@@ -1082,7 +1082,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             return false;
         };
 
-        // source_acc から main + psqt + threat の全てをコピー
+        // source_acc から main + psqt + threat + hand_threat の全てをコピー
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
             let current_acc = &mut stack.current_mut().accumulator;
@@ -1096,6 +1096,12 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 #[cfg(feature = "nnue-threat")]
                 if self.has_threat {
                     current_acc.get_threat_mut(p).copy_from_slice(source_acc.get_threat(p));
+                }
+                #[cfg(feature = "nnue-hand-threat")]
+                if self.has_hand_threat {
+                    current_acc
+                        .get_hand_threat_mut(p)
+                        .copy_from_slice(source_acc.get_hand_threat(p));
                 }
             }
         }
@@ -1213,10 +1219,13 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             }
         }
 
-        // HandThreat: path 長 1 なら差分更新、それ以外は full refresh
+        // HandThreat: path.len == 1 は pos を直接使う fast path、
+        //             path.len > 1 は snapshot を walk して各 step ごとに差分更新。
+        // current_acc は既に source_acc からコピー済み。
         #[cfg(feature = "nnue-hand-threat")]
         if self.has_hand_threat {
             if path.len() == 1 {
+                // Fast path: single-ply、pos そのまま使う
                 let entry_idx = path.iter().next().unwrap();
                 let dirty_piece = stack.entry_at(entry_idx).dirty_piece;
                 for perspective in [Color::Black, Color::White] {
@@ -1252,7 +1261,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     }
                 }
             } else {
-                // 2+ plies: full refresh (中間局面が不明)
+                // Multi-ply: rebuild fallback (snapshot 経路は overhead が大きく利得不明)
                 for perspective in [Color::Black, Color::White] {
                     let p = perspective as usize;
                     let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
