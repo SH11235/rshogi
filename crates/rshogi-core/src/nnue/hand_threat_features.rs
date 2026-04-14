@@ -695,6 +695,11 @@ pub fn append_changed_hand_threat_indices(
     };
     let (new_color, _new_class, new_pt, to_sq) = new_info;
 
+    // 二歩 state が flip した (color, file)。capture / drop の両方で設定される可能性。
+    // 非 Pawn が生歩を捕獲: (cap_color, to_sq.file)  pawn count 1→0
+    // Pawn drop:           (dropper,  to_sq.file)  pawn count 0→1
+    let mut pawn_file_flip: Option<(Color, u8)> = None;
+
     // Drop 判定: old が盤上駒でない場合は手駒側 BonaPiece のはず
     let is_drop = old_info_board.is_none();
     // drop 1→0 transition 情報 (is_drop 時に drop 先 block が空になるケース)
@@ -708,11 +713,15 @@ pub fn append_changed_hand_threat_indices(
             bump!(FALLBACK_OTHER);
             return false;
         };
-        // Pawn drop は fallback (pawn file state 変化)
-        if dropped_pt == PieceType::Pawn || new_pt == PieceType::Pawn {
-            bump!(FALLBACK_PAWN_INVOLVED);
-            bump!(FALLBACK_PAWN_DROP);
+        // dropped_pt と new_pt の整合性チェック (drop は成り不可なので一致するはず)
+        if dropped_pt != new_pt {
+            bump!(FALLBACK_OTHER);
             return false;
+        }
+        // Pawn drop: dropper の file(to_sq) が 0→1 で flip
+        // (二歩ルールにより drop 前は必ず file に 0 枚)
+        if dropped_pt == PieceType::Pawn {
+            pawn_file_flip = Some((dropper, to_sq.file() as u8));
         }
         // hand count が 0 になれば 1→0 transition として後段で direct-push
         if pos.hand(dropper).count(dropped_pt) == 0 {
@@ -782,10 +791,9 @@ pub fn append_changed_hand_threat_indices(
     //
     //  - `cap_before_piece_at_to`: before 状態の to_sq 駒情報 (source_set path 用)
     //  - `capture_transition_block`: (drop_color, HandThreatClass) が transition する場合 Some
-    //  - `pawn_file_flip`: 二歩 state が flip した (color, file)
+    //  - `pawn_file_flip` (関数先頭で宣言済み): 二歩 state が flip した (color, file)
     //    非 Pawn が生歩を捕獲するケース (PAWN_CAP_BOARD_PAWN) で使用。
     //    cap_color 側の board pawn file count が 1→0 で flip。
-    let mut pawn_file_flip: Option<(Color, u8)> = None;
     let (cap_before_piece_at_to, capture_transition_block): (
         Option<(Color, PieceType)>,
         Option<(Color, HandThreatClass)>,
@@ -1689,6 +1697,39 @@ mod tests {
         pos.set_sfen("4k4/9/9/4p4/4S4/9/9/9/4K4 b P 1")
             .expect("nonpawn captures pawn sfen");
         let m = Move::from_usi("5e5d").expect("5e5d");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Pawn drop: dropper の file(to_sq) が 0→1 で flip
+    /// non-transition (hand に複数 Pawn を持つ) ケース
+    #[test]
+    fn test_hand_threat_incremental_pawn_drop_nontrans() {
+        // Black has 2 Pawn in hand, drops one at 5e (file 5, empty)
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b 2P 1").expect("pawn drop sfen");
+        let m = Move::from_usi("P*5e").expect("P*5e");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Pawn drop with target: drop 先が attack 範囲に駒を持つ
+    #[test]
+    fn test_hand_threat_incremental_pawn_drop_with_target() {
+        // White Knight at 5d (above black drop at 5e for attack)
+        // Black has 2 Pawn in hand, drops at 5e
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/4n4/9/9/9/9/4K4 b 2P 1")
+            .expect("pawn drop with target sfen");
+        let m = Move::from_usi("P*5e").expect("P*5e");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Pawn drop 1→0 transition: 最後の Pawn を打つ
+    #[test]
+    fn test_hand_threat_incremental_pawn_drop_1to0() {
+        // Black has 1 Pawn in hand, drops it (transition)
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b P 1").expect("pawn drop 1->0 sfen");
+        let m = Move::from_usi("P*5e").expect("P*5e");
         verify_incremental_hand_threat(&mut pos, m);
     }
 
