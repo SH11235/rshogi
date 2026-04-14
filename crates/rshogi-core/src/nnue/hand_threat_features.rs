@@ -422,6 +422,48 @@ pub(crate) fn is_legal_drop_rank(hand_class: HandThreatClass, color: Color, sq: 
     }
 }
 
+/// `[hand_class][color]` で「行きどころ無し制限を満たす」マスの bitboard を保持する static。
+///
+/// `for_each_active_hand_threat_index` の hot path で per-square check を bitboard
+/// 1 回の AND に置換するために使用。
+static LEGAL_DROP_RANK_BB: std::sync::LazyLock<[[Bitboard; 2]; HAND_NUM_CLASSES]> =
+    std::sync::LazyLock::new(|| {
+        let mut tbl = [[Bitboard::EMPTY; 2]; HAND_NUM_CLASSES];
+        for &hc in &ALL_HAND_THREAT_CLASSES {
+            for &color in &[Color::Black, Color::White] {
+                let mut bb = Bitboard::EMPTY;
+                for raw in 0..81u8 {
+                    if let Some(sq) = Square::from_u8(raw)
+                        && is_legal_drop_rank(hc, color, sq)
+                    {
+                        bb = bb | Bitboard::from_square(sq);
+                    }
+                }
+                tbl[hc as usize][color as usize] = bb;
+            }
+        }
+        tbl
+    });
+
+#[inline]
+pub(crate) fn legal_drop_rank_bb(hand_class: HandThreatClass, color: Color) -> Bitboard {
+    LEGAL_DROP_RANK_BB[hand_class as usize][color as usize]
+}
+
+/// `pawn_bb` (ある color の生歩 bitboard) から、その駒が存在する file 全体を表す
+/// bitboard を返す。Pawn drop の二歩判定で「drop が禁止される file」をまとめて
+/// 1 つの bitboard で扱うために使う。
+#[inline]
+pub(crate) fn pawn_files_bb(pawn_bb: Bitboard) -> Bitboard {
+    let mut result = Bitboard::EMPTY;
+    let mut iter = pawn_bb;
+    while !iter.is_empty() {
+        let sq = iter.pop();
+        result = result | FILE_BB[sq.file() as usize];
+    }
+    result
+}
+
 /// `color` が持ち駒の Pawn を file `file` に drop できるか (二歩判定)
 ///
 /// 同じ file に `color` 側の `PieceType::Pawn` (not promoted) があれば二歩。
@@ -1395,6 +1437,7 @@ pub fn for_each_active_hand_threat_index<F: FnMut(usize)>(
 ) {
     let hm = is_hm_mirror(king_sq, perspective);
     let occupied = pos.occupied();
+    let empty = !occupied;
     let friend_color = perspective;
     let enemy_color = !perspective;
 
@@ -1413,18 +1456,16 @@ pub fn for_each_active_hand_threat_index<F: FnMut(usize)>(
                 !drop_color
             };
 
-            for drop_raw in 0..81u8 {
-                let drop_sq = Square::from_u8(drop_raw).unwrap();
-                if occupied.contains(drop_sq) {
-                    continue;
-                }
-                if !is_legal_drop_rank(hand_class, drop_color, drop_sq) {
-                    continue;
-                }
-                if hand_class == HandThreatClass::Pawn && has_pawn_on_file(pos, drop_color, drop_sq)
-                {
-                    continue;
-                }
+            // legal_rank の bitboard と AND して候補を絞り込む
+            // (per-sq の is_legal_drop_rank check を回避)
+            let mut candidates = empty & legal_drop_rank_bb(hand_class, drop_color);
+            // Pawn の場合、自色 pawn が既に乗っている file 全体を除外
+            if hand_class == HandThreatClass::Pawn {
+                let pawn_files = pawn_files_bb(pos.pieces(drop_color, PieceType::Pawn));
+                candidates = candidates & !pawn_files;
+            }
+            while !candidates.is_empty() {
+                let drop_sq = candidates.pop();
 
                 let attack_bb = attacks_from_dropped(hand_class, drop_color, drop_sq, occupied);
                 let mut targets = attack_bb & occupied;
