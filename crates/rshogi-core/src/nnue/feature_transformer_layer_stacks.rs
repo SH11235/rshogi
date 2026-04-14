@@ -513,16 +513,10 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     ) {
         let king_sq = pos.king_square(perspective);
         hand_threat_acc.fill(0);
-        let mut indices = Vec::with_capacity(512);
-        hand_threat_features::append_active_hand_threat_indices(
-            pos,
-            perspective,
-            king_sq,
-            &mut indices,
-        );
-        for &idx in &indices {
+        // クロージャ版で Vec 割り当てを回避し、enumerate と weight 加算を融合
+        hand_threat_features::for_each_active_hand_threat_index(pos, perspective, king_sq, |idx| {
             self.add_hand_threat_weights(hand_threat_acc, idx);
-        }
+        });
     }
 
     /// PSQT アキュムレータのフル計算

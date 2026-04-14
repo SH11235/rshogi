@@ -1187,13 +1187,91 @@ pub fn append_changed_hand_threat_indices(
 }
 
 // =============================================================================
-// append_active_hand_threat_indices (test 用フル列挙)
+// for_each_active_hand_threat_index / append_active_hand_threat_indices
 // =============================================================================
+
+/// 現局面の全 hand threat pair を列挙し、各 index に対して `f` を呼ぶ。
+///
+/// rebuild_hand_threat の hot path で使用。Vec などの heap 割り当てを避けるため、
+/// 列挙ごとにクロージャを呼ぶ形式。
+pub fn for_each_active_hand_threat_index<F: FnMut(usize)>(
+    pos: &Position,
+    perspective: Color,
+    king_sq: Square,
+    mut f: F,
+) {
+    let hm = is_hm_mirror(king_sq, perspective);
+    let occupied = pos.occupied();
+    let friend_color = perspective;
+    let enemy_color = !perspective;
+
+    for &drop_color in &[friend_color, enemy_color] {
+        let drop_owner = if drop_color == friend_color { 0 } else { 1 };
+        let hand = pos.hand(drop_color);
+
+        for &hand_class in &ALL_HAND_THREAT_CLASSES {
+            if hand.count(hand_class.as_piece_type()) == 0 {
+                continue;
+            }
+
+            let oriented_color = if perspective == Color::Black {
+                drop_color
+            } else {
+                !drop_color
+            };
+
+            for drop_raw in 0..81u8 {
+                let drop_sq = Square::from_u8(drop_raw).unwrap();
+                if occupied.contains(drop_sq) {
+                    continue;
+                }
+                if !is_legal_drop_rank(hand_class, drop_color, drop_sq) {
+                    continue;
+                }
+                if hand_class == HandThreatClass::Pawn && has_pawn_on_file(pos, drop_color, drop_sq)
+                {
+                    continue;
+                }
+
+                let attack_bb = attacks_from_dropped(hand_class, drop_color, drop_sq, occupied);
+                let mut targets = attack_bb & occupied;
+                let drop_sq_n = normalize_sq(drop_sq, perspective, hm);
+                while !targets.is_empty() {
+                    let to_sq = targets.pop();
+                    let target_pc = pos.piece_on(to_sq);
+                    let target_pt = target_pc.piece_type();
+                    let Some(attacked_class) = ThreatClass::from_piece_type(target_pt) else {
+                        continue;
+                    };
+                    let attacked_side = if target_pc.color() == friend_color {
+                        0
+                    } else {
+                        1
+                    };
+                    let to_sq_n = normalize_sq(to_sq, perspective, hm);
+                    let idx = hand_threat_index(
+                        drop_owner,
+                        hand_class,
+                        oriented_color,
+                        attacked_side,
+                        attacked_class,
+                        drop_sq_n,
+                        to_sq_n,
+                    );
+                    debug_assert!(
+                        idx < HAND_THREAT_DIMENSIONS,
+                        "hand_threat index out of range: {idx} >= {HAND_THREAT_DIMENSIONS}"
+                    );
+                    f(idx);
+                }
+            }
+        }
+    }
+}
 
 /// 現局面の全 hand threat pair を列挙し、`indices` に追加する
 ///
-/// refresh path や初回計算で使用する。差分更新は `append_changed_hand_threat_indices`
-/// が未実装のため当面は full rebuild のみ。
+/// テスト用ヘルパー。本番経路は `for_each_active_hand_threat_index` を直接使う。
 pub fn append_active_hand_threat_indices(
     pos: &Position,
     perspective: Color,
