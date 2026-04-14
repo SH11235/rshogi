@@ -897,6 +897,47 @@ impl LayerStacksNetwork {
 
                 // --- Tier 3: 全計算 (cache 経由) ---
                 if !updated {
+                    // Diagnostic: refresh が fire する原因 (find_usable=None の理由) を記録
+                    #[cfg(feature = "hand-threat-stats")]
+                    {
+                        use super::accumulator_layer_stacks::RefreshDiagResult;
+                        use std::sync::atomic::Ordering;
+                        let diag = $stack.diagnose_refresh_depth();
+                        match diag {
+                            RefreshDiagResult::Found(d) if d <= 4 => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_1_4
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::Found(d) if d <= 8 => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_5_8
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::Found(d) if d <= 16 => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_9_16
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::Found(d) if d <= 32 => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_17_32
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::Found(_) => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_DEPTH_33_PLUS
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::CurrentKingMoved => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_CURRENT_KING_MOVED
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::AncestorKingMoved(_) => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_ANCESTOR_KING_MOVED
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            RefreshDiagResult::ChainEnded(_) => {
+                                super::hand_threat_features::stats::REFRESH_DIAG_CHAIN_ENDED
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
                     let acc = &mut $stack.current_mut().accumulator;
                     if let Some(
                         super::accumulator_layer_stacks::LayerStacksAccCache::$cache_variant(c),

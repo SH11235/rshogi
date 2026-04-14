@@ -102,6 +102,15 @@ pub mod stats {
         // forward_update_incremental:
         REBUILD_FROM_FORWARD_UPDATE_DIFF_FALLBACK,
         REBUILD_FROM_FORWARD_UPDATE_PATH_LONG,
+        // --- Refresh diagnostic (find_usable_accumulator が None を返した時の内訳) ---
+        REFRESH_DIAG_DEPTH_1_4,
+        REFRESH_DIAG_DEPTH_5_8,
+        REFRESH_DIAG_DEPTH_9_16,
+        REFRESH_DIAG_DEPTH_17_32,
+        REFRESH_DIAG_DEPTH_33_PLUS,
+        REFRESH_DIAG_CURRENT_KING_MOVED,
+        REFRESH_DIAG_ANCESTOR_KING_MOVED,
+        REFRESH_DIAG_CHAIN_ENDED,
     }
 
     /// diff カウンタのみの合計 (update 呼び出し総数)
@@ -128,8 +137,7 @@ pub mod stats {
         eprintln!("=== HandThreat update stats ===");
         eprintln!("  diff call total: {diff_total}");
         for (name, count) in &entries {
-            let is_rebuild = name.starts_with("REBUILD_FROM_");
-            if is_rebuild {
+            if name.starts_with("REBUILD_FROM_") || name.starts_with("REFRESH_DIAG_") {
                 continue;
             }
             if diff_total == 0 {
@@ -154,6 +162,24 @@ pub mod stats {
                 continue;
             }
             let pct = (*count as f64) * 100.0 / (rebuild_total as f64);
+            eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
+        }
+        eprintln!();
+        // REFRESH 診断内訳 (find_usable が None の理由)
+        let diag_total: u64 = entries
+            .iter()
+            .filter(|(n, _)| n.starts_with("REFRESH_DIAG_"))
+            .map(|(_, v)| *v)
+            .sum();
+        eprintln!("  refresh diag total (find_usable=None case): {diag_total}");
+        for (name, count) in &entries {
+            if !name.starts_with("REFRESH_DIAG_") {
+                continue;
+            }
+            if diag_total == 0 {
+                continue;
+            }
+            let pct = (*count as f64) * 100.0 / (diag_total as f64);
             eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
         }
     }

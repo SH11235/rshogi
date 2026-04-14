@@ -11,6 +11,19 @@ use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square};
 
+/// `diagnose_refresh_depth` の戻り値: refresh が fire する原因の内訳
+#[derive(Debug, Clone, Copy)]
+pub enum RefreshDiagResult {
+    /// computed 祖先が見つかった (king move chain なし)
+    Found(usize),
+    /// 現局面で king が動いている (HalfKA 視点での refresh 必須)
+    CurrentKingMoved,
+    /// 祖先 chain 途中に king move があり打ち切り
+    AncestorKingMoved(usize),
+    /// chain がルートに到達 (root が computed でない)
+    ChainEnded(usize),
+}
+
 /// LayerStacks用アキュムレータ（L1次元）
 #[repr(C, align(64))]
 #[derive(Clone)]
@@ -499,6 +512,43 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     /// - None: パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
     pub fn collect_path(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
         self.collect_path_internal(source_idx)
+    }
+
+    /// `find_usable_accumulator` 診断版: MAX_DEPTH 制限なしで computed 祖先を探す。
+    ///
+    /// 用途: refresh_accumulator_with_cache が fire する原因の内訳を測る。
+    /// 「king move blocking が支配的か / depth 上限が支配的か / root 到達か」を
+    /// 区別できる。
+    pub fn diagnose_refresh_depth(&self) -> RefreshDiagResult {
+        debug_assert!(self.current < self.entries.len());
+        let current = unsafe { self.entries.get_unchecked(self.current) };
+        if current.dirty_piece.king_moved[0] || current.dirty_piece.king_moved[1] {
+            return RefreshDiagResult::CurrentKingMoved;
+        }
+        let mut prev_idx = match current.previous {
+            Some(p) => p,
+            None => return RefreshDiagResult::ChainEnded(0),
+        };
+        let mut depth = 1usize;
+        loop {
+            debug_assert!(prev_idx < self.entries.len());
+            let prev = unsafe { self.entries.get_unchecked(prev_idx) };
+            if prev.accumulator.computed_accumulation {
+                return RefreshDiagResult::Found(depth);
+            }
+            if depth >= 256 {
+                return RefreshDiagResult::ChainEnded(depth);
+            }
+            let next_prev_idx = match prev.previous {
+                Some(p) => p,
+                None => return RefreshDiagResult::ChainEnded(depth),
+            };
+            if prev.dirty_piece.king_moved[0] || prev.dirty_piece.king_moved[1] {
+                return RefreshDiagResult::AncestorKingMoved(depth);
+            }
+            prev_idx = next_prev_idx;
+            depth += 1;
+        }
     }
 
     fn collect_path_internal(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
