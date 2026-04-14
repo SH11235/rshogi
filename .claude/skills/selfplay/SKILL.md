@@ -17,7 +17,7 @@ user-invocable: true
 - **確認ポイント**: 特に注目する比較（例: "E vs D: TT 16bit の棋力効果"）
 
 ### デフォルト値（指定がなければ以下を使用）
-- **開始局面**: `--startpos-file start_sfens_ply32.txt`（**必須**。平手からの対局は序盤の偏りで正確な棋力を測れないため、必ず開始局面集を使用すること）
+- **開始局面**: `--startpos-file data/startpos/start_sfens_ply32.txt`（**必須**。平手からの対局は序盤の偏りで正確な棋力を測れないため、必ず開始局面集を使用すること。他の候補: `data/startpos/start_sfens_ply24.txt`, `data/startpos/taya36.sfen`。これらは local 専用 (gitignored `data/` 配下) で、他の contributor の環境には存在しないので skill 側で必要なら個別に配置する）
 - 秒読み: 1000ms
 - スレッド: 1
 - ハッシュ: 256MB
