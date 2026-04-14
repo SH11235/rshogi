@@ -532,8 +532,14 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         perspective: Color,
         current_king_sq: Square,
     ) -> Option<(usize, usize)> {
-        // 期待 path length は 99% が depth=2 なので MAX_DEPTH = 4 で十分
+        // MAX_DEPTH は counter 計測 (FIXB_FIND_HIT_DEPTH_*, FIXB_FIND_MISS_MAX_DEPTH)
+        // を見て調整する。現状は 4 で 99% カバー見込み。
         const MAX_DEPTH: usize = 4;
+
+        #[cfg(feature = "hand-threat-stats")]
+        use super::hand_threat_features::stats;
+        #[cfg(feature = "hand-threat-stats")]
+        use std::sync::atomic::Ordering;
 
         debug_assert!(self.current < self.entries.len());
         let current = unsafe { self.entries.get_unchecked(self.current) };
@@ -541,38 +547,70 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         let last_hm = is_hm_mirror(current_king_sq, perspective);
 
         // 現局面の king move を許容する: dirty_piece に king move があれば HM 判定
-        // (current.dirty_piece が king move を含む可能性あり)
         if current.dirty_piece.king_moved[perspective.index()] {
-            // 現局面の king move を逆引き: dirty_piece の old_piece から prev king sq を取る
-            let prev_king_sq = extract_prev_king_sq(&current.dirty_piece, perspective)?;
+            let Some(prev_king_sq) = extract_prev_king_sq(&current.dirty_piece, perspective) else {
+                #[cfg(feature = "hand-threat-stats")]
+                stats::FIXB_FIND_MISS_MIRROR_MISMATCH.fetch_add(1, Ordering::Relaxed);
+                return None;
+            };
             if is_hm_mirror(prev_king_sq, perspective) != last_hm {
+                #[cfg(feature = "hand-threat-stats")]
+                stats::FIXB_FIND_MISS_MIRROR_MISMATCH.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
             last_king_sq = prev_king_sq;
         }
 
-        let mut prev_idx = current.previous?;
+        let Some(mut prev_idx) = current.previous else {
+            #[cfg(feature = "hand-threat-stats")]
+            stats::FIXB_FIND_MISS_CHAIN_END.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
         let mut depth = 1usize;
         loop {
             debug_assert!(prev_idx < self.entries.len());
             let prev = unsafe { self.entries.get_unchecked(prev_idx) };
             if prev.accumulator.computed_accumulation {
+                #[cfg(feature = "hand-threat-stats")]
+                {
+                    let counter = match depth {
+                        1 => &stats::FIXB_FIND_HIT_DEPTH_1,
+                        2 => &stats::FIXB_FIND_HIT_DEPTH_2,
+                        3..=4 => &stats::FIXB_FIND_HIT_DEPTH_3_4,
+                        5..=8 => &stats::FIXB_FIND_HIT_DEPTH_5_8,
+                        9..=16 => &stats::FIXB_FIND_HIT_DEPTH_9_16,
+                        _ => &stats::FIXB_FIND_HIT_DEPTH_17_PLUS,
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
                 return Some((prev_idx, depth));
             }
             if depth >= MAX_DEPTH {
+                #[cfg(feature = "hand-threat-stats")]
+                stats::FIXB_FIND_MISS_MAX_DEPTH.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
-            // king move があれば HM mirror 跨ぎを判定
             if prev.dirty_piece.king_moved[perspective.index()] {
-                let prev_prev_king_sq = extract_prev_king_sq(&prev.dirty_piece, perspective)?;
+                let Some(prev_prev_king_sq) = extract_prev_king_sq(&prev.dirty_piece, perspective)
+                else {
+                    #[cfg(feature = "hand-threat-stats")]
+                    stats::FIXB_FIND_MISS_MIRROR_MISMATCH.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                };
                 if is_hm_mirror(prev_prev_king_sq, perspective)
                     != is_hm_mirror(last_king_sq, perspective)
                 {
+                    #[cfg(feature = "hand-threat-stats")]
+                    stats::FIXB_FIND_MISS_MIRROR_MISMATCH.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
                 last_king_sq = prev_prev_king_sq;
             }
-            let next_prev_idx = prev.previous?;
+            let Some(next_prev_idx) = prev.previous else {
+                #[cfg(feature = "hand-threat-stats")]
+                stats::FIXB_FIND_MISS_CHAIN_END.fetch_add(1, Ordering::Relaxed);
+                return None;
+            };
             prev_idx = next_prev_idx;
             depth += 1;
         }

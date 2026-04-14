@@ -119,6 +119,31 @@ pub mod stats {
         REFRESH_DIAG_KOK_DEPTH_5_8,
         REFRESH_DIAG_KOK_DEPTH_9_PLUS,
         REFRESH_DIAG_KOK_NO_ANCESTOR,
+        // --- Fix B (HandThreat-specific Tier 2) fallback reason counters ---
+        // find_usable_for_hand_threat per perspective:
+        FIXB_FIND_HIT_DEPTH_1,
+        FIXB_FIND_HIT_DEPTH_2,
+        FIXB_FIND_HIT_DEPTH_3_4,
+        FIXB_FIND_HIT_DEPTH_5_8,
+        FIXB_FIND_HIT_DEPTH_9_16,
+        FIXB_FIND_HIT_DEPTH_17_PLUS,
+        FIXB_FIND_MISS_MAX_DEPTH,
+        FIXB_FIND_MISS_MIRROR_MISMATCH,
+        FIXB_FIND_MISS_CHAIN_END,
+        // try_apply_hand_threat_tier2 at call site:
+        FIXB_APPLY_SUCCESS,
+        FIXB_APPLY_SKIP_ONE_PERSPECTIVE_MISS,
+        FIXB_APPLY_SKIP_SRC_IDX_MISMATCH,
+        FIXB_APPLY_SKIP_DEPTH_TOO_DEEP,
+        FIXB_APPLY_SKIP_PATH_COLLECT_FAIL,
+        FIXB_APPLY_SKIP_PATH_LEN_MISMATCH,
+        FIXB_APPLY_FAIL_DIFF_FALLBACK,
+        // --- Tier D (forward_update_incremental) path length 分布 ---
+        // PATH_LEN_1 は既存 fast path (incremental)。2+ は現状 rebuild fallback。
+        TIERD_PATH_LEN_1,
+        TIERD_PATH_LEN_2,
+        TIERD_PATH_LEN_3,
+        TIERD_PATH_LEN_4_PLUS,
     }
 
     /// diff カウンタのみの合計 (update 呼び出し総数)
@@ -188,6 +213,60 @@ pub mod stats {
                 continue;
             }
             let pct = (*count as f64) * 100.0 / (diag_total as f64);
+            eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
+        }
+        eprintln!();
+        // Fix B find_usable_for_hand_threat 内訳 (per perspective 呼び出し)
+        let find_total: u64 = entries
+            .iter()
+            .filter(|(n, _)| n.starts_with("FIXB_FIND_"))
+            .map(|(_, v)| *v)
+            .sum();
+        eprintln!("  fixB find_usable total: {find_total}");
+        for (name, count) in &entries {
+            if !name.starts_with("FIXB_FIND_") {
+                continue;
+            }
+            if find_total == 0 {
+                continue;
+            }
+            let pct = (*count as f64) * 100.0 / (find_total as f64);
+            eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
+        }
+        eprintln!();
+        // Fix B apply (try_apply_hand_threat_tier2) 呼び出し内訳
+        let apply_total: u64 = entries
+            .iter()
+            .filter(|(n, _)| n.starts_with("FIXB_APPLY_"))
+            .map(|(_, v)| *v)
+            .sum();
+        eprintln!("  fixB apply total: {apply_total}");
+        for (name, count) in &entries {
+            if !name.starts_with("FIXB_APPLY_") {
+                continue;
+            }
+            if apply_total == 0 {
+                continue;
+            }
+            let pct = (*count as f64) * 100.0 / (apply_total as f64);
+            eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
+        }
+        eprintln!();
+        // Tier D (forward_update_incremental) path length 分布
+        let tierd_total: u64 = entries
+            .iter()
+            .filter(|(n, _)| n.starts_with("TIERD_PATH_LEN_"))
+            .map(|(_, v)| *v)
+            .sum();
+        eprintln!("  Tier D path length total: {tierd_total}");
+        for (name, count) in &entries {
+            if !name.starts_with("TIERD_PATH_LEN_") {
+                continue;
+            }
+            if tierd_total == 0 {
+                continue;
+            }
+            let pct = (*count as f64) * 100.0 / (tierd_total as f64);
             eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
         }
     }

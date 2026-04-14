@@ -1017,26 +1017,41 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         stack: &mut AccumulatorStackLayerStacks<L1>,
         sources: &[Option<(usize, usize)>; 2],
     ) -> bool {
+        #[cfg(feature = "hand-threat-stats")]
+        use hand_threat_features::stats;
+        #[cfg(feature = "hand-threat-stats")]
+        use std::sync::atomic::Ordering;
+
         let (Some((src_b, depth_b)), Some((src_w, depth_w))) = (sources[0], sources[1]) else {
+            #[cfg(feature = "hand-threat-stats")]
+            stats::FIXB_APPLY_SKIP_ONE_PERSPECTIVE_MISS.fetch_add(1, Ordering::Relaxed);
             return false;
         };
         // 両 perspective で同じ source_idx が必要 (snapshot を共有して効率化)
         if src_b != src_w {
+            #[cfg(feature = "hand-threat-stats")]
+            stats::FIXB_APPLY_SKIP_SRC_IDX_MISMATCH.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         let source_idx = src_b;
         let depth = depth_b.max(depth_w);
         if depth == 0 || depth > 8 {
+            #[cfg(feature = "hand-threat-stats")]
+            stats::FIXB_APPLY_SKIP_DEPTH_TOO_DEEP.fetch_add(1, Ordering::Relaxed);
             return false;
         }
 
         // path 収集 (source → current 順)
         let path = stack.collect_path(source_idx);
         let Some(path) = path else {
+            #[cfg(feature = "hand-threat-stats")]
+            stats::FIXB_APPLY_SKIP_PATH_COLLECT_FAIL.fetch_add(1, Ordering::Relaxed);
             return false;
         };
         if path.len() != depth {
             // path 長 mismatch (king move filtering で path collect が短くなる場合等)
+            #[cfg(feature = "hand-threat-stats")]
+            stats::FIXB_APPLY_SKIP_PATH_LEN_MISMATCH.fetch_add(1, Ordering::Relaxed);
             return false;
         }
 
@@ -1084,6 +1099,8 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     &mut ht_added,
                 );
                 if !ok {
+                    #[cfg(feature = "hand-threat-stats")]
+                    stats::FIXB_APPLY_FAIL_DIFF_FALLBACK.fetch_add(1, Ordering::Relaxed);
                     return false;
                 }
                 let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
@@ -1095,6 +1112,8 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 }
             }
         }
+        #[cfg(feature = "hand-threat-stats")]
+        stats::FIXB_APPLY_SUCCESS.fetch_add(1, Ordering::Relaxed);
         true
     }
 
@@ -1191,8 +1210,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             return false;
         };
 
-        // source_acc から main + psqt + threat の全てをコピー
-        // (HandThreat は path 長に関係なく rebuild するためコピー不要)
+        // source_acc から main + psqt + threat をコピー。
+        // HandThreat は path.len==1 の fast path は pos 直接で rebuild せず、
+        // path.len>=2 の multi-ply walk 内で source→current のコピーを行う。
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
             let current_acc = &mut stack.current_mut().accumulator;
@@ -1324,10 +1344,24 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         }
 
         // HandThreat: path.len == 1 は pos を直接使う fast path、
-        //             path.len > 1 は snapshot を walk して各 step ごとに差分更新。
-        // current_acc は既に source_acc からコピー済み。
+        //             path.len > 1 は rebuild fallback。
+        // (multi-ply snapshot walk は 2026-04-14 に試行したが、rebuild_hand_threat が
+        //  十分高速 [acc.fill + bitboard iter + LUT] で、4 diff calls > 2 rebuilds だった
+        //  ため neutral / -3% 退行で採用せず。counter のみ残す。)
         #[cfg(feature = "nnue-hand-threat")]
         if self.has_hand_threat {
+            #[cfg(feature = "hand-threat-stats")]
+            {
+                use hand_threat_features::stats;
+                use std::sync::atomic::Ordering;
+                let counter = match path.len() {
+                    1 => &stats::TIERD_PATH_LEN_1,
+                    2 => &stats::TIERD_PATH_LEN_2,
+                    3 => &stats::TIERD_PATH_LEN_3,
+                    _ => &stats::TIERD_PATH_LEN_4_PLUS,
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
             if path.len() == 1 {
                 // Fast path: single-ply、pos そのまま使う
                 let entry_idx = path.iter().next().unwrap();
@@ -1365,7 +1399,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     }
                 }
             } else {
-                // Multi-ply: rebuild fallback (snapshot 経路は overhead が大きく利得不明)
+                // Multi-ply: rebuild fallback
                 for perspective in [Color::Black, Color::White] {
                     let p = perspective as usize;
                     let hand_threat_acc = stack.current_mut().accumulator.get_hand_threat_mut(p);
