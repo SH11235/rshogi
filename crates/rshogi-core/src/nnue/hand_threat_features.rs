@@ -741,43 +741,29 @@ pub fn append_changed_hand_threat_indices(
         return false;
     }
     // Promotion 分類と incremental 可否判定:
-    // 非捕獲・非 Pawn promotion のみ incremental 対応
-    //   (to_sq の piece class 変化は既存 source_set + before/after 列挙で
-    //    自然に吸収される。pawn file state も非 Pawn 駒の成りなら不変)
-    // Pawn → ProPawn: pawn file count が 1 減少 → pawn drop legality 変化 → fallback
-    // 成りあり capture: 現時点では fallback
+    // Promotion 可否判定:
+    //  - 成り対象が Pawn (Pawn → ProPawn) は動 player 側の pawn file count が
+    //    1 減少 → 二歩 state 変化。pawn_file_flip で扱えるが、移動駒側の flip
+    //    として追加対応が必要 → 現時点では fallback
+    //  - それ以外の成り (Lance/Knight/Silver/Bishop/Rook → 成駒) は動 player
+    //    側の pawn file 不変。to_sq の piece class 変化は source_set + before/after
+    //    列挙で自然に吸収される。
+    //  - 成り + capture も同様 (capture 側の cap_pt が Pawn でなければ flip なし、
+    //    cap_pt が Pawn なら capture 側で flip 設定済み)。
     //
-    // Drop の場合は old_pt と new_pt が同じ (dropper side sets old_pt := new_pt) なので
-    // is_promotion は false。
+    // Drop の場合は old_pt == new_pt なので is_promotion は false。
     let is_promotion = !is_drop && old_pt != new_pt;
-    if is_promotion {
+    if is_promotion && old_pt == PieceType::Pawn {
+        // Pawn 成り: 動 player 側の pawn file 1→0 flip。未対応。
         if dirty_piece.dirty_num == 2 {
-            // capture 付き promotion: 現時点では fallback
-            let cp1_promo = &dirty_piece.changed_piece[1];
-            let cap_info = decode_board_threat_info_fb(cp1_promo.old_piece.fb);
-            match cap_info {
-                Some((_, _, cap_pt, _)) => {
-                    if old_pt == PieceType::Pawn || cap_pt == PieceType::Pawn {
-                        bump!(FALLBACK_PROMOTION_CAPTURE_PAWN_OR_CAPTURED_PAWN);
-                    } else {
-                        bump!(FALLBACK_PROMOTION_CAPTURE_NONPAWN);
-                    }
-                }
-                None => {
-                    bump!(FALLBACK_PROMOTION_CAPTURE_NONPAWN);
-                }
-            }
-            return false;
-        }
-        // 非捕獲 promotion
-        if old_pt == PieceType::Pawn {
-            // Pawn 成り: pawn file state 変化 → 未対応
+            bump!(FALLBACK_PROMOTION_CAPTURE_PAWN_OR_CAPTURED_PAWN);
+        } else {
             bump!(FALLBACK_PROMOTION_NONCAP_PAWN);
-            return false;
         }
-        // 非捕獲・非 Pawn promotion: incremental path へ fall-through
-        // (後段の enumeration が old_pt/new_pt の違いを正しく扱う)
+        return false;
     }
+    // 非 Pawn promotion (with/without capture) は後段の source_set 経路で扱える。
+    // capture 側の Pawn 関与判定は capture path で行う。
 
     // 捕獲の場合: dirty_piece[1] から captured piece 情報を取得。
     //
@@ -823,14 +809,12 @@ pub fn append_changed_hand_threat_indices(
             bump!(FALLBACK_CAPTURE_OTHER);
             return false;
         }
-        // 動いた駒が Pawn の場合は fallback
-        if old_pt == PieceType::Pawn {
-            bump!(FALLBACK_PAWN_INVOLVED);
-            bump!(FALLBACK_PAWN_CAP_OLD_PAWN);
-            return false;
-        }
-        // cap_pt_board == Pawn (非 Pawn が生歩を捕獲) → pawn_file_flip
-        // 注: old_pt != Pawn、cap_pt_board == Pawn → cap_pt_hand_base も Pawn
+        // 動いた駒が Pawn のケース:
+        //  - 非成り Pawn 移動は同 file 直進なので動 player 側の pawn file count 不変
+        //  - 成りは前段の is_promotion check で fallback 済み
+        // → 動 player 側の pawn file flip は無く、capture 側 (cap_pt_board) の
+        //   flip 判定だけ行えばよい。
+        // cap_pt_board == Pawn (生歩を捕獲) → pawn_file_flip (cap_color)
         if cap_pt_board == PieceType::Pawn {
             // cap_color の file(to_sq) pawn state が 1→0 で flip
             // (二歩ルールにより before に必ず 1 枚、after に 0 枚)
@@ -1696,6 +1680,56 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen("4k4/9/9/4p4/4S4/9/9/9/4K4 b P 1")
             .expect("nonpawn captures pawn sfen");
+        let m = Move::from_usi("5e5d").expect("5e5d");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// 成り + 捕獲 (両方非 Pawn): Bishop が Knight を捕獲して成る
+    #[test]
+    fn test_hand_threat_incremental_capture_promotion_bishop_knight() {
+        // Black Bishop at 5e captures White Knight at 2b and promotes
+        // diagonal: 5e → 4d → 3c → 2b
+        // Black has 1 Knight in hand already (non-transition)
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/1n7/9/9/4B4/9/9/9/4K4 b N 1")
+            .expect("bishop captures knight with promotion");
+        let m = Move::from_usi("5e2b+").expect("5e2b+");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// 非 Pawn が生歩を捕獲して成る: cap side の pawn file flip + 成り
+    #[test]
+    fn test_hand_threat_incremental_capture_promotion_with_pawn_cap() {
+        // Black Silver at 4d captures White Pawn at 4c and promotes (4d4c+)
+        // Black hand has 1 Pawn already (non-transition)
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/5p3/5S3/9/9/9/9/4K4 b P 1")
+            .expect("silver captures pawn with promotion");
+        let m = Move::from_usi("4d4c+").expect("4d4c+");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Pawn が非 Pawn を捕獲: 動 side の pawn file 不変、cap side の file 不変
+    /// (cap_pt が Pawn ではないため、pawn file flip なし)
+    #[test]
+    fn test_hand_threat_incremental_pawn_captures_nonpawn() {
+        // Black Pawn 5e captures White Knight 5d
+        // Black hand has 1 Knight already (non-transition)
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/4n4/4P4/9/9/9/4K4 b N 1")
+            .expect("pawn captures knight sfen");
+        let m = Move::from_usi("5e5d").expect("5e5d");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Pawn が Pawn を捕獲: cap side の file 1→0 flip
+    #[test]
+    fn test_hand_threat_incremental_pawn_captures_pawn() {
+        // Black Pawn 5e captures White Pawn 5d
+        // Black hand has 1 Pawn already (non-transition for hand[Pawn])
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/4p4/4P4/9/9/9/4K4 b P 1")
+            .expect("pawn captures pawn sfen");
         let m = Move::from_usi("5e5d").expect("5e5d");
         verify_incremental_hand_threat(&mut pos, m);
     }
