@@ -45,6 +45,8 @@ threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-m
 threat-profile-cross-side = ["rshogi-core/threat-profile-cross-side"]
 # NNUE HandThreat 特徴量対応
 nnue-hand-threat = ["rshogi-core/nnue-hand-threat"]
+# HandThreat defensive 版 (dims = 30,276、nnue-hand-threat と併用)
+hand-threat-defensive = ["rshogi-core/hand-threat-defensive"]
 # HandThreat 差分更新 fallback reason counter
 hand-threat-stats = ["rshogi-core/hand-threat-stats"]
 # NNUE progress8kpabs 差分更新最適化（L1=1536 で有効、L1=768 で退行）

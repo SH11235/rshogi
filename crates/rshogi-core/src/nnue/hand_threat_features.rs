@@ -502,17 +502,23 @@ pub(crate) fn piece_type_to_hand_threat_class(pt: PieceType) -> Option<HandThrea
 // hand_pair_base テーブル
 // =============================================================================
 
-/// hand_pair_base の pair 数
+// =============================================================================
+// case 選択: full pair (default) vs defensive
+// =============================================================================
+// hand-threat-defensive feature が有効な場合、drop_owner=1 (enemy) かつ
+// attacked_side=0 (friend) の block のみ符号化する。次元数は 1/4 に削減される。
+// 詳細は docs/hand_threat_reduction_design.md を参照。
+
+// ----- Full pair (default) -----
+
+/// hand_pair_base の pair 数 (full pair)
 /// = 2 (drop_owner) × 7 (hand_class) × 2 (attacked_side) × 9 (attacked_class)
+#[cfg(not(feature = "hand-threat-defensive"))]
 const HAND_NUM_PAIRS: usize = 2 * HAND_NUM_CLASSES * 2 * NUM_THREAT_CLASSES; // 252
 
-/// hand_pair_base テーブルを build し、HAND_THREAT_DIMENSIONS も同時算出
-///
-/// Layout (flat): `drop_owner * 126 + hc * 18 + attacked_side * 9 + ac`
+/// full pair: layout `drop_owner * 126 + hc * 18 + attacked_side * 9 + ac`
 /// 126 = 7 * 18, 18 = 2 * 9
-///
-/// 各 entry には (drop_owner, hc, attacked_side, ac) 未満の全 pair が持つ
-/// `HAND_ATTACKS_PER_COLOR[hc]` の累積和を格納。
+#[cfg(not(feature = "hand-threat-defensive"))]
 const fn build_hand_pair_base() -> ([usize; HAND_NUM_PAIRS], usize) {
     let mut table = [0usize; HAND_NUM_PAIRS];
     let mut cumulative = 0usize;
@@ -538,22 +544,26 @@ const fn build_hand_pair_base() -> ([usize; HAND_NUM_PAIRS], usize) {
     (table, cumulative)
 }
 
+#[cfg(not(feature = "hand-threat-defensive"))]
 const HAND_PAIR_DATA: ([usize; HAND_NUM_PAIRS], usize) = build_hand_pair_base();
 
+#[cfg(not(feature = "hand-threat-defensive"))]
 static HAND_PAIR_BASE: [usize; HAND_NUM_PAIRS] = HAND_PAIR_DATA.0;
 
-/// HandThreat の総特徴量次元数
+/// HandThreat 総特徴量次元数 (full pair)
 ///
-/// 案 A: `2 × 7 × 2 × 9 × (HAND_ATTACKS_PER_COLOR の合計 / 7)` の展開
+/// `2 × 7 × 2 × 9 × (HAND_ATTACKS_PER_COLOR の合計)` の展開
 /// = 36 × 3,364 = **121,104**
+#[cfg(not(feature = "hand-threat-defensive"))]
 pub const HAND_THREAT_DIMENSIONS: usize = HAND_PAIR_DATA.1;
 
-/// コンパイル時 assertion: HAND_THREAT_DIMENSIONS が期待値と一致すること
+#[cfg(not(feature = "hand-threat-defensive"))]
 const _HAND_THREAT_DIMENSIONS_CHECK: () = {
     assert!(HAND_THREAT_DIMENSIONS == 121_104, "HAND_THREAT_DIMENSIONS must be 121,104");
 };
 
-/// hand_pair_base を取得 (除外なしなので常に Some)
+/// full pair: `hand_pair_base` を取得
+#[cfg(not(feature = "hand-threat-defensive"))]
 #[inline]
 fn hand_pair_base(
     drop_owner: usize,
@@ -563,6 +573,70 @@ fn hand_pair_base(
 ) -> usize {
     let idx = drop_owner * 126 + (hc as usize) * 18 + attacked_side * 9 + ac as usize;
     HAND_PAIR_BASE[idx]
+}
+
+// ----- Defensive (enemy drop → friend target のみ) -----
+
+/// hand_pair_base の pair 数 (defensive)
+/// = 1 (drop_owner=enemy) × 7 (hand_class) × 1 (attacked_side=friend) × 9 (attacked_class)
+#[cfg(feature = "hand-threat-defensive")]
+const HAND_NUM_PAIRS: usize = HAND_NUM_CLASSES * NUM_THREAT_CLASSES; // 63
+
+/// defensive: layout `hc * 9 + ac` (drop_owner/attacked_side は固定なので unused)
+#[cfg(feature = "hand-threat-defensive")]
+const fn build_hand_pair_base() -> ([usize; HAND_NUM_PAIRS], usize) {
+    let mut table = [0usize; HAND_NUM_PAIRS];
+    let mut cumulative = 0usize;
+    let mut hc = 0usize;
+    while hc < HAND_NUM_CLASSES {
+        let mut ac = 0usize;
+        while ac < NUM_THREAT_CLASSES {
+            let idx = hc * NUM_THREAT_CLASSES + ac;
+            table[idx] = cumulative;
+            cumulative += HAND_ATTACKS_PER_COLOR[hc];
+            ac += 1;
+        }
+        hc += 1;
+    }
+    (table, cumulative)
+}
+
+#[cfg(feature = "hand-threat-defensive")]
+const HAND_PAIR_DATA: ([usize; HAND_NUM_PAIRS], usize) = build_hand_pair_base();
+
+#[cfg(feature = "hand-threat-defensive")]
+static HAND_PAIR_BASE: [usize; HAND_NUM_PAIRS] = HAND_PAIR_DATA.0;
+
+/// HandThreat 総特徴量次元数 (defensive)
+///
+/// `1 × 7 × 1 × 9 × (HAND_ATTACKS_PER_COLOR の合計)`
+/// = 9 × 3,364 = **30,276**
+#[cfg(feature = "hand-threat-defensive")]
+pub const HAND_THREAT_DIMENSIONS: usize = HAND_PAIR_DATA.1;
+
+#[cfg(feature = "hand-threat-defensive")]
+const _HAND_THREAT_DIMENSIONS_CHECK: () = {
+    assert!(
+        HAND_THREAT_DIMENSIONS == 30_276,
+        "HAND_THREAT_DIMENSIONS must be 30,276 (defensive)"
+    );
+};
+
+/// defensive: `hand_pair_base` を取得
+///
+/// `drop_owner` と `attacked_side` は caller 側で enemy/friend にフィルタ済みの
+/// 前提なので、ここでは受け取らない。debug_assert で誤呼び出しを検出。
+#[cfg(feature = "hand-threat-defensive")]
+#[inline]
+fn hand_pair_base(
+    drop_owner: usize,
+    hc: HandThreatClass,
+    attacked_side: usize,
+    ac: ThreatClass,
+) -> usize {
+    debug_assert_eq!(drop_owner, 1, "defensive mode: drop_owner must be 1 (enemy)");
+    debug_assert_eq!(attacked_side, 0, "defensive mode: attacked_side must be 0 (friend)");
+    HAND_PAIR_BASE[(hc as usize) * NUM_THREAT_CLASSES + ac as usize]
 }
 
 // =============================================================================
@@ -1377,7 +1451,13 @@ pub fn append_changed_hand_threat_indices<P: HandThreatPosLike>(
     let mut before_len = 0usize;
     let mut after_len = 0usize;
 
-    for &drop_color in &[friend_color, !friend_color] {
+    // drop_color loop: full pair は {friend, enemy}、defensive は {enemy} のみ。
+    #[cfg(not(feature = "hand-threat-defensive"))]
+    let drop_colors_arr: [Color; 2] = [friend_color, !friend_color];
+    #[cfg(feature = "hand-threat-defensive")]
+    let drop_colors_arr: [Color; 1] = [!friend_color];
+
+    for &drop_color in drop_colors_arr.iter() {
         let drop_owner = if drop_color == friend_color { 0 } else { 1 };
 
         for &hand_class in &ALL_HAND_THREAT_CLASSES {
@@ -1425,6 +1505,10 @@ pub fn append_changed_hand_threat_indices<P: HandThreatPosLike>(
                         } else {
                             1
                         };
+                        #[cfg(feature = "hand-threat-defensive")]
+                        if attacked_side != 0 {
+                            continue;
+                        }
                         let to_sq_n = normalize_sq(to_target, perspective, hm);
                         let idx = hand_threat_index(
                             drop_owner,
@@ -1485,6 +1569,10 @@ pub fn append_changed_hand_threat_indices<P: HandThreatPosLike>(
                             continue;
                         };
                         let attacked_side = if target_color == friend_color { 0 } else { 1 };
+                        #[cfg(feature = "hand-threat-defensive")]
+                        if attacked_side != 0 {
+                            continue;
+                        }
                         let to_sq_n = normalize_sq(to_target, perspective, hm);
                         let idx = hand_threat_index(
                             drop_owner,
@@ -1560,6 +1648,10 @@ pub fn append_changed_hand_threat_indices<P: HandThreatPosLike>(
                     } else {
                         1
                     };
+                    #[cfg(feature = "hand-threat-defensive")]
+                    if attacked_side != 0 {
+                        continue;
+                    }
                     let to_sq_n = normalize_sq(to_target, perspective, hm);
                     let idx = hand_threat_index(
                         drop_owner,
@@ -1624,6 +1716,10 @@ pub fn append_changed_hand_threat_indices<P: HandThreatPosLike>(
                         continue;
                     };
                     let attacked_side = if target_color == friend_color { 0 } else { 1 };
+                    #[cfg(feature = "hand-threat-defensive")]
+                    if attacked_side != 0 {
+                        continue;
+                    }
                     let to_sq_n = normalize_sq(to_target, perspective, hm);
                     let idx = hand_threat_index(
                         drop_owner,
@@ -1728,7 +1824,13 @@ pub fn for_each_active_hand_threat_index<F: FnMut(usize)>(
     let friend_color = perspective;
     let enemy_color = !perspective;
 
-    for &drop_color in &[friend_color, enemy_color] {
+    // drop_color loop: full pair は {friend, enemy}、defensive は {enemy} のみ。
+    #[cfg(not(feature = "hand-threat-defensive"))]
+    let drop_colors_arr: [Color; 2] = [friend_color, enemy_color];
+    #[cfg(feature = "hand-threat-defensive")]
+    let drop_colors_arr: [Color; 1] = [enemy_color];
+
+    for &drop_color in drop_colors_arr.iter() {
         let drop_owner = if drop_color == friend_color { 0 } else { 1 };
         let hand = pos.hand(drop_color);
 
@@ -1769,6 +1871,10 @@ pub fn for_each_active_hand_threat_index<F: FnMut(usize)>(
                     } else {
                         1
                     };
+                    #[cfg(feature = "hand-threat-defensive")]
+                    if attacked_side != 0 {
+                        continue;
+                    }
                     let to_sq_n = normalize_sq(to_sq, perspective, hm);
                     let idx = hand_threat_index(
                         drop_owner,
@@ -1825,8 +1931,13 @@ pub fn append_active_hand_threat_indices(
     let friend_color = perspective;
     let enemy_color = !perspective;
 
-    // 両 drop_owner を処理
-    for &drop_color in &[friend_color, enemy_color] {
+    // drop_color loop: full pair は {friend, enemy}、defensive は {enemy} のみ。
+    #[cfg(not(feature = "hand-threat-defensive"))]
+    let drop_colors_arr: [Color; 2] = [friend_color, enemy_color];
+    #[cfg(feature = "hand-threat-defensive")]
+    let drop_colors_arr: [Color; 1] = [enemy_color];
+
+    for &drop_color in drop_colors_arr.iter() {
         let drop_owner = if drop_color == friend_color { 0 } else { 1 };
         let hand = pos.hand(drop_color);
 
@@ -1871,6 +1982,10 @@ pub fn append_active_hand_threat_indices(
                     } else {
                         1
                     };
+                    #[cfg(feature = "hand-threat-defensive")]
+                    if attacked_side != 0 {
+                        continue;
+                    }
 
                     // 正規化
                     let drop_sq_n = normalize_sq(drop_sq, perspective, hm);
@@ -1913,9 +2028,16 @@ pub fn append_active_hand_threat_indices(
 mod tests {
     use super::*;
 
+    #[cfg(not(feature = "hand-threat-defensive"))]
     #[test]
-    fn test_hand_threat_dimensions() {
+    fn test_hand_threat_dimensions_full_pair() {
         assert_eq!(HAND_THREAT_DIMENSIONS, 121_104);
+    }
+
+    #[cfg(feature = "hand-threat-defensive")]
+    #[test]
+    fn test_hand_threat_dimensions_defensive() {
+        assert_eq!(HAND_THREAT_DIMENSIONS, 30_276);
     }
 
     #[test]
@@ -1931,8 +2053,9 @@ mod tests {
         assert_eq!(HandThreatClass::Rook.as_board_class() as usize, ThreatClass::Rook as usize);
     }
 
+    #[cfg(not(feature = "hand-threat-defensive"))]
     #[test]
-    fn test_hand_pair_base_monotone() {
+    fn test_hand_pair_base_monotone_full_pair() {
         // hand_pair_base は累積和なので単調増加
         let mut prev: Option<usize> = None;
         for drop_owner in 0..2 {
@@ -1947,6 +2070,95 @@ mod tests {
                         prev = Some(base);
                     }
                 }
+            }
+        }
+    }
+
+    /// defensive: 任意局面で enumerate される全 index が < 30_276 であることを確認
+    #[cfg(feature = "hand-threat-defensive")]
+    #[test]
+    fn test_defensive_indices_within_range() {
+        // 両者が大量の手駒を持ち、盤上にも駒がある局面
+        // (駒総数制限: Gold <=4, Bishop <=2, Rook <=2 等)
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/4s4/9/9/9/9/9/4S4/4K4 b RBNLPrbnlp 1")
+            .expect("defensive range test sfen");
+        for &perspective in &[Color::Black, Color::White] {
+            let king_sq = pos.king_square(perspective);
+            let mut indices = Vec::new();
+            append_active_hand_threat_indices(&pos, perspective, king_sq, &mut indices);
+            assert!(
+                !indices.is_empty(),
+                "defensive: at least 1 enemy-drop → friend-target expected \
+                 (perspective={perspective:?})"
+            );
+            for &idx in &indices {
+                assert!(
+                    idx < HAND_THREAT_DIMENSIONS,
+                    "defensive index {idx} must be < {HAND_THREAT_DIMENSIONS} \
+                     (perspective={perspective:?})"
+                );
+            }
+        }
+    }
+
+    /// defensive: friend drop が symbol として exclude されていることを逆証
+    ///
+    /// 局面: Black (= perspective) のみに手駒があり、drop target = 盤上 White 駒のみ。
+    /// full pair なら active > 0、defensive なら drop_owner=friend なので active = 0。
+    #[cfg(feature = "hand-threat-defensive")]
+    #[test]
+    fn test_defensive_excludes_friend_drop() {
+        let mut pos = Position::new();
+        // Black Rook 5e, White Knight 5c, Black has Pawn in hand
+        pos.set_sfen("4k4/9/4n4/9/4R4/9/9/9/4K4 b P 1").expect("sfen");
+        let king_b = pos.king_square(Color::Black);
+        let mut indices = Vec::new();
+        append_active_hand_threat_indices(&pos, Color::Black, king_b, &mut indices);
+        // Black perspective で drop_color = enemy = White。White には手駒が無いので
+        // defensive では 0 件。
+        assert_eq!(
+            indices.len(),
+            0,
+            "defensive: friend=Black, no White hand pieces → must be empty"
+        );
+    }
+
+    /// defensive: enemy drop → friend target が symbol として正しく enumerate されること
+    #[cfg(feature = "hand-threat-defensive")]
+    #[test]
+    fn test_defensive_enumerates_enemy_drop_friend_target() {
+        let mut pos = Position::new();
+        // Black king 5i, Black rook 5e (friend target), White has Pawn in hand ('p' 小文字)
+        pos.set_sfen("4k4/9/9/9/4R4/9/9/9/4K4 w p 1").expect("sfen");
+        let king_b = pos.king_square(Color::Black);
+        let mut indices = Vec::new();
+        append_active_hand_threat_indices(&pos, Color::Black, king_b, &mut indices);
+        // Black perspective: drop_color = enemy = White (has Pawn).
+        // White Pawn drops attack one square forward. Some drops attack Black Rook at 5e.
+        // At least 1 index should exist.
+        assert!(
+            !indices.is_empty(),
+            "defensive: enemy White drops should threaten friend Black → indices > 0"
+        );
+        for &idx in &indices {
+            assert!(idx < HAND_THREAT_DIMENSIONS);
+        }
+    }
+
+    #[cfg(feature = "hand-threat-defensive")]
+    #[test]
+    fn test_hand_pair_base_monotone_defensive() {
+        // defensive layout: hc × 9 + ac
+        let mut prev: Option<usize> = None;
+        for hc in 0..HAND_NUM_CLASSES {
+            for ac in 0..NUM_THREAT_CLASSES {
+                let idx = hc * NUM_THREAT_CLASSES + ac;
+                let base = HAND_PAIR_BASE[idx];
+                if let Some(p) = prev {
+                    assert!(base > p, "base must be strictly increasing");
+                }
+                prev = Some(base);
             }
         }
     }
@@ -2648,6 +2860,7 @@ mod tests {
     /// SFEN: `4k4/9/9/9/4R4/9/9/9/4K4 b P 1`
     ///
     /// Expected (bullet-shogi から取得した golden): stm=468, nstm=61667
+    #[cfg(not(feature = "hand-threat-defensive"))]
     #[test]
     fn test_cross_validation_minimal_pawn_drop() {
         let mut pos = Position::new();
