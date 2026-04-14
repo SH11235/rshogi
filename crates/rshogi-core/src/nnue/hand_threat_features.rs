@@ -195,7 +195,7 @@ pub const MAX_CHANGED_HAND_THREAT_FEATURES: usize = 255;
 
 /// HandThreat 差分更新を諦めて full rebuild すべきかを判定する
 ///
-/// Phase 0 の `threat_features::needs_threat_refresh` と同じロジック:
+/// `threat_features::needs_threat_refresh` と同じロジック:
 /// HM mirror 境界を跨いだときのみ true。HandThreat も `normalize_sq` (HM mirror)
 /// を正規化に使うため、跨ぎが起きない限り差分更新で正しく計算できる。
 ///
@@ -430,6 +430,28 @@ pub(crate) fn has_pawn_on_file(pos: &Position, color: Color, sq: Square) -> bool
     let pawn_bb = pos.pieces(color, PieceType::Pawn);
     let file_bb = FILE_BB[sq.file() as usize];
     !(pawn_bb & file_bb).is_empty()
+}
+
+/// before 状態の has_pawn_on_file を返す (pawn file flip 対応)
+///
+/// `flip == Some((flipped_color, flipped_file))` なら、その (color, file) の
+/// ペアに対しては `pos` の返す値を反転 (二歩 state が flip しているため)。
+/// それ以外は `pos` の値と同じ。
+#[inline]
+pub(crate) fn has_pawn_on_file_before(
+    pos: &Position,
+    color: Color,
+    sq: Square,
+    flip: Option<(Color, u8)>,
+) -> bool {
+    let after = has_pawn_on_file(pos, color, sq);
+    if let Some((fc, ff)) = flip
+        && color == fc
+        && sq.file() as u8 == ff
+    {
+        return !after;
+    }
+    after
 }
 
 // =============================================================================
@@ -692,7 +714,7 @@ pub fn append_changed_hand_threat_indices(
             bump!(FALLBACK_PAWN_DROP);
             return false;
         }
-        // Phase 4: hand count が 0 になれば 1→0 transition として後段で direct-push
+        // hand count が 0 になれば 1→0 transition として後段で direct-push
         if pos.hand(dropper).count(dropped_pt) == 0 {
             is_drop_1to0_transition = true;
         }
@@ -710,11 +732,11 @@ pub fn append_changed_hand_threat_indices(
         return false;
     }
     // Promotion 分類と incremental 可否判定:
-    // Phase 1: 非捕獲・非 Pawn promotion のみ incremental 対応
-    //          (to_sq の piece class 変化は既存 source_set + before/after 列挙で
-    //           自然に吸収される。pawn file state も非 Pawn 駒の成りなら不変)
-    //   Pawn → ProPawn: pawn file count が 1 減少 → pawn drop legality 変化 → fallback
-    //   成りあり capture: Phase 2 (decode fix) + Phase 4 (0↔1 transition) 後に対応
+    // 非捕獲・非 Pawn promotion のみ incremental 対応
+    //   (to_sq の piece class 変化は既存 source_set + before/after 列挙で
+    //    自然に吸収される。pawn file state も非 Pawn 駒の成りなら不変)
+    // Pawn → ProPawn: pawn file count が 1 減少 → pawn drop legality 変化 → fallback
+    // 成りあり capture: 現時点では fallback
     //
     // Drop の場合は old_pt と new_pt が同じ (dropper side sets old_pt := new_pt) なので
     // is_promotion は false。
@@ -740,7 +762,7 @@ pub fn append_changed_hand_threat_indices(
         }
         // 非捕獲 promotion
         if old_pt == PieceType::Pawn {
-            // Pawn 成り: pawn file state 変化 → Phase 5 で対応
+            // Pawn 成り: pawn file state 変化 → 未対応
             bump!(FALLBACK_PROMOTION_NONCAP_PAWN);
             return false;
         }
@@ -749,16 +771,21 @@ pub fn append_changed_hand_threat_indices(
     }
 
     // 捕獲の場合: dirty_piece[1] から captured piece 情報を取得。
-    // 制限:
-    // - 両駒ともに非 Pawn (pawn file 不変)
     //
     // 重要: cp1.old_piece.fb は盤上駒 → decode_board_threat_info_fb は成駒を Gold に
     // 正規化して返すため、手駒 block の識別には cp1.new_piece.fb (手駒 BonaPiece) から
     // decode_hand_piece_fb で実手駒種を取得する。
     //
-    // Phase 4: 0↔1 transition も直接 push 方式で対応。
+    // 0↔1 transition は直接 push 方式で対応。
+    // 非 Pawn が生歩を捕獲するケース (PAWN_CAP_BOARD_PAWN) は
+    // `pawn_file_flip = Some((cap_color, to_sq.file))` を設定して対応する。
+    //
     //  - `cap_before_piece_at_to`: before 状態の to_sq 駒情報 (source_set path 用)
     //  - `capture_transition_block`: (drop_color, HandThreatClass) が transition する場合 Some
+    //  - `pawn_file_flip`: 二歩 state が flip した (color, file)
+    //    非 Pawn が生歩を捕獲するケース (PAWN_CAP_BOARD_PAWN) で使用。
+    //    cap_color 側の board pawn file count が 1→0 で flip。
+    let mut pawn_file_flip: Option<(Color, u8)> = None;
     let (cap_before_piece_at_to, capture_transition_block): (
         Option<(Color, PieceType)>,
         Option<(Color, HandThreatClass)>,
@@ -788,18 +815,21 @@ pub fn append_changed_hand_threat_indices(
             bump!(FALLBACK_CAPTURE_OTHER);
             return false;
         }
-        // Pawn 関与は pawn file state 変化の可能性あり
+        // 動いた駒が Pawn の場合は fallback
         if old_pt == PieceType::Pawn {
             bump!(FALLBACK_PAWN_INVOLVED);
             bump!(FALLBACK_PAWN_CAP_OLD_PAWN);
             return false;
         }
+        // cap_pt_board == Pawn (非 Pawn が生歩を捕獲) → pawn_file_flip
+        // 注: old_pt != Pawn、cap_pt_board == Pawn → cap_pt_hand_base も Pawn
         if cap_pt_board == PieceType::Pawn {
-            bump!(FALLBACK_PAWN_INVOLVED);
-            bump!(FALLBACK_PAWN_CAP_BOARD_PAWN);
-            return false;
-        }
-        if cap_pt_hand_base == PieceType::Pawn {
+            // cap_color の file(to_sq) pawn state が 1→0 で flip
+            // (二歩ルールにより before に必ず 1 枚、after に 0 枚)
+            debug_assert_eq!(cap_pt_hand_base, PieceType::Pawn);
+            pawn_file_flip = Some((cap_color, to_sq.file() as u8));
+        } else if cap_pt_hand_base == PieceType::Pawn {
+            // cap_pt_board != Pawn なのに hand が Pawn になるのは想定外
             bump!(FALLBACK_PAWN_INVOLVED);
             bump!(FALLBACK_PAWN_CAP_HAND_PAWN);
             return false;
@@ -808,7 +838,7 @@ pub fn append_changed_hand_threat_indices(
         let after_count = pos.hand(old_color).count(cap_pt_hand_base);
         let trans_block = if after_count == 1 {
             let hc = piece_type_to_hand_threat_class(cap_pt_hand_base)
-                .expect("non-Pawn cap_pt_hand_base");
+                .expect("cap_pt_hand_base covers all 7 hand classes");
             Some((old_color, hc))
         } else {
             None
@@ -867,7 +897,7 @@ pub fn append_changed_hand_threat_indices(
                 !drop_color
             };
 
-            // --- Phase 4: Transition block の直接 push 処理 ---
+            // --- Transition block の直接 push 処理 ---
             if is_cap_trans {
                 // 0→1 transition: block 全体の after features を added に直接 push
                 for drop_raw in 0..81u8 {
@@ -931,8 +961,9 @@ pub fn append_changed_hand_threat_indices(
                     if !is_legal_drop_rank(hand_class, drop_color, drop_sq) {
                         continue;
                     }
+                    // before 状態の二歩判定 (pawn_file_flip 対応)
                     if hand_class == HandThreatClass::Pawn
-                        && has_pawn_on_file(pos, drop_color, drop_sq)
+                        && has_pawn_on_file_before(pos, drop_color, drop_sq, pawn_file_flip)
                     {
                         continue;
                     }
@@ -988,8 +1019,18 @@ pub fn append_changed_hand_threat_indices(
             // source_set (from/to + 逆方向 attack)
             let rev_from = attacks_from_dropped(hand_class, !drop_color, from_sq, Bitboard::EMPTY);
             let rev_to = attacks_from_dropped(hand_class, !drop_color, to_sq, Bitboard::EMPTY);
-            let source_set =
+            let mut source_set =
                 Bitboard::from_square(from_sq) | Bitboard::from_square(to_sq) | rev_from | rev_to;
+
+            // pawn_file_flip が該当 block に影響する場合、
+            // flipped file 全体を source_set に追加 (二歩 state 変化で
+            // drop 候補が増減する可能性があるため)
+            if let Some((fc, ff)) = pawn_file_flip
+                && fc == drop_color
+                && hand_class == HandThreatClass::Pawn
+            {
+                source_set = source_set | FILE_BB[ff as usize];
+            }
 
             let before_range = source_set;
             let after_range = source_set;
@@ -1043,7 +1084,8 @@ pub fn append_changed_hand_threat_indices(
             }
 
             // --- Before 側列挙 ---
-            // 注意: Pawn 二歩判定は pawn file 不変なので pos のまま使える。
+            // 注意: Pawn 二歩判定は pawn_file_flip が存在する場合 before 状態を
+            //       has_pawn_on_file_before で再構成する必要がある。
             //       target piece info は from_sq のみ before = (old_color, old_pt)、
             //       他のマスは pos のまま (非取り・非成りなので変化なし)。
             let mut before_drops = before_range & !before_occ;
@@ -1052,7 +1094,8 @@ pub fn append_changed_hand_threat_indices(
                 if !is_legal_drop_rank(hand_class, drop_color, drop_sq) {
                     continue;
                 }
-                if hand_class == HandThreatClass::Pawn && has_pawn_on_file(pos, drop_color, drop_sq)
+                if hand_class == HandThreatClass::Pawn
+                    && has_pawn_on_file_before(pos, drop_color, drop_sq, pawn_file_flip)
                 {
                     continue;
                 }
@@ -1518,7 +1561,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 2: decode_hand_piece_fb が手駒 BonaPiece から実手駒種を正しく復元する
+    /// decode_hand_piece_fb が手駒 BonaPiece から実手駒種を正しく復元する
     #[test]
     fn test_decode_hand_piece_fb_basic() {
         use super::super::bona_piece::{BonaPiece, ExtBonaPiece};
@@ -1539,7 +1582,7 @@ mod tests {
         assert_eq!(decode_hand_piece_fb(BonaPiece::ZERO), None);
     }
 
-    /// Phase 2: 全手駒種 × 両色 × 各 count を round-trip 検証
+    /// 全手駒種 × 両色 × 各 count を round-trip 検証
     #[test]
     fn test_decode_hand_piece_fb_exhaustive() {
         use super::super::bona_piece::ExtBonaPiece;
@@ -1566,7 +1609,7 @@ mod tests {
         }
     }
 
-    /// Phase 2: 盤上駒 BonaPiece は decode_hand_piece_fb で None を返すべき
+    /// 盤上駒 BonaPiece は decode_hand_piece_fb で None を返すべき
     #[test]
     fn test_decode_hand_piece_fb_rejects_board() {
         use super::super::bona_piece::BonaPiece;
@@ -1578,7 +1621,7 @@ mod tests {
         assert_eq!(decode_hand_piece_fb(bp), None);
     }
 
-    /// Phase 1: 非捕獲・非 Pawn promotion (Silver → ProSilver) で差分更新が一致
+    /// 非捕獲・非 Pawn promotion (Silver → ProSilver) で差分更新が一致
     ///
     /// 非 Pawn 成りは:
     /// - 持ち駒 state 不変 (非捕獲)
@@ -1598,7 +1641,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 1: Knight promotion (Knight → ProKnight / GoldLike) 非捕獲
+    /// Knight promotion (Knight → ProKnight / GoldLike) 非捕獲
     #[test]
     fn test_hand_threat_incremental_noncap_knight_promotion() {
         // 2c の Knight を 1a+ に動かす (2→1 file, 3→1 rank の knight jump)
@@ -1609,7 +1652,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 2: 成駒捕獲 (ProSilver → 手駒 Silver) のシナリオで hand transition 判定が正しい
+    /// 成駒捕獲 (ProSilver → 手駒 Silver) のシナリオで hand transition 判定が正しい
     ///
     /// 旧実装の `cap_pt_board.unpromote()` では `decode_board_threat_info_fb` が返す
     /// `PieceType::Gold` をそのまま Gold として扱い、本来更新すべき hand[Silver] が
@@ -1630,7 +1673,37 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 4: Capture 0→1 transition (us captures non-Pawn piece, gains first of type)
+    /// 非 Pawn が生歩を捕獲 → pawn file flip + hand[Pawn] 更新
+    ///
+    /// Black Silver が White Pawn を 5d で捕獲。
+    /// - White の file 5 pawn state が 1→0 で flip
+    /// - Black の hand[Pawn] が 0→1 (transition) ← fallback
+    /// non-transition 版は hand[Pawn] を事前に 1 枚与える
+    #[test]
+    fn test_hand_threat_incremental_nonpawn_captures_pawn_nontrans() {
+        // Black Silver 5e は White Pawn を 5d に取りに行く (silver 5e → 5d)
+        // rank 4 (d): 4 empty + p + 4 empty = "4p4"
+        // rank 5 (e): 4 empty + S + 4 empty = "4S4"
+        // Black has 1 Pawn already → after capture = 2 (non-transition)
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/4p4/4S4/9/9/9/4K4 b P 1")
+            .expect("nonpawn captures pawn sfen");
+        let m = Move::from_usi("5e5d").expect("5e5d");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// 同じパターンで White も Pawn を hand に持つ (both sides have pawn in hand)
+    #[test]
+    fn test_hand_threat_incremental_nonpawn_captures_pawn_both_hand() {
+        // Black Silver 5e captures White Pawn at 5d
+        // Both sides have Pawn in hand already
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/4p4/4S4/9/9/9/4K4 b Pp 1").expect("both hand pawn sfen");
+        let m = Move::from_usi("5e5d").expect("5e5d");
+        verify_incremental_hand_threat(&mut pos, m);
+    }
+
+    /// Capture 0→1 transition (us captures non-Pawn piece, gains first of type)
     #[test]
     fn test_hand_threat_incremental_capture_0_1_transition() {
         // Black Silver at 3c captures White Silver at 3b.
@@ -1644,7 +1717,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 4: Capture 0→1 transition (Bishop, slider with many features)
+    /// Capture 0→1 transition (Bishop, slider with many features)
     #[test]
     fn test_hand_threat_incremental_capture_0_1_bishop() {
         // Black Bishop at 5e captures White Bishop at 1a.
@@ -1659,7 +1732,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 4: Drop 1→0 transition (dropper has exactly 1 piece before drop)
+    /// Drop 1→0 transition (dropper has exactly 1 piece before drop)
     #[test]
     fn test_hand_threat_incremental_drop_1_0_transition() {
         // Black has exactly 1 Silver in hand, drops it at 5e.
@@ -1670,7 +1743,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 3: 非 Pawn drop (Silver drop) 非遷移 (before hand count >= 2)
+    /// 非 Pawn drop (Silver drop) 非遷移 (before hand count >= 2)
     #[test]
     fn test_hand_threat_incremental_noncap_silver_drop() {
         // Black has 2 Silver in hand, drops one at 5五 (5e, empty sq)
@@ -1681,7 +1754,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 3: Rook drop (slider, non-transition) が正しく動作する
+    /// Rook drop (slider, non-transition) が正しく動作する
     #[test]
     fn test_hand_threat_incremental_noncap_rook_drop() {
         // Black has 2 Rook in hand, drops one at 5e
@@ -1691,7 +1764,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 3: Silver drop が実際に attack pair を発生させるケース (target 駒あり)
+    /// Silver drop が実際に attack pair を発生させるケース (target 駒あり)
     #[test]
     fn test_hand_threat_incremental_drop_with_targets() {
         // Black has 2 Silver in hand, drops at 3三.
@@ -1704,7 +1777,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 2: 成桂捕獲 (ProKnight → 手駒 Knight)
+    /// 成桂捕獲 (ProKnight → 手駒 Knight)
     #[test]
     fn test_hand_threat_incremental_capture_promoted_knight() {
         // Black Silver at 3b captures ProKnight at 2a (knight promoted to gold-class)
@@ -1720,7 +1793,7 @@ mod tests {
         verify_incremental_hand_threat(&mut pos, m);
     }
 
-    /// Phase 1: Bishop promotion (Bishop → Horse) 非捕獲、slider の attack 変化あり
+    /// Bishop promotion (Bishop → Horse) 非捕獲、slider の attack 変化あり
     #[test]
     fn test_hand_threat_incremental_noncap_bishop_promotion() {
         // Black Bishop at 5五 → 2二+ (対角移動、非捕獲、成り)
