@@ -144,6 +144,28 @@ pub mod stats {
         TIERD_PATH_LEN_2,
         TIERD_PATH_LEN_3,
         TIERD_PATH_LEN_4_PLUS,
+        // --- Active feature count 分布 (rebuild 時の per-call 計測) ---
+        // rebuild_hand_threat 1 回の呼び出し内で何個の feature index を
+        // enumerate したかを bucket で記録する。
+        ACTIVE_CALL_COUNT,
+        ACTIVE_INDEX_TOTAL, // 全 call の総和 (avg = TOTAL/CALL)
+        ACTIVE_BUCKET_0_99,
+        ACTIVE_BUCKET_100_249,
+        ACTIVE_BUCKET_250_499,
+        ACTIVE_BUCKET_500_999,
+        ACTIVE_BUCKET_1000_1999,
+        ACTIVE_BUCKET_2000_3999,
+        ACTIVE_BUCKET_4000_PLUS,
+        // --- Diff 1 call あたりの変化 index 数分布 ---
+        // append_changed_hand_threat_indices が返した removed + added の合計。
+        DIFF_CHANGE_CALL_COUNT,
+        DIFF_CHANGE_TOTAL,
+        DIFF_CHANGE_0_4,
+        DIFF_CHANGE_5_9,
+        DIFF_CHANGE_10_19,
+        DIFF_CHANGE_20_49,
+        DIFF_CHANGE_50_99,
+        DIFF_CHANGE_100_PLUS,
     }
 
     /// diff カウンタのみの合計 (update 呼び出し総数)
@@ -267,6 +289,49 @@ pub mod stats {
                 continue;
             }
             let pct = (*count as f64) * 100.0 / (tierd_total as f64);
+            eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
+        }
+        eprintln!();
+        // Active feature count 分布 (rebuild per-call)
+        let active_call = ACTIVE_CALL_COUNT.load(Ordering::Relaxed);
+        let active_total_idx = ACTIVE_INDEX_TOTAL.load(Ordering::Relaxed);
+        eprintln!("  active feature rebuild calls: {active_call}");
+        if active_call > 0 {
+            let avg = active_total_idx as f64 / active_call as f64;
+            eprintln!("    avg active indices per call: {avg:.1}");
+            eprintln!("    total indices enumerated: {active_total_idx}");
+        }
+        for (name, count) in &entries {
+            if !name.starts_with("ACTIVE_BUCKET_") {
+                continue;
+            }
+            if active_call == 0 {
+                continue;
+            }
+            let pct = (*count as f64) * 100.0 / (active_call as f64);
+            eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
+        }
+        eprintln!();
+        // Diff change count per call
+        let diff_call = DIFF_CHANGE_CALL_COUNT.load(Ordering::Relaxed);
+        let diff_total = DIFF_CHANGE_TOTAL.load(Ordering::Relaxed);
+        eprintln!("  diff change per-call total: {diff_call}");
+        if diff_call > 0 {
+            let avg = diff_total as f64 / diff_call as f64;
+            eprintln!("    avg change indices per call: {avg:.1}");
+            eprintln!("    total change indices: {diff_total}");
+        }
+        for (name, count) in &entries {
+            if !name.starts_with("DIFF_CHANGE_")
+                || *name == "DIFF_CHANGE_CALL_COUNT"
+                || *name == "DIFF_CHANGE_TOTAL"
+            {
+                continue;
+            }
+            if diff_call == 0 {
+                continue;
+            }
+            let pct = (*count as f64) * 100.0 / (diff_call as f64);
             eprintln!("  {name:50}  {count:>12}  {pct:6.2}%");
         }
     }
@@ -1622,6 +1687,22 @@ pub fn append_changed_hand_threat_indices<P: HandThreatPosLike>(
     }
 
     bump!(INCREMENTAL_OK);
+    #[cfg(feature = "hand-threat-stats")]
+    {
+        use std::sync::atomic::Ordering;
+        let change_count = removed.len() + added.len();
+        stats::DIFF_CHANGE_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+        stats::DIFF_CHANGE_TOTAL.fetch_add(change_count as u64, Ordering::Relaxed);
+        let bucket = match change_count {
+            0..=4 => &stats::DIFF_CHANGE_0_4,
+            5..=9 => &stats::DIFF_CHANGE_5_9,
+            10..=19 => &stats::DIFF_CHANGE_10_19,
+            20..=49 => &stats::DIFF_CHANGE_20_49,
+            50..=99 => &stats::DIFF_CHANGE_50_99,
+            _ => &stats::DIFF_CHANGE_100_PLUS,
+        };
+        bucket.fetch_add(1, Ordering::Relaxed);
+    }
     true
 }
 
@@ -1639,6 +1720,8 @@ pub fn for_each_active_hand_threat_index<F: FnMut(usize)>(
     king_sq: Square,
     mut f: F,
 ) {
+    #[cfg(feature = "hand-threat-stats")]
+    let mut active_count: u64 = 0;
     let hm = is_hm_mirror(king_sq, perspective);
     let occupied = pos.occupied();
     let empty = !occupied;
@@ -1701,9 +1784,29 @@ pub fn for_each_active_hand_threat_index<F: FnMut(usize)>(
                         "hand_threat index out of range: {idx} >= {HAND_THREAT_DIMENSIONS}"
                     );
                     f(idx);
+                    #[cfg(feature = "hand-threat-stats")]
+                    {
+                        active_count += 1;
+                    }
                 }
             }
         }
+    }
+    #[cfg(feature = "hand-threat-stats")]
+    {
+        use std::sync::atomic::Ordering;
+        stats::ACTIVE_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+        stats::ACTIVE_INDEX_TOTAL.fetch_add(active_count, Ordering::Relaxed);
+        let bucket = match active_count {
+            0..=99 => &stats::ACTIVE_BUCKET_0_99,
+            100..=249 => &stats::ACTIVE_BUCKET_100_249,
+            250..=499 => &stats::ACTIVE_BUCKET_250_499,
+            500..=999 => &stats::ACTIVE_BUCKET_500_999,
+            1000..=1999 => &stats::ACTIVE_BUCKET_1000_1999,
+            2000..=3999 => &stats::ACTIVE_BUCKET_2000_3999,
+            _ => &stats::ACTIVE_BUCKET_4000_PLUS,
+        };
+        bucket.fetch_add(1, Ordering::Relaxed);
     }
 }
 
