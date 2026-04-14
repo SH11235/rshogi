@@ -1082,7 +1082,8 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             return false;
         };
 
-        // source_acc から main + psqt + threat + hand_threat の全てをコピー
+        // source_acc から main + psqt + threat の全てをコピー
+        // (HandThreat は path 長に関係なく rebuild するためコピー不要)
         let source_acc = stack.entry_at(source_idx).accumulator.clone();
         {
             let current_acc = &mut stack.current_mut().accumulator;
@@ -1096,12 +1097,6 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 #[cfg(feature = "nnue-threat")]
                 if self.has_threat {
                     current_acc.get_threat_mut(p).copy_from_slice(source_acc.get_threat(p));
-                }
-                #[cfg(feature = "nnue-hand-threat")]
-                if self.has_hand_threat {
-                    current_acc
-                        .get_hand_threat_mut(p)
-                        .copy_from_slice(source_acc.get_hand_threat(p));
                 }
             }
         }
