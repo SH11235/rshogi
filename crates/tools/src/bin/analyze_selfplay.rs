@@ -654,6 +654,10 @@ fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
 
     let mut meta_labels: Option<(String, String)> = None;
     let mut pair_buffer: BTreeMap<u32, [Option<GameSide>; 2]> = BTreeMap::new();
+    // ペア完成後にバッファから remove するので、`pair_buffer` だけでは
+    // 「その pair_index は既に集計済み」かどうか判定できない。
+    // 3 件目以降の重複到着を正しく検出するため、処理済み pair_index を別に保持する。
+    let mut completed_pairs: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut total = Penta::ZERO;
     let mut seq: u32 = 0;
     let mut warned_missing_pair_index = false;
@@ -752,28 +756,35 @@ fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
                 }
             };
 
+            // 既に集計済みの pair_index に 3 件目以降が到着した場合は除外する。
+            // 通常の tournament 出力では起き得ないが、pair_index なし旧ログの
+            // seq fallback が並列対局で崩れた場合や、ログ破損で発生し得る。
+            if completed_pairs.contains(&pair_idx) {
+                eprintln!(
+                    "警告: {path} — pair_index={pair_idx} は既に集計済みです。\
+                     余剰データを除外します。"
+                );
+                continue;
+            }
             let entry = pair_buffer.entry(pair_idx).or_insert([None, None]);
             if entry[slot].is_none() {
                 entry[slot] = Some(test_side);
             } else if entry[1 - slot].is_none() {
-                // 同 slot が 2 度到着するのは通常の tournament 出力では起き得ない
-                // （ログ破損、あるいは pair_index なし旧ログの seq fallback が
-                //  並列対局で崩れた場合）。空きスロットに入れつつ警告する。
+                // 同 slot が 2 度到着するのは通常の tournament 出力では起き得ない。
+                // 空きスロットに入れつつ警告する。
                 eprintln!(
                     "警告: {path} — pair_index={pair_idx} の slot={slot} が重複しています。\
                      空きスロットに配置しますが、結果は正確でない可能性があります。"
                 );
                 entry[1 - slot] = Some(test_side);
-            } else {
-                // 両スロット埋まり済みで 3 件目が到着: 診断のため件数のみ記録。
-                eprintln!(
-                    "警告: {path} — pair_index={pair_idx} に 3 件目以降の結果が来ました。\
-                     余剰データを除外します。"
-                );
             }
+            // else: entry[slot] も entry[1-slot] も埋まっているケースは
+            // 上の `completed_pairs` チェックで弾かれるため到達しない。
+
             if let [Some(a), Some(b)] = *entry {
                 total += Penta::from_pair(a, b);
                 pair_buffer.remove(&pair_idx);
+                completed_pairs.insert(pair_idx);
             }
         }
     }

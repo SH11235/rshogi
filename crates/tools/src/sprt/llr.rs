@@ -39,8 +39,11 @@ impl SprtParameters {
     /// - `alpha` / `beta` が `(0, 1)` の開区間外のとき: `ln(beta/(1-alpha))` や
     ///   `ln((1-beta)/alpha)` が `NaN` / `inf` になり判定不能になるため。
     pub fn new(nelo0: f64, nelo1: f64, alpha: f64, beta: f64) -> Result<SprtParameters, String> {
-        if nelo0.is_nan() || nelo1.is_nan() {
-            return Err(format!("SPRT: nelo0 / nelo1 に NaN は使えません: {nelo0}, {nelo1}"));
+        // `±inf` / NaN は t0/t1 / 境界を無限大・NaN に波及させるので全て拒否する。
+        if !nelo0.is_finite() || !nelo1.is_finite() {
+            return Err(format!(
+                "SPRT: nelo0 / nelo1 は有限値である必要があります: {nelo0}, {nelo1}"
+            ));
         }
         if nelo0 >= nelo1 {
             return Err(format!(
@@ -308,13 +311,35 @@ mod tests {
     }
 
     #[test]
+    fn new_rejects_non_finite_nelo() {
+        assert!(SprtParameters::new(f64::NAN, 5.0, 0.05, 0.05).is_err());
+        assert!(SprtParameters::new(0.0, f64::NAN, 0.05, 0.05).is_err());
+        assert!(SprtParameters::new(f64::NEG_INFINITY, 5.0, 0.05, 0.05).is_err());
+        assert!(SprtParameters::new(0.0, f64::INFINITY, 0.05, 0.05).is_err());
+        assert!(SprtParameters::new(f64::INFINITY, f64::INFINITY, 0.05, 0.05).is_err());
+    }
+
+    #[test]
     fn new_rejects_out_of_range_alpha_beta() {
+        // 境界値 / 範囲外 / NaN / Inf を全て弾く
         assert!(SprtParameters::new(0.0, 5.0, 0.0, 0.05).is_err());
         assert!(SprtParameters::new(0.0, 5.0, 1.0, 0.05).is_err());
         assert!(SprtParameters::new(0.0, 5.0, -0.1, 0.05).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, 1.5, 0.05).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, f64::NAN, 0.05).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, f64::INFINITY, 0.05).is_err());
         assert!(SprtParameters::new(0.0, 5.0, 0.05, 0.0).is_err());
         assert!(SprtParameters::new(0.0, 5.0, 0.05, 1.0).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, 0.05, -0.1).is_err());
         assert!(SprtParameters::new(0.0, 5.0, 0.05, f64::NAN).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, 0.05, f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn new_accepts_valid_edge_inputs() {
+        // すぐ 0 / 1 ではない ε 幅の境界
+        assert!(SprtParameters::new(-1e-9, 1e-9, 1e-6, 1e-6).is_ok());
+        assert!(SprtParameters::new(0.0, 5.0, 0.5, 0.5).is_ok());
     }
 
     #[test]
