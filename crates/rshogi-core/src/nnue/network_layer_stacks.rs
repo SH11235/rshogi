@@ -29,12 +29,8 @@ use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
 use super::network::{
-    LayerStackBucketMode, compute_layer_stack_progress8_bucket_index,
-    compute_layer_stack_progress8gikou_bucket_index,
-    compute_layer_stack_progress8kpabs_bucket_index, get_fv_scale_override,
-    get_layer_stack_bucket_mode, get_layer_stack_progress_coeff,
-    get_layer_stack_progress_coeff_gikou_lite, get_layer_stack_progress_kpabs_weights,
-    parse_fv_scale_from_arch,
+    LayerStackBucketMode, compute_layer_stack_progress8kpabs_bucket_index, get_fv_scale_override,
+    get_layer_stack_bucket_mode, get_layer_stack_progress_kpabs_weights, parse_fv_scale_from_arch,
 };
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -47,14 +43,6 @@ use std::path::Path;
 #[inline]
 fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usize {
     match get_layer_stack_bucket_mode() {
-        LayerStackBucketMode::Progress8 => {
-            let coeff = get_layer_stack_progress_coeff();
-            compute_layer_stack_progress8_bucket_index(pos, side_to_move, coeff)
-        }
-        LayerStackBucketMode::Progress8Gikou => {
-            let coeff = get_layer_stack_progress_coeff_gikou_lite();
-            compute_layer_stack_progress8gikou_bucket_index(pos, side_to_move, coeff)
-        }
         LayerStackBucketMode::Progress8KPAbs => {
             let weights = get_layer_stack_progress_kpabs_weights();
             compute_layer_stack_progress8kpabs_bucket_index(pos, side_to_move, weights)

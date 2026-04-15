@@ -15,14 +15,10 @@ use rshogi_core::eval::{
     set_pass_right_value_phased,
 };
 use rshogi_core::nnue::{
-    AccumulatorStackVariant, LayerStackBucketMode, LayerStackProgressCoeff,
-    LayerStackProgressCoeffGikouLite, SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER,
-    SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
-    SHOGI_PROGRESS8_FEATURE_ORDER, SHOGI_PROGRESS8_NUM_FEATURES, clear_nnue, evaluate_dispatch,
-    get_layer_stack_bucket_mode, get_network, init_nnue, parse_layer_stack_bucket_mode,
+    AccumulatorStackVariant, LayerStackBucketMode, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, clear_nnue,
+    evaluate_dispatch, get_network, init_nnue, parse_layer_stack_bucket_mode,
     parse_nnue_architecture, print_nnue_stats, reset_layer_stack_progress_kpabs_weights,
-    set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_progress_coeff,
-    set_layer_stack_progress_coeff_gikou_lite, set_layer_stack_progress_kpabs_weights,
+    set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
     set_nnue_architecture_override,
 };
 use rshogi_core::position::Position;
@@ -31,7 +27,6 @@ use rshogi_core::search::{
     SearchResult, SearchTuneParams,
 };
 use rshogi_core::types::{EnteringKingRule, Move};
-use serde::Deserialize;
 use serde_json::json;
 
 /// エンジン名
@@ -42,224 +37,6 @@ const ENGINE_VERSION: &str = "0.1.0";
 const ENGINE_AUTHOR: &str = "sh11235";
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
-
-#[derive(Debug, Deserialize)]
-struct ProgressCoeffV1 {
-    format: String,
-    model: String,
-    num_buckets: usize,
-    feature_order: Vec<String>,
-    standardization: ProgressStandardization,
-    weights: Vec<f32>,
-    bias: f32,
-    runtime: ProgressRuntime,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProgressCoeffV2 {
-    format: String,
-    model: String,
-    feature_set: String,
-    num_buckets: usize,
-    feature_order: Vec<String>,
-    standardization: ProgressStandardization,
-    weights: Vec<f32>,
-    bias: f32,
-    runtime: ProgressRuntime,
-}
-
-#[allow(clippy::large_enum_variant)]
-enum LoadedProgressCoeff {
-    V1(LayerStackProgressCoeff),
-    V2(LayerStackProgressCoeffGikouLite),
-    KPAbs(Box<[f32]>),
-}
-
-#[derive(Debug, Deserialize)]
-struct ProgressStandardization {
-    mean: Vec<f32>,
-    std: Vec<f32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProgressRuntime {
-    z_clip: Vec<f32>,
-}
-
-fn load_progress_coeff_v1(path: &str) -> Result<LayerStackProgressCoeff, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read LS_PROGRESS_COEFF '{path}': {e}"))?;
-    let coeff: ProgressCoeffV1 = serde_json::from_str(&text)
-        .map_err(|e| format!("failed to parse LS_PROGRESS_COEFF JSON '{path}': {e}"))?;
-
-    if coeff.format != "rshogi.progress_coeff.v1" {
-        return Err(format!(
-            "invalid progress coeff format '{}', expected 'rshogi.progress_coeff.v1'",
-            coeff.format
-        ));
-    }
-    if coeff.model != "logistic_regression" {
-        return Err(format!(
-            "invalid progress coeff model '{}', expected 'logistic_regression'",
-            coeff.model
-        ));
-    }
-    if coeff.num_buckets != 8 {
-        return Err(format!("invalid num_buckets {}, expected 8", coeff.num_buckets));
-    }
-    if coeff.feature_order.len() != SHOGI_PROGRESS8_NUM_FEATURES {
-        return Err(format!(
-            "invalid feature_order length {}, expected {}",
-            coeff.feature_order.len(),
-            SHOGI_PROGRESS8_NUM_FEATURES
-        ));
-    }
-    for (idx, expected) in SHOGI_PROGRESS8_FEATURE_ORDER.iter().enumerate() {
-        if coeff.feature_order[idx] != *expected {
-            return Err(format!(
-                "feature_order mismatch at index {}: got '{}', expected '{}'",
-                idx, coeff.feature_order[idx], expected
-            ));
-        }
-    }
-    if coeff.standardization.mean.len() != SHOGI_PROGRESS8_NUM_FEATURES
-        || coeff.standardization.std.len() != SHOGI_PROGRESS8_NUM_FEATURES
-        || coeff.weights.len() != SHOGI_PROGRESS8_NUM_FEATURES
-    {
-        return Err(format!(
-            "mean/std/weights lengths must all be {} (got mean={}, std={}, weights={})",
-            SHOGI_PROGRESS8_NUM_FEATURES,
-            coeff.standardization.mean.len(),
-            coeff.standardization.std.len(),
-            coeff.weights.len()
-        ));
-    }
-    if coeff.runtime.z_clip.len() != 2 {
-        return Err(format!(
-            "runtime.z_clip must have exactly 2 values (got {})",
-            coeff.runtime.z_clip.len()
-        ));
-    }
-
-    let mean: [f32; SHOGI_PROGRESS8_NUM_FEATURES] = coeff
-        .standardization
-        .mean
-        .try_into()
-        .map_err(|_| "failed to convert mean to fixed array".to_string())?;
-    let std: [f32; SHOGI_PROGRESS8_NUM_FEATURES] = coeff
-        .standardization
-        .std
-        .try_into()
-        .map_err(|_| "failed to convert std to fixed array".to_string())?;
-    let weights: [f32; SHOGI_PROGRESS8_NUM_FEATURES] = coeff
-        .weights
-        .try_into()
-        .map_err(|_| "failed to convert weights to fixed array".to_string())?;
-    let z_clip = [coeff.runtime.z_clip[0], coeff.runtime.z_clip[1]];
-
-    Ok(LayerStackProgressCoeff::new(mean, std, weights, coeff.bias, z_clip))
-}
-
-fn load_progress_coeff_v2(path: &str) -> Result<LayerStackProgressCoeffGikouLite, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read LS_PROGRESS_COEFF '{path}': {e}"))?;
-    let coeff: ProgressCoeffV2 = serde_json::from_str(&text)
-        .map_err(|e| format!("failed to parse LS_PROGRESS_COEFF JSON '{path}': {e}"))?;
-
-    if coeff.format != "rshogi.progress_coeff.v2" {
-        return Err(format!(
-            "invalid progress coeff format '{}', expected 'rshogi.progress_coeff.v2'",
-            coeff.format
-        ));
-    }
-    if coeff.model != "logistic_regression" {
-        return Err(format!(
-            "invalid progress coeff model '{}', expected 'logistic_regression'",
-            coeff.model
-        ));
-    }
-    if coeff.feature_set != "gikou_lite_34" {
-        return Err(format!(
-            "invalid feature_set '{}', expected 'gikou_lite_34'",
-            coeff.feature_set
-        ));
-    }
-    if coeff.num_buckets != 8 {
-        return Err(format!("invalid num_buckets {}, expected 8", coeff.num_buckets));
-    }
-    if coeff.feature_order.len() != SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES {
-        return Err(format!(
-            "invalid feature_order length {}, expected {}",
-            coeff.feature_order.len(),
-            SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES
-        ));
-    }
-    for (idx, expected) in SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER.iter().enumerate() {
-        if coeff.feature_order[idx] != *expected {
-            return Err(format!(
-                "feature_order mismatch at index {}: got '{}', expected '{}'",
-                idx, coeff.feature_order[idx], expected
-            ));
-        }
-    }
-    if coeff.standardization.mean.len() != SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES
-        || coeff.standardization.std.len() != SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES
-        || coeff.weights.len() != SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES
-    {
-        return Err(format!(
-            "mean/std/weights lengths must all be {} (got mean={}, std={}, weights={})",
-            SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES,
-            coeff.standardization.mean.len(),
-            coeff.standardization.std.len(),
-            coeff.weights.len()
-        ));
-    }
-    if coeff.runtime.z_clip.len() != 2 {
-        return Err(format!(
-            "runtime.z_clip must have exactly 2 values (got {})",
-            coeff.runtime.z_clip.len()
-        ));
-    }
-
-    let mean: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES] = coeff
-        .standardization
-        .mean
-        .try_into()
-        .map_err(|_| "failed to convert mean to fixed array".to_string())?;
-    let std: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES] =
-        coeff
-            .standardization
-            .std
-            .try_into()
-            .map_err(|_| "failed to convert std to fixed array".to_string())?;
-    let weights: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES] = coeff
-        .weights
-        .try_into()
-        .map_err(|_| "failed to convert weights to fixed array".to_string())?;
-    let z_clip = [coeff.runtime.z_clip[0], coeff.runtime.z_clip[1]];
-
-    Ok(LayerStackProgressCoeffGikouLite::new(mean, std, weights, coeff.bias, z_clip))
-}
-
-#[derive(Debug, Deserialize)]
-struct ProgressCoeffFormatProbe {
-    format: String,
-}
-
-fn load_progress_coeff(path: &str) -> Result<LoadedProgressCoeff, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read LS_PROGRESS_COEFF '{path}': {e}"))?;
-    let probe: ProgressCoeffFormatProbe = serde_json::from_str(&text)
-        .map_err(|e| format!("failed to parse LS_PROGRESS_COEFF JSON '{path}': {e}"))?;
-
-    match probe.format.as_str() {
-        "rshogi.progress_coeff.v1" => load_progress_coeff_v1(path).map(LoadedProgressCoeff::V1),
-        "rshogi.progress_coeff.v2" => load_progress_coeff_v2(path).map(LoadedProgressCoeff::V2),
-        other => Err(format!(
-            "invalid progress coeff format '{other}', expected 'rshogi.progress_coeff.v1' or 'rshogi.progress_coeff.v2'"
-        )),
-    }
-}
 
 fn load_progress_coeff_kpabs(path: &str) -> Result<Box<[f32]>, String> {
     let bytes = std::fs::read(path)
@@ -473,7 +250,7 @@ impl UsiEngine {
         // 水匠5等は24、YaneuraOuデフォルトは16
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
         println!(
-            "option name LS_BUCKET_MODE type combo default {} var progress8 var progress8gikou var progress8kpabs",
+            "option name LS_BUCKET_MODE type combo default {} var progress8kpabs",
             LayerStackBucketMode::Progress8KPAbs.as_str()
         );
         println!("option name LS_PROGRESS_COEFF type string default <empty>");
@@ -1004,48 +781,25 @@ impl UsiEngine {
                 }
                 None => {
                     eprintln!(
-                        "info string Warning: invalid LS_BUCKET_MODE '{}', expected progress8, progress8gikou or progress8kpabs",
+                        "info string Warning: invalid LS_BUCKET_MODE '{}', expected progress8kpabs",
                         value
                     );
                 }
             },
             "LS_PROGRESS_COEFF" => {
                 if value.is_empty() || value == "<empty>" {
-                    set_layer_stack_progress_coeff(LayerStackProgressCoeff::default());
-                    set_layer_stack_progress_coeff_gikou_lite(
-                        LayerStackProgressCoeffGikouLite::default(),
-                    );
                     reset_layer_stack_progress_kpabs_weights();
                     eprintln!("info string LS_PROGRESS_COEFF: reset to built-in default");
                 } else {
-                    let loaded = match get_layer_stack_bucket_mode() {
-                        LayerStackBucketMode::Progress8KPAbs => {
-                            load_progress_coeff_kpabs(&value).map(LoadedProgressCoeff::KPAbs)
-                        }
-                        _ => load_progress_coeff(&value),
-                    };
-
-                    match loaded {
-                        Ok(LoadedProgressCoeff::V1(coeff)) => {
-                            set_layer_stack_progress_coeff(coeff);
-                            eprintln!("info string LS_PROGRESS_COEFF loaded (v1): {value}");
-                        }
-                        Ok(LoadedProgressCoeff::V2(coeff)) => {
-                            set_layer_stack_progress_coeff_gikou_lite(coeff);
-                            eprintln!("info string LS_PROGRESS_COEFF loaded (v2): {value}");
-                        }
-                        Ok(LoadedProgressCoeff::KPAbs(weights)) => {
-                            match set_layer_stack_progress_kpabs_weights(weights) {
-                                Ok(()) => {
-                                    eprintln!(
-                                        "info string LS_PROGRESS_COEFF loaded (kpabs): {value}"
-                                    );
-                                }
-                                Err(err) => {
-                                    eprintln!("info string Warning: {err}");
-                                }
+                    match load_progress_coeff_kpabs(&value) {
+                        Ok(weights) => match set_layer_stack_progress_kpabs_weights(weights) {
+                            Ok(()) => {
+                                eprintln!("info string LS_PROGRESS_COEFF loaded (kpabs): {value}");
                             }
-                        }
+                            Err(err) => {
+                                eprintln!("info string Warning: {err}");
+                            }
+                        },
                         Err(err) => {
                             eprintln!("info string Warning: {err}");
                         }
@@ -1708,124 +1462,15 @@ mod tests {
             .spawn(|| {
                 use rshogi_core::nnue::{
                     LayerStackBucketMode, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
-                    get_layer_stack_bucket_mode, get_layer_stack_progress_coeff,
-                    get_layer_stack_progress_coeff_gikou_lite,
-                    get_layer_stack_progress_kpabs_weights,
+                    get_layer_stack_bucket_mode, get_layer_stack_progress_kpabs_weights,
                     reset_layer_stack_progress_kpabs_weights, set_layer_stack_bucket_mode,
-                    set_layer_stack_progress_coeff, set_layer_stack_progress_coeff_gikou_lite,
                 };
 
                 // テスト開始時に既定値へ戻す
                 set_layer_stack_bucket_mode(LayerStackBucketMode::Progress8KPAbs);
-                set_layer_stack_progress_coeff(Default::default());
-                set_layer_stack_progress_coeff_gikou_lite(Default::default());
                 reset_layer_stack_progress_kpabs_weights();
 
                 let mut engine = UsiEngine::new();
-                engine.cmd_setoption(&[
-                    "setoption",
-                    "name",
-                    "LS_BUCKET_MODE",
-                    "value",
-                    "progress8",
-                ]);
-                assert_eq!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Progress8);
-
-                // progress coeff の読み込み確認
-                let tmp_path = std::env::temp_dir().join("rshogi_progress_coeff_test.json");
-                let json = r#"{
-  "format": "rshogi.progress_coeff.v1",
-  "model": "logistic_regression",
-  "num_buckets": 8,
-  "feature_order": [
-    "x_board_non_king",
-    "x_hand_total",
-    "x_major_board",
-    "x_promoted_board",
-    "x_stm_king_rank_rel",
-    "x_ntm_king_rank_rel"
-  ],
-  "standardization": {
-    "mean": [1, 2, 3, 4, 5, 6],
-    "std": [1, 1, 1, 1, 1, 1]
-  },
-  "weights": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
-  "bias": -0.5,
-  "runtime": { "z_clip": [-7.0, 7.0] }
-}"#;
-                std::fs::write(&tmp_path, json).unwrap();
-                engine.cmd_setoption(&[
-                    "setoption",
-                    "name",
-                    "LS_PROGRESS_COEFF",
-                    "value",
-                    tmp_path.to_str().unwrap(),
-                ]);
-                let coeff = get_layer_stack_progress_coeff();
-                assert_eq!(coeff.mean, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-                assert_eq!(coeff.std, [1.0; 6]);
-                assert_eq!(coeff.weights, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
-                assert_eq!(coeff.bias, -0.5);
-                assert_eq!(coeff.z_clip, [-7.0, 7.0]);
-                let _ = std::fs::remove_file(tmp_path);
-
-                engine.cmd_setoption(&[
-                    "setoption",
-                    "name",
-                    "LS_BUCKET_MODE",
-                    "value",
-                    "progress8gikou",
-                ]);
-                assert_eq!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Progress8Gikou);
-
-                let tmp_path_v2 = std::env::temp_dir().join("rshogi_progress_coeff_v2_test.json");
-                let mut feature_order = String::new();
-                for (i, name) in SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER.iter().enumerate() {
-                    if i > 0 {
-                        feature_order.push_str(",\n    ");
-                    }
-                    feature_order.push('"');
-                    feature_order.push_str(name);
-                    feature_order.push('"');
-                }
-                let json_v2 = format!(
-                    r#"{{
-  "format": "rshogi.progress_coeff.v2",
-  "model": "logistic_regression",
-  "feature_set": "gikou_lite_34",
-  "num_buckets": 8,
-  "feature_order": [
-    {feature_order}
-  ],
-  "standardization": {{
-    "mean": [{zeros}],
-    "std": [{ones}]
-  }},
-  "weights": [{weights}],
-  "bias": 0.25,
-  "runtime": {{ "z_clip": [-6.0, 6.0] }}
-}}"#,
-                    feature_order = feature_order,
-                    zeros = vec!["0.0"; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES].join(", "),
-                    ones = vec!["1.0"; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES].join(", "),
-                    weights = vec!["0.1"; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES].join(", "),
-                );
-                std::fs::write(&tmp_path_v2, json_v2).unwrap();
-                engine.cmd_setoption(&[
-                    "setoption",
-                    "name",
-                    "LS_PROGRESS_COEFF",
-                    "value",
-                    tmp_path_v2.to_str().unwrap(),
-                ]);
-                let coeff_v2 = get_layer_stack_progress_coeff_gikou_lite();
-                assert_eq!(coeff_v2.mean, [0.0; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES]);
-                assert_eq!(coeff_v2.std, [1.0; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES]);
-                assert_eq!(coeff_v2.weights, [0.1; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES]);
-                assert_eq!(coeff_v2.bias, 0.25);
-                assert_eq!(coeff_v2.z_clip, [-6.0, 6.0]);
-                let _ = std::fs::remove_file(tmp_path_v2);
-
                 engine.cmd_setoption(&[
                     "setoption",
                     "name",
@@ -1866,8 +1511,6 @@ mod tests {
 
                 // 他テストへの影響を避けるため復元
                 set_layer_stack_bucket_mode(LayerStackBucketMode::Progress8KPAbs);
-                set_layer_stack_progress_coeff(Default::default());
-                set_layer_stack_progress_coeff_gikou_lite(Default::default());
                 reset_layer_stack_progress_kpabs_weights();
             })
             .unwrap()

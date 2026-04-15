@@ -25,12 +25,10 @@ use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DirtyPiece, LayerStackBucketMode,
     LayerStacksNetwork, NNUEEvaluator, NNUENetwork, NetworkLayerStacks,
-    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_progress8_bucket_index,
-    compute_layer_stack_progress8gikou_bucket_index,
-    compute_layer_stack_progress8kpabs_bucket_index, get_layer_stack_progress_coeff,
-    get_layer_stack_progress_coeff_gikou_lite, get_layer_stack_progress_kpabs_weights,
-    parse_layer_stack_bucket_mode, set_layer_stack_bucket_mode,
-    set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
+    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_progress8kpabs_bucket_index,
+    get_layer_stack_progress_kpabs_weights, parse_layer_stack_bucket_mode,
+    set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
+    sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, PieceType};
@@ -308,16 +306,6 @@ fn bench_progress_bucket(positions: &[Position], weights: &[f32], warmup: u64, i
 fn compute_layer_stack_bucket_index(pos: &Position, mode: LayerStackBucketMode) -> usize {
     let side_to_move = pos.side_to_move();
     match mode {
-        LayerStackBucketMode::Progress8 => compute_layer_stack_progress8_bucket_index(
-            pos,
-            side_to_move,
-            get_layer_stack_progress_coeff(),
-        ),
-        LayerStackBucketMode::Progress8Gikou => compute_layer_stack_progress8gikou_bucket_index(
-            pos,
-            side_to_move,
-            get_layer_stack_progress_coeff_gikou_lite(),
-        ),
         LayerStackBucketMode::Progress8KPAbs => compute_layer_stack_progress8kpabs_bucket_index(
             pos,
             side_to_move,
@@ -345,10 +333,7 @@ fn configure_layer_stack_bucket(
     progress_weights: Option<&[f32]>,
 ) -> Result<LayerStackBucketMode> {
     let mode = parse_layer_stack_bucket_mode(&cli.ls_bucket_mode).ok_or_else(|| {
-        anyhow!(
-            "invalid --ls-bucket-mode '{}'. expected one of: progress8, progress8gikou, progress8kpabs",
-            cli.ls_bucket_mode
-        )
+        anyhow!("invalid --ls-bucket-mode '{}'. expected: progress8kpabs", cli.ls_bucket_mode)
     })?;
     set_layer_stack_bucket_mode(mode);
 
