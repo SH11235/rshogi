@@ -709,6 +709,17 @@ fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
             seq += 1;
             let slot = slot_hint.min(1) as usize;
 
+            // 既に集計済みの pair_index に 3 件目以降が到着した場合は除外する。
+            // test_side 決定より前に診断することで、ログ破損 (winner/outcome 不正) で
+            // test_side の match が `continue` に落ちても警告は確実に出る。
+            if completed_pairs.contains(&pair_idx) {
+                eprintln!(
+                    "警告: {path} — pair_index={pair_idx} は既に集計済みです。\
+                     余剰データを除外します。"
+                );
+                continue;
+            }
+
             // test 視点の Win/Draw/Loss を決定する。
             //
             // 優先: tournament.rs が書く `winner` フィールド (エンジンラベルそのもの)。
@@ -756,16 +767,6 @@ fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
                 }
             };
 
-            // 既に集計済みの pair_index に 3 件目以降が到着した場合は除外する。
-            // 通常の tournament 出力では起き得ないが、pair_index なし旧ログの
-            // seq fallback が並列対局で崩れた場合や、ログ破損で発生し得る。
-            if completed_pairs.contains(&pair_idx) {
-                eprintln!(
-                    "警告: {path} — pair_index={pair_idx} は既に集計済みです。\
-                     余剰データを除外します。"
-                );
-                continue;
-            }
             let entry = pair_buffer.entry(pair_idx).or_insert([None, None]);
             if entry[slot].is_none() {
                 entry[slot] = Some(test_side);
