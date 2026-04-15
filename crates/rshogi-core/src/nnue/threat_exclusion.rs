@@ -1,24 +1,53 @@
 //! Threat pair 除外 profile
 //!
-//! Cargo feature flag で選択された profile に基づき、除外する pair を定義する。
-//! rshogi と bullet-shogi で同一の除外ロジックを維持すること。
+//! pair 単位で Threat 特徴量を除外する仕組み。除外する pair セットを Cargo
+//! feature flag でビルド時に選択する。除外された pair は index 空間からも
+//! 重み行列からも物理的に削除され、推論オーバーヘッドはゼロ
+//! (`pair_base` テーブルの内容が変わるだけ)。
 //!
-//! ## Profile 一覧
+//! # クロスリポジトリ契約
 //!
-//! | id | feature flag | 除外内容 |
-//! |----|-------------|---------|
-//! | 0 | (default) | なし (Baseline) |
-//! | 1 | `threat-profile-same-class` | 同種ペア全除外 |
-//! | 2 | `threat-profile-same-class-major-pawn` | 同種 + 大駒→歩除外 |
+//! 除外集合と profile id は学習側 (bullet-shogi) と推論側 (rshogi) で**完全に
+//! 一致**させる必要がある。手動同期に加え、Golden Forward cross-validation
+//! テスト ([`verify-nnue` skill]) で実装一致を検証している。
 //!
-//! ## 制約: profile は STM/NSTM 対称であること
+//! [`verify-nnue` skill]: https://github.com/SH11235/rshogi/tree/main/.claude/skills/verify-nnue
+//!
+//! # Profile 一覧 (実装済み)
+//!
+//! | id | feature flag | 除外内容 | THREAT_DIMENSIONS |
+//! |----|-------------|---------|------------------:|
+//! | 0  | (default) | なし (Baseline) | 216,720 |
+//! | 1  | `threat-profile-same-class` | 同種ペア全除外 (9 クラス × 4 side = 36 pair) | 192,640 |
+//! | 2  | `threat-profile-same-class-major-pawn` | profile 1 + 大駒 attacker → Pawn attacked (4 大駒 × 4 side = 16 pair 追加) | 173,568 |
+//!
+//! # 設計: pair_base の sentinel
+//!
+//! 除外 pair は `pair_base[i]` に sentinel `EXCLUDED_PAIR_BASE` を入れて
+//! 累積和計算時にスキップする。`pair_base` の連続性を維持する代わりに次元を
+//! 詰める方式で、index 計算側 ([`super::threat_features::pair_base`]) は
+//! sentinel をチェックして `None` を返す。
+//!
+//! 各 profile の `is_excluded` 関数で除外条件を const 評価し、
+//! `build_pair_base` でテーブルを生成する。
+//!
+//! # arch_str / quantised.bin file format
+//!
+//! profile 0 (default) のモデル:
+//! - arch_str: `Threat=216720`
+//! - file: Threat weights を直接書く
+//!
+//! profile 1 以上のモデル:
+//! - arch_str: `Threat=<dims>,ThreatProfile=<id>`
+//! - file: Threat weights の直前に `profile_id` (u32 LE) を書く
+//! - 読み込み時に engine の profile id と照合し、不一致ならエラー
+//!
+//! # 制約: profile は STM/NSTM 対称であること
 //!
 //! bullet-shogi の `SparseInputType::map_features` は `f(stm_idx, nstm_idx)` で
 //! STM/NSTM ペアを同時に列挙する設計のため、STM perspective で active な pair は
 //! NSTM perspective でも active である必要がある。
 //! enemy→friend のみ (enemy-only) のような非対称 profile は学習に使えない。
-//!
-//! 仕様: `docs/threat_spec.md` Exclusion profiles セクション
 
 // 相互排他チェック: 複数 profile を同時選択すると compile error
 const _PROFILE_EXCLUSIVITY: () = {

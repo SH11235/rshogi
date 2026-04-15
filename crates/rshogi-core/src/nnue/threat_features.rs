@@ -1,12 +1,134 @@
 //! Threat 特徴量
 //!
 //! 盤上の駒の攻撃関係（threat pair）を NNUE 特徴量として列挙する。
-//! 各 pair は (attacker_side, attacker_class, attacked_side, attacked_class, from_sq, to_sq) で一意に決まる。
+//! 各 pair は `(attacker_side, attacker_class, attacked_side, attacked_class, from_sq, to_sq)`
+//! の 6 要素で一意に決まる。
 //!
-//! ## 仕様
+//! # クロスリポジトリ契約
 //!
-//! - 仕様固定メモ: `docs/threat_spec.md`
-//! - 設計書: `docs/nnue_architecture_research.md` Phase 3
+//! 本モジュールが定義する定数・構造・正規化方式は、学習側 (bullet-shogi) と
+//! 推論側 (rshogi) で**完全に一致させる必要がある**。両者の不一致は学習済み
+//! quantised.bin の互換性を破壊するため、変更時は両リポジトリの実装と
+//! Golden Forward cross-validation テスト ([`verify-nnue` skill]) で必ず
+//! 確認すること。
+//!
+//! - [`ThreatClass`] enum の順序: `id 0..=8` に依存した weight 配置
+//! - [`ATTACKS_PER_COLOR`] の値: `THREAT_DIMENSIONS` の計算根拠
+//! - [`super::threat_exclusion::is_excluded`] の判定: profile 別 weight 配置の決定
+//! - [`Square::raw`] 値の座標対応: `raw = file * 9 + rank`
+//!   (file: 0=1筋..8=9筋, rank: 0=1段..8=9段)
+//!
+//! [`verify-nnue` skill]: https://github.com/SH11235/rshogi/tree/main/.claude/skills/verify-nnue
+//!
+//! # ThreatClass (King 除外、9 family)
+//!
+//! | id | name | 含まれる PieceType |
+//! |----|------|--------------------|
+//! | 0  | Pawn      | Pawn |
+//! | 1  | Lance     | Lance |
+//! | 2  | Knight    | Knight |
+//! | 3  | Silver    | Silver |
+//! | 4  | GoldLike  | Gold, ProPawn, ProLance, ProKnight, ProSilver |
+//! | 5  | Bishop    | Bishop |
+//! | 6  | Rook      | Rook |
+//! | 7  | Horse     | Horse |
+//! | 8  | Dragon    | Dragon |
+//!
+//! 除外: attacker = King, attacked = King (King は ThreatClass を持たない)
+//!
+//! # attacks_per_color
+//!
+//! 各 class の駒が空盤面上の全 81 マスに置かれた場合の攻撃先マス数の合計
+//! (先手基準。後手は視点変換で対称)。`ATTACKS_PER_COLOR` 定数として保持。
+//!
+//! `Σ ATTACKS_PER_COLOR = 6,020`
+//!
+//! # THREAT_DIMENSIONS (profile 0, default)
+//!
+//! ```text
+//! 2 (attacker_side) × 9 (attacker_class) × 2 (attacked_side) × 9 (attacked_class) × ATTACKS_PER_COLOR[ac]
+//!     = 36 × 6,020
+//!     = 216,720
+//! ```
+//!
+//! Profile 1 (same-class) は 192,640、profile 2 (same-class-major-pawn) は 173,568。
+//! 詳細は [`super::threat_exclusion`] を参照。
+//!
+//! # index 構造
+//!
+//! ```text
+//! oriented_color = attacker_color ^ perspective         // perspective swap
+//! attack_pattern = attack_pattern_id(attacker_class, oriented_color)
+//!
+//! threat_index =
+//!     pair_base[attacker_side][attacker_class][attacked_side][attacked_class]
+//!   + from_offset[attack_pattern][from_sq_n]
+//!   + attack_order[attack_pattern][from_sq_n][to_sq_n]
+//! ```
+//!
+//! ## 用語
+//!
+//! - `attacker_side`: 0 = perspective side (friend), 1 = opposite side (enemy)
+//!   - 「現在手番基準の stm/nstm」ではなく、accumulator の perspective から見た
+//!     friend/enemy。差分更新は perspective ごとに行うため、手番反転で side
+//!     ラベルが全反転しない
+//! - `attacked_side`: 同上
+//! - `from_sq_n` / `to_sq_n`: 正規化後 (perspective + Half-Mirror) の Square
+//! - `attack_pattern`: 方向性駒では色別、非方向性駒では色不問
+//!
+//! ## attack_pattern (14 エントリ)
+//!
+//! - **非方向性駒** (Bishop, Rook, Horse, Dragon): 色不問で同一 LUT (4 エントリ)
+//! - **方向性駒** (Pawn, Lance, Knight, Silver, GoldLike): 色別 LUT
+//!   (5 種 × 2 色 = 10 エントリ)
+//!
+//! 方向性駒は攻撃方向が駒色に依存する。perspective 基準正規化後の駒色
+//! (`oriented_color`) を attack LUT のキーに含める Stockfish FullThreats 準拠の
+//! 設計を採用している。THREAT_DIMENSIONS は影響を受けず、index 空間は同一。
+//!
+//! ## 正規化 (Stockfish FullThreats 準拠)
+//!
+//! HalfKA_hm と同じ perspective 基準で正規化する:
+//!
+//! ```text
+//! 1. Perspective 基準正規化:
+//!    sq_n = if perspective == White { sq.inverse() } else { sq }
+//!
+//! 2. Half-Mirror (perspective の王の筋で判定):
+//!    hm = is_hm_mirror(king_sq, perspective)
+//!    sq_final = if hm { sq_n.mirror() } else { sq_n }
+//! ```
+//!
+//! - from_sq と to_sq の両方に同じ perspective 変換を適用 (相対位置が保存される)
+//! - 駒色は perspective で swap: `oriented_color = attacker_color ^ perspective`
+//! - orient 後のマスと oriented_color を使って色別 attack LUT を引く
+//! - HalfKA_hm と Threat で正規化基準を統一
+//!
+//! ## pair_base テーブル
+//!
+//! 展開順序: `attacker_side → attacker_class → attacked_side → attacked_class`
+//!
+//! - 各 pair の要素数 = `ATTACKS_PER_COLOR[attacker_class]`
+//! - flat index: `as * 162 + ac * 18 + ds * 9 + dc` (162 = 9*18, 18 = 2*9)
+//! - `pair_base[i]` = 前の pair までの累積和
+//! - profile による除外 pair は sentinel `EXCLUDED_PAIR_BASE` を持ち、
+//!   累積和計算時にスキップされる ([`super::threat_exclusion`] 参照)
+//!
+//! ## from_offset / attack_order テーブル
+//!
+//! - `from_offset[attack_pattern][sq]` = sq=0 から sq-1 までの各マスの攻撃数の累積和
+//! - `attack_order[attack_pattern][from_sq][to_sq]` = 空盤面上で from_sq の駒が
+//!   攻撃できる全マスを **Square raw 値の昇順** で 0-indexed 番号付けした時の to_sq の番号
+//!
+//! **重要 — 静的テーブルと実盤面の使い分け**:
+//!
+//! - **index テーブル生成 (`from_offset`, `attack_order`) は空盤面上の利き** を使う。
+//!   実盤面の occupied は無視し、静的テーブルとして事前計算可能にする
+//! - **active な threat pair の列挙** には実盤面の occupied を使う。
+//!   `attackers_to_occ(sq, occupied)` で実際に発生している threat を取り出す
+//!
+//! スライダー駒 (Lance, Bishop, Rook, Horse, Dragon) では index と active 列挙で
+//! 異なる利きを参照する点に注意。
 
 use crate::bitboard::{
     Bitboard, bishop_effect, dragon_effect, gold_effect, horse_effect, knight_effect, lance_effect,
@@ -54,7 +176,7 @@ pub const MAX_CHANGED_THREAT_FEATURES: usize = 192;
 
 /// Threat 差分更新を諦めて full rebuild すべきかを判定する
 ///
-/// 仕様 (`docs/threat_spec.md`):
+/// 判定式:
 /// ```text
 /// needs_threat_refresh(perspective) =
 ///     is_hm_mirror(prev_king_sq[perspective], perspective)
@@ -125,7 +247,8 @@ pub(crate) fn extract_prev_king_sq(dirty_piece: &DirtyPiece, perspective: Color)
 
 /// Threat 駒種分類（King 除外、9 family）
 ///
-/// 順序は仕様固定（`docs/threat_spec.md`）。変更禁止。
+/// 順序はクロスリポジトリ契約で固定 (bullet-shogi と一致必須、module doc 参照)。
+/// 変更すると学習済みモデルの weight 配置と互換性が破壊される。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ThreatClass {

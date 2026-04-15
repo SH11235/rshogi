@@ -91,7 +91,7 @@ nnue-psqt = []
 nnue-threat = []
 # Threat exclusion profiles (mutually exclusive)
 # 除外 pair で Threat 次元を削減し、NPS を改善する。
-# 仕様: docs/threat_spec.md Exclusion profiles
+# 詳細は crates/rshogi-core/src/nnue/threat_exclusion.rs の module doc 参照。
 threat-profile-same-class = []               # profile 1: 同種ペア全除外
 threat-profile-same-class-major-pawn = []   # profile 2: 同種 + 大駒→歩除外
 # NNUE progress8kpabs バケットの差分更新最適化
