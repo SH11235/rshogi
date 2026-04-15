@@ -17,6 +17,8 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
+use tools::sprt::{GameSide, Penta, SprtParameters, judge};
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -31,6 +33,35 @@ struct Cli {
     /// JSON出力モード
     #[arg(long)]
     json: bool,
+
+    /// SPRT post-hoc 判定表示を有効化。
+    /// `--sprt-test-label`, `--sprt-base-label` が必須。
+    #[arg(long, default_value_t = false)]
+    sprt: bool,
+
+    /// H1 側（challenger / test）のラベル
+    #[arg(long)]
+    sprt_test_label: Option<String>,
+
+    /// H0 側（base）のラベル
+    #[arg(long)]
+    sprt_base_label: Option<String>,
+
+    /// H0 仮説の正規化 Elo（default: 0.0）
+    #[arg(long, default_value_t = 0.0)]
+    sprt_nelo0: f64,
+
+    /// H1 仮説の正規化 Elo（default: 5.0）
+    #[arg(long, default_value_t = 5.0)]
+    sprt_nelo1: f64,
+
+    /// 第一種過誤率 α（default: 0.05）
+    #[arg(long, default_value_t = 0.05)]
+    sprt_alpha: f64,
+
+    /// 第二種過誤率 β（default: 0.05）
+    #[arg(long, default_value_t = 0.05)]
+    sprt_beta: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +99,13 @@ struct ResultLog {
     winner: Option<String>,
     #[serde(default)]
     plies: u32,
+    /// SPRT post-hoc 解析用の追加メタ（tournament.rs が出力、旧形式では None）
+    #[serde(default)]
+    pair_index: Option<u32>,
+    #[serde(default)]
+    pair_slot: Option<u32>,
+    #[serde(default)]
+    error: Option<bool>,
 }
 
 /// 通常JSONLのmove行
@@ -234,6 +272,8 @@ struct JsonOutput {
     engines: Vec<JsonEngine>,
     head_to_head: Vec<JsonHeadToHead>,
     extra: JsonExtra,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sprt: Option<SprtJsonOutput>,
 }
 
 #[derive(Serialize)]
@@ -599,6 +639,257 @@ fn parse_file(path: &str) -> Result<FileResult> {
 }
 
 // ---------------------------------------------------------------------------
+// SPRT post-hoc 集計
+// ---------------------------------------------------------------------------
+
+/// 単一 JSONL ファイルから base/test ペアに該当する Penta を集計する。
+///
+/// - ファイルの meta が base/test 両方のラベルを含まなければ `Penta::ZERO`
+/// - `pair_index` が無い旧ログは `seq / 2` / `seq % 2` でペアリング
+/// - `error=true` の結果は除外
+fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("ファイルを開けません: {path}"))?;
+    let reader = BufReader::new(file);
+
+    let mut meta_labels: Option<(String, String)> = None;
+    let mut pair_buffer: BTreeMap<u32, [Option<GameSide>; 2]> = BTreeMap::new();
+    // ペア完成後にバッファから remove するので、`pair_buffer` だけでは
+    // 「その pair_index は既に集計済み」かどうか判定できない。
+    // 3 件目以降の重複到着を正しく検出するため、処理済み pair_index を別に保持する。
+    let mut completed_pairs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut total = Penta::ZERO;
+    let mut seq: u32 = 0;
+    let mut warned_missing_pair_index = false;
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if meta_labels.is_none() && trimmed.contains("\"type\":\"meta\"") {
+            let meta: MetaLog = serde_json::from_str(trimmed)
+                .with_context(|| format!("metaパースエラー: {path}"))?;
+            let black = meta
+                .engine_cmd
+                .label_black
+                .clone()
+                .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_black));
+            let white = meta
+                .engine_cmd
+                .label_white
+                .clone()
+                .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_white));
+            let match_pair = (black == base && white == test) || (black == test && white == base);
+            if !match_pair {
+                return Ok(Penta::ZERO);
+            }
+            meta_labels = Some((black, white));
+        } else if trimmed.contains("\"type\":\"result\"") {
+            let Some((label_black_meta, label_white_meta)) = meta_labels.as_ref() else {
+                continue;
+            };
+            let result: ResultLog = serde_json::from_str(trimmed)
+                .with_context(|| format!("resultパースエラー: {path}"))?;
+            if result.error.unwrap_or(false) {
+                continue;
+            }
+            if result.pair_index.is_none() && !warned_missing_pair_index {
+                eprintln!(
+                    "警告: {path} は pair_index を含まない旧形式ログです。\n\
+                     SPRT ペアリングは result の出現順 (seq / 2, seq % 2) でフォールバックしますが、\n\
+                     並列対局ログでは完了順がずれている可能性があるため結果は正確でない場合があります。"
+                );
+                warned_missing_pair_index = true;
+            }
+            let pair_idx = result.pair_index.unwrap_or(seq / 2);
+            let slot_hint = result.pair_slot.unwrap_or(seq % 2);
+            seq += 1;
+            let slot = slot_hint.min(1) as usize;
+
+            // 既に集計済みの pair_index に 3 件目以降が到着した場合は除外する。
+            // test_side 決定より前に診断することで、ログ破損 (winner/outcome 不正) で
+            // test_side の match が `continue` に落ちても警告は確実に出る。
+            if completed_pairs.contains(&pair_idx) {
+                eprintln!(
+                    "警告: {path} — pair_index={pair_idx} は既に集計済みです。\
+                     余剰データを除外します。"
+                );
+                continue;
+            }
+
+            // test 視点の Win/Draw/Loss を決定する。
+            //
+            // 優先: tournament.rs が書く `winner` フィールド (エンジンラベルそのもの)。
+            // 旧ログ (winner なし) は pair_slot から実黒を推定:
+            //   slot == 0 → meta.label_black が実際の黒
+            //   slot == 1 → meta.label_white が実際の黒（先後入替）
+            let test_side = if let Some(winner) = result.winner.as_deref() {
+                match result.outcome.as_str() {
+                    "black_win" | "white_win" => {
+                        if winner == test {
+                            GameSide::Win
+                        } else if winner == base {
+                            GameSide::Loss
+                        } else {
+                            continue;
+                        }
+                    }
+                    "draw" => GameSide::Draw,
+                    _ => continue,
+                }
+            } else {
+                let actual_black = if slot == 0 {
+                    label_black_meta.as_str()
+                } else {
+                    label_white_meta.as_str()
+                };
+                let test_is_black = actual_black == test;
+                match result.outcome.as_str() {
+                    "black_win" => {
+                        if test_is_black {
+                            GameSide::Win
+                        } else {
+                            GameSide::Loss
+                        }
+                    }
+                    "white_win" => {
+                        if test_is_black {
+                            GameSide::Loss
+                        } else {
+                            GameSide::Win
+                        }
+                    }
+                    "draw" => GameSide::Draw,
+                    _ => continue,
+                }
+            };
+
+            let entry = pair_buffer.entry(pair_idx).or_insert([None, None]);
+            if entry[slot].is_none() {
+                entry[slot] = Some(test_side);
+            } else if entry[1 - slot].is_none() {
+                // 同 slot が 2 度到着するのは通常の tournament 出力では起き得ない。
+                // 空きスロットに入れつつ警告する。
+                eprintln!(
+                    "警告: {path} — pair_index={pair_idx} の slot={slot} が重複しています。\
+                     空きスロットに配置しますが、結果は正確でない可能性があります。"
+                );
+                entry[1 - slot] = Some(test_side);
+            }
+            // else: entry[slot] も entry[1-slot] も埋まっているケースは
+            // 上の `completed_pairs` チェックで弾かれるため到達しない。
+
+            if let [Some(a), Some(b)] = *entry {
+                total += Penta::from_pair(a, b);
+                pair_buffer.remove(&pair_idx);
+                completed_pairs.insert(pair_idx);
+            }
+        }
+    }
+    if !pair_buffer.is_empty() {
+        eprintln!(
+            "情報: {path} — {} ペアが未完了（片スロット欠け）のため SPRT 集計から除外されました",
+            pair_buffer.len()
+        );
+    }
+    Ok(total)
+}
+
+fn build_sprt_json(
+    penta: Penta,
+    base_label: &str,
+    test_label: &str,
+    params: SprtParameters,
+) -> SprtJsonOutput {
+    let llr = params.llr(penta);
+    let (lo, hi) = params.llr_bounds();
+    let decision = judge(&params, penta);
+    SprtJsonOutput {
+        base: base_label.to_string(),
+        test: test_label.to_string(),
+        nelo0: params.nelo_bounds().0,
+        nelo1: params.nelo_bounds().1,
+        alpha: params.alpha,
+        beta: params.beta,
+        pairs: penta.pair_count(),
+        llr,
+        lower: lo,
+        upper: hi,
+        decision: decision.as_str().to_string(),
+        nelo: penta.normalized_elo().map(|(e, ci)| SprtNelo { value: e, ci95: ci }),
+        logistic_elo: penta.logistic_elo().map(|(e, ci)| SprtNelo { value: e, ci95: ci }),
+        penta: SprtPentaJson {
+            ll: penta.ll,
+            dl: penta.dl,
+            dd: penta.dd,
+            wl: penta.wl,
+            wd: penta.wd,
+            ww: penta.ww,
+        },
+    }
+}
+
+fn print_sprt_text_report(penta: Penta, output: &SprtJsonOutput) {
+    println!();
+    println!("=== SPRT (post-hoc): {} vs {} ===", output.test, output.base);
+    println!(
+        "hypotheses: H0 = nelo0={:+.1}  H1 = nelo1={:+.1}  (alpha={}, beta={})",
+        output.nelo0, output.nelo1, output.alpha, output.beta
+    );
+    println!("bounds:     LLR ∈ [{:+.3}, {:+.3}]", output.lower, output.upper);
+    println!("pairs:      {}", output.pairs);
+    println!("LLR:        {:+.3}", output.llr);
+    println!("decision:   {}", output.decision);
+    match &output.nelo {
+        Some(n) => println!("nelo:       {:+.2} ± {:.2}", n.value, n.ci95),
+        None => println!("nelo:       n/a (variance 0)"),
+    }
+    match &output.logistic_elo {
+        Some(n) => println!("elo:        {:+.2} ± {:.2}", n.value, n.ci95),
+        None => println!("elo:        n/a"),
+    }
+    println!("penta:      {}", penta);
+    println!("=================================");
+}
+
+#[derive(Serialize, Clone)]
+struct SprtJsonOutput {
+    base: String,
+    test: String,
+    nelo0: f64,
+    nelo1: f64,
+    alpha: f64,
+    beta: f64,
+    pairs: u64,
+    llr: f64,
+    lower: f64,
+    upper: f64,
+    decision: String,
+    nelo: Option<SprtNelo>,
+    logistic_elo: Option<SprtNelo>,
+    penta: SprtPentaJson,
+}
+
+#[derive(Serialize, Clone)]
+struct SprtNelo {
+    value: f64,
+    ci95: f64,
+}
+
+#[derive(Serialize, Clone)]
+struct SprtPentaJson {
+    ll: u64,
+    dl: u64,
+    dd: u64,
+    wl: u64,
+    wd: u64,
+    ww: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Elo計算
 // ---------------------------------------------------------------------------
 
@@ -784,6 +1075,38 @@ fn main() -> Result<()> {
         }
     }
 
+    // SPRT post-hoc 集計（JSON モードでは最終 JSON にフィールドとして埋め込むため事前に計算する）
+    let sprt_payload: Option<(Penta, SprtJsonOutput)> = if cli.sprt {
+        let base_label = cli
+            .sprt_base_label
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--sprt 有効時は --sprt-base-label が必須です"))?;
+        let test_label = cli
+            .sprt_test_label
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--sprt 有効時は --sprt-test-label が必須です"))?;
+        if base_label == test_label {
+            bail!("--sprt-base-label と --sprt-test-label は異なる必要があります");
+        }
+        let mut total = Penta::ZERO;
+        for path in &files {
+            if path.contains(".summary.") {
+                continue;
+            }
+            match collect_sprt_penta(path, base_label, test_label) {
+                Ok(p) => total += p,
+                Err(e) => eprintln!("警告: SPRT 集計失敗 {path}: {e}"),
+            }
+        }
+        let params =
+            SprtParameters::new(cli.sprt_nelo0, cli.sprt_nelo1, cli.sprt_alpha, cli.sprt_beta)
+                .map_err(|e| anyhow::anyhow!(e))?;
+        let json = build_sprt_json(total, base_label, test_label, params);
+        Some((total, json))
+    } else {
+        None
+    };
+
     if cli.json {
         print_json(
             valid_files,
@@ -794,9 +1117,13 @@ fn main() -> Result<()> {
             &head_to_head,
             &labels,
             &extra,
+            sprt_payload.as_ref().map(|(_, j)| j.clone()),
         )?;
     } else {
         print_text(valid_files, total_done, total_all, &engines, &head_to_head, &labels, &extra);
+        if let Some((penta, json)) = sprt_payload.as_ref() {
+            print_sprt_text_report(*penta, json);
+        }
     }
 
     Ok(())
@@ -1042,6 +1369,7 @@ fn print_json(
     head_to_head: &BTreeMap<(String, String), HeadToHeadStats>,
     labels: &BTreeMap<String, String>,
     extra: &AggregatedExtraStats,
+    sprt: Option<SprtJsonOutput>,
 ) -> Result<()> {
     let pct = if total_all > 0 {
         total_done as f64 / total_all as f64 * 100.0
@@ -1190,6 +1518,7 @@ fn print_json(
             draws: extra.draws,
             engine_timing: json_engine_timing,
         },
+        sprt,
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
