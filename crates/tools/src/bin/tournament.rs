@@ -52,6 +52,7 @@ use tools::selfplay::types::{EvalLog, side_label};
 use tools::selfplay::{
     EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
 };
+use tools::sprt::{Decision, GameSide, Penta, SprtParameters, judge};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -139,6 +140,46 @@ struct Cli {
     /// Nodes limit per move. If specified, sends `go nodes N`.
     #[arg(long)]
     nodes: Option<u64>,
+
+    /// Base engine label for "base-vs-N" mode.
+    /// Only pairs that include this engine are scheduled; non-base pairings are skipped.
+    /// The label must match one of the `--engine-label` (or path-derived) values.
+    #[arg(long)]
+    base_label: Option<String>,
+
+    /// SPRT 逐次確率比検定を有効化（--sprt-test-label, --sprt-base-label 必須）。
+    /// 境界到達で新規チケット供給を停止し、進行中ゲームは完了待ち。
+    #[arg(long, default_value_t = false)]
+    sprt: bool,
+
+    /// H1 側（challenger / test）のエンジンラベル。Penta はこの視点で集計される。
+    #[arg(long)]
+    sprt_test_label: Option<String>,
+
+    /// H0 側（base）のエンジンラベル。`--base-label` と別指定したい場合に使う。
+    /// 未指定時は `--base-label` を流用する。
+    #[arg(long)]
+    sprt_base_label: Option<String>,
+
+    /// H0 仮説の正規化 Elo（default: 0.0）
+    #[arg(long, default_value_t = 0.0)]
+    sprt_nelo0: f64,
+
+    /// H1 仮説の正規化 Elo（default: 5.0）
+    #[arg(long, default_value_t = 5.0)]
+    sprt_nelo1: f64,
+
+    /// 第一種過誤率 α（default: 0.05）
+    #[arg(long, default_value_t = 0.05)]
+    sprt_alpha: f64,
+
+    /// 第二種過誤率 β（default: 0.05）
+    #[arg(long, default_value_t = 0.05)]
+    sprt_beta: f64,
+
+    /// SPRT レポートをペア何単位ごとに出すか（default: 10）
+    #[arg(long, default_value_t = 10)]
+    sprt_report_interval: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +196,10 @@ struct MatchTicket {
     white_idx: usize,
     /// 開始局面インデックス
     startpos_idx: usize,
+    /// 同じ startpos の先後入替ペアの通し番号（0, 1, 2, ... = ペアの index）
+    pair_index: u32,
+    /// ペア内のスロット: 0 = 1 局目, 1 = 2 局目（先後入替）
+    pair_slot: u32,
 }
 
 struct MatchResult {
@@ -163,6 +208,9 @@ struct MatchResult {
     reason: String,
     plies: u32,
     move_logs: Vec<MoveLogEntry>,
+    /// エンジン起動失敗・通信エラー等で対局が成立しなかった場合 true。
+    /// SPRT 集計からは除外される。
+    error: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -194,6 +242,17 @@ struct ResultLogEntry<'a> {
     plies: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     winner: Option<String>,
+    /// SPRT post-hoc 解析用の追加メタ（非破壊）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ticket_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pair_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pair_slot: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    startpos_idx: Option<u32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    error: bool,
 }
 
 #[derive(Serialize)]
@@ -254,6 +313,211 @@ struct EngineMetaEntry {
     label: String,
     path: String,
     usi_options: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// SPRT 状態
+// ---------------------------------------------------------------------------
+
+/// SPRT 逐次判定のランタイム状態。
+///
+/// 視点は常に challenger (test) 側で固定される。pair 単位で集計するため、
+/// 並列ワーカーから結果が順不同に到着しても `pair_index` 経由でバッファして
+/// 2 ゲームが揃った時点で Penta に反映する。
+struct SprtState {
+    params: SprtParameters,
+    base_idx: usize,
+    test_idx: usize,
+    /// pair_index → そのペアの 2 スロット分の結果（test 視点）
+    buffer: HashMap<u32, [Option<GameSide>; 2]>,
+    /// 集計済みの Pentanomial
+    penta: Penta,
+    report_interval: u32,
+    /// 直前に `maybe_report` が出力した pair_count。
+    /// 非 SPRT ペアの結果が流れてきたり、同一 pair_index が再観測されたりしても
+    /// ペア数が変わらない限り再出力しない。
+    last_reported_pairs: u64,
+    /// 判定確定時点のスナップショット（後追いで変化しないように凍結）
+    stopped_at: Option<SprtSnapshot>,
+    test_label: String,
+    base_label: String,
+}
+
+#[derive(Clone)]
+struct SprtSnapshot {
+    decision: Decision,
+    pairs: u64,
+    llr: f64,
+    nelo: Option<(f64, f64)>,
+    penta: Penta,
+}
+
+impl SprtState {
+    fn new(
+        params: SprtParameters,
+        base_idx: usize,
+        test_idx: usize,
+        report_interval: u32,
+        base_label: String,
+        test_label: String,
+    ) -> Self {
+        SprtState {
+            params,
+            base_idx,
+            test_idx,
+            buffer: HashMap::new(),
+            penta: Penta::ZERO,
+            report_interval: report_interval.max(1),
+            last_reported_pairs: 0,
+            stopped_at: None,
+            test_label,
+            base_label,
+        }
+    }
+
+    /// ゲーム結果を 1 つ取り込む。
+    ///
+    /// - base と test のペアでない、または error なら無視
+    /// - 両スロットが揃ったら Penta に反映し、判定を更新
+    ///
+    /// 戻り値: 今回の取り込みで初めて terminal に到達したら `Some(Decision)`。
+    fn observe(&mut self, result: &MatchResult) -> Option<Decision> {
+        if result.error {
+            return None;
+        }
+        let bi = result.ticket.black_idx;
+        let wi = result.ticket.white_idx;
+        let (a, b) = if bi < wi { (bi, wi) } else { (wi, bi) };
+        let base = self.base_idx.min(self.test_idx);
+        let test = self.base_idx.max(self.test_idx);
+        if (a, b) != (base, test) {
+            return None;
+        }
+
+        let test_side = match (result.outcome, self.test_idx == bi, self.test_idx == wi) {
+            (GameOutcome::BlackWin, true, _) | (GameOutcome::WhiteWin, _, true) => GameSide::Win,
+            (GameOutcome::BlackWin, _, true) | (GameOutcome::WhiteWin, true, _) => GameSide::Loss,
+            (GameOutcome::Draw, _, _) => GameSide::Draw,
+            (GameOutcome::InProgress, _, _) => return None,
+            _ => return None,
+        };
+
+        let slot = result.ticket.pair_slot.min(1) as usize;
+        let entry = self.buffer.entry(result.ticket.pair_index).or_insert([None, None]);
+        entry[slot] = Some(test_side);
+
+        if let ([Some(a), Some(b)], _) = (*entry, ()) {
+            let delta = Penta::from_pair(a, b);
+            self.penta += delta;
+            self.buffer.remove(&result.ticket.pair_index);
+
+            if self.stopped_at.is_none() {
+                let decision = judge(&self.params, self.penta);
+                if decision.is_terminal() {
+                    self.stopped_at = Some(self.snapshot(decision));
+                    return Some(decision);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn pair_count(&self) -> u64 {
+        self.penta.pair_count()
+    }
+
+    fn snapshot(&self, decision: Decision) -> SprtSnapshot {
+        SprtSnapshot {
+            decision,
+            pairs: self.penta.pair_count(),
+            llr: self.params.llr(self.penta),
+            nelo: self.penta.normalized_elo(),
+            penta: self.penta,
+        }
+    }
+
+    /// レポート間隔ごとに現在の LLR / nelo / penta を表示する。
+    ///
+    /// 非 SPRT ペアの結果でも `handle_sprt_observation` から呼ばれるため、
+    /// 「ペア数が変わっていない」間は何度呼ばれても再出力しないことで
+    /// 進捗行の連打を避ける。
+    fn maybe_report(&mut self, force: bool) {
+        let pairs = self.pair_count();
+        if pairs == 0 {
+            return;
+        }
+        if pairs == self.last_reported_pairs {
+            return;
+        }
+        if !force && !pairs.is_multiple_of(self.report_interval as u64) {
+            return;
+        }
+        self.last_reported_pairs = pairs;
+        let llr = self.params.llr(self.penta);
+        let (lo, hi) = self.params.llr_bounds();
+        let nelo_txt = match self.penta.normalized_elo() {
+            Some((e, ci)) => format!("{:+.2} ± {:.2}", e, ci),
+            None => "n/a".to_string(),
+        };
+        println!(
+            "[SPRT pair={} | {} vs {}] LLR={:+.3} (bounds {:+.2}..{:+.2})  nelo={}  penta={}  state={}",
+            pairs,
+            self.test_label,
+            self.base_label,
+            llr,
+            lo,
+            hi,
+            nelo_txt,
+            self.penta,
+            match (self.stopped_at.as_ref(), judge(&self.params, self.penta)) {
+                (Some(snap), _) => snap.decision.as_str(),
+                (None, d) => d.as_str(),
+            }
+        );
+    }
+}
+
+fn print_sprt_final(state: &SprtState) {
+    let (lo, hi) = state.params.llr_bounds();
+    let current_llr = state.params.llr(state.penta);
+    let current_decision = judge(&state.params, state.penta);
+    println!();
+    println!("=== SPRT Summary ({} vs {}) ===", state.test_label, state.base_label);
+    println!(
+        "bounds: LLR ∈ [{:+.3}, {:+.3}]  (alpha={}, beta={})",
+        lo, hi, state.params.alpha, state.params.beta,
+    );
+    println!(
+        "nelo hypotheses: H0={:+.1}  H1={:+.1}",
+        state.params.nelo_bounds().0,
+        state.params.nelo_bounds().1,
+    );
+    if let Some(snap) = state.stopped_at.as_ref() {
+        println!(
+            "stopped_at:  pairs={}, LLR={:+.3}, decision={}",
+            snap.pairs,
+            snap.llr,
+            snap.decision.as_str(),
+        );
+        if let Some((e, ci)) = snap.nelo {
+            println!("             nelo={:+.2} ± {:.2}  penta={}", e, ci, snap.penta);
+        } else {
+            println!("             nelo=n/a  penta={}", snap.penta);
+        }
+    }
+    println!(
+        "final:       pairs={}, LLR={:+.3}, decision={}",
+        state.penta.pair_count(),
+        current_llr,
+        current_decision.as_str(),
+    );
+    if let Some((e, ci)) = state.penta.normalized_elo() {
+        println!("             nelo={:+.2} ± {:.2}  penta={}", e, ci, state.penta);
+    } else {
+        println!("             nelo=n/a  penta={}", state.penta);
+    }
+    println!("================================");
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +677,7 @@ fn worker_main(
                     reason: result.reason,
                     plies: result.plies,
                     move_logs,
+                    error: false,
                 });
             }
             Err(e) => {
@@ -423,6 +688,7 @@ fn worker_main(
                     reason: format!("error: {e}"),
                     plies: 0,
                     move_logs,
+                    error: true,
                 });
             }
         }
@@ -649,6 +915,61 @@ fn main() -> Result<()> {
         serde_json::to_writer_pretty(BufWriter::new(meta_file), &tournament_meta)?;
     }
 
+    // SPRT 有効化時のラベル解決（ticket 生成前に検証しておきたい）
+    let mut sprt_state: Option<SprtState> = None;
+    if cli.sprt {
+        let base_label =
+            cli.sprt_base_label.as_deref().or(cli.base_label.as_deref()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--sprt 有効時は --sprt-base-label か --base-label のいずれかが必須です"
+                )
+            })?;
+        let test_label = cli
+            .sprt_test_label
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--sprt 有効時は --sprt-test-label が必須です"))?;
+        let base_i = engine_labels.iter().position(|l| l == base_label).ok_or_else(|| {
+            anyhow::anyhow!("SPRT base label '{}' が engines に存在しません", base_label)
+        })?;
+        let test_i = engine_labels.iter().position(|l| l == test_label).ok_or_else(|| {
+            anyhow::anyhow!("SPRT test label '{}' が engines に存在しません", test_label)
+        })?;
+        if base_i == test_i {
+            bail!("--sprt-base-label と --sprt-test-label は異なるエンジンである必要があります");
+        }
+        let params =
+            SprtParameters::new(cli.sprt_nelo0, cli.sprt_nelo1, cli.sprt_alpha, cli.sprt_beta)
+                .map_err(|e| anyhow::anyhow!(e))?;
+        sprt_state = Some(SprtState::new(
+            params,
+            base_i,
+            test_i,
+            cli.sprt_report_interval,
+            base_label.to_string(),
+            test_label.to_string(),
+        ));
+    }
+
+    // --base-label が指定されていればその index を resolve、それ以外は None（総当たり）
+    let base_idx: Option<usize> = if let Some(ref label) = cli.base_label {
+        match engine_labels.iter().position(|l| l == label) {
+            Some(idx) => Some(idx),
+            None => bail!("--base-label '{label}' が --engine / --engine-label に存在しません"),
+        }
+    } else {
+        None
+    };
+
+    // ペア一覧を生成。base-vs-N モードなら base と他エンジンの組のみ。
+    // いずれのモードでもキーは (min, max) で正規化。
+    let pair_indices: Vec<(usize, usize)> = match base_idx {
+        Some(bi) => (0..n)
+            .filter(|&j| j != bi)
+            .map(|j| if bi < j { (bi, j) } else { (j, bi) })
+            .collect(),
+        None => (0..n).flat_map(|i| ((i + 1)..n).map(move |j| (i, j))).collect(),
+    };
+
     // 全ペア × games × 2方向のチケット生成
     // cli.games は「各方向の対局数」なので、1ペアあたり cli.games * 2 局
     let total_per_pair = cli.games * 2;
@@ -656,37 +977,51 @@ fn main() -> Result<()> {
     let mut rng = rand::rng();
     {
         let mut ticket_id = 0u64;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                for game_idx in 0..total_per_pair {
-                    // game_idx が偶数のとき (i, j), 奇数のとき (j, i) で先後交替
-                    let (black_idx, white_idx) = if game_idx % 2 == 0 { (i, j) } else { (j, i) };
-                    let startpos_idx = if start_defs.len() == 1 {
-                        0
-                    } else if game_idx % 2 == 0 {
-                        // 先後ペアの1局目: ランダムに選択
-                        *((0..start_defs.len()).collect::<Vec<_>>()).choose(&mut rng).unwrap()
-                    } else {
-                        // 先後ペアの2局目: 同じ開始局面で先後入替
-                        tickets.last().unwrap().startpos_idx
-                    };
-                    tickets.push(MatchTicket {
-                        id: ticket_id,
-                        black_idx,
-                        white_idx,
-                        startpos_idx,
-                    });
-                    ticket_id += 1;
-                }
+        for &(i, j) in &pair_indices {
+            // ペア内の通し index (0, 1, 2, ...)。
+            // game_idx % 2 == 0 が pair の 1 局目、== 1 が 2 局目（先後入替）。
+            for game_idx in 0..total_per_pair {
+                // base-vs-N モードでは base (bi) を先にする向きから始めたいので、
+                // i < j の前提のもとで base が i 側にあるとは限らない点に注意する必要はない。
+                // 任意の (i, j) に対し、偶数 game_idx で (i, j)、奇数で (j, i) という扱いで
+                // pair_slot が 0 の手番と 1 の手番が必ず 1 ペアを成す。
+                let (black_idx, white_idx) = if game_idx % 2 == 0 { (i, j) } else { (j, i) };
+                let startpos_idx = if start_defs.len() == 1 {
+                    0
+                } else if game_idx % 2 == 0 {
+                    *((0..start_defs.len()).collect::<Vec<_>>()).choose(&mut rng).unwrap()
+                } else {
+                    tickets.last().unwrap().startpos_idx
+                };
+                // `pair_index` / `pair_slot` は `ticket_id` 基準で一意化する。
+                // ペア (偶数 ticket_id, 奇数 ticket_id) が常に 1 組になるよう
+                // `pair_index = ticket_id / 2`, `pair_slot = ticket_id % 2`。
+                let pair_slot = (ticket_id % 2) as u32;
+                let pair_index = (ticket_id / 2) as u32;
+                tickets.push(MatchTicket {
+                    id: ticket_id,
+                    black_idx,
+                    white_idx,
+                    startpos_idx,
+                    pair_slot,
+                    pair_index,
+                });
+                ticket_id += 1;
             }
         }
     }
 
     let total_games = tickets.len() as u32;
+    let mode_label = if base_idx.is_some() {
+        "base-vs-N"
+    } else {
+        "round-robin"
+    };
     println!(
-        "tournament: {} engines, {} pairs, {} games/direction, {} games/pair, {} total games, concurrency={}",
+        "tournament: {} engines, {} pairs ({}), {} games/direction, {} games/pair, {} total games, concurrency={}",
         n,
-        n * (n - 1) / 2,
+        pair_indices.len(),
+        mode_label,
         cli.games,
         total_per_pair,
         total_games,
@@ -698,8 +1033,8 @@ fn main() -> Result<()> {
     // ペアごとのゲームカウンター
     let mut pair_game_count: HashMap<(usize, usize), u32> = HashMap::new();
 
-    for i in 0..n {
-        for j in (i + 1)..n {
+    for &(i, j) in &pair_indices {
+        {
             let filename = format!("{}-vs-{}.jsonl", engine_labels[i], engine_labels[j]);
             let path = cli.out_dir.join(&filename);
             let mut pw = PairWriter::new(&path)?;
@@ -797,19 +1132,26 @@ fn main() -> Result<()> {
 
     // 勝敗カウンター: pair_key → (wins_i, wins_j, draws) (i < j)
     let mut pair_stats: HashMap<(usize, usize), (u32, u32, u32)> = HashMap::new();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            pair_stats.insert((i, j), (0, 0, 0));
-        }
+    for &(i, j) in &pair_indices {
+        pair_stats.insert((i, j), (0, 0, 0));
     }
 
     let start_time = Instant::now();
     let mut completed = 0u32;
     let mut ticket_iter = tickets.into_iter();
     let mut next_ticket: Option<MatchTicket> = ticket_iter.next();
+    // SPRT が境界到達した時点で feeding を停止する。
+    // 停止後は total_to_complete = sent に落として、
+    // 在庫（ワーカーが今受け取っているチケット）だけを drain する。
+    let mut sent: u32 = 0;
+    let mut total_to_complete: u32 = total_games;
+    let mut sprt_stopped = false;
 
     // メインイベントループ
-    while completed < total_games && !shutdown.load(Ordering::Relaxed) {
+    while completed < total_to_complete && !shutdown.load(Ordering::Relaxed) {
+        if sprt_stopped {
+            next_ticket = None;
+        }
         match &next_ticket {
             None => {
                 // チケットは全送信済み、結果を待つ
@@ -823,11 +1165,20 @@ fn main() -> Result<()> {
                             &mut pair_game_count,
                         )?;
                         completed += 1;
-                        if completed.is_multiple_of(cli.report_interval) || completed == total_games
+                        handle_sprt_observation(
+                            &mut sprt_state,
+                            &result,
+                            &mut sprt_stopped,
+                            &mut total_to_complete,
+                            sent,
+                            completed,
+                        );
+                        if completed.is_multiple_of(cli.report_interval)
+                            || completed == total_to_complete
                         {
                             print_progress(
                                 completed,
-                                total_games,
+                                total_to_complete,
                                 &pair_stats,
                                 &engine_labels,
                                 start_time,
@@ -841,6 +1192,7 @@ fn main() -> Result<()> {
                 chan::select! {
                     send(ticket_tx, Some(t.clone())) -> res => {
                         if res.is_ok() {
+                            sent += 1;
                             next_ticket = ticket_iter.next();
                         }
                     }
@@ -854,10 +1206,20 @@ fn main() -> Result<()> {
                                 &mut pair_game_count,
                             )?;
                             completed += 1;
-                            if completed.is_multiple_of(cli.report_interval) || completed == total_games {
+                            handle_sprt_observation(
+                                &mut sprt_state,
+                                &result,
+                                &mut sprt_stopped,
+                                &mut total_to_complete,
+                                sent,
+                                completed,
+                            );
+                            if completed.is_multiple_of(cli.report_interval)
+                                || completed == total_to_complete
+                            {
                                 print_progress(
                                     completed,
-                                    total_games,
+                                    total_to_complete,
                                     &pair_stats,
                                     &engine_labels,
                                     start_time,
@@ -889,7 +1251,34 @@ fn main() -> Result<()> {
     print_final_table(&pair_stats, &engine_labels);
     println!("Output: {}", cli.out_dir.display());
     println!("===========================");
+
+    if let Some(state) = sprt_state.as_ref() {
+        print_sprt_final(state);
+    }
+
     Ok(())
+}
+
+fn handle_sprt_observation(
+    sprt_state: &mut Option<SprtState>,
+    result: &MatchResult,
+    sprt_stopped: &mut bool,
+    total_to_complete: &mut u32,
+    sent: u32,
+    completed: u32,
+) {
+    let Some(state) = sprt_state.as_mut() else {
+        return;
+    };
+    let was_terminal = state.stopped_at.is_some();
+    let _ = state.observe(result);
+    state.maybe_report(false);
+    if !was_terminal && state.stopped_at.is_some() && !*sprt_stopped {
+        *sprt_stopped = true;
+        *total_to_complete = sent;
+        let remaining = total_to_complete.saturating_sub(completed);
+        println!("[SPRT] terminal decision reached; draining {} in-flight game(s)...", remaining);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -944,6 +1333,11 @@ fn process_result(
             reason: &result.reason,
             plies: result.plies,
             winner,
+            ticket_id: Some(result.ticket.id),
+            pair_index: Some(result.ticket.pair_index),
+            pair_slot: Some(result.ticket.pair_slot),
+            startpos_idx: Some(result.ticket.startpos_idx as u32),
+            error: result.error,
         };
         pw.write_json(&result_entry)?;
         pw.flush()?;

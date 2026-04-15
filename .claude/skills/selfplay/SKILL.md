@@ -1,11 +1,16 @@
 ---
-description: NNUE モデルの棋力評価。指定エンジン間の総当たり自己対局を実行し、結果を集計する。「評価して」「対局させて」等の棋力比較リクエストに使用する。
+description: NNUE モデルの棋力評価と SPRT 検定。tournament ツールでエンジン間の総当たり対局、base-vs-N 対局、あるいは SPRT (逐次確率比検定) による有意差の早期判定を実行し、analyze_selfplay で集計・post-hoc 解析する。「評価して」「対局させて」「SPRT で検定して」「有意差を見て」「Elo 差を測って」等の棋力比較リクエストに使用する。
 user-invocable: true
 ---
 
 # 自己対局評価スキル
 
-以下の指示に従い、指定されたエンジン間の総当たり自己対局を実行し、結果を集計する。
+以下の指示に従い、指定されたエンジン間の対局を実行し結果を集計する。
+モードは主に 3 つ:
+
+1. **総当たり (round-robin)** — 固定局数で全ペアを対局させて Elo 差・勝率を測る。デフォルト。
+2. **base-vs-N** — 基準エンジン 1 体と challenger N 体だけを対局させる (`--base-label`)。総当たりの無駄を省く。
+3. **SPRT (逐次確率比検定)** — A/B 2 エンジンで有意差を逐次判定し、境界到達で自動早期停止する (`--sprt`)。ユーザーが「SPRT」「逐次検定」「有意差」「早期停止」等を要求した場合はこちらを使う。
 
 ## 入力パラメータ
 
@@ -199,6 +204,73 @@ cargo run -p tools --release --bin analyze_selfplay -- runs/selfplay/{DIR}/*.jso
 2. **総合結果表**: 各カードの勝敗・勝率・Elo差
 3. **確認ポイントの評価**: ユーザーが指定した比較ポイントについての分析
 4. **総括**: 全体的な傾向と推奨事項
+
+### 5. SPRT モード（逐次確率比検定）
+
+2 エンジン間で「有意差があるか」を早期判定したい場合は、`tournament --sprt`
+を使う。境界に達した時点で新規チケット供給を停止し、進行中ゲームは完了待ちで
+drain する。ライブで判定が走るので、従来の固定 `--games` より**大幅に時間を節約できる**
+ケースが多い（一方で、差が微妙な場合は `--games` 上限まで走る）。
+
+典型例: `base` エンジンと `test` エンジンで、H0 = 差なし / H1 = +5 nelo、α=β=0.05。
+
+```
+cargo run -p tools --release --bin tournament -- \
+  --engine target/release/rshogi-usi-{BASE_HASH} --engine-label base \
+  --engine target/release/rshogi-usi-{TEST_HASH} --engine-label test \
+  --games 5000 --byoyomi 1000 --concurrency 8 \
+  --startpos-file data/startpos/start_sfens_ply32.txt \
+  --base-label base \
+  --sprt --sprt-base-label base --sprt-test-label test \
+  --sprt-nelo0 0 --sprt-nelo1 5 --sprt-alpha 0.05 --sprt-beta 0.05 \
+  --out-dir runs/selfplay/$(date +%Y%m%d_%H%M%S)-sprt-base-vs-test
+```
+
+ポイント:
+
+- **`--base-label`**: base-vs-N モード（基準エンジン 1 個固定）。`--engine` を複数指定しても
+  base と他のエンジンのペアだけが対局対象になる。3 エンジン以上で総当たり不要なとき便利。
+- **`--sprt-test-label` は必須**。SPRT は challenger 視点で集計されるため、どちらが
+  H1 側（検定したい側）かを明示する。
+- **`--games` は上限の保険**。SPRT が境界に達したら自動で止まるので十分大きく取ってよい。
+- **`--concurrency`**: 並列対局でも pentanomial ペアリングは `pair_index` で一意化される
+  ため、完了順が前後しても正しく集計される。
+- ログファイルには `pair_index` / `pair_slot` が自動で書き込まれるので、後から
+  `analyze_selfplay --sprt` で再判定できる。
+
+境界到達時の標準出力例:
+
+```
+[SPRT pair=240 | test vs base] LLR=+2.941 (bounds -2.94..+2.94)  nelo=+4.12 ± 1.85  penta=[3, 18, 140, 61, 18]  state=accept_h1
+[SPRT] terminal decision reached; draining 6 in-flight game(s)...
+...
+=== SPRT Summary (test vs base) ===
+bounds: LLR ∈ [-2.944, +2.944]  (alpha=0.05, beta=0.05)
+nelo hypotheses: H0=+0.0  H1=+5.0
+stopped_at:  pairs=240, LLR=+2.941, decision=accept_h1
+             nelo=+4.12 ± 1.85  penta=[3, 18, 140, 61, 18]
+final:       pairs=246, LLR=+3.002, decision=accept_h1
+             nelo=+4.15 ± 1.83  penta=[3, 18, 143, 64, 18]
+================================
+```
+
+### 6. SPRT post-hoc 判定（完了済みログに対して再計算）
+
+既に `tournament` で回し終わったログから SPRT 判定を再現・再検討したいときは
+`analyze_selfplay --sprt` を使う。`pair_index` が書かれているログには
+無損失で復元できる。
+
+```
+cargo run -p tools --release --bin analyze_selfplay -- \
+  runs/selfplay/{DIR}/*.jsonl \
+  --sprt --sprt-base-label base --sprt-test-label test \
+  --sprt-nelo0 0 --sprt-nelo1 5
+```
+
+通常の集計出力の末尾に SPRT レポートが追加される（`--json` 併用時は JSON 出力に
+`sprt` フィールドが追加される）。
+
+閾値を後から振り直して「どこで打ち切れたか」を検証するのにも使える。
 
 ## 入力例
 

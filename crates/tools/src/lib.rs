@@ -51,6 +51,7 @@ pub mod qsearch_pv;
 pub mod report;
 pub mod runner;
 pub mod selfplay;
+pub mod sprt;
 pub mod system;
 mod utils;
 
