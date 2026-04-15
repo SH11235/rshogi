@@ -756,13 +756,32 @@ fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
             if entry[slot].is_none() {
                 entry[slot] = Some(test_side);
             } else if entry[1 - slot].is_none() {
+                // 同 slot が 2 度到着するのは通常の tournament 出力では起き得ない
+                // （ログ破損、あるいは pair_index なし旧ログの seq fallback が
+                //  並列対局で崩れた場合）。空きスロットに入れつつ警告する。
+                eprintln!(
+                    "警告: {path} — pair_index={pair_idx} の slot={slot} が重複しています。\
+                     空きスロットに配置しますが、結果は正確でない可能性があります。"
+                );
                 entry[1 - slot] = Some(test_side);
+            } else {
+                // 両スロット埋まり済みで 3 件目が到着: 診断のため件数のみ記録。
+                eprintln!(
+                    "警告: {path} — pair_index={pair_idx} に 3 件目以降の結果が来ました。\
+                     余剰データを除外します。"
+                );
             }
             if let [Some(a), Some(b)] = *entry {
                 total += Penta::from_pair(a, b);
                 pair_buffer.remove(&pair_idx);
             }
         }
+    }
+    if !pair_buffer.is_empty() {
+        eprintln!(
+            "情報: {path} — {} ペアが未完了（片スロット欠け）のため SPRT 集計から除外されました",
+            pair_buffer.len()
+        );
     }
     Ok(total)
 }
@@ -1068,7 +1087,8 @@ fn main() -> Result<()> {
             }
         }
         let params =
-            SprtParameters::new(cli.sprt_nelo0, cli.sprt_nelo1, cli.sprt_alpha, cli.sprt_beta);
+            SprtParameters::new(cli.sprt_nelo0, cli.sprt_nelo1, cli.sprt_alpha, cli.sprt_beta)
+                .map_err(|e| anyhow::anyhow!(e))?;
         let json = build_sprt_json(total, base_label, test_label, params);
         Some((total, json))
     } else {

@@ -52,13 +52,13 @@ mod tests {
 
     #[test]
     fn empty_is_running() {
-        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05);
+        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         assert_eq!(judge(&params, Penta::ZERO), Decision::Running);
     }
 
     #[test]
     fn heavy_win_accepts_h1_eventually() {
-        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05);
+        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         let mut p = Penta::ZERO;
         // test が圧倒的に勝ち越す状況を大量に与える
         p.ww = 400;
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn heavy_loss_accepts_h0_eventually() {
-        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05);
+        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         let mut p = Penta::ZERO;
         p.ll = 400;
         p.dl = 100;
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn close_is_running() {
-        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05);
+        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         let mut p = Penta::ZERO;
         // 互角に近い小サンプル
         p.ww = 3;

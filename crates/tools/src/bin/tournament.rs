@@ -333,6 +333,10 @@ struct SprtState {
     /// 集計済みの Pentanomial
     penta: Penta,
     report_interval: u32,
+    /// 直前に `maybe_report` が出力した pair_count。
+    /// 非 SPRT ペアの結果が流れてきたり、同一 pair_index が再観測されたりしても
+    /// ペア数が変わらない限り再出力しない。
+    last_reported_pairs: u64,
     /// 判定確定時点のスナップショット（後追いで変化しないように凍結）
     stopped_at: Option<SprtSnapshot>,
     test_label: String,
@@ -364,6 +368,7 @@ impl SprtState {
             buffer: HashMap::new(),
             penta: Penta::ZERO,
             report_interval: report_interval.max(1),
+            last_reported_pairs: 0,
             stopped_at: None,
             test_label,
             base_label,
@@ -433,14 +438,22 @@ impl SprtState {
     }
 
     /// レポート間隔ごとに現在の LLR / nelo / penta を表示する。
+    ///
+    /// 非 SPRT ペアの結果でも `handle_sprt_observation` から呼ばれるため、
+    /// 「ペア数が変わっていない」間は何度呼ばれても再出力しないことで
+    /// 進捗行の連打を避ける。
     fn maybe_report(&mut self, force: bool) {
         let pairs = self.pair_count();
         if pairs == 0 {
             return;
         }
+        if pairs == self.last_reported_pairs {
+            return;
+        }
         if !force && !pairs.is_multiple_of(self.report_interval as u64) {
             return;
         }
+        self.last_reported_pairs = pairs;
         let llr = self.params.llr(self.penta);
         let (lo, hi) = self.params.llr_bounds();
         let nelo_txt = match self.penta.normalized_elo() {
@@ -925,7 +938,8 @@ fn main() -> Result<()> {
             bail!("--sprt-base-label と --sprt-test-label は異なるエンジンである必要があります");
         }
         let params =
-            SprtParameters::new(cli.sprt_nelo0, cli.sprt_nelo1, cli.sprt_alpha, cli.sprt_beta);
+            SprtParameters::new(cli.sprt_nelo0, cli.sprt_nelo1, cli.sprt_alpha, cli.sprt_beta)
+                .map_err(|e| anyhow::anyhow!(e))?;
         sprt_state = Some(SprtState::new(
             params,
             base_i,

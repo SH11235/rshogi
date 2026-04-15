@@ -32,11 +32,31 @@ pub struct SprtParameters {
 
 impl SprtParameters {
     /// SPRT パラメータを構築する。
-    pub fn new(nelo0: f64, nelo1: f64, alpha: f64, beta: f64) -> SprtParameters {
+    ///
+    /// # Errors
+    /// - `nelo0 >= nelo1` のとき: 仮説順序が逆転すると Wald 境界が裏返り、
+    ///   `accept_h0` / `accept_h1` の採択判定が意図と逆になるため。
+    /// - `alpha` / `beta` が `(0, 1)` の開区間外のとき: `ln(beta/(1-alpha))` や
+    ///   `ln((1-beta)/alpha)` が `NaN` / `inf` になり判定不能になるため。
+    pub fn new(nelo0: f64, nelo1: f64, alpha: f64, beta: f64) -> Result<SprtParameters, String> {
+        if nelo0.is_nan() || nelo1.is_nan() {
+            return Err(format!("SPRT: nelo0 / nelo1 に NaN は使えません: {nelo0}, {nelo1}"));
+        }
+        if nelo0 >= nelo1 {
+            return Err(format!(
+                "SPRT: nelo0 ({nelo0}) は nelo1 ({nelo1}) より小さくなければなりません"
+            ));
+        }
+        if !alpha.is_finite() || alpha <= 0.0 || alpha >= 1.0 {
+            return Err(format!("SPRT: alpha は (0, 1) の開区間内である必要があります: {alpha}"));
+        }
+        if !beta.is_finite() || beta <= 0.0 || beta >= 1.0 {
+            return Err(format!("SPRT: beta は (0, 1) の開区間内である必要があります: {beta}"));
+        }
         let c_et = 800.0 / f64::ln(10.0);
         let lower_bound = (beta / (1.0 - alpha)).ln();
         let upper_bound = ((1.0 - beta) / alpha).ln();
-        SprtParameters {
+        Ok(SprtParameters {
             nelo0,
             nelo1,
             alpha,
@@ -45,7 +65,7 @@ impl SprtParameters {
             upper_bound,
             t0: nelo0 / c_et,
             t1: nelo1 / c_et,
-        }
+        })
     }
 
     /// Wald 境界 `(lower, upper)`。
@@ -163,7 +183,13 @@ fn mle<const N: usize>(
     Some(p)
 }
 
-/// `max(x_i, 1e-3)`。shogitest 仕様に合わせて再正規化はしない。
+/// `max(x_i, 1e-3)` でゼロ確率にフロアを当てる。
+///
+/// shogitest 仕様に合わせて**再正規化はしない**（総和 > 1 になる）。
+/// これは `mle` の反復内で θ が事後的に確率比を補正するため、
+/// 経験分布のフロアだけ調整すれば最終 MLE は正しく収束するという設計。
+/// ゼロ確率エントリを放置すると `ln(0)` / `0 割り` を踏むため、最低限
+/// 1e-3 を下限とする。
 fn regularize<const N: usize>(x: [f64; N]) -> [f64; N] {
     x.map(|v| v.max(1e-3))
 }
@@ -218,6 +244,11 @@ where
 
         let x_f = (f_b * a - f_a * b) / (f_b - f_a);
 
+        // x_half == x_f のとき `0 / 0 = NaN` になる。
+        // ただしその場合は下の `delta <= (x_half - x_f).abs()` が `delta <= 0`
+        // となり false（delta > 0）なので `x_t = x_half` の枝を通り、
+        // さらに `(x_t - x_half).abs() == 0 <= r` で `x_itp = x_t` となる。
+        // 結果として `sigma` は実際には参照されず、NaN が伝播することはない。
         let sigma = (x_half - x_f) / (x_half - x_f).abs();
         let x_t = if delta <= (x_half - x_f).abs() {
             x_f + sigma * delta
@@ -264,21 +295,37 @@ mod tests {
 
     #[test]
     fn bounds_are_wald() {
-        let p = SprtParameters::new(0.0, 5.0, 0.05, 0.05);
+        let p = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         let (lo, hi) = p.llr_bounds();
         assert!(approx(lo, (0.05_f64 / 0.95).ln(), 1e-12));
         assert!(approx(hi, (0.95_f64 / 0.05).ln(), 1e-12));
     }
 
     #[test]
+    fn new_rejects_inverted_nelo() {
+        assert!(SprtParameters::new(5.0, 0.0, 0.05, 0.05).is_err());
+        assert!(SprtParameters::new(5.0, 5.0, 0.05, 0.05).is_err());
+    }
+
+    #[test]
+    fn new_rejects_out_of_range_alpha_beta() {
+        assert!(SprtParameters::new(0.0, 5.0, 0.0, 0.05).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, 1.0, 0.05).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, -0.1, 0.05).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, 0.05, 0.0).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, 0.05, 1.0).is_err());
+        assert!(SprtParameters::new(0.0, 5.0, 0.05, f64::NAN).is_err());
+    }
+
+    #[test]
     fn zero_penta_llr_is_zero() {
-        let p = SprtParameters::new(0.0, 5.0, 0.05, 0.05);
+        let p = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         assert_eq!(p.llr(Penta::ZERO), 0.0);
     }
 
     #[test]
     fn winning_sample_gives_positive_llr() {
-        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05);
+        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         let mut penta = Penta::ZERO;
         // 明確に test engine 勝ち越し
         penta.ww = 40;
@@ -293,7 +340,7 @@ mod tests {
 
     #[test]
     fn losing_sample_gives_negative_llr() {
-        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05);
+        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         // `Penta::from_pair` を使って対称に反転したペアを作る
         let mut penta = Penta::ZERO;
         penta.ll = 40;
@@ -310,7 +357,7 @@ mod tests {
     fn symmetric_flip_flips_sign() {
         // 仮説ペアが 0 周りで対称 (`-5 vs +5`) のときに、
         // Penta を反転すると LLR の符号が厳密に反転することを確認する。
-        let params = SprtParameters::new(-5.0, 5.0, 0.05, 0.05);
+        let params = SprtParameters::new(-5.0, 5.0, 0.05, 0.05).unwrap();
         let mut win_heavy = Penta::ZERO;
         win_heavy.ww = 30;
         win_heavy.wd = 10;
@@ -338,7 +385,7 @@ mod tests {
     fn asymmetric_hypothesis_sign_is_still_flipped() {
         // production デフォルト (0/5) でも、ペアを反転したら LLR 符号は必ず逆転する。
         // 厳密な絶対値一致は期待できないが、符号と大体の大きさは確認する。
-        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05);
+        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         let mut win_heavy = Penta::ZERO;
         win_heavy.ww = 30;
         win_heavy.wd = 10;
