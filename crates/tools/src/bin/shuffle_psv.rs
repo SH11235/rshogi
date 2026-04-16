@@ -89,19 +89,24 @@ fn format_size(bytes: usize) -> String {
     if bytes >= GIB {
         format!("{:.1} GiB", bytes as f64 / GIB as f64)
     } else {
-        format!("{:.0} MiB", bytes as f64 / MIB as f64)
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
     }
 }
 
 /// メモリ充足チェック。required_bytes が利用可能メモリの 80% を超える場合はエラーで停止する。
 /// --force 指定時は警告のみで続行。
+///
+/// 80% 閾値は、OS・他プロセス・バッファキャッシュ等に 20% の余裕を確保するため。
+const MEMORY_VALIDATION_RATIO: f64 = 0.8;
+
 fn check_memory(required_bytes: usize, force: bool) -> Result<()> {
     if let Some(mem_available) = get_mem_available() {
-        let threshold = (mem_available as f64 * 0.8) as usize;
+        let threshold = (mem_available as f64 * MEMORY_VALIDATION_RATIO) as usize;
         eprintln!(
-            "  required: {} / available: {} (80% threshold: {})",
+            "  required: {} / available: {} ({:.0}% threshold: {})",
             format_size(required_bytes),
             format_size(mem_available as usize),
+            MEMORY_VALIDATION_RATIO * 100.0,
             format_size(threshold),
         );
         if required_bytes > threshold {
@@ -383,20 +388,23 @@ fn shuffle_chunked(
     // 各チャンクは最大 chunk_size * RECORD_SIZE バイトをメモリに展開するため、
     // 同時にロードするチャンク数 × チャンクサイズが利用可能メモリを超えないようにする。
     let max_chunk_bytes = chunk_size * RECORD_SIZE;
+    // OS・他プロセス・バッファキャッシュ等のための余裕を 30% 確保し、
+    // 利用可能メモリの 70% を上限とする。
+    const MEMORY_BUDGET_RATIO: f64 = 0.7;
     let batch_size = {
         let num_threads = rayon::current_num_threads();
-        let mem_limit = get_mem_available().unwrap_or(max_chunk_bytes as u64 * num_threads as u64);
-        // 利用可能メモリの 70% を上限とする
-        let usable = (mem_limit as f64 * 0.7) as usize;
+        // 非 Linux 環境では MemAvailable を取得できないため、制限なし（スレッド数で決定）
+        let mem_limit = get_mem_available().unwrap_or(u64::MAX);
+        let usable = (mem_limit as f64 * MEMORY_BUDGET_RATIO) as usize;
         let by_memory = (usable / max_chunk_bytes).max(1);
         let batch = num_threads.min(by_memory);
         eprintln!(
-            "  batch_size: {} (threads: {}, memory limit: {} chunks × {} = {})",
+            "  batch_size: {} (threads: {}, memory allows: {} chunks × {} = {})",
             batch,
             num_threads,
-            batch,
+            by_memory,
             format_size(max_chunk_bytes),
-            format_size(batch * max_chunk_bytes),
+            format_size(by_memory * max_chunk_bytes),
         );
         batch
     };
