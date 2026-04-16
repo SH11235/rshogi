@@ -8,6 +8,8 @@
 
 | ツール | 説明 |
 |--------|------|
+| `tournament` | 複数エンジンの round-robin 並列トーナメント、SPRT 検定 |
+| `analyze_selfplay` | tournament 出力の集計・Elo/nElo 算出・SPRT post-hoc 判定 |
 | `engine_selfplay` | USIエンジン同士の自己対局、学習データ（PackedSfenValue）生成 |
 | `floodgate_pipeline` | Floodgate棋譜のダウンロード・変換 |
 
@@ -61,8 +63,9 @@ cargo run -p tools --release --bin benchmark -- --internal
 
 各ツールの詳細は `docs/` を参照：
 
-- [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
+- [tournament](docs/tournament.md) - 並列トーナメント・SPRT 検定
 - [engine_selfplay](docs/engine_selfplay.md) - 自己対局ツールの詳細
+- [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
 - [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群
 
 各ツールのオプション一覧は `--help` で確認できます。
