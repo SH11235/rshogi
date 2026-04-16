@@ -172,14 +172,15 @@ fn main() -> Result<()> {
 
     // シャッフル方式を選択
     if cli.chunk_size > 0 && record_count > cli.chunk_size as u64 {
-        let chunk_bytes = cli.chunk_size * RECORD_SIZE;
-        info!(
-            "Using chunked shuffle (chunk size: {} records, {})",
+        info!("Using chunked shuffle (chunk size: {} records)", cli.chunk_size,);
+        shuffle_chunked(
+            &cli.input,
+            &cli.output,
+            record_count,
             cli.chunk_size,
-            format_size(chunk_bytes),
-        );
-        check_memory(chunk_bytes, cli.force)?;
-        shuffle_chunked(&cli.input, &cli.output, record_count, cli.chunk_size, &mut rng)?;
+            cli.force,
+            &mut rng,
+        )?;
     } else {
         let data_bytes = record_count as usize * RECORD_SIZE;
         info!("Using in-memory shuffle ({})", format_size(data_bytes));
@@ -303,6 +304,7 @@ fn shuffle_chunked(
     output_path: &PathBuf,
     record_count: u64,
     chunk_size: usize,
+    force: bool,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     let num_chunks = (record_count as usize).div_ceil(chunk_size);
@@ -319,7 +321,16 @@ fn shuffle_chunked(
         );
     }
 
-    info!("Creating {num_chunks} temporary chunks");
+    // ランダム振り分け後の期待チャンクサイズで見積もる。
+    // chunk_size そのものではなく record_count / num_chunks を使うことで、
+    // record_count が chunk_size をわずかに超える場合の過大見積もりを防ぐ。
+    let expected_chunk_records = (record_count as usize).div_ceil(num_chunks);
+    let expected_chunk_bytes = expected_chunk_records * RECORD_SIZE;
+    info!(
+        "Creating {num_chunks} temporary chunks (expected max chunk: {})",
+        format_size(expected_chunk_bytes),
+    );
+    check_memory(expected_chunk_bytes, force)?;
 
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
 
