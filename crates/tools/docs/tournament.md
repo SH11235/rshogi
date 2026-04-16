@@ -32,6 +32,15 @@ cargo build -p tools --bin tournament --release
 
 ### SPRT（有意差の早期判定）
 
+test エンジンが base より +5 nelo 以上強いかを有意水準 95% で検定する。
+差が明確なら早期に判定終了し、差が微妙なら `--games` 上限まで対局を続ける。
+
+- `--sprt-nelo0 0`: H0 = 差なし（帰無仮説）
+- `--sprt-nelo1 5`: H1 = +5 nelo 以上の差あり（対立仮説、検出したい最小効果量）
+- `--sprt-alpha 0.05`: H0 が真なのに H1 と誤判定する確率の上限 5%
+- `--sprt-beta 0.05`: H1 が真なのに H0 と誤判定する確率の上限 5%
+- `--games 5000`: SPRT が境界に達しなかった場合の対局数上限（保険）
+
 ```bash
 ./target/release/tournament \
   --engine /path/to/base-engine --engine-label base \
