@@ -1075,6 +1075,22 @@ fn main() -> Result<()> {
         }
     }
 
+    // 直接対決ペアごとの pentanomial 集計（nElo 表示用）
+    let mut h2h_penta: BTreeMap<(String, String), Penta> = BTreeMap::new();
+    for (left, right) in head_to_head.keys() {
+        let mut penta = Penta::ZERO;
+        for path in &files {
+            if path.contains(".summary.") {
+                continue;
+            }
+            // left=base, right=test で集計 → normalized_elo() は right 視点
+            if let Ok(p) = collect_sprt_penta(path, left, right) {
+                penta += p;
+            }
+        }
+        h2h_penta.insert((left.clone(), right.clone()), penta);
+    }
+
     // SPRT post-hoc 集計（JSON モードでは最終 JSON にフィールドとして埋め込むため事前に計算する）
     let sprt_payload: Option<(Penta, SprtJsonOutput)> = if cli.sprt {
         let base_label = cli
@@ -1120,7 +1136,16 @@ fn main() -> Result<()> {
             sprt_payload.as_ref().map(|(_, j)| j.clone()),
         )?;
     } else {
-        print_text(valid_files, total_done, total_all, &engines, &head_to_head, &labels, &extra);
+        print_text(
+            valid_files,
+            total_done,
+            total_all,
+            &engines,
+            &head_to_head,
+            &h2h_penta,
+            &labels,
+            &extra,
+        );
         if let Some((penta, json)) = sprt_payload.as_ref() {
             print_sprt_text_report(*penta, json);
         }
@@ -1139,6 +1164,7 @@ fn print_text(
     total_all: u32,
     engines: &BTreeMap<String, EngineStats>,
     head_to_head: &BTreeMap<(String, String), HeadToHeadStats>,
+    h2h_penta: &BTreeMap<(String, String), Penta>,
     labels: &BTreeMap<String, String>,
     extra: &AggregatedExtraStats,
 ) {
@@ -1209,9 +1235,16 @@ fn print_text(
         let elo = elo_diff(v.left_wins, v.right_wins, v.draws);
         let ci = elo_ci95(v.left_wins, v.right_wins, v.draws);
 
+        // pentanomial nElo（right=test 視点で集計されているため、left 視点に変換）
+        let nelo_str = h2h_penta
+            .get(&(a.clone(), b.clone()))
+            .and_then(|p| p.normalized_elo())
+            .map(|(e, c)| format!(" | nElo:{:+.0} ±{:.0}", -e, c))
+            .unwrap_or_default();
+
         let elo_str = match (elo, ci) {
-            (Some(e), Some(c)) => format!(" | Elo差:{:+.0} ±{:.0}", e, c),
-            _ => String::new(),
+            (Some(e), Some(c)) => format!(" | Elo差:{:+.0} ±{:.0}{}", e, c, nelo_str),
+            _ => nelo_str,
         };
 
         println!(
