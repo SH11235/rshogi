@@ -39,9 +39,20 @@
 //! # attacks_per_color
 //!
 //! 各 class の駒が空盤面上の全 81 マスに置かれた場合の攻撃先マス数の合計
-//! (先手基準。後手は視点変換で対称)。`ATTACKS_PER_COLOR` 定数として保持。
+//! (先手基準。後手は視点変換で対称)。[`ATTACKS_PER_COLOR`] 定数として保持。
 //!
-//! `Σ ATTACKS_PER_COLOR = 6,020`
+//! | id | class | attacks_per_color |
+//! |----|-------|------------------:|
+//! | 0  | Pawn      |    72 |
+//! | 1  | Lance     |   324 |
+//! | 2  | Knight    |   112 |
+//! | 3  | Silver    |   328 |
+//! | 4  | GoldLike  |   416 |
+//! | 5  | Bishop    |   816 |
+//! | 6  | Rook      | 1,296 |
+//! | 7  | Horse     | 1,104 |
+//! | 8  | Dragon    | 1,552 |
+//! | **合計** | | **6,020** |
 //!
 //! # THREAT_DIMENSIONS (profile 0, default)
 //!
@@ -577,7 +588,7 @@ impl AttackOrderTable {
 static ATTACK_ORDER_TABLE: LazyLock<AttackOrderTable> = LazyLock::new(AttackOrderTable::new);
 
 // =============================================================================
-// 共通ヘルパ (HandThreat 等で流用)
+// Threat index 計算ヘルパ
 // =============================================================================
 
 /// 指定 (board_class, oriented_color, from_sq_n, to_sq_n) の attack offset を計算

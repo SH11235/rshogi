@@ -33,14 +33,37 @@
 //!
 //! # arch_str / quantised.bin file format
 //!
+//! ## arch_str
+//!
 //! profile 0 (default) のモデル:
-//! - arch_str: `Threat=216720`
-//! - file: Threat weights を直接書く
+//! - `Threat=216720`
 //!
 //! profile 1 以上のモデル:
-//! - arch_str: `Threat=<dims>,ThreatProfile=<id>`
-//! - file: Threat weights の直前に `profile_id` (u32 LE) を書く
-//! - 読み込み時に engine の profile id と照合し、不一致ならエラー
+//! - `Threat=<dims>,ThreatProfile=<id>`
+//!
+//! ## quantised.bin block order (Threat 部分)
+//!
+//! ```text
+//! FT biases  (i16, LEB128)
+//! FT weights (i16, LEB128)
+//! [PSQT biases + weights (i32, raw)]        ← PSQT ありの場合のみ
+//! [Threat profile id (u32, LE raw)]         ← ThreatProfile= が arch_str にある場合のみ
+//! [Threat weights (i8, raw)]                ← Threat= が arch_str にある場合のみ
+//! LayerStack per-bucket data
+//! ```
+//!
+//! Threat weights layout: `i8[THREAT_DIMENSIONS × L1]` (feature-major、
+//! 各特徴量の L1 i8 重みが連続)。
+//!
+//! ## profile id
+//!
+//! profile 0 (default) のモデルでは `ThreatProfile=` も profile id バイトも書かない。
+//! profile 1 以上のモデルのみ、arch_str に `ThreatProfile=N` を含め、
+//! Threat weights の直前に `profile_id` (u32, little-endian) を書き込む。
+//!
+//! 読み込み側の判定:
+//! 1. arch_str に `ThreatProfile=` がある → u32 を読み、engine の profile id と照合
+//! 2. arch_str に `ThreatProfile=` がない → 旧モデル (profile 0)。engine が profile 0 でなければエラー
 //!
 //! # 制約: profile は STM/NSTM 対称であること
 //!
