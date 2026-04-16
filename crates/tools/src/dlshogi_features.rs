@@ -14,7 +14,7 @@ use rshogi_core::bitboard::{
     lance_effect, pawn_effect, rook_effect, silver_effect,
 };
 use rshogi_core::position::Position;
-use rshogi_core::types::{Color, PieceType, Square};
+use rshogi_core::types::{Color, Move, PieceType, Square};
 
 // ============================================================
 // Constants (標準 dlshogi)
@@ -263,6 +263,125 @@ pub fn make_input_features(pos: &Position, features1: &mut [f32], features2: &mu
     }
 }
 
+// ============================================================
+// Policy move label (cshogi の make_move_label 相当)
+// ============================================================
+
+/// ポリシーヘッドの移動方向ラベル
+///
+/// 10 方向 × 2 (不成り/成り) = 20 盤上方向 + 7 持ち駒 = 合計 27 カテゴリ。
+/// ポリシー出力サイズ: 27 × 81 = 2187。
+///
+/// cshogi の `MOVE_DIRECTION` enum と同一順序。
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDirection {
+    Up = 0,
+    UpLeft = 1,
+    UpRight = 2,
+    Left = 3,
+    Right = 4,
+    Down = 5,
+    DownLeft = 6,
+    DownRight = 7,
+    Up2Left = 8,
+    Up2Right = 9,
+    // 成り (上記 + 10)
+    UpPromote = 10,
+    UpLeftPromote = 11,
+    UpRightPromote = 12,
+    LeftPromote = 13,
+    RightPromote = 14,
+    DownPromote = 15,
+    DownLeftPromote = 16,
+    DownRightPromote = 17,
+    Up2LeftPromote = 18,
+    Up2RightPromote = 19,
+}
+
+/// 盤上移動方向の数 (不成り10 + 成り10 = 20)
+const MOVE_DIRECTION_NUM: u32 = 20;
+
+/// ポリシーラベルの総数: (20 盤上方向 + 7 持ち駒) × 81 マス
+pub const MAX_MOVE_LABEL_NUM: usize = 27 * SQUARE_NUM; // 2187
+
+/// from→to の差分から移動方向を判定する
+///
+/// `dir_x = from_file - to_file`, `dir_y = to_rank - from_rank`
+/// (cshogi と同一符号: 上方向が負、右方向が正)
+fn get_move_direction(dir_x: i32, dir_y: i32) -> MoveDirection {
+    if dir_y < 0 && dir_x == 0 {
+        MoveDirection::Up
+    } else if dir_y == -2 && dir_x == -1 {
+        MoveDirection::Up2Left
+    } else if dir_y == -2 && dir_x == 1 {
+        MoveDirection::Up2Right
+    } else if dir_y < 0 && dir_x < 0 {
+        MoveDirection::UpLeft
+    } else if dir_y < 0 && dir_x > 0 {
+        MoveDirection::UpRight
+    } else if dir_y == 0 && dir_x < 0 {
+        MoveDirection::Left
+    } else if dir_y == 0 && dir_x > 0 {
+        MoveDirection::Right
+    } else if dir_y > 0 && dir_x == 0 {
+        MoveDirection::Down
+    } else if dir_y > 0 && dir_x < 0 {
+        MoveDirection::DownLeft
+    } else {
+        // dir_y > 0 && dir_x > 0
+        MoveDirection::DownRight
+    }
+}
+
+/// 指し手をポリシー出力のラベルインデックスに変換する
+///
+/// cshogi の `__dlshogi_make_move_label` と同一ロジック。
+/// 後手番では盤面を 180 度回転して先手視点に正規化する。
+///
+/// 戻り値は `0..2187` のインデックス。
+pub fn make_move_label(mv: Move, color: Color) -> usize {
+    let is_white = color == Color::White;
+
+    if !mv.is_drop() {
+        let (to_sq, from_sq) = if is_white {
+            (mv.to().inverse().index(), mv.from().inverse().index())
+        } else {
+            (mv.to().index(), mv.from().index())
+        };
+
+        let to_file = to_sq / 9;
+        let to_rank = to_sq % 9;
+        let from_file = from_sq / 9;
+        let from_rank = from_sq % 9;
+
+        let dir_x = from_file as i32 - to_file as i32;
+        let dir_y = to_rank as i32 - from_rank as i32;
+
+        let mut direction = get_move_direction(dir_x, dir_y) as u32;
+
+        if mv.is_promote() {
+            direction += 10;
+        }
+
+        (SQUARE_NUM as u32 * direction + to_sq as u32) as usize
+    } else {
+        let to_sq = if is_white {
+            mv.to().inverse().index()
+        } else {
+            mv.to().index()
+        };
+
+        // 手駒種別: Pawn=1..Rook=6 → 0..5, Gold=7 → 6
+        let pt = mv.drop_piece_type() as u32;
+        let hand_piece = if pt <= 6 { pt - 1 } else { 6 }; // Gold(7) → 6
+
+        let direction = MOVE_DIRECTION_NUM + hand_piece;
+
+        (SQUARE_NUM as u32 * direction + to_sq as u32) as usize
+    }
+}
+
 /// 勝率 (0..1) をセンチポーン値に変換
 ///
 /// dlshogi の Eval_Coef に相当する逆変換。
@@ -351,5 +470,95 @@ mod tests {
         let cp_high = winrate_to_cp(0.7, 600.0);
         let cp_low = winrate_to_cp(0.3, 600.0);
         assert_eq!(cp_high, -cp_low);
+    }
+
+    // ============================================================
+    // make_move_label テスト
+    // ============================================================
+
+    #[test]
+    fn test_max_move_label_num() {
+        assert_eq!(MAX_MOVE_LABEL_NUM, 2187);
+    }
+
+    #[test]
+    fn test_make_move_label_range() {
+        // 初期局面の全合法手がラベル範囲内に収まること
+        use rshogi_core::movegen::{MoveList, generate_legal};
+
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .unwrap();
+        let mut list = MoveList::new();
+        generate_legal(&pos, &mut list);
+
+        for mv in list.iter() {
+            let label = make_move_label(*mv, Color::Black);
+            assert!(label < MAX_MOVE_LABEL_NUM, "label {label} out of range for {}", mv.to_usi());
+        }
+    }
+
+    #[test]
+    fn test_make_move_label_up_move_black() {
+        // 7g7f (先手): file=6→6, rank=6→5 → dir_x=0, dir_y=-1 → UP
+        // to_sq = 6*9+5 = 59, label = 81*0 + 59 = 59
+        let mv = Move::from_usi("7g7f").unwrap();
+        let label = make_move_label(mv, Color::Black);
+        assert_eq!(label, 59);
+    }
+
+    #[test]
+    fn test_make_move_label_promote() {
+        // 2d2c+ (先手): file=1→1, rank=3→2 → dir_x=0, dir_y=-1 → UP_PROMOTE=10
+        // to_sq = 1*9+2 = 11, label = 81*10 + 11 = 821
+        let mv = Move::from_usi("2d2c+").unwrap();
+        let label = make_move_label(mv, Color::Black);
+        assert_eq!(label, 821);
+    }
+
+    #[test]
+    fn test_make_move_label_drop_pawn() {
+        // P*5e (先手): hand_piece=0(Pawn), direction=20
+        // to_sq = 4*9+4 = 40, label = 81*20 + 40 = 1660
+        let mv = Move::from_usi("P*5e").unwrap();
+        let label = make_move_label(mv, Color::Black);
+        assert_eq!(label, 1660);
+    }
+
+    #[test]
+    fn test_make_move_label_drop_gold() {
+        // G*5e (先手): hand_piece=6(Gold), direction=26
+        // to_sq = 4*9+4 = 40, label = 81*26 + 40 = 2146
+        let mv = Move::from_usi("G*5e").unwrap();
+        let label = make_move_label(mv, Color::Black);
+        assert_eq!(label, 2146);
+    }
+
+    #[test]
+    fn test_make_move_label_white_rotation() {
+        // 後手: 7g7f → 盤面反転 → to=80-59=21, from=80-60=20
+        // to=(file=2,rank=3), from=(file=2,rank=2) → dir_x=0, dir_y=1 → DOWN=5
+        // label = 81*5 + 21 = 426
+        let mv = Move::from_usi("7g7f").unwrap();
+        let label = make_move_label(mv, Color::White);
+        assert_eq!(label, 426);
+    }
+
+    #[test]
+    fn test_make_move_label_all_legal_in_range() {
+        // 中盤局面で全合法手のラベルが範囲内
+        use rshogi_core::movegen::{MoveList, generate_legal};
+
+        let mut pos = Position::new();
+        pos.set_sfen("l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w GR5p 1")
+            .unwrap();
+        let color = pos.side_to_move();
+        let mut list = MoveList::new();
+        generate_legal(&pos, &mut list);
+
+        for mv in list.iter() {
+            let label = make_move_label(*mv, color);
+            assert!(label < MAX_MOVE_LABEL_NUM, "label {label} out of range for {}", mv.to_usi());
+        }
     }
 }
