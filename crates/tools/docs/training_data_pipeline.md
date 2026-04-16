@@ -113,7 +113,17 @@ TMPDIR=/mnt/data/tmp shuffle_psv ...
 
 ## 実行例
 
-547 GiB の既存教師データに 70 GiB の新規データを追加した実例:
+547 GiB の既存教師データに 70 GiB の新規データを追加した実例です。
+
+### 実行環境
+
+| 項目 | スペック |
+|---|---|
+| CPU | 32 コア |
+| メモリ | 128 GiB |
+| ストレージ | Samsung SSD 990 PRO 4TB (NVMe) |
+
+### コマンドと実行結果
 
 ```bash
 # 1. 差分 dedup (96 分)
@@ -124,7 +134,7 @@ psv_dedup_bloom \
   --input /data/aoba_rescore_dlsuisho.bin \
   --output /data/aoba_rescore_unique.bin
 
-# 2. 結合
+# 2. 結合 (18 分)
 cat /data/DLSuisho15b_deduped_shuffled.bin \
     /data/aoba_rescore_unique.bin \
     > /data/DLSuisho15b_aoba_combined.bin
@@ -138,3 +148,13 @@ TMPDIR=/data/tmp shuffle_psv \
 # 4. 中間ファイル削除
 rm /data/aoba_rescore_unique.bin /data/DLSuisho15b_aoba_combined.bin
 ```
+
+### 所要時間の内訳
+
+| ステップ | 処理時間 | I/O 量 | ボトルネック |
+|---|---|---|---|
+| 差分 dedup | 96 分 | 読み 617 GiB + 書き 70 GiB | ディスク読み込み (3.0M rec/s) |
+| 結合 (cat) | 18 分 | 読み 617 GiB + 書き 617 GiB | ディスク I/O |
+| シャッフル Pass 1 | 30 分 | 読み 617 GiB + 書き 617 GiB | ディスク I/O (17 ファイル同時書き込み) |
+| シャッフル Pass 2 | 30 分 | 読み 617 GiB + 書き 617 GiB | チャンクシャッフル (CPU) + ディスク I/O |
+| **合計** | **約 3 時間** | | |
