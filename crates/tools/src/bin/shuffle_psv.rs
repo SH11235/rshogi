@@ -60,6 +60,10 @@ struct Cli {
     /// デフォルト: 0（全レコードをメモリに読み込む）
     #[arg(long, default_value_t = 0)]
     chunk_size: usize,
+
+    /// メモリ不足でも強制続行
+    #[arg(long)]
+    force: bool,
 }
 
 /// 処理中にCtrl-Cが押されたかを追跡
@@ -87,6 +91,35 @@ fn format_size(bytes: usize) -> String {
     } else {
         format!("{:.0} MiB", bytes as f64 / MIB as f64)
     }
+}
+
+/// メモリ充足チェック。required_bytes が利用可能メモリの 80% を超える場合はエラーで停止する。
+/// --force 指定時は警告のみで続行。
+fn check_memory(required_bytes: usize, force: bool) -> Result<()> {
+    if let Some(mem_available) = get_mem_available() {
+        let threshold = (mem_available as f64 * 0.8) as usize;
+        eprintln!(
+            "  required: {} / available: {} (80% threshold: {})",
+            format_size(required_bytes),
+            format_size(mem_available as usize),
+            format_size(threshold),
+        );
+        if required_bytes > threshold {
+            if force {
+                eprintln!("Warning: メモリ不足ですが --force が指定されているため続行します");
+            } else {
+                anyhow::bail!(
+                    "メモリ不足: {} 必要ですが、利用可能メモリは {} です。\n\
+                     対処法:\n\
+                     - --chunk-size を小さくする\n\
+                     - --force で強制続行（swap 使用の可能性あり）",
+                    format_size(required_bytes),
+                    format_size(mem_available as usize),
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -133,11 +166,18 @@ fn main() -> Result<()> {
 
     // シャッフル方式を選択
     if cli.chunk_size > 0 && record_count > cli.chunk_size as u64 {
-        eprintln!("Using chunked shuffle (chunk size: {} records)", cli.chunk_size);
+        let chunk_bytes = cli.chunk_size * RECORD_SIZE;
+        eprintln!(
+            "Using chunked shuffle (chunk size: {} records, {})",
+            cli.chunk_size,
+            format_size(chunk_bytes),
+        );
+        check_memory(chunk_bytes, cli.force)?;
         shuffle_chunked(&cli.input, &cli.output, record_count, cli.chunk_size, &mut rng)?;
     } else {
-        eprintln!("Using in-memory shuffle");
-        // Note: 巨大ファイルでは一括 I/O のため、Ctrl-C の応答に時間がかかる場合がある
+        let data_bytes = record_count as usize * RECORD_SIZE;
+        eprintln!("Using in-memory shuffle ({})", format_size(data_bytes));
+        check_memory(data_bytes, cli.force)?;
         shuffle_in_memory(&cli.input, &cli.output, record_count, &mut rng)?;
     }
 
