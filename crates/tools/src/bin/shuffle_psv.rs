@@ -65,6 +65,30 @@ struct Cli {
 /// 処理中にCtrl-Cが押されたかを追跡
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+/// /proc/meminfo から MemAvailable をバイト単位で取得する。
+fn get_mem_available() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kb_str = rest.trim().strip_suffix("kB")?.trim();
+            let kb: u64 = kb_str.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// バイト数を人間が読みやすい形式にフォーマットする。
+fn format_size(bytes: usize) -> String {
+    const GIB: usize = 1024 * 1024 * 1024;
+    const MIB: usize = 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else {
+        format!("{:.0} MiB", bytes as f64 / MIB as f64)
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
@@ -315,7 +339,27 @@ fn shuffle_chunked(
         .with_context(|| format!("Failed to create {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(BUF_SIZE, out_file);
 
-    let batch_size = rayon::current_num_threads();
+    // バッチサイズをメモリ上限で制限する。
+    // 各チャンクは最大 chunk_size * RECORD_SIZE バイトをメモリに展開するため、
+    // 同時にロードするチャンク数 × チャンクサイズが利用可能メモリを超えないようにする。
+    let max_chunk_bytes = chunk_size * RECORD_SIZE;
+    let batch_size = {
+        let num_threads = rayon::current_num_threads();
+        let mem_limit = get_mem_available().unwrap_or(max_chunk_bytes as u64 * num_threads as u64);
+        // 利用可能メモリの 70% を上限とする
+        let usable = (mem_limit as f64 * 0.7) as usize;
+        let by_memory = (usable / max_chunk_bytes).max(1);
+        let batch = num_threads.min(by_memory);
+        eprintln!(
+            "  batch_size: {} (threads: {}, memory limit: {} chunks × {} = {})",
+            batch,
+            num_threads,
+            batch,
+            format_size(max_chunk_bytes),
+            format_size(batch * max_chunk_bytes),
+        );
+        batch
+    };
     for batch_start in (0..num_chunks).step_by(batch_size) {
         if INTERRUPTED.load(Ordering::SeqCst) {
             progress.abandon_with_message("Interrupted");
