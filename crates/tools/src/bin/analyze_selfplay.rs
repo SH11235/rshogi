@@ -1075,21 +1075,27 @@ fn main() -> Result<()> {
         }
     }
 
-    // 直接対決ペアごとの pentanomial 集計（nElo 表示用）
-    let mut h2h_penta: BTreeMap<(String, String), Penta> = BTreeMap::new();
-    for (left, right) in head_to_head.keys() {
-        let mut penta = Penta::ZERO;
-        for path in &files {
-            if path.contains(".summary.") {
-                continue;
+    // 直接対決ペアごとの pentanomial 集計（nElo 表示用、テキスト出力時のみ）
+    let h2h_penta: BTreeMap<(String, String), Penta> = if !cli.json {
+        let mut map = BTreeMap::new();
+        for (left, right) in head_to_head.keys() {
+            let mut penta = Penta::ZERO;
+            for path in &files {
+                if path.contains(".summary.") {
+                    continue;
+                }
+                // left=base, right=test で集計 → normalized_elo() は right 視点
+                match collect_sprt_penta(path, left, right) {
+                    Ok(p) => penta += p,
+                    Err(e) => eprintln!("警告: h2h penta 集計失敗 {path}: {e}"),
+                }
             }
-            // left=base, right=test で集計 → normalized_elo() は right 視点
-            if let Ok(p) = collect_sprt_penta(path, left, right) {
-                penta += p;
-            }
+            map.insert((left.clone(), right.clone()), penta);
         }
-        h2h_penta.insert((left.clone(), right.clone()), penta);
-    }
+        map
+    } else {
+        BTreeMap::new()
+    };
 
     // SPRT post-hoc 集計（JSON モードでは最終 JSON にフィールドとして埋め込むため事前に計算する）
     let sprt_payload: Option<(Penta, SprtJsonOutput)> = if cli.sprt {
