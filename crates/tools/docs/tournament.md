@@ -176,5 +176,11 @@ tournament の出力 JSONL を読み込み、勝率・Elo 差・NPS 等を集計
   --sprt-nelo0 0 --sprt-nelo1 5
 ```
 
+- `--sprt`: SPRT 判定モードを有効化
+- `--sprt-base-label` / `--sprt-test-label`: pentanomial の集計方向を指定する（どちらが test 側か）。
+  nelo の符号は test 視点で決まるため、**両方とも省略不可**。
+  値は tournament 実行時の `--engine-label` で指定したラベルと一致させること
+- `--sprt-nelo0` / `--sprt-nelo1`: tournament 実行時と異なる閾値を指定して
+  「この閾値なら何局で打ち切れたか」を事後検証できる
+
 通常の集計出力の末尾に SPRT レポートが追加される。
-閾値を変えて「どこで打ち切れたか」の検証にも使える。
