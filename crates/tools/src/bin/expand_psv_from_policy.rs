@@ -45,9 +45,9 @@ struct Cli {
     #[arg(long)]
     onnx_model: PathBuf,
 
-    /// ONNX 推論バッチサイズ
-    #[arg(long, default_value_t = 1024)]
-    batch_size: usize,
+    /// ONNX 推論バッチサイズ（1 以上）
+    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u64).range(1..))]
+    batch_size: u64,
 
     /// GPU デバイス ID（-1 で CPU）
     #[arg(long, default_value_t = 0)]
@@ -74,9 +74,10 @@ fn run(cli: &Cli) -> Result<()> {
     use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
     use ort::session::Session;
     use ort::value::TensorRef;
+    use rayon::prelude::*;
     use std::fs::{self, File};
     use std::io::{BufWriter, Read, Write};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use rshogi_core::movegen::{MoveList, generate_legal};
     use rshogi_core::position::Position;
@@ -107,6 +108,22 @@ fn run(cli: &Cli) -> Result<()> {
     }
 
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+    // 入力と出力が同一ファイルでないことを確認
+    {
+        let input_canon = fs::canonicalize(&cli.input)
+            .with_context(|| format!("Cannot resolve {}", cli.input.display()))?;
+        // 出力がまだ存在しない場合は衝突しない
+        if let Ok(output_canon) = fs::canonicalize(&cli.output)
+            && input_canon == output_canon
+        {
+            anyhow::bail!(
+                "--input and --output point to the same file: {}\n\
+                 Specify a different output path to avoid destroying input data.",
+                input_canon.display()
+            );
+        }
+    }
 
     // ORT_DYLIB_PATH 検証
     match std::env::var("ORT_DYLIB_PATH") {
@@ -156,6 +173,18 @@ fn run(cli: &Cli) -> Result<()> {
                 trt_ep
             };
 
+            match trt_ep.is_available() {
+                Ok(true) => eprintln!("TensorRT execution provider: available"),
+                Ok(false) => {
+                    anyhow::bail!(
+                        "TensorRTExecutionProvider is NOT available.\n\
+                         Ensure TensorRT (libnvinfer.so.10) is in LD_LIBRARY_PATH.\n\
+                         To use CUDA EP instead, omit --tensorrt."
+                    );
+                }
+                Err(e) => eprintln!("WARNING: TensorRT EP check: {e}"),
+            }
+
             let cuda_ep = ort::execution_providers::CUDAExecutionProvider::default()
                 .with_device_id(cli.gpu_id)
                 .build()
@@ -193,7 +222,7 @@ fn run(cli: &Cli) -> Result<()> {
         builder.commit_from_file(&cli.onnx_model).map_err(ort_err)?
     };
 
-    let batch_size = cli.batch_size;
+    let batch_size = cli.batch_size as usize;
     let threshold = cli.threshold / 100.0; // % → 割合
 
     eprintln!("Model loaded. Batch size: {batch_size}, threshold: {:.1}%", cli.threshold);
@@ -202,6 +231,13 @@ fn run(cli: &Cli) -> Result<()> {
     let input_size = fs::metadata(&cli.input)
         .with_context(|| format!("Cannot stat {}", cli.input.display()))?
         .len();
+    if input_size % PackedSfenValue::SIZE as u64 != 0 {
+        anyhow::bail!(
+            "Input file size ({input_size} bytes) is not a multiple of {} (PSV record size). \
+             The file may be corrupted.",
+            PackedSfenValue::SIZE
+        );
+    }
     let total_records = input_size / PackedSfenValue::SIZE as u64;
     eprintln!("Input: {} ({total_records} records)", cli.input.display());
 
@@ -214,11 +250,12 @@ fn run(cli: &Cli) -> Result<()> {
     );
 
     // Ctrl+C ハンドラ
-    ctrlc::set_handler(move || {
+    if let Err(e) = ctrlc::set_handler(move || {
         INTERRUPTED.store(true, Ordering::SeqCst);
         eprintln!("\nInterrupted. Finishing current batch...");
-    })
-    .ok();
+    }) {
+        eprintln!("WARNING: Failed to set Ctrl+C handler: {e}");
+    }
 
     let in_file = File::open(&cli.input)
         .with_context(|| format!("Failed to open {}", cli.input.display()))?;
@@ -283,20 +320,28 @@ fn run(cli: &Cli) -> Result<()> {
             break;
         }
 
-        // 特徴量構築
+        // 特徴量構築（rayon 並列）
         f1_buf[..actual_batch * FEATURES1_SIZE].fill(0.0);
         f2_buf[..actual_batch * FEATURES2_SIZE].fill(0.0);
 
-        for (i, (_, sfen)) in batch_records.iter().enumerate() {
-            let mut pos = Position::new();
-            if pos.set_sfen(sfen).is_err() {
-                error_count += 1;
-                continue;
-            }
-            let f1 = &mut f1_buf[i * FEATURES1_SIZE..(i + 1) * FEATURES1_SIZE];
-            let f2 = &mut f2_buf[i * FEATURES2_SIZE..(i + 1) * FEATURES2_SIZE];
-            make_input_features(&pos, f1, f2);
-        }
+        let batch_errors = AtomicU64::new(0);
+        let f1_slices: Vec<&mut [f32]> =
+            f1_buf[..actual_batch * FEATURES1_SIZE].chunks_mut(FEATURES1_SIZE).collect();
+        let f2_slices: Vec<&mut [f32]> =
+            f2_buf[..actual_batch * FEATURES2_SIZE].chunks_mut(FEATURES2_SIZE).collect();
+
+        f1_slices.into_par_iter().zip(f2_slices).zip(batch_records.par_iter()).for_each(
+            |((f1, f2), (_, sfen))| {
+                let mut pos = Position::new();
+                if pos.set_sfen(sfen).is_err() {
+                    batch_errors.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                make_input_features(&pos, f1, f2);
+            },
+        );
+
+        error_count += batch_errors.load(Ordering::Relaxed);
 
         // ONNX 推論
         let shape1: [usize; 4] = [actual_batch, INPUT1_CHANNELS, 9, 9];
@@ -318,8 +363,18 @@ fn run(cli: &Cli) -> Result<()> {
         let outputs = session.run_binding(&binding).map_err(ort_err)?;
 
         // ポリシー出力を取得: shape [batch, MAX_MOVE_LABEL_NUM]
-        let (_, policy_data) =
+        let (policy_shape, policy_data) =
             outputs["output_policy"].try_extract_tensor::<f32>().map_err(ort_err)?;
+        let expected_len = actual_batch * MAX_MOVE_LABEL_NUM;
+        if policy_data.len() != expected_len {
+            anyhow::bail!(
+                "Policy output shape mismatch: expected [{actual_batch}, {MAX_MOVE_LABEL_NUM}] \
+                 ({expected_len} elements), got shape {:?} ({} elements). \
+                 Is the ONNX model a dlshogi-compatible policy network?",
+                policy_shape,
+                policy_data.len()
+            );
+        }
 
         // 各局面について合法手の確率を計算し、閾値超えの次局面を生成
         for (i, (psv, sfen)) in batch_records.iter().enumerate() {
