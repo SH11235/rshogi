@@ -123,6 +123,39 @@ cargo run -p tools --release --bin psv_to_jsonl -- \
 {"sfen":"lnsgkgsnl/...","score":123,"depth":0,"best_move":"7g7f","nodes":0}
 ```
 
+### expand_psv_from_policy
+
+dlshogi ONNX モデルのポリシー出力を使い、各局面の合法手のうち選択確率が閾値を超える手の
+次局面を新しい PSV として書き出す。学習データの局面カバレッジを拡張する用途に使用。
+
+**前提条件**: ONNX Runtime のセットアップが必要。詳細は [rescore_psv.md](rescore_psv.md) を参照。
+
+```bash
+# ビルド（dlshogi-onnx feature が必要）
+cargo build --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy
+
+# 実行
+ORT_DYLIB_PATH=~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib/libonnxruntime.so \
+cargo run --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy -- \
+  --input data.psv \
+  --output expanded.psv \
+  --onnx-model model.onnx
+```
+
+| オプション | 説明 | デフォルト |
+|------------|------|------------|
+| `-i, --input` | 入力 PSV ファイル | 必須 |
+| `-o, --output` | 出力 PSV ファイル | 必須 |
+| `--onnx-model` | dlshogi ONNX モデル | 必須 |
+| `--batch-size` | 推論バッチサイズ | 1024 |
+| `--gpu-id` | GPU デバイス ID（-1 で CPU） | 0 |
+| `--tensorrt` | TensorRT EP を使用 | false |
+| `--tensorrt-cache` | TensorRT エンジンキャッシュディレクトリ | - |
+| `--threshold` | 選択確率の閾値（%） | 10.0 |
+
+出力 PSV の `score`、`move16`、`game_result` は 0 で初期化される。
+必要に応じて `rescore_psv` でスコアを付与すること。
+
 ### fix_scores
 
 スコアの補正処理。
@@ -168,6 +201,27 @@ cargo run -p tools --release --bin shuffle_psv -- \
 cargo run -p tools --release --bin preprocess_psv -- \
   --input data.psv --output processed.psv \
   --nnue model.nnue --rescore --skip-in-check
+```
+
+### ポリシーネットワークで局面を拡張する場合
+
+dlshogi モデルの有力手から次局面を生成し、学習データを増やす：
+
+```bash
+# 1. ポリシーで局面拡張（確率 10% 超の手の次局面を生成）
+cargo run --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy -- \
+  --input data.psv --output expanded.psv \
+  --onnx-model model.onnx --threshold 10.0
+
+# 2. 拡張局面にスコアを付与
+cargo run -p tools --release --bin rescore_psv -- \
+  --input expanded.psv --output-dir rescored/ \
+  --nnue model.nnue --use-qsearch
+
+# 3. 元データと結合してシャッフル
+cat data.psv rescored/expanded.psv > combined.psv
+cargo run -p tools --release --bin shuffle_psv -- \
+  --input combined.psv --output training_shuffled.psv
 ```
 
 ## 注意事項
