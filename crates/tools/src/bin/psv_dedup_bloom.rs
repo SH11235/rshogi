@@ -273,15 +273,17 @@ fn main() -> io::Result<()> {
     }
 
     // ファイルサイズからレコード数を算出
-    let ref_expected = count_records("Reference", &ref_paths)?;
-    let input_expected = count_records("Input", &input_paths)?;
-    let total_expected_for_bloom = ref_expected + input_expected;
-
-    let total_expected_for_bloom = if args.max_positions > 0 {
-        total_expected_for_bloom.min(args.max_positions)
+    let ref_expected = if ref_paths.is_empty() {
+        0u64
     } else {
-        total_expected_for_bloom
+        count_records("Reference", &ref_paths)?
     };
+    let input_expected = count_records("Input", &input_paths)?;
+
+    // bloom のサイジングは reference + input の全件で行う。
+    // --max-positions は Phase 2 の出力上限であり、bloom 容量の制限には使わない。
+    // （reference 全件を bloom に登録するため、ここで cap すると FPR が悪化する）
+    let total_expected_for_bloom = ref_expected + input_expected;
     eprintln!(
         "Total expected records for bloom sizing: {total_expected_for_bloom} (ref: {ref_expected}, input: {input_expected})"
     );
@@ -373,7 +375,7 @@ fn main() -> io::Result<()> {
                 if ref_records.is_multiple_of(100_000_000) {
                     let elapsed = start.elapsed().as_secs_f64();
                     let speed = ref_records as f64 / elapsed / 1e6;
-                    let remaining = (ref_expected - ref_records) as f64 / (speed * 1e6);
+                    let remaining = ref_expected.saturating_sub(ref_records) as f64 / (speed * 1e6);
                     eprintln!(
                         "  {:.0}M loaded, {:.1}s ({:.1}M rec/s, ETA {:.0}s)",
                         ref_records as f64 / 1e6,
@@ -407,7 +409,7 @@ fn main() -> io::Result<()> {
         let mut reader = BufReader::with_capacity(8 << 20, file);
 
         loop {
-            if args.max_positions > 0 && (ref_records + input_records) >= args.max_positions {
+            if args.max_positions > 0 && input_records >= args.max_positions {
                 break;
             }
 
@@ -428,7 +430,7 @@ fn main() -> io::Result<()> {
             if input_records.is_multiple_of(100_000_000) {
                 let elapsed = phase2_start.elapsed().as_secs_f64();
                 let speed = input_records as f64 / elapsed / 1e6;
-                let remaining = (input_expected - input_records) as f64 / (speed * 1e6);
+                let remaining = input_expected.saturating_sub(input_records) as f64 / (speed * 1e6);
                 eprintln!(
                     "  {:.0}M read, {:.0}M written, {:.1}s ({:.1}M rec/s, ETA {:.0}s)",
                     input_records as f64 / 1e6,
