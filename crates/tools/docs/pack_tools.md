@@ -125,28 +125,37 @@ cargo run -p tools --release --bin psv_to_jsonl -- \
 
 ### expand_psv_from_policy
 
-dlshogi ONNX モデルのポリシー出力を使い、各局面の合法手のうち選択確率が閾値を超える手の
+dlshogi 系 ONNX モデルのポリシー出力を使い、各局面の合法手のうち選択確率が閾値を超える手の
 次局面を新しい PSV として書き出す。学習データの局面カバレッジを拡張する用途に使用。
+
+AobaZero (`--onnx-model`) と標準 dlshogi (`--dlshogi-onnx-model`, DL水匠等) の両方に対応。
 
 **前提条件**: ONNX Runtime のセットアップが必要。詳細は [rescore_psv.md](rescore_psv.md) を参照。
 
 ```bash
-# ビルド（dlshogi-onnx feature が必要）
-cargo build --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy
+# ビルド（両モデル対応にする場合）
+cargo build --release -p tools --features aobazero-onnx,dlshogi-onnx --bin expand_psv_from_policy
 
-# 実行
+# AobaZero モデルで実行
+ORT_DYLIB_PATH=~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib/libonnxruntime.so \
+cargo run --release -p tools --features aobazero-onnx --bin expand_psv_from_policy -- \
+  --input data.psv --output expanded.psv \
+  --onnx-model aoba_model.onnx
+
+# 標準 dlshogi モデル (DL水匠等) で実行
 ORT_DYLIB_PATH=~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib/libonnxruntime.so \
 cargo run --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy -- \
-  --input data.psv \
-  --output expanded.psv \
-  --onnx-model model.onnx
+  --input data.psv --output expanded.psv \
+  --dlshogi-onnx-model dlshogi_model.onnx
 ```
 
 | オプション | 説明 | デフォルト |
 |------------|------|------------|
 | `-i, --input` | 入力 PSV ファイル | 必須 |
 | `-o, --output` | 出力 PSV ファイル | 必須 |
-| `--onnx-model` | dlshogi ONNX モデル | 必須 |
+| `--onnx-model` | AobaZero ONNX モデル（排他） | - |
+| `--dlshogi-onnx-model` | 標準 dlshogi ONNX モデル（排他） | - |
+| `--draw-ply` | 引き分け手数（`--onnx-model` 使用時のみ） | 0 |
 | `--batch-size` | 推論バッチサイズ | 1024 |
 | `--gpu-id` | GPU デバイス ID（-1 で CPU） | 0 |
 | `--tensorrt` | TensorRT EP を使用 | false |

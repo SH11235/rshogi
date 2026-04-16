@@ -1,19 +1,25 @@
 //! expand_psv_from_policy - ポリシーネットワークで PSV を展開
 //!
-//! PSV ファイルの各局面に対して dlshogi ONNX モデルのポリシー推論を行い、
+//! PSV ファイルの各局面に対して dlshogi 系 ONNX モデルのポリシー推論を行い、
 //! 合法手の選択確率が閾値を超える手について次局面を生成し、新しい PSV ファイルに書き出す。
 //!
+//! AobaZero (`--onnx-model`) と標準 dlshogi (`--dlshogi-onnx-model`) の両方に対応。
 //! cshogi_util の expand_psv_from_policy.py 相当。
 //!
 //! # 使用例
 //!
 //! ```bash
+//! # AobaZero モデル
+//! ORT_DYLIB_PATH=/path/to/libonnxruntime.so \
+//! cargo run --release -p tools --features aobazero-onnx --bin expand_psv_from_policy -- \
+//!   --input data.psv --output expanded.psv \
+//!   --onnx-model aoba_model.onnx
+//!
+//! # 標準 dlshogi モデル (DL水匠等)
 //! ORT_DYLIB_PATH=/path/to/libonnxruntime.so \
 //! cargo run --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy -- \
-//!   --input data.psv \
-//!   --output expanded.psv \
-//!   --onnx-model model.onnx \
-//!   --threshold 10.0
+//!   --input data.psv --output expanded.psv \
+//!   --dlshogi-onnx-model dlshogi_model.onnx
 //! ```
 
 use anyhow::Result;
@@ -24,13 +30,15 @@ use std::path::PathBuf;
 ///
 /// 各局面の合法手についてポリシー確率を計算し、
 /// 閾値を超える手の次局面を新しい PSV として書き出す。
+/// AobaZero と標準 dlshogi の両モデルに対応。
 #[derive(Parser)]
 #[command(
     name = "expand_psv_from_policy",
     version,
     about = "ポリシーネットワークで PSV を展開\n\n\
              各局面の合法手のうちポリシー確率が閾値を超えるものについて、\n\
-             着手後の局面を新規 PSV レコードとして書き出す。"
+             着手後の局面を新規 PSV レコードとして書き出す。\n\
+             AobaZero (--onnx-model) と標準 dlshogi (--dlshogi-onnx-model) に対応。"
 )]
 struct Cli {
     /// 入力 PSV ファイル
@@ -41,9 +49,17 @@ struct Cli {
     #[arg(short, long)]
     output: PathBuf,
 
-    /// dlshogi ONNX モデルファイル
+    /// AobaZero ONNX モデルファイル（--dlshogi-onnx-model と排他）
     #[arg(long)]
-    onnx_model: PathBuf,
+    onnx_model: Option<PathBuf>,
+
+    /// 標準 dlshogi ONNX モデルファイル（DL水匠等、--onnx-model と排他）
+    #[arg(long)]
+    dlshogi_onnx_model: Option<PathBuf>,
+
+    /// 引き分け手数（--onnx-model 使用時の手数特徴量調整、0=調整なし）
+    #[arg(long, default_value_t = 0)]
+    draw_ply: i32,
 
     /// ONNX 推論バッチサイズ（1 以上）
     #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u64).range(1..))]
@@ -66,7 +82,7 @@ struct Cli {
     threshold: f32,
 }
 
-#[cfg(feature = "dlshogi-onnx")]
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 fn run(cli: &Cli) -> Result<()> {
     use anyhow::Context;
     use indicatif::{ProgressBar, ProgressStyle};
@@ -81,18 +97,13 @@ fn run(cli: &Cli) -> Result<()> {
 
     use rshogi_core::movegen::{MoveList, generate_legal};
     use rshogi_core::position::Position;
-    use tools::dlshogi_features::{
-        FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, MAX_MOVE_LABEL_NUM,
-        make_input_features, make_move_label,
-    };
+    use tools::dlshogi_features::{MAX_MOVE_LABEL_NUM, make_move_label};
     use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen};
 
-    /// ort のエラーを anyhow に変換
     fn ort_err(e: ort::Error) -> anyhow::Error {
         anyhow::anyhow!("{e}")
     }
 
-    /// softmax を計算し正規化する（オーバーフロー防止のため最大値を引く）
     fn softmax_normalize(logits: &[f32], out: &mut [f32]) {
         debug_assert_eq!(logits.len(), out.len());
         let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -109,11 +120,77 @@ fn run(cli: &Cli) -> Result<()> {
 
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+    // モデル選択の検証
+    let use_aoba = cli.onnx_model.is_some();
+    let use_dlshogi = cli.dlshogi_onnx_model.is_some();
+
+    if use_aoba && use_dlshogi {
+        anyhow::bail!("--onnx-model and --dlshogi-onnx-model are mutually exclusive");
+    }
+    if !use_aoba && !use_dlshogi {
+        anyhow::bail!(
+            "Either --onnx-model (AobaZero) or --dlshogi-onnx-model (standard dlshogi) is required"
+        );
+    }
+
+    #[cfg(not(feature = "aobazero-onnx"))]
+    if use_aoba {
+        anyhow::bail!(
+            "--onnx-model requires the 'aobazero-onnx' feature.\n\
+             Rebuild with: cargo build --release -p tools --features aobazero-onnx \
+             --bin expand_psv_from_policy"
+        );
+    }
+    #[cfg(not(feature = "dlshogi-onnx"))]
+    if use_dlshogi {
+        anyhow::bail!(
+            "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature.\n\
+             Rebuild with: cargo build --release -p tools --features dlshogi-onnx \
+             --bin expand_psv_from_policy"
+        );
+    }
+
+    let onnx_path = if use_aoba {
+        cli.onnx_model.as_ref().unwrap()
+    } else {
+        cli.dlshogi_onnx_model.as_ref().unwrap()
+    };
+
+    // 特徴量サイズの決定
+    let (f1_size, f2_size, input1_ch, input2_ch, model_name) = if use_aoba {
+        #[cfg(feature = "aobazero-onnx")]
+        {
+            use tools::aobazero_features as af;
+            (
+                af::FEATURES1_SIZE,
+                af::FEATURES2_SIZE,
+                af::INPUT1_CHANNELS,
+                af::INPUT2_CHANNELS,
+                "AobaZero",
+            )
+        }
+        #[cfg(not(feature = "aobazero-onnx"))]
+        unreachable!()
+    } else {
+        #[cfg(feature = "dlshogi-onnx")]
+        {
+            use tools::dlshogi_features as df;
+            (
+                df::FEATURES1_SIZE,
+                df::FEATURES2_SIZE,
+                df::INPUT1_CHANNELS,
+                df::INPUT2_CHANNELS,
+                "dlshogi",
+            )
+        }
+        #[cfg(not(feature = "dlshogi-onnx"))]
+        unreachable!()
+    };
+
     // 入力と出力が同一ファイルでないことを確認
     {
         let input_canon = fs::canonicalize(&cli.input)
             .with_context(|| format!("Cannot resolve {}", cli.input.display()))?;
-        // 出力がまだ存在しない場合は衝突しない
         if let Ok(output_canon) = fs::canonicalize(&cli.output)
             && input_canon == output_canon
         {
@@ -146,7 +223,7 @@ fn run(cli: &Cli) -> Result<()> {
     }
 
     // ONNX セッション初期化
-    eprintln!("Loading dlshogi ONNX model: {}", cli.onnx_model.display());
+    eprintln!("Loading {model_name} ONNX model: {}", onnx_path.display());
 
     let mut builder = Session::builder()
         .map_err(ort_err)?
@@ -194,7 +271,7 @@ fn run(cli: &Cli) -> Result<()> {
             builder
                 .with_execution_providers([trt_ep, cuda_ep])
                 .map_err(|e| anyhow::anyhow!("TensorRT/CUDA EP failed: {e}"))?
-                .commit_from_file(&cli.onnx_model)
+                .commit_from_file(onnx_path)
                 .map_err(ort_err)?
         } else {
             eprintln!("Using CUDA GPU {}", cli.gpu_id);
@@ -214,12 +291,12 @@ fn run(cli: &Cli) -> Result<()> {
             builder
                 .with_execution_providers([ep])
                 .map_err(|e| anyhow::anyhow!("CUDA EP failed: {e}"))?
-                .commit_from_file(&cli.onnx_model)
+                .commit_from_file(onnx_path)
                 .map_err(ort_err)?
         }
     } else {
         eprintln!("Using CPU");
-        builder.commit_from_file(&cli.onnx_model).map_err(ort_err)?
+        builder.commit_from_file(onnx_path).map_err(ort_err)?
     };
 
     let batch_size = cli.batch_size as usize;
@@ -266,8 +343,8 @@ fn run(cli: &Cli) -> Result<()> {
     let mut writer = BufWriter::new(out_file);
 
     // 特徴量バッファ
-    let mut f1_buf = vec![0.0f32; batch_size * FEATURES1_SIZE];
-    let mut f2_buf = vec![0.0f32; batch_size * FEATURES2_SIZE];
+    let mut f1_buf = vec![0.0f32; batch_size * f1_size];
+    let mut f2_buf = vec![0.0f32; batch_size * f2_size];
     let mut buffer = [0u8; PackedSfenValue::SIZE];
 
     let output_mem =
@@ -281,6 +358,35 @@ fn run(cli: &Cli) -> Result<()> {
     // 合法手 softmax 用バッファ（再利用）
     let mut logits_buf = Vec::with_capacity(600);
     let mut probs_buf = Vec::with_capacity(600);
+
+    // 特徴量構築クロージャ（モデル別）
+    type FeatureBuilder = Box<dyn Fn(&Position, &mut [f32], &mut [f32], &PackedSfenValue) + Sync>;
+    let build_features: FeatureBuilder = if use_aoba {
+        #[cfg(feature = "aobazero-onnx")]
+        {
+            let draw_ply = cli.draw_ply;
+            Box::new(move |pos, f1, f2, psv| {
+                tools::aobazero_features::make_input_features(
+                    pos,
+                    f1,
+                    f2,
+                    psv.game_ply as i32,
+                    draw_ply,
+                );
+            })
+        }
+        #[cfg(not(feature = "aobazero-onnx"))]
+        unreachable!()
+    } else {
+        #[cfg(feature = "dlshogi-onnx")]
+        {
+            Box::new(|pos, f1, f2, _psv| {
+                tools::dlshogi_features::make_input_features(pos, f1, f2);
+            })
+        }
+        #[cfg(not(feature = "dlshogi-onnx"))]
+        unreachable!()
+    };
 
     loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
@@ -321,38 +427,36 @@ fn run(cli: &Cli) -> Result<()> {
         }
 
         // 特徴量構築（rayon 並列）
-        f1_buf[..actual_batch * FEATURES1_SIZE].fill(0.0);
-        f2_buf[..actual_batch * FEATURES2_SIZE].fill(0.0);
+        f1_buf[..actual_batch * f1_size].fill(0.0);
+        f2_buf[..actual_batch * f2_size].fill(0.0);
 
         let batch_errors = AtomicU64::new(0);
         let f1_slices: Vec<&mut [f32]> =
-            f1_buf[..actual_batch * FEATURES1_SIZE].chunks_mut(FEATURES1_SIZE).collect();
+            f1_buf[..actual_batch * f1_size].chunks_mut(f1_size).collect();
         let f2_slices: Vec<&mut [f32]> =
-            f2_buf[..actual_batch * FEATURES2_SIZE].chunks_mut(FEATURES2_SIZE).collect();
+            f2_buf[..actual_batch * f2_size].chunks_mut(f2_size).collect();
 
         f1_slices.into_par_iter().zip(f2_slices).zip(batch_records.par_iter()).for_each(
-            |((f1, f2), (_, sfen))| {
+            |((f1, f2), (psv, sfen))| {
                 let mut pos = Position::new();
                 if pos.set_sfen(sfen).is_err() {
                     batch_errors.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
-                make_input_features(&pos, f1, f2);
+                build_features(&pos, f1, f2, psv);
             },
         );
 
         error_count += batch_errors.load(Ordering::Relaxed);
 
         // ONNX 推論
-        let shape1: [usize; 4] = [actual_batch, INPUT1_CHANNELS, 9, 9];
-        let input1 =
-            TensorRef::<f32>::from_array_view((shape1, &f1_buf[..actual_batch * FEATURES1_SIZE]))
-                .map_err(ort_err)?;
+        let shape1: [usize; 4] = [actual_batch, input1_ch, 9, 9];
+        let input1 = TensorRef::<f32>::from_array_view((shape1, &f1_buf[..actual_batch * f1_size]))
+            .map_err(ort_err)?;
 
-        let shape2: [usize; 4] = [actual_batch, INPUT2_CHANNELS, 9, 9];
-        let input2 =
-            TensorRef::<f32>::from_array_view((shape2, &f2_buf[..actual_batch * FEATURES2_SIZE]))
-                .map_err(ort_err)?;
+        let shape2: [usize; 4] = [actual_batch, input2_ch, 9, 9];
+        let input2 = TensorRef::<f32>::from_array_view((shape2, &f2_buf[..actual_batch * f2_size]))
+            .map_err(ort_err)?;
 
         let mut binding = session.create_binding().map_err(ort_err)?;
         binding.bind_input("input1", &input1).map_err(ort_err)?;
@@ -370,7 +474,7 @@ fn run(cli: &Cli) -> Result<()> {
             anyhow::bail!(
                 "Policy output shape mismatch: expected [{actual_batch}, {MAX_MOVE_LABEL_NUM}] \
                  ({expected_len} elements), got shape {:?} ({} elements). \
-                 Is the ONNX model a dlshogi-compatible policy network?",
+                 Is the ONNX model a compatible policy network?",
                 policy_shape,
                 policy_data.len()
             );
@@ -447,16 +551,16 @@ fn run(cli: &Cli) -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    #[cfg(not(feature = "dlshogi-onnx"))]
+    #[cfg(not(any(feature = "aobazero-onnx", feature = "dlshogi-onnx")))]
     {
         let _ = cli;
         anyhow::bail!(
-            "This binary requires the 'dlshogi-onnx' feature.\n\
-             Rebuild with: cargo build --release -p tools --features dlshogi-onnx \
-             --bin expand_psv_from_policy"
+            "This binary requires the 'aobazero-onnx' or 'dlshogi-onnx' feature.\n\
+             Rebuild with: cargo build --release -p tools \
+             --features aobazero-onnx,dlshogi-onnx --bin expand_psv_from_policy"
         );
     }
 
-    #[cfg(feature = "dlshogi-onnx")]
+    #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
     run(&cli)
 }
