@@ -98,6 +98,14 @@ cargo run -p tools --release --bin analyze_selfplay -- runs/selfplay/{DIR}/*.jso
 ```
 
 `analyze_selfplay` は JSONL ファイルを読み込み、勝率・Elo差・手数分布などを集計して標準出力に表示する。
+直接対決セクションでは trinomial Elo 差に加え、**pentanomial nElo（正規化 Elo）** を併記する。
+nElo はペア単位 (同一開始局面・先後入替) で集計し、開始局面・先後の交絡を除去した
+より正確な棋力差推定を提供する（SPRT の nelo と同じ指標）。
+
+```
+  A(engine-base) vs B(engine-test) | 2045局 | ... | Elo差:-36 ±15 | nElo:-37 ±15
+```
+
 この出力を元に、以下の内容をマークダウンファイル（`docs/performance/` 配下）に出力する:
 
 1. **対局条件**: 秒読み・スレッド・ハッシュ・対局数・NNUE
