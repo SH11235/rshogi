@@ -1,0 +1,29 @@
+[package]
+name = "rshogi-csa-server"
+version = "0.1.0"
+edition = "2024"
+authors = ["SH11235"]
+description = "Core logic for a CSA protocol shogi game server (transport-agnostic)."
+license = "GPL-3.0-only"
+repository = "https://github.com/SH11235/rshogi"
+
+[dependencies]
+rshogi-core = { path = "../rshogi-core" }
+rshogi-csa = { path = "../rshogi-csa" }
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+serde.workspace = true
+tokio = { workspace = true, optional = true }
+
+[features]
+# Phase 1 の TCP フロントエンドを既定で有効にする。Cloudflare Workers (wasm32) ビルドでは
+# `--no-default-features --features workers` を渡して tokio 依存を外すこと。
+default = ["tokio-transport"]
+# tokio 非同期ランタイムを使う `GameRoom::run` 等を有効化する。
+tokio-transport = ["dep:tokio"]
+# Cloudflare Workers 等のシングルスレッド WASM ランタイム向けフラグ（現状は副作用なし）。
+workers = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "sync", "fs", "test-util"] }
