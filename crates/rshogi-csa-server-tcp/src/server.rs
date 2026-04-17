@@ -870,10 +870,12 @@ async fn dispatch(
 
 /// 手番側残時間 + マージン + 猶予で時間切れ deadline を算出（run_loop と同等）。
 fn compute_timeup_deadline(room: &GameRoom) -> tokio::time::Instant {
+    // 手番側の予算（本体 + byoyomi）で deadline を計算する。本体残時間だけを使うと
+    // byoyomi 区間に入らず即 time-up してしまうバグになる（Codex 相談 2026-04-18）。
     let side: Color = room.position().side_to_move().into();
-    let remaining = room.clock_remaining_ms(side).max(0) as u64;
+    let turn_budget = room.clock_turn_budget_ms(side).max(0) as u64;
     let margin = room.time_margin_ms();
-    tokio::time::Instant::now() + Duration::from_millis(remaining + margin + 250)
+    tokio::time::Instant::now() + Duration::from_millis(turn_budget + margin + 250)
 }
 
 /// `<token>,T<sec>` 形式の broadcast 行を `(token, elapsed_sec)` に分解する。

@@ -2,6 +2,20 @@
 //!
 //! 秒読み方式（[`SecondsCountdownClock`]）は CSA 2014 改訂互換で、
 //! `Least_Time_Per_Move = 0`、経過時間は整数秒に切り捨てる。
+//!
+//! # API 設計メモ
+//!
+//! 残時間系 API は 2 種類に分かれる。意味を取り違えると deadline 計算を誤るため、
+//! 呼び出し側は用途に応じて使い分けること（Codex 相談 2026-04-18 の P1 指摘）。
+//!
+//! - [`TimeClock::remaining_main_ms`][]: **表示・ロギング用**の本体時間残り。
+//!   秒読みは含まない。対局者向け Game_Summary や GUI 表示で使う。
+//! - [`TimeClock::turn_budget_ms`][]: **deadline 計算用**の「今の 1 手で使える最大時間」。
+//!   秒読みは手番ごとにリセットされるため、`本体残り + byoyomi` 全量 を返す。
+//!   `run_loop::compute_deadline` などの時間切れアラームはこちらを使う。
+//!
+//! 旧 `remaining_ms` は意味がぶれて deadline 計算側で秒読みを無視するバグを招いたため、
+//! 本 Phase 1 で API を明示的に分離する破壊的変更を入れている。
 
 use crate::types::Color;
 
@@ -24,13 +38,19 @@ pub trait TimeClock {
     /// Game_Summary の `BEGIN Time` セクションを CSA 仕様の項目・順序・単位で出力する。
     fn format_summary(&self) -> String;
 
-    /// 指定対局者の残時間（ミリ秒）。
+    /// 指定対局者の **本体持ち時間** の残り（ミリ秒）。
     ///
-    /// 本体時間と秒読みを合算した残時間を返す。
-    /// 実装は 0 を下回らない値にクランプして返してよい
-    /// （[`SecondsCountdownClock`] は 0 止まり）。
+    /// 秒読みは含めない。GUI 表示・ログ・`HandleOutcome::MoveAccepted` の通知など、
+    /// 人間向けの情報提示で使う。0 を下回らずクランプされていてよい。
     /// 型が `i64` なのは将来他方式の時計で負値を許容する余地を残すため。
-    fn remaining_ms(&self, color: Color) -> i64;
+    fn remaining_main_ms(&self, color: Color) -> i64;
+
+    /// 指定対局者が **今の 1 手で使える最大時間** をミリ秒で返す。
+    ///
+    /// `run_loop::compute_deadline` など時間切れアラームの算出に使う。
+    /// 秒読み方式では `本体残り + byoyomi` を返す（秒読みは手番開始でリセットされるため
+    /// 前手の消費は引かない）。Fischer / StopWatch 方式も同じ意味で実装する。
+    fn turn_budget_ms(&self, color: Color) -> i64;
 }
 
 /// 秒読み方式の時計（CSA 2014 改訂互換）。
@@ -67,13 +87,25 @@ impl SecondsCountdownClock {
             Color::White => &mut self.remaining_white_ms,
         }
     }
+
+    fn slot(&self, color: Color) -> i64 {
+        match color {
+            Color::Black => self.remaining_black_ms,
+            Color::White => self.remaining_white_ms,
+        }
+    }
+
+    /// `byoyomi_seconds` をミリ秒単位で返す（ヘルパ）。
+    fn byoyomi_ms(&self) -> i64 {
+        self.byoyomi_seconds as i64 * 1000
+    }
 }
 
 impl TimeClock for SecondsCountdownClock {
     fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult {
         // 整数秒に切り捨て（CSA 2014 改訂）。
         let elapsed_sec = (elapsed_ms / 1000) as i64;
-        let byoyomi_ms = self.byoyomi_seconds as i64 * 1000;
+        let byoyomi_ms = self.byoyomi_ms();
         let slot = self.slot_mut(color);
 
         // 本体持ち時間の中で収まる場合は単純に減算する。
@@ -106,11 +138,14 @@ impl TimeClock for SecondsCountdownClock {
         out
     }
 
-    fn remaining_ms(&self, color: Color) -> i64 {
-        match color {
-            Color::Black => self.remaining_black_ms,
-            Color::White => self.remaining_white_ms,
-        }
+    fn remaining_main_ms(&self, color: Color) -> i64 {
+        // 本体時間のみ。秒読みは手番ごとにリセットされるので残量の概念は無い。
+        self.slot(color)
+    }
+
+    fn turn_budget_ms(&self, color: Color) -> i64 {
+        // 今の 1 手で使える最大時間 = 本体残り + 毎手 full 回復する byoyomi。
+        self.slot(color) + self.byoyomi_ms()
     }
 }
 
@@ -122,7 +157,7 @@ mod tests {
     fn continues_when_consume_within_main_time() {
         let mut c = SecondsCountdownClock::new(600, 10);
         assert_eq!(c.consume(Color::Black, 1_200), ClockResult::Continue);
-        assert_eq!(c.remaining_ms(Color::Black), 599_000);
+        assert_eq!(c.remaining_main_ms(Color::Black), 599_000);
     }
 
     #[test]
@@ -130,7 +165,7 @@ mod tests {
         let mut c = SecondsCountdownClock::new(10, 0);
         // 999ms は 0 秒に切り捨てられる
         assert_eq!(c.consume(Color::Black, 999), ClockResult::Continue);
-        assert_eq!(c.remaining_ms(Color::Black), 10_000);
+        assert_eq!(c.remaining_main_ms(Color::Black), 10_000);
     }
 
     #[test]
@@ -138,7 +173,7 @@ mod tests {
         let mut c = SecondsCountdownClock::new(5, 10);
         // 本体 5 秒ちょうど消費で、本体は 0、秒読みに残り 10 秒相当
         assert_eq!(c.consume(Color::Black, 5_000), ClockResult::Continue);
-        assert_eq!(c.remaining_ms(Color::Black), 0);
+        assert_eq!(c.remaining_main_ms(Color::Black), 0);
         // 以降、秒読み 10 秒以内であれば TimeUp にならない
         assert_eq!(c.consume(Color::Black, 9_000), ClockResult::Continue);
     }
@@ -167,6 +202,37 @@ mod tests {
         let mut c = SecondsCountdownClock::new(60, 5);
         assert_eq!(c.consume(Color::Black, 10_000), ClockResult::Continue);
         // 白の残時間は減らない
-        assert_eq!(c.remaining_ms(Color::White), 60_000);
+        assert_eq!(c.remaining_main_ms(Color::White), 60_000);
+    }
+
+    // ---- Codex 相談 2026-04-18 の P1 指摘回帰テスト ----
+
+    #[test]
+    fn turn_budget_includes_byoyomi_on_fresh_clock() {
+        // 本体 60 秒 + 秒読み 10 秒 → 初手の予算 70 秒。旧 API (remaining_ms) は 60 秒しか
+        // 返さず、deadline 計算が byoyomi を無視するバグの元だった。
+        let c = SecondsCountdownClock::new(60, 10);
+        assert_eq!(c.remaining_main_ms(Color::Black), 60_000);
+        assert_eq!(c.turn_budget_ms(Color::Black), 70_000);
+    }
+
+    #[test]
+    fn turn_budget_is_byoyomi_only_after_main_exhausted() {
+        // 本体 5 秒使い切り後、各手番は byoyomi 10 秒だけが予算。
+        let mut c = SecondsCountdownClock::new(5, 10);
+        assert_eq!(c.consume(Color::Black, 5_000), ClockResult::Continue);
+        assert_eq!(c.remaining_main_ms(Color::Black), 0);
+        assert_eq!(c.turn_budget_ms(Color::Black), 10_000);
+        // 次の手番も同じ予算（byoyomi はリセットされる）。
+        assert_eq!(c.consume(Color::Black, 9_000), ClockResult::Continue);
+        assert_eq!(c.turn_budget_ms(Color::Black), 10_000);
+    }
+
+    #[test]
+    fn turn_budget_zero_only_when_main_zero_and_byoyomi_zero() {
+        // byoyomi=0 かつ本体 0 でだけ予算 0（= 次の手で即 time-up）。
+        let mut c = SecondsCountdownClock::new(5, 0);
+        assert_eq!(c.consume(Color::Black, 5_000), ClockResult::Continue);
+        assert_eq!(c.turn_budget_ms(Color::Black), 0);
     }
 }

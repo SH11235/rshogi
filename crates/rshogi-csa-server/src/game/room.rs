@@ -90,8 +90,9 @@ pub enum HandleOutcome {
     MoveAccepted {
         /// 次に手を指す対局者。
         next_turn: Color,
-        /// 次手番側の残時間 (ms)。
-        remaining_ms: i64,
+        /// 次手番側の **本体持ち時間** の残り (ms)。秒読みは含まない（表示・ログ用）。
+        /// deadline 計算には [`GameRoom::clock_turn_budget_ms`] を使うこと。
+        remaining_main_ms: i64,
     },
     /// 終局確定。`broadcasts` に終局理由 → 勝敗コード列が積まれる。
     GameEnded(GameResult),
@@ -185,9 +186,20 @@ impl GameRoom {
         self.moves_played
     }
 
-    /// 指定側の現在残時間（ミリ秒）。`run_loop` で時計切れアラームを設定する際に使う。
-    pub fn clock_remaining_ms(&self, color: Color) -> i64 {
-        self.clock.remaining_ms(color)
+    /// 指定側の **本体持ち時間** の残り（ミリ秒）。秒読みは含まない。
+    ///
+    /// 表示・ログ・棋譜メタデータ用。deadline 計算には
+    /// [`Self::clock_turn_budget_ms`] を使うこと（秒読みを含んだ予算が必要なため）。
+    pub fn clock_remaining_main_ms(&self, color: Color) -> i64 {
+        self.clock.remaining_main_ms(color)
+    }
+
+    /// 指定側が今の 1 手で使える最大時間（ミリ秒、秒読み込み）。
+    ///
+    /// `run_loop` で時計切れアラームを設定する際に使う。秒読みは手番ごとに
+    /// リセットされるため、本 API は `本体残り + byoyomi` 全量を返す。
+    pub fn clock_turn_budget_ms(&self, color: Color) -> i64 {
+        self.clock.turn_budget_ms(color)
     }
 
     /// 設定済みの通信マージン（ミリ秒）。`run_loop` の `compute_deadline` から参照される。
@@ -477,11 +489,11 @@ impl GameRoom {
         self.turn_started_at_ms = Some(now_ms);
         let next_turn = from.opposite();
         let core_next: rshogi_core::types::Color = next_turn.into();
-        let remaining_ms = self.clock.remaining_ms(core_next.into());
+        let remaining_main_ms = self.clock.remaining_main_ms(core_next.into());
         Ok(HandleResult {
             outcome: HandleOutcome::MoveAccepted {
                 next_turn,
-                remaining_ms,
+                remaining_main_ms,
             },
             broadcasts,
         })

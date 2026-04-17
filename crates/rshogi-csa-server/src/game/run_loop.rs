@@ -104,19 +104,24 @@ enum Event {
     TimeUp,
 }
 
-/// 手番側の残時間 + 通信マージン + 通信猶予から `tokio::time::Instant` を計算する。
+/// 手番側の予算（本体 + byoyomi）+ 通信マージン + 通信猶予から
+/// `tokio::time::Instant` を計算する。
 ///
 /// `handle_move` 側は `consume(elapsed_ms - time_margin_ms)` で時計を進めるため、
-/// 物理時間が `remaining_ms + time_margin_ms` 以内に届く着手は合法。`run_loop` は
+/// 物理時間が `turn_budget_ms + time_margin_ms` 以内に届く着手は合法。`run_loop` は
 /// この境界に `TIMEUP_GRACE_MS` を足した時刻まで `recv_line` を待機する
 /// （Requirement 3.4 の時間切れ確定 と Requirement 3.6 の通信マージン両立）。
+///
+/// 旧実装は本体残時間のみを渡していたため、既定設定 `byoyomi=10` でも本体切れで
+/// 即 time-up していた（Codex 相談 2026-04-18 の P1 指摘）。本版は
+/// [`GameRoom::clock_turn_budget_ms`] で秒読みを含めた予算を取得する。
 fn compute_deadline(room: &GameRoom, _now_ms: u64) -> Instant {
     if !matches!(room.status(), GameStatus::Playing) {
         return Instant::now() + NEAR_INFINITE;
     }
     let side: Color = room.position().side_to_move().into();
-    let remaining_ms = room.clock_remaining_ms(side).max(0) as u64;
-    let wait_ms = remaining_ms + room.time_margin_ms() + TIMEUP_GRACE_MS;
+    let turn_budget_ms = room.clock_turn_budget_ms(side).max(0) as u64;
+    let wait_ms = turn_budget_ms + room.time_margin_ms() + TIMEUP_GRACE_MS;
     Instant::now() + Duration::from_millis(wait_ms)
 }
 
@@ -370,6 +375,64 @@ mod tests {
             result,
             GameResult::TimeUp {
                 loser: Color::Black
+            }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn run_allows_byoyomi_after_main_time_exhausted() {
+        // Codex 相談 2026-04-18 の P1 回帰: 本体持ち時間切れ後も byoyomi の範囲内なら
+        // time-up にならず、秒読みで指した手が正しく受理されること。
+        // 旧実装は `compute_deadline` が本体残時間のみを参照していたため、本体 2 秒 +
+        // 秒読み 10 秒設定でも 2.25 秒で勝手に time-up していた。
+        let config = GameRoomConfig {
+            game_id: GameId::new("g1"),
+            black: PlayerName::new("alice"),
+            white: PlayerName::new("bob"),
+            max_moves: 256,
+            time_margin_ms: 0,
+            entering_king_rule: EnteringKingRule::Point24,
+        };
+        let clock = Box::new(SecondsCountdownClock::new(2, 10));
+        let mut room = GameRoom::new(config, clock);
+        let MockHandles {
+            transport: mut sente,
+            tx: sente_tx,
+            outbox: _sente_out,
+        } = MockHandles::build("sente");
+        let MockHandles {
+            transport: mut gote,
+            tx: gote_tx,
+            outbox: _gote_out,
+        } = MockHandles::build("gote");
+        let bcast = MockBroadcaster {
+            sent: Rc::new(RefCell::new(Vec::new())),
+        };
+
+        let driver = async {
+            sente_tx.send(Ok(line("AGREE"))).unwrap();
+            advance().await;
+            gote_tx.send(Ok(line("AGREE"))).unwrap();
+            // 本体 2 秒を超える 8 秒経過してから sente が着手。旧実装ではこの時点で
+            // time-up していた。新実装は 2 + 10 + 0.25 = 12.25 秒が deadline なので合法。
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            sente_tx.send(Ok(line("+7776FU"))).unwrap();
+            advance().await;
+            gote_tx.send(Ok(line("%TORYO"))).unwrap();
+        };
+
+        let room_id = RoomId::new("g1");
+        let start = tokio::time::Instant::now();
+        let runner = run_room(&mut room, &mut sente, &mut gote, &bcast, &room_id, || {
+            tokio::time::Instant::now().saturating_duration_since(start).as_millis() as u64
+        });
+        let (_, result) = tokio::join!(driver, runner);
+        let result = result.unwrap();
+        // 秒読み内で sente の手が通り、gote 投了で sente 勝利。
+        assert!(matches!(
+            result,
+            GameResult::Toryo {
+                winner: Color::Black,
             }
         ));
     }
