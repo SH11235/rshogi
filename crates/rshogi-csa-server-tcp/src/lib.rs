@@ -7,11 +7,14 @@
 //! 公開 API は以下の通り:
 //! - [`transport::TcpTransport`]: 1 接続分の行 I/O を [`rshogi_csa_server::ClientTransport`] として提供。
 //! - [`broadcaster::InMemoryBroadcaster`]: 同一プロセス内で観戦者接続を保持する `Broadcaster` 実装。
+//! - [`auth`]: パスワードハッシュ照合と `RateStorage` 経由の認証経路。
 
+pub mod auth;
 pub mod broadcaster;
 pub mod phase_gate;
 pub mod transport;
 
+pub use auth::{AuthError, AuthOutcome, PasswordHasher, PlainPasswordHasher, authenticate};
 pub use broadcaster::InMemoryBroadcaster;
 pub use phase_gate::{CURRENT_PHASE, PHASE1_LOCK, PhaseGate, assert_phase1_only};
 pub use transport::TcpTransport;
