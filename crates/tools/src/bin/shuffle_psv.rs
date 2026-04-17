@@ -21,6 +21,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
+use log::{info, warn};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -60,10 +61,72 @@ struct Cli {
     /// デフォルト: 0（全レコードをメモリに読み込む）
     #[arg(long, default_value_t = 0)]
     chunk_size: usize,
+
+    /// メモリ不足でも強制続行
+    #[arg(long)]
+    force: bool,
 }
 
 /// 処理中にCtrl-Cが押されたかを追跡
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// /proc/meminfo から MemAvailable をバイト単位で取得する。
+fn get_mem_available() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kb_str = rest.trim().strip_suffix("kB")?.trim();
+            let kb: u64 = kb_str.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// バイト数を人間が読みやすい形式にフォーマットする。
+fn format_size(bytes: usize) -> String {
+    const GIB: usize = 1024 * 1024 * 1024;
+    const MIB: usize = 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    }
+}
+
+/// メモリ充足チェック。required_bytes が利用可能メモリの 80% を超える場合はエラーで停止する。
+/// --force 指定時は警告のみで続行。
+///
+/// 80% 閾値は、OS・他プロセス・バッファキャッシュ等に 20% の余裕を確保するため。
+const MEMORY_VALIDATION_RATIO: f64 = 0.8;
+
+fn check_memory(required_bytes: usize, force: bool) -> Result<()> {
+    if let Some(mem_available) = get_mem_available() {
+        let threshold = (mem_available as f64 * MEMORY_VALIDATION_RATIO) as usize;
+        info!(
+            "  required: {} / available: {} ({:.0}% threshold: {})",
+            format_size(required_bytes),
+            format_size(mem_available as usize),
+            MEMORY_VALIDATION_RATIO * 100.0,
+            format_size(threshold),
+        );
+        if required_bytes > threshold {
+            if force {
+                warn!("メモリ不足ですが --force が指定されているため続行します");
+            } else {
+                anyhow::bail!(
+                    "メモリ不足: {} 必要ですが、利用可能メモリは {} です。\n\
+                     対処法:\n\
+                     - --chunk-size を小さくする\n\
+                     - --force で強制続行（swap 使用の可能性あり）",
+                    format_size(required_bytes),
+                    format_size(mem_available as usize),
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -86,13 +149,13 @@ fn main() -> Result<()> {
     let record_count = file_size / RECORD_SIZE as u64;
 
     if file_size % RECORD_SIZE as u64 != 0 {
-        eprintln!(
-            "Warning: File size ({file_size}) is not a multiple of record size ({RECORD_SIZE}). \
+        warn!(
+            "File size ({file_size}) is not a multiple of record size ({RECORD_SIZE}). \
              Trailing bytes will be ignored.",
         );
     }
 
-    eprintln!(
+    info!(
         "Input file: {} ({} bytes, {} records)",
         cli.input.display(),
         file_size,
@@ -101,7 +164,7 @@ fn main() -> Result<()> {
 
     // 乱数生成器を初期化
     let mut rng = if let Some(seed) = cli.seed {
-        eprintln!("Using seed: {seed}");
+        info!("Using seed: {seed}");
         ChaCha8Rng::seed_from_u64(seed)
     } else {
         ChaCha8Rng::from_os_rng()
@@ -109,18 +172,26 @@ fn main() -> Result<()> {
 
     // シャッフル方式を選択
     if cli.chunk_size > 0 && record_count > cli.chunk_size as u64 {
-        eprintln!("Using chunked shuffle (chunk size: {} records)", cli.chunk_size);
-        shuffle_chunked(&cli.input, &cli.output, record_count, cli.chunk_size, &mut rng)?;
+        info!("Using chunked shuffle (chunk size: {} records)", cli.chunk_size,);
+        shuffle_chunked(
+            &cli.input,
+            &cli.output,
+            record_count,
+            cli.chunk_size,
+            cli.force,
+            &mut rng,
+        )?;
     } else {
-        eprintln!("Using in-memory shuffle");
-        // Note: 巨大ファイルでは一括 I/O のため、Ctrl-C の応答に時間がかかる場合がある
+        let data_bytes = record_count as usize * RECORD_SIZE;
+        info!("Using in-memory shuffle ({})", format_size(data_bytes));
+        check_memory(data_bytes, cli.force)?;
         shuffle_in_memory(&cli.input, &cli.output, record_count, &mut rng)?;
     }
 
     if INTERRUPTED.load(Ordering::SeqCst) {
-        eprintln!("Note: Processing was interrupted, output may be incomplete");
+        warn!("Processing was interrupted, output may be incomplete");
     } else {
-        eprintln!("Output: {}", cli.output.display());
+        info!("Output: {}", cli.output.display());
     }
 
     Ok(())
@@ -158,13 +229,11 @@ fn shuffle_in_memory(
 ) -> Result<()> {
     let data_size = record_count as usize * RECORD_SIZE;
     let data_mb = data_size / 1_000_000;
-    eprintln!("Estimated memory usage: {data_mb} MB");
+    info!("Estimated memory usage: {data_mb} MB");
 
     const LARGE_FILE_THRESHOLD_MB: usize = 4000;
     if data_mb > LARGE_FILE_THRESHOLD_MB {
-        eprintln!(
-            "Warning: Large memory allocation ({data_mb} MB). Consider using --chunk-size option.",
-        );
+        warn!("Large memory allocation ({data_mb} MB). Consider using --chunk-size option.");
     }
 
     // 読み込み（レコード単位の進捗表示）
@@ -193,7 +262,7 @@ fn shuffle_in_memory(
     progress.finish_with_message("Read complete");
 
     // Fisher-Yates in-place シャッフル（インデックス配列不要）
-    eprintln!("Shuffling...");
+    info!("Shuffling...");
     let records = bytes_as_records_mut(&mut buf);
     records.shuffle(rng);
 
@@ -220,7 +289,7 @@ fn shuffle_in_memory(
     }
     progress.finish_with_message("Done");
 
-    eprintln!("Shuffled {} records", record_count);
+    info!("Shuffled {} records", record_count);
     Ok(())
 }
 
@@ -235,6 +304,7 @@ fn shuffle_chunked(
     output_path: &PathBuf,
     record_count: u64,
     chunk_size: usize,
+    force: bool,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     let num_chunks = (record_count as usize).div_ceil(chunk_size);
@@ -251,12 +321,21 @@ fn shuffle_chunked(
         );
     }
 
-    eprintln!("Creating {num_chunks} temporary chunks");
+    // ランダム振り分け後の期待チャンクサイズで見積もる。
+    // chunk_size そのものではなく record_count / num_chunks を使うことで、
+    // record_count が chunk_size をわずかに超える場合の過大見積もりを防ぐ。
+    let expected_chunk_records = (record_count as usize).div_ceil(num_chunks);
+    let expected_chunk_bytes = expected_chunk_records * RECORD_SIZE;
+    info!(
+        "Creating {num_chunks} temporary chunks (expected max chunk: {})",
+        format_size(expected_chunk_bytes),
+    );
+    check_memory(expected_chunk_bytes, force)?;
 
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
 
     // Pass 1: 各レコードをランダムなチャンクに振り分け
-    eprintln!("Pass 1: Distributing records to chunks...");
+    info!("Pass 1: Distributing records to chunks...");
     let progress = ProgressBar::new(record_count);
     progress.set_style(progress_style("Pass 1"));
 
@@ -301,7 +380,7 @@ fn shuffle_chunked(
 
     // Pass 2: チャンクをバッチ並列でシャッフル → 即座に書き出し
     // メモリ使用量 = バッチサイズ（コア数）× チャンクサイズ に制限
-    eprintln!("Pass 2: Shuffling chunks in batches and writing...");
+    info!("Pass 2: Shuffling chunks in batches and writing...");
     let progress = ProgressBar::new(num_chunks as u64);
     progress.set_style(progress_style("Pass 2"));
 
@@ -315,7 +394,30 @@ fn shuffle_chunked(
         .with_context(|| format!("Failed to create {}", output_path.display()))?;
     let mut writer = BufWriter::with_capacity(BUF_SIZE, out_file);
 
-    let batch_size = rayon::current_num_threads();
+    // バッチサイズをメモリ上限で制限する。
+    // 各チャンクは最大 chunk_size * RECORD_SIZE バイトをメモリに展開するため、
+    // 同時にロードするチャンク数 × チャンクサイズが利用可能メモリを超えないようにする。
+    let max_chunk_bytes = chunk_size * RECORD_SIZE;
+    // OS・他プロセス・バッファキャッシュ等のための余裕を 30% 確保し、
+    // 利用可能メモリの 70% を上限とする。
+    const MEMORY_BUDGET_RATIO: f64 = 0.7;
+    let batch_size = {
+        let num_threads = rayon::current_num_threads();
+        // 非 Linux 環境では MemAvailable を取得できないため、制限なし（スレッド数で決定）
+        let mem_limit = get_mem_available().unwrap_or(u64::MAX);
+        let usable = (mem_limit as f64 * MEMORY_BUDGET_RATIO) as usize;
+        let by_memory = (usable / max_chunk_bytes).max(1);
+        let batch = num_threads.min(by_memory);
+        info!(
+            "  batch_size: {} (threads: {}, memory allows: {} chunks × {} = {})",
+            batch,
+            num_threads,
+            by_memory,
+            format_size(max_chunk_bytes),
+            format_size(by_memory * max_chunk_bytes),
+        );
+        batch
+    };
     for batch_start in (0..num_chunks).step_by(batch_size) {
         if INTERRUPTED.load(Ordering::SeqCst) {
             progress.abandon_with_message("Interrupted");
@@ -362,6 +464,6 @@ fn shuffle_chunked(
     writer.flush()?;
     progress.finish();
 
-    eprintln!("Shuffling complete");
+    info!("Shuffling complete");
     Ok(())
 }

@@ -17,6 +17,12 @@
 ///   cargo run --release --bin psv_dedup_bloom -- \
 ///     --input-dir /path/to/dir \
 ///     --output deduped.bin --fpr 0.0001
+///
+///   # reference モード: 既存ファイルから bloom だけ構築し、入力をフィルタ
+///   cargo run --release --bin psv_dedup_bloom -- \
+///     --reference existing_deduped.bin \
+///     --input new_data.bin \
+///     --output unique_new.bin
 use std::{
     fs::File,
     io::{self, BufReader, BufWriter, Read, Write},
@@ -32,6 +38,11 @@ use tools::common::dedup::{PSV_SIZE, SFEN_SIZE, check_output_not_in_inputs, coll
     about = "ブルームフィルタによる大規模 PSV 重複除去"
 )]
 struct Args {
+    /// 参照ファイル（カンマ区切りで複数可）。bloom filter に登録するが出力しない。
+    /// 既存の dedup 済みファイルを指定し、入力ファイルとの差分だけを出力する用途。
+    #[arg(long)]
+    reference: Option<String>,
+
     /// 入力 PSV ファイル（カンマ区切りで複数可）。--input-dir と排他
     #[arg(long)]
     input: Option<String>,
@@ -186,6 +197,43 @@ fn format_gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
+/// reference ファイルパスをパースする（カンマ区切り）。
+fn parse_reference_paths(reference: &str) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for s in reference.split(',') {
+        let p = PathBuf::from(s.trim());
+        if !p.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("reference ファイルが見つかりません: {}", p.display()),
+            ));
+        }
+        paths.push(p);
+    }
+    Ok(paths)
+}
+
+/// ファイル群のレコード数を集計して表示する。
+fn count_records(label: &str, paths: &[PathBuf]) -> io::Result<u64> {
+    let mut total: u64 = 0;
+    eprintln!("[{label}]");
+    for p in paths {
+        let sz = std::fs::metadata(p)?.len();
+        let n = sz / PSV_SIZE as u64;
+        if sz % PSV_SIZE as u64 != 0 {
+            eprintln!(
+                "Warning: {} のサイズが {} の倍数ではありません (残余 {} bytes)",
+                p.display(),
+                PSV_SIZE,
+                sz % PSV_SIZE as u64,
+            );
+        }
+        total += n;
+        eprintln!("  {}: {n} records ({:.2} GB)", p.display(), sz as f64 / 1e9);
+    }
+    Ok(total)
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
@@ -196,14 +244,22 @@ fn main() -> io::Result<()> {
         ));
     }
 
-    let paths = collect_input_paths(args.input.as_deref(), args.input_dir.as_ref(), &args.pattern)?;
-    if paths.is_empty() {
+    // reference ファイルのパース
+    let ref_paths = match &args.reference {
+        Some(r) => parse_reference_paths(r)?,
+        None => Vec::new(),
+    };
+
+    let input_paths =
+        collect_input_paths(args.input.as_deref(), args.input_dir.as_ref(), &args.pattern)?;
+    if input_paths.is_empty() {
         eprintln!("入力ファイルが見つかりません");
         return Ok(());
     }
 
-    // 入力と出力の重複チェック（出力ファイルが未作成でも検出可能）
-    check_output_not_in_inputs(&args.output, &paths)?;
+    // 入力と出力の重複チェック
+    check_output_not_in_inputs(&args.output, &input_paths)?;
+    check_output_not_in_inputs(&args.output, &ref_paths)?;
 
     // 出力先の親ディレクトリ存在確認（ブルームフィルタ確保前に検出する）
     if let Some(parent) = args.output.parent()
@@ -217,34 +273,29 @@ fn main() -> io::Result<()> {
     }
 
     // ファイルサイズからレコード数を算出
-    let mut total_expected: u64 = 0;
-    for p in &paths {
-        let sz = std::fs::metadata(p)?.len();
-        let n = sz / PSV_SIZE as u64;
-        if sz % PSV_SIZE as u64 != 0 {
-            eprintln!(
-                "Warning: {} のサイズが {} の倍数ではありません (残余 {} bytes)",
-                p.display(),
-                PSV_SIZE,
-                sz % PSV_SIZE as u64,
-            );
-        }
-        total_expected += n;
-        eprintln!("  {}: {n} records ({:.2} GB)", p.display(), sz as f64 / 1e9);
-    }
-    if args.max_positions > 0 && args.max_positions < total_expected {
-        total_expected = args.max_positions;
-    }
-    eprintln!("Total expected records: {total_expected}");
+    let ref_expected = if ref_paths.is_empty() {
+        0u64
+    } else {
+        count_records("Reference", &ref_paths)?
+    };
+    let input_expected = count_records("Input", &input_paths)?;
 
-    if total_expected == 0 {
+    // bloom のサイジングは reference + input の全件で行う。
+    // --max-positions は Phase 2 の出力上限であり、bloom 容量の制限には使わない。
+    // （reference 全件を bloom に登録するため、ここで cap すると FPR が悪化する）
+    let total_expected_for_bloom = ref_expected + input_expected;
+    eprintln!(
+        "Total expected records for bloom sizing: {total_expected_for_bloom} (ref: {ref_expected}, input: {input_expected})"
+    );
+
+    if input_expected == 0 {
         eprintln!("処理対象レコードが 0 件のため終了します");
         return Ok(());
     }
 
     // ブルームフィルタサイズ算出（確保前）
-    let params = BloomFilter::estimate(total_expected, args.fpr);
-    let elements_per_block = total_expected as f64 / params.num_blocks as f64;
+    let params = BloomFilter::estimate(total_expected_for_bloom, args.fpr);
+    let elements_per_block = total_expected_for_bloom as f64 / params.num_blocks as f64;
     eprintln!(
         "Blocked Bloom filter: {} ({} blocks × {} bits, k={}, ~{:.1} elem/block), target FPR={:.4}%",
         format_gib(params.size_bytes),
@@ -275,7 +326,7 @@ fn main() -> io::Result<()> {
                          - --force で強制続行（swap 使用の可能性あり）",
                     format_gib(params.size_bytes),
                     format_gib(mem_available),
-                    format_gib(BloomFilter::estimate(total_expected, 0.01).size_bytes),
+                    format_gib(BloomFilter::estimate(total_expected_for_bloom, 0.01).size_bytes),
                 )));
             }
         }
@@ -290,22 +341,75 @@ fn main() -> io::Result<()> {
     let mut bloom = BloomFilter::allocate(&params);
     eprintln!("Bloom filter allocated.");
 
-    // 出力
+    let start = std::time::Instant::now();
+
+    // --- Phase 1: reference ファイルを bloom に登録（出力しない） ---
+    let mut ref_records = 0u64;
+    if !ref_paths.is_empty() {
+        eprintln!("=== Phase 1: Reference files (bloom registration only) ===");
+        let mut sfen_buf = [0u8; SFEN_SIZE];
+        let mut skip_buf = [0u8; PSV_SIZE - SFEN_SIZE];
+
+        for path in &ref_paths {
+            eprintln!("  Loading: {}", path.display());
+            let file = File::open(path)?;
+            let mut reader = BufReader::with_capacity(8 << 20, file);
+
+            loop {
+                match reader.read_exact(&mut sfen_buf) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => return Err(e),
+                }
+                // PSV の残り (score, move 等) は読み飛ばす
+                if let Err(e) = reader.read_exact(&mut skip_buf) {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        break;
+                    }
+                    return Err(e);
+                }
+
+                bloom.insert_or_check(&sfen_buf);
+                ref_records += 1;
+
+                if ref_records.is_multiple_of(100_000_000) {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let speed = ref_records as f64 / elapsed / 1e6;
+                    let remaining = ref_expected.saturating_sub(ref_records) as f64 / (speed * 1e6);
+                    eprintln!(
+                        "  {:.0}M loaded, {:.1}s ({:.1}M rec/s, ETA {:.0}s)",
+                        ref_records as f64 / 1e6,
+                        elapsed,
+                        speed,
+                        remaining,
+                    );
+                }
+            }
+        }
+        let phase1_elapsed = start.elapsed().as_secs_f64();
+        eprintln!("  Reference loaded: {} records in {:.1}s", ref_records, phase1_elapsed,);
+    }
+
+    // --- Phase 2: 入力ファイルをフィルタして出力 ---
+    if !ref_paths.is_empty() {
+        eprintln!("=== Phase 2: Filter input files ===");
+    }
+
     let out_file = File::create(&args.output)?;
     let mut writer = BufWriter::with_capacity(8 << 20, out_file);
 
-    let mut total_records = 0u64;
+    let mut input_records = 0u64;
     let mut written_records = 0u64;
     let mut buf = [0u8; PSV_SIZE];
-    let start = std::time::Instant::now();
+    let phase2_start = std::time::Instant::now();
 
-    for path in &paths {
+    for path in &input_paths {
         eprintln!("Reading: {}", path.display());
         let file = File::open(path)?;
         let mut reader = BufReader::with_capacity(8 << 20, file);
 
         loop {
-            if args.max_positions > 0 && total_records >= args.max_positions {
+            if args.max_positions > 0 && input_records >= args.max_positions {
                 break;
             }
 
@@ -315,7 +419,7 @@ fn main() -> io::Result<()> {
                 Err(e) => return Err(e),
             }
 
-            total_records += 1;
+            input_records += 1;
 
             let sfen: &[u8; SFEN_SIZE] = buf[..SFEN_SIZE].try_into().unwrap();
             if !bloom.insert_or_check(sfen) {
@@ -323,13 +427,13 @@ fn main() -> io::Result<()> {
                 written_records += 1;
             }
 
-            if total_records.is_multiple_of(100_000_000) {
-                let elapsed = start.elapsed().as_secs_f64();
-                let speed = total_records as f64 / elapsed / 1e6;
-                let remaining = (total_expected - total_records) as f64 / (speed * 1e6);
+            if input_records.is_multiple_of(100_000_000) {
+                let elapsed = phase2_start.elapsed().as_secs_f64();
+                let speed = input_records as f64 / elapsed / 1e6;
+                let remaining = input_expected.saturating_sub(input_records) as f64 / (speed * 1e6);
                 eprintln!(
                     "  {:.0}M read, {:.0}M written, {:.1}s ({:.1}M rec/s, ETA {:.0}s)",
-                    total_records as f64 / 1e6,
+                    input_records as f64 / 1e6,
                     written_records as f64 / 1e6,
                     elapsed,
                     speed,
@@ -342,18 +446,21 @@ fn main() -> io::Result<()> {
     writer.flush()?;
 
     let elapsed = start.elapsed().as_secs_f64();
-    let removed = total_records - written_records;
-    let removed_pct = if total_records > 0 {
-        100.0 * removed as f64 / total_records as f64
+    let removed = input_records - written_records;
+    let removed_pct = if input_records > 0 {
+        100.0 * removed as f64 / input_records as f64
     } else {
         0.0
     };
 
     println!("=== Bloom Dedup Summary ===");
-    println!("Input records:   {total_records}");
+    if ref_records > 0 {
+        println!("Reference records: {ref_records}");
+    }
+    println!("Input records:   {input_records}");
     println!(
         "Output records:  {written_records} ({:.2}%)",
-        100.0 * written_records as f64 / total_records.max(1) as f64,
+        100.0 * written_records as f64 / input_records.max(1) as f64,
     );
     println!("Removed:         {removed} ({removed_pct:.4}%)");
     println!("FPR setting:     {:.4}%", args.fpr * 100.0);

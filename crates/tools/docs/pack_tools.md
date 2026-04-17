@@ -123,6 +123,63 @@ cargo run -p tools --release --bin psv_to_jsonl -- \
 {"sfen":"lnsgkgsnl/...","score":123,"depth":0,"best_move":"7g7f","nodes":0}
 ```
 
+### expand_psv_from_policy
+
+dlshogi 系 ONNX モデルのポリシー出力を使い、各局面の合法手のうち選択確率が閾値を超える手の
+次局面を新しい PSV として書き出す。学習データの局面カバレッジを拡張する用途に使用。
+
+AobaZero (`--onnx-model`) と標準 dlshogi (`--dlshogi-onnx-model`, DL水匠等) の両方に対応。
+
+**前提条件**: ONNX Runtime のセットアップが必要。詳細は [rescore_psv.md](rescore_psv.md) を参照。
+
+```bash
+# ビルド（両モデル対応にする場合）
+cargo build --release -p tools --features aobazero-onnx,dlshogi-onnx --bin expand_psv_from_policy
+
+# AobaZero モデルで実行
+ORT_DYLIB_PATH=~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib/libonnxruntime.so \
+cargo run --release -p tools --features aobazero-onnx --bin expand_psv_from_policy -- \
+  --input data.psv --output expanded.psv \
+  --onnx-model aoba_model.onnx
+
+# 標準 dlshogi モデル (DL水匠等) で実行
+ORT_DYLIB_PATH=~/lib/onnxruntime-linux-x64-gpu-1.24.2/lib/libonnxruntime.so \
+cargo run --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy -- \
+  --input data.psv --output expanded.psv \
+  --dlshogi-onnx-model dlshogi_model.onnx
+```
+
+| オプション | 説明 | デフォルト |
+|------------|------|------------|
+| `-i, --input` | 入力 PSV ファイル | 必須 |
+| `-o, --output` | 出力 PSV ファイル | 必須 |
+| `--onnx-model` | AobaZero ONNX モデル（排他） | - |
+| `--dlshogi-onnx-model` | 標準 dlshogi ONNX モデル（排他） | - |
+| `--draw-ply` | 引き分け手数（`--onnx-model` 使用時のみ） | 0 |
+| `--batch-size` | 推論バッチサイズ | 1024 |
+| `--gpu-id` | GPU デバイス ID（-1 で CPU） | 0 |
+| `--tensorrt` | TensorRT EP を使用 | false |
+| `--tensorrt-cache` | TensorRT エンジンキャッシュディレクトリ | - |
+| `--threshold` | 選択確率の閾値（%） | 10.0 |
+
+出力 PSV の `score`、`move16`、`game_result` は 0 で初期化される。
+必要に応じて `rescore_psv` でスコアを付与すること。
+
+処理中は進捗バー（局面数、処理速度、経過時間）が表示される。
+Ctrl+C で安全に中断可能（現在のバッチ完了後に停止）。
+
+#### 参考性能値
+
+DL水匠15b (55MB) + RTX 3080 Ti, CUDA EP, 50 万局面 (threshold=10%):
+
+| バッチサイズ | 処理時間 | スループット | 展開率 |
+|:---:|:---:|:---:|:---:|
+| 256 | 66s | ~7,600 局面/s | 2.17x |
+| 1024 | 63s | ~8,000 局面/s | 2.17x |
+| 2048 | 58s | ~8,600 局面/s | 2.17x |
+
+GPU 推論が律速のため、バッチサイズ 1024〜2048 が推奨。
+
 ### fix_scores
 
 スコアの補正処理。
@@ -168,6 +225,27 @@ cargo run -p tools --release --bin shuffle_psv -- \
 cargo run -p tools --release --bin preprocess_psv -- \
   --input data.psv --output processed.psv \
   --nnue model.nnue --rescore --skip-in-check
+```
+
+### ポリシーネットワークで局面を拡張する場合
+
+dlshogi モデルの有力手から次局面を生成し、学習データを増やす：
+
+```bash
+# 1. ポリシーで局面拡張（確率 10% 超の手の次局面を生成）
+cargo run --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy -- \
+  --input data.psv --output expanded.psv \
+  --onnx-model model.onnx --threshold 10.0
+
+# 2. 拡張局面にスコアを付与
+cargo run -p tools --release --bin rescore_psv -- \
+  --input expanded.psv --output-dir rescored/ \
+  --nnue model.nnue --use-qsearch
+
+# 3. 元データと結合してシャッフル
+cat data.psv rescored/expanded.psv > combined.psv
+cargo run -p tools --release --bin shuffle_psv -- \
+  --input combined.psv --output training_shuffled.psv
 ```
 
 ## 注意事項

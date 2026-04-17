@@ -120,14 +120,6 @@ cargo run -p tools --bin spsa_stats_to_plot_csv -- \
   --window 16
 ```
 
-### 6. shogitest 連携
-
-```bash
-# tuned.params を shogitest の option 形式に変換
-cargo run -p tools --bin params_to_shogitest_options -- \
-  "${RUN_DIR}/tuned.params" --one-per-line
-```
-
 ## 自己対局 (engine_selfplay)
 
 ### 基本（学習データ生成）
