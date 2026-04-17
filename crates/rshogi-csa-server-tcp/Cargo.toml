@@ -8,6 +8,7 @@ license = "GPL-3.0-only"
 repository = "https://github.com/SH11235/rshogi"
 
 [dependencies]
+rshogi-core = { path = "../rshogi-core" }
 rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false, features = ["tokio-transport"] }
 anyhow.workspace = true
 thiserror.workspace = true
@@ -21,6 +22,10 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 
 [features]
 default = []
+
+[[bin]]
+name = "rshogi-csa-server-tcp"
+path = "src/bin/main.rs"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "sync", "fs", "net", "test-util"] }
