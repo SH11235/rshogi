@@ -747,6 +747,107 @@ mod tests {
         assert_eq!(r.broadcasts[0].line.as_str(), "+7776FU,T2");
     }
 
+    // ---- 通信マージン境界値テスト（Codex 相談 2026-04-18 の申し送り 1）----
+
+    fn room_with(time_margin_ms: u64, total_sec: u32, byoyomi_sec: u32) -> GameRoom {
+        let config = GameRoomConfig {
+            game_id: GameId::new("g"),
+            black: PlayerName::new("a"),
+            white: PlayerName::new("b"),
+            max_moves: 256,
+            time_margin_ms,
+            entering_king_rule: EnteringKingRule::Point24,
+        };
+        let clock = Box::new(SecondsCountdownClock::new(total_sec, byoyomi_sec));
+        GameRoom::new(config, clock)
+    }
+
+    #[test]
+    fn time_margin_larger_than_elapsed_clamps_to_zero_consume() {
+        // (a) time_margin_ms > elapsed_ms の場合、saturating_sub で consume 引数が 0
+        //     になり、手番は時間消費ゼロで受理される（margin が elapsed を完全吸収）。
+        let mut room = room_with(5_000, 60, 0);
+        agree_both(&mut room);
+        let r = room.handle_line(Color::Black, &line("+7776FU"), 1_000).unwrap();
+        assert_eq!(r.broadcasts[0].line.as_str(), "+7776FU,T0");
+    }
+
+    #[test]
+    fn move_at_exact_main_time_boundary_enters_byoyomi_without_timeup() {
+        // (c) 秒読み突入直前: 本体 5 秒を使い切って consume(5000ms) を渡すと
+        //     ClockResult::Continue で秒読み区間に乗り換える。時間切れにならず、
+        //     対局は続行。`consume` 単体の境界は clock.rs::enters_byoyomi_when_main_exhausted
+        //     でカバーされているが、`GameRoom` 層での挙動もここで固定する。
+        let mut room = room_with(0, 5, 10);
+        agree_both(&mut room);
+        // margin=0 なので elapsed_ms がそのまま consume に渡る。
+        let r = room.handle_line(Color::Black, &line("+7776FU"), 5_000).unwrap();
+        assert!(matches!(
+            r.outcome,
+            HandleOutcome::MoveAccepted {
+                next_turn: Color::White,
+                ..
+            }
+        ));
+        assert_eq!(r.broadcasts[0].line.as_str(), "+7776FU,T5");
+    }
+
+    #[test]
+    fn move_at_exact_byoyomi_limit_is_still_accepted() {
+        // (d) 秒読み使い切り直前: 本体 0 + 秒読み 10 秒 + ぴったり 10 秒経過で
+        //     consume(10_000ms) = over_sec 10 * 1000 == byoyomi_ms なので境界条件
+        //     `over_sec * 1000 > byoyomi_ms` は false → Continue。
+        //     Handle_line はこれを MoveAccepted として受理する必要がある。
+        let mut room = room_with(0, 0, 10);
+        agree_both(&mut room);
+        let r = room.handle_line(Color::Black, &line("+7776FU"), 10_000).unwrap();
+        assert!(matches!(
+            r.outcome,
+            HandleOutcome::MoveAccepted {
+                next_turn: Color::White,
+                ..
+            }
+        ));
+        assert_eq!(r.broadcasts[0].line.as_str(), "+7776FU,T10");
+    }
+
+    #[test]
+    fn move_one_ms_over_byoyomi_boundary_times_out() {
+        // (d') 秒読み使い切り直後: consume(11_000ms) は over_sec=11、11*1000 > 10_000
+        //      で TimeUp。(d) と (d') で境界条件の両側をテストする。
+        let mut room = room_with(0, 0, 10);
+        agree_both(&mut room);
+        let r = room.handle_line(Color::Black, &line("+7776FU"), 11_000).unwrap();
+        assert!(matches!(
+            r.outcome,
+            HandleOutcome::GameEnded(GameResult::TimeUp {
+                loser: Color::Black
+            })
+        ));
+    }
+
+    #[test]
+    fn move_at_main_plus_margin_boundary_is_accepted() {
+        // (e) 本体 + margin の合算ちょうど: 本体 5 秒 + margin 1500ms のとき
+        //     elapsed 6500ms で着手 → consume(5000ms) → Black の本体を使い切って 0 に
+        //     落ちる（Continue 扱いで対局続行）。MoveAccepted.remaining_main_ms は
+        //     「次手番側 (White) の本体残り」なので、White 未消費の 5000ms が返る。
+        //     Black 側が実際に 0 まで落ちたことは broadcast の `,T5` で確認する。
+        let mut room = room_with(1_500, 5, 0);
+        agree_both(&mut room);
+        let r = room.handle_line(Color::Black, &line("+7776FU"), 6_500).unwrap();
+        assert!(matches!(
+            r.outcome,
+            HandleOutcome::MoveAccepted {
+                next_turn: Color::White,
+                remaining_main_ms: 5_000,
+            }
+        ));
+        assert_eq!(r.broadcasts[0].line.as_str(), "+7776FU,T5");
+        // Black 側の本体持ち時間が 0 まで落ちていることを直接確認。
+        assert_eq!(room.clock_remaining_main_ms(Color::Black), 0);
+    }
+
     #[test]
     fn keep_alive_does_not_change_state() {
         let mut room = make_room();
