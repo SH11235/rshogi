@@ -36,7 +36,8 @@ pub use port::{
 pub use protocol::command::{ClientCommand, parse_command};
 pub use protocol::summary::{GameSummaryBuilder, standard_initial_position_block};
 pub use record::kifu::{
-    KifuMove, KifuRecord, format_zerozero_list_line, illegal_reason_subcode, winner_of,
+    KifuMove, KifuRecord, format_zerozero_list_line, illegal_reason_subcode, primary_result_code,
+    winner_of,
 };
 #[cfg(feature = "tokio-transport")]
 pub use storage::file::FileKifuStorage;

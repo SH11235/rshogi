@@ -35,7 +35,7 @@ use rshogi_csa_server::port::{
 };
 use rshogi_csa_server::protocol::command::{ClientCommand, parse_command};
 use rshogi_csa_server::protocol::summary::{GameSummaryBuilder, standard_initial_position_block};
-use rshogi_csa_server::record::kifu::{KifuMove, KifuRecord};
+use rshogi_csa_server::record::kifu::{KifuMove, KifuRecord, primary_result_code};
 use rshogi_csa_server::types::{
     Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, RoomId,
 };
@@ -925,24 +925,13 @@ where
         gote: matched.white.clone(),
         start_time: start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         end_time: end_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        result_code: result_code_for_list(result),
+        // 00LIST の結果コードは core crate の `primary_result_code` を唯一の情報源として使う
+        // （Codex 相談 2026-04-18: TCP 側との二重定義を避けて #OUTE_SENNICHITE 等の語彙方針
+        // が片側だけズレないようにする）。
+        result_code: primary_result_code(result).to_owned(),
     };
     state.kifu_storage.append_summary(&entry).await.map_err(ServerError::Storage)?;
     Ok(())
-}
-
-fn result_code_for_list(result: &GameResult) -> String {
-    match result {
-        GameResult::Toryo { .. } => "#RESIGN",
-        GameResult::TimeUp { .. } => "#TIME_UP",
-        GameResult::IllegalMove { .. } => "#ILLEGAL_MOVE",
-        GameResult::Kachi { .. } => "#JISHOGI",
-        GameResult::OuteSennichite { .. } => "#OUTE_SENNICHITE",
-        GameResult::Sennichite => "#SENNICHITE",
-        GameResult::MaxMoves => "#MAX_MOVES",
-        GameResult::Abnormal { .. } => "#ABNORMAL",
-    }
-    .to_owned()
 }
 
 /// `SharedState` を組み立てるヘルパ（運用コードとテストで再利用）。

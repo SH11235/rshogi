@@ -156,7 +156,11 @@ pub fn format_zerozero_list_line(
 ///
 /// 00LIST の `result_code` 列は CSA プロトコル通知コード (`#...`) を採用する
 /// （Ruby `mk_rate` 互換）。棋譜本体の特殊手 (`%...`) とは語彙が異なる点に注意。
-fn primary_result_code(result: &GameResult) -> &'static str {
+///
+/// フロントエンド crate からも同じ語彙で `GameSummaryEntry::result_code` を
+/// 埋めるため `pub` で公開している（Codex 相談 2026-04-18: TCP 側に二重定義を
+/// 作らないためのシングルソース）。
+pub fn primary_result_code(result: &GameResult) -> &'static str {
     match result {
         GameResult::Toryo { .. } => "#RESIGN",
         GameResult::TimeUp { .. } => "#TIME_UP",
