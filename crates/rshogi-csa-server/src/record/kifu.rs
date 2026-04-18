@@ -5,6 +5,15 @@
 //!
 //! 設計書 §KifuWriter に対応するモジュール。Phase 1 では Floodgate 拡張の
 //! `'eval pv` コメントは `KifuMove::comment` に String として埋め込む形で支援する。
+//!
+//! # 記号方針
+//!
+//! 棋譜本体（`%...`）と 00LIST（`#...`）で語彙が異なる点は
+//! `docs/csa-server/design.md` §6.5.1 を参照。特に連続王手千日手は棋譜本体が
+//! `%ILLEGAL_MOVE` + `'OUTE_SENNICHITE` コメント、00LIST が `#OUTE_SENNICHITE`
+//! の二層運用になっている（CSA 標準パーサ `rshogi_csa::parse_special_move` が
+//! `%OUTE_SENNICHITE` を受理しないため）。結果コードは必ず
+//! [`primary_result_code`] を単一ソースとして参照すること。
 
 use std::fmt::Write as _;
 
