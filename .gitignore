@@ -59,6 +59,9 @@ spsa_params/
 memo/
 docs/archive/
 
+# Kiro spec workspace (local planning artifacts, not for VCS)
+.kiro/
+
 # Data files
 data/
 
