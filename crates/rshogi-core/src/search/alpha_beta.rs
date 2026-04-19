@@ -755,10 +755,19 @@ impl SearchWorker {
             }
             // LayerStacks 用 AccumulatorCaches を初期化
             if network.is_layer_stacks() {
-                if self.state.acc_cache.is_none()
-                    && let crate::nnue::NNUENetwork::LayerStacks(ls_net) = &*network
-                {
-                    self.state.acc_cache = Some(ls_net.new_acc_cache());
+                if let crate::nnue::NNUENetwork::LayerStacks(ls_net) = &*network {
+                    // 既存 cache があっても L1 バリアント（1536/768/512）が不一致なら破棄。
+                    // 同一プロセスで EvalFile をリロードして L1 が変わった場合、旧 cache
+                    // variant を保持したままだと `LayerStacksNetwork::update_accumulator`
+                    // の cache 経路が pattern match で外れ、Finny-table caching が
+                    // 静かに無効化される（PR #466 Codex review P2 #2）。
+                    let need_new_cache = match &self.state.acc_cache {
+                        None => true,
+                        Some(cache) => cache.l1_size() != ls_net.l1_size(),
+                    };
+                    if need_new_cache {
+                        self.state.acc_cache = Some(ls_net.new_acc_cache());
+                    }
                 }
                 // 新しいゲーム開始時にキャッシュを無効化（usinewgame 経由で呼ばれる）
                 if let Some(cache) = &mut self.state.acc_cache {

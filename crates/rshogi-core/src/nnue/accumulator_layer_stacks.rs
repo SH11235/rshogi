@@ -601,6 +601,28 @@ pub enum LayerStacksAccCache {
 }
 
 impl LayerStacksAccCache {
+    /// この cache の L1 サイズを返す
+    ///
+    /// ネットワーク reload で L1 バリアントが変わったときに、旧 cache を
+    /// 使い回してしまう事故を防ぐため、`prepare_search` 側で
+    /// `network.l1_size()` と比較するために使う。
+    pub fn l1_size(&self) -> usize {
+        match self {
+            #[cfg(feature = "layerstacks-1536")]
+            Self::L1536(_) => 1536,
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(_) => 768,
+            #[cfg(feature = "layerstacks-512")]
+            Self::L512(_) => 512,
+            #[cfg(not(any(
+                feature = "layerstacks-1536",
+                feature = "layerstacks-768",
+                feature = "layerstacks-512"
+            )))]
+            _ => unreachable!("no LayerStacks variant enabled"),
+        }
+    }
+
     /// 全エントリを無効化
     pub fn invalidate(&mut self) {
         match self {
