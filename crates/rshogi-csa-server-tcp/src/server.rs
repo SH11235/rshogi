@@ -754,10 +754,19 @@ where
     .await;
     let end_time = chrono::Utc::now();
 
-    // 終局（正常 / I/O 失敗いずれも）を観測したら即座に GameRegistry から外す。
-    // persist_kifu は遅いストレージで時間がかかり得るので、先に登録を外して
-    // 「進行中対局」の鮮度を保つ。`drive_game` epilogue の unregister は idempotent
-    // なのでダブルコールでも安全。
+    // 終局（正常 / I/O 失敗いずれも）を観測したら、League の状態遷移と
+    // GameRegistry の unregister を persist_kifu より先に行う。`%%WHO` は
+    // `League` を、`%%LIST` / `%%SHOW` は `GameRegistry` を読むので、両者を
+    // 同じタイミングで「対局終了」側に寄せることで、遅いストレージを使う
+    // 運用でも WHO と LIST / SHOW の一貫性が保たれる（`persist_kifu` 中に
+    // `%%WHO` が `playing:<game_id>` を返す一方で `%%LIST` では既に消えて
+    // いる、という不整合を防ぐ）。`drive_game` epilogue の end_game / logout /
+    // unregister はいずれも idempotent なので、ここで先行してもダブルコール
+    // で破綻しない。
+    {
+        let mut league = state.league.lock().await;
+        let _ = league.end_game(&matched);
+    }
     {
         let mut games = state.games.lock().await;
         games.unregister(game_id);
