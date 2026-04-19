@@ -246,6 +246,18 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     pub fn read_threat_weights<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
         let weight_count = THREAT_DIMENSIONS * L1;
         self.threat_weights = AlignedBox::new_zeroed(weight_count);
+        // SAFETY:
+        // - `AlignedBox::new_zeroed(weight_count)` は `weight_count` 個の `i8`
+        //   を保持する領域をゼロ初期化で確保している。
+        // - `i8` と `u8` はサイズ (1 バイト) もアラインメントも同一で、任意の
+        //   バイトパターンが両者とも valid（Rust reference: "Numeric types").
+        //   よって `*mut i8 → *mut u8` のキャストは valid で、同じメモリ領域を
+        //   バイト列として参照するスライスを作るのは安全。
+        // - 作ったスライスは `read_exact` 呼び出しの内側でしか使わず、
+        //   関数リターン前にドロップされる。`self.threat_weights` への排他可変
+        //   参照は関数シグネチャで保証されており、重複参照は発生しない。
+        // - `weight_count == THREAT_DIMENSIONS * L1` は `AlignedBox` の長さと
+        //   一致するため、`from_raw_parts_mut` の length 要件を満たす。
         let slice = unsafe {
             std::slice::from_raw_parts_mut(
                 self.threat_weights.as_mut_ptr() as *mut u8,
@@ -279,6 +291,17 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         // AVX2: 128bit i8 → 256bit i16 sign-extend + add, L1/16 iterations
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
+            // SAFETY:
+            // - `acc_ptr`: 呼び出し元が `AccumulatorLayerStacks::get_threat_mut()`
+            //   等から取得する `&mut [i16; L1]` (親構造体 `AccumulatorLayerStacks`
+            //   が `#[repr(C, align(64))]` で 64 バイトアライン）→
+            //   `_mm256_load_si256` / `_mm256_store_si256` の 32 バイトアライン
+            //   要件を満たす
+            // - `w_ptr`: `AlignedBox<i8>` のポインタ。`_mm_loadu_si128`
+            //   （非アラインロード）を使っているためアライメント要件は無い
+            // - プリフェッチは hint のみで safety に影響しない
+            // - ループ `L1 / 16` は const generics 由来。`L1 ∈ {512, 768, 1536}`
+            //   は全て 16 の倍数なので末端要素が取り残されない
             unsafe {
                 use std::arch::x86_64::*;
                 let acc_ptr = accumulation.as_mut_ptr();
@@ -326,6 +349,13 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         // AVX2: 128bit i8 → 256bit i16 sign-extend + sub
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
+            // SAFETY: `add_threat_weights` と同じ契約。
+            // - `acc_ptr`: `accumulation: &mut [i16; L1]` の親は
+            //   `AccumulatorLayerStacks<L1>` (`#[repr(C, align(64))]`) → 32 バイト
+            //   アラインが保証され `_mm256_load/store_si256` の要件を満たす
+            // - `w_ptr`: `AlignedBox<i8>` だが `_mm_loadu_si128` 非アラインロード
+            //   を使うためアライメント要件は無い
+            // - `L1 ∈ {512, 768, 1536}` はすべて 16 の倍数
             unsafe {
                 use std::arch::x86_64::*;
 

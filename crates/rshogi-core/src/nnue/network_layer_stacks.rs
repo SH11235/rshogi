@@ -57,6 +57,18 @@ fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16;
     // AVX2: 256bit = 16 x i16, L1/16 iterations
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
+        // SAFETY:
+        // - `a_ptr` / `b_ptr`: 唯一の呼び出し元は `NetworkLayerStacks::evaluate`
+        //   であり、そこから渡される `us_t` / `them_t` は
+        //   `AccumulatorLayerStacks::get_threat()` が返す
+        //   `&[i16; L1]` (親構造体 `AccumulatorLayerStacks` が
+        //   `#[repr(C, align(64))]` で 64 バイトアライン）。
+        //   → `_mm256_load_si256` の 32 バイトアライン要件を満たす
+        // - `dst_ptr`: 呼び出し元の `sum_t: &mut Aligned<[i16; L1]>`
+        //   （`#[repr(C, align(64))]`、64 バイトアライン）→ store 要件を満たす
+        // - ループ回数 `L1 / 16` は const generics 由来。`add_i16_arrays` は
+        //   `AccumulatorLayerStacks<L1>` で `L1 ∈ {512, 768, 1536}`（全て 16 の倍数）
+        //   からのみ呼ばれるため末端要素が取り残されない
         unsafe {
             use std::arch::x86_64::*;
             let dst_ptr = dst.as_mut_ptr();
