@@ -543,22 +543,13 @@ where
             let _removed = pool.remove_by_handle(&game_name, &handle);
             break 'outer WaiterOutcome::DisconnectedFromPool;
         };
+        // `%%HELP` / `%%WHO` / `%%LIST` / `%%SHOW` は末尾の `##[<TAG>] END` 行で
+        // 1 応答として完結する contract。途中でマッチ要求が来ても送出を中断
+        // してはいけない（client が END を待ったまま詰まる）ので、1 応答は
+        // 必ず全行送りきってからループ先頭 `tokio::select!` でマッチ確定
+        // 待ちに戻る。マッチは 1 応答分の遅れ（数行の write 時間）だけ
+        // 引き延ばされるが、相互の framing を壊さないためのトレードオフ。
         for out in lines {
-            // 応答送信中にマッチ確定が届いたら、残りの返信行は捨てて handoff を
-            // 優先する。x1 クライアントが応答を読まずに TCP 送信バッファを詰まら
-            // せても、相補手番の相手の LOGIN を待たせない。
-            match match_req_rx.try_recv() {
-                Ok(req) => {
-                    let _ = req.transport_responder.send(transport);
-                    let _ = req.completion_rx.await;
-                    break 'outer WaiterOutcome::Completed;
-                }
-                Err(oneshot::error::TryRecvError::Empty) => {}
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    // pool 側が破棄された。league だけクリーンアップ。
-                    break 'outer WaiterOutcome::Aborted;
-                }
-            }
             if transport.send_line(&out).await.is_err() {
                 // 応答送信に失敗したら切断として扱う。
                 let mut pool = state.waiting.lock().await;
