@@ -9,11 +9,34 @@
 //! # ビルドターゲット
 //!
 //! 本 crate は Cloudflare Workers の wasm32-unknown-unknown 向け cdylib として
-//! `worker-build` からビルドされる。ホスト target（x86_64 等）では
-//! [`phase_gate`] を除く実装モジュールは空になり、workspace 全体の
-//! `cargo check` / `cargo test` を壊さない。
-//!
-//! Workers 固有の統合テストは `wrangler dev` (Miniflare) 下で実行する。
-//! wasm-bindgen-test などホスト非依存のハーネスは今後追加する。
+//! `worker-build` からビルドされる。純粋ロジック (`phase_gate`, `origin`,
+//! `config`) はホスト target でも `rlib` としてコンパイル・テストでき、
+//! workspace 全体の `cargo check` / `cargo test` を壊さない。
+//! WebSocket 受付や Durable Object 関連モジュール (`router`, `game_room`) は
+//! wasm32 でのみ有効化され、`wrangler dev` (Miniflare) 下で統合検証する。
 
+pub mod config;
+pub mod origin;
 pub mod phase_gate;
+
+#[cfg(target_arch = "wasm32")]
+mod game_room;
+#[cfg(target_arch = "wasm32")]
+mod router;
+
+#[cfg(target_arch = "wasm32")]
+pub use game_room::GameRoom;
+
+/// Workers ランタイムの fetch イベント。axum 等を経由せず直接
+/// [`router::handle_fetch`] に委譲する薄いエントリポイント。
+///
+/// `#[event(fetch)]` マクロが呼び出し側の wasm-bindgen 配線を生成する。
+#[cfg(target_arch = "wasm32")]
+#[worker::event(fetch)]
+pub async fn fetch(
+    req: worker::Request,
+    env: worker::Env,
+    _ctx: worker::Context,
+) -> worker::Result<worker::Response> {
+    router::handle_fetch(req, env).await
+}
