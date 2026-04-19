@@ -33,7 +33,10 @@ chrono = { version = "0.4", default-features = false, features = ["serde"] }
 # ビルドされる経路のみで有効化される。
 worker = { version = "0.8", features = ["http", "axum"] }
 worker-macros = { version = "0.8", features = ["http"] }
-axum = { version = "0.8", default-features = false, features = ["json", "ws"] }
+# `ws` feature は tokio-tungstenite を引き込み wasm32 でビルドが壊れる。
+# WebSocket の受理は Durable Object の `state.acceptWebSocket` 側で行うため、
+# axum には Router と json extractor のみを使う。
+axum = { version = "0.8", default-features = false, features = ["json"] }
 tower-service = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
