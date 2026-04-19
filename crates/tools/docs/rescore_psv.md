@@ -254,6 +254,92 @@ CPU 側の特徴量構築を並列化しても全体時間は短縮されない*
 > 注: GPU のサーマルスロットリングが計測に大きく影響するため、
 > 連続計測時は GPU 温度を 60℃ 以下に冷却してから実行すること。
 
+## ユースケース別の使い分け
+
+DL 系 ONNX モード（`--dlshogi-onnx-model` / `--onnx-model`）での代表的な
+運用パターン。各フラグは独立に組み合わせ可能。
+
+### 1. 王手局面を教師データから除外する
+
+王手親局面は評価が不安定になりやすい（詰み・詰めろ・王手放置などが混在）ため、
+学習ノイズを減らしたい場合に使う:
+
+```bash
+rescore_psv --input "data/*.bin" --output-dir rescored/ \
+  --dlshogi-onnx-model model.onnx \
+  --skip-in-check
+```
+
+rescore 出力から王手親レコードが除外される（推論は実行され、書き出しだけ抑制）。
+出力サイズは「入力 - 王手局面数」。
+
+### 2. 親と子の王手フィルタを別々に制御する（expand 併用）
+
+expand 側と rescore 側で独立に王手除外を制御したい場合:
+
+```bash
+# 例 A: rescore には王手親も含める、expand 側は王手親から展開しない
+rescore_psv --input data.bin --output-dir rescored/ \
+  --expand-output-dir expanded/ \
+  --dlshogi-onnx-model model.onnx \
+  --expand-skip-parent-in-check
+
+# 例 B: 展開した子局面が王手状態になるものを除外（"王手に追い込んだ手" を学習対象から外す）
+rescore_psv --input data.bin --output-dir rescored/ \
+  --expand-output-dir expanded/ \
+  --dlshogi-onnx-model model.onnx \
+  --expand-skip-child-in-check
+```
+
+`--skip-in-check` / `--expand-skip-parent-in-check` / `--expand-skip-child-in-check`
+の 3 フラグは独立。全部同時 ON で「王手が関係する局面を全排除」にもできる。
+
+### 3. 大規模 shard を段階的に処理する（glob + レジューム）
+
+数十〜数百 shard を逐次処理し、中断・設定変更があっても再開できる:
+
+```bash
+rescore_psv --input "data/shard_*.bin" --output-dir rescored/ \
+  --expand-output-dir expanded/ \
+  --dlshogi-onnx-model model.onnx \
+  --onnx-tensorrt --onnx-tensorrt-cache /tmp/trt_cache \
+  --expand-threshold 10.0
+```
+
+各 shard 完了時に `rescored/shard_XXX.bin.done` マーカーが書き出される。
+次回実行時の挙動:
+
+- 設定変更なし + 全 shard 完了済み → 全 skip
+- 一部 shard のみ完了 → 未完了 shard だけ処理（完了分はマーカーで skip）
+- `--onnx-eval-scale` やモデルを変更 → marker 不一致で対象 shard を自動再生成
+
+`nohup` / `tmux` で流しっぱなしにしておき、GPU 温度で止めた後の再開や、
+モデル差し替え時の一括再スコアに使える。
+
+### 4. 段階的パイプライン（多段 expand + rescore）
+
+policy で得た子局面をさらに展開、のようにカバレッジを段階的に広げる:
+
+```bash
+# ステップ 1: 元データを rescore + 1 次展開
+rescore_psv --input "data/*.bin" --output-dir rescored/ \
+  --expand-output-dir expanded1/ \
+  --dlshogi-onnx-model model.onnx
+
+# ステップ 2: 1 次展開の子局面を入力にして、さらに rescore + 2 次展開
+rescore_psv --input "expanded1/*.bin" --output-dir rescored_expanded1/ \
+  --expand-output-dir expanded2/ \
+  --dlshogi-onnx-model model.onnx
+```
+
+**運用上の注意**:
+
+- 各段で `--output-dir` と `--expand-output-dir` は **別ディレクトリ**を指定
+- 入力ディレクトリ（例 `expanded1/`）と新しい `--expand-output-dir`（例
+  `expanded2/`）も **別ディレクトリ**を指定
+- 旧段の expand 出力が次段の入力と同じファイル実体になる誤設定は起動時に検出
+  してエラー（安全装置、PR #463 で追加）
+
 ## 動作確認
 
 正常時の出力:
