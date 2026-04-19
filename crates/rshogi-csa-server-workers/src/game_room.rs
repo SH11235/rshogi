@@ -21,12 +21,12 @@
 //!    で deadline を予約し、到着した時に `CoreRoom::force_time_up(current_turn)`
 //!    で負け側を確定する (§9.5)。
 //! 7. **再起動復元** (`ensure_core_loaded`): DO isolate が破棄された後の
-//!    最初の操作で、`moves` テーブルを ply 順に `handle_line` で replay し
-//!    CoreRoom を再構築する (§9.4 の「再起動復元」要件)。
-//!
-//! # 未実装（後続タスク）
-//!
-//! - §9.6 R2 への CSA V2 棋譜エクスポート（GameEnded 時）。
+//!    最初の操作で、`play_started_at_ms` が立っていれば AGREE を再送し、
+//!    続けて `moves` テーブルを ply 順に `handle_line` で replay して
+//!    CoreRoom を復元する (§9.4 の「再起動復元」要件)。
+//! 8. **棋譜エクスポート** (`export_kifu_to_r2`): 終局を観測した瞬間に
+//!    CSA V2 形式で組み立て、R2 の `YYYY/MM/DD/<game_id>.csa` に書き出す (§9.6)。
+//!    Phase 1 `FileKifuStorage` と同一キー体系で Ruby 系バッチとの互換性を保つ。
 
 use std::cell::RefCell;
 use std::time::Duration;
@@ -49,6 +49,8 @@ use rshogi_csa_server::protocol::summary::{GameSummaryBuilder, standard_initial_
 use rshogi_csa_server::types::{Color, CsaLine, GameId, PlayerName};
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
+use crate::config::ConfigKeys;
+use crate::datetime::{format_csa_datetime, format_date_path};
 use crate::phase_gate;
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 
@@ -84,6 +86,13 @@ struct PersistedConfig {
     byoyomi_sec: u32,
     max_moves: u32,
     time_margin_ms: u64,
+    /// マッチ成立（2 人目の LOGIN 受理）時刻。`$START_TIME` などの参考に使う。
+    matched_at_ms: u64,
+    /// 両者 AGREE を受理して `HandleOutcome::GameStarted` が立った瞬間。
+    /// `None` の間は `AgreeWaiting`/`StartWaiting` 段階で、cold start 復元時も
+    /// CoreRoom は `AgreeWaiting` で作り直す。`Some(t)` になって初めて replay で
+    /// AGREE を再送して `Playing` 状態に戻す（start 直後・初手前の再起動対策）。
+    play_started_at_ms: Option<u64>,
 }
 
 /// 終局フラグ。一度 `Some` になったらその DO は同じ対局を二度開始しない。
@@ -106,16 +115,18 @@ struct MoveRow {
 #[durable_object]
 pub struct GameRoom {
     state: State,
+    env: Env,
     core: RefCell<Option<CoreRoom>>,
     config: RefCell<Option<PersistedConfig>>,
 }
 
 impl DurableObject for GameRoom {
-    fn new(state: State, _: Env) -> Self {
+    fn new(state: State, env: Env) -> Self {
         let sql = state.storage().sql();
         sql.exec(SCHEMA_SQL, None).expect("failed to initialize DO schema");
         Self {
             state,
+            env,
             core: RefCell::new(None),
             config: RefCell::new(None),
         }
@@ -323,6 +334,8 @@ impl GameRoom {
             byoyomi_sec: DEFAULT_BYOYOMI_SEC,
             max_moves: DEFAULT_MAX_MOVES,
             time_margin_ms: DEFAULT_TIME_MARGIN_MS,
+            matched_at_ms: started,
+            play_started_at_ms: None,
         };
         self.state.storage().put(KEY_CONFIG, &cfg).await?;
 
@@ -390,6 +403,11 @@ impl GameRoom {
                 }
             }
         };
+
+        // Playing 開始を確定できた瞬間だけ cfg を更新（冪等）。
+        if let HandleOutcome::GameStarted = result.outcome {
+            self.mark_play_started(now).await?;
+        }
 
         // 着手を永続化。MoveAccepted の場合のみ moves テーブルに append する。
         if let HandleOutcome::MoveAccepted { .. } = result.outcome {
@@ -461,16 +479,24 @@ impl GameRoom {
         Ok(())
     }
 
-    /// 終局したなら finished フラグを立て、両 ws を close して後片付けする。
+    /// 終局したなら R2 に棋譜を書き出し、finished フラグを立てて両 ws を close する。
     async fn finalize_if_ended(&self, result: &HandleResult) -> Result<()> {
         let HandleOutcome::GameEnded(ref game_result) = result.outcome else {
             return Ok(());
         };
         use rshogi_csa_server::record::kifu::primary_result_code;
         let code = primary_result_code(game_result).to_owned();
+        let ended_at_ms = self.now_ms();
+
+        // 棋譜エクスポートは best-effort：R2 バインディングが設定されていない開発
+        // 環境や一時的な put 失敗で終局処理自体を止めないよう、ログだけ残して続行する。
+        if let Err(e) = self.export_kifu_to_r2(game_result, ended_at_ms).await {
+            console_log!("[GameRoom] kifu export failed: {e:?}");
+        }
+
         let finished = FinishedState {
             result_code: code,
-            ended_at_ms: self.now_ms(),
+            ended_at_ms,
         };
         self.state.storage().put(KEY_FINISHED, &finished).await?;
 
@@ -481,6 +507,71 @@ impl GameRoom {
         for ws in self.state.get_websockets() {
             let _ = ws.close(Some(1000), Some("game finished".to_owned()));
         }
+        Ok(())
+    }
+
+    /// R2 バケットに CSA V2 形式の棋譜を書き出す (§9.6)。
+    ///
+    /// キー体系: `YYYY/MM/DD/<game_id>.csa`。Phase 1 `FileKifuStorage` と
+    /// 同一構造なので、既存 Ruby 系のバッチ（mk_rate / mk_html）を R2 を
+    /// mount して流用できる（Req 14.1-4）。
+    async fn export_kifu_to_r2(
+        &self,
+        game_result: &rshogi_csa_server::game::result::GameResult,
+        ended_at_ms: u64,
+    ) -> Result<()> {
+        use rshogi_csa_server::record::kifu::{KifuMove, KifuRecord};
+
+        let cfg = match self.config.borrow().as_ref() {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
+
+        let moves_rows = self.load_moves().await?;
+        // MoveRow は raw CSA 行（例: `+7776FU,T3`）を保持しているので、トークン部のみを
+        // 抽出して `KifuMove` に変換する。消費時間は at_ms 差分から秒に丸める。
+        let mut kifu_moves: Vec<KifuMove> = Vec::with_capacity(moves_rows.len());
+        let mut prev_ts: u64 = cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms);
+        for m in &moves_rows {
+            let token_str = m.line.split(',').next().unwrap_or(&m.line);
+            let at_ms = m.at_ms.max(0) as u64;
+            let elapsed_ms = at_ms.saturating_sub(prev_ts);
+            prev_ts = at_ms;
+            kifu_moves.push(KifuMove {
+                token: rshogi_csa_server::types::CsaMoveToken::new(token_str),
+                elapsed_sec: (elapsed_ms / 1000) as u32,
+                comment: None,
+            });
+        }
+
+        // `time_section` は clock の初期設定値に依存し、持ち時間の残量には
+        // 左右されないので cfg から再構築しても同じ出力になる。
+        let time_section =
+            SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec).format_summary();
+
+        let start_str = format_csa_datetime(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
+        let end_str = format_csa_datetime(ended_at_ms);
+
+        let record = KifuRecord {
+            game_id: GameId::new(cfg.game_id.clone()),
+            black: PlayerName::new(cfg.black_handle.clone()),
+            white: PlayerName::new(cfg.white_handle.clone()),
+            start_time: start_str,
+            end_time: end_str,
+            event: String::new(),
+            time_section,
+            initial_position: standard_initial_position_block(),
+            moves: kifu_moves,
+            result: game_result.clone(),
+        };
+        let text = record.build_v2();
+
+        let date_path = format_date_path(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
+        let key = format!("{date_path}/{}.csa", cfg.game_id);
+
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        bucket.put(&key, text.as_bytes().to_vec()).execute().await?;
+        console_log!("[GameRoom] kifu exported to R2 key='{key}'");
         Ok(())
     }
 
@@ -539,17 +630,23 @@ impl GameRoom {
 
         // moves 再送。AGREE は手として永続化しないため、moves が存在するなら
         // 両者 AGREE 済みと確定できる（そうでないと MoveAccepted に至らない）。
-        let moves = self.load_moves().await?;
-        if !moves.is_empty() {
-            // SQLite 側は i64 で保存するが CoreRoom の API は u64 ミリ秒。
-            // 過去のタイムスタンプなので非負前提で cast する（負値は防御的に 0）。
-            let first_ts = moves[0].at_ms.max(0) as u64;
+        // `play_started_at_ms` が立っている = 両者 AGREE が成立した事実の永続化。
+        // moves の有無に関わらず、ここが `Some` なら Playing 状態へ戻すために
+        // AGREE を再送する。これにより `START` 後〜初手前の cold start でも
+        // `Playing` に復帰して alarm による time-up が正しく発火する。
+        if let Some(play_started_at_ms) = cfg.play_started_at_ms {
             for color in [Color::Black, Color::White] {
-                if let Err(e) = core.handle_line(color, &CsaLine::new("AGREE"), first_ts) {
+                if let Err(e) = core.handle_line(color, &CsaLine::new("AGREE"), play_started_at_ms)
+                {
                     console_log!("[GameRoom] replay AGREE failed: {e:?}");
                     return Ok(());
                 }
             }
+
+            // 手を 1 つずつ再送する。AGREE の timestamp は `play_started_at_ms` を
+            // 使っているので、初手の `at_ms - play_started_at_ms` が正しい消費時間
+            // として CoreRoom の clock に反映される（初手消費時間が 0 になる問題の修正）。
+            let moves = self.load_moves().await?;
             for m in &moves {
                 let color = match m.color.as_str() {
                     "black" => Color::Black,
@@ -559,7 +656,7 @@ impl GameRoom {
                         return Ok(());
                     }
                 };
-                let ts = m.at_ms.max(0) as u64;
+                let ts = (m.at_ms.max(0) as u64).max(play_started_at_ms);
                 if let Err(e) = core.handle_line(color, &CsaLine::new(&m.line), ts) {
                     console_log!(
                         "[GameRoom] replay move ply={} line='{}' failed: {e:?}",
@@ -573,6 +670,25 @@ impl GameRoom {
 
         *self.core.borrow_mut() = Some(core);
         *self.config.borrow_mut() = Some(cfg);
+        Ok(())
+    }
+
+    /// 初めて `HandleOutcome::GameStarted` を観測した時刻を cfg に書き込む。
+    /// 2 手目以降は冪等に no-op として扱い、storage への再書き込みを避ける。
+    async fn mark_play_started(&self, ts: u64) -> Result<()> {
+        let new_cfg = {
+            let mut borrow = self.config.borrow_mut();
+            match borrow.as_mut() {
+                Some(c) if c.play_started_at_ms.is_none() => {
+                    c.play_started_at_ms = Some(ts);
+                    Some(c.clone())
+                }
+                _ => None,
+            }
+        };
+        if let Some(c) = new_cfg {
+            self.state.storage().put(KEY_CONFIG, &c).await?;
+        }
         Ok(())
     }
 
