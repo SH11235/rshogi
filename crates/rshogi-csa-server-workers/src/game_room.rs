@@ -17,15 +17,19 @@
 //! 5. **切断** (`websocket_close`): 認証済みプレイヤの切断は
 //!    [`CoreRoom::force_abnormal`] で敗北を確定する。
 //!
+//! 6. **時間切れ駆動** (`alarm`): 手番開始ごとに `state.storage().set_alarm`
+//!    で deadline を予約し、到着した時に `CoreRoom::force_time_up(current_turn)`
+//!    で負け側を確定する (§9.5)。
+//! 7. **再起動復元** (`ensure_core_loaded`): DO isolate が破棄された後の
+//!    最初の操作で、`moves` テーブルを ply 順に `handle_line` で replay し
+//!    CoreRoom を再構築する (§9.4 の「再起動復元」要件)。
+//!
 //! # 未実装（後続タスク）
 //!
-//! - §9.5 Alarm による時間切れ駆動。
 //! - §9.6 R2 への CSA V2 棋譜エクスポート（GameEnded 時）。
-//! - DO 再起動時の CoreRoom 復元 (moves テーブル replay)。現状は
-//!   アイドル中に isolate が破棄されると対局状態を失う。
-//!   Hibernation 中の通常の pause/resume は attachment + SQL で維持される。
 
 use std::cell::RefCell;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use worker::{
@@ -53,6 +57,10 @@ const DEFAULT_MAIN_TIME_SEC: u32 = 600;
 const DEFAULT_BYOYOMI_SEC: u32 = 10;
 const DEFAULT_MAX_MOVES: u32 = 256;
 const DEFAULT_TIME_MARGIN_MS: u64 = 1000;
+
+/// Alarm 発火時刻に上乗せする安全側マージン（ミリ秒）。Cloudflare Alarm API
+/// のジッタと `Date::now()` ↔ `handle_line` の now_ms 伝搬遅延を吸収する。
+const ALARM_SAFETY_MS: u64 = 200;
 
 /// Durable Object 初期化 SQL。
 ///
@@ -83,6 +91,15 @@ struct PersistedConfig {
 struct FinishedState {
     result_code: String,
     ended_at_ms: u64,
+}
+
+/// `moves` テーブル 1 行分。replay / alarm で使う。
+#[derive(Debug, Clone, Deserialize)]
+struct MoveRow {
+    ply: i64,
+    color: String,
+    line: String,
+    at_ms: i64,
 }
 
 /// 1 対局分の Durable Object。
@@ -156,7 +173,23 @@ impl DurableObject for GameRoom {
             return Ok(());
         };
 
-        // CoreRoom を rebuild（必要なら）してから force_abnormal を適用する。
+        // 終局後に届く close は CoreRoom を再構築して force_abnormal してしまうと
+        // 永続化済みの正常終局結果を上書きしてしまうため、ここで即 return する。
+        if self.load_finished().await?.is_some() {
+            return Ok(());
+        }
+
+        // マッチ前の切断はコアを作らず、占有していたスロットだけを解放する。
+        // これが漏れると同色枠が埋まったまま残り、以降の再 LOGIN が必ず conflict で弾かれる。
+        let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
+        if cfg_opt.is_none() {
+            let mut slots = self.load_slots().await?;
+            slots.retain(|s| s.role != role);
+            self.state.storage().put(KEY_SLOTS, &slots).await?;
+            return Ok(());
+        }
+
+        // 対局中の切断は force_abnormal で敗北を確定する。
         self.ensure_core_loaded().await?;
         let result_opt =
             self.core.borrow_mut().as_mut().map(|core| core.force_abnormal(role.to_core()));
@@ -172,8 +205,25 @@ impl DurableObject for GameRoom {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        // §9.5 で time-up 判定を実装する。
-        Response::ok("noop")
+        // 既に終局済みの DO でアラームが届いたら何もしない（念のためのガード）。
+        if self.load_finished().await?.is_some() {
+            return Response::ok("already finished");
+        }
+
+        self.ensure_core_loaded().await?;
+        let outcome = {
+            let mut borrow = self.core.borrow_mut();
+            let Some(core) = borrow.as_mut() else {
+                return Response::ok("no core");
+            };
+            let loser = current_turn_color(core.moves_played());
+            Some(core.force_time_up(loser))
+        };
+        if let Some(result) = outcome {
+            self.dispatch_broadcasts(&result.broadcasts).await?;
+            self.finalize_if_ended(&result).await?;
+        }
+        Response::ok("time_up handled")
     }
 }
 
@@ -215,36 +265,37 @@ impl GameRoom {
             return Ok(());
         };
 
-        // 既存スロットと衝突しないかを確認し、同色が既に埋まっていれば拒否する。
-        let mut slots = self.load_slots().await?;
-        if slots.iter().any(|s| s.role == role) {
-            send_line(ws, &LoginReply::Incorrect.to_line())?;
-            return Ok(());
-        }
-
-        // スロットを追加して永続化、attachment を Player に差し替え。
-        slots.push(Slot {
+        // 新スロットを**仮に**加えて衝突判定する。`evaluate_match` が Conflict を返す
+        // 場合は永続化も attachment 差し替えも行わず、部屋を破壊しないよう拒否する
+        // （game_name 不一致・重複 role・スロット超過の全てを一元的に弾く）。
+        let mut next_slots = self.load_slots().await?;
+        next_slots.push(Slot {
             role,
             handle: handle.clone(),
             game_name: game_name.clone(),
         });
-        self.state.storage().put(KEY_SLOTS, &slots).await?;
+        if let MatchResult::Conflict { reason } = evaluate_match(&next_slots) {
+            console_log!("[GameRoom] LOGIN rejected (conflict: {reason})");
+            send_line(ws, &LoginReply::Incorrect.to_line())?;
+            return Ok(());
+        }
+
+        // 検証を通ったので slots を書き戻し、attachment を Player に差し替える。
+        self.state.storage().put(KEY_SLOTS, &next_slots).await?;
         let att = WsAttachment::player(role, handle.clone(), game_name.clone());
         ws.serialize_attachment(&att)
             .map_err(|e| Error::RustError(format!("attach player: {e}")))?;
 
-        // LOGIN:<name> OK を返す。
         let ok_reply = LoginReply::Ok {
             name: name.to_string(),
         };
         send_line(ws, &ok_reply.to_line())?;
 
-        // 2 人揃ったら Game_Summary を送って CoreRoom を作る。
         if let MatchResult::Match {
             black_handle,
             white_handle,
             game_name,
-        } = evaluate_match(&slots)
+        } = evaluate_match(&next_slots)
         {
             self.start_match(&black_handle, &white_handle, &game_name).await?;
         }
@@ -346,7 +397,46 @@ impl GameRoom {
         }
 
         self.dispatch_broadcasts(&result.broadcasts).await?;
+        self.reschedule_turn_alarm(&result.outcome).await?;
         self.finalize_if_ended(&result).await?;
+        Ok(())
+    }
+
+    /// 直前の `HandleOutcome` に応じて Alarm を張り替える (§9.5)。
+    ///
+    /// - `GameStarted` / `MoveAccepted`: 次手番側が使える残時間 (main + byoyomi) を
+    ///   `Duration` として set_alarm に渡す。通信マージン分の安全側余裕も追加する。
+    /// - `GameEnded`: 明示的に delete_alarm で解除する (set_alarm で上書きされないケースへの保険)。
+    /// - `Continue`: 手番は変わらないので何もしない。
+    async fn reschedule_turn_alarm(&self, outcome: &HandleOutcome) -> Result<()> {
+        match outcome {
+            HandleOutcome::GameStarted | HandleOutcome::MoveAccepted { .. } => {
+                let budget_ms = {
+                    let borrow = self.core.borrow();
+                    let Some(core) = borrow.as_ref() else {
+                        return Ok(());
+                    };
+                    let next_turn = current_turn_color(core.moves_played());
+                    core.clock_turn_budget_ms(next_turn)
+                };
+                let margin_ms = self
+                    .config
+                    .borrow()
+                    .as_ref()
+                    .map(|c| c.time_margin_ms)
+                    .unwrap_or(DEFAULT_TIME_MARGIN_MS);
+                // budget が負になるのは契約違反だが、set_alarm に負時間は渡せないので
+                // 防御的に 0 へ丸める。`u64 + margin` に小さな安全側ゲタ (ALARM_SAFETY_MS)
+                // を加えて、CoreRoom が deadline 未到達として直前に弾くのを防ぐ。
+                let budget = budget_ms.max(0) as u64;
+                let total = budget.saturating_add(margin_ms).saturating_add(ALARM_SAFETY_MS);
+                self.state.storage().set_alarm(Duration::from_millis(total)).await?;
+            }
+            HandleOutcome::GameEnded(_) => {
+                let _ = self.state.storage().delete_alarm().await;
+            }
+            HandleOutcome::Continue => {}
+        }
         Ok(())
     }
 
@@ -408,13 +498,25 @@ impl GameRoom {
         Ok(())
     }
 
-    /// CoreRoom が in-memory に無ければ永続化から復元する。
+    /// CoreRoom が in-memory に無ければ永続化から復元する（`moves` replay 付き）。
     ///
-    /// Phase 2-9.4 MVP の復元は「config が存在すれば新しい CoreRoom を作る」だけ。
-    /// moves テーブルからの replay は後続コミットで入れる（まだ入っていない場合、
-    /// cold start 直後に過去着手が失われる）。
+    /// 復元ステップ:
+    /// 1. `KEY_CONFIG` から `GameRoomConfig` を再構築し、新しい `CoreRoom` を作る。
+    /// 2. 既に終局済みなら config が残っていても core を作らずに早期 return。
+    /// 3. `moves` テーブルに着手が 1 手以上あれば、両プレイヤは必ず AGREE 済みとみなし、
+    ///    記録されている最初の着手時刻をもって AGREE を二度流し、Playing 状態へ
+    ///    遷移させる。その後、ply 順に `handle_line` で差し手を再送する。
+    ///
+    /// # 既知の制約
+    /// - AGREE 完了だが 1 手目未指の状態で isolate が破棄された場合、復元後の
+    ///   CoreRoom は `AgreeWaiting` に戻る。両者が再 AGREE を送れば再開できる。
+    /// - 復元中に `handle_line` が `Err` を返したら core は生成せず、以降の着手
+    ///   受理を拒絶する（結果整合性を優先）。
     async fn ensure_core_loaded(&self) -> Result<()> {
         if self.core.borrow().is_some() {
+            return Ok(());
+        }
+        if self.load_finished().await?.is_some() {
             return Ok(());
         }
         let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
@@ -423,7 +525,7 @@ impl GameRoom {
         };
         let clock: Box<dyn TimeClock> =
             Box::new(SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec));
-        let core = CoreRoom::new(
+        let mut core = CoreRoom::new(
             GameRoomConfig {
                 game_id: GameId::new(cfg.game_id.clone()),
                 black: PlayerName::new(cfg.black_handle.clone()),
@@ -434,9 +536,53 @@ impl GameRoom {
             },
             clock,
         );
+
+        // moves 再送。AGREE は手として永続化しないため、moves が存在するなら
+        // 両者 AGREE 済みと確定できる（そうでないと MoveAccepted に至らない）。
+        let moves = self.load_moves().await?;
+        if !moves.is_empty() {
+            // SQLite 側は i64 で保存するが CoreRoom の API は u64 ミリ秒。
+            // 過去のタイムスタンプなので非負前提で cast する（負値は防御的に 0）。
+            let first_ts = moves[0].at_ms.max(0) as u64;
+            for color in [Color::Black, Color::White] {
+                if let Err(e) = core.handle_line(color, &CsaLine::new("AGREE"), first_ts) {
+                    console_log!("[GameRoom] replay AGREE failed: {e:?}");
+                    return Ok(());
+                }
+            }
+            for m in &moves {
+                let color = match m.color.as_str() {
+                    "black" => Color::Black,
+                    "white" => Color::White,
+                    _ => {
+                        console_log!("[GameRoom] replay: unknown color '{}'", m.color);
+                        return Ok(());
+                    }
+                };
+                let ts = m.at_ms.max(0) as u64;
+                if let Err(e) = core.handle_line(color, &CsaLine::new(&m.line), ts) {
+                    console_log!(
+                        "[GameRoom] replay move ply={} line='{}' failed: {e:?}",
+                        m.ply,
+                        m.line
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         *self.core.borrow_mut() = Some(core);
         *self.config.borrow_mut() = Some(cfg);
         Ok(())
+    }
+
+    /// `moves` テーブルを ply 昇順で読み出す。
+    async fn load_moves(&self) -> Result<Vec<MoveRow>> {
+        let sql = self.state.storage().sql();
+        let cursor =
+            sql.exec("SELECT ply, color, line, at_ms FROM moves ORDER BY ply ASC", None)?;
+        let rows: Vec<MoveRow> = cursor.to_array()?;
+        Ok(rows)
     }
 
     async fn load_slots(&self) -> Result<Vec<Slot>> {
@@ -471,6 +617,16 @@ impl GameRoom {
             ],
         )?;
         Ok(())
+    }
+}
+
+/// 既消費手数から次の手番色を導出する。平手開始は先手 (Black) なので偶数手目の
+/// 次手番は Black、奇数手目の次手番は White。replay 後や Alarm 起動時に呼ぶ。
+fn current_turn_color(moves_played: u32) -> Color {
+    if moves_played % 2 == 0 {
+        Color::Black
+    } else {
+        Color::White
     }
 }
 
