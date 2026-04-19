@@ -79,13 +79,27 @@ pub enum LoginResult {
     AlreadyLoggedIn,
 }
 
-/// 最小限の League（ログイン中のプレイヤと状態を保持する）。
+/// League 内部で 1 プレイヤ分の状態を保持するレコード。
 ///
-/// マッチング戦略やレート永続化は後続フェーズで接続する。ここでは状態機械の
-/// 一貫性を担保するのが目的。
+/// 状態機械 (`PlayerStatus`) と x1 拡張モードフラグを 1 か所に束ねて、ログイン時点で
+/// 決まる「このクライアントは `%%` 系を許可されているか」を他 API から同期して
+/// 読めるようにする。x1 フラグは LOGIN 受理時点で確定し、以降の状態遷移では変化
+/// しない（別接続として再 LOGIN しない限り上書きされない）ため、`transition` では
+/// 明示的に保持し続ける。
+#[derive(Debug, Clone)]
+struct PlayerRecord {
+    status: PlayerStatus,
+    x1: bool,
+}
+
+/// ログイン中のプレイヤと状態を保持する League。
+///
+/// 状態機械 (`PlayerStatus`)、x1 拡張フラグ、マッチ待ちプール候補を一元管理する。
+/// マッチング戦略やレート永続化は別モジュール (`matching::pairing` や
+/// `port::RateStorage`) に逃がしている。
 #[derive(Debug, Default)]
 pub struct League {
-    players: HashMap<PlayerName, PlayerStatus>,
+    players: HashMap<PlayerName, PlayerRecord>,
 }
 
 impl League {
@@ -97,13 +111,28 @@ impl League {
     /// プレイヤのログインを試みる。
     ///
     /// パスワードの検証は呼び出し側（[`crate::port::RateStorage`] + PasswordHasher 相当）に任せる。
-    /// 本関数は純粋に状態機械として、登録成功時 [`PlayerStatus::Connected`] に遷移させる。
+    /// 本関数は純粋に状態機械として、登録成功時 [`PlayerStatus::Connected`] に遷移させ、
+    /// `x1` 拡張モードの許可フラグも併せて記録する。
     pub fn login(&mut self, name: &PlayerName, x1: bool) -> LoginResult {
         if self.players.contains_key(name) {
             return LoginResult::AlreadyLoggedIn;
         }
-        self.players.insert(name.clone(), PlayerStatus::Connected);
+        self.players.insert(
+            name.clone(),
+            PlayerRecord {
+                status: PlayerStatus::Connected,
+                x1,
+            },
+        );
         LoginResult::Ok { x1 }
+    }
+
+    /// 指定プレイヤが x1 拡張モードで LOGIN しているかを返す。
+    ///
+    /// LOGIN 時に `x1` フラグ付きだったプレイヤのみ `%%` 系コマンドを受理できる。
+    /// 未ログインのプレイヤは `false` を返す。
+    pub fn is_x1(&self, name: &PlayerName) -> bool {
+        self.players.get(name).map(|r| r.x1).unwrap_or(false)
     }
 
     /// プレイヤの状態を遷移させる。
@@ -124,23 +153,23 @@ impl League {
                 current: "<not-logged-in>".to_owned(),
             });
         };
-        if matches!(slot, PlayerStatus::Finished) {
+        if matches!(slot.status, PlayerStatus::Finished) {
             return Err(StateError::InvalidForState {
                 current: "Finished".to_owned(),
             });
         }
-        *slot = new_status;
+        slot.status = new_status;
         Ok(())
     }
 
     /// プレイヤの現在状態を参照する。
     pub fn status(&self, name: &PlayerName) -> Option<&PlayerStatus> {
-        self.players.get(name)
+        self.players.get(name).map(|r| &r.status)
     }
 
     /// 全プレイヤ一覧。`%%WHO` 応答生成等で使う。
     pub fn who(&self) -> Vec<(PlayerName, PlayerStatus)> {
-        self.players.iter().map(|(n, s)| (n.clone(), s.clone())).collect()
+        self.players.iter().map(|(n, r)| (n.clone(), r.status.clone())).collect()
     }
 
     /// LOGOUT 時にプレイヤをリーグから除去する。
@@ -165,7 +194,7 @@ impl League {
         // 1. 両者の現状を確認（GameWaiting で、かつ同一 `game_name` であること）。
         let mut shared_game_name: Option<&GameName> = None;
         for name in [&matched.black, &matched.white] {
-            match self.players.get(name) {
+            match self.players.get(name).map(|r| &r.status) {
                 Some(PlayerStatus::GameWaiting { game_name, .. }) => {
                     if let Some(prev) = shared_game_name {
                         if prev != game_name {
@@ -194,14 +223,13 @@ impl League {
                 }
             }
         }
-        // 2. 両者を AgreeWaiting に遷移。
+        // 2. 両者を AgreeWaiting に遷移（x1 フラグは維持する）。
         for name in [&matched.black, &matched.white] {
-            self.players.insert(
-                name.clone(),
-                PlayerStatus::AgreeWaiting {
+            if let Some(rec) = self.players.get_mut(name) {
+                rec.status = PlayerStatus::AgreeWaiting {
                     game_id: game_id.clone(),
-                },
-            );
+                };
+            }
         }
         Ok(())
     }
@@ -221,7 +249,9 @@ impl League {
             }
         }
         for name in [&players.black, &players.white] {
-            self.players.insert(name.clone(), PlayerStatus::Finished);
+            if let Some(rec) = self.players.get_mut(name) {
+                rec.status = PlayerStatus::Finished;
+            }
         }
         Ok(())
     }
@@ -233,7 +263,7 @@ impl League {
         let mut v: Vec<_> = self
             .players
             .iter()
-            .filter_map(|(n, s)| match s {
+            .filter_map(|(n, r)| match &r.status {
                 PlayerStatus::GameWaiting {
                     game_name: g,
                     preferred_color,
@@ -261,7 +291,7 @@ impl League {
         let mut candidates: Vec<(&PlayerName, Option<Color>)> = self
             .players
             .iter()
-            .filter_map(|(n, s)| match s {
+            .filter_map(|(n, r)| match &r.status {
                 PlayerStatus::GameWaiting {
                     game_name: g,
                     preferred_color,
@@ -317,6 +347,50 @@ mod tests {
         assert_eq!(l.login(&name("alice"), false), LoginResult::Ok { x1: false });
         assert_eq!(l.login(&name("alice"), false), LoginResult::AlreadyLoggedIn);
         assert_eq!(l.login(&name("bob"), true), LoginResult::Ok { x1: true });
+    }
+
+    #[test]
+    fn is_x1_reflects_login_flag() {
+        let mut l = League::new();
+        assert!(!l.is_x1(&name("ghost")));
+        l.login(&name("alice"), false);
+        l.login(&name("bob"), true);
+        assert!(!l.is_x1(&name("alice")));
+        assert!(l.is_x1(&name("bob")));
+    }
+
+    #[test]
+    fn x1_flag_survives_state_transitions_and_match_confirmation() {
+        // x1 は LOGIN 時に確定する属性で、状態機械の遷移では消えない。
+        let mut l = League::new();
+        l.login(&name("alice"), true);
+        l.login(&name("bob"), true);
+        for n in ["alice", "bob"] {
+            l.transition(
+                &name(n),
+                PlayerStatus::GameWaiting {
+                    game_name: GameName::new("g1"),
+                    preferred_color: if n == "alice" {
+                        Some(Color::Black)
+                    } else {
+                        Some(Color::White)
+                    },
+                },
+            )
+            .unwrap();
+        }
+        let pair = MatchedPair {
+            black: name("alice"),
+            white: name("bob"),
+        };
+        l.confirm_match(&pair, GameId::new("g1")).unwrap();
+        assert!(l.is_x1(&name("alice")));
+        assert!(l.is_x1(&name("bob")));
+        l.end_game(&pair).unwrap();
+        assert!(l.is_x1(&name("alice")));
+        assert!(l.is_x1(&name("bob")));
+        l.logout(&name("alice"));
+        assert!(!l.is_x1(&name("alice")));
     }
 
     #[test]
