@@ -107,7 +107,16 @@ fn main() -> anyhow::Result<()> {
     local.block_on(&rt, async move {
         let handle = run_server(state).await.context("run_server")?;
         log::info!("rshogi-csa-server-tcp ready");
-        // SIGINT で graceful shutdown（Phase 5 で本格化）。
+        // 暫定のシャットダウン経路: SIGINT のみ監視し、受信したら受付タスクを `abort` で
+        // 強制停止する。SIGTERM（Docker / Kubernetes）は未対応で、また abort は進行中の
+        // 対局タスクと棋譜書き込みを中途半端な状態で切り捨てる可能性がある。
+        //
+        // 以下を完備する本実装は別タスクで行う（`.kiro/specs/rshogi-csa-server/tasks.md`
+        // タスク 17.1「SIGINT／SIGTERM による graceful shutdown」）:
+        //   - SIGTERM も含めた終了シグナル待機
+        //   - 新規接続の受付停止
+        //   - 進行中対局の終局待ちおよび棋譜・00LIST の原子的 flush
+        // タスク 17.1 完了時点でここの `handle.abort()` は置換する。
         let _ = tokio::signal::ctrl_c().await;
         log::info!("shutting down");
         handle.abort();
