@@ -29,6 +29,7 @@ use rshogi_csa_server::game::clock::SecondsCountdownClock;
 use rshogi_csa_server::game::result::GameResult;
 use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
+use rshogi_csa_server::matching::registry::{GameListing, GameRegistry};
 use rshogi_csa_server::port::{
     BroadcastTag, Broadcaster, ClientTransport, GameSummaryEntry, KifuStorage, RateDecision,
     RateStorage,
@@ -196,6 +197,8 @@ where
     kifu_storage: K,
     password_store: P,
     hasher: Box<dyn PasswordHasher>,
+    /// 進行中対局のメモリ内レジストリ。`%%LIST` / `%%SHOW` 応答で参照する。
+    games: Mutex<GameRegistry>,
     /// 全接続タスクの終了を待つためのカウンタ通知。graceful shutdown で使用。
     active_games: Notify,
     /// 連番カウンタ（game_id 生成）。起動時刻 + 連番で衝突を避ける。
@@ -304,7 +307,7 @@ where
     // 2. LOGIN 行を受信。
     let login_line = transport.recv_line(state.config.login_timeout).await?;
     let cmd = parse_command(&login_line)?;
-    let (full_name, password, _x1) = match cmd {
+    let (full_name, password, x1) = match cmd {
         ClientCommand::Login { name, password, x1 } => (name, password, x1),
         _ => {
             let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect")).await;
@@ -347,10 +350,15 @@ where
     // LOGIN 成功応答: shogi-server 互換の `LOGIN:<handle> OK`。
     transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
 
-    // 5. League に登録し GameWaiting に遷移。
+    // 5. League に登録して GameWaiting に遷移する。x1 フラグはプロトコル拡張
+    //    「このクライアントは `%%` 系コマンドも解釈できる」ことを示す属性で、
+    //    matchmaking への参加可否とは独立。x1 付きクライアントは通常どおり
+    //    matchmaking に参加しつつ、待機中は `%%` 系コマンドを発行できる
+    //    （shogi-server 互換の運用）。観戦専用で接続したいクライアントは
+    //    `%%MONITOR2ON` 経路（後続のコミットで追加）を使う。
     {
         let mut league = state.league.lock().await;
-        match league.login(&handle_player, false) {
+        match league.login(&handle_player, x1) {
             LoginResult::Ok { .. } => {}
             LoginResult::AlreadyLoggedIn => {
                 let _ =
@@ -402,6 +410,7 @@ where
                 transport,
                 handle,
                 color,
+                game_name.clone(),
                 done_tx,
             )
             .await;
@@ -412,10 +421,16 @@ where
     }
 
     // waiter 側パス: transport を保持したまま、マッチ確定 or 切断 を監視する。
-    run_waiter(state.clone(), transport, handle, color, game_name, handle_player).await
+    run_waiter(state.clone(), transport, handle, color, game_name, handle_player, x1).await
 }
 
-/// waiter として待機プールに入り、マッチ確定 or 切断を待つ。
+/// waiter として待機プールに入り、マッチ確定 / 切断 / `%%` 系情報コマンドを監視する。
+///
+/// - 非 x1 waiter は待機中のクライアント入力を受け付けず、任意のデータ到着を
+///   切断として扱う（対局前の不正入力は拒否する方針）。
+/// - x1 waiter は `%%VERSION` / `%%HELP` / `%%WHO` / `%%LIST` / `%%SHOW` /
+///   空行 keep-alive に応答し、それ以外の入力で切断する。マッチングへの参加は
+///   非 x1 と同じ経路なので、相補手番の相手が到着すれば drive 側へ handoff する。
 #[allow(clippy::too_many_arguments)]
 async fn run_waiter<R, K, P>(
     state: Rc<SharedState<R, K, P>>,
@@ -424,13 +439,14 @@ async fn run_waiter<R, K, P>(
     color: Color,
     game_name: GameName,
     handle_player: PlayerName,
+    x1: bool,
 ) -> Result<(), ServerError>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
-    let (match_req_tx, match_req_rx) = oneshot::channel::<MatchRequest>();
+    let (match_req_tx, mut match_req_rx) = oneshot::channel::<MatchRequest>();
     {
         let mut pool = state.waiting.lock().await;
         pool.push(
@@ -443,30 +459,103 @@ where
         );
     }
 
-    // 切断監視: recv_line は cancel-safe（`TcpTransport::recv_line`）なので、
-    // `match_req_rx` が先に発火すればバッファは保存されたまま drive 側へ transport を渡せる。
-    let waiter_outcome = tokio::select! {
-        req_res = match_req_rx => {
-            match req_res {
-                Ok(req) => {
-                    // transport を drive 側へ渡し、終局通知を待つ。
-                    let _ = req.transport_responder.send(transport);
-                    let _ = req.completion_rx.await;
-                    WaiterOutcome::Completed
-                }
-                Err(_) => {
-                    // pool 側が破棄された。league だけクリーンアップ。
-                    WaiterOutcome::Aborted
+    // マッチ確定 / 受信 の 2 経路を監視する。x1 waiter のみ受信行を `%%` 系
+    // コマンドとして解釈し応答を返すため、recv ブランチは loop で回す。`recv_line` は
+    // cancel-safe（`TcpTransport::recv_line`）なので、マッチが先に到着した場合は
+    // バッファを保ったまま drive 側へ transport を渡せる。
+    let waiter_outcome: WaiterOutcome = 'outer: loop {
+        let recv = tokio::select! {
+            req_res = &mut match_req_rx => {
+                match req_res {
+                    Ok(req) => {
+                        // transport を drive 側へ渡し、終局通知を待つ。
+                        let _ = req.transport_responder.send(transport);
+                        let _ = req.completion_rx.await;
+                        break 'outer WaiterOutcome::Completed;
+                    }
+                    Err(_) => {
+                        // pool 側が破棄された。league だけクリーンアップ。
+                        break 'outer WaiterOutcome::Aborted;
+                    }
                 }
             }
-        }
-        _res = transport.recv_line(NEAR_INFINITE) => {
-            // 切断 or 待機中に不正行が来た → waiter を撤去して LOGIN をリセット。
-            // （GameWaiting 中のクライアント入力は受け付けない方針で、任意のデータを
-            //  受信した時点で接続を閉じる。）
+            recv = transport.recv_line(NEAR_INFINITE) => recv,
+        };
+
+        let line = match recv {
+            Ok(l) => l,
+            Err(_) => {
+                // 切断 or I/O エラー → pool を抜けて終了。
+                let mut pool = state.waiting.lock().await;
+                let _removed = pool.remove_by_handle(&game_name, &handle);
+                break 'outer WaiterOutcome::DisconnectedFromPool;
+            }
+        };
+
+        if !x1 {
+            // 非 x1 waiter は待機中の入力を許容しない（現行方針）。
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
-            WaiterOutcome::DisconnectedFromPool
+            break 'outer WaiterOutcome::DisconnectedFromPool;
+        }
+
+        // x1 waiter: 情報コマンドだけ応答する。
+        let cmd = match parse_command(&line) {
+            Ok(c) => c,
+            Err(_) => {
+                // パース不能な行は切断扱い。
+                let mut pool = state.waiting.lock().await;
+                let _removed = pool.remove_by_handle(&game_name, &handle);
+                break 'outer WaiterOutcome::DisconnectedFromPool;
+            }
+        };
+        let replies: Option<Vec<CsaLine>> = match cmd {
+            ClientCommand::KeepAlive => Some(Vec::new()),
+            ClientCommand::Version => Some(rshogi_csa_server::protocol::info::version_lines()),
+            ClientCommand::Help => Some(rshogi_csa_server::protocol::info::help_lines()),
+            ClientCommand::Who => {
+                let snapshot = {
+                    let league = state.league.lock().await;
+                    league.who()
+                };
+                Some(rshogi_csa_server::protocol::info::who_lines(&snapshot))
+            }
+            ClientCommand::List => {
+                let snapshot = {
+                    let games = state.games.lock().await;
+                    games.snapshot()
+                };
+                Some(rshogi_csa_server::protocol::info::list_lines(&snapshot))
+            }
+            ClientCommand::Show { game_id } => {
+                let listing = {
+                    let games = state.games.lock().await;
+                    games.get(&game_id).cloned()
+                };
+                Some(rshogi_csa_server::protocol::info::show_lines(&game_id, listing.as_ref()))
+            }
+            _ => None,
+        };
+        let Some(lines) = replies else {
+            // 未サポートの x1 コマンド / 対局中コマンドは切断扱い（未配線の
+            // `%%MONITOR2ON` / `%%CHAT` / `%%SETBUOY` 等は後続コミットで追加する）。
+            let mut pool = state.waiting.lock().await;
+            let _removed = pool.remove_by_handle(&game_name, &handle);
+            break 'outer WaiterOutcome::DisconnectedFromPool;
+        };
+        // `%%HELP` / `%%WHO` / `%%LIST` / `%%SHOW` は末尾の `##[<TAG>] END` 行で
+        // 1 応答として完結する contract。途中でマッチ要求が来ても送出を中断
+        // してはいけない（client が END を待ったまま詰まる）ので、1 応答は
+        // 必ず全行送りきってからループ先頭 `tokio::select!` でマッチ確定
+        // 待ちに戻る。マッチは 1 応答分の遅れ（数行の write 時間）だけ
+        // 引き延ばされるが、相互の framing を壊さないためのトレードオフ。
+        for out in lines {
+            if transport.send_line(&out).await.is_err() {
+                // 応答送信に失敗したら切断として扱う。
+                let mut pool = state.waiting.lock().await;
+                let _removed = pool.remove_by_handle(&game_name, &handle);
+                break 'outer WaiterOutcome::DisconnectedFromPool;
+            }
         }
     };
 
@@ -504,6 +593,7 @@ async fn drive_game<R, K, P>(
     self_transport: TcpTransport,
     self_handle: String,
     self_color: Color,
+    game_name: GameName,
     opp_completion_tx: oneshot::Sender<()>,
 ) -> Result<(), ServerError>
 where
@@ -542,10 +632,15 @@ where
     // 以降のどの経路（送信失敗・切断・内部エラー）でも必ず end_game + logout を実行する
     // ため、内部処理を `drive_game_inner` に切り出し、結果を問わず epilogue で後始末する
     // （`?` の早期 return で League が解放されず再 LOGIN が詰まる経路を防ぐ）。
+    // GameRegistry の register は `drive_game_inner` 内で両者 AGREE 成立を確認
+    // してから入れる（AGREE 待ち中に REJECT / %CHUDAN / 切断で不成立になった
+    // 対局を `%%LIST` / `%%SHOW` に出さないため）。unregister は本関数 epilogue で
+    // 無条件に呼ぶ（未登録 game_id への unregister は no-op）。
     let inner = drive_game_inner(
         state.as_ref(),
         &game_id,
         matched.clone(),
+        game_name.clone(),
         &mut black_transport,
         &mut white_transport,
     )
@@ -557,6 +652,10 @@ where
         let _ = league.end_game(&matched);
         league.logout(&matched.black);
         league.logout(&matched.white);
+    }
+    {
+        let mut games = state.games.lock().await;
+        games.unregister(&game_id);
     }
     state.broadcaster.clear_room(&RoomId::new(game_id.as_str())).await;
     // 待機タスクに完了通知（これで先着側のタスクが抜ける）。
@@ -571,6 +670,7 @@ async fn drive_game_inner<R, K, P>(
     state: &SharedState<R, K, P>,
     game_id: &GameId,
     matched: MatchedPair,
+    game_name: GameName,
     black_transport: &mut TcpTransport,
     white_transport: &mut TcpTransport,
 ) -> Result<(), ServerError>
@@ -605,7 +705,26 @@ where
         return Ok(());
     }
 
-    // 両者 InGame へ遷移させてから run_room を呼ぶ。
+    // `GameRoom` を構築して内部 AGREE を 2 回入れ、`START` 配信まで済ませる。
+    // 先に dispatch を通し、成功後に初めて League と GameRegistry を更新する。
+    // こうすることで START 配信が遅延・詰まり・失敗している間は「League は
+    // AgreeWaiting のまま、GameRegistry も空」の一貫した状態を保てる
+    //（WHO が `playing:<game_id>` を返すのに LIST / SHOW には出ない、という
+    // 不整合を防ぐ）。
+    let start_time = chrono::Utc::now();
+    let (mut room, game_start_instant) = initialize_game_and_dispatch_start(
+        state,
+        game_id,
+        &matched,
+        clock,
+        black_transport,
+        white_transport,
+    )
+    .await?;
+
+    // `START` 配信成功を確認してから、League → `InGame` 遷移と GameRegistry
+    // 登録を連続で行う。2 つの共有状態更新は micro 秒スケールで連続するので、
+    // `%%WHO` と `%%LIST` / `%%SHOW` が同じ「対局開始」状態を観測する。
     {
         let mut league = state.league.lock().await;
         for n in [&matched.black, &matched.white] {
@@ -619,22 +738,50 @@ where
                 .map_err(ServerError::State)?;
         }
     }
+    let started_at_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    {
+        let mut games = state.games.lock().await;
+        games.register(GameListing {
+            game_id: game_id.clone(),
+            black: matched.black.clone(),
+            white: matched.white.clone(),
+            game_name,
+            started_at: started_at_iso,
+        });
+    }
 
-    // 指し手と消費時間を記録するため、run_loop の代わりに handle_line を自前で回す。
-    // 理由: run_room は broadcasts を transport に流し込むが、棋譜を組み立てるには
-    //       手トークンと消費秒数を別途保持する必要があるため、最小の拡張として
-    //       start_game_and_record を用意する。
-    let start_time = chrono::Utc::now();
-    let (result, moves) = start_game_and_record(
+    // 指し手と消費時間を記録しつつ終局まで駆動する。
+    let result_moves = run_game_loop_and_record(
         state,
         game_id,
-        matched.clone(),
+        &mut room,
+        game_start_instant,
         black_transport,
         white_transport,
-        clock,
     )
-    .await?;
+    .await;
     let end_time = chrono::Utc::now();
+
+    // 終局（正常 / I/O 失敗いずれも）を観測したら、League の状態遷移と
+    // GameRegistry の unregister を persist_kifu より先に行う。`%%WHO` は
+    // `League` を、`%%LIST` / `%%SHOW` は `GameRegistry` を読むので、両者を
+    // 同じタイミングで「対局終了」側に寄せることで、遅いストレージを使う
+    // 運用でも WHO と LIST / SHOW の一貫性が保たれる（`persist_kifu` 中に
+    // `%%WHO` が `playing:<game_id>` を返す一方で `%%LIST` では既に消えて
+    // いる、という不整合を防ぐ）。`drive_game` epilogue の end_game / logout /
+    // unregister はいずれも idempotent なので、ここで先行してもダブルコール
+    // で破綻しない。
+    {
+        let mut league = state.league.lock().await;
+        let _ = league.end_game(&matched);
+    }
+    {
+        let mut games = state.games.lock().await;
+        games.unregister(game_id);
+    }
+
+    // run_game_loop の失敗はそのまま早期 return する（persist_kifu は行わない）。
+    let (result, moves) = result_moves?;
 
     // 棋譜 + 00LIST 永続化。
     persist_kifu(state, game_id, &matched, start_time, end_time, &moves, &result).await?;
@@ -746,18 +893,20 @@ async fn wait_both_agree(
     Ok((true, log))
 }
 
-/// 対局を駆動しつつ、棋譜記録用に各指し手の `(token, elapsed_sec)` を収集する。
+/// `GameRoom` を初期化し、内部 AGREE 2 回 + 最初の `START` 配信までを行う。
 ///
-/// `run_room` を直接使うと消費秒数を取り出せないため、この関数では `GameRoom` を
-/// 直接駆動して手番イベントから `,T<sec>` を解析する。
-async fn start_game_and_record<R, K, P>(
+/// 成功すると「クライアントが対局開始を受け取れた」ことが保証されるので、
+/// 呼び出し側は続けて `GameRegistry::register` してから `run_game_loop_and_record`
+/// を呼ぶ流れに乗せる。`dispatch` が送信失敗した場合は `ServerError::Transport`
+/// で早期 return し、GameRegistry には入れない（幽霊対局を防ぐ）。
+async fn initialize_game_and_dispatch_start<R, K, P>(
     state: &SharedState<R, K, P>,
     game_id: &GameId,
-    matched: MatchedPair,
+    matched: &MatchedPair,
+    clock: SecondsCountdownClock,
     black: &mut TcpTransport,
     white: &mut TcpTransport,
-    clock: SecondsCountdownClock,
-) -> Result<(GameResult, Vec<KifuMove>), ServerError>
+) -> Result<(GameRoom, tokio::time::Instant), ServerError>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
@@ -773,19 +922,41 @@ where
     };
     let mut room = GameRoom::new(cfg, Box::new(clock));
 
-    // broadcasts を監視して `,T<sec>` を抜き取る軽量ラッパ。run_room に相当する処理を
-    // ここで再実装する。時間切れアラームも同じ方式で駆動する。
-    let start = tokio::time::Instant::now();
-    let now_ms = || tokio::time::Instant::now().saturating_duration_since(start).as_millis() as u64;
+    let start_instant = tokio::time::Instant::now();
+    let now_ms =
+        || tokio::time::Instant::now().saturating_duration_since(start_instant).as_millis() as u64;
+
     // 対局開始を双方に通知するため、内部的に AGREE を 2 回入れてから Playing に進める。
-    // 外部クライアントからの AGREE は wait_both_agree で受信済みなので、ここでは
-    // GameRoom の内部状態だけを進める。
+    // 外部クライアントからの AGREE は `wait_both_agree` で受信済みなので、ここでは
+    // GameRoom の内部状態だけを進める。`START` 行は 2 回目の AGREE 処理で
+    // broadcasts に積まれる。
     room.handle_line(Color::Black, &CsaLine::new("AGREE"), now_ms())?;
     let r = room.handle_line(Color::White, &CsaLine::new("AGREE"), now_ms())?;
     dispatch(&r.broadcasts, black, white, &state.broadcaster, &RoomId::new(game_id.as_str()))
         .await?;
 
-    // 手と時間を記録するバッファ。
+    Ok((room, start_instant))
+}
+
+/// 既に `START` 配信済みの `GameRoom` を受け取り、終局まで駆動する。
+///
+/// `run_room` を直接使うと消費秒数を取り出せないため、ここでは `GameRoom` を直接駆動
+/// して手番イベントから `,T<sec>` を解析し `KifuMove` を収集する。
+async fn run_game_loop_and_record<R, K, P>(
+    state: &SharedState<R, K, P>,
+    game_id: &GameId,
+    room: &mut GameRoom,
+    start_instant: tokio::time::Instant,
+    black: &mut TcpTransport,
+    white: &mut TcpTransport,
+) -> Result<(GameResult, Vec<KifuMove>), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let now_ms =
+        || tokio::time::Instant::now().saturating_duration_since(start_instant).as_millis() as u64;
     let mut recorded_moves: Vec<KifuMove> = Vec::new();
 
     loop {
@@ -793,7 +964,7 @@ where
         if let rshogi_csa_server::GameStatus::Finished(result) = status {
             return Ok((result, recorded_moves));
         }
-        let deadline = compute_timeup_deadline(&room);
+        let deadline = compute_timeup_deadline(room);
         // 受信側は「実質無限」で貼る。持ち時間の終端は `sleep_until(deadline)` 側で駆動する。
         // 1 時間で打ち切っていると長時間持ち時間の対局が誤って切断負けになる。
         let evt = tokio::select! {
@@ -954,6 +1125,7 @@ where
         kifu_storage,
         password_store,
         hasher,
+        games: Mutex::new(GameRegistry::new()),
         active_games: Notify::new(),
         game_counter: Mutex::new(0),
         started_at: chrono::Utc::now(),

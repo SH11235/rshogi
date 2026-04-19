@@ -25,10 +25,12 @@ pub use game::run_loop::run_room;
 pub use game::validator::{KachiOutcome, RepetitionVerdict, Validator, Violation};
 pub use matching::league::{League, LoginResult, MatchedPair, PairingCandidate, PlayerStatus};
 pub use matching::pairing::{DirectMatchStrategy, PairingLogic};
+pub use matching::registry::{GameListing, GameRegistry};
 pub use port::{
     BroadcastTag, Broadcaster, BuoyStorage, ClientTransport, KifuStorage, RateDecision, RateStorage,
 };
 pub use protocol::command::{ClientCommand, parse_command};
+pub use protocol::info::{help_lines, list_lines, show_lines, version_lines, who_lines};
 pub use protocol::summary::{GameSummaryBuilder, standard_initial_position_block};
 pub use record::kifu::{
     KifuMove, KifuRecord, format_zerozero_list_line, illegal_reason_subcode, primary_result_code,

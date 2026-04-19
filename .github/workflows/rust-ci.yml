@@ -13,6 +13,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
+  # `.cargo/config.toml` の `target-cpu=native` を CI では無効化する。
+  # CI ランナーの CPU 世代（Skylake / Ice Lake / Cascade Lake 等）と sccache の
+  # 組み合わせで、片方の CPU でビルドされたキャッシュエントリが別 CPU の
+  # runner で実行されて SIGILL（`Compile terminated by signal 4`）で落ちる
+  # flaky を起こしていた。CI では CPU 固有命令を出さない `x86-64-v2` 相当の
+  # 保守的な baseline を指定し、sccache エントリを CPU 非依存にする。
+  # ローカル開発の `target-cpu=native` は `.cargo/config.toml` 側で維持され、
+  # CI のみがこの env で override される（env の方が `.cargo/config.toml` の
+  # rustflags より precedence が高い）。
+  RUSTFLAGS: "-C target-cpu=x86-64-v2"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

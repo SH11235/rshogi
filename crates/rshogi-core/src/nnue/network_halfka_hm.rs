@@ -1104,13 +1104,17 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKA_hm<INPUT, OU
         not(target_feature = "avx2")
     ))]
     #[inline]
+    // acc / bias_ptr / col / out_ptr を同じインデックス `k` で touch するため、
+    // iterator 化すると raw pointer 側のオフセットを別途 track する必要があり、
+    // SIMD intrinsic の autovectorization を阻害し得る。range ループのまま保つ。
+    #[allow(clippy::needless_range_loop)]
     unsafe fn propagate_ssse3_loop_inverted(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
         // SAFETY: 呼び出し側が ssse3 フィーチャを保証する
         unsafe {
             use std::arch::x86_64::*;
 
-            // OUTPUT % 4 == 0 の場合のみループ逆転を使用
-            if OUTPUT % 4 == 0 && OUTPUT > 0 {
+            // OUTPUT が 4 の倍数 ∧ 非ゼロの場合のみループ逆転を使用
+            if OUTPUT.is_multiple_of(4) && OUTPUT > 0 {
                 const MAX_REGS: usize = 256; // 最大 1024 出力まで対応
                 let num_regs = OUTPUT / 4;
                 debug_assert!(num_regs <= MAX_REGS);

@@ -152,11 +152,13 @@ impl fmt::Debug for GameRoom {
 impl GameRoom {
     /// 平手初期局面で対局ルームを構築する。
     ///
-    /// 駒落ちやブイは別コンストラクタとして追加する想定（本関数は平手のみ対応）。
+    /// 駒落ち・フォーク対局は本コンストラクタとは別の経路で足す（まだ未実装）。
+    /// 開始局面を設定化するには、盤面を Game_Summary の `position_section` と
+    /// `to_move` に反映する棋譜側の配線も同時に必要なため、本 API は平手固定に
+    /// 留めておく。
     pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Self {
         let mut pos = Position::new();
-        // SFEN_HIRATE は const なので set_sfen は失敗し得ない。万一失敗した場合は
-        // ライブラリ側の不具合なので panic で即時検知する。
+        // SFEN_HIRATE は const。set_sfen が失敗するのは rshogi-core 側のバグ。
         pos.set_sfen(SFEN_HIRATE).expect("SFEN_HIRATE must be valid");
         let validator = Validator::new(config.entering_king_rule);
         Self {
