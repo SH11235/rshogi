@@ -487,6 +487,45 @@ fn x1_waiter_answers_version_and_help_and_stays_in_pool() {
 }
 
 #[test]
+fn x1_waiter_answers_who_with_terminator_and_self_row() {
+    // x1 付きで LOGIN した 2 プレイヤが異なる game_name で待機している状態で
+    // %%WHO を投げると、自身と他プレイヤが `##[WHO] <name> <status>` で一覧され、
+    // `##[WHO] END` で終わる。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("x1_who").await;
+
+        // alice が x1 で waiting に入る（g1, black）。
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN alice+g1+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:alice OK");
+
+        // bob が x1 で別の game_name (g-other, white) に入る → マッチ成立しない。
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN bob+g-other+white pw x1").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:bob OK");
+
+        // alice が %%WHO を投げる。
+        send_line(&mut wa, "%%WHO").await;
+
+        // 終端 ##[WHO] END まで受信して集めたものを検証する。
+        let mut rows: Vec<String> = Vec::new();
+        for _ in 0..10 {
+            let line = read_line_raw(&mut ra).await.unwrap();
+            let is_end = line == "##[WHO] END";
+            rows.push(line);
+            if is_end {
+                break;
+            }
+        }
+        assert_eq!(rows.last().map(String::as_str), Some("##[WHO] END"));
+        assert!(rows.iter().any(|l| l == "##[WHO] alice waiting:g1"), "no alice row: {rows:?}");
+        assert!(rows.iter().any(|l| l == "##[WHO] bob waiting:g-other"), "no bob row: {rows:?}");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn non_x1_waiter_is_disconnected_on_any_input() {
     // x1 なし LOGIN の waiter は、待機中の任意の入力（%% 系含む）で切断される。
     // 「x1 未確立のセッションは %% を受け付けない」方針を TCP レベルで守る。

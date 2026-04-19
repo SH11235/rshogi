@@ -503,6 +503,13 @@ where
             ClientCommand::KeepAlive => Some(Vec::new()),
             ClientCommand::Version => Some(rshogi_csa_server::protocol::info::version_lines()),
             ClientCommand::Help => Some(rshogi_csa_server::protocol::info::help_lines()),
+            ClientCommand::Who => {
+                let snapshot = {
+                    let league = state.league.lock().await;
+                    league.who()
+                };
+                Some(rshogi_csa_server::protocol::info::who_lines(&snapshot))
+            }
             _ => None,
         };
         let Some(lines) = replies else {
