@@ -246,6 +246,38 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
             ));
         }
 
+        // HandCount Dense 検出 (L1 層に 14 元の持ち駒 dense vector を concat する構成)
+        //
+        // arch_str に `HandCountDense={dims},` が含まれるモデルは、LayerStack の
+        // L1 重みが通常の `pad32(ft_out)` ではなく `pad32(ft_out + dims)` 行で
+        // 保存されているため、現行の `LayerStacks::read` ではバイト境界がずれて
+        // 壊れた重みを読み込む or trailing data で失敗する。
+        //
+        // 現状の対応：nnue-hand-count-dense feature 未実装のため、HandCountDense
+        // モデルを検出したら明示的にエラーで拒否する。これは現在 rshogi 側で
+        // 推論パス（AffineTransform の入力次元拡張 + hand_count 差分計算 + L1 concat）
+        // を未実装のため、bullet 側で量子化した model.bin を誤って通常経路で
+        // 読み込ませない safeguard である。
+        //
+        // 将来作業：`nnue-hand-count-dense` feature を有効化したときに
+        //   - `LayerStacks::read_with_hand_count(reader, dims)` で L1 重みを
+        //     `pad32(ft_out + dims)` 行で読み込み、先頭 ft_out 行は通常の
+        //     AffineTransform 重みに、続く dims 行は `hand_count_l1` 専用
+        //     行列に格納する
+        //   - 評価時に `hand_count::extract_hand_count(pos)` で 14 元を抽出し、
+        //     `sum_i hand_count[i] * hand_count_l1_weight[k][i]` を L1 出力に加算
+        //   を実装する。
+        if arch_str.contains("HandCountDense=") {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "HandCountDense モデルの rshogi 推論側は未実装です。\n\
+                 bullet 側 feat/nnue-hand-count-dense で量子化した model.bin は、\n\
+                 rshogi 側の LayerStacks reader / 推論パス拡張が landing するまで\n\
+                 ロードできません。nnue-hand-count-dense feature も現状は\n\
+                 scaffold のみで、実際の重み読み出し・評価は未配線です。",
+            ));
+        }
+
         // LayerStacks を読み込み（FC層は常に非圧縮）
         let layer_stacks = LayerStacks::read(reader)?;
 

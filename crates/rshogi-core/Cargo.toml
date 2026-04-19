@@ -89,6 +89,10 @@ nnue-psqt = []
 # NNUE Threat 特徴量対応
 # 無効時: AccumulatorLayerStacks から threat_accumulation を除去 (-6KB/entry)、Threat モデル読み込み不可
 nnue-threat = []
+# NNUE HandCount Dense Input 対応
+# 有効時: LayerStack L1 層の入力に 14 元の持ち駒 dense vector を concat する
+# (`HandCountDense=14` を arch_str に含むモデル)。無効時は当該モデルは読み込み不可。
+nnue-hand-count-dense = []
 # Threat exclusion profiles (mutually exclusive)
 # 除外 pair で Threat 次元を削減し、NPS を改善する。
 # 詳細は crates/rshogi-core/src/nnue/threat_exclusion.rs の module doc 参照。
