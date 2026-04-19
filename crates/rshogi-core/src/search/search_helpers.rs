@@ -128,7 +128,8 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
                 // 以外のアームに到達することはない。
                 unsafe { std::hint::unreachable_unchecked() }
             };
-            return update_and_evaluate_layer_stacks_cached(network, pos, s, &mut st.acc_cache);
+            let net = network.as_layer_stacks();
+            return update_and_evaluate_layer_stacks_cached(net, pos, s, &mut st.acc_cache);
         }
     }
     evaluate_dispatch(pos, &mut st.nnue_stack, &mut st.acc_cache)

@@ -18,7 +18,7 @@
 //! **「Accumulator は L1 だけで決まる」** を活用し、L2/L3/活性化の追加時に
 //! このファイルの変更は最小限で済む。
 
-use super::accumulator_layer_stacks::{AccumulatorCacheLayerStacks, AccumulatorStackLayerStacks};
+use super::accumulator_layer_stacks::{LayerStacksAccCache, LayerStacksAccStack};
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
 use super::bona_piece::BonaPiece;
@@ -27,8 +27,9 @@ use super::constants::{MAX_ARCH_LEN, NNUE_VERSION, NNUE_VERSION_HALFKA};
 use super::halfka::{HalfKANetwork, HalfKAStack};
 use super::halfka_hm::{HalfKA_hmNetwork, HalfKA_hmStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
-use super::network_layer_stacks::NetworkLayerStacks;
+use super::network_layer_stacks::LayerStacksNetwork;
 use super::spec::{Activation, FeatureSet};
+#[cfg(not(feature = "layerstack-only"))]
 use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
 use crate::position::Position;
@@ -113,16 +114,11 @@ pub fn parse_nnue_architecture(value: &str) -> Option<NNUEArchitectureOverride> 
 }
 
 /// LayerStacks の bucket 選択モード
+///
+/// 現在は `Progress8KPAbs`（YaneuraOu 互換 progress.bin）のみをサポートする。
+/// enum として残しているのは将来の bucket mode 追加に備えた前方互換性のため。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerStackBucketMode {
-    /// 従来方式: 両玉の相対段で 9 バケットを選択
-    KingRank9 = 0,
-    /// 手数方式: game_ply を固定境界で 9 バケットに分割
-    Ply9 = 1,
-    /// 進行度方式: logistic regression で 8 バケットへ分割（bucket8は未使用）
-    Progress8 = 2,
-    /// 進行度方式(gikou-lite): logistic regression(34特徴) で 8 バケットへ分割（bucket8は未使用）
-    Progress8Gikou = 3,
     /// 進行度方式(KP-absolute): YaneuraOu 互換 progress.bin で 8 バケットへ分割（bucket8は未使用）
     Progress8KPAbs = 4,
 }
@@ -130,38 +126,10 @@ pub enum LayerStackBucketMode {
 impl LayerStackBucketMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::KingRank9 => "kingrank9",
-            Self::Ply9 => "ply9",
-            Self::Progress8 => "progress8",
-            Self::Progress8Gikou => "progress8gikou",
             Self::Progress8KPAbs => "progress8kpabs",
         }
     }
 }
-
-/// LayerStacks の ply9 バケットの既定境界。
-///
-/// bucket0: <=30, bucket1: <=44, ..., bucket7: <=138, bucket8: >=139
-pub const LAYER_STACK_PLY9_DEFAULT_BOUNDS: [u16; 8] = [30, 44, 58, 72, 86, 100, 116, 138];
-
-/// progress8 で使用する特徴量数
-pub const SHOGI_PROGRESS8_NUM_FEATURES: usize = 6;
-
-/// progress8 で使用するバケット数
-pub const SHOGI_PROGRESS8_NUM_BUCKETS: usize = 8;
-
-/// progress8 coeff_v1 の特徴量順序
-pub const SHOGI_PROGRESS8_FEATURE_ORDER: [&str; SHOGI_PROGRESS8_NUM_FEATURES] = [
-    "x_board_non_king",
-    "x_hand_total",
-    "x_major_board",
-    "x_promoted_board",
-    "x_stm_king_rank_rel",
-    "x_ntm_king_rank_rel",
-];
-
-/// progress8gikou で使用する特徴量数
-pub const SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES: usize = 34;
 
 /// progress8kpabs で使用する重み数（81 king squares x FE_OLD_END BonaPiece）
 pub const SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS: usize = 81 * FE_OLD_END;
@@ -188,147 +156,9 @@ thread_local! {
     static CACHED_PROGRESS_BUCKET: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
-/// progress8gikou coeff_v2 の特徴量順序
-pub const SHOGI_PROGRESS_GIKOU_LITE_FEATURE_ORDER: [&str; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES] = [
-    "x_board_non_king",
-    "x_hand_total",
-    "x_major_board",
-    "x_promoted_board",
-    "x_stm_king_rank_rel",
-    "x_ntm_king_rank_rel",
-    "x_stm_all_to_own_king_d1",
-    "x_stm_all_to_own_king_d2",
-    "x_stm_all_to_own_king_d3p",
-    "x_stm_all_to_opp_king_d1",
-    "x_stm_all_to_opp_king_d2",
-    "x_stm_all_to_opp_king_d3p",
-    "x_ntm_all_to_own_king_d1",
-    "x_ntm_all_to_own_king_d2",
-    "x_ntm_all_to_own_king_d3p",
-    "x_ntm_all_to_opp_king_d1",
-    "x_ntm_all_to_opp_king_d2",
-    "x_ntm_all_to_opp_king_d3p",
-    "x_stm_major_to_own_king_d1",
-    "x_stm_major_to_own_king_d2",
-    "x_stm_major_to_own_king_d3p",
-    "x_stm_major_to_opp_king_d1",
-    "x_stm_major_to_opp_king_d2",
-    "x_stm_major_to_opp_king_d3p",
-    "x_ntm_major_to_own_king_d1",
-    "x_ntm_major_to_own_king_d2",
-    "x_ntm_major_to_own_king_d3p",
-    "x_ntm_major_to_opp_king_d1",
-    "x_ntm_major_to_opp_king_d2",
-    "x_ntm_major_to_opp_king_d3p",
-    "x_stm_hand_total",
-    "x_ntm_hand_total",
-    "x_stm_hand_major",
-    "x_ntm_hand_major",
-];
-
-/// progress8 (coeff_v1) の係数。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LayerStackProgressCoeff {
-    pub mean: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
-    pub std: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
-    pub weights: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
-    pub bias: f32,
-    pub z_clip: [f32; 2],
-}
-
-/// progress8gikou (coeff_v2) の係数。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LayerStackProgressCoeffGikouLite {
-    pub mean: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
-    pub std: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
-    pub weights: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
-    pub bias: f32,
-    pub z_clip: [f32; 2],
-}
-
-impl LayerStackProgressCoeffGikouLite {
-    pub const fn new(
-        mean: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
-        std: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
-        weights: [f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
-        bias: f32,
-        z_clip: [f32; 2],
-    ) -> Self {
-        Self {
-            mean,
-            std,
-            weights,
-            bias,
-            z_clip,
-        }
-    }
-}
-
-impl LayerStackProgressCoeff {
-    pub const fn new(
-        mean: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
-        std: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
-        weights: [f32; SHOGI_PROGRESS8_NUM_FEATURES],
-        bias: f32,
-        z_clip: [f32; 2],
-    ) -> Self {
-        Self {
-            mean,
-            std,
-            weights,
-            bias,
-            z_clip,
-        }
-    }
-}
-
-impl Default for LayerStackProgressCoeff {
-    fn default() -> Self {
-        // docs/coeff/progress_coeff_v1.default.json と同一の既定値。
-        Self {
-            mean: [30.12, 8.45, 2.18, 1.63, 6.71, 6.24],
-            std: [3.77, 4.02, 0.66, 1.40, 1.31, 1.27],
-            weights: [-0.81, 0.56, -0.32, 0.48, 0.11, -0.09],
-            bias: -0.15,
-            z_clip: [-8.0, 8.0],
-        }
-    }
-}
-
-impl Default for LayerStackProgressCoeffGikouLite {
-    fn default() -> Self {
-        Self {
-            mean: [0.0; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
-            std: [1.0; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
-            weights: [0.0; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES],
-            bias: 0.0,
-            z_clip: [-8.0, 8.0],
-        }
-    }
-}
-
 /// LayerStacks bucket mode のグローバル設定
-static LAYER_STACK_BUCKET_MODE: AtomicI32 = AtomicI32::new(LayerStackBucketMode::KingRank9 as i32);
-
-/// LayerStacks ply9 境界のグローバル設定
-static LAYER_STACK_PLY_BOUNDS: [AtomicI32; 8] = [
-    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[0] as i32),
-    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[1] as i32),
-    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[2] as i32),
-    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[3] as i32),
-    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[4] as i32),
-    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[5] as i32),
-    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[6] as i32),
-    AtomicI32::new(LAYER_STACK_PLY9_DEFAULT_BOUNDS[7] as i32),
-];
-
-/// LayerStacks progress8 係数のグローバル設定
-static LAYER_STACK_PROGRESS_COEFF: LazyLock<RwLock<LayerStackProgressCoeff>> =
-    LazyLock::new(|| RwLock::new(LayerStackProgressCoeff::default()));
-
-/// LayerStacks progress8gikou 係数のグローバル設定
-static LAYER_STACK_PROGRESS_COEFF_GIKOU_LITE: LazyLock<RwLock<LayerStackProgressCoeffGikouLite>> =
-    LazyLock::new(|| RwLock::new(LayerStackProgressCoeffGikouLite::default()));
+static LAYER_STACK_BUCKET_MODE: AtomicI32 =
+    AtomicI32::new(LayerStackBucketMode::Progress8KPAbs as i32);
 
 /// progress8kpabs 重みのデフォルト（未設定時は全ゼロ）
 static LAYER_STACK_PROGRESS_KP_ABS_ZERO_WEIGHTS: [f32; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS] =
@@ -360,65 +190,14 @@ pub fn set_fv_scale_override(value: i32) {
 
 /// LayerStacks bucket mode を取得
 pub fn get_layer_stack_bucket_mode() -> LayerStackBucketMode {
-    match LAYER_STACK_BUCKET_MODE.load(Ordering::Relaxed) {
-        1 => LayerStackBucketMode::Ply9,
-        2 => LayerStackBucketMode::Progress8,
-        3 => LayerStackBucketMode::Progress8Gikou,
-        4 => LayerStackBucketMode::Progress8KPAbs,
-        _ => LayerStackBucketMode::KingRank9,
-    }
+    // 現状は Progress8KPAbs のみ。int mapping は将来のモード追加用。
+    let _ = LAYER_STACK_BUCKET_MODE.load(Ordering::Relaxed);
+    LayerStackBucketMode::Progress8KPAbs
 }
 
 /// LayerStacks bucket mode を設定
 pub fn set_layer_stack_bucket_mode(mode: LayerStackBucketMode) {
     LAYER_STACK_BUCKET_MODE.store(mode as i32, Ordering::Relaxed);
-}
-
-/// LayerStacks ply9 境界を取得
-pub fn get_layer_stack_ply_bounds() -> [u16; 8] {
-    std::array::from_fn(|i| {
-        let value = LAYER_STACK_PLY_BOUNDS[i].load(Ordering::Relaxed);
-        if value < 0 { 0 } else { value as u16 }
-    })
-}
-
-/// LayerStacks ply9 境界を設定
-pub fn set_layer_stack_ply_bounds(bounds: [u16; 8]) {
-    for (slot, &value) in LAYER_STACK_PLY_BOUNDS.iter().zip(bounds.iter()) {
-        slot.store(i32::from(value), Ordering::Relaxed);
-    }
-}
-
-/// LayerStacks progress8 係数を取得
-pub fn get_layer_stack_progress_coeff() -> LayerStackProgressCoeff {
-    match LAYER_STACK_PROGRESS_COEFF.read() {
-        Ok(guard) => *guard,
-        Err(poisoned) => *poisoned.into_inner(),
-    }
-}
-
-/// LayerStacks progress8 係数を設定
-pub fn set_layer_stack_progress_coeff(coeff: LayerStackProgressCoeff) {
-    match LAYER_STACK_PROGRESS_COEFF.write() {
-        Ok(mut guard) => *guard = coeff,
-        Err(poisoned) => *poisoned.into_inner() = coeff,
-    }
-}
-
-/// LayerStacks progress8gikou 係数を取得
-pub fn get_layer_stack_progress_coeff_gikou_lite() -> LayerStackProgressCoeffGikouLite {
-    match LAYER_STACK_PROGRESS_COEFF_GIKOU_LITE.read() {
-        Ok(guard) => *guard,
-        Err(poisoned) => *poisoned.into_inner(),
-    }
-}
-
-/// LayerStacks progress8gikou 係数を設定
-pub fn set_layer_stack_progress_coeff_gikou_lite(coeff: LayerStackProgressCoeffGikouLite) {
-    match LAYER_STACK_PROGRESS_COEFF_GIKOU_LITE.write() {
-        Ok(mut guard) => *guard = coeff,
-        Err(poisoned) => *poisoned.into_inner() = coeff,
-    }
 }
 
 /// LayerStacks progress8kpabs 重みを取得
@@ -493,8 +272,8 @@ pub enum NNUENetwork {
     HalfKA_hm(HalfKA_hmNetwork),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPNetwork),
-    /// LayerStacks（1536次元 + 9バケット）
-    LayerStacks(Box<NetworkLayerStacks>),
+    /// LayerStacks（L1=1536/768 + 9バケット）
+    LayerStacks(LayerStacksNetwork),
 }
 
 impl NNUENetwork {
@@ -589,8 +368,15 @@ impl NNUENetwork {
                 // LayerStacks は特殊処理（FT が LEB128 圧縮のためファイルサイズ検出の対象外）
                 if effective_feature_set == FeatureSet::LayerStacks {
                     reader.seek(SeekFrom::Start(0))?;
-                    let network = NetworkLayerStacks::read_with_options(reader, psqt_override)?;
-                    return Ok(Self::LayerStacks(Box::new(network)));
+                    // L1 サイズをアーキテクチャ文字列から取得（デフォルト 1536）
+                    let (l1_from_arch, _, _) = super::spec::parse_arch_dimensions(&arch_str);
+                    let l1 = if l1_from_arch == 0 {
+                        1536
+                    } else {
+                        l1_from_arch
+                    };
+                    let network = LayerStacksNetwork::read_with_options(reader, l1, psqt_override)?;
+                    return Ok(Self::LayerStacks(network));
                 }
 
                 // 4. ファイルサイズからアーキテクチャを検出
@@ -689,7 +475,7 @@ impl NNUENetwork {
             Self::HalfKA(net) => net.l1_size(),
             Self::HalfKA_hm(net) => net.l1_size(),
             Self::HalfKP(net) => net.l1_size(),
-            Self::LayerStacks(_) => 1536,
+            Self::LayerStacks(net) => net.l1_size(),
         }
     }
 
@@ -709,112 +495,17 @@ impl NNUENetwork {
             Self::HalfKA(net) => net.architecture_spec(),
             Self::HalfKA_hm(net) => net.architecture_spec(),
             Self::HalfKP(net) => net.architecture_spec(),
-            Self::LayerStacks(_) => super::spec::ArchitectureSpec::new(
-                super::spec::FeatureSet::LayerStacks,
-                1536,
-                0,
-                0,
-                Activation::CReLU,
-            ),
+            Self::LayerStacks(net) => net.architecture_spec(),
         }
     }
 
-    // LayerStacks 用のメソッド（LayerStacks のみ維持）
-
-    /// 差分計算を使わずにAccumulatorを計算（LayerStacks用）
-    pub fn refresh_accumulator_layer_stacks(
-        &self,
-        pos: &Position,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) {
+    /// LayerStacksNetwork への参照を取得
+    ///
+    /// LayerStacks アーキテクチャでない場合は panic。
+    pub fn as_layer_stacks(&self) -> &LayerStacksNetwork {
         match self {
-            Self::LayerStacks(net) => net.refresh_accumulator(pos, acc),
+            Self::LayerStacks(net) => net,
             _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（LayerStacks用）
-    pub fn update_accumulator_layer_stacks(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        prev_acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) {
-        match self {
-            Self::LayerStacks(net) => net.update_accumulator(pos, dirty_piece, acc, prev_acc),
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算を使わずにAccumulatorを計算（LayerStacks用、キャッシュ対応）
-    pub fn refresh_accumulator_layer_stacks_with_cache(
-        &self,
-        pos: &Position,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        cache: &mut AccumulatorCacheLayerStacks,
-    ) {
-        match self {
-            Self::LayerStacks(net) => net.refresh_accumulator_with_cache(pos, acc, cache),
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 差分計算でAccumulatorを更新（LayerStacks用、キャッシュ対応）
-    pub fn update_accumulator_layer_stacks_with_cache(
-        &self,
-        pos: &Position,
-        dirty_piece: &super::accumulator::DirtyPiece,
-        acc: &mut super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        prev_acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        cache: &mut AccumulatorCacheLayerStacks,
-    ) {
-        match self {
-            Self::LayerStacks(net) => {
-                net.update_accumulator_with_cache(pos, dirty_piece, acc, prev_acc, cache)
-            }
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 複数手分の差分を適用してアキュムレータを更新（LayerStacks用）
-    pub fn forward_update_incremental_layer_stacks(
-        &self,
-        pos: &Position,
-        stack: &mut AccumulatorStackLayerStacks,
-        source_idx: usize,
-    ) -> bool {
-        match self {
-            Self::LayerStacks(net) => net.forward_update_incremental(pos, stack, source_idx),
-            _ => panic!("This method is only for LayerStacks architecture."),
-        }
-    }
-
-    /// 評価値を計算（LayerStacks用）
-    pub fn evaluate_layer_stacks(
-        &self,
-        pos: &Position,
-        acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-    ) -> Value {
-        match self {
-            Self::LayerStacks(net) => net.evaluate(pos, acc),
-            // SAFETY: layerstack-only ビルドでは LayerStacks 以外のバリアントは生成されない。
-            //         非 layerstack-only ビルドでは呼び出し元が LayerStacks であることを保証する。
-            _ => unsafe { core::hint::unreachable_unchecked() },
-        }
-    }
-
-    /// 評価値を計算（LayerStacks用、事前計算済み bucket index を使用）
-    pub fn evaluate_layer_stacks_with_bucket(
-        &self,
-        pos: &Position,
-        acc: &super::accumulator_layer_stacks::AccumulatorLayerStacks,
-        bucket_index: usize,
-    ) -> Value {
-        match self {
-            Self::LayerStacks(net) => net.evaluate_with_bucket(pos, acc, bucket_index),
-            // SAFETY: evaluate_layer_stacks と同様。
-            _ => unsafe { core::hint::unreachable_unchecked() },
         }
     }
 
@@ -987,242 +678,9 @@ pub fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
 /// LayerStacks bucket mode をパース
 pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "kingrank9" => Some(LayerStackBucketMode::KingRank9),
-        "ply9" => Some(LayerStackBucketMode::Ply9),
-        "progress8" => Some(LayerStackBucketMode::Progress8),
-        "progress8gikou" => Some(LayerStackBucketMode::Progress8Gikou),
         "progress8kpabs" => Some(LayerStackBucketMode::Progress8KPAbs),
         _ => None,
     }
-}
-
-/// `LS_PLY_BOUNDS` 文字列をパースする。
-///
-/// 形式: `30,44,58,72,86,100,116,138` （8要素）
-pub fn parse_layer_stack_ply_bounds_csv(text: &str) -> Result<[u16; 8], String> {
-    let mut values = Vec::new();
-    for token in text.split(',') {
-        let t = token.trim();
-        if t.is_empty() {
-            continue;
-        }
-        let value: u16 =
-            t.parse().map_err(|e| format!("invalid LS_PLY_BOUNDS value '{t}': {e}"))?;
-        values.push(value);
-    }
-
-    if values.len() != 8 {
-        return Err(format!(
-            "LS_PLY_BOUNDS requires exactly 8 comma-separated values (got {})",
-            values.len()
-        ));
-    }
-
-    Ok([
-        values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7],
-    ])
-}
-
-/// LayerStacks ply9 境界を CSV 文字列へ変換
-pub fn format_layer_stack_ply_bounds(bounds: [u16; 8]) -> String {
-    bounds.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
-}
-
-/// game_ply と境界から LayerStacks ply9 の bucket index (0..=8) を計算
-pub fn compute_layer_stack_ply9_bucket_index(game_ply: i32, bounds: [u16; 8]) -> usize {
-    let ply = if game_ply < 0 {
-        0
-    } else {
-        u16::try_from(game_ply).unwrap_or(u16::MAX)
-    };
-
-    for (i, &bound) in bounds.iter().enumerate() {
-        if ply <= bound {
-            return i;
-        }
-    }
-
-    8
-}
-
-/// progress8 係数に基づいて LayerStacks bucket index (0..=7) を計算
-pub fn compute_layer_stack_progress8_bucket_index(
-    pos: &Position,
-    side_to_move: Color,
-    coeff: LayerStackProgressCoeff,
-) -> usize {
-    let board_non_king = (pos.occupied().count() - pos.pieces_pt(PieceType::King).count()) as f32;
-
-    let hand_black = pos.hand(Color::Black);
-    let hand_white = pos.hand(Color::White);
-    let hand_total = PieceType::HAND_PIECES
-        .iter()
-        .map(|&pt| hand_black.count(pt) + hand_white.count(pt))
-        .sum::<u32>() as f32;
-
-    let major_board = (pos.pieces_pt(PieceType::Bishop).count()
-        + pos.pieces_pt(PieceType::Rook).count()
-        + pos.pieces_pt(PieceType::Horse).count()
-        + pos.pieces_pt(PieceType::Dragon).count()) as f32;
-
-    let promoted_board = (pos.pieces_pt(PieceType::ProPawn).count()
-        + pos.pieces_pt(PieceType::ProLance).count()
-        + pos.pieces_pt(PieceType::ProKnight).count()
-        + pos.pieces_pt(PieceType::ProSilver).count()
-        + pos.pieces_pt(PieceType::Horse).count()
-        + pos.pieces_pt(PieceType::Dragon).count()) as f32;
-
-    let f_king_rank = pos.king_square(side_to_move).rank().index() as f32;
-    let e_king_rank = pos.king_square(!side_to_move).rank().index() as f32;
-    let (stm_king_rank_rel, ntm_king_rank_rel) = match side_to_move {
-        Color::Black => (f_king_rank, 8.0 - e_king_rank),
-        Color::White => (8.0 - f_king_rank, e_king_rank),
-    };
-
-    let x = [
-        board_non_king,
-        hand_total,
-        major_board,
-        promoted_board,
-        stm_king_rank_rel,
-        ntm_king_rank_rel,
-    ];
-
-    let mut z = coeff.bias;
-    for (i, &feature) in x.iter().enumerate() {
-        let std = if coeff.std[i] > 0.0 {
-            coeff.std[i]
-        } else {
-            1.0
-        };
-        let x_norm = (feature - coeff.mean[i]) / std;
-        z += coeff.weights[i] * x_norm;
-    }
-
-    let z_min = coeff.z_clip[0].min(coeff.z_clip[1]);
-    let z_max = coeff.z_clip[0].max(coeff.z_clip[1]);
-    let z_clamped = z.clamp(z_min, z_max);
-    let p = (1.0 / (1.0 + (-z_clamped).exp())).clamp(0.0, 1.0);
-    let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
-
-    raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
-}
-
-#[inline]
-fn chebyshev_distance(a: crate::types::Square, b: crate::types::Square) -> u8 {
-    let df = a.file().index().abs_diff(b.file().index());
-    let dr = a.rank().index().abs_diff(b.rank().index());
-    df.max(dr) as u8
-}
-
-#[inline]
-fn distance_bin(d: u8) -> usize {
-    if d <= 1 {
-        0
-    } else if d == 2 {
-        1
-    } else {
-        2
-    }
-}
-
-#[inline]
-fn is_major_piece(pt: PieceType) -> bool {
-    matches!(pt, PieceType::Bishop | PieceType::Rook | PieceType::Horse | PieceType::Dragon)
-}
-
-/// progress8gikou 係数に基づいて LayerStacks bucket index (0..=7) を計算
-pub fn compute_layer_stack_progress8gikou_bucket_index(
-    pos: &Position,
-    side_to_move: Color,
-    coeff: LayerStackProgressCoeffGikouLite,
-) -> usize {
-    let mut x = [0.0f32; SHOGI_PROGRESS_GIKOU_LITE_NUM_FEATURES];
-
-    // v1 の6特徴を prefix として共有する。
-    let board_non_king = (pos.occupied().count() - pos.pieces_pt(PieceType::King).count()) as f32;
-    let hand_black = pos.hand(Color::Black);
-    let hand_white = pos.hand(Color::White);
-    let hand_total = PieceType::HAND_PIECES
-        .iter()
-        .map(|&pt| hand_black.count(pt) + hand_white.count(pt))
-        .sum::<u32>() as f32;
-    let major_board = (pos.pieces_pt(PieceType::Bishop).count()
-        + pos.pieces_pt(PieceType::Rook).count()
-        + pos.pieces_pt(PieceType::Horse).count()
-        + pos.pieces_pt(PieceType::Dragon).count()) as f32;
-    let promoted_board = (pos.pieces_pt(PieceType::ProPawn).count()
-        + pos.pieces_pt(PieceType::ProLance).count()
-        + pos.pieces_pt(PieceType::ProKnight).count()
-        + pos.pieces_pt(PieceType::ProSilver).count()
-        + pos.pieces_pt(PieceType::Horse).count()
-        + pos.pieces_pt(PieceType::Dragon).count()) as f32;
-    let f_king_rank = pos.king_square(side_to_move).rank().index() as f32;
-    let e_king_rank = pos.king_square(!side_to_move).rank().index() as f32;
-    let (stm_king_rank_rel, ntm_king_rank_rel) = match side_to_move {
-        Color::Black => (f_king_rank, 8.0 - e_king_rank),
-        Color::White => (8.0 - f_king_rank, e_king_rank),
-    };
-    x[0] = board_non_king;
-    x[1] = hand_total;
-    x[2] = major_board;
-    x[3] = promoted_board;
-    x[4] = stm_king_rank_rel;
-    x[5] = ntm_king_rank_rel;
-
-    let stm_king = pos.king_square(side_to_move);
-    let ntm_king = pos.king_square(!side_to_move);
-    for sq in pos.occupied().iter() {
-        let pc = pos.piece_on(sq);
-        if pc.is_none() {
-            continue;
-        }
-        let pt = pc.piece_type();
-        if pt == PieceType::King {
-            continue;
-        }
-
-        let is_stm_piece = pc.color() == side_to_move;
-        let side_offset = if is_stm_piece { 6usize } else { 12usize };
-        let major_offset = if is_stm_piece { 18usize } else { 24usize };
-        let own_king = if is_stm_piece { stm_king } else { ntm_king };
-        let opp_king = if is_stm_piece { ntm_king } else { stm_king };
-
-        let own_bin = distance_bin(chebyshev_distance(sq, own_king));
-        let opp_bin = distance_bin(chebyshev_distance(sq, opp_king));
-        x[side_offset + own_bin] += 1.0;
-        x[side_offset + 3 + opp_bin] += 1.0;
-
-        if is_major_piece(pt) {
-            x[major_offset + own_bin] += 1.0;
-            x[major_offset + 3 + opp_bin] += 1.0;
-        }
-    }
-
-    let stm_hand = pos.hand(side_to_move);
-    let ntm_hand = pos.hand(!side_to_move);
-    x[30] = PieceType::HAND_PIECES.iter().map(|&pt| stm_hand.count(pt)).sum::<u32>() as f32;
-    x[31] = PieceType::HAND_PIECES.iter().map(|&pt| ntm_hand.count(pt)).sum::<u32>() as f32;
-    x[32] = (stm_hand.count(PieceType::Bishop) + stm_hand.count(PieceType::Rook)) as f32;
-    x[33] = (ntm_hand.count(PieceType::Bishop) + ntm_hand.count(PieceType::Rook)) as f32;
-
-    let mut z = coeff.bias;
-    for (i, &feature) in x.iter().enumerate() {
-        let std = if coeff.std[i] > 0.0 {
-            coeff.std[i]
-        } else {
-            1.0
-        };
-        let x_norm = (feature - coeff.mean[i]) / std;
-        z += coeff.weights[i] * x_norm;
-    }
-
-    let z_min = coeff.z_clip[0].min(coeff.z_clip[1]);
-    let z_max = coeff.z_clip[0].max(coeff.z_clip[1]);
-    let z_clamped = z.clamp(z_min, z_max);
-    let p = (1.0 / (1.0 + (-z_clamped).exp())).clamp(0.0, 1.0);
-    let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
-    raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
 }
 
 /// progress8kpabs 重みに基づいて LayerStacks bucket index (0..=7) を計算
@@ -1304,6 +762,7 @@ pub fn compute_progress8kpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
 ///
 /// 玉が動いていない場合にのみ使用可能。
 /// DirtyPiece の ExtBonaPiece.fb/fw は progress8kpabs と同じ BonaPiece 体系。
+#[cfg(feature = "nnue-progress-diff")]
 #[inline]
 pub fn update_progress8kpabs_sum_diff(
     prev_sum: f32,
@@ -1585,130 +1044,59 @@ pub fn get_network() -> Option<Arc<NNUENetwork>> {
 // 内部ヘルパー関数（ロジック集約用）
 // =============================================================================
 
-/// LayerStacks アキュムレータを更新して評価（内部実装）
-///
-/// `evaluate_layer_stacks` と `evaluate_dispatch` から呼び出される共通ロジック。
-/// network は既に取得済みで、アーキテクチャチェックも完了していることが前提。
-#[inline]
-fn update_and_evaluate_layer_stacks(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut AccumulatorStackLayerStacks,
-) -> Value {
-    // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                network.update_accumulator_layer_stacks(pos, &dirty_piece, current_acc, prev_acc);
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-            updated = network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
-        }
-
-        // 3. それでも失敗なら全計算
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            network.refresh_accumulator_layer_stacks(pos, acc);
-        }
-    }
-
-    // progress8kpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
-    if get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs {
-        let bucket = ensure_progress_bucket(pos, stack);
-        CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
-    }
-
-    // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_layer_stacks(pos, acc_ref)
-}
-
 /// LayerStacks アキュムレータを更新して評価（キャッシュ対応版）
 ///
-/// `update_and_evaluate_layer_stacks` と同じロジックだが、
+/// `LayerStacksNetwork::update_accumulator()` と `evaluate()` に委譲する。
 /// AccumulatorCaches（Finny Tables）を使用して refresh を高速化する。
+///
+/// `nnue-progress-diff` feature 有効時は progress8kpabs モードで差分更新を試み、
+/// 結果を `CACHED_PROGRESS_BUCKET` に格納して `evaluate()` 内の全駒スキャンを回避する。
+/// Threat なし環境では +3〜4% NPS、Threat あり環境では cache 圧迫で退行するため
+/// 運用モデルに応じて明示指定する。
 #[inline(always)]
 pub(crate) fn update_and_evaluate_layer_stacks_cached(
-    network: &NNUENetwork,
+    net: &LayerStacksNetwork,
     pos: &Position,
-    stack: &mut AccumulatorStackLayerStacks,
-    acc_cache: &mut Option<AccumulatorCacheLayerStacks>,
+    stack: &mut LayerStacksAccStack,
+    acc_cache: &mut Option<LayerStacksAccCache>,
 ) -> Value {
     // アキュムレータの更新
-    let current_entry = stack.current();
-    if !current_entry.accumulator.computed_accumulation {
-        let mut updated = false;
-
-        // 1. 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                if let Some(cache) = acc_cache {
-                    network.update_accumulator_layer_stacks_with_cache(
-                        pos,
-                        &dirty_piece,
-                        current_acc,
-                        prev_acc,
-                        cache,
-                    );
-                } else {
-                    network.update_accumulator_layer_stacks(
-                        pos,
-                        &dirty_piece,
-                        current_acc,
-                        prev_acc,
-                    );
-                }
-                updated = true;
-            }
-        }
-
-        // 2. 失敗なら祖先探索 + 複数手差分更新を試行
-        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
-            updated = network.forward_update_incremental_layer_stacks(pos, stack, source_idx);
-        }
-
-        // 3. それでも失敗なら全計算（キャッシュ経由）
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            if let Some(cache) = acc_cache {
-                network.refresh_accumulator_layer_stacks_with_cache(pos, acc, cache);
-            } else {
-                network.refresh_accumulator_layer_stacks(pos, acc);
-            }
-        }
-    }
+    net.update_accumulator(pos, stack, acc_cache);
 
     // progress8kpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
-    if get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs {
-        let bucket = ensure_progress_bucket(pos, stack);
+    #[cfg(feature = "nnue-progress-diff")]
+    if matches!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Progress8KPAbs) {
+        let bucket = match stack {
+            #[cfg(feature = "layerstacks-1536")]
+            LayerStacksAccStack::L1536(s) => ensure_progress_bucket(pos, s),
+            #[cfg(feature = "layerstacks-768")]
+            LayerStacksAccStack::L768(s) => ensure_progress_bucket(pos, s),
+            #[cfg(feature = "layerstacks-512")]
+            LayerStacksAccStack::L512(s) => ensure_progress_bucket(pos, s),
+            #[cfg(not(any(
+                feature = "layerstacks-1536",
+                feature = "layerstacks-768",
+                feature = "layerstacks-512"
+            )))]
+            _ => unreachable!("no LayerStacks variant enabled"),
+        };
         CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
     }
 
     // 評価
-    let acc_ref = &stack.current().accumulator;
-    network.evaluate_layer_stacks(pos, acc_ref)
+    net.evaluate(pos, stack)
 }
 
 /// progress8kpabs の progress_sum を計算済みにして bucket index を返す
 ///
 /// 差分更新が可能な場合（前局面が計算済み、玉移動なし）は DirtyPiece の差分で O(1) 更新。
 /// それ以外は全駒スキャンにフォールバック。
+#[cfg(feature = "nnue-progress-diff")]
 #[inline]
-fn ensure_progress_bucket(pos: &Position, stack: &mut AccumulatorStackLayerStacks) -> usize {
+fn ensure_progress_bucket<const L1: usize>(
+    pos: &Position,
+    stack: &mut super::accumulator_layer_stacks::AccumulatorStackLayerStacks<L1>,
+) -> usize {
     if !stack.current().computed_progress {
         let weights = get_layer_stack_progress_kpabs_weights();
         let current_entry = stack.current();
@@ -1883,11 +1271,11 @@ pub fn is_halfka_1024_loaded() -> bool {
 
 /// 局面を評価（LayerStacks用）
 ///
-/// AccumulatorStackLayerStacks を使って差分更新し、計算済みなら再利用する。
+/// LayerStacksAccStack を使って差分更新し、計算済みなら再利用する。
 ///
 /// # Panics
 /// NNUEが未ロードかつMaterial評価も無効の場合はパニックする。
-pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerStacks) -> Value {
+pub fn evaluate_layer_stacks(pos: &Position, stack: &mut LayerStacksAccStack) -> Value {
     if material::is_material_enabled() {
         return material::evaluate_material(pos);
     }
@@ -1899,13 +1287,8 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerSt
         );
     };
 
-    // LayerStacks 以外はエラー
-    if !network.is_layer_stacks() {
-        panic!("Non-LayerStacks architecture detected. Use evaluate() with AccumulatorStack.");
-    }
-
-    // 内部ヘルパー関数を呼び出し
-    update_and_evaluate_layer_stacks(&network, pos, stack)
+    let net = network.as_layer_stacks();
+    update_and_evaluate_layer_stacks_cached(net, pos, stack, &mut None)
 }
 
 /// アーキテクチャに応じて適切な評価関数を呼び出す
@@ -1921,7 +1304,7 @@ pub fn evaluate_layer_stacks(pos: &Position, stack: &mut AccumulatorStackLayerSt
 pub fn evaluate_dispatch(
     pos: &Position,
     stack: &mut AccumulatorStackVariant,
-    acc_cache: &mut Option<AccumulatorCacheLayerStacks>,
+    acc_cache: &mut Option<LayerStacksAccCache>,
 ) -> Value {
     if material::is_material_enabled() {
         return material::evaluate_material(pos);
@@ -1937,7 +1320,8 @@ pub fn evaluate_dispatch(
     // バリアントに応じて適切な評価関数を呼び出し
     match stack {
         AccumulatorStackVariant::LayerStacks(s) => {
-            update_and_evaluate_layer_stacks_cached(&network, pos, s, acc_cache)
+            let net = network.as_layer_stacks();
+            update_and_evaluate_layer_stacks_cached(net, pos, s, acc_cache)
         }
         #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKA(s) => update_and_evaluate_halfka(&network, pos, s),
@@ -1964,7 +1348,7 @@ pub fn evaluate_dispatch(
 pub fn ensure_accumulator_computed(
     pos: &Position,
     stack: &mut AccumulatorStackVariant,
-    acc_cache: &mut Option<AccumulatorCacheLayerStacks>,
+    acc_cache: &mut Option<LayerStacksAccCache>,
 ) {
     // NNUEがなければ何もしない
     let Some(network) = get_network() else {
@@ -1974,7 +1358,8 @@ pub fn ensure_accumulator_computed(
     // バリアントに応じてアキュムレータを更新（評価はしない）
     match stack {
         AccumulatorStackVariant::LayerStacks(s) => {
-            update_accumulator_only_layer_stacks_cached(&network, pos, s, acc_cache);
+            let net = network.as_layer_stacks();
+            net.update_accumulator(pos, s, acc_cache);
         }
         #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKA(s) => {
@@ -1994,56 +1379,6 @@ pub fn ensure_accumulator_computed(
         | AccumulatorStackVariant::HalfKP(_) => {
             unreachable!("layerstack-only build: only LayerStacks variant is supported")
         }
-    }
-}
-
-/// LayerStacks アキュムレータを更新のみ（キャッシュ対応版、評価なし）
-#[inline]
-fn update_accumulator_only_layer_stacks_cached(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut AccumulatorStackLayerStacks,
-    acc_cache: &mut Option<AccumulatorCacheLayerStacks>,
-) {
-    let current_entry = stack.current();
-    if current_entry.accumulator.computed_accumulation {
-        count_already_computed!();
-        return;
-    }
-
-    let mut updated = false;
-
-    // 直前局面で差分更新を試行
-    if let Some(prev_idx) = current_entry.previous {
-        let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-        if prev_computed {
-            let dirty_piece = stack.current().dirty_piece;
-            let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-            if let Some(cache) = acc_cache {
-                network.update_accumulator_layer_stacks_with_cache(
-                    pos,
-                    &dirty_piece,
-                    current_acc,
-                    prev_acc,
-                    cache,
-                );
-            } else {
-                network.update_accumulator_layer_stacks(pos, &dirty_piece, current_acc, prev_acc);
-            }
-            count_update!();
-            updated = true;
-        }
-    }
-
-    // 失敗なら全計算（キャッシュ経由）
-    if !updated {
-        let acc = &mut stack.current_mut().accumulator;
-        if let Some(cache) = acc_cache {
-            network.refresh_accumulator_layer_stacks_with_cache(pos, acc, cache);
-        } else {
-            network.refresh_accumulator_layer_stacks(pos, acc);
-        }
-        count_refresh!();
     }
 }
 
@@ -2202,10 +1537,11 @@ mod tests {
         let mut pos = crate::position::Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
 
-        let mut acc = crate::nnue::AccumulatorLayerStacks::new();
-        network.refresh_accumulator_layer_stacks(&pos, &mut acc);
-
-        let value = network.evaluate_layer_stacks(&pos, &acc);
+        let ls_net = network.as_layer_stacks();
+        let mut stack = ls_net.new_acc_stack();
+        let mut acc_cache = Some(ls_net.new_acc_cache());
+        ls_net.update_accumulator(&pos, &mut stack, &mut acc_cache);
+        let value = ls_net.evaluate(&pos, &stack);
         eprintln!("LayerStacks evaluate: {}", value.raw());
 
         // 評価値が妥当な範囲内
@@ -2420,28 +1756,22 @@ mod tests {
     #[test]
     fn test_parse_layer_stack_bucket_mode() {
         assert_eq!(
-            parse_layer_stack_bucket_mode("kingrank9"),
-            Some(LayerStackBucketMode::KingRank9)
-        );
-        assert_eq!(parse_layer_stack_bucket_mode("ply9"), Some(LayerStackBucketMode::Ply9));
-        assert_eq!(parse_layer_stack_bucket_mode("PLY9"), Some(LayerStackBucketMode::Ply9));
-        assert_eq!(
-            parse_layer_stack_bucket_mode("progress8"),
-            Some(LayerStackBucketMode::Progress8)
-        );
-        assert_eq!(
-            parse_layer_stack_bucket_mode("progress8gikou"),
-            Some(LayerStackBucketMode::Progress8Gikou)
-        );
-        assert_eq!(
             parse_layer_stack_bucket_mode("progress8kpabs"),
             Some(LayerStackBucketMode::Progress8KPAbs)
         );
         assert_eq!(
-            parse_layer_stack_bucket_mode(" kingrank9 "),
-            Some(LayerStackBucketMode::KingRank9)
+            parse_layer_stack_bucket_mode("PROGRESS8KPABS"),
+            Some(LayerStackBucketMode::Progress8KPAbs)
+        );
+        assert_eq!(
+            parse_layer_stack_bucket_mode(" progress8kpabs "),
+            Some(LayerStackBucketMode::Progress8KPAbs)
         );
         assert_eq!(parse_layer_stack_bucket_mode("unknown"), None);
+        assert_eq!(parse_layer_stack_bucket_mode("progress8"), None);
+        assert_eq!(parse_layer_stack_bucket_mode("progress8gikou"), None);
+        assert_eq!(parse_layer_stack_bucket_mode("kingrank9"), None);
+        assert_eq!(parse_layer_stack_bucket_mode("ply9"), None);
     }
 
     #[test]
@@ -2469,53 +1799,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_layer_stack_ply_bounds_csv() {
-        assert_eq!(
-            parse_layer_stack_ply_bounds_csv("30,44,58,72,86,100,116,138").unwrap(),
-            [30, 44, 58, 72, 86, 100, 116, 138]
-        );
-        assert_eq!(
-            parse_layer_stack_ply_bounds_csv(" 30, 44, 58, 72, 86, 100, 116, 138 ").unwrap(),
-            [30, 44, 58, 72, 86, 100, 116, 138]
-        );
-
-        assert!(parse_layer_stack_ply_bounds_csv("30,44,58").is_err());
-        assert!(parse_layer_stack_ply_bounds_csv("30,44,58,72,86,100,116,abc").is_err());
-    }
-
-    #[test]
-    fn test_compute_layer_stack_ply9_bucket_index() {
-        let bounds = LAYER_STACK_PLY9_DEFAULT_BOUNDS;
-        assert_eq!(compute_layer_stack_ply9_bucket_index(0, bounds), 0);
-        assert_eq!(compute_layer_stack_ply9_bucket_index(30, bounds), 0);
-        assert_eq!(compute_layer_stack_ply9_bucket_index(31, bounds), 1);
-        assert_eq!(compute_layer_stack_ply9_bucket_index(138, bounds), 7);
-        assert_eq!(compute_layer_stack_ply9_bucket_index(139, bounds), 8);
-        assert_eq!(compute_layer_stack_ply9_bucket_index(400, bounds), 8);
-        assert_eq!(compute_layer_stack_ply9_bucket_index(-5, bounds), 0);
-    }
-
-    #[test]
-    fn test_compute_layer_stack_progress8_bucket_index_range() {
-        let mut pos = Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-
-        let coeff = LayerStackProgressCoeff::default();
-        let b = compute_layer_stack_progress8_bucket_index(&pos, pos.side_to_move(), coeff);
-        assert!(b <= 7, "progress8 bucket must be in 0..=7, got {b}");
-    }
-
-    #[test]
-    fn test_compute_layer_stack_progress8gikou_bucket_index_range() {
-        let mut pos = Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-
-        let coeff = LayerStackProgressCoeffGikouLite::default();
-        let b = compute_layer_stack_progress8gikou_bucket_index(&pos, pos.side_to_move(), coeff);
-        assert!(b <= 7, "progress8gikou bucket must be in 0..=7, got {b}");
-    }
-
-    #[test]
     fn test_compute_layer_stack_progress8kpabs_bucket_index_range() {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
@@ -2527,18 +1810,19 @@ mod tests {
 
     #[test]
     fn test_progress_bucket_thresholds_match_sigmoid() {
+        const NUM_BUCKETS: usize = 8;
         // テーブル引きが元の sigmoid 方式と一致することを確認
         let sigmoid_bucket = |sum: f32| -> usize {
             let p = (1.0 / (1.0 + (-sum).exp())).clamp(0.0, 1.0);
-            let raw = (p * SHOGI_PROGRESS8_NUM_BUCKETS as f32).floor() as i32;
-            raw.clamp(0, (SHOGI_PROGRESS8_NUM_BUCKETS - 1) as i32) as usize
+            let raw = (p * NUM_BUCKETS as f32).floor() as i32;
+            raw.clamp(0, (NUM_BUCKETS - 1) as i32) as usize
         };
         let threshold_bucket = |sum: f32| -> usize {
             PROGRESS_BUCKET_THRESHOLDS
                 .iter()
                 .filter(|&&t| sum >= t)
                 .count()
-                .min(SHOGI_PROGRESS8_NUM_BUCKETS - 1)
+                .min(NUM_BUCKETS - 1)
         };
 
         // 閾値から離れた値では完全一致すべき
@@ -2549,6 +1833,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "nnue-progress-diff")]
     #[test]
     fn test_progress8kpabs_diff_update() {
         use crate::types::Move;

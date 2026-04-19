@@ -13,7 +13,7 @@
 //! L2/L3/活性化の追加時にこのファイルの変更は不要。
 
 use super::accumulator::DirtyPiece;
-use super::accumulator_layer_stacks::AccumulatorStackLayerStacks;
+use super::accumulator_layer_stacks::LayerStacksAccStack;
 use super::halfka::HalfKAStack;
 use super::halfka_hm::HalfKA_hmStack;
 use super::halfkp::HalfKPStack;
@@ -39,8 +39,8 @@ pub enum AccumulatorStackVariant {
     HalfKA_hm(HalfKA_hmStack),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPStack),
-    /// LayerStacks（1536次元 + 9バケット）
-    LayerStacks(AccumulatorStackLayerStacks),
+    /// LayerStacks（L1=1536/768 + 9バケット）
+    LayerStacks(LayerStacksAccStack),
 }
 
 impl AccumulatorStackVariant {
@@ -52,7 +52,7 @@ impl AccumulatorStackVariant {
             NNUENetwork::HalfKA(net) => Self::HalfKA(HalfKAStack::from_network(net)),
             NNUENetwork::HalfKA_hm(net) => Self::HalfKA_hm(HalfKA_hmStack::from_network(net)),
             NNUENetwork::HalfKP(net) => Self::HalfKP(HalfKPStack::from_network(net)),
-            NNUENetwork::LayerStacks(_) => Self::LayerStacks(AccumulatorStackLayerStacks::new()),
+            NNUENetwork::LayerStacks(net) => Self::LayerStacks(net.new_acc_stack()),
         }
     }
 
@@ -73,7 +73,7 @@ impl AccumulatorStackVariant {
                 stack.l1_size() == net.l1_size()
             }
             (Self::HalfKP(stack), NNUENetwork::HalfKP(net)) => stack.l1_size() == net.l1_size(),
-            (Self::LayerStacks(_), NNUENetwork::LayerStacks(_)) => true,
+            (Self::LayerStacks(st), NNUENetwork::LayerStacks(net)) => st.l1_size() == net.l1_size(),
             _ => false,
         }
     }
@@ -98,7 +98,7 @@ impl AccumulatorStackVariant {
             Self::HalfKP(stack) => stack.push(dirty_piece),
             Self::LayerStacks(stack) => {
                 stack.push();
-                stack.current_mut().dirty_piece = dirty_piece;
+                stack.set_current_dirty_piece(dirty_piece);
             }
         }
     }
@@ -280,7 +280,7 @@ mod tests {
 
         // 各スタックのサイズを確認（デバッグ用）
         let variant_size = size_of::<AccumulatorStackVariant>();
-        let layer_stacks_size = size_of::<AccumulatorStackLayerStacks>();
+        let layer_stacks_size = size_of::<LayerStacksAccStack>();
         let halfka_stack_size = size_of::<HalfKA_hmStack>();
         let halfkp_stack_size = size_of::<HalfKPStack>();
 

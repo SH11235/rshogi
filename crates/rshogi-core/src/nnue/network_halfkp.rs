@@ -39,8 +39,8 @@ use std::io::{self, Read, Seek};
 use std::marker::PhantomData;
 
 use super::accumulator::{
-    AccumulatorCacheGeneric, Aligned as AlignedGeneric, AlignedBox, DirtyPiece, IndexList,
-    MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
+    AccumulatorCacheGeneric, Aligned as AlignedGeneric, AlignedBox, AlignedI16, DirtyPiece,
+    IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
 };
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION};
@@ -128,17 +128,6 @@ unsafe fn m128_add_dpbusd_epi32(
 // =============================================================================
 // AccumulatorHalfKP - const generics 版アキュムレータ
 // =============================================================================
-
-/// 64バイトアラインされた固定サイズ i16 配列（static版Alignedと同等）
-#[repr(C, align(64))]
-#[derive(Clone, Copy)]
-pub struct AlignedI16<const N: usize>(pub [i16; N]);
-
-impl<const N: usize> Default for AlignedI16<N> {
-    fn default() -> Self {
-        Self([0i16; N])
-    }
-}
 
 /// HalfKP アキュムレータ
 ///

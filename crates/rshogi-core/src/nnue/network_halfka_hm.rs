@@ -45,8 +45,8 @@ use std::marker::PhantomData;
 use std::sync::OnceLock;
 
 use super::accumulator::{
-    AccumulatorCacheGeneric, Aligned, AlignedBox, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES,
-    MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
+    AccumulatorCacheGeneric, Aligned, AlignedBox, AlignedI16, DirtyPiece, IndexList,
+    MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
 };
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA};
@@ -142,29 +142,14 @@ unsafe fn m128_add_dpbusd_epi32(
 // =============================================================================
 
 /// HalfKA_hm アキュムレータ
-/// HalfKA_hm アキュムレータ
 ///
-/// # 最適化に関する注意
-///
-/// 現在の実装では `accumulation` に `AlignedBox<i16>`（動的ヒープメモリ）を使用している。
-/// `add_weights`/`sub_weights` に渡される引数が `&mut [i16]`（スライス）となるため、
-/// 固定サイズ配列を使用する場合と比較してコンパイラ最適化が効きにくい。
-///
-/// ただし、HalfKA_hm系（L1=512, 1024）ではL1サイズが大きいため境界チェックの
-/// 相対的オーバーヘッドが小さく、ベンチマーク上は改善が見られる。
-///
-/// ## 改善案（オプション）
-///
-/// さらなる最適化が必要な場合、固定サイズ配列への変更を検討：
-/// ```ignore
-/// pub accumulation: [Box<[i16; L1]>; 2],
-/// ```
-///
-/// 参考: HalfKP（L1=256）では元のfeature_transformer.rsが `Aligned<[i16; 256]>` を
-/// 使用していたため、動的スライスへの変更で約17%の性能低下が見られた。
+/// `AlignedI16<L1>` (64バイトアライン固定サイズ配列) を使用。
+/// コンパイル時にサイズが確定するため、境界チェック除去やループ展開等の最適化が効く。
+#[repr(C, align(64))]
+#[derive(Clone, Copy)]
 pub struct AccumulatorHalfKA_hm<const L1: usize> {
-    /// アキュムレータバッファ [perspective][L1]
-    pub accumulation: [AlignedBox<i16>; 2],
+    /// アキュムレータバッファ [perspective][L1]（64バイトアライン、インライン）
+    pub accumulation: [AlignedI16<L1>; 2],
     /// 計算済みフラグ
     pub computed_accumulation: bool,
 }
@@ -173,15 +158,15 @@ impl<const L1: usize> AccumulatorHalfKA_hm<L1> {
     /// 新規作成
     pub fn new() -> Self {
         Self {
-            accumulation: [AlignedBox::new_zeroed(L1), AlignedBox::new_zeroed(L1)],
+            accumulation: [AlignedI16::default(), AlignedI16::default()],
             computed_accumulation: false,
         }
     }
 
     /// クリア
     pub fn clear(&mut self) {
-        self.accumulation[0].fill(0);
-        self.accumulation[1].fill(0);
+        self.accumulation[0].0.fill(0);
+        self.accumulation[1].0.fill(0);
         self.computed_accumulation = false;
     }
 }
@@ -189,15 +174,6 @@ impl<const L1: usize> AccumulatorHalfKA_hm<L1> {
 impl<const L1: usize> Default for AccumulatorHalfKA_hm<L1> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<const L1: usize> Clone for AccumulatorHalfKA_hm<L1> {
-    fn clone(&self) -> Self {
-        Self {
-            accumulation: [self.accumulation[0].clone(), self.accumulation[1].clone()],
-            computed_accumulation: self.computed_accumulation,
-        }
     }
 }
 
@@ -439,7 +415,7 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
     pub fn refresh_accumulator(&self, pos: &Position, acc: &mut AccumulatorHalfKA_hm<L1>) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let accumulation = &mut acc.accumulation[p];
+            let accumulation = &mut acc.accumulation[p].0;
 
             accumulation.copy_from_slice(&self.biases);
 
@@ -465,10 +441,10 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
             let reset = HalfKA_hm_FeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
-                acc.accumulation[p].copy_from_slice(&self.biases);
+                acc.accumulation[p].0.copy_from_slice(&self.biases);
                 let active_indices = HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective);
                 for index in active_indices.iter() {
-                    self.add_weights(&mut acc.accumulation[p], index);
+                    self.add_weights(&mut acc.accumulation[p].0, index);
                 }
             } else {
                 let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
@@ -481,13 +457,13 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
                     &mut added,
                 );
 
-                acc.accumulation[p].copy_from_slice(&prev_acc.accumulation[p]);
+                acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
 
                 for index in removed.iter() {
-                    self.sub_weights(&mut acc.accumulation[p], index);
+                    self.sub_weights(&mut acc.accumulation[p].0, index);
                 }
                 for index in added.iter() {
-                    self.add_weights(&mut acc.accumulation[p], index);
+                    self.add_weights(&mut acc.accumulation[p].0, index);
                 }
             }
         }
@@ -512,7 +488,7 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
                 self.refresh_perspective_with_cache(
                     pos,
                     perspective,
-                    &mut acc.accumulation[p],
+                    &mut acc.accumulation[p].0,
                     cache,
                 );
             } else {
@@ -526,13 +502,13 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
                     &mut added,
                 );
 
-                acc.accumulation[p].copy_from_slice(&prev_acc.accumulation[p]);
+                acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
 
                 for index in removed.iter() {
-                    self.sub_weights(&mut acc.accumulation[p], index);
+                    self.sub_weights(&mut acc.accumulation[p].0, index);
                 }
                 for index in added.iter() {
-                    self.add_weights(&mut acc.accumulation[p], index);
+                    self.add_weights(&mut acc.accumulation[p].0, index);
                 }
             }
         }
@@ -549,7 +525,12 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            self.refresh_perspective_with_cache(pos, perspective, &mut acc.accumulation[p], cache);
+            self.refresh_perspective_with_cache(
+                pos,
+                perspective,
+                &mut acc.accumulation[p].0,
+                cache,
+            );
         }
 
         acc.computed_accumulation = true;
@@ -600,7 +581,7 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
         {
             let (source_acc, current_acc) = stack.get_prev_and_current_accumulators(source_idx);
             for p in 0..2 {
-                current_acc.accumulation[p].copy_from_slice(&source_acc.accumulation[p]);
+                current_acc.accumulation[p] = source_acc.accumulation[p];
             }
         }
 
@@ -626,7 +607,8 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
                 );
 
                 let p = perspective as usize;
-                let accumulation = &mut stack.entry_at_mut(current_idx).accumulator.accumulation[p];
+                let accumulation =
+                    &mut stack.entry_at_mut(current_idx).accumulator.accumulation[p].0;
 
                 for index in removed.iter() {
                     self.sub_weights(accumulation, index);
@@ -758,7 +740,7 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
 
         for (p, &perspective) in perspectives.iter().enumerate() {
             let out_offset = L1 * p;
-            let accumulation = &acc.accumulation[perspective as usize];
+            let accumulation = &acc.accumulation[perspective as usize].0;
             output[out_offset..out_offset + L1].copy_from_slice(accumulation);
         }
     }
@@ -1568,27 +1550,27 @@ mod tests {
     #[test]
     fn test_accumulator_halfka_256() {
         let mut acc = AccumulatorHalfKA_hm::<256>::new();
-        assert_eq!(acc.accumulation[0].len(), 256);
+        assert_eq!(acc.accumulation[0].0.len(), 256);
         assert!(!acc.computed_accumulation);
 
-        acc.accumulation[0][0] = 100;
+        acc.accumulation[0].0[0] = 100;
         acc.computed_accumulation = true;
 
-        let cloned = acc.clone();
-        assert_eq!(cloned.accumulation[0][0], 100);
+        let cloned = acc;
+        assert_eq!(cloned.accumulation[0].0[0], 100);
         assert!(cloned.computed_accumulation);
     }
 
     #[test]
     fn test_accumulator_halfka_512() {
         let acc = AccumulatorHalfKA_hm::<512>::new();
-        assert_eq!(acc.accumulation[0].len(), 512);
+        assert_eq!(acc.accumulation[0].0.len(), 512);
     }
 
     #[test]
     fn test_accumulator_halfka_1024() {
         let acc = AccumulatorHalfKA_hm::<1024>::new();
-        assert_eq!(acc.accumulation[0].len(), 1024);
+        assert_eq!(acc.accumulation[0].0.len(), 1024);
     }
 
     #[test]

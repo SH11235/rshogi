@@ -169,6 +169,20 @@ impl<T: Default + Copy> Default for Aligned<T> {
     }
 }
 
+/// 64バイトアラインされた固定サイズ i16 配列
+///
+/// `AlignedBox<i16>` のスタック固定版。コンパイル時にサイズが確定するため、
+/// 境界チェックの除去やループ展開等のコンパイラ最適化が効きやすい。
+#[repr(C, align(64))]
+#[derive(Clone, Copy)]
+pub struct AlignedI16<const N: usize>(pub [i16; N]);
+
+impl<const N: usize> Default for AlignedI16<N> {
+    fn default() -> Self {
+        Self([0i16; N])
+    }
+}
+
 // =============================================================================
 // AlignedBox - 64バイトアラインメントのヒープ確保スライス
 // =============================================================================

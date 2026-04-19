@@ -30,7 +30,7 @@
 use std::sync::Arc;
 
 use super::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
-use super::accumulator_layer_stacks::{AccumulatorCacheLayerStacks, AccumulatorStackLayerStacks};
+use super::accumulator_layer_stacks::LayerStacksAccCache;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::halfka::HalfKAStack;
 use super::halfka_hm::HalfKA_hmStack;
@@ -60,7 +60,7 @@ pub struct NNUEEvaluator {
     stack: AccumulatorStackVariant,
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
     /// LayerStacks アーキテクチャ以外では None
-    acc_cache: Option<AccumulatorCacheLayerStacks>,
+    acc_cache: Option<LayerStacksAccCache>,
     /// 非LayerStacks用 AccumulatorCaches（Finny Tables）
     /// HalfKP/HalfKA/HalfKA_hm で使用。LayerStacks では None
     acc_cache_generic: Option<AccumulatorCacheGeneric>,
@@ -79,8 +79,8 @@ impl NNUEEvaluator {
     /// ```
     pub fn new_with_position(net: Arc<NNUENetwork>, pos: &Position) -> Self {
         let stack = AccumulatorStackVariant::from_network(&net);
-        let acc_cache = if matches!(*net, NNUENetwork::LayerStacks(_)) {
-            Some(AccumulatorCacheLayerStacks::new())
+        let acc_cache = if let NNUENetwork::LayerStacks(ls_net) = &*net {
+            Some(ls_net.new_acc_cache())
         } else {
             None
         };
@@ -109,8 +109,8 @@ impl NNUEEvaluator {
     ///
     /// - `pos`: 初期化する局面
     pub fn clone_for_thread(&self, pos: &Position) -> Self {
-        let acc_cache = if matches!(*self.net, NNUENetwork::LayerStacks(_)) {
-            Some(AccumulatorCacheLayerStacks::new())
+        let acc_cache = if let NNUENetwork::LayerStacks(ls_net) = &*self.net {
+            Some(ls_net.new_acc_cache())
         } else {
             None
         };
@@ -227,7 +227,7 @@ impl NNUEEvaluator {
                 net.evaluate(pos, st)
             }
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
-                net.evaluate(pos, &st.current().accumulator)
+                net.evaluate(pos, st)
             }
             _ => unreachable!("Network/Stack type mismatch"),
         }
@@ -286,15 +286,7 @@ impl NNUEEvaluator {
                 }
             }
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
-                if let Some(cache) = &mut self.acc_cache {
-                    net.refresh_accumulator_with_cache(
-                        pos,
-                        &mut st.current_mut().accumulator,
-                        cache,
-                    );
-                } else {
-                    net.refresh_accumulator(pos, &mut st.current_mut().accumulator);
-                }
+                net.update_accumulator(pos, st, &mut self.acc_cache);
             }
             _ => unreachable!("Network/Stack type mismatch"),
         }
@@ -313,7 +305,7 @@ impl NNUEEvaluator {
                 Self::update_halfkp_accumulator(net, pos, st, &mut self.acc_cache_generic);
             }
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
-                Self::update_layer_stacks_accumulator(net, pos, st, &mut self.acc_cache);
+                net.update_accumulator(pos, st, &mut self.acc_cache);
             }
             _ => unreachable!("Network/Stack type mismatch"),
         }
@@ -438,50 +430,6 @@ impl NNUEEvaluator {
             count_refresh!();
         }
     }
-
-    /// LayerStacks アキュムレータを更新
-    #[inline]
-    fn update_layer_stacks_accumulator(
-        net: &super::network_layer_stacks::NetworkLayerStacks,
-        pos: &Position,
-        stack: &mut AccumulatorStackLayerStacks,
-        cache: &mut Option<AccumulatorCacheLayerStacks>,
-    ) {
-        let current_entry = stack.current();
-        if current_entry.accumulator.computed_accumulation {
-            count_already_computed!();
-            return;
-        }
-
-        let mut updated = false;
-
-        // 直前局面で差分更新を試行
-        if let Some(prev_idx) = current_entry.previous {
-            let prev_computed = stack.entry_at(prev_idx).accumulator.computed_accumulation;
-            if prev_computed {
-                let dirty_piece = stack.current().dirty_piece;
-                let (prev_acc, current_acc) = stack.get_prev_and_current_accumulators(prev_idx);
-                if let Some(c) = cache {
-                    net.update_accumulator_with_cache(pos, &dirty_piece, current_acc, prev_acc, c);
-                } else {
-                    net.update_accumulator(pos, &dirty_piece, current_acc, prev_acc);
-                }
-                count_update!();
-                updated = true;
-            }
-        }
-
-        // それでも失敗なら全計算
-        if !updated {
-            let acc = &mut stack.current_mut().accumulator;
-            if let Some(c) = cache {
-                net.refresh_accumulator_with_cache(pos, acc, c);
-            } else {
-                net.refresh_accumulator(pos, acc);
-            }
-            count_refresh!();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -591,9 +539,13 @@ mod tests {
     }
 
     /// 各バリアントの push/pop インデックス一貫性テスト
+    ///
+    /// LayerStacks の各 L1 バリアント（1536/768/512）について、有効な feature のものだけ
+    /// 個別に検証する。旧実装は 1536 のみ `#[cfg]` 付き `let` だったため、1536 無効
+    /// ビルドでは後続の `stack.reset()/push()/pop()` が直前の HalfKP に対して暗黙に
+    /// 実行され、LayerStacks variant を実質テストしない silent no-op 状態だった。
     #[test]
     fn test_all_variants_push_pop_consistency() {
-        use crate::nnue::accumulator_layer_stacks::AccumulatorStackLayerStacks;
         use crate::nnue::network_halfka::AccumulatorStackHalfKA;
         use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
         use crate::nnue::network_halfkp::AccumulatorStackHalfKP;
@@ -634,14 +586,55 @@ mod tests {
         stack.pop();
         // パニックしなければ成功
 
-        // LayerStacks
-        let mut stack = AccumulatorStackVariant::LayerStacks(AccumulatorStackLayerStacks::new());
-        stack.reset();
-        stack.push(dirty);
-        stack.push(dirty);
-        stack.pop();
-        stack.pop();
-        // パニックしなければ成功
+        // LayerStacks 各 L1 バリアント（有効 feature のみ検証）。
+        // 外側の `any(...)` でいずれかの variant が有効なときだけ import が使われる
+        // ようにして unused-import 警告を抑える。
+        #[cfg(any(
+            feature = "layerstacks-1536",
+            feature = "layerstacks-768",
+            feature = "layerstacks-512"
+        ))]
+        {
+            use crate::nnue::accumulator_layer_stacks::{
+                AccumulatorStackLayerStacks, LayerStacksAccStack,
+            };
+
+            #[cfg(feature = "layerstacks-1536")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L1536(
+                    AccumulatorStackLayerStacks::<1536>::new(),
+                ));
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+
+            #[cfg(feature = "layerstacks-768")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L768(
+                    AccumulatorStackLayerStacks::<768>::new(),
+                ));
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+
+            #[cfg(feature = "layerstacks-512")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L512(
+                    AccumulatorStackLayerStacks::<512>::new(),
+                ));
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+        }
     }
 
     /// 深い探索木での push/pop テスト

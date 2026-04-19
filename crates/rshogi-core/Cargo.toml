@@ -45,7 +45,7 @@ web-time = "1"
 [features]
 # 探索経路では pass_rights / PASS NMP を無効化
 # Web/WASM で pass ルールを使う場合は default-features=false で無効化する。
-default = ["search-no-pass-rules"]
+default = ["search-no-pass-rules", "layerstacks-1536"]
 # デバッグ機能
 debug = []
 # 探索統計収集（枝刈り発生回数等のカウント）
@@ -77,6 +77,30 @@ search-no-pass-rules = []
 # LayerStack 専用ビルド（大会向け production 用）
 # HalfKP/HalfKA/HalfKA_hm のコードを除去し、evaluate_dispatch の icache footprint を削減
 layerstack-only = []
+# LayerStacks L1=1536 バリアント（従来アーキテクチャ）
+layerstacks-1536 = []
+# LayerStacks L1=768 バリアント（v91 モデル用）
+layerstacks-768 = []
+# LayerStacks L1=512 バリアント
+layerstacks-512 = []
+# NNUE PSQT ショートカット対応
+# 無効時: AccumulatorLayerStacks から psqt_accumulation を除去、PSQT モデル読み込み不可
+nnue-psqt = []
+# NNUE Threat 特徴量対応
+# 無効時: AccumulatorLayerStacks から threat_accumulation を除去 (-6KB/entry)、Threat モデル読み込み不可
+nnue-threat = []
+# Threat exclusion profiles (mutually exclusive)
+# 除外 pair で Threat 次元を削減し、NPS を改善する。
+# 詳細は crates/rshogi-core/src/nnue/threat_exclusion.rs の module doc 参照。
+threat-profile-same-class = []               # profile 1: 同種ペア全除外
+threat-profile-same-class-major-pawn = []   # profile 2: 同種 + 大駒→歩除外
+# NNUE progress8kpabs バケットの差分更新最適化
+# - 有効時: StackEntry に progress_sum/computed_progress フィールド追加、
+#   ensure_progress_bucket で DirtyPiece 差分から O(1) 更新
+# - Threat なし環境: +3〜4% NPS（有効）
+# - Threat あり環境: -2% NPS（cache 圧迫で退行）
+# default では無効。運用モデルの特性に応じてビルド時に明示指定する。
+nnue-progress-diff = []
 
 [lib]
 name = "rshogi_core"
