@@ -1568,22 +1568,23 @@ fn onnx_ort_err(e: ort::Error) -> anyhow::Error {
     anyhow::anyhow!("ONNX Runtime error: {e}")
 }
 
-/// ストリーミング読み込み + rayon 並列特徴量構築 + ゼロコピー GPU 推論
+/// ONNX 直接推論パイプラインの共通設定
 ///
-/// AobaZero / 標準 dlshogi の両方で共通のパイプライン処理。
-/// `build_features` クロージャで特徴量構築の差異を吸収する。
+/// 全フィールドが `Copy` のため、関数内で destructure して既存ローカル変数名と
+/// 互換に展開できる。引数 17 個の関数シグネチャを単一引数に集約することで、
+/// 後続コミットでフィールド追加（expand 機能）を容易にする。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
-#[allow(clippy::too_many_arguments)]
-fn process_file_with_onnx_pipeline<F>(
-    model_name: &str,
-    onnx_path: &std::path::Path,
-    input_path: &std::path::Path,
-    output_path: &std::path::Path,
+#[derive(Clone, Copy)]
+struct OnnxPipelineConfig<'a> {
+    model_name: &'a str,
+    onnx_path: &'a std::path::Path,
+    input_path: &'a std::path::Path,
+    output_path: &'a std::path::Path,
     process_count: u64,
     batch_size: usize,
     gpu_id: i32,
     use_tensorrt: bool,
-    tensorrt_cache: Option<&std::path::Path>,
+    tensorrt_cache: Option<&'a std::path::Path>,
     score_clip: i16,
     eval_scale: f32,
     skip_in_check: bool,
@@ -1591,12 +1592,40 @@ fn process_file_with_onnx_pipeline<F>(
     f2_size: usize,
     input1_channels: usize,
     input2_channels: usize,
-    profile_path: Option<&std::path::Path>,
+    profile_path: Option<&'a std::path::Path>,
+}
+
+/// ストリーミング読み込み + rayon 並列特徴量構築 + ゼロコピー GPU 推論
+///
+/// AobaZero / 標準 dlshogi の両方で共通のパイプライン処理。
+/// `build_features` クロージャで特徴量構築の差異を吸収する。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn process_file_with_onnx_pipeline<F>(
+    config: &OnnxPipelineConfig<'_>,
     build_features: F,
 ) -> Result<()>
 where
     F: Fn(&Position, &mut [f32], &mut [f32], &PackedSfenValue) + Send + Sync,
 {
+    let OnnxPipelineConfig {
+        model_name,
+        onnx_path,
+        input_path,
+        output_path,
+        process_count,
+        batch_size,
+        gpu_id,
+        use_tensorrt,
+        tensorrt_cache,
+        score_clip,
+        eval_scale,
+        skip_in_check,
+        f1_size,
+        f2_size,
+        input1_channels,
+        input2_channels,
+        profile_path,
+    } = *config;
     use ort::ep::ExecutionProvider;
     use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
     use ort::session::Session;
@@ -1992,28 +2021,28 @@ fn process_file_with_onnx(
     };
 
     let draw_ply = cli.onnx_draw_ply;
-    process_file_with_onnx_pipeline(
-        "AobaZero",
-        cli.onnx_model.as_ref().unwrap(),
+    let config = OnnxPipelineConfig {
+        model_name: "AobaZero",
+        onnx_path: cli.onnx_model.as_ref().unwrap(),
         input_path,
         output_path,
         process_count,
-        cli.onnx_batch_size,
-        cli.onnx_gpu_id,
-        cli.onnx_tensorrt,
-        cli.onnx_tensorrt_cache.as_deref(),
-        cli.score_clip,
-        cli.onnx_eval_scale,
-        cli.skip_in_check,
-        FEATURES1_SIZE,
-        FEATURES2_SIZE,
-        INPUT1_CHANNELS,
-        INPUT2_CHANNELS,
-        cli.ort_profile.as_deref(),
-        move |pos, f1, f2, psv| {
-            make_input_features(pos, f1, f2, psv.game_ply as i32, draw_ply);
-        },
-    )
+        batch_size: cli.onnx_batch_size,
+        gpu_id: cli.onnx_gpu_id,
+        use_tensorrt: cli.onnx_tensorrt,
+        tensorrt_cache: cli.onnx_tensorrt_cache.as_deref(),
+        score_clip: cli.score_clip,
+        eval_scale: cli.onnx_eval_scale,
+        skip_in_check: cli.skip_in_check,
+        f1_size: FEATURES1_SIZE,
+        f2_size: FEATURES2_SIZE,
+        input1_channels: INPUT1_CHANNELS,
+        input2_channels: INPUT2_CHANNELS,
+        profile_path: cli.ort_profile.as_deref(),
+    };
+    process_file_with_onnx_pipeline(&config, move |pos, f1, f2, psv| {
+        make_input_features(pos, f1, f2, psv.game_ply as i32, draw_ply);
+    })
 }
 
 // ============================================================
@@ -2031,26 +2060,26 @@ fn process_file_with_dlshogi_onnx(
         FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
     };
 
-    process_file_with_onnx_pipeline(
-        "dlshogi",
-        cli.dlshogi_onnx_model.as_ref().unwrap(),
+    let config = OnnxPipelineConfig {
+        model_name: "dlshogi",
+        onnx_path: cli.dlshogi_onnx_model.as_ref().unwrap(),
         input_path,
         output_path,
         process_count,
-        cli.onnx_batch_size,
-        cli.onnx_gpu_id,
-        cli.onnx_tensorrt,
-        cli.onnx_tensorrt_cache.as_deref(),
-        cli.score_clip,
-        cli.onnx_eval_scale,
-        cli.skip_in_check,
-        FEATURES1_SIZE,
-        FEATURES2_SIZE,
-        INPUT1_CHANNELS,
-        INPUT2_CHANNELS,
-        cli.ort_profile.as_deref(),
-        |pos, f1, f2, _psv| {
-            make_input_features(pos, f1, f2);
-        },
-    )
+        batch_size: cli.onnx_batch_size,
+        gpu_id: cli.onnx_gpu_id,
+        use_tensorrt: cli.onnx_tensorrt,
+        tensorrt_cache: cli.onnx_tensorrt_cache.as_deref(),
+        score_clip: cli.score_clip,
+        eval_scale: cli.onnx_eval_scale,
+        skip_in_check: cli.skip_in_check,
+        f1_size: FEATURES1_SIZE,
+        f2_size: FEATURES2_SIZE,
+        input1_channels: INPUT1_CHANNELS,
+        input2_channels: INPUT2_CHANNELS,
+        profile_path: cli.ort_profile.as_deref(),
+    };
+    process_file_with_onnx_pipeline(&config, |pos, f1, f2, _psv| {
+        make_input_features(pos, f1, f2);
+    })
 }
