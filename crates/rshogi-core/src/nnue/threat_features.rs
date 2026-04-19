@@ -911,6 +911,15 @@ pub(crate) fn decode_board_threat_info_fb(
 
     /// BonaPiece pair index → ThreatClass のマッピング
     /// 順序: Pawn, Lance, Knight, Silver, Gold(Like), Bishop, Horse, Rook, Dragon
+    ///
+    /// **注意**: BonaPiece の格納順序 (Pawn, Lance, ..., Bishop, **Horse**, **Rook**,
+    /// Dragon) と `ThreatClass` の discriminant 値 (..., Bishop=5, **Rook=6**,
+    /// **Horse=7**, Dragon=8) は Rook / Horse の位置が逆転している。
+    ///
+    /// この配列は **BonaPiece 順** に並べて正しい `ThreatClass` を返すための
+    /// 変換テーブル。`ThreatClass` 側の discriminant 値は `PAIR_BASE` インデックス
+    /// としてそのまま使う。単体テスト `test_decode_board_threat_info_fb` で
+    /// `F_HORSE` / `F_ROOK` を用いて両者の整合を検証済み。
     const BP_TO_CLASS: [ThreatClass; 9] = [
         ThreatClass::Pawn,
         ThreatClass::Lance,
