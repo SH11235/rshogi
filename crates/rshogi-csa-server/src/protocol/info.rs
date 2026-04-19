@@ -119,11 +119,15 @@ pub fn show_lines(game_id: &GameId, listing: Option<&GameListing>) -> Vec<CsaLin
 
 /// `%%HELP` に対する応答を複数行で生成する。
 ///
-/// 応答は CSA 拡張 `##[HELP]` プレフィックス付きの行列。各行に 1 コマンドずつ
-/// 概要を載せる。**このリストは実際に受け付けるコマンドだけを含める**
-/// (advertise ≠ accept の乖離を防ぐため)。未配線の `%%LIST` / `%%SHOW` /
+/// 応答は CSA 拡張 `##[HELP]` プレフィックス付きの行列 + 末尾に終端行
+/// `##[HELP] END` を必ず付ける。**このリストは実際に受け付けるコマンドだけを
+/// 含める** (advertise ≠ accept の乖離を防ぐため)。未配線の
 /// `%%MONITOR2ON/OFF` / `%%CHAT` / `%%SETBUOY` 系は、各コマンドの配線コミットで
 /// 順次追加する。
+///
+/// 終端行があることで、persistent socket 上でクライアントは「HELP 応答が何行
+/// 続くか」を事前に知らずに次コマンド送信に進める（`%%WHO` / `%%LIST` /
+/// `%%SHOW` と同じ framing 規約）。
 pub fn help_lines() -> Vec<CsaLine> {
     let entries: &[&str] = &[
         "%%VERSION - show server implementation and version",
@@ -132,7 +136,10 @@ pub fn help_lines() -> Vec<CsaLine> {
         "%%LIST - list active games",
         "%%SHOW <game_id> - show a game summary",
     ];
-    entries.iter().map(|e| CsaLine::new(format!("##[HELP] {e}"))).collect()
+    let mut out: Vec<CsaLine> =
+        entries.iter().map(|e| CsaLine::new(format!("##[HELP] {e}"))).collect();
+    out.push(CsaLine::new("##[HELP] END"));
+    out
 }
 
 #[cfg(test)]
@@ -173,6 +180,13 @@ mod tests {
         for line in help_lines() {
             assert!(line.as_str().starts_with("##[HELP] "), "bad prefix: {}", line.as_str());
         }
+    }
+
+    #[test]
+    fn help_lines_end_with_terminator() {
+        // WHO / LIST / SHOW と揃えて HELP も終端行を持つ。
+        let lines = help_lines();
+        assert_eq!(lines.last().map(|l| l.as_str()), Some("##[HELP] END"));
     }
 
     #[test]

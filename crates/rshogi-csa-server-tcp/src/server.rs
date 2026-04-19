@@ -350,16 +350,20 @@ where
     // LOGIN 成功応答: shogi-server 互換の `LOGIN:<handle> OK`。
     transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
 
-    // 5. League にログインする。
-    //    - x1 フラグ付きのセッションは info-only（`%%` 系コマンド専用）として扱い、
-    //      `Connected` のまま WaitingPool にも入れない。同じ session 内で対局も
-    //      したい場合は x1 なしで別途 LOGIN する契約にする（matchmaking と
-    //      info-only を明確に分離することで「観戦だけのつもりが勝手にマッチ成立
-    //      する」挙動を防ぐ）。
-    //    - x1 なしは従来通り `GameWaiting` に遷移して matchmaking 経路に進む。
+    // 5. セッション種別に応じた経路に分岐する。
+    //    - x1 フラグ付きは info-only（`%%` 系コマンド専用）経路。matchmaking に
+    //      参加せず、`League` にも登録しない。これにより同じ handle が「対局用の
+    //      通常セッション」と「情報取得用の別セッション」を同時に保持できる
+    //      （info-only は League の一意性制約を共有しない）。認証だけは通常経路と
+    //      同じ RateStorage + PasswordStore で済ませる。
+    //    - x1 なしは `League::login` → `GameWaiting` 遷移 → matchmaking。
+    if x1 {
+        return run_x1_info_session(state.clone(), transport).await;
+    }
+
     {
         let mut league = state.league.lock().await;
-        match league.login(&handle_player, x1) {
+        match league.login(&handle_player, false) {
             LoginResult::Ok { .. } => {}
             LoginResult::AlreadyLoggedIn => {
                 let _ =
@@ -371,22 +375,15 @@ where
                 return Ok(());
             }
         }
-        if !x1 {
-            league
-                .transition(
-                    &handle_player,
-                    PlayerStatus::GameWaiting {
-                        game_name: game_name.clone(),
-                        preferred_color: Some(color),
-                    },
-                )
-                .map_err(ServerError::State)?;
-        }
-    }
-
-    // x1 セッションは matchmaking に参加しない info-only 経路に分岐。
-    if x1 {
-        return run_x1_info_session(state.clone(), transport, handle_player).await;
+        league
+            .transition(
+                &handle_player,
+                PlayerStatus::GameWaiting {
+                    game_name: game_name.clone(),
+                    preferred_color: Some(color),
+                },
+            )
+            .map_err(ServerError::State)?;
     }
 
     // 6. 待機プールで相補手番の相手を探す。
@@ -508,13 +505,15 @@ where
 /// x1 info-only セッションを駆動する。
 ///
 /// x1 フラグ付きで LOGIN したクライアントは matchmaking に参加せず、本関数が
-/// サーバー情報系 `%%` コマンドへの応答と keep-alive だけを処理する。`League`
-/// 上は `Connected` のままで、切断を検知したら `League::logout` する。
-/// サポート外の `%%` コマンド、通常の対局コマンド、不正な行は全て切断として扱う。
+/// サーバー情報系 `%%` コマンドへの応答と keep-alive だけを処理する。
+/// `League` にも `WaitingPool` にも登録しないため、同じ handle が別セッションで
+/// 通常対局に参加していても info-only セッションは独立して開けるし、複数の
+/// info-only セッションを並列で持つことも妨げない（info-only は共有状態に
+/// エントリを作らない）。サポート外の `%%` コマンド、通常の対局コマンド、
+/// 不正な行は全て切断として扱う。
 async fn run_x1_info_session<R, K, P>(
     state: Rc<SharedState<R, K, P>>,
     mut transport: TcpTransport,
-    handle_player: PlayerName,
 ) -> Result<(), ServerError>
 where
     R: RateStorage + 'static,
@@ -570,12 +569,8 @@ where
         }
     }
 
-    // info-only セッションは WaitingPool に入れていないので、League からの
-    // 除去だけで十分。
-    {
-        let mut league = state.league.lock().await;
-        league.logout(&handle_player);
-    }
+    // info-only セッションは共有状態にエントリを作らないため、後始末は transport
+    // の drop だけ。active_games notify だけ graceful shutdown 用に触っておく。
     state.active_games.notify_waiters();
     Ok(())
 }

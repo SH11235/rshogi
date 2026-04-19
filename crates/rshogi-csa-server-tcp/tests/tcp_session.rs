@@ -506,14 +506,13 @@ fn x1_info_session_answers_version_and_help_and_never_matches() {
 }
 
 #[test]
-fn x1_info_session_sees_who_with_mixed_statuses() {
-    // %%WHO が x1 info-only セッションと、通常の GameWaiting 待機プレイヤ両方を
-    // 見せる。x1 付き LOGIN のプレイヤは `connected`、x1 なしで WaitingPool に
-    // 入っているプレイヤは `waiting:<game_name>` として出力される。
+fn x1_info_session_sees_only_matchmaking_players_in_who() {
+    // x1 info-only セッションは `League` に登録されないため、%%WHO には出ない。
+    // 通常の GameWaiting 待機プレイヤだけが `waiting:<game_name>` として現れる。
     run_local(|| async {
-        let (addr, topdir) = spawn_server("x1_who_mixed").await;
+        let (addr, topdir) = spawn_server("x1_who_only_match").await;
 
-        // carol が x1 info-only で LOGIN。matchmaking に参加しない → connected。
+        // carol が x1 info-only で LOGIN。League 非登録（%%WHO に出ない）。
         let (mut rc, mut wc) = connect(addr).await;
         send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
         assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
@@ -536,12 +535,56 @@ fn x1_info_session_sees_who_with_mixed_statuses() {
         }
         assert_eq!(rows.last().map(String::as_str), Some("##[WHO] END"));
         assert!(
-            rows.iter().any(|l| l == "##[WHO] carol connected"),
-            "no carol(connected) row: {rows:?}"
-        );
-        assert!(
             rows.iter().any(|l| l == "##[WHO] alice waiting:g1"),
             "no alice(waiting:g1) row: {rows:?}"
+        );
+        // carol (info-only) は WHO には出ない。
+        assert!(
+            !rows.iter().any(|l| l.contains("carol")),
+            "carol should not appear in WHO: {rows:?}"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn same_handle_can_open_play_and_x1_info_sessions_concurrently() {
+    // 同一 handle (alice) が play セッション（x1 なし）と info-only セッション
+    // （x1 付き）を同時に保持できる。x1 info-only は League に登録されないので、
+    // 2 本目の LOGIN が `already_logged_in` で弾かれない。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("same_handle_dual").await;
+
+        // alice が x1 なしで LOGIN → GameWaiting。
+        let (mut _ra_play, mut wa_play) = connect(addr).await;
+        send_line(&mut wa_play, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut _ra_play).await.unwrap(), "LOGIN:alice OK");
+
+        // 同じ alice が x1 付きで別接続の info-only セッションを開く。
+        let (mut ra_info, mut wa_info) = connect(addr).await;
+        send_line(&mut wa_info, "LOGIN alice+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra_info).await.unwrap(), "LOGIN:alice OK");
+
+        // info セッションから %%VERSION を投げて応答が取れることを確認。
+        send_line(&mut wa_info, "%%VERSION").await;
+        let v = read_line_raw(&mut ra_info).await.unwrap();
+        assert!(v.starts_with("##[VERSION] "), "unexpected VERSION: {v}");
+
+        // play 側の同一 alice は League に残っており、WHO で waiting:g1 が観測できる。
+        send_line(&mut wa_info, "%%WHO").await;
+        let mut rows: Vec<String> = Vec::new();
+        for _ in 0..10 {
+            let line = read_line_raw(&mut ra_info).await.unwrap();
+            let is_end = line == "##[WHO] END";
+            rows.push(line);
+            if is_end {
+                break;
+            }
+        }
+        assert!(
+            rows.iter().any(|l| l == "##[WHO] alice waiting:g1"),
+            "no alice play row: {rows:?}"
         );
 
         let _ = tokio::fs::remove_dir_all(&topdir).await;
