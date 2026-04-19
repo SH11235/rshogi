@@ -384,11 +384,9 @@ impl GameRoom {
                 max_moves: cfg.max_moves,
                 time_margin_ms: cfg.time_margin_ms,
                 entering_king_rule: EnteringKingRule::Point24,
-                initial_sfen: None,
             },
             clock,
-        )
-        .map_err(|e| Error::RustError(format!("CoreRoom::new: {e}")))?;
+        );
         *self.core.borrow_mut() = Some(core);
         *self.config.borrow_mut() = Some(cfg.clone());
 
@@ -659,11 +657,9 @@ impl GameRoom {
                 max_moves: cfg.max_moves,
                 time_margin_ms: cfg.time_margin_ms,
                 entering_king_rule: EnteringKingRule::Point24,
-                initial_sfen: None,
             },
             clock,
-        )
-        .map_err(|e| Error::RustError(format!("CoreRoom::new: {e}")))?;
+        );
 
         // moves 再送。AGREE は手として永続化しないため、moves が存在するなら
         // 両者 AGREE 済みと確定できる（そうでないと MoveAccepted に至らない）。

@@ -111,12 +111,6 @@ pub struct GameRoomConfig {
     pub time_margin_ms: u64,
     /// `%KACHI` 判定に使う入玉ルール（既定は 24 点法 = `Point24`）。
     pub entering_king_rule: EnteringKingRule,
-    /// 対局開始局面の SFEN。`None` なら平手初期局面を使う。
-    ///
-    /// フォーク対局・駒落ち対局は「呼び出し側で局面を確定し、その SFEN を
-    /// ここに詰めて渡す」運用にする。`GameRoom` は開始局面決定ロジックを
-    /// 持たず、与えられた SFEN をそのままセットするだけ。
-    pub initial_sfen: Option<String>,
 }
 
 impl fmt::Debug for GameRoomConfig {
@@ -128,7 +122,6 @@ impl fmt::Debug for GameRoomConfig {
             .field("max_moves", &self.max_moves)
             .field("time_margin_ms", &self.time_margin_ms)
             .field("entering_king_rule", &self.entering_king_rule)
-            .field("initial_sfen", &self.initial_sfen)
             .finish()
     }
 }
@@ -157,28 +150,18 @@ impl fmt::Debug for GameRoom {
 }
 
 impl GameRoom {
-    /// `config.initial_sfen` に応じた開始局面で対局ルームを構築する。
+    /// 平手初期局面で対局ルームを構築する。
     ///
-    /// - `initial_sfen` が `None` なら平手初期局面 (`SFEN_HIRATE`)。
-    /// - `Some(sfen)` なら与えられた SFEN を読み込む。SFEN が不正なら
-    ///   [`ServerError::Internal`] を返す。駒落ち・フォーク等の任意局面は、
-    ///   呼び出し側で有効な SFEN に解決してから渡すこと（`GameRoom` は
-    ///   開始局面決定ロジックを持たない）。
-    pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Result<Self, ServerError> {
+    /// 駒落ち・フォーク対局は本コンストラクタとは別の経路で足す（まだ未実装）。
+    /// 開始局面を設定化するには、盤面を Game_Summary の `position_section` と
+    /// `to_move` に反映する棋譜側の配線も同時に必要なため、本 API は平手固定に
+    /// 留めておく。
+    pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Self {
         let mut pos = Position::new();
-        match config.initial_sfen.as_deref() {
-            None => {
-                // SFEN_HIRATE は const で壊れていれば rshogi-core 側のバグ。
-                // 平手開始は失敗経路を持たないことを contract として明示する。
-                pos.set_sfen(SFEN_HIRATE).expect("SFEN_HIRATE must be valid");
-            }
-            Some(sfen) => {
-                pos.set_sfen(sfen)
-                    .map_err(|e| ServerError::Internal(format!("invalid initial_sfen: {e}")))?;
-            }
-        }
+        // SFEN_HIRATE は const。set_sfen が失敗するのは rshogi-core 側のバグ。
+        pos.set_sfen(SFEN_HIRATE).expect("SFEN_HIRATE must be valid");
         let validator = Validator::new(config.entering_king_rule);
-        Ok(Self {
+        Self {
             config,
             pos,
             clock,
@@ -186,7 +169,7 @@ impl GameRoom {
             status: GameStatus::AgreeWaiting,
             moves_played: 0,
             turn_started_at_ms: None,
-        })
+        }
     }
 
     /// 現在の状態。
@@ -633,10 +616,9 @@ mod tests {
             max_moves: 256,
             time_margin_ms: 0,
             entering_king_rule: EnteringKingRule::Point24,
-            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        GameRoom::new(config, clock).expect("hirate config is always valid")
+        GameRoom::new(config, clock)
     }
 
     fn line(s: &str) -> CsaLine {
@@ -757,10 +739,9 @@ mod tests {
             max_moves: 256,
             time_margin_ms: 1_500,
             entering_king_rule: EnteringKingRule::Point24,
-            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 0));
-        let mut room = GameRoom::new(config, clock).expect("valid config");
+        let mut room = GameRoom::new(config, clock);
         agree_both(&mut room);
         // 経過 4000ms, margin 1500ms → consume(2500ms)。整数秒切り捨てで 2 秒消費。
         let r = room.handle_line(Color::Black, &line("+7776FU"), 4_000).unwrap();
@@ -777,10 +758,9 @@ mod tests {
             max_moves: 256,
             time_margin_ms,
             entering_king_rule: EnteringKingRule::Point24,
-            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(total_sec, byoyomi_sec));
-        GameRoom::new(config, clock).expect("valid config")
+        GameRoom::new(config, clock)
     }
 
     #[test]
@@ -1015,41 +995,6 @@ mod tests {
     }
 
     #[test]
-    fn new_with_custom_sfen_sets_position_and_side_to_move() {
-        // 7 六歩が既に指された直後の局面。手番は後手 (w)。
-        let sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";
-        let config = GameRoomConfig {
-            game_id: GameId::new("g"),
-            black: PlayerName::new("a"),
-            white: PlayerName::new("b"),
-            max_moves: 256,
-            time_margin_ms: 0,
-            entering_king_rule: EnteringKingRule::Point24,
-            initial_sfen: Some(sfen.to_owned()),
-        };
-        let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        let room = GameRoom::new(config, clock).expect("valid sfen");
-        // 与えた SFEN の手番（後手）が反映されている。
-        assert_eq!(room.position().side_to_move(), rshogi_core::types::Color::White);
-    }
-
-    #[test]
-    fn new_with_invalid_sfen_returns_internal_error() {
-        let config = GameRoomConfig {
-            game_id: GameId::new("g"),
-            black: PlayerName::new("a"),
-            white: PlayerName::new("b"),
-            max_moves: 256,
-            time_margin_ms: 0,
-            entering_king_rule: EnteringKingRule::Point24,
-            initial_sfen: Some("not a sfen".to_owned()),
-        };
-        let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        let err = GameRoom::new(config, clock).unwrap_err();
-        assert!(matches!(err, ServerError::Internal(ref m) if m.contains("invalid initial_sfen")));
-    }
-
-    #[test]
     fn max_moves_reaches_max_moves_endpoint() {
         // max_moves=2 にして 2 手指せば即 #MAX_MOVES 終了。
         let config = GameRoomConfig {
@@ -1059,10 +1004,9 @@ mod tests {
             max_moves: 2,
             time_margin_ms: 0,
             entering_king_rule: EnteringKingRule::Point24,
-            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        let mut room = GameRoom::new(config, clock).expect("valid config");
+        let mut room = GameRoom::new(config, clock);
         agree_both(&mut room);
         let _ = room.handle_line(Color::Black, &line("+7776FU"), 0).unwrap();
         let r = room.handle_line(Color::White, &line("-3334FU"), 0).unwrap();

@@ -829,9 +829,8 @@ where
         max_moves: state.config.max_moves,
         time_margin_ms: state.config.time_margin_ms,
         entering_king_rule: state.config.entering_king_rule,
-        initial_sfen: None,
     };
-    let mut room = GameRoom::new(cfg, Box::new(clock))?;
+    let mut room = GameRoom::new(cfg, Box::new(clock));
 
     // broadcasts を監視して `,T<sec>` を抜き取る軽量ラッパ。run_room に相当する処理を
     // ここで再実装する。時間切れアラームも同じ方式で駆動する。

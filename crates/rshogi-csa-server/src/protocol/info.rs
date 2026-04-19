@@ -72,21 +72,15 @@ fn format_status_token(status: &PlayerStatus) -> String {
 /// `%%HELP` に対する応答を複数行で生成する。
 ///
 /// 応答は CSA 拡張 `##[HELP]` プレフィックス付きの行列。各行に 1 コマンドずつ
-/// 概要を載せる。クライアントで GUI 補助に使える粒度にする。
+/// 概要を載せる。**このリストは実際に受け付けるコマンドだけを含める**
+/// (advertise ≠ accept の乖離を防ぐため)。未配線の `%%LIST` / `%%SHOW` /
+/// `%%MONITOR2ON/OFF` / `%%CHAT` / `%%SETBUOY` 系は、各コマンドの配線コミットで
+/// 順次追加する。
 pub fn help_lines() -> Vec<CsaLine> {
     let entries: &[&str] = &[
         "%%VERSION - show server implementation and version",
         "%%HELP - list available %% commands",
         "%%WHO - list logged-in players",
-        "%%LIST - list active games",
-        "%%SHOW <game_id> - show summary and move history of a game",
-        "%%MONITOR2ON <game_id> - start spectating a game",
-        "%%MONITOR2OFF <game_id> - stop spectating a game",
-        "%%CHAT <message> - send a chat message to a room",
-        "%%SETBUOY <game_name> <moves...> <count> - register a buoy template (admin)",
-        "%%DELETEBUOY <game_name> - delete a buoy template (admin)",
-        "%%GETBUOYCOUNT <game_name> - show remaining buoy slots",
-        "%%FORK <source_game> [buoy_name] [nth_move] - derive a game from an existing record",
     ];
     entries.iter().map(|e| CsaLine::new(format!("##[HELP] {e}"))).collect()
 }
@@ -107,25 +101,27 @@ mod tests {
     }
 
     #[test]
-    fn help_lines_cover_all_x1_commands() {
+    fn help_lines_cover_currently_wired_commands() {
+        // HELP は「実際に受け付けるコマンドだけを advertise する」方針。
+        // 未配線のコマンドが含まれていたら falsely advertised なので弾く。
         let lines = help_lines();
         let joined: String =
             lines.iter().map(|l| l.as_str().to_owned()).collect::<Vec<_>>().join("\n");
-        for cmd in [
-            "%%VERSION",
-            "%%HELP",
-            "%%WHO",
+        for cmd in ["%%VERSION", "%%HELP", "%%WHO"] {
+            assert!(joined.contains(cmd), "help missing {cmd}: {joined}");
+        }
+        for unwired in [
             "%%LIST",
             "%%SHOW",
             "%%MONITOR2ON",
-            "%%MONITOR2OFF",
             "%%CHAT",
             "%%SETBUOY",
-            "%%DELETEBUOY",
-            "%%GETBUOYCOUNT",
             "%%FORK",
         ] {
-            assert!(joined.contains(cmd), "help missing {cmd}: {joined}");
+            assert!(
+                !joined.contains(unwired),
+                "help advertises unwired command {unwired}: {joined}"
+            );
         }
     }
 
