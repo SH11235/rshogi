@@ -304,7 +304,7 @@ where
     // 2. LOGIN 行を受信。
     let login_line = transport.recv_line(state.config.login_timeout).await?;
     let cmd = parse_command(&login_line)?;
-    let (full_name, password, _x1) = match cmd {
+    let (full_name, password, x1) = match cmd {
         ClientCommand::Login { name, password, x1 } => (name, password, x1),
         _ => {
             let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect")).await;
@@ -350,7 +350,7 @@ where
     // 5. League に登録し GameWaiting に遷移。
     {
         let mut league = state.league.lock().await;
-        match league.login(&handle_player, false) {
+        match league.login(&handle_player, x1) {
             LoginResult::Ok { .. } => {}
             LoginResult::AlreadyLoggedIn => {
                 let _ =
@@ -412,10 +412,16 @@ where
     }
 
     // waiter 側パス: transport を保持したまま、マッチ確定 or 切断 を監視する。
-    run_waiter(state.clone(), transport, handle, color, game_name, handle_player).await
+    run_waiter(state.clone(), transport, handle, color, game_name, handle_player, x1).await
 }
 
 /// waiter として待機プールに入り、マッチ確定 or 切断を待つ。
+///
+/// 非 x1 waiter は「何か行が届いた時点で切断」方針を維持する（対局前の任意入力は
+/// 受け付けない）。x1 waiter は `%%VERSION` / `%%HELP` / 空行 keep-alive だけ
+/// 応答し、それ以外の入力で切断する。対応する `%%` 系コマンドの集合は
+/// 今後 `%%WHO` / `%%LIST` / `%%SHOW` を順次拡張していく余地として、
+/// ここでマッチ節を増やす形で対応する。
 #[allow(clippy::too_many_arguments)]
 async fn run_waiter<R, K, P>(
     state: Rc<SharedState<R, K, P>>,
@@ -424,13 +430,14 @@ async fn run_waiter<R, K, P>(
     color: Color,
     game_name: GameName,
     handle_player: PlayerName,
+    x1: bool,
 ) -> Result<(), ServerError>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
-    let (match_req_tx, match_req_rx) = oneshot::channel::<MatchRequest>();
+    let (match_req_tx, mut match_req_rx) = oneshot::channel::<MatchRequest>();
     {
         let mut pool = state.waiting.lock().await;
         pool.push(
@@ -443,30 +450,75 @@ where
         );
     }
 
-    // 切断監視: recv_line は cancel-safe（`TcpTransport::recv_line`）なので、
-    // `match_req_rx` が先に発火すればバッファは保存されたまま drive 側へ transport を渡せる。
-    let waiter_outcome = tokio::select! {
-        req_res = match_req_rx => {
-            match req_res {
-                Ok(req) => {
-                    // transport を drive 側へ渡し、終局通知を待つ。
-                    let _ = req.transport_responder.send(transport);
-                    let _ = req.completion_rx.await;
-                    WaiterOutcome::Completed
-                }
-                Err(_) => {
-                    // pool 側が破棄された。league だけクリーンアップ。
-                    WaiterOutcome::Aborted
+    // 切断 / マッチ確定 / x1 情報コマンドの 3 経路を監視する。`recv_line` は
+    // cancel-safe（`TcpTransport::recv_line`）なので、マッチが先に到着した場合は
+    // バッファを保ったまま drive 側へ transport を渡せる。
+    let waiter_outcome: WaiterOutcome = 'outer: loop {
+        let recv = tokio::select! {
+            req_res = &mut match_req_rx => {
+                match req_res {
+                    Ok(req) => {
+                        // transport を drive 側へ渡し、終局通知を待つ。
+                        let _ = req.transport_responder.send(transport);
+                        let _ = req.completion_rx.await;
+                        break 'outer WaiterOutcome::Completed;
+                    }
+                    Err(_) => {
+                        // pool 側が破棄された。league だけクリーンアップ。
+                        break 'outer WaiterOutcome::Aborted;
+                    }
                 }
             }
-        }
-        _res = transport.recv_line(NEAR_INFINITE) => {
-            // 切断 or 待機中に不正行が来た → waiter を撤去して LOGIN をリセット。
-            // （GameWaiting 中のクライアント入力は受け付けない方針で、任意のデータを
-            //  受信した時点で接続を閉じる。）
+            recv = transport.recv_line(NEAR_INFINITE) => recv,
+        };
+
+        let line = match recv {
+            Ok(l) => l,
+            Err(_) => {
+                // 切断 or I/O エラー → pool を抜けて終了。
+                let mut pool = state.waiting.lock().await;
+                let _removed = pool.remove_by_handle(&game_name, &handle);
+                break 'outer WaiterOutcome::DisconnectedFromPool;
+            }
+        };
+
+        if !x1 {
+            // 非 x1 waiter は待機中の入力を許容しない（現行方針）。
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
-            WaiterOutcome::DisconnectedFromPool
+            break 'outer WaiterOutcome::DisconnectedFromPool;
+        }
+
+        // x1 waiter: 情報コマンドだけ応答する。
+        let cmd = match parse_command(&line) {
+            Ok(c) => c,
+            Err(_) => {
+                // パース不能な行は切断扱い。
+                let mut pool = state.waiting.lock().await;
+                let _removed = pool.remove_by_handle(&game_name, &handle);
+                break 'outer WaiterOutcome::DisconnectedFromPool;
+            }
+        };
+        let replies: Option<Vec<CsaLine>> = match cmd {
+            ClientCommand::KeepAlive => Some(Vec::new()),
+            ClientCommand::Version => Some(rshogi_csa_server::protocol::info::version_lines()),
+            ClientCommand::Help => Some(rshogi_csa_server::protocol::info::help_lines()),
+            _ => None,
+        };
+        let Some(lines) = replies else {
+            // 未サポートの x1 コマンド / 対局中コマンドは切断扱い（現時点では
+            // %%WHO / %%LIST / %%SHOW 等は未配線のため拒否に倒す）。
+            let mut pool = state.waiting.lock().await;
+            let _removed = pool.remove_by_handle(&game_name, &handle);
+            break 'outer WaiterOutcome::DisconnectedFromPool;
+        };
+        for out in lines {
+            if transport.send_line(&out).await.is_err() {
+                // 応答送信に失敗したら切断として扱う。
+                let mut pool = state.waiting.lock().await;
+                let _removed = pool.remove_by_handle(&game_name, &handle);
+                break 'outer WaiterOutcome::DisconnectedFromPool;
+            }
         }
     };
 

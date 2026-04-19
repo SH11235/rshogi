@@ -440,6 +440,72 @@ fn agree_total_window_is_not_reset_by_peer_keepalive() {
 }
 
 #[test]
+fn x1_waiter_answers_version_and_help_and_stays_in_pool() {
+    // x1 付きで LOGIN した待機クライアントは、対局成立前でも %%VERSION / %%HELP
+    // に応答し、keep-alive（空行）では切断されない。応答が終わっても waiter は
+    // プールに残り続け、あとから来た相補手番とマッチ成立できる。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("x1_waiter_info").await;
+
+        // alice が x1 付きで LOGIN。
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN alice+g1+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:alice OK");
+
+        // %%VERSION → 1 行応答。
+        send_line(&mut wa, "%%VERSION").await;
+        let v = read_line_raw(&mut ra).await.unwrap();
+        assert!(v.starts_with("##[VERSION] "), "unexpected VERSION line: {v}");
+
+        // %%HELP → 複数行応答。まず 1 行読んで ##[HELP] プレフィックスを確認。
+        send_line(&mut wa, "%%HELP").await;
+        let h = read_line_raw(&mut ra).await.unwrap();
+        assert!(h.starts_with("##[HELP] "), "unexpected HELP line: {h}");
+
+        // keep-alive（空行）では切断されず、プールにも残る。
+        send_line(&mut wa, "").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // bob が相補手番で入ってきた時点でマッチ成立する → alice 側に Game_Summary
+        // が流れてくる。途中の %%HELP の残り行があっても Game_Summary 冒頭
+        // `BEGIN Game_Summary` 行を探せば良い。
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:bob OK");
+
+        let mut saw_begin = false;
+        for _ in 0..60 {
+            let line = read_line_raw(&mut ra).await.unwrap();
+            if line == "BEGIN Game_Summary" {
+                saw_begin = true;
+                break;
+            }
+        }
+        assert!(saw_begin, "did not observe Game_Summary for x1 waiter");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn non_x1_waiter_is_disconnected_on_any_input() {
+    // x1 なし LOGIN の waiter は、待機中の任意の入力（%% 系含む）で切断される。
+    // 「x1 未確立のセッションは %% を受け付けない」方針を TCP レベルで守る。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("non_x1_waiter").await;
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:alice OK");
+
+        // %%VERSION を投げると切断される。
+        send_line(&mut wa, "%%VERSION").await;
+        // 応答行は無く EOF を観測する（ソケットが閉じられる）。
+        let eof = read_line_raw(&mut ra).await;
+        assert!(eof.is_none(), "non-x1 waiter should be disconnected, got line: {eof:?}");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn waiter_disconnect_is_cleaned_up_and_allows_relogin() {
     // 先着プレイヤが相手待ち中に切断したとき、待機プールと League から明示的に除去される
     // こと。さもなければ同一 handle の再 LOGIN が already_logged_in で失敗する。
