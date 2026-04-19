@@ -544,6 +544,21 @@ where
             break 'outer WaiterOutcome::DisconnectedFromPool;
         };
         for out in lines {
+            // 応答送信中にマッチ確定が届いたら、残りの返信行は捨てて handoff を
+            // 優先する。x1 クライアントが応答を読まずに TCP 送信バッファを詰まら
+            // せても、相補手番の相手の LOGIN を待たせない。
+            match match_req_rx.try_recv() {
+                Ok(req) => {
+                    let _ = req.transport_responder.send(transport);
+                    let _ = req.completion_rx.await;
+                    break 'outer WaiterOutcome::Completed;
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {}
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    // pool 側が破棄された。league だけクリーンアップ。
+                    break 'outer WaiterOutcome::Aborted;
+                }
+            }
             if transport.send_line(&out).await.is_err() {
                 // 応答送信に失敗したら切断として扱う。
                 let mut pool = state.waiting.lock().await;
@@ -699,7 +714,26 @@ where
         return Ok(());
     }
 
-    // 両者 InGame へ遷移させてから run_room を呼ぶ。
+    // `GameRoom` を構築して内部 AGREE を 2 回入れ、`START` 配信まで済ませる。
+    // 先に dispatch を通し、成功後に初めて League と GameRegistry を更新する。
+    // こうすることで START 配信が遅延・詰まり・失敗している間は「League は
+    // AgreeWaiting のまま、GameRegistry も空」の一貫した状態を保てる
+    //（WHO が `playing:<game_id>` を返すのに LIST / SHOW には出ない、という
+    // 不整合を防ぐ）。
+    let start_time = chrono::Utc::now();
+    let (mut room, game_start_instant) = initialize_game_and_dispatch_start(
+        state,
+        game_id,
+        &matched,
+        clock,
+        black_transport,
+        white_transport,
+    )
+    .await?;
+
+    // `START` 配信成功を確認してから、League → `InGame` 遷移と GameRegistry
+    // 登録を連続で行う。2 つの共有状態更新は micro 秒スケールで連続するので、
+    // `%%WHO` と `%%LIST` / `%%SHOW` が同じ「対局開始」状態を観測する。
     {
         let mut league = state.league.lock().await;
         for n in [&matched.black, &matched.white] {
@@ -713,23 +747,6 @@ where
                 .map_err(ServerError::State)?;
         }
     }
-
-    // `GameRoom` を構築して内部 AGREE を 2 回入れ、`START` 配信まで済ませる。
-    // ここで dispatch が失敗したら GameRegistry には入れずに early-return
-    // （「`%%LIST` に開始失敗した幽霊対局が出る」挙動を防ぐ）。
-    let start_time = chrono::Utc::now();
-    let (mut room, game_start_instant) = initialize_game_and_dispatch_start(
-        state,
-        game_id,
-        &matched,
-        clock,
-        black_transport,
-        white_transport,
-    )
-    .await?;
-
-    // `START` 配信成功を確認してから GameRegistry へ登録する。`started_at` は
-    // ここで取得して実プレイ開始時刻に揃える。
     let started_at_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     {
         let mut games = state.games.lock().await;
