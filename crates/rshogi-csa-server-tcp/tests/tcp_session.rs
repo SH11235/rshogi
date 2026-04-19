@@ -124,6 +124,7 @@ async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
         max_moves: 256,
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
+        x1_reply_write_timeout: Duration::from_secs(5),
         entering_king_rule: EnteringKingRule::Point24,
     };
     // bind_addr=:0 を使うため、先に手動で bind してから actual addr を取る必要がある。
@@ -389,6 +390,7 @@ async fn spawn_server_with_agree_timeout(
         max_moves: 256,
         login_timeout: Duration::from_secs(10),
         agree_timeout,
+        x1_reply_write_timeout: Duration::from_secs(5),
         entering_king_rule: EnteringKingRule::Point24,
     };
     let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();

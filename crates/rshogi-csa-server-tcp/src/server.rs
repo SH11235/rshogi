@@ -99,6 +99,15 @@ pub struct ServerConfig {
     /// Game_Summary 送信後、双方の AGREE / REJECT が揃うまでの受付窓。GUI
     /// クライアントや人手合意を挟む運用でも足りるよう、設定可能にしてある。
     pub agree_timeout: Duration,
+    /// x1 waiter が `%%` 系応答を 1 行送出するときの書き込みタイムアウト。
+    ///
+    /// x1 client が応答を読まずに詰まると、`run_waiter` の `send_line` が
+    /// 無期限にブロックし、同時刻に到着した対局相手（drive 側）への transport
+    /// handoff も止まる（`resp_rx.await` が永久に保留になる）。これは slow
+    /// response ではなくマッチメイキング停止なので、1 行あたり上限を設けて
+    /// 超過時は切断扱いにする。5 秒は「localhost / LAN の健常クライアント
+    /// では十分、stall した client を抱え込み続けるには長すぎる」レンジ。
+    pub x1_reply_write_timeout: Duration,
     /// 入玉ルール。既定は 24 点法。
     pub entering_king_rule: EnteringKingRule,
 }
@@ -115,6 +124,7 @@ impl ServerConfig {
             max_moves: 256,
             login_timeout: Duration::from_secs(30),
             agree_timeout: Duration::from_secs(5 * 60),
+            x1_reply_write_timeout: Duration::from_secs(5),
             entering_king_rule: EnteringKingRule::Point24,
         }
     }
@@ -549,13 +559,26 @@ where
         // 必ず全行送りきってからループ先頭 `tokio::select!` でマッチ確定
         // 待ちに戻る。マッチは 1 応答分の遅れ（数行の write 時間）だけ
         // 引き延ばされるが、相互の framing を壊さないためのトレードオフ。
+        //
+        // ただし、応答を読まずに詰まった x1 client を無期限に抱え込むと、
+        // 対局相手の handoff（`resp_rx.await`）が永久に停止してマッチメイキング
+        // 全体が止まる。そのため 1 行ごとに `x1_reply_write_timeout` を上限として
+        // 適用し、超過・失敗いずれも切断扱いで pool から除去する。
+        let write_timeout = state.config.x1_reply_write_timeout;
+        let mut write_failed = false;
         for out in lines {
-            if transport.send_line(&out).await.is_err() {
-                // 応答送信に失敗したら切断として扱う。
-                let mut pool = state.waiting.lock().await;
-                let _removed = pool.remove_by_handle(&game_name, &handle);
-                break 'outer WaiterOutcome::DisconnectedFromPool;
+            match tokio::time::timeout(write_timeout, transport.send_line(&out)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    write_failed = true;
+                    break;
+                }
             }
+        }
+        if write_failed {
+            let mut pool = state.waiting.lock().await;
+            let _removed = pool.remove_by_handle(&game_name, &handle);
+            break 'outer WaiterOutcome::DisconnectedFromPool;
         }
     };
 
@@ -738,7 +761,10 @@ where
                 .map_err(ServerError::State)?;
         }
     }
-    let started_at_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // `started_at_iso` は棋譜の `start_time` と同じ瞬間を表すべきなので、
+    // 別途 `Utc::now()` を取らず `start_time` から派生させる（`%%SHOW` の
+    // `started_at` フィールドと棋譜ヘッダの開始時刻が常に一致する）。
+    let started_at_iso = start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     {
         let mut games = state.games.lock().await;
         games.register(GameListing {
