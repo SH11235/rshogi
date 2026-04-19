@@ -94,18 +94,20 @@ pub fn list_lines(games: &[GameListing]) -> Vec<CsaLine> {
 
 /// `%%SHOW <game_id>` に対する応答を生成する。
 ///
-/// `listing` が `Some` なら対局サマリ 1 行を `##[SHOW] <field> <value>` 群として
-/// 出力し、末尾に終端行 `##[SHOW] END` を付ける。`None`（未登録 game_id）なら
-/// `##[SHOW] NOT_FOUND <game_id>` の 1 行のみを返す。
+/// `listing` が `Some` なら対局サマリを `##[SHOW] <field> <value>` 群として
+/// 出力する。`None`（未登録 game_id）なら `##[SHOW] NOT_FOUND <game_id>` を
+/// 先頭に出す。どちらの分岐でも末尾には終端行 `##[SHOW] END` を必ず付ける
+/// （persistent socket 上で「END まで読む」クライアントが missing game_id で
+/// 無限待ちにならないよう、framing を `%%WHO` / `%%LIST` / `%%HELP` と揃える）。
 ///
 /// 指し手列の添付は本関数のスコープ外（`GameRoom` から別途取得して
 /// `show_lines_with_moves` に差し替え拡張する想定）。
 pub fn show_lines(game_id: &GameId, listing: Option<&GameListing>) -> Vec<CsaLine> {
     let Some(g) = listing else {
-        return vec![CsaLine::new(format!(
-            "##[SHOW] NOT_FOUND {}",
-            game_id.as_str()
-        ))];
+        return vec![
+            CsaLine::new(format!("##[SHOW] NOT_FOUND {}", game_id.as_str())),
+            CsaLine::new("##[SHOW] END"),
+        ];
     };
     vec![
         CsaLine::new(format!("##[SHOW] game_id {}", g.game_id.as_str())),
@@ -276,10 +278,15 @@ mod tests {
     }
 
     #[test]
-    fn show_lines_for_unknown_game_emits_not_found() {
+    fn show_lines_for_unknown_game_emits_not_found_then_terminator() {
         let lines = show_lines(&GameId::new("g-missing"), None);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].as_str(), "##[SHOW] NOT_FOUND g-missing");
+        assert_eq!(
+            lines.iter().map(|l| l.as_str().to_owned()).collect::<Vec<_>>(),
+            vec![
+                "##[SHOW] NOT_FOUND g-missing".to_owned(),
+                "##[SHOW] END".to_owned(),
+            ]
+        );
     }
 
     #[test]

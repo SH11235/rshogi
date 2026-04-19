@@ -666,10 +666,12 @@ fn x1_list_and_show_reflect_ongoing_game() {
             "SHOW missing game_name: {show_rows:?}"
         );
 
-        // %%SHOW 未知 ID → NOT_FOUND。
+        // %%SHOW 未知 ID → NOT_FOUND + 終端行の 2 行で framing を保つ。
         send_line(&mut ws, "%%SHOW unknown-game").await;
         let nf = read_line_raw(&mut rs).await.unwrap();
         assert_eq!(nf, "##[SHOW] NOT_FOUND unknown-game");
+        let end = read_line_raw(&mut rs).await.unwrap();
+        assert_eq!(end, "##[SHOW] END");
 
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
