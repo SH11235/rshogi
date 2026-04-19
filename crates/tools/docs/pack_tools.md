@@ -130,6 +130,11 @@ dlshogi 系 ONNX モデルのポリシー出力を使い、各局面の合法手
 
 AobaZero (`--onnx-model`) と標準 dlshogi (`--dlshogi-onnx-model`, DL水匠等) の両方に対応。
 
+> **Tip**: スコア付け (rescore) と局面展開 (expand) を同じモデルで両方行う場合は、
+> `rescore_psv --expand-output-dir ...` を使うと **推論 1 パス** で両方を同時に実行できる
+> （value 出力で rescore、policy 出力で expand）。詳細は
+> [rescore_psv.md](rescore_psv.md#ポリシー展開expand-output-dirについて) を参照。
+
 **前提条件**: ONNX Runtime のセットアップが必要。詳細は [rescore_psv.md](rescore_psv.md) を参照。
 
 ```bash
@@ -229,15 +234,40 @@ cargo run -p tools --release --bin preprocess_psv -- \
 
 ### ポリシーネットワークで局面を拡張する場合
 
-dlshogi モデルの有力手から次局面を生成し、学習データを増やす：
+dlshogi モデルの有力手から次局面を生成し、学習データを増やす。
+**同じ ONNX モデルで rescore と expand を両方行うなら `rescore_psv` の
+`--expand-output-dir` で 1 パス実行** が推奨（GPU 推論が 1 回で済み、I/O も減る）。
+
+```bash
+# 1 パス版: rescore + expand を同一推論で同時に実行
+cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
+  --input data.psv --output-dir rescored/ \
+  --expand-output-dir expanded/ \
+  --expand-threshold 10.0 \
+  --dlshogi-onnx-model model.onnx \
+  --onnx-tensorrt --onnx-tensorrt-cache /tmp/trt_cache
+
+# expanded/data.psv は score=0 で書き出されるため、NNUE で再スコア
+cargo run -p tools --release --bin rescore_psv -- \
+  --input expanded/data.psv --output-dir rescored_expanded/ \
+  --nnue model.nnue --use-qsearch
+
+# 元データと結合してシャッフル
+cat rescored/data.psv rescored_expanded/data.psv > combined.psv
+cargo run -p tools --release --bin shuffle_psv -- \
+  --input combined.psv --output training_shuffled.psv
+```
+
+rescore と expand で異なるモデルを使いたい場合、または既存スコア付き PSV から
+policy 展開だけ追加したい場合は `expand_psv_from_policy` を単独で使う：
 
 ```bash
 # 1. ポリシーで局面拡張（確率 10% 超の手の次局面を生成）
 cargo run --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy -- \
   --input data.psv --output expanded.psv \
-  --onnx-model model.onnx --threshold 10.0
+  --dlshogi-onnx-model policy_model.onnx --threshold 10.0
 
-# 2. 拡張局面にスコアを付与
+# 2. 拡張局面にスコアを付与（rescore 用モデル）
 cargo run -p tools --release --bin rescore_psv -- \
   --input expanded.psv --output-dir rescored/ \
   --nnue model.nnue --use-qsearch
