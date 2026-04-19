@@ -222,6 +222,26 @@ struct Cli {
     /// ORT profiling出力先ディレクトリ（指定するとsession.run()の内訳をJSONで出力）
     #[arg(long)]
     ort_profile: Option<PathBuf>,
+
+    // --- ポリシー展開モード（ONNX 推論で value と同時に policy も使う） ---
+    /// 展開された子局面の出力ディレクトリ（指定時のみ expand 機能が有効）
+    /// ONNX モード（--onnx-model または --dlshogi-onnx-model）必須。
+    /// 入力ファイル名と同名で出力（rescore 出力とは別ディレクトリに置くこと）。
+    #[arg(long)]
+    expand_output_dir: Option<PathBuf>,
+
+    /// 合法手 softmax 確率がこの値（%）を超えた手を子局面として書き出す
+    /// `0.0 < v <= 100.0` の有限値が必要。expand 無効時は無視。
+    #[arg(long, default_value_t = 10.0)]
+    expand_threshold: f32,
+
+    /// 親局面が王手のとき expand をスキップ（rescore 側は --skip-in-check で別制御）
+    #[arg(long)]
+    expand_skip_parent_in_check: bool,
+
+    /// 展開した子局面が王手のとき expand 出力をスキップ
+    #[arg(long)]
+    expand_skip_child_in_check: bool,
 }
 
 /// 処理中にCtrl-Cが押されたかを追跡
@@ -231,6 +251,191 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 const QSEARCH_ALPHA_INIT: i32 = -30000;
 /// qsearchの初期beta値
 const QSEARCH_BETA_INIT: i32 = 30000;
+
+/// ONNX モードの marker 判定結果
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+enum OnnxMarkerDecision {
+    /// 完了済み（marker 一致 + bodies_match）。ファイル全体を skip
+    Skip,
+    /// rescore + expand 出力を truncate して最初から処理
+    TruncateAndProcess,
+    /// marker 不存在 + expand 無効 → 既存の record-count resume にフォールバック
+    LegacyResume,
+}
+
+/// 既存出力パスが symlink でないこと、未作成・既存どちらでも入力パスと衝突
+/// しないことを検証する。既存ファイルが入力の hardlink である場合も検出する
+/// （Unix のみ、`MetadataExt::dev/ino` で同一 inode を判定）。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn ensure_safe_output_path(
+    predicted: &std::path::Path,
+    canonical_input: &std::path::Path,
+) -> Result<()> {
+    // 既存ファイルなら symlink を拒否（truncate/append が symlink を辿ると
+    // 入力破壊につながる）
+    if let Ok(meta) = fs::symlink_metadata(predicted)
+        && meta.file_type().is_symlink()
+    {
+        anyhow::bail!(
+            "Output path is a symlink (refusing to truncate a symlink): {}. \
+             Remove the symlink or choose a different directory.",
+            predicted.display()
+        );
+    }
+    // 出力ファイル未作成でも parent を canonicalize して予定 canonical パスを構築
+    // し、入力パスと一致したらエラー
+    let predicted_canonical = canonicalize_predicted_path(predicted)?;
+    if predicted_canonical == canonical_input {
+        anyhow::bail!(
+            "Output path resolves to input file: {} -> {}",
+            predicted.display(),
+            canonical_input.display()
+        );
+    }
+    // 既存出力ファイルが入力と同じ inode を指す（hardlink）ケースを検出。
+    // `canonicalize` はパス解決のみで hardlink を検出できないため、Unix では
+    // `MetadataExt::{dev, ino}` で同一 inode 判定する。
+    #[cfg(unix)]
+    if predicted.exists() {
+        use std::os::unix::fs::MetadataExt;
+        let pred_meta = fs::metadata(predicted)
+            .with_context(|| format!("Failed to stat predicted output {}", predicted.display()))?;
+        let in_meta = fs::metadata(canonical_input)
+            .with_context(|| format!("Failed to stat input {}", canonical_input.display()))?;
+        if pred_meta.dev() == in_meta.dev() && pred_meta.ino() == in_meta.ino() {
+            anyhow::bail!(
+                "Output path is a hardlink to the input file ({} ↔ {}). \
+                 Refusing to truncate; choose a different directory.",
+                predicted.display(),
+                canonical_input.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// ONNX モードの marker チェック + 必要な truncate を行い、判定結果を返す
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+#[allow(clippy::too_many_arguments)]
+fn onnx_marker_decide(
+    cli: &Cli,
+    model_kind: &str,
+    onnx_path: &std::path::Path,
+    input_path: &std::path::Path,
+    rescore_output_path: &std::path::Path,
+    expand_output_path: Option<&std::path::Path>,
+    process_count: u64,
+) -> Result<OnnxMarkerDecision> {
+    // 現在 run の OnnxPipelineConfig を組み立てて fingerprint を作る
+    // （f1/f2 サイズや input1/input2 channels は fingerprint に含まれないが、
+    //  Config を共通化するために設定する。任意値で OK）
+    let expand_cfg = expand_output_path.map(|p| ExpandConfig {
+        output_path: p,
+        threshold: cli.expand_threshold / 100.0,
+        skip_parent_in_check: cli.expand_skip_parent_in_check,
+        skip_child_in_check: cli.expand_skip_child_in_check,
+    });
+    // dlshogi モデルは `onnx_draw_ply` を使わないため fingerprint からも 0 固定にする
+    // （AobaZero 専用パラメータの誤った invalidation を避ける）
+    let onnx_draw_ply_for_fp = if model_kind == "aobazero" {
+        cli.onnx_draw_ply
+    } else {
+        0
+    };
+    let cfg = OnnxPipelineConfig {
+        model_name: "",
+        model_kind,
+        onnx_path,
+        input_path,
+        output_path: rescore_output_path,
+        process_count,
+        batch_size: cli.onnx_batch_size,
+        gpu_id: cli.onnx_gpu_id,
+        use_tensorrt: cli.onnx_tensorrt,
+        tensorrt_cache: cli.onnx_tensorrt_cache.as_deref(),
+        score_clip: cli.score_clip,
+        eval_scale: cli.onnx_eval_scale,
+        skip_in_check: cli.skip_in_check,
+        onnx_draw_ply: onnx_draw_ply_for_fp,
+        f1_size: 0,
+        f2_size: 0,
+        input1_channels: 0,
+        input2_channels: 0,
+        profile_path: None,
+        expand: expand_cfg,
+    };
+    let current = build_run_fingerprint(&cfg)?;
+
+    // 入出力 symlink / 重複チェック
+    let canonical_input = current.input_path.clone();
+    ensure_safe_output_path(rescore_output_path, &canonical_input)?;
+    if let Some(p) = expand_output_path {
+        ensure_safe_output_path(p, &canonical_input)?;
+    }
+
+    let marker_path = marker_path_for(rescore_output_path);
+    if marker_path.exists() {
+        let marker = parse_marker(&marker_path)?;
+        let bodies_match = rescore_output_path.exists()
+            && fs::metadata(rescore_output_path)?.len() == marker.output_sizes.rescore_output_size
+            && match (
+                marker.fingerprint.expand,
+                marker.output_sizes.expand_output_size,
+                marker.fingerprint.expand_output_path.as_ref(),
+            ) {
+                (true, Some(size), Some(path)) => {
+                    path.exists() && fs::metadata(path)?.len() == size
+                }
+                (false, None, None) => true,
+                _ => false,
+            };
+
+        if marker.fingerprint == current && bodies_match {
+            return Ok(OnnxMarkerDecision::Skip);
+        }
+
+        // 不一致: 現在 run の出力を truncate
+        if rescore_output_path.exists() {
+            File::options().write(true).open(rescore_output_path)?.set_len(0)?;
+        }
+        if let Some(p) = expand_output_path
+            && p.exists()
+        {
+            File::options().write(true).open(p)?.set_len(0)?;
+        }
+        // 過去 marker が指す expand 出力パスが現在と異なれば旧 artifact を削除
+        if let Some(old) = &marker.fingerprint.expand_output_path {
+            let same =
+                expand_output_path.map(|p| canonicalize_predicted_path(p).ok()).unwrap_or(None);
+            let differ = same.as_ref() != Some(old);
+            if differ && old.exists() {
+                fs::remove_file(old).with_context(|| {
+                    format!("Failed to remove stale expand artifact {}", old.display())
+                })?;
+            }
+        }
+        // marker 自体も削除（次回完了時に新しい marker を作成）
+        fs::remove_file(&marker_path)
+            .with_context(|| format!("Failed to remove stale marker {}", marker_path.display()))?;
+        return Ok(OnnxMarkerDecision::TruncateAndProcess);
+    }
+
+    // marker 不存在
+    if expand_output_path.is_some() {
+        // expand 有効時は marker 必須。truncate して最初から
+        if rescore_output_path.exists() {
+            File::options().write(true).open(rescore_output_path)?.set_len(0)?;
+        }
+        if let Some(p) = expand_output_path
+            && p.exists()
+        {
+            File::options().write(true).open(p)?.set_len(0)?;
+        }
+        Ok(OnnxMarkerDecision::TruncateAndProcess)
+    } else {
+        Ok(OnnxMarkerDecision::LegacyResume)
+    }
+}
 
 /// 入力パターンをglobで展開してファイルリストを取得
 fn expand_input_patterns(patterns: &[String]) -> Result<Vec<PathBuf>> {
@@ -300,6 +505,28 @@ fn main() -> Result<()> {
             "--nnue is required when --engine/--onnx-model/--dlshogi-onnx-model is not specified"
         );
     }
+
+    // --expand-output-dir は ONNX モード必須
+    if cli.expand_output_dir.is_some() && !(use_onnx || use_dlshogi_onnx) {
+        anyhow::bail!(
+            "--expand-output-dir requires ONNX mode (--onnx-model or --dlshogi-onnx-model). \
+             policy 出力は ONNX 推論経路でのみ取得できます。"
+        );
+    }
+    // expand 機能の数値検証
+    if cli.expand_output_dir.is_some() {
+        let t = cli.expand_threshold;
+        if !(t.is_finite() && 0.0 < t && t <= 100.0) {
+            anyhow::bail!("--expand-threshold must be a finite value in (0.0, 100.0], got {t}");
+        }
+    }
+    // ONNX 系の eval_scale 妥当性
+    if use_onnx || use_dlshogi_onnx {
+        let s = cli.onnx_eval_scale;
+        if !s.is_finite() || s <= 0.0 {
+            anyhow::bail!("--onnx-eval-scale must be a positive finite value, got {s}");
+        }
+    }
     #[cfg(not(feature = "aobazero-onnx"))]
     if use_onnx {
         anyhow::bail!(
@@ -333,6 +560,29 @@ fn main() -> Result<()> {
         fs::create_dir_all(&cli.output_dir).with_context(|| {
             format!("Failed to create output directory: {}", cli.output_dir.display())
         })?;
+    }
+    // expand 出力ディレクトリの作成
+    if let Some(d) = &cli.expand_output_dir
+        && !d.exists()
+    {
+        fs::create_dir_all(d).with_context(|| {
+            format!("Failed to create expand output directory: {}", d.display())
+        })?;
+    }
+    // 両 dir を canonicalize して衝突を検出
+    let canonical_rescore_dir = cli.output_dir.canonicalize().with_context(|| {
+        format!("Failed to canonicalize --output-dir {}", cli.output_dir.display())
+    })?;
+    let canonical_expand_dir = match &cli.expand_output_dir {
+        Some(d) => Some(d.canonicalize().with_context(|| {
+            format!("Failed to canonicalize --expand-output-dir {}", d.display())
+        })?),
+        None => None,
+    };
+    if let Some(ed) = &canonical_expand_dir
+        && &canonical_rescore_dir == ed
+    {
+        anyhow::bail!("--output-dir and --expand-output-dir must point to different directories");
     }
 
     // NNUEモデルのロード（NNUE内部評価モードのみ）
@@ -434,6 +684,15 @@ fn main() -> Result<()> {
         cli.source_fv_scale as f64 / cli.target_fv_scale as f64
     );
     eprintln!("Output directory: {}", cli.output_dir.display());
+    if let Some(d) = &cli.expand_output_dir {
+        eprintln!(
+            "Expand output directory: {} (threshold={:.2}%, skip_parent={}, skip_child={})",
+            d.display(),
+            cli.expand_threshold,
+            cli.expand_skip_parent_in_check,
+            cli.expand_skip_child_in_check,
+        );
+    }
     if cli.delete_input {
         eprintln!("Delete input after processing: yes");
     }
@@ -448,44 +707,100 @@ fn main() -> Result<()> {
         }
 
         // 出力ファイルパスを生成
-        let output_path =
-            cli.output_dir.join(input_path.file_name().ok_or_else(|| {
-                anyhow::anyhow!("Invalid input file name: {}", input_path.display())
-            })?);
+        let file_name = input_path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("Invalid input file name: {}", input_path.display()))?;
+        let output_path = cli.output_dir.join(file_name);
+        #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+        let expand_output_path = canonical_expand_dir.as_ref().map(|d| d.join(file_name));
 
-        // 入力と出力が同じパスの場合はエラー（--delete-input でデータ消失を防ぐ）
-        if input_path.canonicalize().ok() == output_path.canonicalize().ok() {
-            anyhow::bail!(
-                "Input and output paths are the same: {}. Use a different --output-dir.",
-                input_path.display()
-            );
-        }
-
-        // 出力ファイルが既に存在し、入力と同じレコード数ならスキップ（完了済み）
+        // 入力ファイルサイズと process_count を最初に確定（marker 判定の前提）
         let input_file_size = fs::metadata(input_path)?.len();
         let input_record_count = input_file_size / PackedSfenValue::SIZE as u64;
-        if output_path.exists() {
-            let out_size = fs::metadata(&output_path)?.len();
-            let out_records = out_size / PackedSfenValue::SIZE as u64;
-            if out_records >= input_record_count && out_size % PackedSfenValue::SIZE as u64 == 0 {
-                eprintln!(
-                    "=== [{}/{}] Skipping (complete: {} records): {} ===",
-                    file_idx + 1,
-                    total_files,
-                    out_records,
-                    output_path.display()
-                );
-                continue;
+        let process_count = if cli.limit > 0 && cli.limit < input_record_count {
+            cli.limit
+        } else {
+            input_record_count
+        };
+
+        // ONNX モードでは marker ベースで skip / truncate 判定
+        #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+        let mut use_legacy_resume_check = !(use_onnx || use_dlshogi_onnx);
+        #[cfg(not(any(feature = "aobazero-onnx", feature = "dlshogi-onnx")))]
+        let use_legacy_resume_check = !(use_onnx || use_dlshogi_onnx);
+        #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+        if use_onnx || use_dlshogi_onnx {
+            let (model_kind, onnx_path): (&str, &std::path::Path) = if use_onnx {
+                ("aobazero", cli.onnx_model.as_ref().unwrap().as_path())
+            } else {
+                ("dlshogi", cli.dlshogi_onnx_model.as_ref().unwrap().as_path())
+            };
+            let decision = onnx_marker_decide(
+                &cli,
+                model_kind,
+                onnx_path,
+                input_path,
+                &output_path,
+                expand_output_path.as_deref(),
+                process_count,
+            )?;
+            match decision {
+                OnnxMarkerDecision::Skip => {
+                    eprintln!(
+                        "=== [{}/{}] Skipping (marker matches): {} ===",
+                        file_idx + 1,
+                        total_files,
+                        output_path.display()
+                    );
+                    continue;
+                }
+                OnnxMarkerDecision::TruncateAndProcess => {
+                    eprintln!(
+                        "=== [{}/{}] Truncated stale outputs, regenerating: {} ===",
+                        file_idx + 1,
+                        total_files,
+                        input_path.display()
+                    );
+                }
+                OnnxMarkerDecision::LegacyResume => {
+                    use_legacy_resume_check = true;
+                }
             }
-            if out_records > 0 {
-                eprintln!(
-                    "=== [{}/{}] Resuming ({}/{} records): {} ===",
-                    file_idx + 1,
-                    total_files,
-                    out_records,
-                    input_record_count,
+        }
+
+        // legacy resume / skip 判定（NNUE/USI 全モード、または ONNX 無 marker + expand 無効）
+        if use_legacy_resume_check {
+            // 入力と出力が同じパスの場合はエラー（--delete-input でデータ消失を防ぐ）
+            if input_path.canonicalize().ok() == output_path.canonicalize().ok() {
+                anyhow::bail!(
+                    "Input and output paths are the same: {}. Use a different --output-dir.",
                     input_path.display()
                 );
+            }
+            if output_path.exists() {
+                let out_size = fs::metadata(&output_path)?.len();
+                let out_records = out_size / PackedSfenValue::SIZE as u64;
+                if out_records >= input_record_count && out_size % PackedSfenValue::SIZE as u64 == 0
+                {
+                    eprintln!(
+                        "=== [{}/{}] Skipping (complete: {} records): {} ===",
+                        file_idx + 1,
+                        total_files,
+                        out_records,
+                        output_path.display()
+                    );
+                    continue;
+                }
+                if out_records > 0 {
+                    eprintln!(
+                        "=== [{}/{}] Resuming ({}/{} records): {} ===",
+                        file_idx + 1,
+                        total_files,
+                        out_records,
+                        input_record_count,
+                        input_path.display()
+                    );
+                }
             }
         }
 
@@ -506,12 +821,6 @@ fn main() -> Result<()> {
             );
         }
 
-        let process_count = if cli.limit > 0 && cli.limit < record_count {
-            cli.limit
-        } else {
-            record_count
-        };
-
         eprintln!("Records: {record_count}, Processing: {process_count}");
 
         // 必要メモリの概算と警告（入力バッファ + 出力バッファ）
@@ -527,11 +836,23 @@ fn main() -> Result<()> {
         // 処理実行
         #[cfg(feature = "aobazero-onnx")]
         if use_onnx {
-            process_file_with_onnx(&cli, input_path, &output_path, process_count)?;
+            process_file_with_onnx(
+                &cli,
+                input_path,
+                &output_path,
+                expand_output_path.as_deref(),
+                process_count,
+            )?;
         }
         #[cfg(feature = "dlshogi-onnx")]
         if use_dlshogi_onnx {
-            process_file_with_dlshogi_onnx(&cli, input_path, &output_path, process_count)?;
+            process_file_with_dlshogi_onnx(
+                &cli,
+                input_path,
+                &output_path,
+                expand_output_path.as_deref(),
+                process_count,
+            )?;
         }
         if !use_onnx && !use_dlshogi_onnx {
             if !engines.is_empty() {
@@ -1571,12 +1892,12 @@ fn onnx_ort_err(e: ort::Error) -> anyhow::Error {
 /// ONNX 直接推論パイプラインの共通設定
 ///
 /// 全フィールドが `Copy` のため、関数内で destructure して既存ローカル変数名と
-/// 互換に展開できる。引数 17 個の関数シグネチャを単一引数に集約することで、
-/// 後続コミットでフィールド追加（expand 機能）を容易にする。
+/// 互換に展開できる。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 #[derive(Clone, Copy)]
 struct OnnxPipelineConfig<'a> {
     model_name: &'a str,
+    model_kind: &'a str,
     onnx_path: &'a std::path::Path,
     input_path: &'a std::path::Path,
     output_path: &'a std::path::Path,
@@ -1588,11 +1909,321 @@ struct OnnxPipelineConfig<'a> {
     score_clip: i16,
     eval_scale: f32,
     skip_in_check: bool,
+    onnx_draw_ply: i32,
     f1_size: usize,
     f2_size: usize,
     input1_channels: usize,
     input2_channels: usize,
     profile_path: Option<&'a std::path::Path>,
+    expand: Option<ExpandConfig<'a>>,
+}
+
+/// ポリシー展開機能の設定（`OnnxPipelineConfig::expand` が `Some` のときのみ動作）
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+#[derive(Clone, Copy)]
+struct ExpandConfig<'a> {
+    /// 展開した子局面の出力ファイルパス（入力ファイル名を `--expand-output-dir` に置いたもの）
+    output_path: &'a std::path::Path,
+    /// 合法手 softmax 確率の閾値（割合: `0.0 < v <= 1.0`、CLI の `%` から内部変換済み）
+    threshold: f32,
+    /// 親局面が王手なら expand 出力をスキップ
+    skip_parent_in_check: bool,
+    /// 展開した子局面が王手なら expand 出力をスキップ
+    skip_child_in_check: bool,
+}
+
+/// 完了マーカーのフォーマットバージョン
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+const MARKER_VERSION: u32 = 1;
+
+/// 完了マーカーの fingerprint 部（出力内容を一意に決める実行設定）
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunFingerprint {
+    version: u32,
+    mode: String,
+    model_kind: String,
+    model_path: PathBuf,
+    model_size: u64,
+    model_mtime_ns: u128,
+    input_path: PathBuf,
+    input_size: u64,
+    input_mtime_ns: u128,
+    process_count: u64,
+    skip_in_check: bool,
+    score_clip: i16,
+    eval_scale_bits: u32,
+    onnx_draw_ply: i32,
+    expand: bool,
+    expand_threshold_bits: Option<u32>,
+    expand_skip_parent_in_check: Option<bool>,
+    expand_skip_child_in_check: Option<bool>,
+    expand_output_path: Option<PathBuf>,
+}
+
+/// 完了マーカーの出力サイズ情報（fingerprint とは分離）
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputSizes {
+    rescore_output_size: u64,
+    expand_output_size: Option<u64>,
+}
+
+/// 完了マーカー全体（fingerprint + output sizes）
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoneMarker {
+    fingerprint: RunFingerprint,
+    output_sizes: OutputSizes,
+}
+
+/// `<rescore_output>.done` を返す
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn marker_path_for(rescore_output: &std::path::Path) -> PathBuf {
+    let mut s = rescore_output.as_os_str().to_owned();
+    s.push(".done");
+    PathBuf::from(s)
+}
+
+/// ファイルの `(len, modified_unix_ns)` を取得
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn file_size_mtime_ns(path: &std::path::Path) -> Result<(u64, u128)> {
+    let m = fs::metadata(path).with_context(|| format!("Failed to stat {}", path.display()))?;
+    let mtime = m
+        .modified()
+        .with_context(|| format!("Failed to read mtime: {}", path.display()))?;
+    let dur = mtime
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .with_context(|| format!("Invalid mtime (before UNIX epoch): {}", path.display()))?;
+    Ok((m.len(), dur.as_nanos()))
+}
+
+/// `DoneMarker` をテキスト key=value 形式にシリアライズ
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn serialize_marker(marker: &DoneMarker) -> String {
+    let f = &marker.fingerprint;
+    let mut out = String::new();
+    use std::fmt::Write;
+    let _ = writeln!(out, "version={}", f.version);
+    let _ = writeln!(out, "mode={}", f.mode);
+    let _ = writeln!(out, "model_kind={}", f.model_kind);
+    let _ = writeln!(out, "model_path={}", f.model_path.display());
+    let _ = writeln!(out, "model_size={}", f.model_size);
+    let _ = writeln!(out, "model_mtime_ns={}", f.model_mtime_ns);
+    let _ = writeln!(out, "input_path={}", f.input_path.display());
+    let _ = writeln!(out, "input_size={}", f.input_size);
+    let _ = writeln!(out, "input_mtime_ns={}", f.input_mtime_ns);
+    let _ = writeln!(out, "process_count={}", f.process_count);
+    let _ = writeln!(out, "skip_in_check={}", f.skip_in_check);
+    let _ = writeln!(out, "score_clip={}", f.score_clip);
+    let _ = writeln!(out, "eval_scale_bits=0x{:08x}", f.eval_scale_bits);
+    let _ = writeln!(out, "onnx_draw_ply={}", f.onnx_draw_ply);
+    let _ = writeln!(out, "expand={}", f.expand);
+    if f.expand {
+        let _ = writeln!(
+            out,
+            "expand_threshold_bits=0x{:08x}",
+            f.expand_threshold_bits.expect("expand=true requires threshold")
+        );
+        let _ = writeln!(
+            out,
+            "expand_skip_parent_in_check={}",
+            f.expand_skip_parent_in_check.expect("expand=true requires skip_parent")
+        );
+        let _ = writeln!(
+            out,
+            "expand_skip_child_in_check={}",
+            f.expand_skip_child_in_check.expect("expand=true requires skip_child")
+        );
+        let _ = writeln!(
+            out,
+            "expand_output_path={}",
+            f.expand_output_path.as_ref().expect("expand=true requires path").display()
+        );
+    }
+    let _ = writeln!(out, "rescore_output_size={}", marker.output_sizes.rescore_output_size);
+    if f.expand {
+        let _ = writeln!(
+            out,
+            "expand_output_size={}",
+            marker
+                .output_sizes
+                .expand_output_size
+                .expect("expand=true requires expand_output_size")
+        );
+    }
+    out
+}
+
+/// マーカーファイルをパース（key=value テキスト形式、行頭空白・コメントは未対応）
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read marker {}", path.display()))?;
+    let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (lineno, raw) in text.lines().enumerate() {
+        if raw.is_empty() {
+            continue;
+        }
+        let (k, v) = raw.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("Marker {} line {}: missing '='", path.display(), lineno + 1)
+        })?;
+        map.insert(k.to_string(), v.to_string());
+    }
+    let get = |k: &str| -> Result<&String> {
+        map.get(k)
+            .ok_or_else(|| anyhow::anyhow!("Marker {} missing key {k}", path.display()))
+    };
+    let parse_hex_u32 = |s: &str| -> Result<u32> {
+        let stripped = s
+            .strip_prefix("0x")
+            .ok_or_else(|| anyhow::anyhow!("expected '0x' prefix, got: {s}"))?;
+        u32::from_str_radix(stripped, 16).context("invalid hex u32")
+    };
+    let parse_bool = |s: &str| -> Result<bool> {
+        match s {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => anyhow::bail!("invalid bool: {other}"),
+        }
+    };
+
+    let version: u32 = get("version")?.parse().context("invalid version")?;
+    if version != MARKER_VERSION {
+        anyhow::bail!("Unsupported marker version: {version} (expected {MARKER_VERSION})");
+    }
+    let expand = parse_bool(get("expand")?)?;
+    let fingerprint = RunFingerprint {
+        version,
+        mode: get("mode")?.clone(),
+        model_kind: get("model_kind")?.clone(),
+        model_path: PathBuf::from(get("model_path")?),
+        model_size: get("model_size")?.parse().context("invalid model_size")?,
+        model_mtime_ns: get("model_mtime_ns")?.parse().context("invalid model_mtime_ns")?,
+        input_path: PathBuf::from(get("input_path")?),
+        input_size: get("input_size")?.parse().context("invalid input_size")?,
+        input_mtime_ns: get("input_mtime_ns")?.parse().context("invalid input_mtime_ns")?,
+        process_count: get("process_count")?.parse().context("invalid process_count")?,
+        skip_in_check: parse_bool(get("skip_in_check")?)?,
+        score_clip: get("score_clip")?.parse().context("invalid score_clip")?,
+        eval_scale_bits: parse_hex_u32(get("eval_scale_bits")?)?,
+        onnx_draw_ply: get("onnx_draw_ply")?.parse().context("invalid onnx_draw_ply")?,
+        expand,
+        expand_threshold_bits: if expand {
+            Some(parse_hex_u32(get("expand_threshold_bits")?)?)
+        } else {
+            None
+        },
+        expand_skip_parent_in_check: if expand {
+            Some(parse_bool(get("expand_skip_parent_in_check")?)?)
+        } else {
+            None
+        },
+        expand_skip_child_in_check: if expand {
+            Some(parse_bool(get("expand_skip_child_in_check")?)?)
+        } else {
+            None
+        },
+        expand_output_path: if expand {
+            Some(PathBuf::from(get("expand_output_path")?))
+        } else {
+            None
+        },
+    };
+    let output_sizes = OutputSizes {
+        rescore_output_size: get("rescore_output_size")?
+            .parse()
+            .context("invalid rescore_output_size")?,
+        expand_output_size: if expand {
+            Some(get("expand_output_size")?.parse().context("invalid expand_output_size")?)
+        } else {
+            None
+        },
+    };
+    Ok(DoneMarker {
+        fingerprint,
+        output_sizes,
+    })
+}
+
+/// マーカーを atomic に書き出す（tmp に書く → sync_all → rename）
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn write_marker_atomic(rescore_output: &std::path::Path, marker: &DoneMarker) -> Result<()> {
+    let final_path = marker_path_for(rescore_output);
+    let mut tmp_os = final_path.as_os_str().to_owned();
+    tmp_os.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_os);
+    let body = serialize_marker(marker);
+    {
+        let mut f = File::create(&tmp_path)
+            .with_context(|| format!("Failed to create marker tmp {}", tmp_path.display()))?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp_path, &final_path).with_context(|| {
+        format!("Failed to rename marker {} → {}", tmp_path.display(), final_path.display())
+    })?;
+    Ok(())
+}
+
+/// `OnnxPipelineConfig` から `RunFingerprint` を構築
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn build_run_fingerprint(config: &OnnxPipelineConfig<'_>) -> Result<RunFingerprint> {
+    let model_path = config
+        .onnx_path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize {}", config.onnx_path.display()))?;
+    let (model_size, model_mtime_ns) = file_size_mtime_ns(&model_path)?;
+    let input_path = config
+        .input_path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize {}", config.input_path.display()))?;
+    let (input_size, input_mtime_ns) = file_size_mtime_ns(&input_path)?;
+    let expand_output_path = match config.expand {
+        Some(e) => Some(
+            // 出力ファイルが未作成でも canonical_dir + file_name で予定パスを構築する
+            // ため、parent dir のみ canonicalize する
+            canonicalize_predicted_path(e.output_path)?,
+        ),
+        None => None,
+    };
+    Ok(RunFingerprint {
+        version: MARKER_VERSION,
+        mode: "onnx".to_string(),
+        model_kind: config.model_kind.to_string(),
+        model_path,
+        model_size,
+        model_mtime_ns,
+        input_path,
+        input_size,
+        input_mtime_ns,
+        process_count: config.process_count,
+        skip_in_check: config.skip_in_check,
+        score_clip: config.score_clip,
+        eval_scale_bits: config.eval_scale.to_bits(),
+        onnx_draw_ply: config.onnx_draw_ply,
+        expand: config.expand.is_some(),
+        expand_threshold_bits: config.expand.map(|e| e.threshold.to_bits()),
+        expand_skip_parent_in_check: config.expand.map(|e| e.skip_parent_in_check),
+        expand_skip_child_in_check: config.expand.map(|e| e.skip_child_in_check),
+        expand_output_path,
+    })
+}
+
+/// 未作成出力ファイルの予定 canonical パスを構築する。
+/// parent dir を canonicalize して file_name と join する。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn canonicalize_predicted_path(path: &std::path::Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Path has no parent directory: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Path has no file name: {}", path.display()))?;
+    let canonical_parent = parent
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize parent {}", parent.display()))?;
+    Ok(canonical_parent.join(file_name))
 }
 
 /// ストリーミング読み込み + rayon 並列特徴量構築 + ゼロコピー GPU 推論
@@ -1609,6 +2240,7 @@ where
 {
     let OnnxPipelineConfig {
         model_name,
+        model_kind: _,
         onnx_path,
         input_path,
         output_path,
@@ -1620,16 +2252,35 @@ where
         score_clip,
         eval_scale,
         skip_in_check,
+        onnx_draw_ply: _,
         f1_size,
         f2_size,
         input1_channels,
         input2_channels,
         profile_path,
+        expand,
     } = *config;
     use ort::ep::ExecutionProvider;
     use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
     use ort::session::Session;
     use ort::value::TensorRef;
+    use rshogi_core::movegen::{MoveList, generate_legal};
+    use tools::dlshogi_features::{MAX_MOVE_LABEL_NUM, make_move_label};
+
+    /// 合法手のロジットを softmax 正規化して `out` に書き込む
+    fn softmax_normalize(logits: &[f32], out: &mut [f32]) {
+        debug_assert_eq!(logits.len(), out.len());
+        let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0f32;
+        for (o, &l) in out.iter_mut().zip(logits.iter()) {
+            *o = (l - max).exp();
+            sum += *o;
+        }
+        let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+        for o in out.iter_mut() {
+            *o *= inv;
+        }
+    }
 
     // ORT_DYLIB_PATH 事前検証（load-dynamic feature）
     //
@@ -1815,7 +2466,20 @@ where
         .with_context(|| format!("Failed to open {}", output_path.display()))?;
     let mut writer = BufWriter::new(out_file);
 
-    // 既存レコード分の入力をスキップ
+    // expand 出力 writer（expand 有効時のみ）。main 側で truncate(0) 済みなので
+    // append open で常に先頭から書く。
+    let mut expand_writer: Option<BufWriter<File>> = if let Some(e) = expand {
+        let f =
+            File::options().create(true).append(true).open(e.output_path).with_context(|| {
+                format!("Failed to open expand output {}", e.output_path.display())
+            })?;
+        Some(BufWriter::new(f))
+    } else {
+        None
+    };
+
+    // 既存レコード分の入力をスキップ（expand 無効 + marker 不存在の legacy
+    // resume パス。main 側で truncate(0) 済みなら resume_count == 0 になり no-op）
     let mut remaining = process_count;
     if resume_count > 0 {
         let skip = resume_count.min(remaining);
@@ -1836,6 +2500,10 @@ where
     let mut error_count: u64 = 0;
     let mut clipped_count: u64 = 0;
     let mut total_processed: u64 = 0;
+    let mut total_expanded: u64 = 0;
+    // expand 用 softmax バッファ（バッチ・局面間で再利用）
+    let mut logits_buf: Vec<f32> = Vec::with_capacity(600);
+    let mut probs_buf: Vec<f32> = Vec::with_capacity(600);
 
     // MemoryInfo はバッチサイズに依存しないのでループ外で1回だけ作成
     let output_mem =
@@ -1843,8 +2511,12 @@ where
             .map_err(onnx_ort_err)?;
 
     loop {
-        // バッチ分のレコードをストリーム読み込み
-        let mut batch_records: Vec<(PackedSfenValue, String)> = Vec::with_capacity(batch_size);
+        // バッチ分のレコードをストリーム読み込み。
+        // 注: 旧実装は `--skip-in-check` でこの段階で親をドロップしていたが、
+        // expand 機能（ポリシー推論）と独立に動かすため、推論は常に実行し、
+        // 王手フラグだけを記録して rescore 書き出し / expand 書き出しの個別判定に使う。
+        let mut batch_records: Vec<(PackedSfenValue, String, bool)> =
+            Vec::with_capacity(batch_size);
         while batch_records.len() < batch_size && remaining > 0 {
             if INTERRUPTED.load(Ordering::SeqCst) {
                 remaining = 0;
@@ -1873,15 +2545,15 @@ where
                     continue;
                 }
             };
-            if skip_in_check {
-                let mut pos = Position::new();
-                if pos.set_sfen(&sfen).is_ok() && pos.in_check() {
-                    skipped_count += 1;
-                    progress.inc(1);
-                    continue;
-                }
-            }
-            batch_records.push((psv, sfen));
+            // 王手判定はバッチ読み込み時に 1 回だけ。失敗時は in_check=false
+            // 扱いとし、書き出しループで Position::set_sfen が再度失敗すれば
+            // error_count に計上される。
+            let mut probe = Position::new();
+            let in_check = match probe.set_sfen(&sfen) {
+                Ok(()) => probe.in_check(),
+                Err(_) => false,
+            };
+            batch_records.push((psv, sfen, in_check));
         }
 
         let actual_batch = batch_records.len();
@@ -1900,7 +2572,7 @@ where
             f2_buf[..actual_batch * f2_size].chunks_mut(f2_size).collect();
 
         f1_slices.into_par_iter().zip(f2_slices).zip(batch_records.par_iter()).for_each(
-            |((f1, f2), (psv, sfen))| {
+            |((f1, f2), (psv, sfen, _in_check))| {
                 let mut pos = Position::new();
                 if pos.set_sfen(sfen).is_err() {
                     batch_errors.fetch_add(1, Ordering::Relaxed);
@@ -1948,8 +2620,13 @@ where
         let (_, values) =
             outputs["output_value"].try_extract_tensor::<f32>().map_err(onnx_ort_err)?;
 
-        // 結果を書き出し（テンソルから直接読み取り、to_vec() コピーを排除）
-        for (i, (psv, _)) in batch_records.iter().enumerate() {
+        // rescore 書き出し（テンソルから直接読み取り、to_vec() コピーを排除）
+        // skip_in_check が真かつ親が王手の場合は書き出しを抑制（推論結果は破棄）。
+        for (i, (psv, _sfen, in_check)) in batch_records.iter().enumerate() {
+            if skip_in_check && *in_check {
+                skipped_count += 1;
+                continue;
+            }
             let winrate = values[i];
             let clamped = winrate.clamp(0.001, 0.999);
             let logit = (clamped / (1.0 - clamped)).ln();
@@ -1969,6 +2646,75 @@ where
             };
             writer.write_all(&new_psv.to_bytes())?;
         }
+
+        // expand 機能（policy ベースの子局面生成）
+        if let (Some(expand_cfg), Some(ew)) = (expand, expand_writer.as_mut()) {
+            let (policy_shape, policy_data) =
+                outputs["output_policy"].try_extract_tensor::<f32>().map_err(onnx_ort_err)?;
+            let expected_len = actual_batch * MAX_MOVE_LABEL_NUM;
+            if policy_data.len() != expected_len {
+                anyhow::bail!(
+                    "Policy output shape mismatch: expected [{actual_batch}, \
+                     {MAX_MOVE_LABEL_NUM}] ({expected_len} elements), got shape {:?} \
+                     ({} elements). Is the ONNX model a compatible policy network?",
+                    policy_shape,
+                    policy_data.len()
+                );
+            }
+
+            for (i, (psv, sfen, parent_in_check)) in batch_records.iter().enumerate() {
+                if expand_cfg.skip_parent_in_check && *parent_in_check {
+                    continue;
+                }
+
+                let mut pos = Position::new();
+                if pos.set_sfen(sfen).is_err() {
+                    continue;
+                }
+                let color = pos.side_to_move();
+
+                let mut list = MoveList::new();
+                generate_legal(&pos, &mut list);
+                if list.is_empty() {
+                    continue;
+                }
+
+                let policy_row = &policy_data[i * MAX_MOVE_LABEL_NUM..(i + 1) * MAX_MOVE_LABEL_NUM];
+
+                logits_buf.clear();
+                for mv in list.iter() {
+                    let label = make_move_label(*mv, color);
+                    logits_buf.push(policy_row[label]);
+                }
+                probs_buf.resize(logits_buf.len(), 0.0);
+                softmax_normalize(&logits_buf, &mut probs_buf);
+
+                for (j, mv) in list.iter().enumerate() {
+                    if probs_buf[j] > expand_cfg.threshold {
+                        let gives_check = pos.gives_check(*mv);
+                        pos.do_move(*mv, gives_check);
+
+                        let child_in_check = pos.in_check();
+                        if !(expand_cfg.skip_child_in_check && child_in_check) {
+                            let packed = pack_position(&pos);
+                            let child = PackedSfenValue {
+                                sfen: packed,
+                                score: 0,
+                                move16: 0,
+                                game_ply: psv.game_ply.saturating_add(1),
+                                game_result: 0,
+                                padding: 0,
+                            };
+                            ew.write_all(&child.to_bytes())?;
+                            total_expanded += 1;
+                        }
+
+                        pos.undo_move(*mv);
+                    }
+                }
+            }
+        }
+
         total_processed += actual_batch as u64;
         progress.inc(actual_batch as u64);
     }
@@ -1980,11 +2726,29 @@ where
         }
     }
 
+    // 出力ファイル本体を flush + sync して、マーカー書き出し前にクラッシュしても
+    // 書き出し済みバイト列が確実にディスクに着地している状態を作る。
+    // sync_all() は内部の File に対して実行（BufWriter::flush + into_inner で取り出し）。
     writer.flush()?;
+    let rescore_inner = writer
+        .into_inner()
+        .map_err(|e| anyhow::anyhow!("rescore writer into_inner error: {}", e.error()))?;
+    rescore_inner.sync_all()?;
+    drop(rescore_inner);
+
+    if let Some(mut ew) = expand_writer.take() {
+        ew.flush()?;
+        let inner = ew
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("expand writer into_inner error: {}", e.error()))?;
+        inner.sync_all()?;
+    }
+
     progress.finish_with_message("Done");
 
     // 統計情報
-    let total = total_processed + skipped_count + error_count;
+    let rescore_written = total_processed.saturating_sub(skipped_count);
+    let total = total_processed + error_count;
     if error_count > 0 {
         eprintln!("Note: {error_count} positions had errors");
     }
@@ -1994,13 +2758,46 @@ where
             skipped_count as f64 / total as f64 * 100.0
         );
     }
-    if total > 0 {
+    if rescore_written > 0 {
         eprintln!(
             "Clipped scores: {clipped_count} ({:.2}%)",
-            clipped_count as f64 / total as f64 * 100.0
+            clipped_count as f64 / rescore_written as f64 * 100.0
         );
     }
-    eprintln!("Wrote {total_processed} records");
+    eprintln!("Rescored: {rescore_written} positions");
+    if let Some(e) = expand {
+        let avg = if rescore_written > 0 {
+            total_expanded as f64 / rescore_written as f64
+        } else {
+            0.0
+        };
+        eprintln!(
+            "Expanded: {total_expanded} positions (threshold={:.2}%, avg {:.2} per parent)",
+            e.threshold * 100.0,
+            avg
+        );
+    }
+
+    // 完了マーカー書き出し（atomic rename）。
+    // INTERRUPTED が立っている場合（Ctrl-C で残ファイル分を打ち切った場合）も
+    // 書き出した分は完了扱いとはせず、marker を作らない。
+    if !INTERRUPTED.load(Ordering::SeqCst) {
+        let fingerprint = build_run_fingerprint(config)?;
+        let rescore_size = fs::metadata(output_path)?.len();
+        let expand_size = match expand {
+            Some(e) => Some(fs::metadata(e.output_path)?.len()),
+            None => None,
+        };
+        let marker = DoneMarker {
+            fingerprint,
+            output_sizes: OutputSizes {
+                rescore_output_size: rescore_size,
+                expand_output_size: expand_size,
+            },
+        };
+        write_marker_atomic(output_path, &marker)?;
+        eprintln!("Marker written: {}", marker_path_for(output_path).display());
+    }
 
     Ok(())
 }
@@ -2014,6 +2811,7 @@ fn process_file_with_onnx(
     cli: &Cli,
     input_path: &std::path::Path,
     output_path: &std::path::Path,
+    expand_output_path: Option<&std::path::Path>,
     process_count: u64,
 ) -> Result<()> {
     use tools::aobazero_features::{
@@ -2021,8 +2819,15 @@ fn process_file_with_onnx(
     };
 
     let draw_ply = cli.onnx_draw_ply;
+    let expand = expand_output_path.map(|p| ExpandConfig {
+        output_path: p,
+        threshold: cli.expand_threshold / 100.0,
+        skip_parent_in_check: cli.expand_skip_parent_in_check,
+        skip_child_in_check: cli.expand_skip_child_in_check,
+    });
     let config = OnnxPipelineConfig {
         model_name: "AobaZero",
+        model_kind: "aobazero",
         onnx_path: cli.onnx_model.as_ref().unwrap(),
         input_path,
         output_path,
@@ -2034,11 +2839,13 @@ fn process_file_with_onnx(
         score_clip: cli.score_clip,
         eval_scale: cli.onnx_eval_scale,
         skip_in_check: cli.skip_in_check,
+        onnx_draw_ply: cli.onnx_draw_ply,
         f1_size: FEATURES1_SIZE,
         f2_size: FEATURES2_SIZE,
         input1_channels: INPUT1_CHANNELS,
         input2_channels: INPUT2_CHANNELS,
         profile_path: cli.ort_profile.as_deref(),
+        expand,
     };
     process_file_with_onnx_pipeline(&config, move |pos, f1, f2, psv| {
         make_input_features(pos, f1, f2, psv.game_ply as i32, draw_ply);
@@ -2054,14 +2861,22 @@ fn process_file_with_dlshogi_onnx(
     cli: &Cli,
     input_path: &std::path::Path,
     output_path: &std::path::Path,
+    expand_output_path: Option<&std::path::Path>,
     process_count: u64,
 ) -> Result<()> {
     use tools::dlshogi_features::{
         FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
     };
 
+    let expand = expand_output_path.map(|p| ExpandConfig {
+        output_path: p,
+        threshold: cli.expand_threshold / 100.0,
+        skip_parent_in_check: cli.expand_skip_parent_in_check,
+        skip_child_in_check: cli.expand_skip_child_in_check,
+    });
     let config = OnnxPipelineConfig {
         model_name: "dlshogi",
+        model_kind: "dlshogi",
         onnx_path: cli.dlshogi_onnx_model.as_ref().unwrap(),
         input_path,
         output_path,
@@ -2073,11 +2888,15 @@ fn process_file_with_dlshogi_onnx(
         score_clip: cli.score_clip,
         eval_scale: cli.onnx_eval_scale,
         skip_in_check: cli.skip_in_check,
+        // dlshogi モデルでは `onnx_draw_ply` を使わない。fingerprint の過剰
+        // invalidation を避けるため 0 固定（`onnx_marker_decide` 側でも同じ扱い）。
+        onnx_draw_ply: 0,
         f1_size: FEATURES1_SIZE,
         f2_size: FEATURES2_SIZE,
         input1_channels: INPUT1_CHANNELS,
         input2_channels: INPUT2_CHANNELS,
         profile_path: cli.ort_profile.as_deref(),
+        expand,
     };
     process_file_with_onnx_pipeline(&config, |pos, f1, f2, _psv| {
         make_input_features(pos, f1, f2);
