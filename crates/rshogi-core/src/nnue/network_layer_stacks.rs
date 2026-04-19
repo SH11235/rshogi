@@ -54,6 +54,11 @@ fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usi
 #[cfg(feature = "nnue-threat")]
 #[inline]
 fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16; L1]) {
+    // AVX2 ループは `L1 / 16` 回で全要素を処理する前提。L1 が 16 の倍数で
+    // ない場合は末端要素が取り残されるため、monomorphization 時に失敗させる。
+    const {
+        assert!(L1 % 16 == 0, "L1 must be a multiple of 16 for AVX2 SIMD loops");
+    }
     // AVX2: 256bit = 16 x i16, L1/16 iterations
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {

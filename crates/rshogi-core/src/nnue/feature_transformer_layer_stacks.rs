@@ -286,6 +286,11 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     #[cfg(feature = "nnue-threat")]
     #[inline]
     fn add_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
+        // AVX2 ループは `L1 / 16` 回で全要素を処理する前提のため、
+        // L1 が 16 の倍数でない場合は monomorphization 時に弾く。
+        const {
+            assert!(L1 % 16 == 0, "L1 must be a multiple of 16 for AVX2 SIMD loops");
+        }
         let weights = self.threat_weight_row(index);
 
         // AVX2: 128bit i8 → 256bit i16 sign-extend + add, L1/16 iterations
@@ -344,6 +349,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     #[cfg(feature = "nnue-threat")]
     #[inline]
     fn sub_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
+        const {
+            assert!(L1 % 16 == 0, "L1 must be a multiple of 16 for AVX2 SIMD loops");
+        }
         let weights = self.threat_weight_row(index);
 
         // AVX2: 128bit i8 → 256bit i16 sign-extend + sub
