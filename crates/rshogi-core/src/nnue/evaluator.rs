@@ -539,11 +539,13 @@ mod tests {
     }
 
     /// 各バリアントの push/pop インデックス一貫性テスト
+    ///
+    /// LayerStacks の各 L1 バリアント（1536/768/512）について、有効な feature のものだけ
+    /// 個別に検証する。旧実装は 1536 のみ `#[cfg]` 付き `let` だったため、1536 無効
+    /// ビルドでは後続の `stack.reset()/push()/pop()` が直前の HalfKP に対して暗黙に
+    /// 実行され、LayerStacks variant を実質テストしない silent no-op 状態だった。
     #[test]
     fn test_all_variants_push_pop_consistency() {
-        use crate::nnue::accumulator_layer_stacks::{
-            AccumulatorStackLayerStacks, LayerStacksAccStack,
-        };
         use crate::nnue::network_halfka::AccumulatorStackHalfKA;
         use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
         use crate::nnue::network_halfkp::AccumulatorStackHalfKP;
@@ -584,17 +586,55 @@ mod tests {
         stack.pop();
         // パニックしなければ成功
 
-        // LayerStacks
-        #[cfg(feature = "layerstacks-1536")]
-        let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L1536(
-            AccumulatorStackLayerStacks::<1536>::new(),
-        ));
-        stack.reset();
-        stack.push(dirty);
-        stack.push(dirty);
-        stack.pop();
-        stack.pop();
-        // パニックしなければ成功
+        // LayerStacks 各 L1 バリアント（有効 feature のみ検証）。
+        // 外側の `any(...)` でいずれかの variant が有効なときだけ import が使われる
+        // ようにして unused-import 警告を抑える。
+        #[cfg(any(
+            feature = "layerstacks-1536",
+            feature = "layerstacks-768",
+            feature = "layerstacks-512"
+        ))]
+        {
+            use crate::nnue::accumulator_layer_stacks::{
+                AccumulatorStackLayerStacks, LayerStacksAccStack,
+            };
+
+            #[cfg(feature = "layerstacks-1536")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L1536(
+                    AccumulatorStackLayerStacks::<1536>::new(),
+                ));
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+
+            #[cfg(feature = "layerstacks-768")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L768(
+                    AccumulatorStackLayerStacks::<768>::new(),
+                ));
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+
+            #[cfg(feature = "layerstacks-512")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L512(
+                    AccumulatorStackLayerStacks::<512>::new(),
+                ));
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+        }
     }
 
     /// 深い探索木での push/pop テスト
