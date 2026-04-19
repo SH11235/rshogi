@@ -86,11 +86,10 @@ fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16;
                 _mm256_store_si256(dst_ptr.add(i * 16) as *mut __m256i, result);
             }
         }
-        return;
     }
 
-    // スカラーフォールバック
-    #[allow(unreachable_code)]
+    // スカラーフォールバック（AVX2 非対応環境のみコンパイル）
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     for i in 0..L1 {
         dst[i] = a[i].wrapping_add(b[i]);
     }

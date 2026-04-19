@@ -335,11 +335,10 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
                 }
             }
-            return;
         }
 
-        // スカラーフォールバック
-        #[allow(unreachable_code)]
+        // スカラーフォールバック（AVX2 非対応環境のみコンパイル）
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         for (a, &w) in accumulation.iter_mut().zip(weights) {
             *a = a.wrapping_add(w as i16);
         }
@@ -391,10 +390,10 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
                 }
             }
-            return;
         }
 
-        #[allow(unreachable_code)]
+        // スカラーフォールバック（AVX2 非対応環境のみコンパイル）
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         for (a, &w) in accumulation.iter_mut().zip(weights) {
             *a = a.wrapping_sub(w as i16);
         }
