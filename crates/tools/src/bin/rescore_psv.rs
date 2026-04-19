@@ -263,6 +263,36 @@ enum OnnxMarkerDecision {
     LegacyResume,
 }
 
+/// 2 つのパスが同じファイル実体を指すかを判定する。
+/// パス文字列一致、canonicalize 一致、Unix の `dev + ino` 一致のいずれかで true を返す。
+/// I/O エラーや非 Unix プラットフォームで dev/ino が取れないケースでは false
+/// に倒れる（= 「同一と判定できなかった」。呼び出し側の文脈で追加の安全策が
+/// 必要な場面ではパス一致検証と併用する）。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn is_same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    if let (Ok(ca), Ok(cb)) = (a.canonicalize(), b.canonicalize())
+        && ca == cb
+    {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if a.exists()
+            && b.exists()
+            && let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b))
+            && ma.dev() == mb.dev()
+            && ma.ino() == mb.ino()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// 既存出力パスが symlink でないこと、未作成・既存どちらでも入力パスと衝突
 /// しないことを検証する。既存ファイルが入力の hardlink である場合も検出する
 /// （Unix のみ、`MetadataExt::dev/ino` で同一 inode を判定）。
@@ -394,27 +424,50 @@ fn onnx_marker_decide(
             return Ok(OnnxMarkerDecision::Skip);
         }
 
-        // 不一致: 現在 run の出力を truncate
-        if rescore_output_path.exists() {
-            File::options().write(true).open(rescore_output_path)?.set_len(0)?;
-        }
-        if let Some(p) = expand_output_path
-            && p.exists()
-        {
-            File::options().write(true).open(p)?.set_len(0)?;
-        }
-        // 過去 marker が指す expand 出力パスが現在と異なれば旧 artifact を削除
+        // 不一致時の再生成手順。
+        // 破壊操作の順序は意図的:
+        //   1. 旧 expand artifact 削除（失敗しうる、入力衝突も事前検証）
+        //   2. 現 rescore 出力 truncate
+        //   3. 現 expand 出力 truncate
+        //   4. marker 削除（最後）
+        // この順なら、どの段階で失敗しても次回実行時に marker 不一致判定が
+        // 働き、続きからやり直せる。旧設計の "truncate してから remove_file"
+        // だと、後段失敗時に truncate 済み出力 + 古い marker が残ってデータ
+        // 損失になり得たため修正 (PR #463 review P1)。
+
+        // 1. 旧 expand artifact 削除
         if let Some(old) = &marker.fingerprint.expand_output_path {
-            let same =
-                expand_output_path.map(|p| canonicalize_predicted_path(p).ok()).unwrap_or(None);
-            let differ = same.as_ref() != Some(old);
-            if differ && old.exists() {
+            // 段階的パイプライン（前回 expand 出力を次回入力に使う）対策。
+            // 旧 artifact が現在 run の入力と同一ファイルなら絶対に削除しない。
+            if is_same_file(old, &canonical_input) {
+                anyhow::bail!(
+                    "Stale expand artifact {} resolves to the current input file {}. \
+                     Refusing to delete to prevent input data loss. \
+                     Move the input or change --expand-output-dir.",
+                    old.display(),
+                    canonical_input.display()
+                );
+            }
+            // 現在 run の expand 出力と同一なら truncate ステップで処理されるのでスキップ
+            let same_as_current = expand_output_path.is_some_and(|p| is_same_file(p, old));
+            if !same_as_current && old.exists() {
                 fs::remove_file(old).with_context(|| {
                     format!("Failed to remove stale expand artifact {}", old.display())
                 })?;
             }
         }
-        // marker 自体も削除（次回完了時に新しい marker を作成）
+
+        // 2. 現 rescore 出力 truncate
+        if rescore_output_path.exists() {
+            File::options().write(true).open(rescore_output_path)?.set_len(0)?;
+        }
+        // 3. 現 expand 出力 truncate
+        if let Some(p) = expand_output_path
+            && p.exists()
+        {
+            File::options().write(true).open(p)?.set_len(0)?;
+        }
+        // 4. marker 削除（最後）
         fs::remove_file(&marker_path)
             .with_context(|| format!("Failed to remove stale marker {}", marker_path.display()))?;
         return Ok(OnnxMarkerDecision::TruncateAndProcess);
