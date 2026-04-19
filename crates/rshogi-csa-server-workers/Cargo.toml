@@ -49,5 +49,9 @@ default = []
 # Phase 2 ゲートで「TCP 向けランタイムが混入していないこと」を検査する defensive flag。
 # 本 crate では常に無効化され、有効化されると `phase_gate.rs` の compile_error! が発火する。
 tokio-transport = []
+# Phase 3 機能（x1 拡張・追加終局判定・Fischer/StopWatch 時計・ブイ等）の
+# ゲートフラグ。Phase 2 → Phase 3 の受入検証が通るまで有効化を許さない defensive flag。
+# 実機能の実装時は、Phase 3 ゲート解除と同時に本フラグを再定義する。
+phase3-features = []
 
 [dev-dependencies]

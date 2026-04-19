@@ -18,10 +18,21 @@
 
 // `tokio-transport` が本 crate のビルドで有効化されるのは想定外。Workers 用の
 // wasm32 ランタイムは tokio マルチスレッドを扱わないため、defensive に落とす。
+// (Phase 1 feature が Phase 2 build に混入していないことを担保)
 #[cfg(feature = "tokio-transport")]
 compile_error!(
     "rshogi-csa-server-workers: Phase 2 gate violated — `tokio-transport` feature cannot be \
      enabled together with the Cloudflare Workers frontend. Check feature unification."
+);
+
+// Phase 3 機能（x1 拡張・追加終局判定・Fischer/StopWatch・ブイ等）は、
+// Phase 2 受入シナリオが全緑で完走したことを確認するまで本番ビルドに混入させない。
+// Phase 3 移行時は本 compile_error! を解除し、`CURRENT_PHASE` を 3 に更新する。
+#[cfg(feature = "phase3-features")]
+compile_error!(
+    "rshogi-csa-server-workers: Phase 2→3 gate violated — `phase3-features` feature cannot be \
+     enabled until Phase 2 acceptance scenarios (tasks.md §9.7) pass. Bump CURRENT_PHASE and \
+     remove this gate before merging Phase 3 code."
 );
 
 /// 本 crate の現在 Phase。[`PHASE2_LOCK`] と一致する必要がある。
@@ -65,15 +76,16 @@ impl PhaseGate {
         "phase=2 locked=2 workers"
     }
 
-    /// Phase 3+ が混入していないかをテストから確認するためのブール。
-    /// `cfg(feature = "tokio-transport")` が立っていれば上の `compile_error!` で
-    /// 落ちるため、到達したら false を返すはずがない（= 常に true）。
+    /// Phase 1 (`tokio-transport`) も Phase 3 (`phase3-features`) も混入していない
+    /// ことをテストから確認するためのブール。`compile_error!` と相補的に動作する:
+    /// いずれかの feature が立てばそもそもビルドが通らないため、本関数が呼ばれた
+    /// 時点で Phase 2 ロックが成立している。
     pub const fn phase2_only() -> bool {
-        #[cfg(feature = "tokio-transport")]
+        #[cfg(any(feature = "tokio-transport", feature = "phase3-features"))]
         {
             false
         }
-        #[cfg(not(feature = "tokio-transport"))]
+        #[cfg(not(any(feature = "tokio-transport", feature = "phase3-features")))]
         {
             true
         }
@@ -101,9 +113,10 @@ mod tests {
     }
 
     #[test]
-    fn phase_gate_asserts_no_tokio_transport_feature() {
-        // `tokio-transport` feature が立つとそもそも compile_error! で落ちるため、
-        // 本テストが走ること自体が Phase 2 ゲートの有効性を示す。
+    fn phase_gate_asserts_no_adjacent_phase_features() {
+        // `tokio-transport` (Phase 1) と `phase3-features` (Phase 3) のいずれかが
+        // 立てば上の `compile_error!` でビルドが止まるため、本テストが走ること
+        // 自体が Phase 2 ロックの有効性を示す。
         assert!(PhaseGate::phase2_only());
     }
 }
