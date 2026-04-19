@@ -3,7 +3,7 @@
 //! - `<topdir>/YYYY/MM/DD/<game_id>.csa` に CSA V2 棋譜を書き込む。
 //!   日付は `game_id` 末尾の 8 桁が `YYYYMMDD` 形式である前提だが、形式が
 //!   合わなければ `start_time` から推定する代わりにフォールバックの `unknown/`
-//!   ディレクトリへ落とす（Phase 1 では緩く扱い、Phase 4 で厳格化する）。
+//!   ディレクトリへ落とす（現状は緩く扱う方針）。
 //! - 00LIST は `<topdir>/00LIST` にスペース区切り 1 行として追記する。
 //! - 書き込みは原子的: まず一時ファイルに書いてから `rename` で確定する
 //!   （中断してもファイルが半端な状態にならないようにするため）。
@@ -24,7 +24,7 @@ use crate::types::{GameId, StorageKey};
 /// ローカルディレクトリへ CSA V2 棋譜と 00LIST を書き出す `KifuStorage`。
 ///
 /// `append_summary` は同一インスタンス内で `Mutex` で直列化される。
-/// 同一 `topdir` を別インスタンスから複数プロセスで叩くケースは Phase 1 では想定外
+/// 同一 `topdir` を別インスタンスから複数プロセスで叩くケースは想定外
 /// （TCP サーバーは 1 プロセス・1 ストレージインスタンス）。
 #[derive(Debug, Clone)]
 pub struct FileKifuStorage {
@@ -85,8 +85,8 @@ impl KifuStorage for FileKifuStorage {
         // 同一 FileKifuStorage インスタンスからの append を直列化する。
         // `tokio::fs::File::write_all` は内部で複数 write を呼び得るため、
         // 同時呼び出しがあると POSIX O_APPEND だけでは行内交錯を防げない。
-        // Phase 1 は 1 プロセス前提なので Mutex 1 つで十分。複数プロセスから
-        // 同一ディレクトリを叩く運用が出てきたら flock(2) を併用する想定。
+        // 1 プロセス前提で Mutex 1 つの直列化で十分。複数プロセスから同一
+        // ディレクトリを叩く運用が出てきたら flock(2) を併用する想定。
         let _guard = self.append_lock.lock().await;
         let path = self.zerozero_list_path();
         if let Some(parent) = path.parent() {

@@ -86,7 +86,7 @@ impl WsAttachment {
 
 /// `LOGIN <handle>+<game_name>+<color> <password>` 形式の LOGIN 名を分解する。
 ///
-/// Phase 1 TCP (`crates/rshogi-csa-server-tcp/src/server.rs::parse_handle`) と
+/// TCP 版 (`crates/rshogi-csa-server-tcp/src/server.rs::parse_handle`) と
 /// 同一のコンベンションを採用する。Floodgate 以来の慣習で、クライアントが
 /// 希望する手番色まで名前に埋めてくる。
 ///

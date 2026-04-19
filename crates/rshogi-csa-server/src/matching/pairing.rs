@@ -1,8 +1,8 @@
 //! ペアリング戦略の抽象。
 //!
-//! Phase 1 は [`DirectMatchStrategy`]（同一 `game_name` × 相補手番の 1 ペア）のみを
-//! 提供する。Phase 4 で Floodgate 既定／Swiss／Random／駒落ちなどを同じ trait で
-//! 差し替えるため、戦略は `&[PairingCandidate]` を受けて `Vec<MatchedPair>` を返す
+//! 現状は [`DirectMatchStrategy`]（同一 `game_name` × 相補手番の 1 ペア）のみ
+//! 提供する。Floodgate 既定／Swiss／Random／駒落ちなどを同じ trait で差し替え
+//! られるように、戦略は `&[PairingCandidate]` を受けて `Vec<MatchedPair>` を返す
 //! 純関数 `try_pair` として揃える。
 //!
 //! 副作用（プレイヤ状態の AgreeWaiting 遷移など）は呼び出し側
@@ -15,7 +15,7 @@ use crate::types::Color;
 ///
 /// 1 回の起動で 0 件以上の `MatchedPair` を返す。複数戦略をチェーンする場合は
 /// [`PairingChain`] のような上位コンテナで順番に呼び出し、確定したペアを
-/// 候補リストから除いて次戦略に渡す（Phase 4 で導入予定）。
+/// 候補リストから除いて次戦略に渡す（複数戦略チェーンの導入予定経路）。
 pub trait PairingLogic {
     /// 成立したペア一覧を返す。0 件もあり得る。
     ///
@@ -29,8 +29,8 @@ pub trait PairingLogic {
 
 /// 直接マッチ戦略：相補的手番（Black × White）が揃った最小ペアを 1 組返す。
 ///
-/// Phase 1 MVP の既定戦略。手番未指定（`preferred_color = None`）のプレイヤは
-/// 対象外（Phase 4 の Floodgate ロジックで補完予定）。
+/// 既定戦略。手番未指定（`preferred_color = None`）のプレイヤは対象外で、
+/// 任意手番配分が必要になったら上位の戦略で補完する。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DirectMatchStrategy;
 

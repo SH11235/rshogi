@@ -1,4 +1,4 @@
-# Cloudflare Workers 設定テンプレート（rshogi-csa-server-workers, Phase 2）。
+# Cloudflare Workers 設定テンプレート（rshogi-csa-server-workers）。
 #
 # 使い方:
 #   cp wrangler.toml.example wrangler.toml
@@ -26,7 +26,7 @@ tag = "v1"
 new_sqlite_classes = ["GameRoom"]
 
 # --- R2 (棋譜保存) ---
-# Phase 2-9.6 で CSA V2 棋譜エクスポート先として使用する。
+# `GameRoom` DO が終局時に CSA V2 棋譜を書き出す先。
 # bucket_name / preview_bucket_name は運用側で実際の R2 バケット名に差し替える。
 # 先頭末尾が英数、小文字英数字とハイフンのみ、3〜63 文字の制約に注意 (Cloudflare 要件)。
 [[r2_buckets]]

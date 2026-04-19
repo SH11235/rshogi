@@ -3,7 +3,7 @@ name = "rshogi-csa-server-tcp"
 version = "0.1.0"
 edition = "2024"
 authors = ["SH11235"]
-description = "TCP frontend for the CSA shogi game server (Phase 1 MVP)."
+description = "TCP frontend for the CSA shogi game server."
 license = "GPL-3.0-only"
 repository = "https://github.com/SH11235/rshogi"
 
@@ -22,14 +22,10 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 
 [features]
 default = []
-# Phase 2 移行時に本 crate で有効化する想定の feature 名。Phase 1 期間中は
-# 常に disabled でなければならず、有効化すると `phase_gate.rs` の compile_error!
-# でビルドが停止する（defensive gate）。
+# TCP バイナリが Workers 側のアダプタを取り込まないことを検査する defensive flag。
+# 有効化すると `lib.rs` の `compile_error!` でビルドが停止する。feature unification で
+# 上位依存から混入した場合に検知する用途。
 workers = []
-# Phase 3 機能ゲート。shared crate `rshogi-csa-server/phase3-features` に chain し、
-# 誤って TCP バイナリに Phase 3 機能が混入したら compile_error で止める。
-# 実機能は `rshogi-csa-server` 側にあるため、本フラグは chain だけを役割とする。
-phase3-features = ["rshogi-csa-server/phase3-features"]
 
 [[bin]]
 name = "rshogi-csa-server-tcp"

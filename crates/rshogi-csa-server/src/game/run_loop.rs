@@ -1,4 +1,4 @@
-//! `GameRoom` を `tokio` 非同期ランタイムで駆動するループ層（Phase 1）。
+//! `GameRoom` を `tokio` 非同期ランタイムで駆動するループ層。
 //!
 //! - 2 つの [`crate::port::ClientTransport`] と 1 つの [`crate::port::Broadcaster`] を
 //!   受け取り、対局終了まで行受信 → `handle_line` → 配信 → 状態遷移を回す。
@@ -333,7 +333,7 @@ mod tests {
         let gout = gote_out.borrow();
         assert!(gout.iter().any(|l| l.as_str() == "#RESIGN"));
         assert!(gout.iter().any(|l| l.as_str() == "#WIN"));
-        // 観戦者宛 (Spectator tag) も発火しているが Phase 1 では受信者ゼロを想定。
+        // 観戦者宛 (Spectator tag) も発火しているが本ケースでは受信者ゼロ。
         let spec = bcast_log.borrow();
         assert!(
             spec.iter()

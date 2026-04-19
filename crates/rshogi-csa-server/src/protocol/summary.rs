@@ -76,8 +76,8 @@ fn color_char(c: Color) -> char {
 /// 平手初期局面の `BEGIN Position`...`END Position` ブロックを返す。
 ///
 /// `KifuRecord` でも使えるよう、CSA 標準の P1-P9 + 持ち駒なし + 手番（`+`）を
-/// 1 つの文字列として返す。Phase 4 の駒落ちで別経路（PI 行や P+/P- 駒配置）を
-/// 用意する想定。
+/// 1 つの文字列として返す。駒落ち対応時は別経路（PI 行や P+/P- 駒配置）を
+/// 追加することになる。
 pub fn standard_initial_position_block() -> String {
     // rshogi-csa::initial_position().to_csa_board() がそのまま使えるが、
     // ここで `BEGIN Position`/`END Position` で囲んで返す。

@@ -25,7 +25,7 @@ pub enum BroadcastTag {
 /// 1 クライアント接続の行 I/O 抽象。
 ///
 /// TCP（`tokio::net::TcpStream`）と WebSocket（Durable Object）のどちらも、
-/// この trait を実装したアダプタを通してコアに接続される（設計書 §5.1）。
+/// この trait を実装したアダプタを通してコアに接続される。
 pub trait ClientTransport {
     /// 1 行受信。`timeout` を経過すれば [`TransportError::Timeout`]、EOF は [`TransportError::Closed`]。
     fn recv_line(

@@ -1,8 +1,9 @@
-# Phase 2 受入シナリオ (Cloudflare Workers フロントエンド)
+# Cloudflare Workers フロントエンド 受入シナリオ
 
-`.kiro/specs/rshogi-csa-server/tasks.md` §9.7 に対応する受入検証の記録。
-Miniflare (`wrangler dev --local`) 上で `rshogi-csa-server-workers` の
-WebSocket E2E を通過させ、Phase 2 → Phase 3 ゲートを解除できる状態を宣言する。
+`rshogi-csa-server-workers` を Miniflare (`wrangler dev --local`) 上で
+起動し、WebSocket 経由で 1 対局を通過させる E2E 受入スクリプトと、その
+観測結果の記録。後続の拡張（観戦・x1・Fischer clock など）が入るまえの
+「最小機能で E2E が通る」証跡として残す。
 
 ## 前提ツール
 
@@ -34,7 +35,7 @@ curl -s http://localhost:8788/health
 # → rshogi-csa-server-workers (phase=2 locked=2 workers)
 ```
 
-### Origin 許可リスト検査 (§9.2)
+### Origin 許可リスト検査
 
 ```bash
 # 許可されない Origin → 403
@@ -52,7 +53,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 # → 426
 ```
 
-### 対局 E2E (§9.1 / §9.3 / §9.4 / §9.5 / §9.6)
+### 対局 E2E
 
 以下のような Node スクリプトで LOGIN → AGREE → 指し手 → %TORYO を走らせる。
 
@@ -162,39 +163,26 @@ node /tmp/e2e_smoke.cjs
 
 ## 確認済み項目
 
-- `OK`: E2E スクリプトが成功パスを観測した。
-- `OK (実装済み・未実走)`: コード経路は実装され、ホスト / wasm32 ビルドも通るが、
-  本受入スクリプトでは当該 trigger を誘発していない。該当項目は下節「未検証で
-  Phase 3 以降で詰めるもの」と同じ対象を再掲する形で後続検証の TODO を残す。
+`OK` は E2E スクリプトが成功パスを観測したもの、`OK (実装済み・未実走)` は
+コード経路が実装され (ホスト / wasm32 ビルド済み)、本スクリプトでは当該 trigger を
+誘発していないもの。
 
-| タスク | 確認内容 | 結果 |
-|--------|----------|------|
-| §9.1 | `/ws/:room_id` が `id_from_name` で同一 DO に届き、Hibernation 受理で接続維持 | OK |
-| §9.2 | 許可 Origin 以外（別 Origin / 欠落）は 403 で拒否 | OK |
-| §9.3 | `accept_web_socket` 経路のみでメッセージ配信、手動 `accept()` 呼ばず | OK (コード設計) |
-| §9.4 (永続化) | LOGIN→マッチ→Game_Summary→AGREE→指し手→終局までを DO が駆動。slots / config / moves を `state.storage()` と SQLite に書き込み | OK |
-| §9.4 (再起動復元) | `ensure_core_loaded` で `play_started_at_ms` と `moves` replay を実装。Miniflare では isolate 破棄を誘発できないため本スクリプトでは未観測 | OK (実装済み・未実走) |
-| §9.5 | `set_alarm(Duration)` → `force_time_up(current_turn)` 経路は実装済み。本受入スクリプトは time-up を誘発しない | OK (実装済み・未実走) |
-| §9.6 | R2 `put(YYYY/MM/DD/<game_id>.csa)` が終局で呼ばれる。`local-kifu-dev` に書き出し | OK |
-| §15.7 Phase ゲート | shared crate `rshogi-csa-server` と両フロントエンドで `phase3-features` を `compile_error!` で拒否 | OK (§10.1) |
+| 項目 | 確認内容 | 結果 |
+|------|----------|------|
+| WS 受付 + DO 決定論ルーティング | `/ws/:room_id` が `id_from_name` で同一 DO に届き、Hibernation 受理で接続維持 | OK |
+| Origin 許可リスト | 許可外の Origin / 欠落 / 不一致は 403 で拒否 | OK |
+| accept_web_socket ベースの配信 | 手動 `accept()` を呼ばない、runtime-managed WebSocket の経路 | OK (コード設計) |
+| 対局状態の永続化 | LOGIN→マッチ→Game_Summary→AGREE→指し手→終局までを DO が駆動。slots / config / moves を `state.storage()` と SQLite に書き込み | OK |
+| DO 再起動復元 | `ensure_core_loaded` で `play_started_at_ms` と moves replay を実装。Miniflare では isolate 破棄を誘発できないため本スクリプトでは未観測 | OK (実装済み・未実走) |
+| Alarm 時間切れ駆動 | `set_alarm(Duration)` → `force_time_up(current_turn)` 経路は実装済み。本スクリプトは time-up を誘発しない | OK (実装済み・未実走) |
+| R2 棋譜エクスポート | `put(YYYY/MM/DD/<game_id>.csa)` が終局で呼ばれ、`local-kifu-dev` バケットに書き出される | OK |
+| フロントエンド間のランタイム分離 | TCP と Workers は `workers` / `tokio-transport` feature を互いに `compile_error!` で排他 | OK |
 
-## 未検証で Phase 3 以降で詰めるもの
+## 後続で詰めるもの
 
-- **Alarm 実発火の time-up**: 本シナリオは time-up を誘発していない。
-  手動での長時間待機または短時間クロックの差し込みで追加検証する。
-- **DO 再起動時の replay**: isolate 破棄を強制する手段が Miniflare 限定
-  なので、本番 Cloudflare で明示的なデプロイ入れ替えを伴う確認が必要。
-- **Rate limit / auth storage 互換**: Phase 2 は accept-all stub のまま。
-  Phase 4 の `RateStorage` 互換実装と組み合わせて再検証する。
-
-## 付録: Phase 2 ゲート解除の運用
-
-Phase 3 への移行時は以下を同時に行う:
-
-1. `crates/rshogi-csa-server-workers/src/phase_gate.rs` の `CURRENT_PHASE`
-   を `3` に更新し、Phase 3 実装を守る新しい compile gate に置き換える。
-2. `Cargo.toml` の `phase3-features` フラグを実機能のユースケースに合わせて
-   細分化（x1 / buoy / additional clocks など）する。
-3. `docs/csa-server/phase3-acceptance.md` 相当を新設し、本ドキュメントと
-   合わせて「Phase 2 は合格済み、Phase 3 受入基準が新たに走っている」
-   ことを文書化する。
+- **Alarm 実発火の time-up**: 本スクリプトは time-up を誘発していない。
+  手動の長時間待機または短時間クロックの差し込みで追加検証する。
+- **DO 再起動時の replay**: isolate 破棄を強制する手段が Miniflare にないので、
+  本番 Cloudflare で明示的なデプロイ入れ替えを伴う確認が必要。
+- **Rate limit / auth storage 互換**: Workers 側は現状 accept-all stub。
+  TCP 版相当の `RateStorage` + PasswordHasher 互換実装と組み合わせて再検証する。

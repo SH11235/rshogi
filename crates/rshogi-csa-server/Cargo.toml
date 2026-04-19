@@ -17,20 +17,13 @@ serde.workspace = true
 tokio = { workspace = true, optional = true }
 
 [features]
-# Phase 1 の TCP フロントエンドを既定で有効にする。Cloudflare Workers (wasm32) ビルドでは
-# `--no-default-features --features workers` を渡して tokio 依存を外すこと。
+# TCP フロントエンドを既定で有効にする。Cloudflare Workers (wasm32) ビルドでは
+# `--no-default-features --features workers` を渡して tokio 依存を外す。
 default = ["tokio-transport"]
 # tokio 非同期ランタイムを使う `GameRoom::run` 等を有効化する。
 tokio-transport = ["dep:tokio"]
-# Cloudflare Workers 等のシングルスレッド WASM ランタイム向けフラグ（現状は副作用なし）。
+# Cloudflare Workers 等のシングルスレッド wasm ランタイム向けフラグ（現状は副作用なし）。
 workers = []
-# Phase 3 機能（x1 拡張・追加終局判定・Fischer/StopWatch・ブイ等）のゲートフラグ。
-# Phase 3 は両フロントエンド共通の仕様なのでコア crate に guard を置き、
-# Phase 2 受入が済むまで本 feature を立てた依存グラフは `lib.rs` の
-# `compile_error!` で全ビルド（TCP / Workers / 他）を停止する。
-# 実機能を追加する際は本 compile_error! を解除しつつ、各フロントエンドの
-# phase_gate.rs を Phase 3 相当に更新する。
-phase3-features = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "sync", "fs", "test-util"] }

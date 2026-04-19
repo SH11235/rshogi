@@ -1,4 +1,4 @@
-//! `GameRoom` Durable Object の対局ロジック実装 (Phase 2-9.4)。
+//! `GameRoom` Durable Object の対局ロジック実装。
 //!
 //! 1 部屋 = 1 DO インスタンス。以下のライフサイクルを駆動する:
 //!
@@ -6,8 +6,9 @@
 //!    `state.accept_web_socket` で hibernation を有効化する。
 //! 2. **LOGIN** (`websocket_message` / pending): `<handle>+<game_name>+<color>`
 //!    形式を分解し、役割 (Role) 付きスロットとして [`state.storage().put`] に
-//!    保存する。WS 側の attachment も `Player` に差し替える。Phase 2-9.4 MVP では
-//!    認証は *accept-all* の stub（Phase 4 で `RateStorage` + PasswordHasher 互換に差し替え）。
+//!    保存する。WS 側の attachment も `Player` に差し替える。パスワードの
+//!    実検証は本クレートのスコープ外（入口で accept-all）で、認証ストレージ
+//!    連携は別モジュールの責務。
 //! 3. **マッチ成立**: 2 人目の LOGIN で役割が相補、同じ game_name なら
 //!    [`CoreRoom`] を生成して Game_Summary を双方へ送出する。状態は
 //!    `AgreeWaiting` として Core 側が握る。
@@ -16,17 +17,16 @@
 //!    宛先色別に fanout する。着手は `moves` テーブルに append する。
 //! 5. **切断** (`websocket_close`): 認証済みプレイヤの切断は
 //!    [`CoreRoom::force_abnormal`] で敗北を確定する。
-//!
 //! 6. **時間切れ駆動** (`alarm`): 手番開始ごとに `state.storage().set_alarm`
 //!    で deadline を予約し、到着した時に `CoreRoom::force_time_up(current_turn)`
-//!    で負け側を確定する (§9.5)。
+//!    で負け側を確定する。
 //! 7. **再起動復元** (`ensure_core_loaded`): DO isolate が破棄された後の
 //!    最初の操作で、`play_started_at_ms` が立っていれば AGREE を再送し、
 //!    続けて `moves` テーブルを ply 順に `handle_line` で replay して
-//!    CoreRoom を復元する (§9.4 の「再起動復元」要件)。
+//!    CoreRoom を復元する。
 //! 8. **棋譜エクスポート** (`export_kifu_to_r2`): 終局を観測した瞬間に
-//!    CSA V2 形式で組み立て、R2 の `YYYY/MM/DD/<game_id>.csa` に書き出す (§9.6)。
-//!    Phase 1 `FileKifuStorage` と同一キー体系で Ruby 系バッチとの互換性を保つ。
+//!    CSA V2 形式で組み立て、R2 の `YYYY/MM/DD/<game_id>.csa` に書き出す。
+//!    TCP 側 `FileKifuStorage` と同一キー体系で Ruby 系バッチとの互換性を保つ。
 
 use std::cell::RefCell;
 use std::time::Duration;
@@ -51,10 +51,10 @@ use rshogi_csa_server::types::{Color, CsaLine, GameId, PlayerName};
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::ConfigKeys;
 use crate::datetime::{format_csa_datetime, format_date_path};
-use crate::phase_gate;
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 
-/// Phase 2-9.4 MVP の時計既定値 (Floodgate 600-10 互換)。
+/// 時計既定値 (Floodgate 600-10 互換)。実運用で可変にする必要が出たら
+/// `PersistedConfig` を受け取る構成に切り替える。
 const DEFAULT_MAIN_TIME_SEC: u32 = 600;
 const DEFAULT_BYOYOMI_SEC: u32 = 10;
 const DEFAULT_MAX_MOVES: u32 = 256;
@@ -165,7 +165,7 @@ impl DurableObject for GameRoom {
             .serialize_attachment(&pending)
             .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
 
-        console_log!("[GameRoom] websocket upgrade accepted ({})", phase_gate::PhaseGate::label());
+        console_log!("[GameRoom] websocket upgrade accepted");
 
         Ok(ResponseBuilder::new().with_status(101).with_websocket(pair.client).empty())
     }
@@ -453,7 +453,7 @@ impl GameRoom {
         Ok(())
     }
 
-    /// 直前の `HandleOutcome` に応じて Alarm を張り替える (§9.5)。
+    /// 直前の `HandleOutcome` に応じて Alarm を張り替える。
     ///
     /// - `GameStarted` / `MoveAccepted`: 次手番側が使える残時間 (main + byoyomi) を
     ///   `Duration` として set_alarm に渡す。通信マージン分の安全側余裕も追加する。
@@ -505,7 +505,7 @@ impl GameRoom {
                     self.send_to_role(Role::Black, entry.line.as_str()).await?;
                     self.send_to_role(Role::White, entry.line.as_str()).await?;
                 }
-                // Phase 2 MVP では観戦者を持たないので Spectators は送る宛先なし。
+                // 観戦者は本クレートが扱わないので Spectators は no-op。
                 BroadcastTarget::Spectators => {}
             }
         }
@@ -543,11 +543,11 @@ impl GameRoom {
         Ok(())
     }
 
-    /// R2 バケットに CSA V2 形式の棋譜を書き出す (§9.6)。
+    /// R2 バケットに CSA V2 形式の棋譜を書き出す。
     ///
-    /// キー体系: `YYYY/MM/DD/<game_id>.csa`。Phase 1 `FileKifuStorage` と
+    /// キー体系: `YYYY/MM/DD/<game_id>.csa`。TCP 版 `FileKifuStorage` と
     /// 同一構造なので、既存 Ruby 系のバッチ（mk_rate / mk_html）を R2 を
-    /// mount して流用できる（Req 14.1-4）。
+    /// mount して流用できる。
     async fn export_kifu_to_r2(
         &self,
         game_result: &rshogi_csa_server::game::result::GameResult,

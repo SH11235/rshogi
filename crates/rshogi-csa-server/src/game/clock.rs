@@ -1,7 +1,7 @@
-//! 持ち時間管理 — 3 方式のうち Phase 1 では秒読み方式のみ実装する。
+//! 持ち時間管理。現状は秒読み方式 [`SecondsCountdownClock`] のみ実装する。
 //!
-//! 秒読み方式（[`SecondsCountdownClock`]）は CSA 2014 改訂互換で、
-//! `Least_Time_Per_Move = 0`、経過時間は整数秒に切り捨てる。
+//! 秒読み方式は CSA 2014 改訂互換で、`Least_Time_Per_Move = 0`、経過時間は
+//! 整数秒に切り捨てる。
 //!
 //! # API 設計メモ
 //!
@@ -14,8 +14,8 @@
 //!   秒読みは手番ごとにリセットされるため、`本体残り + byoyomi` 全量 を返す。
 //!   `run_loop::compute_deadline` などの時間切れアラームはこちらを使う。
 //!
-//! 旧 `remaining_ms` は意味がぶれて deadline 計算側で秒読みを無視するバグを招いたため、
-//! 本 Phase 1 で API を明示的に分離する破壊的変更を入れている。
+//! 意味が曖昧な単一の `remaining_ms` にせず明確に 2 種類へ分けているのは、
+//! deadline 計算側で秒読みを無視するバグを防ぐため。
 
 use crate::types::Color;
 

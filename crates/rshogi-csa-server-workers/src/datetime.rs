@@ -11,7 +11,7 @@ pub fn format_csa_datetime(epoch_ms: u64) -> String {
     dt.format("%Y/%m/%d %H:%M:%S").to_string()
 }
 
-/// `YYYY/MM/DD`（UTC）に整形する。R2 キーの日付パス（Phase 1
+/// `YYYY/MM/DD`（UTC）に整形する。R2 キーの日付パス（TCP 版
 /// `FileKifuStorage` と互換）に使う。
 pub fn format_date_path(epoch_ms: u64) -> String {
     let dt = to_utc(epoch_ms);

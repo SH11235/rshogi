@@ -1,19 +1,19 @@
 //! fetch イベントのルーティング。
 //!
 //! `#[event(fetch)]` から 1 本だけ呼ばれる薄いディスパッチャ。
-//! - `GET /ws/:room_id` → Origin 検査後、room_id を `id_from_name` で決定論的に
-//!   解決した Durable Object へ Upgrade 要求を転送する（tasks.md §9.1, §9.2）。
-//! - `GET /` と `GET /health` → Phase ゲート情報を返す簡易ヘルスチェック。
+//! - `GET /ws/:room_id` → Origin 検査後、`room_id` を `id_from_name` で
+//!   決定論的に解決した Durable Object へ Upgrade 要求を転送する。
+//! - `GET /` と `GET /health` → サーバ識別を返す簡易ヘルスチェック。
 //! - 他は 404。
 //!
-//! axum はまだ導入していない。HTTP API を増やす段階で `env::DurableObject` へ
-//! 転送しないパスは axum Router に切り出す想定。
+//! axum を介さず worker-rs のプリミティブだけでさばくのは、WebSocket Upgrade
+//! を axum と DO の間で橋渡しするコストが大きいため。HTTP API を増やす段階で
+//! 非 WS 経路は axum Router に切り出す想定。
 
 use worker::{Env, Method, Request, Response, Result};
 
 use crate::config::{ConfigKeys, OriginAllowList};
 use crate::origin::{OriginDecision, evaluate};
-use crate::phase_gate;
 use crate::room_id::is_valid_room_id;
 
 /// `#[event(fetch)]` から委譲されるディスパッチ。
@@ -23,10 +23,7 @@ pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
     let method = req.method();
 
     if method == Method::Get && (path == "/" || path == "/health") {
-        return Response::ok(format!(
-            "rshogi-csa-server-workers ({})",
-            phase_gate::PhaseGate::label()
-        ));
+        return Response::ok(format!("rshogi-csa-server-workers v{}", env!("CARGO_PKG_VERSION")));
     }
 
     if method == Method::Get {
@@ -66,13 +63,12 @@ async fn forward_ws_to_room(req: Request, env: Env, room_id: &str) -> Result<Res
     }
 
     // room_id から決定論的に DO インスタンスを解決する。`id_from_name` は
-    // 文字列ハッシュを ID に写像するため、同じ room_id は常に同一 DO に到達する
-    // (Req 10.1)。
+    // 文字列ハッシュを ID に写像するため、同じ room_id は常に同一 DO に到達する。
     let namespace = env.durable_object(ConfigKeys::GAME_ROOM_BINDING)?;
     let stub = namespace.id_from_name(room_id)?.get_stub()?;
 
-    // DO 側 fetch は完全な URL を要求する仕様。ここでは転送用のダミー host を
-    // 立て、path に `/ws/:room_id` を引き継ぐ（DO 側の path prefix チェックで使う）。
+    // DO 側 fetch は完全な URL を要求する仕様。転送用のダミー host を立て、
+    // path に `/ws/:room_id` を引き継ぐ（DO 側の path prefix チェックで使う）。
     let forward_url = format!("https://do.internal/ws/{room_id}");
     let mut fwd = Request::new(&forward_url, Method::Get)?;
     let fwd_headers = fwd.headers_mut()?;
