@@ -714,10 +714,22 @@ where
         }
     }
 
-    // 両者 AGREE 成立後に GameRegistry へ登録する。REJECT / %CHUDAN / 切断で
-    // 対局不成立だったケースは上の early-return で既に捌いているので、ここを
-    // 通った時点で「実際にプレイ状態に入った」対局だけが `%%LIST` / `%%SHOW` に
-    // 載る。`started_at` も ここで取得して実プレイ開始時刻に揃える。
+    // `GameRoom` を構築して内部 AGREE を 2 回入れ、`START` 配信まで済ませる。
+    // ここで dispatch が失敗したら GameRegistry には入れずに early-return
+    // （「`%%LIST` に開始失敗した幽霊対局が出る」挙動を防ぐ）。
+    let start_time = chrono::Utc::now();
+    let (mut room, game_start_instant) = initialize_game_and_dispatch_start(
+        state,
+        game_id,
+        &matched,
+        clock,
+        black_transport,
+        white_transport,
+    )
+    .await?;
+
+    // `START` 配信成功を確認してから GameRegistry へ登録する。`started_at` は
+    // ここで取得して実プレイ開始時刻に揃える。
     let started_at_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     {
         let mut games = state.games.lock().await;
@@ -730,21 +742,29 @@ where
         });
     }
 
-    // 指し手と消費時間を記録するため、run_loop の代わりに handle_line を自前で回す。
-    // 理由: run_room は broadcasts を transport に流し込むが、棋譜を組み立てるには
-    //       手トークンと消費秒数を別途保持する必要があるため、最小の拡張として
-    //       start_game_and_record を用意する。
-    let start_time = chrono::Utc::now();
-    let (result, moves) = start_game_and_record(
+    // 指し手と消費時間を記録しつつ終局まで駆動する。
+    let result_moves = run_game_loop_and_record(
         state,
         game_id,
-        matched.clone(),
+        &mut room,
+        game_start_instant,
         black_transport,
         white_transport,
-        clock,
     )
-    .await?;
+    .await;
     let end_time = chrono::Utc::now();
+
+    // 終局（正常 / I/O 失敗いずれも）を観測したら即座に GameRegistry から外す。
+    // persist_kifu は遅いストレージで時間がかかり得るので、先に登録を外して
+    // 「進行中対局」の鮮度を保つ。`drive_game` epilogue の unregister は idempotent
+    // なのでダブルコールでも安全。
+    {
+        let mut games = state.games.lock().await;
+        games.unregister(game_id);
+    }
+
+    // run_game_loop の失敗はそのまま早期 return する（persist_kifu は行わない）。
+    let (result, moves) = result_moves?;
 
     // 棋譜 + 00LIST 永続化。
     persist_kifu(state, game_id, &matched, start_time, end_time, &moves, &result).await?;
@@ -856,18 +876,20 @@ async fn wait_both_agree(
     Ok((true, log))
 }
 
-/// 対局を駆動しつつ、棋譜記録用に各指し手の `(token, elapsed_sec)` を収集する。
+/// `GameRoom` を初期化し、内部 AGREE 2 回 + 最初の `START` 配信までを行う。
 ///
-/// `run_room` を直接使うと消費秒数を取り出せないため、この関数では `GameRoom` を
-/// 直接駆動して手番イベントから `,T<sec>` を解析する。
-async fn start_game_and_record<R, K, P>(
+/// 成功すると「クライアントが対局開始を受け取れた」ことが保証されるので、
+/// 呼び出し側は続けて `GameRegistry::register` してから `run_game_loop_and_record`
+/// を呼ぶ流れに乗せる。`dispatch` が送信失敗した場合は `ServerError::Transport`
+/// で早期 return し、GameRegistry には入れない（幽霊対局を防ぐ）。
+async fn initialize_game_and_dispatch_start<R, K, P>(
     state: &SharedState<R, K, P>,
     game_id: &GameId,
-    matched: MatchedPair,
+    matched: &MatchedPair,
+    clock: SecondsCountdownClock,
     black: &mut TcpTransport,
     white: &mut TcpTransport,
-    clock: SecondsCountdownClock,
-) -> Result<(GameResult, Vec<KifuMove>), ServerError>
+) -> Result<(GameRoom, tokio::time::Instant), ServerError>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
@@ -883,19 +905,41 @@ where
     };
     let mut room = GameRoom::new(cfg, Box::new(clock));
 
-    // broadcasts を監視して `,T<sec>` を抜き取る軽量ラッパ。run_room に相当する処理を
-    // ここで再実装する。時間切れアラームも同じ方式で駆動する。
-    let start = tokio::time::Instant::now();
-    let now_ms = || tokio::time::Instant::now().saturating_duration_since(start).as_millis() as u64;
+    let start_instant = tokio::time::Instant::now();
+    let now_ms =
+        || tokio::time::Instant::now().saturating_duration_since(start_instant).as_millis() as u64;
+
     // 対局開始を双方に通知するため、内部的に AGREE を 2 回入れてから Playing に進める。
-    // 外部クライアントからの AGREE は wait_both_agree で受信済みなので、ここでは
-    // GameRoom の内部状態だけを進める。
+    // 外部クライアントからの AGREE は `wait_both_agree` で受信済みなので、ここでは
+    // GameRoom の内部状態だけを進める。`START` 行は 2 回目の AGREE 処理で
+    // broadcasts に積まれる。
     room.handle_line(Color::Black, &CsaLine::new("AGREE"), now_ms())?;
     let r = room.handle_line(Color::White, &CsaLine::new("AGREE"), now_ms())?;
     dispatch(&r.broadcasts, black, white, &state.broadcaster, &RoomId::new(game_id.as_str()))
         .await?;
 
-    // 手と時間を記録するバッファ。
+    Ok((room, start_instant))
+}
+
+/// 既に `START` 配信済みの `GameRoom` を受け取り、終局まで駆動する。
+///
+/// `run_room` を直接使うと消費秒数を取り出せないため、ここでは `GameRoom` を直接駆動
+/// して手番イベントから `,T<sec>` を解析し `KifuMove` を収集する。
+async fn run_game_loop_and_record<R, K, P>(
+    state: &SharedState<R, K, P>,
+    game_id: &GameId,
+    room: &mut GameRoom,
+    start_instant: tokio::time::Instant,
+    black: &mut TcpTransport,
+    white: &mut TcpTransport,
+) -> Result<(GameResult, Vec<KifuMove>), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let now_ms =
+        || tokio::time::Instant::now().saturating_duration_since(start_instant).as_millis() as u64;
     let mut recorded_moves: Vec<KifuMove> = Vec::new();
 
     loop {
@@ -903,7 +947,7 @@ where
         if let rshogi_csa_server::GameStatus::Finished(result) = status {
             return Ok((result, recorded_moves));
         }
-        let deadline = compute_timeup_deadline(&room);
+        let deadline = compute_timeup_deadline(room);
         // 受信側は「実質無限」で貼る。持ち時間の終端は `sleep_until(deadline)` 側で駆動する。
         // 1 時間で打ち切っていると長時間持ち時間の対局が誤って切断負けになる。
         let evt = tokio::select! {
