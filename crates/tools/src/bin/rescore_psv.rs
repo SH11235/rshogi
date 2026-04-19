@@ -2199,16 +2199,42 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
     })
 }
 
-/// マーカーを atomic に書き出す（tmp に書く → sync_all → rename）
+/// マーカーを atomic に書き出す（tmp に書く → sync_all → rename）。
+/// 他の出力パスと同様、tmp / final が symlink の場合は拒否する
+/// （symlink を follow して任意ファイルを上書きするのを防ぐ、PR #463 review）。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 fn write_marker_atomic(rescore_output: &std::path::Path, marker: &DoneMarker) -> Result<()> {
     let final_path = marker_path_for(rescore_output);
     let mut tmp_os = final_path.as_os_str().to_owned();
     tmp_os.push(".tmp");
     let tmp_path = PathBuf::from(tmp_os);
+
+    // symlink 拒否: final / tmp どちらも symlink 経由の書き込みをブロック。
+    // tmp に前回クラッシュの残骸 (通常ファイル) があれば事前削除する。
+    for p in [&final_path, &tmp_path] {
+        if let Ok(meta) = fs::symlink_metadata(p)
+            && meta.file_type().is_symlink()
+        {
+            anyhow::bail!(
+                "Marker path is a symlink (refusing to write): {}. \
+                 Remove the symlink or choose a different directory.",
+                p.display()
+            );
+        }
+    }
+    if tmp_path.exists() {
+        fs::remove_file(&tmp_path)
+            .with_context(|| format!("Failed to remove stale marker tmp {}", tmp_path.display()))?;
+    }
+
     let body = serialize_marker(marker);
     {
-        let mut f = File::create(&tmp_path)
+        // `create_new(true)` により、競合で tmp を別プロセスが作っていた場合は
+        // 失敗させる（上の symlink チェックと TOCTOU 窓を狭める）。
+        let mut f = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
             .with_context(|| format!("Failed to create marker tmp {}", tmp_path.display()))?;
         f.write_all(body.as_bytes())?;
         f.sync_all()?;
@@ -2598,9 +2624,10 @@ where
                     continue;
                 }
             };
-            // 王手判定はバッチ読み込み時に 1 回だけ。失敗時は in_check=false
-            // 扱いとし、書き出しループで Position::set_sfen が再度失敗すれば
-            // error_count に計上される。
+            // 王手判定はバッチ読み込み時に 1 回だけ行う。ここで
+            // Position::set_sfen に失敗した場合は in_check=false 扱いとする
+            // （後段の特徴量構築で同じ局面を再パースしたときに失敗すれば
+            //  batch_errors → error_count に計上される）。
             let mut probe = Position::new();
             let in_check = match probe.set_sfen(&sfen) {
                 Ok(()) => probe.in_check(),

@@ -133,7 +133,7 @@ AobaZero (`--onnx-model`) と標準 dlshogi (`--dlshogi-onnx-model`, DL水匠等
 > **Tip**: スコア付け (rescore) と局面展開 (expand) を同じモデルで両方行う場合は、
 > `rescore_psv --expand-output-dir ...` を使うと **推論 1 パス** で両方を同時に実行できる
 > （value 出力で rescore、policy 出力で expand）。詳細は
-> [rescore_psv.md](rescore_psv.md#ポリシー展開expand-output-dirについて) を参照。
+> [rescore_psv.md](rescore_psv.md#ポリシー展開--expand-output-dirについて) を参照。
 
 **前提条件**: ONNX Runtime のセットアップが必要。詳細は [rescore_psv.md](rescore_psv.md) を参照。
 
