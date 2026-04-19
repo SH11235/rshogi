@@ -1,10 +1,11 @@
-//! Phase 1 受入シナリオの End-to-End テスト（Requirement 15.1）。
+//! CSA セッション End-to-End テスト（Requirement 15.1）。
 //!
-//! 以下のシナリオを TCP ソケット経由で通す:
+//! TCP ソケット経由で以下のシナリオを通し、フロントエンド全体の挙動を検証する:
 //!
 //! - 認証（LOGIN / 成功・失敗・レート制限）
 //! - マッチ成立 → Game_Summary → AGREE → 対局進行 → 終局（投了 / 最大手数）
 //! - CSA V2 棋譜と 00LIST が shogi-server mk_rate 互換形式で吐かれる
+//! - 待機中の切断・`agree_timeout` 総窓の enforcement 等の不変条件
 //!
 //! `flavor = "current_thread"` + `LocalSet` でサーバーを起動し、同じタスク内から
 //! `TcpStream` クライアントで接続・行送受信する。仮想時計は使わないが、各シナリオは
@@ -401,8 +402,8 @@ async fn spawn_server_with_agree_timeout(
 
 #[test]
 fn agree_total_window_is_not_reset_by_peer_keepalive() {
-    // Codex P2 回帰: `agree_timeout` は Game_Summary 送信時点からの総待機窓であり、
-    // 片方が KEEPALIVE を連打してももう一方の AGREE を無期限待ちにしない。
+    // `agree_timeout` は Game_Summary 送信時点からの総待機窓であり、
+    // 片方が KEEPALIVE を連打してももう一方の AGREE を無期限待ちにしないこと。
     // 短い窓（1.5 秒）を設定し、白が KEEPALIVE を連続送信しつつ黒が AGREE しない
     // シナリオで、窓超過後はマッチ不成立 (REJECT 通知) に落ちることを確認する。
     run_local(|| async {
@@ -440,9 +441,8 @@ fn agree_total_window_is_not_reset_by_peer_keepalive() {
 
 #[test]
 fn waiter_disconnect_is_cleaned_up_and_allows_relogin() {
-    // Codex P1 回帰: 先着プレイヤが相手待ち中に切断したとき、待機プールと League から
-    // 明示的に除去されること。さもなければ同一 handle の再 LOGIN が already_logged_in
-    // で失敗する。
+    // 先着プレイヤが相手待ち中に切断したとき、待機プールと League から明示的に除去される
+    // こと。さもなければ同一 handle の再 LOGIN が already_logged_in で失敗する。
     run_local(|| async {
         let (addr, topdir) = spawn_server("waiter_disc").await;
         // 1 人目 alice が GameWaiting に入る。
