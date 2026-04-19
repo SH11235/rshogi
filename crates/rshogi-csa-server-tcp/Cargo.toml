@@ -26,6 +26,10 @@ default = []
 # 常に disabled でなければならず、有効化すると `phase_gate.rs` の compile_error!
 # でビルドが停止する（defensive gate）。
 workers = []
+# Phase 3 機能ゲート。shared crate `rshogi-csa-server/phase3-features` に chain し、
+# 誤って TCP バイナリに Phase 3 機能が混入したら compile_error で止める。
+# 実機能は `rshogi-csa-server` 側にあるため、本フラグは chain だけを役割とする。
+phase3-features = ["rshogi-csa-server/phase3-features"]
 
 [[bin]]
 name = "rshogi-csa-server-tcp"

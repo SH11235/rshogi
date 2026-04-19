@@ -82,7 +82,51 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   B.ws.send('-3334FU,T5\n'); await sleep(300);
   A.ws.send('%TORYO\n');     await sleep(800);
   A.ws.close(); B.ws.close();
-})();
+  await sleep(200);
+
+  // ---- Evidence output (再現可能な受入ログ) ----
+  const dump = (label, msgs) => {
+    console.log(`\n===== RECEIVED BY ${label} =====`);
+    msgs.forEach(m => process.stdout.write(m));
+  };
+  dump('BLACK', A.messages);
+  dump('WHITE', B.messages);
+
+  // ---- Acceptance gates (fail = exit code 1) ----
+  const checks = [
+    ['BLACK saw LOGIN:OK',      A.messages.some(m => m.includes('LOGIN:alice+g1+black OK'))],
+    ['BLACK saw Game_Summary',  A.messages.some(m => m.includes('BEGIN Game_Summary'))],
+    ['BLACK saw Your_Turn:+',   A.messages.some(m => m.includes('Your_Turn:+'))],
+    ['WHITE saw LOGIN:OK',      B.messages.some(m => m.includes('LOGIN:bob+g1+white OK'))],
+    ['WHITE saw Your_Turn:-',   B.messages.some(m => m.includes('Your_Turn:-'))],
+    ['both saw START',          A.messages.some(m => m.startsWith('START:')) &&
+                                 B.messages.some(m => m.startsWith('START:'))],
+    ['both saw +7776FU move',   A.messages.some(m => m.includes('+7776FU')) &&
+                                 B.messages.some(m => m.includes('+7776FU'))],
+    ['both saw -3334FU move',   A.messages.some(m => m.includes('-3334FU')) &&
+                                 B.messages.some(m => m.includes('-3334FU'))],
+    ['BLACK saw #RESIGN/#LOSE', A.messages.some(m => m.includes('#RESIGN')) &&
+                                 A.messages.some(m => m.includes('#LOSE'))],
+    ['WHITE saw #RESIGN/#WIN',  B.messages.some(m => m.includes('#RESIGN')) &&
+                                 B.messages.some(m => m.includes('#WIN'))],
+  ];
+  console.log('\n===== ACCEPTANCE GATES =====');
+  const failed = checks.filter(([, ok]) => !ok);
+  checks.forEach(([name, ok]) => console.log(`${ok ? '[OK]  ' : '[FAIL]'} ${name}`));
+  process.exit(failed.length ? 1 : 0);
+})().catch(e => { console.error(e); process.exit(1); });
+```
+
+実行して exit 0 で終われば受入合格。再現例:
+
+```bash
+(cd /tmp && npm init -y >/dev/null && npm i ws >/dev/null)
+node /tmp/e2e_smoke.cjs
+# ... RECEIVED BY BLACK / WHITE の dump ...
+# ===== ACCEPTANCE GATES =====
+# [OK]   BLACK saw LOGIN:OK
+# ...
+# echo $? # → 0
 ```
 
 ### 観測される送信シーケンス（検証日 2026-04-19）
@@ -118,15 +162,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 ## 確認済み項目
 
+- `OK`: E2E スクリプトが成功パスを観測した。
+- `OK (実装済み・未実走)`: コード経路は実装され、ホスト / wasm32 ビルドも通るが、
+  本受入スクリプトでは当該 trigger を誘発していない。該当項目は下節「未検証で
+  Phase 3 以降で詰めるもの」と同じ対象を再掲する形で後続検証の TODO を残す。
+
 | タスク | 確認内容 | 結果 |
 |--------|----------|------|
 | §9.1 | `/ws/:room_id` が `id_from_name` で同一 DO に届き、Hibernation 受理で接続維持 | OK |
 | §9.2 | 許可 Origin 以外（別 Origin / 欠落）は 403 で拒否 | OK |
 | §9.3 | `accept_web_socket` 経路のみでメッセージ配信、手動 `accept()` 呼ばず | OK (コード設計) |
-| §9.4 | LOGIN→マッチ→Game_Summary→AGREE→指し手→終局までを DO が駆動 | OK |
-| §9.5 | Alarm 発火は本シナリオには含まないが、`set_alarm(Duration)` 経路は実装済み | OK (コード設計) |
+| §9.4 (永続化) | LOGIN→マッチ→Game_Summary→AGREE→指し手→終局までを DO が駆動。slots / config / moves を `state.storage()` と SQLite に書き込み | OK |
+| §9.4 (再起動復元) | `ensure_core_loaded` で `play_started_at_ms` と `moves` replay を実装。Miniflare では isolate 破棄を誘発できないため本スクリプトでは未観測 | OK (実装済み・未実走) |
+| §9.5 | `set_alarm(Duration)` → `force_time_up(current_turn)` 経路は実装済み。本受入スクリプトは time-up を誘発しない | OK (実装済み・未実走) |
 | §9.6 | R2 `put(YYYY/MM/DD/<game_id>.csa)` が終局で呼ばれる。`local-kifu-dev` に書き出し | OK |
-| §15.7 Phase ゲート | `phase_gate.rs` が `phase3-features` 有効化を `compile_error!` で拒否 | OK (§10.1) |
+| §15.7 Phase ゲート | shared crate `rshogi-csa-server` と両フロントエンドで `phase3-features` を `compile_error!` で拒否 | OK (§10.1) |
 
 ## 未検証で Phase 3 以降で詰めるもの
 

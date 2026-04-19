@@ -6,7 +6,19 @@
 //!
 //! 現在のスコープは仕様書 `.kiro/specs/rshogi-csa-server/` の Phase 1 MVP。
 //! Phase 2〜5 で想定されている Cloudflare Workers 対応、Floodgate 定期運用、
-//! 再接続プロトコル等は本実装時点では未着手（スケジュールは `tasks.md` を参照）。
+//! 再接続プロトコル等は段階的に導入する（スケジュールは `tasks.md` を参照）。
+
+// Phase 3 defensive gate: `phase3-features` を有効にした依存グラフは、
+// Phase 2 の受入 (tasks.md §9.7) が合格して Phase 3 実装が入るまで
+// 本 compile_error! で全ビルドを停止する。フロントエンド crate 側の
+// phase_gate.rs と二重で張り、誤って shared crate の feature だけを立てた
+// 場合でも CI・ローカルで検知できるようにする。
+#[cfg(feature = "phase3-features")]
+compile_error!(
+    "rshogi-csa-server: Phase 3 features are gated. Phase 2 acceptance (tasks.md §9.7) must \
+     complete and both frontend phase_gate.rs modules must be updated before this feature \
+     can be enabled."
+);
 
 pub mod error;
 pub mod types;

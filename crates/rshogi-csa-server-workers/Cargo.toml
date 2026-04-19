@@ -51,7 +51,9 @@ default = []
 tokio-transport = []
 # Phase 3 機能（x1 拡張・追加終局判定・Fischer/StopWatch 時計・ブイ等）の
 # ゲートフラグ。Phase 2 → Phase 3 の受入検証が通るまで有効化を許さない defensive flag。
+# コア `rshogi-csa-server/phase3-features` に chain することで、shared crate 経由での
+# feature 混入も `rshogi-csa-server::lib.rs` の compile_error! で捕捉される。
 # 実機能の実装時は、Phase 3 ゲート解除と同時に本フラグを再定義する。
-phase3-features = []
+phase3-features = ["rshogi-csa-server/phase3-features"]
 
 [dev-dependencies]
