@@ -802,3 +802,121 @@ fn sennichite_broadcasts_draw_on_12_ply_gold_dance() {
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }
+
+#[test]
+fn monitor2_subscribes_and_receives_moves_and_chat() {
+    // x1 クライアント carol が `%%MONITOR2ON <game_id>` で対局に購読し、
+    // (a) 指し手 broadcast (`+7776FU,T0` 等) を受信する
+    // (b) `%%CHAT <msg>` で自身が送ったメッセージが自身に echo される
+    // (c) `%%MONITOR2OFF` で購読を解除する (以降の broadcast は届かない)
+    // を end-to-end で検証する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("monitor2").await;
+
+        // 対局セットアップ (alice vs bob)。white は対局中に指さないので writer は使わない。
+        let (mut rb, mut wb, mut rw, _ww, game_id) = login_match_agree(addr).await;
+
+        // 観戦者 carol は x1 で login。game_name は対局と同じにする必要は無い
+        // (異なる game_name なので直接マッチは成立せず、x1 waiter として留まる)。
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+
+        // `%%MONITOR2ON <game_id>` → `##[MONITOR2] BEGIN <game_id>` + END。
+        send_line(&mut wc, &format!("%%MONITOR2ON {game_id}")).await;
+        let begin = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(begin, format!("##[MONITOR2] BEGIN {game_id}"));
+        let end = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(end, "##[MONITOR2] END");
+
+        // 対局者が着手すると、broadcast (Spectators 宛て) で observer にも届く。
+        send_line(&mut wb, "+7776FU").await;
+        let _ = read_until(&mut rb, "+7776FU,T0").await;
+        let _ = read_until(&mut rw, "+7776FU,T0").await;
+        // observer は `+7776FU,T0` を受信する。
+        let observed = read_until(&mut rc, "+7776FU,T0").await;
+        assert!(observed.iter().any(|l| l == "+7776FU,T0"));
+
+        // `%%CHAT` → `##[CHAT] carol: hello` を observer 自身が echo 受信する
+        // (subscriber に自身が含まれる contract)。
+        send_line(&mut wc, "%%CHAT hello").await;
+        let mut saw_chat = false;
+        for _ in 0..10 {
+            let line = read_line_raw(&mut rc).await.unwrap();
+            if line == "##[CHAT] carol: hello" {
+                saw_chat = true;
+                break;
+            }
+            if line == format!("##[CHAT] OK {game_id}") {
+                // OK 応答自体はあり得る順序。続きを読む。
+                continue;
+            }
+            if line == "##[CHAT] END" {
+                continue;
+            }
+        }
+        assert!(saw_chat, "did not observe CHAT echo");
+
+        // `%%MONITOR2OFF <game_id>` → `##[MONITOR2OFF] <game_id>` + END。
+        send_line(&mut wc, &format!("%%MONITOR2OFF {game_id}")).await;
+        let off = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(off, format!("##[MONITOR2OFF] {game_id}"));
+        let off_end = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(off_end, "##[MONITOR2OFF] END");
+
+        // observer を降りた後、対局者の次着手は broadcaster 経由では届かない
+        // (subscriber は drop されて prune される)。厳密な「届かない」検証は
+        // タイミング依存なので、後続手を送って observer の recv_line が短時間
+        // (100ms) 以内に何も届かない (あるいは subscriber が落ちて何か別行が
+        // 届く) ことで妥協する。本テストでは購読解除 reply の最終行まで
+        // 完了した時点を off 済みとみなし、以降は検証しない (スケジューラ
+        // タイミングで broadcaster の retain (prune) が未実行のまま 1 通だけ
+        // 取りこぼす可能性がある)。
+
+        // 対局を投了で畳んでテスト clean-up する。
+        send_line(&mut wb, "%TORYO").await;
+        let _ = read_until(&mut rb, "#LOSE").await;
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn chat_without_active_monitor_returns_not_monitoring() {
+    // x1 waiter が `%%MONITOR2ON` 前に `%%CHAT` を投げると `NOT_MONITORING` で
+    // 弾かれる。購読前の chat 経路を誤って開放していないことの回帰防止。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("chat_no_sub").await;
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+        send_line(&mut wc, "%%CHAT no-subscription-yet").await;
+        let resp = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(resp, "##[CHAT] NOT_MONITORING");
+        let end = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(end, "##[CHAT] END");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn monitor2_on_unknown_game_returns_not_found() {
+    // 存在しない game_id への `%%MONITOR2ON` は `NOT_FOUND` を返し、購読状態を
+    // 変更しない (broadcaster にも登録しない)。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("mon_unknown").await;
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+        send_line(&mut wc, "%%MONITOR2ON unknown-game").await;
+        let resp = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(resp, "##[MONITOR2] NOT_FOUND unknown-game");
+        let end = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(end, "##[MONITOR2] END");
+        // 購読していないので CHAT は弾かれるはず。
+        send_line(&mut wc, "%%CHAT hello").await;
+        let chat = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(chat, "##[CHAT] NOT_MONITORING");
+        let _ = read_line_raw(&mut rc).await.unwrap(); // END
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}

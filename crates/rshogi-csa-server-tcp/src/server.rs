@@ -46,7 +46,7 @@ use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::auth::{AuthOutcome, PasswordHasher, authenticate};
-use crate::broadcaster::InMemoryBroadcaster;
+use crate::broadcaster::{InMemoryBroadcaster, Subscriber};
 use crate::rate_limit::IpLoginRateLimiter;
 use crate::transport::TcpTransport;
 
@@ -469,10 +469,16 @@ where
         );
     }
 
-    // マッチ確定 / 受信 の 2 経路を監視する。x1 waiter のみ受信行を `%%` 系
-    // コマンドとして解釈し応答を返すため、recv ブランチは loop で回す。`recv_line` は
-    // cancel-safe（`TcpTransport::recv_line`）なので、マッチが先に到着した場合は
-    // バッファを保ったまま drive 側へ transport を渡せる。
+    // `%%MONITOR2ON <game_id>` で購読中の対局があれば、その broadcast 受信口を
+    // `(game_id, UnboundedReceiver<CsaLine>)` として保持する。単一購読モデル:
+    // 後続の `%%MONITOR2ON` は既存 rx を drop して差し替える。CSA x1 仕様上
+    // 複数同時観戦は稀なので、複雑なキュー/セット管理を避ける。
+    let mut monitor_rx: Option<(GameId, tokio::sync::mpsc::UnboundedReceiver<CsaLine>)> = None;
+
+    // マッチ確定 / 受信 / 観戦 broadcast 中継 の 3 経路を監視する。x1 waiter のみ
+    // 受信行を `%%` 系コマンドとして解釈し応答を返すため、recv ブランチは loop で
+    // 回す。`recv_line` は cancel-safe（`TcpTransport::recv_line`）なので、マッチが
+    // 先に到着した場合はバッファを保ったまま drive 側へ transport を渡せる。
     let waiter_outcome: WaiterOutcome = 'outer: loop {
         let recv = tokio::select! {
             req_res = &mut match_req_rx => {
@@ -486,6 +492,39 @@ where
                     Err(_) => {
                         // pool 側が破棄された。league だけクリーンアップ。
                         break 'outer WaiterOutcome::Aborted;
+                    }
+                }
+            }
+            // 観戦購読中のみ有効になる broadcast 中継経路。`monitor_rx` が `None` なら
+            // `pending()` で永久に await し、実質このブランチは無効化される。
+            forwarded = async {
+                match &mut monitor_rx {
+                    Some((_, rx)) => rx.recv().await,
+                    None => std::future::pending::<Option<CsaLine>>().await,
+                }
+            } => {
+                match forwarded {
+                    Some(line) => {
+                        // 観戦者向け broadcast を transport に中継。書き込み失敗・
+                        // タイムアウトは切断扱い（既存の返信経路と同じ `x1_reply_write_timeout`
+                        // を共用し、観戦中継がハングしてマッチメイクを止めないようにする）。
+                        let write_timeout = state.config.x1_reply_write_timeout;
+                        match tokio::time::timeout(write_timeout, transport.send_line(&line)).await
+                        {
+                            Ok(Ok(())) => continue 'outer,
+                            _ => {
+                                let mut pool = state.waiting.lock().await;
+                                let _ = pool.remove_by_handle(&game_name, &handle);
+                                break 'outer WaiterOutcome::DisconnectedFromPool;
+                            }
+                        }
+                    }
+                    None => {
+                        // 送信側 (broadcaster 側の Subscriber tx) が drop された。
+                        // 対局終了による `clear_room` 経由が典型。購読状態をクリアして
+                        // 次の `%%MONITOR2ON` を待つ。
+                        monitor_rx = None;
+                        continue 'outer;
                     }
                 }
             }
@@ -544,11 +583,87 @@ where
                 };
                 Some(rshogi_csa_server::protocol::info::show_lines(&game_id, listing.as_ref()))
             }
+            ClientCommand::Monitor2On { game_id } => {
+                // 対局が GameRegistry に存在しているときのみ購読を許可する。
+                // 存在しない game_id への購読要求は `NOT_FOUND` を返して購読状態を
+                // 変更しない（無効な subscribe でも broadcaster には登録するが、
+                // clear_room まで残ることを避ける方針）。
+                let exists = {
+                    let games = state.games.lock().await;
+                    games.get(&game_id).is_some()
+                };
+                if !exists {
+                    Some(vec![
+                        CsaLine::new(format!("##[MONITOR2] NOT_FOUND {game_id}")),
+                        CsaLine::new("##[MONITOR2] END"),
+                    ])
+                } else {
+                    // 既存の購読があれば rx を drop (broadcaster 側 subscriber は次回の
+                    // broadcast で prune される) して新しい rx に差し替える。単一観戦
+                    // モデルの方針を踏襲。
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    state
+                        .broadcaster
+                        .subscribe(RoomId::new(game_id.as_str()), Subscriber::new(tx))
+                        .await;
+                    monitor_rx = Some((game_id.clone(), rx));
+                    Some(vec![
+                        CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
+                        CsaLine::new("##[MONITOR2] END"),
+                    ])
+                }
+            }
+            ClientCommand::Monitor2Off { game_id } => {
+                // 現在購読中かつ game_id が一致する場合のみ解除する。別 game_id
+                // を指定された場合は no-op で OK を返す（CSA 仕様の寛容性を優先）。
+                if let Some((active_id, _)) = &monitor_rx
+                    && *active_id == game_id
+                {
+                    monitor_rx = None;
+                }
+                Some(vec![
+                    CsaLine::new(format!("##[MONITOR2OFF] {game_id}")),
+                    CsaLine::new("##[MONITOR2OFF] END"),
+                ])
+            }
+            ClientCommand::Chat { message } => {
+                // 現在観戦中のルーム（`monitor_rx` が握っている game_id）に対し、
+                // `##[CHAT] <handle>: <message>` 形式で同ルームの全観戦者へ broadcast
+                // する。対局者 (drive 側 transport) は本 broadcaster では購読しない
+                // 構成なので現時点では受信しない (制約)。対局者側への配信は後続タスク
+                // で `broadcast_room` の配線を見直す際に追加する。
+                //
+                // 観戦中でない CHAT は NOT_MONITORING で弾く。対局参加前の x1 クライアント
+                // が部屋未指定で CHAT を投げた場合のフォールバック経路。
+                if let Some((active_id, _)) = &monitor_rx {
+                    let line = CsaLine::new(format!("##[CHAT] {handle}: {message}"));
+                    // CHAT broadcast 自体は送信側 (本クライアント) 自身にも echo
+                    // として届く (broadcaster に自身が subscribe している)。これは
+                    // CSA 仕様の通例で、送信確認を兼ねる。
+                    let _ = state
+                        .broadcaster
+                        .broadcast_tag(
+                            &RoomId::new(active_id.as_str()),
+                            BroadcastTag::Spectator,
+                            &line,
+                        )
+                        .await;
+                    Some(vec![
+                        CsaLine::new(format!("##[CHAT] OK {active_id}")),
+                        CsaLine::new("##[CHAT] END"),
+                    ])
+                } else {
+                    Some(vec![
+                        CsaLine::new("##[CHAT] NOT_MONITORING"),
+                        CsaLine::new("##[CHAT] END"),
+                    ])
+                }
+            }
             _ => None,
         };
         let Some(lines) = replies else {
             // 未サポートの x1 コマンド / 対局中コマンドは切断扱い（未配線の
-            // `%%MONITOR2ON` / `%%CHAT` / `%%SETBUOY` 等は後続コミットで追加する）。
+            // `%%SETBUOY` / `%%DELETEBUOY` / `%%GETBUOYCOUNT` / `%%FORK` 等は後続タスクで追加する）。
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
             break 'outer WaiterOutcome::DisconnectedFromPool;

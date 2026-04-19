@@ -187,6 +187,14 @@ impl DurableObject for GameRoom {
             WsAttachment::Player { role, handle, .. } => {
                 self.handle_game_line(role, &handle, &line).await
             }
+            // 観戦者の受付ルート (`/ws/<room_id>/spectate`) と observer 系コマンドは
+            // 後続 PR で `router::handle_fetch` / `GameRoom` DO へ配線する。現時点では
+            // `WsAttachment::Spectator` 付きセッションは enum 互換性のためだけに存在し、
+            // 受信行は黙って破棄する (Player 経路への誤入を防ぐ)。
+            WsAttachment::Spectator { .. } => {
+                console_log!("[GameRoom] spectator message ignored (route not wired yet)");
+                Ok(())
+            }
         }
     }
 
