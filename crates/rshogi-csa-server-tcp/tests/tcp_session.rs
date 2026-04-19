@@ -85,6 +85,8 @@ async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
     let mut password_map = HashMap::new();
     password_map.insert("alice".to_owned(), "pw".to_owned());
     password_map.insert("bob".to_owned(), "pw".to_owned());
+    // %%WHO / %%LIST / %%SHOW の観戦者役として使う追加アカウント。
+    password_map.insert("carol".to_owned(), "pw".to_owned());
     let rate_records = vec![
         PlayerRateRecord {
             name: PlayerName::new("alice"),
@@ -96,6 +98,14 @@ async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
         },
         PlayerRateRecord {
             name: PlayerName::new("bob"),
+            rate: 1500,
+            wins: 0,
+            losses: 0,
+            last_game_id: None,
+            last_modified: "2026-04-17T00:00:00Z".to_owned(),
+        },
+        PlayerRateRecord {
+            name: PlayerName::new("carol"),
             rate: 1500,
             wins: 0,
             losses: 0,
@@ -520,6 +530,90 @@ fn x1_waiter_answers_who_with_terminator_and_self_row() {
         assert_eq!(rows.last().map(String::as_str), Some("##[WHO] END"));
         assert!(rows.iter().any(|l| l == "##[WHO] alice waiting:g1"), "no alice row: {rows:?}");
         assert!(rows.iter().any(|l| l == "##[WHO] bob waiting:g-other"), "no bob row: {rows:?}");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn x1_list_and_show_reflect_ongoing_game() {
+    // 先行で alice vs bob が対局開始してレジストリに登録される状態を作り、
+    // 別接続の x1 クライアントから %%LIST / %%SHOW で同じ対局を参照できる。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("x1_list_show").await;
+
+        // alice / bob でマッチ成立させる。
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        let start_b = read_line_raw(&mut rb).await.unwrap();
+        let _ = read_line_raw(&mut rw).await;
+        let game_id = start_b.trim_start_matches("START:").to_owned();
+
+        // 観戦者想定の x1 クライアントが LOGIN（game_name は別のもので OK、対局は
+        // 組まれない）。
+        let (mut rs, mut ws) = connect(addr).await;
+        send_line(&mut ws, "LOGIN carol+other+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rs).await.unwrap(), "LOGIN:carol OK");
+
+        // %%LIST → 進行中対局に alice vs bob が含まれる。
+        send_line(&mut ws, "%%LIST").await;
+        let mut list_rows: Vec<String> = Vec::new();
+        for _ in 0..10 {
+            let line = read_line_raw(&mut rs).await.unwrap();
+            let is_end = line == "##[LIST] END";
+            list_rows.push(line);
+            if is_end {
+                break;
+            }
+        }
+        assert!(
+            list_rows
+                .iter()
+                .any(|l| l.contains(&game_id) && l.contains("alice") && l.contains("bob")),
+            "LIST: {list_rows:?}"
+        );
+        assert_eq!(list_rows.last().map(String::as_str), Some("##[LIST] END"));
+
+        // %%SHOW <game_id> → 各フィールドが 1 行ずつ返る。
+        send_line(&mut ws, &format!("%%SHOW {game_id}")).await;
+        let mut show_rows: Vec<String> = Vec::new();
+        for _ in 0..10 {
+            let line = read_line_raw(&mut rs).await.unwrap();
+            let is_end = line == "##[SHOW] END";
+            show_rows.push(line);
+            if is_end {
+                break;
+            }
+        }
+        assert!(
+            show_rows.iter().any(|l| l == &format!("##[SHOW] game_id {game_id}")),
+            "SHOW: {show_rows:?}"
+        );
+        assert!(
+            show_rows.iter().any(|l| l == "##[SHOW] black alice"),
+            "SHOW missing black: {show_rows:?}"
+        );
+        assert!(
+            show_rows.iter().any(|l| l == "##[SHOW] white bob"),
+            "SHOW missing white: {show_rows:?}"
+        );
+        assert!(
+            show_rows.iter().any(|l| l == "##[SHOW] game_name g1"),
+            "SHOW missing game_name: {show_rows:?}"
+        );
+
+        // %%SHOW 未知 ID → NOT_FOUND。
+        send_line(&mut ws, "%%SHOW unknown-game").await;
+        let nf = read_line_raw(&mut rs).await.unwrap();
+        assert_eq!(nf, "##[SHOW] NOT_FOUND unknown-game");
 
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });

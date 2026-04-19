@@ -13,7 +13,8 @@
 //! ようにする。
 
 use crate::matching::league::PlayerStatus;
-use crate::types::{CsaLine, PlayerName};
+use crate::matching::registry::GameListing;
+use crate::types::{CsaLine, GameId, PlayerName};
 
 /// サーバー実装名。応答ヘッダに埋め込む固定識別子。
 const SERVER_IMPL_NAME: &str = "rshogi-csa-server";
@@ -69,6 +70,53 @@ fn format_status_token(status: &PlayerStatus) -> String {
     }
 }
 
+/// `%%LIST` に対する応答を複数行で生成する。
+///
+/// 引数 `games` は [`crate::matching::registry::GameRegistry::snapshot`] の
+/// 戻り値をそのまま渡す（呼び出し側で `game_id` 昇順にソート済み）。
+/// 各対局に 1 行ずつ `##[LIST] <game_id> <black> <white> <game_name> <started_at>`、
+/// 末尾に終端行 `##[LIST] END` を付ける。
+pub fn list_lines(games: &[GameListing]) -> Vec<CsaLine> {
+    let mut out = Vec::with_capacity(games.len() + 1);
+    for g in games {
+        out.push(CsaLine::new(format!(
+            "##[LIST] {} {} {} {} {}",
+            g.game_id.as_str(),
+            g.black.as_str(),
+            g.white.as_str(),
+            g.game_name.as_str(),
+            g.started_at,
+        )));
+    }
+    out.push(CsaLine::new("##[LIST] END"));
+    out
+}
+
+/// `%%SHOW <game_id>` に対する応答を生成する。
+///
+/// `listing` が `Some` なら対局サマリ 1 行を `##[SHOW] <field> <value>` 群として
+/// 出力し、末尾に終端行 `##[SHOW] END` を付ける。`None`（未登録 game_id）なら
+/// `##[SHOW] NOT_FOUND <game_id>` の 1 行のみを返す。
+///
+/// 指し手列の添付は本関数のスコープ外（`GameRoom` から別途取得して
+/// `show_lines_with_moves` に差し替え拡張する想定）。
+pub fn show_lines(game_id: &GameId, listing: Option<&GameListing>) -> Vec<CsaLine> {
+    let Some(g) = listing else {
+        return vec![CsaLine::new(format!(
+            "##[SHOW] NOT_FOUND {}",
+            game_id.as_str()
+        ))];
+    };
+    vec![
+        CsaLine::new(format!("##[SHOW] game_id {}", g.game_id.as_str())),
+        CsaLine::new(format!("##[SHOW] black {}", g.black.as_str())),
+        CsaLine::new(format!("##[SHOW] white {}", g.white.as_str())),
+        CsaLine::new(format!("##[SHOW] game_name {}", g.game_name.as_str())),
+        CsaLine::new(format!("##[SHOW] started_at {}", g.started_at)),
+        CsaLine::new("##[SHOW] END"),
+    ]
+}
+
 /// `%%HELP` に対する応答を複数行で生成する。
 ///
 /// 応答は CSA 拡張 `##[HELP]` プレフィックス付きの行列。各行に 1 コマンドずつ
@@ -81,6 +129,8 @@ pub fn help_lines() -> Vec<CsaLine> {
         "%%VERSION - show server implementation and version",
         "%%HELP - list available %% commands",
         "%%WHO - list logged-in players",
+        "%%LIST - list active games",
+        "%%SHOW <game_id> - show a game summary",
     ];
     entries.iter().map(|e| CsaLine::new(format!("##[HELP] {e}"))).collect()
 }
@@ -107,17 +157,10 @@ mod tests {
         let lines = help_lines();
         let joined: String =
             lines.iter().map(|l| l.as_str().to_owned()).collect::<Vec<_>>().join("\n");
-        for cmd in ["%%VERSION", "%%HELP", "%%WHO"] {
+        for cmd in ["%%VERSION", "%%HELP", "%%WHO", "%%LIST", "%%SHOW"] {
             assert!(joined.contains(cmd), "help missing {cmd}: {joined}");
         }
-        for unwired in [
-            "%%LIST",
-            "%%SHOW",
-            "%%MONITOR2ON",
-            "%%CHAT",
-            "%%SETBUOY",
-            "%%FORK",
-        ] {
+        for unwired in ["%%MONITOR2ON", "%%CHAT", "%%SETBUOY", "%%FORK"] {
             assert!(
                 !joined.contains(unwired),
                 "help advertises unwired command {unwired}: {joined}"
@@ -168,6 +211,61 @@ mod tests {
         let lines = who_lines(&[]);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].as_str(), "##[WHO] END");
+    }
+
+    fn sample_listing(gid: &str) -> GameListing {
+        use crate::types::GameName;
+        GameListing {
+            game_id: GameId::new(gid),
+            black: PlayerName::new("alice"),
+            white: PlayerName::new("bob"),
+            game_name: GameName::new("floodgate-600-10"),
+            started_at: "2026-04-17T12:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn list_lines_include_all_fields_and_terminator() {
+        let games = vec![sample_listing("g-1"), sample_listing("g-2")];
+        let lines: Vec<String> = list_lines(&games).into_iter().map(|l| l.into_string()).collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "##[LIST] g-1 alice bob floodgate-600-10 2026-04-17T12:00:00Z");
+        assert_eq!(lines[1], "##[LIST] g-2 alice bob floodgate-600-10 2026-04-17T12:00:00Z");
+        assert_eq!(lines[2], "##[LIST] END");
+    }
+
+    #[test]
+    fn list_lines_empty_is_just_terminator() {
+        let lines = list_lines(&[]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].as_str(), "##[LIST] END");
+    }
+
+    #[test]
+    fn show_lines_for_known_game_emits_field_lines_and_terminator() {
+        let g = sample_listing("g-1");
+        let lines: Vec<String> = show_lines(&GameId::new("g-1"), Some(&g))
+            .into_iter()
+            .map(|l| l.into_string())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "##[SHOW] game_id g-1".to_owned(),
+                "##[SHOW] black alice".to_owned(),
+                "##[SHOW] white bob".to_owned(),
+                "##[SHOW] game_name floodgate-600-10".to_owned(),
+                "##[SHOW] started_at 2026-04-17T12:00:00Z".to_owned(),
+                "##[SHOW] END".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn show_lines_for_unknown_game_emits_not_found() {
+        let lines = show_lines(&GameId::new("g-missing"), None);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].as_str(), "##[SHOW] NOT_FOUND g-missing");
     }
 
     #[test]

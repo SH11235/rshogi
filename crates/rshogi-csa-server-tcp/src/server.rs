@@ -29,6 +29,7 @@ use rshogi_csa_server::game::clock::SecondsCountdownClock;
 use rshogi_csa_server::game::result::GameResult;
 use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
+use rshogi_csa_server::matching::registry::{GameListing, GameRegistry};
 use rshogi_csa_server::port::{
     BroadcastTag, Broadcaster, ClientTransport, GameSummaryEntry, KifuStorage, RateDecision,
     RateStorage,
@@ -196,6 +197,8 @@ where
     kifu_storage: K,
     password_store: P,
     hasher: Box<dyn PasswordHasher>,
+    /// 進行中対局のメモリ内レジストリ。`%%LIST` / `%%SHOW` 応答で参照する。
+    games: Mutex<GameRegistry>,
     /// 全接続タスクの終了を待つためのカウンタ通知。graceful shutdown で使用。
     active_games: Notify,
     /// 連番カウンタ（game_id 生成）。起動時刻 + 連番で衝突を避ける。
@@ -402,6 +405,7 @@ where
                 transport,
                 handle,
                 color,
+                game_name.clone(),
                 done_tx,
             )
             .await;
@@ -510,6 +514,20 @@ where
                 };
                 Some(rshogi_csa_server::protocol::info::who_lines(&snapshot))
             }
+            ClientCommand::List => {
+                let snapshot = {
+                    let games = state.games.lock().await;
+                    games.snapshot()
+                };
+                Some(rshogi_csa_server::protocol::info::list_lines(&snapshot))
+            }
+            ClientCommand::Show { game_id } => {
+                let listing = {
+                    let games = state.games.lock().await;
+                    games.get(&game_id).cloned()
+                };
+                Some(rshogi_csa_server::protocol::info::show_lines(&game_id, listing.as_ref()))
+            }
             _ => None,
         };
         let Some(lines) = replies else {
@@ -563,6 +581,7 @@ async fn drive_game<R, K, P>(
     self_transport: TcpTransport,
     self_handle: String,
     self_color: Color,
+    game_name: GameName,
     opp_completion_tx: oneshot::Sender<()>,
 ) -> Result<(), ServerError>
 where
@@ -597,6 +616,19 @@ where
         league.confirm_match(&matched, game_id.clone()).map_err(ServerError::State)?;
     }
 
+    // 進行中対局レジストリに登録（%%LIST / %%SHOW の応答源）。epilogue で必ず外す。
+    let started_at_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    {
+        let mut games = state.games.lock().await;
+        games.register(GameListing {
+            game_id: game_id.clone(),
+            black: matched.black.clone(),
+            white: matched.white.clone(),
+            game_name: game_name.clone(),
+            started_at: started_at_iso,
+        });
+    }
+
     // confirm_match 済みの時点で League には両者が AgreeWaiting として残っている。
     // 以降のどの経路（送信失敗・切断・内部エラー）でも必ず end_game + logout を実行する
     // ため、内部処理を `drive_game_inner` に切り出し、結果を問わず epilogue で後始末する
@@ -616,6 +648,10 @@ where
         let _ = league.end_game(&matched);
         league.logout(&matched.black);
         league.logout(&matched.white);
+    }
+    {
+        let mut games = state.games.lock().await;
+        games.unregister(&game_id);
     }
     state.broadcaster.clear_room(&RoomId::new(game_id.as_str())).await;
     // 待機タスクに完了通知（これで先着側のタスクが抜ける）。
@@ -1013,6 +1049,7 @@ where
         kifu_storage,
         password_store,
         hasher,
+        games: Mutex::new(GameRegistry::new()),
         active_games: Notify::new(),
         game_counter: Mutex::new(0),
         started_at: chrono::Utc::now(),

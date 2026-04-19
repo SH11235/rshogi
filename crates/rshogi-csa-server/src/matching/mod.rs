@@ -6,3 +6,4 @@
 
 pub mod league;
 pub mod pairing;
+pub mod registry;
