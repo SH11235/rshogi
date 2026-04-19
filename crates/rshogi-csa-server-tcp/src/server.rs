@@ -350,7 +350,13 @@ where
     // LOGIN 成功応答: shogi-server 互換の `LOGIN:<handle> OK`。
     transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
 
-    // 5. League に登録し GameWaiting に遷移。
+    // 5. League にログインする。
+    //    - x1 フラグ付きのセッションは info-only（`%%` 系コマンド専用）として扱い、
+    //      `Connected` のまま WaitingPool にも入れない。同じ session 内で対局も
+    //      したい場合は x1 なしで別途 LOGIN する契約にする（matchmaking と
+    //      info-only を明確に分離することで「観戦だけのつもりが勝手にマッチ成立
+    //      する」挙動を防ぐ）。
+    //    - x1 なしは従来通り `GameWaiting` に遷移して matchmaking 経路に進む。
     {
         let mut league = state.league.lock().await;
         match league.login(&handle_player, x1) {
@@ -365,15 +371,22 @@ where
                 return Ok(());
             }
         }
-        league
-            .transition(
-                &handle_player,
-                PlayerStatus::GameWaiting {
-                    game_name: game_name.clone(),
-                    preferred_color: Some(color),
-                },
-            )
-            .map_err(ServerError::State)?;
+        if !x1 {
+            league
+                .transition(
+                    &handle_player,
+                    PlayerStatus::GameWaiting {
+                        game_name: game_name.clone(),
+                        preferred_color: Some(color),
+                    },
+                )
+                .map_err(ServerError::State)?;
+        }
+    }
+
+    // x1 セッションは matchmaking に参加しない info-only 経路に分岐。
+    if x1 {
+        return run_x1_info_session(state.clone(), transport, handle_player).await;
     }
 
     // 6. 待機プールで相補手番の相手を探す。
@@ -416,17 +429,15 @@ where
     }
 
     // waiter 側パス: transport を保持したまま、マッチ確定 or 切断 を監視する。
-    run_waiter(state.clone(), transport, handle, color, game_name, handle_player, x1).await
+    run_waiter(state.clone(), transport, handle, color, game_name, handle_player).await
 }
 
 /// waiter として待機プールに入り、マッチ確定 or 切断を待つ。
 ///
-/// 非 x1 waiter は「何か行が届いた時点で切断」方針を維持する（対局前の任意入力は
-/// 受け付けない）。x1 waiter は `%%VERSION` / `%%HELP` / 空行 keep-alive だけ
-/// 応答し、それ以外の入力で切断する。対応する `%%` 系コマンドの集合は
-/// 今後 `%%WHO` / `%%LIST` / `%%SHOW` を順次拡張していく余地として、
-/// ここでマッチ節を増やす形で対応する。
-#[allow(clippy::too_many_arguments)]
+/// 本関数は x1 フラグなしのクライアント専用。matchmaking に参加しない
+/// info-only クライアント（x1 付き LOGIN）は [`run_x1_info_session`] 側で処理し、
+/// 本関数には入らない。待機中のクライアント入力は現状一切受け付けず、任意の
+/// データ到着を切断として扱う。
 async fn run_waiter<R, K, P>(
     state: Rc<SharedState<R, K, P>>,
     mut transport: TcpTransport,
@@ -434,14 +445,13 @@ async fn run_waiter<R, K, P>(
     color: Color,
     game_name: GameName,
     handle_player: PlayerName,
-    x1: bool,
 ) -> Result<(), ServerError>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
-    let (match_req_tx, mut match_req_rx) = oneshot::channel::<MatchRequest>();
+    let (match_req_tx, match_req_rx) = oneshot::channel::<MatchRequest>();
     {
         let mut pool = state.waiting.lock().await;
         pool.push(
@@ -454,54 +464,71 @@ where
         );
     }
 
-    // 切断 / マッチ確定 / x1 情報コマンドの 3 経路を監視する。`recv_line` は
-    // cancel-safe（`TcpTransport::recv_line`）なので、マッチが先に到着した場合は
-    // バッファを保ったまま drive 側へ transport を渡せる。
-    let waiter_outcome: WaiterOutcome = 'outer: loop {
-        let recv = tokio::select! {
-            req_res = &mut match_req_rx => {
-                match req_res {
-                    Ok(req) => {
-                        // transport を drive 側へ渡し、終局通知を待つ。
-                        let _ = req.transport_responder.send(transport);
-                        let _ = req.completion_rx.await;
-                        break 'outer WaiterOutcome::Completed;
-                    }
-                    Err(_) => {
-                        // pool 側が破棄された。league だけクリーンアップ。
-                        break 'outer WaiterOutcome::Aborted;
-                    }
+    // 切断監視: recv_line は cancel-safe（`TcpTransport::recv_line`）なので、
+    // `match_req_rx` が先に発火すればバッファは保存されたまま drive 側へ transport を渡せる。
+    let waiter_outcome = tokio::select! {
+        req_res = match_req_rx => {
+            match req_res {
+                Ok(req) => {
+                    // transport を drive 側へ渡し、終局通知を待つ。
+                    let _ = req.transport_responder.send(transport);
+                    let _ = req.completion_rx.await;
+                    WaiterOutcome::Completed
+                }
+                Err(_) => {
+                    // pool 側が破棄された。league だけクリーンアップ。
+                    WaiterOutcome::Aborted
                 }
             }
-            recv = transport.recv_line(NEAR_INFINITE) => recv,
-        };
-
-        let line = match recv {
-            Ok(l) => l,
-            Err(_) => {
-                // 切断 or I/O エラー → pool を抜けて終了。
-                let mut pool = state.waiting.lock().await;
-                let _removed = pool.remove_by_handle(&game_name, &handle);
-                break 'outer WaiterOutcome::DisconnectedFromPool;
-            }
-        };
-
-        if !x1 {
-            // 非 x1 waiter は待機中の入力を許容しない（現行方針）。
+        }
+        _res = transport.recv_line(NEAR_INFINITE) => {
+            // 対局前の任意入力は現行方針で切断扱い（GameWaiting 中のクライアント
+            // 入力は受け付けない）。`%%` 系情報コマンドが欲しい場合は LOGIN で x1
+            // フラグを立てて別セッションとして接続する。
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
-            break 'outer WaiterOutcome::DisconnectedFromPool;
+            WaiterOutcome::DisconnectedFromPool
         }
+    };
 
-        // x1 waiter: 情報コマンドだけ応答する。
+    // 共通後処理: League から除去する。drive 側が端末処理する経路を除く。
+    match waiter_outcome {
+        WaiterOutcome::Completed => {
+            // drive 側で end_game + logout 済み。何もしない。
+        }
+        WaiterOutcome::Aborted | WaiterOutcome::DisconnectedFromPool => {
+            let mut league = state.league.lock().await;
+            league.logout(&handle_player);
+        }
+    }
+    state.active_games.notify_waiters();
+    Ok(())
+}
+
+/// x1 info-only セッションを駆動する。
+///
+/// x1 フラグ付きで LOGIN したクライアントは matchmaking に参加せず、本関数が
+/// サーバー情報系 `%%` コマンドへの応答と keep-alive だけを処理する。`League`
+/// 上は `Connected` のままで、切断を検知したら `League::logout` する。
+/// サポート外の `%%` コマンド、通常の対局コマンド、不正な行は全て切断として扱う。
+async fn run_x1_info_session<R, K, P>(
+    state: Rc<SharedState<R, K, P>>,
+    mut transport: TcpTransport,
+    handle_player: PlayerName,
+) -> Result<(), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    loop {
+        let line = match transport.recv_line(NEAR_INFINITE).await {
+            Ok(l) => l,
+            Err(_) => break,
+        };
         let cmd = match parse_command(&line) {
             Ok(c) => c,
-            Err(_) => {
-                // パース不能な行は切断扱い。
-                let mut pool = state.waiting.lock().await;
-                let _removed = pool.remove_by_handle(&game_name, &handle);
-                break 'outer WaiterOutcome::DisconnectedFromPool;
-            }
+            Err(_) => break,
         };
         let replies: Option<Vec<CsaLine>> = match cmd {
             ClientCommand::KeepAlive => Some(Vec::new()),
@@ -530,32 +557,24 @@ where
             }
             _ => None,
         };
-        let Some(lines) = replies else {
-            // 未サポートの x1 コマンド / 対局中コマンドは切断扱い（現時点では
-            // %%WHO / %%LIST / %%SHOW 等は未配線のため拒否に倒す）。
-            let mut pool = state.waiting.lock().await;
-            let _removed = pool.remove_by_handle(&game_name, &handle);
-            break 'outer WaiterOutcome::DisconnectedFromPool;
-        };
+        let Some(lines) = replies else { break };
+        let mut send_err = false;
         for out in lines {
             if transport.send_line(&out).await.is_err() {
-                // 応答送信に失敗したら切断として扱う。
-                let mut pool = state.waiting.lock().await;
-                let _removed = pool.remove_by_handle(&game_name, &handle);
-                break 'outer WaiterOutcome::DisconnectedFromPool;
+                send_err = true;
+                break;
             }
         }
-    };
+        if send_err {
+            break;
+        }
+    }
 
-    // 共通後処理: League から除去する。drive 側が端末処理する経路を除く。
-    match waiter_outcome {
-        WaiterOutcome::Completed => {
-            // drive 側で end_game + logout 済み。何もしない。
-        }
-        WaiterOutcome::Aborted | WaiterOutcome::DisconnectedFromPool => {
-            let mut league = state.league.lock().await;
-            league.logout(&handle_player);
-        }
+    // info-only セッションは WaitingPool に入れていないので、League からの
+    // 除去だけで十分。
+    {
+        let mut league = state.league.lock().await;
+        league.logout(&handle_player);
     }
     state.active_games.notify_waiters();
     Ok(())
@@ -616,27 +635,19 @@ where
         league.confirm_match(&matched, game_id.clone()).map_err(ServerError::State)?;
     }
 
-    // 進行中対局レジストリに登録（%%LIST / %%SHOW の応答源）。epilogue で必ず外す。
-    let started_at_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    {
-        let mut games = state.games.lock().await;
-        games.register(GameListing {
-            game_id: game_id.clone(),
-            black: matched.black.clone(),
-            white: matched.white.clone(),
-            game_name: game_name.clone(),
-            started_at: started_at_iso,
-        });
-    }
-
     // confirm_match 済みの時点で League には両者が AgreeWaiting として残っている。
     // 以降のどの経路（送信失敗・切断・内部エラー）でも必ず end_game + logout を実行する
     // ため、内部処理を `drive_game_inner` に切り出し、結果を問わず epilogue で後始末する
     // （`?` の早期 return で League が解放されず再 LOGIN が詰まる経路を防ぐ）。
+    // GameRegistry の register は `drive_game_inner` 内で両者 AGREE 成立を確認
+    // してから入れる（AGREE 待ち中に REJECT / %CHUDAN / 切断で不成立になった
+    // 対局を `%%LIST` / `%%SHOW` に出さないため）。unregister は本関数 epilogue で
+    // 無条件に呼ぶ（未登録 game_id への unregister は no-op）。
     let inner = drive_game_inner(
         state.as_ref(),
         &game_id,
         matched.clone(),
+        game_name.clone(),
         &mut black_transport,
         &mut white_transport,
     )
@@ -666,6 +677,7 @@ async fn drive_game_inner<R, K, P>(
     state: &SharedState<R, K, P>,
     game_id: &GameId,
     matched: MatchedPair,
+    game_name: GameName,
     black_transport: &mut TcpTransport,
     white_transport: &mut TcpTransport,
 ) -> Result<(), ServerError>
@@ -713,6 +725,22 @@ where
                 )
                 .map_err(ServerError::State)?;
         }
+    }
+
+    // 両者 AGREE 成立後に GameRegistry へ登録する。REJECT / %CHUDAN / 切断で
+    // 対局不成立だったケースは上の early-return で既に捌いているので、ここを
+    // 通った時点で「実際にプレイ状態に入った」対局だけが `%%LIST` / `%%SHOW` に
+    // 載る。`started_at` も ここで取得して実プレイ開始時刻に揃える。
+    let started_at_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    {
+        let mut games = state.games.lock().await;
+        games.register(GameListing {
+            game_id: game_id.clone(),
+            black: matched.black.clone(),
+            white: matched.white.clone(),
+            game_name,
+            started_at: started_at_iso,
+        });
     }
 
     // 指し手と消費時間を記録するため、run_loop の代わりに handle_line を自前で回す。

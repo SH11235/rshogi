@@ -450,12 +450,13 @@ fn agree_total_window_is_not_reset_by_peer_keepalive() {
 }
 
 #[test]
-fn x1_waiter_answers_version_and_help_and_stays_in_pool() {
-    // x1 付きで LOGIN した待機クライアントは、対局成立前でも %%VERSION / %%HELP
-    // に応答し、keep-alive（空行）では切断されない。応答が終わっても waiter は
-    // プールに残り続け、あとから来た相補手番とマッチ成立できる。
+fn x1_info_session_answers_version_and_help_and_never_matches() {
+    // x1 付きで LOGIN したクライアントは matchmaking に参加しない info-only
+    // セッション。`%%VERSION` / `%%HELP` / keep-alive に応答するが、相補手番の
+    // 対局者が来ても Game_Summary を受け取らない（代わりに bob は黒相手を
+    // 見つけられず waiter としてプールに居続ける）。
     run_local(|| async {
-        let (addr, topdir) = spawn_server("x1_waiter_info").await;
+        let (addr, topdir) = spawn_server("x1_info_session").await;
 
         // alice が x1 付きで LOGIN。
         let (mut ra, mut wa) = connect(addr).await;
@@ -472,55 +473,61 @@ fn x1_waiter_answers_version_and_help_and_stays_in_pool() {
         let h = read_line_raw(&mut ra).await.unwrap();
         assert!(h.starts_with("##[HELP] "), "unexpected HELP line: {h}");
 
-        // keep-alive（空行）では切断されず、プールにも残る。
+        // keep-alive（空行）でも切断されない。
         send_line(&mut wa, "").await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // bob が相補手番で入ってきた時点でマッチ成立する → alice 側に Game_Summary
-        // が流れてくる。途中の %%HELP の残り行があっても Game_Summary 冒頭
-        // `BEGIN Game_Summary` 行を探せば良い。
+        // bob が相補手番で入ってきても、x1 alice は matchmaking 対象でないので
+        // マッチは成立しない。alice の socket には Game_Summary が流れてこない。
         let (mut rb, mut wb) = connect(addr).await;
         send_line(&mut wb, "LOGIN bob+g1+white pw").await;
         assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:bob OK");
 
-        let mut saw_begin = false;
-        for _ in 0..60 {
+        // alice の socket に `BEGIN Game_Summary` が来ないことを、短めの
+        // timeout で確認する（読めない＝Game_Summary は来ない）。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send_line(&mut wa, "%%WHO").await;
+        let mut saw_who_end = false;
+        for _ in 0..10 {
             let line = read_line_raw(&mut ra).await.unwrap();
-            if line == "BEGIN Game_Summary" {
-                saw_begin = true;
+            // `BEGIN Game_Summary` が混ざっていたらマッチしてしまった証拠。
+            assert!(
+                line != "BEGIN Game_Summary",
+                "x1 session should not receive Game_Summary, but did"
+            );
+            if line == "##[WHO] END" {
+                saw_who_end = true;
                 break;
             }
         }
-        assert!(saw_begin, "did not observe Game_Summary for x1 waiter");
+        assert!(saw_who_end, "did not see WHO end terminator");
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }
 
 #[test]
-fn x1_waiter_answers_who_with_terminator_and_self_row() {
-    // x1 付きで LOGIN した 2 プレイヤが異なる game_name で待機している状態で
-    // %%WHO を投げると、自身と他プレイヤが `##[WHO] <name> <status>` で一覧され、
-    // `##[WHO] END` で終わる。
+fn x1_info_session_sees_who_with_mixed_statuses() {
+    // %%WHO が x1 info-only セッションと、通常の GameWaiting 待機プレイヤ両方を
+    // 見せる。x1 付き LOGIN のプレイヤは `connected`、x1 なしで WaitingPool に
+    // 入っているプレイヤは `waiting:<game_name>` として出力される。
     run_local(|| async {
-        let (addr, topdir) = spawn_server("x1_who").await;
+        let (addr, topdir) = spawn_server("x1_who_mixed").await;
 
-        // alice が x1 で waiting に入る（g1, black）。
-        let (mut ra, mut wa) = connect(addr).await;
-        send_line(&mut wa, "LOGIN alice+g1+black pw x1").await;
-        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:alice OK");
+        // carol が x1 info-only で LOGIN。matchmaking に参加しない → connected。
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
 
-        // bob が x1 で別の game_name (g-other, white) に入る → マッチ成立しない。
-        let (mut rb, mut wb) = connect(addr).await;
-        send_line(&mut wb, "LOGIN bob+g-other+white pw x1").await;
-        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:bob OK");
+        // alice が x1 なしで LOGIN → waiting:g1 に入る。
+        let (mut _ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut _ra).await.unwrap(), "LOGIN:alice OK");
 
-        // alice が %%WHO を投げる。
-        send_line(&mut wa, "%%WHO").await;
-
-        // 終端 ##[WHO] END まで受信して集めたものを検証する。
+        // carol が %%WHO を投げる。
+        send_line(&mut wc, "%%WHO").await;
         let mut rows: Vec<String> = Vec::new();
         for _ in 0..10 {
-            let line = read_line_raw(&mut ra).await.unwrap();
+            let line = read_line_raw(&mut rc).await.unwrap();
             let is_end = line == "##[WHO] END";
             rows.push(line);
             if is_end {
@@ -528,8 +535,14 @@ fn x1_waiter_answers_who_with_terminator_and_self_row() {
             }
         }
         assert_eq!(rows.last().map(String::as_str), Some("##[WHO] END"));
-        assert!(rows.iter().any(|l| l == "##[WHO] alice waiting:g1"), "no alice row: {rows:?}");
-        assert!(rows.iter().any(|l| l == "##[WHO] bob waiting:g-other"), "no bob row: {rows:?}");
+        assert!(
+            rows.iter().any(|l| l == "##[WHO] carol connected"),
+            "no carol(connected) row: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|l| l == "##[WHO] alice waiting:g1"),
+            "no alice(waiting:g1) row: {rows:?}"
+        );
 
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
@@ -614,6 +627,47 @@ fn x1_list_and_show_reflect_ongoing_game() {
         send_line(&mut ws, "%%SHOW unknown-game").await;
         let nf = read_line_raw(&mut rs).await.unwrap();
         assert_eq!(nf, "##[SHOW] NOT_FOUND unknown-game");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn rejected_game_never_appears_in_list() {
+    // AGREE 待ち中に片方が REJECT を返して対局不成立になったケースでは、
+    // GameRegistry に登録されていないので %%LIST には出ない。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("reject_list").await;
+
+        // 観戦者役の carol を先に入れておく。
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+
+        // alice / bob でマッチ成立 → Game_Summary まで行くが bob が REJECT する。
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+
+        // bob は AGREE せず REJECT → alice / bob 双方に `REJECT:<game_id>` が届く。
+        send_line(&mut ww, "REJECT").await;
+        let reject_b = read_line_raw(&mut rb).await.unwrap();
+        assert!(reject_b.starts_with("REJECT:"), "expected REJECT, got {reject_b}");
+        let reject_w = read_line_raw(&mut rw).await.unwrap();
+        assert!(reject_w.starts_with("REJECT:"), "expected REJECT, got {reject_w}");
+
+        // サーバ側の epilogue が走るのを少し待つ。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // carol が %%LIST → 空（terminator のみ）であることを確認。
+        send_line(&mut wc, "%%LIST").await;
+        let first = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(first, "##[LIST] END", "rejected game should not be listed: got {first}");
 
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
