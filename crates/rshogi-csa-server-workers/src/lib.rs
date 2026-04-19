@@ -15,9 +15,11 @@
 //! WebSocket 受付や Durable Object 関連モジュール (`router`, `game_room`) は
 //! wasm32 でのみ有効化され、`wrangler dev` (Miniflare) 下で統合検証する。
 
+pub mod attachment;
 pub mod config;
 pub mod origin;
 pub mod phase_gate;
+pub mod session_state;
 
 #[cfg(target_arch = "wasm32")]
 mod game_room;
