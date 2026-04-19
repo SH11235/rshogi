@@ -1,7 +1,6 @@
 //! サーバー全体で使用する型付きエラー。
 //!
-//! 内部計算でも I/O でも `Result<T, ServerError>` で伝播させ、panic による対局停止を避ける
-//! （Requirement 8.5, 12.2）。
+//! 内部計算でも I/O でも `Result<T, ServerError>` で伝播させ、panic による対局停止を避ける。
 
 use thiserror::Error;
 

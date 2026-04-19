@@ -1,4 +1,4 @@
-//! `KifuStorage` のローカルファイル実装（Requirement 5.2, 5.4, 9.4）。
+//! `KifuStorage` のローカルファイル実装。
 //!
 //! - `<topdir>/YYYY/MM/DD/<game_id>.csa` に CSA V2 棋譜を書き込む。
 //!   日付は `game_id` 末尾の 8 桁が `YYYYMMDD` 形式である前提だが、形式が
@@ -6,7 +6,7 @@
 //!   ディレクトリへ落とす（Phase 1 では緩く扱い、Phase 4 で厳格化する）。
 //! - 00LIST は `<topdir>/00LIST` にスペース区切り 1 行として追記する。
 //! - 書き込みは原子的: まず一時ファイルに書いてから `rename` で確定する
-//!   （Requirement 9.4 の「中断してもファイルが半端な状態にならない」）。
+//!   （中断してもファイルが半端な状態にならないようにするため）。
 //!
 //! `tokio-transport` フィーチャ下でのみコンパイルされる（`tokio::fs` が必要なため）。
 
@@ -193,7 +193,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn save_falls_back_to_unknown_for_invalid_calendar_date() {
-        // 13 月や 40 日のような数字だけど不正な日付は unknown へ落とす（Codex P3 回帰）。
+        // 13 月や 40 日のような数字だけど不正な日付は unknown へ落とす。
         let dir = unique_topdir("save_invalid_date");
         let store = FileKifuStorage::new(&dir);
         let game_id = GameId::new("20261340abcd");

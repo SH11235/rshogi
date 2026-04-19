@@ -81,7 +81,7 @@ pub enum ClientCommand {
     /// `%%SETBUOY <game_name> <moves> <count>`（運営権限が必要）。
     ///
     /// 構文木には権限情報を持たない。運営権限判定は呼び出し側（[`crate::matching::league::League`]
-    /// とセッション情報）が担う（Requirement 7.10, 7.12）。
+    /// とセッション情報）が担う。
     SetBuoy {
         /// 登録先 game_name。
         game_name: GameName,

@@ -1,4 +1,4 @@
-//! ペアリング戦略の抽象（Requirement 6.3）。
+//! ペアリング戦略の抽象。
 //!
 //! Phase 1 は [`DirectMatchStrategy`]（同一 `game_name` × 相補手番の 1 ペア）のみを
 //! 提供する。Phase 4 で Floodgate 既定／Swiss／Random／駒落ちなどを同じ trait で

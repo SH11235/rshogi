@@ -1,6 +1,6 @@
 //! TCP 受付ループと 1 接続分のセッションドライバ。
 //!
-//! Phase 1 MVP では以下の流れを 1 タスクで駆動する（Requirement 7.1–7.4）:
+//! Phase 1 MVP では以下の流れを 1 タスクで駆動する:
 //!
 //! 1. `TcpListener` で受理 → 1 接続を [`TcpTransport`] でラップ
 //! 2. [`IpLoginRateLimiter::record`] で同一 IP からの連続 LOGIN 試行を抑制
@@ -288,7 +288,7 @@ where
     let peer = TcpTransport::peer_key(&stream)?;
     let mut transport = TcpTransport::new(stream, peer.clone());
 
-    // 1. 同一 IP からの LOGIN 試行レート制限 (Requirement 13.3)。
+    // 1. 同一 IP からの LOGIN 試行レート制限。
     match state.rate_limiter.record(&peer).await {
         RateDecision::Allow => {}
         RateDecision::Deny { retry_after_sec } => {
@@ -674,7 +674,7 @@ async fn wait_both_agree(
         if now >= deadline {
             // トータル窓超過。select! の race や同一ソケットへの連続送信で直前に届いた
             // AGREE を取りこぼさないよう、deadline 到達時に両 transport の buffer を
-            // Timeout が返るまで繰り返し非ブロッキング drain する（Codex P2 回帰）。
+            // Timeout が返るまで繰り返し非ブロッキング drain する。
             // `recv_line(Duration::ZERO)` は buffer に完全な行があれば即時返し、
             // 無ければ Timeout を返すため I/O 待ちは発生しない。
             for (c, t) in [(Color::Black, &mut *black), (Color::White, &mut *white)] {
@@ -737,7 +737,7 @@ async fn wait_both_agree(
             // Timeout（deadline 到達）は不成立ではなく drain 経路へ合流させる。
             // `remaining` で recv_line が先に期限切れしても、反対側 future がキャンセルされた
             // 時点で line_buf に AGREE が残っているケースを救うため、ループ先頭の
-            // deadline 分岐で drain する（Codex P2 回帰）。
+            // deadline 分岐で drain する。
             (_, Err(TransportError::Timeout)) => continue,
             // Closed / Io 系は切断として即座に不成立。
             (_, Err(_)) => return Ok((false, log)),
@@ -795,7 +795,7 @@ where
         }
         let deadline = compute_timeup_deadline(&room);
         // 受信側は「実質無限」で貼る。持ち時間の終端は `sleep_until(deadline)` 側で駆動する。
-        // 1 時間で打ち切っていると長時間持ち時間の対局が誤って切断負けになる（Codex P2 回帰）。
+        // 1 時間で打ち切っていると長時間持ち時間の対局が誤って切断負けになる。
         let evt = tokio::select! {
             r = black.recv_line(NEAR_INFINITE) => Evt::Recv(Color::Black, r),
             r = white.recv_line(NEAR_INFINITE) => Evt::Recv(Color::White, r),
@@ -865,7 +865,7 @@ async fn dispatch(
 /// 手番側残時間 + マージン + 猶予で時間切れ deadline を算出（run_loop と同等）。
 fn compute_timeup_deadline(room: &GameRoom) -> tokio::time::Instant {
     // 手番側の予算（本体 + byoyomi）で deadline を計算する。本体残時間だけを使うと
-    // byoyomi 区間に入らず即 time-up してしまうバグになる（Codex 相談 2026-04-18）。
+    // byoyomi 区間に入らず即 time-up してしまうバグになる。
     let side: Color = room.position().side_to_move().into();
     let turn_budget = room.clock_turn_budget_ms(side).max(0) as u64;
     let margin = room.time_margin_ms();
@@ -920,8 +920,8 @@ where
         start_time: start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         end_time: end_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         // 00LIST の結果コードは core crate の `primary_result_code` を唯一の情報源として使う
-        // （Codex 相談 2026-04-18: TCP 側との二重定義を避けて #OUTE_SENNICHITE 等の語彙方針
-        // が片側だけズレないようにする）。
+        // （TCP 側との二重定義を避けて #OUTE_SENNICHITE 等の語彙方針が片側だけズレない
+        // ようにする）。
         result_code: primary_result_code(result).to_owned(),
     };
     state.kifu_storage.append_summary(&entry).await.map_err(ServerError::Storage)?;

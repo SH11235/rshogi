@@ -5,7 +5,7 @@
 //! - 受信タイムアウトは [`tokio::time::timeout`] で包み、期限切れを
 //!   [`TransportError::Timeout`] にマップする。
 //! - EOF（相手切断）は [`TransportError::Closed`]、その他の I/O 失敗は
-//!   [`TransportError::Io`] に変換する（Requirement 7.1, 8.5）。
+//!   [`TransportError::Io`] に変換する。
 //!
 //! ホットパスでの割り当てを避けるため、行バッファを接続ごとに 1 つ保持し、
 //! 使い回す（`read_line` の戻りを parse 後に `clear` する）。
@@ -111,7 +111,7 @@ impl ClientTransport for TcpTransport {
     }
 
     async fn send_line(&mut self, line: &CsaLine) -> Result<(), TransportError> {
-        // CSA 1.2.1 は CR+LF を要求する（Requirement 1.9, 7.1）。
+        // CSA 1.2.1 は CR+LF を要求する。
         let bytes = line.as_str().as_bytes();
         self.writer
             .write_all(bytes)
@@ -224,8 +224,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn recv_line_handles_utf8_split_across_chunks() {
-        // UTF-8 マルチバイト文字が read チャンク境界でまたがっても誤検出しないこと
-        // （Codex P1 回帰）。「あ」(U+3042) は 3 バイトの UTF-8 "\xE3\x81\x82"。
+        // UTF-8 マルチバイト文字が read チャンク境界でまたがっても誤検出しないこと。
+        // 「あ」(U+3042) は 3 バイトの UTF-8 "\xE3\x81\x82"。
         // 1 バイト目 → 2 バイト目 → 残り 1 バイト + LF を別 write で送り、
         // 複数 read に分散するようにする。
         let (mut transport, mut client) = loopback_pair().await;

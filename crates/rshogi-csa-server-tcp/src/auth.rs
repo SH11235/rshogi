@@ -1,4 +1,4 @@
-//! 認証とパスワードハッシュ検証（Requirement 13.1, 13.2）。
+//! 認証とパスワードハッシュ検証。
 //!
 //! Ruby shogi-server と互換の players.yaml で提供される plain パスワードを
 //! ハッシュ照合できるよう [`PasswordHasher`] を trait として分離する。

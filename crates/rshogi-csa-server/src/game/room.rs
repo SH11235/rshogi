@@ -1,10 +1,9 @@
 //! 1 対局のライフサイクル全体を駆動する `GameRoom`。
 //!
-//! - I/O は行わず、外部から `handle_line` で 1 行ずつ駆動される（Requirement 8.3）。
+//! - I/O は行わず、外部から `handle_line` で 1 行ずつ駆動される。
 //! - 関係者へ送るべき行は [`HandleResult::broadcasts`] に積まれて返り、フロントエンド
 //!   が `Broadcaster` 経由で実配信する設計（Phase 1 MVP）。
-//! - 状態機械は `AgreeWaiting → StartWaiting → Playing → Finished` の単調遷移
-//!   （Requirement 2.1, 2.4）。
+//! - 状態機械は `AgreeWaiting → StartWaiting → Playing → Finished` の単調遷移。
 
 use std::fmt;
 
@@ -41,8 +40,8 @@ pub enum GameStatus {
 /// `BroadcastEntry::target` の宛先区分。
 ///
 /// 各受信者は自分が属するカテゴリ宛のエントリだけを 1 回受け取る前提で
-/// フロントエンドがフィルタする（Requirement 4.7 の「受信者ごとに 1 回ずつ
-/// 理由→勝敗」を満たすため、宛先は重複しない区分にしている）。
+/// フロントエンドがフィルタする（受信者ごとに 1 回ずつ「理由→勝敗」が届くよう
+/// 宛先は重複しない区分にしている）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadcastTarget {
     /// 先手対局者だけに送る。
@@ -106,9 +105,9 @@ pub struct GameRoomConfig {
     pub black: PlayerName,
     /// 後手プレイヤ名。
     pub white: PlayerName,
-    /// 最大手数（既定 256）。これに達したら `#MAX_MOVES`（Requirement 4.4）。
+    /// 最大手数（既定 256）。これに達したら `#MAX_MOVES`。
     pub max_moves: u32,
-    /// 通信マージン（ミリ秒）。`consume` 呼び出し前に減算される（Requirement 3.6）。
+    /// 通信マージン（ミリ秒）。`consume` 呼び出し前に減算される。
     pub time_margin_ms: u64,
     /// `%KACHI` 判定に使う入玉ルール（Phase 1 既定は `Point24`）。
     pub entering_king_rule: EnteringKingRule,
@@ -273,7 +272,7 @@ impl GameRoom {
 
     /// 切断を検出したときに呼ぶ。Phase 1 は再接続猶予 0 秒なので即時 `#ABNORMAL` 確定。
     ///
-    /// 勝者確定は Requirement 2.5 の「対局中の切断」に限り、それ以前
+    /// 勝者確定は「対局中の切断」に限り、それ以前
     /// (`AgreeWaiting`/`StartWaiting`) は対局未成立扱いで `winner: None`。
     pub fn force_abnormal(&mut self, disconnected: Color) -> HandleResult {
         let winner = match self.status {
@@ -338,7 +337,7 @@ impl GameRoom {
 
     fn handle_reject(&mut self, from: Color) -> Result<HandleResult, ServerError> {
         if matches!(self.status, GameStatus::AgreeWaiting | GameStatus::StartWaiting { .. }) {
-            // Requirement 1.5: REJECT は対局不成立を双方に通知して終了。
+            // REJECT は対局不成立を双方に通知して終了。
             // CSA 仕様上は `#ABNORMAL` を送らないため、ここでは finish() ではなく
             // 専用経路で `REJECT:<game_id> by <rejector>` のみ配信する。
             // 内部状態は Finished(Abnormal{None}) を流用（GameResult enum を増やさず
@@ -376,7 +375,7 @@ impl GameRoom {
                 current: format!("{:?}", self.status),
             }));
         }
-        // 手番判定（Requirement 2.3）。手番外からの指し手はプロトコルエラーで拒否し、
+        // 手番判定。手番外からの指し手はプロトコルエラーで拒否し、
         // 状態は変更しない。
         let core_side: rshogi_core::types::Color = from.into();
         if core_side != self.pos.side_to_move() {
@@ -419,7 +418,7 @@ impl GameRoom {
         mv: rshogi_core::types::Move,
         now_ms: u64,
     ) -> Result<HandleResult, ServerError> {
-        // 1. 経過時間を計算し通信マージンを差し引いて時計を消費（Requirement 3.3, 3.6）。
+        // 1. 経過時間を計算し通信マージンを差し引いて時計を消費。
         let started = self.turn_started_at_ms.unwrap_or(now_ms);
         let raw_elapsed_ms = now_ms.saturating_sub(started);
         let elapsed_ms = raw_elapsed_ms.saturating_sub(self.config.time_margin_ms);
@@ -436,13 +435,13 @@ impl GameRoom {
         self.moves_played += 1;
         let elapsed_sec = elapsed_ms / 1000;
 
-        // 4. 関係者に `<token>,T<sec>` を配信（Requirement 1.6）。
+        // 4. 関係者に `<token>,T<sec>` を配信。
         let mut broadcasts = vec![BroadcastEntry {
             target: BroadcastTarget::All,
             line: CsaLine::new(format!("{},T{}", token.as_str(), elapsed_sec)),
         }];
 
-        // 5. 千日手・連続王手千日手判定（Requirement 4.2, 4.3）。
+        // 5. 千日手・連続王手千日手判定。
         match self.validator.classify_repetition(&self.pos) {
             RepetitionVerdict::None => {}
             RepetitionVerdict::Sennichite => {
@@ -475,7 +474,7 @@ impl GameRoom {
             }
         }
 
-        // 6. 最大手数到達判定（Requirement 4.4）。
+        // 6. 最大手数到達判定。
         if self.moves_played >= self.config.max_moves {
             let mut result = self.finish(GameResult::MaxMoves);
             broadcasts.append(&mut result.broadcasts);
@@ -542,7 +541,7 @@ impl GameRoom {
     }
 
     fn finish(&mut self, result: GameResult) -> HandleResult {
-        // result.server_messages() の順序通りに BroadcastEntry を組む（Requirement 4.7）。
+        // result.server_messages() の順序通りに BroadcastEntry を組む。
         let messages = result.server_messages();
         let mut broadcasts = Vec::new();
         for (audience, lines) in &messages.sends {
@@ -684,7 +683,7 @@ mod tests {
             }) => {}
             other => panic!("unexpected outcome: {other:?}"),
         }
-        // Requirement 4.7: 受信者ごとに 1 回ずつ「理由 → 勝敗」が届く。
+        // 受信者ごとに 1 回ずつ「理由 → 勝敗」が届く。
         // 宛先は Winner=White / Loser=Black / Spectators の 3 系列で、各 2 行 = 計 6 行。
         assert_eq!(r.broadcasts.len(), 6);
         let by_target = |t: BroadcastTarget| -> Vec<String> {
@@ -747,7 +746,7 @@ mod tests {
         assert_eq!(r.broadcasts[0].line.as_str(), "+7776FU,T2");
     }
 
-    // ---- 通信マージン境界値テスト（Codex 相談 2026-04-18 の申し送り 1）----
+    // ---- 通信マージン境界値テスト ----
 
     fn room_with(time_margin_ms: u64, total_sec: u32, byoyomi_sec: u32) -> GameRoom {
         let config = GameRoomConfig {
@@ -879,7 +878,7 @@ mod tests {
             HandleOutcome::GameEnded(GameResult::Abnormal { winner: None }) => {}
             other => panic!("unexpected outcome: {other:?}"),
         }
-        // Requirement 1.5: REJECT は `#ABNORMAL` を送らない。送信は 1 行のみ。
+        // REJECT は `#ABNORMAL` を送らない。送信は 1 行のみ。
         assert_eq!(r.broadcasts.len(), 1);
         assert_eq!(r.broadcasts[0].target, BroadcastTarget::Players);
         assert_eq!(r.broadcasts[0].line.as_str(), "REJECT:20140101120000 by alice");

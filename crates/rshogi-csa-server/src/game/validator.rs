@@ -16,7 +16,7 @@ use crate::types::{Color, CsaMoveToken};
 /// `validate_move` が返す違反種別。
 ///
 /// `GameRoom` はこれを [`crate::game::result::IllegalReason`] にマップし、
-/// 関係者へ `#ILLEGAL_MOVE` を通知する（Requirement 4.1, 4.6）。
+/// 関係者へ `#ILLEGAL_MOVE` を通知する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Violation {
     /// CSA トークンの構文不正（駒種コード不明・桁数不足など）。
@@ -127,7 +127,7 @@ impl Validator {
     /// 千日手判定。`pos` は最後の `do_move` 直後の局面を渡す。
     ///
     /// `Position::repetition_state` 内部で連続王手判定も行われるため、
-    /// 千日手成立時の勝敗側もここで切り分ける（Requirement 4.2, 4.3）。
+    /// 千日手成立時の勝敗側もここで切り分ける。
     pub fn classify_repetition(&self, pos: &Position) -> RepetitionVerdict {
         match pos.repetition_state(i32::MAX) {
             RepetitionState::None | RepetitionState::Superior | RepetitionState::Inferior => {

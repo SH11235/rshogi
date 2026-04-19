@@ -6,7 +6,7 @@
 //! # API 設計メモ
 //!
 //! 残時間系 API は 2 種類に分かれる。意味を取り違えると deadline 計算を誤るため、
-//! 呼び出し側は用途に応じて使い分けること（Codex 相談 2026-04-18 の P1 指摘）。
+//! 呼び出し側は用途に応じて使い分けること。
 //!
 //! - [`TimeClock::remaining_main_ms`][]: **表示・ロギング用**の本体時間残り。
 //!   秒読みは含まない。対局者向け Game_Summary や GUI 表示で使う。
@@ -32,7 +32,7 @@ pub enum ClockResult {
 pub trait TimeClock {
     /// 指定した対局者の残時間から `elapsed_ms` ミリ秒分を消費し、時間切れ判定を返す。
     ///
-    /// 呼び出し側が通信マージンを差し引いて渡すこと（Requirement 3.6）。
+    /// 呼び出し側が通信マージンを差し引いて渡すこと。
     fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult;
 
     /// Game_Summary の `BEGIN Time` セクションを CSA 仕様の項目・順序・単位で出力する。
@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(c.remaining_main_ms(Color::White), 60_000);
     }
 
-    // ---- Codex 相談 2026-04-18 の P1 指摘回帰テスト ----
+    // ---- 秒読み / turn_budget_ms 回帰テスト ----
 
     #[test]
     fn turn_budget_includes_byoyomi_on_fresh_clock() {

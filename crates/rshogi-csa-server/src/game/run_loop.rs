@@ -1,10 +1,10 @@
-//! `GameRoom` を `tokio` 非同期ランタイムで駆動するループ層（Phase 1, Requirement 8.4）。
+//! `GameRoom` を `tokio` 非同期ランタイムで駆動するループ層（Phase 1）。
 //!
 //! - 2 つの [`crate::port::ClientTransport`] と 1 つの [`crate::port::Broadcaster`] を
 //!   受け取り、対局終了まで行受信 → `handle_line` → 配信 → 状態遷移を回す。
 //! - 行受信と時間切れアラームを `tokio::select!` で同時待ちする。
 //! - 配信先のマッピング（[`crate::game::room::BroadcastTarget`] → 物理経路）を
-//!   ここで一元化する（Codex レビュー申し送り: Spectators / All の経路を配信層側で明文化）。
+//!   ここで一元化する（Spectators / All の経路を配信層側で明文化する意図）。
 //! - I/O が必要なため、本モジュールは `tokio-transport` フィーチャ下でのみコンパイルされる。
 
 use std::time::Duration;
@@ -110,10 +110,10 @@ enum Event {
 /// `handle_move` 側は `consume(elapsed_ms - time_margin_ms)` で時計を進めるため、
 /// 物理時間が `turn_budget_ms + time_margin_ms` 以内に届く着手は合法。`run_loop` は
 /// この境界に `TIMEUP_GRACE_MS` を足した時刻まで `recv_line` を待機する
-/// （Requirement 3.4 の時間切れ確定 と Requirement 3.6 の通信マージン両立）。
+/// （時間切れ確定と通信マージンの両立）。
 ///
 /// 旧実装は本体残時間のみを渡していたため、既定設定 `byoyomi=10` でも本体切れで
-/// 即 time-up していた（Codex 相談 2026-04-18 の P1 指摘）。本版は
+/// 即 time-up していた。本版は
 /// [`GameRoom::clock_turn_budget_ms`] で秒読みを含めた予算を取得する。
 fn compute_deadline(room: &GameRoom, _now_ms: u64) -> Instant {
     if !matches!(room.status(), GameStatus::Playing) {
@@ -381,7 +381,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn run_allows_byoyomi_after_main_time_exhausted() {
-        // Codex 相談 2026-04-18 の P1 回帰: 本体持ち時間切れ後も byoyomi の範囲内なら
+        // 本体持ち時間切れ後も byoyomi の範囲内なら
         // time-up にならず、秒読みで指した手が正しく受理されること。
         // 旧実装は `compute_deadline` が本体残時間のみを参照していたため、本体 2 秒 +
         // 秒読み 10 秒設定でも 2.25 秒で勝手に time-up していた。
@@ -479,7 +479,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn run_does_not_time_out_within_communication_margin() {
-        // Requirement 3.6 回帰: 通信マージン内に届いた手は時間切れ扱いしないこと。
+        // 通信マージン内に届いた手は時間切れ扱いしないこと。
         // 残時間 1 秒 + マージン 5 秒。物理時間 4 秒経過後に着手 → 合法（消費は max(0, 4-5)=0 秒）。
         let config = GameRoomConfig {
             game_id: GameId::new("g"),

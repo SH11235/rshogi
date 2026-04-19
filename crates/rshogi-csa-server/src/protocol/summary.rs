@@ -1,4 +1,4 @@
-//! `Game_Summary` ブロックの生成（Requirement 1.3, 3.5）。
+//! `Game_Summary` ブロックの生成。
 //!
 //! CSA v1.2.1 の `BEGIN Game_Summary` ... `END Game_Summary` を組み立てる。
 //! 各対局者宛ての出力は `Your_Turn` だけが異なるため、ビルダ 1 つから

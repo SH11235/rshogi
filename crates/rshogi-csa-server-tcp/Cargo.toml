@@ -24,7 +24,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 default = []
 # Phase 2 移行時に本 crate で有効化する想定の feature 名。Phase 1 期間中は
 # 常に disabled でなければならず、有効化すると `phase_gate.rs` の compile_error!
-# でビルドが停止する（Requirement 15.7 の defensive gate）。
+# でビルドが停止する（defensive gate）。
 workers = []
 
 [[bin]]

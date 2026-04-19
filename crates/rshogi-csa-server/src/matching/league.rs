@@ -1,6 +1,6 @@
 //! プレイヤ状態機械と最小限の League 実装。
 //!
-//! Requirement 2.1, 2.2, 6.1, 6.4, 7.2 のうち Phase 1 で必要な範囲を扱う。
+//! 状態遷移・マッチング・ログインのうち Phase 1 で必要な範囲を扱う。
 //! 重複ログイン（Phase 4）・x1 観戦系・Floodgate 固有ペアリングは後続フェーズで拡張。
 
 use std::collections::HashMap;
@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::error::StateError;
 use crate::types::{Color, GameId, GameName, PlayerName};
 
-/// プレイヤ状態機械の 6 状態（Requirement 2.1）。
+/// プレイヤ状態機械の 6 状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerStatus {
     /// ログイン直後かつマッチ未開始の状態（接続確立済み・認証済み）。
@@ -81,7 +81,7 @@ pub enum LoginResult {
 /// 最小限の League（ログイン中のプレイヤと状態を保持する）。
 ///
 /// マッチング戦略やレート永続化は後続フェーズで接続する。ここでは状態機械の
-/// 一貫性（Requirement 2.1, 2.2）を担保するのが目的。
+/// 一貫性を担保するのが目的。
 #[derive(Debug, Default)]
 pub struct League {
     players: HashMap<PlayerName, PlayerStatus>,
@@ -154,8 +154,8 @@ impl League {
     /// 片方でも未ログイン／既に対局中なら `StateError::InvalidForState` を返し、
     /// 両者の状態を一切変更しない（all-or-nothing 不変条件）。
     ///
-    /// - Requirement 6.1: 双方を「合意待ち」へ遷移する。
-    /// - Requirement 2.1: 状態機械の単一エントリ。
+    /// - 双方を「合意待ち」へ遷移する。
+    /// - 状態機械の単一エントリ。
     pub fn confirm_match(
         &mut self,
         matched: &MatchedPair,
@@ -168,7 +168,7 @@ impl League {
                 Some(PlayerStatus::GameWaiting { game_name, .. }) => {
                     if let Some(prev) = shared_game_name {
                         if prev != game_name {
-                            // Requirement 6.1: 同一 `game_name` の組でなければ成立させない。
+                            // 同一 `game_name` の組でなければ成立させない。
                             return Err(StateError::InvalidForState {
                                 current: format!(
                                     "game_name mismatch: {} vs {}",
@@ -209,7 +209,7 @@ impl League {
     ///
     /// `GameRoom` が `HandleOutcome::GameEnded` を返したとき、`League` に対して
     /// 両者の状態を Finished に確定するために呼ぶ。LOGOUT は別途 [`Self::logout`] で
-    /// プレイヤエントリ自体を除去する想定（Requirement 2.4: 資源解放）。
+    /// プレイヤエントリ自体を除去する想定（資源解放）。
     pub fn end_game(&mut self, players: &MatchedPair) -> Result<(), StateError> {
         // confirm_match と同様 all-or-nothing：両者揃っているのを確認してから書き換える。
         for name in [&players.black, &players.white] {
@@ -250,8 +250,8 @@ impl League {
 
     /// 同一 `game_name` のマッチ待ちから、相補的な手番（`Black` と `White`）の組を 1 組だけ抽出する。
     ///
-    /// - Requirement 6.1：同一 `game_name` で両者が待機しているときだけ成立。
-    /// - Requirement 6.4：候補が 2 名未満ならマッチを成立させない。
+    /// - 同一 `game_name` で両者が待機しているときだけ成立。
+    /// - 候補が 2 名未満ならマッチを成立させない。
     /// - 手番希望が重複する（同色同士／一方が未指定など）組はマッチを成立させない。
     ///
     /// `PairingLogic` 経由の戦略チェーン版は [`crate::matching::pairing`] を参照。
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn confirm_match_rejects_pair_with_different_game_names() {
         // 異なる game_name で待機している 2 人を誤って渡しても、
-        // confirm_match が拒否すること（Requirement 6.1 防御）。
+        // confirm_match が拒否すること。
         let mut l = League::new();
         l.login(&name("alice"), false);
         l.transition(
@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn disconnect_during_play_routes_through_end_game() {
-        // Requirement 2.5 / 5.5: 対局中の切断 → 異常終了 → 両者を Finished へ。
+        // 対局中の切断 → 異常終了 → 両者を Finished へ。
         let mut l = League::new();
         login_and_wait(&mut l, "alice", Color::Black);
         login_and_wait(&mut l, "bob", Color::White);

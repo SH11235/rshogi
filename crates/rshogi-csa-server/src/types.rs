@@ -87,7 +87,7 @@ newtype_str! {
 }
 
 newtype_str! {
-    /// デプロイ切断時の再接続を識別するトークン（Requirement 17）。
+    /// デプロイ切断時の再接続を識別するトークン。
     pub ReconnectToken
 }
 

@@ -1,4 +1,4 @@
-//! CSA V2 形式の棋譜生成（Requirement 5.1, 5.5）。
+//! CSA V2 形式の棋譜生成。
 //!
 //! `record_v22.html` 準拠のテキストを組み立てる。`KifuRecord` をビルドして
 //! [`KifuRecord::build_v2`] を呼ぶと、保存可能な棋譜文字列が得られる。
@@ -145,7 +145,7 @@ fn result_lines(result: &GameResult) -> Vec<String> {
     }
 }
 
-/// 00LIST 1 行分のフォーマット（Requirement 5.4）。
+/// 00LIST 1 行分のフォーマット。
 ///
 /// 形式: `<game_id> <sente> <gote> <start_time> <end_time> <result_code>`
 /// （Ruby `mk_rate` 互換のシンプルなスペース区切り）。改行は呼び出し側で付ける。
@@ -167,8 +167,7 @@ pub fn format_zerozero_list_line(
 /// （Ruby `mk_rate` 互換）。棋譜本体の特殊手 (`%...`) とは語彙が異なる点に注意。
 ///
 /// フロントエンド crate からも同じ語彙で `GameSummaryEntry::result_code` を
-/// 埋めるため `pub` で公開している（Codex 相談 2026-04-18: TCP 側に二重定義を
-/// 作らないためのシングルソース）。
+/// 埋めるため `pub` で公開している（TCP 側に二重定義を作らないためのシングルソース）。
 pub fn primary_result_code(result: &GameResult) -> &'static str {
     match result {
         GameResult::Toryo { .. } => "#RESIGN",
