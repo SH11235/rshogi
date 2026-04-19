@@ -226,6 +226,19 @@ fingerprint に含まれる項目:
 完了扱いにしない）。プロセス kill / panic には atomic rename + `sync_all()` で
 対応。電源断・カーネルパニックは非目標。
 
+#### パスに使える文字の制約
+
+マーカーは単純な `key=value\n` テキスト形式で保存される。round-trip を保証する
+ため、**model / input / expand_output_dir のパスに以下の文字を含めると起動時
+エラーで弾かれる**:
+
+- `=` (key/value セパレータと衝突、例: `v1.0=alpha/model.onnx`)
+- `\n` / `\r` (レコードセパレータと衝突)
+- 非 UTF-8 バイト列（Windows では実質発生しない、Linux の古い / 非 UTF-8 FS 由来）
+
+エラーが出た場合はパスをリネームして回避する。これらの文字を path に含める
+ユースケースは稀なので通常は気にする必要はない。
+
 ### パス安全チェック（ONNX モード）
 
 ONNX モードでは以下を起動時 / ファイルごとに検証し、データ破壊を防止する:
@@ -371,6 +384,8 @@ AobaZero ONNX model loaded. Batch size: 1024
 | `Output path is a symlink (refusing to truncate a symlink)` | 出力予定パスが symlink | symlink を削除するか別ディレクトリを使う |
 | `Output path is a hardlink to the input file` | 出力予定が入力の hardlink（Unix） | 別ディレクトリを指定 |
 | `Stale expand artifact ... resolves to the current input file` | 旧 expand 出力と現在 input が同一（段階的パイプライン） | 入力を移動するか `--expand-output-dir` を変更 |
+| `... path contains '=' which is not supported by the completion marker` | モデル/入力/expand 出力パスに `=` が含まれる | パスをリネーム（`v1.0=alpha` → `v1.0-alpha` など） |
+| `... path contains non-UTF-8 characters` | パスに非 UTF-8 バイト列 | パスを UTF-8 に揃える |
 
 ## 技術的背景
 

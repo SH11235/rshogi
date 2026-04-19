@@ -2245,6 +2245,41 @@ fn write_marker_atomic(rescore_output: &std::path::Path, marker: &DoneMarker) ->
     Ok(())
 }
 
+/// マーカーの `key=value\n` テキスト形式で安全に round-trip できないパスを拒否する。
+///
+/// 具体的には以下のいずれかを含むパスを起動時にエラーにする:
+/// - 非 UTF-8 バイト列（`Path::to_str` が `None`、`Path::display` が lossy になる）
+/// - `=`（key/value セパレータと衝突）
+/// - `\n` / `\r`（レコードセパレータと衝突）
+///
+/// 現実的には `=` を含むパスだけが稀に発生する（例:
+/// `v1.0=alpha/model.onnx`）。非 UTF-8 と改行はほぼ起こらないが、同じ
+/// 検証枠で拾っておく。遭遇時はパスをリネームすることで回避可能。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+fn ensure_marker_safe_path(kind: &str, path: &std::path::Path) -> Result<()> {
+    let s = path.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{kind} path contains non-UTF-8 characters which cannot be recorded in the \
+             completion marker: {}. Rename the path to ASCII / UTF-8 only characters.",
+            path.display()
+        )
+    })?;
+    if let Some(bad) = s.chars().find(|c| *c == '=' || *c == '\n' || *c == '\r') {
+        let name = match bad {
+            '=' => "'='",
+            '\n' => "LF (newline)",
+            '\r' => "CR",
+            _ => unreachable!(),
+        };
+        anyhow::bail!(
+            "{kind} path contains {name} which is not supported by the completion marker \
+             format (key=value text): {}. Rename the path to avoid these characters.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// `OnnxPipelineConfig` から `RunFingerprint` を構築
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 fn build_run_fingerprint(config: &OnnxPipelineConfig<'_>) -> Result<RunFingerprint> {
@@ -2252,18 +2287,22 @@ fn build_run_fingerprint(config: &OnnxPipelineConfig<'_>) -> Result<RunFingerpri
         .onnx_path
         .canonicalize()
         .with_context(|| format!("Failed to canonicalize {}", config.onnx_path.display()))?;
+    ensure_marker_safe_path("--onnx-model / --dlshogi-onnx-model", &model_path)?;
     let (model_size, model_mtime_ns) = file_size_mtime_ns(&model_path)?;
     let input_path = config
         .input_path
         .canonicalize()
         .with_context(|| format!("Failed to canonicalize {}", config.input_path.display()))?;
+    ensure_marker_safe_path("input", &input_path)?;
     let (input_size, input_mtime_ns) = file_size_mtime_ns(&input_path)?;
     let expand_output_path = match config.expand {
-        Some(e) => Some(
+        Some(e) => {
             // 出力ファイルが未作成でも canonical_dir + file_name で予定パスを構築する
             // ため、parent dir のみ canonicalize する
-            canonicalize_predicted_path(e.output_path)?,
-        ),
+            let p = canonicalize_predicted_path(e.output_path)?;
+            ensure_marker_safe_path("--expand-output-dir (entry)", &p)?;
+            Some(p)
+        }
         None => None,
     };
     Ok(RunFingerprint {
