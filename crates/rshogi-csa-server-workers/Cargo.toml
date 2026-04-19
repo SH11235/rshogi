@@ -1,0 +1,50 @@
+[package]
+name = "rshogi-csa-server-workers"
+version = "0.1.0"
+edition = "2024"
+authors = ["SH11235"]
+description = "Cloudflare Workers frontend for the CSA shogi game server (Phase 2)."
+license = "GPL-3.0-only"
+repository = "https://github.com/SH11235/rshogi"
+
+[lib]
+# cdylib は worker-build が wasm32 で cdylib を要求するため。
+# rlib はホスト target でも phase_gate 等の pure-Rust ロジックを単体テスト
+# できるようにするため残す。wasm32 以外では crate 本体はほぼ空になる。
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# ホスト／wasm32 の双方で利用する依存のみをここに置く。
+# Workers 固有 (`worker`, `worker-macros`, `wasm-bindgen` 等) は
+# `[target.'cfg(target_arch = "wasm32")'.dependencies]` に分離して
+# ホスト側 `cargo check --workspace` を壊さない。
+rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false, features = ["workers"] }
+rshogi-csa = { path = "../rshogi-csa" }
+rshogi-core = { path = "../rshogi-core" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# chrono はホスト／wasm32 で挙動を揃えるため `clock` 既定を切り、
+# serde 以外の機能は取り込まない。
+chrono = { version = "0.4", default-features = false, features = ["serde"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# wasm32-unknown-unknown 以外では参照しない。worker-build / wrangler dev から
+# ビルドされる経路のみで有効化される。
+worker = { version = "0.8", features = ["http", "axum"] }
+worker-macros = { version = "0.8", features = ["http"] }
+axum = { version = "0.8", default-features = false, features = ["json", "ws"] }
+tower-service = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+futures-util = "0.3"
+async-trait = "0.1"
+
+[features]
+default = []
+# Phase 2 ゲートで「TCP 向けランタイムが混入していないこと」を検査する defensive flag。
+# 本 crate では常に無効化され、有効化されると `phase_gate.rs` の compile_error! が発火する。
+tokio-transport = []
+
+[dev-dependencies]
