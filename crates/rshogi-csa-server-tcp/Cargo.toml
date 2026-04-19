@@ -1,0 +1,35 @@
+[package]
+name = "rshogi-csa-server-tcp"
+version = "0.1.0"
+edition = "2024"
+authors = ["SH11235"]
+description = "TCP frontend for the CSA shogi game server (Phase 1 MVP)."
+license = "GPL-3.0-only"
+repository = "https://github.com/SH11235/rshogi"
+
+[dependencies]
+rshogi-core = { path = "../rshogi-core" }
+rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false, features = ["tokio-transport"] }
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+serde.workspace = true
+toml.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "sync", "fs", "net", "signal"] }
+
+[features]
+default = []
+# Phase 2 移行時に本 crate で有効化する想定の feature 名。Phase 1 期間中は
+# 常に disabled でなければならず、有効化すると `phase_gate.rs` の compile_error!
+# でビルドが停止する（defensive gate）。
+workers = []
+
+[[bin]]
+name = "rshogi-csa-server-tcp"
+path = "src/bin/main.rs"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "sync", "fs", "net", "test-util"] }
