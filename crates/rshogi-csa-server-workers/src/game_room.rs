@@ -69,8 +69,16 @@ const ALARM_SAFETY_MS: u64 = 200;
 /// moves のみ SQL で持つ（append と ply 順 replay の効率を理由に）。
 /// 他の構造化状態 (slots / config / finished) は `state.storage().put/get` で
 /// JSON として置き、スキーママイグレーションを軽くする。
-const SCHEMA_SQL: &str = "\nCREATE TABLE IF NOT EXISTS moves (\n    ply INTEGER PRIMARY KEY,\n    color TEXT NOT NULL,\n    line TEXT NOT NULL,\n    at_ms INTEGER NOT NULL\n);\n";
+const SCHEMA_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS moves (
+    ply INTEGER PRIMARY KEY,
+    color TEXT NOT NULL,
+    line TEXT NOT NULL,
+    at_ms INTEGER NOT NULL
+);
+"#;
 
+const KEY_ROOM_ID: &str = "room_id";
 const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
@@ -134,8 +142,18 @@ impl DurableObject for GameRoom {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let url = req.url()?;
-        if !url.path().starts_with("/ws/") {
+        let path = url.path();
+        let Some(room_id) = path.strip_prefix("/ws/") else {
             return Response::error("Upgrade required", 426);
+        };
+
+        // 初回 fetch でのみ room_id を永続化する。`start_match` 側で game_id 生成に
+        // 使うため、DO 再構築後でも同じ値を参照できるよう storage に置く。
+        // room_id は `id_from_name` のキーと一致するので、同一 DO インスタンスでは
+        // 常に同じ値が到着する前提。
+        let existing: Option<String> = self.state.storage().get(KEY_ROOM_ID).await?;
+        if existing.is_none() && !room_id.is_empty() {
+            self.state.storage().put(KEY_ROOM_ID, room_id.to_owned()).await?;
         }
 
         let pair = WebSocketPair::new()?;
@@ -179,7 +197,13 @@ impl DurableObject for GameRoom {
         _reason: String,
         _was_clean: bool,
     ) -> Result<()> {
-        let att: Option<WsAttachment> = ws.deserialize_attachment().ok().flatten();
+        // attachment が corrupt (JSON が壊れた等) の場合は None と同じ扱いにせざるを
+        // 得ないが、診断のためにエラー内容をログへ残す。現実装では Player 以外 (Pending /
+        // corrupt) は slot 解放できないので何もせず return する。
+        let att: Option<WsAttachment> = ws.deserialize_attachment().unwrap_or_else(|e| {
+            console_log!("[GameRoom] websocket_close: deserialize_attachment failed: {e:?}");
+            None
+        });
         let Some(WsAttachment::Player { role, .. }) = att else {
             return Ok(());
         };
@@ -321,9 +345,18 @@ impl GameRoom {
         white_handle: &str,
         game_name: &str,
     ) -> Result<()> {
-        // Phase 2-9.4 MVP では game_id を DO 時刻ベースで生成する。
+        // `room_id` は fetch 時に永続化している（DO インスタンス = room_id なので
+        // 他 DO と衝突しない。game_id は `<room_id>-<epoch_ms>` 形式で、
+        // 別 DO が同一ミリ秒にマッチしても R2 キー `YYYY/MM/DD/<game_id>.csa` が
+        // 一意になるように room_id を混ぜる）。
         let started = self.now_ms();
-        let game_id = format!("{started}");
+        let room_id: String = self
+            .state
+            .storage()
+            .get(KEY_ROOM_ID)
+            .await?
+            .unwrap_or_else(|| "unknown".to_owned());
+        let game_id = format!("{room_id}-{started}");
 
         let cfg = PersistedConfig {
             game_id: game_id.clone(),
@@ -712,13 +745,16 @@ impl GameRoom {
 
     async fn append_move(&self, color: Color, line: &str, now_ms: u64) -> Result<()> {
         let sql = self.state.storage().sql();
-        let count_cursor = sql.exec("SELECT COUNT(*) AS n FROM moves", None)?;
+        // `COALESCE(MAX(ply), 0) + 1` を採用: 仮に未来のメンテナンス等で moves を
+        // 一部削除しても PRIMARY KEY 衝突を避けられる。`COUNT(*) + 1` は削除後の
+        // ply とぶつかる危険があるため選ばない。
+        let cursor = sql.exec("SELECT COALESCE(MAX(ply), 0) + 1 AS n FROM moves", None)?;
         #[derive(Deserialize)]
         struct CountRow {
             n: i64,
         }
-        let rows: Vec<CountRow> = count_cursor.to_array()?;
-        let next_ply = rows.first().map(|r| r.n).unwrap_or(0) + 1;
+        let rows: Vec<CountRow> = cursor.to_array()?;
+        let next_ply = rows.first().map(|r| r.n).unwrap_or(1);
         let color_str = match color {
             Color::Black => "black",
             Color::White => "white",

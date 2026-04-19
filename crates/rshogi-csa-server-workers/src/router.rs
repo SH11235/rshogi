@@ -14,6 +14,7 @@ use worker::{Env, Method, Request, Response, Result};
 use crate::config::{ConfigKeys, OriginAllowList};
 use crate::origin::{OriginDecision, evaluate};
 use crate::phase_gate;
+use crate::room_id::is_valid_room_id;
 
 /// `#[event(fetch)]` から委譲されるディスパッチ。
 pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
@@ -30,8 +31,8 @@ pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
 
     if method == Method::Get {
         if let Some(room_id) = path.strip_prefix("/ws/") {
-            if room_id.is_empty() {
-                return Response::error("Missing room_id", 400);
+            if !is_valid_room_id(room_id) {
+                return Response::error("Invalid room_id", 400);
             }
             return forward_ws_to_room(req, env, room_id).await;
         }

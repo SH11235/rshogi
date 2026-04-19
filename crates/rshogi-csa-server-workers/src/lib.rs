@@ -20,6 +20,7 @@ pub mod config;
 pub mod datetime;
 pub mod origin;
 pub mod phase_gate;
+pub mod room_id;
 pub mod session_state;
 
 #[cfg(target_arch = "wasm32")]
