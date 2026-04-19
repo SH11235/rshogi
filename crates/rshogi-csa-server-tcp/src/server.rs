@@ -95,9 +95,8 @@ pub struct ServerConfig {
     pub login_timeout: Duration,
     /// AGREE 受信の最大待機時間。
     ///
-    /// Game_Summary 送信後、双方の AGREE / REJECT が揃うまでの受付窓。
-    /// 60 秒固定では GUI クライアントや人手合意が間に合わないことがあるため
-    /// （Codex P2 指摘）、運用で長時間に調整できるよう設定可能にしてある。
+    /// Game_Summary 送信後、双方の AGREE / REJECT が揃うまでの受付窓。GUI
+    /// クライアントや人手合意を挟む運用でも足りるよう、設定可能にしてある。
     pub agree_timeout: Duration,
     /// 入玉ルール。Phase 1 は Point24。
     pub entering_king_rule: EnteringKingRule,
@@ -168,7 +167,7 @@ impl WaitingPool {
         queue.remove(idx)
     }
 
-    /// 指定 handle のスロットをプールから除去する（切断検知時の掃除用、Codex P1 回帰）。
+    /// 指定 handle のスロットをプールから除去する（待機中の切断検知時の掃除用）。
     fn remove_by_handle(&mut self, game_name: &GameName, handle: &str) -> bool {
         let Some(queue) = self.queues.get_mut(game_name) else {
             return false;
@@ -337,17 +336,12 @@ where
         &password,
         &stored_hash,
     )
-    .await
+    .await?
     {
-        Ok(AuthOutcome::Ok { .. }) => {}
-        Ok(AuthOutcome::Incorrect) => {
+        AuthOutcome::Ok { .. } => {}
+        AuthOutcome::Incorrect => {
             let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect")).await;
             return Ok(());
-        }
-        Err(e) => {
-            return Err(ServerError::Storage(rshogi_csa_server::error::StorageError::Io(format!(
-                "auth: {e}"
-            ))));
         }
     }
     // LOGIN 成功応答: shogi-server 互換の `LOGIN:<handle> OK`。
@@ -545,9 +539,9 @@ where
     }
 
     // confirm_match 済みの時点で League には両者が AgreeWaiting として残っている。
-    // 以降のどの経路（送信失敗・切断・内部エラー）でも必ず end_game + logout を実行するため、
-    // 内部処理を `drive_game_inner` に切り出し、結果を問わず後始末する。
-    // （Codex P1 回帰: 以前は `?` での早期 return 時に League が解放されず再 LOGIN 不能だった。）
+    // 以降のどの経路（送信失敗・切断・内部エラー）でも必ず end_game + logout を実行する
+    // ため、内部処理を `drive_game_inner` に切り出し、結果を問わず epilogue で後始末する
+    // （`?` の早期 return で League が解放されず再 LOGIN が詰まる経路を防ぐ）。
     let inner = drive_game_inner(
         state.as_ref(),
         &game_id,
@@ -661,9 +655,9 @@ async fn send_multiline<T: ClientTransport>(
 /// 双方の AGREE 応答を待ち合わせる。REJECT/Chudan/切断時は `Ok((false, ..))` を返す。
 ///
 /// `agree_timeout` は `Game_Summary` 送信時点から計測する **トータル** の待機窓。
-/// Codex P2 回帰: ループ毎に `recv_line(agree_timeout)` を張り直すと片側 KEEPALIVE の連打で
-/// タイマーが際限なくリセットされ、もう一方の AGREE が無期限に待たされる。
-/// そのため `deadline = Instant::now() + agree_timeout` を固定し、各 `recv_line` には
+/// ループ毎に `recv_line(agree_timeout)` を張り直すと片側 KEEPALIVE の連打でタイマーが
+/// 際限なくリセットされ、もう一方の AGREE が無期限に待たされるため、
+/// `deadline = Instant::now() + agree_timeout` を固定し、各 `recv_line` には
 /// 「deadline までの残り時間」を渡す。ハードリミットに到達したら `Ok((false, ..))` で
 /// 不成立として抜ける。
 async fn wait_both_agree(
