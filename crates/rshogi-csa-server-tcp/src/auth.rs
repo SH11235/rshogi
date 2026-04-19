@@ -2,8 +2,8 @@
 //!
 //! Ruby shogi-server と互換の players.yaml で提供される plain パスワードを
 //! ハッシュ照合できるよう [`PasswordHasher`] を trait として分離する。
-//! Phase 1 は [`PlainPasswordHasher`]（equals 比較）のみ実装。
-//! 将来 bcrypt 等を接続する場合はこの trait を別 crate で実装する。
+//! 現状は [`PlainPasswordHasher`]（equals 比較）のみ実装。
+//! bcrypt 等を接続する場合はこの trait を別 crate で実装する。
 //!
 //! 平文パスワードは [`rshogi_csa_server::types::Secret`] で保持し、
 //! ログには一切出さない（Secret の `Debug` は常に `***`）。照合時に `expose()` で
@@ -18,7 +18,7 @@ use rshogi_csa_server::types::{PlayerName, Secret};
 pub enum AuthError {
     /// プレイヤ名に対応するレコードが存在しない。
     ///
-    /// Phase 1 は「未登録 = 認証失敗」として扱い、内部的には [`AuthOutcome::Incorrect`]
+    /// 「未登録 = 認証失敗」として扱い、内部的には [`AuthOutcome::Incorrect`]
     /// に畳み込む設計なので、通常この variant は構築側が意図的に使うときだけ返る。
     #[error("unknown player: {0}")]
     UnknownPlayer(String),

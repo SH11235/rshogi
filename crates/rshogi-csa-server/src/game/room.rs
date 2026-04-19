@@ -2,7 +2,7 @@
 //!
 //! - I/O は行わず、外部から `handle_line` で 1 行ずつ駆動される。
 //! - 関係者へ送るべき行は [`HandleResult::broadcasts`] に積まれて返り、フロントエンド
-//!   が `Broadcaster` 経由で実配信する設計（Phase 1 MVP）。
+//!   が `Broadcaster` 経由で実配信する設計。
 //! - 状態機械は `AgreeWaiting → StartWaiting → Playing → Finished` の単調遷移。
 
 use std::fmt;
@@ -17,7 +17,7 @@ use crate::game::validator::{KachiOutcome, RepetitionVerdict, Validator, Violati
 use crate::protocol::command::{ClientCommand, parse_command};
 use crate::types::{Color, CsaLine, CsaMoveToken, GameId, PlayerName};
 
-/// 対局ルームの状態機械（Phase 1 で使用する 4 状態）。
+/// 対局ルームの状態機械（4 状態）。
 ///
 /// 設計書 §GameRoom State Management で示されている `AgreeWaiting → StartWaiting →
 /// Playing → Finished` の単調遷移をそのまま表現する。`StartWaiting` は片方が AGREE
@@ -50,7 +50,7 @@ pub enum BroadcastTarget {
     White,
     /// 両対局者に送る（観戦者は含めない）。
     Players,
-    /// 観戦者だけに送る（Phase 3 で実体化、Phase 1 では実体ゼロでも経路だけ用意）。
+    /// 観戦者だけに送る（観戦機能未実装の本構成でも経路だけ用意しておく）。
     Spectators,
     /// 両対局者 + 同一ルームの全観戦者に送る（引き分け・無勝負時の同報）。
     All,
@@ -109,7 +109,7 @@ pub struct GameRoomConfig {
     pub max_moves: u32,
     /// 通信マージン（ミリ秒）。`consume` 呼び出し前に減算される。
     pub time_margin_ms: u64,
-    /// `%KACHI` 判定に使う入玉ルール（Phase 1 既定は `Point24`）。
+    /// `%KACHI` 判定に使う入玉ルール（既定は 24 点法 = `Point24`）。
     pub entering_king_rule: EnteringKingRule,
 }
 
@@ -152,7 +152,7 @@ impl fmt::Debug for GameRoom {
 impl GameRoom {
     /// 平手初期局面で対局ルームを構築する。
     ///
-    /// 駒落ちやブイは Phase 4 で別 API を用意する想定。
+    /// 駒落ちやブイは別コンストラクタとして追加する想定（本関数は平手のみ対応）。
     pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Self {
         let mut pos = Position::new();
         // SFEN_HIRATE は const なので set_sfen は失敗し得ない。万一失敗した場合は
@@ -247,7 +247,7 @@ impl GameRoom {
                     current: format!("{:?}", self.status),
                 }))
             }
-            // Phase 3 の x1 拡張コマンドは Phase 1 では受け付けない。
+            // x1 拡張コマンドは本クレートでは未サポートとして弾く。
             other => {
                 Err(ServerError::Protocol(ProtocolError::X1NotEnabled(command_static_name(&other))))
             }
@@ -258,7 +258,7 @@ impl GameRoom {
     ///
     /// `loser` は時間を使い切った側。`Playing` 状態でのみ有効で、それ以外で呼ばれた
     /// 場合は内部不変条件違反として `Internal` エラーを返さず、no-op で `Continue` を
-    /// 返す（Phase 1 ではタイマーの spurious 起動を許容する）。
+    /// 返す（タイマーの spurious 起動は許容する方針）。
     pub fn force_time_up(&mut self, loser: Color) -> HandleResult {
         if !matches!(self.status, GameStatus::Playing) {
             return HandleResult {
@@ -270,7 +270,7 @@ impl GameRoom {
         self.finish(result)
     }
 
-    /// 切断を検出したときに呼ぶ。Phase 1 は再接続猶予 0 秒なので即時 `#ABNORMAL` 確定。
+    /// 切断を検出したときに呼ぶ。再接続猶予 0 秒で即時 `#ABNORMAL` 確定。
     ///
     /// 勝者確定は「対局中の切断」に限り、それ以前
     /// (`AgreeWaiting`/`StartWaiting`) は対局未成立扱いで `winner: None`。
@@ -340,8 +340,8 @@ impl GameRoom {
             // REJECT は対局不成立を双方に通知して終了。
             // CSA 仕様上は `#ABNORMAL` を送らないため、ここでは finish() ではなく
             // 専用経路で `REJECT:<game_id> by <rejector>` のみ配信する。
-            // 内部状態は Finished(Abnormal{None}) を流用（GameResult enum を増やさず
-            // Phase 1 を済ませるための割り切り）。
+            // 内部状態は Finished(Abnormal{None}) を流用する（REJECT 専用の
+            // GameResult variant を増やさずに既存 enum で表現する割り切り）。
             let line = CsaLine::new(format!(
                 "REJECT:{} by {}",
                 self.config.game_id,
@@ -531,7 +531,7 @@ impl GameRoom {
     }
 
     fn handle_chudan(&mut self, _from: Color) -> Result<HandleResult, ServerError> {
-        // %CHUDAN は対局中断。Phase 1 では `#ABNORMAL`（勝者なし）として終局する。
+        // %CHUDAN は対局中断。`#ABNORMAL`（勝者なし）として終局する。
         if !matches!(self.status, GameStatus::Playing) {
             return Err(ServerError::State(StateError::InvalidForState {
                 current: format!("{:?}", self.status),

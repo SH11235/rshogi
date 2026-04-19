@@ -5,6 +5,7 @@ members = [
     "crates/rshogi-csa",
     "crates/rshogi-csa-server",
     "crates/rshogi-csa-server-tcp",
+    "crates/rshogi-csa-server-workers",
     "crates/rshogi-usi",
     "crates/tools",
 ]

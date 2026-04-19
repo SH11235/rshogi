@@ -17,12 +17,12 @@ serde.workspace = true
 tokio = { workspace = true, optional = true }
 
 [features]
-# Phase 1 の TCP フロントエンドを既定で有効にする。Cloudflare Workers (wasm32) ビルドでは
-# `--no-default-features --features workers` を渡して tokio 依存を外すこと。
+# TCP フロントエンドを既定で有効にする。Cloudflare Workers (wasm32) ビルドでは
+# `--no-default-features --features workers` を渡して tokio 依存を外す。
 default = ["tokio-transport"]
 # tokio 非同期ランタイムを使う `GameRoom::run` 等を有効化する。
 tokio-transport = ["dep:tokio"]
-# Cloudflare Workers 等のシングルスレッド WASM ランタイム向けフラグ（現状は副作用なし）。
+# Cloudflare Workers 等のシングルスレッド wasm ランタイム向けフラグ（現状は副作用なし）。
 workers = []
 
 [dev-dependencies]

@@ -1,6 +1,6 @@
 //! rshogi-csa-server-tcp バイナリのエントリポイント。
 //!
-//! Phase 1 MVP の最小構成として、設定ファイル無しでも以下の条件で起動できる:
+//! 最小構成として、設定ファイル無しでも以下の条件で起動できる:
 //!
 //! ```bash
 //! cargo run -p rshogi-csa-server-tcp -- --bind 127.0.0.1:4081 --kifu-dir ./kifu \
@@ -9,7 +9,7 @@
 //!
 //! `players.toml` は shogi-server の players.yaml に相当する最小形式で、
 //! `<handle>` ごとに `password` / `rate` / `wins` / `losses` を持つ。
-//! Phase 4 以降で永続 YAML フォーマットに移行する想定。
+//! 書き戻しは未対応（再起動時の状態はファイルから再構築する）。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,7 +23,6 @@ use rshogi_csa_server::port::{PlayerRateRecord, RateStorage};
 use rshogi_csa_server::types::PlayerName;
 use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
-use rshogi_csa_server_tcp::phase_gate::{PhaseGate, assert_phase1_only};
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
 use rshogi_csa_server_tcp::server::{InMemoryPasswordStore, ServerConfig, build_state, run_server};
 use tokio::sync::Mutex;
@@ -33,7 +32,7 @@ use tokio::sync::Mutex;
 #[command(
     author,
     version,
-    about = "rshogi CSA Phase 1 TCP server",
+    about = "rshogi CSA protocol shogi server (TCP frontend)",
     long_about = None,
 )]
 struct Cli {
@@ -64,9 +63,8 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
-    assert_phase1_only();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    log::info!("rshogi-csa-server-tcp starting ({})", PhaseGate::label());
+    log::info!("rshogi-csa-server-tcp starting (v{})", env!("CARGO_PKG_VERSION"));
 
     let cli = Cli::parse();
     let bind_addr = cli.bind.parse().with_context(|| format!("bad --bind {}", cli.bind))?;
@@ -111,12 +109,11 @@ fn main() -> anyhow::Result<()> {
         // 強制停止する。SIGTERM（Docker / Kubernetes）は未対応で、また abort は進行中の
         // 対局タスクと棋譜書き込みを中途半端な状態で切り捨てる可能性がある。
         //
-        // 以下を完備する本実装は別タスクで行う（`.kiro/specs/rshogi-csa-server/tasks.md`
-        // タスク 17.1「SIGINT／SIGTERM による graceful shutdown」）:
+        // 完全な graceful shutdown を入れる場合に必要な要素:
         //   - SIGTERM も含めた終了シグナル待機
         //   - 新規接続の受付停止
         //   - 進行中対局の終局待ちおよび棋譜・00LIST の原子的 flush
-        // タスク 17.1 完了時点でここの `handle.abort()` は置換する。
+        // graceful shutdown 実装時にここの `handle.abort()` は cancellation token 経路へ置き換える。
         let _ = tokio::signal::ctrl_c().await;
         log::info!("shutting down");
         handle.abort();
@@ -177,8 +174,8 @@ fn load_players_toml(
     Ok((password_map, rate_map))
 }
 
-/// インメモリの `RateStorage`。Phase 1 の TCP バイナリは再起動時に players.toml から
-/// 再構築する前提。Phase 4 で永続書き戻しを追加する。
+/// インメモリの `RateStorage`。再起動時は players.toml から再構築する前提で、
+/// 実行中の書き戻し先は持たない（永続書き戻しを付けるなら別 impl を差し込む）。
 pub struct InMemoryRateStorage {
     inner: Mutex<HashMap<String, PlayerRateRecord>>,
 }

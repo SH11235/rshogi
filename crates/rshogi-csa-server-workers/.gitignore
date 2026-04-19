@@ -1,0 +1,9 @@
+# 実運用の wrangler.toml は各運用者の手元で `wrangler.toml.example` から派生する。
+# 実 ID・bucket 名・許可 Origin が混ざり得るため VCS から除外する。
+/wrangler.toml
+
+# worker-build が生成する成果物。
+/build/
+
+# wrangler dev / miniflare のローカル state。
+/.wrangler/

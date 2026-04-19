@@ -1,0 +1,41 @@
+# Cloudflare Workers 設定テンプレート（rshogi-csa-server-workers）。
+#
+# 使い方:
+#   cp wrangler.toml.example wrangler.toml
+#   # 実際の ID/bucket 名/許可 Origin を埋めて利用する
+#
+# `wrangler.toml` は `.gitignore` で除外されており、実運用値はコミットされない。
+
+name = "rshogi-csa-server-workers"
+main = "build/worker/shim.mjs"
+compatibility_date = "2025-09-23"
+
+[build]
+# worker-build が cdylib を wasm32 向けにビルドし、`build/worker/shim.mjs` を生成する。
+command = "cargo install -q worker-build@^0.8 && worker-build --release"
+
+# --- Durable Objects ---
+# GameRoom: 1 room_id = 1 DO インスタンス。`id_from_name(room_id)` で決定論的解決。
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+# SQLite-backed DO: `state.storage().sql()` を利用するため必須。
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameRoom"]
+
+# --- R2 (棋譜保存) ---
+# `GameRoom` DO が終局時に CSA V2 棋譜を書き出す先。
+# bucket_name / preview_bucket_name は運用側で実際の R2 バケット名に差し替える。
+# 先頭末尾が英数、小文字英数字とハイフンのみ、3〜63 文字の制約に注意 (Cloudflare 要件)。
+[[r2_buckets]]
+binding = "KIFU_BUCKET"
+bucket_name = "local-kifu-dev"
+preview_bucket_name = "local-kifu-dev"
+
+# --- 変数 ---
+# WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。
+# 空文字列・未設定時は全 Upgrade 要求を 403 で拒否する（安全側の既定）。
+[vars]
+CORS_ORIGINS = ""

@@ -1,9 +1,9 @@
 //! 合法手・千日手・打ち歩詰・連続王手千日手・入玉宣言の判定。
 //!
 //! `rshogi-core` の `Position` を入力として受け取り、CSA トークンを内部 `Move` に
-//! 変換しつつ合法性を検証する。Phase 1 では Validator 単体で完結し、Phase 4
-//! 以降の `EnteringKingRule` 切替（駒落ち/24 点法/トライルール等）も同じ API
-//! から受け付けられるよう構成している。
+//! 変換しつつ合法性を検証する。Validator 単体で完結し、`EnteringKingRule`
+//! 切替（24 点法／27 点法／トライルール等）も同じ API から受け付けられるよう
+//! 構成している。
 
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
@@ -62,8 +62,8 @@ pub enum KachiOutcome {
 
 /// 合法性・千日手・入玉宣言を判定するサービス。
 ///
-/// `entering_king_rule` で `%KACHI` 判定方式を切替可能にしている（Phase 1 既定は
-/// CSA 24 点法 = `Point24`、Phase 3 以降で 27 点法やトライルールも選択可能）。
+/// `entering_king_rule` で `%KACHI` 判定方式を切替可能にしている（既定は
+/// CSA 24 点法 = `Point24`。27 点法やトライルールも選択可能）。
 #[derive(Debug, Clone, Copy)]
 pub struct Validator {
     entering_king_rule: EnteringKingRule,
@@ -166,11 +166,10 @@ impl Validator {
 
     /// `%KACHI`（入玉宣言）が `pos` の手番側で成立するか判定する。
     ///
-    /// 内部は `rshogi_core::Position::declaration_win` に委譲する。Phase 1 では
-    /// CSA 24 点法（`Point24`）が既定。`Point27`/`Point24H`/`Point27H` も同 API で扱える。
-    /// `TryRule` は Phase 3 以降で扱う想定だが、API 契約上は宣言成立を示す任意の
-    /// `Move` を Accepted として受け付けるため、将来 `entering_king_rule` を切替えても
-    /// 呼び出し側のコードは変更不要。
+    /// 内部は `rshogi_core::Position::declaration_win` に委譲する。CSA 24 点法
+    /// （`Point24`）を既定とし、`Point27`/`Point24H`/`Point27H` も同 API で扱える。
+    /// `TryRule` も API 契約上は宣言成立を示す任意の `Move` を Accepted として
+    /// 受け付けるため、`entering_king_rule` を切替えても呼び出し側のコードは変更不要。
     pub fn evaluate_kachi(&self, pos: &Position) -> KachiOutcome {
         let mv = pos.declaration_win(self.entering_king_rule);
         if mv.is_none() {

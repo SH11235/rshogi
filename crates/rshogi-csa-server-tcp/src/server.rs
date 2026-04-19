@@ -1,6 +1,6 @@
 //! TCP 受付ループと 1 接続分のセッションドライバ。
 //!
-//! Phase 1 MVP では以下の流れを 1 タスクで駆動する:
+//! 以下の流れを 1 タスクで駆動する:
 //!
 //! 1. `TcpListener` で受理 → 1 接続を [`TcpTransport`] でラップ
 //! 2. [`IpLoginRateLimiter::record`] で同一 IP からの連続 LOGIN 試行を抑制
@@ -98,7 +98,7 @@ pub struct ServerConfig {
     /// Game_Summary 送信後、双方の AGREE / REJECT が揃うまでの受付窓。GUI
     /// クライアントや人手合意を挟む運用でも足りるよう、設定可能にしてある。
     pub agree_timeout: Duration,
-    /// 入玉ルール。Phase 1 は Point24。
+    /// 入玉ルール。既定は 24 点法。
     pub entering_king_rule: EnteringKingRule,
 }
 
@@ -196,7 +196,7 @@ where
     kifu_storage: K,
     password_store: P,
     hasher: Box<dyn PasswordHasher>,
-    /// 全接続タスクの終了を待つためのカウンタ通知。graceful shutdown 用 (Phase 5 で本格化)。
+    /// 全接続タスクの終了を待つためのカウンタ通知。graceful shutdown で使用。
     active_games: Notify,
     /// 連番カウンタ（game_id 生成）。起動時刻 + 連番で衝突を避ける。
     game_counter: Mutex<u64>,
@@ -204,7 +204,7 @@ where
     started_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// パスワードストアの抽象。`handle` に対応する保存ハッシュ（Phase 1 は平文）を返す。
+/// パスワードストアの抽象。`handle` に対応する保存ハッシュ（現状は平文）を返す。
 pub trait PasswordStore {
     /// `handle` に対応する保存済みパスワードを返す。未登録なら `None`。
     fn lookup(&self, handle: &str) -> Option<String>;
@@ -212,7 +212,7 @@ pub trait PasswordStore {
 
 /// メモリ常駐のテスト・開発用 PasswordStore。起動時に `HashMap` を渡す。
 pub struct InMemoryPasswordStore {
-    /// handle → plain password。Phase 1 は平文（shogi-server 互換）。
+    /// handle → plain password。shogi-server 互換の平文保存。
     pub map: HashMap<String, String>,
 }
 
@@ -241,9 +241,9 @@ where
 {
     let listener = TcpListener::bind(state.config.bind_addr).await?;
     log::info!(
-        "rshogi-csa-server-tcp listening on {} ({})",
-        state.config.bind_addr,
-        crate::phase_gate::PhaseGate::label()
+        "rshogi-csa-server-tcp {} listening on {}",
+        env!("CARGO_PKG_VERSION"),
+        state.config.bind_addr
     );
     let handle = tokio::task::spawn_local(accept_loop(listener, state));
     Ok(handle)
@@ -462,8 +462,8 @@ where
         }
         _res = transport.recv_line(NEAR_INFINITE) => {
             // 切断 or 待機中に不正行が来た → waiter を撤去して LOGIN をリセット。
-            // （Phase 1 は GameWaiting 中のクライアント入力を受け付けないため、任意のデータを
-            //  受信した時点で接続を閉じる運用とする。）
+            // （GameWaiting 中のクライアント入力は受け付けない方針で、任意のデータを
+            //  受信した時点で接続を閉じる。）
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
             WaiterOutcome::DisconnectedFromPool

@@ -1,12 +1,7 @@
 //! rshogi-csa-server — CSA プロトコル準拠の将棋対局サーバーのコアロジック。
 //!
 //! I/O には直接依存せず、[`port`] モジュールで定義された trait 群を介して
-//! TCP 版と Cloudflare Workers 版の双方のフロントエンドから再利用できるよう
-//! 設計されている。
-//!
-//! 現在のスコープは仕様書 `.kiro/specs/rshogi-csa-server/` の Phase 1 MVP。
-//! Phase 2〜5 で想定されている Cloudflare Workers 対応、Floodgate 定期運用、
-//! 再接続プロトコル等は本実装時点では未着手（スケジュールは `tasks.md` を参照）。
+//! TCP 版と Cloudflare Workers 版の双方のフロントエンドから再利用できる。
 
 pub mod error;
 pub mod types;

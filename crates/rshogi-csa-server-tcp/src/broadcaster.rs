@@ -1,8 +1,8 @@
 //! 同一プロセス内の観戦者接続を束ねる in-memory [`Broadcaster`] 実装。
 //!
-//! Phase 1 では観戦経路は空実装でも動くが、[`rshogi_csa_server::game::run_loop::run_room`]
-//! が `BroadcastTag::Spectator` を必ず 1 回以上呼ぶため、副作用が起きても安全なスタブを
-//! 用意しておく。
+//! 観戦者購読が実体化されていない本バイナリ構成でも動けるよう、副作用が
+//! 起きても安全なスタブを用意する。`run_room` は `BroadcastTag::Spectator`
+//! を必ず 1 回以上呼ぶので、呼び先が空の実装でも例外にならない契約にしている。
 //!
 //! 設計上、各ルームの観戦者集合は `Mutex<HashMap<RoomId, Vec<Subscriber>>>` で保持する。
 //! 1 subscriber あたり `tokio::sync::mpsc::UnboundedSender<CsaLine>` を持たせ、
@@ -33,8 +33,8 @@ impl Subscriber {
 
 /// プロセスローカルの `Broadcaster`。
 ///
-/// Phase 1 MVP では 1 プロセスに 1 インスタンスだけ作り、`Arc` で共有する想定。
-/// 複数プロセス間の配信は Phase 2（Workers）以降のスコープ。
+/// 1 プロセスに 1 インスタンスだけ作り、`Arc` で共有する想定。複数プロセス間の
+/// 配信はこのクレートの責務外（別フロントエンドが受け持つ）。
 #[derive(Default, Clone)]
 pub struct InMemoryBroadcaster {
     inner: Arc<Mutex<HashMap<RoomId, Vec<Subscriber>>>>,
@@ -46,8 +46,8 @@ impl InMemoryBroadcaster {
         Self::default()
     }
 
-    /// ルームに観戦者を登録する（Phase 3 の `%%MONITOR2ON` から呼ばれる想定）。
-    /// Phase 1 では呼び出し経路を用意しておくだけで、本体コードからは使わない。
+    /// ルームに観戦者を登録する（`%%MONITOR2ON` 相当の拡張経路から呼ばれる想定）。
+    /// 現状のバイナリ構成では呼び出し経路のみ用意し、本体コードからは未使用。
     pub async fn subscribe(&self, room_id: RoomId, subscriber: Subscriber) {
         let mut guard = self.inner.lock().await;
         guard.entry(room_id).or_default().push(subscriber);
@@ -74,7 +74,7 @@ impl Broadcaster for InMemoryBroadcaster {
         line: &CsaLine,
     ) -> Result<(), TransportError> {
         if !matches!(tag, BroadcastTag::Spectator) {
-            // Phase 1 では Admin/Player タグは使われない。未対応経路が来たら黙って no-op。
+            // Admin/Player タグは本実装では使われない。未対応経路が来たら黙って no-op。
             return Ok(());
         }
         let mut guard = self.inner.lock().await;
@@ -108,7 +108,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn broadcast_tag_non_spectator_is_no_op_in_phase1() {
+    async fn broadcast_tag_non_spectator_is_no_op() {
         let bcast = InMemoryBroadcaster::new();
         let (tx, mut rx) = unbounded_channel();
         bcast.subscribe(RoomId::new("g1"), Subscriber::new(tx)).await;
@@ -116,7 +116,7 @@ mod tests {
             .broadcast_tag(&RoomId::new("g1"), BroadcastTag::Player, &CsaLine::new("X"))
             .await
             .unwrap();
-        // Player タグは Phase 1 では無視される。
+        // Player タグは本実装では無視される。
         assert!(rx.try_recv().is_err());
     }
 

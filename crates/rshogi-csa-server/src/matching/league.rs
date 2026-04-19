@@ -1,7 +1,8 @@
 //! プレイヤ状態機械と最小限の League 実装。
 //!
-//! 状態遷移・マッチング・ログインのうち Phase 1 で必要な範囲を扱う。
-//! 重複ログイン（Phase 4）・x1 観戦系・Floodgate 固有ペアリングは後続フェーズで拡張。
+//! 状態遷移・マッチング・ログインのうち最小構成で必要な範囲を扱う。
+//! 重複ログイン対応、x1 観戦系、Floodgate 固有ペアリングはこのモジュールに
+//! 差分で乗せる形で拡張する想定。
 
 use std::collections::HashMap;
 
@@ -52,8 +53,8 @@ pub struct MatchedPair {
 
 /// `PairingLogic` に渡すプレイヤ 1 件分の情報。
 ///
-/// Phase 1 では `name` と `preferred_color` のみだが、Phase 4 で
-/// レーティング・連戦数・所属チームなどを追加する想定で構造体に切り出している。
+/// 現状は `name` と `preferred_color` のみ持たせる。レーティング・連戦数・
+/// 所属チームなどを加える拡張に備えて、構造体として切り出している。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingCandidate {
     /// プレイヤ名。
@@ -74,7 +75,7 @@ pub enum LoginResult {
     Incorrect,
     /// 同名のプレイヤが既に接続中。
     ///
-    /// Phase 4 の DupeLoginResolver が到着するまでは「新接続拒否」を既定方針とする。
+    /// 重複ログインの解決方針を導入するまでは「新接続拒否」を既定で返す。
     AlreadyLoggedIn,
 }
 
@@ -107,12 +108,12 @@ impl League {
 
     /// プレイヤの状態を遷移させる。
     ///
-    /// Phase 1 では以下の最小限の不変条件のみを守る:
+    /// 最小限の不変条件のみを守る:
     /// - 未ログインのプレイヤに対する遷移は [`StateError::InvalidForState`] で拒否する。
     /// - `Finished` 状態は終端として扱い、他状態への再遷移を拒否する（LOGOUT で除去される想定）。
     ///
     /// 完全な遷移表（`Connected → GameWaiting`、`AgreeWaiting ↔ StartWaiting` 等）は
-    /// Phase 2 で対局ルームハンドラと組み合わせて詳細化する。
+    /// 対局ルームハンドラ側と突き合わせて詳細化する。
     pub fn transition(
         &mut self,
         name: &PlayerName,
@@ -276,7 +277,7 @@ impl League {
         candidates.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 
         // 相補的手番（Black×White または White×Black）のみを採用する。
-        // 手番希望が未指定のプレイヤは Phase 1 では対象外（Phase 4 で拡張予定）。
+        // 手番希望が未指定のプレイヤは現状の直接マッチでは対象外。
         for i in 0..candidates.len() {
             for j in (i + 1)..candidates.len() {
                 let (ni, ci) = candidates[i];
@@ -413,7 +414,7 @@ mod tests {
             )
             .unwrap();
         }
-        // 手番希望未指定のプレイヤが混ざる組は Phase 1 では成立させない。
+        // 手番希望未指定のプレイヤが混ざる組は直接マッチでは成立させない。
         assert_eq!(l.pick_direct_match(&GameName::new("g1")), None);
     }
 

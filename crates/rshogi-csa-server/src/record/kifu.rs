@@ -3,17 +3,16 @@
 //! `record_v22.html` 準拠のテキストを組み立てる。`KifuRecord` をビルドして
 //! [`KifuRecord::build_v2`] を呼ぶと、保存可能な棋譜文字列が得られる。
 //!
-//! 設計書 §KifuWriter に対応するモジュール。Phase 1 では Floodgate 拡張の
-//! `'eval pv` コメントは `KifuMove::comment` に String として埋め込む形で支援する。
+//! Floodgate 拡張の `'eval pv` コメントは `KifuMove::comment` に String として
+//! 埋め込む形で支援する。
 //!
 //! # 記号方針
 //!
-//! 棋譜本体（`%...`）と 00LIST（`#...`）で語彙が異なる点は
-//! `docs/csa-server/design.md` §6.5.1 を参照。特に連続王手千日手は棋譜本体が
-//! `%ILLEGAL_MOVE` + `'OUTE_SENNICHITE` コメント、00LIST が `#OUTE_SENNICHITE`
-//! の二層運用になっている（CSA 標準パーサ `rshogi_csa::parse_special_move` が
-//! `%OUTE_SENNICHITE` を受理しないため）。結果コードは必ず
-//! [`primary_result_code`] を単一ソースとして参照すること。
+//! 棋譜本体（`%...`）と 00LIST（`#...`）で語彙が異なる。特に連続王手千日手は
+//! 棋譜本体が `%ILLEGAL_MOVE` + `'OUTE_SENNICHITE` コメント、00LIST が
+//! `#OUTE_SENNICHITE` の二層運用になっている（CSA 標準パーサ
+//! `rshogi_csa::parse_special_move` が `%OUTE_SENNICHITE` を受理しないため）。
+//! 結果コードは必ず [`primary_result_code`] を単一ソースとして参照すること。
 
 use std::fmt::Write as _;
 
@@ -119,7 +118,7 @@ impl KifuRecord {
 /// (`TORYO`/`KACHI`/`HIKIWAKE`/`SENNICHITE`/`CHUDAN`/`TIME_UP`/`ILLEGAL_MOVE`/
 /// `JISHOGI`/`MAX_MOVES`) に揃える。
 ///
-/// 連続王手千日手は専用の `%` トークンが標準化されていないため、Phase 1 では
+/// 連続王手千日手は専用の `%` トークンが標準化されていないため、
 /// `%ILLEGAL_MOVE` で記録し、補足としてコメント行 `'OUTE_SENNICHITE` を追加する。
 /// `IllegalReason::Uchifuzume` / `IllegalKachi` も同様にコメント行で残す。
 fn result_lines(result: &GameResult) -> Vec<String> {
@@ -182,7 +181,7 @@ pub fn primary_result_code(result: &GameResult) -> &'static str {
 }
 
 /// 勝敗側を 00LIST 補助情報として取得するヘルパ。Floodgate 等のレートバッチが
-/// 必要に応じて利用する。Phase 1 ではエクスポートのみ。
+/// 必要に応じて利用する（現状は公開のみで、本 crate 内部では未使用）。
 pub fn winner_of(result: &GameResult) -> Option<Color> {
     match result {
         GameResult::Toryo { winner } | GameResult::Kachi { winner } => Some(*winner),
@@ -194,7 +193,7 @@ pub fn winner_of(result: &GameResult) -> Option<Color> {
     }
 }
 
-/// `IllegalReason` を CSA 棋譜上のサブコードへ変換するヘルパ（Phase 3 拡張用に予約）。
+/// `IllegalReason` を CSA 棋譜上のサブコードへ変換するヘルパ（拡張用の予約 API）。
 pub fn illegal_reason_subcode(reason: IllegalReason) -> &'static str {
     match reason {
         IllegalReason::Generic => "ILLEGAL_MOVE",

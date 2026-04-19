@@ -1,4 +1,4 @@
-//! 永続化アダプタ実装。Phase 1 では TCP 向けのファイルストレージのみを置く。
+//! 永続化アダプタ実装。現状は TCP 向けのファイルストレージのみ。
 
 #[cfg(feature = "tokio-transport")]
 pub mod file;
