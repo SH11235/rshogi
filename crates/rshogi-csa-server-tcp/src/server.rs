@@ -31,8 +31,8 @@ use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
 use rshogi_csa_server::matching::registry::{GameListing, GameRegistry};
 use rshogi_csa_server::port::{
-    BroadcastTag, Broadcaster, ClientTransport, GameSummaryEntry, KifuStorage, RateDecision,
-    RateStorage,
+    BroadcastTag, Broadcaster, BuoyStorage, ClientTransport, GameSummaryEntry, KifuStorage,
+    RateDecision, RateStorage,
 };
 use rshogi_csa_server::protocol::command::{ClientCommand, parse_command};
 use rshogi_csa_server::protocol::summary::{
@@ -120,6 +120,12 @@ pub struct ServerConfig {
     /// は `sensible_defaults` が全対局で使う既定値を設定するためにあり、テスト
     /// や特殊環境 (駒落ちサーバー等) で全対局を非平手で起動する経路で使う。
     pub initial_sfen: Option<String>,
+    /// 管理者ハンドル (`%%SETBUOY` / `%%DELETEBUOY` の実行を許可する LOGIN 名)。
+    ///
+    /// 空の場合は誰も管理者ではなく、`%%SETBUOY` / `%%DELETEBUOY` は全て
+    /// `PERMISSION_DENIED` で拒否される。`%%GETBUOYCOUNT` は参照系なので
+    /// 管理者権限を要求しない。
+    pub admin_handles: Vec<String>,
 }
 
 impl ServerConfig {
@@ -137,6 +143,7 @@ impl ServerConfig {
             x1_reply_write_timeout: Duration::from_secs(5),
             entering_king_rule: EnteringKingRule::Point24,
             initial_sfen: None,
+            admin_handles: Vec::new(),
         }
     }
 }
@@ -226,6 +233,12 @@ where
     game_counter: Mutex<u64>,
     /// サーバー起動時刻（game_id プリフィックス用）。
     started_at: chrono::DateTime<chrono::Utc>,
+    /// ブイ (途中局面テンプレート) の永続化先。
+    ///
+    /// `config.kifu_topdir` 配下の `buoys/` ディレクトリを使う。TCP サーバー
+    /// は常に同一プロセス・同一プロセス内で単一インスタンスを保持する前提
+    /// (複数プロセス並行書き込みは非対応)。
+    buoy_storage: rshogi_csa_server::FileBuoyStorage,
 }
 
 /// パスワードストアの抽象。`handle` に対応する保存ハッシュ（現状は平文）を返す。
@@ -810,11 +823,76 @@ where
                     ])
                 }
             }
+            ClientCommand::SetBuoy {
+                game_name: buoy_name,
+                moves,
+                count,
+            } => {
+                // 管理者のみ許可。`admin_handles` リストに現ハンドルが含まれるか確認。
+                // 配列 (Vec) 線形走査だが admin は通常数件なので実運用で問題にならない。
+                if !state.config.admin_handles.iter().any(|h| h == &handle) {
+                    Some(vec![
+                        CsaLine::new(format!("##[SETBUOY] PERMISSION_DENIED {buoy_name}")),
+                        CsaLine::new("##[SETBUOY] END"),
+                    ])
+                } else {
+                    match state.buoy_storage.set(&buoy_name, moves, count).await {
+                        Ok(()) => Some(vec![
+                            CsaLine::new(format!("##[SETBUOY] OK {buoy_name} {count}")),
+                            CsaLine::new("##[SETBUOY] END"),
+                        ]),
+                        Err(e) => Some(vec![
+                            CsaLine::new(format!("##[SETBUOY] ERROR {buoy_name} {e}")),
+                            CsaLine::new("##[SETBUOY] END"),
+                        ]),
+                    }
+                }
+            }
+            ClientCommand::DeleteBuoy {
+                game_name: buoy_name,
+            } => {
+                if !state.config.admin_handles.iter().any(|h| h == &handle) {
+                    Some(vec![
+                        CsaLine::new(format!("##[DELETEBUOY] PERMISSION_DENIED {buoy_name}")),
+                        CsaLine::new("##[DELETEBUOY] END"),
+                    ])
+                } else {
+                    match state.buoy_storage.delete(&buoy_name).await {
+                        Ok(()) => Some(vec![
+                            CsaLine::new(format!("##[DELETEBUOY] OK {buoy_name}")),
+                            CsaLine::new("##[DELETEBUOY] END"),
+                        ]),
+                        Err(e) => Some(vec![
+                            CsaLine::new(format!("##[DELETEBUOY] ERROR {buoy_name} {e}")),
+                            CsaLine::new("##[DELETEBUOY] END"),
+                        ]),
+                    }
+                }
+            }
+            ClientCommand::GetBuoyCount {
+                game_name: buoy_name,
+            } => {
+                // 参照系なので権限チェックなし (全クライアントが参照可能)。
+                match state.buoy_storage.count(&buoy_name).await {
+                    Ok(Some(n)) => Some(vec![
+                        CsaLine::new(format!("##[GETBUOYCOUNT] {buoy_name} {n}")),
+                        CsaLine::new("##[GETBUOYCOUNT] END"),
+                    ]),
+                    Ok(None) => Some(vec![
+                        CsaLine::new(format!("##[GETBUOYCOUNT] NOT_FOUND {buoy_name}")),
+                        CsaLine::new("##[GETBUOYCOUNT] END"),
+                    ]),
+                    Err(e) => Some(vec![
+                        CsaLine::new(format!("##[GETBUOYCOUNT] ERROR {buoy_name} {e}")),
+                        CsaLine::new("##[GETBUOYCOUNT] END"),
+                    ]),
+                }
+            }
             _ => None,
         };
         let Some(lines) = replies else {
             // 未サポートの x1 コマンド / 対局中コマンドは切断扱い（未配線の
-            // `%%SETBUOY` / `%%DELETEBUOY` / `%%GETBUOYCOUNT` / `%%FORK` 等は後続タスクで追加する）。
+            // `%%FORK` は後続タスクで追加する）。
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
             break 'outer WaiterOutcome::DisconnectedFromPool;
@@ -1450,6 +1528,7 @@ where
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
+    let buoy_storage = rshogi_csa_server::FileBuoyStorage::new(config.kifu_topdir.clone());
     SharedState {
         config,
         league: Mutex::new(League::new()),
@@ -1464,6 +1543,7 @@ where
         active_games: Notify::new(),
         game_counter: Mutex::new(0),
         started_at: chrono::Utc::now(),
+        buoy_storage,
     }
 }
 
