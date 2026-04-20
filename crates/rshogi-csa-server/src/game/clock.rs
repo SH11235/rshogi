@@ -160,7 +160,7 @@ const SECOND_GRAIN_MS: i64 = 1_000;
 /// 1 分分のミリ秒。StopWatch の grain (最小単位)。
 const MINUTE_GRAIN_MS: i64 = 60 * 1_000;
 
-/// Fischer 方式の時計（増分加算、**pre-increment セマンティクス**）。
+/// Fischer 方式の時計（増分加算、**CSA client の会計規則に合わせた init+post hybrid**）。
 ///
 /// - `total_time_seconds`: 初期の持ち時間（秒）。
 /// - `increment_seconds`: 1 手ごとに加算される増分（秒）。
@@ -168,14 +168,19 @@ const MINUTE_GRAIN_MS: i64 = 60 * 1_000;
 /// - 消費で残時間が負に落ちた時点で時間切れ。
 ///
 /// # セマンティクス
-/// - **`consume(elapsed)` は先に増分を加算してから elapsed を差し引く**
-///   (pre-increment)。初手から `total + increment` の budget が使える挙動で、
-///   既存 CSA client (`crates/tools/src/csa_client/session.rs`) が
-///   `black_time_ms = total_time_ms + increment_ms` で move 1 を計算するのと
-///   整合する。FIDE 標準の「手完了後に increment 追加 (post-increment)」とは
-///   タイミングだけ 1 手ぶん前後するが、数手指した後の残り時間は同じに収束する。
-/// - `turn_budget_ms` は「現在手で使える最大時間 = 残時間 + increment +
-///   秒 grain」を返す。
+/// 既存 CSA client (`crates/tools/src/csa_client/session.rs`) は以下の会計を採用:
+/// ```text
+/// init:          slot = total + increment     // pre-init-increment
+/// consume(e):    slot = slot - e + increment  // post-move-increment
+/// ```
+///
+/// FIDE 標準 (init=total / 各手 post-increment) とも、完全な pre-increment
+/// (init=total / 各手 pre-increment) とも異なる独特の計算だが、既存 client /
+/// 棋譜ツールとの interop を優先してサーバもこれに合わせる (Codex review
+/// PR #468 4th round P1)。初手に `total + increment` 秒の予算があり、以後
+/// 各手ごとに (残 - elapsed + inc) で slot が更新される。
+///
+/// - `turn_budget_ms` は「現在の slot (既に +increment 済み) + 秒 grain」を返す。
 #[derive(Debug, Clone)]
 pub struct FischerClock {
     total_time_seconds: u32,
@@ -186,8 +191,11 @@ pub struct FischerClock {
 
 impl FischerClock {
     /// 新しい Fischer 時計を作る。引数単位は「秒」。
+    ///
+    /// client と合わせるため初期 slot は `total + increment` (= 初手で使える
+    /// 予算)。以後 `consume` 毎に post-increment で `slot = slot - elapsed + inc`。
     pub fn new(total_time_seconds: u32, increment_seconds: u32) -> Self {
-        let initial = total_time_seconds as i64 * 1000;
+        let initial = (total_time_seconds as i64 + increment_seconds as i64) * 1000;
         Self {
             total_time_seconds,
             increment_seconds,
@@ -217,20 +225,23 @@ impl FischerClock {
 
 impl TimeClock for FischerClock {
     fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult {
-        // pre-increment: 先に `increment_ms` を加算してから elapsed を差し引く。
-        // move 1 で `total + increment` の budget が使える挙動にして、CSA client
-        // (`black_time_ms = total_time_ms + increment_ms`) と整合させる
-        // (Codex review PR #468 3rd round P1)。
+        // CSA client の会計規則に合わせた post-move-increment:
+        //   new_slot = slot - elapsed + increment
+        // 初期 slot は `new` で `total + increment` 済みなので、初手でも
+        // `total + increment` 秒の予算を検査できる。2 手目以降は前手の完了時に
+        // increment が加算されているため実質的に post-increment 挙動。
+        // client は `black_time_ms = total + inc` + 毎手 `slot -= e; slot += inc`
+        // で動くので、server もこれに一致させる (Codex review PR #468 4th round P1)。
         let elapsed_sec_ms = (elapsed_ms / 1000) as i64 * 1000;
         let increment = self.increment_ms();
         let slot = self.slot_mut(color);
 
-        let after = *slot + increment - elapsed_sec_ms;
-        if after < 0 {
+        let after_consume = *slot - elapsed_sec_ms;
+        if after_consume < 0 {
             *slot = 0;
             ClockResult::TimeUp
         } else {
-            *slot = after;
+            *slot = after_consume + increment;
             ClockResult::Continue
         }
     }
@@ -253,12 +264,11 @@ impl TimeClock for FischerClock {
     }
 
     fn turn_budget_ms(&self, color: Color) -> i64 {
-        // pre-increment セマンティクスにより、`consume` は `slot + increment`
-        // までの elapsed を受理する。deadline スケジューラはその境界を使うこと
-        // (CSA client も move 1 を `total + increment` で計算)。
-        // `consume` は elapsed を秒単位に切り捨てるため、truncation 分 (999ms)
-        // を足して境界を次の秒境界の直前に揃える。
-        self.slot(color) + self.increment_ms() + (SECOND_GRAIN_MS - 1)
+        // `slot` は既に前手 post-increment 込み (初期は `total + increment`、
+        // 以後 `- elapsed + increment`)。`consume` は `slot - elapsed` で判定
+        // するので、deadline も現在の slot 値をそのまま budget とする。
+        // `consume` の秒切り捨てを考慮して `SECOND_GRAIN_MS - 1` (999ms) を足す。
+        self.slot(color) + (SECOND_GRAIN_MS - 1)
     }
 }
 
@@ -339,20 +349,28 @@ impl TimeClock for StopWatchClock {
     }
 
     fn format_summary(&self) -> String {
-        // `Time_Unit:1min` は CSA 仕様上は合法だが、既存 client / USI エンジンの
-        // 多くは byoyomi を「単位 × value ms」ではなく常に秒 × 1000 ms として
-        // 解釈する (Codex review PR #468 3rd round P2)。相互運用性を優先して
-        // `Time_Unit:1sec` で出力し、total_time と byoyomi を秒に展開する。
-        // 内部 `consume` は依然として分単位に切り捨てるため、engine から見た
-        // byoyomi (秒単位) と server 側が受理する最大 elapsed (分切り上げ) の
-        // 乖離は、engine が自主的に byoyomi 内に収めることで解消する。
-        let total_time_seconds = self.total_time_minutes * 60;
-        let byoyomi_seconds = self.byoyomi_minutes * 60;
+        // StopWatch 方式は `consume` が elapsed_ms を **分単位に切り捨てる** ため、
+        // Game_Summary も CSA 仕様の `Time_Unit:1min` で分単位を宣言する。
+        //
+        // # 既知の client-server 乖離
+        //
+        // 本 server は `T<sec>` broadcast (秒単位の elapsed) を送り、client
+        // (`crates/tools/src/csa_client/session.rs`) はその値を literal ms として
+        // 残時間から減算する。一方 server 側の `consume` は分単位で切り捨てる
+        // ため、「client のローカル remaining」と「server の実 slot」は 1 手に
+        // 最大 59 秒ずれ得る (Codex review PR #468 4th round P1 指摘の client 側
+        // 実装の limitation)。engine の時間管理精度を保つには、client 側も
+        // StopWatch 相当の分単位切り捨てを行うか、T<sec> を分単位で emit する
+        // 必要がある。どちらも別 PR で対応。
+        //
+        // 現状の妥協: server は CSA 仕様に準拠して `Time_Unit:1min` を出し、
+        // client-side の取り違えは後続タスクで修正する (サーバ側を変えると
+        // `%%LIST` / 棋譜互換を広く破ってしまう)。
         let mut out = String::new();
         out.push_str("BEGIN Time\n");
-        out.push_str("Time_Unit:1sec\n");
-        out.push_str(&format!("Total_Time:{total_time_seconds}\n"));
-        out.push_str(&format!("Byoyomi:{byoyomi_seconds}\n"));
+        out.push_str("Time_Unit:1min\n");
+        out.push_str(&format!("Total_Time:{}\n", self.total_time_minutes));
+        out.push_str(&format!("Byoyomi:{}\n", self.byoyomi_minutes));
         out.push_str("Least_Time_Per_Move:0\n");
         out.push_str("END Time\n");
         out
@@ -468,34 +486,38 @@ mod tests {
     // ---- FischerClock ----
 
     #[test]
-    fn fischer_adds_increment_before_consume() {
-        // 初期 60 秒、増分 5 秒。pre-increment セマンティクス: move 1 では
-        // `total + increment = 65` が予算で、10 秒使うと残り `65 - 10 = 55`。
+    fn fischer_matches_csa_client_accounting() {
+        // CSA client は init `slot = total + inc` + 毎手 `slot -= e; slot += inc`
+        // で動くので、server もこれに一致させる (Codex review PR #468 4th round P1)。
+        //
+        // 初期 60 秒、増分 5 秒。init で slot=65。move 1 で 10 秒使うと:
+        //   slot = 65 - 10 = 55, + inc = 60
+        // move 2 で 2 秒使うと:
+        //   slot = 60 - 2 = 58, + inc = 63
         let mut c = FischerClock::new(60, 5);
+        assert_eq!(c.remaining_main_ms(Color::Black), 65_000);
         assert_eq!(c.consume(Color::Black, 10_000), ClockResult::Continue);
-        assert_eq!(c.remaining_main_ms(Color::Black), 55_000);
-        // 2 手目は `55 + 5 = 60` が予算、2 秒使って残り 58。
+        assert_eq!(c.remaining_main_ms(Color::Black), 60_000);
         assert_eq!(c.consume(Color::Black, 2_000), ClockResult::Continue);
-        assert_eq!(c.remaining_main_ms(Color::Black), 58_000);
+        assert_eq!(c.remaining_main_ms(Color::Black), 63_000);
     }
 
     #[test]
     fn fischer_accepts_move_up_to_total_plus_increment_on_move_one() {
-        // Codex review (PR #468 3rd round) の回帰防止: CSA client は move 1 で
-        // `total + increment` の budget を engine に配る (`black_time_ms =
-        // total_time_ms + increment_ms`)。server もそれを受理すること。
+        // Codex review (PR #468 3rd/4th round) 回帰防止: CSA client は move 1 で
+        // `total + increment` の budget を engine に配る。server もそれを受理する。
         // 例: total=60, inc=5 → move 1 は 65 秒まで受理、66 秒で TimeUp。
         let mut c = FischerClock::new(60, 5);
         assert_eq!(c.consume(Color::Black, 65_000), ClockResult::Continue);
-        assert_eq!(c.remaining_main_ms(Color::Black), 0);
-        // 次手の残時間は 0 + increment (pre) = 5 秒まで許容、6 秒で TimeUp。
+        assert_eq!(c.remaining_main_ms(Color::Black), 5_000);
+        // 次手の残時間は 5 秒。5 秒使えば OK、6 秒で TimeUp。
         let mut c2 = FischerClock::new(60, 5);
         assert_eq!(c2.consume(Color::Black, 66_000), ClockResult::TimeUp);
     }
 
     #[test]
-    fn fischer_time_up_when_elapsed_exceeds_remaining_plus_increment() {
-        // 残 5 秒、増分 3 秒。pre-increment なので 8 秒までは受理 (5+3)。
+    fn fischer_time_up_when_elapsed_exceeds_total_plus_increment() {
+        // client の init = total + increment 規則。total=5, inc=3 → 初手 8 秒まで。
         // 9 秒で TimeUp。
         let mut c = FischerClock::new(5, 3);
         assert_eq!(c.consume(Color::Black, 9_000), ClockResult::TimeUp);
@@ -504,10 +526,10 @@ mod tests {
 
     #[test]
     fn fischer_consume_truncates_to_second() {
-        // 999ms は 0 秒に切り捨て。pre-increment で slot=60 → 60+5-0=65。
+        // 999ms は 0 秒に切り捨て。init slot=65, consume(999): 65 - 0 + 5 = 70。
         let mut c = FischerClock::new(60, 5);
         assert_eq!(c.consume(Color::Black, 999), ClockResult::Continue);
-        assert_eq!(c.remaining_main_ms(Color::Black), 65_000);
+        assert_eq!(c.remaining_main_ms(Color::Black), 70_000);
     }
 
     #[test]
@@ -524,10 +546,8 @@ mod tests {
     }
 
     #[test]
-    fn fischer_turn_budget_includes_increment_and_second_grain() {
-        // pre-increment により、move 1 では `total + increment + 秒 grain` が予算。
-        // 60 + 5 = 65 秒分 (65_000ms) が `consume` の受理上限で、`turn_budget_ms`
-        // は秒切り捨て分の 999ms を足した 65_999 を返す。
+    fn fischer_turn_budget_uses_current_slot_plus_second_grain() {
+        // init slot = total + inc = 65 秒。`turn_budget_ms` は slot + grain 999ms。
         let c = FischerClock::new(60, 5);
         assert_eq!(c.turn_budget_ms(Color::Black), 65_999);
     }
@@ -536,7 +556,8 @@ mod tests {
     fn fischer_black_and_white_are_independent() {
         let mut c = FischerClock::new(60, 5);
         assert_eq!(c.consume(Color::Black, 10_000), ClockResult::Continue);
-        assert_eq!(c.remaining_main_ms(Color::White), 60_000);
+        // init で両者とも 60+5=65 秒、Black だけ消費後 60 秒、White は 65 秒のまま。
+        assert_eq!(c.remaining_main_ms(Color::White), 65_000);
     }
 
     // ---- StopWatchClock ----
@@ -578,18 +599,18 @@ mod tests {
     }
 
     #[test]
-    fn stopwatch_format_summary_emits_seconds_for_client_compat() {
-        // `Time_Unit:1min` は既存 CSA client + USI エンジンの多くが byoyomi を
-        // 秒として扱う都合で損失が出るため、秒に展開して出す (Codex review
-        // PR #468 3rd round P2)。内部 consume は依然として分単位に切り捨てる
-        // ため、engine から見た byoyomi (秒) と server 側の最大受理 elapsed
-        // (分切り上げ) の差は engine が自主的に byoyomi 内に収めることで吸収。
+    fn stopwatch_format_summary_uses_minute_unit() {
+        // StopWatch は consume で分単位切り捨てを行うため、Game_Summary も
+        // `Time_Unit:1min` で分単位宣言する (Codex review PR #468 4th round P1
+        // の指摘通り)。Round 3 で一時的に秒表記にしたが、`consume` の分切り捨てと
+        // `T<sec>` broadcast の秒単位が乖離して client 側の remaining が server 側
+        // と食い違うため revert。
         let c = StopWatchClock::new(15, 1);
         let s = c.format_summary();
         assert!(s.contains("BEGIN Time"));
-        assert!(s.contains("Time_Unit:1sec"));
-        assert!(s.contains("Total_Time:900"), "total=15min → 900 sec: {s}");
-        assert!(s.contains("Byoyomi:60"), "byoyomi=1min → 60 sec: {s}");
+        assert!(s.contains("Time_Unit:1min"));
+        assert!(s.contains("Total_Time:15"));
+        assert!(s.contains("Byoyomi:1"));
         assert!(s.contains("Least_Time_Per_Move:0"));
         assert!(s.contains("END Time"));
     }
