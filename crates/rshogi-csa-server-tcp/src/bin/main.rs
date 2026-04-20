@@ -60,6 +60,12 @@ struct Cli {
     /// AGREE 受信の最大待機時間（秒）。GUI/エンジンの起動待ちを許容するため長めの既定値。
     #[arg(long, default_value_t = 300)]
     agree_timeout_sec: u64,
+    /// `%%SETBUOY` / `%%DELETEBUOY` を許可する admin ハンドル。複数指定可 (例:
+    /// `--admin-handle alice --admin-handle bob`)。空の場合はブイ登録コマンドを
+    /// 全リクエストで `PERMISSION_DENIED` で拒否する (Codex review PR #470 3rd
+    /// round P2)。`%%GETBUOYCOUNT` は参照系なので権限不要で全ユーザー可。
+    #[arg(long = "admin-handle", value_name = "HANDLE")]
+    admin_handle: Vec<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -88,7 +94,7 @@ fn main() -> anyhow::Result<()> {
         x1_reply_write_timeout: std::time::Duration::from_secs(5),
         entering_king_rule: rshogi_core::types::EnteringKingRule::Point24,
         initial_sfen: None,
-        admin_handles: Vec::new(),
+        admin_handles: cli.admin_handle.clone(),
     };
     let kifu_storage = FileKifuStorage::new(config.kifu_topdir.clone());
     let state = Rc::new(build_state(
