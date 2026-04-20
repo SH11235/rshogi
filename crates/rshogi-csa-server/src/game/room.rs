@@ -164,24 +164,33 @@ impl fmt::Debug for GameRoom {
 impl GameRoom {
     /// `GameRoomConfig::initial_sfen` に従って対局ルームを構築する。
     ///
-    /// - `initial_sfen = None`: 平手 (`SFEN_HIRATE`) で初期化。既存 API と後方互換。
+    /// - `initial_sfen = None`: 平手 (`SFEN_HIRATE`) で初期化。SFEN_HIRATE は
+    ///   const で `set_sfen` が失敗するのは rshogi-core 側のバグなので、この
+    ///   パスは内部で `expect` する。
     /// - `initial_sfen = Some(sfen)`: 渡された SFEN で `Position::set_sfen`。
-    ///   SFEN が不正なら panic する（呼び出し側が事前に
-    ///   [`crate::protocol::summary::position_section_from_sfen`] を通して検証
-    ///   している前提）。
+    ///   SFEN 不正時は `Err(ServerError::Protocol(Malformed))` を返し、
+    ///   呼び出し側が適切に拒否 / ログ出力できるようにする (Codex review
+    ///   PR #470 4th round P2)。プロセス全体 / DO を panic で落とさないため
+    ///   の設計。
     ///
     /// Game_Summary の `position_section` / `to_move` と棋譜の `initial_position`
     /// は同一 SFEN から派生させる契約なので、呼び出し側は同じ `initial_sfen` を
     /// GameRoom / GameSummaryBuilder / KifuRecord に横断して渡すこと。
-    pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Self {
+    pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Result<Self, ServerError> {
         let mut pos = Position::new();
-        // `initial_sfen` 指定時はそれを使う。未指定時は平手。`SFEN_HIRATE` は const で
-        // `set_sfen` が失敗するのは rshogi-core 側のバグ。
-        let sfen = config.initial_sfen.as_deref().unwrap_or(SFEN_HIRATE);
-        pos.set_sfen(sfen)
-            .unwrap_or_else(|e| panic!("GameRoom::new: invalid initial_sfen {sfen:?}: {e:?}"));
+        match config.initial_sfen.as_deref() {
+            Some(sfen) => pos.set_sfen(sfen).map_err(|e| {
+                ServerError::Protocol(ProtocolError::Malformed(format!(
+                    "invalid initial_sfen {sfen:?}: {e:?}"
+                )))
+            })?,
+            None => {
+                // 平手は const。失敗するのはコアのバグなので expect で落としていい。
+                pos.set_sfen(SFEN_HIRATE).expect("SFEN_HIRATE must be valid");
+            }
+        }
         let validator = Validator::new(config.entering_king_rule);
-        Self {
+        Ok(Self {
             config,
             pos,
             clock,
@@ -189,7 +198,7 @@ impl GameRoom {
             status: GameStatus::AgreeWaiting,
             moves_played: 0,
             turn_started_at_ms: None,
-        }
+        })
     }
 
     /// 現在の状態。
@@ -645,7 +654,7 @@ mod tests {
             initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        GameRoom::new(config, clock)
+        GameRoom::new(config, clock).expect("valid test config")
     }
 
     /// 任意 SFEN から対局を開始するためのテスト専用 helper。
@@ -665,7 +674,7 @@ mod tests {
             initial_sfen: Some(sfen.to_owned()),
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        GameRoom::new(config, clock)
+        GameRoom::new(config, clock).expect("valid test config")
     }
 
     fn line(s: &str) -> CsaLine {
@@ -789,7 +798,7 @@ mod tests {
             initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 0));
-        let mut room = GameRoom::new(config, clock);
+        let mut room = GameRoom::new(config, clock).expect("valid test config");
         agree_both(&mut room);
         // 経過 4000ms, margin 1500ms → consume(2500ms)。整数秒切り捨てで 2 秒消費。
         let r = room.handle_line(Color::Black, &line("+7776FU"), 4_000).unwrap();
@@ -809,7 +818,7 @@ mod tests {
             initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(total_sec, byoyomi_sec));
-        GameRoom::new(config, clock)
+        GameRoom::new(config, clock).expect("valid test config")
     }
 
     #[test]
@@ -1056,7 +1065,7 @@ mod tests {
             initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        let mut room = GameRoom::new(config, clock);
+        let mut room = GameRoom::new(config, clock).expect("valid test config");
         agree_both(&mut room);
         let _ = room.handle_line(Color::Black, &line("+7776FU"), 0).unwrap();
         let r = room.handle_line(Color::White, &line("-3334FU"), 0).unwrap();

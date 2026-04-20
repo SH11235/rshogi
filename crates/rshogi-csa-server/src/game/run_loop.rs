@@ -267,7 +267,7 @@ mod tests {
             initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        GameRoom::new(config, clock)
+        GameRoom::new(config, clock).expect("valid test config")
     }
 
     fn line(s: &str) -> CsaLine {
@@ -396,7 +396,7 @@ mod tests {
             initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(2, 10));
-        let mut room = GameRoom::new(config, clock);
+        let mut room = GameRoom::new(config, clock).expect("valid test config");
         let MockHandles {
             transport: mut sente,
             tx: sente_tx,
@@ -494,7 +494,7 @@ mod tests {
             initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(1, 0));
-        let mut room = GameRoom::new(config, clock);
+        let mut room = GameRoom::new(config, clock).expect("valid test config");
         let MockHandles {
             transport: mut sente,
             tx: sente_tx,

@@ -406,6 +406,10 @@ impl GameRoom {
             }
             None => (standard_initial_position_block(), Color::Black),
         };
+        // `CoreRoom::new` は initial_sfen が不正な場合に Err を返す。Workers DO は
+        // 永続化済み config から cold start 復元することもあるため、Err を panic で
+        // 落とさず Error::RustError で Runtime に伝搬する (Codex review PR #470
+        // 4th round P2)。
         let core = CoreRoom::new(
             GameRoomConfig {
                 game_id: GameId::new(cfg.game_id.clone()),
@@ -417,7 +421,8 @@ impl GameRoom {
                 initial_sfen: cfg.initial_sfen.clone(),
             },
             clock,
-        );
+        )
+        .map_err(|e| Error::RustError(format!("CoreRoom::new: {e:?}")))?;
         *self.core.borrow_mut() = Some(core);
         *self.config.borrow_mut() = Some(cfg.clone());
 
@@ -685,7 +690,11 @@ impl GameRoom {
         };
         let clock: Box<dyn TimeClock> =
             Box::new(SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec));
-        let mut core = CoreRoom::new(
+        // 永続化済み initial_sfen を信用して CoreRoom を再構築。もし永続化データが
+        // 壊れて `set_sfen` が落ちる場合は panic ではなく Err として返し、呼び出し側
+        // (`ensure_core_loaded`) の Result で伝搬できるようにする (Codex review
+        // PR #470 4th round P2)。
+        let mut core = match CoreRoom::new(
             GameRoomConfig {
                 game_id: GameId::new(cfg.game_id.clone()),
                 black: PlayerName::new(cfg.black_handle.clone()),
@@ -699,7 +708,13 @@ impl GameRoom {
                 initial_sfen: cfg.initial_sfen.clone(),
             },
             clock,
-        );
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                console_log!("[GameRoom] replay CoreRoom::new failed: {e:?}");
+                return Ok(());
+            }
+        };
 
         // moves 再送。AGREE は手として永続化しないため、moves が存在するなら
         // 両者 AGREE 済みと確定できる（そうでないと MoveAccepted に至らない）。

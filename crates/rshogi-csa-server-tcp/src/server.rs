@@ -1323,7 +1323,7 @@ where
         entering_king_rule: state.config.entering_king_rule,
         initial_sfen: state.config.initial_sfen.clone(),
     };
-    let mut room = GameRoom::new(cfg, Box::new(clock));
+    let mut room = GameRoom::new(cfg, Box::new(clock))?;
 
     let start_instant = tokio::time::Instant::now();
     let now_ms =
