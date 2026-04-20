@@ -65,10 +65,29 @@ impl InMemoryBroadcaster {
     }
 
     /// ルームに観戦者を登録する（`%%MONITOR2ON` 相当の拡張経路から呼ばれる想定）。
-    /// 現状のバイナリ構成では呼び出し経路のみ用意し、本体コードからは未使用。
+    ///
+    /// 登録の前に既存 subscriber の中で `tx.is_closed()` が true (= receiver が
+    /// drop 済み) のものを retain で prune する。`%%MONITOR2OFF` や購読先切替で
+    /// 行き場の無くなった Sender が `clear_room` まで残らないようにするため
+    /// (Codex review PR #469 P2)。broadcast が発生しない idle な room でも
+    /// 登録時に毎回掃除されるので、dead entry の蓄積は O(同時購読者数) に抑えられる。
     pub async fn subscribe(&self, room_id: RoomId, subscriber: Subscriber) {
         let mut guard = self.inner.lock().await;
-        guard.entry(room_id).or_default().push(subscriber);
+        let entry = guard.entry(room_id).or_default();
+        entry.retain(|s| !s.tx.is_closed());
+        entry.push(subscriber);
+    }
+
+    /// 指定ルームに紐づく dead subscriber (receiver drop 済み) を prune する。
+    ///
+    /// `%%MONITOR2OFF` など「subscribe は呼ばないが掃除はしたい」経路で使う。
+    /// broadcast 経路と違い `retain` は `is_closed` のみを基準にするため、
+    /// 生存中の subscriber への送信は発生しない。
+    pub async fn prune_closed(&self, room_id: &RoomId) {
+        let mut guard = self.inner.lock().await;
+        if let Some(subs) = guard.get_mut(room_id) {
+            subs.retain(|s| !s.tx.is_closed());
+        }
     }
 
     /// ルームに紐づく観戦者集合を丸ごと削除する。対局終了時などに呼ぶ。
@@ -200,5 +219,44 @@ mod tests {
             .await
             .unwrap();
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn subscribe_prunes_closed_subscribers_before_inserting() {
+        // Codex review (PR #469 再 review P2) の回帰: 観戦者が MONITOR2OFF / 切替で
+        // rx を drop しても、broadcast が発火するまで死んだ Sender が残る。subscribe
+        // が次の購読登録の直前に dead entry を prune することで、反復トグルによる
+        // 蓄積を O(同時生存購読者数) に抑える。
+        let bcast = InMemoryBroadcaster::new();
+        let (tx1, rx1) = channel::<CsaLine>(SUBSCRIBER_CHANNEL_CAPACITY);
+        bcast.subscribe(RoomId::new("g1"), Subscriber::new(tx1)).await;
+        drop(rx1); // 1 つ目の subscriber を dead 化
+        // broadcast 無しで 2 つ目を subscribe。1 つ目は prune されるはず。
+        let (tx2, _rx2) = channel::<CsaLine>(SUBSCRIBER_CHANNEL_CAPACITY);
+        bcast.subscribe(RoomId::new("g1"), Subscriber::new(tx2)).await;
+        let guard = bcast.inner.lock().await;
+        let subs = guard.get(&RoomId::new("g1")).unwrap();
+        assert_eq!(subs.len(), 1, "subscribe should have pruned dead entry first");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prune_closed_removes_dead_entries_on_demand() {
+        // MONITOR2OFF 経路では subscribe は呼ばれないため、専用の prune_closed で
+        // 明示的に dead entry を掃除する。broadcast 無しで直接 prune が走って
+        // いることを確認。
+        let bcast = InMemoryBroadcaster::new();
+        let (tx, rx) = channel::<CsaLine>(SUBSCRIBER_CHANNEL_CAPACITY);
+        bcast.subscribe(RoomId::new("g1"), Subscriber::new(tx)).await;
+        drop(rx);
+        assert_eq!(bcast.inner.lock().await.get(&RoomId::new("g1")).unwrap().len(), 1);
+        bcast.prune_closed(&RoomId::new("g1")).await;
+        assert_eq!(bcast.inner.lock().await.get(&RoomId::new("g1")).unwrap().len(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prune_closed_on_unknown_room_is_noop() {
+        // 存在しない room_id に対する prune は no-op (エラーにならない)。
+        let bcast = InMemoryBroadcaster::new();
+        bcast.prune_closed(&RoomId::new("never-subscribed")).await;
     }
 }

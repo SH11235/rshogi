@@ -606,9 +606,6 @@ where
             }
             ClientCommand::Monitor2On { game_id } => {
                 // 対局が GameRegistry に存在しているときのみ購読を許可する。
-                // 存在しない game_id への購読要求は `NOT_FOUND` を返して購読状態を
-                // 変更しない（無効な subscribe でも broadcaster には登録するが、
-                // clear_room まで残ることを避ける方針）。
                 let exists = {
                     let games = state.games.lock().await;
                     games.get(&game_id).is_some()
@@ -618,11 +615,61 @@ where
                         CsaLine::new(format!("##[MONITOR2] NOT_FOUND {game_id}")),
                         CsaLine::new("##[MONITOR2] END"),
                     ])
+                } else if !observer_mode {
+                    // 初回の observer 転換。subscribe().await の前に waiting pool
+                    // から自分を除外する必要がある。そうしないと drive 側の
+                    // `take_complement` と subscribe() の await の間にレースが発生し、
+                    // drive が slot を掴んだ後で我々が observer_mode に入ると
+                    // match_request が監視外に流れて相手が永久 hang する
+                    // (Codex review PR #469 P1)。
+                    //
+                    // 競合の結果は pool の Mutex で直列化されるので、`remove_by_handle`
+                    // の戻り値で「先に drive が slot を掴んだか」を確実に判別できる:
+                    // - true: 我々が先に取り除いた。drive は以後 slot を見つけない。
+                    //         安全に observer へ遷移。
+                    // - false: drive が先に slot を取っていった。match_request が
+                    //         間もなく match_req_rx に届く。observer にはならず、
+                    //         client に BUSY を返して通常 waiter として match_req_rx
+                    //         を次のループで受けさせる。
+                    let mut pool = state.waiting.lock().await;
+                    let removed = pool.remove_by_handle(&game_name, &handle);
+                    drop(pool);
+                    if !removed {
+                        Some(vec![
+                            CsaLine::new(format!("##[MONITOR2] BUSY {game_id}")),
+                            CsaLine::new("##[MONITOR2] END"),
+                        ])
+                    } else {
+                        // League も `GameWaiting` → `Connected` へ戻して `%%WHO` から
+                        // `waiting:<game_name>` を消す。`transition` は「未ログイン」
+                        // 「Finished」でのみ Err を返すが、ここではどちらでもない。
+                        let mut league = state.league.lock().await;
+                        let _ = league.transition(&handle_player, PlayerStatus::Connected);
+                        drop(league);
+                        observer_mode = true;
+                        // subscriber 登録。subscribe は内部で dead entry を prune する
+                        // ため、切替や MONITOR2OFF の蓄積は O(生存購読者数) に抑えられる
+                        // (Codex review PR #469 P2)。
+                        let (tx, rx) = tokio::sync::mpsc::channel(
+                            crate::broadcaster::SUBSCRIBER_CHANNEL_CAPACITY,
+                        );
+                        state
+                            .broadcaster
+                            .subscribe(RoomId::new(game_id.as_str()), Subscriber::new(tx))
+                            .await;
+                        monitor_rx = Some((game_id.clone(), rx));
+                        Some(vec![
+                            CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
+                            CsaLine::new("##[MONITOR2] END"),
+                        ])
+                    }
                 } else {
-                    // 既存の購読があれば rx を drop (broadcaster 側 subscriber は次回の
-                    // broadcast で prune される) して新しい rx に差し替える。単一観戦
-                    // モデルの方針を踏襲。容量制限付き channel を使うことで slow
-                    // consumer による unbounded buffer 蓄積を防ぐ。
+                    // 既に observer モード。旧 rx を drop して差し替える。
+                    // 差し替え前に旧 room の dead entry を明示的に prune する
+                    // (subscribe 内の prune は新 room に対してのみ行われるため)。
+                    if let Some((old_id, _)) = monitor_rx.take() {
+                        state.broadcaster.prune_closed(&RoomId::new(old_id.as_str())).await;
+                    }
                     let (tx, rx) =
                         tokio::sync::mpsc::channel(crate::broadcaster::SUBSCRIBER_CHANNEL_CAPACITY);
                     state
@@ -630,24 +677,6 @@ where
                         .subscribe(RoomId::new(game_id.as_str()), Subscriber::new(tx))
                         .await;
                     monitor_rx = Some((game_id.clone(), rx));
-                    // 観戦者モードに入ったら waiting pool から自分のスロットを除外する。
-                    // さらに League 側の PlayerStatus も `GameWaiting` から `Connected`
-                    // へ戻して、`%%WHO` で `waiting:<game_name>` と出ないようにする。
-                    // これにより、同一 game_name + 相補色で後続プレイヤが LOGIN しても
-                    // 観戦者を対局者として選ばれなくなる (Codex review PR #469 P1)。
-                    // 観戦者のループは `match_req_rx` が drop されても observer_mode
-                    // フラグで本ブランチを pending 化しているのでループを抜けない。
-                    if !observer_mode {
-                        let mut pool = state.waiting.lock().await;
-                        let _ = pool.remove_by_handle(&game_name, &handle);
-                        drop(pool);
-                        let mut league = state.league.lock().await;
-                        // `transition` が Err を返すのは「未ログイン」「Finished」の 2 ケース
-                        // のみ。observer 化の時点で両者どちらでもないはずなので結果は
-                        // 無視してログ用途に留める。
-                        let _ = league.transition(&handle_player, PlayerStatus::Connected);
-                        observer_mode = true;
-                    }
                     Some(vec![
                         CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
                         CsaLine::new("##[MONITOR2] END"),
@@ -661,6 +690,10 @@ where
                     && *active_id == game_id
                 {
                     monitor_rx = None;
+                    // 旧 rx が drop された時点で tx は is_closed になる。broadcast
+                    // が起きない idle room でも tx が貯まらないよう、ここで明示的に
+                    // prune する (Codex review PR #469 P2)。
+                    state.broadcaster.prune_closed(&RoomId::new(game_id.as_str())).await;
                 }
                 Some(vec![
                     CsaLine::new(format!("##[MONITOR2OFF] {game_id}")),
