@@ -881,6 +881,52 @@ fn monitor2_subscribes_and_receives_moves_and_chat() {
 }
 
 #[test]
+fn monitor2_removes_subscriber_from_matchmaking_pool() {
+    // Codex review (PR #469 P1) の回帰: x1 waiter は LOGIN で一旦 WaitingPool に
+    // 入るが、`%%MONITOR2ON` が成立した時点で観戦者扱いになるため pool から
+    // 除外しなければならない。除外しないと、同一 game_name + 相補色で後続
+    // プレイヤが LOGIN したとき観戦者が対局者として選ばれてしまう。
+    //
+    // このテストでは alice/bob 対局進行中に carol が同じ `g1`+`black` で x1
+    // LOGIN (alice と同色 = bob と相補)。`%%MONITOR2ON` で observer 化した後、
+    // carol が `%%WHO` で自分の status を確認し `waiting:g1` が出ないことを
+    // 確認する (= pool から正しく抜けている)。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("monitor2_no_match").await;
+
+        // alice vs bob のメイン対局。
+        let (_rb, _wb, _rw, _ww, game_id) = login_match_agree(addr).await;
+
+        // carol が相補色候補として pool に入る (現時点では `waiting:g1`)。
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+g1+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+
+        // observer 化。pool から外れる。
+        send_line(&mut wc, &format!("%%MONITOR2ON {game_id}")).await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), format!("##[MONITOR2] BEGIN {game_id}"));
+        let _ = read_line_raw(&mut rc).await.unwrap(); // END
+
+        // %%WHO で carol の status を確認。observer 化済みなら `waiting:g1` は
+        // 出ないはず (pool から抜けているので League の GameWaiting 状態ではない)。
+        send_line(&mut wc, "%%WHO").await;
+        let mut lines = Vec::new();
+        for _ in 0..20 {
+            let l = read_line_raw(&mut rc).await.unwrap();
+            let end = l == "##[WHO] END";
+            lines.push(l);
+            if end {
+                break;
+            }
+        }
+        let has_waiting_carol = lines.iter().any(|l| l == "##[WHO] carol waiting:g1");
+        assert!(!has_waiting_carol, "observer carol must not appear as waiting: {lines:?}");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn chat_without_active_monitor_returns_not_monitoring() {
     // x1 waiter が `%%MONITOR2ON` 前に `%%CHAT` を投げると `NOT_MONITORING` で
     // 弾かれる。購読前の chat 経路を誤って開放していないことの回帰防止。

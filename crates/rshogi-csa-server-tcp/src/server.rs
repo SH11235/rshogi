@@ -470,10 +470,20 @@ where
     }
 
     // `%%MONITOR2ON <game_id>` で購読中の対局があれば、その broadcast 受信口を
-    // `(game_id, UnboundedReceiver<CsaLine>)` として保持する。単一購読モデル:
+    // `(game_id, Receiver<CsaLine>)` (bounded) として保持する。単一購読モデル:
     // 後続の `%%MONITOR2ON` は既存 rx を drop して差し替える。CSA x1 仕様上
     // 複数同時観戦は稀なので、複雑なキュー/セット管理を避ける。
-    let mut monitor_rx: Option<(GameId, tokio::sync::mpsc::UnboundedReceiver<CsaLine>)> = None;
+    //
+    // キュー容量は `crate::broadcaster::SUBSCRIBER_CHANNEL_CAPACITY`。slow
+    // consumer がキューを溜め込んだ時点で broadcaster 側が prune するため、
+    // 無制限 memory 溜め込み経路 (Codex review PR #469 P2) を遮断する。
+    let mut monitor_rx: Option<(GameId, tokio::sync::mpsc::Receiver<CsaLine>)> = None;
+
+    // `%%MONITOR2ON` が成立したら観戦者扱いとなるため、waiting pool から除外する
+    // 必要がある (Codex review PR #469 P1: 観戦者が同一 game_name + 相補色で
+    // 後続 LOGIN とマッチさせられる経路を塞ぐ)。`pool.remove_by_handle` は
+    // 冪等 (未登録なら何もしない) なので、複数回呼んでも害が無い。
+    let mut observer_mode = false;
 
     // マッチ確定 / 受信 / 観戦 broadcast 中継 の 3 経路を監視する。x1 waiter のみ
     // 受信行を `%%` 系コマンドとして解釈し応答を返すため、recv ブランチは loop で
@@ -481,7 +491,18 @@ where
     // 先に到着した場合はバッファを保ったまま drive 側へ transport を渡せる。
     let waiter_outcome: WaiterOutcome = 'outer: loop {
         let recv = tokio::select! {
-            req_res = &mut match_req_rx => {
+            // observer_mode 時は `match_req_rx` の Err は自分が pool から自主的に
+            // 外れたことが原因。`recv_line` / `forwarded` ブランチを使い続けられるよう、
+            // pending() に切り替えて本ブランチを実質無効化する。`match_req_rx` を
+            // `Option` 化すると `tokio::select!` 内部の pin 要件が面倒になるため、
+            // ブランチ側で observer_mode 判定をする。
+            req_res = async {
+                if observer_mode {
+                    std::future::pending::<Result<MatchRequest, oneshot::error::RecvError>>().await
+                } else {
+                    (&mut match_req_rx).await
+                }
+            } => {
                 match req_res {
                     Ok(req) => {
                         // transport を drive 側へ渡し、終局通知を待つ。
@@ -600,13 +621,33 @@ where
                 } else {
                     // 既存の購読があれば rx を drop (broadcaster 側 subscriber は次回の
                     // broadcast で prune される) して新しい rx に差し替える。単一観戦
-                    // モデルの方針を踏襲。
-                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    // モデルの方針を踏襲。容量制限付き channel を使うことで slow
+                    // consumer による unbounded buffer 蓄積を防ぐ。
+                    let (tx, rx) =
+                        tokio::sync::mpsc::channel(crate::broadcaster::SUBSCRIBER_CHANNEL_CAPACITY);
                     state
                         .broadcaster
                         .subscribe(RoomId::new(game_id.as_str()), Subscriber::new(tx))
                         .await;
                     monitor_rx = Some((game_id.clone(), rx));
+                    // 観戦者モードに入ったら waiting pool から自分のスロットを除外する。
+                    // さらに League 側の PlayerStatus も `GameWaiting` から `Connected`
+                    // へ戻して、`%%WHO` で `waiting:<game_name>` と出ないようにする。
+                    // これにより、同一 game_name + 相補色で後続プレイヤが LOGIN しても
+                    // 観戦者を対局者として選ばれなくなる (Codex review PR #469 P1)。
+                    // 観戦者のループは `match_req_rx` が drop されても observer_mode
+                    // フラグで本ブランチを pending 化しているのでループを抜けない。
+                    if !observer_mode {
+                        let mut pool = state.waiting.lock().await;
+                        let _ = pool.remove_by_handle(&game_name, &handle);
+                        drop(pool);
+                        let mut league = state.league.lock().await;
+                        // `transition` が Err を返すのは「未ログイン」「Finished」の 2 ケース
+                        // のみ。observer 化の時点で両者どちらでもないはずなので結果は
+                        // 無視してログ用途に留める。
+                        let _ = league.transition(&handle_player, PlayerStatus::Connected);
+                        observer_mode = true;
+                    }
                     Some(vec![
                         CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
                         CsaLine::new("##[MONITOR2] END"),
