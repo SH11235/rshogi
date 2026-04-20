@@ -555,9 +555,19 @@ where
         let line = match recv {
             Ok(l) => l,
             Err(_) => {
-                // 切断 or I/O エラー → pool を抜けて終了。
+                // 切断 or I/O エラー → pool を抜けて終了。observer モードで
+                // MONITOR2OFF を呼ばずに切断した接続は `monitor_rx` を drop する
+                // ことで tx が `is_closed` になるが、`broadcaster.inner` の entry
+                // は次の broadcast / subscribe / clear_room まで掃除されない。
+                // broadcast が発生しない idle room で再接続を繰り返されると
+                // dead sender が蓄積するため、切断時にも明示的に prune する
+                // (Codex review PR #469 3rd round P2)。
                 let mut pool = state.waiting.lock().await;
                 let _removed = pool.remove_by_handle(&game_name, &handle);
+                drop(pool);
+                if let Some((room, _)) = monitor_rx.take() {
+                    state.broadcaster.prune_closed(&RoomId::new(room.as_str())).await;
+                }
                 break 'outer WaiterOutcome::DisconnectedFromPool;
             }
         };
@@ -657,11 +667,27 @@ where
                             .broadcaster
                             .subscribe(RoomId::new(game_id.as_str()), Subscriber::new(tx))
                             .await;
-                        monitor_rx = Some((game_id.clone(), rx));
-                        Some(vec![
-                            CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
-                            CsaLine::new("##[MONITOR2] END"),
-                        ])
+                        // TOCTOU 回避: 初回 exists 確認から subscribe までの間に
+                        // drive が終局して `unregister + clear_room` を完了している
+                        // 可能性がある。その場合は broadcaster に stale room が残り、
+                        // 観戦者は二度と broadcast を受け取れない。subscribe 後に
+                        // もう一度存在確認し、消えていれば rx を drop + prune して
+                        // NOT_FOUND を返す (Codex review PR #469 3rd round P2)。
+                        let still_exists = subscribe_still_registered(&state, &game_id).await;
+                        if !still_exists {
+                            drop(rx);
+                            state.broadcaster.prune_closed(&RoomId::new(game_id.as_str())).await;
+                            Some(vec![
+                                CsaLine::new(format!("##[MONITOR2] NOT_FOUND {game_id}")),
+                                CsaLine::new("##[MONITOR2] END"),
+                            ])
+                        } else {
+                            monitor_rx = Some((game_id.clone(), rx));
+                            Some(vec![
+                                CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
+                                CsaLine::new("##[MONITOR2] END"),
+                            ])
+                        }
                     }
                 } else {
                     // 既に observer モード。旧 rx を drop して差し替える。
@@ -676,11 +702,22 @@ where
                         .broadcaster
                         .subscribe(RoomId::new(game_id.as_str()), Subscriber::new(tx))
                         .await;
-                    monitor_rx = Some((game_id.clone(), rx));
-                    Some(vec![
-                        CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
-                        CsaLine::new("##[MONITOR2] END"),
-                    ])
+                    // 同じく subscribe 後に TOCTOU 再確認。
+                    let still_exists = subscribe_still_registered(&state, &game_id).await;
+                    if !still_exists {
+                        drop(rx);
+                        state.broadcaster.prune_closed(&RoomId::new(game_id.as_str())).await;
+                        Some(vec![
+                            CsaLine::new(format!("##[MONITOR2] NOT_FOUND {game_id}")),
+                            CsaLine::new("##[MONITOR2] END"),
+                        ])
+                    } else {
+                        monitor_rx = Some((game_id.clone(), rx));
+                        Some(vec![
+                            CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
+                            CsaLine::new("##[MONITOR2] END"),
+                        ])
+                    }
                 }
             }
             ClientCommand::Monitor2Off { game_id } => {
@@ -793,6 +830,23 @@ enum WaiterOutcome {
     Aborted,
     /// 対局前に切断を検知した（pool + league から除去する）。
     DisconnectedFromPool,
+}
+
+/// `%%MONITOR2ON` の TOCTOU 再確認用ヘルパ。`subscribe` 完了後に game_id が
+/// まだ `GameRegistry` に存在するかを確認する。
+///
+/// `subscribe` の前後は drive 側の `unregister + clear_room` に対して非原子的で、
+/// subscribe 完了時点でゲームが既に終局している可能性がある。その場合 stale
+/// なエントリを broadcaster に残さないよう、呼び出し側で drop + prune して
+/// NOT_FOUND を返す (Codex review PR #469 3rd round P2)。
+async fn subscribe_still_registered<R, K, P>(state: &SharedState<R, K, P>, game_id: &GameId) -> bool
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let games = state.games.lock().await;
+    games.get(game_id).is_some()
 }
 
 /// drive 側タスクのメインループ。両 transport を所有して 1 対局を完了まで運ぶ。
