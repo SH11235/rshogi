@@ -264,6 +264,7 @@ mod tests {
             max_moves: 256,
             time_margin_ms: 0,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
         GameRoom::new(config, clock)
@@ -392,6 +393,7 @@ mod tests {
             max_moves: 256,
             time_margin_ms: 0,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(2, 10));
         let mut room = GameRoom::new(config, clock);
@@ -489,6 +491,7 @@ mod tests {
             // 持ち時間 1 秒 + 秒読み 0 秒 + 通信マージン 5 秒。
             time_margin_ms: 5_000,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(1, 0));
         let mut room = GameRoom::new(config, clock);

@@ -87,6 +87,7 @@ fn main() -> anyhow::Result<()> {
         agree_timeout: std::time::Duration::from_secs(cli.agree_timeout_sec),
         x1_reply_write_timeout: std::time::Duration::from_secs(5),
         entering_king_rule: rshogi_core::types::EnteringKingRule::Point24,
+        initial_sfen: None,
     };
     let kifu_storage = FileKifuStorage::new(config.kifu_topdir.clone());
     let state = Rc::new(build_state(

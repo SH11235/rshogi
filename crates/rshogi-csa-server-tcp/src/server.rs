@@ -35,7 +35,10 @@ use rshogi_csa_server::port::{
     RateStorage,
 };
 use rshogi_csa_server::protocol::command::{ClientCommand, parse_command};
-use rshogi_csa_server::protocol::summary::{GameSummaryBuilder, standard_initial_position_block};
+use rshogi_csa_server::protocol::summary::{
+    GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
+    standard_initial_position_block,
+};
 use rshogi_csa_server::record::kifu::{KifuMove, KifuRecord, primary_result_code};
 use rshogi_csa_server::types::{
     Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, RoomId,
@@ -110,6 +113,13 @@ pub struct ServerConfig {
     pub x1_reply_write_timeout: Duration,
     /// 入玉ルール。既定は 24 点法。
     pub entering_king_rule: EnteringKingRule,
+    /// 既定の対局開始局面 SFEN。`None` なら平手。
+    ///
+    /// 運用では通常 `None` (= 平手) のまま起動し、`%%FORK` / buoy 経由の対局
+    /// のみ `GameRoomConfig::initial_sfen` を per-game で上書きする。本 field
+    /// は `sensible_defaults` が全対局で使う既定値を設定するためにあり、テスト
+    /// や特殊環境 (駒落ちサーバー等) で全対局を非平手で起動する経路で使う。
+    pub initial_sfen: Option<String>,
 }
 
 impl ServerConfig {
@@ -126,6 +136,7 @@ impl ServerConfig {
             agree_timeout: Duration::from_secs(5 * 60),
             x1_reply_write_timeout: Duration::from_secs(5),
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         }
     }
 }
@@ -976,14 +987,29 @@ where
 {
     // Game_Summary を両対局者に送信。
     let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
+    // `initial_sfen` が設定されていればそれから派生、無ければ平手固定のブロックを使う。
+    // GameRoom / Game_Summary / 棋譜 の三点一致契約 (GameRoomConfig::initial_sfen の
+    // doc を参照) を満たすため、同じ SFEN を複数入口で再利用する。
+    let (position_section, to_move) = match &state.config.initial_sfen {
+        Some(sfen) => {
+            let section = position_section_from_sfen(sfen).map_err(|e| {
+                ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
+            })?;
+            let side = side_to_move_from_sfen(sfen).map_err(|e| {
+                ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
+            })?;
+            (section, side)
+        }
+        None => (standard_initial_position_block(), Color::Black),
+    };
     let summary = GameSummaryBuilder {
         game_id: game_id.clone(),
         black: matched.black.clone(),
         white: matched.white.clone(),
         time_section: clock.format_summary(),
-        position_section: standard_initial_position_block(),
+        position_section,
         rematch_on_draw: false,
-        to_move: Color::Black,
+        to_move,
         declaration: "Jishogi 1.1".to_owned(),
     };
     send_multiline(black_transport, &summary.build_for(Color::Black)).await?;
@@ -1217,6 +1243,7 @@ where
         max_moves: state.config.max_moves,
         time_margin_ms: state.config.time_margin_ms,
         entering_king_rule: state.config.entering_king_rule,
+        initial_sfen: state.config.initial_sfen.clone(),
     };
     let mut room = GameRoom::new(cfg, Box::new(clock));
 
@@ -1368,6 +1395,16 @@ where
     P: PasswordStore + 'static,
 {
     let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
+    // initial_sfen が設定されていれば棋譜の `initial_position` も同じ SFEN から派生。
+    // 設定されていない (= 平手) 場合は既存の CSA shorthand `PI\n+\n` を保つ。
+    // 長期的には常に `BEGIN Position` 形式に統一しても良いが、shogi-server 互換
+    // バッチへの影響を避けるため hirate のみ現行踏襲 (deferral)。
+    let initial_position = match &state.config.initial_sfen {
+        Some(sfen) => position_section_from_sfen(sfen).map_err(|e| {
+            ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
+        })?,
+        None => "PI\n+\n".to_owned(),
+    };
     let record = KifuRecord {
         game_id: game_id.clone(),
         black: matched.black.clone(),
@@ -1376,7 +1413,7 @@ where
         end_time: end_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         event: "rshogi-csa-server-tcp".to_owned(),
         time_section: clock.format_summary(),
-        initial_position: "PI\n+\n".to_owned(),
+        initial_position,
         moves: moves.to_vec(),
         result: result.clone(),
     };
