@@ -1,6 +1,6 @@
 //! `BuoyStorage` のローカルファイル実装。
 //!
-//! ブイ (途中局面テンプレート) を `<topdir>/buoys/<sanitized_game_name>.json`
+//! ブイ (途中局面テンプレート) を `<topdir>/buoys/<encoded_game_name>.json`
 //! に JSON として保存する。内容は以下の単純な schema:
 //!
 //! ```text
@@ -10,13 +10,25 @@
 //! }
 //! ```
 //!
-//! - `set` は原子的に上書きする (`.tmp` に書いてから `rename`)。
+//! - `set` は原子的に上書きする (`.tmp` に書いてから `rename`)。tmp ファイル名には
+//!   PID + atomic counter を含めて、複数 `set` が同じ buoy に並列に書いても
+//!   互いの tmp を踏まない (Codex review PR #470 P3)。
 //! - `delete` はファイル削除。ファイル未存在は no-op (`Ok(())`)。
 //! - `count` は JSON を読んで `remaining` を返す。ファイル未存在なら `Ok(None)`。
+//!
+//! ## ファイル名エンコーディング
+//!
+//! `game_name` が `.` `/` `\` 等を含んでも異なるブイが衝突しないよう、
+//! **percent-encoding 風の可逆エンコーディング** (`encode_game_name`) を使う。
+//! 安全文字 (ASCII alphanumeric と `-` `_`) 以外は `%XX` 形式でエスケープする。
+//! これにより `a/b` / `a.b` / `a%b` が異なるファイル名に落ちる (Codex review
+//! PR #470 P2)。旧実装 (`/` `\` `.` `\0` を全て `_` に置換) では衝突リスクが
+//! あったため修正。
 //!
 //! `tokio-transport` フィーチャ下でのみコンパイルされる (`tokio::fs` が必要)。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -25,6 +37,10 @@ use tokio::io::AsyncWriteExt;
 use crate::error::StorageError;
 use crate::port::BuoyStorage;
 use crate::types::{CsaMoveToken, GameName};
+
+/// tmp ファイル名生成用の atomic カウンタ。複数 `set` が同時実行されても
+/// 各呼び出しで異なるサフィックスが得られるため、tmp ファイルが混ざらない。
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// ローカルディレクトリへブイを書き出す `BuoyStorage`。
 ///
@@ -54,26 +70,52 @@ impl FileBuoyStorage {
         }
     }
 
-    /// 1 ブイ分のファイルパス `<topdir>/buoys/<sanitized>.json`。
+    /// 1 ブイ分のファイルパス `<topdir>/buoys/<encoded>.json`。
     ///
-    /// `game_name` の `/` / `\0` / パス区切りはファイル名で有害なので、
-    /// 明示的に `_` へ置換する。CSA の game_name は通常 `floodgate-600-10`
-    /// のようなハイフン区切り ASCII のため、現実の衝突はほぼ無いが、
-    /// 悪意ある入力を防ぐため常に sanitize する。
+    /// `game_name` は `encode_game_name` で percent-encoding 風の可逆エンコーディング
+    /// を施す。ASCII alphanumeric と `-` / `_` はそのまま、それ以外は `%XX` 形式
+    /// (大文字 hex) でエスケープ。これにより `a/b` と `a.b` と `a_b` が異なる
+    /// ファイル名に落ち、意図せぬ上書きを防ぐ (Codex review PR #470 P2)。
     fn path_for(&self, game_name: &GameName) -> PathBuf {
-        let sanitized: String = game_name
-            .as_str()
-            .chars()
-            .map(|c| {
-                if c == '/' || c == '\\' || c == '\0' || c == '.' {
-                    '_'
-                } else {
-                    c
-                }
-            })
-            .collect();
-        self.topdir.join("buoys").join(format!("{sanitized}.json"))
+        let encoded = encode_game_name(game_name.as_str());
+        self.topdir.join("buoys").join(format!("{encoded}.json"))
     }
+
+    /// 同一 buoy への並列 `set` が tmp ファイル名で衝突しないよう、毎回
+    /// PID + atomic counter で一意な suffix を付けた tmp パスを作る
+    /// (Codex review PR #470 P3)。rename 済みの tmp は残らず、rename 失敗時も
+    /// ファイルシステム側 cleanup に任せる (tmp ファイルは少量・短命なので
+    /// 削除漏れの運用影響は限定的)。
+    fn tmp_path_for(&self, final_path: &std::path::Path) -> PathBuf {
+        let pid = std::process::id();
+        let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let stem = final_path.file_stem().and_then(|s| s.to_str()).unwrap_or("buoy");
+        let parent = final_path.parent().unwrap_or(std::path::Path::new("."));
+        parent.join(format!("{stem}.{pid}.{seq}.tmp"))
+    }
+}
+
+/// `game_name` をファイル名に安全なエンコーディングに変換する。
+///
+/// - 安全文字 (ASCII alphanumeric、`-`、`_`) はそのまま出力。
+/// - それ以外 (UTF-8 multi-byte を含む) は byte 単位で `%XX` 形式 (大文字 hex)
+///   にエスケープ。`%` 自体も `%25` に置換して可逆性を保つ。
+///
+/// 出力は ASCII のみ、ファイル名として有効で、かつ 1 対 1 の単射 (可逆) である。
+fn encode_game_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        let is_safe = b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+        if is_safe {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+    }
+    out
 }
 
 impl BuoyStorage for FileBuoyStorage {
@@ -95,7 +137,10 @@ impl BuoyStorage for FileBuoyStorage {
             .map_err(|e| StorageError::Io(format!("serialize buoy: {e}")))?;
 
         // .tmp → rename で原子的書き換え。中断時に半端な JSON が残らないようにする。
-        let tmp = path.with_extension("json.tmp");
+        // tmp 名は `<stem>.<pid>.<counter>.tmp` で一意化する。並列 `set` が同じ
+        // buoy に走っても互いの tmp を踏まず、rename は last-writer-wins で
+        // 確定する (Codex review PR #470 P3)。
+        let tmp = self.tmp_path_for(&path);
         let mut f = fs::File::create(&tmp).await.map_err(to_storage_err)?;
         f.write_all(&bytes).await.map_err(to_storage_err)?;
         f.flush().await.map_err(to_storage_err)?;
@@ -197,18 +242,73 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sanitize_path_for_slash_in_game_name() {
-        // `/` / `\` / `.` を含む game_name は `_` に置換されてファイル名に落ちる。
-        // これにより topdir 外への escape (`../../etc/passwd` 等) を防ぐ。
-        let topdir = unique_topdir("sanitize");
+    async fn encode_path_for_special_characters_escapes_to_percent_hex() {
+        // `..` / `/` を含む game_name は percent-encoding で可逆にエスケープされる。
+        // これにより topdir 外への escape (`../../etc/passwd` 等) を防ぎつつ、
+        // 異なる game_name が衝突しない (Codex review PR #470 P2)。
+        let topdir = unique_topdir("encode_escape");
         let storage = FileBuoyStorage::new(topdir.clone());
         let gn = GameName::new("../foo/bar");
         storage.set(&gn, vec![], 1).await.unwrap();
-        // `..` の 2 文字 + `/` の 3 文字分が各々 `_` に置換されて `___foo_bar.json`。
-        let expected = topdir.join("buoys").join("___foo_bar.json");
-        assert!(expected.exists(), "sanitized file not found at {expected:?}");
-        // 実際の set/count の round-trip も同じ sanitize 規則で一致する。
+        // `.` → `%2E`, `/` → `%2F` で `%2E%2E%2Ffoo%2Fbar.json` になる。
+        let expected = topdir.join("buoys").join("%2E%2E%2Ffoo%2Fbar.json");
+        assert!(expected.exists(), "encoded file not found at {expected:?}");
         assert_eq!(storage.count(&gn).await.unwrap(), Some(1));
+        let _ = fs::remove_dir_all(&topdir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn encoded_game_names_do_not_collide_across_special_chars() {
+        // `a.b` / `a/b` / `a_b` / `a-b` が異なるファイル名に落ちることを確認する
+        // (Codex review PR #470 P2 の回帰防止: 旧実装は全て `a_b.json` に潰れた)。
+        let topdir = unique_topdir("encode_distinct");
+        let storage = FileBuoyStorage::new(topdir.clone());
+        // 各 game_name を別の remaining で登録し、各 count が独立して観測できることを確認する。
+        storage.set(&GameName::new("a.b"), vec![], 10).await.unwrap();
+        storage.set(&GameName::new("a/b"), vec![], 20).await.unwrap();
+        storage.set(&GameName::new("a_b"), vec![], 30).await.unwrap();
+        storage.set(&GameName::new("a-b"), vec![], 40).await.unwrap();
+        assert_eq!(storage.count(&GameName::new("a.b")).await.unwrap(), Some(10));
+        assert_eq!(storage.count(&GameName::new("a/b")).await.unwrap(), Some(20));
+        assert_eq!(storage.count(&GameName::new("a_b")).await.unwrap(), Some(30));
+        assert_eq!(storage.count(&GameName::new("a-b")).await.unwrap(), Some(40));
+        let _ = fs::remove_dir_all(&topdir).await;
+    }
+
+    #[test]
+    fn encode_game_name_preserves_safe_ascii_and_escapes_others() {
+        // encode_game_name の単純 unit テスト: 安全文字はそのまま、他は %XX。
+        assert_eq!(encode_game_name("abc-123_XYZ"), "abc-123_XYZ");
+        assert_eq!(encode_game_name("a.b"), "a%2Eb");
+        assert_eq!(encode_game_name("a/b"), "a%2Fb");
+        assert_eq!(encode_game_name("a%b"), "a%25b");
+        // UTF-8 multi-byte (日本語) は各 byte が % エスケープされる。
+        assert_eq!(encode_game_name("あ"), "%E3%81%82");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_uses_unique_tmp_path_per_invocation() {
+        // Codex review PR #470 P3 の回帰防止: tmp ファイル名が PID + counter で
+        // 一意化されるため、並列 `set` が共通の `.tmp` を踏まない。同一 buoy に
+        // 対して 2 回続けて `set` を走らせ、どちらも成功することで last-writer-wins
+        // が壊れないことを確認する (旧実装は tmp を共有していて 2 回目が部分的に
+        // 壊れるリスクがあった)。
+        let topdir = unique_topdir("tmp_unique");
+        let storage = FileBuoyStorage::new(topdir.clone());
+        let gn = GameName::new("sequential");
+        storage.set(&gn, vec![], 1).await.unwrap();
+        storage.set(&gn, vec![], 2).await.unwrap();
+        assert_eq!(storage.count(&gn).await.unwrap(), Some(2));
+        // buoys ディレクトリに残るのは本ファイル 1 つだけで、tmp 残骸が無いはず
+        // (rename 成功時は tmp は消える)。
+        let mut entries = fs::read_dir(topdir.join("buoys")).await.unwrap();
+        let mut count = 0;
+        while let Some(e) = entries.next_entry().await.unwrap() {
+            let name = e.file_name().to_string_lossy().to_string();
+            assert!(!name.ends_with(".tmp"), "leftover tmp: {name}");
+            count += 1;
+        }
+        assert_eq!(count, 1);
         let _ = fs::remove_dir_all(&topdir).await;
     }
 
