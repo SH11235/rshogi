@@ -145,9 +145,20 @@ impl TimeClock for SecondsCountdownClock {
 
     fn turn_budget_ms(&self, color: Color) -> i64 {
         // 今の 1 手で使える最大時間 = 本体残り + 毎手 full 回復する byoyomi。
-        self.slot(color) + self.byoyomi_ms()
+        //
+        // `consume` は経過時間を **秒単位に切り捨て** てから差し引くため、
+        // 実際に受理される物理 elapsed_ms は `slot + byoyomi_ms` そのものではなく
+        // 「次の秒境界の直前まで」 (`slot + byoyomi + 999ms`) となる。スケジューラは
+        // 本関数の戻り値で deadline を設定するため、`consume` の truncation 分
+        // (999ms) を足さないと正当な着手がタイムアウトで強制敗北する。
+        self.slot(color) + self.byoyomi_ms() + (SECOND_GRAIN_MS - 1)
     }
 }
+
+/// 1 秒分のミリ秒。Fischer / SecondsCountdown の grain (最小単位) として共通使用。
+const SECOND_GRAIN_MS: i64 = 1_000;
+/// 1 分分のミリ秒。StopWatch の grain (最小単位)。
+const MINUTE_GRAIN_MS: i64 = 60 * 1_000;
 
 /// Fischer 方式の時計（増分加算 / Bronstein 派生ではない標準 Fischer）。
 ///
@@ -236,8 +247,11 @@ impl TimeClock for FischerClock {
     }
 
     fn turn_budget_ms(&self, color: Color) -> i64 {
-        // 現在手で使える budget は現在の残時間のみ。increment は手完了後に付く。
-        self.slot(color)
+        // 現在手で使える budget は現在の残時間のみ (increment は手完了後に付く)。
+        // `consume` は elapsed を秒単位に切り捨てるため、`slot` ぴったりで
+        // deadline を切ると正当な着手 (例: slot=5000ms で物理 5.5s 経過) を
+        // 誤って TimeUp させる。truncation 分 (999ms) を足して整合を取る。
+        self.slot(color) + (SECOND_GRAIN_MS - 1)
     }
 }
 
@@ -335,7 +349,12 @@ impl TimeClock for StopWatchClock {
 
     fn turn_budget_ms(&self, color: Color) -> i64 {
         // 本体残り + 毎手 full 回復する秒読み（分単位）。
-        self.slot(color) + self.byoyomi_ms()
+        //
+        // `consume` は elapsed_ms を **分単位に切り捨て** (`elapsed_ms / 60_000`)
+        // してから差し引くため、`slot + byoyomi_ms` で deadline を切るとプレイヤが
+        // まだ本来使える分 (最大 59_999ms) を失う。`MINUTE_GRAIN_MS - 1` を足して
+        // 次の分境界の直前まで deadline を伸ばし、`consume` の切り捨て挙動と整合させる。
+        self.slot(color) + self.byoyomi_ms() + (MINUTE_GRAIN_MS - 1)
     }
 }
 
@@ -399,31 +418,36 @@ mod tests {
 
     #[test]
     fn turn_budget_includes_byoyomi_on_fresh_clock() {
-        // 本体 60 秒 + 秒読み 10 秒 → 初手の予算 70 秒。旧 API (remaining_ms) は 60 秒しか
-        // 返さず、deadline 計算が byoyomi を無視するバグの元だった。
+        // 本体 60 秒 + 秒読み 10 秒 → 初手の予算 70_999ms (秒 grain の `consume` で
+        // truncation される最大フラクショナル 999ms を scheduler deadline に含める)。
+        // 旧 API (remaining_ms) は 60 秒しか返さず、deadline 計算が byoyomi を無視する
+        // バグの元だった。
         let c = SecondsCountdownClock::new(60, 10);
         assert_eq!(c.remaining_main_ms(Color::Black), 60_000);
-        assert_eq!(c.turn_budget_ms(Color::Black), 70_000);
+        assert_eq!(c.turn_budget_ms(Color::Black), 70_999);
     }
 
     #[test]
     fn turn_budget_is_byoyomi_only_after_main_exhausted() {
-        // 本体 5 秒使い切り後、各手番は byoyomi 10 秒だけが予算。
+        // 本体 5 秒使い切り後、各手番は byoyomi 10 秒 + 秒 grain 分 = 10_999ms が予算。
         let mut c = SecondsCountdownClock::new(5, 10);
         assert_eq!(c.consume(Color::Black, 5_000), ClockResult::Continue);
         assert_eq!(c.remaining_main_ms(Color::Black), 0);
-        assert_eq!(c.turn_budget_ms(Color::Black), 10_000);
+        assert_eq!(c.turn_budget_ms(Color::Black), 10_999);
         // 次の手番も同じ予算（byoyomi はリセットされる）。
         assert_eq!(c.consume(Color::Black, 9_000), ClockResult::Continue);
-        assert_eq!(c.turn_budget_ms(Color::Black), 10_000);
+        assert_eq!(c.turn_budget_ms(Color::Black), 10_999);
     }
 
     #[test]
-    fn turn_budget_zero_only_when_main_zero_and_byoyomi_zero() {
-        // byoyomi=0 かつ本体 0 でだけ予算 0（= 次の手で即 time-up）。
+    fn turn_budget_reflects_second_grain_when_byoyomi_zero() {
+        // byoyomi=0 で本体 0 に落ちた状態でも、秒 grain の切り捨て分 (999ms) だけ
+        // deadline を伸ばす必要がある。`consume(elapsed=999)` は elapsed_sec=0 に
+        // 切り捨てられるため受理される (本体 0 を消費しない)。budget もこれに
+        // 合わせ 999ms を返すのが正しい挙動。
         let mut c = SecondsCountdownClock::new(5, 0);
         assert_eq!(c.consume(Color::Black, 5_000), ClockResult::Continue);
-        assert_eq!(c.turn_budget_ms(Color::Black), 0);
+        assert_eq!(c.turn_budget_ms(Color::Black), 999);
     }
 
     // ---- FischerClock ----
@@ -469,10 +493,13 @@ mod tests {
     }
 
     #[test]
-    fn fischer_turn_budget_is_remaining_only_not_plus_increment() {
-        // increment は手を指し終えた時に付くので、現在手の budget は残時間のみ。
+    fn fischer_turn_budget_is_remaining_only_plus_second_grain() {
+        // increment は手を指し終えた時に付くので、現在手の budget は「残時間 + 秒 grain」。
+        // 秒 grain の 999ms は `consume` の秒単位切り捨てと整合させるための余白で、
+        // deadline スケジューラが正当な着手 (例: slot=60_000ms で物理 60.5s 経過) を
+        // 誤って TimeUp させないために入れる。
         let c = FischerClock::new(60, 5);
-        assert_eq!(c.turn_budget_ms(Color::Black), 60_000);
+        assert_eq!(c.turn_budget_ms(Color::Black), 60_999);
     }
 
     #[test]
@@ -533,10 +560,13 @@ mod tests {
     }
 
     #[test]
-    fn stopwatch_turn_budget_includes_byoyomi() {
-        // 本体 15 分 + 秒読み 1 分 = 16 分。
+    fn stopwatch_turn_budget_includes_byoyomi_plus_minute_grain() {
+        // 本体 15 分 + 秒読み 1 分 + minute grain (59_999ms) = 16 分 + 59_999ms。
+        // `consume` が分単位に切り捨てる挙動と scheduler deadline を整合させるため、
+        // 次の分境界の直前まで delay を伸ばす。これが無いと 1 分 byoyomi の局面で
+        // scheduler が最大 59 秒早く TimeUp を発火させてしまう (Codex review P1)。
         let c = StopWatchClock::new(15, 1);
-        assert_eq!(c.turn_budget_ms(Color::Black), 16 * 60 * 1000);
+        assert_eq!(c.turn_budget_ms(Color::Black), 16 * 60_000 + 59_999);
     }
 
     #[test]
