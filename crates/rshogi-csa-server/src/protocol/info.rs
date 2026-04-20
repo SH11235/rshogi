@@ -137,8 +137,10 @@ pub fn help_lines() -> Vec<CsaLine> {
         "%%WHO - list logged-in players",
         "%%LIST - list active games",
         "%%SHOW <game_id> - show a game summary",
-        "%%MONITOR2ON <game_id> - subscribe to a game as a spectator",
-        "%%MONITOR2OFF <game_id> - unsubscribe from a game",
+        "%%MONITOR2ON <game_id> - subscribe to a game as a spectator \
+(the session leaves matchmaking; re-LOGIN to resume)",
+        "%%MONITOR2OFF <game_id> - unsubscribe from a game (stays observer-only; \
+re-LOGIN to return to matchmaking)",
         "%%CHAT <message> - broadcast a chat message to spectators of the monitored game",
     ];
     let mut out: Vec<CsaLine> =

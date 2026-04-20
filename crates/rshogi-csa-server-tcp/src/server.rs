@@ -677,6 +677,35 @@ where
                         if !still_exists {
                             drop(rx);
                             state.broadcaster.prune_closed(&RoomId::new(game_id.as_str())).await;
+                            // 状態巻き戻し: pool から抜けた + League を Connected に
+                            // 遷移した + observer_mode を立てた 3 点を元に戻す。
+                            // 新しい oneshot ペアを作って slot を再登録し、次の
+                            // tokio::select! で match_req_rx を再び監視できる状態に
+                            // 戻す (Codex review PR #469 4th round P2)。
+                            let (new_tx, new_rx) = oneshot::channel::<MatchRequest>();
+                            {
+                                let mut pool = state.waiting.lock().await;
+                                pool.push(
+                                    game_name.clone(),
+                                    WaitingSlot {
+                                        handle: handle.clone(),
+                                        color,
+                                        match_request_tx: new_tx,
+                                    },
+                                );
+                            }
+                            {
+                                let mut league = state.league.lock().await;
+                                let _ = league.transition(
+                                    &handle_player,
+                                    PlayerStatus::GameWaiting {
+                                        game_name: game_name.clone(),
+                                        preferred_color: Some(color),
+                                    },
+                                );
+                            }
+                            match_req_rx = new_rx;
+                            observer_mode = false;
                             Some(vec![
                                 CsaLine::new(format!("##[MONITOR2] NOT_FOUND {game_id}")),
                                 CsaLine::new("##[MONITOR2] END"),
