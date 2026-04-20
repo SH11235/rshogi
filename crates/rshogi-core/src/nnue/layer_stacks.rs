@@ -20,6 +20,8 @@ use super::constants::{
     LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, NNUE_PYTORCH_L2, NNUE_PYTORCH_L3,
     NUM_LAYER_STACK_BUCKETS,
 };
+#[cfg(feature = "nnue-hand-count-dense")]
+use super::hand_count::HAND_COUNT_DIMS;
 use super::layers::AffineTransform;
 use std::io::{self, Read};
 
@@ -28,6 +30,56 @@ const L2_PADDED_INPUT: usize = super::layers::padded_input(LAYER_STACK_L2_IN);
 
 /// Output 入力のパディング済み次元数（padded_input(32) = 32）
 const OUTPUT_PADDED_INPUT: usize = super::layers::padded_input(NNUE_PYTORCH_L3);
+
+/// LayerStack L1 層 (`AffineTransform<L1, LAYER_STACK_L1_OUT=16>`) の重み index を
+/// SIMD 有効ビルドの scramble 形式に変換する。
+///
+/// `AffineTransform<_, 16>::should_use_scrambled_weights()` は AVX2 (OUT % 8 == 0) /
+/// SSSE3 (OUT % 4 == 0) ビルドで常に `true` になる。scramble は
+/// `i = output * padded_input + input` 形式の linear index を input_chunk ベースの
+/// レイアウトに変換する:
+///
+/// ```text
+/// scrambled = (i / CHUNK_SIZE) % (padded_input / CHUNK_SIZE) * OUTPUT_DIM * CHUNK_SIZE
+///           + (i / padded_input) * CHUNK_SIZE
+///           + i % CHUNK_SIZE
+/// ```
+///
+/// `AffineTransform::get_weight_index_scrambled` と同じ式だが、こちらは
+/// `read_with_hand_count` から参照するため module-level const fn として用意する。
+#[cfg(feature = "nnue-hand-count-dense")]
+#[inline]
+const fn scrambled_l1_weight_index(i: usize, padded_input: usize) -> usize {
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "ssse3",
+            not(target_feature = "avx2")
+        )
+    ))]
+    {
+        // AVX2 環境: CHUNK_SIZE = 4、OUTPUT_DIM (=16) % 8 == 0 で scramble 有効
+        // SSSE3 環境: CHUNK_SIZE = 4、OUTPUT_DIM (=16) % 4 == 0 で scramble 有効
+        const CHUNK_SIZE: usize = 4;
+        const OUTPUT_DIM: usize = LAYER_STACK_L1_OUT;
+        (i / CHUNK_SIZE) % (padded_input / CHUNK_SIZE) * OUTPUT_DIM * CHUNK_SIZE
+            + (i / padded_input) * CHUNK_SIZE
+            + (i % CHUNK_SIZE)
+    }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(
+            target_arch = "x86_64",
+            target_feature = "ssse3",
+            not(target_feature = "avx2")
+        )
+    )))]
+    {
+        let _ = padded_input;
+        i
+    }
+}
 
 #[cfg(test)]
 fn sqr_clipped_relu_explicit<const DIM: usize>(input: &[i32; DIM], output: &mut [u8; DIM]) {
@@ -39,6 +91,21 @@ fn sqr_clipped_relu_explicit<const DIM: usize>(input: &[i32; DIM], output: &mut 
 // =============================================================================
 // LayerStack 単一バケット
 // =============================================================================
+
+/// HandCount Dense L1 重み (bucket ごと)
+///
+/// レイアウト: `weights[out_idx][in_idx]`（row-major, `LAYER_STACK_L1_OUT × HAND_COUNT_DIMS`）
+///
+/// 量子化: bullet 側は `QB = 64` で i8 化する（FT L1 主経路と同じスケール）。
+/// 一方 FT パスは入力が u8 (scale QA=127) × 重み i8 (scale QB=64) = scale 8128 で
+/// L1 出力に寄与するのに対し、HandCount パスは入力が raw i16 × 重み i8 (scale QB=64) =
+/// scale 64 なので 127 倍のスケールギャップが生じる。`propagate_with_hand_count` 内で
+/// HC 寄与に `× 127` を掛けて FT と同じ scale に揃えることで float 推論と一致させる。
+#[cfg(feature = "nnue-hand-count-dense")]
+pub struct HandCountL1Weights {
+    /// weights[out_idx][in_idx]: i8 (量子化スケール QB=64)
+    pub weights: [[i8; HAND_COUNT_DIMS]; LAYER_STACK_L1_OUT],
+}
 
 /// LayerStack 単一バケットの層
 ///
@@ -55,6 +122,9 @@ pub struct LayerStackBucket<const L1: usize> {
     pub l2: AffineTransform<LAYER_STACK_L2_IN, NNUE_PYTORCH_L3>,
     /// 出力層: 32 → 1
     pub output: AffineTransform<NNUE_PYTORCH_L3, 1>,
+    /// HandCount Dense 入力の L1 層重み (`HandCountDense=14` モデル時のみ `Some`)
+    #[cfg(feature = "nnue-hand-count-dense")]
+    pub l1_hand_count: Option<HandCountL1Weights>,
 }
 
 impl<const L1: usize> LayerStackBucket<L1> {
@@ -64,6 +134,8 @@ impl<const L1: usize> LayerStackBucket<L1> {
             l1: AffineTransform::new(),
             l2: AffineTransform::new(),
             output: AffineTransform::new(),
+            #[cfg(feature = "nnue-hand-count-dense")]
+            l1_hand_count: None,
         }
     }
 
@@ -72,48 +144,260 @@ impl<const L1: usize> LayerStackBucket<L1> {
         let l1 = AffineTransform::read(reader)?;
         let l2 = AffineTransform::read(reader)?;
         let output = AffineTransform::read(reader)?;
-        Ok(Self { l1, l2, output })
+        Ok(Self {
+            l1,
+            l2,
+            output,
+            #[cfg(feature = "nnue-hand-count-dense")]
+            l1_hand_count: None,
+        })
+    }
+
+    /// HandCount Dense 付きで読み込み
+    ///
+    /// bullet 側の save format (feat/nnue-hand-count-dense) は L1 重みを 1 行あたり
+    /// `pad32(ft_out + hc_dims)` byte で書き出す。byte layout は以下:
+    ///
+    /// ```text
+    /// [biases: 16 × i32 LE]
+    /// for out_idx in 0..16:
+    ///   [0..ft_padded)            : FT L1 重み (bucket_w + shared_w を i8 量子化)
+    ///   [ft_padded..ft_padded+hc) : HandCount 重み (bucket_w のみを i8 量子化)
+    ///   [ft_padded+hc..total_pad) : padding (0)
+    /// ```
+    ///
+    /// `ft_padded = pad32(L1)`、`total_pad = pad32(L1 + hc_dims)`。
+    /// 既存 `AffineTransform::read` は 1 行 = `ft_padded` byte を想定しているため、
+    /// HandCount 行では行境界がずれる。本関数は手動で byte stream を main / HC /
+    /// padding に振り分け、main は `AffineTransform::read` と同じ scramble を適用し、
+    /// HC は row-major `[OUT][HC_DIMS]` に格納する。
+    #[cfg(feature = "nnue-hand-count-dense")]
+    pub fn read_with_hand_count<R: Read>(reader: &mut R, hc_dims: usize) -> io::Result<Self> {
+        use super::accumulator::AlignedBox;
+        use super::layers::padded_input;
+
+        if hc_dims != HAND_COUNT_DIMS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("HandCountDense dims mismatch: model={hc_dims}, engine={HAND_COUNT_DIMS}"),
+            ));
+        }
+
+        // L1 biases (i32 LE × 16)
+        let mut l1_biases = [0i32; LAYER_STACK_L1_OUT];
+        let mut buf4 = [0u8; 4];
+        for bias in l1_biases.iter_mut() {
+            reader.read_exact(&mut buf4)?;
+            *bias = i32::from_le_bytes(buf4);
+        }
+
+        // L1 weights: per-row = ft_padded FT bytes + hc_dims HC bytes + pad_extra padding bytes
+        let ft_padded = padded_input(L1);
+        let total_padded = padded_input(L1 + hc_dims);
+        if total_padded < ft_padded + hc_dims {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "HandCountDense padding invariant violated: ft_padded={ft_padded}, hc_dims={hc_dims}, total_padded={total_padded}"
+                ),
+            ));
+        }
+        let pad_extra = total_padded - ft_padded - hc_dims;
+
+        let weight_size = LAYER_STACK_L1_OUT * ft_padded;
+        let mut main_weights = AlignedBox::<i8>::new_zeroed(weight_size);
+        let mut hc_weights = [[0i8; HAND_COUNT_DIMS]; LAYER_STACK_L1_OUT];
+
+        let mut buf1 = [0u8; 1];
+        for (out_idx, hc_row) in hc_weights.iter_mut().enumerate() {
+            // Main FT part
+            for in_idx in 0..ft_padded {
+                reader.read_exact(&mut buf1)?;
+                let linear = out_idx * ft_padded + in_idx;
+                let target = scrambled_l1_weight_index(linear, ft_padded);
+                main_weights[target] = buf1[0] as i8;
+            }
+            // HandCount part
+            for hc_cell in hc_row.iter_mut().take(hc_dims) {
+                reader.read_exact(&mut buf1)?;
+                *hc_cell = buf1[0] as i8;
+            }
+            // padding (0)
+            for _ in 0..pad_extra {
+                reader.read_exact(&mut buf1)?;
+            }
+        }
+
+        let l1 = AffineTransform::<L1, LAYER_STACK_L1_OUT> {
+            biases: l1_biases,
+            weights: main_weights,
+        };
+
+        // L2 / Output は通常の AffineTransform::read（byte layout 変更なし）
+        let l2 = AffineTransform::read(reader)?;
+        let output = AffineTransform::read(reader)?;
+
+        Ok(Self {
+            l1,
+            l2,
+            output,
+            l1_hand_count: Some(HandCountL1Weights {
+                weights: hc_weights,
+            }),
+        })
     }
 
     /// 順伝播
     ///
     /// 入力: SqrClippedReLU後のL1次元 (u8)
     /// 出力: スケーリング前の生スコア (i32)
+    ///
+    /// `nnue-hand-count-dense` feature 有効時は `propagate_with_hand_count(input, None)`
+    /// のラッパーとして動作する。
     pub fn propagate(&self, input: &[u8; L1]) -> i32 {
+        #[cfg(feature = "nnue-hand-count-dense")]
+        {
+            self.propagate_with_hand_count(input, None)
+        }
+        #[cfg(not(feature = "nnue-hand-count-dense"))]
+        {
+            self.propagate_no_hand_count(input)
+        }
+    }
+
+    /// 順伝播（HandCount Dense 寄与込み）
+    ///
+    /// `hand_count` が `Some` かつ `l1_hand_count` が `Some` のとき、L1 主経路の結果に
+    /// `sum_i hand_count[i] * hc_w[k][i] * 127` を加算する。× 127 は FT 入力の QA=127
+    /// スケールを吸収するための補正。詳細は `HandCountL1Weights` の docstring 参照。
+    #[cfg(feature = "nnue-hand-count-dense")]
+    pub fn propagate_with_hand_count(
+        &self,
+        input: &[u8; L1],
+        hand_count: Option<&[i16; HAND_COUNT_DIMS]>,
+    ) -> i32 {
         let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
         let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
         let mut l2_out = [0i32; NNUE_PYTORCH_L3];
         let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
         let mut output_arr = [0i32; 1];
 
-        // L1: 1536 → 16
+        // L1: L1 → 16
         self.l1.propagate(input, &mut l1_out);
 
-        // Split: [15, 1]
-        // l1_x: 最初の15要素、l1_skip: 最後の1要素
-        let l1_skip = l1_out[NNUE_PYTORCH_L2]; // index 15
+        // HandCount Dense の寄与
+        //
+        // Scale correction: FT 寄与は u8(127) × i8(64) = 8128、HC 寄与は raw × i8(64) = 64
+        // なので HC 側に × 127 を乗じて scale を 8128 に揃える。
+        // 最大値: |hc[i]| ≤ 18, |i8| ≤ 128, 14 terms → |partial| ≤ 32,256
+        //         × 127 → 4,096,512 < i32::MAX (overflow しない)
+        if let (Some(hc), Some(hcw)) = (hand_count, self.l1_hand_count.as_ref()) {
+            for (l1_cell, hcw_row) in l1_out.iter_mut().zip(hcw.weights.iter()) {
+                let partial: i32 =
+                    hc.iter().zip(hcw_row.iter()).map(|(&h, &w)| (h as i32) * (w as i32)).sum();
+                *l1_cell += partial * 127;
+            }
+        }
 
-        // ClippedReLU + Sqr for first 15 elements, then concat with original
-        // SqrClippedReLU: min(127, (input^2) >> 19)
-        // ClippedReLU:    clamp(input >> 6, 0, 127)
+        // Split: [15, 1]
+        let l1_skip = l1_out[NNUE_PYTORCH_L2];
+
         l1_sqr_clipped_relu_activation(&l1_out, &mut l2_input.0);
 
-        // L2: 30 → 32
         self.l2.propagate(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
-        // Output: 32 → 1
         self.output.propagate(&l2_relu.0, &mut output_arr);
 
-        // Skip connection
+        output_arr[0] + l1_skip
+    }
+
+    /// `propagate` の内部実装（nnue-hand-count-dense feature 無効時）。
+    ///
+    /// feature 有効時は `propagate_with_hand_count` がメイン実装、`propagate` は
+    /// その `None` 呼び出しのラッパーとして機能する。
+    #[cfg(not(feature = "nnue-hand-count-dense"))]
+    fn propagate_no_hand_count(&self, input: &[u8; L1]) -> i32 {
+        let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
+        let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
+        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut output_arr = [0i32; 1];
+
+        self.l1.propagate(input, &mut l1_out);
+
+        let l1_skip = l1_out[NNUE_PYTORCH_L2];
+
+        l1_sqr_clipped_relu_activation(&l1_out, &mut l2_input.0);
+
+        self.l2.propagate(&l2_input.0, &mut l2_out);
+        clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
+
+        self.output.propagate(&l2_relu.0, &mut output_arr);
+
         output_arr[0] + l1_skip
     }
 
     /// 順伝播（診断情報付き）
     ///
     /// 戻り値: (raw_score, l1_out, l1_skip)
+    ///
+    /// `nnue-hand-count-dense` feature 有効時は `propagate_with_diagnostics_with_hand_count(input, None)`
+    /// のラッパーとして動作し、HC 入力なしの従来動作を保つ。
     #[cfg(feature = "diagnostics")]
     pub fn propagate_with_diagnostics(
+        &self,
+        input: &[u8; L1],
+    ) -> (i32, [i32; LAYER_STACK_L1_OUT], i32) {
+        #[cfg(feature = "nnue-hand-count-dense")]
+        {
+            self.propagate_with_diagnostics_with_hand_count(input, None)
+        }
+        #[cfg(not(feature = "nnue-hand-count-dense"))]
+        {
+            self.propagate_with_diagnostics_no_hand_count(input)
+        }
+    }
+
+    /// 順伝播（診断情報付き、HandCount Dense 寄与込み）
+    #[cfg(all(feature = "diagnostics", feature = "nnue-hand-count-dense"))]
+    pub fn propagate_with_diagnostics_with_hand_count(
+        &self,
+        input: &[u8; L1],
+        hand_count: Option<&[i16; HAND_COUNT_DIMS]>,
+    ) -> (i32, [i32; LAYER_STACK_L1_OUT], i32) {
+        let mut l1_out = [0i32; LAYER_STACK_L1_OUT];
+        let mut l2_input = Aligned([0u8; L2_PADDED_INPUT]);
+        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut output_arr = [0i32; 1];
+
+        self.l1.propagate(input, &mut l1_out);
+
+        // HandCount Dense 寄与 (propagate_with_hand_count と同一処理)
+        if let (Some(hc), Some(hcw)) = (hand_count, self.l1_hand_count.as_ref()) {
+            for (l1_cell, hcw_row) in l1_out.iter_mut().zip(hcw.weights.iter()) {
+                let partial: i32 =
+                    hc.iter().zip(hcw_row.iter()).map(|(&h, &w)| (h as i32) * (w as i32)).sum();
+                *l1_cell += partial * 127;
+            }
+        }
+
+        let l1_skip = l1_out[NNUE_PYTORCH_L2];
+        l1_sqr_clipped_relu_activation(&l1_out, &mut l2_input.0);
+
+        self.l2.propagate(&l2_input.0, &mut l2_out);
+        clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
+
+        self.output.propagate(&l2_relu.0, &mut output_arr);
+
+        let raw_score = output_arr[0] + l1_skip;
+        (raw_score, l1_out, l1_skip)
+    }
+
+    /// 順伝播（診断情報付き、HandCount なし: feature OFF 時の実体）
+    #[cfg(all(feature = "diagnostics", not(feature = "nnue-hand-count-dense")))]
+    fn propagate_with_diagnostics_no_hand_count(
         &self,
         input: &[u8; L1],
     ) -> (i32, [i32; LAYER_STACK_L1_OUT], i32) {
@@ -125,20 +409,15 @@ impl<const L1: usize> LayerStackBucket<L1> {
 
         self.l1.propagate(input, &mut l1_out);
 
-        // Split: [15, 1]
-        let l1_skip = l1_out[NNUE_PYTORCH_L2]; // index 15
+        let l1_skip = l1_out[NNUE_PYTORCH_L2];
         l1_sqr_clipped_relu_activation(&l1_out, &mut l2_input.0);
 
-        // L2: 30 → 32
         self.l2.propagate(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
-        // Output: 32 → 1
         self.output.propagate(&l2_relu.0, &mut output_arr);
 
-        // Skip connection
         let raw_score = output_arr[0] + l1_skip;
-
         (raw_score, l1_out, l1_skip)
     }
 }
@@ -157,6 +436,13 @@ impl<const L1: usize> Default for LayerStackBucket<L1> {
 pub struct LayerStacks<const L1: usize> {
     /// 9個のバケット
     pub buckets: [LayerStackBucket<L1>; NUM_LAYER_STACK_BUCKETS],
+    /// HandCount Dense 入力が読み込まれているか
+    ///
+    /// `NetworkLayerStacks::evaluate_with_bucket` で HC 抽出を分岐するために使用。
+    /// 全バケットが一括でロードされるため、`buckets[0].l1_hand_count.is_some()` と
+    /// 同値だがホットパスで `is_some()` を呼ばないようにここにキャッシュする。
+    #[cfg(feature = "nnue-hand-count-dense")]
+    pub has_hand_count: bool,
 }
 
 impl<const L1: usize> LayerStacks<L1> {
@@ -164,6 +450,8 @@ impl<const L1: usize> LayerStacks<L1> {
     pub fn new() -> Self {
         Self {
             buckets: std::array::from_fn(|_| LayerStackBucket::new()),
+            #[cfg(feature = "nnue-hand-count-dense")]
+            has_hand_count: false,
         }
     }
 
@@ -189,12 +477,49 @@ impl<const L1: usize> LayerStacks<L1> {
         Ok(stacks)
     }
 
+    /// HandCount Dense 付きでファイルから読み込み
+    ///
+    /// `HandCountDense=hc_dims,` を arch_str に含むモデル向け。各バケットの L1 重みを
+    /// `LayerStackBucket::read_with_hand_count` で読み込み、`has_hand_count` を `true` に
+    /// セットする。
+    #[cfg(feature = "nnue-hand-count-dense")]
+    pub fn read_with_hand_count<R: Read>(reader: &mut R, hc_dims: usize) -> io::Result<Self> {
+        let mut stacks = Self::new();
+        let mut buf4 = [0u8; 4];
+
+        for bucket in stacks.buckets.iter_mut() {
+            reader.read_exact(&mut buf4)?;
+            let _fc_hash = u32::from_le_bytes(buf4);
+            *bucket = LayerStackBucket::read_with_hand_count(reader, hc_dims)?;
+        }
+
+        stacks.has_hand_count = true;
+        Ok(stacks)
+    }
+
     /// 生スコアを計算（スケーリング前）
     pub fn evaluate_raw(&self, bucket_index: usize, input: &[u8; L1]) -> i32 {
         debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
         // SAFETY: bucket_index は progress_sum_to_bucket() または clamp(0, NUM-1) 由来で
         //         常に NUM_LAYER_STACK_BUCKETS 未満。
         unsafe { self.buckets.get_unchecked(bucket_index) }.propagate(input)
+    }
+
+    /// 生スコアを計算（HandCount Dense 寄与込み）
+    ///
+    /// `has_hand_count == true` のときに `NetworkLayerStacks::evaluate_with_bucket` から
+    /// 呼ばれる。`hand_count` が `None` の場合は `propagate` と同じ結果になる。
+    #[cfg(feature = "nnue-hand-count-dense")]
+    pub fn evaluate_raw_with_hand_count(
+        &self,
+        bucket_index: usize,
+        input: &[u8; L1],
+        hand_count: Option<&[i16; HAND_COUNT_DIMS]>,
+    ) -> i32 {
+        debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
+        // SAFETY: 同上
+        unsafe { self.buckets.get_unchecked(bucket_index) }
+            .propagate_with_hand_count(input, hand_count)
     }
 
     /// 生スコアを計算（診断情報付き）
@@ -208,6 +533,20 @@ impl<const L1: usize> LayerStacks<L1> {
     ) -> (i32, [i32; LAYER_STACK_L1_OUT], i32) {
         debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
         self.buckets[bucket_index].propagate_with_diagnostics(input)
+    }
+
+    /// 生スコアを計算（診断情報付き、HandCount Dense 寄与込み）
+    ///
+    /// 戻り値: (raw_score, l1_out, l1_skip)
+    #[cfg(all(feature = "diagnostics", feature = "nnue-hand-count-dense"))]
+    pub fn evaluate_raw_with_diagnostics_with_hand_count(
+        &self,
+        bucket_index: usize,
+        input: &[u8; L1],
+        hand_count: Option<&[i16; HAND_COUNT_DIMS]>,
+    ) -> (i32, [i32; LAYER_STACK_L1_OUT], i32) {
+        debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
+        self.buckets[bucket_index].propagate_with_diagnostics_with_hand_count(input, hand_count)
     }
 }
 
@@ -905,6 +1244,8 @@ mod tests {
             l1: affine_from_bytes::<TEST_L1, LAYER_STACK_L1_OUT>(l1_biases, &l1_weights),
             l2: affine_from_bytes::<LAYER_STACK_L2_IN, NNUE_PYTORCH_L3>(l2_biases, &l2_weights),
             output: affine_from_bytes::<NNUE_PYTORCH_L3, 1>(output_biases, &output_weights),
+            #[cfg(feature = "nnue-hand-count-dense")]
+            l1_hand_count: None,
         };
 
         let input = Aligned([0u8; TEST_L1]);
@@ -961,5 +1302,187 @@ mod tests {
         assert_eq!(l2_input[0], 127, "SqrClippedReLU should saturate to 127");
         // ClippedReLU: 50000 >> 6 = 781 → clamp → 127
         assert_eq!(l2_input[NNUE_PYTORCH_L2], 127, "ClippedReLU should saturate to 127");
+    }
+
+    // =============================================================================
+    // HandCount Dense 関連テスト (nnue-hand-count-dense feature)
+    //
+    // Round-trip 検証: bullet-shogi 側の save format を模したバイト列を生成し、
+    // `LayerStackBucket::read_with_hand_count` で読み込んで、既知の入力を
+    // `propagate_with_hand_count` に流して期待値（スカラー参照実装）と一致するかを確認する。
+    // これにより以下を同時に保証する:
+    //   1. byte layout (biases / main FT weights / HC weights / padding の行境界)
+    //   2. scramble 変換（AVX2/SSSE3 ビルドでの重みインデックス）
+    //   3. scale 補正 × 127（FT 入力 u8=127× と HC 入力 raw i16 の整合）
+    // =============================================================================
+
+    #[cfg(feature = "nnue-hand-count-dense")]
+    #[test]
+    fn test_read_with_hand_count_round_trip_matches_scalar() {
+        use super::super::hand_count::HAND_COUNT_DIMS;
+        use super::super::layers::padded_input;
+
+        // -----------------------------------------------------------------------
+        // Step 1: 既知の重み・バイアスを生成
+        // -----------------------------------------------------------------------
+
+        // L1 biases (i32): index ごとに決定的に変化させる
+        let mut l1_biases = [0i32; LAYER_STACK_L1_OUT];
+        for (i, b) in l1_biases.iter_mut().enumerate() {
+            *b = ((i as i32) - 8) * 123; // -984 .. +861
+        }
+
+        // L1 main weights (i8): row-major `[out][in]`、入力 i/j からの決定関数
+        let ft_padded = padded_input(TEST_L1);
+        let mut main_weights_row_major = vec![0i8; LAYER_STACK_L1_OUT * ft_padded];
+        for out_idx in 0..LAYER_STACK_L1_OUT {
+            for in_idx in 0..TEST_L1 {
+                // 値は [-3, 3] に収める（propagate 出力の overflow を避ける）
+                let v = ((in_idx as i32 + out_idx as i32) % 7) - 3;
+                main_weights_row_major[out_idx * ft_padded + in_idx] = v as i8;
+            }
+            // [TEST_L1..ft_padded) は AffineTransform::read の padding と同じ扱い (全 0)
+        }
+
+        // HC weights (i8): row-major `[out][in]`
+        let mut hc_weights_row_major = vec![0i8; LAYER_STACK_L1_OUT * HAND_COUNT_DIMS];
+        for out_idx in 0..LAYER_STACK_L1_OUT {
+            for in_idx in 0..HAND_COUNT_DIMS {
+                let v = ((in_idx as i32 * 2) + out_idx as i32) % 5 - 2;
+                hc_weights_row_major[out_idx * HAND_COUNT_DIMS + in_idx] = v as i8;
+            }
+        }
+
+        // L2 / Output は単純に 0 にしてスキップ接続経由で L1 の振る舞いを直接観察
+        let l2_biases = [0i32; NNUE_PYTORCH_L3];
+        let l2_weights = vec![0i8; NNUE_PYTORCH_L3 * padded_input(LAYER_STACK_L2_IN)];
+        let output_biases = [0i32; 1];
+        let output_weights = vec![0i8; padded_input(NNUE_PYTORCH_L3)];
+
+        // -----------------------------------------------------------------------
+        // Step 2: bullet 側の save format でバイト列を組み立てる
+        // -----------------------------------------------------------------------
+
+        let hc_dims = HAND_COUNT_DIMS;
+        let total_padded = padded_input(TEST_L1 + hc_dims);
+        let pad_extra = total_padded - ft_padded - hc_dims;
+
+        let mut bytes: Vec<u8> = Vec::new();
+
+        // L1 biases
+        for &b in &l1_biases {
+            bytes.extend_from_slice(&b.to_le_bytes());
+        }
+        // L1 weights (per-row: main FT + HC + padding)
+        for out_idx in 0..LAYER_STACK_L1_OUT {
+            for in_idx in 0..ft_padded {
+                bytes.push(main_weights_row_major[out_idx * ft_padded + in_idx] as u8);
+            }
+            for in_idx in 0..hc_dims {
+                bytes.push(hc_weights_row_major[out_idx * hc_dims + in_idx] as u8);
+            }
+            bytes.extend(std::iter::repeat_n(0u8, pad_extra));
+        }
+        // L2 biases
+        for &b in &l2_biases {
+            bytes.extend_from_slice(&b.to_le_bytes());
+        }
+        // L2 weights
+        for &w in &l2_weights {
+            bytes.push(w as u8);
+        }
+        // Output biases
+        for &b in &output_biases {
+            bytes.extend_from_slice(&b.to_le_bytes());
+        }
+        // Output weights
+        for &w in &output_weights {
+            bytes.push(w as u8);
+        }
+
+        // -----------------------------------------------------------------------
+        // Step 3: 読み込み
+        // -----------------------------------------------------------------------
+
+        let mut cursor = std::io::Cursor::new(bytes);
+        let bucket =
+            LayerStackBucket::<TEST_L1>::read_with_hand_count(&mut cursor, hc_dims).unwrap();
+
+        // HC 重みが正しく格納されているか
+        let hcw = bucket.l1_hand_count.as_ref().unwrap();
+        for out_idx in 0..LAYER_STACK_L1_OUT {
+            for in_idx in 0..hc_dims {
+                assert_eq!(
+                    hcw.weights[out_idx][in_idx],
+                    hc_weights_row_major[out_idx * hc_dims + in_idx],
+                    "HC weights mismatch at [{out_idx}][{in_idx}]"
+                );
+            }
+        }
+
+        // -----------------------------------------------------------------------
+        // Step 4: 既知の入力で propagate_with_hand_count を実行し、スカラー参照と比較
+        // -----------------------------------------------------------------------
+
+        // 入力 u8: 決定的に変化させる
+        let mut input = Aligned([0u8; TEST_L1]);
+        for (i, v) in input.0.iter_mut().enumerate().take(TEST_L1) {
+            *v = ((i * 3 + 7) % 128) as u8;
+        }
+
+        // hand_count: 各駒種の典型的な手駒数を設定
+        let hand_count: [i16; HAND_COUNT_DIMS] = [2, 1, 0, 1, 0, 1, 0, 3, 0, 1, 0, 0, 1, 0];
+
+        let actual = bucket.propagate_with_hand_count(&input.0, Some(&hand_count));
+
+        // スカラー参照: 既知の weights で L1 出力を手計算
+        let mut expected_l1_out = [0i32; LAYER_STACK_L1_OUT];
+        for (out_idx, expected_cell) in expected_l1_out.iter_mut().enumerate() {
+            // L1 bias
+            *expected_cell = l1_biases[out_idx];
+            // Main FT contribution: sum(input[i] * weight[out][i])
+            for in_idx in 0..TEST_L1 {
+                let w = main_weights_row_major[out_idx * ft_padded + in_idx];
+                *expected_cell += (input.0[in_idx] as i32) * (w as i32);
+            }
+            // HC contribution: sum(hand_count[i] * weight[out][i]) * 127
+            let mut hc_partial: i32 = 0;
+            for in_idx in 0..hc_dims {
+                let w = hc_weights_row_major[out_idx * hc_dims + in_idx];
+                hc_partial += (hand_count[in_idx] as i32) * (w as i32);
+            }
+            *expected_cell += hc_partial * 127;
+        }
+
+        // L1 skip = expected_l1_out[NNUE_PYTORCH_L2]（L2/Output が 0 なのでこれがそのまま生スコア）
+        let expected_score = expected_l1_out[NNUE_PYTORCH_L2];
+
+        assert_eq!(
+            actual, expected_score,
+            "propagate_with_hand_count output mismatch:\n  \
+             expected (scalar reference) = {expected_score}\n  \
+             actual (bucket.propagate_with_hand_count) = {actual}\n  \
+             expected l1_out = {expected_l1_out:?}"
+        );
+    }
+
+    /// hand_count が `None` の場合は `propagate` と同じ結果になる（後方互換性）
+    #[cfg(feature = "nnue-hand-count-dense")]
+    #[test]
+    fn test_propagate_with_hand_count_none_matches_propagate() {
+        use super::super::hand_count::HAND_COUNT_DIMS;
+
+        let mut bucket = LayerStackBucket::<TEST_L1>::new();
+        bucket.l1.biases[0] = 12345;
+        bucket.l1.biases[5] = -6789;
+        bucket.l1_hand_count = Some(HandCountL1Weights {
+            weights: [[99i8; HAND_COUNT_DIMS]; LAYER_STACK_L1_OUT],
+        });
+
+        let input = Aligned([0u8; TEST_L1]);
+        let baseline = bucket.propagate(&input.0);
+        let with_none = bucket.propagate_with_hand_count(&input.0, None);
+
+        assert_eq!(baseline, with_none, "propagate_with_hand_count(None) should match propagate()");
     }
 }

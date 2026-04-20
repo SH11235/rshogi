@@ -31,6 +31,7 @@ use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
 use super::network::{
     LayerStackBucketMode, compute_layer_stack_progress8kpabs_bucket_index, get_fv_scale_override,
     get_layer_stack_bucket_mode, get_layer_stack_progress_kpabs_weights, parse_fv_scale_from_arch,
+    parse_hand_count_dense_dims,
 };
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -246,40 +247,40 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
             ));
         }
 
-        // HandCount Dense 検出 (L1 層に 14 元の持ち駒 dense vector を concat する構成)
+        // HandCount Dense 検出
         //
-        // arch_str に `HandCountDense={dims},` が含まれるモデルは、LayerStack の
-        // L1 重みが通常の `pad32(ft_out)` ではなく `pad32(ft_out + dims)` 行で
-        // 保存されているため、現行の `LayerStacks::read` ではバイト境界がずれて
-        // 壊れた重みを読み込む or trailing data で失敗する。
+        // arch_str に `HandCountDense={dims},` が含まれるモデルは LayerStack の L1
+        // 重みを `pad32(ft_out + dims)` byte/row で書き出している。先頭 ft_out は FT
+        // 由来の通常重み、続く dims が HandCount Dense 入力用、残りは padding。
         //
-        // 現状の対応：nnue-hand-count-dense feature 未実装のため、HandCountDense
-        // モデルを検出したら明示的にエラーで拒否する。これは現在 rshogi 側で
-        // 推論パス（AffineTransform の入力次元拡張 + hand_count 差分計算 + L1 concat）
-        // を未実装のため、bullet 側で量子化した model.bin を誤って通常経路で
-        // 読み込ませない safeguard である。
-        //
-        // 将来作業：`nnue-hand-count-dense` feature を有効化したときに
-        //   - `LayerStacks::read_with_hand_count(reader, dims)` で L1 重みを
-        //     `pad32(ft_out + dims)` 行で読み込み、先頭 ft_out 行は通常の
-        //     AffineTransform 重みに、続く dims 行は `hand_count_l1` 専用
-        //     行列に格納する
-        //   - 評価時に `hand_count::extract_hand_count(pos)` で 14 元を抽出し、
-        //     `sum_i hand_count[i] * hand_count_l1_weight[k][i]` を L1 出力に加算
-        //   を実装する。
-        if arch_str.contains("HandCountDense=") {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "HandCountDense モデルの rshogi 推論側は未実装です。\n\
-                 bullet 側 feat/nnue-hand-count-dense で量子化した model.bin は、\n\
-                 rshogi 側の LayerStacks reader / 推論パス拡張が landing するまで\n\
-                 ロードできません。nnue-hand-count-dense feature も現状は\n\
-                 scaffold のみで、実際の重み読み出し・評価は未配線です。",
-            ));
-        }
+        // - `nnue-hand-count-dense` feature 有効時: `LayerStacks::read_with_hand_count`
+        //   で HC 重みを分離して格納し、評価時に `extract_hand_count(pos)` と合わせて
+        //   L1 出力に寄与させる。
+        // - feature 無効時: 現状の reader ではバイト境界がずれるため明示的に拒否する
+        //   (破損した重みを読み込まないための safeguard)。
+        let hand_count_dims = match parse_hand_count_dense_dims(&arch_str) {
+            Ok(v) => v,
+            Err(msg) => return Err(io::Error::new(io::ErrorKind::InvalidData, msg)),
+        };
 
         // LayerStacks を読み込み（FC層は常に非圧縮）
-        let layer_stacks = LayerStacks::read(reader)?;
+        #[cfg(feature = "nnue-hand-count-dense")]
+        let layer_stacks = if let Some(dims) = hand_count_dims {
+            LayerStacks::read_with_hand_count(reader, dims)?
+        } else {
+            LayerStacks::read(reader)?
+        };
+        #[cfg(not(feature = "nnue-hand-count-dense"))]
+        let layer_stacks = {
+            if hand_count_dims.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "HandCountDense model requires nnue-hand-count-dense feature.\n\
+                     Rebuild with `--features nnue-hand-count-dense` to load this model.",
+                ));
+            }
+            LayerStacks::read(reader)?
+        };
 
         // EOF検証: 余りデータがないことを確認
         // factorizedモデル（非coalesced）を誤って読んだ場合、
@@ -411,7 +412,16 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }
 
-        // LayerStacks で評価
+        // LayerStacks で評価（HandCount Dense 有効時は HC 寄与も加算）
+        #[cfg(feature = "nnue-hand-count-dense")]
+        let raw_score = if self.layer_stacks.has_hand_count {
+            let hc = super::hand_count::extract_hand_count(pos);
+            self.layer_stacks
+                .evaluate_raw_with_hand_count(bucket_index, &transformed.0, Some(&hc))
+        } else {
+            self.layer_stacks.evaluate_raw(bucket_index, &transformed.0)
+        };
+        #[cfg(not(feature = "nnue-hand-count-dense"))]
         let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
 
         // PSQT ショートカット (Stockfish 準拠: (stm - nstm) / 2)
@@ -511,7 +521,20 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
             get_layer_stack_bucket_mode()
         );
 
-        // LayerStacks で評価（詳細ログ付き）
+        // LayerStacks で評価（詳細ログ付き、HandCount Dense 有効時は HC 寄与も反映）
+        #[cfg(feature = "nnue-hand-count-dense")]
+        let (raw_score, l1_out, l1_skip) = if self.layer_stacks.has_hand_count {
+            let hc = super::hand_count::extract_hand_count(pos);
+            info!("[NNUE Eval] hand_count: {:?}", hc);
+            self.layer_stacks.evaluate_raw_with_diagnostics_with_hand_count(
+                bucket_index,
+                &transformed.0,
+                Some(&hc),
+            )
+        } else {
+            self.layer_stacks.evaluate_raw_with_diagnostics(bucket_index, &transformed.0)
+        };
+        #[cfg(not(feature = "nnue-hand-count-dense"))]
         let (raw_score, l1_out, l1_skip) =
             self.layer_stacks.evaluate_raw_with_diagnostics(bucket_index, &transformed.0);
 

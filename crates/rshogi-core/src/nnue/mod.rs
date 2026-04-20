@@ -39,7 +39,6 @@ pub mod features;
 pub(crate) mod halfka;
 pub(crate) mod halfka_hm;
 pub(crate) mod halfkp;
-#[cfg(feature = "nnue-hand-count-dense")]
 pub(crate) mod hand_count;
 mod layer_stacks;
 mod layers;

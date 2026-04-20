@@ -675,6 +675,29 @@ pub fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
     None
 }
 
+/// arch_str から `HandCountDense=N,` の `N` をパースする。
+///
+/// 該当エントリが無ければ `None`。
+/// 数値のパースに失敗、または `N == 0` / `N > HAND_COUNT_DENSE_MAX` の場合は
+/// `Err` を返し、破損 / 将来フォーマットとして明示的に拒否する。
+pub fn parse_hand_count_dense_dims(arch_str: &str) -> Result<Option<usize>, String> {
+    /// 将来の拡張に備えた HandCountDense 次元数の上限（明らかに不当な値を弾くため）
+    const HAND_COUNT_DENSE_MAX: usize = 1024;
+
+    for part in arch_str.split(',') {
+        if let Some(value) = part.strip_prefix("HandCountDense=") {
+            return match value.parse::<usize>() {
+                Ok(n) if n > 0 && n <= HAND_COUNT_DENSE_MAX => Ok(Some(n)),
+                Ok(n) => Err(format!(
+                    "Invalid HandCountDense dims: {n} (must be in 1..={HAND_COUNT_DENSE_MAX})"
+                )),
+                Err(_) => Err(format!("Failed to parse HandCountDense value: {value:?}")),
+            };
+        }
+    }
+    Ok(None)
+}
+
 /// LayerStacks bucket mode をパース
 pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode> {
     match value.trim().to_ascii_lowercase().as_str() {
