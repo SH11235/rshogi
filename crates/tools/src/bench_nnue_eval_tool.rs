@@ -644,7 +644,7 @@ macro_rules! with_ls_net {
             LayerStacksNetwork::L1536x16x32($inner) => $body,
             #[cfg(feature = "layerstacks-1536x32x32")]
             LayerStacksNetwork::L1536x32x32($inner) => $body,
-            #[cfg(feature = "layerstacks-768")]
+            #[cfg(feature = "layerstacks-768x16x32")]
             LayerStacksNetwork::L768($inner) => $body,
             #[allow(unreachable_patterns)]
             _ => bail!("有効な LayerStacks バリアントがありません"),

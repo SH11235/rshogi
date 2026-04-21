@@ -671,7 +671,7 @@ mod tests {
         let arch = "Features=HalfKA_hm^[73305->256x2]-SCReLU,fv_scale=13,l2=32,l3=32,qa=127,qb=64";
         assert_eq!(parse_arch_dimensions(arch), (256, 32, 32));
 
-        // LayerStacks 1536x32x32 (v98)
+        // LayerStacks 1536x32x32
         let arch = "Features=HalfKA_hm(Friend)[73305->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-62](SqrClippedReLU[62](AffineTransform[32<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28";
         assert_eq!(parse_arch_dimensions(arch), (1536, 32, 32));
 

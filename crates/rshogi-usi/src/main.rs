@@ -1302,14 +1302,14 @@ impl UsiEngine {
                             let value = inner.evaluate_with_diagnostics(&self.position, &acc);
                             println!("info string Static eval (diagnostics): {}", value.raw());
                         }
-                        #[cfg(feature = "layerstacks-768")]
+                        #[cfg(feature = "layerstacks-768x16x32")]
                         LayerStacksNetwork::L768(inner) => {
                             let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::<768>::new();
                             inner.refresh_accumulator(&self.position, &mut acc);
                             let value = inner.evaluate_with_diagnostics(&self.position, &acc);
                             println!("info string Static eval (diagnostics): {}", value.raw());
                         }
-                        #[cfg(feature = "layerstacks-512")]
+                        #[cfg(feature = "layerstacks-512x16x32")]
                         LayerStacksNetwork::L512(inner) => {
                             let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::<512>::new();
                             inner.refresh_accumulator(&self.position, &mut acc);

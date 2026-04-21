@@ -158,9 +158,9 @@ pub fn run() -> Result<()> {
         LayerStacksNetwork::L1536x16x32(concrete_net) => verify_with_network(&cli, concrete_net)?,
         #[cfg(feature = "layerstacks-1536x32x32")]
         LayerStacksNetwork::L1536x32x32(concrete_net) => verify_with_network(&cli, concrete_net)?,
-        #[cfg(feature = "layerstacks-768")]
+        #[cfg(feature = "layerstacks-768x16x32")]
         LayerStacksNetwork::L768(concrete_net) => verify_with_network(&cli, concrete_net)?,
-        #[cfg(feature = "layerstacks-512")]
+        #[cfg(feature = "layerstacks-512x16x32")]
         LayerStacksNetwork::L512(concrete_net) => verify_with_network(&cli, concrete_net)?,
         #[allow(unreachable_patterns)]
         _ => anyhow::bail!("有効な LayerStacks バリアントがありません"),
