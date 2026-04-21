@@ -18,6 +18,8 @@
 | ツール | 説明 |
 |--------|------|
 | `shuffle_psv` | PSV ファイルのシャッフル |
+| `split_psv` | PSV ファイルを局面数または容量で分割 |
+| `merge_psv` | 複数の PSV ファイルを順序どおり結合 |
 | `rescore_psv` | 局面の再評価（探索スコア付与） |
 | `preprocess_psv` | PSV ファイルの前処理（qsearch leaf置換等） |
 | `validate_psv` | PSV ファイルの不正局面検出・除去 |

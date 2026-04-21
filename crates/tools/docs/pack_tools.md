@@ -33,6 +33,59 @@ cargo run -p tools --release --bin shuffle_psv -- \
 | `--seed` | 乱数シード（再現性） | ランダム |
 | `--chunk-size` | チャンクサイズ（大規模ファイル用） | 0（全読み込み） |
 
+### split_psv
+
+PSV ファイルを複数ファイルへ分割。1 ファイルあたりの局面数または容量を指定できる。
+入出力はストリーミングで行うため、大きなファイルでも少しずつ書き出せる。
+
+```bash
+# 1 ファイル 1 億局面で分割
+cargo run -p tools --release --bin split_psv -- \
+  --input data.psv --output-prefix split/train \
+  --records-per-file 100000000
+
+# 1 ファイル 4GB 目安で分割
+cargo run -p tools --release --bin split_psv -- \
+  --input data.psv --output-prefix split/train \
+  --bytes-per-file 4GB
+```
+
+| オプション | 説明 | デフォルト |
+|------------|------|------------|
+| `-i, --input` | 入力ファイル | 必須 |
+| `--output-prefix` | 出力プレフィックス（`prefix_000.bin` 形式） | 必須 |
+| `--records-per-file` | 1 ファイルあたりの局面数 | - |
+| `--bytes-per-file` | 1 ファイルあたりの容量（`4GB`, `3500MiB` など） | - |
+| `--write-chunk-records` | 1 回の読み書きで扱う局面数 | `1000000` |
+| `--start-index` | 出力ファイル番号の開始値 | `0` |
+| `--digits` | 出力ファイル番号の最小桁数 | `3` |
+| `--suffix` | 出力ファイル拡張子 | `.bin` |
+
+### merge_psv
+
+複数の PSV ファイルを入力順どおりに 1 ファイルへ結合。
+`--input-dir` 使用時はファイル名の昇順で処理する。
+
+```bash
+# 明示した順序で結合
+cargo run -p tools --release --bin merge_psv -- \
+  --input split/train_000.bin,split/train_001.bin,split/train_002.bin \
+  --output merged.psv
+
+# ディレクトリから結合
+cargo run -p tools --release --bin merge_psv -- \
+  --input-dir split --pattern "train_*.bin" \
+  --output merged.psv
+```
+
+| オプション | 説明 | デフォルト |
+|------------|------|------------|
+| `--input` | 入力ファイル（カンマ区切り） | - |
+| `--input-dir` | 入力ディレクトリ（`--input` と排他） | - |
+| `--pattern` | `--input-dir` 使用時の glob パターン | `*.bin` |
+| `-o, --output` | 出力ファイル | 必須 |
+| `--write-chunk-records` | 1 回の読み書きで扱う局面数 | `1000000` |
+
 ### rescore_psv
 
 局面に探索スコアを付与。既存データの再評価に使用。
