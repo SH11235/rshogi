@@ -41,10 +41,12 @@
 //! ```
 
 pub mod aobazero_features;
+pub mod bench_nnue_eval_tool;
 pub mod common;
 pub mod config;
 pub mod csa_client;
 pub mod dlshogi_features;
+pub mod eval_sfens_tool;
 pub mod packed_sfen;
 pub mod positions;
 pub mod qsearch_pv;
@@ -54,6 +56,7 @@ pub mod selfplay;
 pub mod sprt;
 pub mod system;
 mod utils;
+pub mod verify_nnue_accumulator_tool;
 
 // 公開API
 pub use config::{BenchmarkConfig, EvalConfig, LimitType};

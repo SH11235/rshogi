@@ -756,14 +756,21 @@ impl SearchWorker {
             // LayerStacks 用 AccumulatorCaches を初期化
             if network.is_layer_stacks() {
                 if let crate::nnue::NNUENetwork::LayerStacks(ls_net) = &*network {
-                    // 既存 cache があっても L1 バリアント（1536/768/512）が不一致なら破棄。
-                    // 同一プロセスで EvalFile をリロードして L1 が変わった場合、旧 cache
+                    // 既存 cache があっても exact architecture が不一致なら破棄。
+                    // 同一プロセスで EvalFile をリロードして LayerStacks 形状が変わった場合、旧 cache
                     // variant を保持したままだと `LayerStacksNetwork::update_accumulator`
                     // の cache 経路が pattern match で外れ、Finny-table caching が
                     // 静かに無効化される（PR #466 Codex review P2 #2）。
                     let need_new_cache = match &self.state.acc_cache {
                         None => true,
-                        Some(cache) => cache.l1_size() != ls_net.l1_size(),
+                        Some(cache) => {
+                            cache.architecture_dims()
+                                != (
+                                    ls_net.architecture_spec().l1,
+                                    ls_net.architecture_spec().l2,
+                                    ls_net.architecture_spec().l3,
+                                )
+                        }
                     };
                     if need_new_cache {
                         self.state.acc_cache = Some(ls_net.new_acc_cache());

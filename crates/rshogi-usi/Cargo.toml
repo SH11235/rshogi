@@ -44,10 +44,11 @@ threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
 # NNUE progress8kpabs 差分更新最適化（L1=1536 で有効、L1=768 で退行）
 nnue-progress-diff = ["rshogi-core/nnue-progress-diff"]
-# LayerStacks L1 バリアント
-layerstacks-1536 = ["rshogi-core/layerstacks-1536"]
-layerstacks-768 = ["rshogi-core/layerstacks-768"]
-layerstacks-512 = ["rshogi-core/layerstacks-512"]
+# LayerStacks exact architecture / L1 バリアント
+layerstacks-1536x16x32 = ["rshogi-core/layerstacks-1536x16x32"]
+layerstacks-1536x32x32 = ["rshogi-core/layerstacks-1536x32x32"]
+layerstacks-768x16x32 = ["rshogi-core/layerstacks-768x16x32"]
+layerstacks-512x16x32 = ["rshogi-core/layerstacks-512x16x32"]
 
 [[bin]]
 name = "rshogi-usi"

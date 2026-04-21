@@ -590,20 +590,21 @@ mod tests {
         // 外側の `any(...)` でいずれかの variant が有効なときだけ import が使われる
         // ようにして unused-import 警告を抑える。
         #[cfg(any(
-            feature = "layerstacks-1536",
-            feature = "layerstacks-768",
-            feature = "layerstacks-512"
+            feature = "layerstacks-1536x16x32",
+            feature = "layerstacks-1536x32x32",
+            feature = "layerstacks-768x16x32",
+            feature = "layerstacks-512x16x32"
         ))]
         {
             use crate::nnue::accumulator_layer_stacks::{
                 AccumulatorStackLayerStacks, LayerStacksAccStack,
             };
 
-            #[cfg(feature = "layerstacks-1536")]
+            #[cfg(feature = "layerstacks-1536x16x32")]
             {
-                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L1536(
-                    AccumulatorStackLayerStacks::<1536>::new(),
-                ));
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L1536x16x32(AccumulatorStackLayerStacks::<1536>::new()),
+                );
                 stack.reset();
                 stack.push(dirty);
                 stack.push(dirty);
@@ -611,11 +612,11 @@ mod tests {
                 stack.pop();
             }
 
-            #[cfg(feature = "layerstacks-768")]
+            #[cfg(feature = "layerstacks-1536x32x32")]
             {
-                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L768(
-                    AccumulatorStackLayerStacks::<768>::new(),
-                ));
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L1536x32x32(AccumulatorStackLayerStacks::<1536>::new()),
+                );
                 stack.reset();
                 stack.push(dirty);
                 stack.push(dirty);
@@ -623,11 +624,23 @@ mod tests {
                 stack.pop();
             }
 
-            #[cfg(feature = "layerstacks-512")]
+            #[cfg(feature = "layerstacks-768x16x32")]
             {
-                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L512(
-                    AccumulatorStackLayerStacks::<512>::new(),
-                ));
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L768x16x32(AccumulatorStackLayerStacks::<768>::new()),
+                );
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+
+            #[cfg(feature = "layerstacks-512x16x32")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L512x16x32(AccumulatorStackLayerStacks::<512>::new()),
+                );
                 stack.reset();
                 stack.push(dirty);
                 stack.push(dirty);

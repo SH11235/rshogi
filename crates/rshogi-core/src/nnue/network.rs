@@ -368,14 +368,19 @@ impl NNUENetwork {
                 // LayerStacks は特殊処理（FT が LEB128 圧縮のためファイルサイズ検出の対象外）
                 if effective_feature_set == FeatureSet::LayerStacks {
                     reader.seek(SeekFrom::Start(0))?;
-                    // L1 サイズをアーキテクチャ文字列から取得（デフォルト 1536）
-                    let (l1_from_arch, _, _) = super::spec::parse_arch_dimensions(&arch_str);
+                    let (l1_from_arch, l2_from_arch, l3_from_arch) =
+                        super::spec::parse_arch_dimensions(&arch_str);
                     let l1 = if l1_from_arch == 0 {
                         1536
                     } else {
                         l1_from_arch
                     };
-                    let network = LayerStacksNetwork::read_with_options(reader, l1, psqt_override)?;
+                    let (l2, l3) = match (l2_from_arch, l3_from_arch) {
+                        (0, 0) => (16, 32),
+                        dims => dims,
+                    };
+                    let network =
+                        LayerStacksNetwork::read_with_options(reader, l1, l2, l3, psqt_override)?;
                     return Ok(Self::LayerStacks(network));
                 }
 
@@ -1067,16 +1072,19 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
     #[cfg(feature = "nnue-progress-diff")]
     if matches!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Progress8KPAbs) {
         let bucket = match stack {
-            #[cfg(feature = "layerstacks-1536")]
-            LayerStacksAccStack::L1536(s) => ensure_progress_bucket(pos, s),
-            #[cfg(feature = "layerstacks-768")]
-            LayerStacksAccStack::L768(s) => ensure_progress_bucket(pos, s),
-            #[cfg(feature = "layerstacks-512")]
-            LayerStacksAccStack::L512(s) => ensure_progress_bucket(pos, s),
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            LayerStacksAccStack::L1536x16x32(s) => ensure_progress_bucket(pos, s),
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            LayerStacksAccStack::L1536x32x32(s) => ensure_progress_bucket(pos, s),
+            #[cfg(feature = "layerstacks-768x16x32")]
+            LayerStacksAccStack::L768x16x32(s) => ensure_progress_bucket(pos, s),
+            #[cfg(feature = "layerstacks-512x16x32")]
+            LayerStacksAccStack::L512x16x32(s) => ensure_progress_bucket(pos, s),
             #[cfg(not(any(
-                feature = "layerstacks-1536",
-                feature = "layerstacks-768",
-                feature = "layerstacks-512"
+                feature = "layerstacks-1536x16x32",
+                feature = "layerstacks-1536x32x32",
+                feature = "layerstacks-768x16x32",
+                feature = "layerstacks-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         };
