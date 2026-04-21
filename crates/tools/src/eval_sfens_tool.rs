@@ -408,9 +408,9 @@ pub fn run() -> Result<()> {
                 #[cfg(feature = "layerstacks-1536x32x32")]
                 LayerStacksNetwork::L1536x32x32($inner) => $body,
                 #[cfg(feature = "layerstacks-768x16x32")]
-                LayerStacksNetwork::L768($inner) => $body,
+                LayerStacksNetwork::L768x16x32($inner) => $body,
                 #[cfg(feature = "layerstacks-512x16x32")]
-                LayerStacksNetwork::L512($inner) => $body,
+                LayerStacksNetwork::L512x16x32($inner) => $body,
                 #[allow(unreachable_patterns)]
                 _ => anyhow::bail!("有効な LayerStacks バリアントがありません"),
             }

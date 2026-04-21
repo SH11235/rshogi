@@ -626,9 +626,9 @@ mod tests {
 
             #[cfg(feature = "layerstacks-768x16x32")]
             {
-                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L768(
-                    AccumulatorStackLayerStacks::<768>::new(),
-                ));
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L768x16x32(AccumulatorStackLayerStacks::<768>::new()),
+                );
                 stack.reset();
                 stack.push(dirty);
                 stack.push(dirty);
@@ -638,9 +638,9 @@ mod tests {
 
             #[cfg(feature = "layerstacks-512x16x32")]
             {
-                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L512(
-                    AccumulatorStackLayerStacks::<512>::new(),
-                ));
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L512x16x32(AccumulatorStackLayerStacks::<512>::new()),
+                );
                 stack.reset();
                 stack.push(dirty);
                 stack.push(dirty);

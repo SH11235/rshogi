@@ -1077,9 +1077,9 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
             #[cfg(feature = "layerstacks-1536x32x32")]
             LayerStacksAccStack::L1536x32x32(s) => ensure_progress_bucket(pos, s),
             #[cfg(feature = "layerstacks-768x16x32")]
-            LayerStacksAccStack::L768(s) => ensure_progress_bucket(pos, s),
+            LayerStacksAccStack::L768x16x32(s) => ensure_progress_bucket(pos, s),
             #[cfg(feature = "layerstacks-512x16x32")]
-            LayerStacksAccStack::L512(s) => ensure_progress_bucket(pos, s),
+            LayerStacksAccStack::L512x16x32(s) => ensure_progress_bucket(pos, s),
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",

@@ -517,9 +517,9 @@ pub enum LayerStacksAccStack {
     #[cfg(feature = "layerstacks-1536x32x32")]
     L1536x32x32(AccumulatorStackLayerStacks<1536>),
     #[cfg(feature = "layerstacks-768x16x32")]
-    L768(AccumulatorStackLayerStacks<768>),
+    L768x16x32(AccumulatorStackLayerStacks<768>),
     #[cfg(feature = "layerstacks-512x16x32")]
-    L512(AccumulatorStackLayerStacks<512>),
+    L512x16x32(AccumulatorStackLayerStacks<512>),
 }
 
 /// LayerStacks dispatch match の網羅性を確保するマクロ
@@ -534,9 +534,9 @@ macro_rules! ls_match {
             #[cfg(feature = "layerstacks-1536x32x32")]
             Self::L1536x32x32($pat) => $body,
             #[cfg(feature = "layerstacks-768x16x32")]
-            Self::L768($pat) => $body,
+            Self::L768x16x32($pat) => $body,
             #[cfg(feature = "layerstacks-512x16x32")]
-            Self::L512($pat) => $body,
+            Self::L512x16x32($pat) => $body,
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -557,9 +557,9 @@ impl LayerStacksAccStack {
             #[cfg(feature = "layerstacks-1536x32x32")]
             Self::L1536x32x32(_) => 1536,
             #[cfg(feature = "layerstacks-768x16x32")]
-            Self::L768(_) => 768,
+            Self::L768x16x32(_) => 768,
             #[cfg(feature = "layerstacks-512x16x32")]
-            Self::L512(_) => 512,
+            Self::L512x16x32(_) => 512,
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -578,9 +578,9 @@ impl LayerStacksAccStack {
             #[cfg(feature = "layerstacks-1536x32x32")]
             Self::L1536x32x32(_) => (1536, 32, 32),
             #[cfg(feature = "layerstacks-768x16x32")]
-            Self::L768(_) => (768, 16, 32),
+            Self::L768x16x32(_) => (768, 16, 32),
             #[cfg(feature = "layerstacks-512x16x32")]
-            Self::L512(_) => (512, 16, 32),
+            Self::L512x16x32(_) => (512, 16, 32),
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -627,9 +627,9 @@ pub enum LayerStacksAccCache {
     #[cfg(feature = "layerstacks-1536x32x32")]
     L1536x32x32(AccumulatorCacheLayerStacks<1536>),
     #[cfg(feature = "layerstacks-768x16x32")]
-    L768(AccumulatorCacheLayerStacks<768>),
+    L768x16x32(AccumulatorCacheLayerStacks<768>),
     #[cfg(feature = "layerstacks-512x16x32")]
-    L512(AccumulatorCacheLayerStacks<512>),
+    L512x16x32(AccumulatorCacheLayerStacks<512>),
 }
 
 impl LayerStacksAccCache {
@@ -645,9 +645,9 @@ impl LayerStacksAccCache {
             #[cfg(feature = "layerstacks-1536x32x32")]
             Self::L1536x32x32(_) => 1536,
             #[cfg(feature = "layerstacks-768x16x32")]
-            Self::L768(_) => 768,
+            Self::L768x16x32(_) => 768,
             #[cfg(feature = "layerstacks-512x16x32")]
-            Self::L512(_) => 512,
+            Self::L512x16x32(_) => 512,
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -666,9 +666,9 @@ impl LayerStacksAccCache {
             #[cfg(feature = "layerstacks-1536x32x32")]
             Self::L1536x32x32(_) => (1536, 32, 32),
             #[cfg(feature = "layerstacks-768x16x32")]
-            Self::L768(_) => (768, 16, 32),
+            Self::L768x16x32(_) => (768, 16, 32),
             #[cfg(feature = "layerstacks-512x16x32")]
-            Self::L512(_) => (512, 16, 32),
+            Self::L512x16x32(_) => (512, 16, 32),
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -687,9 +687,9 @@ impl LayerStacksAccCache {
             #[cfg(feature = "layerstacks-1536x32x32")]
             Self::L1536x32x32(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-768x16x32")]
-            Self::L768(c) => c.invalidate(),
+            Self::L768x16x32(c) => c.invalidate(),
             #[cfg(feature = "layerstacks-512x16x32")]
-            Self::L512(c) => c.invalidate(),
+            Self::L512x16x32(c) => c.invalidate(),
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
