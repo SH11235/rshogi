@@ -277,7 +277,7 @@ impl<
 ///
 /// L1→L2 activation: SqrClippedReLU + ClippedReLU（15要素 → 30 u8）
 ///
-/// l1_out の最初の 15 要素 (NNUE_PYTORCH_L2) に対して:
+/// l1_out の最初の 15 要素 (`LAYER_STACK_16X32_MAIN_DIM`) に対して:
 /// - SqrClippedReLU: min(127, (input^2) >> 19) → l2_input[0..15]
 /// - ClippedReLU:    clamp(input >> 6, 0, 127)  → l2_input[15..30]
 ///
@@ -616,14 +616,16 @@ pub fn compute_king_ranks(
 mod tests {
     use super::*;
     use crate::nnue::accumulator::Aligned;
-    use crate::nnue::constants::{LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, NNUE_PYTORCH_L1};
+    use crate::nnue::constants::{
+        LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, NNUE_PYTORCH_L1,
+    };
     use crate::nnue::layers::ClippedReLU;
 
     /// テスト用の具体的な L1 サイズ
     const TEST_L1: usize = NNUE_PYTORCH_L1; // 1536
-    const TEST_LS_L1_OUT: usize = LAYER_STACK_L1_OUT;
+    const TEST_LS_L1_OUT: usize = LAYER_STACK_16X32_L1_OUT;
     const TEST_MAIN_DIM: usize = TEST_LS_L1_OUT - 1;
-    const TEST_LS_L2_IN: usize = LAYER_STACK_L2_IN;
+    const TEST_LS_L2_IN: usize = LAYER_STACK_16X32_L2_IN;
     const TEST_LS_L2_PADDED_INPUT: usize = 32;
 
     type TestLayerStackBucket =

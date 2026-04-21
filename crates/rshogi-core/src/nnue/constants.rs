@@ -114,8 +114,8 @@ pub const OUTPUT_DIMENSIONS: usize = 1;
 /// nnue-pytorch の Feature Transformer 出力次元数（片方の視点）
 pub const NNUE_PYTORCH_L1: usize = 1536;
 
-/// 従来 LayerStacks (1536x16x32) の L2 直前 main 次元数
-pub const NNUE_PYTORCH_L2: usize = 15;
+/// LayerStacks 16x32 バリアントの L2 直前 main 次元数
+pub const LAYER_STACK_16X32_MAIN_DIM: usize = 15;
 
 /// LayerStacks の L2 出力次元数
 pub const NNUE_PYTORCH_L3: usize = 32;
@@ -123,20 +123,20 @@ pub const NNUE_PYTORCH_L3: usize = 32;
 /// LayerStacks のバケット数
 pub const NUM_LAYER_STACK_BUCKETS: usize = 9;
 
-/// 従来 LayerStacks (1536x16x32) の L1層出力次元数（main 15 + skip 1 = 16）
-pub const LAYER_STACK_L1_OUT: usize = NNUE_PYTORCH_L2 + 1; // 16
+/// LayerStacks 16x32 バリアントの L1層出力次元数（main 15 + skip 1 = 16）
+pub const LAYER_STACK_16X32_L1_OUT: usize = LAYER_STACK_16X32_MAIN_DIM + 1; // 16
 
-/// 従来 LayerStacks (1536x16x32) の L2層入力次元数（sqr 15 + crelu 15 = 30）
-pub const LAYER_STACK_L2_IN: usize = NNUE_PYTORCH_L2 * 2; // 30
+/// LayerStacks 16x32 バリアントの L2層入力次元数（sqr 15 + crelu 15 = 30）
+pub const LAYER_STACK_16X32_L2_IN: usize = LAYER_STACK_16X32_MAIN_DIM * 2; // 30
 
-/// LayerStacks 1536x32x32 の L1層出力次元数（main 31 + skip 1 = 32）
-pub const LAYER_STACK_V98_L1_OUT: usize = 32;
+/// LayerStacks 32x32 バリアントの L1層出力次元数（main 31 + skip 1 = 32）
+pub const LAYER_STACK_32X32_L1_OUT: usize = 32;
 
-/// LayerStacks 1536x32x32 の main 次元数
-pub const LAYER_STACK_V98_MAIN_DIM: usize = LAYER_STACK_V98_L1_OUT - 1; // 31
+/// LayerStacks 32x32 バリアントの main 次元数
+pub const LAYER_STACK_32X32_MAIN_DIM: usize = LAYER_STACK_32X32_L1_OUT - 1; // 31
 
-/// LayerStacks 1536x32x32 の L2層入力次元数（sqr 31 + crelu 31 = 62）
-pub const LAYER_STACK_V98_L2_IN: usize = LAYER_STACK_V98_MAIN_DIM * 2; // 62
+/// LayerStacks 32x32 バリアントの L2層入力次元数（sqr 31 + crelu 31 = 62）
+pub const LAYER_STACK_32X32_L2_IN: usize = LAYER_STACK_32X32_MAIN_DIM * 2; // 62
 
 /// nnue-pytorch の隠れ層重みスケール
 pub const NNUE_PYTORCH_WEIGHT_SCALE_HIDDEN: i32 = 64;

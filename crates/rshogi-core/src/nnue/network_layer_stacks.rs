@@ -25,7 +25,9 @@
 
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
-use super::constants::{FV_SCALE_HALFKA, LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, MAX_ARCH_LEN};
+use super::constants::{
+    FV_SCALE_HALFKA, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, MAX_ARCH_LEN,
+};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
 use super::network::{
@@ -598,16 +600,16 @@ impl<
 
 #[cfg(feature = "layerstacks-1536x16x32")]
 pub type NetworkLayerStacks1536x16x32 =
-    NetworkLayerStacks<1536, LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, 32>;
+    NetworkLayerStacks<1536, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32>;
 #[cfg(feature = "layerstacks-1536x32x32")]
 pub type NetworkLayerStacks1536x32x32 =
-    NetworkLayerStacks<1536, LAYER_STACK_V98_L1_OUT, LAYER_STACK_V98_L2_IN, 64>;
+    NetworkLayerStacks<1536, LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN, 64>;
 #[cfg(feature = "layerstacks-768x16x32")]
 pub type NetworkLayerStacks768x16x32 =
-    NetworkLayerStacks<768, LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, 32>;
+    NetworkLayerStacks<768, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32>;
 #[cfg(feature = "layerstacks-512x16x32")]
 pub type NetworkLayerStacks512x16x32 =
-    NetworkLayerStacks<512, LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, 32>;
+    NetworkLayerStacks<512, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32>;
 
 // =============================================================================
 // LayerStacksNetwork - L1 サイズ dispatch enum
