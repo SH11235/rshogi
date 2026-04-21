@@ -1,6 +1,6 @@
 # rshogi tools リファレンス
 
-crates/tools/src/bin/ 配下の全31バイナリの一覧と解説。
+crates/tools/src/bin/ 配下の全32バイナリの一覧と解説。
 
 ## 対局・トーナメント
 
@@ -46,8 +46,9 @@ crates/tools/src/bin/ 配下の全31バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `psv_dedup` | PSV ファイルの局面重複削除（HashSet 方式） |
-| `psv_dedup_bloom` | 大規模 PSV ファイルのブルームフィルタ重複除去（数百億レコード対応） |
+| `psv_dedup` | PSV ファイルの局面重複削除（HashSet 方式、中規模向け） |
+| `psv_dedup_bloom` | 大規模 PSV ファイルのブルームフィルタ重複除去（数百億レコード対応、近似） |
+| `psv_dedup_partition` | ディスクパーティション方式の exact 重複除去（低メモリ・大規模向け） |
 | `psv_dedup_check` | PSV ファイルの重複率を統計出力（近似モード・正確モード対応） |
 | `validate_sfens` | SFEN テキストの不正局面を検出・除去（文法・玉の存在・駒数超過・二歩など） |
 
