@@ -128,7 +128,10 @@ const MEM_THRESHOLD_FACTOR: f64 = 0.8;
 
 struct ResourceEstimate {
     total_records: u64,
+    /// Phase 1 が一時ディレクトリに書き出すバイト数 (= ref + input)
     phase1_temp_bytes: u64,
+    /// 出力の上限バイト数。reference モードでは input 側だけが出力対象。
+    output_upper_bound_bytes: u64,
     phase1_memory_bytes: u64,
     phase2_peak_memory_bytes: u64,
 }
@@ -149,6 +152,7 @@ fn estimate_resources(
     ResourceEstimate {
         total_records,
         phase1_temp_bytes: total_bytes,
+        output_upper_bound_bytes: input_size_bytes,
         phase1_memory_bytes: phase1_mem,
         phase2_peak_memory_bytes: phase2_peak_mem,
     }
@@ -252,7 +256,8 @@ fn preflight_check(
     } else {
         same_filesystem(temp_dir, output_parent)
     };
-    let output_required = (estimate.phase1_temp_bytes as f64 * DISK_SAFETY_FACTOR) as u64;
+    // 出力上限は input 側のみ（reference は出力対象外なので除外する）
+    let output_required = (estimate.output_upper_bound_bytes as f64 * DISK_SAFETY_FACTOR) as u64;
     if let Some(avail) = get_disk_available(output_parent) {
         if same_fs == Some(true) {
             eprintln!(
@@ -304,6 +309,53 @@ fn sum_existing_partition_bytes(dir: &Path) -> io::Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// `--phase2-only` 時、既存 temp ディレクトリから partition 数を推定する。
+///
+/// `partition_NNNNN.bin` 形式のファイルを列挙し、最大 index + 1 を返す。
+/// Phase 1 は 0..N-1 のすべての partition ファイルを空でも作成するため、
+/// ファイル数ではなく最大 index を使うことで途中削除された場合も正しく
+/// Phase 1 時点の N を取得できる。
+fn detect_partition_count(dir: &Path) -> io::Result<usize> {
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut max_idx: Option<usize> = None;
+    let mut count = 0usize;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(stripped) = name.strip_prefix("partition_").and_then(|s| s.strip_suffix(".bin"))
+        else {
+            continue;
+        };
+        let Ok(idx) = stripped.parse::<usize>() else {
+            continue;
+        };
+        max_idx = Some(max_idx.map_or(idx, |m| m.max(idx)));
+        count += 1;
+    }
+    match max_idx {
+        Some(m) => {
+            let detected = m + 1;
+            if count < detected {
+                eprintln!(
+                    "Warning: temp {} に {} 個の partition ファイルしか見つかりません \
+                     (Phase 1 時の N={})。欠損 partition は skip されます。",
+                    dir.display(),
+                    count,
+                    detected,
+                );
+            }
+            Ok(detected)
+        }
+        None => Ok(0),
+    }
 }
 
 fn partition_filename(partition: usize) -> String {
@@ -577,11 +629,13 @@ fn main() -> io::Result<()> {
         ));
     }
 
-    warn_fd_limit(args.partitions);
-
     let partition_buffer_bytes = args.partition_buffer_kb * 1024;
     let input_subdir = args.temp_dir.join(INPUT_SUBDIR);
     let ref_subdir = args.temp_dir.join(REF_SUBDIR);
+
+    // Phase 2 で使う partition 数。--phase2-only 時は既存 temp dir から自動検出して
+    // Phase 1 時の N と一致させる (データ欠損を防ぐ)。
+    let partitions: usize;
 
     let (phase1_ref_records, phase1_input_records) = if args.phase2_only {
         eprintln!("=== Phase 1 skipped (--phase2-only) ===");
@@ -600,7 +654,40 @@ fn main() -> io::Result<()> {
                 ),
             ));
         }
+
+        let detected = detect_partition_count(&input_subdir)?;
+        if detected == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "partition ファイルが見つかりません: {} (ファイル名形式 partition_NNNNN.bin)",
+                    input_subdir.display(),
+                ),
+            ));
+        }
+        if detected != args.partitions {
+            eprintln!(
+                "Info: --phase2-only で {} から {} 個の partition を検出しました \
+                 (CLI の --partitions={} は上書きされます)。",
+                input_subdir.display(),
+                detected,
+                args.partitions,
+            );
+        }
+        partitions = detected;
+        warn_fd_limit(partitions);
+
         if ref_subdir.is_dir() {
+            let ref_detected = detect_partition_count(&ref_subdir)?;
+            if ref_detected != 0 && ref_detected != partitions {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "partition 数の不一致: input={partitions}, ref={ref_detected}. \
+                         temp ディレクトリが壊れている可能性があります。",
+                    ),
+                ));
+            }
             eprintln!("  reference パーティション検出: {}", ref_subdir.display());
         }
 
@@ -609,7 +696,7 @@ fn main() -> io::Result<()> {
         let estimate = estimate_resources(
             existing_ref_bytes,
             existing_input_bytes,
-            args.partitions,
+            partitions,
             partition_buffer_bytes,
         );
         preflight_check(
@@ -622,6 +709,9 @@ fn main() -> io::Result<()> {
 
         (0u64, 0u64)
     } else {
+        partitions = args.partitions;
+        warn_fd_limit(partitions);
+
         let ref_paths = match args.reference.as_deref() {
             Some(r) => parse_reference_paths(r)?,
             None => Vec::new(),
@@ -643,12 +733,8 @@ fn main() -> io::Result<()> {
         } else {
             input_size
         };
-        let estimate = estimate_resources(
-            ref_size,
-            capped_input_size,
-            args.partitions,
-            partition_buffer_bytes,
-        );
+        let estimate =
+            estimate_resources(ref_size, capped_input_size, partitions, partition_buffer_bytes);
         preflight_check(
             &estimate,
             &args.temp_dir,
@@ -657,11 +743,11 @@ fn main() -> io::Result<()> {
             args.force,
         )?;
 
-        eprintln!("=== Phase 1: Partitioning ({} partitions) ===", args.partitions);
+        eprintln!("=== Phase 1: Partitioning ({partitions} partitions) ===");
         eprintln!(
             "  partition buffer: {} KiB/partition (total ~{:.1} MiB)",
             args.partition_buffer_kb,
-            (args.partitions * partition_buffer_bytes) as f64 / (1024.0 * 1024.0),
+            (partitions * partition_buffer_bytes) as f64 / (1024.0 * 1024.0),
         );
 
         let ref_records = if ref_paths.is_empty() {
@@ -675,7 +761,7 @@ fn main() -> io::Result<()> {
                 "reference",
                 &ref_paths,
                 &ref_subdir,
-                args.partitions,
+                partitions,
                 partition_buffer_bytes,
                 0, // reference は常に全件
             )?
@@ -685,7 +771,7 @@ fn main() -> io::Result<()> {
             "input",
             &inputs,
             &input_subdir,
-            args.partitions,
+            partitions,
             partition_buffer_bytes,
             args.max_positions,
         )?;
@@ -710,7 +796,7 @@ fn main() -> io::Result<()> {
     let (ref_seen, input_seen, unique) = deduplicate_partitions(
         &input_subdir,
         ref_dir_opt,
-        args.partitions,
+        partitions,
         &args.output,
         args.keep_temp,
     )?;

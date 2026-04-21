@@ -149,7 +149,7 @@ pub fn get_disk_available(path: &Path) -> Option<u64> {
     if rc != 0 {
         return None;
     }
-    Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+    Some(stat.f_bavail * stat.f_frsize)
 }
 
 /// バイト値を `%.1f GiB` 形式で整形する。
