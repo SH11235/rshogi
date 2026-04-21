@@ -26,7 +26,8 @@
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{
-    FV_SCALE_HALFKA, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, MAX_ARCH_LEN,
+    FV_SCALE_HALFKA, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, LAYER_STACK_32X32_L1_OUT,
+    LAYER_STACK_32X32_L2_IN, MAX_ARCH_LEN,
 };
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
