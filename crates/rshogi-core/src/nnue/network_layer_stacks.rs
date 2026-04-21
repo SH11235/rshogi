@@ -25,7 +25,7 @@
 
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
-use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN};
+use super::constants::{FV_SCALE_HALFKA, LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, MAX_ARCH_LEN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
 use super::network::{
@@ -98,16 +98,27 @@ fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16;
 /// LayerStacksアーキテクチャのNNUEネットワーク
 ///
 /// HalfKA_hm^ 特徴量（73,305次元）+ L1次元 Feature Transformer + 9バケット LayerStacks
-pub struct NetworkLayerStacks<const L1: usize> {
+pub struct NetworkLayerStacks<
+    const L1: usize,
+    const LS_L1_OUT: usize,
+    const LS_L2_IN: usize,
+    const LS_L2_PADDED_INPUT: usize,
+> {
     /// Feature Transformer (73,305 → L1)
     pub feature_transformer: FeatureTransformerLayerStacks<L1>,
     /// LayerStacks (9バケット)
-    pub layer_stacks: LayerStacks<L1>,
+    pub layer_stacks: LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
     /// 評価値スケーリング係数（アーキテクチャ文字列から取得、USIオプションでオーバーライド可）
     pub fv_scale: i32,
 }
 
-impl<const L1: usize> NetworkLayerStacks<L1> {
+impl<
+    const L1: usize,
+    const LS_L1_OUT: usize,
+    const LS_L2_IN: usize,
+    const LS_L2_PADDED_INPUT: usize,
+> NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+{
     /// ファイルから読み込み
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let file = File::open(path)?;
@@ -293,7 +304,10 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
 
     /// 読み込み時の診断ログを出力
     #[cfg(feature = "diagnostics")]
-    fn log_load_diagnostics(ft: &FeatureTransformerLayerStacks<L1>, ls: &LayerStacks<L1>) {
+    fn log_load_diagnostics(
+        ft: &FeatureTransformerLayerStacks<L1>,
+        ls: &LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
+    ) {
         // FT統計
         let bias_sum: i64 = ft.biases.0.iter().map(|&x| x as i64).sum();
         let weight_min = ft.weights.iter().copied().min().unwrap_or(0);
@@ -582,38 +596,57 @@ impl<const L1: usize> NetworkLayerStacks<L1> {
     }
 }
 
+#[cfg(feature = "layerstacks-1536x16x32")]
+pub type NetworkLayerStacks1536x16x32 =
+    NetworkLayerStacks<1536, LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, 32>;
+#[cfg(feature = "layerstacks-1536x32x32")]
+pub type NetworkLayerStacks1536x32x32 =
+    NetworkLayerStacks<1536, LAYER_STACK_V98_L1_OUT, LAYER_STACK_V98_L2_IN, 64>;
+#[cfg(feature = "layerstacks-768")]
+pub type NetworkLayerStacks768x16x32 =
+    NetworkLayerStacks<768, LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, 32>;
+#[cfg(feature = "layerstacks-512")]
+pub type NetworkLayerStacks512x16x32 =
+    NetworkLayerStacks<512, LAYER_STACK_L1_OUT, LAYER_STACK_L2_IN, 32>;
+
 // =============================================================================
 // LayerStacksNetwork - L1 サイズ dispatch enum
 // =============================================================================
 
 /// LayerStacks ネットワークの L1 サイズ dispatch enum
 ///
-/// Cargo feature `layerstacks-1536` / `layerstacks-768` / `layerstacks-512` で
+/// Cargo feature `layerstacks-1536x16x32` / `layerstacks-1536x32x32`
+/// / `layerstacks-768` / `layerstacks-512` で
 /// 有効なバリアントが制御される。
 ///
 /// **重要**: 大会ビルドでは必ず単一バリアントのみを有効化すること。複数バリアントを
 /// 同時有効にすると dispatch match の overhead で約 5% NPS 退行する（実測値）。
 pub enum LayerStacksNetwork {
-    #[cfg(feature = "layerstacks-1536")]
-    L1536(Box<NetworkLayerStacks<1536>>),
+    #[cfg(feature = "layerstacks-1536x16x32")]
+    L1536x16x32(Box<NetworkLayerStacks1536x16x32>),
+    #[cfg(feature = "layerstacks-1536x32x32")]
+    L1536x32x32(Box<NetworkLayerStacks1536x32x32>),
     #[cfg(feature = "layerstacks-768")]
-    L768(Box<NetworkLayerStacks<768>>),
+    L768(Box<NetworkLayerStacks768x16x32>),
     #[cfg(feature = "layerstacks-512")]
-    L512(Box<NetworkLayerStacks<512>>),
+    L512(Box<NetworkLayerStacks512x16x32>),
 }
 
 impl LayerStacksNetwork {
     /// L1 サイズを取得
     pub fn l1_size(&self) -> usize {
         match self {
-            #[cfg(feature = "layerstacks-1536")]
-            Self::L1536(_) => 1536,
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            Self::L1536x16x32(_) => 1536,
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            Self::L1536x32x32(_) => 1536,
             #[cfg(feature = "layerstacks-768")]
             Self::L768(_) => 768,
             #[cfg(feature = "layerstacks-512")]
             Self::L512(_) => 512,
             #[cfg(not(any(
-                feature = "layerstacks-1536",
+                feature = "layerstacks-1536x16x32",
+                feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768",
                 feature = "layerstacks-512"
             )))]
@@ -623,26 +656,42 @@ impl LayerStacksNetwork {
 
     /// アーキテクチャ仕様を取得
     pub fn architecture_spec(&self) -> super::spec::ArchitectureSpec {
-        super::spec::ArchitectureSpec::new(
-            super::spec::FeatureSet::LayerStacks,
-            self.l1_size(),
-            0,
-            0,
-            super::spec::Activation::CReLU,
-        )
-    }
-
-    /// FV_SCALE を取得
-    pub fn fv_scale(&self) -> i32 {
         match self {
-            #[cfg(feature = "layerstacks-1536")]
-            Self::L1536(net) => net.fv_scale,
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            Self::L1536x16x32(_) => super::spec::ArchitectureSpec::new(
+                super::spec::FeatureSet::LayerStacks,
+                1536,
+                16,
+                32,
+                super::spec::Activation::CReLU,
+            ),
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            Self::L1536x32x32(_) => super::spec::ArchitectureSpec::new(
+                super::spec::FeatureSet::LayerStacks,
+                1536,
+                32,
+                32,
+                super::spec::Activation::CReLU,
+            ),
             #[cfg(feature = "layerstacks-768")]
-            Self::L768(net) => net.fv_scale,
+            Self::L768(_) => super::spec::ArchitectureSpec::new(
+                super::spec::FeatureSet::LayerStacks,
+                768,
+                16,
+                32,
+                super::spec::Activation::CReLU,
+            ),
             #[cfg(feature = "layerstacks-512")]
-            Self::L512(net) => net.fv_scale,
+            Self::L512(_) => super::spec::ArchitectureSpec::new(
+                super::spec::FeatureSet::LayerStacks,
+                512,
+                16,
+                32,
+                super::spec::Activation::CReLU,
+            ),
             #[cfg(not(any(
-                feature = "layerstacks-1536",
+                feature = "layerstacks-1536x16x32",
+                feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768",
                 feature = "layerstacks-512"
             )))]
@@ -650,31 +699,59 @@ impl LayerStacksNetwork {
         }
     }
 
-    /// ファイルから読み込み（L1 サイズで dispatch）
+    /// FV_SCALE を取得
+    pub fn fv_scale(&self) -> i32 {
+        match self {
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            Self::L1536x16x32(net) => net.fv_scale,
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            Self::L1536x32x32(net) => net.fv_scale,
+            #[cfg(feature = "layerstacks-768")]
+            Self::L768(net) => net.fv_scale,
+            #[cfg(feature = "layerstacks-512")]
+            Self::L512(net) => net.fv_scale,
+            #[cfg(not(any(
+                feature = "layerstacks-1536x16x32",
+                feature = "layerstacks-1536x32x32",
+                feature = "layerstacks-768",
+                feature = "layerstacks-512"
+            )))]
+            _ => unreachable!("no LayerStacks variant enabled"),
+        }
+    }
+
+    /// ファイルから読み込み（exact architecture で dispatch）
     pub fn read_with_options<R: Read + Seek>(
         reader: &mut R,
         l1: usize,
+        l2: usize,
+        l3: usize,
         psqt_override: Option<bool>,
     ) -> io::Result<Self> {
-        match l1 {
-            #[cfg(feature = "layerstacks-1536")]
-            1536 => {
-                let net = NetworkLayerStacks::<1536>::read_with_options(reader, psqt_override)?;
-                Ok(Self::L1536(Box::new(net)))
+        match (l1, l2, l3) {
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            (1536, 16, 32) => {
+                let net = NetworkLayerStacks1536x16x32::read_with_options(reader, psqt_override)?;
+                Ok(Self::L1536x16x32(Box::new(net)))
+            }
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            (1536, 32, 32) => {
+                let net = NetworkLayerStacks1536x32x32::read_with_options(reader, psqt_override)?;
+                Ok(Self::L1536x32x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-768")]
-            768 => {
-                let net = NetworkLayerStacks::<768>::read_with_options(reader, psqt_override)?;
+            (768, 16, 32) => {
+                let net = NetworkLayerStacks768x16x32::read_with_options(reader, psqt_override)?;
                 Ok(Self::L768(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-512")]
-            512 => {
-                let net = NetworkLayerStacks::<512>::read_with_options(reader, psqt_override)?;
+            (512, 16, 32) => {
+                let net = NetworkLayerStacks512x16x32::read_with_options(reader, psqt_override)?;
                 Ok(Self::L512(Box::new(net)))
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Unsupported LayerStacks L1 size: {l1}"),
+                format!("Unsupported LayerStacks architecture: {l1}x{l2}x{l3}"),
             )),
         }
     }
@@ -686,10 +763,16 @@ impl LayerStacksNetwork {
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
     ) -> Value {
         match (self, stack) {
-            #[cfg(feature = "layerstacks-1536")]
-            (Self::L1536(net), super::accumulator_layer_stacks::LayerStacksAccStack::L1536(st)) => {
-                net.evaluate(pos, &st.current().accumulator)
-            }
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            (
+                Self::L1536x16x32(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(st),
+            ) => net.evaluate(pos, &st.current().accumulator),
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            (
+                Self::L1536x32x32(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(st),
+            ) => net.evaluate(pos, &st.current().accumulator),
             #[cfg(feature = "layerstacks-768")]
             (Self::L768(net), super::accumulator_layer_stacks::LayerStacksAccStack::L768(st)) => {
                 net.evaluate(pos, &st.current().accumulator)
@@ -771,9 +854,19 @@ impl LayerStacksNetwork {
         }
 
         match (self, stack) {
-            #[cfg(feature = "layerstacks-1536")]
-            (Self::L1536(net), super::accumulator_layer_stacks::LayerStacksAccStack::L1536(st)) => {
-                do_update!(net, st, L1536);
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            (
+                Self::L1536x16x32(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(st),
+            ) => {
+                do_update!(net, st, L1536x16x32);
+            }
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            (
+                Self::L1536x32x32(net),
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(st),
+            ) => {
+                do_update!(net, st, L1536x32x32);
             }
             #[cfg(feature = "layerstacks-768")]
             (Self::L768(net), super::accumulator_layer_stacks::LayerStacksAccStack::L768(st)) => {
@@ -791,10 +884,18 @@ impl LayerStacksNetwork {
     /// 新しい L1 サイズに対応する AccStack を作成
     pub fn new_acc_stack(&self) -> super::accumulator_layer_stacks::LayerStacksAccStack {
         match self {
-            #[cfg(feature = "layerstacks-1536")]
-            Self::L1536(_) => super::accumulator_layer_stacks::LayerStacksAccStack::L1536(
-                super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1536>::new(),
-            ),
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            Self::L1536x16x32(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(
+                    super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1536>::new(),
+                )
+            }
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            Self::L1536x32x32(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(
+                    super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1536>::new(),
+                )
+            }
             #[cfg(feature = "layerstacks-768")]
             Self::L768(_) => super::accumulator_layer_stacks::LayerStacksAccStack::L768(
                 super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<768>::new(),
@@ -804,7 +905,8 @@ impl LayerStacksNetwork {
                 super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<512>::new(),
             ),
             #[cfg(not(any(
-                feature = "layerstacks-1536",
+                feature = "layerstacks-1536x16x32",
+                feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768",
                 feature = "layerstacks-512"
             )))]
@@ -815,10 +917,18 @@ impl LayerStacksNetwork {
     /// 新しい L1 サイズに対応する AccCache を作成
     pub fn new_acc_cache(&self) -> super::accumulator_layer_stacks::LayerStacksAccCache {
         match self {
-            #[cfg(feature = "layerstacks-1536")]
-            Self::L1536(_) => super::accumulator_layer_stacks::LayerStacksAccCache::L1536(
-                super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1536>::new(),
-            ),
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            Self::L1536x16x32(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccCache::L1536x16x32(
+                    super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1536>::new(),
+                )
+            }
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            Self::L1536x32x32(_) => {
+                super::accumulator_layer_stacks::LayerStacksAccCache::L1536x32x32(
+                    super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1536>::new(),
+                )
+            }
             #[cfg(feature = "layerstacks-768")]
             Self::L768(_) => super::accumulator_layer_stacks::LayerStacksAccCache::L768(
                 super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<768>::new(),
@@ -828,7 +938,8 @@ impl LayerStacksNetwork {
                 super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<512>::new(),
             ),
             #[cfg(not(any(
-                feature = "layerstacks-1536",
+                feature = "layerstacks-1536x16x32",
+                feature = "layerstacks-1536x32x32",
                 feature = "layerstacks-768",
                 feature = "layerstacks-512"
             )))]
@@ -870,7 +981,7 @@ mod tests {
         let path = std::env::var("NNUE_TEST_FILE")
             .unwrap_or_else(|_| "/path/to/your/layer_stacks.nnue".to_string());
 
-        let network = match NetworkLayerStacks::<TEST_L1>::load(path) {
+        let network = match NetworkLayerStacks1536x16x32::load(path) {
             Ok(n) => n,
             Err(e) => {
                 eprintln!("Skipping test: {e}");
@@ -900,13 +1011,13 @@ mod tests {
 
         // 最初のnonzero重みの位置を探す
         let first_nonzero_pos = network.feature_transformer.weights.iter().position(|&x| x != 0);
-        if let Some(pos) = first_nonzero_pos {
-            let sample_end = (pos + 10).min(weight_total);
+        if let Some(weight_pos) = first_nonzero_pos {
+            let sample_end = (weight_pos + 10usize).min(weight_total);
             let first_nonzero_sample: Vec<i16> =
-                network.feature_transformer.weights[pos..sample_end].to_vec();
-            eprintln!("First nonzero at position {pos}, sample: {first_nonzero_sample:?}");
+                network.feature_transformer.weights[weight_pos..sample_end].to_vec();
+            eprintln!("First nonzero at position {weight_pos}, sample: {first_nonzero_sample:?}");
             // 特徴インデックスを計算 (weight layout: [feature_index][output_dim])
-            let feature_idx = pos / TEST_L1;
+            let feature_idx = weight_pos / TEST_L1;
             eprintln!("  -> Feature index: {feature_idx}");
         }
 

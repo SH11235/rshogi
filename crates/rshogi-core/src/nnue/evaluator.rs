@@ -590,7 +590,8 @@ mod tests {
         // 外側の `any(...)` でいずれかの variant が有効なときだけ import が使われる
         // ようにして unused-import 警告を抑える。
         #[cfg(any(
-            feature = "layerstacks-1536",
+            feature = "layerstacks-1536x16x32",
+            feature = "layerstacks-1536x32x32",
             feature = "layerstacks-768",
             feature = "layerstacks-512"
         ))]
@@ -599,11 +600,23 @@ mod tests {
                 AccumulatorStackLayerStacks, LayerStacksAccStack,
             };
 
-            #[cfg(feature = "layerstacks-1536")]
+            #[cfg(feature = "layerstacks-1536x16x32")]
             {
-                let mut stack = AccumulatorStackVariant::LayerStacks(LayerStacksAccStack::L1536(
-                    AccumulatorStackLayerStacks::<1536>::new(),
-                ));
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L1536x16x32(AccumulatorStackLayerStacks::<1536>::new()),
+                );
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+
+            #[cfg(feature = "layerstacks-1536x32x32")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L1536x32x32(AccumulatorStackLayerStacks::<1536>::new()),
+                );
                 stack.reset();
                 stack.push(dirty);
                 stack.push(dirty);

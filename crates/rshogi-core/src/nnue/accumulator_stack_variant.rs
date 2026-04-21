@@ -73,7 +73,14 @@ impl AccumulatorStackVariant {
                 stack.l1_size() == net.l1_size()
             }
             (Self::HalfKP(stack), NNUENetwork::HalfKP(net)) => stack.l1_size() == net.l1_size(),
-            (Self::LayerStacks(st), NNUENetwork::LayerStacks(net)) => st.l1_size() == net.l1_size(),
+            (Self::LayerStacks(st), NNUENetwork::LayerStacks(net)) => {
+                st.architecture_dims()
+                    == (
+                        net.architecture_spec().l1,
+                        net.architecture_spec().l2,
+                        net.architecture_spec().l3,
+                    )
+            }
             _ => false,
         }
     }

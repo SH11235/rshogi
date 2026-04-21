@@ -45,7 +45,7 @@ web-time = "1"
 [features]
 # 探索経路では pass_rights / PASS NMP を無効化
 # Web/WASM で pass ルールを使う場合は default-features=false で無効化する。
-default = ["search-no-pass-rules", "layerstacks-1536"]
+default = ["search-no-pass-rules", "layerstacks-1536x16x32"]
 # デバッグ機能
 debug = []
 # 探索統計収集（枝刈り発生回数等のカウント）
@@ -77,8 +77,10 @@ search-no-pass-rules = []
 # LayerStack 専用ビルド（大会向け production 用）
 # HalfKP/HalfKA/HalfKA_hm のコードを除去し、evaluate_dispatch の icache footprint を削減
 layerstack-only = []
-# LayerStacks L1=1536 バリアント（従来アーキテクチャ）
-layerstacks-1536 = []
+# LayerStacks 1536x16x32 バリアント（従来アーキテクチャ）
+layerstacks-1536x16x32 = []
+# LayerStacks 1536x32x32 バリアント（v98）
+layerstacks-1536x32x32 = []
 # LayerStacks L1=768 バリアント（v91 モデル用）
 layerstacks-768 = []
 # LayerStacks L1=512 バリアント
