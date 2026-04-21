@@ -14,8 +14,9 @@
 //!   --ls-progress-coeff path/to/nodchip_progress_e1_f1_cuda.bin
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
+use std::mem::size_of;
 use std::path::PathBuf;
 
 use rshogi_core::movegen::{MoveList, generate_legal_all};
@@ -123,23 +124,49 @@ fn verify_with_network<
     Ok((total_tests, fail))
 }
 
+fn load_progress_coeff_weights(coeff_path: &PathBuf) -> Result<Box<[f32]>> {
+    let data = std::fs::read(coeff_path)
+        .with_context(|| format!("Failed to read progress coeff: {}", coeff_path.display()))?;
+
+    let expected_f32_bytes = SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * size_of::<f32>();
+    let expected_f64_bytes = SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * size_of::<f64>();
+
+    if data.len() == expected_f32_bytes {
+        let weights: Vec<f32> = data
+            .chunks_exact(size_of::<f32>())
+            .map(|c| f32::from_le_bytes(c.try_into().expect("chunk size is checked")))
+            .collect();
+        return Ok(weights.into_boxed_slice());
+    }
+
+    if data.len() == expected_f64_bytes {
+        let weights: Vec<f32> = data
+            .chunks_exact(size_of::<f64>())
+            .map(|c| f64::from_le_bytes(c.try_into().expect("chunk size is checked")) as f32)
+            .collect();
+        return Ok(weights.into_boxed_slice());
+    }
+
+    bail!(
+        "Invalid progress coeff size: {} bytes (expected {} bytes for {} f32 weights or {} bytes for {} f64 weights): {}",
+        data.len(),
+        expected_f32_bytes,
+        SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+        expected_f64_bytes,
+        SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+        coeff_path.display()
+    );
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
     // Bucket mode 設定
     if let Some(ref coeff_path) = cli.ls_progress_coeff {
-        let data = std::fs::read(coeff_path)
-            .with_context(|| format!("Failed to read progress coeff: {}", coeff_path.display()))?;
-        if data.len() == SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * 4 {
-            let weights: Vec<f32> = data
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            set_layer_stack_progress_kpabs_weights(weights.into_boxed_slice())
-                .expect("progress kpabs weights");
-            set_layer_stack_bucket_mode(LayerStackBucketMode::Progress8KPAbs);
-            println!("Bucket mode: progress8kpabs");
-        }
+        let weights = load_progress_coeff_weights(coeff_path)?;
+        set_layer_stack_progress_kpabs_weights(weights).map_err(anyhow::Error::msg)?;
+        set_layer_stack_bucket_mode(LayerStackBucketMode::Progress8KPAbs);
+        println!("Bucket mode: progress8kpabs");
     }
 
     // NNUE モデル読み込み

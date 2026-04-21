@@ -10,9 +10,9 @@
 //! 視点結合: 両視点を連結 → L1*2
 //! SqrClippedReLU: L1*2 → L1
 //! LayerStacks (両玉の相対段ベースの9バケット選択後):
-//!   L1: L1 → 16
-//!   SqrReLU + concat: 30
-//!   L2: 30 → 32
+//!   L1: L1 → LS_L1_OUT
+//!   SqrReLU + concat: LS_L2_IN (= 2 * (LS_L1_OUT - 1))
+//!   L2: LS_L2_IN → 32
 //!   Output: 32 → 1 + skip
 //! ```
 //!
@@ -641,6 +641,12 @@ pub enum LayerStacksNetwork {
 }
 
 impl LayerStacksNetwork {
+    /// アーキテクチャ寸法 (L1, L2, L3) を返す
+    pub fn architecture_dims(&self) -> (usize, usize, usize) {
+        let spec = self.architecture_spec();
+        (spec.l1, spec.l2, spec.l3)
+    }
+
     /// L1 サイズを取得
     pub fn l1_size(&self) -> usize {
         match self {
@@ -770,6 +776,8 @@ impl LayerStacksNetwork {
         pos: &Position,
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
     ) -> Value {
+        let (net_l1, net_l2, net_l3) = self.architecture_dims();
+        let (stack_l1, stack_l2, stack_l3) = stack.architecture_dims();
         match (self, stack) {
             #[cfg(feature = "layerstacks-1536x16x32")]
             (
@@ -792,7 +800,9 @@ impl LayerStacksNetwork {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(st),
             ) => net.evaluate(pos, &st.current().accumulator),
             #[allow(unreachable_patterns)]
-            _ => panic!("LayerStacksNetwork/LayerStacksAccStack L1 size mismatch"),
+            _ => panic!(
+                "LayerStacksNetwork/LayerStacksAccStack architecture mismatch: network={net_l1}x{net_l2}x{net_l3}, stack={stack_l1}x{stack_l2}x{stack_l3}"
+            ),
         }
     }
 
@@ -803,6 +813,8 @@ impl LayerStacksNetwork {
         stack: &mut super::accumulator_layer_stacks::LayerStacksAccStack,
         cache: &mut Option<super::accumulator_layer_stacks::LayerStacksAccCache>,
     ) {
+        let (net_l1, net_l2, net_l3) = self.architecture_dims();
+        let (stack_l1, stack_l2, stack_l3) = stack.architecture_dims();
         macro_rules! do_update {
             ($net:expr, $stack:expr, $cache_variant:ident) => {{
                 let current_entry = $stack.current();
@@ -893,7 +905,9 @@ impl LayerStacksNetwork {
                 do_update!(net, st, L512x16x32);
             }
             #[allow(unreachable_patterns)]
-            _ => panic!("LayerStacksNetwork/LayerStacksAccStack L1 size mismatch"),
+            _ => panic!(
+                "LayerStacksNetwork/LayerStacksAccStack architecture mismatch: network={net_l1}x{net_l2}x{net_l3}, stack={stack_l1}x{stack_l2}x{stack_l3}"
+            ),
         }
     }
 

@@ -6,12 +6,12 @@
 //! ## アーキテクチャ
 //!
 //! ```text
-//! Feature Transformer: 73,305 → L1 (1536 or 768)
+//! Feature Transformer: 73,305 → L1 (512 / 768 / 1536)
 //! SqrClippedReLU: L1*2 → L1
 //! LayerStacks (bucket選択後):
-//!   L1: L1 → 16, split [15, 1]
-//!   Sqr(15) → 30
-//!   L2: 30 → 32, ReLU
+//!   L1: L1 → LS_L1_OUT, split [LS_L1_OUT - 1, 1]
+//!   Sqr + ClippedReLU: LS_L1_OUT - 1 → LS_L2_IN (= 2 * (LS_L1_OUT - 1))
+//!   L2: LS_L2_IN → 32, ReLU
 //!   Output: 32 → 1 + skip
 //! ```
 
@@ -37,8 +37,8 @@ fn sqr_clipped_relu_explicit<const DIM: usize>(input: &[i32; DIM], output: &mut 
 /// LayerStack 単一バケットの層
 ///
 /// 各バケットは以下の構造を持つ:
-/// - L1: L1 → 16
-/// - L2: 30 → 32
+/// - L1: L1 → LS_L1_OUT
+/// - L2: LS_L2_IN → 32
 /// - Output: 32 → 1
 ///
 /// 各層は `AffineTransform` を使用し、AVX512/AVX2/SSSE3/WASM SIMD128 に対応。
@@ -48,9 +48,9 @@ pub struct LayerStackBucket<
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
 > {
-    /// L1層: L1 → 16
+    /// L1層: L1 → LS_L1_OUT
     pub l1: AffineTransform<L1, LS_L1_OUT>,
-    /// L2層: 30 → 32
+    /// L2層: LS_L2_IN → 32
     pub l2: AffineTransform<LS_L2_IN, NNUE_PYTORCH_L3>,
     /// 出力層: 32 → 1
     pub output: AffineTransform<NNUE_PYTORCH_L3, 1>,
@@ -104,19 +104,19 @@ impl<
         let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
         let mut output_arr = [0i32; 1];
 
-        // L1: 1536 → 16
+        // L1: L1 → LS_L1_OUT
         self.l1.propagate(input, &mut l1_out);
 
-        // Split: [15, 1]
-        // l1_x: 最初の15要素、l1_skip: 最後の1要素
+        // Split: [main_dim, 1]
+        // l1_skip は最後の 1 要素、残り main_dim 要素を L2 入力へ変換する。
         let l1_skip = l1_out[Self::MAIN_DIM];
 
-        // ClippedReLU + Sqr for first 15 elements, then concat with original
+        // main_dim 要素に SqrClippedReLU と ClippedReLU を適用して連結する。
         // SqrClippedReLU: min(127, (input^2) >> 19)
         // ClippedReLU:    clamp(input >> 6, 0, 127)
         l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
 
-        // L2: 30 → 32
+        // L2: LS_L2_IN → 32
         self.l2.propagate(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
@@ -140,11 +140,11 @@ impl<
 
         self.l1.propagate(input, &mut l1_out);
 
-        // Split: [15, 1]
+        // Split: [main_dim, 1]
         let l1_skip = l1_out[Self::MAIN_DIM];
         l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
 
-        // L2: 30 → 32
+        // L2: LS_L2_IN → 32
         self.l2.propagate(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
@@ -275,13 +275,14 @@ impl<
 /// 入力が [0, 127] の範囲なので、a * b の最大値は 127 * 127 = 16129。
 /// `16129 >> 7 = 126` なので出力も [0, 127] に収まる。
 ///
-/// L1→L2 activation: SqrClippedReLU + ClippedReLU（15要素 → 30 u8）
+/// L1→L2 activation: SqrClippedReLU + ClippedReLU（main_dim 要素 → 2 * main_dim u8）
 ///
-/// l1_out の最初の 15 要素 (`LAYER_STACK_16X32_MAIN_DIM`) に対して:
-/// - SqrClippedReLU: min(127, (input^2) >> 19) → l2_input[0..15]
-/// - ClippedReLU:    clamp(input >> 6, 0, 127)  → l2_input[15..30]
+/// `main_dim = LS_L1_OUT - 1` とする。
+/// `l1_out` の先頭 `main_dim` 要素に対して:
+/// - SqrClippedReLU: min(127, (input^2) >> 19) → l2_input[0..main_dim]
+/// - ClippedReLU:    clamp(input >> 6, 0, 127)  → l2_input[main_dim..2*main_dim]
 ///
-/// 16番目の要素 (l1_skip) は呼び出し側で別途取得済み。
+/// 最後の 1 要素 (l1_skip) は呼び出し側で別途取得済み。
 #[inline]
 fn l1_sqr_clipped_relu_activation<const LS_L1_OUT: usize, const LS_L2_IN: usize>(
     l1_out: &[i32; LS_L1_OUT],
@@ -289,7 +290,7 @@ fn l1_sqr_clipped_relu_activation<const LS_L1_OUT: usize, const LS_L2_IN: usize>
 ) {
     let main_dim = LS_L1_OUT - 1;
     debug_assert_eq!(LS_L2_IN, main_dim * 2);
-    // 16要素のみなので SIMD 化のメリットが小さく、スカラーで十分。
+    // LayerStacks の main_dim は現状 15 または 31 で、SIMD 化のメリットが小さい。
     // 注意: 二乗は i64 で計算する必要がある。
     // i32 乗算は |val| > ~46340 (sqrt(i32::MAX)) でオーバーフローし、
     // 中盤局面の L1 出力は数万〜数十万に達するため i64 が必須。
