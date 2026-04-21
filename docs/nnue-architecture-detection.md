@@ -151,7 +151,22 @@ const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
 | HalfKP | ✓ あり | ファイルサイズで検出 |
 | HalfKA_hm | ✓ あり | ファイルサイズで検出 |
 | HalfKA | ✓ あり | ファイルサイズで検出 |
-| LayerStacks | - | 固定アーキテクチャ（ヘッダーで判定） |
+| LayerStacks | △ ヘッダーベース | FT が LEB128 圧縮のため file size ではなく arch string から判定 |
+
+## LayerStacks の補足
+
+LayerStacks は Feature Transformer が LEB128 圧縮されており、HalfKP/HalfKA 系のような
+`file_size -> architecture` の逆引きがしにくい。そのため rshogi では arch string から
+`(L1, L2, L3)` を抽出して exact architecture を判定する。
+
+現在の exact architecture feature:
+
+- `layerstacks-1536x16x32`
+- `layerstacks-1536x32x32`
+- `layerstacks-768x16x32`
+- `layerstacks-512x16x32`
+
+大会向け専用ビルドでは、必要な feature を 1 つだけ有効化して dispatch を最小化する。
 
 ## FT hash について（参考情報）
 
