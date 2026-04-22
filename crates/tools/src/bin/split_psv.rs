@@ -36,6 +36,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+use tools::common::dedup::canonicalize_maybe_new;
 use tools::packed_sfen::PackedSfenValue;
 
 const RECORD_SIZE: usize = PackedSfenValue::SIZE;
@@ -368,21 +369,6 @@ fn check_output_paths_do_not_hit_input(
     Ok(())
 }
 
-fn canonicalize_maybe_new(path: &Path) -> Result<PathBuf> {
-    if let Ok(canonical) = path.canonicalize() {
-        return Ok(canonical);
-    }
-
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("出力パスにファイル名がありません"))?;
-    Ok(parent
-        .canonicalize()
-        .with_context(|| format!("親ディレクトリを正規化できませんでした: {}", parent.display()))?
-        .join(name))
-}
-
 fn zero_pad(value: u64, digits: usize) -> String {
     format!("{value:0digits$}")
 }
@@ -495,6 +481,27 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("出力ファイルが入力ファイルと衝突します"));
+    }
+
+    #[test]
+    fn split_collision_check_allows_relative_output_prefix_in_cwd() {
+        let dir = tempdir().unwrap();
+        let input_path = dir.path().join("input.psv");
+        fs::write(&input_path, make_records(5)).unwrap();
+
+        check_output_paths_do_not_hit_input(
+            &input_path,
+            Path::new("train"),
+            &SplitConfig {
+                records_per_file: 2,
+                write_chunk_records: 1,
+                start_index: 0,
+                digits: 3,
+                suffix: ".bin".to_string(),
+            },
+            5,
+        )
+        .unwrap();
     }
 
     #[test]
