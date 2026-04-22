@@ -189,6 +189,39 @@ GPU 推論が律速のため、バッチサイズ 1024〜2048 が推奨。
 
 スコアの補正処理。
 
+## 重複除去ツールの選び方
+
+PSV 重複除去には 3 種類のツールを用意している。入力規模・利用可能メモリ・一時ディスクの有無で選ぶ。重複キーはいずれも先頭 32 バイトの PackedSfen（first-wins）。
+
+| ツール | 方式 | 正確性 | メモリ | 一時ディスク | I/O パス | 想定規模 |
+|---|---|---|---|---|---|---|
+| [`psv_dedup`](../src/bin/psv_dedup.rs) | 全件 `HashSet<u64>` | ほぼ exact (64bit hash 衝突のみ) | ユニーク局面数 × ~16 B | 不要 | 1 | 数億〜数十億 |
+| [`psv_dedup_bloom`](psv_dedup_bloom.md) | Blocked Bloom Filter | 近似 (`--fpr` で制御、偽陽性あり) | 固定 (入力規模と `fpr` で決定) | 不要 | 1 | 数百億 (メモリ潤沢) |
+| [`psv_dedup_partition`](psv_dedup_partition.md) | ディスクパーティション + `HashSet<[u8;32]>` | **完全 exact** | 最大パーティションのユニーク局面ぶん | 入力と同等 | 2 | 数十億〜数百億 (メモリ限定) |
+
+### 選び方フロー
+
+```
+入力 < 数十億件？
+├─ Yes → psv_dedup（シンプル・速い）
+└─ No
+    ├─ メモリに余裕あり（数十 GiB 以上）
+    │   ├─ 偽陽性が許容できる → psv_dedup_bloom（1 パス・最速）
+    │   └─ exact が必須         → psv_dedup_partition
+    └─ メモリが限られている
+        └─ 一時ディスクに余裕あり → psv_dedup_partition（exact・低メモリ）
+```
+
+### reference モードが必要な場合
+
+既存 dedup 済みファイルとの **差分だけ** を抽出したい場合は `psv_dedup_bloom --reference` または `psv_dedup_partition --reference` が対応（`psv_dedup` は非対応）。近似で良いなら bloom、exact が必須なら partition を選ぶ。
+
+### 重複率の事前調査
+
+本番 dedup の前に重複率を把握したい場合は [`psv_dedup_check`](../src/bin/psv_dedup_check.rs) を使う。
+- `--table-size 4G` 等で direct-mapped テーブルを指定すれば固定メモリの近似チェック
+- 指定しない場合は `HashMap` で正確カウント (重複度合いの分布も出る)
+
 ## 典型的なワークフロー
 
 ### engine_selfplay で生成した場合
