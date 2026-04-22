@@ -67,14 +67,14 @@ Phase 1 memory:       0.5 GiB (fixed: partitions × buffer)
 Phase 2 peak memory:  1.3 GiB (HashSet of largest partition, ~1.20x variance)
 Memory available:     64.0 GiB (threshold 80% = 51.2 GiB)
 Temp disk available:  8.0 TiB (/fast/ssd/tmp)
-Output disk:          same filesystem as temp (/fast/ssd). ...
+Output disk:          same filesystem as temp (/fast/ssd). 追加 headroom ...
 ```
 
 チェック内容:
 
 - **メモリ**: `Phase1 mem` と `Phase2 peak mem` のうち大きい方が `MemAvailable × 80%` を超えたら Err
 - **temp ディスク**: 入力合計 × 1.05 が `--temp-dir` の空きを超えたら Err
-- **output ディスク**: 出力上限 = 入力合計（dedup しない最悪ケース）× 1.05 が出力親ディレクトリの空きを超えたら Err。ただし temp と同一ファイルシステムなら、temp は Phase 2 で削除されながら出力が書き込まれるため重複要件とみなさずスキップする
+- **output ディスク**: 出力上限 = 入力合計（dedup しない最悪ケース）× 1.05 が出力親ディレクトリの空きを超えたら Err。temp と同一ファイルシステムの場合もチェックは省略しない。`--keep-temp` なしでは「処理中の最大 input partition」ぶんの追加 headroom、`--keep-temp` ありでは output 全量ぶんの追加空き容量を要求する
 - 不足時は停止。`--force` を付けると Warning を出して続行する（swap 多用・途中失敗のリスクを許容する場合のみ）
 
 ## 一時ディスクの寿命
@@ -163,7 +163,7 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 
 ### Phase 1 だけ先に済ませて後日 Phase 2
 
-`--keep-temp` で一時ファイルを保持し、別セッションで `--phase2-only` から再開できる。
+`--keep-temp` で一時ファイルを保持し、別セッションで `--phase2-only` から再開できる。途中で partition ファイルが欠けた temp ディレクトリは破損扱いとなり、`--phase2-only` は即エラーで停止する。
 
 ```bash
 # セッション1: 振り分けだけ
