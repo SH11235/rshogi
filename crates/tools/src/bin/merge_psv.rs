@@ -12,10 +12,17 @@
 //!   --input data_000.bin,data_001.bin,data_002.bin \
 //!   --output merged.psv
 //!
-//! # ディレクトリから glob で拾って名前順に結合
+//! # ディレクトリ直下から glob で拾って shard 番号順に結合
 //! cargo run -p tools --release --bin merge_psv -- \
 //!   --input-dir split \
 //!   --pattern "train_*.bin" \
+//!   --output merged.psv
+//!
+//! # 入れ子ディレクトリも明示的に含める
+//! cargo run -p tools --release --bin merge_psv -- \
+//!   --input-dir split \
+//!   --pattern "train_*.bin" \
+//!   --recursive \
 //!   --output merged.psv
 //!
 //! # 20 万局面ずつ読み書きしてメモリ使用量を抑える
@@ -34,7 +41,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use tools::common::dedup::{PSV_SIZE, check_output_not_in_inputs, collect_input_paths};
+use tools::common::dedup::{PSV_SIZE, check_output_not_in_inputs};
 
 const IO_BUF_SIZE: usize = 8 * 1024 * 1024;
 const DEFAULT_WRITE_CHUNK_RECORDS: usize = 1_000_000;
@@ -63,6 +70,10 @@ struct Cli {
     #[arg(long, default_value = "*.bin")]
     pattern: String,
 
+    /// --input-dir 配下を再帰的に探索する
+    #[arg(long, default_value_t = false)]
+    recursive: bool,
+
     /// 出力 PSV ファイル
     #[arg(short, long)]
     output: PathBuf,
@@ -87,8 +98,7 @@ fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
-    let inputs = collect_input_paths(cli.input.as_deref(), cli.input_dir.as_ref(), &cli.pattern)
-        .context("入力ファイル一覧の収集に失敗しました")?;
+    let inputs = resolve_input_paths(&cli).context("入力ファイル一覧の収集に失敗しました")?;
     if inputs.is_empty() {
         bail!("入力ファイルが 0 件です");
     }
@@ -108,6 +118,115 @@ fn main() -> Result<()> {
     info!("出力: {}", cli.output.display());
 
     Ok(())
+}
+
+fn resolve_input_paths(cli: &Cli) -> Result<Vec<PathBuf>> {
+    match (&cli.input, &cli.input_dir) {
+        (Some(_), Some(_)) => bail!("--input と --input-dir は同時に指定できません"),
+        (None, None) => bail!("--input または --input-dir のいずれかを指定してください"),
+        (Some(input), None) => parse_explicit_input_paths(input),
+        (None, Some(input_dir)) => {
+            collect_merge_input_paths(input_dir, &cli.pattern, cli.recursive)
+        }
+    }
+}
+
+fn parse_explicit_input_paths(input: &str) -> Result<Vec<PathBuf>> {
+    let paths: Vec<PathBuf> = input.split(',').map(|part| PathBuf::from(part.trim())).collect();
+    for path in &paths {
+        if !path.exists() {
+            bail!("入力ファイルが存在しません: {}", path.display());
+        }
+    }
+    Ok(paths)
+}
+
+fn collect_merge_input_paths(dir: &Path, pattern: &str, recursive: bool) -> Result<Vec<PathBuf>> {
+    if !dir.is_dir() {
+        bail!("入力ディレクトリが存在しません: {}", dir.display());
+    }
+
+    let pattern = glob::Pattern::new(pattern)
+        .with_context(|| format!("無効な glob パターンです: {pattern}"))?;
+    let mut paths = if recursive {
+        walkdir::WalkDir::new(dir)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.into_path())
+            .collect::<Vec<_>>()
+    } else {
+        std::fs::read_dir(dir)
+            .with_context(|| format!("入力ディレクトリを読み取れませんでした: {}", dir.display()))?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|file_type| file_type.is_file())
+                    .map(|_| entry.path())
+            })
+            .collect::<Vec<_>>()
+    };
+
+    paths.retain(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| pattern.matches(name))
+    });
+    paths.sort_by(compare_merge_input_paths);
+
+    Ok(paths)
+}
+
+fn compare_merge_input_paths(a: &PathBuf, b: &PathBuf) -> std::cmp::Ordering {
+    match (a.parent(), b.parent()) {
+        (Some(a_parent), Some(b_parent)) if a_parent == b_parent => {
+            compare_file_names_with_numeric_suffix(a, b).then_with(|| a.cmp(b))
+        }
+        _ => a.cmp(b),
+    }
+}
+
+fn compare_file_names_with_numeric_suffix(a: &Path, b: &Path) -> std::cmp::Ordering {
+    let Some(a_key) = trailing_numeric_suffix_key(a) else {
+        return a.file_name().cmp(&b.file_name());
+    };
+    let Some(b_key) = trailing_numeric_suffix_key(b) else {
+        return a.file_name().cmp(&b.file_name());
+    };
+
+    if a_key.prefix == b_key.prefix && a_key.extension == b_key.extension {
+        a_key.number.cmp(&b_key.number).then_with(|| a.file_name().cmp(&b.file_name()))
+    } else {
+        a.file_name().cmp(&b.file_name())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NumericSuffixKey {
+    prefix: String,
+    number: u64,
+    extension: String,
+}
+
+fn trailing_numeric_suffix_key(path: &Path) -> Option<NumericSuffixKey> {
+    let stem = path.file_stem()?.to_str()?;
+    let digit_start = stem
+        .char_indices()
+        .rev()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .last()
+        .map(|(index, _)| index)?;
+    let digits = &stem[digit_start..];
+    let prefix = &stem[..digit_start];
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default().to_string();
+
+    Some(NumericSuffixKey {
+        prefix: prefix.to_string(),
+        number: digits.parse().ok()?,
+        extension,
+    })
 }
 
 fn merge_files(inputs: &[PathBuf], output_path: &Path, config: &MergeConfig) -> Result<MergeStats> {
@@ -278,5 +397,68 @@ mod tests {
     #[test]
     fn validate_write_chunk_records_rejects_huge_value() {
         assert!(validate_write_chunk_records(MAX_WRITE_CHUNK_RECORDS + 1).is_err());
+    }
+
+    #[test]
+    fn collect_merge_input_paths_sorts_numeric_suffix() {
+        let dir = tempdir().unwrap();
+        for name in [
+            "train_099.bin",
+            "train_100.bin",
+            "train_1000.bin",
+            "train_101.bin",
+        ] {
+            fs::write(dir.path().join(name), []).unwrap();
+        }
+
+        let paths = collect_merge_input_paths(dir.path(), "train_*.bin", false).unwrap();
+        let names: Vec<_> = paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "train_099.bin",
+                "train_100.bin",
+                "train_101.bin",
+                "train_1000.bin"
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_merge_input_paths_ignores_nested_dirs_by_default() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("train_000.bin"), []).unwrap();
+        let nested = dir.path().join("archive");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("train_001.bin"), []).unwrap();
+
+        let paths = collect_merge_input_paths(dir.path(), "train_*.bin", false).unwrap();
+        let names: Vec<_> = paths
+            .iter()
+            .map(|path| path.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(names, vec!["train_000.bin"]);
+    }
+
+    #[test]
+    fn collect_merge_input_paths_includes_nested_dirs_when_recursive() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("train_000.bin"), []).unwrap();
+        let nested = dir.path().join("archive");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("train_001.bin"), []).unwrap();
+
+        let paths = collect_merge_input_paths(dir.path(), "train_*.bin", true).unwrap();
+        let names: Vec<_> = paths
+            .iter()
+            .map(|path| path.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(names, vec!["archive/train_001.bin", "train_000.bin"]);
     }
 }
