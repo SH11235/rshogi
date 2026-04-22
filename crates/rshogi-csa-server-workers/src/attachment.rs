@@ -54,9 +54,12 @@ impl Role {
 /// - [`WsAttachment::Pending`]: LOGIN 到着前の匿名接続。`websocket_message`
 ///   ハンドラは最初に受信した行を LOGIN として解釈しようとする。
 /// - [`WsAttachment::Player`]: 認証済みプレイヤ。色・ハンドル・game_name を保持する。
+/// - [`WsAttachment::Spectator`]: 観戦者。`game_id` で観戦対象の対局を特定する。
+///   観戦系メッセージ (`%%MONITOR2ON/OFF`, `%%CHAT`) の経路判定と broadcast
+///   fanout の対象判定に使う。
 ///
-/// serde タグ付き形式を使い、将来 `Spectator` などを追加しても既存
-/// attachment を読み壊さない前方互換性を確保する。
+/// serde タグ付き形式を使い、新 variant を追加しても既存 attachment を
+/// 読み壊さない前方互換性を確保する。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsAttachment {
@@ -71,6 +74,15 @@ pub enum WsAttachment {
         /// CSA LOGIN の `<game_name>` 部分。マッチング時の同名性チェックに使う。
         game_name: String,
     },
+    /// 観戦者。`/ws/<room_id>/spectate` から接続したセッションに付与する。
+    ///
+    /// Player との違いは「盤面を動かす権限を持たず、broadcast を一方向受信する」点。
+    /// `game_id` は観戦対象の対局 ID で、`GameRoom` DO が broadcast fanout 時に
+    /// `WsAttachment::Spectator` 持ちセッション全てへ配信する判定で使う。
+    Spectator {
+        /// 観戦対象の対局 ID。
+        game_id: String,
+    },
 }
 
 impl WsAttachment {
@@ -80,6 +92,13 @@ impl WsAttachment {
             role,
             handle: handle.into(),
             game_name: game_name.into(),
+        }
+    }
+
+    /// 観戦者 attachment を構築する補助関数。
+    pub fn spectator(game_id: impl Into<String>) -> Self {
+        Self::Spectator {
+            game_id: game_id.into(),
         }
     }
 }
@@ -174,5 +193,30 @@ mod tests {
         assert!(parse_login_handle("+game1+black").is_none());
         assert!(parse_login_handle("alice++black").is_none());
         assert!(parse_login_handle("alice+game1+black+extra").is_none());
+    }
+
+    #[test]
+    fn spectator_roundtrips_via_json() {
+        let att = WsAttachment::spectator("room-20260101-0001");
+        let s = serde_json::to_string(&att).unwrap();
+        let back: WsAttachment = serde_json::from_str(&s).unwrap();
+        assert_eq!(att, back);
+    }
+
+    #[test]
+    fn spectator_json_has_expected_shape() {
+        let att = WsAttachment::spectator("room-xyz");
+        let s = serde_json::to_string(&att).unwrap();
+        // `#[serde(tag = "type")]` の下では variant 名が `type` 値に入る。
+        assert!(s.contains("\"type\":\"Spectator\""));
+        assert!(s.contains("\"game_id\":\"room-xyz\""));
+    }
+
+    #[test]
+    fn player_and_spectator_are_distinct_types() {
+        // 同一ハンドル / ID でも Player と Spectator は別 variant として比較される。
+        let player = WsAttachment::player(Role::Black, "alice", "room-1");
+        let spec = WsAttachment::spectator("room-1");
+        assert_ne!(player, spec);
     }
 }

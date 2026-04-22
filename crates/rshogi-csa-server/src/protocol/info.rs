@@ -124,8 +124,8 @@ pub fn show_lines(game_id: &GameId, listing: Option<&GameListing>) -> Vec<CsaLin
 /// 応答は CSA 拡張 `##[HELP]` プレフィックス付きの行列 + 末尾に終端行
 /// `##[HELP] END` を必ず付ける。**このリストは実際に受け付けるコマンドだけを
 /// 含める** (advertise ≠ accept の乖離を防ぐため)。未配線の
-/// `%%MONITOR2ON/OFF` / `%%CHAT` / `%%SETBUOY` 系は、各コマンドの配線コミットで
-/// 順次追加する。
+/// `%%SETBUOY` / `%%DELETEBUOY` / `%%GETBUOYCOUNT` / `%%FORK` 系は、各コマンドの
+/// 配線コミットで順次追加する。
 ///
 /// 終端行があることで、persistent socket 上でクライアントは「HELP 応答が何行
 /// 続くか」を事前に知らずに次コマンド送信に進める（`%%WHO` / `%%LIST` /
@@ -137,6 +137,11 @@ pub fn help_lines() -> Vec<CsaLine> {
         "%%WHO - list logged-in players",
         "%%LIST - list active games",
         "%%SHOW <game_id> - show a game summary",
+        "%%MONITOR2ON <game_id> - subscribe to a game as a spectator \
+(the session leaves matchmaking; re-LOGIN to resume)",
+        "%%MONITOR2OFF <game_id> - unsubscribe from a game (stays observer-only; \
+re-LOGIN to return to matchmaking)",
+        "%%CHAT <message> - broadcast a chat message to spectators of the monitored game",
     ];
     let mut out: Vec<CsaLine> =
         entries.iter().map(|e| CsaLine::new(format!("##[HELP] {e}"))).collect();
@@ -166,10 +171,19 @@ mod tests {
         let lines = help_lines();
         let joined: String =
             lines.iter().map(|l| l.as_str().to_owned()).collect::<Vec<_>>().join("\n");
-        for cmd in ["%%VERSION", "%%HELP", "%%WHO", "%%LIST", "%%SHOW"] {
+        for cmd in [
+            "%%VERSION",
+            "%%HELP",
+            "%%WHO",
+            "%%LIST",
+            "%%SHOW",
+            "%%MONITOR2ON",
+            "%%MONITOR2OFF",
+            "%%CHAT",
+        ] {
             assert!(joined.contains(cmd), "help missing {cmd}: {joined}");
         }
-        for unwired in ["%%MONITOR2ON", "%%CHAT", "%%SETBUOY", "%%FORK"] {
+        for unwired in ["%%SETBUOY", "%%DELETEBUOY", "%%GETBUOYCOUNT", "%%FORK"] {
             assert!(
                 !joined.contains(unwired),
                 "help advertises unwired command {unwired}: {joined}"
