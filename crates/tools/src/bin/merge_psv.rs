@@ -151,10 +151,16 @@ fn collect_merge_input_paths(dir: &Path, pattern: &str, recursive: bool) -> Resu
     let mut paths = if recursive {
         walkdir::WalkDir::new(dir)
             .into_iter()
-            .filter_map(|entry| entry.ok())
+            .map(|entry| {
+                entry.with_context(|| {
+                    format!("入力ディレクトリの再帰走査中に失敗しました: {}", dir.display())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
             .filter(|entry| entry.file_type().is_file())
             .map(|entry| entry.into_path())
-            .collect::<Vec<_>>()
+            .collect()
     } else {
         std::fs::read_dir(dir)
             .with_context(|| format!("入力ディレクトリを読み取れませんでした: {}", dir.display()))?
@@ -180,12 +186,7 @@ fn collect_merge_input_paths(dir: &Path, pattern: &str, recursive: bool) -> Resu
 }
 
 fn compare_merge_input_paths(a: &PathBuf, b: &PathBuf) -> std::cmp::Ordering {
-    match (a.parent(), b.parent()) {
-        (Some(a_parent), Some(b_parent)) if a_parent == b_parent => {
-            compare_file_names_with_numeric_suffix(a, b).then_with(|| a.cmp(b))
-        }
-        _ => a.cmp(b),
-    }
+    compare_file_names_with_numeric_suffix(a, b).then_with(|| a.cmp(b))
 }
 
 fn compare_file_names_with_numeric_suffix(a: &Path, b: &Path) -> std::cmp::Ordering {
@@ -344,6 +345,8 @@ fn progress_style(label: &str) -> ProgressStyle {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     fn make_records(start: usize, count: usize) -> Vec<u8> {
@@ -459,6 +462,36 @@ mod tests {
             .map(|path| path.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned())
             .collect();
 
-        assert_eq!(names, vec!["archive/train_001.bin", "train_000.bin"]);
+        assert_eq!(names, vec!["train_000.bin", "archive/train_001.bin"]);
+    }
+
+    #[test]
+    fn compare_merge_input_paths_prefers_numeric_suffix_across_dirs() {
+        let a = PathBuf::from("archive/train_001.bin");
+        let b = PathBuf::from("train_000.bin");
+
+        assert_eq!(compare_merge_input_paths(&a, &b), std::cmp::Ordering::Greater);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_merge_input_paths_propagates_recursive_walk_errors() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("train_000.bin"), []).unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("train_001.bin"), []).unwrap();
+
+        let mut permissions = fs::metadata(&locked).unwrap().permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&locked, permissions).unwrap();
+
+        let result = collect_merge_input_paths(dir.path(), "train_*.bin", true);
+
+        let mut restore_permissions = fs::metadata(&locked).unwrap().permissions();
+        restore_permissions.set_mode(0o755);
+        fs::set_permissions(&locked, restore_permissions).unwrap();
+
+        assert!(result.is_err());
     }
 }
