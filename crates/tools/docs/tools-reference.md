@@ -1,6 +1,6 @@
 # rshogi tools リファレンス
 
-crates/tools/src/bin/ 配下の全33バイナリの一覧と解説。
+crates/tools/src/bin/ 配下の全31バイナリの一覧と解説。
 
 ## 対局・トーナメント
 

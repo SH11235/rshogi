@@ -41,6 +41,8 @@ use tools::packed_sfen::PackedSfenValue;
 const RECORD_SIZE: usize = PackedSfenValue::SIZE;
 const IO_BUF_SIZE: usize = 8 * 1024 * 1024;
 const DEFAULT_WRITE_CHUNK_RECORDS: usize = 1_000_000;
+const MAX_WRITE_CHUNK_BYTES: usize = 512 * 1024 * 1024;
+const MAX_WRITE_CHUNK_RECORDS: usize = MAX_WRITE_CHUNK_BYTES / RECORD_SIZE;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -121,16 +123,23 @@ fn main() -> Result<()> {
 
     info!("総局面数: {}", stats.total_records);
     info!("出力ファイル数: {}", stats.part_count);
-    if stats.part_count > 0 {
-        let last_index = cli.start_index + stats.part_count - 1;
-        info!(
-            "出力範囲: {}_{}..{}{}",
-            cli.output_prefix.display(),
-            zero_pad(cli.start_index, config.digits),
-            zero_pad(last_index, config.digits),
-            config.suffix,
-        );
-    }
+    if stats.part_count > 0
+        && let Some(offset) = stats.part_count.checked_sub(1) {
+            if let Some(last_index) = cli.start_index.checked_add(offset) {
+                info!(
+                    "出力範囲: {}_{}..{}{}",
+                    cli.output_prefix.display(),
+                    zero_pad(cli.start_index, config.digits),
+                    zero_pad(last_index, config.digits),
+                    config.suffix,
+                );
+            } else {
+                warn!(
+                    "出力範囲の表示を省略しました: start_index ({}) と part_count ({}) から最終インデックスを安全に計算できません",
+                    cli.start_index, stats.part_count,
+                );
+            }
+        }
 
     Ok(())
 }
@@ -144,6 +153,7 @@ fn split_file(input_path: &Path, output_prefix: &Path, config: &SplitConfig) -> 
     if config.write_chunk_records == 0 {
         bail!("--write-chunk-records は 1 以上を指定してください");
     }
+    validate_write_chunk_records(config.write_chunk_records)?;
 
     ensure_parent_dir(output_prefix)?;
 
@@ -176,11 +186,15 @@ fn split_file(input_path: &Path, output_prefix: &Path, config: &SplitConfig) -> 
         });
     }
 
+    check_output_paths_do_not_hit_input(input_path, output_prefix, config, total_records)?;
+
     let file = File::open(input_path)
         .with_context(|| format!("入力ファイルを開けませんでした: {}", input_path.display()))?;
     let mut reader = BufReader::with_capacity(IO_BUF_SIZE, file);
 
-    let chunk_records = config.write_chunk_records.min(config.records_per_file as usize).max(1);
+    let chunk_records_u64 = (config.write_chunk_records as u64).min(config.records_per_file);
+    let chunk_records =
+        usize::try_from(chunk_records_u64).context("チャンク局面数を usize に変換できません")?;
     let buffer_len = chunk_records
         .checked_mul(RECORD_SIZE)
         .context("書き出しチャンクが大きすぎます")?;
@@ -226,8 +240,10 @@ fn split_file(input_path: &Path, output_prefix: &Path, config: &SplitConfig) -> 
         })?;
         info!("part {}: {} ({} records)", part_index, output_path.display(), written_in_part);
 
-        part_index += 1;
-        part_count += 1;
+        part_index =
+            part_index.checked_add(1).context("出力ファイル番号が u64 の上限を超えました")?;
+        part_count =
+            part_count.checked_add(1).context("出力ファイル数が u64 の上限を超えました")?;
     }
 
     progress.finish_and_clear();
@@ -307,6 +323,63 @@ fn build_part_path(prefix: &Path, index: u64, digits: usize, suffix: &str) -> Pa
     let mut path = OsString::from(prefix.as_os_str());
     path.push(format!("_{}{suffix}", zero_pad(index, digits)));
     PathBuf::from(path)
+}
+
+fn validate_write_chunk_records(write_chunk_records: usize) -> Result<()> {
+    if write_chunk_records > MAX_WRITE_CHUNK_RECORDS {
+        bail!(
+            "--write-chunk-records={} は大きすぎます。最大値は {} records ({} bytes) です",
+            write_chunk_records,
+            MAX_WRITE_CHUNK_RECORDS,
+            MAX_WRITE_CHUNK_BYTES,
+        );
+    }
+    Ok(())
+}
+
+fn check_output_paths_do_not_hit_input(
+    input_path: &Path,
+    output_prefix: &Path,
+    config: &SplitConfig,
+    total_records: u64,
+) -> Result<()> {
+    let input_canonical = input_path
+        .canonicalize()
+        .with_context(|| format!("入力パスを正規化できませんでした: {}", input_path.display()))?;
+    let part_count = total_records.div_ceil(config.records_per_file);
+
+    for offset in 0..part_count {
+        let index = config
+            .start_index
+            .checked_add(offset)
+            .context("出力ファイル番号が u64 の上限を超えました")?;
+        let output_path = build_part_path(output_prefix, index, config.digits, &config.suffix);
+        let output_canonical = canonicalize_maybe_new(&output_path)?;
+        if output_canonical == input_canonical {
+            bail!(
+                "出力ファイルが入力ファイルと衝突します: {}\n\
+                 --output-prefix / --start-index / --digits / --suffix を見直してください",
+                output_path.display(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn canonicalize_maybe_new(path: &Path) -> Result<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Ok(canonical);
+    }
+
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("出力パスにファイル名がありません"))?;
+    Ok(parent
+        .canonicalize()
+        .with_context(|| format!("親ディレクトリを正規化できませんでした: {}", parent.display()))?
+        .join(name))
 }
 
 fn zero_pad(value: u64, digits: usize) -> String {
@@ -399,5 +472,32 @@ mod tests {
         merged.extend_from_slice(&part1);
         merged.extend_from_slice(&part2);
         assert_eq!(merged, original);
+    }
+
+    #[test]
+    fn split_rejects_output_path_that_hits_input() {
+        let dir = tempdir().unwrap();
+        let input_path = dir.path().join("train_000.bin");
+        fs::write(&input_path, make_records(5)).unwrap();
+
+        let err = split_file(
+            &input_path,
+            &dir.path().join("train"),
+            &SplitConfig {
+                records_per_file: 2,
+                write_chunk_records: 1,
+                start_index: 0,
+                digits: 3,
+                suffix: ".bin".to_string(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("出力ファイルが入力ファイルと衝突します"));
+    }
+
+    #[test]
+    fn validate_write_chunk_records_rejects_huge_value() {
+        assert!(validate_write_chunk_records(MAX_WRITE_CHUNK_RECORDS + 1).is_err());
     }
 }

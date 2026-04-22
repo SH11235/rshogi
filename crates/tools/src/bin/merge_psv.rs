@@ -38,6 +38,8 @@ use tools::common::dedup::{PSV_SIZE, check_output_not_in_inputs, collect_input_p
 
 const IO_BUF_SIZE: usize = 8 * 1024 * 1024;
 const DEFAULT_WRITE_CHUNK_RECORDS: usize = 1_000_000;
+const MAX_WRITE_CHUNK_BYTES: usize = 512 * 1024 * 1024;
+const MAX_WRITE_CHUNK_RECORDS: usize = MAX_WRITE_CHUNK_BYTES / PSV_SIZE;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -115,6 +117,7 @@ fn merge_files(inputs: &[PathBuf], output_path: &Path, config: &MergeConfig) -> 
     if config.write_chunk_records == 0 {
         bail!("--write-chunk-records は 1 以上を指定してください");
     }
+    validate_write_chunk_records(config.write_chunk_records)?;
 
     ensure_parent_dir(output_path)?;
 
@@ -198,6 +201,18 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_write_chunk_records(write_chunk_records: usize) -> Result<()> {
+    if write_chunk_records > MAX_WRITE_CHUNK_RECORDS {
+        bail!(
+            "--write-chunk-records={} は大きすぎます。最大値は {} records ({} bytes) です",
+            write_chunk_records,
+            MAX_WRITE_CHUNK_RECORDS,
+            MAX_WRITE_CHUNK_BYTES,
+        );
+    }
+    Ok(())
+}
+
 fn progress_style(label: &str) -> ProgressStyle {
     ProgressStyle::default_bar()
         .template(&format!(
@@ -258,5 +273,10 @@ mod tests {
         expected.extend_from_slice(&chunk0);
         expected.extend_from_slice(&chunk1);
         assert_eq!(merged, expected);
+    }
+
+    #[test]
+    fn validate_write_chunk_records_rejects_huge_value() {
+        assert!(validate_write_chunk_records(MAX_WRITE_CHUNK_RECORDS + 1).is_err());
     }
 }
