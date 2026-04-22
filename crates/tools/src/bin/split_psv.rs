@@ -107,9 +107,7 @@ fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
-    if !cli.input.exists() {
-        bail!("入力ファイルが存在しません: {}", cli.input.display());
-    }
+    ensure_input_is_file(&cli.input)?;
 
     let records_per_file = resolve_records_per_file(&cli)?;
     let config = SplitConfig {
@@ -147,6 +145,7 @@ fn main() -> Result<()> {
 }
 
 fn split_file(input_path: &Path, output_prefix: &Path, config: &SplitConfig) -> Result<SplitStats> {
+    ensure_input_is_file(input_path)?;
     if config.records_per_file == 0 {
         bail!(
             "--records-per-file / --bytes-per-file から算出される局面数は 1 以上である必要があります"
@@ -254,6 +253,16 @@ fn split_file(input_path: &Path, output_prefix: &Path, config: &SplitConfig) -> 
         total_records,
         part_count,
     })
+}
+
+fn ensure_input_is_file(input_path: &Path) -> Result<()> {
+    if !input_path.exists() {
+        bail!("入力ファイルが存在しません: {}", input_path.display());
+    }
+    if !input_path.is_file() {
+        bail!("入力パスはファイルである必要があります: {}", input_path.display());
+    }
+    Ok(())
 }
 
 fn resolve_records_per_file(cli: &Cli) -> Result<u64> {
@@ -507,5 +516,25 @@ mod tests {
     #[test]
     fn validate_write_chunk_records_rejects_huge_value() {
         assert!(validate_write_chunk_records(MAX_WRITE_CHUNK_RECORDS + 1).is_err());
+    }
+
+    #[test]
+    fn split_rejects_directory_input_before_processing() {
+        let dir = tempdir().unwrap();
+
+        let err = split_file(
+            dir.path(),
+            &dir.path().join("train"),
+            &SplitConfig {
+                records_per_file: 2,
+                write_chunk_records: 1,
+                start_index: 0,
+                digits: 3,
+                suffix: ".bin".to_string(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("入力パスはファイルである必要があります"));
     }
 }

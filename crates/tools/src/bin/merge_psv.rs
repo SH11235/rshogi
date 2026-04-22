@@ -134,9 +134,7 @@ fn resolve_input_paths(cli: &Cli) -> Result<Vec<PathBuf>> {
 fn parse_explicit_input_paths(input: &str) -> Result<Vec<PathBuf>> {
     let paths: Vec<PathBuf> = input.split(',').map(|part| PathBuf::from(part.trim())).collect();
     for path in &paths {
-        if !path.exists() {
-            bail!("入力ファイルが存在しません: {}", path.display());
-        }
+        ensure_input_is_file(path)?;
     }
     Ok(paths)
 }
@@ -162,17 +160,14 @@ fn collect_merge_input_paths(dir: &Path, pattern: &str, recursive: bool) -> Resu
             .map(|entry| entry.into_path())
             .collect()
     } else {
-        std::fs::read_dir(dir)
+        let entries = std::fs::read_dir(dir)
             .with_context(|| format!("入力ディレクトリを読み取れませんでした: {}", dir.display()))?
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| {
-                entry
-                    .file_type()
-                    .ok()
-                    .filter(|file_type| file_type.is_file())
-                    .map(|_| entry.path())
-            })
-            .collect::<Vec<_>>()
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| format!("入力ディレクトリ走査中に失敗しました: {}", dir.display()))?;
+        collect_regular_file_paths(
+            entries.into_iter().map(|entry| entry.path()).collect(),
+            Some(dir),
+        )?
     };
 
     paths.retain(|path| {
@@ -183,6 +178,39 @@ fn collect_merge_input_paths(dir: &Path, pattern: &str, recursive: bool) -> Resu
     paths.sort_by(compare_merge_input_paths);
 
     Ok(paths)
+}
+
+fn collect_regular_file_paths(
+    paths: Vec<PathBuf>,
+    source_dir: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
+    let mut regular_files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let file_type = std::fs::metadata(&path)
+            .with_context(|| match source_dir {
+                Some(dir) => format!(
+                    "入力ディレクトリ内エントリの種別判定に失敗しました: {} (dir: {})",
+                    path.display(),
+                    dir.display()
+                ),
+                None => format!("入力ファイルの種別判定に失敗しました: {}", path.display()),
+            })?
+            .file_type();
+        if file_type.is_file() {
+            regular_files.push(path);
+        }
+    }
+    Ok(regular_files)
+}
+
+fn ensure_input_is_file(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("入力ファイルが存在しません: {}", path.display());
+    }
+    if !path.is_file() {
+        bail!("入力パスはファイルである必要があります: {}", path.display());
+    }
+    Ok(())
 }
 
 fn compare_merge_input_paths(a: &PathBuf, b: &PathBuf) -> std::cmp::Ordering {
@@ -493,5 +521,26 @@ mod tests {
         fs::set_permissions(&locked, restore_permissions).unwrap();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_explicit_input_paths_rejects_directory() {
+        let dir = tempdir().unwrap();
+
+        let err = parse_explicit_input_paths(&dir.path().display().to_string()).unwrap_err();
+
+        assert!(err.to_string().contains("入力パスはファイルである必要があります"));
+    }
+
+    #[test]
+    fn collect_regular_file_paths_propagates_metadata_errors() {
+        let dir = tempdir().unwrap();
+        let gone = dir.path().join("train_000.bin");
+        fs::write(&gone, []).unwrap();
+        fs::remove_file(&gone).unwrap();
+
+        let err = collect_regular_file_paths(vec![gone], Some(dir.path())).unwrap_err();
+
+        assert!(err.to_string().contains("入力ディレクトリ内エントリの種別判定に失敗しました"));
     }
 }
