@@ -45,7 +45,10 @@ use rshogi_csa_server::game::room::{
     HandleResult,
 };
 use rshogi_csa_server::protocol::command::{ClientCommand, parse_command};
-use rshogi_csa_server::protocol::summary::{GameSummaryBuilder, standard_initial_position_block};
+use rshogi_csa_server::protocol::summary::{
+    GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
+    standard_initial_position_block,
+};
 use rshogi_csa_server::types::{Color, CsaLine, GameId, PlayerName};
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
@@ -101,6 +104,11 @@ struct PersistedConfig {
     /// CoreRoom は `AgreeWaiting` で作り直す。`Some(t)` になって初めて replay で
     /// AGREE を再送して `Playing` 状態に戻す（start 直後・初手前の再起動対策）。
     play_started_at_ms: Option<u64>,
+    /// 対局の開始局面 SFEN。通常対局は `None` (= 平手)。buoy / %%FORK 経由の
+    /// 対局では `Some(sfen)` で、cold start 復元時もこの SFEN から CoreRoom を
+    /// 組み直す。serde は `#[serde(default)]` で旧 JSON (= `None`) と後方互換。
+    #[serde(default)]
+    initial_sfen: Option<String>,
 }
 
 /// 終局フラグ。一度 `Some` になったらその DO は同じ対局を二度開始しない。
@@ -377,6 +385,10 @@ impl GameRoom {
             time_margin_ms: DEFAULT_TIME_MARGIN_MS,
             matched_at_ms: started,
             play_started_at_ms: None,
+            // `%%FORK` / buoy 成立経路は未配線のため現時点では常に平手で開始する。
+            // 将来 buoy / fork 経由でここに SFEN が入った場合、cold start 復元も
+            // 同じ SFEN から立ち上がる (PersistedConfig 経由で永続化しているため)。
+            initial_sfen: None,
         };
         self.state.storage().put(KEY_CONFIG, &cfg).await?;
 
@@ -384,6 +396,20 @@ impl GameRoom {
         let clock: Box<dyn TimeClock> =
             Box::new(SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec));
         let time_section = clock.format_summary();
+        // initial_sfen 指定時は Game_Summary `position_section` / `To_Move` を
+        // 同じ SFEN から派生させる。未指定時は平手相当のブロックと `Color::Black`。
+        let (position_section, to_move) = match cfg.initial_sfen.as_deref() {
+            Some(sfen) => {
+                let section = position_section_from_sfen(sfen).map_err(Error::RustError)?;
+                let side = side_to_move_from_sfen(sfen).map_err(Error::RustError)?;
+                (section, side)
+            }
+            None => (standard_initial_position_block(), Color::Black),
+        };
+        // `CoreRoom::new` は initial_sfen が不正な場合に Err を返す。Workers DO は
+        // 永続化済み config から cold start 復元することもあるため、Err を panic で
+        // 落とさず Error::RustError で Runtime に伝搬する (Codex review PR #470
+        // 4th round P2)。
         let core = CoreRoom::new(
             GameRoomConfig {
                 game_id: GameId::new(cfg.game_id.clone()),
@@ -392,9 +418,11 @@ impl GameRoom {
                 max_moves: cfg.max_moves,
                 time_margin_ms: cfg.time_margin_ms,
                 entering_king_rule: EnteringKingRule::Point24,
+                initial_sfen: cfg.initial_sfen.clone(),
             },
             clock,
-        );
+        )
+        .map_err(|e| Error::RustError(format!("CoreRoom::new: {e:?}")))?;
         *self.core.borrow_mut() = Some(core);
         *self.config.borrow_mut() = Some(cfg.clone());
 
@@ -404,9 +432,9 @@ impl GameRoom {
             black: PlayerName::new(cfg.black_handle),
             white: PlayerName::new(cfg.white_handle),
             time_section,
-            position_section: standard_initial_position_block(),
+            position_section,
             rematch_on_draw: false,
-            to_move: Color::Black,
+            to_move,
             declaration: String::new(),
         };
         let summary_black = builder.build_for(Color::Black);
@@ -601,7 +629,12 @@ impl GameRoom {
             end_time: end_str,
             event: String::new(),
             time_section,
-            initial_position: standard_initial_position_block(),
+            // Game_Summary の position_section と同じ SFEN 由来のブロックを使う。
+            // 三点一致契約 (CoreRoom / Summary / 棋譜 initial_position) の R2 側。
+            initial_position: match cfg.initial_sfen.as_deref() {
+                Some(sfen) => position_section_from_sfen(sfen).map_err(Error::RustError)?,
+                None => standard_initial_position_block(),
+            },
             moves: kifu_moves,
             result: game_result.clone(),
         };
@@ -657,7 +690,11 @@ impl GameRoom {
         };
         let clock: Box<dyn TimeClock> =
             Box::new(SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec));
-        let mut core = CoreRoom::new(
+        // 永続化済み initial_sfen を信用して CoreRoom を再構築。もし永続化データが
+        // 壊れて `set_sfen` が落ちる場合は panic ではなく Err として返し、呼び出し側
+        // (`ensure_core_loaded`) の Result で伝搬できるようにする (Codex review
+        // PR #470 4th round P2)。
+        let mut core = match CoreRoom::new(
             GameRoomConfig {
                 game_id: GameId::new(cfg.game_id.clone()),
                 black: PlayerName::new(cfg.black_handle.clone()),
@@ -665,9 +702,19 @@ impl GameRoom {
                 max_moves: cfg.max_moves,
                 time_margin_ms: cfg.time_margin_ms,
                 entering_king_rule: EnteringKingRule::Point24,
+                // cold start 復元時も start_match で永続化した initial_sfen を
+                // そのまま使って CoreRoom を組み直す。moves replay の起点となる
+                // 局面を保つため。
+                initial_sfen: cfg.initial_sfen.clone(),
             },
             clock,
-        );
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                console_log!("[GameRoom] replay CoreRoom::new failed: {e:?}");
+                return Ok(());
+            }
+        };
 
         // moves 再送。AGREE は手として永続化しないため、moves が存在するなら
         // 両者 AGREE 済みと確定できる（そうでないと MoveAccepted に至らない）。

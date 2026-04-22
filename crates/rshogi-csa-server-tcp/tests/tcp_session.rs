@@ -126,6 +126,8 @@ async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
         agree_timeout: Duration::from_secs(30),
         x1_reply_write_timeout: Duration::from_secs(5),
         entering_king_rule: EnteringKingRule::Point24,
+        initial_sfen: None,
+        admin_handles: Vec::new(),
     };
     // bind_addr=:0 を使うため、先に手動で bind してから actual addr を取る必要がある。
     // ここでは ServerConfig を既定の :0 のまま build_state に渡し、run_server 内で
@@ -392,6 +394,8 @@ async fn spawn_server_with_agree_timeout(
         agree_timeout,
         x1_reply_write_timeout: Duration::from_secs(5),
         entering_king_rule: EnteringKingRule::Point24,
+        initial_sfen: None,
+        admin_handles: Vec::new(),
     };
     let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
     let actual_addr = probe.local_addr().unwrap();
@@ -940,6 +944,148 @@ fn chat_without_active_monitor_returns_not_monitoring() {
         assert_eq!(resp, "##[CHAT] NOT_MONITORING");
         let end = read_line_raw(&mut rc).await.unwrap();
         assert_eq!(end, "##[CHAT] END");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// 指定の admin ハンドル付きで TCP サーバーを起動するヘルパ。
+/// `%%SETBUOY` / `%%DELETEBUOY` テストで使う。
+async fn spawn_server_with_admin(
+    tag: &str,
+    admin_handles: Vec<String>,
+) -> (std::net::SocketAddr, PathBuf) {
+    let topdir = unique_topdir(tag);
+    let mut password_map = HashMap::new();
+    for h in ["alice", "bob", "carol", "admin"] {
+        password_map.insert(h.to_owned(), "pw".to_owned());
+    }
+    let rate_records: Vec<_> = ["alice", "bob", "carol", "admin"]
+        .iter()
+        .map(|n| PlayerRateRecord {
+            name: PlayerName::new(*n),
+            rate: 1500,
+            wins: 0,
+            losses: 0,
+            last_game_id: None,
+            last_modified: "2026-04-17T00:00:00Z".to_owned(),
+        })
+        .collect();
+    let rate_storage = support::MemRateStorage::new(rate_records);
+    let kifu_storage = FileKifuStorage::new(topdir.clone());
+    let config = ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        kifu_topdir: topdir.clone(),
+        total_time_sec: 60,
+        byoyomi_sec: 10,
+        time_margin_ms: 1_500,
+        max_moves: 256,
+        login_timeout: Duration::from_secs(10),
+        agree_timeout: Duration::from_secs(30),
+        x1_reply_write_timeout: Duration::from_secs(5),
+        entering_king_rule: EnteringKingRule::Point24,
+        initial_sfen: None,
+        admin_handles,
+    };
+    let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
+    let actual_addr = probe.local_addr().unwrap();
+    drop(probe);
+    let mut config = config;
+    config.bind_addr = actual_addr;
+    let state = Rc::new(build_state(
+        config,
+        rate_storage,
+        kifu_storage,
+        InMemoryPasswordStore { map: password_map },
+        Box::new(PlainPasswordHasher::new()),
+        IpLoginRateLimiter::default_limits(),
+        InMemoryBroadcaster::new(),
+    ));
+    let _handle = run_server(state).await.expect("run_server");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (actual_addr, topdir)
+}
+
+#[test]
+fn setbuoy_from_admin_is_accepted_and_getbuoycount_reflects_state() {
+    // admin ハンドル (`admin`) が %%SETBUOY で buoy を登録し、同 client が
+    // %%GETBUOYCOUNT で登録件数を参照、続いて %%DELETEBUOY で削除して
+    // %%GETBUOYCOUNT が NOT_FOUND に戻ることを E2E で検証する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_with_admin("buoy_admin", vec!["admin".to_owned()]).await;
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN admin+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:admin OK");
+
+        // %%SETBUOY my-buoy +7776FU 3 → OK + END。
+        send_line(&mut wa, "%%SETBUOY my-buoy +7776FU 3").await;
+        let resp = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(resp, "##[SETBUOY] OK my-buoy 3");
+        let end = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(end, "##[SETBUOY] END");
+
+        // %%GETBUOYCOUNT my-buoy → 3 + END。
+        send_line(&mut wa, "%%GETBUOYCOUNT my-buoy").await;
+        let q = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(q, "##[GETBUOYCOUNT] my-buoy 3");
+        let _ = read_line_raw(&mut ra).await.unwrap();
+
+        // %%DELETEBUOY my-buoy → OK + END。
+        send_line(&mut wa, "%%DELETEBUOY my-buoy").await;
+        let d = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(d, "##[DELETEBUOY] OK my-buoy");
+        let _ = read_line_raw(&mut ra).await.unwrap();
+
+        // 削除後は NOT_FOUND。
+        send_line(&mut wa, "%%GETBUOYCOUNT my-buoy").await;
+        let q2 = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(q2, "##[GETBUOYCOUNT] NOT_FOUND my-buoy");
+        let _ = read_line_raw(&mut ra).await.unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn setbuoy_from_non_admin_is_permission_denied() {
+    // 非 admin (carol) が %%SETBUOY を投げると PERMISSION_DENIED で弾かれ、
+    // その後 %%GETBUOYCOUNT は NOT_FOUND (登録されていない)。
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_admin("buoy_non_admin", vec!["admin".to_owned()]).await;
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+
+        // `%%SETBUOY` は <game_name> <moves> <count> が最低 3 トークン必要なので、
+        // パース通過させる最小形で投げる (非 admin は SETBUOY のパスに入る前に
+        // permission で弾かれる)。
+        send_line(&mut wc, "%%SETBUOY bad-buoy +7776FU 3").await;
+        let resp = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(resp, "##[SETBUOY] PERMISSION_DENIED bad-buoy");
+        let _ = read_line_raw(&mut rc).await.unwrap();
+
+        // 登録されていないことを GETBUOYCOUNT で再確認 (参照は権限不要)。
+        send_line(&mut wc, "%%GETBUOYCOUNT bad-buoy").await;
+        let q = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(q, "##[GETBUOYCOUNT] NOT_FOUND bad-buoy");
+        let _ = read_line_raw(&mut rc).await.unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn getbuoycount_for_unknown_buoy_returns_not_found_without_admin_check() {
+    // 参照系 (%%GETBUOYCOUNT) は admin 権限不要で全クライアントから使える。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_with_admin("buoy_anon_query", Vec::new()).await;
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN alice+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut wc, "%%GETBUOYCOUNT nothing-here").await;
+        let q = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(q, "##[GETBUOYCOUNT] NOT_FOUND nothing-here");
+        let _ = read_line_raw(&mut rc).await.unwrap();
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }

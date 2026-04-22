@@ -31,11 +31,14 @@ use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
 use rshogi_csa_server::matching::registry::{GameListing, GameRegistry};
 use rshogi_csa_server::port::{
-    BroadcastTag, Broadcaster, ClientTransport, GameSummaryEntry, KifuStorage, RateDecision,
-    RateStorage,
+    BroadcastTag, Broadcaster, BuoyStorage, ClientTransport, GameSummaryEntry, KifuStorage,
+    RateDecision, RateStorage,
 };
 use rshogi_csa_server::protocol::command::{ClientCommand, parse_command};
-use rshogi_csa_server::protocol::summary::{GameSummaryBuilder, standard_initial_position_block};
+use rshogi_csa_server::protocol::summary::{
+    GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
+    standard_initial_position_block,
+};
 use rshogi_csa_server::record::kifu::{KifuMove, KifuRecord, primary_result_code};
 use rshogi_csa_server::types::{
     Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, RoomId,
@@ -110,6 +113,19 @@ pub struct ServerConfig {
     pub x1_reply_write_timeout: Duration,
     /// 入玉ルール。既定は 24 点法。
     pub entering_king_rule: EnteringKingRule,
+    /// 既定の対局開始局面 SFEN。`None` なら平手。
+    ///
+    /// 運用では通常 `None` (= 平手) のまま起動し、`%%FORK` / buoy 経由の対局
+    /// のみ `GameRoomConfig::initial_sfen` を per-game で上書きする。本 field
+    /// は `sensible_defaults` が全対局で使う既定値を設定するためにあり、テスト
+    /// や特殊環境 (駒落ちサーバー等) で全対局を非平手で起動する経路で使う。
+    pub initial_sfen: Option<String>,
+    /// 管理者ハンドル (`%%SETBUOY` / `%%DELETEBUOY` の実行を許可する LOGIN 名)。
+    ///
+    /// 空の場合は誰も管理者ではなく、`%%SETBUOY` / `%%DELETEBUOY` は全て
+    /// `PERMISSION_DENIED` で拒否される。`%%GETBUOYCOUNT` は参照系なので
+    /// 管理者権限を要求しない。
+    pub admin_handles: Vec<String>,
 }
 
 impl ServerConfig {
@@ -126,6 +142,8 @@ impl ServerConfig {
             agree_timeout: Duration::from_secs(5 * 60),
             x1_reply_write_timeout: Duration::from_secs(5),
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
+            admin_handles: Vec::new(),
         }
     }
 }
@@ -215,6 +233,12 @@ where
     game_counter: Mutex<u64>,
     /// サーバー起動時刻（game_id プリフィックス用）。
     started_at: chrono::DateTime<chrono::Utc>,
+    /// ブイ (途中局面テンプレート) の永続化先。
+    ///
+    /// `config.kifu_topdir` 配下の `buoys/` ディレクトリを使う。TCP サーバー
+    /// は常に同一プロセス・同一プロセス内で単一インスタンスを保持する前提
+    /// (複数プロセス並行書き込みは非対応)。
+    buoy_storage: rshogi_csa_server::FileBuoyStorage,
 }
 
 /// パスワードストアの抽象。`handle` に対応する保存ハッシュ（現状は平文）を返す。
@@ -799,11 +823,76 @@ where
                     ])
                 }
             }
+            ClientCommand::SetBuoy {
+                game_name: buoy_name,
+                moves,
+                count,
+            } => {
+                // 管理者のみ許可。`admin_handles` リストに現ハンドルが含まれるか確認。
+                // 配列 (Vec) 線形走査だが admin は通常数件なので実運用で問題にならない。
+                if !state.config.admin_handles.iter().any(|h| h == &handle) {
+                    Some(vec![
+                        CsaLine::new(format!("##[SETBUOY] PERMISSION_DENIED {buoy_name}")),
+                        CsaLine::new("##[SETBUOY] END"),
+                    ])
+                } else {
+                    match state.buoy_storage.set(&buoy_name, moves, count).await {
+                        Ok(()) => Some(vec![
+                            CsaLine::new(format!("##[SETBUOY] OK {buoy_name} {count}")),
+                            CsaLine::new("##[SETBUOY] END"),
+                        ]),
+                        Err(e) => Some(vec![
+                            CsaLine::new(format!("##[SETBUOY] ERROR {buoy_name} {e}")),
+                            CsaLine::new("##[SETBUOY] END"),
+                        ]),
+                    }
+                }
+            }
+            ClientCommand::DeleteBuoy {
+                game_name: buoy_name,
+            } => {
+                if !state.config.admin_handles.iter().any(|h| h == &handle) {
+                    Some(vec![
+                        CsaLine::new(format!("##[DELETEBUOY] PERMISSION_DENIED {buoy_name}")),
+                        CsaLine::new("##[DELETEBUOY] END"),
+                    ])
+                } else {
+                    match state.buoy_storage.delete(&buoy_name).await {
+                        Ok(()) => Some(vec![
+                            CsaLine::new(format!("##[DELETEBUOY] OK {buoy_name}")),
+                            CsaLine::new("##[DELETEBUOY] END"),
+                        ]),
+                        Err(e) => Some(vec![
+                            CsaLine::new(format!("##[DELETEBUOY] ERROR {buoy_name} {e}")),
+                            CsaLine::new("##[DELETEBUOY] END"),
+                        ]),
+                    }
+                }
+            }
+            ClientCommand::GetBuoyCount {
+                game_name: buoy_name,
+            } => {
+                // 参照系なので権限チェックなし (全クライアントが参照可能)。
+                match state.buoy_storage.count(&buoy_name).await {
+                    Ok(Some(n)) => Some(vec![
+                        CsaLine::new(format!("##[GETBUOYCOUNT] {buoy_name} {n}")),
+                        CsaLine::new("##[GETBUOYCOUNT] END"),
+                    ]),
+                    Ok(None) => Some(vec![
+                        CsaLine::new(format!("##[GETBUOYCOUNT] NOT_FOUND {buoy_name}")),
+                        CsaLine::new("##[GETBUOYCOUNT] END"),
+                    ]),
+                    Err(e) => Some(vec![
+                        CsaLine::new(format!("##[GETBUOYCOUNT] ERROR {buoy_name} {e}")),
+                        CsaLine::new("##[GETBUOYCOUNT] END"),
+                    ]),
+                }
+            }
             _ => None,
         };
         let Some(lines) = replies else {
             // 未サポートの x1 コマンド / 対局中コマンドは切断扱い（未配線の
-            // `%%SETBUOY` / `%%DELETEBUOY` / `%%GETBUOYCOUNT` / `%%FORK` 等は後続タスクで追加する）。
+            // `%%FORK` は後続タスクで追加する）。
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
             break 'outer WaiterOutcome::DisconnectedFromPool;
@@ -976,14 +1065,29 @@ where
 {
     // Game_Summary を両対局者に送信。
     let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
+    // `initial_sfen` が設定されていればそれから派生、無ければ平手固定のブロックを使う。
+    // GameRoom / Game_Summary / 棋譜 の三点一致契約 (GameRoomConfig::initial_sfen の
+    // doc を参照) を満たすため、同じ SFEN を複数入口で再利用する。
+    let (position_section, to_move) = match &state.config.initial_sfen {
+        Some(sfen) => {
+            let section = position_section_from_sfen(sfen).map_err(|e| {
+                ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
+            })?;
+            let side = side_to_move_from_sfen(sfen).map_err(|e| {
+                ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
+            })?;
+            (section, side)
+        }
+        None => (standard_initial_position_block(), Color::Black),
+    };
     let summary = GameSummaryBuilder {
         game_id: game_id.clone(),
         black: matched.black.clone(),
         white: matched.white.clone(),
         time_section: clock.format_summary(),
-        position_section: standard_initial_position_block(),
+        position_section,
         rematch_on_draw: false,
-        to_move: Color::Black,
+        to_move,
         declaration: "Jishogi 1.1".to_owned(),
     };
     send_multiline(black_transport, &summary.build_for(Color::Black)).await?;
@@ -1217,8 +1321,9 @@ where
         max_moves: state.config.max_moves,
         time_margin_ms: state.config.time_margin_ms,
         entering_king_rule: state.config.entering_king_rule,
+        initial_sfen: state.config.initial_sfen.clone(),
     };
-    let mut room = GameRoom::new(cfg, Box::new(clock));
+    let mut room = GameRoom::new(cfg, Box::new(clock))?;
 
     let start_instant = tokio::time::Instant::now();
     let now_ms =
@@ -1368,6 +1473,16 @@ where
     P: PasswordStore + 'static,
 {
     let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
+    // initial_sfen が設定されていれば棋譜の `initial_position` も同じ SFEN から派生。
+    // 設定されていない (= 平手) 場合は既存の CSA shorthand `PI\n+\n` を保つ。
+    // 長期的には常に `BEGIN Position` 形式に統一しても良いが、shogi-server 互換
+    // バッチへの影響を避けるため hirate のみ現行踏襲 (deferral)。
+    let initial_position = match &state.config.initial_sfen {
+        Some(sfen) => position_section_from_sfen(sfen).map_err(|e| {
+            ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
+        })?,
+        None => "PI\n+\n".to_owned(),
+    };
     let record = KifuRecord {
         game_id: game_id.clone(),
         black: matched.black.clone(),
@@ -1376,7 +1491,7 @@ where
         end_time: end_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         event: "rshogi-csa-server-tcp".to_owned(),
         time_section: clock.format_summary(),
-        initial_position: "PI\n+\n".to_owned(),
+        initial_position,
         moves: moves.to_vec(),
         result: result.clone(),
     };
@@ -1413,6 +1528,7 @@ where
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
+    let buoy_storage = rshogi_csa_server::FileBuoyStorage::new(config.kifu_topdir.clone());
     SharedState {
         config,
         league: Mutex::new(League::new()),
@@ -1427,6 +1543,7 @@ where
         active_games: Notify::new(),
         game_counter: Mutex::new(0),
         started_at: chrono::Utc::now(),
+        buoy_storage,
     }
 }
 

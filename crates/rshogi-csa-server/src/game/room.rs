@@ -111,6 +111,17 @@ pub struct GameRoomConfig {
     pub time_margin_ms: u64,
     /// `%KACHI` 判定に使う入玉ルール（既定は 24 点法 = `Point24`）。
     pub entering_king_rule: EnteringKingRule,
+    /// 対局の開始局面を表す SFEN。`None` なら平手（`SFEN_HIRATE`）を使う。
+    ///
+    /// 駒落ち・ブイ・フォーク対局では本フィールドを `Some(sfen)` で渡す。
+    /// **契約**: Game_Summary の `position_section` / `to_move` と、棋譜の
+    /// `initial_position` は本フィールドから派生させること（三点一致）。
+    /// フロントエンドはこの SFEN を
+    /// [`crate::protocol::summary::position_section_from_sfen`] に渡して
+    /// `position_section` を取得し、同じ関数の出力をそのまま棋譜の
+    /// `initial_position` にも使う。手番は SFEN 由来の `side_to_move` を
+    /// `to_move` にセットする。これにより 3 経路間で局面が食い違う事故を防ぐ。
+    pub initial_sfen: Option<String>,
 }
 
 impl fmt::Debug for GameRoomConfig {
@@ -122,6 +133,7 @@ impl fmt::Debug for GameRoomConfig {
             .field("max_moves", &self.max_moves)
             .field("time_margin_ms", &self.time_margin_ms)
             .field("entering_king_rule", &self.entering_king_rule)
+            .field("initial_sfen", &self.initial_sfen)
             .finish()
     }
 }
@@ -150,18 +162,35 @@ impl fmt::Debug for GameRoom {
 }
 
 impl GameRoom {
-    /// 平手初期局面で対局ルームを構築する。
+    /// `GameRoomConfig::initial_sfen` に従って対局ルームを構築する。
     ///
-    /// 駒落ち・フォーク対局は本コンストラクタとは別の経路で足す（まだ未実装）。
-    /// 開始局面を設定化するには、盤面を Game_Summary の `position_section` と
-    /// `to_move` に反映する棋譜側の配線も同時に必要なため、本 API は平手固定に
-    /// 留めておく。
-    pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Self {
+    /// - `initial_sfen = None`: 平手 (`SFEN_HIRATE`) で初期化。SFEN_HIRATE は
+    ///   const で `set_sfen` が失敗するのは rshogi-core 側のバグなので、この
+    ///   パスは内部で `expect` する。
+    /// - `initial_sfen = Some(sfen)`: 渡された SFEN で `Position::set_sfen`。
+    ///   SFEN 不正時は `Err(ServerError::Protocol(Malformed))` を返し、
+    ///   呼び出し側が適切に拒否 / ログ出力できるようにする (Codex review
+    ///   PR #470 4th round P2)。プロセス全体 / DO を panic で落とさないため
+    ///   の設計。
+    ///
+    /// Game_Summary の `position_section` / `to_move` と棋譜の `initial_position`
+    /// は同一 SFEN から派生させる契約なので、呼び出し側は同じ `initial_sfen` を
+    /// GameRoom / GameSummaryBuilder / KifuRecord に横断して渡すこと。
+    pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Result<Self, ServerError> {
         let mut pos = Position::new();
-        // SFEN_HIRATE は const。set_sfen が失敗するのは rshogi-core 側のバグ。
-        pos.set_sfen(SFEN_HIRATE).expect("SFEN_HIRATE must be valid");
+        match config.initial_sfen.as_deref() {
+            Some(sfen) => pos.set_sfen(sfen).map_err(|e| {
+                ServerError::Protocol(ProtocolError::Malformed(format!(
+                    "invalid initial_sfen {sfen:?}: {e:?}"
+                )))
+            })?,
+            None => {
+                // 平手は const。失敗するのはコアのバグなので expect で落としていい。
+                pos.set_sfen(SFEN_HIRATE).expect("SFEN_HIRATE must be valid");
+            }
+        }
         let validator = Validator::new(config.entering_king_rule);
-        Self {
+        Ok(Self {
             config,
             pos,
             clock,
@@ -169,7 +198,7 @@ impl GameRoom {
             status: GameStatus::AgreeWaiting,
             moves_played: 0,
             turn_started_at_ms: None,
-        }
+        })
     }
 
     /// 現在の状態。
@@ -622,18 +651,18 @@ mod tests {
             max_moves: 256,
             time_margin_ms: 0,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        GameRoom::new(config, clock)
+        GameRoom::new(config, clock).expect("valid test config")
     }
 
     /// 任意 SFEN から対局を開始するためのテスト専用 helper。
     ///
-    /// 本番 API (`GameRoom::new`) は入玉対局・千日手・打ち歩詰など
-    /// 「局面起点」の終局シナリオを試験できるように拡張されていない
-    /// （Game_Summary / 棋譜の初期局面契約まで一括で導入するタスクが別にある）。
-    /// テストモジュール内で private フィールド `pos` を直接差し替えて、
-    /// 本番 API を増やさずに位置を注入する。
+    /// `GameRoomConfig::initial_sfen` 契約の配線が完了したので、テストは
+    /// 本番 API 経由で任意 SFEN を流し込める。private フィールドを触る旧方式は
+    /// 廃止して、`config.initial_sfen = Some(sfen)` をそのまま `GameRoom::new`
+    /// に委ねる形に書き換えた。
     fn room_with_sfen(rule: EnteringKingRule, sfen: &str) -> GameRoom {
         let config = GameRoomConfig {
             game_id: GameId::new("20140101120000"),
@@ -642,11 +671,10 @@ mod tests {
             max_moves: 256,
             time_margin_ms: 0,
             entering_king_rule: rule,
+            initial_sfen: Some(sfen.to_owned()),
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        let mut room = GameRoom::new(config, clock);
-        room.pos.set_sfen(sfen).expect("valid sfen for test");
-        room
+        GameRoom::new(config, clock).expect("valid test config")
     }
 
     fn line(s: &str) -> CsaLine {
@@ -767,9 +795,10 @@ mod tests {
             max_moves: 256,
             time_margin_ms: 1_500,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 0));
-        let mut room = GameRoom::new(config, clock);
+        let mut room = GameRoom::new(config, clock).expect("valid test config");
         agree_both(&mut room);
         // 経過 4000ms, margin 1500ms → consume(2500ms)。整数秒切り捨てで 2 秒消費。
         let r = room.handle_line(Color::Black, &line("+7776FU"), 4_000).unwrap();
@@ -786,9 +815,10 @@ mod tests {
             max_moves: 256,
             time_margin_ms,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(total_sec, byoyomi_sec));
-        GameRoom::new(config, clock)
+        GameRoom::new(config, clock).expect("valid test config")
     }
 
     #[test]
@@ -1032,9 +1062,10 @@ mod tests {
             max_moves: 2,
             time_margin_ms: 0,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        let mut room = GameRoom::new(config, clock);
+        let mut room = GameRoom::new(config, clock).expect("valid test config");
         agree_both(&mut room);
         let _ = room.handle_line(Color::Black, &line("+7776FU"), 0).unwrap();
         let r = room.handle_line(Color::White, &line("-3334FU"), 0).unwrap();

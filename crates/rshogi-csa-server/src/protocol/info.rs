@@ -123,9 +123,8 @@ pub fn show_lines(game_id: &GameId, listing: Option<&GameListing>) -> Vec<CsaLin
 ///
 /// 応答は CSA 拡張 `##[HELP]` プレフィックス付きの行列 + 末尾に終端行
 /// `##[HELP] END` を必ず付ける。**このリストは実際に受け付けるコマンドだけを
-/// 含める** (advertise ≠ accept の乖離を防ぐため)。未配線の
-/// `%%SETBUOY` / `%%DELETEBUOY` / `%%GETBUOYCOUNT` / `%%FORK` 系は、各コマンドの
-/// 配線コミットで順次追加する。
+/// 含める** (advertise ≠ accept の乖離を防ぐため)。未配線の `%%FORK` 系は、
+/// 各コマンドの配線コミットで順次追加する。
 ///
 /// 終端行があることで、persistent socket 上でクライアントは「HELP 応答が何行
 /// 続くか」を事前に知らずに次コマンド送信に進める（`%%WHO` / `%%LIST` /
@@ -142,6 +141,9 @@ pub fn help_lines() -> Vec<CsaLine> {
         "%%MONITOR2OFF <game_id> - unsubscribe from a game (stays observer-only; \
 re-LOGIN to return to matchmaking)",
         "%%CHAT <message> - broadcast a chat message to spectators of the monitored game",
+        "%%SETBUOY <game_name> <moves> <count> - register a buoy (admin only)",
+        "%%DELETEBUOY <game_name> - delete a buoy (admin only)",
+        "%%GETBUOYCOUNT <game_name> - query remaining count of a buoy",
     ];
     let mut out: Vec<CsaLine> =
         entries.iter().map(|e| CsaLine::new(format!("##[HELP] {e}"))).collect();
@@ -180,15 +182,14 @@ mod tests {
             "%%MONITOR2ON",
             "%%MONITOR2OFF",
             "%%CHAT",
+            "%%SETBUOY",
+            "%%DELETEBUOY",
+            "%%GETBUOYCOUNT",
         ] {
             assert!(joined.contains(cmd), "help missing {cmd}: {joined}");
         }
-        for unwired in ["%%SETBUOY", "%%DELETEBUOY", "%%GETBUOYCOUNT", "%%FORK"] {
-            assert!(
-                !joined.contains(unwired),
-                "help advertises unwired command {unwired}: {joined}"
-            );
-        }
+        // 現時点で未配線のコマンド: `%%FORK` のみ。HELP に混入していたら回帰。
+        assert!(!joined.contains("%%FORK"), "help advertises unwired command %%FORK: {joined}");
     }
 
     #[test]
