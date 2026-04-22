@@ -128,12 +128,27 @@ impl Validator {
     ///
     /// `Position::repetition_state` 内部で連続王手判定も行われるため、
     /// 千日手成立時の勝敗側もここで切り分ける。
+    ///
+    /// **発火タイミング:**
+    /// - 通常千日手 (Draw): 同一局面 4 回目の到達で発火する。`state.repetition < 0`
+    ///   (= `times >= 3` = 4 回目以降の出現) を必須条件としており、それ以前の非決定的
+    ///   な再来では `None` を返す。これは競技将棋の「同一局面 4 回で引き分け」ルール
+    ///   に一致する。
+    /// - 連続王手千日手 (Win/Lose): 1 サイクル目の再来で発火する。連続王手は
+    ///   反則行為であり、1 循環で反則確定すればそれ以降は続行する意味がないため、
+    ///   非決定的な (`rep > 0` の) 再来でも Verdict を返す。
     pub fn classify_repetition(&self, pos: &Position) -> RepetitionVerdict {
-        match pos.repetition_state(i32::MAX) {
+        let state = pos.state();
+        if state.repetition == 0 {
+            return RepetitionVerdict::None;
+        }
+        match state.repetition_type {
             RepetitionState::None | RepetitionState::Superior | RepetitionState::Inferior => {
                 RepetitionVerdict::None
             }
-            RepetitionState::Draw => RepetitionVerdict::Sennichite,
+            // 非決定的な再来 (rep > 0) では発火せず対局続行。決定的 (rep < 0) でのみ発火。
+            RepetitionState::Draw if state.repetition < 0 => RepetitionVerdict::Sennichite,
+            RepetitionState::Draw => RepetitionVerdict::None,
             RepetitionState::Lose => RepetitionVerdict::OuteSennichiteLose,
             RepetitionState::Win => RepetitionVerdict::OuteSennichiteWin,
         }
@@ -735,5 +750,78 @@ mod tests {
         let pos = pos_from_sfen(rshogi_core::position::SFEN_HIRATE);
         assert!(!v.is_sennichite(&pos));
         assert!(!v.is_oute_sennichite(&pos));
+    }
+
+    /// CSA トークン列を順次 `do_move` で適用する検証用ヘルパ。
+    ///
+    /// 千日手系テストは CSA トークンで棋譜を記述した方が読みやすい。`validate_move`
+    /// で Move を取り出し `Position::gives_check` を渡して `do_move` する、という
+    /// 3 ステップを 1 つにまとめる。
+    fn apply_moves(pos: &mut Position, rule: EnteringKingRule, tokens: &[&str]) {
+        let v = Validator::new(rule);
+        for t in tokens {
+            let tok = token(t);
+            let mv = v
+                .validate_move(pos, &tok)
+                .unwrap_or_else(|e| panic!("validate_move failed for {t}: {e:?}"));
+            let gc = pos.gives_check(mv);
+            pos.do_move(mv, gc);
+        }
+    }
+
+    #[test]
+    fn classify_repetition_returns_sennichite_after_12_ply_gold_dance() {
+        // 平手初期局面から両者の左金を 4 九 ↔ 4 八 / 4 一 ↔ 4 二 と循環させて
+        // 3 サイクル (= 12 手) で初期局面 4 回目の到達 → 通常千日手。
+        //
+        // どの手も相手玉には利かないため連続王手は発生せず、RepetitionState::Draw
+        // として分類される想定。
+        let mut pos = pos_from_sfen(rshogi_core::position::SFEN_HIRATE);
+        let v = Validator::new(EnteringKingRule::Point24);
+        let cycle = ["+4948KI", "-4142KI", "+4849KI", "-4241KI"];
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        // 3 周目の最終手でちょうど初期局面 4 回目の出現。
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::Sennichite);
+    }
+
+    #[test]
+    fn classify_repetition_returns_oute_sennichite_win_for_perpetual_checker() {
+        // 黒玉 9 九、黒飛 3 八、白玉 3 二、side = White（=白が王手されている局面から開始）。
+        // 4 手 1 サイクルで「白王が 3 二 ↔ 4 二 を往復し、黒飛が 3 八 ↔ 4 八 を往復して
+        // そのたびに王手をかけ直す」連続王手の千日手を作る。3 サイクル (= 12 手) 経過で
+        // 初期 SFEN 局面が 4 回目の出現となり、RepetitionState::Win が分類される。
+        //
+        // `RepetitionState::Win` は「手番側 = 連続王手されていた側が勝つ」を意味するので
+        // Verdict は `OuteSennichiteWin`。側面: 黒が perpetual checker。
+        let mut pos = pos_from_sfen("9/6k2/9/9/9/9/9/6R2/K8 w - 1");
+        let v = Validator::new(EnteringKingRule::Point24);
+        let cycle = ["-3242OU", "+3848HI", "-4232OU", "+4838HI"];
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::OuteSennichiteWin);
+        // `is_oute_sennichite` は勝敗を区別しない薄いラッパなので両 variant で true。
+        assert!(v.is_oute_sennichite(&pos));
+    }
+
+    #[test]
+    fn classify_repetition_returns_oute_sennichite_lose_when_cycle_ends_on_non_checking_move() {
+        // Win variant と同じ駒配置・同じ連続王手循環だが、開始 SFEN を「サイクル中間
+        // (白玉 4 二 退避済み、黒番で黒飛が次に王手を掛け直す直前)」に寄せると、
+        // 検出発火 M12 は **白の退避手** で閉じる。
+        //
+        // 結果として side-to-move after M12 = Black（＝連続王手していた側）で、
+        // `cc_side = cc[Black]` が高い値を持つため `RepetitionState::Lose` が選ばれる。
+        // Verdict は `OuteSennichiteLose`。Lose は「手番側が負け = 連続王手していた側が負け」
+        // であり、このケースでは Black（= from.opposite() = 次手番）が敗者となる。
+        let mut pos = pos_from_sfen("9/5k3/9/9/9/9/9/6R2/K8 b - 1");
+        let v = Validator::new(EnteringKingRule::Point24);
+        let cycle = ["+3848HI", "-4232OU", "+4838HI", "-3242OU"];
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::OuteSennichiteLose);
     }
 }

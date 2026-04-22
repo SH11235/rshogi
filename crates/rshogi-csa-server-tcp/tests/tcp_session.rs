@@ -708,3 +708,97 @@ fn waiter_disconnect_is_cleaned_up_and_allows_relogin() {
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }
+
+/// alice / bob をマッチ成立させて AGREE まで進め、(reader_black, writer_black,
+/// reader_white, writer_white, game_id) を返すテストハーネス。
+/// 終局系 E2E テストで共通のセットアップを削減するため。
+async fn login_match_agree(
+    addr: std::net::SocketAddr,
+) -> (
+    BufReader<OwnedReadHalf>,
+    OwnedWriteHalf,
+    BufReader<OwnedReadHalf>,
+    OwnedWriteHalf,
+    String,
+) {
+    let (mut rb, mut wb) = connect(addr).await;
+    send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+    assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+    let (mut rw, mut ww) = connect(addr).await;
+    send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+    assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+    let _ = drain_game_summary(&mut rb).await;
+    let _ = drain_game_summary(&mut rw).await;
+    send_line(&mut wb, "AGREE").await;
+    send_line(&mut ww, "AGREE").await;
+    let start_b = read_line_raw(&mut rb).await.unwrap();
+    let _ = read_line_raw(&mut rw).await.unwrap();
+    let game_id = start_b.trim_start_matches("START:").to_owned();
+    (rb, wb, rw, ww, game_id)
+}
+
+#[test]
+fn kachi_on_initial_position_ends_as_illegal_kachi() {
+    // 平手初期局面で %KACHI を投げると 24 点不成立で `#ILLEGAL_MOVE` 終局。
+    // TCP 駆動系を通った終局メッセージが対局者双方に届くことを確認する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("kachi_rejected").await;
+        let (mut rb, mut wb, mut rw, _ww, _game_id) = login_match_agree(addr).await;
+        send_line(&mut wb, "%KACHI").await;
+        // 黒 (敗者側) は #ILLEGAL_MOVE + #LOSE。白 (勝者側) は #ILLEGAL_MOVE + #WIN。
+        let b_lines = read_until(&mut rb, "#LOSE").await;
+        assert!(b_lines.iter().any(|l| l == "#ILLEGAL_MOVE"));
+        let w_lines = read_until(&mut rw, "#WIN").await;
+        assert!(w_lines.iter().any(|l| l == "#ILLEGAL_MOVE"));
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn sennichite_broadcasts_draw_on_12_ply_gold_dance() {
+    // 平手から両者の左金を 4 九 ↔ 4 八 / 4 一 ↔ 4 二 と循環させて 3 サイクル (12 手)
+    // 経過で初期局面 4 回目の出現 → `#SENNICHITE` + `#DRAW` が双方の対局者に届く。
+    // TCP 層で千日手の通知が正しく fanout されることを E2E で検証する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("sennichite").await;
+        let (mut rb, mut wb, mut rw, mut ww, _game_id) = login_match_agree(addr).await;
+        // 3 サイクル (12 手) を淡々と送り出す。最終手以外は `,T0` broadcast が流れる。
+        let moves: &[(&str, bool)] = &[
+            ("+4948KI", true), // (token, is_black)
+            ("-4142KI", false),
+            ("+4849KI", true),
+            ("-4241KI", false),
+        ];
+        for _ in 0..2 {
+            for (tok, is_black) in moves {
+                if *is_black {
+                    send_line(&mut wb, tok).await;
+                } else {
+                    send_line(&mut ww, tok).await;
+                }
+                let expect = format!("{tok},T0");
+                let _ = read_until(&mut rb, &expect).await;
+                let _ = read_until(&mut rw, &expect).await;
+            }
+        }
+        // 3 サイクル目: 最終 (-4241KI) で千日手が確定する。最終手の放送と `#SENNICHITE`
+        // / `#DRAW` の両方を対局者双方で確認する。
+        for (tok, is_black) in moves.iter().take(3) {
+            if *is_black {
+                send_line(&mut wb, tok).await;
+            } else {
+                send_line(&mut ww, tok).await;
+            }
+            let expect = format!("{tok},T0");
+            let _ = read_until(&mut rb, &expect).await;
+            let _ = read_until(&mut rw, &expect).await;
+        }
+        send_line(&mut ww, "-4241KI").await;
+        let b_end = read_until(&mut rb, "#DRAW").await;
+        assert!(b_end.iter().any(|l| l == "#SENNICHITE"));
+        assert!(b_end.iter().any(|l| l == "-4241KI,T0"));
+        let w_end = read_until(&mut rw, "#DRAW").await;
+        assert!(w_end.iter().any(|l| l == "#SENNICHITE"));
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}

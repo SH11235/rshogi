@@ -455,8 +455,14 @@ impl GameRoom {
                 });
             }
             RepetitionVerdict::OuteSennichiteLose => {
-                // 連続王手していた側（=直前の手番=from）が反則負け。
-                let mut result = self.finish(GameResult::OuteSennichite { loser: from });
+                // `OuteSennichiteLose` ⇔ `Position::repetition_state` の `Lose` で、
+                // 「手番側 (= side-to-move after the last move = from.opposite()) が
+                // 連続王手していた側で反則負け」を意味する。循環の最終手 (from) が
+                // 非王手 (=受け手の escape) で閉じ、from.opposite() がサイクル中ずっと
+                // 王手を連続して掛けていた場合に発火する。従って敗者は from.opposite()。
+                let mut result = self.finish(GameResult::OuteSennichite {
+                    loser: from.opposite(),
+                });
                 broadcasts.append(&mut result.broadcasts);
                 return Ok(HandleResult {
                     outcome: result.outcome,
@@ -464,10 +470,10 @@ impl GameRoom {
                 });
             }
             RepetitionVerdict::OuteSennichiteWin => {
-                // 連続王手されていた側（直前の手番）が勝ち＝相手（手番外）の反則負け。
-                let mut result = self.finish(GameResult::OuteSennichite {
-                    loser: from.opposite(),
-                });
+                // `OuteSennichiteWin` ⇔ `Position::repetition_state` の `Win` で、
+                // 「手番側 (from.opposite()) が勝ち」= 直前に指した from が連続王手
+                // していた側で反則負け。循環の最終手が from による王手で閉じた場合に発火。
+                let mut result = self.finish(GameResult::OuteSennichite { loser: from });
                 broadcasts.append(&mut result.broadcasts);
                 return Ok(HandleResult {
                     outcome: result.outcome,
@@ -619,6 +625,28 @@ mod tests {
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
         GameRoom::new(config, clock)
+    }
+
+    /// 任意 SFEN から対局を開始するためのテスト専用 helper。
+    ///
+    /// 本番 API (`GameRoom::new`) は入玉対局・千日手・打ち歩詰など
+    /// 「局面起点」の終局シナリオを試験できるように拡張されていない
+    /// （Game_Summary / 棋譜の初期局面契約まで一括で導入するタスクが別にある）。
+    /// テストモジュール内で private フィールド `pos` を直接差し替えて、
+    /// 本番 API を増やさずに位置を注入する。
+    fn room_with_sfen(rule: EnteringKingRule, sfen: &str) -> GameRoom {
+        let config = GameRoomConfig {
+            game_id: GameId::new("20140101120000"),
+            black: PlayerName::new("alice"),
+            white: PlayerName::new("bob"),
+            max_moves: 256,
+            time_margin_ms: 0,
+            entering_king_rule: rule,
+        };
+        let clock = Box::new(SecondsCountdownClock::new(60, 5));
+        let mut room = GameRoom::new(config, clock);
+        room.pos.set_sfen(sfen).expect("valid sfen for test");
+        room
     }
 
     fn line(s: &str) -> CsaLine {
@@ -1019,5 +1047,131 @@ mod tests {
         assert_eq!(r.broadcasts[0].line.as_str(), "-3334FU,T0");
         assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#MAX_MOVES"));
         assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#CENSORED"));
+    }
+
+    #[test]
+    fn kachi_accepted_from_point27_sfen_ends_with_jishogi() {
+        // Validator の `evaluate_kachi_accepted_for_27pt_position` と同じ入玉局面を流用。
+        // 先手が 28 点を満たしており、両者 AGREE → 先手 %KACHI → `GameResult::Kachi` 確定。
+        let mut room =
+            room_with_sfen(EnteringKingRule::Point27, "LNSGKGSNL/4BR3/9/9/9/9/9/9/4k4 b RB 1");
+        agree_both(&mut room);
+        let r = room.handle_line(Color::Black, &line("%KACHI"), 0).unwrap();
+        match &r.outcome {
+            HandleOutcome::GameEnded(GameResult::Kachi {
+                winner: Color::Black,
+            }) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        // `#JISHOGI` + `#WIN/#LOSE` の 3 宛先 × 2 行 = 6 行。
+        assert_eq!(r.broadcasts.len(), 6);
+        assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#JISHOGI"));
+        assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#WIN"));
+        assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#LOSE"));
+    }
+
+    #[test]
+    fn uchifuzume_pawn_drop_ends_with_illegal_move_reason_uchifuzume() {
+        // Validator の `validate_move_detects_uchifuzume` と同じ盤面:
+        // 後手玉 1 一、先手 と 1 三、先手金 3 二、先手玉 5 九、手駒に歩。
+        // 先手 +0012FU で打ち歩詰 → `IllegalMove{reason: Uchifuzume}` が確定する。
+        let mut room = room_with_sfen(EnteringKingRule::Point24, "8k/6G2/8+P/9/9/9/9/9/4K4 b P 1");
+        agree_both(&mut room);
+        let r = room.handle_line(Color::Black, &line("+0012FU"), 0).unwrap();
+        match &r.outcome {
+            HandleOutcome::GameEnded(GameResult::IllegalMove {
+                loser: Color::Black,
+                reason: IllegalReason::Uchifuzume,
+            }) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#ILLEGAL_MOVE"));
+    }
+
+    #[test]
+    fn sennichite_ends_game_after_12_ply_gold_dance() {
+        // 平手初期局面で左金を 4 九 ↔ 4 八 / 4 一 ↔ 4 二 と循環させて 3 サイクル
+        // (12 手) 経過 → 初期局面 4 回目の到達 → `GameResult::Sennichite`。
+        let mut room = make_room();
+        agree_both(&mut room);
+        let cycle = [
+            (Color::Black, "+4948KI"),
+            (Color::White, "-4142KI"),
+            (Color::Black, "+4849KI"),
+            (Color::White, "-4241KI"),
+        ];
+        for _ in 0..2 {
+            for (c, tok) in &cycle {
+                let r = room.handle_line(*c, &line(tok), 0).unwrap();
+                assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+            }
+        }
+        for (c, tok) in cycle.iter().take(3) {
+            let r = room.handle_line(*c, &line(tok), 0).unwrap();
+            assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+        }
+        // 3 サイクル目の最終手 (-4241KI) で 4 回目の初期局面到達 → Sennichite。
+        let last = room.handle_line(Color::White, &line("-4241KI"), 0).unwrap();
+        match &last.outcome {
+            HandleOutcome::GameEnded(GameResult::Sennichite) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(last.broadcasts.iter().any(|b| b.line.as_str() == "#SENNICHITE"));
+        assert!(last.broadcasts.iter().any(|b| b.line.as_str() == "#DRAW"));
+    }
+
+    #[test]
+    fn oute_sennichite_win_variant_loses_the_last_checker() {
+        // Win variant: 開始 SFEN で白が既に黒飛の王手下にある (side=W)。
+        // 4 手 1 サイクル (白退避 → 黒再王手 → 白退避 → 黒再王手) で開始 SFEN に復帰。
+        // 連続王手は反則行為なので 1 サイクルで反則確定 (競技将棋ルール準拠)。
+        // 循環最終手 (+4838HI) は黒の王手手なので from=Black、連続王手側の黒が敗者。
+        let mut room = room_with_sfen(EnteringKingRule::Point24, "9/6k2/9/9/9/9/9/6R2/K8 w - 1");
+        agree_both(&mut room);
+        let prefix = [
+            (Color::White, "-3242OU"),
+            (Color::Black, "+3848HI"),
+            (Color::White, "-4232OU"),
+        ];
+        for (c, tok) in &prefix {
+            let r = room.handle_line(*c, &line(tok), 0).unwrap();
+            assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+        }
+        let last = room.handle_line(Color::Black, &line("+4838HI"), 0).unwrap();
+        match &last.outcome {
+            HandleOutcome::GameEnded(GameResult::OuteSennichite {
+                loser: Color::Black,
+            }) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(last.broadcasts.iter().any(|b| b.line.as_str() == "#OUTE_SENNICHITE"));
+    }
+
+    #[test]
+    fn oute_sennichite_lose_variant_loses_the_perpetual_checker() {
+        // Lose variant: Win variant と駒群は同じだが、開始 SFEN を「白玉 4 二 退避済、
+        // 黒番で次の黒の手が王手」に寄せる (黒飛 3 八, 白玉 4 二, side=B, 非王手)。
+        // 4 手 1 サイクルで初期 SFEN 復帰。連続王手側 (Black = from.opposite()) が敗者。
+        // 最終手 (-3242OU) は白の退避手で非王手のため from=White、連続王手していた
+        // 黒が from.opposite()。
+        let mut room = room_with_sfen(EnteringKingRule::Point24, "9/5k3/9/9/9/9/9/6R2/K8 b - 1");
+        agree_both(&mut room);
+        let prefix = [
+            (Color::Black, "+3848HI"),
+            (Color::White, "-4232OU"),
+            (Color::Black, "+4838HI"),
+        ];
+        for (c, tok) in &prefix {
+            let r = room.handle_line(*c, &line(tok), 0).unwrap();
+            assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+        }
+        let last = room.handle_line(Color::White, &line("-3242OU"), 0).unwrap();
+        match &last.outcome {
+            HandleOutcome::GameEnded(GameResult::OuteSennichite {
+                loser: Color::Black,
+            }) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(last.broadcasts.iter().any(|b| b.line.as_str() == "#OUTE_SENNICHITE"));
     }
 }
