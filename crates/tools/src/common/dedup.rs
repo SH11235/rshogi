@@ -81,16 +81,56 @@ pub fn collect_input_paths(
 }
 
 /// まだ存在しないかもしれないパスを正規化する。
-/// `parent().canonicalize() / file_name()` で解決する。
-fn canonicalize_maybe_new(path: &Path) -> io::Result<PathBuf> {
-    if let Ok(c) = path.canonicalize() {
-        return Ok(c);
+///
+/// 既存の最長祖先ディレクトリだけを `canonicalize` し、残りの成分は
+/// パス構文どおりに連結する。これにより、まだ存在しない出力ファイルや
+/// 親ディレクトリを含むパスでも比較用の絶対パスへ正規化できる。
+pub fn canonicalize_maybe_new(path: &Path) -> io::Result<PathBuf> {
+    let components: Vec<_> = path.components().collect();
+
+    for prefix_len in (0..=components.len()).rev() {
+        let prefix = join_components(&components[..prefix_len]);
+        let base = if prefix_len == 0 && path.is_relative() {
+            std::env::current_dir()?.canonicalize()?
+        } else if prefix.as_os_str().is_empty() {
+            continue;
+        } else if let Ok(base) = prefix.canonicalize() {
+            base
+        } else {
+            continue;
+        };
+
+        return Ok(append_components(base, &components[prefix_len..]));
     }
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let name = path.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "出力パスにファイル名がありません")
-    })?;
-    Ok(parent.canonicalize()?.join(name))
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("パスを正規化できませんでした: {}", path.display()),
+    ))
+}
+
+fn join_components(components: &[std::path::Component<'_>]) -> PathBuf {
+    let mut path = PathBuf::new();
+    for component in components {
+        path.push(component.as_os_str());
+    }
+    path
+}
+
+fn append_components(mut base: PathBuf, components: &[std::path::Component<'_>]) -> PathBuf {
+    for component in components {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let _ = base.pop();
+            }
+            std::path::Component::Normal(part) => base.push(part),
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                base.push(component.as_os_str());
+            }
+        }
+    }
+    base
 }
 
 /// 出力パスが入力パスのいずれかと一致していないか検査する。
@@ -215,6 +255,36 @@ impl DedupSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[test]
+    fn canonicalize_maybe_new_handles_new_relative_file_in_cwd() {
+        let expected =
+            std::env::current_dir().unwrap().canonicalize().unwrap().join("train_000.bin");
+
+        assert_eq!(canonicalize_maybe_new(Path::new("train_000.bin")).unwrap(), expected);
+    }
+
+    #[test]
+    fn canonicalize_maybe_new_handles_nonexistent_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out/merged.psv");
+
+        assert_eq!(
+            canonicalize_maybe_new(&output).unwrap(),
+            dir.path().canonicalize().unwrap().join("out/merged.psv")
+        );
+    }
+
+    #[test]
+    fn check_output_not_in_inputs_accepts_new_output_under_new_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.psv");
+        fs::write(&input, [0u8; PSV_SIZE]).unwrap();
+
+        check_output_not_in_inputs(&dir.path().join("new/out.psv"), &[input]).unwrap();
+    }
+
     #[test]
     fn test_dedup_with_mirror() {
         let a = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/2B4R1/LNSGKGSNL b - 1";

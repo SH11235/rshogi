@@ -35,6 +35,8 @@ crates/tools/src/bin/ 配下の全32バイナリの一覧と解説。
 | ツール | 説明 |
 |--------|------|
 | `shuffle_psv` | PSV ファイル内のレコード（40バイト単位）をシャッフル |
+| `split_psv` | PSV ファイルを局面数または容量で複数ファイルへ分割 |
+| `merge_psv` | 複数の PSV ファイルを順序どおりストリーミング結合 |
 | `rescore_psv` | PSV ファイルの評価値を NNUE または外部エンジンで再計算 |
 | `preprocess_psv` | PSV ファイルに qsearch leaf 置換を適用。チャンクストリーミング処理対応 |
 | `filter_teacher_data` | 王手除外・スコアフィルタ・クリップなどの前処理を適用 |
