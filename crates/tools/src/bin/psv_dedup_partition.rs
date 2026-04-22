@@ -178,6 +178,26 @@ fn same_fs_output_headroom_bytes(estimate: &ResourceEstimate, keep_temp: bool) -
     }
 }
 
+fn output_disk_required_bytes(
+    estimate: &ResourceEstimate,
+    same_fs: bool,
+    skip_temp_check: bool,
+    keep_temp: bool,
+) -> u64 {
+    if same_fs {
+        let same_fs_headroom =
+            (same_fs_output_headroom_bytes(estimate, keep_temp) as f64 * DISK_SAFETY_FACTOR) as u64;
+        if skip_temp_check {
+            same_fs_headroom
+        } else {
+            ((estimate.phase1_temp_bytes as f64 * DISK_SAFETY_FACTOR) as u64)
+                .saturating_add(same_fs_headroom)
+        }
+    } else {
+        (estimate.output_upper_bound_bytes as f64 * DISK_SAFETY_FACTOR) as u64
+    }
+}
+
 /// 不足チェック結果を INFO 出力し、不足時は Err（`force` なら Warning）。
 fn preflight_check(
     estimate: &ResourceEstimate,
@@ -272,11 +292,7 @@ fn preflight_check(
     }
 
     // 出力ディスクチェック（temp と同一 fs の場合は Phase 2 の一時的な headroom を見る）
-    let same_fs = if skip_temp_check {
-        Some(false)
-    } else {
-        same_filesystem(temp_dir, output_parent)
-    };
+    let same_fs = same_filesystem(temp_dir, output_parent);
     // 出力上限は input 側のみ（reference は出力対象外なので除外する）
     let output_required = (estimate.output_upper_bound_bytes as f64 * DISK_SAFETY_FACTOR) as u64;
     if let Some(avail) = get_disk_available(output_parent) {
@@ -294,12 +310,8 @@ fn preflight_check(
                     "（処理中の最大 input partition 想定）"
                 }
             );
-            let same_fs_required = if skip_temp_check {
-                same_fs_headroom
-            } else {
-                ((estimate.phase1_temp_bytes as f64 * DISK_SAFETY_FACTOR) as u64)
-                    .saturating_add(same_fs_headroom)
-            };
+            let same_fs_required =
+                output_disk_required_bytes(estimate, true, skip_temp_check, keep_temp);
             if same_fs_required > avail {
                 let msg = if skip_temp_check {
                     format!(
@@ -948,6 +960,14 @@ mod tests {
         let estimate = estimate_resources(400, 4_000, 4, 64 * 1024);
 
         assert_eq!(same_fs_output_headroom_bytes(&estimate, true), 4_000);
+    }
+
+    #[test]
+    fn phase2_only_same_fs_uses_headroom_not_full_output() {
+        let estimate = estimate_resources(400, 4_000, 4, 64 * 1024);
+
+        assert_eq!(output_disk_required_bytes(&estimate, true, true, false), 1_260);
+        assert_eq!(output_disk_required_bytes(&estimate, false, true, false), 4_200);
     }
 
     #[test]
