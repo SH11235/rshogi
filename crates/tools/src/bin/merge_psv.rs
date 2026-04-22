@@ -214,7 +214,10 @@ fn ensure_input_is_file(path: &Path) -> Result<()> {
 }
 
 fn compare_merge_input_paths(a: &PathBuf, b: &PathBuf) -> std::cmp::Ordering {
-    compare_file_names_with_numeric_suffix(a, b).then_with(|| a.cmp(b))
+    a.parent()
+        .cmp(&b.parent())
+        .then_with(|| compare_file_names_with_numeric_suffix(a, b))
+        .then_with(|| a.cmp(b))
 }
 
 fn compare_file_names_with_numeric_suffix(a: &Path, b: &Path) -> std::cmp::Ordering {
@@ -494,11 +497,40 @@ mod tests {
     }
 
     #[test]
-    fn compare_merge_input_paths_prefers_numeric_suffix_across_dirs() {
-        let a = PathBuf::from("archive/train_001.bin");
-        let b = PathBuf::from("train_000.bin");
+    fn compare_merge_input_paths_keeps_directory_groups_contiguous() {
+        let a = PathBuf::from("a/train_001.bin");
+        let b = PathBuf::from("b/train_000.bin");
 
-        assert_eq!(compare_merge_input_paths(&a, &b), std::cmp::Ordering::Greater);
+        assert_eq!(compare_merge_input_paths(&a, &b), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn collect_merge_input_paths_keeps_recursive_directory_batches_contiguous() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(a.join("train_000.bin"), []).unwrap();
+        fs::write(a.join("train_001.bin"), []).unwrap();
+        fs::write(b.join("train_000.bin"), []).unwrap();
+        fs::write(b.join("train_001.bin"), []).unwrap();
+
+        let paths = collect_merge_input_paths(dir.path(), "train_*.bin", true).unwrap();
+        let names: Vec<_> = paths
+            .iter()
+            .map(|path| path.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "a/train_000.bin",
+                "a/train_001.bin",
+                "b/train_000.bin",
+                "b/train_001.bin"
+            ]
+        );
     }
 
     #[cfg(unix)]
