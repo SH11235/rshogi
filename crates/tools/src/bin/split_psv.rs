@@ -241,10 +241,12 @@ fn split_file(input_path: &Path, output_prefix: &Path, config: &SplitConfig) -> 
         })?;
         info!("part {}: {} ({} records)", part_index, output_path.display(), written_in_part);
 
-        part_index =
-            part_index.checked_add(1).context("出力ファイル番号が u64 の上限を超えました")?;
         part_count =
             part_count.checked_add(1).context("出力ファイル数が u64 の上限を超えました")?;
+        if remaining > 0 {
+            part_index =
+                part_index.checked_add(1).context("出力ファイル番号が u64 の上限を超えました")?;
+        }
     }
 
     progress.finish_and_clear();
@@ -357,25 +359,97 @@ fn check_output_paths_do_not_hit_input(
     let input_canonical = input_path
         .canonicalize()
         .with_context(|| format!("入力パスを正規化できませんでした: {}", input_path.display()))?;
-    let part_count = total_records.div_ceil(config.records_per_file);
+    let output_family = SplitOutputFamily::new(output_prefix, config, total_records)
+        .context("出力パス系列を解決できませんでした")?;
 
-    for offset in 0..part_count {
-        let index = config
-            .start_index
-            .checked_add(offset)
-            .context("出力ファイル番号が u64 の上限を超えました")?;
-        let output_path = build_part_path(output_prefix, index, config.digits, &config.suffix);
-        let output_canonical = canonicalize_maybe_new(&output_path)?;
-        if output_canonical == input_canonical {
-            bail!(
-                "出力ファイルが入力ファイルと衝突します: {}\n\
-                 --output-prefix / --start-index / --digits / --suffix を見直してください",
-                output_path.display(),
-            );
-        }
+    if output_family.contains(&input_canonical) {
+        bail!(
+            "出力ファイルが入力ファイルと衝突します: {}\n\
+             --output-prefix / --start-index / --digits / --suffix を見直してください",
+            input_path.display(),
+        );
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SplitOutputFamily {
+    canonical_parent: PathBuf,
+    filename_prefix: String,
+    suffix: String,
+    digits: usize,
+    start_index: u64,
+    last_index: u64,
+}
+
+impl SplitOutputFamily {
+    fn new(output_prefix: &Path, config: &SplitConfig, total_records: u64) -> Result<Self> {
+        let part_count = total_records.div_ceil(config.records_per_file);
+        let last_index = config
+            .start_index
+            .checked_add(part_count.saturating_sub(1))
+            .context("出力ファイル番号が u64 の上限を超えました")?;
+        let canonical_parent = canonicalize_output_parent(output_prefix)?;
+        let filename_prefix = output_prefix
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        Ok(Self {
+            canonical_parent,
+            filename_prefix,
+            suffix: config.suffix.clone(),
+            digits: config.digits,
+            start_index: config.start_index,
+            last_index,
+        })
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        let Some(parent) = path.parent() else {
+            return false;
+        };
+        if parent != self.canonical_parent {
+            return false;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+
+        let prefix = format!("{}_", self.filename_prefix);
+        if !file_name.starts_with(&prefix) || !file_name.ends_with(&self.suffix) {
+            return false;
+        }
+
+        let digits_end = file_name.len().saturating_sub(self.suffix.len());
+        let digits_str = &file_name[prefix.len()..digits_end];
+        if digits_str.is_empty() || !digits_str.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+
+        let Ok(index) = digits_str.parse::<u64>() else {
+            return false;
+        };
+        if index < self.start_index || index > self.last_index {
+            return false;
+        }
+
+        zero_pad(index, self.digits) == digits_str
+    }
+}
+
+fn canonicalize_output_parent(output_prefix: &Path) -> Result<PathBuf> {
+    let parent = output_prefix.parent().unwrap_or(Path::new("."));
+    let marker = parent.join("__rshogi_split_output_parent_check__");
+    let canonical_marker = canonicalize_maybe_new(&marker).with_context(|| {
+        format!("出力先親ディレクトリを正規化できませんでした: {}", parent.display())
+    })?;
+    canonical_marker
+        .parent()
+        .map(Path::to_path_buf)
+        .context("出力先親ディレクトリを特定できませんでした")
 }
 
 fn zero_pad(value: u64, digits: usize) -> String {
@@ -493,6 +567,29 @@ mod tests {
     }
 
     #[test]
+    fn split_detects_collision_for_large_part_count_without_enumerating_all_parts() {
+        let dir = tempdir().unwrap();
+        let input_path = dir.path().join(format!("train_{}.bin", u64::MAX - 1));
+        fs::write(&input_path, make_records(1)).unwrap();
+
+        let err = check_output_paths_do_not_hit_input(
+            &input_path,
+            &dir.path().join("train"),
+            &SplitConfig {
+                records_per_file: 1,
+                write_chunk_records: 1,
+                start_index: 0,
+                digits: 1,
+                suffix: ".bin".to_string(),
+            },
+            u64::MAX,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("出力ファイルが入力ファイルと衝突します"));
+    }
+
+    #[test]
     fn split_collision_check_allows_relative_output_prefix_in_cwd() {
         let dir = tempdir().unwrap();
         let input_path = dir.path().join("input.psv");
@@ -536,5 +633,34 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("入力パスはファイルである必要があります"));
+    }
+
+    #[test]
+    fn split_file_allows_last_valid_index_at_u64_max() {
+        let dir = tempdir().unwrap();
+        let input_path = dir.path().join("input.psv");
+        fs::write(&input_path, make_records(1)).unwrap();
+
+        let stats = split_file(
+            &input_path,
+            &dir.path().join("train"),
+            &SplitConfig {
+                records_per_file: 1,
+                write_chunk_records: 1,
+                start_index: u64::MAX,
+                digits: 1,
+                suffix: ".bin".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            stats,
+            SplitStats {
+                total_records: 1,
+                part_count: 1
+            }
+        );
+        assert!(dir.path().join(format!("train_{}.bin", u64::MAX)).is_file());
     }
 }
