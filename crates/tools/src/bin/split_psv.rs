@@ -124,22 +124,23 @@ fn main() -> Result<()> {
     info!("総局面数: {}", stats.total_records);
     info!("出力ファイル数: {}", stats.part_count);
     if stats.part_count > 0
-        && let Some(offset) = stats.part_count.checked_sub(1) {
-            if let Some(last_index) = cli.start_index.checked_add(offset) {
-                info!(
-                    "出力範囲: {}_{}..{}{}",
-                    cli.output_prefix.display(),
-                    zero_pad(cli.start_index, config.digits),
-                    zero_pad(last_index, config.digits),
-                    config.suffix,
-                );
-            } else {
-                warn!(
-                    "出力範囲の表示を省略しました: start_index ({}) と part_count ({}) から最終インデックスを安全に計算できません",
-                    cli.start_index, stats.part_count,
-                );
-            }
+        && let Some(offset) = stats.part_count.checked_sub(1)
+    {
+        if let Some(last_index) = cli.start_index.checked_add(offset) {
+            info!(
+                "出力範囲: {}_{}..{}{}",
+                cli.output_prefix.display(),
+                zero_pad(cli.start_index, config.digits),
+                zero_pad(last_index, config.digits),
+                config.suffix,
+            );
+        } else {
+            warn!(
+                "出力範囲の表示を省略しました: start_index ({}) と part_count ({}) から最終インデックスを安全に計算できません",
+                cli.start_index, stats.part_count,
+            );
         }
+    }
 
     Ok(())
 }
