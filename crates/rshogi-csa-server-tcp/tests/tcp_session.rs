@@ -1029,6 +1029,26 @@ async fn spawn_server_with_admin(
     tag: &str,
     admin_handles: Vec<String>,
 ) -> (std::net::SocketAddr, PathBuf) {
+    spawn_server_custom(
+        tag,
+        ClockSpec::Countdown {
+            total_time_sec: 60,
+            byoyomi_sec: 10,
+        },
+        EnteringKingRule::Point24,
+        None,
+        admin_handles,
+    )
+    .await
+}
+
+async fn spawn_server_custom(
+    tag: &str,
+    clock: ClockSpec,
+    entering_king_rule: EnteringKingRule,
+    initial_sfen: Option<&str>,
+    admin_handles: Vec<String>,
+) -> (std::net::SocketAddr, PathBuf) {
     let topdir = unique_topdir(tag);
     let mut password_map = HashMap::new();
     for h in ["alice", "bob", "carol", "admin"] {
@@ -1050,17 +1070,14 @@ async fn spawn_server_with_admin(
     let config = ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         kifu_topdir: topdir.clone(),
-        clock: ClockSpec::Countdown {
-            total_time_sec: 60,
-            byoyomi_sec: 10,
-        },
+        clock,
         time_margin_ms: 1_500,
         max_moves: 256,
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
         x1_reply_write_timeout: Duration::from_secs(5),
-        entering_king_rule: EnteringKingRule::Point24,
-        initial_sfen: None,
+        entering_king_rule,
+        initial_sfen: initial_sfen.map(str::to_owned),
         admin_handles,
     };
     let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
@@ -1276,6 +1293,101 @@ fn monitor2_on_unknown_game_returns_not_found() {
         let chat = read_line_raw(&mut rc).await.unwrap();
         assert_eq!(chat, "##[CHAT] NOT_MONITORING");
         let _ = read_line_raw(&mut rc).await.unwrap(); // END
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn uchifuzume_from_initial_sfen_ends_as_illegal_move_e2e() {
+    // Phase 3 acceptance: 打ち歩詰の典型局面を TCP E2E で流し、
+    // `#ILLEGAL_MOVE` → `#LOSE/#WIN` が wire されることを固定する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_custom(
+            "uchifuzume_e2e",
+            ClockSpec::Countdown {
+                total_time_sec: 60,
+                byoyomi_sec: 10,
+            },
+            EnteringKingRule::Point24,
+            Some("8k/6G2/8+P/9/9/9/9/9/4K4 b P 1"),
+            Vec::new(),
+        )
+        .await;
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        let _ = read_line_raw(&mut rb).await.unwrap();
+        let _ = read_line_raw(&mut rw).await.unwrap();
+
+        send_line(&mut wb, "+0012FU").await;
+        let black_end = read_until(&mut rb, "#LOSE").await;
+        let white_end = read_until(&mut rw, "#WIN").await;
+        assert!(black_end.iter().any(|l| l == "#ILLEGAL_MOVE"), "black_end: {black_end:?}");
+        assert!(white_end.iter().any(|l| l == "#ILLEGAL_MOVE"), "white_end: {white_end:?}");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn oute_sennichite_from_initial_sfen_ends_as_perpetual_check_loss_e2e() {
+    // Phase 3 acceptance: 連続王手千日手の最小循環を TCP E2E で流し、
+    // `#OUTE_SENNICHITE` が終局メッセージとして表に出ることを確認する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_custom(
+            "oute_sennichite_e2e",
+            ClockSpec::Countdown {
+                total_time_sec: 60,
+                byoyomi_sec: 10,
+            },
+            EnteringKingRule::Point24,
+            Some("9/6k2/9/9/9/9/9/6R2/K8 w - 1"),
+            Vec::new(),
+        )
+        .await;
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let s_black = drain_game_summary(&mut rb).await;
+        let s_white = drain_game_summary(&mut rw).await;
+        assert!(s_black.iter().any(|l| l == "To_Move:-"), "black summary: {s_black:?}");
+        assert!(s_white.iter().any(|l| l == "To_Move:-"), "white summary: {s_white:?}");
+
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        let _ = read_line_raw(&mut rb).await.unwrap();
+        let _ = read_line_raw(&mut rw).await.unwrap();
+
+        send_line(&mut ww, "-3242OU").await;
+        let _ = read_until(&mut rb, "-3242OU,T0").await;
+        let _ = read_until(&mut rw, "-3242OU,T0").await;
+        send_line(&mut wb, "+3848HI").await;
+        let _ = read_until(&mut rb, "+3848HI,T0").await;
+        let _ = read_until(&mut rw, "+3848HI,T0").await;
+        send_line(&mut ww, "-4232OU").await;
+        let _ = read_until(&mut rb, "-4232OU,T0").await;
+        let _ = read_until(&mut rw, "-4232OU,T0").await;
+        send_line(&mut wb, "+4838HI").await;
+
+        let black_end = read_until(&mut rb, "#LOSE").await;
+        let white_end = read_until(&mut rw, "#WIN").await;
+        assert!(black_end.iter().any(|l| l == "#OUTE_SENNICHITE"), "black_end: {black_end:?}");
+        assert!(white_end.iter().any(|l| l == "#OUTE_SENNICHITE"), "white_end: {white_end:?}");
+
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }
