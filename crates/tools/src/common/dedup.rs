@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 use std::path::{Component, Prefix};
 #[cfg(not(unix))]
 use sysinfo::Disks;
@@ -185,7 +185,7 @@ fn disk_probe_path(path: &Path) -> Option<PathBuf> {
     canonicalize_maybe_new(probe).ok()
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn normalize_mount_compare_path(path: &Path) -> PathBuf {
     let mut components = path.components();
     let Some(first) = components.next() else {
@@ -205,6 +205,11 @@ fn normalize_mount_compare_path(path: &Path) -> PathBuf {
         normalized.push(component.as_os_str());
     }
     normalized
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn normalize_mount_compare_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 #[cfg(not(unix))]
