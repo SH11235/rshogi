@@ -31,11 +31,14 @@ use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
 use rshogi_csa_server::matching::registry::{GameListing, GameRegistry};
 use rshogi_csa_server::port::{
-    BroadcastTag, Broadcaster, ClientTransport, GameSummaryEntry, KifuStorage, RateDecision,
-    RateStorage,
+    BroadcastTag, Broadcaster, BuoyStorage, ClientTransport, GameSummaryEntry, KifuStorage,
+    RateDecision, RateStorage,
 };
 use rshogi_csa_server::protocol::command::{ClientCommand, parse_command};
-use rshogi_csa_server::protocol::summary::{GameSummaryBuilder, standard_initial_position_block};
+use rshogi_csa_server::protocol::summary::{
+    GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
+    standard_initial_position_block,
+};
 use rshogi_csa_server::record::kifu::{KifuMove, KifuRecord, primary_result_code};
 use rshogi_csa_server::types::{
     Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, RoomId,
@@ -46,7 +49,7 @@ use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::auth::{AuthOutcome, PasswordHasher, authenticate};
-use crate::broadcaster::InMemoryBroadcaster;
+use crate::broadcaster::{InMemoryBroadcaster, Subscriber};
 use crate::rate_limit::IpLoginRateLimiter;
 use crate::transport::TcpTransport;
 
@@ -110,6 +113,19 @@ pub struct ServerConfig {
     pub x1_reply_write_timeout: Duration,
     /// 入玉ルール。既定は 24 点法。
     pub entering_king_rule: EnteringKingRule,
+    /// 既定の対局開始局面 SFEN。`None` なら平手。
+    ///
+    /// 運用では通常 `None` (= 平手) のまま起動し、`%%FORK` / buoy 経由の対局
+    /// のみ `GameRoomConfig::initial_sfen` を per-game で上書きする。本 field
+    /// は `sensible_defaults` が全対局で使う既定値を設定するためにあり、テスト
+    /// や特殊環境 (駒落ちサーバー等) で全対局を非平手で起動する経路で使う。
+    pub initial_sfen: Option<String>,
+    /// 管理者ハンドル (`%%SETBUOY` / `%%DELETEBUOY` の実行を許可する LOGIN 名)。
+    ///
+    /// 空の場合は誰も管理者ではなく、`%%SETBUOY` / `%%DELETEBUOY` は全て
+    /// `PERMISSION_DENIED` で拒否される。`%%GETBUOYCOUNT` は参照系なので
+    /// 管理者権限を要求しない。
+    pub admin_handles: Vec<String>,
 }
 
 impl ServerConfig {
@@ -126,6 +142,8 @@ impl ServerConfig {
             agree_timeout: Duration::from_secs(5 * 60),
             x1_reply_write_timeout: Duration::from_secs(5),
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
+            admin_handles: Vec::new(),
         }
     }
 }
@@ -215,6 +233,12 @@ where
     game_counter: Mutex<u64>,
     /// サーバー起動時刻（game_id プリフィックス用）。
     started_at: chrono::DateTime<chrono::Utc>,
+    /// ブイ (途中局面テンプレート) の永続化先。
+    ///
+    /// `config.kifu_topdir` 配下の `buoys/` ディレクトリを使う。TCP サーバー
+    /// は常に同一プロセス・同一プロセス内で単一インスタンスを保持する前提
+    /// (複数プロセス並行書き込みは非対応)。
+    buoy_storage: rshogi_csa_server::FileBuoyStorage,
 }
 
 /// パスワードストアの抽象。`handle` に対応する保存ハッシュ（現状は平文）を返す。
@@ -469,13 +493,40 @@ where
         );
     }
 
-    // マッチ確定 / 受信 の 2 経路を監視する。x1 waiter のみ受信行を `%%` 系
-    // コマンドとして解釈し応答を返すため、recv ブランチは loop で回す。`recv_line` は
-    // cancel-safe（`TcpTransport::recv_line`）なので、マッチが先に到着した場合は
-    // バッファを保ったまま drive 側へ transport を渡せる。
+    // `%%MONITOR2ON <game_id>` で購読中の対局があれば、その broadcast 受信口を
+    // `(game_id, Receiver<CsaLine>)` (bounded) として保持する。単一購読モデル:
+    // 後続の `%%MONITOR2ON` は既存 rx を drop して差し替える。CSA x1 仕様上
+    // 複数同時観戦は稀なので、複雑なキュー/セット管理を避ける。
+    //
+    // キュー容量は `crate::broadcaster::SUBSCRIBER_CHANNEL_CAPACITY`。slow
+    // consumer がキューを溜め込んだ時点で broadcaster 側が prune するため、
+    // 無制限 memory 溜め込み経路 (Codex review PR #469 P2) を遮断する。
+    let mut monitor_rx: Option<(GameId, tokio::sync::mpsc::Receiver<CsaLine>)> = None;
+
+    // `%%MONITOR2ON` が成立したら観戦者扱いとなるため、waiting pool から除外する
+    // 必要がある (Codex review PR #469 P1: 観戦者が同一 game_name + 相補色で
+    // 後続 LOGIN とマッチさせられる経路を塞ぐ)。`pool.remove_by_handle` は
+    // 冪等 (未登録なら何もしない) なので、複数回呼んでも害が無い。
+    let mut observer_mode = false;
+
+    // マッチ確定 / 受信 / 観戦 broadcast 中継 の 3 経路を監視する。x1 waiter のみ
+    // 受信行を `%%` 系コマンドとして解釈し応答を返すため、recv ブランチは loop で
+    // 回す。`recv_line` は cancel-safe（`TcpTransport::recv_line`）なので、マッチが
+    // 先に到着した場合はバッファを保ったまま drive 側へ transport を渡せる。
     let waiter_outcome: WaiterOutcome = 'outer: loop {
         let recv = tokio::select! {
-            req_res = &mut match_req_rx => {
+            // observer_mode 時は `match_req_rx` の Err は自分が pool から自主的に
+            // 外れたことが原因。`recv_line` / `forwarded` ブランチを使い続けられるよう、
+            // pending() に切り替えて本ブランチを実質無効化する。`match_req_rx` を
+            // `Option` 化すると `tokio::select!` 内部の pin 要件が面倒になるため、
+            // ブランチ側で observer_mode 判定をする。
+            req_res = async {
+                if observer_mode {
+                    std::future::pending::<Result<MatchRequest, oneshot::error::RecvError>>().await
+                } else {
+                    (&mut match_req_rx).await
+                }
+            } => {
                 match req_res {
                     Ok(req) => {
                         // transport を drive 側へ渡し、終局通知を待つ。
@@ -489,15 +540,58 @@ where
                     }
                 }
             }
+            // 観戦購読中のみ有効になる broadcast 中継経路。`monitor_rx` が `None` なら
+            // `pending()` で永久に await し、実質このブランチは無効化される。
+            forwarded = async {
+                match &mut monitor_rx {
+                    Some((_, rx)) => rx.recv().await,
+                    None => std::future::pending::<Option<CsaLine>>().await,
+                }
+            } => {
+                match forwarded {
+                    Some(line) => {
+                        // 観戦者向け broadcast を transport に中継。書き込み失敗・
+                        // タイムアウトは切断扱い（既存の返信経路と同じ `x1_reply_write_timeout`
+                        // を共用し、観戦中継がハングしてマッチメイクを止めないようにする）。
+                        let write_timeout = state.config.x1_reply_write_timeout;
+                        match tokio::time::timeout(write_timeout, transport.send_line(&line)).await
+                        {
+                            Ok(Ok(())) => continue 'outer,
+                            _ => {
+                                let mut pool = state.waiting.lock().await;
+                                let _ = pool.remove_by_handle(&game_name, &handle);
+                                break 'outer WaiterOutcome::DisconnectedFromPool;
+                            }
+                        }
+                    }
+                    None => {
+                        // 送信側 (broadcaster 側の Subscriber tx) が drop された。
+                        // 対局終了による `clear_room` 経由が典型。購読状態をクリアして
+                        // 次の `%%MONITOR2ON` を待つ。
+                        monitor_rx = None;
+                        continue 'outer;
+                    }
+                }
+            }
             recv = transport.recv_line(NEAR_INFINITE) => recv,
         };
 
         let line = match recv {
             Ok(l) => l,
             Err(_) => {
-                // 切断 or I/O エラー → pool を抜けて終了。
+                // 切断 or I/O エラー → pool を抜けて終了。observer モードで
+                // MONITOR2OFF を呼ばずに切断した接続は `monitor_rx` を drop する
+                // ことで tx が `is_closed` になるが、`broadcaster.inner` の entry
+                // は次の broadcast / subscribe / clear_room まで掃除されない。
+                // broadcast が発生しない idle room で再接続を繰り返されると
+                // dead sender が蓄積するため、切断時にも明示的に prune する
+                // (Codex review PR #469 3rd round P2)。
                 let mut pool = state.waiting.lock().await;
                 let _removed = pool.remove_by_handle(&game_name, &handle);
+                drop(pool);
+                if let Some((room, _)) = monitor_rx.take() {
+                    state.broadcaster.prune_closed(&RoomId::new(room.as_str())).await;
+                }
                 break 'outer WaiterOutcome::DisconnectedFromPool;
             }
         };
@@ -544,11 +638,261 @@ where
                 };
                 Some(rshogi_csa_server::protocol::info::show_lines(&game_id, listing.as_ref()))
             }
+            ClientCommand::Monitor2On { game_id } => {
+                // 対局が GameRegistry に存在しているときのみ購読を許可する。
+                let exists = {
+                    let games = state.games.lock().await;
+                    games.get(&game_id).is_some()
+                };
+                if !exists {
+                    Some(vec![
+                        CsaLine::new(format!("##[MONITOR2] NOT_FOUND {game_id}")),
+                        CsaLine::new("##[MONITOR2] END"),
+                    ])
+                } else if !observer_mode {
+                    // 初回の observer 転換。subscribe().await の前に waiting pool
+                    // から自分を除外する必要がある。そうしないと drive 側の
+                    // `take_complement` と subscribe() の await の間にレースが発生し、
+                    // drive が slot を掴んだ後で我々が observer_mode に入ると
+                    // match_request が監視外に流れて相手が永久 hang する
+                    // (Codex review PR #469 P1)。
+                    //
+                    // 競合の結果は pool の Mutex で直列化されるので、`remove_by_handle`
+                    // の戻り値で「先に drive が slot を掴んだか」を確実に判別できる:
+                    // - true: 我々が先に取り除いた。drive は以後 slot を見つけない。
+                    //         安全に observer へ遷移。
+                    // - false: drive が先に slot を取っていった。match_request が
+                    //         間もなく match_req_rx に届く。observer にはならず、
+                    //         client に BUSY を返して通常 waiter として match_req_rx
+                    //         を次のループで受けさせる。
+                    let mut pool = state.waiting.lock().await;
+                    let removed = pool.remove_by_handle(&game_name, &handle);
+                    drop(pool);
+                    if !removed {
+                        Some(vec![
+                            CsaLine::new(format!("##[MONITOR2] BUSY {game_id}")),
+                            CsaLine::new("##[MONITOR2] END"),
+                        ])
+                    } else {
+                        // League も `GameWaiting` → `Connected` へ戻して `%%WHO` から
+                        // `waiting:<game_name>` を消す。`transition` は「未ログイン」
+                        // 「Finished」でのみ Err を返すが、ここではどちらでもない。
+                        let mut league = state.league.lock().await;
+                        let _ = league.transition(&handle_player, PlayerStatus::Connected);
+                        drop(league);
+                        observer_mode = true;
+                        // subscriber 登録。subscribe は内部で dead entry を prune する
+                        // ため、切替や MONITOR2OFF の蓄積は O(生存購読者数) に抑えられる
+                        // (Codex review PR #469 P2)。
+                        let (tx, rx) = tokio::sync::mpsc::channel(
+                            crate::broadcaster::SUBSCRIBER_CHANNEL_CAPACITY,
+                        );
+                        state
+                            .broadcaster
+                            .subscribe(RoomId::new(game_id.as_str()), Subscriber::new(tx))
+                            .await;
+                        // TOCTOU 回避: 初回 exists 確認から subscribe までの間に
+                        // drive が終局して `unregister + clear_room` を完了している
+                        // 可能性がある。その場合は broadcaster に stale room が残り、
+                        // 観戦者は二度と broadcast を受け取れない。subscribe 後に
+                        // もう一度存在確認し、消えていれば rx を drop + prune して
+                        // NOT_FOUND を返す (Codex review PR #469 3rd round P2)。
+                        let still_exists = subscribe_still_registered(&state, &game_id).await;
+                        if !still_exists {
+                            drop(rx);
+                            state.broadcaster.prune_closed(&RoomId::new(game_id.as_str())).await;
+                            // 状態巻き戻し: pool から抜けた + League を Connected に
+                            // 遷移した + observer_mode を立てた 3 点を元に戻す。
+                            // 新しい oneshot ペアを作って slot を再登録し、次の
+                            // tokio::select! で match_req_rx を再び監視できる状態に
+                            // 戻す (Codex review PR #469 4th round P2)。
+                            let (new_tx, new_rx) = oneshot::channel::<MatchRequest>();
+                            {
+                                let mut pool = state.waiting.lock().await;
+                                pool.push(
+                                    game_name.clone(),
+                                    WaitingSlot {
+                                        handle: handle.clone(),
+                                        color,
+                                        match_request_tx: new_tx,
+                                    },
+                                );
+                            }
+                            {
+                                let mut league = state.league.lock().await;
+                                let _ = league.transition(
+                                    &handle_player,
+                                    PlayerStatus::GameWaiting {
+                                        game_name: game_name.clone(),
+                                        preferred_color: Some(color),
+                                    },
+                                );
+                            }
+                            match_req_rx = new_rx;
+                            observer_mode = false;
+                            Some(vec![
+                                CsaLine::new(format!("##[MONITOR2] NOT_FOUND {game_id}")),
+                                CsaLine::new("##[MONITOR2] END"),
+                            ])
+                        } else {
+                            monitor_rx = Some((game_id.clone(), rx));
+                            Some(vec![
+                                CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
+                                CsaLine::new("##[MONITOR2] END"),
+                            ])
+                        }
+                    }
+                } else {
+                    // 既に observer モード。旧 rx を drop して差し替える。
+                    // 差し替え前に旧 room の dead entry を明示的に prune する
+                    // (subscribe 内の prune は新 room に対してのみ行われるため)。
+                    if let Some((old_id, _)) = monitor_rx.take() {
+                        state.broadcaster.prune_closed(&RoomId::new(old_id.as_str())).await;
+                    }
+                    let (tx, rx) =
+                        tokio::sync::mpsc::channel(crate::broadcaster::SUBSCRIBER_CHANNEL_CAPACITY);
+                    state
+                        .broadcaster
+                        .subscribe(RoomId::new(game_id.as_str()), Subscriber::new(tx))
+                        .await;
+                    // 同じく subscribe 後に TOCTOU 再確認。
+                    let still_exists = subscribe_still_registered(&state, &game_id).await;
+                    if !still_exists {
+                        drop(rx);
+                        state.broadcaster.prune_closed(&RoomId::new(game_id.as_str())).await;
+                        Some(vec![
+                            CsaLine::new(format!("##[MONITOR2] NOT_FOUND {game_id}")),
+                            CsaLine::new("##[MONITOR2] END"),
+                        ])
+                    } else {
+                        monitor_rx = Some((game_id.clone(), rx));
+                        Some(vec![
+                            CsaLine::new(format!("##[MONITOR2] BEGIN {game_id}")),
+                            CsaLine::new("##[MONITOR2] END"),
+                        ])
+                    }
+                }
+            }
+            ClientCommand::Monitor2Off { game_id } => {
+                // 現在購読中かつ game_id が一致する場合のみ解除する。別 game_id
+                // を指定された場合は no-op で OK を返す（CSA 仕様の寛容性を優先）。
+                if let Some((active_id, _)) = &monitor_rx
+                    && *active_id == game_id
+                {
+                    monitor_rx = None;
+                    // 旧 rx が drop された時点で tx は is_closed になる。broadcast
+                    // が起きない idle room でも tx が貯まらないよう、ここで明示的に
+                    // prune する (Codex review PR #469 P2)。
+                    state.broadcaster.prune_closed(&RoomId::new(game_id.as_str())).await;
+                }
+                Some(vec![
+                    CsaLine::new(format!("##[MONITOR2OFF] {game_id}")),
+                    CsaLine::new("##[MONITOR2OFF] END"),
+                ])
+            }
+            ClientCommand::Chat { message } => {
+                // 現在観戦中のルーム（`monitor_rx` が握っている game_id）に対し、
+                // `##[CHAT] <handle>: <message>` 形式で同ルームの全観戦者へ broadcast
+                // する。対局者 (drive 側 transport) は本 broadcaster では購読しない
+                // 構成なので現時点では受信しない (制約)。対局者側への配信は後続タスク
+                // で `broadcast_room` の配線を見直す際に追加する。
+                //
+                // 観戦中でない CHAT は NOT_MONITORING で弾く。対局参加前の x1 クライアント
+                // が部屋未指定で CHAT を投げた場合のフォールバック経路。
+                if let Some((active_id, _)) = &monitor_rx {
+                    let line = CsaLine::new(format!("##[CHAT] {handle}: {message}"));
+                    // CHAT broadcast 自体は送信側 (本クライアント) 自身にも echo
+                    // として届く (broadcaster に自身が subscribe している)。これは
+                    // CSA 仕様の通例で、送信確認を兼ねる。
+                    let _ = state
+                        .broadcaster
+                        .broadcast_tag(
+                            &RoomId::new(active_id.as_str()),
+                            BroadcastTag::Spectator,
+                            &line,
+                        )
+                        .await;
+                    Some(vec![
+                        CsaLine::new(format!("##[CHAT] OK {active_id}")),
+                        CsaLine::new("##[CHAT] END"),
+                    ])
+                } else {
+                    Some(vec![
+                        CsaLine::new("##[CHAT] NOT_MONITORING"),
+                        CsaLine::new("##[CHAT] END"),
+                    ])
+                }
+            }
+            ClientCommand::SetBuoy {
+                game_name: buoy_name,
+                moves,
+                count,
+            } => {
+                // 管理者のみ許可。`admin_handles` リストに現ハンドルが含まれるか確認。
+                // 配列 (Vec) 線形走査だが admin は通常数件なので実運用で問題にならない。
+                if !state.config.admin_handles.iter().any(|h| h == &handle) {
+                    Some(vec![
+                        CsaLine::new(format!("##[SETBUOY] PERMISSION_DENIED {buoy_name}")),
+                        CsaLine::new("##[SETBUOY] END"),
+                    ])
+                } else {
+                    match state.buoy_storage.set(&buoy_name, moves, count).await {
+                        Ok(()) => Some(vec![
+                            CsaLine::new(format!("##[SETBUOY] OK {buoy_name} {count}")),
+                            CsaLine::new("##[SETBUOY] END"),
+                        ]),
+                        Err(e) => Some(vec![
+                            CsaLine::new(format!("##[SETBUOY] ERROR {buoy_name} {e}")),
+                            CsaLine::new("##[SETBUOY] END"),
+                        ]),
+                    }
+                }
+            }
+            ClientCommand::DeleteBuoy {
+                game_name: buoy_name,
+            } => {
+                if !state.config.admin_handles.iter().any(|h| h == &handle) {
+                    Some(vec![
+                        CsaLine::new(format!("##[DELETEBUOY] PERMISSION_DENIED {buoy_name}")),
+                        CsaLine::new("##[DELETEBUOY] END"),
+                    ])
+                } else {
+                    match state.buoy_storage.delete(&buoy_name).await {
+                        Ok(()) => Some(vec![
+                            CsaLine::new(format!("##[DELETEBUOY] OK {buoy_name}")),
+                            CsaLine::new("##[DELETEBUOY] END"),
+                        ]),
+                        Err(e) => Some(vec![
+                            CsaLine::new(format!("##[DELETEBUOY] ERROR {buoy_name} {e}")),
+                            CsaLine::new("##[DELETEBUOY] END"),
+                        ]),
+                    }
+                }
+            }
+            ClientCommand::GetBuoyCount {
+                game_name: buoy_name,
+            } => {
+                // 参照系なので権限チェックなし (全クライアントが参照可能)。
+                match state.buoy_storage.count(&buoy_name).await {
+                    Ok(Some(n)) => Some(vec![
+                        CsaLine::new(format!("##[GETBUOYCOUNT] {buoy_name} {n}")),
+                        CsaLine::new("##[GETBUOYCOUNT] END"),
+                    ]),
+                    Ok(None) => Some(vec![
+                        CsaLine::new(format!("##[GETBUOYCOUNT] NOT_FOUND {buoy_name}")),
+                        CsaLine::new("##[GETBUOYCOUNT] END"),
+                    ]),
+                    Err(e) => Some(vec![
+                        CsaLine::new(format!("##[GETBUOYCOUNT] ERROR {buoy_name} {e}")),
+                        CsaLine::new("##[GETBUOYCOUNT] END"),
+                    ]),
+                }
+            }
             _ => None,
         };
         let Some(lines) = replies else {
             // 未サポートの x1 コマンド / 対局中コマンドは切断扱い（未配線の
-            // `%%MONITOR2ON` / `%%CHAT` / `%%SETBUOY` 等は後続コミットで追加する）。
+            // `%%FORK` は後続タスクで追加する）。
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
             break 'outer WaiterOutcome::DisconnectedFromPool;
@@ -604,6 +948,23 @@ enum WaiterOutcome {
     Aborted,
     /// 対局前に切断を検知した（pool + league から除去する）。
     DisconnectedFromPool,
+}
+
+/// `%%MONITOR2ON` の TOCTOU 再確認用ヘルパ。`subscribe` 完了後に game_id が
+/// まだ `GameRegistry` に存在するかを確認する。
+///
+/// `subscribe` の前後は drive 側の `unregister + clear_room` に対して非原子的で、
+/// subscribe 完了時点でゲームが既に終局している可能性がある。その場合 stale
+/// なエントリを broadcaster に残さないよう、呼び出し側で drop + prune して
+/// NOT_FOUND を返す (Codex review PR #469 3rd round P2)。
+async fn subscribe_still_registered<R, K, P>(state: &SharedState<R, K, P>, game_id: &GameId) -> bool
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let games = state.games.lock().await;
+    games.get(game_id).is_some()
 }
 
 /// drive 側タスクのメインループ。両 transport を所有して 1 対局を完了まで運ぶ。
@@ -704,14 +1065,29 @@ where
 {
     // Game_Summary を両対局者に送信。
     let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
+    // `initial_sfen` が設定されていればそれから派生、無ければ平手固定のブロックを使う。
+    // GameRoom / Game_Summary / 棋譜 の三点一致契約 (GameRoomConfig::initial_sfen の
+    // doc を参照) を満たすため、同じ SFEN を複数入口で再利用する。
+    let (position_section, to_move) = match &state.config.initial_sfen {
+        Some(sfen) => {
+            let section = position_section_from_sfen(sfen).map_err(|e| {
+                ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
+            })?;
+            let side = side_to_move_from_sfen(sfen).map_err(|e| {
+                ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
+            })?;
+            (section, side)
+        }
+        None => (standard_initial_position_block(), Color::Black),
+    };
     let summary = GameSummaryBuilder {
         game_id: game_id.clone(),
         black: matched.black.clone(),
         white: matched.white.clone(),
         time_section: clock.format_summary(),
-        position_section: standard_initial_position_block(),
+        position_section,
         rematch_on_draw: false,
-        to_move: Color::Black,
+        to_move,
         declaration: "Jishogi 1.1".to_owned(),
     };
     send_multiline(black_transport, &summary.build_for(Color::Black)).await?;
@@ -945,8 +1321,9 @@ where
         max_moves: state.config.max_moves,
         time_margin_ms: state.config.time_margin_ms,
         entering_king_rule: state.config.entering_king_rule,
+        initial_sfen: state.config.initial_sfen.clone(),
     };
-    let mut room = GameRoom::new(cfg, Box::new(clock));
+    let mut room = GameRoom::new(cfg, Box::new(clock))?;
 
     let start_instant = tokio::time::Instant::now();
     let now_ms =
@@ -1096,6 +1473,16 @@ where
     P: PasswordStore + 'static,
 {
     let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
+    // initial_sfen が設定されていれば棋譜の `initial_position` も同じ SFEN から派生。
+    // 設定されていない (= 平手) 場合は既存の CSA shorthand `PI\n+\n` を保つ。
+    // 長期的には常に `BEGIN Position` 形式に統一しても良いが、shogi-server 互換
+    // バッチへの影響を避けるため hirate のみ現行踏襲 (deferral)。
+    let initial_position = match &state.config.initial_sfen {
+        Some(sfen) => position_section_from_sfen(sfen).map_err(|e| {
+            ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
+        })?,
+        None => "PI\n+\n".to_owned(),
+    };
     let record = KifuRecord {
         game_id: game_id.clone(),
         black: matched.black.clone(),
@@ -1104,7 +1491,7 @@ where
         end_time: end_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         event: "rshogi-csa-server-tcp".to_owned(),
         time_section: clock.format_summary(),
-        initial_position: "PI\n+\n".to_owned(),
+        initial_position,
         moves: moves.to_vec(),
         result: result.clone(),
     };
@@ -1141,6 +1528,7 @@ where
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
+    let buoy_storage = rshogi_csa_server::FileBuoyStorage::new(config.kifu_topdir.clone());
     SharedState {
         config,
         league: Mutex::new(League::new()),
@@ -1155,6 +1543,7 @@ where
         active_games: Notify::new(),
         game_counter: Mutex::new(0),
         started_at: chrono::Utc::now(),
+        buoy_storage,
     }
 }
 

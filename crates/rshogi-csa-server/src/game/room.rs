@@ -111,6 +111,17 @@ pub struct GameRoomConfig {
     pub time_margin_ms: u64,
     /// `%KACHI` 判定に使う入玉ルール（既定は 24 点法 = `Point24`）。
     pub entering_king_rule: EnteringKingRule,
+    /// 対局の開始局面を表す SFEN。`None` なら平手（`SFEN_HIRATE`）を使う。
+    ///
+    /// 駒落ち・ブイ・フォーク対局では本フィールドを `Some(sfen)` で渡す。
+    /// **契約**: Game_Summary の `position_section` / `to_move` と、棋譜の
+    /// `initial_position` は本フィールドから派生させること（三点一致）。
+    /// フロントエンドはこの SFEN を
+    /// [`crate::protocol::summary::position_section_from_sfen`] に渡して
+    /// `position_section` を取得し、同じ関数の出力をそのまま棋譜の
+    /// `initial_position` にも使う。手番は SFEN 由来の `side_to_move` を
+    /// `to_move` にセットする。これにより 3 経路間で局面が食い違う事故を防ぐ。
+    pub initial_sfen: Option<String>,
 }
 
 impl fmt::Debug for GameRoomConfig {
@@ -122,6 +133,7 @@ impl fmt::Debug for GameRoomConfig {
             .field("max_moves", &self.max_moves)
             .field("time_margin_ms", &self.time_margin_ms)
             .field("entering_king_rule", &self.entering_king_rule)
+            .field("initial_sfen", &self.initial_sfen)
             .finish()
     }
 }
@@ -150,18 +162,35 @@ impl fmt::Debug for GameRoom {
 }
 
 impl GameRoom {
-    /// 平手初期局面で対局ルームを構築する。
+    /// `GameRoomConfig::initial_sfen` に従って対局ルームを構築する。
     ///
-    /// 駒落ち・フォーク対局は本コンストラクタとは別の経路で足す（まだ未実装）。
-    /// 開始局面を設定化するには、盤面を Game_Summary の `position_section` と
-    /// `to_move` に反映する棋譜側の配線も同時に必要なため、本 API は平手固定に
-    /// 留めておく。
-    pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Self {
+    /// - `initial_sfen = None`: 平手 (`SFEN_HIRATE`) で初期化。SFEN_HIRATE は
+    ///   const で `set_sfen` が失敗するのは rshogi-core 側のバグなので、この
+    ///   パスは内部で `expect` する。
+    /// - `initial_sfen = Some(sfen)`: 渡された SFEN で `Position::set_sfen`。
+    ///   SFEN 不正時は `Err(ServerError::Protocol(Malformed))` を返し、
+    ///   呼び出し側が適切に拒否 / ログ出力できるようにする (Codex review
+    ///   PR #470 4th round P2)。プロセス全体 / DO を panic で落とさないため
+    ///   の設計。
+    ///
+    /// Game_Summary の `position_section` / `to_move` と棋譜の `initial_position`
+    /// は同一 SFEN から派生させる契約なので、呼び出し側は同じ `initial_sfen` を
+    /// GameRoom / GameSummaryBuilder / KifuRecord に横断して渡すこと。
+    pub fn new(config: GameRoomConfig, clock: Box<dyn TimeClock>) -> Result<Self, ServerError> {
         let mut pos = Position::new();
-        // SFEN_HIRATE は const。set_sfen が失敗するのは rshogi-core 側のバグ。
-        pos.set_sfen(SFEN_HIRATE).expect("SFEN_HIRATE must be valid");
+        match config.initial_sfen.as_deref() {
+            Some(sfen) => pos.set_sfen(sfen).map_err(|e| {
+                ServerError::Protocol(ProtocolError::Malformed(format!(
+                    "invalid initial_sfen {sfen:?}: {e:?}"
+                )))
+            })?,
+            None => {
+                // 平手は const。失敗するのはコアのバグなので expect で落としていい。
+                pos.set_sfen(SFEN_HIRATE).expect("SFEN_HIRATE must be valid");
+            }
+        }
         let validator = Validator::new(config.entering_king_rule);
-        Self {
+        Ok(Self {
             config,
             pos,
             clock,
@@ -169,7 +198,7 @@ impl GameRoom {
             status: GameStatus::AgreeWaiting,
             moves_played: 0,
             turn_started_at_ms: None,
-        }
+        })
     }
 
     /// 現在の状態。
@@ -455,8 +484,14 @@ impl GameRoom {
                 });
             }
             RepetitionVerdict::OuteSennichiteLose => {
-                // 連続王手していた側（=直前の手番=from）が反則負け。
-                let mut result = self.finish(GameResult::OuteSennichite { loser: from });
+                // `OuteSennichiteLose` ⇔ `Position::repetition_state` の `Lose` で、
+                // 「手番側 (= side-to-move after the last move = from.opposite()) が
+                // 連続王手していた側で反則負け」を意味する。循環の最終手 (from) が
+                // 非王手 (=受け手の escape) で閉じ、from.opposite() がサイクル中ずっと
+                // 王手を連続して掛けていた場合に発火する。従って敗者は from.opposite()。
+                let mut result = self.finish(GameResult::OuteSennichite {
+                    loser: from.opposite(),
+                });
                 broadcasts.append(&mut result.broadcasts);
                 return Ok(HandleResult {
                     outcome: result.outcome,
@@ -464,10 +499,10 @@ impl GameRoom {
                 });
             }
             RepetitionVerdict::OuteSennichiteWin => {
-                // 連続王手されていた側（直前の手番）が勝ち＝相手（手番外）の反則負け。
-                let mut result = self.finish(GameResult::OuteSennichite {
-                    loser: from.opposite(),
-                });
+                // `OuteSennichiteWin` ⇔ `Position::repetition_state` の `Win` で、
+                // 「手番側 (from.opposite()) が勝ち」= 直前に指した from が連続王手
+                // していた側で反則負け。循環の最終手が from による王手で閉じた場合に発火。
+                let mut result = self.finish(GameResult::OuteSennichite { loser: from });
                 broadcasts.append(&mut result.broadcasts);
                 return Ok(HandleResult {
                     outcome: result.outcome,
@@ -616,9 +651,30 @@ mod tests {
             max_moves: 256,
             time_margin_ms: 0,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        GameRoom::new(config, clock)
+        GameRoom::new(config, clock).expect("valid test config")
+    }
+
+    /// 任意 SFEN から対局を開始するためのテスト専用 helper。
+    ///
+    /// `GameRoomConfig::initial_sfen` 契約の配線が完了したので、テストは
+    /// 本番 API 経由で任意 SFEN を流し込める。private フィールドを触る旧方式は
+    /// 廃止して、`config.initial_sfen = Some(sfen)` をそのまま `GameRoom::new`
+    /// に委ねる形に書き換えた。
+    fn room_with_sfen(rule: EnteringKingRule, sfen: &str) -> GameRoom {
+        let config = GameRoomConfig {
+            game_id: GameId::new("20140101120000"),
+            black: PlayerName::new("alice"),
+            white: PlayerName::new("bob"),
+            max_moves: 256,
+            time_margin_ms: 0,
+            entering_king_rule: rule,
+            initial_sfen: Some(sfen.to_owned()),
+        };
+        let clock = Box::new(SecondsCountdownClock::new(60, 5));
+        GameRoom::new(config, clock).expect("valid test config")
     }
 
     fn line(s: &str) -> CsaLine {
@@ -739,9 +795,10 @@ mod tests {
             max_moves: 256,
             time_margin_ms: 1_500,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 0));
-        let mut room = GameRoom::new(config, clock);
+        let mut room = GameRoom::new(config, clock).expect("valid test config");
         agree_both(&mut room);
         // 経過 4000ms, margin 1500ms → consume(2500ms)。整数秒切り捨てで 2 秒消費。
         let r = room.handle_line(Color::Black, &line("+7776FU"), 4_000).unwrap();
@@ -758,9 +815,10 @@ mod tests {
             max_moves: 256,
             time_margin_ms,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(total_sec, byoyomi_sec));
-        GameRoom::new(config, clock)
+        GameRoom::new(config, clock).expect("valid test config")
     }
 
     #[test]
@@ -1004,9 +1062,10 @@ mod tests {
             max_moves: 2,
             time_margin_ms: 0,
             entering_king_rule: EnteringKingRule::Point24,
+            initial_sfen: None,
         };
         let clock = Box::new(SecondsCountdownClock::new(60, 5));
-        let mut room = GameRoom::new(config, clock);
+        let mut room = GameRoom::new(config, clock).expect("valid test config");
         agree_both(&mut room);
         let _ = room.handle_line(Color::Black, &line("+7776FU"), 0).unwrap();
         let r = room.handle_line(Color::White, &line("-3334FU"), 0).unwrap();
@@ -1019,5 +1078,131 @@ mod tests {
         assert_eq!(r.broadcasts[0].line.as_str(), "-3334FU,T0");
         assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#MAX_MOVES"));
         assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#CENSORED"));
+    }
+
+    #[test]
+    fn kachi_accepted_from_point27_sfen_ends_with_jishogi() {
+        // Validator の `evaluate_kachi_accepted_for_27pt_position` と同じ入玉局面を流用。
+        // 先手が 28 点を満たしており、両者 AGREE → 先手 %KACHI → `GameResult::Kachi` 確定。
+        let mut room =
+            room_with_sfen(EnteringKingRule::Point27, "LNSGKGSNL/4BR3/9/9/9/9/9/9/4k4 b RB 1");
+        agree_both(&mut room);
+        let r = room.handle_line(Color::Black, &line("%KACHI"), 0).unwrap();
+        match &r.outcome {
+            HandleOutcome::GameEnded(GameResult::Kachi {
+                winner: Color::Black,
+            }) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        // `#JISHOGI` + `#WIN/#LOSE` の 3 宛先 × 2 行 = 6 行。
+        assert_eq!(r.broadcasts.len(), 6);
+        assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#JISHOGI"));
+        assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#WIN"));
+        assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#LOSE"));
+    }
+
+    #[test]
+    fn uchifuzume_pawn_drop_ends_with_illegal_move_reason_uchifuzume() {
+        // Validator の `validate_move_detects_uchifuzume` と同じ盤面:
+        // 後手玉 1 一、先手 と 1 三、先手金 3 二、先手玉 5 九、手駒に歩。
+        // 先手 +0012FU で打ち歩詰 → `IllegalMove{reason: Uchifuzume}` が確定する。
+        let mut room = room_with_sfen(EnteringKingRule::Point24, "8k/6G2/8+P/9/9/9/9/9/4K4 b P 1");
+        agree_both(&mut room);
+        let r = room.handle_line(Color::Black, &line("+0012FU"), 0).unwrap();
+        match &r.outcome {
+            HandleOutcome::GameEnded(GameResult::IllegalMove {
+                loser: Color::Black,
+                reason: IllegalReason::Uchifuzume,
+            }) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(r.broadcasts.iter().any(|b| b.line.as_str() == "#ILLEGAL_MOVE"));
+    }
+
+    #[test]
+    fn sennichite_ends_game_after_12_ply_gold_dance() {
+        // 平手初期局面で左金を 4 九 ↔ 4 八 / 4 一 ↔ 4 二 と循環させて 3 サイクル
+        // (12 手) 経過 → 初期局面 4 回目の到達 → `GameResult::Sennichite`。
+        let mut room = make_room();
+        agree_both(&mut room);
+        let cycle = [
+            (Color::Black, "+4948KI"),
+            (Color::White, "-4142KI"),
+            (Color::Black, "+4849KI"),
+            (Color::White, "-4241KI"),
+        ];
+        for _ in 0..2 {
+            for (c, tok) in &cycle {
+                let r = room.handle_line(*c, &line(tok), 0).unwrap();
+                assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+            }
+        }
+        for (c, tok) in cycle.iter().take(3) {
+            let r = room.handle_line(*c, &line(tok), 0).unwrap();
+            assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+        }
+        // 3 サイクル目の最終手 (-4241KI) で 4 回目の初期局面到達 → Sennichite。
+        let last = room.handle_line(Color::White, &line("-4241KI"), 0).unwrap();
+        match &last.outcome {
+            HandleOutcome::GameEnded(GameResult::Sennichite) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(last.broadcasts.iter().any(|b| b.line.as_str() == "#SENNICHITE"));
+        assert!(last.broadcasts.iter().any(|b| b.line.as_str() == "#DRAW"));
+    }
+
+    #[test]
+    fn oute_sennichite_win_variant_loses_the_last_checker() {
+        // Win variant: 開始 SFEN で白が既に黒飛の王手下にある (side=W)。
+        // 4 手 1 サイクル (白退避 → 黒再王手 → 白退避 → 黒再王手) で開始 SFEN に復帰。
+        // 連続王手は反則行為なので 1 サイクルで反則確定 (競技将棋ルール準拠)。
+        // 循環最終手 (+4838HI) は黒の王手手なので from=Black、連続王手側の黒が敗者。
+        let mut room = room_with_sfen(EnteringKingRule::Point24, "9/6k2/9/9/9/9/9/6R2/K8 w - 1");
+        agree_both(&mut room);
+        let prefix = [
+            (Color::White, "-3242OU"),
+            (Color::Black, "+3848HI"),
+            (Color::White, "-4232OU"),
+        ];
+        for (c, tok) in &prefix {
+            let r = room.handle_line(*c, &line(tok), 0).unwrap();
+            assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+        }
+        let last = room.handle_line(Color::Black, &line("+4838HI"), 0).unwrap();
+        match &last.outcome {
+            HandleOutcome::GameEnded(GameResult::OuteSennichite {
+                loser: Color::Black,
+            }) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(last.broadcasts.iter().any(|b| b.line.as_str() == "#OUTE_SENNICHITE"));
+    }
+
+    #[test]
+    fn oute_sennichite_lose_variant_loses_the_perpetual_checker() {
+        // Lose variant: Win variant と駒群は同じだが、開始 SFEN を「白玉 4 二 退避済、
+        // 黒番で次の黒の手が王手」に寄せる (黒飛 3 八, 白玉 4 二, side=B, 非王手)。
+        // 4 手 1 サイクルで初期 SFEN 復帰。連続王手側 (Black = from.opposite()) が敗者。
+        // 最終手 (-3242OU) は白の退避手で非王手のため from=White、連続王手していた
+        // 黒が from.opposite()。
+        let mut room = room_with_sfen(EnteringKingRule::Point24, "9/5k3/9/9/9/9/9/6R2/K8 b - 1");
+        agree_both(&mut room);
+        let prefix = [
+            (Color::Black, "+3848HI"),
+            (Color::White, "-4232OU"),
+            (Color::Black, "+4838HI"),
+        ];
+        for (c, tok) in &prefix {
+            let r = room.handle_line(*c, &line(tok), 0).unwrap();
+            assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+        }
+        let last = room.handle_line(Color::White, &line("-3242OU"), 0).unwrap();
+        match &last.outcome {
+            HandleOutcome::GameEnded(GameResult::OuteSennichite {
+                loser: Color::Black,
+            }) => {}
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(last.broadcasts.iter().any(|b| b.line.as_str() == "#OUTE_SENNICHITE"));
     }
 }

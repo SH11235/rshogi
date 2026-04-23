@@ -126,6 +126,8 @@ async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
         agree_timeout: Duration::from_secs(30),
         x1_reply_write_timeout: Duration::from_secs(5),
         entering_king_rule: EnteringKingRule::Point24,
+        initial_sfen: None,
+        admin_handles: Vec::new(),
     };
     // bind_addr=:0 を使うため、先に手動で bind してから actual addr を取る必要がある。
     // ここでは ServerConfig を既定の :0 のまま build_state に渡し、run_server 内で
@@ -392,6 +394,8 @@ async fn spawn_server_with_agree_timeout(
         agree_timeout,
         x1_reply_write_timeout: Duration::from_secs(5),
         entering_king_rule: EnteringKingRule::Point24,
+        initial_sfen: None,
+        admin_handles: Vec::new(),
     };
     let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
     let actual_addr = probe.local_addr().unwrap();
@@ -705,6 +709,406 @@ fn waiter_disconnect_is_cleaned_up_and_allows_relogin() {
         send_line(&mut wa2, "LOGIN alice+g1+black pw").await;
         let resp = read_line_raw(&mut ra2).await.unwrap();
         assert_eq!(resp, "LOGIN:alice OK");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// alice / bob をマッチ成立させて AGREE まで進め、(reader_black, writer_black,
+/// reader_white, writer_white, game_id) を返すテストハーネス。
+/// 終局系 E2E テストで共通のセットアップを削減するため。
+async fn login_match_agree(
+    addr: std::net::SocketAddr,
+) -> (
+    BufReader<OwnedReadHalf>,
+    OwnedWriteHalf,
+    BufReader<OwnedReadHalf>,
+    OwnedWriteHalf,
+    String,
+) {
+    let (mut rb, mut wb) = connect(addr).await;
+    send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+    assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+    let (mut rw, mut ww) = connect(addr).await;
+    send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+    assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+    let _ = drain_game_summary(&mut rb).await;
+    let _ = drain_game_summary(&mut rw).await;
+    send_line(&mut wb, "AGREE").await;
+    send_line(&mut ww, "AGREE").await;
+    let start_b = read_line_raw(&mut rb).await.unwrap();
+    let _ = read_line_raw(&mut rw).await.unwrap();
+    let game_id = start_b.trim_start_matches("START:").to_owned();
+    (rb, wb, rw, ww, game_id)
+}
+
+#[test]
+fn kachi_on_initial_position_ends_as_illegal_kachi() {
+    // 平手初期局面で %KACHI を投げると 24 点不成立で `#ILLEGAL_MOVE` 終局。
+    // TCP 駆動系を通った終局メッセージが対局者双方に届くことを確認する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("kachi_rejected").await;
+        let (mut rb, mut wb, mut rw, _ww, _game_id) = login_match_agree(addr).await;
+        send_line(&mut wb, "%KACHI").await;
+        // 黒 (敗者側) は #ILLEGAL_MOVE + #LOSE。白 (勝者側) は #ILLEGAL_MOVE + #WIN。
+        let b_lines = read_until(&mut rb, "#LOSE").await;
+        assert!(b_lines.iter().any(|l| l == "#ILLEGAL_MOVE"));
+        let w_lines = read_until(&mut rw, "#WIN").await;
+        assert!(w_lines.iter().any(|l| l == "#ILLEGAL_MOVE"));
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn sennichite_broadcasts_draw_on_12_ply_gold_dance() {
+    // 平手から両者の左金を 4 九 ↔ 4 八 / 4 一 ↔ 4 二 と循環させて 3 サイクル (12 手)
+    // 経過で初期局面 4 回目の出現 → `#SENNICHITE` + `#DRAW` が双方の対局者に届く。
+    // TCP 層で千日手の通知が正しく fanout されることを E2E で検証する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("sennichite").await;
+        let (mut rb, mut wb, mut rw, mut ww, _game_id) = login_match_agree(addr).await;
+        // 3 サイクル (12 手) を淡々と送り出す。最終手以外は `,T0` broadcast が流れる。
+        let moves: &[(&str, bool)] = &[
+            ("+4948KI", true), // (token, is_black)
+            ("-4142KI", false),
+            ("+4849KI", true),
+            ("-4241KI", false),
+        ];
+        for _ in 0..2 {
+            for (tok, is_black) in moves {
+                if *is_black {
+                    send_line(&mut wb, tok).await;
+                } else {
+                    send_line(&mut ww, tok).await;
+                }
+                let expect = format!("{tok},T0");
+                let _ = read_until(&mut rb, &expect).await;
+                let _ = read_until(&mut rw, &expect).await;
+            }
+        }
+        // 3 サイクル目: 最終 (-4241KI) で千日手が確定する。最終手の放送と `#SENNICHITE`
+        // / `#DRAW` の両方を対局者双方で確認する。
+        for (tok, is_black) in moves.iter().take(3) {
+            if *is_black {
+                send_line(&mut wb, tok).await;
+            } else {
+                send_line(&mut ww, tok).await;
+            }
+            let expect = format!("{tok},T0");
+            let _ = read_until(&mut rb, &expect).await;
+            let _ = read_until(&mut rw, &expect).await;
+        }
+        send_line(&mut ww, "-4241KI").await;
+        let b_end = read_until(&mut rb, "#DRAW").await;
+        assert!(b_end.iter().any(|l| l == "#SENNICHITE"));
+        assert!(b_end.iter().any(|l| l == "-4241KI,T0"));
+        let w_end = read_until(&mut rw, "#DRAW").await;
+        assert!(w_end.iter().any(|l| l == "#SENNICHITE"));
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn monitor2_subscribes_and_receives_moves_and_chat() {
+    // x1 クライアント carol が `%%MONITOR2ON <game_id>` で対局に購読し、
+    // (a) 指し手 broadcast (`+7776FU,T0` 等) を受信する
+    // (b) `%%CHAT <msg>` で自身が送ったメッセージが自身に echo される
+    // (c) `%%MONITOR2OFF` で購読を解除する (以降の broadcast は届かない)
+    // を end-to-end で検証する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("monitor2").await;
+
+        // 対局セットアップ (alice vs bob)。white は対局中に指さないので writer は使わない。
+        let (mut rb, mut wb, mut rw, _ww, game_id) = login_match_agree(addr).await;
+
+        // 観戦者 carol は x1 で login。game_name は対局と同じにする必要は無い
+        // (異なる game_name なので直接マッチは成立せず、x1 waiter として留まる)。
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+
+        // `%%MONITOR2ON <game_id>` → `##[MONITOR2] BEGIN <game_id>` + END。
+        send_line(&mut wc, &format!("%%MONITOR2ON {game_id}")).await;
+        let begin = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(begin, format!("##[MONITOR2] BEGIN {game_id}"));
+        let end = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(end, "##[MONITOR2] END");
+
+        // 対局者が着手すると、broadcast (Spectators 宛て) で observer にも届く。
+        send_line(&mut wb, "+7776FU").await;
+        let _ = read_until(&mut rb, "+7776FU,T0").await;
+        let _ = read_until(&mut rw, "+7776FU,T0").await;
+        // observer は `+7776FU,T0` を受信する。
+        let observed = read_until(&mut rc, "+7776FU,T0").await;
+        assert!(observed.iter().any(|l| l == "+7776FU,T0"));
+
+        // `%%CHAT` → `##[CHAT] carol: hello` を observer 自身が echo 受信する
+        // (subscriber に自身が含まれる contract)。
+        send_line(&mut wc, "%%CHAT hello").await;
+        let mut saw_chat = false;
+        for _ in 0..10 {
+            let line = read_line_raw(&mut rc).await.unwrap();
+            if line == "##[CHAT] carol: hello" {
+                saw_chat = true;
+                break;
+            }
+            if line == format!("##[CHAT] OK {game_id}") {
+                // OK 応答自体はあり得る順序。続きを読む。
+                continue;
+            }
+            if line == "##[CHAT] END" {
+                continue;
+            }
+        }
+        assert!(saw_chat, "did not observe CHAT echo");
+
+        // `%%MONITOR2OFF <game_id>` → `##[MONITOR2OFF] <game_id>` + END。
+        send_line(&mut wc, &format!("%%MONITOR2OFF {game_id}")).await;
+        let off = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(off, format!("##[MONITOR2OFF] {game_id}"));
+        let off_end = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(off_end, "##[MONITOR2OFF] END");
+
+        // observer を降りた後、対局者の次着手は broadcaster 経由では届かない
+        // (subscriber は drop されて prune される)。厳密な「届かない」検証は
+        // タイミング依存なので、後続手を送って observer の recv_line が短時間
+        // (100ms) 以内に何も届かない (あるいは subscriber が落ちて何か別行が
+        // 届く) ことで妥協する。本テストでは購読解除 reply の最終行まで
+        // 完了した時点を off 済みとみなし、以降は検証しない (スケジューラ
+        // タイミングで broadcaster の retain (prune) が未実行のまま 1 通だけ
+        // 取りこぼす可能性がある)。
+
+        // 対局を投了で畳んでテスト clean-up する。
+        send_line(&mut wb, "%TORYO").await;
+        let _ = read_until(&mut rb, "#LOSE").await;
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn monitor2_removes_subscriber_from_matchmaking_pool() {
+    // Codex review (PR #469 P1) の回帰: x1 waiter は LOGIN で一旦 WaitingPool に
+    // 入るが、`%%MONITOR2ON` が成立した時点で観戦者扱いになるため pool から
+    // 除外しなければならない。除外しないと、同一 game_name + 相補色で後続
+    // プレイヤが LOGIN したとき観戦者が対局者として選ばれてしまう。
+    //
+    // このテストでは alice/bob 対局進行中に carol が同じ `g1`+`black` で x1
+    // LOGIN (alice と同色 = bob と相補)。`%%MONITOR2ON` で observer 化した後、
+    // carol が `%%WHO` で自分の status を確認し `waiting:g1` が出ないことを
+    // 確認する (= pool から正しく抜けている)。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("monitor2_no_match").await;
+
+        // alice vs bob のメイン対局。
+        let (_rb, _wb, _rw, _ww, game_id) = login_match_agree(addr).await;
+
+        // carol が相補色候補として pool に入る (現時点では `waiting:g1`)。
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+g1+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+
+        // observer 化。pool から外れる。
+        send_line(&mut wc, &format!("%%MONITOR2ON {game_id}")).await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), format!("##[MONITOR2] BEGIN {game_id}"));
+        let _ = read_line_raw(&mut rc).await.unwrap(); // END
+
+        // %%WHO で carol の status を確認。observer 化済みなら `waiting:g1` は
+        // 出ないはず (pool から抜けているので League の GameWaiting 状態ではない)。
+        send_line(&mut wc, "%%WHO").await;
+        let mut lines = Vec::new();
+        for _ in 0..20 {
+            let l = read_line_raw(&mut rc).await.unwrap();
+            let end = l == "##[WHO] END";
+            lines.push(l);
+            if end {
+                break;
+            }
+        }
+        let has_waiting_carol = lines.iter().any(|l| l == "##[WHO] carol waiting:g1");
+        assert!(!has_waiting_carol, "observer carol must not appear as waiting: {lines:?}");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn chat_without_active_monitor_returns_not_monitoring() {
+    // x1 waiter が `%%MONITOR2ON` 前に `%%CHAT` を投げると `NOT_MONITORING` で
+    // 弾かれる。購読前の chat 経路を誤って開放していないことの回帰防止。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("chat_no_sub").await;
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+        send_line(&mut wc, "%%CHAT no-subscription-yet").await;
+        let resp = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(resp, "##[CHAT] NOT_MONITORING");
+        let end = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(end, "##[CHAT] END");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// 指定の admin ハンドル付きで TCP サーバーを起動するヘルパ。
+/// `%%SETBUOY` / `%%DELETEBUOY` テストで使う。
+async fn spawn_server_with_admin(
+    tag: &str,
+    admin_handles: Vec<String>,
+) -> (std::net::SocketAddr, PathBuf) {
+    let topdir = unique_topdir(tag);
+    let mut password_map = HashMap::new();
+    for h in ["alice", "bob", "carol", "admin"] {
+        password_map.insert(h.to_owned(), "pw".to_owned());
+    }
+    let rate_records: Vec<_> = ["alice", "bob", "carol", "admin"]
+        .iter()
+        .map(|n| PlayerRateRecord {
+            name: PlayerName::new(*n),
+            rate: 1500,
+            wins: 0,
+            losses: 0,
+            last_game_id: None,
+            last_modified: "2026-04-17T00:00:00Z".to_owned(),
+        })
+        .collect();
+    let rate_storage = support::MemRateStorage::new(rate_records);
+    let kifu_storage = FileKifuStorage::new(topdir.clone());
+    let config = ServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        kifu_topdir: topdir.clone(),
+        total_time_sec: 60,
+        byoyomi_sec: 10,
+        time_margin_ms: 1_500,
+        max_moves: 256,
+        login_timeout: Duration::from_secs(10),
+        agree_timeout: Duration::from_secs(30),
+        x1_reply_write_timeout: Duration::from_secs(5),
+        entering_king_rule: EnteringKingRule::Point24,
+        initial_sfen: None,
+        admin_handles,
+    };
+    let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
+    let actual_addr = probe.local_addr().unwrap();
+    drop(probe);
+    let mut config = config;
+    config.bind_addr = actual_addr;
+    let state = Rc::new(build_state(
+        config,
+        rate_storage,
+        kifu_storage,
+        InMemoryPasswordStore { map: password_map },
+        Box::new(PlainPasswordHasher::new()),
+        IpLoginRateLimiter::default_limits(),
+        InMemoryBroadcaster::new(),
+    ));
+    let _handle = run_server(state).await.expect("run_server");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (actual_addr, topdir)
+}
+
+#[test]
+fn setbuoy_from_admin_is_accepted_and_getbuoycount_reflects_state() {
+    // admin ハンドル (`admin`) が %%SETBUOY で buoy を登録し、同 client が
+    // %%GETBUOYCOUNT で登録件数を参照、続いて %%DELETEBUOY で削除して
+    // %%GETBUOYCOUNT が NOT_FOUND に戻ることを E2E で検証する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_with_admin("buoy_admin", vec!["admin".to_owned()]).await;
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN admin+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:admin OK");
+
+        // %%SETBUOY my-buoy +7776FU 3 → OK + END。
+        send_line(&mut wa, "%%SETBUOY my-buoy +7776FU 3").await;
+        let resp = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(resp, "##[SETBUOY] OK my-buoy 3");
+        let end = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(end, "##[SETBUOY] END");
+
+        // %%GETBUOYCOUNT my-buoy → 3 + END。
+        send_line(&mut wa, "%%GETBUOYCOUNT my-buoy").await;
+        let q = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(q, "##[GETBUOYCOUNT] my-buoy 3");
+        let _ = read_line_raw(&mut ra).await.unwrap();
+
+        // %%DELETEBUOY my-buoy → OK + END。
+        send_line(&mut wa, "%%DELETEBUOY my-buoy").await;
+        let d = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(d, "##[DELETEBUOY] OK my-buoy");
+        let _ = read_line_raw(&mut ra).await.unwrap();
+
+        // 削除後は NOT_FOUND。
+        send_line(&mut wa, "%%GETBUOYCOUNT my-buoy").await;
+        let q2 = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(q2, "##[GETBUOYCOUNT] NOT_FOUND my-buoy");
+        let _ = read_line_raw(&mut ra).await.unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn setbuoy_from_non_admin_is_permission_denied() {
+    // 非 admin (carol) が %%SETBUOY を投げると PERMISSION_DENIED で弾かれ、
+    // その後 %%GETBUOYCOUNT は NOT_FOUND (登録されていない)。
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_admin("buoy_non_admin", vec!["admin".to_owned()]).await;
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+
+        // `%%SETBUOY` は <game_name> <moves> <count> が最低 3 トークン必要なので、
+        // パース通過させる最小形で投げる (非 admin は SETBUOY のパスに入る前に
+        // permission で弾かれる)。
+        send_line(&mut wc, "%%SETBUOY bad-buoy +7776FU 3").await;
+        let resp = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(resp, "##[SETBUOY] PERMISSION_DENIED bad-buoy");
+        let _ = read_line_raw(&mut rc).await.unwrap();
+
+        // 登録されていないことを GETBUOYCOUNT で再確認 (参照は権限不要)。
+        send_line(&mut wc, "%%GETBUOYCOUNT bad-buoy").await;
+        let q = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(q, "##[GETBUOYCOUNT] NOT_FOUND bad-buoy");
+        let _ = read_line_raw(&mut rc).await.unwrap();
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn getbuoycount_for_unknown_buoy_returns_not_found_without_admin_check() {
+    // 参照系 (%%GETBUOYCOUNT) は admin 権限不要で全クライアントから使える。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_with_admin("buoy_anon_query", Vec::new()).await;
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN alice+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut wc, "%%GETBUOYCOUNT nothing-here").await;
+        let q = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(q, "##[GETBUOYCOUNT] NOT_FOUND nothing-here");
+        let _ = read_line_raw(&mut rc).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn monitor2_on_unknown_game_returns_not_found() {
+    // 存在しない game_id への `%%MONITOR2ON` は `NOT_FOUND` を返し、購読状態を
+    // 変更しない (broadcaster にも登録しない)。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("mon_unknown").await;
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+        send_line(&mut wc, "%%MONITOR2ON unknown-game").await;
+        let resp = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(resp, "##[MONITOR2] NOT_FOUND unknown-game");
+        let end = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(end, "##[MONITOR2] END");
+        // 購読していないので CHAT は弾かれるはず。
+        send_line(&mut wc, "%%CHAT hello").await;
+        let chat = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(chat, "##[CHAT] NOT_MONITORING");
+        let _ = read_line_raw(&mut rc).await.unwrap(); // END
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }

@@ -37,6 +37,8 @@ pub use record::kifu::{
     winner_of,
 };
 #[cfg(feature = "tokio-transport")]
+pub use storage::buoy::FileBuoyStorage;
+#[cfg(feature = "tokio-transport")]
 pub use storage::file::FileKifuStorage;
 pub use types::{
     AdminId, Color, CsaLine, CsaMoveToken, GameId, GameName, IpKey, PlayerName, ReconnectToken,
