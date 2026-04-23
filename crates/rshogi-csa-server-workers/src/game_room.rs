@@ -50,7 +50,8 @@ use rshogi_csa_server::protocol::summary::{
     GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
     standard_initial_position_block,
 };
-use rshogi_csa_server::types::{Color, CsaLine, GameId, PlayerName};
+use rshogi_csa_server::record::kifu::{fork_initial_sfen_from_kifu, initial_sfen_from_csa_moves};
+use rshogi_csa_server::types::{Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName};
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::{ConfigKeys, parse_clock_spec};
@@ -58,6 +59,7 @@ use crate::datetime::{format_csa_datetime, format_date_path};
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 use crate::spectator_control::{MonitorDecision, resolve_monitor_target};
 use crate::ws_route::{WsRoute, parse_ws_route};
+use crate::x1_paths::{buoy_object_key, default_fork_buoy_name, kifu_by_id_object_key};
 
 const DEFAULT_MAX_MOVES: u32 = 256;
 const DEFAULT_TIME_MARGIN_MS: u64 = 1000;
@@ -154,6 +156,21 @@ struct MoveRow {
     color: String,
     line: String,
     at_ms: i64,
+}
+
+/// R2 上の buoy 保存フォーマット。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedBuoy {
+    moves: Vec<String>,
+    remaining: u32,
+    #[serde(default)]
+    initial_sfen: Option<String>,
+}
+
+enum BuoyReservation {
+    Missing,
+    Reserved(Option<String>),
+    Exhausted,
 }
 
 /// 1 対局分の Durable Object。
@@ -403,6 +420,15 @@ impl GameRoom {
         let game_id = format!("{room_id}-{started}");
         let clock_spec = load_clock_spec_from_env(&self.env)?;
         let (main_time_sec, byoyomi_sec) = legacy_clock_fields(&clock_spec);
+        let initial_sfen =
+            match self.reserve_initial_sfen_from_buoy(&GameName::new(game_name)).await? {
+                BuoyReservation::Missing => None,
+                BuoyReservation::Reserved(initial_sfen) => initial_sfen,
+                BuoyReservation::Exhausted => {
+                    console_log!("[GameRoom] buoy '{game_name}' exhausted; match start deferred");
+                    return Ok(());
+                }
+            };
 
         let cfg = PersistedConfig {
             game_id: game_id.clone(),
@@ -416,10 +442,7 @@ impl GameRoom {
             time_margin_ms: DEFAULT_TIME_MARGIN_MS,
             matched_at_ms: started,
             play_started_at_ms: None,
-            // `%%FORK` / buoy 成立経路は未配線のため現時点では常に平手で開始する。
-            // 将来 buoy / fork 経由でここに SFEN が入った場合、cold start 復元も
-            // 同じ SFEN から立ち上がる (PersistedConfig 経由で永続化しているため)。
-            initial_sfen: None,
+            initial_sfen,
         };
         self.state.storage().put(KEY_CONFIG, &cfg).await?;
 
@@ -493,12 +516,13 @@ impl GameRoom {
         let now = self.now_ms();
         let color = role.to_core();
         let csa = CsaLine::new(line);
-        if let Ok(ClientCommand::Chat { message }) = parse_command(&csa) {
-            self.relay_chat(handle, &message).await?;
-            let monitor_id = self.current_monitor_id().await?;
-            send_line(ws, &format!("##[CHAT] OK {monitor_id}"))?;
-            send_line(ws, "##[CHAT] END")?;
-            return Ok(());
+        if let Ok(cmd) = parse_command(&csa) {
+            if let Some(replies) = self.handle_player_control_command(handle, cmd).await? {
+                for out in replies {
+                    send_line(ws, &out)?;
+                }
+                return Ok(());
+            }
         }
 
         let result = {
@@ -577,6 +601,206 @@ impl GameRoom {
             }
             _ => Ok(()),
         }
+    }
+
+    /// プレイヤー接続から受け付ける制御系コマンドを処理する。
+    ///
+    /// `Some(replies)` を返した場合は、呼び出し側が返信行を送って通常の
+    /// `CoreRoom::handle_line` 経路をスキップする。
+    async fn handle_player_control_command(
+        &self,
+        handle: &str,
+        cmd: ClientCommand,
+    ) -> Result<Option<Vec<String>>> {
+        match cmd {
+            ClientCommand::Chat { message } => {
+                self.relay_chat(handle, &message).await?;
+                let monitor_id = self.current_monitor_id().await?;
+                Ok(Some(vec![
+                    format!("##[CHAT] OK {monitor_id}"),
+                    "##[CHAT] END".to_owned(),
+                ]))
+            }
+            ClientCommand::SetBuoy {
+                game_name,
+                moves,
+                count,
+            } => {
+                if !self.is_admin_handle(handle) {
+                    return Ok(Some(vec![
+                        format!("##[SETBUOY] PERMISSION_DENIED {game_name}"),
+                        "##[SETBUOY] END".to_owned(),
+                    ]));
+                }
+                let derived = match initial_sfen_from_csa_moves(&moves) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Ok(Some(vec![
+                            format!("##[SETBUOY] ERROR {game_name} {e}"),
+                            "##[SETBUOY] END".to_owned(),
+                        ]));
+                    }
+                };
+                let doc = PersistedBuoy {
+                    moves: moves.into_iter().map(|m| m.as_str().to_owned()).collect(),
+                    remaining: count,
+                    initial_sfen: Some(derived),
+                };
+                if let Err(e) = self.store_buoy(&game_name, &doc).await {
+                    return Ok(Some(vec![
+                        format!("##[SETBUOY] ERROR {game_name} {e}"),
+                        "##[SETBUOY] END".to_owned(),
+                    ]));
+                }
+                Ok(Some(vec![
+                    format!("##[SETBUOY] OK {game_name} {count}"),
+                    "##[SETBUOY] END".to_owned(),
+                ]))
+            }
+            ClientCommand::DeleteBuoy { game_name } => {
+                if !self.is_admin_handle(handle) {
+                    return Ok(Some(vec![
+                        format!("##[DELETEBUOY] PERMISSION_DENIED {game_name}"),
+                        "##[DELETEBUOY] END".to_owned(),
+                    ]));
+                }
+                if let Err(e) = self.delete_buoy(&game_name).await {
+                    return Ok(Some(vec![
+                        format!("##[DELETEBUOY] ERROR {game_name} {e}"),
+                        "##[DELETEBUOY] END".to_owned(),
+                    ]));
+                }
+                Ok(Some(vec![
+                    format!("##[DELETEBUOY] OK {game_name}"),
+                    "##[DELETEBUOY] END".to_owned(),
+                ]))
+            }
+            ClientCommand::GetBuoyCount { game_name } => match self.load_buoy(&game_name).await? {
+                Some(doc) => Ok(Some(vec![
+                    format!("##[GETBUOYCOUNT] {game_name} {}", doc.remaining),
+                    "##[GETBUOYCOUNT] END".to_owned(),
+                ])),
+                None => Ok(Some(vec![
+                    format!("##[GETBUOYCOUNT] NOT_FOUND {game_name}"),
+                    "##[GETBUOYCOUNT] END".to_owned(),
+                ])),
+            },
+            ClientCommand::Fork {
+                source_game,
+                new_buoy,
+                nth_move,
+            } => {
+                let buoy_name = new_buoy.unwrap_or_else(|| {
+                    GameName::new(default_fork_buoy_name(source_game.as_str(), nth_move))
+                });
+                let Some(csa_v2) = self.load_kifu_by_game_id(&source_game).await? else {
+                    return Ok(Some(vec![
+                        format!("##[FORK] NOT_FOUND {source_game}"),
+                        "##[FORK] END".to_owned(),
+                    ]));
+                };
+                let (initial_sfen, applied_moves) =
+                    match fork_initial_sfen_from_kifu(&csa_v2, nth_move) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Ok(Some(vec![
+                                format!("##[FORK] ERROR {buoy_name} {e}"),
+                                "##[FORK] END".to_owned(),
+                            ]));
+                        }
+                    };
+                let doc = PersistedBuoy {
+                    moves: Vec::new(),
+                    remaining: 1,
+                    initial_sfen: Some(initial_sfen),
+                };
+                if let Err(e) = self.store_buoy(&buoy_name, &doc).await {
+                    return Ok(Some(vec![
+                        format!("##[FORK] ERROR {buoy_name} {e}"),
+                        "##[FORK] END".to_owned(),
+                    ]));
+                }
+                Ok(Some(vec![
+                    format!("##[FORK] OK {buoy_name} {applied_moves}"),
+                    "##[FORK] END".to_owned(),
+                ]))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn is_admin_handle(&self, handle: &str) -> bool {
+        let configured = self.env.var(ConfigKeys::ADMIN_HANDLE).ok().map(|v| v.to_string());
+        configured
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some_and(|admin| admin == handle)
+    }
+
+    async fn reserve_initial_sfen_from_buoy(
+        &self,
+        game_name: &GameName,
+    ) -> Result<BuoyReservation> {
+        let Some(mut buoy) = self.load_buoy(game_name).await? else {
+            return Ok(BuoyReservation::Missing);
+        };
+        if buoy.remaining == 0 {
+            return Ok(BuoyReservation::Exhausted);
+        }
+        let reserved_initial_sfen = match buoy.initial_sfen.as_ref() {
+            Some(sfen) => Some(sfen.clone()),
+            None => {
+                let moves: Vec<CsaMoveToken> =
+                    buoy.moves.iter().map(|mv| CsaMoveToken::new(mv.as_str())).collect();
+                Some(initial_sfen_from_csa_moves(&moves).map_err(Error::RustError)?)
+            }
+        };
+        buoy.remaining -= 1;
+        self.store_buoy(game_name, &buoy).await?;
+        Ok(BuoyReservation::Reserved(reserved_initial_sfen))
+    }
+
+    async fn load_kifu_by_game_id(&self, game_id: &GameId) -> Result<Option<String>> {
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = kifu_by_id_object_key(game_id.as_str());
+        let Some(obj) = bucket.get(&key).execute().await? else {
+            return Ok(None);
+        };
+        let Some(body) = obj.body() else {
+            return Ok(None);
+        };
+        Ok(Some(body.text().await?))
+    }
+
+    async fn load_buoy(&self, game_name: &GameName) -> Result<Option<PersistedBuoy>> {
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = buoy_object_key(game_name.as_str());
+        let Some(obj) = bucket.get(&key).execute().await? else {
+            return Ok(None);
+        };
+        let Some(body) = obj.body() else {
+            return Ok(None);
+        };
+        let text = body.text().await?;
+        let doc = serde_json::from_str::<PersistedBuoy>(&text)
+            .map_err(|e| Error::RustError(format!("parse buoy json: {e}")))?;
+        Ok(Some(doc))
+    }
+
+    async fn store_buoy(&self, game_name: &GameName, doc: &PersistedBuoy) -> Result<()> {
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = buoy_object_key(game_name.as_str());
+        let payload = serde_json::to_vec(doc)
+            .map_err(|e| Error::RustError(format!("serialize buoy json: {e}")))?;
+        bucket.put(&key, payload).execute().await?;
+        Ok(())
+    }
+
+    async fn delete_buoy(&self, game_name: &GameName) -> Result<()> {
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = buoy_object_key(game_name.as_str());
+        bucket.delete(&key).await
     }
 
     /// 直前の `HandleOutcome` に応じて Alarm を張り替える。
@@ -743,9 +967,11 @@ impl GameRoom {
 
         let date_path = format_date_path(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
         let key = format!("{date_path}/{}.csa", cfg.game_id);
+        let by_id_key = kifu_by_id_object_key(&cfg.game_id);
 
         let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
         bucket.put(&key, text.as_bytes().to_vec()).execute().await?;
+        bucket.put(&by_id_key, text.as_bytes().to_vec()).execute().await?;
         console_log!("[GameRoom] kifu exported to R2 key='{key}'");
         Ok(())
     }

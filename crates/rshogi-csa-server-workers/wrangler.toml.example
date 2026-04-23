@@ -47,3 +47,5 @@ BYOYOMI_SEC = "10"
 # stopwatch 用（分）。CLOCK_KIND=stopwatch のときのみ使う。
 TOTAL_TIME_MIN = "10"
 BYOYOMI_MIN = "1"
+# `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル（LOGIN の handle 部分）。
+ADMIN_HANDLE = "admin"

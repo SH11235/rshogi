@@ -28,6 +28,8 @@ impl ConfigKeys {
     pub const TOTAL_TIME_MIN: &'static str = "TOTAL_TIME_MIN";
     /// StopWatch 用の秒読み（分）。
     pub const BYOYOMI_MIN: &'static str = "BYOYOMI_MIN";
+    /// 運営権限を持つハンドル名（`%%SETBUOY` / `%%DELETEBUOY`）。
+    pub const ADMIN_HANDLE: &'static str = "ADMIN_HANDLE";
 }
 
 /// Workers `[vars]` 文字列群から時計設定を解決する。

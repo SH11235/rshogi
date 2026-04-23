@@ -30,6 +30,7 @@ pub mod room_id;
 pub mod session_state;
 pub mod spectator_control;
 pub mod ws_route;
+pub mod x1_paths;
 
 #[cfg(target_arch = "wasm32")]
 mod game_room;
