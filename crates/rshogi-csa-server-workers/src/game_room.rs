@@ -39,7 +39,7 @@ use worker::{
 };
 
 use rshogi_core::types::EnteringKingRule;
-use rshogi_csa_server::game::clock::SecondsCountdownClock;
+use rshogi_csa_server::ClockSpec;
 use rshogi_csa_server::game::clock::TimeClock;
 use rshogi_csa_server::game::room::{
     BroadcastEntry, BroadcastTarget, GameRoom as CoreRoom, GameRoomConfig, HandleOutcome,
@@ -53,16 +53,12 @@ use rshogi_csa_server::protocol::summary::{
 use rshogi_csa_server::types::{Color, CsaLine, GameId, PlayerName};
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
-use crate::config::ConfigKeys;
+use crate::config::{ConfigKeys, parse_clock_spec};
 use crate::datetime::{format_csa_datetime, format_date_path};
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 use crate::spectator_control::{MonitorDecision, resolve_monitor_target};
 use crate::ws_route::{WsRoute, parse_ws_route};
 
-/// 時計既定値 (Floodgate 600-10 互換)。実運用で可変にする必要が出たら
-/// `PersistedConfig` を受け取る構成に切り替える。
-const DEFAULT_MAIN_TIME_SEC: u32 = 600;
-const DEFAULT_BYOYOMI_SEC: u32 = 10;
 const DEFAULT_MAX_MOVES: u32 = 256;
 const DEFAULT_TIME_MARGIN_MS: u64 = 1000;
 
@@ -89,6 +85,23 @@ const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
 
+fn legacy_clock_fields(clock: &ClockSpec) -> (u32, u32) {
+    match clock {
+        ClockSpec::Countdown {
+            total_time_sec,
+            byoyomi_sec,
+        } => (*total_time_sec, *byoyomi_sec),
+        ClockSpec::Fischer {
+            total_time_sec,
+            increment_sec,
+        } => (*total_time_sec, *increment_sec),
+        ClockSpec::StopWatch {
+            total_time_min,
+            byoyomi_min,
+        } => (*total_time_min, *byoyomi_min),
+    }
+}
+
 /// マッチ成立時に永続化する対局設定。CoreRoom の再構築に必要な最小情報。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedConfig {
@@ -98,6 +111,10 @@ struct PersistedConfig {
     game_name: String,
     main_time_sec: u32,
     byoyomi_sec: u32,
+    /// 新しい時計設定。旧 JSON では欠落するため `None` を許容し、legacy
+    /// `main_time_sec/byoyomi_sec` へ fallback する。
+    #[serde(default)]
+    clock: Option<ClockSpec>,
     max_moves: u32,
     time_margin_ms: u64,
     /// マッチ成立（2 人目の LOGIN 受理）時刻。`$START_TIME` などの参考に使う。
@@ -112,6 +129,15 @@ struct PersistedConfig {
     /// 組み直す。serde は `#[serde(default)]` で旧 JSON (= `None`) と後方互換。
     #[serde(default)]
     initial_sfen: Option<String>,
+}
+
+impl PersistedConfig {
+    fn clock_spec(&self) -> ClockSpec {
+        self.clock.clone().unwrap_or(ClockSpec::Countdown {
+            total_time_sec: self.main_time_sec,
+            byoyomi_sec: self.byoyomi_sec,
+        })
+    }
 }
 
 /// 終局フラグ。一度 `Some` になったらその DO は同じ対局を二度開始しない。
@@ -375,14 +401,17 @@ impl GameRoom {
             .await?
             .unwrap_or_else(|| "unknown".to_owned());
         let game_id = format!("{room_id}-{started}");
+        let clock_spec = load_clock_spec_from_env(&self.env)?;
+        let (main_time_sec, byoyomi_sec) = legacy_clock_fields(&clock_spec);
 
         let cfg = PersistedConfig {
             game_id: game_id.clone(),
             black_handle: black_handle.to_owned(),
             white_handle: white_handle.to_owned(),
             game_name: game_name.to_owned(),
-            main_time_sec: DEFAULT_MAIN_TIME_SEC,
-            byoyomi_sec: DEFAULT_BYOYOMI_SEC,
+            main_time_sec,
+            byoyomi_sec,
+            clock: Some(clock_spec.clone()),
             max_moves: DEFAULT_MAX_MOVES,
             time_margin_ms: DEFAULT_TIME_MARGIN_MS,
             matched_at_ms: started,
@@ -395,9 +424,8 @@ impl GameRoom {
         self.state.storage().put(KEY_CONFIG, &cfg).await?;
 
         // CoreRoom を構築して in-memory に置く。
-        let clock: Box<dyn TimeClock> =
-            Box::new(SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec));
-        let time_section = clock.format_summary();
+        let clock: Box<dyn TimeClock> = clock_spec.build_clock();
+        let time_section = clock_spec.format_time_section();
         // initial_sfen 指定時は Game_Summary `position_section` / `To_Move` を
         // 同じ SFEN から派生させる。未指定時は平手相当のブロックと `Color::Black`。
         let (position_section, to_move) = match cfg.initial_sfen.as_deref() {
@@ -689,8 +717,7 @@ impl GameRoom {
 
         // `time_section` は clock の初期設定値に依存し、持ち時間の残量には
         // 左右されないので cfg から再構築しても同じ出力になる。
-        let time_section =
-            SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec).format_summary();
+        let time_section = cfg.clock_spec().format_time_section();
 
         let start_str = format_csa_datetime(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
         let end_str = format_csa_datetime(ended_at_ms);
@@ -791,8 +818,7 @@ impl GameRoom {
         let Some(cfg) = cfg_opt else {
             return Ok(());
         };
-        let clock: Box<dyn TimeClock> =
-            Box::new(SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec));
+        let clock: Box<dyn TimeClock> = cfg.clock_spec().build_clock();
         // 永続化済み initial_sfen を信用して CoreRoom を再構築。もし永続化データが
         // 壊れて `set_sfen` が落ちる場合は panic ではなく Err として返し、呼び出し側
         // (`ensure_core_loaded`) の Result で伝搬できるようにする (Codex review
@@ -950,4 +976,20 @@ fn send_line(ws: &WebSocket, line: &str) -> Result<()> {
     }
     ws.send_with_str(&out)
         .map_err(|e| Error::RustError(format!("send_with_str: {e}")))
+}
+
+fn load_clock_spec_from_env(env: &Env) -> Result<ClockSpec> {
+    let clock_kind = env.var(ConfigKeys::CLOCK_KIND).ok().map(|v| v.to_string());
+    let total_time_sec = env.var(ConfigKeys::TOTAL_TIME_SEC).ok().map(|v| v.to_string());
+    let byoyomi_sec = env.var(ConfigKeys::BYOYOMI_SEC).ok().map(|v| v.to_string());
+    let total_time_min = env.var(ConfigKeys::TOTAL_TIME_MIN).ok().map(|v| v.to_string());
+    let byoyomi_min = env.var(ConfigKeys::BYOYOMI_MIN).ok().map(|v| v.to_string());
+    parse_clock_spec(
+        clock_kind.as_deref(),
+        total_time_sec.as_deref(),
+        byoyomi_sec.as_deref(),
+        total_time_min.as_deref(),
+        byoyomi_min.as_deref(),
+    )
+    .map_err(Error::RustError)
 }

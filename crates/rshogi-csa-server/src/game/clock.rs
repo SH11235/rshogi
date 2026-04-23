@@ -17,6 +17,8 @@
 //! 意味が曖昧な単一の `remaining_ms` にせず明確に 2 種類へ分けているのは、
 //! deadline 計算側で秒読みを無視するバグを防ぐため。
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::Color;
 
 /// 1 手消費後の時計判定結果。
@@ -54,7 +56,8 @@ pub trait TimeClock {
 }
 
 /// フロントエンド設定から選択する時計方式。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClockSpec {
     /// CSA 2014 改訂互換の秒読み。
     Countdown {
