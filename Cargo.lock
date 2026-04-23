@@ -1631,6 +1631,7 @@ dependencies = [
  "rshogi-core",
  "rshogi-csa",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]
