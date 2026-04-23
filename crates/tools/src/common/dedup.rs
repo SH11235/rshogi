@@ -7,6 +7,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 #[cfg(not(unix))]
+use std::path::{Component, Prefix};
+#[cfg(not(unix))]
 use sysinfo::Disks;
 
 /// PackedSfenValue のレコードサイズ（バイト）
@@ -184,15 +186,39 @@ fn disk_probe_path(path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(not(unix))]
+fn normalize_mount_compare_path(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let Some(first) = components.next() else {
+        return PathBuf::new();
+    };
+
+    let mut normalized = PathBuf::new();
+    match first {
+        Component::Prefix(prefix) => match prefix.kind() {
+            Prefix::VerbatimDisk(drive) => normalized.push(format!("{}:", drive as char)),
+            _ => normalized.push(first.as_os_str()),
+        },
+        _ => normalized.push(first.as_os_str()),
+    }
+
+    for component in components {
+        normalized.push(component.as_os_str());
+    }
+    normalized
+}
+
+#[cfg(not(unix))]
 fn disk_for_path(path: &Path) -> Option<(PathBuf, u64)> {
-    let probe = disk_probe_path(path)?;
+    let probe = normalize_mount_compare_path(&disk_probe_path(path)?);
     let disks = Disks::new_with_refreshed_list();
     disks
         .list()
         .iter()
-        .filter(|disk| probe.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().components().count())
-        .map(|disk| (disk.mount_point().to_path_buf(), disk.available_space()))
+        .filter_map(|disk| {
+            let mount = normalize_mount_compare_path(disk.mount_point());
+            probe.starts_with(&mount).then_some((mount, disk.available_space()))
+        })
+        .max_by_key(|(mount, _)| mount.components().count())
 }
 
 /// 指定パスが属するファイルシステムの空き容量（バイト）を取得する。
@@ -315,6 +341,34 @@ mod tests {
         fs::write(&input, [0u8; PSV_SIZE]).unwrap();
 
         check_output_not_in_inputs(&dir.path().join("new/out.psv"), &[input]).unwrap();
+    }
+
+    #[test]
+    fn disk_probe_path_uses_existing_parent_for_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = disk_probe_path(&dir.path().join("out/new.psv")).unwrap();
+
+        assert_eq!(probe, dir.path().canonicalize().unwrap().join("out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_filesystem_returns_true_within_same_tempdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.psv");
+        let b = dir.path().join("nested/b.psv");
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+
+        assert_eq!(same_filesystem(&a, &b), Some(true));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn normalize_mount_compare_path_normalizes_verbatim_disk_prefix() {
+        let original = Path::new(r"\\?\C:\work\tmp\dedup");
+        let normalized = normalize_mount_compare_path(original);
+
+        assert_eq!(normalized, PathBuf::from(r"C:\work\tmp\dedup"));
     }
 
     #[test]
