@@ -56,6 +56,7 @@ use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::ConfigKeys;
 use crate::datetime::{format_csa_datetime, format_date_path};
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
+use crate::spectator_control::{MonitorDecision, resolve_monitor_target};
 use crate::ws_route::{WsRoute, parse_ws_route};
 
 /// 時計既定値 (Floodgate 600-10 互換)。実運用で可変にする必要が出たら
@@ -199,7 +200,7 @@ impl DurableObject for GameRoom {
         match attachment {
             WsAttachment::Pending => self.handle_login(&ws, &line).await,
             WsAttachment::Player { role, handle, .. } => {
-                self.handle_game_line(role, &handle, &line).await
+                self.handle_game_line(&ws, role, &handle, &line).await
             }
             WsAttachment::Spectator { room_id } => {
                 self.handle_spectator_line(&ws, &room_id, &line).await
@@ -448,7 +449,13 @@ impl GameRoom {
     }
 
     /// 対局中のプレイヤからの行を CoreRoom に流す。
-    async fn handle_game_line(&self, role: Role, handle: &str, line: &str) -> Result<()> {
+    async fn handle_game_line(
+        &self,
+        ws: &WebSocket,
+        role: Role,
+        handle: &str,
+        line: &str,
+    ) -> Result<()> {
         if self.load_finished().await?.is_some() {
             // 終局後に届いた行は無視する。
             return Ok(());
@@ -460,6 +467,9 @@ impl GameRoom {
         let csa = CsaLine::new(line);
         if let Ok(ClientCommand::Chat { message }) = parse_command(&csa) {
             self.relay_chat(handle, &message).await?;
+            let monitor_id = self.current_monitor_id().await?;
+            send_line(ws, &format!("##[CHAT] OK {monitor_id}"))?;
+            send_line(ws, "##[CHAT] END")?;
             return Ok(());
         }
 
@@ -512,17 +522,27 @@ impl GameRoom {
                 Ok(())
             }
             ClientCommand::Monitor2Off { game_id } => {
-                send_line(ws, &format!("##[MONITOR2OFF] {game_id}"))?;
-                send_line(ws, "##[MONITOR2OFF] END")?;
-                let _ = ws.close(Some(1000), Some("spectator off".to_owned()));
+                match resolve_monitor_target(room_id, active_game_id.as_deref(), game_id.as_str()) {
+                    MonitorDecision::Accept { monitor_id } => {
+                        send_line(ws, &format!("##[MONITOR2OFF] {monitor_id}"))?;
+                        send_line(ws, "##[MONITOR2OFF] END")?;
+                        let _ = ws.close(Some(1000), Some("spectator off".to_owned()));
+                    }
+                    MonitorDecision::NotFound { requested } => {
+                        send_line(ws, &format!("##[MONITOR2OFF] NOT_FOUND {requested}"))?;
+                        send_line(ws, "##[MONITOR2OFF] END")?;
+                    }
+                }
                 Ok(())
             }
             ClientCommand::Monitor2On { game_id } => {
-                let requested = game_id.as_str();
-                if requested == room_id || active_game_id.as_deref() == Some(requested) {
-                    send_line(ws, &format!("##[MONITOR2] BEGIN {monitor_id}"))?;
-                } else {
-                    send_line(ws, &format!("##[MONITOR2] NOT_FOUND {game_id}"))?;
+                match resolve_monitor_target(room_id, active_game_id.as_deref(), game_id.as_str()) {
+                    MonitorDecision::Accept { monitor_id } => {
+                        send_line(ws, &format!("##[MONITOR2] BEGIN {monitor_id}"))?;
+                    }
+                    MonitorDecision::NotFound { requested } => {
+                        send_line(ws, &format!("##[MONITOR2] NOT_FOUND {requested}"))?;
+                    }
                 }
                 send_line(ws, "##[MONITOR2] END")?;
                 Ok(())
@@ -735,6 +755,15 @@ impl GameRoom {
         }
         let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
         Ok(cfg_opt.map(|cfg| cfg.game_id))
+    }
+
+    /// 応答に載せる現在の観戦対象 ID。対局中は `game_id`、それ以前は `room_id`。
+    async fn current_monitor_id(&self) -> Result<String> {
+        if let Some(game_id) = self.active_game_id().await? {
+            return Ok(game_id);
+        }
+        let room_id: Option<String> = self.state.storage().get(KEY_ROOM_ID).await?;
+        Ok(room_id.unwrap_or_else(|| "unknown".to_owned()))
     }
 
     /// CoreRoom が in-memory に無ければ永続化から復元する（`moves` replay 付き）。

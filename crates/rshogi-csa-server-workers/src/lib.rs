@@ -28,6 +28,7 @@ pub mod datetime;
 pub mod origin;
 pub mod room_id;
 pub mod session_state;
+pub mod spectator_control;
 pub mod ws_route;
 
 #[cfg(target_arch = "wasm32")]
