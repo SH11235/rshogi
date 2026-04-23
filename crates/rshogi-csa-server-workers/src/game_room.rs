@@ -393,7 +393,7 @@ impl GameRoom {
             game_name,
         } = evaluate_match(&next_slots)
         {
-            self.start_match(&black_handle, &white_handle, &game_name).await?;
+            let _ = self.start_match(&black_handle, &white_handle, &game_name).await?;
         }
 
         Ok(())
@@ -405,7 +405,7 @@ impl GameRoom {
         black_handle: &str,
         white_handle: &str,
         game_name: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // `room_id` は fetch 時に永続化している（DO インスタンス = room_id なので
         // 他 DO と衝突しない。game_id は `<room_id>-<epoch_ms>` 形式で、
         // 別 DO が同一ミリ秒にマッチしても R2 キー `YYYY/MM/DD/<game_id>.csa` が
@@ -426,7 +426,7 @@ impl GameRoom {
                 BuoyReservation::Reserved(initial_sfen) => initial_sfen,
                 BuoyReservation::Exhausted => {
                     console_log!("[GameRoom] buoy '{game_name}' exhausted; match start deferred");
-                    return Ok(());
+                    return Ok(false);
                 }
             };
 
@@ -496,7 +496,7 @@ impl GameRoom {
         self.send_to_role(Role::Black, &summary_black).await?;
         self.send_to_role(Role::White, &summary_white).await?;
 
-        Ok(())
+        Ok(true)
     }
 
     /// 対局中のプレイヤからの行を CoreRoom に流す。
@@ -512,9 +512,6 @@ impl GameRoom {
             return Ok(());
         }
 
-        self.ensure_core_loaded().await?;
-        let now = self.now_ms();
-        let color = role.to_core();
         let csa = CsaLine::new(line);
         if let Ok(cmd) = parse_command(&csa) {
             if let Some(replies) = self.handle_player_control_command(handle, cmd).await? {
@@ -524,6 +521,14 @@ impl GameRoom {
                 return Ok(());
             }
         }
+
+        if self.active_game_id().await?.is_none() && !self.try_start_pending_match().await? {
+            return Ok(());
+        }
+
+        self.ensure_core_loaded().await?;
+        let now = self.now_ms();
+        let color = role.to_core();
 
         let result = {
             let mut borrow = self.core.borrow_mut();
@@ -675,13 +680,17 @@ impl GameRoom {
                     "##[DELETEBUOY] END".to_owned(),
                 ]))
             }
-            ClientCommand::GetBuoyCount { game_name } => match self.load_buoy(&game_name).await? {
-                Some(doc) => Ok(Some(vec![
+            ClientCommand::GetBuoyCount { game_name } => match self.load_buoy(&game_name).await {
+                Ok(Some(doc)) => Ok(Some(vec![
                     format!("##[GETBUOYCOUNT] {game_name} {}", doc.remaining),
                     "##[GETBUOYCOUNT] END".to_owned(),
                 ])),
-                None => Ok(Some(vec![
+                Ok(None) => Ok(Some(vec![
                     format!("##[GETBUOYCOUNT] NOT_FOUND {game_name}"),
+                    "##[GETBUOYCOUNT] END".to_owned(),
+                ])),
+                Err(e) => Ok(Some(vec![
+                    format!("##[GETBUOYCOUNT] ERROR {game_name} {e}"),
                     "##[GETBUOYCOUNT] END".to_owned(),
                 ])),
             },
@@ -693,11 +702,20 @@ impl GameRoom {
                 let buoy_name = new_buoy.unwrap_or_else(|| {
                     GameName::new(default_fork_buoy_name(source_game.as_str(), nth_move))
                 });
-                let Some(csa_v2) = self.load_kifu_by_game_id(&source_game).await? else {
-                    return Ok(Some(vec![
-                        format!("##[FORK] NOT_FOUND {source_game}"),
-                        "##[FORK] END".to_owned(),
-                    ]));
+                let csa_v2 = match self.load_kifu_by_game_id(&source_game).await {
+                    Ok(Some(csa_v2)) => csa_v2,
+                    Ok(None) => {
+                        return Ok(Some(vec![
+                            format!("##[FORK] NOT_FOUND {source_game}"),
+                            "##[FORK] END".to_owned(),
+                        ]));
+                    }
+                    Err(e) => {
+                        return Ok(Some(vec![
+                            format!("##[FORK] ERROR {buoy_name} {e}"),
+                            "##[FORK] END".to_owned(),
+                        ]));
+                    }
                 };
                 let (initial_sfen, applied_moves) =
                     match fork_initial_sfen_from_kifu(&csa_v2, nth_move) {
@@ -759,6 +777,19 @@ impl GameRoom {
         buoy.remaining -= 1;
         self.store_buoy(game_name, &buoy).await?;
         Ok(BuoyReservation::Reserved(reserved_initial_sfen))
+    }
+
+    async fn try_start_pending_match(&self) -> Result<bool> {
+        let slots = self.load_slots().await?;
+        let MatchResult::Match {
+            black_handle,
+            white_handle,
+            game_name,
+        } = evaluate_match(&slots)
+        else {
+            return Ok(false);
+        };
+        self.start_match(&black_handle, &white_handle, &game_name).await
     }
 
     async fn load_kifu_by_game_id(&self, game_id: &GameId) -> Result<Option<String>> {
