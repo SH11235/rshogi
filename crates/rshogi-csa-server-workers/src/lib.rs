@@ -28,6 +28,7 @@ pub mod datetime;
 pub mod origin;
 pub mod room_id;
 pub mod session_state;
+pub mod ws_route;
 
 #[cfg(target_arch = "wasm32")]
 mod game_room;

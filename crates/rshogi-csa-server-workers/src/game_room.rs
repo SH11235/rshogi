@@ -2,7 +2,8 @@
 //!
 //! 1 部屋 = 1 DO インスタンス。以下のライフサイクルを駆動する:
 //!
-//! 1. **WebSocket Upgrade** (`fetch`): [`WsAttachment::Pending`] を付けて
+//! 1. **WebSocket Upgrade** (`fetch`): 対局者は [`WsAttachment::Pending`]、
+//!    観戦者は [`WsAttachment::Spectator`] を付けて
 //!    `state.accept_web_socket` で hibernation を有効化する。
 //! 2. **LOGIN** (`websocket_message` / pending): `<handle>+<game_name>+<color>`
 //!    形式を分解し、役割 (Role) 付きスロットとして [`state.storage().put`] に
@@ -55,6 +56,7 @@ use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::ConfigKeys;
 use crate::datetime::{format_csa_datetime, format_date_path};
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
+use crate::ws_route::{WsRoute, parse_ws_route};
 
 /// 時計既定値 (Floodgate 600-10 互換)。実運用で可変にする必要が出たら
 /// `PersistedConfig` を受け取る構成に切り替える。
@@ -151,9 +153,10 @@ impl DurableObject for GameRoom {
     async fn fetch(&self, req: Request) -> Result<Response> {
         let url = req.url()?;
         let path = url.path();
-        let Some(room_id) = path.strip_prefix("/ws/") else {
+        let Some(route) = parse_ws_route(&path) else {
             return Response::error("Upgrade required", 426);
         };
+        let room_id = route.room_id();
 
         // 初回 fetch でのみ room_id を永続化する。`start_match` 側で game_id 生成に
         // 使うため、DO 再構築後でも同じ値を参照できるよう storage に置く。
@@ -168,7 +171,10 @@ impl DurableObject for GameRoom {
         let server = pair.server;
         self.state.accept_web_socket(&server);
 
-        let pending = WsAttachment::Pending;
+        let pending = match route {
+            WsRoute::Player { .. } => WsAttachment::Pending,
+            WsRoute::Spectator { room_id } => WsAttachment::spectator(room_id),
+        };
         server
             .serialize_attachment(&pending)
             .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
@@ -195,13 +201,8 @@ impl DurableObject for GameRoom {
             WsAttachment::Player { role, handle, .. } => {
                 self.handle_game_line(role, &handle, &line).await
             }
-            // 観戦者の受付ルート (`/ws/<room_id>/spectate`) と observer 系コマンドは
-            // 後続 PR で `router::handle_fetch` / `GameRoom` DO へ配線する。現時点では
-            // `WsAttachment::Spectator` 付きセッションは enum 互換性のためだけに存在し、
-            // 受信行は黙って破棄する (Player 経路への誤入を防ぐ)。
-            WsAttachment::Spectator { .. } => {
-                console_log!("[GameRoom] spectator message ignored (route not wired yet)");
-                Ok(())
+            WsAttachment::Spectator { room_id } => {
+                self.handle_spectator_line(&ws, &room_id, &line).await
             }
         }
     }
@@ -457,6 +458,10 @@ impl GameRoom {
         let now = self.now_ms();
         let color = role.to_core();
         let csa = CsaLine::new(line);
+        if let Ok(ClientCommand::Chat { message }) = parse_command(&csa) {
+            self.relay_chat(handle, &message).await?;
+            return Ok(());
+        }
 
         let result = {
             let mut borrow = self.core.borrow_mut();
@@ -487,6 +492,43 @@ impl GameRoom {
         self.reschedule_turn_alarm(&result.outcome).await?;
         self.finalize_if_ended(&result).await?;
         Ok(())
+    }
+
+    /// 観戦者からの制御行。`%%CHAT` を同一 room の全参加者へ relay し、
+    /// `%%MONITOR2OFF` は確認応答後に socket を閉じる。
+    async fn handle_spectator_line(&self, ws: &WebSocket, room_id: &str, line: &str) -> Result<()> {
+        let csa = CsaLine::new(line);
+        let Ok(cmd) = parse_command(&csa) else {
+            return Ok(());
+        };
+        let active_game_id = self.active_game_id().await?;
+        let monitor_id = active_game_id.as_deref().unwrap_or(room_id);
+        match cmd {
+            ClientCommand::KeepAlive => Ok(()),
+            ClientCommand::Chat { message } => {
+                self.relay_chat("spectator", &message).await?;
+                send_line(ws, &format!("##[CHAT] OK {monitor_id}"))?;
+                send_line(ws, "##[CHAT] END")?;
+                Ok(())
+            }
+            ClientCommand::Monitor2Off { game_id } => {
+                send_line(ws, &format!("##[MONITOR2OFF] {game_id}"))?;
+                send_line(ws, "##[MONITOR2OFF] END")?;
+                let _ = ws.close(Some(1000), Some("spectator off".to_owned()));
+                Ok(())
+            }
+            ClientCommand::Monitor2On { game_id } => {
+                let requested = game_id.as_str();
+                if requested == room_id || active_game_id.as_deref() == Some(requested) {
+                    send_line(ws, &format!("##[MONITOR2] BEGIN {monitor_id}"))?;
+                } else {
+                    send_line(ws, &format!("##[MONITOR2] NOT_FOUND {game_id}"))?;
+                }
+                send_line(ws, "##[MONITOR2] END")?;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// 直前の `HandleOutcome` に応じて Alarm を張り替える。
@@ -541,11 +583,23 @@ impl GameRoom {
                     self.send_to_role(Role::Black, entry.line.as_str()).await?;
                     self.send_to_role(Role::White, entry.line.as_str()).await?;
                 }
-                // 観戦者は本クレートが扱わないので Spectators は no-op。
-                BroadcastTarget::Spectators => {}
+                BroadcastTarget::Spectators => {
+                    self.send_to_spectators(entry.line.as_str()).await?;
+                }
+            }
+            if matches!(entry.target, BroadcastTarget::All) {
+                self.send_to_spectators(entry.line.as_str()).await?;
             }
         }
         Ok(())
+    }
+
+    /// 同一 room の対局者 + 観戦者全員へ chat を relay する。
+    async fn relay_chat(&self, sender: &str, message: &str) -> Result<()> {
+        let line = format!("##[CHAT] {sender}: {message}");
+        self.send_to_role(Role::Black, &line).await?;
+        self.send_to_role(Role::White, &line).await?;
+        self.send_to_spectators(&line).await
     }
 
     /// 終局したなら R2 に棋譜を書き出し、finished フラグを立てて両 ws を close する。
@@ -661,6 +715,26 @@ impl GameRoom {
             }
         }
         Ok(())
+    }
+
+    /// 全観戦者へ 1 行送出する。
+    async fn send_to_spectators(&self, line: &str) -> Result<()> {
+        for ws in self.state.get_websockets() {
+            let att: Option<WsAttachment> = ws.deserialize_attachment().ok().flatten();
+            if let Some(WsAttachment::Spectator { .. }) = att {
+                send_line(&ws, line)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 現在アクティブな `game_id` を返す。マッチ成立前は `None`。
+    async fn active_game_id(&self) -> Result<Option<String>> {
+        if let Some(cfg) = self.config.borrow().as_ref() {
+            return Ok(Some(cfg.game_id.clone()));
+        }
+        let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
+        Ok(cfg_opt.map(|cfg| cfg.game_id))
     }
 
     /// CoreRoom が in-memory に無ければ永続化から復元する（`moves` replay 付き）。
