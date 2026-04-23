@@ -18,11 +18,14 @@
 | ツール | 説明 |
 |--------|------|
 | `shuffle_psv` | PSV ファイルのシャッフル |
+| `split_psv` | PSV ファイルを局面数または容量で分割 |
+| `merge_psv` | 複数の PSV ファイルを順序どおり結合 |
 | `rescore_psv` | 局面の再評価（探索スコア付与） |
 | `preprocess_psv` | PSV ファイルの前処理（qsearch leaf置換等） |
 | `validate_psv` | PSV ファイルの不正局面検出・除去 |
 | `psv_to_jsonl` | PSV 形式 → JSONL 変換（デバッグ・確認用） |
 | `fix_scores` | スコアの補正 |
+| `psv_dedup` / `psv_dedup_bloom` / `psv_dedup_partition` | PSV 局面の重複除去（3 方式。使い分けは [pack_tools.md](docs/pack_tools.md#重複除去ツールの選び方)） |
 
 ### ベンチマーク・分析
 

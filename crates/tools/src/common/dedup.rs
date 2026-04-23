@@ -3,7 +3,9 @@
 use crate::common::sfen::normalize_4t;
 use crate::common::sfen_ops::canonicalize_4t_with_mirror;
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// PackedSfenValue のレコードサイズ（バイト）
@@ -79,16 +81,56 @@ pub fn collect_input_paths(
 }
 
 /// まだ存在しないかもしれないパスを正規化する。
-/// `parent().canonicalize() / file_name()` で解決する。
-fn canonicalize_maybe_new(path: &Path) -> io::Result<PathBuf> {
-    if let Ok(c) = path.canonicalize() {
-        return Ok(c);
+///
+/// 既存の最長祖先ディレクトリだけを `canonicalize` し、残りの成分は
+/// パス構文どおりに連結する。これにより、まだ存在しない出力ファイルや
+/// 親ディレクトリを含むパスでも比較用の絶対パスへ正規化できる。
+pub fn canonicalize_maybe_new(path: &Path) -> io::Result<PathBuf> {
+    let components: Vec<_> = path.components().collect();
+
+    for prefix_len in (0..=components.len()).rev() {
+        let prefix = join_components(&components[..prefix_len]);
+        let base = if prefix_len == 0 && path.is_relative() {
+            std::env::current_dir()?.canonicalize()?
+        } else if prefix.as_os_str().is_empty() {
+            continue;
+        } else if let Ok(base) = prefix.canonicalize() {
+            base
+        } else {
+            continue;
+        };
+
+        return Ok(append_components(base, &components[prefix_len..]));
     }
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let name = path.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "出力パスにファイル名がありません")
-    })?;
-    Ok(parent.canonicalize()?.join(name))
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("パスを正規化できませんでした: {}", path.display()),
+    ))
+}
+
+fn join_components(components: &[std::path::Component<'_>]) -> PathBuf {
+    let mut path = PathBuf::new();
+    for component in components {
+        path.push(component.as_os_str());
+    }
+    path
+}
+
+fn append_components(mut base: PathBuf, components: &[std::path::Component<'_>]) -> PathBuf {
+    for component in components {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let _ = base.pop();
+            }
+            std::path::Component::Normal(part) => base.push(part),
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                base.push(component.as_os_str());
+            }
+        }
+    }
+    base
 }
 
 /// 出力パスが入力パスのいずれかと一致していないか検査する。
@@ -106,6 +148,72 @@ pub fn check_output_not_in_inputs(output: &Path, inputs: &[PathBuf]) -> io::Resu
         }
     }
     Ok(())
+}
+
+/// 入力ファイル群のサイズ合計（バイト）を返す。
+pub fn sum_file_sizes(paths: &[PathBuf]) -> io::Result<u64> {
+    let mut total = 0u64;
+    for p in paths {
+        total += std::fs::metadata(p)?.len();
+    }
+    Ok(total)
+}
+
+/// /proc/meminfo から MemAvailable をバイト単位で取得する。
+/// 取得できない環境では None を返す。
+pub fn get_mem_available() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kb_str = rest.trim().strip_suffix("kB")?.trim();
+            let kb: u64 = kb_str.parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// `statvfs(2)` で指定パスが存在するファイルシステムの空き容量（バイト）を取得する。
+/// 取得できない場合は None。
+pub fn get_disk_available(path: &Path) -> Option<u64> {
+    let probe: &Path = if path.exists() {
+        path
+    } else {
+        path.parent().unwrap_or(Path::new("."))
+    };
+    let c = CString::new(probe.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: statvfs は POSIX 標準で、c は有効な C 文字列ポインタ、stat は書き込み可能な
+    // 構造体を指す。失敗時は -1 を返すだけで副作用はない。
+    let rc = unsafe { libc::statvfs(c.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    Some(stat.f_bavail * stat.f_frsize)
+}
+
+/// バイト値を `%.1f GiB` 形式で整形する。
+pub fn format_gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+/// 2 つのパスが同一ファイルシステム上にあるかを判定する。
+/// 取得できない場合は None。
+pub fn same_filesystem(a: &Path, b: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let probe_a: &Path = if a.exists() {
+        a
+    } else {
+        a.parent().unwrap_or(Path::new("."))
+    };
+    let probe_b: &Path = if b.exists() {
+        b
+    } else {
+        b.parent().unwrap_or(Path::new("."))
+    };
+    let ma = std::fs::metadata(probe_a).ok()?;
+    let mb = std::fs::metadata(probe_b).ok()?;
+    Some(ma.dev() == mb.dev())
 }
 
 /// In-memory de-duplicator keyed by 4-token SFEN or mirror-canonicalized 4-token SFEN.
@@ -147,6 +255,36 @@ impl DedupSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[test]
+    fn canonicalize_maybe_new_handles_new_relative_file_in_cwd() {
+        let expected =
+            std::env::current_dir().unwrap().canonicalize().unwrap().join("train_000.bin");
+
+        assert_eq!(canonicalize_maybe_new(Path::new("train_000.bin")).unwrap(), expected);
+    }
+
+    #[test]
+    fn canonicalize_maybe_new_handles_nonexistent_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out/merged.psv");
+
+        assert_eq!(
+            canonicalize_maybe_new(&output).unwrap(),
+            dir.path().canonicalize().unwrap().join("out/merged.psv")
+        );
+    }
+
+    #[test]
+    fn check_output_not_in_inputs_accepts_new_output_under_new_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.psv");
+        fs::write(&input, [0u8; PSV_SIZE]).unwrap();
+
+        check_output_not_in_inputs(&dir.path().join("new/out.psv"), &[input]).unwrap();
+    }
+
     #[test]
     fn test_dedup_with_mirror() {
         let a = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/2B4R1/LNSGKGSNL b - 1";
