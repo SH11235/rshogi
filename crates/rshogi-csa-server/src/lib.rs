@@ -14,7 +14,9 @@ pub mod record;
 pub mod storage;
 
 pub use error::{ProtocolError, ServerError, StateError, StorageError, TransportError};
-pub use game::clock::{ClockResult, SecondsCountdownClock, TimeClock};
+pub use game::clock::{
+    ClockResult, ClockSpec, FischerClock, SecondsCountdownClock, StopWatchClock, TimeClock,
+};
 pub use game::result::{GameResult, IllegalReason};
 pub use game::room::{
     BroadcastEntry, BroadcastTarget, GameRoom, GameRoomConfig, GameStatus, HandleOutcome,

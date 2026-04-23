@@ -24,8 +24,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use rshogi_core::types::EnteringKingRule;
+use rshogi_csa_server::ClockSpec;
 use rshogi_csa_server::error::{ProtocolError, ServerError};
-use rshogi_csa_server::game::clock::SecondsCountdownClock;
 use rshogi_csa_server::game::result::GameResult;
 use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
@@ -46,7 +46,7 @@ use rshogi_csa_server::record::kifu::{
 use rshogi_csa_server::types::{
     Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, RoomId,
 };
-use rshogi_csa_server::{FileKifuStorage, TimeClock, TransportError};
+use rshogi_csa_server::{FileKifuStorage, TransportError};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::task::JoinHandle;
@@ -90,10 +90,8 @@ pub struct ServerConfig {
     pub bind_addr: SocketAddr,
     /// CSA V2 棋譜と 00LIST の保存先ルート。
     pub kifu_topdir: std::path::PathBuf,
-    /// Game_Summary に埋め込む持ち時間 (秒)。
-    pub total_time_sec: u32,
-    /// 秒読み (秒)。
-    pub byoyomi_sec: u32,
+    /// 対局で使う時計方式とパラメータ。
+    pub clock: ClockSpec,
     /// 通信マージン (ミリ秒)。`GameRoom` の `consume` 前に差し引かれる。
     pub time_margin_ms: u64,
     /// 最大手数。
@@ -137,8 +135,7 @@ impl ServerConfig {
         Self {
             bind_addr: "127.0.0.1:4081".parse().unwrap(),
             kifu_topdir: std::path::PathBuf::from("./kifu"),
-            total_time_sec: 600,
-            byoyomi_sec: 10,
+            clock: ClockSpec::default(),
             time_margin_ms: 1_500,
             max_moves: 256,
             login_timeout: Duration::from_secs(30),
@@ -1216,7 +1213,8 @@ where
     P: PasswordStore + 'static,
 {
     // Game_Summary を両対局者に送信。
-    let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
+    let clock = state.config.clock.build_clock();
+    let time_section = state.config.clock.format_time_section();
     // `initial_sfen` が設定されていればそれから派生、無ければ平手固定のブロックを使う。
     // GameRoom / Game_Summary / 棋譜 の三点一致契約 (GameRoomConfig::initial_sfen の
     // doc を参照) を満たすため、同じ SFEN を複数入口で再利用する。
@@ -1236,7 +1234,7 @@ where
         game_id: game_id.clone(),
         black: matched.black.clone(),
         white: matched.white.clone(),
-        time_section: clock.format_summary(),
+        time_section,
         position_section,
         rematch_on_draw: false,
         to_move,
@@ -1468,7 +1466,7 @@ async fn initialize_game_and_dispatch_start<R, K, P>(
     state: &SharedState<R, K, P>,
     game_id: &GameId,
     matched: &MatchedPair,
-    clock: SecondsCountdownClock,
+    clock: Box<dyn rshogi_csa_server::TimeClock>,
     match_initial_sfen: Option<String>,
     black: &mut TcpTransport,
     white: &mut TcpTransport,
@@ -1487,7 +1485,7 @@ where
         entering_king_rule: state.config.entering_king_rule,
         initial_sfen: match_initial_sfen,
     };
-    let mut room = GameRoom::new(cfg, Box::new(clock))?;
+    let mut room = GameRoom::new(cfg, clock)?;
 
     let start_instant = tokio::time::Instant::now();
     let now_ms =
@@ -1637,7 +1635,6 @@ where
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
-    let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
     // initial_sfen が設定されていれば棋譜の `initial_position` も同じ SFEN から派生。
     // 設定されていない (= 平手) 場合は既存の CSA shorthand `PI\n+\n` を保つ。
     // 長期的には常に `BEGIN Position` 形式に統一しても良いが、shogi-server 互換
@@ -1655,7 +1652,7 @@ where
         start_time: start_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         end_time: end_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         event: "rshogi-csa-server-tcp".to_owned(),
-        time_section: clock.format_summary(),
+        time_section: state.config.clock.format_time_section(),
         initial_position,
         moves: moves.to_vec(),
         result: result.clone(),

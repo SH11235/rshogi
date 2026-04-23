@@ -17,9 +17,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use rshogi_core::types::EnteringKingRule;
-use rshogi_csa_server::FileKifuStorage;
 use rshogi_csa_server::port::PlayerRateRecord;
 use rshogi_csa_server::types::PlayerName;
+use rshogi_csa_server::{ClockSpec, FileKifuStorage};
 use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
@@ -81,6 +81,18 @@ fn unique_topdir(tag: &str) -> PathBuf {
 /// - `127.0.0.1:0` で bind し、実際のポートを返す。
 /// - players は alice/bob 固定（パスワードはどちらも `pw`）。
 async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
+    spawn_server_with_clock(
+        tag,
+        ClockSpec::Countdown {
+            total_time_sec: 60,
+            byoyomi_sec: 10,
+        },
+    )
+    .await
+}
+
+/// テストシナリオ 1 件分のサーバーを指定時計で立ち上げる。
+async fn spawn_server_with_clock(tag: &str, clock: ClockSpec) -> (std::net::SocketAddr, PathBuf) {
     let topdir = unique_topdir(tag);
     let mut password_map = HashMap::new();
     password_map.insert("alice".to_owned(), "pw".to_owned());
@@ -118,8 +130,7 @@ async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
     let config = ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         kifu_topdir: topdir.clone(),
-        total_time_sec: 60,
-        byoyomi_sec: 10,
+        clock,
         time_margin_ms: 1_500,
         max_moves: 256,
         login_timeout: Duration::from_secs(10),
@@ -280,6 +291,68 @@ fn login_ok_and_match_start_via_game_summary_and_agree() {
 }
 
 #[test]
+fn fischer_clock_summary_exposes_increment_field() {
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_with_clock(
+            "fischer_summary",
+            ClockSpec::Fischer {
+                total_time_sec: 60,
+                increment_sec: 5,
+            },
+        )
+        .await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let s_black = drain_game_summary(&mut rb).await;
+        let s_white = drain_game_summary(&mut rw).await;
+        for summary in [&s_black, &s_white] {
+            assert!(summary.iter().any(|l| l == "Time_Unit:1sec"), "{summary:?}");
+            assert!(summary.iter().any(|l| l == "Total_Time:60"), "{summary:?}");
+            assert!(summary.iter().any(|l| l == "Increment:5"), "{summary:?}");
+            assert!(!summary.iter().any(|l| l.starts_with("Byoyomi:")), "{summary:?}");
+        }
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn stopwatch_clock_summary_uses_minute_unit() {
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_with_clock(
+            "stopwatch_summary",
+            ClockSpec::StopWatch {
+                total_time_min: 15,
+                byoyomi_min: 1,
+            },
+        )
+        .await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let s_black = drain_game_summary(&mut rb).await;
+        let s_white = drain_game_summary(&mut rw).await;
+        for summary in [&s_black, &s_white] {
+            assert!(summary.iter().any(|l| l == "Time_Unit:1min"), "{summary:?}");
+            assert!(summary.iter().any(|l| l == "Total_Time:15"), "{summary:?}");
+            assert!(summary.iter().any(|l| l == "Byoyomi:1"), "{summary:?}");
+            assert!(!summary.iter().any(|l| l.starts_with("Increment:")), "{summary:?}");
+        }
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn kifu_and_zerozero_list_compatible_with_mk_rate() {
     run_local(|| async {
         let (addr, topdir) = spawn_server("kifu_fmt").await;
@@ -386,8 +459,10 @@ async fn spawn_server_with_agree_timeout(
     let config = ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         kifu_topdir: topdir.clone(),
-        total_time_sec: 60,
-        byoyomi_sec: 10,
+        clock: ClockSpec::Countdown {
+            total_time_sec: 60,
+            byoyomi_sec: 10,
+        },
         time_margin_ms: 1_500,
         max_moves: 256,
         login_timeout: Duration::from_secs(10),
@@ -975,8 +1050,10 @@ async fn spawn_server_with_admin(
     let config = ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         kifu_topdir: topdir.clone(),
-        total_time_sec: 60,
-        byoyomi_sec: 10,
+        clock: ClockSpec::Countdown {
+            total_time_sec: 60,
+            byoyomi_sec: 10,
+        },
         time_margin_ms: 1_500,
         max_moves: 256,
         login_timeout: Duration::from_secs(10),
