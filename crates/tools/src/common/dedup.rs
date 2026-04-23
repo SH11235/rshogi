@@ -3,10 +3,11 @@
 use crate::common::sfen::normalize_4t;
 use crate::common::sfen_ops::canonicalize_4t_with_mirror;
 use std::collections::HashSet;
-use std::ffi::CString;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+#[cfg(not(unix))]
+use sysinfo::Disks;
 
 /// PackedSfenValue のレコードサイズ（バイト）
 pub const PSV_SIZE: usize = 40;
@@ -173,23 +174,51 @@ pub fn get_mem_available() -> Option<u64> {
     None
 }
 
-/// `statvfs(2)` で指定パスが存在するファイルシステムの空き容量（バイト）を取得する。
-/// 取得できない場合は None。
-pub fn get_disk_available(path: &Path) -> Option<u64> {
-    let probe: &Path = if path.exists() {
+fn disk_probe_path(path: &Path) -> Option<PathBuf> {
+    let probe = if path.exists() {
         path
     } else {
         path.parent().unwrap_or(Path::new("."))
     };
+    canonicalize_maybe_new(probe).ok()
+}
+
+#[cfg(not(unix))]
+fn disk_for_path(path: &Path) -> Option<(PathBuf, u64)> {
+    let probe = disk_probe_path(path)?;
+    let disks = Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|disk| probe.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().components().count())
+        .map(|disk| (disk.mount_point().to_path_buf(), disk.available_space()))
+}
+
+/// 指定パスが属するファイルシステムの空き容量（バイト）を取得する。
+/// 取得できない場合は None。
+#[cfg(unix)]
+pub fn get_disk_available(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let probe = disk_probe_path(path)?;
     let c = CString::new(probe.as_os_str().as_bytes()).ok()?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: statvfs は POSIX 標準で、c は有効な C 文字列ポインタ、stat は書き込み可能な
-    // 構造体を指す。失敗時は -1 を返すだけで副作用はない。
+    // SAFETY: statvfs は POSIX 標準で、c は NUL を含まない有効な C 文字列、
+    // stat は書き込み可能な領域を指す。失敗時は None を返すだけ。
     let rc = unsafe { libc::statvfs(c.as_ptr(), &mut stat) };
     if rc != 0 {
         return None;
     }
     Some(stat.f_bavail * stat.f_frsize)
+}
+
+/// 指定パスが属するファイルシステムの空き容量（バイト）を取得する。
+/// 取得できない場合は None。
+#[cfg(not(unix))]
+pub fn get_disk_available(path: &Path) -> Option<u64> {
+    disk_for_path(path).map(|(_, available_space)| available_space)
 }
 
 /// バイト値を `%.1f GiB` 形式で整形する。
@@ -199,21 +228,24 @@ pub fn format_gib(bytes: u64) -> String {
 
 /// 2 つのパスが同一ファイルシステム上にあるかを判定する。
 /// 取得できない場合は None。
+#[cfg(unix)]
 pub fn same_filesystem(a: &Path, b: &Path) -> Option<bool> {
     use std::os::unix::fs::MetadataExt;
-    let probe_a: &Path = if a.exists() {
-        a
-    } else {
-        a.parent().unwrap_or(Path::new("."))
-    };
-    let probe_b: &Path = if b.exists() {
-        b
-    } else {
-        b.parent().unwrap_or(Path::new("."))
-    };
+
+    let probe_a = disk_probe_path(a)?;
+    let probe_b = disk_probe_path(b)?;
     let ma = std::fs::metadata(probe_a).ok()?;
     let mb = std::fs::metadata(probe_b).ok()?;
     Some(ma.dev() == mb.dev())
+}
+
+/// 2 つのパスが同一ファイルシステム上にあるかを判定する。
+/// 取得できない場合は None。
+#[cfg(not(unix))]
+pub fn same_filesystem(a: &Path, b: &Path) -> Option<bool> {
+    let (mount_a, _) = disk_for_path(a)?;
+    let (mount_b, _) = disk_for_path(b)?;
+    Some(mount_a == mount_b)
 }
 
 /// In-memory de-duplicator keyed by 4-token SFEN or mirror-canonicalized 4-token SFEN.
