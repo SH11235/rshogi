@@ -90,6 +90,15 @@ pub trait KifuStorage {
         csa_v2_text: &str,
     ) -> impl std::future::Future<Output = Result<StorageKey, StorageError>>;
 
+    /// 既存の CSA V2 棋譜を読み出す。
+    ///
+    /// `%%FORK` のように過去棋譜から任意手数の局面を再構築する経路で使う。
+    /// 未保存の `game_id` は `Ok(None)` を返す。
+    fn load(
+        &self,
+        game_id: &GameId,
+    ) -> impl std::future::Future<Output = Result<Option<String>, StorageError>>;
+
     /// 00LIST に 1 行追記する。
     fn append_summary(
         &self,

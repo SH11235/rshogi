@@ -312,17 +312,26 @@ fn parse_x1(rest: &str) -> Result<ClientCommand, ProtocolError> {
             let src = toks
                 .next()
                 .ok_or_else(|| ProtocolError::Malformed("%%FORK: missing source_game".into()))?;
-            let buoy = toks.next().map(GameName::new);
-            let nth = match toks.next() {
-                Some(s) => Some(
-                    s.parse()
-                        .map_err(|e| ProtocolError::Malformed(format!("%%FORK: bad nth ({e})")))?,
-                ),
-                None => None,
-            };
+            let second = toks.next();
+            let third = toks.next();
             if toks.next().is_some() {
                 return Err(ProtocolError::Malformed("%%FORK: unexpected trailing tokens".into()));
             }
+            let (buoy, nth) =
+                match (second, third) {
+                    (None, None) => (None, None),
+                    (Some(s), None) => match s.parse() {
+                        Ok(nth) => (None, Some(nth)),
+                        Err(_) => (Some(GameName::new(s)), None),
+                    },
+                    (Some(buoy), Some(nth)) => (
+                        Some(GameName::new(buoy)),
+                        Some(nth.parse().map_err(|e| {
+                            ProtocolError::Malformed(format!("%%FORK: bad nth ({e})"))
+                        })?),
+                    ),
+                    (None, Some(_)) => unreachable!("third token without second token"),
+                };
             Ok(ClientCommand::Fork {
                 source_game: GameId::new(src),
                 new_buoy: buoy,
@@ -509,6 +518,42 @@ mod tests {
             parse_command(&line("%%GETBUOYCOUNT buoy1")).unwrap(),
             ClientCommand::GetBuoyCount {
                 game_name: GameName::new("buoy1")
+            }
+        );
+    }
+
+    #[test]
+    fn parses_fork_with_optional_buoy_and_nth_move() {
+        assert_eq!(
+            parse_command(&line("%%FORK 20260417120000")).unwrap(),
+            ClientCommand::Fork {
+                source_game: GameId::new("20260417120000"),
+                new_buoy: None,
+                nth_move: None,
+            }
+        );
+        assert_eq!(
+            parse_command(&line("%%FORK 20260417120000 forked")).unwrap(),
+            ClientCommand::Fork {
+                source_game: GameId::new("20260417120000"),
+                new_buoy: Some(GameName::new("forked")),
+                nth_move: None,
+            }
+        );
+        assert_eq!(
+            parse_command(&line("%%FORK 20260417120000 24")).unwrap(),
+            ClientCommand::Fork {
+                source_game: GameId::new("20260417120000"),
+                new_buoy: None,
+                nth_move: Some(24),
+            }
+        );
+        assert_eq!(
+            parse_command(&line("%%FORK 20260417120000 forked 24")).unwrap(),
+            ClientCommand::Fork {
+                source_game: GameId::new("20260417120000"),
+                new_buoy: Some(GameName::new("forked")),
+                nth_move: Some(24),
             }
         );
     }

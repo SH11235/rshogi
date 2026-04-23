@@ -1091,6 +1091,96 @@ fn getbuoycount_for_unknown_buoy_returns_not_found_without_admin_check() {
 }
 
 #[test]
+fn setbuoy_is_consumed_when_match_starts_and_summary_uses_derived_turn() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_admin("buoy_match_start", vec!["admin".to_owned()]).await;
+
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN admin+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:admin OK");
+        send_line(&mut wa, "%%SETBUOY g1 +7776FU 1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[SETBUOY] OK g1 1");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[SETBUOY] END");
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let s_black = drain_game_summary(&mut rb).await;
+        let s_white = drain_game_summary(&mut rw).await;
+        assert!(s_black.iter().any(|l| l == "To_Move:-"), "black summary: {s_black:?}");
+        assert!(s_white.iter().any(|l| l == "To_Move:-"), "white summary: {s_white:?}");
+
+        send_line(&mut wa, "%%GETBUOYCOUNT g1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] g1 0");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn fork_creates_single_use_buoy_from_existing_game() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_admin("fork_from_kifu", vec!["admin".to_owned()]).await;
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        let start_b = read_line_raw(&mut rb).await.unwrap();
+        let _ = read_line_raw(&mut rw).await.unwrap();
+        let source_game_id = start_b.trim_start_matches("START:").to_owned();
+        send_line(&mut wb, "+7776FU").await;
+        let _ = read_until(&mut rb, "+7776FU,T0").await;
+        let _ = read_until(&mut rw, "+7776FU,T0").await;
+        send_line(&mut ww, "%TORYO").await;
+        let _ = read_until(&mut rb, "#WIN").await;
+        let _ = read_until(&mut rw, "#LOSE").await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN admin+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:admin OK");
+        send_line(&mut wa, &format!("%%FORK {} forked 1", source_game_id)).await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] OK forked 1");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] END");
+        send_line(&mut wa, "%%GETBUOYCOUNT forked").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] forked 1");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        let (mut rb2, mut wb2) = connect(addr).await;
+        send_line(&mut wb2, "LOGIN alice+forked+black pw").await;
+        assert_eq!(read_line_raw(&mut rb2).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw2, mut ww2) = connect(addr).await;
+        send_line(&mut ww2, "LOGIN bob+forked+white pw").await;
+        assert_eq!(read_line_raw(&mut rw2).await.unwrap(), "LOGIN:bob OK");
+        let s_black = drain_game_summary(&mut rb2).await;
+        let s_white = drain_game_summary(&mut rw2).await;
+        assert!(s_black.iter().any(|l| l == "To_Move:-"), "forked black summary: {s_black:?}");
+        assert!(s_white.iter().any(|l| l == "To_Move:-"), "forked white summary: {s_white:?}");
+
+        send_line(&mut wa, "%%GETBUOYCOUNT forked").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] forked 0");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn monitor2_on_unknown_game_returns_not_found() {
     // 存在しない game_id への `%%MONITOR2ON` は `NOT_FOUND` を返し、購読状態を
     // 変更しない (broadcaster にも登録しない)。

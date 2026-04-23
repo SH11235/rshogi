@@ -33,8 +33,8 @@ pub use protocol::command::{ClientCommand, parse_command};
 pub use protocol::info::{help_lines, list_lines, show_lines, version_lines, who_lines};
 pub use protocol::summary::{GameSummaryBuilder, standard_initial_position_block};
 pub use record::kifu::{
-    KifuMove, KifuRecord, format_zerozero_list_line, illegal_reason_subcode, primary_result_code,
-    winner_of,
+    KifuMove, KifuRecord, fork_initial_sfen_from_kifu, format_zerozero_list_line,
+    illegal_reason_subcode, initial_sfen_from_csa_moves, primary_result_code, winner_of,
 };
 #[cfg(feature = "tokio-transport")]
 pub use storage::buoy::FileBuoyStorage;

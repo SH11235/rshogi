@@ -6,6 +6,7 @@
 //! ```text
 //! {
 //!   "moves": ["+7776FU", "-3334FU", ...],
+//!   "initial_sfen": "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
 //!   "remaining": 3
 //! }
 //! ```
@@ -15,6 +16,8 @@
 //!   互いの tmp を踏まない (Codex review PR #470 P3)。
 //! - `delete` はファイル削除。ファイル未存在は no-op (`Ok(())`)。
 //! - `count` は JSON を読んで `remaining` を返す。ファイル未存在なら `Ok(None)`。
+//! - `initial_sfen` は任意。通常の `%%SETBUOY` では CSA 手列から導出した開始局面を
+//!   キャッシュし、`%%FORK` では派生局面の SFEN を直接保存する。
 //!
 //! ## ファイル名エンコーディング
 //!
@@ -28,11 +31,13 @@
 //! `tokio-transport` フィーチャ下でのみコンパイルされる (`tokio::fs` が必要)。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 use crate::error::StorageError;
 use crate::port::BuoyStorage;
@@ -51,6 +56,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone)]
 pub struct FileBuoyStorage {
     topdir: PathBuf,
+    reserve_lock: Arc<Mutex<()>>,
 }
 
 /// ディスク上の JSON schema。serde が直接 roundtrip できる最小形。
@@ -58,8 +64,22 @@ pub struct FileBuoyStorage {
 struct BuoyFile {
     /// 初期局面に差し込む CSA 手列 (生文字列。検証は呼び出し側の責務)。
     moves: Vec<String>,
+    /// 派生対局の開始局面 SFEN。旧 schema からの後方互換のため省略可。
+    #[serde(default)]
+    initial_sfen: Option<String>,
     /// 残り対局数。0 になると実質 "消費済み"。
     remaining: u32,
+}
+
+/// ストレージから読み出したブイ 1 件分。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBuoy {
+    /// 初期局面に差し込む CSA 手列。
+    pub moves: Vec<CsaMoveToken>,
+    /// 派生対局の開始局面 SFEN。`Some` ならこちらを優先して使う。
+    pub initial_sfen: Option<String>,
+    /// 残り対局数。
+    pub remaining: u32,
 }
 
 impl FileBuoyStorage {
@@ -67,6 +87,7 @@ impl FileBuoyStorage {
     pub fn new<P: Into<PathBuf>>(topdir: P) -> Self {
         Self {
             topdir: topdir.into(),
+            reserve_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -92,6 +113,94 @@ impl FileBuoyStorage {
         let stem = final_path.file_stem().and_then(|s| s.to_str()).unwrap_or("buoy");
         let parent = final_path.parent().unwrap_or(std::path::Path::new("."));
         parent.join(format!("{stem}.{pid}.{seq}.tmp"))
+    }
+
+    /// ブイを拡張メタデータ付きで保存する。
+    pub async fn store(
+        &self,
+        game_name: &GameName,
+        moves: Vec<CsaMoveToken>,
+        remaining: u32,
+        initial_sfen: Option<String>,
+    ) -> Result<(), StorageError> {
+        let path = self.path_for(game_name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await.map_err(to_storage_err)?;
+        }
+        let payload = BuoyFile {
+            moves: moves.into_iter().map(|t| t.as_str().to_owned()).collect(),
+            initial_sfen,
+            remaining,
+        };
+        let bytes = serde_json::to_vec(&payload)
+            .map_err(|e| StorageError::Io(format!("serialize buoy: {e}")))?;
+
+        // .tmp → rename で原子的書き換え。中断時に半端な JSON が残らないようにする。
+        // tmp 名は `<stem>.<pid>.<counter>.tmp` で一意化する。並列 `set` が同じ
+        // buoy に走っても互いの tmp を踏まず、rename は last-writer-wins で
+        // 確定する (Codex review PR #470 P3)。
+        let tmp = self.tmp_path_for(&path);
+        let mut f = fs::File::create(&tmp).await.map_err(to_storage_err)?;
+        f.write_all(&bytes).await.map_err(to_storage_err)?;
+        f.flush().await.map_err(to_storage_err)?;
+        drop(f);
+        fs::rename(&tmp, &path).await.map_err(to_storage_err)?;
+        Ok(())
+    }
+
+    /// ブイを丸ごと読み出す。未登録なら `Ok(None)`。
+    pub async fn load(&self, game_name: &GameName) -> Result<Option<StoredBuoy>, StorageError> {
+        let path = self.path_for(game_name);
+        let bytes = match fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(StorageError::Io(format!("read buoy: {e}"))),
+        };
+        let parsed: BuoyFile = serde_json::from_slice(&bytes)
+            .map_err(|e| StorageError::Io(format!("parse buoy: {e}")))?;
+        Ok(Some(StoredBuoy {
+            moves: parsed.moves.into_iter().map(CsaMoveToken::new).collect(),
+            initial_sfen: parsed.initial_sfen,
+            remaining: parsed.remaining,
+        }))
+    }
+
+    /// 残り対局数を 1 減らす。未登録なら `Ok(None)`。
+    pub async fn decrement_remaining(
+        &self,
+        game_name: &GameName,
+    ) -> Result<Option<u32>, StorageError> {
+        let Some(mut buoy) = self.load(game_name).await? else {
+            return Ok(None);
+        };
+        if buoy.remaining > 0 {
+            buoy.remaining -= 1;
+        }
+        let new_remaining = buoy.remaining;
+        self.store(game_name, buoy.moves, new_remaining, buoy.initial_sfen).await?;
+        Ok(Some(new_remaining))
+    }
+
+    /// マッチ成立時に buoy を 1 回分予約する。
+    ///
+    /// 1 プロセス内では `reserve_lock` で `load + decrement + persist` を直列化し、
+    /// 「残数 1 を 2 対局が同時に拾う」race を防ぐ。
+    pub async fn reserve_for_match(
+        &self,
+        game_name: &GameName,
+    ) -> Result<Option<StoredBuoy>, StorageError> {
+        let _guard = self.reserve_lock.lock().await;
+        let Some(mut buoy) = self.load(game_name).await? else {
+            return Ok(None);
+        };
+        if buoy.remaining == 0 {
+            return Ok(Some(buoy));
+        }
+        let reserved = buoy.clone();
+        buoy.remaining -= 1;
+        self.store(game_name, buoy.moves.clone(), buoy.remaining, buoy.initial_sfen.clone())
+            .await?;
+        Ok(Some(reserved))
     }
 }
 
@@ -125,28 +234,7 @@ impl BuoyStorage for FileBuoyStorage {
         moves: Vec<CsaMoveToken>,
         remaining: u32,
     ) -> Result<(), StorageError> {
-        let path = self.path_for(game_name);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await.map_err(to_storage_err)?;
-        }
-        let payload = BuoyFile {
-            moves: moves.into_iter().map(|t| t.as_str().to_owned()).collect(),
-            remaining,
-        };
-        let bytes = serde_json::to_vec(&payload)
-            .map_err(|e| StorageError::Io(format!("serialize buoy: {e}")))?;
-
-        // .tmp → rename で原子的書き換え。中断時に半端な JSON が残らないようにする。
-        // tmp 名は `<stem>.<pid>.<counter>.tmp` で一意化する。並列 `set` が同じ
-        // buoy に走っても互いの tmp を踏まず、rename は last-writer-wins で
-        // 確定する (Codex review PR #470 P3)。
-        let tmp = self.tmp_path_for(&path);
-        let mut f = fs::File::create(&tmp).await.map_err(to_storage_err)?;
-        f.write_all(&bytes).await.map_err(to_storage_err)?;
-        f.flush().await.map_err(to_storage_err)?;
-        drop(f);
-        fs::rename(&tmp, &path).await.map_err(to_storage_err)?;
-        Ok(())
+        self.store(game_name, moves, remaining, None).await
     }
 
     async fn delete(&self, game_name: &GameName) -> Result<(), StorageError> {
@@ -160,15 +248,7 @@ impl BuoyStorage for FileBuoyStorage {
     }
 
     async fn count(&self, game_name: &GameName) -> Result<Option<u32>, StorageError> {
-        let path = self.path_for(game_name);
-        let bytes = match fs::read(&path).await {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(StorageError::Io(format!("read buoy: {e}"))),
-        };
-        let parsed: BuoyFile = serde_json::from_slice(&bytes)
-            .map_err(|e| StorageError::Io(format!("parse buoy: {e}")))?;
-        Ok(Some(parsed.remaining))
+        Ok(self.load(game_name).await?.map(|b| b.remaining))
     }
 }
 
@@ -330,6 +410,7 @@ mod tests {
         let bytes = fs::read(&storage.path_for(&gn)).await.unwrap();
         let parsed: BuoyFile = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed.remaining, 7);
+        assert_eq!(parsed.initial_sfen, None);
         assert_eq!(
             parsed.moves,
             vec![
@@ -338,6 +419,58 @@ mod tests {
                 "+2726FU".to_owned()
             ]
         );
+        let _ = fs::remove_dir_all(&topdir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_returns_initial_sfen_when_present() {
+        let topdir = unique_topdir("load_initial_sfen");
+        let storage = FileBuoyStorage::new(topdir.clone());
+        let gn = GameName::new("forked");
+        storage
+            .store(
+                &gn,
+                vec![CsaMoveToken::new("+7776FU")],
+                1,
+                Some(
+                    "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2".to_owned(),
+                ),
+            )
+            .await
+            .unwrap();
+        let buoy = storage.load(&gn).await.unwrap().unwrap();
+        assert_eq!(buoy.moves, vec![CsaMoveToken::new("+7776FU")]);
+        assert_eq!(
+            buoy.initial_sfen.as_deref(),
+            Some("lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2")
+        );
+        assert_eq!(buoy.remaining, 1);
+        let _ = fs::remove_dir_all(&topdir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn decrement_remaining_updates_stored_value() {
+        let topdir = unique_topdir("decrement");
+        let storage = FileBuoyStorage::new(topdir.clone());
+        let gn = GameName::new("forked");
+        storage.set(&gn, vec![CsaMoveToken::new("+7776FU")], 2).await.unwrap();
+        assert_eq!(storage.decrement_remaining(&gn).await.unwrap(), Some(1));
+        assert_eq!(storage.count(&gn).await.unwrap(), Some(1));
+        assert_eq!(storage.decrement_remaining(&gn).await.unwrap(), Some(0));
+        assert_eq!(storage.count(&gn).await.unwrap(), Some(0));
+        let _ = fs::remove_dir_all(&topdir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reserve_for_match_returns_original_entry_and_persists_decremented_count() {
+        let topdir = unique_topdir("reserve_for_match");
+        let storage = FileBuoyStorage::new(topdir.clone());
+        let gn = GameName::new("forked");
+        storage.set(&gn, vec![CsaMoveToken::new("+7776FU")], 1).await.unwrap();
+        let reserved = storage.reserve_for_match(&gn).await.unwrap().unwrap();
+        assert_eq!(reserved.remaining, 1);
+        assert_eq!(reserved.moves, vec![CsaMoveToken::new("+7776FU")]);
+        assert_eq!(storage.count(&gn).await.unwrap(), Some(0));
         let _ = fs::remove_dir_all(&topdir).await;
     }
 }

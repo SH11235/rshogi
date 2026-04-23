@@ -144,6 +144,7 @@ re-LOGIN to return to matchmaking)",
         "%%SETBUOY <game_name> <moves> <count> - register a buoy (admin only)",
         "%%DELETEBUOY <game_name> - delete a buoy (admin only)",
         "%%GETBUOYCOUNT <game_name> - query remaining count of a buoy",
+        "%%FORK <source_game> [buoy_name] [nth_move] - derive a buoy from an existing game",
     ];
     let mut out: Vec<CsaLine> =
         entries.iter().map(|e| CsaLine::new(format!("##[HELP] {e}"))).collect();
@@ -169,7 +170,6 @@ mod tests {
     #[test]
     fn help_lines_cover_currently_wired_commands() {
         // HELP は「実際に受け付けるコマンドだけを advertise する」方針。
-        // 未配線のコマンドが含まれていたら falsely advertised なので弾く。
         let lines = help_lines();
         let joined: String =
             lines.iter().map(|l| l.as_str().to_owned()).collect::<Vec<_>>().join("\n");
@@ -185,11 +185,10 @@ mod tests {
             "%%SETBUOY",
             "%%DELETEBUOY",
             "%%GETBUOYCOUNT",
+            "%%FORK",
         ] {
             assert!(joined.contains(cmd), "help missing {cmd}: {joined}");
         }
-        // 現時点で未配線のコマンド: `%%FORK` のみ。HELP に混入していたら回帰。
-        assert!(!joined.contains("%%FORK"), "help advertises unwired command %%FORK: {joined}");
     }
 
     #[test]
