@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use tools::sprt::{GameSide, Penta, SprtParameters, judge};
+use tools::sprt::{GameSide, Penta, SprtMetaLog, SprtParameters, judge};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -77,20 +77,6 @@ struct MetaLog {
     /// tournament.rs が --sprt 実行時のみ出力。未指定時のラベル自動推定に使う。
     #[serde(default)]
     sprt: Option<SprtMetaLog>,
-}
-
-#[derive(Deserialize, Clone)]
-struct SprtMetaLog {
-    base_label: String,
-    test_label: String,
-    #[serde(default)]
-    nelo0: Option<f64>,
-    #[serde(default)]
-    nelo1: Option<f64>,
-    #[serde(default)]
-    alpha: Option<f64>,
-    #[serde(default)]
-    beta: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -660,15 +646,16 @@ fn parse_file(path: &str) -> Result<FileResult> {
 // SPRT post-hoc 集計
 // ---------------------------------------------------------------------------
 
-/// 入力ファイル群の meta 行から SPRT メタを収集し、単一のラベル組に合致するなら返す。
+/// 入力ファイル群の meta 行から SPRT メタを収集し、単一のラベル組/パラメータに合致するなら返す。
 ///
 /// - meta 行に SPRT 情報が書かれているのは `tournament.rs --sprt` 実行で生成された
 ///   base/test ペアの jsonl のみ
-/// - 複数ファイルが同じ `(base_label, test_label)` を示すなら採用
-/// - 複数ファイルが異なるラベル組を示す場合は衝突として `bail!`
+/// - 複数ファイルが同じ `(base_label, test_label, nelo0, nelo1, alpha, beta)` を示すなら採用
+/// - ラベルが異なる場合は衝突として `bail!`
+/// - ラベルは同じでも Wald パラメータが異なる場合も `bail!`（LLR 境界が変わるため誤集計防止）
 /// - どのファイルにも SPRT 情報が無ければ `None`（呼び出し側で CLI 必須）
 fn collect_sprt_meta(files: &[&str]) -> Result<Option<SprtMetaLog>> {
-    let mut found: Option<SprtMetaLog> = None;
+    let mut found: Option<(SprtMetaLog, String)> = None;
     for &path in files {
         if path.contains(".summary.") {
             continue;
@@ -680,29 +667,51 @@ fn collect_sprt_meta(files: &[&str]) -> Result<Option<SprtMetaLog>> {
         for line in reader.lines() {
             let Ok(line) = line else { break };
             let trimmed = line.trim();
-            if !trimmed.contains("\"type\":\"meta\"") {
-                // meta 行は各ファイルの先頭 1 行のみ。非 meta 行が出た時点で打ち切り。
-                if !trimmed.is_empty() {
-                    break;
-                }
+            if trimmed.is_empty() {
                 continue;
             }
-            let meta: MetaLog = serde_json::from_str(trimmed)
+            // JSON として parse し `type == "meta"` を判定する。文字列部分一致だと
+            // JSON 整形スタイル（スペースの有無）に依存してしまうため serde で判定。
+            let value: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            if value.get("type").and_then(|v| v.as_str()) != Some("meta") {
+                // meta 行は各ファイルの先頭 1 行のみ。非 meta 行が出た時点で打ち切り。
+                break;
+            }
+            let meta: MetaLog = serde_json::from_value(value)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
             if let Some(sprt) = meta.sprt {
                 match found.as_ref() {
-                    None => found = Some(sprt),
-                    Some(existing) => {
+                    None => found = Some((sprt, path.to_string())),
+                    Some((existing, existing_path)) => {
                         if existing.base_label != sprt.base_label
                             || existing.test_label != sprt.test_label
                         {
                             bail!(
-                                "入力ファイル間で SPRT ラベルが一致しません: ({} vs {}) と ({} vs {})。\
+                                "入力ファイル間で SPRT ラベルが一致しません: {existing_path} は ({} vs {})、{path} は ({} vs {})。\
                                  --sprt-base-label / --sprt-test-label を明示してください。",
                                 existing.base_label,
                                 existing.test_label,
                                 sprt.base_label,
                                 sprt.test_label
+                            );
+                        }
+                        if existing != &sprt {
+                            bail!(
+                                "入力ファイル間で SPRT Wald パラメータが一致しません: \
+                                 {existing_path} は (nelo0={}, nelo1={}, alpha={}, beta={})、\
+                                 {path} は (nelo0={}, nelo1={}, alpha={}, beta={})。\
+                                 --sprt-nelo0 / --sprt-nelo1 / --sprt-alpha / --sprt-beta を明示してください。",
+                                existing.nelo0,
+                                existing.nelo1,
+                                existing.alpha,
+                                existing.beta,
+                                sprt.nelo0,
+                                sprt.nelo1,
+                                sprt.alpha,
+                                sprt.beta
                             );
                         }
                     }
@@ -711,7 +720,7 @@ fn collect_sprt_meta(files: &[&str]) -> Result<Option<SprtMetaLog>> {
             break;
         }
     }
-    Ok(found)
+    Ok(found.map(|(m, _)| m))
 }
 
 /// 単一 JSONL ファイルから base/test ペアに該当する Penta を集計する。
@@ -1171,8 +1180,19 @@ fn main() -> Result<()> {
 
     // SPRT post-hoc 集計（JSON モードでは最終 JSON にフィールドとして埋め込むため事前に計算する）
     let sprt_payload: Option<(Penta, SprtJsonOutput)> = if cli.sprt {
-        // meta 行から SPRT 情報を収集し、CLI 未指定項目の補完に使う。
-        let meta_sprt = collect_sprt_meta(&files)?;
+        // CLI が全項目（ラベル+パラメータ）を明示している場合は meta 参照をスキップ。
+        // これにより meta 情報が混在・欠落していても CLI による上書きで解析可能。
+        let needs_meta = cli.sprt_base_label.is_none()
+            || cli.sprt_test_label.is_none()
+            || cli.sprt_nelo0.is_none()
+            || cli.sprt_nelo1.is_none()
+            || cli.sprt_alpha.is_none()
+            || cli.sprt_beta.is_none();
+        let meta_sprt = if needs_meta {
+            collect_sprt_meta(&files)?
+        } else {
+            None
+        };
 
         let base_label = cli
             .sprt_base_label
@@ -1197,22 +1217,10 @@ fn main() -> Result<()> {
         }
 
         // nelo / alpha / beta は CLI → meta → ハードコード fallback の順で解決する。
-        let nelo0 = cli
-            .sprt_nelo0
-            .or_else(|| meta_sprt.as_ref().and_then(|m| m.nelo0))
-            .unwrap_or(0.0);
-        let nelo1 = cli
-            .sprt_nelo1
-            .or_else(|| meta_sprt.as_ref().and_then(|m| m.nelo1))
-            .unwrap_or(5.0);
-        let alpha = cli
-            .sprt_alpha
-            .or_else(|| meta_sprt.as_ref().and_then(|m| m.alpha))
-            .unwrap_or(0.05);
-        let beta = cli
-            .sprt_beta
-            .or_else(|| meta_sprt.as_ref().and_then(|m| m.beta))
-            .unwrap_or(0.05);
+        let nelo0 = cli.sprt_nelo0.or_else(|| meta_sprt.as_ref().map(|m| m.nelo0)).unwrap_or(0.0);
+        let nelo1 = cli.sprt_nelo1.or_else(|| meta_sprt.as_ref().map(|m| m.nelo1)).unwrap_or(5.0);
+        let alpha = cli.sprt_alpha.or_else(|| meta_sprt.as_ref().map(|m| m.alpha)).unwrap_or(0.05);
+        let beta = cli.sprt_beta.or_else(|| meta_sprt.as_ref().map(|m| m.beta)).unwrap_or(0.05);
 
         let mut total = Penta::ZERO;
         for path in &files {

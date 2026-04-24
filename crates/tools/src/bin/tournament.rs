@@ -52,7 +52,7 @@ use tools::selfplay::types::{EvalLog, side_label};
 use tools::selfplay::{
     EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
 };
-use tools::sprt::{Decision, GameSide, Penta, SprtParameters, judge};
+use tools::sprt::{Decision, GameSide, Penta, SprtMetaLog, SprtParameters, judge};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -268,16 +268,6 @@ struct MetaLogEntry {
     /// analyze_selfplay 側でラベル自動推定に利用する。
     #[serde(skip_serializing_if = "Option::is_none")]
     sprt: Option<SprtMetaLog>,
-}
-
-#[derive(Serialize, Clone)]
-struct SprtMetaLog {
-    base_label: String,
-    test_label: String,
-    nelo0: f64,
-    nelo1: f64,
-    alpha: f64,
-    beta: f64,
 }
 
 #[derive(Serialize)]
