@@ -423,16 +423,28 @@ impl GameRoom {
         let game_id = format!("{room_id}-{started}");
         let clock_spec = load_clock_spec_from_env(&self.env)?;
         let (main_time_sec, byoyomi_sec) = legacy_clock_fields(&clock_spec);
-        let initial_sfen = match self
-            .reserve_initial_sfen_from_buoy(&GameName::new(game_name))
-            .await?
+        // 双方の LOGIN は既に OK を返しているので、予約で失敗したまま早期
+        // return するとスロットが永久に詰まる。Exhausted に加え、CAS リトライ
+        // 上限到達などの Err も pending match abort 経路に落として部屋を
+        // 再利用可能にする (codex レビュー PR #474 2nd round P2)。
+        let reservation = match self.reserve_initial_sfen_from_buoy(&GameName::new(game_name)).await
         {
+            Ok(r) => r,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] buoy '{game_name}' reservation failed: {e:?}; rejecting pending match"
+                );
+                self.abort_pending_match_with_error(&format!(
+                    "##[ERROR] buoy '{game_name}' reservation failed"
+                ))
+                .await?;
+                return Ok(false);
+            }
+        };
+        let initial_sfen = match reservation {
             BuoyReservation::Missing => None,
             BuoyReservation::Reserved(initial_sfen) => initial_sfen,
             BuoyReservation::Exhausted => {
-                // 双方の LOGIN は既に OK を返しているので、ここで何もせずに
-                // return するとスロットが永久に詰まる。エラー行を送って
-                // WS を閉じ、slots をクリアして部屋を再利用可能にする。
                 console_log!("[GameRoom] buoy '{game_name}' exhausted; rejecting pending match");
                 self.abort_pending_match_with_error(&format!(
                     "##[ERROR] buoy '{game_name}' exhausted"
