@@ -647,14 +647,6 @@ fn parse_file(path: &str) -> Result<FileResult> {
 // SPRT post-hoc 集計
 // ---------------------------------------------------------------------------
 
-/// JSONL 1 行の `type` フィールドを parse して返す。JSON でない / `type` が無い
-/// / 文字列でない場合は `None`。`contains("\"type\":\"...\"")` の部分一致よりも
-/// 整形スタイル差に対して堅牢。
-fn log_line_type(trimmed: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    value.get("type").and_then(|t| t.as_str()).map(str::to_owned)
-}
-
 /// 入力ファイル群の meta 行から SPRT メタを収集し、単一のラベル組/パラメータに合致するなら返す。
 ///
 /// # 動作
@@ -779,8 +771,11 @@ fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
             continue;
         }
 
-        let kind = log_line_type(trimmed);
-        if meta_labels.is_none() && kind.as_deref() == Some("meta") {
+        // 高速パス: 軽量 contains で meta/result 候補行だけ絞り込み、
+        // 絞り込んだ行は直接ターゲット型にパースして失敗時は bail（破損検知）。
+        // 全行を `serde_json::Value` へ変換するとホット move 行で重いため避ける。
+        // tournament.rs はコンパクト JSON を書き出すので contains で十分機能する。
+        if meta_labels.is_none() && trimmed.contains("\"type\":\"meta\"") {
             let meta: MetaLog = serde_json::from_str(trimmed)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
             let black = meta
@@ -798,7 +793,7 @@ fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
                 return Ok(Penta::ZERO);
             }
             meta_labels = Some((black, white));
-        } else if kind.as_deref() == Some("result") {
+        } else if trimmed.contains("\"type\":\"result\"") {
             let Some((label_black_meta, label_white_meta)) = meta_labels.as_ref() else {
                 continue;
             };
@@ -1807,9 +1802,35 @@ mod tests {
         assert!(res.is_none());
     }
 
-    /// 破損 JSON の先頭行は警告を出して当該ファイルのみスキップし、他ファイルから収集できる。
+    /// collect_sprt_penta は破損 result 行で bail する（サイレントにスキップしない）。
+    /// JSONL が途中で壊れたケースで Penta/LLR が過小集計されるのを防止。
     #[test]
-    fn broken_json_is_skipped_with_warning() {
+    fn collect_sprt_penta_bails_on_broken_result_line() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken_result.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // 先頭に有効な meta（base=a, test=b）、その後に壊れた result 行を入れる
+        writeln!(
+            f,
+            "{{\"type\":\"meta\",\"timestamp\":\"t\",\"settings\":{{\"games\":2}},\
+             \"engine_cmd\":{{\"path_black\":\"/a\",\"path_white\":\"/b\",\
+             \"label_black\":\"a\",\"label_white\":\"b\",\
+             \"usi_options_black\":[],\"usi_options_white\":[]}}}}"
+        )
+        .unwrap();
+        // 壊れた result 行（outcome フィールドが数値で ResultLog パース失敗）
+        writeln!(f, "{{\"type\":\"result\",\"outcome\":123}}").unwrap();
+        drop(f);
+
+        let err = collect_sprt_penta(&path.display().to_string(), "a", "b").unwrap_err();
+        assert!(err.to_string().contains("resultパースエラー"));
+    }
+
+    /// 破損 JSON の先頭行は当該ファイルのみスキップし、他ファイルから収集できる。
+    /// （警告の eprintln! 出力はテストでは捕捉していない）
+    #[test]
+    fn broken_json_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let broken = dir.path().join("broken.jsonl");
         std::fs::write(&broken, "{not json\n").unwrap();
@@ -1825,17 +1846,5 @@ mod tests {
         let res = collect_sprt_meta(&files, None, None).unwrap();
         let got = res.expect("good file should still provide meta");
         assert_eq!(got.base_label, "v100");
-    }
-
-    /// `log_line_type` が JSON の type フィールドを正しく返す。
-    #[test]
-    fn log_line_type_returns_type_string() {
-        assert_eq!(log_line_type("{\"type\":\"meta\",\"x\":1}").as_deref(), Some("meta"));
-        // 空白を挟んだ整形でも検出できる（旧 contains ベースではスキップされていたケース）
-        assert_eq!(log_line_type("{ \"type\" : \"result\" }").as_deref(), Some("result"));
-        // type が無い / 非 JSON / 非文字列
-        assert_eq!(log_line_type("{\"foo\":1}"), None);
-        assert_eq!(log_line_type("not json"), None);
-        assert_eq!(log_line_type("{\"type\":42}"), None);
     }
 }
