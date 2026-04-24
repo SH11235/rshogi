@@ -17,6 +17,8 @@
 //! 意味が曖昧な単一の `remaining_ms` にせず明確に 2 種類へ分けているのは、
 //! deadline 計算側で秒読みを無視するバグを防ぐため。
 
+use serde::{Deserialize, Serialize};
+
 use crate::types::Color;
 
 /// 1 手消費後の時計判定結果。
@@ -51,6 +53,61 @@ pub trait TimeClock {
     /// 秒読み方式では `本体残り + byoyomi` を返す（秒読みは手番開始でリセットされるため
     /// 前手の消費は引かない）。Fischer / StopWatch 方式も同じ意味で実装する。
     fn turn_budget_ms(&self, color: Color) -> i64;
+}
+
+/// フロントエンド設定から選択する時計方式。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClockSpec {
+    /// CSA 2014 改訂互換の秒読み。
+    Countdown {
+        total_time_sec: u32,
+        byoyomi_sec: u32,
+    },
+    /// Fischer 方式（秒単位）。
+    Fischer {
+        total_time_sec: u32,
+        increment_sec: u32,
+    },
+    /// StopWatch 方式（分単位）。
+    StopWatch {
+        total_time_min: u32,
+        byoyomi_min: u32,
+    },
+}
+
+impl Default for ClockSpec {
+    fn default() -> Self {
+        Self::Countdown {
+            total_time_sec: 600,
+            byoyomi_sec: 10,
+        }
+    }
+}
+
+impl ClockSpec {
+    /// 指定設定に対応する時計インスタンスを生成する。
+    pub fn build_clock(&self) -> Box<dyn TimeClock> {
+        match self {
+            Self::Countdown {
+                total_time_sec,
+                byoyomi_sec,
+            } => Box::new(SecondsCountdownClock::new(*total_time_sec, *byoyomi_sec)),
+            Self::Fischer {
+                total_time_sec,
+                increment_sec,
+            } => Box::new(FischerClock::new(*total_time_sec, *increment_sec)),
+            Self::StopWatch {
+                total_time_min,
+                byoyomi_min,
+            } => Box::new(StopWatchClock::new(*total_time_min, *byoyomi_min)),
+        }
+    }
+
+    /// `Game_Summary` / 棋譜へ埋め込む時間セクションを生成する。
+    pub fn format_time_section(&self) -> String {
+        self.build_clock().format_summary()
+    }
 }
 
 /// 秒読み方式の時計（CSA 2014 改訂互換）。
@@ -630,5 +687,35 @@ mod tests {
         let mut c = StopWatchClock::new(15, 1);
         assert_eq!(c.consume(Color::Black, 60_000), ClockResult::Continue);
         assert_eq!(c.remaining_main_ms(Color::White), 15 * 60 * 1000);
+    }
+
+    #[test]
+    fn clock_spec_builds_matching_summary_for_countdown() {
+        let spec = ClockSpec::Countdown {
+            total_time_sec: 600,
+            byoyomi_sec: 10,
+        };
+        assert_eq!(
+            spec.format_time_section(),
+            SecondsCountdownClock::new(600, 10).format_summary()
+        );
+    }
+
+    #[test]
+    fn clock_spec_builds_matching_summary_for_fischer() {
+        let spec = ClockSpec::Fischer {
+            total_time_sec: 600,
+            increment_sec: 10,
+        };
+        assert_eq!(spec.format_time_section(), FischerClock::new(600, 10).format_summary());
+    }
+
+    #[test]
+    fn clock_spec_builds_matching_summary_for_stopwatch() {
+        let spec = ClockSpec::StopWatch {
+            total_time_min: 15,
+            byoyomi_min: 1,
+        };
+        assert_eq!(spec.format_time_section(), StopWatchClock::new(15, 1).format_summary());
     }
 }

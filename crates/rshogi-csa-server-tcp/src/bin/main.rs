@@ -17,10 +17,10 @@ use std::rc::Rc;
 
 use anyhow::Context;
 use clap::Parser;
-use rshogi_csa_server::FileKifuStorage;
 use rshogi_csa_server::error::StorageError;
 use rshogi_csa_server::port::{PlayerRateRecord, RateStorage};
 use rshogi_csa_server::types::PlayerName;
+use rshogi_csa_server::{ClockSpec, FileKifuStorage};
 use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
@@ -45,12 +45,21 @@ struct Cli {
     /// プレイヤ定義ファイル（TOML 形式、keys = handle）。
     #[arg(long)]
     players: PathBuf,
-    /// 持ち時間 (秒)。
+    /// 秒読み方式 / Fischer 方式で使う持ち時間 (秒)。
     #[arg(long, default_value_t = 600)]
     total_time_sec: u32,
-    /// 秒読み (秒)。
+    /// 秒読み方式の秒読み、または Fischer 方式の増分 (秒)。
     #[arg(long, default_value_t = 10)]
     byoyomi_sec: u32,
+    /// StopWatch 方式で使う持ち時間 (分)。
+    #[arg(long, default_value_t = 10)]
+    total_time_min: u32,
+    /// StopWatch 方式の秒読み (分)。
+    #[arg(long, default_value_t = 1)]
+    byoyomi_min: u32,
+    /// 時計方式。`countdown` / `fischer` / `stopwatch`。
+    #[arg(long, value_enum, default_value_t = ClockKindArg::Countdown)]
+    clock_kind: ClockKindArg,
     /// 通信マージン (ミリ秒)。
     #[arg(long, default_value_t = 1_500)]
     margin_ms: u64,
@@ -66,6 +75,38 @@ struct Cli {
     /// round P2)。`%%GETBUOYCOUNT` は参照系なので権限不要で全ユーザー可。
     #[arg(long = "admin-handle", value_name = "HANDLE")]
     admin_handle: Vec<String>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+enum ClockKindArg {
+    Countdown,
+    Fischer,
+    Stopwatch,
+}
+
+impl ClockKindArg {
+    fn to_clock_spec(
+        self,
+        total_time_sec: u32,
+        byoyomi_sec: u32,
+        total_time_min: u32,
+        byoyomi_min: u32,
+    ) -> ClockSpec {
+        match self {
+            Self::Countdown => ClockSpec::Countdown {
+                total_time_sec,
+                byoyomi_sec,
+            },
+            Self::Fischer => ClockSpec::Fischer {
+                total_time_sec,
+                increment_sec: byoyomi_sec,
+            },
+            Self::Stopwatch => ClockSpec::StopWatch {
+                total_time_min,
+                byoyomi_min,
+            },
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -85,8 +126,12 @@ fn main() -> anyhow::Result<()> {
     let config = ServerConfig {
         bind_addr,
         kifu_topdir: cli.kifu_dir,
-        total_time_sec: cli.total_time_sec,
-        byoyomi_sec: cli.byoyomi_sec,
+        clock: cli.clock_kind.to_clock_spec(
+            cli.total_time_sec,
+            cli.byoyomi_sec,
+            cli.total_time_min,
+            cli.byoyomi_min,
+        ),
         time_margin_ms: cli.margin_ms,
         max_moves: cli.max_moves,
         login_timeout: std::time::Duration::from_secs(30),

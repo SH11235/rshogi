@@ -16,6 +16,8 @@
 
 use std::fmt::Write as _;
 
+use rshogi_csa::{ParsedMove, initial_position, parse_csa_full};
+
 use crate::game::result::{GameResult, IllegalReason};
 use crate::types::{Color, CsaMoveToken, GameId, PlayerName};
 
@@ -202,6 +204,46 @@ pub fn illegal_reason_subcode(reason: IllegalReason) -> &'static str {
     }
 }
 
+/// 平手初期局面に CSA 手列を順に適用し、開始局面 SFEN を導出する。
+pub fn initial_sfen_from_csa_moves(moves: &[CsaMoveToken]) -> Result<String, String> {
+    let mut pos = initial_position();
+    for mv in moves {
+        pos.apply_csa_move(mv.as_str())
+            .map_err(|e| format!("invalid buoy move {}: {e}", mv.as_str()))?;
+    }
+    Ok(pos.to_sfen())
+}
+
+/// 既存棋譜から任意手数の派生開始局面 SFEN を導出する。
+///
+/// 返り値の第 2 要素は実際に適用した通常手数。`nth_move = None` のときは
+/// 特殊手 (`%TORYO` など) を除く全通常手を適用する。
+pub fn fork_initial_sfen_from_kifu(
+    csa_v2_text: &str,
+    nth_move: Option<u32>,
+) -> Result<(String, u32), String> {
+    let (mut pos, moves, _info) =
+        parse_csa_full(csa_v2_text).map_err(|e| format!("parse source kifu: {e}"))?;
+    let normal_moves: Vec<_> = moves
+        .into_iter()
+        .filter_map(|m| match m {
+            ParsedMove::Normal(mv) => Some(mv.mv),
+            ParsedMove::Special(_) => None,
+        })
+        .collect();
+    let apply_count = nth_move.unwrap_or(normal_moves.len() as u32) as usize;
+    if apply_count > normal_moves.len() {
+        return Err(format!(
+            "nth_move {apply_count} exceeds available moves {}",
+            normal_moves.len()
+        ));
+    }
+    for mv in normal_moves.iter().take(apply_count) {
+        pos.apply_csa_move(mv).map_err(|e| format!("replay move {mv}: {e}"))?;
+    }
+    Ok((pos.to_sfen(), apply_count as u32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +413,35 @@ mod tests {
             },
         );
         assert_eq!(line, "g1 alice bob 2026-04-17T12:00:00Z 2026-04-17T12:10:00Z #RESIGN");
+    }
+
+    #[test]
+    fn initial_sfen_from_csa_moves_applies_moves_on_hirate() {
+        let sfen = initial_sfen_from_csa_moves(&[
+            CsaMoveToken::new("+7776FU"),
+            CsaMoveToken::new("-3334FU"),
+        ])
+        .unwrap();
+        assert_eq!(sfen, "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3");
+    }
+
+    #[test]
+    fn fork_initial_sfen_from_kifu_respects_nth_move() {
+        let mut rec = rec_skeleton();
+        rec.initial_position = "PI\n+\n".to_owned();
+        let txt = rec.build_v2();
+        let (sfen, applied) = fork_initial_sfen_from_kifu(&txt, Some(1)).unwrap();
+        assert_eq!(applied, 1);
+        assert_eq!(sfen, "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2");
+    }
+
+    #[test]
+    fn fork_initial_sfen_from_kifu_rejects_out_of_range_nth_move() {
+        let mut rec = rec_skeleton();
+        rec.initial_position = "PI\n+\n".to_owned();
+        let txt = rec.build_v2();
+        let err = fork_initial_sfen_from_kifu(&txt, Some(3)).unwrap_err();
+        assert!(err.contains("exceeds available moves"), "unexpected: {err}");
     }
 
     #[test]

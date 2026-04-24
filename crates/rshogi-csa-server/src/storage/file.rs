@@ -81,6 +81,16 @@ impl KifuStorage for FileKifuStorage {
         Ok(StorageKey::new(rel.to_string_lossy().into_owned()))
     }
 
+    async fn load(&self, game_id: &GameId) -> Result<Option<String>, StorageError> {
+        let rel = self.relative_kifu_path(game_id);
+        let abs = self.topdir.join(&rel);
+        match fs::read_to_string(&abs).await {
+            Ok(body) => Ok(Some(body)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StorageError::Io(format!("read {abs:?}: {e}"))),
+        }
+    }
+
     async fn append_summary(&self, entry: &GameSummaryEntry) -> Result<(), StorageError> {
         // 同一 FileKifuStorage インスタンスからの append を直列化する。
         // `tokio::fs::File::write_all` は内部で複数 write を呼び得るため、
@@ -178,6 +188,26 @@ mod tests {
         let body = fs::read_to_string(&abs).await.unwrap();
         assert_eq!(body, "V2.2\nN+alice\n");
         // テストの後始末。
+        let _ = fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_returns_saved_kifu_text() {
+        let dir = unique_topdir("load_saved");
+        let store = FileKifuStorage::new(&dir);
+        let game_id = GameId::new("20260417120000");
+        store.save(&game_id, "V2.2\nN+alice\n").await.unwrap();
+        let body = store.load(&game_id).await.unwrap();
+        assert_eq!(body.as_deref(), Some("V2.2\nN+alice\n"));
+        let _ = fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_returns_none_for_unknown_game() {
+        let dir = unique_topdir("load_unknown");
+        let store = FileKifuStorage::new(&dir);
+        let body = store.load(&GameId::new("20260417120000")).await.unwrap();
+        assert_eq!(body, None);
         let _ = fs::remove_dir_all(&dir).await;
     }
 

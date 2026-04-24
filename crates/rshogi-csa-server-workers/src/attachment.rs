@@ -54,7 +54,7 @@ impl Role {
 /// - [`WsAttachment::Pending`]: LOGIN 到着前の匿名接続。`websocket_message`
 ///   ハンドラは最初に受信した行を LOGIN として解釈しようとする。
 /// - [`WsAttachment::Player`]: 認証済みプレイヤ。色・ハンドル・game_name を保持する。
-/// - [`WsAttachment::Spectator`]: 観戦者。`game_id` で観戦対象の対局を特定する。
+/// - [`WsAttachment::Spectator`]: 観戦者。`room_id` で観戦対象の部屋を特定する。
 ///   観戦系メッセージ (`%%MONITOR2ON/OFF`, `%%CHAT`) の経路判定と broadcast
 ///   fanout の対象判定に使う。
 ///
@@ -77,11 +77,11 @@ pub enum WsAttachment {
     /// 観戦者。`/ws/<room_id>/spectate` から接続したセッションに付与する。
     ///
     /// Player との違いは「盤面を動かす権限を持たず、broadcast を一方向受信する」点。
-    /// `game_id` は観戦対象の対局 ID で、`GameRoom` DO が broadcast fanout 時に
+    /// `room_id` は観戦対象の部屋 ID で、`GameRoom` DO が broadcast fanout 時に
     /// `WsAttachment::Spectator` 持ちセッション全てへ配信する判定で使う。
     Spectator {
-        /// 観戦対象の対局 ID。
-        game_id: String,
+        /// 観戦対象の部屋 ID。
+        room_id: String,
     },
 }
 
@@ -96,9 +96,9 @@ impl WsAttachment {
     }
 
     /// 観戦者 attachment を構築する補助関数。
-    pub fn spectator(game_id: impl Into<String>) -> Self {
+    pub fn spectator(room_id: impl Into<String>) -> Self {
         Self::Spectator {
-            game_id: game_id.into(),
+            room_id: room_id.into(),
         }
     }
 }
@@ -209,7 +209,7 @@ mod tests {
         let s = serde_json::to_string(&att).unwrap();
         // `#[serde(tag = "type")]` の下では variant 名が `type` 値に入る。
         assert!(s.contains("\"type\":\"Spectator\""));
-        assert!(s.contains("\"game_id\":\"room-xyz\""));
+        assert!(s.contains("\"room_id\":\"room-xyz\""));
     }
 
     #[test]

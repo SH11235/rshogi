@@ -39,3 +39,13 @@ preview_bucket_name = "local-kifu-dev"
 # 空文字列・未設定時は全 Upgrade 要求を 403 で拒否する（安全側の既定）。
 [vars]
 CORS_ORIGINS = ""
+# 対局時計。`countdown` / `fischer` / `stopwatch`。
+CLOCK_KIND = "countdown"
+# countdown / fischer 用（秒）。
+TOTAL_TIME_SEC = "600"
+BYOYOMI_SEC = "10"
+# stopwatch 用（分）。CLOCK_KIND=stopwatch のときのみ使う。
+TOTAL_TIME_MIN = "10"
+BYOYOMI_MIN = "1"
+# `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル（LOGIN の handle 部分）。
+ADMIN_HANDLE = "admin"

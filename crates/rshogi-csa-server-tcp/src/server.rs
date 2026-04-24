@@ -24,8 +24,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use rshogi_core::types::EnteringKingRule;
+use rshogi_csa_server::ClockSpec;
 use rshogi_csa_server::error::{ProtocolError, ServerError};
-use rshogi_csa_server::game::clock::SecondsCountdownClock;
 use rshogi_csa_server::game::result::GameResult;
 use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
@@ -39,11 +39,14 @@ use rshogi_csa_server::protocol::summary::{
     GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
     standard_initial_position_block,
 };
-use rshogi_csa_server::record::kifu::{KifuMove, KifuRecord, primary_result_code};
+use rshogi_csa_server::record::kifu::{
+    KifuMove, KifuRecord, fork_initial_sfen_from_kifu, initial_sfen_from_csa_moves,
+    primary_result_code,
+};
 use rshogi_csa_server::types::{
     Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, RoomId,
 };
-use rshogi_csa_server::{FileKifuStorage, TimeClock, TransportError};
+use rshogi_csa_server::{FileKifuStorage, TransportError};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::task::JoinHandle;
@@ -87,10 +90,8 @@ pub struct ServerConfig {
     pub bind_addr: SocketAddr,
     /// CSA V2 棋譜と 00LIST の保存先ルート。
     pub kifu_topdir: std::path::PathBuf,
-    /// Game_Summary に埋め込む持ち時間 (秒)。
-    pub total_time_sec: u32,
-    /// 秒読み (秒)。
-    pub byoyomi_sec: u32,
+    /// 対局で使う時計方式とパラメータ。
+    pub clock: ClockSpec,
     /// 通信マージン (ミリ秒)。`GameRoom` の `consume` 前に差し引かれる。
     pub time_margin_ms: u64,
     /// 最大手数。
@@ -134,8 +135,7 @@ impl ServerConfig {
         Self {
             bind_addr: "127.0.0.1:4081".parse().unwrap(),
             kifu_topdir: std::path::PathBuf::from("./kifu"),
-            total_time_sec: 600,
-            byoyomi_sec: 10,
+            clock: ClockSpec::default(),
             time_margin_ms: 1_500,
             max_moves: 256,
             login_timeout: Duration::from_secs(30),
@@ -424,7 +424,10 @@ where
         let mut pool = state.waiting.lock().await;
         pool.take_complement(&game_name, color)
     } {
-        // drive 側パス。
+        // buoy を予約する前に相手 waiter の健在と transport handoff を確定する。
+        // 先に予約してしまうと、相手が直前に切断していた場合に buoy 残数が
+        // 消費されたまま復元されない問題があった (codex cloud P1 /
+        // codex CLI round 3 P2)。
         let (resp_tx, resp_rx) = oneshot::channel::<TcpTransport>();
         let (done_tx, done_rx) = oneshot::channel::<()>();
         let req = MatchRequest {
@@ -433,9 +436,36 @@ where
         };
         let opp_handle = slot.handle.clone();
         let opp_color = slot.color;
-        if slot.match_request_tx.send(req).is_ok()
-            && let Ok(opp_transport) = resp_rx.await
-        {
+        let handoff_ok = slot.match_request_tx.send(req).is_ok();
+        let opp_transport = if handoff_ok { resp_rx.await.ok() } else { None };
+        if let Some(opp_transport) = opp_transport {
+            // handoff が確定した後で buoy を予約する。buoy が存在しない場合は
+            // 通常対局、存在して残数があれば予約、残数 0 なら両者に通知して
+            // 対局を取り消す。
+            let match_initial_sfen =
+                match reserve_match_initial_position(state.as_ref(), &game_name).await? {
+                    MatchInitialPosition::Default(sfen) => sfen,
+                    MatchInitialPosition::Reserved(sfen) => Some(sfen),
+                    MatchInitialPosition::Exhausted => {
+                        // buoy 残数 0。相手の waiter に Abort を送りたいが、既に
+                        // Start を送って transport まで受け取ってしまっているので
+                        // 直接 transport にエラーを送って切断する。自分も同じ
+                        // エラーを送って終わる。再キューしない（silently ハング
+                        // するのを避ける）。
+                        log::info!("buoy {game_name} exhausted after handoff; aborting match");
+                        let err_line =
+                            CsaLine::new(format!("##[ERROR] buoy '{game_name}' exhausted"));
+                        let _ = transport.send_line(&err_line).await;
+                        let mut opp_transport = opp_transport;
+                        let _ = opp_transport.send_line(&err_line).await;
+                        let _ = done_tx.send(());
+                        // 両者の League エントリを片付ける。
+                        let mut league = state.league.lock().await;
+                        league.logout(&handle_player);
+                        league.logout(&PlayerName::new(opp_handle.as_str()));
+                        return Ok(());
+                    }
+                };
             return drive_game(
                 state.clone(),
                 opp_transport,
@@ -445,6 +475,7 @@ where
                 handle,
                 color,
                 game_name.clone(),
+                match_initial_sfen,
                 done_tx,
             )
             .await;
@@ -836,11 +867,21 @@ where
                         CsaLine::new("##[SETBUOY] END"),
                     ])
                 } else {
-                    match state.buoy_storage.set(&buoy_name, moves, count).await {
-                        Ok(()) => Some(vec![
-                            CsaLine::new(format!("##[SETBUOY] OK {buoy_name} {count}")),
-                            CsaLine::new("##[SETBUOY] END"),
-                        ]),
+                    match initial_sfen_from_csa_moves(&moves) {
+                        Ok(derived_initial_sfen) => match state
+                            .buoy_storage
+                            .store(&buoy_name, moves, count, Some(derived_initial_sfen))
+                            .await
+                        {
+                            Ok(()) => Some(vec![
+                                CsaLine::new(format!("##[SETBUOY] OK {buoy_name} {count}")),
+                                CsaLine::new("##[SETBUOY] END"),
+                            ]),
+                            Err(e) => Some(vec![
+                                CsaLine::new(format!("##[SETBUOY] ERROR {buoy_name} {e}")),
+                                CsaLine::new("##[SETBUOY] END"),
+                            ]),
+                        },
                         Err(e) => Some(vec![
                             CsaLine::new(format!("##[SETBUOY] ERROR {buoy_name} {e}")),
                             CsaLine::new("##[SETBUOY] END"),
@@ -888,11 +929,47 @@ where
                     ]),
                 }
             }
+            ClientCommand::Fork {
+                source_game,
+                new_buoy,
+                nth_move,
+            } => {
+                let buoy_name =
+                    new_buoy.unwrap_or_else(|| default_fork_buoy_name(&source_game, nth_move));
+                match derive_fork_from_source_kifu(state.as_ref(), &source_game, nth_move).await? {
+                    ForkOutcome::NotFound => Some(vec![
+                        CsaLine::new(format!("##[FORK] NOT_FOUND {source_game}")),
+                        CsaLine::new("##[FORK] END"),
+                    ]),
+                    ForkOutcome::Malformed(msg) => Some(vec![
+                        CsaLine::new(format!("##[FORK] ERROR {} {msg}", buoy_name.as_str())),
+                        CsaLine::new("##[FORK] END"),
+                    ]),
+                    ForkOutcome::Derived(derived) => match state
+                        .buoy_storage
+                        .store(&buoy_name, Vec::new(), 1, Some(derived.initial_sfen.clone()))
+                        .await
+                    {
+                        Ok(()) => Some(vec![
+                            CsaLine::new(format!(
+                                "##[FORK] OK {} {}",
+                                buoy_name.as_str(),
+                                derived.applied_moves
+                            )),
+                            CsaLine::new("##[FORK] END"),
+                        ]),
+                        Err(e) => Some(vec![
+                            CsaLine::new(format!("##[FORK] ERROR {} {e}", buoy_name.as_str())),
+                            CsaLine::new("##[FORK] END"),
+                        ]),
+                    },
+                }
+            }
             _ => None,
         };
         let Some(lines) = replies else {
             // 未サポートの x1 コマンド / 対局中コマンドは切断扱い（未配線の
-            // `%%FORK` は後続タスクで追加する）。
+            // x1 拡張以外はここへ落とす）。
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
             break 'outer WaiterOutcome::DisconnectedFromPool;
@@ -950,6 +1027,33 @@ enum WaiterOutcome {
     DisconnectedFromPool,
 }
 
+/// buoy 解決結果。通常対局 / buoy 起点 / 枯渇の 3 分岐を区別する。
+enum MatchInitialPosition {
+    /// buoy 未設定。グローバル既定値 (`ServerConfig::initial_sfen`) を使う。
+    Default(Option<String>),
+    /// buoy が有効で、今回の対局用に消費済み。
+    Reserved(String),
+    /// buoy は存在するが残数 0。対局を成立させない。
+    Exhausted,
+}
+
+/// `%%FORK` 派生の結果。
+struct ForkDerivation {
+    initial_sfen: String,
+    applied_moves: u32,
+}
+
+/// `%%FORK` の派生処理の結末。malformed は接続を切らずに x1 応答で
+/// `##[FORK] ERROR ...` に落とすため、Result の Err としては扱わない。
+enum ForkOutcome {
+    /// 元棋譜が存在しない。
+    NotFound,
+    /// 元棋譜は見つかったが CSA として壊れている／`nth_move` が範囲外。
+    Malformed(String),
+    /// 派生成功。
+    Derived(ForkDerivation),
+}
+
 /// `%%MONITOR2ON` の TOCTOU 再確認用ヘルパ。`subscribe` 完了後に game_id が
 /// まだ `GameRegistry` に存在するかを確認する。
 ///
@@ -967,6 +1071,89 @@ where
     games.get(game_id).is_some()
 }
 
+/// 待機プールから相手を拾った後に、その対局で使う開始局面を確定する。
+///
+/// buoy があれば残数を 1 消費してその開始局面を返し、無ければグローバル既定値を返す。
+/// 残数 0 の buoy は対局を成立させない。
+async fn reserve_match_initial_position<R, K, P>(
+    state: &SharedState<R, K, P>,
+    game_name: &GameName,
+) -> Result<MatchInitialPosition, ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let Some(buoy) = state
+        .buoy_storage
+        .reserve_for_match(game_name)
+        .await
+        .map_err(ServerError::Storage)?
+    else {
+        return Ok(MatchInitialPosition::Default(state.config.initial_sfen.clone()));
+    };
+    if buoy.remaining == 0 {
+        return Ok(MatchInitialPosition::Exhausted);
+    }
+    let initial_sfen = match buoy.initial_sfen {
+        Some(sfen) => sfen,
+        None => match initial_sfen_from_csa_moves(&buoy.moves) {
+            Ok(sfen) => sfen,
+            Err(e) => {
+                // legacy buoy (initial_sfen 無し、moves からの導出) で moves が
+                // 不正な場合、`reserve_for_match` で既に消費した 1 回分を
+                // 巻き戻す。そうしないと不正 buoy が静かに burn し続ける
+                // (Copilot レビュー指摘)。
+                if let Err(rollback_err) = state.buoy_storage.release_reservation(game_name).await {
+                    log::error!(
+                        "failed to rollback buoy reservation for {game_name}: {rollback_err}"
+                    );
+                }
+                return Err(ServerError::Protocol(ProtocolError::Malformed(format!(
+                    "buoy {game_name}: {e}"
+                ))));
+            }
+        },
+    };
+    Ok(MatchInitialPosition::Reserved(initial_sfen))
+}
+
+/// `%%FORK` の入力を既存棋譜から SFEN に落とす。
+///
+/// 元棋譜が見つからない／壊れている／`nth_move` が範囲外のケースは `Err` では
+/// なく [`ForkOutcome`] の `NotFound` / `Malformed` バリアントで返す。waiter
+/// ループ側は x1 応答 `##[FORK] NOT_FOUND` / `##[FORK] ERROR ...` に落として
+/// 接続を維持し、graceful degradation にする。`Err` は storage I/O 失敗など
+/// 本当に復旧不能な経路にだけ残す。
+async fn derive_fork_from_source_kifu<R, K, P>(
+    state: &SharedState<R, K, P>,
+    source_game: &GameId,
+    nth_move: Option<u32>,
+) -> Result<ForkOutcome, ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let Some(csa_v2_text) =
+        state.kifu_storage.load(source_game).await.map_err(ServerError::Storage)?
+    else {
+        return Ok(ForkOutcome::NotFound);
+    };
+    match fork_initial_sfen_from_kifu(&csa_v2_text, nth_move) {
+        Ok((initial_sfen, applied_moves)) => Ok(ForkOutcome::Derived(ForkDerivation {
+            initial_sfen,
+            applied_moves,
+        })),
+        Err(e) => Ok(ForkOutcome::Malformed(format!("%%FORK {}: {e}", source_game.as_str()))),
+    }
+}
+
+fn default_fork_buoy_name(source_game: &GameId, nth_move: Option<u32>) -> GameName {
+    let suffix = nth_move.map_or_else(|| "final".to_owned(), |n| n.to_string());
+    GameName::new(format!("{}-fork-{}", source_game.as_str(), suffix))
+}
+
 /// drive 側タスクのメインループ。両 transport を所有して 1 対局を完了まで運ぶ。
 #[allow(clippy::too_many_arguments)]
 async fn drive_game<R, K, P>(
@@ -978,6 +1165,7 @@ async fn drive_game<R, K, P>(
     self_handle: String,
     self_color: Color,
     game_name: GameName,
+    match_initial_sfen: Option<String>,
     opp_completion_tx: oneshot::Sender<()>,
 ) -> Result<(), ServerError>
 where
@@ -1025,6 +1213,7 @@ where
         &game_id,
         matched.clone(),
         game_name.clone(),
+        match_initial_sfen.clone(),
         &mut black_transport,
         &mut white_transport,
     )
@@ -1055,6 +1244,7 @@ async fn drive_game_inner<R, K, P>(
     game_id: &GameId,
     matched: MatchedPair,
     game_name: GameName,
+    match_initial_sfen: Option<String>,
     black_transport: &mut TcpTransport,
     white_transport: &mut TcpTransport,
 ) -> Result<(), ServerError>
@@ -1064,11 +1254,12 @@ where
     P: PasswordStore + 'static,
 {
     // Game_Summary を両対局者に送信。
-    let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
+    let clock = state.config.clock.build_clock();
+    let time_section = state.config.clock.format_time_section();
     // `initial_sfen` が設定されていればそれから派生、無ければ平手固定のブロックを使う。
     // GameRoom / Game_Summary / 棋譜 の三点一致契約 (GameRoomConfig::initial_sfen の
     // doc を参照) を満たすため、同じ SFEN を複数入口で再利用する。
-    let (position_section, to_move) = match &state.config.initial_sfen {
+    let (position_section, to_move) = match &match_initial_sfen {
         Some(sfen) => {
             let section = position_section_from_sfen(sfen).map_err(|e| {
                 ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
@@ -1084,7 +1275,7 @@ where
         game_id: game_id.clone(),
         black: matched.black.clone(),
         white: matched.white.clone(),
-        time_section: clock.format_summary(),
+        time_section,
         position_section,
         rematch_on_draw: false,
         to_move,
@@ -1116,6 +1307,7 @@ where
         game_id,
         &matched,
         clock,
+        match_initial_sfen.clone(),
         black_transport,
         white_transport,
     )
@@ -1186,7 +1378,17 @@ where
     let (result, moves) = result_moves?;
 
     // 棋譜 + 00LIST 永続化。
-    persist_kifu(state, game_id, &matched, start_time, end_time, &moves, &result).await?;
+    persist_kifu(
+        state,
+        game_id,
+        &matched,
+        match_initial_sfen.as_deref(),
+        start_time,
+        end_time,
+        &moves,
+        &result,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1305,7 +1507,8 @@ async fn initialize_game_and_dispatch_start<R, K, P>(
     state: &SharedState<R, K, P>,
     game_id: &GameId,
     matched: &MatchedPair,
-    clock: SecondsCountdownClock,
+    clock: Box<dyn rshogi_csa_server::TimeClock>,
+    match_initial_sfen: Option<String>,
     black: &mut TcpTransport,
     white: &mut TcpTransport,
 ) -> Result<(GameRoom, tokio::time::Instant), ServerError>
@@ -1321,9 +1524,9 @@ where
         max_moves: state.config.max_moves,
         time_margin_ms: state.config.time_margin_ms,
         entering_king_rule: state.config.entering_king_rule,
-        initial_sfen: state.config.initial_sfen.clone(),
+        initial_sfen: match_initial_sfen,
     };
-    let mut room = GameRoom::new(cfg, Box::new(clock))?;
+    let mut room = GameRoom::new(cfg, clock)?;
 
     let start_instant = tokio::time::Instant::now();
     let now_ms =
@@ -1462,6 +1665,7 @@ async fn persist_kifu<R, K, P>(
     state: &SharedState<R, K, P>,
     game_id: &GameId,
     matched: &MatchedPair,
+    initial_sfen: Option<&str>,
     start_time: chrono::DateTime<chrono::Utc>,
     end_time: chrono::DateTime<chrono::Utc>,
     moves: &[KifuMove],
@@ -1472,12 +1676,11 @@ where
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
-    let clock = SecondsCountdownClock::new(state.config.total_time_sec, state.config.byoyomi_sec);
     // initial_sfen が設定されていれば棋譜の `initial_position` も同じ SFEN から派生。
     // 設定されていない (= 平手) 場合は既存の CSA shorthand `PI\n+\n` を保つ。
     // 長期的には常に `BEGIN Position` 形式に統一しても良いが、shogi-server 互換
     // バッチへの影響を避けるため hirate のみ現行踏襲 (deferral)。
-    let initial_position = match &state.config.initial_sfen {
+    let initial_position = match initial_sfen {
         Some(sfen) => position_section_from_sfen(sfen).map_err(|e| {
             ServerError::Protocol(ProtocolError::Malformed(format!("initial_sfen: {e}")))
         })?,
@@ -1490,7 +1693,7 @@ where
         start_time: start_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         end_time: end_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         event: "rshogi-csa-server-tcp".to_owned(),
-        time_section: clock.format_summary(),
+        time_section: state.config.clock.format_time_section(),
         initial_position,
         moves: moves.to_vec(),
         result: result.clone(),

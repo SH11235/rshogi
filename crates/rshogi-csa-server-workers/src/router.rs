@@ -14,7 +14,7 @@ use worker::{Env, Method, Request, Response, Result};
 
 use crate::config::{ConfigKeys, OriginAllowList};
 use crate::origin::{OriginDecision, evaluate};
-use crate::room_id::is_valid_room_id;
+use crate::ws_route::parse_ws_route;
 
 /// `#[event(fetch)]` から委譲されるディスパッチ。
 pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
@@ -26,20 +26,23 @@ pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
         return Response::ok(format!("rshogi-csa-server-workers v{}", env!("CARGO_PKG_VERSION")));
     }
 
-    if method == Method::Get {
-        if let Some(room_id) = path.strip_prefix("/ws/") {
-            if !is_valid_room_id(room_id) {
-                return Response::error("Invalid room_id", 400);
-            }
-            return forward_ws_to_room(req, env, room_id).await;
-        }
+    if method == Method::Get && path.starts_with("/ws/") {
+        let Some(route) = parse_ws_route(&path) else {
+            return Response::error("Invalid room_id", 400);
+        };
+        return forward_ws_to_room(req, env, &path, route.room_id()).await;
     }
 
     Response::error("Not Found", 404)
 }
 
 /// `/ws/:room_id` を Origin 検査し、許可された場合のみ GameRoom DO に転送する。
-async fn forward_ws_to_room(req: Request, env: Env, room_id: &str) -> Result<Response> {
+async fn forward_ws_to_room(
+    req: Request,
+    env: Env,
+    request_path: &str,
+    room_id: &str,
+) -> Result<Response> {
     // Origin 許可リストは `[vars] CORS_ORIGINS = "<csv>"` から取得する。
     // 値が空や未設定なら `OriginAllowList` は空 = 全拒否（安全側）。
     let allow_csv = env
@@ -68,8 +71,8 @@ async fn forward_ws_to_room(req: Request, env: Env, room_id: &str) -> Result<Res
     let stub = namespace.id_from_name(room_id)?.get_stub()?;
 
     // DO 側 fetch は完全な URL を要求する仕様。転送用のダミー host を立て、
-    // path に `/ws/:room_id` を引き継ぐ（DO 側の path prefix チェックで使う）。
-    let forward_url = format!("https://do.internal/ws/{room_id}");
+    // path をそのまま DO 側へ引き継ぐ（`/spectate` を含む route 判定に使う）。
+    let forward_url = format!("https://do.internal{request_path}");
     let mut fwd = Request::new(&forward_url, Method::Get)?;
     let fwd_headers = fwd.headers_mut()?;
 

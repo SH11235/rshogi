@@ -17,9 +17,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use rshogi_core::types::EnteringKingRule;
-use rshogi_csa_server::FileKifuStorage;
 use rshogi_csa_server::port::PlayerRateRecord;
 use rshogi_csa_server::types::PlayerName;
+use rshogi_csa_server::{ClockSpec, FileKifuStorage};
 use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
@@ -81,6 +81,18 @@ fn unique_topdir(tag: &str) -> PathBuf {
 /// - `127.0.0.1:0` で bind し、実際のポートを返す。
 /// - players は alice/bob 固定（パスワードはどちらも `pw`）。
 async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
+    spawn_server_with_clock(
+        tag,
+        ClockSpec::Countdown {
+            total_time_sec: 60,
+            byoyomi_sec: 10,
+        },
+    )
+    .await
+}
+
+/// テストシナリオ 1 件分のサーバーを指定時計で立ち上げる。
+async fn spawn_server_with_clock(tag: &str, clock: ClockSpec) -> (std::net::SocketAddr, PathBuf) {
     let topdir = unique_topdir(tag);
     let mut password_map = HashMap::new();
     password_map.insert("alice".to_owned(), "pw".to_owned());
@@ -118,8 +130,7 @@ async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
     let config = ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         kifu_topdir: topdir.clone(),
-        total_time_sec: 60,
-        byoyomi_sec: 10,
+        clock,
         time_margin_ms: 1_500,
         max_moves: 256,
         login_timeout: Duration::from_secs(10),
@@ -280,6 +291,68 @@ fn login_ok_and_match_start_via_game_summary_and_agree() {
 }
 
 #[test]
+fn fischer_clock_summary_exposes_increment_field() {
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_with_clock(
+            "fischer_summary",
+            ClockSpec::Fischer {
+                total_time_sec: 60,
+                increment_sec: 5,
+            },
+        )
+        .await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let s_black = drain_game_summary(&mut rb).await;
+        let s_white = drain_game_summary(&mut rw).await;
+        for summary in [&s_black, &s_white] {
+            assert!(summary.iter().any(|l| l == "Time_Unit:1sec"), "{summary:?}");
+            assert!(summary.iter().any(|l| l == "Total_Time:60"), "{summary:?}");
+            assert!(summary.iter().any(|l| l == "Increment:5"), "{summary:?}");
+            assert!(!summary.iter().any(|l| l.starts_with("Byoyomi:")), "{summary:?}");
+        }
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn stopwatch_clock_summary_uses_minute_unit() {
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_with_clock(
+            "stopwatch_summary",
+            ClockSpec::StopWatch {
+                total_time_min: 15,
+                byoyomi_min: 1,
+            },
+        )
+        .await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let s_black = drain_game_summary(&mut rb).await;
+        let s_white = drain_game_summary(&mut rw).await;
+        for summary in [&s_black, &s_white] {
+            assert!(summary.iter().any(|l| l == "Time_Unit:1min"), "{summary:?}");
+            assert!(summary.iter().any(|l| l == "Total_Time:15"), "{summary:?}");
+            assert!(summary.iter().any(|l| l == "Byoyomi:1"), "{summary:?}");
+            assert!(!summary.iter().any(|l| l.starts_with("Increment:")), "{summary:?}");
+        }
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn kifu_and_zerozero_list_compatible_with_mk_rate() {
     run_local(|| async {
         let (addr, topdir) = spawn_server("kifu_fmt").await;
@@ -386,8 +459,10 @@ async fn spawn_server_with_agree_timeout(
     let config = ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         kifu_topdir: topdir.clone(),
-        total_time_sec: 60,
-        byoyomi_sec: 10,
+        clock: ClockSpec::Countdown {
+            total_time_sec: 60,
+            byoyomi_sec: 10,
+        },
         time_margin_ms: 1_500,
         max_moves: 256,
         login_timeout: Duration::from_secs(10),
@@ -954,6 +1029,26 @@ async fn spawn_server_with_admin(
     tag: &str,
     admin_handles: Vec<String>,
 ) -> (std::net::SocketAddr, PathBuf) {
+    spawn_server_custom(
+        tag,
+        ClockSpec::Countdown {
+            total_time_sec: 60,
+            byoyomi_sec: 10,
+        },
+        EnteringKingRule::Point24,
+        None,
+        admin_handles,
+    )
+    .await
+}
+
+async fn spawn_server_custom(
+    tag: &str,
+    clock: ClockSpec,
+    entering_king_rule: EnteringKingRule,
+    initial_sfen: Option<&str>,
+    admin_handles: Vec<String>,
+) -> (std::net::SocketAddr, PathBuf) {
     let topdir = unique_topdir(tag);
     let mut password_map = HashMap::new();
     for h in ["alice", "bob", "carol", "admin"] {
@@ -975,15 +1070,14 @@ async fn spawn_server_with_admin(
     let config = ServerConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         kifu_topdir: topdir.clone(),
-        total_time_sec: 60,
-        byoyomi_sec: 10,
+        clock,
         time_margin_ms: 1_500,
         max_moves: 256,
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
         x1_reply_write_timeout: Duration::from_secs(5),
-        entering_king_rule: EnteringKingRule::Point24,
-        initial_sfen: None,
+        entering_king_rule,
+        initial_sfen: initial_sfen.map(str::to_owned),
         admin_handles,
     };
     let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
@@ -1091,6 +1185,96 @@ fn getbuoycount_for_unknown_buoy_returns_not_found_without_admin_check() {
 }
 
 #[test]
+fn setbuoy_is_consumed_when_match_starts_and_summary_uses_derived_turn() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_admin("buoy_match_start", vec!["admin".to_owned()]).await;
+
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN admin+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:admin OK");
+        send_line(&mut wa, "%%SETBUOY g1 +7776FU 1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[SETBUOY] OK g1 1");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[SETBUOY] END");
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let s_black = drain_game_summary(&mut rb).await;
+        let s_white = drain_game_summary(&mut rw).await;
+        assert!(s_black.iter().any(|l| l == "To_Move:-"), "black summary: {s_black:?}");
+        assert!(s_white.iter().any(|l| l == "To_Move:-"), "white summary: {s_white:?}");
+
+        send_line(&mut wa, "%%GETBUOYCOUNT g1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] g1 0");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn fork_creates_single_use_buoy_from_existing_game() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_admin("fork_from_kifu", vec!["admin".to_owned()]).await;
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        let start_b = read_line_raw(&mut rb).await.unwrap();
+        let _ = read_line_raw(&mut rw).await.unwrap();
+        let source_game_id = start_b.trim_start_matches("START:").to_owned();
+        send_line(&mut wb, "+7776FU").await;
+        let _ = read_until(&mut rb, "+7776FU,T0").await;
+        let _ = read_until(&mut rw, "+7776FU,T0").await;
+        send_line(&mut ww, "%TORYO").await;
+        let _ = read_until(&mut rb, "#WIN").await;
+        let _ = read_until(&mut rw, "#LOSE").await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN admin+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:admin OK");
+        send_line(&mut wa, &format!("%%FORK {} forked 1", source_game_id)).await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] OK forked 1");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] END");
+        send_line(&mut wa, "%%GETBUOYCOUNT forked").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] forked 1");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        let (mut rb2, mut wb2) = connect(addr).await;
+        send_line(&mut wb2, "LOGIN alice+forked+black pw").await;
+        assert_eq!(read_line_raw(&mut rb2).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw2, mut ww2) = connect(addr).await;
+        send_line(&mut ww2, "LOGIN bob+forked+white pw").await;
+        assert_eq!(read_line_raw(&mut rw2).await.unwrap(), "LOGIN:bob OK");
+        let s_black = drain_game_summary(&mut rb2).await;
+        let s_white = drain_game_summary(&mut rw2).await;
+        assert!(s_black.iter().any(|l| l == "To_Move:-"), "forked black summary: {s_black:?}");
+        assert!(s_white.iter().any(|l| l == "To_Move:-"), "forked white summary: {s_white:?}");
+
+        send_line(&mut wa, "%%GETBUOYCOUNT forked").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] forked 0");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn monitor2_on_unknown_game_returns_not_found() {
     // 存在しない game_id への `%%MONITOR2ON` は `NOT_FOUND` を返し、購読状態を
     // 変更しない (broadcaster にも登録しない)。
@@ -1109,6 +1293,169 @@ fn monitor2_on_unknown_game_returns_not_found() {
         let chat = read_line_raw(&mut rc).await.unwrap();
         assert_eq!(chat, "##[CHAT] NOT_MONITORING");
         let _ = read_line_raw(&mut rc).await.unwrap(); // END
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn fork_gracefully_errors_and_keeps_connection_alive() {
+    // 元棋譜が存在しない場合・nth_move が範囲外の場合の `%%FORK` で接続が
+    // 切れずに `##[FORK] NOT_FOUND` / `##[FORK] ERROR ...` + `END` を返すこと
+    // を検証する (codex レビュー PR #474 P2)。検証後に `%%GETBUOYCOUNT` が
+    // 通ることで、waiter ループが健在であることを確認する。
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_admin("fork_graceful_error", vec!["admin".to_owned()]).await;
+
+        // admin で x1 接続。
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN admin+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:admin OK");
+
+        // 1) 存在しない game_id への FORK → NOT_FOUND。
+        send_line(&mut wa, "%%FORK nonexistent-game forked 1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] NOT_FOUND nonexistent-game");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] END");
+
+        // 接続が生きていることを %%GETBUOYCOUNT で確認。
+        send_line(&mut wa, "%%GETBUOYCOUNT nothing").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] NOT_FOUND nothing");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        // 2) 既存対局を作って nth_move を範囲外にした FORK → ERROR。
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        // START:<game_id> を読み取って game_id を確定する。
+        let start_b = read_line_raw(&mut rb).await.unwrap();
+        assert!(start_b.starts_with("START:"), "expected START line, got {start_b:?}");
+        let source_game_id = start_b.trim_start_matches("START:").to_owned();
+        let _ = read_line_raw(&mut rw).await.unwrap(); // white 側の START
+        send_line(&mut wb, "+7776FU,T0").await;
+        let _ = read_until(&mut rb, "+7776FU,T0").await;
+        let _ = read_until(&mut rw, "+7776FU,T0").await;
+        send_line(&mut ww, "%TORYO").await;
+        let _ = read_until(&mut rb, "#WIN").await;
+        let _ = read_until(&mut rw, "#LOSE").await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // nth_move=999 は範囲外。切断せず ERROR + END を返す。
+        send_line(&mut wa, &format!("%%FORK {source_game_id} bad 999")).await;
+        let err_line = read_line_raw(&mut ra).await.unwrap();
+        assert!(
+            err_line.starts_with("##[FORK] ERROR bad"),
+            "expected graceful ERROR response, got {err_line:?}",
+        );
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] END");
+
+        // まだ接続は生きている。
+        send_line(&mut wa, "%%GETBUOYCOUNT bad").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] NOT_FOUND bad");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn uchifuzume_from_initial_sfen_ends_as_illegal_move_e2e() {
+    // Phase 3 acceptance: 打ち歩詰の典型局面を TCP E2E で流し、
+    // `#ILLEGAL_MOVE` → `#LOSE/#WIN` が wire されることを固定する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_custom(
+            "uchifuzume_e2e",
+            ClockSpec::Countdown {
+                total_time_sec: 60,
+                byoyomi_sec: 10,
+            },
+            EnteringKingRule::Point24,
+            Some("8k/6G2/8+P/9/9/9/9/9/4K4 b P 1"),
+            Vec::new(),
+        )
+        .await;
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        let _ = read_line_raw(&mut rb).await.unwrap();
+        let _ = read_line_raw(&mut rw).await.unwrap();
+
+        send_line(&mut wb, "+0012FU").await;
+        let black_end = read_until(&mut rb, "#LOSE").await;
+        let white_end = read_until(&mut rw, "#WIN").await;
+        assert!(black_end.iter().any(|l| l == "#ILLEGAL_MOVE"), "black_end: {black_end:?}");
+        assert!(white_end.iter().any(|l| l == "#ILLEGAL_MOVE"), "white_end: {white_end:?}");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn oute_sennichite_from_initial_sfen_ends_as_perpetual_check_loss_e2e() {
+    // Phase 3 acceptance: 連続王手千日手の最小循環を TCP E2E で流し、
+    // `#OUTE_SENNICHITE` が終局メッセージとして表に出ることを確認する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server_custom(
+            "oute_sennichite_e2e",
+            ClockSpec::Countdown {
+                total_time_sec: 60,
+                byoyomi_sec: 10,
+            },
+            EnteringKingRule::Point24,
+            Some("9/6k2/9/9/9/9/9/6R2/K8 w - 1"),
+            Vec::new(),
+        )
+        .await;
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let s_black = drain_game_summary(&mut rb).await;
+        let s_white = drain_game_summary(&mut rw).await;
+        assert!(s_black.iter().any(|l| l == "To_Move:-"), "black summary: {s_black:?}");
+        assert!(s_white.iter().any(|l| l == "To_Move:-"), "white summary: {s_white:?}");
+
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        let _ = read_line_raw(&mut rb).await.unwrap();
+        let _ = read_line_raw(&mut rw).await.unwrap();
+
+        send_line(&mut ww, "-3242OU").await;
+        let _ = read_until(&mut rb, "-3242OU,T0").await;
+        let _ = read_until(&mut rw, "-3242OU,T0").await;
+        send_line(&mut wb, "+3848HI").await;
+        let _ = read_until(&mut rb, "+3848HI,T0").await;
+        let _ = read_until(&mut rw, "+3848HI,T0").await;
+        send_line(&mut ww, "-4232OU").await;
+        let _ = read_until(&mut rb, "-4232OU,T0").await;
+        let _ = read_until(&mut rw, "-4232OU,T0").await;
+        send_line(&mut wb, "+4838HI").await;
+
+        let black_end = read_until(&mut rb, "#LOSE").await;
+        let white_end = read_until(&mut rw, "#WIN").await;
+        assert!(black_end.iter().any(|l| l == "#OUTE_SENNICHITE"), "black_end: {black_end:?}");
+        assert!(white_end.iter().any(|l| l == "#OUTE_SENNICHITE"), "white_end: {white_end:?}");
+
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }

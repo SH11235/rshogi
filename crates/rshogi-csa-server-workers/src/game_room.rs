@@ -2,7 +2,8 @@
 //!
 //! 1 部屋 = 1 DO インスタンス。以下のライフサイクルを駆動する:
 //!
-//! 1. **WebSocket Upgrade** (`fetch`): [`WsAttachment::Pending`] を付けて
+//! 1. **WebSocket Upgrade** (`fetch`): 対局者は [`WsAttachment::Pending`]、
+//!    観戦者は [`WsAttachment::Spectator`] を付けて
 //!    `state.accept_web_socket` で hibernation を有効化する。
 //! 2. **LOGIN** (`websocket_message` / pending): `<handle>+<game_name>+<color>`
 //!    形式を分解し、役割 (Role) 付きスロットとして [`state.storage().put`] に
@@ -38,7 +39,7 @@ use worker::{
 };
 
 use rshogi_core::types::EnteringKingRule;
-use rshogi_csa_server::game::clock::SecondsCountdownClock;
+use rshogi_csa_server::ClockSpec;
 use rshogi_csa_server::game::clock::TimeClock;
 use rshogi_csa_server::game::room::{
     BroadcastEntry, BroadcastTarget, GameRoom as CoreRoom, GameRoomConfig, HandleOutcome,
@@ -49,17 +50,17 @@ use rshogi_csa_server::protocol::summary::{
     GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
     standard_initial_position_block,
 };
-use rshogi_csa_server::types::{Color, CsaLine, GameId, PlayerName};
+use rshogi_csa_server::record::kifu::{fork_initial_sfen_from_kifu, initial_sfen_from_csa_moves};
+use rshogi_csa_server::types::{Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName};
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
-use crate::config::ConfigKeys;
+use crate::config::{ConfigKeys, parse_clock_spec};
 use crate::datetime::{format_csa_datetime, format_date_path};
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
+use crate::spectator_control::{MonitorDecision, resolve_monitor_target};
+use crate::ws_route::{WsRoute, parse_ws_route};
+use crate::x1_paths::{buoy_object_key, default_fork_buoy_name, kifu_by_id_object_key};
 
-/// 時計既定値 (Floodgate 600-10 互換)。実運用で可変にする必要が出たら
-/// `PersistedConfig` を受け取る構成に切り替える。
-const DEFAULT_MAIN_TIME_SEC: u32 = 600;
-const DEFAULT_BYOYOMI_SEC: u32 = 10;
 const DEFAULT_MAX_MOVES: u32 = 256;
 const DEFAULT_TIME_MARGIN_MS: u64 = 1000;
 
@@ -86,6 +87,30 @@ const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
 
+/// 旧 schema との互換用に `main_time_sec` / `byoyomi_sec` を秒単位で返す。
+///
+/// StopWatch は内部表現が分単位だが、フィールド名が `_sec` なので秒単位に
+/// 揃えて JSON を内部整合させる (Copilot レビュー指摘)。ClockSpec 自体も
+/// `clock` に丸ごと永続化しているため、legacy フィールドは ClockSpec が
+/// 無い旧 JSON からの fallback 専用だが、それでも単位不整合は footgun なので
+/// 秒に正規化しておく。
+fn legacy_clock_fields(clock: &ClockSpec) -> (u32, u32) {
+    match clock {
+        ClockSpec::Countdown {
+            total_time_sec,
+            byoyomi_sec,
+        } => (*total_time_sec, *byoyomi_sec),
+        ClockSpec::Fischer {
+            total_time_sec,
+            increment_sec,
+        } => (*total_time_sec, *increment_sec),
+        ClockSpec::StopWatch {
+            total_time_min,
+            byoyomi_min,
+        } => (total_time_min.saturating_mul(60), byoyomi_min.saturating_mul(60)),
+    }
+}
+
 /// マッチ成立時に永続化する対局設定。CoreRoom の再構築に必要な最小情報。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedConfig {
@@ -95,6 +120,10 @@ struct PersistedConfig {
     game_name: String,
     main_time_sec: u32,
     byoyomi_sec: u32,
+    /// 新しい時計設定。旧 JSON では欠落するため `None` を許容し、legacy
+    /// `main_time_sec/byoyomi_sec` へ fallback する。
+    #[serde(default)]
+    clock: Option<ClockSpec>,
     max_moves: u32,
     time_margin_ms: u64,
     /// マッチ成立（2 人目の LOGIN 受理）時刻。`$START_TIME` などの参考に使う。
@@ -111,6 +140,15 @@ struct PersistedConfig {
     initial_sfen: Option<String>,
 }
 
+impl PersistedConfig {
+    fn clock_spec(&self) -> ClockSpec {
+        self.clock.clone().unwrap_or(ClockSpec::Countdown {
+            total_time_sec: self.main_time_sec,
+            byoyomi_sec: self.byoyomi_sec,
+        })
+    }
+}
+
 /// 終局フラグ。一度 `Some` になったらその DO は同じ対局を二度開始しない。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FinishedState {
@@ -125,6 +163,21 @@ struct MoveRow {
     color: String,
     line: String,
     at_ms: i64,
+}
+
+/// R2 上の buoy 保存フォーマット。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedBuoy {
+    moves: Vec<String>,
+    remaining: u32,
+    #[serde(default)]
+    initial_sfen: Option<String>,
+}
+
+enum BuoyReservation {
+    Missing,
+    Reserved(Option<String>),
+    Exhausted,
 }
 
 /// 1 対局分の Durable Object。
@@ -151,9 +204,10 @@ impl DurableObject for GameRoom {
     async fn fetch(&self, req: Request) -> Result<Response> {
         let url = req.url()?;
         let path = url.path();
-        let Some(room_id) = path.strip_prefix("/ws/") else {
+        let Some(route) = parse_ws_route(&path) else {
             return Response::error("Upgrade required", 426);
         };
+        let room_id = route.room_id();
 
         // 初回 fetch でのみ room_id を永続化する。`start_match` 側で game_id 生成に
         // 使うため、DO 再構築後でも同じ値を参照できるよう storage に置く。
@@ -168,7 +222,10 @@ impl DurableObject for GameRoom {
         let server = pair.server;
         self.state.accept_web_socket(&server);
 
-        let pending = WsAttachment::Pending;
+        let pending = match route {
+            WsRoute::Player { .. } => WsAttachment::Pending,
+            WsRoute::Spectator { room_id } => WsAttachment::spectator(room_id),
+        };
         server
             .serialize_attachment(&pending)
             .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
@@ -193,15 +250,10 @@ impl DurableObject for GameRoom {
         match attachment {
             WsAttachment::Pending => self.handle_login(&ws, &line).await,
             WsAttachment::Player { role, handle, .. } => {
-                self.handle_game_line(role, &handle, &line).await
+                self.handle_game_line(&ws, role, &handle, &line).await
             }
-            // 観戦者の受付ルート (`/ws/<room_id>/spectate`) と observer 系コマンドは
-            // 後続 PR で `router::handle_fetch` / `GameRoom` DO へ配線する。現時点では
-            // `WsAttachment::Spectator` 付きセッションは enum 互換性のためだけに存在し、
-            // 受信行は黙って破棄する (Player 経路への誤入を防ぐ)。
-            WsAttachment::Spectator { .. } => {
-                console_log!("[GameRoom] spectator message ignored (route not wired yet)");
-                Ok(())
+            WsAttachment::Spectator { room_id } => {
+                self.handle_spectator_line(&ws, &room_id, &line).await
             }
         }
     }
@@ -267,7 +319,10 @@ impl DurableObject for GameRoom {
             let Some(core) = borrow.as_mut() else {
                 return Response::ok("no core");
             };
-            let loser = current_turn_color(core.moves_played());
+            // 時計切れ側は現在手番（SFEN `side_to_move` を起点に手数で交代した
+            // 色）。buoy / `%%FORK` で白開始の局面でも正しく白を時間切れ扱いに
+            // する。
+            let loser = core.current_turn();
             Some(core.force_time_up(loser))
         };
         if let Some(result) = outcome {
@@ -348,7 +403,7 @@ impl GameRoom {
             game_name,
         } = evaluate_match(&next_slots)
         {
-            self.start_match(&black_handle, &white_handle, &game_name).await?;
+            let _ = self.start_match(&black_handle, &white_handle, &game_name).await?;
         }
 
         Ok(())
@@ -360,7 +415,7 @@ impl GameRoom {
         black_handle: &str,
         white_handle: &str,
         game_name: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // `room_id` は fetch 時に永続化している（DO インスタンス = room_id なので
         // 他 DO と衝突しない。game_id は `<room_id>-<epoch_ms>` 形式で、
         // 別 DO が同一ミリ秒にマッチしても R2 キー `YYYY/MM/DD/<game_id>.csa` が
@@ -373,29 +428,58 @@ impl GameRoom {
             .await?
             .unwrap_or_else(|| "unknown".to_owned());
         let game_id = format!("{room_id}-{started}");
+        let clock_spec = load_clock_spec_from_env(&self.env)?;
+        let (main_time_sec, byoyomi_sec) = legacy_clock_fields(&clock_spec);
+        // 双方の LOGIN は既に OK を返しているので、予約で失敗したまま早期
+        // return するとスロットが永久に詰まる。Exhausted に加え、CAS リトライ
+        // 上限到達などの Err も pending match abort 経路に落として部屋を
+        // 再利用可能にする (codex レビュー PR #474 2nd round P2)。
+        let reservation = match self.reserve_initial_sfen_from_buoy(&GameName::new(game_name)).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] buoy '{game_name}' reservation failed: {e:?}; rejecting pending match"
+                );
+                self.abort_pending_match_with_error(&format!(
+                    "##[ERROR] buoy '{game_name}' reservation failed"
+                ))
+                .await?;
+                return Ok(false);
+            }
+        };
+        let initial_sfen = match reservation {
+            BuoyReservation::Missing => None,
+            BuoyReservation::Reserved(initial_sfen) => initial_sfen,
+            BuoyReservation::Exhausted => {
+                console_log!("[GameRoom] buoy '{game_name}' exhausted; rejecting pending match");
+                self.abort_pending_match_with_error(&format!(
+                    "##[ERROR] buoy '{game_name}' exhausted"
+                ))
+                .await?;
+                return Ok(false);
+            }
+        };
 
         let cfg = PersistedConfig {
             game_id: game_id.clone(),
             black_handle: black_handle.to_owned(),
             white_handle: white_handle.to_owned(),
             game_name: game_name.to_owned(),
-            main_time_sec: DEFAULT_MAIN_TIME_SEC,
-            byoyomi_sec: DEFAULT_BYOYOMI_SEC,
+            main_time_sec,
+            byoyomi_sec,
+            clock: Some(clock_spec.clone()),
             max_moves: DEFAULT_MAX_MOVES,
             time_margin_ms: DEFAULT_TIME_MARGIN_MS,
             matched_at_ms: started,
             play_started_at_ms: None,
-            // `%%FORK` / buoy 成立経路は未配線のため現時点では常に平手で開始する。
-            // 将来 buoy / fork 経由でここに SFEN が入った場合、cold start 復元も
-            // 同じ SFEN から立ち上がる (PersistedConfig 経由で永続化しているため)。
-            initial_sfen: None,
+            initial_sfen,
         };
         self.state.storage().put(KEY_CONFIG, &cfg).await?;
 
         // CoreRoom を構築して in-memory に置く。
-        let clock: Box<dyn TimeClock> =
-            Box::new(SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec));
-        let time_section = clock.format_summary();
+        let clock: Box<dyn TimeClock> = clock_spec.build_clock();
+        let time_section = clock_spec.format_time_section();
         // initial_sfen 指定時は Game_Summary `position_section` / `To_Move` を
         // 同じ SFEN から派生させる。未指定時は平手相当のブロックと `Color::Black`。
         let (position_section, to_move) = match cfg.initial_sfen.as_deref() {
@@ -443,20 +527,39 @@ impl GameRoom {
         self.send_to_role(Role::Black, &summary_black).await?;
         self.send_to_role(Role::White, &summary_white).await?;
 
-        Ok(())
+        Ok(true)
     }
 
     /// 対局中のプレイヤからの行を CoreRoom に流す。
-    async fn handle_game_line(&self, role: Role, handle: &str, line: &str) -> Result<()> {
+    async fn handle_game_line(
+        &self,
+        ws: &WebSocket,
+        role: Role,
+        handle: &str,
+        line: &str,
+    ) -> Result<()> {
         if self.load_finished().await?.is_some() {
             // 終局後に届いた行は無視する。
+            return Ok(());
+        }
+
+        let csa = CsaLine::new(line);
+        if let Ok(cmd) = parse_command(&csa) {
+            if let Some(replies) = self.handle_player_control_command(handle, cmd).await? {
+                for out in replies {
+                    send_line(ws, &out)?;
+                }
+                return Ok(());
+            }
+        }
+
+        if self.active_game_id().await?.is_none() && !self.try_start_pending_match().await? {
             return Ok(());
         }
 
         self.ensure_core_loaded().await?;
         let now = self.now_ms();
         let color = role.to_core();
-        let csa = CsaLine::new(line);
 
         let result = {
             let mut borrow = self.core.borrow_mut();
@@ -489,6 +592,321 @@ impl GameRoom {
         Ok(())
     }
 
+    /// 観戦者からの制御行。`%%CHAT` を同一 room の全参加者へ relay し、
+    /// `%%MONITOR2OFF` は確認応答後に socket を閉じる。
+    async fn handle_spectator_line(&self, ws: &WebSocket, room_id: &str, line: &str) -> Result<()> {
+        let csa = CsaLine::new(line);
+        let Ok(cmd) = parse_command(&csa) else {
+            return Ok(());
+        };
+        let active_game_id = self.active_game_id().await?;
+        let monitor_id = active_game_id.as_deref().unwrap_or(room_id);
+        match cmd {
+            ClientCommand::KeepAlive => Ok(()),
+            ClientCommand::Chat { message } => {
+                self.relay_chat("spectator", &message).await?;
+                send_line(ws, &format!("##[CHAT] OK {monitor_id}"))?;
+                send_line(ws, "##[CHAT] END")?;
+                Ok(())
+            }
+            ClientCommand::Monitor2Off { game_id } => {
+                match resolve_monitor_target(room_id, active_game_id.as_deref(), game_id.as_str()) {
+                    MonitorDecision::Accept { monitor_id } => {
+                        send_line(ws, &format!("##[MONITOR2OFF] {monitor_id}"))?;
+                        send_line(ws, "##[MONITOR2OFF] END")?;
+                        let _ = ws.close(Some(1000), Some("spectator off".to_owned()));
+                    }
+                    MonitorDecision::NotFound { requested } => {
+                        send_line(ws, &format!("##[MONITOR2OFF] NOT_FOUND {requested}"))?;
+                        send_line(ws, "##[MONITOR2OFF] END")?;
+                    }
+                }
+                Ok(())
+            }
+            ClientCommand::Monitor2On { game_id } => {
+                match resolve_monitor_target(room_id, active_game_id.as_deref(), game_id.as_str()) {
+                    MonitorDecision::Accept { monitor_id } => {
+                        send_line(ws, &format!("##[MONITOR2] BEGIN {monitor_id}"))?;
+                    }
+                    MonitorDecision::NotFound { requested } => {
+                        send_line(ws, &format!("##[MONITOR2] NOT_FOUND {requested}"))?;
+                    }
+                }
+                send_line(ws, "##[MONITOR2] END")?;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// プレイヤー接続から受け付ける制御系コマンドを処理する。
+    ///
+    /// `Some(replies)` を返した場合は、呼び出し側が返信行を送って通常の
+    /// `CoreRoom::handle_line` 経路をスキップする。
+    async fn handle_player_control_command(
+        &self,
+        handle: &str,
+        cmd: ClientCommand,
+    ) -> Result<Option<Vec<String>>> {
+        match cmd {
+            ClientCommand::Chat { message } => {
+                self.relay_chat(handle, &message).await?;
+                let monitor_id = self.current_monitor_id().await?;
+                Ok(Some(vec![
+                    format!("##[CHAT] OK {monitor_id}"),
+                    "##[CHAT] END".to_owned(),
+                ]))
+            }
+            ClientCommand::SetBuoy {
+                game_name,
+                moves,
+                count,
+            } => {
+                if !self.is_admin_handle(handle) {
+                    return Ok(Some(vec![
+                        format!("##[SETBUOY] PERMISSION_DENIED {game_name}"),
+                        "##[SETBUOY] END".to_owned(),
+                    ]));
+                }
+                let derived = match initial_sfen_from_csa_moves(&moves) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Ok(Some(vec![
+                            format!("##[SETBUOY] ERROR {game_name} {e}"),
+                            "##[SETBUOY] END".to_owned(),
+                        ]));
+                    }
+                };
+                let doc = PersistedBuoy {
+                    moves: moves.into_iter().map(|m| m.as_str().to_owned()).collect(),
+                    remaining: count,
+                    initial_sfen: Some(derived),
+                };
+                if let Err(e) = self.store_buoy(&game_name, &doc).await {
+                    return Ok(Some(vec![
+                        format!("##[SETBUOY] ERROR {game_name} {e}"),
+                        "##[SETBUOY] END".to_owned(),
+                    ]));
+                }
+                Ok(Some(vec![
+                    format!("##[SETBUOY] OK {game_name} {count}"),
+                    "##[SETBUOY] END".to_owned(),
+                ]))
+            }
+            ClientCommand::DeleteBuoy { game_name } => {
+                if !self.is_admin_handle(handle) {
+                    return Ok(Some(vec![
+                        format!("##[DELETEBUOY] PERMISSION_DENIED {game_name}"),
+                        "##[DELETEBUOY] END".to_owned(),
+                    ]));
+                }
+                if let Err(e) = self.delete_buoy(&game_name).await {
+                    return Ok(Some(vec![
+                        format!("##[DELETEBUOY] ERROR {game_name} {e}"),
+                        "##[DELETEBUOY] END".to_owned(),
+                    ]));
+                }
+                Ok(Some(vec![
+                    format!("##[DELETEBUOY] OK {game_name}"),
+                    "##[DELETEBUOY] END".to_owned(),
+                ]))
+            }
+            ClientCommand::GetBuoyCount { game_name } => match self.load_buoy(&game_name).await {
+                Ok(Some(doc)) => Ok(Some(vec![
+                    format!("##[GETBUOYCOUNT] {game_name} {}", doc.remaining),
+                    "##[GETBUOYCOUNT] END".to_owned(),
+                ])),
+                Ok(None) => Ok(Some(vec![
+                    format!("##[GETBUOYCOUNT] NOT_FOUND {game_name}"),
+                    "##[GETBUOYCOUNT] END".to_owned(),
+                ])),
+                Err(e) => Ok(Some(vec![
+                    format!("##[GETBUOYCOUNT] ERROR {game_name} {e}"),
+                    "##[GETBUOYCOUNT] END".to_owned(),
+                ])),
+            },
+            ClientCommand::Fork {
+                source_game,
+                new_buoy,
+                nth_move,
+            } => {
+                let buoy_name = new_buoy.unwrap_or_else(|| {
+                    GameName::new(default_fork_buoy_name(source_game.as_str(), nth_move))
+                });
+                let csa_v2 = match self.load_kifu_by_game_id(&source_game).await {
+                    Ok(Some(csa_v2)) => csa_v2,
+                    Ok(None) => {
+                        return Ok(Some(vec![
+                            format!("##[FORK] NOT_FOUND {source_game}"),
+                            "##[FORK] END".to_owned(),
+                        ]));
+                    }
+                    Err(e) => {
+                        return Ok(Some(vec![
+                            format!("##[FORK] ERROR {buoy_name} {e}"),
+                            "##[FORK] END".to_owned(),
+                        ]));
+                    }
+                };
+                let (initial_sfen, applied_moves) =
+                    match fork_initial_sfen_from_kifu(&csa_v2, nth_move) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return Ok(Some(vec![
+                                format!("##[FORK] ERROR {buoy_name} {e}"),
+                                "##[FORK] END".to_owned(),
+                            ]));
+                        }
+                    };
+                let doc = PersistedBuoy {
+                    moves: Vec::new(),
+                    remaining: 1,
+                    initial_sfen: Some(initial_sfen),
+                };
+                if let Err(e) = self.store_buoy(&buoy_name, &doc).await {
+                    return Ok(Some(vec![
+                        format!("##[FORK] ERROR {buoy_name} {e}"),
+                        "##[FORK] END".to_owned(),
+                    ]));
+                }
+                Ok(Some(vec![
+                    format!("##[FORK] OK {buoy_name} {applied_moves}"),
+                    "##[FORK] END".to_owned(),
+                ]))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn is_admin_handle(&self, handle: &str) -> bool {
+        let configured = self.env.var(ConfigKeys::ADMIN_HANDLE).ok().map(|v| v.to_string());
+        configured
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some_and(|admin| admin == handle)
+    }
+
+    async fn reserve_initial_sfen_from_buoy(
+        &self,
+        game_name: &GameName,
+    ) -> Result<BuoyReservation> {
+        // R2 には CAS プリミティブが無い代わりに conditional PUT（etag 一致時
+        // のみ書き込み）が使える。`load → decrement → put(onlyIf=etag)` を
+        // リトライループで回し、別 DO が同時に同じ buoy を予約してきた場合は
+        // etag 不一致で put が Ok(None) に落ちるので再読み込みする。
+        //
+        // リトライ上限は 5 回。実運用では同一 buoy への同時アクセスは稀と
+        // 見込むが、同一 game_name の room が連続して LOGIN を受けると再試行
+        // が必要になり得る。上限に達したら Exhausted 相当にフォールバックせず
+        // 明示的なエラーを返し、`abort_pending_match_with_error` 経由で部屋を
+        // 閉じる（静かな誤受理より fail-fast の方が運用上安全）。
+        const MAX_ATTEMPTS: u32 = 5;
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = buoy_object_key(game_name.as_str());
+        for attempt in 0..MAX_ATTEMPTS {
+            let Some(obj) = bucket.get(&key).execute().await? else {
+                return Ok(BuoyReservation::Missing);
+            };
+            let etag = obj.etag();
+            let Some(body) = obj.body() else {
+                return Ok(BuoyReservation::Missing);
+            };
+            let text = body.text().await?;
+            let mut buoy: PersistedBuoy = serde_json::from_str(&text)
+                .map_err(|e| Error::RustError(format!("parse buoy json: {e}")))?;
+            if buoy.remaining == 0 {
+                return Ok(BuoyReservation::Exhausted);
+            }
+            let reserved_initial_sfen = match buoy.initial_sfen.as_ref() {
+                Some(sfen) => Some(sfen.clone()),
+                None => {
+                    let moves: Vec<CsaMoveToken> =
+                        buoy.moves.iter().map(|mv| CsaMoveToken::new(mv.as_str())).collect();
+                    Some(initial_sfen_from_csa_moves(&moves).map_err(Error::RustError)?)
+                }
+            };
+            buoy.remaining -= 1;
+            let payload = serde_json::to_vec(&buoy)
+                .map_err(|e| Error::RustError(format!("serialize buoy json: {e}")))?;
+            let put_result = bucket
+                .put(&key, payload)
+                .only_if(worker::Conditional {
+                    etag_matches: Some(etag),
+                    ..Default::default()
+                })
+                .execute()
+                .await?;
+            if put_result.is_some() {
+                return Ok(BuoyReservation::Reserved(reserved_initial_sfen));
+            }
+            console_log!(
+                "[GameRoom] buoy '{}' reservation etag mismatch, retry {}/{MAX_ATTEMPTS}",
+                game_name.as_str(),
+                attempt + 1,
+            );
+        }
+        Err(Error::RustError(format!(
+            "buoy '{}' reservation retry exhausted after {MAX_ATTEMPTS} attempts",
+            game_name.as_str(),
+        )))
+    }
+
+    async fn try_start_pending_match(&self) -> Result<bool> {
+        let slots = self.load_slots().await?;
+        let MatchResult::Match {
+            black_handle,
+            white_handle,
+            game_name,
+        } = evaluate_match(&slots)
+        else {
+            return Ok(false);
+        };
+        self.start_match(&black_handle, &white_handle, &game_name).await
+    }
+
+    async fn load_kifu_by_game_id(&self, game_id: &GameId) -> Result<Option<String>> {
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = kifu_by_id_object_key(game_id.as_str());
+        let Some(obj) = bucket.get(&key).execute().await? else {
+            return Ok(None);
+        };
+        let Some(body) = obj.body() else {
+            return Ok(None);
+        };
+        Ok(Some(body.text().await?))
+    }
+
+    async fn load_buoy(&self, game_name: &GameName) -> Result<Option<PersistedBuoy>> {
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = buoy_object_key(game_name.as_str());
+        let Some(obj) = bucket.get(&key).execute().await? else {
+            return Ok(None);
+        };
+        let Some(body) = obj.body() else {
+            return Ok(None);
+        };
+        let text = body.text().await?;
+        let doc = serde_json::from_str::<PersistedBuoy>(&text)
+            .map_err(|e| Error::RustError(format!("parse buoy json: {e}")))?;
+        Ok(Some(doc))
+    }
+
+    async fn store_buoy(&self, game_name: &GameName, doc: &PersistedBuoy) -> Result<()> {
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = buoy_object_key(game_name.as_str());
+        let payload = serde_json::to_vec(doc)
+            .map_err(|e| Error::RustError(format!("serialize buoy json: {e}")))?;
+        bucket.put(&key, payload).execute().await?;
+        Ok(())
+    }
+
+    async fn delete_buoy(&self, game_name: &GameName) -> Result<()> {
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = buoy_object_key(game_name.as_str());
+        bucket.delete(&key).await
+    }
+
     /// 直前の `HandleOutcome` に応じて Alarm を張り替える。
     ///
     /// - `GameStarted` / `MoveAccepted`: 次手番側が使える残時間 (main + byoyomi) を
@@ -503,7 +921,7 @@ impl GameRoom {
                     let Some(core) = borrow.as_ref() else {
                         return Ok(());
                     };
-                    let next_turn = current_turn_color(core.moves_played());
+                    let next_turn = core.current_turn();
                     core.clock_turn_budget_ms(next_turn)
                 };
                 let margin_ms = self
@@ -541,11 +959,23 @@ impl GameRoom {
                     self.send_to_role(Role::Black, entry.line.as_str()).await?;
                     self.send_to_role(Role::White, entry.line.as_str()).await?;
                 }
-                // 観戦者は本クレートが扱わないので Spectators は no-op。
-                BroadcastTarget::Spectators => {}
+                BroadcastTarget::Spectators => {
+                    self.send_to_spectators(entry.line.as_str()).await?;
+                }
+            }
+            if matches!(entry.target, BroadcastTarget::All) {
+                self.send_to_spectators(entry.line.as_str()).await?;
             }
         }
         Ok(())
+    }
+
+    /// 同一 room の対局者 + 観戦者全員へ chat を relay する。
+    async fn relay_chat(&self, sender: &str, message: &str) -> Result<()> {
+        let line = format!("##[CHAT] {sender}: {message}");
+        self.send_to_role(Role::Black, &line).await?;
+        self.send_to_role(Role::White, &line).await?;
+        self.send_to_spectators(&line).await
     }
 
     /// 終局したなら R2 に棋譜を書き出し、finished フラグを立てて両 ws を close する。
@@ -615,8 +1045,7 @@ impl GameRoom {
 
         // `time_section` は clock の初期設定値に依存し、持ち時間の残量には
         // 左右されないので cfg から再構築しても同じ出力になる。
-        let time_section =
-            SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec).format_summary();
+        let time_section = cfg.clock_spec().format_time_section();
 
         let start_str = format_csa_datetime(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
         let end_str = format_csa_datetime(ended_at_ms);
@@ -642,10 +1071,31 @@ impl GameRoom {
 
         let date_path = format_date_path(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
         let key = format!("{date_path}/{}.csa", cfg.game_id);
+        let by_id_key = kifu_by_id_object_key(&cfg.game_id);
 
         let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
         bucket.put(&key, text.as_bytes().to_vec()).execute().await?;
+        bucket.put(&by_id_key, text.as_bytes().to_vec()).execute().await?;
         console_log!("[GameRoom] kifu exported to R2 key='{key}'");
+        Ok(())
+    }
+
+    /// マッチ開始直前の致命的条件（buoy 枯渇等）で対局を開始できない場合に、
+    /// 既に LOGIN OK を受けている Player ロールの WS 全員にエラー行を送出し、
+    /// 接続を閉じてスロットを空にする。
+    ///
+    /// ここでクリアしないと、スロットは Match 状態のまま残ってしまい 2 人目に
+    /// Game_Summary もエラーも届かないため、部屋が永久に詰まる (codex review
+    /// PR #474 P2)。
+    async fn abort_pending_match_with_error(&self, error_line: &str) -> Result<()> {
+        for ws in self.state.get_websockets() {
+            let att: Option<WsAttachment> = ws.deserialize_attachment().ok().flatten();
+            if matches!(att, Some(WsAttachment::Player { .. })) {
+                let _ = send_line(&ws, error_line);
+                let _ = ws.close(Some(1011), Some("match aborted".to_owned()));
+            }
+        }
+        self.state.storage().put(KEY_SLOTS, &Vec::<Slot>::new()).await?;
         Ok(())
     }
 
@@ -661,6 +1111,41 @@ impl GameRoom {
             }
         }
         Ok(())
+    }
+
+    /// 全観戦者へ 1 行送出する。
+    ///
+    /// 観戦者は best-effort 配信。特定の WS への書き込みが失敗しても他の
+    /// 観戦者や対局進行を止めず、エラーは log に落として継続する (Copilot
+    /// レビュー指摘)。観戦者 1 人の切断が DO を不安定化させないようにする。
+    async fn send_to_spectators(&self, line: &str) -> Result<()> {
+        for ws in self.state.get_websockets() {
+            let att: Option<WsAttachment> = ws.deserialize_attachment().ok().flatten();
+            if let Some(WsAttachment::Spectator { .. }) = att
+                && let Err(e) = send_line(&ws, line)
+            {
+                console_log!("[GameRoom] spectator send failed (ignored): {e:?}");
+            }
+        }
+        Ok(())
+    }
+
+    /// 現在アクティブな `game_id` を返す。マッチ成立前は `None`。
+    async fn active_game_id(&self) -> Result<Option<String>> {
+        if let Some(cfg) = self.config.borrow().as_ref() {
+            return Ok(Some(cfg.game_id.clone()));
+        }
+        let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
+        Ok(cfg_opt.map(|cfg| cfg.game_id))
+    }
+
+    /// 応答に載せる現在の観戦対象 ID。対局中は `game_id`、それ以前は `room_id`。
+    async fn current_monitor_id(&self) -> Result<String> {
+        if let Some(game_id) = self.active_game_id().await? {
+            return Ok(game_id);
+        }
+        let room_id: Option<String> = self.state.storage().get(KEY_ROOM_ID).await?;
+        Ok(room_id.unwrap_or_else(|| "unknown".to_owned()))
     }
 
     /// CoreRoom が in-memory に無ければ永続化から復元する（`moves` replay 付き）。
@@ -688,8 +1173,7 @@ impl GameRoom {
         let Some(cfg) = cfg_opt else {
             return Ok(());
         };
-        let clock: Box<dyn TimeClock> =
-            Box::new(SecondsCountdownClock::new(cfg.main_time_sec, cfg.byoyomi_sec));
+        let clock: Box<dyn TimeClock> = cfg.clock_spec().build_clock();
         // 永続化済み initial_sfen を信用して CoreRoom を再構築。もし永続化データが
         // 壊れて `set_sfen` が落ちる場合は panic ではなく Err として返し、呼び出し側
         // (`ensure_core_loaded`) の Result で伝搬できるようにする (Codex review
@@ -827,16 +1311,6 @@ impl GameRoom {
     }
 }
 
-/// 既消費手数から次の手番色を導出する。平手開始は先手 (Black) なので偶数手目の
-/// 次手番は Black、奇数手目の次手番は White。replay 後や Alarm 起動時に呼ぶ。
-fn current_turn_color(moves_played: u32) -> Color {
-    if moves_played % 2 == 0 {
-        Color::Black
-    } else {
-        Color::White
-    }
-}
-
 /// 末尾改行を付けて 1 行送出する。CSA 行は改行終端が契約なので、
 /// アダプタレイヤ（この関数）で 1 箇所に集約する。
 fn send_line(ws: &WebSocket, line: &str) -> Result<()> {
@@ -847,4 +1321,20 @@ fn send_line(ws: &WebSocket, line: &str) -> Result<()> {
     }
     ws.send_with_str(&out)
         .map_err(|e| Error::RustError(format!("send_with_str: {e}")))
+}
+
+fn load_clock_spec_from_env(env: &Env) -> Result<ClockSpec> {
+    let clock_kind = env.var(ConfigKeys::CLOCK_KIND).ok().map(|v| v.to_string());
+    let total_time_sec = env.var(ConfigKeys::TOTAL_TIME_SEC).ok().map(|v| v.to_string());
+    let byoyomi_sec = env.var(ConfigKeys::BYOYOMI_SEC).ok().map(|v| v.to_string());
+    let total_time_min = env.var(ConfigKeys::TOTAL_TIME_MIN).ok().map(|v| v.to_string());
+    let byoyomi_min = env.var(ConfigKeys::BYOYOMI_MIN).ok().map(|v| v.to_string());
+    parse_clock_spec(
+        clock_kind.as_deref(),
+        total_time_sec.as_deref(),
+        byoyomi_sec.as_deref(),
+        total_time_min.as_deref(),
+        byoyomi_min.as_deref(),
+    )
+    .map_err(Error::RustError)
 }
