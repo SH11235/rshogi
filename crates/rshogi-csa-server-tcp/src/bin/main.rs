@@ -75,6 +75,11 @@ struct Cli {
     /// round P2)。`%%GETBUOYCOUNT` は参照系なので権限不要で全ユーザー可。
     #[arg(long = "admin-handle", value_name = "HANDLE")]
     admin_handle: Vec<String>,
+    /// Floodgate 運用機能の opt-in フラグ。Floodgate 系機能を本バイナリで
+    /// 有効化する PR は、本フラグが `true` のときだけ配線を生かすように
+    /// 実装する（現時点ではまだ配線された機能は無い）。
+    #[arg(long, default_value_t = false)]
+    allow_floodgate_features: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -140,6 +145,7 @@ fn main() -> anyhow::Result<()> {
         entering_king_rule: rshogi_core::types::EnteringKingRule::Point24,
         initial_sfen: None,
         admin_handles: cli.admin_handle.clone(),
+        allow_floodgate_features: cli.allow_floodgate_features,
     };
     let kifu_storage = FileKifuStorage::new(config.kifu_topdir.clone());
     let state = Rc::new(build_state(
