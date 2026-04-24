@@ -175,14 +175,15 @@ pub struct GracefulShutdown {
 
 impl GracefulShutdown {
     /// 未トリガ状態のインスタンスを返す。
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             triggered: AtomicBool::new(false),
             notify: Notify::new(),
         }
     }
 
-    /// シャットダウンを開始する。複数回呼ばれても冪等。
+    /// シャットダウンを開始する。複数回呼ばれても冪等。main の signal ハンドラ
+    /// とテストから呼ばれる。
     pub fn trigger(&self) {
         if !self.triggered.swap(true, Ordering::Release) {
             // 待機中の全 waiter に通知。新しく `wait()` してくる経路は
@@ -191,13 +192,14 @@ impl GracefulShutdown {
         }
     }
 
-    /// 既にトリガ済みか。
-    pub fn is_triggered(&self) -> bool {
+    /// 既にトリガ済みか。クレート内で `wait()` の lost-wakeup ガードに使う。
+    pub(crate) fn is_triggered(&self) -> bool {
         self.triggered.load(Ordering::Acquire)
     }
 
-    /// トリガされるまで待機する。トリガ済みなら即座に返る。
-    pub async fn wait(&self) {
+    /// トリガされるまで待機する。トリガ済みなら即座に返る。accept ループと
+    /// waiter タスクが `tokio::select!` ブランチで使う内部 API。
+    pub(crate) async fn wait(&self) {
         if self.is_triggered() {
             return;
         }
@@ -350,7 +352,10 @@ where
     /// 呼び出し側は起床後に [`Self::active_game_count`] を再確認してから
     /// `break` すること（run_waiter 終了時の wake は counter を減らさないため
     /// spurious に見える）。
-    pub fn wait_active_games_notify(&self) -> tokio::sync::futures::Notified<'_> {
+    ///
+    /// 戻り型は `impl Future` でラップして内部で使う `Notify` の詳細を漏らさない。
+    /// 将来 notify 実装を差し替える際の破壊的変更を避ける。
+    pub fn wait_active_games_notify(&self) -> impl std::future::Future<Output = ()> + '_ {
         self.active_games.notified()
     }
 }
@@ -1533,6 +1538,14 @@ where
     // いる、という不整合を防ぐ）。`drive_game` epilogue の end_game / logout /
     // unregister はいずれも idempotent なので、ここで先行してもダブルコール
     // で破綻しない。
+    //
+    // **shutdown 判定との関係**: graceful shutdown の「対局完了待ち」は
+    // `GameRegistry` 件数ではなく `SharedState::active_drive_tasks`
+    // (AtomicUsize) を真実源とする。`drive_game` の RAII guard が epilogue の
+    // 最後 (persist_kifu 完了後) で decrement するため、ここでの `unregister`
+    // を前倒ししても shutdown 判定は 0 に落ちない。逆に言うと、将来
+    // `active_game_count()` の参照先をうかつに `GameRegistry` に戻すと
+    // persist_kifu 中の棋譜消失 race が再発するので注意。
     {
         let mut league = state.league.lock().await;
         let _ = league.end_game(&matched);

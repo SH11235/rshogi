@@ -183,13 +183,15 @@ fn main() -> anyhow::Result<()> {
         // 2. accept ループの終了を待つ。shutdown が立っているので即座に抜ける。
         //    panic した場合に listener 未解放のまま後段に進まないよう、panic は
         //    error log に落として正常経路と同様に fall-through させる。
+        //    `{e:#}` は JoinError の Debug 出力（panic payload とロケーション）を
+        //    一行に展開するので、運用時の原因調査で使える。
         match handle.await {
             Ok(()) => {}
             Err(e) if e.is_panic() => {
-                log::error!("accept loop panicked during shutdown: {e}");
+                log::error!("accept loop panicked during shutdown: {e:#}");
             }
             Err(e) => {
-                log::info!("accept loop joined with error: {e}");
+                log::info!("accept loop joined with error: {e:#}");
             }
         }
 
