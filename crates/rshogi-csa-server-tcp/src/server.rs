@@ -127,6 +127,10 @@ pub struct ServerConfig {
     /// `PERMISSION_DENIED` で拒否される。`%%GETBUOYCOUNT` は参照系なので
     /// 管理者権限を要求しない。
     pub admin_handles: Vec<String>,
+    /// Floodgate 運用機能の opt-in フラグ。現時点では本バイナリに配線された
+    /// Floodgate 機能は無く、将来 Floodgate 系機能が入る PR が本フラグを
+    /// 起動条件として参照する。
+    pub allow_floodgate_features: bool,
 }
 
 impl ServerConfig {
@@ -144,6 +148,7 @@ impl ServerConfig {
             entering_king_rule: EnteringKingRule::Point24,
             initial_sfen: None,
             admin_handles: Vec::new(),
+            allow_floodgate_features: false,
         }
     }
 }

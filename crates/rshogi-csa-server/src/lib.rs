@@ -3,6 +3,7 @@
 //! I/O には直接依存せず、[`port`] モジュールで定義された trait 群を介して
 //! TCP 版と Cloudflare Workers 版の双方のフロントエンドから再利用できる。
 
+pub mod config;
 pub mod error;
 pub mod types;
 
@@ -13,6 +14,9 @@ pub mod protocol;
 pub mod record;
 pub mod storage;
 
+pub use config::{
+    FloodgateFeatureIntent, parse_allow_floodgate_features, validate_floodgate_feature_gate,
+};
 pub use error::{ProtocolError, ServerError, StateError, StorageError, TransportError};
 pub use game::clock::{
     ClockResult, ClockSpec, FischerClock, SecondsCountdownClock, StopWatchClock, TimeClock,

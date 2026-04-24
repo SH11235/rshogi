@@ -131,14 +131,9 @@ async fn spawn_server_with_clock(tag: &str, clock: ClockSpec) -> (std::net::Sock
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         kifu_topdir: topdir.clone(),
         clock,
-        time_margin_ms: 1_500,
-        max_moves: 256,
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
-        x1_reply_write_timeout: Duration::from_secs(5),
-        entering_king_rule: EnteringKingRule::Point24,
-        initial_sfen: None,
-        admin_handles: Vec::new(),
+        ..ServerConfig::sensible_defaults()
     };
     // bind_addr=:0 を使うため、先に手動で bind してから actual addr を取る必要がある。
     // ここでは ServerConfig を既定の :0 のまま build_state に渡し、run_server 内で
@@ -463,14 +458,9 @@ async fn spawn_server_with_agree_timeout(
             total_time_sec: 60,
             byoyomi_sec: 10,
         },
-        time_margin_ms: 1_500,
-        max_moves: 256,
         login_timeout: Duration::from_secs(10),
         agree_timeout,
-        x1_reply_write_timeout: Duration::from_secs(5),
-        entering_king_rule: EnteringKingRule::Point24,
-        initial_sfen: None,
-        admin_handles: Vec::new(),
+        ..ServerConfig::sensible_defaults()
     };
     let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
     let actual_addr = probe.local_addr().unwrap();
@@ -1071,14 +1061,12 @@ async fn spawn_server_custom(
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         kifu_topdir: topdir.clone(),
         clock,
-        time_margin_ms: 1_500,
-        max_moves: 256,
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
-        x1_reply_write_timeout: Duration::from_secs(5),
         entering_king_rule,
         initial_sfen: initial_sfen.map(str::to_owned),
         admin_handles,
+        ..ServerConfig::sensible_defaults()
     };
     let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
     let actual_addr = probe.local_addr().unwrap();
