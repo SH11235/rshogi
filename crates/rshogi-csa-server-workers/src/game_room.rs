@@ -312,7 +312,10 @@ impl DurableObject for GameRoom {
             let Some(core) = borrow.as_mut() else {
                 return Response::ok("no core");
             };
-            let loser = current_turn_color(core.moves_played());
+            // 時計切れ側は現在手番（SFEN `side_to_move` を起点に手数で交代した
+            // 色）。buoy / `%%FORK` で白開始の局面でも正しく白を時間切れ扱いに
+            // する。
+            let loser = core.current_turn();
             Some(core.force_time_up(loser))
         };
         if let Some(result) = outcome {
@@ -420,15 +423,24 @@ impl GameRoom {
         let game_id = format!("{room_id}-{started}");
         let clock_spec = load_clock_spec_from_env(&self.env)?;
         let (main_time_sec, byoyomi_sec) = legacy_clock_fields(&clock_spec);
-        let initial_sfen =
-            match self.reserve_initial_sfen_from_buoy(&GameName::new(game_name)).await? {
-                BuoyReservation::Missing => None,
-                BuoyReservation::Reserved(initial_sfen) => initial_sfen,
-                BuoyReservation::Exhausted => {
-                    console_log!("[GameRoom] buoy '{game_name}' exhausted; match start deferred");
-                    return Ok(false);
-                }
-            };
+        let initial_sfen = match self
+            .reserve_initial_sfen_from_buoy(&GameName::new(game_name))
+            .await?
+        {
+            BuoyReservation::Missing => None,
+            BuoyReservation::Reserved(initial_sfen) => initial_sfen,
+            BuoyReservation::Exhausted => {
+                // 双方の LOGIN は既に OK を返しているので、ここで何もせずに
+                // return するとスロットが永久に詰まる。エラー行を送って
+                // WS を閉じ、slots をクリアして部屋を再利用可能にする。
+                console_log!("[GameRoom] buoy '{game_name}' exhausted; rejecting pending match");
+                self.abort_pending_match_with_error(&format!(
+                    "##[ERROR] buoy '{game_name}' exhausted"
+                ))
+                .await?;
+                return Ok(false);
+            }
+        };
 
         let cfg = PersistedConfig {
             game_id: game_id.clone(),
@@ -760,23 +772,65 @@ impl GameRoom {
         &self,
         game_name: &GameName,
     ) -> Result<BuoyReservation> {
-        let Some(mut buoy) = self.load_buoy(game_name).await? else {
-            return Ok(BuoyReservation::Missing);
-        };
-        if buoy.remaining == 0 {
-            return Ok(BuoyReservation::Exhausted);
-        }
-        let reserved_initial_sfen = match buoy.initial_sfen.as_ref() {
-            Some(sfen) => Some(sfen.clone()),
-            None => {
-                let moves: Vec<CsaMoveToken> =
-                    buoy.moves.iter().map(|mv| CsaMoveToken::new(mv.as_str())).collect();
-                Some(initial_sfen_from_csa_moves(&moves).map_err(Error::RustError)?)
+        // R2 には CAS プリミティブが無い代わりに conditional PUT（etag 一致時
+        // のみ書き込み）が使える。`load → decrement → put(onlyIf=etag)` を
+        // リトライループで回し、別 DO が同時に同じ buoy を予約してきた場合は
+        // etag 不一致で put が Ok(None) に落ちるので再読み込みする。
+        //
+        // リトライ上限は 5 回。実運用では同一 buoy への同時アクセスは稀と
+        // 見込むが、同一 game_name の room が連続して LOGIN を受けると再試行
+        // が必要になり得る。上限に達したら Exhausted 相当にフォールバックせず
+        // 明示的なエラーを返し、`abort_pending_match_with_error` 経由で部屋を
+        // 閉じる（静かな誤受理より fail-fast の方が運用上安全）。
+        const MAX_ATTEMPTS: u32 = 5;
+        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
+        let key = buoy_object_key(game_name.as_str());
+        for attempt in 0..MAX_ATTEMPTS {
+            let Some(obj) = bucket.get(&key).execute().await? else {
+                return Ok(BuoyReservation::Missing);
+            };
+            let etag = obj.etag();
+            let Some(body) = obj.body() else {
+                return Ok(BuoyReservation::Missing);
+            };
+            let text = body.text().await?;
+            let mut buoy: PersistedBuoy = serde_json::from_str(&text)
+                .map_err(|e| Error::RustError(format!("parse buoy json: {e}")))?;
+            if buoy.remaining == 0 {
+                return Ok(BuoyReservation::Exhausted);
             }
-        };
-        buoy.remaining -= 1;
-        self.store_buoy(game_name, &buoy).await?;
-        Ok(BuoyReservation::Reserved(reserved_initial_sfen))
+            let reserved_initial_sfen = match buoy.initial_sfen.as_ref() {
+                Some(sfen) => Some(sfen.clone()),
+                None => {
+                    let moves: Vec<CsaMoveToken> =
+                        buoy.moves.iter().map(|mv| CsaMoveToken::new(mv.as_str())).collect();
+                    Some(initial_sfen_from_csa_moves(&moves).map_err(Error::RustError)?)
+                }
+            };
+            buoy.remaining -= 1;
+            let payload = serde_json::to_vec(&buoy)
+                .map_err(|e| Error::RustError(format!("serialize buoy json: {e}")))?;
+            let put_result = bucket
+                .put(&key, payload)
+                .only_if(worker::Conditional {
+                    etag_matches: Some(etag),
+                    ..Default::default()
+                })
+                .execute()
+                .await?;
+            if put_result.is_some() {
+                return Ok(BuoyReservation::Reserved(reserved_initial_sfen));
+            }
+            console_log!(
+                "[GameRoom] buoy '{}' reservation etag mismatch, retry {}/{MAX_ATTEMPTS}",
+                game_name.as_str(),
+                attempt + 1,
+            );
+        }
+        Err(Error::RustError(format!(
+            "buoy '{}' reservation retry exhausted after {MAX_ATTEMPTS} attempts",
+            game_name.as_str(),
+        )))
     }
 
     async fn try_start_pending_match(&self) -> Result<bool> {
@@ -848,7 +902,7 @@ impl GameRoom {
                     let Some(core) = borrow.as_ref() else {
                         return Ok(());
                     };
-                    let next_turn = current_turn_color(core.moves_played());
+                    let next_turn = core.current_turn();
                     core.clock_turn_budget_ms(next_turn)
                 };
                 let margin_ms = self
@@ -1004,6 +1058,25 @@ impl GameRoom {
         bucket.put(&key, text.as_bytes().to_vec()).execute().await?;
         bucket.put(&by_id_key, text.as_bytes().to_vec()).execute().await?;
         console_log!("[GameRoom] kifu exported to R2 key='{key}'");
+        Ok(())
+    }
+
+    /// マッチ開始直前の致命的条件（buoy 枯渇等）で対局を開始できない場合に、
+    /// 既に LOGIN OK を受けている Player ロールの WS 全員にエラー行を送出し、
+    /// 接続を閉じてスロットを空にする。
+    ///
+    /// ここでクリアしないと、スロットは Match 状態のまま残ってしまい 2 人目に
+    /// Game_Summary もエラーも届かないため、部屋が永久に詰まる (codex review
+    /// PR #474 P2)。
+    async fn abort_pending_match_with_error(&self, error_line: &str) -> Result<()> {
+        for ws in self.state.get_websockets() {
+            let att: Option<WsAttachment> = ws.deserialize_attachment().ok().flatten();
+            if matches!(att, Some(WsAttachment::Player { .. })) {
+                let _ = send_line(&ws, error_line);
+                let _ = ws.close(Some(1011), Some("match aborted".to_owned()));
+            }
+        }
+        self.state.storage().put(KEY_SLOTS, &Vec::<Slot>::new()).await?;
         Ok(())
     }
 
@@ -1210,16 +1283,6 @@ impl GameRoom {
             ],
         )?;
         Ok(())
-    }
-}
-
-/// 既消費手数から次の手番色を導出する。平手開始は先手 (Black) なので偶数手目の
-/// 次手番は Black、奇数手目の次手番は White。replay 後や Alarm 起動時に呼ぶ。
-fn current_turn_color(moves_played: u32) -> Color {
-    if moves_played % 2 == 0 {
-        Color::Black
-    } else {
-        Color::White
     }
 }
 

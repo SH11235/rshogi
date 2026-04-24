@@ -927,11 +927,15 @@ where
                 let buoy_name =
                     new_buoy.unwrap_or_else(|| default_fork_buoy_name(&source_game, nth_move));
                 match derive_fork_from_source_kifu(state.as_ref(), &source_game, nth_move).await? {
-                    None => Some(vec![
+                    ForkOutcome::NotFound => Some(vec![
                         CsaLine::new(format!("##[FORK] NOT_FOUND {source_game}")),
                         CsaLine::new("##[FORK] END"),
                     ]),
-                    Some(derived) => match state
+                    ForkOutcome::Malformed(msg) => Some(vec![
+                        CsaLine::new(format!("##[FORK] ERROR {} {msg}", buoy_name.as_str())),
+                        CsaLine::new("##[FORK] END"),
+                    ]),
+                    ForkOutcome::Derived(derived) => match state
                         .buoy_storage
                         .store(&buoy_name, Vec::new(), 1, Some(derived.initial_sfen.clone()))
                         .await
@@ -1029,6 +1033,17 @@ struct ForkDerivation {
     applied_moves: u32,
 }
 
+/// `%%FORK` の派生処理の結末。malformed は接続を切らずに x1 応答で
+/// `##[FORK] ERROR ...` に落とすため、Result の Err としては扱わない。
+enum ForkOutcome {
+    /// 元棋譜が存在しない。
+    NotFound,
+    /// 元棋譜は見つかったが CSA として壊れている／`nth_move` が範囲外。
+    Malformed(String),
+    /// 派生成功。
+    Derived(ForkDerivation),
+}
+
 /// `%%MONITOR2ON` の TOCTOU 再確認用ヘルパ。`subscribe` 完了後に game_id が
 /// まだ `GameRegistry` に存在するかを確認する。
 ///
@@ -1080,11 +1095,17 @@ where
 }
 
 /// `%%FORK` の入力を既存棋譜から SFEN に落とす。
+///
+/// 元棋譜が見つからない／壊れている／`nth_move` が範囲外のケースは `Err` では
+/// なく [`ForkOutcome`] の `NotFound` / `Malformed` バリアントで返す。waiter
+/// ループ側は x1 応答 `##[FORK] NOT_FOUND` / `##[FORK] ERROR ...` に落として
+/// 接続を維持し、graceful degradation にする。`Err` は storage I/O 失敗など
+/// 本当に復旧不能な経路にだけ残す。
 async fn derive_fork_from_source_kifu<R, K, P>(
     state: &SharedState<R, K, P>,
     source_game: &GameId,
     nth_move: Option<u32>,
-) -> Result<Option<ForkDerivation>, ServerError>
+) -> Result<ForkOutcome, ServerError>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
@@ -1093,19 +1114,15 @@ where
     let Some(csa_v2_text) =
         state.kifu_storage.load(source_game).await.map_err(ServerError::Storage)?
     else {
-        return Ok(None);
+        return Ok(ForkOutcome::NotFound);
     };
-    let (initial_sfen, applied_moves) = fork_initial_sfen_from_kifu(&csa_v2_text, nth_move)
-        .map_err(|e| {
-            ServerError::Protocol(ProtocolError::Malformed(format!(
-                "%%FORK {}: {e}",
-                source_game.as_str()
-            )))
-        })?;
-    Ok(Some(ForkDerivation {
-        initial_sfen,
-        applied_moves,
-    }))
+    match fork_initial_sfen_from_kifu(&csa_v2_text, nth_move) {
+        Ok((initial_sfen, applied_moves)) => Ok(ForkOutcome::Derived(ForkDerivation {
+            initial_sfen,
+            applied_moves,
+        })),
+        Err(e) => Ok(ForkOutcome::Malformed(format!("%%FORK {}: {e}", source_game.as_str()))),
+    }
 }
 
 fn default_fork_buoy_name(source_game: &GameId, nth_move: Option<u32>) -> GameName {

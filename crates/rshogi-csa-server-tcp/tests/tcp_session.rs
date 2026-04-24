@@ -1298,6 +1298,74 @@ fn monitor2_on_unknown_game_returns_not_found() {
 }
 
 #[test]
+fn fork_gracefully_errors_and_keeps_connection_alive() {
+    // 元棋譜が存在しない場合・nth_move が範囲外の場合の `%%FORK` で接続が
+    // 切れずに `##[FORK] NOT_FOUND` / `##[FORK] ERROR ...` + `END` を返すこと
+    // を検証する (codex レビュー PR #474 P2)。検証後に `%%GETBUOYCOUNT` が
+    // 通ることで、waiter ループが健在であることを確認する。
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_admin("fork_graceful_error", vec!["admin".to_owned()]).await;
+
+        // admin で x1 接続。
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN admin+obs+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:admin OK");
+
+        // 1) 存在しない game_id への FORK → NOT_FOUND。
+        send_line(&mut wa, "%%FORK nonexistent-game forked 1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] NOT_FOUND nonexistent-game");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] END");
+
+        // 接続が生きていることを %%GETBUOYCOUNT で確認。
+        send_line(&mut wa, "%%GETBUOYCOUNT nothing").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] NOT_FOUND nothing");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        // 2) 既存対局を作って nth_move を範囲外にした FORK → ERROR。
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        // START:<game_id> を読み取って game_id を確定する。
+        let start_b = read_line_raw(&mut rb).await.unwrap();
+        assert!(start_b.starts_with("START:"), "expected START line, got {start_b:?}");
+        let source_game_id = start_b.trim_start_matches("START:").to_owned();
+        let _ = read_line_raw(&mut rw).await.unwrap(); // white 側の START
+        send_line(&mut wb, "+7776FU,T0").await;
+        let _ = read_until(&mut rb, "+7776FU,T0").await;
+        let _ = read_until(&mut rw, "+7776FU,T0").await;
+        send_line(&mut ww, "%TORYO").await;
+        let _ = read_until(&mut rb, "#WIN").await;
+        let _ = read_until(&mut rw, "#LOSE").await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // nth_move=999 は範囲外。切断せず ERROR + END を返す。
+        send_line(&mut wa, &format!("%%FORK {source_game_id} bad 999")).await;
+        let err_line = read_line_raw(&mut ra).await.unwrap();
+        assert!(
+            err_line.starts_with("##[FORK] ERROR bad"),
+            "expected graceful ERROR response, got {err_line:?}",
+        );
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[FORK] END");
+
+        // まだ接続は生きている。
+        send_line(&mut wa, "%%GETBUOYCOUNT bad").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] NOT_FOUND bad");
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "##[GETBUOYCOUNT] END");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
 fn uchifuzume_from_initial_sfen_ends_as_illegal_move_e2e() {
     // Phase 3 acceptance: 打ち歩詰の典型局面を TCP E2E で流し、
     // `#ILLEGAL_MOVE` → `#LOSE/#WIN` が wire されることを固定する。

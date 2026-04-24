@@ -216,6 +216,14 @@ impl GameRoom {
         self.moves_played
     }
 
+    /// 現在手番色。`initial_sfen` の `side_to_move` を起点に指し手で交代するため、
+    /// buoy / `%%FORK` 由来の非平手開始局面でも正しい手番を返す。時計アラームや
+    /// replay 後の手番色を `moves_played` から再計算すると SFEN の `w` 開始に
+    /// 対応できないので、時計発火・手番判定では本 API を使う。
+    pub fn current_turn(&self) -> Color {
+        self.pos.side_to_move().into()
+    }
+
     /// 指定側の **本体持ち時間** の残り（ミリ秒）。秒読みは含まない。
     ///
     /// 表示・ログ・棋譜メタデータ用。deadline 計算には
@@ -1204,5 +1212,19 @@ mod tests {
             other => panic!("unexpected outcome: {other:?}"),
         }
         assert!(last.broadcasts.iter().any(|b| b.line.as_str() == "#OUTE_SENNICHITE"));
+    }
+
+    #[test]
+    fn current_turn_follows_initial_sfen_side_to_move() {
+        // 平手開始は先手から。
+        let room = make_room();
+        assert_eq!(room.current_turn(), Color::Black);
+
+        // `w`（白手番）開始の SFEN で構築した場合、初手前は White を返す。
+        // codex レビュー P1 回帰防止: buoy / %%FORK 由来で白開始の局面でも
+        // 時計切れ時の loser が先手に誤判定されないことを保証する。
+        let white_turn_sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";
+        let room = room_with_sfen(EnteringKingRule::Point24, white_turn_sfen);
+        assert_eq!(room.current_turn(), Color::White);
     }
 }
