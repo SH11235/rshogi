@@ -181,14 +181,30 @@ fn main() -> anyhow::Result<()> {
         state.shutdown.trigger();
 
         // 2. accept ループの終了を待つ。shutdown が立っているので即座に抜ける。
-        let _ = handle.await;
+        //    panic した場合に listener 未解放のまま後段に進まないよう、panic は
+        //    error log に落として正常経路と同様に fall-through させる。
+        match handle.await {
+            Ok(()) => {}
+            Err(e) if e.is_panic() => {
+                log::error!("accept loop panicked during shutdown: {e}");
+            }
+            Err(e) => {
+                log::info!("accept loop joined with error: {e}");
+            }
+        }
 
         // 3. 進行中対局が終局するまで待つ。grace を超過したら warning を出して
         //    プロセス終了へ進む（残りの対局タスクは LocalSet 終了で abort される）。
+        //    `shutdown_grace = 0` は「grace なし = 即切り」と解釈する。
+        //
+        //    TOCTOU 対策として `wait_active_games_notify` を先に登録してから
+        //    counter を確認する。これで登録と確認の間に `notify_waiters` が
+        //    発火しても取りこぼさない。
         let grace = state.config().shutdown_grace;
         let deadline = tokio::time::Instant::now() + grace;
         loop {
-            let active = state.active_game_count().await;
+            let notified = state.wait_active_games_notify();
+            let active = state.active_game_count();
             if active == 0 {
                 break;
             }
@@ -197,9 +213,9 @@ fn main() -> anyhow::Result<()> {
                 grace.as_secs()
             );
             tokio::select! {
-                _ = state.wait_active_games_notify() => continue,
+                _ = notified => continue,
                 _ = tokio::time::sleep_until(deadline) => {
-                    let remaining = state.active_game_count().await;
+                    let remaining = state.active_game_count();
                     if remaining > 0 {
                         log::warn!(
                             "shutdown grace expired; {remaining} game(s) left unfinished"

@@ -21,7 +21,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rshogi_core::types::EnteringKingRule;
@@ -163,9 +163,11 @@ impl ServerConfig {
 /// accept ループや待機 waiter が `wait()` を `tokio::select!` に組み込んで
 /// cancellation を検知する。
 ///
-/// `current_thread` ランタイム + `LocalSet` 前提で `Rc` 共有するため
-/// `Send`/`Sync` 境界は不要だが、実装は `AtomicBool` + `Notify` にして
-/// 将来マルチスレッドへ広げた場合にも耐えられるようにしている。
+/// 現在は `current_thread` ランタイム + `LocalSet` 前提で `Rc` 共有するが、
+/// 同期プリミティブは `AtomicBool` + `Notify` で組んであるので、他ランタイム
+/// へ移す場合も追加改修なしで使える。メモリオーダリングは `Release` (swap) /
+/// `Acquire` (load) で十分で、`Notify` 側のバリアと合わせて
+/// trigger → wait の happens-before 関係を維持する。
 pub struct GracefulShutdown {
     triggered: AtomicBool,
     notify: Notify,
@@ -182,7 +184,7 @@ impl GracefulShutdown {
 
     /// シャットダウンを開始する。複数回呼ばれても冪等。
     pub fn trigger(&self) {
-        if !self.triggered.swap(true, Ordering::SeqCst) {
+        if !self.triggered.swap(true, Ordering::Release) {
             // 待機中の全 waiter に通知。新しく `wait()` してくる経路は
             // 下の `is_triggered` チェックで即座に抜ける。
             self.notify.notify_waiters();
@@ -191,7 +193,7 @@ impl GracefulShutdown {
 
     /// 既にトリガ済みか。
     pub fn is_triggered(&self) -> bool {
-        self.triggered.load(Ordering::SeqCst)
+        self.triggered.load(Ordering::Acquire)
     }
 
     /// トリガされるまで待機する。トリガ済みなら即座に返る。
@@ -293,8 +295,23 @@ where
     password_store: P,
     hasher: Box<dyn PasswordHasher>,
     /// 進行中対局のメモリ内レジストリ。`%%LIST` / `%%SHOW` 応答で参照する。
+    ///
+    /// **注意**: このカウントは graceful shutdown の完了判定に使ってはならない。
+    /// `drive_game_inner` が `persist_kifu` より先に `unregister` を呼ぶため、
+    /// 棋譜 flush 中に件数 0 と誤判定され得る。shutdown 判定には
+    /// [`Self::active_drive_tasks`] を使う（`drive_game` epilogue の最後で
+    /// デクリメントされる）。
     games: Mutex<GameRegistry>,
-    /// 全接続タスクの終了を待つためのカウンタ通知。graceful shutdown で使用。
+    /// `drive_game` タスクの在籍カウンタ。`drive_game` の entry で +1、epilogue
+    /// の最後（`persist_kifu` 完了を含む全後始末の後）に -1 される。graceful
+    /// shutdown の「対局完了待ち」はこのカウンタを 0 まで落とすのを待つ。
+    /// `GameRegistry` の件数を使うと `persist_kifu` 中に 0 と判定される race
+    /// があるため、こちらを唯一の真実とする。
+    active_drive_tasks: AtomicUsize,
+    /// 対局 1 件が終了（`drive_game` の epilogue 完了）したことを通知する。
+    /// graceful shutdown ループがこれで起床して `active_drive_tasks` を再確認
+    /// する。`run_waiter` からも呼ばれるので spurious wake が起き得るが、
+    /// 起床後に counter を再確認するので正しく判定できる。
     active_games: Notify,
     /// 連番カウンタ（game_id 生成）。起動時刻 + 連番で衝突を避ける。
     game_counter: Mutex<u64>,
@@ -323,14 +340,16 @@ where
         &self.config
     }
 
-    /// 現在の進行中対局数。graceful shutdown 中に残対局数を監視するために使う。
-    pub async fn active_game_count(&self) -> usize {
-        self.games.lock().await.len()
+    /// 進行中の `drive_game` タスク数。`persist_kifu` を含む epilogue が完了
+    /// して初めて 0 になる。graceful shutdown 完了判定はこのカウンタを使う。
+    pub fn active_game_count(&self) -> usize {
+        self.active_drive_tasks.load(Ordering::Acquire)
     }
 
-    /// 進行中対局数が 0 になったことを通知する [`Notify`] への待機ハンドル。
-    /// 対局 1 件が終了するたびに `notify_waiters` が呼ばれるため、呼び出し側は
-    /// 受信後に [`Self::active_game_count`] を再確認してから `break` する。
+    /// `drive_game` epilogue 完了と `run_waiter` 終了のどちらでも起床する通知。
+    /// 呼び出し側は起床後に [`Self::active_game_count`] を再確認してから
+    /// `break` すること（run_waiter 終了時の wake は counter を減らさないため
+    /// spurious に見える）。
     pub fn wait_active_games_notify(&self) -> tokio::sync::futures::Notified<'_> {
         self.active_games.notified()
     }
@@ -655,12 +674,22 @@ where
             // graceful shutdown: 待機中のセッションに `##[NOTICE] ...` を送って
             // 切断する。プレイヤー側は LOGIN 済みだが対局には入っていないので、
             // 安全に接続を閉じてプロセス終了を待てる。
+            //
+            // observer_mode の waiter が持っている `monitor_rx` は通常切断経路と
+            // 同じく take() + prune_closed() する。こうしないと broadcaster に
+            // dead sender が残って同 room の後続観戦者 / 終局 clear_room まで
+            // 掃除されない。
             _ = state.shutdown.wait() => {
                 let _ = transport
                     .send_line(&CsaLine::new("##[NOTICE] server shutting down"))
                     .await;
-                let mut pool = state.waiting.lock().await;
-                let _ = pool.remove_by_handle(&game_name, &handle);
+                {
+                    let mut pool = state.waiting.lock().await;
+                    let _ = pool.remove_by_handle(&game_name, &handle);
+                }
+                if let Some((room, _)) = monitor_rx.take() {
+                    state.broadcaster.prune_closed(&RoomId::new(room.as_str())).await;
+                }
                 break 'outer WaiterOutcome::DisconnectedFromPool;
             }
             // observer_mode 時は `match_req_rx` の Err は自分が pool から自主的に
@@ -1292,6 +1321,26 @@ where
 {
     debug_assert_eq!(opp_color, self_color.opposite());
 
+    // `drive_game` 在籍をカウントする RAII ガード。graceful shutdown の完了
+    // 判定で使うため、`persist_kifu` を含む epilogue 全体が終わるまで生存
+    // させる必要がある。Err 早期 return / panic でも確実に decrement + notify
+    // されるように `Drop` で解放する。
+    struct DriveGuard<'a> {
+        counter: &'a AtomicUsize,
+        notify: &'a Notify,
+    }
+    impl Drop for DriveGuard<'_> {
+        fn drop(&mut self) {
+            self.counter.fetch_sub(1, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+    }
+    state.active_drive_tasks.fetch_add(1, Ordering::Release);
+    let _drive_guard = DriveGuard {
+        counter: &state.active_drive_tasks,
+        notify: &state.active_games,
+    };
+
     // 役割割り当て: Black / White transport を色で確定。
     let (mut black_transport, mut white_transport, black_handle, white_handle) =
         if self_color == Color::Black {
@@ -1350,7 +1399,9 @@ where
     state.broadcaster.clear_room(&RoomId::new(game_id.as_str())).await;
     // 待機タスクに完了通知（これで先着側のタスクが抜ける）。
     let _ = opp_completion_tx.send(());
-    state.active_games.notify_waiters();
+    // `active_drive_tasks` の decrement + `active_games.notify_waiters()` は
+    // `_drive_guard` の Drop で行う。ここで明示的に呼ぶと二重通知になり、
+    // Err 早期 return 経路との挙動差も生まれるので guard に一任する。
     inner
 }
 
@@ -1860,6 +1911,7 @@ where
         password_store,
         hasher,
         games: Mutex::new(GameRegistry::new()),
+        active_drive_tasks: AtomicUsize::new(0),
         active_games: Notify::new(),
         game_counter: Mutex::new(0),
         started_at: chrono::Utc::now(),

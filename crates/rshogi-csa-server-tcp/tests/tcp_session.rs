@@ -211,6 +211,59 @@ async fn read_until(reader: &mut BufReader<OwnedReadHalf>, expect: &str) -> Vec<
     }
 }
 
+/// ファイルが現れるまで短ポーリングで待機する。非同期書き込み完了タイミング
+/// のばらつきを吸収する。上限 2 秒 (40 × 50ms)。
+async fn wait_for_file_text(path: &std::path::Path) -> String {
+    for _ in 0..40 {
+        if let Ok(body) = tokio::fs::read_to_string(path).await {
+            return body;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::fs::read_to_string(path)
+        .await
+        .unwrap_or_else(|e| panic!("expected file {path:?} after wait: {e}"))
+}
+
+/// `<topdir>/YYYY/MM/DD/<game_id>.csa` の書き込みを tokio::fs 非同期経路で
+/// 再帰的に探す。current-thread ランタイムでも executor を塞がない。
+async fn find_csa_file_recursive(root: &std::path::Path, game_id: &str) -> Option<PathBuf> {
+    let target = format!("{game_id}.csa");
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = tokio::fs::read_dir(&dir).await.ok()?;
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let file_type = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if path.file_name().and_then(|s| s.to_str()) == Some(target.as_str()) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// 指定 game_id の CSA 棋譜ファイルが書き込まれるのを待って読み出す。
+async fn wait_for_csa_text(topdir: &std::path::Path, game_id: &str) -> String {
+    for _ in 0..40 {
+        if let Some(path) = find_csa_file_recursive(topdir, game_id).await
+            && let Ok(body) = tokio::fs::read_to_string(&path).await
+        {
+            return body;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let path = find_csa_file_recursive(topdir, game_id)
+        .await
+        .unwrap_or_else(|| panic!("csa file for game_id {game_id} not found under {topdir:?}"));
+    tokio::fs::read_to_string(path).await.unwrap()
+}
+
 fn run_local<F, Fut>(f: F)
 where
     F: FnOnce() -> Fut + 'static,
@@ -1507,7 +1560,218 @@ fn graceful_shutdown_disconnects_waiter_and_stops_accepting() {
 
         // 対局は動いていないので active_game_count は 0。shutdown 後 grace なしで
         // 進める状態を確認する。
-        assert_eq!(state.active_game_count().await, 0);
+        assert_eq!(state.active_game_count(), 0);
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn graceful_shutdown_waits_for_in_flight_game_and_persists_kifu() {
+    // in-flight 対局が走っている最中に shutdown を起動したケース。
+    // graceful shutdown の中核契約 (棋譜を落とさない) が機能するかを検証する。
+    //
+    //   1. alice / bob で対局を開始 → AGREE → +7776FU を指す。
+    //   2. `state.shutdown.trigger()` を呼ぶ（対局は進行中）。
+    //   3. %TORYO で対局を通常終了させる。
+    //   4. grace 内に `active_game_count()` が 0 に落ちることを確認。
+    //   5. 棋譜ファイルが書き込み完了していることを確認 (CSA 本文 + 00LIST)。
+    run_local(|| async {
+        let topdir = unique_topdir("graceful_shutdown_inflight");
+        let mut password_map = HashMap::new();
+        password_map.insert("alice".to_owned(), "pw".to_owned());
+        password_map.insert("bob".to_owned(), "pw".to_owned());
+        let rate_records: Vec<_> = ["alice", "bob"]
+            .iter()
+            .map(|n| PlayerRateRecord {
+                name: PlayerName::new(*n),
+                rate: 1500,
+                wins: 0,
+                losses: 0,
+                last_game_id: None,
+                last_modified: "2026-04-17T00:00:00Z".to_owned(),
+            })
+            .collect();
+        let rate_storage = support::MemRateStorage::new(rate_records);
+        let kifu_storage = FileKifuStorage::new(topdir.clone());
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let config = ServerConfig {
+            bind_addr: addr,
+            kifu_topdir: topdir.clone(),
+            login_timeout: Duration::from_secs(10),
+            agree_timeout: Duration::from_secs(30),
+            ..ServerConfig::sensible_defaults()
+        };
+        let state = Rc::new(build_state(
+            config,
+            rate_storage,
+            kifu_storage,
+            InMemoryPasswordStore { map: password_map },
+            Box::new(PlainPasswordHasher::new()),
+            IpLoginRateLimiter::default_limits(),
+            InMemoryBroadcaster::new(),
+        ));
+        let _handle = run_server(state.clone()).await.expect("run_server");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        let start_b = read_line_raw(&mut rb).await.unwrap();
+        assert!(start_b.starts_with("START:"), "expected START line, got {start_b:?}");
+        let game_id = start_b.trim_start_matches("START:").to_owned();
+        let _ = read_line_raw(&mut rw).await.unwrap(); // white 側 START
+
+        send_line(&mut wb, "+7776FU,T0").await;
+        let _ = read_until(&mut rb, "+7776FU,T0").await;
+        let _ = read_until(&mut rw, "+7776FU,T0").await;
+
+        // 対局中に shutdown を起動。active_drive_tasks は 1 のまま。
+        assert_eq!(state.active_game_count(), 1);
+        state.shutdown.trigger();
+
+        // 投了で対局を正常終了させる。
+        send_line(&mut ww, "%TORYO").await;
+        let _ = read_until(&mut rb, "#WIN").await;
+        let _ = read_until(&mut rw, "#LOSE").await;
+
+        // drive_game の epilogue が走って active_drive_tasks が 0 に落ちるのを
+        // 待つ。TOCTOU 対策として notified を先に生成してから counter 確認。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = state.wait_active_games_notify();
+            if state.active_game_count() == 0 {
+                break;
+            }
+            tokio::select! {
+                _ = notified => continue,
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!("active_game_count did not reach 0 within grace");
+                }
+            }
+        }
+
+        // 棋譜と 00LIST が書き込まれていることを確認。graceful shutdown が
+        // persist_kifu の完了を待っていた証拠。
+        let csa = wait_for_csa_text(&topdir, &game_id).await;
+        assert!(csa.contains("N+alice"), "kifu body missing alice: {csa}");
+        assert!(csa.contains("%TORYO"), "kifu body missing TORYO: {csa}");
+        let zerozero = wait_for_file_text(&topdir.join("00LIST")).await;
+        assert!(zerozero.contains(&game_id), "00LIST missing game_id: {zerozero}");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn graceful_shutdown_prunes_observer_subscribers() {
+    // observer_mode (`%%MONITOR2ON`) 中の waiter が shutdown を受けた場合に、
+    // broadcaster の subscriber が leak しないことを検証する。
+    //
+    // 1. alice / bob で対局を開始 → AGREE 済みの in-flight 状態を作る。
+    // 2. 第 3 者 carol が x1 + `%%MONITOR2ON` で観戦者になる。
+    // 3. `state.shutdown.trigger()` を呼ぶ。
+    // 4. carol に `##[NOTICE] server shutting down` が届く。
+    // 5. 対局を正常終了させ、grace 内に active_game_count が 0 になる。
+    //    observer_mode の waiter が prune_closed を呼んでいれば broadcaster
+    //    の clear_room が clean に完了する。
+    run_local(|| async {
+        let topdir = unique_topdir("graceful_shutdown_observer");
+        let mut password_map = HashMap::new();
+        for h in ["alice", "bob", "carol"] {
+            password_map.insert(h.to_owned(), "pw".to_owned());
+        }
+        let rate_records: Vec<_> = ["alice", "bob", "carol"]
+            .iter()
+            .map(|n| PlayerRateRecord {
+                name: PlayerName::new(*n),
+                rate: 1500,
+                wins: 0,
+                losses: 0,
+                last_game_id: None,
+                last_modified: "2026-04-17T00:00:00Z".to_owned(),
+            })
+            .collect();
+        let rate_storage = support::MemRateStorage::new(rate_records);
+        let kifu_storage = FileKifuStorage::new(topdir.clone());
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let config = ServerConfig {
+            bind_addr: addr,
+            kifu_topdir: topdir.clone(),
+            login_timeout: Duration::from_secs(10),
+            agree_timeout: Duration::from_secs(30),
+            ..ServerConfig::sensible_defaults()
+        };
+        let state = Rc::new(build_state(
+            config,
+            rate_storage,
+            kifu_storage,
+            InMemoryPasswordStore { map: password_map },
+            Box::new(PlainPasswordHasher::new()),
+            IpLoginRateLimiter::default_limits(),
+            InMemoryBroadcaster::new(),
+        ));
+        let _handle = run_server(state.clone()).await.expect("run_server");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // 対局ペアを起動して AGREE まで進める。
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+g1+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+g1+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+        let _ = drain_game_summary(&mut rb).await;
+        let _ = drain_game_summary(&mut rw).await;
+        send_line(&mut wb, "AGREE").await;
+        send_line(&mut ww, "AGREE").await;
+        let start_b = read_line_raw(&mut rb).await.unwrap();
+        let game_id = start_b.trim_start_matches("START:").to_owned();
+        let _ = read_line_raw(&mut rw).await.unwrap();
+
+        // carol を x1 + observer にする。
+        let (mut rc, mut wc) = connect(addr).await;
+        send_line(&mut wc, "LOGIN carol+g2+black pw x1").await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), "LOGIN:carol OK");
+        send_line(&mut wc, &format!("%%MONITOR2ON {game_id}")).await;
+        assert_eq!(read_line_raw(&mut rc).await.unwrap(), format!("##[MONITOR2] BEGIN {game_id}"));
+        let _ = read_line_raw(&mut rc).await.unwrap(); // END
+
+        // shutdown を起動。
+        state.shutdown.trigger();
+        let notice = read_line_raw(&mut rc).await.unwrap();
+        assert_eq!(notice, "##[NOTICE] server shutting down");
+
+        // 対局を正常終了。
+        send_line(&mut ww, "%TORYO").await;
+        let _ = read_until(&mut rb, "#WIN").await;
+        let _ = read_until(&mut rw, "#LOSE").await;
+
+        // active_drive_tasks が 0 に落ちるのを待つ。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let notified = state.wait_active_games_notify();
+            if state.active_game_count() == 0 {
+                break;
+            }
+            tokio::select! {
+                _ = notified => continue,
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!("active_game_count did not reach 0 within grace");
+                }
+            }
+        }
 
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
