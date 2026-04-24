@@ -3,10 +3,13 @@
 use crate::common::sfen::normalize_4t;
 use crate::common::sfen_ops::canonicalize_4t_with_mirror;
 use std::collections::HashSet;
-use std::ffi::CString;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+#[cfg(windows)]
+use std::path::{Component, Prefix};
+#[cfg(not(unix))]
+use sysinfo::Disks;
 
 /// PackedSfenValue のレコードサイズ（バイト）
 pub const PSV_SIZE: usize = 40;
@@ -173,23 +176,80 @@ pub fn get_mem_available() -> Option<u64> {
     None
 }
 
-/// `statvfs(2)` で指定パスが存在するファイルシステムの空き容量（バイト）を取得する。
-/// 取得できない場合は None。
-pub fn get_disk_available(path: &Path) -> Option<u64> {
-    let probe: &Path = if path.exists() {
+fn disk_probe_path(path: &Path) -> Option<PathBuf> {
+    let probe = if path.exists() {
         path
     } else {
         path.parent().unwrap_or(Path::new("."))
     };
+    canonicalize_maybe_new(probe).ok()
+}
+
+#[cfg(windows)]
+fn normalize_mount_compare_path(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let Some(first) = components.next() else {
+        return PathBuf::new();
+    };
+
+    let mut normalized = PathBuf::new();
+    match first {
+        Component::Prefix(prefix) => match prefix.kind() {
+            Prefix::VerbatimDisk(drive) => normalized.push(format!("{}:", drive as char)),
+            _ => normalized.push(first.as_os_str()),
+        },
+        _ => normalized.push(first.as_os_str()),
+    }
+
+    for component in components {
+        normalized.push(component.as_os_str());
+    }
+    normalized
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn normalize_mount_compare_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+#[cfg(not(unix))]
+fn disk_for_path(path: &Path) -> Option<(PathBuf, u64)> {
+    let probe = normalize_mount_compare_path(&disk_probe_path(path)?);
+    let disks = Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter_map(|disk| {
+            let mount = normalize_mount_compare_path(disk.mount_point());
+            probe.starts_with(&mount).then_some((mount, disk.available_space()))
+        })
+        .max_by_key(|(mount, _)| mount.components().count())
+}
+
+/// 指定パスが属するファイルシステムの空き容量（バイト）を取得する。
+/// 取得できない場合は None。
+#[cfg(unix)]
+pub fn get_disk_available(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let probe = disk_probe_path(path)?;
     let c = CString::new(probe.as_os_str().as_bytes()).ok()?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: statvfs は POSIX 標準で、c は有効な C 文字列ポインタ、stat は書き込み可能な
-    // 構造体を指す。失敗時は -1 を返すだけで副作用はない。
+    // SAFETY: statvfs は POSIX 標準で、c は NUL を含まない有効な C 文字列、
+    // stat は書き込み可能な領域を指す。失敗時は None を返すだけ。
     let rc = unsafe { libc::statvfs(c.as_ptr(), &mut stat) };
     if rc != 0 {
         return None;
     }
     Some(stat.f_bavail * stat.f_frsize)
+}
+
+/// 指定パスが属するファイルシステムの空き容量（バイト）を取得する。
+/// 取得できない場合は None。
+#[cfg(not(unix))]
+pub fn get_disk_available(path: &Path) -> Option<u64> {
+    disk_for_path(path).map(|(_, available_space)| available_space)
 }
 
 /// バイト値を `%.1f GiB` 形式で整形する。
@@ -199,21 +259,24 @@ pub fn format_gib(bytes: u64) -> String {
 
 /// 2 つのパスが同一ファイルシステム上にあるかを判定する。
 /// 取得できない場合は None。
+#[cfg(unix)]
 pub fn same_filesystem(a: &Path, b: &Path) -> Option<bool> {
     use std::os::unix::fs::MetadataExt;
-    let probe_a: &Path = if a.exists() {
-        a
-    } else {
-        a.parent().unwrap_or(Path::new("."))
-    };
-    let probe_b: &Path = if b.exists() {
-        b
-    } else {
-        b.parent().unwrap_or(Path::new("."))
-    };
+
+    let probe_a = disk_probe_path(a)?;
+    let probe_b = disk_probe_path(b)?;
     let ma = std::fs::metadata(probe_a).ok()?;
     let mb = std::fs::metadata(probe_b).ok()?;
     Some(ma.dev() == mb.dev())
+}
+
+/// 2 つのパスが同一ファイルシステム上にあるかを判定する。
+/// 取得できない場合は None。
+#[cfg(not(unix))]
+pub fn same_filesystem(a: &Path, b: &Path) -> Option<bool> {
+    let (mount_a, _) = disk_for_path(a)?;
+    let (mount_b, _) = disk_for_path(b)?;
+    Some(mount_a == mount_b)
 }
 
 /// In-memory de-duplicator keyed by 4-token SFEN or mirror-canonicalized 4-token SFEN.
@@ -283,6 +346,34 @@ mod tests {
         fs::write(&input, [0u8; PSV_SIZE]).unwrap();
 
         check_output_not_in_inputs(&dir.path().join("new/out.psv"), &[input]).unwrap();
+    }
+
+    #[test]
+    fn disk_probe_path_uses_existing_parent_for_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = disk_probe_path(&dir.path().join("out/new.psv")).unwrap();
+
+        assert_eq!(probe, dir.path().canonicalize().unwrap().join("out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_filesystem_returns_true_within_same_tempdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.psv");
+        let b = dir.path().join("nested/b.psv");
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+
+        assert_eq!(same_filesystem(&a, &b), Some(true));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn normalize_mount_compare_path_normalizes_verbatim_disk_prefix() {
+        let original = Path::new(r"\\?\C:\work\tmp\dedup");
+        let normalized = normalize_mount_compare_path(original);
+
+        assert_eq!(normalized, PathBuf::from(r"C:\work\tmp\dedup"));
     }
 
     #[test]
