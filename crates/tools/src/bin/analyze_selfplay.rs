@@ -36,31 +36,32 @@ struct Cli {
 
     /// SPRT post-hoc 判定表示を有効化。
     /// ラベル / パラメータは tournament.rs が meta 行に書き出した SPRT 情報から自動推定する。
-    /// meta に SPRT 情報がない（または異なる値が混在する）場合は明示指定が必須。
+    /// ラベルは meta にも CLI にも無い場合エラー。数値パラメータは meta にも CLI にも無い
+    /// 場合のみハードコード fallback (nelo0=0, nelo1=5, alpha=0.05, beta=0.05) を使う。
     #[arg(long, default_value_t = false)]
     sprt: bool,
 
-    /// H1 側（challenger / test）のラベル。未指定時は meta から推定。
+    /// H1 側（challenger / test）のラベル。未指定時は meta から推定（meta にも無ければエラー）。
     #[arg(long)]
     sprt_test_label: Option<String>,
 
-    /// H0 側（base）のラベル。未指定時は meta から推定。
+    /// H0 側（base）のラベル。未指定時は meta から推定（meta にも無ければエラー）。
     #[arg(long)]
     sprt_base_label: Option<String>,
 
-    /// H0 仮説の正規化 Elo。未指定時は meta から推定（fallback: 0.0）。
+    /// H0 仮説の正規化 Elo。未指定時は meta → ハードコード fallback (0.0) の順で解決。
     #[arg(long)]
     sprt_nelo0: Option<f64>,
 
-    /// H1 仮説の正規化 Elo。未指定時は meta から推定（fallback: 5.0）。
+    /// H1 仮説の正規化 Elo。未指定時は meta → ハードコード fallback (5.0) の順で解決。
     #[arg(long)]
     sprt_nelo1: Option<f64>,
 
-    /// 第一種過誤率 α。未指定時は meta から推定（fallback: 0.05）。
+    /// 第一種過誤率 α。未指定時は meta → ハードコード fallback (0.05) の順で解決。
     #[arg(long)]
     sprt_alpha: Option<f64>,
 
-    /// 第二種過誤率 β。未指定時は meta から推定（fallback: 0.05）。
+    /// 第二種過誤率 β。未指定時は meta → ハードコード fallback (0.05) の順で解決。
     #[arg(long)]
     sprt_beta: Option<f64>,
 }
@@ -648,13 +649,29 @@ fn parse_file(path: &str) -> Result<FileResult> {
 
 /// 入力ファイル群の meta 行から SPRT メタを収集し、単一のラベル組/パラメータに合致するなら返す。
 ///
+/// # 動作
 /// - meta 行に SPRT 情報が書かれているのは `tournament.rs --sprt` 実行で生成された
 ///   base/test ペアの jsonl のみ
-/// - 複数ファイルが同じ `(base_label, test_label, nelo0, nelo1, alpha, beta)` を示すなら採用
-/// - ラベルが異なる場合は衝突として `bail!`
-/// - ラベルは同じでも Wald パラメータが異なる場合も `bail!`（LLR 境界が変わるため誤集計防止）
-/// - どのファイルにも SPRT 情報が無ければ `None`（呼び出し側で CLI 必須）
-fn collect_sprt_meta(files: &[&str]) -> Result<Option<SprtMetaLog>> {
+/// - `cli_base` / `cli_test` が共に与えられた場合、一致しない meta は無視する（別 run のログが
+///   混在しても CLI 明示ラベルが優先して絞り込めるようにする）
+/// - 残った meta が複数あり、`(base_label, test_label, nelo0, nelo1, alpha, beta)` が
+///   揃って一致するなら採用。ラベル不一致は `bail!`、Wald パラメータ不一致も `bail!`
+///   （LLR 境界が変わるため誤集計防止）
+/// - どのファイルにも SPRT 情報が無ければ `None`
+///   呼び出し側ではラベルは CLI 明示が必須、Wald パラメータはハードコード fallback あり
+/// - 先頭非空行が JSON として壊れている場合は警告を出してそのファイルのみスキップ
+///   （破損ファイルと旧形式 jsonl を区別するため）
+///
+/// # 整形済み JSON との互換性
+/// この関数は `serde_json::from_str` で行全体をパースするため、整形済み（スペース入り）
+/// jsonl でも動作する。一方 `collect_sprt_penta` は `contains` 高速パス前提のため
+/// コンパクト JSON のみを想定している点で非対称。tournament.rs はコンパクト出力なので
+/// 現状は問題にならない。
+fn collect_sprt_meta(
+    files: &[&str],
+    cli_base: Option<&str>,
+    cli_test: Option<&str>,
+) -> Result<Option<SprtMetaLog>> {
     let mut found: Option<(SprtMetaLog, String)> = None;
     for &path in files {
         if path.contains(".summary.") {
@@ -670,11 +687,13 @@ fn collect_sprt_meta(files: &[&str]) -> Result<Option<SprtMetaLog>> {
             if trimmed.is_empty() {
                 continue;
             }
-            // JSON として parse し `type == "meta"` を判定する。文字列部分一致だと
-            // JSON 整形スタイル（スペースの有無）に依存してしまうため serde で判定。
+            // 先頭非空行を JSON として parse。失敗 = 破損 or jsonl 非互換なので警告して次ファイルへ。
             let value: serde_json::Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
-                Err(_) => break,
+                Err(e) => {
+                    eprintln!("警告: {path} 先頭行の JSON パースに失敗しました: {e}");
+                    break;
+                }
             };
             if value.get("type").and_then(|v| v.as_str()) != Some("meta") {
                 // meta 行は各ファイルの先頭 1 行のみ。非 meta 行が出た時点で打ち切り。
@@ -682,38 +701,46 @@ fn collect_sprt_meta(files: &[&str]) -> Result<Option<SprtMetaLog>> {
             }
             let meta: MetaLog = serde_json::from_value(value)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
-            if let Some(sprt) = meta.sprt {
-                match found.as_ref() {
-                    None => found = Some((sprt, path.to_string())),
-                    Some((existing, existing_path)) => {
-                        if existing.base_label != sprt.base_label
-                            || existing.test_label != sprt.test_label
-                        {
-                            bail!(
-                                "入力ファイル間で SPRT ラベルが一致しません: {existing_path} は ({} vs {})、{path} は ({} vs {})。\
-                                 --sprt-base-label / --sprt-test-label を明示してください。",
-                                existing.base_label,
-                                existing.test_label,
-                                sprt.base_label,
-                                sprt.test_label
-                            );
-                        }
-                        if existing != &sprt {
-                            bail!(
-                                "入力ファイル間で SPRT Wald パラメータが一致しません: \
-                                 {existing_path} は (nelo0={}, nelo1={}, alpha={}, beta={})、\
-                                 {path} は (nelo0={}, nelo1={}, alpha={}, beta={})。\
-                                 --sprt-nelo0 / --sprt-nelo1 / --sprt-alpha / --sprt-beta を明示してください。",
-                                existing.nelo0,
-                                existing.nelo1,
-                                existing.alpha,
-                                existing.beta,
-                                sprt.nelo0,
-                                sprt.nelo1,
-                                sprt.alpha,
-                                sprt.beta
-                            );
-                        }
+            let Some(sprt) = meta.sprt else { break };
+
+            // CLI でラベルが両方明示されている場合は、ラベル不一致 meta を無視する。
+            // これにより、異なる run の jsonl が混在していても CLI 明示で解析対象を絞れる。
+            if let (Some(cb), Some(ct)) = (cli_base, cli_test)
+                && (sprt.base_label != cb || sprt.test_label != ct)
+            {
+                break;
+            }
+
+            match found.as_ref() {
+                None => found = Some((sprt, path.to_string())),
+                Some((existing, existing_path)) => {
+                    if existing.base_label != sprt.base_label
+                        || existing.test_label != sprt.test_label
+                    {
+                        bail!(
+                            "入力ファイル間で SPRT ラベルが一致しません: {existing_path} は ({} vs {})、{path} は ({} vs {})。\
+                             --sprt-base-label / --sprt-test-label を明示してください。",
+                            existing.base_label,
+                            existing.test_label,
+                            sprt.base_label,
+                            sprt.test_label
+                        );
+                    }
+                    if existing != &sprt {
+                        bail!(
+                            "入力ファイル間で SPRT Wald パラメータが一致しません: \
+                             {existing_path} は (nelo0={}, nelo1={}, alpha={}, beta={})、\
+                             {path} は (nelo0={}, nelo1={}, alpha={}, beta={})。\
+                             --sprt-nelo0 / --sprt-nelo1 / --sprt-alpha / --sprt-beta を明示してください。",
+                            existing.nelo0,
+                            existing.nelo1,
+                            existing.alpha,
+                            existing.beta,
+                            sprt.nelo0,
+                            sprt.nelo1,
+                            sprt.alpha,
+                            sprt.beta
+                        );
                     }
                 }
             }
@@ -728,6 +755,10 @@ fn collect_sprt_meta(files: &[&str]) -> Result<Option<SprtMetaLog>> {
 /// - ファイルの meta が base/test 両方のラベルを含まなければ `Penta::ZERO`
 /// - `pair_index` が無い旧ログは `seq / 2` / `seq % 2` でペアリング
 /// - `error=true` の結果は除外
+/// - 破損 meta/result 行があれば `Err` を返す。呼び出し側（main の for ループ）は
+///   これを `eprintln!` の警告に降格してそのファイル分だけ統計から除外するため、
+///   破損ファイルが混ざると Penta が無告知で過小集計される点に注意
+///   （`--strict` フラグ等は未実装。破損を絶対に見逃したくない場合は事前に jsonl を検証すること）
 fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
     let file =
         std::fs::File::open(path).with_context(|| format!("ファイルを開けません: {path}"))?;
@@ -750,6 +781,13 @@ fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
             continue;
         }
 
+        // 高速パス: 軽量 contains で meta/result 候補行だけ絞り込み、
+        // 絞り込んだ行は直接ターゲット型にパースして失敗時は bail（破損検知）。
+        // 全行を `serde_json::Value` へ変換するとホット move 行で重いため避ける。
+        // tournament.rs はコンパクト JSON を書き出すので contains で十分機能する。
+        // 注: 外部ツールで整形された jsonl（`"type": "meta"` のようにスペース入り）は
+        // ここでヒットせず SPRT 集計から無告知で外れる。現状は tournament.rs 出力のみ
+        // 想定の割り切り。整形済み jsonl を扱う要求が出たら JSON Value 判定に切り替える。
         if meta_labels.is_none() && trimmed.contains("\"type\":\"meta\"") {
             let meta: MetaLog = serde_json::from_str(trimmed)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
@@ -1180,8 +1218,9 @@ fn main() -> Result<()> {
 
     // SPRT post-hoc 集計（JSON モードでは最終 JSON にフィールドとして埋め込むため事前に計算する）
     let sprt_payload: Option<(Penta, SprtJsonOutput)> = if cli.sprt {
-        // CLI が全項目（ラベル+パラメータ）を明示している場合は meta 参照をスキップ。
-        // これにより meta 情報が混在・欠落していても CLI による上書きで解析可能。
+        // CLI が全項目（ラベル+パラメータ）を明示している場合は meta 参照を完全スキップ。
+        // 部分明示の場合は未解決項目の補完のため meta を収集するが、CLI でラベルが明示されて
+        // いる場合はそれを `collect_sprt_meta` に渡して別 run の meta を無視させる。
         let needs_meta = cli.sprt_base_label.is_none()
             || cli.sprt_test_label.is_none()
             || cli.sprt_nelo0.is_none()
@@ -1189,7 +1228,11 @@ fn main() -> Result<()> {
             || cli.sprt_alpha.is_none()
             || cli.sprt_beta.is_none();
         let meta_sprt = if needs_meta {
-            collect_sprt_meta(&files)?
+            collect_sprt_meta(
+                &files,
+                cli.sprt_base_label.as_deref(),
+                cli.sprt_test_label.as_deref(),
+            )?
         } else {
             None
         };
@@ -1673,4 +1716,148 @@ fn print_json(
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    fn write_meta_jsonl(dir: &std::path::Path, name: &str, sprt_json: Option<&str>) -> String {
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        let sprt_field = match sprt_json {
+            Some(s) => format!(",\"sprt\":{s}"),
+            None => String::new(),
+        };
+        writeln!(
+            f,
+            "{{\"type\":\"meta\",\"timestamp\":\"t\",\"settings\":{{\"games\":2}},\
+             \"engine_cmd\":{{\"path_black\":\"/b\",\"path_white\":\"/w\",\
+             \"label_black\":\"x\",\"label_white\":\"y\",\
+             \"usi_options_black\":[],\"usi_options_white\":[]}}{sprt_field}}}"
+        )
+        .unwrap();
+        path.display().to_string()
+    }
+
+    /// CLI でラベルが両方明示されていれば、CLI と合わない meta は無視される。
+    /// 別 run 由来の異ラベル jsonl が混在しても bail! せず、CLI と合う meta を採用する。
+    #[test]
+    fn cli_labels_filter_unrelated_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let matching_sprt = "{\"base_label\":\"v100\",\"test_label\":\"v101\",\"nelo0\":0.0,\"nelo1\":4.0,\"alpha\":0.05,\"beta\":0.05}";
+        let unrelated_sprt = "{\"base_label\":\"v200\",\"test_label\":\"v201\",\"nelo0\":0.0,\"nelo1\":5.0,\"alpha\":0.01,\"beta\":0.01}";
+        let a = write_meta_jsonl(dir.path(), "a.jsonl", Some(matching_sprt));
+        let b = write_meta_jsonl(dir.path(), "b.jsonl", Some(unrelated_sprt));
+        let files: Vec<&str> = vec![a.as_str(), b.as_str()];
+
+        let res = collect_sprt_meta(&files, Some("v100"), Some("v101")).unwrap();
+        let got = res.expect("matching meta should be picked up");
+        assert_eq!(got.base_label, "v100");
+        assert_eq!(got.test_label, "v101");
+        assert_eq!(got.nelo1, 4.0);
+    }
+
+    /// CLI ラベル未指定で異ラベルの meta が混在する場合は従来通り bail! する。
+    #[test]
+    fn without_cli_labels_conflicting_meta_bails() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl(
+            dir.path(),
+            "a.jsonl",
+            Some(
+                "{\"base_label\":\"v100\",\"test_label\":\"v101\",\"nelo0\":0.0,\"nelo1\":4.0,\"alpha\":0.05,\"beta\":0.05}",
+            ),
+        );
+        let b = write_meta_jsonl(
+            dir.path(),
+            "b.jsonl",
+            Some(
+                "{\"base_label\":\"v200\",\"test_label\":\"v201\",\"nelo0\":0.0,\"nelo1\":5.0,\"alpha\":0.01,\"beta\":0.01}",
+            ),
+        );
+        let files: Vec<&str> = vec![a.as_str(), b.as_str()];
+        let err = collect_sprt_meta(&files, None, None).unwrap_err();
+        assert!(err.to_string().contains("SPRT ラベル"));
+    }
+
+    /// ラベル一致でもパラメータが違う場合は bail!。
+    #[test]
+    fn same_labels_different_params_bails() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl(
+            dir.path(),
+            "a.jsonl",
+            Some(
+                "{\"base_label\":\"v100\",\"test_label\":\"v101\",\"nelo0\":0.0,\"nelo1\":4.0,\"alpha\":0.05,\"beta\":0.05}",
+            ),
+        );
+        let b = write_meta_jsonl(
+            dir.path(),
+            "b.jsonl",
+            Some(
+                "{\"base_label\":\"v100\",\"test_label\":\"v101\",\"nelo0\":0.0,\"nelo1\":5.0,\"alpha\":0.01,\"beta\":0.01}",
+            ),
+        );
+        let files: Vec<&str> = vec![a.as_str(), b.as_str()];
+        let err = collect_sprt_meta(&files, None, None).unwrap_err();
+        assert!(err.to_string().contains("Wald パラメータ"));
+    }
+
+    /// sprt meta を含まない旧形式 jsonl は None を返す（呼び出し側で CLI 必須を要求）。
+    #[test]
+    fn legacy_jsonl_without_sprt_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl(dir.path(), "legacy.jsonl", None);
+        let files: Vec<&str> = vec![a.as_str()];
+        let res = collect_sprt_meta(&files, None, None).unwrap();
+        assert!(res.is_none());
+    }
+
+    /// collect_sprt_penta は破損 result 行で bail する（サイレントにスキップしない）。
+    /// JSONL が途中で壊れたケースで Penta/LLR が過小集計されるのを防止。
+    #[test]
+    fn collect_sprt_penta_bails_on_broken_result_line() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken_result.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // 先頭に有効な meta（base=a, test=b）、その後に壊れた result 行を入れる
+        writeln!(
+            f,
+            "{{\"type\":\"meta\",\"timestamp\":\"t\",\"settings\":{{\"games\":2}},\
+             \"engine_cmd\":{{\"path_black\":\"/a\",\"path_white\":\"/b\",\
+             \"label_black\":\"a\",\"label_white\":\"b\",\
+             \"usi_options_black\":[],\"usi_options_white\":[]}}}}"
+        )
+        .unwrap();
+        // 壊れた result 行（outcome フィールドが数値で ResultLog パース失敗）
+        writeln!(f, "{{\"type\":\"result\",\"outcome\":123}}").unwrap();
+        drop(f);
+
+        let err = collect_sprt_penta(&path.display().to_string(), "a", "b").unwrap_err();
+        assert!(err.to_string().contains("resultパースエラー"));
+    }
+
+    /// 破損 JSON の先頭行は当該ファイルのみスキップし、他ファイルから収集できる。
+    /// （警告の eprintln! 出力はテストでは捕捉していない）
+    #[test]
+    fn broken_json_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = dir.path().join("broken.jsonl");
+        std::fs::write(&broken, "{not json\n").unwrap();
+        let good = write_meta_jsonl(
+            dir.path(),
+            "good.jsonl",
+            Some(
+                "{\"base_label\":\"v100\",\"test_label\":\"v101\",\"nelo0\":0.0,\"nelo1\":4.0,\"alpha\":0.05,\"beta\":0.05}",
+            ),
+        );
+        let broken_str = broken.display().to_string();
+        let files: Vec<&str> = vec![broken_str.as_str(), good.as_str()];
+        let res = collect_sprt_meta(&files, None, None).unwrap();
+        let got = res.expect("good file should still provide meta");
+        assert_eq!(got.base_label, "v100");
+    }
 }
