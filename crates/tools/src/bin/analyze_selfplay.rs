@@ -661,6 +661,12 @@ fn parse_file(path: &str) -> Result<FileResult> {
 ///   呼び出し側ではラベルは CLI 明示が必須、Wald パラメータはハードコード fallback あり
 /// - 先頭非空行が JSON として壊れている場合は警告を出してそのファイルのみスキップ
 ///   （破損ファイルと旧形式 jsonl を区別するため）
+///
+/// # 整形済み JSON との互換性
+/// この関数は `serde_json::from_str` で行全体をパースするため、整形済み（スペース入り）
+/// jsonl でも動作する。一方 `collect_sprt_penta` は `contains` 高速パス前提のため
+/// コンパクト JSON のみを想定している点で非対称。tournament.rs はコンパクト出力なので
+/// 現状は問題にならない。
 fn collect_sprt_meta(
     files: &[&str],
     cli_base: Option<&str>,
