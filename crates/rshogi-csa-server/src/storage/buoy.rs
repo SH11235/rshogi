@@ -202,6 +202,23 @@ impl FileBuoyStorage {
             .await?;
         Ok(Some(reserved))
     }
+
+    /// `reserve_for_match` で消費した 1 回分を巻き戻す。
+    ///
+    /// マッチ handoff が失敗した（相手が切断していた 等）場合や、buoy からの
+    /// 初期局面導出に失敗した場合に、消費済みの残数を復元するために使う。
+    /// `reserve_for_match` と同じ `reserve_lock` を取るので、`reserve` と
+    /// `release` は 1 プロセス内で直列化される。対象の buoy が既に削除されて
+    /// いれば Ok(()) を返す（巻き戻し対象なしで no-op）。
+    pub async fn release_reservation(&self, game_name: &GameName) -> Result<(), StorageError> {
+        let _guard = self.reserve_lock.lock().await;
+        let Some(mut buoy) = self.load(game_name).await? else {
+            return Ok(());
+        };
+        buoy.remaining = buoy.remaining.saturating_add(1);
+        self.store(game_name, buoy.moves, buoy.remaining, buoy.initial_sfen).await?;
+        Ok(())
+    }
 }
 
 /// `game_name` をファイル名に安全なエンコーディングに変換する。
@@ -471,6 +488,33 @@ mod tests {
         assert_eq!(reserved.remaining, 1);
         assert_eq!(reserved.moves, vec![CsaMoveToken::new("+7776FU")]);
         assert_eq!(storage.count(&gn).await.unwrap(), Some(0));
+        let _ = fs::remove_dir_all(&topdir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn release_reservation_restores_consumed_count() {
+        // handoff 失敗や初期局面導出失敗のロールバック経路。`reserve_for_match`
+        // で 3 → 2 に減らした後、`release_reservation` で 2 → 3 に戻せる。
+        let topdir = unique_topdir("release_reservation");
+        let storage = FileBuoyStorage::new(topdir.clone());
+        let gn = GameName::new("forked-rollback");
+        storage.set(&gn, vec![CsaMoveToken::new("+7776FU")], 3).await.unwrap();
+        let _ = storage.reserve_for_match(&gn).await.unwrap().unwrap();
+        assert_eq!(storage.count(&gn).await.unwrap(), Some(2));
+        storage.release_reservation(&gn).await.unwrap();
+        assert_eq!(storage.count(&gn).await.unwrap(), Some(3));
+        let _ = fs::remove_dir_all(&topdir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn release_reservation_is_no_op_for_missing_buoy() {
+        // buoy が既に削除されている場合、release_reservation は no-op を返す。
+        // 存在しない buoy を作り直さないことも同時に確認する。
+        let topdir = unique_topdir("release_reservation_missing");
+        let storage = FileBuoyStorage::new(topdir.clone());
+        let gn = GameName::new("never-set");
+        storage.release_reservation(&gn).await.unwrap();
+        assert_eq!(storage.count(&gn).await.unwrap(), None);
         let _ = fs::remove_dir_all(&topdir).await;
     }
 }

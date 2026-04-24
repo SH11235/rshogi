@@ -101,6 +101,12 @@ pub enum ClientCommand {
         game_name: GameName,
     },
     /// `%%FORK <source_game> [buoy_name] [nth_move]`
+    ///
+    /// 省略形の曖昧性: 第 2 トークンだけが与えられたとき、それが数字だけなら
+    /// `nth_move`、そうでなければ `buoy_name` として解釈する。数字だけの
+    /// buoy 名（例: `"42"`）を指定したい場合は、3 トークン目に `nth_move`
+    /// を付けて `%%FORK <id> 42 0` のように明示する必要がある（Copilot
+    /// レビュー指摘）。通常の buoy 命名では影響しない。
     Fork {
         /// 派生元の対局 ID。
         source_game: GameId,

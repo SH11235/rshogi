@@ -87,6 +87,13 @@ const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
 
+/// 旧 schema との互換用に `main_time_sec` / `byoyomi_sec` を秒単位で返す。
+///
+/// StopWatch は内部表現が分単位だが、フィールド名が `_sec` なので秒単位に
+/// 揃えて JSON を内部整合させる (Copilot レビュー指摘)。ClockSpec 自体も
+/// `clock` に丸ごと永続化しているため、legacy フィールドは ClockSpec が
+/// 無い旧 JSON からの fallback 専用だが、それでも単位不整合は footgun なので
+/// 秒に正規化しておく。
 fn legacy_clock_fields(clock: &ClockSpec) -> (u32, u32) {
     match clock {
         ClockSpec::Countdown {
@@ -100,7 +107,7 @@ fn legacy_clock_fields(clock: &ClockSpec) -> (u32, u32) {
         ClockSpec::StopWatch {
             total_time_min,
             byoyomi_min,
-        } => (*total_time_min, *byoyomi_min),
+        } => (total_time_min.saturating_mul(60), byoyomi_min.saturating_mul(60)),
     }
 }
 
@@ -1107,11 +1114,17 @@ impl GameRoom {
     }
 
     /// 全観戦者へ 1 行送出する。
+    ///
+    /// 観戦者は best-effort 配信。特定の WS への書き込みが失敗しても他の
+    /// 観戦者や対局進行を止めず、エラーは log に落として継続する (Copilot
+    /// レビュー指摘)。観戦者 1 人の切断が DO を不安定化させないようにする。
     async fn send_to_spectators(&self, line: &str) -> Result<()> {
         for ws in self.state.get_websockets() {
             let att: Option<WsAttachment> = ws.deserialize_attachment().ok().flatten();
-            if let Some(WsAttachment::Spectator { .. }) = att {
-                send_line(&ws, line)?;
+            if let Some(WsAttachment::Spectator { .. }) = att
+                && let Err(e) = send_line(&ws, line)
+            {
+                console_log!("[GameRoom] spectator send failed (ignored): {e:?}");
             }
         }
         Ok(())

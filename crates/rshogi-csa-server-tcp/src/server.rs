@@ -424,27 +424,10 @@ where
         let mut pool = state.waiting.lock().await;
         pool.take_complement(&game_name, color)
     } {
-        let match_initial_sfen =
-            match reserve_match_initial_position(state.as_ref(), &game_name).await? {
-                MatchInitialPosition::Default(sfen) => sfen,
-                MatchInitialPosition::Reserved(sfen) => Some(sfen),
-                MatchInitialPosition::Exhausted => {
-                    let mut pool = state.waiting.lock().await;
-                    pool.push(game_name.clone(), slot);
-                    log::info!("buoy {game_name} exhausted; falling back to waiter");
-                    return run_waiter(
-                        state.clone(),
-                        transport,
-                        handle,
-                        color,
-                        game_name,
-                        handle_player,
-                        x1,
-                    )
-                    .await;
-                }
-            };
-        // drive 側パス。
+        // buoy を予約する前に相手 waiter の健在と transport handoff を確定する。
+        // 先に予約してしまうと、相手が直前に切断していた場合に buoy 残数が
+        // 消費されたまま復元されない問題があった (codex cloud P1 /
+        // codex CLI round 3 P2)。
         let (resp_tx, resp_rx) = oneshot::channel::<TcpTransport>();
         let (done_tx, done_rx) = oneshot::channel::<()>();
         let req = MatchRequest {
@@ -453,9 +436,36 @@ where
         };
         let opp_handle = slot.handle.clone();
         let opp_color = slot.color;
-        if slot.match_request_tx.send(req).is_ok()
-            && let Ok(opp_transport) = resp_rx.await
-        {
+        let handoff_ok = slot.match_request_tx.send(req).is_ok();
+        let opp_transport = if handoff_ok { resp_rx.await.ok() } else { None };
+        if let Some(opp_transport) = opp_transport {
+            // handoff が確定した後で buoy を予約する。buoy が存在しない場合は
+            // 通常対局、存在して残数があれば予約、残数 0 なら両者に通知して
+            // 対局を取り消す。
+            let match_initial_sfen =
+                match reserve_match_initial_position(state.as_ref(), &game_name).await? {
+                    MatchInitialPosition::Default(sfen) => sfen,
+                    MatchInitialPosition::Reserved(sfen) => Some(sfen),
+                    MatchInitialPosition::Exhausted => {
+                        // buoy 残数 0。相手の waiter に Abort を送りたいが、既に
+                        // Start を送って transport まで受け取ってしまっているので
+                        // 直接 transport にエラーを送って切断する。自分も同じ
+                        // エラーを送って終わる。再キューしない（silently ハング
+                        // するのを避ける）。
+                        log::info!("buoy {game_name} exhausted after handoff; aborting match");
+                        let err_line =
+                            CsaLine::new(format!("##[ERROR] buoy '{game_name}' exhausted"));
+                        let _ = transport.send_line(&err_line).await;
+                        let mut opp_transport = opp_transport;
+                        let _ = opp_transport.send_line(&err_line).await;
+                        let _ = done_tx.send(());
+                        // 両者の League エントリを片付ける。
+                        let mut league = state.league.lock().await;
+                        league.logout(&handle_player);
+                        league.logout(&PlayerName::new(opp_handle.as_str()));
+                        return Ok(());
+                    }
+                };
             return drive_game(
                 state.clone(),
                 opp_transport,
@@ -1087,9 +1097,23 @@ where
     }
     let initial_sfen = match buoy.initial_sfen {
         Some(sfen) => sfen,
-        None => initial_sfen_from_csa_moves(&buoy.moves).map_err(|e| {
-            ServerError::Protocol(ProtocolError::Malformed(format!("buoy {game_name}: {e}")))
-        })?,
+        None => match initial_sfen_from_csa_moves(&buoy.moves) {
+            Ok(sfen) => sfen,
+            Err(e) => {
+                // legacy buoy (initial_sfen 無し、moves からの導出) で moves が
+                // 不正な場合、`reserve_for_match` で既に消費した 1 回分を
+                // 巻き戻す。そうしないと不正 buoy が静かに burn し続ける
+                // (Copilot レビュー指摘)。
+                if let Err(rollback_err) = state.buoy_storage.release_reservation(game_name).await {
+                    log::error!(
+                        "failed to rollback buoy reservation for {game_name}: {rollback_err}"
+                    );
+                }
+                return Err(ServerError::Protocol(ProtocolError::Malformed(format!(
+                    "buoy {game_name}: {e}"
+                ))));
+            }
+        },
     };
     Ok(MatchInitialPosition::Reserved(initial_sfen))
 }
