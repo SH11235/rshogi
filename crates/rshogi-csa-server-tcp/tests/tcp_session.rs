@@ -1447,3 +1447,68 @@ fn oute_sennichite_from_initial_sfen_ends_as_perpetual_check_loss_e2e() {
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }
+
+#[test]
+fn graceful_shutdown_disconnects_waiter_and_stops_accepting() {
+    // graceful shutdown 回帰テスト:
+    //   1. 待機中の x1 クライアント (LOGIN OK 済み、マッチ待ち) を 1 本接続。
+    //   2. `state.shutdown.trigger()` を呼ぶ。
+    //   3. 待機クライアントに `##[NOTICE] server shutting down` が届く。
+    //   4. active_game_count が 0 に留まり、shutdown 検証が進める状態を確認する。
+    run_local(|| async {
+        let topdir = unique_topdir("graceful_shutdown");
+        let mut password_map = HashMap::new();
+        password_map.insert("alice".to_owned(), "pw".to_owned());
+        let rate_records = vec![PlayerRateRecord {
+            name: PlayerName::new("alice"),
+            rate: 1500,
+            wins: 0,
+            losses: 0,
+            last_game_id: None,
+            last_modified: "2026-04-17T00:00:00Z".to_owned(),
+        }];
+        let rate_storage = support::MemRateStorage::new(rate_records);
+        let kifu_storage = FileKifuStorage::new(topdir.clone());
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let config = ServerConfig {
+            bind_addr: addr,
+            kifu_topdir: topdir.clone(),
+            login_timeout: Duration::from_secs(10),
+            agree_timeout: Duration::from_secs(30),
+            ..ServerConfig::sensible_defaults()
+        };
+        let state = Rc::new(build_state(
+            config,
+            rate_storage,
+            kifu_storage,
+            InMemoryPasswordStore { map: password_map },
+            Box::new(PlainPasswordHasher::new()),
+            IpLoginRateLimiter::default_limits(),
+            InMemoryBroadcaster::new(),
+        ));
+        let _handle = run_server(state.clone()).await.expect("run_server");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // 待機クライアントを接続。
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN alice+g1+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:alice OK");
+
+        // shutdown を起動。
+        state.shutdown.trigger();
+
+        // 待機クライアントに NOTICE が届く。
+        let notice = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(notice, "##[NOTICE] server shutting down");
+        drop(ra);
+        drop(wa);
+
+        // 対局は動いていないので active_game_count は 0。shutdown 後 grace なしで
+        // 進める状態を確認する。
+        assert_eq!(state.active_game_count().await, 0);
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}

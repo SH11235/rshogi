@@ -21,6 +21,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rshogi_core::types::EnteringKingRule;
@@ -131,6 +132,10 @@ pub struct ServerConfig {
     /// Floodgate 機能は無く、将来 Floodgate 系機能が入る PR が本フラグを
     /// 起動条件として参照する。
     pub allow_floodgate_features: bool,
+    /// SIGINT / SIGTERM 受信後に進行中対局の終了を待つ上限。超過分は未完了の
+    /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
+    /// を落とさない」ためのバッファで、既定 60 秒。
+    pub shutdown_grace: Duration,
 }
 
 impl ServerConfig {
@@ -149,7 +154,64 @@ impl ServerConfig {
             initial_sfen: None,
             admin_handles: Vec::new(),
             allow_floodgate_features: false,
+            shutdown_grace: Duration::from_secs(60),
         }
+    }
+}
+
+/// graceful shutdown 用トリガ。SIGINT / SIGTERM 受信で `trigger` され、
+/// accept ループや待機 waiter が `wait()` を `tokio::select!` に組み込んで
+/// cancellation を検知する。
+///
+/// `current_thread` ランタイム + `LocalSet` 前提で `Rc` 共有するため
+/// `Send`/`Sync` 境界は不要だが、実装は `AtomicBool` + `Notify` にして
+/// 将来マルチスレッドへ広げた場合にも耐えられるようにしている。
+pub struct GracefulShutdown {
+    triggered: AtomicBool,
+    notify: Notify,
+}
+
+impl GracefulShutdown {
+    /// 未トリガ状態のインスタンスを返す。
+    pub fn new() -> Self {
+        Self {
+            triggered: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    /// シャットダウンを開始する。複数回呼ばれても冪等。
+    pub fn trigger(&self) {
+        if !self.triggered.swap(true, Ordering::SeqCst) {
+            // 待機中の全 waiter に通知。新しく `wait()` してくる経路は
+            // 下の `is_triggered` チェックで即座に抜ける。
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// 既にトリガ済みか。
+    pub fn is_triggered(&self) -> bool {
+        self.triggered.load(Ordering::SeqCst)
+    }
+
+    /// トリガされるまで待機する。トリガ済みなら即座に返る。
+    pub async fn wait(&self) {
+        if self.is_triggered() {
+            return;
+        }
+        // notify_waiters は現在待機中の全 waiter にのみ通知するため、
+        // notified 登録 → atomic 再確認で lost-wakeup を避ける。
+        let notified = self.notify.notified();
+        if self.is_triggered() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+impl Default for GracefulShutdown {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -244,6 +306,34 @@ where
     /// は常に同一プロセス・同一プロセス内で単一インスタンスを保持する前提
     /// (複数プロセス並行書き込みは非対応)。
     buoy_storage: rshogi_csa_server::FileBuoyStorage,
+    /// SIGINT / SIGTERM 由来の graceful shutdown トリガ。accept ループと
+    /// 待機 waiter が監視して、新規受付停止と待機セッション切断を行う。
+    pub shutdown: GracefulShutdown,
+}
+
+impl<R, K, P> SharedState<R, K, P>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    /// 起動時に渡した [`ServerConfig`] を参照する。graceful shutdown などで
+    /// `shutdown_grace` のような設定値を読むために使う。
+    pub fn config(&self) -> &ServerConfig {
+        &self.config
+    }
+
+    /// 現在の進行中対局数。graceful shutdown 中に残対局数を監視するために使う。
+    pub async fn active_game_count(&self) -> usize {
+        self.games.lock().await.len()
+    }
+
+    /// 進行中対局数が 0 になったことを通知する [`Notify`] への待機ハンドル。
+    /// 対局 1 件が終了するたびに `notify_waiters` が呼ばれるため、呼び出し側は
+    /// 受信後に [`Self::active_game_count`] を再確認してから `break` する。
+    pub fn wait_active_games_notify(&self) -> tokio::sync::futures::Notified<'_> {
+        self.active_games.notified()
+    }
 }
 
 /// パスワードストアの抽象。`handle` に対応する保存ハッシュ（現状は平文）を返す。
@@ -299,19 +389,30 @@ where
     P: PasswordStore + 'static,
 {
     loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                log::debug!("accepted {addr}");
-                let st = state.clone();
-                tokio::task::spawn_local(async move {
-                    if let Err(e) = handle_connection(stream, st).await {
-                        log::info!("connection {addr} ended: {e:?}");
-                    }
-                });
+        tokio::select! {
+            // graceful shutdown 中は新規受付を止める。listener は drop されて
+            // port が解放されるまでの short window では SYN が失敗する可能性が
+            // あるが、既存接続と進行中対局には影響しない。
+            _ = state.shutdown.wait() => {
+                log::info!("accept loop received shutdown signal; stopping new connections");
+                break;
             }
-            Err(e) => {
-                log::warn!("accept error: {e}");
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            res = listener.accept() => {
+                match res {
+                    Ok((stream, addr)) => {
+                        log::debug!("accepted {addr}");
+                        let st = state.clone();
+                        tokio::task::spawn_local(async move {
+                            if let Err(e) = handle_connection(stream, st).await {
+                                log::info!("connection {addr} ended: {e:?}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        log::warn!("accept error: {e}");
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
             }
         }
     }
@@ -551,6 +652,17 @@ where
     // 先に到着した場合はバッファを保ったまま drive 側へ transport を渡せる。
     let waiter_outcome: WaiterOutcome = 'outer: loop {
         let recv = tokio::select! {
+            // graceful shutdown: 待機中のセッションに `##[NOTICE] ...` を送って
+            // 切断する。プレイヤー側は LOGIN 済みだが対局には入っていないので、
+            // 安全に接続を閉じてプロセス終了を待てる。
+            _ = state.shutdown.wait() => {
+                let _ = transport
+                    .send_line(&CsaLine::new("##[NOTICE] server shutting down"))
+                    .await;
+                let mut pool = state.waiting.lock().await;
+                let _ = pool.remove_by_handle(&game_name, &handle);
+                break 'outer WaiterOutcome::DisconnectedFromPool;
+            }
             // observer_mode 時は `match_req_rx` の Err は自分が pool から自主的に
             // 外れたことが原因。`recv_line` / `forwarded` ブランチを使い続けられるよう、
             // pending() に切り替えて本ブランチを実質無効化する。`match_req_rx` を
@@ -1752,6 +1864,7 @@ where
         game_counter: Mutex::new(0),
         started_at: chrono::Utc::now(),
         buoy_storage,
+        shutdown: GracefulShutdown::new(),
     }
 }
 
