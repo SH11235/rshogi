@@ -749,6 +749,10 @@ fn collect_sprt_meta(
 /// - ファイルの meta が base/test 両方のラベルを含まなければ `Penta::ZERO`
 /// - `pair_index` が無い旧ログは `seq / 2` / `seq % 2` でペアリング
 /// - `error=true` の結果は除外
+/// - 破損 meta/result 行があれば `Err` を返す。呼び出し側（main の for ループ）は
+///   これを `eprintln!` の警告に降格してそのファイル分だけ統計から除外するため、
+///   破損ファイルが混ざると Penta が無告知で過小集計される点に注意
+///   （`--strict` フラグ等は未実装。破損を絶対に見逃したくない場合は事前に jsonl を検証すること）
 fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
     let file =
         std::fs::File::open(path).with_context(|| format!("ファイルを開けません: {path}"))?;
@@ -775,6 +779,9 @@ fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
         // 絞り込んだ行は直接ターゲット型にパースして失敗時は bail（破損検知）。
         // 全行を `serde_json::Value` へ変換するとホット move 行で重いため避ける。
         // tournament.rs はコンパクト JSON を書き出すので contains で十分機能する。
+        // 注: 外部ツールで整形された jsonl（`"type": "meta"` のようにスペース入り）は
+        // ここでヒットせず SPRT 集計から無告知で外れる。現状は tournament.rs 出力のみ
+        // 想定の割り切り。整形済み jsonl を扱う要求が出たら JSON Value 判定に切り替える。
         if meta_labels.is_none() && trimmed.contains("\"type\":\"meta\"") {
             let meta: MetaLog = serde_json::from_str(trimmed)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
