@@ -13,8 +13,10 @@
 
 pub mod decision;
 pub mod llr;
+pub mod meta;
 pub mod penta;
 
 pub use decision::{Decision, judge};
 pub use llr::SprtParameters;
+pub use meta::SprtMetaLog;
 pub use penta::{GameSide, Penta};

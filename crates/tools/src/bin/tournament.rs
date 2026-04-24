@@ -52,7 +52,7 @@ use tools::selfplay::types::{EvalLog, side_label};
 use tools::selfplay::{
     EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
 };
-use tools::sprt::{Decision, GameSide, Penta, SprtParameters, judge};
+use tools::sprt::{Decision, GameSide, Penta, SprtMetaLog, SprtParameters, judge};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -264,6 +264,10 @@ struct MetaLogEntry {
     engine_cmd: EngineCommandMeta,
     start_positions: Vec<String>,
     output: String,
+    /// SPRT 実行時のみ付与される。base / test ラベルと Wald パラメータを含み、
+    /// analyze_selfplay 側でラベル自動推定に利用する。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sprt: Option<SprtMetaLog>,
 }
 
 #[derive(Serialize)]
@@ -1039,6 +1043,24 @@ fn main() -> Result<()> {
             let path = cli.out_dir.join(&filename);
             let mut pw = PairWriter::new(&path)?;
 
+            // SPRT 有効かつこのペアが base/test の組み合わせなら SPRT meta を付与する。
+            // pair_indices は (min, max) 正規化済みなので両順序をカバーする。
+            let sprt_meta = sprt_state.as_ref().and_then(|state| {
+                let pair = (state.base_idx.min(state.test_idx), state.base_idx.max(state.test_idx));
+                if pair == (i, j) {
+                    Some(SprtMetaLog {
+                        base_label: state.base_label.clone(),
+                        test_label: state.test_label.clone(),
+                        nelo0: state.params.nelo0,
+                        nelo1: state.params.nelo1,
+                        alpha: state.params.alpha,
+                        beta: state.params.beta,
+                    })
+                } else {
+                    None
+                }
+            });
+
             // meta行を書く
             let meta = MetaLogEntry {
                 kind: "meta".to_string(),
@@ -1065,6 +1087,7 @@ fn main() -> Result<()> {
                 },
                 start_positions: start_commands.clone(),
                 output: path.display().to_string(),
+                sprt: sprt_meta,
             };
             pw.write_json(&meta)?;
             pw.flush()?;
