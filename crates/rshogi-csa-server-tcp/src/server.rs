@@ -451,6 +451,66 @@ where
     Ok(handle)
 }
 
+/// `Box<dyn Any>` の panic payload から人間可読な短い文字列を取り出す。
+///
+/// `panic!("...")` で渡した `&str` / `String` を最優先で抽出し、それ以外の
+/// payload 型は `"<non-string panic payload>"` で固定する。`tracing::error!` の
+/// 構造化フィールドにそのまま乗せられるよう `String` を返す。
+///
+/// debug ビルドでは [`run_connection_isolated`] が catch_unwind を行わないため
+/// 本関数は使われない。`#[cfg(not(debug_assertions))]` で release ビルド時のみ
+/// 定義することで、`#[allow(dead_code)]` 抑止に頼らずに dead_code 警告を回避する。
+#[cfg(not(debug_assertions))]
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_owned();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_owned()
+}
+
+/// 1 接続分の `handle_connection` を panic boundary で包むラッパ。
+///
+/// release ビルドでは `FutureExt::catch_unwind` で panic を捕捉し、`tracing::error!`
+/// に span (`conn_id` / `game_id`) 付きで記録した上で task を正常終了させる。
+/// 当該接続は途絶するが、accept ループや他の対局タスクには影響しない。
+///
+/// debug ビルド (`cfg(debug_assertions)`) では catch_unwind を行わずに panic を
+/// 透過させる。CLAUDE.md の「契約違反は panic で顕在化」方針に従い、開発中の
+/// 不変条件違反は即時クラッシュさせて気付きやすくするため。
+async fn run_connection_isolated<R, K, P>(stream: TcpStream, state: Rc<SharedState<R, K, P>>)
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    #[cfg(debug_assertions)]
+    {
+        if let Err(e) = handle_connection(stream, state).await {
+            tracing::info!(error = ?e, "connection ended");
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        use futures::FutureExt;
+        let fut = std::panic::AssertUnwindSafe(handle_connection(stream, state));
+        match fut.catch_unwind().await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::info!(error = ?e, "connection ended");
+            }
+            Err(payload) => {
+                tracing::error!(
+                    panic_payload = %panic_payload_to_string(payload.as_ref()),
+                    "connection task panicked; isolated to this connection"
+                );
+            }
+        }
+    }
+}
+
 /// 受理ループ。各接続を `spawn_local` で同スレッド内の独立タスクにする。
 async fn accept_loop<R, K, P>(listener: TcpListener, state: Rc<SharedState<R, K, P>>)
 where
@@ -490,12 +550,7 @@ where
                         span.in_scope(|| tracing::debug!("accepted"));
                         let st = state.clone();
                         tokio::task::spawn_local(
-                            async move {
-                                if let Err(e) = handle_connection(stream, st).await {
-                                    tracing::info!(error = ?e, "connection ended");
-                                }
-                            }
-                            .instrument(span),
+                            run_connection_isolated(stream, st).instrument(span),
                         );
                     }
                     Err(e) => {
@@ -2073,6 +2128,39 @@ mod tests {
         assert_eq!(parse_move_broadcast("-3334FU,T10"), Some(("-3334FU", 10)));
         assert_eq!(parse_move_broadcast("#RESIGN"), None);
         assert_eq!(parse_move_broadcast("+7776FU,Tx"), None);
+    }
+
+    /// `panic_payload_to_string` は release ビルドでのみ参照されるため、
+    /// テストも同じ cfg で囲む（debug ビルドでは関数自体が存在しない）。
+    /// `panic!("...")` で渡される `&'static str` / `String` 双方を抽出でき、
+    /// それ以外の型は固定文字列にフォールバックする契約を固定する。
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn panic_payload_to_string_extracts_str_and_string() {
+        let s_payload: Box<dyn std::any::Any + Send> = Box::new("static-msg");
+        assert_eq!(panic_payload_to_string(s_payload.as_ref()), "static-msg");
+
+        let owned_payload: Box<dyn std::any::Any + Send> = Box::new(String::from("owned-msg"));
+        assert_eq!(panic_payload_to_string(owned_payload.as_ref()), "owned-msg");
+
+        let other_payload: Box<dyn std::any::Any + Send> = Box::new(42_i32);
+        assert_eq!(panic_payload_to_string(other_payload.as_ref()), "<non-string panic payload>");
+    }
+
+    /// release ビルドでは `run_connection_isolated` 経路の `catch_unwind` が
+    /// `panic!` を tracing event に変換してタスクを正常終了させる。本テストは
+    /// `handle_connection` を叩かずに同経路の async catch_unwind を直接呼び、
+    /// debug build と release build の挙動契約が分岐していることを確認する。
+    #[cfg(not(debug_assertions))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_catch_unwind_isolates_panic_in_release_build() {
+        use futures::FutureExt;
+        let f = std::panic::AssertUnwindSafe(async {
+            panic!("intentional test panic");
+        });
+        let outcome = f.catch_unwind().await;
+        let payload = outcome.expect_err("AssertUnwindSafe future must surface panic");
+        assert_eq!(panic_payload_to_string(payload.as_ref()), "intentional test panic");
     }
 
     /// 既定構成は Floodgate 系機能を要求していないため、`allow_floodgate_features=false`
