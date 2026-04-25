@@ -26,6 +26,7 @@ pub mod attachment;
 pub mod config;
 pub mod datetime;
 pub mod origin;
+pub mod persistence;
 pub mod room_id;
 pub mod session_state;
 pub mod spectator_control;

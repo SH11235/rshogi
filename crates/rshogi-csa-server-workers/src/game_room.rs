@@ -56,6 +56,9 @@ use rshogi_csa_server::types::{Color, CsaLine, CsaMoveToken, GameId, GameName, P
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::{ConfigKeys, parse_clock_spec};
 use crate::datetime::{format_csa_datetime, format_date_path};
+use crate::persistence::{
+    FinishedState, MoveRow, PersistedConfig, ReplaySummary, legacy_clock_fields, replay_core_room,
+};
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 use crate::spectator_control::{MonitorDecision, resolve_monitor_target};
 use crate::ws_route::{WsRoute, parse_ws_route};
@@ -86,84 +89,6 @@ const KEY_ROOM_ID: &str = "room_id";
 const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
-
-/// 旧 schema との互換用に `main_time_sec` / `byoyomi_sec` を秒単位で返す。
-///
-/// StopWatch は内部表現が分単位だが、フィールド名が `_sec` なので秒単位に
-/// 揃えて JSON を内部整合させる (Copilot レビュー指摘)。ClockSpec 自体も
-/// `clock` に丸ごと永続化しているため、legacy フィールドは ClockSpec が
-/// 無い旧 JSON からの fallback 専用だが、それでも単位不整合は footgun なので
-/// 秒に正規化しておく。
-fn legacy_clock_fields(clock: &ClockSpec) -> (u32, u32) {
-    match clock {
-        ClockSpec::Countdown {
-            total_time_sec,
-            byoyomi_sec,
-        } => (*total_time_sec, *byoyomi_sec),
-        ClockSpec::Fischer {
-            total_time_sec,
-            increment_sec,
-        } => (*total_time_sec, *increment_sec),
-        ClockSpec::StopWatch {
-            total_time_min,
-            byoyomi_min,
-        } => (total_time_min.saturating_mul(60), byoyomi_min.saturating_mul(60)),
-    }
-}
-
-/// マッチ成立時に永続化する対局設定。CoreRoom の再構築に必要な最小情報。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedConfig {
-    game_id: String,
-    black_handle: String,
-    white_handle: String,
-    game_name: String,
-    main_time_sec: u32,
-    byoyomi_sec: u32,
-    /// 新しい時計設定。旧 JSON では欠落するため `None` を許容し、legacy
-    /// `main_time_sec/byoyomi_sec` へ fallback する。
-    #[serde(default)]
-    clock: Option<ClockSpec>,
-    max_moves: u32,
-    time_margin_ms: u64,
-    /// マッチ成立（2 人目の LOGIN 受理）時刻。`$START_TIME` などの参考に使う。
-    matched_at_ms: u64,
-    /// 両者 AGREE を受理して `HandleOutcome::GameStarted` が立った瞬間。
-    /// `None` の間は `AgreeWaiting`/`StartWaiting` 段階で、cold start 復元時も
-    /// CoreRoom は `AgreeWaiting` で作り直す。`Some(t)` になって初めて replay で
-    /// AGREE を再送して `Playing` 状態に戻す（start 直後・初手前の再起動対策）。
-    play_started_at_ms: Option<u64>,
-    /// 対局の開始局面 SFEN。通常対局は `None` (= 平手)。buoy / %%FORK 経由の
-    /// 対局では `Some(sfen)` で、cold start 復元時もこの SFEN から CoreRoom を
-    /// 組み直す。serde は `#[serde(default)]` で旧 JSON (= `None`) と後方互換。
-    #[serde(default)]
-    initial_sfen: Option<String>,
-}
-
-impl PersistedConfig {
-    fn clock_spec(&self) -> ClockSpec {
-        self.clock.clone().unwrap_or(ClockSpec::Countdown {
-            total_time_sec: self.main_time_sec,
-            byoyomi_sec: self.byoyomi_sec,
-        })
-    }
-}
-
-/// 終局フラグ。一度 `Some` になったらその DO は同じ対局を二度開始しない。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FinishedState {
-    result_code: String,
-    ended_at_ms: u64,
-}
-
-/// `moves` テーブル 1 行分。replay / alarm で使う。
-#[derive(Debug, Clone, Deserialize)]
-struct MoveRow {
-    ply: i64,
-    color: String,
-    line: String,
-    at_ms: i64,
-}
 
 /// R2 上の buoy 保存フォーマット。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1173,75 +1098,36 @@ impl GameRoom {
         let Some(cfg) = cfg_opt else {
             return Ok(());
         };
-        let clock: Box<dyn TimeClock> = cfg.clock_spec().build_clock();
-        // 永続化済み initial_sfen を信用して CoreRoom を再構築。もし永続化データが
-        // 壊れて `set_sfen` が落ちる場合は panic ではなく Err として返し、呼び出し側
-        // (`ensure_core_loaded`) の Result で伝搬できるようにする (Codex review
-        // PR #470 4th round P2)。
-        let mut core = match CoreRoom::new(
-            GameRoomConfig {
-                game_id: GameId::new(cfg.game_id.clone()),
-                black: PlayerName::new(cfg.black_handle.clone()),
-                white: PlayerName::new(cfg.white_handle.clone()),
-                max_moves: cfg.max_moves,
-                time_margin_ms: cfg.time_margin_ms,
-                entering_king_rule: EnteringKingRule::Point24,
-                // cold start 復元時も start_match で永続化した initial_sfen を
-                // そのまま使って CoreRoom を組み直す。moves replay の起点となる
-                // 局面を保つため。
-                initial_sfen: cfg.initial_sfen.clone(),
-            },
-            clock,
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                console_log!("[GameRoom] replay CoreRoom::new failed: {e:?}");
-                return Ok(());
-            }
+        // moves replay は I/O 非依存に分離した `replay_core_room` に委譲する。
+        // 永続化レイヤとの境界は `load_moves()` の戻り値だけで、replay 中の状態
+        // 復元は I/O を持たない純粋関数として `crate::persistence` 側でホスト
+        // target から網羅テストされている (cold start シナリオの状態完全一致 +
+        // 失敗系の分岐被覆)。
+        let moves = if cfg.play_started_at_ms.is_some() {
+            self.load_moves().await?
+        } else {
+            Vec::new()
         };
-
-        // moves 再送。AGREE は手として永続化しないため、moves が存在するなら
-        // 両者 AGREE 済みと確定できる（そうでないと MoveAccepted に至らない）。
-        // `play_started_at_ms` が立っている = 両者 AGREE が成立した事実の永続化。
-        // moves の有無に関わらず、ここが `Some` なら Playing 状態へ戻すために
-        // AGREE を再送する。これにより `START` 後〜初手前の cold start でも
-        // `Playing` に復帰して alarm による time-up が正しく発火する。
-        if let Some(play_started_at_ms) = cfg.play_started_at_ms {
-            for color in [Color::Black, Color::White] {
-                if let Err(e) = core.handle_line(color, &CsaLine::new("AGREE"), play_started_at_ms)
-                {
-                    console_log!("[GameRoom] replay AGREE failed: {e:?}");
-                    return Ok(());
-                }
+        match replay_core_room(&cfg, &moves) {
+            ReplaySummary::Restored { core, .. } => {
+                // `core` は `Box<CoreRoom>` で返るためここで unbox する
+                // (`ReplaySummary` の variant 間サイズ差対策、persistence.rs 参照)。
+                *self.core.borrow_mut() = Some(*core);
+                *self.config.borrow_mut() = Some(cfg);
             }
-
-            // 手を 1 つずつ再送する。AGREE の timestamp は `play_started_at_ms` を
-            // 使っているので、初手の `at_ms - play_started_at_ms` が正しい消費時間
-            // として CoreRoom の clock に反映される（初手消費時間が 0 になる問題の修正）。
-            let moves = self.load_moves().await?;
-            for m in &moves {
-                let color = match m.color.as_str() {
-                    "black" => Color::Black,
-                    "white" => Color::White,
-                    _ => {
-                        console_log!("[GameRoom] replay: unknown color '{}'", m.color);
-                        return Ok(());
-                    }
-                };
-                let ts = (m.at_ms.max(0) as u64).max(play_started_at_ms);
-                if let Err(e) = core.handle_line(color, &CsaLine::new(&m.line), ts) {
-                    console_log!(
-                        "[GameRoom] replay move ply={} line='{}' failed: {e:?}",
-                        m.ply,
-                        m.line
-                    );
-                    return Ok(());
-                }
+            ReplaySummary::InvalidSfen { reason } => {
+                console_log!("[GameRoom] replay CoreRoom::new failed: {reason}");
+            }
+            ReplaySummary::AgreeReplayFailed { color, reason } => {
+                console_log!("[GameRoom] replay AGREE failed (color={color:?}): {reason}");
+            }
+            ReplaySummary::UnknownColor { ply, color } => {
+                console_log!("[GameRoom] replay: unknown color '{color}' at ply={ply}");
+            }
+            ReplaySummary::MoveReplayFailed { ply, line, reason } => {
+                console_log!("[GameRoom] replay move ply={ply} line='{line}' failed: {reason}");
             }
         }
-
-        *self.core.borrow_mut() = Some(core);
-        *self.config.borrow_mut() = Some(cfg);
         Ok(())
     }
 
