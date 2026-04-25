@@ -14,17 +14,23 @@ anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 tracing.workspace = true
-# `tracing-subscriber` / `tracing-log` は subscriber 初期化系で本 binary 用途
-# のみ。library crate に染み出さないよう workspace ではなく crate ローカルで
-# 直接書く（dep 範囲を明示）。
-tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "tracing-log", "ansi"] }
-tracing-log = "0.2"
+# subscriber / log bridge は本 binary 用途のみ。workspace で version を pin
+# しつつ、library crate 側で `.workspace = true` を書かないことで pull を抑止する。
+tracing-subscriber.workspace = true
+tracing-log.workspace = true
 # 1 connection task の panic を boundary に閉じ込めるため、async 対応の
 # `FutureExt::catch_unwind` を runtime dep として追加する。`futures` メタクレート
 # 経由ではなく `futures-util` を直接指定することで依存ツリーを最小化する
 # (`futures-channel` 等を引き込まない)。`catch_unwind` は `std` feature 配下なので
 # それのみを有効化する（async-await / executor / sink などは tokio で賄う）。
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# 接続数 / 対局数 / 指し手レイテンシ / 終局別カウンタ / 時間切れ数を Prometheus
+# 互換テキスト形式で expose する。`metrics` は facade、recorder と HTTP listener
+# は `metrics-exporter-prometheus` が提供する。recorder 未 install 時は
+# `metrics::counter!` 等は NoOp で動くので、`--metrics-bind` 未指定の起動経路でも
+# 安全。subscriber と同じく workspace で version を pin し binary でのみ参照する。
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 clap.workspace = true
 serde.workspace = true
 toml.workspace = true
