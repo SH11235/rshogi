@@ -141,6 +141,46 @@ pub trait RateStorage {
     fn list_all(
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<PlayerRateRecord>, StorageError>>;
+
+    /// 終局時のレート関連フィールドを更新する（atomic な read-modify-write）。
+    ///
+    /// レート値そのもの（`rate`）は外部バッチ（Ruby `mk_rate` 等）が更新する責務
+    /// なので本関数では触れず、勝敗 / `last_game_id` / `last_modified` のみを
+    /// 更新する。`winner` が `Some(name)` なら該当者の `wins` を +1、それ以外の
+    /// 既知プレイヤの `losses` を +1 する。`winner` が `None`（千日手・最大手数・
+    /// 切断で勝者不確定 `Abnormal { winner: None }`）なら `wins`/`losses` は据置で
+    /// `last_*` のみ更新する。
+    ///
+    /// 既定実装は `load` → 変更 → `save` を逐次実行するため、複数対局が同時に
+    /// 同一プレイヤのレコードを書き換えると最後の `save` で勝敗増分が失われる
+    /// レースを抱える。アトミック性が必要な実装（[`crate::FileKifuStorage`] 系の
+    /// ファイルベース）は本関数を override して内部 lock 配下で読み書きする。
+    fn record_game_outcome(
+        &self,
+        black: &PlayerName,
+        white: &PlayerName,
+        winner: Option<&PlayerName>,
+        game_id: &GameId,
+        now_iso: &str,
+    ) -> impl std::future::Future<Output = Result<(), StorageError>> {
+        async move {
+            for name in [black, white] {
+                let mut rec = match self.load(name).await? {
+                    Some(r) => r,
+                    None => continue,
+                };
+                match winner {
+                    Some(w) if w == name => rec.wins = rec.wins.saturating_add(1),
+                    Some(_) => rec.losses = rec.losses.saturating_add(1),
+                    None => {}
+                }
+                rec.last_game_id = Some(game_id.clone());
+                rec.last_modified = now_iso.to_owned();
+                self.save(&rec).await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// ブイ（途中局面テンプレート）の永続化抽象。

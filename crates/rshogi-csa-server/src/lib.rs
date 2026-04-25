@@ -46,6 +46,8 @@ pub use record::kifu::{
 pub use storage::buoy::FileBuoyStorage;
 #[cfg(feature = "tokio-transport")]
 pub use storage::file::FileKifuStorage;
+#[cfg(feature = "tokio-transport")]
+pub use storage::players_yaml::PlayersYamlRateStorage;
 pub use types::{
     AdminId, Color, CsaLine, CsaMoveToken, GameId, GameName, IpKey, PlayerName, ReconnectToken,
     RoomId, Secret, StorageKey,

@@ -137,6 +137,17 @@ pub struct ServerConfig {
     /// `ServerConfig` フィールドを増やしたうえで `floodgate_intent_from_config`
     /// が `true` を返すよう更新し、運用側に明示の opt-in を強制する。
     pub allow_floodgate_features: bool,
+    /// Ruby shogi-server 互換 `players.yaml` のパス。`Some` を指定すると
+    /// [`PlayersYamlRateStorage`](rshogi_csa_server::PlayersYamlRateStorage)
+    /// 経由でレートを永続化する経路が有効になり、終局時に勝敗・最終対局 ID・
+    /// 最終更新時刻が書き戻される。`None` の場合はインメモリレート保存で動作する
+    /// （再起動で wins/losses が失われる開発用既定）。
+    ///
+    /// 本フィールドが `Some` の状態は Floodgate 運用機能の一つ
+    /// (`enable_persistent_player_rates`) として
+    /// [`floodgate_intent_from_config`] により intent に変換され、
+    /// `--allow-floodgate-features` が立っていない場合は起動が `Err` で停止する。
+    pub players_yaml_path: Option<std::path::PathBuf>,
     /// SIGINT / SIGTERM 受信後に進行中対局の終了を待つ上限。超過分は未完了の
     /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
     /// を落とさない」ためのバッファで、既定 60 秒。
@@ -159,6 +170,7 @@ impl ServerConfig {
             initial_sfen: None,
             admin_handles: Vec::new(),
             allow_floodgate_features: false,
+            players_yaml_path: None,
             shutdown_grace: Duration::from_secs(60),
         }
     }
@@ -186,12 +198,12 @@ impl ServerConfig {
 /// 防ぐため。クレート外（`bin/main.rs` 含む）からは [`prepare_runtime`] のみが
 /// 入口になる。
 pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFeatureIntent {
-    // スタブ: 現状 `ServerConfig` に Floodgate 系フィールドが存在しないため、
-    // `config` を観測する必要がない。Floodgate 機能を実装する PR がフィールドを
-    // 追加した時点で本関数を更新するので、その更新漏れを `let _` の存在が
-    // リマインダになる（フィールド参照を追記する際に削除する）。
-    let _ = config;
-    FloodgateFeatureIntent::default()
+    FloodgateFeatureIntent {
+        // `players.yaml` 永続化はレート互換運用機能なので、Floodgate 系機能の
+        // opt-in が必要（`--allow-floodgate-features`）。
+        enable_persistent_player_rates: config.players_yaml_path.is_some(),
+        ..FloodgateFeatureIntent::default()
+    }
 }
 
 /// 起動前に opt-in ゲートを評価する。
@@ -2136,6 +2148,30 @@ where
         result_code: primary_result_code(result).to_owned(),
     };
     state.kifu_storage.append_summary(&entry).await.map_err(ServerError::Storage)?;
+
+    // 終局時のレート関連フィールドを更新する: 勝敗（wins / losses）、最終対局 ID、
+    // 最終更新時刻。`:rate` 値そのものは Ruby `mk_rate` 等の外部バッチが管理する
+    // 責務なので本サーバ側では触れない（`record_game_outcome` の契約）。
+    //
+    // `record_game_outcome` の中で原子性が保証されるかは実装依存だが、
+    // [`PlayersYamlRateStorage`] は disk_lock 配下で read-modify-write を直列化
+    // するため、複数対局が同一プレイヤを同時に書き換える経路でも lost-update が
+    // 起こらない（同一プロセス内に限る）。
+    let winner_name = result.winner().map(|c| match c {
+        Color::Black => &matched.black,
+        Color::White => &matched.white,
+    });
+    state
+        .rate_storage
+        .record_game_outcome(
+            &matched.black,
+            &matched.white,
+            winner_name,
+            game_id,
+            &end_time.to_rfc3339(),
+        )
+        .await
+        .map_err(ServerError::Storage)?;
     Ok(())
 }
 
@@ -2282,8 +2318,7 @@ mod tests {
 
     /// 将来 Floodgate 機能が `floodgate_intent_from_config` に配線された後、
     /// `allow_floodgate_features=false` のままで起動を試みると fail-fast する
-    /// 契約を直接検証する。helper 経路ではなく gate 関数を直接テストするのは、
-    /// 現状 `floodgate_intent_from_config` が常に `Default` を返すため。
+    /// 契約を直接検証する。
     #[test]
     fn floodgate_gate_rejects_intent_when_optin_is_off() {
         let intent = FloodgateFeatureIntent {
@@ -2292,5 +2327,42 @@ mod tests {
         };
         let err = validate_floodgate_feature_gate(false, intent).unwrap_err();
         assert!(err.contains("scheduler"), "error must list requested feature: {err}");
+    }
+
+    /// `players_yaml_path` を設定した状態で `--allow-floodgate-features` が
+    /// 立っていない場合、`prepare_runtime` が起動を fail-fast させる契約を固定。
+    /// レート永続化は Floodgate 互換運用機能なので opt-in が必要。
+    #[test]
+    fn prepare_runtime_rejects_players_yaml_when_floodgate_optin_off() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        cfg.players_yaml_path = Some(std::path::PathBuf::from("/tmp/players.yaml"));
+        cfg.allow_floodgate_features = false;
+        let err = prepare_runtime(&cfg)
+            .expect_err("must fail when persistent rates requested without opt-in");
+        assert!(
+            err.contains("persistent_player_rates"),
+            "error must list the requested feature: {err}",
+        );
+    }
+
+    /// `players_yaml_path` + `--allow-floodgate-features` の組み合わせで通過する
+    /// 契約を固定。レート永続化を本番で有効化する標準起動経路。
+    #[test]
+    fn prepare_runtime_accepts_players_yaml_with_floodgate_optin() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        cfg.players_yaml_path = Some(std::path::PathBuf::from("/tmp/players.yaml"));
+        cfg.allow_floodgate_features = true;
+        prepare_runtime(&cfg).expect("opt-in must allow persistent rate storage");
+    }
+
+    /// `floodgate_intent_from_config` が `players_yaml_path` の有無で
+    /// `enable_persistent_player_rates` を切り替えることを直接固定する。
+    /// 将来 ServerConfig フィールドを増やす際の回帰検出用。
+    #[test]
+    fn floodgate_intent_reflects_players_yaml_path() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        assert!(!floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
+        cfg.players_yaml_path = Some(std::path::PathBuf::from("/tmp/players.yaml"));
+        assert!(floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
     }
 }

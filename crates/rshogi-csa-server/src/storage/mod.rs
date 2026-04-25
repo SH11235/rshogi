@@ -4,3 +4,5 @@
 pub mod buoy;
 #[cfg(feature = "tokio-transport")]
 pub mod file;
+#[cfg(feature = "tokio-transport")]
+pub mod players_yaml;
