@@ -1408,8 +1408,8 @@ fn fork_gracefully_errors_and_keeps_connection_alive() {
 
 #[test]
 fn uchifuzume_from_initial_sfen_ends_as_illegal_move_e2e() {
-    // Phase 3 acceptance: 打ち歩詰の典型局面を TCP E2E で流し、
-    // `#ILLEGAL_MOVE` → `#LOSE/#WIN` が wire されることを固定する。
+    // 打ち歩詰の典型局面を TCP E2E で流し、`#ILLEGAL_MOVE` → `#LOSE/#WIN` が
+    // wire されることを固定する（追加終局判定の受入回帰）。
     run_local(|| async {
         let (addr, topdir) = spawn_server_custom(
             "uchifuzume_e2e",
@@ -1449,8 +1449,8 @@ fn uchifuzume_from_initial_sfen_ends_as_illegal_move_e2e() {
 
 #[test]
 fn oute_sennichite_from_initial_sfen_ends_as_perpetual_check_loss_e2e() {
-    // Phase 3 acceptance: 連続王手千日手の最小循環を TCP E2E で流し、
-    // `#OUTE_SENNICHITE` が終局メッセージとして表に出ることを確認する。
+    // 連続王手千日手の最小循環を TCP E2E で流し、`#OUTE_SENNICHITE` が終局
+    // メッセージとして表に出ることを確認する（追加終局判定の受入回帰）。
     run_local(|| async {
         let (addr, topdir) = spawn_server_custom(
             "oute_sennichite_e2e",

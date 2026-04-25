@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use rshogi_core::types::EnteringKingRule;
 use rshogi_csa_server::ClockSpec;
+use rshogi_csa_server::config::{FloodgateFeatureIntent, validate_floodgate_feature_gate};
 use rshogi_csa_server::error::{ProtocolError, ServerError};
 use rshogi_csa_server::game::result::GameResult;
 use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig};
@@ -128,9 +129,12 @@ pub struct ServerConfig {
     /// `PERMISSION_DENIED` で拒否される。`%%GETBUOYCOUNT` は参照系なので
     /// 管理者権限を要求しない。
     pub admin_handles: Vec<String>,
-    /// Floodgate 運用機能の opt-in フラグ。現時点では本バイナリに配線された
-    /// Floodgate 機能は無く、将来 Floodgate 系機能が入る PR が本フラグを
-    /// 起動条件として参照する。
+    /// Floodgate 運用機能の opt-in フラグ。`floodgate_intent_from_config` が
+    /// 返す要求集合に何か含まれていて本フラグが `false` の場合、
+    /// [`validate_floodgate_feature_gate`](rshogi_csa_server::config::validate_floodgate_feature_gate)
+    /// が起動時に Err を返す。Floodgate 系機能を追加する PR は、対応する
+    /// `ServerConfig` フィールドを増やしたうえで `floodgate_intent_from_config`
+    /// が `true` を返すよう更新し、運用側に明示の opt-in を強制する。
     pub allow_floodgate_features: bool,
     /// SIGINT / SIGTERM 受信後に進行中対局の終了を待つ上限。超過分は未完了の
     /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
@@ -157,6 +161,47 @@ impl ServerConfig {
             shutdown_grace: Duration::from_secs(60),
         }
     }
+}
+
+/// `ServerConfig` から「この起動構成が要求している Floodgate 系機能集合」を
+/// 導出する単一窓口。
+///
+/// 現状は Floodgate 系設定フィールドが `ServerConfig` に存在しないため常に
+/// 既定（空集合）を返し、`allow_floodgate_features` が `false` でも起動が
+/// 通る。Floodgate 機能を導入する PR は次の手順で配線する:
+///
+/// 1. 新フィールド（例: スケジュール宣言・非 direct ペアリング戦略・重複ログイン
+///    方針など）を `ServerConfig` に追加する。
+/// 2. 当ヘルパで該当フィールドが「機能を要求している」状態を検出し、対応する
+///    [`FloodgateFeatureIntent`] フラグを `true` にして返す。
+/// 3. CLI / config 経由の入力で該当フィールドが埋まり、かつ
+///    `allow_floodgate_features = false` の場合は `prepare_runtime` が
+///    `validate_floodgate_feature_gate` 経由で起動失敗させる。
+///
+/// この単一窓口を経由することで、Floodgate 機能の追加 PR がゲート呼び出しを
+/// 忘れる事故を構造的に防ぐ。
+///
+/// `pub(crate)` に閉じているのは「単一窓口を迂回した直接呼び出し」を型システムで
+/// 防ぐため。クレート外（`bin/main.rs` 含む）からは [`prepare_runtime`] のみが
+/// 入口になる。
+pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFeatureIntent {
+    // スタブ: 現状 `ServerConfig` に Floodgate 系フィールドが存在しないため、
+    // `config` を観測する必要がない。Floodgate 機能を実装する PR がフィールドを
+    // 追加した時点で本関数を更新するので、その更新漏れを `let _` の存在が
+    // リマインダになる（フィールド参照を追記する際に削除する）。
+    let _ = config;
+    FloodgateFeatureIntent::default()
+}
+
+/// 起動前に opt-in ゲートを評価する。
+///
+/// `floodgate_intent_from_config` が返す要求集合と `config.allow_floodgate_features`
+/// を [`validate_floodgate_feature_gate`] に通し、要求があるのにフラグが立って
+/// いない場合は `Err` を返して fail-fast する。CLI / バイナリは `build_state`
+/// より前に本関数を呼ぶこと。
+pub fn prepare_runtime(config: &ServerConfig) -> Result<(), String> {
+    let intent = floodgate_intent_from_config(config);
+    validate_floodgate_feature_gate(config.allow_floodgate_features, intent)
 }
 
 /// graceful shutdown 用トリガ。SIGINT / SIGTERM 受信で `trigger` され、
@@ -1986,5 +2031,29 @@ mod tests {
         assert_eq!(parse_move_broadcast("-3334FU,T10"), Some(("-3334FU", 10)));
         assert_eq!(parse_move_broadcast("#RESIGN"), None);
         assert_eq!(parse_move_broadcast("+7776FU,Tx"), None);
+    }
+
+    /// 既定構成は Floodgate 系機能を要求していないため、`allow_floodgate_features=false`
+    /// のままでも `prepare_runtime` が成功する。これが崩れると通常起動経路が
+    /// 全停止するため、契約として固定する。
+    #[test]
+    fn prepare_runtime_passes_for_default_config_without_floodgate_optin() {
+        let cfg = ServerConfig::sensible_defaults();
+        assert!(!cfg.allow_floodgate_features);
+        prepare_runtime(&cfg).expect("default config must start without floodgate opt-in");
+    }
+
+    /// 将来 Floodgate 機能が `floodgate_intent_from_config` に配線された後、
+    /// `allow_floodgate_features=false` のままで起動を試みると fail-fast する
+    /// 契約を直接検証する。helper 経路ではなく gate 関数を直接テストするのは、
+    /// 現状 `floodgate_intent_from_config` が常に `Default` を返すため。
+    #[test]
+    fn floodgate_gate_rejects_intent_when_optin_is_off() {
+        let intent = FloodgateFeatureIntent {
+            enable_scheduler: true,
+            ..FloodgateFeatureIntent::default()
+        };
+        let err = validate_floodgate_feature_gate(false, intent).unwrap_err();
+        assert!(err.contains("scheduler"), "error must list requested feature: {err}");
     }
 }

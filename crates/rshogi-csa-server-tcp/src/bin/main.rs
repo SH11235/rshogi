@@ -24,7 +24,9 @@ use rshogi_csa_server::{ClockSpec, FileKifuStorage};
 use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
-use rshogi_csa_server_tcp::server::{InMemoryPasswordStore, ServerConfig, build_state, run_server};
+use rshogi_csa_server_tcp::server::{
+    InMemoryPasswordStore, ServerConfig, build_state, prepare_runtime, run_server,
+};
 use tokio::sync::Mutex;
 
 /// rshogi-csa-server-tcp CLI 引数。
@@ -78,6 +80,9 @@ struct Cli {
     /// Floodgate 運用機能の opt-in フラグ。Floodgate 系機能を本バイナリで
     /// 有効化する PR は、本フラグが `true` のときだけ配線を生かすように
     /// 実装する（現時点ではまだ配線された機能は無い）。
+    /// CLI 名は `prepare_runtime` 失敗時のエラーメッセージで参照する
+    /// [`ALLOW_FLOODGATE_FEATURES_FLAG`] と同じ綴り。リネームする際は両方
+    /// 同時に変更すること（同期は下のユニットテストが回帰検知する）。
     #[arg(long, default_value_t = false)]
     allow_floodgate_features: bool,
     /// SIGINT / SIGTERM 受信後に進行中対局の完了を待つ秒数。超過分は未完了の
@@ -119,6 +124,13 @@ impl ClockKindArg {
     }
 }
 
+/// `Cli::allow_floodgate_features` から clap が生成する CLI フラグ名。
+/// `prepare_runtime` 失敗時のエラーメッセージ生成に使う。clap derive の
+/// `#[arg(long, ...)]` はフィールド名から flag を生成するため、この const と
+/// フィールド名を同期させる必要がある。`flag_name_matches_field_name`
+/// テストが両者の一致を回帰検知する。
+const ALLOW_FLOODGATE_FEATURES_FLAG: &str = "--allow-floodgate-features";
+
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("rshogi-csa-server-tcp starting (v{})", env!("CARGO_PKG_VERSION"));
@@ -153,6 +165,14 @@ fn main() -> anyhow::Result<()> {
         allow_floodgate_features: cli.allow_floodgate_features,
         shutdown_grace: std::time::Duration::from_secs(cli.shutdown_grace_sec),
     };
+    // Floodgate 系機能の opt-in ゲートを起動前に評価する。要求があるのに
+    // フラグが立っていない場合はここで起動を止める。
+    prepare_runtime(&config).map_err(|msg| {
+        anyhow::anyhow!(
+            "{msg}; pass {ALLOW_FLOODGATE_FEATURES_FLAG} to enable Floodgate runtime features",
+        )
+    })?;
+
     let kifu_storage = FileKifuStorage::new(config.kifu_topdir.clone());
     let state = Rc::new(build_state(
         config,
@@ -344,5 +364,29 @@ impl RateStorage for InMemoryRateStorage {
 
     async fn list_all(&self) -> Result<Vec<PlayerRateRecord>, StorageError> {
         Ok(self.inner.lock().await.values().cloned().collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// `ALLOW_FLOODGATE_FEATURES_FLAG` 定数と clap が生成する CLI フラグ名が
+    /// 一致することを固定する。`Cli::allow_floodgate_features` のフィールド名を
+    /// リネームしたら本テストが落ち、エラーメッセージ生成側との同期忘れを検知する。
+    #[test]
+    fn allow_floodgate_features_flag_matches_clap_long() {
+        let cmd = Cli::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "allow_floodgate_features")
+            .expect("allow_floodgate_features arg must exist on Cli");
+        let long = arg.get_long().expect("--allow-floodgate-features must have a long form");
+        assert_eq!(
+            format!("--{long}"),
+            ALLOW_FLOODGATE_FEATURES_FLAG,
+            "ALLOW_FLOODGATE_FEATURES_FLAG must stay in sync with clap-generated flag",
+        );
     }
 }

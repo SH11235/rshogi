@@ -984,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn x1_command_in_phase1_is_not_enabled() {
+    fn x1_command_without_x1_login_is_not_enabled() {
         let mut room = make_room();
         let err = room.handle_line(Color::Black, &line("%%WHO"), 0).unwrap_err();
         assert!(matches!(err, ServerError::Protocol(ProtocolError::X1NotEnabled(_))));
