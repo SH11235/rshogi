@@ -21,10 +21,11 @@ log         = "0.4"
 clap = { version = "4.5.47", features = ["derive"] }
 env_logger = "0.11"
 tracing = "0.1"
-# 注: `tracing-subscriber` と `tracing-log` は subscriber 初期化系で binary
-# でしか使わないため、workspace 経由では公開しない。`rshogi-csa-server-tcp`
-# のような binary crate が直接 dep として書く（library crate が誤って pull
-# しないようにするため、依存範囲を crate ローカルに閉じ込めている）。
+# 注: `tracing-subscriber` と `tracing-log`、`metrics` / `metrics-exporter-prometheus`
+# は subscriber / recorder 初期化系で binary でしか使わないため、workspace 経由
+# では公開しない。`rshogi-csa-server-tcp` のような binary crate が直接 dep として
+# 書く（library crate が誤って pull しないよう、依存範囲を crate ローカルに
+# 閉じ込めている）。
 rand = "0.9"
 rand_xoshiro = "0.7"
 regex = "1.11.2"

@@ -29,7 +29,7 @@ use rshogi_csa_server::ClockSpec;
 use rshogi_csa_server::config::{FloodgateFeatureIntent, validate_floodgate_feature_gate};
 use rshogi_csa_server::error::{ProtocolError, ServerError};
 use rshogi_csa_server::game::result::GameResult;
-use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig};
+use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig, HandleOutcome};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
 use rshogi_csa_server::matching::registry::{GameListing, GameRegistry};
 use rshogi_csa_server::port::{
@@ -471,6 +471,18 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     "<non-string panic payload>".to_owned()
 }
 
+/// 1 接続の生存期間中だけ `csa_connections_active` gauge を `+1` した状態に
+/// 保ち、Drop で確実に `-1` するための RAII ガード。panic / `?` early return /
+/// graceful shutdown のどの経路でも漏れず減算するため、`run_connection_isolated`
+/// の冒頭に置いて connection task のスコープに紐付ける。
+struct ConnectionActiveGuard;
+
+impl Drop for ConnectionActiveGuard {
+    fn drop(&mut self) {
+        metrics::gauge!(crate::metrics::CONNECTIONS_ACTIVE).decrement(1.0);
+    }
+}
+
 /// 1 接続分の `handle_connection` を panic boundary で包むラッパ。
 ///
 /// release ビルドでは `FutureExt::catch_unwind` で panic を捕捉し、`tracing::error!`
@@ -480,12 +492,18 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
 /// debug ビルド (`cfg(debug_assertions)`) では catch_unwind を行わずに panic を
 /// 透過させる。CLAUDE.md の「契約違反は panic で顕在化」方針に従い、開発中の
 /// 不変条件違反は即時クラッシュさせて気付きやすくするため。
+///
+/// `csa_connections_active` gauge の decrement を [`ConnectionActiveGuard`] の
+/// Drop に任せている。release ビルドの catch_unwind 経路でも debug ビルドの
+/// 透過経路でも、`?` early return / panic / 正常終了のどの分岐でも guard の Drop
+/// が確実に走るため gauge は leak しない。
 async fn run_connection_isolated<R, K, P>(stream: TcpStream, state: Rc<SharedState<R, K, P>>)
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
+    let _conn_active = ConnectionActiveGuard;
     #[cfg(debug_assertions)]
     {
         if let Err(e) = handle_connection(stream, state).await {
@@ -558,6 +576,10 @@ where
                             game_id = tracing::field::Empty,
                         );
                         span.in_scope(|| tracing::debug!("accepted"));
+                        // 累計接続数 + 同時接続数 (gauge) を更新。同時数の decrement
+                        // は task 終了時の Drop で確実に走るよう RAII ガードに任せる。
+                        metrics::counter!(crate::metrics::CONNECTIONS_TOTAL).increment(1);
+                        metrics::gauge!(crate::metrics::CONNECTIONS_ACTIVE).increment(1.0);
                         let st = state.clone();
                         tokio::task::spawn_local(
                             run_connection_isolated(stream, st).instrument(span),
@@ -1476,7 +1498,9 @@ where
     // `drive_game` 在籍をカウントする RAII ガード。graceful shutdown の完了
     // 判定で使うため、`persist_kifu` を含む epilogue 全体が終わるまで生存
     // させる必要がある。Err 早期 return / panic でも確実に decrement + notify
-    // されるように `Drop` で解放する。
+    // されるように `Drop` で解放する。Prometheus メトリクスの
+    // `csa_games_active` gauge も同じライフサイクルに乗せ、終局途中の panic で
+    // gauge が leak しないようにする。
     struct DriveGuard<'a> {
         counter: &'a AtomicUsize,
         notify: &'a Notify,
@@ -1485,9 +1509,12 @@ where
         fn drop(&mut self) {
             self.counter.fetch_sub(1, Ordering::Release);
             self.notify.notify_waiters();
+            metrics::gauge!(crate::metrics::GAMES_ACTIVE).decrement(1.0);
         }
     }
     state.active_drive_tasks.fetch_add(1, Ordering::Release);
+    metrics::counter!(crate::metrics::GAMES_TOTAL).increment(1);
+    metrics::gauge!(crate::metrics::GAMES_ACTIVE).increment(1.0);
     let _drive_guard = DriveGuard {
         counter: &state.active_drive_tasks,
         notify: &state.active_games,
@@ -1710,6 +1737,19 @@ where
     // run_game_loop の失敗はそのまま早期 return する（persist_kifu は行わない）。
     let (result, moves) = result_moves?;
 
+    // 終局確定の Prometheus メトリクス。`result_code` ラベル単位で counter を
+    // 増分し、運用ダッシュボードで終局種別ごとの件数を観測できる状態にする。
+    // 時間切れだけは SLO 用に独立した `csa_time_up_total` でも数える。
+    let result_code_str: &'static str = primary_result_code(&result);
+    metrics::counter!(
+        crate::metrics::GAMES_FINISHED_TOTAL,
+        "result_code" => result_code_str,
+    )
+    .increment(1);
+    if matches!(result, GameResult::TimeUp { .. }) {
+        metrics::counter!(crate::metrics::TIME_UP_TOTAL).increment(1);
+    }
+
     // 棋譜 + 00LIST 永続化。
     persist_kifu(
         state,
@@ -1911,6 +1951,11 @@ where
             r = white.recv_line(NEAR_INFINITE) => Evt::Recv(Color::White, r),
             _ = tokio::time::sleep_until(deadline) => Evt::TimeUp,
         };
+        // 指し手の場合だけ Prometheus histogram 用のサーバ側処理レイテンシ
+        // （`handle_line` 受信から broadcast 直前までの monotonic 経過秒）を
+        // 計測する。AGREE / 終局通知 / 切断は histogram の対象外（手の処理時間
+        // を歪めないため）。
+        let move_started_at = std::time::Instant::now();
         let r = match evt {
             Evt::Recv(from, Ok(line)) => room.handle_line(from, &line, now_ms())?,
             Evt::Recv(from, Err(TransportError::Closed | TransportError::Timeout)) => {
@@ -1922,6 +1967,10 @@ where
                 room.force_time_up(loser)
             }
         };
+        if matches!(r.outcome, HandleOutcome::MoveAccepted { .. }) {
+            let elapsed_secs = move_started_at.elapsed().as_secs_f64();
+            metrics::histogram!(crate::metrics::MOVE_LATENCY_SECONDS).record(elapsed_secs);
+        }
         // 着手行 `<token>,T<sec>` を抽出（BroadcastTarget::All で配信される）。
         for entry in &r.broadcasts {
             if let Some((tok, tsec)) = parse_move_broadcast(entry.line.as_str()) {

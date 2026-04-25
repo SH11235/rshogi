@@ -90,6 +90,12 @@ struct Cli {
     /// ためのバッファ。
     #[arg(long, default_value_t = 60)]
     shutdown_grace_sec: u64,
+    /// Prometheus 互換メトリクスを expose する HTTP listener の bind 先（例:
+    /// `127.0.0.1:9090`）。未指定時はメトリクス recorder を install せず、
+    /// `metrics::counter!` 等は NoOp として実行される（軽量な atomic 1 回程度の
+    /// オーバーヘッド）。Prometheus の scrape 先として運用する場合のみ指定する。
+    #[arg(long)]
+    metrics_bind: Option<String>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -137,6 +143,18 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let bind_addr = cli.bind.parse().with_context(|| format!("bad --bind {}", cli.bind))?;
+
+    // `--metrics-bind` 指定時のみ Prometheus exporter を install する。未指定時は
+    // recorder 未 install のまま、`metrics::counter!` 等は NoOp で動く。exporter
+    // は別 thread で multi-threaded Tokio runtime を立てて HTTP listener を持ち、
+    // 本クレートの `current_thread` + `LocalSet` 設計とは独立して動作する。
+    if let Some(raw) = cli.metrics_bind.as_deref() {
+        let metrics_addr: std::net::SocketAddr =
+            raw.parse().with_context(|| format!("bad --metrics-bind {raw}"))?;
+        rshogi_csa_server_tcp::metrics::init_prometheus_exporter(metrics_addr)
+            .with_context(|| format!("install Prometheus exporter on {metrics_addr}"))?;
+        tracing::info!(bind = %metrics_addr, "Prometheus metrics exporter ready");
+    }
 
     // 1. プレイヤ定義ファイルを読む。TOML の `[players.<handle>]` エントリで表現する。
     let (password_map, rate_map) = load_players_toml(&cli.players)

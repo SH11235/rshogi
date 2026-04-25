@@ -25,6 +25,14 @@ tracing-log = "0.2"
 # (`futures-channel` 等を引き込まない)。`catch_unwind` は `std` feature 配下なので
 # それのみを有効化する（async-await / executor / sink などは tokio で賄う）。
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# 接続数 / 対局数 / 指し手レイテンシ / 終局別カウンタ / 時間切れ数を Prometheus
+# 互換テキスト形式で expose する。`metrics` は facade、recorder と HTTP listener
+# は `metrics-exporter-prometheus` が提供する。recorder 未 install 時は
+# `metrics::counter!` 等は NoOp で動くので、`--metrics-bind` 未指定の起動経路でも
+# 安全。subscriber と同じ理由（binary でのみ install）で workspace ではなく
+# crate ローカル直接 dep として宣言する。
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
 clap.workspace = true
 serde.workspace = true
 toml.workspace = true
