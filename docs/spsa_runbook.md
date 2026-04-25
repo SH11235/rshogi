@@ -504,54 +504,104 @@ rshogi 側で**負値パラメータ**として格納される。マッピング
 
 ### 10.6 rshogi SPSA で YaneuraOu エンジンを駆動する
 
-#### A. YO 形式 `.params` で YO を直接チューニング（最も単純）
+YO を rshogi の SPSA ループで叩いてチューニングしたい場合、YO 側のチューニング対象
+パラメータを **USI option として顕在化させる**前処理がユーザ側で必要になる。
+本リポジトリのツールでは肩代わりせず、既存の YaneuraOu-ScriptCollection の流儀に従う。
+
+#### 10.6.0 YO 側の前処理（必須・ユーザ作業）
+
+**参考リポジトリ**: <https://github.com/yaneurao/YaneuraOu-ScriptCollection/tree/main/SPSA>
+
+YO のチューニング対象は素のソースだと `constexpr int param = N;` のような定数なので、
+そのままでは USI 経由で値を変えられない。`tune.py` がソースに `TUNE(...)` マクロを
+注入することで、Stockfish 由来の汎用機構経由で USI option として現れるようになる。
+
+##### Step 1. tune.py の入手
+
+YaneuraOu-ScriptCollection の `SPSA/` ディレクトリ、もしくは本リポジトリの `tune/` 直下に
+`tune.py` と `ParamLib.py` が同梱されている。
+
+##### Step 2. `.tune` ファイルを YO ソースに当てる
+
+`.tune` ファイルはチューニング対象の C++ ソース断片に `@` マーカーを付けたテンプレート。
+`tune.py tune` を実行すると、`yaneuraou-search.cpp` 中の `%%TUNE_DECLARATION%%` /
+`%%TUNE_OPTIONS%%` プレースホルダ位置に `TUNE(SetRange(min, max), param_name, ...)` の
+コードを注入し、対象定数を runtime 可変な変数に置換する。
+
+```bash
+# YO リポジトリのルートで:
+cd /path/to/YaneuraOu
+python3 /path/to/rshogi/tune/tune.py tune \
+  /path/to/rshogi/tune/suisho10.tune \
+  source/  # YO の C++ ソースディレクトリ
+```
+
+実行後、`source/engine/yaneuraou-engine/yaneuraou-search.cpp` などが書き換わる
+（git diff で確認可）。元に戻す場合は `git checkout source/`。
+
+##### Step 3. YO をビルド
+
+ビルドコマンドは YO のアーキテクチャ（AVX2/AVX512/NEON 等）・評価関数種別
+（HalfKP / HalfKAv2 / NNUE 系）・OS/コンパイラに依存するため、本ドキュメントでは固定の
+レシピは示さない。YO の `Makefile` / `README` / ScriptCollection の例を参照のこと。
+代表的には:
+
+```bash
+cd /path/to/YaneuraOu/source
+make YANEURAOU_EDITION=YANEURAOU_ENGINE_NNUE TARGET_CPU=AVX2 -j$(nproc)
+# 出来たバイナリ（例: YaneuraOu-by-gcc）を tune-patched 用に取っておく
+cp YaneuraOu-by-gcc /path/to/YaneuraOu-tune-patched
+```
+
+##### Step 4. USI option として現れていることを確認
+
+```bash
+echo "usi" | /path/to/YaneuraOu-tune-patched | grep "option name correction_value_1"
+# option name correction_value_1 type spin default 9536 min 0 max 17734
+```
+
+これが返れば前処理完了。返らない場合は Step 2 の注入が当たっていないか、Step 3 が
+古いバイナリ。
+
+#### 10.6.1 ケース A: YO 形式 `.params` で YO を直接チューニング（推奨・最も単純）
 
 `.params` の name 列が YO のビルド済み USI option 名と一致していれば、rshogi の `spsa`
 はその name を `setoption` にそのまま流すだけなので、**変換ツール・マッピング表は不要**。
 
 ```bash
+RUN_DIR="runs/spsa/$(date -u +%Y%m%d_%H%M%S)_yo_suisho10"
+mkdir -p "${RUN_DIR}"
+cp tune/suisho10.params "${RUN_DIR}/tuned.params"   # 開始点を自分で配置
+
 cargo run --release -p tools --bin spsa -- \
-  --params tune/suisho10.params \
+  --params "${RUN_DIR}/tuned.params" \
   --engine-path /path/to/YaneuraOu-tune-patched \
   --iterations 200 --games-per-iteration 64 \
-  ...
+  --concurrency 8 --threads 1 --hash-mb 256 --byoyomi 1000 \
+  --startpos-file /path/to/openings.txt \
+  --seeds 1,2,3,4 \
+  --param-values-csv "${RUN_DIR}/param_values.csv" \
+  --stats-csv "${RUN_DIR}/stats.seed.csv" \
+  --stats-aggregate-csv "${RUN_DIR}/stats.aggregate.csv"
 ```
 
-YO 側で必要な前処理（本ツールのスコープ外）:
+書き戻された `${RUN_DIR}/tuned.params` は YO 形式のまま運用に乗る。
 
-1. `tune/suisho10.tune` を `tune.py tune` で当てる
-2. YO をリビルド（`correction_value_1` 等が USI option として現れる）
-
-リビルドコマンドは YO のアーキテクチャ・ビルドシステム依存のため、本ツールでは wrap せず
-ユーザに委ねる。SPSA ループ完了後の `tuned.params` は YO 形式のまま書き戻されるので、
-`tune.py apply` で YO ソースに焼き込んで production リビルド、で運用を閉じられる。
-
-#### B. rshogi 形式 `.params` で YO を駆動（`--engine-param-mapping`）
+#### 10.6.2 ケース B: rshogi 形式 `.params` で YO を駆動（`--engine-param-mapping`）
 
 rshogi 側の `.params` フォーマット（`SPSA_*` 命名）のまま YO バイナリを駆動したい場合、
 `spsa` バイナリに `--engine-param-mapping` を渡すと、`.params` 内の rshogi 名 (`SPSA_*`)
 を `setoption` する直前にエンジン側名前空間（YO 名）に翻訳し、必要なら符号を反転する。
-
-事前準備:
-
-1. YO 側のソースに `tune/suisho10.tune` 等を `tune.py tune` で当てる
-2. YO をリビルド（`correction_value_1` 等が USI option として現れる）
-
-実行例:
 
 ```bash
 cargo run --release -p tools --bin spsa -- \
   --params spsa_params/<rshogi_base>.params \
   --engine-path /path/to/YaneuraOu-tune-patched \
   --engine-param-mapping tune/yo_rshogi_mapping.toml \
-  --iterations 200 \
-  --games-per-iteration 64 \
-  --concurrency 8 \
+  --iterations 200 --games-per-iteration 64 \
+  --concurrency 8 --threads 1 --hash-mb 256 --byoyomi 1000 \
   --startpos-file /path/to/openings.txt \
   --seeds 1,2,3,4 \
-  --threads 1 \
-  --hash-mb 256 \
-  --byoyomi 1000 \
   --param-values-csv "${RUN_DIR}/param_values.csv" \
   --stats-csv "${RUN_DIR}/stats.seed.csv" \
   --stats-aggregate-csv "${RUN_DIR}/stats.aggregate.csv"
@@ -562,9 +612,30 @@ cargo run --release -p tools --bin spsa -- \
 - マッピング表にない rshogi 名（rshogi 独自 / `unmapped.rshogi` のもの）は名前をそのまま
   渡すが、YO バイナリ側にその option がないので `set_option_if_available` で黙って無視される
 - そのため YO 駆動時は `--active-only-regex` で YO 対応グループに絞ると無駄な `setoption`
-  を避けられる（例: `'^SPSA_(LMR|FUTILITY|NMP|RAZORING|SINGULAR|S14|S18|EVAL_DIFF|CORR|STAT|TT_MOVE|PROBCUT|QS_|ASP_|TT_CUTOFF_|FAIL_HIGH_|CONT_HISTORY_WEIGHT|UPDATE_QUIET_HISTORIES|PAWN_HISTORY)_'`
-  といった粒度で）
+  を避けられる
 
-ルーティング後の値が再度 `.params` に書き戻されるときは rshogi 名・rshogi 符号慣用のまま
-保存されるので、運用は通常の rshogi SPSA と同じ。最終的な `tuned.params` を YO 本体に焼き
-込む際には `rshogi_to_yo_params` で YO 形式に戻し、`tune.py apply` でソース反映する。
+#### 10.6.3 チューニング結果を YO 本体に焼き込む（`tune.py apply`）
+
+SPSA ループで得られた最終値を YO の production バイナリに反映するには、`tune.py apply`
+でソースに焼き戻し → production ビルドが必要（YO の TUNE() マクロは production リリース
+時には残したくないため、定数として書き戻す）。
+
+```bash
+# ケース A の場合: tuned.params が YO 形式のままなので直接 apply
+cd /path/to/YaneuraOu
+python3 /path/to/rshogi/tune/tune.py apply \
+  /path/to/rshogi/runs/spsa/<RUN>/tuned.params \
+  source/
+
+# ケース B の場合: rshogi 形式 → YO 形式に逆変換してから apply
+cargo run --release -p tools --bin rshogi_to_yo_params -- \
+  --rshogi-params /path/to/rshogi/runs/spsa/<RUN>/tuned.params \
+  --base /path/to/rshogi/tune/suisho10.params \
+  --mapping /path/to/rshogi/tune/yo_rshogi_mapping.toml \
+  --output /tmp/tuned_yo.params
+cd /path/to/YaneuraOu
+python3 /path/to/rshogi/tune/tune.py apply /tmp/tuned_yo.params source/
+```
+
+`apply` 後、`%%TUNE_DECLARATION%%` 等のマーカーは消え、注入された `TUNE(...)` も実定数に
+置換される。production ビルドして完了。元の状態に戻したい場合は `git checkout source/`。
