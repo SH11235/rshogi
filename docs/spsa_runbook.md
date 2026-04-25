@@ -492,6 +492,28 @@ cargo run --release -p tools --bin check_param_mapping -- \
 
 `--strict` 指定時は値不一致 1 件でも exit 1。
 
+#### YO バイナリとの整合性検証
+
+`--yo-binary <path>` を渡すと、YO バイナリを起動して `usi` 応答を受信し、
+公開されている USI option 一覧と mapping 表 (`mappings.yo` ∪ `unmapped.yo`)
+の整合性を検証する。tune.py 注入が変わって mapping 表が陳腐化したことを
+CI で拾う用途。
+
+```bash
+cargo run --release -p tools --bin check_param_mapping -- \
+  --mapping tune/yo_rshogi_mapping.toml \
+  --yo-binary /path/to/YaneuraOu-tune-patched
+```
+
+検出される 2 種類のドリフト:
+
+- **YO で公開されているが mapping にも `unmapped.yo` にも記載のない option**:
+  tune.py 注入が増えた可能性（標準 USI option なら `unmapped.yo` に追記）
+- **mapping/`unmapped.yo` にあるが YO バイナリの USI option に存在しない**:
+  旧 mapping の残骸 or 条件付き注入（YO ビルド設定で出る/出ないが変わるもの）
+
+`--strict` 指定時は上記いずれかの不整合があれば exit 1。
+
 ### 10.5 マッピング表の更新フロー
 
 新たな YO ↔ rshogi 対応を追加する／既存対応を見直す場合:

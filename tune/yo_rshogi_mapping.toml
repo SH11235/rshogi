@@ -78,6 +78,10 @@ sign_flip = false
 
 # === Worker clear (history table fills) ===
 # YaneuraOuWorker_clear1 (3 params, in YO source order): main / capture / pawn history fill
+# 注: これら 3 つは YO 側で worker-clear 系を tune.py 注入する設定でビルドされた
+# バイナリでのみ公開される条件付きパラメータ。標準注入のバイナリでは
+# `check_param_mapping --yo-binary` で「mapping/unmapped.yo にあるが YO 側にない」
+# として 3 件 warn されるが想定通り。
 [[mapping]]
 yo = "YaneuraOuWorker_clear1_1"
 rshogi = "SPSA_MAIN_HIST_INIT"
@@ -611,8 +615,56 @@ sign_flip = false
 # ============================================================
 
 [unmapped]
-# rshogi 側に対応がない YO パラメータ（現状なし: suisho10 の全 102 パラメータが rshogi にマップ済み）
-yo = []
+# rshogi 側に対応がない YO パラメータ。
+# tune.py 注入対象外の通常の YO USI option を列挙して `check_param_mapping
+# --yo-binary` のドリフト検出ノイズを抑える。
+yo = [
+  # 標準 USI option
+  "USI_Hash",
+  "USI_Ponder",
+  "USI_OwnBook",
+  "Threads",
+  "MultiPV",
+  "NetworkDelay",
+  "NetworkDelay2",
+  "NodesLimit",
+  "MinimumThinkingTime",
+  "SlowMover",
+  "MaxMovesToDraw",
+  "DepthLimit",
+  "PvInterval",
+  "ResignValue",
+  "DrawValueBlack",
+  "DrawValueWhite",
+  "RoundUpToFullSecond",
+  "DebugLogFile",
+  "ConsiderationMode",
+  "OutputFailLHPV",
+  "Stochastic_Ponder",
+  "GenerateAllLegalMoves",
+  "EnteringKingRule",
+  "NumaPolicy",
+  # 評価関数 / モデル系
+  "EvalDir",
+  "FV_SCALE",
+  "LS_BUCKET_MODE",
+  "LS_PROGRESS_COEFF",
+  # 定跡系
+  "BookFile",
+  "BookDir",
+  "BookMoves",
+  "BookDepthLimit",
+  "BookEvalDiff",
+  "BookEvalBlackLimit",
+  "BookEvalWhiteLimit",
+  "BookIgnoreRate",
+  "BookOnTheFly",
+  "BookPvMoves",
+  "ConsiderBookMoveCount",
+  "FlippedBook",
+  "IgnoreBookPly",
+  "NarrowBook",
+]
 
 # YO 側に対応マーカー (`@`) がない、または rshogi 独自に追加されたパラメータ。
 # YO → rshogi 変換時にデフォルトのまま据え置かれる。

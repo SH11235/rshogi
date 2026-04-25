@@ -4,11 +4,16 @@
 //! 1. マッピング表自体の整合性（重複・rshogi 名が `tune_params.rs` に存在するか等）
 //! 2. 与えられた YO/rshogi `.params` ペアでマッピングを通したときの値一致を検証
 //!    （`suisho10.params` と `suisho10_converted.params` を渡せば回帰テストになる）
+//! 3. `--yo-binary <path>` 指定時、YO バイナリの USI option 一覧と
+//!    マッピング表の整合性を検証する（tune.py 注入の陳腐化検出）
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rshogi_core::search::SearchTuneParams;
 use tools::spsa_param_mapping::{MappingTable, ParamRow, load_params, yo_to_rshogi_value};
@@ -31,6 +36,86 @@ struct Cli {
     /// 不一致が 1 件でもあれば exit 1
     #[arg(long)]
     strict: bool,
+
+    /// YO バイナリのパス。指定時は `usi` を送って `option name ...` 一覧を取得し
+    /// マッピング表 (`mappings.yo` ∪ `unmapped.yo`) との不整合を検出する。
+    /// tune.py 注入が変わって mapping 表が陳腐化したことを CI で拾う用途。
+    #[arg(long)]
+    yo_binary: Option<PathBuf>,
+
+    /// `--yo-binary` で `usi` 応答を待つタイムアウト秒（既定 5 秒）
+    #[arg(long, default_value_t = 5)]
+    yo_timeout_secs: u64,
+}
+
+/// `option name <NAME> type <TYPE> ...` から `<NAME>` を抜き出す
+fn parse_usi_option_name(line: &str) -> Option<&str> {
+    let rest = line.trim().strip_prefix("option ")?;
+    let after_name = rest.strip_prefix("name ")?;
+    // `type` までが name 部
+    let upto = after_name.find(" type ")?;
+    Some(after_name[..upto].trim())
+}
+
+/// YO バイナリを起動し `usi` を送って公開する USI option 名一覧を取得する。
+///
+/// `usiok` 応答 or タイムアウト到達で読み取りを終了し、`quit` を送って終了させる。
+fn fetch_yo_usi_options(binary: &Path, timeout: Duration) -> Result<HashSet<String>> {
+    let mut child = Command::new(binary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to spawn YO binary {}", binary.display()))?;
+
+    {
+        let stdin = child.stdin.as_mut().context("YO stdin not available")?;
+        stdin.write_all(b"usi\n").context("failed to write 'usi' to YO")?;
+        stdin.flush().ok();
+    }
+
+    let stdout = child.stdout.take().context("YO stdout not available")?;
+    let mut reader = BufReader::new(stdout);
+    let deadline = Instant::now() + timeout;
+    let mut options = HashSet::new();
+    let mut got_usiok = false;
+
+    // BufReader は blocking なので timeout は厳密ではないが、`usiok` で必ず抜けるため
+    // 通常は数百ms で完了する。万一 hang した場合に kill するための保険。
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                if let Some(name) = parse_usi_option_name(&line) {
+                    options.insert(name.to_owned());
+                }
+                if line.trim() == "usiok" {
+                    got_usiok = true;
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("warn: YO stdout read error: {e}");
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            eprintln!("warn: YO `usi` 応答が {} 秒以内に完了しませんでした", timeout.as_secs());
+            break;
+        }
+    }
+
+    // 後始末: quit 送って待つ。失敗しても child は drop で kill される。
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"quit\n");
+    }
+    let _ = child.wait();
+
+    if !got_usiok && options.is_empty() {
+        bail!("YO バイナリから option を 1 件も取得できませんでした ({})", binary.display());
+    }
+    Ok(options)
 }
 
 fn main() -> Result<()> {
@@ -123,17 +208,108 @@ fn main() -> Result<()> {
         println!("(--yo-params と --rshogi-params 両方の指定でペア値検証を行います)");
     }
 
+    // (4) YO バイナリ整合性検証
+    let mut yo_only_in_binary: Vec<String> = Vec::new();
+    let mut yo_only_in_table: Vec<String> = Vec::new();
+    if let Some(yo_bin) = &cli.yo_binary {
+        let timeout = Duration::from_secs(cli.yo_timeout_secs);
+        let yo_options = fetch_yo_usi_options(yo_bin, timeout)?;
+        println!(
+            "yo-binary check: {} USI options (timeout {}s) from {}",
+            yo_options.len(),
+            cli.yo_timeout_secs,
+            yo_bin.display()
+        );
+
+        let table_yo: HashSet<&str> = table
+            .mappings
+            .iter()
+            .map(|m| m.yo.as_str())
+            .chain(table.unmapped.yo.iter().map(|s| s.as_str()))
+            .collect();
+
+        for name in &yo_options {
+            if !table_yo.contains(name.as_str()) {
+                yo_only_in_binary.push(name.clone());
+            }
+        }
+        yo_only_in_binary.sort();
+        for name in &table_yo {
+            if !yo_options.contains(*name) {
+                yo_only_in_table.push((*name).to_owned());
+            }
+        }
+        yo_only_in_table.sort();
+
+        if !yo_only_in_binary.is_empty() {
+            println!(
+                "WARN: YO で公開されているが mapping にも unmapped.yo にも記載のない option \
+                 ({} 件、tune.py 注入が増えた可能性):",
+                yo_only_in_binary.len()
+            );
+            for n in &yo_only_in_binary {
+                println!("  - {n}");
+            }
+        }
+        if !yo_only_in_table.is_empty() {
+            println!(
+                "WARN: mapping/unmapped.yo にあるが YO バイナリの USI option に存在しない \
+                 ({} 件、旧 mapping の残骸の可能性):",
+                yo_only_in_table.len()
+            );
+            for n in &yo_only_in_table {
+                println!("  - {n}");
+            }
+        }
+    }
+
     let has_errors = !bad_rshogi_names.is_empty();
     let has_mismatches = !value_mismatches.is_empty();
-    let exit_failure = has_errors || (cli.strict && has_mismatches);
+    let has_yo_drift = !yo_only_in_binary.is_empty() || !yo_only_in_table.is_empty();
+    let exit_failure = has_errors || (cli.strict && (has_mismatches || has_yo_drift));
 
     println!("\n=== summary ===");
     println!("bad rshogi names    : {}", bad_rshogi_names.len());
     println!("uncovered (info)    : {}", uncovered.len());
     println!("value mismatches    : {}", value_mismatches.len());
+    if cli.yo_binary.is_some() {
+        println!("yo only in binary   : {}", yo_only_in_binary.len());
+        println!("yo only in table    : {}", yo_only_in_table.len());
+    }
 
     if exit_failure {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_usi_option_name_extracts_simple() {
+        assert_eq!(
+            parse_usi_option_name(
+                "option name correction_value_1 type spin default 9536 min 0 max 17734"
+            ),
+            Some("correction_value_1")
+        );
+    }
+
+    #[test]
+    fn parse_usi_option_name_handles_multiword_name() {
+        assert_eq!(
+            parse_usi_option_name("option name USI_Hash type spin default 16"),
+            Some("USI_Hash")
+        );
+    }
+
+    #[test]
+    fn parse_usi_option_name_rejects_non_option() {
+        assert_eq!(parse_usi_option_name("id name YaneuraOu"), None);
+        assert_eq!(parse_usi_option_name("usiok"), None);
+        // type 句を欠く不正形式
+        assert_eq!(parse_usi_option_name("option name foo bar"), None);
+    }
 }
