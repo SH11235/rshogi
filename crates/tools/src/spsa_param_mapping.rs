@@ -112,7 +112,9 @@ pub struct ParamRow {
     pub not_used: bool,
 }
 
-fn parse_value_i32(text: &str) -> Result<i32> {
+/// `.params` の value 列を i32 に正規化する共通ヘルパ。整数値ならそのまま、
+/// 小数値なら `round()` する（YO/rshogi いずれの `.params` も整数前提）。
+pub fn parse_value_i32(text: &str) -> Result<i32> {
     if let Ok(v) = text.parse::<i32>() {
         return Ok(v);
     }

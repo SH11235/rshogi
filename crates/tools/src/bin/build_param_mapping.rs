@@ -6,14 +6,13 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rshogi_core::search::SearchTuneParams;
-
-const NOT_USED_MARKER: &str = "[[NOT USED]]";
+use tools::spsa_param_mapping::{parse_value_i32, read_raw_params};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -35,43 +34,19 @@ struct Cli {
     output: PathBuf,
 }
 
-fn parse_value_i32(text: &str) -> Result<i32> {
-    if let Ok(v) = text.parse::<i32>() {
-        return Ok(v);
-    }
-    let v = text.parse::<f64>().with_context(|| format!("invalid numeric value: {text}"))?;
-    Ok(v.round() as i32)
-}
-
 /// YaneuraOu と rshogi のいずれの `.params` も同じ CSV 形式。
-fn load_params(path: &PathBuf) -> Result<BTreeMap<String, i32>> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
+/// パースは `spsa_param_mapping::read_raw_params` に委譲し、
+/// ここでは「name → 値 i32」の BTreeMap に整形する。
+fn load_params(path: &Path) -> Result<BTreeMap<String, i32>> {
+    let raws = read_raw_params(path)?;
     let mut map = BTreeMap::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line_no = idx + 1;
-        let line = line.with_context(|| format!("line {line_no}: read failed"))?;
-        let mut raw = line.trim().to_owned();
-        if raw.is_empty() || raw.starts_with('#') {
-            continue;
-        }
-        if raw.contains(NOT_USED_MARKER) {
-            raw = raw.replace(NOT_USED_MARKER, "");
-        }
-        if let Some((head, _)) = raw.split_once("//") {
-            raw = head.to_owned();
-        }
-        let cols: Vec<&str> = raw.split(',').map(str::trim).collect();
-        if cols.len() < 3 {
-            bail!("line {line_no} in {}: not enough columns", path.display());
-        }
-        let name = cols[0].to_owned();
-        let value = parse_value_i32(cols[2])
-            .with_context(|| format!("line {line_no} in {}", path.display()))?;
+    for raw in raws {
+        let value = parse_value_i32(&raw.value_text)
+            .with_context(|| format!("invalid value for {} in {}", raw.name, path.display()))?;
         // 同名再定義は後勝ちで黙って上書きされるとマッピング表が不正になり得るので
         // 明示的に reject する。
-        if map.insert(name.clone(), value).is_some() {
-            bail!("line {line_no} in {}: duplicate parameter name '{}'", path.display(), name);
+        if map.insert(raw.name.clone(), value).is_some() {
+            bail!("duplicate parameter name '{}' in {}", raw.name, path.display());
         }
     }
     Ok(map)

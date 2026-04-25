@@ -514,6 +514,22 @@ cargo run --release -p tools --bin check_param_mapping -- \
 
 `--strict` 指定時は上記いずれかの不整合があれば exit 1。
 
+CI 例（mapping 表のドリフト検出を制度化）:
+
+```bash
+# YO バイナリと mapping 表の整合性を不一致 0 で要求
+cargo run --release -p tools --bin check_param_mapping -- \
+  --mapping tune/yo_rshogi_mapping.toml \
+  --yo-params tune/suisho10.params \
+  --rshogi-params spsa_params/suisho10_converted.params \
+  --yo-binary /path/to/YaneuraOu-tune-patched \
+  --strict
+```
+
+worker_clear1 系のような条件付き注入で warn が予期される YO ビルドを CI 対象に
+する場合は、それらを `unmapped.yo` に移すか CI を `--strict` なしで走らせて
+warn 件数だけを監視する運用にする。
+
 ### 10.5 マッピング表の更新フロー
 
 新たな YO ↔ rshogi 対応を追加する／既存対応を見直す場合:

@@ -681,33 +681,39 @@ fn save_meta(path: &Path, meta: &ResumeMetaData) -> Result<()> {
 
 impl SpsaParam {
     fn from_raw(raw: RawParamRow, line_no: usize) -> Result<Self> {
-        let is_int = raw.kind.eq_ignore_ascii_case("int");
+        let RawParamRow {
+            name,
+            kind,
+            value_text,
+            min_text,
+            max_text,
+            col5_text,
+            col6_text,
+            comment,
+            not_used,
+        } = raw;
+        let is_int = kind.eq_ignore_ascii_case("int");
         Ok(SpsaParam {
-            value: raw
-                .value_text
+            name,
+            type_name: kind,
+            is_int,
+            value: value_text
                 .parse::<f64>()
                 .with_context(|| format!("invalid v at line {line_no}"))?,
-            min: raw
-                .min_text
+            min: min_text
                 .parse::<f64>()
                 .with_context(|| format!("invalid min at line {line_no}"))?,
-            max: raw
-                .max_text
+            max: max_text
                 .parse::<f64>()
                 .with_context(|| format!("invalid max at line {line_no}"))?,
-            c_end: raw
-                .col5_text
+            c_end: col5_text
                 .parse::<f64>()
                 .with_context(|| format!("invalid c_end at line {line_no}"))?,
-            r_end: raw
-                .col6_text
+            r_end: col6_text
                 .parse::<f64>()
                 .with_context(|| format!("invalid r_end at line {line_no}"))?,
-            name: raw.name,
-            type_name: raw.kind,
-            is_int,
-            comment: raw.comment,
-            not_used: raw.not_used,
+            comment,
+            not_used,
         })
     }
 }
@@ -802,6 +808,11 @@ fn apply_parameter_vector(
             continue;
         }
         let (engine_name, engine_value) = translator.translate(&p.name, v);
+        // `engine_value` は translator で sign_flip 後の値。SPSA 側の clamp は呼び出し
+        // 元 (`update_parameter_vector`) で `p.min/max` 適用済みなので、ここで再 clamp
+        // しない。translator は名前と符号だけを変換する役割で、YO 側 USI option の
+        // min/max との整合性は運用責任（runbook §10.6 + check_param_mapping --yo-binary
+        // で事前検証する想定）。
         engine.set_option_if_available(engine_name, &option_value_string(p, engine_value))?;
     }
     engine.sync_ready()?;

@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -59,7 +61,9 @@ fn parse_usi_option_name(line: &str) -> Option<&str> {
 
 /// YO バイナリを起動し `usi` を送って公開する USI option 名一覧を取得する。
 ///
-/// `usiok` 応答 or タイムアウト到達で読み取りを終了し、`quit` を送って終了させる。
+/// 読み取りは別スレッドで行い、`mpsc::Receiver::recv_timeout` で deadline を厳格化する。
+/// `usiok` を返さない/stdout 無応答の YO バリアントでも `timeout` 経過で確実に抜ける。
+/// 親プロセス側は最後に `quit` を送出し、応答しなければ `kill` で確実に回収する。
 fn fetch_yo_usi_options(binary: &Path, timeout: Duration) -> Result<HashSet<String>> {
     let mut child = Command::new(binary)
         .stdin(Stdio::piped())
@@ -75,18 +79,39 @@ fn fetch_yo_usi_options(binary: &Path, timeout: Duration) -> Result<HashSet<Stri
     }
 
     let stdout = child.stdout.take().context("YO stdout not available")?;
-    let mut reader = BufReader::new(stdout);
+    let (tx, rx) = mpsc::channel::<String>();
+    // stdout を別スレッドで読み、行単位で channel に流す。`usiok` で送信終了。
+    // 親が channel を drop すると send が Err になりスレッドは抜ける。
+    let reader_handle = thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(l) => {
+                    let stop = l.trim() == "usiok";
+                    if tx.send(l).is_err() {
+                        break;
+                    }
+                    if stop {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
     let deadline = Instant::now() + timeout;
     let mut options = HashSet::new();
     let mut got_usiok = false;
-
-    // BufReader は blocking なので timeout は厳密ではないが、`usiok` で必ず抜けるため
-    // 通常は数百ms で完了する。万一 hang した場合に kill するための保険。
+    let mut hit_timeout = false;
     loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {
+        let now = Instant::now();
+        if now >= deadline {
+            hit_timeout = true;
+            break;
+        }
+        match rx.recv_timeout(deadline - now) {
+            Ok(line) => {
                 if let Some(name) = parse_usi_option_name(&line) {
                     options.insert(name.to_owned());
                 }
@@ -95,22 +120,38 @@ fn fetch_yo_usi_options(binary: &Path, timeout: Duration) -> Result<HashSet<Stri
                     break;
                 }
             }
-            Err(e) => {
-                eprintln!("warn: YO stdout read error: {e}");
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                hit_timeout = true;
                 break;
             }
-        }
-        if Instant::now() >= deadline {
-            eprintln!("warn: YO `usi` 応答が {} 秒以内に完了しませんでした", timeout.as_secs());
-            break;
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // EOF / reader thread 終了
         }
     }
+    if hit_timeout {
+        eprintln!("warn: YO `usi` 応答が {} 秒以内に完了しませんでした", timeout.as_secs());
+    }
 
-    // 後始末: quit 送って待つ。失敗しても child は drop で kill される。
+    // 後始末: quit 送って 1 秒だけ try_wait、応答しなければ kill。
+    // `quit` を受け付けない YO バリアントでも child.wait() が無限 hang しないよう確実に回収する。
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(b"quit\n");
     }
-    let _ = child.wait();
+    let kill_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= kill_deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = reader_handle.join();
 
     if !got_usiok && options.is_empty() {
         bail!("YO バイナリから option を 1 件も取得できませんでした ({})", binary.display());
@@ -303,6 +344,18 @@ mod tests {
             parse_usi_option_name("option name USI_Hash type spin default 16"),
             Some("USI_Hash")
         );
+    }
+
+    /// `/bin/true` は `usi` を受け取っても何も出力せず即終了する。
+    /// この場合は option 0 件 + `usiok` 未受領で bail することを確認する。
+    #[test]
+    fn fetch_yo_usi_options_bails_on_silent_binary() {
+        let true_bin = Path::new("/bin/true");
+        if !true_bin.exists() {
+            return; // 環境に無ければスキップ
+        }
+        let r = fetch_yo_usi_options(true_bin, Duration::from_secs(2));
+        assert!(r.is_err(), "expected bail when YO binary produces no usiok");
     }
 
     #[test]
