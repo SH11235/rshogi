@@ -2170,6 +2170,18 @@ where
         Color::White => &matched.white,
     });
     let winner_color = result.winner();
+    // 同名対局は League ペアリング層の不変条件違反。`record_game_outcome` 側で
+    // 早期 Ok return されて wins/losses は据置になるが、その状態は Err 経路では
+    // 無いため運用ログから黙って消える。ここで明示的に `tracing::error!` を出して
+    // 「League から self-play が混入した」事実を即追跡できるようにする。debug
+    // ビルドでは `record_game_outcome` 内の `debug_assert_ne!` が同時に発火する。
+    if matched.black == matched.white {
+        tracing::error!(
+            game_id = %game_id.as_str(),
+            player = %matched.black.as_str(),
+            "self-play detected at persist_kifu; League pairing layer violated black != white invariant",
+        );
+    }
     if let Err(e) = state
         .rate_storage
         .record_game_outcome(

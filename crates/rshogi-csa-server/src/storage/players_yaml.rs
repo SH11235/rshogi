@@ -299,13 +299,19 @@ fn render_document(records: &HashMap<String, PlayerRateRecord>) -> Result<String
 
 async fn atomic_write_yaml(path: &Path, contents: &str) -> Result<(), StorageError> {
     // `rename(2)` は同一ファイルシステム上で atomic なので tmpfile は隣接ディレクトリ
-    // に作る。tmpfile 名は `pid.nanos.counter` を埋めて完全一意化することで:
+    // に作る。tmpfile 名衝突防止の構造:
     //
-    //   - 複数プロセスが同 dir に並行で書いた場合でも `O_CREAT|O_EXCL` のレース
-    //     にならない（`create_new(true)`）
-    //   - 攻撃者・他テナントが固定名 (`.players.yaml.tmp` 等) で先回りして
-    //     symlink を張り、`O_CREAT` の symlink follow で別ファイルを破壊書きする
-    //     攻撃面を狭める。さらに `create_new(true)` は既存 symlink を弾く。
+    //   - **異プロセス間**: `pid` で一意化する（PID が同時刻に再利用されるケースは
+    //     OS が pid 再利用を防ぐため実質ゼロ）。
+    //   - **同プロセス内**: `static AtomicU64` の `seq` が strict monotonic に増え、
+    //     同 pid 内では絶対衝突しない。
+    //   - `nanos` (subsec) は grep / 障害解析用の時刻ヒントで、衝突防止の根拠では
+    //     ない。`pid + seq` で衝突しないので不要にも見えるが、tmp 残骸が事後解析で
+    //     見つかった際に「いつ生成されたか」が分かるよう残す。
+    //
+    // 加えて `create_new(true)` を使うので、運悪く衝突した場合は `AlreadyExists` Err で
+    // 検出可能。攻撃者・他テナントが先回りして同名 symlink を張った場合も `create_new`
+    // が follow せず `EEXIST` で落ちる。
     //
     // dotfile 接頭辞は ls で隠して "中間ファイル" を示す慣習。
     let dir = path
@@ -347,12 +353,19 @@ async fn atomic_write_yaml(path: &Path, contents: &str) -> Result<(), StorageErr
         renamed: false,
     };
 
-    // `create_new(true)` は内部で `O_CREAT|O_EXCL` 相当を使い、既存ファイル / symlink
-    // 当たりで `AlreadyExists` Err を返す。tmpfile 名がプロセス間で一意なので通常
-    // は当たらないが、悪意ある先回り symlink を確実に弾く。
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    // unix では既存 `players.yaml` の mode を継承して tmp を開く（`chmod 0600` 運用で
+    // 人手で締めた permission が rename で 0644 に緩む事故を防ぐ）。Windows / その他
+    // 非 unix では mode 概念がないので素直に `create_new` のみで開く。
+    let mut open_options = fs::OpenOptions::new();
+    open_options.write(true).create_new(true);
+    // unix では `tokio::fs::OpenOptions::mode` が直接生えており trait import 不要。
+    // `Permissions::mode` 側のみ `std::os::unix::fs::PermissionsExt` を要する。
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        open_options.mode(meta.permissions().mode() & 0o7777);
+    }
+    let mut file = open_options
         .open(&tmp)
         .await
         .map_err(|e| StorageError::Io(format!("create {}: {}", tmp.display(), e)))?;
@@ -369,19 +382,32 @@ async fn atomic_write_yaml(path: &Path, contents: &str) -> Result<(), StorageErr
     cleanup.renamed = true;
     drop(cleanup);
 
-    // `rename(2)` のディレクトリエントリ更新は親 inode の fsync を行うまで永続化が
-    // 保証されない（ext4 / xfs の crash recovery で rename 結果が古い状態に戻る
-    // ケースが知られている）。`tokio::fs::File::open(dir).sync_all()` で親ディレクトリ
-    // を fsync してクラッシュ耐性を確保する。
-    let dir_handle = fs::OpenOptions::new()
-        .read(true)
-        .open(dir)
-        .await
-        .map_err(|e| StorageError::Io(format!("open dir {}: {}", dir.display(), e)))?;
-    dir_handle
-        .sync_all()
-        .await
-        .map_err(|e| StorageError::Io(format!("fsync dir {}: {}", dir.display(), e)))?;
+    // unix では `rename(2)` のディレクトリエントリ更新は親 inode の fsync を行うまで
+    // 永続化が保証されない（ext4 / xfs の crash recovery で rename 結果が古い状態に
+    // 戻るケースが知られている）。`tokio::fs::OpenOptions::open(dir).sync_all()` で
+    // 親ディレクトリを fsync してクラッシュ耐性を確保する。
+    //
+    // Windows / 非 unix ではディレクトリ open のセマンティクス自体が異なる
+    // (`CreateFileW` は `FILE_FLAG_BACKUP_SEMANTICS` 必須等) ため、ディレクトリ fsync
+    // は no-op として扱う。本サーバは VPS Linux 運用が一次ターゲットで、Windows は
+    // 開発・テスト経路の便宜上のサポート。
+    #[cfg(unix)]
+    {
+        let dir_handle = fs::OpenOptions::new()
+            .read(true)
+            .open(dir)
+            .await
+            .map_err(|e| StorageError::Io(format!("open dir {}: {}", dir.display(), e)))?;
+        dir_handle
+            .sync_all()
+            .await
+            .map_err(|e| StorageError::Io(format!("fsync dir {}: {}", dir.display(), e)))?;
+    }
+    #[cfg(not(unix))]
+    {
+        // 非 unix では no-op。`dir` 引数を未使用警告から逃すため明示的に消費する。
+        let _ = dir;
+    }
     Ok(())
 }
 
@@ -670,8 +696,14 @@ mod tests {
     }
 
     /// 日本語ハンドル名 / 数字始まりハンドル名など serde_yaml が quote を要する
-    /// 文字列で round-trip する契約を固定する。Ruby 互換 YAML として、UTF-8
-    /// 名前の対局者を扱える運用を保証する。
+    /// 可能性がある文字列で round-trip する契約を固定する。Ruby 互換 YAML として、
+    /// UTF-8 名前の対局者を扱える運用を保証する。
+    ///
+    /// (1) round-trip で意味的同値を保つ
+    /// (2) 日本語ハンドルは bare key として出力される（`田中太郎:` の出現を pin）
+    /// (3) 数字 only ハンドル `12345` は YAML 1.2 で integer scalar に解釈されうる
+    ///     ため `serde_yaml` は string quote を付ける。`'12345':` の出現を pin する
+    ///     （quote の有無は仕様変更で破壊的変化があるため byte 列で固定する）。
     #[test]
     fn render_and_parse_round_trip_handles_unicode_and_numeric_names() {
         let mut records = HashMap::new();
@@ -680,6 +712,16 @@ mod tests {
         let yaml = render_document(&records).unwrap();
         let parsed = parse_document(&yaml).unwrap();
         assert_eq!(parsed, records, "Unicode / numeric handles must round-trip");
+
+        // (2): 日本語ハンドルは bare で出力される。
+        assert!(yaml.contains("田中太郎:\n"), "non-ASCII handle must be unquoted, got:\n{yaml}",);
+        // (3): 数字 only ハンドルは integer 解釈を防ぐため quote される。
+        // serde_yaml 0.9 は single quote を採用するが、double quote 採用 minor バージョン
+        // 変化に保険を掛けるため両方許容する assertion にする。
+        assert!(
+            yaml.contains("'12345':\n") || yaml.contains("\"12345\":\n"),
+            "numeric handle must be string-quoted to avoid YAML integer coercion, got:\n{yaml}",
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
