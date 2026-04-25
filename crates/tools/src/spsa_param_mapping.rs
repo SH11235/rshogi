@@ -183,3 +183,109 @@ pub fn rshogi_to_yo_value(rshogi_value: i32, sign_flip: bool) -> i32 {
         rshogi_value
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// YO ↔ rshogi の値変換は involution（2 回適用で元に戻る）
+    #[test]
+    fn value_translation_is_involution() {
+        for &v in &[-10000_i32, -1, 0, 1, 100, 12345] {
+            for &flip in &[false, true] {
+                let r = yo_to_rshogi_value(v, flip);
+                assert_eq!(rshogi_to_yo_value(r, flip), v, "v={v} flip={flip}");
+            }
+        }
+    }
+
+    fn make_table(entries: &[(&str, &str, bool)]) -> MappingTable {
+        MappingTable {
+            mappings: entries
+                .iter()
+                .map(|(yo, rs, fl)| Mapping {
+                    yo: (*yo).to_owned(),
+                    rshogi: (*rs).to_owned(),
+                    sign_flip: *fl,
+                })
+                .collect(),
+            unmapped: UnmappedSection::default(),
+        }
+    }
+
+    #[test]
+    fn validate_detects_duplicate_yo() {
+        let t = make_table(&[("a", "X", false), ("a", "Y", false)]);
+        assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn validate_detects_duplicate_rshogi() {
+        let t = make_table(&[("a", "X", false), ("b", "X", true)]);
+        assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn validate_detects_unmapped_overlap() {
+        let mut t = make_table(&[("a", "X", false)]);
+        t.unmapped.rshogi.push("X".to_owned());
+        assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_unique_table() {
+        let t = make_table(&[("a", "X", false), ("b", "Y", true), ("c", "Z", false)]);
+        assert!(t.validate().is_ok());
+    }
+
+    /// 正本 .params ペア (suisho10.params + suisho10_converted.params) で
+    /// YO → rshogi → YO ラウンドトリップが値を保つことを確認する回帰テスト。
+    ///
+    /// テストデータが環境依存なので `#[ignore]` 付き。
+    /// 実行には以下を `tune/` 配下に配置してから `cargo test -p tools -- --ignored`:
+    /// - `tune/suisho10.params`
+    /// - `tune/suisho10_converted.params` (= spsa_params/suisho10_converted.params のコピー)
+    /// - `tune/yo_rshogi_mapping.toml`
+    #[test]
+    #[ignore]
+    fn canonical_pair_round_trip() {
+        let yo_path = Path::new("tune/suisho10.params");
+        let rshogi_path = Path::new("tune/suisho10_converted.params");
+        let mapping_path = Path::new("tune/yo_rshogi_mapping.toml");
+        if !yo_path.exists() || !rshogi_path.exists() || !mapping_path.exists() {
+            eprintln!("fixture files not present, skipping");
+            return;
+        }
+        let table = MappingTable::load(mapping_path).expect("mapping load");
+        let yo = load_params(yo_path).expect("yo load");
+        let r = load_params(rshogi_path).expect("rshogi load");
+
+        let yo_by_name: HashMap<&str, &ParamRow> =
+            yo.iter().map(|x| (x.name.as_str(), x)).collect();
+        let r_by_name: HashMap<&str, &ParamRow> =
+            r.iter().map(|x| (x.name.as_str(), x)).collect();
+
+        let mut checked = 0;
+        for m in &table.mappings {
+            let (Some(yo_row), Some(r_row)) =
+                (yo_by_name.get(m.yo.as_str()), r_by_name.get(m.rshogi.as_str()))
+            else {
+                continue;
+            };
+            let to_r = yo_to_rshogi_value(yo_row.value, m.sign_flip);
+            assert_eq!(
+                to_r, r_row.value,
+                "{} -> {}: YO={} sign_flip={} 期待 rshogi={} 実際={}",
+                m.yo, m.rshogi, yo_row.value, m.sign_flip, to_r, r_row.value
+            );
+            let back_to_yo = rshogi_to_yo_value(r_row.value, m.sign_flip);
+            assert_eq!(
+                back_to_yo, yo_row.value,
+                "{} -> {}: rshogi={} sign_flip={} 期待 YO={} 実際={}",
+                m.yo, m.rshogi, r_row.value, m.sign_flip, back_to_yo, yo_row.value
+            );
+            checked += 1;
+        }
+        assert!(checked >= 90, "checked too few mappings: {checked}");
+    }
+}
