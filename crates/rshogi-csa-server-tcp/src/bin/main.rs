@@ -132,8 +132,8 @@ impl ClockKindArg {
 const ALLOW_FLOODGATE_FEATURES_FLAG: &str = "--allow-floodgate-features";
 
 fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    log::info!("rshogi-csa-server-tcp starting (v{})", env!("CARGO_PKG_VERSION"));
+    init_tracing();
+    tracing::info!(version = %env!("CARGO_PKG_VERSION"), "rshogi-csa-server-tcp starting");
 
     let cli = Cli::parse();
     let bind_addr = cli.bind.parse().with_context(|| format!("bad --bind {}", cli.bind))?;
@@ -190,12 +190,12 @@ fn main() -> anyhow::Result<()> {
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, async move {
         let handle = run_server(state.clone()).await.context("run_server")?;
-        log::info!("rshogi-csa-server-tcp ready");
+        tracing::info!("rshogi-csa-server-tcp ready");
 
         // SIGINT と SIGTERM を並列待機する。SIGINT は Ctrl-C、SIGTERM は
         // systemd / Docker / Kubernetes の停止シグナル。
         let sig = wait_for_termination_signal().await;
-        log::info!("received {sig}, initiating graceful shutdown");
+        tracing::info!(signal = sig, "initiating graceful shutdown");
 
         // 1. 新規接続の受付停止 + 待機プール中のセッション切断を誘導する。
         state.shutdown.trigger();
@@ -208,10 +208,14 @@ fn main() -> anyhow::Result<()> {
         match handle.await {
             Ok(()) => {}
             Err(e) if e.is_panic() => {
-                log::error!("accept loop panicked during shutdown: {e:#}");
+                // `JoinError::Display` は "task X panicked" を返す。`{e:#}` の
+                // alternate flag は同種類で `{e}` と同等出力なので、`%e` に絞って
+                // 一時 String 確保を省く（panic payload を覗くなら別途
+                // `e.into_panic()` 経由が必要）。
+                tracing::error!(error = %e, "accept loop panicked during shutdown");
             }
             Err(e) => {
-                log::info!("accept loop joined with error: {e:#}");
+                tracing::info!(error = %e, "accept loop joined with error");
             }
         }
 
@@ -230,17 +234,19 @@ fn main() -> anyhow::Result<()> {
             if active == 0 {
                 break;
             }
-            log::info!(
-                "waiting for {active} active game(s) to finish (grace {}s)",
-                grace.as_secs()
+            tracing::info!(
+                active_games = active,
+                grace_sec = grace.as_secs(),
+                "waiting for active games to finish"
             );
             tokio::select! {
                 _ = notified => continue,
                 _ = tokio::time::sleep_until(deadline) => {
                     let remaining = state.active_game_count();
                     if remaining > 0 {
-                        log::warn!(
-                            "shutdown grace expired; {remaining} game(s) left unfinished"
+                        tracing::warn!(
+                            unfinished_games = remaining,
+                            "shutdown grace expired"
                         );
                     }
                     break;
@@ -248,7 +254,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        log::info!("shutdown complete");
+        tracing::info!("shutdown complete");
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())
@@ -272,7 +278,7 @@ async fn wait_for_termination_signal() -> &'static str {
                 "SIGTERM"
             }
             Err(e) => {
-                log::warn!("failed to install SIGTERM handler: {e}");
+                tracing::warn!(error = %e, "failed to install SIGTERM handler");
                 std::future::pending::<&'static str>().await
             }
         }
@@ -283,6 +289,35 @@ async fn wait_for_termination_signal() -> &'static str {
         s = sigint => s,
         s = sigterm => s,
     }
+}
+
+/// `tracing_subscriber` の初期化。
+///
+/// `RUST_LOG` 互換の env-filter で level / target を設定でき、未設定時は
+/// `EnvFilter::new("info")` により target 指定なしの `info` 全体フィルタを
+/// 適用する。`tracing-log` ブリッジ (`LogTracer::init`) を明示的に起動するため、
+/// 依存先 crate が `log::info!` 等の `log` macro を使っていても tracing
+/// subscriber に流れて 1 系統の出力になる。
+///
+/// 構造化フィールド（`conn_id` / `game_id` 等）は `info!(field = value)` 形式で
+/// span に乗り、`fmt` フォーマッタが key=value で展開する。日次ローテはここでは
+/// 設定せず、systemd journal / Docker logging driver / log shipper 等の
+/// プロセス外設定に任せる（YAGNI）。
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::prelude::*;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // ANSI カラー escape は log shipper / journald 経由で消費する運用でノイズに
+    // なるため常時 off。色付きログを欲しい運用要件が出てきたら
+    // `IsTerminal` 自動判定なり env toggle なりをその時点で導入する（YAGNI）。
+    // `tracing-subscriber` の `tracing-log` feature だけでは依存先 crate の
+    // `log::*` macro 出力は subscriber に流れない。`LogTracer::init()` を
+    // subscriber 初期化前に呼んで log -> tracing ブリッジを明示的に起動する。
+    let _ = tracing_log::LogTracer::init();
+    let registry = tracing_subscriber::registry().with(filter).with(fmt::layer().with_ansi(false));
+    // 多重 init はテスト harness 等で発生し得るため失敗を許容する。
+    let _ = registry.try_init();
 }
 
 /// players.toml を読む。

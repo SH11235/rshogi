@@ -21,7 +21,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rshogi_core::types::EnteringKingRule;
@@ -52,6 +52,7 @@ use rshogi_csa_server::{FileKifuStorage, TransportError};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 use crate::auth::{AuthOutcome, PasswordHasher, authenticate};
 use crate::broadcaster::{InMemoryBroadcaster, Subscriber};
@@ -441,10 +442,10 @@ where
     P: PasswordStore + 'static,
 {
     let listener = TcpListener::bind(state.config.bind_addr).await?;
-    log::info!(
-        "rshogi-csa-server-tcp {} listening on {}",
-        env!("CARGO_PKG_VERSION"),
-        state.config.bind_addr
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        bind = %state.config.bind_addr,
+        "rshogi-csa-server-tcp listening"
     );
     let handle = tokio::task::spawn_local(accept_loop(listener, state));
     Ok(handle)
@@ -457,28 +458,48 @@ where
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
+    // 接続ごとに `conn_id` を採番し、tracing span のフィールドとして全ログイベント
+    // に伝播する。プロセス再起動でリセットされる単純な `AtomicU64` で十分（同一
+    // run 内で uniq・stable・短い表現の 3 条件を満たす）。
+    let connection_seq = Rc::new(AtomicU64::new(1));
     loop {
         tokio::select! {
             // graceful shutdown 中は新規受付を止める。listener は drop されて
             // port が解放されるまでの short window では SYN が失敗する可能性が
             // あるが、既存接続と進行中対局には影響しない。
             _ = state.shutdown.wait() => {
-                log::info!("accept loop received shutdown signal; stopping new connections");
+                tracing::info!("accept loop received shutdown signal; stopping new connections");
                 break;
             }
             res = listener.accept() => {
                 match res {
                     Ok((stream, addr)) => {
-                        log::debug!("accepted {addr}");
+                        let conn_id = connection_seq.fetch_add(1, Ordering::Relaxed);
+                        // `game_id` は対局確定時 (`drive_game` 内) に
+                        // `Span::current().record("game_id", ...)` で後から埋める
+                        // 想定で、conn span 上に Empty で予約しておく。span の
+                        // フィールド名は `id` ではなく `conn_id` にして、ログ
+                        // shipper クエリで対局 id 等の他キーと衝突しない名前を
+                        // 採用する。
+                        let span = tracing::info_span!(
+                            "conn",
+                            conn_id = conn_id,
+                            remote = %addr,
+                            game_id = tracing::field::Empty,
+                        );
+                        span.in_scope(|| tracing::debug!("accepted"));
                         let st = state.clone();
-                        tokio::task::spawn_local(async move {
-                            if let Err(e) = handle_connection(stream, st).await {
-                                log::info!("connection {addr} ended: {e:?}");
+                        tokio::task::spawn_local(
+                            async move {
+                                if let Err(e) = handle_connection(stream, st).await {
+                                    tracing::info!(error = ?e, "connection ended");
+                                }
                             }
-                        });
+                            .instrument(span),
+                        );
                     }
                     Err(e) => {
-                        log::warn!("accept error: {e}");
+                        tracing::warn!(error = %e, "accept error");
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 }
@@ -627,7 +648,7 @@ where
                         // 直接 transport にエラーを送って切断する。自分も同じ
                         // エラーを送って終わる。再キューしない（silently ハング
                         // するのを避ける）。
-                        log::info!("buoy {game_name} exhausted after handoff; aborting match");
+                        tracing::info!(%game_name, "buoy exhausted after handoff; aborting match");
                         let err_line =
                             CsaLine::new(format!("##[ERROR] buoy '{game_name}' exhausted"));
                         let _ = transport.send_line(&err_line).await;
@@ -657,7 +678,7 @@ where
         }
         // waiter が直前に切断などで離脱していた場合、handoff は失敗する。
         // その場合は自分が waiter 役として待機し直す（League は GameWaiting のまま）。
-        log::info!("matchmaking handoff failed for {opp_handle}; falling back to waiter");
+        tracing::info!(opponent = %opp_handle, "matchmaking handoff failed; falling back to waiter");
     }
 
     // waiter 側パス: transport を保持したまま、マッチ確定 or 切断 を監視する。
@@ -1182,17 +1203,31 @@ where
         // 全体が止まる。そのため 1 行ごとに `x1_reply_write_timeout` を上限として
         // 適用し、超過・失敗いずれも切断扱いで pool から除去する。
         let write_timeout = state.config.x1_reply_write_timeout;
-        let mut write_failed = false;
+        let mut stall_cause: Option<&'static str> = None;
         for out in lines {
             match tokio::time::timeout(write_timeout, transport.send_line(&out)).await {
                 Ok(Ok(())) => {}
-                Ok(Err(_)) | Err(_) => {
-                    write_failed = true;
+                Ok(Err(_)) => {
+                    stall_cause = Some("io");
+                    break;
+                }
+                Err(_) => {
+                    stall_cause = Some("timeout");
                     break;
                 }
             }
         }
-        if write_failed {
+        if let Some(cause) = stall_cause {
+            // x1 waiter の応答 write が止まった際は、運用側が原因を分類できるよう
+            // cause を必ずログに残す（timeout = client が読まずに詰まり、
+            // io = peer 切断・I/O エラー）。マッチメイキング全体の停止を防ぐため
+            // この経路で常に pool から除去・League logout する。
+            tracing::info!(
+                cause,
+                handle = %handle,
+                game_name = %game_name,
+                "x1 waiter write stalled; dropping session"
+            );
             let mut pool = state.waiting.lock().await;
             let _removed = pool.remove_by_handle(&game_name, &handle);
             break 'outer WaiterOutcome::DisconnectedFromPool;
@@ -1301,8 +1336,10 @@ where
                 // 巻き戻す。そうしないと不正 buoy が静かに burn し続ける
                 // (Copilot レビュー指摘)。
                 if let Err(rollback_err) = state.buoy_storage.release_reservation(game_name).await {
-                    log::error!(
-                        "failed to rollback buoy reservation for {game_name}: {rollback_err}"
+                    tracing::error!(
+                        %game_name,
+                        error = %rollback_err,
+                        "failed to rollback buoy reservation"
                     );
                 }
                 return Err(ServerError::Protocol(ProtocolError::Malformed(format!(
@@ -1405,6 +1442,11 @@ where
         *counter += 1;
         GameId::new(format!("{}{:04}", state.started_at.format("%Y%m%d%H%M%S"), *counter))
     };
+    // 確定した game_id を現在の tracing span に追加し、以後この対局タスク内で
+    // 発行されるイベントに `game_id = "<id>"` を伝播させる。conn span の
+    // `conn_id` フィールドと併せて、接続単位 + 対局単位の二段相関 ID を運用
+    // ログから一意に追えるようにする。
+    tracing::Span::current().record("game_id", tracing::field::display(&game_id));
 
     // League 側でペア確定 (confirm_match) → AgreeWaiting へ。
     let matched = MatchedPair {

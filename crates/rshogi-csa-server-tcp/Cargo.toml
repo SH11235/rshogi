@@ -13,8 +13,12 @@ rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false, f
 anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
-log.workspace = true
-env_logger.workspace = true
+tracing.workspace = true
+# `tracing-subscriber` / `tracing-log` は subscriber 初期化系で本 binary 用途
+# のみ。library crate に染み出さないよう workspace ではなく crate ローカルで
+# 直接書く（dep 範囲を明示）。
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "tracing-log", "ansi"] }
+tracing-log = "0.2"
 clap.workspace = true
 serde.workspace = true
 toml.workspace = true
