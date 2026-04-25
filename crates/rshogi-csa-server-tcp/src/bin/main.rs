@@ -208,10 +208,14 @@ fn main() -> anyhow::Result<()> {
         match handle.await {
             Ok(()) => {}
             Err(e) if e.is_panic() => {
-                tracing::error!(error = %format!("{e:#}"), "accept loop panicked during shutdown");
+                // `JoinError::Display` は "task X panicked" を返す。`{e:#}` の
+                // alternate flag は同種類で `{e}` と同等出力なので、`%e` に絞って
+                // 一時 String 確保を省く（panic payload を覗くなら別途
+                // `e.into_panic()` 経由が必要）。
+                tracing::error!(error = %e, "accept loop panicked during shutdown");
             }
             Err(e) => {
-                tracing::info!(error = %format!("{e:#}"), "accept loop joined with error");
+                tracing::info!(error = %e, "accept loop joined with error");
             }
         }
 
@@ -290,9 +294,10 @@ async fn wait_for_termination_signal() -> &'static str {
 /// `tracing_subscriber` の初期化。
 ///
 /// `RUST_LOG` 互換の env-filter で level / target を設定でき、未設定時は
-/// `info` レベルで rshogi-csa-server-tcp のイベントを出力する。`tracing-log`
-/// ブリッジを有効化しているので、依存先 crate が `log` macro を使っていても
-/// 同じ subscriber に流れて 1 系統の出力になる。
+/// `EnvFilter::new("info")` により target 指定なしの `info` 全体フィルタを
+/// 適用する。`tracing-log` ブリッジ (`LogTracer::init`) を明示的に起動するため、
+/// 依存先 crate が `log::info!` 等の `log` macro を使っていても tracing
+/// subscriber に流れて 1 系統の出力になる。
 ///
 /// 構造化フィールド（`conn_id` / `game_id` 等）は `info!(field = value)` 形式で
 /// span に乗り、`fmt` フォーマッタが key=value で展開する。日次ローテはここでは
@@ -305,12 +310,15 @@ fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     // ANSI カラー escape は log shipper / journald 経由で消費する運用でノイズに
     // なるため既定で off。開発者がローカルで色付きログを見たい場合は
-    // `RSHOGI_LOG_ANSI=1` を立てて override できる（YAGNI ぎりぎり残す程度に）。
+    // `RSHOGI_LOG_ANSI=1` を立てて override できる。
     let ansi = std::env::var("RSHOGI_LOG_ANSI").as_deref() == Ok("1");
+    // `tracing-subscriber` の `tracing-log` feature だけでは依存先 crate の
+    // `log::*` macro 出力は subscriber に流れない。`LogTracer::init()` を
+    // subscriber 初期化前に呼んで log -> tracing ブリッジを明示的に起動する。
+    // 多重 init は冪等扱い（テスト harness 等での重複呼び出しを許容）。
+    let _ = tracing_log::LogTracer::init();
     let registry = tracing_subscriber::registry().with(filter).with(fmt::layer().with_ansi(ansi));
-    if registry.try_init().is_err() {
-        // テスト等で既に初期化されている場合は何もしない（多重 init 失敗を許容）。
-    }
+    let _ = registry.try_init();
 }
 
 /// players.toml を読む。

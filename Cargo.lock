@@ -1675,6 +1675,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 

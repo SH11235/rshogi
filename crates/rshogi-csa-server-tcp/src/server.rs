@@ -52,6 +52,7 @@ use rshogi_csa_server::{FileKifuStorage, TransportError};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 use crate::auth::{AuthOutcome, PasswordHasher, authenticate};
 use crate::broadcaster::{InMemoryBroadcaster, Subscriber};
@@ -476,24 +477,25 @@ where
                         let conn_id = connection_seq.fetch_add(1, Ordering::Relaxed);
                         // `game_id` は対局確定時 (`drive_game` 内) に
                         // `Span::current().record("game_id", ...)` で後から埋める
-                        // 想定で、conn span 上に Empty で予約しておく。
+                        // 想定で、conn span 上に Empty で予約しておく。span の
+                        // フィールド名は `id` ではなく `conn_id` にして、ログ
+                        // shipper クエリで対局 id 等の他キーと衝突しない名前を
+                        // 採用する。
                         let span = tracing::info_span!(
                             "conn",
-                            id = conn_id,
+                            conn_id = conn_id,
                             remote = %addr,
                             game_id = tracing::field::Empty,
                         );
-                        tracing::debug!(parent: &span, "accepted");
+                        span.in_scope(|| tracing::debug!("accepted"));
                         let st = state.clone();
                         tokio::task::spawn_local(
-                            tracing::Instrument::instrument(
-                                async move {
-                                    if let Err(e) = handle_connection(stream, st).await {
-                                        tracing::info!(error = ?e, "connection ended");
-                                    }
-                                },
-                                span,
-                            )
+                            async move {
+                                if let Err(e) = handle_connection(stream, st).await {
+                                    tracing::info!(error = ?e, "connection ended");
+                                }
+                            }
+                            .instrument(span),
                         );
                     }
                     Err(e) => {
