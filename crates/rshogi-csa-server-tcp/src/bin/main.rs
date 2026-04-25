@@ -154,6 +154,17 @@ fn main() -> anyhow::Result<()> {
         rshogi_csa_server_tcp::metrics::init_prometheus_exporter(metrics_addr)
             .with_context(|| format!("install Prometheus exporter on {metrics_addr}"))?;
         tracing::info!(bind = %metrics_addr, "Prometheus metrics exporter ready");
+        // `/metrics` は plain HTTP で auth も無いため、非 loopback bind は
+        // 公開ネットへ漏らす事故になり得る。reverse proxy (nginx/envoy) で
+        // basic auth / TLS / IP 制限をかける運用前提だが、その手前で誤って
+        // `0.0.0.0:9090` 等を直接公開していないかを起動時に警告する。
+        if !metrics_addr.ip().is_loopback() {
+            tracing::warn!(
+                bind = %metrics_addr,
+                "metrics endpoint is bound to a non-loopback address; \
+                 ensure a reverse proxy enforces auth / TLS / IP allowlist before exposing it"
+            );
+        }
     }
 
     // 1. プレイヤ定義ファイルを読む。TOML の `[players.<handle>]` エントリで表現する。
