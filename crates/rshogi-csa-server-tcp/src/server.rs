@@ -2182,15 +2182,15 @@ where
             "self-play detected at persist_kifu; League pairing layer violated black != white invariant",
         );
     }
+    // `record_game_outcome` は trait 既定実装を使う実装（[`InMemoryRateStorage`]
+    // 等）だと `now_iso: &str` を `.await` を跨いで保持する。`&end_time.to_rfc3339()`
+    // を直接渡すと一時 `String` への参照が future に閉じ込められ、ライフタイム
+    // 解析の都合でビルドが落ちうる。ローカル変数に束縛してから参照を渡し、
+    // 一時値の寿命を `.await` 完了後まで明示的に確保する。
+    let end_time_iso = end_time.to_rfc3339();
     if let Err(e) = state
         .rate_storage
-        .record_game_outcome(
-            &matched.black,
-            &matched.white,
-            winner_name,
-            game_id,
-            &end_time.to_rfc3339(),
-        )
+        .record_game_outcome(&matched.black, &matched.white, winner_name, game_id, &end_time_iso)
         .await
     {
         tracing::error!(

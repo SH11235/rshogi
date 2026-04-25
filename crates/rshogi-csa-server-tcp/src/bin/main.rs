@@ -226,12 +226,12 @@ fn main() -> anyhow::Result<()> {
     let players_yaml = cli.players_yaml;
     local.block_on(&rt, async move {
         // 4. レートストレージを `--players-yaml` の有無で切り替える。
-        //    YAML 経路: 起動時に既存ファイルを読み、TOML 由来の handle で未登録分を
-        //              既定値（rate=1500 / wins=0 / losses=0）で in-memory 補填。
-        //              書き戻しは `record_game_outcome` 経由で atomic に行う。
+        //    YAML 経路: 起動時に既存ファイルを読み、YAML 未登録の handle を
+        //              TOML 由来の `PlayerRateRecord`（rate / wins / losses）で
+        //              in-memory 補填する。書き戻しは `record_game_outcome` 経由
+        //              で atomic に行う。
         //    None 経路: TOML から再構築するインメモリ保存。再起動で wins/losses が
         //              失われるが、開発・テスト用途には十分。
-        let now_iso = chrono::Utc::now().to_rfc3339();
         if let Some(yaml_path) = players_yaml {
             // load_from_file が PathBuf を消費するので、エラーメッセージ用には
             // path 文字列を先に確保する（追加 PathBuf clone を避ける）。
@@ -239,9 +239,11 @@ fn main() -> anyhow::Result<()> {
             let storage = PlayersYamlRateStorage::load_from_file(yaml_path)
                 .await
                 .with_context(|| format!("failed to load players.yaml at {path_for_err}"))?;
-            // TOML 由来の handle でまだ YAML 上に存在しないものを既定値で補填する。
-            // PlayerRateRecord に rate=1500 を入れるのは Floodgate 既定の初期値。
-            storage.ensure_default_records(rate_map.into_keys(), 1500, &now_iso);
+            // TOML 由来の handle でまだ YAML 上に存在しないものを TOML 値そのままで
+            // 補填する。YAML 既存レコード側は ensure_default_records が保護する。
+            // `into_values()` で `PlayerRateRecord` 全体を渡すことで、TOML の
+            // rate / wins / losses が初期値補填経路でデータ破壊なく反映される。
+            storage.ensure_default_records(rate_map.into_values());
             run_with_state(config, storage, kifu_storage, password_store).await
         } else {
             let storage = InMemoryRateStorage::new(rate_map);

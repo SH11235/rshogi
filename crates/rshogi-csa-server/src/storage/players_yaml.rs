@@ -10,21 +10,25 @@
 //! `:last_game_id`/`:last_modified` をキーとして読み書きする:
 //!
 //! ```yaml
-//! ---
 //! alice:
 //!   :name: alice
 //!   :rate: 2500
 //!   :win: 100
 //!   :loss: 50
 //!   :last_game_id: 20260426-001
-//!   :last_modified: '2026-04-26T12:34:56+00:00'
+//!   :last_modified: 2026-04-26T12:34:56+00:00
 //! bob:
 //!   :name: bob
 //!   :rate: 2400
 //!   :win: 80
 //!   :loss: 60
-//!   :last_modified: '2026-04-26T12:34:56+00:00'
+//!   :last_modified: 2026-04-26T12:34:56+00:00
 //! ```
+//!
+//! `serde_yaml` の `to_string` は document start (`---`) を出さず、`String` 型の
+//! `:last_modified` も quote 無しで bare scalar として出力する。例は
+//! `render_document` のテスト golden YAML と一致させる（実出力と差異が出たら
+//! `render_document_emits_byte_stable_yaml_with_ruby_symbol_keys` が落ちる）。
 //!
 //! ## クリーンルーム方針
 //!
@@ -148,11 +152,20 @@ impl PlayersYamlRateStorage {
     /// ファイルが存在しない場合は空マップを返す（初回起動の運用シナリオ）。
     /// ファイルが空文字列・空白のみの場合も同様に空マップとして扱う。
     /// パース失敗は [`StorageError::Malformed`] として `Err` を返す。
+    ///
+    /// **fail-fast**: ファイル自体が `NotFound` でも、親ディレクトリが存在しない
+    /// 場合は設定ミス（例: `--players-yaml /nonexistent-dir/players.yaml`）として
+    /// 起動時に `StorageError::Io` を返す。これを許容すると、サーバが accept ループ
+    /// に入ったあと初回終局時に毎回書き込みが失敗する形で運用障害が遅延顕在化
+    /// するため、最初の `record_game_outcome` を待たずに起動段階で検知する。
     pub async fn load_from_file(path: PathBuf) -> Result<Self, StorageError> {
         let map = match fs::read_to_string(&path).await {
             Ok(text) if text.trim().is_empty() => HashMap::new(),
             Ok(text) => parse_document(&text)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ensure_parent_dir_exists(&path).await?;
+                HashMap::new()
+            }
             Err(e) => {
                 return Err(StorageError::Io(format!("read {}: {}", path.display(), e)));
             }
@@ -164,28 +177,24 @@ impl PlayersYamlRateStorage {
         })
     }
 
-    /// 指定プレイヤがまだ未登録なら、既定値（rate=`initial_rate`、wins=0、losses=0）
-    /// でレコードを補填する。disk への書き戻しは行わず、cache を更新するのみ。
+    /// `players.toml` 由来の `PlayerRateRecord` で、まだ YAML 上に未登録のプレイヤ
+    /// レコードを補填する。disk への書き戻しは行わず、cache を更新するのみ。
+    ///
+    /// **契約**: YAML 既存レコードは保護される（同名キーが既にあれば渡された
+    /// `PlayerRateRecord` は捨てる）。これにより YAML 側で運用中の `:rate` /
+    /// `:win` / `:loss` を上書きせず、TOML 側の値は「YAML 移行時の既存プレイヤ
+    /// 補填」目的にのみ使われる。
     ///
     /// `players.toml` で定義された全プレイヤを LOGIN 経路で受け付けるための
     /// 起動時補填用。最初に終局して `record_game_outcome` が走った時点で
     /// `players.yaml` に書き戻される。
-    pub fn ensure_default_records<I, S>(&self, names: I, initial_rate: i32, now_iso: &str)
+    pub fn ensure_default_records<I>(&self, defaults: I)
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = PlayerRateRecord>,
     {
         let mut cache = lock_cache(&self.cache);
-        for raw in names {
-            let name: String = raw.into();
-            cache.entry(name.clone()).or_insert_with(|| PlayerRateRecord {
-                name: PlayerName::new(&name),
-                rate: initial_rate,
-                wins: 0,
-                losses: 0,
-                last_game_id: None,
-                last_modified: now_iso.to_owned(),
-            });
+        for rec in defaults {
+            cache.entry(rec.name.as_str().to_owned()).or_insert(rec);
         }
     }
 
@@ -295,6 +304,37 @@ fn render_document(records: &HashMap<String, PlayerRateRecord>) -> Result<String
         records.iter().map(|(k, v)| (k.clone(), YamlRecord::from_record(v))).collect();
     serde_yaml::to_string(&doc)
         .map_err(|e| StorageError::Io(format!("serialize players.yaml: {e}")))
+}
+
+/// `path` の親ディレクトリが存在することを検証する（[`load_from_file`] の
+/// fail-fast 用）。`path` が単純なファイル名（親が空 / `Path::new(".")` 相当）
+/// の場合はカレントディレクトリが暗黙的な親なので存在チェックは省略する。
+///
+/// `tokio::fs::try_exists` は対象が存在しないときに `Ok(false)`、stat 自体が
+/// permission denied 等で失敗した場合に `Err` を返す。後者は親が存在しない
+/// 設定ミスとは別軸の運用障害（権限不足）なので、エラーメッセージにパスと
+/// 原因の両方を残して `Io` で上に伝える。
+async fn ensure_parent_dir_exists(path: &Path) -> Result<(), StorageError> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => return Ok(()),
+    };
+    let exists = fs::try_exists(parent).await.map_err(|e| {
+        StorageError::Io(format!(
+            "stat parent dir {} for {}: {}",
+            parent.display(),
+            path.display(),
+            e
+        ))
+    })?;
+    if !exists {
+        return Err(StorageError::Io(format!(
+            "players.yaml parent directory does not exist: {} (for {})",
+            parent.display(),
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 async fn atomic_write_yaml(path: &Path, contents: &str) -> Result<(), StorageError> {
@@ -542,6 +582,38 @@ mod tests {
         assert!(storage.list_all().await.unwrap().is_empty());
     }
 
+    /// **P2 回帰固定**: ファイル本体が無くても、親ディレクトリが存在しない
+    /// 場合は起動段階で `StorageError::Io` を返して fail-fast する。これを
+    /// 許容すると初回終局時の atomic write が必ず失敗する形で運用障害が遅延
+    /// 顕在化するため、accept ループに入る前に検知する契約を固定する。
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_from_file_fails_fast_when_parent_dir_missing() {
+        let dir = tempdir();
+        // 親ディレクトリ自体が存在しないパスを指す（typo / mount 漏れの設定ミス）。
+        let nonexistent_parent = dir.path().join("does-not-exist");
+        let path = nonexistent_parent.join("players.yaml");
+        let err = PlayersYamlRateStorage::load_from_file(path).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(matches!(err, StorageError::Io(_)), "expected Io error, got: {msg}");
+        assert!(
+            msg.contains("parent directory"),
+            "error message should mention parent directory: {msg}"
+        );
+    }
+
+    /// 親ディレクトリは存在するがファイル本体が無いケースは初回起動の正常経路
+    /// なので、空マップで起動できる。`load_from_file_returns_empty_when_file_missing`
+    /// と等価だが、parent 検証経路を踏むことで P2 修正の正常系副作用が無いこと
+    /// を明示する。
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_from_file_accepts_missing_file_when_parent_dir_exists() {
+        let dir = tempdir();
+        let path = dir.path().join("players.yaml");
+        // 親 (`dir`) は tempdir で生成済み、ファイル自体は無い状態。
+        let storage = PlayersYamlRateStorage::load_from_file(path).await.unwrap();
+        assert!(storage.list_all().await.unwrap().is_empty());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn save_writes_atomic_yaml_and_round_trips() {
         let dir = tempdir();
@@ -563,16 +635,33 @@ mod tests {
         assert_eq!(names, vec!["alice".to_owned(), "bob".to_owned()]);
     }
 
+    /// `ensure_default_records` 経由で初期レコードを差し込むテストヘルパ。
+    /// 旧 API（`names + initial_rate + now_iso`）の呼び出し記述を集約し、
+    /// 新 API（`IntoIterator<Item = PlayerRateRecord>`）への移行で
+    /// 各テストの差分を最小化する。
+    fn seed_default_records(
+        storage: &PlayersYamlRateStorage,
+        names: &[&str],
+        initial_rate: i32,
+        now_iso: &str,
+    ) {
+        let defaults = names.iter().map(|n| PlayerRateRecord {
+            name: PlayerName::new(*n),
+            rate: initial_rate,
+            wins: 0,
+            losses: 0,
+            last_game_id: None,
+            last_modified: now_iso.to_owned(),
+        });
+        storage.ensure_default_records(defaults);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn record_game_outcome_increments_winner_and_loser_atomically() {
         let dir = tempdir();
         let path = dir.path().join("players.yaml");
         let storage = PlayersYamlRateStorage::load_from_file(path.clone()).await.unwrap();
-        storage.ensure_default_records(
-            ["alice".to_owned(), "bob".to_owned()],
-            1500,
-            "2026-04-26T00:00:00+00:00",
-        );
+        seed_default_records(&storage, &["alice", "bob"], 1500, "2026-04-26T00:00:00+00:00");
 
         let alice = PlayerName::new("alice");
         let bob = PlayerName::new("bob");
@@ -597,11 +686,7 @@ mod tests {
         let dir = tempdir();
         let path = dir.path().join("players.yaml");
         let storage = PlayersYamlRateStorage::load_from_file(path.clone()).await.unwrap();
-        storage.ensure_default_records(
-            ["alice".to_owned(), "bob".to_owned()],
-            1500,
-            "2026-04-26T00:00:00+00:00",
-        );
+        seed_default_records(&storage, &["alice", "bob"], 1500, "2026-04-26T00:00:00+00:00");
 
         let alice = PlayerName::new("alice");
         let bob = PlayerName::new("bob");
@@ -732,18 +817,41 @@ mod tests {
         storage.save(&rec("alice", 2500, 100, 50)).await.unwrap();
 
         // alice は既に rate=2500/wins=100 で記録済み。ensure_default_records が
-        // これを既定値で上書きしないことを確認。
-        storage.ensure_default_records(
-            ["alice".to_owned(), "bob".to_owned()],
-            1500,
-            "2026-04-26T15:00:00+00:00",
-        );
+        // これを TOML 由来の既定値で上書きしないことを確認。
+        seed_default_records(&storage, &["alice", "bob"], 1500, "2026-04-26T15:00:00+00:00");
         let alice_rec = storage.load(&PlayerName::new("alice")).await.unwrap().unwrap();
         assert_eq!(alice_rec.rate, 2500);
         assert_eq!(alice_rec.wins, 100);
         let bob_rec = storage.load(&PlayerName::new("bob")).await.unwrap().unwrap();
         assert_eq!(bob_rec.rate, 1500);
         assert_eq!(bob_rec.wins, 0);
+    }
+
+    /// **P1 回帰固定**: TOML 由来の `PlayerRateRecord`（rate / wins / losses が
+    /// 1500 以外）が YAML 未登録プレイヤの補填値として実際に使われることを検証する。
+    /// 旧実装は `into_keys()` で名前のみ抽出して固定値 `1500` で補填していたため
+    /// TOML 側の運用値を黙って失う bug があった。新 API では `PlayerRateRecord`
+    /// 全体を受け取るため、未登録分は TOML 値そのままで in-memory 登録される。
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_default_records_uses_toml_rate_wins_losses_for_unseen_players() {
+        let dir = tempdir();
+        let path = dir.path().join("players.yaml");
+        let storage = PlayersYamlRateStorage::load_from_file(path).await.unwrap();
+        // YAML には何もない状態。TOML 側で carol が rate=1800/wins=12/losses=7
+        // と運用されているケースを模倣する。
+        let toml_seed = vec![PlayerRateRecord {
+            name: PlayerName::new("carol"),
+            rate: 1800,
+            wins: 12,
+            losses: 7,
+            last_game_id: None,
+            last_modified: "2026-04-26T15:00:00+00:00".to_owned(),
+        }];
+        storage.ensure_default_records(toml_seed);
+        let carol = storage.load(&PlayerName::new("carol")).await.unwrap().unwrap();
+        assert_eq!(carol.rate, 1800, "TOML rate must be honored for unseen players");
+        assert_eq!(carol.wins, 12, "TOML wins must be honored for unseen players");
+        assert_eq!(carol.losses, 7, "TOML losses must be honored for unseen players");
     }
 
     /// `tempfile` クレートを使わずに済ませるため、テスト専用の薄い RAII
