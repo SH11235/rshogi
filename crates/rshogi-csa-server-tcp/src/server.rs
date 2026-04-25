@@ -226,9 +226,30 @@ pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFe
 /// を [`validate_floodgate_feature_gate`] に通し、要求があるのにフラグが立って
 /// いない場合は `Err` を返して fail-fast する。CLI / バイナリは `build_state`
 /// より前に本関数を呼ぶこと。
+///
+/// あわせて Floodgate 機能の起動引数に対する shape 検証も行う（後段の
+/// `run_schedules` まで未知 strategy 名を運ばずに、起動時点で fail-fast する）。
 pub fn prepare_runtime(config: &ServerConfig) -> Result<(), String> {
     let intent = floodgate_intent_from_config(config);
-    validate_floodgate_feature_gate(config.allow_floodgate_features, intent)
+    validate_floodgate_feature_gate(config.allow_floodgate_features, intent)?;
+    validate_floodgate_schedule_strategies(&config.floodgate_schedules)?;
+    Ok(())
+}
+
+/// `floodgate_schedules` の各エントリの `pairing_strategy` 名が
+/// [`crate::scheduler::build_strategy`] で受理可能かを起動時点で検証する。
+///
+/// `run_schedules` 経路でも `build_strategy` が Err を返すが、その時点では
+/// `prepare_runtime` 通過後 `build_state` も済んでおり、エラーログの読みづらさ
+/// （初期化 panic と区別がつきづらい）が問題になる。本関数で先回り検証する。
+fn validate_floodgate_schedule_strategies(
+    schedules: &[rshogi_csa_server::FloodgateSchedule],
+) -> Result<(), String> {
+    for schedule in schedules {
+        crate::scheduler::build_strategy(&schedule.pairing_strategy)
+            .map_err(|e| format!("schedule {:?}: {}", schedule.game_name, e))?;
+    }
+    Ok(())
 }
 
 /// graceful shutdown 用トリガ。SIGINT / SIGTERM 受信で `trigger` され、
@@ -507,7 +528,7 @@ where
 /// 本関数は使われない。`#[cfg(not(debug_assertions))]` で release ビルド時のみ
 /// 定義することで、`#[allow(dead_code)]` 抑止に頼らずに dead_code 警告を回避する。
 #[cfg(not(debug_assertions))]
-fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         return (*s).to_owned();
     }
@@ -2429,5 +2450,55 @@ mod tests {
         assert!(!floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
         cfg.players_yaml_path = Some(std::path::PathBuf::from("/tmp/players.yaml"));
         assert!(floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
+    }
+
+    /// `floodgate_intent_from_config` が `floodgate_schedules` の非空で
+    /// `enable_scheduler` を立てることを直接固定。
+    #[test]
+    fn floodgate_intent_reflects_floodgate_schedules() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        assert!(!floodgate_intent_from_config(&cfg).enable_scheduler);
+        cfg.floodgate_schedules.push(rshogi_csa_server::FloodgateSchedule {
+            game_name: "floodgate-600-10".to_owned(),
+            weekday: rshogi_csa_server::FloodgateWeekday::Mon,
+            hour: 9,
+            minute: 0,
+            pairing_strategy: "direct".to_owned(),
+        });
+        assert!(floodgate_intent_from_config(&cfg).enable_scheduler);
+    }
+
+    /// `prepare_runtime` が `floodgate_schedules` の `pairing_strategy` を
+    /// 起動時点で検証する契約を固定。未知 strategy 名は run_schedules 経路に
+    /// 持ち込まれず、起動時点で fail-fast する（gate 通過後の後段失敗ではなく）。
+    #[test]
+    fn prepare_runtime_rejects_unknown_pairing_strategy() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        cfg.allow_floodgate_features = true;
+        cfg.floodgate_schedules.push(rshogi_csa_server::FloodgateSchedule {
+            game_name: "floodgate-600-10".to_owned(),
+            weekday: rshogi_csa_server::FloodgateWeekday::Mon,
+            hour: 9,
+            minute: 0,
+            pairing_strategy: "least_diff".to_owned(),
+        });
+        let err = prepare_runtime(&cfg).expect_err("unknown strategy must fail-fast");
+        assert!(err.contains("least_diff"), "error must mention strategy: {err}");
+        assert!(err.contains("floodgate-600-10"), "error must mention schedule: {err}");
+    }
+
+    /// `prepare_runtime` が `direct` strategy を accept することを固定。
+    #[test]
+    fn prepare_runtime_accepts_direct_pairing_strategy() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        cfg.allow_floodgate_features = true;
+        cfg.floodgate_schedules.push(rshogi_csa_server::FloodgateSchedule {
+            game_name: "floodgate-600-10".to_owned(),
+            weekday: rshogi_csa_server::FloodgateWeekday::Mon,
+            hour: 9,
+            minute: 0,
+            pairing_strategy: "direct".to_owned(),
+        });
+        prepare_runtime(&cfg).expect("direct strategy must pass prepare_runtime");
     }
 }

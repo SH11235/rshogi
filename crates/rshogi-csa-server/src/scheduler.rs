@@ -20,7 +20,6 @@
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc, Weekday as ChronoWeekday};
 use serde::{Deserialize, Serialize};
 
-use crate::game::clock::ClockSpec;
 use crate::types::GameName;
 
 /// 曜日（Floodgate スケジュールの宣言で使う）。
@@ -91,11 +90,15 @@ pub struct FloodgateSchedule {
     pub hour: u8,
     /// 発火時刻の分（0..=59、UTC）。
     pub minute: u8,
-    /// 対局で使う時計方式。
-    pub clock: ClockSpec,
     /// ペアリング戦略名。`"direct"` をフロントエンドが認識し、Floodgate 系の
     /// 追加戦略は別タスクで配線する。未知の名前は起動時 `Err`。
     pub pairing_strategy: String,
+    // NOTE: per-schedule の時計（`ClockSpec`）は本タスクの範囲外。スケジュール
+    // 起動の対局は `state.config.clock`（global）を使う。スケジュール毎に異なる
+    // 時計を実現するには `drive_game` のシグネチャに `ClockSpec` を追加する
+    // 侵襲的な改修が必要になるため、必要になった時点で別タスクで対応する。
+    // 不要なフィールドを「parse はするけど無視する」silent drop は YAGNI 違反な
+    // ので意図的に省く（field を持たないことで利用者の誤解を防ぐ）。
 }
 
 impl FloodgateSchedule {
@@ -179,7 +182,6 @@ mod tests {
             weekday,
             hour,
             minute,
-            clock: ClockSpec::default(),
             pairing_strategy: "direct".to_owned(),
         }
     }
@@ -253,10 +255,6 @@ mod tests {
             weekday: Weekday::Wed,
             hour: 9,
             minute: 30,
-            clock: ClockSpec::Countdown {
-                total_time_sec: 600,
-                byoyomi_sec: 10,
-            },
             pairing_strategy: "direct".to_owned(),
         };
         // GameName アクセサが正しく newtype 変換することも確認。
@@ -268,9 +266,37 @@ mod tests {
         );
         assert!(toml_text.contains("weekday = \"Wed\""), "toml shape: {toml_text}");
         assert!(toml_text.contains("pairing_strategy = \"direct\""));
-        assert!(toml_text.contains("kind = \"countdown\""));
         let parsed: FloodgateSchedule = toml::from_str(&toml_text).unwrap();
         assert_eq!(parsed, s);
+    }
+
+    /// 月末跨ぎ: 2026-04-30 (Thu) 23:30 UTC の時点で「Fri 00:00」を狙うと、
+    /// 2026-05-01 (Fri) 00:00 UTC（日数 +1、月またぎ）。
+    #[test]
+    fn next_fire_handles_month_rollover() {
+        let s = schedule(Weekday::Fri, 0, 0);
+        let now = dt(2026, 4, 30, 23, 30);
+        let next = s.next_fire_after(now);
+        assert_eq!(next, dt(2026, 5, 1, 0, 0));
+    }
+
+    /// 閏年跨ぎ: 2024-02-28 (Wed) 12:00 UTC の時点で「Sat 00:00」を狙うと、
+    /// 閏日 2024-02-29 (Thu) を経て 2024-03-02 (Sat) 00:00 UTC。
+    #[test]
+    fn next_fire_handles_leap_day_rollover() {
+        let s = schedule(Weekday::Sat, 0, 0);
+        let now = dt(2024, 2, 28, 12, 0);
+        let next = s.next_fire_after(now);
+        assert_eq!(next, dt(2024, 3, 2, 0, 0));
+    }
+
+    /// 閏年の 2-29 (Thu) 自身を起点にしたケース。「Thu 23:00」を狙うと同日 23:00。
+    #[test]
+    fn next_fire_handles_leap_day_as_origin() {
+        let s = schedule(Weekday::Thu, 23, 0);
+        let now = dt(2024, 2, 29, 12, 0);
+        let next = s.next_fire_after(now);
+        assert_eq!(next, dt(2024, 2, 29, 23, 0));
     }
 
     #[test]

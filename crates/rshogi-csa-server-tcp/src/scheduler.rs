@@ -44,6 +44,8 @@ use tokio::sync::oneshot;
 
 use crate::server::{MatchRequest, PasswordStore, SharedState, WaitingSlot, drive_game};
 use crate::transport::TcpTransport;
+use rshogi_csa_server::ClientTransport;
+use rshogi_csa_server::types::CsaLine;
 
 /// `tokio::time::sleep_until` ベースの `FloodgateTimer` 実装。
 ///
@@ -107,6 +109,47 @@ where
 }
 
 async fn run_one_schedule<R, K, P, T>(
+    state: Rc<SharedState<R, K, P>>,
+    schedule: FloodgateSchedule,
+    strategy: Box<dyn PairingLogic>,
+    timer: T,
+) where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    T: FloodgateTimer + 'static,
+{
+    // release ビルドでは scheduler ループ全体を `catch_unwind` で囲み、`fire_schedule`
+    // 内で起きた panic がこのスケジュールタスクを静かに殺すのを防ぐ。catch 後は
+    // `tracing::error!` で記録してタスクは終了させる（再 spawn は YAGNI）。debug
+    // ビルドでは透過させて契約違反を顕在化させる（CLAUDE.md 「契約違反は panic」
+    // 方針）。`AssertUnwindSafe` の根拠は `run_connection_isolated` と同様で、
+    // SharedState の可変フィールドは Mutex / Atomic / Notify で構成されており、
+    // `drive_game` 側の `DriveGuard` Drop で in-flight 状態は巻き戻る。
+    #[cfg(debug_assertions)]
+    {
+        run_one_schedule_loop(state, schedule, strategy, timer).await;
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        use futures_util::FutureExt;
+        let game_name_for_log = schedule.game_name.clone();
+        let fut =
+            std::panic::AssertUnwindSafe(run_one_schedule_loop(state, schedule, strategy, timer));
+        match fut.catch_unwind().await {
+            Ok(()) => {}
+            Err(payload) => {
+                tracing::error!(
+                    game_name = %game_name_for_log,
+                    panic_payload = %crate::server::panic_payload_to_string(payload.as_ref()),
+                    "scheduler task panicked; isolated to this schedule"
+                );
+            }
+        }
+    }
+}
+
+async fn run_one_schedule_loop<R, K, P, T>(
     state: Rc<SharedState<R, K, P>>,
     schedule: FloodgateSchedule,
     strategy: Box<dyn PairingLogic>,
@@ -189,6 +232,11 @@ pub(crate) async fn fire_schedule<R, K, P>(
             preferred_color: Some(s.color),
         })
         .collect();
+    // 注: 現在配線されている戦略 [`DirectMatchStrategy`] は最初に見つかった
+    // 1 ペアだけを返す（複数ペア成立は未対応）。`pairs.len()` を引数に下流処理
+    // を組んでいるが、`"direct"` 経由では最大 1 ペアに収束する。複数ペア対応
+    // は Floodgate の `"least_diff"` 戦略を入れるタスクで multi-pair 対応戦略を
+    // 追加して切り替える想定。
     let pairs = strategy.try_pair(&candidates);
     tracing::info!(
         game_name = %schedule.game_name,
@@ -249,6 +297,15 @@ pub(crate) async fn fire_schedule<R, K, P>(
 /// `spawn_local` で起動する。`drive_game` は片方の waiter（black）の done_tx を
 /// 消費して終局通知するので、もう片方（white）の done_tx は本関数が drive 完了
 /// 後に手動で signal する。
+///
+/// 異常系（handoff 失敗 / transport recv 失敗）では:
+/// - 既に確定した側の transport は `##[ERROR]` 通知してから close
+/// - **両 player を `League` から logout**（`drain_for_game_name` で WaitingPool
+///   からは除去済みなので、League を生で残すと再 LOGIN が `AlreadyLoggedIn` で
+///   弾かれる leak になるため）
+/// - drop により残った oneshot は recv Err になり、surviving waiter は
+///   `WaiterOutcome::Completed` 経路で抜ける（drive_game に到達していないため
+///   logout は本関数が代行する）
 async fn spawn_scheduled_drive<R, K, P>(
     state: Rc<SharedState<R, K, P>>,
     game_name: GameName,
@@ -286,22 +343,33 @@ async fn spawn_scheduled_drive<R, K, P>(
             white_alive = w_handoff_ok,
             "scheduled match handoff failed (waiter disconnected before handoff)"
         );
-        // 残った transport_responder / done_tx は drop により waiter が
-        // recv エラーで起床し、`run_waiter` 内のリカバリ経路で再キューされる。
+        // WaitingPool からは drain 済みで、drive_game にも到達していないので
+        // League エントリは本関数が責任を持って除去する。
+        logout_pair(&state, &black_handle, &white_handle).await;
         return;
     }
 
-    // 両 waiter から transport を吸い上げる。`recv` 失敗（waiter 直後切断）時は
-    // 残った片側の done_tx を drop して waiter を起こし、リカバリさせる。
+    // 両 waiter から transport を吸い上げる。`recv` 失敗（waiter 直後切断）時は:
+    // - 確定した側の transport には `##[ERROR]` 通知を送って drop（無音切断回避）
+    // - 双方とも League から logout（drive_game に到達しないため孤児化防止）
     let (b_transport, w_transport) = match (b_resp_rx.await, w_resp_rx.await) {
         (Ok(b), Ok(w)) => (b, w),
-        (Ok(_), Err(_)) | (Err(_), Ok(_)) | (Err(_), Err(_)) => {
+        (got_black, got_white) => {
             tracing::warn!(
                 game_name = %game_name.as_str(),
                 black = %black_handle,
                 white = %white_handle,
-                "scheduled match handoff: transport recv failed; aborting drive spawn"
+                black_recv_ok = got_black.is_ok(),
+                white_recv_ok = got_white.is_ok(),
+                "scheduled match handoff: transport recv failed; aborting"
             );
+            if let Ok(mut surviving) = got_black {
+                notify_aborted_match(&mut surviving, &game_name).await;
+            }
+            if let Ok(mut surviving) = got_white {
+                notify_aborted_match(&mut surviving, &game_name).await;
+            }
+            logout_pair(&state, &black_handle, &white_handle).await;
             return;
         }
     };
@@ -338,9 +406,28 @@ async fn spawn_scheduled_drive<R, K, P>(
             );
         }
     });
+}
 
-    // ペアリング選好で「ここまでで未消費の handle 文字列」を log に残しておく。
-    let _ = (black_handle, white_handle); // 既に閉じ込め済みだが、move 検証用。
+/// abort 経路で確定した transport に対し、`##[ERROR]` 通知を 1 行送ってから
+/// 接続を閉じる。送信失敗（既に切断済み等）は best-effort で無視する。
+async fn notify_aborted_match(transport: &mut TcpTransport, game_name: &GameName) {
+    let line = CsaLine::new(format!(
+        "##[ERROR] scheduled match aborted: opponent disconnected for {game_name}"
+    ));
+    let _ = transport.send_line(&line).await;
+}
+
+/// `drain_for_game_name` で WaitingPool から取り出した両 player を League から
+/// logout する。drive_game に到達できなかった経路で必ず呼ぶ（League 孤児化防止）。
+async fn logout_pair<R, K, P>(state: &SharedState<R, K, P>, black: &str, white: &str)
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let mut league = state.league.lock().await;
+    league.logout(&PlayerName::new(black));
+    league.logout(&PlayerName::new(white));
 }
 
 #[cfg(test)]
