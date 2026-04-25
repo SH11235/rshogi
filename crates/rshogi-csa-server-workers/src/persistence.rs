@@ -100,20 +100,6 @@ pub enum ReplaySummary {
         /// `CoreRoom::new` が返したエラー文字列。
         reason: String,
     },
-    /// `play_started_at_ms` 後の AGREE 再送が失敗した（不変条件違反）。
-    ///
-    /// 本 variant は防御的に置いてある。`CoreRoom::new` 直後は必ず
-    /// `AgreeWaiting` で、そこから AGREE を流すと `Continue` を返す契約のため、
-    /// 実装が壊れない限り発火しない。テスト経路から自然に発火させる経路は
-    /// 用意していないが、Core 側のリファクタで AGREE handling が変わった際に
-    /// panic ではなく console_log で運用に痕跡を残すため variant を残す。
-    #[allow(dead_code)]
-    AgreeReplayFailed {
-        /// AGREE を送った色（先後どちらの再送で詰まったか）。
-        color: Color,
-        /// `handle_line` のエラー文字列。
-        reason: String,
-    },
     /// `MoveRow::color` が `"black"` / `"white"` 以外の不明値だった。
     UnknownColor {
         /// 該当 row の `ply`。
@@ -178,13 +164,14 @@ pub fn replay_core_room(cfg: &PersistedConfig, moves: &[MoveRow]) -> ReplaySumma
         };
     };
 
+    // `CoreRoom::new` 直後は必ず `AgreeWaiting` 状態で、そこから game_id 省略の
+    // AGREE を流すと `verify_game_id(None)` を素通りして `Continue` を返す契約。
+    // 失敗するのは Core 側の状態機械が崩れている契約違反ケースのみで、この場合
+    // 永続化レイヤから先に進めても整合性が取れないため `expect` で落として
+    // bug を顕在化させる。
     for color in [Color::Black, Color::White] {
-        if let Err(e) = core.handle_line(color, &CsaLine::new("AGREE"), play_started_at_ms) {
-            return ReplaySummary::AgreeReplayFailed {
-                color,
-                reason: format!("{e:?}"),
-            };
-        }
+        core.handle_line(color, &CsaLine::new("AGREE"), play_started_at_ms)
+            .expect("CoreRoom::new returns AgreeWaiting; AGREE from there must succeed");
     }
 
     for m in moves {

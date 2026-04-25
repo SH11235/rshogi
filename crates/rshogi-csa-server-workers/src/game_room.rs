@@ -1119,9 +1119,6 @@ impl GameRoom {
             ReplaySummary::InvalidSfen { reason } => {
                 console_log!("[GameRoom] replay CoreRoom::new failed: {reason}");
             }
-            ReplaySummary::AgreeReplayFailed { color, reason } => {
-                console_log!("[GameRoom] replay AGREE failed (color={color:?}): {reason}");
-            }
             ReplaySummary::UnknownColor { ply, color } => {
                 console_log!("[GameRoom] replay: unknown color '{color}' at ply={ply}");
             }
