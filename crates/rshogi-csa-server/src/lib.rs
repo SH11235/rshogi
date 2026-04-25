@@ -49,6 +49,10 @@ pub use storage::buoy::FileBuoyStorage;
 #[cfg(feature = "tokio-transport")]
 pub use storage::file::FileKifuStorage;
 #[cfg(feature = "tokio-transport")]
+pub use storage::floodgate_history::{
+    FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryColor, JsonlFloodgateHistoryStorage,
+};
+#[cfg(feature = "tokio-transport")]
 pub use storage::players_yaml::PlayersYamlRateStorage;
 pub use types::{
     AdminId, Color, CsaLine, CsaMoveToken, GameId, GameName, IpKey, PlayerName, ReconnectToken,

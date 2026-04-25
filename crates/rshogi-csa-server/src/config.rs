@@ -20,6 +20,10 @@ pub struct FloodgateFeatureIntent {
     /// 有効化する意図。`PlayersYamlRateStorage` を起動時に読み込み、終局時に
     /// 書き戻す経路を本フラグで gate する。
     pub enable_persistent_player_rates: bool,
+    /// Floodgate 履歴（開始時刻・ペア・結果）を再起動跨ぎで参照可能に永続化
+    /// する経路を有効化する意図。`JsonlFloodgateHistoryStorage` を起動時に
+    /// 構築し、終局時に append する経路を本フラグで gate する。
+    pub enable_floodgate_history: bool,
 }
 
 /// 真偽文字列から Floodgate 機能 gate を解決する。
@@ -71,6 +75,9 @@ pub fn validate_floodgate_feature_gate(
     }
     if intent.enable_persistent_player_rates {
         requested.push("persistent_player_rates");
+    }
+    if intent.enable_floodgate_history {
+        requested.push("floodgate_history");
     }
     if requested.is_empty() || allow_floodgate_features {
         return Ok(());
@@ -152,6 +159,7 @@ mod tests {
                 use_non_direct_pairing: true,
                 enable_duplicate_login_policy: true,
                 enable_persistent_player_rates: true,
+                enable_floodgate_history: true,
             },
         )
         .unwrap_err();
@@ -159,6 +167,20 @@ mod tests {
         assert!(err.contains("non_direct_pairing"));
         assert!(err.contains("duplicate_login_policy"));
         assert!(err.contains("persistent_player_rates"));
+        assert!(err.contains("floodgate_history"));
+    }
+
+    #[test]
+    fn floodgate_gate_rejects_floodgate_history_when_disabled() {
+        let err = validate_floodgate_feature_gate(
+            false,
+            FloodgateFeatureIntent {
+                enable_floodgate_history: true,
+                ..FloodgateFeatureIntent::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("floodgate_history"));
     }
 
     #[test]
