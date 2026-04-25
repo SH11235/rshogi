@@ -25,8 +25,8 @@ use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
 use rshogi_csa_server_tcp::server::{
-    InMemoryPasswordStore, PasswordStore, ServerConfig, SharedState, build_state, prepare_runtime,
-    run_server,
+    DuplicateLoginPolicy, InMemoryPasswordStore, PasswordStore, ServerConfig, SharedState,
+    build_state, prepare_runtime, run_server,
 };
 use tokio::sync::Mutex;
 
@@ -68,6 +68,15 @@ struct Cli {
     /// opt-in が必須。
     #[arg(long, value_name = "PATH")]
     floodgate_history_jsonl: Option<PathBuf>,
+    /// 駒落ち初期局面 TOML パス。`[[handicap]]` 配列で `game_name` と `sfen`
+    /// を複数指定できる。指定すると当該 `game_name` の対局が SFEN 開始になる。
+    #[arg(long, value_name = "PATH")]
+    handicap_toml: Option<PathBuf>,
+    /// 同名ログイン重複時に旧セッションを evict する（既定は新接続を拒否）。
+    /// `--allow-floodgate-features` opt-in が必須。`AgreeWaiting` 以降の
+    /// 対局進行中セッションは evict されず新接続を拒否する。
+    #[arg(long, default_value_t = false)]
+    duplicate_login_evict_old: bool,
     /// 秒読み方式 / Fischer 方式で使う持ち時間 (秒)。
     #[arg(long, default_value_t = 600)]
     total_time_sec: u32,
@@ -201,6 +210,14 @@ fn main() -> anyhow::Result<()> {
         Vec::new()
     };
 
+    // 駒落ち初期局面 TOML を読み込む（指定時のみ）。
+    let handicap_map: HashMap<String, String> = if let Some(path) = cli.handicap_toml.as_ref() {
+        load_handicap_toml(path)
+            .with_context(|| format!("failed to load handicap TOML at {path:?}"))?
+    } else {
+        HashMap::new()
+    };
+
     // 2. ServerConfig を構築。
     let config = ServerConfig {
         bind_addr,
@@ -226,6 +243,12 @@ fn main() -> anyhow::Result<()> {
         players_yaml_path: cli.players_yaml.clone(),
         floodgate_schedules,
         floodgate_history_path: cli.floodgate_history_jsonl.clone(),
+        handicap_initial_sfens: handicap_map,
+        duplicate_login_policy: if cli.duplicate_login_evict_old {
+            DuplicateLoginPolicy::EvictOld
+        } else {
+            DuplicateLoginPolicy::RejectNew
+        },
         shutdown_grace: std::time::Duration::from_secs(cli.shutdown_grace_sec),
     };
     // Floodgate 系機能の opt-in ゲートを起動前に評価する。`players_yaml_path` が
@@ -488,6 +511,31 @@ fn load_players_toml(
         );
     }
     Ok((password_map, rate_map))
+}
+
+/// 駒落ち初期局面 TOML を読む。
+///
+/// 期待する形式:
+/// ```toml
+/// [[handicap]]
+/// game_name = "floodgate-handicap-kakkin"
+/// sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
+/// ```
+fn load_handicap_toml(path: &std::path::Path) -> anyhow::Result<HashMap<String, String>> {
+    use serde::Deserialize;
+    #[derive(Debug, Deserialize)]
+    struct Entry {
+        game_name: String,
+        sfen: String,
+    }
+    #[derive(Debug, Deserialize)]
+    struct Root {
+        #[serde(default)]
+        handicap: Vec<Entry>,
+    }
+    let raw = std::fs::read_to_string(path)?;
+    let root: Root = toml::from_str(&raw)?;
+    Ok(root.handicap.into_iter().map(|e| (e.game_name, e.sfen)).collect())
 }
 
 /// Floodgate スケジュール TOML を読む。

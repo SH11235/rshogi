@@ -164,6 +164,20 @@ pub struct ServerConfig {
     /// Floodgate 運用機能の一つ (`enable_floodgate_history`) として
     /// `--allow-floodgate-features` opt-in を要求する。
     pub floodgate_history_path: Option<std::path::PathBuf>,
+    /// 駒落ち（特定 `game_name` で平手以外の初期局面を使う）マッピング。
+    /// キー: CSA `game_name` 文字列、値: SFEN 表記の初期局面。`reserve_match_initial_position`
+    /// が buoy 残数チェック前に本マップを参照し、該当 `game_name` の対局を
+    /// 指定 SFEN 開始にする。空 `HashMap` の場合は全対局が global の
+    /// `initial_sfen`（通常 `None` = 平手）を使う。
+    pub handicap_initial_sfens: std::collections::HashMap<String, String>,
+    /// 同一プレイヤ名の重複ログイン処理ポリシー。既定は `RejectNew`（既存
+    /// セッションを保護）。`EvictOld` を指定すると、既存セッションを League
+    /// から logout し、待機プールから slot を除去してから新接続の LOGIN を
+    /// 受理する（現状は `Connected` / `GameWaiting` 状態のみ evict 対象。
+    /// `AgreeWaiting` 以降は対局進行中なので evict せず new connection を拒否）。
+    /// `EvictOld` は Floodgate 運用機能扱いで、`--allow-floodgate-features`
+    /// opt-in が必須。
+    pub duplicate_login_policy: DuplicateLoginPolicy,
     /// SIGINT / SIGTERM 受信後に進行中対局の終了を待つ上限。超過分は未完了の
     /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
     /// を落とさない」ためのバッファで、既定 60 秒。
@@ -189,6 +203,8 @@ impl ServerConfig {
             players_yaml_path: None,
             floodgate_schedules: Vec::new(),
             floodgate_history_path: None,
+            handicap_initial_sfens: std::collections::HashMap::new(),
+            duplicate_login_policy: DuplicateLoginPolicy::RejectNew,
             shutdown_grace: Duration::from_secs(60),
         }
     }
@@ -225,8 +241,28 @@ pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFe
         enable_scheduler: !config.floodgate_schedules.is_empty(),
         // Floodgate 履歴 JSONL も Floodgate 系運用機能。`Some` で opt-in 要求。
         enable_floodgate_history: config.floodgate_history_path.is_some(),
+        // 重複ログインの `EvictOld` は Floodgate 運用機能扱い。`RejectNew`
+        // (既定) は通常の保護方針なので opt-in 不要、`EvictOld` のみ要求する。
+        enable_duplicate_login_policy: matches!(
+            config.duplicate_login_policy,
+            DuplicateLoginPolicy::EvictOld
+        ),
         ..FloodgateFeatureIntent::default()
     }
+}
+
+/// 同一プレイヤ名の重複ログインに対する処理ポリシー。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DuplicateLoginPolicy {
+    /// 新接続を `LOGIN:incorrect already_logged_in` で拒否する（既定）。
+    /// 既存セッションを保護する保守的な挙動。
+    #[default]
+    RejectNew,
+    /// 既存セッションを League から logout し、待機プールから slot を除去
+    /// してから新接続の LOGIN を受理する。`AgreeWaiting` 以降の状態（対局
+    /// 進行中のセッション）は evict せず、新接続を拒否する（in-game の対局を
+    /// 中断させない安全側挙動）。
+    EvictOld,
 }
 
 /// 起動前に opt-in ゲートを評価する。
@@ -770,7 +806,53 @@ where
     //    （shogi-server 互換の運用）。観戦専用で接続したいクライアントは
     //    `%%MONITOR2ON` 経路（後続のコミットで追加）を使う。
     {
+        // EvictOld ポリシー: 既存セッションが `Connected` / `GameWaiting` 状態
+        // の場合は logout して新接続にリプレイス。`AgreeWaiting` / `StartWaiting`
+        // / `InGame` は対局進行中なので evict せず、新接続を `AlreadyLoggedIn`
+        // で拒否（対局中断による棋譜破損を防ぐ）。
+        let evicted_game_name: Option<GameName> = {
+            let league = state.league.lock().await;
+            match (state.config.duplicate_login_policy, league.status(&handle_player)) {
+                (
+                    DuplicateLoginPolicy::EvictOld,
+                    Some(PlayerStatus::Connected | PlayerStatus::GameWaiting { .. }),
+                ) => {
+                    // GameWaiting なら `game_name` を取り出して WaitingPool 除去用に保持。
+                    if let Some(PlayerStatus::GameWaiting { game_name: gn, .. }) =
+                        league.status(&handle_player)
+                    {
+                        Some(gn.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+        if state.config.duplicate_login_policy == DuplicateLoginPolicy::EvictOld
+            && let Some(old_game_name) = evicted_game_name.as_ref()
+        {
+            let mut pool = state.waiting.lock().await;
+            pool.remove_by_handle(old_game_name, handle_player.as_str());
+        }
         let mut league = state.league.lock().await;
+        if state.config.duplicate_login_policy == DuplicateLoginPolicy::EvictOld
+            && league.status(&handle_player).is_some()
+        {
+            // 上のスナップショット時点で `Connected` / `GameWaiting` だったケースのみ
+            // logout する。`AgreeWaiting` 以降は status が None じゃないが evict
+            // しない方針なので、状態を再確認して in-game ならこのブロックを抜ける。
+            match league.status(&handle_player) {
+                Some(PlayerStatus::Connected | PlayerStatus::GameWaiting { .. }) => {
+                    league.logout(&handle_player);
+                    tracing::info!(
+                        player = %handle_player.as_str(),
+                        "evicted old session due to duplicate login (EvictOld policy)"
+                    );
+                }
+                _ => { /* AgreeWaiting / StartWaiting / InGame: keep old, reject new below */ }
+            }
+        }
         match league.login(&handle_player, x1) {
             LoginResult::Ok { .. } => {}
             LoginResult::AlreadyLoggedIn => {
@@ -1504,6 +1586,12 @@ where
         .await
         .map_err(ServerError::Storage)?
     else {
+        // buoy 未設定。駒落ちマッピングに該当エントリがあれば優先し、無ければ
+        // global 既定値（通常 `None` = 平手）に落ちる。駒落ちは buoy のように
+        // 残数を消費しない常設の `game_name` → SFEN 静的マッピング。
+        if let Some(handicap_sfen) = state.config.handicap_initial_sfens.get(game_name.as_str()) {
+            return Ok(MatchInitialPosition::Default(Some(handicap_sfen.clone())));
+        }
         return Ok(MatchInitialPosition::Default(state.config.initial_sfen.clone()));
     };
     if buoy.remaining == 0 {
