@@ -15,6 +15,11 @@ thiserror.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `LeastDiffPairingStrategy` の試行回数ベース最適化で seed 可能 PRNG を使う。
+# `rand` の `SliceRandom::shuffle` を使うため `rand` 本体も入れる。`rand_xoshiro`
+# は cryptographic 強度不要・速度重視・seed 可で本用途に合う。
+rand = { workspace = true }
+rand_xoshiro = { workspace = true }
 # Ruby shogi-server 互換 `players.yaml` の読み書きで使用する。実装本体は
 # `tokio-transport` 配下の `storage::players_yaml` のみが触れるため、wasm32
 # (workers) ビルドに不要な依存が入らないよう optional + `tokio-transport` 連動で

@@ -31,7 +31,7 @@ pub use game::room::{
 pub use game::run_loop::run_room;
 pub use game::validator::{KachiOutcome, RepetitionVerdict, Validator, Violation};
 pub use matching::league::{League, LoginResult, MatchedPair, PairingCandidate, PlayerStatus};
-pub use matching::pairing::{DirectMatchStrategy, PairingLogic};
+pub use matching::pairing::{DirectMatchStrategy, LeastDiffPairingStrategy, PairingLogic};
 pub use matching::registry::{GameListing, GameRegistry};
 pub use port::{
     BroadcastTag, Broadcaster, BuoyStorage, ClientTransport, KifuStorage, RateDecision, RateStorage,

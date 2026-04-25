@@ -37,7 +37,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use rshogi_csa_server::matching::pairing::{DirectMatchStrategy, PairingLogic};
+use rshogi_csa_server::matching::pairing::{
+    DirectMatchStrategy, LeastDiffPairingStrategy, PairingLogic,
+};
 use rshogi_csa_server::scheduler::{FloodgateSchedule, FloodgateTimer};
 use rshogi_csa_server::types::{Color, GameName, PlayerName};
 use rshogi_csa_server::{KifuStorage, PairingCandidate, RateStorage};
@@ -46,6 +48,7 @@ use tokio::sync::oneshot;
 use crate::server::{MatchRequest, PasswordStore, SharedState, WaitingSlot, drive_game};
 use crate::transport::TcpTransport;
 use rshogi_csa_server::ClientTransport;
+use rshogi_csa_server::FloodgateHistoryStorage;
 use rshogi_csa_server::types::CsaLine;
 
 /// Floodgate 定刻発火で waiter から transport を回収する際の最大待機時間。
@@ -106,13 +109,20 @@ impl FloodgateTimer for TokioFloodgateTimer {
 
 /// `pairing_strategy` 文字列からペアリング戦略インスタンスを構築する。
 ///
-/// `"direct"` のみ本タスクで配線する。`"least_diff"` 等の Floodgate 系戦略は
-/// 別タスクで `Box<dyn PairingLogic>` 化するクロージャを足す形で拡張する。
-/// 未知の名前は起動時に `Err` で fail-fast する（`run_schedules` 経由で）。
+/// 受理する戦略名:
+/// - `"direct"`: 1 ペアだけ返す[`DirectMatchStrategy`]（相補手番の最初の組）
+/// - `"least_diff"`: レート差・連戦ペナルティを最小化する
+///   [`LeastDiffPairingStrategy`]（既定試行 300 回）
+///
+/// 未知の名前は起動時に `Err` で fail-fast する（`prepare_runtime` の
+/// `validate_floodgate_schedule_strategies` から事前検証経由でも呼ばれる）。
 pub(crate) fn build_strategy(name: &str) -> Result<Box<dyn PairingLogic>, String> {
     match name {
         "direct" => Ok(Box::new(DirectMatchStrategy)),
-        other => Err(format!("unknown pairing_strategy {other:?}; supported: \"direct\"")),
+        "least_diff" => Ok(Box::new(LeastDiffPairingStrategy::new())),
+        other => Err(format!(
+            "unknown pairing_strategy {other:?}; supported: \"direct\" / \"least_diff\""
+        )),
     }
 }
 
@@ -263,19 +273,62 @@ pub(crate) async fn fire_schedule<R, K, P>(
         return;
     }
 
-    // 2. PairingCandidate に変換して戦略を回す。
-    let candidates: Vec<PairingCandidate> = drained
-        .iter()
-        .map(|s| PairingCandidate {
-            name: PlayerName::new(&s.handle),
-            preferred_color: Some(s.color),
-        })
-        .collect();
-    // 注: 現在配線されている戦略 [`DirectMatchStrategy`] は最初に見つかった
-    // 1 ペアだけを返す（複数ペア成立は未対応）。`pairs.len()` を引数に下流処理
-    // を組んでいるが、`"direct"` 経由では最大 1 ペアに収束する。複数ペア対応
-    // は Floodgate の `"least_diff"` 戦略を入れるタスクで multi-pair 対応戦略を
-    // 追加して切り替える想定。
+    // 2. PairingCandidate に変換: rate と recent_opponents は外部ストレージ
+    //    から事前取得して埋める（`LeastDiffPairingStrategy` 等が消費する）。
+    //    DirectMatchStrategy は両フィールドを無視するので、prefetch コストは
+    //    実質 N 回の cache lookup（PlayersYamlRateStorage は in-memory cache）
+    //    + 1 回の history read で済む（fire_schedule あたり 1 回）。
+    let recent_opponents_by_handle: HashMap<String, Vec<String>> = {
+        let mut by_handle: HashMap<String, Vec<String>> = HashMap::new();
+        if let Some(history) = state.history_storage.as_ref() {
+            // 直近 50 件まで読む（連戦ペナルティ判定に十分。長すぎると false
+            // positive で「2 週間前の対戦相手も連戦扱い」になる）。
+            match history.list_recent(50).await {
+                Ok(entries) => {
+                    for e in entries {
+                        by_handle.entry(e.black.clone()).or_default().push(e.white.clone());
+                        by_handle.entry(e.white.clone()).or_default().push(e.black.clone());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to read floodgate history for back-to-back penalty; \
+                         continuing with empty history (penalty disabled for this fire)"
+                    );
+                }
+            }
+        }
+        by_handle
+    };
+    let mut candidates: Vec<PairingCandidate> = Vec::with_capacity(drained.len());
+    for slot in drained.iter() {
+        let name = PlayerName::new(&slot.handle);
+        let rate = match state.rate_storage.load(&name).await {
+            Ok(Some(rec)) => Some(rec.rate),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    handle = %slot.handle,
+                    error = %e,
+                    "failed to load rate for scheduled candidate; using default for pairing"
+                );
+                None
+            }
+        };
+        let recent_opponents =
+            recent_opponents_by_handle.get(&slot.handle).cloned().unwrap_or_default();
+        candidates.push(PairingCandidate {
+            name,
+            preferred_color: Some(slot.color),
+            rate,
+            recent_opponents,
+        });
+    }
+    // 注: `DirectMatchStrategy` は最初に見つかった 1 ペアだけを返す（complementary
+    // 手番の最小ペア）。`LeastDiffPairingStrategy` は最大 N/2 ペアを返す
+    // multi-pair 戦略。`pairs.len()` を引数に下流処理を組んでいるので、戦略実装
+    // が単発でも複数ペアでも同じ経路を通る。
     let pairs = strategy.try_pair(&candidates);
     tracing::info!(
         game_name = %schedule.game_name,
@@ -528,19 +581,20 @@ where
 mod tests {
     use super::*;
 
-    /// `build_strategy` が `"direct"` を受理し、その他はエラーにする契約を固定。
-    /// 15.2 で `"least_diff"` 等を追加するときに本テストを更新する。
+    /// `build_strategy` が `"direct"` / `"least_diff"` を受理し、その他は
+    /// エラーにする契約を固定。新しい戦略を追加するときに本テストを更新する。
     #[test]
-    fn build_strategy_accepts_direct_and_rejects_unknown() {
+    fn build_strategy_accepts_known_strategies_and_rejects_unknown() {
         // `dyn PairingLogic` は Debug 非実装なので `unwrap` ベースのアサートは
         // 通らない。match で取り出して name() を確認する。
         match build_strategy("direct") {
             Ok(s) => assert_eq!(s.name(), "direct"),
             Err(e) => panic!("direct must be accepted, got Err: {e}"),
         }
-
-        let err = expect_err(build_strategy("least_diff"));
-        assert!(err.contains("least_diff"), "error must mention input: {err}");
+        match build_strategy("least_diff") {
+            Ok(s) => assert_eq!(s.name(), "least_diff"),
+            Err(e) => panic!("least_diff must be accepted, got Err: {e}"),
+        }
 
         let err = expect_err(build_strategy("unknown"));
         assert!(err.contains("\"unknown\""));
