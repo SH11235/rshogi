@@ -69,17 +69,29 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     force_schedule: bool,
 
-    /// 反復統計CSVの出力先（resume時は追記）
+    /// 反復統計CSVの出力先（resume時は追記）。既定: <params>.stats.csv
     #[arg(long)]
     stats_csv: Option<PathBuf>,
 
-    /// 反復統計のseed横断集計CSV（平均・分散）
+    /// 反復統計CSVの出力を無効化する
+    #[arg(long, default_value_t = false)]
+    no_stats_csv: bool,
+
+    /// 反復統計のseed横断集計CSV（平均・分散）。既定: <params>.stats_aggregate.csv
     #[arg(long)]
     stats_aggregate_csv: Option<PathBuf>,
 
-    /// 反復ごとのパラメータ値履歴CSV（wide形式）
+    /// seed横断集計CSVの出力を無効化する
+    #[arg(long, default_value_t = false)]
+    no_stats_aggregate_csv: bool,
+
+    /// 反復ごとのパラメータ値履歴CSV（wide形式）。既定: <params>.values.csv
     #[arg(long)]
     param_values_csv: Option<PathBuf>,
+
+    /// パラメータ値履歴CSVの出力を無効化する
+    #[arg(long, default_value_t = false)]
+    no_param_values_csv: bool,
 
     /// 乱数seed（単一）
     #[arg(long, conflicts_with = "seeds")]
@@ -395,6 +407,18 @@ struct EarlyStopConfig {
 
 fn default_meta_path(params_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.meta.json", params_path.display()))
+}
+
+fn default_param_values_csv_path(params_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.values.csv", params_path.display()))
+}
+
+fn default_stats_csv_path(params_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.stats.csv", params_path.display()))
+}
+
+fn default_stats_aggregate_csv_path(params_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.stats_aggregate.csv", params_path.display()))
 }
 
 fn schedule_matches(lhs: ScheduleConfig, rhs: ScheduleConfig) -> bool {
@@ -1188,16 +1212,28 @@ fn main() -> Result<()> {
     let end_iteration = start_iteration
         .checked_add(cli.iterations)
         .context("iteration index overflow")?;
-    let aggregate_csv_path = if let Some(path) = &cli.stats_aggregate_csv {
+    let stats_csv_path: Option<PathBuf> = if cli.no_stats_csv {
+        None
+    } else {
+        Some(cli.stats_csv.clone().unwrap_or_else(|| default_stats_csv_path(&cli.params)))
+    };
+    let aggregate_csv_path: Option<PathBuf> = if cli.no_stats_aggregate_csv {
+        None
+    } else if let Some(path) = &cli.stats_aggregate_csv {
         Some(path.clone())
     } else if seed_values.len() > 1 {
-        cli.stats_csv
-            .as_ref()
-            .map(|path| PathBuf::from(format!("{}.aggregate.csv", path.display())))
+        // 互換性: --stats-csv が明示指定されている場合は従来の派生
+        // (<stats_csv>.aggregate.csv) を維持。さもなければ <params>.stats_aggregate.csv。
+        // これにより既存ジョブを --resume したとき既定の集計CSV出力先が変わらない。
+        if let Some(stats_path) = &cli.stats_csv {
+            Some(PathBuf::from(format!("{}.aggregate.csv", stats_path.display())))
+        } else {
+            Some(default_stats_aggregate_csv_path(&cli.params))
+        }
     } else {
         None
     };
-    let mut stats_csv_writer = if let Some(path) = &cli.stats_csv {
+    let mut stats_csv_writer = if let Some(path) = stats_csv_path.as_deref() {
         Some(open_stats_csv_writer(path, cli.resume)?)
     } else {
         None
@@ -1207,7 +1243,16 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let mut param_values_csv_writer = if let Some(path) = &cli.param_values_csv {
+    let param_values_csv_path: Option<PathBuf> = if cli.no_param_values_csv {
+        None
+    } else {
+        Some(
+            cli.param_values_csv
+                .clone()
+                .unwrap_or_else(|| default_param_values_csv_path(&cli.params)),
+        )
+    };
+    let mut param_values_csv_writer = if let Some(path) = param_values_csv_path.as_deref() {
         Some(open_param_values_csv_writer(path, cli.resume, &params)?)
     } else {
         None
