@@ -12,7 +12,92 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-const NOT_USED_MARKER: &str = "[[NOT USED]]";
+pub const NOT_USED_MARKER: &str = "[[NOT USED]]";
+
+/// `.params` ファイルの 1 行を文字列のまま保持する低レベル表現。
+///
+/// 値の型変換 (i32 / f64) は呼び出し側 (`ParamRow::from_raw` /
+/// `SpsaParam::from_raw`) が担当する。`SpsaParam` は値が浮動小数で `comment` を
+/// 保持する一方、`ParamRow` は整数化して `comment` を捨てる、と用途が異なるため、
+/// 共通する「コメント分離 + `[[NOT USED]]` 検出 + カラム分割」だけをここで一本化する。
+#[derive(Debug, Clone)]
+pub struct RawParamRow {
+    pub name: String,
+    pub kind: String,
+    pub value_text: String,
+    pub min_text: String,
+    pub max_text: String,
+    /// 6 番目の列。YO/rshogi `.params` では `step`、Fishtest 派生では `c_end`。
+    pub col5_text: String,
+    /// 7 番目の列。YO/rshogi `.params` では `alpha`、Fishtest 派生では `r_end`。
+    pub col6_text: String,
+    /// `//` 以降の文字列（先頭の `//` を含まずトリム済み、空なら "")
+    pub comment: String,
+    pub not_used: bool,
+}
+
+/// `.params` の 1 行を `RawParamRow` にパースする。
+///
+/// 戻り値:
+/// - `Ok(None)`: 空行 / `#` コメント行（無視）
+/// - `Ok(Some(row))`: 通常行
+/// - `Err(_)`: カラム数不足
+///
+/// 注意: コメント (`// 以降`) を先に切り離してから `[[NOT USED]]` 判定を行う。
+/// 順序を逆にすると `// 旧: [[NOT USED]]` のようなコメント内のマーカーまで誤検出する。
+pub fn parse_param_line(line: &str, line_no: usize) -> Result<Option<RawParamRow>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok(None);
+    }
+    let (raw_val_part, comment) = if let Some((left, right)) = trimmed.split_once("//") {
+        (left, right.trim().to_string())
+    } else {
+        (trimmed, String::new())
+    };
+    let not_used = raw_val_part.contains(NOT_USED_MARKER);
+    let val_owned: String;
+    let val_part: &str = if not_used {
+        val_owned = raw_val_part.replace(NOT_USED_MARKER, "");
+        val_owned.as_str()
+    } else {
+        raw_val_part
+    };
+    let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
+    if cols.len() < 7 {
+        bail!("line {line_no}: expected 7 columns, got {} ('{line}')", cols.len());
+    }
+    Ok(Some(RawParamRow {
+        name: cols[0].to_owned(),
+        kind: cols[1].to_owned(),
+        value_text: cols[2].to_owned(),
+        min_text: cols[3].to_owned(),
+        max_text: cols[4].to_owned(),
+        col5_text: cols[5].to_owned(),
+        col6_text: cols[6].to_owned(),
+        comment,
+        not_used,
+    }))
+}
+
+/// `.params` ファイルを行ごとに `RawParamRow` の列として読み込む共通ヘルパ。
+///
+/// 空行と `#` コメント行は無視される。
+pub fn read_raw_params(path: &Path) -> Result<Vec<RawParamRow>> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut rows = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = line.with_context(|| format!("line {line_no}: read failed"))?;
+        if let Some(row) =
+            parse_param_line(&line, line_no).with_context(|| format!("in {}", path.display()))?
+        {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
 
 /// `.params` ファイルの 1 行（YO/rshogi 共通フォーマット）
 #[derive(Debug, Clone)]
@@ -39,50 +124,36 @@ fn parse_f64(text: &str) -> Result<f64> {
     text.parse::<f64>().with_context(|| format!("invalid float value: {text}"))
 }
 
+impl ParamRow {
+    /// `RawParamRow` から整数値ベースの `ParamRow` を構築する（コメントは捨てる）。
+    pub fn from_raw(raw: RawParamRow) -> Result<Self> {
+        Ok(Self {
+            value: parse_value_i32(&raw.value_text)
+                .with_context(|| format!("invalid value '{}'", raw.value_text))?,
+            min: parse_value_i32(&raw.min_text)
+                .with_context(|| format!("invalid min '{}'", raw.min_text))?,
+            max: parse_value_i32(&raw.max_text)
+                .with_context(|| format!("invalid max '{}'", raw.max_text))?,
+            step: parse_f64(&raw.col5_text)
+                .with_context(|| format!("invalid step '{}'", raw.col5_text))?,
+            alpha: parse_f64(&raw.col6_text)
+                .with_context(|| format!("invalid alpha '{}'", raw.col6_text))?,
+            name: raw.name,
+            kind: raw.kind,
+            not_used: raw.not_used,
+        })
+    }
+}
+
 /// `.params` を順序保存で読み込む
 pub fn load_params(path: &Path) -> Result<Vec<ParamRow>> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut rows = Vec::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line_no = idx + 1;
-        let line = line.with_context(|| format!("line {line_no}: read failed"))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        // 先にコメント (`//` 以降) を切り離し、値部分にだけ `[[NOT USED]]` 判定を
-        // 適用する。順序を逆にするとコメント内のマーカーまで消えて偽陽性になる。
-        let val_part = match trimmed.split_once("//") {
-            Some((left, _)) => left.trim(),
-            None => trimmed,
-        };
-        let not_used = val_part.contains(NOT_USED_MARKER);
-        let raw = if not_used {
-            val_part.replace(NOT_USED_MARKER, "")
-        } else {
-            val_part.to_owned()
-        };
-        let cols: Vec<&str> = raw.split(',').map(str::trim).collect();
-        if cols.len() < 7 {
-            bail!("line {line_no} in {}: expected 7 columns, got {}", path.display(), cols.len());
-        }
-        let row = ParamRow {
-            name: cols[0].to_owned(),
-            kind: cols[1].to_owned(),
-            value: parse_value_i32(cols[2])
-                .with_context(|| format!("line {line_no} in {}: value", path.display()))?,
-            min: parse_value_i32(cols[3])
-                .with_context(|| format!("line {line_no} in {}: min", path.display()))?,
-            max: parse_value_i32(cols[4])
-                .with_context(|| format!("line {line_no} in {}: max", path.display()))?,
-            step: parse_f64(cols[5])
-                .with_context(|| format!("line {line_no} in {}: step", path.display()))?,
-            alpha: parse_f64(cols[6])
-                .with_context(|| format!("line {line_no} in {}: alpha", path.display()))?,
-            not_used,
-        };
-        rows.push(row);
+    let raws = read_raw_params(path)?;
+    let mut rows = Vec::with_capacity(raws.len());
+    for raw in raws {
+        rows.push(
+            ParamRow::from_raw(raw)
+                .with_context(|| format!("failed to parse row in {}", path.display()))?,
+        );
     }
     Ok(rows)
 }
@@ -286,6 +357,54 @@ mod tests {
         let mut t = make_table(&[("a", "X", false)]);
         t.unmapped.yo.push("a".to_owned());
         assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn parse_param_line_basic() {
+        let raw = parse_param_line("foo,int,10,0,100,1.0,0.002", 1).unwrap().unwrap();
+        assert_eq!(raw.name, "foo");
+        assert_eq!(raw.kind, "int");
+        assert_eq!(raw.value_text, "10");
+        assert_eq!(raw.min_text, "0");
+        assert_eq!(raw.max_text, "100");
+        assert_eq!(raw.col5_text, "1.0");
+        assert_eq!(raw.col6_text, "0.002");
+        assert!(!raw.not_used);
+        assert!(raw.comment.is_empty());
+    }
+
+    #[test]
+    fn parse_param_line_skips_blank_and_comment() {
+        assert!(parse_param_line("", 1).unwrap().is_none());
+        assert!(parse_param_line("   ", 2).unwrap().is_none());
+        assert!(parse_param_line("# whole-line comment", 3).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_param_line_extracts_inline_comment_and_not_used() {
+        let raw = parse_param_line("foo,int,10,0,100,1,0.002 [[NOT USED]] // 旧: tuned away", 5)
+            .unwrap()
+            .unwrap();
+        assert!(raw.not_used);
+        assert_eq!(raw.comment, "旧: tuned away");
+        assert_eq!(raw.value_text, "10");
+    }
+
+    /// `// 旧: [[NOT USED]]` のようにコメント内にマーカーがあっても
+    /// not_used を偽陽性で立てない（先にコメント分離する規約の回帰テスト）
+    #[test]
+    fn parse_param_line_marker_in_comment_only_is_ignored() {
+        let raw = parse_param_line("foo,int,10,0,100,1,0.002 // 旧: [[NOT USED]]", 7)
+            .unwrap()
+            .unwrap();
+        assert!(!raw.not_used);
+        assert_eq!(raw.comment, "旧: [[NOT USED]]");
+    }
+
+    #[test]
+    fn parse_param_line_rejects_short_row() {
+        let err = parse_param_line("foo,int,10,0,100", 9).unwrap_err();
+        assert!(err.to_string().contains("expected 7 columns"));
     }
 
     #[test]

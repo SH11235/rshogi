@@ -17,9 +17,10 @@ use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::{
     EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
 };
-use tools::spsa_param_mapping::MappingTable;
+use tools::spsa_param_mapping::{
+    MappingTable, NOT_USED_MARKER as PARAM_NOT_USED_MARKER, RawParamRow, parse_param_line,
+};
 
-const PARAM_NOT_USED_MARKER: &str = "[[NOT USED]]";
 const META_FORMAT_VERSION: u32 = 2;
 
 #[derive(Parser, Debug)]
@@ -678,59 +679,37 @@ fn save_meta(path: &Path, meta: &ResumeMetaData) -> Result<()> {
     Ok(())
 }
 
-fn parse_param_line(line: &str, line_no: usize) -> Result<Option<SpsaParam>> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Ok(None);
+impl SpsaParam {
+    fn from_raw(raw: RawParamRow, line_no: usize) -> Result<Self> {
+        let is_int = raw.kind.eq_ignore_ascii_case("int");
+        Ok(SpsaParam {
+            value: raw
+                .value_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid v at line {line_no}"))?,
+            min: raw
+                .min_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid min at line {line_no}"))?,
+            max: raw
+                .max_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid max at line {line_no}"))?,
+            c_end: raw
+                .col5_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid c_end at line {line_no}"))?,
+            r_end: raw
+                .col6_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid r_end at line {line_no}"))?,
+            name: raw.name,
+            type_name: raw.kind,
+            is_int,
+            comment: raw.comment,
+            not_used: raw.not_used,
+        })
     }
-
-    // 先にコメント (`//` 以降) を切り離し、値部分にだけ `[[NOT USED]]` 判定を適用する。
-    // 順序を逆にすると `// 旧: [[NOT USED]]` のようなコメント内のマーカーまで消えて
-    // not_used が偽陽性になる。
-    let (raw_val_part, comment) = if let Some((left, right)) = trimmed.split_once("//") {
-        (left, right.trim().to_string())
-    } else {
-        (trimmed, String::new())
-    };
-    let not_used = raw_val_part.contains(PARAM_NOT_USED_MARKER);
-    let val_owned: String;
-    let val_part: &str = if not_used {
-        val_owned = raw_val_part.replace(PARAM_NOT_USED_MARKER, "");
-        val_owned.as_str()
-    } else {
-        raw_val_part
-    };
-
-    let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
-    if cols.len() < 7 {
-        bail!("invalid params line {}: '{}'", line_no, line);
-    }
-
-    let type_name = cols[1].to_string();
-    let is_int = type_name.eq_ignore_ascii_case("int");
-
-    Ok(Some(SpsaParam {
-        name: cols[0].to_string(),
-        type_name,
-        is_int,
-        value: cols[2]
-            .parse::<f64>()
-            .with_context(|| format!("invalid v at line {}", line_no))?,
-        min: cols[3]
-            .parse::<f64>()
-            .with_context(|| format!("invalid min at line {}", line_no))?,
-        max: cols[4]
-            .parse::<f64>()
-            .with_context(|| format!("invalid max at line {}", line_no))?,
-        c_end: cols[5]
-            .parse::<f64>()
-            .with_context(|| format!("invalid c_end at line {}", line_no))?,
-        r_end: cols[6]
-            .parse::<f64>()
-            .with_context(|| format!("invalid r_end at line {}", line_no))?,
-        comment,
-        not_used,
-    }))
 }
 
 fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
@@ -738,9 +717,10 @@ fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
     let reader = BufReader::new(file);
     let mut params = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
         let line = line?;
-        if let Some(param) = parse_param_line(&line, idx + 1)? {
-            params.push(param);
+        if let Some(raw) = parse_param_line(&line, line_no)? {
+            params.push(SpsaParam::from_raw(raw, line_no)?);
         }
     }
     if params.is_empty() {
