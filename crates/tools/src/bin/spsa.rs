@@ -677,16 +677,21 @@ fn parse_param_line(line: &str, line_no: usize) -> Result<Option<SpsaParam>> {
         return Ok(None);
     }
 
-    let mut payload = trimmed.to_string();
-    let not_used = payload.contains(PARAM_NOT_USED_MARKER);
-    if not_used {
-        payload = payload.replace(PARAM_NOT_USED_MARKER, "");
-    }
-
-    let (val_part, comment) = if let Some((left, right)) = payload.split_once("//") {
+    // 先にコメント (`//` 以降) を切り離し、値部分にだけ `[[NOT USED]]` 判定を適用する。
+    // 順序を逆にすると `// 旧: [[NOT USED]]` のようなコメント内のマーカーまで消えて
+    // not_used が偽陽性になる。
+    let (raw_val_part, comment) = if let Some((left, right)) = trimmed.split_once("//") {
         (left, right.trim().to_string())
     } else {
-        (payload.as_str(), String::new())
+        (trimmed, String::new())
+    };
+    let not_used = raw_val_part.contains(PARAM_NOT_USED_MARKER);
+    let val_owned: String;
+    let val_part: &str = if not_used {
+        val_owned = raw_val_part.replace(PARAM_NOT_USED_MARKER, "");
+        val_owned.as_str()
+    } else {
+        raw_val_part
     };
 
     let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
@@ -1138,24 +1143,42 @@ fn main() -> Result<()> {
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
     if let Some(init_src) = &cli.init_from {
-        if !cli.params.exists() {
-            if let Some(parent) = cli.params.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("failed to create parent dir for {}", cli.params.display())
-                })?;
-            }
-            std::fs::copy(init_src, &cli.params).with_context(|| {
-                format!("failed to copy {} -> {}", init_src.display(), cli.params.display())
+        if let Some(parent) = cli.params.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create parent dir for {}", cli.params.display())
             })?;
-            println!("initialized {} from canonical {}", cli.params.display(), init_src.display());
-        } else {
-            println!(
-                "init-from: {} already exists, leaving as-is (canonical {} not copied)",
-                cli.params.display(),
-                init_src.display()
-            );
+        }
+        // TOCTOU 緩和: `exists()` チェック→ `fs::copy` の間に他プロセスが書き込むと
+        // 上書きしてしまう。`OpenOptions::create_new` で atomic に作成失敗 (AlreadyExists)
+        // を検出し、その場合は既存ファイルを尊重する。
+        match OpenOptions::new().create_new(true).write(true).open(&cli.params) {
+            Ok(out) => {
+                let mut writer = BufWriter::new(out);
+                let mut reader = File::open(init_src)
+                    .with_context(|| format!("failed to open {}", init_src.display()))?;
+                std::io::copy(&mut reader, &mut writer).with_context(|| {
+                    format!("failed to copy {} -> {}", init_src.display(), cli.params.display())
+                })?;
+                writer.flush()?;
+                println!(
+                    "initialized {} from canonical {}",
+                    cli.params.display(),
+                    init_src.display()
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                println!(
+                    "init-from: {} already exists, leaving as-is (canonical {} not copied)",
+                    cli.params.display(),
+                    init_src.display()
+                );
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(e)
+                    .context(format!("failed to create {} for init-from", cli.params.display())));
+            }
         }
     }
     let translator = match &cli.engine_param_mapping {
@@ -1280,6 +1303,30 @@ fn main() -> Result<()> {
         );
     }
     println!("active params: {active_param_count}/{}", params.len());
+
+    // 翻訳器有効時、`active_only_regex` でマッチしたが unmapped で除外されたパラメータを
+    // info 出力する。「期待した parameter が摂動されていない」事象に気づきやすくする。
+    if translator.is_enabled() {
+        let mut unmapped_active: Vec<&str> = params
+            .iter()
+            .filter(|p| {
+                !p.not_used
+                    && active_only_regex.as_ref().is_none_or(|re| re.is_match(&p.name))
+                    && !translator.is_mapped(&p.name)
+            })
+            .map(|p| p.name.as_str())
+            .collect();
+        if !unmapped_active.is_empty() {
+            unmapped_active.sort();
+            println!(
+                "info: {} param(s) matched --active-only-regex but are unmapped (translator skipped):",
+                unmapped_active.len()
+            );
+            for n in &unmapped_active {
+                println!("  - {n}");
+            }
+        }
+    }
 
     let base_cfg = EngineConfig {
         path: engine_path,

@@ -45,7 +45,9 @@ fn synthesize_yo_row(yo_name: &str, value: i32) -> ParamRow {
     let abs_value = value.unsigned_abs() as i32;
     let span = (abs_value * 2).max(8);
     let (min, max) = if value >= 0 { (0, span) } else { (-span, 0) };
-    let step = ((span as f64) / 20.0).max(1.0);
+    // YO 側 .params の step は整数前提で扱われるため round する
+    // (yo_to_rshogi_params の rshogi_default_rows と整合)
+    let step = ((span as f64) / 20.0).max(1.0).round();
     ParamRow {
         name: yo_name.to_owned(),
         kind: "int".to_owned(),

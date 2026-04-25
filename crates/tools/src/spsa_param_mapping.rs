@@ -51,14 +51,18 @@ pub fn load_params(path: &Path) -> Result<Vec<ParamRow>> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let mut raw = trimmed.to_owned();
-        let not_used = raw.contains(NOT_USED_MARKER);
-        if not_used {
-            raw = raw.replace(NOT_USED_MARKER, "").trim().to_owned();
-        }
-        if let Some((head, _)) = raw.split_once("//") {
-            raw = head.trim().to_owned();
-        }
+        // 先にコメント (`//` 以降) を切り離し、値部分にだけ `[[NOT USED]]` 判定を
+        // 適用する。順序を逆にするとコメント内のマーカーまで消えて偽陽性になる。
+        let val_part = match trimmed.split_once("//") {
+            Some((left, _)) => left.trim(),
+            None => trimmed,
+        };
+        let not_used = val_part.contains(NOT_USED_MARKER);
+        let raw = if not_used {
+            val_part.replace(NOT_USED_MARKER, "")
+        } else {
+            val_part.to_owned()
+        };
         let cols: Vec<&str> = raw.split(',').map(str::trim).collect();
         if cols.len() < 7 {
             bail!("line {line_no} in {}: expected 7 columns, got {}", path.display(), cols.len());
@@ -158,6 +162,11 @@ impl MappingTable {
                 bail!("unmapped.rshogi includes '{n}' which is also in mappings");
             }
         }
+        for n in &self.unmapped.yo {
+            if yo_seen.contains_key(n.as_str()) {
+                bail!("unmapped.yo includes '{n}' which is also in mappings");
+            }
+        }
         Ok(())
     }
 
@@ -229,6 +238,13 @@ mod tests {
     fn validate_detects_unmapped_overlap() {
         let mut t = make_table(&[("a", "X", false)]);
         t.unmapped.rshogi.push("X".to_owned());
+        assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn validate_detects_unmapped_yo_overlap() {
+        let mut t = make_table(&[("a", "X", false)]);
+        t.unmapped.yo.push("a".to_owned());
         assert!(t.validate().is_err());
     }
 

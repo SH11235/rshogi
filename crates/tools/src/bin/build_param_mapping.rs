@@ -68,7 +68,11 @@ fn load_params(path: &PathBuf) -> Result<BTreeMap<String, i32>> {
         let name = cols[0].to_owned();
         let value = parse_value_i32(cols[2])
             .with_context(|| format!("line {line_no} in {}", path.display()))?;
-        map.insert(name, value);
+        // 同名再定義は後勝ちで黙って上書きされるとマッピング表が不正になり得るので
+        // 明示的に reject する。
+        if map.insert(name.clone(), value).is_some() {
+            bail!("line {line_no} in {}: duplicate parameter name '{}'", path.display(), name);
+        }
     }
     Ok(map)
 }
