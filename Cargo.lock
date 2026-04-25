@@ -1668,6 +1668,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "futures-util",
  "rshogi-core",
  "rshogi-csa-server",
  "serde",

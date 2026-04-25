@@ -19,6 +19,12 @@ tracing.workspace = true
 # 直接書く（dep 範囲を明示）。
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "tracing-log", "ansi"] }
 tracing-log = "0.2"
+# 1 connection task の panic を boundary に閉じ込めるため、async 対応の
+# `FutureExt::catch_unwind` を runtime dep として追加する。`futures` メタクレート
+# 経由ではなく `futures-util` を直接指定することで依存ツリーを最小化する
+# (`futures-channel` 等を引き込まない)。`catch_unwind` は `std` feature 配下なので
+# それのみを有効化する（async-await / executor / sink などは tokio で賄う）。
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 clap.workspace = true
 serde.workspace = true
 toml.workspace = true
