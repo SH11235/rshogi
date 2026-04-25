@@ -46,7 +46,7 @@ cargo run -p tools --release --bin tournament -- \
 
 ## SPSA パラメータチューニング
 
-詳細な手順書は [docs/spsa_runbook.md](../../../docs/spsa_runbook.md) を参照。
+詳細な手順書は [../docs/spsa_runbook.md](../docs/spsa_runbook.md) を参照。
 
 ### 1. パラメータファイル生成
 
