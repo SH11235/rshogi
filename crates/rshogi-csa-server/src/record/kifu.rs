@@ -149,7 +149,8 @@ fn result_lines(result: &GameResult) -> Vec<String> {
 /// 00LIST 1 行分のフォーマット。
 ///
 /// 形式: `<game_id> <sente> <gote> <start_time> <end_time> <result_code>`
-/// （Ruby `mk_rate` 互換のシンプルなスペース区切り）。改行は呼び出し側で付ける。
+/// （単一スペース区切り、改行は呼び出し側で付ける）。`split(' ')` で 6 列に
+/// 一意分割できることが消費側との契約。
 pub fn format_zerozero_list_line(
     game_id: &GameId,
     black: &PlayerName,
@@ -164,8 +165,8 @@ pub fn format_zerozero_list_line(
 
 /// 終局結果から「主要結果コード 1 つ」を返す。00LIST 用に集約値が必要な箇所で使う。
 ///
-/// 00LIST の `result_code` 列は CSA プロトコル通知コード (`#...`) を採用する
-/// （Ruby `mk_rate` 互換）。棋譜本体の特殊手 (`%...`) とは語彙が異なる点に注意。
+/// 00LIST の `result_code` 列は CSA プロトコル通知コード (`#...`) を採用する。
+/// 棋譜本体の特殊手 (`%...`) とは語彙が異なる点に注意。
 ///
 /// フロントエンド crate からも同じ語彙で `GameSummaryEntry::result_code` を
 /// 埋めるため `pub` で公開している（TCP 側に二重定義を作らないためのシングルソース）。
@@ -182,7 +183,7 @@ pub fn primary_result_code(result: &GameResult) -> &'static str {
     }
 }
 
-/// 勝敗側を 00LIST 補助情報として取得するヘルパ。Floodgate 等のレートバッチが
+/// 勝敗側を 00LIST 補助情報として取得するヘルパ。レート集計などの後段処理が
 /// 必要に応じて利用する（現状は公開のみで、本 crate 内部では未使用）。
 pub fn winner_of(result: &GameResult) -> Option<Color> {
     match result {
@@ -402,6 +403,10 @@ mod tests {
 
     #[test]
     fn zerozero_list_line_format() {
+        // 00LIST の時刻列は `split(' ')` で単一トークンに収まる必要があるため、
+        // 実呼び出し側 (`storage/file.rs::append_summary`) は ISO 8601 形式
+        // `YYYY-MM-DDTHH:MM:SSZ` を渡す（CSA V2 棋譜の `$START_TIME` /
+        // `$END_TIME` は `YYYY/MM/DD HH:MM:SS` で空白入り、こちらは別経路）。
         let line = format_zerozero_list_line(
             &GameId::new("g1"),
             &PlayerName::new("alice"),
@@ -444,13 +449,10 @@ mod tests {
         assert!(err.contains("exceeds available moves"), "unexpected: {err}");
     }
 
-    /// 既存 Ruby `mk_rate` / `mk_html` 等のレートバッチが消費するフォーマットは、
-    /// 軽微な format 変更でも壊れる（行末の trailing space 1 つで列分割が破綻する等）。
-    /// build_v2() の出力 1 byte でも変わったら本テストが落ちる「ゴールデン」テスト
-    /// として固定し、format 変更時に必ず明示的な golden 更新を要求する。
-    ///
-    /// このテストは Ruby ランタイム依存無しでフォーマット契約を担保する CI 互換性
-    /// ゲートの一翼を担う（外部処理系を CI に持ち込まない方針）。
+    /// CSA V2 棋譜全文をバイト一致で固定するゴールデン。trailing space や区切り
+    /// 文字の混入を 1 byte 単位で検出するため、既存の `contains` 系テストでは
+    /// 拾えない静かな破壊を防ぐ。format を意図的に変える際は `expected` を
+    /// 更新する。
     #[test]
     fn csa_v2_full_text_is_byte_stable_for_representative_record() {
         let mut rec = rec_skeleton();
@@ -477,30 +479,28 @@ PI
 'eval=12 pv 3c3d
 %TORYO
 ";
-        assert_eq!(
-            txt, expected,
-            "CSA V2 棋譜のゴールデン形式が変更されました。\
-            外部レートバッチ互換が壊れる可能性があるため、format 変更を意図する場合は \
-            expected を更新したうえで Ruby `mk_rate` 仕様 (記号方針セクション参照) との \
-            整合を再確認すること"
-        );
+        assert_eq!(txt, expected, "CSA V2 棋譜のゴールデン形式が変更されました");
     }
 
-    /// 00LIST の 1 行が `<game_id> <sente> <gote> <start_time> <end_time> <result_code>`
-    /// 形式（単一スペース区切り、改行なし）であることを全 `GameResult` variant について
-    /// 完全一致で固定する。レートバッチ側は `split(' ')` の単純パースを前提にしている
-    /// ため、列数や区切り文字の違反は致命的になる。
+    /// 00LIST の 1 行を全 `GameResult` variant について完全一致で固定するゴールデン。
+    /// 単一スペース 6 列のフォーマット契約 (`split(' ')` 前提) を 1 byte 単位で
+    /// 守ることが消費側との契約。
     #[test]
     fn zerozero_list_format_is_byte_stable_for_all_result_variants() {
         let game_id = GameId::new("g1");
         let black = PlayerName::new("alice");
         let white = PlayerName::new("bob");
+        // 00LIST の時刻列は `split(' ')` で単一トークンに収まる必要があるため、
+        // 実呼び出し側は ISO 8601 形式 `YYYY-MM-DDTHH:MM:SSZ` を渡す。CSA V2
+        // 棋譜の `$START_TIME` / `$END_TIME` は `YYYY/MM/DD HH:MM:SS` で空白
+        // 入りだが、それは別経路なのでここではテストしない。
         let start = "2026-04-17T12:00:00Z";
         let end = "2026-04-17T12:10:00Z";
 
         // (variant, expected_result_code) を網羅する。新しい variant が `GameResult` に
         // 増えた場合、本テストの match と list 両方を更新する必要がある (single source
         // of truth として `primary_result_code` も同時に更新する契約)。
+        // `winner` / `loser` は `primary_result_code` が無視するため片側のみ網羅する。
         let cases: Vec<(GameResult, &str)> = vec![
             (
                 GameResult::Toryo {

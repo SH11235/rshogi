@@ -1,9 +1,9 @@
 //! csa-server 系クレート群の `license` メタデータが GPL-3.0-only に揃っている
 //! ことを CI で機械的に検証する。
 //!
-//! Ruby shogi-server からのクリーンルーム再実装である本サーバ群は、生成物
-//! （`crates/rshogi-csa-server*` の rlib / cdylib / バイナリ）に GPL-3.0-only を
-//! 引き継がせる必要がある。各 `Cargo.toml` の `license` フィールドが手作業で
+//! 本サーバ群は GPL-3.0-only を採用するクリーンルーム実装で、生成物
+//! （`crates/rshogi-csa-server*` の rlib / cdylib / バイナリ）にも同ライセンス
+//! を引き継がせる必要がある。各 `Cargo.toml` の `license` フィールドが手作業で
 //! 書き換わって不揃いになる事故を、ビルド時 / cargo test 時に確実に止める。
 //!
 //! 本テストは workspace ルートの `Cargo.toml` の `members` を動的に走査するため、

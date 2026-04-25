@@ -1011,9 +1011,9 @@ impl GameRoom {
 
     /// R2 バケットに CSA V2 形式の棋譜を書き出す。
     ///
-    /// キー体系: `YYYY/MM/DD/<game_id>.csa`。TCP 版 `FileKifuStorage` と
-    /// 同一構造なので、既存 Ruby 系のバッチ（mk_rate / mk_html）を R2 を
-    /// mount して流用できる。
+    /// キー体系: `YYYY/MM/DD/<game_id>.csa`。TCP 版 `FileKifuStorage` と同一
+    /// 構造なので、外部のレート集計や HTML レンダリングなどの後段処理は R2 を
+    /// mount するだけで TCP 版と同じパスで読める。
     async fn export_kifu_to_r2(
         &self,
         game_result: &rshogi_csa_server::game::result::GameResult,

@@ -4,7 +4,7 @@
 //!
 //! - 認証（LOGIN / 成功・失敗・レート制限）
 //! - マッチ成立 → Game_Summary → AGREE → 対局進行 → 終局（投了 / 最大手数）
-//! - CSA V2 棋譜と 00LIST が shogi-server mk_rate 互換形式で吐かれる
+//! - CSA V2 棋譜と 00LIST が `split(' ')` 6 列のフォーマット契約に従って吐かれる
 //! - 待機中の切断・`agree_timeout` 総窓の enforcement 等の不変条件
 //!
 //! `flavor = "current_thread"` + `LocalSet` でサーバーを起動し、同じタスク内から
@@ -401,7 +401,7 @@ fn stopwatch_clock_summary_uses_minute_unit() {
 }
 
 #[test]
-fn kifu_and_zerozero_list_compatible_with_mk_rate() {
+fn kifu_and_zerozero_list_match_format_contract() {
     run_local(|| async {
         let (addr, topdir) = spawn_server("kifu_fmt").await;
         let (mut rb, mut wb) = connect(addr).await;
@@ -442,11 +442,11 @@ fn kifu_and_zerozero_list_compatible_with_mk_rate() {
         assert!(csa.contains("\n+7776FU,T"));
         assert!(csa.contains("\n-3334FU,T"));
         assert!(csa.contains("\n%TORYO\n"));
-        // 00LIST 1 行分が mk_rate 互換（スペース区切り 6 カラム、末尾 #RESIGN）。
+        // 00LIST 1 行がフォーマット契約 (スペース区切り 6 カラム、末尾 #RESIGN) に従う。
         let zerozero = tokio::fs::read_to_string(topdir.join("00LIST")).await.unwrap();
         let line = zerozero.lines().last().unwrap();
         let cols: Vec<_> = line.split(' ').collect();
-        assert_eq!(cols.len(), 6, "mk_rate expects 6 columns: {line}");
+        assert_eq!(cols.len(), 6, "00LIST format expects 6 columns: {line}");
         assert_eq!(cols[5], "#RESIGN");
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });

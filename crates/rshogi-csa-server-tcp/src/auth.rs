@@ -1,6 +1,6 @@
 //! 認証とパスワードハッシュ検証。
 //!
-//! Ruby shogi-server と互換の players.yaml で提供される plain パスワードを
+//! shogi-server プロトコルの players.yaml で提供される平文パスワードを
 //! ハッシュ照合できるよう [`PasswordHasher`] を trait として分離する。
 //! 現状は [`PlainPasswordHasher`]（equals 比較）のみ実装。
 //! bcrypt 等を接続する場合はこの trait を別 crate で実装する。
@@ -54,10 +54,10 @@ pub enum AuthOutcome {
 
 /// パスワード照合ロジックの抽象。
 ///
-/// Ruby shogi-server の players.yaml と互換のため、既定実装は平文比較
-/// [`PlainPasswordHasher`]。将来ハッシュ方式（bcrypt 等）に移行する場合は
-/// この trait を実装して差し替え、その際に入力長で分岐しない定数時間比較
-/// （`subtle::ConstantTimeEq` 等）を採用する。
+/// shogi-server 互換 players.yaml は平文パスワード保存が既定なので、既定実装は
+/// 平文比較 [`PlainPasswordHasher`]。将来ハッシュ方式（bcrypt 等）に移行する
+/// 場合はこの trait を実装して差し替え、その際に入力長で分岐しない定数時間
+/// 比較（`subtle::ConstantTimeEq` 等）を採用する。
 pub trait PasswordHasher {
     /// 入力平文 `candidate` と保存ハッシュ `stored_hash` が一致するか判定する。
     fn verify(&self, candidate: &Secret, stored_hash: &str) -> bool;
@@ -65,7 +65,7 @@ pub trait PasswordHasher {
 
 /// players.yaml 互換の平文パスワード照合。
 ///
-/// Ruby shogi-server の players.yaml は平文パスワード保存が既定なので、移行期は
+/// shogi-server 互換 players.yaml は平文パスワード保存が既定なので、移行期は
 /// 平文比較で互換性を確保する。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PlainPasswordHasher;
@@ -80,8 +80,8 @@ impl PlainPasswordHasher {
 impl PasswordHasher for PlainPasswordHasher {
     fn verify(&self, candidate: &Secret, stored_hash: &str) -> bool {
         // 注意: 平文比較かつ長さ不一致で即 return するため、処理時間からパスワード長を
-        // 推定する攻撃に対して定数時間ではない。本実装は Ruby shogi-server の
-        // players.yaml 平文互換のための暫定経路であり、ハッシュ方式への移行時は
+        // 推定する攻撃に対して定数時間ではない。本実装は shogi-server 互換
+        // players.yaml の平文保存に合わせた暫定経路であり、ハッシュ方式への移行時は
         // 長さ分岐ごと `subtle::ConstantTimeEq` 等の完全定数時間比較に置き換える。
         let a = candidate.expose().as_bytes();
         let b = stored_hash.as_bytes();

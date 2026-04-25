@@ -1634,6 +1634,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "toml",
 ]
 
 [[package]]
