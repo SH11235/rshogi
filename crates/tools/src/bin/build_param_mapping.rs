@@ -123,7 +123,10 @@ fn main() -> Result<()> {
                 candidates.push((n.clone(), false));
             }
         }
-        if let Some(names) = yo_by_value.get(&-*rval) {
+        // P2-2: rval == 0 のときは -rval == rval なので二重カウントを避ける
+        if *rval != 0
+            && let Some(names) = yo_by_value.get(&-*rval)
+        {
             for n in names {
                 candidates.push((n.clone(), true));
             }
@@ -132,12 +135,18 @@ fn main() -> Result<()> {
             0 => rshogi_unmapped.push(rname.clone()),
             1 => {
                 let (yname, flip) = candidates.into_iter().next().unwrap();
-                yo_used.insert(yname.clone());
-                auto_matches.push(AutoMatch {
-                    yo: yname,
-                    rshogi: rname.clone(),
-                    sign_flip: flip,
-                });
+                // P2-1: 既に別の rshogi 名に割り当て済みの YO 名なら、一意性を壊すので
+                // ambiguous に振り分けて人手判断させる
+                if yo_used.contains(yname.as_str()) {
+                    ambiguous.push((rname.clone(), *rval, vec![(yname, flip)]));
+                } else {
+                    yo_used.insert(yname.clone());
+                    auto_matches.push(AutoMatch {
+                        yo: yname,
+                        rshogi: rname.clone(),
+                        sign_flip: flip,
+                    });
+                }
             }
             _ => ambiguous.push((rname.clone(), *rval, candidates)),
         }

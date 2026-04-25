@@ -332,14 +332,17 @@ struct SeedRunContext<'a> {
 /// rshogi `.params` の名前 → エンジン側 USI option 名 への翻訳器
 #[derive(Debug, Default)]
 struct EngineNameTranslator {
-    /// rshogi 名 → (エンジン側名, 符号反転)。空なら無翻訳
+    /// rshogi 名 → (エンジン側名, 符号反転)。
     table: HashMap<String, (String, bool)>,
+    /// マッピング表がロードされているか
+    enabled: bool,
 }
 
 impl EngineNameTranslator {
     fn empty() -> Self {
         Self {
             table: HashMap::new(),
+            enabled: false,
         }
     }
 
@@ -350,7 +353,10 @@ impl EngineNameTranslator {
             .iter()
             .map(|m| (m.rshogi.clone(), (m.yo.clone(), m.sign_flip)))
             .collect();
-        Ok(Self { table })
+        Ok(Self {
+            table,
+            enabled: true,
+        })
     }
 
     /// `value` を必要に応じて符号反転し、エンジン側に送る (name, value) を返す。
@@ -367,6 +373,16 @@ impl EngineNameTranslator {
 
     fn len(&self) -> usize {
         self.table.len()
+    }
+
+    /// マッピング表がロードされているか
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// rshogi 名がマッピング表に登録されているか
+    fn is_mapped(&self, rshogi_name: &str) -> bool {
+        self.table.contains_key(rshogi_name)
     }
 }
 
@@ -390,12 +406,25 @@ fn schedule_matches(lhs: ScheduleConfig, rhs: ScheduleConfig) -> bool {
         && lhs.total_iterations == rhs.total_iterations
 }
 
-fn is_param_active(param: &SpsaParam, active_only_regex: Option<&Regex>) -> bool {
+fn is_param_active(
+    param: &SpsaParam,
+    active_only_regex: Option<&Regex>,
+    translator: &EngineNameTranslator,
+) -> bool {
     if param.not_used {
         return false;
     }
-    if let Some(re) = active_only_regex {
-        return re.is_match(&param.name);
+    if let Some(re) = active_only_regex
+        && !re.is_match(&param.name)
+    {
+        return false;
+    }
+    // P1: マッピング表がロード済みかつ name が未マッピングの場合、エンジン側で
+    // setoption が黙ってスキップされるため SPSA で摂動・更新するのは無駄かつ有害
+    // （unmapped.rshogi 系の値がランダムウォークして .params を汚染する）。
+    // ここで active 集合から除外する。
+    if translator.is_enabled() && !translator.is_mapped(&param.name) {
+        return false;
     }
     true
 }
@@ -1197,7 +1226,7 @@ fn main() -> Result<()> {
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
     let active_param_count = params
         .iter()
-        .filter(|param| is_param_active(param, active_only_regex.as_ref()))
+        .filter(|param| is_param_active(param, active_only_regex.as_ref(), &translator))
         .count();
     if active_param_count == 0 {
         bail!(
@@ -1269,7 +1298,7 @@ fn main() -> Result<()> {
             let flips: Vec<f64> = params
                 .iter()
                 .map(|p| {
-                    if !is_param_active(p, active_only_regex.as_ref()) {
+                    if !is_param_active(p, active_only_regex.as_ref(), &translator) {
                         0.0
                     } else if rng.random_bool(0.5) {
                         1.0
@@ -1283,7 +1312,7 @@ fn main() -> Result<()> {
                 .zip(param_schedules.iter())
                 .zip(flips.iter())
                 .map(|((p, sched), &flip)| {
-                    if !is_param_active(p, active_only_regex.as_ref()) {
+                    if !is_param_active(p, active_only_regex.as_ref(), &translator) {
                         0.0
                     } else {
                         let (c_k, _) =
@@ -1307,7 +1336,7 @@ fn main() -> Result<()> {
             let mut active_params = 0usize;
             let mut abs_shift_sum = 0.0f64;
             for (p, &shift) in params.iter().zip(shifts.iter()) {
-                if !is_param_active(p, active_only_regex.as_ref()) {
+                if !is_param_active(p, active_only_regex.as_ref(), &translator) {
                     continue;
                 }
                 active_params += 1;
@@ -1358,7 +1387,8 @@ fn main() -> Result<()> {
             for (idx, (p, (&flip, sched))) in
                 params.iter().zip(flips.iter().zip(param_schedules.iter())).enumerate()
             {
-                if !is_param_active(p, active_only_regex.as_ref()) || p.c_end.abs() <= f64::EPSILON
+                if !is_param_active(p, active_only_regex.as_ref(), &translator)
+                    || p.c_end.abs() <= f64::EPSILON
                 {
                     continue;
                 }
@@ -1393,7 +1423,9 @@ fn main() -> Result<()> {
         let mut abs_update_sum = 0.0f64;
         let mut max_abs_update = 0.0f64;
         for (idx, p) in params.iter_mut().enumerate() {
-            if !is_param_active(p, active_only_regex.as_ref()) || p.c_end.abs() <= f64::EPSILON {
+            if !is_param_active(p, active_only_regex.as_ref(), &translator)
+                || p.c_end.abs() <= f64::EPSILON
+            {
                 continue;
             }
             let before = p.value;
