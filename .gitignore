@@ -55,6 +55,13 @@ pr_summaries/
 # SPSA tuning results (personal, evaluation-function dependent)
 spsa_params/
 
+# YaneuraOu-ScriptCollection 由来の SPSA ツール / .tune / .params (上流由来、ユーザがローカルに配置)
+# 詳細は tune/README.md 参照
+tune/tune.py
+tune/ParamLib.py
+tune/*.tune
+tune/*.params
+
 # Private memo
 memo/
 docs/archive/
