@@ -1443,9 +1443,9 @@ where
         GameId::new(format!("{}{:04}", state.started_at.format("%Y%m%d%H%M%S"), *counter))
     };
     // 確定した game_id を現在の tracing span に追加し、以後この対局タスク内で
-    // 発行されるイベントに `game_id = "<id>"` を伝播させる。conn span の `id`
-    // フィールドと併せて、接続単位 + 対局単位の二段相関 ID を CI ログから
-    // 一意に追えるようにする。
+    // 発行されるイベントに `game_id = "<id>"` を伝播させる。conn span の
+    // `conn_id` フィールドと併せて、接続単位 + 対局単位の二段相関 ID を運用
+    // ログから一意に追えるようにする。
     tracing::Span::current().record("game_id", tracing::field::display(&game_id));
 
     // League 側でペア確定 (confirm_match) → AgreeWaiting へ。

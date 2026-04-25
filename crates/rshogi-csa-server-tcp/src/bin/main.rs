@@ -309,15 +309,14 @@ fn init_tracing() {
     use tracing_subscriber::prelude::*;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     // ANSI カラー escape は log shipper / journald 経由で消費する運用でノイズに
-    // なるため既定で off。開発者がローカルで色付きログを見たい場合は
-    // `RSHOGI_LOG_ANSI=1` を立てて override できる。
-    let ansi = std::env::var("RSHOGI_LOG_ANSI").as_deref() == Ok("1");
+    // なるため常時 off。色付きログを欲しい運用要件が出てきたら
+    // `IsTerminal` 自動判定なり env toggle なりをその時点で導入する（YAGNI）。
     // `tracing-subscriber` の `tracing-log` feature だけでは依存先 crate の
     // `log::*` macro 出力は subscriber に流れない。`LogTracer::init()` を
     // subscriber 初期化前に呼んで log -> tracing ブリッジを明示的に起動する。
-    // 多重 init は冪等扱い（テスト harness 等での重複呼び出しを許容）。
     let _ = tracing_log::LogTracer::init();
-    let registry = tracing_subscriber::registry().with(filter).with(fmt::layer().with_ansi(ansi));
+    let registry = tracing_subscriber::registry().with(filter).with(fmt::layer().with_ansi(false));
+    // 多重 init はテスト harness 等で発生し得るため失敗を許容する。
     let _ = registry.try_init();
 }
 
