@@ -1081,7 +1081,14 @@ fn main() -> Result<()> {
     } else if let Some(path) = &cli.stats_aggregate_csv {
         Some(path.clone())
     } else if seed_values.len() > 1 {
-        Some(default_stats_aggregate_csv_path(&cli.params))
+        // 互換性: --stats-csv が明示指定されている場合は従来の派生
+        // (<stats_csv>.aggregate.csv) を維持。さもなければ <params>.stats_aggregate.csv。
+        // これにより既存ジョブを --resume したとき既定の集計CSV出力先が変わらない。
+        if let Some(stats_path) = &cli.stats_csv {
+            Some(PathBuf::from(format!("{}.aggregate.csv", stats_path.display())))
+        } else {
+            Some(default_stats_aggregate_csv_path(&cli.params))
+        }
     } else {
         None
     };
