@@ -79,14 +79,29 @@ pub const MOVE_LATENCY_BUCKETS_SECONDS: &[f64] = &[0.001, 0.005, 0.01, 0.05, 0.1
 /// その場合 `metrics::counter!` 等は NoOp で動き、計測点を呼ぶオーバーヘッドは
 /// 数 ns 程度に収まる（NoOp recorder の atomic 1 回分）。
 ///
-/// 順序は **`describe_*` → `set_buckets_for_metric` → `install` → 主要系列の
-/// ゼロ初期化**。`describe_*` を install 前に呼ぶのは `metrics-exporter-prometheus`
-/// の README / examples の慣例に揃え、grep 一致を保つため。bucket 設定も install
-/// 前に渡す必要がある（PrometheusBuilder の builder pattern が install 時点の
-/// 状態を fix するため）。ゼロ初期化は recorder install 後でしか効かない
-/// （NoOp recorder には書き込めないため）ので最後。
+/// 順序は **bucket 設定 → `install` → `describe_*` → 主要系列のゼロ初期化**。
+/// bucket 設定は install 前に渡す必要がある（PrometheusBuilder の builder
+/// pattern が install 時点の状態を fix するため）。`describe_*` は install 後
+/// に呼ぶ必要がある（global recorder 未 install の状態で describe しても
+/// `# HELP` 行が exporter 出力に register されない、`metrics-exporter-prometheus`
+/// 0.18 の挙動）。ゼロ初期化も recorder install 後でしか効かない（NoOp recorder
+/// には書き込めない）ので最後。
 pub fn init_prometheus_exporter(addr: SocketAddr) -> Result<(), MetricsError> {
     use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+
+    PrometheusBuilder::new()
+        .with_http_listener(addr)
+        // `set_buckets_for_metric` で histogram 化を強制する。デフォルトの
+        // summary (rolling quantile) 出力では `_bucket` 系列が無く
+        // `histogram_quantile()` も複数インスタンス aggregation も使えないため、
+        // 本サーバの SLO 観点には合わない。
+        .set_buckets_for_metric(
+            Matcher::Full(MOVE_LATENCY_SECONDS.to_owned()),
+            MOVE_LATENCY_BUCKETS_SECONDS,
+        )
+        .map_err(MetricsError::Install)?
+        .install()
+        .map_err(MetricsError::Install)?;
 
     metrics::describe_counter!(
         CONNECTIONS_TOTAL,
@@ -123,20 +138,6 @@ pub fn init_prometheus_exporter(addr: SocketAddr) -> Result<(), MetricsError> {
          exposed as a Prometheus histogram (not summary), enabling histogram_quantile() \
          and cross-instance aggregation."
     );
-
-    PrometheusBuilder::new()
-        .with_http_listener(addr)
-        // `set_buckets_for_metric` で histogram 化を強制する。デフォルトの
-        // summary (rolling quantile) 出力では `_bucket` 系列が無く
-        // `histogram_quantile()` も複数インスタンス aggregation も使えないため、
-        // 本サーバの SLO 観点には合わない。
-        .set_buckets_for_metric(
-            Matcher::Full(MOVE_LATENCY_SECONDS.to_owned()),
-            MOVE_LATENCY_BUCKETS_SECONDS,
-        )
-        .map_err(MetricsError::Install)?
-        .install()
-        .map_err(MetricsError::Install)?;
 
     // 起動直後の `/metrics` でも主要系列がゼロ値で見えるようにラベル無し
     // counter / gauge を一度だけ touch する。これがないと exporter は「値が
