@@ -494,7 +494,17 @@ where
     }
     #[cfg(not(debug_assertions))]
     {
-        use futures::FutureExt;
+        use futures_util::FutureExt;
+        // `AssertUnwindSafe` の根拠:
+        // - `SharedState` の可変フィールドは `Mutex` / `AtomicUsize` / `Notify` で
+        //   構成され、tokio の `Mutex` は poison を持たないため unwind 中に
+        //   guard が Drop されればロックは解放され、他 task から再ロック可能。
+        // - 進行中対局のカウンタ (`active_drive_tasks`) と `active_games` notify は
+        //   `drive_game` 内の `DriveGuard` の Drop で巻き戻されるので、
+        //   panic 経路でも一貫した状態に戻る（graceful shutdown の完了判定が
+        //   このカウンタに依存しているため特に重要）。
+        // - 部分更新が残り得るのは当該接続専有のローカル状態のみで、当該接続は
+        //   この panic で切断されるため他 task からは観測されない。
         let fut = std::panic::AssertUnwindSafe(handle_connection(stream, state));
         match fut.catch_unwind().await {
             Ok(Ok(())) => {}
@@ -2151,10 +2161,16 @@ mod tests {
     /// `panic!` を tracing event に変換してタスクを正常終了させる。本テストは
     /// `handle_connection` を叩かずに同経路の async catch_unwind を直接呼び、
     /// debug build と release build の挙動契約が分岐していることを確認する。
+    ///
+    /// 注: テスト名に "isolates" を含むが、これは `run_connection_isolated`
+    /// そのものの connection レベル隔離ではなく、同関数が依拠する
+    /// `AssertUnwindSafe + catch_unwind` 機構の契約を固定するもの。
+    /// `handle_connection` を伴う実機 panic 注入は後続の TCP 負荷試験
+    /// ハーネスで扱う（持ち越し）。
     #[cfg(not(debug_assertions))]
     #[tokio::test(flavor = "current_thread")]
     async fn async_catch_unwind_isolates_panic_in_release_build() {
-        use futures::FutureExt;
+        use futures_util::FutureExt;
         let f = std::panic::AssertUnwindSafe(async {
             panic!("intentional test panic");
         });
