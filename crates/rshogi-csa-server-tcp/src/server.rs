@@ -180,7 +180,15 @@ impl ServerConfig {
 ///
 /// この単一窓口を経由することで、Floodgate 機能の追加 PR がゲート呼び出しを
 /// 忘れる事故を構造的に防ぐ。
-pub fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFeatureIntent {
+///
+/// `pub(crate)` に閉じているのは「単一窓口を迂回した直接呼び出し」を型システムで
+/// 防ぐため。クレート外（`bin/main.rs` 含む）からは [`prepare_runtime`] のみが
+/// 入口になる。
+pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFeatureIntent {
+    // スタブ: 現状 `ServerConfig` に Floodgate 系フィールドが存在しないため、
+    // `config` を観測する必要がない。Floodgate 機能を実装する PR がフィールドを
+    // 追加した時点で本関数を更新するので、その更新漏れを `let _` の存在が
+    // リマインダになる（フィールド参照を追記する際に削除する）。
     let _ = config;
     FloodgateFeatureIntent::default()
 }
