@@ -132,8 +132,8 @@ impl ClockKindArg {
 const ALLOW_FLOODGATE_FEATURES_FLAG: &str = "--allow-floodgate-features";
 
 fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    log::info!("rshogi-csa-server-tcp starting (v{})", env!("CARGO_PKG_VERSION"));
+    init_tracing();
+    tracing::info!(version = %env!("CARGO_PKG_VERSION"), "rshogi-csa-server-tcp starting");
 
     let cli = Cli::parse();
     let bind_addr = cli.bind.parse().with_context(|| format!("bad --bind {}", cli.bind))?;
@@ -190,12 +190,12 @@ fn main() -> anyhow::Result<()> {
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, async move {
         let handle = run_server(state.clone()).await.context("run_server")?;
-        log::info!("rshogi-csa-server-tcp ready");
+        tracing::info!("rshogi-csa-server-tcp ready");
 
         // SIGINT と SIGTERM を並列待機する。SIGINT は Ctrl-C、SIGTERM は
         // systemd / Docker / Kubernetes の停止シグナル。
         let sig = wait_for_termination_signal().await;
-        log::info!("received {sig}, initiating graceful shutdown");
+        tracing::info!(signal = sig, "initiating graceful shutdown");
 
         // 1. 新規接続の受付停止 + 待機プール中のセッション切断を誘導する。
         state.shutdown.trigger();
@@ -208,10 +208,10 @@ fn main() -> anyhow::Result<()> {
         match handle.await {
             Ok(()) => {}
             Err(e) if e.is_panic() => {
-                log::error!("accept loop panicked during shutdown: {e:#}");
+                tracing::error!(error = %format!("{e:#}"), "accept loop panicked during shutdown");
             }
             Err(e) => {
-                log::info!("accept loop joined with error: {e:#}");
+                tracing::info!(error = %format!("{e:#}"), "accept loop joined with error");
             }
         }
 
@@ -230,17 +230,19 @@ fn main() -> anyhow::Result<()> {
             if active == 0 {
                 break;
             }
-            log::info!(
-                "waiting for {active} active game(s) to finish (grace {}s)",
-                grace.as_secs()
+            tracing::info!(
+                active_games = active,
+                grace_sec = grace.as_secs(),
+                "waiting for active games to finish"
             );
             tokio::select! {
                 _ = notified => continue,
                 _ = tokio::time::sleep_until(deadline) => {
                     let remaining = state.active_game_count();
                     if remaining > 0 {
-                        log::warn!(
-                            "shutdown grace expired; {remaining} game(s) left unfinished"
+                        tracing::warn!(
+                            unfinished_games = remaining,
+                            "shutdown grace expired"
                         );
                     }
                     break;
@@ -248,7 +250,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        log::info!("shutdown complete");
+        tracing::info!("shutdown complete");
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())
@@ -272,7 +274,7 @@ async fn wait_for_termination_signal() -> &'static str {
                 "SIGTERM"
             }
             Err(e) => {
-                log::warn!("failed to install SIGTERM handler: {e}");
+                tracing::warn!(error = %e, "failed to install SIGTERM handler");
                 std::future::pending::<&'static str>().await
             }
         }
@@ -282,6 +284,32 @@ async fn wait_for_termination_signal() -> &'static str {
     tokio::select! {
         s = sigint => s,
         s = sigterm => s,
+    }
+}
+
+/// `tracing_subscriber` の初期化。
+///
+/// `RUST_LOG` 互換の env-filter で level / target を設定でき、未設定時は
+/// `info` レベルで rshogi-csa-server-tcp のイベントを出力する。`tracing-log`
+/// ブリッジを有効化しているので、依存先 crate が `log` macro を使っていても
+/// 同じ subscriber に流れて 1 系統の出力になる。
+///
+/// 構造化フィールド（`conn_id` / `game_id` 等）は `info!(field = value)` 形式で
+/// span に乗り、`fmt` フォーマッタが key=value で展開する。日次ローテはここでは
+/// 設定せず、systemd journal / Docker logging driver / log shipper 等の
+/// プロセス外設定に任せる（YAGNI）。
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::prelude::*;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // ANSI カラー escape は log shipper / journald 経由で消費する運用でノイズに
+    // なるため既定で off。開発者がローカルで色付きログを見たい場合は
+    // `RSHOGI_LOG_ANSI=1` を立てて override できる（YAGNI ぎりぎり残す程度に）。
+    let ansi = std::env::var("RSHOGI_LOG_ANSI").as_deref() == Ok("1");
+    let registry = tracing_subscriber::registry().with(filter).with(fmt::layer().with_ansi(ansi));
+    if registry.try_init().is_err() {
+        // テスト等で既に初期化されている場合は何もしない（多重 init 失敗を許容）。
     }
 }
 
