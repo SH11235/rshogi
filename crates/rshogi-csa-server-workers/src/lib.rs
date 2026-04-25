@@ -2,7 +2,7 @@
 //!
 //! コアの I/O 非依存な `GameRoom::handle_line` を Workers の Durable Object
 //! (`GameRoom` DO) 上で駆動し、WebSocket Hibernation でアイドル時のアプリ
-//! 常時実行を避ける。設計の詳細は `docs/csa-server/design.md`。
+//! 常時実行を避ける。
 //!
 //! # ビルドターゲット
 //!
