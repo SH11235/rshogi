@@ -1086,12 +1086,12 @@ fn main() -> Result<()> {
     let engine_args = cli.engine_args.clone().unwrap_or_default();
     if let Some(init_src) = &cli.init_from {
         if !cli.params.exists() {
-            if let Some(parent) = cli.params.parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent).with_context(|| {
-                        format!("failed to create parent dir for {}", cli.params.display())
-                    })?;
-                }
+            if let Some(parent) = cli.params.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create parent dir for {}", cli.params.display())
+                })?;
             }
             std::fs::copy(init_src, &cli.params).with_context(|| {
                 format!("failed to copy {} -> {}", init_src.display(), cli.params.display())

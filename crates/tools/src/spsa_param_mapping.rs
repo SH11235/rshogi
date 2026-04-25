@@ -262,8 +262,7 @@ mod tests {
 
         let yo_by_name: HashMap<&str, &ParamRow> =
             yo.iter().map(|x| (x.name.as_str(), x)).collect();
-        let r_by_name: HashMap<&str, &ParamRow> =
-            r.iter().map(|x| (x.name.as_str(), x)).collect();
+        let r_by_name: HashMap<&str, &ParamRow> = r.iter().map(|x| (x.name.as_str(), x)).collect();
 
         let mut checked = 0;
         for m in &table.mappings {
