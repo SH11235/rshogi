@@ -105,7 +105,7 @@ cargo run --release -p tools --bin spsa_stats_to_plot_csv -- \
 | `'^SPSA_CONT_HIST'` | Continuation History | 9 | cont history 初期値 + bonus weight (ply 1〜6) |
 | `'^SPSA_CORR'` | Correction | 8 | correction value weight + history 更新係数 |
 | `'^SPSA_FAIL_HIGH_'` | Fail-High History | 8 | fail-high continuation bonus weight |
-| `'^SPSA_NMP_'` | Null Move Pruning | 7 | NMP margin, reduction, verification depth |
+| `'^SPSA_NMP_'` | Null Move Pruning | 8 | NMP margin, reduction, verification depth |
 | `'^SPSA_FUTILITY_'` | Futility Pruning | 5 | futility margin, improving/opp_worsening 調整 |
 | `'^SPSA_EVAL_DIFF_'` | evalDiff | 5 | static eval 差分の clamp, offset, history 係数 |
 | `'^SPSA_UPDATE_ALL_'` | History 更新スケール | 5 | quiet/capture bonus/malus, early refute |
@@ -121,7 +121,8 @@ cargo run --release -p tools --bin spsa_stats_to_plot_csv -- \
 | `'^SPSA_TT_MOVE_'` | TT Move | 2 | TT move bonus/malus |
 | `'^SPSA_DRAW_'` | Draw Jitter | 2 | 引き分けスコア揺らぎ |
 | `'^SPSA_QS_'` | QSearch | 1 | 静止探索 futility |
-| `'^SPSA_TT_CUTOFF_'` | TT Cutoff | 1 | TT cutoff cont history penalty |
+| `'^SPSA_TT_CUTOFF_'` | TT Cutoff | 4 | TT cutoff cont history penalty + quiet bonus |
+| `'^SPSA_SMALL_PROBCUT_'` | Small ProbCut | 1 | small ProbCut beta margin |
 | `'^SPSA_MAIN_HIST'` | Main History Init | 1 | main history 初期値 |
 | `'^SPSA_CAPTURE_HIST'` | Capture History Init | 1 | capture history 初期値 |
 
@@ -165,6 +166,10 @@ SPSA_LMR_TABLE_COEFF,int,2809,1024,8192,35,358.4 [[NOT USED]]
 
 ### パラメータ一覧（グループ別・推奨チューニング順）
 
+> **default 値の正本は `crates/rshogi-core/src/search/tune_params.rs`**
+> 以下の表は実装に追従するよう手動メンテしているが、乖離があれば実装側を信用すること。
+> 一部の符号が YO 源コードと反転しているのは、rshogi 式が `+` に統一して負号をパラメータ値に内包しているため（例: `SPSA_NMP_MARGIN_OFFSET` は `margin = mult*depth + offset` の形なので負値）。
+
 #### 優先度1: LMR（Late Move Reductions）
 
 探索木の形を最も大きく変える。`--active-only-regex '^SPSA_LMR_'`
@@ -174,28 +179,28 @@ SPSA_LMR_TABLE_COEFF,int,2809,1024,8192,35,358.4 [[NOT USED]]
 | LMR | `SPSA_LMR_TABLE_COEFF` | 2809 | reductions テーブル係数 (ln スケール) |
 | LMR | `SPSA_LMR_DELTA_SCALE` | 757 | delta による reduction 調整 |
 | LMR | `SPSA_LMR_NON_IMPROVING_MULT` | 218 | non-improving 時の追加 reduction |
-| LMR | `SPSA_LMR_NON_IMPROVING_DIV` | 197 | non-improving 除算 |
-| LMR | `SPSA_LMR_BASE_OFFSET` | 1135 | reduction ベースオフセット |
-| LMR | `SPSA_LMR_TTPV_ADD` | 1009 | TT-PV ノード補正 |
-| LMR | `SPSA_LMR_STEP16_BASE_ADD` | 999 | Step16 ベース加算 |
-| LMR | `SPSA_LMR_STEP16_MOVE_COUNT_MUL` | 2014 | 手番号による加算 |
-| LMR | `SPSA_LMR_STEP16_CORRECTION_DIV` | 10032 | correction value 除算 |
-| LMR | `SPSA_LMR_STEP16_CUT_NODE_ADD` | 1979 | cut node 加算 |
-| LMR | `SPSA_LMR_STEP16_CUT_NODE_NO_TT_ADD` | 980 | cut node (TT miss) 追加 |
-| LMR | `SPSA_LMR_STEP16_TT_CAPTURE_ADD` | 955 | TT capture 加算 |
-| LMR | `SPSA_LMR_STEP16_CUTOFF_COUNT_ADD` | 987 | cutoff count 加算 |
-| LMR | `SPSA_LMR_STEP16_CUTOFF_COUNT_ALL_NODE_ADD` | 979 | all-node cutoff count 加算 |
-| LMR | `SPSA_LMR_STEP16_TTPV_SUB_BASE` | 2174 | TT-PV 減算ベース |
-| LMR | `SPSA_LMR_STEP16_TTPV_SUB_PV_NODE` | 979 | PV node 減算 |
-| LMR | `SPSA_LMR_STEP16_TTPV_SUB_TT_VALUE` | 981 | TT value 減算 |
-| LMR | `SPSA_LMR_STEP16_TTPV_SUB_TT_DEPTH` | 929 | TT depth 減算 |
-| LMR | `SPSA_LMR_STEP16_TTPV_SUB_CUT_NODE` | 1063 | cut node 減算 |
-| LMR | `SPSA_LMR_STEP16_TT_MOVE_PENALTY` | 6002 | TT move penalty |
-| LMR | `SPSA_LMR_STEP16_CAPTURE_STAT_SCALE_NUM` | 7 | capture stat スケール |
-| LMR | `SPSA_LMR_STEP16_STAT_SCORE_SCALE_NUM` | 10 | stat score スケール |
-| LMR | `SPSA_LMR_RESEARCH_DEEPER_BASE` | 1006 | re-search deeper 基準 |
-| LMR | `SPSA_LMR_RESEARCH_DEEPER_DEPTH_MUL` | 285 | re-search deeper depth 係数 |
-| LMR | `SPSA_LMR_RESEARCH_SHALLOWER_THRESHOLD` | 7 | re-search shallower 閾値 |
+| LMR | `SPSA_LMR_NON_IMPROVING_DIV` | 512 | non-improving 除算 |
+| LMR | `SPSA_LMR_BASE_OFFSET` | 1200 | reduction ベースオフセット |
+| LMR | `SPSA_LMR_TTPV_ADD` | 946 | TT-PV ノード補正 |
+| LMR | `SPSA_LMR_STEP16_BASE_ADD` | 843 | Step16 ベース加算 |
+| LMR | `SPSA_LMR_STEP16_MOVE_COUNT_MUL` | 66 | 手番号による加算 |
+| LMR | `SPSA_LMR_STEP16_CORRECTION_DIV` | 30450 | correction value 除算 |
+| LMR | `SPSA_LMR_STEP16_CUT_NODE_ADD` | 3094 | cut node 加算 |
+| LMR | `SPSA_LMR_STEP16_CUT_NODE_NO_TT_ADD` | 1056 | cut node (TT miss) 追加 |
+| LMR | `SPSA_LMR_STEP16_TT_CAPTURE_ADD` | 1415 | TT capture 加算 |
+| LMR | `SPSA_LMR_STEP16_CUTOFF_COUNT_ADD` | 1051 | cutoff count 加算 |
+| LMR | `SPSA_LMR_STEP16_CUTOFF_COUNT_ALL_NODE_ADD` | 814 | all-node cutoff count 加算 |
+| LMR | `SPSA_LMR_STEP16_TTPV_SUB_BASE` | 2618 | TT-PV 減算ベース |
+| LMR | `SPSA_LMR_STEP16_TTPV_SUB_PV_NODE` | 991 | PV node 減算 |
+| LMR | `SPSA_LMR_STEP16_TTPV_SUB_TT_VALUE` | 903 | TT value 減算 |
+| LMR | `SPSA_LMR_STEP16_TTPV_SUB_TT_DEPTH` | 978 | TT depth 減算 |
+| LMR | `SPSA_LMR_STEP16_TTPV_SUB_CUT_NODE` | 1051 | cut node 減算 |
+| LMR | `SPSA_LMR_STEP16_TT_MOVE_PENALTY` | 2018 | TT move penalty |
+| LMR | `SPSA_LMR_STEP16_CAPTURE_STAT_SCALE_NUM` | 803 | capture stat スケール |
+| LMR | `SPSA_LMR_STEP16_STAT_SCORE_SCALE_NUM` | 794 | stat score スケール |
+| LMR | `SPSA_LMR_RESEARCH_DEEPER_BASE` | 43 | re-search deeper 基準 |
+| LMR | `SPSA_LMR_RESEARCH_DEEPER_DEPTH_MUL` | 2 | re-search deeper depth 係数 |
+| LMR | `SPSA_LMR_RESEARCH_SHALLOWER_THRESHOLD` | 9 | re-search shallower 閾値 |
 
 #### 優先度1: Futility / Razoring / NMP
 
@@ -203,18 +208,19 @@ SPSA_LMR_TABLE_COEFF,int,2809,1024,8192,35,358.4 [[NOT USED]]
 
 | regex | USI名 | default | 説明 |
 |---|---|---|---|
-| FUTILITY | `SPSA_FUTILITY_MARGIN_BASE` | 229 | futility margin 基準値 |
-| FUTILITY | `SPSA_FUTILITY_MARGIN_TT_BONUS` | 105 | TT ヒット時のボーナス |
-| FUTILITY | `SPSA_FUTILITY_IMPROVING_SCALE` | 138 | improving 時の調整 |
-| FUTILITY | `SPSA_FUTILITY_OPP_WORSENING_SCALE` | 76 | 相手悪化時の調整 |
-| FUTILITY | `SPSA_FUTILITY_CORRECTION_DIV` | 666 | correction value 除算 |
-| RAZORING | `SPSA_RAZORING_BASE` | 456 | razoring 閾値ベース |
-| RAZORING | `SPSA_RAZORING_DEPTH2` | 275 | razoring depth=2 追加 |
-| NMP | `SPSA_NMP_MARGIN_DEPTH_MULT` | 22 | NMP margin depth 係数 |
-| NMP | `SPSA_NMP_MARGIN_OFFSET` | 268 | NMP margin オフセット |
-| NMP | `SPSA_NMP_REDUCTION_BASE` | 4 | NMP reduction ベース |
-| NMP | `SPSA_NMP_REDUCTION_DEPTH_DIV` | 4 | NMP reduction depth 除算 |
-| NMP | `SPSA_NMP_VERIFICATION_DEPTH` | 14 | NMP verification depth |
+| FUTILITY | `SPSA_FUTILITY_MARGIN_BASE` | 91 | futility margin 基準値 |
+| FUTILITY | `SPSA_FUTILITY_MARGIN_TT_BONUS` | 21 | TT ヒット時のボーナス |
+| FUTILITY | `SPSA_FUTILITY_IMPROVING_SCALE` | 2094 | improving 時の調整 (`/1024` 適用) |
+| FUTILITY | `SPSA_FUTILITY_OPP_WORSENING_SCALE` | 1324 | 相手悪化時の調整 (`/4096` 適用) |
+| FUTILITY | `SPSA_FUTILITY_CORRECTION_DIV` | 158105 | correction value 除算 |
+| RAZORING | `SPSA_RAZORING_BASE` | 514 | razoring 閾値ベース |
+| RAZORING | `SPSA_RAZORING_DEPTH2` | 294 | razoring depth=2 追加 |
+| NMP | `SPSA_NMP_MARGIN_DEPTH_MULT` | 18 | NMP margin depth 係数 |
+| NMP | `SPSA_NMP_MARGIN_OFFSET` | -390 | NMP margin オフセット (式: `mult*depth + offset`) |
+| NMP | `SPSA_NMP_MARGIN_IMPROVING_BONUS` | 50 | improving 時の追加 |
+| NMP | `SPSA_NMP_REDUCTION_BASE` | 7 | NMP reduction ベース |
+| NMP | `SPSA_NMP_REDUCTION_DEPTH_DIV` | 3 | NMP reduction depth 除算 |
+| NMP | `SPSA_NMP_VERIFICATION_DEPTH` | 16 | NMP verification depth |
 | NMP | `SPSA_NMP_MIN_PLY_NUM` | 3 | NMP 最小 ply 分子 |
 | NMP | `SPSA_NMP_MIN_PLY_DEN` | 4 | NMP 最小 ply 分母 |
 
@@ -266,33 +272,35 @@ History 初期値。`--active-only-regex '^SPSA_(MAIN|CAPTURE|CONT|PAWN|LOW_PLY)
 
 `--active-only-regex '^SPSA_SINGULAR_'`
 
+rshogi 式は `+` に統一しているため、YO 式の `-X *` は rshogi 側で負値パラメータとして格納される（例: `_NON_TT_CAPTURE = -212`）。
+
 | regex | USI名 | default | 説明 |
 |---|---|---|---|
-| SINGULAR | `SPSA_SINGULAR_MIN_DEPTH_BASE` | 8 | SE 最小 depth ベース |
-| SINGULAR | `SPSA_SINGULAR_MIN_DEPTH_TT_PV_ADD` | -1 | TT-PV 時の追加 |
+| SINGULAR | `SPSA_SINGULAR_MIN_DEPTH_BASE` | 6 | SE 最小 depth ベース |
+| SINGULAR | `SPSA_SINGULAR_MIN_DEPTH_TT_PV_ADD` | 1 | TT-PV 時の追加 |
 | SINGULAR | `SPSA_SINGULAR_TT_DEPTH_MARGIN` | 3 | TT depth マージン |
-| SINGULAR | `SPSA_SINGULAR_BETA_MARGIN_BASE` | 64 | beta margin ベース |
-| SINGULAR | `SPSA_SINGULAR_BETA_MARGIN_TT_PV_NON_PV_ADD` | 98 | TT-PV かつ non-PV 時の追加 |
-| SINGULAR | `SPSA_SINGULAR_BETA_MARGIN_DIV` | 66 | beta margin depth 除算 |
+| SINGULAR | `SPSA_SINGULAR_BETA_MARGIN_BASE` | 56 | beta margin ベース |
+| SINGULAR | `SPSA_SINGULAR_BETA_MARGIN_TT_PV_NON_PV_ADD` | 81 | TT-PV かつ non-PV 時の追加 |
+| SINGULAR | `SPSA_SINGULAR_BETA_MARGIN_DIV` | 60 | beta margin depth 除算 |
 | SINGULAR | `SPSA_SINGULAR_DEPTH_DIV` | 2 | SE search depth 除算 |
-| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_BASE` | -3 | double ext margin ベース |
-| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_PV_NODE` | -17 | PV node 追加 |
-| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_NON_TT_CAPTURE` | -14 | non-TT capture 追加 |
-| SINGULAR | `SPSA_SINGULAR_CORR_VAL_ADJ_DIV` | 272 | correction value 調整除算 |
-| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_MULT` | 37 | TT move history 係数 |
-| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_DIV` | 1024 | TT move history 除算 |
-| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_LATE_PLY_PENALTY` | 1 | late ply ペナルティ |
-| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_BASE` | 97 | triple ext margin ベース |
-| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_PV_NODE` | -18 | PV node 追加 |
-| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_NON_TT_CAPTURE` | -40 | non-TT capture 追加 |
-| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_TT_PV` | -22 | TT-PV 追加 |
-| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_LATE_PLY_PENALTY` | 2 | late ply ペナルティ |
-| SINGULAR | `SPSA_SINGULAR_NEGATIVE_EXTENSION_TT_FAIL_HIGH` | -1 | TT fail-high 時の負延長 |
-| SINGULAR | `SPSA_SINGULAR_NEGATIVE_EXTENSION_CUT_NODE` | -1 | cut node 時の負延長 |
+| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_BASE` | -4 | double ext margin ベース |
+| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_PV_NODE` | 198 | PV node 追加 |
+| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_NON_TT_CAPTURE` | -212 | non-TT capture 追加 (YO `-212 *`) |
+| SINGULAR | `SPSA_SINGULAR_CORR_VAL_ADJ_DIV` | 229958 | correction value 調整除算 |
+| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_MULT` | -921 | TT move history 係数 (YO `-921 *`) |
+| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_DIV` | 127649 | TT move history 除算 |
+| SINGULAR | `SPSA_SINGULAR_DOUBLE_MARGIN_LATE_PLY_PENALTY` | 45 | late ply ペナルティ |
+| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_BASE` | 76 | triple ext margin ベース |
+| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_PV_NODE` | 308 | PV node 追加 |
+| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_NON_TT_CAPTURE` | -250 | non-TT capture 追加 (YO `-250 *`) |
+| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_TT_PV` | 92 | TT-PV 追加 |
+| SINGULAR | `SPSA_SINGULAR_TRIPLE_MARGIN_LATE_PLY_PENALTY` | 52 | late ply ペナルティ |
+| SINGULAR | `SPSA_SINGULAR_NEGATIVE_EXTENSION_TT_FAIL_HIGH` | -3 | TT fail-high 時の負延長 |
+| SINGULAR | `SPSA_SINGULAR_NEGATIVE_EXTENSION_CUT_NODE` | -2 | cut node 時の負延長 |
 
 #### 優先度3: Aspiration Window / Step 18 / TT cutoff / evalDiff
 
-`--active-only-regex '^SPSA_(ASP|S18|TT_CUTOFF|EVAL_DIFF)_'`
+`--active-only-regex '^SPSA_(ASP|S18|TT_CUTOFF|EVAL_DIFF|SMALL_PROBCUT)_'`
 
 | regex | USI名 | default | 説明 |
 |---|---|---|---|
@@ -302,6 +310,10 @@ History 初期値。`--active-only-regex '^SPSA_(MAIN|CAPTURE|CONT|PAWN|LOW_PLY)
 | S18 | `SPSA_S18_R_THRESH1` | 3212 | full depth 閾値 1 |
 | S18 | `SPSA_S18_R_THRESH2` | 4784 | full depth 閾値 2 |
 | TT_CUTOFF | `SPSA_TT_CUTOFF_CONT_PENALTY` | -2142 | TT cutoff cont history penalty |
+| TT_CUTOFF | `SPSA_TT_CUTOFF_QUIET_BONUS_DEPTH_MULT` | 130 | TT cutoff quiet bonus depth 係数 |
+| TT_CUTOFF | `SPSA_TT_CUTOFF_QUIET_BONUS_OFFSET` | -71 | TT cutoff quiet bonus オフセット |
+| TT_CUTOFF | `SPSA_TT_CUTOFF_QUIET_BONUS_MAX` | 1043 | TT cutoff quiet bonus 上限 |
+| SMALL_PROBCUT | `SPSA_SMALL_PROBCUT_BETA_MARGIN` | 418 | small ProbCut beta margin |
 | EVAL_DIFF | `SPSA_EVAL_DIFF_CLAMP_MIN` | -200 | evalDiff clamp 下限 |
 | EVAL_DIFF | `SPSA_EVAL_DIFF_CLAMP_MAX` | 156 | evalDiff clamp 上限 |
 | EVAL_DIFF | `SPSA_EVAL_DIFF_OFFSET` | 58 | evalDiff オフセット |
@@ -314,25 +326,25 @@ History 初期値。`--active-only-regex '^SPSA_(MAIN|CAPTURE|CONT|PAWN|LOW_PLY)
 
 | regex | USI名 | default | 説明 |
 |---|---|---|---|
-| STAT | `SPSA_STAT_BONUS_DEPTH_MULT` | 163 | stat bonus depth 係数 |
-| STAT | `SPSA_STAT_BONUS_OFFSET` | -118 | stat bonus オフセット |
-| STAT | `SPSA_STAT_BONUS_MAX` | 1544 | stat bonus 上限 |
-| STAT | `SPSA_STAT_BONUS_TT_BONUS` | 315 | TT move bonus |
-| STAT | `SPSA_STAT_MALUS_DEPTH_MULT` | 148 | stat malus depth 係数 |
-| STAT | `SPSA_STAT_MALUS_OFFSET` | -114 | stat malus オフセット |
-| STAT | `SPSA_STAT_MALUS_MAX` | 1515 | stat malus 上限 |
-| STAT | `SPSA_STAT_MALUS_MOVE_COUNT_MULT` | 19 | stat malus move count 係数 |
-| PROBCUT | `SPSA_PROBCUT_BETA_MARGIN` | 188 | ProbCut beta margin |
-| PROBCUT | `SPSA_PROBCUT_IMPROVING_SUB` | 52 | improving 時の減算 |
-| PROBCUT | `SPSA_PROBCUT_DYNAMIC_DIV` | 399 | 動的 beta 除算 |
-| PROBCUT | `SPSA_PROBCUT_DEPTH_BASE` | 3 | ProbCut depth |
-| QS | `SPSA_QS_FUTILITY_BASE` | 200 | 静止探索 futility ベース |
-| IIR | `SPSA_IIR_SHALLOW` | 3 | IIR 浅い depth 閾値 |
-| IIR | `SPSA_IIR_DEEP` | 8 | IIR 深い depth 閾値 |
+| STAT | `SPSA_STAT_BONUS_DEPTH_MULT` | 121 | stat bonus depth 係数 |
+| STAT | `SPSA_STAT_BONUS_OFFSET` | -77 | stat bonus オフセット |
+| STAT | `SPSA_STAT_BONUS_MAX` | 1633 | stat bonus 上限 |
+| STAT | `SPSA_STAT_BONUS_TT_BONUS` | 375 | TT move bonus |
+| STAT | `SPSA_STAT_MALUS_DEPTH_MULT` | 825 | stat malus depth 係数 |
+| STAT | `SPSA_STAT_MALUS_OFFSET` | -196 | stat malus オフセット |
+| STAT | `SPSA_STAT_MALUS_MAX` | 2159 | stat malus 上限 |
+| STAT | `SPSA_STAT_MALUS_MOVE_COUNT_MULT` | 16 | stat malus move count 係数 |
+| PROBCUT | `SPSA_PROBCUT_BETA_MARGIN` | 224 | ProbCut beta margin |
+| PROBCUT | `SPSA_PROBCUT_IMPROVING_SUB` | 64 | improving 時の減算 |
+| PROBCUT | `SPSA_PROBCUT_DYNAMIC_DIV` | 306 | 動的 beta 除算 |
+| PROBCUT | `SPSA_PROBCUT_DEPTH_BASE` | 5 | ProbCut depth |
+| QS | `SPSA_QS_FUTILITY_BASE` | 352 | 静止探索 futility ベース |
+| IIR | `SPSA_IIR_SHALLOW` | 1 | IIR 浅い depth 閾値 |
+| IIR | `SPSA_IIR_DEEP` | 3 | IIR 深い depth 閾値 |
 | IIR | `SPSA_IIR_DEPTH_BOUNDARY` | 10 | IIR depth 境界 |
 | IIR | `SPSA_IIR_EVAL_SUM` | 177 | IIR eval sum 閾値 |
 | DRAW | `SPSA_DRAW_JITTER_MASK` | 2 | 引き分けスコア揺らぎマスク |
-| DRAW | `SPSA_DRAW_JITTER_OFFSET` | 1 | 引き分けスコア揺らぎオフセット |
+| DRAW | `SPSA_DRAW_JITTER_OFFSET` | -1 | 引き分けスコア揺らぎオフセット |
 
 #### 優先度3: History 詳細（Continuation / Pawn / Prior / TT move）
 
@@ -341,39 +353,39 @@ History 初期値。`--active-only-regex '^SPSA_(MAIN|CAPTURE|CONT|PAWN|LOW_PLY)
 
 | regex | USI名 | default | 説明 |
 |---|---|---|---|
-| LOW_PLY | `SPSA_LOW_PLY_HISTORY_MULTIPLIER` | 366 | low ply history 乗算 |
-| LOW_PLY | `SPSA_LOW_PLY_HISTORY_OFFSET` | -189 | low ply history オフセット |
-| CONT | `SPSA_CONT_HISTORY_MULTIPLIER` | 52 | cont history bonus 乗算 |
-| CONT | `SPSA_CONT_HISTORY_NEAR_PLY_OFFSET` | 36 | cont history 近 ply オフセット |
-| CONT | `SPSA_CONT_HISTORY_WEIGHT_1`〜`6` | 6,5,4,3,2,2 | cont history weight (ply 1〜6) |
-| FAIL_HIGH | `SPSA_FAIL_HIGH_CONT_BASE_NUM` | 79 | fail-high cont bonus ベース |
-| FAIL_HIGH | `SPSA_FAIL_HIGH_CONT_NEAR_PLY_OFFSET` | 35 | fail-high cont 近 ply オフセット |
-| FAIL_HIGH | `SPSA_FAIL_HIGH_CONT_WEIGHT_1`〜`6` | 5,4,3,2,2,1 | fail-high cont weight (ply 1〜6) |
-| PAWN | `SPSA_PAWN_HISTORY_POS_MULTIPLIER` | 8 | pawn history 正方向乗算 |
-| PAWN | `SPSA_PAWN_HISTORY_NEG_MULTIPLIER` | 25 | pawn history 負方向乗算 |
-| UPDATE | `SPSA_UPDATE_ALL_QUIET_BONUS_SCALE_NUM` | 1 | quiet bonus スケール |
-| UPDATE | `SPSA_UPDATE_ALL_QUIET_MALUS_SCALE_NUM` | 1 | quiet malus スケール |
-| UPDATE | `SPSA_UPDATE_ALL_CAPTURE_BONUS_SCALE_NUM` | 1 | capture bonus スケール |
-| UPDATE | `SPSA_UPDATE_ALL_CAPTURE_MALUS_SCALE_NUM` | 1 | capture malus スケール |
-| UPDATE | `SPSA_UPDATE_ALL_EARLY_REFUTE_PENALTY_SCALE_NUM` | 1 | early refute penalty スケール |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_BONUS_SCALE_BASE` | 4137 | prior quiet CM bonus ベース |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_PARENT_STAT_DIV` | 461 | parent stat 除算 |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_DEPTH_MUL` | 146 | depth 係数 |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_DEPTH_CAP` | 8 | depth 上限 |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_MOVE_COUNT_BONUS` | 157 | move count bonus |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_EVAL_BONUS` | 197 | eval bonus |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_EVAL_MARGIN` | 193 | eval margin |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_PARENT_EVAL_BONUS` | 142 | parent eval bonus |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_PARENT_EVAL_MARGIN` | 204 | parent eval margin |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_SCALED_DEPTH_MUL` | 128 | scaled depth 係数 |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_SCALED_OFFSET` | 127 | scaled offset |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_SCALED_CAP` | 6 | scaled 上限 |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_CONT_SCALE_NUM` | 1 | cont scale |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_MAIN_SCALE_NUM` | 2 | main scale |
-| PRIOR | `SPSA_PRIOR_QUIET_CM_PAWN_SCALE_NUM` | 1 | pawn scale |
-| TT_MOVE | `SPSA_TT_MOVE_BONUS` | 285 | TT move bonus |
-| TT_MOVE | `SPSA_TT_MOVE_MALUS` | 68 | TT move malus |
-| PRIOR | `SPSA_PRIOR_CAPTURE_CM_BONUS` | 200 | prior capture CM bonus |
+| LOW_PLY | `SPSA_LOW_PLY_HISTORY_MULTIPLIER` | 761 | low ply history 乗算 |
+| LOW_PLY | `SPSA_LOW_PLY_HISTORY_OFFSET` | 0 | low ply history オフセット |
+| CONT | `SPSA_CONT_HISTORY_MULTIPLIER` | 955 | cont history bonus 乗算 |
+| CONT | `SPSA_CONT_HISTORY_NEAR_PLY_OFFSET` | 88 | cont history 近 ply オフセット |
+| CONT | `SPSA_CONT_HISTORY_WEIGHT_1`〜`6` | 1157,648,288,576,140,441 | cont history weight (ply 1〜6) |
+| FAIL_HIGH | `SPSA_FAIL_HIGH_CONT_BASE_NUM` | 1412 | fail-high cont bonus ベース |
+| FAIL_HIGH | `SPSA_FAIL_HIGH_CONT_NEAR_PLY_OFFSET` | 80 | fail-high cont 近 ply オフセット |
+| FAIL_HIGH | `SPSA_FAIL_HIGH_CONT_WEIGHT_1`〜`6` | 1108,652,273,572,126,449 | fail-high cont weight (ply 1〜6) |
+| PAWN | `SPSA_PAWN_HISTORY_POS_MULTIPLIER` | 850 | pawn history 正方向乗算 |
+| PAWN | `SPSA_PAWN_HISTORY_NEG_MULTIPLIER` | 550 | pawn history 負方向乗算 |
+| UPDATE | `SPSA_UPDATE_ALL_QUIET_BONUS_SCALE_NUM` | 881 | quiet bonus スケール |
+| UPDATE | `SPSA_UPDATE_ALL_QUIET_MALUS_SCALE_NUM` | 1083 | quiet malus スケール |
+| UPDATE | `SPSA_UPDATE_ALL_CAPTURE_BONUS_SCALE_NUM` | 1482 | capture bonus スケール |
+| UPDATE | `SPSA_UPDATE_ALL_CAPTURE_MALUS_SCALE_NUM` | 1397 | capture malus スケール |
+| UPDATE | `SPSA_UPDATE_ALL_EARLY_REFUTE_PENALTY_SCALE_NUM` | 614 | early refute penalty スケール |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_BONUS_SCALE_BASE` | -228 | prior quiet CM bonus ベース |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_PARENT_STAT_DIV` | 104 | parent stat 除算 |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_DEPTH_MUL` | 63 | depth 係数 |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_DEPTH_CAP` | 508 | depth 上限 |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_MOVE_COUNT_BONUS` | 184 | move count bonus |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_EVAL_BONUS` | 143 | eval bonus |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_EVAL_MARGIN` | 92 | eval margin |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_PARENT_EVAL_BONUS` | 149 | parent eval bonus |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_PARENT_EVAL_MARGIN` | 70 | parent eval margin |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_SCALED_DEPTH_MUL` | 144 | scaled depth 係数 |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_SCALED_OFFSET` | -92 | scaled offset |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_SCALED_CAP` | 1365 | scaled 上限 |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_CONT_SCALE_NUM` | 400 | cont scale |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_MAIN_SCALE_NUM` | 220 | main scale |
+| PRIOR | `SPSA_PRIOR_QUIET_CM_PAWN_SCALE_NUM` | 1164 | pawn scale |
+| TT_MOVE | `SPSA_TT_MOVE_BONUS` | 811 | TT move bonus |
+| TT_MOVE | `SPSA_TT_MOVE_MALUS` | -848 | TT move malus |
+| PRIOR | `SPSA_PRIOR_CAPTURE_CM_BONUS` | 964 | prior capture CM bonus |
 
 ## 7. `.params` ファイルの step / delta
 
