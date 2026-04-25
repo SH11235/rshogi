@@ -141,6 +141,61 @@ pub trait RateStorage {
     fn list_all(
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<PlayerRateRecord>, StorageError>>;
+
+    /// 終局時のレート関連フィールドを更新する（atomic な read-modify-write）。
+    ///
+    /// レート値そのもの（`rate`）は外部バッチ（Ruby `mk_rate` 等）が更新する責務
+    /// なので本関数では触れず、勝敗 / `last_game_id` / `last_modified` のみを
+    /// 更新する。`winner` が `Some(name)` なら該当者の `wins` を +1、それ以外の
+    /// 既知プレイヤの `losses` を +1 する。`winner` が `None`（千日手・最大手数・
+    /// 切断で勝者不確定 `Abnormal { winner: None }`）なら `wins`/`losses` は据置で
+    /// `last_*` のみ更新する。
+    ///
+    /// **契約**: `black != white` を呼び出し側が保証する（CSA 対局は同一プレイヤ
+    /// が先後に登場しないため League 層で守られる前提）。同名を渡した場合は早期
+    /// return し、`wins`/`losses` の二重加算を防ぐ。debug ビルドでは `debug_assert_ne!`
+    /// で契約違反を顕在化させる。
+    ///
+    /// **既定実装の race**: `load` → 変更 → `save` を逐次実行するため、複数対局が
+    /// 同時に同一プレイヤのレコードを書き換えると最後の `save` で勝敗増分が失われる
+    /// lost-update を抱える。本既定実装は単一プロセス内の小規模運用（テスト・
+    /// インメモリ Mock）向けで、本番フロントエンド（[`crate::PlayersYamlRateStorage`]
+    /// 等）はこのメソッドを override して内部 lock 配下で読み書きを直列化する。
+    fn record_game_outcome(
+        &self,
+        black: &PlayerName,
+        white: &PlayerName,
+        winner: Option<&PlayerName>,
+        game_id: &GameId,
+        now_iso: &str,
+    ) -> impl std::future::Future<Output = Result<(), StorageError>> {
+        debug_assert_ne!(
+            black, white,
+            "record_game_outcome: black and white must be distinct players",
+        );
+        async move {
+            // self-play 防護: 同名を渡した場合は無視する。リリースビルドでも
+            // 二重加算を絶対に発生させない。
+            if black == white {
+                return Ok(());
+            }
+            for name in [black, white] {
+                let mut rec = match self.load(name).await? {
+                    Some(r) => r,
+                    None => continue,
+                };
+                match winner {
+                    Some(w) if w == name => rec.wins = rec.wins.saturating_add(1),
+                    Some(_) => rec.losses = rec.losses.saturating_add(1),
+                    None => {}
+                }
+                rec.last_game_id = Some(game_id.clone());
+                rec.last_modified = now_iso.to_owned();
+                self.save(&rec).await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// ブイ（途中局面テンプレート）の永続化抽象。

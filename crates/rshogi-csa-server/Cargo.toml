@@ -15,6 +15,11 @@ thiserror.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Ruby shogi-server 互換 `players.yaml` の読み書きで使用する。実装本体は
+# `tokio-transport` 配下の `storage::players_yaml` のみが触れるため、wasm32
+# (workers) ビルドに不要な依存が入らないよう optional + `tokio-transport` 連動で
+# 引き込む。
+serde_yaml = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 
 [features]
@@ -22,7 +27,7 @@ tokio = { workspace = true, optional = true }
 # `--no-default-features --features workers` を渡して tokio 依存を外す。
 default = ["tokio-transport"]
 # tokio 非同期ランタイムを使う `GameRoom::run` 等を有効化する。
-tokio-transport = ["dep:tokio"]
+tokio-transport = ["dep:tokio", "dep:serde_yaml"]
 # Cloudflare Workers 等のシングルスレッド wasm ランタイム向けフラグ（現状は副作用なし）。
 workers = []
 

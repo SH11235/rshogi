@@ -18,14 +18,15 @@ use std::rc::Rc;
 use anyhow::Context;
 use clap::Parser;
 use rshogi_csa_server::error::StorageError;
-use rshogi_csa_server::port::{PlayerRateRecord, RateStorage};
+use rshogi_csa_server::port::{KifuStorage, PlayerRateRecord, RateStorage};
 use rshogi_csa_server::types::PlayerName;
-use rshogi_csa_server::{ClockSpec, FileKifuStorage};
+use rshogi_csa_server::{ClockSpec, FileKifuStorage, PlayersYamlRateStorage};
 use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
 use rshogi_csa_server_tcp::server::{
-    InMemoryPasswordStore, ServerConfig, build_state, prepare_runtime, run_server,
+    InMemoryPasswordStore, PasswordStore, ServerConfig, SharedState, build_state, prepare_runtime,
+    run_server,
 };
 use tokio::sync::Mutex;
 
@@ -44,9 +45,18 @@ struct Cli {
     /// 棋譜と 00LIST を保存するルートディレクトリ。
     #[arg(long, default_value = "./kifu")]
     kifu_dir: PathBuf,
-    /// プレイヤ定義ファイル（TOML 形式、keys = handle）。
+    /// プレイヤ定義ファイル（TOML 形式、keys = handle）。`password` フィールドを
+    /// 読むのは常に本ファイル。`--players-yaml` を併用するとレート関連フィールド
+    /// (`rate` / `wins` / `losses`) は YAML 側で永続管理される（TOML 側の
+    /// `rate` / `wins` / `losses` は YAML 未登録プレイヤの初期値補填にのみ使う）。
     #[arg(long)]
     players: PathBuf,
+    /// Ruby shogi-server 互換の `players.yaml` パス。指定すると終局時に
+    /// 勝敗・最終対局 ID・最終更新時刻が atomic write で書き戻される。
+    /// 未指定時はインメモリ保存（再起動で wins/losses が失われる開発用）。
+    /// `--allow-floodgate-features` の opt-in が立っていない場合は起動が失敗する。
+    #[arg(long, value_name = "PATH")]
+    players_yaml: Option<PathBuf>,
     /// 秒読み方式 / Fischer 方式で使う持ち時間 (秒)。
     #[arg(long, default_value_t = 600)]
     total_time_sec: u32,
@@ -171,7 +181,6 @@ fn main() -> anyhow::Result<()> {
     let (password_map, rate_map) = load_players_toml(&cli.players)
         .with_context(|| format!("failed to load players file {:?}", cli.players))?;
     let password_store = InMemoryPasswordStore { map: password_map };
-    let rate_storage = InMemoryRateStorage::new(rate_map);
 
     // 2. ServerConfig を構築。
     let config = ServerConfig {
@@ -192,10 +201,15 @@ fn main() -> anyhow::Result<()> {
         initial_sfen: None,
         admin_handles: cli.admin_handle.clone(),
         allow_floodgate_features: cli.allow_floodgate_features,
+        // `cli.players_yaml` を一旦クローンして config に乗せる。下の `async move`
+        // ブロックが分岐ごとに `cli.players_yaml` の所有権を取れるよう、ここでは
+        // 1 回だけ clone する（残りはそのまま move される）。
+        players_yaml_path: cli.players_yaml.clone(),
         shutdown_grace: std::time::Duration::from_secs(cli.shutdown_grace_sec),
     };
-    // Floodgate 系機能の opt-in ゲートを起動前に評価する。要求があるのに
-    // フラグが立っていない場合はここで起動を止める。
+    // Floodgate 系機能の opt-in ゲートを起動前に評価する。`players_yaml_path` が
+    // `Some` の状態は `enable_persistent_player_rates` 要求として intent に乗るため、
+    // `--allow-floodgate-features` が立っていなければここで fail-fast する。
     prepare_runtime(&config).map_err(|msg| {
         anyhow::anyhow!(
             "{msg}; pass {ALLOW_FLOODGATE_FEATURES_FLAG} to enable Floodgate runtime features",
@@ -203,7 +217,57 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     let kifu_storage = FileKifuStorage::new(config.kifu_topdir.clone());
-    let state = Rc::new(build_state(
+
+    // 3. port trait の `async fn in trait` は `Send` 境界を持たないため、TCP バイナリは
+    //    `current_thread` ランタイム + `LocalSet` 経路で配線する（設計方針）。
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let local = tokio::task::LocalSet::new();
+    // `cli.players_yaml` の所有権を async 内に move する（追加 clone を避ける）。
+    let players_yaml = cli.players_yaml;
+    local.block_on(&rt, async move {
+        // 4. レートストレージを `--players-yaml` の有無で切り替える。
+        //    YAML 経路: 起動時に既存ファイルを読み、YAML 未登録の handle を
+        //              TOML 由来の `PlayerRateRecord`（rate / wins / losses）で
+        //              in-memory 補填する。書き戻しは `record_game_outcome` 経由
+        //              で atomic に行う。
+        //    None 経路: TOML から再構築するインメモリ保存。再起動で wins/losses が
+        //              失われるが、開発・テスト用途には十分。
+        if let Some(yaml_path) = players_yaml {
+            // load_from_file が PathBuf を消費するので、エラーメッセージ用には
+            // path 文字列を先に確保する（追加 PathBuf clone を避ける）。
+            let path_for_err = yaml_path.display().to_string();
+            let storage = PlayersYamlRateStorage::load_from_file(yaml_path)
+                .await
+                .with_context(|| format!("failed to load players.yaml at {path_for_err}"))?;
+            // TOML 由来の handle でまだ YAML 上に存在しないものを TOML 値そのままで
+            // 補填する。YAML 既存レコード側は ensure_default_records が保護する。
+            // `into_values()` で `PlayerRateRecord` 全体を渡すことで、TOML の
+            // rate / wins / losses が初期値補填経路でデータ破壊なく反映される。
+            storage.ensure_default_records(rate_map.into_values());
+            run_with_state(config, storage, kifu_storage, password_store).await
+        } else {
+            let storage = InMemoryRateStorage::new(rate_map);
+            run_with_state(config, storage, kifu_storage, password_store).await
+        }
+    })?;
+    Ok(())
+}
+
+/// 構築済みの依存（rate / kifu / password）から `SharedState` を組み立てて
+/// accept ループを起動し、SIGINT / SIGTERM 受信後の graceful shutdown を完遂する
+/// 共通経路。`R` を YAML / インメモリで切り替えるための monomorphize 用ヘルパ。
+async fn run_with_state<R, K, P>(
+    config: ServerConfig,
+    rate_storage: R,
+    kifu_storage: K,
+    password_store: P,
+) -> anyhow::Result<()>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let state: Rc<SharedState<R, K, P>> = Rc::new(build_state(
         config,
         rate_storage,
         kifu_storage,
@@ -213,79 +277,66 @@ fn main() -> anyhow::Result<()> {
         InMemoryBroadcaster::new(),
     ));
 
-    // 3. port trait の `async fn in trait` は `Send` 境界を持たないため、TCP バイナリは
-    //    `current_thread` ランタイム + `LocalSet` 経路で配線する（設計方針）。
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&rt, async move {
-        let handle = run_server(state.clone()).await.context("run_server")?;
-        tracing::info!("rshogi-csa-server-tcp ready");
+    let handle = run_server(state.clone()).await.context("run_server")?;
+    tracing::info!("rshogi-csa-server-tcp ready");
 
-        // SIGINT と SIGTERM を並列待機する。SIGINT は Ctrl-C、SIGTERM は
-        // systemd / Docker / Kubernetes の停止シグナル。
-        let sig = wait_for_termination_signal().await;
-        tracing::info!(signal = sig, "initiating graceful shutdown");
+    // SIGINT と SIGTERM を並列待機する。SIGINT は Ctrl-C、SIGTERM は
+    // systemd / Docker / Kubernetes の停止シグナル。
+    let sig = wait_for_termination_signal().await;
+    tracing::info!(signal = sig, "initiating graceful shutdown");
 
-        // 1. 新規接続の受付停止 + 待機プール中のセッション切断を誘導する。
-        state.shutdown.trigger();
+    // 1. 新規接続の受付停止 + 待機プール中のセッション切断を誘導する。
+    state.shutdown.trigger();
 
-        // 2. accept ループの終了を待つ。shutdown が立っているので即座に抜ける。
-        //    panic した場合に listener 未解放のまま後段に進まないよう、panic は
-        //    error log に落として正常経路と同様に fall-through させる。
-        //    `{e:#}` は JoinError の Debug 出力（panic payload とロケーション）を
-        //    一行に展開するので、運用時の原因調査で使える。
-        match handle.await {
-            Ok(()) => {}
-            Err(e) if e.is_panic() => {
-                // `JoinError::Display` は "task X panicked" を返す。`{e:#}` の
-                // alternate flag は同種類で `{e}` と同等出力なので、`%e` に絞って
-                // 一時 String 確保を省く（panic payload を覗くなら別途
-                // `e.into_panic()` 経由が必要）。
-                tracing::error!(error = %e, "accept loop panicked during shutdown");
-            }
-            Err(e) => {
-                tracing::info!(error = %e, "accept loop joined with error");
-            }
+    // 2. accept ループの終了を待つ。shutdown が立っているので即座に抜ける。
+    //    panic した場合に listener 未解放のまま後段に進まないよう、panic は
+    //    error log に落として正常経路と同様に fall-through させる。
+    match handle.await {
+        Ok(()) => {}
+        Err(e) if e.is_panic() => {
+            tracing::error!(error = %e, "accept loop panicked during shutdown");
         }
+        Err(e) => {
+            tracing::info!(error = %e, "accept loop joined with error");
+        }
+    }
 
-        // 3. 進行中対局が終局するまで待つ。grace を超過したら warning を出して
-        //    プロセス終了へ進む（残りの対局タスクは LocalSet 終了で abort される）。
-        //    `shutdown_grace = 0` は「grace なし = 即切り」と解釈する。
-        //
-        //    TOCTOU 対策として `wait_active_games_notify` を先に登録してから
-        //    counter を確認する。これで登録と確認の間に `notify_waiters` が
-        //    発火しても取りこぼさない。
-        let grace = state.config().shutdown_grace;
-        let deadline = tokio::time::Instant::now() + grace;
-        loop {
-            let notified = state.wait_active_games_notify();
-            let active = state.active_game_count();
-            if active == 0 {
+    // 3. 進行中対局が終局するまで待つ。grace を超過したら warning を出して
+    //    プロセス終了へ進む（残りの対局タスクは LocalSet 終了で abort される）。
+    //    `shutdown_grace = 0` は「grace なし = 即切り」と解釈する。
+    //
+    //    TOCTOU 対策として `wait_active_games_notify` を先に登録してから
+    //    counter を確認する。これで登録と確認の間に `notify_waiters` が
+    //    発火しても取りこぼさない。
+    let grace = state.config().shutdown_grace;
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        let notified = state.wait_active_games_notify();
+        let active = state.active_game_count();
+        if active == 0 {
+            break;
+        }
+        tracing::info!(
+            active_games = active,
+            grace_sec = grace.as_secs(),
+            "waiting for active games to finish"
+        );
+        tokio::select! {
+            _ = notified => continue,
+            _ = tokio::time::sleep_until(deadline) => {
+                let remaining = state.active_game_count();
+                if remaining > 0 {
+                    tracing::warn!(
+                        unfinished_games = remaining,
+                        "shutdown grace expired"
+                    );
+                }
                 break;
             }
-            tracing::info!(
-                active_games = active,
-                grace_sec = grace.as_secs(),
-                "waiting for active games to finish"
-            );
-            tokio::select! {
-                _ = notified => continue,
-                _ = tokio::time::sleep_until(deadline) => {
-                    let remaining = state.active_game_count();
-                    if remaining > 0 {
-                        tracing::warn!(
-                            unfinished_games = remaining,
-                            "shutdown grace expired"
-                        );
-                    }
-                    break;
-                }
-            }
         }
+    }
 
-        tracing::info!("shutdown complete");
-        Ok::<(), anyhow::Error>(())
-    })?;
+    tracing::info!("shutdown complete");
     Ok(())
 }
 

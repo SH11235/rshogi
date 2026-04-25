@@ -16,6 +16,10 @@ pub struct FloodgateFeatureIntent {
     pub enable_scheduler: bool,
     pub use_non_direct_pairing: bool,
     pub enable_duplicate_login_policy: bool,
+    /// Ruby shogi-server 互換 `players.yaml` 形式でレートを永続化する経路を
+    /// 有効化する意図。`PlayersYamlRateStorage` を起動時に読み込み、終局時に
+    /// 書き戻す経路を本フラグで gate する。
+    pub enable_persistent_player_rates: bool,
 }
 
 /// 真偽文字列から Floodgate 機能 gate を解決する。
@@ -64,6 +68,9 @@ pub fn validate_floodgate_feature_gate(
     }
     if intent.enable_duplicate_login_policy {
         requested.push("duplicate_login_policy");
+    }
+    if intent.enable_persistent_player_rates {
+        requested.push("persistent_player_rates");
     }
     if requested.is_empty() || allow_floodgate_features {
         return Ok(());
@@ -144,11 +151,26 @@ mod tests {
                 enable_scheduler: true,
                 use_non_direct_pairing: true,
                 enable_duplicate_login_policy: true,
+                enable_persistent_player_rates: true,
             },
         )
         .unwrap_err();
         assert!(err.contains("scheduler"));
         assert!(err.contains("non_direct_pairing"));
         assert!(err.contains("duplicate_login_policy"));
+        assert!(err.contains("persistent_player_rates"));
+    }
+
+    #[test]
+    fn floodgate_gate_rejects_persistent_player_rates_when_disabled() {
+        let err = validate_floodgate_feature_gate(
+            false,
+            FloodgateFeatureIntent {
+                enable_persistent_player_rates: true,
+                ..FloodgateFeatureIntent::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("persistent_player_rates"));
     }
 }
