@@ -80,6 +80,11 @@ struct Cli {
     /// 実装する（現時点ではまだ配線された機能は無い）。
     #[arg(long, default_value_t = false)]
     allow_floodgate_features: bool,
+    /// SIGINT / SIGTERM 受信後に進行中対局の完了を待つ秒数。超過分は未完了の
+    /// まま warning log を出して切り捨てる。ローリング再起動で対局を落とさない
+    /// ためのバッファ。
+    #[arg(long, default_value_t = 60)]
+    shutdown_grace_sec: u64,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -146,6 +151,7 @@ fn main() -> anyhow::Result<()> {
         initial_sfen: None,
         admin_handles: cli.admin_handle.clone(),
         allow_floodgate_features: cli.allow_floodgate_features,
+        shutdown_grace: std::time::Duration::from_secs(cli.shutdown_grace_sec),
     };
     let kifu_storage = FileKifuStorage::new(config.kifu_topdir.clone());
     let state = Rc::new(build_state(
@@ -163,23 +169,100 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, async move {
-        let handle = run_server(state).await.context("run_server")?;
+        let handle = run_server(state.clone()).await.context("run_server")?;
         log::info!("rshogi-csa-server-tcp ready");
-        // 暫定のシャットダウン経路: SIGINT のみ監視し、受信したら受付タスクを `abort` で
-        // 強制停止する。SIGTERM（Docker / Kubernetes）は未対応で、また abort は進行中の
-        // 対局タスクと棋譜書き込みを中途半端な状態で切り捨てる可能性がある。
+
+        // SIGINT と SIGTERM を並列待機する。SIGINT は Ctrl-C、SIGTERM は
+        // systemd / Docker / Kubernetes の停止シグナル。
+        let sig = wait_for_termination_signal().await;
+        log::info!("received {sig}, initiating graceful shutdown");
+
+        // 1. 新規接続の受付停止 + 待機プール中のセッション切断を誘導する。
+        state.shutdown.trigger();
+
+        // 2. accept ループの終了を待つ。shutdown が立っているので即座に抜ける。
+        //    panic した場合に listener 未解放のまま後段に進まないよう、panic は
+        //    error log に落として正常経路と同様に fall-through させる。
+        //    `{e:#}` は JoinError の Debug 出力（panic payload とロケーション）を
+        //    一行に展開するので、運用時の原因調査で使える。
+        match handle.await {
+            Ok(()) => {}
+            Err(e) if e.is_panic() => {
+                log::error!("accept loop panicked during shutdown: {e:#}");
+            }
+            Err(e) => {
+                log::info!("accept loop joined with error: {e:#}");
+            }
+        }
+
+        // 3. 進行中対局が終局するまで待つ。grace を超過したら warning を出して
+        //    プロセス終了へ進む（残りの対局タスクは LocalSet 終了で abort される）。
+        //    `shutdown_grace = 0` は「grace なし = 即切り」と解釈する。
         //
-        // 完全な graceful shutdown を入れる場合に必要な要素:
-        //   - SIGTERM も含めた終了シグナル待機
-        //   - 新規接続の受付停止
-        //   - 進行中対局の終局待ちおよび棋譜・00LIST の原子的 flush
-        // graceful shutdown 実装時にここの `handle.abort()` は cancellation token 経路へ置き換える。
-        let _ = tokio::signal::ctrl_c().await;
-        log::info!("shutting down");
-        handle.abort();
+        //    TOCTOU 対策として `wait_active_games_notify` を先に登録してから
+        //    counter を確認する。これで登録と確認の間に `notify_waiters` が
+        //    発火しても取りこぼさない。
+        let grace = state.config().shutdown_grace;
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            let notified = state.wait_active_games_notify();
+            let active = state.active_game_count();
+            if active == 0 {
+                break;
+            }
+            log::info!(
+                "waiting for {active} active game(s) to finish (grace {}s)",
+                grace.as_secs()
+            );
+            tokio::select! {
+                _ = notified => continue,
+                _ = tokio::time::sleep_until(deadline) => {
+                    let remaining = state.active_game_count();
+                    if remaining > 0 {
+                        log::warn!(
+                            "shutdown grace expired; {remaining} game(s) left unfinished"
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+
+        log::info!("shutdown complete");
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())
+}
+
+/// SIGINT / SIGTERM のどちらかを受けるまで待つ。受けたシグナル名を返す。
+///
+/// Unix 以外のプラットフォームでは SIGTERM 経路は `pending` になるため、
+/// 実質 SIGINT (Ctrl-C) のみが反応する。
+async fn wait_for_termination_signal() -> &'static str {
+    let sigint = async {
+        let _ = tokio::signal::ctrl_c().await;
+        "SIGINT"
+    };
+    #[cfg(unix)]
+    let sigterm = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+                "SIGTERM"
+            }
+            Err(e) => {
+                log::warn!("failed to install SIGTERM handler: {e}");
+                std::future::pending::<&'static str>().await
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<&'static str>();
+    tokio::select! {
+        s = sigint => s,
+        s = sigterm => s,
+    }
 }
 
 /// players.toml を読む。
