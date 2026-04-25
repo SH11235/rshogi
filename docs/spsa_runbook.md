@@ -504,10 +504,33 @@ rshogi 側で**負値パラメータ**として格納される。マッピング
 
 ### 10.6 rshogi SPSA で YaneuraOu エンジンを駆動する
 
+#### A. YO 形式 `.params` で YO を直接チューニング（最も単純）
+
+`.params` の name 列が YO のビルド済み USI option 名と一致していれば、rshogi の `spsa`
+はその name を `setoption` にそのまま流すだけなので、**変換ツール・マッピング表は不要**。
+
+```bash
+cargo run --release -p tools --bin spsa -- \
+  --params tune/suisho10.params \
+  --engine-path /path/to/YaneuraOu-tune-patched \
+  --iterations 200 --games-per-iteration 64 \
+  ...
+```
+
+YO 側で必要な前処理（本ツールのスコープ外）:
+
+1. `tune/suisho10.tune` を `tune.py tune` で当てる
+2. YO をリビルド（`correction_value_1` 等が USI option として現れる）
+
+リビルドコマンドは YO のアーキテクチャ・ビルドシステム依存のため、本ツールでは wrap せず
+ユーザに委ねる。SPSA ループ完了後の `tuned.params` は YO 形式のまま書き戻されるので、
+`tune.py apply` で YO ソースに焼き込んで production リビルド、で運用を閉じられる。
+
+#### B. rshogi 形式 `.params` で YO を駆動（`--engine-param-mapping`）
+
+rshogi 側の `.params` フォーマット（`SPSA_*` 命名）のまま YO バイナリを駆動したい場合、
 `spsa` バイナリに `--engine-param-mapping` を渡すと、`.params` 内の rshogi 名 (`SPSA_*`)
 を `setoption` する直前にエンジン側名前空間（YO 名）に翻訳し、必要なら符号を反転する。
-これにより rshogi 側の `.params` フォーマット（`SPSA_*` 命名）のまま、tune.py 注入＋
-リビルド済みの YO バイナリを直接駆動できる。
 
 事前準備:
 
