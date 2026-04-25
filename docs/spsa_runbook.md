@@ -501,3 +501,47 @@ rshogi 側で**負値パラメータ**として格納される。マッピング
 - `Search_nullmove_2` (YO: `+ 390`) ↔ `SPSA_NMP_MARGIN_OFFSET` (rshogi: `-390`)
 - `Search_Extensions3_3` (YO: `- 212 *`) ↔ `SPSA_SINGULAR_DOUBLE_MARGIN_NON_TT_CAPTURE` (rshogi: `-212`)
 - `update_all_stats_1c_2` (YO: `- 77`) ↔ `SPSA_STAT_BONUS_OFFSET` (rshogi: `-77`)
+
+### 10.6 rshogi SPSA で YaneuraOu エンジンを駆動する
+
+`spsa` バイナリに `--engine-param-mapping` を渡すと、`.params` 内の rshogi 名 (`SPSA_*`)
+を `setoption` する直前にエンジン側名前空間（YO 名）に翻訳し、必要なら符号を反転する。
+これにより rshogi 側の `.params` フォーマット（`SPSA_*` 命名）のまま、tune.py 注入＋
+リビルド済みの YO バイナリを直接駆動できる。
+
+事前準備:
+
+1. YO 側のソースに `tune/suisho10.tune` 等を `tune.py tune` で当てる
+2. YO をリビルド（`correction_value_1` 等が USI option として現れる）
+
+実行例:
+
+```bash
+cargo run --release -p tools --bin spsa -- \
+  --params spsa_params/<rshogi_base>.params \
+  --engine-path /path/to/YaneuraOu-tune-patched \
+  --engine-param-mapping tune/yo_rshogi_mapping.toml \
+  --iterations 200 \
+  --games-per-iteration 64 \
+  --concurrency 8 \
+  --startpos-file /path/to/openings.txt \
+  --seeds 1,2,3,4 \
+  --threads 1 \
+  --hash-mb 256 \
+  --byoyomi 1000 \
+  --param-values-csv "${RUN_DIR}/param_values.csv" \
+  --stats-csv "${RUN_DIR}/stats.seed.csv" \
+  --stats-aggregate-csv "${RUN_DIR}/stats.aggregate.csv"
+```
+
+- `.params` の `SPSA_*` 名は `setoption` 時に YO 名（`correction_value_1` 等）へ翻訳され、
+  `sign_flip = true` の項は値の符号を反転して送出される
+- マッピング表にない rshogi 名（rshogi 独自 / `unmapped.rshogi` のもの）は名前をそのまま
+  渡すが、YO バイナリ側にその option がないので `set_option_if_available` で黙って無視される
+- そのため YO 駆動時は `--active-only-regex` で YO 対応グループに絞ると無駄な `setoption`
+  を避けられる（例: `'^SPSA_(LMR|FUTILITY|NMP|RAZORING|SINGULAR|S14|S18|EVAL_DIFF|CORR|STAT|TT_MOVE|PROBCUT|QS_|ASP_|TT_CUTOFF_|FAIL_HIGH_|CONT_HISTORY_WEIGHT|UPDATE_QUIET_HISTORIES|PAWN_HISTORY)_'`
+  といった粒度で）
+
+ルーティング後の値が再度 `.params` に書き戻されるときは rshogi 名・rshogi 符号慣用のまま
+保存されるので、運用は通常の rshogi SPSA と同じ。最終的な `tuned.params` を YO 本体に焼き
+込む際には `rshogi_to_yo_params` で YO 形式に戻し、`tune.py apply` でソース反映する。

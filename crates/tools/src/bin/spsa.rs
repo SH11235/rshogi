@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::{
     EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
 };
+use tools::spsa_param_mapping::MappingTable;
 
 const PARAM_NOT_USED_MARKER: &str = "[[NOT USED]]";
 const META_FORMAT_VERSION: u32 = 2;
@@ -162,6 +164,13 @@ struct Cli {
     /// 早期停止: 条件連続成立回数（0で無効）
     #[arg(long, default_value_t = 0)]
     early_stop_patience: u32,
+
+    /// エンジン側パラメータ名マッピング TOML（例: tune/yo_rshogi_mapping.toml）。
+    /// 指定時、`.params` の rshogi 名 (`SPSA_*`) を、setoption する直前にエンジン側名前空間
+    /// （例: YaneuraOu の `correction_value_1`）に翻訳し、必要なら符号を反転する。
+    /// マッピング表に存在しないパラメータはそのままの名前で送る。
+    #[arg(long)]
+    engine_param_mapping: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -308,6 +317,48 @@ struct SeedRunContext<'a> {
     seed_idx: usize,
     seed_count: usize,
     base_seed: u64,
+    translator: &'a EngineNameTranslator,
+}
+
+/// rshogi `.params` の名前 → エンジン側 USI option 名 への翻訳器
+#[derive(Debug, Default)]
+struct EngineNameTranslator {
+    /// rshogi 名 → (エンジン側名, 符号反転)。空なら無翻訳
+    table: HashMap<String, (String, bool)>,
+}
+
+impl EngineNameTranslator {
+    fn empty() -> Self {
+        Self {
+            table: HashMap::new(),
+        }
+    }
+
+    fn from_mapping_file(path: &Path) -> Result<Self> {
+        let mapping = MappingTable::load(path)?;
+        let table = mapping
+            .mappings
+            .iter()
+            .map(|m| (m.rshogi.clone(), (m.yo.clone(), m.sign_flip)))
+            .collect();
+        Ok(Self { table })
+    }
+
+    /// `value` を必要に応じて符号反転し、エンジン側に送る (name, value) を返す。
+    /// マッピング表にない name はそのまま通す。
+    fn translate<'a>(&'a self, name: &'a str, value: f64) -> (&'a str, f64) {
+        match self.table.get(name) {
+            Some((engine_name, sign_flip)) => {
+                let v = if *sign_flip { -value } else { value };
+                (engine_name.as_str(), v)
+            }
+            None => (name, value),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.table.len()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -682,9 +733,11 @@ fn apply_parameter_vector(
     engine: &mut EngineProcess,
     params: &[SpsaParam],
     values: &[f64],
+    translator: &EngineNameTranslator,
 ) -> Result<()> {
     for (p, &v) in params.iter().zip(values.iter()) {
-        engine.set_option_if_available(&p.name, &option_value_string(p, v))?;
+        let (engine_name, engine_value) = translator.translate(&p.name, v);
+        engine.set_option_if_available(engine_name, &option_value_string(p, engine_value))?;
     }
     engine.sync_ready()?;
     Ok(())
@@ -789,6 +842,7 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
         seed_idx,
         seed_count,
         base_seed,
+        translator,
     } = ctx;
 
     let game_count = start_pos_indices.len();
@@ -830,11 +884,31 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
                 for task in task_rx {
                     let result = (|| -> Result<GameTaskResult> {
                         if task.plus_is_black {
-                            apply_parameter_vector(&mut plus_engine, params, plus_values)?;
-                            apply_parameter_vector(&mut minus_engine, params, minus_values)?;
+                            apply_parameter_vector(
+                                &mut plus_engine,
+                                params,
+                                plus_values,
+                                translator,
+                            )?;
+                            apply_parameter_vector(
+                                &mut minus_engine,
+                                params,
+                                minus_values,
+                                translator,
+                            )?;
                         } else {
-                            apply_parameter_vector(&mut plus_engine, params, minus_values)?;
-                            apply_parameter_vector(&mut minus_engine, params, plus_values)?;
+                            apply_parameter_vector(
+                                &mut plus_engine,
+                                params,
+                                minus_values,
+                                translator,
+                            )?;
+                            apply_parameter_vector(
+                                &mut minus_engine,
+                                params,
+                                plus_values,
+                                translator,
+                            )?;
                         }
                         plus_engine.new_game()?;
                         minus_engine.new_game()?;
@@ -1001,6 +1075,14 @@ fn main() -> Result<()> {
 
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
+    let translator = match &cli.engine_param_mapping {
+        Some(path) => {
+            let t = EngineNameTranslator::from_mapping_file(path)?;
+            println!("engine param mapping: {} entries loaded from {}", t.len(), path.display());
+            t
+        }
+        None => EngineNameTranslator::empty(),
+    };
     let mut params = read_params(&cli.params)?;
     let schedule = ScheduleConfig {
         alpha: cli.alpha,
@@ -1231,6 +1313,7 @@ fn main() -> Result<()> {
                 seed_idx,
                 seed_count: seed_values.len(),
                 base_seed,
+                translator: &translator,
             })?;
             total_games = total_games
                 .checked_add(cli.games_per_iteration as usize)
