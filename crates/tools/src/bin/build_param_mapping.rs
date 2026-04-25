@@ -113,6 +113,11 @@ fn main() -> Result<()> {
 
     for (rname, rval) in &rshogi {
         let default = defaults.get(rname).copied();
+        // rshogi `.params` の値が `SearchTuneParams` の default と一致するなら
+        // YO からの転記がない rshogi 独自パラメータと推定する。default と異なれば
+        // YO 由来のチューニング済み値とみなして候補マッチングの対象にする。
+        // defaults に名前がない場合（新規追加された SPSA_* 等）は安全側で
+        // is_tuned = true として候補マッチングに回す。
         let is_tuned = match default {
             Some(d) => *rval != d,
             None => true,

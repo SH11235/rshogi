@@ -46,6 +46,14 @@ CSV 出力先は既定で `${RUN_DIR}/tuned.params.{stats,stats_aggregate,values
 に自動生成される。別パスにしたい場合のみ `--stats-csv` / `--stats-aggregate-csv`
 / `--param-values-csv` を明示。生成を止めたい場合は `--no-*` フラグを使う。
 
+集計CSV (`stats_aggregate`) のパス導出規則:
+
+- `--stats-aggregate-csv` 明示 → そのパスを使用
+- `--stats-csv <S>` 明示（明示なし）→ 互換性のため従来の派生 `<S>.aggregate.csv`
+  を使う。これにより既存ジョブを `--resume` した時に既定の集計CSV出力先が変わらない
+- どちらも未指定 → 既定の `<params>.stats_aggregate.csv`
+- seeds 指定が単一のときは集計CSV を生成しない
+
 ## 4. 再開実行（resume）
 
 ```bash
@@ -626,6 +634,13 @@ cargo run --release -p tools --bin spsa -- \
   渡すが、YO バイナリ側にその option がないので `set_option_if_available` で黙って無視される
 - そのため YO 駆動時は `--active-only-regex` で YO 対応グループに絞ると無駄な `setoption`
   を避けられる
+- **range の整合性は運用責任**: SPSA 側の clamp は rshogi 側 `.params` の min/max
+  でしか効かない。`sign_flip = true` のパラメータは rshogi 範囲 → 符号反転 → YO に送出
+  される過程で YO 側 USI option の min/max からはみ出すケースが理屈上ありうる。
+  チューニング前に `check_param_mapping --yo-binary <YOバイナリ> --yo-params
+  tune/<YO形式>.params --rshogi-params spsa_params/<rshogi形式>.params`
+  で双方の range 整合性を確認しておくこと。YO 側で range 外の値は USI option として
+  受理されない可能性がある。
 
 #### 10.6.3 チューニング結果を YO 本体に焼き込む（`tune.py apply`）
 

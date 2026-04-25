@@ -180,11 +180,16 @@ impl MappingTable {
 }
 
 /// 値変換: YO → rshogi
+///
+/// 内部実装は `rshogi_to_yo_value` と同一（involution）だが、両関数を別名で公開する
+/// ことで呼び出し元の方向性（どちらの名前空間にいるのか）を明示する目的で残している。
 pub fn yo_to_rshogi_value(yo_value: i32, sign_flip: bool) -> i32 {
     if sign_flip { -yo_value } else { yo_value }
 }
 
 /// 値変換: rshogi → YO（YO 側は元の符号慣用に戻る）
+///
+/// `yo_to_rshogi_value` と実装は同じ。意図表現（どちら方向の変換か）を保つために両方公開。
 pub fn rshogi_to_yo_value(rshogi_value: i32, sign_flip: bool) -> i32 {
     if sign_flip {
         -rshogi_value

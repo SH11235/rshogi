@@ -1273,6 +1273,7 @@ fn main() -> Result<()> {
         // 互換性: --stats-csv が明示指定されている場合は従来の派生
         // (<stats_csv>.aggregate.csv) を維持。さもなければ <params>.stats_aggregate.csv。
         // これにより既存ジョブを --resume したとき既定の集計CSV出力先が変わらない。
+        // 詳細: docs/spsa_runbook.md §3 「集計CSV のパス導出規則」
         if let Some(stats_path) = &cli.stats_csv {
             Some(PathBuf::from(format!("{}.aggregate.csv", stats_path.display())))
         } else {
