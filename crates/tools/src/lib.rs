@@ -54,6 +54,7 @@ pub mod report;
 pub mod runner;
 pub mod selfplay;
 pub mod sprt;
+pub mod spsa_param_mapping;
 pub mod system;
 mod utils;
 pub mod verify_nnue_accumulator_tool;

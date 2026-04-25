@@ -1,0 +1,733 @@
+# YaneuraOu ⇔ rshogi SPSA パラメータマッピング表
+#
+# このファイルは正本となる対応表。`build_param_mapping` で初期生成後、
+# `tune/suisho10.tune` のソースコンテキスト解析と rshogi 側 `tune_params.rs`
+# のレビューで人手確定したもの。
+#
+# - sign_flip = true : YO 式 `-X *` を rshogi 側で値の符号に内包（例: NMP_MARGIN_OFFSET）
+#   YO 値 X に対し rshogi 値は -X となる
+# - 行コメント : 元の YO 式抜粋（[[mapping]] 直前に置く）
+# - unmapped.yo : rshogi 側に対応がない YO パラメータ（現状なし）
+# - unmapped.rshogi : suisho10 から転記対象でない rshogi 独自パラメータ
+
+# === Correction value ===
+# return 9536@ * pcv + 8494@ * micv + 10132@ * (wnpcv + bnpcv) + 7156@ * cntcv;
+[[mapping]]
+yo = "correction_value_1"
+rshogi = "SPSA_CORR_PCV_WEIGHT"
+sign_flip = false
+
+[[mapping]]
+yo = "correction_value_2"
+rshogi = "SPSA_CORR_MICV_WEIGHT"
+sign_flip = false
+
+[[mapping]]
+yo = "correction_value_3"
+rshogi = "SPSA_CORR_NONPAWN_WEIGHT"
+sign_flip = false
+
+[[mapping]]
+yo = "correction_value_4"
+rshogi = "SPSA_CORR_CNT_WEIGHT"
+sign_flip = false
+
+# === update_correction_history ===
+# constexpr int nonPawnWeight = 165@;
+[[mapping]]
+yo = "update_correction_history_nonPawnWeight_1"
+rshogi = "SPSA_CORR_HIST_NONPAWN"
+sign_flip = false
+
+# minor << bonus * 156@ / 128;
+[[mapping]]
+yo = "update_correction_history1_1"
+rshogi = "SPSA_CORR_HIST_MINOR"
+sign_flip = false
+
+# (ss-2)->cont << bonus * 137@ / 128;
+[[mapping]]
+yo = "update_correction_history2_1"
+rshogi = "SPSA_CORR_HIST_CONT_SS2"
+sign_flip = false
+
+# (ss-4)->cont << bonus * 64@ / 128;
+[[mapping]]
+yo = "update_correction_history2_2"
+rshogi = "SPSA_CORR_HIST_CONT_SS4"
+sign_flip = false
+
+# === lowPlyHistory init ===
+# lowPlyHistory.fill(97@);
+[[mapping]]
+yo = "lowPlyHistory_fill_1"
+rshogi = "SPSA_LOW_PLY_HIST_INIT"
+sign_flip = false
+
+# === Aspiration window ===
+# delta = 5@ + threadIdx % 8 + std::abs(meanSquaredScore) / 9000@;
+[[mapping]]
+yo = "aspiration_window_1"
+rshogi = "SPSA_ASP_DELTA_BASE"
+sign_flip = false
+
+[[mapping]]
+yo = "aspiration_window_2"
+rshogi = "SPSA_ASP_MEAN_SQ_DIV"
+sign_flip = false
+
+# === Worker clear (history table fills) ===
+# YaneuraOuWorker_clear1 (3 params, in YO source order): main / capture / pawn history fill
+# 注: これら 3 つは YO 側で worker-clear 系を tune.py 注入する設定でビルドされた
+# バイナリでのみ公開される条件付きパラメータ。標準注入のバイナリでは
+# `check_param_mapping --yo-binary` で「mapping/unmapped.yo にあるが YO 側にない」
+# として 3 件 warn されるが想定通り。
+[[mapping]]
+yo = "YaneuraOuWorker_clear1_1"
+rshogi = "SPSA_MAIN_HIST_INIT"
+sign_flip = false
+
+[[mapping]]
+yo = "YaneuraOuWorker_clear1_2"
+rshogi = "SPSA_CAPTURE_HIST_INIT"
+sign_flip = false
+
+[[mapping]]
+yo = "YaneuraOuWorker_clear1_3"
+rshogi = "SPSA_PAWN_HIST_INIT"
+sign_flip = false
+
+# h.fill(-529@); (continuation history)
+[[mapping]]
+yo = "YaneuraOuWorker_clear2_1"
+rshogi = "SPSA_CONT_HIST_INIT"
+sign_flip = false
+
+# reductions[i] = int(2809@ / 128.0 * std::log(i));
+[[mapping]]
+yo = "YaneuraOuWorker_clear3_1"
+rshogi = "SPSA_LMR_TABLE_COEFF"
+sign_flip = false
+
+# === Search Step 4: TT lookup quiet bonus & cont penalty ===
+# update_quiet_histories(... std::min(130@ * depth - 71@, 1043@));
+[[mapping]]
+yo = "Search_tt_lookup1_1"
+rshogi = "SPSA_TT_CUTOFF_QUIET_BONUS_DEPTH_MULT"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_tt_lookup1_2"
+rshogi = "SPSA_TT_CUTOFF_QUIET_BONUS_OFFSET"
+sign_flip = true
+
+[[mapping]]
+yo = "Search_tt_lookup1_3"
+rshogi = "SPSA_TT_CUTOFF_QUIET_BONUS_MAX"
+sign_flip = false
+
+# update_continuation_histories(ss-1, ..., -2142@);
+[[mapping]]
+yo = "Search_tt_lookup2_1"
+rshogi = "SPSA_TT_CUTOFF_CONT_PENALTY"
+sign_flip = false
+
+# === Search Step 6: static eval (evalDiff) ===
+# int evalDiff = std::clamp(-((ss-1)->staticEval + ss->staticEval), -200@, 156@) + 58@;
+# mainHistory[~us][...] << evalDiff * 9@;
+[[mapping]]
+yo = "Search_static_evaluation_1a_1"
+rshogi = "SPSA_EVAL_DIFF_CLAMP_MIN"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_static_evaluation_1a_2"
+rshogi = "SPSA_EVAL_DIFF_CLAMP_MAX"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_static_evaluation_1a_3"
+rshogi = "SPSA_EVAL_DIFF_OFFSET"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_static_evaluation_1a_4"
+rshogi = "SPSA_EVAL_DIFF_MAIN_HIST"
+sign_flip = false
+
+# pawn_entry << evalDiff * 13@;
+[[mapping]]
+yo = "Search_static_evaluation_2a_1"
+rshogi = "SPSA_EVAL_DIFF_PAWN_HIST"
+sign_flip = false
+
+# if (priorReduction >= 2 && depth >= 2 && ss->staticEval + (ss-1)->staticEval > 173@) depth--;
+[[mapping]]
+yo = "Search_static_evaluation3_1"
+rshogi = "SPSA_IIR_EVAL_SUM"
+sign_flip = false
+
+# === Search Step 7: Razoring ===
+# if (!PvNode && eval < alpha - 514@ - 294@ * depth * depth) ...
+[[mapping]]
+yo = "Search_razoring_1"
+rshogi = "SPSA_RAZORING_BASE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_razoring_2"
+rshogi = "SPSA_RAZORING_DEPTH2"
+sign_flip = false
+
+# === Search Step 8: Futility (search-level) ===
+# Value futilityMult = 91@ - 21@ * !ss->ttHit;
+# ... + std::abs(correctionValue) / 158105@;
+[[mapping]]
+yo = "Search_futility_1_1"
+rshogi = "SPSA_FUTILITY_MARGIN_BASE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_futility_1_2"
+rshogi = "SPSA_FUTILITY_MARGIN_TT_BONUS"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_futility_1_3"
+rshogi = "SPSA_FUTILITY_CORRECTION_DIV"
+sign_flip = false
+
+# === Search Step 9: Null move ===
+# if (cutNode && ss->staticEval >= beta - 18@ * depth + 390@ ...) ...
+[[mapping]]
+yo = "Search_nullmove_1"
+rshogi = "SPSA_NMP_MARGIN_DEPTH_MULT"
+sign_flip = false
+
+# rshogi 側 margin = depth_mult*depth + offset (sign を畳み込む)
+[[mapping]]
+yo = "Search_nullmove_2"
+rshogi = "SPSA_NMP_MARGIN_OFFSET"
+sign_flip = true
+
+# === Search Step 11: ProbCut ===
+# probCutBeta = beta + 224@ - 64@ * improving;
+[[mapping]]
+yo = "Search_Probcut_1"
+rshogi = "SPSA_PROBCUT_BETA_MARGIN"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Probcut_2"
+rshogi = "SPSA_PROBCUT_IMPROVING_SUB"
+sign_flip = false
+
+# === Search Step 12: small ProbCut ===
+# probCutBeta = beta + 418@;
+[[mapping]]
+yo = "Search_small_Probcut_1"
+rshogi = "SPSA_SMALL_PROBCUT_BETA_MARGIN"
+sign_flip = false
+
+# === Search Step 13: TT-PV reduction decrease ===
+# if (ss->ttPv) r += 946@;
+[[mapping]]
+yo = "Search_decrease_reduction_for_tt_pv_1"
+rshogi = "SPSA_LMR_TTPV_ADD"
+sign_flip = false
+
+# === Search Step 14: futility on individual moves ===
+# Value futilityValue = ss->staticEval + 231@ + 211@ * lmrDepth + PieceValue[capturedPiece] + 130@ * captHist / 1024;
+[[mapping]]
+yo = "Search_futility_value_1"
+rshogi = "SPSA_S14_FUT_BASE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_futility_value_2"
+rshogi = "SPSA_S14_FUT_LMR_MULT"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_futility_value_3"
+rshogi = "SPSA_S14_FUT_CAPT_HIST"
+sign_flip = false
+
+# === Search Step 14: continuation history pruning ===
+# if (history < -4312@ * depth) continue;
+# history += 76@ * mainHistory[us][move.raw()] / 32;
+# lmrDepth += history / 3220@;
+[[mapping]]
+yo = "Search_Continuation_history_based_pruning1_1"
+rshogi = "SPSA_S14_CONT_HIST_THRESH"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Continuation_history_based_pruning1_2"
+rshogi = "SPSA_S14_MAIN_HIST_NUM"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Continuation_history_based_pruning1_3"
+rshogi = "SPSA_S14_LMR_HIST_DIV"
+sign_flip = false
+
+# Value futilityValue = ss->staticEval + 47 + 171 * !bestMove + 134@ * lmrDepth + 90@ * (ss->staticEval > alpha);
+[[mapping]]
+yo = "Search_Continuation_history_based_pruning2_1"
+rshogi = "SPSA_S14_QFUT_LMR_MULT"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Continuation_history_based_pruning2_2"
+rshogi = "SPSA_S14_QFUT_EVAL_ALPHA"
+sign_flip = false
+
+# if (!pos.see_ge(move, -27@ * lmrDepth * lmrDepth)) continue;
+# rshogi/YO ともに負値で格納
+[[mapping]]
+yo = "Search_Continuation_history_based_pruning3_1"
+rshogi = "SPSA_S14_SEE_MULT"
+sign_flip = false
+
+# === Search Step 15: Singular Extension ===
+# Value singularBeta = ttData.value - (56@ + 81@ * (ss->ttPv && !PvNode)) * depth / 60@;
+[[mapping]]
+yo = "Search_Extensions1_1"
+rshogi = "SPSA_SINGULAR_BETA_MARGIN_BASE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Extensions1_2"
+rshogi = "SPSA_SINGULAR_BETA_MARGIN_TT_PV_NON_PV_ADD"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Extensions1_3"
+rshogi = "SPSA_SINGULAR_BETA_MARGIN_DIV"
+sign_flip = false
+
+# int corrValAdj = std::abs(correctionValue) / 229958@;
+[[mapping]]
+yo = "Search_Extensions2_1"
+rshogi = "SPSA_SINGULAR_CORR_VAL_ADJ_DIV"
+sign_flip = false
+
+# int doubleMargin = -4@ + 198@ * PvNode - 212@ * !ttCapture - corrValAdj
+#                  - 921@ * ttMoveHistory / 127649 - (ss->ply > rootDepth) * 45@;
+# rshogi は `+` 統一なので _1, _3, _4 は sign_flip=true で負値格納
+[[mapping]]
+yo = "Search_Extensions3_1"
+rshogi = "SPSA_SINGULAR_DOUBLE_MARGIN_BASE"
+sign_flip = true
+
+[[mapping]]
+yo = "Search_Extensions3_2"
+rshogi = "SPSA_SINGULAR_DOUBLE_MARGIN_PV_NODE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Extensions3_3"
+rshogi = "SPSA_SINGULAR_DOUBLE_MARGIN_NON_TT_CAPTURE"
+sign_flip = true
+
+[[mapping]]
+yo = "Search_Extensions3_4"
+rshogi = "SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_MULT"
+sign_flip = true
+
+[[mapping]]
+yo = "Search_Extensions3_5"
+rshogi = "SPSA_SINGULAR_DOUBLE_MARGIN_LATE_PLY_PENALTY"
+sign_flip = false
+
+# int tripleMargin = 76@ + 308@ * PvNode - 250@ * !ttCapture + 92@ * ss->ttPv - corrValAdj
+#                  - (ss->ply * 2 > rootDepth * 3) * 52@;
+[[mapping]]
+yo = "Search_Extensions4_1"
+rshogi = "SPSA_SINGULAR_TRIPLE_MARGIN_BASE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Extensions4_2"
+rshogi = "SPSA_SINGULAR_TRIPLE_MARGIN_PV_NODE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Extensions4_3"
+rshogi = "SPSA_SINGULAR_TRIPLE_MARGIN_NON_TT_CAPTURE"
+sign_flip = true
+
+[[mapping]]
+yo = "Search_Extensions4_4"
+rshogi = "SPSA_SINGULAR_TRIPLE_MARGIN_TT_PV"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Extensions4_5"
+rshogi = "SPSA_SINGULAR_TRIPLE_MARGIN_LATE_PLY_PENALTY"
+sign_flip = false
+
+# === Search Step 16: PvNode reduction decrease ===
+# if (ss->ttPv) r -= 2618@ + PvNode * 991@ + (ttData.value > alpha) * 903@
+#                 + (ttData.depth >= depth) * (978@ + cutNode * 1051@);
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_1_1"
+rshogi = "SPSA_LMR_STEP16_TTPV_SUB_BASE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_1_2"
+rshogi = "SPSA_LMR_STEP16_TTPV_SUB_PV_NODE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_1_3"
+rshogi = "SPSA_LMR_STEP16_TTPV_SUB_TT_VALUE"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_1_4"
+rshogi = "SPSA_LMR_STEP16_TTPV_SUB_TT_DEPTH"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_1_5"
+rshogi = "SPSA_LMR_STEP16_TTPV_SUB_CUT_NODE"
+sign_flip = false
+
+# r += 843@;  (Base reduction offset)
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_2_1"
+rshogi = "SPSA_LMR_STEP16_BASE_ADD"
+sign_flip = false
+
+# r -= moveCount * 66@;
+# r -= std::abs(correctionValue) / 30450@;
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_3_1"
+rshogi = "SPSA_LMR_STEP16_MOVE_COUNT_MUL"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_3_2"
+rshogi = "SPSA_LMR_STEP16_CORRECTION_DIV"
+sign_flip = false
+
+# if (cutNode) r += 3094@ + 1056@ * !ttData.move;
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_4_1"
+rshogi = "SPSA_LMR_STEP16_CUT_NODE_ADD"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_4_2"
+rshogi = "SPSA_LMR_STEP16_CUT_NODE_NO_TT_ADD"
+sign_flip = false
+
+# if (ttCapture) r += 1415@;
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_5_1"
+rshogi = "SPSA_LMR_STEP16_TT_CAPTURE_ADD"
+sign_flip = false
+
+# if ((ss+1)->cutoffCnt > 2) r += 1051@ + allNode * 814@;
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_6_1"
+rshogi = "SPSA_LMR_STEP16_CUTOFF_COUNT_ADD"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_6_2"
+rshogi = "SPSA_LMR_STEP16_CUTOFF_COUNT_ALL_NODE_ADD"
+sign_flip = false
+
+# if (move == ttData.move) r -= 2018@;
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_7_1"
+rshogi = "SPSA_LMR_STEP16_TT_MOVE_PENALTY"
+sign_flip = false
+
+# if (capture) ss->statScore = 803@ * int(PieceValue[...]) / 128 + ...;
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_8_1"
+rshogi = "SPSA_LMR_STEP16_CAPTURE_STAT_SCALE_NUM"
+sign_flip = false
+
+# r -= ss->statScore * 794@ / 8192;
+[[mapping]]
+yo = "Search_Decrease_reduction_for_PvNodes_9_1"
+rshogi = "SPSA_LMR_STEP16_STAT_SCORE_SCALE_NUM"
+sign_flip = false
+
+# === Search Step 17: post-LMR cont history update ===
+# update_continuation_histories(ss, movedPiece, move.to_sq(), 1365@);
+[[mapping]]
+yo = "Search_Post_LMR_continuation_history_updates_1"
+rshogi = "SPSA_FAIL_HIGH_CONT_BASE_NUM"
+sign_flip = false
+
+# === Search Step 18: full depth threshold ===
+# if (!ttData.move) r += 1118@;
+[[mapping]]
+yo = "Search_Full_depth_search_threshold_1a_1"
+rshogi = "SPSA_S18_NO_TT_ADD"
+sign_flip = false
+
+# value = -search<NonPV>(... newDepth - (r > 3212@) - (r > 4784@ && newDepth > 2), !cutNode);
+[[mapping]]
+yo = "Search_Full_depth_search_threshold_2b_1"
+rshogi = "SPSA_S18_R_THRESH1"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_Full_depth_search_threshold_2b_2"
+rshogi = "SPSA_S18_R_THRESH2"
+sign_flip = false
+
+# === Search Step 21: TT move history bonus ===
+# if (!PvNode) ttMoveHistory << (bestMove == ttData.move ? 809@ : -865@);
+[[mapping]]
+yo = "Search_ttMoveHistoryBonus_1"
+rshogi = "SPSA_TT_MOVE_BONUS"
+sign_flip = false
+
+[[mapping]]
+yo = "Search_ttMoveHistoryBonus_2"
+rshogi = "SPSA_TT_MOVE_MALUS"
+sign_flip = false
+
+# === qsearch Step 4: stand-pat ===
+# futilityBase = ss->staticEval + 352@;
+[[mapping]]
+yo = "Search_standPat_1"
+rshogi = "SPSA_QS_FUTILITY_BASE"
+sign_flip = false
+
+# === Worker reduction (LMR per-move adjustment) ===
+# return reductionScale - delta * 757@ / rootDelta + !i * reductionScale * 218@ / 512 + 1200@;
+[[mapping]]
+yo = "YaneuraOuWorker_reduction_1"
+rshogi = "SPSA_LMR_DELTA_SCALE"
+sign_flip = false
+
+[[mapping]]
+yo = "YaneuraOuWorker_reduction_2"
+rshogi = "SPSA_LMR_NON_IMPROVING_MULT"
+sign_flip = false
+
+[[mapping]]
+yo = "YaneuraOuWorker_reduction_3"
+rshogi = "SPSA_LMR_BASE_OFFSET"
+sign_flip = false
+
+# === update_all_stats ===
+# int bonus = std::min(121@ * depth - 77@, 1633) + 375@ * (bestMove == ttMove);
+# int malus = std::min(825@ * depth - 196@, 2159) - 16@ * moveCount;
+[[mapping]]
+yo = "update_all_stats_1c_1"
+rshogi = "SPSA_STAT_BONUS_DEPTH_MULT"
+sign_flip = false
+
+[[mapping]]
+yo = "update_all_stats_1c_2"
+rshogi = "SPSA_STAT_BONUS_OFFSET"
+sign_flip = true
+
+[[mapping]]
+yo = "update_all_stats_1c_3"
+rshogi = "SPSA_STAT_BONUS_TT_BONUS"
+sign_flip = false
+
+[[mapping]]
+yo = "update_all_stats_1c_4"
+rshogi = "SPSA_STAT_MALUS_DEPTH_MULT"
+sign_flip = false
+
+[[mapping]]
+yo = "update_all_stats_1c_5"
+rshogi = "SPSA_STAT_MALUS_OFFSET"
+sign_flip = true
+
+[[mapping]]
+yo = "update_all_stats_1c_6"
+rshogi = "SPSA_STAT_MALUS_MOVE_COUNT_MULT"
+sign_flip = false
+
+# === conthist_bonuses ===
+# {{1, 1157@}, {2, 648@}, {3, 288@}, {4, 576@}, {5, 140@}, {6, 441@}}
+[[mapping]]
+yo = "conthist_bonuses_1"
+rshogi = "SPSA_CONT_HISTORY_WEIGHT_1"
+sign_flip = false
+
+[[mapping]]
+yo = "conthist_bonuses_2"
+rshogi = "SPSA_CONT_HISTORY_WEIGHT_2"
+sign_flip = false
+
+[[mapping]]
+yo = "conthist_bonuses_3"
+rshogi = "SPSA_CONT_HISTORY_WEIGHT_3"
+sign_flip = false
+
+[[mapping]]
+yo = "conthist_bonuses_4"
+rshogi = "SPSA_CONT_HISTORY_WEIGHT_4"
+sign_flip = false
+
+[[mapping]]
+yo = "conthist_bonuses_5"
+rshogi = "SPSA_CONT_HISTORY_WEIGHT_5"
+sign_flip = false
+
+[[mapping]]
+yo = "conthist_bonuses_6"
+rshogi = "SPSA_CONT_HISTORY_WEIGHT_6"
+sign_flip = false
+
+# === update_quiet_histories ===
+# lowPlyHistory[ss->ply][move.raw()] << bonus * 761@ / 1024;
+# update_continuation_histories(... bonus * 955@ / 1024);
+[[mapping]]
+yo = "update_quiet_histories_1a_1"
+rshogi = "SPSA_LOW_PLY_HISTORY_MULTIPLIER"
+sign_flip = false
+
+[[mapping]]
+yo = "update_quiet_histories_1a_2"
+rshogi = "SPSA_CONT_HISTORY_MULTIPLIER"
+sign_flip = false
+
+# pawn_entry << bonus * (bonus > 0 ? 850@ : 550@) / 1024;
+[[mapping]]
+yo = "update_quiet_histories_2b_1"
+rshogi = "SPSA_PAWN_HISTORY_POS_MULTIPLIER"
+sign_flip = false
+
+[[mapping]]
+yo = "update_quiet_histories_2b_2"
+rshogi = "SPSA_PAWN_HISTORY_NEG_MULTIPLIER"
+sign_flip = false
+
+# ============================================================
+# 未対応領域
+# ============================================================
+
+[unmapped]
+# rshogi 側に対応がない YO パラメータ。
+# tune.py 注入対象外の通常の YO USI option を列挙して `check_param_mapping
+# --yo-binary` のドリフト検出ノイズを抑える。
+yo = [
+  # 標準 USI option
+  "USI_Hash",
+  "USI_Ponder",
+  "USI_OwnBook",
+  "Threads",
+  "MultiPV",
+  "NetworkDelay",
+  "NetworkDelay2",
+  "NodesLimit",
+  "MinimumThinkingTime",
+  "SlowMover",
+  "MaxMovesToDraw",
+  "DepthLimit",
+  "PvInterval",
+  "ResignValue",
+  "DrawValueBlack",
+  "DrawValueWhite",
+  "RoundUpToFullSecond",
+  "DebugLogFile",
+  "ConsiderationMode",
+  "OutputFailLHPV",
+  "Stochastic_Ponder",
+  "GenerateAllLegalMoves",
+  "EnteringKingRule",
+  "NumaPolicy",
+  # 評価関数 / モデル系
+  "EvalDir",
+  "FV_SCALE",
+  "LS_BUCKET_MODE",
+  "LS_PROGRESS_COEFF",
+  # 定跡系
+  "BookFile",
+  "BookDir",
+  "BookMoves",
+  "BookDepthLimit",
+  "BookEvalDiff",
+  "BookEvalBlackLimit",
+  "BookEvalWhiteLimit",
+  "BookIgnoreRate",
+  "BookOnTheFly",
+  "BookPvMoves",
+  "ConsiderBookMoveCount",
+  "FlippedBook",
+  "IgnoreBookPly",
+  "NarrowBook",
+]
+
+# YO 側に対応マーカー (`@`) がない、または rshogi 独自に追加されたパラメータ。
+# YO → rshogi 変換時にデフォルトのまま据え置かれる。
+rshogi = [
+  "SPSA_FUTILITY_IMPROVING_SCALE",
+  "SPSA_FUTILITY_OPP_WORSENING_SCALE",
+  "SPSA_NMP_MARGIN_IMPROVING_BONUS",
+  "SPSA_NMP_REDUCTION_BASE",
+  "SPSA_NMP_REDUCTION_DEPTH_DIV",
+  "SPSA_NMP_VERIFICATION_DEPTH",
+  "SPSA_NMP_MIN_PLY_NUM",
+  "SPSA_NMP_MIN_PLY_DEN",
+  "SPSA_PROBCUT_DYNAMIC_DIV",
+  "SPSA_PROBCUT_DEPTH_BASE",
+  "SPSA_IIR_SHALLOW",
+  "SPSA_IIR_DEEP",
+  "SPSA_IIR_DEPTH_BOUNDARY",
+  "SPSA_DRAW_JITTER_MASK",
+  "SPSA_DRAW_JITTER_OFFSET",
+  "SPSA_LMR_NON_IMPROVING_DIV",
+  "SPSA_LMR_RESEARCH_DEEPER_BASE",
+  "SPSA_LMR_RESEARCH_DEEPER_DEPTH_MUL",
+  "SPSA_LMR_RESEARCH_SHALLOWER_THRESHOLD",
+  "SPSA_SINGULAR_MIN_DEPTH_BASE",
+  "SPSA_SINGULAR_MIN_DEPTH_TT_PV_ADD",
+  "SPSA_SINGULAR_TT_DEPTH_MARGIN",
+  "SPSA_SINGULAR_DEPTH_DIV",
+  "SPSA_SINGULAR_DOUBLE_MARGIN_TT_MOVE_HIST_DIV",
+  "SPSA_SINGULAR_NEGATIVE_EXTENSION_TT_FAIL_HIGH",
+  "SPSA_SINGULAR_NEGATIVE_EXTENSION_CUT_NODE",
+  "SPSA_STAT_BONUS_MAX",
+  "SPSA_STAT_MALUS_MAX",
+  "SPSA_S14_MAIN_HIST_DEN",
+  "SPSA_S14_QFUT_BASE",
+  "SPSA_S14_QFUT_NO_BEST",
+  "SPSA_LOW_PLY_HISTORY_OFFSET",
+  "SPSA_CONT_HISTORY_NEAR_PLY_OFFSET",
+  "SPSA_FAIL_HIGH_CONT_NEAR_PLY_OFFSET",
+  "SPSA_FAIL_HIGH_CONT_WEIGHT_1",
+  "SPSA_FAIL_HIGH_CONT_WEIGHT_2",
+  "SPSA_FAIL_HIGH_CONT_WEIGHT_3",
+  "SPSA_FAIL_HIGH_CONT_WEIGHT_4",
+  "SPSA_FAIL_HIGH_CONT_WEIGHT_5",
+  "SPSA_FAIL_HIGH_CONT_WEIGHT_6",
+  "SPSA_UPDATE_ALL_QUIET_BONUS_SCALE_NUM",
+  "SPSA_UPDATE_ALL_QUIET_MALUS_SCALE_NUM",
+  "SPSA_UPDATE_ALL_CAPTURE_BONUS_SCALE_NUM",
+  "SPSA_UPDATE_ALL_CAPTURE_MALUS_SCALE_NUM",
+  "SPSA_UPDATE_ALL_EARLY_REFUTE_PENALTY_SCALE_NUM",
+  "SPSA_PRIOR_QUIET_CM_BONUS_SCALE_BASE",
+  "SPSA_PRIOR_QUIET_CM_PARENT_STAT_DIV",
+  "SPSA_PRIOR_QUIET_CM_DEPTH_MUL",
+  "SPSA_PRIOR_QUIET_CM_DEPTH_CAP",
+  "SPSA_PRIOR_QUIET_CM_MOVE_COUNT_BONUS",
+  "SPSA_PRIOR_QUIET_CM_EVAL_BONUS",
+  "SPSA_PRIOR_QUIET_CM_EVAL_MARGIN",
+  "SPSA_PRIOR_QUIET_CM_PARENT_EVAL_BONUS",
+  "SPSA_PRIOR_QUIET_CM_PARENT_EVAL_MARGIN",
+  "SPSA_PRIOR_QUIET_CM_SCALED_DEPTH_MUL",
+  "SPSA_PRIOR_QUIET_CM_SCALED_OFFSET",
+  "SPSA_PRIOR_QUIET_CM_SCALED_CAP",
+  "SPSA_PRIOR_QUIET_CM_CONT_SCALE_NUM",
+  "SPSA_PRIOR_QUIET_CM_MAIN_SCALE_NUM",
+  "SPSA_PRIOR_QUIET_CM_PAWN_SCALE_NUM",
+  "SPSA_PRIOR_CAPTURE_CM_BONUS",
+]

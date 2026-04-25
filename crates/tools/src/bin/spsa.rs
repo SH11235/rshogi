@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -16,8 +17,10 @@ use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::{
     EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
 };
+use tools::spsa_param_mapping::{
+    MappingTable, NOT_USED_MARKER as PARAM_NOT_USED_MARKER, RawParamRow, parse_param_line,
+};
 
-const PARAM_NOT_USED_MARKER: &str = "[[NOT USED]]";
 const META_FORMAT_VERSION: u32 = 2;
 
 #[derive(Parser, Debug)]
@@ -174,6 +177,22 @@ struct Cli {
     /// 早期停止: 条件連続成立回数（0で無効）
     #[arg(long, default_value_t = 0)]
     early_stop_patience: u32,
+
+    /// エンジン側パラメータ名マッピング TOML（例: tune/yo_rshogi_mapping.toml）。
+    /// 指定時、`.params` の rshogi 名 (`SPSA_*`) を、setoption する直前にエンジン側名前空間
+    /// （例: YaneuraOu の `correction_value_1`）に翻訳し、必要なら符号を反転する。
+    /// マッピング表に存在しないパラメータはそのままの名前で送る。
+    #[arg(long)]
+    engine_param_mapping: Option<PathBuf>,
+
+    /// 正本 `.params` の上書き保護用。`--params` のパスが存在しない時に限り、
+    /// `<init-from>` の内容をコピーしてから SPSA を開始する。既に存在する場合は
+    /// resume と同じく既存ファイルを読み込んで何もしない。正本（例:
+    /// `spsa_params/suisho10_converted.params`）を `--params` に直接渡すと
+    /// 反復ごとに上書きされるので、`--params runs/spsa/<ts>/tuned.params
+    /// --init-from spsa_params/suisho10_converted.params` のパターンで使う。
+    #[arg(long)]
+    init_from: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -320,6 +339,71 @@ struct SeedRunContext<'a> {
     seed_idx: usize,
     seed_count: usize,
     base_seed: u64,
+    translator: &'a EngineNameTranslator,
+    active_mask: &'a [bool],
+}
+
+/// rshogi `.params` の名前 → エンジン側 USI option 名 への翻訳器
+///
+/// 不変条件: `from_mapping_file` / `empty` で構築後は **immutable**。
+/// `&Self` は worker thread 間で `thread::scope` 経由で共有して安全（`HashMap`
+/// は `Sync` であり、`translate` は内部状態を変更しない）。将来 `enabled` を
+/// `AtomicBool` 化したり内部可変性を入れる場合は、共有読み取りの安全性を
+/// 再評価すること。
+#[derive(Debug, Default)]
+struct EngineNameTranslator {
+    /// rshogi 名 → (エンジン側名, 符号反転)。
+    table: HashMap<String, (String, bool)>,
+    /// マッピング表がロードされているか
+    enabled: bool,
+}
+
+impl EngineNameTranslator {
+    fn empty() -> Self {
+        Self {
+            table: HashMap::new(),
+            enabled: false,
+        }
+    }
+
+    fn from_mapping_file(path: &Path) -> Result<Self> {
+        let mapping = MappingTable::load(path)?;
+        let table = mapping
+            .mappings
+            .iter()
+            .map(|m| (m.rshogi.clone(), (m.yo.clone(), m.sign_flip)))
+            .collect();
+        Ok(Self {
+            table,
+            enabled: true,
+        })
+    }
+
+    /// `value` を必要に応じて符号反転し、エンジン側に送る (name, value) を返す。
+    /// マッピング表にない name はそのまま通す。
+    fn translate<'a>(&'a self, name: &'a str, value: f64) -> (&'a str, f64) {
+        match self.table.get(name) {
+            Some((engine_name, sign_flip)) => {
+                let v = if *sign_flip { -value } else { value };
+                (engine_name.as_str(), v)
+            }
+            None => (name, value),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.table.len()
+    }
+
+    /// マッピング表がロードされているか
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// rshogi 名がマッピング表に登録されているか
+    fn is_mapped(&self, rshogi_name: &str) -> bool {
+        self.table.contains_key(rshogi_name)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -354,12 +438,25 @@ fn schedule_matches(lhs: ScheduleConfig, rhs: ScheduleConfig) -> bool {
         && lhs.total_iterations == rhs.total_iterations
 }
 
-fn is_param_active(param: &SpsaParam, active_only_regex: Option<&Regex>) -> bool {
+fn is_param_active(
+    param: &SpsaParam,
+    active_only_regex: Option<&Regex>,
+    translator: &EngineNameTranslator,
+) -> bool {
     if param.not_used {
         return false;
     }
-    if let Some(re) = active_only_regex {
-        return re.is_match(&param.name);
+    if let Some(re) = active_only_regex
+        && !re.is_match(&param.name)
+    {
+        return false;
+    }
+    // P1: マッピング表がロード済みかつ name が未マッピングの場合、エンジン側で
+    // setoption が黙ってスキップされるため SPSA で摂動・更新するのは無駄かつ有害
+    // （unmapped.rshogi 系の値がランダムウォークして .params を汚染する）。
+    // ここで active 集合から除外する。
+    if translator.is_enabled() && !translator.is_mapped(&param.name) {
+        return false;
     }
     true
 }
@@ -582,54 +679,43 @@ fn save_meta(path: &Path, meta: &ResumeMetaData) -> Result<()> {
     Ok(())
 }
 
-fn parse_param_line(line: &str, line_no: usize) -> Result<Option<SpsaParam>> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Ok(None);
+impl SpsaParam {
+    fn from_raw(raw: RawParamRow, line_no: usize) -> Result<Self> {
+        let RawParamRow {
+            name,
+            kind,
+            value_text,
+            min_text,
+            max_text,
+            col5_text,
+            col6_text,
+            comment,
+            not_used,
+        } = raw;
+        let is_int = kind.eq_ignore_ascii_case("int");
+        Ok(SpsaParam {
+            name,
+            type_name: kind,
+            is_int,
+            value: value_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid v at line {line_no}"))?,
+            min: min_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid min at line {line_no}"))?,
+            max: max_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid max at line {line_no}"))?,
+            c_end: col5_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid c_end at line {line_no}"))?,
+            r_end: col6_text
+                .parse::<f64>()
+                .with_context(|| format!("invalid r_end at line {line_no}"))?,
+            comment,
+            not_used,
+        })
     }
-
-    let mut payload = trimmed.to_string();
-    let not_used = payload.contains(PARAM_NOT_USED_MARKER);
-    if not_used {
-        payload = payload.replace(PARAM_NOT_USED_MARKER, "");
-    }
-
-    let (val_part, comment) = if let Some((left, right)) = payload.split_once("//") {
-        (left, right.trim().to_string())
-    } else {
-        (payload.as_str(), String::new())
-    };
-
-    let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
-    if cols.len() < 7 {
-        bail!("invalid params line {}: '{}'", line_no, line);
-    }
-
-    let type_name = cols[1].to_string();
-    let is_int = type_name.eq_ignore_ascii_case("int");
-
-    Ok(Some(SpsaParam {
-        name: cols[0].to_string(),
-        type_name,
-        is_int,
-        value: cols[2]
-            .parse::<f64>()
-            .with_context(|| format!("invalid v at line {}", line_no))?,
-        min: cols[3]
-            .parse::<f64>()
-            .with_context(|| format!("invalid min at line {}", line_no))?,
-        max: cols[4]
-            .parse::<f64>()
-            .with_context(|| format!("invalid max at line {}", line_no))?,
-        c_end: cols[5]
-            .parse::<f64>()
-            .with_context(|| format!("invalid c_end at line {}", line_no))?,
-        r_end: cols[6]
-            .parse::<f64>()
-            .with_context(|| format!("invalid r_end at line {}", line_no))?,
-        comment,
-        not_used,
-    }))
 }
 
 fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
@@ -637,9 +723,10 @@ fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
     let reader = BufReader::new(file);
     let mut params = Vec::new();
     for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
         let line = line?;
-        if let Some(param) = parse_param_line(&line, idx + 1)? {
-            params.push(param);
+        if let Some(raw) = parse_param_line(&line, line_no)? {
+            params.push(SpsaParam::from_raw(raw, line_no)?);
         }
     }
     if params.is_empty() {
@@ -653,10 +740,12 @@ fn write_params(path: &Path, params: &[SpsaParam]) -> Result<()> {
         File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut w = BufWriter::new(file);
     for p in params {
+        // float は `{:.6}` で固定桁にしてラウンドトリップ・git diff の安定性を保つ
+        // (`{}` (Display) は `1e-7` のような指数表記や精度不定の桁を出すため)
         let v_str = if p.is_int {
             format!("{}", p.value.round() as i64)
         } else {
-            format!("{}", p.value)
+            format!("{:.6}", p.value)
         };
         let mut line = format!(
             "{},{},{},{},{},{},{}",
@@ -706,9 +795,25 @@ fn apply_parameter_vector(
     engine: &mut EngineProcess,
     params: &[SpsaParam],
     values: &[f64],
+    translator: &EngineNameTranslator,
+    active_mask: &[bool],
 ) -> Result<()> {
-    for (p, &v) in params.iter().zip(values.iter()) {
-        engine.set_option_if_available(&p.name, &option_value_string(p, v))?;
+    debug_assert_eq!(params.len(), values.len());
+    debug_assert_eq!(params.len(), active_mask.len());
+    for ((p, &v), &active) in params.iter().zip(values.iter()).zip(active_mask.iter()) {
+        // 非 active (not_used / regex 不一致 / translator enabled & unmapped) は
+        // engine 側で `set_option_if_available` が黙ってスキップする上、SPSA 側でも
+        // 値が変わらないので毎ゲーム送信は無駄。
+        if !active {
+            continue;
+        }
+        let (engine_name, engine_value) = translator.translate(&p.name, v);
+        // `engine_value` は translator で sign_flip 後の値。SPSA 側の clamp は呼び出し
+        // 元 (`update_parameter_vector`) で `p.min/max` 適用済みなので、ここで再 clamp
+        // しない。translator は名前と符号だけを変換する役割で、YO 側 USI option の
+        // min/max との整合性は運用責任（runbook §10.6 + check_param_mapping --yo-binary
+        // で事前検証する想定）。
+        engine.set_option_if_available(engine_name, &option_value_string(p, engine_value))?;
     }
     engine.sync_ready()?;
     Ok(())
@@ -813,6 +918,8 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
         seed_idx,
         seed_count,
         base_seed,
+        translator,
+        active_mask,
     } = ctx;
 
     let game_count = start_pos_indices.len();
@@ -854,11 +961,35 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
                 for task in task_rx {
                     let result = (|| -> Result<GameTaskResult> {
                         if task.plus_is_black {
-                            apply_parameter_vector(&mut plus_engine, params, plus_values)?;
-                            apply_parameter_vector(&mut minus_engine, params, minus_values)?;
+                            apply_parameter_vector(
+                                &mut plus_engine,
+                                params,
+                                plus_values,
+                                translator,
+                                active_mask,
+                            )?;
+                            apply_parameter_vector(
+                                &mut minus_engine,
+                                params,
+                                minus_values,
+                                translator,
+                                active_mask,
+                            )?;
                         } else {
-                            apply_parameter_vector(&mut plus_engine, params, minus_values)?;
-                            apply_parameter_vector(&mut minus_engine, params, plus_values)?;
+                            apply_parameter_vector(
+                                &mut plus_engine,
+                                params,
+                                minus_values,
+                                translator,
+                                active_mask,
+                            )?;
+                            apply_parameter_vector(
+                                &mut minus_engine,
+                                params,
+                                plus_values,
+                                translator,
+                                active_mask,
+                            )?;
                         }
                         plus_engine.new_game()?;
                         minus_engine.new_game()?;
@@ -1025,6 +1156,55 @@ fn main() -> Result<()> {
 
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
+    // parent dir を先に確保（init-from 指定有無に関わらず後段で write_params が
+    // 同じパスに書き出すため、堅牢性のため init-from 外で create_dir_all する）
+    if let Some(parent) = cli.params.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent dir for {}", cli.params.display()))?;
+    }
+
+    if let Some(init_src) = &cli.init_from {
+        // TOCTOU 緩和: `exists()` チェック→ `fs::copy` の間に他プロセスが書き込むと
+        // 上書きしてしまう。`OpenOptions::create_new` で atomic に作成失敗 (AlreadyExists)
+        // を検出し、その場合は既存ファイルを尊重する。
+        match OpenOptions::new().create_new(true).write(true).open(&cli.params) {
+            Ok(out) => {
+                let mut writer = BufWriter::new(out);
+                let mut reader = File::open(init_src)
+                    .with_context(|| format!("failed to open {}", init_src.display()))?;
+                std::io::copy(&mut reader, &mut writer).with_context(|| {
+                    format!("failed to copy {} -> {}", init_src.display(), cli.params.display())
+                })?;
+                writer.flush()?;
+                println!(
+                    "initialized {} from canonical {}",
+                    cli.params.display(),
+                    init_src.display()
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                println!(
+                    "init-from: {} already exists, leaving as-is (canonical {} not copied)",
+                    cli.params.display(),
+                    init_src.display()
+                );
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(e)
+                    .context(format!("failed to create {} for init-from", cli.params.display())));
+            }
+        }
+    }
+    let translator = match &cli.engine_param_mapping {
+        Some(path) => {
+            let t = EngineNameTranslator::from_mapping_file(path)?;
+            println!("engine param mapping: {} entries loaded from {}", t.len(), path.display());
+            t
+        }
+        None => EngineNameTranslator::empty(),
+    };
     let mut params = read_params(&cli.params)?;
     let schedule = ScheduleConfig {
         alpha: cli.alpha,
@@ -1084,6 +1264,7 @@ fn main() -> Result<()> {
         // 互換性: --stats-csv が明示指定されている場合は従来の派生
         // (<stats_csv>.aggregate.csv) を維持。さもなければ <params>.stats_aggregate.csv。
         // これにより既存ジョブを --resume したとき既定の集計CSV出力先が変わらない。
+        // 詳細: docs/spsa_runbook.md §3 「集計CSV のパス導出規則」
         if let Some(stats_path) = &cli.stats_csv {
             Some(PathBuf::from(format!("{}.aggregate.csv", stats_path.display())))
         } else {
@@ -1128,10 +1309,14 @@ fn main() -> Result<()> {
 
     let (start_positions, _) =
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
-    let active_param_count = params
+    // active mask は iteration 中に変化しない（params の値だけが更新され、name/not_used
+    // /regex マッチ性は不変）ため、ここで 1 度だけ計算してホットパス (apply_parameter_vector)
+    // で再利用する。
+    let active_mask: Vec<bool> = params
         .iter()
-        .filter(|param| is_param_active(param, active_only_regex.as_ref()))
-        .count();
+        .map(|p| is_param_active(p, active_only_regex.as_ref(), &translator))
+        .collect();
+    let active_param_count = active_mask.iter().filter(|&&b| b).count();
     if active_param_count == 0 {
         bail!(
             "no active parameters (active_only_regex={:?}, not_used filtering may have excluded all)",
@@ -1139,6 +1324,30 @@ fn main() -> Result<()> {
         );
     }
     println!("active params: {active_param_count}/{}", params.len());
+
+    // 翻訳器有効時、`active_only_regex` でマッチしたが unmapped で除外されたパラメータを
+    // info 出力する。「期待した parameter が摂動されていない」事象に気づきやすくする。
+    if translator.is_enabled() {
+        let mut unmapped_active: Vec<&str> = params
+            .iter()
+            .filter(|p| {
+                !p.not_used
+                    && active_only_regex.as_ref().is_none_or(|re| re.is_match(&p.name))
+                    && !translator.is_mapped(&p.name)
+            })
+            .map(|p| p.name.as_str())
+            .collect();
+        if !unmapped_active.is_empty() {
+            unmapped_active.sort();
+            println!(
+                "info: {} param(s) matched --active-only-regex but are unmapped (translator skipped):",
+                unmapped_active.len()
+            );
+            for n in &unmapped_active {
+                println!("  - {n}");
+            }
+        }
+    }
 
     let base_cfg = EngineConfig {
         path: engine_path,
@@ -1202,7 +1411,7 @@ fn main() -> Result<()> {
             let flips: Vec<f64> = params
                 .iter()
                 .map(|p| {
-                    if !is_param_active(p, active_only_regex.as_ref()) {
+                    if !is_param_active(p, active_only_regex.as_ref(), &translator) {
                         0.0
                     } else if rng.random_bool(0.5) {
                         1.0
@@ -1216,7 +1425,7 @@ fn main() -> Result<()> {
                 .zip(param_schedules.iter())
                 .zip(flips.iter())
                 .map(|((p, sched), &flip)| {
-                    if !is_param_active(p, active_only_regex.as_ref()) {
+                    if !is_param_active(p, active_only_regex.as_ref(), &translator) {
                         0.0
                     } else {
                         let (c_k, _) =
@@ -1240,7 +1449,7 @@ fn main() -> Result<()> {
             let mut active_params = 0usize;
             let mut abs_shift_sum = 0.0f64;
             for (p, &shift) in params.iter().zip(shifts.iter()) {
-                if !is_param_active(p, active_only_regex.as_ref()) {
+                if !is_param_active(p, active_only_regex.as_ref(), &translator) {
                     continue;
                 }
                 active_params += 1;
@@ -1276,6 +1485,8 @@ fn main() -> Result<()> {
                 seed_idx,
                 seed_count: seed_values.len(),
                 base_seed,
+                translator: &translator,
+                active_mask: &active_mask,
             })?;
             total_games = total_games
                 .checked_add(cli.games_per_iteration as usize)
@@ -1290,7 +1501,8 @@ fn main() -> Result<()> {
             for (idx, (p, (&flip, sched))) in
                 params.iter().zip(flips.iter().zip(param_schedules.iter())).enumerate()
             {
-                if !is_param_active(p, active_only_regex.as_ref()) || p.c_end.abs() <= f64::EPSILON
+                if !is_param_active(p, active_only_regex.as_ref(), &translator)
+                    || p.c_end.abs() <= f64::EPSILON
                 {
                     continue;
                 }
@@ -1325,7 +1537,9 @@ fn main() -> Result<()> {
         let mut abs_update_sum = 0.0f64;
         let mut max_abs_update = 0.0f64;
         for (idx, p) in params.iter_mut().enumerate() {
-            if !is_param_active(p, active_only_regex.as_ref()) || p.c_end.abs() <= f64::EPSILON {
+            if !is_param_active(p, active_only_regex.as_ref(), &translator)
+                || p.c_end.abs() <= f64::EPSILON
+            {
                 continue;
             }
             let before = p.value;
