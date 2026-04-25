@@ -57,7 +57,7 @@ use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::{ConfigKeys, parse_clock_spec};
 use crate::datetime::{format_csa_datetime, format_date_path};
 use crate::persistence::{
-    FinishedState, MoveRow, PersistedConfig, ReplaySummary, legacy_clock_fields, replay_core_room,
+    FinishedState, MoveRow, PersistedConfig, ReplaySummary, replay_core_room,
 };
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 use crate::spectator_control::{MonitorDecision, resolve_monitor_target};
@@ -354,7 +354,6 @@ impl GameRoom {
             .unwrap_or_else(|| "unknown".to_owned());
         let game_id = format!("{room_id}-{started}");
         let clock_spec = load_clock_spec_from_env(&self.env)?;
-        let (main_time_sec, byoyomi_sec) = legacy_clock_fields(&clock_spec);
         // 双方の LOGIN は既に OK を返しているので、予約で失敗したまま早期
         // return するとスロットが永久に詰まる。Exhausted に加え、CAS リトライ
         // 上限到達などの Err も pending match abort 経路に落として部屋を
@@ -391,9 +390,7 @@ impl GameRoom {
             black_handle: black_handle.to_owned(),
             white_handle: white_handle.to_owned(),
             game_name: game_name.to_owned(),
-            main_time_sec,
-            byoyomi_sec,
-            clock: Some(clock_spec.clone()),
+            clock: clock_spec.clone(),
             max_moves: DEFAULT_MAX_MOVES,
             time_margin_ms: DEFAULT_TIME_MARGIN_MS,
             matched_at_ms: started,
@@ -970,7 +967,7 @@ impl GameRoom {
 
         // `time_section` は clock の初期設定値に依存し、持ち時間の残量には
         // 左右されないので cfg から再構築しても同じ出力になる。
-        let time_section = cfg.clock_spec().format_time_section();
+        let time_section = cfg.clock.format_time_section();
 
         let start_str = format_csa_datetime(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
         let end_str = format_csa_datetime(ended_at_ms);
@@ -1073,20 +1070,24 @@ impl GameRoom {
         Ok(room_id.unwrap_or_else(|| "unknown".to_owned()))
     }
 
-    /// CoreRoom が in-memory に無ければ永続化から復元する（`moves` replay 付き）。
+    /// CoreRoom が in-memory に無ければ永続化から復元する。
     ///
     /// 復元ステップ:
-    /// 1. `KEY_CONFIG` から `GameRoomConfig` を再構築し、新しい `CoreRoom` を作る。
-    /// 2. 既に終局済みなら config が残っていても core を作らずに早期 return。
-    /// 3. `moves` テーブルに着手が 1 手以上あれば、両プレイヤは必ず AGREE 済みとみなし、
-    ///    記録されている最初の着手時刻をもって AGREE を二度流し、Playing 状態へ
-    ///    遷移させる。その後、ply 順に `handle_line` で差し手を再送する。
+    /// 1. 既に in-memory にコアがあれば即 return。終局済みフラグが立っていても
+    ///    新しいコアを作らずに return（同 DO で同対局が再開しないことの保証）。
+    /// 2. `KEY_CONFIG` (`PersistedConfig`) を読み、無ければ何もしない。
+    /// 3. `play_started_at_ms` が立っているときだけ `moves` テーブルを読み込む。
+    /// 4. `crate::persistence::replay_core_room` に委譲して新しい `CoreRoom` を
+    ///    組み立てる。成功時は in-memory にセット、失敗 variant は console_log で
+    ///    記録するだけでコアを生成しない（結果整合性を優先）。
     ///
     /// # 既知の制約
-    /// - AGREE 完了だが 1 手目未指の状態で isolate が破棄された場合、復元後の
-    ///   CoreRoom は `AgreeWaiting` に戻る。両者が再 AGREE を送れば再開できる。
-    /// - 復元中に `handle_line` が `Err` を返したら core は生成せず、以降の着手
-    ///   受理を拒絶する（結果整合性を優先）。
+    /// - AGREE 完了だが 1 手目未指の状態で isolate が破棄された場合は、
+    ///   `play_started_at_ms` が `Some(t)` であれば AGREE を再送して `Playing`
+    ///   に復帰する（cold start 復元時に alarm による time-up が発火できる経路
+    ///   を維持する）。`play_started_at_ms` が `None` なら `AgreeWaiting` のまま。
+    /// - 復元中の `handle_line` 失敗（`AgreeReplayFailed` / `MoveReplayFailed` 等）
+    ///   ではコアを生成せず、以降の着手受理を拒絶する。
     async fn ensure_core_loaded(&self) -> Result<()> {
         if self.core.borrow().is_some() {
             return Ok(());
@@ -1109,7 +1110,7 @@ impl GameRoom {
             Vec::new()
         };
         match replay_core_room(&cfg, &moves) {
-            ReplaySummary::Restored { core, .. } => {
+            ReplaySummary::Restored { core } => {
                 // `core` は `Box<CoreRoom>` で返るためここで unbox する
                 // (`ReplaySummary` の variant 間サイズ差対策、persistence.rs 参照)。
                 *self.core.borrow_mut() = Some(*core);

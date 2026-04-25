@@ -26,7 +26,12 @@ pub mod attachment;
 pub mod config;
 pub mod datetime;
 pub mod origin;
-pub mod persistence;
+// `persistence` は DO ランタイム (`game_room`) からのみ消費される I/O 非依存の
+// 純粋ロジックを置く。ホスト target の通常ビルドでは消費者が存在しないので
+// `cargo build` の dead-code 解析と整合させるため、wasm32 ビルドとテスト時のみ
+// コンパイルする。テストはホスト target で `cargo test` から到達できる。
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod persistence;
 pub mod room_id;
 pub mod session_state;
 pub mod spectator_control;
