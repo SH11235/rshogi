@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_match_skips_unspecified_color_in_phase1() {
+    fn direct_match_skips_unspecified_color() {
         let s = DirectMatchStrategy::new();
         let pairs = s.try_pair(&[cand("alice", None), cand("bob", Some(Color::Black))]);
         assert!(pairs.is_empty());

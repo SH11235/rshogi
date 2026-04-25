@@ -24,7 +24,9 @@ use rshogi_csa_server::{ClockSpec, FileKifuStorage};
 use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
-use rshogi_csa_server_tcp::server::{InMemoryPasswordStore, ServerConfig, build_state, run_server};
+use rshogi_csa_server_tcp::server::{
+    InMemoryPasswordStore, ServerConfig, build_state, prepare_runtime, run_server,
+};
 use tokio::sync::Mutex;
 
 /// rshogi-csa-server-tcp CLI 引数。
@@ -153,6 +155,14 @@ fn main() -> anyhow::Result<()> {
         allow_floodgate_features: cli.allow_floodgate_features,
         shutdown_grace: std::time::Duration::from_secs(cli.shutdown_grace_sec),
     };
+    // Floodgate 系機能の opt-in ゲートを起動前に評価する。要求があるのに
+    // `--allow-floodgate-features` が立っていない場合はここで起動を止める。
+    prepare_runtime(&config).map_err(|msg| {
+        anyhow::anyhow!(
+            "{msg}; pass --allow-floodgate-features to enable Floodgate runtime features",
+        )
+    })?;
+
     let kifu_storage = FileKifuStorage::new(config.kifu_topdir.clone());
     let state = Rc::new(build_state(
         config,
