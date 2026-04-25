@@ -57,6 +57,12 @@ struct Cli {
     /// `--allow-floodgate-features` の opt-in が立っていない場合は起動が失敗する。
     #[arg(long, value_name = "PATH")]
     players_yaml: Option<PathBuf>,
+    /// Floodgate スケジュール宣言の TOML パス。`[[schedules]]` 配列で複数の
+    /// スケジュールを指定できる（`game_name` / `weekday` / `hour` / `minute` /
+    /// `clock` / `pairing_strategy`）。指定すると定刻起動マッチメイクが有効化
+    /// され、`--allow-floodgate-features` opt-in が必須になる。
+    #[arg(long, value_name = "PATH")]
+    floodgate_schedule_toml: Option<PathBuf>,
     /// 秒読み方式 / Fischer 方式で使う持ち時間 (秒)。
     #[arg(long, default_value_t = 600)]
     total_time_sec: u32,
@@ -182,6 +188,14 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to load players file {:?}", cli.players))?;
     let password_store = InMemoryPasswordStore { map: password_map };
 
+    // Floodgate スケジュール TOML を読み込む（指定時のみ）。
+    let floodgate_schedules = if let Some(path) = cli.floodgate_schedule_toml.as_ref() {
+        load_floodgate_schedule_toml(path)
+            .with_context(|| format!("failed to load floodgate schedule TOML at {path:?}"))?
+    } else {
+        Vec::new()
+    };
+
     // 2. ServerConfig を構築。
     let config = ServerConfig {
         bind_addr,
@@ -205,6 +219,7 @@ fn main() -> anyhow::Result<()> {
         // ブロックが分岐ごとに `cli.players_yaml` の所有権を取れるよう、ここでは
         // 1 回だけ clone する（残りはそのまま move される）。
         players_yaml_path: cli.players_yaml.clone(),
+        floodgate_schedules,
         shutdown_grace: std::time::Duration::from_secs(cli.shutdown_grace_sec),
     };
     // Floodgate 系機能の opt-in ゲートを起動前に評価する。`players_yaml_path` が
@@ -280,6 +295,16 @@ where
     let handle = run_server(state.clone()).await.context("run_server")?;
     tracing::info!("rshogi-csa-server-tcp ready");
 
+    // Floodgate スケジューラを起動。`floodgate_schedules` が空なら無動作。
+    // `run_schedules` は各スケジュールを `spawn_local` で独立タスク化して
+    // JoinHandle を返す。各タスクは内部で `state.shutdown` を監視して
+    // shutdown 時に自動終了する。
+    let scheduler_handles = rshogi_csa_server_tcp::scheduler::run_schedules(state.clone())
+        .map_err(|msg| anyhow::anyhow!("failed to start floodgate scheduler: {msg}"))?;
+    if !scheduler_handles.is_empty() {
+        tracing::info!(schedules = scheduler_handles.len(), "floodgate scheduler tasks started");
+    }
+
     // SIGINT と SIGTERM を並列待機する。SIGINT は Ctrl-C、SIGTERM は
     // systemd / Docker / Kubernetes の停止シグナル。
     let sig = wait_for_termination_signal().await;
@@ -299,6 +324,13 @@ where
         Err(e) => {
             tracing::info!(error = %e, "accept loop joined with error");
         }
+    }
+
+    // 2.5 scheduler tasks の完了も待つ。`state.shutdown` が立っているので各
+    //     スケジューラループは select! で抜けて自然終了する。残りの対局完了は
+    //     後続の active_drive_tasks 待機で吸収する。
+    for h in scheduler_handles {
+        let _ = h.await;
     }
 
     // 3. 進行中対局が終局するまで待つ。grace を超過したら warning を出して
@@ -450,6 +482,36 @@ fn load_players_toml(
         );
     }
     Ok((password_map, rate_map))
+}
+
+/// Floodgate スケジュール TOML を読む。
+///
+/// 期待する形式:
+/// ```toml
+/// [[schedules]]
+/// game_name = "floodgate-600-10"
+/// weekday = "Mon"
+/// hour = 13
+/// minute = 0
+/// pairing_strategy = "direct"
+///
+/// [schedules.clock]
+/// kind = "countdown"
+/// total_time_sec = 600
+/// byoyomi_sec = 10
+/// ```
+fn load_floodgate_schedule_toml(
+    path: &std::path::Path,
+) -> anyhow::Result<Vec<rshogi_csa_server::FloodgateSchedule>> {
+    use serde::Deserialize;
+    #[derive(Debug, Deserialize)]
+    struct Root {
+        #[serde(default)]
+        schedules: Vec<rshogi_csa_server::FloodgateSchedule>,
+    }
+    let raw = std::fs::read_to_string(path)?;
+    let root: Root = toml::from_str(&raw)?;
+    Ok(root.schedules)
 }
 
 /// インメモリの `RateStorage`。再起動時は players.toml から再構築する前提で、

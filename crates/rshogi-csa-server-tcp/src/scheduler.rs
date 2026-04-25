@@ -1,0 +1,386 @@
+//! Floodgate スケジューラ実行系（TCP frontend 用）。
+//!
+//! コア crate `rshogi_csa_server::scheduler` で定義された値型 / trait
+//! ([`FloodgateSchedule`] / [`FloodgateTimer`]) を実装し、tokio current_thread
+//! ランタイム上でスケジュール定刻にマッチメイクを発火する。
+//!
+//! # ライフサイクル
+//!
+//! [`run_schedules`] が `state.config.floodgate_schedules` の各エントリを
+//! 独立した tokio task に配って起動する。各タスクは:
+//!
+//! 1. `next_fire_after(now)` で次回発火 UTC 時刻を算出
+//! 2. `FloodgateTimer::wait_until` または shutdown シグナルを `tokio::select!`
+//!    で並列待機
+//! 3. shutdown が立った場合は即座に終了。発火タイミングが先に来たら
+//!    [`fire_schedule`] を呼んで 1 周分マッチメイクし、ループに戻る
+//!
+//! # `fire_schedule` のフロー
+//!
+//! 1. `WaitingPool::drain_for_game_name` で当該 `game_name` の全 slot を取得
+//! 2. `PairingLogic::try_pair` で `Vec<MatchedPair>` を計算
+//! 3. ペア化された slot は両 waiter に [`MatchRequest`] を送って transport を
+//!    吸い上げ、`drive_game` を `spawn_local` で起動
+//! 4. ペア化されなかった slot は WaitingPool に再 push（次回まで待機）
+//!
+//! # 既知の制約（後続タスクで対応）
+//!
+//! - **per-schedule clock**: 現状は `state.config.clock`（global）を使う。
+//!   スケジュール毎に異なる時計（`floodgate-600-10` と `floodgate-180-3` 等）
+//!   をサポートするには `drive_game` のシグネチャに `ClockSpec` 引数を足して
+//!   呼び出し側で上書きする必要があり、本タスクの範囲外として持ち越し。
+//! - **buoy / 駒落ち**: スケジューラ起動の対局は常に平手（`initial_sfen = None`）。
+//!   駒落ちサポートはタスク 15.4 で対応する。
+
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use chrono::{DateTime, Utc};
+use rshogi_csa_server::matching::pairing::{DirectMatchStrategy, PairingLogic};
+use rshogi_csa_server::scheduler::{FloodgateSchedule, FloodgateTimer};
+use rshogi_csa_server::types::{Color, GameName, PlayerName};
+use rshogi_csa_server::{KifuStorage, PairingCandidate, RateStorage};
+use tokio::sync::oneshot;
+
+use crate::server::{MatchRequest, PasswordStore, SharedState, WaitingSlot, drive_game};
+use crate::transport::TcpTransport;
+
+/// `tokio::time::sleep_until` ベースの `FloodgateTimer` 実装。
+///
+/// `current_thread` ランタイム上で動き、deadline までスリープする。deadline が
+/// 既に過去であれば即座に return する（spurious tick 等の安全側挙動）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokioFloodgateTimer;
+
+impl FloodgateTimer for TokioFloodgateTimer {
+    async fn wait_until(&self, deadline: DateTime<Utc>) {
+        let now = Utc::now();
+        let dur = (deadline - now).to_std().unwrap_or(std::time::Duration::ZERO);
+        if dur.is_zero() {
+            return;
+        }
+        tokio::time::sleep(dur).await;
+    }
+}
+
+/// `pairing_strategy` 文字列からペアリング戦略インスタンスを構築する。
+///
+/// `"direct"` のみ本タスクで配線する。`"least_diff"` 等の Floodgate 系戦略は
+/// 別タスクで `Box<dyn PairingLogic>` 化するクロージャを足す形で拡張する。
+/// 未知の名前は起動時に `Err` で fail-fast する（`run_schedules` 経由で）。
+pub(crate) fn build_strategy(name: &str) -> Result<Box<dyn PairingLogic>, String> {
+    match name {
+        "direct" => Ok(Box::new(DirectMatchStrategy)),
+        other => Err(format!("unknown pairing_strategy {other:?}; supported: \"direct\"")),
+    }
+}
+
+/// 全 [`FloodgateSchedule`] をそれぞれ独立した task に乗せて起動する。
+///
+/// 戻り値は spawn された各 task の `JoinHandle<()>`。`run_server` 起動と並行に
+/// `tokio::task::spawn_local` で呼ばれることを想定する。各 task は内部で
+/// `state.shutdown` を監視し、shutdown 時に自動終了する。main 側は join handle
+/// を保持し、shutdown 後の `await` で終了確認する。
+///
+/// 戦略構築は task spawn より前にまとめて行い、未知 strategy 名は起動段階で
+/// `Err` を返す（run loop に入ってから初めて detected すると、無音でスケジュール
+/// が動かない事故になりうる）。
+pub fn run_schedules<R, K, P>(
+    state: Rc<SharedState<R, K, P>>,
+) -> Result<Vec<tokio::task::JoinHandle<()>>, String>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let schedules = state.config().floodgate_schedules.clone();
+    let mut handles = Vec::with_capacity(schedules.len());
+    for schedule in schedules {
+        let strategy = build_strategy(&schedule.pairing_strategy)?;
+        let s = state.clone();
+        let h = tokio::task::spawn_local(async move {
+            run_one_schedule(s, schedule, strategy, TokioFloodgateTimer).await;
+        });
+        handles.push(h);
+    }
+    Ok(handles)
+}
+
+async fn run_one_schedule<R, K, P, T>(
+    state: Rc<SharedState<R, K, P>>,
+    schedule: FloodgateSchedule,
+    strategy: Box<dyn PairingLogic>,
+    timer: T,
+) where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    T: FloodgateTimer + 'static,
+{
+    let game_name_for_log = schedule.game_name.clone();
+    loop {
+        if state.shutdown.is_triggered() {
+            tracing::info!(
+                game_name = %game_name_for_log,
+                "scheduler task exiting (shutdown triggered)"
+            );
+            return;
+        }
+        let now = Utc::now();
+        let next_fire = schedule.next_fire_after(now);
+        tracing::info!(
+            game_name = %game_name_for_log,
+            strategy = strategy.name(),
+            next_fire = %next_fire,
+            "scheduler waiting for next fire"
+        );
+        tokio::select! {
+            _ = timer.wait_until(next_fire) => {}
+            _ = state.shutdown.wait() => {
+                tracing::info!(
+                    game_name = %game_name_for_log,
+                    "scheduler task exiting (shutdown signal during wait)"
+                );
+                return;
+            }
+        }
+        // shutdown が wait_until 完了と同時に立っていた場合は fire しない。
+        if state.shutdown.is_triggered() {
+            return;
+        }
+        fire_schedule(state.clone(), &schedule, strategy.as_ref()).await;
+    }
+}
+
+/// 1 回分のマッチメイク発火: 待機 slot を取得 → ペア化 → drive_game を spawn。
+///
+/// 副作用は state.waiting / state.league（drive_game 内）/ tokio::task::spawn_local
+/// に閉じる。ペアリング戦略の純関数部分とテスト容易性のため、戦略は呼び出し側が
+/// `&dyn PairingLogic` で渡す（`run_schedules` 経路では `Box<dyn ...>` を借りる）。
+pub(crate) async fn fire_schedule<R, K, P>(
+    state: Rc<SharedState<R, K, P>>,
+    schedule: &FloodgateSchedule,
+    strategy: &dyn PairingLogic,
+) where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let game_name = schedule.game_name();
+
+    // 1. WaitingPool から当該 game_name の全 slot を抜き取る。
+    let drained: Vec<WaitingSlot> = {
+        let mut pool = state.waiting.lock().await;
+        pool.drain_for_game_name(&game_name)
+    };
+    if drained.is_empty() {
+        tracing::info!(
+            game_name = %schedule.game_name,
+            "scheduler fired but no waiters were in the pool"
+        );
+        return;
+    }
+
+    // 2. PairingCandidate に変換して戦略を回す。
+    let candidates: Vec<PairingCandidate> = drained
+        .iter()
+        .map(|s| PairingCandidate {
+            name: PlayerName::new(&s.handle),
+            preferred_color: Some(s.color),
+        })
+        .collect();
+    let pairs = strategy.try_pair(&candidates);
+    tracing::info!(
+        game_name = %schedule.game_name,
+        waiters = drained.len(),
+        pairs = pairs.len(),
+        strategy = strategy.name(),
+        "scheduler fired"
+    );
+
+    // 3. ペア成立した slot と未成立 slot に分割。
+    let mut by_handle: HashMap<String, WaitingSlot> =
+        drained.into_iter().map(|s| (s.handle.clone(), s)).collect();
+    let mut to_drive: Vec<(WaitingSlot, WaitingSlot)> = Vec::with_capacity(pairs.len());
+    for pair in &pairs {
+        let black = by_handle.remove(pair.black.as_str());
+        let white = by_handle.remove(pair.white.as_str());
+        match (black, white) {
+            (Some(b), Some(w)) => to_drive.push((b, w)),
+            // どちらか取り出せなかったケース: 戦略が不整合な MatchedPair を返した
+            // 異常系。戦略実装の不変条件違反として log のみ残し、両 slot は
+            // 残置（後で leftover として再キュー）。
+            (b, w) => {
+                if let Some(slot) = b {
+                    by_handle.insert(slot.handle.clone(), slot);
+                }
+                if let Some(slot) = w {
+                    by_handle.insert(slot.handle.clone(), slot);
+                }
+                tracing::warn!(
+                    game_name = %schedule.game_name,
+                    pair_black = %pair.black.as_str(),
+                    pair_white = %pair.white.as_str(),
+                    "pairing strategy returned a MatchedPair with handles not in candidate set"
+                );
+            }
+        }
+    }
+
+    // 4. 不成立 slot を WaitingPool に再 push（決定論的順序）。
+    {
+        let mut pool = state.waiting.lock().await;
+        let mut leftover: Vec<WaitingSlot> = by_handle.into_values().collect();
+        leftover.sort_by(|a, b| a.handle.cmp(&b.handle));
+        for slot in leftover {
+            pool.push(game_name.clone(), slot);
+        }
+    }
+
+    // 5. 成立ペアごとに transport を吸い上げて drive_game を spawn。
+    for (black, white) in to_drive {
+        spawn_scheduled_drive(state.clone(), game_name.clone(), black, white).await;
+    }
+}
+
+/// 1 ペア分の transport handoff と drive_game spawn。
+///
+/// 両 waiter に [`MatchRequest`] を送って transport を回収し、`drive_game` を
+/// `spawn_local` で起動する。`drive_game` は片方の waiter（black）の done_tx を
+/// 消費して終局通知するので、もう片方（white）の done_tx は本関数が drive 完了
+/// 後に手動で signal する。
+async fn spawn_scheduled_drive<R, K, P>(
+    state: Rc<SharedState<R, K, P>>,
+    game_name: GameName,
+    black: WaitingSlot,
+    white: WaitingSlot,
+) where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let (b_resp_tx, b_resp_rx) = oneshot::channel::<TcpTransport>();
+    let (b_done_tx, b_done_rx) = oneshot::channel::<()>();
+    let (w_resp_tx, w_resp_rx) = oneshot::channel::<TcpTransport>();
+    let (w_done_tx, w_done_rx) = oneshot::channel::<()>();
+
+    let b_req = MatchRequest {
+        transport_responder: b_resp_tx,
+        completion_rx: b_done_rx,
+    };
+    let w_req = MatchRequest {
+        transport_responder: w_resp_tx,
+        completion_rx: w_done_rx,
+    };
+
+    let black_handle = black.handle.clone();
+    let white_handle = white.handle.clone();
+    let b_handoff_ok = black.match_request_tx.send(b_req).is_ok();
+    let w_handoff_ok = white.match_request_tx.send(w_req).is_ok();
+    if !b_handoff_ok || !w_handoff_ok {
+        tracing::warn!(
+            game_name = %game_name.as_str(),
+            black = %black_handle,
+            white = %white_handle,
+            black_alive = b_handoff_ok,
+            white_alive = w_handoff_ok,
+            "scheduled match handoff failed (waiter disconnected before handoff)"
+        );
+        // 残った transport_responder / done_tx は drop により waiter が
+        // recv エラーで起床し、`run_waiter` 内のリカバリ経路で再キューされる。
+        return;
+    }
+
+    // 両 waiter から transport を吸い上げる。`recv` 失敗（waiter 直後切断）時は
+    // 残った片側の done_tx を drop して waiter を起こし、リカバリさせる。
+    let (b_transport, w_transport) = match (b_resp_rx.await, w_resp_rx.await) {
+        (Ok(b), Ok(w)) => (b, w),
+        (Ok(_), Err(_)) | (Err(_), Ok(_)) | (Err(_), Err(_)) => {
+            tracing::warn!(
+                game_name = %game_name.as_str(),
+                black = %black_handle,
+                white = %white_handle,
+                "scheduled match handoff: transport recv failed; aborting drive spawn"
+            );
+            return;
+        }
+    };
+
+    // drive_game は black の done_tx を消費して終局通知する。white の done_tx は
+    // 本関数のクロージャに残し、drive 完了後に手動 signal する。
+    let game_name_for_task = game_name.clone();
+    let black_handle_for_task = black_handle.clone();
+    let white_handle_for_task = white_handle.clone();
+    tokio::task::spawn_local(async move {
+        let result = drive_game(
+            state,
+            // drive_game の引数は (opp_*, self_*) 並び。Floodgate 経路では
+            // どちらも waiter なので役割は対称。black を「opp 役」（drive_game が
+            // done_tx を消費する側）に割り当てる。
+            b_transport,
+            black_handle_for_task.clone(),
+            Color::Black,
+            w_transport,
+            white_handle_for_task.clone(),
+            Color::White,
+            game_name_for_task,
+            None, // initial_sfen — buoy/駒落ち は本タスクの範囲外
+            b_done_tx,
+        )
+        .await;
+        let _ = w_done_tx.send(());
+        if let Err(e) = result {
+            tracing::error!(
+                error = %e,
+                black = %black_handle_for_task,
+                white = %white_handle_for_task,
+                "scheduled drive_game returned error"
+            );
+        }
+    });
+
+    // ペアリング選好で「ここまでで未消費の handle 文字列」を log に残しておく。
+    let _ = (black_handle, white_handle); // 既に閉じ込め済みだが、move 検証用。
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `build_strategy` が `"direct"` を受理し、その他はエラーにする契約を固定。
+    /// 15.2 で `"least_diff"` 等を追加するときに本テストを更新する。
+    #[test]
+    fn build_strategy_accepts_direct_and_rejects_unknown() {
+        // `dyn PairingLogic` は Debug 非実装なので `unwrap` ベースのアサートは
+        // 通らない。match で取り出して name() を確認する。
+        match build_strategy("direct") {
+            Ok(s) => assert_eq!(s.name(), "direct"),
+            Err(e) => panic!("direct must be accepted, got Err: {e}"),
+        }
+
+        let err = expect_err(build_strategy("least_diff"));
+        assert!(err.contains("least_diff"), "error must mention input: {err}");
+
+        let err = expect_err(build_strategy("unknown"));
+        assert!(err.contains("\"unknown\""));
+    }
+
+    fn expect_err(r: Result<Box<dyn PairingLogic>, String>) -> String {
+        match r {
+            Ok(_) => panic!("expected Err but got Ok"),
+            Err(e) => e,
+        }
+    }
+
+    /// `TokioFloodgateTimer::wait_until` が「過去 deadline」を渡されても即座に
+    /// return する契約を固定。spurious tick やシステム時刻ジャンプで scheduler
+    /// が無限ループ的に長時間スリープするのを防ぐ。
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn tokio_timer_wait_until_returns_immediately_for_past_deadline() {
+        let timer = TokioFloodgateTimer;
+        let past = Utc::now() - chrono::Duration::seconds(10);
+        // start_paused のため `tokio::time::sleep` は明示的に進めないと進まないが、
+        // `dur.is_zero()` 早期 return 経路を通るため即 return する。
+        timer.wait_until(past).await;
+    }
+}

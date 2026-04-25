@@ -12,6 +12,7 @@ pub mod matching;
 pub mod port;
 pub mod protocol;
 pub mod record;
+pub mod scheduler;
 pub mod storage;
 
 pub use config::{
@@ -42,6 +43,7 @@ pub use record::kifu::{
     KifuMove, KifuRecord, fork_initial_sfen_from_kifu, format_zerozero_list_line,
     illegal_reason_subcode, initial_sfen_from_csa_moves, primary_result_code, winner_of,
 };
+pub use scheduler::{FloodgateSchedule, FloodgateTimer, Weekday as FloodgateWeekday};
 #[cfg(feature = "tokio-transport")]
 pub use storage::buoy::FileBuoyStorage;
 #[cfg(feature = "tokio-transport")]

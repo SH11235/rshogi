@@ -148,6 +148,16 @@ pub struct ServerConfig {
     /// [`floodgate_intent_from_config`] により intent に変換され、
     /// `--allow-floodgate-features` が立っていない場合は起動が `Err` で停止する。
     pub players_yaml_path: Option<std::path::PathBuf>,
+    /// 定刻起動でマッチメイクを発火する Floodgate スケジュール宣言。空 `Vec` は
+    /// 「スケジューラ無し」を意味する。非空の場合は Floodgate 運用機能
+    /// (`enable_scheduler`) として gate 経由で `--allow-floodgate-features`
+    /// opt-in を要求する。
+    ///
+    /// 各 [`FloodgateSchedule`](rshogi_csa_server::FloodgateSchedule) は独立した
+    /// スケジュールタスクで駆動され、UTC の `weekday × hour:minute` に到達した
+    /// 時点で当該 `game_name` の待機プールから候補を抽出し、`pairing_strategy`
+    /// が指定する戦略でペアを作って Game_Summary を送信する。
+    pub floodgate_schedules: Vec<rshogi_csa_server::FloodgateSchedule>,
     /// SIGINT / SIGTERM 受信後に進行中対局の終了を待つ上限。超過分は未完了の
     /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
     /// を落とさない」ためのバッファで、既定 60 秒。
@@ -171,6 +181,7 @@ impl ServerConfig {
             admin_handles: Vec::new(),
             allow_floodgate_features: false,
             players_yaml_path: None,
+            floodgate_schedules: Vec::new(),
             shutdown_grace: Duration::from_secs(60),
         }
     }
@@ -202,6 +213,9 @@ pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFe
         // `players.yaml` 永続化はレート互換運用機能なので、Floodgate 系機能の
         // opt-in が必要（`--allow-floodgate-features`）。
         enable_persistent_player_rates: config.players_yaml_path.is_some(),
+        // 定刻起動スケジュールも Floodgate 系機能。1 件以上のスケジュール宣言
+        // があれば opt-in 要求。
+        enable_scheduler: !config.floodgate_schedules.is_empty(),
         ..FloodgateFeatureIntent::default()
     }
 }
@@ -282,11 +296,15 @@ impl Default for GracefulShutdown {
 /// drive は自分の `completion_rx`（game 終了通知）と、waiter の transport を受け取るための
 /// `transport_responder` を両方含めて送る。waiter はこれを受け取ったら自分の transport を
 /// `transport_responder` で返送し、`completion_rx` を await して終局まで待機する。
-struct MatchRequest {
+///
+/// 通常の direct match 経路では `handle_connection` 内の drive 役が構築する。
+/// Floodgate scheduler 経路（`scheduler::fire_schedule`）でも同じ構造を使い、
+/// scheduler が両 waiter に MatchRequest を送って transport を吸い上げる。
+pub(crate) struct MatchRequest {
     /// waiter が自分の `TcpTransport` をここで返送する。
-    transport_responder: oneshot::Sender<TcpTransport>,
+    pub(crate) transport_responder: oneshot::Sender<TcpTransport>,
     /// drive 側が終局後に `send(())` する。waiter はこれを受けてタスクを終える。
-    completion_rx: oneshot::Receiver<()>,
+    pub(crate) completion_rx: oneshot::Receiver<()>,
 }
 
 /// 待機プール内の 1 スロット。
@@ -295,34 +313,50 @@ struct MatchRequest {
 /// drive 側はここに入っている [`oneshot::Sender<MatchRequest>`] を通して待機側へ
 /// マッチ確定を通知する。`take_complement` でプールから取り出された slot は、
 /// `match_request_tx.send(...)` の成否で waiter が健在かどうか判定できる。
-struct WaitingSlot {
+pub(crate) struct WaitingSlot {
     /// 認証後に確定した handle 単独部分（League へ登録した名前）。
-    handle: String,
+    pub(crate) handle: String,
     /// 希望手番。
-    color: Color,
+    pub(crate) color: Color,
     /// drive 側 → waiter への確定通知。
-    match_request_tx: oneshot::Sender<MatchRequest>,
+    pub(crate) match_request_tx: oneshot::Sender<MatchRequest>,
 }
 
 /// 待機プール。
 ///
 /// `game_name` 別にキューを持ち、各キュー内で先着順に保持する。
-/// drive 側は相補手番のスロットを先頭から順に探す。
+/// drive 側は相補手番のスロットを先頭から順に探す。Floodgate scheduler は
+/// [`Self::drain_for_game_name`] で当該 `game_name` の全 slot を一括取得する。
 #[derive(Default)]
-struct WaitingPool {
+pub(crate) struct WaitingPool {
     queues: HashMap<GameName, VecDeque<WaitingSlot>>,
 }
 
 impl WaitingPool {
-    fn push(&mut self, game_name: GameName, slot: WaitingSlot) {
+    pub(crate) fn push(&mut self, game_name: GameName, slot: WaitingSlot) {
         self.queues.entry(game_name).or_default().push_back(slot);
     }
 
     /// 相補手番のスロットを 1 件取り出す。見つからなければ `None`。
-    fn take_complement(&mut self, game_name: &GameName, want: Color) -> Option<WaitingSlot> {
+    pub(crate) fn take_complement(
+        &mut self,
+        game_name: &GameName,
+        want: Color,
+    ) -> Option<WaitingSlot> {
         let queue = self.queues.get_mut(game_name)?;
         let idx = queue.iter().position(|s| s.color == want.opposite())?;
         queue.remove(idx)
+    }
+
+    /// 指定 `game_name` の待機 slot を全て取り出してプールから消す。
+    ///
+    /// Floodgate scheduler の発火経路で使う。返却された `Vec` は元のキューの
+    /// 先着順を維持する。`None` 系（キュー自体が無い）の場合は空 `Vec` を返す。
+    pub(crate) fn drain_for_game_name(&mut self, game_name: &GameName) -> Vec<WaitingSlot> {
+        match self.queues.get_mut(game_name) {
+            Some(queue) => queue.drain(..).collect(),
+            None => Vec::new(),
+        }
     }
 
     /// 指定 handle のスロットをプールから除去する（待機中の切断検知時の掃除用）。
@@ -346,8 +380,8 @@ where
     P: PasswordStore + 'static,
 {
     config: ServerConfig,
-    league: Mutex<League>,
-    waiting: Mutex<WaitingPool>,
+    pub(crate) league: Mutex<League>,
+    pub(crate) waiting: Mutex<WaitingPool>,
     rate_limiter: IpLoginRateLimiter,
     broadcaster: InMemoryBroadcaster,
     rate_storage: R,
@@ -1502,7 +1536,7 @@ fn default_fork_buoy_name(source_game: &GameId, nth_move: Option<u32>) -> GameNa
 
 /// drive 側タスクのメインループ。両 transport を所有して 1 対局を完了まで運ぶ。
 #[allow(clippy::too_many_arguments)]
-async fn drive_game<R, K, P>(
+pub(crate) async fn drive_game<R, K, P>(
     state: Rc<SharedState<R, K, P>>,
     opp_transport: TcpTransport,
     opp_handle: String,
