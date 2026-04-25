@@ -262,15 +262,21 @@ mod tests {
     /// - `tune/suisho10.params`
     /// - `tune/suisho10_converted.params` (= spsa_params/suisho10_converted.params のコピー)
     /// - `tune/yo_rshogi_mapping.toml`
+    ///
+    /// fixture 不在時は `panic!` で明示的に失敗する（CI で `--ignored` を回した時に
+    /// fixture 配置漏れがサイレントに通過しないようにするため）。
     #[test]
     #[ignore]
     fn canonical_pair_round_trip() {
         let yo_path = Path::new("tune/suisho10.params");
         let rshogi_path = Path::new("tune/suisho10_converted.params");
         let mapping_path = Path::new("tune/yo_rshogi_mapping.toml");
-        if !yo_path.exists() || !rshogi_path.exists() || !mapping_path.exists() {
-            eprintln!("fixture files not present, skipping");
-            return;
+        for p in &[yo_path, rshogi_path, mapping_path] {
+            assert!(
+                p.exists(),
+                "fixture not present: {} — see test doc for placement",
+                p.display()
+            );
         }
         let table = MappingTable::load(mapping_path).expect("mapping load");
         let yo = load_params(yo_path).expect("yo load");

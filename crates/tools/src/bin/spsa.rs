@@ -339,9 +339,16 @@ struct SeedRunContext<'a> {
     seed_count: usize,
     base_seed: u64,
     translator: &'a EngineNameTranslator,
+    active_mask: &'a [bool],
 }
 
 /// rshogi `.params` の名前 → エンジン側 USI option 名 への翻訳器
+///
+/// 不変条件: `from_mapping_file` / `empty` で構築後は **immutable**。
+/// `&Self` は worker thread 間で `thread::scope` 経由で共有して安全（`HashMap`
+/// は `Sync` であり、`translate` は内部状態を変更しない）。将来 `enabled` を
+/// `AtomicBool` 化したり内部可変性を入れる場合は、共有読み取りの安全性を
+/// 再評価すること。
 #[derive(Debug, Default)]
 struct EngineNameTranslator {
     /// rshogi 名 → (エンジン側名, 符号反転)。
@@ -747,10 +754,12 @@ fn write_params(path: &Path, params: &[SpsaParam]) -> Result<()> {
         File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut w = BufWriter::new(file);
     for p in params {
+        // float は `{:.6}` で固定桁にしてラウンドトリップ・git diff の安定性を保つ
+        // (`{}` (Display) は `1e-7` のような指数表記や精度不定の桁を出すため)
         let v_str = if p.is_int {
             format!("{}", p.value.round() as i64)
         } else {
-            format!("{}", p.value)
+            format!("{:.6}", p.value)
         };
         let mut line = format!(
             "{},{},{},{},{},{},{}",
@@ -801,8 +810,17 @@ fn apply_parameter_vector(
     params: &[SpsaParam],
     values: &[f64],
     translator: &EngineNameTranslator,
+    active_mask: &[bool],
 ) -> Result<()> {
-    for (p, &v) in params.iter().zip(values.iter()) {
+    debug_assert_eq!(params.len(), values.len());
+    debug_assert_eq!(params.len(), active_mask.len());
+    for ((p, &v), &active) in params.iter().zip(values.iter()).zip(active_mask.iter()) {
+        // 非 active (not_used / regex 不一致 / translator enabled & unmapped) は
+        // engine 側で `set_option_if_available` が黙ってスキップする上、SPSA 側でも
+        // 値が変わらないので毎ゲーム送信は無駄。
+        if !active {
+            continue;
+        }
         let (engine_name, engine_value) = translator.translate(&p.name, v);
         engine.set_option_if_available(engine_name, &option_value_string(p, engine_value))?;
     }
@@ -910,6 +928,7 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
         seed_count,
         base_seed,
         translator,
+        active_mask,
     } = ctx;
 
     let game_count = start_pos_indices.len();
@@ -956,12 +975,14 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
                                 params,
                                 plus_values,
                                 translator,
+                                active_mask,
                             )?;
                             apply_parameter_vector(
                                 &mut minus_engine,
                                 params,
                                 minus_values,
                                 translator,
+                                active_mask,
                             )?;
                         } else {
                             apply_parameter_vector(
@@ -969,12 +990,14 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
                                 params,
                                 minus_values,
                                 translator,
+                                active_mask,
                             )?;
                             apply_parameter_vector(
                                 &mut minus_engine,
                                 params,
                                 plus_values,
                                 translator,
+                                active_mask,
                             )?;
                         }
                         plus_engine.new_game()?;
@@ -1142,14 +1165,16 @@ fn main() -> Result<()> {
 
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
+    // parent dir を先に確保（init-from 指定有無に関わらず後段で write_params が
+    // 同じパスに書き出すため、堅牢性のため init-from 外で create_dir_all する）
+    if let Some(parent) = cli.params.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent dir for {}", cli.params.display()))?;
+    }
+
     if let Some(init_src) = &cli.init_from {
-        if let Some(parent) = cli.params.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create parent dir for {}", cli.params.display())
-            })?;
-        }
         // TOCTOU 緩和: `exists()` チェック→ `fs::copy` の間に他プロセスが書き込むと
         // 上書きしてしまう。`OpenOptions::create_new` で atomic に作成失敗 (AlreadyExists)
         // を検出し、その場合は既存ファイルを尊重する。
@@ -1292,10 +1317,14 @@ fn main() -> Result<()> {
 
     let (start_positions, _) =
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
-    let active_param_count = params
+    // active mask は iteration 中に変化しない（params の値だけが更新され、name/not_used
+    // /regex マッチ性は不変）ため、ここで 1 度だけ計算してホットパス (apply_parameter_vector)
+    // で再利用する。
+    let active_mask: Vec<bool> = params
         .iter()
-        .filter(|param| is_param_active(param, active_only_regex.as_ref(), &translator))
-        .count();
+        .map(|p| is_param_active(p, active_only_regex.as_ref(), &translator))
+        .collect();
+    let active_param_count = active_mask.iter().filter(|&&b| b).count();
     if active_param_count == 0 {
         bail!(
             "no active parameters (active_only_regex={:?}, not_used filtering may have excluded all)",
@@ -1465,6 +1494,7 @@ fn main() -> Result<()> {
                 seed_count: seed_values.len(),
                 base_seed,
                 translator: &translator,
+                active_mask: &active_mask,
             })?;
             total_games = total_games
                 .checked_add(cli.games_per_iteration as usize)

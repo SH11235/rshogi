@@ -204,27 +204,31 @@ fn main() -> Result<()> {
         writeln!(out)?;
     }
 
-    if !yo_unmapped.is_empty() {
-        writeln!(out, "[unmapped]")?;
-        let mut s = yo_unmapped.clone();
-        s.sort();
+    // [unmapped] セクションを 1 箇所にまとめて書く（条件分岐で改行構造が変わると
+    // フォーマッタの再配置で意味が変わる事故が起きるので、構造を固定する）
+    let mut yo_sorted = yo_unmapped.clone();
+    yo_sorted.sort();
+    let mut rshogi_sorted = rshogi_unmapped.clone();
+    rshogi_sorted.sort();
+    writeln!(out, "[unmapped]")?;
+    if yo_sorted.is_empty() {
+        writeln!(out, "yo = []")?;
+    } else {
         writeln!(out, "yo = [")?;
-        for n in &s {
+        for n in &yo_sorted {
             writeln!(out, "  \"{n}\",")?;
         }
         writeln!(out, "]")?;
+    }
+    if rshogi_sorted.is_empty() {
+        writeln!(out, "rshogi = []")?;
     } else {
-        writeln!(out, "[unmapped]")?;
-        writeln!(out, "yo = []")?;
+        writeln!(out, "rshogi = [")?;
+        for n in &rshogi_sorted {
+            writeln!(out, "  \"{n}\",")?;
+        }
+        writeln!(out, "]")?;
     }
-
-    let mut s = rshogi_unmapped.clone();
-    s.sort();
-    writeln!(out, "rshogi = [")?;
-    for n in &s {
-        writeln!(out, "  \"{n}\",")?;
-    }
-    writeln!(out, "]")?;
 
     eprintln!(
         "auto-matched = {}, ambiguous = {}, yo_unmapped = {}, rshogi_unmapped = {}",
