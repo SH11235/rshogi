@@ -2157,11 +2157,20 @@ where
     // [`PlayersYamlRateStorage`] は disk_lock 配下で read-modify-write を直列化
     // するため、複数対局が同一プレイヤを同時に書き換える経路でも lost-update が
     // 起こらない（同一プロセス内に限る）。
+    //
+    // 失敗時の運用方針: 棋譜・00LIST は既に永続化済みなので、レート更新だけが
+    // 失敗した状態でこの関数が `Err` を返すと、`drive_game` 上位は終局メッセージを
+    // 既に送信済みのまま I/O 失敗を上に伝える。運用ログから「どの対局のレート
+    // 更新が失敗したか」を即特定できるよう、`tracing::error!` で `game_id` /
+    // `black` / `white` / `winner_color` を構造化フィールドとして残してから
+    // 上に Err を返す（mk_rate バッチは 00LIST から再計算可能なので、最終的な
+    // 整合性回復は運用側で取れる）。
     let winner_name = result.winner().map(|c| match c {
         Color::Black => &matched.black,
         Color::White => &matched.white,
     });
-    state
+    let winner_color = result.winner();
+    if let Err(e) = state
         .rate_storage
         .record_game_outcome(
             &matched.black,
@@ -2171,7 +2180,17 @@ where
             &end_time.to_rfc3339(),
         )
         .await
-        .map_err(ServerError::Storage)?;
+    {
+        tracing::error!(
+            game_id = %game_id.as_str(),
+            black = %matched.black.as_str(),
+            white = %matched.white.as_str(),
+            winner = ?winner_color,
+            error = %e,
+            "rate storage update failed; kifu is persisted but wins/losses were not advanced"
+        );
+        return Err(ServerError::Storage(e));
+    }
     Ok(())
 }
 

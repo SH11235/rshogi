@@ -151,10 +151,16 @@ pub trait RateStorage {
     /// 切断で勝者不確定 `Abnormal { winner: None }`）なら `wins`/`losses` は据置で
     /// `last_*` のみ更新する。
     ///
-    /// 既定実装は `load` → 変更 → `save` を逐次実行するため、複数対局が同時に
-    /// 同一プレイヤのレコードを書き換えると最後の `save` で勝敗増分が失われる
-    /// レースを抱える。アトミック性が必要な実装（[`crate::FileKifuStorage`] 系の
-    /// ファイルベース）は本関数を override して内部 lock 配下で読み書きする。
+    /// **契約**: `black != white` を呼び出し側が保証する（CSA 対局は同一プレイヤ
+    /// が先後に登場しないため League 層で守られる前提）。同名を渡した場合は早期
+    /// return し、`wins`/`losses` の二重加算を防ぐ。debug ビルドでは `debug_assert_ne!`
+    /// で契約違反を顕在化させる。
+    ///
+    /// **既定実装の race**: `load` → 変更 → `save` を逐次実行するため、複数対局が
+    /// 同時に同一プレイヤのレコードを書き換えると最後の `save` で勝敗増分が失われる
+    /// lost-update を抱える。本既定実装は単一プロセス内の小規模運用（テスト・
+    /// インメモリ Mock）向けで、本番フロントエンド（[`crate::PlayersYamlRateStorage`]
+    /// 等）はこのメソッドを override して内部 lock 配下で読み書きを直列化する。
     fn record_game_outcome(
         &self,
         black: &PlayerName,
@@ -163,7 +169,16 @@ pub trait RateStorage {
         game_id: &GameId,
         now_iso: &str,
     ) -> impl std::future::Future<Output = Result<(), StorageError>> {
+        debug_assert_ne!(
+            black, white,
+            "record_game_outcome: black and white must be distinct players",
+        );
         async move {
+            // self-play 防護: 同名を渡した場合は無視する。リリースビルドでも
+            // 二重加算を絶対に発生させない。
+            if black == white {
+                return Ok(());
+            }
             for name in [black, white] {
                 let mut rec = match self.load(name).await? {
                     Some(r) => r,

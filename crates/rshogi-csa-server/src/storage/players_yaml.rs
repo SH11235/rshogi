@@ -64,8 +64,23 @@ use crate::error::StorageError;
 use crate::port::{PlayerRateRecord, RateStorage};
 use crate::types::{GameId, PlayerName};
 
+/// `StdMutex<HashMap<...>>` を poisoning に強くロックする小ヘルパ。
+///
+/// `current_thread + LocalSet` 運用では他スレッドが panic を伝播させる経路は
+/// 実質存在しないが、`poison`化は契約違反ではなく単に「ロック中にどこかで
+/// panic が起きた」副作用に過ぎない。CLAUDE.md の「panic は契約違反のみ」
+/// 方針に合わせ、poisoning は `into_inner` でデータをそのまま借りる。
+fn lock_cache<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 1 プレイヤ分のレコードを Ruby Symbol キー（`:name` / `:rate` / ...）で表現する
 /// serde スキーマ。
+///
+/// `last_game_id` が `None` の場合は serde の `skip_serializing_if` でキー行ごと
+/// 出力から除外する（`null` リテラルや空値を吐かない）。Ruby `YAML.dump` で
+/// `Hash.delete(:last_game_id)` 済みの未対局レコードと等価な見え方になる。
+/// deserialize 側は `default` で `None` を許容する。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct YamlRecord {
     #[serde(rename = ":name")]
@@ -76,7 +91,11 @@ struct YamlRecord {
     win: u32,
     #[serde(rename = ":loss")]
     loss: u32,
-    #[serde(rename = ":last_game_id", default)]
+    #[serde(
+        rename = ":last_game_id",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     last_game_id: Option<String>,
     #[serde(rename = ":last_modified")]
     last_modified: String,
@@ -156,7 +175,7 @@ impl PlayersYamlRateStorage {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let mut cache = self.cache.lock().expect("rate cache poisoned");
+        let mut cache = lock_cache(&self.cache);
         for raw in names {
             let name: String = raw.into();
             cache.entry(name.clone()).or_insert_with(|| PlayerRateRecord {
@@ -171,7 +190,7 @@ impl PlayersYamlRateStorage {
     }
 
     fn snapshot(&self) -> HashMap<String, PlayerRateRecord> {
-        self.cache.lock().expect("rate cache poisoned").clone()
+        lock_cache(&self.cache).clone()
     }
 
     async fn flush_to_disk(
@@ -188,7 +207,7 @@ impl RateStorage for PlayersYamlRateStorage {
         &self,
         name: &PlayerName,
     ) -> impl std::future::Future<Output = Result<Option<PlayerRateRecord>, StorageError>> {
-        let result = self.cache.lock().expect("rate cache poisoned").get(name.as_str()).cloned();
+        let result = lock_cache(&self.cache).get(name.as_str()).cloned();
         async move { Ok(result) }
     }
 
@@ -201,7 +220,7 @@ impl RateStorage for PlayersYamlRateStorage {
         async move {
             let _guard = self.disk_lock.lock().await;
             {
-                let mut cache = self.cache.lock().expect("rate cache poisoned");
+                let mut cache = lock_cache(&self.cache);
                 cache.insert(key, value);
             }
             let snapshot = self.snapshot();
@@ -212,8 +231,7 @@ impl RateStorage for PlayersYamlRateStorage {
     fn list_all(
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<PlayerRateRecord>, StorageError>> {
-        let snapshot: Vec<PlayerRateRecord> =
-            self.cache.lock().expect("rate cache poisoned").values().cloned().collect();
+        let snapshot: Vec<PlayerRateRecord> = lock_cache(&self.cache).values().cloned().collect();
         async move { Ok(snapshot) }
     }
 
@@ -225,15 +243,25 @@ impl RateStorage for PlayersYamlRateStorage {
         game_id: &GameId,
         now_iso: &str,
     ) -> impl std::future::Future<Output = Result<(), StorageError>> {
+        debug_assert_ne!(
+            black, white,
+            "record_game_outcome: black and white must be distinct players",
+        );
         let black_str = black.as_str().to_owned();
         let white_str = white.as_str().to_owned();
+        // self-play 防護: 同名を渡した場合は二重加算を防ぐため `for` ループに
+        // 入る前に同一性チェックする。trait 既定実装と同じ契約を保つ。
+        let same_player = black_str == white_str;
         let winner_str = winner.map(|w| w.as_str().to_owned());
         let game_id_owned = game_id.clone();
         let now_owned = now_iso.to_owned();
         async move {
+            if same_player {
+                return Ok(());
+            }
             let _guard = self.disk_lock.lock().await;
             {
-                let mut cache = self.cache.lock().expect("rate cache poisoned");
+                let mut cache = lock_cache(&self.cache);
                 for key in [&black_str, &white_str] {
                     if let Some(rec) = cache.get_mut(key) {
                         match winner_str.as_deref() {
@@ -271,7 +299,15 @@ fn render_document(records: &HashMap<String, PlayerRateRecord>) -> Result<String
 
 async fn atomic_write_yaml(path: &Path, contents: &str) -> Result<(), StorageError> {
     // `rename(2)` は同一ファイルシステム上で atomic なので tmpfile は隣接ディレクトリ
-    // に作る。dotfile 接頭辞でユーザに対しても "中間ファイル" であることを示す。
+    // に作る。tmpfile 名は `pid.nanos.counter` を埋めて完全一意化することで:
+    //
+    //   - 複数プロセスが同 dir に並行で書いた場合でも `O_CREAT|O_EXCL` のレース
+    //     にならない（`create_new(true)`）
+    //   - 攻撃者・他テナントが固定名 (`.players.yaml.tmp` 等) で先回りして
+    //     symlink を張り、`O_CREAT` の symlink follow で別ファイルを破壊書きする
+    //     攻撃面を狭める。さらに `create_new(true)` は既存 symlink を弾く。
+    //
+    // dotfile 接頭辞は ls で隠して "中間ファイル" を示す慣習。
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -282,8 +318,42 @@ async fn atomic_write_yaml(path: &Path, contents: &str) -> Result<(), StorageErr
             StorageError::Io(format!("players.yaml path has no file name: {}", path.display()))
         })?
         .to_string_lossy();
-    let tmp = dir.join(format!(".{stem}.rshogi-tmp"));
-    let mut file = fs::File::create(&tmp)
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{stem}.rshogi-tmp.{pid}.{nanos}.{seq}"));
+
+    // tmpfile が rename 完走前に Err 経路へ落ちた場合の残骸を確実に掃除するための
+    // RAII ガード。`renamed = true` を立てると Drop で残骸削除をスキップする。
+    struct TmpCleanup<'a> {
+        tmp: &'a Path,
+        renamed: bool,
+    }
+    impl Drop for TmpCleanup<'_> {
+        fn drop(&mut self) {
+            if !self.renamed {
+                let _ = std::fs::remove_file(self.tmp);
+            }
+        }
+    }
+    let mut cleanup = TmpCleanup {
+        tmp: &tmp,
+        renamed: false,
+    };
+
+    // `create_new(true)` は内部で `O_CREAT|O_EXCL` 相当を使い、既存ファイル / symlink
+    // 当たりで `AlreadyExists` Err を返す。tmpfile 名がプロセス間で一意なので通常
+    // は当たらないが、悪意ある先回り symlink を確実に弾く。
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
         .await
         .map_err(|e| StorageError::Io(format!("create {}: {}", tmp.display(), e)))?;
     file.write_all(contents.as_bytes())
@@ -296,6 +366,22 @@ async fn atomic_write_yaml(path: &Path, contents: &str) -> Result<(), StorageErr
     fs::rename(&tmp, path).await.map_err(|e| {
         StorageError::Io(format!("rename {} -> {}: {}", tmp.display(), path.display(), e))
     })?;
+    cleanup.renamed = true;
+    drop(cleanup);
+
+    // `rename(2)` のディレクトリエントリ更新は親 inode の fsync を行うまで永続化が
+    // 保証されない（ext4 / xfs の crash recovery で rename 結果が古い状態に戻る
+    // ケースが知られている）。`tokio::fs::File::open(dir).sync_all()` で親ディレクトリ
+    // を fsync してクラッシュ耐性を確保する。
+    let dir_handle = fs::OpenOptions::new()
+        .read(true)
+        .open(dir)
+        .await
+        .map_err(|e| StorageError::Io(format!("open dir {}: {}", dir.display(), e)))?;
+    dir_handle
+        .sync_all()
+        .await
+        .map_err(|e| StorageError::Io(format!("fsync dir {}: {}", dir.display(), e)))?;
     Ok(())
 }
 
@@ -346,6 +432,40 @@ mod tests {
             "  :last_modified: 2026-04-26T12:34:56+00:00\n",
         );
         assert_eq!(yaml, expected);
+    }
+
+    /// `last_game_id` が `None` のレコードは `:last_game_id` 行ごと出力から
+    /// 除外される（serde の `skip_serializing_if`）。Ruby 側で `if rec[:last_game_id]`
+    /// truthiness チェックする実装でも、`has_key?(:last_game_id)` で存在判定する
+    /// 実装でも、どちらにも互換な見え方になる。`null` リテラルは Ruby `YAML.dump`
+    /// が出さない形なので避ける。
+    #[test]
+    fn render_document_omits_last_game_id_when_none() {
+        let mut records = HashMap::new();
+        records.insert(
+            "alice".to_owned(),
+            PlayerRateRecord {
+                name: PlayerName::new("alice"),
+                rate: 1500,
+                wins: 0,
+                losses: 0,
+                last_game_id: None,
+                last_modified: "2026-04-26T00:00:00+00:00".to_owned(),
+            },
+        );
+        let yaml = render_document(&records).unwrap();
+        let expected = concat!(
+            "alice:\n",
+            "  :name: alice\n",
+            "  :rate: 1500\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_modified: 2026-04-26T00:00:00+00:00\n",
+        );
+        assert_eq!(yaml, expected);
+        // round-trip しても同じ shape を保つ（None で deserialize される）。
+        let parsed = parse_document(&yaml).unwrap();
+        assert_eq!(parsed, records);
     }
 
     #[test]
@@ -516,6 +636,50 @@ mod tests {
             matches!(err, StorageError::Malformed(_)),
             "expected Malformed error, got: {msg}"
         );
+    }
+
+    /// `record_game_outcome` の契約: `black == white` が誤って渡されても
+    /// `wins`/`losses` の二重加算が発生しない（self-play 防護）。debug ビルドでは
+    /// `debug_assert_ne!` が落とすが、release ビルドでも `Ok(())` で早期 return
+    /// して整合性を保つ。
+    #[cfg(not(debug_assertions))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn record_game_outcome_rejects_self_play_in_release_build() {
+        let dir = tempdir();
+        let path = dir.path().join("players.yaml");
+        let storage = PlayersYamlRateStorage::load_from_file(path).await.unwrap();
+        storage.save(&rec("alice", 1500, 5, 3)).await.unwrap();
+
+        let alice = PlayerName::new("alice");
+        let game_id = GameId::new("20260426-self");
+        // 同名を black / white 両方に渡しても 2 重加算しない。
+        storage
+            .record_game_outcome(
+                &alice,
+                &alice,
+                Some(&alice),
+                &game_id,
+                "2026-04-26T16:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        let r = storage.load(&alice).await.unwrap().unwrap();
+        // wins/losses は据置（save 時の値そのまま）。
+        assert_eq!(r.wins, 5);
+        assert_eq!(r.losses, 3);
+    }
+
+    /// 日本語ハンドル名 / 数字始まりハンドル名など serde_yaml が quote を要する
+    /// 文字列で round-trip する契約を固定する。Ruby 互換 YAML として、UTF-8
+    /// 名前の対局者を扱える運用を保証する。
+    #[test]
+    fn render_and_parse_round_trip_handles_unicode_and_numeric_names() {
+        let mut records = HashMap::new();
+        records.insert("田中太郎".to_owned(), rec("田中太郎", 1500, 0, 0));
+        records.insert("12345".to_owned(), rec("12345", 1700, 10, 5));
+        let yaml = render_document(&records).unwrap();
+        let parsed = parse_document(&yaml).unwrap();
+        assert_eq!(parsed, records, "Unicode / numeric handles must round-trip");
     }
 
     #[tokio::test(flavor = "current_thread")]
