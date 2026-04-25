@@ -170,12 +170,47 @@ impl MappingTable {
         Ok(())
     }
 
-    pub fn by_yo_name(&self) -> HashMap<&str, &Mapping> {
-        self.mappings.iter().map(|m| (m.yo.as_str(), m)).collect()
+    /// YO 名 / rshogi 名の双方向ルックアップを 1 度だけ構築するインデックスを返す。
+    ///
+    /// 旧 `by_yo_name` / `by_rshogi_name` は呼ぶたびに `HashMap` を新規 alloc していた。
+    /// ループ内での誤用を避けるため、1 度作って取り回す API に統一した。
+    pub fn index(&self) -> MappingIndex<'_> {
+        MappingIndex {
+            by_yo: self.mappings.iter().map(|m| (m.yo.as_str(), m)).collect(),
+            by_rshogi: self.mappings.iter().map(|m| (m.rshogi.as_str(), m)).collect(),
+        }
+    }
+}
+
+/// `MappingTable::index()` で構築する双方向ルックアップ。
+///
+/// `&Mapping` は `MappingTable` への借用なので、構築元の `MappingTable` より
+/// 長生きしてはならない（lifetime `'a` が制約する）。
+#[derive(Debug)]
+pub struct MappingIndex<'a> {
+    by_yo: HashMap<&'a str, &'a Mapping>,
+    by_rshogi: HashMap<&'a str, &'a Mapping>,
+}
+
+impl<'a> MappingIndex<'a> {
+    /// YO 名から `Mapping` を引く
+    pub fn by_yo(&self, name: &str) -> Option<&'a Mapping> {
+        self.by_yo.get(name).copied()
     }
 
-    pub fn by_rshogi_name(&self) -> HashMap<&str, &Mapping> {
-        self.mappings.iter().map(|m| (m.rshogi.as_str(), m)).collect()
+    /// rshogi 名から `Mapping` を引く
+    pub fn by_rshogi(&self, name: &str) -> Option<&'a Mapping> {
+        self.by_rshogi.get(name).copied()
+    }
+
+    /// YO 名がインデックスに登録されているか
+    pub fn contains_yo(&self, name: &str) -> bool {
+        self.by_yo.contains_key(name)
+    }
+
+    /// rshogi 名がインデックスに登録されているか
+    pub fn contains_rshogi(&self, name: &str) -> bool {
+        self.by_rshogi.contains_key(name)
     }
 }
 

@@ -74,14 +74,13 @@ fn main() -> Result<()> {
         None => rshogi_default_rows(),
     };
 
-    let yo_to_r = table.by_yo_name();
-    let r_to_yo = table.by_rshogi_name();
+    let index = table.index();
 
     let mut applied = 0usize;
     let mut out_of_range: Vec<(String, i32, i32, i32)> = Vec::new();
 
     for r in rshogi_rows.iter_mut() {
-        let Some(mapping) = r_to_yo.get(r.name.as_str()) else {
+        let Some(mapping) = index.by_rshogi(r.name.as_str()) else {
             continue;
         };
         let Some(yo_row) = yo_by_name.get(mapping.yo.as_str()) else {
@@ -100,7 +99,7 @@ fn main() -> Result<()> {
     let mut yo_unmapped_in_input: Vec<&str> = yo_rows
         .iter()
         .map(|r| r.name.as_str())
-        .filter(|n| !yo_to_r.contains_key(n) && !table.unmapped.yo.iter().any(|u| u == n))
+        .filter(|n| !index.contains_yo(n) && !table.unmapped.yo.iter().any(|u| u == n))
         .collect();
     yo_unmapped_in_input.sort();
 

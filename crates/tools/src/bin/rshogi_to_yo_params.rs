@@ -93,10 +93,10 @@ fn main() -> Result<()> {
         table.mappings.iter().map(|m| m.yo.as_str()).collect()
     };
 
-    let yo_to_r = table.by_yo_name();
+    let index = table.index();
 
     for yo_name in iter_order {
-        let Some(mapping) = yo_to_r.get(yo_name) else {
+        let Some(mapping) = index.by_yo(yo_name) else {
             // base にあるが mapping 表にない YO パラメータ → base のまま出力（rshogi 由来データなし）
             if let Some(base_row) = base_by_name.get(yo_name) {
                 out_rows.push((*base_row).clone());
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
     let mut rshogi_only: Vec<&str> = rshogi_rows
         .iter()
         .map(|r| r.name.as_str())
-        .filter(|n| !table.by_rshogi_name().contains_key(n))
+        .filter(|n| !index.contains_rshogi(n))
         .collect();
     rshogi_only.sort();
     if !rshogi_only.is_empty() {
