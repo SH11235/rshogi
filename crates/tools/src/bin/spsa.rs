@@ -171,6 +171,15 @@ struct Cli {
     /// マッピング表に存在しないパラメータはそのままの名前で送る。
     #[arg(long)]
     engine_param_mapping: Option<PathBuf>,
+
+    /// 正本 `.params` の上書き保護用。`--params` のパスが存在しない時に限り、
+    /// `<init-from>` の内容をコピーしてから SPSA を開始する。既に存在する場合は
+    /// resume と同じく既存ファイルを読み込んで何もしない。正本（例:
+    /// `spsa_params/suisho10_converted.params`）を `--params` に直接渡すと
+    /// 反復ごとに上書きされるので、`--params runs/spsa/<ts>/tuned.params
+    /// --init-from spsa_params/suisho10_converted.params` のパターンで使う。
+    #[arg(long)]
+    init_from: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -1075,6 +1084,27 @@ fn main() -> Result<()> {
 
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
+    if let Some(init_src) = &cli.init_from {
+        if !cli.params.exists() {
+            if let Some(parent) = cli.params.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create parent dir for {}", cli.params.display())
+                    })?;
+                }
+            }
+            std::fs::copy(init_src, &cli.params).with_context(|| {
+                format!("failed to copy {} -> {}", init_src.display(), cli.params.display())
+            })?;
+            println!("initialized {} from canonical {}", cli.params.display(), init_src.display());
+        } else {
+            println!(
+                "init-from: {} already exists, leaving as-is (canonical {} not copied)",
+                cli.params.display(),
+                init_src.display()
+            );
+        }
+    }
     let translator = match &cli.engine_param_mapping {
         Some(path) => {
             let t = EngineNameTranslator::from_mapping_file(path)?;
