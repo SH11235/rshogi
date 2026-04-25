@@ -28,3 +28,6 @@ workers = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "sync", "fs", "test-util"] }
+# License 整合性 integration test (`tests/license_integrity.rs`) で workspace の各
+# Cargo.toml を読むためだけに使う。
+toml = { workspace = true }

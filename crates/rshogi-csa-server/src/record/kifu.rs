@@ -444,6 +444,133 @@ mod tests {
         assert!(err.contains("exceeds available moves"), "unexpected: {err}");
     }
 
+    /// 既存 Ruby `mk_rate` / `mk_html` 等のレートバッチが消費するフォーマットは、
+    /// 軽微な format 変更でも壊れる（行末の trailing space 1 つで列分割が破綻する等）。
+    /// build_v2() の出力 1 byte でも変わったら本テストが落ちる「ゴールデン」テスト
+    /// として固定し、format 変更時に必ず明示的な golden 更新を要求する。
+    ///
+    /// このテストは Ruby ランタイム依存無しでフォーマット契約を担保する CI 互換性
+    /// ゲートの一翼を担う（外部処理系を CI に持ち込まない方針）。
+    #[test]
+    fn csa_v2_full_text_is_byte_stable_for_representative_record() {
+        let mut rec = rec_skeleton();
+        rec.initial_position = "PI\n+\n".to_owned();
+        let txt = rec.build_v2();
+        let expected = "\
+V2.2
+N+alice
+N-bob
+$EVENT:rshogi-csa-server-test
+$GAME_ID:20140101120000
+$START_TIME:2026/04/17 12:00:00
+$END_TIME:2026/04/17 12:05:00
+BEGIN Time
+Time_Unit:1sec
+Total_Time:600
+Byoyomi:10
+Least_Time_Per_Move:0
+END Time
+PI
++
++7776FU,T3
+-3334FU,T4
+'eval=12 pv 3c3d
+%TORYO
+";
+        assert_eq!(
+            txt, expected,
+            "CSA V2 棋譜のゴールデン形式が変更されました。\
+            外部レートバッチ互換が壊れる可能性があるため、format 変更を意図する場合は \
+            expected を更新したうえで Ruby `mk_rate` 仕様 (記号方針セクション参照) との \
+            整合を再確認すること"
+        );
+    }
+
+    /// 00LIST の 1 行が `<game_id> <sente> <gote> <start_time> <end_time> <result_code>`
+    /// 形式（単一スペース区切り、改行なし）であることを全 `GameResult` variant について
+    /// 完全一致で固定する。レートバッチ側は `split(' ')` の単純パースを前提にしている
+    /// ため、列数や区切り文字の違反は致命的になる。
+    #[test]
+    fn zerozero_list_format_is_byte_stable_for_all_result_variants() {
+        let game_id = GameId::new("g1");
+        let black = PlayerName::new("alice");
+        let white = PlayerName::new("bob");
+        let start = "2026-04-17T12:00:00Z";
+        let end = "2026-04-17T12:10:00Z";
+
+        // (variant, expected_result_code) を網羅する。新しい variant が `GameResult` に
+        // 増えた場合、本テストの match と list 両方を更新する必要がある (single source
+        // of truth として `primary_result_code` も同時に更新する契約)。
+        let cases: Vec<(GameResult, &str)> = vec![
+            (
+                GameResult::Toryo {
+                    winner: Color::Black,
+                },
+                "#RESIGN",
+            ),
+            (
+                GameResult::TimeUp {
+                    loser: Color::White,
+                },
+                "#TIME_UP",
+            ),
+            (
+                GameResult::IllegalMove {
+                    loser: Color::Black,
+                    reason: IllegalReason::Generic,
+                },
+                "#ILLEGAL_MOVE",
+            ),
+            (
+                GameResult::IllegalMove {
+                    loser: Color::Black,
+                    reason: IllegalReason::Uchifuzume,
+                },
+                "#ILLEGAL_MOVE",
+            ),
+            (
+                GameResult::IllegalMove {
+                    loser: Color::Black,
+                    reason: IllegalReason::IllegalKachi,
+                },
+                "#ILLEGAL_MOVE",
+            ),
+            (
+                GameResult::Kachi {
+                    winner: Color::Black,
+                },
+                "#JISHOGI",
+            ),
+            (
+                GameResult::OuteSennichite {
+                    loser: Color::Black,
+                },
+                "#OUTE_SENNICHITE",
+            ),
+            (GameResult::Sennichite, "#SENNICHITE"),
+            (GameResult::MaxMoves, "#MAX_MOVES"),
+            (
+                GameResult::Abnormal {
+                    winner: Some(Color::Black),
+                },
+                "#ABNORMAL",
+            ),
+            (GameResult::Abnormal { winner: None }, "#ABNORMAL"),
+        ];
+
+        for (result, code) in cases {
+            let line = format_zerozero_list_line(&game_id, &black, &white, start, end, &result);
+            let expected = format!("g1 alice bob {start} {end} {code}");
+            assert_eq!(line, expected, "00LIST 行が固定形式から外れました: {result:?}");
+            // 列数 6 と区切り単一スペースを直接固定する（leading/trailing space 0、
+            // タブ混入なし、改行なし）。
+            assert_eq!(line.split(' ').count(), 6, "列数が 6 から逸脱: {line}");
+            assert!(!line.contains('\t'), "タブ文字混入: {line}");
+            assert!(!line.contains('\n'), "改行混入: {line}");
+            assert!(!line.contains("  "), "連続スペース混入: {line}");
+        }
+    }
+
     #[test]
     fn winner_of_resolves_correctly() {
         assert_eq!(
