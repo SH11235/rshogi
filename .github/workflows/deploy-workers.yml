@@ -94,7 +94,7 @@ jobs:
               echo
               echo "See \`docs/csa-server/deployment.md\` for initial setup."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning ::staging deploy skipped (environment secrets not configured)."
+            echo "::warning::staging deploy skipped (environment secrets not configured)."
           fi
 
   deploy-staging:
@@ -128,8 +128,8 @@ jobs:
       - name: Verify wrangler.staging.toml exists
         run: |
           test -f crates/rshogi-csa-server-workers/wrangler.staging.toml || {
-            echo "::error ::crates/rshogi-csa-server-workers/wrangler.staging.toml not found."
-            echo "::error ::Run from main branch with the file committed (see docs/csa-server/deployment.md)."
+            echo "::error::crates/rshogi-csa-server-workers/wrangler.staging.toml not found."
+            echo "::error::Run from main branch with the file committed (see docs/csa-server/deployment.md)."
             exit 1
           }
       # `cargo install` の成果物 (`~/.cargo/bin/worker-build`) は `Swatinem/rust-cache`
@@ -196,7 +196,7 @@ jobs:
           HEALTH_URL: ${{ vars.WORKERS_HEALTH_URL }}
         run: |
           if [ -z "$HEALTH_URL" ]; then
-            echo "::warning ::WORKERS_HEALTH_URL not set on rshogi-csa-server-workers-staging Environment; skipping smoke check"
+            echo "::warning::WORKERS_HEALTH_URL not set on rshogi-csa-server-workers-staging Environment; skipping smoke check"
             exit 0
           fi
           # Cloudflare 側の rollout は数秒〜数十秒の伝播時間がある。
@@ -210,7 +210,7 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error ::Health check failed after 5 attempts. Investigate via 'cd crates/rshogi-csa-server-workers && vp run tail:staging'."
+          echo "::error::Health check failed after 5 attempts. Investigate via 'cd crates/rshogi-csa-server-workers && vp run tail:staging'."
           exit 1
 
   # ---------- production -----------------------------------------------------
@@ -243,7 +243,7 @@ jobs:
               echo
               echo "See \`docs/csa-server/deployment.md\` for initial setup."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning ::production deploy skipped (environment secrets not configured)."
+            echo "::warning::production deploy skipped (environment secrets not configured)."
           fi
 
   deploy-production:
@@ -273,8 +273,8 @@ jobs:
       - name: Verify wrangler.production.toml exists
         run: |
           test -f crates/rshogi-csa-server-workers/wrangler.production.toml || {
-            echo "::error ::crates/rshogi-csa-server-workers/wrangler.production.toml not found."
-            echo "::error ::Run from main branch with the file committed (see docs/csa-server/deployment.md)."
+            echo "::error::crates/rshogi-csa-server-workers/wrangler.production.toml not found."
+            echo "::error::Run from main branch with the file committed (see docs/csa-server/deployment.md)."
             exit 1
           }
       # ⚠️ バージョン更新時の二重管理に注意:
@@ -333,7 +333,7 @@ jobs:
           HEALTH_URL: ${{ vars.WORKERS_HEALTH_URL }}
         run: |
           if [ -z "$HEALTH_URL" ]; then
-            echo "::warning ::WORKERS_HEALTH_URL not set on rshogi-csa-server-workers-production Environment; skipping smoke check"
+            echo "::warning::WORKERS_HEALTH_URL not set on rshogi-csa-server-workers-production Environment; skipping smoke check"
             exit 0
           fi
           for attempt in 1 2 3 4 5; do
@@ -345,5 +345,5 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error ::Health check failed after 5 attempts. Investigate via 'cd crates/rshogi-csa-server-workers && vp run tail:prod'."
+          echo "::error::Health check failed after 5 attempts. Investigate via 'cd crates/rshogi-csa-server-workers && vp run tail:prod'."
           exit 1

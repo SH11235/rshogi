@@ -340,7 +340,7 @@ fail させる契約。
 
 これを設定すると、deploy 完了後に CI が `/health` を curl で叩いて 200 を確認する
 smoke step が走る。値未設定でも smoke job は起動するが、step 内で
-`::warning ::WORKERS_HEALTH_URL not set on <Environment> Environment; skipping smoke check`
+`::warning::WORKERS_HEALTH_URL not set on <Environment> Environment; skipping smoke check`
 を出して `exit 0` で終わるため、CI 全体は成功扱いを維持したまま deploy 健全性
 チェックだけ skip される。**§3 の初回 deploy が成功してから設定する** こと。
 
