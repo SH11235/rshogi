@@ -22,7 +22,8 @@ main = "build/worker/shim.mjs"
 compatibility_date = "2026-04-21"
 
 # CI 環境では事前に `cargo install -q worker-build@^0.8 --locked` がインストール済みの
-# 前提（`.github/workflows/deploy-workers.yml` の preCommands で実行）。本番 deploy 経路は
+# 前提（`.github/workflows/deploy-workers.yml` の独立 step `Install worker-build` で
+# `actions/cache` 経由 hit 時 skip + miss 時 install を行う）。本ファイルは
 # `worker-build --release` のみを実行することで、CI 1 回 deploy あたりの時間を短縮する。
 # ローカル手動 deploy では `wrangler.toml.example` 由来の `cargo install + worker-build`
 # 連結コマンドを使う想定。

@@ -106,9 +106,15 @@ jobs:
             exit 1
           }
       # `cargo install` の成果物 (`~/.cargo/bin/worker-build`) は `Swatinem/rust-cache`
-      # の対象外なので、`actions/cache` で明示キャッシュする。バージョン pin
-      # (`worker-build@^0.8`) をキー名に含め、minor 更新時は cache miss → 再 install
-      # で追従する。Hit 時は `cargo install` step を skip して 30〜60 秒短縮する。
+      # の対象外なので、`actions/cache` で明示キャッシュする。Hit 時は `cargo install`
+      # step を skip して 30〜60 秒短縮する。
+      #
+      # ⚠️ バージョン更新時の二重管理に注意:
+      #   `cargo install worker-build@^0.8` を `^0.9` 系に上げる場合、本キャッシュキー
+      #   末尾の `v0.8` も同時に `v0.9` へ更新する必要がある。`v0.8` のままだと
+      #   過去 cache が hit して 0.8.x バイナリが使われ続け、新 0.9.x が install
+      #   step で skip される (`steps.cache-worker-build.outputs.cache-hit == 'true'`)。
+      #   インストールコマンドとキャッシュキーの **2 箇所同時更新** が必須。
       - name: Cache worker-build binary
         id: cache-worker-build
         uses: actions/cache@v4
