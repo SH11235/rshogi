@@ -1,0 +1,82 @@
+# Cloudflare Workers 本番デプロイ設定 (CI 経由 `wrangler deploy` で使用)。
+#
+# - 本ファイルは VCS で追跡される。`account_id` / `CLOUDFLARE_API_TOKEN` 等の
+#   秘匿情報は **入れない**。これらは GitHub Secrets から CI runtime で env 経由で
+#   注入する (`CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN`)。
+# - bucket 名 / Origin / 時計設定など秘匿情報でない値はそのままコミットする。
+#   公開 URL や bucket 命名は機密ではないが、変更は通常の PR レビュー経路を通す。
+# - `wrangler.toml` (ローカル開発用、gitignored) や `wrangler.toml.example`
+#   (一般 template) とは別ファイルとして共存する。
+# - 値変更手順 / 初回セットアップ手順は `docs/csa-server/deployment.md` を参照。
+
+name = "rshogi-csa-server-workers"
+main = "build/worker/shim.mjs"
+# 2026-04-21 時点の最新 compatibility flag 日付に追従する。
+# 主要 opt-in 機能:
+# - `web_socket_auto_reply_to_close` (2026-04-07): WS が close フレームに自動応答
+#   （仕様準拠）。本 worker は `state.acceptWebSocket()` 経由で WS を扱うため恩恵あり
+# - `enhanced_error_serialization` (2026-04-21): エラーオブジェクトの V8 serialization
+#   対応拡大
+# Cloudflare 公式ガイダンス: 新規プロジェクトは current date を設定。bump は新フラグ
+# が出ても自動追従しないため、運用判断で本 PR のような明示更新で進める方針。
+compatibility_date = "2026-04-21"
+
+# CI 環境では事前に `cargo install -q worker-build@^0.8 --locked` がインストール済みの
+# 前提（`.github/workflows/deploy-workers.yml` の独立 step `Install worker-build` で
+# `actions/cache` 経由 hit 時 skip + miss 時 install を行う）。本ファイルは
+# `worker-build --release` のみを実行することで、CI 1 回 deploy あたりの時間を短縮する。
+# ローカル手動 deploy では `wrangler.toml.example` 由来の `cargo install + worker-build`
+# 連結コマンドを使う想定。
+[build]
+command = "worker-build --release"
+
+# --- Durable Objects ---
+# GameRoom: 1 room_id = 1 DO インスタンス。`id_from_name(room_id)` で決定論解決。
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+# SQLite-backed DO: `state.storage().sql()` を利用するため必須。
+# 本 migration tag は **初回 deploy 時にのみ apply される**。`new_sqlite_classes` の
+# 内容を変更する場合は新 tag (`v2` / `v3` ...) を **追加する** こと。既存 tag を
+# 編集しても無視される。詳細は `docs/csa-server/deployment.md` を参照。
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameRoom"]
+
+# --- R2: 棋譜保存 ---
+# `GameRoom` DO が終局時に CSA V2 棋譜を書き出す先。
+# `bucket_name` は事前に Cloudflare 上で作成しておく必要がある:
+#   wrangler r2 bucket create rshogi-csa-kifu-prod
+# 命名規約 (Cloudflare): 小文字英数字 + ハイフン、3〜63 文字、先頭末尾は英数字。
+[[r2_buckets]]
+binding = "KIFU_BUCKET"
+bucket_name = "rshogi-csa-kifu-prod"
+
+# --- R2: Floodgate 履歴保存 ---
+# 1 対局 = 1 オブジェクト形式の Floodgate 履歴。task 15.7 で `game_room.rs` から
+# `R2FloodgateHistoryStorage::append` の配線が入る予定。
+#   wrangler r2 bucket create rshogi-csa-floodgate-history-prod
+[[r2_buckets]]
+binding = "FLOODGATE_HISTORY_BUCKET"
+bucket_name = "rshogi-csa-floodgate-history-prod"
+
+# --- 環境変数 ---
+# `[vars]` の値は機密でないが、本番 client URL に応じて運用者が更新する。
+# 値変更は通常の PR で行い、merge → 自動 deploy で反映される。
+[vars]
+# WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。
+# 空文字列・未設定時は全 Upgrade 要求を 403 で拒否する（安全側の既定）。
+# 例: "https://rshogi.example.com,https://www.rshogi.example.com"
+CORS_ORIGINS = ""
+
+# 対局時計。`countdown` (CSA 2014 改訂秒読み) / `fischer` (増分加算) / `stopwatch` (分単位)。
+CLOCK_KIND = "countdown"
+# countdown / fischer 用（秒）。
+TOTAL_TIME_SEC = "600"
+BYOYOMI_SEC = "10"
+# stopwatch 用（分）。CLOCK_KIND=stopwatch のときのみ参照。
+TOTAL_TIME_MIN = "10"
+BYOYOMI_MIN = "1"
+# `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル（LOGIN の handle 部分）。
+ADMIN_HANDLE = "admin"
