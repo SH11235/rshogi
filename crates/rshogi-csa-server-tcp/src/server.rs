@@ -373,11 +373,13 @@ impl WaitingPool {
     ///
     /// Floodgate scheduler の発火経路で使う。返却された `Vec` は元のキューの
     /// 先着順を維持する。`None` 系（キュー自体が無い）の場合は空 `Vec` を返す。
+    /// `HashMap` の entry ごと `remove` するため、毎週発火で空 `VecDeque` が
+    /// プール内に累積しない（`drain(..)` 単体では entry が残る）。
     pub(crate) fn drain_for_game_name(&mut self, game_name: &GameName) -> Vec<WaitingSlot> {
-        match self.queues.get_mut(game_name) {
-            Some(queue) => queue.drain(..).collect(),
-            None => Vec::new(),
-        }
+        self.queues
+            .remove(game_name)
+            .map(|q| q.into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// 指定 handle のスロットをプールから除去する（待機中の切断検知時の掃除用）。
@@ -2450,6 +2452,66 @@ mod tests {
         assert!(!floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
         cfg.players_yaml_path = Some(std::path::PathBuf::from("/tmp/players.yaml"));
         assert!(floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
+    }
+
+    /// `WaitingPool::drain_for_game_name` が:
+    /// - 同 `game_name` 配下の slot を挿入順で全件返す
+    /// - 戻ったあと当該 `HashMap` entry は `remove` されている（空 `VecDeque`
+    ///   が累積しない）
+    /// - 他 `game_name` の entry は触らない
+    /// - 既に entry が無い場合は空 `Vec` を返す
+    ///
+    /// Floodgate scheduler が毎週発火するため、空 entry が `HashMap` に
+    /// 残り続けると long-running 運用で内部表現が肥大化する。`remove` 経路を
+    /// 回帰固定する。
+    #[test]
+    fn waiting_pool_drain_for_game_name_returns_in_order_and_removes_empty_entry() {
+        let mut pool = WaitingPool::default();
+        let game = GameName::new("floodgate-600-10");
+        let other_game = GameName::new("g1");
+
+        // 同一 game_name に 3 件、別 game_name に 1 件 push する。
+        for handle in ["alice", "bob", "carol"] {
+            let (tx, _rx) = oneshot::channel::<MatchRequest>();
+            pool.push(
+                game.clone(),
+                WaitingSlot {
+                    handle: handle.to_owned(),
+                    color: Color::Black,
+                    match_request_tx: tx,
+                },
+            );
+        }
+        let (tx_other, _rx_other) = oneshot::channel::<MatchRequest>();
+        pool.push(
+            other_game.clone(),
+            WaitingSlot {
+                handle: "dave".to_owned(),
+                color: Color::White,
+                match_request_tx: tx_other,
+            },
+        );
+
+        let drained = pool.drain_for_game_name(&game);
+        let handles: Vec<String> = drained.into_iter().map(|s| s.handle).collect();
+        assert_eq!(
+            handles,
+            vec!["alice".to_owned(), "bob".to_owned(), "carol".to_owned()],
+            "drain must preserve insertion order"
+        );
+
+        // drain 後の `HashMap` から当該 entry は消えている（空 VecDeque が残らない）。
+        assert!(
+            !pool.queues.contains_key(&game),
+            "drain should remove the empty HashMap entry to prevent accumulation"
+        );
+
+        // 別 `game_name` の entry は保護される。
+        assert!(pool.queues.contains_key(&other_game), "other game_name entry must be preserved");
+
+        // 既に entry が無い場合の二度目 drain は空 `Vec` を返す。
+        let again = pool.drain_for_game_name(&game);
+        assert!(again.is_empty(), "drain on missing entry returns empty vec");
     }
 
     /// `floodgate_intent_from_config` が `floodgate_schedules` の非空で

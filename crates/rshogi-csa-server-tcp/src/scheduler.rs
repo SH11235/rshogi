@@ -34,6 +34,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rshogi_csa_server::matching::pairing::{DirectMatchStrategy, PairingLogic};
@@ -46,6 +47,44 @@ use crate::server::{MatchRequest, PasswordStore, SharedState, WaitingSlot, drive
 use crate::transport::TcpTransport;
 use rshogi_csa_server::ClientTransport;
 use rshogi_csa_server::types::CsaLine;
+
+/// Floodgate 定刻発火で waiter から transport を回収する際の最大待機時間。
+///
+/// 通常 waiter は `MatchRequest` を受信した select! 枝で即座に
+/// `transport_responder.send(transport)` を呼ぶため、この timeout は ms 単位の
+/// 応答前提のセーフティネットとして 5 秒に置く。waiter 側が deadlock した場合
+/// （別 select 枝で stall 等）でも本 timeout で scheduler ループが永久ブロック
+/// するのを防ぐ。timeout 経過後の transport は abort 扱いで logout_pair の
+/// 経路に乗せる。
+const TRANSPORT_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `transport_responder` の oneshot 受信に失敗した理由を区別する。
+///
+/// scheduler の handoff 経路で waiter が transport を引き渡せなかった場合の
+/// 内訳をログに残すため、`SenderDropped`（waiter loop が responder を drop）と
+/// `TimedOut`（[`TRANSPORT_HANDOFF_TIMEOUT`] 経過）を分ける。両者とも abort
+/// 経路に流すが、運用ログから「waiter が応答を返せない deadlock 状態」を
+/// 即特定できるようにする。
+#[derive(Debug, Clone, Copy)]
+enum TransportHandoffError {
+    /// waiter が transport を送る前に responder の sender 側が drop された
+    /// （waiter loop が exit / channel が壊れた等）。
+    SenderDropped,
+    /// `TRANSPORT_HANDOFF_TIMEOUT` を経過しても waiter が transport を送らなかった。
+    TimedOut,
+}
+
+/// `transport_responder` の受信に [`TRANSPORT_HANDOFF_TIMEOUT`] のタイムアウトを
+/// 被せる。timeout か sender drop のどちらでも `Err` で abort 経路に流す。
+async fn recv_transport_with_timeout(
+    rx: oneshot::Receiver<TcpTransport>,
+) -> Result<TcpTransport, TransportHandoffError> {
+    match tokio::time::timeout(TRANSPORT_HANDOFF_TIMEOUT, rx).await {
+        Ok(Ok(t)) => Ok(t),
+        Ok(Err(_)) => Err(TransportHandoffError::SenderDropped),
+        Err(_) => Err(TransportHandoffError::TimedOut),
+    }
+}
 
 /// `tokio::time::sleep_until` ベースの `FloodgateTimer` 実装。
 ///
@@ -353,10 +392,12 @@ async fn spawn_scheduled_drive<R, K, P>(
         // 既存の `(Ok, Err) | (Err, Ok)` recv 経路と同じ扱いに統一し、生存側
         // transport を吸い上げて `##[ERROR]` 通知を送ってから drop することで
         // 片側瞬断時でも健全側 player に切断理由を残す。
-        if b_handoff_ok && let Ok(mut surviving) = b_resp_rx.await {
+        // `recv_transport_with_timeout` で `TRANSPORT_HANDOFF_TIMEOUT` を被せ、
+        // waiter 側が応答を返せない deadlock 状態でも本経路は永久ブロックしない。
+        if b_handoff_ok && let Ok(mut surviving) = recv_transport_with_timeout(b_resp_rx).await {
             notify_aborted_match(&mut surviving, &game_name).await;
         }
-        if w_handoff_ok && let Ok(mut surviving) = w_resp_rx.await {
+        if w_handoff_ok && let Ok(mut surviving) = recv_transport_with_timeout(w_resp_rx).await {
             notify_aborted_match(&mut surviving, &game_name).await;
         }
         // WaitingPool からは drain 済みで、drive_game にも到達していないので
@@ -365,18 +406,26 @@ async fn spawn_scheduled_drive<R, K, P>(
         return;
     }
 
-    // 両 waiter から transport を吸い上げる。`recv` 失敗（waiter 直後切断）時は:
+    // 両 waiter から transport を吸い上げる。`recv_transport_with_timeout` で
+    // [`TRANSPORT_HANDOFF_TIMEOUT`] を被せ、waiter 直後切断（SenderDropped）と
+    // waiter deadlock（TimedOut）の両方を `Err` として abort 経路に流す。
+    // recv 失敗時は:
     // - 確定した側の transport には `##[ERROR]` 通知を送って drop（無音切断回避）
     // - 双方とも League から logout（drive_game に到達しないため孤児化防止）
-    let (b_transport, w_transport) = match (b_resp_rx.await, w_resp_rx.await) {
+    let b_recv = recv_transport_with_timeout(b_resp_rx).await;
+    let w_recv = recv_transport_with_timeout(w_resp_rx).await;
+    let (b_transport, w_transport) = match (b_recv, w_recv) {
         (Ok(b), Ok(w)) => (b, w),
         (got_black, got_white) => {
             tracing::warn!(
                 game_name = %game_name.as_str(),
                 black = %black_handle,
                 white = %white_handle,
-                black_recv_ok = got_black.is_ok(),
-                white_recv_ok = got_white.is_ok(),
+                // `Result::err()` で `Option<TransportHandoffError>` を取り出して
+                // `Debug` 出力する。`None` は recv 成功側、
+                // `Some(SenderDropped)` / `Some(TimedOut)` が失敗理由の内訳。
+                black_recv_err = ?got_black.as_ref().err(),
+                white_recv_err = ?got_white.as_ref().err(),
                 "scheduled match handoff: transport recv failed; aborting"
             );
             if let Ok(mut surviving) = got_black {
@@ -485,5 +534,45 @@ mod tests {
         // start_paused のため `tokio::time::sleep` は明示的に進めないと進まないが、
         // `dur.is_zero()` 早期 return 経路を通るため即 return する。
         timer.wait_until(past).await;
+    }
+
+    /// `recv_transport_with_timeout` の sender drop 経路: oneshot の sender 側
+    /// が drop されたら `Err(SenderDropped)` で即 return する（waiter loop が
+    /// transport を送る前に exit したケースの再現）。
+    ///
+    /// `TcpTransport` は `Debug` 非実装なので `Result` を `{:?}` で出さず、
+    /// `err()` 側だけ取り出して assert する。
+    #[tokio::test(flavor = "current_thread")]
+    async fn recv_transport_with_timeout_returns_sender_dropped_when_tx_drops() {
+        let (tx, rx) = oneshot::channel::<TcpTransport>();
+        drop(tx);
+        let err = recv_transport_with_timeout(rx)
+            .await
+            .err()
+            .expect("sender drop must produce Err");
+        assert!(
+            matches!(err, TransportHandoffError::SenderDropped),
+            "expected SenderDropped, got: {err:?}"
+        );
+    }
+
+    /// `recv_transport_with_timeout` の timeout 経路: tokio start_paused で
+    /// 仮想時刻を `TRANSPORT_HANDOFF_TIMEOUT` 超過まで進め、`Err(TimedOut)` を
+    /// 返すことを固定する。waiter 側が deadlock した場合に scheduler ループが
+    /// 永久ブロックしないことを保証する。
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn recv_transport_with_timeout_returns_timed_out_on_no_response() {
+        let (_tx, rx) = oneshot::channel::<TcpTransport>();
+        // sender (`_tx`) は drop せず保持したまま、仮想時刻だけ進める。
+        // `start_paused` 下では `tokio::time::timeout` が auto-advance で
+        // 即座に発火する（runtime が「次に進めるべき時刻」を検出する）。
+        let err = recv_transport_with_timeout(rx)
+            .await
+            .err()
+            .expect("timeout must produce Err");
+        assert!(
+            matches!(err, TransportHandoffError::TimedOut),
+            "expected TimedOut, got: {err:?}"
+        );
     }
 }
