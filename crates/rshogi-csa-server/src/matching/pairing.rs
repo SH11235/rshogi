@@ -90,7 +90,8 @@ impl PairingLogic for DirectMatchStrategy {
 ///
 /// 1. 候補集合を seed 可能な PRNG でシャッフルし、隣接ペアを取って
 ///    "perfect matching" を作る（候補数が奇数なら最後の 1 名は不成立で残置）
-/// 2. 各 trial の "目的関数" を計算し、最小コストの試行を最終結果として採用
+/// 2. 各 trial の "成立ペア数" と "目的関数" を計算し、`(成立ペア数 大, 総コスト 小)`
+///    の lexicographic 順で最良の試行を最終結果として採用
 /// 3. 既定試行回数 `max_trials = 300`（Requirement 6.2 既定値）
 ///
 /// # 目的関数
@@ -107,8 +108,9 @@ impl PairingLogic for DirectMatchStrategy {
 /// # 色割り当て
 ///
 /// - 両者が `Some(Color)` で相補的: そのまま割当
-/// - 両者が `Some(Color)` で同一: 当該ペアは "color 不適合" として trial 全体を
-///   discard（試行を 1 回減らす扱い）
+/// - 両者が `Some(Color)` で同一: 当該ペアは本 trial では成立としてカウントせず
+///   スキップ（trial 全体は破棄しない）。color 偏りのある候補集合（例: Black 3 名 +
+///   White 1 名）でも成立可能な組は採用し、残りは待機に戻す
 /// - 片方のみ `Some(Color)`: そちらの希望を尊重し、もう片方は反対色
 /// - 両者 `None`: シャッフル順序の最初を Black、次を White
 ///
@@ -166,8 +168,9 @@ impl LeastDiffPairingStrategy {
     }
 }
 
-/// 候補ペア (a, b) のコストを計算する。`None` を返した場合は color 不適合で
-/// 当該 trial 全体を捨てる合図。`Some(...)` の中身は `(black, white, cost)`。
+/// 候補ペア (a, b) のコストを計算する。`None` を返した場合は color 不適合で、
+/// このペアは本 trial では成立せずスキップ（trial 全体は破棄しない）。
+/// `Some(...)` の中身は `(black, white, cost)`。
 fn try_pair_with_cost(
     a: &PairingCandidate,
     b: &PairingCandidate,
@@ -217,14 +220,12 @@ impl PairingLogic for LeastDiffPairingStrategy {
 
         let mut rng = self.build_rng();
         let mut indices: Vec<usize> = (0..sorted.len()).collect();
-        let mut best_pairs: Vec<MatchedPair> = Vec::new();
-        let mut best_cost: Option<i64> = None;
+        let mut best: Option<(usize, i64, Vec<MatchedPair>)> = None;
 
         for _trial in 0..self.max_trials {
             indices.shuffle(&mut rng);
             let mut pairs: Vec<MatchedPair> = Vec::with_capacity(sorted.len() / 2);
             let mut total_cost: i64 = 0;
-            let mut color_ok = true;
             for chunk in indices.chunks(2) {
                 if chunk.len() < 2 {
                     // 奇数要素: 最後の 1 名は本 trial で不成立（残置）。
@@ -232,26 +233,25 @@ impl PairingLogic for LeastDiffPairingStrategy {
                 }
                 let a = &sorted[chunk[0]];
                 let b = &sorted[chunk[1]];
-                match try_pair_with_cost(a, b, self.back_to_back_penalty) {
-                    Some((pair, cost)) => {
-                        total_cost = total_cost.saturating_add(cost);
-                        pairs.push(pair);
-                    }
-                    None => {
-                        color_ok = false;
-                        break;
-                    }
+                if let Some((pair, cost)) = try_pair_with_cost(a, b, self.back_to_back_penalty) {
+                    total_cost = total_cost.saturating_add(cost);
+                    pairs.push(pair);
                 }
+                // 色不適合（同一希望）は当該ペアのみスキップして残置。trial 全体は
+                // 破棄しない（色偏り時に成立可能な組まで失わないため）。
             }
-            if !color_ok {
-                continue;
-            }
-            if best_cost.is_none_or(|c| total_cost < c) {
-                best_cost = Some(total_cost);
-                best_pairs = pairs;
+            // (成立ペア数 大, 総コスト 小) の lexicographic 順で best を更新する。
+            // 同コストでも成立数が多い方を優先することで、色不適合スキップ後でも
+            // 残りのペアを取りこぼさない。
+            let better = match &best {
+                None => true,
+                Some((bm, bc, _)) => pairs.len() > *bm || (pairs.len() == *bm && total_cost < *bc),
+            };
+            if better {
+                best = Some((pairs.len(), total_cost, pairs));
             }
         }
-        best_pairs
+        best.map(|(_, _, p)| p).unwrap_or_default()
     }
 
     fn name(&self) -> &'static str {
@@ -471,6 +471,26 @@ mod tests {
         ];
         let s = LeastDiffPairingStrategy::new().with_seed(0);
         assert!(s.try_pair(&candidates).is_empty());
+    }
+
+    /// LeastDiff: 色希望が偏っている候補集合（Black 3 + White 1）でも、
+    /// 成立可能な 1 ペアは返り、残りは待機に戻る。色不適合の trial 全体破棄を
+    /// やめた挙動の回帰テスト。
+    #[test]
+    fn least_diff_with_color_imbalance_returns_partial_pairs() {
+        // alice (Black 1500) と dave (White 1510) のレート差²=100 が最小。
+        // bob, carol は Black 同士で組めず本 trial では待機（残置）。
+        let candidates = vec![
+            rated_cand("alice", Some(Color::Black), 1500, vec![]),
+            rated_cand("bob", Some(Color::Black), 1700, vec![]),
+            rated_cand("carol", Some(Color::Black), 1900, vec![]),
+            rated_cand("dave", Some(Color::White), 1510, vec![]),
+        ];
+        let s = LeastDiffPairingStrategy::new().with_seed(42).with_max_trials(300);
+        let pairs = s.try_pair(&candidates);
+        assert_eq!(pairs.len(), 1, "color 偏りでも成立可能な 1 ペアは返る");
+        assert_eq!(pairs[0].black.as_str(), "alice");
+        assert_eq!(pairs[0].white.as_str(), "dave");
     }
 
     /// LeastDiff: 戦略名が `"least_diff"` で安定している契約を固定。
