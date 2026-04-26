@@ -34,6 +34,19 @@ binding = "KIFU_BUCKET"
 bucket_name = "local-kifu-dev"
 preview_bucket_name = "local-kifu-dev"
 
+# --- R2 (Floodgate 履歴保存) ---
+# Floodgate 運用での 1 対局 = 1 オブジェクト形式の履歴永続化先。
+# `R2FloodgateHistoryStorage` が `floodgate-history/YYYY/MM/DD/HHMMSS-<game_id>.json`
+# キー（UTC 正規化）で書き出し、`list_recent(N)` は当日 day-shard から逆順走査して
+# 直近 N 件を返す（最大 366 日まで遡る安全上限）。
+# task 15.7 で `game_room.rs` 終局経路から `append` を呼ぶ配線が入る。
+# Floodgate 運用を行わない構成でも binding 宣言は残して問題ない（実書き込みは
+# game_room から呼ばれるまで発生しない）。
+[[r2_buckets]]
+binding = "FLOODGATE_HISTORY_BUCKET"
+bucket_name = "local-floodgate-history-dev"
+preview_bucket_name = "local-floodgate-history-dev"
+
 # --- 変数 ---
 # WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。
 # 空文字列・未設定時は全 Upgrade 要求を 403 で拒否する（安全側の既定）。
