@@ -608,7 +608,9 @@ fn build_floodgate_comment(
         0
     };
 
-    let mut comment = format!("'* {score}");
+    // CSA Floodgate の追記コメント本体（`'` プレフィックス抜き）。
+    // 送信時は CsaConnection::send_move_with_comment 側で `,'<comment>` 形に整形される。
+    let mut comment = format!("* {score}");
     if !info.pv.is_empty() {
         let mut pv_pos = pos.clone();
         let pv_start = if info.pv.first().map(|s| s.as_str()) == Some(last_bestmove) {

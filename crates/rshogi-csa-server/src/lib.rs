@@ -36,7 +36,9 @@ pub use matching::registry::{GameListing, GameRegistry};
 pub use port::{
     BroadcastTag, Broadcaster, BuoyStorage, ClientTransport, KifuStorage, RateDecision, RateStorage,
 };
-pub use protocol::command::{ClientCommand, parse_command};
+pub use protocol::command::{
+    ClientCommand, ReconnectRequest, color_of_move, parse_command, serialize_client_command,
+};
 pub use protocol::info::{help_lines, list_lines, show_lines, version_lines, who_lines};
 pub use protocol::summary::{GameSummaryBuilder, standard_initial_position_block};
 pub use record::kifu::{

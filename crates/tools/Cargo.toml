@@ -41,6 +41,10 @@ log.workspace = true
 # Local dependencies
 rshogi-core = { path = "../rshogi-core" }
 rshogi-csa = { path = "../rshogi-csa" }
+# CSA プロトコル送信側 serialize / 受信側 parse の単一ソース。
+# `default-features=false` で `tokio-transport` (tokio + serde_yaml) を切り、
+# protocol モジュールが必要とする pure な型 / 関数のみを取り込む。
+rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false }
 
 # Additional dependencies
 sysinfo = "0.37"

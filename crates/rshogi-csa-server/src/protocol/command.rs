@@ -421,6 +421,110 @@ pub fn color_of_move(token: &CsaMoveToken) -> Option<Color> {
     }
 }
 
+/// [`ClientCommand`] を CSA プロトコル 1 行に直列化する（行末改行は含めない）。
+///
+/// クライアント → サーバー方向の送信側で、`format!("LOGIN {id} {pw}")` のような
+/// 散在する文字列組み立てを 1 関数に集約するためのヘルパ。サーバー側の
+/// [`parse_command`] と組で動き、roundtrip プロパティ
+/// `parse_command(serialize_client_command(c))` が等値性を満たすことを
+/// テストで担保する（標準コマンド・x1 拡張コマンドそれぞれに対し）。
+///
+/// 注意:
+/// - [`ClientCommand::KeepAlive`] は空文字列を返す（呼び出し側で改行のみを送る運用）。
+/// - [`ClientCommand::Move::comment`] の値は CSA `'` プレフィックス**抜き**の本体を期待し、
+///   出力では `,'<comment>` の形に整える（[`parse_command`] と対称）。
+pub fn serialize_client_command(cmd: &ClientCommand) -> String {
+    match cmd {
+        ClientCommand::Login {
+            name,
+            password,
+            x1,
+            reconnect,
+        } => {
+            let mut s = format!("LOGIN {} {}", name.as_str(), password.expose());
+            if *x1 {
+                s.push_str(" x1");
+            } else if let Some(rec) = reconnect {
+                s.push_str(" reconnect:");
+                s.push_str(rec.game_id.as_str());
+                s.push('+');
+                s.push_str(rec.token.as_str());
+            }
+            s
+        }
+        ClientCommand::Logout => "LOGOUT".to_owned(),
+        ClientCommand::Agree { game_id } => match game_id {
+            Some(g) => format!("AGREE {}", g.as_str()),
+            None => "AGREE".to_owned(),
+        },
+        ClientCommand::Reject { game_id } => match game_id {
+            Some(g) => format!("REJECT {}", g.as_str()),
+            None => "REJECT".to_owned(),
+        },
+        ClientCommand::Move { token, comment } => match comment {
+            Some(c) => format!("{},'{}", token.as_str(), c),
+            None => token.as_str().to_owned(),
+        },
+        ClientCommand::Toryo => "%TORYO".to_owned(),
+        ClientCommand::Kachi => "%KACHI".to_owned(),
+        ClientCommand::Chudan => "%CHUDAN".to_owned(),
+        ClientCommand::KeepAlive => String::new(),
+        ClientCommand::Who => "%%WHO".to_owned(),
+        ClientCommand::List => "%%LIST".to_owned(),
+        ClientCommand::Show { game_id } => format!("%%SHOW {}", game_id.as_str()),
+        ClientCommand::Monitor2On { game_id } => format!("%%MONITOR2ON {}", game_id.as_str()),
+        ClientCommand::Monitor2Off { game_id } => format!("%%MONITOR2OFF {}", game_id.as_str()),
+        ClientCommand::Chat { message } => format!("%%CHAT {message}"),
+        ClientCommand::Version => "%%VERSION".to_owned(),
+        ClientCommand::Help => "%%HELP".to_owned(),
+        ClientCommand::SetBuoy {
+            game_name,
+            moves,
+            count,
+        } => {
+            let mut s = format!("%%SETBUOY {}", game_name.as_str());
+            for m in moves {
+                s.push(' ');
+                s.push_str(m.as_str());
+            }
+            s.push(' ');
+            s.push_str(&count.to_string());
+            s
+        }
+        ClientCommand::DeleteBuoy { game_name } => {
+            format!("%%DELETEBUOY {}", game_name.as_str())
+        }
+        ClientCommand::GetBuoyCount { game_name } => {
+            format!("%%GETBUOYCOUNT {}", game_name.as_str())
+        }
+        ClientCommand::Fork {
+            source_game,
+            new_buoy,
+            nth_move,
+        } => {
+            let mut s = format!("%%FORK {}", source_game.as_str());
+            match (new_buoy, nth_move) {
+                (Some(b), Some(n)) => {
+                    s.push(' ');
+                    s.push_str(b.as_str());
+                    s.push(' ');
+                    s.push_str(&n.to_string());
+                }
+                (Some(b), None) => {
+                    s.push(' ');
+                    s.push_str(b.as_str());
+                }
+                (None, Some(n)) => {
+                    s.push(' ');
+                    s.push_str(&n.to_string());
+                }
+                (None, None) => {}
+            }
+            s
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,5 +802,215 @@ mod tests {
         assert_eq!(color_of_move(&CsaMoveToken::new("+7776FU")), Some(Color::Black));
         assert_eq!(color_of_move(&CsaMoveToken::new("-3334FU")), Some(Color::White));
         assert_eq!(color_of_move(&CsaMoveToken::new("7776FU")), None);
+    }
+
+    #[test]
+    fn serialize_login_basic_and_x1_and_reconnect() {
+        let basic = ClientCommand::Login {
+            name: PlayerName::new("alice"),
+            password: Secret::new("pw"),
+            x1: false,
+            reconnect: None,
+        };
+        assert_eq!(serialize_client_command(&basic), "LOGIN alice pw");
+
+        let x1 = ClientCommand::Login {
+            name: PlayerName::new("bob"),
+            password: Secret::new("secret"),
+            x1: true,
+            reconnect: None,
+        };
+        assert_eq!(serialize_client_command(&x1), "LOGIN bob secret x1");
+
+        let rec = ClientCommand::Login {
+            name: PlayerName::new("carol"),
+            password: Secret::new("p"),
+            x1: false,
+            reconnect: Some(ReconnectRequest {
+                game_id: GameId::new("20260427120000"),
+                token: ReconnectToken::new("abcd1234"),
+            }),
+        };
+        assert_eq!(
+            serialize_client_command(&rec),
+            "LOGIN carol p reconnect:20260427120000+abcd1234"
+        );
+    }
+
+    #[test]
+    fn serialize_move_with_and_without_comment() {
+        let bare = ClientCommand::Move {
+            token: CsaMoveToken::new("+7776FU"),
+            comment: None,
+        };
+        assert_eq!(serialize_client_command(&bare), "+7776FU");
+
+        let with = ClientCommand::Move {
+            token: CsaMoveToken::new("+7776FU"),
+            comment: Some("* 123 +7776FU -3334FU".to_owned()),
+        };
+        assert_eq!(serialize_client_command(&with), "+7776FU,'* 123 +7776FU -3334FU");
+    }
+
+    #[test]
+    fn serialize_special_and_x1_simple_commands() {
+        assert_eq!(serialize_client_command(&ClientCommand::Logout), "LOGOUT");
+        assert_eq!(serialize_client_command(&ClientCommand::Toryo), "%TORYO");
+        assert_eq!(serialize_client_command(&ClientCommand::Kachi), "%KACHI");
+        assert_eq!(serialize_client_command(&ClientCommand::Chudan), "%CHUDAN");
+        assert_eq!(serialize_client_command(&ClientCommand::KeepAlive), "");
+        assert_eq!(serialize_client_command(&ClientCommand::Who), "%%WHO");
+        assert_eq!(serialize_client_command(&ClientCommand::List), "%%LIST");
+        assert_eq!(serialize_client_command(&ClientCommand::Version), "%%VERSION");
+        assert_eq!(serialize_client_command(&ClientCommand::Help), "%%HELP");
+    }
+
+    #[test]
+    fn serialize_agree_reject_with_optional_id() {
+        assert_eq!(serialize_client_command(&ClientCommand::Agree { game_id: None }), "AGREE");
+        assert_eq!(
+            serialize_client_command(&ClientCommand::Agree {
+                game_id: Some(GameId::new("g1"))
+            }),
+            "AGREE g1"
+        );
+        assert_eq!(serialize_client_command(&ClientCommand::Reject { game_id: None }), "REJECT");
+    }
+
+    #[test]
+    fn serialize_buoy_and_fork() {
+        let setbuoy = ClientCommand::SetBuoy {
+            game_name: GameName::new("buoy1"),
+            moves: vec![CsaMoveToken::new("+7776FU"), CsaMoveToken::new("-3334FU")],
+            count: 5,
+        };
+        assert_eq!(serialize_client_command(&setbuoy), "%%SETBUOY buoy1 +7776FU -3334FU 5");
+
+        let del = ClientCommand::DeleteBuoy {
+            game_name: GameName::new("buoy1"),
+        };
+        assert_eq!(serialize_client_command(&del), "%%DELETEBUOY buoy1");
+
+        let count = ClientCommand::GetBuoyCount {
+            game_name: GameName::new("buoy1"),
+        };
+        assert_eq!(serialize_client_command(&count), "%%GETBUOYCOUNT buoy1");
+
+        let f0 = ClientCommand::Fork {
+            source_game: GameId::new("g"),
+            new_buoy: None,
+            nth_move: None,
+        };
+        assert_eq!(serialize_client_command(&f0), "%%FORK g");
+
+        let f1 = ClientCommand::Fork {
+            source_game: GameId::new("g"),
+            new_buoy: Some(GameName::new("forked")),
+            nth_move: None,
+        };
+        assert_eq!(serialize_client_command(&f1), "%%FORK g forked");
+
+        let f2 = ClientCommand::Fork {
+            source_game: GameId::new("g"),
+            new_buoy: None,
+            nth_move: Some(24),
+        };
+        assert_eq!(serialize_client_command(&f2), "%%FORK g 24");
+
+        let f3 = ClientCommand::Fork {
+            source_game: GameId::new("g"),
+            new_buoy: Some(GameName::new("forked")),
+            nth_move: Some(24),
+        };
+        assert_eq!(serialize_client_command(&f3), "%%FORK g forked 24");
+    }
+
+    #[test]
+    fn parse_then_serialize_then_parse_is_stable_for_all_variants() {
+        // parse_command(serialize(cmd)) == cmd を主要バリアントに対して確認する
+        // (Secret は PartialEq 実装で expose 値に基づくので Login も等価判定可能)。
+        let samples = vec![
+            ClientCommand::Login {
+                name: PlayerName::new("alice"),
+                password: Secret::new("pw"),
+                x1: false,
+                reconnect: None,
+            },
+            ClientCommand::Login {
+                name: PlayerName::new("bob"),
+                password: Secret::new("s"),
+                x1: true,
+                reconnect: None,
+            },
+            ClientCommand::Login {
+                name: PlayerName::new("carol"),
+                password: Secret::new("p"),
+                x1: false,
+                reconnect: Some(ReconnectRequest {
+                    game_id: GameId::new("20260427120000"),
+                    token: ReconnectToken::new("abcd1234"),
+                }),
+            },
+            ClientCommand::Logout,
+            ClientCommand::Agree { game_id: None },
+            ClientCommand::Agree {
+                game_id: Some(GameId::new("g1")),
+            },
+            ClientCommand::Reject { game_id: None },
+            ClientCommand::Move {
+                token: CsaMoveToken::new("+7776FU"),
+                comment: None,
+            },
+            ClientCommand::Move {
+                token: CsaMoveToken::new("+7776FU"),
+                comment: Some("* 100 +7776FU -3334FU".to_owned()),
+            },
+            ClientCommand::Toryo,
+            ClientCommand::Kachi,
+            ClientCommand::Chudan,
+            ClientCommand::KeepAlive,
+            ClientCommand::Who,
+            ClientCommand::List,
+            ClientCommand::Show {
+                game_id: GameId::new("g1"),
+            },
+            ClientCommand::Monitor2On {
+                game_id: GameId::new("g1"),
+            },
+            ClientCommand::Monitor2Off {
+                game_id: GameId::new("g1"),
+            },
+            ClientCommand::Version,
+            ClientCommand::Help,
+            ClientCommand::SetBuoy {
+                game_name: GameName::new("buoy1"),
+                moves: vec![CsaMoveToken::new("+7776FU"), CsaMoveToken::new("-3334FU")],
+                count: 5,
+            },
+            ClientCommand::DeleteBuoy {
+                game_name: GameName::new("buoy1"),
+            },
+            ClientCommand::GetBuoyCount {
+                game_name: GameName::new("buoy1"),
+            },
+            ClientCommand::Fork {
+                source_game: GameId::new("g"),
+                new_buoy: None,
+                nth_move: None,
+            },
+            ClientCommand::Fork {
+                source_game: GameId::new("g"),
+                new_buoy: Some(GameName::new("forked")),
+                nth_move: Some(24),
+            },
+        ];
+
+        for cmd in samples {
+            let line = serialize_client_command(&cmd);
+            let parsed = parse_command(&CsaLine::new(&line)).unwrap_or_else(|e| {
+                panic!("parse failed for serialized `{line}` ({cmd:?}): {e:?}")
+            });
+            assert_eq!(parsed, cmd, "roundtrip mismatch for {cmd:?} => `{line}`");
+        }
     }
 }

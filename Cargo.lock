@@ -2414,6 +2414,7 @@ dependencies = [
  "reqwest",
  "rshogi-core",
  "rshogi-csa",
+ "rshogi-csa-server",
  "serde",
  "serde_json",
  "sysinfo",
