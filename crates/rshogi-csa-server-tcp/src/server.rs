@@ -468,9 +468,9 @@ where
     kifu_storage: K,
     password_store: P,
     hasher: Box<dyn PasswordHasher>,
-    /// Floodgate 履歴 JSONL の append 先。`None` の場合は履歴記録を skip する。
-    /// 異 trait 実装は不要なので具体型 `Option<...>` で持つ（generic 引数で受ける
-    /// より型増殖を避けたい）。
+    /// Floodgate 履歴の append 先。`None` の場合は履歴記録を skip する。
+    /// `H` は [`FloodgateHistoryStorage`] を実装する具体 backend（TCP 既定は
+    /// `JsonlFloodgateHistoryStorage`、Workers では R2 + DO storage backend など）。
     pub(crate) history_storage: Option<H>,
     /// 進行中対局のメモリ内レジストリ。`%%LIST` / `%%SHOW` 応答で参照する。
     ///

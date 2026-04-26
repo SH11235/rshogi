@@ -19,7 +19,7 @@ use std::time::Duration;
 use rshogi_core::types::EnteringKingRule;
 use rshogi_csa_server::port::PlayerRateRecord;
 use rshogi_csa_server::types::PlayerName;
-use rshogi_csa_server::{ClockSpec, FileKifuStorage};
+use rshogi_csa_server::{ClockSpec, FileKifuStorage, JsonlFloodgateHistoryStorage};
 use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
@@ -151,7 +151,7 @@ async fn spawn_server_with_clock(tag: &str, clock: ClockSpec) -> (std::net::Sock
         Box::new(PlainPasswordHasher::new()),
         IpLoginRateLimiter::default_limits(),
         InMemoryBroadcaster::new(),
-        None::<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
+        None::<JsonlFloodgateHistoryStorage>,
     ));
     let _handle = run_server_with_listener(listener, state).await.expect("run_server");
     // accept ループが起動するまで少し待つ。
@@ -529,7 +529,7 @@ async fn spawn_server_with_agree_timeout(
         Box::new(PlainPasswordHasher::new()),
         IpLoginRateLimiter::default_limits(),
         InMemoryBroadcaster::new(),
-        None::<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
+        None::<JsonlFloodgateHistoryStorage>,
     ));
     let _handle = run_server_with_listener(listener, state).await.expect("run_server");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1133,7 +1133,7 @@ async fn spawn_server_custom(
         Box::new(PlainPasswordHasher::new()),
         IpLoginRateLimiter::default_limits(),
         InMemoryBroadcaster::new(),
-        None::<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
+        None::<JsonlFloodgateHistoryStorage>,
     ));
     let _handle = run_server_with_listener(listener, state).await.expect("run_server");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1539,7 +1539,7 @@ fn graceful_shutdown_disconnects_waiter_and_stops_accepting() {
             Box::new(PlainPasswordHasher::new()),
             IpLoginRateLimiter::default_limits(),
             InMemoryBroadcaster::new(),
-            None::<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
+            None::<JsonlFloodgateHistoryStorage>,
         ));
         let _handle = run_server_with_listener(listener, state.clone()).await.expect("run_server");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1611,7 +1611,7 @@ fn graceful_shutdown_waits_for_in_flight_game_and_persists_kifu() {
             Box::new(PlainPasswordHasher::new()),
             IpLoginRateLimiter::default_limits(),
             InMemoryBroadcaster::new(),
-            None::<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
+            None::<JsonlFloodgateHistoryStorage>,
         ));
         let _handle = run_server_with_listener(listener, state.clone()).await.expect("run_server");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1720,7 +1720,7 @@ fn graceful_shutdown_prunes_observer_subscribers() {
             Box::new(PlainPasswordHasher::new()),
             IpLoginRateLimiter::default_limits(),
             InMemoryBroadcaster::new(),
-            None::<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
+            None::<JsonlFloodgateHistoryStorage>,
         ));
         let _handle = run_server_with_listener(listener, state.clone()).await.expect("run_server");
         tokio::time::sleep(Duration::from_millis(50)).await;
