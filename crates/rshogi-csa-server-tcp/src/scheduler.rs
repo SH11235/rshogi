@@ -387,17 +387,37 @@ async fn spawn_scheduled_drive<R, K, P>(
         );
         // 片側だけ MatchRequest が届いたケースでは、生存側 waiter は
         // `transport_responder.send(transport)` を呼んで transport を引き渡そうと
-        // している（[`run_waiter`] 設計）。本関数が即 return すると responder_rx
-        // が drop されて waiter 側が `MatchHandoffFailed` で無通知切断する。
+        // している（waiter loop の MatchRequest 受信枝設計）。本関数が即 return
+        // すると responder_rx が drop されて waiter 側が無通知切断する。
         // 既存の `(Ok, Err) | (Err, Ok)` recv 経路と同じ扱いに統一し、生存側
         // transport を吸い上げて `##[ERROR]` 通知を送ってから drop することで
         // 片側瞬断時でも健全側 player に切断理由を残す。
         // `recv_transport_with_timeout` で `TRANSPORT_HANDOFF_TIMEOUT` を被せ、
         // waiter 側が応答を返せない deadlock 状態でも本経路は永久ブロックしない。
-        if b_handoff_ok && let Ok(mut surviving) = recv_transport_with_timeout(b_resp_rx).await {
+        // `tokio::join!` で b/w を並列に await することで、両 waiter 同時 deadlock
+        // 時にもブロック時間を最大 `TRANSPORT_HANDOFF_TIMEOUT` に抑える。`bool`
+        // ガード分岐を `async move` 内に閉じ込めることで、`b_handoff_ok = false`
+        // 側は `None` を即返し、もう片側の await を妨げない。
+        let (b_surviving, w_surviving) = tokio::join!(
+            async move {
+                if b_handoff_ok {
+                    recv_transport_with_timeout(b_resp_rx).await.ok()
+                } else {
+                    None
+                }
+            },
+            async move {
+                if w_handoff_ok {
+                    recv_transport_with_timeout(w_resp_rx).await.ok()
+                } else {
+                    None
+                }
+            },
+        );
+        if let Some(mut surviving) = b_surviving {
             notify_aborted_match(&mut surviving, &game_name).await;
         }
-        if w_handoff_ok && let Ok(mut surviving) = recv_transport_with_timeout(w_resp_rx).await {
+        if let Some(mut surviving) = w_surviving {
             notify_aborted_match(&mut surviving, &game_name).await;
         }
         // WaitingPool からは drain 済みで、drive_game にも到達していないので
@@ -412,8 +432,17 @@ async fn spawn_scheduled_drive<R, K, P>(
     // recv 失敗時は:
     // - 確定した側の transport には `##[ERROR]` 通知を送って drop（無音切断回避）
     // - 双方とも League から logout（drive_game に到達しないため孤児化防止）
-    let b_recv = recv_transport_with_timeout(b_resp_rx).await;
-    let w_recv = recv_transport_with_timeout(w_resp_rx).await;
+    //
+    // `tokio::join!` で b/w を並列に await することで、両 waiter 同時 deadlock 時
+    // にもブロック時間を最大 `TRANSPORT_HANDOFF_TIMEOUT` に抑える（順次 await だと
+    // 最悪 `2 * TRANSPORT_HANDOFF_TIMEOUT`）。`current_thread` ランタイム上でも
+    // `tokio::join!` は両 future を交互ポーリングするため、片側 timeout の間にも
+    // う片側の完了を進められる。multi-pair 戦略（`least_diff`）で複数ペアを順次
+    // handoff する経路では、deadlock ペアの後続ペア handoff への遅延波及を防ぐ。
+    let (b_recv, w_recv) = tokio::join!(
+        recv_transport_with_timeout(b_resp_rx),
+        recv_transport_with_timeout(w_resp_rx),
+    );
     let (b_transport, w_transport) = match (b_recv, w_recv) {
         (Ok(b), Ok(w)) => (b, w),
         (got_black, got_white) => {
@@ -566,10 +595,7 @@ mod tests {
         // sender (`_tx`) は drop せず保持したまま、仮想時刻だけ進める。
         // `start_paused` 下では `tokio::time::timeout` が auto-advance で
         // 即座に発火する（runtime が「次に進めるべき時刻」を検出する）。
-        let err = recv_transport_with_timeout(rx)
-            .await
-            .err()
-            .expect("timeout must produce Err");
+        let err = recv_transport_with_timeout(rx).await.err().expect("timeout must produce Err");
         assert!(
             matches!(err, TransportHandoffError::TimedOut),
             "expected TimedOut, got: {err:?}"
