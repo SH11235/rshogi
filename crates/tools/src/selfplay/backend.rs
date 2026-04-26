@@ -211,11 +211,7 @@ impl SearchBackend for NativeBackend {
             seldepth: None,
             nodes: Some(result.nodes),
             time_ms: Some(elapsed_ms),
-            nps: if elapsed_ms > 0 {
-                Some(result.nodes * 1000 / elapsed_ms)
-            } else {
-                None
-            },
+            nps: result.nodes.saturating_mul(1000).checked_div(elapsed_ms),
             pv: if result.pv.is_empty() {
                 None
             } else {

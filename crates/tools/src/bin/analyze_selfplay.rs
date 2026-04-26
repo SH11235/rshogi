@@ -1517,7 +1517,7 @@ fn print_text(
             }
             println!();
             let mut sides: Vec<_> = stats.by_side.iter().collect();
-            sides.sort_by(|(a, _), (b, _)| a.cmp(b));
+            sides.sort_by_key(|(a, _)| *a);
             for (side, bucket) in sides {
                 println!(
                     "    side {}: moves={} avg_elapsed={:.1}ms",

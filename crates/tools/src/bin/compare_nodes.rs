@@ -949,8 +949,7 @@ fn write_summary(
 
     // 乖離が大きい局面トップ10
     let mut sorted: Vec<&PositionResult> = results.iter().collect();
-    sorted
-        .sort_by(|a, b| b.final_nodes_diff.unsigned_abs().cmp(&a.final_nodes_diff.unsigned_abs()));
+    sorted.sort_by_key(|r| std::cmp::Reverse(r.final_nodes_diff.unsigned_abs()));
     let top_n = sorted.len().min(10);
     writeln!(writer, "--- 乖離が大きい局面 (top {top_n}) ---")?;
     for r in &sorted[..top_n] {

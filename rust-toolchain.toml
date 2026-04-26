@@ -1,3 +1,6 @@
+# 開発者間 / CI でツールチェーンバージョンを揃えるため patch 単位で pin する。
+# 新 stable が出たら本ファイルの bump で意図的に追従する運用（自動追従より
+# clippy lint 追加・breaking change を PR で受け止める方が安全）。
 [toolchain]
-channel = "1.93.1"
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]
