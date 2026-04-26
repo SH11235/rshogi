@@ -23,6 +23,7 @@ pub mod auth;
 pub mod broadcaster;
 pub mod metrics;
 pub mod rate_limit;
+pub mod scheduler;
 pub mod server;
 pub mod transport;
 

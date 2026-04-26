@@ -148,6 +148,16 @@ pub struct ServerConfig {
     /// [`floodgate_intent_from_config`] により intent に変換され、
     /// `--allow-floodgate-features` が立っていない場合は起動が `Err` で停止する。
     pub players_yaml_path: Option<std::path::PathBuf>,
+    /// 定刻起動でマッチメイクを発火する Floodgate スケジュール宣言。空 `Vec` は
+    /// 「スケジューラ無し」を意味する。非空の場合は Floodgate 運用機能
+    /// (`enable_scheduler`) として gate 経由で `--allow-floodgate-features`
+    /// opt-in を要求する。
+    ///
+    /// 各 [`FloodgateSchedule`](rshogi_csa_server::FloodgateSchedule) は独立した
+    /// スケジュールタスクで駆動され、UTC の `weekday × hour:minute` に到達した
+    /// 時点で当該 `game_name` の待機プールから候補を抽出し、`pairing_strategy`
+    /// が指定する戦略でペアを作って Game_Summary を送信する。
+    pub floodgate_schedules: Vec<rshogi_csa_server::FloodgateSchedule>,
     /// SIGINT / SIGTERM 受信後に進行中対局の終了を待つ上限。超過分は未完了の
     /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
     /// を落とさない」ためのバッファで、既定 60 秒。
@@ -171,6 +181,7 @@ impl ServerConfig {
             admin_handles: Vec::new(),
             allow_floodgate_features: false,
             players_yaml_path: None,
+            floodgate_schedules: Vec::new(),
             shutdown_grace: Duration::from_secs(60),
         }
     }
@@ -202,6 +213,9 @@ pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFe
         // `players.yaml` 永続化はレート互換運用機能なので、Floodgate 系機能の
         // opt-in が必要（`--allow-floodgate-features`）。
         enable_persistent_player_rates: config.players_yaml_path.is_some(),
+        // 定刻起動スケジュールも Floodgate 系機能。1 件以上のスケジュール宣言
+        // があれば opt-in 要求。
+        enable_scheduler: !config.floodgate_schedules.is_empty(),
         ..FloodgateFeatureIntent::default()
     }
 }
@@ -212,9 +226,30 @@ pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFe
 /// を [`validate_floodgate_feature_gate`] に通し、要求があるのにフラグが立って
 /// いない場合は `Err` を返して fail-fast する。CLI / バイナリは `build_state`
 /// より前に本関数を呼ぶこと。
+///
+/// あわせて Floodgate 機能の起動引数に対する shape 検証も行う（後段の
+/// `run_schedules` まで未知 strategy 名を運ばずに、起動時点で fail-fast する）。
 pub fn prepare_runtime(config: &ServerConfig) -> Result<(), String> {
     let intent = floodgate_intent_from_config(config);
-    validate_floodgate_feature_gate(config.allow_floodgate_features, intent)
+    validate_floodgate_feature_gate(config.allow_floodgate_features, intent)?;
+    validate_floodgate_schedule_strategies(&config.floodgate_schedules)?;
+    Ok(())
+}
+
+/// `floodgate_schedules` の各エントリの `pairing_strategy` 名が
+/// [`crate::scheduler::build_strategy`] で受理可能かを起動時点で検証する。
+///
+/// `run_schedules` 経路でも `build_strategy` が Err を返すが、その時点では
+/// `prepare_runtime` 通過後 `build_state` も済んでおり、エラーログの読みづらさ
+/// （初期化 panic と区別がつきづらい）が問題になる。本関数で先回り検証する。
+fn validate_floodgate_schedule_strategies(
+    schedules: &[rshogi_csa_server::FloodgateSchedule],
+) -> Result<(), String> {
+    for schedule in schedules {
+        crate::scheduler::build_strategy(&schedule.pairing_strategy)
+            .map_err(|e| format!("schedule {:?}: {}", schedule.game_name, e))?;
+    }
+    Ok(())
 }
 
 /// graceful shutdown 用トリガ。SIGINT / SIGTERM 受信で `trigger` され、
@@ -282,11 +317,15 @@ impl Default for GracefulShutdown {
 /// drive は自分の `completion_rx`（game 終了通知）と、waiter の transport を受け取るための
 /// `transport_responder` を両方含めて送る。waiter はこれを受け取ったら自分の transport を
 /// `transport_responder` で返送し、`completion_rx` を await して終局まで待機する。
-struct MatchRequest {
+///
+/// 通常の direct match 経路では `handle_connection` 内の drive 役が構築する。
+/// Floodgate scheduler 経路（`scheduler::fire_schedule`）でも同じ構造を使い、
+/// scheduler が両 waiter に MatchRequest を送って transport を吸い上げる。
+pub(crate) struct MatchRequest {
     /// waiter が自分の `TcpTransport` をここで返送する。
-    transport_responder: oneshot::Sender<TcpTransport>,
+    pub(crate) transport_responder: oneshot::Sender<TcpTransport>,
     /// drive 側が終局後に `send(())` する。waiter はこれを受けてタスクを終える。
-    completion_rx: oneshot::Receiver<()>,
+    pub(crate) completion_rx: oneshot::Receiver<()>,
 }
 
 /// 待機プール内の 1 スロット。
@@ -295,34 +334,52 @@ struct MatchRequest {
 /// drive 側はここに入っている [`oneshot::Sender<MatchRequest>`] を通して待機側へ
 /// マッチ確定を通知する。`take_complement` でプールから取り出された slot は、
 /// `match_request_tx.send(...)` の成否で waiter が健在かどうか判定できる。
-struct WaitingSlot {
+pub(crate) struct WaitingSlot {
     /// 認証後に確定した handle 単独部分（League へ登録した名前）。
-    handle: String,
+    pub(crate) handle: String,
     /// 希望手番。
-    color: Color,
+    pub(crate) color: Color,
     /// drive 側 → waiter への確定通知。
-    match_request_tx: oneshot::Sender<MatchRequest>,
+    pub(crate) match_request_tx: oneshot::Sender<MatchRequest>,
 }
 
 /// 待機プール。
 ///
 /// `game_name` 別にキューを持ち、各キュー内で先着順に保持する。
-/// drive 側は相補手番のスロットを先頭から順に探す。
+/// drive 側は相補手番のスロットを先頭から順に探す。Floodgate scheduler は
+/// [`Self::drain_for_game_name`] で当該 `game_name` の全 slot を一括取得する。
 #[derive(Default)]
-struct WaitingPool {
+pub(crate) struct WaitingPool {
     queues: HashMap<GameName, VecDeque<WaitingSlot>>,
 }
 
 impl WaitingPool {
-    fn push(&mut self, game_name: GameName, slot: WaitingSlot) {
+    pub(crate) fn push(&mut self, game_name: GameName, slot: WaitingSlot) {
         self.queues.entry(game_name).or_default().push_back(slot);
     }
 
     /// 相補手番のスロットを 1 件取り出す。見つからなければ `None`。
-    fn take_complement(&mut self, game_name: &GameName, want: Color) -> Option<WaitingSlot> {
+    pub(crate) fn take_complement(
+        &mut self,
+        game_name: &GameName,
+        want: Color,
+    ) -> Option<WaitingSlot> {
         let queue = self.queues.get_mut(game_name)?;
         let idx = queue.iter().position(|s| s.color == want.opposite())?;
         queue.remove(idx)
+    }
+
+    /// 指定 `game_name` の待機 slot を全て取り出してプールから消す。
+    ///
+    /// Floodgate scheduler の発火経路で使う。返却された `Vec` は元のキューの
+    /// 先着順を維持する。`None` 系（キュー自体が無い）の場合は空 `Vec` を返す。
+    /// `HashMap` の entry ごと `remove` するため、毎週発火で空 `VecDeque` が
+    /// プール内に累積しない（`drain(..)` 単体では entry が残る）。
+    pub(crate) fn drain_for_game_name(&mut self, game_name: &GameName) -> Vec<WaitingSlot> {
+        self.queues
+            .remove(game_name)
+            .map(|q| q.into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// 指定 handle のスロットをプールから除去する（待機中の切断検知時の掃除用）。
@@ -346,8 +403,8 @@ where
     P: PasswordStore + 'static,
 {
     config: ServerConfig,
-    league: Mutex<League>,
-    waiting: Mutex<WaitingPool>,
+    pub(crate) league: Mutex<League>,
+    pub(crate) waiting: Mutex<WaitingPool>,
     rate_limiter: IpLoginRateLimiter,
     broadcaster: InMemoryBroadcaster,
     rate_storage: R,
@@ -473,7 +530,7 @@ where
 /// 本関数は使われない。`#[cfg(not(debug_assertions))]` で release ビルド時のみ
 /// 定義することで、`#[allow(dead_code)]` 抑止に頼らずに dead_code 警告を回避する。
 #[cfg(not(debug_assertions))]
-fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         return (*s).to_owned();
     }
@@ -1502,7 +1559,7 @@ fn default_fork_buoy_name(source_game: &GameId, nth_move: Option<u32>) -> GameNa
 
 /// drive 側タスクのメインループ。両 transport を所有して 1 対局を完了まで運ぶ。
 #[allow(clippy::too_many_arguments)]
-async fn drive_game<R, K, P>(
+pub(crate) async fn drive_game<R, K, P>(
     state: Rc<SharedState<R, K, P>>,
     opp_transport: TcpTransport,
     opp_handle: String,
@@ -2395,5 +2452,115 @@ mod tests {
         assert!(!floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
         cfg.players_yaml_path = Some(std::path::PathBuf::from("/tmp/players.yaml"));
         assert!(floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
+    }
+
+    /// `WaitingPool::drain_for_game_name` が:
+    /// - 同 `game_name` 配下の slot を挿入順で全件返す
+    /// - 戻ったあと当該 `HashMap` entry は `remove` されている（空 `VecDeque`
+    ///   が累積しない）
+    /// - 他 `game_name` の entry は触らない
+    /// - 既に entry が無い場合は空 `Vec` を返す
+    ///
+    /// Floodgate scheduler が毎週発火するため、空 entry が `HashMap` に
+    /// 残り続けると long-running 運用で内部表現が肥大化する。`remove` 経路を
+    /// 回帰固定する。
+    #[test]
+    fn waiting_pool_drain_for_game_name_returns_in_order_and_removes_empty_entry() {
+        let mut pool = WaitingPool::default();
+        let game = GameName::new("floodgate-600-10");
+        let other_game = GameName::new("g1");
+
+        // 同一 game_name に 3 件、別 game_name に 1 件 push する。
+        for handle in ["alice", "bob", "carol"] {
+            let (tx, _rx) = oneshot::channel::<MatchRequest>();
+            pool.push(
+                game.clone(),
+                WaitingSlot {
+                    handle: handle.to_owned(),
+                    color: Color::Black,
+                    match_request_tx: tx,
+                },
+            );
+        }
+        let (tx_other, _rx_other) = oneshot::channel::<MatchRequest>();
+        pool.push(
+            other_game.clone(),
+            WaitingSlot {
+                handle: "dave".to_owned(),
+                color: Color::White,
+                match_request_tx: tx_other,
+            },
+        );
+
+        let drained = pool.drain_for_game_name(&game);
+        let handles: Vec<String> = drained.into_iter().map(|s| s.handle).collect();
+        assert_eq!(
+            handles,
+            vec!["alice".to_owned(), "bob".to_owned(), "carol".to_owned()],
+            "drain must preserve insertion order"
+        );
+
+        // drain 後の `HashMap` から当該 entry は消えている（空 VecDeque が残らない）。
+        assert!(
+            !pool.queues.contains_key(&game),
+            "drain should remove the empty HashMap entry to prevent accumulation"
+        );
+
+        // 別 `game_name` の entry は保護される。
+        assert!(pool.queues.contains_key(&other_game), "other game_name entry must be preserved");
+
+        // 既に entry が無い場合の二度目 drain は空 `Vec` を返す。
+        let again = pool.drain_for_game_name(&game);
+        assert!(again.is_empty(), "drain on missing entry returns empty vec");
+    }
+
+    /// `floodgate_intent_from_config` が `floodgate_schedules` の非空で
+    /// `enable_scheduler` を立てることを直接固定。
+    #[test]
+    fn floodgate_intent_reflects_floodgate_schedules() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        assert!(!floodgate_intent_from_config(&cfg).enable_scheduler);
+        cfg.floodgate_schedules.push(rshogi_csa_server::FloodgateSchedule {
+            game_name: "floodgate-600-10".to_owned(),
+            weekday: rshogi_csa_server::FloodgateWeekday::Mon,
+            hour: 9,
+            minute: 0,
+            pairing_strategy: "direct".to_owned(),
+        });
+        assert!(floodgate_intent_from_config(&cfg).enable_scheduler);
+    }
+
+    /// `prepare_runtime` が `floodgate_schedules` の `pairing_strategy` を
+    /// 起動時点で検証する契約を固定。未知 strategy 名は run_schedules 経路に
+    /// 持ち込まれず、起動時点で fail-fast する（gate 通過後の後段失敗ではなく）。
+    #[test]
+    fn prepare_runtime_rejects_unknown_pairing_strategy() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        cfg.allow_floodgate_features = true;
+        cfg.floodgate_schedules.push(rshogi_csa_server::FloodgateSchedule {
+            game_name: "floodgate-600-10".to_owned(),
+            weekday: rshogi_csa_server::FloodgateWeekday::Mon,
+            hour: 9,
+            minute: 0,
+            pairing_strategy: "least_diff".to_owned(),
+        });
+        let err = prepare_runtime(&cfg).expect_err("unknown strategy must fail-fast");
+        assert!(err.contains("least_diff"), "error must mention strategy: {err}");
+        assert!(err.contains("floodgate-600-10"), "error must mention schedule: {err}");
+    }
+
+    /// `prepare_runtime` が `direct` strategy を accept することを固定。
+    #[test]
+    fn prepare_runtime_accepts_direct_pairing_strategy() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        cfg.allow_floodgate_features = true;
+        cfg.floodgate_schedules.push(rshogi_csa_server::FloodgateSchedule {
+            game_name: "floodgate-600-10".to_owned(),
+            weekday: rshogi_csa_server::FloodgateWeekday::Mon,
+            hour: 9,
+            minute: 0,
+            pairing_strategy: "direct".to_owned(),
+        });
+        prepare_runtime(&cfg).expect("direct strategy must pass prepare_runtime");
     }
 }
