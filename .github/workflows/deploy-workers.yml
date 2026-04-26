@@ -114,7 +114,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/worker-build
-          key: worker-build-${{ runner.os }}-v0.8
+          # `runner.os` (Linux/macOS/Windows) だけだと ubuntu-22.04 ↔ 24.04 image 変更時に
+          # glibc 互換性差で動かない可能性があるため、`runner.arch` (X64/ARM64) も含める。
+          # Linux X64 環境では実質固定値だが、将来 ARM64 runner 移行や macOS 検証を
+          # 始めても自動的に分離キャッシュになる defensive な記述。
+          key: worker-build-${{ runner.os }}-${{ runner.arch }}-v0.8
       - name: Install worker-build
         if: steps.cache-worker-build.outputs.cache-hit != 'true'
         run: cargo install -q worker-build@^0.8 --locked

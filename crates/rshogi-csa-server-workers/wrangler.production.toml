@@ -11,7 +11,15 @@
 
 name = "rshogi-csa-server-workers"
 main = "build/worker/shim.mjs"
-compatibility_date = "2025-09-23"
+# 2026-04-21 時点の最新 compatibility flag 日付に追従する。
+# 主要 opt-in 機能:
+# - `web_socket_auto_reply_to_close` (2026-04-07): WS が close フレームに自動応答
+#   （仕様準拠）。本 worker は `state.acceptWebSocket()` 経由で WS を扱うため恩恵あり
+# - `enhanced_error_serialization` (2026-04-21): エラーオブジェクトの V8 serialization
+#   対応拡大
+# Cloudflare 公式ガイダンス: 新規プロジェクトは current date を設定。bump は新フラグ
+# が出ても自動追従しないため、運用判断で本 PR のような明示更新で進める方針。
+compatibility_date = "2026-04-21"
 
 # CI 環境では事前に `cargo install -q worker-build@^0.8 --locked` がインストール済みの
 # 前提（`.github/workflows/deploy-workers.yml` の preCommands で実行）。本番 deploy 経路は

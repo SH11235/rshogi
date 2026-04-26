@@ -52,6 +52,24 @@ npm install -g wrangler
 cargo install -q worker-build@^0.8 --locked
 ```
 
+### Workers Paid プランの確認
+
+Cloudflare Dashboard で先に確認しておく:
+
+[Workers & Pages → Plans](https://dash.cloudflare.com/?to=/:account/workers/plans)
+を開き、現プランが **Workers Paid** であることを確認する。Free プランの場合は
+ここでアップグレードしてから §2 以降に進む。Free のまま §3 の deploy を実行
+すると Durable Objects / R2 関連の権限エラーで停止する。
+
+CLI からも確認したい場合は §3.2 で `wrangler login` を済ませた後で:
+
+```bash
+wrangler whoami
+```
+
+を打つと現在認証中のアカウント情報が出る（プラン情報の表示は wrangler の
+バージョンによる。確実なのは Dashboard 側の確認）。
+
 ## 2. 初回 Cloudflare セットアップ
 
 ### 2.1 R2 buckets を作成
@@ -74,6 +92,11 @@ bucket 名はリポジトリ管理の `crates/rshogi-csa-server-workers/wrangler
 Workers Scripts / Workers KV / Workers R2 / Durable Objects / 必要な
 membership read など実運用に十分な権限が一括付与される。Account Resources は
 本リポジトリ用のアカウントのみに絞ること。
+
+> ℹ️ preset の権限内訳は Cloudflare 側仕様で更新されることがあるため、token 作成
+> 直前のサマリ画面で `Workers Scripts:Edit` / `Workers R2 Storage:Edit` /
+> `Durable Objects:Edit` の 3 つが含まれていることを確認してから "Create Token"
+> を押す。preset から脱落していた場合は "Custom token" に切り替えて下表を反映する。
 
 詳細を絞りたい場合は "Custom token" で以下を組み合わせる:
 
@@ -112,6 +135,13 @@ membership read など実運用に十分な権限が一括付与される。Acco
 | Name | 値（例） |
 |---|---|
 | `WORKERS_HEALTH_URL` | `https://rshogi-csa-server-workers.<your-subdomain>.workers.dev/health` |
+
+`<your-subdomain>` は Cloudflare アカウント固有の workers.dev サブドメイン
+（例: `your-name`）。**§3.4 の `wrangler deploy` 実行ログ末尾に
+`Published rshogi-csa-server-workers (X.YZs) https://...workers.dev` という形で
+完全な URL が出力される**ので、その値を流用する。
+[Cloudflare Dashboard → Workers & Pages → `rshogi-csa-server-workers` →
+Triggers → Routes] でも確認できる。
 
 これを設定すると、deploy 完了後に CI が `/health` を curl で叩いて smoke check
 する step が起動する。値未設定なら smoke step は skip されるだけで deploy 自体は
@@ -176,7 +206,8 @@ curl "https://rshogi-csa-server-workers.${SUBDOMAIN}.workers.dev/health"
 WebSocket 疎通は別途 wsclient ツールで確認:
 
 ```bash
-# 例: websocat 利用
+# `websocat` が無い場合は `cargo install websocat` か `brew install websocat` で
+# 入れる。`wscat` (`npm i -g wscat`) や任意の WS client でも代用可。
 websocat "wss://rshogi-csa-server-workers.${SUBDOMAIN}.workers.dev/ws/test-room-1" \
   -H "Origin: https://rshogi.example.com"
 # 接続が確立すれば OK（"LOGIN ..." を入力すると Worker 側で受理する）
@@ -277,6 +308,48 @@ wrangler rollback <version-id> --config wrangler.production.toml
 そのまま。**rollback で対応した不具合の本修正 PR を必ず追って main に出し、
 通常 deploy で前進する**。rollback したまま放置すると次の自動 deploy で
 壊れたコードが再度 apply される。
+
+### 5.4 自動 deploy job が途中で失敗したとき
+
+CI 上の deploy job が失敗 (`wrangler-action` が non-zero) した場合、Cloudflare
+側の状態は **失敗時点まで進んでいる可能性** がある（一部 binding 更新だけが
+反映された等）。以下の順で復旧する:
+
+1. **失敗ログを確認**
+   - GitHub Actions の job log を一読し `Error:` 行で原因を切り分ける
+   - `Authentication error (10000)`: §6.3 の token 系
+   - `R2 bucket not found`: §6.3 の bucket 系
+   - `Migration tag conflict`: §3.6 の migration 同 tag 再 apply（変更が apply
+     されたかどうかを Dashboard で確認、必要なら新 tag で出し直す）
+
+2. **Cloudflare 側の現在 version を確認**
+   ```bash
+   wrangler deployments list --config crates/rshogi-csa-server-workers/wrangler.production.toml
+   ```
+   最新 version が deploy job 開始 **前** のものなら未反映 → 再実行で OK。
+   deploy job 中の途中 version になっていたら次へ。
+
+3. **不整合状態の場合は §5.1 / §5.2 の手順で安定 version に rollback**
+   - 直前の安定 version に戻すなら §5.1（`wrangler rollback --config ...`）
+   - 特定の安定 version に戻すなら §5.2（`wrangler deployments list` で ID を
+     確認して `wrangler rollback <version-id> --config ...`）
+   - rollback 後は §5.3 の通り、修正を main に戻す PR を必ず追って出す
+
+4. **修正 PR or 同 commit の workflow 再実行**
+   - 設定値の問題 (token / secrets / toml) なら修正 PR を main に出して通常 flow
+   - 一過性 (network / Cloudflare 側の障害) なら `gh workflow run deploy-workers.yml --ref main`
+     で同 commit の deploy を再試行
+
+5. **wrangler tail でクライアント影響を観察**
+   ```bash
+   wrangler tail --config crates/rshogi-csa-server-workers/wrangler.production.toml
+   ```
+   既存接続が切れていないか / 新規接続が成立しているかを確認してから運用復帰。
+
+> 💡 deploy job は `concurrency: deploy-workers / cancel-in-progress: false` で
+> 同時実行が serialize される。失敗 job を放置して次の merge を進めると、新 push
+> の deploy が後ろで待つ。失敗の追加調査が必要なら GitHub Actions 画面で当該
+> deploy job を **手動 cancel** してから次に進めること。
 
 ## 6. 監視 / トラブルシューティング
 

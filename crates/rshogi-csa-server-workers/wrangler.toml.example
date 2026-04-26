@@ -8,7 +8,10 @@
 
 name = "rshogi-csa-server-workers"
 main = "build/worker/shim.mjs"
-compatibility_date = "2025-09-23"
+# `wrangler.production.toml` と揃えて current date 系（2026-04-21）に追従。
+# 個人開発で別 date を使う場合はコピー後に書き換える。新フラグ意味は
+# https://developers.cloudflare.com/workers/configuration/compatibility-flags/ 参照。
+compatibility_date = "2026-04-21"
 
 [build]
 # worker-build が cdylib を wasm32 向けにビルドし、`build/worker/shim.mjs` を生成する。
