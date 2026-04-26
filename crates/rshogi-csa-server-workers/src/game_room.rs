@@ -1284,6 +1284,16 @@ impl GameRoom {
             })?;
             self.build_pending_reconnect(core, &cfg, role, grace_duration)?
         };
+        // `KEY_GRACE_REGISTRY` と `KEY_PENDING_ALARM_KIND` を 2 回の `put` で
+        // 書き分ける。Cloudflare DO は同一 instance に対する fetch / alarm /
+        // websocket_* を単一スレッドで逐次処理するため、1 件目 put 後の `await`
+        // 中に他ハンドラが割り込んで不整合を観測する race は起きない。本コード
+        // は `worker` 0.8 系で `transaction` API がまだ stable に提供されていない
+        // 前提で 2 回 put にしているが、`handle_grace_expired_alarm` 側は
+        // registry の存在を先に確認してから進む設計なので、最悪 (DO 強制終了等)
+        // でも整合性は壊れない (registry が無ければ何もせず alarm tag だけ
+        // 片付ける)。`worker` crate が `transaction` を提供したら本ブロックを
+        // 束ねる方が望ましい。
         self.state.storage().put(KEY_GRACE_REGISTRY, &pending).await?;
         self.state
             .storage()
@@ -1360,7 +1370,11 @@ impl GameRoom {
         let game_summary_for_disconnected = summary.build_for(disconnected_color);
 
         let now_ms = self.now_ms();
-        let deadline_ms = now_ms.saturating_add(grace_duration.as_millis() as u64);
+        // `Duration::as_millis()` は `u128` を返すため、`u64::try_from` で
+        // 範囲外をサチュレートさせて silent truncation を避ける (実用上の grace は
+        // 数十秒〜数時間オーダーで、`u64::MAX` ms の到達は無いが防御的に書く)。
+        let grace_ms = u64::try_from(grace_duration.as_millis()).unwrap_or(u64::MAX);
+        let deadline_ms = now_ms.saturating_add(grace_ms);
         let disconnected_handle = match disconnected_color {
             Color::Black => cfg.black_handle.clone(),
             Color::White => cfg.white_handle.clone(),
@@ -1497,16 +1511,34 @@ impl GameRoom {
             .map_err(|e| Error::RustError(format!("attach player on reconnect: {e}")))?;
 
         self.delete_grace_registry().await?;
-        // alarm tag を片付け、再接続後に時計切れ deadline をかけ直す。
+        // alarm tag を片付ける。直後に turn alarm を再セットして上書きするため、
+        // 順序は kind tag 削除 → set_alarm の順で書き直す（kind tag 未設定は
+        // 既定で `TimeUp` 扱い）。
         self.delete_pending_alarm_kind().await?;
-        // 再接続クライアントに対する次手 deadline alarm は alarm_kind 未設定 (= TimeUp 既定)
-        // で reschedule する経路を流用したい。CoreRoom の current_turn と clock を
-        // 元に再設定するヘルパは既存にないが、`reschedule_turn_alarm` と等価な
-        // 入口を `HandleOutcome::Continue` 相当のダミー結果で叩く方法は
-        // 過剰実装。再接続直後は次手到来時に通常の `reschedule_turn_alarm` 経路で
-        // 再設定されるため、ここでは alarm を一旦解除するに留める (新規 alarm が
-        // 来るまで時計駆動が止まるが、対局者が即指せば通常経路で復帰する)。
-        let _ = self.state.storage().delete_alarm().await;
+        // 再接続クライアントが指し手を送らず放置しても確実に turn deadline が
+        // 発火するよう、現在手番の本体時間 + 秒読み + 通信マージン + 安全側
+        // ゲタを乗せて即時 alarm を予約する。次手の `reschedule_turn_alarm`
+        // が通常経路で上書きするまでのフェールセーフ。
+        let alarm_total_ms = {
+            let core_borrow = self.core.borrow();
+            core_borrow.as_ref().map(|core| {
+                let next_turn = core.current_turn();
+                let budget = core.clock_turn_budget_ms(next_turn).max(0) as u64;
+                let margin = self
+                    .config
+                    .borrow()
+                    .as_ref()
+                    .map(|c| c.time_margin_ms)
+                    .unwrap_or(DEFAULT_TIME_MARGIN_MS);
+                budget.saturating_add(margin).saturating_add(ALARM_SAFETY_MS)
+            })
+        };
+        if let Some(total) = alarm_total_ms {
+            self.state.storage().set_alarm(Duration::from_millis(total)).await?;
+        } else {
+            // CoreRoom 不在 (異常系)。alarm を解除して保守的に振る舞う。
+            let _ = self.state.storage().delete_alarm().await;
+        }
         console_log!("[GameRoom] reconnect succeeded: handle={} role={:?}", handle, role);
         Ok(())
     }

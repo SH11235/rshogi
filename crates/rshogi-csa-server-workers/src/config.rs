@@ -118,8 +118,8 @@ impl ConfigKeys {
 }
 
 /// `RECONNECT_GRACE_SECONDS` 文字列を `Duration` へ解決する。`None` または空文字
-/// は `Duration::ZERO`（再接続プロトコル無効化）として扱う。負値や `u32::MAX` を
-/// 超える値は拒否する。
+/// は `Duration::ZERO`（再接続プロトコル無効化）として扱う。負値・非数値文字列・
+/// `u64` の範囲外は `Err` で拒否する（実用上は分〜時間オーダーの設定だけを期待）。
 pub fn parse_reconnect_grace_duration(raw: Option<&str>) -> Result<std::time::Duration, String> {
     let trimmed = raw.unwrap_or("").trim();
     if trimmed.is_empty() {

@@ -109,7 +109,6 @@ impl PendingReconnect {
         }
         ReconnectMatchOutcome::Accepted
     }
-
 }
 
 /// 再接続成立時にクライアントへ送出する状態再送メッセージを組み立てる。
@@ -128,7 +127,13 @@ pub fn build_resume_message(
     let turn_char = match snapshot.current_turn.as_str() {
         "black" => '+',
         "white" => '-',
-        _ => '+', // 永続化スキーマで弾く前提だが、未知値は黒手番扱いで安全側に倒す。
+        // `current_turn` は `color_to_str` 経由でしか書き込まれないため、ここに
+        // 到達するのは DO storage を外部から直接書き換えた等のスキーマ不整合
+        // ケースのみ。値判定不能で勝敗が変わる経路を作らないよう、安全側に
+        // 黒手番（先手）でフォールバックして再接続自体は成立させる（CSA 互換
+        // クライアントは Reconnect_Token / Game_Summary 由来の手番情報を再
+        // 受信するため、致命的影響は限定的）。
+        _ => '+',
     };
     let _ = writeln!(out, "Current_Turn:{turn_char}");
     let _ = writeln!(out, "Black_Time_Remaining_Ms:{}", snapshot.black_remaining_ms);
