@@ -2169,7 +2169,6 @@ fn parse_move_broadcast(line: &str) -> Option<(&str, u32)> {
 
 /// 棋譜 + 00LIST を永続化する。`game_name` は Floodgate 履歴 JSONL に記録する
 /// ためのみ使う（kifu / 00LIST 出力には影響しない）。
-#[allow(clippy::too_many_arguments)]
 async fn persist_kifu<R, K, P>(
     state: &SharedState<R, K, P>,
     game_id: &GameId,
@@ -2280,6 +2279,20 @@ where
 
     // Floodgate 履歴 JSONL に append（`floodgate_history_path` が Some のとき
     // のみ。失敗時はレート同様に `tracing::error!` で記録してから上に Err を返す）。
+    //
+    // best-effort に倒さず Err を伝播する判断理由:
+    // - 履歴は単なる運用参照ではなく、Floodgate 月例集計など 00LIST と
+    //   突き合わせる外部バッチの突合元としても利用され得る。silent skip すると
+    //   運用ログから消えて整合性チェックを後追いできなくなる。
+    // - 上位 `drive_game_inner` には既に終局メッセージ送出済みの状態で I/O
+    //   失敗を返す形になるが、`csa_games_finished_total{result_code}` の集計や
+    //   kifu/00LIST/rate と同じく storage 失敗を 1 経路に集約しておけば
+    //   alert ルールが一本化できる（kifu 失敗・rate 失敗・history 失敗で挙動が
+    //   分岐すると運用側のフィルタがぶれる）。
+    // - history 失敗で `drive_game_inner` 上位が見るのは `Err` だが、`DriveGuard`
+    //   Drop は既に `result_code_slot` 経由で正規ラベルを set 済み（L1869）なので
+    //   `csa_games_finished_total` の集計ラベルは正しい。Err は alert ルートに
+    //   流れるだけで、メトリクス側の整合性は崩れない。
     if let Some(history) = state.history_storage.as_ref() {
         let entry = rshogi_csa_server::FloodgateHistoryEntry::new(
             game_id,
@@ -2310,7 +2323,6 @@ where
 /// `floodgate_history_path` が `Some` の場合は [`JsonlFloodgateHistoryStorage`]
 /// を構築して `SharedState.history_storage` に乗せる。`None` の場合は履歴
 /// 記録 skip。
-#[allow(clippy::too_many_arguments)]
 pub fn build_state<R, K, P>(
     config: ServerConfig,
     rate_storage: R,

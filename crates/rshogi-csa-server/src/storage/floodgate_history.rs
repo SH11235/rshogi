@@ -158,6 +158,19 @@ impl FloodgateHistoryStorage for JsonlFloodgateHistoryStorage {
         async move {
             let line = serialized?;
             let _guard = self.append_lock.lock().await;
+            // 親ディレクトリ未作成時のフェイル連発を防ぐ。`--floodgate-history-jsonl`
+            // にデプロイ初回などで存在しないディレクトリ配下のパスを指定された場合、
+            // `OpenOptions::open` だけだと毎ゲーム ENOENT で `StorageError::Io` を
+            // 返し続けて「履歴 opt-in したのに永続化が常に失敗する」状態になる。
+            // `create_dir_all` は idempotent でディレクトリが既にあれば no-op、
+            // ファイル作成より遥かに低頻度なので append-lock 内で一度ずつ呼んで OK。
+            if let Some(parent) = self.path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    StorageError::Io(format!("create_dir_all {}: {}", parent.display(), e))
+                })?;
+            }
             let mut file =
                 OpenOptions::new().create(true).append(true).open(&self.path).await.map_err(
                     |e| StorageError::Io(format!("open {} (append): {}", self.path.display(), e)),
@@ -184,12 +197,23 @@ impl FloodgateHistoryStorage for JsonlFloodgateHistoryStorage {
             if limit == 0 {
                 return Ok(Vec::new());
             }
+            // TODO: 件数が膨らんだ場合は末尾シーク + バッファ後退で `\n` を逆方向に
+            //       探す実装に置き換え検討（現状は logrotate 前提の中小規模運用で
+            //       全読みでも実害が無いため `read_to_string` で済ませている）。
             let raw = match tokio::fs::read_to_string(&path).await {
                 Ok(s) => s,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(e) => return Err(StorageError::Io(format!("read {}: {}", path.display(), e))),
             };
             // 後ろから limit 行までを集めて、新しい順（最後に書かれた順）で返す。
+            //
+            // malformed 行は strict に `Err` で返す（`tracing::warn!` で skip しない）。
+            // 理由は履歴 JSONL が運用ダッシュボード / x1 拡張コマンド経由の参照に
+            // 加えて勝敗集計（mk_rate 等の外部バッチ）の入力にも使われ得るため、
+            // 不整合行を黙って無視するとプレイヤごとの win/lose が静かに乖離して
+            // 後追い切り分けが極めて困難になる。append-lock + write_all で書き込み
+            // 中の crash 痕跡が残った場合は、運用が手作業で末尾の半行を切る or
+            // logrotate の rotate 境界で物理削除するなど明示的に対処する方針。
             let mut entries: Vec<FloodgateHistoryEntry> = Vec::new();
             for line in raw.lines().rev() {
                 if line.trim().is_empty() {
@@ -296,6 +320,21 @@ mod tests {
         let storage = JsonlFloodgateHistoryStorage::new(path);
         let err = storage.list_recent(5).await.unwrap_err();
         assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn append_creates_missing_parent_directories() {
+        // `--floodgate-history-jsonl` にデプロイ初回で未作成のサブディレクトリを
+        // 含むパスを指定された場合でも、append が ENOENT で失敗し続けず、ディレクトリ
+        // ごと作って成功する契約。
+        let dir = tempdir();
+        let nested = dir.path().join("a").join("b").join("c").join("history.jsonl");
+        let storage = JsonlFloodgateHistoryStorage::new(nested.clone());
+        storage.append(&entry("g1", Some(HistoryColor::Black))).await.unwrap();
+        let recent = storage.list_recent(5).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].game_id, "g1");
+        assert!(nested.exists(), "history file should be created at {nested:?}");
     }
 
     #[tokio::test(flavor = "current_thread")]
