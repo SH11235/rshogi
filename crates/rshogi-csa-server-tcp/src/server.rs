@@ -1881,21 +1881,17 @@ where
     )
     .await;
 
-    // 後始末は inner の結果に関係なく必ず走る。
+    // 後始末は inner の結果に関係なく必ず走る。`league` ロックを保持したまま
+    // `session_cancellers` まで取りに行くことで、「end_game + logout で League が
+    // 空く」 → 「同名で新規 LOGIN が成功して cancellers に新 Arc を挿入」 →
+    // 「本ブロックの `cancellers.remove` が新トークンを誤って消す」という race を
+    // 閉じる（PR #495 review: P2-1）。ロック順序は LOGIN handler と一致する
+    // `league → cancellers`。
     {
         let mut league = state.league.lock().await;
         let _ = league.end_game(&matched);
         league.logout(&matched.black);
         league.logout(&matched.white);
-    }
-    {
-        // セッションが対局終了で終わるので、両者の cancel notify エントリも
-        // 片付ける。EvictOld 経路では旧セッションが既に置換済の可能性があるが、
-        // その場合 League には既に新セッションが居て cancellers にも新トークンが
-        // 入っているため、以下の `remove` は新トークンを誤って取り除き得る。
-        // ただし対局中 (`AgreeWaiting`/`InGame`) のプレイヤは EvictOld 対象外で
-        // 新 LOGIN は AlreadyLoggedIn で拒否されるため、本経路で「既に新セッションが
-        // cancellers に居る」ことは起き得ない（不変条件）。
         let mut cancellers = state.session_cancellers.lock().await;
         cancellers.remove(&matched.black);
         cancellers.remove(&matched.white);

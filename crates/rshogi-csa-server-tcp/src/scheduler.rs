@@ -579,13 +579,14 @@ where
 {
     let black_player = PlayerName::new(black);
     let white_player = PlayerName::new(white);
-    {
-        let mut league = state.league.lock().await;
-        league.logout(&black_player);
-        league.logout(&white_player);
-    }
-    // session_cancellers エントリも片付ける。`drive_game` に到達せず epilogue
-    // が走らないため、本経路で明示的に取り下げないと map が増え続ける。
+    // `league` ロックを保持したまま `session_cancellers` まで取りに行くことで、
+    // 「logout で League が空く」 → 「同名で新規 LOGIN が cancellers に新 Arc を
+    // 挿入」 → 「本ブロックの `cancellers.remove` が新トークンを誤って消す」
+    // race を閉じる（PR #495 review: P2-2）。ロック順序は `league → cancellers`
+    // で、LOGIN handler ・ drive_game epilogue と一貫させる。
+    let mut league = state.league.lock().await;
+    league.logout(&black_player);
+    league.logout(&white_player);
     let mut cancellers = state.session_cancellers.lock().await;
     cancellers.remove(&black_player);
     cancellers.remove(&white_player);
