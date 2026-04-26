@@ -8,8 +8,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use tools::csa_client::event::Event;
-use tools::csa_client::transport::{ConnectOpts, CsaTransport, TransportTarget};
+use rshogi_csa_client::event::Event;
+use rshogi_csa_client::transport::{ConnectOpts, CsaTransport, TransportTarget};
 use tungstenite::{Message, accept};
 
 /// 1 接続を受け取り、与えた `script` のスクリプトを順次実行する mock WebSocket

@@ -13,11 +13,11 @@ use anyhow::Result;
 
 use rshogi_csa::{Color, Position, csa_move_to_usi, usi_move_to_csa};
 
-use super::config::CsaClientConfig;
-use super::engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine};
-use super::event::Event;
-use super::protocol::{CsaConnection, GameResult, parse_game_result, parse_server_move};
-use super::record::GameRecord;
+use crate::config::CsaClientConfig;
+use crate::engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine};
+use crate::event::Event;
+use crate::protocol::{CsaConnection, GameResult, parse_game_result, parse_server_move};
+use crate::record::GameRecord;
 
 // ────────────────────────────────────────────
 // Clock
@@ -33,7 +33,7 @@ struct Clock {
 }
 
 impl Clock {
-    fn from_summary(summary: &super::protocol::GameSummary) -> Self {
+    fn from_summary(summary: &crate::protocol::GameSummary) -> Self {
         Self {
             black_time_ms: summary.black_time.total_time_ms + summary.black_time.increment_ms,
             white_time_ms: summary.white_time.total_time_ms + summary.white_time.increment_ms,

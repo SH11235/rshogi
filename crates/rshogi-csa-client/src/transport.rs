@@ -23,7 +23,7 @@ use tungstenite::handshake::client::Request;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
-use super::event::Event;
+use crate::event::Event;
 
 /// 接続先のスキーム解析結果。`host` 設定文字列から `from_host_port` で生成する。
 #[derive(Debug, Clone, PartialEq, Eq)]

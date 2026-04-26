@@ -41,15 +41,6 @@ log.workspace = true
 # Local dependencies
 rshogi-core = { path = "../rshogi-core" }
 rshogi-csa = { path = "../rshogi-csa" }
-# CSA プロトコル送信側 serialize / 受信側 parse の単一ソース。
-# `default-features=false` で `tokio-transport` (tokio + serde_yaml) を切り、
-# protocol モジュールが必要とする pure な型 / 関数のみを取り込む。
-rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false }
-
-# CSA-over-WebSocket 用の sync ハンドシェイク + フレーミング。
-# rustls + webpki ルートで TLS を実装し、native-tls 経由の OpenSSL 依存を避ける。
-# Cloudflare Workers は Let's Encrypt 証明書なので webpki ルートで疎通する。
-tungstenite = { version = "0.27", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
 # Additional dependencies
 sysinfo = "0.37"

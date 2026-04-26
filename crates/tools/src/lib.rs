@@ -44,7 +44,6 @@ pub mod aobazero_features;
 pub mod bench_nnue_eval_tool;
 pub mod common;
 pub mod config;
-pub mod csa_client;
 pub mod dlshogi_features;
 pub mod eval_sfens_tool;
 pub mod packed_sfen;

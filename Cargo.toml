@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/rshogi-core",
     "crates/rshogi-csa",
+    "crates/rshogi-csa-client",
     "crates/rshogi-csa-server",
     "crates/rshogi-csa-server-tcp",
     "crates/rshogi-csa-server-workers",
