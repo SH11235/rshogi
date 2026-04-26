@@ -53,14 +53,23 @@ pub struct MatchedPair {
 
 /// `PairingLogic` に渡すプレイヤ 1 件分の情報。
 ///
-/// 現状は `name` と `preferred_color` のみ持たせる。レーティング・連戦数・
-/// 所属チームなどを加える拡張に備えて、構造体として切り出している。
+/// `LeastDiffPairingStrategy` 等のレート差ベース戦略は `rate` と
+/// `recent_opponents` も参照する。スケジューラ経路は `RateStorage` /
+/// `FloodgateHistoryStorage` から事前取得して埋める想定。直接マッチ戦略では
+/// 余分なフィールドは無視され、`Option::None` / 空 `Vec` で構築されても OK。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingCandidate {
     /// プレイヤ名。
     pub name: PlayerName,
     /// 手番希望（None なら任意）。
     pub preferred_color: Option<Color>,
+    /// 既知のレーティング。`None` の場合は戦略側で既定値（通常 1500）を当てる。
+    /// レート差ベース戦略 (`LeastDiffPairingStrategy`) は本フィールドを使う。
+    pub rate: Option<i32>,
+    /// 直近の対戦相手（連戦回避ペナルティ計算で使う）。`Vec<String>` 内は
+    /// 直近 N 試合の対戦相手の handle。スケジューラ経路で履歴ストレージから
+    /// 事前取得して埋める。
+    pub recent_opponents: Vec<String>,
 }
 
 /// `League::login` の結果。
@@ -270,6 +279,11 @@ impl League {
                 } if g == game_name => Some(PairingCandidate {
                     name: n.clone(),
                     preferred_color: *preferred_color,
+                    // League は rate / 履歴を保持しない。レート差ベース戦略を使う
+                    // 経路では呼び出し側が `RateStorage` / `FloodgateHistoryStorage`
+                    // から事前取得して埋める。
+                    rate: None,
+                    recent_opponents: Vec::new(),
                 }),
                 _ => None,
             })

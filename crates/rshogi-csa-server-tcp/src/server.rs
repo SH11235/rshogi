@@ -416,14 +416,14 @@ where
     pub(crate) waiting: Mutex<WaitingPool>,
     rate_limiter: IpLoginRateLimiter,
     broadcaster: InMemoryBroadcaster,
-    rate_storage: R,
+    pub(crate) rate_storage: R,
     kifu_storage: K,
     password_store: P,
     hasher: Box<dyn PasswordHasher>,
     /// Floodgate 履歴 JSONL の append 先。`None` の場合は履歴記録を skip する。
     /// 異 trait 実装は不要なので具体型 `Option<...>` で持つ（generic 引数で受ける
     /// より型増殖を避けたい）。
-    history_storage: Option<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
+    pub(crate) history_storage: Option<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
     /// 進行中対局のメモリ内レジストリ。`%%LIST` / `%%SHOW` 応答で参照する。
     ///
     /// **注意**: このカウントは graceful shutdown の完了判定に使ってはならない。
@@ -2605,10 +2605,10 @@ mod tests {
             weekday: rshogi_csa_server::FloodgateWeekday::Mon,
             hour: 9,
             minute: 0,
-            pairing_strategy: "least_diff".to_owned(),
+            pairing_strategy: "unknown_strategy".to_owned(),
         });
         let err = prepare_runtime(&cfg).expect_err("unknown strategy must fail-fast");
-        assert!(err.contains("least_diff"), "error must mention strategy: {err}");
+        assert!(err.contains("unknown_strategy"), "error must mention strategy: {err}");
         assert!(err.contains("floodgate-600-10"), "error must mention schedule: {err}");
     }
 

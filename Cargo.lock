@@ -1814,6 +1814,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "rand",
+ "rand_xoshiro",
  "rshogi-core",
  "rshogi-csa",
  "serde",
