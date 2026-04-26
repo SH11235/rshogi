@@ -1,13 +1,16 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Miniflare, type WebSocket } from "miniflare";
+import { Miniflare, type R2Bucket, type WebSocket } from "miniflare";
 
 const WORKER_ROOT = resolve(import.meta.dirname, "../..");
 const SHIM_PATH = resolve(WORKER_ROOT, "build/worker/shim.mjs");
 
 export interface HarnessOptions {
-  persistRoot?: string;
+  /// Miniflare の persist 先ディレクトリ。テスト並列実行や 2 回目の `vitest run`
+  /// で R2 / DO storage が交差汚染しないよう、呼び出し側で一時ディレクトリを
+  /// 切って必ず指定する契約。`makeTempPersistRoot()` のヘルパで作るのが基本経路。
+  persistRoot: string;
   reconnectGraceSeconds?: number;
   allowFloodgateFeatures?: boolean;
   totalTimeSec?: number;
@@ -19,7 +22,7 @@ export interface HarnessOptions {
   adminHandle?: string;
 }
 
-export async function createMiniflare(opts: HarnessOptions = {}): Promise<Miniflare> {
+export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> {
   const mf = new Miniflare({
     scriptPath: SHIM_PATH,
     modules: true,
@@ -60,6 +63,34 @@ export async function makeTempPersistRoot(): Promise<{
       await rm(path, { recursive: true, force: true });
     },
   };
+}
+
+/// 棋譜 R2 オブジェクトを `game_id` 部分一致で待機列挙する。`KIFU_BUCKET` の
+/// キー命名規則 (`YYYY/MM/DD/<game_id>.csa` 等) は `game_id` を prefix にしない
+/// 階層形なので `R2.list({ prefix })` は使えず、全件列挙 + 後段 substring 一致で
+/// 拾う。`game_id` は `<room_id>-<epoch_ms>` 形式で偶発的に他キーへ混入する
+/// 可能性が実質ないため、substring 一致で十分。テスト用途で件数は数件想定、
+/// page 跨ぎ (>1000 件) は視野外。
+export async function pollR2ForGameId(
+  bucket: R2Bucket,
+  gameId: string,
+  { timeoutMs = 5000, intervalMs = 100 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<{ key: string }[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const list = await bucket.list();
+    const matched = list.objects
+      .filter((o: { key: string }) => o.key.includes(gameId))
+      .map((o: { key: string }) => ({ key: o.key }));
+    if (matched.length > 0) return matched;
+    if (Date.now() > deadline) {
+      const seen = list.objects.map((o: { key: string }) => o.key);
+      throw new Error(
+        `R2 object for game_id=${gameId} not found within ${timeoutMs}ms; current keys: ${JSON.stringify(seen)}`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
 }
 
 export class CsaClient {

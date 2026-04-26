@@ -63,10 +63,22 @@ jobs:
         with:
           # `rust-ci.yml` の `wasm-build` job、`deploy-workers.yml` と
           # 同じ wasm32 sysroot キャッシュ namespace を共有する。
+          # `Swatinem/rust-cache` は `RUSTFLAGS` を cache key 構成要素に含めるため、
+          # 共有する 3 workflow すべてが job 直下で `RUSTFLAGS: ""` を立てる契約で
+          # 揃える必要がある。どれか 1 つで `RUSTFLAGS` が立つと cache miss / 汚染
+          # が発生する。本 job の `RUSTFLAGS: ""` は `env:` で明示済み (44-50 行)。
           shared-key: wasm32
       # `cargo install` の成果物 (`~/.cargo/bin/worker-build`) は `Swatinem/rust-cache`
       # の対象外なので、`actions/cache` で明示キャッシュする。`deploy-workers.yml`
-      # と同じキー規約に揃える（バージョン更新時はキー末尾も同時更新）。
+      # と同じキー規約に揃える。
+      #
+      # ⚠️ バージョン更新時の二重管理に注意:
+      #   `cargo install worker-build@^0.8` を `^0.9` 系に上げる場合、本キャッシュキー
+      #   末尾の `v0.8` も同時に `v0.9` へ更新する必要がある。`v0.8` のままだと
+      #   過去 cache が hit して 0.8.x バイナリが使われ続け、新 0.9.x が install
+      #   step で skip される (`steps.cache-worker-build.outputs.cache-hit == 'true'`)。
+      #   インストールコマンドとキャッシュキーの **2 箇所同時更新** が必須。
+      #   `deploy-workers.yml` の同箇所と同契約。
       - name: Cache worker-build binary
         id: cache-worker-build
         uses: actions/cache@v4

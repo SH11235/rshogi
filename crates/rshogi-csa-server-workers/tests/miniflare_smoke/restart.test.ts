@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CsaClient, createMiniflare, makeTempPersistRoot } from "./harness.ts";
+import {
+  CsaClient,
+  createMiniflare,
+  makeTempPersistRoot,
+  pollR2ForGameId,
+} from "./harness.ts";
 import type { Miniflare } from "miniflare";
 
 describe("miniflare smoke: DO restart 永続化", () => {
@@ -95,7 +100,7 @@ async function playOneGame(
   await black.recvUntil((l) => l === "#LOSE");
 
   const r2 = await mf.getR2Bucket("KIFU_BUCKET");
-  const list = await pollR2List(r2, gameId);
+  const list = await pollR2ForGameId(r2, gameId);
   const key = list[0]!.key;
   const body = await (await r2.get(key))!.text();
 
@@ -103,21 +108,4 @@ async function playOneGame(
   white.close();
 
   return { gameId, kifuKey: key, kifuBody: body };
-}
-
-async function pollR2List(
-  r2: Awaited<ReturnType<Miniflare["getR2Bucket"]>>,
-  gameId: string,
-  timeoutMs = 5000,
-): Promise<{ key: string }[]> {
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    const res = await r2.list();
-    const matched = res.objects.filter((o: { key: string }) => o.key.includes(gameId));
-    if (matched.length > 0) return matched.map((o: { key: string }) => ({ key: o.key }));
-    if (Date.now() > deadline) {
-      throw new Error(`R2 object for ${gameId} not found within ${timeoutMs}ms`);
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
 }

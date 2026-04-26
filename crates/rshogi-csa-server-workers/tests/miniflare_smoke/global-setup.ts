@@ -17,6 +17,13 @@ export default async function setup(): Promise<void> {
 
 function runWorkerBuild(): Promise<void> {
   return new Promise((resolveBuild, reject) => {
+    // `RUSTFLAGS` を空文字で上書きする理由: 開発者ローカルや CI 上位 env で
+    // `-C target-cpu=x86-64-v2` 等の host 用 flag が立っていると、wasm32 では
+    // "not a recognized processor" 警告が大量出力されたり、`cargo` が host
+    // sysroot キャッシュと混在して codegen が壊れることがある。Workers の
+    // wasm32 ビルドは `Swatinem/rust-cache` の `shared-key: wasm32` 経路と
+    // 揃える必要があり、そこも RUSTFLAGS="" で固定済 (workers-smoke.yml /
+    // rust-ci.yml `wasm-build` job / deploy-workers.yml の 3 箇所と同契約)。
     const child = spawn("worker-build", ["--release"], {
       cwd: WORKER_ROOT,
       stdio: "inherit",
