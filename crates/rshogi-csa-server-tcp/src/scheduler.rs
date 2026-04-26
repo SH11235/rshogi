@@ -32,7 +32,7 @@
 //! - **buoy / 駒落ち**: スケジューラ起動の対局は常に平手（`initial_sfen = None`）。
 //!   駒落ちサポートはタスク 15.4 で対応する。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -279,15 +279,20 @@ pub(crate) async fn fire_schedule<R, K, P>(
     //    実質 N 回の cache lookup（PlayersYamlRateStorage は in-memory cache）
     //    + 1 回の history read で済む（fire_schedule あたり 1 回）。
     let recent_opponents_by_handle: HashMap<String, Vec<String>> = {
-        let mut by_handle: HashMap<String, Vec<String>> = HashMap::new();
+        // 連戦ペナルティ判定 (`played_recently = recent_opponents.iter().any(...)`)
+        // は対戦相手の有無を boolean で見るだけで頻度はカウントしない。同一相手と
+        // 直近 N 連戦している履歴があると `Vec<String>` に N 個の同名 entry が
+        // 積まれてメモリ・線形探索コストが嵩むため、HashSet で dedup してから
+        // `PairingCandidate` 渡し用の `Vec` に書き戻す。
+        let mut by_handle: HashMap<String, HashSet<String>> = HashMap::new();
         if let Some(history) = state.history_storage.as_ref() {
             // 直近 50 件まで読む（連戦ペナルティ判定に十分。長すぎると false
             // positive で「2 週間前の対戦相手も連戦扱い」になる）。
             match history.list_recent(50).await {
                 Ok(entries) => {
                     for e in entries {
-                        by_handle.entry(e.black.clone()).or_default().push(e.white.clone());
-                        by_handle.entry(e.white.clone()).or_default().push(e.black.clone());
+                        by_handle.entry(e.black.clone()).or_default().insert(e.white.clone());
+                        by_handle.entry(e.white.clone()).or_default().insert(e.black.clone());
                     }
                 }
                 Err(e) => {
@@ -299,7 +304,7 @@ pub(crate) async fn fire_schedule<R, K, P>(
                 }
             }
         }
-        by_handle
+        by_handle.into_iter().map(|(k, set)| (k, set.into_iter().collect())).collect()
     };
     let mut candidates: Vec<PairingCandidate> = Vec::with_capacity(drained.len());
     for slot in drained.iter() {

@@ -189,7 +189,9 @@ fn try_pair_with_cost(
         cost = cost.saturating_add(back_to_back_penalty);
     }
 
-    // 色割り当て。色不適合（同一希望）の場合は None を返して trial を discard。
+    // 色割り当て。色不適合（同一希望）の場合は None を返し、呼び出し側
+    // (`LeastDiffPairingStrategy::try_pair`) は当該ペアだけスキップして本 trial を
+    // 続行する（trial 全体は破棄しない）。
     let (black, white) = match (a.preferred_color, b.preferred_color) {
         (Some(Color::Black), Some(Color::White)) | (Some(Color::Black), None) => {
             (a.name.clone(), b.name.clone())
