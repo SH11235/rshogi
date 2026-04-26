@@ -992,10 +992,9 @@ impl GameRoom {
         // が立っていなければ何もしない。TCP 側 (`server.rs`) は append 失敗時に
         // `ServerError::Storage` を伝播するが、Workers DO で Err を返すと alarm /
         // ws close が抜ける副作用があるため、kifu export と同じ silent log 方針で
-        // 終局処理の前進を優先する。
-        if let Err(e) = self.try_persist_floodgate_history(game_result, &code, ended_at_ms).await {
-            console_log!("[GameRoom] floodgate history persist failed: {e:?}");
-        }
+        // 終局処理の前進を優先する。失敗は `try_persist_floodgate_history` 内で
+        // `console_log!` のみで吸収するため呼び出し側は `Result` を待たない。
+        self.try_persist_floodgate_history(game_result, &code, ended_at_ms).await;
 
         let finished = FinishedState {
             result_code: code,
@@ -1086,26 +1085,30 @@ impl GameRoom {
 
     /// Floodgate 履歴 1 件を `FLOODGATE_HISTORY_BUCKET` に永続化する。`ALLOW_FLOODGATE_FEATURES`
     /// が opt-in されており、binding が設定されているときだけ append する。
-    /// 失敗は `console_log!` のみで伝播させない（呼び出し側 `finalize_if_ended` で
-    /// 終局確定の前進を止めない方針）。
+    /// すべての失敗は `console_log!` で握り潰して呼び出し側 `finalize_if_ended` の
+    /// 終局確定の前進を止めない（best-effort）。`Result` を返さないことで
+    /// シグネチャと振る舞いを一致させ、「Err を返し得る」と誤読される余地を消す。
     async fn try_persist_floodgate_history(
         &self,
         game_result: &rshogi_csa_server::game::result::GameResult,
         result_code: &str,
         ended_at_ms: u64,
-    ) -> Result<()> {
+    ) {
         let storage = match resolve_floodgate_history_storage(&self.env) {
             Ok(Some(s)) => s,
-            Ok(None) => return Ok(()),
+            Ok(None) => return,
             Err(e) => {
-                console_log!("[GameRoom] floodgate history disabled: {e}");
-                return Ok(());
+                // `Err` 経路は `parse_allow_floodgate_features` の解析エラーまたは
+                // `validate_floodgate_feature_gate` の opt-in 漏れ等の **設定不正**。
+                // opt-in 未有効 (`Ok(None)`) と区別がつくよう "config error" を明示する。
+                console_log!("[GameRoom] floodgate history config error: {e}");
+                return;
             }
         };
 
         let cfg = match self.config.borrow().as_ref() {
             Some(c) => c.clone(),
-            None => return Ok(()),
+            None => return,
         };
 
         let start_ms = cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms);
@@ -1123,7 +1126,6 @@ impl GameRoom {
         if let Err(e) = storage.append(&entry).await {
             console_log!("[GameRoom] floodgate history append failed: {e:?}");
         }
-        Ok(())
     }
 
     /// マッチ開始直前の致命的条件（buoy 枯渇等）で対局を開始できない場合に、
