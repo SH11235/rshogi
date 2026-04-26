@@ -9,6 +9,14 @@ use rshogi_csa_server::ClockSpec;
 use crate::origin;
 
 /// 起動時にバインディング名として参照する環境変数キー群。
+///
+/// # 新規定数を追加するときは
+///
+/// 個別 const と併せて、用途別の網羅配列 [`ConfigKeys::ALL_R2_BINDINGS`] /
+/// [`ConfigKeys::ALL_DO_BINDINGS`] / [`ConfigKeys::ALL_VARS_KEYS`] への追加を
+/// 必ず行うこと。`tests/wrangler_template_consistency.rs` がこれら配列と
+/// `wrangler.toml.example` の双方向整合を検証しているため、配列追加を忘れると
+/// template 更新忘れも検出できなくなる。
 pub struct ConfigKeys;
 
 impl ConfigKeys {
@@ -34,6 +42,29 @@ impl ConfigKeys {
     pub const BYOYOMI_MIN: &'static str = "BYOYOMI_MIN";
     /// 運営権限を持つハンドル名（`%%SETBUOY` / `%%DELETEBUOY`）。
     pub const ADMIN_HANDLE: &'static str = "ADMIN_HANDLE";
+
+    /// `wrangler.toml` の `[[r2_buckets]] binding = "..."` で宣言されるべき名前の
+    /// 網羅列挙。新規 R2 binding 定数を追加したら必ず本配列にも追加する。
+    pub const ALL_R2_BINDINGS: &'static [&'static str] = &[
+        Self::KIFU_BUCKET_BINDING,
+        Self::FLOODGATE_HISTORY_BUCKET_BINDING,
+    ];
+
+    /// `wrangler.toml` の `[[durable_objects.bindings]] name = "..."` で宣言される
+    /// べき名前の網羅列挙。新規 DO binding 定数を追加したら必ず本配列にも追加する。
+    pub const ALL_DO_BINDINGS: &'static [&'static str] = &[Self::GAME_ROOM_BINDING];
+
+    /// `wrangler.toml` の `[vars]` で宣言されるべきキーの網羅列挙。
+    /// 新規 `[vars]` キー定数を追加したら必ず本配列にも追加する。
+    pub const ALL_VARS_KEYS: &'static [&'static str] = &[
+        Self::CORS_ORIGINS,
+        Self::CLOCK_KIND,
+        Self::TOTAL_TIME_SEC,
+        Self::BYOYOMI_SEC,
+        Self::TOTAL_TIME_MIN,
+        Self::BYOYOMI_MIN,
+        Self::ADMIN_HANDLE,
+    ];
 }
 
 /// Workers `[vars]` 文字列群から時計設定を解決する。

@@ -1,0 +1,139 @@
+//! `wrangler.toml.example` と `ConfigKeys` 定数の整合性検証。
+//!
+//! Workers コードに新しい binding 定数（R2 / DO / `[vars]` キー）を追加した PR が、
+//! `wrangler.toml.example` のテンプレート更新を忘れて merge されると、運用者が
+//! `cp wrangler.toml.example wrangler.toml` で派生させた本番設定で binding 不足の
+//! まま deploy する事故が発生する。逆に、template にだけ binding を追加して
+//! `ConfigKeys` への追加を忘れたケースもコード側で参照されない dead binding を
+//! 抱え込む原因になる。
+//!
+//! 過去事例: PR #500 で `R2FloodgateHistoryStorage` を新設し
+//! `ConfigKeys::FLOODGATE_HISTORY_BUCKET_BINDING` を追加したが、対応する
+//! `[[r2_buckets]]` エントリの template への追加が漏れていた（task 23.2 で修正）。
+//!
+//! 本テストは `wrangler.toml.example` を TOML として parse し、`ConfigKeys` の
+//! 網羅配列 (`ALL_R2_BINDINGS` / `ALL_DO_BINDINGS` / `ALL_VARS_KEYS`) と
+//! template の宣言が **双方向に一致** することを assert する。
+//!
+//! - 順方向: `ConfigKeys::ALL_*` の各要素 ⊆ template 宣言（コード追加 → template 漏れ検出）
+//! - 逆方向: template 宣言 ⊆ `ConfigKeys::ALL_*` の各要素（template 追加 → コード参照漏れ検出）
+
+use std::sync::LazyLock;
+
+use rshogi_csa_server_workers::config::ConfigKeys;
+
+/// `wrangler.toml.example` を解析した結果。テンプレートに宣言されている
+/// 各種 binding / `[vars]` キーを集約する。
+struct TemplateBindings {
+    r2_bindings: Vec<String>,
+    do_bindings: Vec<String>,
+    vars_keys: Vec<String>,
+}
+
+/// テスト 1 本ごとに file I/O + parse を繰り返さないため `LazyLock` で 1 回化する。
+/// 失敗時は `panic!` する（dev 経路でのみ動作するテストなので Result 化は不要）。
+static TEMPLATE: LazyLock<TemplateBindings> = LazyLock::new(load_template_bindings);
+
+fn load_template_bindings() -> TemplateBindings {
+    let template_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("wrangler.toml.example");
+    let raw = std::fs::read_to_string(&template_path).unwrap_or_else(|e| {
+        panic!("failed to read {}: {e}", template_path.display());
+    });
+    let doc: toml::Value = toml::from_str(&raw).unwrap_or_else(|e| {
+        panic!("failed to parse {} as TOML: {e}", template_path.display());
+    });
+
+    // `[[r2_buckets]]` 配列の各エントリから `binding = "..."` を集める。
+    let r2_bindings = doc
+        .get("r2_buckets")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("binding").and_then(|v| v.as_str()).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // `[[durable_objects.bindings]]` 配列の各エントリから `name = "..."` を集める。
+    let do_bindings = doc
+        .get("durable_objects")
+        .and_then(|v| v.get("bindings"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("name").and_then(|v| v.as_str()).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // `[vars]` テーブルのキー集合を集める。
+    let vars_keys = doc
+        .get("vars")
+        .and_then(|v| v.as_table())
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
+
+    TemplateBindings {
+        r2_bindings,
+        do_bindings,
+        vars_keys,
+    }
+}
+
+/// 双方向整合 assert ヘルパ。
+///
+/// `code_side` (= `ConfigKeys::ALL_*`) と `template_side` (= `wrangler.toml.example`
+/// から抽出したリスト) が同一集合であることを検証する。
+///
+/// - `code_side` にあって `template_side` に無い要素 → コード追加忘れ
+///   (`ConfigKeys` に定数追加したが template 更新を怠った)
+/// - `template_side` にあって `code_side` に無い要素 → template 追加忘れ
+///   (template に binding を入れたが `ConfigKeys::ALL_*` への登録を怠った)
+fn assert_bidirectional(category: &str, code_side: &[&'static str], template_side: &[String]) {
+    let missing_from_template: Vec<&&str> = code_side
+        .iter()
+        .filter(|name| !template_side.iter().any(|t| t == **name))
+        .collect();
+    assert!(
+        missing_from_template.is_empty(),
+        "wrangler.toml.example missing {category} entries declared in ConfigKeys::ALL_{cat_upper}: \
+         {missing_from_template:?}; template currently declares: {template_side:?}",
+        cat_upper = category.to_ascii_uppercase(),
+    );
+
+    let missing_from_code: Vec<&String> = template_side
+        .iter()
+        .filter(|name| !code_side.contains(&name.as_str()))
+        .collect();
+    assert!(
+        missing_from_code.is_empty(),
+        "wrangler.toml.example declares {category} entries not present in ConfigKeys::ALL_{cat_upper}: \
+         {missing_from_code:?}; ConfigKeys::ALL_{cat_upper} currently lists: {code_side:?}",
+        cat_upper = category.to_ascii_uppercase(),
+    );
+}
+
+/// `wrangler.toml.example` の `[[r2_buckets]]` 配列が、`ConfigKeys::ALL_R2_BINDINGS`
+/// と双方向に一致することを検証する。
+#[test]
+fn wrangler_template_r2_bindings_match_config_keys() {
+    assert_bidirectional("r2_bindings", ConfigKeys::ALL_R2_BINDINGS, &TEMPLATE.r2_bindings);
+}
+
+/// `wrangler.toml.example` の `[[durable_objects.bindings]]` 配列が、
+/// `ConfigKeys::ALL_DO_BINDINGS` と双方向に一致することを検証する。
+#[test]
+fn wrangler_template_do_bindings_match_config_keys() {
+    assert_bidirectional("do_bindings", ConfigKeys::ALL_DO_BINDINGS, &TEMPLATE.do_bindings);
+}
+
+/// `wrangler.toml.example` の `[vars]` テーブルキーが、`ConfigKeys::ALL_VARS_KEYS`
+/// と双方向に一致することを検証する。
+///
+/// `[vars]` 値は運用側で書き換える前提なので空文字や placeholder で構わない。
+/// 本テストは「キーの集合が一致すること」のみを検証し、値の内容には関与しない。
+#[test]
+fn wrangler_template_vars_keys_match_config_keys() {
+    assert_bidirectional("vars_keys", ConfigKeys::ALL_VARS_KEYS, &TEMPLATE.vars_keys);
+}
