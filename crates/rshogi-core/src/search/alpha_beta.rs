@@ -759,8 +759,7 @@ impl SearchWorker {
                     // 既存 cache があっても exact architecture が不一致なら破棄。
                     // 同一プロセスで EvalFile をリロードして LayerStacks 形状が変わった場合、旧 cache
                     // variant を保持したままだと `LayerStacksNetwork::update_accumulator`
-                    // の cache 経路が pattern match で外れ、Finny-table caching が
-                    // 静かに無効化される（PR #466 Codex review P2 #2）。
+                    // の cache 経路が pattern match で外れ、Finny-table caching が静かに無効化される。
                     let need_new_cache = match &self.state.acc_cache {
                         None => true,
                         Some(cache) => {

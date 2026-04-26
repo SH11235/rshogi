@@ -21,6 +21,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -164,6 +165,20 @@ pub struct ServerConfig {
     /// Floodgate 運用機能の一つ (`enable_floodgate_history`) として
     /// `--allow-floodgate-features` opt-in を要求する。
     pub floodgate_history_path: Option<std::path::PathBuf>,
+    /// 駒落ち（特定 `game_name` で平手以外の初期局面を使う）マッピング。
+    /// キー: CSA `game_name` 文字列、値: SFEN 表記の初期局面。`reserve_match_initial_position`
+    /// が buoy 残数チェック前に本マップを参照し、該当 `game_name` の対局を
+    /// 指定 SFEN 開始にする。空 `HashMap` の場合は全対局が global の
+    /// `initial_sfen`（通常 `None` = 平手）を使う。
+    pub handicap_initial_sfens: std::collections::HashMap<String, String>,
+    /// 同一プレイヤ名の重複ログイン処理ポリシー。既定は `RejectNew`（既存
+    /// セッションを保護）。`EvictOld` を指定すると、既存セッションを League
+    /// から logout し、待機プールから slot を除去してから新接続の LOGIN を
+    /// 受理する（現状は `Connected` / `GameWaiting` 状態のみ evict 対象。
+    /// `AgreeWaiting` 以降は対局進行中なので evict せず new connection を拒否）。
+    /// `EvictOld` は Floodgate 運用機能扱いで、`--allow-floodgate-features`
+    /// opt-in が必須。
+    pub duplicate_login_policy: DuplicateLoginPolicy,
     /// SIGINT / SIGTERM 受信後に進行中対局の終了を待つ上限。超過分は未完了の
     /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
     /// を落とさない」ためのバッファで、既定 60 秒。
@@ -189,6 +204,8 @@ impl ServerConfig {
             players_yaml_path: None,
             floodgate_schedules: Vec::new(),
             floodgate_history_path: None,
+            handicap_initial_sfens: std::collections::HashMap::new(),
+            duplicate_login_policy: DuplicateLoginPolicy::RejectNew,
             shutdown_grace: Duration::from_secs(60),
         }
     }
@@ -225,8 +242,28 @@ pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFe
         enable_scheduler: !config.floodgate_schedules.is_empty(),
         // Floodgate 履歴 JSONL も Floodgate 系運用機能。`Some` で opt-in 要求。
         enable_floodgate_history: config.floodgate_history_path.is_some(),
+        // 重複ログインの `EvictOld` は Floodgate 運用機能扱い。`RejectNew`
+        // (既定) は通常の保護方針なので opt-in 不要、`EvictOld` のみ要求する。
+        enable_duplicate_login_policy: matches!(
+            config.duplicate_login_policy,
+            DuplicateLoginPolicy::EvictOld
+        ),
         ..FloodgateFeatureIntent::default()
     }
+}
+
+/// 同一プレイヤ名の重複ログインに対する処理ポリシー。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DuplicateLoginPolicy {
+    /// 新接続を `LOGIN:incorrect already_logged_in` で拒否する（既定）。
+    /// 既存セッションを保護する保守的な挙動。
+    #[default]
+    RejectNew,
+    /// 既存セッションを League から logout し、待機プールから slot を除去
+    /// してから新接続の LOGIN を受理する。`AgreeWaiting` 以降の状態（対局
+    /// 進行中のセッション）は evict せず、新接続を拒否する（in-game の対局を
+    /// 中断させない安全側挙動）。
+    EvictOld,
 }
 
 /// 起動前に opt-in ゲートを評価する。
@@ -414,6 +451,16 @@ where
     config: ServerConfig,
     pub(crate) league: Mutex<League>,
     pub(crate) waiting: Mutex<WaitingPool>,
+    /// `EvictOld` で旧 `run_waiter` を即終了させるための cancel notify をプレイヤ
+    /// 名で持つ。LOGIN 成功時に新規 `Arc<Notify>` を挿入し、`EvictOld` 経路で旧
+    /// セッションを追い出すときは旧 `Arc<Notify>` を取り出して `notify_one()` を
+    /// 呼ぶ。`run_waiter` は自分の Notify を `select!` で監視して即抜ける。
+    /// 同一ロック保持中に `league` と本マップを連携して書き換えることで、
+    /// 旧セッションの追い出しと新 LOGIN の着席を 1 つの臨界区にまとめ、
+    /// TOCTOU race と「旧タスクの後始末が新セッションを巻き込んで logout する」
+    /// 競合を閉じる。`workers` ビルドでは tokio 依存を持ち込めないため、
+    /// League 側ではなく TCP frontend 側で保持する。
+    pub(crate) session_cancellers: Mutex<HashMap<PlayerName, Arc<Notify>>>,
     rate_limiter: IpLoginRateLimiter,
     broadcaster: InMemoryBroadcaster,
     pub(crate) rate_storage: R,
@@ -582,7 +629,7 @@ pub(crate) fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> S
 /// `+1` も Drop の対と同じスコープに閉じ込めるため [`Self::acquire`] で
 /// 構築する。accept ループで `+1` してから `spawn_local` するパターンだと、
 /// LocalSet の shutdown race で task が一度も poll されずに drop された場合に
-/// guard が構築されないまま gauge が leak する（PR #490 review 指摘 P1）。
+/// guard が構築されないまま gauge が leak する。
 struct ConnectionActiveGuard;
 
 impl ConnectionActiveGuard {
@@ -695,7 +742,7 @@ where
                         // 累計接続数 counter は accept 即時で +1。同時接続数 gauge
                         // は `ConnectionActiveGuard::acquire` で task 内 +1 / Drop
                         // で -1 をペアにし、spawn 直後に task が poll されずに drop
-                        // された race でも leak しないようにする (PR #490 P1)。
+                        // された race でも leak しないようにする。
                         metrics::counter!(crate::metrics::CONNECTIONS_TOTAL).increment(1);
                         let st = state.clone();
                         tokio::task::spawn_local(
@@ -790,11 +837,71 @@ where
     //    matchmaking に参加しつつ、待機中は `%%` 系コマンドを発行できる
     //    （shogi-server 互換の運用）。観戦専用で接続したいクライアントは
     //    `%%MONITOR2ON` 経路（後続のコミットで追加）を使う。
+    // EvictOld 経路で旧 `run_waiter` を即終了させるための cancel notify。
+    // LOGIN が成功して新セッションを開始するときに `state.session_cancellers`
+    // に挿入し、`run_waiter` 側で `select!` の 1 ブランチとして監視する。
+    let cancel: Arc<Notify> = Arc::new(Notify::new());
+    // 新セッションの世代番号。`run_waiter` 終了時に `logout_if_generation` で
+    // 「自分が現在の登録と一致するか」を確認することで、旧タスクの後始末が新
+    // セッションを誤って logout してしまう race を防ぐ。
+    let session_generation: rshogi_csa_server::matching::league::SessionGeneration;
     {
+        // EvictOld ポリシー: 既存セッションが `Connected` / `GameWaiting` 状態
+        // の場合は旧セッションを追い出して新接続にリプレイスする。
+        // `AgreeWaiting` / `StartWaiting` / `InGame` は対局進行中なので evict せず、
+        // 新接続を `AlreadyLoggedIn` で拒否（対局中断による棋譜破損を防ぐ）。
+        //
+        // ロック順序: `league` → `waiting` → `session_cancellers`。league を保持
+        // した状態で旧セッションの追い出し → 新 LOGIN を 1 つの臨界区にまとめる
+        // ことで、status snapshot と eviction の間に別タスクのペアリングが完了
+        // する TOCTOU race、旧 `run_waiter` の後始末が新セッションを巻き込んで
+        // logout する race、`Connected` 観戦者の旧 `run_waiter` が止まらず
+        // `%%` 系コマンドを処理し続ける問題、をまとめて閉じる。
         let mut league = state.league.lock().await;
+        let evict_kind = match (state.config.duplicate_login_policy, league.status(&handle_player))
+        {
+            (DuplicateLoginPolicy::EvictOld, Some(PlayerStatus::GameWaiting { game_name, .. })) => {
+                EvictKind::WaitingInPool(game_name.clone())
+            }
+            (DuplicateLoginPolicy::EvictOld, Some(PlayerStatus::Connected)) => {
+                EvictKind::ConnectedOnly
+            }
+            _ => EvictKind::None,
+        };
+        if !matches!(evict_kind, EvictKind::None) {
+            // GameWaiting だった場合は `WaitingPool` から先に slot を取り除く。
+            // pool 除去 → league.evict_session → notify_one の順を league ロック
+            // 保持中に直列化することで、別タスクが「pool 除去前に take_complement」
+            // → 「league.evict_session 後に league.confirm_match」のような race
+            // を成立させない。take_complement / confirm_match 経路は league ロック
+            // を取りに来るので、本ブロックを抜けるまで待たされる。
+            if let EvictKind::WaitingInPool(ref old_game_name) = evict_kind {
+                let mut pool = state.waiting.lock().await;
+                pool.remove_by_handle(old_game_name, handle_player.as_str());
+            }
+            let _old_generation = league.evict_session(&handle_player);
+            // 旧 cancel notify を取り出して fire し、旧 `run_waiter` の `select!`
+            // を起こして即終了させる。`run_waiter` は自分の `Notify` 監視と
+            // `logout_if_generation` の組合せで、新セッションを巻き込まずに自身を
+            // 後始末する。
+            let mut cancellers = state.session_cancellers.lock().await;
+            if let Some(old_cancel) = cancellers.remove(&handle_player) {
+                old_cancel.notify_one();
+            }
+            tracing::info!(
+                player = %handle_player.as_str(),
+                kind = ?evict_kind,
+                "evicted old session due to duplicate login (EvictOld policy)"
+            );
+        }
         match league.login(&handle_player, x1) {
-            LoginResult::Ok { .. } => {}
+            LoginResult::Ok { generation, .. } => {
+                session_generation = generation;
+            }
             LoginResult::AlreadyLoggedIn => {
+                // `RejectNew` 経路 (default) で同名セッションが既に居るときに到達。
+                // `EvictOld` 経路は直前で `evict_session` 済みなので AlreadyLoggedIn
+                // にはならない。
                 let _ =
                     transport.send_line(&CsaLine::new("LOGIN:incorrect already_logged_in")).await;
                 return Ok(());
@@ -813,6 +920,10 @@ where
                 },
             )
             .map_err(ServerError::State)?;
+        // 新セッションの cancel notify を登録する。league ロックを保持したまま
+        // 行うことで「LOGIN 完了 ↔ cancellers に登録」の原子性を保つ。
+        let mut cancellers = state.session_cancellers.lock().await;
+        cancellers.insert(handle_player.clone(), cancel.clone());
     }
 
     // 6. 待機プールで相補手番の相手を探す。
@@ -826,8 +937,7 @@ where
     } {
         // buoy を予約する前に相手 waiter の健在と transport handoff を確定する。
         // 先に予約してしまうと、相手が直前に切断していた場合に buoy 残数が
-        // 消費されたまま復元されない問題があった (codex cloud P1 /
-        // codex CLI round 3 P2)。
+        // 消費されたまま復元されない。
         let (resp_tx, resp_rx) = oneshot::channel::<TcpTransport>();
         let (done_tx, done_rx) = oneshot::channel::<()>();
         let req = MatchRequest {
@@ -859,10 +969,28 @@ where
                         let mut opp_transport = opp_transport;
                         let _ = opp_transport.send_line(&err_line).await;
                         let _ = done_tx.send(());
-                        // 両者の League エントリを片付ける。
+                        // 両者の League エントリと `session_cancellers` を片付ける。
+                        // `league` ロックを保持したまま `cancellers.lock()` を取りに
+                        // 行き、「相手の logout 後に同名で新 LOGIN が成立して
+                        // cancellers に新トークンを挿入する」 → 「直後の
+                        // `cancellers.remove(opp)` が新トークンを誤削除する」race を
+                        // 閉じる。ロック順序は LOGIN handler ・ drive_game epilogue と
+                        // 同じ `league → cancellers`。
+                        // 自分は世代一致での logout、相手は plain logout（相手の世代は
+                        // 本ハンドラからは知れない／相手の `run_waiter` は
+                        // `WaiterOutcome::Completed` で logout しないため、ここで一括
+                        // して片付ける）。
+                        let opp_player = PlayerName::new(opp_handle.as_str());
                         let mut league = state.league.lock().await;
-                        league.logout(&handle_player);
-                        league.logout(&PlayerName::new(opp_handle.as_str()));
+                        league.logout_if_generation(&handle_player, session_generation);
+                        league.logout(&opp_player);
+                        let mut cancellers = state.session_cancellers.lock().await;
+                        if let Some(cur) = cancellers.get(&handle_player)
+                            && Arc::ptr_eq(cur, &cancel)
+                        {
+                            cancellers.remove(&handle_player);
+                        }
+                        cancellers.remove(&opp_player);
                         return Ok(());
                     }
                 };
@@ -886,7 +1014,18 @@ where
     }
 
     // waiter 側パス: transport を保持したまま、マッチ確定 or 切断 を監視する。
-    run_waiter(state.clone(), transport, handle, color, game_name, handle_player, x1).await
+    run_waiter(
+        state.clone(),
+        transport,
+        handle,
+        color,
+        game_name,
+        handle_player,
+        x1,
+        cancel,
+        session_generation,
+    )
+    .await
 }
 
 /// waiter として待機プールに入り、マッチ確定 / 切断 / `%%` 系情報コマンドを監視する。
@@ -905,6 +1044,8 @@ async fn run_waiter<R, K, P>(
     game_name: GameName,
     handle_player: PlayerName,
     x1: bool,
+    cancel: Arc<Notify>,
+    session_generation: rshogi_csa_server::matching::league::SessionGeneration,
 ) -> Result<(), ServerError>
 where
     R: RateStorage + 'static,
@@ -931,13 +1072,13 @@ where
     //
     // キュー容量は `crate::broadcaster::SUBSCRIBER_CHANNEL_CAPACITY`。slow
     // consumer がキューを溜め込んだ時点で broadcaster 側が prune するため、
-    // 無制限 memory 溜め込み経路 (Codex review PR #469 P2) を遮断する。
+    // 無制限 memory 溜め込み経路を遮断する。
     let mut monitor_rx: Option<(GameId, tokio::sync::mpsc::Receiver<CsaLine>)> = None;
 
     // `%%MONITOR2ON` が成立したら観戦者扱いとなるため、waiting pool から除外する
-    // 必要がある (Codex review PR #469 P1: 観戦者が同一 game_name + 相補色で
-    // 後続 LOGIN とマッチさせられる経路を塞ぐ)。`pool.remove_by_handle` は
-    // 冪等 (未登録なら何もしない) なので、複数回呼んでも害が無い。
+    // 必要がある（観戦者が同一 game_name + 相補色で後続 LOGIN とマッチさせられる
+    // 経路を塞ぐ）。`pool.remove_by_handle` は冪等（未登録なら何もしない）なので、
+    // 複数回呼んでも害が無い。
     let mut observer_mode = false;
 
     // マッチ確定 / 受信 / 観戦 broadcast 中継 の 3 経路を監視する。x1 waiter のみ
@@ -966,6 +1107,24 @@ where
                     state.broadcaster.prune_closed(&RoomId::new(room.as_str())).await;
                 }
                 break 'outer WaiterOutcome::DisconnectedFromPool;
+            }
+            // EvictOld ポリシーで新 LOGIN が同名で来たときに、新 LOGIN ハンドラが
+            // 旧セッションの `Arc<Notify>` を `notify_one()` する。observer も
+            // GameWaiting waiter も等しくここで起きて即終了させ、旧 TCP 接続を
+            // 開放する。pool 除去・League logout は新 LOGIN 側が既に League ロック
+            // 保持中に済ませているので、ここでの後始末は notify による
+            // `Notification` をいったん受け取りつつ、`monitor_rx` の broadcast
+            // 接続だけ自分で prune する。
+            _ = cancel.notified() => {
+                if let Some((room, _)) = monitor_rx.take() {
+                    state.broadcaster.prune_closed(&RoomId::new(room.as_str())).await;
+                }
+                let _ = transport
+                    .send_line(&CsaLine::new(
+                        "##[NOTICE] session evicted by duplicate login",
+                    ))
+                    .await;
+                break 'outer WaiterOutcome::EvictedByDuplicateLogin;
             }
             // observer_mode 時は `match_req_rx` の Err は自分が pool から自主的に
             // 外れたことが原因。`recv_line` / `forwarded` ブランチを使い続けられるよう、
@@ -1036,8 +1195,7 @@ where
                 // ことで tx が `is_closed` になるが、`broadcaster.inner` の entry
                 // は次の broadcast / subscribe / clear_room まで掃除されない。
                 // broadcast が発生しない idle room で再接続を繰り返されると
-                // dead sender が蓄積するため、切断時にも明示的に prune する
-                // (Codex review PR #469 3rd round P2)。
+                // dead sender が蓄積するため、切断時にも明示的に prune する。
                 let mut pool = state.waiting.lock().await;
                 let _removed = pool.remove_by_handle(&game_name, &handle);
                 drop(pool);
@@ -1106,8 +1264,7 @@ where
                     // から自分を除外する必要がある。そうしないと drive 側の
                     // `take_complement` と subscribe() の await の間にレースが発生し、
                     // drive が slot を掴んだ後で我々が observer_mode に入ると
-                    // match_request が監視外に流れて相手が永久 hang する
-                    // (Codex review PR #469 P1)。
+                    // match_request が監視外に流れて相手が永久 hang する。
                     //
                     // 競合の結果は pool の Mutex で直列化されるので、`remove_by_handle`
                     // の戻り値で「先に drive が slot を掴んだか」を確実に判別できる:
@@ -1134,8 +1291,7 @@ where
                         drop(league);
                         observer_mode = true;
                         // subscriber 登録。subscribe は内部で dead entry を prune する
-                        // ため、切替や MONITOR2OFF の蓄積は O(生存購読者数) に抑えられる
-                        // (Codex review PR #469 P2)。
+                        // ため、切替や MONITOR2OFF の蓄積は O(生存購読者数) に抑えられる。
                         let (tx, rx) = tokio::sync::mpsc::channel(
                             crate::broadcaster::SUBSCRIBER_CHANNEL_CAPACITY,
                         );
@@ -1148,7 +1304,7 @@ where
                         // 可能性がある。その場合は broadcaster に stale room が残り、
                         // 観戦者は二度と broadcast を受け取れない。subscribe 後に
                         // もう一度存在確認し、消えていれば rx を drop + prune して
-                        // NOT_FOUND を返す (Codex review PR #469 3rd round P2)。
+                        // NOT_FOUND を返す。
                         let still_exists = subscribe_still_registered(&state, &game_id).await;
                         if !still_exists {
                             drop(rx);
@@ -1157,7 +1313,7 @@ where
                             // 遷移した + observer_mode を立てた 3 点を元に戻す。
                             // 新しい oneshot ペアを作って slot を再登録し、次の
                             // tokio::select! で match_req_rx を再び監視できる状態に
-                            // 戻す (Codex review PR #469 4th round P2)。
+                            // 戻す。
                             let (new_tx, new_rx) = oneshot::channel::<MatchRequest>();
                             {
                                 let mut pool = state.waiting.lock().await;
@@ -1234,7 +1390,7 @@ where
                     monitor_rx = None;
                     // 旧 rx が drop された時点で tx は is_closed になる。broadcast
                     // が起きない idle room でも tx が貯まらないよう、ここで明示的に
-                    // prune する (Codex review PR #469 P2)。
+                    // prune する。
                     state.broadcaster.prune_closed(&RoomId::new(game_id.as_str())).await;
                 }
                 Some(vec![
@@ -1441,11 +1597,30 @@ where
     // 共通後処理: League から除去する。drive 側が端末処理する経路を除く。
     match waiter_outcome {
         WaiterOutcome::Completed => {
-            // drive 側で end_game + logout 済み。何もしない。
+            // drive 側で end_game + logout 済み。
         }
         WaiterOutcome::Aborted | WaiterOutcome::DisconnectedFromPool => {
+            // 自分の世代のセッションが League にまだ居れば logout する。EvictOld
+            // で旧セッション扱いになっていた場合は世代が一致しないので no-op に
+            // なり、新 LOGIN 側が新たに着席した entry を巻き込まない。
             let mut league = state.league.lock().await;
-            league.logout(&handle_player);
+            league.logout_if_generation(&handle_player, session_generation);
+        }
+        WaiterOutcome::EvictedByDuplicateLogin => {
+            // 新 LOGIN 側が League の evict_session と pool 除去・cancellers 入替を
+            // 全て完了済。本タスクは transport を閉じて終わる以外にやることが無い。
+        }
+    }
+    // EvictedByDuplicateLogin 以外は、自分の cancel notify がまだ
+    // `session_cancellers` に残っていれば取り下げる。新 LOGIN が既に置換済の場合
+    // `Arc::ptr_eq` 不一致で no-op。EvictedByDuplicateLogin の場合は新 LOGIN が
+    // 既に新トークンを挿入済なので何もしない。
+    if !matches!(waiter_outcome, WaiterOutcome::EvictedByDuplicateLogin) {
+        let mut cancellers = state.session_cancellers.lock().await;
+        if let Some(cur) = cancellers.get(&handle_player)
+            && Arc::ptr_eq(cur, &cancel)
+        {
+            cancellers.remove(&handle_player);
         }
     }
     state.active_games.notify_waiters();
@@ -1460,6 +1635,25 @@ enum WaiterOutcome {
     Aborted,
     /// 対局前に切断を検知した（pool + league から除去する）。
     DisconnectedFromPool,
+    /// `EvictOld` ポリシーで新 LOGIN により旧セッションとして cancel された。
+    /// 後始末は新 LOGIN 側が既に完了しているので、本タスクからの League logout
+    /// は `logout_if_generation` で no-op となる（`Arc<Notify>` cancel は
+    /// 新 LOGIN 側が `pool.remove_by_handle` も済ませている前提）。
+    EvictedByDuplicateLogin,
+}
+
+/// `EvictOld` ポリシーで旧セッションを追い出す際の状態分類。
+#[derive(Debug)]
+enum EvictKind {
+    /// EvictOld 対象なし（`RejectNew` ポリシー or 旧セッションが
+    /// `AgreeWaiting` 以降の対局進行中状態）。
+    None,
+    /// 旧セッションが `Connected` 状態（観戦者 / `%%MONITOR2ON` 後）。pool には
+    /// 居ないので pool 除去は不要。
+    ConnectedOnly,
+    /// 旧セッションが `GameWaiting` 状態。`WaitingPool` から slot を取り除く必要が
+    /// ある。
+    WaitingInPool(GameName),
 }
 
 /// buoy 解決結果。通常対局 / buoy 起点 / 枯渇の 3 分岐を区別する。
@@ -1495,7 +1689,7 @@ enum ForkOutcome {
 /// `subscribe` の前後は drive 側の `unregister + clear_room` に対して非原子的で、
 /// subscribe 完了時点でゲームが既に終局している可能性がある。その場合 stale
 /// なエントリを broadcaster に残さないよう、呼び出し側で drop + prune して
-/// NOT_FOUND を返す (Codex review PR #469 3rd round P2)。
+/// NOT_FOUND を返す。
 async fn subscribe_still_registered<R, K, P>(state: &SharedState<R, K, P>, game_id: &GameId) -> bool
 where
     R: RateStorage + 'static,
@@ -1525,6 +1719,12 @@ where
         .await
         .map_err(ServerError::Storage)?
     else {
+        // buoy 未設定。駒落ちマッピングに該当エントリがあれば優先し、無ければ
+        // global 既定値（通常 `None` = 平手）に落ちる。駒落ちは buoy のように
+        // 残数を消費しない常設の `game_name` → SFEN 静的マッピング。
+        if let Some(handicap_sfen) = state.config.handicap_initial_sfens.get(game_name.as_str()) {
+            return Ok(MatchInitialPosition::Default(Some(handicap_sfen.clone())));
+        }
         return Ok(MatchInitialPosition::Default(state.config.initial_sfen.clone()));
     };
     if buoy.remaining == 0 {
@@ -1537,8 +1737,7 @@ where
             Err(e) => {
                 // legacy buoy (initial_sfen 無し、moves からの導出) で moves が
                 // 不正な場合、`reserve_for_match` で既に消費した 1 回分を
-                // 巻き戻す。そうしないと不正 buoy が静かに burn し続ける
-                // (Copilot レビュー指摘)。
+                // 巻き戻す。そうしないと不正 buoy が静かに burn し続ける。
                 if let Err(rollback_err) = state.buoy_storage.release_reservation(game_name).await {
                     tracing::error!(
                         %game_name,
@@ -1708,12 +1907,19 @@ where
     )
     .await;
 
-    // 後始末は inner の結果に関係なく必ず走る。
+    // 後始末は inner の結果に関係なく必ず走る。`league` ロックを保持したまま
+    // `session_cancellers` まで取りに行くことで、「end_game + logout で League が
+    // 空く」 → 「同名で新規 LOGIN が成功して cancellers に新 Arc を挿入」 →
+    // 「本ブロックの `cancellers.remove` が新トークンを誤って消す」という race を
+    // 閉じる。ロック順序は LOGIN handler と一致する `league → cancellers`。
     {
         let mut league = state.league.lock().await;
         let _ = league.end_game(&matched);
         league.logout(&matched.black);
         league.logout(&matched.white);
+        let mut cancellers = state.session_cancellers.lock().await;
+        cancellers.remove(&matched.black);
+        cancellers.remove(&matched.white);
     }
     {
         let mut games = state.games.lock().await;
@@ -2367,6 +2573,7 @@ where
         config,
         league: Mutex::new(League::new()),
         waiting: Mutex::new(WaitingPool::default()),
+        session_cancellers: Mutex::new(HashMap::new()),
         rate_limiter,
         broadcaster,
         rate_storage,

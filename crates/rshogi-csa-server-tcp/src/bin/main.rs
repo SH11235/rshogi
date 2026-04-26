@@ -25,8 +25,8 @@ use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
 use rshogi_csa_server_tcp::server::{
-    InMemoryPasswordStore, PasswordStore, ServerConfig, SharedState, build_state, prepare_runtime,
-    run_server,
+    DuplicateLoginPolicy, InMemoryPasswordStore, PasswordStore, ServerConfig, SharedState,
+    build_state, prepare_runtime, run_server,
 };
 use tokio::sync::Mutex;
 
@@ -68,6 +68,15 @@ struct Cli {
     /// opt-in が必須。
     #[arg(long, value_name = "PATH")]
     floodgate_history_jsonl: Option<PathBuf>,
+    /// 駒落ち初期局面 TOML パス。`[[handicap]]` 配列で `game_name` と `sfen`
+    /// を複数指定できる。指定すると当該 `game_name` の対局が SFEN 開始になる。
+    #[arg(long, value_name = "PATH")]
+    handicap_toml: Option<PathBuf>,
+    /// 同名ログイン重複時に旧セッションを evict する（既定は新接続を拒否）。
+    /// `--allow-floodgate-features` opt-in が必須。`AgreeWaiting` 以降の
+    /// 対局進行中セッションは evict されず新接続を拒否する。
+    #[arg(long)]
+    duplicate_login_evict_old: bool,
     /// 秒読み方式 / Fischer 方式で使う持ち時間 (秒)。
     #[arg(long, default_value_t = 600)]
     total_time_sec: u32,
@@ -94,8 +103,8 @@ struct Cli {
     agree_timeout_sec: u64,
     /// `%%SETBUOY` / `%%DELETEBUOY` を許可する admin ハンドル。複数指定可 (例:
     /// `--admin-handle alice --admin-handle bob`)。空の場合はブイ登録コマンドを
-    /// 全リクエストで `PERMISSION_DENIED` で拒否する (Codex review PR #470 3rd
-    /// round P2)。`%%GETBUOYCOUNT` は参照系なので権限不要で全ユーザー可。
+    /// 全リクエストで `PERMISSION_DENIED` で拒否する。`%%GETBUOYCOUNT` は参照系
+    /// なので権限不要で全ユーザー可。
     #[arg(long = "admin-handle", value_name = "HANDLE")]
     admin_handle: Vec<String>,
     /// Floodgate 運用機能の opt-in フラグ。Floodgate 系機能を本バイナリで
@@ -201,6 +210,14 @@ fn main() -> anyhow::Result<()> {
         Vec::new()
     };
 
+    // 駒落ち初期局面 TOML を読み込む（指定時のみ）。
+    let handicap_map: HashMap<String, String> = if let Some(path) = cli.handicap_toml.as_ref() {
+        load_handicap_toml(path)
+            .with_context(|| format!("failed to load handicap TOML at {path:?}"))?
+    } else {
+        HashMap::new()
+    };
+
     // 2. ServerConfig を構築。
     let config = ServerConfig {
         bind_addr,
@@ -226,6 +243,12 @@ fn main() -> anyhow::Result<()> {
         players_yaml_path: cli.players_yaml.clone(),
         floodgate_schedules,
         floodgate_history_path: cli.floodgate_history_jsonl.clone(),
+        handicap_initial_sfens: handicap_map,
+        duplicate_login_policy: if cli.duplicate_login_evict_old {
+            DuplicateLoginPolicy::EvictOld
+        } else {
+            DuplicateLoginPolicy::RejectNew
+        },
         shutdown_grace: std::time::Duration::from_secs(cli.shutdown_grace_sec),
     };
     // Floodgate 系機能の opt-in ゲートを起動前に評価する。`players_yaml_path` が
@@ -490,6 +513,58 @@ fn load_players_toml(
     Ok((password_map, rate_map))
 }
 
+/// 駒落ち初期局面 TOML を読む。
+///
+/// 期待する形式（例は飛車落ち、上手 = 後手番が指し始める伝統に従い `w`）:
+/// ```toml
+/// [[handicap]]
+/// game_name = "floodgate-handicap-hisya"
+/// sfen = "lnsgkgsnl/7b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1"
+/// ```
+///
+/// 各エントリの `sfen` は SFEN として最低限の形を満たす必要がある（盤面 / 手番 /
+/// 持駒 / 手数 の 4 フィールド、手番は `b` か `w`）。下流の `MatchInitialPosition`
+/// 経路は SFEN を信頼してパースするため、起動時点で fail-fast させて運用ミスを
+/// 早期に検出する。
+fn load_handicap_toml(path: &std::path::Path) -> anyhow::Result<HashMap<String, String>> {
+    use serde::Deserialize;
+    #[derive(Debug, Deserialize)]
+    struct Entry {
+        game_name: String,
+        sfen: String,
+    }
+    #[derive(Debug, Deserialize)]
+    struct Root {
+        #[serde(default)]
+        handicap: Vec<Entry>,
+    }
+    let raw = std::fs::read_to_string(path)?;
+    let root: Root = toml::from_str(&raw)?;
+    let mut out = HashMap::with_capacity(root.handicap.len());
+    for e in root.handicap {
+        validate_handicap_sfen(&e.game_name, &e.sfen)?;
+        out.insert(e.game_name, e.sfen);
+    }
+    Ok(out)
+}
+
+/// SFEN 文字列の最低限の形を検証する。盤面パース全体は下流に任せ、ここでは
+/// 「フィールド数」「手番文字」だけを確認して typo / 切り詰め行を弾く。
+fn validate_handicap_sfen(game_name: &str, sfen: &str) -> anyhow::Result<()> {
+    let fields: Vec<&str> = sfen.split_whitespace().collect();
+    anyhow::ensure!(
+        fields.len() >= 4,
+        "handicap SFEN for '{game_name}' must have at least 4 whitespace-separated fields (board / side / hand / move-number), got {} field(s): {sfen:?}",
+        fields.len()
+    );
+    let side = fields[1];
+    anyhow::ensure!(
+        side == "b" || side == "w",
+        "handicap SFEN for '{game_name}' has invalid side-to-move {side:?}, expected \"b\" or \"w\""
+    );
+    Ok(())
+}
+
 /// Floodgate スケジュール TOML を読む。
 ///
 /// 期待する形式:
@@ -571,5 +646,43 @@ mod tests {
             ALLOW_FLOODGATE_FEATURES_FLAG,
             "ALLOW_FLOODGATE_FEATURES_FLAG must stay in sync with clap-generated flag",
         );
+    }
+
+    /// `validate_handicap_sfen` がフィールド数不足を弾く契約。
+    #[test]
+    fn validate_handicap_sfen_rejects_too_few_fields() {
+        let err = validate_handicap_sfen("g", "lnsgkgsnl/9 b").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("4"), "error must mention required field count: {msg}");
+        assert!(msg.contains("g"), "error must mention game_name: {msg}");
+    }
+
+    /// `validate_handicap_sfen` が手番文字を b/w 限定する契約。
+    #[test]
+    fn validate_handicap_sfen_rejects_unknown_side_to_move() {
+        let err = validate_handicap_sfen(
+            "g",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL x - 1",
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("side-to-move"), "error must mention side-to-move: {msg}");
+    }
+
+    /// `validate_handicap_sfen` が標準的な平手 / 駒落ち SFEN を受理する契約。
+    #[test]
+    fn validate_handicap_sfen_accepts_standard_and_handicap() {
+        // 平手 (`b` 始まり)
+        validate_handicap_sfen(
+            "hirate",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+        )
+        .unwrap();
+        // 飛車落ち (`w` 始まり)
+        validate_handicap_sfen(
+            "hisya",
+            "lnsgkgsnl/7b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1",
+        )
+        .unwrap();
     }
 }

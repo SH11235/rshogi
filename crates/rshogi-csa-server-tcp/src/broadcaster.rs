@@ -9,12 +9,11 @@
 //! 実際の送信は受信側タスクが担う（I/O をロック内で行わないようにするため）。
 //!
 //! # Bounded channel
-//! 旧実装は `UnboundedSender` を採用していたが、Codex review (PR #469 P2) で
-//! 指摘のとおり slow-but-not-dead な observer が無制限にキューを溜め込む
-//! メモリ肥大経路になり得る。`%%CHAT` はユーザー駆動で rate-limit が無く、
-//! 1 観戦者あたりの buffer を緩和しないと DoS リスクになる。本版では容量
-//! [`SUBSCRIBER_CHANNEL_CAPACITY`] の bounded channel を使い、`try_send` が
-//! 失敗した subscriber は「配信不能」とみなして broadcaster 側の retain で
+//! `UnboundedSender` を使うと slow-but-not-dead な observer が無制限にキューを
+//! 溜め込むメモリ肥大経路になり得る。`%%CHAT` はユーザー駆動で rate-limit が
+//! 無く、1 観戦者あたりの buffer を緩和しないと DoS リスクになる。本版では
+//! 容量 [`SUBSCRIBER_CHANNEL_CAPACITY`] の bounded channel を使い、`try_send`
+//! が失敗した subscriber は「配信不能」とみなして broadcaster 側の retain で
 //! 即 prune する (disconnect と同等の扱い)。これによりプロセス全体の
 //! buffer 上限が `room 数 × subscriber 数 × capacity × 1 行最大サイズ` に収まる。
 
@@ -68,9 +67,9 @@ impl InMemoryBroadcaster {
     ///
     /// 登録の前に既存 subscriber の中で `tx.is_closed()` が true (= receiver が
     /// drop 済み) のものを retain で prune する。`%%MONITOR2OFF` や購読先切替で
-    /// 行き場の無くなった Sender が `clear_room` まで残らないようにするため
-    /// (Codex review PR #469 P2)。broadcast が発生しない idle な room でも
-    /// 登録時に毎回掃除されるので、dead entry の蓄積は O(同時購読者数) に抑えられる。
+    /// 行き場の無くなった Sender が `clear_room` まで残らないようにするため。
+    /// broadcast が発生しない idle な room でも登録時に毎回掃除されるので、
+    /// dead entry の蓄積は O(同時購読者数) に抑えられる。
     pub async fn subscribe(&self, room_id: RoomId, subscriber: Subscriber) {
         let mut guard = self.inner.lock().await;
         let entry = guard.entry(room_id).or_default();
@@ -178,10 +177,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn broadcast_tag_prunes_full_subscribers() {
-        // Codex review (PR #469 P2) の回帰: slow consumer がキューをあふれさせた
-        // subscriber は try_send が WouldBlock で失敗し、即 prune されることを
-        // 確認する。bounded channel の capacity を 1 にして、1 通目までは受理、
-        // 2 通目で overflow → prune。
+        // slow consumer がキューをあふれさせた subscriber は try_send が WouldBlock
+        // で失敗し、即 prune されることを確認する。bounded channel の capacity を 1
+        // にして、1 通目までは受理、2 通目で overflow → prune。
         let bcast = InMemoryBroadcaster::new();
         let (tx, _keep_rx) = channel::<CsaLine>(1);
         bcast.subscribe(RoomId::new("g1"), Subscriber::new(tx)).await;
@@ -223,10 +221,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn subscribe_prunes_closed_subscribers_before_inserting() {
-        // Codex review (PR #469 再 review P2) の回帰: 観戦者が MONITOR2OFF / 切替で
-        // rx を drop しても、broadcast が発火するまで死んだ Sender が残る。subscribe
-        // が次の購読登録の直前に dead entry を prune することで、反復トグルによる
-        // 蓄積を O(同時生存購読者数) に抑える。
+        // 観戦者が MONITOR2OFF / 切替で rx を drop しても、broadcast が発火するまで
+        // 死んだ Sender が残る。subscribe が次の購読登録の直前に dead entry を
+        // prune することで、反復トグルによる蓄積を O(同時生存購読者数) に抑える。
         let bcast = InMemoryBroadcaster::new();
         let (tx1, rx1) = channel::<CsaLine>(SUBSCRIBER_CHANNEL_CAPACITY);
         bcast.subscribe(RoomId::new("g1"), Subscriber::new(tx1)).await;

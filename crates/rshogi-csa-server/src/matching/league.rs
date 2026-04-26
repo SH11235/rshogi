@@ -9,6 +9,21 @@ use std::collections::HashMap;
 use crate::error::StateError;
 use crate::types::{Color, GameId, GameName, PlayerName};
 
+/// 1 セッションを一意に識別する世代カウンタ。
+///
+/// LOGIN ごとに単調増加する番号を発行し、「League の現在の登録は自分のセッションか」
+/// を判定するために使う。同名の旧セッションを `EvictOld` で追い出す際は、新 LOGIN
+/// で世代が更新されるため、旧タスクは [`League::logout_if_generation`] で
+/// 「自分の世代が現在のものと一致するか」を確認してから logout を実行する。
+/// これにより、旧タスクの終了処理が後から走って新セッションを誤って logout して
+/// しまう race を防ぐ。
+///
+/// 別途、旧 `run_waiter` の `select!` を起こして即終了させるための cancel 信号は、
+/// TCP frontend 側で `Arc<tokio::sync::Notify>` をプレイヤ名で持つ別マップで管理する
+/// （workers ビルド (tokio 非依存) でも League がコンパイルできるよう、League 自身は
+/// 同期プリミティブを持たない設計）。
+pub type SessionGeneration = u64;
+
 /// プレイヤ状態機械の 6 状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerStatus {
@@ -79,6 +94,9 @@ pub enum LoginResult {
     Ok {
         /// x1 拡張モードで受け付けたかどうか。
         x1: bool,
+        /// この LOGIN で発行されたセッション世代。`run_waiter` / `drive_game` に
+        /// 渡して [`League::logout_if_generation`] と組み合わせて使う。
+        generation: SessionGeneration,
     },
     /// 認証失敗（不正なパスワード／未登録プレイヤ）。
     Incorrect,
@@ -99,6 +117,11 @@ pub enum LoginResult {
 struct PlayerRecord {
     status: PlayerStatus,
     x1: bool,
+    /// 現在のセッションを識別する世代番号。LOGIN ごとに発行され、旧タスクが
+    /// `Arc<tokio::sync::Notify>` 等で起こされて後片付けに入ったときに、自分の
+    /// 世代と League の最新世代を比較する。同名で再 LOGIN 済みのときは世代が
+    /// 一致しないため、旧タスクの logout が新セッションを巻き込まない。
+    generation: SessionGeneration,
 }
 
 /// ログイン中のプレイヤと状態を保持する League。
@@ -109,6 +132,9 @@ struct PlayerRecord {
 #[derive(Debug, Default)]
 pub struct League {
     players: HashMap<PlayerName, PlayerRecord>,
+    /// 次に発行する session generation。LOGIN / evict 時に単調増加する。
+    /// 0 はサーバ起動直後の初期値で「まだ何も発行していない」状態。
+    next_generation: SessionGeneration,
 }
 
 impl League {
@@ -126,14 +152,47 @@ impl League {
         if self.players.contains_key(name) {
             return LoginResult::AlreadyLoggedIn;
         }
+        let generation = self.next_generation;
+        self.next_generation += 1;
         self.players.insert(
             name.clone(),
             PlayerRecord {
                 status: PlayerStatus::Connected,
                 x1,
+                generation,
             },
         );
-        LoginResult::Ok { x1 }
+        LoginResult::Ok { x1, generation }
+    }
+
+    /// 現在の同名セッションを追い出して、旧セッションの世代番号を返す。
+    ///
+    /// `EvictOld` ポリシーで使う原子的な追い出し API。`League` のロックを保持した
+    /// 状態で「追い出し → 新 LOGIN」を 1 つの臨界区にまとめるために使う。返値の
+    /// 世代は呼び出し側で「旧 cancel notify を引くキー」として参照できる。
+    /// 既存セッションが無ければ `None`。
+    pub fn evict_session(&mut self, name: &PlayerName) -> Option<SessionGeneration> {
+        self.players.remove(name).map(|r| r.generation)
+    }
+
+    /// 指定世代のセッションが現在の登録と一致するときだけ logout する。
+    ///
+    /// 旧 `run_waiter` が `WaiterOutcome::Aborted` 等の終了経路で後始末を走らせた
+    /// ときに、既に新 LOGIN が同名で着席している場合に新セッションまで巻き込んで
+    /// logout してしまう競合を防ぐ。世代が一致して logout した場合に `true`、
+    /// それ以外（別世代に置換済 or 未ログイン）は `false` を返す。
+    pub fn logout_if_generation(
+        &mut self,
+        name: &PlayerName,
+        generation: SessionGeneration,
+    ) -> bool {
+        match self.players.get(name) {
+            Some(rec) if rec.generation == generation => {
+                self.players.remove(name);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// 指定プレイヤが x1 拡張モードで LOGIN しているかを返す。
@@ -358,9 +417,67 @@ mod tests {
     #[test]
     fn login_and_duplicate() {
         let mut l = League::new();
-        assert_eq!(l.login(&name("alice"), false), LoginResult::Ok { x1: false });
+        assert!(matches!(l.login(&name("alice"), false), LoginResult::Ok { x1: false, .. }));
         assert_eq!(l.login(&name("alice"), false), LoginResult::AlreadyLoggedIn);
-        assert_eq!(l.login(&name("bob"), true), LoginResult::Ok { x1: true });
+        assert!(matches!(l.login(&name("bob"), true), LoginResult::Ok { x1: true, .. }));
+    }
+
+    #[test]
+    fn login_issues_monotonically_increasing_generations() {
+        // EvictOld の世代比較が成立する前提として、世代は LOGIN ごとに単調増加する。
+        let mut l = League::new();
+        let LoginResult::Ok { generation: g0, .. } = l.login(&name("alice"), false) else {
+            panic!("login must succeed");
+        };
+        l.evict_session(&name("alice"));
+        let LoginResult::Ok { generation: g1, .. } = l.login(&name("alice"), false) else {
+            panic!("re-login must succeed");
+        };
+        assert!(g1 > g0, "generation must increase after evict + re-login");
+    }
+
+    #[test]
+    fn evict_session_returns_old_generation_and_clears_entry() {
+        let mut l = League::new();
+        let LoginResult::Ok {
+            generation: old, ..
+        } = l.login(&name("alice"), false)
+        else {
+            panic!("login must succeed");
+        };
+        let returned = l.evict_session(&name("alice")).expect("must return old generation");
+        assert_eq!(old, returned);
+        assert!(l.status(&name("alice")).is_none());
+        // 未ログインプレイヤを evict しても None。
+        assert!(l.evict_session(&name("ghost")).is_none());
+    }
+
+    #[test]
+    fn logout_if_generation_protects_new_session_after_evict() {
+        // 旧 run_waiter が終了経路で logout を走らせたときに、既に新 LOGIN が
+        // 同名で着席していれば新セッションを巻き込まずに no-op になることを固定する。
+        let mut l = League::new();
+        let LoginResult::Ok {
+            generation: old, ..
+        } = l.login(&name("alice"), false)
+        else {
+            panic!("login must succeed");
+        };
+        l.evict_session(&name("alice"));
+        let LoginResult::Ok {
+            generation: new_, ..
+        } = l.login(&name("alice"), false)
+        else {
+            panic!("re-login must succeed");
+        };
+        // 旧世代での logout は no-op。新セッションは残る。
+        assert!(!l.logout_if_generation(&name("alice"), old));
+        assert!(l.status(&name("alice")).is_some());
+        // 新世代なら logout 成立。
+        assert!(l.logout_if_generation(&name("alice"), new_));
+        assert!(l.status(&name("alice")).is_none());
+        // 未ログイン状態への呼び出しも no-op。
+        assert!(!l.logout_if_generation(&name("alice"), new_));
     }
 
     #[test]

@@ -1004,10 +1004,10 @@ fn monitor2_subscribes_and_receives_moves_and_chat() {
 
 #[test]
 fn monitor2_removes_subscriber_from_matchmaking_pool() {
-    // Codex review (PR #469 P1) の回帰: x1 waiter は LOGIN で一旦 WaitingPool に
-    // 入るが、`%%MONITOR2ON` が成立した時点で観戦者扱いになるため pool から
-    // 除外しなければならない。除外しないと、同一 game_name + 相補色で後続
-    // プレイヤが LOGIN したとき観戦者が対局者として選ばれてしまう。
+    // x1 waiter は LOGIN で一旦 WaitingPool に入るが、`%%MONITOR2ON` が成立
+    // した時点で観戦者扱いになるため pool から除外しなければならない。
+    // 除外しないと、同一 game_name + 相補色で後続プレイヤが LOGIN したとき
+    // 観戦者が対局者として選ばれてしまう。
     //
     // このテストでは alice/bob 対局進行中に carol が同じ `g1`+`black` で x1
     // LOGIN (alice と同色 = bob と相補)。`%%MONITOR2ON` で observer 化した後、
@@ -1339,8 +1339,8 @@ fn monitor2_on_unknown_game_returns_not_found() {
 fn fork_gracefully_errors_and_keeps_connection_alive() {
     // 元棋譜が存在しない場合・nth_move が範囲外の場合の `%%FORK` で接続が
     // 切れずに `##[FORK] NOT_FOUND` / `##[FORK] ERROR ...` + `END` を返すこと
-    // を検証する (codex レビュー PR #474 P2)。検証後に `%%GETBUOYCOUNT` が
-    // 通ることで、waiter ループが健在であることを確認する。
+    // を検証する。検証後に `%%GETBUOYCOUNT` が通ることで、waiter ループが
+    // 健在であることを確認する。
     run_local(|| async {
         let (addr, topdir) =
             spawn_server_with_admin("fork_graceful_error", vec!["admin".to_owned()]).await;
