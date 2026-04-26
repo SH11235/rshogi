@@ -183,12 +183,12 @@ pub struct ServerConfig {
     /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
     /// を落とさない」ためのバッファで、既定 60 秒。
     pub shutdown_grace: Duration,
-    /// 対局中に対局者の接続が切れた際、即時 `#ABNORMAL` 終局せず再接続を待つ
+    /// 対局中に対局者の接続が切れた際、即時 `#ABNORMAL` 終局させず再接続を待つ
     /// 猶予時間。`Duration::ZERO` のとき、接続喪失で即時に異常終了させる
-    /// （Phase 1-4 互換、Requirement 2.5 の Phase 1-3 既定）。Phase 5 で再接続
-    /// プロトコルを有効化する場合は運用側で 60 秒程度を設定する。猶予中は
-    /// `SharedState::reconnect_pending` に対局状態を保持し、Game_Summary 末尾
-    /// 拡張行で配布した `reconnect_token` の照合で再参加を許可する。
+    /// （再接続プロトコルを有効化していない構成での保守的な既定）。`> 0` を
+    /// 指定した場合は猶予中 `SharedState::reconnect_pending` に対局状態を保持し、
+    /// Game_Summary 末尾拡張行で配布した `reconnect_token` の照合で再参加を許可
+    /// する。運用上の推奨は 60 秒。
     pub reconnect_grace_duration: Duration,
 }
 
@@ -453,9 +453,10 @@ impl WaitingPool {
 /// 現在の盤面・両者残時間・最終手・手番を再送するために保持する。
 #[derive(Debug, Clone)]
 pub(crate) struct ReconnectSnapshot {
-    /// 先手の残り持ち時間 (ms)。
+    /// 先手の本体残り持ち時間 (ms)。秒読み残は含まない (`GameRoom::clock_remaining_main_ms`
+    /// と同義)。表示・ログ用途で、再接続クライアントの 1 手 deadline 計算には使えない。
     pub(crate) black_remaining_ms: u64,
-    /// 後手の残り持ち時間 (ms)。
+    /// 後手の本体残り持ち時間 (ms)。`black_remaining_ms` と同じ契約。
     pub(crate) white_remaining_ms: u64,
     /// 現在の手番。
     pub(crate) current_turn: Color,
@@ -551,9 +552,9 @@ where
     /// 切断検出後 grace 期間内の対局を一時保持するレジストリ。`game_id` で索引し、
     /// LOGIN 時に `reconnect:<game_id>+<token>` を提示したクライアントが
     /// `Arc<PendingReconnect>` を取り出して token 照合・transport handoff を行う。
-    /// `config.reconnect_grace_duration` が `Duration::ZERO` の場合（Phase 1-4
-    /// 互換）はこのレジストリは常に空のままで、`run_game_loop_and_record` は
-    /// 即時 `#ABNORMAL` に進む。
+    /// `config.reconnect_grace_duration` が `Duration::ZERO` の場合（再接続経路を
+    /// 無効化した既定構成）はこのレジストリは常に空のままで、
+    /// `run_game_loop_and_record` は即時 `#ABNORMAL` に進む。
     pub(crate) reconnect_pending: Mutex<HashMap<GameId, Arc<PendingReconnect>>>,
 }
 
@@ -898,7 +899,8 @@ where
     //      で来た場合は新規対局参加 (League 登録 / 待機プール) ではなく、grace 中の
     //      該当対局へ「同一対局者として再参加」する経路へ。`reconnect_pending` 検索
     //      → handle / token 照合 → game loop に新 transport を handoff。失敗時は
-    //      `LOGIN:incorrect <reason>` で拒否し、対局状態は変更しない (Requirement 17.6)。
+    //      `LOGIN:incorrect <reason>` で拒否し、grace 中の対局状態と registry エントリ
+    //      は一切変更しない (拒否は元の対局者による再試行を妨げないため)。
     if let Some(req) = reconnect {
         return handle_reconnect_request(&state, transport, &handle_player, req).await;
     }
@@ -2554,7 +2556,12 @@ where
         "awaiting reconnect within grace window"
     );
 
+    // `biased;` で oneshot 受信側を優先する。deadline と sender.send が同時に
+    // ready になった場合に sleep_until が選ばれると、handshake 側で resume を
+    // 受信したクライアントに対して `#ABNORMAL` を返してしまう非決定 race を
+    // 起こすため、resume が成立し得るなら確実にそちらを採用する。
     let outcome = tokio::select! {
+        biased;
         recv_res = rx => match recv_res {
             Ok(new_transport) => DisconnectOutcome::Reconnected(new_transport),
             // sender 側が drop された場合 (handshake 側の panic 等)。registry には
@@ -2586,10 +2593,11 @@ where
 /// - registry エントリは残っているが `reconnect_tx` が既に消費済み (重複再接続) →
 ///   `LOGIN:incorrect reconnect_already_resumed`
 ///
-/// いずれの拒否ケースでも `reconnect_pending` のエントリは変更せず、対局状態は
-/// 保持されたままになる (Requirement 17.6)。成功時のみ `reconnect_tx` を `take()`
-/// して新 `TcpTransport` を game loop に渡し、状態再送 (Game_Summary 全文 +
-/// `Reconnect_State` ブロック) を済ませてから handoff する。
+/// いずれの拒否ケースでも `reconnect_pending` のエントリは変更せず、対局状態
+/// は保持されたままになる (拒否は元の対局者による再試行を妨げない)。成功時のみ
+/// `reconnect_tx` を `take()` して新 `TcpTransport` を game loop に渡し、状態
+/// 再送 (Game_Summary 全文 + `Reconnect_State` ブロック) を済ませてから
+/// handoff する。
 async fn handle_reconnect_request<R, K, P, H>(
     state: &SharedState<R, K, P, H>,
     mut transport: TcpTransport,
