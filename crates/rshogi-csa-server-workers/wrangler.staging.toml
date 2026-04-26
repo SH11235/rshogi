@@ -1,0 +1,91 @@
+# Cloudflare Workers staging デプロイ設定 (CI 経由 `wrangler deploy` で使用)。
+#
+# - 本ファイルは VCS で追跡される。`account_id` / `CLOUDFLARE_API_TOKEN` 等の
+#   秘匿情報は **入れない**。これらは GitHub Environments の secret から CI
+#   runtime で env 経由で注入する (`CLOUDFLARE_ACCOUNT_ID` /
+#   `CLOUDFLARE_API_TOKEN`、staging environment 側に登録された値)。
+# - bucket 名 / Origin / 時計設定など秘匿情報でない値はそのままコミットする。
+# - 本ファイルは production (`wrangler.production.toml`) と同じ shape を維持し、
+#   `name` と R2 `bucket_name` のみ staging 専用値に書き換える。値の意味と
+#   `[vars]` 各キーの意図は production toml の同等行に合わせる（差分は最小化）。
+# - 値変更手順 / 初回セットアップ手順は `docs/csa-server/deployment.md` を参照。
+
+name = "rshogi-csa-server-workers-staging"
+main = "build/worker/shim.mjs"
+# production toml と日付を揃える。新フラグ採用は production と同時に bump する
+# 運用にして staging / production で挙動が乖離しないようにする。
+compatibility_date = "2026-04-21"
+
+# CI 環境では事前に `cargo install -q worker-build@^0.8 --locked` がインストール済みの
+# 前提（`.github/workflows/deploy-workers.yml` の独立 step `Install worker-build` で
+# `actions/cache` 経由 hit 時 skip + miss 時 install を行う）。本ファイルは
+# `worker-build --release` のみを実行することで、CI 1 回 deploy あたりの時間を短縮する。
+[build]
+command = "worker-build --release"
+
+# --- Durable Objects ---
+# GameRoom: 1 room_id = 1 DO インスタンス。`id_from_name(room_id)` で決定論解決。
+# Worker `name` が staging 専用なので DO namespace も自動で staging 隔離される
+# （production の GameRoom storage には触れない）。
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+# SQLite-backed DO: `state.storage().sql()` を利用するため必須。
+# 本 migration tag は **初回 deploy 時にのみ apply される**。`new_sqlite_classes` の
+# 内容を変更する場合は新 tag (`v2` / `v3` ...) を **追加する** こと。既存 tag を
+# 編集しても無視される。staging / production で migration 履歴は独立しているため、
+# 同じ tag を両環境で持っていても干渉しない。
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameRoom"]
+
+# --- R2: 棋譜保存 ---
+# `GameRoom` DO が終局時に CSA V2 棋譜を書き出す先。staging 用 bucket は事前に
+# Cloudflare 上で作成しておく必要がある:
+#   wrangler r2 bucket create rshogi-csa-kifu-staging
+# 命名規約 (Cloudflare): 小文字英数字 + ハイフン、3〜63 文字、先頭末尾は英数字。
+[[r2_buckets]]
+binding = "KIFU_BUCKET"
+bucket_name = "rshogi-csa-kifu-staging"
+
+# --- R2: Floodgate 履歴保存 ---
+#   wrangler r2 bucket create rshogi-csa-floodgate-history-staging
+[[r2_buckets]]
+binding = "FLOODGATE_HISTORY_BUCKET"
+bucket_name = "rshogi-csa-floodgate-history-staging"
+
+# --- 環境変数 ---
+# `[vars]` の値は機密でないが、staging client の Origin に応じて運用者が更新する。
+# 値変更は通常の PR で行い、merge → 自動 deploy で反映される。
+[vars]
+# WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。
+# 空文字列・未設定時は全 Upgrade 要求を 403 で拒否する（安全側の既定）。
+# staging client が確定するまでは空のままで `/health` のみ動く運用にする。
+# 例: "https://staging.rshogi.example.com"
+CORS_ORIGINS = ""
+
+# 対局時計。`countdown` (CSA 2014 改訂秒読み) / `fischer` (増分加算) / `stopwatch` (分単位)。
+# production と同値にして staging で時計挙動の regression を素直に検出する。
+CLOCK_KIND = "countdown"
+TOTAL_TIME_SEC = "600"
+BYOYOMI_SEC = "10"
+TOTAL_TIME_MIN = "10"
+BYOYOMI_MIN = "1"
+
+# 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
+# `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
+RECONNECT_GRACE_SECONDS = "0"
+ALLOW_FLOODGATE_FEATURES = "false"
+
+# --- secret として設定する値 ---
+# staging で必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。
+# 実値は Cloudflare 側の secret store にのみ存在し、`env.var(name)` 経由で
+# `[vars]` と同じ namespace から Worker code が読む（Cloudflare 仕様）。
+#
+# - ADMIN_HANDLE: `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル名。
+#   production と異なる値にすることで「staging で漏れた handle が production に
+#   通用しない」分離を保つ。
+#   設定: `vp exec wrangler secret put ADMIN_HANDLE --config wrangler.staging.toml`
+#   確認: `vp exec wrangler secret list --config wrangler.staging.toml`
+#   詳細は `docs/csa-server/deployment.md` 参照。

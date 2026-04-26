@@ -21,9 +21,9 @@ use crate::origin;
 ///   [`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`]
 ///
 /// `tests/wrangler_template_consistency.rs` (template) と
-/// `tests/wrangler_production_toml_consistency.rs` (production) が
+/// `tests/wrangler_environment_toml_consistency.rs` (production / staging) が
 /// これら配列と該当 toml ファイルの双方向整合を検証する。配列追加を忘れると
-/// template / production toml 更新忘れも検出できなくなる。
+/// template / 各環境 toml 更新忘れも検出できなくなる。
 pub struct ConfigKeys;
 
 impl ConfigKeys {
