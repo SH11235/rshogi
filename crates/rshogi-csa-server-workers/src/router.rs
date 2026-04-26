@@ -5,10 +5,6 @@
 //!   決定論的に解決した Durable Object へ Upgrade 要求を転送する。
 //! - `GET /` と `GET /health` → サーバ識別を返す簡易ヘルスチェック。
 //! - 他は 404。
-//!
-//! axum を介さず worker-rs のプリミティブだけでさばくのは、WebSocket Upgrade
-//! を axum と DO の間で橋渡しするコストが大きいため。HTTP API を増やす段階で
-//! 非 WS 経路は axum Router に切り出す想定。
 
 use worker::{Env, Method, Request, Response, Result};
 
