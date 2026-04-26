@@ -189,5 +189,5 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error ::Health check failed after 5 attempts. Investigate via 'cd crates/rshogi-csa-server-workers && pnpm tail:prod'."
+          echo "::error ::Health check failed after 5 attempts. Investigate via 'cd crates/rshogi-csa-server-workers && vp run tail:prod'."
           exit 1

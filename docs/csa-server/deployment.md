@@ -60,7 +60,8 @@ vp install                              # `packageManager` の pnpm 経由で de
 ```
 
 以降 `wrangler` は `vp exec wrangler ...` または scripts (`vp run deploy:prod`
-等) 経由で呼び出す。`npm install -g wrangler` などの global install は不要。
+等) 経由で呼び出す。`npm install -g wrangler` / `pnpm add -g wrangler` などの
+global install は不要。
 
 ### Workers Paid プランの確認
 
