@@ -23,14 +23,15 @@
 //!    吸い上げ、`drive_game` を `spawn_local` で起動
 //! 4. ペア化されなかった slot は WaitingPool に再 push（次回まで待機）
 //!
-//! # 既知の制約（後続タスクで対応）
+//! # 既知の制約
 //!
 //! - **per-schedule clock**: 現状は `state.config.clock`（global）を使う。
 //!   スケジュール毎に異なる時計（`floodgate-600-10` と `floodgate-180-3` 等）
 //!   をサポートするには `drive_game` のシグネチャに `ClockSpec` 引数を足して
-//!   呼び出し側で上書きする必要があり、本タスクの範囲外として持ち越し。
+//!   呼び出し側で上書きする必要がある。
 //! - **buoy / 駒落ち**: スケジューラ起動の対局は常に平手（`initial_sfen = None`）。
-//!   駒落ちサポートはタスク 15.4 で対応する。
+//!   buoy 予約消費や駒落ち初期局面のマッピングは matchmaking 経路（LOGIN ハンドラ
+//!   からの `reserve_match_initial_position`）でのみ作用する。
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -544,7 +545,7 @@ async fn spawn_scheduled_drive<R, K, P>(
             white_handle_for_task.clone(),
             Color::White,
             game_name_for_task,
-            None, // initial_sfen — buoy/駒落ち は本タスクの範囲外
+            None, // initial_sfen — スケジューラ経路は常に平手で起動する
             b_done_tx,
         )
         .await;
