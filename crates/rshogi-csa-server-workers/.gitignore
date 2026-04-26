@@ -7,3 +7,7 @@
 
 # wrangler dev / miniflare のローカル state。
 /.wrangler/
+
+# pnpm が `package.json` から install する Node deps。`pnpm-lock.yaml` は
+# 追跡してバージョン pin を保ち、`node_modules/` のみを除外する。
+/node_modules/

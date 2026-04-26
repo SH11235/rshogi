@@ -128,16 +128,34 @@ jobs:
       - name: Install worker-build
         if: steps.cache-worker-build.outputs.cache-hit != 'true'
         run: cargo install -q worker-build@^0.8 --locked
-      # `cloudflare/wrangler-action@v3` で wrangler のインストール + deploy を実行する。
-      # Cloudflare 公式 action のため wrangler バージョン互換 / token 注入経路 /
-      # error message の形式が公式仕様に追従する利点がある。
+      # Node 経路は `package.json` の devDependency (wrangler) を使う。`wrangler` の
+      # version は `pnpm-lock.yaml` で pin され、ローカル開発と CI で完全一致する。
+      # `pnpm/action-setup` は `package.json` の `packageManager` field を読んで
+      # 正しい pnpm バージョンを install する (corepack 経由)。
+      - uses: pnpm/action-setup@v4
+        with:
+          # `package.json` の `packageManager: pnpm@x.y.z` から版を読む。
+          # 実 install は後続の `pnpm install --frozen-lockfile` step で行うので
+          # action 内部での自動 install を抑止する (意図を明示する目的)。
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/rshogi-csa-server-workers/.node-version
+          cache: 'pnpm'
+          cache-dependency-path: crates/rshogi-csa-server-workers/pnpm-lock.yaml
+      - name: Install Node deps (wrangler)
+        working-directory: crates/rshogi-csa-server-workers
+        run: pnpm install --frozen-lockfile
+      # `cloudflare/wrangler-action@v3` で deploy を実行する。`packageManager: pnpm`
+      # を指定し `wranglerVersion` は省略することで、`package.json` の devDependency
+      # に install 済みの wrangler を `pnpm exec wrangler` 経由で使う経路に統一する。
       - name: Deploy via wrangler-action
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: crates/rshogi-csa-server-workers
-          wranglerVersion: '3'
+          packageManager: pnpm
           # `wrangler.production.toml` 内 `[build] command = "worker-build --release"` が
           # `wrangler deploy` の前段で起動する。本 step ではビルドと upload を一気通貫で行う。
           command: deploy --config wrangler.production.toml
@@ -171,5 +189,5 @@ jobs:
             fi
             sleep 5
           done
-          echo "::error ::Health check failed after 5 attempts. Investigate via 'wrangler tail --config crates/rshogi-csa-server-workers/wrangler.production.toml'."
+          echo "::error ::Health check failed after 5 attempts. Investigate via 'cd crates/rshogi-csa-server-workers && vp run tail:prod'."
           exit 1
