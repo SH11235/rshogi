@@ -30,5 +30,5 @@ pub mod transport;
 pub use auth::{AuthError, AuthOutcome, PasswordHasher, PlainPasswordHasher, authenticate};
 pub use broadcaster::InMemoryBroadcaster;
 pub use rate_limit::IpLoginRateLimiter;
-pub use server::{ServerConfig, run_server};
+pub use server::{ServerConfig, run_server, run_server_with_listener};
 pub use transport::TcpTransport;
