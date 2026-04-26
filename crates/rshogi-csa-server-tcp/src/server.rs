@@ -1640,10 +1640,21 @@ where
                         Ok(entries) => {
                             rshogi_csa_server::protocol::info::floodgate_history_lines(&entries)
                         }
-                        Err(e) => vec![
-                            CsaLine::new(format!("##[FLOODGATE] history ERROR {e}")),
-                            CsaLine::new("##[FLOODGATE] history END"),
-                        ],
+                        Err(e) => {
+                            // storage 実装の生のメッセージはファイルパス / OS エラーを
+                            // 含み得るため、外部接続クライアントへは汎用 `internal` に
+                            // 縮退させる。詳細はサーバーログ側で確認できるよう
+                            // `tracing::error!` に握る (運用観測の経路は kifu / 00LIST /
+                            // rate と同じ集約点)。
+                            tracing::error!(
+                                error = %e,
+                                "history_storage.list_recent failed"
+                            );
+                            vec![
+                                CsaLine::new("##[FLOODGATE] history ERROR internal"),
+                                CsaLine::new("##[FLOODGATE] history END"),
+                            ]
+                        }
                     },
                     None => vec![
                         CsaLine::new("##[FLOODGATE] history ERROR not_configured"),
@@ -1656,21 +1667,27 @@ where
                 handle: target_handle,
             } => {
                 // 参照系のため admin 権限不要。`load` で `Ok(None)` の場合は応答内
-                // で NOT_FOUND を返し、永続化エラー (`Err`) は ERROR を返す（kifu 等
-                // と同じ silent fail 経路は採らず、storage 実装の異常を運用観測できる
-                // ように生のメッセージを乗せる）。
+                // で NOT_FOUND を返し、永続化エラー (`Err`) は外部クライアントへは
+                // `internal` に縮退、詳細は `tracing::error!` でサーバーログに残す。
                 let lines = match state.rate_storage.load(&target_handle).await {
                     Ok(record) => rshogi_csa_server::protocol::info::floodgate_rating_lines(
                         &target_handle,
                         record.as_ref(),
                     ),
-                    Err(e) => vec![
-                        CsaLine::new(format!(
-                            "##[FLOODGATE] rating ERROR {} {e}",
-                            target_handle.as_str()
-                        )),
-                        CsaLine::new("##[FLOODGATE] rating END"),
-                    ],
+                    Err(e) => {
+                        tracing::error!(
+                            handle = %target_handle.as_str(),
+                            error = %e,
+                            "rate_storage.load failed"
+                        );
+                        vec![
+                            CsaLine::new(format!(
+                                "##[FLOODGATE] rating ERROR {} internal",
+                                target_handle.as_str()
+                            )),
+                            CsaLine::new("##[FLOODGATE] rating END"),
+                        ]
+                    }
                 };
                 Some(lines)
             }

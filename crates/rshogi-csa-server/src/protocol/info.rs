@@ -170,6 +170,24 @@ re-LOGIN to return to matchmaking)",
 /// 既存の CSA `LOGIN` / [`FloodgateHistoryEntry`] の入力契約上 ASCII printable
 /// (空白を含まない) のみを許容しているため運用上問題にならない。
 pub fn floodgate_history_lines(entries: &[FloodgateHistoryEntry]) -> Vec<CsaLine> {
+    // 行 framing は 1 entry = 1 行 (空白区切り) 契約。各フィールドに空白が混入すると
+    // 受信側のトークン分解が壊れる。CSA LOGIN / `FloodgateHistoryEntry::new` の入力
+    // 契約上は ASCII printable (空白なし) のみを通す前提だが、上流契約の退行を debug
+    // ビルドで早期検出できるよう assert する (release はゼロコスト)。
+    debug_assert!(
+        entries.iter().all(|e| {
+            !e.game_id.contains(' ')
+                && !e.game_name.contains(' ')
+                && !e.black.contains(' ')
+                && !e.white.contains(' ')
+                && !e.result_code.contains(' ')
+                && !e.start_time.contains(' ')
+                && !e.end_time.contains(' ')
+        }),
+        "FloodgateHistoryEntry fields must not contain ASCII whitespace; \
+         line framing in `##[FLOODGATE] history` would break otherwise"
+    );
+
     let mut out = Vec::with_capacity(entries.len() + 1);
     for e in entries {
         let winner = match e.winner {
@@ -205,6 +223,22 @@ pub fn floodgate_rating_lines(
     handle: &PlayerName,
     record: Option<&PlayerRateRecord>,
 ) -> Vec<CsaLine> {
+    // `floodgate_history_lines` と同じ行 framing 契約。`PlayerName` / `last_modified` /
+    // `last_game_id` の上流契約も「空白を含まない」前提だが、debug ビルドで退行検出
+    // できるようにしておく。
+    debug_assert!(
+        !handle.as_str().contains(' '),
+        "handle must not contain ASCII whitespace; line framing would break"
+    );
+    if let Some(r) = record {
+        debug_assert!(
+            !r.name.as_str().contains(' ')
+                && !r.last_modified.contains(' ')
+                && r.last_game_id.as_ref().is_none_or(|g| !g.as_str().contains(' ')),
+            "PlayerRateRecord fields must not contain ASCII whitespace"
+        );
+    }
+
     let head = match record {
         Some(r) => {
             let last_game_id = r.last_game_id.as_ref().map_or("-", GameId::as_str);
