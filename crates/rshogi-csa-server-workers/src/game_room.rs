@@ -40,12 +40,16 @@ use worker::{
 
 use rshogi_core::types::EnteringKingRule;
 use rshogi_csa_server::ClockSpec;
+use rshogi_csa_server::config::{
+    FloodgateFeatureIntent, parse_allow_floodgate_features, validate_floodgate_feature_gate,
+};
 use rshogi_csa_server::game::clock::TimeClock;
 use rshogi_csa_server::game::room::{
     BroadcastEntry, BroadcastTarget, GameRoom as CoreRoom, GameRoomConfig, HandleOutcome,
     HandleResult,
 };
-use rshogi_csa_server::protocol::command::{ClientCommand, parse_command};
+use rshogi_csa_server::protocol::command::{ClientCommand, ReconnectRequest, parse_command};
+use rshogi_csa_server::protocol::summary::position_section_from_position;
 use rshogi_csa_server::protocol::summary::{
     GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
     standard_initial_position_block,
@@ -56,10 +60,14 @@ use rshogi_csa_server::types::{
 };
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
-use crate::config::{ConfigKeys, parse_clock_spec};
+use crate::config::{ConfigKeys, parse_clock_spec, parse_reconnect_grace_duration};
 use crate::datetime::{format_csa_datetime, format_date_path};
 use crate::persistence::{
     FinishedState, MoveRow, PersistedConfig, ReplaySummary, replay_core_room,
+};
+use crate::reconnect::{
+    PendingAlarmKind, PendingReconnect, ReconnectMatchOutcome, ReconnectSnapshot,
+    build_resume_message, color_from_str, color_to_str,
 };
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 use crate::spectator_control::{MonitorDecision, resolve_monitor_target};
@@ -91,6 +99,12 @@ const KEY_ROOM_ID: &str = "room_id";
 const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
+/// 切断 → 再接続待ちエントリの DO storage key (1 対局 = 0..=1 件)。
+const KEY_GRACE_REGISTRY: &str = "grace_registry";
+/// 次に発火する `state.alarm()` の種別タグ。`None` は alarm 未予約 / 既存 alarm
+/// が時間切れ駆動 (TimeUp) であることを示す。grace 経路に入ったときだけ
+/// `GraceExpired` を書き込む。
+const KEY_PENDING_ALARM_KIND: &str = "pending_alarm_kind";
 
 /// R2 上の buoy 保存フォーマット。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +233,28 @@ impl DurableObject for GameRoom {
             return Ok(());
         }
 
+        // 再接続プロトコルが env で有効化されている (grace_duration > 0 + Floodgate
+        // features opt-in) なら即時 force_abnormal せず、grace registry に対局
+        // 状態のスナップショットを書いて alarm を grace deadline で予約する。
+        // ALLOW_FLOODGATE_FEATURES が立っていない構成で grace_duration が誤って
+        // > 0 になっていた場合は console_log で警告して保守的に旧経路へ落とす。
+        let grace_duration = match resolve_reconnect_grace(&self.env) {
+            Ok(d) => d,
+            Err(e) => {
+                console_log!("[GameRoom] reconnect grace disabled: {e}");
+                Duration::ZERO
+            }
+        };
+        if !grace_duration.is_zero() {
+            if let Err(e) = self.enter_grace_window(role, grace_duration).await {
+                // grace 経路のセットアップに失敗したら旧経路 (即時 force_abnormal)
+                // にフォールバックして部屋が宙ぶらりんにならないようにする。
+                console_log!("[GameRoom] enter_grace_window failed; fallback to abnormal: {e:?}");
+            } else {
+                return Ok(());
+            }
+        }
+
         // 対局中の切断は force_abnormal で敗北を確定する。
         self.ensure_core_loaded().await?;
         let result_opt =
@@ -238,6 +274,14 @@ impl DurableObject for GameRoom {
         // 既に終局済みの DO でアラームが届いたら何もしない（念のためのガード）。
         if self.load_finished().await?.is_some() {
             return Response::ok("already finished");
+        }
+
+        // alarm 種別タグを読み、`GraceExpired` 経路だけ grace registry の処理に
+        // 委譲する。既定値 (タグ未設定) は時間切れ駆動とみなす。
+        let kind = self.load_pending_alarm_kind().await?;
+        if matches!(kind, Some(PendingAlarmKind::GraceExpired)) {
+            self.handle_grace_expired_alarm().await?;
+            return Response::ok("grace_expired handled");
         }
 
         self.ensure_core_loaded().await?;
@@ -286,7 +330,10 @@ impl GameRoom {
                 return Ok(());
             }
         };
-        let ClientCommand::Login { name, .. } = cmd else {
+        let ClientCommand::Login {
+            name, reconnect, ..
+        } = cmd
+        else {
             // pending 状態で LOGIN 以外が来たら拒否して切断。
             send_line(ws, &LoginReply::Incorrect.to_line())?;
             let _ = ws.close(Some(1000), Some("expected LOGIN".to_owned()));
@@ -297,6 +344,15 @@ impl GameRoom {
             send_line(ws, &LoginReply::Incorrect.to_line())?;
             return Ok(());
         };
+
+        // 再接続要求の経路分岐。LOGIN 行 3 つ目トークンが
+        // `reconnect:<game_id>+<token>` の場合は新規対局参加 (slot 確保 + マッチ
+        // 成立) ではなく、grace 中の該当対局へ「同一対局者として再参加」する経路へ。
+        // 失敗時は LOGIN OK を送らずに `LOGIN:incorrect reconnect_rejected` で
+        // 拒否する (拒否は元の対局者による再試行を妨げない)。
+        if let Some(req) = reconnect {
+            return self.handle_reconnect_request(ws, &handle, role, req).await;
+        }
 
         // 新スロットを**仮に**加えて衝突判定する。`evaluate_match` が Conflict を返す
         // 場合は永続化も attachment 差し替えも行わず、部屋を破壊しないよう拒否する
@@ -387,6 +443,11 @@ impl GameRoom {
             }
         };
 
+        // 対局開始時に対局者ごとに一意な再接続トークンを発行する。`Game_Summary`
+        // 末尾拡張行で配布した値を、後の grace 経路 (websocket_close → 再接続要求の
+        // `expected_token` 照合) で参照するために `PersistedConfig` に保存しておく。
+        let black_reconnect_token = ReconnectToken::generate();
+        let white_reconnect_token = ReconnectToken::generate();
         let cfg = PersistedConfig {
             game_id: game_id.clone(),
             black_handle: black_handle.to_owned(),
@@ -398,6 +459,8 @@ impl GameRoom {
             matched_at_ms: started,
             play_started_at_ms: None,
             initial_sfen,
+            black_reconnect_token: Some(black_reconnect_token.as_str().to_owned()),
+            white_reconnect_token: Some(white_reconnect_token.as_str().to_owned()),
         };
         self.state.storage().put(KEY_CONFIG, &cfg).await?;
 
@@ -433,12 +496,10 @@ impl GameRoom {
         *self.core.borrow_mut() = Some(core);
         *self.config.borrow_mut() = Some(cfg.clone());
 
-        // 対局開始時に対局者ごとに一意な再接続トークンを発行し、Game_Summary 末尾の
-        // 拡張行で配布する。デプロイ／DO 再起動による切断時、クライアントは
-        // この token を提示して同一対局・同一対局者として再参加する。
-        let black_reconnect_token = ReconnectToken::generate();
-        let white_reconnect_token = ReconnectToken::generate();
-        // Game_Summary を双方に送出（Your_Turn だけ色で変える）。
+        // 上で `PersistedConfig` に保存したトークンを Game_Summary の末尾拡張行で
+        // 配布する。クライアントは本トークンを保持しておき、デプロイ／DO 再起動
+        // による切断時に LOGIN reconnect 引数として提示して同一対局・同一対局者
+        // として再参加する。
         let builder = GameSummaryBuilder {
             game_id: GameId::new(cfg.game_id),
             black: PlayerName::new(cfg.black_handle),
@@ -1185,10 +1246,7 @@ impl GameRoom {
         }
         let rows: Vec<CountRow> = cursor.to_array()?;
         let next_ply = rows.first().map(|r| r.n).unwrap_or(1);
-        let color_str = match color {
-            Color::Black => "black",
-            Color::White => "white",
-        };
+        let color_str = color_to_str(color);
         sql.exec(
             "INSERT INTO moves(ply, color, line, at_ms) VALUES (?, ?, ?, ?)",
             vec![
@@ -1198,6 +1256,346 @@ impl GameRoom {
                 (now_ms as i64).into(),
             ],
         )?;
+        Ok(())
+    }
+
+    /// websocket_close で対局中の切断を grace registry に登録する経路。
+    ///
+    /// 1. `CoreRoom` を確保 (cold start なら replay) し、現在局面のスナップショット
+    ///    と切断側用の Game_Summary 文字列 (現在盤面で再構築) を組み立てる
+    /// 2. `PersistedConfig` から切断側に発行済の `reconnect_token` を取り出す
+    ///    （未発行なら grace 経路に乗らないので Err で旧経路にフォールバック）
+    /// 3. `PendingReconnect` を `KEY_GRACE_REGISTRY` に保存
+    /// 4. alarm 種別を `GraceExpired` でマークし、`grace_duration` 後に発火する
+    ///    `state.alarm()` を予約する (既存 turn alarm より早い場合のみ上書きする
+    ///    ため、現状予約済の alarm を `get_alarm` で読み取って比較する)
+    async fn enter_grace_window(&self, role: Role, grace_duration: Duration) -> Result<()> {
+        self.ensure_core_loaded().await?;
+        let cfg = self
+            .config
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| Error::RustError("enter_grace_window: config missing".into()))?;
+        // 既存 turn alarm の予定発火時刻を grace 経路前に取得しておき、
+        // `PendingReconnect` に保存する。再接続成功後に新規 alarm を貼り直すとき、
+        // この値と「再接続時刻 + 残時間 budget」のうち早い方を採用することで、
+        // 悪意あるクライアントが切断 → grace 直前再接続を繰り返して相手手番の
+        // wall-clock 上の deadline を不当に延長する経路を防ぐ。
+        let original_turn_alarm_epoch_ms =
+            self.state.storage().get_alarm().await.ok().flatten().map(|e| e as u64);
+        let pending = {
+            let borrow = self.core.borrow();
+            let core = borrow.as_ref().ok_or_else(|| {
+                Error::RustError("enter_grace_window: core missing after ensure_core_loaded".into())
+            })?;
+            self.build_pending_reconnect(
+                core,
+                &cfg,
+                role,
+                grace_duration,
+                original_turn_alarm_epoch_ms,
+            )?
+        };
+        // `KEY_GRACE_REGISTRY` と `KEY_PENDING_ALARM_KIND` を 2 回の `put` で
+        // 書き分ける。Cloudflare DO は同一 instance に対する fetch / alarm /
+        // websocket_* を単一スレッドで逐次処理するため、1 件目 put 後の `await`
+        // 中に他ハンドラが割り込んで不整合を観測する race は起きない。本コード
+        // は `worker` 0.8 系で `transaction` API がまだ stable に提供されていない
+        // 前提で 2 回 put にしているが、`handle_grace_expired_alarm` 側は
+        // registry の存在を先に確認してから進む設計なので、最悪 (DO 強制終了等)
+        // でも整合性は壊れない (registry が無ければ何もせず alarm tag だけ
+        // 片付ける)。`worker` crate が `transaction` を提供したら本ブロックを
+        // 束ねる方が望ましい。
+        self.state.storage().put(KEY_GRACE_REGISTRY, &pending).await?;
+        self.state
+            .storage()
+            .put(KEY_PENDING_ALARM_KIND, &PendingAlarmKind::GraceExpired)
+            .await?;
+        // 既存の turn alarm より grace deadline が早ければ上書き、遅ければ既存
+        // alarm (時間切れ) を残す。`get_alarm` は次回発火時刻 (epoch ms) を返し、
+        // 未予約なら `None`。
+        let now_ms = self.now_ms();
+        let grace_deadline_ms = pending.deadline_ms;
+        let existing = self.state.storage().get_alarm().await.ok().flatten();
+        let should_set_grace = match existing {
+            Some(epoch_ms) if (epoch_ms as u64) <= grace_deadline_ms => false,
+            _ => true,
+        };
+        if should_set_grace {
+            let delay = grace_deadline_ms.saturating_sub(now_ms).saturating_add(ALARM_SAFETY_MS);
+            self.state.storage().set_alarm(Duration::from_millis(delay)).await?;
+        }
+        console_log!(
+            "[GameRoom] entered grace window: role={role:?} grace_secs={}",
+            grace_duration.as_secs()
+        );
+        Ok(())
+    }
+
+    /// `enter_grace_window` の純粋ロジック部分。`CoreRoom` の現状から
+    /// `PendingReconnect` を組み立てる (snapshot / Game_Summary / token 取り出し)。
+    fn build_pending_reconnect(
+        &self,
+        core: &CoreRoom,
+        cfg: &PersistedConfig,
+        role: Role,
+        grace_duration: Duration,
+        original_turn_alarm_epoch_ms: Option<u64>,
+    ) -> Result<PendingReconnect> {
+        let disconnected_color = role.to_core();
+        let token = match disconnected_color {
+            Color::Black => cfg.black_reconnect_token.as_deref(),
+            Color::White => cfg.white_reconnect_token.as_deref(),
+        }
+        .ok_or_else(|| {
+            Error::RustError(format!(
+                "build_pending_reconnect: no reconnect_token issued for {disconnected_color:?}"
+            ))
+        })?
+        .to_owned();
+        let position_section = position_section_from_position(core.position());
+        let snapshot = ReconnectSnapshot {
+            position_section: position_section.clone(),
+            black_remaining_ms: core.clock_remaining_main_ms(Color::Black).max(0) as u64,
+            white_remaining_ms: core.clock_remaining_main_ms(Color::White).max(0) as u64,
+            current_turn: color_to_str(core.current_turn()).to_owned(),
+            // CoreRoom は最終手 token を露出していないため、moves テーブルから
+            // 再現する経路 (cold start 時) と整合するよう、現時点では None とする。
+            // E2E では Reconnect_State の `Last_Move:` 行省略動作を許容する。
+            last_move: None,
+        };
+
+        // 切断側宛の Game_Summary を「切断時点の現在局面」で再構築する。再接続
+        // クライアントは初接続時と同じ `Reconnect_Token:` 拡張行を再受信できる。
+        let clock_spec = load_clock_spec_from_env(&self.env)?;
+        let summary = GameSummaryBuilder {
+            game_id: GameId::new(cfg.game_id.clone()),
+            black: PlayerName::new(cfg.black_handle.clone()),
+            white: PlayerName::new(cfg.white_handle.clone()),
+            time_section: clock_spec.format_time_section(),
+            position_section,
+            rematch_on_draw: false,
+            to_move: core.current_turn(),
+            declaration: String::new(),
+            black_reconnect_token: cfg.black_reconnect_token.as_deref().map(ReconnectToken::new),
+            white_reconnect_token: cfg.white_reconnect_token.as_deref().map(ReconnectToken::new),
+        };
+        let game_summary_for_disconnected = summary.build_for(disconnected_color);
+
+        let now_ms = self.now_ms();
+        // `Duration::as_millis()` は `u128` を返すため、`u64::try_from` で
+        // 範囲外をサチュレートさせて silent truncation を避ける (実用上の grace は
+        // 数十秒〜数時間オーダーで、`u64::MAX` ms の到達は無いが防御的に書く)。
+        let grace_ms = u64::try_from(grace_duration.as_millis()).unwrap_or(u64::MAX);
+        let deadline_ms = now_ms.saturating_add(grace_ms);
+        let disconnected_handle = match disconnected_color {
+            Color::Black => cfg.black_handle.clone(),
+            Color::White => cfg.white_handle.clone(),
+        };
+        Ok(PendingReconnect {
+            disconnected_handle,
+            disconnected_color: color_to_str(disconnected_color).to_owned(),
+            expected_token: token,
+            deadline_ms,
+            snapshot,
+            game_summary_for_disconnected,
+            original_turn_alarm_epoch_ms,
+        })
+    }
+
+    /// alarm が `GraceExpired` 種別で発火した経路。registry を読んで切断側を
+    /// `force_abnormal` で確定させる。registry が無い (race で削除済み) なら
+    /// 何もしない。
+    async fn handle_grace_expired_alarm(&self) -> Result<()> {
+        let pending: Option<PendingReconnect> =
+            self.state.storage().get(KEY_GRACE_REGISTRY).await.ok().flatten();
+        let Some(pending) = pending else {
+            // 再接続が成立して registry が片付けられた直後の race 等。alarm kind
+            // も並行で TimeUp に戻されているはずだが、念のため tag を片付けておく。
+            self.delete_pending_alarm_kind().await?;
+            return Ok(());
+        };
+        self.ensure_core_loaded().await?;
+        let role = match color_from_str(&pending.disconnected_color) {
+            Ok(c) => Role::from_core(c),
+            Err(e) => {
+                console_log!("[GameRoom] grace alarm: invalid color in registry: {e}");
+                self.delete_grace_registry().await?;
+                self.delete_pending_alarm_kind().await?;
+                return Ok(());
+            }
+        };
+        let result_opt =
+            self.core.borrow_mut().as_mut().map(|core| core.force_abnormal(role.to_core()));
+        if let Some(result) = result_opt {
+            self.dispatch_broadcasts(&result.broadcasts).await?;
+            self.finalize_if_ended(&result).await?;
+        }
+        self.delete_grace_registry().await?;
+        self.delete_pending_alarm_kind().await?;
+        Ok(())
+    }
+
+    /// LOGIN 行で `reconnect:<game_id>+<token>` が指定されたクライアントを受理し、
+    /// grace 中対局へ再参加させる。
+    ///
+    /// 失敗ケース (`reconnect_unknown_game` / `handle_mismatch` / `color_mismatch` /
+    /// `token_mismatch` / `expired`) はすべて `LOGIN:incorrect reconnect_rejected`
+    /// で返す (拒否理由を分けると side-channel で「特定 handle / game_id が grace
+    /// 中に存在するか」を識別できるため、wire 上は統一)。詳細は console_log の
+    /// サーバーログ側にだけ残す。`reconnect_already_resumed` は token 知識を持つ
+    /// 正当者の二重接続経路で情報漏洩リスクが無いため原因を分けて返す。
+    async fn handle_reconnect_request(
+        &self,
+        ws: &WebSocket,
+        handle: &str,
+        role: Role,
+        req: ReconnectRequest,
+    ) -> Result<()> {
+        // DO instance が hibernate から起床した直後の再接続でも CoreRoom を
+        // ロードできるよう、registry 検索の前に `ensure_core_loaded` を呼ぶ。
+        // 成功確定後の `current_game_name_or_empty` / 状態再送はロード済を前提に
+        // できるので、この 1 箇所だけで grace 経路全体の cold-start 互換が成立する。
+        self.ensure_core_loaded().await?;
+        let pending: Option<PendingReconnect> =
+            self.state.storage().get(KEY_GRACE_REGISTRY).await.ok().flatten();
+        let Some(pending) = pending else {
+            console_log!(
+                "[GameRoom] reconnect rejected: no pending entry (game_id={})",
+                req.game_id
+            );
+            send_line(ws, "LOGIN:incorrect reconnect_rejected")?;
+            return Ok(());
+        };
+
+        // game_id 照合は registry 検索 (DO instance = 1 対局専属) で済むため、
+        // ここでは LOGIN 経由の game_id が現在対局と一致するかだけ確認する。
+        let cfg_game_id = self.config.borrow().as_ref().map(|c| c.game_id.clone());
+        if cfg_game_id.as_deref() != Some(req.game_id.as_str()) {
+            // DO instance が想定と違う対局に紐づいている (game_id 未一致)。
+            console_log!(
+                "[GameRoom] reconnect rejected: game_id mismatch (req={}, current={:?})",
+                req.game_id,
+                cfg_game_id
+            );
+            send_line(ws, "LOGIN:incorrect reconnect_rejected")?;
+            return Ok(());
+        }
+
+        let now_ms = self.now_ms();
+        let outcome = pending.match_request(handle, role.to_core(), req.token.as_str(), now_ms);
+        match outcome {
+            ReconnectMatchOutcome::Accepted => {}
+            ReconnectMatchOutcome::Rejected => {
+                console_log!(
+                    "[GameRoom] reconnect rejected: handle/color/token mismatch (handle={}, role={:?})",
+                    handle,
+                    role
+                );
+                send_line(ws, "LOGIN:incorrect reconnect_rejected")?;
+                return Ok(());
+            }
+            ReconnectMatchOutcome::Expired => {
+                console_log!(
+                    "[GameRoom] reconnect rejected: grace expired (deadline_ms={}, now_ms={})",
+                    pending.deadline_ms,
+                    now_ms
+                );
+                send_line(ws, "LOGIN:incorrect reconnect_rejected")?;
+                return Ok(());
+            }
+        }
+
+        // 成功確定。LOGIN OK → resume 送出 → attachment を Player に差し替え →
+        // grace registry / alarm tag を片付ける順で進める。
+        let game_name = self.current_game_name_or_empty().await?;
+        let login_name = format!("{handle}+{game_name}+{}", color_to_str(role.to_core()));
+        send_line(ws, &LoginReply::Ok { name: login_name }.to_line())?;
+        // 状態再送 (Game_Summary + Reconnect_State ブロック) は複数行なので
+        // 1 行ずつ `send_line` に分解する。`build_resume_message` の改行終端が
+        // 各行末改行と整合するので `lines()` でそのまま reuse できる。
+        let resume =
+            build_resume_message(&pending.game_summary_for_disconnected, &pending.snapshot);
+        for line in resume.lines() {
+            send_line(ws, line)?;
+        }
+
+        let att = WsAttachment::player(role, handle.to_owned(), game_name);
+        ws.serialize_attachment(&att)
+            .map_err(|e| Error::RustError(format!("attach player on reconnect: {e}")))?;
+
+        self.delete_grace_registry().await?;
+        // alarm tag を片付ける。直後に turn alarm を再セットして上書きするため、
+        // 順序は kind tag 削除 → set_alarm の順で書き直す（kind tag 未設定は
+        // 既定で `TimeUp` 扱い）。
+        self.delete_pending_alarm_kind().await?;
+        // 再接続クライアントが指し手を送らず放置しても確実に turn deadline が
+        // 発火するよう、即時 alarm を貼り直す。決定方針:
+        // - 候補 A: 切断時に取り置いた元 turn alarm の発火時刻 (`pending.original
+        //   _turn_alarm_epoch_ms`)
+        // - 候補 B: 再接続時刻 + (現在手番の本体時間 + 秒読み + 通信マージン +
+        //   安全側ゲタ)
+        // のうち**早い方**を採用する。常に B にすると悪意あるクライアントが
+        // 切断 → grace 直前再接続を繰り返して相手手番の wall-clock 上の deadline
+        // を延長する経路が成立するため、A を上限としても利く形にする。
+        let now = self.now_ms();
+        let candidate_b_total_ms = {
+            let core_borrow = self.core.borrow();
+            core_borrow.as_ref().map(|core| {
+                let next_turn = core.current_turn();
+                let budget = core.clock_turn_budget_ms(next_turn).max(0) as u64;
+                let margin = self
+                    .config
+                    .borrow()
+                    .as_ref()
+                    .map(|c| c.time_margin_ms)
+                    .unwrap_or(DEFAULT_TIME_MARGIN_MS);
+                budget.saturating_add(margin).saturating_add(ALARM_SAFETY_MS)
+            })
+        };
+        if let Some(total_b) = candidate_b_total_ms {
+            let candidate_b_epoch = now.saturating_add(total_b);
+            let final_epoch = pending
+                .original_turn_alarm_epoch_ms
+                .map(|orig| orig.min(candidate_b_epoch))
+                .unwrap_or(candidate_b_epoch);
+            // `set_alarm(Duration)` は「now から N ms 後」に発火する API なので
+            // delay = final_epoch - now で渡す。`saturating_sub` は now が final_epoch
+            // を既に過ぎている場合に 0 を返し、即時発火させて time_up に進める。
+            let delay_ms = final_epoch.saturating_sub(now);
+            self.state.storage().set_alarm(Duration::from_millis(delay_ms)).await?;
+        } else {
+            // CoreRoom 不在 (異常系)。alarm を解除して保守的に振る舞う。
+            let _ = self.state.storage().delete_alarm().await;
+        }
+        console_log!("[GameRoom] reconnect succeeded: handle={} role={:?}", handle, role);
+        Ok(())
+    }
+
+    /// 現在 DO の対局 game_name (`PersistedConfig.game_name`)。LOGIN OK 応答で
+    /// `<handle>+<game_name>+<color>` 形式を再構築するために使う。config 未設定
+    /// なら空文字を返す (handshake は LOGIN OK 後に拒否されている経路では呼ば
+    /// れないため、空文字到達は契約違反として handle される想定)。
+    async fn current_game_name_or_empty(&self) -> Result<String> {
+        if let Some(cfg) = self.config.borrow().as_ref() {
+            return Ok(cfg.game_name.clone());
+        }
+        let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
+        Ok(cfg_opt.map(|c| c.game_name).unwrap_or_default())
+    }
+
+    async fn delete_grace_registry(&self) -> Result<()> {
+        let _ = self.state.storage().delete(KEY_GRACE_REGISTRY).await;
+        Ok(())
+    }
+
+    async fn load_pending_alarm_kind(&self) -> Result<Option<PendingAlarmKind>> {
+        Ok(self.state.storage().get(KEY_PENDING_ALARM_KIND).await.ok().flatten())
+    }
+
+    async fn delete_pending_alarm_kind(&self) -> Result<()> {
+        let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
         Ok(())
     }
 }
@@ -1228,4 +1626,28 @@ fn load_clock_spec_from_env(env: &Env) -> Result<ClockSpec> {
         byoyomi_min.as_deref(),
     )
     .map_err(Error::RustError)
+}
+
+/// `RECONNECT_GRACE_SECONDS` env を読み、Floodgate features の opt-in
+/// (`ALLOW_FLOODGATE_FEATURES`) と整合しているか検証して `Duration` を返す。
+///
+/// ```text
+/// grace=0 (or unset)  : OK (Floodgate gate を通さず保守的既定)
+/// grace>0 + allow=true: OK (再接続プロトコル有効)
+/// grace>0 + allow=false: Err (Floodgate features の opt-in 漏れ)
+/// ```
+///
+/// 設定不正は `Err(String)` で返し、呼び出し側は安全側に grace を無効化する経路に
+/// 落とす (websocket_close で旧 force_abnormal 経路にフォールバック)。
+fn resolve_reconnect_grace(env: &Env) -> std::result::Result<Duration, String> {
+    let grace_raw = env.var(ConfigKeys::RECONNECT_GRACE_SECONDS).ok().map(|v| v.to_string());
+    let grace = parse_reconnect_grace_duration(grace_raw.as_deref())?;
+    let allow_raw = env.var(ConfigKeys::ALLOW_FLOODGATE_FEATURES).ok().map(|v| v.to_string());
+    let allow = parse_allow_floodgate_features(allow_raw.as_deref())?;
+    let intent = FloodgateFeatureIntent {
+        enable_reconnect_protocol: !grace.is_zero(),
+        ..FloodgateFeatureIntent::default()
+    };
+    validate_floodgate_feature_gate(allow, intent)?;
+    Ok(grace)
 }

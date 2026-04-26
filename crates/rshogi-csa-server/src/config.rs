@@ -24,6 +24,13 @@ pub struct FloodgateFeatureIntent {
     /// する経路を有効化する意図。`JsonlFloodgateHistoryStorage` を起動時に
     /// 構築し、終局時に append する経路を本フラグで gate する。
     pub enable_floodgate_history: bool,
+    /// 切断時の再接続プロトコル（grace 期間中の対局状態保持と再接続要求受理）
+    /// を有効化する意図。本フラグが `true` のとき、各 frontend は
+    /// `reconnect_grace_duration > 0` を運用設定として受け付け、`Game_Summary`
+    /// 末尾拡張行で配布した `reconnect_token` の照合・状態再送・grace 満了時の
+    /// 切断敗北確定を有効化する。`allow_floodgate_features` の opt-in なしで本
+    /// 機能を要求した場合は起動を fail-fast する。
+    pub enable_reconnect_protocol: bool,
 }
 
 /// 真偽文字列から Floodgate 機能 gate を解決する。
@@ -78,6 +85,9 @@ pub fn validate_floodgate_feature_gate(
     }
     if intent.enable_floodgate_history {
         requested.push("floodgate_history");
+    }
+    if intent.enable_reconnect_protocol {
+        requested.push("reconnect_protocol");
     }
     if requested.is_empty() || allow_floodgate_features {
         return Ok(());
@@ -160,6 +170,7 @@ mod tests {
                 enable_duplicate_login_policy: true,
                 enable_persistent_player_rates: true,
                 enable_floodgate_history: true,
+                enable_reconnect_protocol: true,
             },
         )
         .unwrap_err();
@@ -168,6 +179,32 @@ mod tests {
         assert!(err.contains("duplicate_login_policy"));
         assert!(err.contains("persistent_player_rates"));
         assert!(err.contains("floodgate_history"));
+        assert!(err.contains("reconnect_protocol"));
+    }
+
+    #[test]
+    fn floodgate_gate_rejects_reconnect_protocol_when_disabled() {
+        let err = validate_floodgate_feature_gate(
+            false,
+            FloodgateFeatureIntent {
+                enable_reconnect_protocol: true,
+                ..FloodgateFeatureIntent::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("reconnect_protocol"));
+    }
+
+    #[test]
+    fn floodgate_gate_allows_reconnect_protocol_when_enabled() {
+        validate_floodgate_feature_gate(
+            true,
+            FloodgateFeatureIntent {
+                enable_reconnect_protocol: true,
+                ..FloodgateFeatureIntent::default()
+            },
+        )
+        .unwrap();
     }
 
     #[test]
