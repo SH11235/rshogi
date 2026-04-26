@@ -127,7 +127,7 @@ pub trait FloodgateHistoryStorage {
 #[derive(Debug)]
 pub struct JsonlFloodgateHistoryStorage {
     path: PathBuf,
-    /// append を直列化する async lock。`load_recent` は別 read 経路なのでロック
+    /// append を直列化する async lock。`list_recent` は別 read 経路なのでロック
     /// 範囲は短い。
     append_lock: AsyncMutex<()>,
 }
@@ -317,6 +317,24 @@ mod tests {
         let storage = JsonlFloodgateHistoryStorage::new(path);
         let err = storage.list_recent(5).await.unwrap_err();
         assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn append_returns_err_when_parent_path_is_regular_file() {
+        // 親ディレクトリ作成が失敗する経路（同名の regular file が居座っている）でも
+        // panic せず `StorageError::Io` で上に返す契約を固定する。これにより
+        // `persist_kifu` 側の `if let Err(e) = ... return Err(...)` 経路が
+        // 型システム上だけでなく実 I/O 失敗で踏まれることを保証し、将来 silent な
+        // best-effort 化に戻された場合に CI で気付ける。
+        let dir = tempdir();
+        let blocker = dir.path().join("blocker");
+        // ファイルを作って、その配下にパスを作ろうとすると create_dir_all が
+        // ENOTDIR で落ちる（regular file 上にディレクトリは作れない）。
+        std::fs::write(&blocker, b"").unwrap();
+        let bad_path = blocker.join("history.jsonl");
+        let storage = JsonlFloodgateHistoryStorage::new(bad_path);
+        let err = storage.append(&entry("g1", None)).await.unwrap_err();
+        assert!(matches!(err, StorageError::Io(_)), "expected Io error, got: {err:?}");
     }
 
     #[tokio::test(flavor = "current_thread")]
