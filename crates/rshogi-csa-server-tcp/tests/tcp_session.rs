@@ -1284,7 +1284,10 @@ fn fork_creates_single_use_buoy_from_existing_game() {
         let _ = read_until(&mut rb, "#WIN").await;
         let _ = read_until(&mut rw, "#LOSE").await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // 固定 sleep だと並行実行下で persist_kifu 完了前に %%FORK が走り、
+        // kifu_storage.load が NotFound を返して `##[FORK] NOT_FOUND` に落ちる
+        // race が出る (PR #497 と同種)。CSA ファイル書き込みを polling で待つ。
+        let _ = wait_for_csa_text(&topdir, &source_game_id).await;
 
         let (mut ra, mut wa) = connect(addr).await;
         send_line(&mut wa, "LOGIN admin+obs+black pw x1").await;
@@ -1386,7 +1389,10 @@ fn fork_gracefully_errors_and_keeps_connection_alive() {
         let _ = read_until(&mut rb, "#WIN").await;
         let _ = read_until(&mut rw, "#LOSE").await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // 固定 sleep だと並行実行下で persist_kifu 完了前に %%FORK が走り、
+        // 期待する `##[FORK] ERROR` ではなく `NOT_FOUND` に落ちる race が出る
+        // (PR #497 と同種)。CSA ファイル書き込みを polling で待つ。
+        let _ = wait_for_csa_text(&topdir, &source_game_id).await;
 
         // nth_move=999 は範囲外。切断せず ERROR + END を返す。
         send_line(&mut wa, &format!("%%FORK {source_game_id} bad 999")).await;
