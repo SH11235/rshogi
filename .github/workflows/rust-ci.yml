@@ -174,8 +174,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Add wasm32 target to pinned toolchain
+        # `rust-toolchain.toml` が channel を 1.93.1 に pin しているため、
+        # cargo は dtolnay/rust-toolchain@stable が install した stable (1.95.0) では
+        # なく rust-toolchain.toml の channel を使う（`rustup show active-toolchain` で
+        # 確認できる）。dtolnay action の `targets:` パラメータは default toolchain
+        # （= stable）にのみ wasm32 target を追加するため、cargo の実行時には反映
+        # されない（`E0463: can't find crate for core` でビルドが落ちる）。
+        # rust-toolchain.toml の channel から動的に値を取り、その toolchain に
+        # 明示的に wasm32 target を追加する。channel が変わったら自動追従する。
+        run: |
+          CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
+          echo "Adding wasm32-unknown-unknown to toolchain $CHANNEL"
+          rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Enable sccache
