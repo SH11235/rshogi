@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "build": "worker-build --release",
+    "deploy:staging": "wrangler deploy --config wrangler.staging.toml",
     "deploy:prod": "wrangler deploy --config wrangler.production.toml",
+    "tail:staging": "wrangler tail --config wrangler.staging.toml",
     "tail:prod": "wrangler tail --config wrangler.production.toml",
     "dev": "wrangler dev"
   },
