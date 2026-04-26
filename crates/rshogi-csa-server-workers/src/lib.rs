@@ -25,6 +25,7 @@ compile_error!(
 pub mod attachment;
 pub mod config;
 pub mod datetime;
+pub mod floodgate_history;
 pub mod origin;
 // `persistence` は DO ランタイム (`game_room`) からのみ消費される I/O 非依存の
 // 純粋ロジックを置く。ホスト target の通常ビルドでは消費者が存在しないので

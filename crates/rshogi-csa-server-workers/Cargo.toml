@@ -53,3 +53,6 @@ default = []
 tokio-transport = []
 
 [dev-dependencies]
+# host target の async テスト（`FloodgateHistoryStorage` の cold-start 契約検証等）
+# で futures を駆動するためにのみ使用する。wasm32 ランタイムには取り込まれない。
+tokio = { workspace = true, features = ["rt", "macros"] }

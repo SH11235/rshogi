@@ -18,6 +18,10 @@ impl ConfigKeys {
     pub const GAME_ROOM_BINDING: &'static str = "GAME_ROOM";
     /// R2 バケットバインディング名（CSA V2 棋譜保存）。
     pub const KIFU_BUCKET_BINDING: &'static str = "KIFU_BUCKET";
+    /// R2 バケットバインディング名（Floodgate 履歴保存）。1 対局 = 1 オブジェクトの
+    /// JSONL を `floodgate-history/YYYY/MM/DD/HHMMSS-<game_id>.json` キーで保存し、
+    /// `list_recent` は day shard を新しい順に走査して N 件取得する。
+    pub const FLOODGATE_HISTORY_BUCKET_BINDING: &'static str = "FLOODGATE_HISTORY_BUCKET";
     /// 時計方式。`countdown` / `fischer` / `stopwatch`。
     pub const CLOCK_KIND: &'static str = "CLOCK_KIND";
     /// 秒読み / Fischer 用の持ち時間（秒）。
