@@ -1,0 +1,165 @@
+# Cloudflare Workers (rshogi-csa-server-workers) の自動デプロイ workflow。
+#
+# - `main` への push で起動し、`wrangler.production.toml` を使って Cloudflare に
+#   `wrangler deploy` する
+# - `workflow_dispatch` 起動も可能（緊急 deploy / rollback 後の再 apply 等）
+# - Cloudflare 側 secrets が未設定の段階では preflight job で安全に skip し、
+#   merge を block しない（secrets 設定後の最初の push or workflow_dispatch で
+#   実 deploy が走る）
+#
+# 初回セットアップ・rollback・トラブルシューティングは
+# `docs/csa-server/deployment.md` を参照。
+
+name: Deploy Workers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/rshogi-csa-server-workers/**'
+      - 'crates/rshogi-csa-server/**'
+      - 'crates/rshogi-csa/**'
+      - 'crates/rshogi-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/deploy-workers.yml'
+  workflow_dispatch:
+
+# 同時 deploy を防ぐ。途中キャンセルすると build/upload 中の wrangler が中途半端な
+# 状態で止まる可能性があるため、`cancel-in-progress: false` で進行中 deploy は
+# 必ず完走させる。次の push は完了後に順次起動する。
+concurrency:
+  group: deploy-workers
+  cancel-in-progress: false
+
+jobs:
+  # secrets 未設定環境 (新規 fork / 初回セットアップ前) で deploy を試行して fail
+  # させないための前段。`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` の双方が
+  # 設定されているときだけ後続 deploy job を起動する。
+  preflight:
+    name: Check deploy prerequisites
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      can_deploy: ${{ steps.check.outputs.can_deploy }}
+    steps:
+      - name: Check Cloudflare credentials
+        id: check
+        env:
+          API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [[ -n "$API_TOKEN" && -n "$ACCOUNT_ID" ]]; then
+            echo "can_deploy=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Cloudflare credentials configured; deploy will proceed."
+          else
+            echo "can_deploy=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## ⚠️ Cloudflare deploy skipped"
+              echo
+              echo "GitHub Secrets \`CLOUDFLARE_API_TOKEN\` / \`CLOUDFLARE_ACCOUNT_ID\` are not configured."
+              echo
+              echo "See \`docs/csa-server/deployment.md\` §2 for initial setup."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning ::Cloudflare deploy skipped (secrets not configured). See docs/csa-server/deployment.md."
+          fi
+
+  deploy:
+    name: Deploy to Cloudflare Workers
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.can_deploy == 'true'
+    timeout-minutes: 20
+    env:
+      # workflow 上位の `-C target-cpu=x86-64-v2` (rust-ci.yml の env) を継承しない
+      # ように明示空文字。本 workflow は独立しているが、将来 workflow_call で連結
+      # された場合の defensive な設定。wasm32 ビルドでは x86 専用フラグが warning
+      # を大量に出すため。
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # `rust-toolchain.toml` が channel を pin しているため、wasm32 target は
+      # `dtolnay/rust-toolchain@stable` が入れる stable ではなく、pinned channel
+      # 側に明示的に追加する必要がある（`rust-ci.yml` の `wasm-build` job と
+      # 同じ手順、詳細はそちらの該当 step 参照）。手順を揃えることで `shared-key:
+      # wasm32` の rust-cache を両 job で安全に共有できる。
+      - name: Add wasm32 target to pinned toolchain
+        run: |
+          CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
+          echo "Adding wasm32-unknown-unknown to toolchain $CHANNEL"
+          rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # `rust-ci.yml` の `wasm-build` job (task 23.1) と同じ wasm32 sysroot キャッシュ
+          # namespace を共有する。CI 全体で wasm32 ビルドの cold start 時間を短縮できる。
+          shared-key: wasm32
+      - name: Verify wrangler.production.toml exists
+        run: |
+          test -f crates/rshogi-csa-server-workers/wrangler.production.toml || {
+            echo "::error ::crates/rshogi-csa-server-workers/wrangler.production.toml not found."
+            echo "::error ::Run from main branch with the file committed (see docs/csa-server/deployment.md §3)."
+            exit 1
+          }
+      # `cargo install` の成果物 (`~/.cargo/bin/worker-build`) は `Swatinem/rust-cache`
+      # の対象外なので、`actions/cache` で明示キャッシュする。バージョン pin
+      # (`worker-build@^0.8`) をキー名に含め、minor 更新時は cache miss → 再 install
+      # で追従する。Hit 時は `cargo install` step を skip して 30〜60 秒短縮する。
+      - name: Cache worker-build binary
+        id: cache-worker-build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/worker-build
+          key: worker-build-${{ runner.os }}-v0.8
+      - name: Install worker-build
+        if: steps.cache-worker-build.outputs.cache-hit != 'true'
+        run: cargo install -q worker-build@^0.8 --locked
+      # `cloudflare/wrangler-action@v3` で wrangler のインストール + deploy を実行する。
+      # Cloudflare 公式 action のため wrangler バージョン互換 / token 注入経路 /
+      # error message の形式が公式仕様に追従する利点がある。
+      - name: Deploy via wrangler-action
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: crates/rshogi-csa-server-workers
+          wranglerVersion: '3'
+          # `wrangler.production.toml` 内 `[build] command = "worker-build --release"` が
+          # `wrangler deploy` の前段で起動する。本 step ではビルドと upload を一気通貫で行う。
+          command: deploy --config wrangler.production.toml
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  # deploy 完了後に worker の `/health` を curl で叩いて 200 を確認する smoke check。
+  # `vars.WORKERS_HEALTH_URL` (repository variable) が設定されているときのみ実行する。
+  # 値が未設定でも deploy 自体は成功扱い（health URL が確定する前の段階で merge を
+  # block しない）。
+  smoke:
+    name: Smoke check deployed worker
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: ${{ vars.WORKERS_HEALTH_URL != '' }}
+    timeout-minutes: 5
+    steps:
+      - name: Curl /health endpoint
+        env:
+          HEALTH_URL: ${{ vars.WORKERS_HEALTH_URL }}
+        run: |
+          # Cloudflare 側の rollout は数秒〜数十秒の伝播時間がある。
+          # 短い間隔で 5 回までリトライする。
+          for attempt in 1 2 3 4 5; do
+            echo "[attempt $attempt] curl $HEALTH_URL"
+            if curl -fsS --max-time 10 "$HEALTH_URL"; then
+              echo
+              echo "✅ smoke check passed"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error ::Health check failed after 5 attempts. Investigate via 'wrangler tail --config crates/rshogi-csa-server-workers/wrangler.production.toml'."
+          exit 1
