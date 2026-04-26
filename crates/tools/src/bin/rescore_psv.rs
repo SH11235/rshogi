@@ -1810,7 +1810,7 @@ fn process_file_with_engine(
     std::thread::scope(|s| {
         let mut handles = Vec::new();
 
-        for (engine, chunk) in engines.iter_mut().zip(chunks.into_iter()) {
+        for (engine, chunk) in engines.iter_mut().zip(chunks) {
             let tx = tx.clone();
             let progress = std::sync::Arc::clone(&progress_arc);
             let error_count = &error_count;

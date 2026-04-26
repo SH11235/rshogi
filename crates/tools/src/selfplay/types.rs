@@ -84,53 +84,39 @@ impl InfoSnapshot {
         let mut i = 1;
         while i < tokens.len() {
             match tokens[i] {
-                "depth" => {
-                    if i + 1 < tokens.len() {
-                        depth = tokens[i + 1].parse::<u32>().ok();
-                        i += 1;
-                    }
+                "depth" if i + 1 < tokens.len() => {
+                    depth = tokens[i + 1].parse::<u32>().ok();
+                    i += 1;
                 }
-                "seldepth" => {
-                    if i + 1 < tokens.len() {
-                        seldepth = tokens[i + 1].parse::<u32>().ok();
-                        i += 1;
-                    }
+                "seldepth" if i + 1 < tokens.len() => {
+                    seldepth = tokens[i + 1].parse::<u32>().ok();
+                    i += 1;
                 }
-                "nodes" => {
-                    if i + 1 < tokens.len() {
-                        nodes = tokens[i + 1].parse::<u64>().ok();
-                        i += 1;
-                    }
+                "nodes" if i + 1 < tokens.len() => {
+                    nodes = tokens[i + 1].parse::<u64>().ok();
+                    i += 1;
                 }
-                "time" => {
-                    if i + 1 < tokens.len() {
-                        time_ms = tokens[i + 1].parse::<u64>().ok();
-                        i += 1;
-                    }
+                "time" if i + 1 < tokens.len() => {
+                    time_ms = tokens[i + 1].parse::<u64>().ok();
+                    i += 1;
                 }
-                "nps" => {
-                    if i + 1 < tokens.len() {
-                        nps = tokens[i + 1].parse::<u64>().ok();
-                        i += 1;
-                    }
+                "nps" if i + 1 < tokens.len() => {
+                    nps = tokens[i + 1].parse::<u64>().ok();
+                    i += 1;
                 }
-                "score" => {
-                    if i + 2 < tokens.len() {
-                        match tokens[i + 1] {
-                            "cp" => {
-                                score_cp = tokens[i + 2].parse::<i32>().ok();
-                                score_mate = None;
-                                i += 2;
-                            }
-                            "mate" => {
-                                score_mate = tokens[i + 2].parse::<i32>().ok();
-                                score_cp = None;
-                                i += 2;
-                            }
-                            _ => {}
-                        }
+                "score" if i + 2 < tokens.len() => match tokens[i + 1] {
+                    "cp" => {
+                        score_cp = tokens[i + 2].parse::<i32>().ok();
+                        score_mate = None;
+                        i += 2;
                     }
-                }
+                    "mate" => {
+                        score_mate = tokens[i + 2].parse::<i32>().ok();
+                        score_cp = None;
+                        i += 2;
+                    }
+                    _ => {}
+                },
                 "pv" => {
                     let mut j = i + 1;
                     while j < tokens.len() {

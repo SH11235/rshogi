@@ -1564,11 +1564,7 @@ where
             let helper_nodes = 0u64;
 
             let total_nodes = worker.state.nodes.saturating_add(helper_nodes);
-            let nps = if time_ms > 0 {
-                total_nodes.saturating_mul(1000) / time_ms
-            } else {
-                0
-            };
+            let nps = total_nodes.saturating_mul(1000).checked_div(time_ms).unwrap_or(0);
 
             for pv_idx in 0..processed_pv {
                 let info = SearchInfo {

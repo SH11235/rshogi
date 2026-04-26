@@ -228,40 +228,32 @@ impl InfoSnapshot {
 
         while i < tokens.len() {
             match tokens[i] {
-                "depth" => {
-                    if i + 1 < tokens.len() {
-                        if let Ok(val) = tokens[i + 1].parse() {
-                            self.depth = val;
-                        } else {
-                            eprintln!("Warning: Failed to parse depth: {}", tokens[i + 1]);
-                        }
+                "depth" if i + 1 < tokens.len() => {
+                    if let Ok(val) = tokens[i + 1].parse() {
+                        self.depth = val;
+                    } else {
+                        eprintln!("Warning: Failed to parse depth: {}", tokens[i + 1]);
                     }
                 }
-                "nodes" => {
-                    if i + 1 < tokens.len() {
-                        if let Ok(val) = tokens[i + 1].parse() {
-                            self.nodes = val;
-                        } else {
-                            eprintln!("Warning: Failed to parse nodes: {}", tokens[i + 1]);
-                        }
+                "nodes" if i + 1 < tokens.len() => {
+                    if let Ok(val) = tokens[i + 1].parse() {
+                        self.nodes = val;
+                    } else {
+                        eprintln!("Warning: Failed to parse nodes: {}", tokens[i + 1]);
                     }
                 }
-                "nps" => {
-                    if i + 1 < tokens.len() {
-                        if let Ok(val) = tokens[i + 1].parse() {
-                            self.nps = val;
-                        } else {
-                            eprintln!("Warning: Failed to parse nps: {}", tokens[i + 1]);
-                        }
+                "nps" if i + 1 < tokens.len() => {
+                    if let Ok(val) = tokens[i + 1].parse() {
+                        self.nps = val;
+                    } else {
+                        eprintln!("Warning: Failed to parse nps: {}", tokens[i + 1]);
                     }
                 }
-                "hashfull" => {
-                    if i + 1 < tokens.len() {
-                        if let Ok(val) = tokens[i + 1].parse() {
-                            self.hashfull = val;
-                        } else {
-                            eprintln!("Warning: Failed to parse hashfull: {}", tokens[i + 1]);
-                        }
+                "hashfull" if i + 1 < tokens.len() => {
+                    if let Ok(val) = tokens[i + 1].parse() {
+                        self.hashfull = val;
+                    } else {
+                        eprintln!("Warning: Failed to parse hashfull: {}", tokens[i + 1]);
                     }
                 }
                 _ => {}
