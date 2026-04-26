@@ -75,7 +75,7 @@ struct Cli {
     /// 同名ログイン重複時に旧セッションを evict する（既定は新接続を拒否）。
     /// `--allow-floodgate-features` opt-in が必須。`AgreeWaiting` 以降の
     /// 対局進行中セッションは evict されず新接続を拒否する。
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
     duplicate_login_evict_old: bool,
     /// 秒読み方式 / Fischer 方式で使う持ち時間 (秒)。
     #[arg(long, default_value_t = 600)]
@@ -515,12 +515,17 @@ fn load_players_toml(
 
 /// 駒落ち初期局面 TOML を読む。
 ///
-/// 期待する形式:
+/// 期待する形式（例は飛車落ち、上手 = 後手番が指し始める伝統に従い `w`）:
 /// ```toml
 /// [[handicap]]
-/// game_name = "floodgate-handicap-kakkin"
-/// sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
+/// game_name = "floodgate-handicap-hisya"
+/// sfen = "lnsgkgsnl/7b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1"
 /// ```
+///
+/// 各エントリの `sfen` は SFEN として最低限の形を満たす必要がある（盤面 / 手番 /
+/// 持駒 / 手数 の 4 フィールド、手番は `b` か `w`）。下流の `MatchInitialPosition`
+/// 経路は SFEN を信頼してパースするため、起動時点で fail-fast させて運用ミスを
+/// 早期に検出する。
 fn load_handicap_toml(path: &std::path::Path) -> anyhow::Result<HashMap<String, String>> {
     use serde::Deserialize;
     #[derive(Debug, Deserialize)]
@@ -535,7 +540,29 @@ fn load_handicap_toml(path: &std::path::Path) -> anyhow::Result<HashMap<String, 
     }
     let raw = std::fs::read_to_string(path)?;
     let root: Root = toml::from_str(&raw)?;
-    Ok(root.handicap.into_iter().map(|e| (e.game_name, e.sfen)).collect())
+    let mut out = HashMap::with_capacity(root.handicap.len());
+    for e in root.handicap {
+        validate_handicap_sfen(&e.game_name, &e.sfen)?;
+        out.insert(e.game_name, e.sfen);
+    }
+    Ok(out)
+}
+
+/// SFEN 文字列の最低限の形を検証する。盤面パース全体は下流に任せ、ここでは
+/// 「フィールド数」「手番文字」だけを確認して typo / 切り詰め行を弾く。
+fn validate_handicap_sfen(game_name: &str, sfen: &str) -> anyhow::Result<()> {
+    let fields: Vec<&str> = sfen.split_whitespace().collect();
+    anyhow::ensure!(
+        fields.len() >= 4,
+        "handicap SFEN for '{game_name}' must have at least 4 whitespace-separated fields (board / side / hand / move-number), got {} field(s): {sfen:?}",
+        fields.len()
+    );
+    let side = fields[1];
+    anyhow::ensure!(
+        side == "b" || side == "w",
+        "handicap SFEN for '{game_name}' has invalid side-to-move {side:?}, expected \"b\" or \"w\""
+    );
+    Ok(())
 }
 
 /// Floodgate スケジュール TOML を読む。
@@ -619,5 +646,43 @@ mod tests {
             ALLOW_FLOODGATE_FEATURES_FLAG,
             "ALLOW_FLOODGATE_FEATURES_FLAG must stay in sync with clap-generated flag",
         );
+    }
+
+    /// `validate_handicap_sfen` がフィールド数不足を弾く契約。
+    #[test]
+    fn validate_handicap_sfen_rejects_too_few_fields() {
+        let err = validate_handicap_sfen("g", "lnsgkgsnl/9 b").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("4"), "error must mention required field count: {msg}");
+        assert!(msg.contains("g"), "error must mention game_name: {msg}");
+    }
+
+    /// `validate_handicap_sfen` が手番文字を b/w 限定する契約。
+    #[test]
+    fn validate_handicap_sfen_rejects_unknown_side_to_move() {
+        let err = validate_handicap_sfen(
+            "g",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL x - 1",
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("side-to-move"), "error must mention side-to-move: {msg}");
+    }
+
+    /// `validate_handicap_sfen` が標準的な平手 / 駒落ち SFEN を受理する契約。
+    #[test]
+    fn validate_handicap_sfen_accepts_standard_and_handicap() {
+        // 平手 (`b` 始まり)
+        validate_handicap_sfen(
+            "hirate",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+        )
+        .unwrap();
+        // 飛車落ち (`w` 始まり)
+        validate_handicap_sfen(
+            "hisya",
+            "lnsgkgsnl/7b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1",
+        )
+        .unwrap();
     }
 }

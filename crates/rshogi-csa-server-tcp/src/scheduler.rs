@@ -577,9 +577,18 @@ where
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
-    let mut league = state.league.lock().await;
-    league.logout(&PlayerName::new(black));
-    league.logout(&PlayerName::new(white));
+    let black_player = PlayerName::new(black);
+    let white_player = PlayerName::new(white);
+    {
+        let mut league = state.league.lock().await;
+        league.logout(&black_player);
+        league.logout(&white_player);
+    }
+    // session_cancellers エントリも片付ける。`drive_game` に到達せず epilogue
+    // が走らないため、本経路で明示的に取り下げないと map が増え続ける。
+    let mut cancellers = state.session_cancellers.lock().await;
+    cancellers.remove(&black_player);
+    cancellers.remove(&white_player);
 }
 
 #[cfg(test)]
