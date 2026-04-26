@@ -2597,12 +2597,13 @@ where
 /// 該当 `game_id` の grace 中対局へ再参加させる。
 ///
 /// 失敗ケース:
-/// - `game_id` が registry に存在しない → `LOGIN:incorrect reconnect_unknown_game`
-/// - LOGIN handle / 色のいずれかが `disconnected_handle` / `disconnected_color`
-///   と一致しない → `LOGIN:incorrect reconnect_handle_mismatch`
-/// - `token` が `expected_token` と不一致 → `LOGIN:incorrect reconnect_token_mismatch`
+/// - `game_id` の登録なし / handle・色不一致 / token 不一致 のいずれも wire 上は
+///   `LOGIN:incorrect reconnect_rejected` で統一して返す (理由を分けて返すと
+///   side-channel で「特定 handle / game_id が grace 中に存在するか」を識別
+///   できる)。詳細は `tracing::warn!` のログ側にだけ残す。
 /// - registry エントリは残っているが `reconnect_tx` が既に消費済み (重複再接続) →
-///   `LOGIN:incorrect reconnect_already_resumed`
+///   `LOGIN:incorrect reconnect_already_resumed` (token 知識を持つ正当者の二重
+///   接続なので情報漏洩リスクは無く、原因を区別して返す)
 ///
 /// いずれの拒否ケースでも `reconnect_pending` のエントリは変更せず、対局状態
 /// は保持されたままになる (拒否は元の対局者による再試行を妨げない)。成功時のみ
@@ -2627,9 +2628,13 @@ where
         pendings.get(&req.game_id).cloned()
     };
     let Some(pending) = pending else {
-        let _ = transport
-            .send_line(&CsaLine::new("LOGIN:incorrect reconnect_unknown_game"))
-            .await;
+        tracing::warn!(
+            game_id = %req.game_id,
+            login_handle = %handle_player.as_str(),
+            login_color = ?requested_color,
+            "rejected reconnect: unknown game_id"
+        );
+        let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect reconnect_rejected")).await;
         return Ok(());
     };
     if pending.disconnected_handle.as_str() != handle_player.as_str()
@@ -2643,9 +2648,7 @@ where
             expected_color = ?pending.disconnected_color,
             "rejected reconnect: handle/color mismatch"
         );
-        let _ = transport
-            .send_line(&CsaLine::new("LOGIN:incorrect reconnect_handle_mismatch"))
-            .await;
+        let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect reconnect_rejected")).await;
         return Ok(());
     }
     if pending.expected_token.as_str() != req.token.as_str() {
@@ -2654,9 +2657,7 @@ where
             login_handle = %handle_player.as_str(),
             "rejected reconnect: token mismatch"
         );
-        let _ = transport
-            .send_line(&CsaLine::new("LOGIN:incorrect reconnect_token_mismatch"))
-            .await;
+        let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect reconnect_rejected")).await;
         return Ok(());
     }
 

@@ -1958,11 +1958,9 @@ fn reconnect_grace_rejects_token_mismatch_and_preserves_pending_state() {
         let (mut rx, mut wx) = connect(addr).await;
         send_line(&mut wx, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{bad_token}"))
             .await;
-        // 拒否経路: `LOGIN:<handle> OK` は送出されず、即 `LOGIN:incorrect ...` のみ届く。
-        assert_eq!(
-            read_line_raw(&mut rx).await.unwrap(),
-            "LOGIN:incorrect reconnect_token_mismatch"
-        );
+        // 拒否経路: `LOGIN:<handle> OK` は送出されず、即 `LOGIN:incorrect reconnect_rejected`
+        // のみ届く (拒否理由は side-channel 防止のため wire 上は統一)。
+        assert_eq!(read_line_raw(&mut rx).await.unwrap(), "LOGIN:incorrect reconnect_rejected");
         drop(rx);
         drop(wx);
 
