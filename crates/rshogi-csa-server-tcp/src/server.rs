@@ -524,9 +524,30 @@ where
     P: PasswordStore + 'static,
 {
     let listener = TcpListener::bind(state.config.bind_addr).await?;
+    run_server_with_listener(listener, state).await
+}
+
+/// 既に bind 済みの [`TcpListener`] を引き取り、accept ループを起動する。
+///
+/// テスト harness で `127.0.0.1:0` の空きポートを掴んだまま渡したいケース向けに
+/// `run_server` を分割したエントリポイント。`run_server` は `state.config.bind_addr`
+/// から自分で bind するが、テスト用に「先に listener を確保 → 実 addr を取得 →
+/// 同じ listener をそのままサーバーに渡す」フローを取らないと、probe を drop して
+/// から本体 bind する間に別タスクが同じポートを掴む TOCTOU race が起きるため、
+/// 別経路として公開する。
+pub async fn run_server_with_listener<R, K, P>(
+    listener: TcpListener,
+    state: Rc<SharedState<R, K, P>>,
+) -> Result<JoinHandle<()>, std::io::Error>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+{
+    let bind = listener.local_addr()?;
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        bind = %state.config.bind_addr,
+        bind = %bind,
         "rshogi-csa-server-tcp listening"
     );
     let handle = tokio::task::spawn_local(accept_loop(listener, state));

@@ -23,7 +23,9 @@ use rshogi_csa_server::{ClockSpec, FileKifuStorage};
 use rshogi_csa_server_tcp::auth::PlainPasswordHasher;
 use rshogi_csa_server_tcp::broadcaster::InMemoryBroadcaster;
 use rshogi_csa_server_tcp::rate_limit::IpLoginRateLimiter;
-use rshogi_csa_server_tcp::server::{InMemoryPasswordStore, ServerConfig, build_state, run_server};
+use rshogi_csa_server_tcp::server::{
+    InMemoryPasswordStore, ServerConfig, build_state, run_server_with_listener,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -127,23 +129,20 @@ async fn spawn_server_with_clock(tag: &str, clock: ClockSpec) -> (std::net::Sock
     ];
     let rate_storage = support::MemRateStorage::new(rate_records);
     let kifu_storage = FileKifuStorage::new(topdir.clone());
+    // `127.0.0.1:0` を bind したまま実 addr を取得し、同じ listener をそのまま
+    // サーバーに渡す。probe を drop してから run_server 内で再 bind すると、
+    // その隙に並行テストが同じポートを掴んで「相手のサーバーに繋がる」事故
+    // (kifu が別 topdir に書かれて NotFound) が起きるため。
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let actual_addr = listener.local_addr().unwrap();
     let config = ServerConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        bind_addr: actual_addr,
         kifu_topdir: topdir.clone(),
         clock,
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
         ..ServerConfig::sensible_defaults()
     };
-    // bind_addr=:0 を使うため、先に手動で bind してから actual addr を取る必要がある。
-    // ここでは ServerConfig を既定の :0 のまま build_state に渡し、run_server 内で
-    // bind される際のポートを取れない。そのため、TcpListener を先に bind して
-    // そのアドレスを config に書き戻す。
-    let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
-    let actual_addr = probe.local_addr().unwrap();
-    drop(probe); // 実際の bind は run_server が行う
-    let mut config = config;
-    config.bind_addr = actual_addr;
     let state = Rc::new(build_state(
         config,
         rate_storage,
@@ -153,7 +152,7 @@ async fn spawn_server_with_clock(tag: &str, clock: ClockSpec) -> (std::net::Sock
         IpLoginRateLimiter::default_limits(),
         InMemoryBroadcaster::new(),
     ));
-    let _handle = run_server(state).await.expect("run_server");
+    let _handle = run_server_with_listener(listener, state).await.expect("run_server");
     // accept ループが起動するまで少し待つ。
     tokio::time::sleep(Duration::from_millis(50)).await;
     (actual_addr, topdir)
@@ -330,8 +329,9 @@ fn login_ok_and_match_start_via_game_summary_and_agree() {
         assert!(b_end.iter().any(|l| l == "#RESIGN"));
 
         // 棋譜ファイルと 00LIST が出ていることを確認。
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let zerozero = tokio::fs::read_to_string(topdir.join("00LIST")).await.unwrap();
+        // 固定 sleep だと並行実行時に persist_kifu の完了前に read_to_string する race が
+        // 起きる (NotFound でテストが flaky 化する) ため、ポーリング helper で待機する。
+        let zerozero = wait_for_file_text(&topdir.join("00LIST")).await;
         assert!(zerozero.contains(&game_id), "00LIST: {zerozero}");
         assert!(zerozero.contains("alice bob"));
         let _ = tokio::fs::remove_dir_all(&topdir).await;
@@ -428,13 +428,16 @@ fn kifu_and_zerozero_list_match_format_contract() {
         send_line(&mut wb, "%TORYO").await;
         let _ = read_until(&mut rb, "#LOSE").await;
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
         // 棋譜の場所は YYYY/MM/DD/<game_id>.csa（game_id は YYYYMMDDHHMMSS+連番）。
+        // 本テストは「format contract」として日付ディレクトリ配置も検証対象に含める
+        // ため、再帰探索ではなく game_id から組み立てた具体パスをポーリングする。
+        // `relative_kifu_path` が壊れて別ディレクトリへ書き出すような回帰は、ここで
+        // タイムアウト → panic で検知される。
         let yyyy = &game_id[0..4];
         let mm = &game_id[4..6];
         let dd = &game_id[6..8];
         let csa_path = topdir.join(yyyy).join(mm).join(dd).join(format!("{game_id}.csa"));
-        let csa = tokio::fs::read_to_string(&csa_path).await.unwrap();
+        let csa = wait_for_file_text(&csa_path).await;
         // V2.2 ヘッダ、プレイヤ名、2 手、%TORYO の存在を確認。
         assert!(csa.starts_with("V2.2\n"));
         assert!(csa.contains("\nN+alice\n"));
@@ -443,7 +446,7 @@ fn kifu_and_zerozero_list_match_format_contract() {
         assert!(csa.contains("\n-3334FU,T"));
         assert!(csa.contains("\n%TORYO\n"));
         // 00LIST 1 行がフォーマット契約 (スペース区切り 6 カラム、末尾 #RESIGN) に従う。
-        let zerozero = tokio::fs::read_to_string(topdir.join("00LIST")).await.unwrap();
+        let zerozero = wait_for_file_text(&topdir.join("00LIST")).await;
         let line = zerozero.lines().last().unwrap();
         let cols: Vec<_> = line.split(' ').collect();
         assert_eq!(cols.len(), 6, "00LIST format expects 6 columns: {line}");
@@ -504,8 +507,10 @@ async fn spawn_server_with_agree_timeout(
     ];
     let rate_storage = support::MemRateStorage::new(rate_records);
     let kifu_storage = FileKifuStorage::new(topdir.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let actual_addr = listener.local_addr().unwrap();
     let config = ServerConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        bind_addr: actual_addr,
         kifu_topdir: topdir.clone(),
         clock: ClockSpec::Countdown {
             total_time_sec: 60,
@@ -515,11 +520,6 @@ async fn spawn_server_with_agree_timeout(
         agree_timeout,
         ..ServerConfig::sensible_defaults()
     };
-    let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
-    let actual_addr = probe.local_addr().unwrap();
-    drop(probe);
-    let mut config = config;
-    config.bind_addr = actual_addr;
     let state = Rc::new(build_state(
         config,
         rate_storage,
@@ -529,7 +529,7 @@ async fn spawn_server_with_agree_timeout(
         IpLoginRateLimiter::default_limits(),
         InMemoryBroadcaster::new(),
     ));
-    let _handle = run_server(state).await.expect("run_server");
+    let _handle = run_server_with_listener(listener, state).await.expect("run_server");
     tokio::time::sleep(Duration::from_millis(50)).await;
     (actual_addr, topdir)
 }
@@ -1110,8 +1110,10 @@ async fn spawn_server_custom(
         .collect();
     let rate_storage = support::MemRateStorage::new(rate_records);
     let kifu_storage = FileKifuStorage::new(topdir.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let actual_addr = listener.local_addr().unwrap();
     let config = ServerConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        bind_addr: actual_addr,
         kifu_topdir: topdir.clone(),
         clock,
         login_timeout: Duration::from_secs(10),
@@ -1121,11 +1123,6 @@ async fn spawn_server_custom(
         admin_handles,
         ..ServerConfig::sensible_defaults()
     };
-    let probe = tokio::net::TcpListener::bind(config.bind_addr).await.unwrap();
-    let actual_addr = probe.local_addr().unwrap();
-    drop(probe);
-    let mut config = config;
-    config.bind_addr = actual_addr;
     let state = Rc::new(build_state(
         config,
         rate_storage,
@@ -1135,7 +1132,7 @@ async fn spawn_server_custom(
         IpLoginRateLimiter::default_limits(),
         InMemoryBroadcaster::new(),
     ));
-    let _handle = run_server(state).await.expect("run_server");
+    let _handle = run_server_with_listener(listener, state).await.expect("run_server");
     tokio::time::sleep(Duration::from_millis(50)).await;
     (actual_addr, topdir)
 }
@@ -1522,9 +1519,8 @@ fn graceful_shutdown_disconnects_waiter_and_stops_accepting() {
         }];
         let rate_storage = support::MemRateStorage::new(rate_records);
         let kifu_storage = FileKifuStorage::new(topdir.clone());
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = probe.local_addr().unwrap();
-        drop(probe);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let config = ServerConfig {
             bind_addr: addr,
             kifu_topdir: topdir.clone(),
@@ -1541,7 +1537,7 @@ fn graceful_shutdown_disconnects_waiter_and_stops_accepting() {
             IpLoginRateLimiter::default_limits(),
             InMemoryBroadcaster::new(),
         ));
-        let _handle = run_server(state.clone()).await.expect("run_server");
+        let _handle = run_server_with_listener(listener, state.clone()).await.expect("run_server");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // 待機クライアントを接続。
@@ -1594,9 +1590,8 @@ fn graceful_shutdown_waits_for_in_flight_game_and_persists_kifu() {
             .collect();
         let rate_storage = support::MemRateStorage::new(rate_records);
         let kifu_storage = FileKifuStorage::new(topdir.clone());
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = probe.local_addr().unwrap();
-        drop(probe);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let config = ServerConfig {
             bind_addr: addr,
             kifu_topdir: topdir.clone(),
@@ -1613,7 +1608,7 @@ fn graceful_shutdown_waits_for_in_flight_game_and_persists_kifu() {
             IpLoginRateLimiter::default_limits(),
             InMemoryBroadcaster::new(),
         ));
-        let _handle = run_server(state.clone()).await.expect("run_server");
+        let _handle = run_server_with_listener(listener, state.clone()).await.expect("run_server");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let (mut rb, mut wb) = connect(addr).await;
@@ -1703,9 +1698,8 @@ fn graceful_shutdown_prunes_observer_subscribers() {
             .collect();
         let rate_storage = support::MemRateStorage::new(rate_records);
         let kifu_storage = FileKifuStorage::new(topdir.clone());
-        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = probe.local_addr().unwrap();
-        drop(probe);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let config = ServerConfig {
             bind_addr: addr,
             kifu_topdir: topdir.clone(),
@@ -1722,7 +1716,7 @@ fn graceful_shutdown_prunes_observer_subscribers() {
             IpLoginRateLimiter::default_limits(),
             InMemoryBroadcaster::new(),
         ));
-        let _handle = run_server(state.clone()).await.expect("run_server");
+        let _handle = run_server_with_listener(listener, state.clone()).await.expect("run_server");
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // 対局ペアを起動して AGREE まで進める。
