@@ -57,11 +57,18 @@ pub const KEY_PREFIX: &str = "floodgate-history";
 /// 1 対局分の R2 オブジェクトキーを生成する。
 ///
 /// キーは `floodgate-history/{YYYY}/{MM}/{DD}/{HHMMSS}-{game_id}.json` 形式で、
-/// `entry.start_time` (RFC3339) から日時要素を抽出して埋める。同一 game_id が
-/// 同一秒内に複数回 append されることは想定しない（`game_id` がサーバ発行で
-/// 一意のため）。
+/// `entry.end_time` (RFC3339) から日時要素を抽出して埋める。`start_time` ではなく
+/// `end_time` をキー軸に使うのは、`FloodgateHistoryStorage` の TCP 既定実装
+/// (`JsonlFloodgateHistoryStorage`) が append 順 = 終局確定順で `list_recent` を
+/// 返す契約に揃えるため。`start_time` でキーを切ると長時間対局（数時間続く対局）
+/// が短時間対局より古いキーになり、`limit` が小さい `list_recent` で直近終局が
+/// 欠落するケースがあり得る。
+///
+/// `game_id` はサーバ発行で一意（`/` `?` 等の R2 キー予約文字を含まない契約）。
+/// 安全側に倒すため、想定外の文字を含む場合は `StorageError::Malformed` を返す。
 pub fn entry_key(entry: &FloodgateHistoryEntry) -> Result<String, StorageError> {
-    let ts = parse_timestamp(&entry.start_time)?;
+    let ts = parse_timestamp(&entry.end_time)?;
+    let game_id = validate_key_component(&entry.game_id)?;
     Ok(format!(
         "{}/{:04}/{:02}/{:02}/{:02}{:02}{:02}-{}.json",
         KEY_PREFIX,
@@ -71,8 +78,30 @@ pub fn entry_key(entry: &FloodgateHistoryEntry) -> Result<String, StorageError> 
         ts.hour(),
         ts.minute(),
         ts.second(),
-        entry.game_id,
+        game_id,
     ))
+}
+
+/// `game_id` を R2 キーに埋め込む前のバリデーション。
+///
+/// R2 キーで `/` は階層区切りとして扱われ、day-shard prefix での list / sort が
+/// 壊れる。空文字や R2 が拒否する制御文字も同様に弾く。CSA プロトコル上 `game_id`
+/// は ASCII 英数 + `-` `_` のみを生成するサーバ前提なので、想定外の文字種は
+/// バグとして上位に伝える。
+fn validate_key_component(s: &str) -> Result<&str, StorageError> {
+    if s.is_empty() {
+        return Err(StorageError::Malformed("empty game_id in history entry".to_owned()));
+    }
+    if let Some(bad) = s.chars().find(|c| {
+        // R2 キーで安全に使える文字に絞る。サーバ発行 `game_id` の想定文字集合
+        // （ASCII 英数 + `-` + `_`）に該当しない場合は弾く。
+        !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+    }) {
+        return Err(StorageError::Malformed(format!(
+            "game_id {s:?} contains disallowed character {bad:?} for R2 key"
+        )));
+    }
+    Ok(s)
 }
 
 /// 指定日の R2 オブジェクトをすべて含む list prefix を返す。
@@ -94,7 +123,7 @@ pub fn parse_entry_jsonl(line: &str) -> Result<FloodgateHistoryEntry, StorageErr
 /// `FloodgateHistoryEntry` を JSONL 1 行（末尾改行なし）にシリアライズする。
 pub fn serialize_entry_jsonl(entry: &FloodgateHistoryEntry) -> Result<String, StorageError> {
     serde_json::to_string(entry)
-        .map_err(|e| StorageError::Io(format!("serialize history entry: {e}")))
+        .map_err(|e| StorageError::Malformed(format!("serialize history entry: {e}")))
 }
 
 fn parse_timestamp(rfc3339: &str) -> Result<DateTime<Utc>, StorageError> {
@@ -191,11 +220,23 @@ mod wasm32_impl {
                     return Ok(Vec::new());
                 }
                 let bucket = bucket?;
-                let mut entries: Vec<FloodgateHistoryEntry> = Vec::with_capacity(limit);
+                // `limit` は trait doc 上 `usize::MAX` も許容するため
+                // `Vec::with_capacity(limit)` だと OOM panic 経路を生み得る。
+                // 段階的成長に任せ、初期確保はゼロにしておく。
+                let mut entries: Vec<FloodgateHistoryEntry> = Vec::new();
                 let mut day = today?;
                 let mut days_scanned: u32 = 0;
                 while entries.len() < limit && days_scanned < MAX_DAYS_LOOKBACK {
                     let prefix = day_prefix(day);
+                    // R2 list は prefix 内 lexicographic 昇順でページングされるため、
+                    // ページ単位で逆順化すると「ページ N の末尾（新しい側）」より
+                    // 「ページ N+1 の末尾（さらに新しい）」が後で来る。1 日 >1000 件の
+                    // 状況で `limit` が小さいと先頭ページ（古い側）の末尾だけで
+                    // limit を満たし、当日最新を返せない契約破綻になる。これを防ぐ
+                    // ため、当日分のキーを一旦すべて pagination で集めてから一括逆順で
+                    // 走査する。1 日数百対局を想定する Floodgate 運用では 1 ページで
+                    // 終わるのが通常で、複数ページに膨らむのはバースト時のみ。
+                    let mut day_keys: Vec<String> = Vec::new();
                     let mut cursor: Option<String> = None;
                     loop {
                         let mut builder = bucket.list().prefix(prefix.clone());
@@ -205,35 +246,31 @@ mod wasm32_impl {
                         let page = builder.execute().await.map_err(|e| {
                             StorageError::Io(format!("R2 list prefix {prefix}: {e}"))
                         })?;
-                        // R2 は昇順に返すので、当日内の新しい順は逆走査で取り出す。
-                        // ページ境界をまたぐと「今のページの末尾（=新しい）」を全部
-                        // 取り終わってから次ページへ進むため、まず当ページの全 key を
-                        // 集めてから逆順で読み込む。
-                        let keys: Vec<String> =
-                            page.objects().iter().map(|obj| obj.key()).collect();
-                        for key in keys.into_iter().rev() {
-                            if entries.len() >= limit {
-                                break;
-                            }
-                            let obj = bucket
-                                .get(&key)
-                                .execute()
-                                .await
-                                .map_err(|e| StorageError::Io(format!("R2 get {key}: {e}")))?;
-                            let Some(obj) = obj else { continue };
-                            let Some(body) = obj.body() else { continue };
-                            let raw = body.text().await.map_err(|e| {
-                                StorageError::Io(format!("R2 read body {key}: {e}"))
-                            })?;
-                            entries.push(parse_entry_jsonl(&raw)?);
-                        }
-                        if entries.len() >= limit || !page.truncated() {
+                        day_keys.extend(page.objects().iter().map(|obj| obj.key()));
+                        if !page.truncated() {
                             break;
                         }
                         cursor = page.cursor();
                         if cursor.is_none() {
                             break;
                         }
+                    }
+                    for key in day_keys.into_iter().rev() {
+                        if entries.len() >= limit {
+                            break;
+                        }
+                        let obj = bucket
+                            .get(&key)
+                            .execute()
+                            .await
+                            .map_err(|e| StorageError::Io(format!("R2 get {key}: {e}")))?;
+                        let Some(obj) = obj else { continue };
+                        let Some(body) = obj.body() else { continue };
+                        let raw = body
+                            .text()
+                            .await
+                            .map_err(|e| StorageError::Io(format!("R2 read body {key}: {e}")))?;
+                        entries.push(parse_entry_jsonl(&raw)?);
                     }
                     // `pred_opt` は `0001-01-01` でのみ `None` を返す。Floodgate
                     // 運用で起こり得ないが、もし到達したら同じ日付を再走査せずに
@@ -322,21 +359,21 @@ mod tests {
     use super::test_fixture::InMemoryFloodgateHistoryStorage;
     use super::*;
 
-    fn entry(game_id: &str, start_time: &str) -> FloodgateHistoryEntry {
+    fn entry(game_id: &str, end_time: &str) -> FloodgateHistoryEntry {
         FloodgateHistoryEntry {
             game_id: game_id.to_owned(),
             game_name: "floodgate-600-10".to_owned(),
             black: "alice".to_owned(),
             white: "bob".to_owned(),
-            start_time: start_time.to_owned(),
-            end_time: "2026-04-26T13:00:00+00:00".to_owned(),
+            start_time: "2026-04-26T12:00:00+00:00".to_owned(),
+            end_time: end_time.to_owned(),
             result_code: "#RESIGN".to_owned(),
             winner: Some(HistoryColor::Black),
         }
     }
 
     #[test]
-    fn entry_key_uses_start_time_components() {
+    fn entry_key_uses_end_time_components() {
         let e = entry("g42", "2026-04-26T12:34:56+00:00");
         let key = entry_key(&e).unwrap();
         assert_eq!(key, "floodgate-history/2026/04/26/123456-g42.json");
@@ -351,7 +388,7 @@ mod tests {
 
     #[test]
     fn entry_key_normalizes_offset_to_utc() {
-        // start_time が JST (+09:00) 表記でも、キーは UTC に変換した日時で生成される
+        // end_time が JST (+09:00) 表記でも、キーは UTC に変換した日時で生成される
         // （day-shard が UTC 基準で揃うため）。
         let e = entry("g1", "2026-04-26T09:00:00+09:00");
         let key = entry_key(&e).unwrap();
@@ -363,6 +400,38 @@ mod tests {
         let e = entry("g1", "not a timestamp");
         let err = entry_key(&e).unwrap_err();
         assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn entry_key_rejects_game_id_with_slash() {
+        // `game_id` に `/` が混入すると R2 キーの階層構造が壊れて day-shard list が
+        // 破綻するため、キー生成時点で `Malformed` で弾く（防御層を 1 つ持つ）。
+        let e = entry("g1/evil", "2026-04-26T12:00:00+00:00");
+        let err = entry_key(&e).unwrap_err();
+        assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn entry_key_rejects_empty_game_id() {
+        let e = entry("", "2026-04-26T12:00:00+00:00");
+        let err = entry_key(&e).unwrap_err();
+        assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn entry_key_rejects_game_id_with_non_ascii() {
+        let e = entry("g\u{3042}", "2026-04-26T12:00:00+00:00");
+        let err = entry_key(&e).unwrap_err();
+        assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn entry_key_accepts_game_id_with_underscore_and_dash() {
+        // ASCII 英数 + `_` + `-` はサーバ発行 game_id で頻出（タイムスタンプ + 連番
+        // の連結等）。これらは R2 キーで安全に扱えるため受理する。
+        let e = entry("g_1-abc", "2026-04-26T12:00:00+00:00");
+        let key = entry_key(&e).unwrap();
+        assert!(key.ends_with("-g_1-abc.json"), "got: {key}");
     }
 
     #[test]
@@ -418,17 +487,61 @@ mod tests {
     async fn list_recent_returns_newest_first_within_single_instance() {
         let backing = Arc::new(Mutex::new(BTreeMap::new()));
         let storage = InMemoryFloodgateHistoryStorage::new(backing);
-        for (id, start) in [
+        for (id, end_time) in [
             ("g1", "2026-04-26T12:00:00+00:00"),
             ("g2", "2026-04-26T13:00:00+00:00"),
             ("g3", "2026-04-26T14:00:00+00:00"),
         ] {
-            storage.append(&entry(id, start)).await.unwrap();
+            storage.append(&entry(id, end_time)).await.unwrap();
         }
         let recent = storage.list_recent(2).await.unwrap();
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].game_id, "g3");
         assert_eq!(recent[1].game_id, "g2");
+    }
+
+    /// `entry_key` が `end_time` ベースで生成され BTreeMap が lexicographic に
+    /// sort することで、複数日にまたがる append でも `list_recent` が正しく
+    /// 新しい順を返す。R2 アダプタの day-walking ループ自体は wrangler dev で
+    /// 検証するが、キー設計（end_time の年月日要素を埋める）が day 境界を
+    /// またいで sortable である事実は本テストで固定する。
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_recent_orders_entries_across_day_boundaries() {
+        let backing = Arc::new(Mutex::new(BTreeMap::new()));
+        let storage = InMemoryFloodgateHistoryStorage::new(backing);
+        for (id, end_time) in [
+            // 意図的に append 順を時系列とは逆に並べて、結果が end_time 順で
+            // 揃うことを確認する（append 順そのものに依存しない契約）。
+            ("g3", "2026-04-26T15:00:00+00:00"), // Apr 26 昼
+            ("g1", "2026-04-25T23:30:00+00:00"), // Apr 25 深夜
+            ("g4", "2026-04-27T08:00:00+00:00"), // Apr 27 朝
+            ("g2", "2026-04-26T01:00:00+00:00"), // Apr 26 早朝
+        ] {
+            storage.append(&entry(id, end_time)).await.unwrap();
+        }
+        let recent = storage.list_recent(3).await.unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].game_id, "g4");
+        assert_eq!(recent[1].game_id, "g3");
+        assert_eq!(recent[2].game_id, "g2");
+    }
+
+    /// 同日内の 1 ページ最大（1000 件）を超える append でも、key の lexicographic
+    /// sort が「`end_time` 早い → 遅い」の順序を維持することを `entry_key` レベルで
+    /// 固定する。R2 の page-boundary を超えるシナリオは wrangler dev で実 R2 を
+    /// 使って検証するが、キー設計自体が page 境界をまたいでも単調順序を持つ
+    /// （= `Vec::extend` で全ページ収集 → `into_iter().rev()` で正しく新しい順を
+    /// 取り出せる）事実は本テストで固定する。
+    #[test]
+    fn entry_key_sorts_lexicographically_with_end_time() {
+        let early = entry("g1", "2026-04-26T08:30:15+00:00");
+        let mid = entry("g2", "2026-04-26T12:00:00+00:00");
+        let late = entry("g3", "2026-04-26T18:45:30+00:00");
+        let key_early = entry_key(&early).unwrap();
+        let key_mid = entry_key(&mid).unwrap();
+        let key_late = entry_key(&late).unwrap();
+        assert!(key_early < key_mid, "{key_early} < {key_mid}");
+        assert!(key_mid < key_late, "{key_mid} < {key_late}");
     }
 
     #[tokio::test(flavor = "current_thread")]
