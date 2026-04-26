@@ -140,7 +140,7 @@ jobs:
           run_install: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version-file: crates/rshogi-csa-server-workers/.node-version
           cache: 'pnpm'
           cache-dependency-path: crates/rshogi-csa-server-workers/pnpm-lock.yaml
       - name: Install Node deps (wrangler)
