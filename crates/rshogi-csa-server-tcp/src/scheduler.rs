@@ -137,13 +137,14 @@ pub(crate) fn build_strategy(name: &str) -> Result<Box<dyn PairingLogic>, String
 /// 戦略構築は task spawn より前にまとめて行い、未知 strategy 名は起動段階で
 /// `Err` を返す（run loop に入ってから初めて detected すると、無音でスケジュール
 /// が動かない事故になりうる）。
-pub fn run_schedules<R, K, P>(
-    state: Rc<SharedState<R, K, P>>,
+pub fn run_schedules<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
 ) -> Result<Vec<tokio::task::JoinHandle<()>>, String>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let schedules = state.config().floodgate_schedules.clone();
     let mut handles = Vec::with_capacity(schedules.len());
@@ -158,8 +159,8 @@ where
     Ok(handles)
 }
 
-async fn run_one_schedule<R, K, P, T>(
-    state: Rc<SharedState<R, K, P>>,
+async fn run_one_schedule<R, K, P, H, T>(
+    state: Rc<SharedState<R, K, P, H>>,
     schedule: FloodgateSchedule,
     strategy: Box<dyn PairingLogic>,
     timer: T,
@@ -167,6 +168,7 @@ async fn run_one_schedule<R, K, P, T>(
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
     T: FloodgateTimer + 'static,
 {
     // release ビルドでは scheduler ループ全体を `catch_unwind` で囲み、`fire_schedule`
@@ -199,8 +201,8 @@ async fn run_one_schedule<R, K, P, T>(
     }
 }
 
-async fn run_one_schedule_loop<R, K, P, T>(
-    state: Rc<SharedState<R, K, P>>,
+async fn run_one_schedule_loop<R, K, P, H, T>(
+    state: Rc<SharedState<R, K, P, H>>,
     schedule: FloodgateSchedule,
     strategy: Box<dyn PairingLogic>,
     timer: T,
@@ -208,6 +210,7 @@ async fn run_one_schedule_loop<R, K, P, T>(
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
     T: FloodgateTimer + 'static,
 {
     let game_name_for_log = schedule.game_name.clone();
@@ -250,14 +253,15 @@ async fn run_one_schedule_loop<R, K, P, T>(
 /// 副作用は state.waiting / state.league（drive_game 内）/ tokio::task::spawn_local
 /// に閉じる。ペアリング戦略の純関数部分とテスト容易性のため、戦略は呼び出し側が
 /// `&dyn PairingLogic` で渡す（`run_schedules` 経路では `Box<dyn ...>` を借りる）。
-pub(crate) async fn fire_schedule<R, K, P>(
-    state: Rc<SharedState<R, K, P>>,
+pub(crate) async fn fire_schedule<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
     schedule: &FloodgateSchedule,
     strategy: &dyn PairingLogic,
 ) where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let game_name = schedule.game_name();
 
@@ -407,8 +411,8 @@ pub(crate) async fn fire_schedule<R, K, P>(
 /// - drop により残った oneshot は recv Err になり、surviving waiter は
 ///   `WaiterOutcome::Completed` 経路で抜ける（drive_game に到達していないため
 ///   logout は本関数が代行する）
-async fn spawn_scheduled_drive<R, K, P>(
-    state: Rc<SharedState<R, K, P>>,
+async fn spawn_scheduled_drive<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
     game_name: GameName,
     black: WaitingSlot,
     white: WaitingSlot,
@@ -416,6 +420,7 @@ async fn spawn_scheduled_drive<R, K, P>(
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let (b_resp_tx, b_resp_rx) = oneshot::channel::<TcpTransport>();
     let (b_done_tx, b_done_rx) = oneshot::channel::<()>();
@@ -572,11 +577,12 @@ async fn notify_aborted_match(transport: &mut TcpTransport, game_name: &GameName
 
 /// `drain_for_game_name` で WaitingPool から取り出した両 player を League から
 /// logout する。drive_game に到達できなかった経路で必ず呼ぶ（League 孤児化防止）。
-async fn logout_pair<R, K, P>(state: &SharedState<R, K, P>, black: &str, white: &str)
+async fn logout_pair<R, K, P, H>(state: &SharedState<R, K, P, H>, black: &str, white: &str)
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let black_player = PlayerName::new(black);
     let white_player = PlayerName::new(white);

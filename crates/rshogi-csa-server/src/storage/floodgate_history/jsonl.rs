@@ -1,8 +1,4 @@
-//! Floodgate 履歴の永続化（開始時刻・ペア・結果を再起動跨ぎで参照可能にする）。
-//!
-//! 各対局の終局時に 1 件の [`FloodgateHistoryEntry`] を append-only な JSONL
-//! ファイルに追記する。読み込み側（`%%FLOODGATE history` 等）は近傍 N 件を
-//! tail で読む利用を想定し、行末改行で 1 entry = 1 line のフォーマットを採用。
+//! JSONL 形式の Floodgate 履歴ストレージ実装（tokio ランタイム前提）。
 //!
 //! # 設計判断
 //!
@@ -22,102 +18,17 @@
 
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::error::StorageError;
-use crate::types::{Color, GameId, GameName, PlayerName};
 
-/// Floodgate 履歴 1 件分のエントリ。`persist_kifu` 経由で終局確定時に
-/// `FloodgateHistoryStorage::append` に渡される。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FloodgateHistoryEntry {
-    /// 対局識別子（サーバ発行）。
-    pub game_id: String,
-    /// マッチが帰属する `game_name`（Floodgate スケジュールの分類軸と一致）。
-    pub game_name: String,
-    /// 先手プレイヤ名。
-    pub black: String,
-    /// 後手プレイヤ名。
-    pub white: String,
-    /// 対局開始時刻（UTC、RFC3339）。
-    pub start_time: String,
-    /// 対局終了時刻（UTC、RFC3339）。
-    pub end_time: String,
-    /// 終局理由コード（`#RESIGN` / `#TIME_UP` / `#ILLEGAL_MOVE` 等）。
-    pub result_code: String,
-    /// 勝者の色。引き分け（千日手・最大手数）や勝敗不確定の `#ABNORMAL` では
-    /// `None`。シリアライズ時は `Black` / `White` 文字列。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub winner: Option<HistoryColor>,
-}
-
-/// `Color` を JSON スキーマ用に文字列シリアライズする小 enum。core の
-/// `Color` は serde 派生していないので独立させる（serde を core 全体に拡げる
-/// より隔離する方が依存範囲が読みやすい）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub enum HistoryColor {
-    Black,
-    White,
-}
-
-impl From<Color> for HistoryColor {
-    fn from(c: Color) -> Self {
-        match c {
-            Color::Black => Self::Black,
-            Color::White => Self::White,
-        }
-    }
-}
-
-impl FloodgateHistoryEntry {
-    /// 業務型から構築するヘルパ。`persist_kifu` 経路から呼ばれる。
-    pub fn new(
-        game_id: &GameId,
-        game_name: &GameName,
-        black: &PlayerName,
-        white: &PlayerName,
-        start_time: DateTime<Utc>,
-        end_time: DateTime<Utc>,
-        result_code: &str,
-        winner: Option<Color>,
-    ) -> Self {
-        Self {
-            game_id: game_id.as_str().to_owned(),
-            game_name: game_name.as_str().to_owned(),
-            black: black.as_str().to_owned(),
-            white: white.as_str().to_owned(),
-            start_time: start_time.to_rfc3339(),
-            end_time: end_time.to_rfc3339(),
-            result_code: result_code.to_owned(),
-            winner: winner.map(HistoryColor::from),
-        }
-    }
-}
-
-/// Floodgate 履歴の永続化抽象。`append` で 1 件追加、`list_recent` で末尾 N 件
-/// 取得（運用ダッシュボードや x1 拡張コマンドで使う想定）。
-pub trait FloodgateHistoryStorage {
-    /// 1 件の履歴エントリを末尾に追記する。失敗時は `StorageError` で伝播。
-    fn append(
-        &self,
-        entry: &FloodgateHistoryEntry,
-    ) -> impl std::future::Future<Output = Result<(), StorageError>>;
-
-    /// 末尾 N 件を新しい順で取得する。`limit` は 0 で空 `Vec`、`usize::MAX` で
-    /// 全件相当（実装依存上限あり）。再起動を跨いだ参照に使う。
-    fn list_recent(
-        &self,
-        limit: usize,
-    ) -> impl std::future::Future<Output = Result<Vec<FloodgateHistoryEntry>, StorageError>>;
-}
+use super::port::FloodgateHistoryStorage;
+use super::types::FloodgateHistoryEntry;
 
 /// JSONL 形式（1 entry = 1 line）でファイルに append-only 記録する `FloodgateHistoryStorage`
-/// 実装。`tokio-transport` 配下でのみコンパイルされる。
+/// 実装。
 ///
 /// `append` は内部 `AsyncMutex` で直列化し、`OpenOptions::append(true)` で
 /// 開いて 1 entry を書く。POSIX 上の `O_APPEND` 書き込みは「現在のファイル末尾
@@ -230,6 +141,7 @@ impl FloodgateHistoryStorage for JsonlFloodgateHistoryStorage {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::HistoryColor;
     use super::*;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -245,22 +157,6 @@ mod tests {
             result_code: "#RESIGN".to_owned(),
             winner,
         }
-    }
-
-    #[test]
-    fn entry_round_trips_through_json() {
-        let e = entry("g1", Some(HistoryColor::Black));
-        let s = serde_json::to_string(&e).unwrap();
-        let parsed: FloodgateHistoryEntry = serde_json::from_str(&s).unwrap();
-        assert_eq!(parsed, e);
-    }
-
-    #[test]
-    fn entry_omits_winner_when_none() {
-        let e = entry("g1", None);
-        let s = serde_json::to_string(&e).unwrap();
-        // 引き分け（千日手 / 最大手数）では `winner` フィールドが出力に出ない。
-        assert!(!s.contains("\"winner\""), "winner must be omitted: {s}");
     }
 
     #[tokio::test(flavor = "current_thread")]
