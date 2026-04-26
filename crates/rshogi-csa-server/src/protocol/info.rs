@@ -14,6 +14,8 @@
 
 use crate::matching::league::PlayerStatus;
 use crate::matching::registry::GameListing;
+use crate::port::PlayerRateRecord;
+use crate::storage::floodgate_history::{FloodgateHistoryEntry, HistoryColor};
 use crate::types::{CsaLine, GameId, PlayerName};
 
 /// サーバー実装名。応答ヘッダに埋め込む固定識別子。
@@ -145,11 +147,75 @@ re-LOGIN to return to matchmaking)",
         "%%DELETEBUOY <game_name> - delete a buoy (admin only)",
         "%%GETBUOYCOUNT <game_name> - query remaining count of a buoy",
         "%%FORK <source_game> [buoy_name] [nth_move] - derive a buoy from an existing game",
+        "%%FLOODGATE history [N] - list the most recent N floodgate game results (default 10)",
+        "%%FLOODGATE rating <handle> - show stored rate / wins / losses for one handle",
     ];
     let mut out: Vec<CsaLine> =
         entries.iter().map(|e| CsaLine::new(format!("##[HELP] {e}"))).collect();
     out.push(CsaLine::new("##[HELP] END"));
     out
+}
+
+/// `%%FLOODGATE history [N]` に対する応答行を生成する。
+///
+/// `entries` は [`crate::FloodgateHistoryStorage::list_recent`] の戻り値をその
+/// ままの順序（新しい順）で渡す。各 entry を 1 行 `##[FLOODGATE] history
+/// <game_id> <game_name> <black> <white> <result_code> <winner> <start_time> <end_time>`
+/// として出し、末尾に `##[FLOODGATE] history END` を必ず付ける。空応答でも終端
+/// 行は出すため、persistent socket 上でクライアントは「END まで読む」契約で
+/// 安全に framing できる。
+///
+/// `<winner>` は `Black` / `White` / `-`（千日手・最大手数等で勝者不確定）の
+/// いずれか。プレイヤ名や game_id にスペースが混入すると行 framing が壊れるが、
+/// 既存の CSA `LOGIN` / [`FloodgateHistoryEntry`] の入力契約上 ASCII printable
+/// (空白を含まない) のみを許容しているため運用上問題にならない。
+pub fn floodgate_history_lines(entries: &[FloodgateHistoryEntry]) -> Vec<CsaLine> {
+    let mut out = Vec::with_capacity(entries.len() + 1);
+    for e in entries {
+        let winner = match e.winner {
+            Some(HistoryColor::Black) => "Black",
+            Some(HistoryColor::White) => "White",
+            None => "-",
+        };
+        out.push(CsaLine::new(format!(
+            "##[FLOODGATE] history {} {} {} {} {} {} {} {}",
+            e.game_id,
+            e.game_name,
+            e.black,
+            e.white,
+            e.result_code,
+            winner,
+            e.start_time,
+            e.end_time
+        )));
+    }
+    out.push(CsaLine::new("##[FLOODGATE] history END"));
+    out
+}
+
+/// `%%FLOODGATE rating <handle>` に対する応答行を生成する。
+///
+/// `record` が `Some` なら rate / wins / losses / last_game_id / last_modified を
+/// `##[FLOODGATE] rating <handle> <rate> <wins> <losses> <last_game_id> <last_modified>`
+/// で 1 行返す。`last_game_id` 未設定 (`None`) は `-` で埋める。
+/// `record` が `None`（未登録ハンドル）の場合は `##[FLOODGATE] rating NOT_FOUND
+/// <handle>` を返す。どちらの分岐でも末尾に `##[FLOODGATE] rating END` を付け、
+/// `##[FLOODGATE] history` と同じ framing 契約に揃える。
+pub fn floodgate_rating_lines(
+    handle: &PlayerName,
+    record: Option<&PlayerRateRecord>,
+) -> Vec<CsaLine> {
+    let head = match record {
+        Some(r) => {
+            let last_game_id = r.last_game_id.as_ref().map_or("-", GameId::as_str);
+            CsaLine::new(format!(
+                "##[FLOODGATE] rating {} {} {} {} {} {}",
+                r.name, r.rate, r.wins, r.losses, last_game_id, r.last_modified
+            ))
+        }
+        None => CsaLine::new(format!("##[FLOODGATE] rating NOT_FOUND {handle}")),
+    };
+    vec![head, CsaLine::new("##[FLOODGATE] rating END")]
 }
 
 #[cfg(test)]
@@ -186,6 +252,8 @@ mod tests {
             "%%DELETEBUOY",
             "%%GETBUOYCOUNT",
             "%%FORK",
+            "%%FLOODGATE history",
+            "%%FLOODGATE rating",
         ] {
             assert!(joined.contains(cmd), "help missing {cmd}: {joined}");
         }
@@ -342,5 +410,109 @@ mod tests {
         assert!(lines.contains(&"##[WHO] d playing:x".to_owned()));
         assert!(lines.contains(&"##[WHO] e finished".to_owned()));
         assert!(lines.contains(&"##[WHO] f connected".to_owned()));
+    }
+
+    fn sample_history_entry(game_id: &str, winner: Option<HistoryColor>) -> FloodgateHistoryEntry {
+        FloodgateHistoryEntry {
+            game_id: game_id.to_owned(),
+            game_name: "floodgate-600-10".to_owned(),
+            black: "alice".to_owned(),
+            white: "bob".to_owned(),
+            start_time: "2026-04-26T12:00:00Z".to_owned(),
+            end_time: "2026-04-26T12:30:00Z".to_owned(),
+            result_code: "#RESIGN".to_owned(),
+            winner,
+        }
+    }
+
+    #[test]
+    fn floodgate_history_lines_emit_one_row_per_entry_then_terminator() {
+        let entries = vec![
+            sample_history_entry("g-1", Some(HistoryColor::White)),
+            sample_history_entry("g-2", None),
+        ];
+        let lines: Vec<String> =
+            floodgate_history_lines(&entries).into_iter().map(|l| l.into_string()).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "##[FLOODGATE] history g-1 floodgate-600-10 alice bob #RESIGN White \
+                 2026-04-26T12:00:00Z 2026-04-26T12:30:00Z"
+                    .to_owned(),
+                "##[FLOODGATE] history g-2 floodgate-600-10 alice bob #RESIGN - \
+                 2026-04-26T12:00:00Z 2026-04-26T12:30:00Z"
+                    .to_owned(),
+                "##[FLOODGATE] history END".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn floodgate_history_lines_empty_yields_only_terminator() {
+        let lines = floodgate_history_lines(&[]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].as_str(), "##[FLOODGATE] history END");
+    }
+
+    fn sample_rate_record(name: &str, last_game_id: Option<&str>) -> PlayerRateRecord {
+        PlayerRateRecord {
+            name: PlayerName::new(name),
+            rate: 1500,
+            wins: 10,
+            losses: 7,
+            last_game_id: last_game_id.map(GameId::new),
+            last_modified: "2026-04-26T12:30:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn floodgate_rating_lines_for_known_handle_emits_record_then_terminator() {
+        let record = sample_rate_record("alice", Some("20260426-0001"));
+        let handle = PlayerName::new("alice");
+        let lines: Vec<String> = floodgate_rating_lines(&handle, Some(&record))
+            .into_iter()
+            .map(|l| l.into_string())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "##[FLOODGATE] rating alice 1500 10 7 20260426-0001 2026-04-26T12:30:00Z"
+                    .to_owned(),
+                "##[FLOODGATE] rating END".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn floodgate_rating_lines_omits_last_game_id_when_absent() {
+        let record = sample_rate_record("bob", None);
+        let handle = PlayerName::new("bob");
+        let lines: Vec<String> = floodgate_rating_lines(&handle, Some(&record))
+            .into_iter()
+            .map(|l| l.into_string())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "##[FLOODGATE] rating bob 1500 10 7 - 2026-04-26T12:30:00Z".to_owned(),
+                "##[FLOODGATE] rating END".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn floodgate_rating_lines_for_unknown_handle_emits_not_found() {
+        let handle = PlayerName::new("ghost");
+        let lines: Vec<String> = floodgate_rating_lines(&handle, None)
+            .into_iter()
+            .map(|l| l.into_string())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "##[FLOODGATE] rating NOT_FOUND ghost".to_owned(),
+                "##[FLOODGATE] rating END".to_owned(),
+            ]
+        );
     }
 }

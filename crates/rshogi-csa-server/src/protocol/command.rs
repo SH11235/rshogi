@@ -132,6 +132,24 @@ pub enum ClientCommand {
         /// 何手目からフォークするか（任意）。
         nth_move: Option<u32>,
     },
+    /// `%%FLOODGATE history [N]`
+    ///
+    /// `FloodgateHistoryStorage::list_recent(N)` 経由で直近 N 件の対局履歴を
+    /// CSA 拡張応答書式で返す照会コマンド。`limit` 省略時は frontend 側で
+    /// 既定値 (10 件) を補う契約。
+    FloodgateHistory {
+        /// 取得件数。`None` の場合は呼び出し側で既定値を補う。
+        limit: Option<usize>,
+    },
+    /// `%%FLOODGATE rating <handle>`
+    ///
+    /// `RateStorage::load(handle)` 経由で 1 名分の rate / wins / losses /
+    /// last_game_id / last_modified を CSA 拡張応答書式で返す照会コマンド。
+    /// 該当ハンドル不在は応答内で NOT_FOUND を返す（パースエラーには倒さない）。
+    FloodgateRating {
+        /// 照会対象のプレイヤ名。
+        handle: PlayerName,
+    },
 }
 
 /// 1 行の生 CSA テキストをパースして [`ClientCommand`] に変換する。
@@ -385,7 +403,39 @@ fn parse_x1(rest: &str) -> Result<ClientCommand, ProtocolError> {
                 nth_move: nth,
             })
         }
+        "FLOODGATE" => parse_floodgate_subcommand(tail),
         other => Err(ProtocolError::Unknown(format!("%%{other}"))),
+    }
+}
+
+fn parse_floodgate_subcommand(tail: &str) -> Result<ClientCommand, ProtocolError> {
+    let mut parts = tail.splitn(2, char::is_whitespace);
+    let sub = parts.next().unwrap_or("");
+    let args = parts.next().unwrap_or("").trim_start();
+    match sub {
+        "" => Err(ProtocolError::Malformed("%%FLOODGATE: missing subcommand".into())),
+        "history" => {
+            let mut toks = args.split_whitespace();
+            let limit = match toks.next() {
+                None => None,
+                Some(n) => Some(n.parse::<usize>().map_err(|e| {
+                    ProtocolError::Malformed(format!("%%FLOODGATE history: bad limit ({e})"))
+                })?),
+            };
+            if toks.next().is_some() {
+                return Err(ProtocolError::Malformed(
+                    "%%FLOODGATE history: unexpected trailing tokens".into(),
+                ));
+            }
+            Ok(ClientCommand::FloodgateHistory { limit })
+        }
+        "rating" => {
+            let handle = single_token(args, "%%FLOODGATE rating", "handle")?;
+            Ok(ClientCommand::FloodgateRating {
+                handle: PlayerName::new(handle),
+            })
+        }
+        other => Err(ProtocolError::Unknown(format!("%%FLOODGATE {other}"))),
     }
 }
 
@@ -521,6 +571,13 @@ pub fn serialize_client_command(cmd: &ClientCommand) -> String {
                 (None, None) => {}
             }
             s
+        }
+        ClientCommand::FloodgateHistory { limit } => match limit {
+            Some(n) => format!("%%FLOODGATE history {n}"),
+            None => "%%FLOODGATE history".to_owned(),
+        },
+        ClientCommand::FloodgateRating { handle } => {
+            format!("%%FLOODGATE rating {}", handle.as_str())
         }
     }
 }
@@ -1011,6 +1068,11 @@ mod tests {
             ClientCommand::Chat {
                 message: "hello world".to_owned(),
             },
+            ClientCommand::FloodgateHistory { limit: None },
+            ClientCommand::FloodgateHistory { limit: Some(5) },
+            ClientCommand::FloodgateRating {
+                handle: PlayerName::new("alice"),
+            },
         ];
 
         for cmd in samples {
@@ -1020,5 +1082,64 @@ mod tests {
             });
             assert_eq!(parsed, cmd, "roundtrip mismatch for {cmd:?} => `{line}`");
         }
+    }
+
+    #[test]
+    fn parses_floodgate_history_without_limit() {
+        let cmd = parse_command(&line("%%FLOODGATE history")).unwrap();
+        assert_eq!(cmd, ClientCommand::FloodgateHistory { limit: None });
+    }
+
+    #[test]
+    fn parses_floodgate_history_with_limit() {
+        let cmd = parse_command(&line("%%FLOODGATE history 5")).unwrap();
+        assert_eq!(cmd, ClientCommand::FloodgateHistory { limit: Some(5) });
+    }
+
+    #[test]
+    fn rejects_floodgate_history_with_bad_limit() {
+        let err = parse_command(&line("%%FLOODGATE history abc")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_floodgate_history_with_extra_tokens() {
+        let err = parse_command(&line("%%FLOODGATE history 5 6")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parses_floodgate_rating_with_handle() {
+        let cmd = parse_command(&line("%%FLOODGATE rating alice")).unwrap();
+        assert_eq!(
+            cmd,
+            ClientCommand::FloodgateRating {
+                handle: PlayerName::new("alice"),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_floodgate_rating_without_handle() {
+        let err = parse_command(&line("%%FLOODGATE rating")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_floodgate_rating_with_extra_tokens() {
+        let err = parse_command(&line("%%FLOODGATE rating alice bob")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_floodgate_without_subcommand() {
+        let err = parse_command(&line("%%FLOODGATE")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_floodgate_unknown_subcommand() {
+        let err = parse_command(&line("%%FLOODGATE rank alice")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Unknown(_)), "got {err:?}");
     }
 }

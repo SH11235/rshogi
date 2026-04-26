@@ -35,6 +35,7 @@ mod support {
     use super::*;
     use rshogi_csa_server::error::StorageError;
     use rshogi_csa_server::port::{PlayerRateRecord, RateStorage};
+    use rshogi_csa_server::{FloodgateHistoryEntry, FloodgateHistoryStorage};
     use std::cell::RefCell;
 
     pub struct MemRateStorage {
@@ -65,6 +66,36 @@ mod support {
 
         async fn list_all(&self) -> Result<Vec<PlayerRateRecord>, StorageError> {
             Ok(self.data.borrow().values().cloned().collect())
+        }
+    }
+
+    /// `%%FLOODGATE history` 経路の golden test に使う in-memory `FloodgateHistoryStorage`。
+    /// `JsonlFloodgateHistoryStorage` は tokio fs を要求するためテスト用 stub として
+    /// 別途用意する。`list_recent` は append 順を新しい順に走査して `limit` 件返す
+    /// 既定実装と同じ挙動。
+    pub struct MemHistoryStorage {
+        data: RefCell<Vec<FloodgateHistoryEntry>>,
+    }
+
+    impl MemHistoryStorage {
+        pub fn new(entries: Vec<FloodgateHistoryEntry>) -> Self {
+            Self {
+                data: RefCell::new(entries),
+            }
+        }
+    }
+
+    impl FloodgateHistoryStorage for MemHistoryStorage {
+        async fn append(&self, entry: &FloodgateHistoryEntry) -> Result<(), StorageError> {
+            self.data.borrow_mut().push(entry.clone());
+            Ok(())
+        }
+
+        async fn list_recent(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<FloodgateHistoryEntry>, StorageError> {
+            Ok(self.data.borrow().iter().rev().take(limit).cloned().collect())
         }
     }
 }
@@ -2006,6 +2037,195 @@ fn reconnect_grace_falls_back_to_abnormal_when_deadline_expires() {
 
         drop(rb);
         drop(wb);
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// `MemHistoryStorage` を仕込んだサーバーを立ち上げる x1 拡張用ヘルパ。
+/// `entries` は append 順（古いものから新しいもの）で渡す。
+async fn spawn_server_with_history(
+    tag: &str,
+    entries: Vec<rshogi_csa_server::FloodgateHistoryEntry>,
+) -> (std::net::SocketAddr, PathBuf) {
+    let topdir = unique_topdir(tag);
+    let mut password_map = HashMap::new();
+    password_map.insert("alice".to_owned(), "pw".to_owned());
+    password_map.insert("bob".to_owned(), "pw".to_owned());
+    let rate_records = vec![
+        PlayerRateRecord {
+            name: PlayerName::new("alice"),
+            rate: 1500,
+            wins: 4,
+            losses: 2,
+            last_game_id: Some(rshogi_csa_server::types::GameId::new("20260426-0001")),
+            last_modified: "2026-04-26T12:30:00Z".to_owned(),
+        },
+        PlayerRateRecord {
+            name: PlayerName::new("bob"),
+            rate: 1480,
+            wins: 0,
+            losses: 0,
+            last_game_id: None,
+            last_modified: "2026-04-17T00:00:00Z".to_owned(),
+        },
+    ];
+    let rate_storage = support::MemRateStorage::new(rate_records);
+    let kifu_storage = FileKifuStorage::new(topdir.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let actual_addr = listener.local_addr().unwrap();
+    let config = ServerConfig {
+        bind_addr: actual_addr,
+        kifu_topdir: topdir.clone(),
+        clock: ClockSpec::Countdown {
+            total_time_sec: 60,
+            byoyomi_sec: 10,
+        },
+        login_timeout: Duration::from_secs(10),
+        agree_timeout: Duration::from_secs(30),
+        ..ServerConfig::sensible_defaults()
+    };
+    let history_storage = Some(support::MemHistoryStorage::new(entries));
+    let state = Rc::new(build_state(
+        config,
+        rate_storage,
+        kifu_storage,
+        InMemoryPasswordStore { map: password_map },
+        Box::new(PlainPasswordHasher::new()),
+        IpLoginRateLimiter::default_limits(),
+        InMemoryBroadcaster::new(),
+        history_storage,
+    ));
+    let _handle = run_server_with_listener(listener, state).await.expect("run_server");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (actual_addr, topdir)
+}
+
+#[test]
+fn x1_floodgate_history_returns_recent_entries_with_terminator() {
+    use rshogi_csa_server::{FloodgateHistoryEntry, HistoryColor};
+    run_local(|| async {
+        let entries = vec![
+            FloodgateHistoryEntry {
+                game_id: "20260426-0001".to_owned(),
+                game_name: "floodgate-600-10".to_owned(),
+                black: "alice".to_owned(),
+                white: "bob".to_owned(),
+                start_time: "2026-04-26T12:00:00Z".to_owned(),
+                end_time: "2026-04-26T12:30:00Z".to_owned(),
+                result_code: "#RESIGN".to_owned(),
+                winner: Some(HistoryColor::Black),
+            },
+            FloodgateHistoryEntry {
+                game_id: "20260426-0002".to_owned(),
+                game_name: "floodgate-300-10".to_owned(),
+                black: "carol".to_owned(),
+                white: "dave".to_owned(),
+                start_time: "2026-04-26T13:00:00Z".to_owned(),
+                end_time: "2026-04-26T13:20:00Z".to_owned(),
+                result_code: "#SENNICHITE".to_owned(),
+                winner: None,
+            },
+        ];
+        let (addr, topdir) = spawn_server_with_history("x1_floodgate_history", entries).await;
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN alice+g1+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:alice OK");
+
+        send_line(&mut wa, "%%FLOODGATE history").await;
+        let mut rows: Vec<String> = Vec::new();
+        for _ in 0..20 {
+            let line = read_line_raw(&mut ra).await.unwrap();
+            let is_end = line == "##[FLOODGATE] history END";
+            rows.push(line);
+            if is_end {
+                break;
+            }
+        }
+        // append 順は alice→carol、`list_recent` は新しい順なので carol が先頭。
+        assert_eq!(
+            rows,
+            vec![
+                "##[FLOODGATE] history 20260426-0002 floodgate-300-10 carol dave #SENNICHITE - \
+                 2026-04-26T13:00:00Z 2026-04-26T13:20:00Z"
+                    .to_owned(),
+                "##[FLOODGATE] history 20260426-0001 floodgate-600-10 alice bob #RESIGN Black \
+                 2026-04-26T12:00:00Z 2026-04-26T12:30:00Z"
+                    .to_owned(),
+                "##[FLOODGATE] history END".to_owned(),
+            ]
+        );
+
+        // limit=1 で最新 1 件のみ返ることも確認 (cap 100 内で limit が効くこと)。
+        send_line(&mut wa, "%%FLOODGATE history 1").await;
+        let mut rows1: Vec<String> = Vec::new();
+        for _ in 0..10 {
+            let line = read_line_raw(&mut ra).await.unwrap();
+            let is_end = line == "##[FLOODGATE] history END";
+            rows1.push(line);
+            if is_end {
+                break;
+            }
+        }
+        assert_eq!(rows1.len(), 2);
+        assert!(rows1[0].contains("20260426-0002"), "expected newest first: {rows1:?}");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn x1_floodgate_history_when_storage_unconfigured_returns_error_with_terminator() {
+    // 既存 `spawn_server` は `None::<JsonlFloodgateHistoryStorage>` を渡すため、
+    // history storage 未配線時は ERROR + END で framing が崩れない契約を固定する。
+    run_local(|| async {
+        let (addr, topdir) = spawn_server("x1_floodgate_history_none").await;
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN alice+g1+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:alice OK");
+
+        send_line(&mut wa, "%%FLOODGATE history").await;
+        let head = read_line_raw(&mut ra).await.unwrap();
+        let end = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(head, "##[FLOODGATE] history ERROR not_configured");
+        assert_eq!(end, "##[FLOODGATE] history END");
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn x1_floodgate_rating_returns_record_for_known_handle_and_not_found_otherwise() {
+    use rshogi_csa_server::FloodgateHistoryEntry;
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_history("x1_floodgate_rating", Vec::<FloodgateHistoryEntry>::new())
+                .await;
+        let (mut ra, mut wa) = connect(addr).await;
+        send_line(&mut wa, "LOGIN alice+g1+black pw x1").await;
+        assert_eq!(read_line_raw(&mut ra).await.unwrap(), "LOGIN:alice OK");
+
+        // alice は history-fixture 由来のレコードを持つ (rate=1500, wins=4, losses=2,
+        // last_game_id=20260426-0001, last_modified=2026-04-26T12:30:00Z)。
+        send_line(&mut wa, "%%FLOODGATE rating alice").await;
+        let head = read_line_raw(&mut ra).await.unwrap();
+        let end = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(head, "##[FLOODGATE] rating alice 1500 4 2 20260426-0001 2026-04-26T12:30:00Z");
+        assert_eq!(end, "##[FLOODGATE] rating END");
+
+        // bob は last_game_id 未設定なので `-` で埋まる。
+        send_line(&mut wa, "%%FLOODGATE rating bob").await;
+        let head = read_line_raw(&mut ra).await.unwrap();
+        let end = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(head, "##[FLOODGATE] rating bob 1480 0 0 - 2026-04-17T00:00:00Z");
+        assert_eq!(end, "##[FLOODGATE] rating END");
+
+        // 未登録ハンドルは NOT_FOUND + END で framing 維持。
+        send_line(&mut wa, "%%FLOODGATE rating ghost").await;
+        let head = read_line_raw(&mut ra).await.unwrap();
+        let end = read_line_raw(&mut ra).await.unwrap();
+        assert_eq!(head, "##[FLOODGATE] rating NOT_FOUND ghost");
+        assert_eq!(end, "##[FLOODGATE] rating END");
+
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }

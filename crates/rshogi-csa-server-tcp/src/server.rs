@@ -1630,6 +1630,50 @@ where
                     },
                 }
             }
+            ClientCommand::FloodgateHistory { limit } => {
+                // 直近 N 件取得。`limit` 省略は既定値 10 件で補い、上限は 100 件に
+                // クランプする (1 行 200 byte 想定で 1 応答あたり 20KB 上限。
+                // persistent socket の中継 buffer を圧迫しないため)。
+                let effective_limit = limit.unwrap_or(10).min(100);
+                let lines = match state.history_storage.as_ref() {
+                    Some(history) => match history.list_recent(effective_limit).await {
+                        Ok(entries) => {
+                            rshogi_csa_server::protocol::info::floodgate_history_lines(&entries)
+                        }
+                        Err(e) => vec![
+                            CsaLine::new(format!("##[FLOODGATE] history ERROR {e}")),
+                            CsaLine::new("##[FLOODGATE] history END"),
+                        ],
+                    },
+                    None => vec![
+                        CsaLine::new("##[FLOODGATE] history ERROR not_configured"),
+                        CsaLine::new("##[FLOODGATE] history END"),
+                    ],
+                };
+                Some(lines)
+            }
+            ClientCommand::FloodgateRating {
+                handle: target_handle,
+            } => {
+                // 参照系のため admin 権限不要。`load` で `Ok(None)` の場合は応答内
+                // で NOT_FOUND を返し、永続化エラー (`Err`) は ERROR を返す（kifu 等
+                // と同じ silent fail 経路は採らず、storage 実装の異常を運用観測できる
+                // ように生のメッセージを乗せる）。
+                let lines = match state.rate_storage.load(&target_handle).await {
+                    Ok(record) => rshogi_csa_server::protocol::info::floodgate_rating_lines(
+                        &target_handle,
+                        record.as_ref(),
+                    ),
+                    Err(e) => vec![
+                        CsaLine::new(format!(
+                            "##[FLOODGATE] rating ERROR {} {e}",
+                            target_handle.as_str()
+                        )),
+                        CsaLine::new("##[FLOODGATE] rating END"),
+                    ],
+                };
+                Some(lines)
+            }
             _ => None,
         };
         let Some(lines) = replies else {
