@@ -197,9 +197,6 @@ impl FloodgateHistoryStorage for JsonlFloodgateHistoryStorage {
             if limit == 0 {
                 return Ok(Vec::new());
             }
-            // TODO: 件数が膨らんだ場合は末尾シーク + バッファ後退で `\n` を逆方向に
-            //       探す実装に置き換え検討（現状は logrotate 前提の中小規模運用で
-            //       全読みでも実害が無いため `read_to_string` で済ませている）。
             let raw = match tokio::fs::read_to_string(&path).await {
                 Ok(s) => s,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
