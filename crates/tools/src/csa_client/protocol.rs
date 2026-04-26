@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use rshogi_csa::{Color, CsaMove, ParsedMove, Position, parse_csa_full};
+use rshogi_csa_server::protocol::command::{ClientCommand, serialize_client_command};
+use rshogi_csa_server::types::{CsaMoveToken, GameId, PlayerName, Secret};
 
 use super::event::Event;
 
@@ -135,7 +137,12 @@ impl CsaConnection {
     /// ログイン
     pub fn login(&mut self, id: &str, password: &str) -> Result<()> {
         self.password = password.to_string();
-        let cmd = format!("LOGIN {id} {password}");
+        let cmd = serialize_client_command(&ClientCommand::Login {
+            name: PlayerName::new(id),
+            password: Secret::new(password),
+            x1: false,
+            reconnect: None,
+        });
         self.send_line(&cmd)?;
         let response = self.recv_line_blocking(Duration::from_secs(15))?;
         if response.starts_with("LOGIN:") && response.contains("OK") {
@@ -311,7 +318,10 @@ impl CsaConnection {
 
     /// AGREE を送信して START を待つ
     pub fn agree_and_wait_start(&mut self, game_id: &str) -> Result<()> {
-        self.send_line(&format!("AGREE {game_id}"))?;
+        let cmd = serialize_client_command(&ClientCommand::Agree {
+            game_id: Some(GameId::new(game_id)),
+        });
+        self.send_line(&cmd)?;
         loop {
             let line = self.recv_line_blocking(Duration::from_secs(60))?;
             if line.starts_with("START:") {
@@ -360,33 +370,37 @@ impl CsaConnection {
 
     /// 指し手をサーバーに送信する
     pub fn send_move(&mut self, csa_move: &str) -> Result<()> {
-        self.send_line(csa_move)
+        let cmd = serialize_client_command(&ClientCommand::Move {
+            token: CsaMoveToken::new(csa_move),
+            comment: None,
+        });
+        self.send_line(&cmd)
     }
 
     /// 指し手 + floodgate コメント（評価値・PV）を送信する。
-    /// コメントは `+7776FU,'* 123 +7776FU -3334FU` のようにカンマ区切りで同一行に付加する。
+    /// `comment` には `'` プレフィックスを含まない本体（例: `* 123 +7776FU -3334FU`）を渡す。
+    /// 送信時は `+7776FU,'* 123 +7776FU -3334FU` のように `,'<comment>` 形式で付加される。
     pub fn send_move_with_comment(&mut self, csa_move: &str, comment: Option<&str>) -> Result<()> {
-        if let Some(c) = comment {
-            let line = format!("{csa_move},{c}");
-            self.send_line(&line)
-        } else {
-            self.send_line(csa_move)
-        }
+        let cmd = serialize_client_command(&ClientCommand::Move {
+            token: CsaMoveToken::new(csa_move),
+            comment: comment.map(|c| c.to_owned()),
+        });
+        self.send_line(&cmd)
     }
 
     /// 投了を送信
     pub fn send_resign(&mut self) -> Result<()> {
-        self.send_line("%TORYO")
+        self.send_line(&serialize_client_command(&ClientCommand::Toryo))
     }
 
     /// 入玉宣言勝ちを送信
     pub fn send_win(&mut self) -> Result<()> {
-        self.send_line("%KACHI")
+        self.send_line(&serialize_client_command(&ClientCommand::Kachi))
     }
 
     /// ログアウト
     pub fn logout(&mut self) -> Result<()> {
-        let _ = self.send_line("LOGOUT");
+        let _ = self.send_line(&serialize_client_command(&ClientCommand::Logout));
         Ok(())
     }
 
