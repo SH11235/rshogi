@@ -12,8 +12,10 @@
 
 name = "rshogi-csa-server-workers-staging"
 main = "build/worker/shim.mjs"
-# production toml と日付を揃える。新フラグ採用は production と同時に bump する
-# 運用にして staging / production で挙動が乖離しないようにする。
+# 通常は production と日付を揃え、新フラグ採用は両環境同時に bump する運用で
+# 挙動差を最小化する。staging で先に新 flag の挙動を観察してから production に
+# 反映したい場合に限り、本値を意図的に production より先行させて良い（その場合
+# 観察期間中は staging / production で compatibility 動作が乖離する点に注意）。
 compatibility_date = "2026-04-21"
 
 # CI 環境では事前に `cargo install -q worker-build@^0.8 --locked` がインストール済みの

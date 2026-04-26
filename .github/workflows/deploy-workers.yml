@@ -140,6 +140,8 @@ jobs:
       #   末尾の `v0.8` も同時に `v0.9` へ更新する必要がある。`v0.8` のままだと
       #   過去 cache が hit して 0.8.x バイナリが使われ続け、新 0.9.x が install
       #   step で skip される。インストールコマンドとキャッシュキーの **2 箇所同時更新** が必須。
+      #   本 cache key は `deploy-production` job と共有しているので、bump 時は staging /
+      #   production 両方の install コマンド + key 末尾の **計 4 箇所同時更新** が必要。
       - name: Cache worker-build binary
         id: cache-worker-build
         uses: actions/cache@v4
@@ -177,6 +179,10 @@ jobs:
     name: Smoke check deployed worker (staging)
     runs-on: ubuntu-latest
     needs: deploy-staging
+    # `vars.WORKERS_HEALTH_URL` は本 job が `environment: rshogi-csa-server-workers-staging`
+    # を宣言しているため、staging Environment の variable から自動解決される。
+    # production Environment 側に同名の variable を登録していても、staging 側 URL が
+    # 取り違えられて curl される心配はない（GitHub Actions の environment binding 仕様）。
     if: ${{ vars.WORKERS_HEALTH_URL != '' }}
     environment: rshogi-csa-server-workers-staging
     timeout-minutes: 5
@@ -263,6 +269,13 @@ jobs:
             echo "::error ::Run from main branch with the file committed (see docs/csa-server/deployment.md)."
             exit 1
           }
+      # ⚠️ バージョン更新時の二重管理に注意:
+      #   `cargo install worker-build@^0.8` を `^0.9` 系に上げる場合、本キャッシュキー
+      #   末尾の `v0.8` も同時に `v0.9` へ更新する必要がある。`v0.8` のままだと
+      #   過去 cache が hit して 0.8.x バイナリが使われ続け、新 0.9.x が install
+      #   step で skip される。インストールコマンドとキャッシュキーの **2 箇所同時更新** が必須。
+      #   本 cache key は `deploy-staging` job と共有しているので、bump 時は staging /
+      #   production 両方の install コマンド + key 末尾の **計 4 箇所同時更新** が必要。
       - name: Cache worker-build binary
         id: cache-worker-build
         uses: actions/cache@v4
@@ -300,6 +313,9 @@ jobs:
     name: Smoke check deployed worker (production)
     runs-on: ubuntu-latest
     needs: deploy-production
+    # `vars.WORKERS_HEALTH_URL` は本 job が `environment: rshogi-csa-server-workers-production`
+    # を宣言しているため、production Environment の variable から自動解決される。
+    # staging 側との取り違えは発生しない（同 smoke-staging のコメント参照）。
     if: ${{ vars.WORKERS_HEALTH_URL != '' }}
     environment: rshogi-csa-server-workers-production
     timeout-minutes: 5

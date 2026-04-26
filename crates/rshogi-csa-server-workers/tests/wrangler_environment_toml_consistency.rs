@@ -123,10 +123,14 @@ fn assert_do_bindings_match(env: &EnvironmentBindings) {
     assert_bidirectional(env, "do_bindings", ConfigKeys::ALL_DO_BINDINGS, &env.do_bindings);
 }
 
-fn assert_vars_keys_match_production_subset(env: &EnvironmentBindings) {
+/// `ConfigKeys::PRODUCTION_VARS_KEYS` は名前に "PRODUCTION" を含むが、実態は
+/// **deploy 対象の全環境（production / staging）で共有する公開 `[vars]` キー集合**
+/// であり、production 専用ではない。staging も同じ集合を `[vars]` として
+/// 持つことを保証する。`ConfigKeys` 側の定数名そのものは別 PR で見直す。
+fn assert_vars_keys_match_shared_public_vars(env: &EnvironmentBindings) {
     assert_bidirectional(
         env,
-        "vars_keys (production-only subset)",
+        "vars_keys (shared public vars across deployed environments)",
         ConfigKeys::PRODUCTION_VARS_KEYS,
         &env.vars_keys,
     );
@@ -184,8 +188,8 @@ fn wrangler_production_do_bindings_match_config_keys() {
 }
 
 #[test]
-fn wrangler_production_vars_keys_match_production_only_subset() {
-    assert_vars_keys_match_production_subset(&PRODUCTION);
+fn wrangler_production_vars_keys_match_shared_public_vars() {
+    assert_vars_keys_match_shared_public_vars(&PRODUCTION);
 }
 
 #[test]
@@ -211,8 +215,8 @@ fn wrangler_staging_do_bindings_match_config_keys() {
 }
 
 #[test]
-fn wrangler_staging_vars_keys_match_production_only_subset() {
-    assert_vars_keys_match_production_subset(&STAGING);
+fn wrangler_staging_vars_keys_match_shared_public_vars() {
+    assert_vars_keys_match_shared_public_vars(&STAGING);
 }
 
 #[test]

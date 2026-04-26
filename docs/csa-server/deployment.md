@@ -249,7 +249,7 @@ Environment ベースにすることで、deploy job 側で
 |---|---|
 | Name | `rshogi-csa-server-workers-production` |
 | Deployment branches | Selected branches → `main` のみ許可（同上の gating。`main` 以外の ref で dispatch を打てる構成は production secret 漏洩リスクが高い） |
-| Required reviewers | **1 名以上の reviewer 設定を推奨**。`workflow_dispatch` を起動できるのは repository write 権限者なので、reviewer を立てておくと dispatch 1 アクションでの誤 deploy を防げる |
+| Required reviewers | **1 名以上の reviewer 設定を推奨**。`workflow_dispatch` を起動できるのは repository write 権限者なので、reviewer を立てておくと dispatch 1 アクションでの誤 deploy を防げる<br>**注意**: 本 Environment は `preflight-production` / `deploy-production` / `smoke-production` の 3 jobs から参照される。Required reviewers を有効にすると **3 jobs それぞれで承認 step が挟まる**点に留意（運用上 1 回の承認で 3 jobs を通過させたい場合は、preflight / smoke を deploy-production の前後 step に統合する workflow 改修が別途必要） |
 
 [Environment secrets] で:
 
