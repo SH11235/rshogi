@@ -8,10 +8,24 @@
     "build": "worker-build --release",
     "deploy:prod": "wrangler deploy --config wrangler.production.toml",
     "tail:prod": "wrangler tail --config wrangler.production.toml",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "test:smoke": "vitest run --config tests/miniflare_smoke/vitest.config.ts"
   },
   "devDependencies": {
-    "wrangler": "^3.114.17"
+    "@types/node": "^24.12.2",
+    "@types/ws": "^8.18.1",
+    "miniflare": "^4.20260424.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5",
+    "wrangler": "^4.85.0",
+    "ws": "^8.20.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "workerd"
+    ]
   },
   "packageManager": "pnpm@10.33.2"
 }

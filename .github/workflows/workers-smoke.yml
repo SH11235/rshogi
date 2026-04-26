@@ -1,0 +1,103 @@
+# Cloudflare Workers (rshogi-csa-server-workers) の Miniflare smoke E2E。
+#
+# - `worker-build --release` で生成した wasm worker を Miniflare に直接ロードし、
+#   1 対局 (LOGIN → AGREE → 数手 → TORYO → R2 棋譜オブジェクト確認) を Vitest
+#   で通電する
+# - DO restart シナリオ: Miniflare instance を `dispose()` → 再起動して、R2 永続化
+#   が cross-instance で保持されることを確認する
+# - 本 workflow は wrangler dev を spawn しない。Miniflare 4 の API を直接利用し、
+#   テストプロセス内で worker を起動する経路で軽量化する
+#
+# `cargo check --target wasm32` の build 検査では wasm32 限定コードの論理バグを
+# 検知できない（codegen が通るだけ）。本 workflow が PR で実 worker 経路を通電
+# することで、論理回帰を merge 前に検出する。
+name: Workers Smoke
+
+on:
+  push:
+    paths:
+      - 'crates/rshogi-csa-server-workers/**'
+      - 'crates/rshogi-csa-server/**'
+      - 'crates/rshogi-csa/**'
+      - 'crates/rshogi-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/workers-smoke.yml'
+  pull_request:
+    paths:
+      - 'crates/rshogi-csa-server-workers/**'
+      - 'crates/rshogi-csa-server/**'
+      - 'crates/rshogi-csa/**'
+      - 'crates/rshogi-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/workers-smoke.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Miniflare smoke E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # `rust-ci.yml` の host job が x86-64-v2 を要求するのと違い、本 job は
+      # wasm32 ビルド主体なので空文字で上書きする。x86 専用フラグは wasm32
+      # ターゲットで warning を大量発生させる。
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add wasm32 target to pinned toolchain
+        run: |
+          CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
+          rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # `rust-ci.yml` の `wasm-build` job、`deploy-workers.yml` と
+          # 同じ wasm32 sysroot キャッシュ namespace を共有する。
+          shared-key: wasm32
+      # `cargo install` の成果物 (`~/.cargo/bin/worker-build`) は `Swatinem/rust-cache`
+      # の対象外なので、`actions/cache` で明示キャッシュする。`deploy-workers.yml`
+      # と同じキー規約に揃える（バージョン更新時はキー末尾も同時更新）。
+      - name: Cache worker-build binary
+        id: cache-worker-build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/worker-build
+          key: worker-build-${{ runner.os }}-${{ runner.arch }}-v0.8
+      - name: Install worker-build
+        if: steps.cache-worker-build.outputs.cache-hit != 'true'
+        run: cargo install -q worker-build@^0.8 --locked
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: crates/rshogi-csa-server-workers/package.json
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: crates/rshogi-csa-server-workers/.node-version
+          cache: 'pnpm'
+          cache-dependency-path: crates/rshogi-csa-server-workers/pnpm-lock.yaml
+      - name: Install Node deps
+        working-directory: crates/rshogi-csa-server-workers
+        run: pnpm install --frozen-lockfile
+      - name: Build wasm worker
+        working-directory: crates/rshogi-csa-server-workers
+        run: pnpm run build
+      - name: Run smoke E2E
+        working-directory: crates/rshogi-csa-server-workers
+        env:
+          # Vitest の global setup は `worker-build --release` を再度走らせるが、
+          # 直前の `pnpm run build` 成果物を再利用してテスト時間を短縮する。
+          MINIFLARE_SMOKE_SKIP_BUILD: '1'
+        run: pnpm run test:smoke
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
