@@ -123,7 +123,7 @@ fn assert_do_bindings_match(env: &EnvironmentBindings) {
     assert_bidirectional(env, "do_bindings", ConfigKeys::ALL_DO_BINDINGS, &env.do_bindings);
 }
 
-fn assert_production_vars_keys_match(env: &EnvironmentBindings) {
+fn assert_vars_keys_match_production_subset(env: &EnvironmentBindings) {
     assert_bidirectional(
         env,
         "vars_keys (production-only subset)",
@@ -185,7 +185,7 @@ fn wrangler_production_do_bindings_match_config_keys() {
 
 #[test]
 fn wrangler_production_vars_keys_match_production_only_subset() {
-    assert_production_vars_keys_match(&PRODUCTION);
+    assert_vars_keys_match_production_subset(&PRODUCTION);
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn wrangler_staging_do_bindings_match_config_keys() {
 
 #[test]
 fn wrangler_staging_vars_keys_match_production_only_subset() {
-    assert_production_vars_keys_match(&STAGING);
+    assert_vars_keys_match_production_subset(&STAGING);
 }
 
 #[test]

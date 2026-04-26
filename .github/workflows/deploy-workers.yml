@@ -11,12 +11,16 @@
 # Cloudflare 側 secrets が未設定の段階では preflight job で安全に skip し、
 # merge を block しない（secrets 設定後の最初の push or dispatch で実 deploy が走る）。
 #
-# secrets / variables は GitHub Environments (`staging` / `production`) ごとに
-# 登録する設計:
+# secrets / variables は GitHub Environments
+# (`rshogi-csa-server-workers-staging` / `rshogi-csa-server-workers-production`)
+# ごとに登録する設計:
 #   - secrets   : `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`
 #   - variables : `WORKERS_HEALTH_URL` (`/health` endpoint URL、未設定なら smoke skip)
 # 各 job が `environment:` を宣言することで、その環境に紐付いた値だけが
 # 注入される（staging job が production token を取れない gating になる）。
+# Environment 名に crate prefix (`rshogi-csa-server-workers-`) を付けるのは、
+# 同 repository 内の他 crate (例: TCP server) が将来別 staging を持っても
+# 名前衝突しないようにするため。
 #
 # 初回セットアップ・rollback・トラブルシューティングは
 # `docs/csa-server/deployment.md` を参照。
@@ -47,8 +51,10 @@ on:
 
 # 同時 deploy を防ぐ。途中キャンセルすると build/upload 中の wrangler が中途半端な
 # 状態で止まる可能性があるため、`cancel-in-progress: false` で進行中 deploy は
-# 必ず完走させる。staging / production は別 group で並走可能（互いの concurrency
-# を遮らない）。
+# 必ず完走させる。`push` 由来の staging deploy と `workflow_dispatch (target=production)`
+# 由来の production deploy は group 名が `deploy-workers-staging` /
+# `deploy-workers-production` と分かれるので、staging 自動 deploy が走っている
+# 最中でも production への dispatch を遮らずに並走できる。
 concurrency:
   group: deploy-workers-${{ github.event.inputs.target || 'staging' }}
   cancel-in-progress: false
@@ -65,7 +71,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    environment: staging
+    environment: rshogi-csa-server-workers-staging
     outputs:
       can_deploy: ${{ steps.check.outputs.can_deploy }}
     steps:
@@ -83,7 +89,7 @@ jobs:
             {
               echo "## ⚠️ staging deploy skipped"
               echo
-              echo "Environment \`staging\` の secret \`CLOUDFLARE_API_TOKEN\` / \`CLOUDFLARE_ACCOUNT_ID\` が未設定です。"
+              echo "Environment \`rshogi-csa-server-workers-staging\` の secret \`CLOUDFLARE_API_TOKEN\` / \`CLOUDFLARE_ACCOUNT_ID\` が未設定です。"
               echo
               echo "See \`docs/csa-server/deployment.md\` for initial setup."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -96,7 +102,7 @@ jobs:
     needs: preflight-staging
     if: needs.preflight-staging.outputs.can_deploy == 'true'
     timeout-minutes: 20
-    environment: staging
+    environment: rshogi-csa-server-workers-staging
     env:
       # workflow 上位の `-C target-cpu=x86-64-v2` (rust-ci.yml の env) を継承しない
       # ように明示空文字。本 workflow は独立しているが、将来 workflow_call で連結
@@ -172,7 +178,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: deploy-staging
     if: ${{ vars.WORKERS_HEALTH_URL != '' }}
-    environment: staging
+    environment: rshogi-csa-server-workers-staging
     timeout-minutes: 5
     steps:
       - name: Curl /health endpoint
@@ -201,7 +207,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'production'
     runs-on: ubuntu-latest
     timeout-minutes: 2
-    environment: production
+    environment: rshogi-csa-server-workers-production
     outputs:
       can_deploy: ${{ steps.check.outputs.can_deploy }}
     steps:
@@ -219,7 +225,7 @@ jobs:
             {
               echo "## ⚠️ production deploy skipped"
               echo
-              echo "Environment \`production\` の secret \`CLOUDFLARE_API_TOKEN\` / \`CLOUDFLARE_ACCOUNT_ID\` が未設定です。"
+              echo "Environment \`rshogi-csa-server-workers-production\` の secret \`CLOUDFLARE_API_TOKEN\` / \`CLOUDFLARE_ACCOUNT_ID\` が未設定です。"
               echo
               echo "See \`docs/csa-server/deployment.md\` for initial setup."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -232,7 +238,7 @@ jobs:
     needs: preflight-production
     if: needs.preflight-production.outputs.can_deploy == 'true'
     timeout-minutes: 20
-    environment: production
+    environment: rshogi-csa-server-workers-production
     env:
       RUSTFLAGS: ""
     steps:
@@ -295,7 +301,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: deploy-production
     if: ${{ vars.WORKERS_HEALTH_URL != '' }}
-    environment: production
+    environment: rshogi-csa-server-workers-production
     timeout-minutes: 5
     steps:
       - name: Curl /health endpoint
