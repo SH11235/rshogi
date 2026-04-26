@@ -18,6 +18,13 @@ pub fn format_date_path(epoch_ms: u64) -> String {
     dt.format("%Y/%m/%d").to_string()
 }
 
+/// RFC3339（UTC、秒単位、`Z` サフィックス）に整形する。`FloodgateHistoryEntry`
+/// の `start_time` / `end_time` 契約に揃えるための共通ヘルパで、`R2FloodgateHistoryStorage`
+/// の `entry_key` が `DateTime::parse_from_rfc3339` で読み戻せる書式と一致させる。
+pub fn format_rfc3339_utc(epoch_ms: u64) -> String {
+    to_utc(epoch_ms).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 fn to_utc(epoch_ms: u64) -> chrono::DateTime<chrono::Utc> {
     let secs = (epoch_ms / 1000).min(i64::MAX as u64) as i64;
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
@@ -61,5 +68,16 @@ mod tests {
         assert_eq!(format_date_path(1_705_363_199_000), "2024/01/15");
         // 2024-01-16 00:00:00 → 2024/01/16
         assert_eq!(format_date_path(1_705_363_200_000), "2024/01/16");
+    }
+
+    #[test]
+    fn format_rfc3339_utc_known_point() {
+        // 2024-01-15 09:30:45 UTC = 1_705_311_045_000 ms
+        assert_eq!(format_rfc3339_utc(1_705_311_045_000), "2024-01-15T09:30:45Z");
+    }
+
+    #[test]
+    fn format_rfc3339_utc_drops_sub_second() {
+        assert_eq!(format_rfc3339_utc(1_705_311_045_999), "2024-01-15T09:30:45Z");
     }
 }
