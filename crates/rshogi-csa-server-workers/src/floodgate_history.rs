@@ -17,8 +17,11 @@
 //! - **day-shard 走査**: `list_recent(N)` は当日の day-shard から逆方向に日付を
 //!   さかのぼって走査する。1 日あたり数百対局程度を想定すると、典型的 N=10〜100
 //!   は当日 1 リストで満たせる。R2 list は 1 ページ最大 1000 オブジェクトなので、
-//!   pathological な大量リクエストでもページ分けで処理できる
-//! - **DO storage cache は本 PR では入れない**: ホットパス `list_recent` の
+//!   pathological な大量リクエストでもページ分けで処理できる。なお現状は 1 件 =
+//!   1 GET で読み出しており `list_recent(N)` は最大 1+N 回のラウンドトリップに
+//!   なる。N が大きい運用で R2 GET レイテンシが目立ってきたら、並列 fetch や
+//!   オブジェクト統合での amortize を検討する余地がある
+//! - **DO storage cache は現時点では入れない**: ホットパス `list_recent` の
 //!   キャッシュは将来必要になった時点で追加する（YAGNI）。終局時 1 PUT が
 //!   ホットパスではないため、`append` 側にも cache レイヤは不要
 //!
@@ -35,8 +38,12 @@
 //!   cold start シナリオ（DO instance の破棄 → 再構築 → 永続化済みデータ参照）を
 //!   host target 上で再現する
 //!
-//! 完全な DO 統合（実 R2 + 実 GameRoom DO）は `wrangler dev` (Miniflare) ハーネス
-//! で別途検証する。
+//! `InMemoryFloodgateHistoryStorage` は `BTreeMap` を直接舐めるだけなので、
+//! wasm32 R2 アダプタ固有のロジック（day-walking ループ・cursor pagination・
+//! `pred_opt` フォールバック）は cargo test では検証されない。それらは
+//! 完全な DO 統合（実 R2 + 実 GameRoom DO）として `wrangler dev` (Miniflare)
+//! ハーネス側で「複数日にまたがる entry」「ページ境界をまたぐ list」「日付走査
+//! 上限到達」のシナリオで別途検証する。
 
 use chrono::{DateTime, Datelike, NaiveDate, Timelike, Utc};
 
@@ -134,17 +141,20 @@ mod wasm32_impl {
                 .map_err(|e| StorageError::Io(format!("R2 binding {}: {e}", self.binding)))
         }
 
-        fn today_utc() -> NaiveDate {
+        fn today_utc() -> Result<NaiveDate, StorageError> {
             // wasm32 では `Utc::now()` が `clock` feature 無効のため使えない。
             // 代わりに Workers の `Date::now()` でミリ秒タイムスタンプを取得して
-            // chrono に橋渡しする。
+            // chrono に橋渡しする。`from_timestamp_millis` は ms が i64 表現
+            // 可能な範囲外だと `None` を返すが、現実的に発生しない。発生時は
+            // 静かにフォールバックすると `list_recent` の結果が空になって診断
+            // 困難になるため、エラー化して上位に伝える。
             let now_ms = Date::now().as_millis();
             DateTime::<Utc>::from_timestamp_millis(now_ms as i64)
                 .map(|dt| dt.date_naive())
-                .unwrap_or_else(|| {
-                    // タイムスタンプが i64 範囲外になることは現実的にあり得ないが、
-                    // 防御的に Unix epoch にフォールバックして安全に進める。
-                    NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is valid")
+                .ok_or_else(|| {
+                    StorageError::Io(format!(
+                        "Date::now() ms {now_ms} is out of i64 timestamp range"
+                    ))
                 })
         }
     }
@@ -182,7 +192,7 @@ mod wasm32_impl {
                 }
                 let bucket = bucket?;
                 let mut entries: Vec<FloodgateHistoryEntry> = Vec::with_capacity(limit);
-                let mut day = today;
+                let mut day = today?;
                 let mut days_scanned: u32 = 0;
                 while entries.len() < limit && days_scanned < MAX_DAYS_LOOKBACK {
                     let prefix = day_prefix(day);
@@ -225,7 +235,14 @@ mod wasm32_impl {
                             break;
                         }
                     }
-                    day = day.pred_opt().unwrap_or(day);
+                    // `pred_opt` は `0001-01-01` でのみ `None` を返す。Floodgate
+                    // 運用で起こり得ないが、もし到達したら同じ日付を再走査せずに
+                    // 走査を打ち切る（外側の `days_scanned` で抜けるのを待つより
+                    // 意図が明示的）。
+                    let Some(prev) = day.pred_opt() else {
+                        break;
+                    };
+                    day = prev;
                     days_scanned += 1;
                 }
                 Ok(entries)
