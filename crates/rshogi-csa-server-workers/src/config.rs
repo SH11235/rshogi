@@ -59,7 +59,7 @@ impl ConfigKeys {
     /// 切断時の再接続猶予秒数。`0` または未設定なら再接続プロトコルを無効化し、
     /// WebSocket close を即時 `#ABNORMAL` に流す（保守的既定）。`> 0` を指定する
     /// 構成は `--allow-floodgate-features` (Workers では `ALLOW_FLOODGATE_FEATURES`)
-    /// を要求する Phase 5 features の opt-in 経路に乗る。
+    /// を要求する Floodgate features の opt-in 経路に乗る。
     pub const RECONNECT_GRACE_SECONDS: &'static str = "RECONNECT_GRACE_SECONDS";
     /// Floodgate 機能群を opt-in 有効化するブール変数。`true` / `1` / `yes` / `on`
     /// で有効。`reconnect_protocol` 等の Floodgate 系を要求する構成で必須。

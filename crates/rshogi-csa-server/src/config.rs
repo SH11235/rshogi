@@ -28,8 +28,8 @@ pub struct FloodgateFeatureIntent {
     /// を有効化する意図。本フラグが `true` のとき、各 frontend は
     /// `reconnect_grace_duration > 0` を運用設定として受け付け、`Game_Summary`
     /// 末尾拡張行で配布した `reconnect_token` の照合・状態再送・grace 満了時の
-    /// 切断敗北確定を有効化する。Phase 5 features の opt-in なしで本機能を要求
-    /// した場合は起動を fail-fast する。
+    /// 切断敗北確定を有効化する。`allow_floodgate_features` の opt-in なしで本
+    /// 機能を要求した場合は起動を fail-fast する。
     pub enable_reconnect_protocol: bool,
 }
 

@@ -1277,12 +1277,25 @@ impl GameRoom {
             .as_ref()
             .cloned()
             .ok_or_else(|| Error::RustError("enter_grace_window: config missing".into()))?;
+        // 既存 turn alarm の予定発火時刻を grace 経路前に取得しておき、
+        // `PendingReconnect` に保存する。再接続成功後に新規 alarm を貼り直すとき、
+        // この値と「再接続時刻 + 残時間 budget」のうち早い方を採用することで、
+        // 悪意あるクライアントが切断 → grace 直前再接続を繰り返して相手手番の
+        // wall-clock 上の deadline を不当に延長する経路を防ぐ。
+        let original_turn_alarm_epoch_ms =
+            self.state.storage().get_alarm().await.ok().flatten().map(|e| e as u64);
         let pending = {
             let borrow = self.core.borrow();
             let core = borrow.as_ref().ok_or_else(|| {
                 Error::RustError("enter_grace_window: core missing after ensure_core_loaded".into())
             })?;
-            self.build_pending_reconnect(core, &cfg, role, grace_duration)?
+            self.build_pending_reconnect(
+                core,
+                &cfg,
+                role,
+                grace_duration,
+                original_turn_alarm_epoch_ms,
+            )?
         };
         // `KEY_GRACE_REGISTRY` と `KEY_PENDING_ALARM_KIND` を 2 回の `put` で
         // 書き分ける。Cloudflare DO は同一 instance に対する fetch / alarm /
@@ -1328,6 +1341,7 @@ impl GameRoom {
         cfg: &PersistedConfig,
         role: Role,
         grace_duration: Duration,
+        original_turn_alarm_epoch_ms: Option<u64>,
     ) -> Result<PendingReconnect> {
         let disconnected_color = role.to_core();
         let token = match disconnected_color {
@@ -1386,6 +1400,7 @@ impl GameRoom {
             deadline_ms,
             snapshot,
             game_summary_for_disconnected,
+            original_turn_alarm_epoch_ms,
         })
     }
 
@@ -1516,10 +1531,16 @@ impl GameRoom {
         // 既定で `TimeUp` 扱い）。
         self.delete_pending_alarm_kind().await?;
         // 再接続クライアントが指し手を送らず放置しても確実に turn deadline が
-        // 発火するよう、現在手番の本体時間 + 秒読み + 通信マージン + 安全側
-        // ゲタを乗せて即時 alarm を予約する。次手の `reschedule_turn_alarm`
-        // が通常経路で上書きするまでのフェールセーフ。
-        let alarm_total_ms = {
+        // 発火するよう、即時 alarm を貼り直す。決定方針:
+        // - 候補 A: 切断時に取り置いた元 turn alarm の発火時刻 (`pending.original
+        //   _turn_alarm_epoch_ms`)
+        // - 候補 B: 再接続時刻 + (現在手番の本体時間 + 秒読み + 通信マージン +
+        //   安全側ゲタ)
+        // のうち**早い方**を採用する。常に B にすると悪意あるクライアントが
+        // 切断 → grace 直前再接続を繰り返して相手手番の wall-clock 上の deadline
+        // を延長する経路が成立するため、A を上限としても利く形にする。
+        let now = self.now_ms();
+        let candidate_b_total_ms = {
             let core_borrow = self.core.borrow();
             core_borrow.as_ref().map(|core| {
                 let next_turn = core.current_turn();
@@ -1533,8 +1554,17 @@ impl GameRoom {
                 budget.saturating_add(margin).saturating_add(ALARM_SAFETY_MS)
             })
         };
-        if let Some(total) = alarm_total_ms {
-            self.state.storage().set_alarm(Duration::from_millis(total)).await?;
+        if let Some(total_b) = candidate_b_total_ms {
+            let candidate_b_epoch = now.saturating_add(total_b);
+            let final_epoch = pending
+                .original_turn_alarm_epoch_ms
+                .map(|orig| orig.min(candidate_b_epoch))
+                .unwrap_or(candidate_b_epoch);
+            // `set_alarm(Duration)` は「now から N ms 後」に発火する API なので
+            // delay = final_epoch - now で渡す。`saturating_sub` は now が final_epoch
+            // を既に過ぎている場合に 0 を返し、即時発火させて time_up に進める。
+            let delay_ms = final_epoch.saturating_sub(now);
+            self.state.storage().set_alarm(Duration::from_millis(delay_ms)).await?;
         } else {
             // CoreRoom 不在 (異常系)。alarm を解除して保守的に振る舞う。
             let _ = self.state.storage().delete_alarm().await;
@@ -1604,7 +1634,7 @@ fn load_clock_spec_from_env(env: &Env) -> Result<ClockSpec> {
 /// ```text
 /// grace=0 (or unset)  : OK (Floodgate gate を通さず保守的既定)
 /// grace>0 + allow=true: OK (再接続プロトコル有効)
-/// grace>0 + allow=false: Err (Phase 5 features の opt-in 漏れ)
+/// grace>0 + allow=false: Err (Floodgate features の opt-in 漏れ)
 /// ```
 ///
 /// 設定不正は `Err(String)` で返し、呼び出し側は安全側に grace を無効化する経路に

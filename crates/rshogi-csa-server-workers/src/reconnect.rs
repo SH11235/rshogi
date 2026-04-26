@@ -72,6 +72,15 @@ pub struct PendingReconnect {
     /// 切断側宛の Game_Summary 文字列 (`Reconnect_Token:` 拡張行を含む完全形、
     /// `position_section` は切断時点の現在局面で再構築済み)。
     pub game_summary_for_disconnected: String,
+    /// 切断時点で予約されていた turn alarm の発火時刻 (UNIX epoch ms)。
+    /// 再接続成功時に新しい turn alarm を貼り直す際、本値と「再接続時刻 + 残時間
+    /// budget」のうち**早い方**を採用することで、悪意あるクライアントが切断 →
+    /// grace 直前再接続を繰り返して相手手番の deadline を wall-clock 上で延長
+    /// する経路を防ぐ (元 deadline は壊さない)。`None` なら turn alarm 未予約
+    /// 時点での切断 (例: AGREE 直後の対局未開始) で、上書きせず素直に新規予約。
+    /// `#[serde(default)]` で旧 schema からの cold-start 互換も維持する。
+    #[serde(default)]
+    pub original_turn_alarm_epoch_ms: Option<u64>,
 }
 
 /// `PendingReconnect::match_request` の判定結果。
@@ -181,6 +190,7 @@ mod tests {
             game_summary_for_disconnected:
                 "BEGIN Game_Summary\nGame_ID:g1\nReconnect_Token:abcd\nEND Game_Summary\n"
                     .to_owned(),
+            original_turn_alarm_epoch_ms: None,
         }
     }
 
