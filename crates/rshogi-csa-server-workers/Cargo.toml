@@ -46,6 +46,8 @@ tokio-transport = []
 # host target の async テスト（`FloodgateHistoryStorage` の cold-start 契約検証等）
 # で futures を駆動するためにのみ使用する。wasm32 ランタイムには取り込まれない。
 tokio = { workspace = true, features = ["rt", "macros"] }
-# `wrangler.toml.example` を解析して `ConfigKeys` 定数全件が宣言されていることを
-# 検証する integration test (`tests/wrangler_template_consistency.rs`) でのみ使用。
+# `wrangler.toml.example` / `wrangler.production.toml` を解析して `ConfigKeys`
+# 定数群が正しく宣言されていることを検証する integration test
+# (`tests/wrangler_template_consistency.rs` /
+# `tests/wrangler_production_toml_consistency.rs`) でのみ使用。
 toml = { workspace = true }

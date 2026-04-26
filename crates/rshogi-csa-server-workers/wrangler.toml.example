@@ -42,7 +42,7 @@ preview_bucket_name = "local-kifu-dev"
 # `R2FloodgateHistoryStorage` が `floodgate-history/YYYY/MM/DD/HHMMSS-<game_id>.json`
 # キー（UTC 正規化）で書き出し、`list_recent(N)` は当日 day-shard から逆順走査して
 # 直近 N 件を返す（最大 366 日まで遡る安全上限）。
-# task 15.7 で `game_room.rs` 終局経路から `append` を呼ぶ配線が入る。
+# `game_room.rs` 終局経路から `append` を呼ぶ配線は別 PR で導入予定。
 # Floodgate 運用を行わない構成でも binding 宣言は残して問題ない（実書き込みは
 # game_room から呼ばれるまで発生しない）。
 [[r2_buckets]]

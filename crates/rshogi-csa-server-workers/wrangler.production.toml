@@ -54,8 +54,8 @@ binding = "KIFU_BUCKET"
 bucket_name = "rshogi-csa-kifu-prod"
 
 # --- R2: Floodgate 履歴保存 ---
-# 1 対局 = 1 オブジェクト形式の Floodgate 履歴。task 15.7 で `game_room.rs` から
-# `R2FloodgateHistoryStorage::append` の配線が入る予定。
+# 1 対局 = 1 オブジェクト形式の Floodgate 履歴。`game_room.rs` 終局経路から
+# `R2FloodgateHistoryStorage::append` で書き出す（配線は別 PR で導入予定）。
 #   wrangler r2 bucket create rshogi-csa-floodgate-history-prod
 [[r2_buckets]]
 binding = "FLOODGATE_HISTORY_BUCKET"
@@ -78,5 +78,14 @@ BYOYOMI_SEC = "10"
 # stopwatch 用（分）。CLOCK_KIND=stopwatch のときのみ参照。
 TOTAL_TIME_MIN = "10"
 BYOYOMI_MIN = "1"
-# `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル（LOGIN の handle 部分）。
-ADMIN_HANDLE = "admin"
+
+# --- secret として設定する値 ---
+# 本番運用に必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。
+# 実値は Cloudflare 側の secret store にのみ存在し、`env.var(name)` 経由で
+# `[vars]` と同じ namespace から Worker code が読む（Cloudflare 仕様）。
+#
+# - ADMIN_HANDLE: `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル名。
+#   攻撃者が「どのハンドルを狙うか」を事前確定できないよう secret 化する。
+#   設定: `vp exec wrangler secret put ADMIN_HANDLE --config wrangler.production.toml`
+#   確認: `vp exec wrangler secret list --config wrangler.production.toml`
+#   詳細は `docs/csa-server/deployment.md` §2.4.5 参照。

@@ -95,7 +95,7 @@ jobs:
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
-          # `rust-ci.yml` の `wasm-build` job (task 23.1) と同じ wasm32 sysroot キャッシュ
+          # `rust-ci.yml` の `wasm-build` job と同じ wasm32 sysroot キャッシュ
           # namespace を共有する。CI 全体で wasm32 ビルドの cold start 時間を短縮できる。
           shared-key: wasm32
       - name: Verify wrangler.production.toml exists
@@ -134,7 +134,12 @@ jobs:
       # 正しい pnpm バージョンを install する (corepack 経由)。
       - uses: pnpm/action-setup@v4
         with:
-          # `package.json` の `packageManager: pnpm@x.y.z` から版を読む。
+          # `pnpm/action-setup@v4` は既定で repo root の `package.json` を見るが、
+          # 本リポジトリの Workers 用 `package.json` は workspace member
+          # ディレクトリ配下にあるため、明示的に path を指定して
+          # `packageManager: pnpm@x.y.z` field を読み取れるようにする。
+          # 指定しないと "No pnpm version is specified" で fail する。
+          package_json_file: crates/rshogi-csa-server-workers/package.json
           # 実 install は後続の `pnpm install --frozen-lockfile` step で行うので
           # action 内部での自動 install を抑止する (意図を明示する目的)。
           run_install: false
