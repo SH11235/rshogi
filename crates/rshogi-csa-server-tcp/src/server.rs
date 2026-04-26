@@ -473,6 +473,10 @@ pub(crate) struct ReconnectSnapshot {
 pub(crate) struct PendingReconnect {
     /// 切断された側の handle。LOGIN 時の照合に使う。
     pub(crate) disconnected_handle: PlayerName,
+    /// 切断された側の `Color`。LOGIN 時に提示された `<handle>+<game_name>+<color>`
+    /// の color と一致しない要求は (handle / token が合っていても) 拒否する
+    /// (defense-in-depth)。
+    pub(crate) disconnected_color: Color,
     /// 切断側に発行された再接続トークン (Game_Summary 末尾拡張行で配布済み)。
     pub(crate) expected_token: ReconnectToken,
     /// 再接続成立時に game loop へ新 `TcpTransport` を渡す one-shot 送信側。
@@ -902,7 +906,7 @@ where
     //      `LOGIN:incorrect <reason>` で拒否し、grace 中の対局状態と registry エントリ
     //      は一切変更しない (拒否は元の対局者による再試行を妨げないため)。
     if let Some(req) = reconnect {
-        return handle_reconnect_request(&state, transport, &handle_player, req).await;
+        return handle_reconnect_request(&state, transport, &handle_player, color, req).await;
     }
 
     // 5. League に登録して GameWaiting に遷移する。x1 フラグはプロトコル拡張
@@ -2539,6 +2543,7 @@ where
     let deadline = tokio::time::Instant::now() + grace;
     let pending = Arc::new(PendingReconnect {
         disconnected_handle: handle.clone(),
+        disconnected_color: disconnected,
         expected_token,
         reconnect_tx: Mutex::new(Some(tx)),
         snapshot,
@@ -2588,7 +2593,8 @@ where
 ///
 /// 失敗ケース:
 /// - `game_id` が registry に存在しない → `LOGIN:incorrect reconnect_unknown_game`
-/// - LOGIN handle と `disconnected_handle` が不一致 → `LOGIN:incorrect reconnect_handle_mismatch`
+/// - LOGIN handle / 色のいずれかが `disconnected_handle` / `disconnected_color`
+///   と一致しない → `LOGIN:incorrect reconnect_handle_mismatch`
 /// - `token` が `expected_token` と不一致 → `LOGIN:incorrect reconnect_token_mismatch`
 /// - registry エントリは残っているが `reconnect_tx` が既に消費済み (重複再接続) →
 ///   `LOGIN:incorrect reconnect_already_resumed`
@@ -2602,6 +2608,7 @@ async fn handle_reconnect_request<R, K, P, H>(
     state: &SharedState<R, K, P, H>,
     mut transport: TcpTransport,
     handle_player: &PlayerName,
+    requested_color: Color,
     req: ReconnectRequest,
 ) -> Result<(), ServerError>
 where
@@ -2620,12 +2627,16 @@ where
             .await;
         return Ok(());
     };
-    if pending.disconnected_handle.as_str() != handle_player.as_str() {
+    if pending.disconnected_handle.as_str() != handle_player.as_str()
+        || pending.disconnected_color != requested_color
+    {
         tracing::warn!(
             game_id = %req.game_id,
             login_handle = %handle_player.as_str(),
+            login_color = ?requested_color,
             expected_handle = %pending.disconnected_handle.as_str(),
-            "rejected reconnect: handle mismatch"
+            expected_color = ?pending.disconnected_color,
+            "rejected reconnect: handle/color mismatch"
         );
         let _ = transport
             .send_line(&CsaLine::new("LOGIN:incorrect reconnect_handle_mismatch"))
