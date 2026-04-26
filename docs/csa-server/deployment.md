@@ -338,9 +338,17 @@ fail させる契約。
 [Cloudflare Dashboard → Workers & Pages → 各 worker → Triggers → Routes] でも
 確認できる。
 
-これを設定すると、deploy 完了後に CI が `/health` を curl で叩いて smoke check
-する step が起動する。値未設定なら smoke step は skip されるだけで deploy 自体
-は成功扱い。**§3 の初回 deploy が成功してから設定する** こと。
+これを設定すると、deploy 完了後に CI が `/health` を curl で叩いて 200 を確認する
+smoke step が走る。値未設定でも smoke job は起動するが、step 内で
+`::warning ::WORKERS_HEALTH_URL not set on <Environment> Environment; skipping smoke check`
+を出して `exit 0` で終わるため、CI 全体は成功扱いを維持したまま deploy 健全性
+チェックだけ skip される。**§3 の初回 deploy が成功してから設定する** こと。
+
+> ℹ️ 実装メモ: GitHub Actions の job-level `if:` は `environment:` 宣言の
+> 解決 **前** に評価されるため、`if: ${{ vars.WORKERS_HEALTH_URL != '' }}`
+> のような形では Environment variable が見えず常に false と評価される。
+> このため smoke job は job レベルで gate せず、必ず起動して step 内 env で
+> 解決した値を見て分岐する設計にしている。
 
 ## 3. 初回手動 deploy
 

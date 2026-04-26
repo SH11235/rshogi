@@ -15,7 +15,8 @@
 # (`rshogi-csa-server-workers-staging` / `rshogi-csa-server-workers-production`)
 # ごとに登録する設計:
 #   - secrets   : `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`
-#   - variables : `WORKERS_HEALTH_URL` (`/health` endpoint URL、未設定なら smoke skip)
+#   - variables : `WORKERS_HEALTH_URL` (`/health` endpoint URL、未設定なら smoke step が
+#                 warning を出して即 exit 0 で済ませる）
 # 各 job が `environment:` を宣言することで、その環境に紐付いた値だけが
 # 注入される（staging job が production token を取れない gating になる）。
 # Environment 名に crate prefix (`rshogi-csa-server-workers-`) を付けるのは、
@@ -179,11 +180,14 @@ jobs:
     name: Smoke check deployed worker (staging)
     runs-on: ubuntu-latest
     needs: deploy-staging
-    # `vars.WORKERS_HEALTH_URL` は本 job が `environment: rshogi-csa-server-workers-staging`
-    # を宣言しているため、staging Environment の variable から自動解決される。
-    # production Environment 側に同名の variable を登録していても、staging 側 URL が
-    # 取り違えられて curl される心配はない（GitHub Actions の environment binding 仕様）。
-    if: ${{ vars.WORKERS_HEALTH_URL != '' }}
+    # `environment:` 宣言により staging Environment の variables / secrets が
+    # step 実行時に注入される（production との取り違えは発生しない）。
+    #
+    # 注意: GitHub Actions の job-level `if:` は environment 解決の **前** に
+    # 評価されるため、`if: ${{ vars.WORKERS_HEALTH_URL != '' }}` のような形で
+    # gate すると Environment variable が見えず常に false になる。job 自体は
+    # 必ず起動させ、step 内の env で `vars.WORKERS_HEALTH_URL` を解決して
+    # 空ならその場で warning + exit 0 で skip 相当にする。
     environment: rshogi-csa-server-workers-staging
     timeout-minutes: 5
     steps:
@@ -191,6 +195,10 @@ jobs:
         env:
           HEALTH_URL: ${{ vars.WORKERS_HEALTH_URL }}
         run: |
+          if [ -z "$HEALTH_URL" ]; then
+            echo "::warning ::WORKERS_HEALTH_URL not set on rshogi-csa-server-workers-staging Environment; skipping smoke check"
+            exit 0
+          fi
           # Cloudflare 側の rollout は数秒〜数十秒の伝播時間がある。
           # 短い間隔で 5 回までリトライする。
           for attempt in 1 2 3 4 5; do
@@ -313,10 +321,10 @@ jobs:
     name: Smoke check deployed worker (production)
     runs-on: ubuntu-latest
     needs: deploy-production
-    # `vars.WORKERS_HEALTH_URL` は本 job が `environment: rshogi-csa-server-workers-production`
-    # を宣言しているため、production Environment の variable から自動解決される。
-    # staging 側との取り違えは発生しない（同 smoke-staging のコメント参照）。
-    if: ${{ vars.WORKERS_HEALTH_URL != '' }}
+    # `environment:` 宣言により production Environment の variables / secrets が
+    # step 実行時に注入される（staging との取り違えは発生しない、同 smoke-staging
+    # のコメント参照）。job-level `if:` での gate は environment 解決前に評価されて
+    # しまい Environment variable が見えないため、step 内 env 経由で gate する。
     environment: rshogi-csa-server-workers-production
     timeout-minutes: 5
     steps:
@@ -324,6 +332,10 @@ jobs:
         env:
           HEALTH_URL: ${{ vars.WORKERS_HEALTH_URL }}
         run: |
+          if [ -z "$HEALTH_URL" ]; then
+            echo "::warning ::WORKERS_HEALTH_URL not set on rshogi-csa-server-workers-production Environment; skipping smoke check"
+            exit 0
+          fi
           for attempt in 1 2 3 4 5; do
             echo "[attempt $attempt] curl $HEALTH_URL"
             if curl -fsS --max-time 10 "$HEALTH_URL"; then
