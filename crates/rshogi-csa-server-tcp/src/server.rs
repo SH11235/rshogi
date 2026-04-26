@@ -48,7 +48,7 @@ use rshogi_csa_server::record::kifu::{
     primary_result_code,
 };
 use rshogi_csa_server::types::{
-    Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, RoomId,
+    Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, ReconnectToken, RoomId,
 };
 use rshogi_csa_server::{FileKifuStorage, TransportError};
 use tokio::net::{TcpListener, TcpStream};
@@ -1991,6 +1991,10 @@ where
         }
         None => (standard_initial_position_block(), Color::Black),
     };
+    // 対局開始時に対局者ごとに一意な再接続トークンを発行し、Game_Summary 末尾の
+    // 拡張行で配布する。再接続経路はトークン照合で同一対局・同一対局者を識別する。
+    let black_reconnect_token = ReconnectToken::generate();
+    let white_reconnect_token = ReconnectToken::generate();
     let summary = GameSummaryBuilder {
         game_id: game_id.clone(),
         black: matched.black.clone(),
@@ -2000,6 +2004,8 @@ where
         rematch_on_draw: false,
         to_move,
         declaration: "Jishogi 1.1".to_owned(),
+        black_reconnect_token: Some(black_reconnect_token),
+        white_reconnect_token: Some(white_reconnect_token),
     };
     send_multiline(black_transport, &summary.build_for(Color::Black)).await?;
     send_multiline(white_transport, &summary.build_for(Color::White)).await?;

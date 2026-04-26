@@ -51,7 +51,9 @@ use rshogi_csa_server::protocol::summary::{
     standard_initial_position_block,
 };
 use rshogi_csa_server::record::kifu::{fork_initial_sfen_from_kifu, initial_sfen_from_csa_moves};
-use rshogi_csa_server::types::{Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName};
+use rshogi_csa_server::types::{
+    Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, ReconnectToken,
+};
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::{ConfigKeys, parse_clock_spec};
@@ -431,6 +433,11 @@ impl GameRoom {
         *self.core.borrow_mut() = Some(core);
         *self.config.borrow_mut() = Some(cfg.clone());
 
+        // 対局開始時に対局者ごとに一意な再接続トークンを発行し、Game_Summary 末尾の
+        // 拡張行で配布する。デプロイ／DO 再起動による切断時、クライアントは
+        // この token を提示して同一対局・同一対局者として再参加する。
+        let black_reconnect_token = ReconnectToken::generate();
+        let white_reconnect_token = ReconnectToken::generate();
         // Game_Summary を双方に送出（Your_Turn だけ色で変える）。
         let builder = GameSummaryBuilder {
             game_id: GameId::new(cfg.game_id),
@@ -441,6 +448,8 @@ impl GameRoom {
             rematch_on_draw: false,
             to_move,
             declaration: String::new(),
+            black_reconnect_token: Some(black_reconnect_token),
+            white_reconnect_token: Some(white_reconnect_token),
         };
         let summary_black = builder.build_for(Color::Black);
         let summary_white = builder.build_for(Color::White);

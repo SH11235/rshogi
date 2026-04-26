@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color as CoreColor, File, PieceType, Rank, Square};
 
-use crate::types::{Color, GameId, PlayerName};
+use crate::types::{Color, GameId, PlayerName, ReconnectToken};
 
 /// `Game_Summary` の入力パラメタ。
 #[derive(Debug, Clone)]
@@ -32,6 +32,13 @@ pub struct GameSummaryBuilder {
     pub to_move: Color,
     /// 入玉宣言ルール表示（`Declaration:Jishogi 1.1` など）。空ならデフォルト省略。
     pub declaration: String,
+    /// 先手向けの再接続トークン。`Some` の場合、`build_for(Color::Black)` 出力に
+    /// 標準項目の後・`END Game_Summary` の直前で `Reconnect_Token:<token>` 拡張行
+    /// として埋め込む。`None` なら拡張行を出さず CSA v1.2.1 標準互換の出力に戻る。
+    pub black_reconnect_token: Option<ReconnectToken>,
+    /// 後手向けの再接続トークン。`build_for(Color::White)` 出力に対する挙動は
+    /// [`Self::black_reconnect_token`] と同様。
+    pub white_reconnect_token: Option<ReconnectToken>,
 }
 
 impl GameSummaryBuilder {
@@ -63,6 +70,15 @@ impl GameSummaryBuilder {
         out.push_str(&self.position_section);
         if !self.position_section.ends_with('\n') {
             out.push('\n');
+        }
+        // CSA v1.2.1 標準項目の後に続く拡張行として再接続トークンを末尾追加する。
+        // 標準互換クライアントは未知キーを無視できるため、CSA v1.2.1 とは後方互換。
+        let token = match you {
+            Color::Black => self.black_reconnect_token.as_ref(),
+            Color::White => self.white_reconnect_token.as_ref(),
+        };
+        if let Some(t) = token {
+            let _ = writeln!(out, "Reconnect_Token:{t}");
         }
         out.push_str("END Game_Summary\n");
         out
@@ -238,6 +254,8 @@ mod tests {
             rematch_on_draw: false,
             to_move: Color::Black,
             declaration: "Jishogi 1.1".to_owned(),
+            black_reconnect_token: None,
+            white_reconnect_token: None,
         }
     }
 
@@ -336,6 +354,54 @@ mod tests {
         // 手番行も `-` になることを固定する。
         let block = position_section_from_sfen("9/6k2/9/9/9/9/9/6R2/K8 w - 1").unwrap();
         assert!(block.contains("\n-\nEND Position"));
+    }
+
+    #[test]
+    fn build_for_omits_reconnect_token_when_none() {
+        let txt = skeleton().build_for(Color::Black);
+        assert!(!txt.contains("Reconnect_Token:"), "unexpected token line: {txt}");
+    }
+
+    #[test]
+    fn build_for_emits_per_color_reconnect_token() {
+        let mut b = skeleton();
+        b.black_reconnect_token = Some(ReconnectToken::new("aaaa1111"));
+        b.white_reconnect_token = Some(ReconnectToken::new("bbbb2222"));
+        let black_out = b.build_for(Color::Black);
+        let white_out = b.build_for(Color::White);
+        assert!(black_out.contains("\nReconnect_Token:aaaa1111\n"));
+        assert!(!black_out.contains("bbbb2222"));
+        assert!(white_out.contains("\nReconnect_Token:bbbb2222\n"));
+        assert!(!white_out.contains("aaaa1111"));
+    }
+
+    #[test]
+    fn build_for_places_reconnect_token_after_end_position_and_before_end_game_summary() {
+        let mut b = skeleton();
+        b.black_reconnect_token = Some(ReconnectToken::new("0123abcd"));
+        let txt = b.build_for(Color::Black);
+        let end_position = txt
+            .find("END Position\n")
+            .unwrap_or_else(|| panic!("missing END Position: {txt}"));
+        let token_line = txt
+            .find("\nReconnect_Token:0123abcd\n")
+            .unwrap_or_else(|| panic!("missing token line: {txt}"));
+        let end_game = txt
+            .find("END Game_Summary\n")
+            .unwrap_or_else(|| panic!("missing END Game_Summary: {txt}"));
+        assert!(end_position < token_line, "token must follow END Position");
+        assert!(token_line < end_game, "token must precede END Game_Summary");
+    }
+
+    #[test]
+    fn build_for_emits_only_one_color_token_when_other_is_none() {
+        let mut b = skeleton();
+        b.black_reconnect_token = Some(ReconnectToken::new("only-black"));
+        // 後手向け出力は何も入れていない。
+        let white_out = b.build_for(Color::White);
+        assert!(!white_out.contains("Reconnect_Token:"), "white must omit token: {white_out}");
+        let black_out = b.build_for(Color::Black);
+        assert!(black_out.contains("\nReconnect_Token:only-black\n"));
     }
 
     #[test]
