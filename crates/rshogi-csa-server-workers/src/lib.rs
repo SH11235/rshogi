@@ -33,6 +33,12 @@ pub mod origin;
 // コンパイルする。テストはホスト target で `cargo test` から到達できる。
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) mod persistence;
+// `reconnect` も `persistence` と同じく DO ランタイム専用の I/O 非依存ロジック
+// (grace registry のスキーマ、`PendingAlarmKind`、`build_resume_message` 等)。
+// ホスト target からはテスト経由でしか到達しないため、wasm32 とテスト時のみ
+// コンパイルする。
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod reconnect;
 pub mod room_id;
 pub mod session_state;
 pub mod spectator_control;

@@ -65,3 +65,9 @@ TOTAL_TIME_MIN = "10"
 BYOYOMI_MIN = "1"
 # `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル（LOGIN の handle 部分）。
 ADMIN_HANDLE = "admin"
+# 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
+# `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
+RECONNECT_GRACE_SECONDS = "0"
+# Floodgate 系運用機能（再接続プロトコル等）を opt-in で有効化する。`true` / `1` /
+# `yes` / `on` で有効。空または `false` のとき該当機能要求は起動 fail-fast。
+ALLOW_FLOODGATE_FEATURES = "false"

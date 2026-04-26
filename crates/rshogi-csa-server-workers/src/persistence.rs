@@ -49,6 +49,17 @@ pub struct PersistedConfig {
     /// 対局では `Some(sfen)` で、cold start 復元時もこの SFEN から `CoreRoom` を
     /// 組み直す。
     pub(crate) initial_sfen: Option<String>,
+    /// 先手向けに発行した再接続トークン。`Game_Summary` 末尾拡張行で配布した
+    /// 値そのまま (32 文字 hex)。`websocket_close` 時に grace registry へ写して
+    /// 切断側 LOGIN reconnect 要求の `expected_token` 照合に使う。再接続プロトコル
+    /// を有効化していない構成では `None`。`#[serde(default)]` を付けているのは、
+    /// 旧 schema (本フィールド導入前) で永続化された snapshot からの cold start
+    /// で deserialize 失敗を起こさないため。
+    #[serde(default)]
+    pub(crate) black_reconnect_token: Option<String>,
+    /// 後手向けの再接続トークン。挙動・契約は [`Self::black_reconnect_token`] と同様。
+    #[serde(default)]
+    pub(crate) white_reconnect_token: Option<String>,
 }
 
 /// 終局フラグ。一度 `Some` になったらその DO は同じ対局を二度開始しない。
@@ -225,6 +236,8 @@ mod tests {
             matched_at_ms: PLAY_STARTED_AT_MS - 100,
             play_started_at_ms: None,
             initial_sfen: None,
+            black_reconnect_token: None,
+            white_reconnect_token: None,
         }
     }
 

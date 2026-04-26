@@ -56,6 +56,14 @@ impl ConfigKeys {
     /// `env.var(ConfigKeys::ADMIN_HANDLE)` で var/secret どちらも読む（Cloudflare
     /// 仕様で同じ namespace に展開される）。
     pub const ADMIN_HANDLE: &'static str = "ADMIN_HANDLE";
+    /// 切断時の再接続猶予秒数。`0` または未設定なら再接続プロトコルを無効化し、
+    /// WebSocket close を即時 `#ABNORMAL` に流す（保守的既定）。`> 0` を指定する
+    /// 構成は `--allow-floodgate-features` (Workers では `ALLOW_FLOODGATE_FEATURES`)
+    /// を要求する Phase 5 features の opt-in 経路に乗る。
+    pub const RECONNECT_GRACE_SECONDS: &'static str = "RECONNECT_GRACE_SECONDS";
+    /// Floodgate 機能群を opt-in 有効化するブール変数。`true` / `1` / `yes` / `on`
+    /// で有効。`reconnect_protocol` 等の Floodgate 系を要求する構成で必須。
+    pub const ALLOW_FLOODGATE_FEATURES: &'static str = "ALLOW_FLOODGATE_FEATURES";
 
     /// `wrangler.toml` の `[[r2_buckets]] binding = "..."` で宣言されるべき名前の
     /// 網羅列挙。新規 R2 binding 定数を追加したら必ず本配列にも追加する。
@@ -95,6 +103,8 @@ impl ConfigKeys {
         Self::BYOYOMI_SEC,
         Self::TOTAL_TIME_MIN,
         Self::BYOYOMI_MIN,
+        Self::RECONNECT_GRACE_SECONDS,
+        Self::ALLOW_FLOODGATE_FEATURES,
     ];
 
     /// **local dev のみ** の `wrangler.toml.example` `[vars]` テーブルに追加で
@@ -105,6 +115,20 @@ impl ConfigKeys {
     /// 全件を `[vars]` として記載することで、新規メンバーが `cp wrangler.toml.example
     /// wrangler.toml && wrangler dev` で即動作確認できる friction レス運用を維持する。
     pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] = &[Self::ADMIN_HANDLE];
+}
+
+/// `RECONNECT_GRACE_SECONDS` 文字列を `Duration` へ解決する。`None` または空文字
+/// は `Duration::ZERO`（再接続プロトコル無効化）として扱う。負値や `u32::MAX` を
+/// 超える値は拒否する。
+pub fn parse_reconnect_grace_duration(raw: Option<&str>) -> Result<std::time::Duration, String> {
+    let trimmed = raw.unwrap_or("").trim();
+    if trimmed.is_empty() {
+        return Ok(std::time::Duration::ZERO);
+    }
+    let secs: u64 = trimmed
+        .parse()
+        .map_err(|e| format!("RECONNECT_GRACE_SECONDS: invalid u64 {trimmed:?}: {e}"))?;
+    Ok(std::time::Duration::from_secs(secs))
 }
 
 /// Workers `[vars]` 文字列群から時計設定を解決する。
@@ -218,5 +242,33 @@ mod tests {
     fn parse_clock_spec_rejects_unknown_kind() {
         let err = parse_clock_spec(Some("weird"), None, None, None, None).unwrap_err();
         assert!(err.contains("countdown|fischer|stopwatch"));
+    }
+
+    #[test]
+    fn parse_reconnect_grace_duration_defaults_to_zero() {
+        assert_eq!(parse_reconnect_grace_duration(None).unwrap(), std::time::Duration::ZERO);
+        assert_eq!(parse_reconnect_grace_duration(Some("")).unwrap(), std::time::Duration::ZERO);
+        assert_eq!(
+            parse_reconnect_grace_duration(Some(" \t ")).unwrap(),
+            std::time::Duration::ZERO,
+        );
+    }
+
+    #[test]
+    fn parse_reconnect_grace_duration_accepts_positive_seconds() {
+        assert_eq!(
+            parse_reconnect_grace_duration(Some("60")).unwrap(),
+            std::time::Duration::from_secs(60),
+        );
+        assert_eq!(
+            parse_reconnect_grace_duration(Some(" 30\n")).unwrap(),
+            std::time::Duration::from_secs(30),
+        );
+    }
+
+    #[test]
+    fn parse_reconnect_grace_duration_rejects_non_numeric() {
+        let err = parse_reconnect_grace_duration(Some("forever")).unwrap_err();
+        assert!(err.contains("RECONNECT_GRACE_SECONDS"));
     }
 }
