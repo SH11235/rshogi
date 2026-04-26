@@ -91,6 +91,26 @@ newtype_str! {
     pub ReconnectToken
 }
 
+impl ReconnectToken {
+    /// 128 bit の乱数を引き、32 文字の小文字 hex 文字列としてトークンに包む。
+    ///
+    /// 値は `[0-9a-f]` のみを取るため、CSA プロトコルの空白／改行／コロン
+    /// などの区切り文字と衝突せず、Game_Summary 拡張行へそのまま埋め込める。
+    /// 乱数源は `rand::random()` 経由のスレッドローカル RNG（OS RNG から seed
+    /// された ChaCha 派生 CSPRNG）で、wasm32 (Workers) では `getrandom` の
+    /// `wasm_js` feature を介して Web Crypto API から bytes が供給される。
+    pub fn generate() -> Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let bytes: [u8; 16] = rand::random();
+        let mut s = String::with_capacity(32);
+        for b in bytes {
+            s.push(HEX[(b >> 4) as usize] as char);
+            s.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        Self(s)
+    }
+}
+
 newtype_str! {
     /// 運営権限を持つクライアント識別子（`%%SETBUOY` 等で権限判定に用いる）。
     pub AdminId
@@ -197,5 +217,26 @@ mod tests {
     fn color_opposite() {
         assert_eq!(Color::Black.opposite(), Color::White);
         assert_eq!(Color::White.opposite(), Color::Black);
+    }
+
+    #[test]
+    fn reconnect_token_generate_is_32_lowercase_hex() {
+        let t = ReconnectToken::generate();
+        let s = t.as_str();
+        assert_eq!(s.len(), 32, "expected 32 hex chars: {s}");
+        assert!(
+            s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "expected lowercase hex only: {s}",
+        );
+    }
+
+    #[test]
+    fn reconnect_token_generate_is_unique_across_calls() {
+        // 128 bit 乱数なので 100 回引いても全て異なるはず（衝突は無視できる）。
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..100 {
+            let t = ReconnectToken::generate();
+            assert!(seen.insert(t.into_string()), "duplicate token observed");
+        }
     }
 }
