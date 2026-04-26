@@ -86,12 +86,12 @@ fn load_template_bindings() -> TemplateBindings {
 /// `code_side` (= `ConfigKeys::ALL_*`) と `template_side` (= `wrangler.toml.example`
 /// から抽出したリスト) が同一集合であることを検証する。
 ///
-/// - `code_side` にあって `template_side` に無い要素 → コード追加忘れ
+/// - `code_side` にあって `template_side` に無い要素 → template 更新忘れ
 ///   (`ConfigKeys` に定数追加したが template 更新を怠った)
-/// - `template_side` にあって `code_side` に無い要素 → template 追加忘れ
+/// - `template_side` にあって `code_side` に無い要素 → `ConfigKeys::ALL_*` 登録忘れ
 ///   (template に binding を入れたが `ConfigKeys::ALL_*` への登録を怠った)
 fn assert_bidirectional(category: &str, code_side: &[&'static str], template_side: &[String]) {
-    let missing_from_template: Vec<&&str> = code_side
+    let missing_from_template: Vec<_> = code_side
         .iter()
         .filter(|name| !template_side.iter().any(|t| t == **name))
         .collect();
@@ -102,7 +102,7 @@ fn assert_bidirectional(category: &str, code_side: &[&'static str], template_sid
         cat_upper = category.to_ascii_uppercase(),
     );
 
-    let missing_from_code: Vec<&String> = template_side
+    let missing_from_code: Vec<_> = template_side
         .iter()
         .filter(|name| !code_side.contains(&name.as_str()))
         .collect();
