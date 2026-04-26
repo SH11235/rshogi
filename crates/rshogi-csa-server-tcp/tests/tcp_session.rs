@@ -429,8 +429,15 @@ fn kifu_and_zerozero_list_match_format_contract() {
         let _ = read_until(&mut rb, "#LOSE").await;
 
         // 棋譜の場所は YYYY/MM/DD/<game_id>.csa（game_id は YYYYMMDDHHMMSS+連番）。
-        // persist_kifu 完了前の read_to_string で NotFound にならないようポーリング待機する。
-        let csa = wait_for_csa_text(&topdir, &game_id).await;
+        // 本テストは「format contract」として日付ディレクトリ配置も検証対象に含める
+        // ため、再帰探索ではなく game_id から組み立てた具体パスをポーリングする。
+        // `relative_kifu_path` が壊れて別ディレクトリへ書き出すような回帰は、ここで
+        // タイムアウト → panic で検知される。
+        let yyyy = &game_id[0..4];
+        let mm = &game_id[4..6];
+        let dd = &game_id[6..8];
+        let csa_path = topdir.join(yyyy).join(mm).join(dd).join(format!("{game_id}.csa"));
+        let csa = wait_for_file_text(&csa_path).await;
         // V2.2 ヘッダ、プレイヤ名、2 手、%TORYO の存在を確認。
         assert!(csa.starts_with("V2.2\n"));
         assert!(csa.contains("\nN+alice\n"));
