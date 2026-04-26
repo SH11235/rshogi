@@ -1,0 +1,32 @@
+[package]
+name = "rshogi-csa-client"
+version = "0.1.0"
+edition = "2024"
+authors = ["SH11235"]
+description = "CSA protocol client (CLI bridge) that wires a USI engine to a CSA server (TCP / WebSocket)."
+license = "GPL-3.0-only"
+repository = "https://github.com/SH11235/rshogi"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+env_logger.workspace = true
+log.workspace = true
+toml.workspace = true
+
+rshogi-core = { path = "../rshogi-core" }
+rshogi-csa = { path = "../rshogi-csa" }
+# CSA プロトコル送信側 serialize / 受信側 parse の単一ソース。
+# `default-features=false` で `tokio-transport` (tokio + serde_yaml) を切り、
+# protocol モジュールが必要とする pure な型 / 関数のみを取り込む。
+rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false }
+
+# CSA-over-WebSocket 用の sync ハンドシェイク + フレーミング。
+# rustls + webpki ルートで TLS を実装し、native-tls 経由の OpenSSL 依存を避ける。
+tungstenite = { version = "0.27", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+
+ctrlc = "3.4"
+libc = "0.2"

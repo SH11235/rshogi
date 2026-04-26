@@ -1,5 +1,5 @@
 # CSA対局クライアント設定例
-# 使い方: cargo run -p tools --bin csa_client --release -- csa_client_example.toml
+# 使い方: cargo run -p rshogi-csa-client --release -- csa_client_example.toml
 
 [server]
 host = "wdoor.c.u-tokyo.ac.jp"

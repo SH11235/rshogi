@@ -1812,6 +1812,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rshogi-csa-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "ctrlc",
+ "env_logger",
+ "libc",
+ "log",
+ "rshogi-core",
+ "rshogi-csa",
+ "rshogi-csa-server",
+ "serde",
+ "serde_json",
+ "toml",
+ "tungstenite",
+]
+
+[[package]]
 name = "rshogi-csa-server"
 version = "0.1.0"
 dependencies = [
@@ -2479,13 +2499,11 @@ dependencies = [
  "reqwest",
  "rshogi-core",
  "rshogi-csa",
- "rshogi-csa-server",
  "serde",
  "serde_json",
  "sysinfo",
  "tempfile",
  "toml",
- "tungstenite",
  "url",
  "walkdir",
 ]

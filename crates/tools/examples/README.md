@@ -1,26 +1,9 @@
 # コマンド例
 
-## CSA 対局クライアント (csa_client)
-
-USI エンジンを CSA プロトコル対局サーバーに接続するブリッジ。TCP 経路と
-WebSocket 経路の両方をサポートする。
-
-### Workers staging × csa_client 実機 E2E
-
-`csa_client_staging/` ディレクトリ配下の `*.toml.example` をコピーして
-書き換え、Cloudflare Workers の staging に WebSocket で接続する形で 1 対局
-通電を確認する。手順は [`docs/csa-server/staging-e2e.md`](../../../docs/csa-server/staging-e2e.md)
-を参照。
-
-```bash
-cp crates/tools/examples/csa_client_staging/staging-black.toml.example \
-   /tmp/staging-black.toml
-cp crates/tools/examples/csa_client_staging/staging-white.toml.example \
-   /tmp/staging-white.toml
-# 各 .toml の `engine.path` / `host` URL / `id` を編集してから別ターミナルで起動。
-cargo run -p tools --release --bin csa_client -- /tmp/staging-black.toml
-cargo run -p tools --release --bin csa_client -- /tmp/staging-white.toml
-```
+> CSA 対局クライアント (`csa_client`) は独立 crate `rshogi-csa-client` に分離
+> された。コマンド例とサンプル設定は
+> [`crates/rshogi-csa-client/examples/README.md`](../../rshogi-csa-client/examples/README.md)
+> を参照。
 
 ## トーナメント (tournament)
 

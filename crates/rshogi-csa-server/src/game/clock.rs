@@ -225,7 +225,7 @@ const MINUTE_GRAIN_MS: i64 = 60 * 1_000;
 /// - 消費で残時間が負に落ちた時点で時間切れ。
 ///
 /// # セマンティクス
-/// 既存 CSA client (`crates/tools/src/csa_client/session.rs`) は以下の会計を採用:
+/// 既存 CSA client (`crates/rshogi-csa-client/src/session.rs`) は以下の会計を採用:
 /// ```text
 /// init:          slot = total + increment     // pre-init-increment
 /// consume(e):    slot = slot - e + increment  // post-move-increment
@@ -412,7 +412,7 @@ impl TimeClock for StopWatchClock {
         // # 既知の client-server 乖離
         //
         // 本 server は `T<sec>` broadcast (秒単位の elapsed) を送り、client
-        // (`crates/tools/src/csa_client/session.rs`) はその値を literal ms として
+        // (`crates/rshogi-csa-client/src/session.rs`) はその値を literal ms として
         // 残時間から減算する。一方 server 側の `consume` は分単位で切り捨てる
         // ため、「client のローカル remaining」と「server の実 slot」は 1 手に
         // 最大 59 秒ずれ得る（client 側実装の limitation）。engine の時間管理

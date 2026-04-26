@@ -7,10 +7,10 @@
 //!
 //! ```bash
 //! # TOML設定ファイルから実行
-//! cargo run -p tools --bin csa_client -- config.toml
+//! cargo run -p rshogi-csa-client -- config.toml
 //!
 //! # CLIオプションでオーバーライド
-//! cargo run -p tools --bin csa_client -- config.toml --id my_engine --ponder
+//! cargo run -p rshogi-csa-client -- config.toml --id my_engine --ponder
 //! ```
 
 use std::path::PathBuf;
@@ -21,12 +21,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use tools::csa_client::config::CsaClientConfig;
-use tools::csa_client::engine::UsiEngine;
-use tools::csa_client::protocol::{CsaConnection, GameResult};
-use tools::csa_client::record::save_record;
-use tools::csa_client::session::run_game_session;
-use tools::csa_client::transport::{ConnectOpts, TransportTarget};
+use rshogi_csa_client::config::CsaClientConfig;
+use rshogi_csa_client::engine::UsiEngine;
+use rshogi_csa_client::protocol::{CsaConnection, GameResult};
+use rshogi_csa_client::record::save_record;
+use rshogi_csa_client::session::run_game_session;
+use rshogi_csa_client::transport::{ConnectOpts, TransportTarget};
 
 #[derive(Parser)]
 #[command(
@@ -221,7 +221,7 @@ fn run_one_game(
     config: &CsaClientConfig,
     engine: &mut UsiEngine,
     shutdown: &AtomicBool,
-) -> Result<(GameResult, tools::csa_client::record::GameRecord)> {
+) -> Result<(GameResult, rshogi_csa_client::record::GameRecord)> {
     // サーバー接続。host に scheme (`ws://` / `wss://` / `tcp://`) があれば
     // それに従い、無ければ既存挙動どおり `host:port` の TCP。
     let target = TransportTarget::from_host_port(&config.server.host, config.server.port);

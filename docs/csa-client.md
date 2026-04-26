@@ -11,7 +11,7 @@ cp csa_client_example.toml my_config.toml
 # → server.id, server.password, engine.path を書き換える
 
 # 2. 実行
-cargo run -p tools --bin csa_client --release -- my_config.toml
+cargo run -p rshogi-csa-client --release -- my_config.toml
 ```
 
 ## 設定
@@ -27,7 +27,7 @@ CLIオプション > 環境変数 > TOML設定ファイル > デフォルト値
 設定ファイルの値を部分的にオーバーライドできる:
 
 ```bash
-cargo run -p tools --bin csa_client --release -- config.toml \
+cargo run -p rshogi-csa-client --release -- config.toml \
   --id my_engine \
   --max-games 10 \
   --ponder true \
@@ -136,7 +136,7 @@ ponder = true
 
 ```bash
 # バックグラウンド実行
-nohup cargo run -p tools --bin csa_client --release -- config.toml > csa.log 2>&1 &
+nohup cargo run -p rshogi-csa-client --release -- config.toml > csa.log 2>&1 &
 ```
 
 Ctrl+C (SIGINT) で現在の対局完了後にgracefulに終了する。

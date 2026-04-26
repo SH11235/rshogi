@@ -7,9 +7,9 @@ use chrono::Local;
 
 use rshogi_csa::{Color, Position, usi_move_to_csa};
 
-use super::config::RecordConfig;
-use super::engine::SearchInfo;
-use super::protocol::{GameSummary, TimeConfig};
+use crate::config::RecordConfig;
+use crate::engine::SearchInfo;
+use crate::protocol::{GameSummary, TimeConfig};
 
 /// 対局中に蓄積する棋譜データ
 #[derive(Clone, Debug)]

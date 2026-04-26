@@ -13,8 +13,8 @@ use rshogi_csa::{Color, CsaMove, ParsedMove, Position, parse_csa_full};
 use rshogi_csa_server::protocol::command::{ClientCommand, serialize_client_command};
 use rshogi_csa_server::types::{CsaMoveToken, GameId, PlayerName, Secret};
 
-use super::event::Event;
-use super::transport::{ConnectOpts, CsaTransport, TransportTarget};
+use crate::event::Event;
+use crate::transport::{ConnectOpts, CsaTransport, TransportTarget};
 
 /// 先後共通または個別の時間設定
 #[derive(Clone, Debug, Default)]

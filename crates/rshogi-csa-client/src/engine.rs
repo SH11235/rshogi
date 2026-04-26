@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::event::Event;
-use super::protocol::parse_game_result;
+use crate::event::Event;
+use crate::protocol::parse_game_result;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 
