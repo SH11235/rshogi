@@ -38,7 +38,7 @@ use rshogi_csa_server::port::{
     BroadcastTag, Broadcaster, BuoyStorage, ClientTransport, GameSummaryEntry, KifuStorage,
     RateDecision, RateStorage,
 };
-use rshogi_csa_server::protocol::command::{ClientCommand, parse_command};
+use rshogi_csa_server::protocol::command::{ClientCommand, ReconnectRequest, parse_command};
 use rshogi_csa_server::protocol::summary::{
     GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
     standard_initial_position_block,
@@ -183,6 +183,13 @@ pub struct ServerConfig {
     /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
     /// を落とさない」ためのバッファで、既定 60 秒。
     pub shutdown_grace: Duration,
+    /// 対局中に対局者の接続が切れた際、即時 `#ABNORMAL` 終局せず再接続を待つ
+    /// 猶予時間。`Duration::ZERO` のとき、接続喪失で即時に異常終了させる
+    /// （Phase 1-4 互換、Requirement 2.5 の Phase 1-3 既定）。Phase 5 で再接続
+    /// プロトコルを有効化する場合は運用側で 60 秒程度を設定する。猶予中は
+    /// `SharedState::reconnect_pending` に対局状態を保持し、Game_Summary 末尾
+    /// 拡張行で配布した `reconnect_token` の照合で再参加を許可する。
+    pub reconnect_grace_duration: Duration,
 }
 
 impl ServerConfig {
@@ -207,6 +214,7 @@ impl ServerConfig {
             handicap_initial_sfens: std::collections::HashMap::new(),
             duplicate_login_policy: DuplicateLoginPolicy::RejectNew,
             shutdown_grace: Duration::from_secs(60),
+            reconnect_grace_duration: Duration::ZERO,
         }
     }
 }
@@ -441,6 +449,42 @@ impl WaitingPool {
     }
 }
 
+/// 切断時に保持される対局スナップショット。再接続成立時、再参加クライアントへ
+/// 現在の盤面・両者残時間・最終手・手番を再送するために保持する。
+#[derive(Debug, Clone)]
+pub(crate) struct ReconnectSnapshot {
+    /// 先手の残り持ち時間 (ms)。
+    pub(crate) black_remaining_ms: u64,
+    /// 後手の残り持ち時間 (ms)。
+    pub(crate) white_remaining_ms: u64,
+    /// 現在の手番。
+    pub(crate) current_turn: Color,
+    /// 直前に確定した最終手 (なければ `None`)。
+    pub(crate) last_move: Option<CsaMoveToken>,
+}
+
+/// 再接続待ち対局のエントリ。`SharedState::reconnect_pending` に登録される。
+///
+/// 切断された対局者の再接続要求を grace 期間内に受理する。LOGIN 行で
+/// `reconnect:<game_id>+<token>` が提示された際、本エントリの `expected_token`
+/// と照合し、一致すれば `reconnect_tx` から新 `TcpTransport` を game loop に
+/// handoff して対局を再開する。
+pub(crate) struct PendingReconnect {
+    /// 切断された側の handle。LOGIN 時の照合に使う。
+    pub(crate) disconnected_handle: PlayerName,
+    /// 切断側に発行された再接続トークン (Game_Summary 末尾拡張行で配布済み)。
+    pub(crate) expected_token: ReconnectToken,
+    /// 再接続成立時に game loop へ新 `TcpTransport` を渡す one-shot 送信側。
+    /// 1 回だけ使えるため `Mutex<Option<…>>` で「最初に `take()` できた者勝ち」を
+    /// 表現する。token 不一致など拒否ケースでは `take()` せずに残すことで、
+    /// 後続の正当な再接続要求が引き続き受理可能となる。
+    pub(crate) reconnect_tx: Mutex<Option<oneshot::Sender<TcpTransport>>>,
+    /// 切断時点の対局スナップショット。再送に使う。
+    pub(crate) snapshot: ReconnectSnapshot,
+    /// 切断側宛の Game_Summary 文字列 (再接続トークン拡張行を含む完全形)。
+    pub(crate) game_summary_for_disconnected: String,
+}
+
 /// サーバー全体で共有する状態。
 pub struct SharedState<R, K, P, H>
 where
@@ -504,6 +548,13 @@ where
     /// SIGINT / SIGTERM 由来の graceful shutdown トリガ。accept ループと
     /// 待機 waiter が監視して、新規受付停止と待機セッション切断を行う。
     pub shutdown: GracefulShutdown,
+    /// 切断検出後 grace 期間内の対局を一時保持するレジストリ。`game_id` で索引し、
+    /// LOGIN 時に `reconnect:<game_id>+<token>` を提示したクライアントが
+    /// `Arc<PendingReconnect>` を取り出して token 照合・transport handoff を行う。
+    /// `config.reconnect_grace_duration` が `Duration::ZERO` の場合（Phase 1-4
+    /// 互換）はこのレジストリは常に空のままで、`run_game_loop_and_record` は
+    /// 即時 `#ABNORMAL` に進む。
+    pub(crate) reconnect_pending: Mutex<HashMap<GameId, Arc<PendingReconnect>>>,
 }
 
 impl<R, K, P, H> SharedState<R, K, P, H>
@@ -795,8 +846,13 @@ where
     // 2. LOGIN 行を受信。
     let login_line = transport.recv_line(state.config.login_timeout).await?;
     let cmd = parse_command(&login_line)?;
-    let (full_name, password, x1) = match cmd {
-        ClientCommand::Login { name, password, x1 } => (name, password, x1),
+    let (full_name, password, x1, reconnect) = match cmd {
+        ClientCommand::Login {
+            name,
+            password,
+            x1,
+            reconnect,
+        } => (name, password, x1, reconnect),
         _ => {
             let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect")).await;
             return Err(ServerError::Protocol(ProtocolError::Malformed(
@@ -837,6 +893,15 @@ where
     }
     // LOGIN 成功応答: shogi-server 互換の `LOGIN:<handle> OK`。
     transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
+
+    // 4.5. 再接続要求の経路分岐。LOGIN 行の 3 つ目トークンが `reconnect:<game_id>+<token>`
+    //      で来た場合は新規対局参加 (League 登録 / 待機プール) ではなく、grace 中の
+    //      該当対局へ「同一対局者として再参加」する経路へ。`reconnect_pending` 検索
+    //      → handle / token 照合 → game loop に新 transport を handoff。失敗時は
+    //      `LOGIN:incorrect <reason>` で拒否し、対局状態は変更しない (Requirement 17.6)。
+    if let Some(req) = reconnect {
+        return handle_reconnect_request(&state, transport, &handle_player, req).await;
+    }
 
     // 5. League に登録して GameWaiting に遷移する。x1 フラグはプロトコル拡張
     //    「このクライアントは `%%` 系コマンドも解釈できる」ことを示す属性で、
@@ -2004,8 +2069,8 @@ where
         rematch_on_draw: false,
         to_move,
         declaration: "Jishogi 1.1".to_owned(),
-        black_reconnect_token: Some(black_reconnect_token),
-        white_reconnect_token: Some(white_reconnect_token),
+        black_reconnect_token: Some(black_reconnect_token.clone()),
+        white_reconnect_token: Some(white_reconnect_token.clone()),
     };
     send_multiline(black_transport, &summary.build_for(Color::Black)).await?;
     send_multiline(white_transport, &summary.build_for(Color::White)).await?;
@@ -2070,7 +2135,16 @@ where
         });
     }
 
-    // 指し手と消費時間を記録しつつ終局まで駆動する。
+    // 指し手と消費時間を記録しつつ終局まで駆動する。再接続経路で使う handle/token と
+    // Game_Summary builder への参照も渡す。`reconnect_grace_duration` が `Duration::ZERO`
+    // の構成では grace 関連経路には全く立ち寄らない。
+    let reconnect_ctx = ReconnectContext {
+        black_handle: &matched.black,
+        white_handle: &matched.white,
+        black_token: &black_reconnect_token,
+        white_token: &white_reconnect_token,
+        summary: &summary,
+    };
     let result_moves = run_game_loop_and_record(
         state,
         game_id,
@@ -2078,6 +2152,7 @@ where
         game_start_instant,
         black_transport,
         white_transport,
+        &reconnect_ctx,
     )
     .await;
     let end_time = chrono::Utc::now();
@@ -2292,6 +2367,19 @@ where
 ///
 /// `run_room` を直接使うと消費秒数を取り出せないため、ここでは `GameRoom` を直接駆動
 /// して手番イベントから `,T<sec>` を解析し `KifuMove` を収集する。
+/// `run_game_loop_and_record` に渡す再接続関連コンテキスト。
+///
+/// 各対局者の `handle` / `reconnect_token` / Game_Summary builder を一括で持ち、
+/// 引数列を膨らませず内部で使う。`reconnect_grace_duration == ZERO` の構成では
+/// このコンテキストは参照されるだけで実装経路には立ち入らない。
+struct ReconnectContext<'a> {
+    black_handle: &'a PlayerName,
+    white_handle: &'a PlayerName,
+    black_token: &'a ReconnectToken,
+    white_token: &'a ReconnectToken,
+    summary: &'a GameSummaryBuilder,
+}
+
 async fn run_game_loop_and_record<R, K, P, H>(
     state: &SharedState<R, K, P, H>,
     game_id: &GameId,
@@ -2299,6 +2387,7 @@ async fn run_game_loop_and_record<R, K, P, H>(
     start_instant: tokio::time::Instant,
     black: &mut TcpTransport,
     white: &mut TcpTransport,
+    reconnect_ctx: &ReconnectContext<'_>,
 ) -> Result<(GameResult, Vec<KifuMove>), ServerError>
 where
     R: RateStorage + 'static,
@@ -2310,7 +2399,7 @@ where
         || tokio::time::Instant::now().saturating_duration_since(start_instant).as_millis() as u64;
     let mut recorded_moves: Vec<KifuMove> = Vec::new();
 
-    loop {
+    'game_loop: loop {
         let status = room.status().clone();
         if let rshogi_csa_server::GameStatus::Finished(result) = status {
             return Ok((result, recorded_moves));
@@ -2332,7 +2421,33 @@ where
         let r = match evt {
             Evt::Recv(from, Ok(line)) => room.handle_line(from, &line, now_ms())?,
             Evt::Recv(from, Err(TransportError::Closed | TransportError::Timeout)) => {
-                room.force_abnormal(from)
+                let grace = state.config.reconnect_grace_duration;
+                if grace.is_zero() {
+                    room.force_abnormal(from)
+                } else {
+                    let outcome = handle_disconnect_with_grace(
+                        state,
+                        game_id,
+                        room,
+                        &recorded_moves,
+                        reconnect_ctx,
+                        from,
+                        grace,
+                    )
+                    .await?;
+                    match outcome {
+                        DisconnectOutcome::Reconnected(new_transport) => {
+                            // 切断側 transport を新接続で差し替えて対局継続。
+                            // 状態再送は handle_disconnect_with_grace 内で完了済み。
+                            match from {
+                                Color::Black => *black = new_transport,
+                                Color::White => *white = new_transport,
+                            }
+                            continue 'game_loop;
+                        }
+                        DisconnectOutcome::Aborted => room.force_abnormal(from),
+                    }
+                }
             }
             Evt::Recv(_, Err(e)) => return Err(ServerError::Transport(e)),
             Evt::TimeUp => {
@@ -2365,6 +2480,218 @@ where
 enum Evt {
     Recv(Color, Result<CsaLine, TransportError>),
     TimeUp,
+}
+
+/// 切断検出後の grace 経路の結末。
+enum DisconnectOutcome {
+    /// 猶予内に正当な再接続要求が成立し、新 `TcpTransport` を game loop に
+    /// handoff した。呼び出し側は切断側 transport を新接続で差し替えて対局を継続する。
+    Reconnected(TcpTransport),
+    /// 猶予を超過したか、再接続経路が中断された (oneshot 送信側 drop など)。
+    /// 呼び出し側は `room.force_abnormal(...)` で切断側を敗北として確定する。
+    Aborted,
+}
+
+/// 切断検出後 grace 期間内の対局状態を保持し、再接続要求の到着を待つ。
+///
+/// `state.reconnect_pending` に `PendingReconnect` を登録し、`tokio::select!` で
+/// (a) 再接続成功 (b) grace 期限超過 のどちらかを待つ。再接続成功時は新
+/// `TcpTransport` を game loop に渡す前に状態再送 (Game_Summary 全文 + 現在の
+/// 盤面 / 残時間 / 最終手 / 手番) を行う。途中で何が起きても registry から
+/// 当該 `game_id` のエントリを削除して戻る (満了 / 拒否 / panic 経由いずれも)。
+async fn handle_disconnect_with_grace<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
+    game_id: &GameId,
+    room: &GameRoom,
+    recorded_moves: &[KifuMove],
+    ctx: &ReconnectContext<'_>,
+    disconnected: Color,
+    grace: Duration,
+) -> Result<DisconnectOutcome, ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    let (handle, expected_token) = match disconnected {
+        Color::Black => (ctx.black_handle.clone(), ctx.black_token.clone()),
+        Color::White => (ctx.white_handle.clone(), ctx.white_token.clone()),
+    };
+    let snapshot = ReconnectSnapshot {
+        black_remaining_ms: room.clock_remaining_main_ms(Color::Black).max(0) as u64,
+        white_remaining_ms: room.clock_remaining_main_ms(Color::White).max(0) as u64,
+        current_turn: room.current_turn(),
+        last_move: recorded_moves.last().map(|m| m.token.clone()),
+    };
+    // 再接続成立時に送出する Game_Summary 文字列を「切断時点の現在局面」で組み立てておく。
+    // `position_section` だけを snapshot から差し替え、`Reconnect_Token:` 拡張行はそのまま
+    // 残るため、再接続クライアントは初接続時と同じく token 入りの完全な Game_Summary を
+    // 受け取れる。残時間や最終手は `Reconnect_State` ブロックで別途送る。
+    let mut summary_for_resume = ctx.summary.clone();
+    summary_for_resume.position_section =
+        rshogi_csa_server::protocol::summary::position_section_from_position(room.position());
+    let game_summary_for_disconnected = summary_for_resume.build_for(disconnected);
+
+    let (tx, rx) = oneshot::channel::<TcpTransport>();
+    let deadline = tokio::time::Instant::now() + grace;
+    let pending = Arc::new(PendingReconnect {
+        disconnected_handle: handle.clone(),
+        expected_token,
+        reconnect_tx: Mutex::new(Some(tx)),
+        snapshot,
+        game_summary_for_disconnected,
+    });
+    {
+        let mut pendings = state.reconnect_pending.lock().await;
+        pendings.insert(game_id.clone(), pending);
+    }
+    tracing::info!(
+        game_id = %game_id,
+        disconnected_color = ?disconnected,
+        disconnected_handle = %handle.as_str(),
+        grace_secs = grace.as_secs(),
+        "awaiting reconnect within grace window"
+    );
+
+    let outcome = tokio::select! {
+        recv_res = rx => match recv_res {
+            Ok(new_transport) => DisconnectOutcome::Reconnected(new_transport),
+            // sender 側が drop された場合 (handshake 側の panic 等)。registry には
+            // 残っていない可能性が高いので Aborted として上位で `force_abnormal` する。
+            Err(_) => DisconnectOutcome::Aborted,
+        },
+        _ = tokio::time::sleep_until(deadline) => DisconnectOutcome::Aborted,
+    };
+
+    // どの経路でも registry から自分のエントリを片付ける。再接続成功側で既に
+    // `take()` で sender を持ち出していても、PendingReconnect 自体は registry に
+    // 残ったままなので、ここで明示的に削除する (重複ログイン経路で別の handler が
+    // 古い registry エントリを誤って参照しないようにするため)。
+    {
+        let mut pendings = state.reconnect_pending.lock().await;
+        pendings.remove(game_id);
+    }
+
+    Ok(outcome)
+}
+
+/// LOGIN 行で `reconnect:<game_id>+<token>` が指定されたクライアントを受理し、
+/// 該当 `game_id` の grace 中対局へ再参加させる。
+///
+/// 失敗ケース:
+/// - `game_id` が registry に存在しない → `LOGIN:incorrect reconnect_unknown_game`
+/// - LOGIN handle と `disconnected_handle` が不一致 → `LOGIN:incorrect reconnect_handle_mismatch`
+/// - `token` が `expected_token` と不一致 → `LOGIN:incorrect reconnect_token_mismatch`
+/// - registry エントリは残っているが `reconnect_tx` が既に消費済み (重複再接続) →
+///   `LOGIN:incorrect reconnect_already_resumed`
+///
+/// いずれの拒否ケースでも `reconnect_pending` のエントリは変更せず、対局状態は
+/// 保持されたままになる (Requirement 17.6)。成功時のみ `reconnect_tx` を `take()`
+/// して新 `TcpTransport` を game loop に渡し、状態再送 (Game_Summary 全文 +
+/// `Reconnect_State` ブロック) を済ませてから handoff する。
+async fn handle_reconnect_request<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
+    mut transport: TcpTransport,
+    handle_player: &PlayerName,
+    req: ReconnectRequest,
+) -> Result<(), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    let pending = {
+        let pendings = state.reconnect_pending.lock().await;
+        pendings.get(&req.game_id).cloned()
+    };
+    let Some(pending) = pending else {
+        let _ = transport
+            .send_line(&CsaLine::new("LOGIN:incorrect reconnect_unknown_game"))
+            .await;
+        return Ok(());
+    };
+    if pending.disconnected_handle.as_str() != handle_player.as_str() {
+        tracing::warn!(
+            game_id = %req.game_id,
+            login_handle = %handle_player.as_str(),
+            expected_handle = %pending.disconnected_handle.as_str(),
+            "rejected reconnect: handle mismatch"
+        );
+        let _ = transport
+            .send_line(&CsaLine::new("LOGIN:incorrect reconnect_handle_mismatch"))
+            .await;
+        return Ok(());
+    }
+    if pending.expected_token.as_str() != req.token.as_str() {
+        tracing::warn!(
+            game_id = %req.game_id,
+            login_handle = %handle_player.as_str(),
+            "rejected reconnect: token mismatch"
+        );
+        let _ = transport
+            .send_line(&CsaLine::new("LOGIN:incorrect reconnect_token_mismatch"))
+            .await;
+        return Ok(());
+    }
+
+    let resume_message =
+        build_resume_message(&pending.game_summary_for_disconnected, &pending.snapshot);
+    send_multiline(&mut transport, &resume_message).await?;
+
+    let mut tx_slot = pending.reconnect_tx.lock().await;
+    let Some(sender) = tx_slot.take() else {
+        let _ = transport
+            .send_line(&CsaLine::new("LOGIN:incorrect reconnect_already_resumed"))
+            .await;
+        return Ok(());
+    };
+    if sender.send(transport).is_err() {
+        // game loop 側が既に Aborted で終了 (deadline 超過直後の race など)。
+        // registry の片付けは game loop の終了処理が済ませている想定。
+        tracing::warn!(
+            game_id = %req.game_id,
+            "reconnect transport handoff failed: game loop already aborted"
+        );
+    }
+    tracing::info!(
+        game_id = %req.game_id,
+        login_handle = %handle_player.as_str(),
+        "reconnect succeeded; transport handed off to game loop"
+    );
+    Ok(())
+}
+
+/// 再接続成立時にクライアントへ送出する状態再送メッセージを組み立てる。
+///
+/// フォーマット:
+/// 1. `BEGIN Game_Summary` ... `END Game_Summary` (`position_section` は切断時点の
+///    現在局面、`Reconnect_Token:` 拡張行は含む)
+/// 2. `BEGIN Reconnect_State` ... `END Reconnect_State` (現在の手番・両者残時間・
+///    直前手のメタ情報)
+fn build_resume_message(
+    game_summary_for_disconnected: &str,
+    snapshot: &ReconnectSnapshot,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = game_summary_for_disconnected.to_owned();
+    out.push_str("BEGIN Reconnect_State\n");
+    let _ = writeln!(
+        out,
+        "Current_Turn:{}",
+        match snapshot.current_turn {
+            Color::Black => '+',
+            Color::White => '-',
+        }
+    );
+    let _ = writeln!(out, "Black_Time_Remaining_Ms:{}", snapshot.black_remaining_ms);
+    let _ = writeln!(out, "White_Time_Remaining_Ms:{}", snapshot.white_remaining_ms);
+    if let Some(last) = &snapshot.last_move {
+        let _ = writeln!(out, "Last_Move:{}", last.as_str());
+    }
+    out.push_str("END Reconnect_State\n");
+    out
 }
 
 /// `run_room` と同じ dispatch ロジック（コピー。run_loop 外で使うため）。
@@ -2613,6 +2940,7 @@ where
         started_at: chrono::Utc::now(),
         buoy_storage,
         shutdown: GracefulShutdown::new(),
+        reconnect_pending: Mutex::new(HashMap::new()),
     }
 }
 
@@ -2669,6 +2997,62 @@ mod tests {
         assert!(parse_handle("+g1+black").is_none());
         assert!(parse_handle("alice++black").is_none());
         assert!(parse_handle("alice+g1+purple").is_none());
+    }
+
+    fn sample_summary_text() -> String {
+        // 単体テスト用の簡易 Game_Summary 文字列。実コードでは GameSummaryBuilder
+        // 経由で生成されるが、build_resume_message は文字列を受けるだけなので
+        // 標準項目を満たす最小フレームで十分。
+        let mut s = String::new();
+        s.push_str("BEGIN Game_Summary\n");
+        s.push_str("Game_ID:20260426120000\n");
+        s.push_str("Reconnect_Token:abcd\n");
+        s.push_str("END Game_Summary\n");
+        s
+    }
+
+    fn sample_snapshot(last_move: Option<&str>) -> ReconnectSnapshot {
+        ReconnectSnapshot {
+            black_remaining_ms: 599_500,
+            white_remaining_ms: 600_000,
+            current_turn: Color::White,
+            last_move: last_move.map(CsaMoveToken::new),
+        }
+    }
+
+    #[test]
+    fn build_resume_message_includes_game_summary_then_reconnect_state_block() {
+        let summary = sample_summary_text();
+        let snap = sample_snapshot(Some("+7776FU"));
+        let out = build_resume_message(&summary, &snap);
+        let end_summary = out.find("END Game_Summary\n").expect("END Game_Summary");
+        let begin_state = out.find("BEGIN Reconnect_State\n").expect("BEGIN Reconnect_State");
+        let end_state = out.find("END Reconnect_State\n").expect("END Reconnect_State");
+        assert!(end_summary < begin_state, "Reconnect_State must follow Game_Summary");
+        assert!(begin_state < end_state);
+        assert!(out.contains("\nCurrent_Turn:-\n"));
+        assert!(out.contains("\nBlack_Time_Remaining_Ms:599500\n"));
+        assert!(out.contains("\nWhite_Time_Remaining_Ms:600000\n"));
+        assert!(out.contains("\nLast_Move:+7776FU\n"));
+    }
+
+    #[test]
+    fn build_resume_message_emits_plus_for_black_turn() {
+        let summary = sample_summary_text();
+        let snap = ReconnectSnapshot {
+            current_turn: Color::Black,
+            ..sample_snapshot(None)
+        };
+        let out = build_resume_message(&summary, &snap);
+        assert!(out.contains("\nCurrent_Turn:+\n"));
+    }
+
+    #[test]
+    fn build_resume_message_omits_last_move_line_when_none() {
+        let summary = sample_summary_text();
+        let snap = sample_snapshot(None);
+        let out = build_resume_message(&summary, &snap);
+        assert!(!out.contains("Last_Move:"), "must omit Last_Move when no move played: {out}");
     }
 
     #[test]

@@ -5,14 +5,28 @@
 //! [`crate::game`]）で行う。
 
 use crate::error::ProtocolError;
-use crate::types::{Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, Secret};
+use crate::types::{
+    Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, ReconnectToken, Secret,
+};
+
+/// 再接続要求の引数。LOGIN 行末尾の `reconnect:<game_id>+<token>` で送られる。
+///
+/// 通常の新規対局参加 LOGIN とは異なる経路で処理される（`game_id` の対局が
+/// grace 中に存在し、`token` が一致した場合に同一対局者として再参加する）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectRequest {
+    /// 再参加対象の対局 ID。
+    pub game_id: GameId,
+    /// 対局開始時に発行された再接続トークン (Game_Summary 末尾拡張行で配布済み)。
+    pub token: ReconnectToken,
+}
 
 /// クライアントから到着し得るコマンド一覧。
 ///
 /// 非公開フィールドは持たず、パターンマッチによるルーティングが容易な `enum`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientCommand {
-    /// `LOGIN <name> <password> [x1]`
+    /// `LOGIN <name> <password> [x1 | reconnect:<game_id>+<token>]`
     Login {
         /// プレイヤ名。
         name: PlayerName,
@@ -20,6 +34,9 @@ pub enum ClientCommand {
         password: Secret,
         /// x1 拡張モードを要求するか。
         x1: bool,
+        /// 再接続要求。`Some` の場合は新規対局参加ではなく既存対局への再参加要求。
+        /// `x1` と排他: 同一 LOGIN 行で両方を指定することはできない。
+        reconnect: Option<ReconnectRequest>,
     },
     /// `LOGOUT`
     Logout,
@@ -163,13 +180,36 @@ pub fn parse_command(line: &CsaLine) -> Result<ClientCommand, ProtocolError> {
             let password = parts
                 .next()
                 .ok_or_else(|| ProtocolError::Malformed("LOGIN: missing password".into()))?;
-            let x1 = match parts.next() {
-                None => false,
-                Some("x1") => true,
-                Some(extra) => {
-                    return Err(ProtocolError::Malformed(format!(
-                        "LOGIN: unexpected trailing token `{extra}`"
-                    )));
+            let (x1, reconnect) = match parts.next() {
+                None => (false, None),
+                Some("x1") => (true, None),
+                Some(token) => {
+                    if let Some(rest) = token.strip_prefix("reconnect:") {
+                        let mut split = rest.splitn(2, '+');
+                        let game_id_part =
+                            split.next().filter(|s| !s.is_empty()).ok_or_else(|| {
+                                ProtocolError::Malformed(
+                                    "LOGIN: reconnect requires `<game_id>+<token>`".into(),
+                                )
+                            })?;
+                        let token_part =
+                            split.next().filter(|s| !s.is_empty()).ok_or_else(|| {
+                                ProtocolError::Malformed(
+                                    "LOGIN: reconnect requires `<game_id>+<token>`".into(),
+                                )
+                            })?;
+                        (
+                            false,
+                            Some(ReconnectRequest {
+                                game_id: GameId::new(game_id_part),
+                                token: ReconnectToken::new(token_part),
+                            }),
+                        )
+                    } else {
+                        return Err(ProtocolError::Malformed(format!(
+                            "LOGIN: unexpected trailing token `{token}`"
+                        )));
+                    }
                 }
             };
             if parts.next().is_some() {
@@ -179,6 +219,7 @@ pub fn parse_command(line: &CsaLine) -> Result<ClientCommand, ProtocolError> {
                 name: PlayerName::new(name),
                 password: Secret::new(password),
                 x1,
+                reconnect,
             })
         }
         "LOGOUT" => {
@@ -397,6 +438,7 @@ mod tests {
                 name: PlayerName::new("alice"),
                 password: Secret::new("pw"),
                 x1: false,
+                reconnect: None,
             }
         );
     }
@@ -404,10 +446,38 @@ mod tests {
     #[test]
     fn parses_login_x1() {
         let cmd = parse_command(&line("LOGIN bob secret x1")).unwrap();
-        let ClientCommand::Login { x1, .. } = cmd else {
+        let ClientCommand::Login { x1, reconnect, .. } = cmd else {
             panic!("expected Login");
         };
         assert!(x1);
+        assert!(reconnect.is_none());
+    }
+
+    #[test]
+    fn parses_login_reconnect() {
+        let cmd = parse_command(&line("LOGIN alice pw reconnect:20260426120000+abcd1234ef567890"))
+            .unwrap();
+        let ClientCommand::Login { x1, reconnect, .. } = cmd else {
+            panic!("expected Login");
+        };
+        assert!(!x1);
+        let req = reconnect.expect("reconnect must be set");
+        assert_eq!(req.game_id.as_str(), "20260426120000");
+        assert_eq!(req.token.as_str(), "abcd1234ef567890");
+    }
+
+    #[test]
+    fn rejects_login_reconnect_without_separator() {
+        let err = parse_command(&line("LOGIN alice pw reconnect:onlygameid")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)));
+    }
+
+    #[test]
+    fn rejects_login_reconnect_with_empty_parts() {
+        let err = parse_command(&line("LOGIN alice pw reconnect:+token")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)));
+        let err = parse_command(&line("LOGIN alice pw reconnect:gid+")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)));
     }
 
     #[test]
