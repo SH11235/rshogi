@@ -27,6 +27,9 @@ struct ProductionBindings {
     r2_bindings: Vec<String>,
     do_bindings: Vec<String>,
     vars_keys: Vec<String>,
+    /// `[[migrations]]` 配列を生のまま保持する。`new_sqlite_classes` 等を
+    /// 各 test が独自に検査するため、`Vec<toml::Value>` のまま持つ。
+    migrations: Vec<toml::Value>,
 }
 
 static PRODUCTION: LazyLock<ProductionBindings> = LazyLock::new(load_production_bindings);
@@ -68,10 +71,13 @@ fn load_production_bindings() -> ProductionBindings {
         .map(|t| t.keys().cloned().collect())
         .unwrap_or_default();
 
+    let migrations = doc.get("migrations").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
     ProductionBindings {
         r2_bindings,
         do_bindings,
         vars_keys,
+        migrations,
     }
 }
 
@@ -152,17 +158,12 @@ fn wrangler_production_vars_must_not_contain_local_dev_only_keys() {
 /// から抜けていると DO instance の SQLite Storage が利用できない状態で本番化される。
 #[test]
 fn wrangler_production_declares_sqlite_migration_for_game_room() {
-    let toml_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("wrangler.production.toml");
-    let raw = std::fs::read_to_string(&toml_path).expect("read wrangler.production.toml");
-    let doc: toml::Value = toml::from_str(&raw).expect("parse wrangler.production.toml");
+    assert!(
+        !PRODUCTION.migrations.is_empty(),
+        "wrangler.production.toml must declare [[migrations]]",
+    );
 
-    let migrations = doc
-        .get("migrations")
-        .and_then(|v| v.as_array())
-        .expect("wrangler.production.toml must declare [[migrations]]");
-
-    let declares_game_room_sqlite = migrations.iter().any(|m| {
+    let declares_game_room_sqlite = PRODUCTION.migrations.iter().any(|m| {
         m.get("new_sqlite_classes")
             .and_then(|v| v.as_array())
             .is_some_and(|classes| classes.iter().any(|c| c.as_str() == Some("GameRoom")))
@@ -170,6 +171,7 @@ fn wrangler_production_declares_sqlite_migration_for_game_room() {
     assert!(
         declares_game_room_sqlite,
         "wrangler.production.toml must declare [[migrations]] new_sqlite_classes = [\"GameRoom\"]; \
-         got migrations: {migrations:?}",
+         got migrations: {:?}",
+        PRODUCTION.migrations,
     );
 }
