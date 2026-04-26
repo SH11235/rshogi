@@ -54,14 +54,18 @@ use rshogi_csa_server::protocol::summary::{
     GameSummaryBuilder, position_section_from_sfen, side_to_move_from_sfen,
     standard_initial_position_block,
 };
-use rshogi_csa_server::record::kifu::{fork_initial_sfen_from_kifu, initial_sfen_from_csa_moves};
+use rshogi_csa_server::record::kifu::{
+    fork_initial_sfen_from_kifu, initial_sfen_from_csa_moves, winner_of,
+};
 use rshogi_csa_server::types::{
     Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, ReconnectToken,
 };
+use rshogi_csa_server::{FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryColor};
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::{ConfigKeys, parse_clock_spec, parse_reconnect_grace_duration};
-use crate::datetime::{format_csa_datetime, format_date_path};
+use crate::datetime::{format_csa_datetime, format_date_path, format_rfc3339_utc};
+use crate::floodgate_history::R2FloodgateHistoryStorage;
 use crate::persistence::{
     FinishedState, MoveRow, PersistedConfig, ReplaySummary, replay_core_room,
 };
@@ -984,6 +988,15 @@ impl GameRoom {
             console_log!("[GameRoom] kifu export failed: {e:?}");
         }
 
+        // Floodgate 履歴の R2 永続化も同じ best-effort 方針。`ALLOW_FLOODGATE_FEATURES`
+        // が立っていなければ何もしない。TCP 側 (`server.rs`) は append 失敗時に
+        // `ServerError::Storage` を伝播するが、Workers DO で Err を返すと alarm /
+        // ws close が抜ける副作用があるため、kifu export と同じ silent log 方針で
+        // 終局処理の前進を優先する。
+        if let Err(e) = self.try_persist_floodgate_history(game_result, &code, ended_at_ms).await {
+            console_log!("[GameRoom] floodgate history persist failed: {e:?}");
+        }
+
         let finished = FinishedState {
             result_code: code,
             ended_at_ms,
@@ -1068,6 +1081,48 @@ impl GameRoom {
         bucket.put(&key, text.as_bytes().to_vec()).execute().await?;
         bucket.put(&by_id_key, text.as_bytes().to_vec()).execute().await?;
         console_log!("[GameRoom] kifu exported to R2 key='{key}'");
+        Ok(())
+    }
+
+    /// Floodgate 履歴 1 件を `FLOODGATE_HISTORY_BUCKET` に永続化する。`ALLOW_FLOODGATE_FEATURES`
+    /// が opt-in されており、binding が設定されているときだけ append する。
+    /// 失敗は `console_log!` のみで伝播させない（呼び出し側 `finalize_if_ended` で
+    /// 終局確定の前進を止めない方針）。
+    async fn try_persist_floodgate_history(
+        &self,
+        game_result: &rshogi_csa_server::game::result::GameResult,
+        result_code: &str,
+        ended_at_ms: u64,
+    ) -> Result<()> {
+        let storage = match resolve_floodgate_history_storage(&self.env) {
+            Ok(Some(s)) => s,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                console_log!("[GameRoom] floodgate history disabled: {e}");
+                return Ok(());
+            }
+        };
+
+        let cfg = match self.config.borrow().as_ref() {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
+
+        let start_ms = cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms);
+        let entry = FloodgateHistoryEntry {
+            game_id: cfg.game_id.clone(),
+            game_name: cfg.game_name.clone(),
+            black: cfg.black_handle.clone(),
+            white: cfg.white_handle.clone(),
+            start_time: format_rfc3339_utc(start_ms),
+            end_time: format_rfc3339_utc(ended_at_ms),
+            result_code: result_code.to_owned(),
+            winner: winner_of(game_result).map(HistoryColor::from),
+        };
+
+        if let Err(e) = storage.append(&entry).await {
+            console_log!("[GameRoom] floodgate history append failed: {e:?}");
+        }
         Ok(())
     }
 
@@ -1650,4 +1705,34 @@ fn resolve_reconnect_grace(env: &Env) -> std::result::Result<Duration, String> {
     };
     validate_floodgate_feature_gate(allow, intent)?;
     Ok(grace)
+}
+
+/// `ALLOW_FLOODGATE_FEATURES` env と `FLOODGATE_HISTORY_BUCKET` binding を読み、
+/// 履歴永続化用の `R2FloodgateHistoryStorage` を返す。opt-in されていない、または
+/// dev 環境で binding が宣言されていない場合は `Ok(None)` で skip する。
+///
+/// `validate_floodgate_feature_gate` の `enable_floodgate_history` ブランチに
+/// 対応するため、master switch (`allow`) が立っている前提で intent を組み、
+/// 設定不正は `Err(String)` で呼び出し側 (`finalize_if_ended`) のログ経路に流す。
+fn resolve_floodgate_history_storage(
+    env: &Env,
+) -> std::result::Result<Option<R2FloodgateHistoryStorage>, String> {
+    let allow_raw = env.var(ConfigKeys::ALLOW_FLOODGATE_FEATURES).ok().map(|v| v.to_string());
+    let allow = parse_allow_floodgate_features(allow_raw.as_deref())?;
+    if !allow {
+        return Ok(None);
+    }
+    let intent = FloodgateFeatureIntent {
+        enable_floodgate_history: true,
+        ..FloodgateFeatureIntent::default()
+    };
+    validate_floodgate_feature_gate(allow, intent)?;
+
+    if env.bucket(ConfigKeys::FLOODGATE_HISTORY_BUCKET_BINDING).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(R2FloodgateHistoryStorage::new(
+        env.clone(),
+        ConfigKeys::FLOODGATE_HISTORY_BUCKET_BINDING,
+    )))
 }

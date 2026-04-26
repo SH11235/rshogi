@@ -36,14 +36,22 @@ export interface R2ObjectLike {
 }
 
 export async function getKifuBucket(mf: Miniflare): Promise<R2BucketLike> {
-  const raw = (await mf.getR2Bucket("KIFU_BUCKET")) as unknown as R2BucketLike;
+  return getR2BucketByBinding(mf, "KIFU_BUCKET");
+}
+
+export async function getFloodgateHistoryBucket(mf: Miniflare): Promise<R2BucketLike> {
+  return getR2BucketByBinding(mf, "FLOODGATE_HISTORY_BUCKET");
+}
+
+async function getR2BucketByBinding(mf: Miniflare, binding: string): Promise<R2BucketLike> {
+  const raw = (await mf.getR2Bucket(binding)) as unknown as R2BucketLike;
   // 将来 miniflare のメジャーアップで `list` / `get` が rename された場合に
   // 型崩落で silent に壊れる経路を避けるため、duck-type 違反を runtime で
   // 早期検出する。型 cast (`as unknown as R2BucketLike`) を使っている以上、
   // 整合性検証は実装側で持つ責務。
   if (typeof raw.list !== "function" || typeof raw.get !== "function") {
     throw new Error(
-      "miniflare R2Bucket API に list/get が見つからない: " +
+      `miniflare R2Bucket API (${binding}) に list/get が見つからない: ` +
         "miniflare メジャーアップで API rename された可能性。harness の duck-type を更新する必要あり",
     );
   }
@@ -134,6 +142,34 @@ export async function pollR2ForGameId(
       const seen = list.objects.map((o: { key: string }) => o.key);
       throw new Error(
         `R2 object for game_id=${gameId} not found within ${timeoutMs}ms; current keys: ${JSON.stringify(seen)}`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
+/// `FLOODGATE_HISTORY_BUCKET` 配下を `floodgate-history/` prefix で列挙し、
+/// `game_id` を含むキーを待機列挙する。終局確定後に DO の `try_persist_floodgate_history`
+/// が put を完了するまでの race を吸収するため、polling の deadline / interval を
+/// 設ける。`pollR2ForGameId` (`KIFU_BUCKET`) と分離しているのは、prefix を絞った
+/// list をデフォルトにして他テストの kifu キーが混ざらないようにするため。
+export async function pollFloodgateHistoryForGameId(
+  bucket: R2BucketLike,
+  gameId: string,
+  { timeoutMs = 5000, intervalMs = 100 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<{ key: string }[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const list = await bucket.list({ prefix: "floodgate-history/" });
+    const matched = list.objects
+      .filter((o: { key: string }) => o.key.includes(gameId))
+      .map((o: { key: string }) => ({ key: o.key }));
+    if (matched.length > 0) return matched;
+    if (Date.now() > deadline) {
+      const seen = list.objects.map((o: { key: string }) => o.key);
+      throw new Error(
+        `floodgate history object for game_id=${gameId} not found within ${timeoutMs}ms; ` +
+          `current keys under floodgate-history/: ${JSON.stringify(seen)}`,
       );
     }
     await new Promise((r) => setTimeout(r, intervalMs));
