@@ -24,13 +24,6 @@ pub struct FloodgateFeatureIntent {
     /// する経路を有効化する意図。`JsonlFloodgateHistoryStorage` を起動時に
     /// 構築し、終局時に append する経路を本フラグで gate する。
     pub enable_floodgate_history: bool,
-    /// 再接続プロトコル（`ReconnectToken` 発行 + 切断猶予 + 再接続検証 +
-    /// トークン不一致拒否）を有効化する意図。実装本体は未配線で、本フラグは
-    /// Floodgate 運用機能の上に積む後続機能（task 18 系）の gate 用途として
-    /// 先行確保する。実装を入れる PR が `floodgate_intent_from_config` で
-    /// 本フラグを `true` にすることで、`--allow-floodgate-features` opt-in を
-    /// 通過した本番起動でのみ機能を有効化できる。
-    pub enable_reconnect_protocol: bool,
 }
 
 /// 真偽文字列から Floodgate 機能 gate を解決する。
@@ -85,9 +78,6 @@ pub fn validate_floodgate_feature_gate(
     }
     if intent.enable_floodgate_history {
         requested.push("floodgate_history");
-    }
-    if intent.enable_reconnect_protocol {
-        requested.push("reconnect_protocol");
     }
     if requested.is_empty() || allow_floodgate_features {
         return Ok(());
@@ -170,7 +160,6 @@ mod tests {
                 enable_duplicate_login_policy: true,
                 enable_persistent_player_rates: true,
                 enable_floodgate_history: true,
-                enable_reconnect_protocol: true,
             },
         )
         .unwrap_err();
@@ -179,7 +168,6 @@ mod tests {
         assert!(err.contains("duplicate_login_policy"));
         assert!(err.contains("persistent_player_rates"));
         assert!(err.contains("floodgate_history"));
-        assert!(err.contains("reconnect_protocol"));
     }
 
     #[test]

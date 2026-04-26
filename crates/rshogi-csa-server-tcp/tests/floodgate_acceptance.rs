@@ -1,19 +1,19 @@
-//! Floodgate 機能（task 15.x）の受入シナリオ統合テスト。
+//! Floodgate 運用機能の受入シナリオ統合テスト。
 //!
 //! 本テストは TCP listener や fake client を立てる「フル E2E」ではなく、
 //! `ServerConfig` を Floodgate 全機能 ON で組み立てたときの起動経路と
 //! intent 算出の **横断的整合性** を固定する smoke 統合テスト。各機能の
-//! 個別テストはそれぞれの crate / モジュールで網羅済み:
+//! 個別テストはそれぞれの crate / モジュールに網羅されている:
 //!
-//! - 15.5 (Players レート永続化): `rshogi_csa_server::storage::players_yaml::tests`
-//! - 15.1 (スケジューラ): `rshogi_csa_server::scheduler::tests` +
+//! - Players レート永続化: `rshogi_csa_server::storage::players_yaml::tests`
+//! - スケジューラ: `rshogi_csa_server::scheduler::tests` +
 //!   `rshogi_csa_server_tcp::scheduler::tests`
-//! - 15.3 (Floodgate 履歴): `rshogi_csa_server::storage::floodgate_history::tests`
-//! - 15.2 (LeastDiff ペアリング): `rshogi_csa_server::matching::pairing::tests`
-//! - 15.4 (駒落ち / 重複ログイン): `rshogi_csa_server_tcp::server::tests`
+//! - Floodgate 履歴: `rshogi_csa_server::storage::floodgate_history::tests`
+//! - LeastDiff ペアリング: `rshogi_csa_server::matching::pairing::tests`
+//! - 駒落ち / 重複ログイン: `rshogi_csa_server_tcp::server::tests`
 //!
 //! 本受入は「全部入りで起動できるか」を上から見て確認する位置付けで、
-//! E2E（実 TCP / 実エンジン接続）は task 20.1 負荷試験ハーネスで扱う。
+//! 実 TCP / 実エンジン接続を伴う E2E は負荷試験ハーネス側で扱う。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,9 +23,9 @@ use rshogi_csa_server_tcp::server::{DuplicateLoginPolicy, ServerConfig, prepare_
 
 /// Floodgate 全機能を ON にした構成を組み立てるヘルパ。
 ///
-/// 各 PR で追加された機能 (`players_yaml_path` / `floodgate_schedules` /
-/// `floodgate_history_path` / `handicap_initial_sfens` / `duplicate_login_policy`)
-/// を全て利用する設定を返す。`allow_floodgate_features` は呼び出し側で立てる。
+/// `players_yaml_path` / `floodgate_schedules` / `floodgate_history_path` /
+/// `handicap_initial_sfens` / `duplicate_login_policy` を全て利用する設定を
+/// 返す。`allow_floodgate_features` は呼び出し側で立てる。
 fn floodgate_full_config(allow_floodgate: bool) -> ServerConfig {
     let mut cfg = ServerConfig::sensible_defaults();
     cfg.allow_floodgate_features = allow_floodgate;
@@ -81,7 +81,8 @@ fn defaults_pass_prepare_runtime_regardless_of_optin() {
     for allow in [false, true] {
         let mut cfg = ServerConfig::sensible_defaults();
         cfg.allow_floodgate_features = allow;
-        prepare_runtime(&cfg).expect("defaults must always start (allow={allow})");
+        prepare_runtime(&cfg)
+            .unwrap_or_else(|e| panic!("defaults must always start (allow={allow}): {e}"));
     }
 }
 
@@ -122,11 +123,13 @@ fn each_floodgate_feature_individually_requires_optin() {
         cfg.allow_floodgate_features = false;
         mutate(&mut cfg);
         let err = prepare_runtime(&cfg)
-            .expect_err("feature {label} requested without opt-in must fail-fast");
+            .err()
+            .unwrap_or_else(|| panic!("feature {label} requested without opt-in must fail-fast"));
         assert!(err.contains(label), "expected error to mention {label}, got: {err}");
         // opt-in を立てれば通過する。
         cfg.allow_floodgate_features = true;
-        prepare_runtime(&cfg).expect("feature must start with opt-in");
+        prepare_runtime(&cfg)
+            .unwrap_or_else(|e| panic!("feature {label} must start with opt-in: {e}"));
     }
 }
 
@@ -140,12 +143,11 @@ fn default_floodgate_intent_does_not_request_anything() {
     assert!(!intent.enable_duplicate_login_policy);
     assert!(!intent.enable_persistent_player_rates);
     assert!(!intent.enable_floodgate_history);
-    assert!(!intent.enable_reconnect_protocol);
 }
 
-/// 駒落ち初期局面マップ（task 15.4）は Floodgate gate 対象 **外**。
+/// 駒落ち初期局面マップは Floodgate gate 対象 **外**。
 /// `handicap_initial_sfens` を非空にしても opt-in なしで起動を通す（駒落ち
-/// 自体は買い切りの設定で、Floodgate 運用機能ではない）。
+/// 自体は静的設定で、Floodgate 運用機能ではない）。
 #[test]
 fn handicap_initial_sfens_does_not_require_floodgate_optin() {
     let mut cfg = ServerConfig::sensible_defaults();
