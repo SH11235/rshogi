@@ -56,8 +56,7 @@ describe("miniflare smoke: 再接続プロトコル E2E", () => {
     await black0.recvUntil((l) => l.startsWith("+7776FU"));
     await white.recvUntil((l) => l.startsWith("+7776FU"));
 
-    black0.close();
-    await waitFor(() => black0.isClosed(), 2000);
+    await black0.close();
 
     const black1 = await CsaClient.connect(mf, roomId);
     black1.send(`LOGIN ${blackName} pw reconnect:${gameId}+${blackToken}`);
@@ -86,8 +85,8 @@ describe("miniflare smoke: 再接続プロトコル E2E", () => {
     const blackEnd = await black1.recvUntil((l) => l === "#LOSE");
     expect(blackEnd.some((l) => l === "#RESIGN")).toBe(true);
 
-    black1.close();
-    white.close();
+    await black1.close();
+    await white.close();
   });
 
   it("不正 token での再接続は LOGIN:incorrect reconnect_rejected で拒否される", async () => {
@@ -110,26 +109,17 @@ describe("miniflare smoke: 再接続プロトコル E2E", () => {
     await white.recvLine();
     const gameId = startBlack.slice("START:".length);
 
-    black0.close();
-    await waitFor(() => black0.isClosed(), 2000);
+    await black0.close();
 
     const black1 = await CsaClient.connect(mf, roomId);
     black1.send(`LOGIN ${blackName} pw reconnect:${gameId}+wrong-token-0123abcd`);
     expect(await black1.recvLine()).toBe("LOGIN:incorrect reconnect_rejected");
 
-    white.close();
+    await white.close();
   });
 });
 
 function extractReconnectToken(summaryLines: string[]): string | undefined {
   const line = summaryLines.find((l) => l.startsWith("Reconnect_Token:"));
   return line?.slice("Reconnect_Token:".length);
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((r) => setTimeout(r, 20));
-  }
 }

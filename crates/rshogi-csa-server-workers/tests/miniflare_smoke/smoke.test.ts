@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CsaClient,
   createMiniflare,
+  getKifuBucket,
   makeTempPersistRoot,
   pollR2ForGameId,
 } from "./harness.ts";
@@ -66,7 +67,7 @@ describe("miniflare smoke: 1 対局 E2E", () => {
     const blackEnd = await black.recvUntil((l) => l === "#LOSE");
     expect(blackEnd.some((l) => l === "#RESIGN")).toBe(true);
 
-    const r2 = await mf.getR2Bucket("KIFU_BUCKET");
+    const r2 = await getKifuBucket(mf);
     const list = await pollR2ForGameId(r2, gameId);
     expect(list.length).toBeGreaterThan(0);
     const key = list[0]!.key;
@@ -76,7 +77,7 @@ describe("miniflare smoke: 1 対局 E2E", () => {
     expect(body).toContain("V2.2");
     expect(body).toContain(gameId);
 
-    black.close();
-    white.close();
+    await black.close();
+    await white.close();
   });
 });

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CsaClient,
   createMiniflare,
+  getKifuBucket,
   makeTempPersistRoot,
   pollR2ForGameId,
 } from "./harness.ts";
@@ -30,7 +31,7 @@ describe("miniflare smoke: DO restart 永続化", () => {
     const roomId = "restart-room-1";
     const gameName = "fg-60-1";
 
-    const first = await spawn();
+    const first = await spawnMiniflare();
     const { gameId, kifuKey, kifuBody } = await playOneGame(first, roomId, gameName);
 
     expect(kifuBody).toContain("V2.2");
@@ -39,15 +40,17 @@ describe("miniflare smoke: DO restart 永続化", () => {
     await first.dispose();
     instances.length = 0;
 
-    const second = await spawn();
-    const r2 = await second.getR2Bucket("KIFU_BUCKET");
+    const second = await spawnMiniflare();
+    const r2 = await getKifuBucket(second);
     const obj = await r2.get(kifuKey);
     expect(obj, `R2 object ${kifuKey} should survive Miniflare restart`).not.toBeNull();
     const body = await obj!.text();
     expect(body).toBe(kifuBody);
   });
 
-  async function spawn(): Promise<Miniflare> {
+  // `spawn` という名前は Node.js `child_process.spawn` と紛らわしいので
+  // Miniflare instance を生成するヘルパであることを明示する命名に揃える。
+  async function spawnMiniflare(): Promise<Miniflare> {
     const mf = await createMiniflare({
       persistRoot: persistRoot,
       totalTimeSec: 60,
@@ -99,13 +102,13 @@ async function playOneGame(
   black.send("%TORYO");
   await black.recvUntil((l) => l === "#LOSE");
 
-  const r2 = await mf.getR2Bucket("KIFU_BUCKET");
+  const r2 = await getKifuBucket(mf);
   const list = await pollR2ForGameId(r2, gameId);
   const key = list[0]!.key;
   const body = await (await r2.get(key))!.text();
 
-  black.close();
-  white.close();
+  await black.close();
+  await white.close();
 
   return { gameId, kifuKey: key, kifuBody: body };
 }

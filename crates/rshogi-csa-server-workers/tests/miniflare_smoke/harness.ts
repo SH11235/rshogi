@@ -1,7 +1,27 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Miniflare, type R2Bucket, type WebSocket } from "miniflare";
+import { Miniflare, type WebSocket } from "miniflare";
+
+/// `mf.getR2Bucket(...)` の戻り値は miniflare 4 が `ReplaceWorkersTypes<R2Bucket>`
+/// (大きな conditional type) として返し、tsc の構造的推論で `Request_2` などに
+/// 潰れる既知のエッジケースがある。`R2Bucket` 自体は miniflare の barrel export
+/// 対象外でもあり、`@cloudflare/workers-types` を別途 devDep に入れたくない
+/// (テスト用途には過剰)。本ハーネスは `list` / `get` の最小サブセットしか
+/// 使わないため、duck-type interface を 1 か所定義して `getKifuBucket` で
+/// キャストを隠蔽する。
+export interface R2BucketLike {
+  list(): Promise<{ objects: Array<{ key: string }> }>;
+  get(key: string): Promise<R2ObjectLike | null>;
+}
+
+export interface R2ObjectLike {
+  text(): Promise<string>;
+}
+
+export async function getKifuBucket(mf: Miniflare): Promise<R2BucketLike> {
+  return (await mf.getR2Bucket("KIFU_BUCKET")) as unknown as R2BucketLike;
+}
 
 const WORKER_ROOT = resolve(import.meta.dirname, "../..");
 const SHIM_PATH = resolve(WORKER_ROOT, "build/worker/shim.mjs");
@@ -72,7 +92,7 @@ export async function makeTempPersistRoot(): Promise<{
 /// 可能性が実質ないため、substring 一致で十分。テスト用途で件数は数件想定、
 /// page 跨ぎ (>1000 件) は視野外。
 export async function pollR2ForGameId(
-  bucket: R2Bucket,
+  bucket: R2BucketLike,
   gameId: string,
   { timeoutMs = 5000, intervalMs = 100 }: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<{ key: string }[]> {
@@ -158,11 +178,27 @@ export class CsaClient {
     return lines;
   }
 
-  close(): void {
-    if (!this.closed) {
+  /// クライアント側で WS を閉じ、サーバ側 close ハンドラ (`websocket_close`)
+  /// が走り終わるまで待つ。再接続シナリオでは「サーバが切断を観測してから
+  /// `enter_grace_window` が走る」ことに依存するため、close を fire-and-forget
+  /// すると後続の reconnect リクエストが grace 登録より先に到着して race する。
+  /// `addEventListener("close", ...)` を constructor で予約済みなので、それと
+  /// 同経路の close 通知を await できるよう Promise を返す。サーバ側 close
+  /// ack が来ない異常時は `timeoutMs` で諦める。
+  async close(timeoutMs = 2000): Promise<void> {
+    if (this.closed) return;
+    return await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => resolve(), timeoutMs);
+      this.ws.addEventListener(
+        "close",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
       this.ws.close();
-      this.closed = true;
-    }
+    });
   }
 
   isClosed(): boolean {
