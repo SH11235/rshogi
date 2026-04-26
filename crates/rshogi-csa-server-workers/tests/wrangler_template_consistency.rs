@@ -12,8 +12,9 @@
 //! `[[r2_buckets]]` エントリの template への追加が漏れていた（PR #505 で修正）。
 //!
 //! 本テストは `wrangler.toml.example` を TOML として parse し、`ConfigKeys` の
-//! 網羅配列 (`ALL_R2_BINDINGS` / `ALL_DO_BINDINGS` / `ALL_VARS_KEYS`) と
-//! template の宣言が **双方向に一致** することを assert する。
+//! 網羅配列 (`ALL_R2_BINDINGS` / `ALL_DO_BINDINGS` /
+//! `SHARED_PUBLIC_VARS_KEYS` ∪ `LOCAL_DEV_ONLY_VARS_KEYS`) と template の宣言が
+//! **双方向に一致** することを assert する。
 //!
 //! - 順方向: `ConfigKeys::ALL_*` の各要素 ⊆ template 宣言（コード追加 → template 漏れ検出）
 //! - 逆方向: template 宣言 ⊆ `ConfigKeys::ALL_*` の各要素（template 追加 → コード参照漏れ検出）
