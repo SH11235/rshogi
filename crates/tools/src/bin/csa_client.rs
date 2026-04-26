@@ -26,6 +26,7 @@ use tools::csa_client::engine::UsiEngine;
 use tools::csa_client::protocol::{CsaConnection, GameResult};
 use tools::csa_client::record::save_record;
 use tools::csa_client::session::run_game_session;
+use tools::csa_client::transport::{ConnectOpts, TransportTarget};
 
 #[derive(Parser)]
 #[command(
@@ -67,6 +68,11 @@ struct Cli {
     /// Floodgate モード
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     floodgate: Option<bool>,
+
+    /// WebSocket Upgrade 時の Origin ヘッダ値（`wss://` 接続時のみ意味あり）。
+    /// 例: `https://csa-client.example.local`
+    #[arg(long)]
+    ws_origin: Option<String>,
 
     /// Keep-alive 間隔 (秒)
     #[arg(long)]
@@ -216,12 +222,14 @@ fn run_one_game(
     engine: &mut UsiEngine,
     shutdown: &AtomicBool,
 ) -> Result<(GameResult, tools::csa_client::record::GameRecord)> {
-    // サーバー接続
-    let mut conn = CsaConnection::connect(
-        &config.server.host,
-        config.server.port,
-        config.server.keepalive.tcp,
-    )?;
+    // サーバー接続。host に scheme (`ws://` / `wss://` / `tcp://`) があれば
+    // それに従い、無ければ既存挙動どおり `host:port` の TCP。
+    let target = TransportTarget::from_host_port(&config.server.host, config.server.port);
+    let opts = ConnectOpts {
+        tcp_keepalive: config.server.keepalive.tcp,
+        ws_origin: config.server.ws_origin.clone(),
+    };
+    let mut conn = CsaConnection::connect_with_target(&target, &opts)?;
     conn.login(&config.server.id, &config.server.password)?;
 
     // 対局実行
@@ -263,6 +271,9 @@ fn apply_cli_overrides(config: &mut CsaClientConfig, cli: &Cli) {
     }
     if let Some(fg) = cli.floodgate {
         config.server.floodgate = fg;
+    }
+    if let Some(ref origin) = cli.ws_origin {
+        config.server.ws_origin = Some(origin.clone());
     }
     if let Some(ka) = cli.keep_alive {
         config.server.keepalive.ping_interval_sec = ka;

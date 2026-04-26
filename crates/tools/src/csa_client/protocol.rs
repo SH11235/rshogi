@@ -1,19 +1,20 @@
 //! CSAプロトコル通信層
 //!
-//! TCP接続によるCSAサーバーとのテキスト行ベース通信を管理する。
+//! `transport` モジュール（TCP / WebSocket）の上にテキスト行ベースの
+//! CSA プロトコルを乗せる。送信側は `serialize_client_command` 経由で
+//! `ClientCommand` バリアントから 1 行を組み立てる。
 
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::net::TcpStream;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use rshogi_csa::{Color, CsaMove, ParsedMove, Position, parse_csa_full};
 use rshogi_csa_server::protocol::command::{ClientCommand, serialize_client_command};
 use rshogi_csa_server::types::{CsaMoveToken, GameId, PlayerName, Secret};
 
 use super::event::Event;
+use super::transport::{ConnectOpts, CsaTransport, TransportTarget};
 
 /// 先後共通または個別の時間設定
 #[derive(Clone, Debug, Default)]
@@ -67,9 +68,8 @@ pub enum GameResult {
 
 /// CSAプロトコルクライアント
 pub struct CsaConnection {
-    /// 対局開始前はブロッキング読み取りに使用。`start_reader_thread` 後は None。
-    reader: Option<BufReader<TcpStream>>,
-    writer: BufWriter<TcpStream>,
+    /// 下層 transport（TCP / WebSocket）。
+    transport: CsaTransport,
     last_activity_time: Instant,
     /// パスワードマスク用
     password: String,
@@ -78,56 +78,24 @@ pub struct CsaConnection {
 }
 
 impl CsaConnection {
-    /// CSAサーバーに接続する
+    /// 既存呼び出し互換: TCP 経路に絞った接続。
     pub fn connect(host: &str, port: u16, tcp_keepalive: bool) -> Result<Self> {
-        let addr_str = format!("{host}:{port}");
-        log::info!("[CSA] 接続中: {addr_str}");
-        // DNS名を解決し、解決済みアドレスを順に試す（IPv6/IPv4 両対応）
-        use std::net::ToSocketAddrs;
-        let addrs: Vec<_> = addr_str
-            .to_socket_addrs()
-            .with_context(|| format!("名前解決失敗: {addr_str}"))?
-            .collect();
-        if addrs.is_empty() {
-            bail!("アドレスが見つかりません: {addr_str}");
-        }
-        let mut last_err = None;
-        let mut stream_opt = None;
-        for addr in &addrs {
-            log::debug!("[CSA] 接続試行: {addr}");
-            match TcpStream::connect_timeout(addr, Duration::from_secs(15)) {
-                Ok(s) => {
-                    stream_opt = Some(s);
-                    break;
-                }
-                Err(e) => {
-                    log::debug!("[CSA] {addr} 接続失敗: {e}");
-                    last_err = Some(e);
-                }
-            }
-        }
-        let stream = stream_opt.ok_or_else(|| {
-            anyhow::anyhow!(
-                "CSAサーバー接続失敗: {addr_str} ({}アドレス試行済み): {}",
-                addrs.len(),
-                last_err.map_or("unknown".to_string(), |e| e.to_string())
-            )
-        })?;
+        Self::connect_with_target(
+            &TransportTarget::from_host_port(host, port),
+            &ConnectOpts {
+                tcp_keepalive,
+                ws_origin: None,
+            },
+        )
+    }
 
-        if tcp_keepalive {
-            set_tcp_keepalive(&stream)?;
-        }
-        // Nagle 無効化（低遅延のため）
-        let _ = stream.set_nodelay(true);
-        // 読み取りタイムアウト: keep-alive チェック用に30秒
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-
-        let reader = BufReader::new(stream.try_clone()?);
-        let writer = BufWriter::new(stream);
-
+    /// 解析済み `TransportTarget` と接続オプションから接続する。WebSocket 経路は
+    /// 必ず本関数経由で開く（`host` に `ws://` / `wss://` を含めれば
+    /// `connect()` でも転送される）。
+    pub fn connect_with_target(target: &TransportTarget, opts: &ConnectOpts) -> Result<Self> {
+        let transport = CsaTransport::connect(target, opts)?;
         Ok(Self {
-            reader: Some(reader),
-            writer,
+            transport,
             last_activity_time: Instant::now(),
             password: String::new(),
             pending_end_reason: None,
@@ -410,144 +378,42 @@ impl CsaConnection {
             return Ok(());
         }
         if self.last_activity_time.elapsed() >= Duration::from_secs(interval_sec) {
-            self.send_raw(b"\n")?;
+            self.transport.write_keepalive()?;
             self.last_activity_time = Instant::now();
         }
         Ok(())
     }
 
     fn send_line(&mut self, line: &str) -> Result<()> {
-        // パスワードをマスクしてログ出力（非パスワード行ではアロケーション不要）
         if !self.password.is_empty() && line.contains(&self.password) {
             let masked = line.replace(&self.password, "*****");
             log::debug!("[CSA] > {masked}");
         } else {
             log::debug!("[CSA] > {line}");
         }
-        self.writer.write_all(line.as_bytes())?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
+        self.transport.write_line(line)?;
         self.last_activity_time = Instant::now();
         Ok(())
     }
 
-    fn send_raw(&mut self, data: &[u8]) -> Result<()> {
-        self.writer.write_all(data)?;
-        self.writer.flush()?;
-        Ok(())
-    }
-
-    /// reader への可変参照を取得。start_reader_thread 後は使用不可。
-    fn reader_mut(&mut self) -> Result<&mut BufReader<TcpStream>> {
-        self.reader
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("reader は start_reader_thread で移動済み"))
-    }
-
     /// サーバー受信を別スレッドに移し、共通チャネルに `Event::ServerLine` を送信する。
-    /// 対局開始後に呼ぶ。以降、`recv_move` / `recv_line_*` は使用不可。
+    /// 対局開始後に呼ぶ。以降、`recv_move` / 内部 `recv_line_*` は使用不可。
     pub fn start_reader_thread(&mut self, tx: mpsc::Sender<Event>) -> Result<()> {
-        let mut reader =
-            self.reader.take().ok_or_else(|| anyhow::anyhow!("reader は既に移動済み"))?;
-        // 読み取りタイムアウトを短くして keep-alive のタイミングを確保
-        reader.get_ref().set_read_timeout(Some(Duration::from_millis(500)))?;
-        std::thread::Builder::new()
-            .name("csa-server-reader".to_string())
-            .spawn(move || {
-                loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(0) => {
-                            let _ = tx.send(Event::ServerDisconnected);
-                            break;
-                        }
-                        Ok(_) => {
-                            let trimmed = line.trim_end().to_string();
-                            if !trimmed.is_empty() {
-                                log::debug!("[CSA] < {trimmed}");
-                                if tx.send(Event::ServerLine(trimmed)).is_err() {
-                                    break;
-                                }
-                            }
-                            // 空行: keep-alive ping — チャネルには送らない
-                        }
-                        Err(ref e)
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                || e.kind() == std::io::ErrorKind::TimedOut =>
-                        {
-                            // タイムアウト: 正常、次のループへ
-                        }
-                        Err(_) => {
-                            let _ = tx.send(Event::ServerDisconnected);
-                            break;
-                        }
-                    }
-                }
-            })?;
-        Ok(())
+        self.transport.start_reader_thread(tx)
     }
 
-    /// ブロッキング読み取り（タイムアウト付き）。start_reader_thread 前のみ使用可。
     fn recv_line_blocking(&mut self, timeout: Duration) -> Result<String> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining =
-                deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                bail!("サーバー応答タイムアウト");
-            }
-            let reader = self.reader_mut()?;
-            reader.get_ref().set_read_timeout(Some(remaining.min(Duration::from_secs(5))))?;
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => bail!("サーバー切断"),
-                Ok(n) if n > 0 => {
-                    // 空行でもデータ受信なので activity 更新（相手の blank ping 等）
-                    self.last_activity_time = Instant::now();
-                    let trimmed = line.trim_end().to_string();
-                    if !trimmed.is_empty() {
-                        log::debug!("[CSA] < {trimmed}");
-                        return Ok(trimmed);
-                    }
-                }
-                Ok(_) => bail!("サーバー切断"),
-                Err(ref e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
+        let line = self.transport.read_line_blocking(timeout)?;
+        self.last_activity_time = Instant::now();
+        Ok(line)
     }
 
-    /// ノンブロッキング読み取り。データがなければ Ok(None)。start_reader_thread 前のみ。
     fn recv_line_nonblocking(&mut self) -> Result<Option<String>> {
-        let reader = self.reader_mut()?;
-        reader.get_ref().set_read_timeout(Some(Duration::from_millis(100)))?;
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => bail!("サーバー切断"),
-            Ok(_) => {
-                // 空行でもデータ受信なので activity 更新
-                self.last_activity_time = Instant::now();
-                let trimmed = line.trim_end().to_string();
-                if trimmed.is_empty() {
-                    Ok(None)
-                } else {
-                    log::debug!("[CSA] < {trimmed}");
-                    Ok(Some(trimmed))
-                }
-            }
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                Ok(None)
-            }
-            Err(e) => Err(e.into()),
+        let opt = self.transport.read_line_nonblocking()?;
+        if opt.is_some() {
+            self.last_activity_time = Instant::now();
         }
+        Ok(opt)
     }
 }
 
@@ -595,31 +461,4 @@ pub(crate) fn parse_game_result(line: &str) -> Option<GameResult> {
     } else {
         None // #TIME_UP, #ILLEGAL_MOVE, #SENNICHITE 等は中間行
     }
-}
-
-/// TCP SO_KEEPALIVE を有効化する
-#[cfg(unix)]
-fn set_tcp_keepalive(stream: &TcpStream) -> Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let fd = stream.as_raw_fd();
-    let optval: libc::c_int = 1;
-    // SAFETY: fd は有効なソケット。optval は有効なポインタ。
-    let ret = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_KEEPALIVE,
-            &optval as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if ret != 0 {
-        log::warn!("SO_KEEPALIVE 設定失敗: {}", std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_tcp_keepalive(_stream: &TcpStream) -> Result<()> {
-    Ok(())
 }
