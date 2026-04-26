@@ -1003,6 +1003,14 @@ mod tests {
                 new_buoy: Some(GameName::new("forked")),
                 nth_move: Some(24),
             },
+            ClientCommand::Fork {
+                source_game: GameId::new("g"),
+                new_buoy: None,
+                nth_move: Some(24),
+            },
+            ClientCommand::Chat {
+                message: "hello world".to_owned(),
+            },
         ];
 
         for cmd in samples {
