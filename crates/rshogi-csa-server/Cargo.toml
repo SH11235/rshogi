@@ -10,7 +10,6 @@ repository = "https://github.com/SH11235/rshogi"
 [dependencies]
 rshogi-core = { path = "../rshogi-core" }
 rshogi-csa = { path = "../rshogi-csa" }
-anyhow.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 serde.workspace = true

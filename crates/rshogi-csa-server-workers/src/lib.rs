@@ -47,8 +47,8 @@ mod router;
 #[cfg(target_arch = "wasm32")]
 pub use game_room::GameRoom;
 
-/// Workers ランタイムの fetch イベント。axum 等を経由せず直接
-/// [`router::handle_fetch`] に委譲する薄いエントリポイント。
+/// Workers ランタイムの fetch イベント。`router::handle_fetch` に委譲する
+/// 薄いエントリポイント。
 ///
 /// `#[event(fetch)]` マクロが呼び出し側の wasm-bindgen 配線を生成する。
 #[cfg(target_arch = "wasm32")]

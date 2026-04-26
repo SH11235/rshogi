@@ -15,13 +15,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # ホスト／wasm32 の双方で利用する依存のみをここに置く。
-# Workers 固有 (`worker`, `worker-macros`, `wasm-bindgen` 等) は
+# Workers 固有 (`worker`, `worker-macros`) は
 # `[target.'cfg(target_arch = "wasm32")'.dependencies]` に分離して
 # ホスト側 `cargo check --workspace` を壊さない。
 rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false, features = ["workers"] }
-rshogi-csa = { path = "../rshogi-csa" }
 rshogi-core = { path = "../rshogi-core" }
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # chrono はホスト／wasm32 で挙動を揃えるため `clock` 既定を切り、
@@ -30,19 +28,11 @@ chrono = { version = "0.4", default-features = false, features = ["serde"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # wasm32-unknown-unknown 以外では参照しない。worker-build / wrangler dev から
-# ビルドされる経路のみで有効化される。
-worker = { version = "0.8", features = ["http", "axum"] }
+# ビルドされる経路のみで有効化される。`worker` 0.8 が `wasm-bindgen` /
+# `wasm-bindgen-futures` / `js-sys` / `async-trait` / `futures-util` を内部で
+# 引き込むので、本 crate からは worker のみを直接参照すればよい。
+worker = { version = "0.8", features = ["http"] }
 worker-macros = { version = "0.8", features = ["http"] }
-# `ws` feature は tokio-tungstenite を引き込み wasm32 でビルドが壊れる。
-# WebSocket の受理は Durable Object の `state.acceptWebSocket` 側で行うため、
-# axum には Router と json extractor のみを使う。
-axum = { version = "0.8", default-features = false, features = ["json"] }
-tower-service = "0.3"
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
-futures-util = "0.3"
-async-trait = "0.1"
 
 [features]
 default = []
