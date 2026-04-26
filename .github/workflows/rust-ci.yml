@@ -136,3 +136,59 @@ jobs:
       - uses: taiki-e/install-action@cargo-audit
       - name: Run security audit
         run: cargo audit --deny warnings
+
+  wasm-build:
+    # Workers crate (`rshogi-csa-server-workers`) の wasm32-unknown-unknown ビルドを検査する。
+    #
+    # 既存 `lint` / `test` job は host target でしか動かないため、
+    # `#[cfg(target_arch = "wasm32")]` 配下のコード（`game_room.rs` / `router.rs` /
+    # `lib.rs` の本体）は merge 前に検証されない。本番 deploy 直前の
+    # `worker-build --release` で初めて wasm32 ビルド退行が発覚する運用を防ぐため、
+    # PR チェックで wasm32 ビルド検査を並走させる。
+    #
+    # `cargo check` ではなく `cargo build` を使う:
+    #   `cargo check` は MIR 生成までで止まり codegen 段の退行（wasm-bindgen の
+    #   symbol 衝突・`getrandom` の wasm_js feature 不足・lld link error 等）を
+    #   検知できない。本 job の目的は「`worker-build --release` で初めて発覚する
+    #   退行を PR で止める」なので codegen を通す build を使う。
+    #
+    # mold / clang を入れない:
+    #   wasm32 は lld でリンクするため、host job (`lint` / `test`) が入れている
+    #   mold linker は不要。runner セットアップ時間を浪費しない。
+    #
+    # clippy を回さない:
+    #   clippy は host target の `lint` job で全 crate を網羅済み。本 job の責務は
+    #   「Workers crate の wasm32 ビルドが通ること」の回帰検知に限定し、
+    #   `rshogi-core` の wasm32 clippy 整理など別 crate 範囲の lint 課題は扱わない。
+    name: Workers wasm32 Build Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust_code == 'true'
+    timeout-minutes: 20
+    env:
+      # workflow 上位の `-C target-cpu=x86-64-v2` は x86 専用で wasm32 では
+      # `'x86-64-v2' is not a recognized processor for this target (ignoring processor)`
+      # 警告がコンパイル単位ごとに大量出力される。本 job では空文字で上書きし、
+      # wasm32 標準の codegen に任せる（host target 用の baseline 設定の意図とも整合）。
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          # host target キャッシュ (`lint` / `test` job) と完全分離する。
+          # `shared-key` 指定で本 job 専用のキャッシュ namespace を確保し、
+          # 同 base key 配下に host target sysroot が混入しないようにする。
+          shared-key: wasm32
+      - name: Build wasm32
+        run: cargo build -p rshogi-csa-server-workers --target wasm32-unknown-unknown
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
