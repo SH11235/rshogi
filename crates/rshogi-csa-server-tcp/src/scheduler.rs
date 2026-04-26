@@ -298,8 +298,11 @@ pub(crate) async fn fire_schedule<R, K, P>(
 /// 消費して終局通知するので、もう片方（white）の done_tx は本関数が drive 完了
 /// 後に手動で signal する。
 ///
-/// 異常系（handoff 失敗 / transport recv 失敗）では:
-/// - 既に確定した側の transport は `##[ERROR]` 通知してから close
+/// 異常系（`MatchRequest` 配送失敗 / transport recv 失敗）では:
+/// - 既に `MatchRequest` が届いた側 waiter は `transport_responder.send` を
+///   呼んで transport を引き渡そうとしているので、本関数が responder_rx を
+///   `await` して transport を回収し `##[ERROR]` 通知してから close する
+///   （片側瞬断 partial handoff 経路でも生存側を無通知切断しない）
 /// - **両 player を `League` から logout**（`drain_for_game_name` で WaitingPool
 ///   からは除去済みなので、League を生で残すと再 LOGIN が `AlreadyLoggedIn` で
 ///   弾かれる leak になるため）
@@ -343,6 +346,19 @@ async fn spawn_scheduled_drive<R, K, P>(
             white_alive = w_handoff_ok,
             "scheduled match handoff failed (waiter disconnected before handoff)"
         );
+        // 片側だけ MatchRequest が届いたケースでは、生存側 waiter は
+        // `transport_responder.send(transport)` を呼んで transport を引き渡そうと
+        // している（[`run_waiter`] 設計）。本関数が即 return すると responder_rx
+        // が drop されて waiter 側が `MatchHandoffFailed` で無通知切断する。
+        // 既存の `(Ok, Err) | (Err, Ok)` recv 経路と同じ扱いに統一し、生存側
+        // transport を吸い上げて `##[ERROR]` 通知を送ってから drop することで
+        // 片側瞬断時でも健全側 player に切断理由を残す。
+        if b_handoff_ok && let Ok(mut surviving) = b_resp_rx.await {
+            notify_aborted_match(&mut surviving, &game_name).await;
+        }
+        if w_handoff_ok && let Ok(mut surviving) = w_resp_rx.await {
+            notify_aborted_match(&mut surviving, &game_name).await;
+        }
         // WaitingPool からは drain 済みで、drive_game にも到達していないので
         // League エントリは本関数が責任を持って除去する。
         logout_pair(&state, &black_handle, &white_handle).await;
