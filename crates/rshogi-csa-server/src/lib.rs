@@ -49,8 +49,9 @@ pub use storage::buoy::FileBuoyStorage;
 #[cfg(feature = "tokio-transport")]
 pub use storage::file::FileKifuStorage;
 #[cfg(feature = "tokio-transport")]
+pub use storage::floodgate_history::JsonlFloodgateHistoryStorage;
 pub use storage::floodgate_history::{
-    FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryColor, JsonlFloodgateHistoryStorage,
+    FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryColor,
 };
 #[cfg(feature = "tokio-transport")]
 pub use storage::players_yaml::PlayersYamlRateStorage;

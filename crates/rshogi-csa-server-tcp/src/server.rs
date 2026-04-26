@@ -442,11 +442,12 @@ impl WaitingPool {
 }
 
 /// サーバー全体で共有する状態。
-pub struct SharedState<R, K, P>
+pub struct SharedState<R, K, P, H>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     config: ServerConfig,
     pub(crate) league: Mutex<League>,
@@ -467,10 +468,10 @@ where
     kifu_storage: K,
     password_store: P,
     hasher: Box<dyn PasswordHasher>,
-    /// Floodgate 履歴 JSONL の append 先。`None` の場合は履歴記録を skip する。
-    /// 異 trait 実装は不要なので具体型 `Option<...>` で持つ（generic 引数で受ける
-    /// より型増殖を避けたい）。
-    pub(crate) history_storage: Option<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
+    /// Floodgate 履歴の append 先。`None` の場合は履歴記録を skip する。
+    /// `H` は [`FloodgateHistoryStorage`] を実装する具体 backend（TCP 既定は
+    /// `JsonlFloodgateHistoryStorage`、Workers では R2 + DO storage backend など）。
+    pub(crate) history_storage: Option<H>,
     /// 進行中対局のメモリ内レジストリ。`%%LIST` / `%%SHOW` 応答で参照する。
     ///
     /// **注意**: このカウントは graceful shutdown の完了判定に使ってはならない。
@@ -505,11 +506,12 @@ where
     pub shutdown: GracefulShutdown,
 }
 
-impl<R, K, P> SharedState<R, K, P>
+impl<R, K, P, H> SharedState<R, K, P, H>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     /// 起動時に渡した [`ServerConfig`] を参照する。graceful shutdown などで
     /// `shutdown_grace` のような設定値を読むために使う。
@@ -562,13 +564,14 @@ impl PasswordStore for InMemoryPasswordStore {
 /// 配線する設計を取る。
 ///
 /// 戻り値は accept ループのタスクハンドル。テストでは `abort()` でシャットダウンする。
-pub async fn run_server<R, K, P>(
-    state: Rc<SharedState<R, K, P>>,
+pub async fn run_server<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
 ) -> Result<JoinHandle<()>, std::io::Error>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let listener = TcpListener::bind(state.config.bind_addr).await?;
     run_server_with_listener(listener, state).await
@@ -582,14 +585,15 @@ where
 /// 同じ listener をそのままサーバーに渡す」フローを取らないと、probe を drop して
 /// から本体 bind する間に別タスクが同じポートを掴む TOCTOU race が起きるため、
 /// 別経路として公開する。
-pub async fn run_server_with_listener<R, K, P>(
+pub async fn run_server_with_listener<R, K, P, H>(
     listener: TcpListener,
-    state: Rc<SharedState<R, K, P>>,
+    state: Rc<SharedState<R, K, P, H>>,
 ) -> Result<JoinHandle<()>, std::io::Error>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let bind = listener.local_addr()?;
     tracing::info!(
@@ -660,11 +664,12 @@ impl Drop for ConnectionActiveGuard {
 /// Drop に任せている。release ビルドの catch_unwind 経路でも debug ビルドの
 /// 透過経路でも、`?` early return / panic / 正常終了のどの分岐でも guard の Drop
 /// が確実に走るため gauge は leak しない。
-async fn run_connection_isolated<R, K, P>(stream: TcpStream, state: Rc<SharedState<R, K, P>>)
+async fn run_connection_isolated<R, K, P, H>(stream: TcpStream, state: Rc<SharedState<R, K, P, H>>)
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let _conn_active = ConnectionActiveGuard::acquire();
     #[cfg(debug_assertions)]
@@ -703,11 +708,12 @@ where
 }
 
 /// 受理ループ。各接続を `spawn_local` で同スレッド内の独立タスクにする。
-async fn accept_loop<R, K, P>(listener: TcpListener, state: Rc<SharedState<R, K, P>>)
+async fn accept_loop<R, K, P, H>(listener: TcpListener, state: Rc<SharedState<R, K, P, H>>)
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     // 接続ごとに `conn_id` を採番し、tracing span のフィールドとして全ログイベント
     // に伝播する。プロセス再起動でリセットされる単純な `AtomicU64` で十分（同一
@@ -760,14 +766,15 @@ where
 }
 
 /// 1 接続分の処理。LOGIN → 待機プール or drive → 終局まで。
-async fn handle_connection<R, K, P>(
+async fn handle_connection<R, K, P, H>(
     stream: TcpStream,
-    state: Rc<SharedState<R, K, P>>,
+    state: Rc<SharedState<R, K, P, H>>,
 ) -> Result<(), ServerError>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let peer = TcpTransport::peer_key(&stream)?;
     let mut transport = TcpTransport::new(stream, peer.clone());
@@ -1036,8 +1043,8 @@ where
 ///   空行 keep-alive に応答し、それ以外の入力で切断する。マッチングへの参加は
 ///   非 x1 と同じ経路なので、相補手番の相手が到着すれば drive 側へ handoff する。
 #[allow(clippy::too_many_arguments)]
-async fn run_waiter<R, K, P>(
-    state: Rc<SharedState<R, K, P>>,
+async fn run_waiter<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
     mut transport: TcpTransport,
     handle: String,
     color: Color,
@@ -1051,6 +1058,7 @@ where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let (match_req_tx, mut match_req_rx) = oneshot::channel::<MatchRequest>();
     {
@@ -1690,11 +1698,15 @@ enum ForkOutcome {
 /// subscribe 完了時点でゲームが既に終局している可能性がある。その場合 stale
 /// なエントリを broadcaster に残さないよう、呼び出し側で drop + prune して
 /// NOT_FOUND を返す。
-async fn subscribe_still_registered<R, K, P>(state: &SharedState<R, K, P>, game_id: &GameId) -> bool
+async fn subscribe_still_registered<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
+    game_id: &GameId,
+) -> bool
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let games = state.games.lock().await;
     games.get(game_id).is_some()
@@ -1704,14 +1716,15 @@ where
 ///
 /// buoy があれば残数を 1 消費してその開始局面を返し、無ければグローバル既定値を返す。
 /// 残数 0 の buoy は対局を成立させない。
-async fn reserve_match_initial_position<R, K, P>(
-    state: &SharedState<R, K, P>,
+async fn reserve_match_initial_position<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
     game_name: &GameName,
 ) -> Result<MatchInitialPosition, ServerError>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let Some(buoy) = state
         .buoy_storage
@@ -1761,8 +1774,8 @@ where
 /// ループ側は x1 応答 `##[FORK] NOT_FOUND` / `##[FORK] ERROR ...` に落として
 /// 接続を維持し、graceful degradation にする。`Err` は storage I/O 失敗など
 /// 本当に復旧不能な経路にだけ残す。
-async fn derive_fork_from_source_kifu<R, K, P>(
-    state: &SharedState<R, K, P>,
+async fn derive_fork_from_source_kifu<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
     source_game: &GameId,
     nth_move: Option<u32>,
 ) -> Result<ForkOutcome, ServerError>
@@ -1770,6 +1783,7 @@ where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let Some(csa_v2_text) =
         state.kifu_storage.load(source_game).await.map_err(ServerError::Storage)?
@@ -1792,8 +1806,8 @@ fn default_fork_buoy_name(source_game: &GameId, nth_move: Option<u32>) -> GameNa
 
 /// drive 側タスクのメインループ。両 transport を所有して 1 対局を完了まで運ぶ。
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn drive_game<R, K, P>(
-    state: Rc<SharedState<R, K, P>>,
+pub(crate) async fn drive_game<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
     opp_transport: TcpTransport,
     opp_handle: String,
     opp_color: Color,
@@ -1808,6 +1822,7 @@ where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     debug_assert_eq!(opp_color, self_color.opposite());
 
@@ -1942,8 +1957,8 @@ where
 /// の `DriveGuard` が Drop で読み取って `csa_games_finished_total{result_code}`
 /// を +1 する経路に使う。本関数が Err で抜けた・slot を埋めずに完了した場合は
 /// `RESULT_CODE_ABORTED` (`#ABORTED`) で集計される。
-async fn drive_game_inner<R, K, P>(
-    state: &SharedState<R, K, P>,
+async fn drive_game_inner<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
     game_id: &GameId,
     matched: MatchedPair,
     game_name: GameName,
@@ -1956,6 +1971,7 @@ where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     // Game_Summary を両対局者に送信。
     let clock = state.config.clock.build_clock();
@@ -2224,8 +2240,8 @@ async fn wait_both_agree(
 /// 呼び出し側は続けて `GameRegistry::register` してから `run_game_loop_and_record`
 /// を呼ぶ流れに乗せる。`dispatch` が送信失敗した場合は `ServerError::Transport`
 /// で早期 return し、GameRegistry には入れない（幽霊対局を防ぐ）。
-async fn initialize_game_and_dispatch_start<R, K, P>(
-    state: &SharedState<R, K, P>,
+async fn initialize_game_and_dispatch_start<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
     game_id: &GameId,
     matched: &MatchedPair,
     clock: Box<dyn rshogi_csa_server::TimeClock>,
@@ -2237,6 +2253,7 @@ where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let cfg = GameRoomConfig {
         game_id: game_id.clone(),
@@ -2269,8 +2286,8 @@ where
 ///
 /// `run_room` を直接使うと消費秒数を取り出せないため、ここでは `GameRoom` を直接駆動
 /// して手番イベントから `,T<sec>` を解析し `KifuMove` を収集する。
-async fn run_game_loop_and_record<R, K, P>(
-    state: &SharedState<R, K, P>,
+async fn run_game_loop_and_record<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
     game_id: &GameId,
     room: &mut GameRoom,
     start_instant: tokio::time::Instant,
@@ -2281,6 +2298,7 @@ where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let now_ms =
         || tokio::time::Instant::now().saturating_duration_since(start_instant).as_millis() as u64;
@@ -2396,8 +2414,8 @@ fn parse_move_broadcast(line: &str) -> Option<(&str, u32)> {
 
 /// 棋譜 + 00LIST を永続化する。`game_name` は Floodgate 履歴 JSONL に記録する
 /// ためのみ使う（kifu / 00LIST 出力には影響しない）。
-async fn persist_kifu<R, K, P>(
-    state: &SharedState<R, K, P>,
+async fn persist_kifu<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
     game_id: &GameId,
     game_name: &GameName,
     matched: &MatchedPair,
@@ -2411,6 +2429,7 @@ where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     // initial_sfen が設定されていれば棋譜の `initial_position` も同じ SFEN から派生。
     // 設定されていない (= 平手) 場合は既存の CSA shorthand `PI\n+\n` を保つ。
@@ -2547,10 +2566,12 @@ where
 
 /// `SharedState` を組み立てるヘルパ（運用コードとテストで再利用）。
 ///
-/// `floodgate_history_path` が `Some` の場合は [`JsonlFloodgateHistoryStorage`]
-/// を構築して `SharedState.history_storage` に乗せる。`None` の場合は履歴
-/// 記録 skip。
-pub fn build_state<R, K, P>(
+/// `history_storage` は呼び出し側で構築して渡す（履歴永続化を行わない場合は
+/// `None`）。`H` を generic にしているのは TCP の JSONL 実装と Workers 等の
+/// 別 backend 実装を `FloodgateHistoryStorage` trait の下で差し替え可能にする
+/// ため。テストでは `None::<JsonlFloodgateHistoryStorage>` のように turbofish で
+/// 型を確定させて呼ぶ。
+pub fn build_state<R, K, P, H>(
     config: ServerConfig,
     rate_storage: R,
     kifu_storage: K,
@@ -2558,17 +2579,15 @@ pub fn build_state<R, K, P>(
     hasher: Box<dyn PasswordHasher>,
     rate_limiter: IpLoginRateLimiter,
     broadcaster: InMemoryBroadcaster,
-) -> SharedState<R, K, P>
+    history_storage: Option<H>,
+) -> SharedState<R, K, P, H>
 where
     R: RateStorage + 'static,
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
 {
     let buoy_storage = rshogi_csa_server::FileBuoyStorage::new(config.kifu_topdir.clone());
-    let history_storage = config
-        .floodgate_history_path
-        .clone()
-        .map(rshogi_csa_server::JsonlFloodgateHistoryStorage::new);
     SharedState {
         config,
         league: Mutex::new(League::new()),
@@ -2592,16 +2611,23 @@ where
 }
 
 /// 既定の TCP サーバー構築ヘルパ。`bind_addr` と `kifu_topdir` を上書きする用途。
+///
+/// `floodgate_history_path` が `Some` の場合は [`JsonlFloodgateHistoryStorage`]
+/// を構築して `history_storage` に乗せる（TCP 既定の履歴 backend）。
 pub fn default_tcp_shared_state<R, P>(
     config: ServerConfig,
     rate_storage: R,
     password_store: P,
-) -> SharedState<R, FileKifuStorage, P>
+) -> SharedState<R, FileKifuStorage, P, rshogi_csa_server::JsonlFloodgateHistoryStorage>
 where
     R: RateStorage + 'static,
     P: PasswordStore + 'static,
 {
     let kifu_storage = FileKifuStorage::new(config.kifu_topdir.clone());
+    let history_storage = config
+        .floodgate_history_path
+        .clone()
+        .map(rshogi_csa_server::JsonlFloodgateHistoryStorage::new);
     build_state(
         config,
         rate_storage,
@@ -2610,6 +2636,7 @@ where
         Box::new(crate::auth::PlainPasswordHasher::new()),
         IpLoginRateLimiter::default_limits(),
         InMemoryBroadcaster::new(),
+        history_storage,
     )
 }
 

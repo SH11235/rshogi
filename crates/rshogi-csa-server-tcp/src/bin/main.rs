@@ -300,6 +300,10 @@ fn main() -> anyhow::Result<()> {
 /// 構築済みの依存（rate / kifu / password）から `SharedState` を組み立てて
 /// accept ループを起動し、SIGINT / SIGTERM 受信後の graceful shutdown を完遂する
 /// 共通経路。`R` を YAML / インメモリで切り替えるための monomorphize 用ヘルパ。
+///
+/// Floodgate 履歴の backend は TCP 既定の [`JsonlFloodgateHistoryStorage`] を
+/// 直接使う。Workers 等の別 backend に差し替えるのは当面想定外なので、本
+/// バイナリでは H を generic にせず固定する（過剰な型展開を避ける）。
 async fn run_with_state<R, K, P>(
     config: ServerConfig,
     rate_storage: R,
@@ -311,15 +315,21 @@ where
     K: KifuStorage + 'static,
     P: PasswordStore + 'static,
 {
-    let state: Rc<SharedState<R, K, P>> = Rc::new(build_state(
-        config,
-        rate_storage,
-        kifu_storage,
-        password_store,
-        Box::new(PlainPasswordHasher::new()),
-        IpLoginRateLimiter::default_limits(),
-        InMemoryBroadcaster::new(),
-    ));
+    let history_storage = config
+        .floodgate_history_path
+        .clone()
+        .map(rshogi_csa_server::JsonlFloodgateHistoryStorage::new);
+    let state: Rc<SharedState<R, K, P, rshogi_csa_server::JsonlFloodgateHistoryStorage>> =
+        Rc::new(build_state(
+            config,
+            rate_storage,
+            kifu_storage,
+            password_store,
+            Box::new(PlainPasswordHasher::new()),
+            IpLoginRateLimiter::default_limits(),
+            InMemoryBroadcaster::new(),
+            history_storage,
+        ));
 
     let handle = run_server(state.clone()).await.context("run_server")?;
     tracing::info!("rshogi-csa-server-tcp ready");
