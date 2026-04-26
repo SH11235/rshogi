@@ -12,11 +12,18 @@ use crate::origin;
 ///
 /// # 新規定数を追加するときは
 ///
-/// 個別 const と併せて、用途別の網羅配列 [`ConfigKeys::ALL_R2_BINDINGS`] /
-/// [`ConfigKeys::ALL_DO_BINDINGS`] / [`ConfigKeys::ALL_VARS_KEYS`] への追加を
-/// 必ず行うこと。`tests/wrangler_template_consistency.rs` がこれら配列と
-/// `wrangler.toml.example` の双方向整合を検証しているため、配列追加を忘れると
-/// template 更新忘れも検出できなくなる。
+/// 個別 const と併せて、用途別の網羅配列のいずれか 1 つに **必ず追加** する:
+/// - R2 binding: [`ConfigKeys::ALL_R2_BINDINGS`]
+/// - DO binding: [`ConfigKeys::ALL_DO_BINDINGS`]
+/// - production / local dev 双方で `[vars]` 宣言する公開値:
+///   [`ConfigKeys::PRODUCTION_VARS_KEYS`]
+/// - production では Cloudflare secret 経由、local dev では `[vars]` で動かす値:
+///   [`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`]
+///
+/// `tests/wrangler_template_consistency.rs` (template) と
+/// `tests/wrangler_production_toml_consistency.rs` (production) が
+/// これら配列と該当 toml ファイルの双方向整合を検証する。配列追加を忘れると
+/// template / production toml 更新忘れも検出できなくなる。
 pub struct ConfigKeys;
 
 impl ConfigKeys {
@@ -41,6 +48,13 @@ impl ConfigKeys {
     /// StopWatch 用の秒読み（分）。
     pub const BYOYOMI_MIN: &'static str = "BYOYOMI_MIN";
     /// 運営権限を持つハンドル名（`%%SETBUOY` / `%%DELETEBUOY`）。
+    ///
+    /// **production**: Cloudflare secret として `wrangler secret put ADMIN_HANDLE`
+    /// で設定する。OSS repo に handle 名が出ない経路で defense-in-depth を保つ。
+    /// **local dev**: `wrangler.toml.example` の `[vars]` に placeholder を残し、
+    /// `wrangler dev` を friction なく動かせるようにする。Worker code は
+    /// `env.var(ConfigKeys::ADMIN_HANDLE)` で var/secret どちらも読む（Cloudflare
+    /// 仕様で同じ namespace に展開される）。
     pub const ADMIN_HANDLE: &'static str = "ADMIN_HANDLE";
 
     /// `wrangler.toml` の `[[r2_buckets]] binding = "..."` で宣言されるべき名前の
@@ -54,17 +68,43 @@ impl ConfigKeys {
     /// べき名前の網羅列挙。新規 DO binding 定数を追加したら必ず本配列にも追加する。
     pub const ALL_DO_BINDINGS: &'static [&'static str] = &[Self::GAME_ROOM_BINDING];
 
-    /// `wrangler.toml` の `[vars]` で宣言されるべきキーの網羅列挙。
-    /// 新規 `[vars]` キー定数を追加したら必ず本配列にも追加する。
-    pub const ALL_VARS_KEYS: &'static [&'static str] = &[
+    /// **production** の `wrangler.production.toml` `[vars]` テーブルで宣言される
+    /// べきキーの網羅列挙。本配列に含まれる定数は全環境で `[vars]` として平文管理
+    /// される（公開しても運用上問題ない値）。
+    ///
+    /// 本配列に含まれない定数（例: [`Self::ADMIN_HANDLE`]）は production では
+    /// `wrangler secret put` 経由で設定し、`wrangler.production.toml` には書かない。
+    /// ただし [`Self::LOCAL_DEV_ONLY_VARS_KEYS`] に含まれていれば
+    /// `wrangler.toml.example` の `[vars]` には placeholder として残し、local dev
+    /// 経路で `wrangler dev` を friction なく動かせるようにする。
+    ///
+    /// 新規定数追加時の振り分け基準:
+    /// - 公開しても問題ない値 → 本配列 `PRODUCTION_VARS_KEYS`
+    /// - production では secret 経由、local dev は var で動かしたい値 → 本配列に
+    ///   入れず [`Self::LOCAL_DEV_ONLY_VARS_KEYS`] に入れる
+    /// - production も local dev も完全に secret （local dev でも `.dev.vars`
+    ///   で都度設定）の場合 → どちらの配列にも入れない（現状そのケースなし）。
+    ///   このケースを追加する際は、`ConfigKeys` 全 const を走査して **どの
+    ///   `ALL_*` 配列にも属さない定数を網羅** するための第 3 の test (例:
+    ///   `wrangler_secret_only_keys_are_documented`) を新設し、漏れなく
+    ///   登録対象を gate する仕組みを併せて整える。
+    pub const PRODUCTION_VARS_KEYS: &'static [&'static str] = &[
         Self::CORS_ORIGINS,
         Self::CLOCK_KIND,
         Self::TOTAL_TIME_SEC,
         Self::BYOYOMI_SEC,
         Self::TOTAL_TIME_MIN,
         Self::BYOYOMI_MIN,
-        Self::ADMIN_HANDLE,
     ];
+
+    /// **local dev のみ** の `wrangler.toml.example` `[vars]` テーブルに追加で
+    /// 宣言されるキーの網羅列挙。production では Cloudflare secret 経由で設定する
+    /// ため `wrangler.production.toml` には書かない。
+    ///
+    /// `wrangler.toml.example` には `PRODUCTION_VARS_KEYS ∪ LOCAL_DEV_ONLY_VARS_KEYS`
+    /// 全件を `[vars]` として記載することで、新規メンバーが `cp wrangler.toml.example
+    /// wrangler.toml && wrangler dev` で即動作確認できる friction レス運用を維持する。
+    pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] = &[Self::ADMIN_HANDLE];
 }
 
 /// Workers `[vars]` 文字列群から時計設定を解決する。
