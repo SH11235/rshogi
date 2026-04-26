@@ -258,7 +258,7 @@ pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFe
         ),
         // 切断時の再接続プロトコル。`reconnect_grace_duration > 0` を指定した
         // 構成は grace registry / token 照合 / 状態再送 / 満了敗北確定経路を
-        // 全部有効化するため、Phase 5 features の opt-in を要求する。
+        // 全部有効化するため、Floodgate features の opt-in を要求する。
         enable_reconnect_protocol: !config.reconnect_grace_duration.is_zero(),
         ..FloodgateFeatureIntent::default()
     }
