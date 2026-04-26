@@ -5,4 +5,6 @@ pub mod buoy;
 #[cfg(feature = "tokio-transport")]
 pub mod file;
 #[cfg(feature = "tokio-transport")]
+pub mod floodgate_history;
+#[cfg(feature = "tokio-transport")]
 pub mod players_yaml;

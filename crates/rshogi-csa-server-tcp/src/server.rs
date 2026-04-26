@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use rshogi_core::types::EnteringKingRule;
 use rshogi_csa_server::ClockSpec;
+use rshogi_csa_server::FloodgateHistoryStorage;
 use rshogi_csa_server::config::{FloodgateFeatureIntent, validate_floodgate_feature_gate};
 use rshogi_csa_server::error::{ProtocolError, ServerError};
 use rshogi_csa_server::game::result::GameResult;
@@ -158,6 +159,11 @@ pub struct ServerConfig {
     /// 時点で当該 `game_name` の待機プールから候補を抽出し、`pairing_strategy`
     /// が指定する戦略でペアを作って Game_Summary を送信する。
     pub floodgate_schedules: Vec<rshogi_csa_server::FloodgateSchedule>,
+    /// Floodgate 履歴 JSONL ファイルのパス。`Some` を指定すると終局時に
+    /// 1 entry / 1 line で append される。本フィールドが `Some` の状態は
+    /// Floodgate 運用機能の一つ (`enable_floodgate_history`) として
+    /// `--allow-floodgate-features` opt-in を要求する。
+    pub floodgate_history_path: Option<std::path::PathBuf>,
     /// SIGINT / SIGTERM 受信後に進行中対局の終了を待つ上限。超過分は未完了の
     /// まま log warning を出して切り捨てる。運用で「ローリング再起動時に対局
     /// を落とさない」ためのバッファで、既定 60 秒。
@@ -182,6 +188,7 @@ impl ServerConfig {
             allow_floodgate_features: false,
             players_yaml_path: None,
             floodgate_schedules: Vec::new(),
+            floodgate_history_path: None,
             shutdown_grace: Duration::from_secs(60),
         }
     }
@@ -216,6 +223,8 @@ pub(crate) fn floodgate_intent_from_config(config: &ServerConfig) -> FloodgateFe
         // 定刻起動スケジュールも Floodgate 系機能。1 件以上のスケジュール宣言
         // があれば opt-in 要求。
         enable_scheduler: !config.floodgate_schedules.is_empty(),
+        // Floodgate 履歴 JSONL も Floodgate 系運用機能。`Some` で opt-in 要求。
+        enable_floodgate_history: config.floodgate_history_path.is_some(),
         ..FloodgateFeatureIntent::default()
     }
 }
@@ -411,6 +420,10 @@ where
     kifu_storage: K,
     password_store: P,
     hasher: Box<dyn PasswordHasher>,
+    /// Floodgate 履歴 JSONL の append 先。`None` の場合は履歴記録を skip する。
+    /// 異 trait 実装は不要なので具体型 `Option<...>` で持つ（generic 引数で受ける
+    /// より型増殖を避けたい）。
+    history_storage: Option<rshogi_csa_server::JsonlFloodgateHistoryStorage>,
     /// 進行中対局のメモリ内レジストリ。`%%LIST` / `%%SHOW` 応答で参照する。
     ///
     /// **注意**: このカウントは graceful shutdown の完了判定に使ってはならない。
@@ -1803,7 +1816,7 @@ where
             game_id: game_id.clone(),
             black: matched.black.clone(),
             white: matched.white.clone(),
-            game_name,
+            game_name: game_name.clone(),
             started_at: started_at_iso,
         });
     }
@@ -1861,6 +1874,7 @@ where
     persist_kifu(
         state,
         game_id,
+        &game_name,
         &matched,
         match_initial_sfen.as_deref(),
         start_time,
@@ -2153,10 +2167,12 @@ fn parse_move_broadcast(line: &str) -> Option<(&str, u32)> {
     Some((tok, sec))
 }
 
-/// 棋譜 + 00LIST を永続化する。
+/// 棋譜 + 00LIST を永続化する。`game_name` は Floodgate 履歴 JSONL に記録する
+/// ためのみ使う（kifu / 00LIST 出力には影響しない）。
 async fn persist_kifu<R, K, P>(
     state: &SharedState<R, K, P>,
     game_id: &GameId,
+    game_name: &GameName,
     matched: &MatchedPair,
     initial_sfen: Option<&str>,
     start_time: chrono::DateTime<chrono::Utc>,
@@ -2260,11 +2276,53 @@ where
         );
         return Err(ServerError::Storage(e));
     }
+
+    // Floodgate 履歴 JSONL に append（`floodgate_history_path` が Some のとき
+    // のみ。失敗時はレート同様に `tracing::error!` で記録してから上に Err を返す）。
+    //
+    // best-effort に倒さず Err を伝播する判断理由:
+    // - 履歴は単なる運用参照ではなく、Floodgate 月例集計など 00LIST と
+    //   突き合わせる外部バッチの突合元としても利用され得る。silent skip すると
+    //   運用ログから消えて整合性チェックを後追いできなくなる。
+    // - 上位 `drive_game_inner` には既に終局メッセージ送出済みの状態で I/O
+    //   失敗を返す形になるが、`csa_games_finished_total{result_code}` の集計や
+    //   kifu/00LIST/rate と同じく storage 失敗を 1 経路に集約しておけば
+    //   alert ルールが一本化できる（kifu 失敗・rate 失敗・history 失敗で挙動が
+    //   分岐すると運用側のフィルタがぶれる）。
+    // - history 失敗で `drive_game_inner` 上位が見るのは `Err` だが、`DriveGuard`
+    //   Drop は既に `result_code_slot` 経由で正規ラベルを set 済み（L1869）なので
+    //   `csa_games_finished_total` の集計ラベルは正しい。Err は alert ルートに
+    //   流れるだけで、メトリクス側の整合性は崩れない。
+    if let Some(history) = state.history_storage.as_ref() {
+        let entry = rshogi_csa_server::FloodgateHistoryEntry::new(
+            game_id,
+            game_name,
+            &matched.black,
+            &matched.white,
+            start_time,
+            end_time,
+            primary_result_code(result),
+            winner_color,
+        );
+        if let Err(e) = history.append(&entry).await {
+            tracing::error!(
+                game_id = %game_id.as_str(),
+                black = %matched.black.as_str(),
+                white = %matched.white.as_str(),
+                error = %e,
+                "floodgate history append failed; kifu/00LIST/rate are persisted but history entry was lost"
+            );
+            return Err(ServerError::Storage(e));
+        }
+    }
     Ok(())
 }
 
 /// `SharedState` を組み立てるヘルパ（運用コードとテストで再利用）。
-#[allow(clippy::too_many_arguments)]
+///
+/// `floodgate_history_path` が `Some` の場合は [`JsonlFloodgateHistoryStorage`]
+/// を構築して `SharedState.history_storage` に乗せる。`None` の場合は履歴
+/// 記録 skip。
 pub fn build_state<R, K, P>(
     config: ServerConfig,
     rate_storage: R,
@@ -2280,6 +2338,10 @@ where
     P: PasswordStore + 'static,
 {
     let buoy_storage = rshogi_csa_server::FileBuoyStorage::new(config.kifu_topdir.clone());
+    let history_storage = config
+        .floodgate_history_path
+        .clone()
+        .map(rshogi_csa_server::JsonlFloodgateHistoryStorage::new);
     SharedState {
         config,
         league: Mutex::new(League::new()),
@@ -2290,6 +2352,7 @@ where
         kifu_storage,
         password_store,
         hasher,
+        history_storage,
         games: Mutex::new(GameRegistry::new()),
         active_drive_tasks: AtomicUsize::new(0),
         active_games: Notify::new(),
@@ -2562,5 +2625,26 @@ mod tests {
             pairing_strategy: "direct".to_owned(),
         });
         prepare_runtime(&cfg).expect("direct strategy must pass prepare_runtime");
+    }
+
+    /// `floodgate_intent_from_config` が `floodgate_history_path` の有無で
+    /// `enable_floodgate_history` を切り替えることを直接固定。
+    #[test]
+    fn floodgate_intent_reflects_floodgate_history_path() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        assert!(!floodgate_intent_from_config(&cfg).enable_floodgate_history);
+        cfg.floodgate_history_path = Some(std::path::PathBuf::from("/tmp/history.jsonl"));
+        assert!(floodgate_intent_from_config(&cfg).enable_floodgate_history);
+    }
+
+    /// `--allow-floodgate-features` opt-in なしで `floodgate_history_path` を
+    /// 設定すると `prepare_runtime` が fail-fast する契約を固定。
+    #[test]
+    fn prepare_runtime_rejects_floodgate_history_when_optin_off() {
+        let mut cfg = ServerConfig::sensible_defaults();
+        cfg.floodgate_history_path = Some(std::path::PathBuf::from("/tmp/history.jsonl"));
+        cfg.allow_floodgate_features = false;
+        let err = prepare_runtime(&cfg).expect_err("must fail without opt-in");
+        assert!(err.contains("floodgate_history"), "error must list feature: {err}");
     }
 }

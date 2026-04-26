@@ -63,6 +63,11 @@ struct Cli {
     /// され、`--allow-floodgate-features` opt-in が必須になる。
     #[arg(long, value_name = "PATH")]
     floodgate_schedule_toml: Option<PathBuf>,
+    /// Floodgate 履歴 JSONL ファイルのパス。指定すると終局時に 1 entry / 1 line
+    /// で append される（開始時刻・ペア・結果・勝者）。`--allow-floodgate-features`
+    /// opt-in が必須。
+    #[arg(long, value_name = "PATH")]
+    floodgate_history_jsonl: Option<PathBuf>,
     /// 秒読み方式 / Fischer 方式で使う持ち時間 (秒)。
     #[arg(long, default_value_t = 600)]
     total_time_sec: u32,
@@ -220,6 +225,7 @@ fn main() -> anyhow::Result<()> {
         // 1 回だけ clone する（残りはそのまま move される）。
         players_yaml_path: cli.players_yaml.clone(),
         floodgate_schedules,
+        floodgate_history_path: cli.floodgate_history_jsonl.clone(),
         shutdown_grace: std::time::Duration::from_secs(cli.shutdown_grace_sec),
     };
     // Floodgate 系機能の opt-in ゲートを起動前に評価する。`players_yaml_path` が
