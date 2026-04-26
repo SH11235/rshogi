@@ -233,7 +233,7 @@ Environment ベースにすることで、deploy job 側で
 | 項目 | 値 |
 |---|---|
 | Name | `rshogi-csa-server-workers-staging` |
-| Deployment branches | Selected branches → `main` のみ許可（feature branch から `gh workflow run -f target=staging` で deploy を打てると secret が漏れる経路ができるため、`main` 限定にする） |
+| Deployment branches | Selected branches → `main` のみ許可（`main` 以外の ref で `gh workflow run --ref <branch>` を打っても Deployment branches 制限により Environment 解決時に reject され、secret は注入されない gating になる） |
 | Required reviewers | （任意。`main` への push で自動 deploy する設計なので unset を推奨） |
 
 [Environment secrets] で:
@@ -248,7 +248,7 @@ Environment ベースにすることで、deploy job 側で
 | 項目 | 値 |
 |---|---|
 | Name | `rshogi-csa-server-workers-production` |
-| Deployment branches | Selected branches → `main` のみ許可（同上の理由。`main` 以外から dispatch を打てる構成は production secret 漏洩リスクが高い） |
+| Deployment branches | Selected branches → `main` のみ許可（同上の gating。`main` 以外の ref で dispatch を打てる構成は production secret 漏洩リスクが高い） |
 | Required reviewers | **1 名以上の reviewer 設定を推奨**。`workflow_dispatch` を起動できるのは repository write 権限者なので、reviewer を立てておくと dispatch 1 アクションでの誤 deploy を防げる |
 
 [Environment secrets] で:
@@ -269,12 +269,14 @@ repository secret から Environment secret への移管中は以下のいずれ
 
 | 状態 | 挙動 |
 |---|---|
-| Environment が **未作成** | workflow が `environment: rshogi-csa-server-workers-<env>` を宣言しても解決できないため、対応 job (`preflight-*` 等) が environment 解決エラーで失敗する。**PR merge 前に Environment 作成までは必ず済ませること**（§2.4.1 / §2.4.2） |
-| Environment **作成済み** + Environment secret **未登録** + repo secret 残存 | `environment:` 宣言の時点で repo secret は injection 対象から外れるが、`preflight-*` job が `can_deploy=false` を出して deploy step を skip する safe fallback が効く。**deploy が壊れることはない**（job は warning と共に成功扱いで終わる） |
+| Environment が **未作成** | GitHub Actions は `environment: rshogi-csa-server-workers-<env>` を宣言した job 起動時に、対象 environment が存在しなければ **default 設定（Deployment branches 制限なし、Required reviewers なし、Environment secret 未登録）で auto-create する**。secret は何も注入されないので preflight が `can_deploy=false` を出して deploy step を skip する。**ただし auto-create された Environment は protection rules が抜けた状態で残るため、§2.4.1 / §2.4.2 の手順で `main` only / Required reviewers を後付け設定する必要がある**（事前に手動作成しておくのが望ましい） |
+| Environment **作成済み** + Environment secret **未登録** + repo secret 残存 | `environment:` 宣言した job では Environment secret が同名 repo secret を上書きする仕様。Environment secret が空なので `secrets.*` も空となり、preflight が `can_deploy=false` を出して deploy step を skip する safe fallback が効く。**deploy が壊れることはない**（job は warning と共に成功扱いで終わる） |
 | Environment secret **登録済み** | 通常運用。Environment secret が `secrets.*` に注入され、deploy が走る |
 
-つまり「**Environment の枠さえ先に作っておけば、移管中の deploy は壊れずに
-skip される**」設計。secret 値の登録忘れで本番が落ちるシナリオはない。
+つまり **preflight job が必ず fail-safe gate になる** ため、secret 値の登録
+忘れや Environment 未作成で本番が落ちるシナリオは無い。ただし auto-create
+された Environment は protection rules が抜けるので、`main` only と
+Required reviewers の **作成時設定** 自体は §2.4.1 / §2.4.2 の通り重要。
 
 ### 2.5 Cloudflare 上で Worker secret を設定する
 
@@ -396,7 +398,8 @@ websocat "wss://rshogi-csa-server-workers-staging.${SUBDOMAIN}.workers.dev/ws/te
 # 接続が確立すれば OK（"LOGIN ..." を入力すると Worker 側で受理する）
 ```
 
-成功したら §2.6 で staging environment の `WORKERS_HEALTH_URL` を登録する。
+成功したら §2.6 で `rshogi-csa-server-workers-staging` Environment の
+`WORKERS_HEALTH_URL` を登録する。
 
 ### 3.2 production を deploy する
 
@@ -407,7 +410,7 @@ production bucket、`ADMIN_HANDLE` は production secret に登録済み）。
 
 ```bash
 cd crates/rshogi-csa-server-workers
-vp run deploy:prod    # Vite+ 非使用時は `pnpm run deploy:prod`
+vp run deploy:prod    # Vite+ 非使用時は `pnpm run deploy:prod`（§1 末尾参照）
 ```
 
 `https://rshogi-csa-server-workers.<your-subdomain>.workers.dev/` にデプロイされる。
@@ -483,8 +486,9 @@ Deploy target environment: **production** → Run]
 gh workflow run deploy-workers.yml --ref main -f target=production
 ```
 
-production environment に Required reviewers を設定している場合は、deploy job
-が承認待ち状態になり、reviewer の approve を経てから実 deploy step が走る。
+`rshogi-csa-server-workers-production` Environment に Required reviewers を
+設定している場合は、deploy job が承認待ち状態になり、reviewer の approve を
+経てから実 deploy step が走る。
 
 ### 4.3 staging への手動 redeploy
 
@@ -577,7 +581,7 @@ CI 上の deploy job が失敗 (`wrangler-action` が non-zero) した場合、C
 
 ```bash
 cd crates/rshogi-csa-server-workers
-vp run tail:staging   # staging   (Vite+ 非使用時: `pnpm run tail:staging`)
+vp run tail:staging   # staging   (Vite+ 非使用時: `pnpm run tail:staging`、§1 末尾参照)
 vp run tail:prod      # production (Vite+ 非使用時: `pnpm run tail:prod`)
 ```
 

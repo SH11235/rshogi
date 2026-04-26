@@ -98,4 +98,4 @@ ALLOW_FLOODGATE_FEATURES = "false"
 #   攻撃者が「どのハンドルを狙うか」を事前確定できないよう secret 化する。
 #   設定: `vp exec wrangler secret put ADMIN_HANDLE --config wrangler.production.toml`
 #   確認: `vp exec wrangler secret list --config wrangler.production.toml`
-#   詳細は `docs/csa-server/deployment.md` §2.4.5 参照。
+#   詳細は `docs/csa-server/deployment.md` §2.5 参照。
