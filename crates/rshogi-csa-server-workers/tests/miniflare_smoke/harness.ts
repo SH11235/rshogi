@@ -10,8 +10,24 @@ import { Miniflare, type WebSocket } from "miniflare";
 /// (テスト用途には過剰)。本ハーネスは `list` / `get` の最小サブセットしか
 /// 使わないため、duck-type interface を 1 か所定義して `getKifuBucket` で
 /// キャストを隠蔽する。
+///
+/// 引数 / 戻り値を最小だけ広げてあるのは、将来 miniflare 4 が `list()` の
+/// 既定挙動を変えても (例: page size 規定値変更 / `truncated` 必須化) 局所
+/// 改修で追随できるようにするため。
+export interface R2ListOptions {
+  prefix?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface R2ListResult {
+  objects: Array<{ key: string }>;
+  truncated?: boolean;
+  cursor?: string;
+}
+
 export interface R2BucketLike {
-  list(): Promise<{ objects: Array<{ key: string }> }>;
+  list(options?: R2ListOptions): Promise<R2ListResult>;
   get(key: string): Promise<R2ObjectLike | null>;
 }
 
@@ -20,7 +36,18 @@ export interface R2ObjectLike {
 }
 
 export async function getKifuBucket(mf: Miniflare): Promise<R2BucketLike> {
-  return (await mf.getR2Bucket("KIFU_BUCKET")) as unknown as R2BucketLike;
+  const raw = (await mf.getR2Bucket("KIFU_BUCKET")) as unknown as R2BucketLike;
+  // 将来 miniflare のメジャーアップで `list` / `get` が rename された場合に
+  // 型崩落で silent に壊れる経路を避けるため、duck-type 違反を runtime で
+  // 早期検出する。型 cast (`as unknown as R2BucketLike`) を使っている以上、
+  // 整合性検証は実装側で持つ責務。
+  if (typeof raw.list !== "function" || typeof raw.get !== "function") {
+    throw new Error(
+      "miniflare R2Bucket API に list/get が見つからない: " +
+        "miniflare メジャーアップで API rename された可能性。harness の duck-type を更新する必要あり",
+    );
+  }
+  return raw;
 }
 
 const WORKER_ROOT = resolve(import.meta.dirname, "../..");
@@ -183,10 +210,25 @@ export class CsaClient {
   /// `enter_grace_window` が走る」ことに依存するため、close を fire-and-forget
   /// すると後続の reconnect リクエストが grace 登録より先に到着して race する。
   /// `addEventListener("close", ...)` を constructor で予約済みなので、それと
-  /// 同経路の close 通知を await できるよう Promise を返す。サーバ側 close
-  /// ack が来ない異常時は `timeoutMs` で諦める。
+  /// 同経路の close 通知を await できるよう Promise を返す。
+  ///
+  /// timeout 時は **resolve** で抜ける (throw しない)。テストの `afterEach` で
+  /// `mf.dispose()` が必ず呼ばれて WS は強制破棄されるため、close ack が
+  /// 帰らない異常経路でも cleanup は別経路で完結する。close を fail-loud に
+  /// すると afterEach 自体が落ちて test の本当の失敗原因が埋もれるので、
+  /// cleanup 側の不確実性は本関数で吸収する設計に倒している。
   async close(timeoutMs = 2000): Promise<void> {
     if (this.closed) return;
+    // server-initiated close (`game_room.rs` の終局時 close 等) と同じ tick で
+    // 呼ばれるケースでは、`addEventListener` を貼る前に WS が CLOSING/CLOSED
+    // へ遷移しており、close event は再 dispatch されずに `Promise` が timeout
+    // 一杯を空待ちすることがある。`readyState` で早期 return して 2000ms の
+    // 浪費を防ぐ。`READY_STATE_CLOSING = 2` / `READY_STATE_CLOSED = 3` は
+    // miniflare 4 の static 定数。
+    const state = this.ws.readyState;
+    if (state === 2 /* CLOSING */ || state === 3 /* CLOSED */) {
+      return;
+    }
     return await new Promise<void>((resolve) => {
       const timer = setTimeout(() => resolve(), timeoutMs);
       this.ws.addEventListener(
