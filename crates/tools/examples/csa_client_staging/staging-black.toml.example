@@ -1,0 +1,59 @@
+# Workers staging × csa_client (黒番) 用 TOML 例。
+#
+# 詳細手順は docs/csa-server/staging-e2e.md を参照。
+# このファイルは `.example` の suffix 付きで repo に置かれている。実際に使う際は
+# 任意のローカルパス（`/tmp/staging-black.toml` 等）にコピーしてから書き換える。
+
+[server]
+# `wss://` で始まる場合は WebSocket 経路として接続する。
+# `<account>` 部分は Cloudflare アカウント名に置き換え、`<room_id>` は黒・白で
+# 同一の任意文字列を入れる。
+host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>"
+# host が `wss://` を含む場合は `port` は無視されるが、TOML schema 互換のため
+# 値を残しておく。
+port = 0
+id = "csa_e2e_black_<date>"
+password = "anything"
+floodgate = true
+
+# WebSocket Upgrade 時に送る Origin。staging Worker の CORS_ORIGINS allowlist
+# に同じ値を追加してから接続する（§1 参照）。
+ws_origin = "https://csa-client-local"
+
+[server.keepalive]
+# wss は通常 TLS が中間 NAT のタイムアウトを Pong で吸収するため、CSA 空行
+# keep-alive は最低限（60 秒）でよい。
+tcp = false
+ping_interval_sec = 60
+
+[engine]
+# ローカル USI エンジンへの絶対パスを書く。release ビルド推奨。
+path = "/path/to/your/rshogi-usi"
+startup_timeout_sec = 30
+
+[engine.options]
+USI_Hash = 256
+
+[time]
+margin_msec = 2500
+
+[game]
+max_games = 1            # E2E は 1 局回せれば良い
+restart_engine_every_game = false
+ponder = false           # E2E では ponder OFF が単純
+
+[retry]
+initial_delay_sec = 10
+max_delay_sec = 60
+
+[record]
+enabled = true
+dir = "./records/staging-e2e"
+filename_template = "{datetime}_{sente}_vs_{gote}"
+save_csa = true
+save_sfen = true
+
+[log]
+level = "info"
+dir = "./logs/staging-e2e"
+stdout = true
