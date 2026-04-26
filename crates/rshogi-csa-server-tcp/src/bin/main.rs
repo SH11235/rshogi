@@ -250,6 +250,11 @@ fn main() -> anyhow::Result<()> {
             DuplicateLoginPolicy::RejectNew
         },
         shutdown_grace: std::time::Duration::from_secs(cli.shutdown_grace_sec),
+        // 再接続プロトコルは opt-in。本バイナリは既定で `Duration::ZERO` を渡し、
+        // `run_game_loop_and_record` の grace 経路には立ち入らない (切断 → 即時
+        // `#ABNORMAL` 経路のまま)。再接続を有効化したい運用ではここで 60 秒等を
+        // 直接設定するか、後続の CLI / 設定経路で上書きする。
+        reconnect_grace_duration: std::time::Duration::ZERO,
     };
     // Floodgate 系機能の opt-in ゲートを起動前に評価する。`players_yaml_path` が
     // `Some` の状態は `enable_persistent_player_rates` 要求として intent に乗るため、

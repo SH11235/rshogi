@@ -1782,3 +1782,230 @@ fn graceful_shutdown_prunes_observer_subscribers() {
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }
+
+/// 再接続経路向けに `reconnect_grace_duration` を上書きしたサーバを起動する。
+async fn spawn_server_with_reconnect_grace(
+    tag: &str,
+    grace: Duration,
+) -> (
+    std::net::SocketAddr,
+    PathBuf,
+    Rc<
+        rshogi_csa_server_tcp::server::SharedState<
+            support::MemRateStorage,
+            FileKifuStorage,
+            InMemoryPasswordStore,
+            JsonlFloodgateHistoryStorage,
+        >,
+    >,
+) {
+    let topdir = unique_topdir(tag);
+    let mut password_map = HashMap::new();
+    password_map.insert("alice".to_owned(), "pw".to_owned());
+    password_map.insert("bob".to_owned(), "pw".to_owned());
+    let rate_records: Vec<_> = ["alice", "bob"]
+        .iter()
+        .map(|n| PlayerRateRecord {
+            name: PlayerName::new(*n),
+            rate: 1500,
+            wins: 0,
+            losses: 0,
+            last_game_id: None,
+            last_modified: "2026-04-17T00:00:00Z".to_owned(),
+        })
+        .collect();
+    let rate_storage = support::MemRateStorage::new(rate_records);
+    let kifu_storage = FileKifuStorage::new(topdir.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let actual_addr = listener.local_addr().unwrap();
+    let config = ServerConfig {
+        bind_addr: actual_addr,
+        kifu_topdir: topdir.clone(),
+        login_timeout: Duration::from_secs(10),
+        agree_timeout: Duration::from_secs(30),
+        reconnect_grace_duration: grace,
+        ..ServerConfig::sensible_defaults()
+    };
+    let state = Rc::new(build_state(
+        config,
+        rate_storage,
+        kifu_storage,
+        InMemoryPasswordStore { map: password_map },
+        Box::new(PlainPasswordHasher::new()),
+        IpLoginRateLimiter::default_limits(),
+        InMemoryBroadcaster::new(),
+        None::<JsonlFloodgateHistoryStorage>,
+    ));
+    let _handle = run_server_with_listener(listener, state.clone()).await.expect("run_server");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (actual_addr, topdir, state)
+}
+
+/// `BEGIN Game_Summary` の lines 配列から `<field>:` 行の値を取り出す。
+fn extract_summary_field(lines: &[String], field: &str) -> Option<String> {
+    let prefix = format!("{field}:");
+    lines.iter().find_map(|l| l.strip_prefix(&prefix).map(str::to_owned))
+}
+
+/// alice/bob を LOGIN → AGREE → START まで進めて `(game_id, alice_token)` を返す共通手順。
+/// ra/wa/rb/wb の transport は呼び出し側が管理する。
+async fn establish_match_and_capture_alice_token(
+    ra: &mut BufReader<OwnedReadHalf>,
+    wa: &mut OwnedWriteHalf,
+    rb: &mut BufReader<OwnedReadHalf>,
+    wb: &mut OwnedWriteHalf,
+) -> (String, String) {
+    send_line(wa, "LOGIN alice+g1+black pw").await;
+    send_line(wb, "LOGIN bob+g1+white pw").await;
+    assert_eq!(read_line_raw(ra).await.unwrap(), "LOGIN:alice OK");
+    assert_eq!(read_line_raw(rb).await.unwrap(), "LOGIN:bob OK");
+    let alice_lines = drain_game_summary(ra).await;
+    let _ = drain_game_summary(rb).await;
+    let game_id = extract_summary_field(&alice_lines, "Game_ID").expect("Game_ID line");
+    let alice_token =
+        extract_summary_field(&alice_lines, "Reconnect_Token").expect("Reconnect_Token line");
+    send_line(wa, "AGREE").await;
+    send_line(wb, "AGREE").await;
+    let _ = read_until(ra, &format!("START:{game_id}")).await;
+    let _ = read_until(rb, &format!("START:{game_id}")).await;
+    (game_id, alice_token)
+}
+
+#[test]
+fn reconnect_grace_allows_disconnected_player_to_resume_with_valid_token() {
+    // 切断 → 猶予内に正しい token を持って LOGIN → 再参加が成立し、状態再送
+    // (Game_Summary 全文 + Reconnect_State ブロック) を受け取った後に対局を継続できる。
+    run_local(|| async {
+        let (addr, topdir, _state) =
+            spawn_server_with_reconnect_grace("reconnect_resume", Duration::from_secs(5)).await;
+        let (mut ra, mut wa) = connect(addr).await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (game_id, alice_token) =
+            establish_match_and_capture_alice_token(&mut ra, &mut wa, &mut rb, &mut wb).await;
+
+        // 1. alice 側を切断する (TCP transport を drop)。
+        drop(ra);
+        drop(wa);
+        // grace 経路に入るのを待つ。`run_game_loop_and_record` の `Evt::Recv(Closed)` を
+        // 拾って `handle_disconnect_with_grace` に到達するまで少し時間を置く。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // 2. alice として新接続で reconnect 要求。
+        let (mut ra2, mut wa2) = connect(addr).await;
+        send_line(&mut wa2, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{alice_token}"))
+            .await;
+        assert_eq!(read_line_raw(&mut ra2).await.unwrap(), "LOGIN:alice OK");
+
+        // 3. resume message を受信: Game_Summary + Reconnect_State。
+        let resume_summary = drain_game_summary(&mut ra2).await;
+        assert_eq!(
+            extract_summary_field(&resume_summary, "Reconnect_Token").as_deref(),
+            Some(alice_token.as_str()),
+            "resume Game_Summary must include the original token"
+        );
+        assert_eq!(read_line_raw(&mut ra2).await.unwrap(), "BEGIN Reconnect_State");
+        let mut state_lines = Vec::new();
+        loop {
+            let l = read_line_raw(&mut ra2).await.unwrap();
+            let done = l == "END Reconnect_State";
+            state_lines.push(l);
+            if done {
+                break;
+            }
+        }
+        assert!(state_lines.iter().any(|l| l == "Current_Turn:+"));
+        assert!(state_lines.iter().any(|l| l.starts_with("Black_Time_Remaining_Ms:")));
+        assert!(state_lines.iter().any(|l| l.starts_with("White_Time_Remaining_Ms:")));
+
+        // 4. 対局継続: alice が指し手を送って bob 側でも観測される。
+        send_line(&mut wa2, "+7776FU").await;
+        let echoed = read_until(&mut rb, "+7776FU,T0").await;
+        assert!(echoed.iter().any(|l| l == "+7776FU,T0"));
+
+        // 5. 後始末: bob 投了で alice (黒) が勝者として `#WIN` を受け取る。
+        send_line(&mut wb, "%TORYO").await;
+        let _ = read_until(&mut ra2, "#WIN").await;
+
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn reconnect_grace_rejects_token_mismatch_and_preserves_pending_state() {
+    // 切断 → 不正 token を持つ LOGIN は `LOGIN:incorrect reconnect_token_mismatch` で
+    // 拒否され、grace registry エントリは温存される。後続で正しい token を持って
+    // 再接続すれば対局を再開できる。
+    run_local(|| async {
+        let (addr, topdir, _state) =
+            spawn_server_with_reconnect_grace("reconnect_mismatch", Duration::from_secs(5)).await;
+        let (mut ra, mut wa) = connect(addr).await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (game_id, alice_token) =
+            establish_match_and_capture_alice_token(&mut ra, &mut wa, &mut rb, &mut wb).await;
+        drop(ra);
+        drop(wa);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // 1. 不正 token (alice_token と 1 文字違い) で LOGIN reconnect。
+        let bad_token = {
+            let mut t = alice_token.clone();
+            // hex 1 文字を確実に別の値へ書き換える。
+            let last = t.pop().unwrap();
+            let replacement = if last == 'a' { 'b' } else { 'a' };
+            t.push(replacement);
+            t
+        };
+        let (mut rx, mut wx) = connect(addr).await;
+        send_line(&mut wx, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{bad_token}"))
+            .await;
+        // 拒否経路: `LOGIN:<handle> OK` は送出されず、即 `LOGIN:incorrect reconnect_rejected`
+        // のみ届く (拒否理由は side-channel 防止のため wire 上は統一)。
+        assert_eq!(read_line_raw(&mut rx).await.unwrap(), "LOGIN:incorrect reconnect_rejected");
+        drop(rx);
+        drop(wx);
+
+        // 2. registry が消えていないことを正しい token での再接続成功で確認する。
+        let (mut ra2, mut wa2) = connect(addr).await;
+        send_line(&mut wa2, &format!("LOGIN alice+g1+black pw reconnect:{game_id}+{alice_token}"))
+            .await;
+        assert_eq!(read_line_raw(&mut ra2).await.unwrap(), "LOGIN:alice OK");
+        let _ = drain_game_summary(&mut ra2).await;
+        // Reconnect_State block をスキップして対局継続できることを確認。
+        let begin = read_line_raw(&mut ra2).await.unwrap();
+        assert_eq!(begin, "BEGIN Reconnect_State");
+        let _ = read_until(&mut ra2, "END Reconnect_State").await;
+
+        // 後始末: bob 投了で alice (黒) が勝者として `#WIN` を受け取る。
+        send_line(&mut wb, "%TORYO").await;
+        let _ = read_until(&mut ra2, "#WIN").await;
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+#[test]
+fn reconnect_grace_falls_back_to_abnormal_when_deadline_expires() {
+    // grace 期間内に再接続が来ない場合、deadline 超過で `force_abnormal` に進み、
+    // 残留側に `#ABNORMAL` 経由の終局通知が届く。
+    run_local(|| async {
+        // grace を短く (300ms) してテスト時間を抑える。
+        let (addr, topdir, _state) =
+            spawn_server_with_reconnect_grace("reconnect_expired", Duration::from_millis(300))
+                .await;
+        let (mut ra, mut wa) = connect(addr).await;
+        let (mut rb, mut wb) = connect(addr).await;
+        let (_game_id, _alice_token) =
+            establish_match_and_capture_alice_token(&mut ra, &mut wa, &mut rb, &mut wb).await;
+
+        // alice を切断したまま放置。
+        drop(ra);
+        drop(wa);
+
+        // bob 側で `#ABNORMAL` を含む終局シグナルが grace 超過後に届く。
+        let abnormal = read_until(&mut rb, "#ABNORMAL").await;
+        assert!(abnormal.iter().any(|l| l == "#ABNORMAL"));
+
+        drop(rb);
+        drop(wb);
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
