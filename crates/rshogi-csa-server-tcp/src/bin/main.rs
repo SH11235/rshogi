@@ -103,8 +103,8 @@ struct Cli {
     agree_timeout_sec: u64,
     /// `%%SETBUOY` / `%%DELETEBUOY` を許可する admin ハンドル。複数指定可 (例:
     /// `--admin-handle alice --admin-handle bob`)。空の場合はブイ登録コマンドを
-    /// 全リクエストで `PERMISSION_DENIED` で拒否する (Codex review PR #470 3rd
-    /// round P2)。`%%GETBUOYCOUNT` は参照系なので権限不要で全ユーザー可。
+    /// 全リクエストで `PERMISSION_DENIED` で拒否する。`%%GETBUOYCOUNT` は参照系
+    /// なので権限不要で全ユーザー可。
     #[arg(long = "admin-handle", value_name = "HANDLE")]
     admin_handle: Vec<String>,
     /// Floodgate 運用機能の opt-in フラグ。Floodgate 系機能を本バイナリで

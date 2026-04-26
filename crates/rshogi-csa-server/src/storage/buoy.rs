@@ -13,7 +13,7 @@
 //!
 //! - `set` は原子的に上書きする (`.tmp` に書いてから `rename`)。tmp ファイル名には
 //!   PID + atomic counter を含めて、複数 `set` が同じ buoy に並列に書いても
-//!   互いの tmp を踏まない (Codex review PR #470 P3)。
+//!   互いの tmp を踏まない。
 //! - `delete` はファイル削除。ファイル未存在は no-op (`Ok(())`)。
 //! - `count` は JSON を読んで `remaining` を返す。ファイル未存在なら `Ok(None)`。
 //! - `initial_sfen` は任意。通常の `%%SETBUOY` では CSA 手列から導出した開始局面を
@@ -24,9 +24,8 @@
 //! `game_name` が `.` `/` `\` 等を含んでも異なるブイが衝突しないよう、
 //! **percent-encoding 風の可逆エンコーディング** (`encode_game_name`) を使う。
 //! 安全文字 (ASCII alphanumeric と `-` `_`) 以外は `%XX` 形式でエスケープする。
-//! これにより `a/b` / `a.b` / `a%b` が異なるファイル名に落ちる (Codex review
-//! PR #470 P2)。旧実装 (`/` `\` `.` `\0` を全て `_` に置換) では衝突リスクが
-//! あったため修正。
+//! これにより `a/b` / `a.b` / `a%b` が異なるファイル名に落ちる。`/` `\` `.`
+//! `\0` を全て `_` に置換するだけだと衝突リスクがある。
 //!
 //! `tokio-transport` フィーチャ下でのみコンパイルされる (`tokio::fs` が必要)。
 
@@ -96,17 +95,16 @@ impl FileBuoyStorage {
     /// `game_name` は `encode_game_name` で percent-encoding 風の可逆エンコーディング
     /// を施す。ASCII alphanumeric と `-` / `_` はそのまま、それ以外は `%XX` 形式
     /// (大文字 hex) でエスケープ。これにより `a/b` と `a.b` と `a_b` が異なる
-    /// ファイル名に落ち、意図せぬ上書きを防ぐ (Codex review PR #470 P2)。
+    /// ファイル名に落ち、意図せぬ上書きを防ぐ。
     fn path_for(&self, game_name: &GameName) -> PathBuf {
         let encoded = encode_game_name(game_name.as_str());
         self.topdir.join("buoys").join(format!("{encoded}.json"))
     }
 
     /// 同一 buoy への並列 `set` が tmp ファイル名で衝突しないよう、毎回
-    /// PID + atomic counter で一意な suffix を付けた tmp パスを作る
-    /// (Codex review PR #470 P3)。rename 済みの tmp は残らず、rename 失敗時も
-    /// ファイルシステム側 cleanup に任せる (tmp ファイルは少量・短命なので
-    /// 削除漏れの運用影響は限定的)。
+    /// PID + atomic counter で一意な suffix を付けた tmp パスを作る。
+    /// rename 済みの tmp は残らず、rename 失敗時もファイルシステム側 cleanup に
+    /// 任せる (tmp ファイルは少量・短命なので削除漏れの運用影響は限定的)。
     fn tmp_path_for(&self, final_path: &std::path::Path) -> PathBuf {
         let pid = std::process::id();
         let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -138,7 +136,7 @@ impl FileBuoyStorage {
         // .tmp → rename で原子的書き換え。中断時に半端な JSON が残らないようにする。
         // tmp 名は `<stem>.<pid>.<counter>.tmp` で一意化する。並列 `set` が同じ
         // buoy に走っても互いの tmp を踏まず、rename は last-writer-wins で
-        // 確定する (Codex review PR #470 P3)。
+        // 確定する。
         let tmp = self.tmp_path_for(&path);
         let mut f = fs::File::create(&tmp).await.map_err(to_storage_err)?;
         f.write_all(&bytes).await.map_err(to_storage_err)?;
@@ -342,7 +340,7 @@ mod tests {
     async fn encode_path_for_special_characters_escapes_to_percent_hex() {
         // `..` / `/` を含む game_name は percent-encoding で可逆にエスケープされる。
         // これにより topdir 外への escape (`../../etc/passwd` 等) を防ぎつつ、
-        // 異なる game_name が衝突しない (Codex review PR #470 P2)。
+        // 異なる game_name が衝突しない。
         let topdir = unique_topdir("encode_escape");
         let storage = FileBuoyStorage::new(topdir.clone());
         let gn = GameName::new("../foo/bar");
@@ -357,7 +355,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn encoded_game_names_do_not_collide_across_special_chars() {
         // `a.b` / `a/b` / `a_b` / `a-b` が異なるファイル名に落ちることを確認する
-        // (Codex review PR #470 P2 の回帰防止: 旧実装は全て `a_b.json` に潰れた)。
+        // （`/` `\` `.` `\0` を全て `_` に置換するエンコーディングだと衝突する）。
         let topdir = unique_topdir("encode_distinct");
         let storage = FileBuoyStorage::new(topdir.clone());
         // 各 game_name を別の remaining で登録し、各 count が独立して観測できることを確認する。
@@ -385,11 +383,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn set_uses_unique_tmp_path_per_invocation() {
-        // Codex review PR #470 P3 の回帰防止: tmp ファイル名が PID + counter で
-        // 一意化されるため、並列 `set` が共通の `.tmp` を踏まない。同一 buoy に
-        // 対して 2 回続けて `set` を走らせ、どちらも成功することで last-writer-wins
-        // が壊れないことを確認する (旧実装は tmp を共有していて 2 回目が部分的に
-        // 壊れるリスクがあった)。
+        // tmp ファイル名が PID + counter で一意化されるため、並列 `set` が共通の
+        // `.tmp` を踏まない。同一 buoy に対して 2 回続けて `set` を走らせ、どちらも
+        // 成功することで last-writer-wins が壊れないことを確認する（tmp を共有
+        // するエンコーディングだと 2 回目が部分的に壊れるリスクがある）。
         let topdir = unique_topdir("tmp_unique");
         let storage = FileBuoyStorage::new(topdir.clone());
         let gn = GameName::new("sequential");

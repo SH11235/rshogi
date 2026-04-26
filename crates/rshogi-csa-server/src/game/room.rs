@@ -169,9 +169,8 @@ impl GameRoom {
     ///   パスは内部で `expect` する。
     /// - `initial_sfen = Some(sfen)`: 渡された SFEN で `Position::set_sfen`。
     ///   SFEN 不正時は `Err(ServerError::Protocol(Malformed))` を返し、
-    ///   呼び出し側が適切に拒否 / ログ出力できるようにする (Codex review
-    ///   PR #470 4th round P2)。プロセス全体 / DO を panic で落とさないため
-    ///   の設計。
+    ///   呼び出し側が適切に拒否 / ログ出力できるようにする。プロセス全体 / DO を
+    ///   panic で落とさないための設計。
     ///
     /// Game_Summary の `position_section` / `to_move` と棋譜の `initial_position`
     /// は同一 SFEN から派生させる契約なので、呼び出し側は同じ `initial_sfen` を

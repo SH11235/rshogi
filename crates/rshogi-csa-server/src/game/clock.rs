@@ -233,9 +233,9 @@ const MINUTE_GRAIN_MS: i64 = 60 * 1_000;
 ///
 /// FIDE 標準 (init=total / 各手 post-increment) とも、完全な pre-increment
 /// (init=total / 各手 pre-increment) とも異なる独特の計算だが、既存 client /
-/// 棋譜ツールとの interop を優先してサーバもこれに合わせる (Codex review
-/// PR #468 4th round P1)。初手に `total + increment` 秒の予算があり、以後
-/// 各手ごとに (残 - elapsed + inc) で slot が更新される。
+/// 棋譜ツールとの interop を優先してサーバもこれに合わせる。初手に
+/// `total + increment` 秒の予算があり、以後各手ごとに (残 - elapsed + inc) で
+/// slot が更新される。
 ///
 /// - `turn_budget_ms` は「現在の slot (既に +increment 済み) + 秒 grain」を返す。
 #[derive(Debug, Clone)]
@@ -288,7 +288,7 @@ impl TimeClock for FischerClock {
         // `total + increment` 秒の予算を検査できる。2 手目以降は前手の完了時に
         // increment が加算されているため実質的に post-increment 挙動。
         // client は `black_time_ms = total + inc` + 毎手 `slot -= e; slot += inc`
-        // で動くので、server もこれに一致させる (Codex review PR #468 4th round P1)。
+        // で動くので、server もこれに一致させる。
         let elapsed_sec_ms = (elapsed_ms / 1000) as i64 * 1000;
         let increment = self.increment_ms();
         let slot = self.slot_mut(color);
@@ -415,10 +415,9 @@ impl TimeClock for StopWatchClock {
         // (`crates/tools/src/csa_client/session.rs`) はその値を literal ms として
         // 残時間から減算する。一方 server 側の `consume` は分単位で切り捨てる
         // ため、「client のローカル remaining」と「server の実 slot」は 1 手に
-        // 最大 59 秒ずれ得る (Codex review PR #468 4th round P1 指摘の client 側
-        // 実装の limitation)。engine の時間管理精度を保つには、client 側も
-        // StopWatch 相当の分単位切り捨てを行うか、T<sec> を分単位で emit する
-        // 必要がある。どちらも別 PR で対応。
+        // 最大 59 秒ずれ得る（client 側実装の limitation）。engine の時間管理
+        // 精度を保つには、client 側も StopWatch 相当の分単位切り捨てを行うか、
+        // T<sec> を分単位で emit する必要がある。
         //
         // 現状の妥協: server は CSA 仕様に準拠して `Time_Unit:1min` を出し、
         // client-side の取り違えは後続タスクで修正する (サーバ側を変えると
@@ -545,7 +544,7 @@ mod tests {
     #[test]
     fn fischer_matches_csa_client_accounting() {
         // CSA client は init `slot = total + inc` + 毎手 `slot -= e; slot += inc`
-        // で動くので、server もこれに一致させる (Codex review PR #468 4th round P1)。
+        // で動くので、server もこれに一致させる。
         //
         // 初期 60 秒、増分 5 秒。init で slot=65。move 1 で 10 秒使うと:
         //   slot = 65 - 10 = 55, + inc = 60
@@ -561,9 +560,9 @@ mod tests {
 
     #[test]
     fn fischer_accepts_move_up_to_total_plus_increment_on_move_one() {
-        // Codex review (PR #468 3rd/4th round) 回帰防止: CSA client は move 1 で
-        // `total + increment` の budget を engine に配る。server もそれを受理する。
-        // 例: total=60, inc=5 → move 1 は 65 秒まで受理、66 秒で TimeUp。
+        // CSA client は move 1 で `total + increment` の budget を engine に配る
+        // ので server もそれを受理する。例: total=60, inc=5 → move 1 は 65 秒まで
+        // 受理、66 秒で TimeUp。
         let mut c = FischerClock::new(60, 5);
         assert_eq!(c.consume(Color::Black, 65_000), ClockResult::Continue);
         assert_eq!(c.remaining_main_ms(Color::Black), 5_000);
@@ -658,10 +657,9 @@ mod tests {
     #[test]
     fn stopwatch_format_summary_uses_minute_unit() {
         // StopWatch は consume で分単位切り捨てを行うため、Game_Summary も
-        // `Time_Unit:1min` で分単位宣言する (Codex review PR #468 4th round P1
-        // の指摘通り)。Round 3 で一時的に秒表記にしたが、`consume` の分切り捨てと
-        // `T<sec>` broadcast の秒単位が乖離して client 側の remaining が server 側
-        // と食い違うため revert。
+        // `Time_Unit:1min` で分単位宣言する。秒表記にすると `consume` の分切り
+        // 捨てと `T<sec>` broadcast の秒単位が乖離して、client 側の remaining
+        // が server 側と食い違う。
         let c = StopWatchClock::new(15, 1);
         let s = c.format_summary();
         assert!(s.contains("BEGIN Time"));
@@ -677,7 +675,7 @@ mod tests {
         // 本体 15 分 + 秒読み 1 分 + minute grain (59_999ms) = 16 分 + 59_999ms。
         // `consume` が分単位に切り捨てる挙動と scheduler deadline を整合させるため、
         // 次の分境界の直前まで delay を伸ばす。これが無いと 1 分 byoyomi の局面で
-        // scheduler が最大 59 秒早く TimeUp を発火させてしまう (Codex review P1)。
+        // scheduler が最大 59 秒早く TimeUp を発火させてしまう。
         let c = StopWatchClock::new(15, 1);
         assert_eq!(c.turn_budget_ms(Color::Black), 16 * 60_000 + 59_999);
     }

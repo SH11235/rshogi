@@ -357,7 +357,7 @@ impl GameRoom {
         // 双方の LOGIN は既に OK を返しているので、予約で失敗したまま早期
         // return するとスロットが永久に詰まる。Exhausted に加え、CAS リトライ
         // 上限到達などの Err も pending match abort 経路に落として部屋を
-        // 再利用可能にする (codex レビュー PR #474 2nd round P2)。
+        // 再利用可能にする。
         let reservation = match self.reserve_initial_sfen_from_buoy(&GameName::new(game_name)).await
         {
             Ok(r) => r,
@@ -414,8 +414,7 @@ impl GameRoom {
         };
         // `CoreRoom::new` は initial_sfen が不正な場合に Err を返す。Workers DO は
         // 永続化済み config から cold start 復元することもあるため、Err を panic で
-        // 落とさず Error::RustError で Runtime に伝搬する (Codex review PR #470
-        // 4th round P2)。
+        // 落とさず Error::RustError で Runtime に伝搬する。
         let core = CoreRoom::new(
             GameRoomConfig {
                 game_id: GameId::new(cfg.game_id.clone()),
@@ -1007,8 +1006,7 @@ impl GameRoom {
     /// 接続を閉じてスロットを空にする。
     ///
     /// ここでクリアしないと、スロットは Match 状態のまま残ってしまい 2 人目に
-    /// Game_Summary もエラーも届かないため、部屋が永久に詰まる (codex review
-    /// PR #474 P2)。
+    /// Game_Summary もエラーも届かないため、部屋が永久に詰まる。
     async fn abort_pending_match_with_error(&self, error_line: &str) -> Result<()> {
         for ws in self.state.get_websockets() {
             let att: Option<WsAttachment> = ws.deserialize_attachment().ok().flatten();

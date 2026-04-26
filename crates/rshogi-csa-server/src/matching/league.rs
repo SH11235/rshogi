@@ -15,8 +15,8 @@ use crate::types::{Color, GameId, GameName, PlayerName};
 /// を判定するために使う。同名の旧セッションを `EvictOld` で追い出す際は、新 LOGIN
 /// で世代が更新されるため、旧タスクは [`League::logout_if_generation`] で
 /// 「自分の世代が現在のものと一致するか」を確認してから logout を実行する。
-/// これにより、旧タスクの後始末が新セッションを誤って logout してしまう競合
-/// (codex P1) を防ぐ。
+/// これにより、旧タスクの終了処理が後から走って新セッションを誤って logout して
+/// しまう race を防ぐ。
 ///
 /// 別途、旧 `run_waiter` の `select!` を起こして即終了させるための cancel 信号は、
 /// TCP frontend 側で `Arc<tokio::sync::Notify>` をプレイヤ名で持つ別マップで管理する
@@ -119,7 +119,8 @@ struct PlayerRecord {
     x1: bool,
     /// 現在のセッションを識別する世代番号。LOGIN ごとに発行され、旧タスクが
     /// `Arc<tokio::sync::Notify>` 等で起こされて後片付けに入ったときに、自分の
-    /// 世代と League の最新世代を比較するために使う (codex P1 対策)。
+    /// 世代と League の最新世代を比較する。同名で再 LOGIN 済みのときは世代が
+    /// 一致しないため、旧タスクの logout が新セッションを巻き込まない。
     generation: SessionGeneration,
 }
 
@@ -178,8 +179,8 @@ impl League {
     ///
     /// 旧 `run_waiter` が `WaiterOutcome::Aborted` 等の終了経路で後始末を走らせた
     /// ときに、既に新 LOGIN が同名で着席している場合に新セッションまで巻き込んで
-    /// logout してしまう競合 (codex P1) を防ぐ。世代が一致して logout した場合に
-    /// `true`、それ以外（別世代に置換済 or 未ログイン）は `false` を返す。
+    /// logout してしまう競合を防ぐ。世代が一致して logout した場合に `true`、
+    /// それ以外（別世代に置換済 or 未ログイン）は `false` を返す。
     pub fn logout_if_generation(
         &mut self,
         name: &PlayerName,
@@ -453,8 +454,8 @@ mod tests {
 
     #[test]
     fn logout_if_generation_protects_new_session_after_evict() {
-        // codex P1: 旧 run_waiter が後始末で logout したときに、既に新 LOGIN が
-        // 同名で着席していれば新セッションを巻き込んではいけない。
+        // 旧 run_waiter が終了経路で logout を走らせたときに、既に新 LOGIN が
+        // 同名で着席していれば新セッションを巻き込まずに no-op になることを固定する。
         let mut l = League::new();
         let LoginResult::Ok {
             generation: old, ..

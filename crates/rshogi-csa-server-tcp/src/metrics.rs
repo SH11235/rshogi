@@ -64,7 +64,7 @@ pub const MOVE_LATENCY_SECONDS: &str = "csa_move_latency_seconds";
 
 /// `csa_move_latency_seconds` の histogram bucket 境界。1ms / 5ms / 10ms / 50ms
 /// / 100ms / 500ms / 1s / 5s の 8 区間で運用上の P50 / P95 / P99 SLO を網羅する。
-/// 実運用レイテンシ分布が分かったタイミングで TCP 負荷試験 (task 20.1) で再調整する。
+/// 実運用レイテンシ分布が分かったタイミングで TCP 負荷試験のもとで再調整する。
 pub const MOVE_LATENCY_BUCKETS_SECONDS: &[f64] = &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0];
 
 /// `metrics-exporter-prometheus` の Prometheus exporter を install し、

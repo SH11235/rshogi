@@ -33,9 +33,8 @@
 //! ## クリーンルーム方針
 //!
 //! Ruby shogi-server / mk_rate / mk_html のソースは参照せず、上記の公開ドキュメント
-//! にある形式情報のみから実装する（[Requirement 14.1] / `feedback_no_phase_and_session_refs.md`
-//! の OSS 互換ガイドライン）。CI も外部 Ruby ランタイムや shogi-server リポジトリを
-//! 引かない（[Task 21.1] 参照）。
+//! にある形式情報のみから実装する（OSS 互換ガイドラインに準拠）。CI も外部 Ruby
+//! ランタイムや shogi-server リポジトリを引かない。
 //!
 //! ## レート値の責務分担
 //!

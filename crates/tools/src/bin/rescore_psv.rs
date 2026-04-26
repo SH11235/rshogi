@@ -431,9 +431,9 @@ fn onnx_marker_decide(
         //   3. 現 expand 出力 truncate
         //   4. marker 削除（最後）
         // この順なら、どの段階で失敗しても次回実行時に marker 不一致判定が
-        // 働き、続きからやり直せる。旧設計の "truncate してから remove_file"
-        // だと、後段失敗時に truncate 済み出力 + 古い marker が残ってデータ
-        // 損失になり得たため修正 (PR #463 review P1)。
+        // 働き、続きからやり直せる。"truncate してから remove_file" の順だと、
+        // 後段失敗時に truncate 済み出力 + 古い marker が残ってデータ損失に
+        // なり得る。
 
         // 1. 旧 expand artifact 削除
         if let Some(old) = &marker.fingerprint.expand_output_path {
@@ -2201,7 +2201,7 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
 
 /// マーカーを atomic に書き出す（tmp に書く → sync_all → rename）。
 /// 他の出力パスと同様、tmp / final が symlink の場合は拒否する
-/// （symlink を follow して任意ファイルを上書きするのを防ぐ、PR #463 review）。
+/// （symlink を follow して任意ファイルを上書きするのを防ぐ）。
 #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
 fn write_marker_atomic(rescore_output: &std::path::Path, marker: &DoneMarker) -> Result<()> {
     let final_path = marker_path_for(rescore_output);
@@ -2706,7 +2706,7 @@ where
         // IoBinding で推論（Python の run_with_iobinding に対応）
         // session.run() より ORT 内部のメモリ管理が効率的
         //
-        // 最適化の検証ログ (PR #451):
+        // 最適化検証で得られた知見:
         // - create_binding() のループ外化（再利用）は逆効果（4.6〜36% 悪化）。
         //   rebind 時に ORT 内部で前回バインドのクリーンアップコストが発生するため、
         //   毎回新規作成の方が速い。
