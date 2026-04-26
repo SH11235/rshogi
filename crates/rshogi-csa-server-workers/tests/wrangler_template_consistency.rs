@@ -128,20 +128,20 @@ fn wrangler_template_do_bindings_match_config_keys() {
     assert_bidirectional("do_bindings", ConfigKeys::ALL_DO_BINDINGS, &TEMPLATE.do_bindings);
 }
 
-/// `wrangler.toml.example` の `[vars]` テーブルキーが、`ConfigKeys::PRODUCTION_VARS_KEYS`
+/// `wrangler.toml.example` の `[vars]` テーブルキーが、`ConfigKeys::SHARED_PUBLIC_VARS_KEYS`
 /// + `LOCAL_DEV_ONLY_VARS_KEYS` の和集合と双方向に一致することを検証する。
 ///
 /// **template (`wrangler.toml.example`)** は local dev / 新規メンバー向け。
 /// `wrangler dev` を friction なく動かすため、production では secret 化する値も
-/// placeholder として `[vars]` に書く。production の `wrangler.production.toml` は
-/// 別 test (`wrangler_production_toml_consistency.rs`) が `PRODUCTION_VARS_KEYS`
+/// placeholder として `[vars]` に書く。各 deploy 環境の `wrangler.<env>.toml` は
+/// 別 test (`wrangler_environment_toml_consistency.rs`) が `SHARED_PUBLIC_VARS_KEYS`
 /// 単独と整合することを検証する。
 ///
 /// `[vars]` 値は運用側で書き換える前提なので空文字や placeholder で構わない。
 /// 本テストは「キーの集合が一致すること」のみを検証し、値の内容には関与しない。
 #[test]
 fn wrangler_template_vars_keys_match_config_keys() {
-    let expected: Vec<&'static str> = ConfigKeys::PRODUCTION_VARS_KEYS
+    let expected: Vec<&'static str> = ConfigKeys::SHARED_PUBLIC_VARS_KEYS
         .iter()
         .chain(ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS.iter())
         .copied()
