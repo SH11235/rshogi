@@ -54,8 +54,8 @@ binding = "KIFU_BUCKET"
 bucket_name = "rshogi-csa-kifu-prod"
 
 # --- R2: Floodgate 履歴保存 ---
-# 1 対局 = 1 オブジェクト形式の Floodgate 履歴。task 15.7 で `game_room.rs` から
-# `R2FloodgateHistoryStorage::append` の配線が入る予定。
+# 1 対局 = 1 オブジェクト形式の Floodgate 履歴。`game_room.rs` 終局経路から
+# `R2FloodgateHistoryStorage::append` で書き出す（配線は別 PR で導入予定）。
 #   wrangler r2 bucket create rshogi-csa-floodgate-history-prod
 [[r2_buckets]]
 binding = "FLOODGATE_HISTORY_BUCKET"

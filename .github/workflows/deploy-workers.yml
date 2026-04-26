@@ -95,7 +95,7 @@ jobs:
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
-          # `rust-ci.yml` の `wasm-build` job (task 23.1) と同じ wasm32 sysroot キャッシュ
+          # `rust-ci.yml` の `wasm-build` job と同じ wasm32 sysroot キャッシュ
           # namespace を共有する。CI 全体で wasm32 ビルドの cold start 時間を短縮できる。
           shared-key: wasm32
       - name: Verify wrangler.production.toml exists

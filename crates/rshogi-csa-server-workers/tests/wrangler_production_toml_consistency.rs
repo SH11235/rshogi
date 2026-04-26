@@ -12,8 +12,9 @@
 //!
 //! 過去事例の防止対象:
 //! - PR #500 で `R2FloodgateHistoryStorage` を新設したが `wrangler.toml.example`
-//!   への binding 追加が漏れていた → template 側は task 23.2 で固定化
-//! - production toml の整合性は task 23.6 (本テスト) で固定
+//!   への binding 追加が漏れていた → template 側は PR #505 で固定化
+//!   (`tests/wrangler_template_consistency.rs`)
+//! - production toml の整合性は本テストで固定
 //!
 //! `wrangler.toml.example` (local dev template) は別テスト
 //! (`wrangler_template_consistency.rs`) が `PRODUCTION_VARS_KEYS` ∪

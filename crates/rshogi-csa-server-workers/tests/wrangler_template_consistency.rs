@@ -9,7 +9,7 @@
 //!
 //! 過去事例: PR #500 で `R2FloodgateHistoryStorage` を新設し
 //! `ConfigKeys::FLOODGATE_HISTORY_BUCKET_BINDING` を追加したが、対応する
-//! `[[r2_buckets]]` エントリの template への追加が漏れていた（task 23.2 で修正）。
+//! `[[r2_buckets]]` エントリの template への追加が漏れていた（PR #505 で修正）。
 //!
 //! 本テストは `wrangler.toml.example` を TOML として parse し、`ConfigKeys` の
 //! 網羅配列 (`ALL_R2_BINDINGS` / `ALL_DO_BINDINGS` / `ALL_VARS_KEYS`) と
