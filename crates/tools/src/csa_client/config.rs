@@ -23,12 +23,20 @@ pub struct CsaClientConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
+    /// 接続先。`host:port` 直書き、`tcp://host`、`ws://host[:port]/ws/<room>`、
+    /// `wss://host[:port]/ws/<room>` のいずれか。`ws://` / `wss://` の場合は
+    /// `port` 設定は無視される（URL に含めること）。
     pub host: String,
     pub port: u16,
     pub id: String,
     pub password: String,
     pub floodgate: bool,
     pub keepalive: KeepaliveConfig,
+    /// WebSocket Upgrade 時に送る `Origin` ヘッダ値。`None` のとき
+    /// `tungstenite` の既定値（URL から導出）に任せる。Cloudflare Workers の
+    /// `CORS_ORIGINS` allowlist 通過のため、運用時は明示する。
+    #[serde(default)]
+    pub ws_origin: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -40,6 +48,7 @@ impl Default for ServerConfig {
             password: String::new(),
             floodgate: true,
             keepalive: KeepaliveConfig::default(),
+            ws_origin: None,
         }
     }
 }
