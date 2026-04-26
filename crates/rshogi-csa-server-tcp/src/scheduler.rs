@@ -582,8 +582,8 @@ where
     // `league` ロックを保持したまま `session_cancellers` まで取りに行くことで、
     // 「logout で League が空く」 → 「同名で新規 LOGIN が cancellers に新 Arc を
     // 挿入」 → 「本ブロックの `cancellers.remove` が新トークンを誤って消す」
-    // race を閉じる（PR #495 review: P2-2）。ロック順序は `league → cancellers`
-    // で、LOGIN handler ・ drive_game epilogue と一貫させる。
+    // race を閉じる（Claude review PR #495 P2-2）。ロック順序は `league →
+    // cancellers` で、LOGIN handler ・ drive_game epilogue と一貫させる。
     let mut league = state.league.lock().await;
     league.logout(&black_player);
     league.logout(&white_player);

@@ -945,15 +945,21 @@ where
                         let mut opp_transport = opp_transport;
                         let _ = opp_transport.send_line(&err_line).await;
                         let _ = done_tx.send(());
-                        // 両者の League エントリを片付ける。自分は世代一致での
-                        // logout、相手は plain logout（相手の世代は本ハンドラから
-                        // は知れない／相手の `run_waiter` は WaiterOutcome::Completed
-                        // で logout しないため、ここで一括して片付ける）。
+                        // 両者の League エントリと `session_cancellers` を片付ける。
+                        // `league` ロックを保持したまま `cancellers.lock()` を取りに
+                        // 行き、「相手の logout 後に同名で新 LOGIN が成立して
+                        // cancellers に新トークンを挿入する」 → 「直後の
+                        // `cancellers.remove(opp)` が新トークンを誤削除する」race を
+                        // 閉じる（Claude review PR #495 P2-3）。ロック順序は LOGIN
+                        // handler ・ drive_game epilogue と同じ `league → cancellers`。
+                        // 自分は世代一致での logout、相手は plain logout（相手の世代は
+                        // 本ハンドラからは知れない／相手の `run_waiter` は
+                        // `WaiterOutcome::Completed` で logout しないため、ここで一括
+                        // して片付ける）。
                         let opp_player = PlayerName::new(opp_handle.as_str());
                         let mut league = state.league.lock().await;
                         league.logout_if_generation(&handle_player, session_generation);
                         league.logout(&opp_player);
-                        drop(league);
                         let mut cancellers = state.session_cancellers.lock().await;
                         if let Some(cur) = cancellers.get(&handle_player)
                             && Arc::ptr_eq(cur, &cancel)
@@ -1885,7 +1891,7 @@ where
     // `session_cancellers` まで取りに行くことで、「end_game + logout で League が
     // 空く」 → 「同名で新規 LOGIN が成功して cancellers に新 Arc を挿入」 →
     // 「本ブロックの `cancellers.remove` が新トークンを誤って消す」という race を
-    // 閉じる（PR #495 review: P2-1）。ロック順序は LOGIN handler と一致する
+    // 閉じる（Claude review PR #495 P2-1）。ロック順序は LOGIN handler と一致する
     // `league → cancellers`。
     {
         let mut league = state.league.lock().await;
