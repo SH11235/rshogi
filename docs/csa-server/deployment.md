@@ -207,16 +207,15 @@ Triggers → Routes] でも確認できる。
 CI 自動 deploy 前に、ローカルから 1 度手動で deploy して動作確認する。
 **この手順は最初の 1 度だけ**。以降は CI が自動で deploy する。
 
-> 🛑 **§3.2 以降に進む前に、§3.1 の値設定 PR を必ず merge しておく**こと。
-> 特に `CORS_ORIGINS` を空のまま deploy すると、`/health` は応答するものの
-> 全 WS Upgrade が 403 で拒否される（client が一切繋がらない状態）に陥り、
-> 運用者を混乱させる。値を埋めた PR を main に通してから §3.2 の手動 deploy に
-> 進むこと。
+> ⚠️ `wrangler.production.toml` の `CORS_ORIGINS` が空のまま deploy すると
+> `/health` は応答するが全 WS Upgrade が 403 で拒否される（client が
+> 一切繋がらない状態）。§3.1 の値設定が反映済みであることを前提に §3.2
+> 以降を実行する。
 
 ### 3.1 wrangler.production.toml の値を確定する
 
-`crates/rshogi-csa-server-workers/wrangler.production.toml` を開き、本番値に
-編集する PR を作って main に merge する:
+`crates/rshogi-csa-server-workers/wrangler.production.toml` の以下が本番値で
+あることを確認する（未設定なら通常の commit / merge 経路で更新する）:
 
 - `[[r2_buckets]] bucket_name` が §2.1 で作成した bucket 名と一致しているか
 - `[vars] CORS_ORIGINS` に本番 client の Origin（例:
@@ -368,10 +367,10 @@ vp exec wrangler rollback <version-id> --config wrangler.production.toml
 
 ### 5.3 Rollback 後の repo state 同期
 
-`wrangler rollback` は Cloudflare 側だけを巻き戻す。リポジトリの code は
-そのまま。**rollback で対応した不具合の本修正 PR を必ず追って main に出し、
-通常 deploy で前進する**。rollback したまま放置すると次の自動 deploy で
-壊れたコードが再度 apply される。
+`wrangler rollback` は Cloudflare 側のみを巻き戻し、リポジトリの code は
+そのまま。rollback したまま放置すると次の自動 deploy で同じ壊れたコードが
+再度 apply されるため、rollback で対応した不具合は通常 flow（修正 commit
+→ main）で前進させる必要がある。
 
 ### 5.4 自動 deploy job が途中で失敗したとき
 
@@ -398,10 +397,10 @@ CI 上の deploy job が失敗 (`wrangler-action` が non-zero) した場合、C
    - 直前の安定 version に戻すなら §5.1（`vp exec wrangler rollback --config ...`）
    - 特定の安定 version に戻すなら §5.2（`vp exec wrangler deployments list` で ID を
      確認して `vp exec wrangler rollback <version-id> --config ...`）
-   - rollback 後は §5.3 の通り、修正を main に戻す PR を必ず追って出す
+   - rollback 後は §5.3 の通り、修正を通常 flow で main に反映する
 
-4. **修正 PR or 同 commit の workflow 再実行**
-   - 設定値の問題 (token / secrets / toml) なら修正 PR を main に出して通常 flow
+4. **修正 commit or 同 commit の workflow 再実行**
+   - 設定値の問題 (token / secrets / toml) は修正 commit を main に通して通常 flow
    - 一過性 (network / Cloudflare 側の障害) なら `gh workflow run deploy-workers.yml --ref main`
      で同 commit の deploy を再試行
 
