@@ -896,18 +896,23 @@ where
             return Ok(());
         }
     }
-    // LOGIN 成功応答: shogi-server 互換の `LOGIN:<handle> OK`。
-    transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
-
     // 4.5. 再接続要求の経路分岐。LOGIN 行の 3 つ目トークンが `reconnect:<game_id>+<token>`
     //      で来た場合は新規対局参加 (League 登録 / 待機プール) ではなく、grace 中の
     //      該当対局へ「同一対局者として再参加」する経路へ。`reconnect_pending` 検索
     //      → handle / token 照合 → game loop に新 transport を handoff。失敗時は
     //      `LOGIN:incorrect <reason>` で拒否し、grace 中の対局状態と registry エントリ
     //      は一切変更しない (拒否は元の対局者による再試行を妨げないため)。
+    //
+    //      `LOGIN:<handle> OK` 応答は `handle_reconnect_request` 内で「成功確定後」
+    //      にのみ送出する。ここで先行送信すると、拒否ケースで `OK` の直後に
+    //      `LOGIN:incorrect ...` が続く二重応答になる。
     if let Some(req) = reconnect {
         return handle_reconnect_request(&state, transport, &handle_player, color, req).await;
     }
+
+    // LOGIN 成功応答: shogi-server 互換の `LOGIN:<handle> OK`。新規対局参加経路のみ
+    // ここで送出する (再接続経路は上の分岐で先に return している)。
+    transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
 
     // 5. League に登録して GameWaiting に遷移する。x1 フラグはプロトコル拡張
     //    「このクライアントは `%%` 系コマンドも解釈できる」ことを示す属性で、
@@ -2655,30 +2660,57 @@ where
         return Ok(());
     }
 
+    // 順序が重要: クライアントへ何かを送る前に `reconnect_tx` の sender を `take()`
+    // して送信権を確保する。ここで失敗 (重複再接続) なら resume メッセージを一切
+    // 送らずに `LOGIN:incorrect reconnect_already_resumed` で拒否する (クライアント
+    // が「再接続成功した」と誤認するのを防ぐ)。lock を await を跨いで保持しないため
+    // ブロックで囲む。
+    let sender = {
+        let mut tx_slot = pending.reconnect_tx.lock().await;
+        let Some(sender) = tx_slot.take() else {
+            let _ = transport
+                .send_line(&CsaLine::new("LOGIN:incorrect reconnect_already_resumed"))
+                .await;
+            return Ok(());
+        };
+        sender
+    };
+
+    // 成功確定。LOGIN OK 応答 → 状態再送 → transport handoff の順で進める。
+    transport
+        .send_line(&CsaLine::new(format!("LOGIN:{} OK", handle_player.as_str())))
+        .await?;
     let resume_message =
         build_resume_message(&pending.game_summary_for_disconnected, &pending.snapshot);
-    send_multiline(&mut transport, &resume_message).await?;
-
-    let mut tx_slot = pending.reconnect_tx.lock().await;
-    let Some(sender) = tx_slot.take() else {
-        let _ = transport
-            .send_line(&CsaLine::new("LOGIN:incorrect reconnect_already_resumed"))
-            .await;
-        return Ok(());
-    };
-    if sender.send(transport).is_err() {
-        // game loop 側が既に Aborted で終了 (deadline 超過直後の race など)。
-        // registry の片付けは game loop の終了処理が済ませている想定。
-        tracing::warn!(
-            game_id = %req.game_id,
-            "reconnect transport handoff failed: game loop already aborted"
-        );
+    if let Err(e) = send_multiline(&mut transport, &resume_message).await {
+        // resume 送信に失敗。game loop は依然 grace 待ちなので、sender を戻して
+        // 別の正当な再接続要求が引き続き受理可能な状態に保つ。
+        let mut tx_slot = pending.reconnect_tx.lock().await;
+        if tx_slot.is_none() {
+            *tx_slot = Some(sender);
+        }
+        return Err(ServerError::Transport(e));
     }
-    tracing::info!(
-        game_id = %req.game_id,
-        login_handle = %handle_player.as_str(),
-        "reconnect succeeded; transport handed off to game loop"
-    );
+
+    match sender.send(transport) {
+        Ok(()) => {
+            tracing::info!(
+                game_id = %req.game_id,
+                login_handle = %handle_player.as_str(),
+                "reconnect succeeded; transport handed off to game loop"
+            );
+        }
+        Err(mut transport) => {
+            // game loop 側が既に Aborted で終了 (deadline 超過直後の race)。
+            // registry の片付けは game loop の終了処理が済ませている想定。
+            // クライアントには曖昧な切断ではなく明示的な拒否行を返してから close する。
+            tracing::warn!(
+                game_id = %req.game_id,
+                "reconnect transport handoff failed: game loop already aborted"
+            );
+            let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect reconnect_aborted")).await;
+        }
+    }
     Ok(())
 }
 
