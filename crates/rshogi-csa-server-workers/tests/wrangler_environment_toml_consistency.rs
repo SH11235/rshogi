@@ -3,7 +3,7 @@
 //!
 //! 各環境向け toml は CI 自動 deploy で `wrangler deploy --config <file>` が読む
 //! 設定ファイル。`ConfigKeys` 側で「全環境で `[vars]` で管理する公開値」と分類
-//! した定数（[`ConfigKeys::PRODUCTION_VARS_KEYS`]）が過不足なく宣言されている
+//! した定数（[`ConfigKeys::SHARED_PUBLIC_VARS_KEYS`]）が過不足なく宣言されている
 //! ことを各環境ファイルについて検証する。
 //!
 //! **本ファイルが各環境で扱わない値**（[`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`]、
@@ -12,7 +12,7 @@
 //! 含まれていないこと** も検証する。
 //!
 //! `wrangler.toml.example` (local dev template) は別テスト
-//! (`wrangler_template_consistency.rs`) が `PRODUCTION_VARS_KEYS` ∪
+//! (`wrangler_template_consistency.rs`) が `SHARED_PUBLIC_VARS_KEYS` ∪
 //! `LOCAL_DEV_ONLY_VARS_KEYS` の和集合と整合することを検証する。
 
 use std::sync::LazyLock;
@@ -123,15 +123,14 @@ fn assert_do_bindings_match(env: &EnvironmentBindings) {
     assert_bidirectional(env, "do_bindings", ConfigKeys::ALL_DO_BINDINGS, &env.do_bindings);
 }
 
-/// `ConfigKeys::PRODUCTION_VARS_KEYS` は名前に "PRODUCTION" を含むが、実態は
-/// **deploy 対象の全環境（production / staging）で共有する公開 `[vars]` キー集合**
-/// であり、production 専用ではない。staging も同じ集合を `[vars]` として
-/// 持つことを保証する。`ConfigKeys` 側の定数名そのものは別 PR で見直す。
+/// `ConfigKeys::SHARED_PUBLIC_VARS_KEYS` は **deploy 対象の全環境（production /
+/// staging）で共有する公開 `[vars]` キー集合**。production / staging いずれも
+/// 同じ集合を `[vars]` として持つことを保証する。
 fn assert_vars_keys_match_shared_public_vars(env: &EnvironmentBindings) {
     assert_bidirectional(
         env,
         "vars_keys (shared public vars across deployed environments)",
-        ConfigKeys::PRODUCTION_VARS_KEYS,
+        ConfigKeys::SHARED_PUBLIC_VARS_KEYS,
         &env.vars_keys,
     );
 }

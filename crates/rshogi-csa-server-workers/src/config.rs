@@ -15,10 +15,10 @@ use crate::origin;
 /// 個別 const と併せて、用途別の網羅配列のいずれか 1 つに **必ず追加** する:
 /// - R2 binding: [`ConfigKeys::ALL_R2_BINDINGS`]
 /// - DO binding: [`ConfigKeys::ALL_DO_BINDINGS`]
-/// - production / local dev 双方で `[vars]` 宣言する公開値:
-///   [`ConfigKeys::PRODUCTION_VARS_KEYS`]
-/// - production では Cloudflare secret 経由、local dev では `[vars]` で動かす値:
-///   [`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`]
+/// - deploy 対象の全環境（production / staging）で共有する公開 `[vars]` キー:
+///   [`ConfigKeys::SHARED_PUBLIC_VARS_KEYS`]
+/// - production / staging では Cloudflare secret 経由、local dev では `[vars]`
+///   で動かす値: [`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`]
 ///
 /// `tests/wrangler_template_consistency.rs` (template) と
 /// `tests/wrangler_environment_toml_consistency.rs` (production / staging) が
@@ -76,27 +76,27 @@ impl ConfigKeys {
     /// べき名前の網羅列挙。新規 DO binding 定数を追加したら必ず本配列にも追加する。
     pub const ALL_DO_BINDINGS: &'static [&'static str] = &[Self::GAME_ROOM_BINDING];
 
-    /// **production** の `wrangler.production.toml` `[vars]` テーブルで宣言される
-    /// べきキーの網羅列挙。本配列に含まれる定数は全環境で `[vars]` として平文管理
-    /// される（公開しても運用上問題ない値）。
+    /// **deploy 対象の全環境**（production / staging）の `wrangler.<env>.toml`
+    /// `[vars]` テーブルで宣言されるべきキーの網羅列挙。本配列に含まれる定数は
+    /// 全 deploy 環境で `[vars]` として平文管理される（公開しても運用上問題ない値）。
     ///
-    /// 本配列に含まれない定数（例: [`Self::ADMIN_HANDLE`]）は production では
-    /// `wrangler secret put` 経由で設定し、`wrangler.production.toml` には書かない。
+    /// 本配列に含まれない定数（例: [`Self::ADMIN_HANDLE`]）は production / staging
+    /// いずれも `wrangler secret put` 経由で設定し、`wrangler.<env>.toml` には書かない。
     /// ただし [`Self::LOCAL_DEV_ONLY_VARS_KEYS`] に含まれていれば
     /// `wrangler.toml.example` の `[vars]` には placeholder として残し、local dev
     /// 経路で `wrangler dev` を friction なく動かせるようにする。
     ///
     /// 新規定数追加時の振り分け基準:
-    /// - 公開しても問題ない値 → 本配列 `PRODUCTION_VARS_KEYS`
-    /// - production では secret 経由、local dev は var で動かしたい値 → 本配列に
-    ///   入れず [`Self::LOCAL_DEV_ONLY_VARS_KEYS`] に入れる
-    /// - production も local dev も完全に secret （local dev でも `.dev.vars`
-    ///   で都度設定）の場合 → どちらの配列にも入れない（現状そのケースなし）。
-    ///   このケースを追加する際は、`ConfigKeys` 全 const を走査して **どの
-    ///   `ALL_*` 配列にも属さない定数を網羅** するための第 3 の test (例:
-    ///   `wrangler_secret_only_keys_are_documented`) を新設し、漏れなく
+    /// - 公開しても問題ない値 → 本配列 `SHARED_PUBLIC_VARS_KEYS`
+    /// - production / staging では secret 経由、local dev は var で動かしたい値 →
+    ///   本配列に入れず [`Self::LOCAL_DEV_ONLY_VARS_KEYS`] に入れる
+    /// - production / staging / local dev のいずれも完全に secret （local dev
+    ///   でも `.dev.vars` で都度設定）の場合 → どちらの配列にも入れない（現状
+    ///   そのケースなし）。このケースを追加する際は、`ConfigKeys` 全 const を
+    ///   走査して **どの `ALL_*` 配列にも属さない定数を網羅** するための第 3 の
+    ///   test (例: `wrangler_secret_only_keys_are_documented`) を新設し、漏れなく
     ///   登録対象を gate する仕組みを併せて整える。
-    pub const PRODUCTION_VARS_KEYS: &'static [&'static str] = &[
+    pub const SHARED_PUBLIC_VARS_KEYS: &'static [&'static str] = &[
         Self::CORS_ORIGINS,
         Self::CLOCK_KIND,
         Self::TOTAL_TIME_SEC,
@@ -108,10 +108,10 @@ impl ConfigKeys {
     ];
 
     /// **local dev のみ** の `wrangler.toml.example` `[vars]` テーブルに追加で
-    /// 宣言されるキーの網羅列挙。production では Cloudflare secret 経由で設定する
-    /// ため `wrangler.production.toml` には書かない。
+    /// 宣言されるキーの網羅列挙。production / staging では Cloudflare secret 経由
+    /// で設定するため `wrangler.<env>.toml` には書かない。
     ///
-    /// `wrangler.toml.example` には `PRODUCTION_VARS_KEYS ∪ LOCAL_DEV_ONLY_VARS_KEYS`
+    /// `wrangler.toml.example` には `SHARED_PUBLIC_VARS_KEYS ∪ LOCAL_DEV_ONLY_VARS_KEYS`
     /// 全件を `[vars]` として記載することで、新規メンバーが `cp wrangler.toml.example
     /// wrangler.toml && wrangler dev` で即動作確認できる friction レス運用を維持する。
     pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] = &[Self::ADMIN_HANDLE];
