@@ -1313,7 +1313,7 @@ fn main() -> Result<()> {
             eprintln!(
                 "warning: --parallel-seeds の実効並列度が --concurrency より低い \
                  (concurrency={}, seeds={}, games_per_iteration={} → \
-                 per_seed={} (clamped to {}), 実効合計={}, 遊休={})。\
+                 per_seed={} (clamped to {}), 実効合計={}, 未使用={})。\
                  `--concurrency` を seeds × games_per_iteration の倍数に揃えると無駄なく回る。",
                 cli.concurrency,
                 seed_values.len(),
