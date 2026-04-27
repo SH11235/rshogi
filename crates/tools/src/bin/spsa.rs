@@ -906,6 +906,19 @@ fn mean_and_variance(values: &[f64]) -> (f64, f64) {
     (mean, variance)
 }
 
+/// `JoinHandle::join` の panic payload から人間可読なメッセージを抽出する。
+/// `panic!` に渡された値が `&'static str` か `String` の典型ケースのみ拾い、
+/// それ以外は型情報のみのプレースホルダを返す。
+fn panic_payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<panic payload of unknown type>".to_string()
+    }
+}
+
 fn seed_for_iteration(base_seed: u64, iteration_index: u32) -> u64 {
     let iter_term = (iteration_index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     base_seed ^ iter_term
@@ -1286,6 +1299,33 @@ fn main() -> Result<()> {
     }
     println!("using base seeds: {:?}", seed_values);
 
+    // --parallel-seeds 指定時、`cli.concurrency` が seed 数で割り切れない、または
+    // 1 seed あたりの worker 数が `games_per_iteration` を超える設定だと実効並列度が
+    // 指定値より下がる（`run_seed_games_parallel` 側で `worker_count.clamp(1, game_count)`
+    // の clamp が効くため）。vast.ai 等で `--concurrency` を盛ったときに気付けないと
+    // 単純に CPU が余るので、起動時に一度だけ警告して気付かせる。
+    if cli.parallel_seeds && seed_values.len() >= 2 {
+        let per_seed_concurrency = (cli.concurrency / seed_values.len()).max(1);
+        let games_per_iter = cli.games_per_iteration as usize;
+        let effective_per_seed = per_seed_concurrency.min(games_per_iter);
+        let effective_total = effective_per_seed * seed_values.len();
+        if effective_total < cli.concurrency {
+            eprintln!(
+                "warning: --parallel-seeds の実効並列度が --concurrency より低い \
+                 (concurrency={}, seeds={}, games_per_iteration={} → \
+                 per_seed={} (clamped to {}), 実効合計={}, 遊休={})。\
+                 `--concurrency` を seeds × games_per_iteration の倍数に揃えると無駄なく回る。",
+                cli.concurrency,
+                seed_values.len(),
+                games_per_iter,
+                per_seed_concurrency,
+                effective_per_seed,
+                effective_total,
+                cli.concurrency - effective_total,
+            );
+        }
+    }
+
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
     // parent dir を先に確保（init-from 指定有無に関わらず後段で write_params が
@@ -1606,8 +1646,11 @@ fn main() -> Result<()> {
                 handles
                     .into_iter()
                     .map(|(seed_idx, h)| {
-                        h.join().map_err(|_| {
-                            anyhow::anyhow!("seed worker panicked: seed_idx={seed_idx}")
+                        h.join().map_err(|payload| {
+                            anyhow::anyhow!(
+                                "seed worker panicked: seed_idx={seed_idx}: {}",
+                                panic_payload_to_string(&payload),
+                            )
                         })?
                     })
                     .collect()
