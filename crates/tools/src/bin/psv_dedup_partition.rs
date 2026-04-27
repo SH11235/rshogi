@@ -679,6 +679,7 @@ fn deduplicate_partitions(
     Ok((total_ref, total_seen, total_unique))
 }
 
+#[cfg(unix)]
 fn warn_fd_limit(num_partitions: usize) {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
@@ -700,6 +701,11 @@ fn warn_fd_limit(num_partitions: usize) {
         );
     }
 }
+
+// Windows 等の非 Unix 環境には `RLIMIT_NOFILE` 相当のソフトリミットが存在しないため、
+// fd 上限の事前警告は no-op とする（CRT の `_setmaxstdio` はストリーム上限で別概念）。
+#[cfg(not(unix))]
+fn warn_fd_limit(_: usize) {}
 
 /// temp_dir を掃除する（空ディレクトリなら削除）。
 fn cleanup_if_empty(dir: &Path) -> io::Result<()> {
