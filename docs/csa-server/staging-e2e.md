@@ -16,32 +16,17 @@ deployment 全体像は [`deployment.md`](deployment.md) を参照。
   操作できる権限があること。
 - `csa_client` の WS 経路（`tungstenite` 依存）が main に取り込まれていること。
 
-## 1. staging Worker の Origin allowlist を一時調整
+## 1. staging Worker の Origin allowlist を確認する
 
 `csa_client` は WebSocket Upgrade 時に `Origin` ヘッダを送る。staging Worker は
-`CORS_ORIGINS` の allowlist に一致しない Origin を `403 Forbidden Origin` で
-弾くため、E2E 実施時のみ csa_client の Origin を allowlist に追加する。
+`WS_ALLOWED_ORIGINS` の allowlist に一致しない Origin を `403 Forbidden Origin` で
+弾く。`wrangler.staging.toml` には `WS_ALLOWED_ORIGINS = "https://csa-client-local"`
+が staging 既定値として commit されており、本リポ csa_client の `ws_origin`
+（`staging-{black,white}.toml.example` の既定値）と一致するため、追加の
+deploy は不要。
 
-```bash
-# 既存値を確認
-vp exec wrangler --config crates/rshogi-csa-server-workers/wrangler.staging.toml \
-  whoami
-# secret や var の更新は wrangler.staging.toml 経由でしか入らないため、
-# 一時的に `CORS_ORIGINS` を編集 → deploy → 確認 → 巻き戻す流れになる。
-```
-
-`crates/rshogi-csa-server-workers/wrangler.staging.toml` の `[vars]` セクションで
-`CORS_ORIGINS` を以下のように一時更新（commit せずに手元で書き換えるだけで OK）。
-
-```toml
-[vars]
-CORS_ORIGINS = "https://csa-client-local"
-```
-
-そのまま CI 経由 (`workflow_dispatch` で staging deploy を起動) または手元から
-`vp exec wrangler --config wrangler.staging.toml deploy` で適用する。
-
-E2E が完了したら `CORS_ORIGINS = ""`（または元の値）に戻して再 deploy する。
+万一 staging Worker に異なる値が deploy 済みの場合は、`wrangler.staging.toml`
+を最新化したうえで `workflow_dispatch` の staging deploy を再実行する。
 
 ## 2. ローカル csa_client × 2 を用意する
 
@@ -144,17 +129,18 @@ vp exec wrangler r2 object list rshogi-csa-floodgate-history-staging \
 
 ## 5. 後始末
 
-1. `wrangler.staging.toml` の `CORS_ORIGINS` を元の値（通常は空文字列または運用値）に戻し、再 deploy する。
-2. R2 bucket の `csa_e2e_*` 関連オブジェクトを削除したい場合は
+1. R2 bucket の `csa_e2e_*` 関連オブジェクトを削除したい場合は
    `vp exec wrangler r2 object delete` で個別に削除できる（残しておいても害はない）。
-3. ローカルに残った `/tmp/staging-black.toml` / `/tmp/staging-white.toml` /
+2. ローカルに残った `/tmp/staging-black.toml` / `/tmp/staging-white.toml` /
    棋譜ファイルを破棄する。
+3. staging の `WS_ALLOWED_ORIGINS` 自体は commit 済みの実値で運用継続するため、
+   特に巻き戻し作業は要らない。
 
 ## トラブルシューティング
 
 | 症状 | 原因候補 | 対処 |
 | --- | --- | --- |
-| `CSAサーバー接続失敗: WebSocket Upgrade 失敗` (`403 Forbidden Origin`) | `CORS_ORIGINS` allowlist に csa_client の Origin が無い | §1 で staging に Origin を追加してから再 deploy |
+| `CSAサーバー接続失敗: WebSocket Upgrade 失敗` (`403 Forbidden Origin`) | `WS_ALLOWED_ORIGINS` allowlist と csa_client の `ws_origin` が一致していない | §1 を再確認し、最新の `wrangler.staging.toml` を staging に再 deploy する |
 | `ログイン失敗: LOGIN:INCORRECT` 等 | サーバー側 league で同一ハンドルが既に接続中 | `id` を別値に変えるか、Worker の DO state を `vp exec wrangler ...` で再起動する |
 | 双方接続するも対局が始まらない | `room_id` が一致していない | URL の `/ws/<room_id>` 部分が両 toml で完全一致しているか確認 |
 | 対局終局後も R2 に書き込まれない | DO storage の終局イベントが落ちた可能性 | Worker のログを `vp run tail:staging` で確認 |

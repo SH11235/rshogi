@@ -71,7 +71,7 @@ bucket_name = "rshogi-csa-floodgate-history-prod"
 # を設定すること。空のまま production deploy すると `/health` は応答するが
 # WS 対局は一切成立しない（client が 403 で全弾かれる）状態で本番化する。
 # 例: "https://rshogi.example.com,https://www.rshogi.example.com"
-CORS_ORIGINS = ""
+WS_ALLOWED_ORIGINS = ""
 
 # 対局時計。`countdown` (CSA 2014 改訂秒読み) / `fischer` (増分加算) / `stopwatch` (分単位)。
 CLOCK_KIND = "countdown"

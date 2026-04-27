@@ -39,10 +39,10 @@ async fn forward_ws_to_room(
     request_path: &str,
     room_id: &str,
 ) -> Result<Response> {
-    // Origin 許可リストは `[vars] CORS_ORIGINS = "<csv>"` から取得する。
+    // Origin 許可リストは `[vars] WS_ALLOWED_ORIGINS = "<csv>"` から取得する。
     // 値が空や未設定なら `OriginAllowList` は空 = 全拒否（安全側）。
     let allow_csv = env
-        .var(ConfigKeys::CORS_ORIGINS)
+        .var(ConfigKeys::WS_ALLOWED_ORIGINS)
         .ok()
         .map(|v| v.to_string())
         .unwrap_or_default();
