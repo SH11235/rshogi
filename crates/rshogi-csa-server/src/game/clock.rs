@@ -279,6 +279,11 @@ impl MillisecondsCountdownClock {
 
 impl TimeClock for MillisecondsCountdownClock {
     fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult {
+        // 秒読み (`byoyomi_ms`) は **毎手リセット型** で累積しない。本体時間
+        // (`slot`) を使い切ったあとは、各手で独立に `byoyomi_ms` まで使えて、
+        // 超過した瞬間に `TimeUp` を返す。`SecondsCountdownClock::consume` と
+        // 同じ会計モデル (CSA 2014 改訂)。
+        //
         // ms 粒度では切り捨てを行わない。`elapsed_ms` の上限は対局想定時間内に
         // 収まる（数十秒〜数分）ので i64 cast で問題ない。
         let elapsed = elapsed_ms as i64;

@@ -1,13 +1,15 @@
-# Workers staging × csa_client (白番) 用 TOML 例。
+# Workers staging × csa_client (白番) 用 TOML 例 — シナリオ G (時計違い)。
 #
 # 黒番との対 (黒/白で room_id は同じ、id だけ別) で 1 対局を成立させる。
-# 詳細手順は docs/csa-server/staging-e2e.md を参照。
+# シナリオ G では client 側の設定は A と同形で、`CLOCK_KIND` の切替は
+# `wrangler.staging.toml` 側で行う (詳細は docs/csa-server/staging-e2e.md §9)。
+# A と同一 id だと並行/同日実行時に衝突するので `_G` suffix を付けて区別する。
 
 [server]
 # 黒番と同じ `<room_id>` を URL 末尾に入れる（黒・白で完全一致が必須）。
 host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>"
 port = 0
-id = "csa_e2e_white_<date>"
+id = "csa_e2e_white_<date>_G"
 password = "anything"
 floodgate = true
 

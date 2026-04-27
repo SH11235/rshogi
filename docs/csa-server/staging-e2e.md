@@ -108,13 +108,26 @@ cat /tmp/<game_id>.csa
 CSA V2 形式（`V2.2`、`N+`、`$GAME_ID:`、`BEGIN Position` 〜 `END Position`、
 指し手 `+7776FU,T<sec>` 等、終局コマンド `%TORYO` / `+SUMI` 等）が含まれていれば成功。
 
+> ※ Floodgate 履歴バケット (`rshogi-csa-floodgate-history-staging`) への
+> 書き込みは staging では既定 (`ALLOW_FLOODGATE_FEATURES = "false"`) で
+> 無効化されているため、本シナリオの必須確認項目には含めない。Floodgate
+> 機能 opt-in 環境で動作確認する場合は別途
+> `vp exec wrangler r2 object list rshogi-csa-floodgate-history-staging` で
+> 確認する。
+
 ## 4. シナリオ B: 連続 N 対局
 
-`max_games = 5` で同 client が 5 局繰り返す。Workers サーバは **1 DO instance =
-1 対局** という設計で、終局後の同 room_id への再 LOGIN は `LOGIN:incorrect` で
-reject される。連続対局では host / id 内の `{game_seq}` placeholder を
-csa_client が 0 始まりの局番号で自動置換するので、`<room_id>-{game_seq}` 形式に
-書いて毎局新規 DO を立てる運用にする。
+`max_games = 5` で同 client が 5 局繰り返す。**Workers 版 (`rshogi-csa-server-workers`)**
+は 1 DO instance = 1 対局 という設計で、終局後の同 room_id への再 LOGIN は
+`LOGIN:incorrect` で reject される (`game_room.rs::handle_login::load_finished`)。
+連続対局では host / id 内の `{game_seq}` placeholder を csa_client が
+0 始まりの局番号で自動置換するので、`<room_id>-{game_seq}` 形式に書いて
+毎局新規 DO を立てる運用にする。
+
+> 補足: TCP 版 (`rshogi-csa-server-tcp`) は本家 Floodgate 互換で 1 server に
+> 多対局が成立するため、`{game_seq}` placeholder は不要 (むしろ host が
+> DNS 名のため `tcp://host-0:4081` のような展開は不正な host になる)。
+> TCP 経路で連続対局するときは host を固定し、game_name を毎局変えれば良い。
 
 ```bash
 cp crates/rshogi-csa-client/examples/csa_client_staging/scenarios/B_consecutive_games/black.toml.example /tmp/B-black.toml
@@ -150,6 +163,12 @@ wait
 5. 黒 client が `LOGIN:<name> OK` を受けて対局が継続する（指し手の続きから）。
 6. 終局後に R2 棋譜を確認すると、**1 つの game_id** に黒の disconnect 前後の
    指し手が連続している。
+
+> 注意: `RECONNECT_GRACE_SECONDS` で指定した秒数 (例: 30 秒) 以内に
+> step 3 → 4 を完走する必要がある。手元で `id` 文字列を組み立てる作業を含む
+> ため時間的余裕は少ない。事前に `<game_id>` と `<token>` を埋めた reconnect
+> 用 id 文字列を別ターミナルに貼り付けておき、step 3 で kill した直後に
+> step 4 の `id` だけ書き換えて再起動できるよう準備しておくのが安全。
 
 ## 6. シナリオ D: 観戦 (`%%MONITOR2ON`)
 
@@ -251,6 +270,18 @@ gh workflow run "Deploy Workers" -f target=staging
 
 各 kind で R2 棋譜の `BEGIN Time` セクションが想定通りの `Time_Unit` /
 `Total_Time` / `Byoyomi`/`Increment` を含むことを確認する。
+
+> ⚠️ `sed -i` は **追跡対象** の `wrangler.staging.toml` を直接書き換える。
+> 検証を中断して工程を中座した場合、ファイルが意図せぬ kind のまま残り
+> 後続のコミットに混入する事故が起こり得る。各 sed の直後と最後の戻し sed
+> の後で必ず以下を実行し、`countdown_msec` に戻っていることを目視確認する:
+>
+> ```bash
+> git diff crates/rshogi-csa-server-workers/wrangler.staging.toml
+> ```
+>
+> 戻ってない場合は `git checkout -- crates/rshogi-csa-server-workers/wrangler.staging.toml`
+> で復元してから再 deploy する。
 
 ## 10. 後始末
 
