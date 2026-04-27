@@ -335,22 +335,23 @@ fn run_one_game(
         );
         let _ = conn.logout();
         drop(conn);
-        match attempt_reconnect(
-            &target,
-            &opts,
-            &id,
-            &config.server.password,
-            &game_id,
-            &token,
-            engine,
-            config,
-            shutdown,
-        ) {
+        let credentials = ReconnectCredentials {
+            id: &id,
+            password: &config.server.password,
+            game_id: &game_id,
+            token: &token,
+        };
+        match attempt_reconnect(&target, &opts, &credentials, engine, config, shutdown) {
             Ok((reconnect_result, reconnect_record)) => {
                 log::info!("[CSA] 再接続成功: 対局を継続して終局: {:?}", reconnect_result);
                 return Ok((reconnect_result, reconnect_record));
             }
             Err(e) => {
+                // engine は元 disconnect 経路で `gameover("lose")` 発射済み。
+                // `attempt_reconnect` 中に `engine.new_game()` が成功した後で失敗
+                // するケースではエンジンが「新局面待ち」状態のまま残るが、
+                // `stop_and_wait()` は探索中でない場合は no-op として通過する
+                // ことを期待する (rshogi-usi 含む主要 USI engine の挙動)。
                 log::warn!("[CSA] 再接続失敗: {e}。元の Interrupted 結果で終了します。");
                 let _ = engine.stop_and_wait();
                 return result.map(|(r, rec, _)| (r, rec));
@@ -371,22 +372,26 @@ fn run_one_game(
     result.map(|(r, rec, _)| (r, rec))
 }
 
+/// 切断検出後の再接続に必要な認証情報。多引数化を避けるためまとめる。
+struct ReconnectCredentials<'a> {
+    id: &'a str,
+    password: &'a str,
+    game_id: &'a str,
+    token: &'a str,
+}
+
 /// 切断検出後の自動再接続。新規 transport で接続 → `LOGIN ... reconnect:<game_id>+<token>`
 /// → resume 用 Game_Summary + Reconnect_State 受信 → セッションループ継続。
-#[allow(clippy::too_many_arguments)]
 fn attempt_reconnect(
     target: &TransportTarget,
     opts: &ConnectOpts,
-    id: &str,
-    password: &str,
-    game_id: &str,
-    token: &str,
+    creds: &ReconnectCredentials<'_>,
     engine: &mut UsiEngine,
     config: &CsaClientConfig,
     shutdown: &AtomicBool,
 ) -> Result<(GameResult, rshogi_csa_client::record::GameRecord)> {
     let mut conn = CsaConnection::connect_with_target(target, opts)?;
-    conn.login_reconnect(id, password, game_id, token)?;
+    conn.login_reconnect(creds.id, creds.password, creds.game_id, creds.token)?;
     let (r, rec, _) = run_resumed_session(&mut conn, engine, config, shutdown)?;
     let _ = conn.logout();
     Ok((r, rec))

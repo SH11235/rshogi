@@ -152,7 +152,7 @@ fn recv_game_summary_handles_missing_reconnect_token() {
 }
 
 #[test]
-fn recv_reconnect_state_parses_all_fields() {
+fn recv_reconnect_state_parses_known_fields_and_drops_unknown() {
     let port = spawn_mock_tcp_server(|reader, writer| {
         let _ = read_line(reader);
         write_lines(writer, &["LOGIN:alice OK"]);
@@ -163,7 +163,9 @@ fn recv_reconnect_state_parses_all_fields() {
                 "Current_Turn:-",
                 "Black_Time_Remaining_Ms:599500",
                 "White_Time_Remaining_Ms:600000",
+                // 既知フィールドではない行はサイレントに破棄される (前方互換)。
                 "Last_Move:+7776FU",
+                "Custom_Future_Field:foobar",
                 "END Reconnect_State",
             ],
         );
@@ -174,12 +176,11 @@ fn recv_reconnect_state_parses_all_fields() {
     let state = conn.recv_reconnect_state().expect("recv_reconnect_state");
     assert_eq!(state.black_remaining_ms, 599_500);
     assert_eq!(state.white_remaining_ms, 600_000);
-    assert_eq!(state.last_move.as_deref(), Some("+7776FU"));
     assert_eq!(state.current_turn, Some(rshogi_csa::Color::White));
 }
 
 #[test]
-fn recv_reconnect_state_handles_missing_last_move() {
+fn recv_reconnect_state_handles_minimal_block() {
     let port = spawn_mock_tcp_server(|reader, writer| {
         let _ = read_line(reader);
         write_lines(writer, &["LOGIN:alice OK"]);
@@ -198,6 +199,22 @@ fn recv_reconnect_state_handles_missing_last_move() {
     let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
     conn.login("alice", "pw").expect("login");
     let state = conn.recv_reconnect_state().expect("recv_reconnect_state");
-    assert!(state.last_move.is_none());
     assert_eq!(state.current_turn, Some(rshogi_csa::Color::Black));
+}
+
+#[test]
+fn recv_reconnect_state_aborts_when_begin_marker_missing() {
+    // BEGIN Reconnect_State が来ないまま大量の行が届く異常応答で無限ループしない
+    // ことを確認する (50 行で abort)。
+    let port = spawn_mock_tcp_server(|reader, writer| {
+        let _ = read_line(reader);
+        write_lines(writer, &["LOGIN:alice OK"]);
+        let noise: Vec<&str> = (0..60).map(|_| "noise_line_no_begin_marker").collect();
+        write_lines(writer, &noise);
+    });
+
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
+    conn.login("alice", "pw").expect("login");
+    let err = conn.recv_reconnect_state().expect_err("expected abort");
+    assert!(err.to_string().contains("BEGIN Reconnect_State"));
 }

@@ -54,7 +54,8 @@ pub struct GameSummary {
 
 /// 再接続成立時にサーバから送られる `BEGIN Reconnect_State` ブロックの
 /// パース結果。`Current_Turn` / `Black_Time_Remaining_Ms` / `White_Time_Remaining_Ms`
-/// / `Last_Move` を保持する。
+/// を保持する。`Last_Move:` 行は受信時にスキップする (resume 時の局面は
+/// `Game_Summary.position_section` から完全復元できるため client は参照不要)。
 #[derive(Clone, Debug, Default)]
 pub struct ReconnectState {
     /// 切断時点の手番。`+` を `Color::Black`、`-` を `Color::White` で表現。
@@ -62,8 +63,6 @@ pub struct ReconnectState {
     pub current_turn: Option<Color>,
     pub black_remaining_ms: i64,
     pub white_remaining_ms: i64,
-    /// 直前手 (例: `+7776FU`)。`None` のときは初期局面で再接続が走った経路。
-    pub last_move: Option<String>,
 }
 
 /// サーバーから受信した指し手
@@ -133,7 +132,7 @@ impl CsaConnection {
         });
         self.send_line(&cmd)?;
         let response = self.recv_line_blocking(Duration::from_secs(15))?;
-        if response.starts_with("LOGIN:") && response.contains("OK") {
+        if is_login_ok(&response) {
             log::info!("[CSA] ログイン成功: {id}");
             Ok(())
         } else {
@@ -169,7 +168,7 @@ impl CsaConnection {
         });
         self.send_line(&cmd)?;
         let response = self.recv_line_blocking(Duration::from_secs(15))?;
-        if response.starts_with("LOGIN:") && response.contains("OK") {
+        if is_login_ok(&response) {
             log::info!("[CSA] 再接続ログイン成功: {id} (game_id={game_id})");
             Ok(())
         } else {
@@ -178,11 +177,23 @@ impl CsaConnection {
     }
 
     /// 再接続後の `BEGIN Reconnect_State` ... `END Reconnect_State` ブロックを
-    /// 読み取る。`recv_game_summary` 直後に呼ぶ。各キー (`Current_Turn`,
-    /// `Black_Time_Remaining_Ms`, `White_Time_Remaining_Ms`, `Last_Move`) を
-    /// パースして返す。
+    /// 読み取る。`recv_game_summary` 直後に呼ぶ。`Current_Turn` /
+    /// `Black_Time_Remaining_Ms` / `White_Time_Remaining_Ms` をパースして返す。
+    /// `Last_Move:` 行は局面復元に不要なため破棄する (resume 時の局面は
+    /// `Game_Summary.position_section` から完全復元できる)。
+    ///
+    /// `BEGIN Reconnect_State` を待つループには **最大 50 行** の終了保護を入れる。
+    /// 古いサーバや誤接続でこのブロックが届かない場合に無限ループするのを防ぐ。
     pub fn recv_reconnect_state(&mut self) -> Result<ReconnectState> {
+        const MAX_PRELUDE_LINES: usize = 50;
+        let mut tries = 0usize;
         loop {
+            tries += 1;
+            if tries > MAX_PRELUDE_LINES {
+                bail!(
+                    "BEGIN Reconnect_State が届かないまま {tries} 行受信、再接続応答が不正と判断して中止"
+                );
+            }
             let line = self.recv_line_blocking(Duration::from_secs(30))?;
             if line == "BEGIN Reconnect_State" {
                 break;
@@ -204,9 +215,8 @@ impl CsaConnection {
                 state.black_remaining_ms = val.trim().parse().unwrap_or(0);
             } else if let Some(val) = line.strip_prefix("White_Time_Remaining_Ms:") {
                 state.white_remaining_ms = val.trim().parse().unwrap_or(0);
-            } else if let Some(val) = line.strip_prefix("Last_Move:") {
-                state.last_move = Some(val.trim().to_owned());
             }
+            // `Last_Move:` を含む他の拡張行は黙って破棄する (前方互換)。
         }
     }
 
@@ -556,4 +566,12 @@ pub(crate) fn parse_game_result(line: &str) -> Option<GameResult> {
     } else {
         None // #TIME_UP, #ILLEGAL_MOVE, #SENNICHITE 等は中間行
     }
+}
+
+/// LOGIN 応答が成功 (`LOGIN:<name> OK` 形式) であるかを判定する。
+///
+/// 単純な `contains("OK")` 判定だと `LOGIN:incorrect OKAZ_NG` のような偽陽性を
+/// 通してしまうため、`LOGIN:` プレフィックスと末尾の ` OK` をセットで要求する。
+fn is_login_ok(response: &str) -> bool {
+    response.starts_with("LOGIN:") && response.ends_with(" OK")
 }
