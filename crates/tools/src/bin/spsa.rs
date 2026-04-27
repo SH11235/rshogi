@@ -196,8 +196,9 @@ struct Cli {
 
     /// `--seeds` を 2 つ以上指定したとき、iter 内の seed 群を並列実行する。
     /// SPSA の数学的妥当性は保たれる（各 seed は独立な摂動方向を持ち、iter 末で
-    /// 平均化される）。`--concurrency` を seed 数で割った値を各 seed に配分する
-    /// ため、`--concurrency >= seeds_count * games_per_iteration` のとき最大効果。
+    /// 平均化される）。`--concurrency / seeds_count` を各 seed に配分するため、
+    /// 最大効率には **`--concurrency` は `seeds_count` の倍数を推奨**
+    /// （割り切れない端数は浪費される: 例 conc=10, seeds=3 → per_seed=3, 1 枠無駄）。
     /// 単一 seed のときは通常通り順次実行（フラグは無視）。
     #[arg(long, default_value_t = false)]
     parallel_seeds: bool,
@@ -910,36 +911,41 @@ fn seed_for_iteration(base_seed: u64, iteration_index: u32) -> u64 {
     base_seed ^ iter_term
 }
 
-/// 1 seed × 1 iter 分の事前計算（RNG / flips / shifts / plus/minus / startpos インデックス）。
+/// `compute_seed_prep` のセッション定数バンドル（iter 内で全 seed 共通）。
 ///
-/// 各 seed 独立に決定論的に計算可能なため、後段の重いゲーム実行を seed 並列化する際の
-/// 前処理として使う。`total_games_start` は startpos の cyclic indexing にのみ使われ、
-/// 並列実行時はセッション累積 + `seed_idx * games_per_iter` で seed 間の重複を避ける。
-#[allow(clippy::too_many_arguments)]
-fn compute_seed_prep(
-    iter: u32,
-    seed_idx: usize,
-    base_seed: u64,
-    seed_total_games_start: usize,
+/// 引数増加によるシグネチャ複雑化を避けるため `compute_seed_prep` の入力をまとめる。
+struct SeedPrepCtx<'a> {
     big_a: f64,
     schedule: ScheduleConfig,
-    params: &[SpsaParam],
-    param_schedules: &[ParamScheduleConstants],
-    active_only_regex: Option<&Regex>,
-    translator: &EngineNameTranslator,
+    params: &'a [SpsaParam],
+    param_schedules: &'a [ParamScheduleConstants],
+    active_only_regex: Option<&'a Regex>,
+    translator: &'a EngineNameTranslator,
     start_positions_len: usize,
     games_per_iteration: usize,
     random_startpos: bool,
+}
+
+/// 1 seed × 1 iter 分の事前計算（RNG / flips / shifts / plus/minus / startpos インデックス）。
+///
+/// 各 seed 独立に決定論的に計算可能なため、後段の重いゲーム実行を seed 並列化する際の
+/// 前処理として使う。`seed_total_games_start` は startpos の cyclic indexing にのみ使われ、
+/// 並列実行時はセッション累積 + `seed_idx * games_per_iter` で seed 間の重複を避ける。
+fn compute_seed_prep(
+    ctx: &SeedPrepCtx<'_>,
+    iter: u32,
+    base_seed: u64,
+    seed_total_games_start: usize,
 ) -> Result<SeedPrep> {
-    let _ = seed_idx; // ログ用に予約（現状未使用）
     let iter_seed = seed_for_iteration(base_seed, iter);
     let mut rng = ChaCha8Rng::seed_from_u64(iter_seed);
 
     // Per-param Fishtest 摂動: shift_j = c_k_j × flip_j
-    let flips: Vec<f64> = params
+    let flips: Vec<f64> = ctx
+        .params
         .iter()
         .map(|p| {
-            if !is_param_active(p, active_only_regex, translator) {
+            if !is_param_active(p, ctx.active_only_regex, ctx.translator) {
                 0.0
             } else if rng.random_bool(0.5) {
                 1.0
@@ -948,25 +954,29 @@ fn compute_seed_prep(
             }
         })
         .collect();
-    let shifts: Vec<f64> = params
+    let shifts: Vec<f64> = ctx
+        .params
         .iter()
-        .zip(param_schedules.iter())
+        .zip(ctx.param_schedules.iter())
         .zip(flips.iter())
         .map(|((p, sched), &flip)| {
-            if !is_param_active(p, active_only_regex, translator) {
+            if !is_param_active(p, ctx.active_only_regex, ctx.translator) {
                 0.0
             } else {
-                let (c_k, _) = sched.at_iteration(iter, big_a, schedule.alpha, schedule.gamma);
+                let (c_k, _) =
+                    sched.at_iteration(iter, ctx.big_a, ctx.schedule.alpha, ctx.schedule.gamma);
                 c_k * flip
             }
         })
         .collect();
-    let plus_values: Vec<f64> = params
+    let plus_values: Vec<f64> = ctx
+        .params
         .iter()
         .zip(shifts.iter())
         .map(|(p, s)| clamped_value(p, p.value + s))
         .collect();
-    let minus_values: Vec<f64> = params
+    let minus_values: Vec<f64> = ctx
+        .params
         .iter()
         .zip(shifts.iter())
         .map(|(p, s)| clamped_value(p, p.value - s))
@@ -974,8 +984,8 @@ fn compute_seed_prep(
 
     let mut active_params = 0usize;
     let mut abs_shift_sum = 0.0f64;
-    for (p, &shift) in params.iter().zip(shifts.iter()) {
-        if !is_param_active(p, active_only_regex, translator) {
+    for (p, &shift) in ctx.params.iter().zip(shifts.iter()) {
+        if !is_param_active(p, ctx.active_only_regex, ctx.translator) {
             continue;
         }
         active_params += 1;
@@ -987,12 +997,12 @@ fn compute_seed_prep(
         0.0
     };
 
-    let mut start_pos_indices = Vec::with_capacity(games_per_iteration);
-    for game_idx in 0..games_per_iteration {
+    let mut start_pos_indices = Vec::with_capacity(ctx.games_per_iteration);
+    for game_idx in 0..ctx.games_per_iteration {
         start_pos_indices.push(pick_startpos_index(
-            start_positions_len,
+            ctx.start_positions_len,
             &mut rng,
-            random_startpos,
+            ctx.random_startpos,
             seed_total_games_start + game_idx,
         )?);
     }
@@ -1528,26 +1538,23 @@ fn main() -> Result<()> {
         // Phase A: 全 seed の事前計算（CPU-light, sequential）。各 seed の RNG/flips/shifts/
         // start_pos_indices を生成。total_games_start はセッション累積に seed_idx × games_per_iter
         // を足して決定論的に求める。
+        let prep_ctx = SeedPrepCtx {
+            big_a,
+            schedule,
+            params: &params,
+            param_schedules: &param_schedules,
+            active_only_regex: active_only_regex.as_ref(),
+            translator: &translator,
+            start_positions_len: start_positions.len(),
+            games_per_iteration: cli.games_per_iteration as usize,
+            random_startpos: cli.random_startpos,
+        };
         let mut preps = Vec::with_capacity(seed_values.len());
         for (seed_idx, base_seed) in seed_values.iter().copied().enumerate() {
             let seed_total_games_start = total_games
                 .checked_add(seed_idx * cli.games_per_iteration as usize)
                 .context("total_games offset overflow")?;
-            preps.push(compute_seed_prep(
-                iter,
-                seed_idx,
-                base_seed,
-                seed_total_games_start,
-                big_a,
-                schedule,
-                &params,
-                &param_schedules,
-                active_only_regex.as_ref(),
-                &translator,
-                start_positions.len(),
-                cli.games_per_iteration as usize,
-                cli.random_startpos,
-            )?);
+            preps.push(compute_seed_prep(&prep_ctx, iter, base_seed, seed_total_games_start)?);
         }
 
         // Phase B: ゲーム実行（heavy）。--parallel-seeds 指定 + seed 数 ≥ 2 のとき thread::scope
@@ -1572,7 +1579,7 @@ fn main() -> Result<()> {
             std::thread::scope(|scope| -> Result<Vec<SeedGameStats>> {
                 let handles: Vec<_> = (0..seed_count)
                     .map(|seed_idx| {
-                        scope.spawn(move || -> Result<SeedGameStats> {
+                        let h = scope.spawn(move || -> Result<SeedGameStats> {
                             let prep = &preps_ref[seed_idx];
                             run_seed_games_parallel(SeedRunContext {
                                 concurrency: per_seed_concurrency,
@@ -1592,12 +1599,17 @@ fn main() -> Result<()> {
                                 translator: translator_ref,
                                 active_mask: active_mask_ref,
                             })
-                        })
+                        });
+                        (seed_idx, h)
                     })
                     .collect();
                 handles
                     .into_iter()
-                    .map(|h| h.join().map_err(|_| anyhow::anyhow!("seed worker panicked"))?)
+                    .map(|(seed_idx, h)| {
+                        h.join().map_err(|_| {
+                            anyhow::anyhow!("seed worker panicked: seed_idx={seed_idx}")
+                        })?
+                    })
                     .collect()
             })?
         } else {
@@ -1628,7 +1640,7 @@ fn main() -> Result<()> {
         };
 
         // Phase C: 集計（CPU-light, sequential, seed 順序維持）。
-        for (seed_idx, (prep, stats)) in preps.iter().zip(run_stats.iter()).enumerate() {
+        for (prep, stats) in preps.iter().zip(run_stats.iter()) {
             total_games = total_games
                 .checked_add(cli.games_per_iteration as usize)
                 .context("total_games overflow")?;
@@ -1671,7 +1683,6 @@ fn main() -> Result<()> {
                 max_abs_update: 0.0,
                 total_games: 0,
             });
-            let _ = seed_idx; // 並列実行時の seed_idx は preps の順序と一致するため未使用
         }
 
         // Seed 平均後にパラメータ更新
@@ -1878,8 +1889,34 @@ mod tests {
         }
     }
 
-    /// 並列化された seed 実行が順次実行と決定論的に等価な事前計算結果を生むことを検証。
-    /// （ゲーム実行は I/O を伴うので別途 smoke test で確認）
+    fn make_test_ctx<'a>(
+        params: &'a [SpsaParam],
+        schedules: &'a [ParamScheduleConstants],
+        translator: &'a EngineNameTranslator,
+        games_per_iteration: usize,
+    ) -> SeedPrepCtx<'a> {
+        SeedPrepCtx {
+            big_a: 10.0,
+            schedule: ScheduleConfig {
+                alpha: 0.602,
+                gamma: 0.101,
+                a_ratio: 0.1,
+                mobility: 1.0,
+                total_iterations: 100,
+            },
+            params,
+            param_schedules: schedules,
+            active_only_regex: None,
+            translator,
+            start_positions_len: 1957,
+            games_per_iteration,
+            random_startpos: true,
+        }
+    }
+
+    /// `compute_seed_prep` のスナップショットテスト。`ChaCha8Rng` は決定論的なため、
+    /// 同じ `(base_seed, iter)` に対して flips / shifts / start_pos_indices が完全一致する。
+    /// 並列化後も Phase A の事前計算結果がブレないことを保証。
     #[test]
     fn compute_seed_prep_is_deterministic_across_calls() {
         let params = vec![
@@ -1890,47 +1927,11 @@ mod tests {
             .iter()
             .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
             .collect();
-        let schedule = ScheduleConfig {
-            alpha: 0.602,
-            gamma: 0.101,
-            a_ratio: 0.1,
-            mobility: 1.0,
-            total_iterations: 100,
-        };
         let translator = EngineNameTranslator::empty();
+        let ctx = make_test_ctx(&params, &schedules, &translator, 8);
 
-        let prep1 = compute_seed_prep(
-            5,
-            0,
-            42,
-            100,
-            10.0,
-            schedule,
-            &params,
-            &schedules,
-            None,
-            &translator,
-            1957,
-            8,
-            true,
-        )
-        .expect("prep");
-        let prep2 = compute_seed_prep(
-            5,
-            0,
-            42,
-            100,
-            10.0,
-            schedule,
-            &params,
-            &schedules,
-            None,
-            &translator,
-            1957,
-            8,
-            true,
-        )
-        .expect("prep");
+        let prep1 = compute_seed_prep(&ctx, 5, 42, 100).expect("prep1");
+        let prep2 = compute_seed_prep(&ctx, 5, 42, 100).expect("prep2");
 
         assert_eq!(prep1.flips, prep2.flips, "flips must be deterministic from seed/iter");
         assert_eq!(prep1.plus_values, prep2.plus_values);
@@ -1939,56 +1940,30 @@ mod tests {
         assert_eq!(prep1.active_params, prep2.active_params);
     }
 
-    /// 異なる base_seed に対しては異なる flip パターンが生成されることを確認（並列実行時の
-    /// seed 間独立性検証）。
+    /// 異なる `base_seed` が異なる flip パターンを生むことを保証（並列実行時の seed 間独立性）。
+    /// `ChaCha8Rng` は決定論的なため、`(base_seed=1..4, iter=5)` の組み合わせで flip が
+    /// 全一致にならないことをスナップショットテストとして確認する。パラメータ数を 6 に増やして
+    /// 取り得る flip パターンを 2^6=64 通りに広げ、隣接 seed ペアの直接比較で意図を明確化。
     #[test]
     fn compute_seed_prep_seeds_produce_independent_flips() {
-        let params = vec![
-            make_param("Search_a", 1000.0, 100.0),
-            make_param("Search_b", 2000.0, 200.0),
-        ];
+        let params: Vec<_> = (0..6)
+            .map(|i| make_param(&format!("Search_p{i}"), 1000.0 + i as f64 * 100.0, 100.0))
+            .collect();
         let schedules: Vec<ParamScheduleConstants> = params
             .iter()
             .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
             .collect();
-        let schedule = ScheduleConfig {
-            alpha: 0.602,
-            gamma: 0.101,
-            a_ratio: 0.1,
-            mobility: 1.0,
-            total_iterations: 100,
-        };
         let translator = EngineNameTranslator::empty();
+        let ctx = make_test_ctx(&params, &schedules, &translator, 32);
 
-        let mut flip_sets = Vec::new();
-        for base_seed in [1u64, 2, 3, 4] {
-            let prep = compute_seed_prep(
-                5,
-                0,
-                base_seed,
-                100,
-                10.0,
-                schedule,
-                &params,
-                &schedules,
-                None,
-                &translator,
-                1957,
-                32,
-                true,
-            )
-            .expect("prep");
-            flip_sets.push(prep.flips);
-        }
-        // 4 seed のうち少なくとも 1 ペアは異なる flip パターンを持つはず（極小確率で偶然全一致）
-        let mut found_diff = false;
-        for i in 0..flip_sets.len() {
-            for j in (i + 1)..flip_sets.len() {
-                if flip_sets[i] != flip_sets[j] {
-                    found_diff = true;
-                }
-            }
-        }
-        assert!(found_diff, "different seeds should give different flip patterns");
+        let prep1 = compute_seed_prep(&ctx, 5, 1, 100).expect("prep1");
+        let prep2 = compute_seed_prep(&ctx, 5, 2, 100).expect("prep2");
+        let prep3 = compute_seed_prep(&ctx, 5, 3, 100).expect("prep3");
+        let prep4 = compute_seed_prep(&ctx, 5, 4, 100).expect("prep4");
+
+        // 隣接 seed ペアそれぞれで flip パターンが異なることを直接確認
+        assert_ne!(prep1.flips, prep2.flips, "seed=1 vs seed=2 flips must differ");
+        assert_ne!(prep2.flips, prep3.flips, "seed=2 vs seed=3 flips must differ");
+        assert_ne!(prep3.flips, prep4.flips, "seed=3 vs seed=4 flips must differ");
     }
 }
