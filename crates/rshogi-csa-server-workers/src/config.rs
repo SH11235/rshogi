@@ -37,12 +37,16 @@ impl ConfigKeys {
     /// （単一行 JSON）を `floodgate-history/YYYY/MM/DD/HHMMSS-<game_id>.json` キーで
     /// 保存し、`list_recent` は day shard を新しい順に走査して N 件取得する。
     pub const FLOODGATE_HISTORY_BUCKET_BINDING: &'static str = "FLOODGATE_HISTORY_BUCKET";
-    /// 時計方式。`countdown` / `fischer` / `stopwatch`。
+    /// 時計方式。`countdown` / `countdown_msec` / `fischer` / `stopwatch`。
     pub const CLOCK_KIND: &'static str = "CLOCK_KIND";
-    /// 秒読み / Fischer 用の持ち時間（秒）。
+    /// `countdown` / Fischer 用の持ち時間（秒）。
     pub const TOTAL_TIME_SEC: &'static str = "TOTAL_TIME_SEC";
-    /// 秒読みの秒読み、または Fischer の増分（秒）。
+    /// `countdown` の秒読み、または Fischer の増分（秒）。
     pub const BYOYOMI_SEC: &'static str = "BYOYOMI_SEC";
+    /// `countdown_msec` 用の持ち時間（ms）。短時間対局（Floodgate 互換ではない拡張）。
+    pub const TOTAL_TIME_MS: &'static str = "TOTAL_TIME_MS";
+    /// `countdown_msec` の秒読み（ms）。
+    pub const BYOYOMI_MS: &'static str = "BYOYOMI_MS";
     /// StopWatch 用の持ち時間（分）。
     pub const TOTAL_TIME_MIN: &'static str = "TOTAL_TIME_MIN";
     /// StopWatch 用の秒読み（分）。
@@ -101,6 +105,8 @@ impl ConfigKeys {
         Self::CLOCK_KIND,
         Self::TOTAL_TIME_SEC,
         Self::BYOYOMI_SEC,
+        Self::TOTAL_TIME_MS,
+        Self::BYOYOMI_MS,
         Self::TOTAL_TIME_MIN,
         Self::BYOYOMI_MIN,
         Self::RECONNECT_GRACE_SECONDS,
@@ -132,10 +138,18 @@ pub fn parse_reconnect_grace_duration(raw: Option<&str>) -> Result<std::time::Du
 }
 
 /// Workers `[vars]` 文字列群から時計設定を解決する。
+///
+/// `CLOCK_KIND` のバリアント別に参照する env 変数:
+/// - `countdown`: `TOTAL_TIME_SEC` / `BYOYOMI_SEC` (秒、Floodgate 互換)
+/// - `countdown_msec`: `TOTAL_TIME_MS` / `BYOYOMI_MS` (ms、短時間対局向け拡張)
+/// - `fischer`: `TOTAL_TIME_SEC` / `BYOYOMI_SEC` (秒、`BYOYOMI_SEC` は Fischer increment)
+/// - `stopwatch`: `TOTAL_TIME_MIN` / `BYOYOMI_MIN` (分)
 pub fn parse_clock_spec(
     clock_kind: Option<&str>,
     total_time_sec: Option<&str>,
     byoyomi_sec: Option<&str>,
+    total_time_ms: Option<&str>,
+    byoyomi_ms: Option<&str>,
     total_time_min: Option<&str>,
     byoyomi_min: Option<&str>,
 ) -> Result<ClockSpec, String> {
@@ -151,6 +165,10 @@ pub fn parse_clock_spec(
             total_time_sec: parse_u32("TOTAL_TIME_SEC", total_time_sec, 600)?,
             byoyomi_sec: parse_u32("BYOYOMI_SEC", byoyomi_sec, 10)?,
         }),
+        "countdown_msec" => Ok(ClockSpec::CountdownMsec {
+            total_time_ms: parse_u32("TOTAL_TIME_MS", total_time_ms, 600_000)?,
+            byoyomi_ms: parse_u32("BYOYOMI_MS", byoyomi_ms, 10_000)?,
+        }),
         "fischer" => Ok(ClockSpec::Fischer {
             total_time_sec: parse_u32("TOTAL_TIME_SEC", total_time_sec, 600)?,
             increment_sec: parse_u32("BYOYOMI_SEC", byoyomi_sec, 10)?,
@@ -159,7 +177,9 @@ pub fn parse_clock_spec(
             total_time_min: parse_u32("TOTAL_TIME_MIN", total_time_min, 10)?,
             byoyomi_min: parse_u32("BYOYOMI_MIN", byoyomi_min, 1)?,
         }),
-        other => Err(format!("CLOCK_KIND: expected countdown|fischer|stopwatch, got {other:?}")),
+        other => Err(format!(
+            "CLOCK_KIND: expected countdown|countdown_msec|fischer|stopwatch, got {other:?}"
+        )),
     }
 }
 
@@ -208,7 +228,7 @@ mod tests {
     #[test]
     fn parse_clock_spec_defaults_to_countdown() {
         assert_eq!(
-            parse_clock_spec(None, None, None, None, None).unwrap(),
+            parse_clock_spec(None, None, None, None, None, None, None).unwrap(),
             ClockSpec::Countdown {
                 total_time_sec: 600,
                 byoyomi_sec: 10,
@@ -217,9 +237,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_clock_spec_accepts_countdown_msec() {
+        assert_eq!(
+            parse_clock_spec(
+                Some("countdown_msec"),
+                None,
+                None,
+                Some("10000"),
+                Some("100"),
+                None,
+                None,
+            )
+            .unwrap(),
+            ClockSpec::CountdownMsec {
+                total_time_ms: 10_000,
+                byoyomi_ms: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_clock_spec_countdown_msec_uses_defaults_when_unset() {
+        // CLOCK_KIND=countdown_msec で値未指定なら 600_000 / 10_000 (= 600s / 10s 相当) で
+        // production の挙動と整合する。
+        assert_eq!(
+            parse_clock_spec(Some("countdown_msec"), None, None, None, None, None, None).unwrap(),
+            ClockSpec::CountdownMsec {
+                total_time_ms: 600_000,
+                byoyomi_ms: 10_000,
+            }
+        );
+    }
+
+    #[test]
     fn parse_clock_spec_accepts_fischer() {
         assert_eq!(
-            parse_clock_spec(Some("fischer"), Some("300"), Some("5"), None, None).unwrap(),
+            parse_clock_spec(Some("fischer"), Some("300"), Some("5"), None, None, None, None)
+                .unwrap(),
             ClockSpec::Fischer {
                 total_time_sec: 300,
                 increment_sec: 5,
@@ -230,7 +284,8 @@ mod tests {
     #[test]
     fn parse_clock_spec_accepts_stopwatch() {
         assert_eq!(
-            parse_clock_spec(Some("stopwatch"), None, None, Some("15"), Some("2")).unwrap(),
+            parse_clock_spec(Some("stopwatch"), None, None, None, None, Some("15"), Some("2"))
+                .unwrap(),
             ClockSpec::StopWatch {
                 total_time_min: 15,
                 byoyomi_min: 2,
@@ -240,8 +295,8 @@ mod tests {
 
     #[test]
     fn parse_clock_spec_rejects_unknown_kind() {
-        let err = parse_clock_spec(Some("weird"), None, None, None, None).unwrap_err();
-        assert!(err.contains("countdown|fischer|stopwatch"));
+        let err = parse_clock_spec(Some("weird"), None, None, None, None, None, None).unwrap_err();
+        assert!(err.contains("countdown|countdown_msec|fischer|stopwatch"));
     }
 
     #[test]

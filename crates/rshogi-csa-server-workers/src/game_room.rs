@@ -1673,12 +1673,16 @@ fn load_clock_spec_from_env(env: &Env) -> Result<ClockSpec> {
     let clock_kind = env.var(ConfigKeys::CLOCK_KIND).ok().map(|v| v.to_string());
     let total_time_sec = env.var(ConfigKeys::TOTAL_TIME_SEC).ok().map(|v| v.to_string());
     let byoyomi_sec = env.var(ConfigKeys::BYOYOMI_SEC).ok().map(|v| v.to_string());
+    let total_time_ms = env.var(ConfigKeys::TOTAL_TIME_MS).ok().map(|v| v.to_string());
+    let byoyomi_ms = env.var(ConfigKeys::BYOYOMI_MS).ok().map(|v| v.to_string());
     let total_time_min = env.var(ConfigKeys::TOTAL_TIME_MIN).ok().map(|v| v.to_string());
     let byoyomi_min = env.var(ConfigKeys::BYOYOMI_MIN).ok().map(|v| v.to_string());
     parse_clock_spec(
         clock_kind.as_deref(),
         total_time_sec.as_deref(),
         byoyomi_sec.as_deref(),
+        total_time_ms.as_deref(),
+        byoyomi_ms.as_deref(),
         total_time_min.as_deref(),
         byoyomi_min.as_deref(),
     )

@@ -56,14 +56,22 @@ pub trait TimeClock {
 }
 
 /// フロントエンド設定から選択する時計方式。
+///
+/// `Countdown` (整数秒切り捨て、Floodgate 互換) と `CountdownMsec` (1ms 粒度、
+/// 短時間対局向け拡張) は **別バリアント** として並列に持つ。
+/// 1 つの Worker / TCP server インスタンスは config で指定された 1 種類だけを
+/// 使う（バリアントを混在させない）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClockSpec {
-    /// CSA 2014 改訂互換の秒読み。
+    /// CSA 2014 改訂互換の秒読み（整数秒切り捨て、`Time_Unit:1sec`）。
     Countdown {
         total_time_sec: u32,
         byoyomi_sec: u32,
     },
+    /// 1ms 粒度の秒読み（短時間対局向け、`Time_Unit:1msec`）。
+    /// 本家 Floodgate には無い拡張で、`byoyomi_ms = 100` のような端数値を許す。
+    CountdownMsec { total_time_ms: u32, byoyomi_ms: u32 },
     /// Fischer 方式（秒単位）。
     Fischer {
         total_time_sec: u32,
@@ -93,6 +101,10 @@ impl ClockSpec {
                 total_time_sec,
                 byoyomi_sec,
             } => Box::new(SecondsCountdownClock::new(*total_time_sec, *byoyomi_sec)),
+            Self::CountdownMsec {
+                total_time_ms,
+                byoyomi_ms,
+            } => Box::new(MillisecondsCountdownClock::new(*total_time_ms, *byoyomi_ms)),
             Self::Fischer {
                 total_time_sec,
                 increment_sec,
@@ -216,6 +228,97 @@ impl TimeClock for SecondsCountdownClock {
 const SECOND_GRAIN_MS: i64 = 1_000;
 /// 1 分分のミリ秒。StopWatch の grain (最小単位)。
 const MINUTE_GRAIN_MS: i64 = 60 * 1_000;
+
+/// 1ms 粒度の秒読み方式（短時間対局向け、Floodgate 互換ではない拡張）。
+///
+/// - `total_time_ms`: 持ち時間本体（ms）。使い切ると秒読みへ移行。
+/// - `byoyomi_ms`: 1 手あたりの秒読み時間（ms）。使い切ると時間切れ。
+/// - 経過時間の切り捨ては行わない（`elapsed_ms` をそのまま差し引く）。
+/// - Game_Summary は `Time_Unit:1msec` を出力。
+///
+/// `SecondsCountdownClock` との違いは grain (1ms vs 1sec) のみで、
+/// turn_budget や本体→秒読み移行のロジックは同型。
+#[derive(Debug, Clone)]
+pub struct MillisecondsCountdownClock {
+    total_time_ms: u32,
+    byoyomi_ms: u32,
+    remaining_black_ms: i64,
+    remaining_white_ms: i64,
+}
+
+impl MillisecondsCountdownClock {
+    /// 新しい ms 粒度秒読み時計を作る。
+    pub fn new(total_time_ms: u32, byoyomi_ms: u32) -> Self {
+        let initial = total_time_ms as i64;
+        Self {
+            total_time_ms,
+            byoyomi_ms,
+            remaining_black_ms: initial,
+            remaining_white_ms: initial,
+        }
+    }
+
+    fn slot_mut(&mut self, color: Color) -> &mut i64 {
+        match color {
+            Color::Black => &mut self.remaining_black_ms,
+            Color::White => &mut self.remaining_white_ms,
+        }
+    }
+
+    fn slot(&self, color: Color) -> i64 {
+        match color {
+            Color::Black => self.remaining_black_ms,
+            Color::White => self.remaining_white_ms,
+        }
+    }
+
+    fn byoyomi_ms_i64(&self) -> i64 {
+        self.byoyomi_ms as i64
+    }
+}
+
+impl TimeClock for MillisecondsCountdownClock {
+    fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult {
+        // ms 粒度では切り捨てを行わない。`elapsed_ms` の上限は対局想定時間内に
+        // 収まる（数十秒〜数分）ので i64 cast で問題ない。
+        let elapsed = elapsed_ms as i64;
+        let byoyomi = self.byoyomi_ms_i64();
+        let slot = self.slot_mut(color);
+
+        if elapsed <= *slot {
+            *slot -= elapsed;
+            return ClockResult::Continue;
+        }
+
+        let over = elapsed - *slot;
+        *slot = 0;
+        if over > byoyomi {
+            ClockResult::TimeUp
+        } else {
+            ClockResult::Continue
+        }
+    }
+
+    fn format_summary(&self) -> String {
+        let mut out = String::new();
+        out.push_str("BEGIN Time\n");
+        out.push_str("Time_Unit:1msec\n");
+        out.push_str(&format!("Total_Time:{}\n", self.total_time_ms));
+        out.push_str(&format!("Byoyomi:{}\n", self.byoyomi_ms));
+        out.push_str("Least_Time_Per_Move:0\n");
+        out.push_str("END Time\n");
+        out
+    }
+
+    fn remaining_main_ms(&self, color: Color) -> i64 {
+        self.slot(color)
+    }
+
+    fn turn_budget_ms(&self, color: Color) -> i64 {
+        // ms 粒度では切り捨てが無いので grain offset (秒粒度の 999ms 等) は不要。
+        self.slot(color) + self.byoyomi_ms_i64()
+    }
+}
 
 /// Fischer 方式の時計（増分加算、**CSA client の会計規則に合わせた init+post hybrid**）。
 ///
@@ -697,6 +800,67 @@ mod tests {
             spec.format_time_section(),
             SecondsCountdownClock::new(600, 10).format_summary()
         );
+    }
+
+    #[test]
+    fn clock_spec_builds_matching_summary_for_countdown_msec() {
+        let spec = ClockSpec::CountdownMsec {
+            total_time_ms: 10_000,
+            byoyomi_ms: 100,
+        };
+        assert_eq!(
+            spec.format_time_section(),
+            MillisecondsCountdownClock::new(10_000, 100).format_summary()
+        );
+    }
+
+    // ---- MillisecondsCountdownClock ----
+
+    #[test]
+    fn ms_clock_consumes_exact_elapsed_ms() {
+        let mut c = MillisecondsCountdownClock::new(10_000, 100);
+        assert_eq!(c.consume(Color::Black, 250), ClockResult::Continue);
+        // 切り捨て無し: 10_000 - 250 = 9_750ms。
+        assert_eq!(c.remaining_main_ms(Color::Black), 9_750);
+    }
+
+    #[test]
+    fn ms_clock_enters_byoyomi_when_main_exhausted() {
+        let mut c = MillisecondsCountdownClock::new(500, 100);
+        assert_eq!(c.consume(Color::Black, 500), ClockResult::Continue);
+        assert_eq!(c.remaining_main_ms(Color::Black), 0);
+        // 100ms 以内なら byoyomi で受理。
+        assert_eq!(c.consume(Color::Black, 100), ClockResult::Continue);
+    }
+
+    #[test]
+    fn ms_clock_time_up_when_over_byoyomi() {
+        let mut c = MillisecondsCountdownClock::new(500, 100);
+        // 500 + 101 = 601ms 消費 → byoyomi 1ms 超過で TimeUp。
+        assert_eq!(c.consume(Color::Black, 601), ClockResult::TimeUp);
+    }
+
+    #[test]
+    fn ms_clock_format_summary_uses_msec_unit() {
+        let c = MillisecondsCountdownClock::new(10_000, 100);
+        let s = c.format_summary();
+        assert!(s.contains("Time_Unit:1msec"));
+        assert!(s.contains("Total_Time:10000"));
+        assert!(s.contains("Byoyomi:100"));
+    }
+
+    #[test]
+    fn ms_clock_turn_budget_has_no_grain_offset() {
+        // ms 粒度では切り捨てが無いので grain offset (秒粒度の 999ms) は不要。
+        let c = MillisecondsCountdownClock::new(10_000, 100);
+        assert_eq!(c.turn_budget_ms(Color::Black), 10_100);
+    }
+
+    #[test]
+    fn ms_clock_black_and_white_are_independent() {
+        let mut c = MillisecondsCountdownClock::new(10_000, 100);
+        assert_eq!(c.consume(Color::Black, 5_000), ClockResult::Continue);
+        assert_eq!(c.remaining_main_ms(Color::White), 10_000);
     }
 
     #[test]
