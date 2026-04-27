@@ -11,6 +11,7 @@
 //! は文字列スライスで扱う。改行コードは TCP 経路では `write_line` 内部で
 //! `\n` を付加し、WS 経路では text frame の境界そのものが行境界になる。
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
@@ -302,6 +303,11 @@ pub struct WsTransport {
     ws: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
     /// `start_reader_thread` 後は reader が thread 内で動作する。inline 操作禁止フラグ。
     reader_moved: bool,
+    /// CSA サーバ実装は `Game_Summary` のように `\n` 区切りの複数行を 1 つの
+    /// text frame で送ってくる（TCP 互換のため文字列全体を `send_with_str` する）。
+    /// inline モードではここに 1 frame 分を行ごとに分割して push し、
+    /// `read_line_*` が 1 行ずつ pop する。空行 (CSA keep-alive) は捨てる。
+    pending_lines: VecDeque<String>,
 }
 
 impl WsTransport {
@@ -331,6 +337,7 @@ impl WsTransport {
         Ok(Self {
             ws: Arc::new(Mutex::new(ws)),
             reader_moved: false,
+            pending_lines: VecDeque::new(),
         })
     }
 
@@ -345,20 +352,18 @@ impl WsTransport {
         self.ensure_inline()?;
         let deadline = Instant::now() + timeout;
         loop {
+            if let Some(line) = self.pop_pending_line() {
+                log::debug!("[CSA] < {line}");
+                return Ok(line);
+            }
             let remaining =
                 deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO);
             if remaining.is_zero() {
                 bail!("サーバー応答タイムアウト");
             }
-            match self.try_read_one_message()? {
-                Some(line) => {
-                    if !line.is_empty() {
-                        log::debug!("[CSA] < {line}");
-                        return Ok(line);
-                    }
-                    // 空 text frame は keep-alive 扱いで読み飛ばす。
-                }
-                None => {
+            match self.try_read_one_frame()? {
+                FrameOutcome::Text(payload) => self.enqueue_frame(&payload),
+                FrameOutcome::None => {
                     // 50ms 単位でリトライしつつ deadline まで待つ（内部 TcpStream の
                     // read_timeout が 100ms なので、その半分でリトライ間隔を取る）。
                     std::thread::sleep(Duration::from_millis(50).min(remaining));
@@ -369,28 +374,48 @@ impl WsTransport {
 
     fn read_line_nonblocking(&mut self) -> Result<Option<String>> {
         self.ensure_inline()?;
-        match self.try_read_one_message()? {
-            Some(line) if !line.is_empty() => {
-                log::debug!("[CSA] < {line}");
-                Ok(Some(line))
+        if let Some(line) = self.pop_pending_line() {
+            log::debug!("[CSA] < {line}");
+            return Ok(Some(line));
+        }
+        match self.try_read_one_frame()? {
+            FrameOutcome::Text(payload) => {
+                self.enqueue_frame(&payload);
+                Ok(self.pop_pending_line().inspect(|line| {
+                    log::debug!("[CSA] < {line}");
+                }))
             }
-            _ => Ok(None),
+            FrameOutcome::None => Ok(None),
         }
     }
 
-    /// `WebSocket::read` を 1 回だけ非ブロッキングで試行する。
-    /// `Ok(Some(line))`: text frame を 1 つ受信した（空文字含む）。
-    /// `Ok(None)`: WouldBlock / Pong / Ping をハンドリング後にデータなし。
-    /// `Err(_)`: 切断 / プロトコル違反など回復不能。
-    fn try_read_one_message(&mut self) -> Result<Option<String>> {
+    /// 受信した 1 frame の text を `\n` で分割して `pending_lines` に積む。
+    /// 末尾の空行は CSA の keep-alive 慣習に従って捨てる（`split` の最後の要素は
+    /// `\n` 終端時に必ず空文字になるため）。中間に来る空行も同様に捨てる。
+    fn enqueue_frame(&mut self, payload: &str) {
+        for line in payload.split('\n') {
+            let trimmed = line.trim_end_matches('\r');
+            if !trimmed.is_empty() {
+                self.pending_lines.push_back(trimmed.to_owned());
+            }
+        }
+    }
+
+    fn pop_pending_line(&mut self) -> Option<String> {
+        self.pending_lines.pop_front()
+    }
+
+    /// `WebSocket::read` を 1 回だけ非ブロッキングで試行し、得られた text frame
+    /// を生のまま返す（`\n` 分割は呼び出し側）。
+    fn try_read_one_frame(&mut self) -> Result<FrameOutcome> {
         let mut guard = self.ws.lock().map_err(|_| anyhow!("WS lock poisoned"))?;
         match guard.read() {
-            Ok(Message::Text(payload)) => Ok(Some(payload.to_string())),
+            Ok(Message::Text(payload)) => Ok(FrameOutcome::Text(payload.to_string())),
             Ok(Message::Binary(_)) => {
                 log::warn!("[CSA/WS] 想定外の binary frame を破棄");
-                Ok(None)
+                Ok(FrameOutcome::None)
             }
-            Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => Ok(None),
+            Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => Ok(FrameOutcome::None),
             Ok(Message::Close(frame)) => {
                 log::info!("[CSA/WS] サーバーから Close frame 受信: {frame:?}");
                 bail!("サーバー切断");
@@ -398,7 +423,7 @@ impl WsTransport {
             Err(tungstenite::Error::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut =>
             {
-                Ok(None)
+                Ok(FrameOutcome::None)
             }
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
                 bail!("サーバー切断");
@@ -421,7 +446,15 @@ impl WsTransport {
         }
         self.reader_moved = true;
         let ws = Arc::clone(&self.ws);
+        // 既に inline で受信して queue に溜まっている行も先に流してから loop に入る。
+        let pending = std::mem::take(&mut self.pending_lines);
         std::thread::Builder::new().name("csa-ws-reader".to_string()).spawn(move || {
+            for line in pending {
+                log::debug!("[CSA] < {line}");
+                if tx.send(Event::ServerLine(line)).is_err() {
+                    return;
+                }
+            }
             loop {
                 let next = {
                     let mut guard = match ws.lock() {
@@ -435,11 +468,16 @@ impl WsTransport {
                 };
                 match next {
                     Ok(Message::Text(payload)) => {
-                        let line = payload.to_string();
-                        if !line.is_empty() {
-                            log::debug!("[CSA] < {line}");
-                            if tx.send(Event::ServerLine(line)).is_err() {
-                                break;
+                        // 1 frame に複数行 (`\n` 区切り) が入りうる。CSA は
+                        // 行 stream protocol なので、frame を line 単位に展開する。
+                        for raw_line in payload.as_str().split('\n') {
+                            let trimmed = raw_line.trim_end_matches('\r');
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            log::debug!("[CSA] < {trimmed}");
+                            if tx.send(Event::ServerLine(trimmed.to_owned())).is_err() {
+                                return;
                             }
                         }
                     }
@@ -467,6 +505,14 @@ impl WsTransport {
         })?;
         Ok(())
     }
+}
+
+/// `WsTransport::try_read_one_frame` の戻り値。
+enum FrameOutcome {
+    /// text frame を 1 つ受信した（複数行を含み得る）。
+    Text(String),
+    /// データなし（WouldBlock / Ping / Pong / Binary 廃棄）。
+    None,
 }
 
 /// `tungstenite::WebSocket` 内部の `TcpStream` に到達して read_timeout を設定する

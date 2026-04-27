@@ -76,6 +76,9 @@ data/
 logs/
 *.log
 
+# csa_client local output (棋譜 / sfen) for staging E2E or local runs
+records/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

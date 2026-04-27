@@ -100,6 +100,12 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // tungstenite が wss を扱う際、rustls 0.23 は process-level の CryptoProvider が
+    // 明示的に登録されていないと panic する。aws-lc-rs より導入が軽い `ring` を選択し、
+    // 起動時に 1 度だけ install する。`set_default` は同 process で既に install されて
+    // いれば `Err` を返すので無視する。
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
 
     // 設定ファイル読み込み
