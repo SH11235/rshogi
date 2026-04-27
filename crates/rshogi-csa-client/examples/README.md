@@ -7,6 +7,41 @@ WebSocket 経路の両方をサポートする。
 Cloudflare Workers staging への実機 E2E は
 [`docs/csa-server/staging-e2e.md`](../../../docs/csa-server/staging-e2e.md) を参照。
 
+## クイックスタート (`--target` プリセット)
+
+本リポ単一 Cloudflare アカウント (`sh11235.workers.dev`) の staging / production
+Worker には TOML を書かずに 1 コマンドで接続できる。`--simple-engine` を併指定すると
+staging の短秒読み (`BYOYOMI_MS=100`) でも完走する軽量設定 (MaterialLevel=1 /
+USI_Hash=32 / margin_msec=0 / max_games=1 / ponder=false) が入る。
+
+```bash
+# 黒番 (staging)
+cargo run -p rshogi-csa-client --release -- \
+  --target staging \
+  --room-id e2e-quickstart-1 \
+  --handle alice \
+  --color black \
+  --simple-engine \
+  --engine /path/to/your/rshogi-usi
+
+# 別ターミナルで白番 (room_id を黒と一致させる)
+cargo run -p rshogi-csa-client --release -- \
+  --target staging \
+  --room-id e2e-quickstart-1 \
+  --handle bob \
+  --color white \
+  --simple-engine \
+  --engine /path/to/your/rshogi-usi
+```
+
+production に繋ぎたい場合は `--target production` に差し替えるだけでよい
+（production は `WS_ALLOWED_ORIGINS = ""` 運用前提でネイティブ経路 / Origin 欠落で
+接続する）。本リポ以外の Cloudflare アカウントに deploy した Worker に繋ぎたい場合は
+`--target` を使わず TOML / `--host` で URL を直接指定する。
+
+`--simple-engine` を外すと TOML / `--hash` / `--ponder` / `--options K=V,K=V` の通常経路で
+エンジン設定をフルコントロールできる。
+
 ## Workers staging × csa_client 実機 E2E
 
 `csa_client_staging/scenarios/<scenario>/` 配下の `*.toml.example` をコピーして

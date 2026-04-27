@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use clap::Parser;
+use anyhow::{Context, Result, anyhow};
+use clap::{Parser, ValueEnum};
 
 use rshogi_csa_client::config::CsaClientConfig;
 use rshogi_csa_client::engine::UsiEngine;
@@ -27,6 +27,36 @@ use rshogi_csa_client::protocol::{CsaConnection, GameResult};
 use rshogi_csa_client::record::save_record;
 use rshogi_csa_client::session::run_game_session;
 use rshogi_csa_client::transport::{ConnectOpts, TransportTarget};
+
+/// `--target` プリセット。本リポ単一 Cloudflare アカウント (`sh11235.workers.dev`) の
+/// staging / production Worker への 1 コマンド接続を提供する。別アカウントの Worker に
+/// 接続する場合は `--target` を使わず TOML / `--host` で URL を直接指定する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum TargetPreset {
+    /// staging Worker (`rshogi-csa-server-workers-staging.sh11235.workers.dev`)。
+    /// `WS_ALLOWED_ORIGINS = "https://csa-client-local"` allowlist 通過のため
+    /// `Origin: https://csa-client-local` を送る。
+    Staging,
+    /// production Worker (`rshogi-csa-server-workers.sh11235.workers.dev`)。
+    /// `WS_ALLOWED_ORIGINS = ""` (空) の運用前提でネイティブ経路として Origin を
+    /// 送らない (=`ws_origin = None`)。
+    Production,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliColor {
+    Black,
+    White,
+}
+
+impl CliColor {
+    fn as_str(self) -> &'static str {
+        match self {
+            CliColor::Black => "black",
+            CliColor::White => "white",
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +66,31 @@ use rshogi_csa_client::transport::{ConnectOpts, TransportTarget};
 struct Cli {
     /// TOML設定ファイルのパス
     config: Option<PathBuf>,
+
+    /// 接続先プリセット。`--target {staging,production}` で本リポ単一アカウントの
+    /// Worker に 1 コマンドで繋がる。`--room-id` / `--handle` / `--color` を併指定する。
+    #[arg(long, value_enum)]
+    target: Option<TargetPreset>,
+
+    /// `--target` 利用時の room_id。Worker は `/ws/<room_id>` でルームを区切る。
+    /// 黒・白で同じ値を入れること（マッチング成立条件）。
+    #[arg(long)]
+    room_id: Option<String>,
+
+    /// `--target` 利用時のログインハンドル。CSA LOGIN ID は `<handle>+<room_id>+<color>`
+    /// 形式で組み立てる（Workers GameRoom が要求するフォーマット）。
+    #[arg(long)]
+    handle: Option<String>,
+
+    /// `--target` 利用時の手番。
+    #[arg(long, value_enum)]
+    color: Option<CliColor>,
+
+    /// 軽量エンジン設定 (MaterialLevel=1 / USI_Hash=32 / margin_msec=0 / max_games=1 /
+    /// ponder=false) を有効化。staging の短秒読み運用 (BYOYOMI_MS=100) で 1 局を
+    /// 素早く終局まで回したいとき用。`--engine` でバイナリ指定が必要。
+    #[arg(long, default_value_t = false)]
+    simple_engine: bool,
 
     /// CSAサーバーホスト名
     #[arg(long)]
@@ -115,6 +170,15 @@ fn main() -> Result<()> {
     } else {
         CsaClientConfig::default()
     };
+
+    // `--target` プリセットを TOML の上に重ねる。CLI で room_id / handle / color が
+    // 揃っていれば host / id / ws_origin / floodgate を 1 引数で組み立てる。
+    apply_target_preset(&mut config, &cli)?;
+
+    // `--simple-engine` で staging 短秒読み向け軽量設定を上書き。
+    if cli.simple_engine {
+        apply_simple_engine_preset(&mut config);
+    }
 
     // 環境変数でオーバーライド
     apply_env_overrides(&mut config);
@@ -265,6 +329,78 @@ fn run_one_game(
     result
 }
 
+/// `--target` プリセット適用時に password が空のときに埋める placeholder 値。
+/// Workers GameRoom 側は LOGIN password の値を検証しないため、空でなければ任意で
+/// よい。TOML / `--password` で明示的に上書きできる。
+const PRESET_FALLBACK_PASSWORD: &str = "anything";
+
+/// `--target` プリセット適用。`--target` が未指定なら no-op。
+///
+/// 指定時は `--room-id` / `--handle` / `--color` の 3 つを併指定必須とし、
+/// 不足があれば早期エラーで abort する（部分的な preset 適用を避ける）。
+fn apply_target_preset(config: &mut CsaClientConfig, cli: &Cli) -> Result<()> {
+    let Some(target) = cli.target else {
+        return Ok(());
+    };
+    let room_id = cli
+        .room_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("--target を指定する場合 --room-id <room_id> も指定してください"))?;
+    let handle = cli
+        .handle
+        .as_deref()
+        .ok_or_else(|| anyhow!("--target を指定する場合 --handle <name> も指定してください"))?;
+    let color = cli.color.ok_or_else(|| {
+        anyhow!("--target を指定する場合 --color <black|white> も指定してください")
+    })?;
+
+    let (subdomain, ws_origin) = match target {
+        TargetPreset::Staging => (
+            "rshogi-csa-server-workers-staging.sh11235.workers.dev",
+            // staging Worker は `WS_ALLOWED_ORIGINS = "https://csa-client-local"` で
+            // この値を allowlist に登録済み。Origin を送ってブラウザ経路相当でも
+            // ネイティブ経路相当でも通電できるが、明示しておく方が allowlist 経路の
+            // 動作確認に資する。
+            Some("https://csa-client-local".to_owned()),
+        ),
+        TargetPreset::Production => (
+            "rshogi-csa-server-workers.sh11235.workers.dev",
+            // production Worker の `WS_ALLOWED_ORIGINS` は空 (空 allowlist 運用)。
+            // Origin 欠落 = ネイティブ経路として素通し、Origin 付きは 403 になる。
+            // web client 化したいときは wrangler.production.toml の allowlist に値を追加
+            // してから CLI で `--ws-origin <url>` を渡す運用に切り替える。
+            None,
+        ),
+    };
+    config.server.host = format!("wss://{subdomain}/ws/{room_id}");
+    // `wss://` 経路では port 値は無視されるが、TOML schema 互換のため 0 を入れておく。
+    config.server.port = 0;
+    config.server.id = format!("{handle}+{room_id}+{}", color.as_str());
+    if config.server.password.is_empty() {
+        config.server.password = PRESET_FALLBACK_PASSWORD.to_owned();
+    }
+    // Workers GameRoom は floodgate=true 前提の挙動（Game_Summary で Floodgate
+    // 拡張を返す等）なので、preset では強制 true。TOML で `floodgate = false` を
+    // 入れていても上書きされる。CLI `--floodgate=false` は後段で勝つので回避可能。
+    config.server.floodgate = true;
+    config.server.ws_origin = ws_origin;
+    Ok(())
+}
+
+/// `--simple-engine` プリセット。staging の短秒読み運用で 1 局を素早く回す軽量
+/// 設定を `[engine.options]` / `[time]` / `[game]` に重ねる。`engine.path` には
+/// 触れないので、`--engine` か TOML / 環境変数で指定する責任は呼び出し側。
+fn apply_simple_engine_preset(config: &mut CsaClientConfig) {
+    config
+        .engine
+        .options
+        .insert("MaterialLevel".to_owned(), toml::Value::Integer(1));
+    config.engine.options.insert("USI_Hash".to_owned(), toml::Value::Integer(32));
+    config.time.margin_msec = 0;
+    config.game.max_games = 1;
+    config.game.ponder = false;
+}
+
 fn apply_cli_overrides(config: &mut CsaClientConfig, cli: &Cli) {
     if let Some(ref host) = cli.host {
         config.server.host = host.clone();
@@ -391,4 +527,145 @@ fn init_logger(config: &CsaClientConfig) {
         }
     });
     builder.init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli_with(target: Option<TargetPreset>) -> Cli {
+        Cli {
+            config: None,
+            target,
+            room_id: None,
+            handle: None,
+            color: None,
+            simple_engine: false,
+            host: None,
+            port: None,
+            id: None,
+            password: None,
+            engine: None,
+            hash: None,
+            ponder: None,
+            floodgate: None,
+            ws_origin: None,
+            keep_alive: None,
+            margin_msec: None,
+            max_games: None,
+            log_level: None,
+            record_dir: None,
+            options: None,
+        }
+    }
+
+    #[test]
+    fn target_preset_no_op_when_target_unset() {
+        let mut config = CsaClientConfig::default();
+        let original_host = config.server.host.clone();
+        apply_target_preset(&mut config, &cli_with(None)).unwrap();
+        assert_eq!(config.server.host, original_host);
+        assert!(config.server.id.is_empty());
+    }
+
+    #[test]
+    fn target_preset_requires_room_id() {
+        let mut config = CsaClientConfig::default();
+        let cli = cli_with(Some(TargetPreset::Staging));
+        let err = apply_target_preset(&mut config, &cli).unwrap_err();
+        assert!(err.to_string().contains("--room-id"));
+    }
+
+    #[test]
+    fn target_preset_requires_handle() {
+        let mut config = CsaClientConfig::default();
+        let mut cli = cli_with(Some(TargetPreset::Staging));
+        cli.room_id = Some("r".to_owned());
+        let err = apply_target_preset(&mut config, &cli).unwrap_err();
+        assert!(err.to_string().contains("--handle"));
+    }
+
+    #[test]
+    fn target_preset_requires_color() {
+        let mut config = CsaClientConfig::default();
+        let mut cli = cli_with(Some(TargetPreset::Staging));
+        cli.room_id = Some("r".to_owned());
+        cli.handle = Some("h".to_owned());
+        let err = apply_target_preset(&mut config, &cli).unwrap_err();
+        assert!(err.to_string().contains("--color"));
+    }
+
+    #[test]
+    fn target_preset_staging_fills_host_and_id() {
+        let mut config = CsaClientConfig::default();
+        let mut cli = cli_with(Some(TargetPreset::Staging));
+        cli.room_id = Some("e2e-1".to_owned());
+        cli.handle = Some("alice".to_owned());
+        cli.color = Some(CliColor::Black);
+        apply_target_preset(&mut config, &cli).unwrap();
+        assert_eq!(
+            config.server.host,
+            "wss://rshogi-csa-server-workers-staging.sh11235.workers.dev/ws/e2e-1"
+        );
+        assert_eq!(config.server.id, "alice+e2e-1+black");
+        assert_eq!(config.server.ws_origin.as_deref(), Some("https://csa-client-local"));
+        assert!(!config.server.password.is_empty());
+        assert!(config.server.floodgate);
+    }
+
+    #[test]
+    fn target_preset_production_omits_origin() {
+        let mut config = CsaClientConfig::default();
+        let mut cli = cli_with(Some(TargetPreset::Production));
+        cli.room_id = Some("game42".to_owned());
+        cli.handle = Some("bob".to_owned());
+        cli.color = Some(CliColor::White);
+        apply_target_preset(&mut config, &cli).unwrap();
+        assert_eq!(
+            config.server.host,
+            "wss://rshogi-csa-server-workers.sh11235.workers.dev/ws/game42"
+        );
+        assert_eq!(config.server.id, "bob+game42+white");
+        assert!(config.server.ws_origin.is_none());
+    }
+
+    #[test]
+    fn target_preset_keeps_existing_password() {
+        let mut config = CsaClientConfig::default();
+        config.server.password = "user-supplied".to_owned();
+        let mut cli = cli_with(Some(TargetPreset::Staging));
+        cli.room_id = Some("r".to_owned());
+        cli.handle = Some("h".to_owned());
+        cli.color = Some(CliColor::Black);
+        apply_target_preset(&mut config, &cli).unwrap();
+        assert_eq!(config.server.password, "user-supplied");
+    }
+
+    #[test]
+    fn cli_override_wins_over_target_preset() {
+        // `--target staging` で host/id を埋めた後、`--host` / `--id` が CLI override
+        // で最終的に勝つことを保証する（mix 利用での挙動）。
+        let mut config = CsaClientConfig::default();
+        let mut cli = cli_with(Some(TargetPreset::Staging));
+        cli.room_id = Some("r".to_owned());
+        cli.handle = Some("h".to_owned());
+        cli.color = Some(CliColor::Black);
+        cli.host = Some("wss://custom.example/ws/x".to_owned());
+        cli.id = Some("override-id".to_owned());
+        apply_target_preset(&mut config, &cli).unwrap();
+        apply_cli_overrides(&mut config, &cli);
+        assert_eq!(config.server.host, "wss://custom.example/ws/x");
+        assert_eq!(config.server.id, "override-id");
+    }
+
+    #[test]
+    fn simple_engine_preset_sets_short_byoyomi_defaults() {
+        let mut config = CsaClientConfig::default();
+        apply_simple_engine_preset(&mut config);
+        assert_eq!(config.engine.options.get("MaterialLevel"), Some(&toml::Value::Integer(1)));
+        assert_eq!(config.engine.options.get("USI_Hash"), Some(&toml::Value::Integer(32)));
+        assert_eq!(config.time.margin_msec, 0);
+        assert_eq!(config.game.max_games, 1);
+        assert!(!config.game.ponder);
+    }
 }
