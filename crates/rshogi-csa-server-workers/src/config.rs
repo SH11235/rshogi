@@ -28,7 +28,7 @@ pub struct ConfigKeys;
 
 impl ConfigKeys {
     /// Origin 許可リスト（カンマ区切り）。
-    pub const CORS_ORIGINS: &'static str = "CORS_ORIGINS";
+    pub const WS_ALLOWED_ORIGINS: &'static str = "WS_ALLOWED_ORIGINS";
     /// Durable Object バインディング名（GameRoom 1 対局 = 1 インスタンス）。
     pub const GAME_ROOM_BINDING: &'static str = "GAME_ROOM";
     /// R2 バケットバインディング名（CSA V2 棋譜保存）。
@@ -97,7 +97,7 @@ impl ConfigKeys {
     ///   test (例: `wrangler_secret_only_keys_are_documented`) を新設し、漏れなく
     ///   登録対象を gate する仕組みを併せて整える。
     pub const SHARED_PUBLIC_VARS_KEYS: &'static [&'static str] = &[
-        Self::CORS_ORIGINS,
+        Self::WS_ALLOWED_ORIGINS,
         Self::CLOCK_KIND,
         Self::TOTAL_TIME_SEC,
         Self::BYOYOMI_SEC,

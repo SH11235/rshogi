@@ -16,7 +16,7 @@ id = "csa_e2e_black_<date>"
 password = "anything"
 floodgate = true
 
-# WebSocket Upgrade 時に送る Origin。staging Worker の CORS_ORIGINS allowlist
+# WebSocket Upgrade 時に送る Origin。staging Worker の WS_ALLOWED_ORIGINS allowlist
 # に同じ値を追加してから接続する（§1 参照）。
 ws_origin = "https://csa-client-local"
 

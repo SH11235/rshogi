@@ -73,7 +73,7 @@ export interface HarnessOptions {
   totalTimeMin?: number;
   byoyomiMin?: number;
   clockKind?: "countdown" | "fischer" | "stopwatch";
-  corsOrigins?: string;
+  wsAllowedOrigins?: string;
   adminHandle?: string;
 }
 
@@ -99,7 +99,7 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       ADMIN_HANDLE: opts.adminHandle ?? "admin",
       RECONNECT_GRACE_SECONDS: String(opts.reconnectGraceSeconds ?? 0),
       ALLOW_FLOODGATE_FEATURES: opts.allowFloodgateFeatures ? "true" : "false",
-      CORS_ORIGINS: opts.corsOrigins ?? "https://example.com",
+      WS_ALLOWED_ORIGINS: opts.wsAllowedOrigins ?? "https://example.com",
     },
     defaultPersistRoot: opts.persistRoot,
   });

@@ -34,7 +34,7 @@ pub struct ServerConfig {
     pub keepalive: KeepaliveConfig,
     /// WebSocket Upgrade 時に送る `Origin` ヘッダ値。`None` のとき
     /// `tungstenite` の既定値（URL から導出）に任せる。Cloudflare Workers の
-    /// `CORS_ORIGINS` allowlist 通過のため、運用時は明示する。
+    /// `WS_ALLOWED_ORIGINS` allowlist 通過のため、運用時は明示する。
     #[serde(default)]
     pub ws_origin: Option<String>,
 }

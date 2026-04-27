@@ -54,7 +54,7 @@ preview_bucket_name = "local-floodgate-history-dev"
 # WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。
 # 空文字列・未設定時は全 Upgrade 要求を 403 で拒否する（安全側の既定）。
 [vars]
-CORS_ORIGINS = ""
+WS_ALLOWED_ORIGINS = ""
 # 対局時計。`countdown` / `fischer` / `stopwatch`。
 CLOCK_KIND = "countdown"
 # countdown / fischer 用（秒）。
