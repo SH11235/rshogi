@@ -40,7 +40,8 @@ async fn forward_ws_to_room(
     room_id: &str,
 ) -> Result<Response> {
     // Origin 許可リストは `[vars] WS_ALLOWED_ORIGINS = "<csv>"` から取得する。
-    // 値が空や未設定なら `OriginAllowList` は空 = 全拒否（安全側）。
+    // 値が空や未設定なら `OriginAllowList` は空 = ブラウザ経由（Origin 付き）は全拒否。
+    // ネイティブ CSA クライアント等 Origin ヘッダを送らない経路は素通し（[`evaluate`] の仕様）。
     let allow_csv = env
         .var(ConfigKeys::WS_ALLOWED_ORIGINS)
         .ok()
@@ -51,7 +52,6 @@ async fn forward_ws_to_room(
     let origin_header = req.headers().get("Origin")?;
     match evaluate(origin_header.as_deref(), allow_list.iter()) {
         OriginDecision::Allow => {}
-        OriginDecision::Missing => return Response::error("Missing Origin", 403),
         OriginDecision::NotAllowed => return Response::error("Forbidden Origin", 403),
     }
 

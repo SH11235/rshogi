@@ -65,11 +65,13 @@ bucket_name = "rshogi-csa-floodgate-history-prod"
 # `[vars]` の値は機密でないが、本番 client URL に応じて運用者が更新する。
 # 値変更は通常の PR で行い、merge → dispatch deploy で反映される。
 [vars]
-# WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。
-# 空文字列・未設定時は全 Upgrade 要求を 403 で拒否する（安全側の既定）。
-# ⚠️ production を実 client 向けに立ち上げる前に、必ず本番 client の Origin
-# を設定すること。空のまま production deploy すると `/health` は応答するが
-# WS 対局は一切成立しない（client が 403 で全弾かれる）状態で本番化する。
+# WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。ブラウザ経由
+# （Origin ヘッダ付き）のリクエストに対する CSRF 防御として機能する。
+# 空文字列・未設定時はブラウザ経由を全 403、Origin ヘッダを送らない
+# ネイティブ CSA クライアント（`rshogi-csa-client` 等）は素通し。
+# production では web client が確定するまで空のままで運用してよい。
+# native CSA クライアントは LOGIN ハンドル / パスワード等の別レイヤで認可する。
+# web client 化したときに deployment.md §3.4 の手順で Origin を追加する。
 # 例: "https://rshogi.example.com,https://www.rshogi.example.com"
 WS_ALLOWED_ORIGINS = ""
 
