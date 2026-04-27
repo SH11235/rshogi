@@ -27,7 +27,10 @@ pub enum OriginDecision {
 ///
 /// # 引数
 /// - `origin`: リクエストの `Origin` ヘッダ値（`Some("https://example.com")` など）。
-///   `None` はネイティブ CSA クライアント等の非ブラウザ経路として許可する。
+///   `None` は **HTTP リクエストヘッダ自体が欠落** している場合のみを指す。
+///   `Origin: null` のように文字列 `"null"` が送られている場合は `Some("null")` で
+///   到達するので、本関数は他の文字列同様に allowlist と照合し、未登録なら `NotAllowed`
+///   を返す。`file://` や sandboxed iframe 等の `Origin: null` は素通し対象ではない。
 /// - `allowed`: 許可する Origin の列（ホワイトリスト）。空のときも Origin 欠落は
 ///   素通し、Origin 付きはすべて拒否。
 ///
@@ -80,6 +83,15 @@ mod tests {
             evaluate(Some("https://evil.example"), allowed.iter().copied()),
             OriginDecision::NotAllowed
         );
+    }
+
+    #[test]
+    fn origin_null_string_is_not_treated_as_missing() {
+        // `Origin: null` (文字列 "null") は `None` と区別され、allowlist に
+        // 登録されていなければ `NotAllowed`。`file://` や sandboxed iframe で
+        // ブラウザが付与する "null" を素通しさせない。
+        let allowed = ["https://a.example"];
+        assert_eq!(evaluate(Some("null"), allowed.iter().copied()), OriginDecision::NotAllowed);
     }
 
     #[test]
