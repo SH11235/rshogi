@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 
 use rshogi_csa::{Color, CsaMove, ParsedMove, Position, parse_csa_full};
 use rshogi_csa_server::protocol::command::{ClientCommand, serialize_client_command};
-use rshogi_csa_server::types::{CsaMoveToken, GameId, PlayerName, Secret};
+use rshogi_csa_server::types::{CsaMoveToken, GameId, PlayerName, ReconnectToken, Secret};
 
 use crate::event::Event;
 use crate::transport::{ConnectOpts, CsaTransport, TransportTarget};
@@ -44,6 +44,26 @@ pub struct GameSummary {
     pub black_time: TimeConfig,
     /// 後手の時間設定
     pub white_time: TimeConfig,
+    /// `Reconnect_Token:<token>` 拡張行で受信した自色用 token。`None` のとき
+    /// サーバが reconnect protocol を提供していない（`ALLOW_FLOODGATE_FEATURES = false`
+    /// 等）か、相手色用 token のみが送られて自色には付与されていない。
+    /// `Some(token)` の場合、WS 切断時に `LOGIN <id> <pw> reconnect:<game_id>+<token>`
+    /// で同一対局へ復帰できる (Workers の `RECONNECT_GRACE_SECONDS` 以内)。
+    pub reconnect_token: Option<String>,
+}
+
+/// 再接続成立時にサーバから送られる `BEGIN Reconnect_State` ブロックの
+/// パース結果。`Current_Turn` / `Black_Time_Remaining_Ms` / `White_Time_Remaining_Ms`
+/// / `Last_Move` を保持する。
+#[derive(Clone, Debug, Default)]
+pub struct ReconnectState {
+    /// 切断時点の手番。`+` を `Color::Black`、`-` を `Color::White` で表現。
+    /// `None` の場合は不正フォーマットで安全側に倒す（実機サーバは必ず送信）。
+    pub current_turn: Option<Color>,
+    pub black_remaining_ms: i64,
+    pub white_remaining_ms: i64,
+    /// 直前手 (例: `+7776FU`)。`None` のときは初期局面で再接続が走った経路。
+    pub last_move: Option<String>,
 }
 
 /// サーバーから受信した指し手
@@ -121,6 +141,75 @@ impl CsaConnection {
         }
     }
 
+    /// 再接続ログイン: `LOGIN <id> <pw> reconnect:<game_id>+<token>`。
+    ///
+    /// 切断前の `GameSummary.reconnect_token` と `game_id` を使う。サーバが
+    /// 受理すると `LOGIN:<name> OK` を返し、続いて `BEGIN Game_Summary` ...
+    /// `BEGIN Reconnect_State` ... の resume メッセージを送出する。本関数は
+    /// `LOGIN:` 行までのみを処理し、resume 内容の読み取りは
+    /// [`recv_game_summary`][Self::recv_game_summary] と
+    /// [`recv_reconnect_state`][Self::recv_reconnect_state] の組合わせで行う。
+    pub fn login_reconnect(
+        &mut self,
+        id: &str,
+        password: &str,
+        game_id: &str,
+        token: &str,
+    ) -> Result<()> {
+        use rshogi_csa_server::protocol::command::ReconnectRequest;
+        self.password = password.to_string();
+        let cmd = serialize_client_command(&ClientCommand::Login {
+            name: PlayerName::new(id),
+            password: Secret::new(password),
+            x1: false,
+            reconnect: Some(ReconnectRequest {
+                game_id: GameId::new(game_id),
+                token: ReconnectToken::new(token),
+            }),
+        });
+        self.send_line(&cmd)?;
+        let response = self.recv_line_blocking(Duration::from_secs(15))?;
+        if response.starts_with("LOGIN:") && response.contains("OK") {
+            log::info!("[CSA] 再接続ログイン成功: {id} (game_id={game_id})");
+            Ok(())
+        } else {
+            bail!("再接続失敗: {response}");
+        }
+    }
+
+    /// 再接続後の `BEGIN Reconnect_State` ... `END Reconnect_State` ブロックを
+    /// 読み取る。`recv_game_summary` 直後に呼ぶ。各キー (`Current_Turn`,
+    /// `Black_Time_Remaining_Ms`, `White_Time_Remaining_Ms`, `Last_Move`) を
+    /// パースして返す。
+    pub fn recv_reconnect_state(&mut self) -> Result<ReconnectState> {
+        loop {
+            let line = self.recv_line_blocking(Duration::from_secs(30))?;
+            if line == "BEGIN Reconnect_State" {
+                break;
+            }
+        }
+        let mut state = ReconnectState::default();
+        loop {
+            let line = self.recv_line_blocking(Duration::from_secs(30))?;
+            if line == "END Reconnect_State" {
+                return Ok(state);
+            }
+            if let Some(val) = line.strip_prefix("Current_Turn:") {
+                state.current_turn = match val.trim() {
+                    "+" => Some(Color::Black),
+                    "-" => Some(Color::White),
+                    _ => None,
+                };
+            } else if let Some(val) = line.strip_prefix("Black_Time_Remaining_Ms:") {
+                state.black_remaining_ms = val.trim().parse().unwrap_or(0);
+            } else if let Some(val) = line.strip_prefix("White_Time_Remaining_Ms:") {
+                state.white_remaining_ms = val.trim().parse().unwrap_or(0);
+            } else if let Some(val) = line.strip_prefix("Last_Move:") {
+                state.last_move = Some(val.trim().to_owned());
+            }
+        }
+    }
+
     /// Game_Summary を受信して解析する
     pub fn recv_game_summary(&mut self, keepalive_interval_sec: u64) -> Result<GameSummary> {
         log::info!("[CSA] 対局待機中...");
@@ -142,6 +231,7 @@ impl CsaConnection {
         let mut gote_name = String::new();
         let mut position_lines = Vec::new();
         let mut in_position = false;
+        let mut reconnect_token: Option<String> = None;
 
         // 時間設定: 共通 / 先手別 / 後手別の3レイヤー
         // Time_Unit のデフォルトは秒 (1000ms)
@@ -240,6 +330,10 @@ impl CsaConnection {
             } else if let Some(val) = line.strip_prefix("Increment:") {
                 let v: i64 = val.trim().parse().unwrap_or(0);
                 common_time.increment_ms = v * header_time_unit_ms;
+            } else if let Some(val) = line.strip_prefix("Reconnect_Token:") {
+                // 自色用 token は `END Game_Summary` 直前に 1 行だけ届く拡張行。
+                // 相手色 token は届かない（サーバ側 `build_for(my_color)` で除外）。
+                reconnect_token = Some(val.trim().to_owned());
             }
         }
 
@@ -267,6 +361,7 @@ impl CsaConnection {
             initial_moves,
             black_time: final_black_time,
             white_time: final_white_time,
+            reconnect_token,
         };
         log::info!(
             "[CSA] 対局情報受信: {} ({}手目から) {}vs{} 先手:{}ms+{}ms+{}ms 後手:{}ms+{}ms+{}ms",
