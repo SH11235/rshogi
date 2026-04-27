@@ -36,6 +36,12 @@ command = "worker-build --release"
 name = "GAME_ROOM"
 class_name = "GameRoom"
 
+# Lobby: マッチング待機キューとペアリング判定を担当する 1 instance 固定 DO。
+# `id_from_name("default")` で routing する。in-memory queue のみ保持。
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
 # SQLite-backed DO: `state.storage().sql()` を利用するため必須。
 # 本 migration tag は **初回 deploy 時にのみ apply される**。`new_sqlite_classes` の
 # 内容を変更する場合は新 tag (`v2` / `v3` ...) を **追加する** こと。既存 tag を
@@ -43,6 +49,12 @@ class_name = "GameRoom"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["GameRoom"]
+
+# Lobby を SQLite-backed として追加 (storage 利用予定はないが将来の queue TTL 永続化
+# 等を見据えて SQLite クラスとして登録しておく)。
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Lobby"]
 
 # --- R2: 棋譜保存 ---
 # `GameRoom` DO が終局時に CSA V2 棋譜を書き出す先。
@@ -96,6 +108,9 @@ RECONNECT_GRACE_SECONDS = "0"
 # Floodgate 系運用機能（再接続プロトコル等）を opt-in 有効化する。`true` / `1` /
 # `yes` / `on` で有効。空または `false` のとき該当機能要求は起動 fail-fast。
 ALLOW_FLOODGATE_FEATURES = "false"
+# LobbyDO 内 in-memory queue の総数上限。100 件を超える同時待機は LOGIN_LOBBY を
+# queue_full で reject する保守的既定。負荷に応じて引き上げ可。
+LOBBY_QUEUE_SIZE_LIMIT = "100"
 
 # --- secret として設定する値 ---
 # 本番運用に必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。

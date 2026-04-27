@@ -31,6 +31,11 @@ impl ConfigKeys {
     pub const WS_ALLOWED_ORIGINS: &'static str = "WS_ALLOWED_ORIGINS";
     /// Durable Object バインディング名（GameRoom 1 対局 = 1 インスタンス）。
     pub const GAME_ROOM_BINDING: &'static str = "GAME_ROOM";
+    /// Durable Object バインディング名（Lobby マッチング待機キュー、1 instance 固定）。
+    pub const LOBBY_BINDING: &'static str = "LOBBY";
+    /// LobbyDO 内 in-memory queue の総数上限。超過時 LOGIN_LOBBY を `queue_full`
+    /// で reject する。未設定時は 100 が既定値。
+    pub const LOBBY_QUEUE_SIZE_LIMIT: &'static str = "LOBBY_QUEUE_SIZE_LIMIT";
     /// R2 バケットバインディング名（CSA V2 棋譜保存）。
     pub const KIFU_BUCKET_BINDING: &'static str = "KIFU_BUCKET";
     /// R2 バケットバインディング名（Floodgate 履歴保存）。1 対局 = 1 オブジェクト
@@ -78,7 +83,8 @@ impl ConfigKeys {
 
     /// `wrangler.toml` の `[[durable_objects.bindings]] name = "..."` で宣言される
     /// べき名前の網羅列挙。新規 DO binding 定数を追加したら必ず本配列にも追加する。
-    pub const ALL_DO_BINDINGS: &'static [&'static str] = &[Self::GAME_ROOM_BINDING];
+    pub const ALL_DO_BINDINGS: &'static [&'static str] =
+        &[Self::GAME_ROOM_BINDING, Self::LOBBY_BINDING];
 
     /// **deploy 対象の全環境**（production / staging）の `wrangler.<env>.toml`
     /// `[vars]` テーブルで宣言されるべきキーの網羅列挙。本配列に含まれる定数は
@@ -111,6 +117,7 @@ impl ConfigKeys {
         Self::BYOYOMI_MIN,
         Self::RECONNECT_GRACE_SECONDS,
         Self::ALLOW_FLOODGATE_FEATURES,
+        Self::LOBBY_QUEUE_SIZE_LIMIT,
     ];
 
     /// **local dev のみ** の `wrangler.toml.example` `[vars]` テーブルに追加で

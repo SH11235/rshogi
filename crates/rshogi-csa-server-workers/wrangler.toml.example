@@ -23,10 +23,23 @@ command = "cargo install -q worker-build@^0.8 && worker-build --release"
 name = "GAME_ROOM"
 class_name = "GameRoom"
 
+# Lobby: マッチング待機キューとペアリング判定を担当する 1 instance 固定 DO。
+# `id_from_name("default")` で routing する。in-memory queue のみ保持し、
+# Hibernation 復帰時は client が再 LOGIN_LOBBY する想定で永続化はしない。
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
 # SQLite-backed DO: `state.storage().sql()` を利用するため必須。
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["GameRoom"]
+
+# Lobby を SQLite-backed として追加 (storage 利用予定はないが将来の queue TTL 永続化
+# 等を見据えて SQLite クラスとして登録しておく)。
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Lobby"]
 
 # --- R2 (棋譜保存) ---
 # `GameRoom` DO が終局時に CSA V2 棋譜を書き出す先。
@@ -78,3 +91,5 @@ RECONNECT_GRACE_SECONDS = "0"
 # Floodgate 系運用機能（再接続プロトコル等）を opt-in で有効化する。`true` / `1` /
 # `yes` / `on` で有効。空または `false` のとき該当機能要求は起動 fail-fast。
 ALLOW_FLOODGATE_FEATURES = "false"
+# LobbyDO 内 in-memory queue の総数上限。超過時 LOGIN_LOBBY を queue_full で reject。
+LOBBY_QUEUE_SIZE_LIMIT = "100"

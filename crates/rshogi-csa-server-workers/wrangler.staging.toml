@@ -33,6 +33,13 @@ command = "worker-build --release"
 name = "GAME_ROOM"
 class_name = "GameRoom"
 
+# Lobby: マッチング待機キューとペアリング判定を担当する 1 instance 固定 DO。
+# `id_from_name("default")` で routing する。in-memory queue のみ保持し、
+# Hibernation 復帰時は client が再 LOGIN_LOBBY する想定で永続化はしない。
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
 # SQLite-backed DO: `state.storage().sql()` を利用するため必須。
 # 本 migration tag は **初回 deploy 時にのみ apply される**。`new_sqlite_classes` の
 # 内容を変更する場合は新 tag (`v2` / `v3` ...) を **追加する** こと。既存 tag を
@@ -41,6 +48,12 @@ class_name = "GameRoom"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["GameRoom"]
+
+# Lobby を SQLite-backed として追加 (storage 利用予定はないが将来の queue TTL 永続化
+# 等を見据えて SQLite クラスとして登録しておく)。
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Lobby"]
 
 # --- R2: 棋譜保存 ---
 # `GameRoom` DO が終局時に CSA V2 棋譜を書き出す先。staging 用 bucket は事前に
@@ -103,6 +116,8 @@ BYOYOMI_MIN = "1"
 # 計測してから再評価する。
 RECONNECT_GRACE_SECONDS = "30"
 ALLOW_FLOODGATE_FEATURES = "true"
+# LobbyDO 内 in-memory queue の総数上限。staging では小規模通電向けに 100 で運用。
+LOBBY_QUEUE_SIZE_LIMIT = "100"
 
 # --- secret として設定する値 ---
 # staging で必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。
