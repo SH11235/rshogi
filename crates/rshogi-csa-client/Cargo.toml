@@ -27,6 +27,10 @@ rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false }
 # CSA-over-WebSocket 用の sync ハンドシェイク + フレーミング。
 # rustls + webpki ルートで TLS を実装し、native-tls 経由の OpenSSL 依存を避ける。
 tungstenite = { version = "0.27", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+# rustls 0.23 は process-level の `CryptoProvider` を起動時に明示登録する必要がある
+# （`tungstenite` の rustls feature は cert source だけを切り替え、provider は選ばない）。
+# `ring` provider を `main()` 冒頭で `install_default()` 経由で登録する。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 ctrlc = "3.4"
 libc = "0.2"

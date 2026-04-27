@@ -105,6 +105,90 @@ fn ws_transport_reader_thread_delivers_multiple_lines() {
 }
 
 #[test]
+fn ws_transport_splits_multiline_frame_into_lines() {
+    // CSA サーバは Game_Summary のように `\n` 区切りの複数行を 1 frame で送る。
+    // client 側は frame を行単位に split して 1 行ずつ消費できなければならない。
+    let (port, join) = spawn_mock_ws_server(|ws| {
+        let _ = ws.read(); // wait for "READY"
+        ws.send(Message::Text(
+            "BEGIN Game_Summary\nName+:black\nName-:white\nEND Game_Summary\n".into(),
+        ))
+        .expect("send multiline");
+        thread::sleep(Duration::from_millis(50));
+    });
+
+    let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0);
+    let mut transport = CsaTransport::connect(
+        &target,
+        &ConnectOpts {
+            tcp_keepalive: false,
+            ws_origin: Some("http://localhost".to_owned()),
+        },
+    )
+    .expect("connect");
+
+    transport.write_line("READY").expect("write ready");
+
+    let mut received = Vec::new();
+    while received.len() < 4 {
+        match transport.read_line_blocking(Duration::from_secs(5)) {
+            Ok(line) => received.push(line),
+            Err(e) => panic!("read failed: {e}"),
+        }
+    }
+    assert_eq!(
+        received,
+        vec![
+            "BEGIN Game_Summary".to_owned(),
+            "Name+:black".to_owned(),
+            "Name-:white".to_owned(),
+            "END Game_Summary".to_owned(),
+        ]
+    );
+
+    drop(transport);
+    join.join().expect("server thread");
+}
+
+#[test]
+fn ws_transport_reader_thread_splits_multiline_frame() {
+    // start_reader_thread 経路でも multi-line frame を 1 行ずつ Event::ServerLine で
+    // 配信できる。
+    let (port, join) = spawn_mock_ws_server(|ws| {
+        let _ = ws.read();
+        ws.send(Message::Text("LINE_X\nLINE_Y\nLINE_Z\n".into())).expect("send");
+        thread::sleep(Duration::from_millis(50));
+    });
+
+    let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0);
+    let mut transport = CsaTransport::connect(
+        &target,
+        &ConnectOpts {
+            tcp_keepalive: false,
+            ws_origin: Some("http://localhost".to_owned()),
+        },
+    )
+    .expect("connect");
+    transport.write_line("READY").expect("write");
+
+    let (tx, rx) = mpsc::channel::<Event>();
+    transport.start_reader_thread(tx).expect("reader thread");
+
+    let mut received = Vec::new();
+    while received.len() < 3 {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Event::ServerLine(s)) => received.push(s),
+            Ok(Event::ServerDisconnected) => break,
+            Err(e) => panic!("recv timeout: {e:?}"),
+        }
+    }
+    assert_eq!(received, vec!["LINE_X".to_owned(), "LINE_Y".into(), "LINE_Z".into()]);
+
+    drop(transport);
+    join.join().expect("server thread");
+}
+
+#[test]
 fn ws_transport_empty_text_frame_treated_as_keepalive() {
     let (port, join) = spawn_mock_ws_server(|ws| {
         let _ = ws.read(); // wait for "PING"
