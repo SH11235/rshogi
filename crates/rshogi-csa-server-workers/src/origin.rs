@@ -4,20 +4,21 @@
 //! ランタイムから分離して単体テストできるようにする。
 //!
 //! **方針**:
-//! - 完全一致のみ許可（ワイルドカードや部分一致を認めない）。
-//! - 許可リストが空の場合は **安全側に倒して全拒否** する。運用ではデプロイ設定で
-//!   `WS_ALLOWED_ORIGINS` を明示する前提。
-//! - Origin ヘッダが欠落しているブラウザ以外のクライアント（CSA 互換クライアント等）を
-//!   許可する場合は、別の認可経路（LOGIN パスワード等）で守る想定。このモジュールでは
-//!   Origin の欠落を**拒否**として扱う。
+//! - Origin ヘッダが付与されている場合は **完全一致のみ許可**（ワイルドカードや
+//!   部分一致を認めない）。これはブラウザ経由のリクエストに対する CSRF 防御層として
+//!   機能する。
+//! - Origin ヘッダが欠落しているリクエスト（ネイティブ CSA クライアント等、
+//!   ブラウザではない経路）は許可する。Origin はブラウザがフェッチ規格に従って
+//!   自動付与するヘッダなので、欠落 = ブラウザ起源ではないシグナル。これらの経路は
+//!   LOGIN ハンドル / パスワード等の別レイヤで認可する前提。
+//! - 許可リストが空の場合、Origin 付きリクエストはすべて拒否される（ブラウザ経由は
+//!   全拒否）。Origin 欠落リクエストは引き続き素通しになる。
 
 /// Origin 判定結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OriginDecision {
-    /// 許可リストに完全一致。
+    /// 許可リストに完全一致した、または Origin ヘッダが欠落していて素通しを許可。
     Allow,
-    /// Origin ヘッダ自体が付与されていない。
-    Missing,
     /// Origin は付与されているが許可リストに存在しない。
     NotAllowed,
 }
@@ -26,17 +27,19 @@ pub enum OriginDecision {
 ///
 /// # 引数
 /// - `origin`: リクエストの `Origin` ヘッダ値（`Some("https://example.com")` など）。
-/// - `allowed`: 許可する Origin の列（ホワイトリスト）。空なら全拒否。
+///   `None` はネイティブ CSA クライアント等の非ブラウザ経路として許可する。
+/// - `allowed`: 許可する Origin の列（ホワイトリスト）。空のときも Origin 欠落は
+///   素通し、Origin 付きはすべて拒否。
 ///
 /// # 戻り値
 /// - [`OriginDecision::Allow`] なら Upgrade を許可してよい。
-/// - それ以外は Upgrade を `403` 等で拒否する。
+/// - [`OriginDecision::NotAllowed`] は Upgrade を `403` 等で拒否する。
 pub fn evaluate<'a, I>(origin: Option<&str>, allowed: I) -> OriginDecision
 where
     I: IntoIterator<Item = &'a str>,
 {
     let Some(origin) = origin else {
-        return OriginDecision::Missing;
+        return OriginDecision::Allow;
     };
     for entry in allowed {
         if entry == origin {
@@ -80,13 +83,22 @@ mod tests {
     }
 
     #[test]
-    fn reject_missing_origin_header() {
+    fn allow_missing_origin_header() {
+        // ネイティブ CSA クライアント等 Origin ヘッダを送らない経路は素通しにする。
         let allowed = ["https://a.example"];
-        assert_eq!(evaluate(None, allowed.iter().copied()), OriginDecision::Missing);
+        assert_eq!(evaluate(None, allowed.iter().copied()), OriginDecision::Allow);
     }
 
     #[test]
-    fn empty_allow_list_rejects_everything() {
+    fn allow_missing_origin_with_empty_allow_list() {
+        // 許可リストが空でも Origin 欠落は素通しになる（CSRF は Origin 付きにのみ効く）。
+        let allowed: [&str; 0] = [];
+        assert_eq!(evaluate(None, allowed.iter().copied()), OriginDecision::Allow);
+    }
+
+    #[test]
+    fn empty_allow_list_rejects_origin_present() {
+        // Origin が付いているのに許可リストが空 → ブラウザ経由全拒否。
         let allowed: [&str; 0] = [];
         assert_eq!(
             evaluate(Some("https://a.example"), allowed.iter().copied()),

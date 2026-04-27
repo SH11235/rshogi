@@ -197,7 +197,8 @@ impl OriginAllowList {
         }
     }
 
-    /// 空かどうか。本番運用で空は実質全拒否となる（[`origin::evaluate`] の仕様）。
+    /// 空かどうか。空のときブラウザ経由（Origin 付き）は全拒否、Origin 欠落の
+    /// ネイティブクライアントは素通し（[`origin::evaluate`] の仕様）。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

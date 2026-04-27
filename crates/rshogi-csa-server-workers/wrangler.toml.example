@@ -51,8 +51,11 @@ bucket_name = "local-floodgate-history-dev"
 preview_bucket_name = "local-floodgate-history-dev"
 
 # --- 変数 ---
-# WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。
-# 空文字列・未設定時は全 Upgrade 要求を 403 で拒否する（安全側の既定）。
+# WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。ブラウザ経由
+# （Origin ヘッダ付き）のリクエストに対する CSRF 防御に使う。
+# 空文字列・未設定時は Origin 付き要求をすべて 403 で拒否する。
+# Origin ヘッダを送らないネイティブ CSA クライアント等は本リストに関係なく素通し
+# （LOGIN ハンドル / パスワード等の別レイヤで認可する想定）。
 [vars]
 WS_ALLOWED_ORIGINS = ""
 # 対局時計。`countdown` / `countdown_msec` / `fischer` / `stopwatch`。
