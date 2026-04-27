@@ -25,7 +25,7 @@ use rshogi_csa_client::config::CsaClientConfig;
 use rshogi_csa_client::engine::UsiEngine;
 use rshogi_csa_client::protocol::{CsaConnection, GameResult};
 use rshogi_csa_client::record::save_record;
-use rshogi_csa_client::session::run_game_session;
+use rshogi_csa_client::session::{run_game_session, run_resumed_session};
 use rshogi_csa_client::transport::{ConnectOpts, TransportTarget};
 
 /// `--target` プリセット。本リポ単一 Cloudflare アカウント (`sh11235.workers.dev`) の
@@ -317,6 +317,48 @@ fn run_one_game(
     // 対局実行
     let result = run_game_session(&mut conn, engine, config, shutdown);
 
+    // 中断 (= サーバ切断) でかつ Reconnect_Token を保持している場合は 1 度だけ
+    // 再接続を試みる。Workers の `RECONNECT_GRACE_SECONDS` 内に到達できれば
+    // 同一対局を継続できる。reconnect 試行前に元 conn は drop / logout する。
+    let reconnect_request = match result.as_ref() {
+        Ok((GameResult::Interrupted, _, Some(summary)))
+            if summary.reconnect_token.is_some() && !shutdown.load(Ordering::SeqCst) =>
+        {
+            Some((summary.game_id.clone(), summary.reconnect_token.clone().unwrap()))
+        }
+        _ => None,
+    };
+
+    if let Some((game_id, token)) = reconnect_request {
+        log::warn!(
+            "[CSA] サーバ切断を検出。Reconnect_Token を持つので grace 内に再接続を試みます: game_id={game_id}"
+        );
+        let _ = conn.logout();
+        drop(conn);
+        let credentials = ReconnectCredentials {
+            id: &id,
+            password: &config.server.password,
+            game_id: &game_id,
+            token: &token,
+        };
+        match attempt_reconnect(&target, &opts, &credentials, engine, config, shutdown) {
+            Ok((reconnect_result, reconnect_record)) => {
+                log::info!("[CSA] 再接続成功: 対局を継続して終局: {:?}", reconnect_result);
+                return Ok((reconnect_result, reconnect_record));
+            }
+            Err(e) => {
+                // engine は元 disconnect 経路で `gameover("lose")` 発射済み。
+                // `attempt_reconnect` 中に `engine.new_game()` が成功した後で失敗
+                // するケースではエンジンが「新局面待ち」状態のまま残るが、
+                // `stop_and_wait()` は探索中でない場合は no-op として通過する
+                // ことを期待する (rshogi-usi 含む主要 USI engine の挙動)。
+                log::warn!("[CSA] 再接続失敗: {e}。元の Interrupted 結果で終了します。");
+                let _ = engine.stop_and_wait();
+                return result.map(|(r, rec, _)| (r, rec));
+            }
+        }
+    }
+
     // エラー時は投了を試みる（NF2: 対局中のエラーは投了してから再接続）
     if result.is_err() {
         // ponder 中の場合は stop して bestmove を待ってからクリーンアップ
@@ -326,7 +368,33 @@ fn run_one_game(
     }
 
     let _ = conn.logout();
-    result
+    // (result, record, _summary) → 既存呼び出し互換 (result, record) に縮約
+    result.map(|(r, rec, _)| (r, rec))
+}
+
+/// 切断検出後の再接続に必要な認証情報。多引数化を避けるためまとめる。
+struct ReconnectCredentials<'a> {
+    id: &'a str,
+    password: &'a str,
+    game_id: &'a str,
+    token: &'a str,
+}
+
+/// 切断検出後の自動再接続。新規 transport で接続 → `LOGIN ... reconnect:<game_id>+<token>`
+/// → resume 用 Game_Summary + Reconnect_State 受信 → セッションループ継続。
+fn attempt_reconnect(
+    target: &TransportTarget,
+    opts: &ConnectOpts,
+    creds: &ReconnectCredentials<'_>,
+    engine: &mut UsiEngine,
+    config: &CsaClientConfig,
+    shutdown: &AtomicBool,
+) -> Result<(GameResult, rshogi_csa_client::record::GameRecord)> {
+    let mut conn = CsaConnection::connect_with_target(target, opts)?;
+    conn.login_reconnect(creds.id, creds.password, creds.game_id, creds.token)?;
+    let (r, rec, _) = run_resumed_session(&mut conn, engine, config, shutdown)?;
+    let _ = conn.logout();
+    Ok((r, rec))
 }
 
 /// `--target` プリセット適用時に password が空のときに埋める placeholder 値。

@@ -16,7 +16,9 @@ use rshogi_csa::{Color, Position, csa_move_to_usi, usi_move_to_csa};
 use crate::config::CsaClientConfig;
 use crate::engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine};
 use crate::event::Event;
-use crate::protocol::{CsaConnection, GameResult, parse_game_result, parse_server_move};
+use crate::protocol::{
+    CsaConnection, GameResult, GameSummary, ReconnectState, parse_game_result, parse_server_move,
+};
 use crate::record::GameRecord;
 
 // ────────────────────────────────────────────
@@ -293,20 +295,77 @@ pub fn run_game_session(
     engine: &mut UsiEngine,
     config: &CsaClientConfig,
     shutdown: &AtomicBool,
-) -> Result<(GameResult, GameRecord)> {
+) -> Result<(GameResult, GameRecord, Option<GameSummary>)> {
     let summary = conn.recv_game_summary(config.server.keepalive.ping_interval_sec)?;
     conn.agree_and_wait_start(&summary.game_id)?;
     engine.new_game()?;
 
+    let summary_for_caller = summary.clone();
+    let (result, record) = run_session_loop(conn, engine, config, shutdown, summary, None)?;
+    Ok((result, record, Some(summary_for_caller)))
+}
+
+/// 再接続成立後の resume セッションを駆動する。
+///
+/// `login_reconnect` が成功した直後の `conn` を受け取り、サーバが続けて送出する
+/// `BEGIN Game_Summary` ... `END Game_Summary` ブロック (新 `Reconnect_Token` 付き)
+/// と `BEGIN Reconnect_State` ... `END Reconnect_State` ブロックを読み取る。
+/// その後、AGREE 経路は **スキップ** して（対局はサーバ側 `Playing` 状態のまま）
+/// 対局ループに戻る。前 session で `gameover("lose")` を発射済みのエンジンに対し
+/// 新 session の `position` / `go` を許可するため、冒頭で `engine.new_game()` を
+/// 呼んで USI 状態をリセットする (hash の温存は後段の最適化として別 PR)。
+pub fn run_resumed_session(
+    conn: &mut CsaConnection,
+    engine: &mut UsiEngine,
+    config: &CsaClientConfig,
+    shutdown: &AtomicBool,
+) -> Result<(GameResult, GameRecord, Option<GameSummary>)> {
+    // resume 時の Game_Summary は切断時点の局面が `position_section` に焼き込まれて
+    // いるため、`initial_moves` は通常空。新 `Reconnect_Token` も含まれる。
+    let summary = conn.recv_game_summary(config.server.keepalive.ping_interval_sec)?;
+    let state = conn.recv_reconnect_state()?;
+    log::info!(
+        "[CSA] 再接続セッション開始: my_color={:?} 残時間 黒:{}ms 白:{}ms",
+        summary.my_color,
+        state.black_remaining_ms,
+        state.white_remaining_ms
+    );
+
+    engine.new_game()?;
+    let summary_for_caller = summary.clone();
+    let (result, record) = run_session_loop(conn, engine, config, shutdown, summary, Some(state))?;
+    Ok((result, record, Some(summary_for_caller)))
+}
+
+/// `run_game_session` / `run_resumed_session` 共通の対局メインループ。
+///
+/// `resume_state` が `Some` のときは Reconnect_State 由来の残時間で `Clock` を
+/// 上書きし、AGREE / `engine.new_game()` のスキップを前提とする。
+fn run_session_loop(
+    conn: &mut CsaConnection,
+    engine: &mut UsiEngine,
+    config: &CsaClientConfig,
+    shutdown: &AtomicBool,
+    summary: GameSummary,
+    resume_state: Option<ReconnectState>,
+) -> Result<(GameResult, GameRecord)> {
     // サーバー受信スレッドを起動
     let (server_tx, server_rx) = mpsc::channel();
     conn.start_reader_thread(server_tx)?;
+
+    let mut clock = Clock::from_summary(&summary);
+    if let Some(state) = &resume_state {
+        // resume の Reconnect_State から残時間を復元する。秒読み / increment 設定は
+        // Game_Summary 側を信用し、本体時間だけ上書き。
+        clock.black_time_ms = state.black_remaining_ms.max(0);
+        clock.white_time_ms = state.white_remaining_ms.max(0);
+    }
 
     let mut s = SessionState {
         pos: summary.position.clone(),
         initial_sfen: summary.position.to_sfen(),
         usi_moves: Vec::new(),
-        clock: Clock::from_summary(&summary),
+        clock,
         record: GameRecord::new(&summary),
         ponder_state: None,
         my_color: summary.my_color,
@@ -317,7 +376,7 @@ pub fn run_game_session(
         server_rx: &server_rx,
     };
 
-    // 途中局面の手順を適用
+    // 途中局面の手順を適用 (resume では通常空)
     let mut move_color = summary.position.side_to_move;
     for cm in &summary.initial_moves {
         let usi = csa_move_to_usi(&cm.mv, &s.pos)?;
