@@ -70,9 +70,11 @@ export interface HarnessOptions {
   allowFloodgateFeatures?: boolean;
   totalTimeSec?: number;
   byoyomiSec?: number;
+  totalTimeMs?: number;
+  byoyomiMs?: number;
   totalTimeMin?: number;
   byoyomiMin?: number;
-  clockKind?: "countdown" | "fischer" | "stopwatch";
+  clockKind?: "countdown" | "countdown_msec" | "fischer" | "stopwatch";
   wsAllowedOrigins?: string;
   adminHandle?: string;
 }
@@ -94,6 +96,8 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       CLOCK_KIND: opts.clockKind ?? "countdown",
       TOTAL_TIME_SEC: String(opts.totalTimeSec ?? 600),
       BYOYOMI_SEC: String(opts.byoyomiSec ?? 10),
+      TOTAL_TIME_MS: String(opts.totalTimeMs ?? 600_000),
+      BYOYOMI_MS: String(opts.byoyomiMs ?? 10_000),
       TOTAL_TIME_MIN: String(opts.totalTimeMin ?? 10),
       BYOYOMI_MIN: String(opts.byoyomiMin ?? 1),
       ADMIN_HANDLE: opts.adminHandle ?? "admin",
