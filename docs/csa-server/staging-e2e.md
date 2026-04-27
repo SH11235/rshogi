@@ -110,21 +110,26 @@ CSA V2 形式（`V2.2`、`N+`、`$GAME_ID:`、`BEGIN Position` 〜 `END Position
 
 ## 4. シナリオ B: 連続 N 対局
 
-`max_games = 5` で同 client が 5 局繰り返す。R2 に 5 件のオブジェクトが追加され、
-`game_id` がすべて異なることを確認する。
+`max_games = 5` で同 client が 5 局繰り返す。Workers サーバは **1 DO instance =
+1 対局** という設計で、終局後の同 room_id への再 LOGIN は `LOGIN:incorrect` で
+reject される。連続対局では host / id 内の `{game_seq}` placeholder を
+csa_client が 0 始まりの局番号で自動置換するので、`<room_id>-{game_seq}` 形式に
+書いて毎局新規 DO を立てる運用にする。
 
 ```bash
 cp crates/rshogi-csa-client/examples/csa_client_staging/scenarios/B_consecutive_games/black.toml.example /tmp/B-black.toml
 cp crates/rshogi-csa-client/examples/csa_client_staging/scenarios/B_consecutive_games/white.toml.example /tmp/B-white.toml
-# 同じ <room_id> を両方に入れて起動。
+# 黒・白で同じ <room_id> base を入れて起動。`{game_seq}` は csa_client が
+# 0,1,2,...,(max_games-1) を埋める。
 cargo run -p rshogi-csa-client --release -- /tmp/B-black.toml &
 cargo run -p rshogi-csa-client --release -- /tmp/B-white.toml &
 wait
 ```
 
 期待: 各 client ログに `対局 #1 〜 #5 結果` が並び、`通算: ...勝 ...敗 ...分`
-が出る。R2 list で `<room_id>-<timestamp>.csa` 形式の object が **5 件**
-追加されている。`game_id` は `<room_id>-<n>` で各局異なる timestamp suffix が付く。
+が出る。R2 list で `<room_id>-<n>-<timestamp>.csa` 形式の object が **5 件**
+追加されている。各 object の `game_id` は `<room_id>-<n>-<timestamp>` で
+`<n>` が 0..4 の連番、`<timestamp>` が DO 内で発番される時刻 suffix。
 
 ## 5. シナリオ C: 切断 → 再接続
 

@@ -8,11 +8,18 @@
 # `wss://` で始まる場合は WebSocket 経路として接続する。
 # `<account>` 部分は Cloudflare アカウント名に置き換え、`<room_id>` は黒・白で
 # 同一の任意文字列を入れる。
-host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>"
+#
+# Workers サーバは 1 DO instance = 1 対局 という設計で、終局後の同 room_id への
+# 再 LOGIN は `LOGIN:incorrect` で reject する。連続対局 (max_games > 1) では
+# host / id 内の `{game_seq}` placeholder を csa_client が 0 始まりの局番号に
+# 自動置換するので、room_id 末尾に `-{game_seq}` を入れて毎局新規 DO を立てる。
+host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>-{game_seq}"
 # host が `wss://` を含む場合は `port` は無視されるが、TOML schema 互換のため
 # 値を残しておく。
 port = 0
-id = "csa_e2e_black_<date>_B"
+# id にも `{game_seq}` を入れて、毎局異なる game_name とすることで Workers サーバの
+# slot 衝突を避ける。
+id = "csa_e2e_black_<date>_B+<room_id>-{game_seq}+black"
 password = "anything"
 floodgate = true
 

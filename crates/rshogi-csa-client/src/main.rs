@@ -164,7 +164,7 @@ fn main() -> Result<()> {
             break;
         }
 
-        match run_one_game(&config, &mut engine, &shutdown) {
+        match run_one_game(&config, &mut engine, &shutdown, games_played) {
             Ok((result, record)) => {
                 // 棋譜保存
                 if let Err(e) = save_record(&record, &config.record) {
@@ -222,21 +222,33 @@ fn spawn_engine(config: &CsaClientConfig) -> Result<UsiEngine> {
     )
 }
 
-/// 1回のゲームを実行する（接続〜対局〜切断）
+/// 1回のゲームを実行する（接続〜対局〜切断）。
+///
+/// `games_played` は本起動セッションでの対局完了数（0 開始）。`config.server.host` /
+/// `config.server.id` に `{game_seq}` placeholder が含まれていれば
+/// `games_played` に置換する。Cloudflare Workers サーバは 1 DO instance =
+/// 1 対局という設計のため、連続対局では room_id を毎局変える必要があり、
+/// この placeholder で host URL を局ごとに分岐する運用を提供する。本家 Floodgate の
+/// ように同 server を多対局に使う場合は placeholder を入れず host を固定すればよい。
 fn run_one_game(
     config: &CsaClientConfig,
     engine: &mut UsiEngine,
     shutdown: &AtomicBool,
+    games_played: u32,
 ) -> Result<(GameResult, rshogi_csa_client::record::GameRecord)> {
+    let game_seq_str = games_played.to_string();
+    let host = config.server.host.replace("{game_seq}", &game_seq_str);
+    let id = config.server.id.replace("{game_seq}", &game_seq_str);
+
     // サーバー接続。host に scheme (`ws://` / `wss://` / `tcp://`) があれば
     // それに従い、無ければ既存挙動どおり `host:port` の TCP。
-    let target = TransportTarget::from_host_port(&config.server.host, config.server.port);
+    let target = TransportTarget::from_host_port(&host, config.server.port);
     let opts = ConnectOpts {
         tcp_keepalive: config.server.keepalive.tcp,
         ws_origin: config.server.ws_origin.clone(),
     };
     let mut conn = CsaConnection::connect_with_target(&target, &opts)?;
-    conn.login(&config.server.id, &config.server.password)?;
+    conn.login(&id, &config.server.password)?;
 
     // 対局実行
     let result = run_game_session(&mut conn, engine, config, shutdown);

@@ -5,9 +5,11 @@
 
 [server]
 # 黒番と同じ `<room_id>` を URL 末尾に入れる（黒・白で完全一致が必須）。
-host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>"
+# `{game_seq}` placeholder は csa_client が 0 始まりの局番号に自動置換する
+# （連続対局時の room_id 衝突回避、scenarios/B_consecutive_games/black.toml.example 参照）。
+host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>-{game_seq}"
 port = 0
-id = "csa_e2e_white_<date>_B"
+id = "csa_e2e_white_<date>_B+<room_id>-{game_seq}+white"
 password = "anything"
 floodgate = true
 
