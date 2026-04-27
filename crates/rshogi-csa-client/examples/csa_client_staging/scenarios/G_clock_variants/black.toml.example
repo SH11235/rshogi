@@ -1,8 +1,11 @@
-# Workers staging × csa_client (黒番) 用 TOML 例。
+# Workers staging × csa_client (黒番) 用 TOML 例 — シナリオ G (時計違い)。
 #
-# 詳細手順は docs/csa-server/staging-e2e.md を参照。
-# このファイルは `.example` の suffix 付きで repo に置かれている。実際に使う際は
-# 任意のローカルパス（`/tmp/G-black.toml` 等）にコピーしてから書き換える。
+# シナリオ G では client 側の設定はシナリオ A と同形で、`CLOCK_KIND` の切替は
+# `wrangler.staging.toml` 側で行う (詳細は docs/csa-server/staging-e2e.md §9)。
+# 本ファイルは A と同一の id 形式だと並行/同日実行時に衝突するので `_G` suffix を
+# 付けて区別する。
+#
+# 実際に使う際は任意のローカルパス（`/tmp/G-black.toml` 等）にコピーしてから書き換える。
 
 [server]
 # `wss://` で始まる場合は WebSocket 経路として接続する。
@@ -12,7 +15,7 @@ host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_i
 # host が `wss://` を含む場合は `port` は無視されるが、TOML schema 互換のため
 # 値を残しておく。
 port = 0
-id = "csa_e2e_black_<date>"
+id = "csa_e2e_black_<date>_G"
 password = "anything"
 floodgate = true
 
