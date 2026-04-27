@@ -22,6 +22,10 @@ pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
         return Response::ok(format!("rshogi-csa-server-workers v{}", env!("CARGO_PKG_VERSION")));
     }
 
+    if method == Method::Get && path == "/ws/lobby" {
+        return forward_ws_to_lobby(req, env).await;
+    }
+
     if method == Method::Get && path.starts_with("/ws/") {
         let Some(route) = parse_ws_route(&path) else {
             return Response::error("Invalid room_id", 400);
@@ -30,6 +34,48 @@ pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
     }
 
     Response::error("Not Found", 404)
+}
+
+/// `/ws/lobby` を Origin 検査し、許可された場合のみ Lobby DO に転送する。
+/// Lobby は 1 instance 固定 (`id_from_name("default")`) でアプリ全体のマッチング
+/// 待機キューを保持する。
+async fn forward_ws_to_lobby(req: Request, env: Env) -> Result<Response> {
+    let allow_csv = env
+        .var(ConfigKeys::WS_ALLOWED_ORIGINS)
+        .ok()
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let allow_list = OriginAllowList::from_csv(&allow_csv);
+    let origin_header = req.headers().get("Origin")?;
+    match evaluate(origin_header.as_deref(), allow_list.iter()) {
+        OriginDecision::Allow => {}
+        OriginDecision::NotAllowed => return Response::error("Forbidden Origin", 403),
+    }
+
+    let upgrade = req.headers().get("Upgrade")?.unwrap_or_default().to_ascii_lowercase();
+    if upgrade != "websocket" {
+        return Response::error("Upgrade required", 426);
+    }
+
+    let namespace = env.durable_object(ConfigKeys::LOBBY_BINDING)?;
+    let stub = namespace.id_from_name("default")?.get_stub()?;
+
+    let forward_url = "https://do.internal/ws/lobby";
+    let mut fwd = Request::new(forward_url, Method::Get)?;
+    let fwd_headers = fwd.headers_mut()?;
+    for name in [
+        "upgrade",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-protocol",
+        "sec-websocket-extensions",
+    ] {
+        if let Some(v) = req.headers().get(name)? {
+            let _ = fwd_headers.set(name, &v);
+        }
+    }
+
+    stub.fetch_with_request(fwd).await
 }
 
 /// `/ws/:room_id` を Origin 検査し、許可された場合のみ GameRoom DO に転送する。

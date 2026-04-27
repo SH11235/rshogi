@@ -77,6 +77,7 @@ export interface HarnessOptions {
   clockKind?: "countdown" | "countdown_msec" | "fischer" | "stopwatch";
   wsAllowedOrigins?: string;
   adminHandle?: string;
+  lobbyQueueSizeLimit?: number;
 }
 
 export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> {
@@ -90,6 +91,7 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
     compatibilityDate: "2026-04-21",
     durableObjects: {
       GAME_ROOM: { className: "GameRoom", useSQLite: true },
+      LOBBY: { className: "Lobby", useSQLite: true },
     },
     r2Buckets: ["KIFU_BUCKET", "FLOODGATE_HISTORY_BUCKET"],
     bindings: {
@@ -104,6 +106,7 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       RECONNECT_GRACE_SECONDS: String(opts.reconnectGraceSeconds ?? 0),
       ALLOW_FLOODGATE_FEATURES: opts.allowFloodgateFeatures ? "true" : "false",
       WS_ALLOWED_ORIGINS: opts.wsAllowedOrigins ?? "https://example.com",
+      LOBBY_QUEUE_SIZE_LIMIT: String(opts.lobbyQueueSizeLimit ?? 100),
     },
     defaultPersistRoot: opts.persistRoot,
   });

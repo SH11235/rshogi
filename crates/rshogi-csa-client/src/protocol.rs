@@ -477,6 +477,18 @@ impl CsaConnection {
         Ok(())
     }
 
+    /// LobbyDO 等のカスタムプロトコル経路で 1 行を直接送出する。`login` /
+    /// `send_move` 等の高水準 API を経由できない `LOGIN_LOBBY` / `LOGOUT_LOBBY`
+    /// 専用の薄いラッパー。debug log では既存の password マスキングが効く。
+    pub fn send_raw_line(&mut self, line: &str) -> Result<()> {
+        self.send_line(line)
+    }
+
+    /// LobbyDO 等のカスタムプロトコル経路で 1 行を blocking 受信する。
+    pub fn recv_line_blocking_pub(&mut self, timeout: Duration) -> Result<String> {
+        self.recv_line_blocking(timeout)
+    }
+
     /// keep-alive 空行を送信（必要な場合）
     pub fn maybe_send_keepalive(&mut self, interval_sec: u64) -> Result<()> {
         if interval_sec == 0 {

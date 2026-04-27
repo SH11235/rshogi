@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, ValueEnum};
 
 use rshogi_csa_client::config::CsaClientConfig;
@@ -91,6 +91,17 @@ struct Cli {
     /// 素早く終局まで回したいとき用。`--engine` でバイナリ指定が必要。
     #[arg(long, default_value_t = false)]
     simple_engine: bool,
+
+    /// LobbyDO マッチングモード。`--target` と `--handle` / `--color` 併用必須。
+    /// `/ws/lobby` に接続して LOGIN_LOBBY → MATCHED 受信 → 指定された room_id へ
+    /// 接続して対局するループを `--max-games` まで繰り返す。
+    #[arg(long, default_value_t = false)]
+    lobby: bool,
+
+    /// `--lobby` 利用時のマッチング pool 名 (`<game_name>` 部分)。同 game_name 同士
+    /// でしかマッチングしない。`[A-Za-z0-9_-]` / 1〜32 文字制限。
+    #[arg(long)]
+    game_name: Option<String>,
 
     /// CSAサーバーホスト名
     #[arg(long)]
@@ -228,7 +239,33 @@ fn main() -> Result<()> {
             break;
         }
 
-        match run_one_game(&config, &mut engine, &shutdown, games_played) {
+        // `--lobby` モードは対局直前に LobbyDO へ問い合わせて room_id を取得する。
+        let lobby_room_assignment = if cli.lobby {
+            match acquire_lobby_match(&config, &cli, &shutdown) {
+                Ok(Some(assignment)) => Some(assignment),
+                Ok(None) => break, // shutdown
+                Err(e) => {
+                    log::error!("ロビー接続エラー: {e}");
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    log::info!("{}秒後にリトライ...", retry_delay.as_secs());
+                    std::thread::sleep(retry_delay);
+                    retry_delay =
+                        (retry_delay * 2).min(Duration::from_secs(config.retry.max_delay_sec));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let game_config = if let Some(ref assignment) = lobby_room_assignment {
+            config_with_lobby_assignment(&config, assignment)
+        } else {
+            config.clone()
+        };
+
+        match run_one_game(&game_config, &mut engine, &shutdown, games_played) {
             Ok((result, record)) => {
                 // 棋譜保存
                 if let Err(e) = save_record(&record, &config.record) {
@@ -397,6 +434,137 @@ fn attempt_reconnect(
     Ok((r, rec))
 }
 
+/// `--lobby` モードで成立したマッチ。`run_one_game` 直前に config を差し替えるための
+/// host / id 値を保持する。
+struct LobbyAssignment {
+    /// MATCHED で受け取った WS URL (`wss://<subdomain>/ws/<room_id>`)。
+    host: String,
+    /// `<handle>+<game_name>+<color>` 形式の LOGIN ID (GameRoom DO 側のフォーマット)。
+    id: String,
+}
+
+/// LobbyDO に接続して 1 ペア分のマッチング結果を取得する。
+///
+/// shutdown 信号が立ったら `Ok(None)` を返す (呼び出し側ループを抜ける)。
+fn acquire_lobby_match(
+    config: &CsaClientConfig,
+    cli: &Cli,
+    shutdown: &AtomicBool,
+) -> Result<Option<LobbyAssignment>> {
+    let game_name = cli
+        .game_name
+        .as_deref()
+        .ok_or_else(|| anyhow!("--lobby を指定する場合 --game-name <name> も指定してください"))?;
+    let handle = cli
+        .handle
+        .as_deref()
+        .ok_or_else(|| anyhow!("--lobby を指定する場合 --handle <name> も指定してください"))?;
+    let color = cli.color.ok_or_else(|| {
+        anyhow!("--lobby を指定する場合 --color <black|white> も指定してください")
+    })?;
+
+    // config.server.host は `apply_target_preset` で `wss://<subdomain>/ws/lobby` に
+    // セットされている前提。`/ws/lobby` 以外の経路 (例: TOML 直書きの `wss://.../ws/<room>`)
+    // は LobbyDO に到達しないため early reject する。
+    if !config.server.host.ends_with("/ws/lobby") {
+        bail!(
+            "--lobby は --target staging|production 経由で設定する想定です (host={})",
+            config.server.host
+        );
+    }
+
+    let target = TransportTarget::from_host_port(&config.server.host, config.server.port);
+    let opts = ConnectOpts {
+        tcp_keepalive: config.server.keepalive.tcp,
+        ws_origin: config.server.ws_origin.clone(),
+    };
+    let mut conn = CsaConnection::connect_with_target(&target, &opts)?;
+
+    let color_str = match color {
+        CliColor::Black => "black",
+        CliColor::White => "white",
+    };
+    let login_id = format!("{handle}+{game_name}+{color_str}");
+    let password = if config.server.password.is_empty() {
+        PRESET_FALLBACK_PASSWORD
+    } else {
+        config.server.password.as_str()
+    };
+    let login_line = format!("LOGIN_LOBBY {login_id} {password}");
+    conn.send_raw_line(&login_line)?;
+
+    log::info!("[Lobby] LOGIN_LOBBY 送信: handle={handle} game_name={game_name} color={color_str}");
+
+    // LOGIN_LOBBY:OK → MATCHED <room_id> <color> の順で受信。途中 shutdown が立ったら
+    // logout して None を返す。
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            let _ = conn.send_raw_line("LOGOUT_LOBBY");
+            return Ok(None);
+        }
+        let line = match conn.recv_line_blocking_pub(Duration::from_secs(60)) {
+            Ok(l) => l,
+            Err(e) => {
+                bail!("[Lobby] 受信エラー: {e}");
+            }
+        };
+        if let Some(rest) = line.strip_prefix("LOGIN_LOBBY:") {
+            if rest.contains(" OK") {
+                log::info!("[Lobby] LOGIN_LOBBY OK ({rest})、MATCHED 待機");
+                continue;
+            }
+            if rest.starts_with("incorrect") {
+                bail!("[Lobby] LOGIN_LOBBY 拒否: {rest}");
+            }
+            if rest == "expired" {
+                bail!("[Lobby] queue TTL 超過 (LOGIN_LOBBY:expired)、再試行してください");
+            }
+        }
+        if let Some(rest) = line.strip_prefix("MATCHED ") {
+            // フォーマット: `MATCHED <room_id> <color>`
+            let mut parts = rest.split_whitespace();
+            let room_id = parts.next().unwrap_or("");
+            let assigned_color = parts.next().unwrap_or("");
+            if room_id.is_empty() || assigned_color.is_empty() {
+                bail!("[Lobby] MATCHED 行のフォーマット不正: {line}");
+            }
+            // assigned_color は client 要望と一致するはず (DirectMatch は preferred 維持)。
+            // 念のため検証して mismatch なら bail (将来 Random pairing 等に備えて)。
+            if assigned_color != color_str {
+                bail!(
+                    "[Lobby] MATCHED の color が要望と一致しません: requested={color_str} got={assigned_color}"
+                );
+            }
+            // host を `wss://<subdomain>/ws/<room_id>` に書き換える。
+            let new_host = config
+                .server
+                .host
+                .strip_suffix("/ws/lobby")
+                .map(|prefix| format!("{prefix}/ws/{room_id}"))
+                .ok_or_else(|| anyhow!("config.server.host から /ws/lobby を切り出せません"))?;
+            let new_id = format!("{handle}+{game_name}+{color_str}");
+            log::info!("[Lobby] MATCHED 受信: room_id={room_id} → host={new_host}");
+            // LobbyDO 側は MATCHED 後に WS を close するので追加 logout は不要。
+            return Ok(Some(LobbyAssignment {
+                host: new_host,
+                id: new_id,
+            }));
+        }
+        log::debug!("[Lobby] 未知の line: {line}");
+    }
+}
+
+/// MATCHED 受信後の host / id を反映した一時 config を返す。
+fn config_with_lobby_assignment(
+    base: &CsaClientConfig,
+    assignment: &LobbyAssignment,
+) -> CsaClientConfig {
+    let mut new_config = base.clone();
+    new_config.server.host = assignment.host.clone();
+    new_config.server.id = assignment.id.clone();
+    new_config
+}
+
 /// `--target` プリセット適用時に password が空のときに埋める placeholder 値。
 /// Workers GameRoom 側は LOGIN password の値を検証しないため、空でなければ任意で
 /// よい。TOML / `--password` で明示的に上書きできる。
@@ -404,16 +572,23 @@ const PRESET_FALLBACK_PASSWORD: &str = "anything";
 
 /// `--target` プリセット適用。`--target` が未指定なら no-op。
 ///
-/// 指定時は `--room-id` / `--handle` / `--color` の 3 つを併指定必須とし、
-/// 不足があれば早期エラーで abort する（部分的な preset 適用を避ける）。
+/// 指定時は `--handle` / `--color` を併指定必須とし、`--lobby` 未指定時は
+/// `--room-id` も必須。`--lobby` 指定時は room_id に `"lobby"` を仮置きして
+/// `wss://<subdomain>/ws/lobby` URL を組み立てる (実際の room_id は MATCHED 受信後に
+/// `acquire_lobby_match` で差し替える)。
 fn apply_target_preset(config: &mut CsaClientConfig, cli: &Cli) -> Result<()> {
     let Some(target) = cli.target else {
         return Ok(());
     };
-    let room_id = cli
-        .room_id
-        .as_deref()
-        .ok_or_else(|| anyhow!("--target を指定する場合 --room-id <room_id> も指定してください"))?;
+    let room_id_owned: String;
+    let room_id: &str = if cli.lobby {
+        "lobby"
+    } else {
+        room_id_owned = cli.room_id.clone().ok_or_else(|| {
+            anyhow!("--target を指定する場合 --room-id <room_id> も指定してください")
+        })?;
+        &room_id_owned
+    };
     let handle = cli
         .handle
         .as_deref()
@@ -609,6 +784,8 @@ mod tests {
             handle: None,
             color: None,
             simple_engine: false,
+            lobby: false,
+            game_name: None,
             host: None,
             port: None,
             id: None,

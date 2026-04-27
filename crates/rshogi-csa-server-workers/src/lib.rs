@@ -26,6 +26,7 @@ pub mod attachment;
 pub mod config;
 pub mod datetime;
 pub mod floodgate_history;
+pub mod lobby_protocol;
 pub mod origin;
 // `persistence` は DO ランタイム (`game_room`) からのみ消費される I/O 非依存の
 // 純粋ロジックを置く。ホスト target の通常ビルドでは消費者が存在しないので
@@ -48,10 +49,14 @@ pub mod x1_paths;
 #[cfg(target_arch = "wasm32")]
 mod game_room;
 #[cfg(target_arch = "wasm32")]
+mod lobby;
+#[cfg(target_arch = "wasm32")]
 mod router;
 
 #[cfg(target_arch = "wasm32")]
 pub use game_room::GameRoom;
+#[cfg(target_arch = "wasm32")]
+pub use lobby::Lobby;
 
 /// Workers ランタイムの fetch イベント。`router::handle_fetch` に委譲する
 /// 薄いエントリポイント。
