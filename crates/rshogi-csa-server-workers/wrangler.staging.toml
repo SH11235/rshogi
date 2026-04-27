@@ -68,11 +68,28 @@ bucket_name = "rshogi-csa-floodgate-history-staging"
 # 入れておく。本番 client URL が確定したら追記/差し替えする。
 WS_ALLOWED_ORIGINS = "https://csa-client-local"
 
-# 対局時計。`countdown` (CSA 2014 改訂秒読み) / `fischer` (増分加算) / `stopwatch` (分単位)。
-# production と同値にして staging で時計挙動の regression を素直に検出する。
-CLOCK_KIND = "countdown"
+# 対局時計の方式と値。
+# - `countdown`: CSA 2014 改訂互換、整数秒切り捨て、Floodgate 互換 (`Time_Unit:1sec`)。
+# - `countdown_msec`: ms 粒度の短時間対局向け拡張 (`Time_Unit:1msec`)。
+#   本リポ独自で本家 Floodgate には無い。staging では実機 E2E と CI E2E を素早く回す
+#   ために CountdownMsec で `byoyomi=100ms` 程度に短縮する運用。
+# - `fischer`: 秒単位の増分加算。
+# - `stopwatch`: 分単位切り捨ての shogi-server 旧挙動。
+#
+# 各バリアントが参照する env 変数:
+#   countdown      → TOTAL_TIME_SEC / BYOYOMI_SEC
+#   countdown_msec → TOTAL_TIME_MS  / BYOYOMI_MS
+#   fischer        → TOTAL_TIME_SEC / BYOYOMI_SEC (BYOYOMI_SEC は increment)
+#   stopwatch      → TOTAL_TIME_MIN / BYOYOMI_MIN
+CLOCK_KIND = "countdown_msec"
+# countdown 系（参照されない側も SHARED_PUBLIC_VARS_KEYS の整合性のため宣言する）。
 TOTAL_TIME_SEC = "600"
 BYOYOMI_SEC = "10"
+# countdown_msec で使う実値: 持ち時間 10 秒、秒読み 100ms（実機 E2E と CI E2E で
+# 1 局を数秒〜十数秒で完走させる速度を狙う）。
+TOTAL_TIME_MS = "10000"
+BYOYOMI_MS = "100"
+# stopwatch 系（参照されない）。
 TOTAL_TIME_MIN = "10"
 BYOYOMI_MIN = "1"
 

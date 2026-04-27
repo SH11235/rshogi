@@ -55,11 +55,15 @@ preview_bucket_name = "local-floodgate-history-dev"
 # 空文字列・未設定時は全 Upgrade 要求を 403 で拒否する（安全側の既定）。
 [vars]
 WS_ALLOWED_ORIGINS = ""
-# 対局時計。`countdown` / `fischer` / `stopwatch`。
+# 対局時計。`countdown` / `countdown_msec` / `fischer` / `stopwatch`。
+# countdown は Floodgate 互換の整数秒切り捨て、countdown_msec は ms 粒度の短時間対局向け拡張。
 CLOCK_KIND = "countdown"
 # countdown / fischer 用（秒）。
 TOTAL_TIME_SEC = "600"
 BYOYOMI_SEC = "10"
+# countdown_msec 用（ms）。CLOCK_KIND=countdown_msec のときのみ使う。
+TOTAL_TIME_MS = "600000"
+BYOYOMI_MS = "10000"
 # stopwatch 用（分）。CLOCK_KIND=stopwatch のときのみ使う。
 TOTAL_TIME_MIN = "10"
 BYOYOMI_MIN = "1"

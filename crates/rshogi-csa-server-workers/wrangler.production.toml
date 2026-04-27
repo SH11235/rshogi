@@ -73,11 +73,17 @@ bucket_name = "rshogi-csa-floodgate-history-prod"
 # 例: "https://rshogi.example.com,https://www.rshogi.example.com"
 WS_ALLOWED_ORIGINS = ""
 
-# 対局時計。`countdown` (CSA 2014 改訂秒読み) / `fischer` (増分加算) / `stopwatch` (分単位)。
+# 対局時計。`countdown` (CSA 2014 改訂秒読み、Floodgate 互換) / `countdown_msec`
+# (ms 粒度の短時間対局向け拡張) / `fischer` (増分加算) / `stopwatch` (分単位)。
+# production は本家 Floodgate と互換の `countdown` (Time_Unit:1sec) を既定値とする。
 CLOCK_KIND = "countdown"
 # countdown / fischer 用（秒）。
 TOTAL_TIME_SEC = "600"
 BYOYOMI_SEC = "10"
+# countdown_msec 用（ms）。CLOCK_KIND=countdown_msec のときのみ参照。
+# production は countdown (sec) で運用するため、ここは整合性確保のための placeholder。
+TOTAL_TIME_MS = "600000"
+BYOYOMI_MS = "10000"
 # stopwatch 用（分）。CLOCK_KIND=stopwatch のときのみ参照。
 TOTAL_TIME_MIN = "10"
 BYOYOMI_MIN = "1"
