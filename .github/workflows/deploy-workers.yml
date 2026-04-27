@@ -8,8 +8,10 @@
 # `workflow_dispatch` で `target = staging` を選ぶと staging への手動 redeploy
 # として動く。production は同 dispatch の choice 入力でのみ起動可能。
 #
-# Cloudflare 側 secrets が未設定の段階では preflight job で安全に skip し、
-# merge を block しない（secrets 設定後の最初の push or dispatch で実 deploy が走る）。
+# Cloudflare 側 secrets が未設定の段階では各 deploy job 先頭の credential check
+# step で `can_deploy=false` に倒し、後続 step を skip して job 自体は green で
+# 抜ける（merge を block しない、secrets 設定後の最初の push or dispatch で実
+# deploy が走る）。
 #
 # secrets / variables は GitHub Environments
 # (`rshogi-csa-server-workers-staging` / `rshogi-csa-server-workers-production`)
@@ -17,8 +19,10 @@
 #   - secrets   : `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`
 #   - variables : `WORKERS_HEALTH_URL` (`/health` endpoint URL、未設定なら smoke step が
 #                 warning を出して即 exit 0 で済ませる）
-# 各 job が `environment:` を宣言することで、その環境に紐付いた値だけが
-# 注入される（staging job が production token を取れない gating になる）。
+# 各 deploy job 1 本だけが `environment:` を宣言することで、その環境に紐付いた値
+# だけが注入され（staging job が production token を取れない gating になる）、
+# かつ Required reviewers を有効化したときに **1 dispatch あたり 1 回の承認操作で
+# preflight / deploy / smoke 全 step が走る** 構造を維持する。
 # Environment 名に crate prefix (`rshogi-csa-server-workers-`) を付けるのは、
 # 同 repository 内の他 crate (例: TCP server) が将来別 staging を持っても
 # 名前衝突しないようにするため。
@@ -65,16 +69,27 @@ jobs:
   # `push` (= 自動 canary) と `workflow_dispatch` (target=staging) の両方で起動。
   # production secrets には触れない（GitHub Environments の解決により staging
   # environment 側に登録された値だけが注入される）。
-  preflight-staging:
-    name: Check staging deploy prerequisites
+  #
+  # preflight (credentials check) → deploy → smoke の 3 段階を 1 job 内の step
+  # として直列実行する。`environment:` 宣言は本 job 1 つだけに付けるため、Required
+  # reviewers を有効化しても 1 dispatch につき 1 回の承認で全 step が走る。
+  # secrets 未設定の場合は credential check step が `can_deploy=false` を出力し、
+  # 後続 step は `if: steps.check.outputs.can_deploy == 'true'` で skip されて
+  # job 自体は green で抜ける（既存の fail-safe を維持）。
+  deploy-staging:
+    name: Deploy to Cloudflare Workers (staging)
     if: |
       github.event_name == 'push' ||
       (github.event_name == 'workflow_dispatch' && inputs.target == 'staging')
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 20
     environment: rshogi-csa-server-workers-staging
-    outputs:
-      can_deploy: ${{ steps.check.outputs.can_deploy }}
+    env:
+      # workflow 上位の `-C target-cpu=x86-64-v2` (rust-ci.yml の env) を継承しない
+      # ように明示空文字。本 workflow は独立しているが、将来 workflow_call で連結
+      # された場合の defensive な設定。wasm32 ビルドでは x86 専用フラグが warning
+      # を大量に出すため。
+      RUSTFLAGS: ""
     steps:
       - name: Check Cloudflare credentials
         id: check
@@ -96,36 +111,28 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::staging deploy skipped (environment secrets not configured)."
           fi
-
-  deploy-staging:
-    name: Deploy to Cloudflare Workers (staging)
-    runs-on: ubuntu-latest
-    needs: preflight-staging
-    if: needs.preflight-staging.outputs.can_deploy == 'true'
-    timeout-minutes: 20
-    environment: rshogi-csa-server-workers-staging
-    env:
-      # workflow 上位の `-C target-cpu=x86-64-v2` (rust-ci.yml の env) を継承しない
-      # ように明示空文字。本 workflow は独立しているが、将来 workflow_call で連結
-      # された場合の defensive な設定。wasm32 ビルドでは x86 専用フラグが warning
-      # を大量に出すため。
-      RUSTFLAGS: ""
-    steps:
       - uses: actions/checkout@v5
+        if: steps.check.outputs.can_deploy == 'true'
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.can_deploy == 'true'
       - name: Add wasm32 target to pinned toolchain
+        if: steps.check.outputs.can_deploy == 'true'
         run: |
           CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
           echo "Adding wasm32-unknown-unknown to toolchain $CHANNEL"
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
       - name: Setup sccache
+        if: steps.check.outputs.can_deploy == 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Enable sccache
+        if: steps.check.outputs.can_deploy == 'true'
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+        if: steps.check.outputs.can_deploy == 'true'
         with:
           shared-key: wasm32
       - name: Verify wrangler.staging.toml exists
+        if: steps.check.outputs.can_deploy == 'true'
         run: |
           test -f crates/rshogi-csa-server-workers/wrangler.staging.toml || {
             echo "::error::crates/rshogi-csa-server-workers/wrangler.staging.toml not found."
@@ -144,27 +151,32 @@ jobs:
       #   本 cache key は `deploy-production` job と共有しているので、bump 時は staging /
       #   production 両方の install コマンド + key 末尾の **計 4 箇所同時更新** が必要。
       - name: Cache worker-build binary
+        if: steps.check.outputs.can_deploy == 'true'
         id: cache-worker-build
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/worker-build
           key: worker-build-${{ runner.os }}-${{ runner.arch }}-v0.8
       - name: Install worker-build
-        if: steps.cache-worker-build.outputs.cache-hit != 'true'
+        if: steps.check.outputs.can_deploy == 'true' && steps.cache-worker-build.outputs.cache-hit != 'true'
         run: cargo install -q worker-build@^0.8 --locked
       - uses: pnpm/action-setup@v4
+        if: steps.check.outputs.can_deploy == 'true'
         with:
           package_json_file: crates/rshogi-csa-server-workers/package.json
           run_install: false
       - uses: actions/setup-node@v4
+        if: steps.check.outputs.can_deploy == 'true'
         with:
           node-version-file: crates/rshogi-csa-server-workers/.node-version
           cache: 'pnpm'
           cache-dependency-path: crates/rshogi-csa-server-workers/pnpm-lock.yaml
       - name: Install Node deps (wrangler)
+        if: steps.check.outputs.can_deploy == 'true'
         working-directory: crates/rshogi-csa-server-workers
         run: pnpm install --frozen-lockfile
       - name: Deploy via wrangler-action
+        if: steps.check.outputs.can_deploy == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -173,25 +185,13 @@ jobs:
           packageManager: pnpm
           command: deploy --config wrangler.staging.toml
       - name: sccache stats
-        if: always()
+        if: always() && steps.check.outputs.can_deploy == 'true'
         run: sccache --show-stats || true
-
-  smoke-staging:
-    name: Smoke check deployed worker (staging)
-    runs-on: ubuntu-latest
-    needs: deploy-staging
-    # `environment:` 宣言により staging Environment の variables / secrets が
-    # step 実行時に注入される（production との取り違えは発生しない）。
-    #
-    # 注意: GitHub Actions の job-level `if:` は environment 解決の **前** に
-    # 評価されるため、`if: ${{ vars.WORKERS_HEALTH_URL != '' }}` のような形で
-    # gate すると Environment variable が見えず常に false になる。job 自体は
-    # 必ず起動させ、step 内の env で `vars.WORKERS_HEALTH_URL` を解決して
-    # 空ならその場で warning + exit 0 で skip 相当にする。
-    environment: rshogi-csa-server-workers-staging
-    timeout-minutes: 5
-    steps:
-      - name: Curl /health endpoint
+      # smoke check は deploy 完了後に同 job 内で続けて実行する。`environment:` は
+      # job 単位で解決済みなので `vars.WORKERS_HEALTH_URL` も step 内 env で読める。
+      # `WORKERS_HEALTH_URL` 未設定時は warning + exit 0 で skip 相当。
+      - name: Smoke check deployed worker
+        if: steps.check.outputs.can_deploy == 'true'
         env:
           HEALTH_URL: ${{ vars.WORKERS_HEALTH_URL }}
         run: |
@@ -216,14 +216,16 @@ jobs:
   # ---------- production -----------------------------------------------------
   # `workflow_dispatch` で `target = production` を選んだ時のみ起動する。push では
   # 走らないので、shogi engine 側の変更だけで production が deploy されることはない。
-  preflight-production:
-    name: Check production deploy prerequisites
+  # staging と同じく credential check → deploy → smoke を 1 job 内の step で直列
+  # 実行し、Required reviewers 有効化時の承認操作を 1 dispatch = 1 回に集約する。
+  deploy-production:
+    name: Deploy to Cloudflare Workers (production)
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'production'
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 20
     environment: rshogi-csa-server-workers-production
-    outputs:
-      can_deploy: ${{ steps.check.outputs.can_deploy }}
+    env:
+      RUSTFLAGS: ""
     steps:
       - name: Check Cloudflare credentials
         id: check
@@ -245,32 +247,28 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::production deploy skipped (environment secrets not configured)."
           fi
-
-  deploy-production:
-    name: Deploy to Cloudflare Workers (production)
-    runs-on: ubuntu-latest
-    needs: preflight-production
-    if: needs.preflight-production.outputs.can_deploy == 'true'
-    timeout-minutes: 20
-    environment: rshogi-csa-server-workers-production
-    env:
-      RUSTFLAGS: ""
-    steps:
       - uses: actions/checkout@v5
+        if: steps.check.outputs.can_deploy == 'true'
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.can_deploy == 'true'
       - name: Add wasm32 target to pinned toolchain
+        if: steps.check.outputs.can_deploy == 'true'
         run: |
           CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
           echo "Adding wasm32-unknown-unknown to toolchain $CHANNEL"
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
       - name: Setup sccache
+        if: steps.check.outputs.can_deploy == 'true'
         uses: mozilla-actions/sccache-action@v0.0.9
       - name: Enable sccache
+        if: steps.check.outputs.can_deploy == 'true'
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+        if: steps.check.outputs.can_deploy == 'true'
         with:
           shared-key: wasm32
       - name: Verify wrangler.production.toml exists
+        if: steps.check.outputs.can_deploy == 'true'
         run: |
           test -f crates/rshogi-csa-server-workers/wrangler.production.toml || {
             echo "::error::crates/rshogi-csa-server-workers/wrangler.production.toml not found."
@@ -285,27 +283,32 @@ jobs:
       #   本 cache key は `deploy-staging` job と共有しているので、bump 時は staging /
       #   production 両方の install コマンド + key 末尾の **計 4 箇所同時更新** が必要。
       - name: Cache worker-build binary
+        if: steps.check.outputs.can_deploy == 'true'
         id: cache-worker-build
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/worker-build
           key: worker-build-${{ runner.os }}-${{ runner.arch }}-v0.8
       - name: Install worker-build
-        if: steps.cache-worker-build.outputs.cache-hit != 'true'
+        if: steps.check.outputs.can_deploy == 'true' && steps.cache-worker-build.outputs.cache-hit != 'true'
         run: cargo install -q worker-build@^0.8 --locked
       - uses: pnpm/action-setup@v4
+        if: steps.check.outputs.can_deploy == 'true'
         with:
           package_json_file: crates/rshogi-csa-server-workers/package.json
           run_install: false
       - uses: actions/setup-node@v4
+        if: steps.check.outputs.can_deploy == 'true'
         with:
           node-version-file: crates/rshogi-csa-server-workers/.node-version
           cache: 'pnpm'
           cache-dependency-path: crates/rshogi-csa-server-workers/pnpm-lock.yaml
       - name: Install Node deps (wrangler)
+        if: steps.check.outputs.can_deploy == 'true'
         working-directory: crates/rshogi-csa-server-workers
         run: pnpm install --frozen-lockfile
       - name: Deploy via wrangler-action
+        if: steps.check.outputs.can_deploy == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -314,21 +317,10 @@ jobs:
           packageManager: pnpm
           command: deploy --config wrangler.production.toml
       - name: sccache stats
-        if: always()
+        if: always() && steps.check.outputs.can_deploy == 'true'
         run: sccache --show-stats || true
-
-  smoke-production:
-    name: Smoke check deployed worker (production)
-    runs-on: ubuntu-latest
-    needs: deploy-production
-    # `environment:` 宣言により production Environment の variables / secrets が
-    # step 実行時に注入される（staging との取り違えは発生しない、同 smoke-staging
-    # のコメント参照）。job-level `if:` での gate は environment 解決前に評価されて
-    # しまい Environment variable が見えないため、step 内 env 経由で gate する。
-    environment: rshogi-csa-server-workers-production
-    timeout-minutes: 5
-    steps:
-      - name: Curl /health endpoint
+      - name: Smoke check deployed worker
+        if: steps.check.outputs.can_deploy == 'true'
         env:
           HEALTH_URL: ${{ vars.WORKERS_HEALTH_URL }}
         run: |
