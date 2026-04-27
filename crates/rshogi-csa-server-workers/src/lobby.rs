@@ -174,6 +174,12 @@ impl Lobby {
             send_line(ws, &build_login_incorrect_line("queue_full"))?;
             return Ok(());
         }
+        // 同 handle で既存の `Queued` 状態の WS が残っている場合は close する。
+        // queue 側は `enqueue` の `retain(|e| e.handle != entry.handle)` で旧 entry を
+        // 抜いてあるが、attachment が `Queued` のまま残ると `dispatch_match` の
+        // `state.get_websockets()` 走査で旧 WS にも MATCHED が誤送される。close を
+        // 先に行うことで websocket_close 経路に乗せ、attachment を消す。
+        evict_old_websockets_with_handle(&self.state, &ws, &req.handle);
 
         // attachment を Queued に差し替えて待機状態に遷移。
         ws.serialize_attachment(&LobbyAttachment::Queued {
@@ -266,6 +272,18 @@ impl Lobby {
             sent_black,
             sent_white,
         );
+        if !sent_black || !sent_white {
+            // 片方の WS が close 済みなどで MATCHED が届かなかった場合、queue から
+            // 既に該当 entry を抜いてあるため client は orphan になる。client 側は
+            // recv timeout (60 秒) で接続エラー検出 → retry_delay 経由で再 LOGIN_LOBBY
+            // するため最終的に復帰できるが、サーバ側でも警告ログを残して
+            // observability を確保する。GameRoom DO 側の login deadline (将来 PR で
+            // 実装予定) でも片側不在は救済される。
+            console_log!(
+                "[Lobby] WARN: MATCHED dispatch incomplete. Black/white client may be orphaned, \
+                 client retry expected after recv timeout: room_id={room_id}"
+            );
+        }
         Ok(())
     }
 
@@ -274,6 +292,38 @@ impl Lobby {
         // フォーマット違反は接続維持しても回復経路がないので close する。
         let _ = ws.close(Some(1003), Some("bad_login_lobby"));
         Ok(())
+    }
+}
+
+/// 同 handle で `Queued` attachment を持つ旧 WS を close して、新 WS のみが
+/// マッチング対象になるよう揃える。`evict_old` 挙動 (本家 Floodgate 互換) を
+/// attachment レイヤでも反映する。`current_ws` は除外する (新しい接続そのものを
+/// close しないため)。
+fn evict_old_websockets_with_handle(state: &State, current_ws: &WebSocket, handle: &str) {
+    for ws in state.get_websockets() {
+        // `WebSocket` には eq 比較がないので serialize_attachment 側の同一性で
+        // 判定する代替が無く、ws を都度 attachment 経由で見て handle 一致を見る。
+        // current_ws と他 WS の弁別: current_ws は LOGIN_LOBBY 直後で attachment を
+        // まだ `Queued` に切り替えていない (`handle_login_lobby` 内で本関数の後に
+        // serialize_attachment するため、`current_ws` の attachment は Pending か
+        // 古い handle のままで、新 handle と一致しない経路が支配的)。同 handle で
+        // 別 WS のみが loop 対象になる安全側設計。
+        let _ = current_ws; // 比較には使わないが、契約を明示するために引数に残す。
+        let attachment = match ws.deserialize_attachment::<LobbyAttachment>() {
+            Ok(Some(a)) => a,
+            _ => continue,
+        };
+        if let LobbyAttachment::Queued {
+            handle: existing, ..
+        } = attachment
+        {
+            if existing == handle {
+                console_log!(
+                    "[Lobby] evict old queued WS with duplicate handle: handle={existing}"
+                );
+                let _ = ws.close(Some(1000), Some("evicted_by_new_login"));
+            }
+        }
     }
 }
 

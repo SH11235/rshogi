@@ -509,7 +509,7 @@ fn acquire_lobby_match(
             }
         };
         if let Some(rest) = line.strip_prefix("LOGIN_LOBBY:") {
-            if rest.contains(" OK") {
+            if rest.ends_with(" OK") {
                 log::info!("[Lobby] LOGIN_LOBBY OK ({rest})、MATCHED 待機");
                 continue;
             }
