@@ -193,6 +193,15 @@ struct Cli {
     /// --init-from spsa_params/suisho10_converted.params` のパターンで使う。
     #[arg(long)]
     init_from: Option<PathBuf>,
+
+    /// `--seeds` を 2 つ以上指定したとき、iter 内の seed 群を並列実行する。
+    /// SPSA の数学的妥当性は保たれる（各 seed は独立な摂動方向を持ち、iter 末で
+    /// 平均化される）。`--concurrency / seeds_count` を各 seed に配分するため、
+    /// 最大効率には **`--concurrency` は `seeds_count` の倍数を推奨**
+    /// （割り切れない端数は浪費される: 例 conc=10, seeds=3 → per_seed=3, 1 枠無駄）。
+    /// 単一 seed のときは通常通り順次実行（フラグは無視）。
+    #[arg(long, default_value_t = false)]
+    parallel_seeds: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -322,6 +331,21 @@ struct SeedGameStats {
     plus_wins: u32,
     minus_wins: u32,
     draws: u32,
+}
+
+/// 1 seed × 1 iter 分の事前計算結果（rng / flips / shifts / plus / minus / startpos インデックス）。
+///
+/// `compute_seed_prep` で生成し、`run_seed_games_parallel` の入力として使う。
+/// 事前計算を seed 並列実行から分離することで、決定論を維持したまま重いゲーム実行のみを並列化できる。
+struct SeedPrep {
+    base_seed: u64,
+    flips: Vec<f64>,
+    plus_values: Vec<f64>,
+    minus_values: Vec<f64>,
+    start_pos_indices: Vec<usize>,
+    active_params: usize,
+    avg_abs_shift: f64,
+    seed_total_games_start: usize,
 }
 
 struct SeedRunContext<'a> {
@@ -882,9 +906,130 @@ fn mean_and_variance(values: &[f64]) -> (f64, f64) {
     (mean, variance)
 }
 
+/// `JoinHandle::join` の panic payload から人間可読なメッセージを抽出する。
+/// `panic!` に渡された値が `&'static str` か `String` の典型ケースのみ拾い、
+/// それ以外は型情報のみのプレースホルダを返す。
+fn panic_payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<panic payload of unknown type>".to_string()
+    }
+}
+
 fn seed_for_iteration(base_seed: u64, iteration_index: u32) -> u64 {
     let iter_term = (iteration_index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     base_seed ^ iter_term
+}
+
+/// `compute_seed_prep` のセッション定数バンドル（iter 内で全 seed 共通）。
+///
+/// 引数増加によるシグネチャ複雑化を避けるため `compute_seed_prep` の入力をまとめる。
+struct SeedPrepCtx<'a> {
+    big_a: f64,
+    schedule: ScheduleConfig,
+    params: &'a [SpsaParam],
+    param_schedules: &'a [ParamScheduleConstants],
+    active_only_regex: Option<&'a Regex>,
+    translator: &'a EngineNameTranslator,
+    start_positions_len: usize,
+    games_per_iteration: usize,
+    random_startpos: bool,
+}
+
+/// 1 seed × 1 iter 分の事前計算（RNG / flips / shifts / plus/minus / startpos インデックス）。
+///
+/// 各 seed 独立に決定論的に計算可能なため、後段の重いゲーム実行を seed 並列化する際の
+/// 前処理として使う。`seed_total_games_start` は startpos の cyclic indexing にのみ使われ、
+/// 並列実行時はセッション累積 + `seed_idx * games_per_iter` で seed 間の重複を避ける。
+fn compute_seed_prep(
+    ctx: &SeedPrepCtx<'_>,
+    iter: u32,
+    base_seed: u64,
+    seed_total_games_start: usize,
+) -> Result<SeedPrep> {
+    let iter_seed = seed_for_iteration(base_seed, iter);
+    let mut rng = ChaCha8Rng::seed_from_u64(iter_seed);
+
+    // Per-param Fishtest 摂動: shift_j = c_k_j × flip_j
+    let flips: Vec<f64> = ctx
+        .params
+        .iter()
+        .map(|p| {
+            if !is_param_active(p, ctx.active_only_regex, ctx.translator) {
+                0.0
+            } else if rng.random_bool(0.5) {
+                1.0
+            } else {
+                -1.0
+            }
+        })
+        .collect();
+    let shifts: Vec<f64> = ctx
+        .params
+        .iter()
+        .zip(ctx.param_schedules.iter())
+        .zip(flips.iter())
+        .map(|((p, sched), &flip)| {
+            if !is_param_active(p, ctx.active_only_regex, ctx.translator) {
+                0.0
+            } else {
+                let (c_k, _) =
+                    sched.at_iteration(iter, ctx.big_a, ctx.schedule.alpha, ctx.schedule.gamma);
+                c_k * flip
+            }
+        })
+        .collect();
+    let plus_values: Vec<f64> = ctx
+        .params
+        .iter()
+        .zip(shifts.iter())
+        .map(|(p, s)| clamped_value(p, p.value + s))
+        .collect();
+    let minus_values: Vec<f64> = ctx
+        .params
+        .iter()
+        .zip(shifts.iter())
+        .map(|(p, s)| clamped_value(p, p.value - s))
+        .collect();
+
+    let mut active_params = 0usize;
+    let mut abs_shift_sum = 0.0f64;
+    for (p, &shift) in ctx.params.iter().zip(shifts.iter()) {
+        if !is_param_active(p, ctx.active_only_regex, ctx.translator) {
+            continue;
+        }
+        active_params += 1;
+        abs_shift_sum += shift.abs();
+    }
+    let avg_abs_shift = if active_params > 0 {
+        abs_shift_sum / active_params as f64
+    } else {
+        0.0
+    };
+
+    let mut start_pos_indices = Vec::with_capacity(ctx.games_per_iteration);
+    for game_idx in 0..ctx.games_per_iteration {
+        start_pos_indices.push(pick_startpos_index(
+            ctx.start_positions_len,
+            &mut rng,
+            ctx.random_startpos,
+            seed_total_games_start + game_idx,
+        )?);
+    }
+
+    Ok(SeedPrep {
+        base_seed,
+        flips,
+        plus_values,
+        minus_values,
+        start_pos_indices,
+        active_params,
+        avg_abs_shift,
+        seed_total_games_start,
+    })
 }
 
 fn duplicate_engine_config(cfg: &EngineConfig) -> EngineConfig {
@@ -1154,6 +1299,33 @@ fn main() -> Result<()> {
     }
     println!("using base seeds: {:?}", seed_values);
 
+    // --parallel-seeds 指定時、`cli.concurrency` が seed 数で割り切れない、または
+    // 1 seed あたりの worker 数が `games_per_iteration` を超える設定だと実効並列度が
+    // 指定値より下がる（`run_seed_games_parallel` 側で `worker_count.clamp(1, game_count)`
+    // の clamp が効くため）。vast.ai 等で `--concurrency` を盛ったときに気付けないと
+    // 単純に CPU が余るので、起動時に一度だけ警告して気付かせる。
+    if cli.parallel_seeds && seed_values.len() >= 2 {
+        let per_seed_concurrency = (cli.concurrency / seed_values.len()).max(1);
+        let games_per_iter = cli.games_per_iteration as usize;
+        let effective_per_seed = per_seed_concurrency.min(games_per_iter);
+        let effective_total = effective_per_seed * seed_values.len();
+        if effective_total < cli.concurrency {
+            eprintln!(
+                "warning: --parallel-seeds の実効並列度が --concurrency より低い \
+                 (concurrency={}, seeds={}, games_per_iteration={} → \
+                 per_seed={} (clamped to {}), 実効合計={}, 未使用={})。\
+                 `--concurrency` を seeds × games_per_iteration の倍数に揃えると無駄なく回る。",
+                cli.concurrency,
+                seed_values.len(),
+                games_per_iter,
+                per_seed_concurrency,
+                effective_per_seed,
+                effective_total,
+                cli.concurrency - effective_total,
+            );
+        }
+    }
+
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
     // parent dir を先に確保（init-from 指定有無に関わらず後段で write_params が
@@ -1403,103 +1575,127 @@ fn main() -> Result<()> {
         let mut seed_draws = Vec::with_capacity(seed_values.len());
         let mut seed_rows = Vec::with_capacity(seed_values.len());
 
+        // Phase A: 全 seed の事前計算（CPU-light, sequential）。各 seed の RNG/flips/shifts/
+        // start_pos_indices を生成。total_games_start はセッション累積に seed_idx × games_per_iter
+        // を足して決定論的に求める。
+        let prep_ctx = SeedPrepCtx {
+            big_a,
+            schedule,
+            params: &params,
+            param_schedules: &param_schedules,
+            active_only_regex: active_only_regex.as_ref(),
+            translator: &translator,
+            start_positions_len: start_positions.len(),
+            games_per_iteration: cli.games_per_iteration as usize,
+            random_startpos: cli.random_startpos,
+        };
+        let mut preps = Vec::with_capacity(seed_values.len());
         for (seed_idx, base_seed) in seed_values.iter().copied().enumerate() {
-            let iter_seed = seed_for_iteration(base_seed, iter);
-            let mut rng = ChaCha8Rng::seed_from_u64(iter_seed);
+            let seed_total_games_start = total_games
+                .checked_add(seed_idx * cli.games_per_iteration as usize)
+                .context("total_games offset overflow")?;
+            preps.push(compute_seed_prep(&prep_ctx, iter, base_seed, seed_total_games_start)?);
+        }
 
-            // Per-param Fishtest 摂動: shift_j = c_k_j × flip_j
-            let flips: Vec<f64> = params
+        // Phase B: ゲーム実行（heavy）。--parallel-seeds 指定 + seed 数 ≥ 2 のとき thread::scope
+        // で seed 並列実行、それ以外は順次実行。--concurrency を seed 数で分配して
+        // CPU の取り合いを避ける。
+        let parallelize = cli.parallel_seeds && seed_values.len() >= 2;
+        let per_seed_concurrency = if parallelize {
+            (cli.concurrency / seed_values.len()).max(1)
+        } else {
+            cli.concurrency
+        };
+        let seed_count = seed_values.len();
+        let run_stats: Vec<SeedGameStats> = if parallelize {
+            // 借用を closure 外で確定 (move closure でも参照を捕捉)
+            let base_cfg_ref = &base_cfg;
+            let params_ref = &params;
+            let start_positions_ref = &start_positions;
+            let game_cfg_ref = &game_cfg;
+            let translator_ref = &translator;
+            let active_mask_ref = &active_mask;
+            let preps_ref = &preps;
+            std::thread::scope(|scope| -> Result<Vec<SeedGameStats>> {
+                let handles: Vec<_> = (0..seed_count)
+                    .map(|seed_idx| {
+                        let h = scope.spawn(move || -> Result<SeedGameStats> {
+                            let prep = &preps_ref[seed_idx];
+                            run_seed_games_parallel(SeedRunContext {
+                                concurrency: per_seed_concurrency,
+                                base_cfg: base_cfg_ref,
+                                params: params_ref,
+                                plus_values: &prep.plus_values,
+                                minus_values: &prep.minus_values,
+                                start_positions: start_positions_ref,
+                                start_pos_indices: &prep.start_pos_indices,
+                                game_cfg: game_cfg_ref,
+                                tc,
+                                total_games_start: prep.seed_total_games_start,
+                                iteration: iter + 1,
+                                seed_idx,
+                                seed_count,
+                                base_seed: prep.base_seed,
+                                translator: translator_ref,
+                                active_mask: active_mask_ref,
+                            })
+                        });
+                        (seed_idx, h)
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|(seed_idx, h)| {
+                        h.join().map_err(|payload| {
+                            anyhow::anyhow!(
+                                "seed worker panicked: seed_idx={seed_idx}: {}",
+                                panic_payload_to_string(&payload),
+                            )
+                        })?
+                    })
+                    .collect()
+            })?
+        } else {
+            preps
                 .iter()
-                .map(|p| {
-                    if !is_param_active(p, active_only_regex.as_ref(), &translator) {
-                        0.0
-                    } else if rng.random_bool(0.5) {
-                        1.0
-                    } else {
-                        -1.0
-                    }
+                .enumerate()
+                .map(|(seed_idx, prep)| -> Result<SeedGameStats> {
+                    run_seed_games_parallel(SeedRunContext {
+                        concurrency: per_seed_concurrency,
+                        base_cfg: &base_cfg,
+                        params: &params,
+                        plus_values: &prep.plus_values,
+                        minus_values: &prep.minus_values,
+                        start_positions: &start_positions,
+                        start_pos_indices: &prep.start_pos_indices,
+                        game_cfg: &game_cfg,
+                        tc,
+                        total_games_start: prep.seed_total_games_start,
+                        iteration: iter + 1,
+                        seed_idx,
+                        seed_count,
+                        base_seed: prep.base_seed,
+                        translator: &translator,
+                        active_mask: &active_mask,
+                    })
                 })
-                .collect();
-            let shifts: Vec<f64> = params
-                .iter()
-                .zip(param_schedules.iter())
-                .zip(flips.iter())
-                .map(|((p, sched), &flip)| {
-                    if !is_param_active(p, active_only_regex.as_ref(), &translator) {
-                        0.0
-                    } else {
-                        let (c_k, _) =
-                            sched.at_iteration(iter, big_a, schedule.alpha, schedule.gamma);
-                        c_k * flip
-                    }
-                })
-                .collect();
+                .collect::<Result<Vec<_>>>()?
+        };
 
-            let plus_values: Vec<f64> = params
-                .iter()
-                .zip(shifts.iter())
-                .map(|(p, s)| clamped_value(p, p.value + s))
-                .collect();
-            let minus_values: Vec<f64> = params
-                .iter()
-                .zip(shifts.iter())
-                .map(|(p, s)| clamped_value(p, p.value - s))
-                .collect();
-
-            let mut active_params = 0usize;
-            let mut abs_shift_sum = 0.0f64;
-            for (p, &shift) in params.iter().zip(shifts.iter()) {
-                if !is_param_active(p, active_only_regex.as_ref(), &translator) {
-                    continue;
-                }
-                active_params += 1;
-                abs_shift_sum += shift.abs();
-            }
-            let avg_abs_shift = if active_params > 0 {
-                abs_shift_sum / active_params as f64
-            } else {
-                0.0
-            };
-            let seed_total_games_start = total_games;
-            let mut start_pos_indices = Vec::with_capacity(cli.games_per_iteration as usize);
-            for game_idx in 0..cli.games_per_iteration as usize {
-                start_pos_indices.push(pick_startpos_index(
-                    start_positions.len(),
-                    &mut rng,
-                    cli.random_startpos,
-                    seed_total_games_start + game_idx,
-                )?);
-            }
-            let seed_game_stats = run_seed_games_parallel(SeedRunContext {
-                concurrency: cli.concurrency,
-                base_cfg: &base_cfg,
-                params: &params,
-                plus_values: &plus_values,
-                minus_values: &minus_values,
-                start_positions: &start_positions,
-                start_pos_indices: &start_pos_indices,
-                game_cfg: &game_cfg,
-                tc,
-                total_games_start: seed_total_games_start,
-                iteration: iter + 1,
-                seed_idx,
-                seed_count: seed_values.len(),
-                base_seed,
-                translator: &translator,
-                active_mask: &active_mask,
-            })?;
+        // Phase C: 集計（CPU-light, sequential, seed 順序維持）。
+        for (prep, stats) in preps.iter().zip(run_stats.iter()) {
             total_games = total_games
                 .checked_add(cli.games_per_iteration as usize)
                 .context("total_games overflow")?;
-            let step_sum = seed_game_stats.step_sum;
-            let plus_wins = seed_game_stats.plus_wins;
-            let minus_wins = seed_game_stats.minus_wins;
-            let draws = seed_game_stats.draws;
+
+            let raw_result = stats.step_sum;
+            let plus_wins = stats.plus_wins;
+            let minus_wins = stats.minus_wins;
+            let draws = stats.draws;
 
             // Fishtest 更新: signal_j = R_k_j × c_k_j × result × flip_j
-            let raw_result = step_sum;
             for (idx, (p, (&flip, sched))) in
-                params.iter().zip(flips.iter().zip(param_schedules.iter())).enumerate()
+                params.iter().zip(prep.flips.iter().zip(param_schedules.iter())).enumerate()
             {
                 if !is_param_active(p, active_only_regex.as_ref(), &translator)
                     || p.c_end.abs() <= f64::EPSILON
@@ -1517,14 +1713,14 @@ fn main() -> Result<()> {
 
             seed_rows.push(IterationStats {
                 iteration: iter + 1,
-                seed: base_seed,
+                seed: prep.base_seed,
                 games: cli.games_per_iteration,
                 plus_wins,
                 minus_wins,
                 draws,
                 raw_result,
-                active_params,
-                avg_abs_shift,
+                active_params: prep.active_params,
+                avg_abs_shift: prep.avg_abs_shift,
                 updated_params: 0,
                 avg_abs_update: 0.0,
                 max_abs_update: 0.0,
@@ -1719,5 +1915,98 @@ mod tests {
         let (c_0, _) = sched.at_iteration(0, big_a, alpha, gamma);
         let (c_last, _) = sched.at_iteration(n - 1, big_a, alpha, gamma);
         assert!(c_0 > c_last, "c_k should decrease over iterations: c_0={c_0}, c_last={c_last}");
+    }
+
+    fn make_param(name: &str, value: f64, c_end: f64) -> SpsaParam {
+        SpsaParam {
+            name: name.to_string(),
+            type_name: "int".into(),
+            is_int: true,
+            value,
+            min: 0.0,
+            max: 100_000.0,
+            c_end,
+            r_end: 0.002,
+            comment: String::new(),
+            not_used: false,
+        }
+    }
+
+    fn make_test_ctx<'a>(
+        params: &'a [SpsaParam],
+        schedules: &'a [ParamScheduleConstants],
+        translator: &'a EngineNameTranslator,
+        games_per_iteration: usize,
+    ) -> SeedPrepCtx<'a> {
+        SeedPrepCtx {
+            big_a: 10.0,
+            schedule: ScheduleConfig {
+                alpha: 0.602,
+                gamma: 0.101,
+                a_ratio: 0.1,
+                mobility: 1.0,
+                total_iterations: 100,
+            },
+            params,
+            param_schedules: schedules,
+            active_only_regex: None,
+            translator,
+            start_positions_len: 1957,
+            games_per_iteration,
+            random_startpos: true,
+        }
+    }
+
+    /// `compute_seed_prep` のスナップショットテスト。`ChaCha8Rng` は決定論的なため、
+    /// 同じ `(base_seed, iter)` に対して flips / shifts / start_pos_indices が完全一致する。
+    /// 並列化後も Phase A の事前計算結果がブレないことを保証。
+    #[test]
+    fn compute_seed_prep_is_deterministic_across_calls() {
+        let params = vec![
+            make_param("Search_a", 1000.0, 100.0),
+            make_param("Search_b", 2000.0, 200.0),
+        ];
+        let schedules: Vec<ParamScheduleConstants> = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+            .collect();
+        let translator = EngineNameTranslator::empty();
+        let ctx = make_test_ctx(&params, &schedules, &translator, 8);
+
+        let prep1 = compute_seed_prep(&ctx, 5, 42, 100).expect("prep1");
+        let prep2 = compute_seed_prep(&ctx, 5, 42, 100).expect("prep2");
+
+        assert_eq!(prep1.flips, prep2.flips, "flips must be deterministic from seed/iter");
+        assert_eq!(prep1.plus_values, prep2.plus_values);
+        assert_eq!(prep1.minus_values, prep2.minus_values);
+        assert_eq!(prep1.start_pos_indices, prep2.start_pos_indices);
+        assert_eq!(prep1.active_params, prep2.active_params);
+    }
+
+    /// 異なる `base_seed` が異なる flip パターンを生むことを保証（並列実行時の seed 間独立性）。
+    /// `ChaCha8Rng` は決定論的なため、`(base_seed=1..4, iter=5)` の組み合わせで flip が
+    /// 全一致にならないことをスナップショットテストとして確認する。パラメータ数を 6 に増やして
+    /// 取り得る flip パターンを 2^6=64 通りに広げ、隣接 seed ペアの直接比較で意図を明確化。
+    #[test]
+    fn compute_seed_prep_seeds_produce_independent_flips() {
+        let params: Vec<_> = (0..6)
+            .map(|i| make_param(&format!("Search_p{i}"), 1000.0 + i as f64 * 100.0, 100.0))
+            .collect();
+        let schedules: Vec<ParamScheduleConstants> = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+            .collect();
+        let translator = EngineNameTranslator::empty();
+        let ctx = make_test_ctx(&params, &schedules, &translator, 32);
+
+        let prep1 = compute_seed_prep(&ctx, 5, 1, 100).expect("prep1");
+        let prep2 = compute_seed_prep(&ctx, 5, 2, 100).expect("prep2");
+        let prep3 = compute_seed_prep(&ctx, 5, 3, 100).expect("prep3");
+        let prep4 = compute_seed_prep(&ctx, 5, 4, 100).expect("prep4");
+
+        // 隣接 seed ペアそれぞれで flip パターンが異なることを直接確認
+        assert_ne!(prep1.flips, prep2.flips, "seed=1 vs seed=2 flips must differ");
+        assert_ne!(prep2.flips, prep3.flips, "seed=2 vs seed=3 flips must differ");
+        assert_ne!(prep3.flips, prep4.flips, "seed=3 vs seed=4 flips must differ");
     }
 }
