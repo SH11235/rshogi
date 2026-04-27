@@ -109,11 +109,10 @@ CSA V2 形式（`V2.2`、`N+`、`$GAME_ID:`、`BEGIN Position` 〜 `END Position
 指し手 `+7776FU,T<sec>` 等、終局コマンド `%TORYO` / `+SUMI` 等）が含まれていれば成功。
 
 > ※ Floodgate 履歴バケット (`rshogi-csa-floodgate-history-staging`) への
-> 書き込みは staging では既定 (`ALLOW_FLOODGATE_FEATURES = "false"`) で
-> 無効化されているため、本シナリオの必須確認項目には含めない。Floodgate
-> 機能 opt-in 環境で動作確認する場合は別途
+> 書き込みは `ALLOW_FLOODGATE_FEATURES = "true"` opt-in 環境で有効になる。
+> staging は本既定で運用中なので、終局後に
 > `vp exec wrangler r2 object list rshogi-csa-floodgate-history-staging` で
-> 確認する。
+> 該当 game_id の object が増えていることを確認する。
 
 ## 4. シナリオ B: 連続 N 対局
 
@@ -146,12 +145,11 @@ wait
 
 ## 5. シナリオ C: 切断 → 再接続
 
-> **前提**: staging で `ALLOW_FLOODGATE_FEATURES = "true"` と
-> `RECONNECT_GRACE_SECONDS = "30"` 等を設定して再 deploy する必要がある。
-> 現在の staging は `false` / `0` で disabled。Floodgate features を有効化する
-> 別 PR を merge してから本シナリオを実機検証する。
+> **前提**: staging で `ALLOW_FLOODGATE_FEATURES = "true"` /
+> `RECONNECT_GRACE_SECONDS = "30"` の opt-in 設定で運用中なので、本シナリオは
+> 追加 deploy 無しでそのまま実機通電できる。
 
-設定後の手順:
+手順:
 
 1. シナリオ A を起動して対局を進める。
 2. Game_Summary 末尾の拡張行 `Reconnect_Token:<token>` を黒/白それぞれの

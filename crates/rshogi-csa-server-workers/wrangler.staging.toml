@@ -96,8 +96,10 @@ BYOYOMI_MIN = "1"
 
 # 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
 # `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
-RECONNECT_GRACE_SECONDS = "0"
-ALLOW_FLOODGATE_FEATURES = "false"
+# staging では reconnect protocol / history bucket / rating 応答などの Floodgate 系
+# 拡張機能を実機通電させるため 30 秒に設定する。production は引き続き 0 で運用。
+RECONNECT_GRACE_SECONDS = "30"
+ALLOW_FLOODGATE_FEATURES = "true"
 
 # --- secret として設定する値 ---
 # staging で必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。
