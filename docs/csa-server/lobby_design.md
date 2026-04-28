@@ -145,7 +145,7 @@ cargo run -p rshogi-csa-client --release -- \
   --handle alice \
   --color any \
   --engine /path/to/your/rshogi-usi \
-  --options "EvalFile=/path/to/v87-400-layerstack.bin,USI_Hash=256"
+  --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256"
 ```
 
 `--lobby` 指定時は `--room-id` 不要 (LobbyDO が発番)。`--color any` は

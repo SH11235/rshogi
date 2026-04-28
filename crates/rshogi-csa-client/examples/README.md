@@ -11,7 +11,7 @@ Cloudflare Workers staging への実機 E2E は
 
 本リポ単一 Cloudflare アカウント (`sh11235.workers.dev`) の staging / production
 Worker には TOML を書かずに 1 コマンドで接続できる。エンジンには NNUE モデル付きの
-本番想定構成を使う (例: `v87-400-layerstack.bin` を `EvalFile` に渡す)。
+本番想定構成を使う (例: `v82-400-layerstack.bin` 等の LayerStack NNUE モデルを `EvalFile` に渡す)。
 
 ```bash
 # 黒番 (staging)
@@ -21,7 +21,7 @@ cargo run -p rshogi-csa-client --release -- \
   --handle alice \
   --color black \
   --engine /path/to/your/rshogi-usi \
-  --options "EvalFile=/path/to/v87-400-layerstack.bin,USI_Hash=256"
+  --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256"
 
 # 別ターミナルで白番 (room_id を黒と一致させる)
 cargo run -p rshogi-csa-client --release -- \
@@ -30,7 +30,7 @@ cargo run -p rshogi-csa-client --release -- \
   --handle bob \
   --color white \
   --engine /path/to/your/rshogi-usi \
-  --options "EvalFile=/path/to/v87-400-layerstack.bin,USI_Hash=256"
+  --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256"
 ```
 
 production に繋ぎたい場合は `--target production` に差し替えるだけでよい
@@ -57,7 +57,7 @@ cargo run -p rshogi-csa-client --release -- \
   --handle alice \
   --color black \
   --engine /path/to/your/rshogi-usi \
-  --options "EvalFile=/path/to/v87-400-layerstack.bin,USI_Hash=256" \
+  --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256" \
   --max-games 5
 
 # 別ターミナルで白番 (game_name を一致させる)
@@ -68,7 +68,7 @@ cargo run -p rshogi-csa-client --release -- \
   --handle bob \
   --color white \
   --engine /path/to/your/rshogi-usi \
-  --options "EvalFile=/path/to/v87-400-layerstack.bin,USI_Hash=256" \
+  --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256" \
   --max-games 5
 ```
 
