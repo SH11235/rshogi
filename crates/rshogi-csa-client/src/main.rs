@@ -23,6 +23,7 @@ use clap::{Parser, ValueEnum};
 
 use rshogi_csa_client::config::CsaClientConfig;
 use rshogi_csa_client::engine::UsiEngine;
+use rshogi_csa_client::jsonl::write_game_jsonl;
 use rshogi_csa_client::protocol::{CsaConnection, GameResult};
 use rshogi_csa_client::record::save_record;
 use rshogi_csa_client::session::{run_game_session, run_resumed_session};
@@ -154,6 +155,12 @@ struct Cli {
     #[arg(long)]
     record_dir: Option<PathBuf>,
 
+    /// JSONL 出力ディレクトリ。指定すると対局完了ごとに analyze_selfplay 互換の
+    /// JSONL ファイルを `<datetime>_<sente>_vs_<gote>.jsonl` として書き出す。
+    /// 未指定時は JSONL を出力しない（既定 OFF）。TOML の `record.jsonl_out` でも指定可。
+    #[arg(long)]
+    jsonl_out: Option<PathBuf>,
+
     /// USIエンジンオプション (K=V,K=V,...)
     #[arg(long)]
     options: Option<String>,
@@ -259,6 +266,14 @@ fn main() -> Result<()> {
                 // 棋譜保存
                 if let Err(e) = save_record(&record, &config.record) {
                     log::error!("棋譜保存エラー: {e}");
+                }
+
+                // JSONL 出力（opt-in、--jsonl-out / record.jsonl_out 指定時のみ）
+                if let Some(ref jsonl_dir) = config.record.jsonl_out {
+                    match write_game_jsonl(jsonl_dir, &record, &config, &result) {
+                        Ok(path) => log::info!("[REC] JSONL 保存: {}", path.display()),
+                        Err(e) => log::error!("JSONL 保存エラー: {e}"),
+                    }
                 }
 
                 games_played += 1;
@@ -662,6 +677,9 @@ fn apply_cli_overrides(config: &mut CsaClientConfig, cli: &Cli) {
     if let Some(ref dir) = cli.record_dir {
         config.record.dir = dir.clone();
     }
+    if let Some(ref dir) = cli.jsonl_out {
+        config.record.jsonl_out = Some(dir.clone());
+    }
     if let Some(ref opts) = cli.options {
         for kv in opts.split(',') {
             if let Some((k, v)) = kv.split_once('=') {
@@ -774,6 +792,7 @@ mod tests {
             max_games: None,
             log_level: None,
             record_dir: None,
+            jsonl_out: None,
             options: None,
         }
     }

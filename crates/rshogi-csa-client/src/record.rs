@@ -24,6 +24,12 @@ pub struct GameRecord {
     pub moves: Vec<RecordedMove>,
     pub result: String,
     pub start_time: chrono::DateTime<Local>,
+    /// 自エンジンの手番。JSONL 出力モードで `outcome` / `winner` の正規化に使う。
+    pub my_color: Color,
+    /// JSONL 出力モード用に蓄積する手単位の追加情報。CSA / SFEN 棋譜出力には影響しない。
+    /// 各要素は `moves[i]` に対応する。投了 / 勝ち宣言など `apply_csa_move` を経由しない
+    /// 手は含まれず、ply ベースで一致する。
+    pub jsonl_moves: Vec<JsonlMoveExtra>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +42,34 @@ pub struct RecordedMove {
     pub pv: Vec<String>,
     /// この手を指した側の手番（評価値の先手視点正規化に使用）
     pub side_to_move: Color,
+}
+
+/// JSONL 出力モードで `move` 行に書く追加情報。
+///
+/// `analyze_selfplay` が読み取るスキーマ（`tools/src/bin/tournament.rs` 互換）と
+/// 揃えるための転写領域。生成は `session.rs` の対局ループで行う。
+#[derive(Clone, Debug)]
+pub struct JsonlMoveExtra {
+    /// この手を指す前の SFEN（`position` コマンドで送ったのと同じ手前局面）
+    pub sfen_before: String,
+    /// USI 形式の指し手
+    pub move_usi: String,
+    /// この手を指したエンジンのラベル。CSA 上のプレイヤー名 (`sente_name` / `gote_name`)
+    /// と一致させるため、先手手番なら `sente_name`、後手手番なら `gote_name` を入れる。
+    /// analyze_selfplay の per-engine timing 集計でこのラベルがキーになる。
+    pub engine_label: String,
+    /// この手の探索に費やした実時間 (ms)
+    pub elapsed_ms: u64,
+    /// `go` で指示した考慮上限 (ms)。byoyomi+残時間ベースで session.rs が計算した値。
+    pub think_limit_ms: u64,
+    /// USI `info` から最後に観測した seldepth
+    pub seldepth: Option<u32>,
+    /// USI `info` から最後に観測した nodes
+    pub nodes: Option<u64>,
+    /// USI `info` から最後に観測した time
+    pub time_ms: Option<u64>,
+    /// USI `info` から最後に観測した nps
+    pub nps: Option<u64>,
 }
 
 impl RecordedMove {
@@ -66,7 +100,15 @@ impl GameRecord {
             moves: Vec::new(),
             result: String::new(),
             start_time: Local::now(),
+            my_color: summary.my_color,
+            jsonl_moves: Vec::new(),
         }
+    }
+
+    /// JSONL 出力モード向けの追加情報を 1 手分蓄積する。
+    /// CSA 棋譜・SFEN 出力にはこのバッファは使われない。
+    pub fn add_jsonl_move(&mut self, extra: JsonlMoveExtra) {
+        self.jsonl_moves.push(extra);
     }
 
     pub fn add_move(

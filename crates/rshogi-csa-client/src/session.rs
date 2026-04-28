@@ -19,7 +19,7 @@ use crate::event::Event;
 use crate::protocol::{
     CsaConnection, GameResult, GameSummary, ReconnectState, parse_game_result, parse_server_move,
 };
-use crate::record::GameRecord;
+use crate::record::{GameRecord, JsonlMoveExtra};
 
 // ────────────────────────────────────────────
 // Clock
@@ -83,6 +83,25 @@ impl Clock {
             format!("btime {} wtime {} byoyomi {}", btime, wtime, byoyomi)
         } else {
             format!("btime {} wtime {}", btime, wtime)
+        }
+    }
+
+    /// JSONL 出力モードの `think_limit_ms` 用に、`side_to_move` の考慮上限を ms で返す。
+    /// byoyomi 指定なら `byoyomi - margin`、Fischer なら残時間 + increment、
+    /// 時間管理が無いなら 0。
+    fn think_limit_ms(&self, margin_msec: u64, side_to_move: Color) -> u64 {
+        let (total_ms, byoyomi_ms, increment_ms) = match side_to_move {
+            Color::Black => (self.black_time_ms, self.black_byoyomi_ms, self.black_increment_ms),
+            Color::White => (self.white_time_ms, self.white_byoyomi_ms, self.white_increment_ms),
+        };
+        if increment_ms > 0 {
+            total_ms.max(0) as u64 + increment_ms.max(0) as u64
+        } else if byoyomi_ms > 0 {
+            (byoyomi_ms - margin_msec as i64).max(0) as u64
+        } else if total_ms > 0 {
+            total_ms as u64
+        } else {
+            0
         }
     }
 
@@ -159,11 +178,17 @@ impl SessionState<'_> {
         &mut self,
         outcome: SearchOutcome,
         turn_start: Instant,
+        sfen_before: String,
+        think_limit_ms: u64,
     ) -> Result<MoveAction> {
         match outcome {
-            SearchOutcome::BestMove(result, info) => {
-                self.send_bestmove_and_wait_echo(&result, &info, turn_start)
-            }
+            SearchOutcome::BestMove(result, info) => self.send_bestmove_and_wait_echo(
+                &result,
+                &info,
+                turn_start,
+                sfen_before,
+                think_limit_ms,
+            ),
             SearchOutcome::ServerInterrupt(lines) => {
                 // サーバーから終局が来た（ponderhit 中等）
                 let (game_result, reason) = parse_server_interrupt_lines(lines);
@@ -180,6 +205,8 @@ impl SessionState<'_> {
         result: &BestMoveResult,
         info: &SearchInfo,
         turn_start: Instant,
+        sfen_before: String,
+        think_limit_ms: u64,
     ) -> Result<MoveAction> {
         if result.bestmove == "resign" {
             self.conn.send_resign()?;
@@ -207,6 +234,19 @@ impl SessionState<'_> {
         self.pos.apply_csa_move(&csa_move)?;
         self.usi_moves.push(result.bestmove.clone());
         self.record.add_move(&csa_move, 0, Some(info), self.my_color);
+        let elapsed_ms = turn_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let engine_label = label_for_color(&self.record, self.my_color);
+        self.record.add_jsonl_move(JsonlMoveExtra {
+            sfen_before,
+            move_usi: result.bestmove.clone(),
+            engine_label,
+            elapsed_ms,
+            think_limit_ms,
+            seldepth: info.seldepth,
+            nodes: info.nodes,
+            time_ms: info.time_ms,
+            nps: info.nps,
+        });
 
         // ponder 開始
         if self.config.game.ponder
@@ -380,12 +420,18 @@ fn run_session_loop(
     let mut move_color = summary.position.side_to_move;
     for cm in &summary.initial_moves {
         let usi = csa_move_to_usi(&cm.mv, &s.pos)?;
+        let initial_sfen_before = s.pos.to_sfen();
         s.pos.apply_csa_move(&cm.mv)?;
-        s.usi_moves.push(usi);
+        s.usi_moves.push(usi.clone());
         if let Some(t) = cm.time_sec {
             s.clock.consume(move_color, t);
         }
-        s.record.add_move(&cm.mv, cm.time_sec.unwrap_or(0), None, move_color);
+        let time_sec = cm.time_sec.unwrap_or(0);
+        s.record.add_move(&cm.mv, time_sec, None, move_color);
+        // 途中再開の手は両方とも「対戦相手の手」相当として extras に記録する。
+        // 自エンジンは新しい session.new_game() でこの局面から開始するため、
+        // この手は自エンジンの探索ログを持たない。
+        push_opponent_jsonl(&mut s.record, initial_sfen_before, usi, move_color, time_sec);
         move_color = opposite(move_color);
     }
 
@@ -393,12 +439,14 @@ fn run_session_loop(
     loop {
         if s.pos.side_to_move == s.my_color {
             let turn_start = Instant::now();
+            let sfen_before = s.pos.to_sfen();
+            let think_limit_ms = s.clock.think_limit_ms(s.config.time.margin_msec, s.my_color);
             let position_cmd = build_position_cmd(&s.initial_sfen, &s.usi_moves);
             let go_cmd =
                 format!("go {}", s.clock.build_go_args(s.config.time.margin_msec, s.my_color));
             let outcome = s.engine.go(&position_cmd, &go_cmd, s.shutdown, s.server_rx)?;
 
-            match s.handle_search_outcome(outcome, turn_start)? {
+            match s.handle_search_outcome(outcome, turn_start, sfen_before, think_limit_ms)? {
                 MoveAction::Continue => {}
                 MoveAction::GameEnd(result, record_box) => return Ok((result, *record_box)),
             }
@@ -417,15 +465,31 @@ fn run_session_loop(
                             if opponent_usi == ps.expected_usi {
                                 // ponderhit
                                 log::debug!("[PONDER] ponderhit: {}", opponent_usi);
+                                let opponent_sfen_before = s.pos.to_sfen();
                                 s.pos.apply_csa_move(&mv)?;
-                                s.usi_moves.push(opponent_usi);
+                                s.usi_moves.push(opponent_usi.clone());
                                 s.clock.consume(opposite(s.my_color), time_sec);
                                 s.record.add_move(&mv, time_sec, None, opposite(s.my_color));
+                                push_opponent_jsonl(
+                                    &mut s.record,
+                                    opponent_sfen_before,
+                                    opponent_usi,
+                                    opposite(s.my_color),
+                                    time_sec,
+                                );
 
                                 let ponderhit_start = Instant::now();
+                                let my_sfen_before = s.pos.to_sfen();
+                                let my_think_limit_ms =
+                                    s.clock.think_limit_ms(s.config.time.margin_msec, s.my_color);
                                 let outcome = s.engine.ponderhit(s.shutdown, s.server_rx)?;
 
-                                match s.handle_search_outcome(outcome, ponderhit_start)? {
+                                match s.handle_search_outcome(
+                                    outcome,
+                                    ponderhit_start,
+                                    my_sfen_before,
+                                    my_think_limit_ms,
+                                )? {
                                     MoveAction::Continue => break,
                                     MoveAction::GameEnd(result, record_box) => {
                                         return Ok((result, *record_box));
@@ -439,19 +503,35 @@ fn run_session_loop(
                                     opponent_usi
                                 );
                                 s.engine.stop_and_wait()?;
+                                let opponent_sfen_before = s.pos.to_sfen();
                                 s.pos.apply_csa_move(&mv)?;
-                                s.usi_moves.push(opponent_usi);
+                                s.usi_moves.push(opponent_usi.clone());
                                 s.clock.consume(opposite(s.my_color), time_sec);
                                 s.record.add_move(&mv, time_sec, None, opposite(s.my_color));
+                                push_opponent_jsonl(
+                                    &mut s.record,
+                                    opponent_sfen_before,
+                                    opponent_usi,
+                                    opposite(s.my_color),
+                                    time_sec,
+                                );
                                 break;
                             }
                         } else {
                             // ponder なし
                             let opponent_usi = csa_move_to_usi(&mv, &s.pos)?;
+                            let opponent_sfen_before = s.pos.to_sfen();
                             s.pos.apply_csa_move(&mv)?;
-                            s.usi_moves.push(opponent_usi);
+                            s.usi_moves.push(opponent_usi.clone());
                             s.clock.consume(opposite(s.my_color), time_sec);
                             s.record.add_move(&mv, time_sec, None, opposite(s.my_color));
+                            push_opponent_jsonl(
+                                &mut s.record,
+                                opponent_sfen_before,
+                                opponent_usi,
+                                opposite(s.my_color),
+                                time_sec,
+                            );
                             break;
                         }
                     }
@@ -579,6 +659,43 @@ fn opposite(color: Color) -> Color {
         Color::Black => Color::White,
         Color::White => Color::Black,
     }
+}
+
+/// CSA プレイヤー名から analyze_selfplay の集計キーになる engine label を返す。
+/// `sente_name` / `gote_name` が空なら `"unknown"` を返す。
+fn label_for_color(record: &GameRecord, color: Color) -> String {
+    let raw = match color {
+        Color::Black => &record.sente_name,
+        Color::White => &record.gote_name,
+    };
+    if raw.is_empty() {
+        "unknown".to_string()
+    } else {
+        raw.clone()
+    }
+}
+
+/// 相手 (= 自エンジンでない側) が指した手を JSONL 用バッファに追加する。
+/// `time_sec` はサーバが報告した消費秒。`elapsed_ms` 換算で記録する。
+fn push_opponent_jsonl(
+    record: &mut GameRecord,
+    sfen_before: String,
+    move_usi: String,
+    side: Color,
+    time_sec: u32,
+) {
+    let engine_label = label_for_color(record, side);
+    record.add_jsonl_move(JsonlMoveExtra {
+        sfen_before,
+        move_usi,
+        engine_label,
+        elapsed_ms: u64::from(time_sec) * 1000,
+        think_limit_ms: 0,
+        seldepth: None,
+        nodes: None,
+        time_ms: None,
+        nps: None,
+    });
 }
 
 fn gameover_str(result: &GameResult) -> &'static str {
