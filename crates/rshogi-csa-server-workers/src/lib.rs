@@ -26,6 +26,7 @@ pub mod attachment;
 pub mod config;
 pub mod datetime;
 pub mod floodgate_history;
+pub mod games_index;
 pub mod lobby_protocol;
 pub mod origin;
 // `persistence` は DO ランタイム (`game_room`) からのみ消費される I/O 非依存の
@@ -52,6 +53,8 @@ mod game_room;
 mod lobby;
 #[cfg(target_arch = "wasm32")]
 mod router;
+#[cfg(target_arch = "wasm32")]
+mod viewer_api;
 
 #[cfg(target_arch = "wasm32")]
 pub use game_room::GameRoom;

@@ -88,7 +88,10 @@ pub fn entry_key(entry: &FloodgateHistoryEntry) -> Result<String, StorageError> 
 /// 壊れる。空文字や R2 が拒否する制御文字も同様に弾く。CSA プロトコル上 `game_id`
 /// は ASCII 英数 + `-` `_` のみを生成するサーバ前提なので、想定外の文字種は
 /// バグとして上位に伝える。
-fn validate_key_component(s: &str) -> Result<&str, StorageError> {
+///
+/// 本関数は `games_index` モジュール (viewer 配信 API) からも参照されるため
+/// `pub` で公開する。許可文字集合と空文字拒否のセマンティクスは両者で共有する。
+pub fn validate_key_component(s: &str) -> Result<&str, StorageError> {
     if s.is_empty() {
         return Err(StorageError::Malformed("empty game_id in history entry".to_owned()));
     }

@@ -10,6 +10,7 @@ use worker::{Env, Method, Request, Response, Result};
 
 use crate::config::{ConfigKeys, OriginAllowList};
 use crate::origin::{OriginDecision, evaluate};
+use crate::viewer_api;
 use crate::ws_route::parse_ws_route;
 
 /// `#[event(fetch)]` から委譲されるディスパッチ。
@@ -20,6 +21,13 @@ pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
 
     if method == Method::Get && (path == "/" || path == "/health") {
         return Response::ok(format!("rshogi-csa-server-workers v{}", env!("CARGO_PKG_VERSION")));
+    }
+
+    // viewer 配信 API (`/api/v1/games[/...]`) は GameRoom DO を経由せず
+    // R2 直 fetch のみで完結する。本ルートに該当しない場合のみ既存の
+    // WebSocket ルーティングへ落ちる。
+    if let Some(resp) = viewer_api::try_handle(&req, &env).await? {
+        return Ok(resp);
     }
 
     if method == Method::Get && path == "/ws/lobby" {

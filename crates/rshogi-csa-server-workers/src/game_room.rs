@@ -66,6 +66,9 @@ use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::{ConfigKeys, parse_clock_spec, parse_reconnect_grace_duration};
 use crate::datetime::{format_csa_datetime, format_date_path, format_rfc3339_utc};
 use crate::floodgate_history::R2FloodgateHistoryStorage;
+use crate::games_index::{
+    ClockSpec as IndexClockSpec, GamesIndexEntry, classify_result, games_index_key,
+};
 use crate::persistence::{
     FinishedState, MoveRow, PersistedConfig, ReplaySummary, replay_core_room,
 };
@@ -1046,6 +1049,10 @@ impl GameRoom {
             });
         }
 
+        // 後続の `KifuRecord::moves` で `kifu_moves` を move する前に手数を退避する。
+        // `moves_count` は viewer 配信 API 用 index entry に埋め込む。
+        let moves_count_for_index: u32 = kifu_moves.len() as u32;
+
         // `time_section` は clock の初期設定値に依存し、持ち時間の残量には
         // 左右されないので cfg から再構築しても同じ出力になる。
         let time_section = cfg.clock.format_time_section();
@@ -1080,6 +1087,73 @@ impl GameRoom {
         bucket.put(&key, text.as_bytes().to_vec()).execute().await?;
         bucket.put(&by_id_key, text.as_bytes().to_vec()).execute().await?;
         console_log!("[GameRoom] kifu exported to R2 key='{key}'");
+
+        // viewer 配信 API 用の補助インデックス (`games-index/...`) を 1 件 put する。
+        // 本文 + by-id put は既に成功しているため、index put のいかなる失敗も
+        // `finalize_if_ended` を Err にしてはならない (best-effort)。validation /
+        // serialize / put すべての失敗を `if let Err` で吸収して Ok(()) で抜ける。
+        // `?` は意図的に使わない。
+        //
+        // `source` は `resolve_floodgate_history_storage` が `Some` を返せる構成
+        // (= Floodgate gating opt-in & binding 解決可) かどうかで事前判定する。
+        // `floodgate-history/` への put 成否ではなく「Floodgate 環境設定下で起きた
+        // 終局」を表す semantics (v3 設計の `source` field 定義に従う)。
+        let source = if resolve_floodgate_history_storage(&self.env).ok().flatten().is_some() {
+            "floodgate"
+        } else {
+            "kifu"
+        };
+
+        let index_key = match games_index_key(ended_at_ms, &cfg.game_id) {
+            Ok(k) => k,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=games_index_skip game_id={} reason=key:{:?}",
+                    cfg.game_id,
+                    e,
+                );
+                return Ok(());
+            }
+        };
+
+        let (result_kind, end_reason) = classify_result(game_result);
+        let entry = GamesIndexEntry {
+            game_id: &cfg.game_id,
+            started_at_ms: cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms),
+            ended_at_ms,
+            black_handle: &cfg.black_handle,
+            white_handle: &cfg.white_handle,
+            result_kind,
+            end_reason,
+            // CSA は理論上 0..=u32::MAX 手は到達しないが、API contract は
+            // 整数手数を要求するため u32 に正規化する。`DEFAULT_MAX_MOVES = 256`
+            // 上限のため通常は 0..=256 に収まる。
+            moves_count: moves_count_for_index,
+            clock: IndexClockSpec::from_server(&cfg.clock),
+            source,
+        };
+
+        let body = match serde_json::to_vec(&entry) {
+            Ok(b) => b,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=games_index_skip game_id={} reason=serialize:{:?}",
+                    cfg.game_id,
+                    e,
+                );
+                return Ok(());
+            }
+        };
+
+        if let Err(e) = bucket.put(&index_key, body).execute().await {
+            console_log!(
+                "[GameRoom] event=games_index_put_failed game_id={} inv_key={} err={:?}",
+                cfg.game_id,
+                index_key,
+                e,
+            );
+        }
+
         Ok(())
     }
 
