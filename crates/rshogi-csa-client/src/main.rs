@@ -86,12 +86,6 @@ struct Cli {
     #[arg(long, value_enum)]
     color: Option<CliColor>,
 
-    /// 軽量エンジン設定 (MaterialLevel=1 / USI_Hash=32 / margin_msec=0 / max_games=1 /
-    /// ponder=false) を有効化。staging の短秒読み運用 (BYOYOMI_MS=100) で 1 局を
-    /// 素早く終局まで回したいとき用。`--engine` でバイナリ指定が必要。
-    #[arg(long, default_value_t = false)]
-    simple_engine: bool,
-
     /// LobbyDO マッチングモード。`--target` と `--handle` / `--color` 併用必須。
     /// `/ws/lobby` に接続して LOGIN_LOBBY → MATCHED 受信 → 指定された room_id へ
     /// 接続して対局するループを `--max-games` まで繰り返す。
@@ -185,11 +179,6 @@ fn main() -> Result<()> {
     // `--target` プリセットを TOML の上に重ねる。CLI で room_id / handle / color が
     // 揃っていれば host / id / ws_origin / floodgate を 1 引数で組み立てる。
     apply_target_preset(&mut config, &cli)?;
-
-    // `--simple-engine` で staging 短秒読み向け軽量設定を上書き。
-    if cli.simple_engine {
-        apply_simple_engine_preset(&mut config);
-    }
 
     // 環境変数でオーバーライド
     apply_env_overrides(&mut config);
@@ -630,20 +619,6 @@ fn apply_target_preset(config: &mut CsaClientConfig, cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// `--simple-engine` プリセット。staging の短秒読み運用で 1 局を素早く回す軽量
-/// 設定を `[engine.options]` / `[time]` / `[game]` に重ねる。`engine.path` には
-/// 触れないので、`--engine` か TOML / 環境変数で指定する責任は呼び出し側。
-fn apply_simple_engine_preset(config: &mut CsaClientConfig) {
-    config
-        .engine
-        .options
-        .insert("MaterialLevel".to_owned(), toml::Value::Integer(1));
-    config.engine.options.insert("USI_Hash".to_owned(), toml::Value::Integer(32));
-    config.time.margin_msec = 0;
-    config.game.max_games = 1;
-    config.game.ponder = false;
-}
-
 fn apply_cli_overrides(config: &mut CsaClientConfig, cli: &Cli) {
     if let Some(ref host) = cli.host {
         config.server.host = host.clone();
@@ -783,7 +758,6 @@ mod tests {
             room_id: None,
             handle: None,
             color: None,
-            simple_engine: false,
             lobby: false,
             game_name: None,
             host: None,
@@ -901,16 +875,5 @@ mod tests {
         apply_cli_overrides(&mut config, &cli);
         assert_eq!(config.server.host, "wss://custom.example/ws/x");
         assert_eq!(config.server.id, "override-id");
-    }
-
-    #[test]
-    fn simple_engine_preset_sets_short_byoyomi_defaults() {
-        let mut config = CsaClientConfig::default();
-        apply_simple_engine_preset(&mut config);
-        assert_eq!(config.engine.options.get("MaterialLevel"), Some(&toml::Value::Integer(1)));
-        assert_eq!(config.engine.options.get("USI_Hash"), Some(&toml::Value::Integer(32)));
-        assert_eq!(config.time.margin_msec, 0);
-        assert_eq!(config.game.max_games, 1);
-        assert!(!config.game.ponder);
     }
 }

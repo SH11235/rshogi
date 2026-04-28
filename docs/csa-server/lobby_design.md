@@ -144,8 +144,8 @@ cargo run -p rshogi-csa-client --release -- \
   --game-name "rshogi-eval" \
   --handle alice \
   --color any \
-  --simple-engine \
-  --engine /path/to/your/rshogi-usi
+  --engine /path/to/your/rshogi-usi \
+  --options "EvalFile=/path/to/v87-400-layerstack.bin,USI_Hash=256"
 ```
 
 `--lobby` 指定時は `--room-id` 不要 (LobbyDO が発番)。`--color any` は
