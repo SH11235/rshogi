@@ -41,11 +41,19 @@ pub enum SearchOutcome {
 }
 
 /// info 行から抽出した探索情報
+///
+/// `depth` / `score_cp` / `score_mate` / `pv` は CSA Floodgate 拡張コメント生成に使われる。
+/// `seldepth` / `nodes` / `time_ms` / `nps` は JSONL 出力モード（analyze_selfplay 互換）の
+/// `move.eval` フィールドへの転写用。`info` 行から最後に観測した値を保持する。
 #[derive(Clone, Debug, Default)]
 pub struct SearchInfo {
     pub depth: Option<u32>,
+    pub seldepth: Option<u32>,
     pub score_cp: Option<i32>,
     pub score_mate: Option<i32>,
+    pub nodes: Option<u64>,
+    pub time_ms: Option<u64>,
+    pub nps: Option<u64>,
     pub pv: Vec<String>,
 }
 
@@ -432,6 +440,30 @@ fn update_search_info(info: &mut SearchInfo, line: &str) {
             "depth" => {
                 if let Some(v) = tokens.peek().and_then(|s| s.parse().ok()) {
                     info.depth = Some(v);
+                    tokens.next();
+                }
+            }
+            "seldepth" => {
+                if let Some(v) = tokens.peek().and_then(|s| s.parse().ok()) {
+                    info.seldepth = Some(v);
+                    tokens.next();
+                }
+            }
+            "nodes" => {
+                if let Some(v) = tokens.peek().and_then(|s| s.parse().ok()) {
+                    info.nodes = Some(v);
+                    tokens.next();
+                }
+            }
+            "time" => {
+                if let Some(v) = tokens.peek().and_then(|s| s.parse().ok()) {
+                    info.time_ms = Some(v);
+                    tokens.next();
+                }
+            }
+            "nps" => {
+                if let Some(v) = tokens.peek().and_then(|s| s.parse().ok()) {
+                    info.nps = Some(v);
                     tokens.next();
                 }
             }

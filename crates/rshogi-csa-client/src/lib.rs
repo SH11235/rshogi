@@ -7,6 +7,7 @@
 pub mod config;
 pub mod engine;
 pub mod event;
+pub mod jsonl;
 pub mod protocol;
 pub mod record;
 pub mod session;

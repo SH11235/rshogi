@@ -149,6 +149,11 @@ pub struct RecordConfig {
     pub filename_template: String,
     pub save_csa: bool,
     pub save_sfen: bool,
+    /// JSONL 出力先ディレクトリ。`None` のとき JSONL は生成しない。
+    /// 指定すると `<datetime>_<sente>_vs_<gote>.jsonl` を出力し、
+    /// `tools::analyze_selfplay` で読み込めるスキーマで meta / move / result 行を書き込む。
+    #[serde(default)]
+    pub jsonl_out: Option<PathBuf>,
 }
 
 impl Default for RecordConfig {
@@ -159,6 +164,7 @@ impl Default for RecordConfig {
             filename_template: "{datetime}_{sente}_vs_{gote}".to_string(),
             save_csa: true,
             save_sfen: true,
+            jsonl_out: None,
         }
     }
 }
