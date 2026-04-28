@@ -11,8 +11,10 @@ deployment 全体像は [`deployment.md`](deployment.md) を参照。
 
 - staging Worker (`rshogi-csa-server-workers-staging.<account>.workers.dev`)
   が deploy 済みであること（`CLOCK_KIND = "countdown_msec"` / `BYOYOMI_MS = "100"`）。
-- ローカルに USI エンジン（`rshogi-usi` 等）の release バイナリがあり、`/path/to/rshogi-usi`
-  で起動できること。設定は最低限 `MaterialLevel = 1` で起動可能（NNUE モデル不要）。
+- ローカルに USI エンジン（`rshogi-usi` 等）の release / production ビルドがあり、
+  NNUE モデル (例: `v87-400-layerstack.bin`) を `EvalFile` に渡せること。本番想定の
+  対局品質を担保するため、Material 評価関数のみでの実行は本番想定 E2E では使わない
+  (探索が不安定で時間切れ局を量産しがちなため)。
 - `vp exec wrangler` で staging Worker / R2 bucket を操作できる権限があること。
 - `csa_client` の WS 経路（`tungstenite` 依存）が main に取り込まれていること。
 - 各シナリオ用の sample TOML は
@@ -232,9 +234,9 @@ count が 0 になっており、再対局はできない（`%%SETBUOY count 1` 
 | `byoyomi (100ms) + α` だけ engine 思考を遅らせる | サーバ側で時間切れ判定 → `#TIME_UP` + `#LOSE/#WIN` | `#TIME_UP` の中間行 + 結果行 |
 | 不正な指し手を送る (例: `+7775FU` のような無効手) | `#ILLEGAL_MOVE` + `#LOSE/#WIN` | `#ILLEGAL_MOVE` |
 
-`#TIME_UP` を再現するには engine 思考を 100ms より遅くするのが最短。
-`MaterialLevel = 1` で十分軽量だが、`Hash = 1024` 等で memory pressure を
-かけると間に合わない手が出るケースもある。
+`#TIME_UP` を再現するには engine 思考を 100ms より遅くするのが最短。NNUE モデルを
+load していないか `Hash = 1024` 等で memory pressure をかけると、初期化や 1 手目
+読み込みで間に合わない局面を作れる。
 
 `#ILLEGAL_MOVE` は `wscat` 経由で手動で `+7775FU` のような無効手を送る方が
 確実 (csa_client は engine の生成する合法手しか送らないため)。
@@ -306,4 +308,4 @@ gh workflow run "Deploy Workers" -f target=staging
 | `ログイン失敗: LOGIN:incorrect` | `<handle>+<game_name>+<color>` 形式違反、または同 game_name で role 重複 | `id` の format を再確認、`<room_id>` を新規生成 |
 | 双方接続するも対局が始まらない | `room_id` が黒/白で不一致 | URL の `/ws/<room_id>` 部分が両 toml で完全一致しているか確認 |
 | 対局終局後も R2 に書き込まれない | DO storage の終局イベントが落ちた | Worker のログを `vp exec wrangler tail` で確認 |
-| `#TIME_UP` で対局が終わってしまう (シナリオ A 通常実行で) | `BYOYOMI_MS=100` が短すぎ engine 思考が間に合わない | `csa_client` の `[time] margin_msec` を 0 に下げる、または engine option `MaterialLevel = 1` で軽量化 |
+| `#TIME_UP` で対局が終わってしまう (シナリオ A 通常実行で) | ネットワーク往復時間ぶん engine の bestmove がサーバ側 deadline に間に合わない | engine 側で「サーバの byoyomi より早めに探索を打ち切る」よう overhead 系の USI オプションを設定する。本リポ csa_client では `[time] margin_msec` を上げると engine に渡す byoyomi がその分減り、応答に余裕を持たせられる |
