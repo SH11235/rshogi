@@ -86,9 +86,11 @@ crons = ["0 */1 * * *"]
 # （Origin ヘッダ付き）に対する CSRF 防御として機能する。
 # 空文字列・未設定時はブラウザ経由を全 403、Origin ヘッダを送らない
 # ネイティブ CSA クライアントは素通し。
-# staging では本リポ csa_client の `ws_origin` 既定値と合わせ、Origin 付きで
-# 実機 E2E が通電できる値を入れておく。web client URL が確定したら追記する。
-WS_ALLOWED_ORIGINS = "https://csa-client-local"
+# staging では本リポ csa_client の `ws_origin` 既定値 (`https://csa-client-local`)
+# と staging web client + Tauri desktop の Origin を併記する。
+# Tauri desktop は OS 別 Origin (`tauri://localhost` / `https://tauri.localhost`)
+# を webview から自動付与するため、両方を登録する。
+WS_ALLOWED_ORIGINS = "https://stg.ramu-shogi.sh11235.com,https://csa-client-local,tauri://localhost,https://tauri.localhost"
 
 # 対局時計の方式と値。
 # - `countdown`: CSA 2014 改訂互換、整数秒切り捨て、Floodgate 互換 (`Time_Unit:1sec`)。

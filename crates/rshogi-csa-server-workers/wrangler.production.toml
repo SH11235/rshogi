@@ -94,8 +94,11 @@ crons = ["0 */1 * * *"]
 # では allowlist が **必須**: 空・未設定時は Origin の有無にかかわらず 403。
 # 無認可公開を防ぐ fail-closed 既定で、`ALLOW_VIEWER_API` と組で運用する。
 # 実運用では web client URL を実値に書き換えること。
-# 例: "https://rshogi.example.com,https://www.rshogi.example.com"
-WS_ALLOWED_ORIGINS = "https://rshogi.example.com"
+# Tauri desktop は webview から fetch するときに OS 別の Origin を付与する:
+#   - macOS / Linux: tauri://localhost
+#   - Windows: https://tauri.localhost
+# 両方を allowlist に登録して desktop からの request も通す。
+WS_ALLOWED_ORIGINS = "https://ramu-shogi.sh11235.com,tauri://localhost,https://tauri.localhost"
 
 # 対局時計。`countdown` (CSA 2014 改訂秒読み、Floodgate 互換) / `countdown_msec`
 # (ms 粒度の短時間対局向け拡張) / `fischer` (増分加算) / `stopwatch` (分単位)。
