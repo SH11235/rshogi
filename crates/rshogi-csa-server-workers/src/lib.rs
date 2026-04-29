@@ -23,6 +23,13 @@ compile_error!(
 );
 
 pub mod attachment;
+// `backfill` は cron trigger (`#[event(scheduled)]`) からのみ消費される。
+// ホスト target で参照する公開 API は Stats / Deserialize 型のみで、IO 関数本体
+// は wasm32 ゲートで切り離している。それでもホスト通常ビルド (cargo build) では
+// 消費者が無くなり dead_code 警告が出るため、`persistence` 等と同様に
+// wasm32 + test ゲーティングで揃える。
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod backfill;
 pub mod config;
 pub mod datetime;
 pub mod floodgate_history;
@@ -80,4 +87,38 @@ pub async fn fetch(
     _ctx: worker::Context,
 ) -> worker::Result<worker::Response> {
     router::handle_fetch(req, env).await
+}
+
+/// Workers ランタイムの scheduled イベント (cron trigger)。
+///
+/// `wrangler.toml` の `[triggers] crons = ["0 */1 * * *"]` (毎時 0 分) で起動し、
+/// 順次 `run_games_index_backfill` → `run_live_orphan_sweep` を呼ぶ
+/// (Issue #551 設計 v3 §11)。
+///
+/// 各ジョブは内部的に best-effort で失敗を握り潰し `Result::Ok` で返すため、
+/// scheduled handler 側ではさらに伝播禁止 (cron の継続可用性を最優先する) で
+/// `Err` も logfmt のみ記録する。`env` は `&env` 経由で渡し `Env: Clone` 前提
+/// を作らない (設計 v2 §4)。
+#[cfg(target_arch = "wasm32")]
+#[worker::event(scheduled)]
+pub async fn scheduled(
+    event: worker::ScheduledEvent,
+    env: worker::Env,
+    _ctx: worker::ScheduleContext,
+) {
+    let cron = event.cron();
+    if let Err(e) = backfill::run_games_index_backfill(&env).await {
+        worker::console_log!(
+            "[scheduled] event=games_index_backfill_failed cron={} err={:?}",
+            cron,
+            e,
+        );
+    }
+    if let Err(e) = backfill::run_live_orphan_sweep(&env).await {
+        worker::console_log!(
+            "[scheduled] event=live_orphan_sweep_failed cron={} err={:?}",
+            cron,
+            e,
+        );
+    }
 }

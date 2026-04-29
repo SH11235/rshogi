@@ -16,7 +16,8 @@
 //!   WS spectate 接続で実状態を確認する)。
 //! - `GET /api/v1/games/<game_id>` 単局 (終局済)
 //!   `kifu-by-id/<encoded_game_id>.csa` を直接 get する。本文 (CSA V2) と
-//!   `games-index/` から取得した meta を合わせて返す。
+//!   `kifu-by-id/<encoded_game_id>.meta.json` から取得した正準メタ (Issue #551
+//!   設計 v3 §12) を合わせて返す。
 //!
 //! いずれも GameRoom DO を経由せず、Worker 直 fetch のみで完結する (R2 read
 //! 1 ホップ)。CORS は staging では `WS_ALLOWED_ORIGINS` をそのまま流用して
@@ -36,7 +37,7 @@ use crate::config::{ConfigKeys, OriginAllowList};
 use crate::games_index::KEY_PREFIX as GAMES_INDEX_PREFIX;
 use crate::live_games_index::LIVE_KEY_PREFIX;
 use crate::origin::{OriginDecision, evaluate};
-use crate::x1_paths::kifu_by_id_object_key;
+use crate::x1_paths::{kifu_by_id_meta_key, kifu_by_id_object_key};
 
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 100;
@@ -99,9 +100,9 @@ struct LiveListResponse {
 struct GameResponse<'a> {
     game_id: &'a str,
     csa: String,
-    /// `games-index/` から取得した meta。MVP では index に entry が無い場合
-    /// 404 を返す前提で、ここは常に `Some` だが、JSON 上は serde 既定で field
-    /// として出る。
+    /// `kifu-by-id/<id>.meta.json` から取得した正準メタ (Issue #551 設計 v3 §12)。
+    /// meta 不在時は 404 を返す前提なので、ここは常に `Some` 相当だが JSON 上は
+    /// serde 既定で field として出る。
     meta: serde_json::Value,
 }
 
@@ -302,21 +303,19 @@ async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response>
         }
     };
 
-    // meta は `games-index/` を prefix list で 1 件だけ走査して見つける。
-    // index key は `<inv_ms>-<game_id>.json` 形式なので game_id 単独では
-    // 完全な key を再構築できない (inv_ms が分からない)。MVP では list で
-    // 1 件目を見つけ次第 break する単純戦略を採る (per game_id で 1 件のみ
-    // 存在する不変条件下では効率より簡潔さを優先)。
+    // meta は `kifu-by-id/<id>.meta.json` を直接 get で取得する (Issue #551
+    // 設計 v3 §12)。primary meta が常設される契約なので、`games-index/` を
+    // prefix list で走査する旧経路 (O(N) コスト) は廃止し、O(1) get に置換した。
     let meta = match find_meta_for(&bucket, game_id).await {
         Ok(Some(m)) => m,
         Ok(None) => {
-            // CSA 本文はあるが index に entry が無い (backfill 未実施 or
-            // index put 失敗)。MVP 仕様として 404 を返す (本文表示には
-            // meta が必須なため)。
+            // primary meta が無い (backfill 未実施 or meta put 失敗)。本 issue
+            // scope では legacy fallback を行わず 404 を返す (Non-goals 設計
+            // v3 §10)。
             return with_cors(Response::error("Not Found", 404)?, req, env);
         }
         Err(e) => {
-            console_log_failed("games_index_lookup", &format!("game_id={game_id} err={e}"));
+            console_log_failed("kifu_by_id_meta_lookup", &format!("game_id={game_id} err={e}"));
             return with_cors(Response::error("Storage error", 502)?, req, env);
         }
     };
@@ -330,59 +329,26 @@ async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response>
     with_cors(resp, req, env)
 }
 
-/// `games-index/` を走査して `game_id` に対応する meta を 1 件取得する。
+/// `kifu-by-id/<id>.meta.json` を直接 get して `game_id` の meta を返す。
 ///
-/// pagination で `truncated` の間ループするが、ヒット時点で打ち切る。
-/// 1 game_id あたり 1 entry の不変条件を活用し、見つかった瞬間返す。
+/// Issue #551 設計 v3 §12 で meta primary 化したことにより、`games-index/`
+/// を prefix list で走査する旧経路 (O(N)) は廃止し O(1) get に統一した。
+/// meta が存在しない場合は `Ok(None)` を返し、呼び出し側で 404 を返す。
 async fn find_meta_for(
     bucket: &worker::Bucket,
     game_id: &str,
 ) -> std::result::Result<Option<serde_json::Value>, String> {
-    let mut cursor: Option<String> = None;
-    loop {
-        let mut builder = bucket.list().prefix(GAMES_INDEX_PREFIX);
-        if let Some(c) = cursor.as_deref() {
-            builder = builder.cursor(c);
-        }
-        let page = builder.execute().await.map_err(|e| e.to_string())?;
-        for obj in page.objects() {
-            let key = obj.key();
-            // key 形式: `games-index/<inv_ms:14>-<game_id>.json`
-            // 末尾 `.json` を除去 → 先頭 `games-index/<inv_ms>-` を除去 → game_id
-            let Some(stripped) = key.strip_prefix(GAMES_INDEX_PREFIX) else {
-                continue;
-            };
-            let Some(without_ext) = stripped.strip_suffix(".json") else {
-                continue;
-            };
-            // `<inv_ms:14>-<game_id>` から `-` 1 個目以降を game_id として取り出す。
-            let Some(dash_idx) = without_ext.find('-') else {
-                continue;
-            };
-            let key_game_id = &without_ext[dash_idx + 1..];
-            if key_game_id != game_id {
-                continue;
-            }
-            let fetched = bucket.get(&key).execute().await.map_err(|e| e.to_string())?;
-            let Some(fetched) = fetched else {
-                continue;
-            };
-            let Some(body) = fetched.body() else {
-                continue;
-            };
-            let bytes = body.bytes().await.map_err(|e| e.to_string())?;
-            let value: serde_json::Value =
-                serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-            return Ok(Some(value));
-        }
-        if !page.truncated() {
-            return Ok(None);
-        }
-        cursor = page.cursor();
-        if cursor.is_none() {
-            return Ok(None);
-        }
-    }
+    let meta_key = kifu_by_id_meta_key(game_id);
+    let fetched = bucket.get(&meta_key).execute().await.map_err(|e| e.to_string())?;
+    let Some(fetched) = fetched else {
+        return Ok(None);
+    };
+    let Some(body) = fetched.body() else {
+        return Ok(None);
+    };
+    let bytes = body.bytes().await.map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    Ok(Some(value))
 }
 
 /// CORS / Origin チェック。リクエスト Origin が許可リストに含まれる場合のみ

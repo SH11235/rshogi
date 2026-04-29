@@ -63,6 +63,14 @@ binding = "FLOODGATE_HISTORY_BUCKET"
 bucket_name = "local-floodgate-history-dev"
 preview_bucket_name = "local-floodgate-history-dev"
 
+# --- Cron triggers ---
+# `[event(scheduled)]` ハンドラ (`lib.rs::scheduled`) を毎時 0 分に起動し、
+# `kifu-by-id/<id>.meta.json` から `games-index/` を補完 (backfill) し、
+# `live-games-index/` の orphan を掃除する (Issue #551)。1 run = 1 page (1000 件)
+# のみ処理する eventual semantics。bulk 1 万件超は admin invoke 経路を別途検討。
+[triggers]
+crons = ["0 */1 * * *"]
+
 # --- 変数 ---
 # WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。ブラウザ経由
 # （Origin ヘッダ付き）のリクエストに対する CSRF 防御に使う。

@@ -86,7 +86,9 @@ use crate::spectator_snapshot::{
     SpectatorClocks, SpectatorSnapshotInput, build_spectator_snapshot,
 };
 use crate::ws_route::{WsRoute, parse_ws_route};
-use crate::x1_paths::{buoy_object_key, default_fork_buoy_name, kifu_by_id_object_key};
+use crate::x1_paths::{
+    buoy_object_key, default_fork_buoy_name, kifu_by_id_meta_key, kifu_by_id_object_key,
+};
 
 const DEFAULT_MAX_MOVES: u32 = 256;
 const DEFAULT_TIME_MARGIN_MS: u64 = 1000;
@@ -1327,29 +1329,25 @@ impl GameRoom {
         bucket.put(&by_id_key, text.as_bytes().to_vec()).execute().await?;
         console_log!("[GameRoom] kifu exported to R2 key='{key}'");
 
-        // viewer 配信 API 用の補助インデックス (`games-index/...`) を 1 件 put する。
-        // 本文 + by-id put は既に成功しているため、index put のいかなる失敗も
-        // `finalize_if_ended` を Err にしてはならない (best-effort)。validation /
-        // serialize / put すべての失敗を `if let Err` で吸収して Ok(()) で抜ける。
-        // `?` は意図的に使わない。
+        // viewer 配信 API 用の正準メタ (`kifu-by-id/<id>.meta.json`) と派生
+        // インデックス (`games-index/<inv>-<id>.json`) を続けて put する。
+        // CSA 本文 + by-id put は既に成功しているため、以降の put のいかなる
+        // 失敗も `finalize_if_ended` を Err にしてはならない (best-effort)。
+        // すべての失敗を `if let Err` で吸収して Ok(()) で抜ける。`?` は意図的
+        // に使わない。
+        //
+        // 書き込み順序 (Issue #551 設計 v3 §1):
+        //   1. csa 本文 / by-id (上で完了)
+        //   2. `kifu-by-id/<id>.meta.json` — backfill / orphan sweep の真の判定
+        //      キー (primary)。csa 成功直後に書く。
+        //   3. `games-index/<inv>-<id>.json` — meta から派生する一覧索引
+        //      (secondary)。failure 時は backfill cron が meta を起点に再生成する。
         //
         // `source` 判定は `live-games-index/` の対局開始時 entry と完全に揃える
         // ため、`games_index::resolve_index_source` 共通 helper に集約済 (Issue
         // #549 設計 v3 §3)。`floodgate-history/` への put 成否ではなく「Floodgate
         // 環境設定下で起きた終局」を表す semantics は同 helper の契約に従う。
         let source = resolve_index_source(&self.env);
-
-        let index_key = match games_index_key(ended_at_ms, &cfg.game_id) {
-            Ok(k) => k,
-            Err(e) => {
-                console_log!(
-                    "[GameRoom] event=games_index_skip game_id={} reason=key:{:?}",
-                    cfg.game_id,
-                    e,
-                );
-                return Ok(());
-            }
-        };
 
         let (result_kind, end_reason) = classify_result(game_result);
         let entry = GamesIndexEntry {
@@ -1368,6 +1366,9 @@ impl GameRoom {
             source,
         };
 
+        // 1 度シリアライズして meta primary / games-index secondary の双方に
+        // 流用する。serialize 失敗は両 put を skip して終了する (どちらも meta
+        // 起点なので片方だけ書く意味がない)。
         let body = match serde_json::to_vec(&entry) {
             Ok(b) => b,
             Err(e) => {
@@ -1380,6 +1381,31 @@ impl GameRoom {
             }
         };
 
+        // (2) `kifu-by-id/<id>.meta.json` — primary。failure は backfill 経路で
+        // 復元できないので observable に log は残すが、後段の games-index put は
+        // 引き続き試行する (現行 best-effort 一連 put 方針を維持。設計 v2 §1)。
+        let meta_key = kifu_by_id_meta_key(&cfg.game_id);
+        if let Err(e) = bucket.put(&meta_key, body.clone()).execute().await {
+            console_log!(
+                "[GameRoom] event=kifu_by_id_meta_put_failed game_id={} meta_key={} err={:?}",
+                cfg.game_id,
+                meta_key,
+                e,
+            );
+        }
+
+        // (3) `games-index/<inv>-<id>.json` — secondary。
+        let index_key = match games_index_key(ended_at_ms, &cfg.game_id) {
+            Ok(k) => k,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=games_index_skip game_id={} reason=key:{:?}",
+                    cfg.game_id,
+                    e,
+                );
+                return Ok(());
+            }
+        };
         if let Err(e) = bucket.put(&index_key, body).execute().await {
             console_log!(
                 "[GameRoom] event=games_index_put_failed game_id={} inv_key={} err={:?}",

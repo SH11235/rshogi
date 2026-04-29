@@ -70,6 +70,14 @@ bucket_name = "rshogi-csa-kifu-staging"
 binding = "FLOODGATE_HISTORY_BUCKET"
 bucket_name = "rshogi-csa-floodgate-history-staging"
 
+# --- Cron triggers ---
+# `[event(scheduled)]` ハンドラ (`lib.rs::scheduled`) を毎時 0 分に起動し、
+# `kifu-by-id/<id>.meta.json` から `games-index/` を補完 (backfill) し、
+# `live-games-index/` の orphan を掃除する (Issue #551)。1 run = 1 page (1000 件)
+# のみ処理する eventual semantics。
+[triggers]
+crons = ["0 */1 * * *"]
+
 # --- 環境変数 ---
 # `[vars]` の値は機密でないが、staging client の Origin に応じて運用者が更新する。
 # 値変更は通常の PR で行い、merge → 自動 deploy で反映される。
