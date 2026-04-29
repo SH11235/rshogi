@@ -32,7 +32,7 @@
 use serde::Serialize;
 use worker::{Env, Headers, Method, Request, Response, Result, Url};
 
-use crate::config::{ConfigKeys, OriginAllowList};
+use crate::config::{ConfigKeys, OriginAllowList, is_viewer_api_enabled};
 use crate::games_index::KEY_PREFIX as GAMES_INDEX_PREFIX;
 use crate::live_games_index::LIVE_KEY_PREFIX;
 use crate::origin::{OriginDecision, evaluate};
@@ -48,6 +48,12 @@ const MIN_LIMIT: u32 = 1;
 /// 引き継ぐ (404 までの fallthrough)。
 pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
     if req.method() != Method::Get {
+        return Ok(None);
+    }
+    // viewer 配信 API は `ALLOW_VIEWER_API` で opt-in 有効化する。無効化 / 未設定
+    // / 値不正のいずれも `Ok(None)` を返して既存ルーティングへフォールスルー
+    // させる（最終的に 404 になる）。production rollout 中の kill-switch も同経路。
+    if !is_viewer_api_enabled(env) {
         return Ok(None);
     }
     let url = req.url()?;
@@ -385,9 +391,14 @@ async fn find_meta_for(
     }
 }
 
-/// CORS / Origin チェック。リクエスト Origin が許可リストに含まれる場合のみ
-/// 通す。Origin ヘッダ未送信のクライアント (curl 等) は許可リスト未設定時のみ
-/// 通す ([`evaluate`] と同じ semantics)。
+/// CORS / Origin チェック。viewer 配信 API では allowlist の設定が **必須**
+/// であり、`WS_ALLOWED_ORIGINS` が空 / 未設定の場合は Origin の有無にかかわらず
+/// 403 を返す（ブラウザ・ネイティブ問わず CSRF / 無認可公開を防ぐ）。
+///
+/// allowlist が非空の場合は [`evaluate`] と同じ semantics で判定する: Origin が
+/// 許可リストに含まれていれば通し、含まれない場合は 403。Origin ヘッダ未送信の
+/// クライアント (curl 等) は allowlist 非空のときのみ素通しする
+/// （[`evaluate`] の仕様）。
 fn check_origin(req: &Request, env: &Env) -> Result<Option<Response>> {
     let allow_csv = env
         .var(ConfigKeys::WS_ALLOWED_ORIGINS)
@@ -395,6 +406,11 @@ fn check_origin(req: &Request, env: &Env) -> Result<Option<Response>> {
         .map(|v| v.to_string())
         .unwrap_or_default();
     let allow_list = OriginAllowList::from_csv(&allow_csv);
+    if allow_list.is_empty() {
+        // allowlist 未設定は viewer API では fail-closed。設定漏れを 403 で
+        // 顕在化させ、無認可公開を防ぐ。
+        return Ok(Some(Response::error("Forbidden Origin", 403)?));
+    }
     let origin_header = req.headers().get("Origin")?;
     match evaluate(origin_header.as_deref(), allow_list.iter()) {
         OriginDecision::Allow => Ok(None),

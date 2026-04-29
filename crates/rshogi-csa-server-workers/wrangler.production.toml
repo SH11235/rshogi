@@ -79,13 +79,15 @@ bucket_name = "rshogi-csa-floodgate-history-prod"
 [vars]
 # WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。ブラウザ経由
 # （Origin ヘッダ付き）のリクエストに対する CSRF 防御として機能する。
-# 空文字列・未設定時はブラウザ経由を全 403、Origin ヘッダを送らない
-# ネイティブ CSA クライアント（`rshogi-csa-client` 等）は素通し。
-# production では web client が確定するまで空のままで運用してよい。
-# native CSA クライアントは LOGIN ハンドル / パスワード等の別レイヤで認可する。
-# web client 化したときに deployment.md §3.4 の手順で Origin を追加する。
+# Player 経路（`/ws/<room_id>`、ネイティブ CSA クライアント想定）では
+# 空文字列・未設定時に Origin ヘッダ付きリクエストを 403 で弾き、Origin ヘッダ
+# を送らないネイティブ CSA クライアント（`rshogi-csa-client` 等）は素通し。
+# Spectator 経路（`/ws/<id>/spectate`）と viewer 配信 API（`/api/v1/games*`）
+# では allowlist が **必須**: 空・未設定時は Origin の有無にかかわらず 403。
+# 無認可公開を防ぐ fail-closed 既定で、`ALLOW_VIEWER_API` と組で運用する。
+# 実運用では web client URL を実値に書き換えること。
 # 例: "https://rshogi.example.com,https://www.rshogi.example.com"
-WS_ALLOWED_ORIGINS = ""
+WS_ALLOWED_ORIGINS = "https://rshogi.example.com"
 
 # 対局時計。`countdown` (CSA 2014 改訂秒読み、Floodgate 互換) / `countdown_msec`
 # (ms 粒度の短時間対局向け拡張) / `fischer` (増分加算) / `stopwatch` (分単位)。
@@ -108,6 +110,13 @@ RECONNECT_GRACE_SECONDS = "0"
 # Floodgate 系運用機能（再接続プロトコル等）を opt-in 有効化する。`true` / `1` /
 # `yes` / `on` で有効。空または `false` のとき該当機能要求は起動 fail-fast。
 ALLOW_FLOODGATE_FEATURES = "false"
+# viewer 配信 API (`/api/v1/games*` HTTP, `/ws/<id>/spectate` WS) を opt-in 有効化する。
+# `true` / `1` / `yes` / `on` で有効、`false` / `0` / `no` / `off` または
+# 未設定で無効化（該当 endpoint は 404）。本値は production rollout の kill-switch
+# も兼ねる: 即時無効化が必要な場合は本値を `"0"` に切り替えて redeploy することで
+# viewer / spectate を 404 化できる。Origin 制限は `WS_ALLOWED_ORIGINS` 側で
+# 必須化される（allowlist 未設定時は 403）。
+ALLOW_VIEWER_API = "1"
 # LobbyDO 内 in-memory queue の総数上限。100 件を超える同時待機は LOGIN_LOBBY を
 # queue_full で reject する保守的既定。負荷に応じて引き上げ可。
 LOBBY_QUEUE_SIZE_LIMIT = "100"
