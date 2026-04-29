@@ -77,12 +77,22 @@ use crate::reconnect::{
     build_resume_message, color_from_str, color_to_str,
 };
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
-use crate::spectator_control::{MonitorDecision, resolve_monitor_target};
+use crate::spectator_control::{
+    MonitorDecision, resolve_monitor_target, resolve_monitor_target_with_finished,
+};
+use crate::spectator_snapshot::{
+    SpectatorClocks, SpectatorSnapshotInput, build_spectator_snapshot,
+};
 use crate::ws_route::{WsRoute, parse_ws_route};
 use crate::x1_paths::{buoy_object_key, default_fork_buoy_name, kifu_by_id_object_key};
 
 const DEFAULT_MAX_MOVES: u32 = 256;
 const DEFAULT_TIME_MARGIN_MS: u64 = 1000;
+
+/// 1 部屋あたりの観戦者同時接続上限。`fetch` で `/ws/<id>/spectate` の upgrade
+/// 時にカウントし、上限に達していたら 503 を返す。MVP の DDoS 防御として最低限
+/// の gating であり、ベンチで上限を見直す際は環境変数化を検討する (現状は const)。
+const MAX_SPECTATORS_PER_ROOM: usize = 50;
 
 /// Alarm 発火時刻に上乗せする安全側マージン（ミリ秒）。Cloudflare Alarm API
 /// のジッタと `Date::now()` ↔ `handle_line` の now_ms 伝搬遅延を吸収する。
@@ -166,6 +176,26 @@ impl DurableObject for GameRoom {
             self.state.storage().put(KEY_ROOM_ID, room_id.to_owned()).await?;
         }
 
+        // 観戦者の上限チェック (MVP の DDoS 防御)。room あたり同時接続
+        // `MAX_SPECTATORS_PER_ROOM` を超える spectator upgrade は 503 で拒否。
+        // 対局者経路 (`WsRoute::Player`) には影響しない。
+        if route.is_spectator() {
+            let count = self
+                .state
+                .get_websockets()
+                .iter()
+                .filter(|ws| {
+                    matches!(
+                        ws.deserialize_attachment::<WsAttachment>().ok().flatten(),
+                        Some(WsAttachment::Spectator { .. })
+                    )
+                })
+                .count();
+            if count >= MAX_SPECTATORS_PER_ROOM {
+                return Response::error("spectator capacity exceeded", 503);
+            }
+        }
+
         let pair = WebSocketPair::new()?;
         let server = pair.server;
         self.state.accept_web_socket(&server);
@@ -200,7 +230,7 @@ impl DurableObject for GameRoom {
             WsAttachment::Player { role, handle, .. } => {
                 self.handle_game_line(&ws, role, &handle, &line).await
             }
-            WsAttachment::Spectator { room_id } => {
+            WsAttachment::Spectator { room_id, .. } => {
                 self.handle_spectator_line(&ws, &room_id, &line).await
             }
         }
@@ -591,7 +621,8 @@ impl GameRoom {
     }
 
     /// 観戦者からの制御行。`%%CHAT` を同一 room の全参加者へ relay し、
-    /// `%%MONITOR2OFF` は確認応答後に socket を閉じる。
+    /// `%%MONITOR2OFF` は確認応答後に socket を閉じる。`%%MONITOR2ON` は
+    /// snapshot (= Game_Summary + 既存指し手 + 終局結果) を 1 回送出する。
     async fn handle_spectator_line(&self, ws: &WebSocket, room_id: &str, line: &str) -> Result<()> {
         let csa = CsaLine::new(line);
         let Ok(cmd) = parse_command(&csa) else {
@@ -622,19 +653,195 @@ impl GameRoom {
                 Ok(())
             }
             ClientCommand::Monitor2On { game_id } => {
-                match resolve_monitor_target(room_id, active_game_id.as_deref(), game_id.as_str()) {
+                let finished = self.load_finished().await?;
+                let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
+                let finished_game_id =
+                    finished.as_ref().and(cfg_opt.as_ref().map(|c| c.game_id.as_str()));
+                let decision = resolve_monitor_target_with_finished(
+                    room_id,
+                    active_game_id.as_deref(),
+                    finished_game_id,
+                    game_id.as_str(),
+                );
+                match decision {
                     MonitorDecision::Accept { monitor_id } => {
                         send_line(ws, &format!("##[MONITOR2] BEGIN {monitor_id}"))?;
+                        self.send_spectator_snapshot(ws, &finished, cfg_opt.as_ref()).await?;
+                        send_line(ws, "##[MONITOR2] END")?;
+                        // 終局済 DO は snapshot を流したあとで close する。client 側は
+                        // `onEnd` 発火後の reconnect 経路を停止するため、normal close
+                        // (code 1000) で終了通知するだけで十分。
+                        if finished.is_some() {
+                            let _ = ws.close(Some(1000), Some("spectate finished".to_owned()));
+                        }
                     }
                     MonitorDecision::NotFound { requested } => {
                         send_line(ws, &format!("##[MONITOR2] NOT_FOUND {requested}"))?;
+                        send_line(ws, "##[MONITOR2] END")?;
                     }
                 }
-                send_line(ws, "##[MONITOR2] END")?;
                 Ok(())
             }
             _ => Ok(()),
         }
+    }
+
+    /// `Monitor2On Accept` 経路で snapshot を送る本体。
+    ///
+    /// 流れ:
+    /// 1. attachment の `snapshot_in_progress = true` をセット (= 以降この ws 宛
+    ///    の broadcast は `send_to_spectators` で per-ws pending queue に積まれる)
+    /// 2. `ensure_core_loaded()` 後に `core` 参照スコープを最小化して
+    ///    `SpectatorClocks` を組み、`load_moves()` で snapshot 用の指し手列を確定
+    /// 3. `build_spectator_snapshot` の wire 行を順次 send
+    /// 4. attachment の queue を flush (`ply > last_ply_in_snapshot` のみ送る) し、
+    ///    `snapshot_in_progress = false` に戻して通常 broadcast 経路へ復帰
+    ///
+    /// 例外経路: `cfg` が無いケース (= LOGIN 前の DO に観戦者だけが入ってきた
+    /// case)。snapshot は組まずに END を返してそのまま通常 broadcast 経路に
+    /// 載せる (player から手が指されるまで配信は無いので queue 不要)。
+    async fn send_spectator_snapshot(
+        &self,
+        ws: &WebSocket,
+        finished: &Option<FinishedState>,
+        cfg_opt: Option<&PersistedConfig>,
+    ) -> Result<()> {
+        let Some(cfg) = cfg_opt else {
+            // 対局未開始 (LOGIN 前) の DO に観戦者が入ったケース。snapshot は
+            // 出さずそのまま終了する (Game_Summary に必要な game_id すら無いため)。
+            return Ok(());
+        };
+
+        // attachment の snapshot 状態を「送信中」に更新する。queue / last_ply は
+        // ここで初期化し、過去 invocation の残骸が混ざらないようにする。
+        self.set_spectator_snapshot_state(ws, true, 0, Vec::new())?;
+
+        // CoreRoom を確保し、clock / current_turn から `SpectatorClocks` を組む。
+        // borrow scope は最小化し、await を伴う `load_moves` は borrow 外で呼ぶ。
+        self.ensure_core_loaded().await?;
+        let clocks_opt = {
+            let borrow = self.core.borrow();
+            borrow.as_ref().map(|core| SpectatorClocks {
+                black_remaining_ms: core.clock_remaining_main_ms(Color::Black).max(0) as u64,
+                white_remaining_ms: core.clock_remaining_main_ms(Color::White).max(0) as u64,
+                side_to_move: core.current_turn(),
+            })
+        };
+        // CoreRoom が `replay_core_room` の InvalidSfen 等で復元できなかった場合
+        // (storage が破損した稀なケース)、安全側に snapshot を諦めて END だけ返す。
+        let Some(clocks) = clocks_opt else {
+            self.flush_spectator_snapshot_queue(ws).await?;
+            return Ok(());
+        };
+
+        let moves = self.load_moves().await?;
+        let last_ply_in_snapshot = u32::try_from(moves.len()).unwrap_or(u32::MAX);
+
+        let lines = build_spectator_snapshot(SpectatorSnapshotInput {
+            config: cfg,
+            moves: &moves,
+            clocks: &clocks,
+            finalized: finished.as_ref(),
+        });
+        for line in &lines {
+            send_line(ws, line)?;
+        }
+
+        // snapshot 完了。attachment の last_ply を更新し、queue を flush する。
+        // queue 内の手は `ply > last_ply_in_snapshot` のみ送る (= snapshot に
+        // 含まれた手と重複しない broadcast のみ)。
+        self.set_spectator_snapshot_last_ply(ws, last_ply_in_snapshot)?;
+        self.flush_spectator_snapshot_queue(ws).await?;
+        Ok(())
+    }
+
+    /// snapshot 完了後に attachment の pending queue を順次 flush する。
+    ///
+    /// `ply > last_ply_in_snapshot` の broadcast 行のみ送出し (重複手の二重表示を
+    /// 防ぐ)、`ply == None` の non-move broadcast (START / 終局通知 / CHAT 等) は
+    /// 常に送る。flush 後は `snapshot_in_progress = false` / `pending_queue = []`
+    /// に戻して通常 broadcast 経路へ復帰させる。
+    async fn flush_spectator_snapshot_queue(&self, ws: &WebSocket) -> Result<()> {
+        let (last_ply, queue) = match ws
+            .deserialize_attachment::<WsAttachment>()
+            .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?
+        {
+            Some(WsAttachment::Spectator {
+                last_ply_in_snapshot,
+                pending_queue,
+                ..
+            }) => (last_ply_in_snapshot, pending_queue),
+            // attachment が Spectator でない / 無いケースは flush 不要。
+            _ => return Ok(()),
+        };
+        for (line, ply) in &queue {
+            // 指し手 broadcast (`ply == Some(n)`) は snapshot 含有分を skip。
+            // 非指し手 broadcast (`ply == None`) は常に送る。
+            match ply {
+                Some(n) if *n <= last_ply => continue,
+                _ => {}
+            }
+            if let Err(e) = send_line(ws, line) {
+                console_log!("[GameRoom] spectator queue flush failed (ignored): {e:?}");
+            }
+        }
+        // snapshot 終了状態へ戻す (`snapshot_in_progress = false`, queue は空)。
+        // last_ply_in_snapshot は保持してもしなくても以後の挙動には影響しない
+        // (= queue 経路に乗らないため) が、再度 Monitor2On が来たときのために
+        // そのまま置いておく。
+        self.set_spectator_snapshot_state(ws, false, last_ply, Vec::new())?;
+        Ok(())
+    }
+
+    /// `WsAttachment::Spectator` の snapshot 関連 3 フィールドを一括更新する。
+    ///
+    /// `room_id` は既存値を保持する (上書きしない)。Spectator でない場合は no-op。
+    fn set_spectator_snapshot_state(
+        &self,
+        ws: &WebSocket,
+        snapshot_in_progress: bool,
+        last_ply_in_snapshot: u32,
+        pending_queue: Vec<(String, Option<u32>)>,
+    ) -> Result<()> {
+        let att = ws
+            .deserialize_attachment::<WsAttachment>()
+            .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?;
+        let Some(WsAttachment::Spectator { room_id, .. }) = att else {
+            return Ok(());
+        };
+        let updated = WsAttachment::Spectator {
+            room_id,
+            snapshot_in_progress,
+            last_ply_in_snapshot,
+            pending_queue,
+        };
+        ws.serialize_attachment(&updated)
+            .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))
+    }
+
+    /// snapshot 構築完了時に `last_ply_in_snapshot` のみ更新する補助関数。
+    /// `snapshot_in_progress` / `pending_queue` は queue が積まれていれば残す。
+    fn set_spectator_snapshot_last_ply(&self, ws: &WebSocket, last_ply: u32) -> Result<()> {
+        let att = ws
+            .deserialize_attachment::<WsAttachment>()
+            .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?;
+        let Some(WsAttachment::Spectator {
+            room_id,
+            snapshot_in_progress,
+            pending_queue,
+            ..
+        }) = att
+        else {
+            return Ok(());
+        };
+        let updated = WsAttachment::Spectator {
+            room_id,
+            snapshot_in_progress,
+            last_ply_in_snapshot: last_ply,
+            pending_queue,
+        };
+        ws.serialize_attachment(&updated)
+            .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))
     }
 
     /// プレイヤー接続から受け付ける制御系コマンドを処理する。
@@ -958,11 +1165,11 @@ impl GameRoom {
                     self.send_to_role(Role::White, entry.line.as_str()).await?;
                 }
                 BroadcastTarget::Spectators => {
-                    self.send_to_spectators(entry.line.as_str()).await?;
+                    self.send_to_spectators(entry.line.as_str(), entry.ply).await?;
                 }
             }
             if matches!(entry.target, BroadcastTarget::All) {
-                self.send_to_spectators(entry.line.as_str()).await?;
+                self.send_to_spectators(entry.line.as_str(), entry.ply).await?;
             }
         }
         Ok(())
@@ -973,7 +1180,9 @@ impl GameRoom {
         let line = format!("##[CHAT] {sender}: {message}");
         self.send_to_role(Role::Black, &line).await?;
         self.send_to_role(Role::White, &line).await?;
-        self.send_to_spectators(&line).await
+        // chat は指し手では無いので ply = None (= snapshot 中の queue でも常に
+        // flush される非指し手 broadcast)。
+        self.send_to_spectators(&line, None).await
     }
 
     /// 終局したなら R2 に棋譜を書き出し、finished フラグを立てて両 ws を close する。
@@ -1237,14 +1446,41 @@ impl GameRoom {
     /// 全観戦者へ 1 行送出する。
     ///
     /// 観戦者は best-effort 配信。特定の WS への書き込みが失敗しても他の
-    /// 観戦者や対局進行を止めず、エラーは log に落として継続する (Copilot
-    /// レビュー指摘)。観戦者 1 人の切断が DO を不安定化させないようにする。
-    async fn send_to_spectators(&self, line: &str) -> Result<()> {
+    /// 観戦者や対局進行を止めず、エラーは log に落として継続する。観戦者 1 人の
+    /// 切断が DO を不安定化させないようにする。
+    ///
+    /// `ply` は指し手 broadcast の場合の手数 (1 始まり)。指し手以外
+    /// (START / 終局通知 / CHAT 等) では `None` を渡す。snapshot 送信中の ws へは
+    /// この行を per-ws pending queue に積み、send は飛ばす (= snapshot 完了後に
+    /// flush 経路で `ply > last_ply_in_snapshot` のみ送出される)。
+    async fn send_to_spectators(&self, line: &str, ply: Option<u32>) -> Result<()> {
         for ws in self.state.get_websockets() {
-            let att: Option<WsAttachment> = ws.deserialize_attachment().ok().flatten();
-            if let Some(WsAttachment::Spectator { .. }) = att
-                && let Err(e) = send_line(&ws, line)
-            {
+            let att: Option<WsAttachment> =
+                ws.deserialize_attachment::<WsAttachment>().ok().flatten();
+            let Some(WsAttachment::Spectator {
+                room_id,
+                snapshot_in_progress,
+                last_ply_in_snapshot,
+                mut pending_queue,
+            }) = att
+            else {
+                continue;
+            };
+            if snapshot_in_progress {
+                // snapshot 送信中は queue に積むだけ。flush 経路で重複手は弾く。
+                pending_queue.push((line.to_owned(), ply));
+                let updated = WsAttachment::Spectator {
+                    room_id,
+                    snapshot_in_progress,
+                    last_ply_in_snapshot,
+                    pending_queue,
+                };
+                if let Err(e) = ws.serialize_attachment(&updated) {
+                    console_log!("[GameRoom] spectator queue serialize failed (ignored): {e:?}");
+                }
+                continue;
+            }
+            if let Err(e) = send_line(&ws, line) {
                 console_log!("[GameRoom] spectator send failed (ignored): {e:?}");
             }
         }

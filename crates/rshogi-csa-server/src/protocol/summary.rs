@@ -42,6 +42,49 @@ pub struct GameSummaryBuilder {
 }
 
 impl GameSummaryBuilder {
+    /// 観戦者向け Game_Summary を組み立てる。
+    ///
+    /// 対局者向け [`Self::build_for`] との差分:
+    /// - `Your_Turn:` 行を出さない（観戦者は手を指せないため player 専用フィールドを除外）
+    /// - `Reconnect_Token:` 拡張行を出さない（観戦者は再接続トークンを保有しない）
+    /// - `END Game_Summary` 直前に `Black_Time_Remaining_Ms:` /
+    ///   `White_Time_Remaining_Ms:` 拡張行を追加（reconnect.rs と同形式）
+    ///
+    /// `black_remaining_ms` / `white_remaining_ms` は wire 上の残時間 (`u64`)。
+    /// `core.clock_remaining_main_ms()` を `max(0) as u64` で正規化した値を渡す
+    /// 契約。
+    pub fn build_for_spectator(&self, black_remaining_ms: u64, white_remaining_ms: u64) -> String {
+        let mut out = String::with_capacity(512);
+        out.push_str("BEGIN Game_Summary\n");
+        out.push_str("Protocol_Version:1.2\n");
+        out.push_str("Protocol_Mode:Server\n");
+        out.push_str("Format:Shogi 1.0\n");
+        if !self.declaration.is_empty() {
+            let _ = writeln!(out, "Declaration:{}", self.declaration);
+        }
+        let _ = writeln!(out, "Game_ID:{}", self.game_id);
+        let _ = writeln!(out, "Name+:{}", self.black);
+        let _ = writeln!(out, "Name-:{}", self.white);
+        let _ =
+            writeln!(out, "Rematch_On_Draw:{}", if self.rematch_on_draw { "YES" } else { "NO" });
+        let _ = writeln!(out, "To_Move:{}", color_char(self.to_move));
+        // 持ち時間セクションは TimeClock 由来の文字列をそのまま埋め込む。
+        out.push_str(&self.time_section);
+        if !self.time_section.ends_with('\n') {
+            out.push('\n');
+        }
+        // 初期局面セクション（`BEGIN Position`...`END Position` 全体）。
+        out.push_str(&self.position_section);
+        if !self.position_section.ends_with('\n') {
+            out.push('\n');
+        }
+        // 観戦者向け拡張行: 残時間 (ms 粒度)。reconnect.rs:148-149 と同形式。
+        let _ = writeln!(out, "Black_Time_Remaining_Ms:{black_remaining_ms}");
+        let _ = writeln!(out, "White_Time_Remaining_Ms:{white_remaining_ms}");
+        out.push_str("END Game_Summary\n");
+        out
+    }
+
     /// `you` 宛ての Game_Summary 文字列を組み立てる。
     ///
     /// `Your_Turn:` は `you` の色に応じて `+`/`-` を出力する。
@@ -402,6 +445,59 @@ mod tests {
         assert!(!white_out.contains("Reconnect_Token:"), "white must omit token: {white_out}");
         let black_out = b.build_for(Color::Black);
         assert!(black_out.contains("\nReconnect_Token:only-black\n"));
+    }
+
+    #[test]
+    fn build_for_spectator_omits_your_turn_and_reconnect_token() {
+        let mut b = skeleton();
+        b.black_reconnect_token = Some(ReconnectToken::new("blk-token"));
+        b.white_reconnect_token = Some(ReconnectToken::new("wht-token"));
+        let txt = b.build_for_spectator(540_000, 600_000);
+        assert!(txt.starts_with("BEGIN Game_Summary\n"));
+        assert!(txt.ends_with("END Game_Summary\n"));
+        assert!(!txt.contains("Your_Turn:"), "spectator must not have Your_Turn: {txt}");
+        assert!(
+            !txt.contains("Reconnect_Token:"),
+            "spectator must not leak Reconnect_Token: {txt}"
+        );
+    }
+
+    #[test]
+    fn build_for_spectator_appends_remaining_ms_lines_before_end() {
+        let txt = skeleton().build_for_spectator(123_456, 654_321);
+        let black = txt
+            .find("Black_Time_Remaining_Ms:123456\n")
+            .unwrap_or_else(|| panic!("missing black remaining: {txt}"));
+        let white = txt
+            .find("White_Time_Remaining_Ms:654321\n")
+            .unwrap_or_else(|| panic!("missing white remaining: {txt}"));
+        let end_pos = txt.find("END Position\n").unwrap();
+        let end_summary = txt.find("END Game_Summary\n").unwrap();
+        assert!(end_pos < black, "Black_Time_Remaining_Ms must follow END Position");
+        assert!(black < white, "Black before White");
+        assert!(white < end_summary, "remaining lines must precede END Game_Summary");
+    }
+
+    #[test]
+    fn build_for_spectator_includes_time_section_and_position() {
+        let txt = skeleton().build_for_spectator(1_000, 2_000);
+        assert!(txt.contains("BEGIN Time"));
+        assert!(txt.contains("END Time"));
+        assert!(txt.contains("BEGIN Position"));
+        assert!(txt.contains("END Position"));
+        assert!(txt.contains("To_Move:+"));
+    }
+
+    #[test]
+    fn build_for_player_is_unchanged_after_spectator_addition() {
+        // 既存 player 経路の挙動が壊れていないことを spectator builder 追加前後で
+        // 直接照合する。`Your_Turn:` が出る、`Reconnect_Token:` が None なら出ない、
+        // `Black_Time_Remaining_Ms:` は player 経路には出ない。
+        let txt = skeleton().build_for(Color::Black);
+        assert!(txt.contains("Your_Turn:+"));
+        assert!(!txt.contains("Reconnect_Token:"));
+        assert!(!txt.contains("Black_Time_Remaining_Ms:"));
+        assert!(!txt.contains("White_Time_Remaining_Ms:"));
     }
 
     #[test]

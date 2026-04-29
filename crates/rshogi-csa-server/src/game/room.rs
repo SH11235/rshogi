@@ -63,6 +63,14 @@ pub struct BroadcastEntry {
     pub target: BroadcastTarget,
     /// 送る生 CSA テキスト（末尾改行はフロントエンドで付ける）。
     pub line: CsaLine,
+    /// 行が指し手 broadcast の場合の手数（1 始まり）。
+    ///
+    /// `Some(n)` は「この行が n 手目の指し手」を意味する。観戦者向けの
+    /// snapshot 送信中に到着した broadcast を「snapshot に含めた最終 ply
+    /// より大きい行のみ」flush するための識別子として用いる。`None` は
+    /// 指し手以外（START、終局通知、CHAT 等）であり queue 経由でも常に
+    /// flush 対象となる。
+    pub ply: Option<u32>,
 }
 
 /// `GameRoom::handle_line` の 1 件分の戻り値。
@@ -364,6 +372,7 @@ impl GameRoom {
                     broadcasts: vec![BroadcastEntry {
                         target: BroadcastTarget::Players,
                         line,
+                        ply: None,
                     }],
                 })
             }
@@ -393,6 +402,7 @@ impl GameRoom {
                 broadcasts: vec![BroadcastEntry {
                     target: BroadcastTarget::Players,
                     line,
+                    ply: None,
                 }],
             })
         } else {
@@ -473,10 +483,14 @@ impl GameRoom {
         self.moves_played += 1;
         let elapsed_sec = elapsed_ms / 1000;
 
-        // 4. 関係者に `<token>,T<sec>` を配信。
+        // 4. 関係者に `<token>,T<sec>` を配信。手数は 1 始まりで、本手の
+        //    `do_move` 後 (= `moves_played` インクリメント後) の値をそのまま
+        //    乗せる。観戦者 snapshot 送信中に到着した broadcast を「snapshot
+        //    に含めた最終 ply より大きい行のみ」flush する判定で使う。
         let mut broadcasts = vec![BroadcastEntry {
             target: BroadcastTarget::All,
             line: CsaLine::new(format!("{},T{}", token.as_str(), elapsed_sec)),
+            ply: Some(self.moves_played),
         }];
 
         // 5. 千日手・連続王手千日手判定。
@@ -607,6 +621,7 @@ impl GameRoom {
                 broadcasts.push(BroadcastEntry {
                     target,
                     line: CsaLine::new(line.clone()),
+                    ply: None,
                 });
             }
         }
