@@ -29,6 +29,8 @@ struct TemplateBindings {
     r2_bindings: Vec<String>,
     do_bindings: Vec<String>,
     vars_keys: Vec<String>,
+    /// `[triggers] crons = [...]` の値を保持する (Issue #551)。空配列は未宣言。
+    crons: Vec<String>,
 }
 
 /// テスト 1 本ごとに file I/O + parse を繰り返さないため `LazyLock` で 1 回化する。
@@ -75,10 +77,19 @@ fn load_template_bindings() -> TemplateBindings {
         .map(|t| t.keys().cloned().collect())
         .unwrap_or_default();
 
+    // `[triggers] crons = [...]` を集める。
+    let crons = doc
+        .get("triggers")
+        .and_then(|v| v.get("crons"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+
     TemplateBindings {
         r2_bindings,
         do_bindings,
         vars_keys,
+        crons,
     }
 }
 
@@ -148,4 +159,16 @@ fn wrangler_template_vars_keys_match_config_keys() {
         .copied()
         .collect();
     assert_bidirectional("vars_keys", &expected, &TEMPLATE.vars_keys);
+}
+
+/// Issue #551 で追加した `[triggers] crons` が template に宣言されていることを
+/// 固定する。`[event(scheduled)]` ハンドラと cron trigger は同 PR で導入したので、
+/// 片方だけが残ったまま運用者が `cp wrangler.toml.example wrangler.toml` した場合
+/// に handler が永久 dormant にならないよう、template 側で必須化する。
+#[test]
+fn wrangler_template_declares_backfill_cron_trigger() {
+    assert!(
+        !TEMPLATE.crons.is_empty(),
+        "wrangler.toml.example must declare [triggers] crons = [...] for the backfill scheduled handler",
+    );
 }

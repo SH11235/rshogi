@@ -33,6 +33,16 @@ pub fn kifu_by_id_object_key(game_id: &str) -> String {
     format!("kifu-by-id/{}.csa", encode_component(game_id))
 }
 
+/// game_id から逆引きする棋譜メタ (`<id>.meta.json`) キー。
+///
+/// `kifu_by_id_object_key` と同じ `encode_component(game_id)` を通すことで、
+/// CSA 本体キーと完全に同じエンコーディング規約に揃える (Issue #551 v3 §12)。
+/// reader (viewer_api) と writer (game_room / backfill) で生成キーが乖離しない
+/// ように、本ヘルパを必ず経由して `<game_id>.meta.json` を構築する。
+pub fn kifu_by_id_meta_key(game_id: &str) -> String {
+    format!("kifu-by-id/{}.meta.json", encode_component(game_id))
+}
+
 /// `%%FORK` で省略時に使う既定の buoy 名。
 pub fn default_fork_buoy_name(source_game: &str, nth_move: Option<u32>) -> String {
     let suffix = nth_move.map_or_else(|| "final".to_owned(), |n| n.to_string());
@@ -58,5 +68,27 @@ mod tests {
     fn fork_default_name_uses_final_when_nth_missing() {
         assert_eq!(default_fork_buoy_name("20260417120000", None), "20260417120000-fork-final");
         assert_eq!(default_fork_buoy_name("20260417120000", Some(24)), "20260417120000-fork-24");
+    }
+
+    #[test]
+    fn kifu_by_id_meta_key_uses_meta_json_suffix() {
+        // ASCII 安全な game_id はそのまま埋まる + 末尾は `.meta.json`。
+        assert_eq!(
+            kifu_by_id_meta_key("lobby-cross-fischer-1777391025209"),
+            "kifu-by-id/lobby-cross-fischer-1777391025209.meta.json",
+        );
+    }
+
+    #[test]
+    fn kifu_by_id_meta_key_encodes_unsafe_chars_consistently_with_object_key() {
+        // CSA 本体キーと meta キーは「encode_component を通したあと拡張子だけ
+        // 異なる」という不変条件が崩れていないこと。これにより writer/reader が
+        // 同一 game_id について常に対応するペアを参照できる。
+        let game_id = "../weird id/対局";
+        let object = kifu_by_id_object_key(game_id);
+        let meta = kifu_by_id_meta_key(game_id);
+        let object_stem = object.strip_suffix(".csa").expect("object key ends with .csa");
+        let meta_stem = meta.strip_suffix(".meta.json").expect("meta key ends with .meta.json");
+        assert_eq!(object_stem, meta_stem, "encoded stem must match between object and meta");
     }
 }

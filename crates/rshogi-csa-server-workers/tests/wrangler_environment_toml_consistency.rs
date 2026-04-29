@@ -32,6 +32,8 @@ struct EnvironmentBindings {
     /// `[[migrations]]` 配列を生のまま保持する。`new_sqlite_classes` 等を
     /// 各 test が独自に検査するため、`Vec<toml::Value>` のまま持つ。
     migrations: Vec<toml::Value>,
+    /// `[triggers] crons = [...]` の値 (Issue #551)。空配列は未宣言。
+    crons: Vec<String>,
 }
 
 static PRODUCTION: LazyLock<EnvironmentBindings> =
@@ -77,6 +79,13 @@ fn load_environment_bindings(label: &'static str, file_name: &'static str) -> En
 
     let migrations = doc.get("migrations").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
+    let crons = doc
+        .get("triggers")
+        .and_then(|v| v.get("crons"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|t| t.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+
     EnvironmentBindings {
         label,
         file_name,
@@ -84,6 +93,7 @@ fn load_environment_bindings(label: &'static str, file_name: &'static str) -> En
         do_bindings,
         vars_keys,
         migrations,
+        crons,
     }
 }
 
@@ -151,6 +161,20 @@ fn assert_no_local_dev_only_keys(env: &EnvironmentBindings) {
     );
 }
 
+/// Issue #551 で追加した `[triggers] crons` が各 deploy 環境に宣言されていることを
+/// 固定する。`[event(scheduled)]` ハンドラは production / staging 両方で稼働させる
+/// 契約 (片方だけ宣言だと backfill / orphan sweep が動かず orphan が滞留する)。
+fn assert_declares_backfill_cron_trigger(env: &EnvironmentBindings) {
+    assert!(
+        !env.crons.is_empty(),
+        "{file} ({label}) must declare [triggers] crons = [...] for the backfill scheduled handler; \
+         got: {crons:?}",
+        file = env.file_name,
+        label = env.label,
+        crons = env.crons,
+    );
+}
+
 fn assert_declares_sqlite_migration_for_game_room(env: &EnvironmentBindings) {
     assert!(
         !env.migrations.is_empty(),
@@ -201,6 +225,11 @@ fn wrangler_production_declares_sqlite_migration_for_game_room() {
     assert_declares_sqlite_migration_for_game_room(&PRODUCTION);
 }
 
+#[test]
+fn wrangler_production_declares_backfill_cron_trigger() {
+    assert_declares_backfill_cron_trigger(&PRODUCTION);
+}
+
 // --- staging -------------------------------------------------------------
 
 #[test]
@@ -226,4 +255,9 @@ fn wrangler_staging_vars_must_not_contain_local_dev_only_keys() {
 #[test]
 fn wrangler_staging_declares_sqlite_migration_for_game_room() {
     assert_declares_sqlite_migration_for_game_room(&STAGING);
+}
+
+#[test]
+fn wrangler_staging_declares_backfill_cron_trigger() {
+    assert_declares_backfill_cron_trigger(&STAGING);
 }
