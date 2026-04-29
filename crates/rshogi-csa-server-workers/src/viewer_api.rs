@@ -33,6 +33,7 @@
 use serde::Serialize;
 use worker::{Env, Headers, Method, Request, Response, Result, Url};
 
+use crate::client_kind::normalize_client_kind;
 use crate::config::{ConfigKeys, OriginAllowList, is_viewer_api_enabled};
 use crate::games_index::KEY_PREFIX as GAMES_INDEX_PREFIX;
 use crate::live_games_index::LIVE_KEY_PREFIX;
@@ -47,8 +48,25 @@ const MIN_LIMIT: u32 = 1;
 ///
 /// 戻り値 `Some(_)` はマッチしたことを示す。`None` の場合は既存ルーティングに
 /// 引き継ぐ (404 までの fallthrough)。
+///
+/// `OPTIONS` は CORS preflight として viewer API 配下のパスでのみ受理する
+/// (Issue #564 設計 v4 §3)。`X-Client` を custom request header として送る
+/// クライアント (ramu-shogi web / desktop) のために `Access-Control-Allow-Headers`
+/// を返す必要がある。`ALLOW_VIEWER_API` 無効時は GET と同様 404 へフォールスルー
+/// し、preflight の段階で kill-switch を効かせる。
 pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
-    if req.method() != Method::Get {
+    let method = req.method();
+
+    if method == Method::Options {
+        let url = req.url()?;
+        let path = url.path();
+        if !is_viewer_api_path(path) {
+            return Ok(None);
+        }
+        return Ok(Some(handle_options(req, env)?));
+    }
+
+    if method != Method::Get {
         return Ok(None);
     }
     // viewer 配信 API は `ALLOW_VIEWER_API` で opt-in 有効化する。無効化 / 未設定
@@ -77,6 +95,56 @@ pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
     }
 
     Ok(None)
+}
+
+/// viewer 配信 API 配下のパスかどうかを判定する純粋ロジック。
+///
+/// `OPTIONS` preflight 経路で対象パスをゲートするためにも使用する。
+/// `/api/v1/games` (一覧)、`/api/v1/games/live` (live 一覧)、
+/// `/api/v1/games/<id>` (単局) のみを true とする。
+fn is_viewer_api_path(path: &str) -> bool {
+    if path == "/api/v1/games" || path == "/api/v1/games/live" {
+        return true;
+    }
+    if let Some(rest) = path.strip_prefix("/api/v1/games/") {
+        return !rest.is_empty() && !rest.contains('/');
+    }
+    false
+}
+
+/// CORS preflight (OPTIONS) を返す。
+///
+/// `ALLOW_VIEWER_API` 無効時は viewer API 全体が無効なので preflight も 404 を
+/// 返す (kill-switch を preflight 段階でも効かせる)。`check_origin` は GET と
+/// 同じ経路を踏み、allowlist 未設定 / Origin 非一致は 403。許可された Origin
+/// に対しては `Access-Control-Allow-Methods: GET, OPTIONS`、
+/// `Access-Control-Allow-Headers: X-Client`、`Access-Control-Max-Age: 86400`
+/// を返す。`Access-Control-Allow-Origin` と `Vary` は `with_cors` が共通付与する。
+fn handle_options(req: &Request, env: &Env) -> Result<Response> {
+    if !is_viewer_api_enabled(env) {
+        return Response::error("Not Found", 404);
+    }
+    if let Some(blocked) = check_origin(req, env)? {
+        return Ok(blocked);
+    }
+    let mut resp = Response::empty()?.with_status(204);
+    {
+        let headers: &mut Headers = resp.headers_mut();
+        headers.set("Access-Control-Allow-Methods", "GET, OPTIONS")?;
+        headers.set("Access-Control-Allow-Headers", "X-Client")?;
+        headers.set("Access-Control-Max-Age", "86400")?;
+    }
+    with_cors(resp, req, env)
+}
+
+/// `X-Client` ヘッダを運用ログ用の `client_kind` 文字列に正規化する。
+///
+/// 実装は [`normalize_client_kind`] に委譲する純粋ロジックで、本関数は
+/// `worker::Request` から生のヘッダ値を取り出す薄いラッパに留めている
+/// (ホスト target でユニットテスト可能にするため)。
+fn extract_client_kind(req: &Request) -> String {
+    let raw = req.headers().get("X-Client").ok().flatten();
+    normalize_client_kind(raw.as_deref())
 }
 
 /// 一覧 API (`/api/v1/games`) レスポンスの wire 形状。
@@ -175,6 +243,10 @@ async fn collect_index_page(
         return Ok(CollectOutcome::ErrorResponse(blocked));
     }
 
+    // 失敗ログに付与する `client_kind` をハンドラ冒頭で 1 度だけ正規化する。
+    // 正常系では使わないので、エラー経路でのみ参照する (Issue #564 設計 v4 §3)。
+    let client_kind = extract_client_kind(req);
+
     // クエリパラメータを 1 度だけ走査して `cursor` / `limit` を取り出す。
     let mut cursor: Option<String> = None;
     let mut limit_raw: Option<String> = None;
@@ -204,7 +276,7 @@ async fn collect_index_page(
     let bucket = match env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
         Ok(b) => b,
         Err(e) => {
-            console_log_failed("kifu_bucket_binding", &e.to_string());
+            console_log_failed("kifu_bucket_binding", &client_kind, &e.to_string());
             let err = with_cors(Response::error("Storage unavailable", 503)?, req, env)?;
             return Ok(CollectOutcome::ErrorResponse(err));
         }
@@ -218,7 +290,7 @@ async fn collect_index_page(
     let page = match builder.execute().await {
         Ok(p) => p,
         Err(e) => {
-            console_log_failed(&format!("{event_root}_list"), &e.to_string());
+            console_log_failed(&format!("{event_root}_list"), &client_kind, &e.to_string());
             let err = with_cors(Response::error("Storage error", 502)?, req, env)?;
             return Ok(CollectOutcome::ErrorResponse(err));
         }
@@ -232,7 +304,11 @@ async fn collect_index_page(
         let fetched = match bucket.get(&key).execute().await {
             Ok(o) => o,
             Err(e) => {
-                console_log_failed(&format!("{event_root}_get"), &format!("key={key} err={e}"));
+                console_log_failed(
+                    &format!("{event_root}_get"),
+                    &client_kind,
+                    &format!("key={key} err={e}"),
+                );
                 continue;
             }
         };
@@ -248,14 +324,22 @@ async fn collect_index_page(
         let bytes = match body.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                console_log_failed(&format!("{event_root}_read"), &format!("key={key} err={e}"));
+                console_log_failed(
+                    &format!("{event_root}_read"),
+                    &client_kind,
+                    &format!("key={key} err={e}"),
+                );
                 continue;
             }
         };
         match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(v) => entries.push(v),
             Err(e) => {
-                console_log_failed(&format!("{event_root}_parse"), &format!("key={key} err={e}"));
+                console_log_failed(
+                    &format!("{event_root}_parse"),
+                    &client_kind,
+                    &format!("key={key} err={e}"),
+                );
                 // 1 件壊れても他を返す (best-effort)。
             }
         }
@@ -279,10 +363,14 @@ async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response>
         return Ok(blocked);
     }
 
+    // 失敗ログに付与する `client_kind` をハンドラ冒頭で 1 度だけ正規化する
+    // (Issue #564 設計 v4 §3)。
+    let client_kind = extract_client_kind(req);
+
     let bucket = match env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
         Ok(b) => b,
         Err(e) => {
-            console_log_failed("kifu_bucket_binding", &e.to_string());
+            console_log_failed("kifu_bucket_binding", &client_kind, &e.to_string());
             return with_cors(Response::error("Storage unavailable", 503)?, req, env);
         }
     };
@@ -291,7 +379,7 @@ async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response>
     let csa_obj = match bucket.get(&by_id_key).execute().await {
         Ok(o) => o,
         Err(e) => {
-            console_log_failed("kifu_by_id_get", &format!("key={by_id_key} err={e}"));
+            console_log_failed("kifu_by_id_get", &client_kind, &format!("key={by_id_key} err={e}"));
             return with_cors(Response::error("Storage error", 502)?, req, env);
         }
     };
@@ -304,7 +392,11 @@ async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response>
     let csa_text = match body.text().await {
         Ok(t) => t,
         Err(e) => {
-            console_log_failed("kifu_by_id_read", &format!("key={by_id_key} err={e}"));
+            console_log_failed(
+                "kifu_by_id_read",
+                &client_kind,
+                &format!("key={by_id_key} err={e}"),
+            );
             return with_cors(Response::error("Storage error", 502)?, req, env);
         }
     };
@@ -321,7 +413,11 @@ async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response>
             return with_cors(Response::error("Not Found", 404)?, req, env);
         }
         Err(e) => {
-            console_log_failed("kifu_by_id_meta_lookup", &format!("game_id={game_id} err={e}"));
+            console_log_failed(
+                "kifu_by_id_meta_lookup",
+                &client_kind,
+                &format!("game_id={game_id} err={e}"),
+            );
             return with_cors(Response::error("Storage error", 502)?, req, env);
         }
     };
@@ -390,6 +486,12 @@ fn check_origin(req: &Request, env: &Env) -> Result<Option<Response>> {
 /// Origin そのものに echo back する。`check_origin` が allowlist 未設定 + Origin 付き
 /// を 403 で先に弾いているため、本関数に到達した時点では allowlist は非空かつ
 /// Origin はリストに含まれている (もしくは Origin ヘッダなし)。
+///
+/// `Vary` は `Origin, Access-Control-Request-Headers` を一括して設定する
+/// (Issue #564 設計 v4 §3 review v1 (e))。preflight (OPTIONS) と GET の
+/// 双方に適用することで、CDN / ブラウザキャッシュが Origin あるいは
+/// preflight で送られた `Access-Control-Request-Headers` を取り違えて
+/// レスポンスを共有する事故を防ぐ。
 fn with_cors(mut resp: Response, req: &Request, env: &Env) -> Result<Response> {
     let allow_csv = env
         .var(ConfigKeys::WS_ALLOWED_ORIGINS)
@@ -402,15 +504,24 @@ fn with_cors(mut resp: Response, req: &Request, env: &Env) -> Result<Response> {
         Some(o) if allow_list.iter().any(|allowed| allowed == o) => Some(o.to_owned()),
         _ => None,
     };
-    if let Some(origin) = allow_origin {
+    {
         let headers: &mut Headers = resp.headers_mut();
-        headers.set("Access-Control-Allow-Origin", &origin)?;
-        headers.set("Vary", "Origin")?;
+        if let Some(origin) = allow_origin {
+            headers.set("Access-Control-Allow-Origin", &origin)?;
+        }
+        // GET / OPTIONS いずれの応答にも Vary を付ける。Origin が一致しなかった
+        // (= ACAO を付けない) 場合でも、CDN がキャッシュキーから Origin と
+        // preflight 用の `Access-Control-Request-Headers` を分離するために
+        // 同じヘッダを露出させる。
+        headers.set("Vary", "Origin, Access-Control-Request-Headers")?;
     }
     Ok(resp)
 }
 
-/// 失敗ログを logfmt で出す統一窓口。viewer API の経路別 event 名を持たせる。
-fn console_log_failed(event: &str, detail: &str) {
-    worker::console_log!("[viewer_api] event={event} detail={detail}");
+/// 失敗ログを logfmt で出す統一窓口。viewer API の経路別 event 名と、
+/// 呼出側クライアントを特定する `client_kind` を持たせる
+/// (Issue #564 設計 v4 §3)。`client_kind` は [`normalize_client_kind`] により
+/// `[a-z0-9-]{1,64}` に正規化済みの ASCII 文字列、または `unknown` / `invalid`。
+fn console_log_failed(event: &str, client_kind: &str, detail: &str) {
+    worker::console_log!("[viewer_api] event={event} client_kind={client_kind} detail={detail}");
 }
