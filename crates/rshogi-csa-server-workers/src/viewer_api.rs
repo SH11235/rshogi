@@ -1,25 +1,40 @@
 //! viewer 配信 HTTP API (`/api/v1/games`) のルーティングと R2 アクセス。
 //!
-//! v3 設計 (Issue #542 issuecomment-4338088406) に準拠する 2 エンドポイント:
+//! v3 設計 (Issue #542 issuecomment-4338088406) に準拠する 3 エンドポイント:
 //!
-//! - `GET /api/v1/games?cursor=<opaque>&limit=<N>` 一覧
+//! - `GET /api/v1/games?cursor=<opaque>&limit=<N>` 一覧 (終局済)
 //!   `KIFU_BUCKET.list({prefix: "games-index/", cursor, limit})` を 1 回呼び、
 //!   各オブジェクト本文 (= [`crate::games_index::GamesIndexEntry`] の JSON) を
 //!   そのまま `games[]` に詰めて返す。`next_cursor` は R2 list の cursor を
 //!   opaque 転送する。
-//! - `GET /api/v1/games/<game_id>` 単局
+//! - `GET /api/v1/games/live?cursor=<opaque>&limit=<N>` 一覧 (進行中)
+//!   `KIFU_BUCKET.list({prefix: "live-games-index/", cursor, limit})` を 1 回呼び、
+//!   各オブジェクト本文 (= [`crate::live_games_index::LiveGamesIndexEntry`] の JSON)
+//!   を `live_games[]` に詰めて返す (Issue #549)。終局済 list と同じ pagination
+//!   semantics、`/api/v1/games/<id>` のような単局エンドポイントは進行中対局には
+//!   設けない (= viewer 側は live entry を **発見手段** として扱い、行クリック時に
+//!   WS spectate 接続で実状態を確認する)。
+//! - `GET /api/v1/games/<game_id>` 単局 (終局済)
 //!   `kifu-by-id/<encoded_game_id>.csa` を直接 get する。本文 (CSA V2) と
 //!   `games-index/` から取得した meta を合わせて返す。
 //!
 //! いずれも GameRoom DO を経由せず、Worker 直 fetch のみで完結する (R2 read
 //! 1 ホップ)。CORS は staging では `WS_ALLOWED_ORIGINS` をそのまま流用して
 //! ramu-shogi origin に絞る (実装の柔軟性で OK)。
+//!
+//! # access control レビュー必須
+//!
+//! `try_handle` 配下に新しい `/api/v1/*` エンドポイントを追加する場合は、
+//! `check_origin` / `with_cors` の通過と `WS_ALLOWED_ORIGINS` allowlist 体系
+//! (Issue #550 で強化予定) に確実に乗ることを必ずレビューする。allowlist 未設定
+//! 環境での挙動 (= Origin ヘッダなしで通る) も含めて回帰させない。
 
 use serde::Serialize;
 use worker::{Env, Headers, Method, Request, Response, Result, Url};
 
 use crate::config::{ConfigKeys, OriginAllowList};
 use crate::games_index::KEY_PREFIX as GAMES_INDEX_PREFIX;
+use crate::live_games_index::LIVE_KEY_PREFIX;
 use crate::origin::{OriginDecision, evaluate};
 use crate::x1_paths::kifu_by_id_object_key;
 
@@ -41,6 +56,11 @@ pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
     if path == "/api/v1/games" {
         return Ok(Some(handle_list(req, env, &url).await?));
     }
+    // `/api/v1/games/live` は `/api/v1/games/<game_id>` より先にマッチさせる
+    // (`live` という ID の単局取得を 1 件目で誤って受けないため)。
+    if path == "/api/v1/games/live" {
+        return Ok(Some(handle_list_live(req, env, &url).await?));
+    }
     if let Some(rest) = path.strip_prefix("/api/v1/games/") {
         if rest.is_empty() || rest.contains('/') {
             // 余分な階層 (`/api/v1/games/x/y`) や末尾 `/` は 404 で扱う。
@@ -52,7 +72,7 @@ pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
     Ok(None)
 }
 
-/// 一覧 API レスポンスの wire 形状。
+/// 一覧 API (`/api/v1/games`) レスポンスの wire 形状。
 #[derive(Debug, Serialize)]
 struct ListResponse {
     /// `games-index/` のオブジェクト本文をそのまま吐き出すのが契約 (本モジュールでは
@@ -60,6 +80,17 @@ struct ListResponse {
     /// する素朴実装。要素数 1 ページ最大 100 件のため性能影響は許容。`RawValue` 化は
     /// レイテンシが顕在化したときの将来拡張で検討する。
     games: Vec<serde_json::Value>,
+    next_cursor: Option<String>,
+}
+
+/// 進行中対局一覧 API (`/api/v1/games/live`) レスポンスの wire 形状。
+///
+/// `games` ではなく `live_games` をキーに使うことで、終局済一覧との混在を
+/// client 側で取り違えないように分離する (viewer 側は配列キー名を見て描画
+/// ルートを切り替えられる)。
+#[derive(Debug, Serialize)]
+struct LiveListResponse {
+    live_games: Vec<serde_json::Value>,
     next_cursor: Option<String>,
 }
 
@@ -74,10 +105,67 @@ struct GameResponse<'a> {
     meta: serde_json::Value,
 }
 
-/// 一覧ハンドラ。
+/// 終局済一覧ハンドラ。`games-index/` を 1 ページ list する。
 async fn handle_list(req: &Request, env: &Env, url: &Url) -> Result<Response> {
+    let entries = match collect_index_page(req, env, url, GAMES_INDEX_PREFIX, "games_index").await?
+    {
+        CollectOutcome::Page(p) => p,
+        CollectOutcome::ErrorResponse(r) => return Ok(r),
+    };
+    let payload = ListResponse {
+        games: entries.entries,
+        next_cursor: entries.next_cursor,
+    };
+    let resp = Response::from_json(&payload)?;
+    with_cors(resp, req, env)
+}
+
+/// 進行中対局一覧ハンドラ。`live-games-index/` を 1 ページ list する。
+///
+/// 終局済の `handle_list` と同じ pagination semantics を持ち、prefix と
+/// レスポンス key (`live_games`) のみが異なる。
+async fn handle_list_live(req: &Request, env: &Env, url: &Url) -> Result<Response> {
+    let entries =
+        match collect_index_page(req, env, url, LIVE_KEY_PREFIX, "live_games_index").await? {
+            CollectOutcome::Page(p) => p,
+            CollectOutcome::ErrorResponse(r) => return Ok(r),
+        };
+    let payload = LiveListResponse {
+        live_games: entries.entries,
+        next_cursor: entries.next_cursor,
+    };
+    let resp = Response::from_json(&payload)?;
+    with_cors(resp, req, env)
+}
+
+/// `collect_index_page` の戻り値。原則 [`Self::Page`] を返すが、early return が
+/// 必要なエラー (Origin 拒否 / limit パース失敗 / R2 binding 失敗 / R2 list 失敗)
+/// は完成済 `Response` を [`Self::ErrorResponse`] に詰めて返す。
+enum CollectOutcome {
+    Page(IndexPage),
+    ErrorResponse(Response),
+}
+
+/// 1 ページぶんの index entry を bytes get → JSON value 化したもの。
+struct IndexPage {
+    entries: Vec<serde_json::Value>,
+    next_cursor: Option<String>,
+}
+
+/// `games-index/` / `live-games-index/` 共通の 1 ページ走査ロジック。
+///
+/// `event_root` はログ event 名の prefix (`games_index` / `live_games_index`)。
+/// 失敗時の logfmt event はこれを土台に `<root>_list` / `<root>_get` /
+/// `<root>_read` / `<root>_parse` を組み立てる。
+async fn collect_index_page(
+    req: &Request,
+    env: &Env,
+    url: &Url,
+    prefix: &str,
+    event_root: &str,
+) -> Result<CollectOutcome> {
     if let Some(blocked) = check_origin(req, env)? {
-        return Ok(blocked);
+        return Ok(CollectOutcome::ErrorResponse(blocked));
     }
 
     // クエリパラメータを 1 度だけ走査して `cursor` / `limit` を取り出す。
@@ -96,11 +184,12 @@ async fn handle_list(req: &Request, env: &Env, url: &Url) -> Result<Response> {
         Some(s) => match s.parse::<u32>() {
             Ok(n) if (MIN_LIMIT..=MAX_LIMIT).contains(&n) => n,
             _ => {
-                return with_cors(
+                let err = with_cors(
                     Response::error(format!("limit must be {MIN_LIMIT}..={MAX_LIMIT}"), 400)?,
                     req,
                     env,
-                );
+                )?;
+                return Ok(CollectOutcome::ErrorResponse(err));
             }
         },
     };
@@ -109,11 +198,12 @@ async fn handle_list(req: &Request, env: &Env, url: &Url) -> Result<Response> {
         Ok(b) => b,
         Err(e) => {
             console_log_failed("kifu_bucket_binding", &e.to_string());
-            return with_cors(Response::error("Storage unavailable", 503)?, req, env);
+            let err = with_cors(Response::error("Storage unavailable", 503)?, req, env)?;
+            return Ok(CollectOutcome::ErrorResponse(err));
         }
     };
 
-    let mut builder = bucket.list().prefix(GAMES_INDEX_PREFIX).limit(limit);
+    let mut builder = bucket.list().prefix(prefix).limit(limit);
     if let Some(c) = cursor.as_deref() {
         builder = builder.cursor(c);
     }
@@ -121,26 +211,28 @@ async fn handle_list(req: &Request, env: &Env, url: &Url) -> Result<Response> {
     let page = match builder.execute().await {
         Ok(p) => p,
         Err(e) => {
-            console_log_failed("games_index_list", &e.to_string());
-            return with_cors(Response::error("Storage error", 502)?, req, env);
+            console_log_failed(&format!("{event_root}_list"), &e.to_string());
+            let err = with_cors(Response::error("Storage error", 502)?, req, env)?;
+            return Ok(CollectOutcome::ErrorResponse(err));
         }
     };
 
-    let mut games: Vec<serde_json::Value> = Vec::with_capacity(page.objects().len());
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(page.objects().len());
     for obj in page.objects() {
         let key = obj.key();
-        // 各 entry を取得 → bytes → JSON value。bytes 経由なのは
-        // 本文がそのまま `GamesIndexEntry` の JSON 形式である契約のため。
+        // 各 entry を取得 → bytes → JSON value。bytes 経由なのは本文が
+        // そのまま `*IndexEntry` の JSON 形式である契約のため。
         let fetched = match bucket.get(&key).execute().await {
             Ok(o) => o,
             Err(e) => {
-                console_log_failed("games_index_get", &format!("key={key} err={e}"));
+                console_log_failed(&format!("{event_root}_get"), &format!("key={key} err={e}"));
                 continue;
             }
         };
         let Some(fetched) = fetched else {
-            // list と get の間に削除されたケース。pagination 整合の観点で
-            // 落としても問題ない。
+            // list と get の間に削除されたケース。live entry の場合は終局
+            // (delete) と list のレースに該当する。pagination 整合の観点で
+            // 落としても問題ない (= live は entry が瞬間的に消えうる契約)。
             continue;
         };
         let Some(body) = fetched.body() else {
@@ -149,14 +241,14 @@ async fn handle_list(req: &Request, env: &Env, url: &Url) -> Result<Response> {
         let bytes = match body.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                console_log_failed("games_index_read", &format!("key={key} err={e}"));
+                console_log_failed(&format!("{event_root}_read"), &format!("key={key} err={e}"));
                 continue;
             }
         };
         match serde_json::from_slice::<serde_json::Value>(&bytes) {
-            Ok(v) => games.push(v),
+            Ok(v) => entries.push(v),
             Err(e) => {
-                console_log_failed("games_index_parse", &format!("key={key} err={e}"));
+                console_log_failed(&format!("{event_root}_parse"), &format!("key={key} err={e}"));
                 // 1 件壊れても他を返す (best-effort)。
             }
         }
@@ -167,9 +259,10 @@ async fn handle_list(req: &Request, env: &Env, url: &Url) -> Result<Response> {
     } else {
         None
     };
-    let payload = ListResponse { games, next_cursor };
-    let resp = Response::from_json(&payload)?;
-    with_cors(resp, req, env)
+    Ok(CollectOutcome::Page(IndexPage {
+        entries,
+        next_cursor,
+    }))
 }
 
 /// 単局ハンドラ。`<game_id>` (URL-decoded path 残部) を受け取り、kifu-by-id を

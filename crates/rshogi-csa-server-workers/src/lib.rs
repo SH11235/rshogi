@@ -27,6 +27,7 @@ pub mod config;
 pub mod datetime;
 pub mod floodgate_history;
 pub mod games_index;
+pub mod live_games_index;
 pub mod lobby_protocol;
 pub mod origin;
 // `persistence` は DO ランタイム (`game_room`) からのみ消費される I/O 非依存の

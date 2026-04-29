@@ -29,7 +29,7 @@
 //!    CSA V2 形式で組み立て、R2 の `YYYY/MM/DD/<game_id>.csa` に書き出す。
 //!    TCP 側 `FileKifuStorage` と同一キー体系で Ruby 系バッチとの互換性を保つ。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,9 @@ use crate::datetime::{format_csa_datetime, format_date_path, format_rfc3339_utc}
 use crate::floodgate_history::R2FloodgateHistoryStorage;
 use crate::games_index::{
     ClockSpec as IndexClockSpec, GamesIndexEntry, classify_result, games_index_key,
+    resolve_index_source,
 };
+use crate::live_games_index::{LiveGamesIndexEntry, live_games_index_key};
 use crate::persistence::{
     FinishedState, MoveRow, PersistedConfig, ReplaySummary, replay_core_room,
 };
@@ -145,6 +147,17 @@ pub struct GameRoom {
     env: Env,
     core: RefCell<Option<CoreRoom>>,
     config: RefCell<Option<PersistedConfig>>,
+    /// この isolate 寿命中に `live-games-index/<inv>-<id>.json` の put が成功
+    /// 済みかどうか (Issue #549)。hibernation で isolate が破棄されると
+    /// `false` に戻るため、cold start 後の最初の `ensure_core_loaded` で 1 回
+    /// だけ retry が走る。`mark_play_started` 経路で put 成功した直後にも
+    /// `true` を立て、同 isolate 内の後続 `ensure_core_loaded` で冗長 put が
+    /// 走らないようにする。
+    ///
+    /// put 失敗時はあえて `false` のまま残す (= 次回 `ensure_core_loaded` で
+    /// retry させる)。R2 put は同一キーで上書きしても idempotent なので
+    /// 重複 put は安全。
+    live_index_put_done: Cell<bool>,
 }
 
 impl DurableObject for GameRoom {
@@ -156,6 +169,7 @@ impl DurableObject for GameRoom {
             env,
             core: RefCell::new(None),
             config: RefCell::new(None),
+            live_index_put_done: Cell::new(false),
         }
     }
 
@@ -1214,6 +1228,22 @@ impl GameRoom {
         };
         self.state.storage().put(KEY_FINISHED, &finished).await?;
 
+        // KEY_FINISHED が確定した後に live-games-index entry を best-effort で
+        // 削除する (Issue #549 §4)。「終局 entry も live entry も無い」矛盾
+        // 状態を最小化するため、`KEY_FINISHED` put より後に delete を置く。
+        // delete 失敗時は orphan として残るが、cron sweep (Issue #551) が
+        // 後追い掃除する契約。`play_started_at_ms` が None のまま終局した
+        // (= AGREE 前 abnormal 等) ケースは live entry を put していないので
+        // delete も skip する。
+        let live_delete_target = self
+            .config
+            .borrow()
+            .as_ref()
+            .and_then(|c| c.play_started_at_ms.map(|ts| (c.clone(), ts)));
+        if let Some((cfg_snapshot, started_at_ms)) = live_delete_target {
+            self.try_delete_live_games_index(&cfg_snapshot, started_at_ms).await;
+        }
+
         // CoreRoom を落とす。再度 ensure_core_loaded しても finished ガードで戻る。
         self.core.borrow_mut().take();
 
@@ -1303,15 +1333,11 @@ impl GameRoom {
         // serialize / put すべての失敗を `if let Err` で吸収して Ok(()) で抜ける。
         // `?` は意図的に使わない。
         //
-        // `source` は `resolve_floodgate_history_storage` が `Some` を返せる構成
-        // (= Floodgate gating opt-in & binding 解決可) かどうかで事前判定する。
-        // `floodgate-history/` への put 成否ではなく「Floodgate 環境設定下で起きた
-        // 終局」を表す semantics (v3 設計の `source` field 定義に従う)。
-        let source = if resolve_floodgate_history_storage(&self.env).ok().flatten().is_some() {
-            "floodgate"
-        } else {
-            "kifu"
-        };
+        // `source` 判定は `live-games-index/` の対局開始時 entry と完全に揃える
+        // ため、`games_index::resolve_index_source` 共通 helper に集約済 (Issue
+        // #549 設計 v3 §3)。`floodgate-history/` への put 成否ではなく「Floodgate
+        // 環境設定下で起きた終局」を表す semantics は同 helper の契約に従う。
+        let source = resolve_index_source(&self.env);
 
         let index_key = match games_index_key(ended_at_ms, &cfg.game_id) {
             Ok(k) => k,
@@ -1524,7 +1550,11 @@ impl GameRoom {
     /// - 復元中の `handle_line` 失敗（`AgreeReplayFailed` / `MoveReplayFailed` 等）
     ///   ではコアを生成せず、以降の着手受理を拒絶する。
     async fn ensure_core_loaded(&self) -> Result<()> {
+        // core が既に組み立て済の場合でも、live-games-index 未 put のまま
+        // hibernation を跨いで再 attach した場合に retry が必要なので、
+        // 早期 return ではなく `live_index_put_done` の照合を先に行う。
         if self.core.borrow().is_some() {
+            self.retry_live_games_index_if_needed().await?;
             return Ok(());
         }
         if self.load_finished().await?.is_some() {
@@ -1561,11 +1591,48 @@ impl GameRoom {
                 console_log!("[GameRoom] replay move ply={ply} line='{line}' failed: {reason}");
             }
         }
+
+        // live-games-index put が抜けたまま hibernation で isolate が落ちた
+        // ケースを救済する (Issue #549 §5)。
+        self.retry_live_games_index_if_needed().await?;
+        Ok(())
+    }
+
+    /// `live-games-index/<inv>-<id>.json` の put が `mark_play_started` 経路で
+    /// 抜けた／hibernation で isolate が落ちた場合のリカバリ。
+    ///
+    /// 条件: 同 isolate 寿命中に未 put (`live_index_put_done == false`) かつ
+    /// `play_started_at_ms.is_some()` (= 対局開始済) かつ未終局
+    /// (`load_finished == None`)。3 つすべて満たすときに 1 回だけ
+    /// `try_put_live_games_index` を呼ぶ。put 成功で flag が立つので、同
+    /// isolate 内の後続 `ensure_core_loaded` では re-entry しない。
+    async fn retry_live_games_index_if_needed(&self) -> Result<()> {
+        if self.live_index_put_done.get() {
+            return Ok(());
+        }
+        if self.load_finished().await?.is_some() {
+            return Ok(());
+        }
+        let cfg_for_put: Option<PersistedConfig> = self
+            .config
+            .borrow()
+            .as_ref()
+            .filter(|c| c.play_started_at_ms.is_some())
+            .cloned();
+        if let Some(c) = cfg_for_put {
+            self.try_put_live_games_index(&c).await;
+        }
         Ok(())
     }
 
     /// 初めて `HandleOutcome::GameStarted` を観測した時刻を cfg に書き込む。
     /// 2 手目以降は冪等に no-op として扱い、storage への再書き込みを避ける。
+    ///
+    /// `KEY_CONFIG` の put 成功後にのみ live-games-index entry の put を
+    /// best-effort で試みる。put 成功時のみ `live_index_put_done` を立てて、
+    /// 同 isolate 内で `ensure_core_loaded` 経由の retry が走らないようにする。
+    /// put 失敗時は flag を立てず、次回の `ensure_core_loaded` 呼び出しで
+    /// retry させる (R2 put は同一キーで idempotent)。
     async fn mark_play_started(&self, ts: u64) -> Result<()> {
         let new_cfg = {
             let mut borrow = self.config.borrow_mut();
@@ -1579,8 +1646,125 @@ impl GameRoom {
         };
         if let Some(c) = new_cfg {
             self.state.storage().put(KEY_CONFIG, &c).await?;
+            // KEY_CONFIG put 成功後にのみ live index put を試みる。これが
+            // Err を返しても finalize 経路ではないので最終的な動作には影響
+            // しない (best-effort)。
+            self.try_put_live_games_index(&c).await;
         }
         Ok(())
+    }
+
+    /// `live-games-index/<inv>-<id>.json` を best-effort で put する。
+    ///
+    /// `cfg.play_started_at_ms` が `None` の場合は live index put が成立しない
+    /// (= mark_play_started 前) ため早期 return する。すべての失敗 (key
+    /// validation / serialize / R2 put) を `console_log!` で吸収し、`Result`
+    /// は返さない。put 成功時のみ `live_index_put_done` を `true` にセットする。
+    async fn try_put_live_games_index(&self, cfg: &PersistedConfig) {
+        let Some(started_at_ms) = cfg.play_started_at_ms else {
+            return;
+        };
+
+        let key = match live_games_index_key(started_at_ms, &cfg.game_id) {
+            Ok(k) => k,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=live_games_index_skip game_id={} reason=key:{:?}",
+                    cfg.game_id,
+                    e,
+                );
+                return;
+            }
+        };
+
+        let source = resolve_index_source(&self.env);
+        let entry = LiveGamesIndexEntry {
+            game_id: &cfg.game_id,
+            started_at_ms,
+            black_handle: &cfg.black_handle,
+            white_handle: &cfg.white_handle,
+            clock: IndexClockSpec::from_server(&cfg.clock),
+            source,
+        };
+
+        let body = match serde_json::to_vec(&entry) {
+            Ok(b) => b,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=live_games_index_skip game_id={} reason=serialize:{:?}",
+                    cfg.game_id,
+                    e,
+                );
+                return;
+            }
+        };
+
+        let bucket = match self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
+            Ok(b) => b,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=live_games_index_skip game_id={} reason=bucket:{}",
+                    cfg.game_id,
+                    e,
+                );
+                return;
+            }
+        };
+
+        match bucket.put(&key, body).execute().await {
+            Ok(_) => {
+                self.live_index_put_done.set(true);
+            }
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=live_games_index_put_failed game_id={} key={} err={:?}",
+                    cfg.game_id,
+                    key,
+                    e,
+                );
+            }
+        }
+    }
+
+    /// `live-games-index/<inv>-<id>.json` を best-effort で delete する。
+    ///
+    /// 終局確定 (`KEY_FINISHED` put 成功) 直後に呼び、live 一覧から進行中
+    /// 表示を消す。失敗 (R2 一時障害 / key 生成失敗) は `console_log!` で
+    /// 吸収して `Result` を返さない。残った orphan は Issue #551 の sweep
+    /// ジョブで掃除する契約。
+    async fn try_delete_live_games_index(&self, cfg: &PersistedConfig, started_at_ms: u64) {
+        let key = match live_games_index_key(started_at_ms, &cfg.game_id) {
+            Ok(k) => k,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=live_games_index_delete_skip game_id={} reason=key:{:?}",
+                    cfg.game_id,
+                    e,
+                );
+                return;
+            }
+        };
+
+        let bucket = match self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
+            Ok(b) => b,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=live_games_index_delete_skip game_id={} reason=bucket:{}",
+                    cfg.game_id,
+                    e,
+                );
+                return;
+            }
+        };
+
+        if let Err(e) = bucket.delete(&key).await {
+            console_log!(
+                "[GameRoom] event=live_games_index_delete_failed game_id={} key={} err={:?}",
+                cfg.game_id,
+                key,
+                e,
+            );
+        }
     }
 
     /// `moves` テーブルを ply 昇順で読み出す。

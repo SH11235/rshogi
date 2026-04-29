@@ -30,9 +30,14 @@
 //! disallowed char 系を host target で検証する。R2 アダプタ固有の経路 (list /
 //! pagination) は `wrangler dev` で別途確認する。
 
+use rshogi_csa_server::config::{
+    FloodgateFeatureIntent, parse_allow_floodgate_features, validate_floodgate_feature_gate,
+};
 use rshogi_csa_server::error::StorageError;
 use serde::Serialize;
 
+#[cfg(target_arch = "wasm32")]
+use crate::config::ConfigKeys;
 use crate::floodgate_history::validate_key_component;
 
 /// `inv_ms = INV_BASE - ended_at_ms` の基準値。`10^14 - 1` を u64 で表現。
@@ -206,6 +211,67 @@ pub fn classify_result(
             None => ("ABORT", "ABNORMAL"),
         },
     }
+}
+
+/// `source` フィールド (`"kifu"` / `"floodgate"`) を env から導出する。
+///
+/// 「Floodgate gating が opt-in されており (`ALLOW_FLOODGATE_FEATURES`)、
+/// `FLOODGATE_HISTORY_BUCKET` binding も解決可能」な構成を `"floodgate"` と
+/// 表現する。それ以外はすべて `"kifu"`。`floodgate-history/` への put 成否は
+/// 判定材料にしない (= live entry put 時点では終局していない / floodgate-history
+/// は終局時にしか書かない、という非対称性を吸収する)。
+///
+/// games-index の終局時 entry 経路と live-games-index の対局開始時 entry 経路
+/// の双方から呼び出して `source` の値を完全に揃えるための共通 helper。
+///
+/// `Env` 依存は `worker::Env` の var / bucket 取得だけに閉じており、純粋判定
+/// ロジック自体は [`classify_index_source_from_inputs`] に切り出してホスト
+/// target でも単体テストできるようにしてある。
+///
+/// `worker` クレートは `cfg(target_arch = "wasm32")` でのみ依存に含まれるため、
+/// 本関数も wasm32 ビルドに限定する。ホスト target の単体テストは
+/// [`classify_index_source_from_inputs`] 経由で網羅する。
+#[cfg(target_arch = "wasm32")]
+pub fn resolve_index_source(env: &worker::Env) -> &'static str {
+    let allow_raw = env.var(ConfigKeys::ALLOW_FLOODGATE_FEATURES).ok().map(|v| v.to_string());
+    let bucket_resolves = env.bucket(ConfigKeys::FLOODGATE_HISTORY_BUCKET_BINDING).is_ok();
+    classify_index_source_from_inputs(allow_raw.as_deref(), bucket_resolves)
+}
+
+/// [`resolve_index_source`] の純粋関数版。
+///
+/// `allow_raw`: `ALLOW_FLOODGATE_FEATURES` env の生文字列 (未設定なら `None`)。
+/// `bucket_resolves`: `FLOODGATE_HISTORY_BUCKET` binding が解決できたか。
+///
+/// `parse_allow_floodgate_features` と `validate_floodgate_feature_gate`
+/// を経由して "Floodgate 履歴 opt-in が成立する構成" を判定し、binding まで
+/// 揃っている場合に限り `"floodgate"` を返す。それ以外 (opt-in 未成立、
+/// gate 不整合、binding 未解決) はすべて `"kifu"` に倒す。
+pub fn classify_index_source_from_inputs(
+    allow_raw: Option<&str>,
+    bucket_resolves: bool,
+) -> &'static str {
+    // env 値の読み取り失敗 (parse error / gate 不整合) は kifu 側に倒す。
+    // viewer 配信 API 用 index は best-effort なので、設定不正で `floodgate`
+    // を誤って付けるよりは保守的に "kifu" を返すほうが矛盾が少ない。
+    let allow = match parse_allow_floodgate_features(allow_raw) {
+        Ok(v) => v,
+        Err(_) => return "kifu",
+    };
+    if !allow {
+        return "kifu";
+    }
+    let intent = FloodgateFeatureIntent {
+        enable_floodgate_history: true,
+        ..FloodgateFeatureIntent::default()
+    };
+    if validate_floodgate_feature_gate(allow, intent).is_err() {
+        return "kifu";
+    }
+    if !bucket_resolves {
+        return "kifu";
+    }
+    "floodgate"
 }
 
 #[cfg(test)]
@@ -411,6 +477,37 @@ mod tests {
         assert_eq!(wire.total_min, Some(15));
         assert_eq!(wire.byoyomi_min, Some(2));
         assert_eq!(wire.total_sec, None);
+    }
+
+    #[test]
+    fn classify_index_source_returns_kifu_when_allow_unset() {
+        assert_eq!(classify_index_source_from_inputs(None, false), "kifu");
+        assert_eq!(classify_index_source_from_inputs(None, true), "kifu");
+    }
+
+    #[test]
+    fn classify_index_source_returns_kifu_when_allow_false() {
+        assert_eq!(classify_index_source_from_inputs(Some("0"), true), "kifu",);
+        assert_eq!(classify_index_source_from_inputs(Some("false"), true), "kifu",);
+    }
+
+    #[test]
+    fn classify_index_source_returns_kifu_when_bucket_missing() {
+        // opt-in は成立するが binding が解決できない (= dev で binding 未宣言)。
+        assert_eq!(classify_index_source_from_inputs(Some("1"), false), "kifu",);
+    }
+
+    #[test]
+    fn classify_index_source_returns_floodgate_when_opt_in_and_bucket() {
+        assert_eq!(classify_index_source_from_inputs(Some("1"), true), "floodgate",);
+        assert_eq!(classify_index_source_from_inputs(Some("true"), true), "floodgate",);
+    }
+
+    #[test]
+    fn classify_index_source_returns_kifu_for_unparseable_allow() {
+        // `parse_allow_floodgate_features` が Err を返す入力。設定不正は
+        // 保守的に kifu に倒す (live / games index の `source` は best-effort)。
+        assert_eq!(classify_index_source_from_inputs(Some("maybe"), true), "kifu",);
     }
 
     #[test]
