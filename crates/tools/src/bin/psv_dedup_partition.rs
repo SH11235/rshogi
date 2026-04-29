@@ -760,7 +760,16 @@ fn cleanup_if_empty(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// `partition_NNNNN.bin` 形式のファイルが 1 つでも存在するか判定する。
+/// `partition_NNNNN.bin` 形式の **非空** ファイルが 1 つでも存在するか判定する。
+///
+/// `partition_files_into` は処理開始時に 0..N-1 の空 partition ファイルを一括作成し、
+/// その後で入力 (reference) ファイルを open/read する。reference の open/read が
+/// 失敗すると ref/ には空の partition ファイルだけが残るため、ファイル名だけで
+/// 判定すると「過去失敗の残骸」と「reference 取り込み済み」を区別できない。
+///
+/// サイズ > 0 のファイルが 1 つでもあれば「データが書き込まれたことがある」=
+/// 取り込み済みとみなす。空ファイルだけが残っている場合は失敗からのリトライを
+/// 許容する (append モードで空ファイルに書き込むのは新規作成と等価)。
 fn has_any_partition_file(dir: &Path) -> io::Result<bool> {
     if !dir.is_dir() {
         return Ok(false);
@@ -772,7 +781,10 @@ fn has_any_partition_file(dir: &Path) -> io::Result<bool> {
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.strip_prefix("partition_").and_then(|s| s.strip_suffix(".bin")).is_some() {
+        if name.strip_prefix("partition_").and_then(|s| s.strip_suffix(".bin")).is_none() {
+            continue;
+        }
+        if entry.metadata()?.len() > 0 {
             return Ok(true);
         }
     }
@@ -1071,15 +1083,20 @@ fn run_partition_only(
         None => Vec::new(),
     };
 
-    // ref_subdir に既存の partition がある状態で --reference を再指定すると、
-    // 同じ参照集合を二重登録するか、別集合と混ざって意味が変わる。どちらも
-    // ユーザの意図に反するので即エラー。
+    // ref_subdir に reference データが書き込まれている状態で --reference を再指定すると、
+    // 同じ参照集合を二重登録するか、別集合と混ざって意味が変わる。どちらもユーザの
+    // 意図に反するので即エラー。ただし `has_any_partition_file` はサイズ > 0 のファイルだけ
+    // カウントするため、過去の失敗で空 partition ファイルだけが残っているケース（reference の
+    // open/read 失敗等）は失敗とみなしてリトライを許容する。
     if !ref_paths.is_empty() && has_any_partition_file(ref_subdir)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "{} に既存の reference partition が存在します。--partition-only で --reference を \
-                 指定できるのは初回のみです。続けて入力を追加する際は --reference を外してください。",
+                "{} に reference partition データが既に書き込まれています。--partition-only で \
+                 --reference を指定できるのは初回のみです。\n\
+                 - 続けて入力を追加するだけなら --reference を外してください。\n\
+                 - 過去の中途失敗から復旧したい場合は ref/ を手動で削除してから再実行してください \
+                   (部分書き込みの append は二重登録になるため自動復旧はしません)。",
                 ref_subdir.display(),
             ),
         ));
@@ -1270,10 +1287,17 @@ mod tests {
         let dir = TempDir::new().unwrap();
         assert!(!has_any_partition_file(dir.path()).unwrap());
 
+        // partition と無関係な名前のファイルは無視
         std::fs::write(dir.path().join("not_a_partition.bin"), []).unwrap();
         assert!(!has_any_partition_file(dir.path()).unwrap());
 
+        // 空の partition ファイルは「過去失敗の残骸」とみなして false (再試行を許容)
         std::fs::write(dir.path().join(partition_filename(0)), []).unwrap();
+        std::fs::write(dir.path().join(partition_filename(1)), []).unwrap();
+        assert!(!has_any_partition_file(dir.path()).unwrap());
+
+        // 1 バイトでもデータがあれば「取り込み済み」とみなして true
+        std::fs::write(dir.path().join(partition_filename(0)), b"x").unwrap();
         assert!(has_any_partition_file(dir.path()).unwrap());
     }
 

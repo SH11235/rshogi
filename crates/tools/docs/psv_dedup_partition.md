@@ -206,7 +206,9 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 
 - 既存の `partition_NNNNN.bin` には append モードで追記される
 - 2 回目以降の `--partitions` が初回と異なるとエラー (ハッシュ空間不整合を防止)
-- `--reference` は **初回のみ** 指定可能。`ref/` に既存 partition がある状態で再指定するとエラー
+- `--reference` は **初回のみ** 指定可能。`ref/` に reference データが書き込まれた状態で再指定するとエラー
+  - 過去の中途失敗で `ref/` に空 partition ファイルだけが残っている場合は失敗の残骸とみなしてリトライを許容する (空ファイルへの append は新規作成と等価)
+  - 部分書き込みが残っている場合は手動で `ref/` を削除してから再実行する (append 復旧は二重登録になるため自動化していない)
 - `--keep-temp` は暗黙で有効、`--output` は指定不可
 - 出力ディスクの事前チェックはスキップ。temp ディスクは「今回追加するぶん」だけ見積もる
 
