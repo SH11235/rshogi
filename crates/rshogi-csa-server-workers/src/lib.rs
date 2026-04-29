@@ -44,6 +44,12 @@ pub(crate) mod reconnect;
 pub mod room_id;
 pub mod session_state;
 pub mod spectator_control;
+// `spectator_snapshot` は DO ランタイムから消費される I/O 非依存の純粋関数で、
+// `persistence` モジュール (`PersistedConfig` / `MoveRow` / `FinishedState`) を
+// 参照する。`persistence` と同じ wasm32 + test ゲーティングで揃え、ホスト
+// target の `cargo test` から到達可能にする。
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod spectator_snapshot;
 pub mod ws_route;
 pub mod x1_paths;
 

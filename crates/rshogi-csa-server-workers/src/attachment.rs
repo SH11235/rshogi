@@ -82,6 +82,39 @@ pub enum WsAttachment {
     Spectator {
         /// 観戦対象の部屋 ID。
         room_id: String,
+        /// snapshot 送信中かどうか (`Monitor2On` Accept 経路に入ると `true`、
+        /// `##[MONITOR2] END` 送出後に `false`)。`true` の間はこの ws への
+        /// 指し手 broadcast を per-ws pending queue に積み、snapshot 完了後に
+        /// flush する race-resolution 用フラグ。
+        ///
+        /// 設計上は in-memory のみ扱いだが、DO の WebSocket Hibernation 経由で
+        /// 異なる handler 呼び出し間で参照する必要があるため attachment 経由で
+        /// 永続化する (= `serialize_attachment` に乗る)。Hibernation 後に「snapshot
+        /// 送信中」状態が復帰してしまうのを防ぐため、`#[serde(default)]` で
+        /// `false` を既定値として復元する規則 (= 万一 hibernation 中に snapshot
+        /// 送信処理が中断したら、復帰後の DO は queue を空 / フラグ false で
+        /// 開始する)。
+        #[serde(default)]
+        snapshot_in_progress: bool,
+        /// snapshot に含めた最終 ply (1 始まり、初手前なら 0)。
+        ///
+        /// snapshot 完了後に pending queue を flush する際、`ply > last_ply_in_snapshot`
+        /// の broadcast 行のみ送出して重複を排除する。`snapshot_in_progress = false`
+        /// に戻った後も値は保持する (queue 経由で挙動を共有しないため副作用は無いが、
+        /// 攻撃的に reset しないことで race の窓を狭くする)。
+        #[serde(default)]
+        last_ply_in_snapshot: u32,
+        /// snapshot 送信中に到着した broadcast 行を「行 + その手の ply」の形で
+        /// 保持する pending queue。snapshot 完了後に順次 flush する。
+        ///
+        /// `Vec<(String, Option<u32>)>`: 第 1 要素が CSA 行、第 2 要素が手数
+        /// (`None` は START / 終局通知 / CHAT 等の非指し手 broadcast で、queue
+        /// 経由でも常に flush 対象)。
+        ///
+        /// MVP では上限を設けない (1 局 ≤ 512 手のため pending queue は数十行
+        /// 程度に収まる想定)。性能課題が顕在化したら別 Issue で gating する。
+        #[serde(default)]
+        pending_queue: Vec<(String, Option<u32>)>,
     },
 }
 
@@ -96,9 +129,17 @@ impl WsAttachment {
     }
 
     /// 観戦者 attachment を構築する補助関数。
+    ///
+    /// `snapshot_in_progress` / `last_ply_in_snapshot` / `pending_queue` は
+    /// すべて default 値で初期化する。snapshot 送信経路に入る際に DO 側で
+    /// `snapshot_in_progress = true` に切り替え、`##[MONITOR2] END` 送出後に
+    /// `false` に戻す契約。
     pub fn spectator(room_id: impl Into<String>) -> Self {
         Self::Spectator {
             room_id: room_id.into(),
+            snapshot_in_progress: false,
+            last_ply_in_snapshot: 0,
+            pending_queue: Vec::new(),
         }
     }
 }
@@ -210,6 +251,49 @@ mod tests {
         // `#[serde(tag = "type")]` の下では variant 名が `type` 値に入る。
         assert!(s.contains("\"type\":\"Spectator\""));
         assert!(s.contains("\"room_id\":\"room-xyz\""));
+    }
+
+    #[test]
+    fn spectator_snapshot_state_round_trips_via_serde() {
+        // snapshot 送信中の attachment が serialize → deserialize で完全復元
+        // されること。in-memory 値だが Hibernation 経由で他 handler から見える
+        // 必要があるため永続化する設計。
+        let att = WsAttachment::Spectator {
+            room_id: "room-xyz".to_owned(),
+            snapshot_in_progress: true,
+            last_ply_in_snapshot: 7,
+            pending_queue: vec![
+                ("+5756FU,T2".to_owned(), Some(8)),
+                ("##[CHAT] alice: hi".to_owned(), None),
+            ],
+        };
+        let s = serde_json::to_string(&att).unwrap();
+        let restored: WsAttachment = serde_json::from_str(&s).unwrap();
+        assert_eq!(att, restored);
+    }
+
+    #[test]
+    fn spectator_legacy_attachment_defaults_snapshot_fields() {
+        // 旧 schema (snapshot_in_progress / last_ply_in_snapshot / pending_queue
+        // 導入前) で永続化された attachment を deserialize した場合に、新 field
+        // が default (false / 0 / Vec::new()) で復元されること。Hibernation 復帰時
+        // の互換性として固定する。
+        let legacy = r#"{"type":"Spectator","room_id":"room-xyz"}"#;
+        let restored: WsAttachment = serde_json::from_str(legacy).unwrap();
+        match restored {
+            WsAttachment::Spectator {
+                room_id,
+                snapshot_in_progress,
+                last_ply_in_snapshot,
+                pending_queue,
+            } => {
+                assert_eq!(room_id, "room-xyz");
+                assert!(!snapshot_in_progress);
+                assert_eq!(last_ply_in_snapshot, 0);
+                assert!(pending_queue.is_empty());
+            }
+            other => panic!("expected Spectator, got {other:?}"),
+        }
     }
 
     #[test]
