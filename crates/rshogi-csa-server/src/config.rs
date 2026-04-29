@@ -33,13 +33,18 @@ pub struct FloodgateFeatureIntent {
     pub enable_reconnect_protocol: bool,
 }
 
-/// 真偽文字列から Floodgate 機能 gate を解決する。
+/// 真偽文字列を `bool` に解決する汎用パーサ。
 ///
-/// TCP frontend は clap が直接 `bool` にパースするため本関数を経由しない。
-/// 環境変数など文字列経由で読む経路（Workers frontend など）で利用する。
-/// 入力は前後空白を `trim` してから判定するため、`"true\n"` や `" 1 "` も
-/// 許容する。
-pub fn parse_allow_floodgate_features(raw: Option<&str>) -> Result<bool, String> {
+/// 環境変数など文字列経由で `bool` を受け取る経路（Workers frontend など）で
+/// 利用する。`true` / `1` / `yes` / `on` を `true`、`false` / `0` / `no` /
+/// `off` を `false` として受理する。case-insensitive かつ前後空白を `trim`
+/// してから判定するため、`"true\n"` や `" 1 "` も許容する。`None` または空白
+/// のみの入力は **`false` 既定**で扱う（個別フラグの保守的既定値）。
+///
+/// エラーメッセージは特定の環境変数名や CLI フラグ名に依存しない汎用形で
+/// 返す。呼び出し側で `ALLOW_FLOODGATE_FEATURES` / `--allow-floodgate-features`
+/// 等のフラグ名 prefix を `map_err` で付加する想定。
+pub fn parse_truthy_bool_env(raw: Option<&str>) -> Result<bool, String> {
     let normalized = raw.unwrap_or("false").trim();
     if normalized.eq_ignore_ascii_case("true")
         || normalized.eq_ignore_ascii_case("yes")
@@ -55,9 +60,21 @@ pub fn parse_allow_floodgate_features(raw: Option<&str>) -> Result<bool, String>
     {
         return Ok(false);
     }
-    Err(format!(
-        "allow_floodgate_features: expected true|false|1|0|yes|no|on|off, got {normalized:?}"
-    ))
+    Err(format!("expected true|false|1|0|yes|no|on|off, got {normalized:?}"))
+}
+
+/// 真偽文字列から Floodgate 機能 gate を解決する。
+///
+/// TCP frontend は clap が直接 `bool` にパースするため本関数を経由しない。
+/// 環境変数など文字列経由で読む経路（Workers frontend など）で利用する。
+/// 入力は前後空白を `trim` してから判定するため、`"true\n"` や `" 1 "` も
+/// 許容する。
+///
+/// 実装は [`parse_truthy_bool_env`] を呼び出し、エラー時は
+/// `"allow_floodgate_features: "` prefix を付与した文字列を返す。既存呼び出し
+/// 側（`?` 伝播 / Err 分岐）の semantics を完全に保持する。
+pub fn parse_allow_floodgate_features(raw: Option<&str>) -> Result<bool, String> {
+    parse_truthy_bool_env(raw).map_err(|e| format!("allow_floodgate_features: {e}"))
 }
 
 /// Floodgate 機能が要求されているかを検証する。
@@ -101,6 +118,34 @@ pub fn validate_floodgate_feature_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_truthy_bool_env_defaults_to_false() {
+        assert!(!parse_truthy_bool_env(None).unwrap());
+    }
+
+    #[test]
+    fn parse_truthy_bool_env_accepts_truthy_variants() {
+        for raw in ["true", "TRUE", "yes", "YES", "on", "ON", "1", " true\n"] {
+            assert!(parse_truthy_bool_env(Some(raw)).unwrap(), "expected truthy: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn parse_truthy_bool_env_accepts_falsy_variants() {
+        for raw in ["false", "FALSE", "no", "NO", "off", "OFF", "0", " false\t"] {
+            assert!(!parse_truthy_bool_env(Some(raw)).unwrap(), "expected falsy: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn parse_truthy_bool_env_rejects_unknown_value_with_generic_prefix() {
+        // 汎用パーサ単独の Err は wrapper 側で prefix を付ける契約。本関数自身は
+        // 特定 frontend 名（"allow_floodgate_features" 等）を含めない。
+        let err = parse_truthy_bool_env(Some("weird")).unwrap_err();
+        assert!(err.contains("expected true|false"), "unexpected err: {err}");
+        assert!(!err.contains("allow_floodgate_features"), "unexpected prefix leaked: {err}");
+    }
 
     #[test]
     fn parse_allow_floodgate_features_defaults_to_false() {

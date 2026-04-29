@@ -70,7 +70,10 @@ preview_bucket_name = "local-floodgate-history-dev"
 # Origin ヘッダを送らないネイティブ CSA クライアント等は本リストに関係なく素通し
 # （LOGIN ハンドル / パスワード等の別レイヤで認可する想定）。
 [vars]
-WS_ALLOWED_ORIGINS = ""
+# local dev では Vite dev server (5173/5174) と Tauri ネイティブの両方から
+# 通電できる Origin を既定値として置く。production / staging では
+# `wrangler.<env>.toml` 側で本番 / staging の URL に書き換える。
+WS_ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:5174,tauri://localhost"
 # 対局時計。`countdown` / `countdown_msec` / `fischer` / `stopwatch`。
 # countdown は Floodgate 互換の整数秒切り捨て、countdown_msec は ms 粒度の短時間対局向け拡張。
 CLOCK_KIND = "countdown"
@@ -91,5 +94,10 @@ RECONNECT_GRACE_SECONDS = "0"
 # Floodgate 系運用機能（再接続プロトコル等）を opt-in で有効化する。`true` / `1` /
 # `yes` / `on` で有効。空または `false` のとき該当機能要求は起動 fail-fast。
 ALLOW_FLOODGATE_FEATURES = "false"
+# viewer 配信 API (`/api/v1/games*` HTTP, `/ws/<id>/spectate` WS) を opt-in 有効化する。
+# `true` / `1` / `yes` / `on` で有効、`false` / `0` / `no` / `off` または
+# 未設定で無効化（該当 endpoint は 404）。production rollout 時の kill-switch も
+# 兼ねるため、即時無効化したい場合は本値を `"0"` にして redeploy する。
+ALLOW_VIEWER_API = "1"
 # LobbyDO 内 in-memory queue の総数上限。超過時 LOGIN_LOBBY を queue_full で reject。
 LOBBY_QUEUE_SIZE_LIMIT = "100"

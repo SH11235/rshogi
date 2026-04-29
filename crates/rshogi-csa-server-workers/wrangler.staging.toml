@@ -116,6 +116,10 @@ BYOYOMI_MIN = "1"
 # 計測してから再評価する。
 RECONNECT_GRACE_SECONDS = "30"
 ALLOW_FLOODGATE_FEATURES = "true"
+# viewer 配信 API (`/api/v1/games*` HTTP, `/ws/<id>/spectate` WS) を opt-in 有効化する。
+# staging は実機通電 (web client / spectator E2E) を回す前提で `"1"` を既定とする。
+# 即時無効化したい場合は本値を `"0"` に切り替えて redeploy する（kill-switch）。
+ALLOW_VIEWER_API = "1"
 # LobbyDO 内 in-memory queue の総数上限。staging では小規模通電向けに 100 で運用。
 LOBBY_QUEUE_SIZE_LIMIT = "100"
 

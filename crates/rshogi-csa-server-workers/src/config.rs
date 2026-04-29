@@ -73,6 +73,14 @@ impl ConfigKeys {
     /// Floodgate 機能群を opt-in 有効化するブール変数。`true` / `1` / `yes` / `on`
     /// で有効。`reconnect_protocol` 等の Floodgate 系を要求する構成で必須。
     pub const ALLOW_FLOODGATE_FEATURES: &'static str = "ALLOW_FLOODGATE_FEATURES";
+    /// viewer 配信 API (`/api/v1/games*` HTTP, `/ws/<id>/spectate` WS) を opt-in
+    /// 有効化するブール変数。`true` / `1` / `yes` / `on` で有効、`false` / `0`
+    /// / `no` / `off` または未設定で無効（= 該当 endpoint は 404 で既存ルーティング
+    /// にフォールスルー）。production rollout 時の kill-switch を兼ね、本値を
+    /// `"0"` に切り替えて redeploy することで viewer API を即時無効化できる。
+    /// 設定不正値は安全側に倒し（無効化）、`worker::console_log!` で警告ログを
+    /// 出す。
+    pub const ALLOW_VIEWER_API: &'static str = "ALLOW_VIEWER_API";
 
     /// `wrangler.toml` の `[[r2_buckets]] binding = "..."` で宣言されるべき名前の
     /// 網羅列挙。新規 R2 binding 定数を追加したら必ず本配列にも追加する。
@@ -117,6 +125,7 @@ impl ConfigKeys {
         Self::BYOYOMI_MIN,
         Self::RECONNECT_GRACE_SECONDS,
         Self::ALLOW_FLOODGATE_FEATURES,
+        Self::ALLOW_VIEWER_API,
         Self::LOBBY_QUEUE_SIZE_LIMIT,
     ];
 
@@ -187,6 +196,26 @@ pub fn parse_clock_spec(
         other => Err(format!(
             "CLOCK_KIND: expected countdown|countdown_msec|fischer|stopwatch, got {other:?}"
         )),
+    }
+}
+
+/// viewer 配信 API (HTTP `/api/v1/games*` および WS `/ws/<id>/spectate`) が
+/// 有効化されているかを `[vars]` `ALLOW_VIEWER_API` から判定する。
+///
+/// 値の解釈は [`rshogi_csa_server::config::parse_truthy_bool_env`] に委ねる。
+/// 設定不正値（`true` / `false` / 数字 / yes/no/on/off 以外）は安全側に倒し
+/// （= viewer API 無効化）、`worker::console_log!` で警告ログを 1 回だけ出す。
+/// production rollout 時の kill-switch を兼ねる: 値を `"0"` に切り替えて
+/// redeploy することで該当 endpoint を即時 404 化できる。
+#[cfg(target_arch = "wasm32")]
+pub fn is_viewer_api_enabled(env: &worker::Env) -> bool {
+    let raw = env.var(ConfigKeys::ALLOW_VIEWER_API).ok().map(|v| v.to_string());
+    match rshogi_csa_server::config::parse_truthy_bool_env(raw.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            worker::console_log!("[viewer_api] event=invalid_allow_viewer_api err={e}");
+            false
+        }
     }
 }
 
