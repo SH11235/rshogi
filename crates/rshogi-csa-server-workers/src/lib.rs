@@ -23,6 +23,10 @@ compile_error!(
 );
 
 pub mod attachment;
+// `client_kind` は `X-Client` ヘッダ値を運用ログ向けに正規化する純粋ロジック。
+// `viewer_api` (wasm32 専用) から呼ばれるが、本体は I/O 非依存なのでホスト
+// target でもテストできるよう公開モジュールとして配置する。
+pub mod client_kind;
 // `backfill` は cron trigger (`#[event(scheduled)]`) からのみ消費される。
 // ホスト target で参照する公開 API は Stats / Deserialize 型のみで、IO 関数本体
 // は wasm32 ゲートで切り離している。それでもホスト通常ビルド (cargo build) では
