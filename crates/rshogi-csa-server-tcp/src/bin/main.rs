@@ -72,6 +72,14 @@ struct Cli {
     /// を複数指定できる。指定すると当該 `game_name` の対局が SFEN 開始になる。
     #[arg(long, value_name = "PATH")]
     handicap_toml: Option<PathBuf>,
+    /// 持ち時間プリセット TOML のパス。`[[preset]]` 配列で `game_name` と
+    /// `kind` (`countdown` / `countdown_msec` / `fischer` / `stopwatch`) と
+    /// 各方式のパラメータを宣言する。指定するとサーバーは strict mode となり、
+    /// 未登録 `game_name` での LOGIN は `LOGIN:incorrect unknown_game_name` で
+    /// 拒否される。未指定時は `--clock-kind` / `--total-time-*` で指定した
+    /// global clock を全 `game_name` で使用する（後方互換）。
+    #[arg(long, value_name = "PATH")]
+    clock_presets_toml: Option<PathBuf>,
     /// 同名ログイン重複時に旧セッションを evict する（既定は新接続を拒否）。
     /// `--allow-floodgate-features` opt-in が必須。`AgreeWaiting` 以降の
     /// 対局進行中セッションは evict されず新接続を拒否する。
@@ -218,6 +226,16 @@ fn main() -> anyhow::Result<()> {
         HashMap::new()
     };
 
+    // 持ち時間プリセット TOML を読み込む（指定時のみ）。空 HashMap は「プリセット
+    // 未宣言」で fallback global clock 動作。
+    let clock_presets: HashMap<rshogi_csa_server::types::GameName, ClockSpec> =
+        if let Some(path) = cli.clock_presets_toml.as_ref() {
+            load_clock_presets_toml(path)
+                .with_context(|| format!("failed to load clock presets TOML at {path:?}"))?
+        } else {
+            HashMap::new()
+        };
+
     // 2. ServerConfig を構築。
     let config = ServerConfig {
         bind_addr,
@@ -244,6 +262,7 @@ fn main() -> anyhow::Result<()> {
         floodgate_schedules,
         floodgate_history_path: cli.floodgate_history_jsonl.clone(),
         handicap_initial_sfens: handicap_map,
+        clock_presets,
         duplicate_login_policy: if cli.duplicate_login_evict_old {
             DuplicateLoginPolicy::EvictOld
         } else {
@@ -580,22 +599,114 @@ fn validate_handicap_sfen(game_name: &str, sfen: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 持ち時間プリセット TOML を読む。
+///
+/// 期待する形式（`ClockSpec` の `#[serde(tag = "kind")]` をフラット展開する）:
+/// ```toml
+/// [[preset]]
+/// game_name = "byoyomi-600-10"
+/// kind = "countdown"
+/// total_time_sec = 600
+/// byoyomi_sec = 10
+///
+/// [[preset]]
+/// game_name = "fischer-300-10F"
+/// kind = "fischer"
+/// total_time_sec = 300
+/// increment_sec = 10
+/// ```
+///
+/// バリデーション:
+/// - `game_name` 重複は起動時 Err。
+/// - `total_time_*` が 0 の preset は Err（少なくとも 1 ms 以上の本体時間を要求）。
+///   `byoyomi_*` / `increment_sec` の 0 は sudden death として許容。
+fn load_clock_presets_toml(
+    path: &std::path::Path,
+) -> anyhow::Result<HashMap<rshogi_csa_server::types::GameName, ClockSpec>> {
+    let raw = std::fs::read_to_string(path)?;
+    parse_clock_presets_toml_str(&raw)
+}
+
+/// `load_clock_presets_toml` の入力 TOML 文字列パース部分。テストから直接呼べる
+/// よう disk IO を切り離している。
+fn parse_clock_presets_toml_str(
+    raw: &str,
+) -> anyhow::Result<HashMap<rshogi_csa_server::types::GameName, ClockSpec>> {
+    use serde::Deserialize;
+    #[derive(Debug, Deserialize)]
+    struct Entry {
+        game_name: String,
+        #[serde(flatten)]
+        spec: ClockSpec,
+    }
+    #[derive(Debug, Deserialize)]
+    struct Root {
+        #[serde(default)]
+        preset: Vec<Entry>,
+    }
+    let root: Root = toml::from_str(raw)?;
+    let mut out: HashMap<rshogi_csa_server::types::GameName, ClockSpec> =
+        HashMap::with_capacity(root.preset.len());
+    for entry in root.preset {
+        validate_clock_spec(&entry.game_name, &entry.spec)?;
+        let key = rshogi_csa_server::types::GameName::new(&entry.game_name);
+        anyhow::ensure!(
+            !out.contains_key(&key),
+            "duplicate clock preset entry for game_name {:?}",
+            entry.game_name
+        );
+        out.insert(key, entry.spec);
+    }
+    Ok(out)
+}
+
+/// `ClockSpec` の最小限バリデーション。`total_time_*` が 0 の preset を弾く。
+fn validate_clock_spec(game_name: &str, spec: &ClockSpec) -> anyhow::Result<()> {
+    match spec {
+        ClockSpec::Countdown { total_time_sec, .. } => {
+            anyhow::ensure!(
+                *total_time_sec > 0,
+                "clock preset {game_name:?}: total_time_sec must be > 0"
+            );
+        }
+        ClockSpec::CountdownMsec { total_time_ms, .. } => {
+            anyhow::ensure!(
+                *total_time_ms > 0,
+                "clock preset {game_name:?}: total_time_ms must be > 0"
+            );
+        }
+        ClockSpec::Fischer { total_time_sec, .. } => {
+            anyhow::ensure!(
+                *total_time_sec > 0,
+                "clock preset {game_name:?}: total_time_sec must be > 0"
+            );
+        }
+        ClockSpec::StopWatch { total_time_min, .. } => {
+            anyhow::ensure!(
+                *total_time_min > 0,
+                "clock preset {game_name:?}: total_time_min must be > 0"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Floodgate スケジュール TOML を読む。
 ///
 /// 期待する形式:
 /// ```toml
 /// [[schedules]]
-/// game_name = "floodgate-600-10"
+/// game_name = "byoyomi-600-10"
 /// weekday = "Mon"
 /// hour = 13
 /// minute = 0
 /// pairing_strategy = "direct"
-///
-/// [schedules.clock]
-/// kind = "countdown"
-/// total_time_sec = 600
-/// byoyomi_sec = 10
 /// ```
+///
+/// 各スケジュールが使う持ち時間は `--clock-presets-toml` で `game_name` 別に
+/// 宣言する（per-game_name）。同 `game_name` で曜日別に時計を変える運用は
+/// 意図的に非対応 — 同じ持ち時間を複数曜日で出したい場合は同一 `game_name` を
+/// 参照する複数 `[[schedules]]` を並べる。
 fn load_floodgate_schedule_toml(
     path: &std::path::Path,
 ) -> anyhow::Result<Vec<rshogi_csa_server::FloodgateSchedule>> {
@@ -699,5 +810,132 @@ mod tests {
             "lnsgkgsnl/7b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1",
         )
         .unwrap();
+    }
+
+    /// `parse_clock_presets_toml_str` が 3 種類の preset を全て正しく逆シリアライズ
+    /// する。`#[serde(flatten)]` で `kind = "..."` が `ClockSpec` enum の正しい
+    /// variant に落ちることを明示確認する（タグ付き enum の flatten 経由展開の
+    /// 回帰検知）。
+    #[test]
+    fn load_clock_presets_accepts_three_variants() {
+        let raw = r#"
+[[preset]]
+game_name = "byoyomi-600-10"
+kind = "countdown"
+total_time_sec = 600
+byoyomi_sec = 10
+
+[[preset]]
+game_name = "byoyomi-60-5"
+kind = "countdown"
+total_time_sec = 60
+byoyomi_sec = 5
+
+[[preset]]
+game_name = "fischer-300-10F"
+kind = "fischer"
+total_time_sec = 300
+increment_sec = 10
+"#;
+        let map = parse_clock_presets_toml_str(raw).unwrap();
+        assert_eq!(map.len(), 3);
+        assert!(matches!(
+            map.get(&rshogi_csa_server::types::GameName::new("byoyomi-600-10")),
+            Some(ClockSpec::Countdown {
+                total_time_sec: 600,
+                byoyomi_sec: 10
+            })
+        ));
+        assert!(matches!(
+            map.get(&rshogi_csa_server::types::GameName::new("byoyomi-60-5")),
+            Some(ClockSpec::Countdown {
+                total_time_sec: 60,
+                byoyomi_sec: 5
+            })
+        ));
+        assert!(matches!(
+            map.get(&rshogi_csa_server::types::GameName::new("fischer-300-10F")),
+            Some(ClockSpec::Fischer {
+                total_time_sec: 300,
+                increment_sec: 10
+            })
+        ));
+    }
+
+    /// プリセット宣言なし (= 空 TOML) は空 HashMap が返る (= fallback モード)。
+    #[test]
+    fn load_clock_presets_empty_file_returns_empty_map() {
+        let map = parse_clock_presets_toml_str("").unwrap();
+        assert!(map.is_empty());
+    }
+
+    /// 同一 `game_name` を 2 度宣言した TOML は起動時に弾く。
+    #[test]
+    fn load_clock_presets_rejects_duplicate_game_name() {
+        let raw = r#"
+[[preset]]
+game_name = "byoyomi-600-10"
+kind = "countdown"
+total_time_sec = 600
+byoyomi_sec = 10
+
+[[preset]]
+game_name = "byoyomi-600-10"
+kind = "fischer"
+total_time_sec = 60
+increment_sec = 5
+"#;
+        let err = parse_clock_presets_toml_str(raw).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("duplicate"), "error must mention duplicate: {msg}");
+        assert!(msg.contains("byoyomi-600-10"), "error must mention game_name: {msg}");
+    }
+
+    /// `total_time_sec = 0` は `validate_clock_spec` で弾く。
+    #[test]
+    fn load_clock_presets_rejects_zero_total_time() {
+        let raw = r#"
+[[preset]]
+game_name = "broken"
+kind = "countdown"
+total_time_sec = 0
+byoyomi_sec = 10
+"#;
+        let err = parse_clock_presets_toml_str(raw).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("total_time_sec"), "error must mention field: {msg}");
+        assert!(msg.contains("broken"), "error must mention game_name: {msg}");
+    }
+
+    /// 未知の `kind` を持つ preset は serde の untagged で Err になる。
+    #[test]
+    fn load_clock_presets_rejects_unknown_kind() {
+        let raw = r#"
+[[preset]]
+game_name = "broken"
+kind = "exotic-kind"
+total_time_sec = 60
+"#;
+        let err = parse_clock_presets_toml_str(raw).unwrap_err();
+        let msg = format!("{err:#}");
+        // toml/serde からのエラーメッセージは実装依存のためキーワードだけ確認
+        assert!(
+            msg.contains("kind") || msg.contains("variant"),
+            "error must reference invalid kind: {msg}"
+        );
+    }
+
+    /// `byoyomi_sec = 0` (sudden death) は許容する。
+    #[test]
+    fn load_clock_presets_allows_zero_byoyomi() {
+        let raw = r#"
+[[preset]]
+game_name = "byoyomi-600-0"
+kind = "countdown"
+total_time_sec = 600
+byoyomi_sec = 0
+"#;
+        let map = parse_clock_presets_toml_str(raw).unwrap();
+        assert_eq!(map.len(), 1);
     }
 }

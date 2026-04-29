@@ -63,7 +63,9 @@ use rshogi_csa_server::types::{
 use rshogi_csa_server::{FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryColor};
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
-use crate::config::{ConfigKeys, parse_clock_spec, parse_reconnect_grace_duration};
+use crate::config::{
+    ConfigKeys, parse_clock_presets, parse_clock_spec, parse_reconnect_grace_duration,
+};
 use crate::datetime::{format_csa_datetime, format_date_path, format_rfc3339_utc};
 use crate::floodgate_history::R2FloodgateHistoryStorage;
 use crate::games_index::{
@@ -464,7 +466,7 @@ impl GameRoom {
             .await?
             .unwrap_or_else(|| "unknown".to_owned());
         let game_id = format!("{room_id}-{started}");
-        let clock_spec = load_clock_spec_from_env(&self.env)?;
+        let clock_spec = resolve_clock_spec_for_game(&self.env, game_name)?;
         // 双方の LOGIN は既に OK を返しているので、予約で失敗したまま早期
         // return するとスロットが永久に詰まる。Exhausted に加え、CAS リトライ
         // 上限到達などの Err も pending match abort 経路に落として部屋を
@@ -1945,12 +1947,13 @@ impl GameRoom {
 
         // 切断側宛の Game_Summary を「切断時点の現在局面」で再構築する。再接続
         // クライアントは初接続時と同じ `Reconnect_Token:` 拡張行を再受信できる。
-        let clock_spec = load_clock_spec_from_env(&self.env)?;
+        // `cfg.clock` (= 対局開始時に確定した preset 由来 ClockSpec) を使うことで、
+        // `CLOCK_PRESETS` 配下では再接続時の `Time:` セクションが対局開始時と一致する。
         let summary = GameSummaryBuilder {
             game_id: GameId::new(cfg.game_id.clone()),
             black: PlayerName::new(cfg.black_handle.clone()),
             white: PlayerName::new(cfg.white_handle.clone()),
-            time_section: clock_spec.format_time_section(),
+            time_section: cfg.clock.format_time_section(),
             position_section,
             rematch_on_draw: false,
             to_move: core.current_turn(),
@@ -2207,6 +2210,36 @@ fn load_clock_spec_from_env(env: &Env) -> Result<ClockSpec> {
         byoyomi_min.as_deref(),
     )
     .map_err(Error::RustError)
+}
+
+/// `game_name` 別の時計プリセットを解決する。
+///
+/// - `CLOCK_PRESETS` が宣言済み (= 1 件以上 entry を持つ) で `game_name` がヒット
+///   → 該当 `ClockSpec` を返す。
+/// - `CLOCK_PRESETS` が未宣言 / 空配列
+///   → `load_clock_spec_from_env` で global clock を返す（後方互換）。
+/// - `CLOCK_PRESETS` 宣言済みかつ `game_name` 未登録
+///   → `Err`（strict mode）。Lobby 側 (`handle_login_lobby`) は同じプリセット表で
+///   事前に弾いており Err はクライアントに届かない（DO ログにのみ出る）。本経路に
+///   到達するのは Lobby を経由しない単体テスト経路、もしくはプリセット書き換え直後の
+///   race など限定的なケース。
+///
+/// **キャッシュなし設計**: Lobby DO は LOGIN ごとに `clock_presets()` を呼ぶため
+/// `OnceCell` キャッシュを持たせるが、GameRoom DO は 1 対局 = 1 インスタンスで
+/// `start_match` のたった 1 回でしか評価しないため、env 再パースのコストが無視できる。
+/// 各 DO のライフサイクルに合わせ計算を最小化することで設計の対称性より局所最適を
+/// 優先している。
+fn resolve_clock_spec_for_game(env: &Env, game_name: &str) -> Result<ClockSpec> {
+    use crate::config::{PresetResolution, resolve_clock_spec_from_presets_map};
+    let raw = env.var(ConfigKeys::CLOCK_PRESETS).ok().map(|v| v.to_string());
+    let presets = parse_clock_presets(raw.as_deref()).map_err(Error::RustError)?;
+    match resolve_clock_spec_from_presets_map(&presets, game_name) {
+        PresetResolution::Fallback => load_clock_spec_from_env(env),
+        PresetResolution::Hit(spec) => Ok(spec),
+        PresetResolution::Unknown => Err(Error::RustError(format!(
+            "CLOCK_PRESETS: unknown game_name {game_name:?}; configure preset or remove strict mode"
+        ))),
+    }
 }
 
 /// `RECONNECT_GRACE_SECONDS` env を読み、Floodgate features の opt-in

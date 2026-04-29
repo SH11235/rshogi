@@ -115,6 +115,13 @@ BYOYOMI_MS = "10000"
 TOTAL_TIME_MIN = "10"
 BYOYOMI_MIN = "1"
 
+# `game_name` 別の時計プリセット（JSON 配列文字列）。空配列 / 空文字 / 未設定で
+# 「プリセット未宣言」となり、CLOCK_KIND 等から導出する global clock を全 game_name に
+# 適用する後方互換動作にとどまる。1 件以上登録した場合は strict mode となり、
+# 未登録 game_name の LOGIN_LOBBY は `LOGIN_LOBBY:incorrect unknown_game_name` で拒否。
+# 命名規則: `byoyomi-<total_sec>-<byoyomi_sec>` / `fischer-<total_sec>-<increment_sec>F`
+CLOCK_PRESETS = "[]"
+
 # 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
 # `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
 RECONNECT_GRACE_SECONDS = "0"

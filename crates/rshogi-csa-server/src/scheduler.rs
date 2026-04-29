@@ -93,12 +93,12 @@ pub struct FloodgateSchedule {
     /// ペアリング戦略名。`"direct"` をフロントエンドが認識し、Floodgate 系の
     /// 追加戦略は別タスクで配線する。未知の名前は起動時 `Err`。
     pub pairing_strategy: String,
-    // NOTE: per-schedule の時計（`ClockSpec`）は本タスクの範囲外。スケジュール
-    // 起動の対局は `state.config.clock`（global）を使う。スケジュール毎に異なる
-    // 時計を実現するには `drive_game` のシグネチャに `ClockSpec` を追加する
-    // 侵襲的な改修が必要になるため、必要になった時点で別タスクで対応する。
-    // 不要なフィールドを「parse はするけど無視する」silent drop は YAGNI 違反な
-    // ので意図的に省く（field を持たないことで利用者の誤解を防ぐ）。
+    // 持ち時間は `state.config.clock_presets` の `game_name` 別 lookup で解決される
+    // （per-game_name clock）。本構造体に `ClockSpec` を持たせない理由は、同一
+    // `game_name` で曜日別に時計を変える運用 (per-schedule clock) を意図的に
+    // 非対応にしているため: 同じ持ち時間を複数曜日で出したい場合は同一 `game_name`
+    // を参照する複数 `[[schedules]]` を並べる。`game_name` をアイデンティティと
+    // 見なすことで、preset map の単一窓口で時計を一元管理できる。
 }
 
 impl FloodgateSchedule {

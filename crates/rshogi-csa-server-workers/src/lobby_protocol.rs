@@ -36,6 +36,10 @@ pub enum LoginLobbyError {
     BadColor,
     /// `<game_name>` が `[A-Za-z0-9_-]` の文字種または 1〜32 文字長制限に違反。
     BadGameName,
+    /// `<game_name>` が `CLOCK_PRESETS` で宣言されたいずれの preset にも一致しない
+    /// （strict mode）。`CLOCK_PRESETS` 未設定 / 空配列のときは strict mode 自体が
+    /// 無効化されているため、本エラーは発生しない。
+    UnknownGameName,
 }
 
 impl LoginLobbyError {
@@ -47,6 +51,7 @@ impl LoginLobbyError {
             Self::BadIdFormat => "bad_id_format",
             Self::BadColor => "bad_color",
             Self::BadGameName => "bad_game_name",
+            Self::UnknownGameName => "unknown_game_name",
         }
     }
 }
@@ -291,6 +296,13 @@ mod tests {
         let too_long = "x".repeat(33);
         let line = format!("LOGIN_LOBBY alice+{too_long}+black pw");
         assert_eq!(parse_login_lobby(&line), Err(LoginLobbyError::BadGameName));
+    }
+
+    /// `UnknownGameName` の reason は `"unknown_game_name"` を返す（lobby が
+    /// `LOGIN_LOBBY:incorrect unknown_game_name` を組み立てるためのキー）。
+    #[test]
+    fn unknown_game_name_reason_is_stable() {
+        assert_eq!(LoginLobbyError::UnknownGameName.reason(), "unknown_game_name");
     }
 
     fn entry(h: &str, g: &str, c: Color) -> QueueEntry {

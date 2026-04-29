@@ -1,0 +1,31 @@
+# 持ち時間プリセット宣言例。
+#
+# `--clock-presets-toml <path>` で読み込ませると strict mode が有効になり、
+# 未登録 `game_name` での LOGIN は `LOGIN:incorrect unknown_game_name` で
+# 拒否される。`game_name` は CSA LOGIN の `<handle>+<game_name>+<color>` の
+# 中央トークンと一致する必要がある。
+#
+# 命名規則（推奨）:
+# - `byoyomi-<total_sec>-<byoyomi_sec>` 秒読み方式
+# - `fischer-<total_sec>-<increment_sec>F` Fischer 方式（末尾 F 必須）
+
+# 通常対局: 10 分 + 10 秒秒読み
+[[preset]]
+game_name = "byoyomi-600-10"
+kind = "countdown"
+total_time_sec = 600
+byoyomi_sec = 10
+
+# 早指し: 1 分 + 5 秒秒読み
+[[preset]]
+game_name = "byoyomi-60-5"
+kind = "countdown"
+total_time_sec = 60
+byoyomi_sec = 5
+
+# Fischer: 5 分 + 1 手 10 秒加算
+[[preset]]
+game_name = "fischer-300-10F"
+kind = "fischer"
+total_time_sec = 300
+increment_sec = 10
