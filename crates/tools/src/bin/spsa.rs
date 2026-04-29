@@ -1521,6 +1521,32 @@ fn main() -> Result<()> {
         }
     }
 
+    // 公平な対局条件のため、tournament と同様に NetworkDelay=0 と
+    // MinimumThinkingTime をデフォルトで注入する。ユーザーが明示的に
+    // --usi-option で指定した場合はそちらを優先。
+    // - NetworkDelay: 0 以外だと秒境界切り上げで思考時間が短縮され、
+    //   時間切れ・思考時間の偏りの原因になる。
+    // - MinimumThinkingTime: byoyomi 時は byoyomi と一致させることで秒読み全体を使い切れる。
+    //   フィッシャー/ノード数モードでは 0（エンジンの時間管理に委ねる）。
+    let min_think = if cli.nodes.is_none() && cli.btime.is_none() && cli.byoyomi > 0 {
+        cli.byoyomi.to_string()
+    } else {
+        "0".to_string()
+    };
+    let time_defaults: [(&str, &str); 3] = [
+        ("NetworkDelay", "0"),
+        ("NetworkDelay2", "0"),
+        ("MinimumThinkingTime", min_think.as_str()),
+    ];
+    let mut usi_options = cli.usi_options.clone().unwrap_or_default();
+    for (name, default_value) in &time_defaults {
+        let already_set =
+            usi_options.iter().any(|o| o.split_once('=').is_some_and(|(k, _)| k == *name));
+        if !already_set {
+            usi_options.push(format!("{name}={default_value}"));
+        }
+    }
+
     let base_cfg = EngineConfig {
         path: engine_path,
         args: engine_args,
@@ -1531,7 +1557,7 @@ fn main() -> Result<()> {
         minimum_thinking_time: None,
         slowmover: None,
         ponder: false,
-        usi_options: cli.usi_options.clone().unwrap_or_default(),
+        usi_options,
     };
 
     let game_cfg = GameConfig {
