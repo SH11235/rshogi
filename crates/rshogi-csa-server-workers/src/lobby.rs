@@ -16,7 +16,8 @@
 //!
 //! 認証は self-claim (`<password>` 値検証なし)、本家 Floodgate と同じ扱い。
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use worker::{
@@ -24,11 +25,12 @@ use worker::{
     WebSocketIncomingMessage, WebSocketPair, console_log, durable_object, wasm_bindgen,
 };
 
-use crate::config::ConfigKeys;
+use crate::config::{ConfigKeys, parse_clock_presets};
 use crate::lobby_protocol::{
     LobbyQueue, LoginLobbyError, MatchedEntries, QueueEntry, build_login_incorrect_line,
     build_login_ok_line, build_matched_line, build_room_id, parse_login_lobby,
 };
+use rshogi_csa_server::ClockSpec;
 use rshogi_csa_server::types::{Color, ReconnectToken};
 
 /// LobbyDO 内 in-memory queue 上限の既定値 (`LOBBY_QUEUE_SIZE_LIMIT` 未設定時)。
@@ -77,6 +79,10 @@ pub struct Lobby {
     state: State,
     env: Env,
     queue: RefCell<LobbyQueue>,
+    /// `CLOCK_PRESETS` 環境変数を 1 度だけパースして保持するキャッシュ。
+    /// 起動中に env vars は不変のため、初回 LOGIN_LOBBY のたびに JSON パースを
+    /// 走らせる無駄を避ける。空 HashMap = preset 未宣言 = strict mode 無効。
+    clock_presets: OnceCell<HashMap<String, ClockSpec>>,
 }
 
 impl DurableObject for Lobby {
@@ -85,6 +91,7 @@ impl DurableObject for Lobby {
             state,
             env,
             queue: RefCell::new(LobbyQueue::new()),
+            clock_presets: OnceCell::new(),
         }
     }
 
@@ -157,12 +164,38 @@ impl Lobby {
             .unwrap_or(DEFAULT_LOBBY_QUEUE_SIZE_LIMIT)
     }
 
+    /// `CLOCK_PRESETS` 環境変数をパースして得たマップを返す（OnceCell キャッシュ）。
+    /// パース失敗時は空 HashMap として扱い、`console_log!` で警告を残して strict
+    /// mode を無効化する（preset 設定不正で全 LOGIN がブロックされる事態を避ける
+    /// 安全側挙動。`CLOCK_PRESETS` 値そのものは `parse_clock_presets` の起動時
+    /// テストでカバーする）。
+    fn clock_presets(&self) -> &HashMap<String, ClockSpec> {
+        self.clock_presets.get_or_init(|| {
+            let raw = self.env.var(ConfigKeys::CLOCK_PRESETS).ok().map(|v| v.to_string());
+            match parse_clock_presets(raw.as_deref()) {
+                Ok(map) => map,
+                Err(e) => {
+                    console_log!("[Lobby] event=invalid_clock_presets err={e}");
+                    HashMap::new()
+                }
+            }
+        })
+    }
+
     /// LOGIN_LOBBY 受信時の処理。
     async fn handle_login_lobby(&self, ws: &WebSocket, line: &str) -> Result<()> {
         let req = match parse_login_lobby(line) {
             Ok(r) => r,
             Err(e) => return self.send_login_error(ws, e).await,
         };
+
+        // strict mode: `CLOCK_PRESETS` が宣言済みかつ未登録 `game_name` は拒否。
+        // 空 (= preset 未宣言) のときは strict mode 自体を無効化し全 game_name を
+        // 通す後方互換動作にとどまる。
+        let presets = self.clock_presets();
+        if !presets.is_empty() && !presets.contains_key(&req.game_name) {
+            return self.send_login_error(ws, LoginLobbyError::UnknownGameName).await;
+        }
 
         let entry = QueueEntry {
             handle: req.handle.clone(),

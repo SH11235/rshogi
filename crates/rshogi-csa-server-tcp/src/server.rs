@@ -84,6 +84,19 @@ pub fn parse_handle(raw: &str) -> Option<(String, GameName, Color)> {
     Some((handle, GameName::new(game_name), color))
 }
 
+/// `clock_presets` が登録されていれば該当 spec を、無ければ `fallback` を返す。
+///
+/// `drive_game_inner` と `build_game_summary` の双方から呼ぶ単一窓口。
+/// preset hit/miss の挙動を 1 か所に集約することで、両経路の clock 解決を
+/// 必ず一致させる。
+fn resolve_clock_spec<'a>(
+    presets: &'a HashMap<GameName, ClockSpec>,
+    fallback: &'a ClockSpec,
+    game_name: &GameName,
+) -> &'a ClockSpec {
+    presets.get(game_name).unwrap_or(fallback)
+}
+
 /// 受信ループで「実質無限」として扱うタイムアウト（10 年）。
 /// 実際の対局終了は持ち時間 deadline で駆動するため、`recv_line` 側は
 /// この長さで貼り付けておく（`rshogi_csa_server::game::run_loop` と揃える）。
@@ -95,8 +108,15 @@ pub struct ServerConfig {
     pub bind_addr: SocketAddr,
     /// CSA V2 棋譜と 00LIST の保存先ルート。
     pub kifu_topdir: std::path::PathBuf,
-    /// 対局で使う時計方式とパラメータ。
+    /// 対局で使う時計方式とパラメータ。`clock_presets` が空（未宣言）のとき、
+    /// または LOGIN の `game_name` が `clock_presets` に登録されていないときの
+    /// fallback 値として参照する。
     pub clock: ClockSpec,
+    /// `game_name` 別の時計プリセット。空 `HashMap` のときは「プリセット未宣言」
+    /// で、全対局が `clock` フィールド (global) を使う（後方互換）。1 件以上
+    /// 登録されたときは strict mode となり、未登録の `game_name` で LOGIN した
+    /// 接続は `LOGIN:incorrect unknown_game_name` で拒否される。
+    pub clock_presets: HashMap<GameName, ClockSpec>,
     /// 通信マージン (ミリ秒)。`GameRoom` の `consume` 前に差し引かれる。
     pub time_margin_ms: u64,
     /// 最大手数。
@@ -199,6 +219,7 @@ impl ServerConfig {
             bind_addr: "127.0.0.1:4081".parse().unwrap(),
             kifu_topdir: std::path::PathBuf::from("./kifu"),
             clock: ClockSpec::default(),
+            clock_presets: HashMap::new(),
             time_margin_ms: 1_500,
             max_moves: 256,
             login_timeout: Duration::from_secs(30),
@@ -878,6 +899,16 @@ where
             full_name
         ))));
     };
+
+    // 3.5. clock_presets が宣言済みなら、未登録 game_name は strict mode で拒否。
+    //      `is_empty()` のときは presets 未宣言扱いで fallback (state.config.clock)
+    //      を全 game_name に当てる後方互換モードに留まり、ここでは拒否しない。
+    if !state.config.clock_presets.is_empty()
+        && !state.config.clock_presets.contains_key(&game_name)
+    {
+        let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect unknown_game_name")).await;
+        return Ok(());
+    }
 
     // 4. パスワード照合。PasswordStore は handle 単位、RateStorage も handle で登録。
     let handle_player = PlayerName::new(&handle);
@@ -2114,9 +2145,12 @@ where
     P: PasswordStore + 'static,
     H: FloodgateHistoryStorage + 'static,
 {
-    // Game_Summary を両対局者に送信。
-    let clock = state.config.clock.build_clock();
-    let time_section = state.config.clock.format_time_section();
+    // Game_Summary を両対局者に送信。clock は game_name に紐付くプリセットを
+    // 優先し、未登録 (or presets 空) なら global fallback を使う。
+    let clock_spec =
+        resolve_clock_spec(&state.config.clock_presets, &state.config.clock, &game_name);
+    let clock = clock_spec.build_clock();
+    let time_section = clock_spec.format_time_section();
     // `initial_sfen` が設定されていればそれから派生、無ければ平手固定のブロックを使う。
     // GameRoom / Game_Summary / 棋譜 の三点一致契約 (GameRoomConfig::initial_sfen の
     // doc を参照) を満たすため、同じ SFEN を複数入口で再利用する。
@@ -2898,7 +2932,12 @@ where
         start_time: start_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         end_time: end_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         event: "rshogi-csa-server-tcp".to_owned(),
-        time_section: state.config.clock.format_time_section(),
+        time_section: resolve_clock_spec(
+            &state.config.clock_presets,
+            &state.config.clock,
+            game_name,
+        )
+        .format_time_section(),
         initial_position,
         moves: moves.to_vec(),
         result: result.clone(),

@@ -177,8 +177,32 @@ async fn spawn_server(tag: &str) -> (std::net::SocketAddr, PathBuf) {
     .await
 }
 
+/// `clock_presets` 付きでテストサーバーを立ち上げる。strict mode 検証用。
+async fn spawn_server_with_clock_presets(
+    tag: &str,
+    presets: std::collections::HashMap<rshogi_csa_server::types::GameName, ClockSpec>,
+) -> (std::net::SocketAddr, PathBuf) {
+    spawn_server_inner(
+        tag,
+        ClockSpec::Countdown {
+            total_time_sec: 60,
+            byoyomi_sec: 10,
+        },
+        presets,
+    )
+    .await
+}
+
 /// テストシナリオ 1 件分のサーバーを指定時計で立ち上げる。
 async fn spawn_server_with_clock(tag: &str, clock: ClockSpec) -> (std::net::SocketAddr, PathBuf) {
+    spawn_server_inner(tag, clock, std::collections::HashMap::new()).await
+}
+
+async fn spawn_server_inner(
+    tag: &str,
+    clock: ClockSpec,
+    clock_presets: std::collections::HashMap<rshogi_csa_server::types::GameName, ClockSpec>,
+) -> (std::net::SocketAddr, PathBuf) {
     let topdir = unique_topdir(tag);
     let mut password_map = HashMap::new();
     password_map.insert("alice".to_owned(), "pw".to_owned());
@@ -223,6 +247,7 @@ async fn spawn_server_with_clock(tag: &str, clock: ClockSpec) -> (std::net::Sock
         bind_addr: actual_addr,
         kifu_topdir: topdir.clone(),
         clock,
+        clock_presets,
         login_timeout: Duration::from_secs(10),
         agree_timeout: Duration::from_secs(30),
         ..ServerConfig::sensible_defaults()
@@ -368,6 +393,93 @@ fn login_auth_failure_on_bad_password() {
         send_line(&mut w, "LOGIN alice+g1+black badpw").await;
         let resp = read_line_raw(&mut r).await.unwrap();
         assert_eq!(resp, "LOGIN:incorrect");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// `clock_presets` が宣言済みかつ未登録 `game_name` の LOGIN は
+/// `LOGIN:incorrect unknown_game_name` で拒否される（strict mode）。
+#[test]
+fn login_rejected_when_game_name_is_not_in_clock_presets() {
+    run_local(|| async {
+        let mut presets = std::collections::HashMap::new();
+        presets.insert(
+            rshogi_csa_server::types::GameName::new("byoyomi-600-10"),
+            ClockSpec::Countdown {
+                total_time_sec: 600,
+                byoyomi_sec: 10,
+            },
+        );
+        let (addr, topdir) = spawn_server_with_clock_presets("preset_strict", presets).await;
+        let (mut r, mut w) = connect(addr).await;
+        // `g1` は presets 未登録 → strict 拒否
+        send_line(&mut w, "LOGIN alice+g1+black pw").await;
+        let resp = read_line_raw(&mut r).await.unwrap();
+        assert_eq!(resp, "LOGIN:incorrect unknown_game_name");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// 登録済 `game_name` の LOGIN は通常成立する（strict mode は registered preset
+/// だけは透過させる契約）。
+#[test]
+fn login_succeeds_when_game_name_is_in_clock_presets() {
+    run_local(|| async {
+        let mut presets = std::collections::HashMap::new();
+        presets.insert(
+            rshogi_csa_server::types::GameName::new("byoyomi-60-5"),
+            ClockSpec::Countdown {
+                total_time_sec: 60,
+                byoyomi_sec: 5,
+            },
+        );
+        let (addr, topdir) = spawn_server_with_clock_presets("preset_ok", presets).await;
+        let (mut r, mut w) = connect(addr).await;
+        send_line(&mut w, "LOGIN alice+byoyomi-60-5+black pw").await;
+        let resp = read_line_raw(&mut r).await.unwrap();
+        assert_eq!(resp, "LOGIN:alice OK");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// 登録済 `game_name` のマッチ成立時、Game_Summary の `Total_Time` / `Byoyomi`
+/// が global clock ではなく preset 由来の値になることを確認する。
+/// （preset = byoyomi-600-10、global clock fallback = 60s/10s なので差異が出る）
+#[test]
+fn matched_game_summary_uses_preset_clock_not_global() {
+    run_local(|| async {
+        let mut presets = std::collections::HashMap::new();
+        presets.insert(
+            rshogi_csa_server::types::GameName::new("byoyomi-600-10"),
+            ClockSpec::Countdown {
+                total_time_sec: 600,
+                byoyomi_sec: 10,
+            },
+        );
+        let (addr, topdir) = spawn_server_with_clock_presets("preset_summary", presets).await;
+
+        let (mut rb, mut wb) = connect(addr).await;
+        send_line(&mut wb, "LOGIN alice+byoyomi-600-10+black pw").await;
+        assert_eq!(read_line_raw(&mut rb).await.unwrap(), "LOGIN:alice OK");
+        let (mut rw, mut ww) = connect(addr).await;
+        send_line(&mut ww, "LOGIN bob+byoyomi-600-10+white pw").await;
+        assert_eq!(read_line_raw(&mut rw).await.unwrap(), "LOGIN:bob OK");
+
+        let s_black = drain_game_summary(&mut rb).await;
+        let s_white = drain_game_summary(&mut rw).await;
+        assert!(
+            s_black.iter().any(|l| l == "Total_Time:600"),
+            "black summary must reflect preset Total_Time: {s_black:?}"
+        );
+        assert!(
+            s_black.iter().any(|l| l == "Byoyomi:10"),
+            "black summary must reflect preset Byoyomi: {s_black:?}"
+        );
+        assert!(
+            s_white.iter().any(|l| l == "Total_Time:600"),
+            "white summary must reflect preset Total_Time: {s_white:?}"
+        );
+        let _ = (wb, ww);
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }
