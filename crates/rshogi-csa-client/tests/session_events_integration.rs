@@ -30,7 +30,9 @@ use rshogi_csa_client::events::{
     SessionEventSink, SessionProgress, SinkError,
 };
 use rshogi_csa_client::protocol::CsaConnection;
-use rshogi_csa_client::session::{run_game_session_with_events, run_resumed_session_with_events};
+use rshogi_csa_client::session::{
+    run_game_session, run_game_session_with_events, run_resumed_session_with_events,
+};
 
 // ────────────────────────────────────────────
 // 共通: mock CSA TCP server / mock USI engine 生成
@@ -651,6 +653,66 @@ fn external_shutdown_emits_shutdown_disconnected_and_returns_shutdown_error() {
     }
     let events = events.lock().unwrap().clone();
     assert!(events.contains(&"Disconnected:Shutdown"), "events: {events:?}");
+}
+
+/// 既存 `run_game_session(&AtomicBool)` 経路でも、外部から立てた shutdown が
+/// `drive_session` 内のループで観測されて `SessionError::Shutdown` で抜けることを
+/// 確認する regression test。`Arc<AtomicBool>` 化に伴う snapshot 問題を起こさない
+/// ための再発防止 guard。
+#[test]
+fn external_shutdown_observed_through_legacy_run_game_session() {
+    let port = spawn_mock_tcp_server(|reader, writer| {
+        let _ = read_line(reader);
+        write_lines(writer, &["LOGIN:alice OK"]);
+        let lines = game_summary_lines("g-legacy-sd");
+        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write_lines(writer, &line_refs);
+        let _ = read_line(reader); // AGREE
+        write_lines(writer, &["START:g-legacy-sd"]);
+        loop {
+            let mut buf = String::new();
+            match reader.read_line(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {
+                    let trimmed = buf.trim_end_matches(['\r', '\n']);
+                    if trimmed.contains("LOGOUT") {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
+    let engine_path = mock_usi_engine_script();
+    let config = mock_config(engine_path, SearchInfoEmitPolicy::Disabled);
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
+    conn.login("alice", "pw").expect("login");
+
+    let mut engine = UsiEngine::spawn(
+        &config.engine.path,
+        &config.engine.options,
+        config.game.ponder,
+        Duration::from_secs(5),
+    )
+    .expect("spawn engine");
+
+    let shutdown_signal = Arc::clone(&shutdown);
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(300));
+        shutdown_signal.store(true, Ordering::SeqCst);
+    });
+
+    // 既存 API: `&AtomicBool` (Arc 介さず参照を直接渡す)
+    let outcome = run_game_session(&mut conn, &mut engine, &config, shutdown.as_ref());
+
+    engine.quit();
+
+    match outcome {
+        Err(SessionError::Shutdown) => {}
+        other => panic!("expected SessionError::Shutdown via legacy API, got {other:?}"),
+    }
 }
 
 // ────────────────────────────────────────────

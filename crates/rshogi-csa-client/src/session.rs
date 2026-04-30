@@ -26,7 +26,7 @@ use anyhow::Result;
 use rshogi_csa::{Color, Position, csa_move_to_usi, usi_move_to_csa};
 
 use crate::config::CsaClientConfig;
-use crate::engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine};
+use crate::engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine, UsiEngineDriver};
 use crate::event::Event;
 use crate::events::{
     BestMoveEvent, DisconnectReason, GameEndEvent, GameEndReason, MoveEvent, MovePlayer,
@@ -52,14 +52,15 @@ use crate::record::{GameRecord, JsonlMoveExtra};
 /// `drop(conn)` か追加 close 処理を呼び出し側が決められる。
 ///
 /// resume 経路は [`run_resumed_session_with_events`] を使うこと。
-pub fn run_game_session_with_events<S>(
+pub fn run_game_session_with_events<E, S>(
     config: &CsaClientConfig,
     conn: &mut CsaConnection,
-    engine: &mut UsiEngine,
+    engine: &mut E,
     shutdown: Arc<AtomicBool>,
     sink: &mut S,
 ) -> Result<SessionOutcome, SessionError>
 where
+    E: UsiEngineDriver + ?Sized,
     S: SessionEventSink + ?Sized,
 {
     drive_session(config, conn, engine, shutdown.as_ref(), sink, SessionMode::Fresh)
@@ -71,14 +72,15 @@ where
 /// 本関数は履歴 replay を `MoveConfirmed` として emit しない (resume 時の局面は
 /// `Resumed.state.last_sfen` から再構築する)。詳細は [`crate::events`] の
 /// crate-level doc を参照。
-pub fn run_resumed_session_with_events<S>(
+pub fn run_resumed_session_with_events<E, S>(
     config: &CsaClientConfig,
     conn: &mut CsaConnection,
-    engine: &mut UsiEngine,
+    engine: &mut E,
     shutdown: Arc<AtomicBool>,
     sink: &mut S,
 ) -> Result<SessionOutcome, SessionError>
 where
+    E: UsiEngineDriver + ?Sized,
     S: SessionEventSink + ?Sized,
 {
     drive_session(config, conn, engine, shutdown.as_ref(), sink, SessionMode::Resumed)
@@ -118,15 +120,16 @@ enum SessionMode {
     Resumed,
 }
 
-fn drive_session<S>(
+fn drive_session<E, S>(
     config: &CsaClientConfig,
     conn: &mut CsaConnection,
-    engine: &mut UsiEngine,
+    engine: &mut E,
     shutdown: &AtomicBool,
     sink: &mut S,
     mode: SessionMode,
 ) -> Result<SessionOutcome, SessionError>
 where
+    E: UsiEngineDriver + ?Sized,
     S: SessionEventSink + ?Sized,
 {
     // Step 1: Connected
@@ -272,10 +275,11 @@ enum LoopOutcome {
 // ────────────────────────────────────────────
 
 /// メインループの可変状態。ライフタイム `'a` は 1 局分の借用。
-/// `S` は generic な sink。`?Sized` を許して `dyn SessionEventSink` も渡せるようにする。
-struct SessionState<'a, S: ?Sized + 'a> {
+/// `E` は engine driver、`S` は sink。いずれも `?Sized` を許して
+/// `&mut dyn UsiEngineDriver` / `&mut dyn SessionEventSink` も渡せるようにする。
+struct SessionState<'a, E: ?Sized + 'a, S: ?Sized + 'a> {
     conn: &'a mut CsaConnection,
-    engine: &'a mut UsiEngine,
+    engine: &'a mut E,
     config: &'a CsaClientConfig,
     shutdown: &'a AtomicBool,
     server_rx: &'a Receiver<Event>,
@@ -305,9 +309,9 @@ enum MoveAction {
 // メインループ
 // ────────────────────────────────────────────
 
-fn run_session_loop<S>(
+fn run_session_loop<E, S>(
     conn: &mut CsaConnection,
-    engine: &mut UsiEngine,
+    engine: &mut E,
     config: &CsaClientConfig,
     shutdown: &AtomicBool,
     summary: GameSummary,
@@ -315,6 +319,7 @@ fn run_session_loop<S>(
     sink: &mut S,
 ) -> LoopOutcome
 where
+    E: UsiEngineDriver + ?Sized,
     S: SessionEventSink + ?Sized,
 {
     let (server_tx, server_rx) = mpsc::channel();
@@ -563,8 +568,8 @@ where
 }
 
 /// 自分の bestmove 後、SearchOrigin を意識してハンドリングする。
-fn handle_search_outcome_with_origin<S>(
-    s: &mut SessionState<'_, S>,
+fn handle_search_outcome_with_origin<E, S>(
+    s: &mut SessionState<'_, E, S>,
     outcome: SearchOutcome,
     turn_start: Instant,
     sfen_before: String,
@@ -572,6 +577,7 @@ fn handle_search_outcome_with_origin<S>(
     origin: SearchOrigin,
 ) -> MoveAction
 where
+    E: UsiEngineDriver + ?Sized,
     S: SessionEventSink + ?Sized,
 {
     match outcome {
@@ -599,8 +605,8 @@ where
     }
 }
 
-fn send_bestmove_and_wait_echo<S>(
-    s: &mut SessionState<'_, S>,
+fn send_bestmove_and_wait_echo<E, S>(
+    s: &mut SessionState<'_, E, S>,
     result: &BestMoveResult,
     info: &SearchInfo,
     turn_start: Instant,
@@ -609,6 +615,7 @@ fn send_bestmove_and_wait_echo<S>(
     origin: SearchOrigin,
 ) -> MoveAction
 where
+    E: UsiEngineDriver + ?Sized,
     S: SessionEventSink + ?Sized,
 {
     if result.bestmove == "resign" {
@@ -818,8 +825,9 @@ where
 }
 
 /// 相手手番で受信した指し手 1 行 (`+...` / `-...`) を処理する。
-fn handle_opponent_move_line<S>(s: &mut SessionState<'_, S>, line: &str) -> MoveAction
+fn handle_opponent_move_line<E, S>(s: &mut SessionState<'_, E, S>, line: &str) -> MoveAction
 where
+    E: UsiEngineDriver + ?Sized,
     S: SessionEventSink + ?Sized,
 {
     let (mv, time_sec) = parse_server_move(line);
@@ -1434,7 +1442,10 @@ struct PonderState {
     expected_usi: String,
 }
 
-fn cleanup_ponder(engine: &mut UsiEngine, ponder_state: &mut Option<PonderState>) -> Result<()> {
+fn cleanup_ponder<E: UsiEngineDriver + ?Sized>(
+    engine: &mut E,
+    ponder_state: &mut Option<PonderState>,
+) -> Result<()> {
     if ponder_state.take().is_some() {
         engine.stop_and_wait()?;
     }

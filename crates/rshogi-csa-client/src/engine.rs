@@ -34,15 +34,164 @@ pub struct BestMoveResult {
 
 /// 探索の終了理由
 pub enum SearchOutcome {
-    /// エンジンが bestmove を返した
+    /// エンジンが bestmove を返した。第 2 引数は終了時点の累積 [`SearchInfo`]
+    /// (final score, final pv, final depth 等)。
     BestMove(BestMoveResult, SearchInfo),
-    /// サーバーから終局通知が来たため探索を中断した
+
+    /// 探索中に server から終局通知 (or disconnect) を受信して中断した。
+    /// 内包する `Vec<String>` は中断契機となった server からの行を含む:
+    ///
+    /// - `#WIN` / `#LOSE` / `#DRAW` / `#CENSORED` / `#CHUDAN` / `#TIME_UP` などの結果行
+    /// - `#ILLEGAL_MOVE` / `#JISHOGI` / `#SENNICHITE` / `#MAX_MOVES` などの理由行
+    /// - server 切断時は `#DISCONNECTED` という synthetic line
+    ///
+    /// session 側は本 Vec の内容から `GameEndEvent.reason` ([`crate::events::GameEndReason`])
+    /// を解釈する。実装は中断時の server 受信行を漏れなくこの Vec に含めること。
     ServerInterrupt(Vec<String>),
 }
 
-/// USI `info` 行を観測する都度呼び出される callback。`(累積 SearchInfo, 生の info 行)`
-/// を受け取り、`SessionEventSink` への `SearchInfo` snapshot 発火に使われる。
+/// USI `info` 行を観測する都度呼び出される callback。
+///
+/// 引数:
+/// - `&SearchInfo`: 観測時点の累積 search info (depth/score/pv 等は最後に観測した値で更新済)
+/// - `&str`: USI engine から受信した raw info 行 (例: `"info depth 12 score cp 87 pv 7g7f 8c8d ..."`)
+///
+/// 呼び出される順序:
+/// - bestmove を受信する**前**に、各 info 行ごとに 1 度だけ呼ばれる
+/// - 探索中断 (stop / server interrupt) の場合、それまでに受信した info 行ぶんは呼ばれている
+///
+/// session 側は本 callback を `SearchInfoEmitPolicy` で throttle した上で
+/// `SessionEventSink::on_event(SessionProgress::SearchInfo(...))` に変換する。
 pub type InfoCallback<'a> = dyn FnMut(&SearchInfo, &str) + 'a;
+
+/// CSA 対局ループから呼び出される USI engine の最小 contract。
+///
+/// 既存 [`UsiEngine`] (外部 USI プロセス driver) が reference impl。consumer は本 trait を
+/// 実装することで in-process engine / mock engine 等を
+/// [`run_game_session_with_events`](crate::run_game_session_with_events) に渡せる。
+///
+/// 同期前提。`Send + Sync` bound は付けない (consumer が必要なら自身の型で課す)。
+/// `Result` は [`anyhow::Result`] を採用する (現行 `UsiEngine` API と整合)。
+///
+/// 利用例:
+///
+/// ```ignore
+/// use rshogi_csa_client::{run_game_session_with_events, UsiEngine, UsiEngineDriver};
+///
+/// // 1. 具象 `UsiEngine` をそのまま渡す
+/// let mut engine = UsiEngine::spawn(&path, &options, ponder, timeout)?;
+/// run_game_session_with_events(&config, &mut conn, &mut engine, shutdown, &mut sink)?;
+///
+/// // 2. dyn dispatch で複数 engine 実装を切り替える
+/// let mut engine: Box<dyn UsiEngineDriver> = if use_builtin {
+///     Box::new(BuiltinEngine::new(...))
+/// } else {
+///     Box::new(UsiEngine::spawn(&path, &options, ponder, timeout)?)
+/// };
+/// run_game_session_with_events(&config, &mut conn, &mut *engine, shutdown, &mut sink)?;
+/// ```
+pub trait UsiEngineDriver {
+    /// USI `usinewgame` 相当を実装する。対局開始前に 1 度呼ばれる。
+    fn new_game(&mut self) -> Result<()>;
+
+    /// `position` + `go` を送信し、bestmove または server interrupt まで block する。
+    ///
+    /// 実装の責任:
+    /// 1. `position_cmd` (例: `"position sfen ... moves ..."`) を engine に送信
+    /// 2. `go_cmd` (例: `"go btime 60000 wtime 60000 byoyomi 5000"`) を engine に送信
+    /// 3. info 行を受信するたびに `info_callback` を呼び、累積 [`SearchInfo`] と raw info 行を渡す
+    /// 4. 探索中、`shutdown.load(Ordering::SeqCst)` が true になった場合は `stop` を engine
+    ///    に送り、bestmove を待ってから `Ok(SearchOutcome::BestMove(...))` で返す (resign 扱いも可)
+    /// 5. 探索中、`server_rx` から [`Event::ServerLine`] を受信し、`#GAME_OVER` などの終局
+    ///    行を検出した場合は engine に `stop` を送り、bestmove を drain してから
+    ///    `Ok(SearchOutcome::ServerInterrupt(server_lines))` を返す
+    /// 6. [`Event::ServerDisconnected`] を受信した場合も同様に終局として扱う
+    ///
+    /// 実装は探索中、`shutdown` を `try_recv` / timeout poll 等で blocking しない形で観測
+    /// すること (例: 200ms 以下の poll interval、または engine 応答ストリームと multiplex)。
+    /// blocking read のみで `shutdown` / `server_rx` を放置すると session 全体が固まる。
+    ///
+    /// `server_rx` から [`Event::ServerLine`] / [`Event::ServerDisconnected`] を受信したら
+    /// 探索を中断 (`stop` 送信 + bestmove drain) し、
+    /// [`SearchOutcome::ServerInterrupt`] で返す。`server_lines` には中断契機の行を
+    /// 漏れなく含めること。
+    fn go_with_info(
+        &mut self,
+        position_cmd: &str,
+        go_cmd: &str,
+        shutdown: &AtomicBool,
+        server_rx: &Receiver<Event>,
+        info_callback: &mut InfoCallback<'_>,
+    ) -> Result<SearchOutcome>;
+
+    /// `position` + `go ponder` を送信し、bestmove を**待たない**で即座に return する。
+    /// 後続で [`UsiEngineDriver::ponderhit_with_info`] または
+    /// [`UsiEngineDriver::stop_and_wait`] が呼ばれる。
+    fn go_ponder(&mut self, position_cmd: &str, go_cmd: &str) -> Result<()>;
+
+    /// USI `ponderhit` を送信し、bestmove または server interrupt まで block する。
+    /// `shutdown` / `server_rx` / `info_callback` の semantics は
+    /// [`UsiEngineDriver::go_with_info`] と同じ。
+    fn ponderhit_with_info(
+        &mut self,
+        shutdown: &AtomicBool,
+        server_rx: &Receiver<Event>,
+        info_callback: &mut InfoCallback<'_>,
+    ) -> Result<SearchOutcome>;
+
+    /// USI `stop` を送信し、bestmove の drain (= 棋譜には載せない) を行う。
+    ///
+    /// session は ponder 中の cleanup 用にこの method を呼ぶ。実装は ponder 中で
+    /// なくとも安全に呼び出されることを保証すること (副作用は USI `stop` 送信のみ
+    /// に留める)。
+    fn stop_and_wait(&mut self) -> Result<()>;
+
+    /// USI `gameover <result>` を送信する。
+    ///
+    /// `result` は `"win"` / `"lose"` / `"draw"` のいずれか (USI 仕様準拠)。
+    /// session 側は [`crate::protocol::GameResult::Interrupted`] /
+    /// [`crate::protocol::GameResult::Censored`] を `"draw"` に丸める (既存
+    /// `gameover_str` 関数の挙動)。
+    fn gameover(&mut self, result: &str) -> Result<()>;
+}
+
+impl UsiEngineDriver for UsiEngine {
+    fn new_game(&mut self) -> Result<()> {
+        UsiEngine::new_game(self)
+    }
+
+    fn go_with_info(
+        &mut self,
+        position_cmd: &str,
+        go_cmd: &str,
+        shutdown: &AtomicBool,
+        server_rx: &Receiver<Event>,
+        info_callback: &mut InfoCallback<'_>,
+    ) -> Result<SearchOutcome> {
+        UsiEngine::go_with_info(self, position_cmd, go_cmd, shutdown, server_rx, info_callback)
+    }
+
+    fn go_ponder(&mut self, position_cmd: &str, go_cmd: &str) -> Result<()> {
+        UsiEngine::go_ponder(self, position_cmd, go_cmd)
+    }
+
+    fn ponderhit_with_info(
+        &mut self,
+        shutdown: &AtomicBool,
+        server_rx: &Receiver<Event>,
+        info_callback: &mut InfoCallback<'_>,
+    ) -> Result<SearchOutcome> {
+        UsiEngine::ponderhit_with_info(self, shutdown, server_rx, info_callback)
+    }
+
+    fn stop_and_wait(&mut self) -> Result<()> {
+        UsiEngine::stop_and_wait(self)
+    }
+
+    fn gameover(&mut self, result: &str) -> Result<()> {
+        UsiEngine::gameover(self, result)
+    }
+}
 
 /// info 行から抽出した探索情報
 ///
