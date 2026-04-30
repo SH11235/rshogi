@@ -24,14 +24,19 @@ use tools::spsa_param_mapping::{
 
 /// `meta.json` のフォーマットバージョン。
 ///
-/// v2 → v3 (本 PR): `params_sha256` / `init_from_sha256` / `engine_path` /
+/// v2 → v3: `params_sha256` / `init_from_sha256` / `engine_path` /
 /// `engine_param_mapping_*` / `param_name_set_hash` / `active_param_count` /
 /// `init_mode` / `init_from_path` を追加。`--init-from` の暗黙スキップを禁止し、
 /// resume 時に params 内容と name set の整合性を hash で検証する。
 ///
-/// 互換性: v3 は v2 を読まない (hard bail)。古い run dir で resume したい場合は
+/// v3 → v4 (本 PR): `current_params_sha256` を追加。各反復で state.params 更新後に
+/// その時点の hash を meta に記録する。resume 起動時に on-disk state.params の hash と
+/// 突き合わせ、両者が乖離していれば「state.params だけ更新後に meta 更新前にクラッシュ」
+/// または「外部から state.params を書き換えられた」として bail (or warn)。
+///
+/// 互換性: vN は v(N-1) を読まない (hard bail)。古い run dir で resume したい場合は
 /// 新規 run dir で `--init-from <canonical>` から fresh start する。
-const META_FORMAT_VERSION: u32 = 3;
+const META_FORMAT_VERSION: u32 = 4;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SPSA tuner for USI engines")]
@@ -228,6 +233,30 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     force_init: bool,
 
+    /// 既存 `<run-dir>/state.params` を canonical の代わりに「そのまま起点」として
+    /// fresh start を許可する。
+    ///
+    /// 通常運用ではこのフラグは不要。`--init-from` を指定して canonical を明示する
+    /// のが推奨経路。本フラグは「外部ツールで生成した state.params を直接 spsa に
+    /// 食わせる」「過去 run の最終 state を seed に新 run を始める (=resume では
+    /// なく fresh)」等の特殊ユースケース向けに、明示的な意思表示として用意する。
+    ///
+    /// 既定で `--init-from` なし + 既存 state は bail (silent fresh は事故の温床
+    /// だったため)。本フラグは `--init-from` / `--resume` / `--force-init` のいずれ
+    /// とも同時指定不可 (意味が矛盾する)。
+    #[arg(long, default_value_t = false)]
+    use_existing_state_as_init: bool,
+
+    /// `<run-dir>/.lock` が残留している場合に強制削除して取得を試みる。
+    ///
+    /// 通常 lock は process 正常終了時 / panic 時に削除される。電源断・
+    /// SIGKILL 等で残ってしまった場合のみこのフラグを使う。間違って実行中
+    /// の SPSA を巻き込むと state.params / meta.json が race condition で
+    /// 壊れるので、必ず lock 内容 (PID/hostname/start) を確認して当該
+    /// プロセスが死んでいることを目視確認してから指定すること。
+    #[arg(long, default_value_t = false)]
+    force_unlock: bool,
+
     /// `--resume` + `--init-from` 併用時の整合性チェックを strict にする。
     ///
     /// デフォルトは warning 出力のみで継続。strict 指定時は median ≥ 0.5 step
@@ -340,6 +369,14 @@ struct ResumeMetaData {
     engine_param_mapping_sha256: Option<String>,
     /// 起動モード。`InitMode` の serde 表現 (kebab-case)。
     init_mode: InitMode,
+    // --- v4 で追加 ---
+    /// 反復ごとに更新される現 state.params の SHA-256。`save_meta` の直前に
+    /// hash を計算して記録する (write_params → meta save の transactional 復旧
+    /// 検証に使う)。
+    /// resume 起動時に on-disk hash と突き合わせ、乖離があれば「state だけ更新で
+    /// 落ちた」or「外部から state を書き換えられた」と判断して bail。
+    /// 反復 0 (起動時 snapshot) では `init_params_sha256` と同値で開始する。
+    current_params_sha256: String,
 }
 
 /// 起動時に決まる SPSA 走行モード。
@@ -556,7 +593,32 @@ fn default_force_init_cleanup_paths(run_dir: &Path) -> Vec<PathBuf> {
         default_param_values_csv_path(run_dir),
         default_stats_csv_path(run_dir),
         default_stats_aggregate_csv_path(run_dir),
+        // 旧 run の final.params が残っていると新 run で上書きされるまで「前回の確定値」
+        // が見え続け、tune.py apply に誤投入される事故になる。fresh 系のリスタート (force-init
+        // / fresh / use-existing) で必ず消す。
+        run_dir.join("final.params"),
     ]
+}
+
+/// fresh start (force-init を含む全 fresh 系) で削除すべき run-dir 直下のファイル。
+///
+/// `apply_init_action` は force-init 経路でのみ `default_force_init_cleanup_paths`
+/// を呼ぶ。一方、`CopyInitFromFresh` / `UseExistingFresh` 経路では既に CSV writer の
+/// `cli.resume=false` truncate で派生 CSV は上書きされるが、`final.params` は writer
+/// を持たないため放置すると stale snapshot が残り続ける。これを防ぐため fresh start
+/// 全経路で `final.params` を能動削除する。
+fn remove_stale_final_params_for_fresh_start(run_dir: &Path) -> Result<()> {
+    let final_path = run_dir.join("final.params");
+    match std::fs::remove_file(&final_path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::Error::new(e)).with_context(|| {
+            format!(
+                "failed to remove stale final.params before fresh start: {}",
+                final_path.display()
+            )
+        }),
+    }
 }
 
 fn default_meta_path(run_dir: &Path) -> PathBuf {
@@ -825,10 +887,37 @@ fn write_param_values_csv_row(
     Ok(())
 }
 
+/// `meta.json` の format_version だけ軽量に取り出すための struct。
+///
+/// `ResumeMetaData` の full schema で deserialize すると、古い meta に対して
+/// 必須フィールド不在で先に失敗するため、format_version 不一致の親切な
+/// hard bail メッセージに到達できない。version だけ別 struct で先読みする。
+#[derive(Deserialize)]
+struct MetaFormatVersionOnly {
+    format_version: u32,
+}
+
 fn load_meta(path: &Path) -> Result<ResumeMetaData> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let meta = serde_json::from_reader(reader)
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to open {}", path.display()))?;
+    // 先に format_version だけ取り出して、互換性チェックを serde 失敗より優先する
+    let version_probe: MetaFormatVersionOnly =
+        serde_json::from_slice(&bytes).with_context(|| {
+            format!("failed to parse JSON {} (format_version probe)", path.display())
+        })?;
+    if version_probe.format_version != META_FORMAT_VERSION {
+        bail!(
+            "meta format version 不一致 (got v{}, expected v{}) in {}.\n\
+             v{} 形式は v{} とは互換性がありません。\n\
+             新規 run dir で `--init-from <canonical>` から fresh start してください。",
+            version_probe.format_version,
+            META_FORMAT_VERSION,
+            path.display(),
+            version_probe.format_version,
+            META_FORMAT_VERSION,
+        );
+    }
+    let meta = serde_json::from_slice(&bytes)
         .with_context(|| format!("failed to parse JSON {}", path.display()))?;
     Ok(meta)
 }
@@ -933,6 +1022,12 @@ enum InitError {
     ForceInitRequiresExistingParams,
     /// `<run-dir>/state.params` 不在 + `--init-from` なし + `--resume` なし。
     NoInitNorExistingParams,
+    /// 既存 `<run-dir>/state.params` あり + `--init-from` / `--resume` / `--force-init`
+    /// すべてなし。silent な fresh start は事故の温床のため明示フラグを要求する。
+    UseExistingRequiresFlag,
+    /// `--use-existing-state-as-init` が他のフラグ (`--init-from` / `--resume` /
+    /// `--force-init`) と同時指定された。
+    UseExistingConflictsWithOtherFlags,
 }
 
 impl InitError {
@@ -970,18 +1065,34 @@ impl InitError {
                  --init-from で canonical (起点) ファイルを指定してください。"
                     .to_owned()
             }
+            Self::UseExistingRequiresFlag => {
+                "<run-dir>/state.params が既に存在しますが --init-from / --resume / --force-init / --use-existing-state-as-init のいずれも指定されていません。\n\
+                 意図に応じて以下のいずれかを指定してください:\n  \
+                 --init-from CANON --force-init      : 既存 state を canonical で atomic 上書き再初期化\n  \
+                 --resume                            : 既存 state から続行 (推奨経路)\n  \
+                 --use-existing-state-as-init        : 既存 state を canonical 代わりに fresh start (特殊用途)"
+                    .to_owned()
+            }
+            Self::UseExistingConflictsWithOtherFlags => {
+                "--use-existing-state-as-init は --init-from / --resume / --force-init と同時指定できません。\n\
+                 これらは「state.params をどう用意するか」の意思表示が排他的に重なるためです。\n\
+                 既存 state をそのまま起点にしたいなら --use-existing-state-as-init のみ指定してください。"
+                    .to_owned()
+            }
         }
     }
 }
 
 /// 純粋関数: CLI フラグと FS 状態 (params 存在性) から `InitAction` を決定する。
 ///
-/// テスト時は `params_exists` をモックできる。16 通りの入力を網羅。
+/// 入力 5 boolean (32 通り)。`use_existing_state_as_init` は他フラグと排他的
+/// 意思表示として、true 時は他フラグ全て false でなければ bail する。
 fn decide_init_action(
     has_init_from: bool,
     params_exists: bool,
     resume: bool,
     force_init: bool,
+    use_existing_state_as_init: bool,
 ) -> InitAction {
     use InitAction::*;
     use InitError::*;
@@ -993,11 +1104,22 @@ fn decide_init_action(
     if force_init && !has_init_from {
         return Bail(ForceInitRequiresInitFrom);
     }
+    // --use-existing-state-as-init は他の意思表示フラグと排他
+    if use_existing_state_as_init && (has_init_from || resume || force_init) {
+        return Bail(UseExistingConflictsWithOtherFlags);
+    }
+    // --use-existing-state-as-init は state.params が無いと意味がない
+    if use_existing_state_as_init && !params_exists {
+        return Bail(NoInitNorExistingParams);
+    }
     // resume は params 必須 (force_init との矛盾は上で除去済み)
     if resume && !params_exists {
         return Bail(ResumeRequiresExistingParams);
     }
-    // 通常分岐
+    // 通常分岐 (この時点で use_existing_state_as_init=true なら他フラグは全て false かつ params_exists=true)
+    if use_existing_state_as_init {
+        return UseExistingFresh;
+    }
     match (has_init_from, params_exists, resume, force_init) {
         // resume
         (true, true, true, false) => Resume { verify_init: true },
@@ -1008,7 +1130,7 @@ fn decide_init_action(
         // 通常
         (true, false, false, false) => CopyInitFromFresh,
         (true, true, false, false) => Bail(InitFromExistsRequiresFlag),
-        (false, true, false, false) => UseExistingFresh,
+        (false, true, false, false) => Bail(UseExistingRequiresFlag),
         (false, false, false, false) => Bail(NoInitNorExistingParams),
         // 上のガードで除去済みの組み合わせ (型システム上 unreachable)
         _ => unreachable!("decide_init_action: invariant violated by guards above"),
@@ -1383,6 +1505,113 @@ impl SpsaParam {
             not_used,
         })
     }
+}
+
+/// `<run-dir>/.lock` の中身。lock 衝突時にユーザが「誰が掴んでいるか」を
+/// 判断するための forensic 情報。
+#[derive(Debug, Serialize, Deserialize)]
+struct LockInfo {
+    pid: u32,
+    hostname: String,
+    started_at_utc: String,
+}
+
+/// run-dir の排他 lock。`OpenOptions::create_new(true)` の atomic file
+/// creation を使うので、同一 host の同一 FS 内でのみ有効 (NFS では
+/// create_new の atomicity が保証されないため非推奨)。
+///
+/// 取得後は `Drop` で lock ファイルを削除する。panic 時も Drop は走るが、
+/// SIGKILL / 電源断では残留する。残留 lock は `--force-unlock` で削除可能。
+///
+/// race-safety: `Drop` は「自分が書いた body」と現在の lock ファイル内容を
+/// 突き合わせ、一致した場合だけ削除する。これにより、他プロセスに
+/// `--force-unlock` で消され別 lock に置き換わった状況で、自分の Drop が
+/// 他プロセスの lock を巻き添えで消す race を防ぐ。
+#[derive(Debug)]
+struct RunDirLock {
+    path: PathBuf,
+    /// 自分が書き込んだ正本 body (改行込み)。`Drop` 時に内容一致確認に使う。
+    expected_body: String,
+}
+
+impl RunDirLock {
+    fn acquire(run_dir: &Path, force_unlock: bool) -> Result<Self> {
+        let path = run_dir.join(".lock");
+        if force_unlock && path.exists() {
+            std::fs::remove_file(&path).with_context(|| {
+                format!("failed to remove stale lock {} (--force-unlock)", path.display())
+            })?;
+            eprintln!("--force-unlock: 古い lock {} を削除しました", path.display());
+        }
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut f) => {
+                let info = LockInfo {
+                    pid: std::process::id(),
+                    hostname: read_hostname(),
+                    started_at_utc: Utc::now().to_rfc3339(),
+                };
+                let body_json =
+                    serde_json::to_string(&info).context("failed to serialize lock info")?;
+                writeln!(f, "{body_json}").with_context(|| {
+                    format!("failed to write lock contents to {}", path.display())
+                })?;
+                f.flush().with_context(|| {
+                    format!("failed to flush lock contents to {}", path.display())
+                })?;
+                // `writeln!` は OS によらず常に `\n` を付ける (Windows でも `\r\n` には
+                // ならない) ため、`expected_body` の構築では `\n` 固定で良い。Drop での
+                // 内容一致比較もこの前提に依存している。
+                let expected_body = format!("{body_json}\n");
+                Ok(RunDirLock {
+                    path,
+                    expected_body,
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let body = std::fs::read_to_string(&path).unwrap_or_else(|_| "(unreadable)".into());
+                bail!(
+                    "他プロセスが run-dir を使用中の可能性があります: {}\n  内容: {}\n  当該プロセスが既に死んでいることを目視確認したうえで --force-unlock を指定してください。",
+                    path.display(),
+                    body.trim()
+                );
+            }
+            Err(e) => Err(anyhow::Error::new(e))
+                .with_context(|| format!("failed to create lock {}", path.display())),
+        }
+    }
+}
+
+impl Drop for RunDirLock {
+    fn drop(&mut self) {
+        // 自分が書いた body と現在の lock 内容が一致するときだけ削除する。
+        // `--force-unlock` で別プロセスに置き換わっていた場合は触らない (race-safe)。
+        match std::fs::read_to_string(&self.path) {
+            Ok(current) if current == self.expected_body => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+            // 内容不一致 / 既に消された / 読めない: いずれも削除しない (他者の lock を
+            // 巻き込まないことが優先)。
+            _ => {}
+        }
+    }
+}
+
+/// hostname 取得。forensic 用途なので exact correctness より「何かしら名前が
+/// 入る」ことを優先する。優先順: $HOSTNAME → /proc/sys/kernel/hostname →
+/// "unknown"。
+fn read_hostname() -> String {
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return h;
+    }
+    if let Ok(h) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let trimmed = h.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "unknown".into()
 }
 
 fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
@@ -2083,6 +2312,13 @@ fn main() -> Result<()> {
     // run_dir を確保 (state / meta / CSV を全て同 dir 配下に置く前提)
     std::fs::create_dir_all(&cli.run_dir)
         .with_context(|| format!("failed to create run-dir {}", cli.run_dir.display()))?;
+
+    // 同一 run-dir に対する二重起動を防ぐため、最初に exclusive lock を取る。
+    // 取得失敗時は他プロセスが state.params/meta.json/CSV を書き換える危険が
+    // あるので即 bail。lock は process 終了時 (Drop) に自動削除されるが、
+    // SIGKILL / 電源断で残留した場合は --force-unlock で消せる。
+    let _run_dir_lock = RunDirLock::acquire(&cli.run_dir, cli.force_unlock)?;
+
     let state_params = state_params_path(&cli.run_dir);
 
     // ========================================================================
@@ -2094,6 +2330,7 @@ fn main() -> Result<()> {
         state_params.exists(),
         cli.resume,
         cli.force_init,
+        cli.use_existing_state_as_init,
     );
     // force-init 時に削除する run-dir 直下の派生 CSV 群。CSV writer は cli.resume=false
     // で truncate もするが、能動削除しておくことで run-dir の状態を fresh と一致させる
@@ -2132,22 +2369,11 @@ fn main() -> Result<()> {
     };
     let (start_iteration, mut total_games, init_snapshot) = match &effective_action {
         NonBailAction::Resume { verify_init } => {
+            // load_meta が format_version 不一致を先に hard bail するため、ここでは
+            // 全フィールド込みの deserialize 成功を前提にできる。
             let meta = load_meta(&meta_path).with_context(|| {
                 format!("--resume was set but metadata load failed: {}", meta_path.display())
             })?;
-            // v3 hard bail: 古い meta は再開不可 (新規 run dir で fresh start を要求)
-            if meta.format_version != META_FORMAT_VERSION {
-                bail!(
-                    "meta format version 不一致 (got v{}, expected v{}) in {}.\n\
-                     v{} 形式は v{} とは互換性がありません。\n\
-                     新規 run dir で `--init-from <canonical>` から fresh start してください。",
-                    meta.format_version,
-                    META_FORMAT_VERSION,
-                    meta_path.display(),
-                    meta.format_version,
-                    META_FORMAT_VERSION,
-                );
-            }
             if !schedule_matches(meta.schedule, schedule) {
                 if cli.force_schedule {
                     eprintln!(
@@ -2167,6 +2393,33 @@ fn main() -> Result<()> {
                     );
                 }
             }
+            // state.params の transactional 整合性検証 (v4 で追加):
+            // 反復ごとに「write_params → meta save」の順で書くため、両者の間で落ちると
+            // meta.completed_iterations より state.params が 1 反復先行する状態が残る。
+            // resume 時に on-disk state.params の hash を meta.current_params_sha256 と
+            // 突き合わせ、乖離があれば bail させて状況をユーザに見せる。
+            let on_disk_state_hash = sha256_hex_of_file(&state_params)?;
+            if meta.current_params_sha256 != on_disk_state_hash {
+                bail!(
+                    "state.params と meta.json が不整合です ({}).\n\
+                     meta.current_params_sha256 = {}\n\
+                     on-disk state.params hash  = {}\n\
+                     考えられる原因:\n  \
+                       1. write_params → save_meta の間で前回 run がクラッシュした (1 反復差)\n  \
+                       2. state.params が外部から書き換えられた\n  \
+                     いずれにせよ resume を継続すると SPSA の進行状態が破綻するため停止します。\n\
+                     対処 (どちらか):\n  \
+                       (a) 新規 run dir で `--init-from <canonical>` から fresh start する\n  \
+                       (b) 1 反復差を許容して既存 state を起点に新 run を始める:\n        \
+                           cp {state_path} <new-run-dir>/state.params\n        \
+                           spsa --run-dir <new-run-dir> --use-existing-state-as-init ...",
+                    meta_path.display(),
+                    meta.current_params_sha256,
+                    on_disk_state_hash,
+                    state_path = state_params.display(),
+                );
+            }
+
             // param 名集合の hash 検証 (resume 時に param 集合が変わっていないこと)。
             // TODO(PR2): mapping 表に新パラメータを追加した正当な変更も現状 hard bail
             // になる。`--force-name-set` か `--allow-param-set-change` の escape hatch を
@@ -2214,6 +2467,11 @@ fn main() -> Result<()> {
         NonBailAction::CopyInitFromFresh
         | NonBailAction::UseExistingFresh
         | NonBailAction::ForceInitOverwrite => {
+            // 旧 run の final.params が残っていると、新 run 完了時に再書き込みされるまで
+            // 「前回の確定値」が見え続ける (= apply 入力に誤投入される)。fresh 系は
+            // すべてここで能動削除する (force-init の cleanup paths にも入っているが、
+            // CopyInitFromFresh / UseExistingFresh では cleanup paths は呼ばれないため)。
+            remove_stale_final_params_for_fresh_start(&cli.run_dir)?;
             let snapshot = InitMetaSnapshot::for_fresh_start(
                 &effective_action,
                 &state_params,
@@ -2635,6 +2893,10 @@ fn main() -> Result<()> {
             write_param_values_csv_row(writer, iter + 1, &params)?;
             writer.flush()?;
         }
+        // state.params 更新 → meta 更新の transactional 復旧用に、書き込み直後の
+        // state.params を hash して meta に焼き込む。resume 起動時に on-disk hash と
+        // 突き合わせて両者の乖離を検出する。
+        let current_params_sha256 = sha256_hex_of_file(&state_params)?;
         let meta = ResumeMetaData {
             format_version: META_FORMAT_VERSION,
             state_params_file: state_params.display().to_string(),
@@ -2653,6 +2915,7 @@ fn main() -> Result<()> {
             engine_param_mapping_path: init_snapshot.engine_param_mapping_path.clone(),
             engine_param_mapping_sha256: init_snapshot.engine_param_mapping_sha256.clone(),
             init_mode: init_snapshot.init_mode,
+            current_params_sha256,
         };
         save_meta(&meta_path, &meta)?;
         eprintln!(
@@ -2716,6 +2979,14 @@ fn main() -> Result<()> {
         }
     }
 
+    // 正常完了時に <run-dir>/final.params を atomic に書き出す。
+    // state.params は反復ごとに更新され続ける live state なので、外部ツール
+    // (tune.py apply 等) に渡す確定スナップショットとして final.params を別 path で
+    // 提供する。これにより SPSA を裏で続行しつつ確定値の apply を並行実行できる。
+    let final_path = cli.run_dir.join("final.params");
+    write_params(&final_path, &params)?;
+    eprintln!("final params written: {}", final_path.display());
+
     Ok(())
 }
 
@@ -2728,7 +2999,17 @@ mod tests {
     // ========================================================================
 
     fn decide(init: bool, exists: bool, resume: bool, force: bool) -> InitAction {
-        decide_init_action(init, exists, resume, force)
+        decide_init_action(init, exists, resume, force, false)
+    }
+
+    fn decide_with_use_existing(
+        init: bool,
+        exists: bool,
+        resume: bool,
+        force: bool,
+        use_existing: bool,
+    ) -> InitAction {
+        decide_init_action(init, exists, resume, force, use_existing)
     }
 
     #[test]
@@ -2804,9 +3085,51 @@ mod tests {
     }
 
     #[test]
-    fn decide_use_existing_fresh() {
+    fn decide_use_existing_requires_flag() {
+        // 旧版の silent fresh start を bail する。
+        // 既存 state + フラグ指定なし → UseExistingRequiresFlag bail
         let action = decide(false, true, false, false);
+        assert!(
+            matches!(action, InitAction::Bail(InitError::UseExistingRequiresFlag)),
+            "got {action:?}"
+        );
+    }
+
+    #[test]
+    fn decide_use_existing_state_as_init_happy_path() {
+        // 既存 state + --use-existing-state-as-init のみ指定 → UseExistingFresh
+        let action = decide_with_use_existing(false, true, false, false, true);
         assert_eq!(action, InitAction::UseExistingFresh);
+    }
+
+    #[test]
+    fn decide_use_existing_state_as_init_without_state_bails() {
+        // state 不在で --use-existing-state-as-init を指定 → 意味がないため bail
+        let action = decide_with_use_existing(false, false, false, false, true);
+        assert!(
+            matches!(action, InitAction::Bail(InitError::NoInitNorExistingParams)),
+            "got {action:?}"
+        );
+    }
+
+    #[test]
+    fn decide_use_existing_state_as_init_conflicts_with_other_flags() {
+        // --use-existing-state-as-init は他の意思表示フラグと排他。
+        // 他フラグ間の矛盾 (e.g. force=true && !init → ForceInitRequiresInitFrom)
+        // が先に発火するケースもあるので、ここでは「何らかの Bail に落ちること」のみ assert。
+        for (init, resume, force) in [
+            (true, false, false), // init + use_existing
+            (false, true, false), // resume + use_existing
+            (false, false, true), // force + use_existing (force は init 必須で別 Bail)
+            (true, true, false),  // init + resume + use_existing
+            (true, false, true),  // init + force + use_existing
+        ] {
+            let action = decide_with_use_existing(init, true, resume, force, true);
+            assert!(
+                matches!(action, InitAction::Bail(_)),
+                "init={init} resume={resume} force={force}: 期待は Bail、got {action:?}"
+            );
+        }
     }
 
     #[test]
@@ -2815,14 +3138,17 @@ mod tests {
         assert!(matches!(action, InitAction::Bail(InitError::NoInitNorExistingParams)));
     }
 
-    /// 16 通り全網羅: 各ケースが unreachable に落ちないこと
+    /// 32 通り全網羅: 5 boolean 入力の各組み合わせが unreachable に落ちないこと
     #[test]
-    fn decide_covers_all_sixteen_combinations() {
+    fn decide_covers_all_thirty_two_combinations() {
         for init in [false, true] {
             for exists in [false, true] {
                 for resume in [false, true] {
                     for force in [false, true] {
-                        let _ = decide(init, exists, resume, force); // 落ちなければOK
+                        for use_existing in [false, true] {
+                            let _ =
+                                decide_with_use_existing(init, exists, resume, force, use_existing);
+                        }
                     }
                 }
             }
@@ -3061,6 +3387,59 @@ mod tests {
         assert_eq!(std::fs::read(&dst).unwrap(), b"data");
     }
 
+    // ========================================================================
+    // RunDirLock: 排他制御
+    // ========================================================================
+
+    #[test]
+    fn run_dir_lock_prevents_double_acquire() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock1 = RunDirLock::acquire(dir.path(), false).unwrap();
+        let err = RunDirLock::acquire(dir.path(), false).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("他プロセスが run-dir を使用中"), "actual: {msg}");
+        // 中身に PID が記録されていること
+        let body = std::fs::read_to_string(dir.path().join(".lock")).unwrap();
+        assert!(body.contains("\"pid\""), "lock body: {body}");
+        drop(lock1);
+        // drop 後は再取得可能
+        let _lock2 = RunDirLock::acquire(dir.path(), false).unwrap();
+    }
+
+    #[test]
+    fn run_dir_lock_force_unlock_removes_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".lock"), "stale").unwrap();
+        // force_unlock なしでは衝突
+        assert!(RunDirLock::acquire(dir.path(), false).is_err());
+        // force_unlock 指定で取得成功
+        let _lock = RunDirLock::acquire(dir.path(), true).unwrap();
+    }
+
+    #[test]
+    fn run_dir_lock_drop_cleans_up_file() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let _lock = RunDirLock::acquire(dir.path(), false).unwrap();
+            assert!(dir.path().join(".lock").exists());
+        }
+        assert!(!dir.path().join(".lock").exists());
+    }
+
+    #[test]
+    fn run_dir_lock_drop_does_not_remove_others_lock() {
+        // race scenario: 別プロセスに --force-unlock で lock を奪われ別 lock に
+        // 置き換わった状況で、自分の Drop が他者の lock を誤って削除しないこと。
+        let dir = tempfile::tempdir().unwrap();
+        let lock = RunDirLock::acquire(dir.path(), false).unwrap();
+        // 他者が .lock を別内容で上書き済み (force-unlock 後の reacquire を模擬)
+        std::fs::write(dir.path().join(".lock"), "other process took over").unwrap();
+        drop(lock);
+        // 内容不一致なので自分の Drop は削除を控える
+        let body = std::fs::read_to_string(dir.path().join(".lock")).unwrap();
+        assert_eq!(body, "other process took over");
+    }
+
     #[test]
     fn non_bail_action_from_bail_returns_none() {
         assert!(
@@ -3157,17 +3536,31 @@ mod tests {
     #[test]
     fn default_force_init_cleanup_paths_returns_run_dir_only() {
         // override 先 (--stats-csv で run-dir 外を指定する等) が混入しないことを担保。
-        // force-init 時の削除対象は run-dir 直下の 3 派生 CSV のみで、
+        // force-init 時の削除対象は run-dir 直下の 3 派生 CSV + final.params のみで、
         // state.params / meta.json は apply_init_action 側で別管理。
         let dir = Path::new("/tmp/some_run");
         let paths = default_force_init_cleanup_paths(dir);
-        assert_eq!(paths.len(), 3, "exactly 3 derived CSV paths");
+        assert_eq!(paths.len(), 4, "exactly 4 derived files (3 CSV + final.params)");
         assert!(paths.contains(&dir.join("values.csv")));
         assert!(paths.contains(&dir.join("stats.csv")));
         assert!(paths.contains(&dir.join("stats_aggregate.csv")));
+        assert!(paths.contains(&dir.join("final.params")));
         // state.params と meta.json は含めない (apply_init_action が個別管理)
         assert!(!paths.contains(&dir.join("state.params")));
         assert!(!paths.contains(&dir.join("meta.json")));
+    }
+
+    #[test]
+    fn remove_stale_final_params_for_fresh_start_handles_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // 不在ファイルでも Ok を返すこと (idempotent)
+        remove_stale_final_params_for_fresh_start(dir.path()).unwrap();
+        // 存在するファイルは消えること
+        let final_path = dir.path().join("final.params");
+        std::fs::write(&final_path, b"stale").unwrap();
+        assert!(final_path.exists());
+        remove_stale_final_params_for_fresh_start(dir.path()).unwrap();
+        assert!(!final_path.exists());
     }
 
     #[test]
@@ -3198,6 +3591,7 @@ mod tests {
             engine_param_mapping_path: None,
             engine_param_mapping_sha256: None,
             init_mode: InitMode::FreshInitFrom,
+            current_params_sha256: "abc123".to_owned(),
         };
         save_meta(&path, &meta).unwrap();
         let loaded = load_meta(&path).unwrap();
@@ -3207,6 +3601,7 @@ mod tests {
         assert_eq!(loaded.param_name_set_sha256, meta.param_name_set_sha256);
         assert_eq!(loaded.active_param_count, meta.active_param_count);
         assert_eq!(loaded.init_mode, meta.init_mode);
+        assert_eq!(loaded.current_params_sha256, meta.current_params_sha256);
     }
 
     // ========================================================================

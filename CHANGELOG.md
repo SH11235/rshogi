@@ -16,6 +16,16 @@
 - `iter 0 snapshot` を `values.csv` に記録するように変更 (#577)
 - `rshogi_to_yo_params`: rshogi default 値の混入を 95% 一致閾値で検知し
   warn/error。`--allow-rshogi-defaults` / `--strict-rshogi-defaults` を新設 (#578)
+- `<run-dir>/.lock` で同 run-dir の二重起動を排他制御。残留 lock は
+  `--force-unlock` で削除 (#580)
+- 既存 state.params + フラグなし起動を bail に変更。canonical なしで
+  既存 state を起点にしたい場合は `--use-existing-state-as-init` を明示指定
+  (silent fresh start は事故の温床だったため) (#580)
+- `meta.json` format_version 3 → 4。`current_params_sha256` を追加し、resume
+  時に on-disk state.params の hash と meta が一致しなければ bail (write_params
+  → save_meta の transactional 復旧検証) (#580)
+- SPSA 正常完了時に `<run-dir>/final.params` を atomic に書き出し。
+  `tune.py apply` には `state.params` ではなく `final.params` を渡すこと (#580)
 
 ### ファイル名 / パスの移行表
 
@@ -53,3 +63,4 @@ fresh start で seed として再利用する。詳細は `crates/tools/docs/sps
 - #577 — observability (iter 0, startup summary, stderr 統一)
 - #578 — `rshogi_to_yo_params` の default 検知
 - #579 — `--params` 廃止 + `--run-dir` 採用 + ドキュメント整理
+- #580 — checkpoint safety (lock + state hash + use-existing 明示化 + final.params)
