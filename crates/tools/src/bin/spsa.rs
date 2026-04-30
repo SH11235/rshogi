@@ -24,14 +24,19 @@ use tools::spsa_param_mapping::{
 
 /// `meta.json` のフォーマットバージョン。
 ///
-/// v2 → v3 (本 PR): `params_sha256` / `init_from_sha256` / `engine_path` /
+/// v2 → v3: `params_sha256` / `init_from_sha256` / `engine_path` /
 /// `engine_param_mapping_*` / `param_name_set_hash` / `active_param_count` /
 /// `init_mode` / `init_from_path` を追加。`--init-from` の暗黙スキップを禁止し、
 /// resume 時に params 内容と name set の整合性を hash で検証する。
 ///
-/// 互換性: v3 は v2 を読まない (hard bail)。古い run dir で resume したい場合は
+/// v3 → v4 (本 PR): `current_params_sha256` を追加。各反復で state.params 更新後に
+/// その時点の hash を meta に記録する。resume 起動時に on-disk state.params の hash と
+/// 突き合わせ、両者が乖離していれば「state.params だけ更新後に meta 更新前にクラッシュ」
+/// または「外部から state.params を書き換えられた」として bail (or warn)。
+///
+/// 互換性: vN は v(N-1) を読まない (hard bail)。古い run dir で resume したい場合は
 /// 新規 run dir で `--init-from <canonical>` から fresh start する。
-const META_FORMAT_VERSION: u32 = 3;
+const META_FORMAT_VERSION: u32 = 4;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SPSA tuner for USI engines")]
@@ -228,6 +233,20 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     force_init: bool,
 
+    /// 既存 `<run-dir>/state.params` を canonical の代わりに「そのまま起点」として
+    /// fresh start を許可する。
+    ///
+    /// 通常運用ではこのフラグは不要。`--init-from` を指定して canonical を明示する
+    /// のが推奨経路。本フラグは「外部ツールで生成した state.params を直接 spsa に
+    /// 食わせる」「過去 run の最終 state を seed に新 run を始める (=resume では
+    /// なく fresh)」等の特殊ユースケース向けに、明示的な意思表示として用意する。
+    ///
+    /// 既定で `--init-from` なし + 既存 state は bail (silent fresh は事故の温床
+    /// だったため)。本フラグは `--init-from` / `--resume` / `--force-init` のいずれ
+    /// とも同時指定不可 (意味が矛盾する)。
+    #[arg(long, default_value_t = false)]
+    use_existing_state_as_init: bool,
+
     /// `<run-dir>/.lock` が残留している場合に強制削除して取得を試みる。
     ///
     /// 通常 lock は process 正常終了時 / panic 時に削除される。電源断・
@@ -350,6 +369,14 @@ struct ResumeMetaData {
     engine_param_mapping_sha256: Option<String>,
     /// 起動モード。`InitMode` の serde 表現 (kebab-case)。
     init_mode: InitMode,
+    // --- v4 で追加 ---
+    /// 反復ごとに更新される現 state.params の SHA-256。`save_meta` の直前に
+    /// hash を計算して記録する (write_params → meta save の transactional 復旧
+    /// 検証に使う)。
+    /// resume 起動時に on-disk hash と突き合わせ、乖離があれば「state だけ更新で
+    /// 落ちた」or「外部から state を書き換えられた」と判断して bail。
+    /// 反復 0 (起動時 snapshot) では `init_params_sha256` と同値で開始する。
+    current_params_sha256: String,
 }
 
 /// 起動時に決まる SPSA 走行モード。
@@ -943,6 +970,12 @@ enum InitError {
     ForceInitRequiresExistingParams,
     /// `<run-dir>/state.params` 不在 + `--init-from` なし + `--resume` なし。
     NoInitNorExistingParams,
+    /// 既存 `<run-dir>/state.params` あり + `--init-from` / `--resume` / `--force-init`
+    /// すべてなし。silent な fresh start は事故の温床のため明示フラグを要求する。
+    UseExistingRequiresFlag,
+    /// `--use-existing-state-as-init` が他のフラグ (`--init-from` / `--resume` /
+    /// `--force-init`) と同時指定された。
+    UseExistingConflictsWithOtherFlags,
 }
 
 impl InitError {
@@ -980,18 +1013,34 @@ impl InitError {
                  --init-from で canonical (起点) ファイルを指定してください。"
                     .to_owned()
             }
+            Self::UseExistingRequiresFlag => {
+                "<run-dir>/state.params が既に存在しますが --init-from / --resume / --force-init / --use-existing-state-as-init のいずれも指定されていません。\n\
+                 意図に応じて以下のいずれかを指定してください:\n  \
+                 --init-from CANON --force-init      : 既存 state を canonical で atomic 上書き再初期化\n  \
+                 --resume                            : 既存 state から続行 (推奨経路)\n  \
+                 --use-existing-state-as-init        : 既存 state を canonical 代わりに fresh start (特殊用途)"
+                    .to_owned()
+            }
+            Self::UseExistingConflictsWithOtherFlags => {
+                "--use-existing-state-as-init は --init-from / --resume / --force-init と同時指定できません。\n\
+                 これらは「state.params をどう用意するか」の意思表示が排他的に重なるためです。\n\
+                 既存 state をそのまま起点にしたいなら --use-existing-state-as-init のみ指定してください。"
+                    .to_owned()
+            }
         }
     }
 }
 
 /// 純粋関数: CLI フラグと FS 状態 (params 存在性) から `InitAction` を決定する。
 ///
-/// テスト時は `params_exists` をモックできる。16 通りの入力を網羅。
+/// 入力 5 boolean (32 通り)。`use_existing_state_as_init` は他フラグと排他的
+/// 意思表示として、true 時は他フラグ全て false でなければ bail する。
 fn decide_init_action(
     has_init_from: bool,
     params_exists: bool,
     resume: bool,
     force_init: bool,
+    use_existing_state_as_init: bool,
 ) -> InitAction {
     use InitAction::*;
     use InitError::*;
@@ -1003,11 +1052,22 @@ fn decide_init_action(
     if force_init && !has_init_from {
         return Bail(ForceInitRequiresInitFrom);
     }
+    // --use-existing-state-as-init は他の意思表示フラグと排他
+    if use_existing_state_as_init && (has_init_from || resume || force_init) {
+        return Bail(UseExistingConflictsWithOtherFlags);
+    }
+    // --use-existing-state-as-init は state.params が無いと意味がない
+    if use_existing_state_as_init && !params_exists {
+        return Bail(NoInitNorExistingParams);
+    }
     // resume は params 必須 (force_init との矛盾は上で除去済み)
     if resume && !params_exists {
         return Bail(ResumeRequiresExistingParams);
     }
-    // 通常分岐
+    // 通常分岐 (この時点で use_existing_state_as_init=true なら他フラグは全て false かつ params_exists=true)
+    if use_existing_state_as_init {
+        return UseExistingFresh;
+    }
     match (has_init_from, params_exists, resume, force_init) {
         // resume
         (true, true, true, false) => Resume { verify_init: true },
@@ -1018,7 +1078,7 @@ fn decide_init_action(
         // 通常
         (true, false, false, false) => CopyInitFromFresh,
         (true, true, false, false) => Bail(InitFromExistsRequiresFlag),
-        (false, true, false, false) => UseExistingFresh,
+        (false, true, false, false) => Bail(UseExistingRequiresFlag),
         (false, false, false, false) => Bail(NoInitNorExistingParams),
         // 上のガードで除去済みの組み合わせ (型システム上 unreachable)
         _ => unreachable!("decide_init_action: invariant violated by guards above"),
@@ -2192,6 +2252,7 @@ fn main() -> Result<()> {
         state_params.exists(),
         cli.resume,
         cli.force_init,
+        cli.use_existing_state_as_init,
     );
     // force-init 時に削除する run-dir 直下の派生 CSV 群。CSV writer は cli.resume=false
     // で truncate もするが、能動削除しておくことで run-dir の状態を fresh と一致させる
@@ -2265,6 +2326,31 @@ fn main() -> Result<()> {
                     );
                 }
             }
+            // state.params の transactional 整合性検証 (v4 で追加):
+            // 反復ごとに「write_params → meta save」の順で書くため、両者の間で落ちると
+            // meta.completed_iterations より state.params が 1 反復先行する状態が残る。
+            // resume 時に on-disk state.params の hash を meta.current_params_sha256 と
+            // 突き合わせ、乖離があれば bail させて状況をユーザに見せる。
+            let on_disk_state_hash = sha256_hex_of_file(&state_params)?;
+            if meta.current_params_sha256 != on_disk_state_hash {
+                bail!(
+                    "state.params と meta.json が不整合です ({}).\n\
+                     meta.current_params_sha256 = {}\n\
+                     on-disk state.params hash  = {}\n\
+                     考えられる原因:\n  \
+                       1. write_params → save_meta の間で前回 run がクラッシュした (1 反復差)\n  \
+                       2. state.params が外部から書き換えられた\n  \
+                     いずれにせよ resume を継続すると SPSA の進行状態が破綻するため停止します。\n\
+                     対処: 新規 run dir で `--init-from <canonical>` から fresh start するか、\n  \
+                     原因 (1) と分かっていて 1 反復差を許容する場合は新規 run dir で\n  \
+                     `--init-from {state_path} --use-existing-state-as-init` でやり直してください。",
+                    meta_path.display(),
+                    meta.current_params_sha256,
+                    on_disk_state_hash,
+                    state_path = state_params.display(),
+                );
+            }
+
             // param 名集合の hash 検証 (resume 時に param 集合が変わっていないこと)。
             // TODO(PR2): mapping 表に新パラメータを追加した正当な変更も現状 hard bail
             // になる。`--force-name-set` か `--allow-param-set-change` の escape hatch を
@@ -2733,6 +2819,10 @@ fn main() -> Result<()> {
             write_param_values_csv_row(writer, iter + 1, &params)?;
             writer.flush()?;
         }
+        // state.params 更新 → meta 更新の transactional 復旧用に、書き込み直後の
+        // state.params を hash して meta に焼き込む。resume 起動時に on-disk hash と
+        // 突き合わせて両者の乖離を検出する。
+        let current_params_sha256 = sha256_hex_of_file(&state_params)?;
         let meta = ResumeMetaData {
             format_version: META_FORMAT_VERSION,
             state_params_file: state_params.display().to_string(),
@@ -2751,6 +2841,7 @@ fn main() -> Result<()> {
             engine_param_mapping_path: init_snapshot.engine_param_mapping_path.clone(),
             engine_param_mapping_sha256: init_snapshot.engine_param_mapping_sha256.clone(),
             init_mode: init_snapshot.init_mode,
+            current_params_sha256,
         };
         save_meta(&meta_path, &meta)?;
         eprintln!(
@@ -2814,6 +2905,14 @@ fn main() -> Result<()> {
         }
     }
 
+    // 正常完了時に <run-dir>/final.params を atomic に書き出す。
+    // state.params は反復ごとに更新され続ける live state なので、外部ツール
+    // (tune.py apply 等) に渡す確定スナップショットとして final.params を別 path で
+    // 提供する。これにより SPSA を裏で続行しつつ確定値の apply を並行実行できる。
+    let final_path = cli.run_dir.join("final.params");
+    write_params(&final_path, &params)?;
+    eprintln!("final params written: {}", final_path.display());
+
     Ok(())
 }
 
@@ -2826,7 +2925,17 @@ mod tests {
     // ========================================================================
 
     fn decide(init: bool, exists: bool, resume: bool, force: bool) -> InitAction {
-        decide_init_action(init, exists, resume, force)
+        decide_init_action(init, exists, resume, force, false)
+    }
+
+    fn decide_with_use_existing(
+        init: bool,
+        exists: bool,
+        resume: bool,
+        force: bool,
+        use_existing: bool,
+    ) -> InitAction {
+        decide_init_action(init, exists, resume, force, use_existing)
     }
 
     #[test]
@@ -2902,9 +3011,51 @@ mod tests {
     }
 
     #[test]
-    fn decide_use_existing_fresh() {
+    fn decide_use_existing_requires_flag() {
+        // 旧版の silent fresh start を bail する。
+        // 既存 state + フラグ指定なし → UseExistingRequiresFlag bail
         let action = decide(false, true, false, false);
+        assert!(
+            matches!(action, InitAction::Bail(InitError::UseExistingRequiresFlag)),
+            "got {action:?}"
+        );
+    }
+
+    #[test]
+    fn decide_use_existing_state_as_init_happy_path() {
+        // 既存 state + --use-existing-state-as-init のみ指定 → UseExistingFresh
+        let action = decide_with_use_existing(false, true, false, false, true);
         assert_eq!(action, InitAction::UseExistingFresh);
+    }
+
+    #[test]
+    fn decide_use_existing_state_as_init_without_state_bails() {
+        // state 不在で --use-existing-state-as-init を指定 → 意味がないため bail
+        let action = decide_with_use_existing(false, false, false, false, true);
+        assert!(
+            matches!(action, InitAction::Bail(InitError::NoInitNorExistingParams)),
+            "got {action:?}"
+        );
+    }
+
+    #[test]
+    fn decide_use_existing_state_as_init_conflicts_with_other_flags() {
+        // --use-existing-state-as-init は他の意思表示フラグと排他。
+        // 他フラグ間の矛盾 (e.g. force=true && !init → ForceInitRequiresInitFrom)
+        // が先に発火するケースもあるので、ここでは「何らかの Bail に落ちること」のみ assert。
+        for (init, resume, force) in [
+            (true, false, false), // init + use_existing
+            (false, true, false), // resume + use_existing
+            (false, false, true), // force + use_existing (force は init 必須で別 Bail)
+            (true, true, false),  // init + resume + use_existing
+            (true, false, true),  // init + force + use_existing
+        ] {
+            let action = decide_with_use_existing(init, true, resume, force, true);
+            assert!(
+                matches!(action, InitAction::Bail(_)),
+                "init={init} resume={resume} force={force}: 期待は Bail、got {action:?}"
+            );
+        }
     }
 
     #[test]
@@ -2913,14 +3064,17 @@ mod tests {
         assert!(matches!(action, InitAction::Bail(InitError::NoInitNorExistingParams)));
     }
 
-    /// 16 通り全網羅: 各ケースが unreachable に落ちないこと
+    /// 32 通り全網羅: 5 boolean 入力の各組み合わせが unreachable に落ちないこと
     #[test]
-    fn decide_covers_all_sixteen_combinations() {
+    fn decide_covers_all_thirty_two_combinations() {
         for init in [false, true] {
             for exists in [false, true] {
                 for resume in [false, true] {
                     for force in [false, true] {
-                        let _ = decide(init, exists, resume, force); // 落ちなければOK
+                        for use_existing in [false, true] {
+                            let _ =
+                                decide_with_use_existing(init, exists, resume, force, use_existing);
+                        }
                     }
                 }
             }
@@ -3335,6 +3489,7 @@ mod tests {
             engine_param_mapping_path: None,
             engine_param_mapping_sha256: None,
             init_mode: InitMode::FreshInitFrom,
+            current_params_sha256: "abc123".to_owned(),
         };
         save_meta(&path, &meta).unwrap();
         let loaded = load_meta(&path).unwrap();
@@ -3344,6 +3499,7 @@ mod tests {
         assert_eq!(loaded.param_name_set_sha256, meta.param_name_set_sha256);
         assert_eq!(loaded.active_param_count, meta.active_param_count);
         assert_eq!(loaded.init_mode, meta.init_mode);
+        assert_eq!(loaded.current_params_sha256, meta.current_params_sha256);
     }
 
     // ========================================================================
