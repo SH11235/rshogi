@@ -25,6 +25,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use rand::SeedableRng;
+use rand_xoshiro::Xoshiro256PlusPlus;
 use rshogi_core::types::EnteringKingRule;
 use rshogi_csa_server::ClockSpec;
 use rshogi_csa_server::FloodgateHistoryStorage;
@@ -32,8 +34,11 @@ use rshogi_csa_server::config::{FloodgateFeatureIntent, validate_floodgate_featu
 use rshogi_csa_server::error::{ProtocolError, ServerError};
 use rshogi_csa_server::game::result::GameResult;
 use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig, HandleOutcome};
-use rshogi_csa_server::matching::challenge::{ChallengeRegistry, ChallengeToken, IssueError};
+use rshogi_csa_server::matching::challenge::{
+    ChallengeRegistry, ChallengeToken, ColorTag, IssueError,
+};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
+use rshogi_csa_server::matching::pairing::resolve_color_for_pair;
 use rshogi_csa_server::matching::registry::{GameListing, GameRegistry};
 use rshogi_csa_server::port::{
     BroadcastTag, Broadcaster, BuoyStorage, ClientTransport, GameSummaryEntry, KifuStorage,
@@ -49,7 +54,7 @@ use rshogi_csa_server::record::kifu::{
     primary_result_code,
 };
 use rshogi_csa_server::types::{
-    Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, ReconnectToken, RoomId,
+    Color, CsaLine, CsaMoveToken, GameId, GameName, PlayerName, ReconnectToken, RoomId, Secret,
 };
 use rshogi_csa_server::{FileKifuStorage, TransportError};
 use tokio::net::{TcpListener, TcpStream};
@@ -570,6 +575,115 @@ impl WaitingPool {
     }
 }
 
+/// 私的対局 (`%%CHALLENGE`) で先着 LOGIN した側の runtime session。
+///
+/// `Arc<Notify>` と `oneshot::Sender` は serialize 不能なため core
+/// [`ChallengeRegistry`] には持たず、TCP frontend で別 map として保持する
+/// (Workers は WS attachment id 経由なので core 側に持つ、型分離設計)。
+pub(crate) struct TcpPendingSession {
+    /// TTL purge / 自身の上書きで起こされる cancel signal。waiter task は
+    /// `tokio::select!` で `cancel.notified()` を監視し、起こされたら
+    /// `##[ERROR] challenge expired before opponent joined` を送って切断する。
+    pub(crate) cancel: Arc<Notify>,
+    /// 後着 LOGIN (matchmaker) → 先着 LOGIN (waiter) へのマッチ確定通知。
+    /// waiter は [`MatchRequest`] を受け取ったら、`MatchRequest::transport_responder`
+    /// で自分の transport を渡し、`MatchRequest::completion_rx` で対局完了まで
+    /// 待機する (公開マッチング `WaitingSlot::match_request_tx` と同じ慣習)。
+    pub(crate) match_request_tx: oneshot::Sender<MatchRequest>,
+}
+
+/// `try_match_or_register` の結果。先着 / 後着 / 同 handle 既登録 を 1 回の
+/// 原子処理で判定して返す。
+pub(crate) enum TryMatchResult {
+    /// 自分が後着で、相手 session が取り出せた (この後 `drive_private_game` へ)。
+    Matched { other: TcpPendingSession },
+    /// 自分が先着で、pending map に登録した。waiter として `match_request_rx` を待つ。
+    Registered,
+    /// 同 handle が既登録。LOGIN handler 側で `LOGIN:incorrect already_logged_in` を
+    /// 返す経路に分岐させる。
+    AlreadyLoggedIn,
+}
+
+/// `%%CHALLENGE` で発行された token に紐付く先着 LOGIN session を保持する
+/// frontend runtime map。1 token あたり最大 2 handle (inviter / opponent)。
+///
+/// core [`ChallengeRegistry`] は永続データ (entry / token) のみを持ち、TCP の
+/// runtime 側 ([`Arc<Notify>`] / [`oneshot::Sender<MatchRequest>`]) は serialize
+/// 不能なため本 frontend map に分離する。Workers では WS attachment id ベースで
+/// core 側に保持しているため、本型は TCP 専用。
+#[derive(Default)]
+pub(crate) struct TcpChallengePending {
+    inner: Mutex<HashMap<ChallengeToken, HashMap<PlayerName, TcpPendingSession>>>,
+}
+
+impl TcpChallengePending {
+    /// 空の pending map を作る。
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// 1 ロック内で「相手 handle (self 以外) を探す → 見つかれば
+    /// [`TryMatchResult::Matched`] で返し相手 session を取り出す。空 entry なら
+    /// 自身を登録」を原子的に行う。同 handle 既登録なら
+    /// [`TryMatchResult::AlreadyLoggedIn`] を返し、自身は登録しない。
+    pub(crate) async fn try_match_or_register(
+        &self,
+        token: ChallengeToken,
+        self_handle: PlayerName,
+        self_session: TcpPendingSession,
+    ) -> TryMatchResult {
+        let mut map = self.inner.lock().await;
+        let entry = map.entry(token.clone()).or_default();
+        if entry.contains_key(&self_handle) {
+            // 既登録: 自身は登録しない。entry は contains_key true の時点で
+            // 必ず非空なので map から外す経路はこのアームには無い。
+            return TryMatchResult::AlreadyLoggedIn;
+        }
+        if let Some(other_key) = entry.keys().find(|k| k.as_str() != self_handle.as_str()).cloned()
+        {
+            let other = entry.remove(&other_key).expect("just keyed");
+            if entry.is_empty() {
+                map.remove(&token);
+            }
+            return TryMatchResult::Matched { other };
+        }
+        entry.insert(self_handle, self_session);
+        TryMatchResult::Registered
+    }
+
+    /// session の cancel と一致する場合のみ削除する。`Arc::ptr_eq` で同一性を
+    /// 確認することで、上書き直後の stale handle race (旧 session が
+    /// `unregister` を呼んで新 session を誤って削除する) を回避する。
+    pub(crate) async fn unregister(
+        &self,
+        token: &ChallengeToken,
+        handle: &PlayerName,
+        cancel: &Arc<Notify>,
+    ) {
+        let mut map = self.inner.lock().await;
+        if let Some(entry) = map.get_mut(token) {
+            let same = entry.get(handle).map(|s| Arc::ptr_eq(&s.cancel, cancel)).unwrap_or(false);
+            if same {
+                entry.remove(handle);
+                if entry.is_empty() {
+                    map.remove(token);
+                }
+            }
+        }
+    }
+
+    /// 期限切れ token の全 session を cancel + 削除する。
+    /// `purge_expired` 戻り値の各 token に対して呼ぶ用途。
+    pub(crate) async fn cancel_token(&self, token: &ChallengeToken) {
+        let mut map = self.inner.lock().await;
+        if let Some(entry) = map.remove(token) {
+            for (_, session) in entry {
+                session.cancel.notify_one();
+            }
+        }
+    }
+}
+
 /// 切断時に保持される対局スナップショット。再接続成立時、再参加クライアントへ
 /// 現在の盤面・両者残時間・最終手・手番を再送するために保持する。
 #[derive(Debug, Clone)]
@@ -685,6 +799,11 @@ where
     /// 消費 / TTL purge を行う core API。`pending_ws_attachment_ids` フィールド
     /// は Workers 専用なので TCP では空のまま使われる (型分離のため除去はしない)。
     pub(crate) challenge_registry: Mutex<ChallengeRegistry>,
+    /// 私的対局の先着 LOGIN session (transport を持ったまま相手を待つ runtime
+    /// map)。core [`ChallengeRegistry`] が serialize 可能な永続データだけを持つの
+    /// に対し、本 map は `Arc<Notify>` と `oneshot::Sender<MatchRequest>` という
+    /// serialize 不能な runtime 値を保持するため frontend 側に分離する。
+    pub(crate) tcp_challenge_pending: TcpChallengePending,
 }
 
 impl<R, K, P, H> SharedState<R, K, P, H>
@@ -782,6 +901,11 @@ where
         bind = %bind,
         "rshogi-csa-server-tcp listening"
     );
+    // 私的対局 (`%%CHALLENGE`) の TTL purge loop。`state.shutdown.wait()` で
+    // 抜けるので明示的な join は不要。fire-and-forget で `JoinHandle` を即破棄
+    // (variable には束縛しない) することで `_var` 接頭辞や `#[allow(...)]` を
+    // 使わずに済ませる。
+    tokio::task::spawn_local(challenge_purge_loop(state.clone()));
     let handle = tokio::task::spawn_local(accept_loop(listener, state));
     Ok(handle)
 }
@@ -992,22 +1116,11 @@ where
     };
 
     // 3.0. 私的対局 LOGIN handle (`<handle>+private-<24hex>+free`) は専用パーサで
-    //      分解する。本経路は Issue #582 の challenge_login (token を持って参加)
-    //      で使う ※完全な対局参加実装は後続 wave で `parse_handle_with_free` の
-    //      返り値を `ChallengeRegistry` の `lookup`/`consume` に橋渡しする。
-    //      本 wave では入口分岐のみ整え、stub として一律 `LOGIN:incorrect` 系を
-    //      返して `parse_handle_with_free` / `PrivateLoginError` の使用箇所を確保する。
+    //      分解し、`handle_private_login_path` に分岐する。本経路は token 持参の
+    //      対局参加で使われ、core [`ChallengeRegistry`] の `lookup` / `consume` と
+    //      `tcp_challenge_pending` の先着/後着判定で対局を駆動する。
     if is_private_login_handle(full_name.as_str()) {
-        let outcome = parse_handle_with_free(full_name.as_str());
-        let response = match outcome {
-            Ok(_) => "LOGIN:incorrect challenge_login_not_implemented_yet",
-            Err(PrivateLoginError::ColorMustBeFree) => {
-                "LOGIN:incorrect color_must_be_free_for_private_game"
-            }
-            Err(_) => "LOGIN:incorrect",
-        };
-        let _ = transport.send_line(&CsaLine::new(response)).await;
-        return Ok(());
+        return handle_private_login_path(state, transport, full_name.as_str(), password).await;
     }
 
     // 3. handle / game_name / color を抽出。
@@ -3030,6 +3143,494 @@ where
     Ok(())
 }
 
+/// 私的対局 (`%%CHALLENGE`) の token 持参 LOGIN 経路。
+/// LOGIN handle が `<handle>+private-<24hex>+free` で到着した接続をここに分岐
+/// させる。先着 / 後着 を [`TcpChallengePending::try_match_or_register`] で
+/// 1 ロック内に判定し、後着なら [`drive_private_game`] を駆動、先着なら waiter
+/// として cancel / shutdown / match_request の 3 経路を `tokio::select!` で
+/// 監視する。
+///
+/// 本経路では League / WaitingPool / `session_cancellers` には一切登録しない。
+/// 私的対局はマッチング状態機械から完全に独立しており、duplicate-login policy も
+/// 介入しない (同 token への二重 LOGIN は `AlreadyLoggedIn` で個別に弾く)。
+async fn handle_private_login_path<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
+    mut transport: TcpTransport,
+    full_name: &str,
+    password: Secret,
+) -> Result<(), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    // 1. handle / token を分解。
+    let (handle, token) = match parse_handle_with_free(full_name) {
+        Ok(parsed) => parsed,
+        Err(PrivateLoginError::ColorMustBeFree) => {
+            let _ = transport
+                .send_line(&CsaLine::new("LOGIN:incorrect color_must_be_free_for_private_game"))
+                .await;
+            return Ok(());
+        }
+        Err(_) => {
+            let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect")).await;
+            return Ok(());
+        }
+    };
+
+    // 2. password 認証 (公開 LOGIN と同じ経路)。失敗は `LOGIN:incorrect` で統一。
+    let handle_player = PlayerName::new(&handle);
+    let Some(stored_hash) = state.password_store.lookup(&handle) else {
+        let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect")).await;
+        return Ok(());
+    };
+    match authenticate(
+        &state.rate_storage,
+        state.hasher.as_ref(),
+        &handle_player,
+        &password,
+        &stored_hash,
+    )
+    .await?
+    {
+        AuthOutcome::Ok { .. } => {}
+        AuthOutcome::Incorrect => {
+            let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect")).await;
+            return Ok(());
+        }
+    }
+
+    // 3. TTL purge を LOGIN ごとに 1 回だけ走らせる (`challenge_purge_loop` の
+    //    最終ガード機能に加えて、認証直後に「対局相手が来ないまま expire した
+    //    token」を検出するための即時パス)。`challenge_registry` ロックを
+    //    保持したまま `tcp_challenge_pending.cancel_token` を呼ぶと
+    //    「pending → registry」順で取りに来る別タスクと逆順になり deadlock
+    //    可能性があるため、purge 結果を `Vec` で受け取って registry ロックを
+    //    drop してから cancel_token を順次呼ぶ。
+    let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+    let expired = {
+        let mut reg = state.challenge_registry.lock().await;
+        reg.purge_expired(now_ms)
+    };
+    for (expired_token, _) in expired {
+        state.tcp_challenge_pending.cancel_token(&expired_token).await;
+    }
+
+    // 4. token 照合と inviter / opponent allowlist チェック。`lookup` の戻り値の
+    //    寿命を最小にするため、参照を取り出した直後に owned コピーを作って
+    //    ロックを抜ける。
+    let entry = {
+        let reg = state.challenge_registry.lock().await;
+        match reg.lookup(&token, now_ms) {
+            Some(e) => e.clone(),
+            None => {
+                drop(reg);
+                let _ =
+                    transport.send_line(&CsaLine::new("LOGIN:incorrect challenge_expired")).await;
+                return Ok(());
+            }
+        }
+    };
+    if handle != entry.inviter && handle != entry.opponent {
+        let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect not_invited")).await;
+        return Ok(());
+    }
+
+    // 5. LOGIN OK 応答 (公開経路と同じ shogi-server 互換 `LOGIN:<handle> OK`)。
+    transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
+
+    // 6. 先着 / 後着 を pending map で原子判定する。
+    let cancel: Arc<Notify> = Arc::new(Notify::new());
+    let (match_request_tx, match_request_rx) = oneshot::channel::<MatchRequest>();
+    let session = TcpPendingSession {
+        cancel: cancel.clone(),
+        match_request_tx,
+    };
+    let outcome = state
+        .tcp_challenge_pending
+        .try_match_or_register(token.clone(), handle_player.clone(), session)
+        .await;
+
+    match outcome {
+        TryMatchResult::AlreadyLoggedIn => {
+            let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect already_logged_in")).await;
+            Ok(())
+        }
+        TryMatchResult::Matched { other } => {
+            run_private_match_matchmaker(
+                state,
+                transport,
+                handle,
+                handle_player,
+                token,
+                entry,
+                other,
+            )
+            .await
+        }
+        TryMatchResult::Registered => {
+            run_private_match_waiter(
+                state,
+                transport,
+                handle_player,
+                token,
+                cancel,
+                match_request_rx,
+            )
+            .await
+        }
+    }
+}
+
+/// 後着 LOGIN (matchmaker) の駆動。`consume` で entry を取り出し、配色を解決し、
+/// 先着 (waiter) から transport を吸い上げて両 transport を [`drive_private_game`]
+/// に渡す。`oneshot::Sender<MatchRequest>` の send 失敗 (waiter task が抜けた race) /
+/// `consume` の TTL レース は両者に `##[ERROR] ...` を送って return する。
+///
+/// 完了通知の流れ:
+/// - waiter 側は `MatchRequest::completion_rx` で待つ。matchmaker 側で
+///   `(other_completion_tx, other_completion_rx)` を作って `MatchRequest` に
+///   詰めるので、`drive_private_game` 内で waiter 側に対応する `*_completion_tx`
+///   を `send(())` すれば waiter が抜ける。
+/// - matchmaker 自身は別途 `(self_completion_tx, self_completion_rx)` を確保し、
+///   drive 側で self 側 completion_tx を発火させ、本関数末尾で
+///   `self_completion_rx.await` する。
+async fn run_private_match_matchmaker<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
+    mut transport: TcpTransport,
+    self_handle: String,
+    self_player: PlayerName,
+    token: ChallengeToken,
+    entry: rshogi_csa_server::matching::challenge::ChallengeEntry,
+    other: TcpPendingSession,
+) -> Result<(), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    // 1. registry から entry を取り出して削除 (1 token = 1 対局のみ)。
+    let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+    let consumed = {
+        let mut reg = state.challenge_registry.lock().await;
+        reg.consume(&token, now_ms)
+    };
+    if consumed.is_none() {
+        // TTL race: lookup 通過後に purge_expired が走った等。
+        other.cancel.notify_one();
+        let err_line = CsaLine::new("##[ERROR] challenge expired before opponent joined");
+        let _ = transport.send_line(&err_line).await;
+        return Ok(());
+    }
+
+    // 2. inviter / opponent と self / other の handle 対応付け。entry は consume
+    //    済の値ではなく LOGIN 時点で clone した `entry` をそのまま使う
+    //    (clock_spec / initial_sfen / inviter_color が同一)。
+    let inviter_handle = entry.inviter.clone();
+    let other_handle = if self_handle == entry.inviter {
+        entry.opponent.clone()
+    } else {
+        entry.inviter.clone()
+    };
+
+    // 3. 配色を解決する。`+free` 指定 (双方 None) は `Xoshiro256PlusPlus` で乱択。
+    //    `from_seed(rand::random())` で OS 乱数から seed を引く慣習は core
+    //    `LeastDiffPairingStrategy::build_rng` と同じ。
+    let mut rng = Xoshiro256PlusPlus::from_seed(rand::random());
+    let inviter_color: Option<Color> = entry.inviter_color.map(ColorTag::to_core);
+    let (a_name, a_color, b_name, b_color) = if self_handle == entry.inviter {
+        (self_player.clone(), inviter_color, PlayerName::new(other_handle.as_str()), None)
+    } else {
+        (
+            PlayerName::new(inviter_handle.as_str()),
+            inviter_color,
+            self_player.clone(),
+            None,
+        )
+    };
+    let Some(matched) = resolve_color_for_pair(a_name, a_color, b_name, b_color, &mut rng) else {
+        // 構造的に同色希望は起こらない (片側が必ず None) が、防御的に処理。
+        other.cancel.notify_one();
+        let _ = transport
+            .send_line(&CsaLine::new("##[ERROR] private match color allocation failed"))
+            .await;
+        return Ok(());
+    };
+
+    // 4. 先着 (waiter) に MatchRequest を送り、transport を吸い上げる。
+    //    `(other_transport_tx, other_transport_rx)` が waiter → matchmaker の
+    //    transport 返送経路。`(other_completion_tx, other_completion_rx)` は
+    //    matchmaker → waiter の終局通知経路で、`drive_private_game` 内で
+    //    waiter 側の completion_tx として発火させる。
+    let (other_transport_tx, other_transport_rx) = oneshot::channel::<TcpTransport>();
+    let (other_completion_tx, other_completion_rx) = oneshot::channel::<()>();
+    let req = MatchRequest {
+        transport_responder: other_transport_tx,
+        completion_rx: other_completion_rx,
+    };
+    if other.match_request_tx.send(req).is_err() {
+        let _ = transport.send_line(&CsaLine::new("##[ERROR] challenge_login race")).await;
+        return Ok(());
+    }
+    let other_transport = match other_transport_rx.await {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = transport.send_line(&CsaLine::new("##[ERROR] challenge_login race")).await;
+            return Ok(());
+        }
+    };
+
+    // 5. matchmaker (self) 用の完了 oneshot。waiter 用は `other_completion_tx`
+    //    (MatchRequest の completion_rx 経由) を使う。inviter / opponent と
+    //    self / other の対応で 2 つの tx を `drive_private_game` に渡す。
+    let (self_completion_tx, self_completion_rx) = oneshot::channel::<()>();
+    let (inviter_transport_final, opponent_transport_final, inviter_tx, opponent_tx) =
+        if self_handle == inviter_handle {
+            (transport, other_transport, self_completion_tx, other_completion_tx)
+        } else {
+            (other_transport, transport, other_completion_tx, self_completion_tx)
+        };
+
+    drive_private_game(
+        state,
+        PlayerName::new(inviter_handle.as_str()),
+        inviter_transport_final,
+        opponent_transport_final,
+        matched,
+        entry.clock_spec.clone(),
+        entry.initial_sfen.clone(),
+        inviter_tx,
+        opponent_tx,
+    )
+    .await?;
+
+    // matchmaker 自身の完了待ち。drive 側で self 用 completion_tx が発火した
+    // タイミングで抜ける。
+    let _ = self_completion_rx.await;
+    Ok(())
+}
+
+/// 先着 LOGIN (waiter) の駆動。3 経路 (`shutdown` / `cancel` / `match_request_rx`) を
+/// `tokio::select!` で監視し、cancel / shutdown 経路では pending map の
+/// 自身を unregister してから return する。マッチ確定経路では transport を
+/// `req.transport_responder` で返送し、`req.completion_rx.await` で対局完了を
+/// 待つ。
+async fn run_private_match_waiter<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
+    mut transport: TcpTransport,
+    handle_player: PlayerName,
+    token: ChallengeToken,
+    cancel: Arc<Notify>,
+    mut match_request_rx: oneshot::Receiver<MatchRequest>,
+) -> Result<(), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    tokio::select! {
+        _ = state.shutdown.wait() => {
+            let _ = transport
+                .send_line(&CsaLine::new("##[NOTICE] server shutting down"))
+                .await;
+            state
+                .tcp_challenge_pending
+                .unregister(&token, &handle_player, &cancel)
+                .await;
+            Ok(())
+        }
+        _ = cancel.notified() => {
+            let _ = transport
+                .send_line(&CsaLine::new(
+                    "##[ERROR] challenge expired before opponent joined",
+                ))
+                .await;
+            state
+                .tcp_challenge_pending
+                .unregister(&token, &handle_player, &cancel)
+                .await;
+            Ok(())
+        }
+        req_res = &mut match_request_rx => {
+            // pending map からは matchmaker 側の `try_match_or_register` で
+            // 既に取り除かれている。`unregister` は同 cancel と一致する場合のみ
+            // 削除する idempotent 操作なので、念のため呼んでも害は無い (未登録
+            // なら no-op)。
+            match req_res {
+                Ok(req) => {
+                    if req.transport_responder.send(transport).is_err() {
+                        // matchmaker が transport_responder を drop した race。
+                        // drive 側に渡す経路が無いので、ここで pending エントリの
+                        // 残骸 (もしあれば) を片付けて終了する。
+                        state
+                            .tcp_challenge_pending
+                            .unregister(&token, &handle_player, &cancel)
+                            .await;
+                        return Ok(());
+                    }
+                    let _ = req.completion_rx.await;
+                    Ok(())
+                }
+                Err(_) => {
+                    // matchmaker 側で MatchRequest を drop。pending エントリを
+                    // 片付けて終了 (本 race は通常起きないが防御的に処理)。
+                    state
+                        .tcp_challenge_pending
+                        .unregister(&token, &handle_player, &cancel)
+                        .await;
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+/// 私的対局専用の対局駆動 wrapper。`drive_game` の epilogue から League /
+/// `session_cancellers` 操作を取り除き、challenge 経路向けの軽量 epilogue
+/// (`games.unregister` + broadcaster `clear_room` + 両 completion 通知) のみ
+/// を残す。`drive_game_inner` 自体は public/private 共通で再利用する。
+///
+/// シグネチャは inviter / opponent ベース (color による分岐は `matched.black` /
+/// `matched.white` を `inviter_handle` と比較して内部で行う)。
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn drive_private_game<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
+    inviter_handle: PlayerName,
+    inviter_transport: TcpTransport,
+    opponent_transport: TcpTransport,
+    matched: MatchedPair,
+    clock_spec: ClockSpec,
+    initial_sfen: Option<String>,
+    inviter_completion_tx: oneshot::Sender<()>,
+    opponent_completion_tx: oneshot::Sender<()>,
+) -> Result<(), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    // `drive_game` と同じ Drop ベース counter / metrics 管理。private 経路でも
+    // graceful shutdown 完了判定 (`active_drive_tasks`) と
+    // `csa_games_finished_total{result_code}` の総和不変条件を維持する。
+    struct DriveGuard<'a> {
+        counter: &'a AtomicUsize,
+        notify: &'a Notify,
+        result_code: Rc<std::cell::Cell<Option<&'static str>>>,
+    }
+    impl Drop for DriveGuard<'_> {
+        fn drop(&mut self) {
+            self.counter.fetch_sub(1, Ordering::Release);
+            self.notify.notify_waiters();
+            metrics::gauge!(crate::metrics::GAMES_ACTIVE).decrement(1.0);
+            let code = self.result_code.get().unwrap_or(crate::metrics::RESULT_CODE_ABORTED);
+            metrics::counter!(
+                crate::metrics::GAMES_FINISHED_TOTAL,
+                "result_code" => code,
+            )
+            .increment(1);
+            if code == "#TIME_UP" {
+                metrics::counter!(crate::metrics::TIME_UP_TOTAL).increment(1);
+            }
+        }
+    }
+    state.active_drive_tasks.fetch_add(1, Ordering::Release);
+    metrics::counter!(crate::metrics::GAMES_TOTAL).increment(1);
+    metrics::gauge!(crate::metrics::GAMES_ACTIVE).increment(1.0);
+    let result_code_slot: Rc<std::cell::Cell<Option<&'static str>>> =
+        Rc::new(std::cell::Cell::new(None));
+    let _drive_guard = DriveGuard {
+        counter: &state.active_drive_tasks,
+        notify: &state.active_games,
+        result_code: result_code_slot.clone(),
+    };
+
+    // inviter / opponent と black / white の対応付け。matched は `resolve_color_for_pair`
+    // で確定済なので、inviter_handle が `matched.black` と一致するなら inviter は
+    // 先手、`matched.white` と一致するなら inviter は後手。
+    let inviter_is_black = matched.black.as_str() == inviter_handle.as_str();
+    let (mut black_transport, mut white_transport) = if inviter_is_black {
+        (inviter_transport, opponent_transport)
+    } else {
+        (opponent_transport, inviter_transport)
+    };
+
+    // 対局 ID を発行 (`drive_game` と同形式)。
+    let game_id = {
+        let mut counter = state.game_counter.lock().await;
+        *counter += 1;
+        GameId::new(format!("{}{:04}", state.started_at.format("%Y%m%d%H%M%S"), *counter))
+    };
+    tracing::Span::current().record("game_id", tracing::field::display(&game_id));
+
+    // private 対局の `game_name` は `_challenge` sentinel を使わず、運用観測用に
+    // `private` 固定文字列を使う。`%%LIST` / `%%SHOW` には game_id 経由で表示される。
+    let game_name = GameName::new("private");
+
+    let inner = drive_game_inner(
+        state.as_ref(),
+        &game_id,
+        matched.clone(),
+        game_name.clone(),
+        initial_sfen,
+        &mut black_transport,
+        &mut white_transport,
+        clock_spec,
+        &result_code_slot,
+    )
+    .await;
+
+    // private 経路の epilogue は public と非対称。具体的には:
+    // - `League::end_game` / `League::logout` は呼ばない (private 経路は
+    //   League に登録されていない)
+    // - `session_cancellers.remove` も呼ばない (private 経路は cancellers に
+    //   挿入されていない)
+    // - `games.unregister` は idempotent な保険として呼ぶ (`drive_game_inner`
+    //   が終局時に既に呼んでいるが、AGREE 不成立で early return した経路では
+    //   register 自体が走らないため、ここで再度呼んでも no-op で安全)
+    {
+        let mut games = state.games.lock().await;
+        games.unregister(&game_id);
+    }
+    state.broadcaster.clear_room(&RoomId::new(game_id.as_str())).await;
+    let _ = inviter_completion_tx.send(());
+    let _ = opponent_completion_tx.send(());
+    inner
+}
+
+/// 私的対局 token の TTL purge を周期実行する軽量 task。
+/// `state.config.challenge_purge_interval` ごとに `purge_expired` を呼び、
+/// 戻り値の各 token に対して [`TcpChallengePending::cancel_token`] を呼んで
+/// 先行 LOGIN 済 session を切断する。`state.shutdown.wait()` で抜ける。
+async fn challenge_purge_loop<R, K, P, H>(state: Rc<SharedState<R, K, P, H>>)
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    let interval = state.config.challenge_purge_interval;
+    loop {
+        tokio::select! {
+            _ = state.shutdown.wait() => return,
+            _ = tokio::time::sleep(interval) => {
+                let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+                let removed = {
+                    let mut reg = state.challenge_registry.lock().await;
+                    reg.purge_expired(now_ms)
+                };
+                for (token, _) in removed {
+                    state.tcp_challenge_pending.cancel_token(&token).await;
+                }
+            }
+        }
+    }
+}
+
 /// LOGIN 行で `reconnect:<game_id>+<token>` が指定されたクライアントを受理し、
 /// 該当 `game_id` の grace 中対局へ再参加させる。
 ///
@@ -3432,6 +4033,7 @@ where
         shutdown: GracefulShutdown::new(),
         reconnect_pending: Mutex::new(HashMap::new()),
         challenge_registry: Mutex::new(ChallengeRegistry::new()),
+        tcp_challenge_pending: TcpChallengePending::new(),
     }
 }
 

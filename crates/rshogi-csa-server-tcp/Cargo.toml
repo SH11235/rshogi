@@ -35,6 +35,12 @@ clap.workspace = true
 serde.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "io-util", "sync", "fs", "net", "signal"] }
+# 私的対局 (`%%CHALLENGE`) で `+free` 指定の inviter / opponent の配色を
+# `resolve_color_for_pair` で乱択するために必要。`rshogi-csa-server` 側
+# pairing 戦略と同じ PRNG (Xoshiro256PlusPlus) を使うため、workspace 既定の
+# `rand_xoshiro` も併せて引く。
+rand.workspace = true
+rand_xoshiro.workspace = true
 
 [features]
 default = []
