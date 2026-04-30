@@ -244,7 +244,9 @@ pub fn parse_clock_presets(
     let mut out: std::collections::HashMap<String, ClockSpec> =
         std::collections::HashMap::with_capacity(entries.len());
     for entry in entries {
-        validate_clock_spec_value(&entry.game_name, &entry.spec)?;
+        entry.spec.validate_total_time_nonzero().map_err(|field| {
+            format!("CLOCK_PRESETS: clock preset {:?}: {field} must be > 0", entry.game_name)
+        })?;
         if out.contains_key(&entry.game_name) {
             return Err(format!(
                 "CLOCK_PRESETS: duplicate clock preset entry for game_name {:?}",
@@ -282,41 +284,6 @@ pub fn resolve_clock_spec_from_presets_map(
         Some(spec) => PresetResolution::Hit(spec.clone()),
         None => PresetResolution::Unknown,
     }
-}
-
-/// `parse_clock_presets` の preset 値検証。`total_time_*` が 0 の preset を弾く。
-fn validate_clock_spec_value(game_name: &str, spec: &ClockSpec) -> Result<(), String> {
-    match spec {
-        ClockSpec::Countdown { total_time_sec, .. } => {
-            if *total_time_sec == 0 {
-                return Err(format!(
-                    "CLOCK_PRESETS: clock preset {game_name:?}: total_time_sec must be > 0"
-                ));
-            }
-        }
-        ClockSpec::CountdownMsec { total_time_ms, .. } => {
-            if *total_time_ms == 0 {
-                return Err(format!(
-                    "CLOCK_PRESETS: clock preset {game_name:?}: total_time_ms must be > 0"
-                ));
-            }
-        }
-        ClockSpec::Fischer { total_time_sec, .. } => {
-            if *total_time_sec == 0 {
-                return Err(format!(
-                    "CLOCK_PRESETS: clock preset {game_name:?}: total_time_sec must be > 0"
-                ));
-            }
-        }
-        ClockSpec::StopWatch { total_time_min, .. } => {
-            if *total_time_min == 0 {
-                return Err(format!(
-                    "CLOCK_PRESETS: clock preset {game_name:?}: total_time_min must be > 0"
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// viewer 配信 API (HTTP `/api/v1/games*` および WS `/ws/<id>/spectate`) が
@@ -528,14 +495,20 @@ mod tests {
         assert!(err.contains("\"x\""), "error must mention game_name: {err}");
     }
 
+    /// `total_time_sec = 0` を loader 経由で弾き、ラッパーが組み立てるメッセージ
+    /// (`CLOCK_PRESETS: clock preset "x": <field> must be > 0`) の prefix と
+    /// phrase が崩れないことを回帰防止する E2E 1 件。`ClockSpec` 全 variant は
+    /// core 側 table テストでカバー。
     #[test]
     fn parse_clock_presets_rejects_zero_total_time() {
         let raw = r#"[
             {"game_name":"broken","kind":"countdown","total_time_sec":0,"byoyomi_sec":10}
         ]"#;
         let err = parse_clock_presets(Some(raw)).unwrap_err();
+        assert!(err.starts_with("CLOCK_PRESETS:"), "error must keep prefix: {err}");
         assert!(err.contains("total_time_sec"), "error must mention field: {err}");
         assert!(err.contains("broken"), "error must mention game_name: {err}");
+        assert!(err.contains("must be > 0"), "error must include comparison phrase: {err}");
     }
 
     #[test]
