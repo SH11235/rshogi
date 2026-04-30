@@ -138,6 +138,10 @@ ALLOW_FLOODGATE_FEATURES = "true"
 ALLOW_VIEWER_API = "1"
 # LobbyDO 内 in-memory queue の総数上限。staging では小規模通電向けに 100 で運用。
 LOBBY_QUEUE_SIZE_LIMIT = "100"
+# 私的対局 (CHALLENGE_LOBBY) で発行される token の TTL (秒)。staging は通電
+# 確認をテンポよく回すため短めの 600 秒 (10 分) で運用する。production 昇格
+# 時は 3600 秒に揃える。
+CHALLENGE_TTL_SEC = "600"
 
 # --- secret として設定する値 ---
 # staging で必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。
