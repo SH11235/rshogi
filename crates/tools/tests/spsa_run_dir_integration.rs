@@ -197,13 +197,19 @@ fn force_init_resets_run_dir_and_clears_stale_final_params() {
     // 1 回目: fresh start で final.params を残す
     let out1 = run_spsa_args(&run_dir, &canonical, &startpos, &[]);
     assert!(out1.status.success());
-    let stale_final_size = std::fs::metadata(run_dir.join("final.params")).unwrap().len();
-    assert!(stale_final_size > 0);
+    let stale_final = std::fs::read(run_dir.join("final.params")).unwrap();
+    assert!(!stale_final.is_empty());
 
-    // canonical を別内容で書き換え (旧 final.params の値とは異なる)
+    // canonical を「c_end=0 + step=0」で値固定の境界条件に書き換える。
+    // c_end=0 にすると schedule の摂動量が 0 になり、SPSA update も実質ゼロ
+    // (`update = a_k * (raw_result_mean / c_end)` が 0 になる schedule)。
+    // この設定で 1 iter 走らせれば、final.params の値は canonical 初期値 (9 / 2.5)
+    // と完全一致するため OR3 のような「実装の摂動量に依存する曖昧な assert」を回避できる。
+    // (本テストの目的は force-init で stale final.params が新 canonical に置き換わる
+    // ことの検証であり、SPSA の数値挙動ではない。)
     let new_body = "\
-SPSA_TEST_INT,int,9,0,10,1,0.001 //changed
-SPSA_TEST_FLOAT,float,2.5,0.0,3.0,0.5,0.001 //changed
+SPSA_TEST_INT,int,9,0,10,0,0.001 //changed (c_end=0 で値固定)
+SPSA_TEST_FLOAT,float,2.5,0.0,3.0,0.0,0.001 //changed (c_end=0 で値固定)
 ";
     std::fs::write(&canonical, new_body).unwrap();
 
@@ -219,12 +225,18 @@ SPSA_TEST_FLOAT,float,2.5,0.0,3.0,0.5,0.001 //changed
     let values_lines = count_lines(&run_dir.join("values.csv"));
     assert_eq!(values_lines, 3, "values.csv should be reset to 3 lines after force-init");
 
-    // final.params も新 canonical 値ベース (旧値の残留がない)
-    let final_body = std::fs::read_to_string(run_dir.join("final.params")).unwrap();
+    // 旧 final.params のバイト列が完全に置き換わっていること (stale 残留がない)。
+    let new_final = std::fs::read(run_dir.join("final.params")).unwrap();
+    assert_ne!(new_final, stale_final, "final.params should not retain stale bytes");
+
+    // c_end=0 schedule なので 1 iter 後も値は canonical 初期値のまま。
+    let final_body = String::from_utf8(new_final).unwrap();
     assert!(
-        final_body.contains("SPSA_TEST_INT,int,9")
-            || final_body.contains("SPSA_TEST_INT,int,8")
-            || final_body.contains("SPSA_TEST_INT,int,10"),
-        "final.params should reflect new canonical (close to 9 after 1 iter): {final_body}"
+        final_body.contains("SPSA_TEST_INT,int,9,"),
+        "final.params should keep canonical init value with c_end=0: {final_body}"
+    );
+    assert!(
+        final_body.contains("SPSA_TEST_FLOAT,float,2.500000,"),
+        "final.params should keep canonical float init value: {final_body}"
     );
 }
