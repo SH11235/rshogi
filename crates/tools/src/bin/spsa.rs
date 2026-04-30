@@ -228,6 +228,16 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     force_init: bool,
 
+    /// `<run-dir>/.lock` が残留している場合に強制削除して取得を試みる。
+    ///
+    /// 通常 lock は process 正常終了時 / panic 時に削除される。電源断・
+    /// SIGKILL 等で残ってしまった場合のみこのフラグを使う。間違って実行中
+    /// の SPSA を巻き込むと state.params / meta.json が race condition で
+    /// 壊れるので、必ず lock 内容 (PID/hostname/start) を確認して当該
+    /// プロセスが死んでいることを目視確認してから指定すること。
+    #[arg(long, default_value_t = false)]
+    force_unlock: bool,
+
     /// `--resume` + `--init-from` 併用時の整合性チェックを strict にする。
     ///
     /// デフォルトは warning 出力のみで継続。strict 指定時は median ≥ 0.5 step
@@ -1385,6 +1395,87 @@ impl SpsaParam {
     }
 }
 
+/// `<run-dir>/.lock` の中身。lock 衝突時にユーザが「誰が掴んでいるか」を
+/// 判断するための forensic 情報。
+#[derive(Debug, Serialize, Deserialize)]
+struct LockInfo {
+    pid: u32,
+    hostname: String,
+    started_at_utc: String,
+}
+
+/// run-dir の排他 lock。`OpenOptions::create_new(true)` の atomic file
+/// creation を使うので、同一 host の同一 FS 内でのみ有効 (NFS では
+/// create_new の atomicity が保証されないため非推奨)。
+///
+/// 取得後は `Drop` で lock ファイルを削除する。panic 時も Drop は走るが、
+/// SIGKILL / 電源断では残留する。残留 lock は `--force-unlock` で削除可能。
+#[derive(Debug)]
+struct RunDirLock {
+    path: PathBuf,
+}
+
+impl RunDirLock {
+    fn acquire(run_dir: &Path, force_unlock: bool) -> Result<Self> {
+        let path = run_dir.join(".lock");
+        if force_unlock && path.exists() {
+            std::fs::remove_file(&path).with_context(|| {
+                format!("failed to remove stale lock {} (--force-unlock)", path.display())
+            })?;
+            eprintln!("--force-unlock: 古い lock {} を削除しました", path.display());
+        }
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut f) => {
+                let info = LockInfo {
+                    pid: std::process::id(),
+                    hostname: read_hostname(),
+                    started_at_utc: Utc::now().to_rfc3339(),
+                };
+                let body = serde_json::to_string(&info).context("failed to serialize lock info")?;
+                writeln!(f, "{body}").with_context(|| {
+                    format!("failed to write lock contents to {}", path.display())
+                })?;
+                f.flush().ok();
+                Ok(RunDirLock { path })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let body = std::fs::read_to_string(&path).unwrap_or_else(|_| "(unreadable)".into());
+                bail!(
+                    "他プロセスが run-dir を使用中の可能性があります: {}\n  内容: {}\n  当該プロセスが既に死んでいることを目視確認したうえで --force-unlock を指定してください。",
+                    path.display(),
+                    body.trim()
+                );
+            }
+            Err(e) => Err(anyhow::Error::new(e))
+                .with_context(|| format!("failed to create lock {}", path.display())),
+        }
+    }
+}
+
+impl Drop for RunDirLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// hostname 取得。forensic 用途なので exact correctness より「何かしら名前が
+/// 入る」ことを優先する。優先順: $HOSTNAME → /proc/sys/kernel/hostname →
+/// "unknown"。
+fn read_hostname() -> String {
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return h;
+    }
+    if let Ok(h) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let trimmed = h.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "unknown".into()
+}
+
 fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
@@ -2083,6 +2174,13 @@ fn main() -> Result<()> {
     // run_dir を確保 (state / meta / CSV を全て同 dir 配下に置く前提)
     std::fs::create_dir_all(&cli.run_dir)
         .with_context(|| format!("failed to create run-dir {}", cli.run_dir.display()))?;
+
+    // 同一 run-dir に対する二重起動を防ぐため、最初に exclusive lock を取る。
+    // 取得失敗時は他プロセスが state.params/meta.json/CSV を書き換える危険が
+    // あるので即 bail。lock は process 終了時 (Drop) に自動削除されるが、
+    // SIGKILL / 電源断で残留した場合は --force-unlock で消せる。
+    let _run_dir_lock = RunDirLock::acquire(&cli.run_dir, cli.force_unlock)?;
+
     let state_params = state_params_path(&cli.run_dir);
 
     // ========================================================================
@@ -3059,6 +3157,45 @@ mod tests {
         std::fs::write(&src, b"data").unwrap();
         atomic_copy_file(&src, &dst).unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"data");
+    }
+
+    // ========================================================================
+    // RunDirLock: 排他制御
+    // ========================================================================
+
+    #[test]
+    fn run_dir_lock_prevents_double_acquire() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock1 = RunDirLock::acquire(dir.path(), false).unwrap();
+        let err = RunDirLock::acquire(dir.path(), false).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("他プロセスが run-dir を使用中"), "actual: {msg}");
+        // 中身に PID が記録されていること
+        let body = std::fs::read_to_string(dir.path().join(".lock")).unwrap();
+        assert!(body.contains("\"pid\""), "lock body: {body}");
+        drop(lock1);
+        // drop 後は再取得可能
+        let _lock2 = RunDirLock::acquire(dir.path(), false).unwrap();
+    }
+
+    #[test]
+    fn run_dir_lock_force_unlock_removes_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".lock"), "stale").unwrap();
+        // force_unlock なしでは衝突
+        assert!(RunDirLock::acquire(dir.path(), false).is_err());
+        // force_unlock 指定で取得成功
+        let _lock = RunDirLock::acquire(dir.path(), true).unwrap();
+    }
+
+    #[test]
+    fn run_dir_lock_drop_cleans_up_file() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let _lock = RunDirLock::acquire(dir.path(), false).unwrap();
+            assert!(dir.path().join(".lock").exists());
+        }
+        assert!(!dir.path().join(".lock").exists());
     }
 
     #[test]
