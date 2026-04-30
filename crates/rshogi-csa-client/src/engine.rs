@@ -40,6 +40,10 @@ pub enum SearchOutcome {
     ServerInterrupt(Vec<String>),
 }
 
+/// USI `info` 行を観測する都度呼び出される callback。`(累積 SearchInfo, 生の info 行)`
+/// を受け取り、`SessionEventSink` への `SearchInfo` snapshot 発火に使われる。
+pub type InfoCallback<'a> = dyn FnMut(&SearchInfo, &str) + 'a;
+
 /// info 行から抽出した探索情報
 ///
 /// `depth` / `score_cp` / `score_mate` / `pv` は CSA Floodgate 拡張コメント生成に使われる。
@@ -199,7 +203,23 @@ impl UsiEngine {
     ) -> Result<SearchOutcome> {
         self.send(position_cmd)?;
         self.send(go_cmd)?;
-        self.wait_bestmove(shutdown, server_rx)
+        self.wait_bestmove(shutdown, server_rx, None)
+    }
+
+    /// `go` と同じだが、`info` 行を観測する都度 `info_callback` を呼んで累積
+    /// `SearchInfo` と生 line を渡す。`SessionEventSink` への `SearchInfo`
+    /// 発火 (累積 snapshot + throttle) の hook 用。
+    pub fn go_with_info(
+        &mut self,
+        position_cmd: &str,
+        go_cmd: &str,
+        shutdown: &AtomicBool,
+        server_rx: &Receiver<Event>,
+        info_callback: &mut InfoCallback<'_>,
+    ) -> Result<SearchOutcome> {
+        self.send(position_cmd)?;
+        self.send(go_cmd)?;
+        self.wait_bestmove(shutdown, server_rx, Some(info_callback))
     }
 
     /// ponder 探索を開始（bestmove を待たない）
@@ -217,7 +237,18 @@ impl UsiEngine {
         server_rx: &Receiver<Event>,
     ) -> Result<SearchOutcome> {
         self.send("ponderhit")?;
-        self.wait_bestmove(shutdown, server_rx)
+        self.wait_bestmove(shutdown, server_rx, None)
+    }
+
+    /// `ponderhit` と同じだが、`info` 行を観測する都度 `info_callback` を呼ぶ。
+    pub fn ponderhit_with_info(
+        &mut self,
+        shutdown: &AtomicBool,
+        server_rx: &Receiver<Event>,
+        info_callback: &mut InfoCallback<'_>,
+    ) -> Result<SearchOutcome> {
+        self.send("ponderhit")?;
+        self.wait_bestmove(shutdown, server_rx, Some(info_callback))
     }
 
     /// stop を送信し、bestmove を待つ（ponder 中断用）。
@@ -280,6 +311,7 @@ impl UsiEngine {
         &mut self,
         shutdown: &AtomicBool,
         server_rx: &Receiver<Event>,
+        mut info_callback: Option<&mut InfoCallback<'_>>,
     ) -> Result<SearchOutcome> {
         use std::time::Instant;
 
@@ -336,6 +368,9 @@ impl UsiEngine {
                     log::trace!("[USI] < {line}");
                     if line.starts_with("info") {
                         update_search_info(&mut info, &line);
+                        if let Some(cb) = info_callback.as_deref_mut() {
+                            cb(&info, &line);
+                        }
                         continue;
                     }
                     if let Some(rest) = line.strip_prefix("bestmove ") {

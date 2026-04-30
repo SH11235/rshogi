@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
+use crate::events::SearchInfoEmitPolicy;
+
 /// CSAクライアント全体の設定
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
@@ -113,6 +115,12 @@ pub struct GameConfig {
     pub restart_engine_every_game: bool,
     /// ponder を有効化
     pub ponder: bool,
+    /// `SessionEventSink` への `SearchInfo` 発火頻度ポリシー。consumer が
+    /// `run_*_with_events` を使うときの USI `info` 行 throttle を制御する。
+    /// CLI / `NoopSessionEventSink` 経路では参照されない。serde では skip
+    /// (TOML から読み込まず、library consumer が programmatic に上書きする想定)。
+    #[serde(skip)]
+    pub search_info_emit: SearchInfoEmitPolicy,
 }
 
 impl Default for GameConfig {
@@ -121,6 +129,7 @@ impl Default for GameConfig {
             max_games: 0,
             restart_engine_every_game: false,
             ponder: true,
+            search_info_emit: SearchInfoEmitPolicy::default(),
         }
     }
 }

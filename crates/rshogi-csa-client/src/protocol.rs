@@ -471,6 +471,13 @@ impl CsaConnection {
         self.send_line(&serialize_client_command(&ClientCommand::Kachi))
     }
 
+    /// 中断 (`%CHUDAN`) を送信。`SessionEventSink` の Fatal / 外部 shutdown 時の
+    /// best-effort attempt at clean closure で使う。サーバ側が実際に
+    /// `#CHUDAN` で確定するかは保証しない。
+    pub fn send_chudan(&mut self) -> Result<()> {
+        self.send_line(&serialize_client_command(&ClientCommand::Chudan))
+    }
+
     /// ログアウト
     pub fn logout(&mut self) -> Result<()> {
         let _ = self.send_line(&serialize_client_command(&ClientCommand::Logout));
