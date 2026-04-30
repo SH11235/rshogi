@@ -309,7 +309,8 @@ impl ParamScheduleConstants {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ResumeMetaData {
     format_version: u32,
-    params_file: String,
+    /// `<run-dir>/state.params` の絶対 or 相対パス文字列 (起動時に記録)。
+    state_params_file: String,
     completed_iterations: u32,
     total_games: usize,
     last_raw_result_mean: f64,
@@ -2597,7 +2598,7 @@ fn main() -> Result<()> {
         }
         let meta = ResumeMetaData {
             format_version: META_FORMAT_VERSION,
-            params_file: state_params.display().to_string(),
+            state_params_file: state_params.display().to_string(),
             completed_iterations: iter + 1,
             total_games,
             last_raw_result_mean: raw_result_mean,
@@ -3102,7 +3103,7 @@ mod tests {
         let path = dir.path().join("meta.json");
         let meta = ResumeMetaData {
             format_version: META_FORMAT_VERSION,
-            params_file: "tuned.params".to_owned(),
+            state_params_file: "state.params".to_owned(),
             completed_iterations: 5,
             total_games: 1000,
             last_raw_result_mean: -0.5,
