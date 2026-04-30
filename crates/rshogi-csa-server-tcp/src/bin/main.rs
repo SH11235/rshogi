@@ -648,7 +648,9 @@ fn parse_clock_presets_toml_str(
     let mut out: HashMap<rshogi_csa_server::types::GameName, ClockSpec> =
         HashMap::with_capacity(root.preset.len());
     for entry in root.preset {
-        validate_clock_spec(&entry.game_name, &entry.spec)?;
+        entry.spec.validate_total_time_nonzero().map_err(|field| {
+            anyhow::anyhow!("clock preset {:?}: {field} must be > 0", entry.game_name)
+        })?;
         let key = rshogi_csa_server::types::GameName::new(&entry.game_name);
         anyhow::ensure!(
             !out.contains_key(&key),
@@ -658,37 +660,6 @@ fn parse_clock_presets_toml_str(
         out.insert(key, entry.spec);
     }
     Ok(out)
-}
-
-/// `ClockSpec` の最小限バリデーション。`total_time_*` が 0 の preset を弾く。
-fn validate_clock_spec(game_name: &str, spec: &ClockSpec) -> anyhow::Result<()> {
-    match spec {
-        ClockSpec::Countdown { total_time_sec, .. } => {
-            anyhow::ensure!(
-                *total_time_sec > 0,
-                "clock preset {game_name:?}: total_time_sec must be > 0"
-            );
-        }
-        ClockSpec::CountdownMsec { total_time_ms, .. } => {
-            anyhow::ensure!(
-                *total_time_ms > 0,
-                "clock preset {game_name:?}: total_time_ms must be > 0"
-            );
-        }
-        ClockSpec::Fischer { total_time_sec, .. } => {
-            anyhow::ensure!(
-                *total_time_sec > 0,
-                "clock preset {game_name:?}: total_time_sec must be > 0"
-            );
-        }
-        ClockSpec::StopWatch { total_time_min, .. } => {
-            anyhow::ensure!(
-                *total_time_min > 0,
-                "clock preset {game_name:?}: total_time_min must be > 0"
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Floodgate スケジュール TOML を読む。
@@ -891,7 +862,9 @@ increment_sec = 5
         assert!(msg.contains("byoyomi-600-10"), "error must mention game_name: {msg}");
     }
 
-    /// `total_time_sec = 0` は `validate_clock_spec` で弾く。
+    /// `total_time_sec = 0` を loader 経由で弾き、ラッパーが組み立てるメッセージ
+    /// (`clock preset "x": <field> must be > 0`) が崩れないことを回帰防止する
+    /// E2E 1 件。`ClockSpec` 全 variant は core 側 table テストでカバー。
     #[test]
     fn load_clock_presets_rejects_zero_total_time() {
         let raw = r#"
@@ -905,6 +878,7 @@ byoyomi_sec = 10
         let msg = format!("{err:#}");
         assert!(msg.contains("total_time_sec"), "error must mention field: {msg}");
         assert!(msg.contains("broken"), "error must mention game_name: {msg}");
+        assert!(msg.contains("must be > 0"), "error must include comparison phrase: {msg}");
     }
 
     /// 未知の `kind` を持つ preset は serde の untagged で Err になる。
