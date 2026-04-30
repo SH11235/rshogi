@@ -11,49 +11,74 @@
 //! は文字列スライスで扱う。改行コードは TCP 経路では `write_line` 内部で
 //! `\n` を付加し、WS 経路では text frame の境界そのものが行境界になる。
 
-use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+
+#[cfg(feature = "websocket")]
+use std::collections::VecDeque;
+#[cfg(feature = "websocket")]
+use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "websocket")]
 use tungstenite::client::IntoClientRequest;
+#[cfg(feature = "websocket")]
 use tungstenite::handshake::client::Request;
+#[cfg(feature = "websocket")]
 use tungstenite::stream::MaybeTlsStream;
+#[cfg(feature = "websocket")]
 use tungstenite::{Message, WebSocket};
 
 use crate::event::Event;
 
 /// 接続先のスキーム解析結果。`host` 設定文字列から `from_host_port` で生成する。
+///
+/// `WebSocket` バリアントは `websocket` feature 有効時のみ存在する。feature OFF で
+/// `ws://` / `wss://` URL を渡すと `from_host_port` が `Err` を返す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportTarget {
     /// `tcp://host:port` または scheme なし `host` + `port`。
     Tcp { host: String, port: u16 },
     /// `ws://host[:port]/path` または `wss://host[:port]/path`。`port` 設定は無視される。
+    #[cfg(feature = "websocket")]
     WebSocket { url: String },
 }
 
 impl TransportTarget {
     /// `server.host` 設定文字列に scheme が含まれていれば優先し、そうでなければ
     /// 既存の `host:port` 形式として TCP 接続先に解釈する。
-    pub fn from_host_port(host: &str, port: u16) -> Self {
+    ///
+    /// `websocket` feature OFF で `ws://` / `wss://` を渡した場合は `Err` を返す。
+    pub fn from_host_port(host: &str, port: u16) -> Result<Self> {
         if host.starts_with("ws://") || host.starts_with("wss://") {
-            Self::WebSocket {
-                url: host.to_owned(),
+            // 片方の cfg block だけがコンパイルされる: feature ON で `WebSocket`
+            // バリアントを返し、OFF では明示エラーで bail する。
+            #[cfg(feature = "websocket")]
+            {
+                return Ok(Self::WebSocket {
+                    url: host.to_owned(),
+                });
             }
-        } else if let Some(rest) = host.strip_prefix("tcp://") {
-            Self::Tcp {
-                host: rest.to_owned(),
-                port,
-            }
-        } else {
-            Self::Tcp {
-                host: host.to_owned(),
-                port,
+            #[cfg(not(feature = "websocket"))]
+            {
+                bail!(
+                    "WebSocket scheme `{host}` was provided but the `websocket` feature is disabled"
+                );
             }
         }
+        if let Some(rest) = host.strip_prefix("tcp://") {
+            return Ok(Self::Tcp {
+                host: rest.to_owned(),
+                port,
+            });
+        }
+        Ok(Self::Tcp {
+            host: host.to_owned(),
+            port,
+        })
     }
 }
 
@@ -73,8 +98,11 @@ pub struct ConnectOpts {
 /// `start_reader_thread` を呼ぶまでは inline で `read_line_*` / `write_line` を
 /// 使い、対局開始後は reader thread に reader 部分を移して main thread が
 /// `write_line` のみを使う運用を想定する。
+///
+/// `WebSocket` バリアントは `websocket` feature 有効時のみ存在する。
 pub enum CsaTransport {
     Tcp(TcpTransport),
+    #[cfg(feature = "websocket")]
     WebSocket(WsTransport),
 }
 
@@ -85,6 +113,7 @@ impl CsaTransport {
             TransportTarget::Tcp { host, port } => {
                 Ok(Self::Tcp(TcpTransport::connect(host, *port, opts.tcp_keepalive)?))
             }
+            #[cfg(feature = "websocket")]
             TransportTarget::WebSocket { url } => {
                 Ok(Self::WebSocket(WsTransport::connect(url, opts.ws_origin.as_deref())?))
             }
@@ -96,6 +125,7 @@ impl CsaTransport {
     pub fn read_line_blocking(&mut self, timeout: Duration) -> Result<String> {
         match self {
             Self::Tcp(t) => t.read_line_blocking(timeout),
+            #[cfg(feature = "websocket")]
             Self::WebSocket(w) => w.read_line_blocking(timeout),
         }
     }
@@ -104,6 +134,7 @@ impl CsaTransport {
     pub fn read_line_nonblocking(&mut self) -> Result<Option<String>> {
         match self {
             Self::Tcp(t) => t.read_line_nonblocking(),
+            #[cfg(feature = "websocket")]
             Self::WebSocket(w) => w.read_line_nonblocking(),
         }
     }
@@ -112,6 +143,7 @@ impl CsaTransport {
     pub fn write_line(&mut self, line: &str) -> Result<()> {
         match self {
             Self::Tcp(t) => t.write_line(line),
+            #[cfg(feature = "websocket")]
             Self::WebSocket(w) => w.write_line(line),
         }
     }
@@ -120,6 +152,7 @@ impl CsaTransport {
     pub fn write_keepalive(&mut self) -> Result<()> {
         match self {
             Self::Tcp(t) => t.write_raw(b"\n"),
+            #[cfg(feature = "websocket")]
             Self::WebSocket(w) => w.write_line(""),
         }
     }
@@ -129,6 +162,7 @@ impl CsaTransport {
     pub fn start_reader_thread(&mut self, tx: mpsc::Sender<Event>) -> Result<()> {
         match self {
             Self::Tcp(t) => t.start_reader_thread(tx),
+            #[cfg(feature = "websocket")]
             Self::WebSocket(w) => w.start_reader_thread(tx),
         }
     }
@@ -298,7 +332,8 @@ impl TcpTransport {
     }
 }
 
-/// WebSocket 経路の transport。
+/// WebSocket 経路の transport。`websocket` feature 有効時のみ提供。
+#[cfg(feature = "websocket")]
 pub struct WsTransport {
     ws: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
     /// `start_reader_thread` 後は reader が thread 内で動作する。inline 操作禁止フラグ。
@@ -310,6 +345,7 @@ pub struct WsTransport {
     pending_lines: VecDeque<String>,
 }
 
+#[cfg(feature = "websocket")]
 impl WsTransport {
     fn connect(url: &str, origin: Option<&str>) -> Result<Self> {
         log::info!("[CSA/WS] 接続中: {url}");
@@ -508,6 +544,7 @@ impl WsTransport {
 }
 
 /// `WsTransport::try_read_one_frame` の戻り値。
+#[cfg(feature = "websocket")]
 enum FrameOutcome {
     /// text frame を 1 つ受信した（複数行を含み得る）。
     Text(String),
@@ -517,6 +554,7 @@ enum FrameOutcome {
 
 /// `tungstenite::WebSocket` 内部の `TcpStream` に到達して read_timeout を設定する
 /// ためのヘルパ。`MaybeTlsStream` の variant に応じて適切な参照を返す。
+#[cfg(feature = "websocket")]
 fn stream_of_ws(ws: &WebSocket<MaybeTlsStream<TcpStream>>) -> Option<&TcpStream> {
     match ws.get_ref() {
         MaybeTlsStream::Plain(s) => Some(s),
@@ -558,7 +596,7 @@ mod tests {
 
     #[test]
     fn target_parses_tcp_default() {
-        let t = TransportTarget::from_host_port("wdoor.c.u-tokyo.ac.jp", 4081);
+        let t = TransportTarget::from_host_port("wdoor.c.u-tokyo.ac.jp", 4081).unwrap();
         assert_eq!(
             t,
             TransportTarget::Tcp {
@@ -570,7 +608,7 @@ mod tests {
 
     #[test]
     fn target_parses_explicit_tcp_scheme() {
-        let t = TransportTarget::from_host_port("tcp://floodgate.example", 4081);
+        let t = TransportTarget::from_host_port("tcp://floodgate.example", 4081).unwrap();
         assert_eq!(
             t,
             TransportTarget::Tcp {
@@ -580,9 +618,10 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "websocket")]
     #[test]
     fn target_parses_ws_and_wss() {
-        let t = TransportTarget::from_host_port("ws://localhost:8787/ws/room1", 0);
+        let t = TransportTarget::from_host_port("ws://localhost:8787/ws/room1", 0).unwrap();
         assert_eq!(
             t,
             TransportTarget::WebSocket {
@@ -593,7 +632,8 @@ mod tests {
         let t = TransportTarget::from_host_port(
             "wss://rshogi-csa-server-workers-staging.example.workers.dev/ws/room1",
             0,
-        );
+        )
+        .unwrap();
         assert_eq!(
             t,
             TransportTarget::WebSocket {
@@ -601,5 +641,13 @@ mod tests {
                     .to_owned()
             }
         );
+    }
+
+    #[cfg(not(feature = "websocket"))]
+    #[test]
+    fn target_rejects_ws_without_feature() {
+        let err = TransportTarget::from_host_port("ws://localhost:8787/ws/room1", 0).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("websocket"), "expected websocket-related error, got: {msg}");
     }
 }

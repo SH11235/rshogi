@@ -347,7 +347,7 @@ fn run_one_game(
 
     // サーバー接続。host に scheme (`ws://` / `wss://` / `tcp://`) があれば
     // それに従い、無ければ既存挙動どおり `host:port` の TCP。
-    let target = TransportTarget::from_host_port(&host, config.server.port);
+    let target = TransportTarget::from_host_port(&host, config.server.port)?;
     let opts = ConnectOpts {
         tcp_keepalive: config.server.keepalive.tcp,
         ws_origin: config.server.ws_origin.clone(),
@@ -477,7 +477,7 @@ fn acquire_lobby_match(
         );
     }
 
-    let target = TransportTarget::from_host_port(&config.server.host, config.server.port);
+    let target = TransportTarget::from_host_port(&config.server.host, config.server.port)?;
     let opts = ConnectOpts {
         tcp_keepalive: config.server.keepalive.tcp,
         ws_origin: config.server.ws_origin.clone(),

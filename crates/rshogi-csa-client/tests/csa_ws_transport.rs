@@ -2,6 +2,12 @@
 //!
 //! `tungstenite` の sync server を loopback ポートで立て、`CsaTransport` の
 //! WebSocket 経路が 1 line = 1 text frame の対応で送受信できることを確認する。
+//!
+//! `websocket` feature OFF 時はファイル全体を build 対象から外す
+//! (`tungstenite` を直接利用しているため、feature OFF では依存が pull されず
+//! テスト build が通らない)。
+
+#![cfg(feature = "websocket")]
 
 use std::net::TcpListener;
 use std::sync::mpsc;
@@ -45,7 +51,8 @@ fn ws_transport_send_then_recv_line() {
         ws.send(Message::Text("LOGIN:OK".into())).expect("send response");
     });
 
-    let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0);
+    let target =
+        TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0).expect("ws target");
     let mut transport = CsaTransport::connect(
         &target,
         &ConnectOpts {
@@ -75,7 +82,8 @@ fn ws_transport_reader_thread_delivers_multiple_lines() {
         thread::sleep(Duration::from_millis(50));
     });
 
-    let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0);
+    let target =
+        TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0).expect("ws target");
     let mut transport = CsaTransport::connect(
         &target,
         &ConnectOpts {
@@ -117,7 +125,8 @@ fn ws_transport_splits_multiline_frame_into_lines() {
         thread::sleep(Duration::from_millis(50));
     });
 
-    let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0);
+    let target =
+        TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0).expect("ws target");
     let mut transport = CsaTransport::connect(
         &target,
         &ConnectOpts {
@@ -160,7 +169,8 @@ fn ws_transport_reader_thread_splits_multiline_frame() {
         thread::sleep(Duration::from_millis(50));
     });
 
-    let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0);
+    let target =
+        TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0).expect("ws target");
     let mut transport = CsaTransport::connect(
         &target,
         &ConnectOpts {
@@ -196,7 +206,8 @@ fn ws_transport_empty_text_frame_treated_as_keepalive() {
         ws.send(Message::Text("AFTER_KEEPALIVE".into())).expect("after");
     });
 
-    let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0);
+    let target =
+        TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0).expect("ws target");
     let mut transport = CsaTransport::connect(
         &target,
         &ConnectOpts {

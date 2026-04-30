@@ -100,7 +100,7 @@ impl CsaConnection {
     /// 既存呼び出し互換: TCP 経路に絞った接続。
     pub fn connect(host: &str, port: u16, tcp_keepalive: bool) -> Result<Self> {
         Self::connect_with_target(
-            &TransportTarget::from_host_port(host, port),
+            &TransportTarget::from_host_port(host, port)?,
             &ConnectOpts {
                 tcp_keepalive,
                 ws_origin: None,
