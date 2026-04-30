@@ -64,3 +64,4 @@ fresh start で seed として再利用する。詳細は `crates/tools/docs/sps
 - #578 — `rshogi_to_yo_params` の default 検知
 - #579 — `--params` 廃止 + `--run-dir` 採用 + ドキュメント整理
 - #580 — checkpoint safety (lock + state hash + use-existing 明示化 + final.params)
+- #581 — runbook §10.7 命名整理 + run-dir integration test (fake USI engine)

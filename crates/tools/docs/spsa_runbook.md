@@ -1017,40 +1017,45 @@ python3 /path/to/rshogi/tune/tune.py apply /tmp/tuned_yo.params source/
 > `cp <run-dir>/state.params /tmp/snapshot.params` で明示的にスナップショット
 > を取ってから apply すること。
 
-### 10.7 旧 run dir からの引き継ぎ
+### 10.7 旧 run の最終値を seed にして新 run を始める
 
-旧バージョンの spsa バイナリで作られた run dir (旧 meta 形式や `tuned.params`
-ベースのパス命名を持つもの) を、現バージョンで継続したい場合の手順。
+旧バージョン spsa の run-dir (旧 meta 形式 / `tuned.params` 命名) や、何らか
+の理由で resume できなくなった run の **最終値だけを取り出して新 run の
+canonical として使う** 手順。**resume ではなく fresh start** であることに注意。
 
 #### できること / できないこと
 
-- **できる**: 旧 run の最終 params を新 run の `--init-from` ソースとして使う
-- **できない**: `completed_iterations` / `total_games` / SPSA schedule 状態の引き継ぎ
-  (新フォーマットの hash 群が旧 meta に存在しないため、resume は不可)
+- **できる**: 旧 run の最終 params 値を新 run の `--init-from` (canonical) として渡す
+- **できない**: 旧 run の `completed_iterations` / `total_games` / SPSA schedule
+  状態の継承。これらは「resume」概念だが、旧 meta から新形式 v4 の hash 群を
+  復元できないため resume は不可
 
-#### 引き継ぎ手順
+#### 手順
 
 ```bash
-# 旧 run の最終 params (tuned.params など) を canonical として保存
+# 旧 run の最終 params を新 run の canonical として一旦保管
 OLD_RUN="runs/spsa/20260401_120000_oldrun"
 cp "${OLD_RUN}/tuned.params" spsa_params/seed_from_oldrun.params
+# (新 run で生成済みなら ${OLD_RUN}/final.params or ${OLD_RUN}/state.params を使う)
 
-# 新 run を fresh start (iter は 0 からカウント)
-NEW_RUN="runs/spsa/$(date -u +%Y%m%d_%H%M%S)_resumed_from_oldrun"
+# 新 run を fresh start (iter は 0 からカウントし直す)
+NEW_RUN="runs/spsa/$(date -u +%Y%m%d_%H%M%S)_seeded_from_oldrun"
 cargo run --release -p tools --bin spsa -- \
   --run-dir "${NEW_RUN}" \
   --init-from spsa_params/seed_from_oldrun.params \
-  --iterations <残りたい iter 数> \
+  --iterations <回したい iter 数> \
   --games-per-iteration 64 ...
 ```
 
 #### 注意点
 
-- 新 run の iter 1 は旧 run の続きではなく「旧最終値を初期値とする新規 SPSA」。
-  schedule の `c_k` も最初から (大きい摂動) で始まるため、旧 run 末尾と同じ
-  収束領域に戻るには数十 iter かかる場合がある。
-- 旧 run の stats / values CSV は引き継がない。集計が必要なら手動で結合する。
-- 「完全に途中から再開」が必要なら、旧 run を作った時点のバイナリで継続するしかない。
+- 新 run の iter 1 は旧 run の「続き」ではなく「旧最終値を初期値とする独立な
+  SPSA」。schedule (`c_k`) も最初の大きい摂動から始まるため、旧 run 末尾と
+  同じ収束領域に戻るには数十 iter 必要なケースがある。
+- 旧 run の `stats.csv` / `values.csv` は新 run には引き継がない。両方の集計が
+  必要なら手動で結合する。
+- **真の途中再開**が必要なら、旧 run を作ったバイナリでそのまま継続するしか
+  ない (新バイナリで旧 meta を読むことは bail する)。
 
 ## 11. トラブルシューティング
 
@@ -1097,8 +1102,8 @@ cargo run --release -p tools --bin spsa -- \
 
 `meta.json` の `format_version` が現バージョンの想定と異なる場合に出る。
 旧形式の `meta.json` を持つ run dir は resume 不可なので、新規 run dir で
-`--init-from <canonical>` から fresh start する (旧 run の最終値を引き継ぎたい
-場合は §10.7 を参照)。
+`--init-from <canonical>` から fresh start する (旧 run の最終値を seed として
+再利用したい場合は §10.7 を参照)。
 
 ### `param 名集合が meta と不一致です`
 
