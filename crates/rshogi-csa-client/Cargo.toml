@@ -7,14 +7,45 @@ description = "CSA protocol client (CLI bridge) that wires a USI engine to a CSA
 license = "GPL-3.0-only"
 repository = "https://github.com/SH11235/rshogi"
 
+# crate を library + binary 構成に分割。consumer (Tauri 等) は lib を取り込み、
+# `--no-default-features --features tcp` 等で WS / CLI 依存を切り落とせる。
+[lib]
+name = "rshogi_csa_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "csa_client"
+path = "src/main.rs"
+# CLI 用 dep (clap / ctrlc / env_logger 等) は `cli` feature で gate 済みのため、
+# bin の build にも `cli` feature を要求する。consumer が `default-features = false`
+# で取り込むと bin はビルド対象から除外される。
+required-features = ["cli"]
+
+[features]
+# default は CLI binary をそのまま動かすためのフルセット。
+default = ["tcp", "websocket", "cli"]
+
+# TCP transport は std::net のみで実装されているため常時有効に近いが、
+# 「明示的に opt-out したい consumer はいない」という意味で feature flag は提供する。
+# 中身は空 (=切り替える dep がない)。
+tcp = []
+
+# CSA-over-WebSocket transport。tungstenite + rustls を pull する。
+websocket = ["dep:tungstenite", "dep:rustls"]
+
+# CLI (`csa_client` バイナリ) を組み立てるための feature。clap / ctrlc /
+# env_logger を pull する。consumer から取り込むときは無効化することで
+# これら CLI 系依存を切れる。
+cli = ["dep:clap", "dep:ctrlc", "dep:env_logger"]
+
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-env_logger.workspace = true
 log.workspace = true
+# `toml::Value` は EngineConfig.options の公開フィールド型として library API の
+# 一部になっているため、feature gate 不可 (consumer から見える型のため常時必須)。
 toml.workspace = true
 
 rshogi-core = { path = "../rshogi-core" }
@@ -24,13 +55,20 @@ rshogi-csa = { path = "../rshogi-csa" }
 # protocol モジュールが必要とする pure な型 / 関数のみを取り込む。
 rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false }
 
+# `libc` は engine.rs の `pre_exec` で `setpgid` を呼ぶ unix 経路、および
+# transport.rs の TCP keepalive (`SO_KEEPALIVE`) で使われる。両方とも library
+# コード側のため feature gate せず常時必須。
+libc = "0.2"
+
 # CSA-over-WebSocket 用の sync ハンドシェイク + フレーミング。
 # rustls + webpki ルートで TLS を実装し、native-tls 経由の OpenSSL 依存を避ける。
-tungstenite = { version = "0.27", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+tungstenite = { version = "0.27", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"], optional = true }
 # rustls 0.23 は process-level の `CryptoProvider` を起動時に明示登録する必要がある
 # （`tungstenite` の rustls feature は cert source だけを切り替え、provider は選ばない）。
 # `ring` provider を `main()` 冒頭で `install_default()` 経由で登録する。
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 
-ctrlc = "3.4"
-libc = "0.2"
+# CLI 専用 dep。`cli` feature でのみ pull する。
+clap = { workspace = true, optional = true }
+ctrlc = { version = "3.4", optional = true }
+env_logger = { workspace = true, optional = true }
