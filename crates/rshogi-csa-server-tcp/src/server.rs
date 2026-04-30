@@ -2082,6 +2082,11 @@ where
     // してから入れる（AGREE 待ち中に REJECT / %CHUDAN / 切断で不成立になった
     // 対局を `%%LIST` / `%%SHOW` に出さないため）。unregister は本関数 epilogue で
     // 無条件に呼ぶ（未登録 game_id への unregister は no-op）。
+    // public 経路は preset map (or fallback) で clock を解決して渡す。
+    // private 経路では `drive_private_game` が challenge entry の `ClockSpec` を
+    // 直接渡すため、`drive_game_inner` 自体は clock 解決を行わない。
+    let clock_spec =
+        resolve_clock_spec(&state.config.clock_presets, &state.config.clock, &game_name).clone();
     let inner = drive_game_inner(
         state.as_ref(),
         &game_id,
@@ -2090,6 +2095,7 @@ where
         match_initial_sfen.clone(),
         &mut black_transport,
         &mut white_transport,
+        clock_spec,
         &result_code_slot,
     )
     .await;
@@ -2137,6 +2143,7 @@ async fn drive_game_inner<R, K, P, H>(
     match_initial_sfen: Option<String>,
     black_transport: &mut TcpTransport,
     white_transport: &mut TcpTransport,
+    clock_spec: ClockSpec,
     result_code_slot: &Rc<std::cell::Cell<Option<&'static str>>>,
 ) -> Result<(), ServerError>
 where
@@ -2145,10 +2152,9 @@ where
     P: PasswordStore + 'static,
     H: FloodgateHistoryStorage + 'static,
 {
-    // Game_Summary を両対局者に送信。clock は game_name に紐付くプリセットを
-    // 優先し、未登録 (or presets 空) なら global fallback を使う。
-    let clock_spec =
-        resolve_clock_spec(&state.config.clock_presets, &state.config.clock, &game_name);
+    // Game_Summary を両対局者に送信。`clock_spec` は呼び出し側 (`drive_game` /
+    // `drive_private_game`) が解決済の値を渡す: public は preset map (or fallback)、
+    // private は challenge entry の値。
     let clock = clock_spec.build_clock();
     let time_section = clock_spec.format_time_section();
     // `initial_sfen` が設定されていればそれから派生、無ければ平手固定のブロックを使う。
@@ -2284,10 +2290,13 @@ where
     // を前倒ししても shutdown 判定は 0 に落ちない。逆に言うと、将来
     // `active_game_count()` の参照先をうかつに `GameRegistry` に戻すと
     // persist_kifu 中の棋譜消失 race が再発するので注意。
-    {
-        let mut league = state.league.lock().await;
-        let _ = league.end_game(&matched);
-    }
+    // `League::end_game` は呼び出し側 wrapper の epilogue で行う:
+    // - `drive_game` (public): wrapper の epilogue で `league.end_game` する
+    // - `drive_private_game` (private): League 非介入のため呼ばない
+    // ここで前倒ししていた `end_game` を wrapper 集約に変更したのは、private 経路
+    // で League に登録されていない handle に対して `end_game` を呼ぶと StateError
+    // になるため。`%%LIST` / `%%WHO` の整合性は `games.unregister` の前倒しで
+    // 引き続き保たれる。
     {
         let mut games = state.games.lock().await;
         games.unregister(game_id);
@@ -2304,7 +2313,9 @@ where
     // `csa_games_total` と `csa_games_finished_total` の総和不変条件が崩れない。
     result_code_slot.set(Some(primary_result_code(&result)));
 
-    // 棋譜 + 00LIST 永続化。
+    // 棋譜 + 00LIST 永続化。`time_section` は `drive_game_inner` 入口で
+    // `clock_spec` から解決済の値を再利用する (二重 resolve を避けるため
+    // 明示的に渡す)。
     persist_kifu(
         state,
         game_id,
@@ -2315,6 +2326,7 @@ where
         end_time,
         &moves,
         &result,
+        clock_spec.format_time_section(),
     )
     .await?;
     Ok(())
@@ -2908,6 +2920,7 @@ async fn persist_kifu<R, K, P, H>(
     end_time: chrono::DateTime<chrono::Utc>,
     moves: &[KifuMove],
     result: &GameResult,
+    time_section: String,
 ) -> Result<(), ServerError>
 where
     R: RateStorage + 'static,
@@ -2932,12 +2945,7 @@ where
         start_time: start_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         end_time: end_time.format("%Y/%m/%d %H:%M:%S").to_string(),
         event: "rshogi-csa-server-tcp".to_owned(),
-        time_section: resolve_clock_spec(
-            &state.config.clock_presets,
-            &state.config.clock,
-            game_name,
-        )
-        .format_time_section(),
+        time_section,
         initial_position,
         moves: moves.to_vec(),
         result: result.clone(),
