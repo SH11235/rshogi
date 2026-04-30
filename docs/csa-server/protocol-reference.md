@@ -49,7 +49,7 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 | 行 | 受理可否 | 備考 |
 |---|---|---|
 | `LOGIN <name> <password>` | ✅ | 通常モードで対局参加。パスワード保存は shogi-server 互換 (`crates/rshogi-csa-server-tcp/src/auth.rs`) |
-| `LOGIN <name> <password> x1` | ✅ | x1 拡張モード。`%%WHO` 等が利用可能になる (`command.rs:201-205`) |
+| `LOGIN <name> <password> x1` | ✅ | x1 拡張モード要求 (`command.rs:201-205`)。**TCP** ではこのフラグが立ったセッションのみ `%%WHO` / `%%LIST` 等の global query 系を受理する (`server.rs:1149-1156` の `run_waiter`)。**Workers** は `x1` フラグ自体を保存・参照しないため、フラグ有無に関わらず global query 系は配線されない (詳細は §5) |
 | `LOGIN <name> <password> reconnect:<game_id>+<token>` `**` | ✅ | 再接続経路 (§9.1)。`x1` と排他 (`command.rs:204-225`) |
 | `LOGOUT` | ✅ | 余剰トークン拒否 (`command.rs:243`) |
 | `AGREE [<game_id>]` | ✅ | `<game_id>` 省略時は `None` (`command.rs:249`) |
