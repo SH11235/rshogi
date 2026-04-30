@@ -545,9 +545,12 @@ fn state_params_path(run_dir: &Path) -> PathBuf {
 /// rename) ため、本リストには含めない。`meta.json` も apply_init_action が個別に
 /// 「失敗で bail」セマンティクスで削除するため別扱い。
 ///
-/// **override 先 (`--meta-file` / `--stats-csv` 等で run-dir 外を指定した場合) は
-/// この関数の戻り値に含めない**: ユーザが意図的に run-dir 外に置いたファイルは
-/// 「外部で管理する」意図とみなし、勝手に削除しない。
+/// **CSV override 先 (`--stats-csv` / `--stats-aggregate-csv` /
+/// `--param-values-csv` で run-dir 外を指定した場合) はこの関数の戻り値に
+/// 含めない**: CSV は run の物理進行ログであり、外部集約 CSV に append する
+/// 運用 (複数 run の比較ログ等) を force-init で破壊しないため。なお
+/// `--meta-file` の override 先は本関数では扱わず、`apply_init_action` 側で
+/// 別途削除される (active resume state は run-dir 外でも force-init の対象)。
 fn default_force_init_cleanup_paths(run_dir: &Path) -> Vec<PathBuf> {
     vec![
         default_param_values_csv_path(run_dir),
@@ -639,7 +642,22 @@ fn write_param_values_csv_header(writer: &mut BufWriter<File>, params: &[SpsaPar
     Ok(())
 }
 
+/// CSV writer の出力先の親ディレクトリを必要に応じて作成する。
+///
+/// `--stats-csv subdir/foo.csv` のように override で深いパスを指定された
+/// 場合、親 dir が存在しないと `open()` が失敗する。run-dir デフォルト経路
+/// では `apply_init_action` が `--run-dir` を作成済みのため redundant だが、
+/// override 経路でのみ意味がある (race-safe な idempotent 操作)。
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create parent dir for {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn open_stats_csv_writer(path: &Path, resume: bool) -> Result<BufWriter<File>> {
+    ensure_parent_dir(path)?;
     let write_header = if resume {
         if !path.exists() {
             true
@@ -675,6 +693,7 @@ fn open_stats_csv_writer(path: &Path, resume: bool) -> Result<BufWriter<File>> {
 }
 
 fn open_stats_aggregate_csv_writer(path: &Path, resume: bool) -> Result<BufWriter<File>> {
+    ensure_parent_dir(path)?;
     let write_header = if resume {
         if !path.exists() {
             true
@@ -714,6 +733,7 @@ fn open_param_values_csv_writer(
     resume: bool,
     params: &[SpsaParam],
 ) -> Result<BufWriter<File>> {
+    ensure_parent_dir(path)?;
     let write_header = if resume {
         if !path.exists() {
             true
@@ -1382,32 +1402,48 @@ fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
     Ok(params)
 }
 
+/// state.params を tempfile + persist で atomic に書き込む。
+///
+/// 反復ごとに呼ばれるため、SIGINT / OOM / 電源断で truncate 中の壊れた
+/// state.params が残ると resume 不能になる。`atomic_copy_file` と同じ
+/// 「同一 FS 内 tempfile → flush → persist (rename)」パターンに統一する。
 fn write_params(path: &Path, params: &[SpsaParam]) -> Result<()> {
-    let file =
-        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
-    let mut w = BufWriter::new(file);
-    for p in params {
-        // float は `{:.6}` で固定桁にしてラウンドトリップ・git diff の安定性を保つ
-        // (`{}` (Display) は `1e-7` のような指数表記や精度不定の桁を出すため)
-        let v_str = if p.is_int {
-            format!("{}", p.value.round() as i64)
-        } else {
-            format!("{:.6}", p.value)
-        };
-        let mut line = format!(
-            "{},{},{},{},{},{},{}",
-            p.name, p.type_name, v_str, p.min, p.max, p.c_end, p.r_end
-        );
-        if !p.comment.is_empty() {
-            line.push_str(" //");
-            line.push_str(&p.comment);
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create parent dir for {}", path.display()))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".spsa_state_")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to create temp file under {}", parent.display()))?;
+    {
+        let mut w = BufWriter::new(tmp.as_file_mut());
+        for p in params {
+            // float は `{:.6}` で固定桁にしてラウンドトリップ・git diff の安定性を保つ
+            // (`{}` (Display) は `1e-7` のような指数表記や精度不定の桁を出すため)
+            let v_str = if p.is_int {
+                format!("{}", p.value.round() as i64)
+            } else {
+                format!("{:.6}", p.value)
+            };
+            let mut line = format!(
+                "{},{},{},{},{},{},{}",
+                p.name, p.type_name, v_str, p.min, p.max, p.c_end, p.r_end
+            );
+            if !p.comment.is_empty() {
+                line.push_str(" //");
+                line.push_str(&p.comment);
+            }
+            if p.not_used {
+                line.push_str(PARAM_NOT_USED_MARKER);
+            }
+            writeln!(w, "{line}")?;
         }
-        if p.not_used {
-            line.push_str(PARAM_NOT_USED_MARKER);
-        }
-        writeln!(w, "{line}")?;
+        w.flush()
+            .with_context(|| format!("failed to flush state writer for {}", path.display()))?;
     }
-    w.flush()?;
+    tmp.persist(path)
+        .with_context(|| format!("failed to atomic-rename to {}", path.display()))?;
     Ok(())
 }
 
@@ -1885,10 +1921,10 @@ fn fmt_param_scalar(p: &SpsaParam, v: f64, frac: usize) -> String {
 
 /// SPSA 起動時に「どんな状態で SPSA を始めるのか」を 1 ブロックで stderr に出力する。
 ///
-/// 75,200 ゲーム規模の事故を起こした silent footgun の二度目の予防線として、
 /// 「init mode が想定通り」「active params 上位 5 件が想定値」を起動 5 秒で目視確認
-/// できる形にする。出力先は stderr なので CSV パイプ運用 (`spsa | tee log.csv`) を
-/// 阻害しない。
+/// できる形にすることで、誤った canonical を投入したまま長時間 run を回す
+/// 事故への二度目の予防線とする。出力先は stderr なので CSV パイプ運用
+/// (`spsa | tee log.csv`) を阻害しない。
 fn print_startup_summary(ctx: &StartupContext<'_>) {
     eprintln!("=== SPSA Startup Summary ===");
     eprintln!("init mode:      {}", ctx.snapshot.init_mode);
@@ -2146,7 +2182,7 @@ fn main() -> Result<()> {
                 );
             }
             // --init-from 指定時は整合性検証を実施 (resume が想定 canonical で開始した
-            // run なら値は近いはず。乖離があれば事故 (rshogi default 混入等) のサイン)。
+            // run なら値は近いはず。乖離があれば誤った canonical 混入のサイン)。
             if *verify_init {
                 let init_path =
                     cli.init_from.as_ref().expect("Resume{verify_init:true} requires init_from");
@@ -2238,7 +2274,7 @@ fn main() -> Result<()> {
     // 判定は `effective_action` (NonBailAction) で行うことで、ユーザが手動で
     // `meta.completed_iterations: 0` を作って --resume したエッジケースで重複書きを防ぐ
     // (`start_iteration == 0` だけだとそのケースで誤って iter 0 行を append してしまう)。
-    // これがあれば事故解析時 (今回の rshogi default 混入) に「最初に何で起動したか」を CSV だけで追える。
+    // これがあれば事故解析時 (誤った canonical 混入等) に「最初に何で起動したか」を CSV だけで追える。
     let is_fresh_start = matches!(
         effective_action,
         NonBailAction::CopyInitFromFresh
@@ -2759,7 +2795,7 @@ mod tests {
 
     #[test]
     fn decide_init_from_exists_requires_flag() {
-        // 旧版の silent footgun を bail する本命ケース
+        // --init-from の暗黙スキップを bail する本命ケース
         let action = decide(true, true, false, false);
         assert!(matches!(action, InitAction::Bail(InitError::InitFromExistsRequiresFlag)));
     }
@@ -2976,6 +3012,40 @@ mod tests {
         std::fs::write(&dst, b"old content").unwrap();
         atomic_copy_file(&src, &dst).unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn write_params_replaces_existing_file_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.params");
+        // 古い内容を残して、tempfile + persist で完全置換されることを確認
+        std::fs::write(&path, b"STALE,STALE,STALE\n").unwrap();
+        let params = vec![SpsaParam {
+            name: "Foo".into(),
+            type_name: "int".into(),
+            is_int: true,
+            value: 42.0,
+            min: 0.0,
+            max: 100.0,
+            c_end: 1.0,
+            r_end: 0.001,
+            comment: String::new(),
+            not_used: false,
+        }];
+        write_params(&path, &params).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with("Foo,int,42,"), "actual: {body}");
+        // ラウンドトリップ
+        let reloaded = read_params(&path).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].name, "Foo");
+        assert_eq!(reloaded[0].value, 42.0);
+        // 一時ファイルが残っていないこと
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let name = entry.unwrap().file_name();
+            let s = name.to_string_lossy();
+            assert!(!s.starts_with(".spsa_state_"), "tempfile leaked: {s}");
+        }
     }
 
     #[test]

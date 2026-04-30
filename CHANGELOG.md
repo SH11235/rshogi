@@ -1,0 +1,55 @@
+# Changelog
+
+破壊的変更と移行手順をまとめる。詳細は各 PR / runbook を参照。
+
+## Unreleased — 2026-04 SPSA 系破壊的変更
+
+### spsa CLI
+
+- `--params <path>` を完全削除 (deprecation alias なし)。代替は `--run-dir <dir>`。
+  run-dir 配下に固定レイアウトで派生ファイルを配置する (#579)
+- `--init-from` の暗黙スキップを禁止。既存 state がある状態で `--init-from`
+  を指定すると `--resume` または `--force-init` が必須 (#576)
+- `meta.json` format_version を 3 に bump。旧形式の meta は再開不可 (#576)
+- 起動時に `=== SPSA Startup Summary ===` を stderr に出力 (init mode と
+  active params 上位 5 件を確認できる) (#577)
+- `iter 0 snapshot` を `values.csv` に記録するように変更 (#577)
+- `rshogi_to_yo_params`: rshogi default 値の混入を 95% 一致閾値で検知し
+  warn/error。`--allow-rshogi-defaults` / `--strict-rshogi-defaults` を新設 (#578)
+
+### ファイル名 / パスの移行表
+
+| 旧 | 新 (run-dir 直下) |
+|---|---|
+| `<run>/tuned.params` | `<run>/state.params` |
+| `<run>/tuned.params.meta.json` | `<run>/meta.json` |
+| `<run>/tuned.params.values.csv` | `<run>/values.csv` |
+| `<run>/tuned.params.stats.csv` | `<run>/stats.csv` |
+| `<run>/tuned.params.stats_aggregate.csv` | `<run>/stats_aggregate.csv` |
+
+### CLI 移行表
+
+| 旧 | 新 |
+|---|---|
+| `spsa --params RUN/tuned.params --init-from CANON ...` | `spsa --run-dir RUN --init-from CANON ...` |
+| (resume) `spsa --params RUN/tuned.params --resume ...` | `spsa --run-dir RUN --resume ...` |
+| (やり直し) `rm -rf RUN && spsa --params ... --init-from ...` | `spsa --run-dir RUN --init-from CANON --force-init ...` |
+
+### 移行チェックリスト
+
+既存運用スクリプトをこのリポジトリ外で持っているなら、以下のパターンを grep:
+
+```bash
+rg 'tuned\.params|--params |\.values\.csv|\.stats\.csv|\.stats_aggregate\.csv|\.meta\.json'
+```
+
+旧 run dir からの継続は不可 (`tuned.params` は新 run の `--init-from` に渡し
+fresh start で seed として再利用する。詳細は `crates/tools/docs/spsa_runbook.md`
+§10.7 参照)。
+
+### 関連 PR
+
+- #576 — safety core (state machine, force-init, meta v3, atomic I/O)
+- #577 — observability (iter 0, startup summary, stderr 統一)
+- #578 — `rshogi_to_yo_params` の default 検知
+- #579 — `--params` 廃止 + `--run-dir` 採用 + ドキュメント整理

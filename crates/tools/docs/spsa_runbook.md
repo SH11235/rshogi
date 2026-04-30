@@ -236,9 +236,16 @@ spsa --run-dir "${RUN_DIR}" --init-from "${CANONICAL}" --force-init ...
 
 - **`--force-init`**: `<run-dir>/state.params` を atomic 上書きして再初期化。
   run-dir 直下の `meta.json` / `stats.csv` / `stats_aggregate.csv` / `values.csv`
-  も削除する (override で run-dir 外を指定した場合、その override 先は削除対象外)。
-  `--resume` と排他。順序保証: meta 削除 (失敗で bail) → 関連 CSV 削除 →
-  state.params atomic copy。
+  も削除する。`--resume` と排他。順序保証: meta 削除 (失敗で bail) → 関連
+  CSV 削除 → state.params atomic copy。
+  - `--meta-file` で run-dir 外の meta を override している場合、その override
+    先 **も削除する** (active resume state とみなすため。誤投入された旧 meta
+    での resume を防ぐのが force-init の意図)。
+  - `--stats-csv` / `--stats-aggregate-csv` / `--param-values-csv` を run-dir
+    外に override している場合、それらの override 先は **削除しない**。CSV は
+    run の物理進行ログであり、override 経由で外部の集約 CSV に append する
+    運用 (複数 run の比較ログ) を破壊しないため。force-init で完全リセットを
+    したいなら override 先 CSV はユーザが手で削除すること。
 - **`--strict-init-check`**: `--resume` + `--init-from` 併用時、整合性が
   median ≥ 0.5σ または max ≥ 5σ を超えたら bail (デフォルトは warn のみ)。
   CI 等で「想定外の resume」を早期検知したい場合に使う。
