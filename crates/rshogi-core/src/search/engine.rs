@@ -177,6 +177,49 @@ pub struct SearchResult {
 }
 
 // =============================================================================
+// PonderhitHandle - ponderhit 通知用のハンドル
+// =============================================================================
+
+/// Ponderhit を外部スレッドから signal するための clone 可能な handle。
+///
+/// `Search::ponderhit_handle()` で取得し、driver / コントローラスレッドから
+/// `signal()` を呼ぶことで、探索ループ内部の ponderhit flag を立てる。
+///
+/// `Arc<AtomicBool>` を直接公開するのではなく型で wrap することで、
+/// 外部からの誤った `store(false)` 等の操作を防ぐ。
+///
+/// # Lifetime
+/// 内部に `Arc<AtomicBool>` を保持しているため、生成元の `Search` が
+/// drop された後でも `signal()` 呼び出しは安全 (panic しない) だが、
+/// 観測者がいないため no-op となる。
+///
+/// # `reset_flags` との相互作用
+/// `Search::reset_flags()` 呼び出し後は内部 flag が clear されるため、
+/// 必要に応じて再度 `signal()` を呼ぶ必要がある。
+#[derive(Clone, Debug)]
+pub struct PonderhitHandle {
+    flag: Arc<AtomicBool>,
+}
+
+impl PonderhitHandle {
+    /// Ponderhit を通知する。
+    ///
+    /// 複数回呼んでも安全 (冪等)。Search 側が観測 swap で消費するまで
+    /// flag は立ったままになる。
+    pub fn signal(&self) {
+        // Relaxed: 観測側 (search_with_callback の swap 三箇所) も Relaxed。
+        // flag 自体が唯一の同期点で、ponderhit 前に書いた他メモリの観測を
+        // 探索側に保証する必要は無い。
+        self.flag.store(true, Ordering::Relaxed);
+    }
+}
+
+const _: () = {
+    fn assert_send_sync<T: Send + Sync>() {}
+    let _ = assert_send_sync::<PonderhitHandle>;
+};
+
+// =============================================================================
 // Search - 探索エンジン
 // =============================================================================
 
@@ -779,13 +822,19 @@ impl Search {
     }
 
     /// ponderhitフラグを取得（探索スレッドへの通知に使用）
+    #[deprecated(note = "use ponderhit_handle()")]
     pub fn ponderhit_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.ponderhit_flag)
     }
 
-    /// ponderhitを要求（外部スレッドから）
-    pub fn request_ponderhit(&self) {
-        self.ponderhit_flag.store(true, Ordering::SeqCst);
+    /// Ponderhit を外部スレッドから signal するための handle を取得する。
+    ///
+    /// 返り値の handle は `Clone` 可能で、探索 thread とは独立に保持できる。
+    /// 同一 `Search` から複数回取得した handle はすべて同じ ponderhit flag を共有する。
+    pub fn ponderhit_handle(&self) -> PonderhitHandle {
+        PonderhitHandle {
+            flag: Arc::clone(&self.ponderhit_flag),
+        }
     }
 
     /// 探索を停止
@@ -1876,6 +1925,14 @@ pub(crate) fn search_helper(
 // =============================================================================
 
 #[cfg(test)]
+impl Search {
+    /// テスト専用: ponderhit flag の現在値を読み取る。
+    pub(crate) fn ponderhit_flag_for_test(&self) -> bool {
+        self.ponderhit_flag.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2272,5 +2329,42 @@ mod tests {
 
         let usi = info.to_usi_string();
         assert!(usi.contains("score mate -4"));
+    }
+
+    #[test]
+    fn ponderhit_handle_signals_search() {
+        let search = Search::new_with_eval_hash(1, 1);
+        let handle = search.ponderhit_handle();
+        handle.signal();
+        assert!(search.ponderhit_flag_for_test());
+    }
+
+    #[test]
+    fn ponderhit_handle_signals_from_other_thread() {
+        let search = Search::new_with_eval_hash(1, 1);
+        let handle = search.ponderhit_handle();
+        std::thread::spawn(move || handle.signal()).join().unwrap();
+        assert!(search.ponderhit_flag_for_test());
+    }
+
+    #[test]
+    fn ponderhit_handle_outlives_search_drop() {
+        let handle = {
+            let search = Search::new_with_eval_hash(1, 1);
+            search.ponderhit_handle()
+        };
+        // Search drop 後でも panic しないことを確認する。
+        // flag の状態は観測できないため、panic 不在のみが検査対象。
+        handle.signal();
+    }
+
+    #[test]
+    fn ponderhit_handle_cleared_by_reset_flags() {
+        let search = Search::new_with_eval_hash(1, 1);
+        let handle = search.ponderhit_handle();
+        handle.signal();
+        assert!(search.ponderhit_flag_for_test());
+        search.reset_flags();
+        assert!(!search.ponderhit_flag_for_test());
     }
 }
