@@ -962,11 +962,18 @@ fn sha256_hex_of_file(path: &Path) -> Result<String> {
 /// が CSV 1 行 1 param で読み込むため、現状この前提は parse 段階で実質保証されている。
 /// 将来 parse 経路を変える場合、この関数も区切り文字を `\0` 等に変更すること
 /// (改行混入時に異なる名前集合が同じ hash を返す可能性があるため)。
+///
+/// debug ビルドでは `\n` 含有を `debug_assert!` で検知し、parse 経路変更時の
+/// regression を test 段階で捕捉する。release ビルドではコストゼロ。
 fn param_name_set_sha256(params: &[SpsaParam]) -> String {
     let mut names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
     names.sort_unstable();
     let mut hasher = Sha256::new();
-    for n in names {
+    for n in &names {
+        debug_assert!(
+            !n.contains('\n'),
+            "param name must not contain '\\n' (would corrupt name-set hash): {n:?}"
+        );
         hasher.update(n.as_bytes());
         hasher.update(b"\n");
     }
@@ -1027,10 +1034,13 @@ fn verify_init_matches_existing(init_path: &Path, existing_path: &Path) -> Resul
     let matched = diffs.iter().filter(|(_, _, _, d)| *d < 0.5).count();
     let mut sorted_d: Vec<f64> = diffs.iter().map(|(_, _, _, d)| *d).collect();
     sorted_d.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median = if sorted_d.is_empty() {
-        0.0
-    } else {
-        sorted_d[sorted_d.len() / 2]
+    // 厳密中央値: 偶数個のときは下側中値と上側中値の平均を取る。
+    // 旧実装は `sorted_d[n/2]` で常に上側中値を返しており、--strict-init-check の
+    // 閾値 (0.5σ) 判定をわずかに過大評価していた。
+    let median = match sorted_d.len() {
+        0 => 0.0,
+        n if n.is_multiple_of(2) => (sorted_d[n / 2 - 1] + sorted_d[n / 2]) / 2.0,
+        n => sorted_d[n / 2],
     };
     let max = sorted_d.iter().copied().fold(0.0_f64, f64::max);
 
@@ -1152,8 +1162,12 @@ fn apply_init_action(
         }
         InitAction::Bail(err) => bail!("init/resume 設定エラー: {}", err.message()),
     }
-    NonBailAction::from_init_action(action)
-        .ok_or_else(|| anyhow::anyhow!("apply_init_action: Bail variant escaped"))
+    // ここに到達するのは Bail 以外の 4 バリアント。`Bail` は上の match で `bail!` 早期 return
+    // するため、`from_init_action` が `None` を返す経路は論理的に到達不能。
+    // `unreachable!` でなく `expect` を使うのは、万が一バグで Bail が漏れたときに
+    // 内部 invariant 違反として明示的に panic するため (anyhow::Error にせず fail-fast)。
+    Ok(NonBailAction::from_init_action(action)
+        .expect("invariant: Bail handled above; non-Bail variants always convertible"))
 }
 
 /// 起動時にしか変わらないメタフィールドのスナップショット。
@@ -2663,6 +2677,41 @@ mod tests {
 
     fn write_params_file(path: &Path, lines: &[&str]) {
         std::fs::write(path, lines.join("\n") + "\n").unwrap();
+    }
+
+    #[test]
+    fn verify_median_with_even_count_uses_average_of_middle_pair() {
+        // 4 件 (偶数) で diff が step 単位で {0, 2, 4, 6} になるよう構築。
+        // 厳密中央値 = (2 + 4) / 2 = 3.0σ (旧実装 `[n/2]` だと上側中値 4.0σ になる)。
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.params");
+        let existing = dir.path().join("existing.params");
+        // step=10 で diff が 0/20/40/60 → step 単位 {0, 2, 4, 6}
+        write_params_file(
+            &init,
+            &[
+                "p0,int,100,0,1000,10,0.002",
+                "p1,int,100,0,1000,10,0.002",
+                "p2,int,100,0,1000,10,0.002",
+                "p3,int,100,0,1000,10,0.002",
+            ],
+        );
+        write_params_file(
+            &existing,
+            &[
+                "p0,int,100,0,1000,10,0.002",
+                "p1,int,120,0,1000,10,0.002",
+                "p2,int,140,0,1000,10,0.002",
+                "p3,int,160,0,1000,10,0.002",
+            ],
+        );
+        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        assert_eq!(report.total, 4);
+        assert!(
+            (report.median_step_units - 3.0).abs() < 1e-9,
+            "median should be 3.0σ (average of 2 and 4), got {}",
+            report.median_step_units
+        );
     }
 
     #[test]
