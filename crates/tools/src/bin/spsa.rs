@@ -1006,6 +1006,22 @@ impl NonBailAction {
             Self::Resume { .. } => InitMode::Resume,
         }
     }
+
+    /// 「今この起動で何をしたか」を表す kebab-case ラベル (startup summary 用)。
+    ///
+    /// run の **出自** (= 初回起動モード) を表す `InitMode` (`meta.init_mode`) とは
+    /// 別軸で、毎回の起動アクションを示す。fresh 系初回起動なら `InitMode` と
+    /// 同値、resume 起動なら `"resume"` と `InitMode::FreshInitFrom` 等の組み合わせ
+    /// になる。これにより summary 上で「今 resume なのか fresh なのか」と
+    /// 「この run は最初に何で生まれたか」を独立に確認できる。
+    fn launch_label(&self) -> &'static str {
+        match self {
+            Self::CopyInitFromFresh => "fresh-init-from",
+            Self::UseExistingFresh => "fresh-existing",
+            Self::ForceInitOverwrite => "force-init",
+            Self::Resume { .. } => "resume",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2127,6 +2143,9 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
 /// 将来項目を増やしても呼び出し側の修正が小さくなる。
 struct StartupContext<'a> {
     snapshot: &'a InitMetaSnapshot,
+    /// 今回の起動アクション (resume / fresh-init-from / fresh-existing / force-init)。
+    /// `snapshot.init_mode` (run 全体の出自) とは別軸で表示するため別途渡す。
+    launch_action: &'a NonBailAction,
     schedule: &'a ScheduleConfig,
     params: &'a [SpsaParam],
     active_mask: &'a [bool],
@@ -2156,7 +2175,11 @@ fn fmt_param_scalar(p: &SpsaParam, v: f64, frac: usize) -> String {
 /// (`spsa | tee log.csv`) を阻害しない。
 fn print_startup_summary(ctx: &StartupContext<'_>) {
     eprintln!("=== SPSA Startup Summary ===");
-    eprintln!("init mode:      {}", ctx.snapshot.init_mode);
+    // launch action: 「今この起動で何をしたか」 (= NonBailAction)。
+    // origin mode: 「この run は最初に何で生まれたか」 (= meta.init_mode)。
+    // fresh 系初回起動なら両者は一致、resume では割れる (resume / fresh-init-from 等)。
+    eprintln!("launch action:  {}", ctx.launch_action.launch_label());
+    eprintln!("origin mode:    {}", ctx.snapshot.init_mode);
     eprintln!("params:         {}", ctx.params_path.display());
     eprintln!("meta:           {}", ctx.meta_path.display());
     eprintln!("params sha256:  {} (起動時スナップショット)", ctx.snapshot.init_params_sha256);
@@ -2602,6 +2625,7 @@ fn main() -> Result<()> {
 
     print_startup_summary(&StartupContext {
         snapshot: &init_snapshot,
+        launch_action: &effective_action,
         schedule: &schedule,
         params: &params,
         active_mask: &active_mask,
@@ -3507,6 +3531,28 @@ mod tests {
         assert!(result.is_err(), "should bail when meta removal fails");
         // params は触られていない (atomic copy が走らない)
         assert_eq!(std::fs::read(&target_params).unwrap(), b"old content\n");
+    }
+
+    #[test]
+    fn non_bail_action_launch_label_covers_all_variants() {
+        // launch_label と init_mode の対応関係:
+        //   - fresh 系 (CopyInitFromFresh / UseExistingFresh / ForceInitOverwrite) は
+        //     launch_label と init_mode の文字列が同値 (run の出自 = 今回の起動)
+        //   - Resume では launch_label="resume" / init_mode は元 run の出自を保持
+        assert_eq!(NonBailAction::CopyInitFromFresh.launch_label(), "fresh-init-from");
+        assert_eq!(NonBailAction::UseExistingFresh.launch_label(), "fresh-existing");
+        assert_eq!(NonBailAction::ForceInitOverwrite.launch_label(), "force-init");
+        assert_eq!(NonBailAction::Resume { verify_init: false }.launch_label(), "resume");
+        assert_eq!(NonBailAction::Resume { verify_init: true }.launch_label(), "resume");
+
+        // fresh 系では launch_label と init_mode (kebab-case Display) が一致する
+        for action in [
+            NonBailAction::CopyInitFromFresh,
+            NonBailAction::UseExistingFresh,
+            NonBailAction::ForceInitOverwrite,
+        ] {
+            assert_eq!(action.launch_label(), format!("{}", action.init_mode()));
+        }
     }
 
     #[test]

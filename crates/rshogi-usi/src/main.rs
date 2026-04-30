@@ -23,8 +23,8 @@ use rshogi_core::nnue::{
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{
-    DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, Search, SearchInfo,
-    SearchResult, SearchTuneParams,
+    DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, PonderhitHandle, Search,
+    SearchInfo, SearchResult, SearchTuneParams,
 };
 use rshogi_core::types::{EnteringKingRule, Move};
 use serde_json::json;
@@ -78,8 +78,8 @@ struct UsiEngine {
     search_thread: Option<thread::JoinHandle<(Search, SearchResult)>>,
     /// 探索停止用のフラグ（探索スレッドと共有）
     stop_flag: Option<Arc<AtomicBool>>,
-    /// ponderhit通知フラグ
-    ponderhit_flag: Option<Arc<AtomicBool>>,
+    /// ponderhit通知ハンドル
+    ponderhit_handle: Option<PonderhitHandle>,
     /// bestmove出力抑制フラグ（cmd_go内部でcmd_stopする際に使用）
     suppress_bestmove: Arc<AtomicBool>,
     /// Stochastic_Ponder オプションのミラー
@@ -136,7 +136,7 @@ impl UsiEngine {
             skill_options: rshogi_core::search::SkillOptions::default(),
             search_thread: None,
             stop_flag: None,
-            ponderhit_flag: None,
+            ponderhit_handle: None,
             suppress_bestmove: Arc::new(AtomicBool::new(false)),
             stochastic_ponder: false,
             last_position_cmd: None,
@@ -1010,9 +1010,8 @@ impl UsiEngine {
         // stop/ponderhitフラグをリセット（スレッド生成前に行い、go()内での競合を防ぐ）
         search.reset_flags();
         let stop_flag = search.stop_flag();
-        let ponderhit_flag = search.ponderhit_flag();
         self.stop_flag = Some(stop_flag.clone());
-        self.ponderhit_flag = Some(ponderhit_flag.clone());
+        self.ponderhit_handle = Some(search.ponderhit_handle());
 
         let suppress_flag = Arc::clone(&self.suppress_bestmove);
         let builder = thread::Builder::new().stack_size(SEARCH_STACK_SIZE);
@@ -1214,8 +1213,8 @@ impl UsiEngine {
             return;
         }
 
-        if let Some(flag) = &self.ponderhit_flag {
-            flag.store(true, Ordering::SeqCst);
+        if let Some(handle) = &self.ponderhit_handle {
+            handle.signal();
         }
     }
 
@@ -1258,7 +1257,7 @@ impl UsiEngine {
             }
         }
         self.stop_flag = None;
-        self.ponderhit_flag = None;
+        self.ponderhit_handle = None;
     }
 
     /// displayコマンド: 現在の局面を表示（デバッグ用）
