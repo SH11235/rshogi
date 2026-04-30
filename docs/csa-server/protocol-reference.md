@@ -182,19 +182,26 @@ CSA v1.2.1 標準互換クライアントは未知キー / 未知行を無視で
 互換クライアントは無視できる:
 
 ```
-Reconnect_Token:<16 hex>
+Reconnect_Token:<32 hex>
 ```
+
+`<32 hex>` は `[0-9a-f]` で固定 32 文字 (128 bit 乱数の lowercase hex 表現、
+[`ReconnectToken::generate`](../../crates/rshogi-csa-server/src/types.rs) `types.rs:94-111`)。クライアントは値を切り詰めず原文のまま保存・送信
+すること。
 
 **2. クライアント側の再ログイン**
 
 切断側クライアントは新しい TCP セッションで以下を送る (`command.rs:201-225`):
 
 ```
-LOGIN <handle> <password> reconnect:<game_id>+<token>
+LOGIN <handle>+<game_name>+<color> <password> reconnect:<game_id>+<token>
 ```
 
+`<handle>+<game_name>+<color>` は通常 LOGIN と同じ `parse_handle`
+([`server.rs:68`](../../crates/rshogi-csa-server-tcp/src/server.rs)) を通すため、再接続要求でも省略不可。bare `<handle>` を送ると
+`reconnect:` トークンを伴っていても `LOGIN:incorrect` で拒否される (`server.rs:894-901`)。
 `x1` モードフラグとは排他。`<game_id>` は Game_Summary の `Game_ID:` で受け取った
-値、`<token>` は `Reconnect_Token:` で受け取った値。
+値、`<token>` は `Reconnect_Token:` で受け取った 32 文字。
 
 **3. サーバー側の判定と応答**
 
@@ -237,8 +244,8 @@ GameRoom DO への接続、というフローを取る。
 | 行 | 役割 | 実装位置 |
 |---|---|---|
 | `LOGIN_LOBBY <handle>+<game_name>+<color> <password>` | queue 追加 | `crates/rshogi-csa-server-workers/src/lobby_protocol.rs:70` |
-| `LOGOUT_LOBBY` | queue 離脱 | `crates/rshogi-csa-server-workers/src/lobby.rs` |
-| `LOBBY_PING` / `LOBBY_PONG` | DO Hibernation 復帰時の双方向 keep-alive | 同上 |
+| `LOGOUT_LOBBY` | queue 離脱 | `crates/rshogi-csa-server-workers/src/lobby.rs:251` |
+| `LOBBY_PONG` | client → server。受信のみ実装 (queue 滞在中の no-op)。サーバーからの `LOBBY_PING` 送出と PONG 応答処理は未実装 (`lobby.rs:257-260`) | `lobby.rs:257` |
 | `LOGIN_LOBBY:<handle> OK` | queue 登録成功 | `lobby_protocol.rs:231` |
 | `LOGIN_LOBBY:incorrect <reason>` | 登録失敗 (`reason` は `LoginLobbyError::reason` 参照) | `lobby_protocol.rs:46-57, 236` |
 | `MATCHED <room_id> <color>` | ペアリング成立。`<room_id>` は `lobby-<game_name>-<32hex>` | `lobby_protocol.rs:222` |
