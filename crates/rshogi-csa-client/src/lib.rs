@@ -19,11 +19,12 @@
 //! # rustls CryptoProvider に関する注意
 //!
 //! `websocket` feature を有効化した場合、`rustls 0.23` は process-level の
-//! `CryptoProvider` が起動時に明示登録されていることを要求する（未登録だと TLS
-//! ハンドシェイク時に panic する）。**本 crate からは provider を install しない**
-//! （複数 consumer が同 process に同居したときに二重 install を避けるため）。
+//! `CryptoProvider` が起動時に明示登録されていることを要求する。**呼び忘れた
+//! 状態で `wss://` 接続を試みると TLS ハンドシェイク時に panic する**。
 //!
-//! consumer 側 `main()` 起動時に 1 度だけ次のいずれかを呼ぶこと:
+//! **本 crate からは provider を install しない**（複数 consumer が同 process
+//! に同居したときに二重 install を避けるため）。consumer 側 `main()` 起動時に
+//! 1 度だけ次のいずれかを呼ぶこと:
 //!
 //! ```ignore
 //! let _ = rustls::crypto::ring::default_provider().install_default();
@@ -31,6 +32,12 @@
 //!
 //! 本 crate 同梱の `csa_client` バイナリ (`src/main.rs`) はこれを行っているが、
 //! library として取り込む consumer は自分で同等の初期化を行う必要がある。
+//!
+//! # Panics
+//!
+//! `websocket` feature 有効時、上記 `CryptoProvider` の install を行わずに
+//! `wss://` 経路で `CsaConnection::connect_with_target` 等を呼ぶと `rustls`
+//! 内部で panic する。consumer 側で起動時 install を必ず行うこと。
 
 pub mod config;
 pub mod engine;

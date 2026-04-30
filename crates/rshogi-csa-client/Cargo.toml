@@ -27,7 +27,8 @@ default = ["tcp", "websocket", "cli"]
 
 # TCP transport は std::net のみで実装されているため常時有効に近いが、
 # 「明示的に opt-out したい consumer はいない」という意味で feature flag は提供する。
-# 中身は空 (=切り替える dep がない)。
+# 中身は空 (=切り替える dep がない) で、無効化しても TcpTransport 本体は常に
+# ビルド対象に残る（feature の役割は依存切り替えではなく将来の opt-in 用 marker）。
 tcp = []
 
 # CSA-over-WebSocket transport。tungstenite + rustls を pull する。

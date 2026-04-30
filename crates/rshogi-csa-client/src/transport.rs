@@ -54,6 +54,8 @@ impl TransportTarget {
     /// `websocket` feature OFF で `ws://` / `wss://` を渡した場合は `Err` を返す。
     pub fn from_host_port(host: &str, port: u16) -> Result<Self> {
         if host.starts_with("ws://") || host.starts_with("wss://") {
+            // 片方の cfg block だけがコンパイルされる: feature ON で `WebSocket`
+            // バリアントを返し、OFF では明示エラーで bail する。
             #[cfg(feature = "websocket")]
             {
                 return Ok(Self::WebSocket {
