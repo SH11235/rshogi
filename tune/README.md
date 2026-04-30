@@ -80,6 +80,24 @@ cargo run --release -p tools --bin rshogi_to_yo_params -- \
   --output /tmp/tuned_yo.params
 ```
 
+#### rshogi default 値の検知
+
+入力 rshogi `.params` の値列が `SearchTuneParams::option_specs()` の default と
+95% 以上一致した場合、`rshogi_to_yo_params` は警告を出す。これは
+`generate_spsa_params` の出力 (= rshogi 内部 default 値) を canonical の代わりに
+誤投入するのを防ぐためのチェック。
+
+挙動とフラグ:
+
+| 状況 | デフォルト | `--allow-rshogi-defaults` | `--strict-rshogi-defaults` |
+|---|---|---|---|
+| default と <95% 一致 | 通常変換 | 通常変換 | 通常変換 |
+| default と ≥95% 一致 | warn 出力 + 続行 | 警告抑制して続行 | error で停止 |
+
+意図的に default 値から始めたい場合は `--allow-rshogi-defaults` を、CI で混入を
+完全に防ぎたい場合は `--strict-rshogi-defaults` を指定する。両者の同時指定は
+意味が矛盾するため bail。
+
 ### マッピング表の整合性検証
 
 ```bash
