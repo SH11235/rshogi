@@ -466,7 +466,25 @@ impl GameRoom {
             .await?
             .unwrap_or_else(|| "unknown".to_owned());
         let game_id = format!("{room_id}-{started}");
-        let clock_spec = resolve_clock_spec_for_game(&self.env, game_name)?;
+        // 双方の LOGIN は既に OK を返しているため、ここで `?` で Err を伝播させると
+        // 両クライアントには Game_Summary も `##[ERROR]` 通知も届かず部屋が永久に
+        // 詰まる。`CLOCK_PRESETS` の不正設定 (`parse_clock_presets` Err) や、deploy
+        // race で Lobby OnceCell キャッシュと GameRoom env が乖離して `game_name`
+        // 未登録に落ちるケースも、buoy reservation 失敗と同じ pending match abort
+        // 経路に揃えて部屋を解放する。
+        let clock_spec = match resolve_clock_spec_for_game(&self.env, game_name) {
+            Ok(spec) => spec,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] clock spec resolution failed for game_name '{game_name}': {e:?}; rejecting pending match"
+                );
+                self.abort_pending_match_with_error(&format!(
+                    "##[ERROR] clock spec for '{game_name}' could not be resolved"
+                ))
+                .await?;
+                return Ok(false);
+            }
+        };
         // 双方の LOGIN は既に OK を返しているので、予約で失敗したまま早期
         // return するとスロットが永久に詰まる。Exhausted に加え、CAS リトライ
         // 上限到達などの Err も pending match abort 経路に落として部屋を
