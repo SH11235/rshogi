@@ -9,7 +9,8 @@
 //! ([`crate::matching::league::League::confirm_match`]) が担う。
 
 use crate::matching::league::{MatchedPair, PairingCandidate};
-use crate::types::Color;
+use crate::types::{Color, PlayerName};
+use rand::Rng;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -165,6 +166,63 @@ impl LeastDiffPairingStrategy {
             Some(s) => Xoshiro256PlusPlus::seed_from_u64(s),
             None => Xoshiro256PlusPlus::from_seed(rand::random()),
         }
+    }
+}
+
+/// 1 ペア分の配色決定ロジック。private match dispatch 等の **shuffling を伴わない
+/// 経路** から呼ぶ用途で公開する。
+///
+/// 双方が `Some` で相補的 → そのまま割当。片方のみ `Some` → そちらの希望を尊重して
+/// もう片方は反対色。双方 `None` → `rng.random::<bool>()` で乱択。
+/// 双方が同色 (`(Black, Black)` / `(White, White)`) → `None` (色不適合、上位層が
+/// CHALLENGE 受理時に弾く想定だが防御的に Option を返す)。
+///
+/// 既存 [`try_pair_with_cost`] は `try_pair` 内 PRNG シャッフルでランダム性を
+/// 担保しているため本 helper を経由しない (deterministic な (None,None) →
+/// `(a,b)` 割当を保つ)。private match では shuffling が無いので、本 helper の
+/// `rng.random` で配色を randomize する。
+pub fn resolve_color_for_pair<R: Rng>(
+    a_name: PlayerName,
+    a_color: Option<Color>,
+    b_name: PlayerName,
+    b_color: Option<Color>,
+    rng: &mut R,
+) -> Option<MatchedPair> {
+    match (a_color, b_color) {
+        (Some(Color::Black), Some(Color::White)) | (Some(Color::Black), None) => {
+            Some(MatchedPair {
+                black: a_name,
+                white: b_name,
+            })
+        }
+        (Some(Color::White), Some(Color::Black)) | (Some(Color::White), None) => {
+            Some(MatchedPair {
+                black: b_name,
+                white: a_name,
+            })
+        }
+        (None, Some(Color::Black)) => Some(MatchedPair {
+            black: b_name,
+            white: a_name,
+        }),
+        (None, Some(Color::White)) => Some(MatchedPair {
+            black: a_name,
+            white: b_name,
+        }),
+        (None, None) => {
+            if rng.random::<bool>() {
+                Some(MatchedPair {
+                    black: a_name,
+                    white: b_name,
+                })
+            } else {
+                Some(MatchedPair {
+                    black: b_name,
+                    white: a_name,
+                })
+            }
+        }
+        (Some(Color::Black), Some(Color::Black)) | (Some(Color::White), Some(Color::White)) => None,
     }
 }
 
@@ -535,5 +593,63 @@ mod tests {
                 Some(PlayerStatus::AgreeWaiting { .. })
             ));
         }
+    }
+
+    /// `resolve_color_for_pair`: 双方が `Some` で相補的なら指定通り、片方 `None` なら
+    /// 反対色、双方 `None` なら rng による乱択、双方同色は `None` を返す契約を
+    /// 1 関数で網羅する。
+    #[test]
+    fn resolve_color_for_pair_covers_all_cases() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
+        let alice = PlayerName::new("alice");
+        let bob = PlayerName::new("bob");
+
+        // 相補的指定
+        let r = resolve_color_for_pair(
+            alice.clone(),
+            Some(Color::Black),
+            bob.clone(),
+            Some(Color::White),
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(r.black.as_str(), "alice");
+        assert_eq!(r.white.as_str(), "bob");
+
+        // 片方 None
+        let r =
+            resolve_color_for_pair(alice.clone(), Some(Color::White), bob.clone(), None, &mut rng)
+                .unwrap();
+        assert_eq!(r.black.as_str(), "bob");
+        assert_eq!(r.white.as_str(), "alice");
+
+        let r =
+            resolve_color_for_pair(alice.clone(), None, bob.clone(), Some(Color::Black), &mut rng)
+                .unwrap();
+        assert_eq!(r.black.as_str(), "bob");
+        assert_eq!(r.white.as_str(), "alice");
+
+        // 双方 None: rng による乱択 (シードを固定して経路網羅を検証)。
+        let r = resolve_color_for_pair(alice.clone(), None, bob.clone(), None, &mut rng).unwrap();
+        assert!(
+            (r.black.as_str() == "alice" && r.white.as_str() == "bob")
+                || (r.black.as_str() == "bob" && r.white.as_str() == "alice"),
+        );
+
+        // 同色希望は None
+        assert!(
+            resolve_color_for_pair(
+                alice.clone(),
+                Some(Color::Black),
+                bob.clone(),
+                Some(Color::Black),
+                &mut rng,
+            )
+            .is_none(),
+        );
+        assert!(
+            resolve_color_for_pair(alice, Some(Color::White), bob, Some(Color::White), &mut rng,)
+                .is_none(),
+        );
     }
 }
