@@ -177,10 +177,21 @@ impl LeastDiffPairingStrategy {
 /// 双方が同色 (`(Black, Black)` / `(White, White)`) → `None` (色不適合、上位層が
 /// CHALLENGE 受理時に弾く想定だが防御的に Option を返す)。
 ///
-/// 既存 [`try_pair_with_cost`] は `try_pair` 内 PRNG シャッフルでランダム性を
-/// 担保しているため本 helper を経由しない (deterministic な (None,None) →
-/// `(a,b)` 割当を保つ)。private match では shuffling が無いので、本 helper の
-/// `rng.random` で配色を randomize する。
+/// # `try_pair_with_cost` と統合しない理由
+///
+/// 既存 [`try_pair_with_cost`] は同形の `match (a_color, b_color)` 表を持つが、
+/// `(None, None)` ケースの挙動が異なる:
+///
+/// - `try_pair_with_cost`: 入力順 `(a, b)` を **deterministic** に Black/White に
+///   割当てる。ランダム性は `LeastDiffPairingStrategy::try_pair` が外側で行う
+///   `indices.shuffle(&mut rng)` (shuffle ベース) で担保される。
+/// - `resolve_color_for_pair`: 入力順がそのままなら配色も固定になるので、本関数
+///   内部で `rng.random::<bool>()` を引いて乱択する。private match dispatch は
+///   shuffle 経路を持たないため。
+///
+/// 以上の挙動差を共通 helper に吸収しようとすると引数で動作モードを切り替える
+/// 設計になりコストが先に立つため、`(None, None)` の扱いだけが違う 2 関数として
+/// 並置する。
 pub fn resolve_color_for_pair<R: Rng>(
     a_name: PlayerName,
     a_color: Option<Color>,

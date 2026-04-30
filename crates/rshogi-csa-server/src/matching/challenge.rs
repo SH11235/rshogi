@@ -52,8 +52,18 @@ impl ChallengeToken {
         Self(s)
     }
 
-    /// 既存文字列から token を作る。検証なしで wrap するだけなので、信頼できる
-    /// 入力 (DO storage 復元 / `private-<token>` パース後など) に限定して使う。
+    /// 既存文字列から token を作る。本関数は **構造的検証なし** で wrap するだけ
+    /// (24 文字長 / hex 文字種のチェックは行わない)。呼び出し側は次のいずれかを
+    /// 保証する責務を持つ:
+    ///
+    /// - DO storage から `Deserialize` 経由で復元した値 (= 過去に
+    ///   [`ChallengeToken::generate`] が出力した文字列)
+    /// - LOGIN handle の `+private-<token>+free` パース経路で抽出した
+    ///   `<token>` 部分 (上位パーサが 24hex を validate 済の前提)
+    ///
+    /// 不正な入力 (短すぎ / 非 hex / 空文字列) を渡しても本関数自体は panic せず
+    /// 受理するが、結果として lookup ミス / 無効 token が登録簿に積まれる事故に
+    /// なる。validate は**構築側 (パーサ)** の責務。
     pub fn from_raw<S: Into<String>>(raw: S) -> Self {
         Self(raw.into())
     }
@@ -76,12 +86,15 @@ pub enum ColorTag {
 }
 
 impl ColorTag {
+    /// `rshogi_core::Color` を serde 対応のローカル enum に変換する。
     pub fn from_core(c: Color) -> Self {
         match c {
             Color::Black => Self::Black,
             Color::White => Self::White,
         }
     }
+
+    /// serde 対応のローカル enum を `rshogi_core::Color` に戻す。
     pub fn to_core(self) -> Color {
         match self {
             Self::Black => Color::Black,
@@ -210,16 +223,21 @@ impl ChallengeRegistry {
         }
     }
 
-    /// **Workers 専用**: WS attachment id を handle に紐付ける。token が無効か
-    /// 期限切れなら no-op。TCP は本 API を呼ばず、frontend 側 runtime map を
-    /// 直接更新する。
+    /// **Workers 専用**: WS attachment id を handle に紐付ける。token が無効
+    /// (未登録) か期限切れなら no-op (期限切れ entry に attachment id を
+    /// 書き込んでしまうと、`purge_expired` 直前のレースで dangling な
+    /// `pending_ws_attachment_ids` が積まれて上位 cleanup の効率を損なう)。
+    /// TCP は本 API を呼ばず、frontend 側 runtime map を直接更新する。
     pub fn mark_ws_logged_in(
         &mut self,
         token: &ChallengeToken,
         handle: PlayerName,
         ws_attachment_id: String,
+        now_ms: u64,
     ) {
-        if let Some(entry) = self.entries.get_mut(token) {
+        if let Some(entry) = self.entries.get_mut(token)
+            && entry.expires_at_ms > now_ms
+        {
             entry.pending_ws_attachment_ids.insert(handle.into_string(), ws_attachment_id);
         }
     }
@@ -227,6 +245,11 @@ impl ChallengeRegistry {
     /// **Workers 専用**: 切断時に attachment id ごと unmark。指定 handle の
     /// 現在値が `ws_attachment_id` と一致する場合のみ削除 (stale handle race
     /// 回避: 別セッションが上書きしていたら触らない)。
+    ///
+    /// `mark_ws_logged_in` と異なり TTL チェックは行わない: 期限切れ後でも
+    /// `purge_expired` が走るまでの間に WS が独自に切断したら attachment id を
+    /// 掃除したい ([`Self::purge_expired`] の戻り値経由の上位 cleanup で dead WS
+    /// への冗長な切断試行を避ける副次効果)。
     pub fn unmark_ws_logged_in(
         &mut self,
         token: &ChallengeToken,
@@ -289,13 +312,16 @@ impl ChallengeRegistry {
         self.entries.values().map(|e| e.expires_at_ms).min()
     }
 
-    /// 登録件数 (テスト用)。
+    /// 登録件数 (テスト専用 accessor)。本 PR スコープ内では production 経路で
+    /// 件数を観測する用途が無いため `#[cfg(test)]` で閉じる。Workers の Alarm
+    /// reset 判定で使うなら `earliest_expiry_ms().is_some()` で代替できるため、
+    /// 件数公開は YAGNI。
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// 登録 entry が無いかどうか (テスト用、`len` と対称的に提供)。
+    /// 登録 entry が無いかどうか (テスト専用、`len` と対称的に提供)。
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -466,7 +492,7 @@ mod tests {
                 NOW_MS,
             )
             .unwrap();
-        reg.mark_ws_logged_in(&t, PlayerName::new("alice"), "ws-1".to_owned());
+        reg.mark_ws_logged_in(&t, PlayerName::new("alice"), "ws-1".to_owned(), NOW_MS);
         let entry = reg.lookup(&t, NOW_MS).unwrap();
         assert_eq!(entry.pending_ws_attachment_ids.get("alice").map(String::as_str), Some("ws-1"));
 
@@ -477,6 +503,66 @@ mod tests {
         // 一致した attachment id では unmark する
         reg.unmark_ws_logged_in(&t, &PlayerName::new("alice"), "ws-1");
         assert!(!reg.lookup(&t, NOW_MS).unwrap().pending_ws_attachment_ids.contains_key("alice"),);
+    }
+
+    /// `mark_ws_logged_in` は期限切れ entry に対して no-op (`now_ms >= expires_at_ms`)。
+    /// 境界条件 `now_ms == expires_at_ms` も含めて検証する (期限切れ扱い)。
+    #[test]
+    fn mark_ws_logged_in_is_no_op_on_expired_entry() {
+        let mut reg = ChallengeRegistry::new();
+        let t = reg
+            .issue(
+                PlayerName::new("alice"),
+                PlayerName::new("bob"),
+                None,
+                fixed_clock(),
+                None,
+                Duration::from_secs(60),
+                NOW_MS,
+            )
+            .unwrap();
+        // 境界: now_ms == expires_at_ms ちょうどは期限切れ扱いで mark は no-op
+        let boundary = NOW_MS + 60_000;
+        reg.mark_ws_logged_in(&t, PlayerName::new("alice"), "ws-1".to_owned(), boundary);
+        // entry は purge 前なので存在するが、`pending_ws_attachment_ids` は空のまま。
+        // entry 残存は `lookup(now < expires_at_ms)` で確認 (public API 経由)。
+        assert!(reg.lookup(&t, NOW_MS).is_some(), "purge 前は entry が残る");
+        assert!(reg.lookup(&t, NOW_MS).unwrap().pending_ws_attachment_ids.is_empty());
+
+        // 期限切れ後 (now > expires_at_ms) も no-op
+        reg.mark_ws_logged_in(&t, PlayerName::new("alice"), "ws-1".to_owned(), boundary + 1);
+        assert!(reg.lookup(&t, NOW_MS).unwrap().pending_ws_attachment_ids.is_empty());
+    }
+
+    /// `purge_expired` の戻り値には削除前に積まれていた `pending_ws_attachment_ids`
+    /// が保持される (Workers Alarm handler が WS 切断のために走査する契約)。
+    #[test]
+    fn purge_expired_returns_entries_with_pending_attachment_ids() {
+        let mut reg = ChallengeRegistry::new();
+        let t = reg
+            .issue(
+                PlayerName::new("alice"),
+                PlayerName::new("bob"),
+                None,
+                fixed_clock(),
+                None,
+                Duration::from_secs(60),
+                NOW_MS,
+            )
+            .unwrap();
+        reg.mark_ws_logged_in(&t, PlayerName::new("alice"), "ws-attached".to_owned(), NOW_MS);
+
+        // 境界 (now_ms == expires_at_ms) で purge → 戻り値の entry に attachment id が残っている
+        let boundary = NOW_MS + 60_000;
+        let removed = reg.purge_expired(boundary);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(
+            removed[0].pending_ws_attachment_ids.get("alice").map(String::as_str),
+            Some("ws-attached"),
+            "戻り値の entry には先行 LOGIN 済 attachment id が保持される",
+        );
+        // 登録簿からは消えている
+        assert!(reg.is_empty());
     }
 
     /// 連続 issue で異なる token が返る (token 衝突時 retry の周辺契約: 実用上
