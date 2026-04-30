@@ -32,6 +32,7 @@ use rshogi_csa_server::config::{FloodgateFeatureIntent, validate_floodgate_featu
 use rshogi_csa_server::error::{ProtocolError, ServerError};
 use rshogi_csa_server::game::result::GameResult;
 use rshogi_csa_server::game::room::{GameRoom, GameRoomConfig, HandleOutcome};
+use rshogi_csa_server::matching::challenge::{ChallengeRegistry, ChallengeToken, IssueError};
 use rshogi_csa_server::matching::league::{League, LoginResult, MatchedPair, PlayerStatus};
 use rshogi_csa_server::matching::registry::{GameListing, GameRegistry};
 use rshogi_csa_server::port::{
@@ -82,6 +83,87 @@ pub fn parse_handle(raw: &str) -> Option<(String, GameName, Color)> {
         return None;
     }
     Some((handle, GameName::new(game_name), color))
+}
+
+/// LOGIN handle 文字列が私的対局フォーマット
+/// (`<handle>+private-<24hex>+free`) に該当しそうかを peek する。
+///
+/// `'+'` で分割した中央トークンが `private-` prefix を持てば `true` を返す。
+/// 中央トークンが存在しない (`+` で 2 分割未満) 場合や、prefix が一致しない
+/// 場合は `false`。本判定は LOGIN handler の入口で「既存 [`parse_handle`] と
+/// 私的対局専用の [`parse_handle_with_free`] のどちらに分岐するか」を決める
+/// 軽量チェックであり、hex 部分の妥当性検証は行わない。
+pub(crate) fn is_private_login_handle(raw: &str) -> bool {
+    raw.split('+').nth(1).is_some_and(|middle| middle.starts_with("private-"))
+}
+
+/// 私的対局 (`%%CHALLENGE`) issuance 経路で LOGIN の `<game_name>` トークンに
+/// 載せて使う予約 sentinel。inviter は `LOGIN <handle>+_challenge+<color> <pw> x1`
+/// で接続し、本 sentinel に到達した接続は通常のマッチング待機プールに乗らず
+/// `handle_challenge_issuance_path` に分岐する (Issue #582 受け入れ基準)。
+/// LOGIN handler の clock-preset strict mode 例外と issuance 分岐の双方から
+/// 参照されるため、文字列リテラル散在による typo を避けて const に集約する。
+pub(crate) const CHALLENGE_ISSUANCE_GAME_NAME: &str = "_challenge";
+
+/// [`parse_handle_with_free`] の失敗種別。
+///
+/// LOGIN handler 側でこれら variant を CSA プロトコルの `LOGIN:incorrect ...`
+/// 文字列へ翻訳する経路に分岐させる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PrivateLoginError {
+    /// `+` で正確に 3 分割できない (2 分割未満 or 4 分割以上) / handle が空 /
+    /// 中央トークンが `private-` prefix を持たない (本来 [`is_private_login_handle`]
+    /// で弾かれる契約違反パスの防御的キャッチ) / その他 malformed。
+    Malformed,
+    /// 中央トークンが `private-<...>` だが、続く `<...>` が 24 文字小文字 hex
+    /// でない (短すぎ / 長すぎ / 大文字 / 非 hex 含む)。
+    PrivateTokenMalformed,
+    /// 末尾の color トークンが `+free` 以外。LOGIN handler 側でこの error を
+    /// `LOGIN:incorrect color_must_be_free_for_private_game` 文字列に変換する
+    /// 経路に分岐させる用途。
+    ColorMustBeFree,
+}
+
+/// 私的対局フォーマット (`<handle>+private-<24hex>+free`) の LOGIN handle を分解する。
+///
+/// 呼び出し側は事前に [`is_private_login_handle`] で `true` を確認している前提。
+/// 違反時は `Err(Malformed)` 系を返す（呼び出し側はこの経路に入ってはいけない契約）。
+///
+/// 検証順:
+/// 1. `'+'` で正確に 3 分割できること
+/// 2. handle (index 0) が非空
+/// 3. 中央トークン (index 1) が `private-` prefix を持ち、続く部分が
+///    ちょうど 24 文字の小文字 hex (`[0-9a-f]`)
+/// 4. 末尾トークン (index 2) が `"free"`
+pub(crate) fn parse_handle_with_free(
+    raw: &str,
+) -> Result<(String, ChallengeToken), PrivateLoginError> {
+    // 既存 `parse_handle` と同じく iterator で 3 セグメントを取り出し、4+ 分割を
+    // `Err(Malformed)` で弾く (Vec collect を避けて allocation 回避)。
+    let mut it = raw.split('+');
+    let handle = it.next().ok_or(PrivateLoginError::Malformed)?;
+    let middle = it.next().ok_or(PrivateLoginError::Malformed)?;
+    let color = it.next().ok_or(PrivateLoginError::Malformed)?;
+    if it.next().is_some() {
+        return Err(PrivateLoginError::Malformed);
+    }
+
+    if handle.is_empty() {
+        return Err(PrivateLoginError::Malformed);
+    }
+    let hex_part = match middle.strip_prefix("private-") {
+        Some(rest) => rest,
+        None => return Err(PrivateLoginError::Malformed),
+    };
+    let hex_ok = hex_part.len() == 24
+        && hex_part.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !hex_ok {
+        return Err(PrivateLoginError::PrivateTokenMalformed);
+    }
+    if color != "free" {
+        return Err(PrivateLoginError::ColorMustBeFree);
+    }
+    Ok((handle.to_owned(), ChallengeToken::from_raw(hex_part)))
 }
 
 /// `clock_presets` が登録されていれば該当 spec を、無ければ `fallback` を返す。
@@ -210,6 +292,18 @@ pub struct ServerConfig {
     /// Game_Summary 末尾拡張行で配布した `reconnect_token` の照合で再参加を許可
     /// する。運用上の推奨は 60 秒。
     pub reconnect_grace_duration: Duration,
+    /// 私的対局 (`%%CHALLENGE`) で発行する token の TTL。期限超過した未消費の
+    /// challenge は `purge_expired` で自然枯死し、片側 LOGIN 済の session は
+    /// `##[ERROR] challenge expired before opponent joined` で切断される。
+    /// 既定 1 時間 (Issue #582 の受け入れ基準: TCP / Workers 両方とも秒単位で 3600)。
+    pub challenge_ttl: Duration,
+    /// `ChallengeRegistry::purge_expired` を回す軽量 task の周期。expire 検出の
+    /// 上限遅延を決める。LOGIN 経路でも都度 `purge_expired` を呼ぶため、本周期は
+    /// 「対局相手が永遠に来ない private match を expire させる」最終ガード。
+    /// CLI 露出は YAGNI、固定既定 60 秒で十分。本フィールドは `accept_loop`
+    /// 内で起動する `challenge_purge_loop` task が参照する (TTL purge loop の
+    /// 配線時に活用される、それまでは config として保持されるのみ)。
+    pub challenge_purge_interval: Duration,
 }
 
 impl ServerConfig {
@@ -236,6 +330,8 @@ impl ServerConfig {
             duplicate_login_policy: DuplicateLoginPolicy::RejectNew,
             shutdown_grace: Duration::from_secs(60),
             reconnect_grace_duration: Duration::ZERO,
+            challenge_ttl: Duration::from_secs(3600),
+            challenge_purge_interval: Duration::from_secs(60),
         }
     }
 }
@@ -585,6 +681,10 @@ where
     /// 無効化した既定構成）はこのレジストリは常に空のままで、
     /// `run_game_loop_and_record` は即時 `#ABNORMAL` に進む。
     pub(crate) reconnect_pending: Mutex<HashMap<GameId, Arc<PendingReconnect>>>,
+    /// 私的対局 (`%%CHALLENGE`) の永続データ (token → entry)。発行 / 検索 /
+    /// 消費 / TTL purge を行う core API。`pending_ws_attachment_ids` フィールド
+    /// は Workers 専用なので TCP では空のまま使われる (型分離のため除去はしない)。
+    pub(crate) challenge_registry: Mutex<ChallengeRegistry>,
 }
 
 impl<R, K, P, H> SharedState<R, K, P, H>
@@ -891,6 +991,25 @@ where
         }
     };
 
+    // 3.0. 私的対局 LOGIN handle (`<handle>+private-<24hex>+free`) は専用パーサで
+    //      分解する。本経路は Issue #582 の challenge_login (token を持って参加)
+    //      で使う ※完全な対局参加実装は後続 wave で `parse_handle_with_free` の
+    //      返り値を `ChallengeRegistry` の `lookup`/`consume` に橋渡しする。
+    //      本 wave では入口分岐のみ整え、stub として一律 `LOGIN:incorrect` 系を
+    //      返して `parse_handle_with_free` / `PrivateLoginError` の使用箇所を確保する。
+    if is_private_login_handle(full_name.as_str()) {
+        let outcome = parse_handle_with_free(full_name.as_str());
+        let response = match outcome {
+            Ok(_) => "LOGIN:incorrect challenge_login_not_implemented_yet",
+            Err(PrivateLoginError::ColorMustBeFree) => {
+                "LOGIN:incorrect color_must_be_free_for_private_game"
+            }
+            Err(_) => "LOGIN:incorrect",
+        };
+        let _ = transport.send_line(&CsaLine::new(response)).await;
+        return Ok(());
+    }
+
     // 3. handle / game_name / color を抽出。
     let Some((handle, game_name, color)) = parse_handle(full_name.as_str()) else {
         let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect")).await;
@@ -903,8 +1022,13 @@ where
     // 3.5. clock_presets が宣言済みなら、未登録 game_name は strict mode で拒否。
     //      `is_empty()` のときは presets 未宣言扱いで fallback (state.config.clock)
     //      を全 game_name に当てる後方互換モードに留まり、ここでは拒否しない。
+    //      `_challenge` は私的対局 (`%%CHALLENGE`) issuance 経路の専用 sentinel
+    //      game_name で対局時計を要求しないため、strict mode の対象外として
+    //      透過させる。本 sentinel に到達した接続は後続の `_challenge` 経路分岐
+    //      で `handle_challenge_issuance_path` に分岐する。
     if !state.config.clock_presets.is_empty()
         && !state.config.clock_presets.contains_key(&game_name)
+        && game_name.as_str() != CHALLENGE_ISSUANCE_GAME_NAME
     {
         let _ = transport.send_line(&CsaLine::new("LOGIN:incorrect unknown_game_name")).await;
         return Ok(());
@@ -931,6 +1055,14 @@ where
             return Ok(());
         }
     }
+    // 4.4. 私的対局 issuance 経路の分岐。LOGIN の game_name が `_challenge`
+    //      sentinel の場合は対局参加 (League 登録 / WaitingPool) ではなく
+    //      `%%CHALLENGE` 受信ループに入り token を発行する。x1 mode 限定で、
+    //      色トークンは無視される (issuance は対局相手が決まらないため意味がない)。
+    if game_name.as_str() == CHALLENGE_ISSUANCE_GAME_NAME {
+        return handle_challenge_issuance_path(state, transport, handle_player, x1).await;
+    }
+
     // 4.5. 再接続要求の経路分岐。LOGIN 行の 3 つ目トークンが `reconnect:<game_id>+<token>`
     //      で来た場合は新規対局参加 (League 登録 / 待機プール) ではなく、grace 中の
     //      該当対局へ「同一対局者として再参加」する経路へ。`reconnect_pending` 検索
@@ -2704,6 +2836,200 @@ where
     Ok(outcome)
 }
 
+/// 私的対局 (`%%CHALLENGE`) の token issuance 経路。LOGIN の `game_name`
+/// が `_challenge` sentinel で到着した接続をここに分岐させる。
+///
+/// 本経路では League / WaitingPool / `session_cancellers` / `reconnect_pending`
+/// 等への登録は **一切行わない**: issuance 接続は対局参加者ではなく、token を
+/// 発行して切断するか、複数 token を順次発行するクライアントとして振る舞うだけ
+/// なので、duplicate-login policy / matching の状態機械からは完全に独立させる。
+///
+/// `x1` が `false` の場合は `%%CHALLENGE` を解釈できないクライアント
+/// (CSA 標準 LOGIN のみのクライアント) なので、`LOGIN:incorrect challenge_requires_x1`
+/// で即拒否する (受け入れても無効コマンド連投で接続が無駄に消費されるだけ)。
+async fn handle_challenge_issuance_path<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
+    mut transport: TcpTransport,
+    handle: PlayerName,
+    x1: bool,
+) -> Result<(), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    if !x1 {
+        let _ = transport
+            .send_line(&CsaLine::new("LOGIN:incorrect challenge_requires_x1"))
+            .await;
+        return Ok(());
+    }
+    transport
+        .send_line(&CsaLine::new(format!("LOGIN:{} OK", handle.as_str())))
+        .await?;
+    run_challenge_issuer(state, transport, handle).await
+}
+
+/// `_challenge` 経路の受信ループ。`%%CHALLENGE` を 1 件以上発行できるよう、
+/// クライアントが `LOGOUT` または切断するまで `%%CHALLENGE` を受け付け続ける。
+///
+/// AGREE / REJECT / 指し手 / `%%` 系観戦コマンド等は本経路では意味を持たない
+/// ため `continue` で無視する (issuance はマッチングプールに参加していないので
+/// 観戦・対局制御コマンドの宛先が無い)。`KeepAlive` も `continue`、`LOGOUT`
+/// のみループ脱出。
+///
+/// **設計判断**: 既存 `run_waiter` (公開マッチング x1 経路) は未対応コマンドを
+/// 切断扱いにするが、本 issuance ループは敢えてそれと非対称に「`LOGOUT` を
+/// クリーン return / 未対応を silent ignore」とする。理由:
+///
+/// - 対局参加経路と異なり、issuance は短命な query / register コマンド層で、
+///   1 接続で複数 token を順次発行できる UX を提供する。誤入力で都度切断
+///   されると inviter が再 LOGIN (= 認証コスト + handshake) を強いられ非対称。
+/// - 切断する場合でも何の信号も送らず close するだけで、`run_waiter` の
+///   切断方針 (debug 用 trace のみ) と同質性は保ちつつ、ハンドシェイク
+///   コストだけ削れる。Issue #582 の TCP フロー §1 step 5 にある「LOGOUT
+///   応答は保証しない」という記述は「LOGOUT の応答行を返さない」意図であり、
+///   本実装でも応答行は送らない (単に loop 脱出のみ)。応答可否ではなく
+///   ループ離脱の trigger としての扱いの差異である。
+async fn run_challenge_issuer<R, K, P, H>(
+    state: Rc<SharedState<R, K, P, H>>,
+    mut transport: TcpTransport,
+    inviter: PlayerName,
+) -> Result<(), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    loop {
+        tokio::select! {
+            _ = state.shutdown.wait() => return Ok(()),
+            recv = transport.recv_line(NEAR_INFINITE) => {
+                let line = match recv {
+                    Ok(l) => l,
+                    Err(_) => return Ok(()),
+                };
+                match parse_command(&line) {
+                    Ok(ClientCommand::KeepAlive) => continue,
+                    Ok(ClientCommand::Logout) => return Ok(()),
+                    Ok(ClientCommand::Challenge {
+                        opponent,
+                        inviter_color,
+                        clock_preset,
+                        initial_sfen,
+                    }) => {
+                        process_challenge(
+                            state.as_ref(),
+                            &mut transport,
+                            &inviter,
+                            opponent,
+                            inviter_color,
+                            clock_preset,
+                            initial_sfen,
+                        )
+                        .await?;
+                    }
+                    Ok(_) | Err(_) => continue,
+                }
+            }
+        }
+    }
+}
+
+/// `%%CHALLENGE` 1 件を 4 段検証して登録する:
+///
+/// 1. `clock_preset` が `clock_presets` に登録済か (`unknown_clock_preset`)
+/// 2. `initial_sfen` が指定されていれば妥当な SFEN か (`bad_sfen`)
+/// 3. `opponent` ハンドルが `password_store` に登録済か (`unknown_opponent_handle`、TCP 限定)
+/// 4. `ChallengeRegistry::issue` で登録 (`self_challenge` は内部検出)
+///
+/// 検証失敗は `CHALLENGE:incorrect <reason>` で 1 行返して `Ok(())`。成功は
+/// `CHALLENGE:OK <token> <ttl_sec>` を返す。失敗で接続を切らないのは、issuance
+/// クライアントが連続で複数 token を発行する用途を許容するため。
+///
+/// **SFEN 検証の代替実装**: Issue #582 仕様文では `validate_handicap_sfen`
+/// 経由とあるが、当該名の helper は core / TCP どちらにも存在しない。代わりに
+/// [`position_section_from_sfen`] と [`side_to_move_from_sfen`] の双方を呼び、
+/// どちらかが `Err` なら `bad_sfen` 判定とする。これは Game_Summary 構築経路
+/// (`drive_game_inner`) と同じ 2 関数で、両者で `Ok` なら以降の対局駆動でも
+/// 同一 SFEN を再利用できる契約。
+async fn process_challenge<R, K, P, H>(
+    state: &SharedState<R, K, P, H>,
+    transport: &mut TcpTransport,
+    inviter: &PlayerName,
+    opponent: PlayerName,
+    inviter_color: Option<Color>,
+    clock_preset: GameName,
+    initial_sfen: Option<String>,
+) -> Result<(), ServerError>
+where
+    R: RateStorage + 'static,
+    K: KifuStorage + 'static,
+    P: PasswordStore + 'static,
+    H: FloodgateHistoryStorage + 'static,
+{
+    // 1. clock_preset 名解決。Workers と異なり TCP では `clock_presets` map が
+    //    spec の正となるため、未登録 preset は即拒否する。
+    let clock_spec = match state.config.clock_presets.get(&clock_preset) {
+        Some(spec) => spec.clone(),
+        None => {
+            transport
+                .send_line(&CsaLine::new("CHALLENGE:incorrect unknown_clock_preset"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // 2. initial_sfen が指定されていれば妥当な SFEN かを `position_section_from_sfen`
+    //    と `side_to_move_from_sfen` の両方でチェック (どちらかが `Err` なら `bad_sfen`)。
+    if let Some(sfen) = &initial_sfen
+        && (position_section_from_sfen(sfen).is_err() || side_to_move_from_sfen(sfen).is_err())
+    {
+        transport.send_line(&CsaLine::new("CHALLENGE:incorrect bad_sfen")).await?;
+        return Ok(());
+    }
+
+    // 3. opponent 存在確認 (TCP のみ; Workers は self-claim でこの検証を持たない)。
+    if state.password_store.lookup(opponent.as_str()).is_none() {
+        transport
+            .send_line(&CsaLine::new("CHALLENGE:incorrect unknown_opponent_handle"))
+            .await?;
+        return Ok(());
+    }
+
+    // 4. registry に発行。`SelfChallenge` のみ enum で帰ってくる。
+    // 通常運用での値域は 1.7e12 (= 2026 年現在のミリ秒) で `u64` には十分収まる。
+    // 万一システム時計が 1970 以前に巻き戻った場合は `0` に倒すが、これにより
+    // `expires_at_ms = 0 + ttl_ms` が現在時刻より遥かに小さくなり、直後の
+    // `lookup` / `consume` が即 expire 扱いとなって entry は短命に終わる
+    // (`purge_expired` で自然枯死)。`as u64` でラップアラウンドさせるよりも
+    // CLAUDE.md の「panic より `Result`」方針と整合し、安全側に倒す判断。
+    let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+    let mut reg = state.challenge_registry.lock().await;
+    match reg.issue(
+        inviter.clone(),
+        opponent,
+        inviter_color,
+        clock_spec,
+        initial_sfen,
+        state.config.challenge_ttl,
+        now_ms,
+    ) {
+        Ok(token) => {
+            let ttl_sec = state.config.challenge_ttl.as_secs();
+            transport
+                .send_line(&CsaLine::new(format!("CHALLENGE:OK {} {}", token.as_str(), ttl_sec)))
+                .await?;
+        }
+        Err(IssueError::SelfChallenge) => {
+            transport.send_line(&CsaLine::new("CHALLENGE:incorrect self_challenge")).await?;
+        }
+    }
+    Ok(())
+}
+
 /// LOGIN 行で `reconnect:<game_id>+<token>` が指定されたクライアントを受理し、
 /// 該当 `game_id` の grace 中対局へ再参加させる。
 ///
@@ -3105,6 +3431,7 @@ where
         buoy_storage,
         shutdown: GracefulShutdown::new(),
         reconnect_pending: Mutex::new(HashMap::new()),
+        challenge_registry: Mutex::new(ChallengeRegistry::new()),
     }
 }
 
@@ -3161,6 +3488,83 @@ mod tests {
         assert!(parse_handle("+g1+black").is_none());
         assert!(parse_handle("alice++black").is_none());
         assert!(parse_handle("alice+g1+purple").is_none());
+    }
+
+    #[test]
+    fn is_private_login_handle_detects_private_prefix() {
+        assert!(is_private_login_handle("alice+private-0123456789abcdef0123abcd+free"));
+        assert!(!is_private_login_handle("alice+g1+black"));
+        assert!(!is_private_login_handle("alice+_challenge+black"));
+        assert!(!is_private_login_handle("alice"));
+        assert!(!is_private_login_handle("alice+"));
+    }
+
+    #[test]
+    fn parse_handle_with_free_accepts_well_formed_input() {
+        let (handle, token) = parse_handle_with_free("alice+private-0123456789abcdef0123abcd+free")
+            .expect("well-formed private login handle");
+        assert_eq!(handle, "alice");
+        assert_eq!(token.as_str(), "0123456789abcdef0123abcd");
+    }
+
+    #[test]
+    fn parse_handle_with_free_rejects_color_other_than_free() {
+        for color in ["black", "white", "sente", "gote", "anything"] {
+            let raw = format!("alice+private-0123456789abcdef0123abcd+{color}");
+            assert_eq!(
+                parse_handle_with_free(&raw),
+                Err(PrivateLoginError::ColorMustBeFree),
+                "color={color} must be rejected with ColorMustBeFree",
+            );
+        }
+    }
+
+    #[test]
+    fn parse_handle_with_free_rejects_malformed_segments() {
+        // 2 分割しか出来ない
+        assert_eq!(
+            parse_handle_with_free("alice+private-0123456789abcdef0123abcd"),
+            Err(PrivateLoginError::Malformed),
+        );
+        // 4 分割される (余分な `+` セグメント)
+        assert_eq!(
+            parse_handle_with_free("alice+private-0123456789abcdef0123abcd+free+extra"),
+            Err(PrivateLoginError::Malformed),
+        );
+        // handle が空
+        assert_eq!(
+            parse_handle_with_free("+private-0123456789abcdef0123abcd+free"),
+            Err(PrivateLoginError::Malformed),
+        );
+        // 中央が `private-` prefix なし
+        assert_eq!(
+            parse_handle_with_free("alice+notprivate-0123456789abcdef0123abcd+free"),
+            Err(PrivateLoginError::Malformed),
+        );
+    }
+
+    #[test]
+    fn parse_handle_with_free_rejects_bad_token() {
+        // 短い (23 hex)
+        assert_eq!(
+            parse_handle_with_free("alice+private-0123456789abcdef0123abc+free"),
+            Err(PrivateLoginError::PrivateTokenMalformed),
+        );
+        // 長い (25 hex)
+        assert_eq!(
+            parse_handle_with_free("alice+private-0123456789abcdef0123abcde+free"),
+            Err(PrivateLoginError::PrivateTokenMalformed),
+        );
+        // 大文字含む
+        assert_eq!(
+            parse_handle_with_free("alice+private-0123456789ABCDEF0123abcd+free"),
+            Err(PrivateLoginError::PrivateTokenMalformed),
+        );
+        // 非 hex 含む
+        assert_eq!(
+            parse_handle_with_free("alice+private-0123456789ghijkl0123abcd+free"),
+            Err(PrivateLoginError::PrivateTokenMalformed),
+        );
     }
 
     fn sample_summary_text() -> String {

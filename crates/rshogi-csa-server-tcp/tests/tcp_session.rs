@@ -2581,3 +2581,122 @@ fn x1_floodgate_rating_storage_error_returns_internal_redaction() {
         let _ = tokio::fs::remove_dir_all(&topdir).await;
     });
 }
+
+// ---------- 私的対局 (`%%CHALLENGE`) issuance 経路 ----------
+
+/// `%%CHALLENGE` のテストで使う共通の clock_presets (1 件、`byoyomi-600-10`)。
+fn challenge_test_presets()
+-> std::collections::HashMap<rshogi_csa_server::types::GameName, ClockSpec> {
+    let mut presets = std::collections::HashMap::new();
+    presets.insert(
+        rshogi_csa_server::types::GameName::new("byoyomi-600-10"),
+        ClockSpec::Countdown {
+            total_time_sec: 600,
+            byoyomi_sec: 10,
+        },
+    );
+    presets
+}
+
+/// `_challenge` LOGIN → `%%CHALLENGE alice ... ` で自分自身を指名すると
+/// `CHALLENGE:incorrect self_challenge` で拒否される (registry 内部検出)。
+#[test]
+fn private_match_self_challenge_is_rejected() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_clock_presets("private_self_challenge", challenge_test_presets())
+                .await;
+        let (mut r, mut w) = connect(addr).await;
+        send_line(&mut w, "LOGIN alice+_challenge+black pw x1").await;
+        assert_eq!(read_line_raw(&mut r).await.unwrap(), "LOGIN:alice OK");
+        // 自分を opponent に指名する
+        send_line(&mut w, "%%CHALLENGE alice black byoyomi-600-10").await;
+        assert_eq!(read_line_raw(&mut r).await.unwrap(), "CHALLENGE:incorrect self_challenge");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// 未登録の clock_preset 名は `CHALLENGE:incorrect unknown_clock_preset` で拒否される。
+#[test]
+fn private_match_unknown_clock_preset_is_rejected() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_clock_presets("private_unknown_preset", challenge_test_presets())
+                .await;
+        let (mut r, mut w) = connect(addr).await;
+        send_line(&mut w, "LOGIN alice+_challenge+black pw x1").await;
+        assert_eq!(read_line_raw(&mut r).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut w, "%%CHALLENGE bob black no-such-preset").await;
+        assert_eq!(
+            read_line_raw(&mut r).await.unwrap(),
+            "CHALLENGE:incorrect unknown_clock_preset"
+        );
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// `password_store` に未登録の opponent ハンドルは
+/// `CHALLENGE:incorrect unknown_opponent_handle` で拒否される (TCP 限定検証)。
+#[test]
+fn private_match_unknown_opponent_handle_is_rejected() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_clock_presets("private_unknown_opponent", challenge_test_presets())
+                .await;
+        let (mut r, mut w) = connect(addr).await;
+        send_line(&mut w, "LOGIN alice+_challenge+black pw x1").await;
+        assert_eq!(read_line_raw(&mut r).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut w, "%%CHALLENGE nobody black byoyomi-600-10").await;
+        assert_eq!(
+            read_line_raw(&mut r).await.unwrap(),
+            "CHALLENGE:incorrect unknown_opponent_handle"
+        );
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// 不正な initial SFEN は `CHALLENGE:incorrect bad_sfen` で拒否される。
+#[test]
+fn private_match_bad_sfen_is_rejected() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_clock_presets("private_bad_sfen", challenge_test_presets()).await;
+        let (mut r, mut w) = connect(addr).await;
+        send_line(&mut w, "LOGIN alice+_challenge+black pw x1").await;
+        assert_eq!(read_line_raw(&mut r).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut w, "%%CHALLENGE bob black byoyomi-600-10 not-a-sfen").await;
+        assert_eq!(read_line_raw(&mut r).await.unwrap(), "CHALLENGE:incorrect bad_sfen");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}
+
+/// 4 段検証を全て満たす入力は `CHALLENGE:OK <token> <ttl>` で受理される。
+/// token は 24 文字小文字 hex、ttl は `ServerConfig::challenge_ttl` 既定の 3600 秒。
+#[test]
+fn private_match_issue_succeeds_with_valid_inputs() {
+    run_local(|| async {
+        let (addr, topdir) =
+            spawn_server_with_clock_presets("private_issue_ok", challenge_test_presets()).await;
+        let (mut r, mut w) = connect(addr).await;
+        send_line(&mut w, "LOGIN alice+_challenge+black pw x1").await;
+        assert_eq!(read_line_raw(&mut r).await.unwrap(), "LOGIN:alice OK");
+        send_line(&mut w, "%%CHALLENGE bob black byoyomi-600-10").await;
+        let resp = read_line_raw(&mut r).await.unwrap();
+        let tokens: Vec<&str> = resp.split_whitespace().collect();
+        assert_eq!(tokens.len(), 3, "unexpected response: {resp:?}");
+        assert_eq!(tokens[0], "CHALLENGE:OK");
+        // token: 24 文字小文字 hex
+        assert_eq!(tokens[1].len(), 24, "token length: {resp:?}");
+        assert!(
+            tokens[1].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "token must be lowercase hex: {resp:?}",
+        );
+        // ttl: spawn_server に渡した ServerConfig::challenge_ttl を動的に取り出して比較。
+        // sensible_defaults() の値が変わっても本テストの期待値は config から導出される。
+        let expected_ttl = rshogi_csa_server_tcp::server::ServerConfig::sensible_defaults()
+            .challenge_ttl
+            .as_secs();
+        assert_eq!(tokens[2], expected_ttl.to_string(), "ttl mismatch: {resp:?}");
+        let _ = tokio::fs::remove_dir_all(&topdir).await;
+    });
+}

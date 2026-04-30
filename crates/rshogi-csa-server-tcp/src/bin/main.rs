@@ -128,6 +128,11 @@ struct Cli {
     /// ためのバッファ。
     #[arg(long, default_value_t = 60)]
     shutdown_grace_sec: u64,
+    /// 私的対局 (`%%CHALLENGE`) で発行する token の TTL (秒)。期限超過した
+    /// 未消費の challenge は `purge_expired` で自然枯死する。Issue #582 受入
+    /// 基準: TCP / Workers 両方とも既定 3600 秒。
+    #[arg(long, default_value_t = 3600)]
+    challenge_ttl_sec: u64,
     /// Prometheus 互換メトリクスを expose する HTTP listener の bind 先（例:
     /// `127.0.0.1:9090`）。未指定時はメトリクス recorder を install せず、
     /// `metrics::counter!` 等は NoOp として実行される（軽量な atomic 1 回程度の
@@ -274,6 +279,11 @@ fn main() -> anyhow::Result<()> {
         // `#ABNORMAL` 経路のまま)。再接続を有効化したい運用ではここで 60 秒等を
         // 直接設定するか、後続の CLI / 設定経路で上書きする。
         reconnect_grace_duration: std::time::Duration::ZERO,
+        challenge_ttl: std::time::Duration::from_secs(cli.challenge_ttl_sec),
+        // `purge_expired` を回す軽量 task の周期。LOGIN-time の都度 purge と
+        // 組み合わせて十分な expire 検出が得られるため、CLI 露出は YAGNI で
+        // 固定 60 秒に閉じる。
+        challenge_purge_interval: std::time::Duration::from_secs(60),
     };
     // Floodgate 系機能の opt-in ゲートを起動前に評価する。`players_yaml_path` が
     // `Some` の状態は `enable_persistent_player_rates` 要求として intent に乗るため、
