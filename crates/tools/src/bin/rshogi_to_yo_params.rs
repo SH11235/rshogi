@@ -7,13 +7,13 @@
 //!   の値を保持する。`--base` 省略時は rshogi 値を中心に簡易 range を生成する。
 //! - rshogi 独自パラメータ（`unmapped.rshogi`）は YO 出力には含まれない（warn 出力）。
 //!
-//! ## rshogi default 検知 (PR3)
+//! ## rshogi default 値の検知
 //!
 //! 入力 rshogi `.params` の値列が `SearchTuneParams::option_specs()` の default と
-//! 95% 以上一致した場合、警告を出す。これは「`generate_spsa_params` の出力をそのまま
-//! 渡してしまった」事故 (2026-04 に 75,200 ゲーム規模の SPSA を台無しにした) の
-//! 再発防止。意図的に default 値から開始したい場合は `--allow-rshogi-defaults` で
-//! 警告を抑制、CI で完全防止したい場合は `--strict-rshogi-defaults` で error 化。
+//! 95% 以上一致した場合、警告を出す。`generate_spsa_params` の出力を canonical の
+//! 代わりに誤投入するのを防ぐためのチェック。意図的に default 値から開始したい
+//! 場合は `--allow-rshogi-defaults` で警告抑制、CI で混入を完全に防ぐ場合は
+//! `--strict-rshogi-defaults` で error 化。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -156,23 +156,17 @@ fn main() -> Result<()> {
     let rshogi_rows = load_params(&cli.rshogi_params)?;
 
     // rshogi default 一致検知: --allow-rshogi-defaults 指定時はスキップ。
-    // 95% 以上一致なら警告 (or strict 時は error)。意図的な default 開始ユーザの
-    // ノイズを最小化しつつ、事故 (generate_spsa_params 出力混入) は捕捉する。
+    // 95% 以上一致なら警告 (strict 指定時は error)。
     if !cli.allow_rshogi_defaults {
         let report = detect_rshogi_default_match(&rshogi_rows);
-        // checked == 0 のとき (= 入力に rshogi 名が 1 件も含まれない) は素通し:
-        // YO 名混在ファイル等を「rshogi default 混入事故」と誤検知しないため。
-        // 真の事故 (generate_spsa_params 出力混入) は 100% 一致なので必ず捕捉できる。
+        // checked == 0 (= 入力に rshogi 名が 1 件も含まれない) は素通し。
+        // YO 名混在ファイル等を「default 値混入」と誤検知しないため。
         if report.checked > 0 && report.match_rate() >= DEFAULT_MATCH_WARN_RATE {
             let msg = format!(
-                "入力 rshogi params の値列が rshogi 内部 default と {}/{} ({:.1}%) 一致しています。\n\
-                 \n  これは以下のどちらかを示唆します:\n\
-                 \n  (a) 意図的に rshogi default 値から SPSA を始めたい (e.g. 新規探索)\n      \
-                 → 警告抑制には --allow-rshogi-defaults を追加してください\n\
-                 \n  (b) `generate_spsa_params` の出力を間違って入力にしてしまった (事故)\n      \
-                 → 入力ファイル ({}) を再確認し、suisho10 等の canonical を渡してください\n\
-                 \n  この変換を SPSA --params に投入すると suisho10 由来でない rshogi default 値で\n  \
-                 SPSA が走り出す可能性があります (2026-04 に 75,200 ゲーム規模の事故事例あり)。",
+                "入力 rshogi params の値列が rshogi 内部 default と {}/{} ({:.1}%) 一致しています ({}).\n\
+                 \n  意図的に default 値から始める場合: --allow-rshogi-defaults を追加してください\n\
+                 \n  そうでない場合: 入力ファイルを再確認し、suisho10 等の canonical を渡してください\n      \
+                 (`generate_spsa_params` の出力をそのまま入力にしている可能性があります)",
                 report.matched,
                 report.checked,
                 report.match_rate() * 100.0,
