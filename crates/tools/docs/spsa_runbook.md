@@ -201,27 +201,34 @@ cargo run --release -p tools --bin spsa -- \
 `<run-dir>/state.params` の存在有無 × `--init-from` × `--resume` × `--force-init`
 × `--use-existing-state-as-init` の 5 軸を `decide_init_action` で一意に分類する:
 
+**Pre-flight bail (フラグ間矛盾)**: 以下を最優先で評価し、該当すれば即 bail。
+state.params の有無は問わない:
+
+| 条件 | 結果 |
+|---|---|
+| `--resume` ✓ + `--force-init` ✓ | **bail** (意味が矛盾) |
+| `--force-init` ✓ + `--init-from` 未指定 | **bail** (上書き元が必要) |
+| `--use-existing-state-as-init` ✓ + (`--init-from` ∨ `--resume` ∨ `--force-init`) | **bail** (排他) |
+
+**正常パス**: pre-flight を通過した組み合わせを `state.params` の存在有無で分岐。
+以下の 10 行で 5 軸 32 通り (上記 pre-flight に吸収される行を除いた残り) を網羅する:
+
 | state.params | `--init-from` | `--resume` | `--force-init` | `--use-existing-state-as-init` | 結果 |
 |---|---|---|---|---|---|
 | 不在 | 指定 | - | - | - | canonical を `state.params` に copy して fresh start |
-| 不在 | 指定 | - | ✓ | - | **bail** (force-init は既存対象が必要) |
 | 不在 | 指定 | ✓ | - | - | **bail** (resume は既存 state が必須) |
 | 不在 | 未指定 | - | - | - | **bail** (入力なし) |
 | 不在 | 未指定 | ✓ | - | - | **bail** (resume は既存 state が必須) |
-| 不在 | 未指定 | - | - | ✓ | **bail** (`--use-existing-state-as-init` は state が必要) |
+| 不在 | 未指定 | - | - | ✓ | **bail** (state がないと意味がない) |
 | 存在 | 指定 | - | - | - | **bail** (`--resume` か `--force-init` の明示が必要) |
 | 存在 | 指定 | ✓ | - | - | resume + 整合性 diagnostic 出力 |
-| 存在 | 指定 | - | ✓ | - | atomic 上書き (meta/CSV 削除 → state replace) |
+| 存在 | 指定 | - | ✓ | - | atomic 上書き (meta/CSV/final.params 削除 → state replace) |
 | 存在 | 未指定 | - | - | - | **bail** (`--use-existing-state-as-init` の明示が必要) |
 | 存在 | 未指定 | ✓ | - | - | 通常 resume (meta hash 検証 + state hash 検証) |
 | 存在 | 未指定 | - | - | ✓ | 既存 state を canonical として fresh start |
-| - | - | ✓ | ✓ | - | **bail** (resume と force-init は意味が矛盾) |
-| - | 未指定 | - | ✓ | - | **bail** (force-init は init-from が必要) |
-| - | (1+) | - | - | ✓ | **bail** (use-existing は他フラグと排他) |
 
-`-` はワイルドカード。表は同値クラスで集約しているが、5 軸 32 通り
-すべてが一意に分類される (完全網羅性は単体テスト
-`decide_covers_all_thirty_two_combinations` で担保)。
+`-` は「指定なし」。完全網羅性は単体テスト
+`decide_covers_all_thirty_two_combinations` で担保。
 
 > 重要: 旧版で許されていた「state 存在 + フラグなし → silent fresh start」は
 > bail に変更された。canonical を渡さず既存 state で fresh start したい場合は

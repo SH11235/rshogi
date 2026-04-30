@@ -593,7 +593,32 @@ fn default_force_init_cleanup_paths(run_dir: &Path) -> Vec<PathBuf> {
         default_param_values_csv_path(run_dir),
         default_stats_csv_path(run_dir),
         default_stats_aggregate_csv_path(run_dir),
+        // 旧 run の final.params が残っていると新 run で上書きされるまで「前回の確定値」
+        // が見え続け、tune.py apply に誤投入される事故になる。fresh 系のリスタート (force-init
+        // / fresh / use-existing) で必ず消す。
+        run_dir.join("final.params"),
     ]
+}
+
+/// fresh start (force-init を含む全 fresh 系) で削除すべき run-dir 直下のファイル。
+///
+/// `apply_init_action` は force-init 経路でのみ `default_force_init_cleanup_paths`
+/// を呼ぶ。一方、`CopyInitFromFresh` / `UseExistingFresh` 経路では既に CSV writer の
+/// `cli.resume=false` truncate で派生 CSV は上書きされるが、`final.params` は writer
+/// を持たないため放置すると stale snapshot が残り続ける。これを防ぐため fresh start
+/// 全経路で `final.params` を能動削除する。
+fn remove_stale_final_params_for_fresh_start(run_dir: &Path) -> Result<()> {
+    let final_path = run_dir.join("final.params");
+    match std::fs::remove_file(&final_path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::Error::new(e)).with_context(|| {
+            format!(
+                "failed to remove stale final.params before fresh start: {}",
+                final_path.display()
+            )
+        }),
+    }
 }
 
 fn default_meta_path(run_dir: &Path) -> PathBuf {
@@ -862,10 +887,37 @@ fn write_param_values_csv_row(
     Ok(())
 }
 
+/// `meta.json` の format_version だけ軽量に取り出すための struct。
+///
+/// `ResumeMetaData` の full schema で deserialize すると、古い meta に対して
+/// 必須フィールド不在で先に失敗するため、format_version 不一致の親切な
+/// hard bail メッセージに到達できない。version だけ別 struct で先読みする。
+#[derive(Deserialize)]
+struct MetaFormatVersionOnly {
+    format_version: u32,
+}
+
 fn load_meta(path: &Path) -> Result<ResumeMetaData> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let meta = serde_json::from_reader(reader)
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to open {}", path.display()))?;
+    // 先に format_version だけ取り出して、互換性チェックを serde 失敗より優先する
+    let version_probe: MetaFormatVersionOnly =
+        serde_json::from_slice(&bytes).with_context(|| {
+            format!("failed to parse JSON {} (format_version probe)", path.display())
+        })?;
+    if version_probe.format_version != META_FORMAT_VERSION {
+        bail!(
+            "meta format version 不一致 (got v{}, expected v{}) in {}.\n\
+             v{} 形式は v{} とは互換性がありません。\n\
+             新規 run dir で `--init-from <canonical>` から fresh start してください。",
+            version_probe.format_version,
+            META_FORMAT_VERSION,
+            path.display(),
+            version_probe.format_version,
+            META_FORMAT_VERSION,
+        );
+    }
+    let meta = serde_json::from_slice(&bytes)
         .with_context(|| format!("failed to parse JSON {}", path.display()))?;
     Ok(meta)
 }
@@ -1470,9 +1522,16 @@ struct LockInfo {
 ///
 /// 取得後は `Drop` で lock ファイルを削除する。panic 時も Drop は走るが、
 /// SIGKILL / 電源断では残留する。残留 lock は `--force-unlock` で削除可能。
+///
+/// race-safety: `Drop` は「自分が書いた body」と現在の lock ファイル内容を
+/// 突き合わせ、一致した場合だけ削除する。これにより、他プロセスに
+/// `--force-unlock` で消され別 lock に置き換わった状況で、自分の Drop が
+/// 他プロセスの lock を巻き添えで消す race を防ぐ。
 #[derive(Debug)]
 struct RunDirLock {
     path: PathBuf,
+    /// 自分が書き込んだ正本 body (改行込み)。`Drop` 時に内容一致確認に使う。
+    expected_body: String,
 }
 
 impl RunDirLock {
@@ -1491,12 +1550,19 @@ impl RunDirLock {
                     hostname: read_hostname(),
                     started_at_utc: Utc::now().to_rfc3339(),
                 };
-                let body = serde_json::to_string(&info).context("failed to serialize lock info")?;
-                writeln!(f, "{body}").with_context(|| {
+                let body_json =
+                    serde_json::to_string(&info).context("failed to serialize lock info")?;
+                writeln!(f, "{body_json}").with_context(|| {
                     format!("failed to write lock contents to {}", path.display())
                 })?;
-                f.flush().ok();
-                Ok(RunDirLock { path })
+                f.flush().with_context(|| {
+                    format!("failed to flush lock contents to {}", path.display())
+                })?;
+                let expected_body = format!("{body_json}\n");
+                Ok(RunDirLock {
+                    path,
+                    expected_body,
+                })
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let body = std::fs::read_to_string(&path).unwrap_or_else(|_| "(unreadable)".into());
@@ -1514,7 +1580,16 @@ impl RunDirLock {
 
 impl Drop for RunDirLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // 自分が書いた body と現在の lock 内容が一致するときだけ削除する。
+        // `--force-unlock` で別プロセスに置き換わっていた場合は触らない (race-safe)。
+        match std::fs::read_to_string(&self.path) {
+            Ok(current) if current == self.expected_body => {
+                let _ = std::fs::remove_file(&self.path);
+            }
+            // 内容不一致 / 既に消された / 読めない: いずれも削除しない (他者の lock を
+            // 巻き込まないことが優先)。
+            _ => {}
+        }
     }
 }
 
@@ -2291,22 +2366,11 @@ fn main() -> Result<()> {
     };
     let (start_iteration, mut total_games, init_snapshot) = match &effective_action {
         NonBailAction::Resume { verify_init } => {
+            // load_meta が format_version 不一致を先に hard bail するため、ここでは
+            // 全フィールド込みの deserialize 成功を前提にできる。
             let meta = load_meta(&meta_path).with_context(|| {
                 format!("--resume was set but metadata load failed: {}", meta_path.display())
             })?;
-            // v3 hard bail: 古い meta は再開不可 (新規 run dir で fresh start を要求)
-            if meta.format_version != META_FORMAT_VERSION {
-                bail!(
-                    "meta format version 不一致 (got v{}, expected v{}) in {}.\n\
-                     v{} 形式は v{} とは互換性がありません。\n\
-                     新規 run dir で `--init-from <canonical>` から fresh start してください。",
-                    meta.format_version,
-                    META_FORMAT_VERSION,
-                    meta_path.display(),
-                    meta.format_version,
-                    META_FORMAT_VERSION,
-                );
-            }
             if !schedule_matches(meta.schedule, schedule) {
                 if cli.force_schedule {
                     eprintln!(
@@ -2341,9 +2405,11 @@ fn main() -> Result<()> {
                        1. write_params → save_meta の間で前回 run がクラッシュした (1 反復差)\n  \
                        2. state.params が外部から書き換えられた\n  \
                      いずれにせよ resume を継続すると SPSA の進行状態が破綻するため停止します。\n\
-                     対処: 新規 run dir で `--init-from <canonical>` から fresh start するか、\n  \
-                     原因 (1) と分かっていて 1 反復差を許容する場合は新規 run dir で\n  \
-                     `--init-from {state_path} --use-existing-state-as-init` でやり直してください。",
+                     対処 (どちらか):\n  \
+                       (a) 新規 run dir で `--init-from <canonical>` から fresh start する\n  \
+                       (b) 1 反復差を許容して既存 state を起点に新 run を始める:\n        \
+                           cp {state_path} <new-run-dir>/state.params\n        \
+                           spsa --run-dir <new-run-dir> --use-existing-state-as-init ...",
                     meta_path.display(),
                     meta.current_params_sha256,
                     on_disk_state_hash,
@@ -2398,6 +2464,11 @@ fn main() -> Result<()> {
         NonBailAction::CopyInitFromFresh
         | NonBailAction::UseExistingFresh
         | NonBailAction::ForceInitOverwrite => {
+            // 旧 run の final.params が残っていると、新 run 完了時に再書き込みされるまで
+            // 「前回の確定値」が見え続ける (= apply 入力に誤投入される)。fresh 系は
+            // すべてここで能動削除する (force-init の cleanup paths にも入っているが、
+            // CopyInitFromFresh / UseExistingFresh では cleanup paths は呼ばれないため)。
+            remove_stale_final_params_for_fresh_start(&cli.run_dir)?;
             let snapshot = InitMetaSnapshot::for_fresh_start(
                 &effective_action,
                 &state_params,
@@ -3353,6 +3424,20 @@ mod tests {
     }
 
     #[test]
+    fn run_dir_lock_drop_does_not_remove_others_lock() {
+        // race scenario: 別プロセスに --force-unlock で lock を奪われ別 lock に
+        // 置き換わった状況で、自分の Drop が他者の lock を誤って削除しないこと。
+        let dir = tempfile::tempdir().unwrap();
+        let lock = RunDirLock::acquire(dir.path(), false).unwrap();
+        // 他者が .lock を別内容で上書き済み (force-unlock 後の reacquire を模擬)
+        std::fs::write(dir.path().join(".lock"), "other process took over").unwrap();
+        drop(lock);
+        // 内容不一致なので自分の Drop は削除を控える
+        let body = std::fs::read_to_string(dir.path().join(".lock")).unwrap();
+        assert_eq!(body, "other process took over");
+    }
+
+    #[test]
     fn non_bail_action_from_bail_returns_none() {
         assert!(
             NonBailAction::from_init_action(&InitAction::Bail(InitError::NoInitNorExistingParams))
@@ -3448,17 +3533,31 @@ mod tests {
     #[test]
     fn default_force_init_cleanup_paths_returns_run_dir_only() {
         // override 先 (--stats-csv で run-dir 外を指定する等) が混入しないことを担保。
-        // force-init 時の削除対象は run-dir 直下の 3 派生 CSV のみで、
+        // force-init 時の削除対象は run-dir 直下の 3 派生 CSV + final.params のみで、
         // state.params / meta.json は apply_init_action 側で別管理。
         let dir = Path::new("/tmp/some_run");
         let paths = default_force_init_cleanup_paths(dir);
-        assert_eq!(paths.len(), 3, "exactly 3 derived CSV paths");
+        assert_eq!(paths.len(), 4, "exactly 4 derived files (3 CSV + final.params)");
         assert!(paths.contains(&dir.join("values.csv")));
         assert!(paths.contains(&dir.join("stats.csv")));
         assert!(paths.contains(&dir.join("stats_aggregate.csv")));
+        assert!(paths.contains(&dir.join("final.params")));
         // state.params と meta.json は含めない (apply_init_action が個別管理)
         assert!(!paths.contains(&dir.join("state.params")));
         assert!(!paths.contains(&dir.join("meta.json")));
+    }
+
+    #[test]
+    fn remove_stale_final_params_for_fresh_start_handles_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // 不在ファイルでも Ok を返すこと (idempotent)
+        remove_stale_final_params_for_fresh_start(dir.path()).unwrap();
+        // 存在するファイルは消えること
+        let final_path = dir.path().join("final.params");
+        std::fs::write(&final_path, b"stale").unwrap();
+        assert!(final_path.exists());
+        remove_stale_final_params_for_fresh_start(dir.path()).unwrap();
+        assert!(!final_path.exists());
     }
 
     #[test]
