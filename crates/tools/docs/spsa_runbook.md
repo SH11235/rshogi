@@ -159,20 +159,83 @@ cargo run --release -p tools --bin spsa -- \
 
 スケジュール設定を変更して再開する場合だけ `--force-schedule` を付与する。
 
-### 4.1 `--init-from` と `--resume` の関係
+### 4.1 `--init-from` / `--resume` / `--force-init` の関係 (v3 以降)
 
-`--init-from <canonical>` は **`--params` のパスが存在しない時だけ canonical を
-コピー**し、存在する時は何もしない (resume と同じ挙動)。両者を併用しても安全:
+> ⚠️ **2026-04 破壊的変更 (PR #576 系)**: 旧版は `--init-from` を渡しても
+> `--params` が既存だと **黙ってスキップ** していたため、誤って rshogi default
+> 値で 75,200 ゲーム規模の SPSA を走らせる事故が発生した。v3 以降は同状況で
+> bail し、ユーザに `--resume` か新設 `--force-init` の明示を要求する。
+> `meta.json` の `format_version: 2` は読まない (新規 run dir で fresh start)。
 
-| `--params` 状態 | `--init-from` | `--resume` | 結果 |
-|---|---|---|---|
-| 不在 | 指定 | (指定有無不問) | canonical をコピーして新規開始 (resume は無視) |
-| 存在 | 指定 | 指定 | 既存ファイルから resume (canonical はコピーしない) |
-| 存在 | 指定 | 未指定 | 既存ファイルを読んで新規 SPSA 反復開始 |
-| 存在 | 未指定 | 指定 | 既存ファイル + meta.json から resume |
+#### 状態遷移マトリクス (16 通り全網羅)
 
-`--init-from` を毎回指定しておけば「初回は canonical から、2 回目以降は前回の続き」
-という運用が 1 コマンドで書ける。
+純粋関数 `decide_init_action(has_init_from, params_exists, resume, force_init)`
+で意思決定。下表で `-` はワイルドカード (該当列の値に関わらず同じ結果)。
+
+| `--params` | `--init-from` | `--resume` | `--force-init` | 結果 |
+|---|---|---|---|---|
+| 不在 | 指定 | - | - | canonical を copy して fresh start |
+| 不在 | 指定 | - | ✓ | **bail** (force-init は既存対象が必要) |
+| 不在 | 指定 | ✓ | - | **bail** (resume は既存 params 必須) |
+| 不在 | 未指定 | - | - | **bail** (入力なし) |
+| 不在 | 未指定 | ✓ | - | **bail** (resume は既存 params 必須) |
+| 存在 | 指定 | - | - | **bail** ★ 旧 silent skip 経路。`--resume` か `--force-init` を明示 |
+| 存在 | 指定 | ✓ | - | resume (整合性 diagnostic 出力) |
+| 存在 | 指定 | - | ✓ | atomic 上書き (meta/CSV 削除 → params replace) |
+| 存在 | 未指定 | - | - | 既存 params で fresh start (旧来の通常動作) |
+| 存在 | 未指定 | ✓ | - | 通常 resume (meta hash 検証) |
+| - | - | ✓ | ✓ | **bail** (resume と force-init は意味が矛盾) |
+| - | 未指定 | - | ✓ | **bail** (force-init は init-from が必要) |
+
+> 注: 表は実装上の同値クラスでまとめており 12 行だが、`(--resume + --force-init = ✓✓)`
+> や `(force-init + --init-from 未指定)` の行はワイルドカードで複数組合せを束ねている
+> ため、4 軸 16 通りすべてが一意に分類される。完全網羅性は単体テスト
+> `decide_covers_all_sixteen_combinations` で担保。
+
+#### 推奨運用パターン
+
+```bash
+RUN_DIR="runs/spsa/$(date -u +%Y%m%d_%H%M%S)_yo_suisho10"
+mkdir -p "${RUN_DIR}"
+
+# 1 回目: --params 不在 → canonical を copy して開始
+spsa --params "${RUN_DIR}/tuned.params" --init-from tune/suisho10.params ...
+
+# 続き (resume): 既存 params + canonical 整合性検証
+spsa --params "${RUN_DIR}/tuned.params" --init-from tune/suisho10.params --resume ...
+
+# 既存 run を破棄して canonical から作り直す:
+spsa --params "${RUN_DIR}/tuned.params" --init-from tune/suisho10.params --force-init ...
+```
+
+#### 関連フラグ
+
+- **`--force-init`**: 既存 `--params` を atomic 上書きして再初期化。`--resume` と排他。
+  - 順序: meta 削除 (失敗で bail) → 関連 CSV 削除 (best-effort warn) → params atomic copy。
+    逆順だと中断時に「新 params + 旧 meta」の不整合 run dir が残る。
+- **`--strict-init-check`**: `--resume` + `--init-from` 時に整合性が
+  median ≥ 0.5σ または max ≥ 5σ を超えたら bail (デフォルトは warn)。CI 等で
+  「想定外の resume」を早期検知したい場合に使う。
+
+#### 起動時 startup summary
+
+v3 以降、SPSA 起動直後に `=== SPSA Startup Summary ===` ブロックが stderr に
+出る (init mode、params/init-from の sha256、active param 数、上位 5 件の値)。
+出力先 stderr なので CSV パイプ運用 (`tee`) を阻害しない。「想定外の値で
+スタートしている」事故を 5 秒で目視検出可能。
+
+> ⚠️ **breaking change (PR #576 続編)**: v3 以降、SPSA の進行ログ・per-game
+> progress (`iter=N seed=X game=Y outcome=...`) ・iter end summary ・early-stop
+> trigger は **すべて stderr に統一** された (旧 stdout)。既存の運用スクリプトが
+> stdout からこれらをパースしていた場合は壊れる。stdout は CSV writer (file 出力)
+> および将来の構造化出力専用。両方を 1 つのログに残したい場合は `2>&1 | tee log.txt`。
+
+#### iter 0 スナップショット
+
+`tuned.params.values.csv` の先頭に **`iteration,foo,bar,...` の next 行として
+`0, <初期値>, ...`** が記録される (fresh / force-init / use-existing-fresh 時のみ。
+resume 時は append のため重複しない)。事故解析時に「最初に何で起動したか」を
+CSV だけで完全に追える。
 
 ## 5. 可視化用CSV変換（任意）
 
@@ -919,10 +982,25 @@ python3 /path/to/rshogi/tune/tune.py apply /tmp/tuned_yo.params source/
 - `--strict-range` を付けるとエラーで止まる。一時的に `--base` の range を広げるか、
   該当 param を `unmapped` に移して翻訳対象から外す
 
-### `init-from: ... already exists, leaving as-is` で意図しない値で開始される
+### `init/resume 設定エラー: --init-from が指定されていますが --params パスは既に存在します`
 
-- `--params <path>` のファイルが残っており resume 扱いされた可能性。新規実行なら
-  `--params` を timestamped 新規パスにする
+- v3 (PR #576) で導入された安全 bail。旧版の silent skip 経路を排除した。
+- 解決策はメッセージにある通り 3 通り:
+  - **続行したい** → `--resume` を追加 (canonical との整合性も diagnostic 出力される)
+  - **既存を破棄して canonical から作り直したい** → `--force-init` を追加
+  - **そもそも指定ミス** → 既存ファイルを `rm` するか、`--params` を新規 timestamped パスにする
+- 推奨は **`--params runs/spsa/<ts>/tuned.params`** のように毎回 timestamped dir を切ること
+
+### `meta format version 不一致 (got v2, expected v3)`
+
+- v3 (PR #576) で meta 形式に hash 群を追加し、後方互換は破棄した
+- v2 meta を持つ run dir は resume 不可。新規 run dir で `--init-from <canonical>` から
+  fresh start する (旧 run の `tuned.params` の値は手動で確認の上 `--init-from` 指定可)
+
+### `param 名集合が meta と不一致です`
+
+- mapping 表に param を追加 / 削除した状態で過去 run を resume しようとした場合に発生
+- 現状 escape hatch なし (PR2 系で検討中)。新規 run dir で fresh start する
 
 ### `info: N param(s) matched --active-only-regex but are unmapped`
 
