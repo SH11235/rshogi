@@ -2341,6 +2341,7 @@ where
         &mut black_transport,
         &mut white_transport,
         clock_spec,
+        true, // public 経路は League に登録済なので InGame 遷移を行う
         &result_code_slot,
     )
     .await;
@@ -2389,6 +2390,7 @@ async fn drive_game_inner<R, K, P, H>(
     black_transport: &mut TcpTransport,
     white_transport: &mut TcpTransport,
     clock_spec: ClockSpec,
+    manage_league_state: bool,
     result_code_slot: &Rc<std::cell::Cell<Option<&'static str>>>,
 ) -> Result<(), ServerError>
 where
@@ -2468,7 +2470,10 @@ where
     // `START` 配信成功を確認してから、League → `InGame` 遷移と GameRegistry
     // 登録を連続で行う。2 つの共有状態更新は micro 秒スケールで連続するので、
     // `%%WHO` と `%%LIST` / `%%SHOW` が同じ「対局開始」状態を観測する。
-    {
+    // 私的対局 (League 非介入) では `manage_league_state == false` で skip する。
+    // skip しないと League に未登録の handle に `transition` を呼んで
+    // `StateError::InvalidForState` で early return してしまう。
+    if manage_league_state {
         let mut league = state.league.lock().await;
         for n in [&matched.black, &matched.white] {
             league
@@ -3580,6 +3585,7 @@ where
         &mut black_transport,
         &mut white_transport,
         clock_spec,
+        false, // private 経路は League 非介入で InGame 遷移は skip
         &result_code_slot,
     )
     .await;
