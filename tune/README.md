@@ -80,6 +80,32 @@ cargo run --release -p tools --bin rshogi_to_yo_params -- \
   --output /tmp/tuned_yo.params
 ```
 
+#### `rshogi_to_yo_params` の rshogi default 検知 (PR3 系)
+
+入力 rshogi `.params` の値列が `SearchTuneParams::option_specs()` の default と
+**95% 以上一致** した場合、警告を出す:
+
+```
+warn: 入力 rshogi params の値列が rshogi 内部 default と 163/163 (100.0%) 一致しています。
+
+  これは以下のどちらかを示唆します:
+  (a) 意図的に rshogi default 値から SPSA を始めたい (e.g. 新規探索)
+      → 警告抑制には --allow-rshogi-defaults を追加してください
+  (b) `generate_spsa_params` の出力を間違って入力にしてしまった (事故)
+      → 入力ファイルを再確認し、suisho10 等の canonical を渡してください
+```
+
+**フラグの使い分け**:
+- 未指定 (default): 95% 一致で warn 出力 + 続行
+- `--allow-rshogi-defaults`: 警告を完全抑制 (default 値から始めることを意図的に表明)
+- `--strict-rshogi-defaults`: warn を error に昇格 (CI で事故完全防止)
+
+**動機**: 2026-04 に `generate_spsa_params` の出力を間違って `rshogi_to_yo_params`
+の入力にしてしまい、生成された .params (rshogi default 値が YO 名で書かれた状態)
+を SPSA に投入。`--init-from suisho10.params` も併用したが silent skip で無視され、
+**rshogi default 値から SPSA 200 iter / 75,200 ゲームが走り棋力低下**した事故が
+発生。本検知は「上流で値の出所を確認させる」一次防衛。
+
 ### マッピング表の整合性検証
 
 ```bash
