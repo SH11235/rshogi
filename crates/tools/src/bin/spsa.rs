@@ -79,7 +79,7 @@ struct Cli {
     #[arg(long, default_value_t = 0.101)]
     gamma: f64,
 
-    /// 再開メタデータファイル（既定: <params>.meta.json）
+    /// 再開メタデータファイル（既定: <run-dir>/meta.json）
     #[arg(long)]
     meta_file: Option<PathBuf>,
 
@@ -91,7 +91,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     force_schedule: bool,
 
-    /// 反復統計CSVの出力先（resume時は追記）。既定: <params>.stats.csv
+    /// 反復統計CSVの出力先（resume時は追記）。既定: <run-dir>/stats.csv
     #[arg(long)]
     stats_csv: Option<PathBuf>,
 
@@ -99,7 +99,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     no_stats_csv: bool,
 
-    /// 反復統計のseed横断集計CSV（平均・分散）。既定: <params>.stats_aggregate.csv
+    /// 反復統計のseed横断集計CSV（平均・分散）。既定: <run-dir>/stats_aggregate.csv
     #[arg(long)]
     stats_aggregate_csv: Option<PathBuf>,
 
@@ -107,7 +107,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     no_stats_aggregate_csv: bool,
 
-    /// 反復ごとのパラメータ値履歴CSV（wide形式）。既定: <params>.values.csv
+    /// 反復ごとのパラメータ値履歴CSV（wide形式）。既定: <run-dir>/values.csv
     #[arg(long)]
     param_values_csv: Option<PathBuf>,
 
@@ -2095,10 +2095,13 @@ fn main() -> Result<()> {
         cli.resume,
         cli.force_init,
     );
-    // force-init 時に削除する run-dir 直下の派生ファイル。CSV writer は cli.resume=false
+    // force-init 時に削除する run-dir 直下の派生 CSV 群。CSV writer は cli.resume=false
     // で truncate もするが、能動削除しておくことで run-dir の状態を fresh と一致させる
     // (例: --no-stats-csv で writer が走らないケースでも stale CSV が残らない)。
-    // override パス (--meta-file / --stats-csv 等) を勝手に削除しないことは
+    // CSV override (--stats-csv / --stats-aggregate-csv / --param-values-csv) で
+    // run-dir 外を指定した場合、その override 先は本リストに含まれない (外部集約 CSV
+    // append 運用を保護するため)。一方 --meta-file の override 先は active resume
+    // state とみなし `apply_init_action` 側で別途削除される。詳細は
     // `default_force_init_cleanup_paths` の doc を参照。
     let force_init_cleanup_paths = default_force_init_cleanup_paths(&cli.run_dir);
     let force_init_cleanup_refs: Vec<&Path> =
