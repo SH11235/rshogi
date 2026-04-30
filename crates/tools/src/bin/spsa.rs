@@ -1558,6 +1558,9 @@ impl RunDirLock {
                 f.flush().with_context(|| {
                     format!("failed to flush lock contents to {}", path.display())
                 })?;
+                // `writeln!` は OS によらず常に `\n` を付ける (Windows でも `\r\n` には
+                // ならない) ため、`expected_body` の構築では `\n` 固定で良い。Drop での
+                // 内容一致比較もこの前提に依存している。
                 let expected_body = format!("{body_json}\n");
                 Ok(RunDirLock {
                     path,
