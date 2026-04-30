@@ -58,6 +58,15 @@
 //!   [`ReconnectState::last_sfen`] から盤面を再構築する責任を持つ。
 //! - [`SearchInfoSnapshot`] は累積 snapshot で、observed したぶんだけ field を
 //!   上書きする (差分ではなく常に「現時点までの最新値の集合」)。
+//!
+//! # UsiEngineDriver trait (engine 抽象)
+//!
+//! [`run_game_session_with_events`] / [`run_resumed_session_with_events`] は engine 引数を
+//! [`UsiEngineDriver`] trait の generic で受ける。`UsiEngine` (外部 USI プロセス driver) が
+//! reference impl で、consumer は同 trait を自前型 (in-process engine / mock 等) に
+//! 実装することで session API に渡せる。`&mut UsiEngine` をそのまま渡しても、
+//! `&mut dyn UsiEngineDriver` 経由の dyn dispatch でも同一 entry を利用できる。
+//! trait の contract と method 一覧は [`UsiEngineDriver`] の doc を参照。
 
 pub mod config;
 pub mod engine;
@@ -73,7 +82,7 @@ pub mod transport;
 // `use rshogi_csa_client::{CsaClientConfig, UsiEngine, ...}` で参照できる。
 // 型名は実装側に合わせており、別名は付与しない。
 pub use config::CsaClientConfig;
-pub use engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine};
+pub use engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine, UsiEngineDriver};
 pub use event::Event;
 pub use events::{
     BestMoveEvent, DisconnectReason, GameEndEvent, GameEndReason, MoveEvent, MovePlayer,

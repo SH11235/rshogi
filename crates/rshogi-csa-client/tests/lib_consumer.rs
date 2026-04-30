@@ -14,7 +14,7 @@ use rshogi_csa_client::{
     MoveEvent, MovePlayer, NoopSessionEventSink, ReconnectState, RecordedMove, SearchInfo,
     SearchInfoEmitPolicy, SearchInfoSnapshot, SearchOrigin, SearchOutcome, SessionError,
     SessionEventSink, SessionOutcome, SessionProgress, Side, SinkError, TransportTarget, UsiEngine,
-    run_game_session, run_game_session_with_events, run_resumed_session,
+    UsiEngineDriver, run_game_session, run_game_session_with_events, run_resumed_session,
     run_resumed_session_with_events,
 };
 
@@ -58,8 +58,10 @@ fn build_only() {
                          _: SinkError| {};
     let consume_funcs: (fn(_, _, _, _) -> _, fn(_, _, _, _) -> _) =
         (run_game_session, run_resumed_session);
-    // 新 API は generic なので関数ポインタ型にキャストせず、`run_game_session_with_events`
-    // / `run_resumed_session_with_events` の名前解決だけ強制する。
+    // 新 API は engine / sink の両方に対して generic なので、関数ポインタ型として
+    // `&mut UsiEngine` 受けと `&mut dyn UsiEngineDriver` 受けの両形を確認する。
+    // どちらも `run_game_session_with_events` / `run_resumed_session_with_events` の
+    // monomorphize 経路を通り、consumer が自前の dyn dispatch を構築できることを保証する。
     type WithEventsFn = fn(
         &CsaClientConfig,
         &mut CsaConnection,
@@ -67,9 +69,46 @@ fn build_only() {
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         &mut NoopSessionEventSink,
     ) -> Result<SessionOutcome, SessionError>;
-    let _events_funcs: (WithEventsFn, WithEventsFn) =
+    let events_funcs: (WithEventsFn, WithEventsFn) =
         (run_game_session_with_events, run_resumed_session_with_events);
-    // dyn-coercion 確認
-    let _: Option<&mut dyn SessionEventSink> = None;
-    let _ = (consume_types, consume_funcs);
+
+    // `&mut dyn UsiEngineDriver` を `run_game_session_with_events` /
+    // `run_resumed_session_with_events` に渡せることを build-only で確認する。
+    // 関数ポインタへキャストすると `for<'a> &'a mut dyn Trait + 'a` と
+    // 個別の lifetime ジェネリクス引数が衝突するため、call site の型推論で固定する。
+    fn consume_dyn_engine_with_events(
+        cfg: &CsaClientConfig,
+        conn: &mut CsaConnection,
+        engine: &mut dyn UsiEngineDriver,
+        shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        sink: &mut dyn SessionEventSink,
+    ) {
+        if false {
+            let _ = run_game_session_with_events(cfg, conn, engine, shutdown.clone(), sink);
+            let _ = run_resumed_session_with_events(cfg, conn, engine, shutdown, sink);
+        }
+    }
+
+    // `UsiEngine` が `UsiEngineDriver` を実装していることを type-level で固定する。
+    // generic 関数 `takes::<UsiEngine>` が monomorphize できれば trait bound check が
+    // 通っている証跡になる。値は使わず `assert_usi_engine_implements_driver` 関数として
+    // 名前解決自体を `consume_funcs` 経由で参照させる。
+    fn takes_engine<E: UsiEngineDriver + ?Sized>(_: &mut E) {}
+    let assert_usi_engine_implements_driver: fn(&mut UsiEngine) = takes_engine::<UsiEngine>;
+
+    // dyn-coercion 確認 (None でも `&mut dyn Trait` の型推論を強制)
+    let dyn_sink_slot: Option<&mut dyn SessionEventSink> = None;
+    let dyn_engine_slot: Option<&mut dyn UsiEngineDriver> = None;
+
+    // 値そのものは使わず、`let _ = (...);` で discard することで未使用警告を抑える
+    // (`_var` prefix の警告抑止ではなく、tuple 全体を pattern として _ に束縛する idiom)。
+    let _ = (
+        consume_types,
+        consume_funcs,
+        events_funcs,
+        consume_dyn_engine_with_events,
+        assert_usi_engine_implements_driver,
+        dyn_sink_slot,
+        dyn_engine_slot,
+    );
 }
