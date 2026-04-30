@@ -3,8 +3,12 @@
 `rshogi-csa-server` (TCP / Cloudflare Workers 共通の core crate) と、その上に乗る
 `rshogi-csa-server-tcp` / `rshogi-csa-server-workers` が話す CSA プロトコル方言の
 利用者向けリファレンス。OSS 利用者が「rshogi-oss を CSA client から繋いだとき
-何が送れて何が返ってくるか」を実装位置 (`file:line`) 付きで一望できることを目的
-にする。
+何が送れて何が返ってくるか」を実装位置 (file + symbol 名) 付きで一望できることを
+目的にする。
+
+実装位置は **行番号ではなく symbol 名** (`file::function` / `file::Type::method`
+/ `file::module`) で示す。行番号は code 編集で陳腐化するため記載しない。
+symbol 名から行を引きたいときは `rg "fn parse_command\("` などで grep する。
 
 `*` 印は本リポ独自拡張、 `**` 印は本リポ独自拡張のうち CSA v1.2.1 標準互換の
 範囲を意図的に逸脱しているもの (Floodgate 系互換のために追加)。
@@ -16,7 +20,7 @@
 | 標準 CSA コマンド (LOGIN / AGREE / Move / TORYO / KACHI / CHUDAN) の本リポ受理範囲 | プロトコル設計の議事録・歴史的経緯 |
 | x1 拡張コマンド (`%%WHO`〜`%%FLOODGATE rating`) と応答 framing | 個別運用環境のパラメタ・URL |
 | 本リポ独自拡張 (`Reconnect_Token` / `BEGIN Reconnect_State` / Lobby `MATCHED`) | Floodgate オプトイン gate の運用方法 (別 doc) |
-| 各コマンドの実装位置 `file:line` | TCP / Workers のデプロイ手順 (別 doc) |
+| 各コマンドの実装位置 (file + symbol 名) | TCP / Workers のデプロイ手順 (別 doc) |
 
 CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照に投げ、ここでは
 「本リポ実装が受理する語彙と返す語彙」を契約として扱う。
@@ -35,59 +39,64 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 
 ## 3. wire format 概観
 
-- 行指向。1 メッセージ = 1 行。受信側は CR/LF 双方を許容し、送信側は LF (`\n`)
-  または CR/LF (`\r\n`) を末尾に付ける (実装は [`crates/rshogi-csa-server-tcp/src/transport.rs`](../../crates/rshogi-csa-server-tcp/src/transport.rs) の `TcpTransport`)。
-- 1 行のパースは [`parse_command`](../../crates/rshogi-csa-server/src/protocol/command.rs) (`crates/rshogi-csa-server/src/protocol/command.rs:159`)、
-  クライアント側送信側の組み立ては同ファイル `serialize_client_command` (L486)。
-- 空行 (改行のみ) は keep-alive として扱われる ([`ClientCommand::KeepAlive`](../../crates/rshogi-csa-server/src/protocol/command.rs))。
-- サーバー → クライアント方向の応答は CSA 標準応答 (例 `LOGIN:alice OK` / `START:<game_id>`) と、x1 拡張で導入した `##[<TAG>] ... ##[<TAG>] END` の 2 種類が混在する。`##` プレフィックスは「このリポ拡張」、`#` プレフィックス (`#WIN` 等) は CSA 標準終局コード。
+- 行指向。1 メッセージ = 1 行。送受信は [`crates/rshogi-csa-server-tcp/src/transport.rs`](../../crates/rshogi-csa-server-tcp/src/transport.rs) の
+  `TcpTransport` が担当し、受信は CR/LF 双方を許容、送信は LF または CR/LF を末尾に付ける。
+- 1 行のパースは [`crates/rshogi-csa-server/src/protocol/command.rs`](../../crates/rshogi-csa-server/src/protocol/command.rs) の `parse_command`、
+  クライアント側送信側の組み立ては同ファイルの `serialize_client_command`。
+  両者は roundtrip プロパティ `parse_command(serialize(c)) == c` を主要バリアント
+  全件についてテストで担保する (`command.rs::tests::parse_then_serialize_then_parse_is_stable_for_all_variants`)。
+- 空行 (改行のみ) は keep-alive (`ClientCommand::KeepAlive`)。
+- サーバー → クライアント方向の応答は CSA 標準応答 (例 `LOGIN:alice OK` /
+  `START:<game_id>`) と、x1 拡張で導入した `##[<TAG>] ... ##[<TAG>] END` の 2
+  種類が混在する。`##` プレフィックスは本リポ拡張、`#` プレフィックス (`#WIN`
+  等) は CSA 標準終局コード。
 
 ## 4. 標準 CSA コマンド (client → server)
 
-すべて [`parse_command`](../../crates/rshogi-csa-server/src/protocol/command.rs) (L159) で受理される。
+すべて `command.rs::parse_command` で受理される。
 
 | 行 | 受理可否 | 備考 |
 |---|---|---|
-| `LOGIN <name> <password>` | ✅ | 通常モードで対局参加。パスワード保存は shogi-server 互換 (`crates/rshogi-csa-server-tcp/src/auth.rs`) |
-| `LOGIN <name> <password> x1` | ✅ | x1 拡張モード要求 (`command.rs:201-205`)。**TCP** ではこのフラグが立ったセッションのみ `%%WHO` / `%%LIST` 等の global query 系を受理する (`server.rs:1149-1156` の `run_waiter`)。**Workers** は `x1` フラグ自体を保存・参照しないため、フラグ有無に関わらず global query 系は配線されない (詳細は §5) |
-| `LOGIN <name> <password> reconnect:<game_id>+<token>` `**` | ✅ | 再接続経路 (§9.1)。`x1` と排他 (`command.rs:204-225`) |
-| `LOGOUT` | ✅ | 余剰トークン拒否 (`command.rs:243`) |
-| `AGREE [<game_id>]` | ✅ | `<game_id>` 省略時は `None` (`command.rs:249`) |
-| `REJECT [<game_id>]` | ✅ | 同上 (`command.rs:256`) |
-| `<sign><from><to><PT>[,T<sec>][,'<comment>]` | ✅ | 指し手。先頭 `+`/`-` で先後判定。`'<comment>` は Floodgate 拡張コメント (PV 等)。`T<sec>` は CSA 互換のため受理するがサーバー時計には反映されない: 経過時間は `GameRoom::handle_move` がサーバ側 `now_ms - move_started_at` から計算する (`game/room.rs:471-485`)。`parse_move` (`command.rs:267`) は `<token>` と `'<comment>` だけを抽出する |
-| `%TORYO` / `%KACHI` / `%CHUDAN` | ✅ | 投了 / 入玉宣言 / 中断 (`command.rs:182`) |
-| 空行 | ✅ | keep-alive (`command.rs:163`) |
+| `LOGIN <name> <password>` | ✅ | 通常モードで対局参加。パスワード保存は shogi-server 互換 ([`crates/rshogi-csa-server-tcp/src/auth.rs`](../../crates/rshogi-csa-server-tcp/src/auth.rs)) |
+| `LOGIN <name> <password> x1` | ✅ | x1 拡張モード要求 (`command.rs::parse_command` 内の x1 トークン分岐)。**TCP** ではこのフラグが立ったセッションのみ `%%WHO` / `%%LIST` 等の global query 系を受理する (TCP `server.rs::run_waiter`)。**Workers** は `x1` フラグ自体を保存・参照しないため、フラグ有無に関わらず global query 系は配線されない (詳細は §5) |
+| `LOGIN <name> <password> reconnect:<game_id>+<token>` `**` | ✅ | 再接続経路 (§9.1)。`x1` と排他 (同じく `parse_command` の同分岐) |
+| `LOGOUT` | ✅ | 余剰トークン拒否 |
+| `AGREE [<game_id>]` | ✅ | `<game_id>` 省略時は `None` |
+| `REJECT [<game_id>]` | ✅ | 同上 |
+| `<sign><from><to><PT>[,T<sec>][,'<comment>]` | ✅ | 指し手。先頭 `+`/`-` で先後判定。`'<comment>` は Floodgate 拡張コメント (PV 等)。**`T<sec>` は CSA 互換のため受理するがサーバー時計には反映されない**: 経過時間は `crates/rshogi-csa-server/src/game/room.rs::GameRoom::handle_move` がサーバ側 `now_ms - move_started_at` から計算する。`command.rs::parse_move` は `<token>` と `'<comment>` だけを抽出する |
+| `%TORYO` / `%KACHI` / `%CHUDAN` | ✅ | 投了 / 入玉宣言 / 中断 |
+| 空行 | ✅ | keep-alive (`ClientCommand::KeepAlive`) |
 
-サーバー → クライアント方向の標準応答と本リポでの実装位置:
+サーバー → クライアント方向の標準応答と本リポでの実装位置 (関数 / 型名で示す):
 
-| 応答 | 意味 | 実装位置 |
+| 応答 | 意味 | 生成箇所 |
 |---|---|---|
-| `LOGIN:<echo> OK` | 認証成功 (新規対局参加経路)。`<echo>` は **TCP では bare `<handle>`** (`server.rs:950`)、**Workers では LOGIN 行で受け取った `<handle>+<game_name>+<color>` を raw 入力のまま echo** する (`crates/rshogi-csa-server-workers/src/session_state.rs:80-97`、`game_room.rs:433-436`)。再接続経路の echo 規則は §9.1 を参照 (Workers のみ色トークンが正規化される) | `server.rs:950` / `session_state.rs:80-97` |
-| `LOGIN:incorrect [<reason>]` | 認証失敗。`<reason>` は本リポ拡張で `unknown_game_name` / `already_logged_in` / `rate_limited retry_after=<sec>` / `reconnect_rejected` / `reconnect_already_resumed` / `reconnect_aborted` を返す `*` | `server.rs:869-916, 1024, 2736-2811` |
-| `START:<game_id>` | 両者 AGREE 後の対局開始通知 | `crates/rshogi-csa-server/src/game/room.rs:369` |
-| `REJECT:<game_id>` | どちらかが REJECT した | `server.rs:2194-2195` |
-| `<token>,T<sec>` | 1 手分の broadcast (各 client / 観戦者へ送出) | `crates/rshogi-csa-server-tcp/src/server.rs` `parse_move_broadcast` (L2889) |
+| `LOGIN:<echo> OK` | 認証成功 (新規対局参加経路)。`<echo>` は **TCP では bare `<handle>`** (`crates/rshogi-csa-server-tcp/src/server.rs::handle_connection` の LOGIN 成功応答送出)、**Workers では LOGIN 行で受け取った `<handle>+<game_name>+<color>` を raw 入力のまま echo** する ([`crates/rshogi-csa-server-workers/src/session_state.rs`](../../crates/rshogi-csa-server-workers/src/session_state.rs) の `LoginReply::Ok::to_line` を `crates/rshogi-csa-server-workers/src/game_room.rs::GameRoom::handle_login` から呼ぶ)。再接続経路の echo 規則は §9.1 を参照 (Workers のみ色トークンが正規化される) | TCP `server.rs::handle_connection` / Workers `session_state.rs::LoginReply` |
+| `LOGIN:incorrect [<reason>]` | 認証失敗。`<reason>` は本リポ拡張で `unknown_game_name` / `already_logged_in` / `rate_limited retry_after=<sec>` / `reconnect_rejected` / `reconnect_already_resumed` / `reconnect_aborted` を返す `*` | TCP `server.rs::handle_connection` の各拒否経路 (handle 解析失敗 / `parse_handle` 失敗 / `clock_presets` 不一致) と再接続経路 `server.rs::handle_reconnect_request` |
+| `START:<game_id>` | 両者 AGREE 後の対局開始通知 | `crates/rshogi-csa-server/src/game/room.rs::GameRoom::handle_agree` |
+| `REJECT:<game_id>` | どちらかが REJECT した | TCP `server.rs::drive_game_inner` の AGREE 結果が false の経路 (`server.rs::wait_both_agree` の戻り値で分岐) |
+| `<token>,T<sec>` | 1 手分の broadcast (各 client / 観戦者へ送出)。`T<sec>` 値はサーバー側 `room.rs` で計算した経過秒 | `room.rs::GameRoom::handle_move` (broadcast 行作成)、TCP `server.rs::parse_move_broadcast` (受信側ヘルパ) |
 
 ## 5. x1 拡張コマンド一覧
 
 CSA 標準を超えた `%%` 系拡張コマンド。受理条件は frontend で異なる:
 
-- **TCP**: `LOGIN ... x1` が成立したセッションのみが受理対象。`run_waiter` は
-  非 x1 waiter で `%%` 系入力を切断扱いにする (`server.rs:1149-1156`)。
-- **Workers**: `x1` フラグを保存・確認せず、`handle_player_control_command` /
-  `handle_spectator_line` 経路が `parse_command` の結果をそのまま処理する
-  (`game_room.rs`)。クライアントは `LOGIN ... x1` を送らなくても下表の Workers
-  対応コマンドを利用できる。
+- **TCP**: `LOGIN ... x1` が成立したセッションのみが受理対象。`crates/rshogi-csa-server-tcp/src/server.rs::run_waiter` が
+  非 x1 waiter で `%%` 系入力を切断扱いにする。
+- **Workers**: `x1` フラグを保存・確認せず、`crates/rshogi-csa-server-workers/src/game_room.rs` の
+  `GameRoom::handle_player_control_command` / `GameRoom::handle_spectator_line` 経路が
+  `parse_command` の結果をそのまま処理する。クライアントは `LOGIN ... x1` を送らなくても
+  下表の Workers 対応コマンドを利用できる。
 
 応答 framing は frontend 共通で **`%%VERSION` を除く** すべての応答が §6 の
 `##[<TAG>] ... ##[<TAG>] END` 契約に従う。`%%VERSION` だけは 1 行応答
-(`##[VERSION] <impl> <ver>`) で `END` 終端行を持たない (`info.rs:28-34`) ため、
-クライアントは `%%VERSION` への応答を 1 行読みで完結させること。
+(`##[VERSION] <impl> <ver>`) で `END` 終端行を持たない (`info.rs::version_lines`
+が 1 行だけ返す) ため、クライアントは `%%VERSION` への応答を 1 行読みで完結
+させること。
 
-実装本体は parse 側が [`parse_x1`](../../crates/rshogi-csa-server/src/protocol/command.rs) (`command.rs:298`)、
-応答行生成側が [`crates/rshogi-csa-server/src/protocol/info.rs`](../../crates/rshogi-csa-server/src/protocol/info.rs) と
-各 frontend のセッションループ ([`crates/rshogi-csa-server-tcp/src/server.rs`](../../crates/rshogi-csa-server-tcp/src/server.rs)、
-[`crates/rshogi-csa-server-workers/src/game_room.rs`](../../crates/rshogi-csa-server-workers/src/game_room.rs))。
+実装本体は parse 側が `command.rs::parse_x1`、応答行生成側が
+[`crates/rshogi-csa-server/src/protocol/info.rs`](../../crates/rshogi-csa-server/src/protocol/info.rs) と各 frontend のセッションループ
+([`crates/rshogi-csa-server-tcp/src/server.rs`](../../crates/rshogi-csa-server-tcp/src/server.rs)、[`crates/rshogi-csa-server-workers/src/game_room.rs`](../../crates/rshogi-csa-server-workers/src/game_room.rs))。
 
 **frontend 対応一覧**: x1 コマンドの parse 自体は core crate に集約 (上記
 `parse_x1`) されているが、**実際にどのコマンドに応答するかは frontend ごとに
@@ -95,28 +104,28 @@ CSA 標準を超えた `%%` 系拡張コマンド。受理条件は frontend で
 (`%%WHO` / `%%LIST` / `%%SHOW` / `%%VERSION` / `%%HELP` / `%%FLOODGATE ...`) は
 配線していない。
 
-| コマンド | 概要 | TCP | Workers | パース位置 | 応答位置 |
-|---|---|---|---|---|---|
-| `%%WHO` | ログイン中プレイヤ一覧。`##[WHO] <name> <status>` を name 昇順、終端 `##[WHO] END` | ✅ | ❌ | `command.rs:305` | `info.rs:52` (`who_lines`) |
-| `%%LIST` | アクティブ対局一覧。`##[LIST] <game_id> <black> <white> <game_name> <started_at>` + END | ✅ | ❌ | `command.rs:309` | `info.rs:81` (`list_lines`) |
-| `%%SHOW <game_id>` | 1 対局のサマリ。未登録は `##[SHOW] NOT_FOUND <game_id>` 後 END | ✅ | ❌ | `command.rs:321` | `info.rs:107` (`show_lines`) |
-| `%%MONITOR2ON <game_id>` | 観戦購読 (broadcast 受信開始)。応答 `##[MONITOR2] BEGIN <game_id>` / 不在 `##[MONITOR2] NOT_FOUND` / 多重 `##[MONITOR2] BUSY` | ✅ | ✅ (spectator 経路。`game_room.rs:691-716`) | `command.rs:327` | `server.rs:1378-1468` |
-| `%%MONITOR2OFF <game_id>` | 観戦購読解除。応答 `##[MONITOR2OFF] <game_id>` + END | ✅ | ✅ (spectator 経路。`game_room.rs:677-686`) | `command.rs:333` | `server.rs:1515-1518` |
-| `%%CHAT <message>` | room へ chat 配信。応答 `##[CHAT] OK <game_id>` / 未観戦時 `##[CHAT] NOT_MONITORING` (broadcast 形式は `##[CHAT] <handle>: <message>`) | ✅ | ✅ (player + spectator。`game_room.rs:671, 893`) | `command.rs:339` | `server.rs:1520-1551` |
-| `%%VERSION` | 実装名 + バージョン 1 行。`##[VERSION] rshogi-csa-server <CARGO_PKG_VERSION>`。**他の x1 応答と異なり END 終端行なし** (§6 の例外) | ✅ | ❌ | `command.rs:313` | `info.rs:28` (`version_lines`) |
-| `%%HELP` | 受理コマンド一覧 (`advertise == accept` で統一) | ✅ | ❌ | `command.rs:317` | `info.rs:134` (`help_lines`) |
-| `%%SETBUOY <game_name> <moves...> <count>` | Buoy 登録。**admin 権限必須** (`config.admin_handles`)。応答 `##[SETBUOY] OK <buoy> <count>` / `PERMISSION_DENIED` / `ERROR <buoy> <reason>` | ✅ | ✅ (player 経路。`game_room.rs:901`) | `command.rs:342` | `server.rs:1553-1591` |
-| `%%DELETEBUOY <game_name>` | Buoy 削除。admin 権限必須。応答 `##[DELETEBUOY] OK/PERMISSION_DENIED/ERROR` | ✅ | ✅ (player 経路。`game_room.rs:937`) | `command.rs:363` | `server.rs:1593-1605` |
-| `%%GETBUOYCOUNT <game_name>` | Buoy 残数照会。応答 `##[GETBUOYCOUNT] <buoy> <n>` / `NOT_FOUND` / `ERROR` | ✅ | ✅ (player 経路。`game_room.rs:955`) | `command.rs:369` | `server.rs:1610-1625` |
-| `%%FORK <source_game> [<buoy_name>] [<nth_move>]` | 過去対局から buoy を派生。第 2 トークンが数字なら `nth_move` として解釈する曖昧性ルール (`command.rs:120-126`) | ✅ | ✅ (player 経路。`game_room.rs:969`) | `command.rs:375` | `server.rs:1635-1660` |
-| `%%FLOODGATE history [N]` `*` | 直近 N 件の Floodgate 対局履歴。`limit` 省略時は frontend 側で 10 件補う | ✅ | ❌ | `command.rs:417` | `info.rs:172` (`floodgate_history_lines`) |
-| `%%FLOODGATE rating <handle>` `*` | 1 名分の rate / wins / losses / last_game_id / last_modified | ✅ | ❌ | `command.rs:432` | `info.rs:222` (`floodgate_rating_lines`) |
+| コマンド | 概要 | TCP | Workers | 応答行生成 |
+|---|---|---|---|---|
+| `%%WHO` | ログイン中プレイヤ一覧。`##[WHO] <name> <status>` を name 昇順、終端 `##[WHO] END` | ✅ | ❌ | `info.rs::who_lines` |
+| `%%LIST` | アクティブ対局一覧。`##[LIST] <game_id> <black> <white> <game_name> <started_at>` + END | ✅ | ❌ | `info.rs::list_lines` |
+| `%%SHOW <game_id>` | 1 対局のサマリ。未登録は `##[SHOW] NOT_FOUND <game_id>` 後 END | ✅ | ❌ | `info.rs::show_lines` |
+| `%%MONITOR2ON <game_id>` | 観戦購読 (broadcast 受信開始)。応答 `##[MONITOR2] BEGIN <game_id>` / 不在 `##[MONITOR2] NOT_FOUND` / 多重 `##[MONITOR2] BUSY` | ✅ | ✅ (spectator 経路) | TCP `server.rs` の `ClientCommand::Monitor2On` arm / Workers `game_room.rs::GameRoom::handle_spectator_line` の `Monitor2On` arm |
+| `%%MONITOR2OFF <game_id>` | 観戦購読解除。応答 `##[MONITOR2OFF] <game_id>` + END | ✅ | ✅ (spectator 経路) | TCP `server.rs` の `Monitor2Off` arm / Workers `game_room.rs::GameRoom::handle_spectator_line` の `Monitor2Off` arm |
+| `%%CHAT <message>` | room へ chat 配信。応答 `##[CHAT] OK <game_id>` / 未観戦時 `##[CHAT] NOT_MONITORING` (broadcast 形式は `##[CHAT] <handle>: <message>`) | ✅ | ✅ (player + spectator) | TCP `server.rs` の `Chat` arm / Workers `game_room.rs` の `Chat` arm (player + spectator 経路) |
+| `%%VERSION` | 実装名 + バージョン 1 行。`##[VERSION] rshogi-csa-server <CARGO_PKG_VERSION>`。**他の x1 応答と異なり END 終端行なし** (§6 の例外) | ✅ | ❌ | `info.rs::version_lines` |
+| `%%HELP` | 受理コマンド一覧 (`advertise == accept` で統一) | ✅ | ❌ | `info.rs::help_lines` |
+| `%%SETBUOY <game_name> <moves...> <count>` | Buoy 登録。**admin 権限必須** (`config.admin_handles`)。応答 `##[SETBUOY] OK <buoy> <count>` / `PERMISSION_DENIED` / `ERROR <buoy> <reason>` | ✅ | ✅ (player 経路) | TCP `server.rs` の `SetBuoy` arm / Workers `game_room.rs::GameRoom::handle_player_control_command` の `SetBuoy` arm |
+| `%%DELETEBUOY <game_name>` | Buoy 削除。admin 権限必須。応答 `##[DELETEBUOY] OK/PERMISSION_DENIED/ERROR` | ✅ | ✅ (player 経路) | TCP `server.rs` の `DeleteBuoy` arm / Workers `game_room.rs` の `DeleteBuoy` arm |
+| `%%GETBUOYCOUNT <game_name>` | Buoy 残数照会。応答 `##[GETBUOYCOUNT] <buoy> <n>` / `NOT_FOUND` / `ERROR` | ✅ | ✅ (player 経路) | TCP `server.rs` の `GetBuoyCount` arm / Workers `game_room.rs` の `GetBuoyCount` arm |
+| `%%FORK <source_game> [<buoy_name>] [<nth_move>]` | 過去対局から buoy を派生。第 2 トークンが数字なら `nth_move` として解釈する曖昧性ルール (`command.rs::ClientCommand::Fork` の doc コメント参照) | ✅ | ✅ (player 経路) | TCP `server.rs` の `Fork` arm / Workers `game_room.rs` の `Fork` arm |
+| `%%FLOODGATE history [N]` `*` | 直近 N 件の Floodgate 対局履歴。`limit` 省略時は frontend 側で 10 件補う | ✅ | ❌ | `info.rs::floodgate_history_lines` |
+| `%%FLOODGATE rating <handle>` `*` | 1 名分の rate / wins / losses / last_game_id / last_modified | ✅ | ❌ | `info.rs::floodgate_rating_lines` |
 
 `%%HELP` は `advertise == accept` の原則で実装されており、`%%HELP` の 1 行サマリと
-本表に列挙したコマンドが常に一致する (`info.rs:134-156` のリストと `parse_x1` の
-`match` 分岐がテストで紐付けられている: `info.rs:271-294`)。なお `%%HELP` は
-TCP frontend のみ応答するため、Workers では `info::help_lines` の advertise
-list を直接の wire 契約として扱わないこと。
+本表に列挙したコマンドが常に一致する (`info.rs::help_lines` のリストと
+`command.rs::parse_x1` の `match` 分岐が `info.rs::tests::help_lines_cover_currently_wired_commands`
+で紐付けられている)。なお `%%HELP` は TCP frontend のみ応答するため、Workers では
+`info::help_lines` の advertise list を直接の wire 契約として扱わないこと。
 
 ## 6. サーバー応答 framing (`##[<TAG>] ... END`)
 
@@ -128,57 +137,63 @@ x1 拡張コマンド応答に共通する framing 規約:
   `##[FLOODGATE] history` と `##[FLOODGATE] history END`)。
 - `<TAG>` は ASCII 大文字 + 数字 + 区切り `_`/`空白` のみ。フィールド値に
   ASCII 空白を含めない契約 (例 `FloodgateHistoryEntry` の各フィールド) で行
-  framing が壊れないことを `debug_assert!` で担保している (`info.rs:177-189`,
-  L229-240)。
+  framing が壊れないことを `info.rs::floodgate_history_lines` /
+  `info.rs::floodgate_rating_lines` の `debug_assert!` で担保している。
 
 **例外**: `%%VERSION` のみ単行応答 (`##[VERSION] <impl> <ver>`) で `END` 終端行を
-持たない (`info.rs:28-34`)。これは Cargo.toml バージョンを 1 行で返すだけの軽量
-照会で、フィールド構造を持たないためフレーミングを省略している。クライアントは
-`%%VERSION` の応答を 1 行読みで完結させ、その他の x1 コマンドは「`##[<TAG>] END`
-まで読む」契約で複数行応答を安全に分節できる。
+持たない (`info.rs::version_lines` が 1 行だけ返す)。これは Cargo.toml バージョンを
+1 行で返すだけの軽量照会で、フィールド構造を持たないためフレーミングを省略
+している。クライアントは `%%VERSION` の応答を 1 行読みで完結させ、その他の x1
+コマンドは「`##[<TAG>] END` まで読む」契約で複数行応答を安全に分節できる。
 
 その他 `##` プレフィックス応答 (上表外の運用通知系):
 
-| 応答 | 用途 | 実装位置 |
+| 応答 | 用途 | 生成箇所 |
 |---|---|---|
-| `##[NOTICE] server shutting down` `*` | TCP サーバー graceful shutdown 通知 | `server.rs:1219` |
-| `##[NOTICE] session evicted by duplicate login` `*` | 重複ログイン時の旧セッション通知 | `server.rs:1243` |
-| `##[ERROR] buoy '<name>' exhausted` `*` | Buoy 残数 0 時の起動拒否 | `server.rs:1085` |
-| `##[ERROR] scheduled match aborted: ...` `*` | スケジューラ起因の対局中止 | `crates/rshogi-csa-server-tcp/src/scheduler.rs:580` |
+| `##[NOTICE] server shutting down` `*` | TCP サーバー graceful shutdown 通知 | TCP `server.rs` の shutdown 経路 |
+| `##[NOTICE] session evicted by duplicate login` `*` | 重複ログイン時の旧セッション通知 | TCP `server.rs` の duplicate login 経路 |
+| `##[ERROR] buoy '<name>' exhausted` `*` | Buoy 残数 0 時の起動拒否 | TCP `server.rs` の buoy 起動経路 |
+| `##[ERROR] scheduled match aborted: ...` `*` | スケジューラ起因の対局中止 | [`crates/rshogi-csa-server-tcp/src/scheduler.rs`](../../crates/rshogi-csa-server-tcp/src/scheduler.rs) |
 
 ## 7. Game_Summary ブロック
 
 CSA v1.2.1 標準 `BEGIN Game_Summary` / `END Game_Summary` の組み立ては
 [`crates/rshogi-csa-server/src/protocol/summary.rs`](../../crates/rshogi-csa-server/src/protocol/summary.rs) に集約する。
 
-| 関数 | 用途 | 位置 |
-|---|---|---|
-| `GameSummaryBuilder::build_for(you)` | 対局者宛て (`Your_Turn:` 付き) | `summary.rs:91` |
-| `GameSummaryBuilder::build_for_spectator(black_ms, white_ms)` `*` | 観戦者宛て。`Your_Turn:` を出さず、末尾に `Black_Time_Remaining_Ms:` / `White_Time_Remaining_Ms:` を追加 | `summary.rs:56` |
-| `standard_initial_position_block()` | 平手 `BEGIN Position` ... `END Position` | `summary.rs:143` |
-| `position_section_from_sfen(sfen)` | 任意 SFEN から Position ブロック | `summary.rs:185` |
+| 関数 | 用途 |
+|---|---|
+| `summary.rs::GameSummaryBuilder::build_for(you)` | 対局者宛て (`Your_Turn:` 付き) |
+| `summary.rs::GameSummaryBuilder::build_for_spectator(black_ms, white_ms)` `*` | 観戦者宛て。`Your_Turn:` を出さず、末尾に `Black_Time_Remaining_Ms:` / `White_Time_Remaining_Ms:` を追加 |
+| `summary.rs::standard_initial_position_block` | 平手 `BEGIN Position` ... `END Position` |
+| `summary.rs::position_section_from_sfen` | 任意 SFEN から Position ブロック |
 
 `build_for` は CSA v1.2.1 標準項目を以下の順で出す: `Protocol_Version` →
 `Protocol_Mode` → `Format` → `Declaration` (任意) → `Game_ID` → `Name+` → `Name-` →
 `Your_Turn` → `Rematch_On_Draw` → `To_Move` → `BEGIN Time` ... `END Time` →
 `BEGIN Position` ... `END Position` → (本リポ拡張) `Reconnect_Token:` →
-`END Game_Summary` (テストで順序固定: `summary.rs:319-349`)。
+`END Game_Summary`。順序は `summary.rs::tests::build_for_includes_required_csa_fields_in_order`
+で固定されている。
 
 ## 8. 終局メッセージ
 
-[`crates/rshogi-csa-server/src/game/result.rs`](../../crates/rshogi-csa-server/src/game/result.rs) で生成。送信順は **「(a) 終局理由コード → (b) 勝敗コード」** を厳守する。
+[`crates/rshogi-csa-server/src/game/result.rs`](../../crates/rshogi-csa-server/src/game/result.rs) で生成。送信順は **「(a) 終局理由コード →
+(b) 勝敗コード」** を厳守する。マッピングは `result.rs::GameResult::server_messages`
+で定義:
 
-| `GameResult` | 終局理由行 | 勝者 / 敗者 / 観戦者へ | 実装位置 |
-|---|---|---|---|
-| `Toryo` (`%TORYO`) | `#RESIGN` | 勝者 `#WIN` / 敗者 `#LOSE` / 観戦 `#WIN` | `result.rs:83` |
-| `TimeUp` | `#TIME_UP` | 同上 | `result.rs:84` |
-| `IllegalMove` (Generic / Uchifuzume / IllegalKachi) | `#ILLEGAL_MOVE` | 同上 | `result.rs:85` |
-| `Kachi` (`%KACHI` 成立) | `#JISHOGI` | 同上 | `result.rs:86` |
-| `OuteSennichite` (連続王手千日手) | `#OUTE_SENNICHITE` | 同上 (王手側が敗者) | `result.rs:87` |
-| `Sennichite` (通常千日手) | `#SENNICHITE` | All に `#DRAW` | `result.rs:88` |
-| `MaxMoves` | `#MAX_MOVES` | All に `#CENSORED` | `result.rs:91` |
-| `Abnormal { winner: Some(_) }` | `#ABNORMAL` | 勝敗付きで pair 配信 | `result.rs:94` |
-| `Abnormal { winner: None }` | `#ABNORMAL` | All に `#ABNORMAL` のみ | `result.rs:96` |
+| `GameResult` バリアント | 終局理由行 | 勝者 / 敗者 / 観戦者へ |
+|---|---|---|
+| `Toryo` (`%TORYO`) | `#RESIGN` | 勝者 `#WIN` / 敗者 `#LOSE` / 観戦 `#WIN` |
+| `TimeUp` | `#TIME_UP` | 同上 |
+| `IllegalMove` (Generic / Uchifuzume / IllegalKachi) | `#ILLEGAL_MOVE` | 同上 |
+| `Kachi` (`%KACHI` 成立) | `#JISHOGI` | 同上 |
+| `OuteSennichite` (連続王手千日手) | `#OUTE_SENNICHITE` | 同上 (王手側が敗者) |
+| `Sennichite` (通常千日手) | `#SENNICHITE` | All に `#DRAW` |
+| `MaxMoves` | `#MAX_MOVES` | All に `#CENSORED` |
+| `Abnormal { winner: Some(_) }` | `#ABNORMAL` | 勝敗付きで pair 配信 |
+| `Abnormal { winner: None }` | `#ABNORMAL` | All に `#ABNORMAL` のみ |
+
+`result.rs::pair_win_lose` が「勝者・敗者・観戦者」3 宛先への 2 行 (理由 + 勝敗)
+組み立てを共通化している。
 
 ## 9. 本リポ独自拡張
 
@@ -192,8 +207,8 @@ CSA v1.2.1 標準互換クライアントは未知キー / 未知行を無視で
 
 **1. 起点: 対局開始時に Game_Summary 末尾へ拡張行を埋める**
 
-`GameSummaryBuilder::build_for(Color)` (`summary.rs:117-126`) は、`black_reconnect_token`
-/ `white_reconnect_token` が `Some` の場合のみ、`END Position` の後・
+`summary.rs::GameSummaryBuilder::build_for` は、`black_reconnect_token` /
+`white_reconnect_token` が `Some` の場合のみ、`END Position` の後・
 `END Game_Summary` の直前に以下を出す。標準項目の後の追記なので CSA v1.2.1
 互換クライアントは無視できる:
 
@@ -201,39 +216,44 @@ CSA v1.2.1 標準互換クライアントは未知キー / 未知行を無視で
 Reconnect_Token:<32 hex>
 ```
 
-`<32 hex>` は `[0-9a-f]` で固定 32 文字 (128 bit 乱数の lowercase hex 表現、
-[`ReconnectToken::generate`](../../crates/rshogi-csa-server/src/types.rs) `types.rs:94-111`)。クライアントは値を切り詰めず原文のまま保存・送信
-すること。
+`<32 hex>` は `[0-9a-f]` で固定 32 文字 (128 bit 乱数の lowercase hex 表現)。
+`crates/rshogi-csa-server/src/types.rs::ReconnectToken::generate` が `rand::random()`
+で 16 byte → 32 hex に展開する。クライアントは値を切り詰めず原文のまま保存・
+送信すること。
 
 **2. クライアント側の再ログイン**
 
-切断側クライアントは新しい TCP セッションで以下を送る (`command.rs:201-225`):
+切断側クライアントは新しい TCP セッションで以下を送る:
 
 ```
 LOGIN <handle>+<game_name>+<color> <password> reconnect:<game_id>+<token>
 ```
 
-`<handle>+<game_name>+<color>` は通常 LOGIN と同じ `parse_handle`
-([`server.rs:68`](../../crates/rshogi-csa-server-tcp/src/server.rs)) を通すため、再接続要求でも省略不可。bare `<handle>` を送ると
-`reconnect:` トークンを伴っていても `LOGIN:incorrect` で拒否される (`server.rs:894-901`)。
-`x1` モードフラグとは排他。`<game_id>` は Game_Summary の `Game_ID:` で受け取った
-値、`<token>` は `Reconnect_Token:` で受け取った 32 文字。
+`<handle>+<game_name>+<color>` は通常 LOGIN と同じ
+`crates/rshogi-csa-server-tcp/src/server.rs::parse_handle` を通すため、再接続
+要求でも省略不可。bare `<handle>` を送ると `reconnect:` トークンを伴っていても
+`LOGIN:incorrect` で拒否される。`x1` モードフラグとは排他。`<game_id>` は
+Game_Summary の `Game_ID:` で受け取った値、`<token>` は `Reconnect_Token:` で
+受け取った 32 文字。
 
 **3. サーバー側の判定と応答**
 
-[`handle_reconnect_request`](../../crates/rshogi-csa-server-tcp/src/server.rs) (`server.rs:2712`) が grace 中の対局を探索し、handle / color /
-token がすべて一致した場合のみ受理する。
+TCP は `crates/rshogi-csa-server-tcp/src/server.rs::handle_reconnect_request`、
+Workers は `crates/rshogi-csa-server-workers/src/game_room.rs::GameRoom::handle_reconnect_request`
+が grace 中の対局を探索し、handle / color / token がすべて一致した場合のみ
+受理する。
 
-| 判定 | 応答 | 補足 |
-|---|---|---|
-| token 一致 | `LOGIN:<echo> OK` → resume message → transport handoff。TCP は bare handle (§4 と同様)、Workers は `<handle>+<game_name>+<color>` 形式だが**色トークンは `color_to_str` で正規化** (`black` / `white`) されるため、再接続時 LOGIN 行で `b` / `sente` 等の alias を送ってもサーバー応答は `black` で返る (`crates/rshogi-csa-server-workers/src/game_room.rs:2111`)。新規 LOGIN 経路 (§4) は raw 入力をそのまま echo するので、ここだけ挙動が異なることに注意 | `server.rs:2780-2814` |
-| game_id 不在 / handle・color 不一致 / token 不一致 | `LOGIN:incorrect reconnect_rejected` | side-channel 漏洩防止のため理由を統合 (`server.rs:2700-2761`) |
-| 既に他経路で再接続済み | `LOGIN:incorrect reconnect_already_resumed` | `server.rs:2768-2776` |
-| game loop 側が deadline 超過済 | `LOGIN:incorrect reconnect_aborted` | `server.rs:2811` |
+| 判定 | 応答 |
+|---|---|
+| token 一致 | `LOGIN:<echo> OK` → resume message → transport handoff。TCP は bare handle (§4 と同様)、Workers は `<handle>+<game_name>+<color>` 形式だが**色トークンは `color_to_str` で正規化** (`black` / `white`) されるため、再接続時 LOGIN 行で `b` / `sente` 等の alias を送ってもサーバー応答は `black` で返る。新規 LOGIN 経路 (§4) は raw 入力をそのまま echo するので、ここだけ挙動が異なることに注意 |
+| game_id 不在 / handle・color 不一致 / token 不一致 | `LOGIN:incorrect reconnect_rejected` (side-channel 漏洩防止のため理由を統合) |
+| 既に他経路で再接続済み | `LOGIN:incorrect reconnect_already_resumed` |
+| game loop 側が deadline 超過済 | `LOGIN:incorrect reconnect_aborted` |
 
 **4. resume message のフォーマット**
 
-`build_resume_message` (`server.rs:2824-2846`) が以下を 1 つの multi-line メッセージで送出する:
+`server.rs::build_resume_message` (TCP) と `crates/rshogi-csa-server-workers/src/reconnect.rs::build_resume_message`
+(Workers) が以下を 1 つの multi-line メッセージで送出する:
 
 ```
 BEGIN Game_Summary
@@ -248,7 +268,7 @@ END Reconnect_State
 ```
 
 `BEGIN Reconnect_State` ... `END Reconnect_State` は本リポ独自で、CSA 標準には
-存在しない。Workers 側にも同形式の実装がある (`crates/rshogi-csa-server-workers/src/reconnect.rs:128-153`)。
+存在しない。
 
 ### 9.2 Lobby マッチング (`MATCHED <room_id> <color>`) `**`
 
@@ -257,14 +277,14 @@ Workers 限定の独自経路。CSA 標準の LOGIN とは別系統 (`/ws/lobby`
 ことでペアリング → `room_id` 発番 → `MATCHED <room_id> <color>` 通知 → 通常の
 GameRoom DO への接続、というフローを取る。
 
-| 行 | 役割 | 実装位置 |
+| 行 | 役割 | 生成 / 受理箇所 |
 |---|---|---|
-| `LOGIN_LOBBY <handle>+<game_name>+<color> <password>` | queue 追加 | `crates/rshogi-csa-server-workers/src/lobby_protocol.rs:70` |
-| `LOGOUT_LOBBY` | queue 離脱 | `crates/rshogi-csa-server-workers/src/lobby.rs:251` |
-| `LOBBY_PONG` | client → server。受信のみ実装 (queue 滞在中の no-op)。サーバーからの `LOBBY_PING` 送出と PONG 応答処理は未実装 (`lobby.rs:257-260`) | `lobby.rs:257` |
-| `LOGIN_LOBBY:<handle> OK` | queue 登録成功 | `lobby_protocol.rs:231` |
-| `LOGIN_LOBBY:incorrect <reason>` | 登録失敗 (`reason` は `LoginLobbyError::reason` 参照) | `lobby_protocol.rs:46-57, 236` |
-| `MATCHED <room_id> <color>` | ペアリング成立。`<room_id>` は `lobby-<game_name>-<32hex>` | `lobby_protocol.rs:222` |
+| `LOGIN_LOBBY <handle>+<game_name>+<color> <password>` | queue 追加 | [`crates/rshogi-csa-server-workers/src/lobby_protocol.rs`](../../crates/rshogi-csa-server-workers/src/lobby_protocol.rs) の `parse_login_lobby` |
+| `LOGOUT_LOBBY` | queue 離脱 | [`crates/rshogi-csa-server-workers/src/lobby.rs`](../../crates/rshogi-csa-server-workers/src/lobby.rs) の `LobbyDO::handle_queued_line` (`LOGOUT_LOBBY` arm) |
+| `LOBBY_PONG` | client → server。受信のみ実装 (queue 滞在中の no-op)。サーバーからの `LOBBY_PING` 送出と PONG 応答処理は未実装 | `lobby.rs::LobbyDO::handle_queued_line` (`LOBBY_PONG` arm) |
+| `LOGIN_LOBBY:<handle> OK` | queue 登録成功 | `lobby_protocol.rs::build_login_ok_line` |
+| `LOGIN_LOBBY:incorrect <reason>` | 登録失敗 (`reason` は `lobby_protocol.rs::LoginLobbyError::reason` 参照) | `lobby_protocol.rs::build_login_incorrect_line` |
+| `MATCHED <room_id> <color>` | ペアリング成立。`<room_id>` は `lobby-<game_name>-<32hex>` (`lobby_protocol.rs::build_room_id`) | `lobby_protocol.rs::build_matched_line` |
 
 詳細設計は [`lobby_design.md`](lobby_design.md)、運用 runbook は
 [`lobby_e2e_runbook.md`](lobby_e2e_runbook.md) を参照。
@@ -273,28 +293,27 @@ GameRoom DO への接続、というフローを取る。
 
 opt-in flag (`--allow-floodgate-features` / 環境変数) は **コマンドそのもの**
 ではなく **起動時の構成 (永続 rates / history / scheduler / 切断敗北確定など)
-の有効化** を gate する (`crates/rshogi-csa-server/src/config.rs:82-115`)。
+の有効化** を gate する。
 
 具体的な振る舞い:
 
 - `%%FLOODGATE rating <handle>` は常に受理され、`rate_storage.load()` の結果を
-  そのまま返す (`server.rs:1697-1723`)。永続 rates が wire されていなければ
-  `NOT_FOUND` 応答に倒れる。
-- `%%FLOODGATE history [N]` も常に受理される (`server.rs:1664-1695`)。
-  `history_storage` 未配線時は `##[FLOODGATE] history ERROR not_configured`
+  そのまま返す (TCP `server.rs` の `FloodgateRating` arm)。永続 rates が wire
+  されていなければ `NOT_FOUND` 応答に倒れる。
+- `%%FLOODGATE history [N]` も常に受理される (TCP `server.rs` の `FloodgateHistory`
+  arm)。`history_storage` 未配線時は `##[FLOODGATE] history ERROR not_configured`
   を返す。
 - opt-in を伴う構成 (`JsonlFloodgateHistoryStorage` の起動・スケジューラ起動・
-  切断敗北確定 など) を要求した状態で `allow_floodgate_features=false` の
-  まま起動すると、`prepare_runtime` が `Err` を返してプロセス終了する
-  (`server.rs:304-314`)。
+  切断敗北確定 など) を要求した状態で `allow_floodgate_features=false` のまま
+  起動すると、TCP `server.rs::prepare_runtime` が `Err` を返してプロセス終了する。
 
 opt-in flag が gate するフィールド集合 (`FloodgateFeatureIntent`) と検証
 ロジック (`validate_floodgate_feature_gate`) の一次ソースは core crate の
 [`crates/rshogi-csa-server/src/config.rs`](../../crates/rshogi-csa-server/src/config.rs)。frontend ごとに「構成 → 要求集合
-(intent)」を導出する経路は別物で、TCP は [`floodgate_intent_from_config`](../../crates/rshogi-csa-server-tcp/src/server.rs) を 1 か所
-に集約 (`server.rs:264`)、Workers は config 解析時にインラインで
-`FloodgateFeatureIntent` を組み立てる (`crates/rshogi-csa-server-workers/src/game_room.rs:2279, 2302`、
-`games_index.rs:264`)。
+(intent)」を導出する経路は別物で、TCP は `crates/rshogi-csa-server-tcp/src/server.rs::floodgate_intent_from_config`
+を 1 か所に集約、Workers は env 解析時にインラインで `FloodgateFeatureIntent`
+を組み立てる (`crates/rshogi-csa-server-workers/src/game_room.rs::resolve_reconnect_grace`
+/ `resolve_floodgate_history_storage`、[`crates/rshogi-csa-server-workers/src/games_index.rs`](../../crates/rshogi-csa-server-workers/src/games_index.rs))。
 
 ## 10. 関連 doc
 
