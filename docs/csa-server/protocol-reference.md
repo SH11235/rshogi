@@ -39,8 +39,12 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 
 ## 3. wire format 概観
 
-- 行指向。1 メッセージ = 1 行。送受信は [`crates/rshogi-csa-server-tcp/src/transport.rs`](../../crates/rshogi-csa-server-tcp/src/transport.rs) の
-  `TcpTransport` が担当し、受信は CR/LF 双方を許容、送信は LF または CR/LF を末尾に付ける。
+- 行指向。1 メッセージ = 1 行。受信側は CR/LF 双方を許容する。送信側の末尾改行
+  は frontend で異なる:
+  - **TCP**: CRLF (`\r\n`) を付ける ([`crates/rshogi-csa-server-tcp/src/transport.rs`](../../crates/rshogi-csa-server-tcp/src/transport.rs) の
+    `TcpTransport::send_line`)。
+  - **Workers**: LF (`\n`) のみを付ける (`crates/rshogi-csa-server-workers/src/game_room.rs::send_line`、
+    `crates/rshogi-csa-server-workers/src/lobby.rs::send_line` の薄いラッパ)。
 - 1 行のパースは [`crates/rshogi-csa-server/src/protocol/command.rs`](../../crates/rshogi-csa-server/src/protocol/command.rs) の `parse_command`、
   クライアント側送信側の組み立ては同ファイルの `serialize_client_command`。
   両者は roundtrip プロパティ `parse_command(serialize(c)) == c` を主要バリアント
@@ -109,8 +113,8 @@ CSA 標準を超えた `%%` 系拡張コマンド。受理条件は frontend で
 | `%%WHO` | ログイン中プレイヤ一覧。`##[WHO] <name> <status>` を name 昇順、終端 `##[WHO] END` | ✅ | ❌ | `info.rs::who_lines` |
 | `%%LIST` | アクティブ対局一覧。`##[LIST] <game_id> <black> <white> <game_name> <started_at>` + END | ✅ | ❌ | `info.rs::list_lines` |
 | `%%SHOW <game_id>` | 1 対局のサマリ。未登録は `##[SHOW] NOT_FOUND <game_id>` 後 END | ✅ | ❌ | `info.rs::show_lines` |
-| `%%MONITOR2ON <game_id>` | 観戦購読 (broadcast 受信開始)。応答 `##[MONITOR2] BEGIN <game_id>` / 不在 `##[MONITOR2] NOT_FOUND` / 多重 `##[MONITOR2] BUSY` | ✅ | ✅ (spectator 経路) | TCP `server.rs` の `ClientCommand::Monitor2On` arm / Workers `game_room.rs::GameRoom::handle_spectator_line` の `Monitor2On` arm |
-| `%%MONITOR2OFF <game_id>` | 観戦購読解除。応答 `##[MONITOR2OFF] <game_id>` + END | ✅ | ✅ (spectator 経路) | TCP `server.rs` の `Monitor2Off` arm / Workers `game_room.rs::GameRoom::handle_spectator_line` の `Monitor2Off` arm |
+| `%%MONITOR2ON <game_id>` | 観戦購読 (broadcast 受信開始)。応答 `##[MONITOR2] BEGIN <id>` / 不在 `##[MONITOR2] NOT_FOUND <game_id>` / 多重 `##[MONITOR2] BUSY <game_id>`。`<id>` は **TCP では要求された `<game_id>`**、**Workers では `monitor_id` (active_game_id があればそれ、無ければ `room_id`)** が入る | ✅ | ✅ (spectator 経路) | TCP `server.rs` の `ClientCommand::Monitor2On` arm / Workers `game_room.rs::GameRoom::handle_spectator_line` の `Monitor2On` arm |
+| `%%MONITOR2OFF <game_id>` | 観戦購読解除。応答 `##[MONITOR2OFF] <id>` + END (`<id>` は §MONITOR2ON と同じ規則。TCP は `<game_id>`、Workers は `monitor_id`)。Workers では未登録 `<game_id>` を渡された場合 `##[MONITOR2OFF] NOT_FOUND <requested>` + END で返す経路がある | ✅ | ✅ (spectator 経路) | TCP `server.rs` の `Monitor2Off` arm / Workers `game_room.rs::GameRoom::handle_spectator_line` の `Monitor2Off` arm |
 | `%%CHAT <message>` | room へ chat 配信。応答 `##[CHAT] OK <game_id>` / 未観戦時 `##[CHAT] NOT_MONITORING` (broadcast 形式は `##[CHAT] <handle>: <message>`) | ✅ | ✅ (player + spectator) | TCP `server.rs` の `Chat` arm / Workers `game_room.rs` の `Chat` arm (player + spectator 経路) |
 | `%%VERSION` | 実装名 + バージョン 1 行。`##[VERSION] rshogi-csa-server <CARGO_PKG_VERSION>`。**他の x1 応答と異なり END 終端行なし** (§6 の例外) | ✅ | ❌ | `info.rs::version_lines` |
 | `%%HELP` | 受理コマンド一覧 (`advertise == accept` で統一) | ✅ | ❌ | `info.rs::help_lines` |
@@ -127,24 +131,35 @@ CSA 標準を超えた `%%` 系拡張コマンド。受理条件は frontend で
 で紐付けられている)。なお `%%HELP` は TCP frontend のみ応答するため、Workers では
 `info::help_lines` の advertise list を直接の wire 契約として扱わないこと。
 
-## 6. サーバー応答 framing (`##[<TAG>] ... END`)
+## 6. サーバー応答 framing
 
 x1 拡張コマンド応答に共通する framing 規約:
 
-- 応答は 1 行以上の本体 + 終端行 `##[<TAG>] END` で構成する。
+- 応答は 1 行以上の本体 + 終端行で構成する。
 - 本体が空 (例: 観戦中対局なし `%%LIST` が 0 件) でも終端行は必ず出る。
-- TAG はコマンド名と直接対応させる (`%%WHO` → `##[WHO]`, `%%FLOODGATE history` →
-  `##[FLOODGATE] history` と `##[FLOODGATE] history END`)。
-- `<TAG>` は ASCII 大文字 + 数字 + 区切り `_`/`空白` のみ。フィールド値に
-  ASCII 空白を含めない契約 (例 `FloodgateHistoryEntry` の各フィールド) で行
-  framing が壊れないことを `info.rs::floodgate_history_lines` /
-  `info.rs::floodgate_rating_lines` の `debug_assert!` で担保している。
+- 各応答は **framing key** を持ち、終端行は「framing key に ASCII 空白 + `END`
+  を付けた行」で表現する。framing key は通常 `##[<TAG>]` だが、`%%FLOODGATE`
+  系のみ固定接尾語彙 (`history` / `rating`) を伴い `##[FLOODGATE] history` /
+  `##[FLOODGATE] rating` 全体が framing key として 1 セットで動く。
 
-**例外**: `%%VERSION` のみ単行応答 (`##[VERSION] <impl> <ver>`) で `END` 終端行を
+| コマンド | framing key | 終端行 |
+|---|---|---|
+| `%%WHO` / `%%LIST` / `%%SHOW` / `%%HELP` 等 | `##[<TAG>]` | `##[<TAG>] END` |
+| `%%MONITOR2ON` (応答 tag は `MONITOR2`) | `##[MONITOR2]` | `##[MONITOR2] END` |
+| `%%MONITOR2OFF` | `##[MONITOR2OFF]` | `##[MONITOR2OFF] END` |
+| `%%FLOODGATE history [N]` | `##[FLOODGATE] history` | `##[FLOODGATE] history END` |
+| `%%FLOODGATE rating <handle>` | `##[FLOODGATE] rating` | `##[FLOODGATE] rating END` |
+
+`<TAG>` (= `##[ ... ]` の中身) は ASCII 大文字 + 数字 + `_` のみ。フィールド値
+に ASCII 空白を含めない契約 (例 `FloodgateHistoryEntry` の各フィールド) で行
+framing が壊れないことを `info.rs::floodgate_history_lines` /
+`info.rs::floodgate_rating_lines` の `debug_assert!` で担保している。
+
+**例外**: `%%VERSION` のみ単行応答 (`##[VERSION] <impl> <ver>`) で終端行を
 持たない (`info.rs::version_lines` が 1 行だけ返す)。これは Cargo.toml バージョンを
 1 行で返すだけの軽量照会で、フィールド構造を持たないためフレーミングを省略
 している。クライアントは `%%VERSION` の応答を 1 行読みで完結させ、その他の x1
-コマンドは「`##[<TAG>] END` まで読む」契約で複数行応答を安全に分節できる。
+コマンドは上記 framing key の終端行まで読むことで複数行応答を安全に分節できる。
 
 その他 `##` プレフィックス応答 (上表外の運用通知系):
 
