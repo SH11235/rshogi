@@ -23,12 +23,19 @@
 //!    吸い上げ、`drive_game` を `spawn_local` で起動
 //! 4. ペア化されなかった slot は WaitingPool に再 push（次回まで待機）
 //!
+//! # 時計の決定
+//!
+//! - 各スケジュールの対局は `schedule.game_name` をキーに
+//!   `state.config.clock_presets` から `ClockSpec` を引いて使う。preset 未登録 (or
+//!   `clock_presets` 空 = 後方互換モード) のときは `state.config.clock` (global)
+//!   が fallback として使われる。
+//! - 同一 `game_name` で曜日別に時計を変える運用 (per-schedule clock) は意図的に
+//!   非対応 — `game_name` をアイデンティティと見なすことで preset map の単一窓口
+//!   で時計を一元管理する設計。同じ持ち時間で複数曜日の枠を作りたい場合は同一
+//!   `game_name` の `[[schedules]]` を曜日違いで並べる。
+//!
 //! # 既知の制約
 //!
-//! - **per-schedule clock**: 現状は `state.config.clock`（global）を使う。
-//!   スケジュール毎に異なる時計（`floodgate-600-10` と `floodgate-180-3` 等）
-//!   をサポートするには `drive_game` のシグネチャに `ClockSpec` 引数を足して
-//!   呼び出し側で上書きする必要がある。
 //! - **buoy / 駒落ち**: スケジューラ起動の対局は常に平手（`initial_sfen = None`）。
 //!   buoy 予約消費や駒落ち初期局面のマッピングは matchmaking 経路（LOGIN ハンドラ
 //!   からの `reserve_match_initial_position`）でのみ作用する。

@@ -117,6 +117,12 @@ BYOYOMI_MS = "100"
 TOTAL_TIME_MIN = "10"
 BYOYOMI_MIN = "1"
 
+# `game_name` 別の時計プリセット（JSON 配列文字列）。空配列で「プリセット未宣言」、
+# 1 件以上登録すると strict mode（未登録 game_name は LOGIN_LOBBY:incorrect
+# unknown_game_name で拒否）。命名規則: `byoyomi-<total_sec>-<byoyomi_sec>` /
+# `fischer-<total_sec>-<increment_sec>F`。staging は通電確認用に空配列で出荷する。
+CLOCK_PRESETS = "[]"
+
 # 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
 # `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
 # staging では reconnect protocol / history bucket / rating 応答などの Floodgate 系
