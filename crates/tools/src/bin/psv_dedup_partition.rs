@@ -35,7 +35,19 @@
 ///   cargo run --release --bin psv_dedup_partition -- \
 ///     --output /path/to/deduped.bin \
 ///     --temp-dir /path/to/tmp \
-///     --phase2-only
+///     --dedup-only
+///
+///   # Phase 1 (パーティション振り分け) だけを行い、入力ファイルを 1 つずつ
+///   # 削除しながら処理することで、入力サイズの 2 倍の空きを必要としない。
+///   # `--temp-dir` の partition ファイルには append モードで追記される。
+///   for f in /data/*.bin; do
+///     cargo run --release --bin psv_dedup_partition -- \
+///       --partition-only --input "$f" \
+///       --temp-dir /path/to/tmp --partitions 1024
+///     rm "$f"
+///   done
+///   cargo run --release --bin psv_dedup_partition -- \
+///     --dedup-only --output /path/to/deduped.bin --temp-dir /path/to/tmp
 use std::{
     collections::HashSet,
     fs::{File, OpenOptions},
@@ -75,9 +87,9 @@ struct Args {
     #[arg(long, default_value = "*.bin")]
     pattern: String,
 
-    /// 出力ファイルパス
+    /// 出力ファイルパス。`--partition-only` 時は不要。それ以外は必須。
     #[arg(long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
     /// 一時ディレクトリ（パーティションファイルの置き場）
     #[arg(long, default_value = "./psv_dedup_partition_tmp")]
@@ -97,10 +109,19 @@ struct Args {
     #[arg(long, default_value = "0")]
     max_positions: u64,
 
-    /// Phase 1 をスキップして既存の一時ファイルから Phase 2 のみ実行。
-    /// temp_dir/ref/ が存在すれば自動で reference モードになる。
+    /// Phase 1 (パーティション振り分け) をスキップして既存の一時ファイルから
+    /// Phase 2 (重複削除) のみ実行する。temp_dir/ref/ が存在すれば自動で
+    /// reference モードになる。`--partition-only` と排他。
     #[arg(long)]
-    phase2_only: bool,
+    dedup_only: bool,
+
+    /// Phase 2 をスキップし、Phase 1 (パーティション振り分け) のみを実行する。
+    /// 既存の partition ファイルがあれば追記モードで書き込むため、入力ファイルを
+    /// 1 つずつ振り分け→元ファイル削除を繰り返すことで、入力と同サイズの一時領域を
+    /// 一度に確保せずに済む。最後に `--dedup-only` で Phase 2 を実行すること。
+    /// `--keep-temp` は暗黙で有効になり、`--output` は不要。`--dedup-only` と排他。
+    #[arg(long)]
+    partition_only: bool,
 
     /// 完了後も一時ディレクトリを削除しない
     #[arg(long)]
@@ -199,10 +220,13 @@ fn output_disk_required_bytes(
 }
 
 /// 不足チェック結果を INFO 出力し、不足時は Err（`force` なら Warning）。
+///
+/// `output_path` が `None` の場合（`--partition-only` モード）は出力ディスクチェックを
+/// 全てスキップする。Phase 2 を実行しないため、出力先の空き容量は問題にならない。
 fn preflight_check(
     estimate: &ResourceEstimate,
     temp_dir: &Path,
-    output_path: &Path,
+    output_path: Option<&Path>,
     skip_temp_check: bool,
     keep_temp: bool,
     force: bool,
@@ -259,14 +283,14 @@ fn preflight_check(
     }
 
     // --- ディスクチェック ---
-    let output_parent = {
-        let p = output_path.parent().unwrap_or(Path::new("."));
-        if p.as_os_str().is_empty() {
-            Path::new(".")
+    let output_parent = output_path.map(|p| {
+        let parent = p.parent().unwrap_or(Path::new("."));
+        if parent.as_os_str().is_empty() {
+            Path::new(".").to_path_buf()
         } else {
-            p
+            parent.to_path_buf()
         }
-    };
+    });
 
     if !skip_temp_check {
         let temp_required = (estimate.phase1_temp_bytes as f64 * DISK_SAFETY_FACTOR) as u64;
@@ -291,81 +315,86 @@ fn preflight_check(
         }
     }
 
-    // 出力ディスクチェック（temp と同一 fs の場合は Phase 2 の一時的な headroom を見る）
-    let same_fs = same_filesystem(temp_dir, output_parent);
-    // 出力上限は input 側のみ（reference は出力対象外なので除外する）
-    let output_required = (estimate.output_upper_bound_bytes as f64 * DISK_SAFETY_FACTOR) as u64;
-    if let Some(avail) = get_disk_available(output_parent) {
-        if same_fs == Some(true) {
-            let same_fs_headroom = (same_fs_output_headroom_bytes(estimate, keep_temp) as f64
-                * DISK_SAFETY_FACTOR) as u64;
-            eprintln!(
-                "Output disk:          same filesystem as temp ({}). Phase 2 では temp を削除しながら \
-                 出力するため、追加で必要な空き容量は最悪 {}{}。",
-                output_parent.display(),
-                format_gib(same_fs_headroom),
-                if keep_temp {
-                    "（--keep-temp のため output 全量ぶん）"
-                } else {
-                    "（処理中の最大 input partition 想定）"
+    // 出力ディスクチェック（--partition-only 時はスキップ）
+    if let Some(output_parent) = output_parent.as_deref() {
+        let same_fs = same_filesystem(temp_dir, output_parent);
+        // 出力上限は input 側のみ（reference は出力対象外なので除外する）
+        let output_required =
+            (estimate.output_upper_bound_bytes as f64 * DISK_SAFETY_FACTOR) as u64;
+        if let Some(avail) = get_disk_available(output_parent) {
+            if same_fs == Some(true) {
+                let same_fs_headroom = (same_fs_output_headroom_bytes(estimate, keep_temp) as f64
+                    * DISK_SAFETY_FACTOR) as u64;
+                eprintln!(
+                    "Output disk:          same filesystem as temp ({}). Phase 2 では temp を削除しながら \
+                     出力するため、追加で必要な空き容量は最悪 {}{}。",
+                    output_parent.display(),
+                    format_gib(same_fs_headroom),
+                    if keep_temp {
+                        "（--keep-temp のため output 全量ぶん）"
+                    } else {
+                        "（処理中の最大 input partition 想定）"
+                    }
+                );
+                let same_fs_required =
+                    output_disk_required_bytes(estimate, true, skip_temp_check, keep_temp);
+                if same_fs_required > avail {
+                    let msg = if skip_temp_check {
+                        format!(
+                            "出力ディスク不足: same filesystem 上で Phase 2 に追加 headroom {} 必要ですが \
+                             {} しか空きがありません ({})。\n\
+                             対処法:\n\
+                             - temp/output を別ファイルシステムに分ける\n\
+                             - 一時ファイルを整理してから --dedup-only を再実行\n\
+                             - --force で強制続行",
+                            format_gib(same_fs_headroom),
+                            format_gib(avail),
+                            output_parent.display(),
+                        )
+                    } else {
+                        format!(
+                            "ディスク不足: same filesystem 上で Phase 1 temp {} と Phase 2 headroom {} の合計が \
+                             必要ですが {} しか空きがありません ({})。\n\
+                             対処法:\n\
+                             - temp/output を別ファイルシステムに分ける\n\
+                             - --partitions を増やして最大 partition を小さくする\n\
+                             - --force で強制続行",
+                            format_gib(
+                                (estimate.phase1_temp_bytes as f64 * DISK_SAFETY_FACTOR) as u64
+                            ),
+                            format_gib(same_fs_headroom),
+                            format_gib(avail),
+                            output_parent.display(),
+                        )
+                    };
+                    if force {
+                        eprintln!("Warning (--force): {msg}");
+                    } else {
+                        return Err(io::Error::other(msg));
+                    }
                 }
-            );
-            let same_fs_required =
-                output_disk_required_bytes(estimate, true, skip_temp_check, keep_temp);
-            if same_fs_required > avail {
-                let msg = if skip_temp_check {
-                    format!(
-                        "出力ディスク不足: same filesystem 上で Phase 2 に追加 headroom {} 必要ですが \
-                         {} しか空きがありません ({})。\n\
-                         対処法:\n\
-                         - temp/output を別ファイルシステムに分ける\n\
-                         - 一時ファイルを整理してから --phase2-only を再実行\n\
-                         - --force で強制続行",
-                        format_gib(same_fs_headroom),
-                        format_gib(avail),
-                        output_parent.display(),
-                    )
-                } else {
-                    format!(
-                        "ディスク不足: same filesystem 上で Phase 1 temp {} と Phase 2 headroom {} の合計が \
-                         必要ですが {} しか空きがありません ({})。\n\
-                         対処法:\n\
-                         - temp/output を別ファイルシステムに分ける\n\
-                         - --partitions を増やして最大 partition を小さくする\n\
-                         - --force で強制続行",
-                        format_gib((estimate.phase1_temp_bytes as f64 * DISK_SAFETY_FACTOR) as u64),
-                        format_gib(same_fs_headroom),
-                        format_gib(avail),
-                        output_parent.display(),
-                    )
-                };
-                if force {
-                    eprintln!("Warning (--force): {msg}");
-                } else {
-                    return Err(io::Error::other(msg));
-                }
-            }
-        } else {
-            eprintln!(
-                "Output disk available:{} ({}, 出力上限 {})",
-                format_gib(avail),
-                output_parent.display(),
-                format_gib(output_required),
-            );
-            if output_required > avail {
-                let msg = format!(
-                    "出力ディスク不足: 上限 {} 必要ですが {} しか空きがありません ({})。\n\
-                     対処法:\n\
-                     - 別ファイルシステムの --output を指定\n\
-                     - --force で強制続行",
-                    format_gib(output_required),
+            } else {
+                eprintln!(
+                    "Output disk available:{} ({}, 出力上限 {})",
                     format_gib(avail),
                     output_parent.display(),
+                    format_gib(output_required),
                 );
-                if force {
-                    eprintln!("Warning (--force): {msg}");
-                } else {
-                    return Err(io::Error::other(msg));
+                if output_required > avail {
+                    let msg = format!(
+                        "出力ディスク不足: 上限 {} 必要ですが {} しか空きがありません ({})。\n\
+                         対処法:\n\
+                         - 別ファイルシステムの --output を指定\n\
+                         - --force で強制続行",
+                        format_gib(output_required),
+                        format_gib(avail),
+                        output_parent.display(),
+                    );
+                    if force {
+                        eprintln!("Warning (--force): {msg}");
+                    } else {
+                        return Err(io::Error::other(msg));
+                    }
                 }
             }
         }
@@ -375,7 +404,7 @@ fn preflight_check(
     Ok(())
 }
 
-/// `--phase2-only` 時、既存 temp ディレクトリのパーティションファイルサイズを
+/// `--dedup-only` 時、既存 temp ディレクトリのパーティションファイルサイズを
 /// 合計して total bytes を得る。
 fn sum_existing_partition_bytes(dir: &Path) -> io::Result<u64> {
     if !dir.is_dir() {
@@ -391,7 +420,7 @@ fn sum_existing_partition_bytes(dir: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-/// `--phase2-only` 時、既存 temp ディレクトリから partition 数を推定する。
+/// `--dedup-only` 時、既存 temp ディレクトリから partition 数を推定する。
 ///
 /// `partition_NNNNN.bin` 形式のファイルを列挙し、最大 index + 1 を返す。
 /// Phase 1 は 0..N-1 のすべての partition ファイルを空でも作成するため、
@@ -428,7 +457,7 @@ fn detect_partition_count(dir: &Path) -> io::Result<usize> {
                     io::ErrorKind::InvalidData,
                     format!(
                         "temp {} の partition が欠損しています: {} 個しか見つからず \
-                         Phase 1 時の N={} を満たしません。`--phase2-only` は不完全な temp では再開できません。",
+                         Phase 1 時の N={} を満たしません。`--dedup-only` は不完全な temp では再開できません。",
                         dir.display(),
                         count,
                         detected,
@@ -465,6 +494,9 @@ fn parse_reference_paths(reference: &str) -> io::Result<Vec<PathBuf>> {
 ///
 /// `max_positions > 0` の場合は `total_records` がその値に達した時点で
 /// 途中終了する。`max_positions == 0` なら全件処理する。
+///
+/// `append = true` の場合、既存の partition ファイルがあれば末尾に追記する。
+/// `--partition-only` で複数回起動して同じ temp_dir に積み重ねるユースケース向け。
 fn partition_files_into(
     label: &str,
     inputs: &[PathBuf],
@@ -472,13 +504,21 @@ fn partition_files_into(
     num_partitions: usize,
     partition_buffer_bytes: usize,
     max_positions: u64,
+    append: bool,
 ) -> io::Result<u64> {
     std::fs::create_dir_all(subdir)?;
 
     let mut writers: Vec<BufWriter<File>> = (0..num_partitions)
         .map(|i| {
             let path = subdir.join(partition_filename(i));
-            let file = OpenOptions::new().create(true).write(true).truncate(true).open(&path)?;
+            let mut opts = OpenOptions::new();
+            opts.create(true).write(true);
+            if append {
+                opts.append(true);
+            } else {
+                opts.truncate(true);
+            }
+            let file = opts.open(&path)?;
             Ok::<_, io::Error>(BufWriter::with_capacity(partition_buffer_bytes, file))
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -527,8 +567,13 @@ fn partition_files_into(
         }
     }
 
-    for w in &mut writers {
-        w.flush()?;
+    // BufWriter の Drop は flush エラーを握りつぶすので、明示的に into_inner で
+    // 内部 File を取り出して flush エラーを伝播させる。append モードで部分書き込みが
+    // 残ると、次回起動の `--dedup-only` が壊れた temp として扱えず誤検出になる。
+    for w in writers {
+        // `IntoInnerError -> io::Error` の From 実装で flush 失敗を伝播させる。
+        let mut file = w.into_inner()?;
+        file.flush()?;
     }
 
     let elapsed = start.elapsed().as_secs_f64();
@@ -715,6 +760,37 @@ fn cleanup_if_empty(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// `partition_NNNNN.bin` 形式の **非空** ファイルが 1 つでも存在するか判定する。
+///
+/// `partition_files_into` は処理開始時に 0..N-1 の空 partition ファイルを一括作成し、
+/// その後で入力 (reference) ファイルを open/read する。reference の open/read が
+/// 失敗すると ref/ には空の partition ファイルだけが残るため、ファイル名だけで
+/// 判定すると「過去失敗の残骸」と「reference 取り込み済み」を区別できない。
+///
+/// サイズ > 0 のファイルが 1 つでもあれば「データが書き込まれたことがある」=
+/// 取り込み済みとみなす。空ファイルだけが残っている場合は失敗からのリトライを
+/// 許容する (append モードで空ファイルに書き込むのは新規作成と等価)。
+fn has_any_partition_file(dir: &Path) -> io::Result<bool> {
+    if !dir.is_dir() {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.strip_prefix("partition_").and_then(|s| s.strip_suffix(".bin")).is_none() {
+            continue;
+        }
+        if entry.metadata()?.len() > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
@@ -730,19 +806,57 @@ fn main() -> io::Result<()> {
             "--partition-buffer-kb は 1 以上を指定してください",
         ));
     }
+    if args.partition_only && args.dedup_only {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--partition-only と --dedup-only は同時に指定できません",
+        ));
+    }
+    if !args.partition_only && args.output.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--output は必須です（--partition-only モードでのみ省略可能）",
+        ));
+    }
+    if args.partition_only && args.output.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--partition-only モードでは --output は使えません（Phase 2 を実行しないため）",
+        ));
+    }
+    if args.dedup_only && (args.input.is_some() || args.input_dir.is_some()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--dedup-only モードでは --input / --input-dir は使えません（既存の一時ファイルから再開するため）",
+        ));
+    }
 
     let partition_buffer_bytes = args.partition_buffer_kb * 1024;
     let input_subdir = args.temp_dir.join(INPUT_SUBDIR);
     let ref_subdir = args.temp_dir.join(REF_SUBDIR);
+    // --partition-only では temp を消したら意味がない（次回起動で再利用するため）。
+    let keep_temp = args.keep_temp || args.partition_only;
 
-    // Phase 2 で使う partition 数。--phase2-only 時は既存 temp dir から自動検出して
+    if args.partition_only {
+        return run_partition_only(
+            &args,
+            &input_subdir,
+            &ref_subdir,
+            partition_buffer_bytes,
+            keep_temp,
+        );
+    }
+
+    // 以降は通常モード or --dedup-only。Phase 2 を実行するので --output は必須。
+    let output_path = args.output.as_ref().expect("output 必須は上で検証済み");
+
+    // Phase 2 で使う partition 数。--dedup-only 時は既存 temp dir から自動検出して
     // Phase 1 時の N と一致させる (データ欠損を防ぐ)。
     let partitions: usize;
-
     let has_reference_partitions: bool;
 
-    let (phase1_ref_records, phase1_input_records) = if args.phase2_only {
-        eprintln!("=== Phase 1 skipped (--phase2-only) ===");
+    let (phase1_ref_records, phase1_input_records) = if args.dedup_only {
+        eprintln!("=== Phase 1 skipped (--dedup-only) ===");
         if !args.temp_dir.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -771,7 +885,7 @@ fn main() -> io::Result<()> {
         }
         if detected != args.partitions {
             eprintln!(
-                "Info: --phase2-only で {} から {} 個の partition を検出しました \
+                "Info: --dedup-only で {} から {} 個の partition を検出しました \
                  (CLI の --partitions={} は上書きされます)。",
                 input_subdir.display(),
                 detected,
@@ -811,7 +925,7 @@ fn main() -> io::Result<()> {
         preflight_check(
             &estimate,
             &args.temp_dir,
-            &args.output,
+            Some(output_path),
             /* skip_temp_check = */ true,
             args.keep_temp,
             args.force,
@@ -833,8 +947,8 @@ fn main() -> io::Result<()> {
             eprintln!("入力ファイルが見つかりません");
             return Ok(());
         }
-        check_output_not_in_inputs(&args.output, &inputs)?;
-        check_output_not_in_inputs(&args.output, &ref_paths)?;
+        check_output_not_in_inputs(output_path, &inputs)?;
+        check_output_not_in_inputs(output_path, &ref_paths)?;
 
         let ref_size = sum_file_sizes(&ref_paths)?;
         let input_size = sum_file_sizes(&inputs)?;
@@ -848,7 +962,7 @@ fn main() -> io::Result<()> {
         preflight_check(
             &estimate,
             &args.temp_dir,
-            &args.output,
+            Some(output_path),
             /* skip_temp_check = */ false,
             args.keep_temp,
             args.force,
@@ -877,6 +991,7 @@ fn main() -> io::Result<()> {
                 partitions,
                 partition_buffer_bytes,
                 0, // reference は常に全件
+                false,
             )?
         };
 
@@ -887,6 +1002,7 @@ fn main() -> io::Result<()> {
             partitions,
             partition_buffer_bytes,
             args.max_positions,
+            false,
         )?;
 
         (ref_records, input_records)
@@ -910,7 +1026,7 @@ fn main() -> io::Result<()> {
         &input_subdir,
         ref_dir_opt,
         partitions,
-        &args.output,
+        output_path,
         args.keep_temp,
     )?;
 
@@ -929,7 +1045,7 @@ fn main() -> io::Result<()> {
         0.0
     };
     println!("=== Partition Dedup Summary ===");
-    if !args.phase2_only {
+    if !args.dedup_only {
         if phase1_ref_records > 0 {
             println!("Reference records: {phase1_ref_records}");
         }
@@ -944,7 +1060,186 @@ fn main() -> io::Result<()> {
         100.0 * unique as f64 / input_seen.max(1) as f64,
     );
     println!("Duplicates:        {duplicates} ({dup_pct:.2}%)");
-    println!("Output file:       {}", args.output.display());
+    println!("Output file:       {}", output_path.display());
+
+    Ok(())
+}
+
+/// `--partition-only` モードの実行ハンドラ。
+///
+/// Phase 1 のみを実行し、既存の partition があれば追記する。Phase 2 (重複削除) は
+/// 行わないため、入力ファイルを 1 つずつ振り分け→元ファイル削除を繰り返すことで、
+/// 入力と同サイズの一時領域を一度に確保せずに済む。
+fn run_partition_only(
+    args: &Args,
+    input_subdir: &Path,
+    ref_subdir: &Path,
+    partition_buffer_bytes: usize,
+    keep_temp: bool,
+) -> io::Result<()> {
+    // ---- 早期検証 (重い I/O 前に全て返す) ----
+    let ref_paths = match args.reference.as_deref() {
+        Some(r) => parse_reference_paths(r)?,
+        None => Vec::new(),
+    };
+
+    // ref_subdir に reference データが書き込まれている状態で --reference を再指定すると、
+    // 同じ参照集合を二重登録するか、別集合と混ざって意味が変わる。どちらもユーザの
+    // 意図に反するので即エラー。ただし `has_any_partition_file` はサイズ > 0 のファイルだけ
+    // カウントするため、過去の失敗で空 partition ファイルだけが残っているケース（reference の
+    // open/read 失敗等）は失敗とみなしてリトライを許容する。
+    if !ref_paths.is_empty() && has_any_partition_file(ref_subdir)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{} に reference partition データが既に書き込まれています。--partition-only で \
+                 --reference を指定できるのは初回のみです。\n\
+                 - 続けて入力を追加するだけなら --reference を外してください。\n\
+                 - 過去の中途失敗から復旧したい場合は ref/ を手動で削除してから再実行してください \
+                   (部分書き込みの append は二重登録になるため自動復旧はしません)。",
+                ref_subdir.display(),
+            ),
+        ));
+    }
+
+    let inputs =
+        collect_input_paths(args.input.as_deref(), args.input_dir.as_ref(), &args.pattern)?;
+    if inputs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "入力ファイルが見つかりません (--partition-only には --input または --input-dir が必須)",
+        ));
+    }
+
+    // 既存 partition があれば数を揃える。不一致なら即エラー (ハッシュ空間が変わると
+    // 過去ファイルとの整合が取れなくなりデータが壊れる)。
+    let existing_input_count = detect_partition_count(input_subdir)?;
+    let existing_ref_count = detect_partition_count(ref_subdir)?;
+    if existing_input_count != 0 && existing_input_count != args.partitions {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "--partitions={} ですが {} には {} 個の partition が既にあります。\
+                 過去の起動と同じ値を指定するか、temp ディレクトリを別にしてください。",
+                args.partitions,
+                input_subdir.display(),
+                existing_input_count,
+            ),
+        ));
+    }
+    if existing_ref_count != 0 && existing_ref_count != args.partitions {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "--partitions={} ですが {} には {} 個の reference partition があります。",
+                args.partitions,
+                ref_subdir.display(),
+                existing_ref_count,
+            ),
+        ));
+    }
+    // input と ref の N 不一致は temp が壊れているか、過去に違う --partitions で
+    // 作られたものが混在している。修復は人間にしかできないので即エラー。
+    if existing_input_count != 0
+        && existing_ref_count != 0
+        && existing_input_count != existing_ref_count
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} の input partition 数 ({}) と reference partition 数 ({}) が不一致です。\
+                 temp ディレクトリが壊れている可能性があります。",
+                args.temp_dir.display(),
+                existing_input_count,
+                existing_ref_count,
+            ),
+        ));
+    }
+
+    let partitions = args.partitions;
+    warn_fd_limit(partitions);
+
+    // 出力ディスクは見ない。今回追加で必要な temp サイズだけ見積もる。
+    let ref_size = sum_file_sizes(&ref_paths)?;
+    let input_size = sum_file_sizes(&inputs)?;
+    let capped_input_size = if args.max_positions > 0 {
+        input_size.min(args.max_positions.saturating_mul(PSV_SIZE as u64))
+    } else {
+        input_size
+    };
+    let estimate =
+        estimate_resources(ref_size, capped_input_size, partitions, partition_buffer_bytes);
+    preflight_check(
+        &estimate,
+        &args.temp_dir,
+        /* output_path = */ None,
+        /* skip_temp_check = */ false,
+        keep_temp,
+        args.force,
+    )?;
+
+    eprintln!(
+        "=== Phase 1 only: Partitioning ({partitions} partitions, {} mode) ===",
+        if existing_input_count > 0 {
+            "append"
+        } else {
+            "create"
+        }
+    );
+    eprintln!(
+        "  partition buffer: {} KiB/partition (total ~{:.1} MiB)",
+        args.partition_buffer_kb,
+        (partitions * partition_buffer_bytes) as f64 / (1024.0 * 1024.0),
+    );
+
+    let ref_records = if ref_paths.is_empty() {
+        0
+    } else {
+        partition_files_into(
+            "reference",
+            &ref_paths,
+            ref_subdir,
+            partitions,
+            partition_buffer_bytes,
+            0,
+            true,
+        )?
+    };
+
+    let input_records = partition_files_into(
+        "input",
+        &inputs,
+        input_subdir,
+        partitions,
+        partition_buffer_bytes,
+        args.max_positions,
+        true,
+    )?;
+
+    let total_input_bytes = sum_existing_partition_bytes(input_subdir)?;
+    let total_ref_bytes = sum_existing_partition_bytes(ref_subdir)?;
+
+    println!("=== Partition Only Summary ===");
+    if ref_records > 0 {
+        println!("Reference records (this run): {ref_records}");
+    }
+    println!("Input records (this run):     {input_records}");
+    println!(
+        "Cumulative temp size:         input={} ref={}",
+        format_gib(total_input_bytes),
+        format_gib(total_ref_bytes)
+    );
+    println!("Temp dir:                     {}", args.temp_dir.display());
+    println!();
+    println!("次のステップ:");
+    println!("  - 残りの入力ファイルがあれば同じコマンドを繰り返してください");
+    println!(
+        "  - 全件の振り分けが終わったら以下で Phase 2 を実行してください:\n\
+         \n\
+         \t--dedup-only --output <出力ファイル> --temp-dir {} --partitions {}",
+        args.temp_dir.display(),
+        partitions,
+    );
 
     Ok(())
 }
@@ -969,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn phase2_only_same_fs_uses_headroom_not_full_output() {
+    fn dedup_only_same_fs_uses_headroom_not_full_output() {
         let estimate = estimate_resources(400, 4_000, 4, 64 * 1024);
 
         assert_eq!(output_disk_required_bytes(&estimate, true, true, false), 1_260);
@@ -985,5 +1280,99 @@ mod tests {
         let err = detect_partition_count(dir.path()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("欠損"));
+    }
+
+    #[test]
+    fn has_any_partition_file_distinguishes_empty_and_populated() {
+        let dir = TempDir::new().unwrap();
+        assert!(!has_any_partition_file(dir.path()).unwrap());
+
+        // partition と無関係な名前のファイルは無視
+        std::fs::write(dir.path().join("not_a_partition.bin"), []).unwrap();
+        assert!(!has_any_partition_file(dir.path()).unwrap());
+
+        // 空の partition ファイルは「過去失敗の残骸」とみなして false (再試行を許容)
+        std::fs::write(dir.path().join(partition_filename(0)), []).unwrap();
+        std::fs::write(dir.path().join(partition_filename(1)), []).unwrap();
+        assert!(!has_any_partition_file(dir.path()).unwrap());
+
+        // 1 バイトでもデータがあれば「取り込み済み」とみなして true
+        std::fs::write(dir.path().join(partition_filename(0)), b"x").unwrap();
+        assert!(has_any_partition_file(dir.path()).unwrap());
+    }
+
+    /// `--partition-only` を 2 回繰り返した結果が、1 回の通常 Phase1 と同等になる。
+    /// (append モードが正しく動き、ハッシュ振り分けが安定していることを確認)
+    #[test]
+    fn partition_only_append_matches_single_pass() {
+        // 4 種類の PSV レコード (sfen 部分だけ違えば良い)
+        let make_psv = |seed: u8| -> [u8; PSV_SIZE] {
+            let mut buf = [0u8; PSV_SIZE];
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = seed.wrapping_add(i as u8);
+            }
+            buf
+        };
+        let recs: Vec<[u8; PSV_SIZE]> = (0..16u8).map(make_psv).collect();
+
+        // ファイル A, B に 8 件ずつ書く
+        let workdir = TempDir::new().unwrap();
+        let file_a = workdir.path().join("a.bin");
+        let file_b = workdir.path().join("b.bin");
+        {
+            let mut f = File::create(&file_a).unwrap();
+            for r in &recs[..8] {
+                f.write_all(r).unwrap();
+            }
+            let mut f = File::create(&file_b).unwrap();
+            for r in &recs[8..] {
+                f.write_all(r).unwrap();
+            }
+        }
+
+        // 経路 1: 1 回 Phase1 で a, b を一度に振り分け (truncate モード)
+        let single_dir = TempDir::new().unwrap();
+        let single_subdir = single_dir.path().join(INPUT_SUBDIR);
+        partition_files_into(
+            "input",
+            &[file_a.clone(), file_b.clone()],
+            &single_subdir,
+            4,
+            64 * 1024,
+            0,
+            false,
+        )
+        .unwrap();
+
+        // 経路 2: --partition-only 風に a, b を別々に append
+        let multi_dir = TempDir::new().unwrap();
+        let multi_subdir = multi_dir.path().join(INPUT_SUBDIR);
+        partition_files_into(
+            "input",
+            std::slice::from_ref(&file_a),
+            &multi_subdir,
+            4,
+            64 * 1024,
+            0,
+            true,
+        )
+        .unwrap();
+        partition_files_into(
+            "input",
+            std::slice::from_ref(&file_b),
+            &multi_subdir,
+            4,
+            64 * 1024,
+            0,
+            true,
+        )
+        .unwrap();
+
+        // 各 partition のバイト列が完全一致すること
+        for i in 0..4 {
+            let single = std::fs::read(single_subdir.join(partition_filename(i))).unwrap();
+            let multi = std::fs::read(multi_subdir.join(partition_filename(i))).unwrap();
+            assert_eq!(single, multi, "partition {i} mismatch between single-pass and append");
+        }
     }
 }

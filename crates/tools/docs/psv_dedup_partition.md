@@ -53,7 +53,7 @@ Phase 2 の流れ (パーティションごと):
 
 これにより、既存ファイルと新規ファイルを結合してから dedup するよりも I/O が少なく、かつ reference 側の重複は出力に回らない。`psv_dedup_bloom --reference` の完全一致版に相当。
 
-`--phase2-only` で再開する際は `<temp-dir>/ref/` の存在を自動検出し、reference モードとして処理する（`--reference` 再指定は不要）。
+`--dedup-only` で再開する際は `<temp-dir>/ref/` の存在を自動検出し、reference モードとして処理する（`--reference` 再指定は不要）。
 
 ## 事前見積りと不足チェック
 
@@ -163,7 +163,7 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 
 ### Phase 1 だけ先に済ませて後日 Phase 2
 
-`--keep-temp` で一時ファイルを保持し、別セッションで `--phase2-only` から再開できる。途中で partition ファイルが欠けた temp ディレクトリは破損扱いとなり、`--phase2-only` は即エラーで停止する。
+`--keep-temp` で一時ファイルを保持し、別セッションで `--dedup-only` から再開できる。途中で partition ファイルが欠けた temp ディレクトリは破損扱いとなり、`--dedup-only` は即エラーで停止する。
 
 ```bash
 # セッション1: 振り分けだけ
@@ -177,8 +177,40 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 cargo run --release -p tools --bin psv_dedup_partition -- \
   --output deduped.bin \
   --temp-dir ./psv_tmp \
-  --phase2-only
+  --dedup-only
 ```
+
+### 数 TB クラス: 入力サイズの 2 倍の空きが取れない場合
+
+通常モードは Phase 1 完了時点で「入力ぶんの一時ファイル + 元入力」が同時に存在するため、入力と同等以上の空きが必要になる。`--partition-only` はこの制約を緩めるためのモードで、Phase 1 (振り分け) だけを実行し、入力ファイルを 1 つずつ処理→削除して進められる。
+
+```bash
+# 1 ファイルずつ振り分け、終わったら元を削除する
+for f in /data/psv/*.bin; do
+  cargo run --release -p tools --bin psv_dedup_partition -- \
+    --partition-only \
+    --input "$f" \
+    --temp-dir /fast/ssd/psv_tmp \
+    --partitions 1024
+  rm "$f"
+done
+
+# 全件の振り分けが終わったら最後に Phase 2 だけ実行
+cargo run --release -p tools --bin psv_dedup_partition -- \
+  --dedup-only \
+  --output deduped.bin \
+  --temp-dir /fast/ssd/psv_tmp
+```
+
+挙動と制約:
+
+- 既存の `partition_NNNNN.bin` には append モードで追記される
+- 2 回目以降の `--partitions` が初回と異なるとエラー (ハッシュ空間不整合を防止)
+- `--reference` は **初回のみ** 指定可能。`ref/` に reference データが書き込まれた状態で再指定するとエラー
+  - 過去の中途失敗で `ref/` に空 partition ファイルだけが残っている場合は失敗の残骸とみなしてリトライを許容する (空ファイルへの append は新規作成と等価)
+  - 部分書き込みが残っている場合は手動で `ref/` を削除してから再実行する (append 復旧は二重登録になるため自動化していない)
+- `--keep-temp` は暗黙で有効、`--output` は指定不可
+- 出力ディスクの事前チェックはスキップ。temp ディスクは「今回追加するぶん」だけ見積もる
 
 ## オプション一覧
 
@@ -193,8 +225,9 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 | `--partitions` | パーティション数 | `1024` |
 | `--partition-buffer-kb` | 各パーティションの BufWriter バッファ (KiB) | `64` |
 | `--max-positions` | 処理する入力レコードの最大件数（0 = 全件、試走用）。参照は常に全件 | `0` |
-| `--phase2-only` | Phase 1 をスキップして既存一時ファイルから再開（ref/ は自動検出） | off |
-| `--keep-temp` | 完了後も一時ファイル・ディレクトリを削除しない | off |
+| `--dedup-only` | Phase 1 をスキップして既存一時ファイルから再開（ref/ は自動検出） | off |
+| `--partition-only` | Phase 2 をスキップして Phase 1 (振り分け) のみ実行（既存 partition には append） | off |
+| `--keep-temp` | 完了後も一時ファイル・ディレクトリを削除しない（`--partition-only` では暗黙で有効） | off |
 | `--force` | メモリ/ディスク不足でも警告のみで続行する | off |
 
 ## `psv_dedup` / `psv_dedup_bloom` との比較
