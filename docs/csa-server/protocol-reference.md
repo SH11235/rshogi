@@ -70,12 +70,19 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 
 ## 5. x1 拡張コマンド一覧
 
-`LOGIN ... x1` が成立したセッションのみ受理される追加コマンド。**`%%VERSION` を
-除く** すべての応答は §6 の `##[<TAG>] ... ##[<TAG>] END` 框 (framing) を採用
-し、persistent socket 上でクライアントが「END まで読む」契約で安全に framing
-できる。`%%VERSION` だけは 1 行応答 (`##[VERSION] <impl> <ver>`) で `END` 終端
-行を持たない (`info.rs:28-34`) ため、クライアントは `%%VERSION` への応答を 1 行
-読みで完結させること。
+CSA 標準を超えた `%%` 系拡張コマンド。受理条件は frontend で異なる:
+
+- **TCP**: `LOGIN ... x1` が成立したセッションのみが受理対象。`run_waiter` は
+  非 x1 waiter で `%%` 系入力を切断扱いにする (`server.rs:1149-1156`)。
+- **Workers**: `x1` フラグを保存・確認せず、`handle_player_control_command` /
+  `handle_spectator_line` 経路が `parse_command` の結果をそのまま処理する
+  (`game_room.rs`)。クライアントは `LOGIN ... x1` を送らなくても下表の Workers
+  対応コマンドを利用できる。
+
+応答 framing は frontend 共通で **`%%VERSION` を除く** すべての応答が §6 の
+`##[<TAG>] ... ##[<TAG>] END` 契約に従う。`%%VERSION` だけは 1 行応答
+(`##[VERSION] <impl> <ver>`) で `END` 終端行を持たない (`info.rs:28-34`) ため、
+クライアントは `%%VERSION` への応答を 1 行読みで完結させること。
 
 実装本体は parse 側が [`parse_x1`](../../crates/rshogi-csa-server/src/protocol/command.rs) (`command.rs:298`)、
 応答行生成側が [`crates/rshogi-csa-server/src/protocol/info.rs`](../../crates/rshogi-csa-server/src/protocol/info.rs) と
