@@ -55,8 +55,13 @@ cargo run -p tools --release --bin tournament -- \
 
 ### 1. canonical パラメータファイルの準備
 
-rshogi 内部 default 値から始める場合は `generate_spsa_params` で生成。
-既存正本 (`tune/suisho10.params` 等) を使う場合は本ステップは不要。
+`--init-from` に渡す canonical (起点) を用意する。渡せる形式は:
+
+- rshogi デフォルト値 (`generate_spsa_params` で生成)
+- rshogi 形式の既存 .params (過去のチューニング結果など)
+- YaneuraOu 形式の既存 .params (YO 駆動時、または `yo_to_rshogi_params` 経由で rshogi 形式に変換したもの)
+
+rshogi デフォルト値から始める場合の生成例:
 
 ```bash
 cargo run --release -p tools --bin generate_spsa_params -- \

@@ -14,9 +14,15 @@ cargo build --release -p tools --bin generate_spsa_params --bin spsa --bin spsa_
 ## 2. canonical `.params` の準備
 
 `--init-from` に渡す canonical (起点パラメータファイル) を用意する。
+渡せる形式は以下のいずれか:
 
-- **既存正本を使う場合**: `tune/suisho10.params` 等をそのまま `--init-from` に渡す
-- **rshogi デフォルト値から始める場合**: `generate_spsa_params` で生成
+- **rshogi デフォルト値**: `generate_spsa_params` で生成 (rshogi の `SearchTuneParams::option_specs()` ベース)
+- **rshogi 形式の既存 .params**: 過去のチューニング結果や手作業で調整した値
+- **YaneuraOu 形式の既存 .params**: YO の `tune.py` 系ツールで生成された
+  YO 命名の .params (例: suisho 系の suisho*.params)。YO 駆動時は §10.6 の
+  ケース A、rshogi 駆動時は §10.6 のケース B / `yo_to_rshogi_params` 経由
+
+rshogi デフォルト値から始める場合の生成コマンド:
 
 ```bash
 cargo run --release -p tools --bin generate_spsa_params -- \
@@ -213,16 +219,17 @@ cargo run --release -p tools --bin spsa -- \
 #### 運用パターン
 
 ```bash
-RUN_DIR="runs/spsa/$(date -u +%Y%m%d_%H%M%S)_yo_suisho10"
+RUN_DIR="runs/spsa/$(date -u +%Y%m%d_%H%M%S)"
+CANONICAL=spsa_params/canonical.params
 
 # 1 回目: 新規開始 (run-dir 自動作成 + canonical を state.params に copy)
-spsa --run-dir "${RUN_DIR}" --init-from tune/suisho10.params ...
+spsa --run-dir "${RUN_DIR}" --init-from "${CANONICAL}" ...
 
 # 続き: resume (canonical との整合性 diagnostic 出力)
-spsa --run-dir "${RUN_DIR}" --init-from tune/suisho10.params --resume ...
+spsa --run-dir "${RUN_DIR}" --init-from "${CANONICAL}" --resume ...
 
 # 同 run-dir を破棄して canonical から作り直す
-spsa --run-dir "${RUN_DIR}" --init-from tune/suisho10.params --force-init ...
+spsa --run-dir "${RUN_DIR}" --init-from "${CANONICAL}" --force-init ...
 ```
 
 #### 関連フラグ
