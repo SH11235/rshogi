@@ -54,7 +54,7 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 | `LOGOUT` | ✅ | 余剰トークン拒否 (`command.rs:243`) |
 | `AGREE [<game_id>]` | ✅ | `<game_id>` 省略時は `None` (`command.rs:249`) |
 | `REJECT [<game_id>]` | ✅ | 同上 (`command.rs:256`) |
-| `<sign><from><to><PT>[,T<sec>][,'<comment>]` | ✅ | 指し手。先頭 `+`/`-` で先後判定。`T<sec>` 経過秒、`'<comment>` は Floodgate 拡張コメント (PV 等) (`parse_move`, `command.rs:267`) |
+| `<sign><from><to><PT>[,T<sec>][,'<comment>]` | ✅ | 指し手。先頭 `+`/`-` で先後判定。`'<comment>` は Floodgate 拡張コメント (PV 等)。`T<sec>` は CSA 互換のため受理するがサーバー時計には反映されない: 経過時間は `GameRoom::handle_move` がサーバ側 `now_ms - move_started_at` から計算する (`game/room.rs:471-485`)。`parse_move` (`command.rs:267`) は `<token>` と `'<comment>` だけを抽出する |
 | `%TORYO` / `%KACHI` / `%CHUDAN` | ✅ | 投了 / 入玉宣言 / 中断 (`command.rs:182`) |
 | 空行 | ✅ | keep-alive (`command.rs:163`) |
 
@@ -70,9 +70,12 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 
 ## 5. x1 拡張コマンド一覧
 
-`LOGIN ... x1` が成立したセッションのみ受理される追加コマンド。すべての応答は
-§6 の `##[<TAG>] ... ##[<TAG>] END` 框 (framing) を採用し、persistent socket 上で
-クライアントが「END まで読む」契約で安全に framing できる。
+`LOGIN ... x1` が成立したセッションのみ受理される追加コマンド。**`%%VERSION` を
+除く** すべての応答は §6 の `##[<TAG>] ... ##[<TAG>] END` 框 (framing) を採用
+し、persistent socket 上でクライアントが「END まで読む」契約で安全に framing
+できる。`%%VERSION` だけは 1 行応答 (`##[VERSION] <impl> <ver>`) で `END` 終端
+行を持たない (`info.rs:28-34`) ため、クライアントは `%%VERSION` への応答を 1 行
+読みで完結させること。
 
 実装本体は parse 側が [`parse_x1`](../../crates/rshogi-csa-server/src/protocol/command.rs) (`command.rs:298`)、
 応答行生成側が [`crates/rshogi-csa-server/src/protocol/info.rs`](../../crates/rshogi-csa-server/src/protocol/info.rs) と
@@ -86,7 +89,7 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 | `%%MONITOR2ON <game_id>` | 観戦購読 (broadcast 受信開始)。応答 `##[MONITOR2] BEGIN <game_id>` / 不在 `##[MONITOR2] NOT_FOUND` / 多重 `##[MONITOR2] BUSY` | `command.rs:327` | `server.rs:1378-1468` |
 | `%%MONITOR2OFF <game_id>` | 観戦購読解除。応答 `##[MONITOR2OFF] <game_id>` + END | `command.rs:333` | `server.rs:1515-1518` |
 | `%%CHAT <message>` | 観戦中の room へ chat 配信。応答 `##[CHAT] OK <game_id>` / 未観戦時 `##[CHAT] NOT_MONITORING` (broadcast 形式は `##[CHAT] <handle>: <message>`) | `command.rs:339` | `server.rs:1520-1551` |
-| `%%VERSION` | 実装名 + バージョン 1 行。`##[VERSION] rshogi-csa-server <CARGO_PKG_VERSION>` | `command.rs:313` | `info.rs:28` (`version_lines`) |
+| `%%VERSION` | 実装名 + バージョン 1 行。`##[VERSION] rshogi-csa-server <CARGO_PKG_VERSION>`。**他の x1 応答と異なり END 終端行なし** (§6 の例外) | `command.rs:313` | `info.rs:28` (`version_lines`) |
 | `%%HELP` | 受理コマンド一覧 (`advertise == accept` で統一) | `command.rs:317` | `info.rs:134` (`help_lines`) |
 | `%%SETBUOY <game_name> <moves...> <count>` | Buoy 登録。**admin 権限必須** (`config.admin_handles`)。応答 `##[SETBUOY] OK <buoy> <count>` / `PERMISSION_DENIED` / `ERROR <buoy> <reason>` | `command.rs:342` | `server.rs:1553-1591` |
 | `%%DELETEBUOY <game_name>` | Buoy 削除。admin 権限必須。応答 `##[DELETEBUOY] OK/PERMISSION_DENIED/ERROR` | `command.rs:363` | `server.rs:1593-1605` |
@@ -112,8 +115,11 @@ x1 拡張コマンド応答に共通する framing 規約:
   framing が壊れないことを `debug_assert!` で担保している (`info.rs:177-189`,
   L229-240)。
 
-クライアント実装の側では「`##[<TAG>] END` まで読む」契約だけで複数行応答を
-安全に分節できる。
+**例外**: `%%VERSION` のみ単行応答 (`##[VERSION] <impl> <ver>`) で `END` 終端行を
+持たない (`info.rs:28-34`)。これは Cargo.toml バージョンを 1 行で返すだけの軽量
+照会で、フィールド構造を持たないためフレーミングを省略している。クライアントは
+`%%VERSION` の応答を 1 行読みで完結させ、その他の x1 コマンドは「`##[<TAG>] END`
+まで読む」契約で複数行応答を安全に分節できる。
 
 その他 `##` プレフィックス応答 (上表外の運用通知系):
 
