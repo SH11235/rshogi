@@ -58,7 +58,7 @@ struct Cli {
 
     /// rshogi default 値の混入検知を error 化する (CI 用)。
     ///
-    /// `--allow-rshogi-defaults` と同時指定すると `--allow` が優先され警告自体が出ない。
+    /// `--allow-rshogi-defaults` と同時指定するとエラーになります (両フラグは意味が矛盾します)。
     #[arg(long, default_value_t = false)]
     strict_rshogi_defaults: bool,
 }
@@ -94,17 +94,25 @@ impl DefaultMatchReport {
 /// どの程度一致しているかを集計する。
 ///
 /// 一致率の閾値判定 (95%) は呼び出し側で行う。ここではカウントだけ返す。
+///
+/// **重複名の扱い**: 入力に同名 row が複数ある場合、後段の変換ロジック
+/// (`rshogi_by_name: HashMap<&str, &ParamRow>`) は last-write-wins で 1 entry に
+/// 集約する。検知側もそれと一致させるため、HashMap で重複排除してから集計する。
+/// (旧実装は全行カウントで、重複入力時に検知と実動作が乖離するバグがあった)
 fn detect_rshogi_default_match(rshogi_rows: &[ParamRow]) -> DefaultMatchReport {
     let defaults: HashMap<&str, i32> = SearchTuneParams::option_specs()
         .iter()
         .map(|s| (s.usi_name, s.default))
         .collect();
+    // 後段の変換と同じ per-name view を作る (last-write-wins)
+    let by_name: HashMap<&str, &ParamRow> =
+        rshogi_rows.iter().map(|r| (r.name.as_str(), r)).collect();
     let mut checked = 0usize;
     let mut matched = 0usize;
-    for r in rshogi_rows {
-        if let Some(&def) = defaults.get(r.name.as_str()) {
+    for (name, row) in &by_name {
+        if let Some(&def) = defaults.get(name) {
             checked += 1;
-            if r.value == def {
+            if row.value == def {
                 matched += 1;
             }
         }
@@ -332,7 +340,7 @@ mod tests {
         assert!(specs.len() >= 4, "need >=4 specs for this test");
         let rows = vec![
             make_row(specs[0].usi_name, specs[0].default), // 一致
-            make_row(specs[1].usi_name, specs[1].default + 12345), // 不一致 (default + 12345 で衝突しない値に)
+            make_row(specs[1].usi_name, specs[1].default + 12345), // 不一致 (default と確実に異なる値 (+12345 offset))
             make_row(specs[2].usi_name, specs[2].default + 12345),
             make_row(specs[3].usi_name, specs[3].default + 12345),
         ];
@@ -370,4 +378,33 @@ mod tests {
         assert_eq!(report.matched, specs.len());
         assert!(report.match_rate() >= DEFAULT_MATCH_WARN_RATE);
     }
+
+    #[test]
+    fn detect_handles_duplicate_names_with_last_write_wins() {
+        // 同名 row が複数あるとき、後段の rshogi_to_yo_params 変換は HashMap
+        // (last-write-wins) で 1 entry に集約する。検知側も同じ per-name view で
+        // 数え上げないと、--strict-rshogi-defaults で false positive を起こす。
+        let specs = SearchTuneParams::option_specs();
+        assert!(!specs.is_empty(), "option_specs must be non-empty");
+        let first = &specs[0];
+        // 同名で 3 つの row。Vec 順は default → default → default+12345 (last は不一致)
+        let rows = vec![
+            make_row(first.usi_name, first.default),
+            make_row(first.usi_name, first.default),
+            make_row(first.usi_name, first.default + 12345),
+        ];
+        let report = detect_rshogi_default_match(&rows);
+        // by_name 集約後は 1 entry のみ。HashMap の last-write-wins で値は不一致になる
+        // 可能性があるが、HashMap iteration 順は不定なのでどの value が採用されるかは
+        // 実装依存。検知件数 (checked) が 3 ではなく 1 であることだけ保証する。
+        assert_eq!(
+            report.checked, 1,
+            "duplicates should be deduplicated to match conversion logic"
+        );
+    }
+
+    // 注: --allow-rshogi-defaults と --strict-rshogi-defaults の同時指定 bail は
+    // main() レベルでしか検証できない (clap parse 自体は成功するが main 内で弾く)。
+    // unit test では検証困難なため、PR description / runbook の smoke test 4
+    // シナリオで担保している。
 }
