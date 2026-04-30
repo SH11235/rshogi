@@ -3243,10 +3243,10 @@ where
         return Ok(());
     }
 
-    // 5. LOGIN OK 応答 (公開経路と同じ shogi-server 互換 `LOGIN:<handle> OK`)。
-    transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
-
-    // 6. 先着 / 後着 を pending map で原子判定する。
+    // 5. 先着 / 後着 を pending map で原子判定する。`already_logged_in` は
+    //    `LOGIN OK` を送る前に検出して `LOGIN:incorrect` のみ返す (Issue #582
+    //    検証順 `color → expired → not_invited → already_logged_in` を満たす
+    //    ため、OK と incorrect の二重送信を回避する)。
     let cancel: Arc<Notify> = Arc::new(Notify::new());
     let (match_request_tx, match_request_rx) = oneshot::channel::<MatchRequest>();
     let session = TcpPendingSession {
@@ -3264,6 +3264,9 @@ where
             Ok(())
         }
         TryMatchResult::Matched { other } => {
+            // 6. LOGIN OK は登録 / マッチ確定後に送る (公開経路 `handle_reconnect_request`
+            //    と同じ「成功確定後に送出」流儀)。
+            transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
             run_private_match_matchmaker(
                 state,
                 transport,
@@ -3276,6 +3279,7 @@ where
             .await
         }
         TryMatchResult::Registered => {
+            transport.send_line(&CsaLine::new(format!("LOGIN:{handle} OK"))).await?;
             run_private_match_waiter(
                 state,
                 transport,
@@ -3454,6 +3458,20 @@ where
                     "##[ERROR] challenge expired before opponent joined",
                 ))
                 .await;
+            state
+                .tcp_challenge_pending
+                .unregister(&token, &handle_player, &cancel)
+                .await;
+            Ok(())
+        }
+        // 先着クライアントの TCP 切断 / EOF を監視する。issuance mode 中は AGREE /
+        // REJECT 等のコマンドが意味を持たないため `recv_res` の中身は捨て、
+        // 切断検知をトリガーに pending map から自身を unregister する (Issue #582
+        // の stale handle race 回避: `cancel` ベースの `Arc::ptr_eq` 一致比較で
+        // 同 handle の別セッションを巻き込まない)。`recv_line` は cancel-safe
+        // なので select 内で捨てられても再起動経路に副作用を残さない。
+        recv_res = transport.recv_line(NEAR_INFINITE) => {
+            let _ = recv_res;
             state
                 .tcp_challenge_pending
                 .unregister(&token, &handle_player, &cancel)

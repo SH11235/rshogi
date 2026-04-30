@@ -276,8 +276,11 @@ impl Lobby {
     /// `purge_expired` 等で書き戻す前提の **抽出** API で、書き戻しは
     /// [`Self::save_challenge_registry`] が担う。
     async fn load_challenge_registry(&self) -> Result<ChallengeRegistry> {
-        let v: Option<ChallengeRegistry> =
-            self.state.storage().get(KEY_CHALLENGE_REGISTRY).await.ok().flatten();
+        // storage error は `?` で上位に伝播させる (空 registry に潰すと、cold
+        // start restore で transient な storage error が起きた場合に entry を
+        // 失って `challenge_expired` 相当に転倒する。Codex review 指摘の通り、
+        // 後続 save で正しい registry を上書きする危険を伴う)。
+        let v: Option<ChallengeRegistry> = self.state.storage().get(KEY_CHALLENGE_REGISTRY).await?;
         Ok(v.unwrap_or_default())
     }
 
@@ -517,10 +520,14 @@ impl Lobby {
         //    でも同等の即時 purge を行うため、両入口で対称化することで
         //    `earliest_expiry_ms` が古い entry に引きずられて Alarm が空 fire
         //    し続けるのを避ける。purge 戻り値の WS 切断責務は `disconnect_pending_websockets`。
+        //    purge / issue を 1 回の load 結果に対して連続適用し、再 load
+        //    による purge 結果の取りこぼしを避ける (Codex review 指摘)。
         let now_ms = self.now_ms();
+        let ttl = self.challenge_ttl();
         let mut reg = self.load_challenge_registry().await?;
         let expired = reg.purge_expired(now_ms);
-        if !expired.is_empty() {
+        let purged = !expired.is_empty();
+        if purged {
             self.disconnect_pending_websockets(&expired).await;
         }
 
@@ -530,6 +537,11 @@ impl Lobby {
         //    が同じく必須で、未登録は拒否される)。
         let presets = self.clock_presets();
         let Some(clock_spec) = presets.get(&req.clock_preset).cloned() else {
+            // 早期 return でも、purge した reg は永続化する (取りこぼし回避)。
+            if purged {
+                self.save_challenge_registry(&reg).await?;
+                self.reschedule_challenge_alarm(&reg).await?;
+            }
             send_line(ws, &build_challenge_incorrect_line("unknown_clock_preset"))?;
             return Ok(());
         };
@@ -539,14 +551,16 @@ impl Lobby {
         if let Some(sfen) = &req.initial_sfen
             && !is_valid_sfen(sfen)
         {
+            if purged {
+                self.save_challenge_registry(&reg).await?;
+                self.reschedule_challenge_alarm(&reg).await?;
+            }
             send_line(ws, &build_challenge_incorrect_line("bad_sfen"))?;
             return Ok(());
         }
 
-        // 3. registry に発行 (self_challenge は内部 enum で帰る)。
-        let now_ms = self.now_ms();
-        let ttl = self.challenge_ttl();
-        let mut reg = self.load_challenge_registry().await?;
+        // 3. registry に発行 (self_challenge は内部 enum で帰る)。purge 後の
+        //    `reg` をそのまま使い、再 load しない (Codex 指摘の取りこぼし回避)。
         let issue_result = reg.issue(
             PlayerName::new(&req.inviter),
             PlayerName::new(&req.opponent),
@@ -571,6 +585,11 @@ impl Lobby {
                 );
             }
             Err(IssueError::SelfChallenge) => {
+                // self_challenge でも purge があった場合は永続化する。
+                if purged {
+                    self.save_challenge_registry(&reg).await?;
+                    self.reschedule_challenge_alarm(&reg).await?;
+                }
                 send_line(ws, &build_challenge_incorrect_line("self_challenge"))?;
             }
         }
