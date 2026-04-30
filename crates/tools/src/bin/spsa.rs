@@ -198,11 +198,11 @@ struct Cli {
     /// 正本 `.params` の上書き保護用。`--params` のパスが存在しない場合に
     /// `<init-from>` の内容をコピーしてから SPSA を開始する。
     ///
-    /// **挙動 (v3 以降):** 既に `--params` が存在する場合、`--resume` か
-    /// `--force-init` のどちらかを明示しないと bail する。これは旧版の
-    /// 「既存ファイルを黙って初期値として使う」挙動が rshogi default 値の
-    /// 混入による事故を引き起こしたための安全対策。
-    /// 詳細は `crates/tools/docs/spsa_runbook.md` §10.6 参照。
+    /// **挙動 (2026-04 / PR #576 以降):** 既に `--params` が存在する場合、
+    /// `--resume` か `--force-init` のどちらかを明示しないと bail する。
+    /// これは旧版の「既存ファイルを黙って初期値として使う」挙動が rshogi
+    /// default 値の混入による事故を引き起こしたための安全対策。
+    /// 詳細は `crates/tools/docs/spsa_runbook.md` §4.1 参照。
     #[arg(long)]
     init_from: Option<PathBuf>,
 

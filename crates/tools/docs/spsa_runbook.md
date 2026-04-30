@@ -159,13 +159,14 @@ cargo run --release -p tools --bin spsa -- \
 
 スケジュール設定を変更して再開する場合だけ `--force-schedule` を付与する。
 
-### 4.1 `--init-from` / `--resume` / `--force-init` の関係 (v3 以降)
+### 4.1 `--init-from` / `--resume` / `--force-init` の関係
 
 > ⚠️ **2026-04 破壊的変更 (PR #576 系)**: 旧版は `--init-from` を渡しても
 > `--params` が既存だと **黙ってスキップ** していたため、誤って rshogi default
-> 値で 75,200 ゲーム規模の SPSA を走らせる事故が発生した。v3 以降は同状況で
+> 値で 75,200 ゲーム規模の SPSA を走らせる事故が発生した。本変更以降は同状況で
 > bail し、ユーザに `--resume` か新設 `--force-init` の明示を要求する。
-> `meta.json` の `format_version: 2` は読まない (新規 run dir で fresh start)。
+> `meta.json` のフォーマットも更新したため、旧形式 (`format_version: 2`) を持つ
+> 既存 run dir は resume 不可 (移行手順は §10.7 参照)。
 
 #### 状態遷移マトリクス (16 通り全網羅)
 
@@ -219,12 +220,12 @@ spsa --params "${RUN_DIR}/tuned.params" --init-from tune/suisho10.params --force
 
 #### 起動時 startup summary
 
-v3 以降、SPSA 起動直後に `=== SPSA Startup Summary ===` ブロックが stderr に
+2026-04 以降、SPSA 起動直後に `=== SPSA Startup Summary ===` ブロックが stderr に
 出る (init mode、params/init-from の sha256、active param 数、上位 5 件の値)。
 出力先 stderr なので CSV パイプ運用 (`tee`) を阻害しない。「想定外の値で
 スタートしている」事故を 5 秒で目視検出可能。
 
-> ⚠️ **breaking change (PR #576 続編)**: v3 以降、SPSA の進行ログ・per-game
+> ⚠️ **breaking change (PR #576 続編)**: SPSA の進行ログ・per-game
 > progress (`iter=N seed=X game=Y outcome=...`) ・iter end summary ・early-stop
 > trigger は **すべて stderr に統一** された (旧 stdout)。既存の運用スクリプトが
 > stdout からこれらをパースしていた場合は壊れる。stdout は CSV writer (file 出力)
@@ -954,6 +955,57 @@ python3 /path/to/rshogi/tune/tune.py apply /tmp/tuned_yo.params source/
 `apply` 後、`%%TUNE_DECLARATION%%` 等のマーカーは消え、注入された `TUNE(...)` も実定数に
 置換される。production ビルドして完了。元の状態に戻したい場合は `git checkout source/`。
 
+### 10.7 旧 meta 形式 (`format_version: 2`) の run dir 移行
+
+2026-04 (PR #576 系) 以降は `meta.json` のフォーマットが更新されたため、
+旧形式を持つ既存 run dir をそのまま `--resume` すると下記エラーで停止する:
+
+```
+meta format version 不一致 (got v2, expected v3) in <path>.
+v2 形式は v3 とは互換性がありません。
+新規 run dir で `--init-from <canonical>` から fresh start してください。
+```
+
+**移行できないもの**:
+- `completed_iterations` / `total_games` / 各 seed の累積 SPSA 状態の継承
+  (新フォーマットには起動時の hash 群が必要だが、旧 meta には記録されていない)
+
+**移行できるもの**:
+- 旧 run の `tuned.params` (チューニング途中の値) を **新規 run の `--init-from`
+  ソース** として再利用する
+
+#### 移行手順 (continuation 相当)
+
+```bash
+# 1. 旧 run のディレクトリを退避 (誤って上書きしないよう保存)
+OLD_RUN="runs/spsa/20260401_120000_oldrun"
+NEW_RUN="runs/spsa/$(date -u +%Y%m%d_%H%M%S)_resumed_from_oldrun"
+mkdir -p "${NEW_RUN}"
+
+# 2. 旧 run の最終 params を新 run の --init-from ソースとして使う
+#    (生 params のコピーで OK。meta は捨てる)
+cp "${OLD_RUN}/tuned.params" "${NEW_RUN}/seed_from_oldrun.params"
+
+# 3. 新 run を fresh start として起動 (iter は 0 からカウントし直し)
+cargo run --release -p tools --bin spsa -- \
+  --params "${NEW_RUN}/tuned.params" \
+  --init-from "${NEW_RUN}/seed_from_oldrun.params" \
+  --iterations <残りたい iter 数> \
+  --games-per-iteration 64 ...
+```
+
+#### 注意点
+
+- **iter 数が連続しなくなる**: 新 run の iter 1 は旧 run の続きでなく、
+  「旧 run の最終値を初期値とする新規 SPSA ラン」になる。schedule の `c_k`
+  も最初から (大きい摂動) で始まるため、旧 run 末尾と同じ収束領域に戻るには
+  数十 iter ほど要する場合がある。
+- **stats / values CSV は引き継がない**: 旧 run の CSV は別ファイルとして保管し、
+  集計時に手動で結合する。新 run の CSV は iter 0 から記録される。
+- **完全な「途中から再開」が必要なら**: 旧 run を実行した古いバイナリで継続する
+  しかない (`git checkout` で古いコミットに戻すのは可)。本ツールチェイン上では
+  旧フォーマットのサポートを完全に放棄している。
+
 ## 11. トラブルシューティング
 
 実機での typical な詰まりどころと対処（症状ベース）。
@@ -984,7 +1036,7 @@ python3 /path/to/rshogi/tune/tune.py apply /tmp/tuned_yo.params source/
 
 ### `init/resume 設定エラー: --init-from が指定されていますが --params パスは既に存在します`
 
-- v3 (PR #576) で導入された安全 bail。旧版の silent skip 経路を排除した。
+- 2026-04 (PR #576) で導入された安全 bail。旧版の silent skip 経路を排除した。
 - 解決策はメッセージにある通り 3 通り:
   - **続行したい** → `--resume` を追加 (canonical との整合性も diagnostic 出力される)
   - **既存を破棄して canonical から作り直したい** → `--force-init` を追加
@@ -993,9 +1045,10 @@ python3 /path/to/rshogi/tune/tune.py apply /tmp/tuned_yo.params source/
 
 ### `meta format version 不一致 (got v2, expected v3)`
 
-- v3 (PR #576) で meta 形式に hash 群を追加し、後方互換は破棄した
-- v2 meta を持つ run dir は resume 不可。新規 run dir で `--init-from <canonical>` から
-  fresh start する (旧 run の `tuned.params` の値は手動で確認の上 `--init-from` 指定可)
+- 2026-04 (PR #576) で meta 形式に hash 群を追加し、後方互換は破棄した
+- 旧形式 (`format_version: 2`) の meta を持つ run dir は resume 不可。
+  新規 run dir で `--init-from <canonical>` から fresh start する (旧 run の
+  `tuned.params` を活かしたい場合は §10.7 の移行手順を参照)
 
 ### `param 名集合が meta と不一致です`
 
