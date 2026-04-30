@@ -53,74 +53,83 @@ cargo run -p tools --release --bin tournament -- \
 
 詳細な手順書は [../docs/spsa_runbook.md](../docs/spsa_runbook.md) を参照。
 
-### 1. パラメータファイル生成
+### 1. canonical パラメータファイルの準備
 
-SearchTuneParams の全 SPSA パラメータを `.params` ファイルに書き出す。
+`--init-from` に渡す canonical (起点) を用意する。渡せる形式は:
+
+- rshogi デフォルト値 (`generate_spsa_params` で生成)
+- rshogi 形式の既存 .params (過去のチューニング結果など)
+- YaneuraOu 形式の既存 .params (YO 駆動時、または `yo_to_rshogi_params` 経由で rshogi 形式に変換したもの)
+
+rshogi デフォルト値から始める場合の生成例:
 
 ```bash
-RUN_DIR="runs/spsa/$(date +%Y%m%d_%H%M%S)"
-mkdir -p "${RUN_DIR}"
-
 cargo run --release -p tools --bin generate_spsa_params -- \
-  --output "${RUN_DIR}/tuned.params"
+  --output spsa_params/canonical.params
 ```
 
 ### 2. SPSA 実行
 
 ```bash
+RUN_DIR="runs/spsa/$(date +%Y%m%d_%H%M%S)"
+
 cargo run --release -p tools --bin spsa -- \
-  --params "${RUN_DIR}/tuned.params" \
+  --run-dir "${RUN_DIR}" \
+  --init-from spsa_params/canonical.params \
   --iterations 200 \
   --games-per-iteration 64 \
   --concurrency 8 \
   --seeds 1,2,3,4 \
   --startpos-file start_sfens_ply24.txt \
-  --threads 1 --hash-mb 256 --byoyomi 1000 \
-  --stats-csv "${RUN_DIR}/stats.seed.csv" \
-  --stats-aggregate-csv "${RUN_DIR}/stats.aggregate.csv" \
-  --param-values-csv "${RUN_DIR}/param_values.csv"
+  --threads 1 --hash-mb 256 --byoyomi 1000
 ```
+
+`<run-dir>` 配下に `state.params` / `meta.json` / `values.csv` /
+`stats.csv` / `stats_aggregate.csv` が自動生成される。CSV のパスを別途
+指定したい場合は `--stats-csv` / `--stats-aggregate-csv` /
+`--param-values-csv` で個別 override 可能。
 
 ### 3. 途中から再開
 
 ```bash
 cargo run --release -p tools --bin spsa -- \
-  --params "${RUN_DIR}/tuned.params" \
+  --run-dir "${RUN_DIR}" \
+  --init-from spsa_params/canonical.params \
   --resume \
   --iterations 400 \
   --games-per-iteration 64 \
   --concurrency 8 \
   --seeds 1,2,3,4 \
   --startpos-file start_sfens_ply24.txt \
-  --threads 1 --hash-mb 256 --byoyomi 1000 \
-  --stats-csv "${RUN_DIR}/stats.seed.csv" \
-  --stats-aggregate-csv "${RUN_DIR}/stats.aggregate.csv" \
-  --param-values-csv "${RUN_DIR}/param_values.csv"
+  --threads 1 --hash-mb 256 --byoyomi 1000
 ```
+
+`--init-from` を resume 時にも指定すると、起動時に canonical との整合性
+diagnostic が出る (乖離が閾値超過したら `--strict-init-check` で error 化可能)。
 
 ### 4. 結果の確認
 
 ```bash
 # デフォルト値との差分表示
 cargo run -p tools --bin spsa_param_diff -- \
-  --current "${RUN_DIR}/tuned.params"
+  --current "${RUN_DIR}/state.params"
 
 # 特定グループのみ表示
 cargo run -p tools --bin spsa_param_diff -- \
-  --current "${RUN_DIR}/tuned.params" \
+  --current "${RUN_DIR}/state.params" \
   --regex "CORR"
 
 # パラメータ値の推移を含めた分析
 cargo run -p tools --bin spsa_param_diff -- \
-  --current "${RUN_DIR}/tuned.params" \
-  --param-values-csv "${RUN_DIR}/param_values.csv"
+  --current "${RUN_DIR}/state.params" \
+  --param-values-csv "${RUN_DIR}/values.csv"
 ```
 
 ### 5. 統計データの可視化用CSV変換
 
 ```bash
 cargo run -p tools --bin spsa_stats_to_plot_csv -- \
-  "${RUN_DIR}/stats.aggregate.csv" \
+  "${RUN_DIR}/stats_aggregate.csv" \
   --output-csv "${RUN_DIR}/plot.csv" \
   --window 16
 ```
