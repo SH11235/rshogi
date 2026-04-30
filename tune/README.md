@@ -108,6 +108,26 @@ cargo run --release -p tools --bin check_param_mapping -- \
   --yo-binary /path/to/YaneuraOu-tune-patched
 ```
 
+## 注意: 中間 `.params` ファイルを SPSA `--params` に直接渡さない
+
+`yo_to_rshogi_params` / `rshogi_to_yo_params` の出力ファイル (例:
+`from_rshogi.params`, `from_yo.params`) は **ラウンドトリップ確認や apply 前の
+焼き戻し用** であり、SPSA の `--params` に直接渡すとそのファイルが反復ごとに
+上書きされる。
+
+過去 (2026-04) に、`rshogi_to_yo_params` の出力 (rshogi default 値が YO 名で
+書かれたファイル) を SPSA に投入して 75,200 ゲーム規模のチューニングが台無し
+になる事故が発生した。
+
+**正しい運用**:
+- 正本ファイル (`tune/suisho10.params` 等) は `--init-from` に指定する
+- 反復用ファイルは `--params runs/spsa/<ts>/tuned.params` のように毎回
+  timestamped dir に置く
+- 起動時に出る `=== SPSA Startup Summary ===` で **init mode と上位 5 件の値**
+  が想定通りかを目視確認する
+
+詳細は `crates/tools/docs/spsa_runbook.md` §4.1 参照。
+
 ## 関連ドキュメント
 
 - `crates/tools/docs/spsa_runbook.md` — SPSA 実行 runbook (本ディレクトリの全コマンド例 + トラブルシューティング)

@@ -198,11 +198,11 @@ struct Cli {
     /// 正本 `.params` の上書き保護用。`--params` のパスが存在しない場合に
     /// `<init-from>` の内容をコピーしてから SPSA を開始する。
     ///
-    /// **挙動 (v3 以降):** 既に `--params` が存在する場合、`--resume` か
-    /// `--force-init` のどちらかを明示しないと bail する。これは旧版の
-    /// 「既存ファイルを黙って初期値として使う」挙動が rshogi default 値の
-    /// 混入による事故を引き起こしたための安全対策。
-    /// 詳細は `crates/tools/docs/spsa_runbook.md` §10.6 参照。
+    /// **挙動 (2026-04 / PR #576 以降):** 既に `--params` が存在する場合、
+    /// `--resume` か `--force-init` のどちらかを明示しないと bail する。
+    /// これは旧版の「既存ファイルを黙って初期値として使う」挙動が rshogi
+    /// default 値の混入による事故を引き起こしたための安全対策。
+    /// 詳細は `crates/tools/docs/spsa_runbook.md` §4.1 参照。
     #[arg(long)]
     init_from: Option<PathBuf>,
 
@@ -343,6 +343,20 @@ enum InitMode {
     ForceInit,
     /// `--resume` で既存 run を継続 (run 全体としてのモードは初回起動時のもの)。
     Resume,
+}
+
+impl std::fmt::Display for InitMode {
+    /// stderr/log 表示用 kebab-case 文字列。`meta.json` の serde 表現と一致させる
+    /// ことで「何が記録されたか」「何が起動したか」を視覚的に紐付けやすくする。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::FreshInitFrom => "fresh-init-from",
+            Self::FreshExisting => "fresh-existing",
+            Self::ForceInit => "force-init",
+            Self::Resume => "resume",
+        };
+        f.write_str(s)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1787,7 +1801,7 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
             } else {
                 draws += 1;
             }
-            println!(
+            eprintln!(
                 "iter={} seed={}/{}({}) game={}/{} plus_is_black={} outcome={} plus_score={:+.1}",
                 iteration,
                 seed_idx + 1,
@@ -1808,6 +1822,99 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
             draws,
         })
     })
+}
+
+/// `print_startup_summary` の入力をまとめた構造体。位置引数の取り違えを防ぎ、
+/// 将来項目を増やしても呼び出し側の修正が小さくなる。
+struct StartupContext<'a> {
+    snapshot: &'a InitMetaSnapshot,
+    schedule: &'a ScheduleConfig,
+    params: &'a [SpsaParam],
+    active_mask: &'a [bool],
+    active_param_count: usize,
+    start_iteration: u32,
+    end_iteration: u32,
+    seed_values: &'a [u64],
+    params_path: &'a Path,
+    meta_path: &'a Path,
+}
+
+/// scalar (i32 想定の f64) を `is_int` に応じて整形する小ヘルパ。`frac` は
+/// 浮動小数時の有効桁。startup summary 内の value/min/max を統一表記するため。
+fn fmt_param_scalar(p: &SpsaParam, v: f64, frac: usize) -> String {
+    if p.is_int {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{:.*}", frac, v)
+    }
+}
+
+/// SPSA 起動時に「どんな状態で SPSA を始めるのか」を 1 ブロックで stderr に出力する。
+///
+/// 75,200 ゲーム規模の事故を起こした silent footgun の二度目の予防線として、
+/// 「init mode が想定通り」「active params 上位 5 件が想定値」を起動 5 秒で目視確認
+/// できる形にする。出力先は stderr なので CSV パイプ運用 (`spsa | tee log.csv`) を
+/// 阻害しない。
+fn print_startup_summary(ctx: &StartupContext<'_>) {
+    eprintln!("=== SPSA Startup Summary ===");
+    eprintln!("init mode:      {}", ctx.snapshot.init_mode);
+    eprintln!("params:         {}", ctx.params_path.display());
+    eprintln!("meta:           {}", ctx.meta_path.display());
+    eprintln!("params sha256:  {} (起動時スナップショット)", ctx.snapshot.init_params_sha256);
+    if let (Some(p), Some(h)) =
+        (ctx.snapshot.init_from_path.as_deref(), ctx.snapshot.init_from_sha256.as_deref())
+    {
+        eprintln!("--init-from:    {p} (sha256: {h})");
+    } else {
+        eprintln!("--init-from:    (none)");
+    }
+    eprintln!("engine:         {}", ctx.snapshot.engine_path);
+    if let Some(p) = ctx.snapshot.engine_param_mapping_path.as_deref() {
+        let h = ctx.snapshot.engine_param_mapping_sha256.as_deref().unwrap_or("?");
+        eprintln!("mapping:        {p} (sha256: {h})");
+    }
+    eprintln!(
+        "schedule:       α={} γ={} a_ratio={} mobility={} total_iter={}",
+        ctx.schedule.alpha,
+        ctx.schedule.gamma,
+        ctx.schedule.a_ratio,
+        ctx.schedule.mobility,
+        ctx.schedule.total_iterations
+    );
+    eprintln!(
+        "iteration plan: {} → {} ({} new iter), seeds={:?}",
+        ctx.start_iteration,
+        ctx.end_iteration,
+        ctx.end_iteration.saturating_sub(ctx.start_iteration),
+        ctx.seed_values
+    );
+    eprintln!("active params:  {}/{}", ctx.active_param_count, ctx.params.len());
+
+    // 起動時 active params の上位 5 件を表示。
+    // active_mask を使うことで「active_only_regex / mapping translator で除外された
+    // param が誤って summary に出る」のを防ぐ (not_used フィルタだけだと不十分)。
+    let preview: Vec<&SpsaParam> = ctx
+        .params
+        .iter()
+        .zip(ctx.active_mask.iter())
+        .filter(|(_, a)| **a)
+        .map(|(p, _)| p)
+        .take(5)
+        .collect();
+    if !preview.is_empty() {
+        eprintln!("starting values (first 5 of {} active params):", ctx.active_param_count);
+        for p in preview {
+            eprintln!(
+                "  {:<48} = {:>10} (range [{}, {}], step {})",
+                p.name,
+                fmt_param_scalar(p, p.value, 4),
+                fmt_param_scalar(p, p.min, 2),
+                fmt_param_scalar(p, p.max, 2),
+                p.c_end
+            );
+        }
+    }
+    eprintln!("=== End Summary ===");
 }
 
 fn main() -> Result<()> {
@@ -1872,7 +1979,7 @@ fn main() -> Result<()> {
     if seed_values.is_empty() {
         bail!("at least one seed is required");
     }
-    println!("using base seeds: {:?}", seed_values);
+    eprintln!("using base seeds: {:?}", seed_values);
 
     // --parallel-seeds 指定時、`cli.concurrency` が seed 数で割り切れない、または
     // 1 seed あたりの worker 数が `games_per_iteration` を超える設定だと実効並列度が
@@ -2095,6 +2202,25 @@ fn main() -> Result<()> {
         None
     };
 
+    // iter 0 スナップショット: 起動時の params を記録する (fresh / force-init / use-existing-fresh)。
+    // resume 時は既存 CSV に既に iter 0 行が含まれる前提で append 継続するため、ここではスキップ。
+    // 判定は `effective_action` (NonBailAction) で行うことで、ユーザが手動で
+    // `meta.completed_iterations: 0` を作って --resume したエッジケースで重複書きを防ぐ
+    // (`start_iteration == 0` だけだとそのケースで誤って iter 0 行を append してしまう)。
+    // これがあれば事故解析時 (今回の rshogi default 混入) に「最初に何で起動したか」を CSV だけで追える。
+    let is_fresh_start = matches!(
+        effective_action,
+        NonBailAction::CopyInitFromFresh
+            | NonBailAction::UseExistingFresh
+            | NonBailAction::ForceInitOverwrite,
+    );
+    if is_fresh_start && let Some(writer) = param_values_csv_writer.as_mut() {
+        write_param_values_csv_row(writer, 0, &params)?;
+        // 即 flush: iter 1 完了前にクラッシュしても iter 0 行を CSV に残し、
+        // 「何で起動したか」を後追い解析できるようにする (事故解析用途で必須)。
+        writer.flush()?;
+    }
+
     if cli.startpos_file.is_none() {
         if cli.require_startpos_file {
             bail!("--require-startpos-file was set but --startpos-file was not provided");
@@ -2120,7 +2246,7 @@ fn main() -> Result<()> {
             cli.active_only_regex
         );
     }
-    println!("active params: {active_param_count}/{}", params.len());
+    eprintln!("active params: {active_param_count}/{}", params.len());
 
     // 翻訳器有効時、`active_only_regex` でマッチしたが unmapped で除外されたパラメータを
     // info 出力する。「期待した parameter が摂動されていない」事象に気づきやすくする。
@@ -2136,15 +2262,28 @@ fn main() -> Result<()> {
             .collect();
         if !unmapped_active.is_empty() {
             unmapped_active.sort();
-            println!(
+            eprintln!(
                 "info: {} param(s) matched --active-only-regex but are unmapped (translator skipped):",
                 unmapped_active.len()
             );
             for n in &unmapped_active {
-                println!("  - {n}");
+                eprintln!("  - {n}");
             }
         }
     }
+
+    print_startup_summary(&StartupContext {
+        snapshot: &init_snapshot,
+        schedule: &schedule,
+        params: &params,
+        active_mask: &active_mask,
+        active_param_count,
+        start_iteration,
+        end_iteration,
+        seed_values: &seed_values,
+        params_path: &cli.params,
+        meta_path: &meta_path,
+    });
 
     // 公平な対局条件のため、tournament と同様に NetworkDelay=0 と
     // MinimumThinkingTime をデフォルトで注入する。ユーザーが明示的に
@@ -2446,7 +2585,7 @@ fn main() -> Result<()> {
             init_mode: init_snapshot.init_mode,
         };
         save_meta(&meta_path, &meta)?;
-        println!(
+        eprintln!(
             "iter={} seeds={} raw_result_mean={:+.3} raw_result_var={:.6} \
              avg_abs_update={:.6} max_abs_update={:.6} checkpoint={} meta={}",
             iter + 1,
@@ -2487,7 +2626,7 @@ fn main() -> Result<()> {
             } else {
                 early_stop_consecutive = 0;
             }
-            println!(
+            eprintln!(
                 "iter={} early_stop_hit={} consecutive={}/{} thresholds(avg_abs_update<={:.6}, result_variance<={:.6})",
                 iter + 1,
                 early_stop_hit,
@@ -2497,7 +2636,7 @@ fn main() -> Result<()> {
                 config.result_variance_threshold
             );
             if early_stop_consecutive >= config.patience {
-                println!(
+                eprintln!(
                     "early stop triggered at iter={} (consecutive={})",
                     iter + 1,
                     early_stop_consecutive
@@ -2885,6 +3024,20 @@ mod tests {
         assert!(result.is_err(), "should bail when meta removal fails");
         // params は触られていない (atomic copy が走らない)
         assert_eq!(std::fs::read(&target_params).unwrap(), b"old content\n");
+    }
+
+    #[test]
+    fn init_mode_display_matches_serde_kebab_case() {
+        // Display と serde 表現を一致させる契約 (startup summary の表記と
+        // meta.json の値が同じ文字列で見えることを担保)
+        assert_eq!(format!("{}", InitMode::FreshInitFrom), "fresh-init-from");
+        assert_eq!(format!("{}", InitMode::FreshExisting), "fresh-existing");
+        assert_eq!(format!("{}", InitMode::ForceInit), "force-init");
+        assert_eq!(format!("{}", InitMode::Resume), "resume");
+
+        // serde で round-trip して同じ文字列で出ることも確認
+        let json = serde_json::to_string(&InitMode::FreshInitFrom).unwrap();
+        assert_eq!(json, "\"fresh-init-from\"");
     }
 
     #[test]
