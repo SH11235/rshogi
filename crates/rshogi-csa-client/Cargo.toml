@@ -45,6 +45,7 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 log.workspace = true
+thiserror.workspace = true
 # `toml::Value` は EngineConfig.options の公開フィールド型として library API の
 # 一部になっているため、feature gate 不可 (consumer から見える型のため常時必須)。
 toml.workspace = true

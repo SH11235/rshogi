@@ -38,10 +38,31 @@
 //! `websocket` feature 有効時、上記 `CryptoProvider` の install を行わずに
 //! `wss://` 経路で `CsaConnection::connect_with_target` 等を呼ぶと `rustls`
 //! 内部で panic する。consumer 側で起動時 install を必ず行うこと。
+//!
+//! # SessionEventSink (対局途中の進捗通知)
+//!
+//! `run_game_session_with_events` / `run_resumed_session_with_events` に
+//! [`SessionEventSink`] 実装を渡すと、対局ループの各イベント
+//! ([`SessionProgress`]) が consumer に push 通知される。詳細は
+//! [`events`] モジュールの doc を参照。
+//!
+//! - sink の `on_event` は対局メインループ thread 上で同期呼び出しされる。
+//!   重い処理 (DB write / network publish 等) を直接行うと対局ループ全体が
+//!   遅延し USI engine 探索や CSA サーバ応答に影響する。consumer は軽量な
+//!   channel 送信のみ行うこと。
+//! - sink が `SinkError::NonFatal` を返した場合は warn ログのみで対局継続。
+//!   `SinkError::Fatal` を返した場合は best-effort attempt at clean closure
+//!   (`%CHUDAN` → `LOGOUT` → transport close → `on_error` → `Disconnected`)
+//!   を行ってから [`SessionError::SinkAborted`] で return する。
+//! - resume 経路では指し手 history の replay は emit しない。consumer は
+//!   [`ReconnectState::last_sfen`] から盤面を再構築する責任を持つ。
+//! - [`SearchInfoSnapshot`] は累積 snapshot で、observed したぶんだけ field を
+//!   上書きする (差分ではなく常に「現時点までの最新値の集合」)。
 
 pub mod config;
 pub mod engine;
 pub mod event;
+pub mod events;
 pub mod jsonl;
 pub mod protocol;
 pub mod record;
@@ -54,7 +75,15 @@ pub mod transport;
 pub use config::CsaClientConfig;
 pub use engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine};
 pub use event::Event;
+pub use events::{
+    BestMoveEvent, DisconnectReason, GameEndEvent, GameEndReason, MoveEvent, MovePlayer,
+    NoopSessionEventSink, ReconnectState, SearchInfoEmitPolicy, SearchInfoSnapshot, SearchOrigin,
+    SessionError, SessionEventSink, SessionOutcome, SessionProgress, Side, SinkError,
+};
 pub use protocol::{CsaConnection, GameResult, GameSummary};
 pub use record::{GameRecord, RecordedMove};
-pub use session::{run_game_session, run_resumed_session};
+pub use session::{
+    run_game_session, run_game_session_with_events, run_resumed_session,
+    run_resumed_session_with_events,
+};
 pub use transport::{ConnectOpts, CsaTransport, TransportTarget};

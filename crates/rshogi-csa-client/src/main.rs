@@ -356,15 +356,18 @@ fn run_one_game(
     conn.login(&id, &config.server.password)?;
 
     // 対局実行
-    let result = run_game_session(&mut conn, engine, config, shutdown);
+    let session_result = run_game_session(&mut conn, engine, config, shutdown);
 
     // 中断 (= サーバ切断) でかつ Reconnect_Token を保持している場合は 1 度だけ
     // 再接続を試みる。Workers の `RECONNECT_GRACE_SECONDS` 内に到達できれば
     // 同一対局を継続できる。reconnect 試行前に元 conn は drop / logout する。
-    let reconnect_request = match result.as_ref() {
-        Ok((GameResult::Interrupted, _, Some(summary)))
-            if summary.reconnect_token.is_some() && !shutdown.load(Ordering::SeqCst) =>
+    let reconnect_request = match session_result.as_ref() {
+        Ok(outcome)
+            if outcome.result == GameResult::Interrupted
+                && outcome.summary.as_ref().is_some_and(|s| s.reconnect_token.is_some())
+                && !shutdown.load(Ordering::SeqCst) =>
         {
+            let summary = outcome.summary.as_ref().unwrap();
             Some((summary.game_id.clone(), summary.reconnect_token.clone().unwrap()))
         }
         _ => None,
@@ -372,7 +375,8 @@ fn run_one_game(
 
     if let Some((game_id, token)) = reconnect_request {
         log::warn!(
-            "[CSA] サーバ切断を検出。Reconnect_Token を持つので grace 内に再接続を試みます: game_id={game_id}"
+            "[CSA] サーバ切断を検出。Reconnect_Token を持つので grace 内に再接続を試みます: game_id={}",
+            game_id
         );
         let _ = conn.logout();
         drop(conn);
@@ -395,13 +399,15 @@ fn run_one_game(
                 // ことを期待する (rshogi-usi 含む主要 USI engine の挙動)。
                 log::warn!("[CSA] 再接続失敗: {e}。元の Interrupted 結果で終了します。");
                 let _ = engine.stop_and_wait();
-                return result.map(|(r, rec, _)| (r, rec));
+                return session_result
+                    .map(|outcome| (outcome.result, outcome.record))
+                    .map_err(|e| anyhow::anyhow!("{}", e));
             }
         }
     }
 
     // エラー時は投了を試みる（NF2: 対局中のエラーは投了してから再接続）
-    if result.is_err() {
+    if session_result.is_err() {
         // ponder 中の場合は stop して bestmove を待ってからクリーンアップ
         let _ = engine.stop_and_wait();
         let _ = conn.send_resign();
@@ -409,8 +415,9 @@ fn run_one_game(
     }
 
     let _ = conn.logout();
-    // (result, record, _summary) → 既存呼び出し互換 (result, record) に縮約
-    result.map(|(r, rec, _)| (r, rec))
+    session_result
+        .map(|outcome| (outcome.result, outcome.record))
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// 切断検出後の再接続に必要な認証情報。多引数化を避けるためまとめる。
@@ -433,9 +440,10 @@ fn attempt_reconnect(
 ) -> Result<(GameResult, rshogi_csa_client::record::GameRecord)> {
     let mut conn = CsaConnection::connect_with_target(target, opts)?;
     conn.login_reconnect(creds.id, creds.password, creds.game_id, creds.token)?;
-    let (r, rec, _) = run_resumed_session(&mut conn, engine, config, shutdown)?;
+    let outcome = run_resumed_session(&mut conn, engine, config, shutdown)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     let _ = conn.logout();
-    Ok((r, rec))
+    Ok((outcome.result, outcome.record))
 }
 
 /// `--lobby` モードで成立したマッチ。`run_one_game` 直前に config を差し替えるための

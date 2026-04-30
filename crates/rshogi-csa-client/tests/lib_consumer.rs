@@ -9,9 +9,13 @@
 //! WS 専用シンボル (`CsaTransport::WebSocket` バリアント等) は参照しない。
 
 use rshogi_csa_client::{
-    BestMoveResult, ConnectOpts, CsaClientConfig, CsaConnection, CsaTransport, Event, GameRecord,
-    GameResult, GameSummary, RecordedMove, SearchInfo, SearchOutcome, TransportTarget, UsiEngine,
-    run_game_session, run_resumed_session,
+    BestMoveEvent, BestMoveResult, ConnectOpts, CsaClientConfig, CsaConnection, CsaTransport,
+    DisconnectReason, Event, GameEndEvent, GameEndReason, GameRecord, GameResult, GameSummary,
+    MoveEvent, MovePlayer, NoopSessionEventSink, ReconnectState, RecordedMove, SearchInfo,
+    SearchInfoEmitPolicy, SearchInfoSnapshot, SearchOrigin, SearchOutcome, SessionError,
+    SessionEventSink, SessionOutcome, SessionProgress, Side, SinkError, TransportTarget, UsiEngine,
+    run_game_session, run_game_session_with_events, run_resumed_session,
+    run_resumed_session_with_events,
 };
 
 /// build only: 上の `use` がそのまま resolve できれば pass。型を実体化したり
@@ -35,11 +39,37 @@ fn build_only() {
                          _: GameResult,
                          _: CsaTransport,
                          _: TransportTarget,
-                         _: ConnectOpts| {};
-    // 関数ポインタとしての参照を取得して値として捨てる (call はしない)。
+                         _: ConnectOpts,
+                         _: BestMoveEvent,
+                         _: DisconnectReason,
+                         _: GameEndEvent,
+                         _: GameEndReason,
+                         _: MoveEvent,
+                         _: MovePlayer,
+                         _: NoopSessionEventSink,
+                         _: ReconnectState,
+                         _: SearchInfoEmitPolicy,
+                         _: SearchInfoSnapshot,
+                         _: SearchOrigin,
+                         _: SessionError,
+                         _: SessionOutcome,
+                         _: SessionProgress,
+                         _: Side,
+                         _: SinkError| {};
     let consume_funcs: (fn(_, _, _, _) -> _, fn(_, _, _, _) -> _) =
         (run_game_session, run_resumed_session);
-
-    // どちらも `_var` で未使用警告抑止せず、`let _ = ...` で値を消費する。
+    // 新 API は generic なので関数ポインタ型にキャストせず、`run_game_session_with_events`
+    // / `run_resumed_session_with_events` の名前解決だけ強制する。
+    type WithEventsFn = fn(
+        &CsaClientConfig,
+        &mut CsaConnection,
+        &mut UsiEngine,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        &mut NoopSessionEventSink,
+    ) -> Result<SessionOutcome, SessionError>;
+    let _events_funcs: (WithEventsFn, WithEventsFn) =
+        (run_game_session_with_events, run_resumed_session_with_events);
+    // dyn-coercion 確認
+    let _: Option<&mut dyn SessionEventSink> = None;
     let _ = (consume_types, consume_funcs);
 }
