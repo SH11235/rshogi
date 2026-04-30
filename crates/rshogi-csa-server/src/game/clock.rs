@@ -120,6 +120,22 @@ impl ClockSpec {
     pub fn format_time_section(&self) -> String {
         self.build_clock().format_summary()
     }
+
+    /// `total_time_*` が 0 の構成を弾く。`byoyomi_*` / `increment_sec` の 0 は
+    /// sudden death として許容する。`Err` には違反フィールド名 (`"total_time_sec"`
+    /// / `"total_time_ms"` / `"total_time_min"`) を返し、メッセージ組み立ては
+    /// 呼び出し側に委ねる。
+    pub fn validate_total_time_nonzero(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Countdown { total_time_sec, .. } if *total_time_sec == 0 => Err("total_time_sec"),
+            Self::CountdownMsec { total_time_ms, .. } if *total_time_ms == 0 => {
+                Err("total_time_ms")
+            }
+            Self::Fischer { total_time_sec, .. } if *total_time_sec == 0 => Err("total_time_sec"),
+            Self::StopWatch { total_time_min, .. } if *total_time_min == 0 => Err("total_time_min"),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// 秒読み方式の時計（CSA 2014 改訂互換）。
@@ -884,5 +900,77 @@ mod tests {
             byoyomi_min: 1,
         };
         assert_eq!(spec.format_time_section(), StopWatchClock::new(15, 1).format_summary());
+    }
+
+    /// 4 variant 全てで `total_time_*` 0 が該当フィールド名 `Err` を返す。
+    #[test]
+    fn validate_total_time_nonzero_rejects_zero_for_each_variant() {
+        let cases: [(ClockSpec, &str); 4] = [
+            (
+                ClockSpec::Countdown {
+                    total_time_sec: 0,
+                    byoyomi_sec: 10,
+                },
+                "total_time_sec",
+            ),
+            (
+                ClockSpec::CountdownMsec {
+                    total_time_ms: 0,
+                    byoyomi_ms: 100,
+                },
+                "total_time_ms",
+            ),
+            (
+                ClockSpec::Fischer {
+                    total_time_sec: 0,
+                    increment_sec: 5,
+                },
+                "total_time_sec",
+            ),
+            (
+                ClockSpec::StopWatch {
+                    total_time_min: 0,
+                    byoyomi_min: 1,
+                },
+                "total_time_min",
+            ),
+        ];
+        for (spec, expected_field) in cases {
+            assert_eq!(
+                spec.validate_total_time_nonzero(),
+                Err(expected_field),
+                "spec {spec:?} must reject {expected_field}",
+            );
+        }
+    }
+
+    /// `byoyomi_*` / `increment_sec` 0 (sudden death) は 4 variant とも許容する。
+    #[test]
+    fn validate_total_time_nonzero_allows_sudden_death_byoyomi() {
+        let cases = [
+            ClockSpec::Countdown {
+                total_time_sec: 600,
+                byoyomi_sec: 0,
+            },
+            ClockSpec::CountdownMsec {
+                total_time_ms: 600_000,
+                byoyomi_ms: 0,
+            },
+            ClockSpec::Fischer {
+                total_time_sec: 300,
+                increment_sec: 0,
+            },
+            ClockSpec::StopWatch {
+                total_time_min: 10,
+                byoyomi_min: 0,
+            },
+        ];
+        for spec in cases {
+            assert_eq!(
+                spec.validate_total_time_nonzero(),
+                Ok(()),
+                "sudden-death spec {spec:?} must be accepted",
+            );
+        }
     }
 }
