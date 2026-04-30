@@ -13,7 +13,7 @@ const NOT_USED_MARKER: &str = "[[NOT USED]]";
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SPSA .params の最終差分と履歴差分を集計する")]
 struct Cli {
-    /// 比較対象の tuned.params
+    /// 比較対象の `.params` ファイル (例: `<run-dir>/state.params`)
     #[arg(long)]
     current: PathBuf,
 
