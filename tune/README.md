@@ -108,23 +108,20 @@ cargo run --release -p tools --bin check_param_mapping -- \
   --yo-binary /path/to/YaneuraOu-tune-patched
 ```
 
-## 注意: 中間 `.params` ファイルを SPSA `--params` に直接渡さない
+## SPSA への投入時の注意
 
-`yo_to_rshogi_params` / `rshogi_to_yo_params` の出力ファイル (例:
-`from_rshogi.params`, `from_yo.params`) は **ラウンドトリップ確認や apply 前の
-焼き戻し用** であり、SPSA の `--params` に直接渡すとそのファイルが反復ごとに
-上書きされる。
+`yo_to_rshogi_params` / `rshogi_to_yo_params` の出力 (例: `from_rshogi.params`,
+`from_yo.params`) は ラウンドトリップ確認や `tune.py apply` 前の焼き戻し用途で
+あり、SPSA に直接の入力として使う際は **canonical (起点) として `--init-from`
+に渡す** こと。SPSA の live 状態は `--run-dir <dir>` 配下の `state.params` に
+書かれるため、canonical 自体が上書きされることはない。
 
-過去 (2026-04) に、`rshogi_to_yo_params` の出力 (rshogi default 値が YO 名で
-書かれたファイル) を SPSA に投入して 75,200 ゲーム規模のチューニングが台無し
-になる事故が発生した。
-
-**正しい運用**:
-- 正本ファイル (`tune/suisho10.params` 等) は `--init-from` に指定する
-- 反復用ファイルは `--params runs/spsa/<ts>/tuned.params` のように毎回
-  timestamped dir に置く
-- 起動時に出る `=== SPSA Startup Summary ===` で **init mode と上位 5 件の値**
-  が想定通りかを目視確認する
+```bash
+# 正しい運用: canonical を --init-from に、SPSA の作業領域は --run-dir に分離
+spsa --run-dir "runs/spsa/$(date -u +%Y%m%d_%H%M%S)" \
+     --init-from tune/suisho10.params \
+     ...
+```
 
 詳細は `crates/tools/docs/spsa_runbook.md` §4.1 参照。
 

@@ -36,9 +36,20 @@ const META_FORMAT_VERSION: u32 = 3;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SPSA tuner for USI engines")]
 struct Cli {
-    /// SPSAパラメータファイル（name,type,v,min,max,c_end,r_end）
+    /// SPSA 実行ディレクトリ。state / meta / CSV を全てこの dir 配下に配置する。
+    ///
+    /// 配置されるファイル (override は個別フラグで可能):
+    /// - `<run-dir>/state.params`        : SPSA の live 状態 (反復ごとに上書き)
+    /// - `<run-dir>/meta.json`           : resume 用メタデータ
+    /// - `<run-dir>/values.csv`          : 各 iter のパラメータ値履歴
+    /// - `<run-dir>/stats.csv`           : per-seed 統計
+    /// - `<run-dir>/stats_aggregate.csv` : seed 横断集計
+    ///
+    /// 通常は `runs/spsa/$(date -u +%Y%m%d_%H%M%S)_<tag>` のように毎回新規 dir を
+    /// 切る。`--init-from <canonical>` を併用すると初回起動時に canonical を
+    /// `<run-dir>/state.params` に複製する。
     #[arg(long)]
-    params: PathBuf,
+    run_dir: PathBuf,
 
     /// 反復回数
     #[arg(long, default_value_t = 1)]
@@ -195,31 +206,33 @@ struct Cli {
     #[arg(long)]
     engine_param_mapping: Option<PathBuf>,
 
-    /// 正本 `.params` の上書き保護用。`--params` のパスが存在しない場合に
-    /// `<init-from>` の内容をコピーしてから SPSA を開始する。
+    /// canonical (起点) parameter ファイル。
     ///
-    /// **挙動 (2026-04 / PR #576 以降):** 既に `--params` が存在する場合、
-    /// `--resume` か `--force-init` のどちらかを明示しないと bail する。
-    /// これは旧版の「既存ファイルを黙って初期値として使う」挙動が rshogi
-    /// default 値の混入による事故を引き起こしたための安全対策。
-    /// 詳細は `crates/tools/docs/spsa_runbook.md` §4.1 参照。
+    /// 用途:
+    /// - **fresh start**: `<run-dir>/state.params` 不在時、canonical を
+    ///   `state.params` にコピーして開始する。
+    /// - **resume の整合性検証**: `--resume` と併用すると、起動時に既存
+    ///   `state.params` と canonical の値乖離を diagnostic 出力する
+    ///   (閾値超過時の bail は `--strict-init-check` で有効化)。
+    ///
+    /// 既存 `state.params` がある状態での fresh 系操作は `--resume` か
+    /// `--force-init` のいずれかの明示が必要 (詳細: runbook §4.1)。
     #[arg(long)]
     init_from: Option<PathBuf>,
 
-    /// `--init-from` 指定時に既存の `--params` を atomic に上書きして強制再初期化する。
+    /// 既存の `<run-dir>/state.params` を canonical で atomic に上書きして
+    /// fresh start する。`--init-from` の指定が必須。
     ///
-    /// 通常は `--resume` で既存 run を継続する想定だが、過去 run の params を捨てて
-    /// canonical から作り直したい時に明示する。`--resume` とは同時指定不可。
-    /// `--force-init` 時は既存 meta / stats CSV / values CSV / aggregate CSV も
-    /// 削除して fresh run として扱う。
+    /// 既存 `meta.json` / 各 CSV も削除して fresh run として扱う。`--resume`
+    /// とは同時指定不可 (意味が矛盾)。
     #[arg(long, default_value_t = false)]
     force_init: bool,
 
-    /// `--resume` + `--init-from` で初期値整合性チェックを strict にする。
+    /// `--resume` + `--init-from` 併用時の整合性チェックを strict にする。
     ///
-    /// デフォルトは warning 出力のみで継続。strict 指定時は median ≥ 0.5 step か
-    /// max ≥ 5 step の乖離があれば bail。CI / 自動化で「想定外の resume」を
-    /// 早期検出したい場合に使う。
+    /// デフォルトは warning 出力のみで継続。strict 指定時は median ≥ 0.5 step
+    /// または max ≥ 5 step の乖離があれば bail する。CI / 自動化で「想定外の
+    /// resume」を早期検出したい場合に使う。
     #[arg(long, default_value_t = false)]
     strict_init_check: bool,
 
@@ -304,7 +317,7 @@ struct ResumeMetaData {
     updated_at_utc: String,
     schedule: ScheduleConfig,
     // --- v3 で追加 ---
-    /// 起動時 (iter 0) の `--params` 全体の SHA-256 hex。fresh start / force-init 時に
+    /// 起動時 (iter 0) の `<run-dir>/state.params` 全体の SHA-256 hex。fresh start / force-init 時に
     /// その時点の params 内容を記録する。SPSA 進行で値は変わるので resume 中の
     /// 検証では使わず、事故解析用の起動時スナップショットとして残す。
     init_params_sha256: String,
@@ -335,11 +348,11 @@ struct ResumeMetaData {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum InitMode {
-    /// `--init-from` 指定 + `--params` 不在 → canonical を copy して fresh start。
+    /// `--init-from` 指定 + `<run-dir>/state.params` 不在 → canonical を copy して fresh start。
     FreshInitFrom,
-    /// `--init-from` なし + `--params` 既存 → 既存ファイルでそのまま fresh start。
+    /// `--init-from` なし + `<run-dir>/state.params` 既存 → 既存ファイルでそのまま fresh start。
     FreshExisting,
-    /// `--init-from` 指定 + `--params` 既存 + `--force-init` → 上書き再初期化。
+    /// `--init-from` 指定 + `<run-dir>/state.params` 既存 + `--force-init` → 上書き再初期化。
     ForceInit,
     /// `--resume` で既存 run を継続 (run 全体としてのモードは初回起動時のもの)。
     Resume,
@@ -520,20 +533,42 @@ struct EarlyStopConfig {
     patience: u32,
 }
 
-fn default_meta_path(params_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.meta.json", params_path.display()))
+/// `<run-dir>/state.params`: SPSA の live 状態ファイル。
+fn state_params_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("state.params")
 }
 
-fn default_param_values_csv_path(params_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.values.csv", params_path.display()))
+/// `--force-init` 時に削除する run-dir 直下の派生ファイル一覧。
+///
+/// state.params は `apply_init_action` 内で atomic copy される (削除→上書きでなく
+/// rename) ため、本リストには含めない。`meta.json` も apply_init_action が個別に
+/// 「失敗で bail」セマンティクスで削除するため別扱い。
+///
+/// **override 先 (`--meta-file` / `--stats-csv` 等で run-dir 外を指定した場合) は
+/// この関数の戻り値に含めない**: ユーザが意図的に run-dir 外に置いたファイルは
+/// 「外部で管理する」意図とみなし、勝手に削除しない。
+fn default_force_init_cleanup_paths(run_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        default_param_values_csv_path(run_dir),
+        default_stats_csv_path(run_dir),
+        default_stats_aggregate_csv_path(run_dir),
+    ]
 }
 
-fn default_stats_csv_path(params_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.stats.csv", params_path.display()))
+fn default_meta_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("meta.json")
 }
 
-fn default_stats_aggregate_csv_path(params_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.stats_aggregate.csv", params_path.display()))
+fn default_param_values_csv_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("values.csv")
+}
+
+fn default_stats_csv_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("stats.csv")
+}
+
+fn default_stats_aggregate_csv_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("stats_aggregate.csv")
 }
 
 fn schedule_matches(lhs: ScheduleConfig, rhs: ScheduleConfig) -> bool {
@@ -807,24 +842,24 @@ fn save_meta(path: &Path, meta: &ResumeMetaData) -> Result<()> {
 // init-from 安全性: 状態遷移と検証ヘルパ (v3 新設)
 // =============================================================================
 
-/// `--init-from` / `--params` / `--resume` / `--force-init` 4 引数から
-/// 起動時に取るべき動作を一意に決める純粋関数。
+/// `--init-from` / `<run-dir>/state.params` の有無 / `--resume` / `--force-init` の
+/// 4 引数から起動時に取るべき動作を一意に決める純粋関数。
 ///
 /// テスト容易性のため副作用 (FS 操作 / println) を持たない。実 dispatch は
 /// `apply_init_action` 側で行う。
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum InitAction {
-    /// `--init-from` を `--params` にコピーして fresh start。
-    /// (params 不在 + init-from 指定 + !resume + !force-init)
+    /// `--init-from` を `<run-dir>/state.params` にコピーして fresh start。
+    /// (state 不在 + init-from 指定 + !resume + !force-init)
     CopyInitFromFresh,
-    /// 既存 `--params` をそのまま fresh start で使う。
-    /// (params 存在 + init-from なし + !resume + !force-init: 従来からの通常動作)
+    /// 既存 `<run-dir>/state.params` をそのまま fresh start で使う。
+    /// (state 存在 + init-from なし + !resume + !force-init)
     UseExistingFresh,
-    /// 既存 `--params` で resume 継続。
-    /// (params 存在 + resume 指定。init-from は整合性検証にのみ使う)
+    /// 既存 `<run-dir>/state.params` で resume 継続。
+    /// (state 存在 + resume 指定。init-from は整合性検証にのみ使う)
     Resume { verify_init: bool },
-    /// 既存 `--params` を atomic に上書きして fresh start (init-from 強制適用)。
-    /// (params 存在 + init-from 指定 + force-init + !resume)
+    /// 既存 `<run-dir>/state.params` を atomic に上書きして fresh start (init-from 強制適用)。
+    /// (state 存在 + init-from 指定 + force-init + !resume)
     ForceInitOverwrite,
     /// 設定エラーで bail。
     Bail(InitError),
@@ -865,18 +900,17 @@ impl NonBailAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum InitError {
-    /// `--init-from` 指定済み + `--params` 既存 + `--resume` も `--force-init` もなし。
-    /// 旧版で発生した silent footgun の本命。
+    /// `--init-from` 指定済み + `<run-dir>/state.params` 既存 + `--resume` も `--force-init` もなし。
     InitFromExistsRequiresFlag,
     /// `--resume` と `--force-init` は意味が矛盾するため同時指定不可。
     ResumeForceInitConflict,
-    /// `--resume` 指定だが `--params` が存在しない。
+    /// `--resume` 指定だが `<run-dir>/state.params` が存在しない。
     ResumeRequiresExistingParams,
     /// `--force-init` 指定だが `--init-from` が指定されていない。
     ForceInitRequiresInitFrom,
-    /// `--force-init` 指定だが `--params` が存在しない (上書き対象がない)。
+    /// `--force-init` 指定だが `<run-dir>/state.params` が存在しない (上書き対象がない)。
     ForceInitRequiresExistingParams,
-    /// `--params` 不在 + `--init-from` なし + `--resume` なし。
+    /// `<run-dir>/state.params` 不在 + `--init-from` なし + `--resume` なし。
     NoInitNorExistingParams,
 }
 
@@ -884,11 +918,11 @@ impl InitError {
     fn message(&self) -> String {
         match self {
             Self::InitFromExistsRequiresFlag => {
-                "--init-from が指定されていますが --params パスは既に存在します。\n\
+                "--init-from が指定されていますが <run-dir>/state.params は既に存在します。\n\
                  意図に応じて以下のいずれかを指定してください:\n  \
-                 --resume     : 既存ファイルから続行 (--init-from は内容検証にのみ使用)\n  \
-                 --force-init : 既存ファイルを atomic 上書きして --init-from から再初期化\n  \
-                 既存ファイル削除: rm <params>"
+                 --resume     : 既存 state から続行 (--init-from は内容検証にのみ使用)\n  \
+                 --force-init : 既存 state を atomic 上書きして --init-from から再初期化\n  \
+                 または --run-dir に新規 timestamped dir を指定する"
                     .to_owned()
             }
             Self::ResumeForceInitConflict => {
@@ -898,22 +932,21 @@ impl InitError {
                     .to_owned()
             }
             Self::ResumeRequiresExistingParams => {
-                "--resume が指定されていますが --params パスが存在しません。\n\
+                "--resume が指定されていますが <run-dir>/state.params が存在しません。\n\
                  fresh start したい場合は --resume を外してください。"
                     .to_owned()
             }
             Self::ForceInitRequiresInitFrom => {
-                "--force-init には --init-from の指定が必須です (上書き元が必要)。"
-                    .to_owned()
+                "--force-init には --init-from の指定が必須です (上書き元が必要)。".to_owned()
             }
             Self::ForceInitRequiresExistingParams => {
-                "--force-init は既存の --params を上書きする操作ですが、対象ファイルがありません。\n\
+                "--force-init は既存の <run-dir>/state.params を上書きする操作ですが、対象ファイルがありません。\n\
                  fresh start なら --force-init を外して --init-from だけで起動してください。"
                     .to_owned()
             }
             Self::NoInitNorExistingParams => {
-                "--params パスが存在せず --init-from も指定されていません。\n\
-                 --init-from で canonical を指定するか、既存の params ファイルを --params に渡してください。"
+                "<run-dir>/state.params が存在せず --init-from も指定されていません。\n\
+                 --init-from で canonical (起点) ファイルを指定してください。"
                     .to_owned()
             }
         }
@@ -994,7 +1027,7 @@ fn param_name_set_sha256(params: &[SpsaParam]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// `--init-from` の内容と既存 `--params` の値列を比較し、診断結果を返す。
+/// `--init-from` の内容と既存 `<run-dir>/state.params` の値列を比較し、診断結果を返す。
 ///
 /// resume 時に「想定の canonical で開始した run を resume しているか」の検証に使う。
 /// `--strict-init-check` 時は閾値超過で error、デフォルトでは warning に留める。
@@ -2010,36 +2043,35 @@ fn main() -> Result<()> {
 
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
-    // parent dir を先に確保（init-from 指定有無に関わらず後段で write_params が
-    // 同じパスに書き出すため、堅牢性のため init-from 外で create_dir_all する）
-    if let Some(parent) = cli.params.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent dir for {}", cli.params.display()))?;
-    }
+    // run_dir を確保 (state / meta / CSV を全て同 dir 配下に置く前提)
+    std::fs::create_dir_all(&cli.run_dir)
+        .with_context(|| format!("failed to create run-dir {}", cli.run_dir.display()))?;
+    let state_params = state_params_path(&cli.run_dir);
 
     // ========================================================================
-    // init/resume 分岐 (v3 安全性): decide_init_action で意思決定 → apply_init_action
-    // で副作用を実行。旧版の「--init-from 暗黙スキップ」は禁止。
+    // init/resume 分岐: decide_init_action で意思決定 → apply_init_action で副作用を実行
     // ========================================================================
-    let meta_path = cli.meta_file.clone().unwrap_or_else(|| default_meta_path(&cli.params));
+    let meta_path = cli.meta_file.clone().unwrap_or_else(|| default_meta_path(&cli.run_dir));
     let init_action = decide_init_action(
         cli.init_from.is_some(),
-        cli.params.exists(),
+        state_params.exists(),
         cli.resume,
         cli.force_init,
     );
-    // 関連 CSV パスは PR2 (observability) で iter 0 + summary 拡張時に正式に流し込む。
-    // 現状 PR1 では meta のみ atomic 削除で扱い、stats/values/aggregate CSV は
-    // 既存の writer 側 truncate 動作 (cli.resume=false → 上書き) に任せる。
-    let related_csv_paths: &[&Path] = &[];
+    // force-init 時に削除する run-dir 直下の派生ファイル。CSV writer は cli.resume=false
+    // で truncate もするが、能動削除しておくことで run-dir の状態を fresh と一致させる
+    // (例: --no-stats-csv で writer が走らないケースでも stale CSV が残らない)。
+    // override パス (--meta-file / --stats-csv 等) を勝手に削除しないことは
+    // `default_force_init_cleanup_paths` の doc を参照。
+    let force_init_cleanup_paths = default_force_init_cleanup_paths(&cli.run_dir);
+    let force_init_cleanup_refs: Vec<&Path> =
+        force_init_cleanup_paths.iter().map(|p| p.as_path()).collect();
     let effective_action = apply_init_action(
         &init_action,
         cli.init_from.as_deref(),
-        &cli.params,
+        &state_params,
         meta_path.as_path(),
-        related_csv_paths,
+        &force_init_cleanup_refs,
     )?;
 
     let translator = match &cli.engine_param_mapping {
@@ -2050,7 +2082,7 @@ fn main() -> Result<()> {
         }
         None => EngineNameTranslator::empty(),
     };
-    let mut params = read_params(&cli.params)?;
+    let mut params = read_params(&state_params)?;
     let schedule = ScheduleConfig {
         alpha: cli.alpha,
         gamma: cli.gamma,
@@ -2117,8 +2149,8 @@ fn main() -> Result<()> {
             if *verify_init {
                 let init_path =
                     cli.init_from.as_ref().expect("Resume{verify_init:true} requires init_from");
-                let report = verify_init_matches_existing(init_path, &cli.params)?;
-                report.print_summary(init_path, &cli.params);
+                let report = verify_init_matches_existing(init_path, &state_params)?;
+                report.print_summary(init_path, &state_params);
                 if report.has_name_set_mismatch() {
                     eprintln!(
                         "warning: --init-from と既存 params で param 名集合が異なります \
@@ -2144,7 +2176,7 @@ fn main() -> Result<()> {
         | NonBailAction::ForceInitOverwrite => {
             let snapshot = InitMetaSnapshot::for_fresh_start(
                 &effective_action,
-                &cli.params,
+                &state_params,
                 cli.init_from.as_deref(),
                 &engine_path,
                 cli.engine_param_mapping.as_deref(),
@@ -2158,21 +2190,19 @@ fn main() -> Result<()> {
     let stats_csv_path: Option<PathBuf> = if cli.no_stats_csv {
         None
     } else {
-        Some(cli.stats_csv.clone().unwrap_or_else(|| default_stats_csv_path(&cli.params)))
+        Some(cli.stats_csv.clone().unwrap_or_else(|| default_stats_csv_path(&cli.run_dir)))
     };
     let aggregate_csv_path: Option<PathBuf> = if cli.no_stats_aggregate_csv {
         None
     } else if let Some(path) = &cli.stats_aggregate_csv {
         Some(path.clone())
     } else if seed_values.len() > 1 {
-        // 互換性: --stats-csv が明示指定されている場合は従来の派生
-        // (<stats_csv>.aggregate.csv) を維持。さもなければ <params>.stats_aggregate.csv。
-        // これにより既存ジョブを --resume したとき既定の集計CSV出力先が変わらない。
-        // 詳細: crates/tools/docs/spsa_runbook.md §3 「集計CSV のパス導出規則」
+        // `--stats-csv` が明示指定されている場合のみ、aggregate を `<stats_csv>.aggregate.csv`
+        // で派生させる。run-dir モードの既定では `<run-dir>/stats_aggregate.csv`。
         if let Some(stats_path) = &cli.stats_csv {
             Some(PathBuf::from(format!("{}.aggregate.csv", stats_path.display())))
         } else {
-            Some(default_stats_aggregate_csv_path(&cli.params))
+            Some(default_stats_aggregate_csv_path(&cli.run_dir))
         }
     } else {
         None
@@ -2193,7 +2223,7 @@ fn main() -> Result<()> {
         Some(
             cli.param_values_csv
                 .clone()
-                .unwrap_or_else(|| default_param_values_csv_path(&cli.params)),
+                .unwrap_or_else(|| default_param_values_csv_path(&cli.run_dir)),
         )
     };
     let mut param_values_csv_writer = if let Some(path) = param_values_csv_path.as_deref() {
@@ -2281,7 +2311,7 @@ fn main() -> Result<()> {
         start_iteration,
         end_iteration,
         seed_values: &seed_values,
-        params_path: &cli.params,
+        params_path: &state_params,
         meta_path: &meta_path,
     });
 
@@ -2560,14 +2590,14 @@ fn main() -> Result<()> {
         let (minus_wins_mean, minus_wins_variance) = mean_and_variance(&seed_minus_wins);
         let (draws_mean, draws_variance) = mean_and_variance(&seed_draws);
 
-        write_params(&cli.params, &params)?;
+        write_params(&state_params, &params)?;
         if let Some(writer) = param_values_csv_writer.as_mut() {
             write_param_values_csv_row(writer, iter + 1, &params)?;
             writer.flush()?;
         }
         let meta = ResumeMetaData {
             format_version: META_FORMAT_VERSION,
-            params_file: cli.params.display().to_string(),
+            params_file: state_params.display().to_string(),
             completed_iterations: iter + 1,
             total_games,
             last_raw_result_mean: raw_result_mean,
@@ -2594,7 +2624,7 @@ fn main() -> Result<()> {
             raw_result_variance,
             avg_abs_update,
             max_abs_update,
-            cli.params.display(),
+            state_params.display(),
             meta_path.display()
         );
         if let Some(writer) = stats_aggregate_csv_writer.as_mut() {
@@ -3038,6 +3068,32 @@ mod tests {
         // serde で round-trip して同じ文字列で出ることも確認
         let json = serde_json::to_string(&InitMode::FreshInitFrom).unwrap();
         assert_eq!(json, "\"fresh-init-from\"");
+    }
+
+    #[test]
+    fn run_dir_path_helpers_use_consistent_layout() {
+        let dir = Path::new("/tmp/some_run");
+        assert_eq!(state_params_path(dir), dir.join("state.params"));
+        assert_eq!(default_meta_path(dir), dir.join("meta.json"));
+        assert_eq!(default_param_values_csv_path(dir), dir.join("values.csv"));
+        assert_eq!(default_stats_csv_path(dir), dir.join("stats.csv"));
+        assert_eq!(default_stats_aggregate_csv_path(dir), dir.join("stats_aggregate.csv"));
+    }
+
+    #[test]
+    fn default_force_init_cleanup_paths_returns_run_dir_only() {
+        // override 先 (--stats-csv で run-dir 外を指定する等) が混入しないことを担保。
+        // force-init 時の削除対象は run-dir 直下の 3 派生 CSV のみで、
+        // state.params / meta.json は apply_init_action 側で別管理。
+        let dir = Path::new("/tmp/some_run");
+        let paths = default_force_init_cleanup_paths(dir);
+        assert_eq!(paths.len(), 3, "exactly 3 derived CSV paths");
+        assert!(paths.contains(&dir.join("values.csv")));
+        assert!(paths.contains(&dir.join("stats.csv")));
+        assert!(paths.contains(&dir.join("stats_aggregate.csv")));
+        // state.params と meta.json は含めない (apply_init_action が個別管理)
+        assert!(!paths.contains(&dir.join("state.params")));
+        assert!(!paths.contains(&dir.join("meta.json")));
     }
 
     #[test]
