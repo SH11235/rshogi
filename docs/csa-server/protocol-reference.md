@@ -62,7 +62,7 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 
 | 応答 | 意味 | 実装位置 |
 |---|---|---|
-| `LOGIN:<handle> OK` | 認証成功 | `crates/rshogi-csa-server-tcp/src/server.rs:950` |
+| `LOGIN:<echo> OK` | 認証成功。`<echo>` は **TCP では bare `<handle>`** (`server.rs:950`)、**Workers では LOGIN 行で受け取った `<handle>+<game_name>+<color>` 全文** をそのまま返す (`crates/rshogi-csa-server-workers/src/session_state.rs:80-97`、`game_room.rs:433-436`)。クライアントは成功応答を照合する際この差分に注意 | `server.rs:950` / `session_state.rs:80-97` |
 | `LOGIN:incorrect [<reason>]` | 認証失敗。`<reason>` は本リポ拡張で `unknown_game_name` / `already_logged_in` / `rate_limited retry_after=<sec>` / `reconnect_rejected` / `reconnect_already_resumed` / `reconnect_aborted` を返す `*` | `server.rs:869-916, 1024, 2736-2811` |
 | `START:<game_id>` | 両者 AGREE 後の対局開始通知 | `crates/rshogi-csa-server/src/game/room.rs:369` |
 | `REJECT:<game_id>` | どちらかが REJECT した | `server.rs:2194-2195` |
@@ -210,7 +210,7 @@ token がすべて一致した場合のみ受理する。
 
 | 判定 | 応答 | 補足 |
 |---|---|---|
-| token 一致 | `LOGIN:<handle> OK` → resume message → transport handoff | `server.rs:2780-2814` |
+| token 一致 | `LOGIN:<echo> OK` → resume message → transport handoff (`<echo>` は §4 の同名 echo 規則。TCP は bare handle、Workers は `<handle>+<game_name>+<color>` 全文 — `crates/rshogi-csa-server-workers/src/game_room.rs:2110-2112`) | `server.rs:2780-2814` |
 | game_id 不在 / handle・color 不一致 / token 不一致 | `LOGIN:incorrect reconnect_rejected` | side-channel 漏洩防止のため理由を統合 (`server.rs:2700-2761`) |
 | 既に他経路で再接続済み | `LOGIN:incorrect reconnect_already_resumed` | `server.rs:2768-2776` |
 | game loop 側が deadline 超過済 | `LOGIN:incorrect reconnect_aborted` | `server.rs:2811` |
@@ -255,8 +255,23 @@ GameRoom DO への接続、というフローを取る。
 
 ### 9.3 Floodgate オプトイン gate
 
-`%%FLOODGATE history` / `%%FLOODGATE rating` 等の Floodgate 運用機能は、起動時の
-opt-in flag (`--allow-floodgate-features` / 環境変数) なしには有効化されない。
+opt-in flag (`--allow-floodgate-features` / 環境変数) は **コマンドそのもの**
+ではなく **起動時の構成 (永続 rates / history / scheduler / 切断敗北確定など)
+の有効化** を gate する (`crates/rshogi-csa-server/src/config.rs:82-115`)。
+
+具体的な振る舞い:
+
+- `%%FLOODGATE rating <handle>` は常に受理され、`rate_storage.load()` の結果を
+  そのまま返す (`server.rs:1697-1723`)。永続 rates が wire されていなければ
+  `NOT_FOUND` 応答に倒れる。
+- `%%FLOODGATE history [N]` も常に受理される (`server.rs:1664-1695`)。
+  `history_storage` 未配線時は `##[FLOODGATE] history ERROR not_configured`
+  を返す。
+- opt-in を伴う構成 (`JsonlFloodgateHistoryStorage` の起動・スケジューラ起動・
+  切断敗北確定 など) を要求した状態で `allow_floodgate_features=false` の
+  まま起動すると、`prepare_runtime` が `Err` を返してプロセス終了する
+  (`server.rs:304-314`)。
+
 詳細は本ディレクトリ別 doc (Floodgate gate 仕様) を参照。
 
 ## 10. 関連 doc
