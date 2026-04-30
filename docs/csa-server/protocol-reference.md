@@ -79,28 +79,37 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 
 実装本体は parse 側が [`parse_x1`](../../crates/rshogi-csa-server/src/protocol/command.rs) (`command.rs:298`)、
 応答行生成側が [`crates/rshogi-csa-server/src/protocol/info.rs`](../../crates/rshogi-csa-server/src/protocol/info.rs) と
-[`crates/rshogi-csa-server-tcp/src/server.rs`](../../crates/rshogi-csa-server-tcp/src/server.rs) のセッションループ。
+各 frontend のセッションループ ([`crates/rshogi-csa-server-tcp/src/server.rs`](../../crates/rshogi-csa-server-tcp/src/server.rs)、
+[`crates/rshogi-csa-server-workers/src/game_room.rs`](../../crates/rshogi-csa-server-workers/src/game_room.rs))。
 
-| コマンド | 概要 | パース位置 | 応答位置 |
-|---|---|---|---|
-| `%%WHO` | ログイン中プレイヤ一覧。`##[WHO] <name> <status>` を name 昇順、終端 `##[WHO] END` | `command.rs:305` | `info.rs:52` (`who_lines`) |
-| `%%LIST` | アクティブ対局一覧。`##[LIST] <game_id> <black> <white> <game_name> <started_at>` + END | `command.rs:309` | `info.rs:81` (`list_lines`) |
-| `%%SHOW <game_id>` | 1 対局のサマリ。未登録は `##[SHOW] NOT_FOUND <game_id>` 後 END | `command.rs:321` | `info.rs:107` (`show_lines`) |
-| `%%MONITOR2ON <game_id>` | 観戦購読 (broadcast 受信開始)。応答 `##[MONITOR2] BEGIN <game_id>` / 不在 `##[MONITOR2] NOT_FOUND` / 多重 `##[MONITOR2] BUSY` | `command.rs:327` | `server.rs:1378-1468` |
-| `%%MONITOR2OFF <game_id>` | 観戦購読解除。応答 `##[MONITOR2OFF] <game_id>` + END | `command.rs:333` | `server.rs:1515-1518` |
-| `%%CHAT <message>` | 観戦中の room へ chat 配信。応答 `##[CHAT] OK <game_id>` / 未観戦時 `##[CHAT] NOT_MONITORING` (broadcast 形式は `##[CHAT] <handle>: <message>`) | `command.rs:339` | `server.rs:1520-1551` |
-| `%%VERSION` | 実装名 + バージョン 1 行。`##[VERSION] rshogi-csa-server <CARGO_PKG_VERSION>`。**他の x1 応答と異なり END 終端行なし** (§6 の例外) | `command.rs:313` | `info.rs:28` (`version_lines`) |
-| `%%HELP` | 受理コマンド一覧 (`advertise == accept` で統一) | `command.rs:317` | `info.rs:134` (`help_lines`) |
-| `%%SETBUOY <game_name> <moves...> <count>` | Buoy 登録。**admin 権限必須** (`config.admin_handles`)。応答 `##[SETBUOY] OK <buoy> <count>` / `PERMISSION_DENIED` / `ERROR <buoy> <reason>` | `command.rs:342` | `server.rs:1553-1591` |
-| `%%DELETEBUOY <game_name>` | Buoy 削除。admin 権限必須。応答 `##[DELETEBUOY] OK/PERMISSION_DENIED/ERROR` | `command.rs:363` | `server.rs:1593-1605` |
-| `%%GETBUOYCOUNT <game_name>` | Buoy 残数照会。応答 `##[GETBUOYCOUNT] <buoy> <n>` / `NOT_FOUND` / `ERROR` | `command.rs:369` | `server.rs:1610-1625` |
-| `%%FORK <source_game> [<buoy_name>] [<nth_move>]` | 過去対局から buoy を派生。第 2 トークンが数字なら `nth_move` として解釈する曖昧性ルール (`command.rs:120-126`) | `command.rs:375` | `server.rs:1635-1660` |
-| `%%FLOODGATE history [N]` `*` | 直近 N 件の Floodgate 対局履歴。`limit` 省略時は frontend 側で 10 件補う | `command.rs:417` | `info.rs:172` (`floodgate_history_lines`) |
-| `%%FLOODGATE rating <handle>` `*` | 1 名分の rate / wins / losses / last_game_id / last_modified | `command.rs:432` | `info.rs:222` (`floodgate_rating_lines`) |
+**frontend 対応一覧**: x1 コマンドの parse 自体は core crate に集約 (上記
+`parse_x1`) されているが、**実際にどのコマンドに応答するかは frontend ごとに
+独立**。Workers は対局 1 室に閉じた DO アーキテクチャのため、global query 系
+(`%%WHO` / `%%LIST` / `%%SHOW` / `%%VERSION` / `%%HELP` / `%%FLOODGATE ...`) は
+配線していない。
+
+| コマンド | 概要 | TCP | Workers | パース位置 | 応答位置 |
+|---|---|---|---|---|---|
+| `%%WHO` | ログイン中プレイヤ一覧。`##[WHO] <name> <status>` を name 昇順、終端 `##[WHO] END` | ✅ | ❌ | `command.rs:305` | `info.rs:52` (`who_lines`) |
+| `%%LIST` | アクティブ対局一覧。`##[LIST] <game_id> <black> <white> <game_name> <started_at>` + END | ✅ | ❌ | `command.rs:309` | `info.rs:81` (`list_lines`) |
+| `%%SHOW <game_id>` | 1 対局のサマリ。未登録は `##[SHOW] NOT_FOUND <game_id>` 後 END | ✅ | ❌ | `command.rs:321` | `info.rs:107` (`show_lines`) |
+| `%%MONITOR2ON <game_id>` | 観戦購読 (broadcast 受信開始)。応答 `##[MONITOR2] BEGIN <game_id>` / 不在 `##[MONITOR2] NOT_FOUND` / 多重 `##[MONITOR2] BUSY` | ✅ | ✅ (spectator 経路。`game_room.rs:691-716`) | `command.rs:327` | `server.rs:1378-1468` |
+| `%%MONITOR2OFF <game_id>` | 観戦購読解除。応答 `##[MONITOR2OFF] <game_id>` + END | ✅ | ✅ (spectator 経路。`game_room.rs:677-686`) | `command.rs:333` | `server.rs:1515-1518` |
+| `%%CHAT <message>` | room へ chat 配信。応答 `##[CHAT] OK <game_id>` / 未観戦時 `##[CHAT] NOT_MONITORING` (broadcast 形式は `##[CHAT] <handle>: <message>`) | ✅ | ✅ (player + spectator。`game_room.rs:671, 893`) | `command.rs:339` | `server.rs:1520-1551` |
+| `%%VERSION` | 実装名 + バージョン 1 行。`##[VERSION] rshogi-csa-server <CARGO_PKG_VERSION>`。**他の x1 応答と異なり END 終端行なし** (§6 の例外) | ✅ | ❌ | `command.rs:313` | `info.rs:28` (`version_lines`) |
+| `%%HELP` | 受理コマンド一覧 (`advertise == accept` で統一) | ✅ | ❌ | `command.rs:317` | `info.rs:134` (`help_lines`) |
+| `%%SETBUOY <game_name> <moves...> <count>` | Buoy 登録。**admin 権限必須** (`config.admin_handles`)。応答 `##[SETBUOY] OK <buoy> <count>` / `PERMISSION_DENIED` / `ERROR <buoy> <reason>` | ✅ | ✅ (player 経路。`game_room.rs:901`) | `command.rs:342` | `server.rs:1553-1591` |
+| `%%DELETEBUOY <game_name>` | Buoy 削除。admin 権限必須。応答 `##[DELETEBUOY] OK/PERMISSION_DENIED/ERROR` | ✅ | ✅ (player 経路。`game_room.rs:937`) | `command.rs:363` | `server.rs:1593-1605` |
+| `%%GETBUOYCOUNT <game_name>` | Buoy 残数照会。応答 `##[GETBUOYCOUNT] <buoy> <n>` / `NOT_FOUND` / `ERROR` | ✅ | ✅ (player 経路。`game_room.rs:955`) | `command.rs:369` | `server.rs:1610-1625` |
+| `%%FORK <source_game> [<buoy_name>] [<nth_move>]` | 過去対局から buoy を派生。第 2 トークンが数字なら `nth_move` として解釈する曖昧性ルール (`command.rs:120-126`) | ✅ | ✅ (player 経路。`game_room.rs:969`) | `command.rs:375` | `server.rs:1635-1660` |
+| `%%FLOODGATE history [N]` `*` | 直近 N 件の Floodgate 対局履歴。`limit` 省略時は frontend 側で 10 件補う | ✅ | ❌ | `command.rs:417` | `info.rs:172` (`floodgate_history_lines`) |
+| `%%FLOODGATE rating <handle>` `*` | 1 名分の rate / wins / losses / last_game_id / last_modified | ✅ | ❌ | `command.rs:432` | `info.rs:222` (`floodgate_rating_lines`) |
 
 `%%HELP` は `advertise == accept` の原則で実装されており、`%%HELP` の 1 行サマリと
 本表に列挙したコマンドが常に一致する (`info.rs:134-156` のリストと `parse_x1` の
-`match` 分岐がテストで紐付けられている: `info.rs:271-294`)。
+`match` 分岐がテストで紐付けられている: `info.rs:271-294`)。なお `%%HELP` は
+TCP frontend のみ応答するため、Workers では `info::help_lines` の advertise
+list を直接の wire 契約として扱わないこと。
 
 ## 6. サーバー応答 framing (`##[<TAG>] ... END`)
 
