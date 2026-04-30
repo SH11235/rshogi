@@ -12,6 +12,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::{
@@ -21,7 +22,16 @@ use tools::spsa_param_mapping::{
     MappingTable, NOT_USED_MARKER as PARAM_NOT_USED_MARKER, RawParamRow, parse_param_line,
 };
 
-const META_FORMAT_VERSION: u32 = 2;
+/// `meta.json` のフォーマットバージョン。
+///
+/// v2 → v3 (本 PR): `params_sha256` / `init_from_sha256` / `engine_path` /
+/// `engine_param_mapping_*` / `param_name_set_hash` / `active_param_count` /
+/// `init_mode` / `init_from_path` を追加。`--init-from` の暗黙スキップを禁止し、
+/// resume 時に params 内容と name set の整合性を hash で検証する。
+///
+/// 互換性: v3 は v2 を読まない (hard bail)。古い run dir で resume したい場合は
+/// 新規 run dir で `--init-from <canonical>` から fresh start する。
+const META_FORMAT_VERSION: u32 = 3;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SPSA tuner for USI engines")]
@@ -185,14 +195,33 @@ struct Cli {
     #[arg(long)]
     engine_param_mapping: Option<PathBuf>,
 
-    /// 正本 `.params` の上書き保護用。`--params` のパスが存在しない時に限り、
-    /// `<init-from>` の内容をコピーしてから SPSA を開始する。既に存在する場合は
-    /// resume と同じく既存ファイルを読み込んで何もしない。正本（例:
-    /// `spsa_params/suisho10_converted.params`）を `--params` に直接渡すと
-    /// 反復ごとに上書きされるので、`--params runs/spsa/<ts>/tuned.params
-    /// --init-from spsa_params/suisho10_converted.params` のパターンで使う。
+    /// 正本 `.params` の上書き保護用。`--params` のパスが存在しない場合に
+    /// `<init-from>` の内容をコピーしてから SPSA を開始する。
+    ///
+    /// **挙動 (v3 以降):** 既に `--params` が存在する場合、`--resume` か
+    /// `--force-init` のどちらかを明示しないと bail する。これは旧版の
+    /// 「既存ファイルを黙って初期値として使う」挙動が rshogi default 値の
+    /// 混入による事故を引き起こしたための安全対策。
+    /// 詳細は `crates/tools/docs/spsa_runbook.md` §10.6 参照。
     #[arg(long)]
     init_from: Option<PathBuf>,
+
+    /// `--init-from` 指定時に既存の `--params` を atomic に上書きして強制再初期化する。
+    ///
+    /// 通常は `--resume` で既存 run を継続する想定だが、過去 run の params を捨てて
+    /// canonical から作り直したい時に明示する。`--resume` とは同時指定不可。
+    /// `--force-init` 時は既存 meta / stats CSV / values CSV / aggregate CSV も
+    /// 削除して fresh run として扱う。
+    #[arg(long, default_value_t = false)]
+    force_init: bool,
+
+    /// `--resume` + `--init-from` で初期値整合性チェックを strict にする。
+    ///
+    /// デフォルトは warning 出力のみで継続。strict 指定時は median ≥ 0.5 step か
+    /// max ≥ 5 step の乖離があれば bail。CI / 自動化で「想定外の resume」を
+    /// 早期検出したい場合に使う。
+    #[arg(long, default_value_t = false)]
+    strict_init_check: bool,
 
     /// `--seeds` を 2 つ以上指定したとき、iter 内の seed 群を並列実行する。
     /// SPSA の数学的妥当性は保たれる（各 seed は独立な摂動方向を持ち、iter 末で
@@ -274,6 +303,46 @@ struct ResumeMetaData {
     last_avg_abs_update: f64,
     updated_at_utc: String,
     schedule: ScheduleConfig,
+    // --- v3 で追加 ---
+    /// 起動時 (iter 0) の `--params` 全体の SHA-256 hex。fresh start / force-init 時に
+    /// その時点の params 内容を記録する。SPSA 進行で値は変わるので resume 中の
+    /// 検証では使わず、事故解析用の起動時スナップショットとして残す。
+    init_params_sha256: String,
+    /// `--init-from` 指定時のソース hex。同 path で再走時に「同じ canonical を
+    /// 使ったか」を後追い確認可能。
+    init_from_sha256: Option<String>,
+    /// `--init-from` のパス文字列 (起動時の指定そのまま、絶対パス化はしない)。
+    init_from_path: Option<String>,
+    /// param 名集合の SHA-256 hex (sort 済み name を `\n` join して hash)。
+    /// resume 時に param 集合が変わっていないことの検証に使う。
+    param_name_set_sha256: String,
+    /// 起動時の active param 数 (active_only_regex / not_used / mapping 適用後)。
+    active_param_count: usize,
+    /// 起動時の engine binary パス (resolve 後の絶対 or 相対パス、解決時のまま)。
+    engine_path: String,
+    /// `--engine-param-mapping` のパス (指定時のみ)。
+    engine_param_mapping_path: Option<String>,
+    /// `--engine-param-mapping` ファイルの SHA-256 hex (指定時のみ)。
+    engine_param_mapping_sha256: Option<String>,
+    /// 起動モード。`InitMode` の serde 表現 (kebab-case)。
+    init_mode: InitMode,
+}
+
+/// 起動時に決まる SPSA 走行モード。
+///
+/// `meta.json` 内に kebab-case 文字列で保存される (`"fresh-init-from"` 等)。
+/// String 直書きは typo の温床なので enum + serde で型安全化。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum InitMode {
+    /// `--init-from` 指定 + `--params` 不在 → canonical を copy して fresh start。
+    FreshInitFrom,
+    /// `--init-from` なし + `--params` 既存 → 既存ファイルでそのまま fresh start。
+    FreshExisting,
+    /// `--init-from` 指定 + `--params` 既存 + `--force-init` → 上書き再初期化。
+    ForceInit,
+    /// `--resume` で既存 run を継続 (run 全体としてのモードは初回起動時のもの)。
+    Resume,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -694,12 +763,518 @@ fn load_meta(path: &Path) -> Result<ResumeMetaData> {
     Ok(meta)
 }
 
+/// `meta.json` を atomic に保存する (temp file + rename)。
+///
+/// 注意: serde_json::to_writer_pretty は内部で flush しないため、明示的に
+/// `BufWriter::flush()` を呼ぶ必要がある (Drop での自動 flush は失敗を握り潰す)。
+/// さらに `std::fs::rename` は同一 filesystem 内で atomic なので、書き込み途中の
+/// クラッシュで既存 meta が破損するのを防げる。
 fn save_meta(path: &Path, meta: &ResumeMetaData) -> Result<()> {
-    let file =
-        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
-    let writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(writer, meta)
-        .with_context(|| format!("failed to write JSON {}", path.display()))?;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".spsa_meta_")
+        .suffix(".json.tmp")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to create temp file under {}", parent.display()))?;
+    {
+        let mut writer = BufWriter::new(tmp.as_file_mut());
+        serde_json::to_writer_pretty(&mut writer, meta)
+            .with_context(|| format!("failed to write JSON {}", path.display()))?;
+        writer
+            .flush()
+            .with_context(|| format!("failed to flush meta writer for {}", path.display()))?;
+    }
+    tmp.persist(path)
+        .with_context(|| format!("failed to atomic-rename meta to {}", path.display()))?;
+    Ok(())
+}
+
+// =============================================================================
+// init-from 安全性: 状態遷移と検証ヘルパ (v3 新設)
+// =============================================================================
+
+/// `--init-from` / `--params` / `--resume` / `--force-init` 4 引数から
+/// 起動時に取るべき動作を一意に決める純粋関数。
+///
+/// テスト容易性のため副作用 (FS 操作 / println) を持たない。実 dispatch は
+/// `apply_init_action` 側で行う。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InitAction {
+    /// `--init-from` を `--params` にコピーして fresh start。
+    /// (params 不在 + init-from 指定 + !resume + !force-init)
+    CopyInitFromFresh,
+    /// 既存 `--params` をそのまま fresh start で使う。
+    /// (params 存在 + init-from なし + !resume + !force-init: 従来からの通常動作)
+    UseExistingFresh,
+    /// 既存 `--params` で resume 継続。
+    /// (params 存在 + resume 指定。init-from は整合性検証にのみ使う)
+    Resume { verify_init: bool },
+    /// 既存 `--params` を atomic に上書きして fresh start (init-from 強制適用)。
+    /// (params 存在 + init-from 指定 + force-init + !resume)
+    ForceInitOverwrite,
+    /// 設定エラーで bail。
+    Bail(InitError),
+}
+
+/// `apply_init_action` 通過後の確定モード。`Bail` を排除した narrow type で
+/// main 側の match から `unreachable!` を消すために使う。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NonBailAction {
+    CopyInitFromFresh,
+    UseExistingFresh,
+    Resume { verify_init: bool },
+    ForceInitOverwrite,
+}
+
+impl NonBailAction {
+    fn from_init_action(a: &InitAction) -> Option<Self> {
+        match a {
+            InitAction::CopyInitFromFresh => Some(Self::CopyInitFromFresh),
+            InitAction::UseExistingFresh => Some(Self::UseExistingFresh),
+            InitAction::Resume { verify_init } => Some(Self::Resume {
+                verify_init: *verify_init,
+            }),
+            InitAction::ForceInitOverwrite => Some(Self::ForceInitOverwrite),
+            InitAction::Bail(_) => None,
+        }
+    }
+
+    fn init_mode(&self) -> InitMode {
+        match self {
+            Self::CopyInitFromFresh => InitMode::FreshInitFrom,
+            Self::UseExistingFresh => InitMode::FreshExisting,
+            Self::ForceInitOverwrite => InitMode::ForceInit,
+            Self::Resume { .. } => InitMode::Resume,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InitError {
+    /// `--init-from` 指定済み + `--params` 既存 + `--resume` も `--force-init` もなし。
+    /// 旧版で発生した silent footgun の本命。
+    InitFromExistsRequiresFlag,
+    /// `--resume` と `--force-init` は意味が矛盾するため同時指定不可。
+    ResumeForceInitConflict,
+    /// `--resume` 指定だが `--params` が存在しない。
+    ResumeRequiresExistingParams,
+    /// `--force-init` 指定だが `--init-from` が指定されていない。
+    ForceInitRequiresInitFrom,
+    /// `--force-init` 指定だが `--params` が存在しない (上書き対象がない)。
+    ForceInitRequiresExistingParams,
+    /// `--params` 不在 + `--init-from` なし + `--resume` なし。
+    NoInitNorExistingParams,
+}
+
+impl InitError {
+    fn message(&self) -> String {
+        match self {
+            Self::InitFromExistsRequiresFlag => {
+                "--init-from が指定されていますが --params パスは既に存在します。\n\
+                 意図に応じて以下のいずれかを指定してください:\n  \
+                 --resume     : 既存ファイルから続行 (--init-from は内容検証にのみ使用)\n  \
+                 --force-init : 既存ファイルを atomic 上書きして --init-from から再初期化\n  \
+                 既存ファイル削除: rm <params>"
+                    .to_owned()
+            }
+            Self::ResumeForceInitConflict => {
+                "--resume と --force-init は同時指定できません (意味が矛盾します)。\n\
+                 - 継続実行したい → --resume のみ\n\
+                 - 既存を破棄して再初期化したい → --force-init のみ"
+                    .to_owned()
+            }
+            Self::ResumeRequiresExistingParams => {
+                "--resume が指定されていますが --params パスが存在しません。\n\
+                 fresh start したい場合は --resume を外してください。"
+                    .to_owned()
+            }
+            Self::ForceInitRequiresInitFrom => {
+                "--force-init には --init-from の指定が必須です (上書き元が必要)。"
+                    .to_owned()
+            }
+            Self::ForceInitRequiresExistingParams => {
+                "--force-init は既存の --params を上書きする操作ですが、対象ファイルがありません。\n\
+                 fresh start なら --force-init を外して --init-from だけで起動してください。"
+                    .to_owned()
+            }
+            Self::NoInitNorExistingParams => {
+                "--params パスが存在せず --init-from も指定されていません。\n\
+                 --init-from で canonical を指定するか、既存の params ファイルを --params に渡してください。"
+                    .to_owned()
+            }
+        }
+    }
+}
+
+/// 純粋関数: CLI フラグと FS 状態 (params 存在性) から `InitAction` を決定する。
+///
+/// テスト時は `params_exists` をモックできる。16 通りの入力を網羅。
+fn decide_init_action(
+    has_init_from: bool,
+    params_exists: bool,
+    resume: bool,
+    force_init: bool,
+) -> InitAction {
+    use InitAction::*;
+    use InitError::*;
+
+    // フラグ間の矛盾を最優先で弾く
+    if resume && force_init {
+        return Bail(ResumeForceInitConflict);
+    }
+    if force_init && !has_init_from {
+        return Bail(ForceInitRequiresInitFrom);
+    }
+    // resume は params 必須 (force_init との矛盾は上で除去済み)
+    if resume && !params_exists {
+        return Bail(ResumeRequiresExistingParams);
+    }
+    // 通常分岐
+    match (has_init_from, params_exists, resume, force_init) {
+        // resume
+        (true, true, true, false) => Resume { verify_init: true },
+        (false, true, true, false) => Resume { verify_init: false },
+        // force-init
+        (true, true, false, true) => ForceInitOverwrite,
+        (true, false, false, true) => Bail(ForceInitRequiresExistingParams),
+        // 通常
+        (true, false, false, false) => CopyInitFromFresh,
+        (true, true, false, false) => Bail(InitFromExistsRequiresFlag),
+        (false, true, false, false) => UseExistingFresh,
+        (false, false, false, false) => Bail(NoInitNorExistingParams),
+        // 上のガードで除去済みの組み合わせ (型システム上 unreachable)
+        _ => unreachable!("decide_init_action: invariant violated by guards above"),
+    }
+}
+
+/// SHA-256 hex (lowercase) を計算する。ファイル全体を一度に読む。
+fn sha256_hex_of_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read for hash: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// param 名集合の hash。sort 済みで決定的。
+///
+/// **前提**: name に改行 `\n` を含まないこと。`spsa_param_mapping::parse_param_line`
+/// が CSV 1 行 1 param で読み込むため、現状この前提は parse 段階で実質保証されている。
+/// 将来 parse 経路を変える場合、この関数も区切り文字を `\0` 等に変更すること
+/// (改行混入時に異なる名前集合が同じ hash を返す可能性があるため)。
+///
+/// debug ビルドでは `\n` 含有を `debug_assert!` で検知し、parse 経路変更時の
+/// regression を test 段階で捕捉する。release ビルドではコストゼロ。
+fn param_name_set_sha256(params: &[SpsaParam]) -> String {
+    let mut names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+    let mut hasher = Sha256::new();
+    for n in &names {
+        debug_assert!(
+            !n.contains('\n'),
+            "param name must not contain '\\n' (would corrupt name-set hash): {n:?}"
+        );
+        hasher.update(n.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// `--init-from` の内容と既存 `--params` の値列を比較し、診断結果を返す。
+///
+/// resume 時に「想定の canonical で開始した run を resume しているか」の検証に使う。
+/// `--strict-init-check` 時は閾値超過で error、デフォルトでは warning に留める。
+#[derive(Debug)]
+struct InitMatchReport {
+    total: usize,
+    matched_within_half_step: usize,
+    median_step_units: f64,
+    max_step_units: f64,
+    extra_in_init: Vec<String>,
+    missing_in_init: Vec<String>,
+    top_diffs: Vec<(String, f64, f64, f64)>, // (name, init_v, existing_v, |Δ|/step)
+}
+
+fn verify_init_matches_existing(init_path: &Path, existing_path: &Path) -> Result<InitMatchReport> {
+    let init_params = read_params(init_path)
+        .with_context(|| format!("verify: failed to read init-from {}", init_path.display()))?;
+    let existing_params = read_params(existing_path)
+        .with_context(|| format!("verify: failed to read existing {}", existing_path.display()))?;
+
+    use std::collections::BTreeSet;
+    let init_names: BTreeSet<&str> = init_params.iter().map(|p| p.name.as_str()).collect();
+    let exist_names: BTreeSet<&str> = existing_params.iter().map(|p| p.name.as_str()).collect();
+    let extra: Vec<String> = init_names.difference(&exist_names).map(|s| (*s).to_owned()).collect();
+    let missing: Vec<String> =
+        exist_names.difference(&init_names).map(|s| (*s).to_owned()).collect();
+
+    let exist_by_name: HashMap<&str, &SpsaParam> =
+        existing_params.iter().map(|p| (p.name.as_str(), p)).collect();
+    let mut diffs: Vec<(String, f64, f64, f64)> = Vec::new();
+    for ip in &init_params {
+        if let Some(ep) = exist_by_name.get(ip.name.as_str()) {
+            // step は c_end (= 最終摂動幅) をそのまま使う。
+            // c_end == 0 の防御的フォールバックのみ 1.0 に補正する。
+            // (旧実装の `c_end.max(1.0)` は c_end < 1 のパラメータで σ を過小評価していた)
+            let step = if ip.c_end > 0.0 { ip.c_end } else { 1.0 };
+            let d = (ip.value - ep.value).abs() / step;
+            if d.is_nan() {
+                bail!(
+                    "verify_init: NaN diff detected for param '{}' (init.value={} existing.value={} step={})",
+                    ip.name,
+                    ip.value,
+                    ep.value,
+                    step
+                );
+            }
+            diffs.push((ip.name.clone(), ip.value, ep.value, d));
+        }
+    }
+    let total = diffs.len();
+    let matched = diffs.iter().filter(|(_, _, _, d)| *d < 0.5).count();
+    let mut sorted_d: Vec<f64> = diffs.iter().map(|(_, _, _, d)| *d).collect();
+    sorted_d.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // 厳密中央値: 偶数個のときは下側中値と上側中値の平均を取る。
+    // 旧実装は `sorted_d[n/2]` で常に上側中値を返しており、--strict-init-check の
+    // 閾値 (0.5σ) 判定をわずかに過大評価していた。
+    let median = match sorted_d.len() {
+        0 => 0.0,
+        n if n.is_multiple_of(2) => (sorted_d[n / 2 - 1] + sorted_d[n / 2]) / 2.0,
+        n => sorted_d[n / 2],
+    };
+    let max = sorted_d.iter().copied().fold(0.0_f64, f64::max);
+
+    // 上位 5 件の乖離を抽出 (大きい順)
+    let mut top = diffs.clone();
+    top.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    top.truncate(5);
+
+    Ok(InitMatchReport {
+        total,
+        matched_within_half_step: matched,
+        median_step_units: median,
+        max_step_units: max,
+        extra_in_init: extra,
+        missing_in_init: missing,
+        top_diffs: top,
+    })
+}
+
+impl InitMatchReport {
+    /// strict mode で bail すべきか判定。median ≥ 0.5 step または max ≥ 5 step で true。
+    fn exceeds_strict_threshold(&self) -> bool {
+        self.median_step_units >= 0.5 || self.max_step_units >= 5.0
+    }
+
+    /// 名前集合に差異があるかどうか。
+    fn has_name_set_mismatch(&self) -> bool {
+        !self.extra_in_init.is_empty() || !self.missing_in_init.is_empty()
+    }
+
+    /// 整合性の人間可読サマリを stderr に出す。
+    fn print_summary(&self, init_path: &Path, existing_path: &Path) {
+        eprintln!(
+            "init-from 整合性チェック: init={} vs existing={}",
+            init_path.display(),
+            existing_path.display()
+        );
+        eprintln!(
+            "  名前一致: {} (init側にしかない: {}, existing側にしかない: {})",
+            self.total,
+            self.extra_in_init.len(),
+            self.missing_in_init.len()
+        );
+        eprintln!(
+            "  値整合性 (|Δ|/step): median={:.3}σ, max={:.3}σ, <0.5σ 一致率={}/{}",
+            self.median_step_units, self.max_step_units, self.matched_within_half_step, self.total
+        );
+        if !self.top_diffs.is_empty() && self.max_step_units >= 0.5 {
+            eprintln!("  上位乖離 (最大 5 件):");
+            for (name, iv, ev, d) in &self.top_diffs {
+                eprintln!("    {name}: init={iv:.3} existing={ev:.3} |Δ|/step={d:.3}σ");
+            }
+        }
+    }
+}
+
+/// `decide_init_action` の結果を実際に FS に反映するヘルパ。
+///
+/// 副作用: ファイル copy / atomic overwrite / 関連 (meta / CSV) の削除。
+/// `force_init` 時は **削除を先に行い** (失敗時は bail)、その後 params を atomic copy
+/// する。順序が逆だと「新 params + 旧 meta」の不整合 run dir が中断時に残り、
+/// 次回 resume で `completed_iterations` 等が古いまま継ぎ足される事故になる。
+///
+/// 戻り値: `Bail` を排除した `NonBailAction`。呼び出し側の `match` から
+/// `unreachable!` 分岐を消せる。
+fn apply_init_action(
+    action: &InitAction,
+    init_from: Option<&Path>,
+    params_path: &Path,
+    meta_path: &Path,
+    related_csv_paths: &[&Path],
+) -> Result<NonBailAction> {
+    match action {
+        InitAction::CopyInitFromFresh => {
+            let src = init_from.expect("CopyInitFromFresh requires init_from");
+            atomic_copy_file(src, params_path)?;
+            eprintln!(
+                "init-from: copied {} -> {} (fresh start)",
+                src.display(),
+                params_path.display()
+            );
+        }
+        InitAction::UseExistingFresh => {
+            eprintln!(
+                "init: using existing {} as fresh start (no --init-from, no --resume)",
+                params_path.display()
+            );
+        }
+        InitAction::Resume { .. } => {
+            // resume 時は params をそのまま使う。verify_init は呼び出し側で実施。
+            eprintln!("init: resuming from existing {}", params_path.display());
+        }
+        InitAction::ForceInitOverwrite => {
+            let src = init_from.expect("ForceInitOverwrite requires init_from");
+            // (1) meta を先に削除 (失敗で bail)。中断耐性のため atomic copy より前に行う。
+            //     params を先に書くと「中断 → 新 params + 旧 meta」となり、次回 resume で
+            //     completed_iterations が古いまま継ぎ足される事故が起きる。
+            if meta_path.exists() {
+                std::fs::remove_file(meta_path).with_context(|| {
+                    format!("force-init: failed to remove stale meta {}", meta_path.display())
+                })?;
+            }
+            // (2) related CSV を削除 (best-effort warn だが、削除に失敗するファイルは
+            //     後段の append/truncate で再処理可能なので致命ではない)。
+            for p in related_csv_paths {
+                if p.exists()
+                    && let Err(e) = std::fs::remove_file(p)
+                {
+                    eprintln!("warning: force-init: failed to remove stale {} ({e})", p.display());
+                }
+            }
+            // (3) params を atomic copy で上書き (rename は同一 FS 内 atomic)。
+            atomic_copy_file(src, params_path)?;
+            eprintln!(
+                "init-from: force-init overwrite {} -> {} (stale meta/CSV removed)",
+                src.display(),
+                params_path.display()
+            );
+        }
+        InitAction::Bail(err) => bail!("init/resume 設定エラー: {}", err.message()),
+    }
+    // ここに到達するのは Bail 以外の 4 バリアント。`Bail` は上の match で `bail!` 早期 return
+    // するため、`from_init_action` が `None` を返す経路は論理的に到達不能。
+    // `unreachable!` でなく `expect` を使うのは、万が一バグで Bail が漏れたときに
+    // 内部 invariant 違反として明示的に panic するため (anyhow::Error にせず fail-fast)。
+    Ok(NonBailAction::from_init_action(action)
+        .expect("invariant: Bail handled above; non-Bail variants always convertible"))
+}
+
+/// 起動時にしか変わらないメタフィールドのスナップショット。
+///
+/// fresh / force-init 時は `for_fresh_start` で計算、resume 時は `from_existing_meta`
+/// で既存 meta から引き継ぐ。これにより resume が「最初に何で起動したか」の情報を
+/// 失わずに保持できる。
+#[derive(Clone, Debug)]
+struct InitMetaSnapshot {
+    init_params_sha256: String,
+    init_from_sha256: Option<String>,
+    init_from_path: Option<String>,
+    engine_path: String,
+    engine_param_mapping_path: Option<String>,
+    engine_param_mapping_sha256: Option<String>,
+    init_mode: InitMode,
+}
+
+impl InitMetaSnapshot {
+    /// fresh / force-init 起動用に現在の状態から構築する。
+    ///
+    /// `Resume` バリアントは `from_existing_meta` を使うべきで、ここに渡したら
+    /// プログラムバグなので panic で fail-fast する (silent な "unknown" 化を防ぐ)。
+    fn for_fresh_start(
+        action: &NonBailAction,
+        params_path: &Path,
+        init_from: Option<&Path>,
+        engine_path: &Path,
+        engine_param_mapping: Option<&Path>,
+    ) -> Result<Self> {
+        if matches!(action, NonBailAction::Resume { .. }) {
+            unreachable!(
+                "for_fresh_start should not be called with Resume; use from_existing_meta instead"
+            );
+        }
+        let init_mode = action.init_mode();
+        let init_params_sha256 = sha256_hex_of_file(params_path)?;
+        let (init_from_sha256, init_from_path) = match init_from {
+            Some(p) => (Some(sha256_hex_of_file(p)?), Some(p.display().to_string())),
+            None => (None, None),
+        };
+        let (mapping_path, mapping_sha) = match engine_param_mapping {
+            Some(p) => (Some(p.display().to_string()), Some(sha256_hex_of_file(p)?)),
+            None => (None, None),
+        };
+        // TODO(PR2 / follow-up): engine_path / mapping_path は CLI 引数のままで
+        // cwd 相対の場合がある。後追い解析で「どのバイナリで起動したか」を知るには
+        // `std::fs::canonicalize` を通したい (失敗時は raw path にフォールバック)。
+        Ok(Self {
+            init_params_sha256,
+            init_from_sha256,
+            init_from_path,
+            engine_path: engine_path.display().to_string(),
+            engine_param_mapping_path: mapping_path,
+            engine_param_mapping_sha256: mapping_sha,
+            init_mode,
+        })
+    }
+
+    /// resume 時に既存 meta から起動時情報を復元する。
+    fn from_existing_meta(meta: &ResumeMetaData) -> Self {
+        Self {
+            init_params_sha256: meta.init_params_sha256.clone(),
+            init_from_sha256: meta.init_from_sha256.clone(),
+            init_from_path: meta.init_from_path.clone(),
+            engine_path: meta.engine_path.clone(),
+            engine_param_mapping_path: meta.engine_param_mapping_path.clone(),
+            engine_param_mapping_sha256: meta.engine_param_mapping_sha256.clone(),
+            init_mode: meta.init_mode,
+        }
+    }
+}
+
+/// `src` の内容を `dst` に atomic にコピーする (temp file + rename)。
+///
+/// 同一 filesystem 内なら rename は atomic なので、書き込み中のクラッシュで
+/// `dst` が中途半端な状態になることを防ぐ。
+///
+/// **前提**:
+/// - `dst.parent()` (or 親が空なら CWD) に書き込み権限と十分な inode/space が必要。
+/// - 同一 FS 内 atomic を担保するため tempfile を `dst.parent()` 直下に作成する。
+///   tmpfs/persist FS 跨ぎ (`/tmp` から `/mnt`) では `tempfile::persist` が
+///   `EXDEV` で失敗する可能性がある (rename(2) の制約)。
+/// - tempfile の permission は umask 由来 (通常 0600)。元 `dst` が group/world
+///   readable だった場合、rename 後に permission が縮退する可能性がある。共有
+///   FS 運用では呼び出し側で chmod 後処理を行うこと。
+fn atomic_copy_file(src: &Path, dst: &Path) -> Result<()> {
+    let parent = dst.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create parent dir for {}", dst.display()))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".spsa_init_")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to create temp file under {}", parent.display()))?;
+    {
+        let mut reader = File::open(src)
+            .with_context(|| format!("failed to open init source {}", src.display()))?;
+        let mut writer = BufWriter::new(tmp.as_file_mut());
+        std::io::copy(&mut reader, &mut writer)
+            .with_context(|| format!("failed to copy {} -> {}", src.display(), dst.display()))?;
+        writer
+            .flush()
+            .with_context(|| format!("failed to flush copy writer for {}", dst.display()))?;
+    }
+    tmp.persist(dst)
+        .with_context(|| format!("failed to atomic-rename to {}", dst.display()))?;
     Ok(())
 }
 
@@ -1337,42 +1912,33 @@ fn main() -> Result<()> {
             .with_context(|| format!("failed to create parent dir for {}", cli.params.display()))?;
     }
 
-    if let Some(init_src) = &cli.init_from {
-        // TOCTOU 緩和: `exists()` チェック→ `fs::copy` の間に他プロセスが書き込むと
-        // 上書きしてしまう。`OpenOptions::create_new` で atomic に作成失敗 (AlreadyExists)
-        // を検出し、その場合は既存ファイルを尊重する。
-        match OpenOptions::new().create_new(true).write(true).open(&cli.params) {
-            Ok(out) => {
-                let mut writer = BufWriter::new(out);
-                let mut reader = File::open(init_src)
-                    .with_context(|| format!("failed to open {}", init_src.display()))?;
-                std::io::copy(&mut reader, &mut writer).with_context(|| {
-                    format!("failed to copy {} -> {}", init_src.display(), cli.params.display())
-                })?;
-                writer.flush()?;
-                println!(
-                    "initialized {} from canonical {}",
-                    cli.params.display(),
-                    init_src.display()
-                );
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                println!(
-                    "init-from: {} already exists, leaving as-is (canonical {} not copied)",
-                    cli.params.display(),
-                    init_src.display()
-                );
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(e)
-                    .context(format!("failed to create {} for init-from", cli.params.display())));
-            }
-        }
-    }
+    // ========================================================================
+    // init/resume 分岐 (v3 安全性): decide_init_action で意思決定 → apply_init_action
+    // で副作用を実行。旧版の「--init-from 暗黙スキップ」は禁止。
+    // ========================================================================
+    let meta_path = cli.meta_file.clone().unwrap_or_else(|| default_meta_path(&cli.params));
+    let init_action = decide_init_action(
+        cli.init_from.is_some(),
+        cli.params.exists(),
+        cli.resume,
+        cli.force_init,
+    );
+    // 関連 CSV パスは PR2 (observability) で iter 0 + summary 拡張時に正式に流し込む。
+    // 現状 PR1 では meta のみ atomic 削除で扱い、stats/values/aggregate CSV は
+    // 既存の writer 側 truncate 動作 (cli.resume=false → 上書き) に任せる。
+    let related_csv_paths: &[&Path] = &[];
+    let effective_action = apply_init_action(
+        &init_action,
+        cli.init_from.as_deref(),
+        &cli.params,
+        meta_path.as_path(),
+        related_csv_paths,
+    )?;
+
     let translator = match &cli.engine_param_mapping {
         Some(path) => {
             let t = EngineNameTranslator::from_mapping_file(path)?;
-            println!("engine param mapping: {} entries loaded from {}", t.len(), path.display());
+            eprintln!("engine param mapping: {} entries loaded from {}", t.len(), path.display());
             t
         }
         None => EngineNameTranslator::empty(),
@@ -1385,40 +1951,99 @@ fn main() -> Result<()> {
         mobility: cli.mobility,
         total_iterations: cli.iterations,
     };
-    let meta_path = cli.meta_file.clone().unwrap_or_else(|| default_meta_path(&cli.params));
-    let (start_iteration, mut total_games) = if cli.resume {
-        let meta = load_meta(&meta_path).with_context(|| {
-            format!("--resume was set but metadata load failed: {}", meta_path.display())
-        })?;
-        if meta.format_version != META_FORMAT_VERSION {
-            bail!(
-                "unsupported meta format version {} in {}",
-                meta.format_version,
-                meta_path.display()
-            );
-        }
-        if !schedule_matches(meta.schedule, schedule) {
-            if cli.force_schedule {
-                eprintln!(
-                    "warning: schedule differs from metadata but continuing due to --force-schedule \
-                     (meta={}, meta_schedule={:?}, cli_schedule={:?})",
-                    meta_path.display(),
-                    meta.schedule,
-                    schedule
-                );
-            } else {
+    let (start_iteration, mut total_games, init_snapshot) = match &effective_action {
+        NonBailAction::Resume { verify_init } => {
+            let meta = load_meta(&meta_path).with_context(|| {
+                format!("--resume was set but metadata load failed: {}", meta_path.display())
+            })?;
+            // v3 hard bail: 古い meta は再開不可 (新規 run dir で fresh start を要求)
+            if meta.format_version != META_FORMAT_VERSION {
                 bail!(
-                    "schedule mismatch with {}. use --force-schedule to override \
-                     (meta_schedule={:?}, cli_schedule={:?})",
+                    "meta format version 不一致 (got v{}, expected v{}) in {}.\n\
+                     v{} 形式は v{} とは互換性がありません。\n\
+                     新規 run dir で `--init-from <canonical>` から fresh start してください。",
+                    meta.format_version,
+                    META_FORMAT_VERSION,
                     meta_path.display(),
-                    meta.schedule,
-                    schedule
+                    meta.format_version,
+                    META_FORMAT_VERSION,
                 );
             }
+            if !schedule_matches(meta.schedule, schedule) {
+                if cli.force_schedule {
+                    eprintln!(
+                        "warning: schedule differs from metadata but continuing due to --force-schedule \
+                         (meta={}, meta_schedule={:?}, cli_schedule={:?})",
+                        meta_path.display(),
+                        meta.schedule,
+                        schedule
+                    );
+                } else {
+                    bail!(
+                        "schedule mismatch with {}. use --force-schedule to override \
+                         (meta_schedule={:?}, cli_schedule={:?})",
+                        meta_path.display(),
+                        meta.schedule,
+                        schedule
+                    );
+                }
+            }
+            // param 名集合の hash 検証 (resume 時に param 集合が変わっていないこと)。
+            // TODO(PR2): mapping 表に新パラメータを追加した正当な変更も現状 hard bail
+            // になる。`--force-name-set` か `--allow-param-set-change` の escape hatch を
+            // PR2 で導入検討。それまでは新規 run dir で fresh start する運用で凌ぐ。
+            let current_name_hash = param_name_set_sha256(&params);
+            if meta.param_name_set_sha256 != current_name_hash {
+                bail!(
+                    "param 名集合が meta と不一致です ({}).\n\
+                     meta.param_name_set_sha256 = {}\n\
+                     current  param_name_set_sha256 = {}\n\
+                     param 集合変更は resume 不可 (本 PR では escape hatch なし)。\n\
+                     新規 run dir で fresh start してください。",
+                    meta_path.display(),
+                    meta.param_name_set_sha256,
+                    current_name_hash,
+                );
+            }
+            // --init-from 指定時は整合性検証を実施 (resume が想定 canonical で開始した
+            // run なら値は近いはず。乖離があれば事故 (rshogi default 混入等) のサイン)。
+            if *verify_init {
+                let init_path =
+                    cli.init_from.as_ref().expect("Resume{verify_init:true} requires init_from");
+                let report = verify_init_matches_existing(init_path, &cli.params)?;
+                report.print_summary(init_path, &cli.params);
+                if report.has_name_set_mismatch() {
+                    eprintln!(
+                        "warning: --init-from と既存 params で param 名集合が異なります \
+                         (extra_in_init={}, missing_in_init={})",
+                        report.extra_in_init.len(),
+                        report.missing_in_init.len()
+                    );
+                }
+                if cli.strict_init_check && report.exceeds_strict_threshold() {
+                    bail!(
+                        "--strict-init-check: init-from と existing で乖離が閾値超過 \
+                         (median={:.3}σ, max={:.3}σ)",
+                        report.median_step_units,
+                        report.max_step_units
+                    );
+                }
+            }
+            let snapshot = InitMetaSnapshot::from_existing_meta(&meta);
+            (meta.completed_iterations, meta.total_games, snapshot)
         }
-        (meta.completed_iterations, meta.total_games)
-    } else {
-        (0, 0)
+        NonBailAction::CopyInitFromFresh
+        | NonBailAction::UseExistingFresh
+        | NonBailAction::ForceInitOverwrite => {
+            let snapshot = InitMetaSnapshot::for_fresh_start(
+                &effective_action,
+                &cli.params,
+                cli.init_from.as_deref(),
+                &engine_path,
+                cli.engine_param_mapping.as_deref(),
+            )?;
+            (0, 0, snapshot)
+        }
     };
     let end_iteration = start_iteration
         .checked_add(cli.iterations)
@@ -1810,6 +2435,15 @@ fn main() -> Result<()> {
             last_avg_abs_update: avg_abs_update,
             updated_at_utc: Utc::now().to_rfc3339(),
             schedule,
+            init_params_sha256: init_snapshot.init_params_sha256.clone(),
+            init_from_sha256: init_snapshot.init_from_sha256.clone(),
+            init_from_path: init_snapshot.init_from_path.clone(),
+            param_name_set_sha256: param_name_set_sha256(&params),
+            active_param_count,
+            engine_path: init_snapshot.engine_path.clone(),
+            engine_param_mapping_path: init_snapshot.engine_param_mapping_path.clone(),
+            engine_param_mapping_sha256: init_snapshot.engine_param_mapping_sha256.clone(),
+            init_mode: init_snapshot.init_mode,
         };
         save_meta(&meta_path, &meta)?;
         println!(
@@ -1879,6 +2513,422 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========================================================================
+    // decide_init_action: 16 通り (4 boolean 入力) を網羅
+    // ========================================================================
+
+    fn decide(init: bool, exists: bool, resume: bool, force: bool) -> InitAction {
+        decide_init_action(init, exists, resume, force)
+    }
+
+    #[test]
+    fn decide_resume_force_init_conflict() {
+        for init in [false, true] {
+            for exists in [false, true] {
+                let action = decide(init, exists, true, true);
+                assert!(
+                    matches!(action, InitAction::Bail(InitError::ResumeForceInitConflict)),
+                    "init={init} exists={exists} resume=force=true → ResumeForceInitConflict, got {action:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decide_force_init_requires_init_from() {
+        // force_init=true && has_init_from=false (resume=false 限定)
+        for exists in [false, true] {
+            let action = decide(false, exists, false, true);
+            assert!(
+                matches!(action, InitAction::Bail(InitError::ForceInitRequiresInitFrom)),
+                "init=false exists={exists} force=true → ForceInitRequiresInitFrom, got {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_resume_requires_existing_params() {
+        // resume=true && exists=false && force=false
+        for init in [false, true] {
+            let action = decide(init, false, true, false);
+            assert!(
+                matches!(action, InitAction::Bail(InitError::ResumeRequiresExistingParams)),
+                "init={init} exists=false resume=true → ResumeRequiresExistingParams, got {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_resume_with_existing_params() {
+        // init=false → verify_init=false
+        let action = decide(false, true, true, false);
+        assert_eq!(action, InitAction::Resume { verify_init: false });
+        // init=true → verify_init=true
+        let action = decide(true, true, true, false);
+        assert_eq!(action, InitAction::Resume { verify_init: true });
+    }
+
+    #[test]
+    fn decide_force_init_overwrite_happy_path() {
+        let action = decide(true, true, false, true);
+        assert_eq!(action, InitAction::ForceInitOverwrite);
+    }
+
+    #[test]
+    fn decide_force_init_requires_existing_params() {
+        let action = decide(true, false, false, true);
+        assert!(matches!(action, InitAction::Bail(InitError::ForceInitRequiresExistingParams)));
+    }
+
+    #[test]
+    fn decide_copy_init_from_fresh() {
+        let action = decide(true, false, false, false);
+        assert_eq!(action, InitAction::CopyInitFromFresh);
+    }
+
+    #[test]
+    fn decide_init_from_exists_requires_flag() {
+        // 旧版の silent footgun を bail する本命ケース
+        let action = decide(true, true, false, false);
+        assert!(matches!(action, InitAction::Bail(InitError::InitFromExistsRequiresFlag)));
+    }
+
+    #[test]
+    fn decide_use_existing_fresh() {
+        let action = decide(false, true, false, false);
+        assert_eq!(action, InitAction::UseExistingFresh);
+    }
+
+    #[test]
+    fn decide_no_init_nor_existing_params() {
+        let action = decide(false, false, false, false);
+        assert!(matches!(action, InitAction::Bail(InitError::NoInitNorExistingParams)));
+    }
+
+    /// 16 通り全網羅: 各ケースが unreachable に落ちないこと
+    #[test]
+    fn decide_covers_all_sixteen_combinations() {
+        for init in [false, true] {
+            for exists in [false, true] {
+                for resume in [false, true] {
+                    for force in [false, true] {
+                        let _ = decide(init, exists, resume, force); // 落ちなければOK
+                    }
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // hash ヘルパ: 決定性 / 順序非依存
+    // ========================================================================
+
+    fn make_param_for_hash(name: &str) -> SpsaParam {
+        SpsaParam {
+            name: name.to_string(),
+            type_name: "int".into(),
+            is_int: true,
+            value: 0.0,
+            min: 0.0,
+            max: 1.0,
+            c_end: 1.0,
+            r_end: 0.002,
+            comment: String::new(),
+            not_used: false,
+        }
+    }
+
+    #[test]
+    fn param_name_set_sha256_is_order_independent() {
+        let a = vec![
+            make_param_for_hash("foo"),
+            make_param_for_hash("bar"),
+            make_param_for_hash("baz"),
+        ];
+        let b = vec![
+            make_param_for_hash("baz"),
+            make_param_for_hash("foo"),
+            make_param_for_hash("bar"),
+        ];
+        assert_eq!(param_name_set_sha256(&a), param_name_set_sha256(&b));
+    }
+
+    #[test]
+    fn param_name_set_sha256_distinguishes_different_sets() {
+        let a = vec![make_param_for_hash("foo"), make_param_for_hash("bar")];
+        let b = vec![make_param_for_hash("foo"), make_param_for_hash("BAR")];
+        assert_ne!(param_name_set_sha256(&a), param_name_set_sha256(&b));
+    }
+
+    #[test]
+    fn sha256_hex_of_file_matches_known_vector() {
+        // 空ファイルの SHA-256 は既知の固定値
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("empty");
+        std::fs::write(&p, b"").unwrap();
+        let hex = sha256_hex_of_file(&p).unwrap();
+        assert_eq!(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    }
+
+    // ========================================================================
+    // verify_init_matches_existing: 整合性検証ロジック
+    // ========================================================================
+
+    fn write_params_file(path: &Path, lines: &[&str]) {
+        std::fs::write(path, lines.join("\n") + "\n").unwrap();
+    }
+
+    #[test]
+    fn verify_median_with_even_count_uses_average_of_middle_pair() {
+        // 4 件 (偶数) で diff が step 単位で {0, 2, 4, 6} になるよう構築。
+        // 厳密中央値 = (2 + 4) / 2 = 3.0σ (旧実装 `[n/2]` だと上側中値 4.0σ になる)。
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.params");
+        let existing = dir.path().join("existing.params");
+        // step=10 で diff が 0/20/40/60 → step 単位 {0, 2, 4, 6}
+        write_params_file(
+            &init,
+            &[
+                "p0,int,100,0,1000,10,0.002",
+                "p1,int,100,0,1000,10,0.002",
+                "p2,int,100,0,1000,10,0.002",
+                "p3,int,100,0,1000,10,0.002",
+            ],
+        );
+        write_params_file(
+            &existing,
+            &[
+                "p0,int,100,0,1000,10,0.002",
+                "p1,int,120,0,1000,10,0.002",
+                "p2,int,140,0,1000,10,0.002",
+                "p3,int,160,0,1000,10,0.002",
+            ],
+        );
+        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        assert_eq!(report.total, 4);
+        assert!(
+            (report.median_step_units - 3.0).abs() < 1e-9,
+            "median should be 3.0σ (average of 2 and 4), got {}",
+            report.median_step_units
+        );
+    }
+
+    #[test]
+    fn verify_reports_perfect_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.params");
+        let existing = dir.path().join("existing.params");
+        let line = "foo,int,100,0,1000,50,0.002";
+        write_params_file(&init, &[line]);
+        write_params_file(&existing, &[line]);
+        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        assert_eq!(report.total, 1);
+        assert_eq!(report.matched_within_half_step, 1);
+        assert!((report.median_step_units - 0.0).abs() < 1e-9);
+        assert!((report.max_step_units - 0.0).abs() < 1e-9);
+        assert!(!report.exceeds_strict_threshold());
+        assert!(!report.has_name_set_mismatch());
+    }
+
+    #[test]
+    fn verify_reports_strict_threshold_exceeded() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.params");
+        let existing = dir.path().join("existing.params");
+        // step=50 で diff=300 → 6σ (>5σ)
+        write_params_file(&init, &["foo,int,100,0,1000,50,0.002"]);
+        write_params_file(&existing, &["foo,int,400,0,1000,50,0.002"]);
+        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        assert_eq!(report.total, 1);
+        assert!(report.max_step_units >= 5.0);
+        assert!(report.exceeds_strict_threshold());
+    }
+
+    #[test]
+    fn verify_uses_actual_c_end_for_step_when_below_one() {
+        // c_end=0.1 のパラメータで diff=1 → 10σ。
+        // 旧実装の `c_end.max(1.0)` だと step=1 と扱われ 1σ になり strict が誤って通る。
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.params");
+        let existing = dir.path().join("existing.params");
+        write_params_file(&init, &["foo,int,1,0,10,0.1,0.002"]);
+        write_params_file(&existing, &["foo,int,2,0,10,0.1,0.002"]);
+        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        // diff=1, step=0.1 → 10σ
+        assert!(
+            report.max_step_units > 5.0,
+            "c_end < 1 should not be inflated to 1; got max={}σ",
+            report.max_step_units
+        );
+        assert!(report.exceeds_strict_threshold());
+    }
+
+    #[test]
+    fn verify_handles_zero_c_end_gracefully() {
+        // c_end=0 は防御的に step=1 にフォールバック (NaN/inf を出さない)。
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.params");
+        let existing = dir.path().join("existing.params");
+        write_params_file(&init, &["foo,int,5,0,10,0,0.002"]);
+        write_params_file(&existing, &["foo,int,5,0,10,0,0.002"]);
+        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        assert!(!report.max_step_units.is_nan());
+        assert_eq!(report.matched_within_half_step, 1);
+    }
+
+    #[test]
+    fn verify_detects_name_set_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.params");
+        let existing = dir.path().join("existing.params");
+        write_params_file(&init, &["foo,int,100,0,1000,50,0.002", "bar,int,200,0,1000,50,0.002"]);
+        write_params_file(
+            &existing,
+            &["foo,int,100,0,1000,50,0.002", "qux,int,200,0,1000,50,0.002"],
+        );
+        let report = verify_init_matches_existing(&init, &existing).unwrap();
+        assert!(report.has_name_set_mismatch());
+        assert_eq!(report.extra_in_init, vec!["bar"]);
+        assert_eq!(report.missing_in_init, vec!["qux"]);
+    }
+
+    // ========================================================================
+    // atomic_copy_file / save_meta: I/O ヘルパ
+    // ========================================================================
+
+    #[test]
+    fn atomic_copy_file_replaces_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        std::fs::write(&src, b"hello").unwrap();
+        std::fs::write(&dst, b"old content").unwrap();
+        atomic_copy_file(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn atomic_copy_file_creates_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("nested/sub/dst");
+        std::fs::write(&src, b"data").unwrap();
+        atomic_copy_file(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"data");
+    }
+
+    #[test]
+    fn non_bail_action_from_bail_returns_none() {
+        assert!(
+            NonBailAction::from_init_action(&InitAction::Bail(InitError::NoInitNorExistingParams))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn apply_force_init_overwrites_params_and_removes_meta() {
+        // 順序バグ (params copy → meta 削除) の再発検知用 file-level テスト。
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("canonical.params");
+        let target_params = dir.path().join("existing.params");
+        let target_meta = dir.path().join("existing.params.meta.json");
+        let stale_csv = dir.path().join("existing.params.values.csv");
+
+        std::fs::write(&canonical, b"foo,int,100,0,1000,50,0.002\n").unwrap();
+        std::fs::write(&target_params, b"foo,int,999,0,1000,50,0.002\n").unwrap();
+        std::fs::write(&target_meta, b"{\"old\":\"meta\"}").unwrap();
+        std::fs::write(&stale_csv, b"old,csv,content").unwrap();
+
+        let action = InitAction::ForceInitOverwrite;
+        let stale_csvs: &[&Path] = &[stale_csv.as_path()];
+        let result = apply_init_action(
+            &action,
+            Some(canonical.as_path()),
+            &target_params,
+            &target_meta,
+            stale_csvs,
+        )
+        .unwrap();
+        assert_eq!(result, NonBailAction::ForceInitOverwrite);
+
+        // params は canonical で上書きされている
+        assert_eq!(std::fs::read(&target_params).unwrap(), b"foo,int,100,0,1000,50,0.002\n");
+        // meta は削除されている (順序的に必ず消える)
+        assert!(!target_meta.exists(), "meta should be removed by force-init");
+        // stale CSV も削除されている (best-effort)
+        assert!(!stale_csv.exists(), "stale CSV should be removed");
+    }
+
+    #[test]
+    fn apply_force_init_bails_on_meta_remove_failure() {
+        // meta が削除できない (= dir として存在) 場合に bail することを確認。
+        // params は上書きされない (順序保証: meta 削除失敗 → そこで return)。
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().join("canonical.params");
+        let target_params = dir.path().join("existing.params");
+        // meta_path に「ディレクトリ」を置くと remove_file が失敗する
+        let blocked_meta_dir = dir.path().join("existing.params.meta.json");
+        std::fs::create_dir(&blocked_meta_dir).unwrap();
+
+        std::fs::write(&canonical, b"new content\n").unwrap();
+        std::fs::write(&target_params, b"old content\n").unwrap();
+
+        let action = InitAction::ForceInitOverwrite;
+        let result = apply_init_action(
+            &action,
+            Some(canonical.as_path()),
+            &target_params,
+            &blocked_meta_dir,
+            &[],
+        );
+        assert!(result.is_err(), "should bail when meta removal fails");
+        // params は触られていない (atomic copy が走らない)
+        assert_eq!(std::fs::read(&target_params).unwrap(), b"old content\n");
+    }
+
+    #[test]
+    fn save_and_load_meta_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.json");
+        let meta = ResumeMetaData {
+            format_version: META_FORMAT_VERSION,
+            params_file: "tuned.params".to_owned(),
+            completed_iterations: 5,
+            total_games: 1000,
+            last_raw_result_mean: -0.5,
+            last_avg_abs_update: 1.2,
+            updated_at_utc: "2026-01-01T00:00:00Z".to_owned(),
+            schedule: ScheduleConfig {
+                alpha: 0.602,
+                gamma: 0.101,
+                a_ratio: 0.1,
+                mobility: 1.0,
+                total_iterations: 200,
+            },
+            init_params_sha256: "abc123".to_owned(),
+            init_from_sha256: Some("def456".to_owned()),
+            init_from_path: Some("canonical.params".to_owned()),
+            param_name_set_sha256: "names_hash".to_owned(),
+            active_param_count: 100,
+            engine_path: "/path/to/engine".to_owned(),
+            engine_param_mapping_path: None,
+            engine_param_mapping_sha256: None,
+            init_mode: InitMode::FreshInitFrom,
+        };
+        save_meta(&path, &meta).unwrap();
+        let loaded = load_meta(&path).unwrap();
+        assert_eq!(loaded.format_version, meta.format_version);
+        assert_eq!(loaded.init_params_sha256, meta.init_params_sha256);
+        assert_eq!(loaded.init_from_sha256, meta.init_from_sha256);
+        assert_eq!(loaded.param_name_set_sha256, meta.param_name_set_sha256);
+        assert_eq!(loaded.active_param_count, meta.active_param_count);
+        assert_eq!(loaded.init_mode, meta.init_mode);
+    }
+
+    // ========================================================================
+    // 既存テスト群
+    // ========================================================================
 
     #[test]
     fn schedule_at_final_iteration_matches_end_values() {
