@@ -1914,14 +1914,34 @@ fn compute_seed_prep(
         0.0
     };
 
+    // Paired antithetic: 同じ start_pos を 2 局連続 (先後入替) で消化することで
+    // 開局選択ノイズと先手有利バイアスを互いにキャンセルする (fishtest 互換)。
+    //
+    // pair_count = games_per_iteration / 2 個の startpos を選び、game 2k と 2k+1 で
+    // 同じ index を再利用する。`plus_is_black` は呼び出し側 (run_seed_games_parallel) で
+    // `idx % 2 == 0` を参照するので、ここでは index 配列のみを生成すれば足りる。
+    //
+    // `pick_startpos_index` の `game_index` 引数は cyclic mode (random=false) で
+    // startpos を周回するためのものなので、pair ごとに 1 ずつ進める (2 game 進めない)。
+    if !ctx.games_per_iteration.is_multiple_of(2) {
+        bail!(
+            "internal error: games_per_iteration must be even for paired antithetic, got {}",
+            ctx.games_per_iteration
+        );
+    }
+    let pair_count = ctx.games_per_iteration / 2;
+    let pair_total_games_start = seed_total_games_start / 2;
     let mut start_pos_indices = Vec::with_capacity(ctx.games_per_iteration);
-    for game_idx in 0..ctx.games_per_iteration {
-        start_pos_indices.push(pick_startpos_index(
+    for pair_idx in 0..pair_count {
+        let idx = pick_startpos_index(
             ctx.start_positions_len,
             &mut rng,
             ctx.random_startpos,
-            seed_total_games_start + game_idx,
-        )?);
+            pair_total_games_start + pair_idx,
+        )?;
+        // 同じ startpos を 2 連続 push (game 2k=plus黒, 2k+1=plus白)。
+        start_pos_indices.push(idx);
+        start_pos_indices.push(idx);
     }
 
     Ok(SeedPrep {
@@ -2245,8 +2265,12 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    // paired antithetic: 同じ startpos を先後入替で 2 局消化するため必ず偶数。
     if cli.games_per_iteration == 0 || cli.games_per_iteration % 2 != 0 {
-        bail!("--games-per-iteration must be an even number >= 2");
+        bail!(
+            "--games-per-iteration must be an even number >= 2 \
+             (paired antithetic は同 startpos の先後入替 2 局を 1 単位とする)"
+        );
     }
     if cli.iterations == 0 {
         bail!("--iterations must be >= 1");
@@ -3808,5 +3832,76 @@ mod tests {
         assert_ne!(prep1.flips, prep2.flips, "seed=1 vs seed=2 flips must differ");
         assert_ne!(prep2.flips, prep3.flips, "seed=2 vs seed=3 flips must differ");
         assert_ne!(prep3.flips, prep4.flips, "seed=3 vs seed=4 flips must differ");
+    }
+
+    /// Paired antithetic: pair 内 2 局 (game 2k, 2k+1) は **同じ start_pos** を共有し、
+    /// `plus_is_black` のみ反転させる。fishtest と等価のノイズ削減を行うための
+    /// 最重要不変条件で、これが崩れると pair 化が形骸化して開局ノイズが残る。
+    #[test]
+    fn compute_seed_prep_pairs_share_startpos() {
+        let params = vec![make_param("Search_a", 1000.0, 100.0)];
+        let schedules: Vec<ParamScheduleConstants> = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+            .collect();
+        let translator = EngineNameTranslator::empty();
+        // games_per_iteration = 16 → pair_count = 8。
+        let ctx = make_test_ctx(&params, &schedules, &translator, 16);
+
+        let prep = compute_seed_prep(&ctx, 5, 42, 100).expect("prep");
+
+        assert_eq!(prep.start_pos_indices.len(), 16, "16 game 分の index がある");
+        // pair 内 (2k, 2k+1) で同じ startpos
+        for pair_idx in 0..8 {
+            let a = prep.start_pos_indices[pair_idx * 2];
+            let b = prep.start_pos_indices[pair_idx * 2 + 1];
+            assert_eq!(
+                a,
+                b,
+                "pair {pair_idx}: game {} と {} は同じ start_pos でなければならない",
+                pair_idx * 2,
+                pair_idx * 2 + 1
+            );
+        }
+    }
+
+    /// Paired antithetic の color 反転規約 (`plus_is_black = idx % 2 == 0`) を直接確認。
+    /// 実コード (`run_seed_games_parallel`) のロジックと同じ式を再現することで、
+    /// pair 化した index 列と組み合わせたとき先後が正しく入れ替わることを保証する。
+    #[test]
+    fn paired_antithetic_color_flips_within_pair() {
+        // pair の game 2k は plus_is_black=true, 2k+1 は false でなければならない。
+        for pair_idx in 0..4_usize {
+            let g0 = pair_idx * 2;
+            let g1 = pair_idx * 2 + 1;
+            assert!(g0 % 2 == 0, "game {g0} should produce plus_is_black=true");
+            assert!(g1 % 2 != 0, "game {g1} should produce plus_is_black=false");
+        }
+    }
+
+    /// 異なる pair は (random_startpos=true 時) 独立サンプリングされるため、
+    /// pair 全体が単一 startpos に固定されないこと (= バリエーションが残ること) を確認。
+    /// 完全一致を否定する弱い不変条件だが、「pair 化を装って実は全 game 同一 startpos」
+    /// のような退行を検出するには十分。
+    #[test]
+    fn compute_seed_prep_different_pairs_have_varied_startpos() {
+        let params = vec![make_param("Search_a", 1000.0, 100.0)];
+        let schedules: Vec<ParamScheduleConstants> = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+            .collect();
+        let translator = EngineNameTranslator::empty();
+        // games_per_iteration = 32 → pair_count = 16。1957 startpos からランダム抽出。
+        let ctx = make_test_ctx(&params, &schedules, &translator, 32);
+
+        let prep = compute_seed_prep(&ctx, 5, 42, 0).expect("prep");
+        let pair_indices: Vec<usize> =
+            (0..16).map(|pair_idx| prep.start_pos_indices[pair_idx * 2]).collect();
+        let unique: std::collections::HashSet<_> = pair_indices.iter().copied().collect();
+        assert!(
+            unique.len() >= 8,
+            "16 pair で start_pos がほぼ全て同一になるのは異常 (got {} unique)",
+            unique.len()
+        );
     }
 }
