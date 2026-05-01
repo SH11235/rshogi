@@ -21,6 +21,9 @@ deployment 全体像は [`deployment.md`](deployment.md) を参照。
   [`crates/rshogi-csa-client/examples/csa_client_staging/scenarios/`](../../crates/rshogi-csa-client/examples/csa_client_staging/scenarios/)
   配下に scenario 別ディレクトリで配置されている。
 
+> 環境別 clock 既定差分の網羅的説明 (production との比較、ops 判断基準) は
+> [`clock_defaults.md`](clock_defaults.md) を参照。
+
 ## 1. 運用シナリオ一覧
 
 | ID | シナリオ | 目的 | 検証ポイント | サーバ側設定 | サンプル TOML |
