@@ -58,7 +58,7 @@ crates/tools/src/bin/ 配下の全32バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `spsa` | Fishtest 互換の並列 SPSA チューナー。seed 多重対応 |
+| `spsa` | Fishtest 整合の SPSA チューナー (v4)。paired antithetic / stochastic rounding / 1 batch = 1 update。multi-seed は撤去済み (`--seed` を変えた独立 run dir で代替) |
 | `generate_spsa_params` | SearchTuneParams から SPSA 用 .params ファイルを生成 |
 | `spsa_param_diff` | SPSA .params の最終差分と履歴差分を集計 |
 | `spsa_stats_to_plot_csv` | SPSA 統計を可視化用 CSV に整形（移動平均計算） |
