@@ -637,4 +637,66 @@ mod tests {
         assert_eq!(core.position().to_sfen(), buoy_sfen);
         assert_eq!(core.current_turn(), Color::White);
     }
+
+    /// 旧 schema (本フィールド導入前の cold start snapshot) に
+    /// `black_reconnect_token` / `white_reconnect_token` フィールドが存在しなくても、
+    /// `#[serde(default)]` で `None` として deserialize できる。Issue #591 hotfix で
+    /// `start_match` が常に `Some` を書く挙動から `None` も書く挙動に変わったため、
+    /// 旧 snapshot との互換性を回帰防止する。
+    #[test]
+    fn persisted_config_deserializes_when_reconnect_token_fields_absent() {
+        let json = r#"{
+            "game_id": "room-1-old",
+            "black_handle": "alice",
+            "white_handle": "bob",
+            "game_name": "g1",
+            "clock": {"kind":"countdown","total_time_sec":60,"byoyomi_sec":10},
+            "max_moves": 256,
+            "time_margin_ms": 0,
+            "matched_at_ms": 999000,
+            "play_started_at_ms": null,
+            "initial_sfen": null
+        }"#;
+        let cfg: PersistedConfig =
+            serde_json::from_str(json).expect("旧 schema は default 経由で deserialize できる");
+        assert_eq!(cfg.black_reconnect_token, None);
+        assert_eq!(cfg.white_reconnect_token, None);
+    }
+
+    /// 明示 `null` 値は `None` として読まれる (`#[serde(default)]` と同等の振る舞い)。
+    #[test]
+    fn persisted_config_deserializes_null_reconnect_token_as_none() {
+        let json = r#"{
+            "game_id": "room-1-null",
+            "black_handle": "alice",
+            "white_handle": "bob",
+            "game_name": "g1",
+            "clock": {"kind":"countdown","total_time_sec":60,"byoyomi_sec":10},
+            "max_moves": 256,
+            "time_margin_ms": 0,
+            "matched_at_ms": 999000,
+            "play_started_at_ms": null,
+            "initial_sfen": null,
+            "black_reconnect_token": null,
+            "white_reconnect_token": null
+        }"#;
+        let cfg: PersistedConfig =
+            serde_json::from_str(json).expect("null 値は None として deserialize できる");
+        assert_eq!(cfg.black_reconnect_token, None);
+        assert_eq!(cfg.white_reconnect_token, None);
+    }
+
+    /// 値あり (`grace > 0` で `start_match` が token を発行した場合の永続化形式) も
+    /// そのまま読み込める。値の round-trip も pin する。
+    #[test]
+    fn persisted_config_round_trips_with_reconnect_token_values() {
+        let mut original = baseline_config();
+        original.black_reconnect_token = Some("a".repeat(32));
+        original.white_reconnect_token = Some("b".repeat(32));
+        let json = serde_json::to_string(&original).expect("serialize cfg");
+        let restored: PersistedConfig =
+            serde_json::from_str(&json).expect("deserialize cfg with token values");
+        assert_eq!(restored.black_reconnect_token, original.black_reconnect_token);
+        assert_eq!(restored.white_reconnect_token, original.white_reconnect_token);
+    }
 }

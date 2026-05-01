@@ -8,8 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
+use std::time::Duration;
 
-use rshogi_csa_server::types::Color;
+use rshogi_csa_server::types::{Color, ReconnectToken};
 
 /// `Color` を `MoveRow.color` と整合する文字列形式 (`"black"` / `"white"`)
 /// に変換する。永続化スキーマは serde 文字列形式で安定化している。
@@ -166,6 +167,26 @@ pub enum PendingAlarmKind {
     GraceExpired,
 }
 
+/// 再接続 grace が有効化されている (`grace > 0`) のときのみ対局者ごとの
+/// `Reconnect_Token` を発行する。`grace == Duration::ZERO` のときは
+/// `(None, None)` を返し、`Game_Summary` 末尾拡張行への配布も
+/// `PersistedConfig` への保存もスキップする。
+///
+/// production の保守的既定 (`RECONNECT_GRACE_SECONDS=0`) では本関数は常に
+/// `(None, None)` を返し、Issue #591 の `LOGIN:incorrect reconnect_rejected`
+/// 経路に client が到達しなくなる (`csa_client::run_one_game` の reconnect
+/// skip 判定で `summary.reconnect_token == None` のため reconnect 試行自体を
+/// skip する)。
+pub(crate) fn issue_tokens_if_enabled(
+    grace: Duration,
+) -> (Option<ReconnectToken>, Option<ReconnectToken>) {
+    if grace.is_zero() {
+        (None, None)
+    } else {
+        (Some(ReconnectToken::generate()), Some(ReconnectToken::generate()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +329,33 @@ mod tests {
         assert_eq!(color_from_str("black").unwrap(), Color::Black);
         assert_eq!(color_from_str("white").unwrap(), Color::White);
         assert!(color_from_str("rainbow").is_err());
+    }
+
+    /// production の保守的既定 (`grace=0`) では token を発行しない。
+    /// `Reconnect_Token:` 拡張行も `PersistedConfig` への保存も skip される。
+    #[test]
+    fn issue_tokens_if_enabled_returns_none_when_grace_is_zero() {
+        let (black, white) = issue_tokens_if_enabled(Duration::ZERO);
+        assert!(black.is_none(), "black token must be None when grace=0");
+        assert!(white.is_none(), "white token must be None when grace=0");
+    }
+
+    /// `grace > 0` の構成では両対局者向けに token を発行する。
+    #[test]
+    fn issue_tokens_if_enabled_returns_some_when_grace_is_positive() {
+        let (black, white) = issue_tokens_if_enabled(Duration::from_secs(30));
+        assert!(black.is_some(), "black token must be Some when grace>0");
+        assert!(white.is_some(), "white token must be Some when grace>0");
+    }
+
+    /// `grace > 0` で発行した 2 つの token は一意でなければならない (相手色の
+    /// token を盗用すれば対局を奪える脆弱性を防ぐため、`ReconnectToken::generate`
+    /// は 32 文字 hex の十分なエントロピを持つ実装を契約する)。
+    #[test]
+    fn issue_tokens_if_enabled_yields_distinct_tokens() {
+        let (black, white) = issue_tokens_if_enabled(Duration::from_secs(30));
+        let black = black.expect("grace>0 で black token は Some");
+        let white = white.expect("grace>0 で white token は Some");
+        assert_ne!(black.as_str(), white.as_str(), "黒/白 token は互いに異なるべき (盗用防止)");
     }
 }

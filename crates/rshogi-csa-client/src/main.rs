@@ -23,6 +23,7 @@ use clap::{Parser, ValueEnum};
 
 use rshogi_csa_client::config::CsaClientConfig;
 use rshogi_csa_client::engine::UsiEngine;
+use rshogi_csa_client::events::SessionOutcome;
 use rshogi_csa_client::jsonl::write_game_jsonl;
 use rshogi_csa_client::protocol::{CsaConnection, GameResult};
 use rshogi_csa_client::record::save_record;
@@ -361,16 +362,14 @@ fn run_one_game(
     // 中断 (= サーバ切断) でかつ Reconnect_Token を保持している場合は 1 度だけ
     // 再接続を試みる。Workers の `RECONNECT_GRACE_SECONDS` 内に到達できれば
     // 同一対局を継続できる。reconnect 試行前に元 conn は drop / logout する。
+    //
+    // 判定ロジック自体は `should_attempt_reconnect` pure helper に切り出して
+    // unit test で pin している。token=None (production の grace=0 構成等) の
+    // 場合は reconnect 試行自体を skip するため、Issue #591 の
+    // `LOGIN:incorrect reconnect_rejected` 経路に到達しない。
     let reconnect_request = match session_result.as_ref() {
-        Ok(outcome)
-            if outcome.result == GameResult::Interrupted
-                && outcome.summary.as_ref().is_some_and(|s| s.reconnect_token.is_some())
-                && !shutdown.load(Ordering::SeqCst) =>
-        {
-            let summary = outcome.summary.as_ref().unwrap();
-            Some((summary.game_id.clone(), summary.reconnect_token.clone().unwrap()))
-        }
-        _ => None,
+        Ok(outcome) => should_attempt_reconnect(outcome, shutdown.load(Ordering::SeqCst)),
+        Err(_) => None,
     };
 
     if let Some((game_id, token)) = reconnect_request {
@@ -418,6 +417,28 @@ fn run_one_game(
     session_result
         .map(|outcome| (outcome.result, outcome.record))
         .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// セッション結果から再接続を試みるべきかどうかを判定する pure helper。
+///
+/// 戻り値の `(game_id, token)` 順は [`ReconnectCredentials`] の `game_id` /
+/// `token` フィールド順と一致させる。順序を逆転させると `attempt_reconnect`
+/// が不正な認証情報を server に送るので unit test で pin する。
+///
+/// 戻り値:
+/// - `Some((game_id, token))`: reconnect を試みるべき (中断 + token あり + 非 shutdown)
+/// - `None`: reconnect を skip すべき (shutdown 中 / 通常終局 / token 未配布)
+///
+/// production の grace=0 構成では server から `Reconnect_Token:` 拡張行が出ないため
+/// `outcome.summary.reconnect_token` が常に `None` で、本関数は `None` を返し、
+/// Issue #591 の `LOGIN:incorrect reconnect_rejected` 経路には到達しない。
+fn should_attempt_reconnect(outcome: &SessionOutcome, shutdown: bool) -> Option<(String, String)> {
+    if shutdown || outcome.result != GameResult::Interrupted {
+        return None;
+    }
+    let summary = outcome.summary.as_ref()?;
+    let token = summary.reconnect_token.as_ref()?.clone();
+    Some((summary.game_id.clone(), token))
 }
 
 /// 切断検出後の再接続に必要な認証情報。多引数化を避けるためまとめる。
@@ -902,5 +923,90 @@ mod tests {
         apply_cli_overrides(&mut config, &cli);
         assert_eq!(config.server.host, "wss://custom.example/ws/x");
         assert_eq!(config.server.id, "override-id");
+    }
+
+    /// `should_attempt_reconnect` の fixture を作る helper。token / shutdown / result を
+    /// 引数で切り替えて全分岐を網羅する。`GameRecord` 等の重量フィールドはダミー値で OK。
+    fn session_outcome_with(result: GameResult, reconnect_token: Option<String>) -> SessionOutcome {
+        use rshogi_csa::{Color as CsaColor, Position};
+        use rshogi_csa_client::protocol::{GameSummary, TimeConfig};
+        use rshogi_csa_client::record::GameRecord;
+
+        let summary = GameSummary {
+            game_id: "room-1-test-id".to_owned(),
+            my_color: CsaColor::Black,
+            sente_name: "alice".to_owned(),
+            gote_name: "bob".to_owned(),
+            position: Position::default(),
+            initial_moves: vec![],
+            black_time: TimeConfig {
+                total_time_ms: 60_000,
+                byoyomi_ms: 1_000,
+                increment_ms: 0,
+            },
+            white_time: TimeConfig {
+                total_time_ms: 60_000,
+                byoyomi_ms: 1_000,
+                increment_ms: 0,
+            },
+            reconnect_token,
+        };
+        SessionOutcome {
+            result,
+            record: GameRecord {
+                game_id: summary.game_id.clone(),
+                sente_name: summary.sente_name.clone(),
+                gote_name: summary.gote_name.clone(),
+                black_time: summary.black_time.clone(),
+                white_time: summary.white_time.clone(),
+                initial_position: Position::default(),
+                moves: vec![],
+                result: String::new(),
+                start_time: chrono::Local::now(),
+                my_color: CsaColor::Black,
+                jsonl_moves: vec![],
+            },
+            summary: Some(summary),
+        }
+    }
+
+    /// `Reconnect_Token:` が配布された + 中断 + 非 shutdown なら reconnect を試みる。
+    /// 戻り値の `(game_id, token)` 順を pin する (順序を逆転させると `ReconnectCredentials`
+    /// の `id`/`password`/`game_id`/`token` 配線で server 側に不正な認証を送ってしまう)。
+    #[test]
+    fn should_attempt_reconnect_returns_some_when_token_present_and_interrupted() {
+        let outcome = session_outcome_with(GameResult::Interrupted, Some("a".repeat(32)));
+        let actual = should_attempt_reconnect(&outcome, false);
+        let (game_id, token) = actual.expect("token あり + 中断 + 非 shutdown で Some");
+        assert_eq!(game_id, "room-1-test-id");
+        assert_eq!(token, "a".repeat(32));
+    }
+
+    /// production の保守的既定 (`grace=0`) で `Reconnect_Token:` 拡張行が出ない場合、
+    /// `summary.reconnect_token == None` なので reconnect 試行を skip する。
+    /// 本 case が Issue #591 hotfix の client 側保証 (= `LOGIN:incorrect reconnect_rejected`
+    /// 経路に到達しない) を pin する唯一の test。
+    #[test]
+    fn should_attempt_reconnect_returns_none_when_token_absent() {
+        let outcome = session_outcome_with(GameResult::Interrupted, None);
+        assert!(should_attempt_reconnect(&outcome, false).is_none());
+    }
+
+    /// shutdown フラグが立っていれば、token があっても reconnect を試みない。
+    /// session を畳む経路で再接続要求を送ると server に二重ログイン扱いされる
+    /// 可能性があるため、shutdown 検知を最優先する契約を pin する。
+    #[test]
+    fn should_attempt_reconnect_returns_none_when_shutdown_set() {
+        let outcome = session_outcome_with(GameResult::Interrupted, Some("a".repeat(32)));
+        assert!(should_attempt_reconnect(&outcome, true).is_none());
+    }
+
+    /// 通常終局 (`Win` / `Lose` / `Draw` 等の `Interrupted` 以外) では reconnect を
+    /// 試みない。`run_one_game` 側で対局が完走したことが確定しているため、
+    /// 再接続経路に進むのは契約違反。
+    #[test]
+    fn should_attempt_reconnect_returns_none_when_result_is_not_interrupted() {
+        let outcome = session_outcome_with(GameResult::Win, Some("a".repeat(32)));
+        assert!(should_attempt_reconnect(&outcome, false).is_none());
     }
 }

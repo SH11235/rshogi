@@ -103,6 +103,11 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       TOTAL_TIME_MIN: String(opts.totalTimeMin ?? 10),
       BYOYOMI_MIN: String(opts.byoyomiMin ?? 1),
       ADMIN_HANDLE: opts.adminHandle ?? "admin",
+      // `reconnectGraceSeconds: 0` 既定は production wrangler.production.toml の
+      // `RECONNECT_GRACE_SECONDS = "0"` と整合し、再接続プロトコル無効構成を表す。
+      // テストで `30` 等を明示する場合のみ Game_Summary に `Reconnect_Token:` 行が
+      // 出て reconnect 経路が有効化される。Issue #591 hotfix 後は server 側 token
+      // 配布も grace に応じた gate を通る。
       RECONNECT_GRACE_SECONDS: String(opts.reconnectGraceSeconds ?? 0),
       ALLOW_FLOODGATE_FEATURES: opts.allowFloodgateFeatures ? "true" : "false",
       WS_ALLOWED_ORIGINS: opts.wsAllowedOrigins ?? "https://example.com",

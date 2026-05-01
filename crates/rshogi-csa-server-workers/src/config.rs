@@ -4,7 +4,14 @@
 //! 分離してテスト可能にする。値取得の実体は wasm32 ビルドでのみ行い、
 //! 本モジュールが返すのは「取得結果から導出した純粋データ」に閉じる。
 
+#[cfg(any(target_arch = "wasm32", test))]
+use std::time::Duration;
+
 use rshogi_csa_server::ClockSpec;
+#[cfg(any(target_arch = "wasm32", test))]
+use rshogi_csa_server::config::{
+    FloodgateFeatureIntent, parse_allow_floodgate_features, validate_floodgate_feature_gate,
+};
 
 use crate::origin;
 
@@ -191,6 +198,43 @@ pub fn parse_reconnect_grace_duration(raw: Option<&str>) -> Result<std::time::Du
         .parse()
         .map_err(|e| format!("RECONNECT_GRACE_SECONDS: invalid u64 {trimmed:?}: {e}"))?;
     Ok(std::time::Duration::from_secs(secs))
+}
+
+/// 再接続 grace 設定を解決する pure helper。
+///
+/// `parse_reconnect_grace_duration`（本 crate ローカル）と
+/// `parse_allow_floodgate_features` / `validate_floodgate_feature_gate`
+/// （shared crate `rshogi-csa-server`）を 3 段で組み合わせる。
+///
+/// `worker::Env` 依存を上層 (`game_room.rs::resolve_reconnect_grace`) の薄い
+/// shim に閉じ込めて、本関数は host 単体テストで設定不正パターンを inject
+/// できる pure な API として提供する。
+///
+/// 受理する入出力:
+/// ```text
+/// (None, None)                    : Ok(Duration::ZERO)  (両者未設定 = 保守的既定)
+/// (Some("0"),  Some("false"))     : Ok(Duration::ZERO)  (production の既定構成)
+/// (Some("30"), Some("true"))      : Ok(Duration::from_secs(30))  (再接続有効化)
+/// (Some("abc"), _)                : Err (パースエラー)
+/// (Some("30"), Some("false"))     : Err (gate mismatch: grace>0 だが allow=false)
+/// ```
+///
+/// 通常ビルドでは wasm32 ターゲットの `game_room::resolve_reconnect_grace` 経由で
+/// 消費される。host テストでは本関数を直接呼び出して設定不正パターンを inject
+/// する。
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn resolve_reconnect_grace_from_strings(
+    grace_raw: Option<&str>,
+    allow_raw: Option<&str>,
+) -> Result<Duration, String> {
+    let grace = parse_reconnect_grace_duration(grace_raw)?;
+    let allow = parse_allow_floodgate_features(allow_raw)?;
+    let intent = FloodgateFeatureIntent {
+        enable_reconnect_protocol: !grace.is_zero(),
+        ..FloodgateFeatureIntent::default()
+    };
+    validate_floodgate_feature_gate(allow, intent)?;
+    Ok(grace)
 }
 
 /// Workers `[vars]` 文字列群から時計設定を解決する。
@@ -475,6 +519,40 @@ mod tests {
     fn parse_reconnect_grace_duration_rejects_non_numeric() {
         let err = parse_reconnect_grace_duration(Some("forever")).unwrap_err();
         assert!(err.contains("RECONNECT_GRACE_SECONDS"));
+    }
+
+    /// production の保守的既定 (`grace=0` + `allow=false`) は `Ok(Duration::ZERO)`
+    /// を返し、新規対局では Reconnect_Token を配布せず再接続経路に立ち入らない。
+    #[test]
+    fn resolve_reconnect_grace_from_strings_production_default_returns_zero() {
+        let grace = resolve_reconnect_grace_from_strings(Some("0"), Some("false")).unwrap();
+        assert_eq!(grace, Duration::ZERO);
+    }
+
+    /// `grace=30` + `allow=true` は再接続プロトコル有効化として受け付ける。
+    #[test]
+    fn resolve_reconnect_grace_from_strings_enabled_returns_duration() {
+        let grace = resolve_reconnect_grace_from_strings(Some("30"), Some("true")).unwrap();
+        assert_eq!(grace, Duration::from_secs(30));
+    }
+
+    /// 非数値の grace はパースエラーとして弾く (`parse_reconnect_grace_duration`
+    /// で wrap される `RECONNECT_GRACE_SECONDS:` prefix を維持する)。
+    #[test]
+    fn resolve_reconnect_grace_from_strings_rejects_non_numeric_grace() {
+        let err = resolve_reconnect_grace_from_strings(Some("abc"), Some("true")).unwrap_err();
+        assert!(err.contains("RECONNECT_GRACE_SECONDS"), "err: {err}");
+    }
+
+    /// `grace>0` + `allow=false` は Floodgate features の opt-in 漏れとして
+    /// `validate_floodgate_feature_gate` で弾く。
+    #[test]
+    fn resolve_reconnect_grace_from_strings_rejects_gate_mismatch() {
+        let err = resolve_reconnect_grace_from_strings(Some("30"), Some("false")).unwrap_err();
+        assert!(
+            err.contains("allow_floodgate_features") || err.contains("reconnect_protocol"),
+            "err must mention gate mismatch: {err}"
+        );
     }
 
     /// `CHALLENGE_TTL_SEC` が未設定 / 空文字なら既定 3600 秒。
