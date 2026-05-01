@@ -185,15 +185,14 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 通常モードは Phase 1 完了時点で「入力ぶんの一時ファイル + 元入力」が同時に存在するため、入力と同等以上の空きが必要になる。`--partition-only` はこの制約を緩めるためのモードで、Phase 1 (振り分け) だけを実行し、入力ファイルを 1 つずつ処理→削除して進められる。
 
 ```bash
-# 1 ファイルずつ振り分け、終わったら元を削除する
-for f in /data/psv/*.bin; do
-  cargo run --release -p tools --bin psv_dedup_partition -- \
-    --partition-only \
-    --input "$f" \
-    --temp-dir /fast/ssd/psv_tmp \
-    --partitions 1024
-  rm "$f"
-done
+# glob は shell ではなくツール側で展開するため、クォートして渡す。
+# 各入力ファイルは、読み切りと partition 書き込みの flush が成功した後に削除される。
+cargo run --release -p tools --bin psv_dedup_partition -- \
+  --partition-only \
+  --input "/data/psv/*.bin" \
+  --temp-dir /fast/ssd/psv_tmp \
+  --partitions 1024 \
+  --delete-input-on-success
 
 # 全件の振り分けが終わったら最後に Phase 2 だけ実行
 cargo run --release -p tools --bin psv_dedup_partition -- \
@@ -205,6 +204,10 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 挙動と制約:
 
 - 既存の `partition_NNNNN.bin` には append モードで追記される
+- `--input` にはファイル、ディレクトリ、glob を指定できる。複数指定はカンマ区切り
+- glob はツール側で展開する。Unix shell で先に展開されないよう `"/data/psv/*.bin"` のようにクォートする
+- `--delete-input-on-success` は `--partition-only` 専用。各入力ファイルを完全に読み切り、partition 書き込みの flush に成功した場合だけ元ファイルを削除する
+- `--delete-input-on-success` と `--max-positions` は併用不可
 - 2 回目以降の `--partitions` が初回と異なるとエラー (ハッシュ空間不整合を防止)
 - `--reference` は **初回のみ** 指定可能。`ref/` に reference データが書き込まれた状態で再指定するとエラー
   - 過去の中途失敗で `ref/` に空 partition ファイルだけが残っている場合は失敗の残骸とみなしてリトライを許容する (空ファイルへの append は新規作成と等価)
@@ -217,7 +220,7 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 | オプション | 説明 | デフォルト |
 |---|---|---|
 | `--reference` | 参照ファイル（カンマ区切り）。HashSet に登録するが出力しない | — |
-| `--input` | 入力ファイル（カンマ区切り）。`--input-dir` と排他 | — |
+| `--input` | 入力ファイル、ディレクトリ、glob（カンマ区切り）。`--input-dir` と排他 | — |
 | `--input-dir` | 入力ディレクトリ。`--pattern` と組み合わせ | — |
 | `--pattern` | `--input-dir` 使用時の glob パターン | `*.bin` |
 | `--output` | 出力ファイルパス | — |
@@ -227,6 +230,7 @@ cargo run --release -p tools --bin psv_dedup_partition -- \
 | `--max-positions` | 処理する入力レコードの最大件数（0 = 全件、試走用）。参照は常に全件 | `0` |
 | `--dedup-only` | Phase 1 をスキップして既存一時ファイルから再開（ref/ は自動検出） | off |
 | `--partition-only` | Phase 2 をスキップして Phase 1 (振り分け) のみ実行（既存 partition には append） | off |
+| `--delete-input-on-success` | `--partition-only` で各入力ファイルの処理成功後に元ファイルを削除する | off |
 | `--keep-temp` | 完了後も一時ファイル・ディレクトリを削除しない（`--partition-only` では暗黙で有効） | off |
 | `--force` | メモリ/ディスク不足でも警告のみで続行する | off |
 

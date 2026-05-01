@@ -31,7 +31,8 @@ pub fn game_ply_from_record(record: &[u8; PSV_SIZE]) -> u16 {
     u16::from_le_bytes([record[36], record[37]])
 }
 
-/// `--input` (カンマ区切り) または `--input-dir` + `--pattern` からファイル一覧を収集する。
+/// `--input` (カンマ区切りのファイル / ディレクトリ / glob) または
+/// `--input-dir` + `--pattern` からファイル一覧を収集する。
 pub fn collect_input_paths(
     input: Option<&str>,
     input_dir: Option<&PathBuf>,
@@ -46,41 +47,85 @@ pub fn collect_input_paths(
             io::ErrorKind::InvalidInput,
             "--data/--input または --input-dir のいずれかを指定してください",
         )),
-        (Some(data), None) => {
-            let paths: Vec<PathBuf> = data.split(',').map(|s| PathBuf::from(s.trim())).collect();
-            for p in &paths {
-                if !p.exists() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("入力ファイルが存在しません: {}", p.display()),
-                    ));
-                }
-            }
-            Ok(paths)
-        }
-        (None, Some(dir)) => {
-            if !dir.is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("入力ディレクトリが存在しません: {}", dir.display()),
-                ));
-            }
-            let pat = glob::Pattern::new(pattern).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidInput, format!("無効な glob パターン: {e}"))
-            })?;
-            let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(dir)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .filter(|e| {
-                    e.path().file_name().and_then(|n| n.to_str()).is_some_and(|n| pat.matches(n))
-                })
-                .map(|e| e.into_path())
-                .collect();
-            paths.sort();
-            Ok(paths)
+        (Some(data), None) => collect_input_specs(data, pattern),
+        (None, Some(dir)) => collect_input_dir(dir, pattern),
+    }
+}
+
+fn collect_input_specs(input: &str, pattern: &str) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for spec in input.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let path = PathBuf::from(spec);
+        if path.is_file() {
+            paths.push(path);
+        } else if path.is_dir() {
+            paths.extend(collect_input_dir(&path, pattern)?);
+        } else if has_glob_metachar(spec) {
+            paths.extend(collect_input_glob(spec)?);
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("入力ファイルまたはディレクトリが存在しません: {}", path.display()),
+            ));
         }
     }
+
+    if paths.is_empty() && !input.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("入力に一致するファイルが見つかりません: {input}"),
+        ));
+    }
+
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn collect_input_dir(dir: &Path, pattern: &str) -> io::Result<Vec<PathBuf>> {
+    if !dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("入力ディレクトリが存在しません: {}", dir.display()),
+        ));
+    }
+    let pat = glob::Pattern::new(pattern).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidInput, format!("無効な glob パターン: {e}"))
+    })?;
+    let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.path().file_name().and_then(|n| n.to_str()).is_some_and(|n| pat.matches(n)))
+        .map(|e| e.into_path())
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+fn collect_input_glob(pattern: &str) -> io::Result<Vec<PathBuf>> {
+    let entries = glob::glob(pattern).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidInput, format!("無効な glob パターン: {e}"))
+    })?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| io::Error::other(format!("glob 展開に失敗しました: {e}")))?;
+        if path.is_file() {
+            paths.push(path);
+        }
+    }
+    if paths.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("glob に一致する入力ファイルが見つかりません: {pattern}"),
+        ));
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn has_glob_metachar(spec: &str) -> bool {
+    spec.contains('*') || spec.contains('?') || spec.contains('[')
 }
 
 /// まだ存在しないかもしれないパスを正規化する。
@@ -346,6 +391,37 @@ mod tests {
         fs::write(&input, [0u8; PSV_SIZE]).unwrap();
 
         check_output_not_in_inputs(&dir.path().join("new/out.psv"), &[input]).unwrap();
+    }
+
+    #[test]
+    fn collect_input_paths_accepts_glob_in_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.bin");
+        let b = dir.path().join("b.bin");
+        let ignored = dir.path().join("c.txt");
+        fs::write(&a, [0u8; PSV_SIZE]).unwrap();
+        fs::write(&b, [1u8; PSV_SIZE]).unwrap();
+        fs::write(ignored, []).unwrap();
+
+        let pattern = format!("{}/*.bin", dir.path().display());
+        let paths = collect_input_paths(Some(&pattern), None, "*.bin").unwrap();
+
+        assert_eq!(paths, vec![a, b]);
+    }
+
+    #[test]
+    fn collect_input_paths_accepts_directory_in_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.bin");
+        let b = dir.path().join("nested/b.bin");
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        fs::write(&a, [0u8; PSV_SIZE]).unwrap();
+        fs::write(&b, [1u8; PSV_SIZE]).unwrap();
+
+        let input = dir.path().to_string_lossy();
+        let paths = collect_input_paths(Some(&input), None, "*.bin").unwrap();
+
+        assert_eq!(paths, vec![a, b]);
     }
 
     #[test]
