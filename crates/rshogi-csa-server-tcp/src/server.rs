@@ -2421,8 +2421,16 @@ where
     };
     // 対局開始時に対局者ごとに一意な再接続トークンを発行し、Game_Summary 末尾の
     // 拡張行で配布する。再接続経路はトークン照合で同一対局・同一対局者を識別する。
-    let black_reconnect_token = ReconnectToken::generate();
-    let white_reconnect_token = ReconnectToken::generate();
+    // ただし `reconnect_grace_duration == ZERO` の構成では再接続経路自体に立ち入ら
+    // ないため、token は発行せず `Game_Summary` 末尾拡張行にも `Reconnect_Token:`
+    // 行を出さない (Issue #591 と同型の `LOGIN:incorrect reconnect_rejected` 経路を
+    // 防ぐ)。
+    let (black_reconnect_token, white_reconnect_token) =
+        if state.config.reconnect_grace_duration.is_zero() {
+            (None, None)
+        } else {
+            (Some(ReconnectToken::generate()), Some(ReconnectToken::generate()))
+        };
     let summary = GameSummaryBuilder {
         game_id: game_id.clone(),
         black: matched.black.clone(),
@@ -2432,8 +2440,8 @@ where
         rematch_on_draw: false,
         to_move,
         declaration: "Jishogi 1.1".to_owned(),
-        black_reconnect_token: Some(black_reconnect_token.clone()),
-        white_reconnect_token: Some(white_reconnect_token.clone()),
+        black_reconnect_token: black_reconnect_token.clone(),
+        white_reconnect_token: white_reconnect_token.clone(),
     };
     send_multiline(black_transport, &summary.build_for(Color::Black)).await?;
     send_multiline(white_transport, &summary.build_for(Color::White)).await?;
@@ -2507,8 +2515,8 @@ where
     let reconnect_ctx = ReconnectContext {
         black_handle: &matched.black,
         white_handle: &matched.white,
-        black_token: &black_reconnect_token,
-        white_token: &white_reconnect_token,
+        black_token: black_reconnect_token.as_ref(),
+        white_token: white_reconnect_token.as_ref(),
         summary: &summary,
     };
     let result_moves = run_game_loop_and_record(
@@ -2743,12 +2751,18 @@ where
 ///
 /// 各対局者の `handle` / `reconnect_token` / Game_Summary builder を一括で持ち、
 /// 引数列を膨らませず内部で使う。`reconnect_grace_duration == ZERO` の構成では
-/// このコンテキストは参照されるだけで実装経路には立ち入らない。
+/// このコンテキストは参照されるだけで実装経路には立ち入らない (`run_game_loop_and_record`
+/// の `grace.is_zero()` ガードで `force_abnormal` 経路に分岐するため)。
 struct ReconnectContext<'a> {
     black_handle: &'a PlayerName,
     white_handle: &'a PlayerName,
-    black_token: &'a ReconnectToken,
-    white_token: &'a ReconnectToken,
+    /// `reconnect_grace_duration > 0` のときに発行された再接続トークン。
+    /// grace=0 構成では `None`、その場合 `handle_disconnect_with_grace` 経路には
+    /// 入らない (`run_game_loop_and_record` の `grace.is_zero()` ガード)。
+    /// 型として `Option` を持ち、参照経路では fail-closed (panic 不可) で
+    /// `Aborted` に倒す defensive guard を持つ。
+    black_token: Option<&'a ReconnectToken>,
+    white_token: Option<&'a ReconnectToken>,
     summary: &'a GameSummaryBuilder,
 }
 
@@ -2886,9 +2900,22 @@ where
     P: PasswordStore + 'static,
     H: FloodgateHistoryStorage + 'static,
 {
-    let (handle, expected_token) = match disconnected {
-        Color::Black => (ctx.black_handle.clone(), ctx.black_token.clone()),
-        Color::White => (ctx.white_handle.clone(), ctx.white_token.clone()),
+    let (handle, expected_token_ref) = match disconnected {
+        Color::Black => (ctx.black_handle.clone(), ctx.black_token),
+        Color::White => (ctx.white_handle.clone(), ctx.white_token),
+    };
+    // 呼び出し側 (`run_game_loop_and_record`) で `grace.is_zero()` ガードを通過した
+    // 経路でのみ本関数に到達するため、token は `Some` で確定するはずだが、型として
+    // `Option` を持つので fail-closed (panic 不可) でガードする。`None` を観測した
+    // ら整合性が壊れているので Aborted に倒し、上位で `force_abnormal` する。
+    let Some(expected_token) = expected_token_ref.cloned() else {
+        tracing::warn!(
+            game_id = %game_id,
+            disconnected_color = ?disconnected,
+            "handle_disconnect_with_grace called without reconnect token; \
+             grace>0 のとき token は Some であるべき invariant 違反。Aborted で fail-closed する"
+        );
+        return Ok(DisconnectOutcome::Aborted);
     };
     let snapshot = ReconnectSnapshot {
         black_remaining_ms: room.clock_remaining_main_ms(Color::Black).max(0) as u64,

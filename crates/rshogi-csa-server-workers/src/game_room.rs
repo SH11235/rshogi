@@ -64,7 +64,7 @@ use rshogi_csa_server::{FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryC
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::{
-    ConfigKeys, parse_clock_presets, parse_clock_spec, parse_reconnect_grace_duration,
+    ConfigKeys, parse_clock_presets, parse_clock_spec, resolve_reconnect_grace_from_strings,
 };
 use crate::datetime::{format_csa_datetime, format_date_path, format_rfc3339_utc};
 use crate::floodgate_history::R2FloodgateHistoryStorage;
@@ -78,7 +78,7 @@ use crate::persistence::{
 };
 use crate::reconnect::{
     PendingAlarmKind, PendingReconnect, ReconnectMatchOutcome, ReconnectSnapshot,
-    build_resume_message, color_from_str, color_to_str,
+    build_resume_message, color_from_str, color_to_str, issue_tokens_if_enabled,
 };
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 use crate::spectator_control::{
@@ -485,6 +485,30 @@ impl GameRoom {
                 return Ok(false);
             }
         };
+        // LOGIN OK 後 Game_Summary 送出前に `##[ERROR]` を送って match を不成立に
+        // する経路は CSA 標準には無いが、本コードベースは既に clock_spec / buoy
+        // 解決失敗で同経路を使っている (`abort_pending_match_with_error`)。
+        // Floodgate 互換 client は `Game_Summary` を期待するので `##[ERROR]` を
+        // 受け取って parse error / session disconnect する。Workers DO 側は両 player
+        // の WS が close されることで部屋を解放できる。本経路は misconfig fail-fast
+        // の defensive measure であり、production の保守的既定 (grace=0 +
+        // allow=false) では `Ok(Duration::ZERO)` を返すため到達しない。
+        //
+        // 本検証を **buoy reservation の前** に配置するのは
+        // `reserve_initial_sfen_from_buoy` が R2 に `remaining -= 1` を conditional
+        // PUT する side-effect を持つため。grace 設定 misconfig で abort する場合に
+        // buoy だけ消費されると、次 LOGIN で `Exhausted` が誤発火する。
+        let grace = match resolve_reconnect_grace(&self.env) {
+            Ok(d) => d,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] reconnect grace config error (aborting pending match): {e}"
+                );
+                self.abort_pending_match_with_error("##[ERROR] reconnect grace config error")
+                    .await?;
+                return Ok(false);
+            }
+        };
         // 双方の LOGIN は既に OK を返しているので、予約で失敗したまま早期
         // return するとスロットが永久に詰まる。Exhausted に加え、CAS リトライ
         // 上限到達などの Err も pending match abort 経路に落として部屋を
@@ -516,11 +540,12 @@ impl GameRoom {
             }
         };
 
-        // 対局開始時に対局者ごとに一意な再接続トークンを発行する。`Game_Summary`
-        // 末尾拡張行で配布した値を、後の grace 経路 (websocket_close → 再接続要求の
-        // `expected_token` 照合) で参照するために `PersistedConfig` に保存しておく。
-        let black_reconnect_token = ReconnectToken::generate();
-        let white_reconnect_token = ReconnectToken::generate();
+        // 対局開始時に対局者ごとに一意な再接続トークンを発行する。再接続 grace が
+        // 有効な構成 (`grace > 0`) でのみ発行し、`Game_Summary` 末尾拡張行で配布した
+        // 値を、後の grace 経路 (websocket_close → 再接続要求の `expected_token` 照合)
+        // で参照するために `PersistedConfig` に保存する。`grace == 0` の構成では
+        // `(None, None)` を返し token 配布も `PersistedConfig` への保存もスキップする。
+        let (black_reconnect_token, white_reconnect_token) = issue_tokens_if_enabled(grace);
         let cfg = PersistedConfig {
             game_id: game_id.clone(),
             black_handle: black_handle.to_owned(),
@@ -532,8 +557,8 @@ impl GameRoom {
             matched_at_ms: started,
             play_started_at_ms: None,
             initial_sfen,
-            black_reconnect_token: Some(black_reconnect_token.as_str().to_owned()),
-            white_reconnect_token: Some(white_reconnect_token.as_str().to_owned()),
+            black_reconnect_token: black_reconnect_token.as_ref().map(|t| t.as_str().to_owned()),
+            white_reconnect_token: white_reconnect_token.as_ref().map(|t| t.as_str().to_owned()),
         };
         self.state.storage().put(KEY_CONFIG, &cfg).await?;
 
@@ -572,7 +597,9 @@ impl GameRoom {
         // 上で `PersistedConfig` に保存したトークンを Game_Summary の末尾拡張行で
         // 配布する。クライアントは本トークンを保持しておき、デプロイ／DO 再起動
         // による切断時に LOGIN reconnect 引数として提示して同一対局・同一対局者
-        // として再参加する。
+        // として再参加する。再接続 grace が無効な構成 (`grace == 0`) では
+        // `black_reconnect_token` / `white_reconnect_token` ともに `None` で、
+        // `Game_Summary` 末尾拡張行に `Reconnect_Token:` 行は付かない。
         let builder = GameSummaryBuilder {
             game_id: GameId::new(cfg.game_id),
             black: PlayerName::new(cfg.black_handle),
@@ -582,8 +609,8 @@ impl GameRoom {
             rematch_on_draw: false,
             to_move,
             declaration: String::new(),
-            black_reconnect_token: Some(black_reconnect_token),
-            white_reconnect_token: Some(white_reconnect_token),
+            black_reconnect_token,
+            white_reconnect_token,
         };
         let summary_black = builder.build_for(Color::Black);
         let summary_white = builder.build_for(Color::White);
@@ -1897,13 +1924,10 @@ impl GameRoom {
         // `KEY_GRACE_REGISTRY` と `KEY_PENDING_ALARM_KIND` を 2 回の `put` で
         // 書き分ける。Cloudflare DO は同一 instance に対する fetch / alarm /
         // websocket_* を単一スレッドで逐次処理するため、1 件目 put 後の `await`
-        // 中に他ハンドラが割り込んで不整合を観測する race は起きない。本コード
-        // は `worker` 0.8 系で `transaction` API がまだ stable に提供されていない
-        // 前提で 2 回 put にしているが、`handle_grace_expired_alarm` 側は
-        // registry の存在を先に確認してから進む設計なので、最悪 (DO 強制終了等)
-        // でも整合性は壊れない (registry が無ければ何もせず alarm tag だけ
-        // 片付ける)。`worker` crate が `transaction` を提供したら本ブロックを
-        // 束ねる方が望ましい。
+        // 中に他ハンドラが割り込んで不整合を観測する race は起きない。
+        // worker 0.8.1 では `Storage::transaction` と `put_multiple` ともに既に
+        // 提供されているが、本 Issue #591 hotfix scope では既存の 2 段 put のまま
+        // 据え置く。followup-B で atomic 化を検討する。
         self.state.storage().put(KEY_GRACE_REGISTRY, &pending).await?;
         self.state
             .storage()
@@ -2271,17 +2295,13 @@ fn resolve_clock_spec_for_game(env: &Env, game_name: &str) -> Result<ClockSpec> 
 ///
 /// 設定不正は `Err(String)` で返し、呼び出し側は安全側に grace を無効化する経路に
 /// 落とす (websocket_close で旧 force_abnormal 経路にフォールバック)。
+///
+/// 実体ロジックは [`resolve_reconnect_grace_from_strings`] (host 単体テスト可能な
+/// pure helper) に委譲し、本関数は `worker::Env` 依存を切り出す薄い shim に閉じる。
 fn resolve_reconnect_grace(env: &Env) -> std::result::Result<Duration, String> {
     let grace_raw = env.var(ConfigKeys::RECONNECT_GRACE_SECONDS).ok().map(|v| v.to_string());
-    let grace = parse_reconnect_grace_duration(grace_raw.as_deref())?;
     let allow_raw = env.var(ConfigKeys::ALLOW_FLOODGATE_FEATURES).ok().map(|v| v.to_string());
-    let allow = parse_allow_floodgate_features(allow_raw.as_deref())?;
-    let intent = FloodgateFeatureIntent {
-        enable_reconnect_protocol: !grace.is_zero(),
-        ..FloodgateFeatureIntent::default()
-    };
-    validate_floodgate_feature_gate(allow, intent)?;
-    Ok(grace)
+    resolve_reconnect_grace_from_strings(grace_raw.as_deref(), allow_raw.as_deref())
 }
 
 /// `ALLOW_FLOODGATE_FEATURES` env と `FLOODGATE_HISTORY_BUCKET` binding を読み、
