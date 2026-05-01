@@ -13,7 +13,7 @@ const MODE_AGGREGATE: &str = "aggregate";
 #[command(
     author,
     version,
-    about = "tools spsa の --stats-csv / --stats-aggregate-csv 出力を可視化向けCSVへ整形する"
+    about = "tools spsa の --stats-csv 出力 (および旧 v3 の stats_aggregate.csv) を可視化向けCSVへ整形する"
 )]
 struct Cli {
     /// 入力CSV

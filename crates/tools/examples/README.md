@@ -76,18 +76,23 @@ RUN_DIR="runs/spsa/$(date +%Y%m%d_%H%M%S)"
 cargo run --release -p tools --bin spsa -- \
   --run-dir "${RUN_DIR}" \
   --init-from spsa_params/canonical.params \
-  --iterations 200 \
-  --games-per-iteration 64 \
+  --total-pairs 6400 \
+  --batch-pairs 32 \
   --concurrency 8 \
-  --seeds 1,2,3,4 \
+  --seed 1 \
   --startpos-file start_sfens_ply24.txt \
   --threads 1 --hash-mb 256 --byoyomi 1000
 ```
 
-`<run-dir>` 配下に `state.params` / `meta.json` / `values.csv` /
-`stats.csv` / `stats_aggregate.csv` が自動生成される。CSV のパスを別途
-指定したい場合は `--stats-csv` / `--stats-aggregate-csv` /
-`--param-values-csv` で個別 override 可能。
+主要な CLI:
+- `--total-pairs N`: SPSA 全体の game pair 数。total_games = 2N
+- `--batch-pairs B`: 1 batch あたりの game pair 数。1 batch で `2B` 局を消化し θ を 1 回更新
+- `--seed S`: base seed (省略時はランダム)。複数 seed 比較は **`--seed` を変えた
+  独立 run dir** を別プロセスで並列実行する
+
+`<run-dir>` 配下に `state.params` / `final.params` / `meta.json` /
+`values.csv` / `stats.csv` が自動生成される。CSV のパスを別途指定したい場合は
+`--stats-csv` / `--param-values-csv` で個別 override 可能。
 
 ### 3. 途中から再開
 
@@ -96,13 +101,17 @@ cargo run --release -p tools --bin spsa -- \
   --run-dir "${RUN_DIR}" \
   --init-from spsa_params/canonical.params \
   --resume \
-  --iterations 400 \
-  --games-per-iteration 64 \
+  --total-pairs 12800 \
+  --batch-pairs 32 \
   --concurrency 8 \
-  --seeds 1,2,3,4 \
+  --seed 1 \
   --startpos-file start_sfens_ply24.txt \
   --threads 1 --hash-mb 256 --byoyomi 1000
 ```
+
+`--total-pairs` を当初値より大きくして batch を継ぎ足したい場合は
+`--force-schedule` を併用する (`--batch-pairs` の途中変更は k 軸の不整合に
+なるため非推奨)。
 
 `--init-from` を resume 時にも指定すると、起動時に canonical との整合性
 diagnostic が出る (乖離が閾値超過したら `--strict-init-check` で error 化可能)。
@@ -129,10 +138,13 @@ cargo run -p tools --bin spsa_param_diff -- \
 
 ```bash
 cargo run -p tools --bin spsa_stats_to_plot_csv -- \
-  "${RUN_DIR}/stats_aggregate.csv" \
+  "${RUN_DIR}/stats.csv" \
   --output-csv "${RUN_DIR}/plot.csv" \
   --window 16
 ```
+
+複数 run の比較 (例 `--seed` を変えた独立 run dir 群) は、各 run の
+`stats.csv` を pandas/awk で concat してから集計する。
 
 ## 自己対局 (engine_selfplay)
 

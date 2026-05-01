@@ -120,10 +120,13 @@ cargo run --release -p tools --bin check_param_mapping -- \
 # 正しい運用: canonical を --init-from に、SPSA の作業領域は --run-dir に分離
 spsa --run-dir "runs/spsa/$(date -u +%Y%m%d_%H%M%S)" \
      --init-from tune/suisho10.params \
+     --total-pairs 6400 --batch-pairs 32 --seed 1 \
      ...
 ```
 
-詳細は `crates/tools/docs/spsa_runbook.md` §4.1 参照。
+主要な SPSA CLI は `--total-pairs N` (SPSA 全体の game pair 数) と
+`--batch-pairs B` (1 batch あたりの game pair 数、既定 8)。詳細は
+`crates/tools/docs/spsa_runbook.md` §3 / §4.1 を参照。
 
 ## 関連ドキュメント
 
