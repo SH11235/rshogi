@@ -308,7 +308,7 @@ fn v3_seeds_flag_rejected_with_migration_hint() {
     assert!(!output.status.success(), "--seeds は v4 で hard error のはず");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("v4") && stderr.contains("docs/spsa_v4_migration.md"),
+        stderr.contains("v4") && stderr.contains("spsa_runbook.md"),
         "v4 撤去メッセージと移行ガイドへの案内が必要: {stderr}"
     );
 }

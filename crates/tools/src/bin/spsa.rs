@@ -130,14 +130,16 @@ struct Cli {
     /// 乱数 seed (省略時はランダム)。SPSA の全 RNG stream は seed と batch index から
     /// 決定論的に生成されるため、同じ seed で run を 2 回回すと同じ θ 軌跡になる。
     ///
-    /// fishtest 整合の v4 仕様では multi-seed (`--seeds`) は撤去された (詳細:
-    /// `docs/spsa_v4_migration.md`)。複数 base_seed の探索は `--seed` を変えた
-    /// 独立 run dir で並列実行する。
+    /// fishtest 整合の v4 仕様では multi-seed (`--seeds`) は撤去された
+    /// (詳細: `crates/tools/docs/spsa_runbook.md` および `CHANGELOG.md` の v4
+    /// エントリ)。複数 base_seed の探索は `--seed` を変えた独立 run dir で並列
+    /// 実行する。
     #[arg(long)]
     seed: Option<u64>,
 
     /// **deprecated/removed**: v3 の multi-seed 機能。指定するとエラー終了する。
-    /// 移行ガイドは `docs/spsa_v4_migration.md` を参照。
+    /// 移行ガイドは `crates/tools/docs/spsa_runbook.md` および `CHANGELOG.md` の
+    /// v4 エントリを参照。
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     seeds: Option<Vec<u64>>,
 
@@ -279,7 +281,8 @@ struct Cli {
     strict_init_check: bool,
 
     /// **deprecated/removed**: v3 の multi-seed 機能。指定するとエラー終了する。
-    /// 移行ガイドは `docs/spsa_v4_migration.md` を参照。
+    /// 移行ガイドは `crates/tools/docs/spsa_runbook.md` および `CHANGELOG.md` の
+    /// v4 エントリを参照。
     #[arg(long, default_value_t = false)]
     parallel_seeds: bool,
 }
@@ -887,7 +890,7 @@ fn load_meta(path: &Path) -> Result<ResumeMetaData> {
             "warning: v3 meta を v4 として silent migrate します ({}).\n  \
                completed_iterations={} → そのまま batch 番号として継承します。\n  \
                total_pairs/batch_pairs/completed_pairs は CLI 指定値から再構築されます。\n  \
-             詳細: docs/spsa_v4_migration.md",
+             詳細: crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ",
             path.display(),
             v3.completed_iterations,
         );
@@ -923,7 +926,7 @@ fn load_meta(path: &Path) -> Result<ResumeMetaData> {
         "meta format version 不一致 (got v{}, expected v{}) in {}.\n\
          v{} 形式は v{} とは互換性がありません。\n\
          新規 run dir で `--init-from <canonical>` から fresh start してください。\n\
-         詳細: docs/spsa_v4_migration.md",
+         詳細: crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ",
         version_probe.format_version,
         META_FORMAT_VERSION,
         path.display(),
@@ -2319,15 +2322,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // v3 multi-seed 機能撤去: --seeds / --parallel-seeds は hard error。
-    // 移行ガイドへ案内 (docs/spsa_v4_migration.md)。
+    // 移行ガイドへ案内 (crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ)。
     if cli.seeds.is_some() {
         bail!(
             "--seeds は v4 で撤去されました。複数 base_seed の探索は --seed を変えた\n\
-             独立 run dir で並列実行してください。詳細: docs/spsa_v4_migration.md"
+             独立 run dir で並列実行してください。詳細: crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ"
         );
     }
     if cli.parallel_seeds {
-        bail!("--parallel-seeds は v4 で撤去されました。詳細: docs/spsa_v4_migration.md");
+        bail!(
+            "--parallel-seeds は v4 で撤去されました。詳細: crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ"
+        );
     }
 
     // 新 CLI: --total-pairs / --batch-pairs。後方互換: --games-per-iteration +
@@ -2362,20 +2367,20 @@ fn main() -> Result<()> {
             eprintln!(
                 "warning: --games-per-iteration/--iterations は deprecated です。\n  \
                    自動換算: --total-pairs {derived_total_pairs} --batch-pairs {derived_batch_pairs}\n  \
-                 docs/spsa_v4_migration.md を参照して新 CLI へ移行してください。"
+                 crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ を参照して新 CLI へ移行してください。"
             );
             (derived_total_pairs, derived_batch_pairs)
         }
         (Some(_), _, Some(_), _) | (Some(_), _, _, Some(_)) => {
             bail!(
                 "--total-pairs と --games-per-iteration/--iterations は同時指定できません。\n\
-                 docs/spsa_v4_migration.md を参照して新 CLI に統一してください。"
+                 crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ を参照して新 CLI に統一してください。"
             );
         }
         (None, _, _, _) => {
             bail!(
                 "--total-pairs を指定してください (deprecated 経路は --games-per-iteration\n\
-                 と --iterations の両方が必要です)。docs/spsa_v4_migration.md 参照。"
+                 と --iterations の両方が必要です)。crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ 参照。"
             );
         }
     };
@@ -2620,7 +2625,7 @@ fn main() -> Result<()> {
                     bail!(
                         "total_pairs/batch_pairs が meta と異なります \
                          (meta total_pairs={}, batch_pairs={} / cli total_pairs={}, batch_pairs={}). \
-                         --force-schedule を指定するか docs/spsa_v4_migration.md を参照してください。",
+                         --force-schedule を指定するか crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ を参照してください。",
                         meta.total_pairs,
                         meta.batch_pairs,
                         total_pairs,
