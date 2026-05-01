@@ -3950,6 +3950,35 @@ mod tests {
         }
     }
 
+    /// Stochastic rounding の境界テスト: `p.value = max` の状態で
+    /// `floor(v + U(0,1))` が `max + 1` になるケースが、再 clamp で `max` に戻る
+    /// ことを確認。`clamp → round → 再 clamp` の順序が崩れると、U が大きい batch
+    /// で max を超えた値が engine に送られて事故になる。
+    #[test]
+    fn stochastic_rounding_clamps_after_round_at_upper_bound() {
+        let mut p = make_param("Search_a", 10.0, 1.0);
+        p.is_int = true;
+        p.min = 0.0;
+        p.max = 10.0;
+        let params = vec![p];
+        let schedules: Vec<ParamScheduleConstants> = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+            .collect();
+        let translator = EngineNameTranslator::empty();
+        let ctx = make_test_ctx(&params, &schedules, &translator, 2);
+        // 多数 iter を回し、plus_value/minus_value が常に [min, max] に収まることを確認。
+        for iter in 0..1000_u32 {
+            let prep = compute_batch_prep(&ctx, iter, iter, 99, 0).expect("prep");
+            for v in prep.plus_values.iter().chain(prep.minus_values.iter()) {
+                assert!(
+                    *v >= 0.0 && *v <= 10.0,
+                    "iter={iter}: rounded value {v} 範囲外 (再 clamp が機能していない)"
+                );
+            }
+        }
+    }
+
     /// Stochastic rounding の期待値は連続 f64 値に一致する (大数の法則)。
     /// 多数 iteration (= 多数 rounding 抽選) を回し、`p.value=10.4` の rounded 平均が
     /// 0.05 程度の誤差で 10.4 に収束することを確認。これが崩れると int param で

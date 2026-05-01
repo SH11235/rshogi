@@ -77,8 +77,8 @@ wait
 | `--games-per-iteration M`         | `--batch-pairs B` (新)                          | `B = M / 2` 相当                      |
 | `--seeds 1,2,3`                   | (削除) hard error                               | 独立 run dir で代替                   |
 | `--parallel-seeds`                | (削除) hard error                               | 同上                                  |
-| `--stats-aggregate-csv PATH`      | (削除) sentinel として hard error はしない      | 出力されないので参照側で気付く        |
-| `--no-stats-aggregate-csv`        | (削除)                                          | 同上                                  |
+| `--stats-aggregate-csv PATH`      | (削除) clap で unknown argument エラー          | 自動化スクリプトの flag 削除が必要    |
+| `--no-stats-aggregate-csv`        | (削除) 同上                                      | 同上                                  |
 | `--seed S`                        | `--seed S` (維持)                               | 単一 base_seed の挙動は同じ           |
 
 deprecated 経路: `--games-per-iteration M --iterations N` を併用すると、warning を
@@ -111,8 +111,8 @@ v3 形式の `meta.json` を v4 で読むときの挙動:
 
 ### silent migration (自動継続)
 
-`seeds.len() == 1` かつ `games_per_iteration` が偶数の v3 run については、
-warning を 1 回出して silent migrate される。継承される情報:
+format_version=3 の `meta.json` は load 時に warning を 1 回出して自動的に
+v4 形式へ migrate される。継承される情報:
 
 - `completed_iterations` (= 完了 batch 数として再解釈)
 - `schedule`、`init_*_sha256`、`current_params_sha256` 等の v3 既存フィールド
@@ -123,19 +123,41 @@ CLI で再指定が必要な情報:
 - `--batch-pairs` (新規 run の batch 粒度)
 
 `completed_pairs` は `completed_iterations × batch_pairs` で再構築される。
-これは「v3 で 1 iter = 1 update = k+1 だった」前提。v3 で `games_per_iteration = 2 × batch_pairs`
-として運用していれば SPSA の k 軸は等価。
+これは「v3 で 1 iter = 1 update = k+1 だった」前提。v3 で
+`games_per_iteration = 2 × batch_pairs` として運用していれば SPSA の k 軸は
+等価。
 
-### hard bail (移行 NG)
+### silent migration の制約 (ユーザ責任)
 
-以下のケースは silent migrate せず明確にエラー終了する:
+v3 meta は schema 上 `seeds_count` / `games_per_iteration` を保持しないため、
+**migration 側で自動検出できないケース**がある:
 
-- v3 で `--seeds` が 2 個以上の multi-seed run (現状の sentinel 検出は不完全
-  なため、ユーザは自身で fresh start すべき)
-- 奇数 `games_per_iteration` の v3 run (paired antithetic と相容れない)
+- v3 で `--seeds 2,3` のような multi-seed run だった場合
+- v3 で奇数 `--games-per-iteration` だった場合 (paired antithetic と本来相容れない)
+
+これらは silent migrate を **通過してしまう**可能性がある。検出した時点で
+SPSA の進行は不整合になり、結果が以後の SPRT で発散することがある。
+**過去の runbook で multi-seed / 奇数 gpi を使っていた run** は、silent migrate
+ではなく以下の手順で fresh start すること:
+
+```bash
+# 既存 state.params を canonical 起点として新 run dir で fresh start
+mkdir -p runs/spsa_v4_$(date -u +%Y%m%d_%H%M%S)
+spsa --run-dir runs/spsa_v4_<tag> \
+     --init-from runs/old_v3/state.params \
+     --total-pairs 5000 --batch-pairs 8 \
+     --seed 12345 ...
+```
+
+### hard bail (resume 不可)
+
+以下のケースは load_meta が hard bail する:
+
 - v2 以前の format (v3 で既に hard bail 化済み)
+- v4 meta で resume 時に `total_pairs` / `batch_pairs` が CLI 指定値と不一致
+  (`--force-schedule` で warning に格下げ可能)
 
-これらの run を引き継ぎたい場合の対処:
+完全に新規 run dir で始め直したい場合:
 
 ```bash
 # 既存 state.params を canonical 起点として新 run dir で fresh start
