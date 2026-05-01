@@ -3,7 +3,7 @@
 //!
 //! Issue #593 partial fix の regression guard。fatal communication error 経路
 //! (send BrokenPipe / recv Disconnected / wait_bestmove Disconnected) と
-//! stderr ring buffer (4 KB cap、CRLF 吸収) の挙動を 5 fixture で pin する。
+//! stderr ring buffer (4 KB cap、CRLF 吸収) の挙動を 6 fixture で pin する。
 //!
 //! 対象 OS: Unix (bash 必須)。Windows には mock USI engine 経路がないため
 //! `#[cfg(unix)]` でガードする。
@@ -30,8 +30,8 @@ static TMPDIR_LOCK: Mutex<()> = Mutex::new(());
 /// path を返す。test ごとに unique な名前を付与する。
 ///
 /// Linux で `cargo test` を並列実行すると、`std::fs::write` 完了直後の `Command::spawn`
-/// で稀に `Text file busy (ETXTBSY)` を踏むため、tmp 書き出し → `sync_all` → atomic
-/// rename → chmod の順で kernel に「書き終えた実行可能ファイル」を確実に認識させる
+/// で稀に `Text file busy (ETXTBSY)` を踏むため、tmp 書き出し → `sync_all` → chmod →
+/// atomic rename の順で kernel に「書き終えた実行可能ファイル」を確実に認識させる
 /// (PR #596 review で指摘された flake への対応)。
 fn write_mock_script(name: &str, body: &str) -> PathBuf {
     use std::io::Write;

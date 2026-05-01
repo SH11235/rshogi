@@ -307,7 +307,7 @@ impl UsiEngine {
                 match read_line_capped(&mut reader, &mut buf, STDERR_LINE_MAX_BYTES) {
                     Ok(ReadLineOutcome::Eof) => break,
                     Ok(ReadLineOutcome::Line) => {
-                        // `Line(0)` (空行) もここに含まれる。EOF と空行を取り違えて
+                        // 空行 (buf.len() == 0 の `Line`) もここに含まれる。EOF と空行を取り違えて
                         // reader thread を早期終了させると以降の stderr が失われ、
                         // pipe が詰まって engine 側が write で block するリスクがある
                         // ため、空行は通常行と同じく ring buffer に push する
@@ -865,9 +865,9 @@ enum ReadLineOutcome {
 ///
 /// 戻り値は [`ReadLineOutcome`] で EOF と空行を区別する。EOF の場合は
 /// `ReadLineOutcome::Eof` を返し、呼び出し側はこれを受けて reader loop を
-/// 終了する。1 行読み取り (空行を含む) の場合は `ReadLineOutcome::Line(n)` を
-/// 返し、`n` は `\r` 込みの buf 長 (delimiter `\n` を含まず、`max_bytes`
-/// 超過分も含まない)。
+/// 終了する。1 行読み取り (空行を含む) の場合は `ReadLineOutcome::Line` を
+/// 返し、実 byte 数は呼び出し側が `buf.len()` で観測する (delimiter `\n` を
+/// 含まず、`max_bytes` 超過分も含まない)。
 fn read_line_capped<R: BufRead>(
     reader: &mut R,
     buf: &mut Vec<u8>,
