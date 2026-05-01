@@ -37,15 +37,13 @@
 ///     --temp-dir /path/to/tmp \
 ///     --dedup-only
 ///
-///   # Phase 1 (パーティション振り分け) だけを行い、入力ファイルを 1 つずつ
-///   # 削除しながら処理することで、入力サイズの 2 倍の空きを必要としない。
-///   # `--temp-dir` の partition ファイルには append モードで追記される。
-///   for f in /data/*.bin; do
-///     cargo run --release --bin psv_dedup_partition -- \
-///       --partition-only --input "$f" \
-///       --temp-dir /path/to/tmp --partitions 1024
-///     rm "$f"
-///   done
+///   # Phase 1 (パーティション振り分け) だけを行い、入力ファイルを読み切るたびに
+///   # ツール側で削除することで、入力サイズの 2 倍の空きを必要としない。
+///   # glob は shell ではなくツール側で展開するため、クォートして渡す。
+///   cargo run --release --bin psv_dedup_partition -- \
+///     --partition-only --input "/data/*.bin" \
+///     --temp-dir /path/to/tmp --partitions 1024 \
+///     --delete-input-on-success
 ///   cargo run --release --bin psv_dedup_partition -- \
 ///     --dedup-only --output /path/to/deduped.bin --temp-dir /path/to/tmp
 use std::{
@@ -75,7 +73,8 @@ struct Args {
     #[arg(long)]
     reference: Option<String>,
 
-    /// 入力 PSV ファイル（カンマ区切り）。--input-dir と排他
+    /// 入力 PSV ファイル、ディレクトリ、glob（カンマ区切りで複数可）。--input-dir と排他。
+    /// glob は shell で展開させず、"/data/*.bin" のようにクォートして渡す。
     #[arg(long)]
     input: Option<String>,
 
@@ -122,6 +121,12 @@ struct Args {
     /// `--keep-temp` は暗黙で有効になり、`--output` は不要。`--dedup-only` と排他。
     #[arg(long)]
     partition_only: bool,
+
+    /// `--partition-only` で各入力ファイルを読み切り、partition 書き込みの flush に
+    /// 成功した後、その入力ファイルを削除する。数 TB 級のデータで入力と同サイズの
+    /// 追加空きを確保できない場合に使う。`--max-positions` とは併用不可。
+    #[arg(long)]
+    delete_input_on_success: bool,
 
     /// 完了後も一時ディレクトリを削除しない
     #[arg(long)]
@@ -505,6 +510,7 @@ fn partition_files_into(
     partition_buffer_bytes: usize,
     max_positions: u64,
     append: bool,
+    delete_inputs_on_success: bool,
 ) -> io::Result<u64> {
     std::fs::create_dir_all(subdir)?;
 
@@ -533,18 +539,28 @@ fn partition_files_into(
         let meta = file.metadata()?;
         let size = meta.len();
         if !size.is_multiple_of(PSV_SIZE as u64) {
+            if delete_inputs_on_success {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} size {size} is not a multiple of {PSV_SIZE}; \
+                         削除を伴う処理では入力破損の可能性があるファイルは削除しません",
+                        input.display(),
+                    ),
+                ));
+            }
             eprintln!("Warning: {} size {size} is not a multiple of {PSV_SIZE}", input.display());
         }
         let mut reader = BufReader::with_capacity(8 << 20, file);
 
-        loop {
+        let completed_input = loop {
             if max_positions > 0 && total_records >= max_positions {
-                break 'outer;
+                break false;
             }
 
             match reader.read_exact(&mut buf) {
                 Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break true,
                 Err(e) => return Err(e),
             }
 
@@ -564,6 +580,15 @@ fn partition_files_into(
                     speed,
                 );
             }
+        };
+
+        if delete_inputs_on_success && completed_input {
+            flush_partition_writers(&mut writers)?;
+            std::fs::remove_file(input)?;
+            eprintln!("    deleted input: {}", input.display());
+        }
+        if !completed_input {
+            break 'outer;
         }
     }
 
@@ -580,6 +605,13 @@ fn partition_files_into(
     eprintln!("  [{label}] done: {total_records} records, {elapsed:.1}s");
 
     Ok(total_records)
+}
+
+fn flush_partition_writers(writers: &mut [BufWriter<File>]) -> io::Result<()> {
+    for writer in writers {
+        writer.flush()?;
+    }
+    Ok(())
 }
 
 /// パーティションファイルを読み、各レコードのコールバックを呼ぶ。
@@ -830,6 +862,18 @@ fn main() -> io::Result<()> {
             "--dedup-only モードでは --input / --input-dir は使えません（既存の一時ファイルから再開するため）",
         ));
     }
+    if args.delete_input_on_success && !args.partition_only {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--delete-input-on-success は --partition-only モードでのみ使えます",
+        ));
+    }
+    if args.delete_input_on_success && args.max_positions > 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--delete-input-on-success と --max-positions は併用できません（入力を途中までしか読まないため）",
+        ));
+    }
 
     let partition_buffer_bytes = args.partition_buffer_kb * 1024;
     let input_subdir = args.temp_dir.join(INPUT_SUBDIR);
@@ -992,6 +1036,7 @@ fn main() -> io::Result<()> {
                 partition_buffer_bytes,
                 0, // reference は常に全件
                 false,
+                false,
             )?
         };
 
@@ -1002,6 +1047,7 @@ fn main() -> io::Result<()> {
             partitions,
             partition_buffer_bytes,
             args.max_positions,
+            false,
             false,
         )?;
 
@@ -1203,6 +1249,7 @@ fn run_partition_only(
             partition_buffer_bytes,
             0,
             true,
+            false,
         )?
     };
 
@@ -1214,6 +1261,7 @@ fn run_partition_only(
         partition_buffer_bytes,
         args.max_positions,
         true,
+        args.delete_input_on_success,
     )?;
 
     let total_input_bytes = sum_existing_partition_bytes(input_subdir)?;
@@ -1341,6 +1389,7 @@ mod tests {
             64 * 1024,
             0,
             false,
+            false,
         )
         .unwrap();
 
@@ -1355,6 +1404,7 @@ mod tests {
             64 * 1024,
             0,
             true,
+            false,
         )
         .unwrap();
         partition_files_into(
@@ -1365,6 +1415,7 @@ mod tests {
             64 * 1024,
             0,
             true,
+            false,
         )
         .unwrap();
 
@@ -1374,5 +1425,68 @@ mod tests {
             let multi = std::fs::read(multi_subdir.join(partition_filename(i))).unwrap();
             assert_eq!(single, multi, "partition {i} mismatch between single-pass and append");
         }
+    }
+
+    #[test]
+    fn partition_files_deletes_inputs_only_after_successful_flush() {
+        let make_psv = |seed: u8| -> [u8; PSV_SIZE] {
+            let mut buf = [0u8; PSV_SIZE];
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = seed.wrapping_add(i as u8);
+            }
+            buf
+        };
+
+        let workdir = TempDir::new().unwrap();
+        let file_a = workdir.path().join("a.bin");
+        let file_b = workdir.path().join("b.bin");
+        {
+            let mut f = File::create(&file_a).unwrap();
+            f.write_all(&make_psv(1)).unwrap();
+            let mut f = File::create(&file_b).unwrap();
+            f.write_all(&make_psv(2)).unwrap();
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let input_subdir = temp_dir.path().join(INPUT_SUBDIR);
+        let records = partition_files_into(
+            "input",
+            &[file_a.clone(), file_b.clone()],
+            &input_subdir,
+            4,
+            64 * 1024,
+            0,
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(records, 2);
+        assert!(!file_a.exists());
+        assert!(!file_b.exists());
+        assert_eq!(sum_existing_partition_bytes(&input_subdir).unwrap(), 2 * PSV_SIZE as u64);
+    }
+
+    #[test]
+    fn partition_files_keeps_invalid_input_when_delete_requested() {
+        let workdir = TempDir::new().unwrap();
+        let input = workdir.path().join("broken.bin");
+        std::fs::write(&input, [1u8; PSV_SIZE - 1]).unwrap();
+
+        let temp_dir = TempDir::new().unwrap();
+        let err = partition_files_into(
+            "input",
+            std::slice::from_ref(&input),
+            &temp_dir.path().join(INPUT_SUBDIR),
+            4,
+            64 * 1024,
+            0,
+            true,
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(input.exists());
     }
 }
