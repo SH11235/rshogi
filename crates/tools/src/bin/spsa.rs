@@ -594,9 +594,9 @@ fn state_params_path(run_dir: &Path) -> PathBuf {
 /// rename) ため、本リストには含めない。`meta.json` も apply_init_action が個別に
 /// 「失敗で bail」セマンティクスで削除するため別扱い。
 ///
-/// **CSV override 先 (`--stats-csv` / `--stats-aggregate-csv` /
-/// `--param-values-csv` で run-dir 外を指定した場合) はこの関数の戻り値に
-/// 含めない**: CSV は run の物理進行ログであり、外部集約 CSV に append する
+/// **CSV override 先 (`--stats-csv` / `--param-values-csv` で run-dir 外を
+/// 指定した場合) はこの関数の戻り値に含めない**:
+/// CSV は run の物理進行ログであり、外部集約 CSV に append する
 /// 運用 (複数 run の比較ログ等) を force-init で破壊しないため。なお
 /// `--meta-file` の override 先は本関数では扱わず、`apply_init_action` 側で
 /// 別途削除される (active resume state は run-dir 外でも force-init の対象)。
@@ -2467,7 +2467,7 @@ fn main() -> Result<()> {
     // force-init 時に削除する run-dir 直下の派生 CSV 群。CSV writer は cli.resume=false
     // で truncate もするが、能動削除しておくことで run-dir の状態を fresh と一致させる
     // (例: --no-stats-csv で writer が走らないケースでも stale CSV が残らない)。
-    // CSV override (--stats-csv / --stats-aggregate-csv / --param-values-csv) で
+    // CSV override (--stats-csv / --param-values-csv) で
     // run-dir 外を指定した場合、その override 先は本リストに含まれない (外部集約 CSV
     // append 運用を保護するため)。一方 --meta-file の override 先は active resume
     // state とみなし `apply_init_action` 側で別途削除される。詳細は
