@@ -1,19 +1,37 @@
 //! USIエンジン管理（ponder対応）
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::event::Event;
 use crate::protocol::parse_game_result;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// stderr ring buffer の最大行数 (engine 死亡時の診断 message 用)。
+const STDERR_TAIL_MAX_LINES: usize = 64;
+
+/// stderr 1 行あたりの byte 上限。超過分は破棄して次の `\n` で改行扱い。
+const STDERR_LINE_MAX_BYTES: usize = 4096;
+
+/// `engine_exited_error()` が stderr reader thread の EOF 観測完了を待つ最大時間。
+const STDERR_DRAIN_WAIT: Duration = Duration::from_millis(200);
+const STDERR_DRAIN_POLL: Duration = Duration::from_millis(50);
+
+/// `quit()` (graceful path) で stderr reader thread の join を待つ最大時間。
+const STDERR_JOIN_WAIT_GRACEFUL: Duration = Duration::from_millis(500);
+
+/// `Drop` (fast path) で stderr reader thread の join を待つ最大時間。
+const STDERR_JOIN_WAIT_DROP: Duration = Duration::from_millis(100);
 
 /// USIエンジンプロセス
 pub struct UsiEngine {
@@ -23,6 +41,25 @@ pub struct UsiEngine {
     pub engine_name: String,
     opt_names: HashSet<String>,
     quit_sent: bool,
+    /// engine binary の path。`engine_name` は handshake 後しか入らないため、
+    /// 死亡時の error message には path も並記して debugging を支援する。
+    /// spawn は対局開始時 1 回しか呼ばれず、`PathBuf` の heap allocation は
+    /// ホットパスにないので許容範囲。
+    engine_path: PathBuf,
+    /// engine の stderr 末尾 64 行 ring buffer。各行 4096 bytes cap。
+    /// engine 死亡時の error message に末尾を付けて原因 debugging を支援する。
+    /// reader thread は best-effort: poison/UTF-8/IO error は loop 終了で吸収。
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    /// stderr reader thread が EOF/IO error 観測後 true をセット。
+    /// `engine_exited_error()` は snapshot 前に短時間 (200ms) この flag を
+    /// best-effort で待つ。実際の tail 可視性は snapshot 時の `Mutex::lock()`
+    /// が Acquire 同期点として機能することで保証される (Acquire load は
+    /// 早期 break 用 signal で、可視性 chain は Mutex 経由)。
+    stderr_done: Arc<AtomicBool>,
+    /// stderr reader thread の handle。`quit()` (graceful) と `Drop` (fast)
+    /// で bounded join + detach fallback。`engine_exited_error()` は handle を
+    /// take しない (副作用なし、cleanup ownership は quit/Drop に集約)。
+    stderr_reader_handle: Option<thread::JoinHandle<()>>,
 }
 
 /// bestmove の解析結果
@@ -234,12 +271,13 @@ impl UsiEngine {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| anyhow!("エンジン起動失敗 {}: {e}", path.display()))?;
 
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
         let (tx, rx) = mpsc::channel::<String>();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
@@ -255,6 +293,37 @@ impl UsiEngine {
             }
         });
 
+        // stderr ring buffer。EOF/IO error までは best-effort で末尾 64 行を
+        // 保持し、engine 死亡時に診断 error message へ転写する。
+        let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_MAX_LINES)));
+        let stderr_done = Arc::new(AtomicBool::new(false));
+        let stderr_tail_writer = Arc::clone(&stderr_tail);
+        let stderr_done_writer = Arc::clone(&stderr_done);
+        let stderr_reader_handle = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut buf: Vec<u8> = Vec::with_capacity(STDERR_LINE_MAX_BYTES);
+            loop {
+                buf.clear();
+                match read_line_capped(&mut reader, &mut buf, STDERR_LINE_MAX_BYTES) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let raw = String::from_utf8_lossy(&buf).into_owned();
+                        let line = raw.trim_end_matches('\r').to_owned();
+                        let mut tail = match stderr_tail_writer.lock() {
+                            Ok(g) => g,
+                            Err(p) => p.into_inner(),
+                        };
+                        if tail.len() >= STDERR_TAIL_MAX_LINES {
+                            tail.pop_front();
+                        }
+                        tail.push_back(line);
+                    }
+                    Err(_) => break,
+                }
+            }
+            stderr_done_writer.store(true, Ordering::Release);
+        });
+
         let mut engine = Self {
             child,
             writer: BufWriter::new(stdin),
@@ -262,6 +331,10 @@ impl UsiEngine {
             engine_name: String::new(),
             opt_names: HashSet::new(),
             quit_sent: false,
+            engine_path: path.to_path_buf(),
+            stderr_tail,
+            stderr_done,
+            stderr_reader_handle: Some(stderr_reader_handle),
         };
         engine.initialize(options, ponder, timeout)?;
         Ok(engine)
@@ -439,21 +512,31 @@ impl UsiEngine {
 
     /// quit を送信してプロセスを終了（タイムアウト付き）
     pub fn quit(&mut self) {
-        if !self.quit_sent {
-            let _ = self.send("quit");
-            // 3秒待ってまだ終了しなければ kill
+        if self.quit_sent {
+            return;
+        }
+        let send_result = self.send("quit");
+        if send_result.is_ok() {
+            // 3 秒待ってまだ終了しなければ kill
             for _ in 0..30 {
                 if let Ok(Some(_)) = self.child.try_wait() {
-                    self.quit_sent = true;
-                    return;
+                    break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
+        }
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
             log::warn!("[USI] quit タイムアウト、kill します");
             let _ = self.child.kill();
             let _ = self.child.wait();
-            self.quit_sent = true;
         }
+        // stderr handle bounded join (graceful path のみ実施)
+        if let Some(handle) = self.stderr_reader_handle.take()
+            && let Err(unfinished) = join_handle_bounded(handle, STDERR_JOIN_WAIT_GRACEFUL)
+        {
+            drop(unfinished);
+        }
+        self.quit_sent = true;
     }
 
     fn wait_bestmove(
@@ -553,7 +636,7 @@ impl UsiEngine {
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    bail!("エンジンプロセスが終了しました");
+                    return Err(self.engine_exited_error());
                 }
             }
         }
@@ -561,13 +644,27 @@ impl UsiEngine {
 
     pub(crate) fn send(&mut self, cmd: &str) -> Result<()> {
         log::debug!("[USI] > {cmd}");
-        self.writer.write_all(cmd.as_bytes())?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
-        Ok(())
+        let result = self
+            .writer
+            .write_all(cmd.as_bytes())
+            .and_then(|_| self.writer.write_all(b"\n"))
+            .and_then(|_| self.writer.flush());
+        match result {
+            Ok(()) => Ok(()),
+            Err(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {
+                // BrokenPipe = engine 死亡確定の強い signal (Linux primary scope)。
+                // Windows の `ConnectionAborted` / `ConnectionReset` は followup-J で対応。
+                Err(self.engine_exited_error())
+            }
+            Err(io_err) => {
+                // BrokenPipe 以外は engine 生存中の transient error。
+                // `anyhow::Context::context` で source を保持しつつ伝搬。
+                Err(io_err).context("エンジン I/O エラー")
+            }
+        }
     }
 
-    fn recv(&self, timeout: Duration) -> Result<String> {
+    fn recv(&mut self, timeout: Duration) -> Result<String> {
         match self.rx.recv_timeout(timeout) {
             Ok(line) => {
                 log::trace!("[USI] < {line}");
@@ -576,9 +673,54 @@ impl UsiEngine {
             Err(RecvTimeoutError::Timeout) => {
                 bail!("エンジン応答タイムアウト");
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                bail!("エンジンプロセスが終了しました");
+            Err(RecvTimeoutError::Disconnected) => Err(self.engine_exited_error()),
+        }
+    }
+
+    /// engine 死亡確定経路 (BrokenPipe / Disconnected) から呼ばれる、
+    /// stderr 末尾と exit status を含む診断 error の組み立て。
+    ///
+    /// 副作用なし: `child` の reaping は `try_wait` の std cache 経由のみ、
+    /// `stderr_reader_handle` の take や `quit_sent` のセットは行わない。
+    /// 同一 session で複数回呼ばれても idempotent。cleanup ownership は
+    /// `quit()` (graceful) と `Drop` (fast) に集約する。
+    fn engine_exited_error(&mut self) -> anyhow::Error {
+        // (1) stderr reader の EOF 観測完了を best-effort で 200ms 待つ。
+        //     実際の tail 可視性は snapshot 時の `Mutex::lock()` で確保される
+        //     (Acquire 同期点)。本 wait は reader が最後の行を push し終えるのを
+        //     待つ目的のみ。fatal communication error 経路 (recv Disconnected /
+        //     send BrokenPipe / wait_bestmove Disconnected) から呼ばれる契約
+        //     なので、try_wait の結果に関係なく常に wait する。
+        let poll_iters = (STDERR_DRAIN_WAIT.as_millis() / STDERR_DRAIN_POLL.as_millis()).max(1);
+        for _ in 0..poll_iters {
+            if self.stderr_done.load(Ordering::Acquire) {
+                break;
             }
+            std::thread::sleep(STDERR_DRAIN_POLL);
+        }
+        // (2) try_wait で exit_status 取得 (副作用なし、reaping は std が cache する)
+        let exit_status = match self.child.try_wait() {
+            Ok(Some(status)) => Some(format!("{status}")),
+            _ => None,
+        };
+        // (3) tail snapshot (poison-resistant)
+        let tail: Vec<String> = self
+            .stderr_tail
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        // (4) error message 構築
+        let path = self.engine_path.display();
+        let prefix = match exit_status {
+            Some(s) => format!("エンジンプロセスが終了しました (path={path}, exit={s})"),
+            None => format!("エンジンプロセスが終了しました (path={path}, status=unknown)"),
+        };
+        if tail.is_empty() {
+            anyhow!("{prefix}; エンジン stderr は空")
+        } else {
+            anyhow!("{prefix}; エンジン stderr 末尾 {} 行:\n{}", tail.len(), tail.join("\n"))
         }
     }
 
@@ -590,12 +732,22 @@ impl UsiEngine {
 
 impl Drop for UsiEngine {
     fn drop(&mut self) {
+        // 既存 fast path を維持: send("quit") + sleep 100ms + kill + wait。
+        // engine 死亡確定 (BrokenPipe) の場合 send 経由で `engine_exited_error()`
+        // が走り 200ms wait を払うが、Drop 全体の遅延は最大 ~400ms に bounded。
+        // panic-on-drop / test runner 経路で 3.5 秒+ の遅延を回避する設計。
         if !self.quit_sent {
             let _ = self.send("quit");
-            // 少し待ってからプロセスを kill
             std::thread::sleep(Duration::from_millis(100));
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+        // stderr handle が残っていれば best-effort で cleanup (bounded join 100ms、
+        // 超過なら detach)
+        if let Some(handle) = self.stderr_reader_handle.take()
+            && let Err(unfinished) = join_handle_bounded(handle, STDERR_JOIN_WAIT_DROP)
+        {
+            drop(unfinished);
         }
     }
 }
@@ -676,4 +828,55 @@ fn update_search_info(info: &mut SearchInfo, line: &str) {
             _ => {}
         }
     }
+}
+
+/// stderr stream から `\n` 区切りで 1 行読み込む。
+///
+/// `max_bytes` を超えた分は読み飛ばし (discard) し、次の `\n` で 1 行として
+/// return する (4 KB 超の長い 1 行は truncate されて残りは破棄、複数行に分割
+/// しない)。LF 区切りのみ。CR 単独 (古い Mac 形式) は同一行扱い。CRLF の `\r`
+/// は戻り値の buf に残るため、ring buffer 投入直前に `trim_end_matches('\r')`
+/// で除去すること。
+///
+/// 戻り値は `\r` 込みの buf 長 (`BufRead::read_until` と同じ semantics、
+/// ただし delimiter `\n` は含まない、`max_bytes` 超過分は含まない)。
+fn read_line_capped<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<usize> {
+    let mut byte = [0u8; 1];
+    loop {
+        match reader.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                if buf.len() < max_bytes {
+                    buf.push(byte[0]);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(buf.len())
+}
+
+/// `JoinHandle` を最大 `deadline` まで待機して join を試みる。timeout 時は
+/// `Err(handle)` を返し caller が `drop()` で detach する。
+fn join_handle_bounded(
+    handle: thread::JoinHandle<()>,
+    deadline: Duration,
+) -> std::result::Result<(), thread::JoinHandle<()>> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        if handle.is_finished() {
+            let _ = handle.join();
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(handle)
 }
