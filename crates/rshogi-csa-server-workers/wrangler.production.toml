@@ -103,6 +103,7 @@ WS_ALLOWED_ORIGINS = "https://ramu-shogi.sh11235.com,tauri://localhost,https://t
 # 対局時計。`countdown` (CSA 2014 改訂秒読み、Floodgate 互換) / `countdown_msec`
 # (ms 粒度の短時間対局向け拡張) / `fischer` (増分加算) / `stopwatch` (分単位)。
 # production は本家 Floodgate と互換の `countdown` (Time_Unit:1sec) を既定値とする。
+# 環境別 clock 既定差分の網羅的説明と ops 判断基準は `docs/csa-server/clock_defaults.md` を参照。
 CLOCK_KIND = "countdown"
 # countdown / fischer 用（秒）。
 TOTAL_TIME_SEC = "600"

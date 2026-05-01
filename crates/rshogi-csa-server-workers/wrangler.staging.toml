@@ -105,6 +105,7 @@ WS_ALLOWED_ORIGINS = "https://stg.ramu-shogi.sh11235.com,https://csa-client-loca
 #   countdown_msec → TOTAL_TIME_MS  / BYOYOMI_MS
 #   fischer        → TOTAL_TIME_SEC / BYOYOMI_SEC (BYOYOMI_SEC は increment)
 #   stopwatch      → TOTAL_TIME_MIN / BYOYOMI_MIN
+# 環境別 clock 既定差分の網羅的説明と ops 判断基準は `docs/csa-server/clock_defaults.md` を参照。
 CLOCK_KIND = "countdown_msec"
 # countdown 系（参照されない側も SHARED_PUBLIC_VARS_KEYS の整合性のため宣言する）。
 TOTAL_TIME_SEC = "600"

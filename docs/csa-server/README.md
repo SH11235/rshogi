@@ -15,6 +15,7 @@
 - [`lobby_design.md`](lobby_design.md) — LobbyDO + マッチングの詳細設計 (`/ws/lobby`、`MATCHED` 通知、queue 戦略)。
 - [`lobby_e2e_runbook.md`](lobby_e2e_runbook.md) — Lobby マッチング対局を実機 staging で回す E2E 運用手順。
 - [`staging-e2e.md`](staging-e2e.md) — Workers staging × `csa_client` 実機対局シナリオ集 (平手 / 連続対局 / 切断再接続 / Buoy / 観戦)。
+- [`clock_defaults.md`](clock_defaults.md) — staging / production の clock 既定差分 (ops 仕様 single source of truth)、Floodgate 互換性、`CLOCK_PRESETS` 上書き経路。
 
 ## 関連 doc (このディレクトリ外)
 
