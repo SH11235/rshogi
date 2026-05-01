@@ -972,7 +972,7 @@ mod tests {
 
     /// `Reconnect_Token:` が配布された + 中断 + 非 shutdown なら reconnect を試みる。
     /// 戻り値の `(game_id, token)` 順を pin する (順序を逆転させると `ReconnectCredentials`
-    /// の `id`/`password`/`game_id`/`token` 配線で sever 側に不正な認証を送ってしまう)。
+    /// の `id`/`password`/`game_id`/`token` 配線で server 側に不正な認証を送ってしまう)。
     #[test]
     fn should_attempt_reconnect_returns_some_when_token_present_and_interrupted() {
         let outcome = session_outcome_with(GameResult::Interrupted, Some("a".repeat(32)));
@@ -989,6 +989,24 @@ mod tests {
     #[test]
     fn should_attempt_reconnect_returns_none_when_token_absent() {
         let outcome = session_outcome_with(GameResult::Interrupted, None);
+        assert!(should_attempt_reconnect(&outcome, false).is_none());
+    }
+
+    /// shutdown フラグが立っていれば、token があっても reconnect を試みない。
+    /// session を畳む経路で再接続要求を送ると server に二重ログイン扱いされる
+    /// 可能性があるため、shutdown 検知を最優先する契約を pin する。
+    #[test]
+    fn should_attempt_reconnect_returns_none_when_shutdown_set() {
+        let outcome = session_outcome_with(GameResult::Interrupted, Some("a".repeat(32)));
+        assert!(should_attempt_reconnect(&outcome, true).is_none());
+    }
+
+    /// 通常終局 (`Win` / `Lose` / `Draw` 等の `Interrupted` 以外) では reconnect を
+    /// 試みない。`run_one_game` 側で対局が完走したことが確定しているため、
+    /// 再接続経路に進むのは契約違反。
+    #[test]
+    fn should_attempt_reconnect_returns_none_when_result_is_not_interrupted() {
+        let outcome = session_outcome_with(GameResult::Win, Some("a".repeat(32)));
         assert!(should_attempt_reconnect(&outcome, false).is_none());
     }
 }

@@ -801,10 +801,9 @@ deploy 後の WS 切断で旧 bug を踏みうる。
 worst case 対局時間 (production CLOCK 設定 `countdown` + `total_time_sec=600`
 + `byoyomi_sec=10` + `max_moves=256`):
 
-- `total_time_sec × 2 + byoyomi_sec × max_moves ≈ 600 × 2 + 10 × 256 = 約 70 分`
-  (両者本体時間の上限)
-- 以降は両者秒読み戦で +`byoyomi_sec × 残手数` ≈ 最大 +25 分
-- 合計 **~85 分** が理論上限
+- 両者がほぼ全 main time を使い切り、`max_moves` 上限まで byoyomi 上限 (10 秒/手) を消費するケース
+- `total_time_sec × 2 + byoyomi_sec × max_moves = 600 × 2 + 10 × 256 = 1200 + 2560 = 3760 秒 ≈ 約 63 分`
+- 実運用ではほとんど到達しないが timeout 設計の上限根拠として用いる。典型値は 25〜30 分
 
 ### deploy 前確認手順
 
@@ -818,8 +817,8 @@ worst case 対局時間 (production CLOCK 設定 `countdown` + `total_time_sec=6
 
 現状 `wrangler deploy` で進行中の DO instance を「対局終了後にだけ replace
 する」graceful drain 経路は配線されていない (followup-I の対象)。対局頻度が
-増えた将来は本手順の上限 (85 分手動待機) では運用上限界が来るため、graceful
-drain 経路の整備が必要になる。
+増えた将来は本手順の上限 (worst case 約 63 分の手動待機) では運用上限界が来る
+ため、graceful drain 経路の整備が必要になる。
 
 ### AGREE 待ち state 残存の制限
 
