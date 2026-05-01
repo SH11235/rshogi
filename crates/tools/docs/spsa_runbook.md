@@ -29,7 +29,12 @@ cargo run --release -p tools --bin generate_spsa_params -- \
   --output spsa_params/canonical.params
 ```
 
-## 3. SPSA実行（更新）
+## 3. SPSA実行
+
+> 以下のコマンド例は **starting point** であり、最適値ではない。
+> `--total-pairs` は対象 param 数 × 50〜500 程度の幅で結果を見ながら増減
+> するのが基本。`--early-stop-*` 三点は閾値の運用実績がまだ無いため、
+> **初回 run では指定せずフルで走らせて挙動を観測** することを推奨する。
 
 ```bash
 RUN_DIR="runs/spsa/$(date -u +%Y%m%d_%H%M%S)"
@@ -47,19 +52,24 @@ cargo run --release -p tools --bin spsa -- \
   --hash-mb 256 \
   --byoyomi 1000 \
   --max-moves 320 \
-  --timeout-margin-ms 1000 \
-  --early-stop-avg-abs-update-threshold 0.02 \
-  --early-stop-result-variance-threshold 0.002 \
-  --early-stop-patience 5
+  --timeout-margin-ms 1000
+  # 初回 run では --early-stop-* 系は付けない。
+  # 閾値の運用実績ができてから個別に追加する (§9.3 参照):
+  #   --early-stop-avg-abs-update-threshold <T1>
+  #   --early-stop-result-variance-threshold <T2>
+  #   --early-stop-patience <N>
 ```
 
-主要な CLI:
+主要な CLI と推奨レンジ:
 
-| フラグ | 意味 |
-|---|---|
-| `--total-pairs N` | SPSA 全体の game pair 上限。total_games = 2N |
-| `--batch-pairs B` | 1 batch あたりの game pair 数 (既定 8)。1 batch で `2B` 局を消化し θ を 1 回更新、k は `+= B` |
-| `--seed S` | base seed (省略時はランダム)。SPSA の乱数列は seed と batch index から決定論的に生成される |
+| フラグ | 推奨レンジ | 意味・備考 |
+|---|---|---|
+| `--total-pairs N` | param 数 × 50〜500 | SPSA 全体の game pair 上限。total_games = 2N。大きいほど収束精度が上がるが対局時間も線形に伸びる |
+| `--batch-pairs B` | 8〜32 (既定 8) | 1 batch あたりの game pair 数。1 batch で `2B` 局を消化し θ を 1 回更新、k は `+= B`。大→低分散・低更新頻度、小→高分散・高更新頻度 |
+| `--byoyomi <ms>` | 100〜1000 ms | 1 手秒読み (既定 1000)。NPS が安定する程度に。短すぎるとエンジンが thinking time を使い切れず評価ノイズが増える |
+| `--seed S` | 任意 | base seed (省略時はランダム)。SPSA の乱数列は seed と batch index から決定論的に生成される |
+| `--max-moves` / `--timeout-margin-ms` | 既定 320 / 1000 ms | 対局打ち切り上限と timeout 検出マージン。慣習値で十分なケースが多い |
+| `--early-stop-*` 三点 | 初回 run では **指定しない** | 閾値の運用実績がまだ無く、特に `--early-stop-result-variance-threshold` は `\|raw_result\| / batch_pairs` (0..1 正規化値) との比較なので、よく考えずに小さい値を入れるとほぼ全 batch で誤発火する。挙動を観測してから設定する (§9.3) |
 
 `<run-dir>` には以下が自動生成される:
 
