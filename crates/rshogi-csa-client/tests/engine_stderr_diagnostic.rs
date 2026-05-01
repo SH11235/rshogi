@@ -28,20 +28,37 @@ static TMPDIR_LOCK: Mutex<()> = Mutex::new(());
 
 /// 与えた bash script を 0o755 の実行可能ファイルとして一時ディレクトリに書き出し、
 /// path を返す。test ごとに unique な名前を付与する。
+///
+/// Linux で `cargo test` を並列実行すると、`std::fs::write` 完了直後の `Command::spawn`
+/// で稀に `Text file busy (ETXTBSY)` を踏むため、tmp 書き出し → `sync_all` → atomic
+/// rename → chmod の順で kernel に「書き終えた実行可能ファイル」を確実に認識させる
+/// (PR #596 review で指摘された flake への対応)。
 fn write_mock_script(name: &str, body: &str) -> PathBuf {
+    use std::io::Write;
     let _guard = TMPDIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let seq = SCRIPT_SEQ.fetch_add(1, Ordering::SeqCst);
-    let path = std::env::temp_dir().join(format!(
-        "csa_client_mock_{}_{}_{}.sh",
-        std::process::id(),
-        name,
-        seq,
-    ));
-    std::fs::write(&path, body).expect("write mock script");
-    let mut perms = std::fs::metadata(&path).expect("stat").permissions();
+    let dir = std::env::temp_dir();
+    let final_path =
+        dir.join(format!("csa_client_mock_{}_{}_{}.sh", std::process::id(), name, seq,));
+    // 書き込みは別 path で行い、close 後に rename することで「open 中の fd」が
+    // exec と race する経路を排除する (ETXTBSY 回避)。
+    let tmp_path =
+        dir.join(format!("csa_client_mock_{}_{}_{}.sh.tmp", std::process::id(), name, seq,));
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)
+            .expect("open tmp script");
+        f.write_all(body.as_bytes()).expect("write mock script");
+        f.sync_all().expect("sync_all");
+    }
+    let mut perms = std::fs::metadata(&tmp_path).expect("stat").permissions();
     perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).expect("chmod");
-    path
+    std::fs::set_permissions(&tmp_path, perms).expect("chmod");
+    std::fs::rename(&tmp_path, &final_path).expect("atomic rename");
+    final_path
 }
 
 /// 死亡時の error message が満たすべき共通条件 (path + (exit or status=unknown))
@@ -213,4 +230,39 @@ exit 1
     // `\r` 単独 (CR だけが残る) は出ないはず。`\r\n` の CR を trim しているか確認。
     // message 内に `CRLF line\r` (= 末尾 CR) が現れたら trim 失敗。
     assert!(!msg.contains("CRLF line\r"), "末尾の `\\r` は trim されているはず: {msg}");
+}
+
+// ───────────────────────────────────────────────
+// Fixture 6: 空行を含む stderr が EOF として誤認されないこと
+//   PR #596 codex review で指摘された read_line_capped の bug への regression guard。
+//   空行 `\n` を読んだ後に後続行を継続して読めることを pin する。
+// ───────────────────────────────────────────────
+#[test]
+fn empty_stderr_line_is_not_treated_as_eof() {
+    let script = r#"#!/usr/bin/env bash
+read line  # usi
+echo "id name mock"
+echo "usiok"
+printf 'before empty\n' >&2
+printf '\n' >&2
+printf 'after empty\n' >&2
+exec 2>&-
+exit 1
+"#;
+    let path = write_mock_script("empty_line_not_eof", script);
+    let opts: HashMap<String, toml::Value> = HashMap::new();
+    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT) {
+        Ok(_) => panic!("isready 後 engine 死亡 → error が期待される"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:#}");
+    assert_diagnostic_prefix(&msg, &path);
+    // `before empty` だけでなく `after empty` も含まれていれば、空行を EOF として
+    // 誤認していない証拠。reader thread が空行で break した場合は `after empty` が
+    // ring buffer に届かない (= bug 再発)。
+    assert!(msg.contains("before empty"), "空行前の行が含まれるはず: {msg}");
+    assert!(
+        msg.contains("after empty"),
+        "空行後の行も含まれるはず (空行 EOF 誤認 bug の regression guard): {msg}"
+    );
 }

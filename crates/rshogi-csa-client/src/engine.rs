@@ -305,8 +305,13 @@ impl UsiEngine {
             loop {
                 buf.clear();
                 match read_line_capped(&mut reader, &mut buf, STDERR_LINE_MAX_BYTES) {
-                    Ok(0) => break,
-                    Ok(_) => {
+                    Ok(ReadLineOutcome::Eof) => break,
+                    Ok(ReadLineOutcome::Line) => {
+                        // `Line(0)` (空行) もここに含まれる。EOF と空行を取り違えて
+                        // reader thread を早期終了させると以降の stderr が失われ、
+                        // pipe が詰まって engine 側が write で block するリスクがある
+                        // ため、空行は通常行と同じく ring buffer に push する
+                        // (PR #596 review で指摘された bug への対応)。
                         let raw = String::from_utf8_lossy(&buf).into_owned();
                         let line = raw.trim_end_matches('\r').to_owned();
                         let mut tail = match stderr_tail_writer.lock() {
@@ -830,6 +835,26 @@ fn update_search_info(info: &mut SearchInfo, line: &str) {
     }
 }
 
+/// `read_line_capped` の戻り値。EOF と「空行の delimiter 読み取り」を
+/// 区別するために使う。
+///
+/// ## 背景
+///
+/// 戻り値を単に byte 数 (`usize`) にしてしまうと、空行 `"\n"` を読んだとき
+/// (`buf.len() == 0`) と EOF (`buf.len() == 0`) が区別できず、呼び出し側で
+/// 空行を EOF として誤認して reader thread を早期終了させる bug を生む
+/// (PR #596 codex review で指摘)。`buf` への push は呼び出し側で観測できる
+/// ため、`Line` バリアントは byte 数を持たず純粋に「区切りを 1 行読んだ」
+/// signal として機能させる。
+enum ReadLineOutcome {
+    /// 1 行読み取り完了 (空行を含む)。実 byte 数は呼び出し側が `buf.len()`
+    /// で観測する。
+    Line,
+    /// EOF (これ以上 reader からは読めない)。reader thread を終了させる
+    /// signal として使う。
+    Eof,
+}
+
 /// stderr stream から `\n` 区切りで 1 行読み込む。
 ///
 /// `max_bytes` を超えた分は読み飛ばし (discard) し、次の `\n` で 1 行として
@@ -838,20 +863,31 @@ fn update_search_info(info: &mut SearchInfo, line: &str) {
 /// は戻り値の buf に残るため、ring buffer 投入直前に `trim_end_matches('\r')`
 /// で除去すること。
 ///
-/// 戻り値は `\r` 込みの buf 長 (`BufRead::read_until` と同じ semantics、
-/// ただし delimiter `\n` は含まない、`max_bytes` 超過分は含まない)。
+/// 戻り値は [`ReadLineOutcome`] で EOF と空行を区別する。EOF の場合は
+/// `ReadLineOutcome::Eof` を返し、呼び出し側はこれを受けて reader loop を
+/// 終了する。1 行読み取り (空行を含む) の場合は `ReadLineOutcome::Line(n)` を
+/// 返し、`n` は `\r` 込みの buf 長 (delimiter `\n` を含まず、`max_bytes`
+/// 超過分も含まない)。
 fn read_line_capped<R: BufRead>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     max_bytes: usize,
-) -> std::io::Result<usize> {
+) -> std::io::Result<ReadLineOutcome> {
     let mut byte = [0u8; 1];
+    let mut got_byte = false;
     loop {
         match reader.read(&mut byte) {
-            Ok(0) => break,
+            Ok(0) => {
+                // EOF: 何も読まずに EOF なら Eof、何か読んだ後 EOF なら最終行扱い
+                if got_byte {
+                    return Ok(ReadLineOutcome::Line);
+                }
+                return Ok(ReadLineOutcome::Eof);
+            }
             Ok(_) => {
+                got_byte = true;
                 if byte[0] == b'\n' {
-                    break;
+                    return Ok(ReadLineOutcome::Line);
                 }
                 if buf.len() < max_bytes {
                     buf.push(byte[0]);
@@ -861,7 +897,6 @@ fn read_line_capped<R: BufRead>(
             Err(e) => return Err(e),
         }
     }
-    Ok(buf.len())
 }
 
 /// `JoinHandle` を最大 `deadline` まで待機して join を試みる。timeout 時は
