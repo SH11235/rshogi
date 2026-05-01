@@ -165,7 +165,8 @@ cargo run -p tools --release --bin tournament -- \
 - `--concurrency`: 並列対局数（デフォルト1）。CPUコア数に応じて調整。
 - `--report-interval`: N局ごとに進捗を表示（デフォルト10）。
 - `--engine-usi-option "INDEX:Name=Value"`: エンジン個別の USI オプション（0始まりインデックス）。
-  指定したエンジンは共通 `--usi-option` が**完全に置換**される（マージではない）。
+  デフォルトでは共通 `--usi-option` にマージされ、同じキーは engine 個別指定が上書きする。
+  旧挙動の完全置換が必要な場合は `--strict-engine-usi-option` を併用する。
 - 出力は以下の2種類が `{out-dir}` に自動生成される:
   - `{label_i}-vs-{label_j}.jsonl`: ペア別の棋譜ログ（各対局の指し手・評価値・結果）
   - `meta.json`: 対局設定・エンジン情報をまとめたファイル。対局条件の確認・再現に利用可能。
