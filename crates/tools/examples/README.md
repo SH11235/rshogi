@@ -84,12 +84,11 @@ cargo run --release -p tools --bin spsa -- \
   --threads 1 --hash-mb 256 --byoyomi 1000
 ```
 
-v4 仕様:
-- `--total-pairs N`: SPSA 全体の game pair 数 (= fishtest `num_iter`)。total_games = 2N
+主要な CLI:
+- `--total-pairs N`: SPSA 全体の game pair 数。total_games = 2N
 - `--batch-pairs B`: 1 batch あたりの game pair 数。1 batch で `2B` 局を消化し θ を 1 回更新
-- `--seed S`: 単一 base_seed (省略時はランダム)。multi-seed 機能 (`--seeds` /
-  `--parallel-seeds`) は撤去された。複数 seed 比較は **`--seed` を変えた独立
-  run dir** で並列実行する
+- `--seed S`: base seed (省略時はランダム)。複数 seed 比較は **`--seed` を変えた
+  独立 run dir** を別プロセスで並列実行する
 
 `<run-dir>` 配下に `state.params` / `final.params` / `meta.json` /
 `values.csv` / `stats.csv` が自動生成される。CSV のパスを別途指定したい場合は
@@ -145,8 +144,7 @@ cargo run -p tools --bin spsa_stats_to_plot_csv -- \
 ```
 
 複数 run の比較 (例 `--seed` を変えた独立 run dir 群) は、各 run の
-`stats.csv` を pandas/awk で concat してから集計する (v4 では
-`stats_aggregate.csv` の自動生成は撤去された)。
+`stats.csv` を pandas/awk で concat してから集計する。
 
 ## 自己対局 (engine_selfplay)
 

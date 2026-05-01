@@ -124,10 +124,9 @@ spsa --run-dir "runs/spsa/$(date -u +%Y%m%d_%H%M%S)" \
      ...
 ```
 
-v4 では `--total-pairs N` (SPSA 全体の game pair 数) と `--batch-pairs B`
-(1 batch あたりの game pair 数、既定 8) が主役 CLI。multi-seed 機能
-(`--seeds` / `--parallel-seeds`) は撤去された (詳細は CHANGELOG の v4 エントリ)。
-詳細は `crates/tools/docs/spsa_runbook.md` §3 / §4.1 参照。
+主要な SPSA CLI は `--total-pairs N` (SPSA 全体の game pair 数) と
+`--batch-pairs B` (1 batch あたりの game pair 数、既定 8)。詳細は
+`crates/tools/docs/spsa_runbook.md` §3 / §4.1 を参照。
 
 ## 関連ドキュメント
 
