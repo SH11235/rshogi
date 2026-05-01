@@ -231,8 +231,10 @@ SPSA_TEST_FLOAT,float,2.5,0.0,3.0,0.0,0.001 //changed (c_end=0 で値固定)
 
     // c_end=0 schedule なので 1 iter 後も値は canonical 初期値のまま。
     let final_body = String::from_utf8(new_final).unwrap();
+    // B-3 以降: is_int でも `{:.6}` 固定桁で f64 を保存する。c_end=0 なので
+    // 抽選も走らず値は変わらない。
     assert!(
-        final_body.contains("SPSA_TEST_INT,int,9,"),
+        final_body.contains("SPSA_TEST_INT,int,9.000000,"),
         "final.params should keep canonical init value with c_end=0: {final_body}"
     );
     assert!(

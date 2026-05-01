@@ -1498,25 +1498,50 @@ impl SpsaParam {
             not_used,
         } = raw;
         let is_int = kind.eq_ignore_ascii_case("int");
+        let value: f64 = value_text
+            .parse::<f64>()
+            .with_context(|| format!("invalid v at line {line_no}"))?;
+        let min: f64 = min_text
+            .parse::<f64>()
+            .with_context(|| format!("invalid min at line {line_no}"))?;
+        let max: f64 = max_text
+            .parse::<f64>()
+            .with_context(|| format!("invalid max at line {line_no}"))?;
+        let c_end: f64 = col5_text
+            .parse::<f64>()
+            .with_context(|| format!("invalid c_end at line {line_no}"))?;
+        let r_end: f64 = col6_text
+            .parse::<f64>()
+            .with_context(|| format!("invalid r_end at line {line_no}"))?;
+        // 数値の妥当性検証。f64::clamp は NaN bound で panic、`as i64` は NaN/Inf で
+        // 0 や i64::MAX/MIN に化けるため、入口で必ず弾く。SPSA tuner はパラメータ
+        // ファイルを長時間信頼する前提なので、ここで Result にして早期発見する。
+        for (label, v) in [
+            ("v", value),
+            ("min", min),
+            ("max", max),
+            ("c_end", c_end),
+            ("r_end", r_end),
+        ] {
+            if !v.is_finite() {
+                bail!("non-finite {label}={v} at line {line_no}");
+            }
+        }
+        if min > max {
+            bail!("min ({min}) > max ({max}) at line {line_no}");
+        }
+        if value < min || value > max {
+            bail!("v ({value}) is out of [min={min}, max={max}] at line {line_no}");
+        }
         Ok(SpsaParam {
             name,
             type_name: kind,
             is_int,
-            value: value_text
-                .parse::<f64>()
-                .with_context(|| format!("invalid v at line {line_no}"))?,
-            min: min_text
-                .parse::<f64>()
-                .with_context(|| format!("invalid min at line {line_no}"))?,
-            max: max_text
-                .parse::<f64>()
-                .with_context(|| format!("invalid max at line {line_no}"))?,
-            c_end: col5_text
-                .parse::<f64>()
-                .with_context(|| format!("invalid c_end at line {line_no}"))?,
-            r_end: col6_text
-                .parse::<f64>()
-                .with_context(|| format!("invalid r_end at line {line_no}"))?,
+            value,
+            min,
+            max,
+            c_end,
+            r_end,
             comment,
             not_used,
         })
@@ -1666,11 +1691,13 @@ fn write_params(path: &Path, params: &[SpsaParam]) -> Result<()> {
         for p in params {
             // float は `{:.6}` で固定桁にしてラウンドトリップ・git diff の安定性を保つ
             // (`{}` (Display) は `1e-7` のような指数表記や精度不定の桁を出すため)
-            let v_str = if p.is_int {
-                format!("{}", p.value.round() as i64)
-            } else {
-                format!("{:.6}", p.value)
-            };
+            // B-3: θ 内部状態は is_int でも f64 のまま保持する (fishtest 流)。
+            // engine への送信時にのみ stochastic round が掛かる (compute_seed_prep)。
+            // 過去 (B-3 以前) は state.params 書き出しで int 丸めしていたが、resume を
+            // 挟むと小数部が消えて「小さな更新が連続消失」する元バグが復活するため、
+            // is_int でも `{:.6}` で f64 を保存する。canonical (engine 配布用) を別途
+            // 整数化したい場合は専用エクスポート経路で行う。
+            let v_str = format!("{:.6}", p.value);
             let mut line = format!(
                 "{},{},{},{},{},{},{}",
                 p.name, p.type_name, v_str, p.min, p.max, p.c_end, p.r_end
@@ -1692,6 +1719,14 @@ fn write_params(path: &Path, params: &[SpsaParam]) -> Result<()> {
     Ok(())
 }
 
+/// engine に setoption 文字列として送る値の整形。
+///
+/// is_int=true の場合、`value` は **既に stochastic round 済み整数値の f64 表現**
+/// であることを呼び出し側 (`compute_seed_prep`) が保証する。理屈上は `as i64` で
+/// truncation すれば足りるが、浮動小数誤差で `9.9999...` のような値が来ても事故
+/// 化しないよう **防御的に `round` を適用** する (整数 f64 への round は no-op で
+/// 既存 stochastic 抽選結果を上書きしない)。NaN / 無限大は呼び出し側 (clamp 適用
+/// 済み) で排除されている前提。
 fn option_value_string(param: &SpsaParam, value: f64) -> String {
     if param.is_int {
         format!("{}", value.round() as i64)
@@ -1828,6 +1863,15 @@ fn seed_for_iteration(base_seed: u64, iteration_index: u32) -> u64 {
     base_seed ^ iter_term
 }
 
+/// flip 抽選用 RNG の salt。base_seed に XOR して `seed_for_iteration` に渡すことで
+/// rounding RNG と独立な stream を確保する。同じ base_seed でも flip と rounding が
+/// 同 RNG state を共有しないようにすることが目的（fishtest worker と同じ分離方針）。
+const FLIP_RNG_SALT: u64 = 0xF11D_F11D_F11D_F11D;
+/// stochastic rounding 用 RNG の salt。`int` 型 SPSA param を engine に送る際の
+/// `floor(v + U(0,1))` 抽選で使う。flip と独立させることで「flip パターンが
+/// rounding 結果に相関する」退行を防ぐ。
+const ROUNDING_RNG_SALT: u64 = 0xC0DD_C0DD_C0DD_C0DD;
+
 /// `compute_seed_prep` のセッション定数バンドル（iter 内で全 seed 共通）。
 ///
 /// 引数増加によるシグネチャ複雑化を避けるため `compute_seed_prep` の入力をまとめる。
@@ -1854,8 +1898,19 @@ fn compute_seed_prep(
     base_seed: u64,
     seed_total_games_start: usize,
 ) -> Result<SeedPrep> {
-    let iter_seed = seed_for_iteration(base_seed, iter);
-    let mut rng = ChaCha8Rng::seed_from_u64(iter_seed);
+    // flip / rounding / startpos の RNG stream を独立化する。
+    // - flip_rng: Bernoulli ±1 抽選用 (seed = base_seed ^ FLIP_RNG_SALT, iter)。
+    // - rounding_rng: stochastic rounding 用 (seed = base_seed ^ ROUNDING_RNG_SALT, iter)。
+    // - rng (本関数 local): startpos cyclic 進行用。flip と salt なしで共有していた既存
+    //   挙動を維持しつつ、flip 抽選を独立 stream にすることで「flip 結果と startpos
+    //   sampling 結果が相関する」退行を防ぐ。base_seed と iter が同じなら結果も同じ
+    //   なので決定論性は保たれる。
+    let flip_seed = seed_for_iteration(base_seed ^ FLIP_RNG_SALT, iter);
+    let rounding_seed = seed_for_iteration(base_seed ^ ROUNDING_RNG_SALT, iter);
+    let startpos_seed = seed_for_iteration(base_seed, iter);
+    let mut flip_rng = ChaCha8Rng::seed_from_u64(flip_seed);
+    let mut rounding_rng = ChaCha8Rng::seed_from_u64(rounding_seed);
+    let mut rng = ChaCha8Rng::seed_from_u64(startpos_seed);
 
     // Per-param Fishtest 摂動: shift_j = c_k_j × flip_j
     let flips: Vec<f64> = ctx
@@ -1864,7 +1919,7 @@ fn compute_seed_prep(
         .map(|p| {
             if !is_param_active(p, ctx.active_only_regex, ctx.translator) {
                 0.0
-            } else if rng.random_bool(0.5) {
+            } else if flip_rng.random_bool(0.5) {
                 1.0
             } else {
                 -1.0
@@ -1886,18 +1941,36 @@ fn compute_seed_prep(
             }
         })
         .collect();
-    let plus_values: Vec<f64> = ctx
-        .params
-        .iter()
-        .zip(shifts.iter())
-        .map(|(p, s)| clamped_value(p, p.value + s))
-        .collect();
-    let minus_values: Vec<f64> = ctx
-        .params
-        .iter()
-        .zip(shifts.iter())
-        .map(|(p, s)| clamped_value(p, p.value - s))
-        .collect();
+    // engine に送る plus/minus 値を確定する。
+    //
+    // is_int=false (実数 param): clamp のみ。
+    // is_int=true (整数 param): fishtest worker 互換の stochastic rounding を適用。
+    //   - 期待値は連続 f64 値と一致するため、長期平均で int 丸めバイアスが消える
+    //   - clamp → round → 再 clamp の順序で「max=10, v=10.4 → floor(10.4 + 0.7)=11
+    //     → 10 へ再 clamp」のような範囲外滑り込みを吸収する
+    //
+    // 注: rounding は **batch (= 1 iter) 単位で 1 回**。同じ batch 内の game pair は
+    // 全て同じ rounded 値を engine に送る (fishtest と等価)。
+    let mut round_int = |p: &SpsaParam, raw: f64| -> f64 {
+        if p.is_int {
+            let clamped = clamped_value(p, raw);
+            // floor(v + U(0,1)) の stochastic rounding。期待値は v、誤差は ±0.5 以内。
+            let u: f64 = rounding_rng.random();
+            let rounded = (clamped + u).floor();
+            clamped_value(p, rounded)
+        } else {
+            clamped_value(p, raw)
+        }
+    };
+    // ⚠ 順序依存: plus_values の各 param で rounding_rng を 1 回消費し、続けて
+    // minus_values でも 1 回消費する。param ごとに plus → minus の順で交互に進める
+    // ことで stream を予測可能にする (将来 ±同 round 値で揃えたくなったら別 stream)。
+    let mut plus_values: Vec<f64> = Vec::with_capacity(ctx.params.len());
+    let mut minus_values: Vec<f64> = Vec::with_capacity(ctx.params.len());
+    for (p, s) in ctx.params.iter().zip(shifts.iter()) {
+        plus_values.push(round_int(p, p.value + s));
+        minus_values.push(round_int(p, p.value - s));
+    }
 
     let mut active_params = 0usize;
     let mut abs_shift_sum = 0.0f64;
@@ -2906,8 +2979,10 @@ fn main() -> Result<()> {
             }
             let before = p.value;
             let avg_signal = update_sums[idx] / seed_values.len() as f64;
-            let updated = clamped_value(p, p.value + avg_signal * cli.mobility);
-            p.value = if p.is_int { updated.round() } else { updated };
+            // θ 内部状態は is_int に関わらず f64 のまま保持する (fishtest 流)。
+            // engine への送信時にのみ stochastic round が掛かる (compute_seed_prep)。
+            // ここで round すると小さな更新が連続消失して棋力低下の原因になる。
+            p.value = clamped_value(p, p.value + avg_signal * cli.mobility);
             let abs_update = (p.value - before).abs();
             updated_params += 1;
             abs_update_sum += abs_update;
@@ -3411,8 +3486,9 @@ mod tests {
         }];
         write_params(&path, &params).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.starts_with("Foo,int,42,"), "actual: {body}");
-        // ラウンドトリップ
+        // B-3 以降: is_int でも `{:.6}` 固定桁で f64 を保存する。
+        assert!(body.starts_with("Foo,int,42.000000,"), "actual: {body}");
+        // ラウンドトリップ (parse は f64 なので "42" / "42.000000" のどちらでも復元可能)
         let reloaded = read_params(&path).unwrap();
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].name, "Foo");
@@ -3876,6 +3952,82 @@ mod tests {
             let g1 = pair_idx * 2 + 1;
             assert!(g0 % 2 == 0, "game {g0} should produce plus_is_black=true");
             assert!(g1 % 2 != 0, "game {g1} should produce plus_is_black=false");
+        }
+    }
+
+    /// Stochastic rounding の期待値は連続 f64 値に一致する (大数の法則)。
+    /// 多数 iteration (= 多数 rounding 抽選) を回し、`p.value=10.4` の rounded 平均が
+    /// 0.05 程度の誤差で 10.4 に収束することを確認。これが崩れると int param で
+    /// 系統的バイアスが入って棋力低下の原因になる。
+    ///
+    /// Seed を変えて iter ごとに rounding stream を進め、結果値の平均を取る。
+    #[test]
+    fn stochastic_rounding_expected_value_matches_continuous() {
+        // base_seed を変えながら、固定 p.value=10.4 の rounded plus_value 平均を取る。
+        // shifts はゼロにしたいので c_end=0.0 (→ at_iteration の c_k は 0) のパラメータを使う。
+        let mut params = vec![make_param("Search_a", 10.4, 1.0)];
+        params[0].is_int = true;
+        params[0].min = 0.0;
+        params[0].max = 100.0;
+        params[0].c_end = 1.0; // shifts を生む
+        let schedules: Vec<ParamScheduleConstants> = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+            .collect();
+        let translator = EngineNameTranslator::empty();
+        let ctx = make_test_ctx(&params, &schedules, &translator, 2);
+
+        // shift がゼロでないと「連続値=10.4」になる plus/minus を作れないので、
+        // ここでは shift 込みの rounded 値を多数 iter 集計し、shift の対称性で平均が
+        // 10.4 に収束することを確認する (plus と minus を両方足し 2 で割る)。
+        let n_iters = 4000_u32;
+        let mut sum = 0.0f64;
+        let mut count = 0_usize;
+        for iter in 0..n_iters {
+            let prep = compute_seed_prep(&ctx, iter, 12345, 0).expect("prep");
+            sum += prep.plus_values[0];
+            sum += prep.minus_values[0];
+            count += 2;
+        }
+        let mean = sum / count as f64;
+        let err = (mean - 10.4).abs();
+        assert!(
+            err < 0.05,
+            "stochastic rounding 平均 {mean} が連続値 10.4 から {err} 乖離 (許容 < 0.05)"
+        );
+    }
+
+    /// 完全再現性: 同一 seed/iter で 2 回 `compute_seed_prep` を回したとき、
+    /// flip / shifts / plus_values / minus_values / start_pos_indices 全てが
+    /// bit-identical に一致することを確認。stochastic rounding 導入後も RNG stream を
+    /// 分離した上で seed_for_iteration から決定論的に生成しているため、保証される。
+    #[test]
+    fn compute_seed_prep_full_reproducibility_with_rounding() {
+        let mut params = vec![
+            make_param("Search_a", 1234.5, 50.0),
+            make_param("Search_b", 9876.7, 100.0),
+        ];
+        for p in params.iter_mut() {
+            p.is_int = true;
+        }
+        let schedules: Vec<ParamScheduleConstants> = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+            .collect();
+        let translator = EngineNameTranslator::empty();
+        let ctx = make_test_ctx(&params, &schedules, &translator, 8);
+
+        let prep1 = compute_seed_prep(&ctx, 7, 99, 200).expect("prep1");
+        let prep2 = compute_seed_prep(&ctx, 7, 99, 200).expect("prep2");
+
+        assert_eq!(prep1.flips, prep2.flips);
+        assert_eq!(prep1.plus_values, prep2.plus_values);
+        assert_eq!(prep1.minus_values, prep2.minus_values);
+        assert_eq!(prep1.start_pos_indices, prep2.start_pos_indices);
+
+        // 整数 round 結果が実際に整数になっていることを確認
+        for v in prep1.plus_values.iter().chain(prep1.minus_values.iter()) {
+            assert_eq!(v.fract(), 0.0, "is_int param で fractional 値が残った: {v}");
         }
     }
 
