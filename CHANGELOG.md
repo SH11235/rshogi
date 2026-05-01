@@ -78,6 +78,14 @@ rg '\-\-seeds\b|\-\-parallel\-seeds|\-\-games\-per\-iteration|\-\-iterations \
 
 ## Unreleased — 2026-04 SPSA 系破壊的変更
 
+### tournament CLI
+
+- `--engine-usi-option` はデフォルトで共通 `--usi-option` にマージし、同じキーは
+  engine 個別指定が上書きするように変更。旧挙動の完全置換が必要な場合は
+  `--strict-engine-usi-option` を指定する。
+- engine read timeout 時に、EvalFile 未指定・NNUE 読み込み遅延・isready 中の
+  panic を疑うヒントと、取得できた engine stderr の直近行を出すようにした。
+
 ### spsa CLI
 
 - `--params <path>` を完全削除 (deprecation alias なし)。代替は `--run-dir <dir>`。

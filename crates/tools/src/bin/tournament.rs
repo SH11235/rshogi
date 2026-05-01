@@ -24,6 +24,7 @@
 ///   --engine /mnt/nvme1/development/YaneuraOu/source/YaneuraOu-halfkp_256x2-32-32 --engine-label yaneuraou \
 ///   --games 50 --byoyomi 500 --threads 2 \
 ///   --usi-option "FV_SCALE=24" \
+///   --strict-engine-usi-option \
 ///   --engine-usi-option "0:EvalFile=eval/halfkp_256x2-32-32_crelu/suisho5.bin" \
 ///   --engine-usi-option "1:EvalDir=/mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu" \
 ///   --engine-usi-option "1:NetworkDelay2=0" \
@@ -103,9 +104,13 @@ struct Cli {
     usi_options: Option<Vec<String>>,
 
     /// Per-engine USI options (format: "INDEX:Name=Value", can be repeated).
-    /// Overrides --usi-option for that engine (not merged).
+    /// Merged on top of --usi-option by default; per-engine values win.
     #[arg(long = "engine-usi-option", num_args = 1..)]
     engine_usi_options: Option<Vec<String>>,
+
+    /// Make --engine-usi-option replace common --usi-option for that engine.
+    #[arg(long = "strict-engine-usi-option")]
+    strict_engine_usi_option: bool,
 
     /// SPSA .params ファイルからUSIオプションを読み込む (format: "INDEX:path/to/file.params")。
     /// ファイル内の各パラメータが Name=Value として該当エンジンに設定される。
@@ -864,7 +869,11 @@ fn main() -> Result<()> {
     ];
     let engine_usi_options: Vec<Vec<String>> = (0..n)
         .map(|i| {
-            let mut opts = per_engine_usi.remove(&i).unwrap_or_else(|| common_usi_options.clone());
+            let mut opts = build_engine_usi_options(
+                &common_usi_options,
+                per_engine_usi.remove(&i),
+                cli.strict_engine_usi_option,
+            );
             for (name, default_value) in &time_defaults {
                 let already_set =
                     opts.iter().any(|o| o.split_once('=').is_some_and(|(k, _)| k == *name));
@@ -1475,4 +1484,81 @@ fn engine_label_from_path(path: &Path) -> String {
         }
     }
     filename.to_string()
+}
+
+fn build_engine_usi_options(
+    common: &[String],
+    per_engine: Option<Vec<String>>,
+    strict_engine_usi_option: bool,
+) -> Vec<String> {
+    let Some(per_engine) = per_engine else {
+        return common.to_vec();
+    };
+    if strict_engine_usi_option {
+        return per_engine;
+    }
+
+    let mut merged = common.to_vec();
+    for option in per_engine {
+        push_usi_option_overwrite(&mut merged, option);
+    }
+    merged
+}
+
+fn push_usi_option_overwrite(options: &mut Vec<String>, new_option: String) {
+    let new_name = usi_option_name(&new_option).to_string();
+    options.retain(|option| usi_option_name(option) != new_name);
+    options.push(new_option);
+}
+
+fn usi_option_name(option: &str) -> &str {
+    // 値側に '=' が含まれる USI option を壊さないよう、最初の '=' だけを区切りにする。
+    option.split_once('=').map_or(option, |(name, _)| name).trim()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_engine_usi_options;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn engine_usi_option_merges_with_common_and_overwrites_same_key() {
+        let common = strings(&["EvalFile=common.bin", "Threads=2", "BookFile=no_book"]);
+        let per_engine = strings(&["EvalFile=engine.bin", "NetworkDelay=0"]);
+
+        let merged = build_engine_usi_options(&common, Some(per_engine), false);
+
+        assert_eq!(
+            merged,
+            strings(&[
+                "Threads=2",
+                "BookFile=no_book",
+                "EvalFile=engine.bin",
+                "NetworkDelay=0",
+            ])
+        );
+    }
+
+    #[test]
+    fn strict_engine_usi_option_replaces_common_options() {
+        let common = strings(&["EvalFile=common.bin", "Threads=2"]);
+        let per_engine = strings(&["EvalDir=/path/to/eval"]);
+
+        let merged = build_engine_usi_options(&common, Some(per_engine), true);
+
+        assert_eq!(merged, strings(&["EvalDir=/path/to/eval"]));
+    }
+
+    #[test]
+    fn duplicated_per_engine_option_uses_last_value() {
+        let common = strings(&["EvalFile=common.bin", "Threads=2"]);
+        let per_engine = strings(&["EvalFile=first.bin", "EvalFile=last.bin"]);
+
+        let merged = build_engine_usi_options(&common, Some(per_engine), false);
+
+        assert_eq!(merged, strings(&["Threads=2", "EvalFile=last.bin"]));
+    }
 }

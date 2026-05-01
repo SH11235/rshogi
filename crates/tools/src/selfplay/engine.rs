@@ -1,8 +1,10 @@
-use std::collections::HashSet;
+use std::cell::Cell;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -12,6 +14,7 @@ use super::types::{InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest, dur
 pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
 pub const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const STDERR_BUFFER_LINES: usize = 2;
 
 /// エンジンプロセス起動時の設定。
 pub struct EngineConfig {
@@ -33,7 +36,9 @@ pub struct EngineProcess {
     child: Child,
     stdin: BufWriter<ChildStdin>,
     rx: Receiver<String>,
+    recent_stderr: Arc<Mutex<VecDeque<String>>>,
     opt_names: HashSet<String>,
+    read_timeout_hint_printed: Cell<bool>,
     pub label: String,
 }
 
@@ -59,11 +64,12 @@ impl EngineProcess {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context_display(|| format!("failed to spawn engine at {}", cfg.path.display()))?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+        let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
         let (tx, rx) = mpsc::channel::<String>();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
@@ -78,12 +84,34 @@ impl EngineProcess {
                 }
             }
         });
+        let recent_stderr = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_LINES)));
+        let stderr_buffer = recent_stderr.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        if let Ok(mut buffer) = stderr_buffer.lock() {
+                            if buffer.len() == STDERR_BUFFER_LINES {
+                                buffer.pop_front();
+                            }
+                            buffer.push_back(line);
+                        } else {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
 
         let mut proc = Self {
             child,
             stdin: BufWriter::new(stdin),
             rx,
+            recent_stderr,
             opt_names: HashSet::new(),
+            read_timeout_hint_printed: Cell::new(false),
             label,
         };
         proc.initialize(cfg)?;
@@ -298,7 +326,7 @@ impl EngineProcess {
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    bail!("{}: engine exited unexpectedly", self.label);
+                    bail!("{}", self.engine_exited_message());
                 }
             }
         }
@@ -316,9 +344,56 @@ impl EngineProcess {
     }
 
     pub fn recv_line(&self, timeout: Duration) -> Result<String> {
-        self.rx
-            .recv_timeout(timeout)
-            .map_err(|_| anyhow!("{}: engine read timeout", self.label))
+        match self.rx.recv_timeout(timeout) {
+            Ok(line) => Ok(line),
+            Err(RecvTimeoutError::Timeout) => {
+                let message = self.engine_read_timeout_message(timeout);
+                if !self.read_timeout_hint_printed.replace(true) {
+                    eprintln!("{message}");
+                }
+                Err(anyhow!(message))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                bail!("{}", self.engine_exited_message())
+            }
+        }
+    }
+
+    fn engine_read_timeout_message(&self, timeout: Duration) -> String {
+        let mut message = format!(
+            "{}: engine read timeout after {} ms\n  typical causes: missing EvalFile / slow NNUE load / engine panic during isready",
+            self.label,
+            timeout.as_millis()
+        );
+        self.append_recent_stderr(&mut message);
+        message
+    }
+
+    fn engine_exited_message(&self) -> String {
+        let mut message = format!(
+            "{}: engine exited unexpectedly\n  typical causes: missing EvalFile / engine panic during usi/isready/search",
+            self.label
+        );
+        self.append_recent_stderr(&mut message);
+        message
+    }
+
+    fn recent_stderr_lines(&self) -> Vec<String> {
+        let Ok(buffer) = self.recent_stderr.lock() else {
+            return Vec::new();
+        };
+        buffer.iter().cloned().collect()
+    }
+
+    fn append_recent_stderr(&self, message: &mut String) {
+        let stderr_lines = self.recent_stderr_lines();
+        if !stderr_lines.is_empty() {
+            message.push_str("\n  recent engine stderr:");
+            for line in stderr_lines {
+                message.push_str("\n    ");
+                message.push_str(&line);
+            }
+        }
     }
 
     pub fn set_option_if_available(&mut self, name: &str, value: &str) -> Result<()> {
