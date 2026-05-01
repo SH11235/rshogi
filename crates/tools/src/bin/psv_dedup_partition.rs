@@ -551,38 +551,49 @@ fn partition_files_into(
             }
             eprintln!("Warning: {} size {size} is not a multiple of {PSV_SIZE}", input.display());
         }
-        let mut reader = BufReader::with_capacity(8 << 20, file);
+        let mut input_bytes_read = 0u64;
+        let completed_input = {
+            let mut reader = BufReader::with_capacity(8 << 20, file);
+            loop {
+                if max_positions > 0 && total_records >= max_positions {
+                    break false;
+                }
 
-        let completed_input = loop {
-            if max_positions > 0 && total_records >= max_positions {
-                break false;
-            }
+                if !read_psv_record(&mut reader, &mut buf, input)? {
+                    break true;
+                }
+                input_bytes_read += PSV_SIZE as u64;
 
-            match reader.read_exact(&mut buf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break true,
-                Err(e) => return Err(e),
-            }
+                let sfen: &[u8; SFEN_SIZE] = buf[..SFEN_SIZE].try_into().unwrap();
+                let h = hash_packed_sfen(sfen);
+                let partition = (h as usize) % num_partitions;
+                writers[partition].write_all(&buf)?;
 
-            let sfen: &[u8; SFEN_SIZE] = buf[..SFEN_SIZE].try_into().unwrap();
-            let h = hash_packed_sfen(sfen);
-            let partition = (h as usize) % num_partitions;
-            writers[partition].write_all(&buf)?;
-
-            total_records += 1;
-            if total_records.is_multiple_of(100_000_000) {
-                let elapsed = start.elapsed().as_secs_f64();
-                let speed = total_records as f64 / elapsed / 1e6;
-                eprintln!(
-                    "    {:.0}M partitioned, {:.1}s ({:.1}M rec/s)",
-                    total_records as f64 / 1e6,
-                    elapsed,
-                    speed,
-                );
+                total_records += 1;
+                if total_records.is_multiple_of(100_000_000) {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let speed = total_records as f64 / elapsed / 1e6;
+                    eprintln!(
+                        "    {:.0}M partitioned, {:.1}s ({:.1}M rec/s)",
+                        total_records as f64 / 1e6,
+                        elapsed,
+                        speed,
+                    );
+                }
             }
         };
 
         if delete_inputs_on_success && completed_input {
+            if input_bytes_read != size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} was read as {input_bytes_read} bytes but metadata reported {size}; \
+                         入力が処理中に変更された可能性があるため削除しません",
+                        input.display(),
+                    ),
+                ));
+            }
             flush_partition_writers(&mut writers)?;
             std::fs::remove_file(input)?;
             eprintln!("    deleted input: {}", input.display());
@@ -605,6 +616,31 @@ fn partition_files_into(
     eprintln!("  [{label}] done: {total_records} records, {elapsed:.1}s");
 
     Ok(total_records)
+}
+
+fn read_psv_record(
+    reader: &mut impl Read,
+    buf: &mut [u8; PSV_SIZE],
+    input: &Path,
+) -> io::Result<bool> {
+    let mut filled = 0usize;
+    while filled < PSV_SIZE {
+        let n = reader.read(&mut buf[filled..])?;
+        if n == 0 {
+            if filled == 0 {
+                return Ok(false);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} ended in the middle of a PSV record ({filled}/{PSV_SIZE} bytes)",
+                    input.display(),
+                ),
+            ));
+        }
+        filled += n;
+    }
+    Ok(true)
 }
 
 fn flush_partition_writers(writers: &mut [BufWriter<File>]) -> io::Result<()> {
@@ -1295,6 +1331,7 @@ fn run_partition_only(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use tempfile::TempDir;
 
     #[test]
@@ -1347,6 +1384,23 @@ mod tests {
         // 1 バイトでもデータがあれば「取り込み済み」とみなして true
         std::fs::write(dir.path().join(partition_filename(0)), b"x").unwrap();
         assert!(has_any_partition_file(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn read_psv_record_distinguishes_clean_eof_from_short_record() {
+        let mut buf = [0u8; PSV_SIZE];
+        let input = Path::new("input.bin");
+
+        let mut empty = Cursor::new(Vec::<u8>::new());
+        assert!(!read_psv_record(&mut empty, &mut buf, input).unwrap());
+
+        let mut full = Cursor::new(vec![7u8; PSV_SIZE]);
+        assert!(read_psv_record(&mut full, &mut buf, input).unwrap());
+        assert_eq!(buf, [7u8; PSV_SIZE]);
+
+        let mut short = Cursor::new(vec![1u8; PSV_SIZE - 1]);
+        let err = read_psv_record(&mut short, &mut buf, input).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     /// `--partition-only` を 2 回繰り返した結果が、1 回の通常 Phase1 と同等になる。
