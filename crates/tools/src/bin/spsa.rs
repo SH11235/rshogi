@@ -44,11 +44,10 @@ struct Cli {
     /// SPSA 実行ディレクトリ。state / meta / CSV を全てこの dir 配下に配置する。
     ///
     /// 配置されるファイル (override は個別フラグで可能):
-    /// - `<run-dir>/state.params`        : SPSA の live 状態 (反復ごとに上書き)
+    /// - `<run-dir>/state.params`        : SPSA の live 状態 (batch ごとに上書き)
     /// - `<run-dir>/meta.json`           : resume 用メタデータ
-    /// - `<run-dir>/values.csv`          : 各 iter のパラメータ値履歴
-    /// - `<run-dir>/stats.csv`           : per-seed 統計
-    /// - `<run-dir>/stats_aggregate.csv` : seed 横断集計
+    /// - `<run-dir>/values.csv`          : 各 batch のパラメータ値履歴
+    /// - `<run-dir>/stats.csv`           : 各 batch の統計
     ///
     /// 通常は `runs/spsa/$(date -u +%Y%m%d_%H%M%S)_<tag>` のように毎回新規 dir を
     /// 切る。`--init-from <canonical>` を併用すると初回起動時に canonical を
@@ -56,13 +55,29 @@ struct Cli {
     #[arg(long)]
     run_dir: PathBuf,
 
-    /// 反復回数
-    #[arg(long, default_value_t = 1)]
-    iterations: u32,
+    /// SPSA の総 game pair 数 (fishtest `num_iter` と等価)。
+    /// total_games = 2 × total_pairs。schedule の `k` 軸の上限としても使われる。
+    /// 必須引数。後方互換のため `--games-per-iteration` + `--iterations` 併用時は
+    /// それらから自動換算する (warning 出力)。
+    #[arg(long)]
+    total_pairs: Option<u32>,
 
-    /// 1イテレーションあたり対局数（偶数必須）
-    #[arg(long, default_value_t = 2)]
-    games_per_iteration: u32,
+    /// 1 batch あたりの game pair 数。同じ flip ベクトルで `2 × batch_pairs` 局を
+    /// 消化し、batch 末で θ を 1 回更新する (k は `+= batch_pairs`)。
+    /// fishtest worker の `iter += game_pairs` と等価。
+    #[arg(long, default_value_t = 8)]
+    batch_pairs: u32,
+
+    /// **deprecated**: `--total-pairs` + `--batch-pairs` を使用してください。
+    /// 後方互換のため残置。指定された場合 `total_pairs = games_per_iteration *
+    /// iterations / 2` に自動換算 (warning 出力)。偶数必須。
+    #[arg(long)]
+    games_per_iteration: Option<u32>,
+
+    /// **deprecated**: `--total-pairs` を使用してください。
+    /// `--games-per-iteration` 併用時のみ意味を持つ (両方指定で `total_pairs` を換算)。
+    #[arg(long)]
+    iterations: Option<u32>,
 
     /// 対局並列数（worker数）
     #[arg(long, default_value_t = 1)]
@@ -104,14 +119,6 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     no_stats_csv: bool,
 
-    /// 反復統計のseed横断集計CSV（平均・分散）。既定: <run-dir>/stats_aggregate.csv
-    #[arg(long)]
-    stats_aggregate_csv: Option<PathBuf>,
-
-    /// seed横断集計CSVの出力を無効化する
-    #[arg(long, default_value_t = false)]
-    no_stats_aggregate_csv: bool,
-
     /// 反復ごとのパラメータ値履歴CSV（wide形式）。既定: <run-dir>/values.csv
     #[arg(long)]
     param_values_csv: Option<PathBuf>,
@@ -120,12 +127,18 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     no_param_values_csv: bool,
 
-    /// 乱数seed（単一）
-    #[arg(long, conflicts_with = "seeds")]
+    /// 乱数 seed (省略時はランダム)。SPSA の全 RNG stream は seed と batch index から
+    /// 決定論的に生成されるため、同じ seed で run を 2 回回すと同じ θ 軌跡になる。
+    ///
+    /// fishtest 整合の v4 仕様では multi-seed (`--seeds`) は撤去された (詳細:
+    /// `docs/spsa_v4_migration.md`)。複数 base_seed の探索は `--seed` を変えた
+    /// 独立 run dir で並列実行する。
+    #[arg(long)]
     seed: Option<u64>,
 
-    /// 乱数seed一覧（カンマ区切り）
-    #[arg(long, value_delimiter = ',', num_args = 1.., conflicts_with = "seed")]
+    /// **deprecated/removed**: v3 の multi-seed 機能。指定するとエラー終了する。
+    /// 移行ガイドは `docs/spsa_v4_migration.md` を参照。
+    #[arg(long, value_delimiter = ',', num_args = 1..)]
     seeds: Option<Vec<u64>>,
 
     /// エンジンバイナリパス（未指定時: target/release/rshogi-usi）
@@ -265,12 +278,8 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     strict_init_check: bool,
 
-    /// `--seeds` を 2 つ以上指定したとき、iter 内の seed 群を並列実行する。
-    /// SPSA の数学的妥当性は保たれる（各 seed は独立な摂動方向を持ち、iter 末で
-    /// 平均化される）。`--concurrency / seeds_count` を各 seed に配分するため、
-    /// 最大効率には **`--concurrency` は `seeds_count` の倍数を推奨**
-    /// （割り切れない端数は浪費される: 例 conc=10, seeds=3 → per_seed=3, 1 枠無駄）。
-    /// 単一 seed のときは通常通り順次実行（フラグは無視）。
+    /// **deprecated/removed**: v3 の multi-seed 機能。指定するとエラー終了する。
+    /// 移行ガイドは `docs/spsa_v4_migration.md` を参照。
     #[arg(long, default_value_t = false)]
     parallel_seeds: bool,
 }
@@ -377,6 +386,17 @@ struct ResumeMetaData {
     /// 落ちた」or「外部から state を書き換えられた」と判断して bail。
     /// 反復 0 (起動時 snapshot) では `init_params_sha256` と同値で開始する。
     current_params_sha256: String,
+    /// SPSA の総 game pair 数 (= fishtest `num_iter`)。schedule の k 軸の上限であり、
+    /// 全 batch 完了 = `total_pairs / batch_pairs` 個の batch を消化したとき。
+    /// resume 時に CLI 指定値と突き合わせて schedule 一致を検証する。
+    total_pairs: u32,
+    /// 1 batch あたりの game pair 数 (= fishtest worker `game_pairs`)。
+    /// resume 時に CLI 指定値と突き合わせる (途中で batch 粒度が変わると k の進行が
+    /// 不整合になるため bail)。
+    batch_pairs: u32,
+    /// SPSA schedule 上の累積 k (= 完了 game pair 数)。`completed_iterations × batch_pairs`
+    /// と等価だが、明示フィールドとして持つことで future-proof + 検証用途に使う。
+    completed_pairs: u32,
 }
 
 /// 起動時に決まる SPSA 走行モード。
@@ -410,11 +430,14 @@ impl std::fmt::Display for InitMode {
     }
 }
 
+/// 1 batch 分の統計 (stats.csv 1 行に対応)。v4 仕様: seed カラム廃止、
+/// `batch_pairs` (batch 内 game pair 数) を追加。
 #[derive(Clone, Copy, Debug)]
 struct IterationStats {
+    /// batch 番号 (1-origin)。v3 では「iteration」だったが意味は等価。
     iteration: u32,
-    seed: u64,
-    games: u32,
+    /// この batch で実行した game pair 数 (= games / 2)。
+    batch_pairs: u32,
     plus_wins: u32,
     minus_wins: u32,
     draws: u32,
@@ -424,22 +447,6 @@ struct IterationStats {
     updated_params: usize,
     avg_abs_update: f64,
     max_abs_update: f64,
-    total_games: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AggregateIterationStats {
-    iteration: u32,
-    seed_count: usize,
-    games_per_seed: u32,
-    raw_result_mean: f64,
-    raw_result_variance: f64,
-    plus_wins_mean: f64,
-    plus_wins_variance: f64,
-    minus_wins_mean: f64,
-    minus_wins_variance: f64,
-    draws_mean: f64,
-    draws_variance: f64,
     total_games: usize,
 }
 
@@ -459,19 +466,20 @@ struct GameTaskResult {
     outcome: GameOutcome,
 }
 
+/// 1 batch の game 集計結果。raw_result = Σ plus_score (各 game pair が +1 / 0 / -1)。
 #[derive(Clone, Copy, Debug)]
-struct SeedGameStats {
+struct BatchGameStats {
     step_sum: f64,
     plus_wins: u32,
     minus_wins: u32,
     draws: u32,
 }
 
-/// 1 seed × 1 iter 分の事前計算結果（rng / flips / shifts / plus / minus / startpos インデックス）。
+/// 1 batch 分の事前計算結果（flips / shifts / plus / minus / startpos インデックス）。
 ///
-/// `compute_seed_prep` で生成し、`run_seed_games_parallel` の入力として使う。
-/// 事前計算を seed 並列実行から分離することで、決定論を維持したまま重いゲーム実行のみを並列化できる。
-struct SeedPrep {
+/// `compute_batch_prep` で生成し、`run_batch_games_parallel` の入力として使う。
+/// fishtest 流: 同 batch 内の全 game pair で共通の flip ベクトルと rounded plus/minus 値を使う。
+struct BatchPrep {
     base_seed: u64,
     flips: Vec<f64>,
     plus_values: Vec<f64>,
@@ -479,10 +487,12 @@ struct SeedPrep {
     start_pos_indices: Vec<usize>,
     active_params: usize,
     avg_abs_shift: f64,
-    seed_total_games_start: usize,
+    /// この batch 内で消化する game の (累積) 開始 game 番号。stats / log 表示と
+    /// `pick_startpos_index` の cyclic 進行に使う。
+    batch_total_games_start: usize,
 }
 
-struct SeedRunContext<'a> {
+struct BatchRunContext<'a> {
     concurrency: usize,
     base_cfg: &'a EngineConfig,
     params: &'a [SpsaParam],
@@ -493,9 +503,8 @@ struct SeedRunContext<'a> {
     game_cfg: &'a GameConfig,
     tc: TimeControl,
     total_games_start: usize,
+    /// batch 番号 (1-origin) を log 表示用に渡す。
     iteration: u32,
-    seed_idx: usize,
-    seed_count: usize,
     base_seed: u64,
     translator: &'a EngineNameTranslator,
     active_mask: &'a [bool],
@@ -592,7 +601,6 @@ fn default_force_init_cleanup_paths(run_dir: &Path) -> Vec<PathBuf> {
     vec![
         default_param_values_csv_path(run_dir),
         default_stats_csv_path(run_dir),
-        default_stats_aggregate_csv_path(run_dir),
         // 旧 run の final.params が残っていると新 run で上書きされるまで「前回の確定値」
         // が見え続け、tune.py apply に誤投入される事故になる。fresh 系のリスタート (force-init
         // / fresh / use-existing) で必ず消す。
@@ -633,10 +641,6 @@ fn default_stats_csv_path(run_dir: &Path) -> PathBuf {
     run_dir.join("stats.csv")
 }
 
-fn default_stats_aggregate_csv_path(run_dir: &Path) -> PathBuf {
-    run_dir.join("stats_aggregate.csv")
-}
-
 fn schedule_matches(lhs: ScheduleConfig, rhs: ScheduleConfig) -> bool {
     const EPS: f64 = 1e-12;
     (lhs.alpha - rhs.alpha).abs() <= EPS
@@ -670,27 +674,18 @@ fn is_param_active(
 }
 
 fn format_param_value_for_csv(param: &SpsaParam) -> String {
-    if param.is_int {
-        format!("{}", param.value.round() as i64)
-    } else {
-        format!("{:.6}", param.value)
-    }
+    // B-3 以降: θ は is_int でも f64 のまま保持するため、CSV も `{:.6}` 固定桁で
+    // 出力する。整数値が "42.000000" のように表示されるが、人間可読性より
+    // resume 整合性 (write_params と一致) を優先する。
+    format!("{:.6}", param.value)
 }
 
 fn write_stats_csv_header(writer: &mut BufWriter<File>) -> Result<()> {
+    // v4 仕様: seed カラム削除、games → batch_pairs へ変更。1 batch = 1 行。
     writeln!(
         writer,
-        "iteration,seed,games,plus_wins,minus_wins,draws,raw_result,active_params,\
+        "iteration,batch_pairs,plus_wins,minus_wins,draws,raw_result,active_params,\
          avg_abs_shift,updated_params,avg_abs_update,max_abs_update,total_games"
-    )?;
-    Ok(())
-}
-
-fn write_stats_aggregate_csv_header(writer: &mut BufWriter<File>) -> Result<()> {
-    writeln!(
-        writer,
-        "iteration,seeds,games_per_seed,raw_result_mean,raw_result_variance,\
-         plus_wins_mean,plus_wins_variance,minus_wins_mean,minus_wins_variance,draws_mean,draws_variance,total_games"
     )?;
     Ok(())
 }
@@ -754,42 +749,6 @@ fn open_stats_csv_writer(path: &Path, resume: bool) -> Result<BufWriter<File>> {
     Ok(writer)
 }
 
-fn open_stats_aggregate_csv_writer(path: &Path, resume: bool) -> Result<BufWriter<File>> {
-    ensure_parent_dir(path)?;
-    let write_header = if resume {
-        if !path.exists() {
-            true
-        } else {
-            std::fs::metadata(path)
-                .with_context(|| format!("failed to stat {}", path.display()))?
-                .len()
-                == 0
-        }
-    } else {
-        true
-    };
-    let file = if resume {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .with_context(|| format!("failed to open {} for append", path.display()))?
-    } else {
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)
-            .with_context(|| format!("failed to create {}", path.display()))?
-    };
-    let mut writer = BufWriter::new(file);
-    if write_header {
-        write_stats_aggregate_csv_header(&mut writer)?;
-        writer.flush()?;
-    }
-    Ok(writer)
-}
-
 fn open_param_values_csv_writer(
     path: &Path,
     resume: bool,
@@ -833,10 +792,9 @@ fn open_param_values_csv_writer(
 fn write_stats_csv_row(writer: &mut BufWriter<File>, stats: IterationStats) -> Result<()> {
     writeln!(
         writer,
-        "{},{},{},{},{},{},{:+.6},{},{:.6},{},{:.6},{:.6},{}",
+        "{},{},{},{},{},{:+.6},{},{:.6},{},{:.6},{:.6},{}",
         stats.iteration,
-        stats.seed,
-        stats.games,
+        stats.batch_pairs,
         stats.plus_wins,
         stats.minus_wins,
         stats.draws,
@@ -846,29 +804,6 @@ fn write_stats_csv_row(writer: &mut BufWriter<File>, stats: IterationStats) -> R
         stats.updated_params,
         stats.avg_abs_update,
         stats.max_abs_update,
-        stats.total_games
-    )?;
-    Ok(())
-}
-
-fn write_stats_aggregate_csv_row(
-    writer: &mut BufWriter<File>,
-    stats: AggregateIterationStats,
-) -> Result<()> {
-    writeln!(
-        writer,
-        "{},{},{},{:+.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}",
-        stats.iteration,
-        stats.seed_count,
-        stats.games_per_seed,
-        stats.raw_result_mean,
-        stats.raw_result_variance,
-        stats.plus_wins_mean,
-        stats.plus_wins_variance,
-        stats.minus_wins_mean,
-        stats.minus_wins_variance,
-        stats.draws_mean,
-        stats.draws_variance,
         stats.total_games
     )?;
     Ok(())
@@ -897,6 +832,31 @@ struct MetaFormatVersionOnly {
     format_version: u32,
 }
 
+/// v3 形式の meta から v4 silent migration に必要な field を抽出する struct。
+/// v3 では `seeds_count` / `games_per_iteration` 相当の情報を保持していた
+/// (実際には実装上 v3 にこれらのフィールドはなかったが、`completed_iterations`
+/// と外部の CLI から `total_pairs` を再構築する)。
+#[derive(Deserialize)]
+struct V3MetaSubset {
+    schedule: ScheduleConfig,
+    completed_iterations: u32,
+    total_games: usize,
+    init_params_sha256: String,
+    init_from_sha256: Option<String>,
+    init_from_path: Option<String>,
+    param_name_set_sha256: String,
+    active_param_count: usize,
+    engine_path: String,
+    engine_param_mapping_path: Option<String>,
+    engine_param_mapping_sha256: Option<String>,
+    init_mode: InitMode,
+    current_params_sha256: String,
+    state_params_file: String,
+    last_raw_result_mean: f64,
+    last_avg_abs_update: f64,
+    updated_at_utc: String,
+}
+
 fn load_meta(path: &Path) -> Result<ResumeMetaData> {
     let bytes =
         std::fs::read(path).with_context(|| format!("failed to open {}", path.display()))?;
@@ -905,21 +865,71 @@ fn load_meta(path: &Path) -> Result<ResumeMetaData> {
         serde_json::from_slice(&bytes).with_context(|| {
             format!("failed to parse JSON {} (format_version probe)", path.display())
         })?;
-    if version_probe.format_version != META_FORMAT_VERSION {
-        bail!(
-            "meta format version 不一致 (got v{}, expected v{}) in {}.\n\
-             v{} 形式は v{} とは互換性がありません。\n\
-             新規 run dir で `--init-from <canonical>` から fresh start してください。",
-            version_probe.format_version,
-            META_FORMAT_VERSION,
-            path.display(),
-            version_probe.format_version,
-            META_FORMAT_VERSION,
-        );
+    if version_probe.format_version == META_FORMAT_VERSION {
+        let meta = serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed to parse JSON {}", path.display()))?;
+        return Ok(meta);
     }
-    let meta = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse JSON {}", path.display()))?;
-    Ok(meta)
+    if version_probe.format_version == 3 {
+        // v3 → v4 silent migration: v3 に multi-seed の痕跡 (`seeds_count > 1` 等) や
+        // 奇数 games_per_iteration の痕跡が無いことを前提に、completed_iterations を
+        // そのまま v4 batch 番号として継承する。total_pairs / batch_pairs / completed_pairs
+        // は CLI 側で確定させてから resume 検証で再合致を確認する経路を取る。
+        //
+        // 注意: v3 では multi-seed 機能があったが、本 silent migration は単一 seed run の
+        // meta のみを扱う想定。v3 で multi-seed run だった meta は **使用者が自ら**
+        // 新規 run dir で fresh start するべき (検出は困難なため migration ではせず、
+        // resume 後の schedule 不一致 / k 軸ズレで間接的に表面化させる)。
+        let v3: V3MetaSubset = serde_json::from_slice(&bytes).with_context(|| {
+            format!("v3 → v4 silent migration: failed to parse v3 meta {}", path.display())
+        })?;
+        eprintln!(
+            "warning: v3 meta を v4 として silent migrate します ({}).\n  \
+               completed_iterations={} → そのまま batch 番号として継承します。\n  \
+               total_pairs/batch_pairs/completed_pairs は CLI 指定値から再構築されます。\n  \
+             詳細: docs/spsa_v4_migration.md",
+            path.display(),
+            v3.completed_iterations,
+        );
+        // total_pairs / batch_pairs は呼び出し側で CLI から再合致させる。ここでは
+        // 一旦 0 で埋め、main 側で resume 整合性検証時に CLI 値を入れる。これは
+        // ResumeMetaData の immutable 不変条件を破るが、silent migration の特例として許容。
+        return Ok(ResumeMetaData {
+            format_version: META_FORMAT_VERSION,
+            state_params_file: v3.state_params_file,
+            completed_iterations: v3.completed_iterations,
+            total_games: v3.total_games,
+            last_raw_result_mean: v3.last_raw_result_mean,
+            last_avg_abs_update: v3.last_avg_abs_update,
+            updated_at_utc: v3.updated_at_utc,
+            schedule: v3.schedule,
+            init_params_sha256: v3.init_params_sha256,
+            init_from_sha256: v3.init_from_sha256,
+            init_from_path: v3.init_from_path,
+            param_name_set_sha256: v3.param_name_set_sha256,
+            active_param_count: v3.active_param_count,
+            engine_path: v3.engine_path,
+            engine_param_mapping_path: v3.engine_param_mapping_path,
+            engine_param_mapping_sha256: v3.engine_param_mapping_sha256,
+            init_mode: v3.init_mode,
+            current_params_sha256: v3.current_params_sha256,
+            // 0 sentinel: main 側で CLI 値とのマッチを skip するシグナルにも使う。
+            total_pairs: 0,
+            batch_pairs: 0,
+            completed_pairs: 0,
+        });
+    }
+    bail!(
+        "meta format version 不一致 (got v{}, expected v{}) in {}.\n\
+         v{} 形式は v{} とは互換性がありません。\n\
+         新規 run dir で `--init-from <canonical>` から fresh start してください。\n\
+         詳細: docs/spsa_v4_migration.md",
+        version_probe.format_version,
+        META_FORMAT_VERSION,
+        path.display(),
+        version_probe.format_version,
+        META_FORMAT_VERSION,
+    );
 }
 
 /// `meta.json` を atomic に保存する (temp file + rename)。
@@ -1692,7 +1702,7 @@ fn write_params(path: &Path, params: &[SpsaParam]) -> Result<()> {
             // float は `{:.6}` で固定桁にしてラウンドトリップ・git diff の安定性を保つ
             // (`{}` (Display) は `1e-7` のような指数表記や精度不定の桁を出すため)
             // B-3: θ 内部状態は is_int でも f64 のまま保持する (fishtest 流)。
-            // engine への送信時にのみ stochastic round が掛かる (compute_seed_prep)。
+            // engine への送信時にのみ stochastic round が掛かる (compute_batch_prep)。
             // 過去 (B-3 以前) は state.params 書き出しで int 丸めしていたが、resume を
             // 挟むと小数部が消えて「小さな更新が連続消失」する元バグが復活するため、
             // is_int でも `{:.6}` で f64 を保存する。canonical (engine 配布用) を別途
@@ -1722,7 +1732,7 @@ fn write_params(path: &Path, params: &[SpsaParam]) -> Result<()> {
 /// engine に setoption 文字列として送る値の整形。
 ///
 /// is_int=true の場合、`value` は **既に stochastic round 済み整数値の f64 表現**
-/// であることを呼び出し側 (`compute_seed_prep`) が保証する。理屈上は `as i64` で
+/// であることを呼び出し側 (`compute_batch_prep`) が保証する。理屈上は `as i64` で
 /// truncation すれば足りるが、浮動小数誤差で `9.9999...` のような値が来ても事故
 /// 化しないよう **防御的に `round` を適用** する (整数 f64 への round は no-op で
 /// 既存 stochastic 抽選結果を上書きしない)。NaN / 無限大は呼び出し側 (clamp 適用
@@ -1818,46 +1828,6 @@ fn pick_startpos_index(
     }
 }
 
-fn resolve_seeds(cli: &Cli) -> Vec<u64> {
-    if let Some(seeds) = &cli.seeds {
-        return seeds.clone();
-    }
-    if let Some(seed) = cli.seed {
-        return vec![seed];
-    }
-    let mut rng = rand::rng();
-    vec![rng.random()]
-}
-
-fn mean_and_variance(values: &[f64]) -> (f64, f64) {
-    if values.is_empty() {
-        return (0.0, 0.0);
-    }
-    let mean = values.iter().copied().sum::<f64>() / values.len() as f64;
-    let variance = values
-        .iter()
-        .map(|value| {
-            let diff = value - mean;
-            diff * diff
-        })
-        .sum::<f64>()
-        / values.len() as f64;
-    (mean, variance)
-}
-
-/// `JoinHandle::join` の panic payload から人間可読なメッセージを抽出する。
-/// `panic!` に渡された値が `&'static str` か `String` の典型ケースのみ拾い、
-/// それ以外は型情報のみのプレースホルダを返す。
-fn panic_payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "<panic payload of unknown type>".to_string()
-    }
-}
-
 fn seed_for_iteration(base_seed: u64, iteration_index: u32) -> u64 {
     let iter_term = (iteration_index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     base_seed ^ iter_term
@@ -1872,10 +1842,10 @@ const FLIP_RNG_SALT: u64 = 0xF11D_F11D_F11D_F11D;
 /// rounding 結果に相関する」退行を防ぐ。
 const ROUNDING_RNG_SALT: u64 = 0xC0DD_C0DD_C0DD_C0DD;
 
-/// `compute_seed_prep` のセッション定数バンドル（iter 内で全 seed 共通）。
+/// `compute_batch_prep` のセッション定数バンドル (run 全体で不変)。
 ///
-/// 引数増加によるシグネチャ複雑化を避けるため `compute_seed_prep` の入力をまとめる。
-struct SeedPrepCtx<'a> {
+/// 引数増加によるシグネチャ複雑化を避けるため `compute_batch_prep` の入力をまとめる。
+struct BatchPrepCtx<'a> {
     big_a: f64,
     schedule: ScheduleConfig,
     params: &'a [SpsaParam],
@@ -1883,31 +1853,36 @@ struct SeedPrepCtx<'a> {
     active_only_regex: Option<&'a Regex>,
     translator: &'a EngineNameTranslator,
     start_positions_len: usize,
-    games_per_iteration: usize,
+    /// 1 batch あたりの game pair 数 (fishtest worker の `game_pairs` と等価)。
+    /// 1 batch で `2 × batch_pairs` 局を消化する。
+    batch_pairs: usize,
     random_startpos: bool,
 }
 
-/// 1 seed × 1 iter 分の事前計算（RNG / flips / shifts / plus/minus / startpos インデックス）。
+/// 1 batch 分の事前計算 (RNG / flips / shifts / plus/minus / startpos インデックス)。
 ///
-/// 各 seed 独立に決定論的に計算可能なため、後段の重いゲーム実行を seed 並列化する際の
-/// 前処理として使う。`seed_total_games_start` は startpos の cyclic indexing にのみ使われ、
-/// 並列実行時はセッション累積 + `seed_idx * games_per_iter` で seed 間の重複を避ける。
-fn compute_seed_prep(
-    ctx: &SeedPrepCtx<'_>,
-    iter: u32,
+/// SPSA schedule の `k` 軸はこの batch の開始時点での累積 game pair 数 (`k_pair_start`)
+/// を渡す。同 batch 内の全 game pair は同じ flip ベクトルと plus/minus 値を共有する
+/// (fishtest 流: 1 batch = 1 update 単位)。
+///
+/// 引数:
+/// - `batch_idx`: batch 番号 (1-origin)。RNG 生成と stats 表示に使う。
+/// - `k_pair_start`: schedule 評価時刻 (= 累積 game pair 数, 0-origin)。
+/// - `total_games_start`: startpos cyclic 進行用 (累積消化 game 数, 0-origin)。
+fn compute_batch_prep(
+    ctx: &BatchPrepCtx<'_>,
+    batch_idx: u32,
+    k_pair_start: u32,
     base_seed: u64,
-    seed_total_games_start: usize,
-) -> Result<SeedPrep> {
+    total_games_start: usize,
+) -> Result<BatchPrep> {
     // flip / rounding / startpos の RNG stream を独立化する。
-    // - flip_rng: Bernoulli ±1 抽選用 (seed = base_seed ^ FLIP_RNG_SALT, iter)。
-    // - rounding_rng: stochastic rounding 用 (seed = base_seed ^ ROUNDING_RNG_SALT, iter)。
-    // - rng (本関数 local): startpos cyclic 進行用。flip と salt なしで共有していた既存
-    //   挙動を維持しつつ、flip 抽選を独立 stream にすることで「flip 結果と startpos
-    //   sampling 結果が相関する」退行を防ぐ。base_seed と iter が同じなら結果も同じ
-    //   なので決定論性は保たれる。
-    let flip_seed = seed_for_iteration(base_seed ^ FLIP_RNG_SALT, iter);
-    let rounding_seed = seed_for_iteration(base_seed ^ ROUNDING_RNG_SALT, iter);
-    let startpos_seed = seed_for_iteration(base_seed, iter);
+    // - flip_rng: Bernoulli ±1 抽選用 (seed = base_seed ^ FLIP_RNG_SALT, batch_idx)。
+    // - rounding_rng: stochastic rounding 用 (seed = base_seed ^ ROUNDING_RNG_SALT, batch_idx)。
+    // - rng (本関数 local): startpos cyclic 進行用。base_seed (salt なし) を使用。
+    let flip_seed = seed_for_iteration(base_seed ^ FLIP_RNG_SALT, batch_idx);
+    let rounding_seed = seed_for_iteration(base_seed ^ ROUNDING_RNG_SALT, batch_idx);
+    let startpos_seed = seed_for_iteration(base_seed, batch_idx);
     let mut flip_rng = ChaCha8Rng::seed_from_u64(flip_seed);
     let mut rounding_rng = ChaCha8Rng::seed_from_u64(rounding_seed);
     let mut rng = ChaCha8Rng::seed_from_u64(startpos_seed);
@@ -1926,6 +1901,8 @@ fn compute_seed_prep(
             }
         })
         .collect();
+    // schedule の k 軸 = batch 開始時点の累積 game pair 数 (`k_pair_start`)。
+    // batch 内では k は固定 (= 全 game pair で同じ flip / shifts / c_k を使う)。
     let shifts: Vec<f64> = ctx
         .params
         .iter()
@@ -1935,8 +1912,12 @@ fn compute_seed_prep(
             if !is_param_active(p, ctx.active_only_regex, ctx.translator) {
                 0.0
             } else {
-                let (c_k, _) =
-                    sched.at_iteration(iter, ctx.big_a, ctx.schedule.alpha, ctx.schedule.gamma);
+                let (c_k, _) = sched.at_iteration(
+                    k_pair_start,
+                    ctx.big_a,
+                    ctx.schedule.alpha,
+                    ctx.schedule.gamma,
+                );
                 c_k * flip
             }
         })
@@ -1990,22 +1971,16 @@ fn compute_seed_prep(
     // Paired antithetic: 同じ start_pos を 2 局連続 (先後入替) で消化することで
     // 開局選択ノイズと先手有利バイアスを互いにキャンセルする (fishtest 互換)。
     //
-    // pair_count = games_per_iteration / 2 個の startpos を選び、game 2k と 2k+1 で
-    // 同じ index を再利用する。`plus_is_black` は呼び出し側 (run_seed_games_parallel) で
+    // batch_pairs 個の startpos を選び、各 pair で game 2k と 2k+1 が同じ index を
+    // 共有する。`plus_is_black` は呼び出し側 (run_batch_games_parallel) で
     // `idx % 2 == 0` を参照するので、ここでは index 配列のみを生成すれば足りる。
     //
     // `pick_startpos_index` の `game_index` 引数は cyclic mode (random=false) で
-    // startpos を周回するためのものなので、pair ごとに 1 ずつ進める (2 game 進めない)。
-    if !ctx.games_per_iteration.is_multiple_of(2) {
-        bail!(
-            "internal error: games_per_iteration must be even for paired antithetic, got {}",
-            ctx.games_per_iteration
-        );
-    }
-    let pair_count = ctx.games_per_iteration / 2;
-    let pair_total_games_start = seed_total_games_start / 2;
-    let mut start_pos_indices = Vec::with_capacity(ctx.games_per_iteration);
-    for pair_idx in 0..pair_count {
+    // startpos を周回するためのものなので、pair ごとに 1 ずつ進める。
+    let pair_total_games_start = total_games_start / 2;
+    let games_in_batch = ctx.batch_pairs * 2;
+    let mut start_pos_indices = Vec::with_capacity(games_in_batch);
+    for pair_idx in 0..ctx.batch_pairs {
         let idx = pick_startpos_index(
             ctx.start_positions_len,
             &mut rng,
@@ -2017,7 +1992,7 @@ fn compute_seed_prep(
         start_pos_indices.push(idx);
     }
 
-    Ok(SeedPrep {
+    Ok(BatchPrep {
         base_seed,
         flips,
         plus_values,
@@ -2025,7 +2000,7 @@ fn compute_seed_prep(
         start_pos_indices,
         active_params,
         avg_abs_shift,
-        seed_total_games_start,
+        batch_total_games_start: total_games_start,
     })
 }
 
@@ -2044,8 +2019,8 @@ fn duplicate_engine_config(cfg: &EngineConfig) -> EngineConfig {
     }
 }
 
-fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
-    let SeedRunContext {
+fn run_batch_games_parallel(ctx: BatchRunContext<'_>) -> Result<BatchGameStats> {
+    let BatchRunContext {
         concurrency,
         base_cfg,
         params,
@@ -2057,8 +2032,6 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
         tc,
         total_games_start,
         iteration,
-        seed_idx,
-        seed_count,
         base_seed,
         translator,
         active_mask,
@@ -2066,7 +2039,7 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
 
     let game_count = start_pos_indices.len();
     if game_count == 0 {
-        return Ok(SeedGameStats {
+        return Ok(BatchGameStats {
             step_sum: 0.0,
             plus_wins: 0,
             minus_wins: 0,
@@ -2077,12 +2050,12 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
     let (task_tx, task_rx) = unbounded::<GameTask>();
     let (result_tx, result_rx) = unbounded::<Result<GameTaskResult>>();
 
-    std::thread::scope(|scope| -> Result<SeedGameStats> {
+    std::thread::scope(|scope| -> Result<BatchGameStats> {
         for worker_idx in 0..worker_count {
             let task_rx = task_rx.clone();
             let result_tx = result_tx.clone();
             let worker_cfg = duplicate_engine_config(base_cfg);
-            let worker_label = format!("seed{}_worker{}", seed_idx + 1, worker_idx + 1);
+            let worker_label = format!("batch{iteration}_worker{}", worker_idx + 1);
             scope.spawn(move || {
                 let mut plus_engine =
                     match EngineProcess::spawn(&worker_cfg, format!("plus_{worker_label}")) {
@@ -2210,10 +2183,8 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
                 draws += 1;
             }
             eprintln!(
-                "iter={} seed={}/{}({}) game={}/{} plus_is_black={} outcome={} plus_score={:+.1}",
+                "batch={} seed={} game={}/{} plus_is_black={} outcome={} plus_score={:+.1}",
                 iteration,
-                seed_idx + 1,
-                seed_count,
                 base_seed,
                 result.game_idx + 1,
                 game_count,
@@ -2223,7 +2194,7 @@ fn run_seed_games_parallel(ctx: SeedRunContext<'_>) -> Result<SeedGameStats> {
             );
         }
 
-        Ok(SeedGameStats {
+        Ok(BatchGameStats {
             step_sum,
             plus_wins,
             minus_wins,
@@ -2243,9 +2214,15 @@ struct StartupContext<'a> {
     params: &'a [SpsaParam],
     active_mask: &'a [bool],
     active_param_count: usize,
+    /// 起動時の batch 進行範囲 (`[start_batch, end_batch)`)。
     start_iteration: u32,
     end_iteration: u32,
-    seed_values: &'a [u64],
+    /// 単一 base seed (v4 で multi-seed は撤去済み)。
+    base_seed: u64,
+    /// SPSA 全体の game pair 上限 (= schedule k 軸上限)。
+    total_pairs: u32,
+    /// 1 batch あたりの game pair 数。
+    batch_pairs: u32,
     params_path: &'a Path,
     meta_path: &'a Path,
 }
@@ -2289,7 +2266,7 @@ fn print_startup_summary(ctx: &StartupContext<'_>) {
         eprintln!("mapping:        {p} (sha256: {h})");
     }
     eprintln!(
-        "schedule:       α={} γ={} a_ratio={} mobility={} total_iter={}",
+        "schedule:       α={} γ={} a_ratio={} mobility={} total_pairs={}",
         ctx.schedule.alpha,
         ctx.schedule.gamma,
         ctx.schedule.a_ratio,
@@ -2297,11 +2274,13 @@ fn print_startup_summary(ctx: &StartupContext<'_>) {
         ctx.schedule.total_iterations
     );
     eprintln!(
-        "iteration plan: {} → {} ({} new iter), seeds={:?}",
+        "batch plan:     batch {} → {} ({} new batch), batch_pairs={}, total_pairs={}, seed={}",
         ctx.start_iteration,
         ctx.end_iteration,
         ctx.end_iteration.saturating_sub(ctx.start_iteration),
-        ctx.seed_values
+        ctx.batch_pairs,
+        ctx.total_pairs,
+        ctx.base_seed,
     );
     eprintln!("active params:  {}/{}", ctx.active_param_count, ctx.params.len());
 
@@ -2338,15 +2317,73 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    // paired antithetic: 同じ startpos を先後入替で 2 局消化するため必ず偶数。
-    if cli.games_per_iteration == 0 || cli.games_per_iteration % 2 != 0 {
+
+    // v3 multi-seed 機能撤去: --seeds / --parallel-seeds は hard error。
+    // 移行ガイドへ案内 (docs/spsa_v4_migration.md)。
+    if cli.seeds.is_some() {
         bail!(
-            "--games-per-iteration must be an even number >= 2 \
-             (paired antithetic は同 startpos の先後入替 2 局を 1 単位とする)"
+            "--seeds は v4 で撤去されました。複数 base_seed の探索は --seed を変えた\n\
+             独立 run dir で並列実行してください。詳細: docs/spsa_v4_migration.md"
         );
     }
-    if cli.iterations == 0 {
-        bail!("--iterations must be >= 1");
+    if cli.parallel_seeds {
+        bail!("--parallel-seeds は v4 で撤去されました。詳細: docs/spsa_v4_migration.md");
+    }
+
+    // 新 CLI: --total-pairs / --batch-pairs。後方互換: --games-per-iteration +
+    // --iterations 併用なら自動換算。
+    let (total_pairs, batch_pairs) = match (
+        cli.total_pairs,
+        cli.batch_pairs,
+        cli.games_per_iteration,
+        cli.iterations,
+    ) {
+        (Some(tp), bp, None, None) => {
+            if bp == 0 {
+                bail!("--batch-pairs must be >= 1");
+            }
+            (tp, bp)
+        }
+        (None, _bp, Some(gpi), Some(iters)) => {
+            if !gpi.is_multiple_of(2) || gpi == 0 {
+                bail!(
+                    "--games-per-iteration must be an even number >= 2 \
+                     (paired antithetic は同 startpos の先後入替 2 局を 1 単位とする)"
+                );
+            }
+            if iters == 0 {
+                bail!("--iterations must be >= 1");
+            }
+            let derived_total_pairs =
+                gpi.checked_mul(iters).context("games_per_iteration * iterations overflow")? / 2;
+            // batch_pairs 既定値 8 だが、deprecate 経路では「1 iter = 1 batch」を
+            // 維持するために gpi/2 を採用する (= ユーザの旧運用で update 頻度を保つ)。
+            let derived_batch_pairs = gpi / 2;
+            eprintln!(
+                "warning: --games-per-iteration/--iterations は deprecated です。\n  \
+                   自動換算: --total-pairs {derived_total_pairs} --batch-pairs {derived_batch_pairs}\n  \
+                 docs/spsa_v4_migration.md を参照して新 CLI へ移行してください。"
+            );
+            (derived_total_pairs, derived_batch_pairs)
+        }
+        (Some(_), _, Some(_), _) | (Some(_), _, _, Some(_)) => {
+            bail!(
+                "--total-pairs と --games-per-iteration/--iterations は同時指定できません。\n\
+                 docs/spsa_v4_migration.md を参照して新 CLI に統一してください。"
+            );
+        }
+        (None, _, _, _) => {
+            bail!(
+                "--total-pairs を指定してください (deprecated 経路は --games-per-iteration\n\
+                 と --iterations の両方が必要です)。docs/spsa_v4_migration.md 参照。"
+            );
+        }
+    };
+    if total_pairs == 0 {
+        bail!("--total-pairs must be >= 1");
+    }
+    if batch_pairs == 0 {
+        bail!("--batch-pairs must be >= 1");
     }
     if cli.concurrency == 0 {
         bail!("--concurrency must be >= 1");
@@ -2394,38 +2431,8 @@ fn main() -> Result<()> {
         .map(Regex::new)
         .transpose()
         .context("invalid --active-only-regex")?;
-    let seed_values = resolve_seeds(&cli);
-    if seed_values.is_empty() {
-        bail!("at least one seed is required");
-    }
-    eprintln!("using base seeds: {:?}", seed_values);
-
-    // --parallel-seeds 指定時、`cli.concurrency` が seed 数で割り切れない、または
-    // 1 seed あたりの worker 数が `games_per_iteration` を超える設定だと実効並列度が
-    // 指定値より下がる（`run_seed_games_parallel` 側で `worker_count.clamp(1, game_count)`
-    // の clamp が効くため）。vast.ai 等で `--concurrency` を盛ったときに気付けないと
-    // 単純に CPU が余るので、起動時に一度だけ警告して気付かせる。
-    if cli.parallel_seeds && seed_values.len() >= 2 {
-        let per_seed_concurrency = (cli.concurrency / seed_values.len()).max(1);
-        let games_per_iter = cli.games_per_iteration as usize;
-        let effective_per_seed = per_seed_concurrency.min(games_per_iter);
-        let effective_total = effective_per_seed * seed_values.len();
-        if effective_total < cli.concurrency {
-            eprintln!(
-                "warning: --parallel-seeds の実効並列度が --concurrency より低い \
-                 (concurrency={}, seeds={}, games_per_iteration={} → \
-                 per_seed={} (clamped to {}), 実効合計={}, 未使用={})。\
-                 `--concurrency` を seeds × games_per_iteration の倍数に揃えると無駄なく回る。",
-                cli.concurrency,
-                seed_values.len(),
-                games_per_iter,
-                per_seed_concurrency,
-                effective_per_seed,
-                effective_total,
-                cli.concurrency - effective_total,
-            );
-        }
-    }
+    let base_seed = cli.seed.unwrap_or_else(|| rand::rng().random::<u64>());
+    eprintln!("using base seed: {base_seed}");
 
     let engine_path = resolve_engine_path(&cli)?;
     let engine_args = cli.engine_args.clone().unwrap_or_default();
@@ -2480,20 +2487,35 @@ fn main() -> Result<()> {
         None => EngineNameTranslator::empty(),
     };
     let mut params = read_params(&state_params)?;
+    // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する
+    // (v4 流: schedule の k 軸は累積 game pair 数)。field 名は v3 互換のため維持。
     let schedule = ScheduleConfig {
         alpha: cli.alpha,
         gamma: cli.gamma,
         a_ratio: cli.a_ratio,
         mobility: cli.mobility,
-        total_iterations: cli.iterations,
+        total_iterations: total_pairs,
     };
-    let (start_iteration, mut total_games, init_snapshot) = match &effective_action {
+    // v4 resume の戻り値: (start_batch, completed_pairs, total_games, init_snapshot)。
+    // - start_batch: 次に実行する batch 番号 (0-origin)。
+    // - completed_pairs: 既に完了した game pair 数 (= schedule k 軸の起点)。
+    let (start_batch, mut completed_pairs, mut total_games, init_snapshot) = match &effective_action
+    {
         NonBailAction::Resume { verify_init } => {
             // load_meta が format_version 不一致を先に hard bail するため、ここでは
             // 全フィールド込みの deserialize 成功を前提にできる。
-            let meta = load_meta(&meta_path).with_context(|| {
+            let mut meta = load_meta(&meta_path).with_context(|| {
                 format!("--resume was set but metadata load failed: {}", meta_path.display())
             })?;
+            // v3 → v4 silent migrate された meta は `schedule.total_iterations` の意味が
+            // 異なる (v3: iterations, v4: total_pairs)。silent migrate ケースでは
+            // total_iterations だけ比較対象から外す (CLI 値で上書き) ことで運用衝突を避ける。
+            // 例: v3 で `gpi=16, iters=100` の meta を v4 `total_pairs=800` で resume する
+            // 正当ケースを誤って bail させない。
+            let v3_silent_migrated = meta.total_pairs == 0 && meta.batch_pairs == 0;
+            if v3_silent_migrated {
+                meta.schedule.total_iterations = total_pairs;
+            }
             if !schedule_matches(meta.schedule, schedule) {
                 if cli.force_schedule {
                     eprintln!(
@@ -2581,8 +2603,41 @@ fn main() -> Result<()> {
                     );
                 }
             }
+            // v4 schedule 検証: 既存 meta の total_pairs / batch_pairs と CLI 指定値の一致。
+            // v3 → v4 silent migration 経路では meta.total_pairs == 0 (sentinel) のため
+            // CLI 値を信頼して継承する (meta は migrate 直後で値を持たない)。
+            let migrated_from_v3 = meta.total_pairs == 0 && meta.batch_pairs == 0;
+            if !migrated_from_v3
+                && (meta.total_pairs != total_pairs || meta.batch_pairs != batch_pairs)
+            {
+                if cli.force_schedule {
+                    eprintln!(
+                        "warning: total_pairs/batch_pairs が meta と異なるが --force-schedule で続行 \
+                         (meta total_pairs={}, batch_pairs={} / cli total_pairs={}, batch_pairs={})",
+                        meta.total_pairs, meta.batch_pairs, total_pairs, batch_pairs
+                    );
+                } else {
+                    bail!(
+                        "total_pairs/batch_pairs が meta と異なります \
+                         (meta total_pairs={}, batch_pairs={} / cli total_pairs={}, batch_pairs={}). \
+                         --force-schedule を指定するか docs/spsa_v4_migration.md を参照してください。",
+                        meta.total_pairs,
+                        meta.batch_pairs,
+                        total_pairs,
+                        batch_pairs
+                    );
+                }
+            }
+            // completed_pairs: v4 meta は記録されたものを使う。v3 silent migrate 時は
+            // `completed_iterations × batch_pairs` で再構築する (v3 では 1 iter = 1 batch
+            // = 1 update で k は iter index と等価だったため)。
+            let resumed_completed_pairs = if migrated_from_v3 {
+                meta.completed_iterations.saturating_mul(batch_pairs)
+            } else {
+                meta.completed_pairs
+            };
             let snapshot = InitMetaSnapshot::from_existing_meta(&meta);
-            (meta.completed_iterations, meta.total_games, snapshot)
+            (meta.completed_iterations, resumed_completed_pairs, meta.total_games, snapshot)
         }
         NonBailAction::CopyInitFromFresh
         | NonBailAction::UseExistingFresh
@@ -2599,39 +2654,53 @@ fn main() -> Result<()> {
                 &engine_path,
                 cli.engine_param_mapping.as_deref(),
             )?;
-            (0, 0, snapshot)
+            (0, 0, 0, snapshot)
         }
     };
-    let end_iteration = start_iteration
-        .checked_add(cli.iterations)
-        .context("iteration index overflow")?;
+    // batch 数 = ceil(total_pairs / batch_pairs)。最終 batch は端数の game pair 数になる。
+    let total_batches = total_pairs.div_ceil(batch_pairs);
+    // resume 不変条件チェック: completed_pairs と completed_iterations の関係が
+    // 設定上ありえない値になっていないか (CLI 指定ミス / silent migrate 不整合等で発生し得る)。
+    if completed_pairs > total_pairs {
+        bail!(
+            "completed_pairs ({completed_pairs}) > total_pairs ({total_pairs}). \
+             既存 meta が現在の --total-pairs より進んでいます。\
+             total_pairs を増やすか、新規 run dir で --use-existing-state-as-init してください。"
+        );
+    }
+    if start_batch > total_batches {
+        bail!(
+            "completed_iterations ({start_batch}) > total_batches ({total_batches}). \
+             total_pairs / batch_pairs と既存 meta の整合性が崩れています。",
+        );
+    }
+    // 中間 batch では `completed_pairs == start_batch * batch_pairs` が必ず成り立つ
+    // (端数 batch は最終 batch にのみ発生し、その後 resume はあり得ないので)。
+    // start_batch < total_batches のときのみチェックする。
+    if start_batch < total_batches {
+        let expected_pairs = start_batch.saturating_mul(batch_pairs);
+        if completed_pairs != expected_pairs {
+            bail!(
+                "completed_pairs ({completed_pairs}) と completed_iterations × batch_pairs \
+                 ({expected_pairs}) が不整合です。meta が破損しているか、batch_pairs を \
+                 途中で変更した可能性があります。--force-schedule では救えないので新規 \
+                 run dir で fresh start してください。"
+            );
+        }
+    }
+    if start_batch >= total_batches {
+        eprintln!(
+            "info: 既に全 batch ({total_batches}) を完了しています (start_batch={start_batch})。何もせず終了します。"
+        );
+    }
+    let end_batch = total_batches;
     let stats_csv_path: Option<PathBuf> = if cli.no_stats_csv {
         None
     } else {
         Some(cli.stats_csv.clone().unwrap_or_else(|| default_stats_csv_path(&cli.run_dir)))
     };
-    let aggregate_csv_path: Option<PathBuf> = if cli.no_stats_aggregate_csv {
-        None
-    } else if let Some(path) = &cli.stats_aggregate_csv {
-        Some(path.clone())
-    } else if seed_values.len() > 1 {
-        // `--stats-csv` が明示指定されている場合のみ、aggregate を `<stats_csv>.aggregate.csv`
-        // で派生させる。run-dir モードの既定では `<run-dir>/stats_aggregate.csv`。
-        if let Some(stats_path) = &cli.stats_csv {
-            Some(PathBuf::from(format!("{}.aggregate.csv", stats_path.display())))
-        } else {
-            Some(default_stats_aggregate_csv_path(&cli.run_dir))
-        }
-    } else {
-        None
-    };
     let mut stats_csv_writer = if let Some(path) = stats_csv_path.as_deref() {
         Some(open_stats_csv_writer(path, cli.resume)?)
-    } else {
-        None
-    };
-    let mut stats_aggregate_csv_writer = if let Some(path) = aggregate_csv_path.as_deref() {
-        Some(open_stats_aggregate_csv_writer(path, cli.resume)?)
     } else {
         None
     };
@@ -2727,9 +2796,11 @@ fn main() -> Result<()> {
         params: &params,
         active_mask: &active_mask,
         active_param_count,
-        start_iteration,
-        end_iteration,
-        seed_values: &seed_values,
+        start_iteration: start_batch,
+        end_iteration: end_batch,
+        base_seed,
+        total_pairs,
+        batch_pairs,
         params_path: &state_params,
         meta_path: &meta_path,
     });
@@ -2790,15 +2861,16 @@ fn main() -> Result<()> {
     };
     let mut early_stop_consecutive = 0u32;
 
-    // Fishtest 方式: per-param スケジュール定数を初期化
-    let big_a = schedule.a_ratio * end_iteration as f64;
+    // Fishtest 方式: per-param スケジュール定数を初期化。
+    // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する。
+    let big_a = schedule.a_ratio * total_pairs as f64;
     let param_schedules: Vec<ParamScheduleConstants> = params
         .iter()
         .map(|p| {
             ParamScheduleConstants::compute(
                 p.c_end,
                 p.r_end,
-                end_iteration,
+                total_pairs,
                 schedule.a_ratio,
                 schedule.alpha,
                 schedule.gamma,
@@ -2806,18 +2878,16 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    for iter in start_iteration..end_iteration {
-        let mut update_sums = vec![0.0f64; params.len()];
-        let mut seed_raw_results = Vec::with_capacity(seed_values.len());
-        let mut seed_plus_wins = Vec::with_capacity(seed_values.len());
-        let mut seed_minus_wins = Vec::with_capacity(seed_values.len());
-        let mut seed_draws = Vec::with_capacity(seed_values.len());
-        let mut seed_rows = Vec::with_capacity(seed_values.len());
+    for batch_idx in start_batch..end_batch {
+        // この batch で消化する game pair 数。最終 batch は端数になり得る。
+        let pairs_remaining = total_pairs - completed_pairs;
+        let this_batch_pairs = pairs_remaining.min(batch_pairs);
+        if this_batch_pairs == 0 {
+            break;
+        }
 
-        // Phase A: 全 seed の事前計算（CPU-light, sequential）。各 seed の RNG/flips/shifts/
-        // start_pos_indices を生成。total_games_start はセッション累積に seed_idx × games_per_iter
-        // を足して決定論的に求める。
-        let prep_ctx = SeedPrepCtx {
+        // params は batch 末で更新するため、prep_ctx は batch ごとに作り直す。
+        let batch_ctx = BatchPrepCtx {
             big_a,
             schedule,
             params: &params,
@@ -2825,149 +2895,64 @@ fn main() -> Result<()> {
             active_only_regex: active_only_regex.as_ref(),
             translator: &translator,
             start_positions_len: start_positions.len(),
-            games_per_iteration: cli.games_per_iteration as usize,
+            batch_pairs: this_batch_pairs as usize,
             random_startpos: cli.random_startpos,
         };
-        let mut preps = Vec::with_capacity(seed_values.len());
-        for (seed_idx, base_seed) in seed_values.iter().copied().enumerate() {
-            let seed_total_games_start = total_games
-                .checked_add(seed_idx * cli.games_per_iteration as usize)
-                .context("total_games offset overflow")?;
-            preps.push(compute_seed_prep(&prep_ctx, iter, base_seed, seed_total_games_start)?);
-        }
 
-        // Phase B: ゲーム実行（heavy）。--parallel-seeds 指定 + seed 数 ≥ 2 のとき thread::scope
-        // で seed 並列実行、それ以外は順次実行。--concurrency を seed 数で分配して
-        // CPU の取り合いを避ける。
-        let parallelize = cli.parallel_seeds && seed_values.len() >= 2;
-        let per_seed_concurrency = if parallelize {
-            (cli.concurrency / seed_values.len()).max(1)
-        } else {
-            cli.concurrency
-        };
-        let seed_count = seed_values.len();
-        let run_stats: Vec<SeedGameStats> = if parallelize {
-            // 借用を closure 外で確定 (move closure でも参照を捕捉)
-            let base_cfg_ref = &base_cfg;
-            let params_ref = &params;
-            let start_positions_ref = &start_positions;
-            let game_cfg_ref = &game_cfg;
-            let translator_ref = &translator;
-            let active_mask_ref = &active_mask;
-            let preps_ref = &preps;
-            std::thread::scope(|scope| -> Result<Vec<SeedGameStats>> {
-                let handles: Vec<_> = (0..seed_count)
-                    .map(|seed_idx| {
-                        let h = scope.spawn(move || -> Result<SeedGameStats> {
-                            let prep = &preps_ref[seed_idx];
-                            run_seed_games_parallel(SeedRunContext {
-                                concurrency: per_seed_concurrency,
-                                base_cfg: base_cfg_ref,
-                                params: params_ref,
-                                plus_values: &prep.plus_values,
-                                minus_values: &prep.minus_values,
-                                start_positions: start_positions_ref,
-                                start_pos_indices: &prep.start_pos_indices,
-                                game_cfg: game_cfg_ref,
-                                tc,
-                                total_games_start: prep.seed_total_games_start,
-                                iteration: iter + 1,
-                                seed_idx,
-                                seed_count,
-                                base_seed: prep.base_seed,
-                                translator: translator_ref,
-                                active_mask: active_mask_ref,
-                            })
-                        });
-                        (seed_idx, h)
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|(seed_idx, h)| {
-                        h.join().map_err(|payload| {
-                            anyhow::anyhow!(
-                                "seed worker panicked: seed_idx={seed_idx}: {}",
-                                panic_payload_to_string(&payload),
-                            )
-                        })?
-                    })
-                    .collect()
-            })?
-        } else {
-            preps
-                .iter()
-                .enumerate()
-                .map(|(seed_idx, prep)| -> Result<SeedGameStats> {
-                    run_seed_games_parallel(SeedRunContext {
-                        concurrency: per_seed_concurrency,
-                        base_cfg: &base_cfg,
-                        params: &params,
-                        plus_values: &prep.plus_values,
-                        minus_values: &prep.minus_values,
-                        start_positions: &start_positions,
-                        start_pos_indices: &prep.start_pos_indices,
-                        game_cfg: &game_cfg,
-                        tc,
-                        total_games_start: prep.seed_total_games_start,
-                        iteration: iter + 1,
-                        seed_idx,
-                        seed_count,
-                        base_seed: prep.base_seed,
-                        translator: &translator,
-                        active_mask: &active_mask,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
+        // Phase A: 事前計算。schedule の k 軸 = batch 開始時点の累積 game pair 数。
+        // RNG 用の batch_idx は 0-origin で渡す (`seed_for_iteration` 内で `+1` され
+        // 重複しない iter_term を作るため、ここで `+1` する必要はない)。
+        let prep =
+            compute_batch_prep(&batch_ctx, batch_idx, completed_pairs, base_seed, total_games)?;
 
-        // Phase C: 集計（CPU-light, sequential, seed 順序維持）。
-        for (prep, stats) in preps.iter().zip(run_stats.iter()) {
-            total_games = total_games
-                .checked_add(cli.games_per_iteration as usize)
-                .context("total_games overflow")?;
+        // Phase B: ゲーム実行 (heavy)。
+        let stats = run_batch_games_parallel(BatchRunContext {
+            concurrency: cli.concurrency,
+            base_cfg: &base_cfg,
+            params: &params,
+            plus_values: &prep.plus_values,
+            minus_values: &prep.minus_values,
+            start_positions: &start_positions,
+            start_pos_indices: &prep.start_pos_indices,
+            game_cfg: &game_cfg,
+            tc,
+            total_games_start: prep.batch_total_games_start,
+            iteration: batch_idx + 1,
+            base_seed: prep.base_seed,
+            translator: &translator,
+            active_mask: &active_mask,
+        })?;
 
-            let raw_result = stats.step_sum;
-            let plus_wins = stats.plus_wins;
-            let minus_wins = stats.minus_wins;
-            let draws = stats.draws;
+        // Phase C: 集計と更新。
+        let games_in_batch = (this_batch_pairs * 2) as usize;
+        total_games = total_games.checked_add(games_in_batch).context("total_games overflow")?;
+        completed_pairs = completed_pairs
+            .checked_add(this_batch_pairs)
+            .context("completed_pairs overflow")?;
 
-            // Fishtest 更新: signal_j = R_k_j × c_k_j × result × flip_j
-            for (idx, (p, (&flip, sched))) in
-                params.iter().zip(prep.flips.iter().zip(param_schedules.iter())).enumerate()
+        let raw_result = stats.step_sum;
+        let plus_wins = stats.plus_wins;
+        let minus_wins = stats.minus_wins;
+        let draws = stats.draws;
+
+        // Fishtest 更新: signal_j = R_k_j × c_k_j × result × flip_j。
+        // k 軸は batch 開始時点 (`completed_pairs - this_batch_pairs`) の累積 pair 数を使う。
+        let k_for_update = completed_pairs - this_batch_pairs;
+        let mut update_sums = vec![0.0f64; params.len()];
+        for (idx, (p, (&flip, sched))) in
+            params.iter().zip(prep.flips.iter().zip(param_schedules.iter())).enumerate()
+        {
+            if !is_param_active(p, active_only_regex.as_ref(), &translator)
+                || p.c_end.abs() <= f64::EPSILON
             {
-                if !is_param_active(p, active_only_regex.as_ref(), &translator)
-                    || p.c_end.abs() <= f64::EPSILON
-                {
-                    continue;
-                }
-                let (c_k, r_k) = sched.at_iteration(iter, big_a, schedule.alpha, schedule.gamma);
-                update_sums[idx] += r_k * c_k * raw_result * flip;
+                continue;
             }
-
-            seed_raw_results.push(raw_result);
-            seed_plus_wins.push(plus_wins as f64);
-            seed_minus_wins.push(minus_wins as f64);
-            seed_draws.push(draws as f64);
-
-            seed_rows.push(IterationStats {
-                iteration: iter + 1,
-                seed: prep.base_seed,
-                games: cli.games_per_iteration,
-                plus_wins,
-                minus_wins,
-                draws,
-                raw_result,
-                active_params: prep.active_params,
-                avg_abs_shift: prep.avg_abs_shift,
-                updated_params: 0,
-                avg_abs_update: 0.0,
-                max_abs_update: 0.0,
-                total_games: 0,
-            });
+            let (c_k, r_k) =
+                sched.at_iteration(k_for_update, big_a, schedule.alpha, schedule.gamma);
+            update_sums[idx] = r_k * c_k * raw_result * flip;
         }
 
-        // Seed 平均後にパラメータ更新
+        // θ 更新。1 batch = 1 update (fishtest 流)。
         let mut updated_params = 0usize;
         let mut abs_update_sum = 0.0f64;
         let mut max_abs_update = 0.0f64;
@@ -2978,11 +2963,9 @@ fn main() -> Result<()> {
                 continue;
             }
             let before = p.value;
-            let avg_signal = update_sums[idx] / seed_values.len() as f64;
+            let signal = update_sums[idx];
             // θ 内部状態は is_int に関わらず f64 のまま保持する (fishtest 流)。
-            // engine への送信時にのみ stochastic round が掛かる (compute_seed_prep)。
-            // ここで round すると小さな更新が連続消失して棋力低下の原因になる。
-            p.value = clamped_value(p, p.value + avg_signal * cli.mobility);
+            p.value = clamped_value(p, p.value + signal * cli.mobility);
             let abs_update = (p.value - before).abs();
             updated_params += 1;
             abs_update_sum += abs_update;
@@ -2995,37 +2978,41 @@ fn main() -> Result<()> {
         } else {
             0.0
         };
+
+        // stats.csv: v4 仕様 1 batch = 1 行。
         if let Some(writer) = stats_csv_writer.as_mut() {
-            for row in &mut seed_rows {
-                row.updated_params = updated_params;
-                row.avg_abs_update = avg_abs_update;
-                row.max_abs_update = max_abs_update;
-                row.total_games = total_games;
-                write_stats_csv_row(writer, *row)?;
-            }
+            let row = IterationStats {
+                iteration: batch_idx + 1,
+                batch_pairs: this_batch_pairs,
+                plus_wins,
+                minus_wins,
+                draws,
+                raw_result,
+                active_params: prep.active_params,
+                avg_abs_shift: prep.avg_abs_shift,
+                updated_params,
+                avg_abs_update,
+                max_abs_update,
+                total_games,
+            };
+            write_stats_csv_row(writer, row)?;
             writer.flush()?;
         }
-
-        let (raw_result_mean, raw_result_variance) = mean_and_variance(&seed_raw_results);
-        let (plus_wins_mean, plus_wins_variance) = mean_and_variance(&seed_plus_wins);
-        let (minus_wins_mean, minus_wins_variance) = mean_and_variance(&seed_minus_wins);
-        let (draws_mean, draws_variance) = mean_and_variance(&seed_draws);
 
         write_params(&state_params, &params)?;
         if let Some(writer) = param_values_csv_writer.as_mut() {
-            write_param_values_csv_row(writer, iter + 1, &params)?;
+            write_param_values_csv_row(writer, batch_idx + 1, &params)?;
             writer.flush()?;
         }
         // state.params 更新 → meta 更新の transactional 復旧用に、書き込み直後の
-        // state.params を hash して meta に焼き込む。resume 起動時に on-disk hash と
-        // 突き合わせて両者の乖離を検出する。
+        // state.params を hash して meta に焼き込む。
         let current_params_sha256 = sha256_hex_of_file(&state_params)?;
         let meta = ResumeMetaData {
             format_version: META_FORMAT_VERSION,
             state_params_file: state_params.display().to_string(),
-            completed_iterations: iter + 1,
+            completed_iterations: batch_idx + 1,
             total_games,
-            last_raw_result_mean: raw_result_mean,
+            last_raw_result_mean: raw_result,
             last_avg_abs_update: avg_abs_update,
             updated_at_utc: Utc::now().to_rfc3339(),
             schedule,
@@ -3039,42 +3026,37 @@ fn main() -> Result<()> {
             engine_param_mapping_sha256: init_snapshot.engine_param_mapping_sha256.clone(),
             init_mode: init_snapshot.init_mode,
             current_params_sha256,
+            total_pairs,
+            batch_pairs,
+            completed_pairs,
         };
         save_meta(&meta_path, &meta)?;
         eprintln!(
-            "iter={} seeds={} raw_result_mean={:+.3} raw_result_var={:.6} \
+            "batch={}/{} k_pair={}/{} batch_pairs={} raw_result={:+.3} \
              avg_abs_update={:.6} max_abs_update={:.6} checkpoint={} meta={}",
-            iter + 1,
-            seed_values.len(),
-            raw_result_mean,
-            raw_result_variance,
+            batch_idx + 1,
+            end_batch,
+            completed_pairs,
+            total_pairs,
+            this_batch_pairs,
+            raw_result,
             avg_abs_update,
             max_abs_update,
             state_params.display(),
             meta_path.display()
         );
-        if let Some(writer) = stats_aggregate_csv_writer.as_mut() {
-            write_stats_aggregate_csv_row(
-                writer,
-                AggregateIterationStats {
-                    iteration: iter + 1,
-                    seed_count: seed_values.len(),
-                    games_per_seed: cli.games_per_iteration,
-                    raw_result_mean,
-                    raw_result_variance,
-                    plus_wins_mean,
-                    plus_wins_variance,
-                    minus_wins_mean,
-                    minus_wins_variance,
-                    draws_mean,
-                    draws_variance,
-                    total_games,
-                },
-            )?;
-            writer.flush()?;
-        }
 
         if let Some(config) = early_stop_config {
+            // raw_result_variance は v3 で「seed 横断分散」だった。v4 は単一 batch
+            // なので raw_result の絶対値を **batch_pairs で正規化** した値 (= 1 game pair
+            // あたりの平均勝率乖離; 0..1 の範囲) を分散の代理指標として使う。
+            // raw_result == 0 ⇔ +1/-1 が完全に拮抗 ⇔ SPSA 収束のシグナル。
+            // 旧 v3 と完全互換ではないため、閾値設計はユーザ側で再調整が必要 (docs に明記)。
+            let raw_result_variance = if this_batch_pairs == 0 {
+                0.0
+            } else {
+                raw_result.abs() / this_batch_pairs as f64
+            };
             let early_stop_hit = avg_abs_update <= config.avg_abs_update_threshold
                 && raw_result_variance <= config.result_variance_threshold;
             if early_stop_hit {
@@ -3083,8 +3065,9 @@ fn main() -> Result<()> {
                 early_stop_consecutive = 0;
             }
             eprintln!(
-                "iter={} early_stop_hit={} consecutive={}/{} thresholds(avg_abs_update<={:.6}, result_variance<={:.6})",
-                iter + 1,
+                "batch={} early_stop_hit={} consecutive={}/{} \
+                 thresholds(avg_abs_update<={:.6}, |raw_result|/batch_pairs<={:.6})",
+                batch_idx + 1,
                 early_stop_hit,
                 early_stop_consecutive,
                 config.patience,
@@ -3093,8 +3076,8 @@ fn main() -> Result<()> {
             );
             if early_stop_consecutive >= config.patience {
                 eprintln!(
-                    "early stop triggered at iter={} (consecutive={})",
-                    iter + 1,
+                    "early stop triggered at batch={} (consecutive={})",
+                    batch_idx + 1,
                     early_stop_consecutive
                 );
                 break;
@@ -3676,20 +3659,19 @@ mod tests {
         assert_eq!(default_meta_path(dir), dir.join("meta.json"));
         assert_eq!(default_param_values_csv_path(dir), dir.join("values.csv"));
         assert_eq!(default_stats_csv_path(dir), dir.join("stats.csv"));
-        assert_eq!(default_stats_aggregate_csv_path(dir), dir.join("stats_aggregate.csv"));
     }
 
     #[test]
     fn default_force_init_cleanup_paths_returns_run_dir_only() {
         // override 先 (--stats-csv で run-dir 外を指定する等) が混入しないことを担保。
-        // force-init 時の削除対象は run-dir 直下の 3 派生 CSV + final.params のみで、
+        // force-init 時の削除対象は run-dir 直下の派生 CSV + final.params のみで、
         // state.params / meta.json は apply_init_action 側で別管理。
+        // v4: stats_aggregate.csv は撤去 (multi-seed 機能と共に削除)。
         let dir = Path::new("/tmp/some_run");
         let paths = default_force_init_cleanup_paths(dir);
-        assert_eq!(paths.len(), 4, "exactly 4 derived files (3 CSV + final.params)");
+        assert_eq!(paths.len(), 3, "exactly 3 derived files (2 CSV + final.params)");
         assert!(paths.contains(&dir.join("values.csv")));
         assert!(paths.contains(&dir.join("stats.csv")));
-        assert!(paths.contains(&dir.join("stats_aggregate.csv")));
         assert!(paths.contains(&dir.join("final.params")));
         // state.params と meta.json は含めない (apply_init_action が個別管理)
         assert!(!paths.contains(&dir.join("state.params")));
@@ -3738,6 +3720,9 @@ mod tests {
             engine_param_mapping_sha256: None,
             init_mode: InitMode::FreshInitFrom,
             current_params_sha256: "abc123".to_owned(),
+            total_pairs: 200,
+            batch_pairs: 8,
+            completed_pairs: 40,
         };
         save_meta(&path, &meta).unwrap();
         let loaded = load_meta(&path).unwrap();
@@ -3748,6 +3733,9 @@ mod tests {
         assert_eq!(loaded.active_param_count, meta.active_param_count);
         assert_eq!(loaded.init_mode, meta.init_mode);
         assert_eq!(loaded.current_params_sha256, meta.current_params_sha256);
+        assert_eq!(loaded.total_pairs, meta.total_pairs);
+        assert_eq!(loaded.batch_pairs, meta.batch_pairs);
+        assert_eq!(loaded.completed_pairs, meta.completed_pairs);
     }
 
     // ========================================================================
@@ -3832,13 +3820,20 @@ mod tests {
         }
     }
 
+    /// テスト用 `BatchPrepCtx`。`games_per_iteration` 引数は v3 名残で受け取るが
+    /// 内部的には `batch_pairs = games_per_iteration / 2` に変換して新仕様に渡す。
+    /// テスト本体の意図を変えずに新 API へ追従するためのシム。
     fn make_test_ctx<'a>(
         params: &'a [SpsaParam],
         schedules: &'a [ParamScheduleConstants],
         translator: &'a EngineNameTranslator,
         games_per_iteration: usize,
-    ) -> SeedPrepCtx<'a> {
-        SeedPrepCtx {
+    ) -> BatchPrepCtx<'a> {
+        assert!(
+            games_per_iteration.is_multiple_of(2),
+            "make_test_ctx: games_per_iteration must be even"
+        );
+        BatchPrepCtx {
             big_a: 10.0,
             schedule: ScheduleConfig {
                 alpha: 0.602,
@@ -3852,16 +3847,16 @@ mod tests {
             active_only_regex: None,
             translator,
             start_positions_len: 1957,
-            games_per_iteration,
+            batch_pairs: games_per_iteration / 2,
             random_startpos: true,
         }
     }
 
-    /// `compute_seed_prep` のスナップショットテスト。`ChaCha8Rng` は決定論的なため、
+    /// `compute_batch_prep` のスナップショットテスト。`ChaCha8Rng` は決定論的なため、
     /// 同じ `(base_seed, iter)` に対して flips / shifts / start_pos_indices が完全一致する。
     /// 並列化後も Phase A の事前計算結果がブレないことを保証。
     #[test]
-    fn compute_seed_prep_is_deterministic_across_calls() {
+    fn compute_batch_prep_is_deterministic_across_calls() {
         let params = vec![
             make_param("Search_a", 1000.0, 100.0),
             make_param("Search_b", 2000.0, 200.0),
@@ -3873,8 +3868,8 @@ mod tests {
         let translator = EngineNameTranslator::empty();
         let ctx = make_test_ctx(&params, &schedules, &translator, 8);
 
-        let prep1 = compute_seed_prep(&ctx, 5, 42, 100).expect("prep1");
-        let prep2 = compute_seed_prep(&ctx, 5, 42, 100).expect("prep2");
+        let prep1 = compute_batch_prep(&ctx, 5, 5, 42, 100).expect("prep1");
+        let prep2 = compute_batch_prep(&ctx, 5, 5, 42, 100).expect("prep2");
 
         assert_eq!(prep1.flips, prep2.flips, "flips must be deterministic from seed/iter");
         assert_eq!(prep1.plus_values, prep2.plus_values);
@@ -3888,7 +3883,7 @@ mod tests {
     /// 全一致にならないことをスナップショットテストとして確認する。パラメータ数を 6 に増やして
     /// 取り得る flip パターンを 2^6=64 通りに広げ、隣接 seed ペアの直接比較で意図を明確化。
     #[test]
-    fn compute_seed_prep_seeds_produce_independent_flips() {
+    fn compute_batch_prep_seeds_produce_independent_flips() {
         let params: Vec<_> = (0..6)
             .map(|i| make_param(&format!("Search_p{i}"), 1000.0 + i as f64 * 100.0, 100.0))
             .collect();
@@ -3899,10 +3894,10 @@ mod tests {
         let translator = EngineNameTranslator::empty();
         let ctx = make_test_ctx(&params, &schedules, &translator, 32);
 
-        let prep1 = compute_seed_prep(&ctx, 5, 1, 100).expect("prep1");
-        let prep2 = compute_seed_prep(&ctx, 5, 2, 100).expect("prep2");
-        let prep3 = compute_seed_prep(&ctx, 5, 3, 100).expect("prep3");
-        let prep4 = compute_seed_prep(&ctx, 5, 4, 100).expect("prep4");
+        let prep1 = compute_batch_prep(&ctx, 5, 5, 1, 100).expect("prep1");
+        let prep2 = compute_batch_prep(&ctx, 5, 5, 2, 100).expect("prep2");
+        let prep3 = compute_batch_prep(&ctx, 5, 5, 3, 100).expect("prep3");
+        let prep4 = compute_batch_prep(&ctx, 5, 5, 4, 100).expect("prep4");
 
         // 隣接 seed ペアそれぞれで flip パターンが異なることを直接確認
         assert_ne!(prep1.flips, prep2.flips, "seed=1 vs seed=2 flips must differ");
@@ -3914,7 +3909,7 @@ mod tests {
     /// `plus_is_black` のみ反転させる。fishtest と等価のノイズ削減を行うための
     /// 最重要不変条件で、これが崩れると pair 化が形骸化して開局ノイズが残る。
     #[test]
-    fn compute_seed_prep_pairs_share_startpos() {
+    fn compute_batch_prep_pairs_share_startpos() {
         let params = vec![make_param("Search_a", 1000.0, 100.0)];
         let schedules: Vec<ParamScheduleConstants> = params
             .iter()
@@ -3924,7 +3919,7 @@ mod tests {
         // games_per_iteration = 16 → pair_count = 8。
         let ctx = make_test_ctx(&params, &schedules, &translator, 16);
 
-        let prep = compute_seed_prep(&ctx, 5, 42, 100).expect("prep");
+        let prep = compute_batch_prep(&ctx, 5, 5, 42, 100).expect("prep");
 
         assert_eq!(prep.start_pos_indices.len(), 16, "16 game 分の index がある");
         // pair 内 (2k, 2k+1) で同じ startpos
@@ -3942,7 +3937,7 @@ mod tests {
     }
 
     /// Paired antithetic の color 反転規約 (`plus_is_black = idx % 2 == 0`) を直接確認。
-    /// 実コード (`run_seed_games_parallel`) のロジックと同じ式を再現することで、
+    /// 実コード (`run_batch_games_parallel`) のロジックと同じ式を再現することで、
     /// pair 化した index 列と組み合わせたとき先後が正しく入れ替わることを保証する。
     #[test]
     fn paired_antithetic_color_flips_within_pair() {
@@ -3984,7 +3979,7 @@ mod tests {
         let mut sum = 0.0f64;
         let mut count = 0_usize;
         for iter in 0..n_iters {
-            let prep = compute_seed_prep(&ctx, iter, 12345, 0).expect("prep");
+            let prep = compute_batch_prep(&ctx, iter, iter, 12345, 0).expect("prep");
             sum += prep.plus_values[0];
             sum += prep.minus_values[0];
             count += 2;
@@ -3997,12 +3992,12 @@ mod tests {
         );
     }
 
-    /// 完全再現性: 同一 seed/iter で 2 回 `compute_seed_prep` を回したとき、
+    /// 完全再現性: 同一 seed/iter で 2 回 `compute_batch_prep` を回したとき、
     /// flip / shifts / plus_values / minus_values / start_pos_indices 全てが
     /// bit-identical に一致することを確認。stochastic rounding 導入後も RNG stream を
     /// 分離した上で seed_for_iteration から決定論的に生成しているため、保証される。
     #[test]
-    fn compute_seed_prep_full_reproducibility_with_rounding() {
+    fn compute_batch_prep_full_reproducibility_with_rounding() {
         let mut params = vec![
             make_param("Search_a", 1234.5, 50.0),
             make_param("Search_b", 9876.7, 100.0),
@@ -4017,8 +4012,8 @@ mod tests {
         let translator = EngineNameTranslator::empty();
         let ctx = make_test_ctx(&params, &schedules, &translator, 8);
 
-        let prep1 = compute_seed_prep(&ctx, 7, 99, 200).expect("prep1");
-        let prep2 = compute_seed_prep(&ctx, 7, 99, 200).expect("prep2");
+        let prep1 = compute_batch_prep(&ctx, 7, 7, 99, 200).expect("prep1");
+        let prep2 = compute_batch_prep(&ctx, 7, 7, 99, 200).expect("prep2");
 
         assert_eq!(prep1.flips, prep2.flips);
         assert_eq!(prep1.plus_values, prep2.plus_values);
@@ -4036,7 +4031,7 @@ mod tests {
     /// 完全一致を否定する弱い不変条件だが、「pair 化を装って実は全 game 同一 startpos」
     /// のような退行を検出するには十分。
     #[test]
-    fn compute_seed_prep_different_pairs_have_varied_startpos() {
+    fn compute_batch_prep_different_pairs_have_varied_startpos() {
         let params = vec![make_param("Search_a", 1000.0, 100.0)];
         let schedules: Vec<ParamScheduleConstants> = params
             .iter()
@@ -4046,7 +4041,7 @@ mod tests {
         // games_per_iteration = 32 → pair_count = 16。1957 startpos からランダム抽出。
         let ctx = make_test_ctx(&params, &schedules, &translator, 32);
 
-        let prep = compute_seed_prep(&ctx, 5, 42, 0).expect("prep");
+        let prep = compute_batch_prep(&ctx, 5, 5, 42, 0).expect("prep");
         let pair_indices: Vec<usize> =
             (0..16).map(|pair_idx| prep.start_pos_indices[pair_idx * 2]).collect();
         let unique: std::collections::HashSet<_> = pair_indices.iter().copied().collect();
