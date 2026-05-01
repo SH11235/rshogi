@@ -36,6 +36,11 @@ impl ConfigKeys {
     /// LobbyDO 内 in-memory queue の総数上限。超過時 LOGIN_LOBBY を `queue_full`
     /// で reject する。未設定時は 100 が既定値。
     pub const LOBBY_QUEUE_SIZE_LIMIT: &'static str = "LOBBY_QUEUE_SIZE_LIMIT";
+    /// 私的対局 (`CHALLENGE_LOBBY`) で発行された token の TTL (秒)。期限超過した
+    /// 未消費 token は LobbyDO の Alarm ハンドラで `purge_expired` され、保留中の
+    /// WS 接続がいれば切断される。未設定時は 3600 秒 (1 時間)。Issue #582 の
+    /// Workers 経路で参照する。
+    pub const CHALLENGE_TTL_SEC: &'static str = "CHALLENGE_TTL_SEC";
     /// R2 バケットバインディング名（CSA V2 棋譜保存）。
     pub const KIFU_BUCKET_BINDING: &'static str = "KIFU_BUCKET";
     /// R2 バケットバインディング名（Floodgate 履歴保存）。1 対局 = 1 オブジェクト
@@ -141,6 +146,7 @@ impl ConfigKeys {
         Self::ALLOW_FLOODGATE_FEATURES,
         Self::ALLOW_VIEWER_API,
         Self::LOBBY_QUEUE_SIZE_LIMIT,
+        Self::CHALLENGE_TTL_SEC,
     ];
 
     /// **local dev のみ** の `wrangler.toml.example` `[vars]` テーブルに追加で
@@ -151,6 +157,26 @@ impl ConfigKeys {
     /// 全件を `[vars]` として記載することで、新規メンバーが `cp wrangler.toml.example
     /// wrangler.toml && wrangler dev` で即動作確認できる friction レス運用を維持する。
     pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] = &[Self::ADMIN_HANDLE];
+}
+
+/// `CHALLENGE_TTL_SEC` 既定値 (1 時間)。`parse_challenge_ttl_duration` で
+/// `None` / 空文字 / パース失敗時のフォールバックとして参照する。
+pub(crate) const DEFAULT_CHALLENGE_TTL_SEC: u64 = 3600;
+
+/// `CHALLENGE_TTL_SEC` 文字列を `Duration` へ解決する。`None` / 空文字 /
+/// 非数値 / `u64` 範囲外は [`DEFAULT_CHALLENGE_TTL_SEC`] にフォールバック
+/// する (challenge TTL 不正で全 `CHALLENGE_LOBBY` 発行が止まる事態を避ける
+/// 安全側挙動)。`= 0` は purge が即時となり全 token が短命になる選択を
+/// 運用側に与えるため許容する。
+pub fn parse_challenge_ttl_duration(raw: Option<&str>) -> std::time::Duration {
+    let trimmed = raw.unwrap_or("").trim();
+    if trimmed.is_empty() {
+        return std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC);
+    }
+    match trimmed.parse::<u64>() {
+        Ok(secs) => std::time::Duration::from_secs(secs),
+        Err(_) => std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC),
+    }
 }
 
 /// `RECONNECT_GRACE_SECONDS` 文字列を `Duration` へ解決する。`None` または空文字
@@ -449,6 +475,43 @@ mod tests {
     fn parse_reconnect_grace_duration_rejects_non_numeric() {
         let err = parse_reconnect_grace_duration(Some("forever")).unwrap_err();
         assert!(err.contains("RECONNECT_GRACE_SECONDS"));
+    }
+
+    /// `CHALLENGE_TTL_SEC` が未設定 / 空文字なら既定 3600 秒。
+    #[test]
+    fn parse_challenge_ttl_duration_defaults_when_unset() {
+        assert_eq!(
+            parse_challenge_ttl_duration(None),
+            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
+        );
+        assert_eq!(
+            parse_challenge_ttl_duration(Some("")),
+            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
+        );
+        assert_eq!(
+            parse_challenge_ttl_duration(Some("  ")),
+            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
+        );
+    }
+
+    /// 数値はそのまま秒として採用する。`= 0` も許容 (purge 即時で全 token 短命)。
+    #[test]
+    fn parse_challenge_ttl_duration_accepts_seconds() {
+        assert_eq!(parse_challenge_ttl_duration(Some("60")), std::time::Duration::from_secs(60));
+        assert_eq!(parse_challenge_ttl_duration(Some("0")), std::time::Duration::ZERO);
+    }
+
+    /// 非数値はパース失敗時のフォールバック (= 既定値) で扱う。
+    #[test]
+    fn parse_challenge_ttl_duration_falls_back_on_invalid() {
+        assert_eq!(
+            parse_challenge_ttl_duration(Some("forever")),
+            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
+        );
+        assert_eq!(
+            parse_challenge_ttl_duration(Some("-1")),
+            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
+        );
     }
 
     #[test]

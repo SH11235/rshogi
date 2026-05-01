@@ -150,6 +150,34 @@ pub enum ClientCommand {
         /// 照会対象のプレイヤ名。
         handle: PlayerName,
     },
+
+    /// `%%CHALLENGE <opponent_handle> <color> <clock_preset_name> [<sfen>]`
+    ///
+    /// 招待者 (LOGIN 済 handle) が `<opponent_handle>` を指名し、`<color>`
+    /// (`black` / `white` / `sente` / `gote` / `free`)・`<clock_preset_name>`
+    /// (TCP 側 `clock_presets` の game_name)・任意の `<sfen>` (開始局面) を
+    /// 指定して private match token を発行する CSA 拡張コマンド。
+    ///
+    /// 受理は **x1 mode 限定**。x1 でない通常 LOGIN セッションが本コマンドを
+    /// 送ると既存 `non_x1_waiter_is_disconnected_on_any_input` の挙動で切断
+    /// される。inviter handle は x1 LOGIN 時の handle として確定するため、
+    /// 本構造体には含めない。
+    ///
+    /// SFEN 内のスペースを潰さないため、本 variant のパースは
+    /// `splitn(4, char::is_whitespace)` + 末尾 `trim()` で行う
+    /// (`split_whitespace` は使わない)。
+    Challenge {
+        /// 招待相手の handle (TCP では存在確認、Workers では self-claim)。
+        opponent: PlayerName,
+        /// 招待者の希望配色。`free` 指定 (= `None`) は両者揃った時点で
+        /// サーバが乱択する。
+        inviter_color: Option<Color>,
+        /// 時計設定 preset 名。上位層が `clock_presets` map から `ClockSpec`
+        /// を解決する。
+        clock_preset: GameName,
+        /// 開始局面 SFEN。`None` は平手。SFEN 内のスペースは保持される。
+        initial_sfen: Option<String>,
+    },
 }
 
 /// 1 行の生 CSA テキストをパースして [`ClientCommand`] に変換する。
@@ -404,7 +432,69 @@ fn parse_x1(rest: &str) -> Result<ClientCommand, ProtocolError> {
             })
         }
         "FLOODGATE" => parse_floodgate_subcommand(tail),
+        "CHALLENGE" => parse_challenge(tail),
         other => Err(ProtocolError::Unknown(format!("%%{other}"))),
+    }
+}
+
+/// `%%CHALLENGE <opponent_handle> <color> <clock_preset_name> [<sfen>]` の引数を
+/// パースする。
+///
+/// SFEN 内のスペースを保持するため `splitn(4, char::is_whitespace)` で最大 4
+/// トークンに分割し、4 トークン目があれば `trim()` のみ適用して `initial_sfen`
+/// に格納する (`split_whitespace` だと SFEN の段間スペースが潰れる)。
+///
+/// `<color>` は `black` / `white` / `sente` / `gote` のいずれかで `Some(Color)`、
+/// `free` は `None` (サーバ乱択) を返す。それ以外は `ProtocolError::Malformed`。
+fn parse_challenge(tail: &str) -> Result<ClientCommand, ProtocolError> {
+    let mut parts = tail.splitn(4, char::is_whitespace);
+    let opponent = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ProtocolError::Malformed("%%CHALLENGE: missing <opponent_handle>".into()))?;
+    let color_tok = parts
+        .next()
+        .map(str::trim_start)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ProtocolError::Malformed("%%CHALLENGE: missing <color>".into()))?;
+    let clock_preset =
+        parts.next().map(str::trim_start).filter(|s| !s.is_empty()).ok_or_else(|| {
+            ProtocolError::Malformed("%%CHALLENGE: missing <clock_preset_name>".into())
+        })?;
+    let sfen_raw = parts.next();
+
+    let inviter_color = parse_challenge_color(color_tok)?;
+    let initial_sfen = match sfen_raw {
+        None => None,
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+    };
+    Ok(ClientCommand::Challenge {
+        opponent: PlayerName::new(opponent),
+        inviter_color,
+        clock_preset: GameName::new(clock_preset),
+        initial_sfen,
+    })
+}
+
+/// `%%CHALLENGE` の `<color>` トークンをパースする。
+///
+/// 受理: `black` / `sente` → `Some(Color::Black)`、`white` / `gote` →
+/// `Some(Color::White)`、`free` → `None`。それ以外は `ProtocolError::Malformed`。
+fn parse_challenge_color(token: &str) -> Result<Option<Color>, ProtocolError> {
+    match token {
+        "black" | "sente" => Ok(Some(Color::Black)),
+        "white" | "gote" => Ok(Some(Color::White)),
+        "free" => Ok(None),
+        other => Err(ProtocolError::Malformed(format!(
+            "%%CHALLENGE: bad <color> ({other:?}); expected black/white/sente/gote/free"
+        ))),
     }
 }
 
@@ -578,6 +668,25 @@ pub fn serialize_client_command(cmd: &ClientCommand) -> String {
         },
         ClientCommand::FloodgateRating { handle } => {
             format!("%%FLOODGATE rating {}", handle.as_str())
+        }
+        ClientCommand::Challenge {
+            opponent,
+            inviter_color,
+            clock_preset,
+            initial_sfen,
+        } => {
+            let color = match inviter_color {
+                Some(Color::Black) => "black",
+                Some(Color::White) => "white",
+                None => "free",
+            };
+            let mut s =
+                format!("%%CHALLENGE {} {} {}", opponent.as_str(), color, clock_preset.as_str(),);
+            if let Some(sfen) = initial_sfen {
+                s.push(' ');
+                s.push_str(sfen);
+            }
+            s
         }
     }
 }
@@ -1073,6 +1182,26 @@ mod tests {
             ClientCommand::FloodgateRating {
                 handle: PlayerName::new("alice"),
             },
+            ClientCommand::Challenge {
+                opponent: PlayerName::new("alice"),
+                inviter_color: Some(Color::Black),
+                clock_preset: GameName::new("byoyomi-600-10"),
+                initial_sfen: None,
+            },
+            ClientCommand::Challenge {
+                opponent: PlayerName::new("bob"),
+                inviter_color: None,
+                clock_preset: GameName::new("floodgate-300-10"),
+                initial_sfen: None,
+            },
+            ClientCommand::Challenge {
+                opponent: PlayerName::new("carol"),
+                inviter_color: Some(Color::White),
+                clock_preset: GameName::new("byoyomi-600-10"),
+                initial_sfen: Some(
+                    "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1".to_owned(),
+                ),
+            },
         ];
 
         for cmd in samples {
@@ -1141,5 +1270,114 @@ mod tests {
     fn rejects_floodgate_unknown_subcommand() {
         let err = parse_command(&line("%%FLOODGATE rank alice")).unwrap_err();
         assert!(matches!(err, ProtocolError::Unknown(_)), "got {err:?}");
+    }
+
+    /// `%%CHALLENGE` の最小ケース: opponent + black + clock_preset、SFEN 省略。
+    #[test]
+    fn parses_challenge_minimal() {
+        let cmd = parse_command(&line("%%CHALLENGE alice black byoyomi-600-10")).unwrap();
+        assert_eq!(
+            cmd,
+            ClientCommand::Challenge {
+                opponent: PlayerName::new("alice"),
+                inviter_color: Some(Color::Black),
+                clock_preset: GameName::new("byoyomi-600-10"),
+                initial_sfen: None,
+            }
+        );
+    }
+
+    /// `<color>` の各 alias (`black`/`white`/`sente`/`gote`/`free`) を網羅。
+    #[test]
+    fn parses_challenge_color_aliases() {
+        let cases = [
+            ("black", Some(Color::Black)),
+            ("sente", Some(Color::Black)),
+            ("white", Some(Color::White)),
+            ("gote", Some(Color::White)),
+            ("free", None),
+        ];
+        for (token, expected) in cases {
+            let cmd =
+                parse_command(&line(&format!("%%CHALLENGE alice {token} byoyomi-600-10"))).unwrap();
+            match cmd {
+                ClientCommand::Challenge { inviter_color, .. } => {
+                    assert_eq!(inviter_color, expected, "color token = {token}");
+                }
+                other => panic!("unexpected variant for color {token}: {other:?}"),
+            }
+        }
+    }
+
+    /// SFEN 内のスペースが `splitn(4)` + `trim()` 経路で保持される。
+    /// `split_whitespace` 経路だと潰れる段間スペースが残ることを検証。
+    #[test]
+    fn parses_challenge_preserves_sfen_spaces() {
+        let sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let cmd =
+            parse_command(&line(&format!("%%CHALLENGE alice free byoyomi-600-10 {sfen}"))).unwrap();
+        assert_eq!(
+            cmd,
+            ClientCommand::Challenge {
+                opponent: PlayerName::new("alice"),
+                inviter_color: None,
+                clock_preset: GameName::new("byoyomi-600-10"),
+                initial_sfen: Some(sfen.to_owned()),
+            }
+        );
+    }
+
+    /// SFEN 末尾の余分な空白は `trim()` で除去される (`Some` ではなく `None` ではない、
+    /// 空でない trimmed SFEN を保持)。
+    #[test]
+    fn parses_challenge_trims_trailing_whitespace_in_sfen() {
+        let cmd = parse_command(&line("%%CHALLENGE alice black byoyomi-600-10    9/9/9 b - 1   "))
+            .unwrap();
+        match cmd {
+            ClientCommand::Challenge { initial_sfen, .. } => {
+                assert_eq!(initial_sfen.as_deref(), Some("9/9/9 b - 1"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// `<sfen>` トークンが空白のみだった場合は `None` (省略扱い)。
+    #[test]
+    fn parses_challenge_treats_blank_sfen_as_none() {
+        // 4 token 目が空白のみ = `splitn(4)` の結果は `Some("")` ではなく
+        // 末尾を含めた raw 部分が来るので、それを trim した結果が空文字列なら None
+        let cmd = parse_command(&line("%%CHALLENGE alice black byoyomi-600-10    ")).unwrap();
+        match cmd {
+            ClientCommand::Challenge { initial_sfen, .. } => assert_eq!(initial_sfen, None),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    /// `<color>` トークンに不正な値を入れた場合は `Malformed`。
+    #[test]
+    fn rejects_challenge_with_bad_color() {
+        let err = parse_command(&line("%%CHALLENGE alice red byoyomi-600-10")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)), "got {err:?}");
+    }
+
+    /// `<opponent>` を省略した場合は `Malformed`。
+    #[test]
+    fn rejects_challenge_without_opponent() {
+        let err = parse_command(&line("%%CHALLENGE")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)), "got {err:?}");
+    }
+
+    /// `<color>` を省略した場合は `Malformed`。
+    #[test]
+    fn rejects_challenge_without_color() {
+        let err = parse_command(&line("%%CHALLENGE alice")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)), "got {err:?}");
+    }
+
+    /// `<clock_preset_name>` を省略した場合は `Malformed`。
+    #[test]
+    fn rejects_challenge_without_clock_preset() {
+        let err = parse_command(&line("%%CHALLENGE alice black")).unwrap_err();
+        assert!(matches!(err, ProtocolError::Malformed(_)), "got {err:?}");
     }
 }

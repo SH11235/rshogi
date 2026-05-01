@@ -138,6 +138,10 @@ ALLOW_VIEWER_API = "1"
 # LobbyDO 内 in-memory queue の総数上限。100 件を超える同時待機は LOGIN_LOBBY を
 # queue_full で reject する保守的既定。負荷に応じて引き上げ可。
 LOBBY_QUEUE_SIZE_LIMIT = "100"
+# 私的対局 (CHALLENGE_LOBBY) で発行される token の TTL (秒)。期限超過した
+# 未消費 token は Lobby DO の Alarm ハンドラで自動削除する。1 時間 = 3600
+# は対戦相手が招待後にゆっくり PC を起動する想定の保守的既定。
+CHALLENGE_TTL_SEC = "3600"
 
 # --- secret として設定する値 ---
 # 本番運用に必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。

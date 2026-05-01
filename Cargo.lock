@@ -1860,6 +1860,8 @@ dependencies = [
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "rand",
+ "rand_xoshiro",
  "rshogi-core",
  "rshogi-csa-server",
  "serde",

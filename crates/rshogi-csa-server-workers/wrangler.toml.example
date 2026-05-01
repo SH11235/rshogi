@@ -116,3 +116,7 @@ ALLOW_FLOODGATE_FEATURES = "false"
 ALLOW_VIEWER_API = "1"
 # LobbyDO 内 in-memory queue の総数上限。超過時 LOGIN_LOBBY を queue_full で reject。
 LOBBY_QUEUE_SIZE_LIMIT = "100"
+# 私的対局 (CHALLENGE_LOBBY) で発行される token の TTL (秒)。期限超過した
+# 未消費 token は Lobby DO の Alarm ハンドラで自動削除し、保留中の WS 接続
+# があれば切断信号を送る。Issue #582 の Workers 経路で参照する。
+CHALLENGE_TTL_SEC = "3600"

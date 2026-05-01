@@ -281,11 +281,12 @@ impl ChallengeRegistry {
         }
     }
 
-    /// 期限切れ entry を一括削除し、削除した entry の `Vec` を返す。呼び出し
-    /// 側は戻り値の `pending_ws_attachment_ids` (Workers) や、TCP では別途
-    /// 管理する runtime pending map から、先行 LOGIN 済 session を切断する
-    /// 責務を持つ。
-    pub fn purge_expired(&mut self, now_ms: u64) -> Vec<ChallengeEntry> {
+    /// 期限切れ entry を一括削除し、削除した `(token, entry)` の `Vec` を返す。
+    /// 呼び出し側は戻り値の `pending_ws_attachment_ids` (Workers) や、TCP では
+    /// 別途管理する runtime pending map から、token をキーに先行 LOGIN 済
+    /// session を切断する責務を持つ (戻り値に token を含めるのは TCP の
+    /// `TcpChallengePending` map から該当エントリを引くため)。
+    pub fn purge_expired(&mut self, now_ms: u64) -> Vec<(ChallengeToken, ChallengeEntry)> {
         let expired_tokens: Vec<ChallengeToken> = self
             .entries
             .iter()
@@ -300,7 +301,7 @@ impl ChallengeRegistry {
         let mut removed = Vec::with_capacity(expired_tokens.len());
         for token in expired_tokens {
             if let Some(entry) = self.entries.remove(&token) {
-                removed.push(entry);
+                removed.push((token, entry));
             }
         }
         removed
@@ -441,10 +442,11 @@ mod tests {
             .unwrap();
         // 60 秒前なら生存
         assert!(reg.lookup(&t, NOW_MS + 59_000).is_some());
-        // 境界: now_ms + 60_000 ちょうど → purge 対象
+        // 境界: now_ms + 60_000 ちょうど → purge 対象。戻り値は (token, entry) のタプル
         let boundary = NOW_MS + 60_000;
         let removed = reg.purge_expired(boundary);
         assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, t, "戻り値の token が purge された entry を識別する");
         assert!(reg.lookup(&t, boundary).is_none());
     }
 
@@ -556,8 +558,9 @@ mod tests {
         let boundary = NOW_MS + 60_000;
         let removed = reg.purge_expired(boundary);
         assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, t, "戻り値の token が purge された entry を識別する");
         assert_eq!(
-            removed[0].pending_ws_attachment_ids.get("alice").map(String::as_str),
+            removed[0].1.pending_ws_attachment_ids.get("alice").map(String::as_str),
             Some("ws-attached"),
             "戻り値の entry には先行 LOGIN 済 attachment id が保持される",
         );
