@@ -211,7 +211,11 @@ struct Cli {
     #[arg(long)]
     early_stop_avg_abs_update_threshold: Option<f64>,
 
-    /// 早期停止: result_variance の閾値（以下で条件成立）
+    /// 早期停止: result_variance 代理指標の閾値（以下で条件成立）。
+    ///
+    /// 比較対象は `|raw_result| / batch_pairs` (0..1 の正規化値、+1/-1 の game pair が
+    /// 完全に拮抗すると 0 に近づく)。`raw_result` の絶対値そのものではない点に注意。
+    /// 閾値値はチューニング対象の感度に応じて再調整すること。
     #[arg(long)]
     early_stop_result_variance_threshold: Option<f64>,
 
@@ -634,6 +638,65 @@ fn remove_stale_final_params_for_fresh_start(run_dir: &Path) -> Result<()> {
 
 fn default_meta_path(run_dir: &Path) -> PathBuf {
     run_dir.join("meta.json")
+}
+
+/// v3 silent migrate 時に旧形式 CSV をローテートする。
+///
+/// 旧 stats.csv は v3 までの 13 列形式 (`iteration,seed,games,...`) で、現行の
+/// 12 列ヘッダ (`iteration,batch_pairs,...`) と互換しない。append すると
+/// `spsa_stats_to_plot_csv` 等の後段ツールが列数混在を検知して破綻する。
+/// 既存ファイルを `<name>.v3.csv` にリネームして退避し、現行ヘッダで新規作成
+/// できる空き状態にする (実際のヘッダ書き出しは `open_stats_csv_writer` が担当)。
+///
+/// 旧 stats_aggregate.csv は現行で自動生成しないため、存在すれば `<name>.v3.csv`
+/// にリネームして退避するだけ (削除はせず、過去ログとして参照可能な形で残す)。
+///
+/// values.csv は param 名ベースのワイド形式で、param 名集合が変わらない限り列が
+/// 壊れない (param 名集合の hash は別途 `param_name_set_sha256` 検証で守られる)。
+/// よって values.csv は触らず append を継続する。
+///
+/// 既に `.v3.csv` 退避先が存在する場合 (= 過去に migrate を試みて何らかの理由で
+/// もう一度走った) は数字付きサフィックス (`<name>.v3.<n>.csv`) で重複回避する。
+///
+/// 引数:
+/// - `run_dir`: 走査対象。run-dir 直下の既定 path のみが対象。`--stats-csv` 等の
+///   override 先は触らない (force-init と同じ思想: 外部集約 CSV append 運用を
+///   保護する)。
+fn rotate_v3_csv_files_for_silent_migrate(run_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut rotated = Vec::new();
+    for name in ["stats.csv", "stats_aggregate.csv"] {
+        let src = run_dir.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dst = pick_v3_backup_path(&src);
+        std::fs::rename(&src, &dst).with_context(|| {
+            format!("v3 silent migrate: failed to rotate {} → {}", src.display(), dst.display())
+        })?;
+        rotated.push(dst);
+    }
+    Ok(rotated)
+}
+
+/// `<name>.csv` → `<name>.v3.csv` (or `<name>.v3.<n>.csv` で衝突回避) の退避先 path を返す。
+/// 副作用なし: 実際の rename は呼び出し側で行う。
+fn pick_v3_backup_path(src: &Path) -> PathBuf {
+    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("backup");
+    let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("csv");
+    let parent = src.parent().unwrap_or_else(|| Path::new("."));
+    let primary = parent.join(format!("{stem}.v3.{ext}"));
+    if !primary.exists() {
+        return primary;
+    }
+    // 衝突: `<name>.v3.<n>.csv` で連番を付ける (n=1..)。1000 件まで試して
+    // それでも衝突するなら諦めて最終候補を返す (実用上は到達しない)。
+    for n in 1..=1000_u32 {
+        let candidate = parent.join(format!("{stem}.v3.{n}.{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    parent.join(format!("{stem}.v3.last.{ext}"))
 }
 
 fn default_param_values_csv_path(run_dir: &Path) -> PathBuf {
@@ -2520,6 +2583,13 @@ fn main() -> Result<()> {
             let v3_silent_migrated = meta.total_pairs == 0 && meta.batch_pairs == 0;
             if v3_silent_migrated {
                 meta.schedule.total_iterations = total_pairs;
+                // 既存 stats.csv / stats_aggregate.csv は v3 形式の列構成で、現行
+                // ヘッダと append 互換性がない。既定 path のもののみ `<name>.v3.csv`
+                // へ退避する (override 先は外部集約 CSV append 運用保護のため触らない)。
+                let rotated = rotate_v3_csv_files_for_silent_migrate(&cli.run_dir)?;
+                for p in &rotated {
+                    eprintln!("v3 → v4 silent migrate: rotated legacy CSV → {}", p.display());
+                }
             }
             if !schedule_matches(meta.schedule, schedule) {
                 if cli.force_schedule {
@@ -2611,8 +2681,9 @@ fn main() -> Result<()> {
             // v4 schedule 検証: 既存 meta の total_pairs / batch_pairs と CLI 指定値の一致。
             // v3 → v4 silent migration 経路では meta.total_pairs == 0 (sentinel) のため
             // CLI 値を信頼して継承する (meta は migrate 直後で値を持たない)。
-            let migrated_from_v3 = meta.total_pairs == 0 && meta.batch_pairs == 0;
-            if !migrated_from_v3
+            // sentinel 判定は L2520 で `v3_silent_migrated` として確定済み。ここでは
+            // それを再利用して二重定義を避ける。
+            if !v3_silent_migrated
                 && (meta.total_pairs != total_pairs || meta.batch_pairs != batch_pairs)
             {
                 if cli.force_schedule {
@@ -2636,7 +2707,7 @@ fn main() -> Result<()> {
             // completed_pairs: v4 meta は記録されたものを使う。v3 silent migrate 時は
             // `completed_iterations × batch_pairs` で再構築する (v3 では 1 iter = 1 batch
             // = 1 update で k は iter index と等価だったため)。
-            let resumed_completed_pairs = if migrated_from_v3 {
+            let resumed_completed_pairs = if v3_silent_migrated {
                 meta.completed_iterations.saturating_mul(batch_pairs)
             } else {
                 meta.completed_pairs
@@ -3696,6 +3767,77 @@ mod tests {
         assert!(!final_path.exists());
     }
 
+    /// v3 silent migrate 経路で旧 stats.csv / stats_aggregate.csv が
+    /// `<name>.v3.csv` に退避されること、values.csv は触られないこと、
+    /// 不在ファイルがあっても error にならないことを確認。
+    #[test]
+    fn rotate_v3_csv_files_preserves_legacy_and_skips_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path();
+        std::fs::write(run_dir.join("stats.csv"), b"iteration,seed,games,...\n1,1,2,...\n")
+            .unwrap();
+        std::fs::write(run_dir.join("stats_aggregate.csv"), b"iteration,seeds,...\n1,1,...\n")
+            .unwrap();
+        let values_body = b"iteration,Search_a\n0,1000\n1,1010\n";
+        std::fs::write(run_dir.join("values.csv"), values_body).unwrap();
+
+        let rotated = rotate_v3_csv_files_for_silent_migrate(run_dir).unwrap();
+
+        // 旧 stats.csv / stats_aggregate.csv は消え、退避先が存在
+        assert!(!run_dir.join("stats.csv").exists(), "旧 stats.csv は退避されるべき");
+        assert!(
+            !run_dir.join("stats_aggregate.csv").exists(),
+            "旧 stats_aggregate.csv は退避されるべき"
+        );
+        assert!(run_dir.join("stats.v3.csv").exists());
+        assert!(run_dir.join("stats_aggregate.v3.csv").exists());
+        assert_eq!(rotated.len(), 2);
+
+        // values.csv は触られないこと (param 名ベースのワイド形式は append 互換)
+        let values_after = std::fs::read(run_dir.join("values.csv")).unwrap();
+        assert_eq!(values_after, values_body, "values.csv は退避対象ではない");
+
+        // 旧 stats.csv の中身が `.v3.csv` に保持されていること
+        let v3_body = std::fs::read_to_string(run_dir.join("stats.v3.csv")).unwrap();
+        assert!(v3_body.starts_with("iteration,seed,games,"));
+    }
+
+    /// run-dir 配下に対象ファイルがゼロでも no-op (空 Vec を返す) で error にならない。
+    #[test]
+    fn rotate_v3_csv_files_is_idempotent_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let rotated = rotate_v3_csv_files_for_silent_migrate(dir.path()).unwrap();
+        assert!(rotated.is_empty(), "対象不在では何もローテートしない");
+    }
+
+    /// `<name>.v3.csv` が既に存在する場合は `<name>.v3.1.csv` 等で衝突回避すること。
+    /// 過去に migrate を走らせた run dir に再度 silent migrate が掛かる事故ケース。
+    #[test]
+    fn rotate_v3_csv_files_avoids_overwriting_existing_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_dir = dir.path();
+        std::fs::write(run_dir.join("stats.csv"), b"new-v3-content").unwrap();
+        // 既存の退避先を意図的に作る (過去 migrate の残骸を模擬)
+        std::fs::write(run_dir.join("stats.v3.csv"), b"earlier-v3-backup").unwrap();
+
+        let rotated = rotate_v3_csv_files_for_silent_migrate(run_dir).unwrap();
+
+        // 既存退避先は触られず、新規は連番で保存される
+        assert_eq!(std::fs::read(run_dir.join("stats.v3.csv")).unwrap(), b"earlier-v3-backup");
+        assert!(run_dir.join("stats.v3.1.csv").exists(), "連番退避先が作られるべき");
+        assert_eq!(std::fs::read(run_dir.join("stats.v3.1.csv")).unwrap(), b"new-v3-content");
+        assert_eq!(rotated.len(), 1);
+    }
+
+    /// `pick_v3_backup_path` は副作用を持たず、衝突がなければ `<stem>.v3.<ext>` を返す。
+    #[test]
+    fn pick_v3_backup_path_returns_canonical_when_no_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("stats.csv");
+        let backup = pick_v3_backup_path(&src);
+        assert_eq!(backup, dir.path().join("stats.v3.csv"));
+    }
+
     #[test]
     fn save_and_load_meta_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -3941,9 +4083,19 @@ mod tests {
         }
     }
 
-    /// Paired antithetic の color 反転規約 (`plus_is_black = idx % 2 == 0`) を直接確認。
-    /// 実コード (`run_batch_games_parallel`) のロジックと同じ式を再現することで、
-    /// pair 化した index 列と組み合わせたとき先後が正しく入れ替わることを保証する。
+    /// Paired antithetic の color 反転規約 (`plus_is_black = idx % 2 == 0`) を
+    /// **規約の文書化テスト** として明示する。
+    ///
+    /// 設計意図: 実装側 (`run_batch_games_parallel`) のロジック `plus_is_black =
+    /// idx % 2 == 0` と同じ式をここに再掲することで、「pair 化した index 列と
+    /// 組み合わせたとき先後が正しく入れ替わる」という規約を 1 箇所に固定する。
+    /// 誰かが規約 (例: `idx % 2 != 0` 反転、別の pair 化方式) を変えた場合、
+    /// 実装と本テストの両方を同時に直す必要があるため、規約変更が暗黙のうちに
+    /// 滑り込むのを防ぐガードレールとして機能する。
+    ///
+    /// 動的な外形動作 (実コードを通った game 結果が pair 内で先後入替されている
+    /// こと) は統合テスト `compute_batch_prep_pairs_share_startpos` (start_pos の
+    /// 共有を確認) と統合テスト群が間接的にカバーする。
     #[test]
     fn paired_antithetic_color_flips_within_pair() {
         // pair の game 2k は plus_is_black=true, 2k+1 は false でなければならない。
@@ -4017,6 +4169,52 @@ mod tests {
             sum += prep.plus_values[0];
             sum += prep.minus_values[0];
             count += 2;
+        }
+        let mean = sum / count as f64;
+        let err = (mean - 10.4).abs();
+        assert!(
+            err < 0.05,
+            "stochastic rounding 平均 {mean} が連続値 10.4 から {err} 乖離 (許容 < 0.05)"
+        );
+    }
+
+    /// `c_end = 0.0` 版の期待値テスト (上の `_matches_continuous` を補完する直接版)。
+    ///
+    /// shift = 0 が確定するため、plus_value も minus_value も `stochastic_round(10.4)`
+    /// (= 10 or 11) しか取らない。多数試行平均が直接 10.4 に収束することを確認する
+    /// (上の版は shift の対称性に頼って間接的に 10.4 に収束させていた)。
+    /// 「shift と rounding の影響を分離して検証する」ガードレールとして残す。
+    ///
+    /// 注意: plus と minus は同一 rounding_rng stream を順に消費するため、
+    /// shift=0 でも個々の値は一致しない (期待値だけが 10.4 に揃う)。
+    #[test]
+    fn stochastic_rounding_expected_value_matches_continuous_zero_shift() {
+        let mut params = vec![make_param("Search_a", 10.4, 1.0)];
+        params[0].is_int = true;
+        params[0].min = 0.0;
+        params[0].max = 100.0;
+        params[0].c_end = 0.0; // c_k = 0 → shift = 0 を強制
+        let schedules: Vec<ParamScheduleConstants> = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+            .collect();
+        let translator = EngineNameTranslator::empty();
+        let ctx = make_test_ctx(&params, &schedules, &translator, 2);
+
+        let n_iters = 4000_u32;
+        let mut sum = 0.0f64;
+        let mut count = 0_usize;
+        for iter in 0..n_iters {
+            let prep = compute_batch_prep(&ctx, iter, iter, 67890, 0).expect("prep");
+            // shift = 0 なので各値は stochastic_round(10.4) ∈ {10, 11}。
+            for v in [prep.plus_values[0], prep.minus_values[0]] {
+                assert!(
+                    v == 10.0 || v == 11.0,
+                    "c_end=0 で stochastic_round(10.4) は 10 か 11 のはず: 実際 {v}"
+                );
+                sum += v;
+                count += 1;
+            }
         }
         let mean = sum / count as f64;
         let err = (mean - 10.4).abs();
