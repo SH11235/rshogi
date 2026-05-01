@@ -707,6 +707,104 @@ fn default_stats_csv_path(run_dir: &Path) -> PathBuf {
     run_dir.join("stats.csv")
 }
 
+/// v3 silent migrate 時、旧 run の `batch_pairs` 相当 (= `games_per_iteration / 2`)
+/// を `total_games / completed_iterations / 2` で推定し、CLI 指定値との不整合を
+/// 検出する。
+///
+/// v3 meta は `batch_pairs` を直接保持しないため、`completed_iterations` と
+/// `total_games` から推定した「1 iter あたりの game pair 数」を信頼する。
+/// 推定値が CLI 指定の `batch_pairs` と一致しないと、SPSA schedule の k 軸
+/// (a_k / c_k 評価のための累積 pair 数) が旧 run の続きにならず、進行状態が
+/// 破綻するため明示停止する (silent failure 防止)。
+///
+/// 動作仕様:
+/// - 推定不可 (`completed_iterations == 0` / `total_games == 0` /
+///   `total_games % completed_iterations != 0`): 強い warning + 続行。
+/// - 推定値が CLI 値と一致: warning なし。
+/// - 推定値が CLI 値と不一致 + `force_schedule == false`: bail (k 軸ズレ確実)。
+/// - 推定値が CLI 値と不一致 + `force_schedule == true`: warning + 続行。
+///
+/// 副作用: ユーザ向け warning は stderr (`eprintln!`)。bail は `Result::Err`。
+/// 純粋に検証だけ行い、`completed_pairs` の再構築や schedule 上書きは
+/// 呼び出し側の責務。
+fn check_v3_batch_pairs_consistency(
+    completed_iterations: u32,
+    total_games: usize,
+    cli_batch_pairs: u32,
+    force_schedule: bool,
+) -> Result<()> {
+    if completed_iterations == 0 || total_games == 0 {
+        eprintln!(
+            "v3 → v4 silent migrate: completed_iterations={completed_iterations}, \
+             total_games={total_games} のため batch_pairs 推定はスキップしました。\n  \
+             CLI 指定の --batch-pairs={cli_batch_pairs} がそのまま採用されます。\n  \
+             旧 run の `games_per_iteration / 2` と一致しないと SPSA schedule の \
+             k 軸が破綻するため、必ず一致する値を指定してください。"
+        );
+        return Ok(());
+    }
+    let total_iters = completed_iterations as usize;
+    if !total_games.is_multiple_of(total_iters) {
+        eprintln!(
+            "v3 → v4 silent migrate: total_games={total_games} が completed_iterations \
+             ={completed_iterations} で割り切れず、batch_pairs を推定できません。\n  \
+             (旧 run が早期停止 / multi-seed 等で 1 iter あたりの game 数が変動した可能性)\n  \
+             CLI 指定の --batch-pairs={cli_batch_pairs} がそのまま採用されます。\n  \
+             k 軸ズレに注意してください。"
+        );
+        return Ok(());
+    }
+    let games_per_iter = total_games / total_iters;
+    if !games_per_iter.is_multiple_of(2) {
+        eprintln!(
+            "v3 → v4 silent migrate: 推定 games_per_iter={games_per_iter} が偶数でなく、\
+             paired antithetic と整合しません。\n  \
+             CLI 指定の --batch-pairs={cli_batch_pairs} がそのまま採用されます。\n  \
+             k 軸ズレに注意してください。"
+        );
+        return Ok(());
+    }
+    // 巨大値や破損 meta で `u32::MAX` を超える場合は推定不可扱いにする
+    // (`as u32` の暗黙切り詰めだと意図しない一致 / 不一致を生む可能性がある)。
+    let estimated_batch_pairs = match u32::try_from(games_per_iter / 2) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!(
+                "v3 → v4 silent migrate: 推定 batch_pairs={} が u32 範囲外のため batch_pairs \
+                 推定はスキップしました。\n  \
+                 (meta が破損しているか異常に大きい可能性)\n  \
+                 CLI 指定の --batch-pairs={cli_batch_pairs} がそのまま採用されます。\n  \
+                 k 軸ズレに注意してください。",
+                games_per_iter / 2
+            );
+            return Ok(());
+        }
+    };
+    if estimated_batch_pairs == cli_batch_pairs {
+        return Ok(());
+    }
+    if force_schedule {
+        eprintln!(
+            "warning: v3 → v4 silent migrate で batch_pairs 推定値と CLI 値が不一致だが \
+             --force-schedule で続行します\n  \
+             推定 batch_pairs (= total_games / completed_iterations / 2) = {estimated_batch_pairs}\n  \
+             CLI --batch-pairs                                          = {cli_batch_pairs}\n  \
+             k 軸ズレが起きる可能性があります。"
+        );
+        return Ok(());
+    }
+    bail!(
+        "v3 → v4 silent migrate: batch_pairs 推定値と CLI 値が不一致です。\n  \
+           推定 batch_pairs (= total_games / completed_iterations / 2) = {estimated_batch_pairs}\n  \
+           CLI --batch-pairs                                          = {cli_batch_pairs}\n\
+         このまま続行すると SPSA schedule の k 軸が旧 run の続きにならず、進行状態が \
+         破綻します。対処:\n  \
+           (a) --batch-pairs {estimated_batch_pairs} を指定して旧 run と一致させる\n  \
+           (b) 旧 run と異なる schedule で再開したい場合は --force-schedule を明示\n  \
+           (c) §10.7 の手順で旧 run の最終値を canonical にして新 run を fresh start"
+    );
+}
+
 fn schedule_matches(lhs: ScheduleConfig, rhs: ScheduleConfig) -> bool {
     const EPS: f64 = 1e-12;
     (lhs.alpha - rhs.alpha).abs() <= EPS
@@ -2564,61 +2662,75 @@ fn main() -> Result<()> {
         mobility: cli.mobility,
         total_iterations: total_pairs,
     };
-    // v4 resume の戻り値: (start_batch, completed_pairs, total_games, init_snapshot)。
+    // v4 resume の戻り値: (start_batch, completed_pairs, total_games, init_snapshot,
+    //                       needs_v3_csv_rotate)。
     // - start_batch: 次に実行する batch 番号 (0-origin)。
     // - completed_pairs: 既に完了した game pair 数 (= schedule k 軸の起点)。
-    let (start_batch, mut completed_pairs, mut total_games, init_snapshot) = match &effective_action
-    {
-        NonBailAction::Resume { verify_init } => {
-            // load_meta が format_version 不一致を先に hard bail するため、ここでは
-            // 全フィールド込みの deserialize 成功を前提にできる。
-            let mut meta = load_meta(&meta_path).with_context(|| {
-                format!("--resume was set but metadata load failed: {}", meta_path.display())
-            })?;
-            // v3 → v4 silent migrate された meta は `schedule.total_iterations` の意味が
-            // 異なる (v3: iterations, v4: total_pairs)。silent migrate ケースでは
-            // total_iterations だけ比較対象から外す (CLI 値で上書き) ことで運用衝突を避ける。
-            // 例: v3 で `gpi=16, iters=100` の meta を v4 `total_pairs=800` で resume する
-            // 正当ケースを誤って bail させない。
-            let v3_silent_migrated = meta.total_pairs == 0 && meta.batch_pairs == 0;
-            if v3_silent_migrated {
-                meta.schedule.total_iterations = total_pairs;
-                // 既存 stats.csv / stats_aggregate.csv は v3 形式の列構成で、現行
-                // ヘッダと append 互換性がない。既定 path のもののみ `<name>.v3.csv`
-                // へ退避する (override 先は外部集約 CSV append 運用保護のため触らない)。
-                let rotated = rotate_v3_csv_files_for_silent_migrate(&cli.run_dir)?;
-                for p in &rotated {
-                    eprintln!("v3 → v4 silent migrate: rotated legacy CSV → {}", p.display());
+    // - needs_v3_csv_rotate: v3 silent migrate を通過した経路だけ true。後続の
+    //   resume 系全検証を抜けた後に旧 stats.csv 等を rotate するためのフラグ。
+    let (start_batch, mut completed_pairs, mut total_games, init_snapshot, needs_v3_csv_rotate) =
+        match &effective_action {
+            NonBailAction::Resume { verify_init } => {
+                // load_meta が format_version 不一致を先に hard bail するため、ここでは
+                // 全フィールド込みの deserialize 成功を前提にできる。
+                let mut meta = load_meta(&meta_path).with_context(|| {
+                    format!("--resume was set but metadata load failed: {}", meta_path.display())
+                })?;
+                // v3 → v4 silent migrate された meta は `schedule.total_iterations` の意味が
+                // 異なる (v3: iterations, v4: total_pairs)。silent migrate ケースでは
+                // total_iterations だけ比較対象から外す (CLI 値で上書き) ことで運用衝突を避ける。
+                // 例: v3 で `gpi=16, iters=100` の meta を v4 `total_pairs=800` で resume する
+                // 正当ケースを誤って bail させない。
+                let v3_silent_migrated = meta.total_pairs == 0 && meta.batch_pairs == 0;
+                if v3_silent_migrated {
+                    meta.schedule.total_iterations = total_pairs;
+                    // ⚠ ここでは「副作用なしの検証」のみ実施する。
+                    //   FS 副作用 (CSV rotate) は resume 系の全検証 (`schedule_matches`、
+                    //   state hash、param 名集合 hash、verify_init、total_pairs/batch_pairs
+                    //   一致など) を通過した後に行う。bail で run-dir に半端な変更が残ると
+                    //   ユーザが原因を直して再 resume したときに状態が変わって混乱する
+                    //   ため、bail 経路は run-dir を一切いじらない不変条件を守る。
+                    //
+                    // v3 meta は `batch_pairs` を直接保持しないが、`total_games` と
+                    // `completed_iterations` から推定値 `games_per_iter ≈ total_games
+                    // / completed_iterations` を計算できる。これが CLI の `batch_pairs
+                    // × 2` (= 1 iter あたりの game 数) と一致しないと、SPSA schedule の
+                    // k 軸が旧 run の続きにならず、a_k/c_k 評価が破綻するため bail。
+                    check_v3_batch_pairs_consistency(
+                        meta.completed_iterations,
+                        meta.total_games,
+                        batch_pairs,
+                        cli.force_schedule,
+                    )?;
                 }
-            }
-            if !schedule_matches(meta.schedule, schedule) {
-                if cli.force_schedule {
-                    eprintln!(
-                        "warning: schedule differs from metadata but continuing due to --force-schedule \
+                if !schedule_matches(meta.schedule, schedule) {
+                    if cli.force_schedule {
+                        eprintln!(
+                            "warning: schedule differs from metadata but continuing due to --force-schedule \
                          (meta={}, meta_schedule={:?}, cli_schedule={:?})",
-                        meta_path.display(),
-                        meta.schedule,
-                        schedule
-                    );
-                } else {
-                    bail!(
-                        "schedule mismatch with {}. use --force-schedule to override \
+                            meta_path.display(),
+                            meta.schedule,
+                            schedule
+                        );
+                    } else {
+                        bail!(
+                            "schedule mismatch with {}. use --force-schedule to override \
                          (meta_schedule={:?}, cli_schedule={:?})",
-                        meta_path.display(),
-                        meta.schedule,
-                        schedule
-                    );
+                            meta_path.display(),
+                            meta.schedule,
+                            schedule
+                        );
+                    }
                 }
-            }
-            // state.params の transactional 整合性検証 (v4 で追加):
-            // 反復ごとに「write_params → meta save」の順で書くため、両者の間で落ちると
-            // meta.completed_iterations より state.params が 1 反復先行する状態が残る。
-            // resume 時に on-disk state.params の hash を meta.current_params_sha256 と
-            // 突き合わせ、乖離があれば bail させて状況をユーザに見せる。
-            let on_disk_state_hash = sha256_hex_of_file(&state_params)?;
-            if meta.current_params_sha256 != on_disk_state_hash {
-                bail!(
-                    "state.params と meta.json が不整合です ({}).\n\
+                // state.params の transactional 整合性検証 (v4 で追加):
+                // 反復ごとに「write_params → meta save」の順で書くため、両者の間で落ちると
+                // meta.completed_iterations より state.params が 1 反復先行する状態が残る。
+                // resume 時に on-disk state.params の hash を meta.current_params_sha256 と
+                // 突き合わせ、乖離があれば bail させて状況をユーザに見せる。
+                let on_disk_state_hash = sha256_hex_of_file(&state_params)?;
+                if meta.current_params_sha256 != on_disk_state_hash {
+                    bail!(
+                        "state.params と meta.json が不整合です ({}).\n\
                      meta.current_params_sha256 = {}\n\
                      on-disk state.params hash  = {}\n\
                      考えられる原因:\n  \
@@ -2630,109 +2742,118 @@ fn main() -> Result<()> {
                        (b) 1 反復差を許容して既存 state を起点に新 run を始める:\n        \
                            cp {state_path} <new-run-dir>/state.params\n        \
                            spsa --run-dir <new-run-dir> --use-existing-state-as-init ...",
-                    meta_path.display(),
-                    meta.current_params_sha256,
-                    on_disk_state_hash,
-                    state_path = state_params.display(),
-                );
-            }
+                        meta_path.display(),
+                        meta.current_params_sha256,
+                        on_disk_state_hash,
+                        state_path = state_params.display(),
+                    );
+                }
 
-            // param 名集合の hash 検証 (resume 時に param 集合が変わっていないこと)。
-            // TODO(PR2): mapping 表に新パラメータを追加した正当な変更も現状 hard bail
-            // になる。`--force-name-set` か `--allow-param-set-change` の escape hatch を
-            // PR2 で導入検討。それまでは新規 run dir で fresh start する運用で凌ぐ。
-            let current_name_hash = param_name_set_sha256(&params);
-            if meta.param_name_set_sha256 != current_name_hash {
-                bail!(
-                    "param 名集合が meta と不一致です ({}).\n\
+                // param 名集合の hash 検証 (resume 時に param 集合が変わっていないこと)。
+                // TODO(PR2): mapping 表に新パラメータを追加した正当な変更も現状 hard bail
+                // になる。`--force-name-set` か `--allow-param-set-change` の escape hatch を
+                // PR2 で導入検討。それまでは新規 run dir で fresh start する運用で凌ぐ。
+                let current_name_hash = param_name_set_sha256(&params);
+                if meta.param_name_set_sha256 != current_name_hash {
+                    bail!(
+                        "param 名集合が meta と不一致です ({}).\n\
                      meta.param_name_set_sha256 = {}\n\
                      current  param_name_set_sha256 = {}\n\
                      param 集合変更は resume 不可 (本 PR では escape hatch なし)。\n\
                      新規 run dir で fresh start してください。",
-                    meta_path.display(),
-                    meta.param_name_set_sha256,
-                    current_name_hash,
-                );
-            }
-            // --init-from 指定時は整合性検証を実施 (resume が想定 canonical で開始した
-            // run なら値は近いはず。乖離があれば誤った canonical 混入のサイン)。
-            if *verify_init {
-                let init_path =
-                    cli.init_from.as_ref().expect("Resume{verify_init:true} requires init_from");
-                let report = verify_init_matches_existing(init_path, &state_params)?;
-                report.print_summary(init_path, &state_params);
-                if report.has_name_set_mismatch() {
-                    eprintln!(
-                        "warning: --init-from と既存 params で param 名集合が異なります \
+                        meta_path.display(),
+                        meta.param_name_set_sha256,
+                        current_name_hash,
+                    );
+                }
+                // --init-from 指定時は整合性検証を実施 (resume が想定 canonical で開始した
+                // run なら値は近いはず。乖離があれば誤った canonical 混入のサイン)。
+                if *verify_init {
+                    let init_path = cli
+                        .init_from
+                        .as_ref()
+                        .expect("Resume{verify_init:true} requires init_from");
+                    let report = verify_init_matches_existing(init_path, &state_params)?;
+                    report.print_summary(init_path, &state_params);
+                    if report.has_name_set_mismatch() {
+                        eprintln!(
+                            "warning: --init-from と既存 params で param 名集合が異なります \
                          (extra_in_init={}, missing_in_init={})",
-                        report.extra_in_init.len(),
-                        report.missing_in_init.len()
-                    );
-                }
-                if cli.strict_init_check && report.exceeds_strict_threshold() {
-                    bail!(
-                        "--strict-init-check: init-from と existing で乖離が閾値超過 \
+                            report.extra_in_init.len(),
+                            report.missing_in_init.len()
+                        );
+                    }
+                    if cli.strict_init_check && report.exceeds_strict_threshold() {
+                        bail!(
+                            "--strict-init-check: init-from と existing で乖離が閾値超過 \
                          (median={:.3}σ, max={:.3}σ)",
-                        report.median_step_units,
-                        report.max_step_units
-                    );
+                            report.median_step_units,
+                            report.max_step_units
+                        );
+                    }
                 }
-            }
-            // v4 schedule 検証: 既存 meta の total_pairs / batch_pairs と CLI 指定値の一致。
-            // v3 → v4 silent migration 経路では meta.total_pairs == 0 (sentinel) のため
-            // CLI 値を信頼して継承する (meta は migrate 直後で値を持たない)。
-            // sentinel 判定は L2520 で `v3_silent_migrated` として確定済み。ここでは
-            // それを再利用して二重定義を避ける。
-            if !v3_silent_migrated
-                && (meta.total_pairs != total_pairs || meta.batch_pairs != batch_pairs)
-            {
-                if cli.force_schedule {
-                    eprintln!(
-                        "warning: total_pairs/batch_pairs が meta と異なるが --force-schedule で続行 \
+                // v4 schedule 検証: 既存 meta の total_pairs / batch_pairs と CLI 指定値の一致。
+                // v3 → v4 silent migration 経路では meta.total_pairs == 0 (sentinel) のため
+                // CLI 値を信頼して継承する (meta は migrate 直後で値を持たない)。
+                // sentinel 判定は L2520 で `v3_silent_migrated` として確定済み。ここでは
+                // それを再利用して二重定義を避ける。
+                if !v3_silent_migrated
+                    && (meta.total_pairs != total_pairs || meta.batch_pairs != batch_pairs)
+                {
+                    if cli.force_schedule {
+                        eprintln!(
+                            "warning: total_pairs/batch_pairs が meta と異なるが --force-schedule で続行 \
                          (meta total_pairs={}, batch_pairs={} / cli total_pairs={}, batch_pairs={})",
-                        meta.total_pairs, meta.batch_pairs, total_pairs, batch_pairs
-                    );
-                } else {
-                    bail!(
-                        "total_pairs/batch_pairs が meta と異なります \
+                            meta.total_pairs, meta.batch_pairs, total_pairs, batch_pairs
+                        );
+                    } else {
+                        bail!(
+                            "total_pairs/batch_pairs が meta と異なります \
                          (meta total_pairs={}, batch_pairs={} / cli total_pairs={}, batch_pairs={}). \
                          --force-schedule を指定するか crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ を参照してください。",
-                        meta.total_pairs,
-                        meta.batch_pairs,
-                        total_pairs,
-                        batch_pairs
-                    );
+                            meta.total_pairs,
+                            meta.batch_pairs,
+                            total_pairs,
+                            batch_pairs
+                        );
+                    }
                 }
+                // completed_pairs: v4 meta は記録されたものを使う。v3 silent migrate 時は
+                // `completed_iterations × batch_pairs` で再構築する (v3 では 1 iter = 1 batch
+                // = 1 update で k は iter index と等価だったため)。
+                let resumed_completed_pairs = if v3_silent_migrated {
+                    meta.completed_iterations.saturating_mul(batch_pairs)
+                } else {
+                    meta.completed_pairs
+                };
+                let snapshot = InitMetaSnapshot::from_existing_meta(&meta);
+                (
+                    meta.completed_iterations,
+                    resumed_completed_pairs,
+                    meta.total_games,
+                    snapshot,
+                    v3_silent_migrated,
+                )
             }
-            // completed_pairs: v4 meta は記録されたものを使う。v3 silent migrate 時は
-            // `completed_iterations × batch_pairs` で再構築する (v3 では 1 iter = 1 batch
-            // = 1 update で k は iter index と等価だったため)。
-            let resumed_completed_pairs = if v3_silent_migrated {
-                meta.completed_iterations.saturating_mul(batch_pairs)
-            } else {
-                meta.completed_pairs
-            };
-            let snapshot = InitMetaSnapshot::from_existing_meta(&meta);
-            (meta.completed_iterations, resumed_completed_pairs, meta.total_games, snapshot)
-        }
-        NonBailAction::CopyInitFromFresh
-        | NonBailAction::UseExistingFresh
-        | NonBailAction::ForceInitOverwrite => {
-            // 旧 run の final.params が残っていると、新 run 完了時に再書き込みされるまで
-            // 「前回の確定値」が見え続ける (= apply 入力に誤投入される)。fresh 系は
-            // すべてここで能動削除する (force-init の cleanup paths にも入っているが、
-            // CopyInitFromFresh / UseExistingFresh では cleanup paths は呼ばれないため)。
-            remove_stale_final_params_for_fresh_start(&cli.run_dir)?;
-            let snapshot = InitMetaSnapshot::for_fresh_start(
-                &effective_action,
-                &state_params,
-                cli.init_from.as_deref(),
-                &engine_path,
-                cli.engine_param_mapping.as_deref(),
-            )?;
-            (0, 0, 0, snapshot)
-        }
-    };
+            NonBailAction::CopyInitFromFresh
+            | NonBailAction::UseExistingFresh
+            | NonBailAction::ForceInitOverwrite => {
+                // 旧 run の final.params が残っていると、新 run 完了時に再書き込みされるまで
+                // 「前回の確定値」が見え続ける (= apply 入力に誤投入される)。fresh 系は
+                // すべてここで能動削除する (force-init の cleanup paths にも入っているが、
+                // CopyInitFromFresh / UseExistingFresh では cleanup paths は呼ばれないため)。
+                remove_stale_final_params_for_fresh_start(&cli.run_dir)?;
+                let snapshot = InitMetaSnapshot::for_fresh_start(
+                    &effective_action,
+                    &state_params,
+                    cli.init_from.as_deref(),
+                    &engine_path,
+                    cli.engine_param_mapping.as_deref(),
+                )?;
+                // fresh 系経路は v3 silent migrate 不在なので false。
+                (0, 0, 0, snapshot, false)
+            }
+        };
     // batch 数 = ceil(total_pairs / batch_pairs)。最終 batch は端数の game pair 数になる。
     let total_batches = total_pairs.div_ceil(batch_pairs);
     // resume 不変条件チェック: completed_pairs と completed_iterations の関係が
@@ -2770,6 +2891,19 @@ fn main() -> Result<()> {
         );
     }
     let end_batch = total_batches;
+
+    // v3 silent migrate を通過した経路は、ここまでで resume 系全検証
+    // (`schedule_matches` / state hash / param 名集合 hash / verify_init /
+    //  total_pairs/batch_pairs 一致 / completed_pairs 不変条件) を抜けている。
+    // これより手前で bail する経路では run-dir に副作用を残さない不変条件を
+    // 守るため、CSV rotate (FS 副作用) はこの位置にまとめている。
+    if needs_v3_csv_rotate {
+        let rotated = rotate_v3_csv_files_for_silent_migrate(&cli.run_dir)?;
+        for p in &rotated {
+            eprintln!("v3 → v4 silent migrate: rotated legacy CSV → {}", p.display());
+        }
+    }
+
     let stats_csv_path: Option<PathBuf> = if cli.no_stats_csv {
         None
     } else {
@@ -3838,6 +3972,78 @@ mod tests {
         assert_eq!(backup, dir.path().join("stats.v3.csv"));
     }
 
+    /// 推定 batch_pairs == CLI 指定値: warning も bail もなく Ok。
+    #[test]
+    fn check_v3_batch_pairs_consistency_passes_when_estimate_matches() {
+        // total_games=64, completed_iterations=4 → games_per_iter=16 → batch_pairs=8。
+        let res = check_v3_batch_pairs_consistency(4, 64, 8, false);
+        assert!(res.is_ok());
+    }
+
+    /// 推定 batch_pairs ≠ CLI、force_schedule=false: bail する。
+    #[test]
+    fn check_v3_batch_pairs_consistency_bails_on_mismatch_without_force() {
+        // 推定 batch_pairs = 8 だが CLI は 16 を渡す。
+        let res = check_v3_batch_pairs_consistency(4, 64, 16, false);
+        let err = res.expect_err("不一致では bail するはず");
+        let msg = format!("{err}");
+        assert!(msg.contains("推定 batch_pairs"), "推定値の表示が必要: {msg}");
+        assert!(msg.contains("--batch-pairs"), "CLI 値の説明が必要: {msg}");
+        assert!(msg.contains("--force-schedule"), "force-schedule 案内が必要: {msg}");
+    }
+
+    /// 推定 batch_pairs ≠ CLI、force_schedule=true: warning + 続行 (Ok)。
+    #[test]
+    fn check_v3_batch_pairs_consistency_warns_with_force() {
+        let res = check_v3_batch_pairs_consistency(4, 64, 16, true);
+        assert!(res.is_ok(), "force_schedule=true なら続行するはず");
+    }
+
+    /// completed_iterations == 0: 推定不可で warning のみ (Ok)。
+    #[test]
+    fn check_v3_batch_pairs_consistency_skips_when_iterations_zero() {
+        let res = check_v3_batch_pairs_consistency(0, 64, 8, false);
+        assert!(res.is_ok(), "completed_iterations=0 では推定スキップして続行");
+    }
+
+    /// total_games == 0: 推定不可で warning のみ (Ok)。
+    #[test]
+    fn check_v3_batch_pairs_consistency_skips_when_games_zero() {
+        let res = check_v3_batch_pairs_consistency(4, 0, 8, false);
+        assert!(res.is_ok(), "total_games=0 では推定スキップして続行");
+    }
+
+    /// total_games が completed_iterations で割り切れない: 推定不可で warning のみ (Ok)。
+    #[test]
+    fn check_v3_batch_pairs_consistency_skips_when_not_divisible() {
+        // 65 / 4 = 16 余 1 → 推定不可
+        let res = check_v3_batch_pairs_consistency(4, 65, 8, false);
+        assert!(res.is_ok(), "割り切れない場合は推定スキップして続行");
+    }
+
+    /// games_per_iter が奇数: 推定不可で warning のみ (Ok)。
+    /// 例: completed_iterations=2, total_games=6 → games_per_iter=3 (奇数)。
+    /// paired antithetic と整合しない異常データ。
+    #[test]
+    fn check_v3_batch_pairs_consistency_skips_when_games_per_iter_is_odd() {
+        let res = check_v3_batch_pairs_consistency(2, 6, 1, false);
+        assert!(res.is_ok(), "奇数 games_per_iter では推定スキップして続行");
+    }
+
+    /// 推定 batch_pairs が `u32::MAX` を超える破損 meta: `as u32` 切り詰めではなく
+    /// 推定不可扱いで warning + Ok。`u32::try_from` 経由で安全に検出する。
+    /// 64bit 環境 (`usize == u64`) でのみ意味を持つテスト。
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn check_v3_batch_pairs_consistency_skips_on_u32_overflow() {
+        // 推定 batch_pairs = total_games / completed_iterations / 2 が u32::MAX 超え
+        // となる組み合わせ。completed_iterations = 1、total_games = (u32::MAX as
+        // usize + 2) * 2 で games_per_iter / 2 = u32::MAX + 1。
+        let total_games = (u32::MAX as usize + 1) * 2;
+        let res = check_v3_batch_pairs_consistency(1, total_games, 8, false);
+        assert!(res.is_ok(), "u32 範囲外の推定値では切り詰めず推定不可扱いで続行するはず");
+    }
+
     #[test]
     fn save_and_load_meta_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -4144,13 +4350,15 @@ mod tests {
     /// Seed を変えて iter ごとに rounding stream を進め、結果値の平均を取る。
     #[test]
     fn stochastic_rounding_expected_value_matches_continuous() {
-        // base_seed を変えながら、固定 p.value=10.4 の rounded plus_value 平均を取る。
-        // shifts はゼロにしたいので c_end=0.0 (→ at_iteration の c_k は 0) のパラメータを使う。
+        // base_seed / iter を変えながら、固定 p.value=10.4 に対する plus/minus rounded
+        // 値の平均を取る。本テストは「shift の対称性 + stochastic rounding の期待値が
+        // 重なって平均 10.4 に収束する」ことの間接検証であり、shift をゼロにしない
+        // (= c_end > 0)。shift = 0 を強制した直接版は `_zero_shift` 別テストにある。
         let mut params = vec![make_param("Search_a", 10.4, 1.0)];
         params[0].is_int = true;
         params[0].min = 0.0;
         params[0].max = 100.0;
-        params[0].c_end = 1.0; // shifts を生む
+        params[0].c_end = 1.0; // shifts を生む (shift 対称性に頼って平均を 10.4 に揃える)
         let schedules: Vec<ParamScheduleConstants> = params
             .iter()
             .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))

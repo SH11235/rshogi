@@ -40,7 +40,8 @@ fn count_lines(path: &Path) -> usize {
     std::fs::read_to_string(path).unwrap_or_default().lines().count()
 }
 
-/// v4 CLI で SPSA を起動。`extra` で `--total-pairs` を渡さなければ既定 1 を使う。
+/// SPSA を起動するヘルパ。`total_pairs` は常に `--total-pairs` として渡し、
+/// 追加の CLI 引数は `extra` で付与する。
 fn run_spsa_args_with_total_pairs(
     run_dir: &Path,
     canonical: &Path,
@@ -364,4 +365,194 @@ fn v3_meta_silent_migrates_on_resume() {
     assert_eq!(v_after["format_version"], 4);
     assert_eq!(v_after["total_pairs"], 2);
     assert_eq!(v_after["batch_pairs"], 1);
+}
+
+/// v3 silent migrate 時、CLI の `--batch-pairs` が v3 meta から推定される値と
+/// 一致しないと bail することを確認 (silent failure 防止の中核ガード)。
+#[test]
+fn v3_silent_migrate_bails_when_batch_pairs_mismatches_estimate() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = dir.path().join("canonical.params");
+    let startpos = dir.path().join("startpos.txt");
+    let run_dir = dir.path().join("run");
+    write_canonical(&canonical);
+    write_startpos_file(&startpos);
+    std::fs::create_dir_all(&run_dir).unwrap();
+
+    // 1 batch (total_pairs=1, batch_pairs=1) で完走 → completed_iterations=1, total_games=2。
+    // 推定 batch_pairs = total_games / completed_iterations / 2 = 1。
+    let out1 = run_spsa_args(&run_dir, &canonical, &startpos, &[]);
+    assert!(out1.status.success());
+
+    // meta を v3 形式に書き換える (silent migrate を発動させる)。
+    let meta_path = run_dir.join("meta.json");
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    let m = v.as_object_mut().unwrap();
+    m.insert("format_version".into(), serde_json::json!(3));
+    m.remove("total_pairs");
+    m.remove("batch_pairs");
+    m.remove("completed_pairs");
+    std::fs::write(&meta_path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+    // CLI で --batch-pairs を **意図的に推定値と異なる 4** にして resume を試みる。
+    // 推定 batch_pairs=1 vs CLI 4 → bail 必須。--force-schedule は付けない。
+    let mut args: Vec<String> = vec![
+        "--run-dir".into(),
+        run_dir.display().to_string(),
+        "--engine-path".into(),
+        FAKE_ENGINE_BIN.into(),
+        "--init-from".into(),
+        canonical.display().to_string(),
+        "--total-pairs".into(),
+        "8".into(),
+        "--batch-pairs".into(),
+        "4".into(),
+        "--concurrency".into(),
+        "1".into(),
+        "--seed".into(),
+        "1".into(),
+        "--byoyomi".into(),
+        "50".into(),
+        "--threads".into(),
+        "1".into(),
+        "--hash-mb".into(),
+        "16".into(),
+        "--startpos-file".into(),
+        startpos.display().to_string(),
+        "--resume".into(),
+    ];
+    // bail 経路では run-dir に副作用を残さないこと: 既存 stats.csv を rename
+    // してから bail すると再試行時に状態が変わるので、検証 → 失敗時は何も
+    // 触らない順序が必要。
+    let stats_csv_before = std::fs::read(run_dir.join("stats.csv")).unwrap();
+    assert!(!run_dir.join("stats.v3.csv").exists(), "事前に stats.v3.csv は無いはず");
+
+    let out2 = Command::new(SPSA_BIN).args(&args).output().unwrap();
+    assert!(
+        !out2.status.success(),
+        "batch_pairs 不一致では bail するはず: stderr={}",
+        String::from_utf8_lossy(&out2.stderr),
+    );
+    // bail 後: stats.csv は元のまま。stats.v3.csv は作られていない (副作用なし)。
+    let stats_csv_after = std::fs::read(run_dir.join("stats.csv")).unwrap();
+    assert_eq!(
+        stats_csv_before, stats_csv_after,
+        "bail 経路では stats.csv が触られていないはず"
+    );
+    assert!(
+        !run_dir.join("stats.v3.csv").exists(),
+        "bail 経路では stats.v3.csv (rotate 副作用) が作られていないはず"
+    );
+    let stderr = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        stderr.contains("batch_pairs 推定値と CLI 値が不一致"),
+        "推定値不一致の bail メッセージが必要: {stderr}"
+    );
+    assert!(stderr.contains("--force-schedule"), "force-schedule 案内が必要: {stderr}");
+
+    // --force-schedule を付け足すと続行する (warning のみ)。
+    args.push("--force-schedule".into());
+    let out3 = Command::new(SPSA_BIN).args(&args).output().unwrap();
+    assert!(
+        out3.status.success(),
+        "--force-schedule 付き resume は成功するはず: stderr={}",
+        String::from_utf8_lossy(&out3.stderr),
+    );
+    let stderr3 = String::from_utf8_lossy(&out3.stderr);
+    assert!(
+        stderr3.contains("batch_pairs 推定値"),
+        "force 続行時も warning は出るはず: {stderr3}"
+    );
+}
+
+/// v3 silent migrate 経路で **schedule (alpha 等) が meta と不一致** で
+/// `--force-schedule` 無しの bail が起きた場合も、CSV rotate (FS 副作用) が
+/// 走っていないことを確認する。
+///
+/// batch_pairs 推定値が一致しているケースを通したあと、後続の `schedule_matches`
+/// 検証で bail する経路で「副作用なし」を担保するためのガードレール。
+#[test]
+fn v3_silent_migrate_bails_without_csv_rotate_on_schedule_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = dir.path().join("canonical.params");
+    let startpos = dir.path().join("startpos.txt");
+    let run_dir = dir.path().join("run");
+    write_canonical(&canonical);
+    write_startpos_file(&startpos);
+    std::fs::create_dir_all(&run_dir).unwrap();
+
+    // 1 batch (推定 batch_pairs=1) を完走 → meta を v3 化。
+    let out1 = run_spsa_args(&run_dir, &canonical, &startpos, &[]);
+    assert!(out1.status.success());
+
+    let meta_path = run_dir.join("meta.json");
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+    let m = v.as_object_mut().unwrap();
+    m.insert("format_version".into(), serde_json::json!(3));
+    m.remove("total_pairs");
+    m.remove("batch_pairs");
+    m.remove("completed_pairs");
+    // schedule.alpha を CLI のデフォルト 0.602 から **わざとズラす** ことで、
+    // batch_pairs 検証は通過するが `schedule_matches` で bail させる。
+    if let Some(schedule) = m.get_mut("schedule").and_then(|s| s.as_object_mut()) {
+        schedule.insert("alpha".into(), serde_json::json!(0.700));
+    } else {
+        panic!("v3 meta に schedule オブジェクトが無い");
+    }
+    std::fs::write(&meta_path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+    let stats_csv_before = std::fs::read(run_dir.join("stats.csv")).unwrap();
+    assert!(!run_dir.join("stats.v3.csv").exists());
+
+    // batch_pairs=1 (推定値と一致) で resume を試みる。`--force-schedule` 無し
+    // なので schedule_matches が alpha 不一致で bail するはず。
+    let args: Vec<String> = vec![
+        "--run-dir".into(),
+        run_dir.display().to_string(),
+        "--engine-path".into(),
+        FAKE_ENGINE_BIN.into(),
+        "--init-from".into(),
+        canonical.display().to_string(),
+        "--total-pairs".into(),
+        "2".into(),
+        "--batch-pairs".into(),
+        "1".into(),
+        "--concurrency".into(),
+        "1".into(),
+        "--seed".into(),
+        "1".into(),
+        "--byoyomi".into(),
+        "50".into(),
+        "--threads".into(),
+        "1".into(),
+        "--hash-mb".into(),
+        "16".into(),
+        "--startpos-file".into(),
+        startpos.display().to_string(),
+        "--resume".into(),
+    ];
+    let out2 = Command::new(SPSA_BIN).args(&args).output().unwrap();
+    assert!(
+        !out2.status.success(),
+        "schedule mismatch では bail するはず: stderr={}",
+        String::from_utf8_lossy(&out2.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        stderr.contains("schedule mismatch"),
+        "schedule mismatch の bail メッセージが必要: {stderr}"
+    );
+
+    // bail 後: stats.csv は元のまま、stats.v3.csv は作られていない。
+    let stats_csv_after = std::fs::read(run_dir.join("stats.csv")).unwrap();
+    assert_eq!(
+        stats_csv_before, stats_csv_after,
+        "schedule mismatch bail 経路でも stats.csv が触られていないはず"
+    );
+    assert!(
+        !run_dir.join("stats.v3.csv").exists(),
+        "schedule mismatch bail 経路でも stats.v3.csv (rotate 副作用) が作られていないはず"
+    );
 }
