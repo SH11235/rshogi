@@ -14,6 +14,7 @@ use super::types::{InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest, dur
 pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
 pub const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const STDERR_BUFFER_LINES: usize = 2;
 
 /// エンジンプロセス起動時の設定。
 pub struct EngineConfig {
@@ -83,7 +84,7 @@ impl EngineProcess {
                 }
             }
         });
-        let recent_stderr = Arc::new(Mutex::new(VecDeque::with_capacity(2)));
+        let recent_stderr = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_LINES)));
         let stderr_buffer = recent_stderr.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
@@ -91,7 +92,7 @@ impl EngineProcess {
                 match line {
                     Ok(line) => {
                         if let Ok(mut buffer) = stderr_buffer.lock() {
-                            if buffer.len() == 2 {
+                            if buffer.len() == STDERR_BUFFER_LINES {
                                 buffer.pop_front();
                             }
                             buffer.push_back(line);
@@ -377,16 +378,15 @@ impl EngineProcess {
         message
     }
 
-    fn recent_stderr_lines(&self, limit: usize) -> Vec<String> {
+    fn recent_stderr_lines(&self) -> Vec<String> {
         let Ok(buffer) = self.recent_stderr.lock() else {
             return Vec::new();
         };
-        let skip = buffer.len().saturating_sub(limit);
-        buffer.iter().skip(skip).cloned().collect()
+        buffer.iter().cloned().collect()
     }
 
     fn append_recent_stderr(&self, message: &mut String) {
-        let stderr_lines = self.recent_stderr_lines(2);
+        let stderr_lines = self.recent_stderr_lines();
         if !stderr_lines.is_empty() {
             message.push_str("\n  recent engine stderr:");
             for line in stderr_lines {

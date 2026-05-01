@@ -1512,6 +1512,7 @@ fn push_usi_option_overwrite(options: &mut Vec<String>, new_option: String) {
 }
 
 fn usi_option_name(option: &str) -> &str {
+    // 値側に '=' が含まれる USI option を壊さないよう、最初の '=' だけを区切りにする。
     option.split_once('=').map_or(option, |(name, _)| name).trim()
 }
 
