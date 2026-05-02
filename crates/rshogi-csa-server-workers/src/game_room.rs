@@ -288,18 +288,14 @@ impl DurableObject for GameRoom {
             return Ok(());
         }
 
-        // 再接続プロトコルが env で有効化されている (grace_duration > 0 + Floodgate
-        // features opt-in) なら即時 force_abnormal せず、grace registry に対局
-        // 状態のスナップショットを書いて alarm を grace deadline で予約する。
-        // ALLOW_FLOODGATE_FEATURES が立っていない構成で grace_duration が誤って
-        // > 0 になっていた場合は console_log で警告して保守的に旧経路へ落とす。
-        let grace_duration = match resolve_reconnect_grace(&self.env) {
-            Ok(d) => d,
-            Err(e) => {
-                console_log!("[GameRoom] reconnect grace disabled: {e}");
-                Duration::ZERO
-            }
+        // 再接続プロトコルは start_match 時点の設定で対局単位に固定する。
+        // close 時に env を読み直すと、対局中の deploy / 設定変更で
+        // `Reconnect_Token` 配布有無と grace 判定がずれるため、永続化済み
+        // `PersistedConfig` の値だけを参照する。
+        let Some(cfg) = cfg_opt else {
+            return Ok(());
         };
+        let grace_duration = Duration::from_millis(cfg.reconnect_grace_ms.unwrap_or_default());
         if !grace_duration.is_zero() {
             if let Err(e) = self.enter_grace_window(role, grace_duration).await {
                 // grace 経路のセットアップに失敗したら旧経路 (即時 force_abnormal)
@@ -557,6 +553,9 @@ impl GameRoom {
             matched_at_ms: started,
             play_started_at_ms: None,
             initial_sfen,
+            reconnect_grace_ms: Some(grace.as_millis().try_into().map_err(|_| {
+                Error::RustError("reconnect grace duration exceeds u64 milliseconds".into())
+            })?),
             black_reconnect_token: black_reconnect_token.as_ref().map(|t| t.as_str().to_owned()),
             white_reconnect_token: white_reconnect_token.as_ref().map(|t| t.as_str().to_owned()),
         };
