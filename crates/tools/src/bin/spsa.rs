@@ -2239,37 +2239,22 @@ fn run_batch_games_parallel(ctx: BatchRunContext<'_>) -> Result<BatchGameStats> 
                     };
                 for task in task_rx {
                     let result = (|| -> Result<GameTaskResult> {
-                        if task.plus_is_black {
-                            apply_parameter_vector(
-                                &mut plus_engine,
-                                params,
-                                plus_values,
-                                translator,
-                                active_mask,
-                            )?;
-                            apply_parameter_vector(
-                                &mut minus_engine,
-                                params,
-                                minus_values,
-                                translator,
-                                active_mask,
-                            )?;
-                        } else {
-                            apply_parameter_vector(
-                                &mut plus_engine,
-                                params,
-                                minus_values,
-                                translator,
-                                active_mask,
-                            )?;
-                            apply_parameter_vector(
-                                &mut minus_engine,
-                                params,
-                                plus_values,
-                                translator,
-                                active_mask,
-                            )?;
-                        }
+                        // plus/minus engine は常に plus/minus パラメータを保持する。
+                        // paired antithetic の先後入替は下の run_game 呼び出し順だけで行う。
+                        apply_parameter_vector(
+                            &mut plus_engine,
+                            params,
+                            plus_values,
+                            translator,
+                            active_mask,
+                        )?;
+                        apply_parameter_vector(
+                            &mut minus_engine,
+                            params,
+                            minus_values,
+                            translator,
+                            active_mask,
+                        )?;
                         plus_engine.new_game()?;
                         minus_engine.new_game()?;
 
