@@ -123,12 +123,12 @@ BYOYOMI_MIN = "1"
 # 命名規則: `byoyomi-<total_sec>-<byoyomi_sec>` / `fischer-<total_sec>-<increment_sec>F`
 CLOCK_PRESETS = "[]"
 
-# 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
+# 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化。
 # `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
-RECONNECT_GRACE_SECONDS = "0"
+RECONNECT_GRACE_SECONDS = "30"
 # Floodgate 系運用機能（再接続プロトコル等）を opt-in 有効化する。`true` / `1` /
 # `yes` / `on` で有効。空または `false` のとき該当機能要求は起動 fail-fast。
-ALLOW_FLOODGATE_FEATURES = "false"
+ALLOW_FLOODGATE_FEATURES = "true"
 # viewer 配信 API (`/api/v1/games*` HTTP, `/ws/<id>/spectate` WS) を opt-in 有効化する。
 # `true` / `1` / `yes` / `on` で有効、`false` / `0` / `no` / `off` または
 # 未設定で無効化（該当 endpoint は 404）。本値は production rollout の kill-switch
