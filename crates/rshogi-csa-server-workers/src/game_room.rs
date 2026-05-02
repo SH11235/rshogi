@@ -78,7 +78,8 @@ use crate::persistence::{
 };
 use crate::reconnect::{
     PendingAlarmKind, PendingReconnect, ReconnectMatchOutcome, ReconnectSnapshot,
-    build_resume_message, color_from_str, color_to_str, issue_tokens_if_enabled,
+    build_resume_message, classify_alarm_after_enter_grace, color_from_str, color_to_str,
+    issue_tokens_if_enabled,
 };
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 use crate::spectator_control::{
@@ -1275,6 +1276,7 @@ impl GameRoom {
             ended_at_ms,
         };
         self.state.storage().put(KEY_FINISHED, &finished).await?;
+        self.delete_grace_alarm_state().await?;
 
         // KEY_FINISHED が確定した後に live-games-index entry を best-effort で
         // 削除する (Issue #549 §4)。「終局 entry も live entry も無い」矛盾
@@ -1920,28 +1922,30 @@ impl GameRoom {
                 original_turn_alarm_epoch_ms,
             )?
         };
-        // `KEY_GRACE_REGISTRY` と `KEY_PENDING_ALARM_KIND` を 2 回の `put` で
-        // 書き分ける。Cloudflare DO は同一 instance に対する fetch / alarm /
-        // websocket_* を単一スレッドで逐次処理するため、1 件目 put 後の `await`
-        // 中に他ハンドラが割り込んで不整合を観測する race は起きない。
-        // worker 0.8.1 では `Storage::transaction` と `put_multiple` ともに既に
-        // 提供されているが、本 Issue #591 hotfix scope では既存の 2 段 put のまま
-        // 据え置く。followup-B で atomic 化を検討する。
-        self.state.storage().put(KEY_GRACE_REGISTRY, &pending).await?;
-        self.state
-            .storage()
-            .put(KEY_PENDING_ALARM_KIND, &PendingAlarmKind::GraceExpired)
-            .await?;
         // 既存の turn alarm より grace deadline が早ければ上書き、遅ければ既存
         // alarm (時間切れ) を残す。`get_alarm` は次回発火時刻 (epoch ms) を返し、
         // 未予約なら `None`。
         let now_ms = self.now_ms();
         let grace_deadline_ms = pending.deadline_ms;
         let existing = self.state.storage().get_alarm().await.ok().flatten();
-        let should_set_grace = match existing {
-            Some(epoch_ms) if (epoch_ms as u64) <= grace_deadline_ms => false,
-            _ => true,
-        };
+        let (alarm_kind, should_set_grace) =
+            classify_alarm_after_enter_grace(existing, grace_deadline_ms);
+
+        #[derive(Serialize)]
+        struct GraceAlarmWrite<'a> {
+            #[serde(rename = "grace_registry")]
+            grace_registry: &'a PendingReconnect,
+            #[serde(rename = "pending_alarm_kind")]
+            pending_alarm_kind: PendingAlarmKind,
+        }
+
+        self.state
+            .storage()
+            .put_multiple(GraceAlarmWrite {
+                grace_registry: &pending,
+                pending_alarm_kind: alarm_kind,
+            })
+            .await?;
         if should_set_grace {
             let delay = grace_deadline_ms.saturating_sub(now_ms).saturating_add(ALARM_SAFETY_MS);
             self.state.storage().set_alarm(Duration::from_millis(delay)).await?;
@@ -2034,7 +2038,7 @@ impl GameRoom {
         let Some(pending) = pending else {
             // 再接続が成立して registry が片付けられた直後の race 等。alarm kind
             // も並行で TimeUp に戻されているはずだが、念のため tag を片付けておく。
-            self.delete_pending_alarm_kind().await?;
+            self.delete_grace_alarm_state().await?;
             return Ok(());
         };
         self.ensure_core_loaded().await?;
@@ -2042,8 +2046,7 @@ impl GameRoom {
             Ok(c) => Role::from_core(c),
             Err(e) => {
                 console_log!("[GameRoom] grace alarm: invalid color in registry: {e}");
-                self.delete_grace_registry().await?;
-                self.delete_pending_alarm_kind().await?;
+                self.delete_grace_alarm_state().await?;
                 return Ok(());
             }
         };
@@ -2053,8 +2056,7 @@ impl GameRoom {
             self.dispatch_broadcasts(&result.broadcasts).await?;
             self.finalize_if_ended(&result).await?;
         }
-        self.delete_grace_registry().await?;
-        self.delete_pending_alarm_kind().await?;
+        self.delete_grace_alarm_state().await?;
         Ok(())
     }
 
@@ -2146,11 +2148,7 @@ impl GameRoom {
         ws.serialize_attachment(&att)
             .map_err(|e| Error::RustError(format!("attach player on reconnect: {e}")))?;
 
-        self.delete_grace_registry().await?;
-        // alarm tag を片付ける。直後に turn alarm を再セットして上書きするため、
-        // 順序は kind tag 削除 → set_alarm の順で書き直す（kind tag 未設定は
-        // 既定で `TimeUp` 扱い）。
-        self.delete_pending_alarm_kind().await?;
+        self.delete_grace_alarm_state().await?;
         // 再接続クライアントが指し手を送らず放置しても確実に turn deadline が
         // 発火するよう、即時 alarm を貼り直す。決定方針:
         // - 候補 A: 切断時に取り置いた元 turn alarm の発火時刻 (`pending.original
@@ -2206,17 +2204,16 @@ impl GameRoom {
         Ok(cfg_opt.map(|c| c.game_name).unwrap_or_default())
     }
 
-    async fn delete_grace_registry(&self) -> Result<()> {
-        let _ = self.state.storage().delete(KEY_GRACE_REGISTRY).await;
-        Ok(())
-    }
-
     async fn load_pending_alarm_kind(&self) -> Result<Option<PendingAlarmKind>> {
         Ok(self.state.storage().get(KEY_PENDING_ALARM_KIND).await.ok().flatten())
     }
 
-    async fn delete_pending_alarm_kind(&self) -> Result<()> {
-        let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+    async fn delete_grace_alarm_state(&self) -> Result<()> {
+        let _ = self
+            .state
+            .storage()
+            .delete_multiple(vec![KEY_GRACE_REGISTRY, KEY_PENDING_ALARM_KIND])
+            .await;
         Ok(())
     }
 }

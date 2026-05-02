@@ -187,6 +187,21 @@ pub(crate) fn issue_tokens_if_enabled(
     }
 }
 
+/// grace 登録時に次回 alarm が表す意味と、alarm 本体を grace deadline に
+/// 上書きするかを決める。
+///
+/// 既存 turn alarm が grace deadline 以前に発火するなら、alarm 本体はそのまま
+/// `TimeUp` として扱う。そうでなければ tag/body ともに `GraceExpired` に揃える。
+pub(crate) fn classify_alarm_after_enter_grace(
+    existing_alarm_epoch_ms: Option<i64>,
+    grace_deadline_ms: u64,
+) -> (PendingAlarmKind, bool) {
+    match existing_alarm_epoch_ms.and_then(|epoch_ms| u64::try_from(epoch_ms).ok()) {
+        Some(epoch_ms) if epoch_ms <= grace_deadline_ms => (PendingAlarmKind::TimeUp, false),
+        _ => (PendingAlarmKind::GraceExpired, true),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +372,26 @@ mod tests {
         let black = black.expect("grace>0 で black token は Some");
         let white = white.expect("grace>0 で white token は Some");
         assert_ne!(black.as_str(), white.as_str(), "黒/白 token は互いに異なるべき (盗用防止)");
+    }
+
+    #[test]
+    fn classify_alarm_after_enter_grace_keeps_earlier_turn_alarm_as_time_up() {
+        let (kind, should_set_grace) = classify_alarm_after_enter_grace(Some(1_000), 2_000);
+        assert_eq!(kind, PendingAlarmKind::TimeUp);
+        assert!(!should_set_grace);
+    }
+
+    #[test]
+    fn classify_alarm_after_enter_grace_uses_grace_when_deadline_is_earlier() {
+        let (kind, should_set_grace) = classify_alarm_after_enter_grace(Some(3_000), 2_000);
+        assert_eq!(kind, PendingAlarmKind::GraceExpired);
+        assert!(should_set_grace);
+    }
+
+    #[test]
+    fn classify_alarm_after_enter_grace_uses_grace_when_no_alarm_exists() {
+        let (kind, should_set_grace) = classify_alarm_after_enter_grace(None, 2_000);
+        assert_eq!(kind, PendingAlarmKind::GraceExpired);
+        assert!(should_set_grace);
     }
 }
