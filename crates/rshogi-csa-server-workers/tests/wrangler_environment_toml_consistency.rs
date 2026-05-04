@@ -29,6 +29,7 @@ struct EnvironmentBindings {
     r2_bindings: Vec<String>,
     do_bindings: Vec<String>,
     vars_keys: Vec<String>,
+    compatibility_date: Option<String>,
     /// `[[migrations]]` 配列を生のまま保持する。`new_sqlite_classes` 等を
     /// 各 test が独自に検査するため、`Vec<toml::Value>` のまま持つ。
     migrations: Vec<toml::Value>,
@@ -77,6 +78,9 @@ fn load_environment_bindings(label: &'static str, file_name: &'static str) -> En
         .map(|t| t.keys().cloned().collect())
         .unwrap_or_default();
 
+    let compatibility_date =
+        doc.get("compatibility_date").and_then(|v| v.as_str()).map(str::to_owned);
+
     let migrations = doc.get("migrations").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
     let crons = doc
@@ -92,6 +96,7 @@ fn load_environment_bindings(label: &'static str, file_name: &'static str) -> En
         r2_bindings,
         do_bindings,
         vars_keys,
+        compatibility_date,
         migrations,
         crons,
     }
@@ -172,6 +177,21 @@ fn assert_declares_backfill_cron_trigger(env: &EnvironmentBindings) {
         file = env.file_name,
         label = env.label,
         crons = env.crons,
+    );
+}
+
+fn assert_compatibility_dates_match(lhs: &EnvironmentBindings, rhs: &EnvironmentBindings) {
+    assert_eq!(
+        lhs.compatibility_date,
+        rhs.compatibility_date,
+        "{lhs_file} ({lhs_label}) and {rhs_file} ({rhs_label}) must use the same \
+         compatibility_date; got lhs={lhs_date:?}, rhs={rhs_date:?}",
+        lhs_file = lhs.file_name,
+        lhs_label = lhs.label,
+        rhs_file = rhs.file_name,
+        rhs_label = rhs.label,
+        lhs_date = lhs.compatibility_date,
+        rhs_date = rhs.compatibility_date,
     );
 }
 
@@ -260,4 +280,9 @@ fn wrangler_staging_declares_sqlite_migration_for_game_room() {
 #[test]
 fn wrangler_staging_declares_backfill_cron_trigger() {
     assert_declares_backfill_cron_trigger(&STAGING);
+}
+
+#[test]
+fn wrangler_environment_compatibility_dates_match() {
+    assert_compatibility_dates_match(&PRODUCTION, &STAGING);
 }
