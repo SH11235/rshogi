@@ -15,7 +15,7 @@ host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_i
 # host が `wss://` を含む場合は `port` は無視されるが、TOML schema 互換のため
 # 値を残しておく。
 port = 0
-id = "csa_e2e_black_<date>_G"
+id = "csa_e2e_g_black+byoyomi-msec-10-100+black"
 password = "anything"
 floodgate = true
 

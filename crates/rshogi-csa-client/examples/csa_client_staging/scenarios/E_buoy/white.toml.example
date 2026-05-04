@@ -7,7 +7,7 @@
 # 黒番と同じ `<buoy_game_name>` を URL 末尾に入れる（黒・白で完全一致が必須）。
 host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<buoy_game_name>"
 port = 0
-id = "csa_e2e_white_<date>_buoy"
+id = "csa_e2e_e_white+byoyomi-msec-10-100+white"
 password = "anything"
 floodgate = true
 

@@ -19,7 +19,7 @@ host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_i
 port = 0
 # id にも `{game_seq}` を入れて、毎局異なる game_name とすることで Workers サーバの
 # slot 衝突を避ける。
-id = "csa_e2e_black_<date>_B+<room_id>-{game_seq}+black"
+id = "csa_e2e_b_black-{game_seq}+byoyomi-msec-10-100+black"
 password = "anything"
 floodgate = true
 

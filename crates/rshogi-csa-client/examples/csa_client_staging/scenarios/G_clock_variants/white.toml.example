@@ -9,7 +9,7 @@
 # 黒番と同じ `<room_id>` を URL 末尾に入れる（黒・白で完全一致が必須）。
 host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>"
 port = 0
-id = "csa_e2e_white_<date>_G"
+id = "csa_e2e_g_white+byoyomi-msec-10-100+white"
 password = "anything"
 floodgate = true
 

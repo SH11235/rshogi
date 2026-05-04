@@ -1,79 +1,118 @@
-# Clock 既定差分 (staging / production)
+# 対局時計 (clock) の設定
 
-`rshogi-csa-server-workers` の staging / production 環境で `[vars]` 既定値が
-意図的に異なる箇所のうち、対局時計 (`CLOCK_KIND` 系) に関する差分を集約する
-ops 仕様 single source of truth。両環境の wrangler コメントは self-contained
-だが、cross-environment 比較・Floodgate 互換性の判断・ops 判断基準は本 doc
-に集約する。
+`rshogi-csa-server-workers` が提供する対局時計の方式と、配信運用者が複数の
+clock 設定を併用するための `CLOCK_PRESETS` 仕様をまとめたユーザ向けドキュメント。
 
-## 環境別 clock 既定値
+## サポートする clock 方式
 
-| 環境 | `CLOCK_KIND` | 持ち時間 | 秒読み / Increment | `Time_Unit` |
-|---|---|---|---|---|
-| staging | `countdown_msec` | 10 秒 (`TOTAL_TIME_MS=10000`) | 100ms (`BYOYOMI_MS=100`) | `1msec` (本リポ独自拡張) |
-| production | `countdown` | 10 分 (`TOTAL_TIME_SEC=600`) | 10 秒 (`BYOYOMI_SEC=10`) | `1sec` (本家 Floodgate 互換) |
+`CLOCK_KIND` (グローバル既定) または `CLOCK_PRESETS` (`game_name` 別 override) で
+以下のいずれかを選択する。
 
-## 差分の意図
+| `kind` | 概要 | `Time_Unit` |
+|---|---|---|
+| `countdown` | CSA 2014 改訂互換、整数秒切り捨て | `1sec` (本家 Floodgate 互換) |
+| `countdown_msec` | 1ms 粒度の短時間対局向け拡張 | `1msec` (本リポ独自) |
+| `fischer` | 1 手ごとに増分加算 | `1sec` |
+| `stopwatch` | 分単位切り捨ての shogi-server 旧挙動 | `1min` |
 
-- **production**: 本家 Floodgate と同じ秒単位 countdown 既定。Floodgate
-  互換棋力統計を取れる構成。
-- **staging**: 短時間 E2E (CI / smoke) の feedback を維持するため独自拡張
-  `countdown_msec` (`Time_Unit:1msec`) を採用。1 局を数秒〜十数秒で完走
-  させる速度を狙う。
+各方式が参照する `[vars]` は以下:
 
-両者の用途が異なるため統一は機能的損失となる。staging は短時間 E2E の
-feedback、production は Floodgate 互換棋力統計をそれぞれの既定として保つ。
+- `countdown` / `fischer`: `TOTAL_TIME_SEC`, `BYOYOMI_SEC` (fischer は increment)
+- `countdown_msec`: `TOTAL_TIME_MS`, `BYOYOMI_MS`
+- `stopwatch`: `TOTAL_TIME_MIN`, `BYOYOMI_MIN`
 
-## CSA Floodgate との互換性
+## グローバル既定 (`CLOCK_KIND`)
 
-- production の `countdown` (`Time_Unit:1sec`) は本家 Floodgate と互換。
-- staging の `countdown_msec` (`Time_Unit:1msec`) は **本リポ独自拡張** で
-  本家 Floodgate には存在しない。
-- **staging で取れた R2 棋譜は本家 Floodgate 互換棋力統計には流用不可**
-  (`Time_Unit:1msec` の独自拡張で記録されているため、棋力統計汚染リスク
-  を伴う)。
+`CLOCK_PRESETS` を未設定 / 空配列にすると、`CLOCK_KIND` と上記の `[vars]` から
+組み立てた global clock が **すべての** `game_name` に適用される（後方互換モード）。
 
-## ops 判断基準
+最小構成例 (`countdown` / 10 分 + 10 秒読み):
 
-- smoke / E2E 用途 → staging (短時間 feedback を活用)。
-- 棋力統計用途 → production (Floodgate 互換)。
+```toml
+CLOCK_KIND = "countdown"
+TOTAL_TIME_SEC = "600"
+BYOYOMI_SEC = "10"
+CLOCK_PRESETS = "[]"
+```
 
-## production smoke 運用注意
+## 複数 clock 併用 (`CLOCK_PRESETS`)
 
-- production の 1 局 **完走待ち** は典型値で 25〜30 分を見込む (Cloudflare
-  Worker の cold start とは別、対局時間自体が長いため)。
-- worst case 計算 (両者がほぼ全 main time を使い切り、`max_moves=256` まで
-  byoyomi 上限を消費するケース): `total_time_sec=600 × 2 + byoyomi_sec=10
-  × max_moves=256 = 3760 秒 ≈ 約 63 分`。実運用ではほとんど到達しないが
-  timeout 設計の上限根拠として用いる。
-- production 完走待ちの timeout 見積もりは典型値 25〜30 分 + マージン
-  (worst case 約 63 分以下) で運用する。
+1 つの worker で「短時間対局」「中時間対局」「Floodgate 互換 1sec」のように
+複数の clock を併用したい場合は `CLOCK_PRESETS` に 1 件以上の preset を登録する。
 
-## `game_name` 別 override 経路 (`CLOCK_PRESETS`)
+`CLOCK_PRESETS` は **JSON 配列文字列** で渡す。各要素は `game_name` と
+`ClockSpec` (`kind` + 各方式の値フィールド) の組:
 
-両環境で `CLOCK_PRESETS` のコード経路は配線済。現状は両 toml で
-`CLOCK_PRESETS = "[]"` (空配列、strict mode 未発動 = 後方互換動作) のため、
-上記 default が全 game_name に適用される。1 件以上登録すれば strict mode
-に切り替わり、未登録 game_name の `LOGIN_LOBBY` は
-`LOGIN_LOBBY:incorrect unknown_game_name` で拒否される。
+```toml
+CLOCK_PRESETS = '''[
+  {"game_name":"byoyomi-msec-10-100","kind":"countdown_msec","total_time_ms":10000,"byoyomi_ms":100},
+  {"game_name":"byoyomi-120-5","kind":"countdown","total_time_sec":120,"byoyomi_sec":5},
+  {"game_name":"floodgate-600-10","kind":"countdown","total_time_sec":600,"byoyomi_sec":10}
+]'''
+```
 
-ad-hoc 上書きを必要とする運用 (例: production で短時間対局を試したい /
-staging で Floodgate 互換 1sec の通電確認をしたい) は、対象環境の
-`CLOCK_PRESETS` に preset 1 件以上を登録することで default を変えずに
-game_name 別に振り分けられる。preset 命名規則:
+クライアントは LOGIN handle の `<game_name>` 部分で preset を選択する:
 
-- `byoyomi-<total_sec>-<byoyomi_sec>` (countdown 系)
-- `fischer-<total_sec>-<increment_sec>F` (fischer 系)
+```text
+LOGIN alice+floodgate-600-10+black password
+```
 
-## 関連 config / 関連 doc
+### strict mode
 
-- `crates/rshogi-csa-server-workers/wrangler.production.toml` の
-  `CLOCK_KIND = "countdown"` セクション (production 実値)
-- `crates/rshogi-csa-server-workers/wrangler.staging.toml` の
-  `CLOCK_KIND = "countdown_msec"` セクション (staging 実値)
-- [`protocol-reference.md`](protocol-reference.md) §9.4 (`Time_Unit:1msec`
-  の独自拡張定義)
-- [`staging-e2e.md`](staging-e2e.md) §0 (staging E2E runbook 文脈)
-- [`lobby_e2e_runbook.md`](lobby_e2e_runbook.md) §6.1 (lobby E2E 文脈)
-- 実装位置: `crates/rshogi-csa-server/src/game/clock.rs::MillisecondsCountdownClock::format_summary`
-  (`Time_Unit:1msec` を `Game_Summary` に出す経路)
+`CLOCK_PRESETS` に **1 件でも** preset を登録すると strict mode が有効化され、
+未登録の `game_name` を含む LOGIN は `LOGIN_LOBBY:incorrect unknown_game_name`
+（lobby 経路）または GameRoom DO 側のマッチ不成立で拒否される。
+
+そのため、本リポジトリ同梱の Worker を deploy する際は、運用上必要な
+`game_name` をすべて preset として宣言すること。SETBUOY で利用する
+`game_name` も同じ preset 表に登録する必要がある。
+
+### 命名規則 (推奨)
+
+ユーザが clock 内容を `game_name` から推測できるよう、以下の命名で揃えるのが
+本リポジトリ同梱例の方針:
+
+| 方式 | 形式 | 例 |
+|---|---|---|
+| `countdown` | `byoyomi-<total_sec>-<byoyomi_sec>` | `byoyomi-600-10` |
+| `countdown` (Floodgate 互換 alias) | `floodgate-<total_sec>-<byoyomi_sec>` | `floodgate-600-10` |
+| `countdown_msec` | `byoyomi-msec-<total_sec>-<byoyomi_ms>` | `byoyomi-msec-10-100` |
+| `fischer` | `fischer-<total_sec>-<increment_sec>F` | `fischer-300-10F` |
+| `stopwatch` | `stopwatch-<total_min>-<byoyomi_min>M` | `stopwatch-10-1M` |
+
+### バリデーション
+
+`parse_clock_presets` (`crates/rshogi-csa-server-workers/src/config.rs`) が以下を
+検査する。違反していると Worker は起動時に Err を返し、当該 endpoint は機能
+しない:
+
+- JSON として parseable であること
+- `game_name` の重複なし
+- `total_time_*` が `> 0` (sudden death だけは byoyomi/increment が `0` でも OK)
+
+## Floodgate 互換性
+
+- `countdown` (`Time_Unit:1sec`) は本家 Floodgate と互換。Floodgate 互換棋力
+  統計に流用するなら `countdown` または `floodgate-` 命名 alias を使う。
+- `countdown_msec` (`Time_Unit:1msec`) は本リポ独自拡張で本家 Floodgate には
+  存在しない。短時間対局を高速に回したい用途専用。
+
+## 同梱 deploy 例
+
+`wrangler.staging.toml` / `wrangler.production.toml` には参考として、3 つの
+代表 preset を登録する例を同梱している:
+
+| `game_name` | 用途 |
+|---|---|
+| `byoyomi-msec-10-100` | 数秒〜十数秒で 1 局を回す高速 smoke / dev loop |
+| `byoyomi-120-5` | 切断 → 再接続検証など 2 〜 5 分規模の中時間対局 |
+| `floodgate-600-10` | Floodgate 互換 10 分 + 10 秒読みの本番対局 |
+
+別 clock を追加したい場合は `CLOCK_PRESETS` に entry を増やすだけで反映できる。
+
+## 関連 doc
+
+- [`protocol-reference.md`](protocol-reference.md) §9.4 — `Time_Unit:1msec`
+  独自拡張の Game_Summary 表記定義。
+- 実装: `crates/rshogi-csa-server/src/game/clock.rs::ClockSpec`
+- 設定パーサ: `crates/rshogi-csa-server-workers/src/config.rs::parse_clock_presets`

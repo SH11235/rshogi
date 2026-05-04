@@ -30,6 +30,9 @@ struct EnvironmentBindings {
     do_bindings: Vec<String>,
     vars_keys: Vec<String>,
     compatibility_date: Option<String>,
+    /// `[vars] CLOCK_PRESETS` の値そのまま (JSON 配列文字列、空配列含む)。Issue #610 で
+    /// 両環境の preset 名集合が揃っていることを assert するために保持する。
+    raw_clock_presets: Option<String>,
     /// `[[migrations]]` 配列を生のまま保持する。`new_sqlite_classes` 等を
     /// 各 test が独自に検査するため、`Vec<toml::Value>` のまま持つ。
     migrations: Vec<toml::Value>,
@@ -81,6 +84,12 @@ fn load_environment_bindings(label: &'static str, file_name: &'static str) -> En
     let compatibility_date =
         doc.get("compatibility_date").and_then(|v| v.as_str()).map(str::to_owned);
 
+    let raw_clock_presets = doc
+        .get("vars")
+        .and_then(|v| v.get("CLOCK_PRESETS"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
     let migrations = doc.get("migrations").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
     let crons = doc
@@ -97,6 +106,7 @@ fn load_environment_bindings(label: &'static str, file_name: &'static str) -> En
         do_bindings,
         vars_keys,
         compatibility_date,
+        raw_clock_presets,
         migrations,
         crons,
     }
@@ -177,6 +187,61 @@ fn assert_declares_backfill_cron_trigger(env: &EnvironmentBindings) {
         file = env.file_name,
         label = env.label,
         crons = env.crons,
+    );
+}
+
+/// 両環境の `[vars] CLOCK_PRESETS` が同じ preset 名集合を宣言していることを assert する。
+/// staging / production で同じ `game_name` で接続したクライアントが同じ clock 設定で
+/// 動くことを保証するため、preset 名は両環境で揃える契約 (Issue #610)。
+///
+/// 値（total_time_*, byoyomi_*）まで一致させると将来環境ごとに調整したいケースを
+/// 縛るため、ここでは「名前集合」の一致だけを pin する。
+fn assert_clock_preset_names_match(lhs: &EnvironmentBindings, rhs: &EnvironmentBindings) {
+    use std::collections::BTreeSet;
+    fn extract_names(env: &EnvironmentBindings) -> BTreeSet<String> {
+        let raw = env.raw_clock_presets.as_deref().unwrap_or("").trim();
+        if raw.is_empty() || raw == "[]" {
+            return BTreeSet::new();
+        }
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap_or_else(|e| {
+            panic!(
+                "{file} ({label}): CLOCK_PRESETS must be valid JSON: {e}; raw={raw}",
+                file = env.file_name,
+                label = env.label,
+            );
+        });
+        parsed
+            .as_array()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{file} ({label}): CLOCK_PRESETS must be a JSON array",
+                    file = env.file_name,
+                    label = env.label,
+                )
+            })
+            .iter()
+            .filter_map(|entry| entry.get("game_name").and_then(|v| v.as_str()).map(str::to_owned))
+            .collect()
+    }
+    let lhs_names = extract_names(lhs);
+    let rhs_names = extract_names(rhs);
+    assert_eq!(
+        lhs_names,
+        rhs_names,
+        "{lhs_file} ({lhs_label}) and {rhs_file} ({rhs_label}) must declare the same \
+         CLOCK_PRESETS game_name set; lhs only: {lhs_only:?}, rhs only: {rhs_only:?}",
+        lhs_file = lhs.file_name,
+        lhs_label = lhs.label,
+        rhs_file = rhs.file_name,
+        rhs_label = rhs.label,
+        lhs_only = lhs_names.difference(&rhs_names).collect::<Vec<_>>(),
+        rhs_only = rhs_names.difference(&lhs_names).collect::<Vec<_>>(),
+    );
+    assert!(
+        !lhs_names.is_empty(),
+        "{file} ({label}): CLOCK_PRESETS must declare at least one preset (Issue #610)",
+        file = lhs.file_name,
+        label = lhs.label,
     );
 }
 
@@ -285,4 +350,9 @@ fn wrangler_staging_declares_backfill_cron_trigger() {
 #[test]
 fn wrangler_environment_compatibility_dates_match() {
     assert_compatibility_dates_match(&PRODUCTION, &STAGING);
+}
+
+#[test]
+fn wrangler_environment_clock_preset_names_match() {
+    assert_clock_preset_names_match(&PRODUCTION, &STAGING);
 }

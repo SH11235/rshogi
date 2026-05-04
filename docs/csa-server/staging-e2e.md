@@ -51,8 +51,14 @@ cp crates/rshogi-csa-client/examples/csa_client_staging/scenarios/A_basic_one_ga
 各 `.toml` の `engine.path` をローカル `rshogi-usi` の絶対パスに、
 `host` URL の `<account>` 部分を Cloudflare アカウント名に、
 `<room_id>` 部分を実行ごとに新規生成する任意文字列（例: `e2e-$(date +%Y%m%d%H%M%S)`）に
-置換する。`id` の suffix（黒/白で異なる）も同じ `<room_id>` を入れて揃える:
-`<handle>+<room_id>+<color>`。
+置換する。
+
+`id` の format は `<handle>+<game_name>+<color>` で、`<game_name>` は worker の
+`CLOCK_PRESETS` で宣言された preset 名 (例: `byoyomi-msec-10-100` /
+`byoyomi-120-5` / `floodgate-600-10`、staging / production 両方の既定で登録済) を
+入れる。preset 仕様と各 preset の用途は [`clock_defaults.md`](clock_defaults.md)
+参照。同梱の `*.toml.example` は既に preset 名を埋めた状態で提供しているので、
+基本は `<handle>` 部分（黒/白で衝突しないユニークな値）と `<room_id>` だけを書き換えれば良い。
 
 ### 2-2. Worker tail を別ターミナルで流す
 

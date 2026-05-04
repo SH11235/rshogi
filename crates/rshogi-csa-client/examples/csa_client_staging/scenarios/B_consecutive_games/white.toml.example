@@ -9,7 +9,7 @@
 # （連続対局時の room_id 衝突回避、scenarios/B_consecutive_games/black.toml.example 参照）。
 host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>-{game_seq}"
 port = 0
-id = "csa_e2e_white_<date>_B+<room_id>-{game_seq}+white"
+id = "csa_e2e_b_white-{game_seq}+byoyomi-msec-10-100+white"
 password = "anything"
 floodgate = true
 
