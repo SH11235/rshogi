@@ -145,6 +145,7 @@ mod tests {
             matched_at_ms: 1_000_000,
             play_started_at_ms: Some(1_000_000),
             initial_sfen: None,
+            reconnect_grace_ms: Some(30_000),
             black_reconnect_token: Some("blk-token".to_owned()),
             white_reconnect_token: Some("wht-token".to_owned()),
         }

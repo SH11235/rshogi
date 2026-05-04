@@ -49,6 +49,13 @@ pub struct PersistedConfig {
     /// 対局では `Some(sfen)` で、cold start 復元時もこの SFEN から `CoreRoom` を
     /// 組み直す。
     pub(crate) initial_sfen: Option<String>,
+    /// 対局開始時に確定した再接続 grace 時間（ミリ秒）。
+    ///
+    /// `websocket_close` 時に env を読み直すと、対局中の deploy / 設定変更で
+    /// token 配布有無と grace 判定がずれるため、マッチ単位で固定した値を保存する。
+    /// 旧 schema では存在しないため `None` として読み、保守的に grace 無効として扱う。
+    #[serde(default)]
+    pub(crate) reconnect_grace_ms: Option<u64>,
     /// 先手向けに発行した再接続トークン。`Game_Summary` 末尾拡張行で配布した
     /// 値そのまま (32 文字 hex)。`websocket_close` 時に grace registry へ写して
     /// 切断側 LOGIN reconnect 要求の `expected_token` 照合に使う。再接続プロトコル
@@ -236,6 +243,7 @@ mod tests {
             matched_at_ms: PLAY_STARTED_AT_MS - 100,
             play_started_at_ms: None,
             initial_sfen: None,
+            reconnect_grace_ms: Some(0),
             black_reconnect_token: None,
             white_reconnect_token: None,
         }
@@ -659,6 +667,7 @@ mod tests {
         }"#;
         let cfg: PersistedConfig =
             serde_json::from_str(json).expect("旧 schema は default 経由で deserialize できる");
+        assert_eq!(cfg.reconnect_grace_ms, None);
         assert_eq!(cfg.black_reconnect_token, None);
         assert_eq!(cfg.white_reconnect_token, None);
     }
@@ -677,25 +686,29 @@ mod tests {
             "matched_at_ms": 999000,
             "play_started_at_ms": null,
             "initial_sfen": null,
+            "reconnect_grace_ms": null,
             "black_reconnect_token": null,
             "white_reconnect_token": null
         }"#;
         let cfg: PersistedConfig =
             serde_json::from_str(json).expect("null 値は None として deserialize できる");
+        assert_eq!(cfg.reconnect_grace_ms, None);
         assert_eq!(cfg.black_reconnect_token, None);
         assert_eq!(cfg.white_reconnect_token, None);
     }
 
     /// 値あり (`grace > 0` で `start_match` が token を発行した場合の永続化形式) も
-    /// そのまま読み込める。値の round-trip も pin する。
+    /// そのまま読み込める。grace 値と token 値の round-trip を pin する。
     #[test]
     fn persisted_config_round_trips_with_reconnect_token_values() {
         let mut original = baseline_config();
+        original.reconnect_grace_ms = Some(30_000);
         original.black_reconnect_token = Some("a".repeat(32));
         original.white_reconnect_token = Some("b".repeat(32));
         let json = serde_json::to_string(&original).expect("serialize cfg");
         let restored: PersistedConfig =
             serde_json::from_str(&json).expect("deserialize cfg with token values");
+        assert_eq!(restored.reconnect_grace_ms, original.reconnect_grace_ms);
         assert_eq!(restored.black_reconnect_token, original.black_reconnect_token);
         assert_eq!(restored.white_reconnect_token, original.white_reconnect_token);
     }
