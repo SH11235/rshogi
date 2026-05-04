@@ -30,23 +30,25 @@ use tools::selfplay::{
 
 const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
 
-/// engine-usi 同士の自己対局ハーネス。時間管理と info ログ収集を最小限に実装する。
+/// NNUE 学習用の棋譜・教師局面（PSV/pack）を生成する gensfen ツール。
+/// engine-usi 同士の対局を回しながら PackedSfenValue を書き出す。棋力評価用途は
+/// `tournament` バイナリを使うこと。
 ///
 /// # よく使うコマンド例
 ///
 /// - 1秒秒読みで数をこなす（infoログなし、デフォルト出力先）:
-///   `cargo run -p tools --bin engine_selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
+///   `cargo run -p tools --bin gensfen -- --games 10 --max-moves 300 --byoyomi 1000`
 ///
 /// - 5秒秒読み + network-delay2=1120、infoログ付きで指定パスに出力:
-///   `cargo run -p tools --bin engine_selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
+///   `cargo run -p tools --bin gensfen -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/gensfen/byoyomi5s.jsonl`
 ///
 /// - 特定SFENの再現（startposファイルを用意して1局だけ）:
-///   `cargo run -p tools --bin engine_selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
+///   `cargo run -p tools --bin gensfen -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
 ///
 /// - 学習データを生成しながら対局:
-///   `cargo run -p tools --bin engine_selfplay -- --games 100 --byoyomi 1000 --output-training-data output.psv`
+///   `cargo run -p tools --bin gensfen -- --games 100 --byoyomi 1000 --output-training-data output.psv`
 ///
-/// `--out` 未指定時は `runs/selfplay/<timestamp>-selfplay.jsonl` に書き出し、infoは同名 `.info.jsonl` を生成する。
+/// `--out` 未指定時は `runs/gensfen/<timestamp>/gensfen.jsonl` に書き出し、infoは同名 `.info.jsonl` を生成する。
 ///
 fn parse_rate_0_1(s: &str) -> std::result::Result<f64, String> {
     let v: f64 = s.parse().map_err(|e| format!("{e}"))?;
@@ -60,7 +62,7 @@ fn parse_rate_0_1(s: &str) -> std::result::Result<f64, String> {
 #[command(
     author,
     version,
-    about = "rshogi-usi selfplay harness (engine vs engine)"
+    about = "rshogi gensfen: training data (PSV/pack) generator via engine-vs-engine play"
 )]
 struct Cli {
     /// Number of games to run
@@ -196,8 +198,8 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     random_startpos: bool,
 
-    /// 出力ディレクトリ（デフォルト: runs/selfplay/<timestamp>/）
-    /// 指定ディレクトリ内に selfplay.jsonl, selfplay.psv 等が出力される
+    /// 出力ディレクトリ（デフォルト: runs/gensfen/<timestamp>/）
+    /// 指定ディレクトリ内に gensfen.jsonl, gensfen.psv 等が出力される
     #[arg(long)]
     out_dir: Option<PathBuf>,
 
@@ -2632,7 +2634,7 @@ fn main() -> Result<()> {
         );
         println!("---------------------");
     }
-    println!("selfplay log written to {}", output_path.display());
+    println!("gensfen log written to {}", output_path.display());
     if !cli.for_train {
         println!("summary written to {}", summary_path.display());
     }
@@ -2657,13 +2659,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// 出力ディレクトリを確定し、その中の selfplay.jsonl パスを返す。
+/// 出力ディレクトリを確定し、その中の gensfen.jsonl パスを返す。
 fn resolve_output_path(out_dir: Option<&Path>, timestamp: &chrono::DateTime<Local>) -> PathBuf {
     let dir = match out_dir {
         Some(d) => d.to_path_buf(),
-        None => PathBuf::from("runs/selfplay").join(timestamp.format("%Y%m%d-%H%M%S").to_string()),
+        None => PathBuf::from("runs/gensfen").join(timestamp.format("%Y%m%d-%H%M%S").to_string()),
     };
-    dir.join("selfplay.jsonl")
+    dir.join("gensfen.jsonl")
 }
 
 fn default_kif_path(jsonl: &Path) -> PathBuf {
@@ -3202,7 +3204,7 @@ mod tests {
     #[test]
     fn resolve_engine_paths_uses_per_side_when_provided() {
         let cli = Cli::parse_from([
-            "engine_selfplay",
+            "gensfen",
             "--engine-path-black",
             "/path/to/black",
             "--engine-path-white",
@@ -3217,11 +3219,7 @@ mod tests {
 
     #[test]
     fn resolve_engine_paths_uses_shared_when_per_side_missing() {
-        let cli = Cli::parse_from([
-            "engine_selfplay",
-            "--engine-path",
-            "/shared/path/engine-usi",
-        ]);
+        let cli = Cli::parse_from(["gensfen", "--engine-path", "/shared/path/engine-usi"]);
         let paths = resolve_engine_paths(&cli);
         assert_eq!(paths.black.path, PathBuf::from("/shared/path/engine-usi"));
         assert_eq!(paths.white.path, PathBuf::from("/shared/path/engine-usi"));

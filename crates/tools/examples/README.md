@@ -146,30 +146,22 @@ cargo run -p tools --bin spsa_stats_to_plot_csv -- \
 複数 run の比較 (例 `--seed` を変えた独立 run dir 群) は、各 run の
 `stats.csv` を pandas/awk で concat してから集計する。
 
-## 自己対局 (engine_selfplay)
+## 教師局面生成 (gensfen)
+
+学習データ生成専用ツール。棋力比較は `tournament` を使うこと（[tournament.md](../docs/tournament.md)）。
 
 ### 基本（学習データ生成）
 
 ```bash
-cargo run -p tools --release --bin engine_selfplay -- \
+cargo run -p tools --release --bin gensfen -- \
   --games 100 --byoyomi 1000 --threads 4 --hash-mb 512
 ```
 
-### 学習データなしで対局のみ
+### 学習データなしで対局のみ（デバッグ用）
 
 ```bash
-cargo run -p tools --release --bin engine_selfplay -- \
+cargo run -p tools --release --bin gensfen -- \
   --games 10 --byoyomi 500 --threads 4 --hash-mb 512 \
-  --no-training-data
-```
-
-### 異なるNNUEモデル同士の比較
-
-```bash
-cargo run -p tools --release --bin engine_selfplay -- \
-  --games 50 --byoyomi 500 --threads 4 --hash-mb 512 \
-  --usi-options-black "EvalFile=./model_a.nnue" \
-  --usi-options-white "EvalFile=./model_b.nnue" \
   --no-training-data
 ```
 

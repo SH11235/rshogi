@@ -50,13 +50,13 @@ perf stat -e cycles,instructions,cache-misses,L1-dcache-load-misses -- true
 `search_only_ab` は taskset で 1 コアに pin しても **L3 は CCX 内 8 コア共有**なので、他コアで重い計測・学習プロセスが走っていると cache pressure 指標が汚染される。
 
 ```bash
-pgrep -af 'rshogi|selfplay|tournament|engine_selfplay|cargo' | grep -v search_only_ab
+pgrep -af 'rshogi|gensfen|tournament|cargo' | grep -v search_only_ab
 top -bn1 -o %CPU | head -20
 ```
 
 特に以下を注視:
-- `engine_selfplay` (学習データ生成、30 並列などで走ると L3 を激しく食う)
-- `tournament` / `selfplay` (自己対局)
+- `gensfen` (学習データ生成、30 並列などで走ると L3 を激しく食う)
+- `tournament` (自己対局・棋力比較)
 - `cargo build` (計測中 CPU 食う)
 
 走っている場合は停止してもらうか、停止できないなら別の CCX（コア 8〜15）に taskset してもらう。

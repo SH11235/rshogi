@@ -7,7 +7,7 @@ crates/tools/src/bin/ 配下の全32バイナリの一覧と解説。
 | ツール | 説明 |
 |--------|------|
 | `tournament` | 複数エンジンの round-robin 並列トーナメント。JSONL 出力 |
-| `engine_selfplay` | 2エンジン間の自己対局ハーネス。学習データ (PSV) 出力対応 |
+| `gensfen` | NNUE 学習用 PSV/pack 教師局面の生成（engine vs engine／NativeBackend、旧名: `engine_selfplay`） |
 | `csa_client` | USI エンジンを floodgate 等の CSA サーバーに接続して連続対局 |
 | `analyze_selfplay` | 自己対局の JSONL ログを集計。勝率・Elo 差・NPS 等を表示 |
 
@@ -74,7 +74,7 @@ crates/tools/src/bin/ 配下の全32バイナリの一覧と解説。
 ## パイプライン例
 
 ```
-教師データ生成 (engine_selfplay)
+教師データ生成 (gensfen)
   → シャッフル (shuffle_psv)
   → 前処理 (preprocess_psv)
   → 学習 (train_nnue)
