@@ -124,10 +124,19 @@ const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
 /// 切断 → 再接続待ちエントリの DO storage key (1 対局 = 0..=1 件)。
+///
+/// ⚠ `enter_grace_window` 内のローカル struct `GraceAlarmWrite` の
+/// `#[serde(rename = "grace_registry")]` と一致させること。`put_multiple` は
+/// struct のフィールド名 (rename 後) を storage key として使うため、ずれると
+/// `load_grace_registry` 側が `None` を返す silent failure になる。
 const KEY_GRACE_REGISTRY: &str = "grace_registry";
 /// 次に発火する `state.alarm()` の種別タグ。`None` は alarm 未予約 / 既存 alarm
 /// が時間切れ駆動 (TimeUp) であることを示す。grace 経路に入ったときだけ
 /// `GraceExpired` を書き込む。
+///
+/// ⚠ `enter_grace_window` 内のローカル struct `GraceAlarmWrite` の
+/// `#[serde(rename = "pending_alarm_kind")]` と一致させること（理由は
+/// `KEY_GRACE_REGISTRY` と同じ）。
 const KEY_PENDING_ALARM_KIND: &str = "pending_alarm_kind";
 
 /// R2 上の buoy 保存フォーマット。
@@ -1907,8 +1916,10 @@ impl GameRoom {
         // この値と「再接続時刻 + 残時間 budget」のうち早い方を採用することで、
         // 悪意あるクライアントが切断 → grace 直前再接続を繰り返して相手手番の
         // wall-clock 上の deadline を不当に延長する経路を防ぐ。
-        let original_turn_alarm_epoch_ms =
-            self.state.storage().get_alarm().await.ok().flatten().map(|e| e as u64);
+        // 同じ値を後段の `classify_alarm_after_enter_grace` でも使うため、
+        // `get_alarm` は 1 回だけ呼んで使い回す。
+        let existing_alarm = self.state.storage().get_alarm().await.ok().flatten();
+        let original_turn_alarm_epoch_ms = existing_alarm.map(|e| e as u64);
         let pending = {
             let borrow = self.core.borrow();
             let core = borrow.as_ref().ok_or_else(|| {
@@ -1927,9 +1938,8 @@ impl GameRoom {
         // 未予約なら `None`。
         let now_ms = self.now_ms();
         let grace_deadline_ms = pending.deadline_ms;
-        let existing = self.state.storage().get_alarm().await.ok().flatten();
         let (alarm_kind, should_set_grace) =
-            classify_alarm_after_enter_grace(existing, grace_deadline_ms);
+            classify_alarm_after_enter_grace(existing_alarm, grace_deadline_ms);
 
         #[derive(Serialize)]
         struct GraceAlarmWrite<'a> {
