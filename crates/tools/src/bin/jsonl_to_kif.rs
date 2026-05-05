@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 use tools::kif::{GameFilter, convert_jsonl_to_kif};
 
@@ -55,6 +55,11 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // --game-id は対象 id を確定させる用途、--skip/--limit は順序ベースの絞り込み。
+    // 両者を併用すると意味が混乱するため明示的に拒否する。
+    if !cli.game_id.is_empty() && (cli.skip > 0 || cli.limit.is_some()) {
+        bail!("--game-id cannot be combined with --skip / --limit. Use one or the other.");
+    }
     let filter = GameFilter {
         game_ids: cli.game_id,
         skip: cli.skip,

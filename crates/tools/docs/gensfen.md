@@ -43,6 +43,8 @@ runs/gensfen/20260317-120000/
 `--out-dir path/to/dir` を指定した場合は、そのディレクトリ内に上記ファイルが生成される。
 
 棋譜（KIF）・サマリファイル・全手 move ログは出力されない（教師局面生成に不要なため）。
+KIF が必要な場合は `tournament` バイナリで対局を回し、その出力 jsonl を
+[`jsonl_to_kif`](tools-reference.md) で変換する。
 
 ## 動作モード
 

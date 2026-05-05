@@ -364,12 +364,6 @@ struct MetaSettings {
     skip_initial_ply: u32,
     #[serde(default = "default_skip_in_check")]
     skip_in_check: bool,
-    /// 先手の初期パス権数（パス権有効時のみ使用）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    initial_pass_count_black: Option<u8>,
-    /// 後手の初期パス権数（パス権有効時のみ使用）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    initial_pass_count_white: Option<u8>,
     /// 開始局面シャッフルの乱数シード（--startpos-no-repeat 用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shuffle_seed: Option<u64>,
@@ -996,10 +990,6 @@ struct WorkerConfig {
     // Depth/nodes limits
     go_depth: Option<u32>,
     go_nodes: Option<u64>,
-    // Pass rights
-    pass_rights_enabled: bool,
-    pass_black: Option<u8>,
-    pass_white: Option<u8>,
     // Positions (shared across workers)
     start_defs: Arc<Vec<ParsedPosition>>,
     start_commands: Arc<Vec<String>>,
@@ -1127,21 +1117,6 @@ fn worker_main(
             None
         };
 
-        let usi_initial_pass_count = {
-            let parse = |opts: &[String]| -> Option<u8> {
-                for opt in opts {
-                    if let Some(val) = opt.strip_prefix("InitialPassCount=") {
-                        return val.trim().parse().ok();
-                    }
-                    if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
-                        return val.trim().parse().ok();
-                    }
-                }
-                None
-            };
-            parse(&cfg.black_usi_opts).or_else(|| parse(&cfg.white_usi_opts)).unwrap_or(2)
-        };
-
         let dedup_hash = cfg.dedup_hash.clone();
         let mut rng = rand::rng();
         let mut dedup_hits = 0u64;
@@ -1163,17 +1138,7 @@ fn worker_main(
             engines.prepare_game(cfg.keep_tt)?;
 
             let parsed = &cfg.start_defs[ticket.startpos_idx];
-            let pass_b = if cfg.pass_rights_enabled {
-                Some(cfg.pass_black.unwrap_or(usi_initial_pass_count))
-            } else {
-                None
-            };
-            let pass_w = if cfg.pass_rights_enabled {
-                Some(cfg.pass_white.unwrap_or(usi_initial_pass_count))
-            } else {
-                None
-            };
-            let mut pos = build_position(parsed, pass_b, pass_w)?;
+            let mut pos = build_position(parsed, None, None)?;
             let mut tc = TimeControl::new(cfg.btime, cfg.wtime, cfg.binc, cfg.winc, cfg.byoyomi);
             let mut outcome = GameOutcome::InProgress;
             let mut outcome_reason = "max_moves";
@@ -1243,11 +1208,6 @@ fn worker_main(
 
                 // --- 通常探索 ---
                 let think_limit_ms = tc.think_limit_ms(side);
-                let pass_rights = if cfg.pass_rights_enabled {
-                    Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
-                } else {
-                    None
-                };
                 let params = SearchParams {
                     sfen: sfen_before.clone(),
                     time_args: tc.time_args(),
@@ -1256,7 +1216,7 @@ fn worker_main(
                     go_depth: cfg.go_depth,
                     go_nodes: cfg.go_nodes,
                     multi_pv: cfg.random_multi_pv.max(1),
-                    pass_rights,
+                    pass_rights: None,
                     side,
                     game_id: game_idx + 1,
                     ply: plies_played,
@@ -1707,54 +1667,42 @@ fn main() -> Result<()> {
         cli.byoyomi = 1000;
     }
 
-    // USIオプションからパス権情報を早期に解析（load_start_positions で使用するため）
+    // gensfen は PassRights を全くサポートしない（PSV/pack 形式が pass 手をエンコード
+    // できないため）。USI options で検出した時点で副作用前に即 bail する。
     let common_usi_opts_early = cli.usi_options.clone().unwrap_or_default();
     let black_usi_opts_early =
         cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts_early.clone());
     let white_usi_opts_early =
         cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts_early.clone());
-    let is_pass_rights_enabled_early = |o: &str| {
+    let is_pass_rights_opt = |o: &str| {
         o == "PassRights=true"
             || o == "PassRights = true"
             || o == "PassRights=1"
             || o == "PassRights = 1"
     };
-    let pass_rights_via_usi_early =
-        black_usi_opts_early.iter().any(|o| is_pass_rights_enabled_early(o))
-            || white_usi_opts_early.iter().any(|o| is_pass_rights_enabled_early(o));
+    if black_usi_opts_early.iter().any(|o| is_pass_rights_opt(o))
+        || white_usi_opts_early.iter().any(|o| is_pass_rights_opt(o))
+    {
+        bail!(
+            "PassRights USI option is not supported by gensfen (PackedSfen format cannot encode pass moves)"
+        );
+    }
 
-    let parse_initial_pass_count_early = |opts: &[String]| -> Option<u8> {
-        for opt in opts {
-            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
-                return val.trim().parse().ok();
-            }
-            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
-                return val.trim().parse().ok();
-            }
-        }
-        None
-    };
-    let usi_initial_pass_count_early = parse_initial_pass_count_early(&black_usi_opts_early)
-        .or_else(|| parse_initial_pass_count_early(&white_usi_opts_early))
-        .unwrap_or(2);
+    // --engine-path* が指定されているのに --native=false が明示されていない場合は
+    // ユーザの意図が曖昧（NativeBackend は外部エンジンを起動しないため指定が無視される）。
+    // explicit > magical の方針で副作用前に bail し、誤解を防ぐ。
+    if (cli.engine_path.is_some()
+        || cli.engine_path_black.is_some()
+        || cli.engine_path_white.is_some())
+        && cli.native != Some(false)
+    {
+        bail!(
+            "--engine-path* requires --native=false. NativeBackend does not spawn external USI engines."
+        );
+    }
 
-    let load_pass_black = if pass_rights_via_usi_early {
-        Some(usi_initial_pass_count_early)
-    } else {
-        None
-    };
-    let load_pass_white = if pass_rights_via_usi_early {
-        Some(usi_initial_pass_count_early)
-    } else {
-        None
-    };
-
-    let (start_defs, start_commands) = load_start_positions(
-        cli.startpos_file.as_deref(),
-        cli.sfen.as_deref(),
-        load_pass_black,
-        load_pass_white,
-    )?;
+    let (start_defs, start_commands) =
+        load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
     let timestamp = Local::now();
     let output_path = resolve_output_path(cli.out_dir.as_deref(), &timestamp);
     let info_path = output_path.with_extension("info.jsonl");
@@ -1810,13 +1758,6 @@ fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(|| default_training_data_path(&output_path, training_data_ext)),
     );
-    // パス権は PSV 形式でエンコードできないため gensfen ではサポートしない。
-    // USI options で PassRights=true が渡された場合のみ早期 bail する。
-    if pass_rights_via_usi_early {
-        bail!(
-            "PassRights USI option is not supported by gensfen (PackedSfen format cannot encode pass moves)"
-        );
-    }
     let training_data_enabled = training_data_path.is_some();
 
     let engine_paths = resolve_engine_paths(&cli);
@@ -1854,33 +1795,6 @@ fn main() -> Result<()> {
     let black_usi_opts = cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts.clone());
     let white_usi_opts = cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts.clone());
 
-    let is_pass_rights_enabled = |o: &str| {
-        o == "PassRights=true"
-            || o == "PassRights = true"
-            || o == "PassRights=1"
-            || o == "PassRights = 1"
-    };
-    let pass_rights_via_usi = black_usi_opts.iter().any(|o| is_pass_rights_enabled(o))
-        || white_usi_opts.iter().any(|o| is_pass_rights_enabled(o));
-
-    let parse_initial_pass_count = |opts: &[String]| -> Option<u8> {
-        for opt in opts {
-            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
-                return val.trim().parse().ok();
-            }
-            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
-                return val.trim().parse().ok();
-            }
-        }
-        None
-    };
-    let usi_initial_pass_count = parse_initial_pass_count(&black_usi_opts)
-        .or_else(|| parse_initial_pass_count(&white_usi_opts))
-        .unwrap_or(2);
-
-    let pass_rights_enabled = pass_rights_via_usi;
-
-    // gensfen オプションのデフォルト解決（meta 書き込みより前に解決する必要がある）
     let native_mode = cli.native.unwrap_or(true);
 
     // USI モードかつ先後同一エンジンなら 1 プロセスで兼用する最適化。
@@ -1992,16 +1906,6 @@ fn main() -> Result<()> {
                 output_training_data: training_data_path.as_ref().map(|p| p.display().to_string()),
                 skip_initial_ply: cli.skip_initial_ply,
                 skip_in_check: cli.skip_in_check,
-                initial_pass_count_black: if pass_rights_enabled {
-                    Some(usi_initial_pass_count)
-                } else {
-                    None
-                },
-                initial_pass_count_white: if pass_rights_enabled {
-                    Some(usi_initial_pass_count)
-                } else {
-                    None
-                },
                 shuffle_seed: shuffle_seed_resolved,
             },
             engine_cmd: EngineCommandMeta {
@@ -2153,17 +2057,6 @@ fn main() -> Result<()> {
             byoyomi: cli.byoyomi,
             go_depth: cli.depth,
             go_nodes: cli.nodes,
-            pass_rights_enabled,
-            pass_black: if pass_rights_enabled {
-                Some(usi_initial_pass_count)
-            } else {
-                None
-            },
-            pass_white: if pass_rights_enabled {
-                Some(usi_initial_pass_count)
-            } else {
-                None
-            },
             start_defs: Arc::clone(&shared_start_defs),
             start_commands: Arc::clone(&shared_start_commands),
             jsonl_path,

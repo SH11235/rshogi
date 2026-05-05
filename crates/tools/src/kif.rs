@@ -65,9 +65,10 @@ pub fn convert_jsonl_to_kif(
         let value: Value = serde_json::from_str(trimmed)
             .with_context(|| format!("failed to parse JSON line: {}", trimmed))?;
         match value.get("type").and_then(|v| v.as_str()) {
-            Some("meta") => {
-                meta = serde_json::from_value(value).ok();
-            }
+            Some("meta") => match serde_json::from_value(value) {
+                Ok(m) => meta = Some(m),
+                Err(e) => eprintln!("warning: failed to parse meta line: {}", e),
+            },
             Some("move") => {
                 let entry: MoveEntry = serde_json::from_value(value)?;
                 games.entry(entry.game_id).or_default().moves.push(entry);
@@ -106,8 +107,11 @@ pub fn convert_jsonl_to_kif(
         );
     }
 
+    // 既存ディレクトリ、または拡張子のないパス（未存在ディレクトリ想定）を
+    // ディレクトリ扱いする。拡張子なし単一ファイルを出力したい場合はこの判定で
+    // ディレクトリ扱いになるので、ファイルとして書きたいときは拡張子を付ける。
     let output_is_dir =
-        output.is_dir() || output.extension().is_none() && !output.as_os_str().is_empty();
+        output.is_dir() || (output.extension().is_none() && !output.as_os_str().is_empty());
 
     let single = selected.len() == 1 && !output_is_dir;
     let mut written = Vec::new();
@@ -200,8 +204,7 @@ fn export_game_to_kif<W: Write>(
     game_id: u32,
     game: &GameLog,
 ) -> Result<()> {
-    let (mut pos, start_sfen) = start_position_for_game(game_id, &game.moves)
-        .ok_or_else(|| anyhow!("could not determine start position for game {}", game_id))?;
+    let (mut pos, start_sfen) = start_position_for_game(game_id, &game.moves)?;
 
     let timestamp = meta.map(|m| m.timestamp.clone()).unwrap_or_else(|| "-".to_string());
     let (black_name, white_name) = engine_names_for(meta);
@@ -271,18 +274,16 @@ fn export_game_to_kif<W: Write>(
     Ok(())
 }
 
-fn start_position_for_game(game_id: u32, moves: &[MoveEntry]) -> Option<(Position, String)> {
-    let first = moves.first()?;
+fn start_position_for_game(game_id: u32, moves: &[MoveEntry]) -> Result<(Position, String)> {
+    let first = moves
+        .first()
+        .ok_or_else(|| anyhow!("game {} has no moves; cannot infer start position", game_id))?;
     let mut pos = Position::new();
-    if pos.set_sfen(&first.sfen_before).is_ok() {
-        let sfen = pos.to_sfen();
-        return Some((pos, sfen));
-    }
-    eprintln!(
-        "warning: game {}: failed to parse sfen_before '{}'",
-        game_id, &first.sfen_before
-    );
-    None
+    pos.set_sfen(&first.sfen_before).map_err(|e| {
+        anyhow!("game {}: failed to parse sfen_before '{}': {}", game_id, &first.sfen_before, e)
+    })?;
+    let sfen = pos.to_sfen();
+    Ok((pos, sfen))
 }
 
 fn engine_names_for(meta: Option<&KifMeta>) -> (String, String) {
@@ -461,5 +462,70 @@ mod tests {
         assert!(f.matches_id(3));
         assert!(!f.matches_id(5));
         assert!(f.matches_id(7));
+    }
+
+    /// 最小サンプル jsonl から KIF が出力できることを end-to-end で検証する。
+    /// メタ撤去や move ログ schema 変更等の regression を検知する目的。
+    #[test]
+    fn convert_minimal_jsonl_emits_kif() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = dir.path().join("games.jsonl");
+        let output = dir.path().join("out");
+
+        // 1 局のみ・2 手指して 引き分け で終了する最小ログ
+        let startpos = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let mut f = std::fs::File::create(&input).expect("create input");
+        writeln!(
+            f,
+            r#"{{"type":"meta","timestamp":"2026-05-05T00:00:00+09:00","settings":{{"btime":1000,"wtime":1000}},"engine_cmd":{{"path_black":"/p/black","path_white":"/p/white"}}}}"#
+        ).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"move","game_id":1,"ply":1,"side_to_move":"b","sfen_before":"{}","move_usi":"7g7f","engine":"black","elapsed_ms":100,"think_limit_ms":1000,"timed_out":false}}"#,
+            startpos
+        ).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"move","game_id":1,"ply":2,"side_to_move":"w","sfen_before":"lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2","move_usi":"3c3d","engine":"white","elapsed_ms":200,"think_limit_ms":1000,"timed_out":false}}"#
+        ).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"result","game_id":1,"outcome":"draw","reason":"max_moves","plies":2}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        let written = convert_jsonl_to_kif(&input, &output, &GameFilter::default())
+            .expect("convert_jsonl_to_kif");
+        assert_eq!(written.len(), 1);
+        let kif = std::fs::read_to_string(&written[0]).expect("read kif");
+        assert!(kif.contains("先手：black"), "kif:\n{}", kif);
+        assert!(kif.contains("後手：white"), "kif:\n{}", kif);
+        assert!(kif.contains("▲"), "kif:\n{}", kif);
+        assert!(kif.contains("△"), "kif:\n{}", kif);
+        assert!(kif.contains("まで2手で引き分け"), "kif:\n{}", kif);
+    }
+
+    #[test]
+    fn convert_errors_when_no_games_match_filter() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = dir.path().join("games.jsonl");
+        let output = dir.path().join("out");
+        let mut f = std::fs::File::create(&input).expect("create input");
+        writeln!(
+            f,
+            r#"{{"type":"result","game_id":1,"outcome":"draw","reason":"max_moves","plies":0}}"#
+        )
+        .unwrap();
+        drop(f);
+        let filter = GameFilter {
+            game_ids: vec![999],
+            ..Default::default()
+        };
+        let err = convert_jsonl_to_kif(&input, &output, &filter)
+            .expect_err("should bail on empty filter result");
+        assert!(format!("{err}").contains("no games matched filter"), "err: {err}");
     }
 }
