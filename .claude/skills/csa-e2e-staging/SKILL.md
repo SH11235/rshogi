@@ -87,11 +87,19 @@ wait
 ```bash
 cp crates/rshogi-csa-client/examples/csa_client.toml.example /tmp/black.toml
 cp crates/rshogi-csa-client/examples/csa_client.toml.example /tmp/white.toml
-# 各 toml の host (room_id 末尾)、id (handle / preset 名 / color)、engine.path を編集
 target/release/csa_client /tmp/black.toml &
 target/release/csa_client /tmp/white.toml &
 wait
 ```
+
+各 toml で **必ず** 書き換える項目 (placeholder のままでは動かない):
+
+| field | 役割 | 書き換え例 |
+|---|---|---|
+| `server.host` | Worker URL。末尾 `/ws/<room_id>` の `<room_id>` を黒/白で完全一致させる | `wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/e2e-20260505...` |
+| `server.id` | LOGIN handle。`<handle>+<game_name>+<color>` の `<game_name>` は **必ず CLOCK_PRESETS 登録 preset 名**(strict mode、未登録名は `LOGIN_LOBBY:incorrect unknown_game_name` で reject される) | 黒: `alice+floodgate-600-10+black` / 白: `bob+floodgate-600-10+white` |
+| `engine.path` | ローカル USI engine 絶対パス | `/abs/path/to/your/usi-engine` |
+| `engine.options` 内 `EvalFile` 等 | 実機 engine が要求するモデルパス | engine 仕様による |
 
 ## 2. シナリオ A: 平手 1 局完走
 
@@ -139,12 +147,21 @@ preset は `byoyomi-120-5` (中時間) を選び、grace 30 秒の中で reconne
    を確認
 5. **30 秒以内に** `csa_client` の auto-reconnect 機能で復帰させる:
    - csa_client は WS Close を検知すると保持済 token を使って自動再接続する
-     (実装: `crates/rshogi-csa-client/src/main.rs::attempt_reconnect`)
-   - そのため、process kill ではなく **WS だけ落とす** 操作 (e.g.,
-     `tc qdisc add ... netem loss 100%` 一時投入、socat proxy を介してそれを
-     落とす、等) が望ましい
-   - process kill した場合は手動で `LOGIN ... reconnect:<game_id>+<token>`
-     行を組み立てて wscat で送る (csa_client の TOML id 経由では現状未対応)
+     (実装: `crates/rshogi-csa-client/src/main.rs::attempt_reconnect`、`LOGIN <id> <pw>
+     reconnect:<game_id>+<token>` を送出 → 受理時 server が
+     `BEGIN Game_Summary` + `BEGIN Reconnect_State` を送り返す。protocol 詳細は
+     `docs/csa-server/protocol-reference.md` 参照)
+   - そのため、process kill ではなく **WS だけ落とす** 操作が望ましい:
+     - **socat proxy 方式 (推奨、root 不要)**: `socat TCP-LISTEN:8443,fork OPENSSL:<worker-host>:443`
+       でローカル proxy を立て、csa_client を `ws://localhost:8443/...` に向ける →
+       proxy だけ kill すれば csa_client は WS Close を観測して auto-reconnect する
+     - **tc / iptables 方式 (root 必要、影響範囲注意)**:
+       `sudo iptables -A OUTPUT -p tcp --dport 443 -j DROP` 等で短時間遮断する。
+       同 machine の他通信も巻き込むので smoke 専用 sandbox で実行する
+   - process kill した場合は手動で wscat から
+     `LOGIN <handle>+<preset>+<color> <pw> reconnect:<game_id>+<token>` 行を送って
+     resume 開始。csa_client の TOML id 経由ではこの形式の LOGIN は未対応
+     (csa_client は auto-reconnect 経路のみで `login_reconnect` を呼ぶ)
 6. 終局後に R2 棋譜を確認すると **1 つの game_id** に黒の disconnect 前後の
    指し手が連続している
 

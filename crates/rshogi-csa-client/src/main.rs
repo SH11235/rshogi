@@ -79,8 +79,9 @@ struct Cli {
     #[arg(long)]
     room_id: Option<String>,
 
-    /// `--target` 利用時のログインハンドル。CSA LOGIN ID は `<handle>+<room_id>+<color>`
-    /// 形式で組み立てる（Workers GameRoom が要求するフォーマット）。
+    /// `--target` 利用時のログインハンドル。CSA LOGIN ID は
+    /// `<handle>+<game_name>+<color>` 形式で組み立てる（Workers GameRoom 要求）。
+    /// `<game_name>` は `--game-name` の値、未指定時は `<room_id>` で fallback。
     #[arg(long)]
     handle: Option<String>,
 
@@ -94,8 +95,12 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     lobby: bool,
 
-    /// `--lobby` 利用時のマッチング pool 名 (`<game_name>` 部分)。同 game_name 同士
-    /// でしかマッチングしない。`[A-Za-z0-9_-]` / 1〜32 文字制限。
+    /// LOGIN handle の `<game_name>` 部分。`--target` 利用時、worker の `CLOCK_PRESETS`
+    /// に登録された preset 名 (例: `floodgate-600-10`) を指定して clock を選ぶ。
+    /// `--lobby` 利用時はマッチング pool 名としても用いる (同 game_name 同士でしか
+    /// マッチングしない)。`[A-Za-z0-9_-]` / 1〜32 文字制限。
+    /// 非 lobby `--target` 経路で省略した場合、後方互換のため `<room_id>` を
+    /// `<game_name>` として使う (`CLOCK_PRESETS` 未登録の Worker 向け既定動作)。
     #[arg(long)]
     game_name: Option<String>,
 
@@ -651,7 +656,12 @@ fn apply_target_preset(config: &mut CsaClientConfig, cli: &Cli) -> Result<()> {
     config.server.host = format!("wss://{subdomain}/ws/{room_id}");
     // `wss://` 経路では port 値は無視されるが、TOML schema 互換のため 0 を入れておく。
     config.server.port = 0;
-    config.server.id = format!("{handle}+{room_id}+{}", color.as_str());
+    // LOGIN id の `<game_name>` 部分は CLI で `--game-name` を渡されたらそれを使う
+    // (worker の `CLOCK_PRESETS` 登録 preset 名と一致させて strict mode を通す)。
+    // 省略時は room_id を game_name として使う後方互換動作にとどめる
+    // (`CLOCK_PRESETS = "[]"` の Worker や lobby 経路の room_id == game_name 慣習向け)。
+    let game_name_for_id = cli.game_name.as_deref().filter(|g| !g.is_empty()).unwrap_or(room_id);
+    config.server.id = format!("{handle}+{game_name_for_id}+{}", color.as_str());
     if config.server.password.is_empty() {
         config.server.password = PRESET_FALLBACK_PASSWORD.to_owned();
     }
@@ -894,6 +904,39 @@ mod tests {
         );
         assert_eq!(config.server.id, "bob+game42+white");
         assert!(config.server.ws_origin.is_none());
+    }
+
+    #[test]
+    fn target_preset_uses_game_name_in_login_id() {
+        // `--target` 非 lobby モードで `--game-name <preset>` を渡すと、URL の
+        // `<room_id>` と LOGIN id の `<game_name>` を独立に組み立てる
+        // (`CLOCK_PRESETS` strict mode で preset 名 LOGIN を成立させるため)。
+        let mut config = CsaClientConfig::default();
+        let mut cli = cli_with(Some(TargetPreset::Staging));
+        cli.room_id = Some("e2e-room-1".to_owned());
+        cli.handle = Some("alice".to_owned());
+        cli.color = Some(CliColor::Black);
+        cli.game_name = Some("floodgate-600-10".to_owned());
+        apply_target_preset(&mut config, &cli).unwrap();
+        assert_eq!(
+            config.server.host,
+            "wss://rshogi-csa-server-workers-staging.sh11235.workers.dev/ws/e2e-room-1"
+        );
+        assert_eq!(config.server.id, "alice+floodgate-600-10+black");
+    }
+
+    #[test]
+    fn target_preset_falls_back_to_room_id_when_game_name_omitted() {
+        // 後方互換: `--game-name` 省略時は room_id を game_name として使う
+        // (`CLOCK_PRESETS = "[]"` 構成や lobby room_id == game_name 慣習向け)。
+        let mut config = CsaClientConfig::default();
+        let mut cli = cli_with(Some(TargetPreset::Staging));
+        cli.room_id = Some("legacy-room".to_owned());
+        cli.handle = Some("alice".to_owned());
+        cli.color = Some(CliColor::Black);
+        cli.game_name = None;
+        apply_target_preset(&mut config, &cli).unwrap();
+        assert_eq!(config.server.id, "alice+legacy-room+black");
     }
 
     #[test]

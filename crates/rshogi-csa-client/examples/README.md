@@ -14,6 +14,11 @@ Workers (`rshogi-csa-server-workers`) deploy 環境への実機 E2E 手順は
 Worker には TOML を書かずに 1 コマンドで接続できる。エンジンには NNUE モデル付きの
 本番想定構成を使う (例: `v82-400-layerstack.bin` 等の LayerStack NNUE モデルを `EvalFile` に渡す)。
 
+`--game-name` には worker `CLOCK_PRESETS` 登録の preset 名 (本リポ既定では
+`byoyomi-msec-10-100` / `byoyomi-120-5` / `floodgate-600-10`) を入れて clock を
+選ぶ。strict mode では未登録名は `LOGIN_LOBBY:incorrect unknown_game_name` で
+拒否される (省略時は後方互換として `<room_id>` を game_name として使う)。
+
 ```bash
 # 黒番 (staging)
 cargo run -p rshogi-csa-client --release -- \
@@ -21,15 +26,17 @@ cargo run -p rshogi-csa-client --release -- \
   --room-id e2e-quickstart-1 \
   --handle alice \
   --color black \
+  --game-name floodgate-600-10 \
   --engine /path/to/your/rshogi-usi \
   --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256"
 
-# 別ターミナルで白番 (room_id を黒と一致させる)
+# 別ターミナルで白番 (room_id / game-name を黒と一致させる)
 cargo run -p rshogi-csa-client --release -- \
   --target staging \
   --room-id e2e-quickstart-1 \
   --handle bob \
   --color white \
+  --game-name floodgate-600-10 \
   --engine /path/to/your/rshogi-usi \
   --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256"
 ```
