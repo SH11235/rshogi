@@ -387,7 +387,7 @@ PackedSfenValue 形式（40バイト/局面）で、Nodchip learner互換。
 
 ## 使用例
 
-### 基本的な自己対局
+### 基本的な教師局面生成
 
 ```bash
 ./target/release/gensfen \

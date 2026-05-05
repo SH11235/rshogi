@@ -267,7 +267,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     for_train: bool,
 
-    /// 前回中断した自己対局セッションを再開する。
+    /// 前回中断した教師局面生成セッションを再開する。
     /// --out で指定した出力ファイルが存在する場合、完了済み対局数を検出して続きから実行する。
     #[arg(long, default_value_t = false)]
     resume: bool,
@@ -1102,7 +1102,7 @@ struct WorkerConfig {
     native_mode: bool,
     /// USI 単一エンジン最適化（先後同一エンジン時に 1 プロセスで兼用）。
     /// TT/履歴が先後で共有されるため、Elo 評価に影響する。
-    /// --for-train 時のみ有効。通常の自己対局では無効。
+    /// --for-train 時のみ有効（棋力評価用途では使用しない）。
     usi_single: bool,
     eval_hash_size_mb: usize,
     // gensfen: 重複回避
@@ -1710,7 +1710,7 @@ fn worker_main(
 // Resume support
 // ---------------------------------------------------------------------------
 
-/// 前回中断した自己対局セッションの進捗状態
+/// 前回中断した教師局面生成セッションの進捗状態
 struct ResumeState {
     /// 完了済み対局数（max game_id ベース）
     completed_games: u32,
@@ -2029,7 +2029,7 @@ fn main() -> Result<()> {
     let native_mode = cli.native.unwrap_or(cli.for_train);
 
     // USI 単一エンジン最適化: --for-train かつ先後同一エンジンなら 1 プロセスで兼用。
-    // TT/履歴が先後で共有されるため、通常の自己対局（Elo 評価）では無効。
+    // TT/履歴が先後で共有されるため、棋力評価対局（tournament）では使用しない前提。
     let usi_single = !native_mode
         && cli.for_train
         && engine_paths.black.path == engine_paths.white.path
