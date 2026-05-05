@@ -28,10 +28,36 @@ user-invocable: true
   3 preset (`byoyomi-msec-10-100` / `byoyomi-120-5` / `floodgate-600-10`) が
   使える。追加 preset が必要なシナリオは事前に `CLOCK_PRESETS` を編集して
   再 deploy する。詳細は `docs/csa-server/clock_defaults.md`。
-- **csa_client release ビルド**: `cargo build --release -p rshogi-csa-client` で
-  `target/release/csa_client` が生成済。
-- **USI エンジン**: NNUE モデル付きの本番想定構成。生成系の例は
-  `crates/rshogi-csa-client/examples/README.md` の `--target` 節参照。
+- **csa_client release ビルド**: `target/release/csa_client` を確認。未生成なら
+  `cargo build --release -p rshogi-csa-client` を実行する (~20 秒)。
+- **USI エンジン + options**: NNUE モデル付きの本番想定構成。下表は本リポで
+  運用している YaneuraOu sfnnwop1536 の例 (engine path / options は user に
+  確認):
+
+  | キー | 例 | 役割 |
+  |---|---|---|
+  | engine path | `/path/to/YaneuraOu-sfnnwop1536-...-tournament` | release 版 USI engine binary |
+  | `EvalDir` | `/path/to/eval_v100_300` | NNUE 評価関数ディレクトリ |
+  | `LS_PROGRESS_COEFF` | `/path/to/progress_hao_full_cuda.e1.bin` | progress8kpabs 係数ファイル |
+  | `FV_SCALE` | `28` | 評価値スケール |
+  | `LS_BUCKET_MODE` | `progress8kpabs` | LayerStack bucket 選択 |
+  | `BookFile` | `no_book` | 定跡無効化 (E2E では決定論性を上げる) |
+  | `NetworkDelay` / `NetworkDelay2` | `0` | ネット遅延補正 OFF |
+  | `MinimumThinkingTime` | `1000` (本番) / `100` (短時間 preset 向け) | 1 手最低思考時間 ms |
+  | `PvInterval` | `0` | PV 出力間隔 |
+  | `Threads` | `1` | 単スレ |
+  | `USI_Hash` | `512` | TT サイズ MB |
+
+  HalfKP 系 (suisho5 等) を使う場合は `EvalDir` の代わりに `EvalFile` を渡し、
+  `LS_*` / `FV_SCALE` 系は engine が無視するか必須でないかを user に確認する。
+- **`--game-name` と `--room-id` の関係** (strict mode 必須事項):
+  - `--target` 経路で `--game-name <preset>` を渡すと LOGIN id は
+    `<handle>+<preset>+<color>` になる (URL の `<room_id>` とは独立)
+  - `--game-name` 省略時は `<room_id>` を `<game_name>` として fallback
+    (`CLOCK_PRESETS = "[]"` の Worker や lobby 慣習向け)
+  - `<room_id>` を任意文字列 (`e2e-<timestamp>` 等) にする場合は **必ず
+    `--game-name <preset>` を併指定** すること。さもないと strict mode で
+    `LOGIN_LOBBY:incorrect unknown_game_name` 拒否
 - **Floodgate 系機能 (再接続 / R2 / viewer API)** が有効: 両 wrangler.toml の
   `RECONNECT_GRACE_SECONDS` / `ALLOW_FLOODGATE_FEATURES` / `ALLOW_VIEWER_API` を
   確認。staging / production 既定では C シナリオが追加 deploy なしで通電する。
@@ -51,12 +77,17 @@ vp exec wrangler tail \
 
 ### 1-A. CLI プリセット (`--target`) で TOML なし起動
 
-最短経路。本リポ同梱 Worker 限定。
+最短経路。本リポ同梱 Worker 限定。`--max-games 1` で 1 局終了で client が自動
+quit する。`<room_id>` は黒/白で完全一致、`<preset>` も完全一致 (黒/白 LOGIN
+のマッチング条件)。
 
 ```bash
 ROOM=e2e-$(date +%Y%m%d%H%M%S)
 PRESET=floodgate-600-10
 ACC=<account>  # 本リポでは sh11235
+ENGINE=/path/to/your/usi-engine
+# YaneuraOu sfnnwop1536 用 options 例 (HalfKP 系なら EvalFile に置き換え):
+OPTS="EvalDir=/path/to/eval_v100_300,FV_SCALE=28,LS_BUCKET_MODE=progress8kpabs,LS_PROGRESS_COEFF=/path/to/progress.bin,BookFile=no_book,NetworkDelay=0,NetworkDelay2=0,MinimumThinkingTime=1000,PvInterval=0,Threads=1,USI_Hash=512"
 
 # 黒
 target/release/csa_client \
@@ -65,18 +96,20 @@ target/release/csa_client \
   --handle alice \
   --color black \
   --game-name "$PRESET" \
-  --engine /path/to/your/usi-engine \
-  --options "EvalFile=/path/to/nnue.bin,USI_Hash=256" &
+  --engine "$ENGINE" \
+  --options "$OPTS" \
+  --max-games 1 &
 
-# 白 (room_id を黒と同じ値で揃える)
+# 白 (room_id / game-name を黒と同じ値で揃える)
 target/release/csa_client \
   --target staging \
   --room-id "$ROOM" \
   --handle bob \
   --color white \
   --game-name "$PRESET" \
-  --engine /path/to/your/usi-engine \
-  --options "EvalFile=/path/to/nnue.bin,USI_Hash=256" &
+  --engine "$ENGINE" \
+  --options "$OPTS" \
+  --max-games 1 &
 wait
 ```
 
@@ -103,15 +136,38 @@ wait
 
 ## 2. シナリオ A: 平手 1 局完走
 
-最小 smoke。`max_games = 1` で 1 局終了で client が自動 quit する。preset は
-`byoyomi-msec-10-100` (短時間) を選べば数秒〜十数秒で完走する。
+最小 smoke。CLI 経路 (1-A) なら `--max-games 1` で、TOML 経路 (1-B) なら
+`[game] max_games = 1` で 1 局終了で client が自動 quit する。
 
-期待:
-- 両 client ログに `LOGIN:<id> OK` → `BEGIN Game_Summary` → `START` →
-  指し手交換 → `%TORYO`/`#WIN`/`#LOSE` が並ぶ
-- ローカル records 配下に `<datetime>_<sente>_vs_<gote>.csa` が保存される
+preset 選び:
+
+| preset | 完走時間目安 | 終局理由の傾向 |
+|---|---|---|
+| `byoyomi-msec-10-100` | 数秒〜30 秒程度 | 1 手最低思考が秒読み (100ms) を超えるエンジンでは `#TIME_UP` 着地が普通 (smoke として終局到達自体を見る用途向け) |
+| `byoyomi-120-5` | 数分 | 平和な終局 (`%TORYO`) を狙うならこちら |
+| `floodgate-600-10` | 10〜25 分 | 本番想定の長尺、棋力統計用途向け |
+
+期待観測:
+
+- 両 client log (info レベル) に下記の順で出る (`game_id` は `[CSA] 対局情報受信:
+  <game_id> ...` の行から取り出せる):
+  - `[CSA] ログイン成功: <id>`
+  - `[CSA] 対局情報受信: <game_id> ...`
+  - `[CSA] 対局開始: START:<game_id>`
+  - 終局時 `[CSA] 対局終了: #WIN` または `[CSA] サーバー終局割り込み: Lose`
+- ローカル `records/` (CLI なら `--record-dir`、TOML なら `[record] dir`) 配下に
+  `<datetime>_<sente>_vs_<gote>.csa` + `.sfen` が保存される
 - R2 bucket (`rshogi-csa-kifu-staging` または `-prod`) に同 game_id の object が
-  追加される。viewer API で取得確認: `curl -sf https://rshogi-csa-server-workers-staging.<account>.workers.dev/api/v1/games/<game_id>`
+  追加される。viewer API で取得確認:
+
+```bash
+curl -sf "https://rshogi-csa-server-workers-staging.<account>.workers.dev/api/v1/games/<game_id>" \
+  | python3 -c "import json,sys; d=json.load(sys.stdin)['meta']; print(f'end_reason={d[\"end_reason\"]} result={d[\"result_kind\"]} moves={d[\"moves_count\"]}')"
+```
+
+`end_reason` が `RESIGN` / `TIME_UP` / `ILLEGAL_MOVE` / `ABNORMAL` のいずれか、
+`source: "floodgate"`、CSA file の `BEGIN Time` block が想定 preset と一致する
+ことを確認。
 
 ## 3. シナリオ B: 連続 N 対局
 
