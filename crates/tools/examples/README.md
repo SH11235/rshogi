@@ -146,31 +146,39 @@ cargo run -p tools --bin spsa_stats_to_plot_csv -- \
 複数 run の比較 (例 `--seed` を変えた独立 run dir 群) は、各 run の
 `stats.csv` を pandas/awk で concat してから集計する。
 
-## 自己対局 (engine_selfplay)
+## 教師局面生成 (gensfen)
 
-### 基本（学習データ生成）
+教師局面生成専用ツール。棋力比較は `tournament` を使うこと（[tournament.md](../docs/tournament.md)）。
+
+### 基本（NativeBackend、デフォルト挙動）
 
 ```bash
-cargo run -p tools --release --bin engine_selfplay -- \
-  --games 100 --byoyomi 1000 --threads 4 --hash-mb 512
+cargo run -p tools --release --bin gensfen -- \
+  --eval-file eval/model.bin \
+  --games 100 --nodes 80000 --concurrency 4
 ```
 
-### 学習データなしで対局のみ
+### USI モードで外部エンジン（YO 等）を使う
 
 ```bash
-cargo run -p tools --release --bin engine_selfplay -- \
-  --games 10 --byoyomi 500 --threads 4 --hash-mb 512 \
-  --no-training-data
+cargo run -p tools --release --bin gensfen -- \
+  --native=false \
+  --engine-path /path/to/usi-engine \
+  --usi-option "EvalDir=/path/to/eval_dir" \
+  --usi-option "FV_SCALE=24" \
+  --games 100 --nodes 80000 --concurrency 4
 ```
 
-### 異なるNNUEモデル同士の比較
+### 異なるモデル間で多様な教師局面を生成（NativeBackend では不可、USI モード）
 
 ```bash
-cargo run -p tools --release --bin engine_selfplay -- \
-  --games 50 --byoyomi 500 --threads 4 --hash-mb 512 \
+cargo run -p tools --release --bin gensfen -- \
+  --native=false \
+  --engine-path-black /path/to/usi-engine-A \
+  --engine-path-white /path/to/usi-engine-B \
   --usi-options-black "EvalFile=./model_a.nnue" \
   --usi-options-white "EvalFile=./model_b.nnue" \
-  --no-training-data
+  --games 100 --nodes 80000 --concurrency 4
 ```
 
 ## 学習データ処理

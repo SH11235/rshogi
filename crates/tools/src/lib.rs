@@ -46,6 +46,7 @@ pub mod common;
 pub mod config;
 pub mod dlshogi_features;
 pub mod eval_sfens_tool;
+pub mod kif;
 pub mod packed_sfen;
 pub mod positions;
 pub mod qsearch_pv;

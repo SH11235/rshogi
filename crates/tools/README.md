@@ -10,7 +10,7 @@
 |--------|------|
 | `tournament` | 複数エンジンの round-robin 並列トーナメント、SPRT 検定 |
 | `analyze_selfplay` | tournament 出力の集計・Elo/nElo 算出・SPRT post-hoc 判定 |
-| `engine_selfplay` | USIエンジン同士の自己対局、学習データ（PackedSfenValue）生成 |
+| `gensfen` | NNUE 学習用 PSV/pack 教師局面の生成（USI engine vs engine／NativeBackend） |
 | `floodgate_pipeline` | Floodgate棋譜のダウンロード・変換 |
 
 ### 学習データ処理
@@ -41,12 +41,12 @@ NNUE モデルの学習には [bullet-shogi](https://github.com/SH11235/bullet-s
 
 ## クイックスタート
 
-### 自己対局で学習データ生成
+### 教師局面の生成（gensfen）
 
 ```bash
-cargo run -p tools --release --bin engine_selfplay -- \
+cargo run -p tools --release --bin gensfen -- \
   --games 100 --byoyomi 1000
-# → runs/selfplay/<timestamp>-selfplay.psv
+# → runs/gensfen/<timestamp>/gensfen.psv
 ```
 
 ### 学習データのシャッフル
@@ -67,7 +67,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 各ツールの詳細は `docs/` を参照：
 
 - [tournament](docs/tournament.md) - 並列トーナメント・SPRT 検定
-- [engine_selfplay](docs/engine_selfplay.md) - 自己対局ツールの詳細
+- [gensfen](docs/gensfen.md) - 教師局面生成ツールの詳細
 - [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
 - [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群
 

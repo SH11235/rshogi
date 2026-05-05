@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +13,7 @@ use rand::Rng;
 use rand::seq::SliceRandom;
 use rshogi_core::movegen::{MoveList, generate_legal, is_legal_with_pass};
 use rshogi_core::position::Position;
-use rshogi_core::types::{Color, Move, PieceType, Square};
+use rshogi_core::types::{Color, Move};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::AtomicU64;
@@ -24,29 +23,28 @@ use tools::packed_sfen::{
 };
 use tools::selfplay::{
     EngineConfig, EngineProcess, EvalLog, GameEngines, GameOutcome, NativeBackend, ParsedPosition,
-    SearchParams, TimeControl, UsiBackend, build_position, load_start_positions,
-    parse_position_line, side_label,
+    SearchParams, TimeControl, UsiBackend, build_position, load_start_positions, side_label,
 };
 
 const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
 
-/// engine-usi 同士の自己対局ハーネス。時間管理と info ログ収集を最小限に実装する。
+/// NNUE 学習用の教師局面（PSV/pack）を生成する gensfen ツール。
+/// NativeBackend で `--eval-file` 指定の評価関数を使い、対局を回しながら
+/// PackedSfenValue を書き出す。棋力評価には `tournament` バイナリを使うこと。
 ///
 /// # よく使うコマンド例
 ///
-/// - 1秒秒読みで数をこなす（infoログなし、デフォルト出力先）:
-///   `cargo run -p tools --bin engine_selfplay -- --games 10 --max-moves 300 --byoyomi 1000`
+/// - 基本（NativeBackend、1000局、nodes=80000）:
+///   `cargo run -p tools --bin gensfen -- --eval-file eval/model.bin --games 1000 --nodes 80000`
 ///
-/// - 5秒秒読み + network-delay2=1120、infoログ付きで指定パスに出力:
-///   `cargo run -p tools --bin engine_selfplay -- --games 2 --max-moves 300 --byoyomi 5000 --network-delay2 1120 --log-info --out runs/selfplay/byoyomi5s.jsonl`
+/// - 30 並列で大規模生成:
+///   `cargo run -p tools --bin gensfen -- --eval-file eval/model.bin --startpos-file start_sfens.txt --games 100000 --nodes 80000 --concurrency 30`
 ///
-/// - 特定SFENの再現（startposファイルを用意して1局だけ）:
-///   `cargo run -p tools --bin engine_selfplay -- --games 1 --max-moves 300 --byoyomi 5000 --startpos-file sfen.txt --log-info`
+/// - USI モード（外部エンジンで対局させたい場合）:
+///   `cargo run -p tools --bin gensfen -- --native=false --engine-path /path/to/usi-engine --usi-option EvalDir=/path/to/eval --usi-option FV_SCALE=24 --games 1000 --nodes 80000`
 ///
-/// - 学習データを生成しながら対局:
-///   `cargo run -p tools --bin engine_selfplay -- --games 100 --byoyomi 1000 --output-training-data output.psv`
-///
-/// `--out` 未指定時は `runs/selfplay/<timestamp>-selfplay.jsonl` に書き出し、infoは同名 `.info.jsonl` を生成する。
+/// `--out-dir` 未指定時は `runs/gensfen/<timestamp>/` に `gensfen.jsonl`（result 行のみ）と
+/// `gensfen.psv` を書き出す。
 ///
 fn parse_rate_0_1(s: &str) -> std::result::Result<f64, String> {
     let v: f64 = s.parse().map_err(|e| format!("{e}"))?;
@@ -60,7 +58,7 @@ fn parse_rate_0_1(s: &str) -> std::result::Result<f64, String> {
 #[command(
     author,
     version,
-    about = "rshogi-usi selfplay harness (engine vs engine)"
+    about = "rshogi gensfen: training data (PSV/pack) generator via engine-vs-engine play"
 )]
 struct Cli {
     /// Number of games to run
@@ -70,14 +68,6 @@ struct Cli {
     /// Maximum plies per game before declaring a draw
     #[arg(long, default_value_t = 512)]
     max_moves: u32,
-
-    /// Enable pass rights (finite pass mode) with specified number of passes for Black
-    #[arg(long)]
-    pass_rights_black: Option<u8>,
-
-    /// Enable pass rights (finite pass mode) with specified number of passes for White
-    #[arg(long)]
-    pass_rights_white: Option<u8>,
 
     /// Initial time for Black in milliseconds
     #[arg(long, default_value_t = 0)]
@@ -196,8 +186,8 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     random_startpos: bool,
 
-    /// 出力ディレクトリ（デフォルト: runs/selfplay/<timestamp>/）
-    /// 指定ディレクトリ内に selfplay.jsonl, selfplay.psv 等が出力される
+    /// 出力ディレクトリ（デフォルト: runs/gensfen/<timestamp>/）
+    /// 指定ディレクトリ内に gensfen.jsonl, gensfen.psv 等が出力される
     #[arg(long)]
     out_dir: Option<PathBuf>,
 
@@ -221,10 +211,6 @@ struct Cli {
     /// 指定しない場合はデフォルトで <output>.psv に出力
     #[arg(long)]
     output_training_data: Option<PathBuf>,
-
-    /// 学習データ出力を無効化
-    #[arg(long, default_value_t = false)]
-    no_training_data: bool,
 
     /// 学習データ出力時に序盤の手数をスキップする（1手目からN手目まで）
     /// ランダム性確保のため、序盤の定跡手順をスキップする
@@ -254,18 +240,7 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
 
-    /// KIF棋譜ファイルの出力を無効化する（大量対局時のディスク節約用）
-    #[arg(long, default_value_t = false)]
-    no_kif: bool,
-
-    /// 教師データ生成に特化したモードで実行する。
-    /// 以下を一括設定: KIF出力無効、summaryファイル無効、JSONLをresult行のみに簡素化、
-    /// NativeBackend使用（rshogi-core直接呼び出し）。
-    /// 学習データ（.psv）出力は有効のまま。
-    #[arg(long, default_value_t = false)]
-    for_train: bool,
-
-    /// 前回中断した自己対局セッションを再開する。
+    /// 前回中断した教師局面生成セッションを再開する。
     /// --out で指定した出力ファイルが存在する場合、完了済み対局数を検出して続きから実行する。
     #[arg(long, default_value_t = false)]
     resume: bool,
@@ -274,8 +249,8 @@ struct Cli {
     // gensfen 重複回避オプション
     // =========================================================================
     /// rshogi-core を直接呼び出す NativeBackend を使用する（USI プロセスを起動しない）。
-    /// --for-train 時はデフォルト有効。--native=false で USI モードを強制。
-    /// --eval-file の指定が必要。
+    /// デフォルト: true（`--eval-file` 必須）。USI モードで動かす場合は `--native=false`
+    /// と `--engine-path` を指定する。
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     native: Option<bool>,
 
@@ -290,12 +265,12 @@ struct Cli {
     keep_tt: Option<bool>,
 
     /// ハッシュベース重複検出のテーブルサイズ（エントリ数）。0 で無効。
-    /// --for-train 時のデフォルト: 67108864 (64M entries, 512MB)。
+    /// デフォルト: 67108864 (64M entries, 512MB)。
     #[arg(long)]
     dedup_hash_size: Option<u64>,
 
     /// 開始局面を重複なしで消費する（シャッフル + pop 方式）。
-    /// --for-train 時はデフォルト有効。--startpos-no-repeat=false で無効化。
+    /// デフォルト: true。`--startpos-no-repeat=false` で無効化。
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     startpos_no_repeat: Option<bool>,
 
@@ -389,12 +364,6 @@ struct MetaSettings {
     skip_initial_ply: u32,
     #[serde(default = "default_skip_in_check")]
     skip_in_check: bool,
-    /// 先手の初期パス権数（パス権有効時のみ使用）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    initial_pass_count_black: Option<u8>,
-    /// 後手の初期パス権数（パス権有効時のみ使用）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    initial_pass_count_white: Option<u8>,
     /// 開始局面シャッフルの乱数シード（--startpos-no-repeat 用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shuffle_seed: Option<u64>,
@@ -435,25 +404,6 @@ struct ResolvedEnginePaths {
 }
 
 #[derive(Serialize)]
-struct MoveLog {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    game_id: u32,
-    ply: u32,
-    side_to_move: char,
-    sfen_before: String,
-    move_usi: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    raw_move_usi: Option<String>,
-    engine: String,
-    elapsed_ms: u64,
-    think_limit_ms: u64,
-    timed_out: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    eval: Option<EvalLog>,
-}
-
-#[derive(Serialize)]
 struct ResultLog<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
@@ -482,41 +432,6 @@ struct MetricsLog {
     last_mate_white: Option<i32>,
     outcome: String,
     reason: String,
-}
-
-/// 対局セッション全体のサマリ
-#[derive(Serialize)]
-struct SummaryLog {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    timestamp: String,
-    total_games: u32,
-    black_wins: u32,
-    white_wins: u32,
-    draws: u32,
-    black_win_rate: f64,
-    white_win_rate: f64,
-    draw_rate: f64,
-    engine_black: EngineSummary,
-    engine_white: EngineSummary,
-    time_control: TimeControlSummary,
-}
-
-#[derive(Serialize)]
-struct EngineSummary {
-    path: String,
-    name: String,
-    usi_options: Vec<String>,
-    threads: usize,
-}
-
-#[derive(Serialize)]
-struct TimeControlSummary {
-    btime: u64,
-    wtime: u64,
-    binc: u64,
-    winc: u64,
-    byoyomi: u64,
 }
 
 #[derive(Default)]
@@ -1075,10 +990,6 @@ struct WorkerConfig {
     // Depth/nodes limits
     go_depth: Option<u32>,
     go_nodes: Option<u64>,
-    // Pass rights
-    pass_rights_enabled: bool,
-    pass_black: Option<u8>,
-    pass_white: Option<u8>,
     // Positions (shared across workers)
     start_defs: Arc<Vec<ParsedPosition>>,
     start_commands: Arc<Vec<String>>,
@@ -1090,8 +1001,6 @@ struct WorkerConfig {
     training_data_path: Option<PathBuf>,
     // Output flags
     flush_each_move: bool,
-    /// JSONLをresult行のみに簡素化（move行を省略）
-    minimal_log: bool,
     // Training
     skip_initial_ply: u32,
     skip_in_check: bool,
@@ -1100,7 +1009,7 @@ struct WorkerConfig {
     native_mode: bool,
     /// USI 単一エンジン最適化（先後同一エンジン時に 1 プロセスで兼用）。
     /// TT/履歴が先後で共有されるため、Elo 評価に影響する。
-    /// --for-train 時のみ有効。通常の自己対局では無効。
+    /// --for-train 時のみ有効（棋力評価用途では使用しない）。
     usi_single: bool,
     eval_hash_size_mb: usize,
     // gensfen: 重複回避
@@ -1208,21 +1117,6 @@ fn worker_main(
             None
         };
 
-        let usi_initial_pass_count = {
-            let parse = |opts: &[String]| -> Option<u8> {
-                for opt in opts {
-                    if let Some(val) = opt.strip_prefix("InitialPassCount=") {
-                        return val.trim().parse().ok();
-                    }
-                    if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
-                        return val.trim().parse().ok();
-                    }
-                }
-                None
-            };
-            parse(&cfg.black_usi_opts).or_else(|| parse(&cfg.white_usi_opts)).unwrap_or(2)
-        };
-
         let dedup_hash = cfg.dedup_hash.clone();
         let mut rng = rand::rng();
         let mut dedup_hits = 0u64;
@@ -1244,17 +1138,7 @@ fn worker_main(
             engines.prepare_game(cfg.keep_tt)?;
 
             let parsed = &cfg.start_defs[ticket.startpos_idx];
-            let pass_b = if cfg.pass_rights_enabled {
-                Some(cfg.pass_black.unwrap_or(usi_initial_pass_count))
-            } else {
-                None
-            };
-            let pass_w = if cfg.pass_rights_enabled {
-                Some(cfg.pass_white.unwrap_or(usi_initial_pass_count))
-            } else {
-                None
-            };
-            let mut pos = build_position(parsed, pass_b, pass_w)?;
+            let mut pos = build_position(parsed, None, None)?;
             let mut tc = TimeControl::new(cfg.btime, cfg.wtime, cfg.binc, cfg.winc, cfg.byoyomi);
             let mut outcome = GameOutcome::InProgress;
             let mut outcome_reason = "max_moves";
@@ -1319,34 +1203,11 @@ fn worker_main(
                         eval_list.push("R".to_string());
                         move_list.push(rm_usi.clone());
                     }
-                    if !cfg.minimal_log {
-                        let move_log = MoveLog {
-                            kind: "move",
-                            game_id: game_idx + 1,
-                            ply: plies_played,
-                            side_to_move: side_label(side),
-                            sfen_before,
-                            move_usi: rm_usi,
-                            raw_move_usi: Some("random".to_string()),
-                            engine: engine_label.to_string(),
-                            elapsed_ms: 0,
-                            think_limit_ms: 0,
-                            timed_out: false,
-                            eval: None,
-                        };
-                        serde_json::to_writer(&mut writer, &move_log)?;
-                        writer.write_all(b"\n")?;
-                    }
                     continue;
                 }
 
                 // --- 通常探索 ---
                 let think_limit_ms = tc.think_limit_ms(side);
-                let pass_rights = if cfg.pass_rights_enabled {
-                    Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
-                } else {
-                    None
-                };
                 let params = SearchParams {
                     sfen: sfen_before.clone(),
                     time_args: tc.time_args(),
@@ -1355,7 +1216,7 @@ fn worker_main(
                     go_depth: cfg.go_depth,
                     go_nodes: cfg.go_nodes,
                     multi_pv: cfg.random_multi_pv.max(1),
-                    pass_rights,
+                    pass_rights: None,
                     side,
                     game_id: game_idx + 1,
                     ply: plies_played,
@@ -1380,9 +1241,7 @@ fn worker_main(
                 let timed_out = search.timed_out;
                 let mut move_usi =
                     search.best_move_usi.clone().unwrap_or_else(|| "none".to_string());
-                let mut raw_move_usi = None;
                 let mut terminal = false;
-                let elapsed_ms = search.elapsed_ms;
                 let eval_log = search.eval.clone();
 
                 if timed_out {
@@ -1397,7 +1256,6 @@ fn worker_main(
                         move_usi = "timeout".to_string();
                     }
                 } else if let Some(ref mv_str) = search.best_move_usi {
-                    raw_move_usi = Some(mv_str.clone());
                     match mv_str.as_str() {
                         "resign" => {
                             move_usi = mv_str.clone();
@@ -1494,10 +1352,6 @@ fn worker_main(
                                     pos.do_move(played_mv, gives_check);
                                     tc.update_after_move(side, search.elapsed_ms);
                                     move_usi = played_mv.to_usi();
-                                    if played_mv == mv {
-                                        raw_move_usi = None;
-                                    }
-                                    // MultiPV で別の手が選ばれた場合は raw に元の bestmove を記録
                                 }
                                 None => {
                                     outcome = if side == Color::Black {
@@ -1538,24 +1392,6 @@ fn worker_main(
                     metrics.update(side, eval_log.as_ref(), plies_played);
                 }
 
-                if !cfg.minimal_log {
-                    let move_log = MoveLog {
-                        kind: "move",
-                        game_id: game_idx + 1,
-                        ply: plies_played,
-                        side_to_move: side_label(side),
-                        sfen_before,
-                        move_usi,
-                        raw_move_usi,
-                        engine: engine_label.to_string(),
-                        elapsed_ms,
-                        think_limit_ms,
-                        timed_out,
-                        eval: eval_log,
-                    };
-                    serde_json::to_writer(&mut writer, &move_log)?;
-                    writer.write_all(b"\n")?;
-                }
                 if cfg.flush_each_move {
                     writer.flush()?;
                 }
@@ -1708,7 +1544,7 @@ fn worker_main(
 // Resume support
 // ---------------------------------------------------------------------------
 
-/// 前回中断した自己対局セッションの進捗状態
+/// 前回中断した教師局面生成セッションの進捗状態
 struct ResumeState {
     /// 完了済み対局数（max game_id ベース）
     completed_games: u32,
@@ -1831,56 +1667,42 @@ fn main() -> Result<()> {
         cli.byoyomi = 1000;
     }
 
-    // USIオプションからパス権情報を早期に解析（load_start_positions で使用するため）
+    // gensfen は PassRights を全くサポートしない（PSV/pack 形式が pass 手をエンコード
+    // できないため）。USI options で検出した時点で副作用前に即 bail する。
     let common_usi_opts_early = cli.usi_options.clone().unwrap_or_default();
     let black_usi_opts_early =
         cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts_early.clone());
     let white_usi_opts_early =
         cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts_early.clone());
-    let is_pass_rights_enabled_early = |o: &str| {
+    let is_pass_rights_opt = |o: &str| {
         o == "PassRights=true"
             || o == "PassRights = true"
             || o == "PassRights=1"
             || o == "PassRights = 1"
     };
-    let pass_rights_via_usi_early =
-        black_usi_opts_early.iter().any(|o| is_pass_rights_enabled_early(o))
-            || white_usi_opts_early.iter().any(|o| is_pass_rights_enabled_early(o));
+    if black_usi_opts_early.iter().any(|o| is_pass_rights_opt(o))
+        || white_usi_opts_early.iter().any(|o| is_pass_rights_opt(o))
+    {
+        bail!(
+            "PassRights USI option is not supported by gensfen (PackedSfen format cannot encode pass moves)"
+        );
+    }
 
-    let parse_initial_pass_count_early = |opts: &[String]| -> Option<u8> {
-        for opt in opts {
-            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
-                return val.trim().parse().ok();
-            }
-            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
-                return val.trim().parse().ok();
-            }
-        }
-        None
-    };
-    let usi_initial_pass_count_early = parse_initial_pass_count_early(&black_usi_opts_early)
-        .or_else(|| parse_initial_pass_count_early(&white_usi_opts_early))
-        .unwrap_or(2);
+    // --engine-path* が指定されているのに --native=false が明示されていない場合は
+    // ユーザの意図が曖昧（NativeBackend は外部エンジンを起動しないため指定が無視される）。
+    // explicit > magical の方針で副作用前に bail し、誤解を防ぐ。
+    if (cli.engine_path.is_some()
+        || cli.engine_path_black.is_some()
+        || cli.engine_path_white.is_some())
+        && cli.native != Some(false)
+    {
+        bail!(
+            "--engine-path* requires --native=false. NativeBackend does not spawn external USI engines."
+        );
+    }
 
-    let pass_rights_cli_specified =
-        cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some();
-    let load_pass_black = if pass_rights_cli_specified || pass_rights_via_usi_early {
-        Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count_early))
-    } else {
-        None
-    };
-    let load_pass_white = if pass_rights_cli_specified || pass_rights_via_usi_early {
-        Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count_early))
-    } else {
-        None
-    };
-
-    let (start_defs, start_commands) = load_start_positions(
-        cli.startpos_file.as_deref(),
-        cli.sfen.as_deref(),
-        load_pass_black,
-        load_pass_white,
-    )?;
+    let (start_defs, start_commands) =
+        load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
     let timestamp = Local::now();
     let output_path = resolve_output_path(cli.out_dir.as_deref(), &timestamp);
     let info_path = output_path.with_extension("info.jsonl");
@@ -1931,22 +1753,12 @@ fn main() -> Result<()> {
         TrainingFormat::Psv => "psv",
         TrainingFormat::Pack => "pack",
     };
-    let training_data_path = match (cli.no_training_data, &cli.output_training_data) {
-        (true, _) => None,
-        (false, Some(path)) => Some(path.clone()),
-        (false, None) => Some(default_training_data_path(&output_path, training_data_ext)),
-    };
-    // パス権有効時は学習データ収集を抑止（PackedSfen形式がパス権をサポートしていないため）
-    let pass_rights_active = pass_rights_cli_specified || pass_rights_via_usi_early;
-    let training_data_enabled = if training_data_path.is_some() && pass_rights_active {
-        eprintln!(
-            "Warning: Training data collection is disabled when pass rights are enabled \
-             (PackedSfen format does not support pass rights)"
-        );
-        false
-    } else {
-        training_data_path.is_some()
-    };
+    let training_data_path = Some(
+        cli.output_training_data
+            .clone()
+            .unwrap_or_else(|| default_training_data_path(&output_path, training_data_ext)),
+    );
+    let training_data_enabled = training_data_path.is_some();
 
     let engine_paths = resolve_engine_paths(&cli);
     let threads_black = cli.threads_black.unwrap_or(cli.threads);
@@ -1980,56 +1792,15 @@ fn main() -> Result<()> {
     let white_args = cli.engine_args_white.clone().unwrap_or(common_args.clone());
 
     let common_usi_opts = cli.usi_options.clone().unwrap_or_default();
-    let mut black_usi_opts =
-        cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts.clone());
-    let mut white_usi_opts =
-        cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts.clone());
+    let black_usi_opts = cli.usi_options_black.clone().unwrap_or_else(|| common_usi_opts.clone());
+    let white_usi_opts = cli.usi_options_white.clone().unwrap_or_else(|| common_usi_opts.clone());
 
-    // パス権オプションが指定されている場合、PassRights=true を自動追加
-    if cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() {
-        let pass_rights_opt = "PassRights=true".to_string();
-        if !black_usi_opts.iter().any(|o| o.starts_with("PassRights")) {
-            black_usi_opts.push(pass_rights_opt.clone());
-        }
-        if !white_usi_opts.iter().any(|o| o.starts_with("PassRights")) {
-            white_usi_opts.push(pass_rights_opt);
-        }
-    }
+    let native_mode = cli.native.unwrap_or(true);
 
-    let is_pass_rights_enabled = |o: &str| {
-        o == "PassRights=true"
-            || o == "PassRights = true"
-            || o == "PassRights=1"
-            || o == "PassRights = 1"
-    };
-    let pass_rights_via_usi = black_usi_opts.iter().any(|o| is_pass_rights_enabled(o))
-        || white_usi_opts.iter().any(|o| is_pass_rights_enabled(o));
-
-    let parse_initial_pass_count = |opts: &[String]| -> Option<u8> {
-        for opt in opts {
-            if let Some(val) = opt.strip_prefix("InitialPassCount=") {
-                return val.trim().parse().ok();
-            }
-            if let Some(val) = opt.strip_prefix("InitialPassCount = ") {
-                return val.trim().parse().ok();
-            }
-        }
-        None
-    };
-    let usi_initial_pass_count = parse_initial_pass_count(&black_usi_opts)
-        .or_else(|| parse_initial_pass_count(&white_usi_opts))
-        .unwrap_or(2);
-
-    let pass_rights_enabled =
-        cli.pass_rights_black.is_some() || cli.pass_rights_white.is_some() || pass_rights_via_usi;
-
-    // gensfen オプションのデフォルト解決（meta 書き込みより前に解決する必要がある）
-    let native_mode = cli.native.unwrap_or(cli.for_train);
-
-    // USI 単一エンジン最適化: --for-train かつ先後同一エンジンなら 1 プロセスで兼用。
-    // TT/履歴が先後で共有されるため、通常の自己対局（Elo 評価）では無効。
+    // USI モードかつ先後同一エンジンなら 1 プロセスで兼用する最適化。
+    // TT/履歴が先後で共有されるため棋力評価対局（tournament）では不可だが、
+    // gensfen は教師局面生成専用のため常に有効化して問題ない。
     let usi_single = !native_mode
-        && cli.for_train
         && engine_paths.black.path == engine_paths.white.path
         && black_args == white_args
         && black_usi_opts == white_usi_opts
@@ -2042,7 +1813,7 @@ fn main() -> Result<()> {
             cli.concurrency * 2
         );
     }
-    let startpos_no_repeat_resolved = cli.startpos_no_repeat.unwrap_or(cli.for_train);
+    let startpos_no_repeat_resolved = cli.startpos_no_repeat.unwrap_or(true);
 
     if startpos_no_repeat_resolved && cli.random_startpos {
         eprintln!("warning: --random-startpos is ignored when --startpos-no-repeat is active");
@@ -2135,16 +1906,6 @@ fn main() -> Result<()> {
                 output_training_data: training_data_path.as_ref().map(|p| p.display().to_string()),
                 skip_initial_ply: cli.skip_initial_ply,
                 skip_in_check: cli.skip_in_check,
-                initial_pass_count_black: if pass_rights_enabled {
-                    Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
-                } else {
-                    None
-                },
-                initial_pass_count_white: if pass_rights_enabled {
-                    Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
-                } else {
-                    None
-                },
                 shuffle_seed: shuffle_seed_resolved,
             },
             engine_cmd: EngineCommandMeta {
@@ -2167,8 +1928,7 @@ fn main() -> Result<()> {
     }
 
     let keep_tt_resolved = cli.keep_tt.unwrap_or(false);
-    let dedup_hash_size_resolved =
-        cli.dedup_hash_size.unwrap_or(if cli.for_train { 64 * 1024 * 1024 } else { 0 });
+    let dedup_hash_size_resolved = cli.dedup_hash_size.unwrap_or(64 * 1024 * 1024);
     let random_multi_pv_resolved = cli.random_multi_pv.unwrap_or(0);
 
     // gensfen: 共有ハッシュ重複検出テーブル（全ワーカーで1つ共有、tanuki-と同じ構成）
@@ -2297,17 +2057,6 @@ fn main() -> Result<()> {
             byoyomi: cli.byoyomi,
             go_depth: cli.depth,
             go_nodes: cli.nodes,
-            pass_rights_enabled,
-            pass_black: if pass_rights_enabled {
-                Some(cli.pass_rights_black.unwrap_or(usi_initial_pass_count))
-            } else {
-                None
-            },
-            pass_white: if pass_rights_enabled {
-                Some(cli.pass_rights_white.unwrap_or(usi_initial_pass_count))
-            } else {
-                None
-            },
             start_defs: Arc::clone(&shared_start_defs),
             start_commands: Arc::clone(&shared_start_commands),
             jsonl_path,
@@ -2316,7 +2065,6 @@ fn main() -> Result<()> {
             metrics_path: w_metrics_path,
             training_data_path: w_training_path,
             flush_each_move: cli.flush_each_move,
-            minimal_log: cli.for_train,
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
             training_format,
@@ -2543,77 +2291,6 @@ fn main() -> Result<()> {
     println!("=======================");
     println!();
 
-    // サマリファイル出力（--for-train 時はスキップ）
-    let summary_path = default_summary_path(&output_path);
-    if !cli.for_train {
-        let black_rate = if actual_games > 0 {
-            (black_wins as f64 / actual_games as f64) * 100.0
-        } else {
-            0.0
-        };
-        let white_rate = if actual_games > 0 {
-            (white_wins as f64 / actual_games as f64) * 100.0
-        } else {
-            0.0
-        };
-        let draw_rate = if actual_games > 0 {
-            (draws as f64 / actual_games as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let summary = SummaryLog {
-            kind: "summary",
-            timestamp: timestamp.to_rfc3339(),
-            total_games: actual_games,
-            black_wins,
-            white_wins,
-            draws,
-            black_win_rate: black_rate,
-            white_win_rate: white_rate,
-            draw_rate,
-            engine_black: EngineSummary {
-                path: engine_paths.black.path.display().to_string(),
-                name: engine_paths
-                    .black
-                    .path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("rshogi-usi")
-                    .to_string(),
-                usi_options: black_usi_opts.clone(),
-                threads: threads_black,
-            },
-            engine_white: EngineSummary {
-                path: engine_paths.white.path.display().to_string(),
-                name: engine_paths
-                    .white
-                    .path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("rshogi-usi")
-                    .to_string(),
-                usi_options: white_usi_opts.clone(),
-                threads: threads_white,
-            },
-            time_control: TimeControlSummary {
-                btime: cli.btime,
-                wtime: cli.wtime,
-                binc: cli.binc,
-                winc: cli.winc,
-                byoyomi: cli.byoyomi,
-            },
-        };
-
-        let mut summary_writer = BufWriter::new(
-            File::create(&summary_path)
-                .with_context(|| format!("failed to create {}", summary_path.display()))?,
-        );
-        serde_json::to_writer(&mut summary_writer, &summary)?;
-        summary_writer.write_all(b"\n")?;
-        summary_writer.flush()?;
-    }
-
     // 学習データサマリー出力
     if training_data_enabled {
         println!();
@@ -2632,44 +2309,20 @@ fn main() -> Result<()> {
         );
         println!("---------------------");
     }
-    println!("selfplay log written to {}", output_path.display());
-    if !cli.for_train {
-        println!("summary written to {}", summary_path.display());
-    }
+    println!("gensfen log written to {}", output_path.display());
     if cli.log_info {
         println!("info log written to {}", info_path.display());
-    }
-    let skip_kif = cli.no_kif || cli.for_train;
-    if !skip_kif {
-        let kif_path = default_kif_path(&output_path);
-        match convert_jsonl_to_kif(&output_path, &kif_path) {
-            Ok(paths) if paths.is_empty() => eprintln!("failed to create KIF: no games found"),
-            Ok(paths) if paths.len() == 1 => println!("kif written to {}", paths[0].display()),
-            Ok(paths) => {
-                println!("kif written (per game):");
-                for p in paths {
-                    println!("  {}", p.display());
-                }
-            }
-            Err(err) => eprintln!("failed to create KIF: {}", err),
-        }
     }
     Ok(())
 }
 
-/// 出力ディレクトリを確定し、その中の selfplay.jsonl パスを返す。
+/// 出力ディレクトリを確定し、その中の gensfen.jsonl パスを返す。
 fn resolve_output_path(out_dir: Option<&Path>, timestamp: &chrono::DateTime<Local>) -> PathBuf {
     let dir = match out_dir {
         Some(d) => d.to_path_buf(),
-        None => PathBuf::from("runs/selfplay").join(timestamp.format("%Y%m%d-%H%M%S").to_string()),
+        None => PathBuf::from("runs/gensfen").join(timestamp.format("%Y%m%d-%H%M%S").to_string()),
     };
-    dir.join("selfplay.jsonl")
-}
-
-fn default_kif_path(jsonl: &Path) -> PathBuf {
-    let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
-    let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-    parent.join(format!("{stem}.kif"))
+    dir.join("gensfen.jsonl")
 }
 
 fn default_eval_path(jsonl: &Path) -> PathBuf {
@@ -2682,12 +2335,6 @@ fn default_metrics_path(jsonl: &Path) -> PathBuf {
     let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
     let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
     parent.join(format!("{stem}.metrics.jsonl"))
-}
-
-fn default_summary_path(jsonl: &Path) -> PathBuf {
-    let parent = jsonl.parent().unwrap_or_else(|| Path::new("."));
-    let stem = jsonl.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-    parent.join(format!("{stem}.summary.jsonl"))
 }
 
 fn default_training_data_path(jsonl: &Path, ext: &str) -> PathBuf {
@@ -2798,399 +2445,6 @@ fn format_engine_settings(engine: &ResolvedEnginePath, usi_options: &[String]) -
     }
 }
 
-// ---------------------------------------------------------------------------
-// KIF 変換
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct GameLog {
-    moves: Vec<MoveEntry>,
-    result: Option<ResultEntry>,
-}
-
-#[derive(Deserialize, Clone)]
-struct MoveEntry {
-    game_id: u32,
-    ply: u32,
-    sfen_before: String,
-    move_usi: String,
-    #[serde(default)]
-    elapsed_ms: Option<u64>,
-    #[serde(default)]
-    eval: Option<EvalLog>,
-}
-
-#[derive(Deserialize)]
-struct ResultEntry {
-    game_id: u32,
-    outcome: String,
-    reason: String,
-    plies: u32,
-}
-
-fn convert_jsonl_to_kif(input: &Path, output: &Path) -> Result<Vec<PathBuf>> {
-    let file =
-        File::open(input).with_context(|| format!("failed to open input {}", input.display()))?;
-    let reader = BufReader::new(file);
-
-    let mut meta: Option<MetaLog> = None;
-    let mut games: BTreeMap<u32, GameLog> = BTreeMap::new();
-
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(trimmed)
-            .with_context(|| format!("failed to parse JSON line: {}", trimmed))?;
-        match value.get("type").and_then(|v| v.as_str()) {
-            Some("meta") => {
-                meta = Some(serde_json::from_value(value)?);
-            }
-            Some("move") => {
-                let entry: MoveEntry = serde_json::from_value(value)?;
-                games.entry(entry.game_id).or_default().moves.push(entry);
-            }
-            Some("result") => {
-                let entry: ResultEntry = serde_json::from_value(value)?;
-                let gid = entry.game_id;
-                games.entry(gid).or_default().result = Some(entry);
-            }
-            _ => {}
-        }
-    }
-
-    if games.is_empty() {
-        bail!("no games found in {}", input.display());
-    }
-
-    let parent = output.parent().unwrap_or_else(|| Path::new("."));
-    let stem = output.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-    let ext = output.extension().and_then(|s| s.to_str()).unwrap_or("kif");
-
-    let multi = games.len() > 1;
-    let mut written = Vec::new();
-    for (game_id, game) in games {
-        let path = if multi {
-            parent.join(format!("{stem}_g{game_id:02}.{ext}"))
-        } else {
-            output.to_path_buf()
-        };
-        let mut writer = BufWriter::new(
-            File::create(&path).with_context(|| format!("failed to create {}", path.display()))?,
-        );
-        export_game_to_kif(&mut writer, meta.as_ref(), game_id, &game)?;
-        writer.flush()?;
-        written.push(path);
-    }
-    Ok(written)
-}
-
-fn export_game_to_kif<W: Write>(
-    writer: &mut W,
-    meta: Option<&MetaLog>,
-    game_id: u32,
-    game: &GameLog,
-) -> Result<()> {
-    let (mut pos, start_sfen) = start_position_for_game(meta, game_id, &game.moves)
-        .ok_or_else(|| anyhow!("could not determine start position for game {}", game_id))?;
-
-    let timestamp = meta.map(|m| m.timestamp.clone()).unwrap_or_else(|| "-".to_string());
-    let (black_name, white_name) = engine_names_for(meta);
-    let (btime, wtime) = meta.map(|m| (m.settings.btime, m.settings.wtime)).unwrap_or((0, 0));
-    writeln!(writer, "開始日時：{}", timestamp)?;
-    writeln!(writer, "手合割：平手")?;
-    writeln!(writer, "先手：{}", black_name)?;
-    writeln!(writer, "後手：{}", white_name)?;
-    writeln!(writer, "持ち時間：先手{}ms / 後手{}ms", btime, wtime)?;
-    writeln!(writer, "開始局面：{}", start_sfen)?;
-    writeln!(writer, "手数----指手---------消費時間--")?;
-
-    let mut moves = game.moves.clone();
-    moves.sort_by_key(|m| m.ply);
-    let mut total_black = 0u64;
-    let mut total_white = 0u64;
-
-    for entry in moves {
-        if entry.move_usi == "resign" || entry.move_usi == "win" || entry.move_usi == "timeout" {
-            break;
-        }
-        let side = pos.side_to_move();
-        let mv = Move::from_usi(&entry.move_usi)
-            .ok_or_else(|| anyhow!("invalid move in log: {}", entry.move_usi))?;
-        if !is_legal_with_pass(&pos, mv) {
-            bail!("illegal move '{}' in log for game {}", entry.move_usi, game_id);
-        }
-        let elapsed_ms = entry.elapsed_ms.unwrap_or(0);
-        let total_time = if side == Color::Black {
-            total_black + elapsed_ms
-        } else {
-            total_white + elapsed_ms
-        };
-        let line = format_move_kif(entry.ply, &pos, mv, elapsed_ms, total_time);
-        writeln!(writer, "{line}")?;
-        let gives_check = if mv.is_pass() {
-            false
-        } else {
-            pos.gives_check(mv)
-        };
-        pos.do_move(mv, gives_check);
-        if side == Color::Black {
-            total_black = total_time;
-        } else {
-            total_white = total_time;
-        }
-        write_eval_comments(writer, entry.eval.as_ref())?;
-    }
-
-    let final_plies = game
-        .result
-        .as_ref()
-        .map(|r| r.plies)
-        .or_else(|| game.moves.last().map(|m| m.ply))
-        .unwrap_or(0);
-    if let Some(res) = game.result.as_ref()
-        && res.reason != "max_moves"
-    {
-        writeln!(writer, "**終了理由={}", res.reason)?;
-    }
-    let summary = match game.result.as_ref().map(|r| r.outcome.as_str()).unwrap_or("draw") {
-        "black_win" => format!("まで{}手で先手の勝ち", final_plies),
-        "white_win" => format!("まで{}手で後手の勝ち", final_plies),
-        _ => format!("まで{}手で引き分け", final_plies),
-    };
-    writeln!(writer, "\n{}", summary)?;
-    Ok(())
-}
-
-fn start_position_for_game(
-    meta: Option<&MetaLog>,
-    game_id: u32,
-    moves: &[MoveEntry],
-) -> Option<(Position, String)> {
-    // パス手がログに含まれているか確認
-    let has_pass = moves.iter().any(|m| m.move_usi == "pass");
-
-    // metaから初期パス権数を取得（未記録の場合は後方互換のため15を使用）
-    let (pass_black, pass_white) = if has_pass {
-        let black = meta.and_then(|m| m.settings.initial_pass_count_black).unwrap_or(15);
-        let white = meta.and_then(|m| m.settings.initial_pass_count_white).unwrap_or(15);
-        (black, white)
-    } else {
-        (0, 0)
-    };
-
-    // 常に moves[0].sfen_before を優先する。
-    // game_id → startpos_idx のマッピングは startpos_no_repeat（シャッフル）や
-    // random_startpos で (game_id-1)%len と一致しないため、sfen_before が正確。
-    if let Some(first) = moves.first() {
-        let mut pos = Position::new();
-        if pos.set_sfen(&first.sfen_before).is_ok() {
-            if has_pass {
-                pos.enable_pass_rights(pass_black, pass_white);
-            }
-            let sfen = pos.to_sfen();
-            return Some((pos, sfen));
-        }
-        // sfen_before のパースに失敗した場合は meta からのフォールバックを試みる。
-        // ファイル破損等で sfen_before が壊れている可能性があるため警告を出す。
-        eprintln!(
-            "warning: game {}: failed to parse sfen_before '{}', falling back to meta",
-            game_id, &first.sfen_before
-        );
-    }
-
-    // フォールバック: moves が空の場合のみ meta から復元
-    if let Some(meta) = meta
-        && !meta.start_positions.is_empty()
-    {
-        let idx = ((game_id - 1) as usize) % meta.start_positions.len();
-        if let Ok((mut pos, _)) = start_position_from_command(&meta.start_positions[idx]) {
-            if has_pass {
-                pos.enable_pass_rights(pass_black, pass_white);
-            }
-            let sfen = pos.to_sfen();
-            return Some((pos, sfen));
-        }
-    }
-    None
-}
-
-fn start_position_from_command(cmd: &str) -> Result<(Position, String)> {
-    let parsed = parse_position_line(cmd)?;
-    let has_pass = parsed.moves.iter().any(|m| m == "pass");
-    let (pass_black, pass_white) = if has_pass {
-        (Some(15), Some(15))
-    } else {
-        (None, None)
-    };
-    let pos = build_position(&parsed, pass_black, pass_white)?;
-    let sfen = pos.to_sfen();
-    Ok((pos, sfen))
-}
-
-fn engine_names_for(meta: Option<&MetaLog>) -> (String, String) {
-    let default = ("black".to_string(), "white".to_string());
-    let Some(meta) = meta else { return default };
-    let black_name = Path::new(&meta.engine_cmd.path_black)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&meta.engine_cmd.path_black);
-    let white_name = Path::new(&meta.engine_cmd.path_white)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&meta.engine_cmd.path_white);
-
-    let black_opts = &meta.engine_cmd.usi_options_black;
-    let white_opts = &meta.engine_cmd.usi_options_white;
-
-    let black_display = if black_opts.is_empty() {
-        black_name.to_string()
-    } else {
-        format!("{} [{}]", black_name, black_opts.join(", "))
-    };
-    let white_display = if white_opts.is_empty() {
-        white_name.to_string()
-    } else {
-        format!("{} [{}]", white_name, white_opts.join(", "))
-    };
-
-    (black_display, white_display)
-}
-
-fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms: u64) -> String {
-    let prefix = if pos.side_to_move() == Color::Black {
-        "▲"
-    } else {
-        "△"
-    };
-
-    // パス手は特別に処理
-    if mv.is_pass() {
-        let per_move = format_mm_ss(elapsed_ms);
-        let total = format_hh_mm_ss(total_ms);
-        return format!("{:>4} {}パス   ({:>5}/{})", ply, prefix, per_move, total);
-    }
-
-    let dest = square_label_kanji(mv.to());
-    let (label, from_suffix) = if mv.is_drop() {
-        (format!("{}打", piece_label(mv.drop_piece_type(), false)), String::new())
-    } else {
-        let from = mv.from();
-        let piece = pos.piece_on(from);
-        let promoted = piece.piece_type().is_promoted() || mv.is_promote();
-        let suffix = format!("({}{})", square_file_digit(from), square_rank_digit(from));
-        (piece_label(piece.piece_type(), promoted).to_string(), suffix)
-    };
-    let per_move = format_mm_ss(elapsed_ms);
-    let total = format_hh_mm_ss(total_ms);
-    format!(
-        "{:>4} {}{}{}{}   ({:>5}/{})",
-        ply, prefix, dest, label, from_suffix, per_move, total
-    )
-}
-
-fn square_label_kanji(sq: Square) -> String {
-    format!("{}{}", file_kanji(sq), rank_kanji(sq))
-}
-
-fn file_kanji(sq: Square) -> &'static str {
-    const FILES: [&str; 10] = ["", "１", "２", "３", "４", "５", "６", "７", "８", "９"];
-    let idx = sq.file().to_usi_char().to_digit(10).unwrap_or(1) as usize;
-    FILES[idx]
-}
-
-fn rank_kanji(sq: Square) -> &'static str {
-    const RANKS: [&str; 9] = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
-    let rank = sq.rank().to_usi_char() as u8;
-    let idx = (rank - b'a') as usize;
-    RANKS.get(idx).copied().unwrap_or("一")
-}
-
-fn square_file_digit(sq: Square) -> char {
-    sq.file().to_usi_char()
-}
-
-fn square_rank_digit(sq: Square) -> char {
-    let rank = sq.rank().to_usi_char();
-    let idx = (rank as u8 - b'a') + 1;
-    char::from_digit(idx as u32, 10).unwrap_or('1')
-}
-
-fn piece_label(piece_type: PieceType, promoted: bool) -> &'static str {
-    match (piece_type, promoted) {
-        (PieceType::Pawn, false) => "歩",
-        (PieceType::Pawn, true) => "と",
-        (PieceType::Lance, false) => "香",
-        (PieceType::Lance, true) => "成香",
-        (PieceType::Knight, false) => "桂",
-        (PieceType::Knight, true) => "成桂",
-        (PieceType::Silver, false) => "銀",
-        (PieceType::Silver, true) => "成銀",
-        (PieceType::Gold, _) => "金",
-        (PieceType::Bishop, false) => "角",
-        (PieceType::Bishop, true) => "馬",
-        (PieceType::Rook, false) => "飛",
-        (PieceType::Rook, true) => "龍",
-        (PieceType::King, _) => "玉",
-        (PieceType::ProPawn, _) => "と",
-        (PieceType::ProLance, _) => "成香",
-        (PieceType::ProKnight, _) => "成桂",
-        (PieceType::ProSilver, _) => "成銀",
-        (PieceType::Horse, _) => "馬",
-        (PieceType::Dragon, _) => "龍",
-    }
-}
-
-fn write_eval_comments<W: Write>(writer: &mut W, eval: Option<&EvalLog>) -> Result<()> {
-    let Some(eval) = eval else {
-        return Ok(());
-    };
-    writeln!(writer, "*info")?;
-    if let Some(mate) = eval.score_mate {
-        writeln!(writer, "**詰み={}", mate)?;
-    } else if let Some(cp) = eval.score_cp {
-        writeln!(writer, "**評価値={:+}", cp)?;
-    }
-    if let Some(depth) = eval.depth {
-        writeln!(writer, "**深さ={}", depth)?;
-    }
-    if let Some(seldepth) = eval.seldepth {
-        writeln!(writer, "**選択深さ={}", seldepth)?;
-    }
-    if let Some(nodes) = eval.nodes {
-        writeln!(writer, "**ノード数={}", nodes)?;
-    }
-    if let Some(time_ms) = eval.time_ms {
-        writeln!(writer, "**探索時間={}ms", time_ms)?;
-    }
-    if let Some(nps) = eval.nps {
-        writeln!(writer, "**NPS={}", nps)?;
-    }
-    if let Some(pv) = eval.pv.as_ref()
-        && !pv.is_empty()
-    {
-        writeln!(writer, "**読み筋={}", pv.join(" "))?;
-    }
-    Ok(())
-}
-
-fn format_mm_ss(ms: u64) -> String {
-    let secs = ms / 1000;
-    let m = secs / 60;
-    let s = secs % 60;
-    format!("{:>2}:{:02}", m, s)
-}
-
-fn format_hh_mm_ss(ms: u64) -> String {
-    let secs = ms / 1000;
-    let h = secs / 3600;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{:02}:{:02}:{:02}", h, m, s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3202,7 +2456,7 @@ mod tests {
     #[test]
     fn resolve_engine_paths_uses_per_side_when_provided() {
         let cli = Cli::parse_from([
-            "engine_selfplay",
+            "gensfen",
             "--engine-path-black",
             "/path/to/black",
             "--engine-path-white",
@@ -3217,11 +2471,7 @@ mod tests {
 
     #[test]
     fn resolve_engine_paths_uses_shared_when_per_side_missing() {
-        let cli = Cli::parse_from([
-            "engine_selfplay",
-            "--engine-path",
-            "/shared/path/engine-usi",
-        ]);
+        let cli = Cli::parse_from(["gensfen", "--engine-path", "/shared/path/engine-usi"]);
         let paths = resolve_engine_paths(&cli);
         assert_eq!(paths.black.path, PathBuf::from("/shared/path/engine-usi"));
         assert_eq!(paths.white.path, PathBuf::from("/shared/path/engine-usi"));
