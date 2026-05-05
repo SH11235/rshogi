@@ -148,21 +148,37 @@ cargo run -p tools --bin spsa_stats_to_plot_csv -- \
 
 ## 教師局面生成 (gensfen)
 
-学習データ生成専用ツール。棋力比較は `tournament` を使うこと（[tournament.md](../docs/tournament.md)）。
+教師局面生成専用ツール。棋力比較は `tournament` を使うこと（[tournament.md](../docs/tournament.md)）。
 
-### 基本（学習データ生成）
+### 基本（NativeBackend、デフォルト挙動）
 
 ```bash
 cargo run -p tools --release --bin gensfen -- \
-  --games 100 --byoyomi 1000 --threads 4 --hash-mb 512
+  --eval-file eval/model.bin \
+  --games 100 --nodes 80000 --concurrency 4
 ```
 
-### 学習データなしで対局のみ（デバッグ用）
+### USI モードで外部エンジン（YO 等）を使う
 
 ```bash
 cargo run -p tools --release --bin gensfen -- \
-  --games 10 --byoyomi 500 --threads 4 --hash-mb 512 \
-  --no-training-data
+  --native=false \
+  --engine-path /path/to/usi-engine \
+  --usi-option "EvalDir=/path/to/eval_dir" \
+  --usi-option "FV_SCALE=24" \
+  --games 100 --nodes 80000 --concurrency 4
+```
+
+### 異なるモデル間で多様な教師局面を生成（NativeBackend では不可、USI モード）
+
+```bash
+cargo run -p tools --release --bin gensfen -- \
+  --native=false \
+  --engine-path-black /path/to/usi-engine-A \
+  --engine-path-white /path/to/usi-engine-B \
+  --usi-options-black "EvalFile=./model_a.nnue" \
+  --usi-options-white "EvalFile=./model_b.nnue" \
+  --games 100 --nodes 80000 --concurrency 4
 ```
 
 ## 学習データ処理
