@@ -145,23 +145,46 @@ preset は `byoyomi-120-5` (中時間) を選び、grace 30 秒の中で reconne
    timer 開始)
 4. `wrangler tail` で `[GameRoom] entered grace window: role=Black grace_secs=30`
    を確認
-5. **30 秒以内に** `csa_client` の auto-reconnect 機能で復帰させる:
+5. **次のいずれかの経路で grace + reconnect 動作を観測する** (用途で使い分け):
+
+   **(a) Server 側 grace + force_abnormal の実機検証** (推奨、最も確実):
+   - 黒 client を `kill -KILL <pid>` で process ごと停止
+   - `wrangler tail` で `[GameRoom] entered grace window` → 30 秒経過後に
+     `force_abnormal` ログを確認
+   - 白 client が `#ABNORMAL` + `#WIN` を受信して終局
+   - R2 export には `end_reason: "ABNORMAL"`、viewer API
+     (`GET /api/v1/games/<game_id>`) で同値を確認
+   - **これだけで server 側 grace 機構 (Issue #607-#609 の核心) は完全に
+     検証できる**。reconnect 成立まで見ない、grace 期限切れ経路の検証として
+     十分。
+
+   **(b) 真の resume (token を使った再接続成功) を検証** (advanced):
    - csa_client は WS Close を検知すると保持済 token を使って自動再接続する
-     (実装: `crates/rshogi-csa-client/src/main.rs::attempt_reconnect`、`LOGIN <id> <pw>
-     reconnect:<game_id>+<token>` を送出 → 受理時 server が
+     (実装: `crates/rshogi-csa-client/src/main.rs::attempt_reconnect`、
+     `LOGIN <id> <pw> reconnect:<game_id>+<token>` を送出 → 受理時 server が
      `BEGIN Game_Summary` + `BEGIN Reconnect_State` を送り返す。protocol 詳細は
-     `docs/csa-server/protocol-reference.md` 参照)
-   - そのため、process kill ではなく **WS だけ落とす** 操作が望ましい:
-     - **socat proxy 方式 (推奨、root 不要)**: `socat TCP-LISTEN:8443,fork OPENSSL:<worker-host>:443`
-       でローカル proxy を立て、csa_client を `ws://localhost:8443/...` に向ける →
-       proxy だけ kill すれば csa_client は WS Close を観測して auto-reconnect する
-     - **tc / iptables 方式 (root 必要、影響範囲注意)**:
-       `sudo iptables -A OUTPUT -p tcp --dport 443 -j DROP` 等で短時間遮断する。
-       同 machine の他通信も巻き込むので smoke 専用 sandbox で実行する
-   - process kill した場合は手動で wscat から
-     `LOGIN <handle>+<preset>+<color> <pw> reconnect:<game_id>+<token>` 行を送って
-     resume 開始。csa_client の TOML id 経由ではこの形式の LOGIN は未対応
-     (csa_client は auto-reconnect 経路のみで `login_reconnect` を呼ぶ)
+     `docs/csa-server/protocol-reference.md` §9.1 参照)
+   - そのため process は生かしたまま **WS Close だけ発生させる** 必要がある。
+     ただし手元で動く確実な手段は限定的:
+     - **`sudo tc qdisc add dev <iface> root netem loss 100%` で全 egress を
+       一時遮断**: root 必須 + machine 全体の通信を巻き込む。CI / sandbox 専用。
+       直後に `sudo tc qdisc del dev <iface> root` で復元
+     - **socat proxy 経由で localhost に向ける構成**: csa_client が wss → proxy
+       (TLS 終端) → wss → Worker と中継させる。ただし Cloudflare Workers は
+       `Host:` ヘッダを SNI と一致させる検証を行うため、単純な
+       `socat TCP-LISTEN:8443 OPENSSL:<host>:443` では Host が `localhost:8443`
+       のままになり Worker ルーティングが失敗しがち。動かす場合は前段 nginx
+       (`proxy_set_header Host <worker-host>`) で Host を書き換える必要があり、
+       OSS 利用者向けの汎用手順としては未提供。実機試したいなら csa_client 側
+       に `--simulate-disconnect-after-msec` 等のテスト用フラグを追加して
+       process 内部から WS を close する path を作るのが最終的に安定。
+   - 手動 wscat から再接続 LOGIN 行を組み立てる場合は
+     `LOGIN <handle>+<preset>+<color> <pw> reconnect:<game_id>+<token>`。
+     csa_client の TOML id 経由ではこの形式の LOGIN は未対応 (csa_client は
+     auto-reconnect 経路のみで `login_reconnect` を呼ぶ)。
+
+   通常の動作確認では **(a) で十分**。OSS 利用者が真の resume 機構を E2E
+   検証したい場合のみ (b) を上記 caveat 付きで使う。
 6. 終局後に R2 棋譜を確認すると **1 つの game_id** に黒の disconnect 前後の
    指し手が連続している
 
