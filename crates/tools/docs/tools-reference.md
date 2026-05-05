@@ -10,6 +10,7 @@ crates/tools/src/bin/ 配下の全32バイナリの一覧と解説。
 | `gensfen` | NNUE 学習用 PSV/pack 教師局面の生成（engine vs engine／NativeBackend） |
 | `csa_client` | USI エンジンを floodgate 等の CSA サーバーに接続して連続対局 |
 | `analyze_selfplay` | 自己対局の JSONL ログを集計。勝率・Elo 差・NPS 等を表示 |
+| `jsonl_to_kif` | tournament 等の JSONL 対局ログから KIF 棋譜を生成（id/skip/limit でフィルタ可） |
 
 ## ベンチマーク・評価
 
