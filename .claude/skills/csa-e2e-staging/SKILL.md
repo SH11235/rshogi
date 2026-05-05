@@ -1,0 +1,265 @@
+---
+description: Workers (`rshogi-csa-server-workers`) deploy 環境に対する `csa_client` 実機 E2E 手順。平手 1 局完走 / 連続対局 / 切断再接続 / 観戦 / Buoy 対局 / 異常終局 / 時計違いペアの 7 シナリオを通電させる。「staging で smoke 流して」「reconnect 検証して」「観戦テスト」「buoy 動かして」「異常終局再現」「時計 kind 切替確認」等のリクエストで起動する。
+user-invocable: true
+---
+
+# CSA server E2E スキル (Workers staging / production)
+
+`rshogi-csa-server-workers` を deploy した Worker (本リポ既定では
+`rshogi-csa-server-workers-staging.<account>.workers.dev` /
+`rshogi-csa-server-workers.<account>.workers.dev`) に対し、`csa_client` を 2
+プロセス起動して各シナリオを実機で通電する。
+
+## 0. 前提と環境変数
+
+事前に以下が揃っていることを確認する。揃っていなければユーザに質問して埋めて
+もらう:
+
+- **Cloudflare account 名** (`<account>`): 本リポ標準では `sh11235`。OSS 利用者
+  が独自 deploy している場合は別の値を入れる。CSA Worker URL の subdomain
+  (`rshogi-csa-server-workers-staging.<account>.workers.dev`) と一致する。
+- **Worker deploy 状態**: `vp exec wrangler deploy --config wrangler.staging.toml`
+  または `gh workflow run deploy-workers.yml -f target=staging` 済。`/health` で
+  生存確認:
+  ```bash
+  curl -sf https://rshogi-csa-server-workers-staging.<account>.workers.dev/health
+  ```
+- **CLOCK_PRESETS 既定**: 同梱の `wrangler.{staging,production}.toml` に登録された
+  3 preset (`byoyomi-msec-10-100` / `byoyomi-120-5` / `floodgate-600-10`) が
+  使える。追加 preset が必要なシナリオは事前に `CLOCK_PRESETS` を編集して
+  再 deploy する。詳細は `docs/csa-server/clock_defaults.md`。
+- **csa_client release ビルド**: `cargo build --release -p rshogi-csa-client` で
+  `target/release/csa_client` が生成済。
+- **USI エンジン**: NNUE モデル付きの本番想定構成。生成系の例は
+  `crates/rshogi-csa-client/examples/README.md` の `--target` 節参照。
+- **Floodgate 系機能 (再接続 / R2 / viewer API)** が有効: 両 wrangler.toml の
+  `RECONNECT_GRACE_SECONDS` / `ALLOW_FLOODGATE_FEATURES` / `ALLOW_VIEWER_API` を
+  確認。staging / production 既定では C シナリオが追加 deploy なしで通電する。
+
+## 1. 共通セットアップ
+
+別ターミナルで Worker tail を流すと R2 export ログ
+(`[GameRoom] kifu exported to R2 key=...`) や error がリアルタイムで見える:
+
+```bash
+vp exec wrangler tail \
+  --config crates/rshogi-csa-server-workers/wrangler.staging.toml \
+  --format pretty
+```
+
+`csa_client` の起動方法は **2 通り** 選べる:
+
+### 1-A. CLI プリセット (`--target`) で TOML なし起動
+
+最短経路。本リポ同梱 Worker 限定。
+
+```bash
+ROOM=e2e-$(date +%Y%m%d%H%M%S)
+PRESET=floodgate-600-10
+ACC=<account>  # 本リポでは sh11235
+
+# 黒
+target/release/csa_client \
+  --target staging \
+  --room-id "$ROOM" \
+  --handle alice \
+  --color black \
+  --game-name "$PRESET" \
+  --engine /path/to/your/usi-engine \
+  --options "EvalFile=/path/to/nnue.bin,USI_Hash=256" &
+
+# 白 (room_id を黒と同じ値で揃える)
+target/release/csa_client \
+  --target staging \
+  --room-id "$ROOM" \
+  --handle bob \
+  --color white \
+  --game-name "$PRESET" \
+  --engine /path/to/your/usi-engine \
+  --options "EvalFile=/path/to/nnue.bin,USI_Hash=256" &
+wait
+```
+
+### 1-B. TOML 設定で起動
+
+スキーマと最小例: `crates/rshogi-csa-client/examples/csa_client.toml.example`。
+
+```bash
+cp crates/rshogi-csa-client/examples/csa_client.toml.example /tmp/black.toml
+cp crates/rshogi-csa-client/examples/csa_client.toml.example /tmp/white.toml
+# 各 toml の host (room_id 末尾)、id (handle / preset 名 / color)、engine.path を編集
+target/release/csa_client /tmp/black.toml &
+target/release/csa_client /tmp/white.toml &
+wait
+```
+
+## 2. シナリオ A: 平手 1 局完走
+
+最小 smoke。`max_games = 1` で 1 局終了で client が自動 quit する。preset は
+`byoyomi-msec-10-100` (短時間) を選べば数秒〜十数秒で完走する。
+
+期待:
+- 両 client ログに `LOGIN:<id> OK` → `BEGIN Game_Summary` → `START` →
+  指し手交換 → `%TORYO`/`#WIN`/`#LOSE` が並ぶ
+- ローカル records 配下に `<datetime>_<sente>_vs_<gote>.csa` が保存される
+- R2 bucket (`rshogi-csa-kifu-staging` または `-prod`) に同 game_id の object が
+  追加される。viewer API で取得確認: `curl -sf https://rshogi-csa-server-workers-staging.<account>.workers.dev/api/v1/games/<game_id>`
+
+## 3. シナリオ B: 連続 N 対局
+
+DO instance = 1 対局の設計のため、終局後の同 room_id 再 LOGIN は reject される。
+連続対局は `host` URL の room_id 末尾と handle に `{game_seq}` placeholder を
+入れることで対応する (csa_client が 0,1,2,...,(max_games-1) を埋める)。
+
+```toml
+host = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/myroom-{game_seq}"
+id = "alice-{game_seq}+byoyomi-msec-10-100+black"
+[game]
+max_games = 5
+```
+
+期待: client ログに `対局 #1 〜 #5 結果` が並び、R2 に 5 件追加される。
+
+## 4. シナリオ C: 切断 → 再接続
+
+> **前提**: `RECONNECT_GRACE_SECONDS > 0` + `ALLOW_FLOODGATE_FEATURES = "true"`。
+> 本リポ既定の staging / production はどちらも 30 秒 grace + opt-in 有効化済。
+
+preset は `byoyomi-120-5` (中時間) を選び、grace 30 秒の中で reconnect 操作の
+余裕を確保する。
+
+手順:
+
+1. シナリオ A 構成で起動して対局を進める
+2. 黒 client ログから `Reconnect_Token:<token>` と `Game_ID:<game_id>` を抜き取る
+   (debug ログレベル `[CSA] < ` プレフィクスで出る)
+3. 黒 client を `Ctrl+C` または `kill -KILL <pid>` で停止 (server 側 grace
+   timer 開始)
+4. `wrangler tail` で `[GameRoom] entered grace window: role=Black grace_secs=30`
+   を確認
+5. **30 秒以内に** `csa_client` の auto-reconnect 機能で復帰させる:
+   - csa_client は WS Close を検知すると保持済 token を使って自動再接続する
+     (実装: `crates/rshogi-csa-client/src/main.rs::attempt_reconnect`)
+   - そのため、process kill ではなく **WS だけ落とす** 操作 (e.g.,
+     `tc qdisc add ... netem loss 100%` 一時投入、socat proxy を介してそれを
+     落とす、等) が望ましい
+   - process kill した場合は手動で `LOGIN ... reconnect:<game_id>+<token>`
+     行を組み立てて wscat で送る (csa_client の TOML id 経由では現状未対応)
+6. 終局後に R2 棋譜を確認すると **1 つの game_id** に黒の disconnect 前後の
+   指し手が連続している
+
+### grace 検証だけでよい場合 (process kill で足りる経路)
+
+`#608/#609` のような server 側 grace + alarm 動作確認だけなら、process kill
+してそのまま 30 秒 grace 期限切れを待ち `force_abnormal` (= `#ABNORMAL` / 相手
+`#WIN`) を観測すれば検証目的は達成できる。R2 export には
+`end_reason: "ABNORMAL"` が記録される。
+
+## 5. シナリオ D: 観戦 (`%%MONITOR2ON`)
+
+`csa_client` は観戦モード未実装のため `wscat` 等の汎用 WS client で擬似する。
+
+```bash
+wscat -c "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>"
+> LOGIN spectator+<preset_name>+spectator anything
+< LOGIN:spectator+<preset_name>+spectator OK
+> %%MONITOR2ON <game_id>
+< [対局者の指し手が broadcast される]
+```
+
+シナリオ A と並行起動し、対局者の指し手が spectator 側にも届くことを確認する。
+`<preset_name>` は対局と同じ preset 名を使う (strict mode 下では preset 登録
+されていない game_name は LOGIN_LOBBY:incorrect で reject される)。
+
+## 6. シナリオ E: Buoy 対局 (`%%SETBUOY` / `%%DELETEBUOY`)
+
+ADMIN 権限で運用権限コマンドを送り、中盤局面からの対局を成立させる。
+`csa_client` は管理コマンドを直接送る経路を持たないので ADMIN 部分は `wscat`
+で代替し、対局者は通常の `csa_client` を使う。
+
+```bash
+# `<ADMIN_HANDLE>` は staging/production の wrangler secret に設定された値。
+wscat -c "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room_id>"
+> LOGIN <ADMIN_HANDLE>+<preset_name>+black anything
+< LOGIN:... OK
+> %%SETBUOY <preset_name> +7776FU -3334FU 1
+```
+
+`count = 1` なので 1 回だけ buoy 対局が成立する。続いて通常 client 2 本で対局
+すると、Game_Summary の `Position` ブロックに `+7776FU` `-3334FU` の 2 手が
+適用された中盤局面が入る。`%%GETBUOYCOUNT <preset_name>` を再度送ると count が
+0 になり、再対局できないことを確認する。
+
+> **strict mode の注意**: `<preset_name>` は CLOCK_PRESETS に登録された値で
+> あること。SETBUOY の `<game_name>` と LOGIN handle の `<game_name>` を一致
+> させる必要がある。
+
+## 7. シナリオ F: 異常切断系
+
+シナリオ A 実行中に以下を起こすと各終局理由がトリガーされる:
+
+| 操作 | 期待される終局 | R2 棋譜末尾 |
+|---|---|---|
+| 黒 client を `Ctrl+C` で kill (grace 無効構成、または grace 期限切れ) | `#ABNORMAL` + 相手 `#WIN` | `%CHUDAN` |
+| `byoyomi (100ms) + α` だけ engine 思考を遅らせる | `#TIME_UP` + `#LOSE/#WIN` | `#TIME_UP` 中間行 + 結果行 |
+| 不正な指し手を送る (`wscat` 経由で `+7775FU` 等の無効手) | `#ILLEGAL_MOVE` + `#LOSE/#WIN` | `#ILLEGAL_MOVE` |
+
+`#TIME_UP` を 100ms byoyomi で再現するには engine 思考を 100ms より遅くするのが
+最短。NNUE モデル未 load または `Hash = 1024` 等の memory pressure で 1 手目に
+間に合わない局面を作れる。`#ILLEGAL_MOVE` は `wscat` 経由が確実
+(csa_client は engine の合法手しか送らないため)。
+
+## 8. シナリオ G: 時計 kind 切替確認
+
+CLOCK_PRESETS のおかげで以前のように `wrangler.toml` の `CLOCK_KIND` を mutate
+する必要は無い。各 kind を preset として登録すれば LOGIN 時の `<game_name>`
+切替だけで kind を選べる:
+
+```toml
+CLOCK_PRESETS = '''[
+  {"game_name":"byoyomi-msec-10-100","kind":"countdown_msec","total_time_ms":10000,"byoyomi_ms":100},
+  {"game_name":"byoyomi-120-5","kind":"countdown","total_time_sec":120,"byoyomi_sec":5},
+  {"game_name":"floodgate-600-10","kind":"countdown","total_time_sec":600,"byoyomi_sec":10},
+  {"game_name":"fischer-300-10F","kind":"fischer","total_time_sec":300,"increment_sec":10},
+  {"game_name":"stopwatch-10-1M","kind":"stopwatch","total_time_min":10,"byoyomi_min":1}
+]'''
+```
+
+各 preset で 1 局ずつ走らせ、Game_Summary `BEGIN Time` セクションの `Time_Unit` /
+`Total_Time` / `Byoyomi`/`Increment` が想定値であることを確認する。
+
+> 旧 staging-e2e.md にあった `sed -i 's/CLOCK_KIND = .*/.../'` で wrangler.toml
+> を mutate する手順は **使わない**。CLOCK_PRESETS で全 kind を共存できる
+> 設計に変わったため。
+
+## 9. 後始末
+
+1. R2 検証用 object を削除したい場合 (残しても害はない):
+   ```bash
+   vp exec wrangler r2 object delete \
+     rshogi-csa-kifu-staging/<key> \
+     --config crates/rshogi-csa-server-workers/wrangler.staging.toml
+   ```
+2. ローカルの `/tmp/<scenario>-*.toml` / `./records/` 配下を必要に応じて破棄
+
+## トラブルシューティング
+
+| 症状 | 原因候補 | 対処 |
+|---|---|---|
+| `403 Forbidden Origin` で WS Upgrade 失敗 | csa_client の `ws_origin` が `WS_ALLOWED_ORIGINS` allowlist に含まれていない | `ws_origin` を toml から削除 (ネイティブ経路 / Origin 欠落) するか、wrangler.toml の allowlist に Origin を追加して再 deploy |
+| `LOGIN:incorrect` | `<handle>+<game_name>+<color>` の format 違反、または `<game_name>` が CLOCK_PRESETS 未登録 (strict mode) | id format を再確認、`<game_name>` を登録 preset 名に変更 |
+| `LOGIN_LOBBY:incorrect unknown_game_name` | strict mode 下で未登録 game_name | CLOCK_PRESETS に追加して再 deploy、または既存 preset 名を使う |
+| 双方接続するも対局が始まらない | `room_id` が黒/白で不一致 | URL `/ws/<room_id>` が両 toml で完全一致しているか確認 |
+| 対局終局後も R2 に書き込まれない | 終局イベントが落ちた | `vp exec wrangler tail` で error 確認 |
+| `#TIME_UP` で対局終了 (通常実行で意図せず) | engine 応答が server byoyomi に間に合わない | csa_client の `[time] margin_msec` を上げる (engine 渡し byoyomi がその分減り余裕生まれる) |
+
+## 関連実装 / doc
+
+- 設定 schema: `crates/rshogi-csa-client/examples/csa_client.toml.example`
+- README: `crates/rshogi-csa-client/examples/README.md` (CLI / lobby / JSONL モード解説)
+- clock 設計: `docs/csa-server/clock_defaults.md`
+- protocol 詳細: `docs/csa-server/protocol-reference.md`
+- lobby DO 詳細: `docs/csa-server/lobby_e2e_runbook.md`
+- viewer API: `docs/csa-server/viewer_access_control.md`
+- 自動再接続実装: `crates/rshogi-csa-client/src/main.rs::attempt_reconnect`
+- server grace 経路: `crates/rshogi-csa-server-workers/src/game_room.rs::enter_grace_window`

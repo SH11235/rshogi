@@ -205,7 +205,10 @@ fn assert_clock_preset_names_match(lhs: &EnvironmentBindings, rhs: &EnvironmentB
         }
         let parsed: serde_json::Value = serde_json::from_str(raw).unwrap_or_else(|e| {
             panic!(
-                "{file} ({label}): CLOCK_PRESETS must be valid JSON: {e}; raw={raw}",
+                "{file} ({label}): CLOCK_PRESETS must be valid JSON: {e}\n\
+                 expected schema: array of {{\"game_name\": \"<name>\", \"kind\": \
+                 \"countdown\"|\"countdown_msec\"|\"fischer\"|\"stopwatch\", ...kind-specific fields}}\n\
+                 raw={raw}",
                 file = env.file_name,
                 label = env.label,
             );
@@ -214,7 +217,8 @@ fn assert_clock_preset_names_match(lhs: &EnvironmentBindings, rhs: &EnvironmentB
             .as_array()
             .unwrap_or_else(|| {
                 panic!(
-                    "{file} ({label}): CLOCK_PRESETS must be a JSON array",
+                    "{file} ({label}): CLOCK_PRESETS must be a JSON array (schema: \
+                     [{{\"game_name\": \"...\", \"kind\": \"...\", ...}}, ...]); got: {raw}",
                     file = env.file_name,
                     label = env.label,
                 )
