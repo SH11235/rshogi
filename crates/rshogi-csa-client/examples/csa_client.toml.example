@@ -1,0 +1,76 @@
+# `rshogi-csa-client` 設定 TOML の generic 例。実運用では任意のローカルパスへ
+# コピーしてから値を埋めて使う。`--target staging|production` で本リポ同梱の
+# Cloudflare Worker に直接繋ぐクイックスタートは `examples/README.md` を参照。
+#
+# CSA-over-WebSocket (`wss://`) 経路と TCP 経路の両方に対応する。`server.host`
+# が `wss://` で始まるなら WebSocket 経路、それ以外（`tcp://` または scheme 省略）
+# なら TCP 経路として扱う。
+
+[server]
+# 接続先 Worker の URL。`/ws/<room_id>` 末尾の `<room_id>` は黒/白で完全一致が
+# 必須（黒側 toml と白側 toml で同じ値を入れる）。同じ `<room_id>` を 2 回使う
+# （= 終局後に再 LOGIN する）と Worker は `LOGIN:incorrect` で reject するため、
+# 局ごとに新規生成すること（例: `e2e-$(date +%Y%m%d%H%M%S)`）。
+host = "wss://your-csa-server.example/ws/<room_id>"
+# WebSocket 経路では port は無視される（URL の scheme で識別）。
+port = 0
+
+# CSA LOGIN handle。format は `<handle>+<game_name>+<color>`:
+#   - `<handle>`: 任意のユニーク ID（黒/白で異なる値）
+#   - `<game_name>`: Worker 側 `CLOCK_PRESETS` に登録された preset 名。同梱例
+#     (`crates/rshogi-csa-server-workers/wrangler.{staging,production}.toml`) では
+#     `byoyomi-msec-10-100` / `byoyomi-120-5` / `floodgate-600-10` が登録済。
+#     未登録 game_name は LOGIN_LOBBY:incorrect unknown_game_name で拒否される
+#     (strict mode)。詳細は `docs/csa-server/clock_defaults.md` 参照。
+#   - `<color>`: `black` | `white` | `b` | `w` | `sente` | `gote`
+id = "alice+floodgate-600-10+black"
+password = "anything"
+floodgate = true
+
+# WebSocket Upgrade 時の Origin ヘッダ値。Worker 側 `WS_ALLOWED_ORIGINS` の
+# allowlist と一致させる必要がある。allowlist 未設定 / 空の Worker（=production
+# 既定）はネイティブ経路として Origin 欠落で接続するため、本フィールドは省略する。
+# ws_origin = "https://your-frontend.example"
+
+[server.keepalive]
+# wss は通常 TLS が中間 NAT のタイムアウトを Pong で吸収するため、CSA 空行
+# keep-alive は最低限（60 秒）でよい。TCP 経路 (`tcp://...`) では SO_KEEPALIVE を
+# 有効化して中間 NAT 切断検出に頼る。
+tcp = false
+ping_interval_sec = 60
+
+[engine]
+# ローカル USI エンジンへの絶対パス。release ビルド推奨。
+path = "/path/to/your/usi-engine"
+startup_timeout_sec = 30
+
+[engine.options]
+# USI options。エンジンが NNUE 評価を使う場合は `EvalFile` 等の追加 options を
+# 必要に応じて足す。
+USI_Hash = 256
+
+[time]
+# 秒読みの安全マージン（ms）。サーバ側 deadline と client 側 deadline のずれを
+# 吸収する。
+margin_msec = 2500
+
+[game]
+max_games = 1
+restart_engine_every_game = false
+ponder = false
+
+[retry]
+initial_delay_sec = 10
+max_delay_sec = 60
+
+[record]
+enabled = true
+dir = "./records"
+filename_template = "{datetime}_{sente}_vs_{gote}"
+save_csa = true
+save_sfen = true
+
+[log]
+level = "info"
+dir = "./logs"
+stdout = true

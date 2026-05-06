@@ -14,8 +14,9 @@
 - [`viewer_access_control.md`](viewer_access_control.md) — viewer / spectate API の access control (Origin allowlist / kill-switch) 運用。
 - [`lobby_design.md`](lobby_design.md) — LobbyDO + マッチングの詳細設計 (`/ws/lobby`、`MATCHED` 通知、queue 戦略)。
 - [`lobby_e2e_runbook.md`](lobby_e2e_runbook.md) — Lobby マッチング対局を実機 staging で回す E2E 運用手順。
-- [`staging-e2e.md`](staging-e2e.md) — Workers staging × `csa_client` 実機対局シナリオ集 (平手 / 連続対局 / 切断再接続 / Buoy / 観戦)。
-- [`clock_defaults.md`](clock_defaults.md) — staging / production の clock 既定差分 (ops 仕様 single source of truth)、Floodgate 互換性、`CLOCK_PRESETS` 上書き経路。
+- [`clock_defaults.md`](clock_defaults.md) — 対局時計 (`CLOCK_KIND` / `CLOCK_PRESETS`) の設定ガイド。サポート方式・JSON schema・strict mode の挙動。
+
+E2E 実機対局のシナリオ別手順 (平手 / 連続対局 / 切断再接続 / Buoy / 観戦 / 異常終局 / 時計違い) は repo 同梱の Skill `.claude/skills/csa-e2e-staging/SKILL.md` を参照。
 
 ## 関連 doc (このディレクトリ外)
 

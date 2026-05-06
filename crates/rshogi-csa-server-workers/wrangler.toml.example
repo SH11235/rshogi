@@ -96,10 +96,14 @@ TOTAL_TIME_MIN = "10"
 BYOYOMI_MIN = "1"
 # `game_name` 別の時計プリセット（JSON 配列文字列）。空配列で「プリセット未宣言」、
 # 1 件以上登録すると strict mode (未登録 game_name は LOGIN_LOBBY:incorrect
-# unknown_game_name で拒否)。サンプル運用例（インライン JSON 文字列）:
-#   CLOCK_PRESETS = '[{"game_name":"byoyomi-600-10","kind":"countdown","total_time_sec":600,"byoyomi_sec":10},{"game_name":"byoyomi-60-5","kind":"countdown","total_time_sec":60,"byoyomi_sec":5},{"game_name":"fischer-300-10F","kind":"fischer","total_time_sec":300,"increment_sec":10}]'
-# TOML の literal string (`'...'`) を使うと内部の `"` をエスケープせずに済む。
-# 改行を入れたい場合は TOML の multi-line literal string (`'''...'''`) も可。
+# unknown_game_name で拒否)。同梱の `wrangler.{staging,production}.toml` と
+# 揃える 3 件登録例 (multi-line literal string でエスケープ無し):
+#   CLOCK_PRESETS = '''[
+#     {"game_name":"byoyomi-msec-10-100","kind":"countdown_msec","total_time_ms":10000,"byoyomi_ms":100},
+#     {"game_name":"byoyomi-120-5","kind":"countdown","total_time_sec":120,"byoyomi_sec":5},
+#     {"game_name":"floodgate-600-10","kind":"countdown","total_time_sec":600,"byoyomi_sec":10}
+#   ]'''
+# 命名規則・各方式の field 名・strict mode 仕様は `docs/csa-server/clock_defaults.md` 参照。
 CLOCK_PRESETS = "[]"
 # `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル（LOGIN の handle 部分）。
 ADMIN_HANDLE = "admin"

@@ -79,8 +79,9 @@ struct Cli {
     #[arg(long)]
     room_id: Option<String>,
 
-    /// `--target` 利用時のログインハンドル。CSA LOGIN ID は `<handle>+<room_id>+<color>`
-    /// 形式で組み立てる（Workers GameRoom が要求するフォーマット）。
+    /// `--target` 利用時のログインハンドル。CSA LOGIN ID は
+    /// `<handle>+<game_name>+<color>` 形式で組み立てる（Workers GameRoom 要求）。
+    /// `<game_name>` は `--game-name` の値（`--target` 利用時は必須）。
     #[arg(long)]
     handle: Option<String>,
 
@@ -94,8 +95,11 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     lobby: bool,
 
-    /// `--lobby` 利用時のマッチング pool 名 (`<game_name>` 部分)。同 game_name 同士
-    /// でしかマッチングしない。`[A-Za-z0-9_-]` / 1〜32 文字制限。
+    /// LOGIN handle の `<game_name>` 部分。`--target {staging,production}` 利用時は
+    /// 両 Worker が `CLOCK_PRESETS` strict mode のため**必須**で、登録済み preset 名
+    /// (例: `byoyomi-msec-10-100` / `byoyomi-120-5` / `floodgate-600-10`) を指定して
+    /// clock を選ぶ。`--lobby` 利用時はマッチング pool 名としても用いる
+    /// (同 game_name 同士でしかマッチングしない)。`[A-Za-z0-9_-]` / 1〜32 文字制限。
     #[arg(long)]
     game_name: Option<String>,
 
@@ -651,7 +655,24 @@ fn apply_target_preset(config: &mut CsaClientConfig, cli: &Cli) -> Result<()> {
     config.server.host = format!("wss://{subdomain}/ws/{room_id}");
     // `wss://` 経路では port 値は無視されるが、TOML schema 互換のため 0 を入れておく。
     config.server.port = 0;
-    config.server.id = format!("{handle}+{room_id}+{}", color.as_str());
+    // `--target {staging,production}` は両 Worker が `CLOCK_PRESETS` を非空で持つ
+    // strict mode 前提なので、LOGIN id の `<game_name>` 部分には登録済み preset 名
+    // (例: `byoyomi-msec-10-100` / `floodgate-600-10`) を必ず明示してもらう。
+    // 省略すると非 lobby 経路は LOGIN OK 後に GameRoom 側 preset 解決で失敗し
+    // Game_Summary まで進めない (lobby 経路は LOGIN 段で UnknownGameName)。
+    // `CLOCK_PRESETS = "[]"` の自前 Worker に `--target` で繋ぎたい場合は
+    // `--target` を使わず TOML / `--host` で URL 直指定するルートに切り替える。
+    let game_name_for_id = cli
+        .game_name
+        .as_deref()
+        .filter(|g| !g.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "--target {{staging,production}} を指定する場合は --game-name <preset> も指定してください \
+                 (両 Worker は CLOCK_PRESETS strict mode のため未登録名は LOGIN/preset 解決で拒否されます)"
+            )
+        })?;
+    config.server.id = format!("{handle}+{game_name_for_id}+{}", color.as_str());
     if config.server.password.is_empty() {
         config.server.password = PRESET_FALLBACK_PASSWORD.to_owned();
     }
@@ -863,18 +884,40 @@ mod tests {
     }
 
     #[test]
+    fn target_preset_requires_game_name() {
+        // staging/production の両 Worker は CLOCK_PRESETS strict mode のため、
+        // `--target` 利用時に `--game-name` が空だと LOGIN/preset 解決で必ず弾かれる。
+        // クライアント側で先に分かりやすく Err 化することで silent 失敗を防ぐ。
+        let mut config = CsaClientConfig::default();
+        let mut cli = cli_with(Some(TargetPreset::Staging));
+        cli.room_id = Some("r".to_owned());
+        cli.handle = Some("h".to_owned());
+        cli.color = Some(CliColor::Black);
+        let err = apply_target_preset(&mut config, &cli).unwrap_err();
+        assert!(err.to_string().contains("--game-name"));
+
+        let mut cli = cli_with(Some(TargetPreset::Production));
+        cli.room_id = Some("r".to_owned());
+        cli.handle = Some("h".to_owned());
+        cli.color = Some(CliColor::White);
+        let err = apply_target_preset(&mut config, &cli).unwrap_err();
+        assert!(err.to_string().contains("--game-name"));
+    }
+
+    #[test]
     fn target_preset_staging_fills_host_and_id() {
         let mut config = CsaClientConfig::default();
         let mut cli = cli_with(Some(TargetPreset::Staging));
         cli.room_id = Some("e2e-1".to_owned());
         cli.handle = Some("alice".to_owned());
         cli.color = Some(CliColor::Black);
+        cli.game_name = Some("byoyomi-msec-10-100".to_owned());
         apply_target_preset(&mut config, &cli).unwrap();
         assert_eq!(
             config.server.host,
             "wss://rshogi-csa-server-workers-staging.sh11235.workers.dev/ws/e2e-1"
         );
-        assert_eq!(config.server.id, "alice+e2e-1+black");
+        assert_eq!(config.server.id, "alice+byoyomi-msec-10-100+black");
         assert_eq!(config.server.ws_origin.as_deref(), Some("https://csa-client-local"));
         assert!(!config.server.password.is_empty());
         assert!(config.server.floodgate);
@@ -887,13 +930,33 @@ mod tests {
         cli.room_id = Some("game42".to_owned());
         cli.handle = Some("bob".to_owned());
         cli.color = Some(CliColor::White);
+        cli.game_name = Some("floodgate-600-10".to_owned());
         apply_target_preset(&mut config, &cli).unwrap();
         assert_eq!(
             config.server.host,
             "wss://rshogi-csa-server-workers.sh11235.workers.dev/ws/game42"
         );
-        assert_eq!(config.server.id, "bob+game42+white");
+        assert_eq!(config.server.id, "bob+floodgate-600-10+white");
         assert!(config.server.ws_origin.is_none());
+    }
+
+    #[test]
+    fn target_preset_uses_game_name_in_login_id() {
+        // `--target` 非 lobby モードで `--game-name <preset>` を渡すと、URL の
+        // `<room_id>` と LOGIN id の `<game_name>` を独立に組み立てる
+        // (`CLOCK_PRESETS` strict mode で preset 名 LOGIN を成立させるため)。
+        let mut config = CsaClientConfig::default();
+        let mut cli = cli_with(Some(TargetPreset::Staging));
+        cli.room_id = Some("e2e-room-1".to_owned());
+        cli.handle = Some("alice".to_owned());
+        cli.color = Some(CliColor::Black);
+        cli.game_name = Some("floodgate-600-10".to_owned());
+        apply_target_preset(&mut config, &cli).unwrap();
+        assert_eq!(
+            config.server.host,
+            "wss://rshogi-csa-server-workers-staging.sh11235.workers.dev/ws/e2e-room-1"
+        );
+        assert_eq!(config.server.id, "alice+floodgate-600-10+black");
     }
 
     #[test]
@@ -904,6 +967,7 @@ mod tests {
         cli.room_id = Some("r".to_owned());
         cli.handle = Some("h".to_owned());
         cli.color = Some(CliColor::Black);
+        cli.game_name = Some("byoyomi-msec-10-100".to_owned());
         apply_target_preset(&mut config, &cli).unwrap();
         assert_eq!(config.server.password, "user-supplied");
     }
@@ -917,6 +981,7 @@ mod tests {
         cli.room_id = Some("r".to_owned());
         cli.handle = Some("h".to_owned());
         cli.color = Some(CliColor::Black);
+        cli.game_name = Some("byoyomi-msec-10-100".to_owned());
         cli.host = Some("wss://custom.example/ws/x".to_owned());
         cli.id = Some("override-id".to_owned());
         apply_target_preset(&mut config, &cli).unwrap();
