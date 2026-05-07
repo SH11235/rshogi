@@ -169,6 +169,12 @@ struct Cli {
     /// USIエンジンオプション (K=V,K=V,...)
     #[arg(long)]
     options: Option<String>,
+
+    /// engine stderr を csa_client log に多重化する (`log::info!("[engine stderr] ...")`).
+    /// debug / 初期セットアップ用。default は false (既存の ring buffer 末尾捕捉のみ)。
+    /// TOML の `engine.stderr_passthrough` でも指定可。
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    engine_stderr_passthrough: Option<bool>,
 }
 
 fn main() -> Result<()> {
@@ -329,6 +335,7 @@ fn spawn_engine(config: &CsaClientConfig) -> Result<UsiEngine> {
         &config.engine.options,
         config.game.ponder,
         Duration::from_secs(config.engine.startup_timeout_sec),
+        config.engine.stderr_passthrough,
     )
 }
 
@@ -730,6 +737,9 @@ fn apply_cli_overrides(config: &mut CsaClientConfig, cli: &Cli) {
     if let Some(ref dir) = cli.jsonl_out {
         config.record.jsonl_out = Some(dir.clone());
     }
+    if let Some(passthrough) = cli.engine_stderr_passthrough {
+        config.engine.stderr_passthrough = passthrough;
+    }
     if let Some(ref opts) = cli.options {
         for kv in opts.split(',') {
             if let Some((k, v)) = kv.split_once('=') {
@@ -844,6 +854,7 @@ mod tests {
             record_dir: None,
             jsonl_out: None,
             options: None,
+            engine_stderr_passthrough: None,
         }
     }
 

@@ -81,6 +81,11 @@ pub struct EngineConfig {
     /// USIオプション (key → value)
     #[serde(default)]
     pub options: HashMap<String, toml::Value>,
+    /// engine の stderr 出力を csa_client log に多重化する (`log::info!`)。
+    /// debug / 初期セットアップで engine 出力を即時確認したいときに有効化する。
+    /// default は false (既存の ring buffer 末尾捕捉のみ)。
+    #[serde(default)]
+    pub stderr_passthrough: bool,
 }
 
 impl Default for EngineConfig {
@@ -89,6 +94,7 @@ impl Default for EngineConfig {
             path: PathBuf::new(),
             startup_timeout_sec: 30,
             options: HashMap::new(),
+            stderr_passthrough: false,
         }
     }
 }

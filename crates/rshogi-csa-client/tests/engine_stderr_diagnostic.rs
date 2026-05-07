@@ -85,7 +85,7 @@ exit 1
 "#;
     let path = write_mock_script("dying_immediate", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
-    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT) {
+    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false) {
         Ok(_) => panic!("spawn 即時死で error が期待される"),
         Err(e) => e,
     };
@@ -116,7 +116,7 @@ exit 1
 "#;
     let path = write_mock_script("dying_after_handshake", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
-    let mut engine = UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT)
+    let mut engine = UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false)
         .expect("初回 handshake は成功する想定");
     // engine プロセスは usiok+readyok を返した直後に exit。
     // new_game() は usinewgame + isready を送る。BrokenPipe か recv Disconnected
@@ -153,7 +153,7 @@ exit 1
     let path = write_mock_script("dying_during_go", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
     let mut engine =
-        UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT).expect("初回 handshake は成功");
+        UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false).expect("初回 handshake は成功");
     engine.new_game().expect("new_game は成功");
     let shutdown = AtomicBool::new(false);
     let (_tx, server_rx) = mpsc::channel::<Event>();
@@ -190,7 +190,7 @@ exit 1
     let path = write_mock_script("long_stderr_line", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
     // initialize は usiok 後 isready を送る → engine 死亡で error
-    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT) {
+    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false) {
         Ok(_) => panic!("isready 送信前後で engine 死亡 → error が期待される"),
         Err(e) => e,
     };
@@ -220,7 +220,7 @@ exit 1
 "#;
     let path = write_mock_script("crlf_stderr", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
-    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT) {
+    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false) {
         Ok(_) => panic!("isready 後 engine 死亡 → error が期待される"),
         Err(e) => e,
     };
@@ -251,7 +251,7 @@ exit 1
 "#;
     let path = write_mock_script("empty_line_not_eof", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
-    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT) {
+    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false) {
         Ok(_) => panic!("isready 後 engine 死亡 → error が期待される"),
         Err(e) => e,
     };
@@ -264,5 +264,34 @@ exit 1
     assert!(
         msg.contains("after empty"),
         "空行後の行も含まれるはず (空行 EOF 誤認 bug の regression guard): {msg}"
+    );
+}
+
+// ───────────────────────────────────────────────
+// Fixture 7: --engine-stderr-passthrough=true でも既存の ring buffer 末尾捕捉が
+//   壊れないことの smoke test。log 多重化 (`log::info!`) 自体の capture は
+//   global logger 依存で flake しやすいため本 test では検証せず、push 経路
+//   との並行動作 (ring buffer 同等動作) を pin する。
+// ───────────────────────────────────────────────
+#[test]
+fn stderr_passthrough_preserves_ring_buffer() {
+    let script = r#"#!/usr/bin/env bash
+printf 'passthrough line A\n' >&2
+printf 'passthrough line B\n' >&2
+exec 2>&-
+exit 1
+"#;
+    let path = write_mock_script("passthrough_smoke", script);
+    let opts: HashMap<String, toml::Value> = HashMap::new();
+    // 第 5 引数 stderr_passthrough = true。
+    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, true) {
+        Ok(_) => panic!("spawn 即時死で error が期待される"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:#}");
+    assert_diagnostic_prefix(&msg, &path);
+    assert!(
+        msg.contains("passthrough line A") || msg.contains("passthrough line B"),
+        "passthrough=true でも ring buffer に末尾が積まれているはず: {msg}"
     );
 }

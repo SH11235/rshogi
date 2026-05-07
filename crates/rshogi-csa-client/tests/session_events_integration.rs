@@ -281,6 +281,7 @@ fn fresh_session_emits_expected_event_sequence() {
         &config.engine.options,
         config.game.ponder,
         Duration::from_secs(5),
+        false,
     )
     .expect("spawn engine");
 
@@ -363,6 +364,7 @@ fn resumed_session_emits_resumed_event_and_no_history_replay() {
         &config.engine.options,
         config.game.ponder,
         Duration::from_secs(5),
+        false,
     )
     .expect("spawn engine");
 
@@ -432,6 +434,7 @@ fn resumed_state_last_sfen_matches_summary_position_section() {
         &config.engine.options,
         config.game.ponder,
         Duration::from_secs(5),
+        false,
     )
     .expect("spawn engine");
 
@@ -548,6 +551,7 @@ fn fatal_sink_triggers_clean_closure_and_returns_sink_aborted() {
         &config.engine.options,
         config.game.ponder,
         Duration::from_secs(5),
+        false,
     )
     .expect("spawn engine");
 
@@ -625,6 +629,7 @@ fn external_shutdown_emits_shutdown_disconnected_and_returns_shutdown_error() {
         &config.engine.options,
         config.game.ponder,
         Duration::from_secs(5),
+        false,
     )
     .expect("spawn engine");
 
@@ -695,6 +700,7 @@ fn external_shutdown_observed_through_legacy_run_game_session() {
         &config.engine.options,
         config.game.ponder,
         Duration::from_secs(5),
+        false,
     )
     .expect("spawn engine");
 
@@ -747,6 +753,7 @@ fn nonfatal_sink_does_not_invoke_on_error_and_session_continues() {
         &config.engine.options,
         config.game.ponder,
         Duration::from_secs(5),
+        false,
     )
     .expect("spawn engine");
 
