@@ -140,6 +140,11 @@ CLOCK_PRESETS = '''[
 # 吸収を兼ねる経験的下限。production 昇格時は実運用 client の再接続所要時間を
 # 計測してから再評価する。
 RECONNECT_GRACE_SECONDS = "30"
+# LOGIN OK 後の AGREE 待ち TTL (秒)。両者 AGREE 前に片方が刺さった対局を DO 上
+# から自動解放する (Issue #600)。staging では E2E をテンポよく回すため短めの
+# 30 秒で運用し、production 昇格時に 60 秒へ揃える運用とする。`0` / 未設定 /
+# 非数値は 60 秒既定にフォールバック。
+AGREE_TIMEOUT_SECONDS = "30"
 ALLOW_FLOODGATE_FEATURES = "true"
 # viewer 配信 API (`/api/v1/games*` HTTP, `/ws/<id>/spectate` WS) を opt-in 有効化する。
 # staging は実機通電 (web client / spectator E2E) を回す前提で `"1"` を既定とする。
