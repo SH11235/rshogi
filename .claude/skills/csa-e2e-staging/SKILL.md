@@ -10,6 +10,26 @@ user-invocable: true
 `rshogi-csa-server-workers.<account>.workers.dev`) に対し、`csa_client` を 2
 プロセス起動して各シナリオを実機で通電する。
 
+## 0a. シナリオ選定 (どの change にどの scenario を流すか)
+
+7 シナリオすべてを毎回流す必要はない。**変更した経路に対応する subset** を
+選んで走らせるのが原則。A は smoke 通電基本として常に走らせる。
+
+| 変更内容 | 必要 scenario | メモ |
+|---|---|---|
+| Worker DO logic 全般 (game_room.rs / lobby.rs / config.rs) | **A** | smoke だけで充分なケース多数 |
+| reconnect grace / token (`enter_grace_window` / `Reconnect_Token` 周辺) | **A + C** | grace 経路 regression check |
+| AGREE / start_match / agree_timeout (#616 系) | **A + F (agree_timeout sub-case)** | LOGIN→Game_Summary→AGREE 待ちの alarm 検証 |
+| spectator broadcast (`%%MONITOR2ON`) | **A + D** | A と並走で broadcast 確認 |
+| Buoy / private match (`%%SETBUOY`) | **A + E** | admin command 経路 |
+| clock kind / preset 設計 (`CLOCK_PRESETS`) | **A + G** | preset 切替で `Time_Unit` / `Total_Time` を確認 |
+| csa_client 専用変更 (engine.rs / send 経路 / record 経路) | **A** | client 単独 smoke |
+| 連続対局 (`--max-games` ループ、`{game_seq}` 経路) | **A + B** | client 内部だが Workers 1 room = 1 対局制約とも整合 |
+| 上記を複数横断する大規模変更 | **A + 関連全部** | 該当 scenario を選ぶ |
+
+**「変更経路と無関係な scenario」は走らせない**。trivia な確認は CI / unit
+test 側で済んでいる前提で、本 skill は実機しか取れない通電を最小化して取る。
+
 ## 0. 前提と環境変数
 
 事前に以下が揃っていることを確認する。揃っていなければユーザに質問して埋めて
@@ -50,6 +70,24 @@ user-invocable: true
 
   HalfKP 系 (suisho5 等) を使う場合は `EvalDir` の代わりに `EvalFile` を渡し、
   `LS_*` / `FV_SCALE` 系は engine が無視するか必須でないかを user に確認する。
+
+  **`target/release/rshogi-usi` を engine に使う場合の注意**: rshogi-usi の
+  `LS_BUCKET_MODE` のデフォルトは `progress8kpabs` で、`LS_PROGRESS_COEFF` を
+  渡さないと `isready` 段階で panic する (`All weights are zero (progress.bin
+  not loaded)`)。HalfKP suisho5 を使う smoke でも **必ず `LS_PROGRESS_COEFF` を
+  指定** すること:
+
+  ```text
+  EvalFile=/abs/path/to/halfkp_256x2-32-32_crelu/suisho5.bin,
+  FV_SCALE=24,
+  LS_PROGRESS_COEFF=/abs/path/to/progress.bin,
+  USI_Hash=256,Threads=1,MinimumThinkingTime=100,
+  NetworkDelay=0,NetworkDelay2=0,PvInterval=0
+  ```
+
+  本リポでは `/mnt/nvme1/development/bullet-shogi/data/progress/` 配下に
+  `progress_hao_full_cuda.bin` 等が常備されている前提。OSS 利用者で同様の
+  ファイルが無い場合は YO sfnnwop1536 等の external engine を選ぶ。
 - **`--game-name` と `--room-id` の関係** (strict mode 必須事項):
   - `--target` 経路で `--game-name <preset>` を渡すと LOGIN id は
     `<handle>+<preset>+<color>` になる (URL の `<room_id>` とは独立)
@@ -294,16 +332,59 @@ wscat -c "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws/<room
 
 シナリオ A 実行中に以下を起こすと各終局理由がトリガーされる:
 
-| 操作 | 期待される終局 | R2 棋譜末尾 |
+| 操作 | 期待される終局 | R2 棋譜末尾 / 備考 |
 |---|---|---|
 | 黒 client を `Ctrl+C` で kill (grace 無効構成、または grace 期限切れ) | `#ABNORMAL` + 相手 `#WIN` | `%CHUDAN` |
 | `byoyomi (100ms) + α` だけ engine 思考を遅らせる | `#TIME_UP` + `#LOSE/#WIN` | `#TIME_UP` 中間行 + 結果行 |
 | 不正な指し手を送る (`wscat` 経由で `+7775FU` 等の無効手) | `#ILLEGAL_MOVE` + `#LOSE/#WIN` | `#ILLEGAL_MOVE` |
+| 両 LOGIN 後 AGREE を送らず TTL 待ち (#616) | 両 player に `##[ERROR] agree_timeout` + WS close (code 1011 "match aborted") | **R2 export なし**、live-games-index にも残らない (`play_started_at_ms` None で skip) |
 
 `#TIME_UP` を 100ms byoyomi で再現するには engine 思考を 100ms より遅くするのが
 最短。NNUE モデル未 load または `Hash = 1024` 等の memory pressure で 1 手目に
 間に合わない局面を作れる。`#ILLEGAL_MOVE` は `wscat` 経由が確実
 (csa_client は engine の合法手しか送らないため)。
+
+### `agree_timeout` sub-case (#616) の最短再現手順
+
+`csa_client` は LOGIN→Game_Summary→自動 AGREE まで一気通貫で走るため、AGREE を
+**送らない** 動作には別ツールが必要。`ws` (Node.js) で 2 session 並行起動するのが
+最短:
+
+```js
+// /tmp/agree_timeout_test.js
+const WebSocket = require("ws");
+const room = process.argv[2];
+const baseUrl = "wss://rshogi-csa-server-workers-staging.<account>.workers.dev/ws";
+const preset = "byoyomi-msec-10-100";
+function startSession(handle, color) {
+    const ws = new WebSocket(`${baseUrl}/${room}`);
+    ws.on("open", () => ws.send(`LOGIN ${handle}+${preset}+${color} testpw\n`));
+    ws.on("message", (d) => process.stdout.write(`[${color}] ${d}`));
+    ws.on("close", (c, r) => console.log(`[${color}] closed code=${c} reason=${r}`));
+    return ws;
+}
+const black = startSession("alice", "black");
+const white = startSession("bob", "white");
+setTimeout(() => { black.close(); white.close(); process.exit(0); }, 90000);
+```
+
+```bash
+cd /tmp && npm install ws >/dev/null
+ROOM=e2e-agree-$(date +%H%M%S)
+NODE_PATH=/tmp/node_modules timeout 95 node /tmp/agree_timeout_test.js "$ROOM"
+```
+
+期待観測 (`AGREE_TIMEOUT_SECONDS=30` 構成):
+
+- 両 session に `LOGIN:... OK` → `BEGIN Game_Summary` ... `Reconnect_Token:...` →
+  `END Game_Summary` まで普通に届く
+- AGREE を送らず約 30 秒経過後、両 session に `##[ERROR] agree_timeout` 受信
+- 続いて WS close (code 1011, reason "match aborted")
+- viewer API: `live_games` に残らない、`/api/v1/games/<game_id>` は **404**
+  (R2 export 自体が起きない)
+
+`AGREE_TIMEOUT_SECONDS` の値は wrangler の `[vars]` を参照
+(staging 既定 30s / production 既定 60s)。
 
 ## 8. シナリオ G: 時計 kind 切替確認
 
@@ -338,6 +419,41 @@ CLOCK_PRESETS = '''[
    ```
 2. ローカルの `/tmp/<scenario>-*.toml` / `./records/` 配下を必要に応じて破棄
 
+## 運用上の落とし穴 (実機で踏みやすい点)
+
+### `csa_client` ログは INFO レベルに **対局中の指し手は出ない**
+
+INFO ログに見えるのは「ログイン成功」「対局情報受信」「対局開始」「対局終了」
+のような lifecycle event のみ。対局中に新しいログが出ないのは正常。生存確認は
+`pgrep -f csa_client` または engine への `wrangler tail` で行う。
+
+### Scenario C で kill から `force_abnormal` までの所要は **30 秒ではなく
+~100 秒**
+
+`kill -KILL` は CSA-level の disconnect message を送らないため、server 側は
+TCP/WS keep-alive のタイムアウトで切断を検知する。Cloudflare WS の idle
+timeout は概ね 70〜90 秒なので、`kill -KILL` から `enter_grace_window` までで
+70〜90 秒、その後 `RECONNECT_GRACE_SECONDS` (既定 30s) を待って `force_abnormal`
+発火する。合計 100〜120 秒程度を見込む。grace 値だけを基準に待つと早合点する。
+
+### `pgrep -f <pattern>` の self-match に注意
+
+`until [ "$(pgrep -f 'csa_client.*<room>' | wc -l)" = "0" ]` のような
+監視ループは、bash 自体が pgrep の検索対象に乗ってしまい (`/bin/bash -c "...
+csa_client.*<room> ..."` の形でコマンドラインに pattern が含まれる) いつまでも
+0 にならない。回避するには:
+
+- `pgrep -f` の代わりに **PID で監視**: `kill -0 "$PID" 2>/dev/null` で生存確認
+- または pattern に bash には含まれない要素を入れる: `pgrep -f
+  'target/release/csa_client.*<room>'` (フルパス + room 組合せ)
+
+### 並列 background process は `()` subshell で detach すると wait が効かない
+
+`( cmd > log 2>&1 & )` は外側 subshell の中で background させるため、外側 subshell
+は即 exit し、`wait` が拾えない。**素直に `&` だけで background 化する** か、
+helper script ファイルに切り出して `nohup bash run.sh & echo $!` で PID を
+ファイルに保存する。今日の sample script: `runs/csa-e2e-20260508/run_scenario_c.sh`。
+
 ## トラブルシューティング
 
 | 症状 | 原因候補 | 対処 |
@@ -348,6 +464,8 @@ CLOCK_PRESETS = '''[
 | 双方接続するも対局が始まらない | `room_id` が黒/白で不一致 | URL `/ws/<room_id>` が両 toml で完全一致しているか確認 |
 | 対局終局後も R2 に書き込まれない | 終局イベントが落ちた | `vp exec wrangler tail` で error 確認 |
 | `#TIME_UP` で対局終了 (通常実行で意図せず) | engine 応答が server byoyomi に間に合わない | csa_client の `[time] margin_msec` を上げる (engine 渡し byoyomi がその分減り余裕生まれる) |
+| `rshogi-usi` が `LS_BUCKET_MODE=progress8kpabs requires LS_PROGRESS_COEFF` で panic | `LS_PROGRESS_COEFF` 未指定 (rshogi-usi 既定 mode は progress8kpabs) | options に `LS_PROGRESS_COEFF=/path/to/progress.bin` を追加。詳細は §0 engine 表下のメモ |
+| AGREE timeout を `csa_client` で再現できない | csa_client は LOGIN→Game_Summary→自動 AGREE まで一気通貫 | 別ツール (Node.js + `ws`) で LOGIN だけ送る。§7 `agree_timeout` sub-case 参照 |
 
 ## 関連実装 / doc
 
@@ -359,3 +477,5 @@ CLOCK_PRESETS = '''[
 - viewer API: `docs/csa-server/viewer_access_control.md`
 - 自動再接続実装: `crates/rshogi-csa-client/src/main.rs::attempt_reconnect`
 - server grace 経路: `crates/rshogi-csa-server-workers/src/game_room.rs::enter_grace_window`
+- AGREE timeout (#616): `crates/rshogi-csa-server-workers/src/game_room.rs::handle_agree_timeout_alarm`
+- AGREE timeout 設定 env: `wrangler.{staging,production,toml.example}.toml` の `AGREE_TIMEOUT_SECONDS`
