@@ -110,6 +110,11 @@ ADMIN_HANDLE = "admin"
 # 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
 # `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
 RECONNECT_GRACE_SECONDS = "0"
+# LOGIN OK 後の AGREE 待ち TTL (秒)。両者 AGREE 前に片方が刺さった対局を DO
+# 上から自動解放する (Issue #600)。`0` / 未設定 / 非数値は 60 秒既定にフォール
+# バック (TTL 0 = 無効化は memory / room 枠の長期占有リスクを再現するため許容
+# しない)。本ファイルでは local dev で長めに観察できるよう 60 秒を既定に置く。
+AGREE_TIMEOUT_SECONDS = "60"
 # Floodgate 系運用機能（再接続プロトコル等）を opt-in で有効化する。`true` / `1` /
 # `yes` / `on` で有効。空または `false` のとき該当機能要求は起動 fail-fast。
 ALLOW_FLOODGATE_FEATURES = "false"

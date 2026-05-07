@@ -165,6 +165,12 @@ pub enum PendingAlarmKind {
     /// grace 期間満了。grace registry を読み取り、切断側を `force_abnormal` で
     /// 敗北として確定させる経路を駆動する。
     GraceExpired,
+    /// AGREE 待ち TTL 満了。`start_match` 直後に予約し、両者 AGREE による
+    /// `HandleOutcome::GameStarted` で cancel される。発火時は対局成立前
+    /// (= `play_started_at_ms` 未確定 / `KEY_FINISHED` 未設定 / live-games-index
+    /// 未 put) のため、`force_abnormal` ではなく `abort_pending_match_with_error`
+    /// + `KEY_FINISHED` セット相当の経路で部屋を解放する (Issue #600)。
+    AgreeTimeout,
 }
 
 /// 再接続 grace が有効化されている (`grace > 0`) のときのみ対局者ごとの

@@ -95,6 +95,12 @@ impl ConfigKeys {
     /// 構成は `--allow-floodgate-features` (Workers では `ALLOW_FLOODGATE_FEATURES`)
     /// を要求する Floodgate features の opt-in 経路に乗る。
     pub const RECONNECT_GRACE_SECONDS: &'static str = "RECONNECT_GRACE_SECONDS";
+    /// LOGIN OK 後の AGREE 待ち TTL (秒)。`start_match` で Game_Summary を送信した
+    /// 直後に予約し、両者 AGREE 受領 (`HandleOutcome::GameStarted`) で cancel する。
+    /// 発火時は対局が成立する前に部屋を解放する (Issue #600)。
+    /// `0` または未設定は安全側既定 [`DEFAULT_AGREE_TIMEOUT_SEC`] にフォールバック
+    /// する (TTL 0 = 無効化は memory / room 枠の長期占有リスクを再現するため許容しない)。
+    pub const AGREE_TIMEOUT_SECONDS: &'static str = "AGREE_TIMEOUT_SECONDS";
     /// Floodgate 機能群を opt-in 有効化するブール変数。`true` / `1` / `yes` / `on`
     /// で有効。`reconnect_protocol` 等の Floodgate 系を要求する構成で必須。
     pub const ALLOW_FLOODGATE_FEATURES: &'static str = "ALLOW_FLOODGATE_FEATURES";
@@ -150,6 +156,7 @@ impl ConfigKeys {
         Self::BYOYOMI_MIN,
         Self::CLOCK_PRESETS,
         Self::RECONNECT_GRACE_SECONDS,
+        Self::AGREE_TIMEOUT_SECONDS,
         Self::ALLOW_FLOODGATE_FEATURES,
         Self::ALLOW_VIEWER_API,
         Self::LOBBY_QUEUE_SIZE_LIMIT,
@@ -170,6 +177,11 @@ impl ConfigKeys {
 /// `None` / 空文字 / パース失敗時のフォールバックとして参照する。
 pub(crate) const DEFAULT_CHALLENGE_TTL_SEC: u64 = 3600;
 
+/// `AGREE_TIMEOUT_SECONDS` 既定値 (60 秒)。TCP frontend は 5 分既定だが、Workers
+/// DO は 1 部屋 = 1 instance で memory / room 枠を専有するため、より短めの既定で
+/// stuck DO を素早く解放する設計を採る (Issue #600)。
+pub(crate) const DEFAULT_AGREE_TIMEOUT_SEC: u64 = 60;
+
 /// `CHALLENGE_TTL_SEC` 文字列を `Duration` へ解決する。`None` / 空文字 /
 /// 非数値 / `u64` 範囲外は [`DEFAULT_CHALLENGE_TTL_SEC`] にフォールバック
 /// する (challenge TTL 不正で全 `CHALLENGE_LOBBY` 発行が止まる事態を避ける
@@ -183,6 +195,22 @@ pub fn parse_challenge_ttl_duration(raw: Option<&str>) -> std::time::Duration {
     match trimmed.parse::<u64>() {
         Ok(secs) => std::time::Duration::from_secs(secs),
         Err(_) => std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC),
+    }
+}
+
+/// `AGREE_TIMEOUT_SECONDS` 文字列を `Duration` へ解決する。
+///
+/// `None` / 空文字 / `0` / 非数値 / `u64` 範囲外は [`DEFAULT_AGREE_TIMEOUT_SEC`]
+/// にフォールバックする (env 不正で stuck DO が無限残存する事態を避ける安全側挙動)。
+/// `> 0` の正値はそのまま秒として `Duration` にする。
+pub fn parse_agree_timeout_duration(raw: Option<&str>) -> std::time::Duration {
+    let trimmed = raw.unwrap_or("").trim();
+    if trimmed.is_empty() {
+        return std::time::Duration::from_secs(DEFAULT_AGREE_TIMEOUT_SEC);
+    }
+    match trimmed.parse::<u64>() {
+        Ok(0) | Err(_) => std::time::Duration::from_secs(DEFAULT_AGREE_TIMEOUT_SEC),
+        Ok(secs) => std::time::Duration::from_secs(secs),
     }
 }
 
@@ -491,6 +519,33 @@ mod tests {
     fn parse_clock_spec_rejects_unknown_kind() {
         let err = parse_clock_spec(Some("weird"), None, None, None, None, None, None).unwrap_err();
         assert!(err.contains("countdown|countdown_msec|fischer|stopwatch"));
+    }
+
+    #[test]
+    fn parse_agree_timeout_duration_defaults_when_unset_or_blank_or_zero() {
+        let default = std::time::Duration::from_secs(DEFAULT_AGREE_TIMEOUT_SEC);
+        assert_eq!(parse_agree_timeout_duration(None), default);
+        assert_eq!(parse_agree_timeout_duration(Some("")), default);
+        assert_eq!(parse_agree_timeout_duration(Some(" \t ")), default);
+        // `0` は「無効化」を意図した運用ミスと解釈し、stuck DO の長期占有を避ける
+        // ため安全側既定にフォールバックする (TTL 0 = 無効化は許容しない)。
+        assert_eq!(parse_agree_timeout_duration(Some("0")), default);
+    }
+
+    #[test]
+    fn parse_agree_timeout_duration_accepts_positive_seconds() {
+        assert_eq!(parse_agree_timeout_duration(Some("30")), std::time::Duration::from_secs(30),);
+        assert_eq!(
+            parse_agree_timeout_duration(Some(" 120\n")),
+            std::time::Duration::from_secs(120),
+        );
+    }
+
+    #[test]
+    fn parse_agree_timeout_duration_falls_back_on_non_numeric() {
+        let default = std::time::Duration::from_secs(DEFAULT_AGREE_TIMEOUT_SEC);
+        assert_eq!(parse_agree_timeout_duration(Some("forever")), default);
+        assert_eq!(parse_agree_timeout_duration(Some("-5")), default);
     }
 
     #[test]

@@ -64,7 +64,8 @@ use rshogi_csa_server::{FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryC
 
 use crate::attachment::{Role, WsAttachment, parse_login_handle};
 use crate::config::{
-    ConfigKeys, parse_clock_presets, parse_clock_spec, resolve_reconnect_grace_from_strings,
+    ConfigKeys, parse_agree_timeout_duration, parse_clock_presets, parse_clock_spec,
+    resolve_reconnect_grace_from_strings,
 };
 use crate::datetime::{format_csa_datetime, format_date_path, format_rfc3339_utc};
 use crate::floodgate_history::R2FloodgateHistoryStorage;
@@ -337,12 +338,16 @@ impl DurableObject for GameRoom {
             return Response::ok("already finished");
         }
 
-        // alarm 種別タグを読み、`GraceExpired` 経路だけ grace registry の処理に
-        // 委譲する。既定値 (タグ未設定) は時間切れ駆動とみなす。
+        // alarm 種別タグを読み、`GraceExpired` / `AgreeTimeout` 経路を分岐する。
+        // 既定値 (タグ未設定 / `TimeUp`) は時間切れ駆動とみなす。
         let kind = self.load_pending_alarm_kind().await?;
         if matches!(kind, Some(PendingAlarmKind::GraceExpired)) {
             self.handle_grace_expired_alarm().await?;
             return Response::ok("grace_expired handled");
+        }
+        if matches!(kind, Some(PendingAlarmKind::AgreeTimeout)) {
+            self.handle_agree_timeout_alarm().await?;
+            return Response::ok("agree_timeout handled");
         }
 
         self.ensure_core_loaded().await?;
@@ -627,6 +632,26 @@ impl GameRoom {
         self.send_to_role(Role::Black, &summary_black).await?;
         self.send_to_role(Role::White, &summary_white).await?;
 
+        // AGREE 待ち TTL を予約する (Issue #600)。LOGIN OK 後に AGREE が届かない
+        // まま片方が刺さると、`/api/v1/games/live` に出ない (mark_play_started が
+        // 走らないので live-games-index に put しない) のに DO 側では memory /
+        // room 枠を専有し続ける edge case を解消する。
+        //
+        // - 両者 AGREE で `HandleOutcome::GameStarted` が観測されたら
+        //   `clear_agree_timeout_tag` で kind タグだけ削除する。alarm 本体は
+        //   直後の `reschedule_turn_alarm` が turn budget で上書きするため、
+        //   別途 cancel する必要はない (タグが無いので alarm は TimeUp として処理される)。
+        // - alarm が `AgreeTimeout` のまま発火したら `handle_agree_timeout_alarm` で
+        //   部屋を解放する (`abort_pending_match_with_error` 相当 + `KEY_FINISHED`
+        //   セット)。AGREE 前なので live-games-index は put 前 (cleanup 不要)、
+        //   `play_started_at_ms` も None のまま (R2 棋譜エクスポート skip)。
+        let agree_timeout = resolve_agree_timeout(&self.env);
+        self.state
+            .storage()
+            .put(KEY_PENDING_ALARM_KIND, &PendingAlarmKind::AgreeTimeout)
+            .await?;
+        self.state.storage().set_alarm(agree_timeout).await?;
+
         Ok(true)
     }
 
@@ -679,6 +704,10 @@ impl GameRoom {
         // Playing 開始を確定できた瞬間だけ cfg を更新（冪等）。
         if let HandleOutcome::GameStarted = result.outcome {
             self.mark_play_started(now).await?;
+            // AGREE 待ち TTL タグを片付ける (Issue #600)。alarm 本体は直後の
+            // `reschedule_turn_alarm` が turn budget で上書きするため、タグだけ
+            // 消せば後続 alarm 発火は既定 (TimeUp) として処理される。
+            self.clear_agree_timeout_tag().await;
         }
 
         // 着手を永続化。MoveAccepted の場合のみ moves テーブルに append する。
@@ -2226,6 +2255,62 @@ impl GameRoom {
             .await;
         Ok(())
     }
+
+    /// AGREE 待ち TTL タグだけを片付ける best-effort helper (Issue #600)。
+    /// `HandleOutcome::GameStarted` 観測時に呼ぶ。`KEY_GRACE_REGISTRY` は
+    /// AGREE 経路では存在しない (grace 経路は対局成立後にしか入らない) ため
+    /// 触らない。
+    async fn clear_agree_timeout_tag(&self) {
+        let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+    }
+
+    /// alarm が `AgreeTimeout` 種別で発火した経路 (Issue #600)。
+    ///
+    /// - 既に終局済 / 対局成立済の場合は no-op (race ガード)。
+    /// - そうでなければ両 player WS に `##[ERROR] agree_timeout` を送って close
+    ///   し、slot を解放、`KEY_FINISHED` で再 LOGIN を弾く。`play_started_at_ms`
+    ///   が None のまま到達するため live-games-index は put 前で cleanup 不要、
+    ///   R2 棋譜エクスポートも skip する (`finalize_if_ended` を呼ばない)。
+    /// - `core` が in-memory に残っていれば落とす (= 後続の `ensure_core_loaded`
+    ///   は `KEY_FINISHED` ガードで早期 return する)。
+    async fn handle_agree_timeout_alarm(&self) -> Result<()> {
+        // 終局済 (既に何らかの経路で確定) ならタグだけ片付けて終了。
+        if self.load_finished().await?.is_some() {
+            let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+            return Ok(());
+        }
+        // race: alarm 直前で AGREE が成立していて `mark_play_started` 済なら
+        // 何もしない。タグも `clear_agree_timeout_tag` 経路で消える (race で
+        // 残っているなら念のため明示削除)。
+        let cfg_opt: Option<PersistedConfig> = self.state.storage().get(KEY_CONFIG).await?;
+        if let Some(cfg) = cfg_opt.as_ref() {
+            if cfg.play_started_at_ms.is_some() {
+                let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+                return Ok(());
+            }
+        }
+
+        console_log!("[GameRoom] agree timeout fired; releasing pending match");
+        // `abort_pending_match_with_error` と同じ pending 解放ロジックを再利用
+        // して、両 player に `##[ERROR] agree_timeout` を返した上で slot を空に
+        // 戻す。
+        self.abort_pending_match_with_error("##[ERROR] agree_timeout").await?;
+        // 後続の LOGIN を弾くため `KEY_FINISHED` を立てる。`result_code` は
+        // 終局集計には乗らない (R2 棋譜・games-index も put しない) が、
+        // `load_finished` ガードを駆動する目的で観測可能な値を埋めておく。
+        let finished = FinishedState {
+            result_code: "agree_timeout".to_owned(),
+            ended_at_ms: self.now_ms(),
+        };
+        self.state.storage().put(KEY_FINISHED, &finished).await?;
+        // alarm 種別タグを片付ける (alarm は既に発火済なので `delete_alarm` は
+        // 不要だが、防御的に明示削除しても副作用はない)。
+        let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+        // 万一 `core` が残っていれば落とす (`ensure_core_loaded` は finished
+        // ガードで以後何もロードしない)。
+        self.core.borrow_mut().take();
+        Ok(())
+    }
 }
 
 /// 末尾改行を付けて 1 行送出する。CSA 行は改行終端が契約なので、
@@ -2304,6 +2389,15 @@ fn resolve_clock_spec_for_game(env: &Env, game_name: &str) -> Result<ClockSpec> 
 ///
 /// 実体ロジックは [`resolve_reconnect_grace_from_strings`] (host 単体テスト可能な
 /// pure helper) に委譲し、本関数は `worker::Env` 依存を切り出す薄い shim に閉じる。
+/// `AGREE_TIMEOUT_SECONDS` env を読み、AGREE 待ち TTL を `Duration` で返す
+/// (Issue #600)。値の解釈は [`parse_agree_timeout_duration`] に従う:
+/// `None` / 空文字 / `0` / 非数値は [`crate::config::DEFAULT_AGREE_TIMEOUT_SEC`]
+/// にフォールバックする (env 不正で stuck DO が無限残存する事態を避ける)。
+fn resolve_agree_timeout(env: &Env) -> Duration {
+    let raw = env.var(ConfigKeys::AGREE_TIMEOUT_SECONDS).ok().map(|v| v.to_string());
+    parse_agree_timeout_duration(raw.as_deref())
+}
+
 fn resolve_reconnect_grace(env: &Env) -> std::result::Result<Duration, String> {
     let grace_raw = env.var(ConfigKeys::RECONNECT_GRACE_SECONDS).ok().map(|v| v.to_string());
     let allow_raw = env.var(ConfigKeys::ALLOW_FLOODGATE_FEATURES).ok().map(|v| v.to_string());

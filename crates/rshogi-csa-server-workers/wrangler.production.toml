@@ -134,6 +134,11 @@ CLOCK_PRESETS = '''[
 # 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化。
 # `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
 RECONNECT_GRACE_SECONDS = "30"
+# LOGIN OK 後の AGREE 待ち TTL (秒)。`start_match` で Game_Summary を送信した
+# 直後に予約し、両者 AGREE で cancel する。発火時は対局成立前に部屋を解放
+# (Issue #600)。`0` / 未設定 / 非数値は 60 秒既定にフォールバック (TTL 0 =
+# 無効化は memory / room 枠の長期占有リスクを再現するため許容しない)。
+AGREE_TIMEOUT_SECONDS = "60"
 # Floodgate 系運用機能（再接続プロトコル等）を opt-in 有効化する。`true` / `1` /
 # `yes` / `on` で有効。空または `false` のとき該当機能要求は起動 fail-fast。
 ALLOW_FLOODGATE_FEATURES = "true"
