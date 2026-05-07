@@ -299,7 +299,7 @@ jobs:
       # production 限定で fail-closed (staging は drain step を持たないので非該当)。
       # script 実体: scripts/check-csa-drain.sh。設計詳細は §12 を参照。
       - name: Drain in-flight games (production)
-        if: steps.check.outputs.can_deploy == 'true' && inputs.force_deploy != true
+        if: steps.check.outputs.can_deploy == 'true' && inputs.force_deploy != 'true'
         env:
           DRAIN_URL: ${{ vars.WORKERS_DRAIN_URL }}
           MAX_WAIT: ${{ inputs.drain_max_wait_sec }}

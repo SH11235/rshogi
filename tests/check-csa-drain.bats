@@ -158,6 +158,21 @@ run_drain() {
     [[ "$output" == *'"drained":true'* ]]
 }
 
+# T10 pagination + count > 0: page1 に live_games 1 件、N=3 観測されない
+@test "T10 pagination with nonzero: stable counter does not advance" {
+    write_responses \
+        '200|{"live_games":[{"game_id":"g1"}],"next_cursor":"tok"}' \
+        '200|{"live_games":[],"next_cursor":null}'
+    run "$SCRIPT" \
+        --live-url "https://example.test/api/v1/games/live" \
+        --poll-interval-sec 0 \
+        --max-wait-sec 0 \
+        --retry-on-fetch-error 1 \
+        --require-stable-zero 3
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'"final_count":1'* ]]
+}
+
 # T11 schema anomaly: live_games フィールド欠落 → fetch error (exit 2)、drained 誤判定しない
 @test "T11 schema anomaly: missing live_games field -> exit 2 (not silent drained)" {
     write_responses \
@@ -219,17 +234,3 @@ run_drain() {
     [ "$status" -eq 2 ]
 }
 
-# T10 pagination + count > 0: page1 に live_games 1 件、N=3 観測されない
-@test "T10 pagination with nonzero: stable counter does not advance" {
-    write_responses \
-        '200|{"live_games":[{"game_id":"g1"}],"next_cursor":"tok"}' \
-        '200|{"live_games":[],"next_cursor":null}'
-    run "$SCRIPT" \
-        --live-url "https://example.test/api/v1/games/live" \
-        --poll-interval-sec 0 \
-        --max-wait-sec 0 \
-        --retry-on-fetch-error 1 \
-        --require-stable-zero 3
-    [ "$status" -eq 1 ]
-    [[ "$output" == *'"final_count":1'* ]]
-}

@@ -73,7 +73,7 @@ while [ $# -gt 0 ]; do
             ;;
         -h|--help)
             usage
-            exit "$EXIT_USAGE"
+            exit 0
             ;;
         *)
             echo "[drain] unknown argument: $1" >&2
@@ -97,6 +97,17 @@ case "$LIVE_URL" in
         exit "$EXIT_USAGE"
         ;;
 esac
+
+# 数値引数を `[[ =~ ^[0-9]+$ ]]` で early validate。算術式 `$(( ... ))` や
+# `[ "$N" -ge ... ]` で発生する不明瞭なシェルエラーを usage error に整える。
+for var_name in MAX_WAIT_SEC POLL_INTERVAL_SEC REQUIRE_STABLE_ZERO RETRY_ON_FETCH_ERROR; do
+    val="${!var_name}"
+    if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+        flag_name="--$(echo "$var_name" | tr '[:upper:]_' '[:lower:]-')"
+        echo "[drain] invalid value for $flag_name: expected non-negative integer, got: $val" >&2
+        exit "$EXIT_USAGE"
+    fi
+done
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "[drain] jq is required but not found in PATH" >&2
@@ -178,8 +189,10 @@ fetch_live_count_once() {
         fi
         total=$((total + count))
 
+        # `// ""` で null/absent を空文字に正規化する。schema check で type が
+        # null|string であることは保証済なので、空文字判定だけで終端を識別できる。
         cursor=$(printf '%s' "$body" | jq -r '.next_cursor // ""' 2>/dev/null) || cursor=""
-        if [ -z "$cursor" ] || [ "$cursor" = "null" ]; then
+        if [ -z "$cursor" ]; then
             break
         fi
     done
@@ -191,8 +204,8 @@ START_EPOCH=$(date +%s)
 STABLE=0
 LAST_COUNT=-1
 
-trap 'echo "[drain] interrupted (SIGTERM); flushing state and exiting" >&2; emit_result 1; exit '"$EXIT_TIMEOUT" TERM
-trap 'echo "[drain] interrupted (SIGINT); flushing state and exiting" >&2; emit_result 1; exit '"$EXIT_TIMEOUT" INT
+trap 'echo "[drain] interrupted (SIGTERM); flushing state and exiting" >&2; emit_result 0; exit '"$EXIT_TIMEOUT" TERM
+trap 'echo "[drain] interrupted (SIGINT); flushing state and exiting" >&2; emit_result 0; exit '"$EXIT_TIMEOUT" INT
 
 emit_result() {
     local drained="$1"
