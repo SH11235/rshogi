@@ -40,7 +40,7 @@ Options:
 Exit codes:
   0  drained (N consecutive zero observations)
   1  timeout (max-wait-sec elapsed before drained)
-  2  fetch error (5xx / parse failure persisted across retries)
+  2  fetch error (5xx persisted across retries, or response schema invalid)
   3  usage error
 EOF
 }
@@ -154,9 +154,22 @@ fetch_live_count_once() {
             sleep 10
         done
 
+        # schema 検証: `live_games` が array、`next_cursor` が null か string であることを
+        # `jq -e` で gate する。配列以外 / 欠落 / object 等は `length` が 0 を返し
+        # fail-open で drained 誤判定するリスクがあるため、必ず array 確認を通す。
         local count
-        if ! count=$(printf '%s' "$body" | jq -r '.live_games | length' 2>/dev/null); then
-            echo "[drain] json parse failed for $fetch_url" >&2
+        if ! count=$(printf '%s' "$body" | jq -er '
+            if (.live_games | type) != "array" then
+                error("live_games is not an array (type=\(.live_games | type))")
+            elif (has("next_cursor") | not) then
+                error("next_cursor field missing")
+            elif (.next_cursor != null and (.next_cursor | type) != "string") then
+                error("next_cursor must be null or string (type=\(.next_cursor | type))")
+            else
+                .live_games | length
+            end
+        ' 2>&1); then
+            echo "[drain] schema validation failed for $fetch_url: $count" >&2
             return 1
         fi
         if ! [[ "$count" =~ ^[0-9]+$ ]]; then

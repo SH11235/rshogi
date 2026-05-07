@@ -158,6 +158,67 @@ run_drain() {
     [[ "$output" == *'"drained":true'* ]]
 }
 
+# T11 schema anomaly: live_games フィールド欠落 → fetch error (exit 2)、drained 誤判定しない
+@test "T11 schema anomaly: missing live_games field -> exit 2 (not silent drained)" {
+    write_responses \
+        '200|{"ok":true}' \
+        '200|{"ok":true}' \
+        '200|{"ok":true}'
+    run "$SCRIPT" \
+        --live-url "https://example.test/api/v1/games/live" \
+        --poll-interval-sec 0 \
+        --max-wait-sec 60 \
+        --retry-on-fetch-error 2 \
+        --require-stable-zero 3
+    [ "$status" -eq 2 ]
+    [[ "$output" != *'"drained":true'* ]]
+}
+
+# T12 schema anomaly: live_games が null
+@test "T12 schema anomaly: live_games is null -> exit 2" {
+    write_responses \
+        '200|{"live_games":null,"next_cursor":null}' \
+        '200|{"live_games":null,"next_cursor":null}' \
+        '200|{"live_games":null,"next_cursor":null}'
+    run "$SCRIPT" \
+        --live-url "https://example.test/api/v1/games/live" \
+        --poll-interval-sec 0 \
+        --max-wait-sec 60 \
+        --retry-on-fetch-error 2 \
+        --require-stable-zero 3
+    [ "$status" -eq 2 ]
+}
+
+# T13 schema anomaly: live_games が object
+@test "T13 schema anomaly: live_games is object -> exit 2" {
+    write_responses \
+        '200|{"live_games":{},"next_cursor":null}' \
+        '200|{"live_games":{},"next_cursor":null}' \
+        '200|{"live_games":{},"next_cursor":null}'
+    run "$SCRIPT" \
+        --live-url "https://example.test/api/v1/games/live" \
+        --poll-interval-sec 0 \
+        --max-wait-sec 60 \
+        --retry-on-fetch-error 2 \
+        --require-stable-zero 3
+    [ "$status" -eq 2 ]
+}
+
+# T14 schema anomaly: next_cursor が number 等の不正型
+@test "T14 schema anomaly: next_cursor is integer -> exit 2" {
+    write_responses \
+        '200|{"live_games":[],"next_cursor":42}' \
+        '200|{"live_games":[],"next_cursor":42}' \
+        '200|{"live_games":[],"next_cursor":42}'
+    run "$SCRIPT" \
+        --live-url "https://example.test/api/v1/games/live" \
+        --poll-interval-sec 0 \
+        --max-wait-sec 60 \
+        --retry-on-fetch-error 2 \
+        --require-stable-zero 3
+    [ "$status" -eq 2 ]
+}
+
 # T10 pagination + count > 0: page1 に live_games 1 件、N=3 観測されない
 @test "T10 pagination with nonzero: stable counter does not advance" {
     write_responses \
