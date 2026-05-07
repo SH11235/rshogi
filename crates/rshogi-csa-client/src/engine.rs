@@ -116,14 +116,14 @@ pub type InfoCallback<'a> = dyn FnMut(&SearchInfo, &str) + 'a;
 /// use rshogi_csa_client::{run_game_session_with_events, UsiEngine, UsiEngineDriver};
 ///
 /// // 1. 具象 `UsiEngine` をそのまま渡す
-/// let mut engine = UsiEngine::spawn(&path, &options, ponder, timeout)?;
+/// let mut engine = UsiEngine::spawn(&path, &options, ponder, timeout, false)?;
 /// run_game_session_with_events(&config, &mut conn, &mut engine, shutdown, &mut sink)?;
 ///
 /// // 2. dyn dispatch で複数 engine 実装を切り替える
 /// let mut engine: Box<dyn UsiEngineDriver> = if use_builtin {
 ///     Box::new(BuiltinEngine::new(...))
 /// } else {
-///     Box::new(UsiEngine::spawn(&path, &options, ponder, timeout)?)
+///     Box::new(UsiEngine::spawn(&path, &options, ponder, timeout, false)?)
 /// };
 /// run_game_session_with_events(&config, &mut conn, &mut *engine, shutdown, &mut sink)?;
 /// ```
@@ -248,12 +248,18 @@ pub struct SearchInfo {
 }
 
 impl UsiEngine {
-    /// USIエンジンを起動し、初期化する
+    /// USIエンジンを起動し、初期化する。
+    ///
+    /// `stderr_passthrough` が true のとき、stderr reader thread は ring buffer
+    /// に push するのに加えて各行を `log::info!("[engine stderr] {line}")` で
+    /// csa_client log に多重化する。debug / 初期セットアップ時に engine 出力を
+    /// 即時確認するための機能で、通常稼働時は false を渡す。
     pub fn spawn(
         path: &Path,
         options: &HashMap<String, toml::Value>,
         ponder: bool,
         timeout: Duration,
+        stderr_passthrough: bool,
     ) -> Result<Self> {
         let mut cmd = Command::new(path);
         // 子プロセスを独立したプロセスグループで起動
@@ -314,6 +320,13 @@ impl UsiEngine {
                         // (PR #596 review で指摘された bug への対応)。
                         let raw = String::from_utf8_lossy(&buf).into_owned();
                         let line = raw.trim_end_matches('\r').to_owned();
+                        // passthrough 時は ring push と並行して log::info! で
+                        // csa_client log に多重化する。lock 取得前に行うのは
+                        // log macro 側の latency を mutex critical section に
+                        // 持ち込まないため (best-effort 経路、順序保証不要)。
+                        if stderr_passthrough {
+                            log::info!("[engine stderr] {line}");
+                        }
                         let mut tail = match stderr_tail_writer.lock() {
                             Ok(g) => g,
                             Err(p) => p.into_inner(),
@@ -656,13 +669,25 @@ impl UsiEngine {
             .and_then(|_| self.writer.flush());
         match result {
             Ok(()) => Ok(()),
-            Err(io_err) if io_err.kind() == std::io::ErrorKind::BrokenPipe => {
+            Err(io_err)
+                if matches!(
+                    io_err.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
                 // BrokenPipe = engine 死亡確定の強い signal (Linux primary scope)。
-                // Windows の `ConnectionAborted` / `ConnectionReset` は followup-J で対応。
+                // Windows の subprocess stdin 死亡は `ConnectionAborted` /
+                // `ConnectionReset` で報告されるため、`matches!` arm に追加して
+                // Windows でも engine 死亡確定経路として扱う。Linux で
+                // `ConnectionAborted/Reset` が stdin pipe に来ることはない
+                // (発生したら同じく fatal 扱いで safe) ので、`cfg(target_os)`
+                // gate は不要。
                 Err(self.engine_exited_error())
             }
             Err(io_err) => {
-                // BrokenPipe 以外は engine 生存中の transient error。
+                // 上記 fatal kind 以外は engine 生存中の transient error。
                 // `anyhow::Context::context` で source を保持しつつ伝搬。
                 Err(io_err).context("エンジン I/O エラー")
             }
