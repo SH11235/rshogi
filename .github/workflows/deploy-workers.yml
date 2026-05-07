@@ -299,7 +299,12 @@ jobs:
       # production 限定で fail-closed (staging は drain step を持たないので非該当)。
       # script 実体: scripts/check-csa-drain.sh。設計詳細は §12 を参照。
       - name: Drain in-flight games (production)
-        if: steps.check.outputs.can_deploy == 'true' && inputs.force_deploy != 'true'
+        # `inputs` context は typed boolean input を boolean のまま保持する
+        # (`github.event.inputs` は文字列化するが今回は触らない)。GitHub Actions の
+        # `==`/`!=` は loose coercion で `true == 'true'` が `1 == NaN` 扱いになり
+        # 文字列比較は意図通り動かないため、`!inputs.force_deploy` で boolean を
+        # 直接否定する。
+        if: steps.check.outputs.can_deploy == 'true' && !inputs.force_deploy
         env:
           DRAIN_URL: ${{ vars.WORKERS_DRAIN_URL }}
           MAX_WAIT: ${{ inputs.drain_max_wait_sec }}
