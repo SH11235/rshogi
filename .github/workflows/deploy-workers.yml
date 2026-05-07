@@ -53,6 +53,25 @@ on:
         options:
           - staging
           - production
+      # production deploy 時に drain step を bypass する緊急経路。
+      # `force_deploy_reason` が必須 (空 reject)。誤用防止のため Step Summary に
+      # banner を出し、`::warning::` で workflow log にも reason を残す。
+      # staging job では参照しない (canary 用途で drain 自体無し)。
+      force_deploy:
+        description: 'Bypass drain check (emergency hotfix only). Requires force_deploy_reason.'
+        type: boolean
+        default: false
+      force_deploy_reason:
+        description: 'Required when force_deploy=true. Will appear in audit log and Step Summary.'
+        type: string
+        default: ''
+      # production drain step の per-deploy override。default 3900s ≈ 65min は
+      # production CLOCK 上限 (`total_time*2 + byoyomi*max_moves`) + 余裕。
+      # 詳細は docs/csa-server/deployment.md §12 参照。
+      drain_max_wait_sec:
+        description: 'Max wait seconds for drain (default 3900 ≈ 65min worst-case game time).'
+        type: number
+        default: 3900
 
 # 同時 deploy を防ぐ。途中キャンセルすると build/upload 中の wrangler が中途半端な
 # 状態で止まる可能性があるため、`cancel-in-progress: false` で進行中 deploy は
@@ -222,7 +241,10 @@ jobs:
     name: Deploy to Cloudflare Workers (production)
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'production'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # drain step は default 3900s (≈65min) + build/deploy ≈10min + smoke + 余裕で 90 min。
+    # `force_deploy=true` のときは drain skip するので 20min 相当に収まるが、
+    # 上限は同一に保ち workflow 設定を 1 通りで管理する。
+    timeout-minutes: 90
     environment: rshogi-csa-server-workers-production
     env:
       RUSTFLAGS: ""
@@ -247,8 +269,57 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::production deploy skipped (environment secrets not configured)."
           fi
+      # `force_deploy=true` 利用時の reason を必須化。空 string なら early fail。
+      # ここで弾くことで checkout / toolchain setup の billed minutes を節約する。
+      # 通過時は Step Summary 1 行目に banner を出し、`::warning::` で workflow log
+      # にも reason を残す。詳細は docs/csa-server/deployment.md §12 参照。
+      - name: Validate force_deploy reason
+        if: steps.check.outputs.can_deploy == 'true'
+        env:
+          FORCE_DEPLOY: ${{ inputs.force_deploy }}
+          FORCE_DEPLOY_REASON: ${{ inputs.force_deploy_reason }}
+        run: |
+          if [[ "$FORCE_DEPLOY" == "true" && -z "$FORCE_DEPLOY_REASON" ]]; then
+            echo "::error::force_deploy=true requires force_deploy_reason (non-empty string)"
+            echo "::error::See docs/csa-server/deployment.md §12 for the emergency deploy procedure"
+            exit 1
+          fi
+          if [[ "$FORCE_DEPLOY" == "true" ]]; then
+            {
+              echo "> ⚠️ FORCE DEPLOY (drain bypassed): $FORCE_DEPLOY_REASON"
+              echo
+              echo "deploy では in-flight 対局の drain を skip しています。docs/csa-server/deployment.md §12 を参照。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::FORCE DEPLOY: drain bypassed. reason=$FORCE_DEPLOY_REASON"
+          fi
       - uses: actions/checkout@v5
         if: steps.check.outputs.can_deploy == 'true'
+      # in-flight 対局がゼロ件で安定するまで待つ best-effort drain。
+      # `force_deploy=true` のときは skip。`WORKERS_DRAIN_URL` 未設定は
+      # production 限定で fail-closed (staging は drain step を持たないので非該当)。
+      # script 実体: scripts/check-csa-drain.sh。設計詳細は §12 を参照。
+      - name: Drain in-flight games (production)
+        # `inputs` context は typed boolean input を boolean のまま保持する
+        # (`github.event.inputs` は文字列化するが今回は触らない)。GitHub Actions の
+        # `==`/`!=` は loose coercion で `true == 'true'` が `1 == NaN` 扱いになり
+        # 文字列比較は意図通り動かないため、`!inputs.force_deploy` で boolean を
+        # 直接否定する。
+        if: steps.check.outputs.can_deploy == 'true' && !inputs.force_deploy
+        env:
+          DRAIN_URL: ${{ vars.WORKERS_DRAIN_URL }}
+          MAX_WAIT: ${{ inputs.drain_max_wait_sec }}
+        run: |
+          if [ -z "$DRAIN_URL" ]; then
+            echo "::error::WORKERS_DRAIN_URL not set on rshogi-csa-server-workers-production Environment"
+            echo "::error::Configure the variable to the live API full URL (e.g. https://...workers.dev/api/v1/games/live)"
+            echo "::error::See docs/csa-server/deployment.md §12 for the configuration procedure"
+            exit 1
+          fi
+          bash scripts/check-csa-drain.sh \
+            --live-url "$DRAIN_URL" \
+            --max-wait-sec "$MAX_WAIT" \
+            --poll-interval-sec 30 \
+            --require-stable-zero 3
       - uses: dtolnay/rust-toolchain@stable
         if: steps.check.outputs.can_deploy == 'true'
       - name: Add wasm32 target to pinned toolchain
