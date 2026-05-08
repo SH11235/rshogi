@@ -132,3 +132,74 @@ curl -sS -o /dev/null -w "%{http_code}\n" "https://<host>/ws/<room>/spectate"
   のみを viewer 配信する前提に立つ。
 - API token / shared secret 経由の認可は現時点では未導入。Origin allowlist で
   必要な防御を担保する設計に閉じている。
+
+## 7. Eventual consistency contract
+
+`/api/v1/games/live` と `/api/v1/games/<game_id>` は best-effort な
+eventual consistency 前提で運用する。viewer / web client は以下の責務を持つ
+契約とする (https://github.com/SH11235/rshogi/issues/642)。
+
+### 7.1 各 endpoint の役割
+
+- **`/api/v1/games/live`**: **進行中対局の発見手段**。返ってきた entry は
+  「その時点で `live-games-index/` に存在した」だけで、対局が依然進行中である
+  ことを保証しない (eventual)。観戦したい client は entry の `game_id` を使って
+  `/ws/<game_id>/spectate` で WS spectate を開き、生イベントで実状態を確認する
+  運用が前提。
+- **`/api/v1/games/<game_id>`**: **終局済対局の単局取得専用** (CSA 棋譜 + meta
+  を返す)。進行中対局を本 endpoint で取得しても 404 を返す設計。
+
+つまり「live 一覧で得た game_id を即座に単局 get」する経路は本来想定されて
+いない (live は spectate に渡し、終局済は別経路 `/api/v1/games` で発見する)。
+本 §7 で扱う 404 は主に「終局直後の状態移行 race」と「viewer 側 cache の
+stale window」「export retry pending」に起因する。
+
+### 7.2 stale entry の発生経路
+
+- **edge cache stale window**: viewer 側 `caches.default` per-URL cache (60s TTL、
+  https://github.com/SH11235/rshogi/issues/636) は edge 限定だが、最大 60 秒間
+  list レスポンスが stale になり得る
+- **DO crash / R2 transient error 由来の orphan**: `finalize_if_ended` は
+  `export_kifu_to_r2()` → `KEY_FINISHED` set → `live-games-index/` delete の順で
+  動く。途中で DO が落ちる、または R2 delete が transient error で失敗すると、
+  終局済対局の live entry が一時的に残る (orphan)。orphan は cron sweep
+  (https://github.com/SH11235/rshogi/issues/629) が best-effort で掃除する
+- **export retry pending**: meta PUT / by-id PUT が失敗して
+  `KEY_EXPORT_PENDING` outbox に積まれている場合
+  (https://github.com/SH11235/rshogi/issues/623)、live は delete 済でも単局
+  meta が未配置で `/api/v1/games/<id>` 404 になる経路がある。retry 完了まで
+  状態が完全には収束しない
+
+### 7.3 client 側の責務
+
+- list で見えた entry に対する操作 (spectate / 単局 get) で 404 / 接続失敗が
+  返ったら **エラー UI を出さず単に skip** する graceful degradation を実装する
+- live 一覧の poll 間隔は **30 秒以上**を推奨 (edge cache 60s TTL を考慮)。
+  短い間隔で poll しても edge cache hit が増えるだけで stale 度は下がらない
+- 同じ cursor で 2 回 list を呼んでも結果集合が一致しない可能性がある
+  (pagination 中に entry が追加・削除されうる)。**cursor pagination は best
+  effort** として扱い、絶対網羅性は期待しない
+
+### 7.4 server 側の挙動 (best-effort, 保証ではない)
+
+- **delete idempotency**: `live-games-index` delete は R2 仕様上 idempotent。
+  ただし transient error / deadline / page 上限・meta PUT 失敗等で sweep が
+  1 回で完了しない経路は残るため「削除済 entry が再出現しない」絶対保証は
+  与えない。通常は次回 cron 周期で収束を試みる
+- **orphan 掃除の頻度**: `SWEEP_ONLY_CRON = "15,30,45 * * * *"` (15 分間隔、
+  https://github.com/SH11235/rshogi/issues/629)。R2 list deadline (25s) や
+  page 上限 (100 page) に達すると 1 cron 内で完了しない場合がある (次 cron で
+  継続)
+- **list の網羅性**: 保証しない (1 page 上限あり、`next_cursor` で連結)
+
+### 7.5 viewer 運用目標 (informative, 計測値ではない)
+
+実装に基づいた **目標値**。実 traffic での計測 / 観測には
+https://github.com/SH11235/rshogi/issues/625 (alerting / observability) の
+整備が必要。
+
+- list レスポンスの stale 収束目安: edge cache TTL 60s + sweep cron 1〜2 周期で
+  概ね 30〜45 分以内に整合状態へ収束する想定 (transient error / page 上限到達
+  時はさらに長くなりうる)
+- 単局 get の 404 は通常運用で稀。発生時の頻度・原因 breakdown は今後 alert /
+  metric の整備に応じて計測する
