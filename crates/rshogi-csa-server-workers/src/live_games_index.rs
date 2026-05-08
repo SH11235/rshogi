@@ -16,6 +16,11 @@
 //! - 終局 → R2 delete までは live に残る (viewer の click 時に既に終局済 cfg)
 //! - DO crash で put 済だが delete されない orphan が残るリスクあり
 //!   (orphan sweep は Issue #551 で扱う backfill ジョブに統合する)
+//! - Issue #636: viewer API (`/api/v1/games/live`) は `caches.default` で
+//!   60 秒 TTL の per-URL cache を被せる。R2 put / delete の反映に追加で
+//!   **最大 60 秒** の cache stale が乗る。具体的には:
+//!     - 対局開始 → live list に現れるまで: 上記 R2 put 反映 + 60 秒
+//!     - 終局 → live list から消えるまで: 上記 R2 delete 反映 + 60 秒
 //!
 //! pagination 中に entry が追加・削除されうるため、同じ cursor で 2 回 list を
 //! 呼んでも結果集合が一致しない。viewer 側は live entry を **発見手段** として

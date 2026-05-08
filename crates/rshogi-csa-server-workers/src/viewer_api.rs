@@ -29,6 +29,41 @@
 //! `check_origin` / `with_cors` の通過と `WS_ALLOWED_ORIGINS` allowlist 体系
 //! (Issue #550 で強化予定) に確実に乗ることを必ずレビューする。allowlist 未設定
 //! 環境での挙動 (= Origin ヘッダなしで通る) も含めて回帰させない。
+//!
+//! # Cloudflare Cache API による R2 Class B ops 削減 (Issue #636)
+//!
+//! 1 リクエストで `bucket.list` (1 RTT) + 各 entry `bucket.get` (最大 N=100 RTT)
+//! を消費する N+1 パターンを Cloudflare の `caches.default` で短期キャッシュする。
+//! cache key は **request URL 完全一致** (= path + query + method)。同一 cursor +
+//! 同一 limit の重複アクセスのみが hit する。
+//!
+//! 重要な不変条件 (round-2 review で確定):
+//! - cache に保存する `Response` は **origin-neutral**。`Access-Control-Allow-Origin`
+//!   と `Vary: Origin, ...` を含めず、`Cache-Control: public, max-age=<TTL>` と
+//!   `Content-Type: application/json` のみを残す。
+//! - cache hit / miss いずれの返却経路でも、最終ステップで [`with_cors`] により
+//!   現在 request の Origin に対する ACAO + Vary を被せる。
+//! - エラー応答 (400 / 403 / 404 / 502 / 503) は cache しない。`Cache-Control: no-store`
+//!   を明示して edge cache が誤って保持しないように倒す。
+//! - `ALLOW_VIEWER_API` kill-switch は [`try_handle`] 冒頭で評価されるため、
+//!   無効化中は cache lookup に到達しない。既存 cache entry は max-age 経過まで
+//!   edge に残るが viewer から参照されない。
+//!
+//! TTL は path 種別ごとに 2 値固定 (測定なし最適化禁止に従い細分化しない):
+//! - 終局済 list / live list: **60 秒**
+//! - 単局 GET (CSA + meta): **600 秒** (CSA / meta は immutable、edge 退避時の
+//!   再 fetch コストを下げるためやや長めに置く)
+//!
+//! ## live list の 60 秒キャッシュが意味すること
+//!
+//! `live-games-index/` の整合性モデル (`live_games_index.rs` 冒頭参照) はもとより
+//! best-effort eventual で、対局開始 / 終局のいずれでも瞬間整合は保証しない。
+//! cache 60 秒を被せたことで以下の 2 点が **最大 60 秒** 遅延しうるが、live list
+//! は viewer が候補発見に使うのみで、行クリック時に WS spectate で実状態確認する
+//! 設計のため許容範囲とみなす。
+//!
+//! - 対局開始 → live list に現れるまで (R2 put 反映遅延 + 最大 60 秒 cache stale)
+//! - 終局 → live list から消えるまで (R2 delete 反映遅延 + 最大 60 秒 cache stale)
 
 use serde::Serialize;
 use worker::{Env, Headers, Method, Request, Response, Result, Url};
@@ -89,7 +124,12 @@ pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
     if let Some(rest) = path.strip_prefix("/api/v1/games/") {
         if rest.is_empty() || rest.contains('/') {
             // 余分な階層 (`/api/v1/games/x/y`) や末尾 `/` は 404 で扱う。
-            return Ok(Some(Response::error("Not Found", 404)?));
+            // viewer API 配下のエラー応答は一律 `Cache-Control: no-store` を
+            // 付け、edge cache が誤って 404 を保持しないように倒す
+            // (Issue #636 review v1)。with_cors も通して ACAO + Vary を
+            // 揃える。
+            let resp = no_store_error("Not Found", 404)?;
+            return Ok(Some(with_cors(resp, req, env)?));
         }
         return Ok(Some(handle_get(req, env, rest).await?));
     }
@@ -180,19 +220,56 @@ struct GameResponse<'a> {
     meta: serde_json::Value,
 }
 
+/// cache TTL を path 種別から決める純粋ロジック。
+///
+/// Issue #636 で導入した `caches.default` per-URL cache の TTL 値固定化。
+/// 値は `viewer_api` モジュール doc に書いた契約と一致させ、テストで固定する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheableKind {
+    /// 終局済 / live いずれの一覧も 60 秒
+    List,
+    /// 単局 (CSA + meta は immutable) は 600 秒
+    SingleGame,
+}
+
+impl CacheableKind {
+    /// `Cache-Control` ヘッダ値 (200 OK 用) を返す。
+    pub(crate) fn cache_control_header(self) -> &'static str {
+        match self {
+            // public で max-age を設定しないと Cache API は put しない契約
+            // (worker 0.8 cache.rs 75-76 行)。
+            CacheableKind::List => "public, max-age=60",
+            CacheableKind::SingleGame => "public, max-age=600",
+        }
+    }
+}
+
 /// 終局済一覧ハンドラ。`games-index/` を 1 ページ list する。
+///
+/// Issue #636 の cache 経路:
+/// 1. allowlist チェック → 403 origin block の場合は no-store で即返却
+/// 2. cache.get (key = request URL) → hit なら ACAO 被せて返す
+/// 3. miss なら collect_index_page で R2 list + N×get → origin-neutral Response
+///    を生成して cache.put、ACAO 被せて返す
 async fn handle_list(req: &Request, env: &Env, url: &Url) -> Result<Response> {
-    let entries = match collect_index_page(req, env, url, GAMES_INDEX_PREFIX, "games_index").await?
-    {
-        CollectOutcome::Page(p) => p,
-        CollectOutcome::ErrorResponse(r) => return Ok(r),
-    };
-    let payload = ListResponse {
-        games: entries.entries,
-        next_cursor: entries.next_cursor,
-    };
-    let resp = Response::from_json(&payload)?;
-    with_cors(resp, req, env)
+    if let Some(blocked) = check_origin(req, env)? {
+        return Ok(blocked);
+    }
+    let client_kind = extract_client_kind(req);
+    serve_cached_list(
+        req,
+        env,
+        url,
+        CacheableKind::List,
+        GAMES_INDEX_PREFIX,
+        "games_index",
+        &client_kind,
+        |entries, next_cursor| ListResponse {
+            games: entries,
+            next_cursor,
+        },
+    )
+    .await
 }
 
 /// 進行中対局一覧ハンドラ。`live-games-index/` を 1 ページ list する。
@@ -200,25 +277,69 @@ async fn handle_list(req: &Request, env: &Env, url: &Url) -> Result<Response> {
 /// 終局済の `handle_list` と同じ pagination semantics を持ち、prefix と
 /// レスポンス key (`live_games`) のみが異なる。
 async fn handle_list_live(req: &Request, env: &Env, url: &Url) -> Result<Response> {
-    let entries =
-        match collect_index_page(req, env, url, LIVE_KEY_PREFIX, "live_games_index").await? {
-            CollectOutcome::Page(p) => p,
-            CollectOutcome::ErrorResponse(r) => return Ok(r),
-        };
-    let payload = LiveListResponse {
-        live_games: entries.entries,
-        next_cursor: entries.next_cursor,
-    };
-    let resp = Response::from_json(&payload)?;
-    with_cors(resp, req, env)
+    if let Some(blocked) = check_origin(req, env)? {
+        return Ok(blocked);
+    }
+    let client_kind = extract_client_kind(req);
+    serve_cached_list(
+        req,
+        env,
+        url,
+        CacheableKind::List,
+        LIVE_KEY_PREFIX,
+        "live_games_index",
+        &client_kind,
+        |entries, next_cursor| LiveListResponse {
+            live_games: entries,
+            next_cursor,
+        },
+    )
+    .await
 }
 
-/// `collect_index_page` の戻り値。原則 [`Self::Page`] を返すが、early return が
-/// 必要なエラー (Origin 拒否 / limit パース失敗 / R2 binding 失敗 / R2 list 失敗)
-/// は完成済 `Response` を [`Self::ErrorResponse`] に詰めて返す。
-enum CollectOutcome {
+/// 一覧系 (`/api/v1/games`, `/api/v1/games/live`) 共通の cache + R2 list 経路。
+///
+/// `payload_builder` は entries / next_cursor から最終 wire payload を組み立てる。
+/// 終局済 / 進行中で wire の root key (`games` / `live_games`) のみが異なるため、
+/// 関数オブジェクトで切り替える。
+async fn serve_cached_list<P, B>(
+    req: &Request,
+    env: &Env,
+    url: &Url,
+    kind: CacheableKind,
+    prefix: &str,
+    event_root: &str,
+    client_kind: &str,
+    payload_builder: B,
+) -> Result<Response>
+where
+    P: Serialize,
+    B: FnOnce(Vec<serde_json::Value>, Option<String>) -> P,
+{
+    let cache_key = req.url()?.to_string();
+    if let Some(hit) = cache_get_origin_neutral(&cache_key).await {
+        return with_cors(hit, req, env);
+    }
+
+    // miss: R2 list + N×get を実施し、origin-neutral Response を組み立てる。
+    let outcome = collect_index_page(env, url, prefix, event_root, client_kind).await?;
+    match outcome {
+        BuildOutcome::Page(page) => {
+            let payload = payload_builder(page.entries, page.next_cursor);
+            let mut resp = Response::from_json(&payload)?;
+            set_cache_control(&mut resp, kind.cache_control_header())?;
+            cache_put_origin_neutral(&cache_key, &mut resp, event_root, client_kind).await;
+            with_cors(resp, req, env)
+        }
+        BuildOutcome::ErrorNoStore(resp) => with_cors(resp, req, env),
+    }
+}
+
+/// `collect_index_page` の戻り値。Page は cache 可能、ErrorNoStore は cache しない。
+enum BuildOutcome {
     Page(IndexPage),
-    ErrorResponse(Response),
+    /// 400 / 502 / 503 を `Cache-Control: no-store` 付きで返す。
+    ErrorNoStore(Response),
 }
 
 /// 1 ページぶんの index entry を bytes get → JSON value 化したもの。
@@ -229,24 +350,19 @@ struct IndexPage {
 
 /// `games-index/` / `live-games-index/` 共通の 1 ページ走査ロジック。
 ///
+/// Origin チェックは呼び出し側 (`handle_list` / `handle_list_live`) で
+/// 済ませる契約。本関数は R2 にしかアクセスしない (= cache miss でのみ走る)。
+///
 /// `event_root` はログ event 名の prefix (`games_index` / `live_games_index`)。
 /// 失敗時の logfmt event はこれを土台に `<root>_list` / `<root>_get` /
 /// `<root>_read` / `<root>_parse` を組み立てる。
 async fn collect_index_page(
-    req: &Request,
     env: &Env,
     url: &Url,
     prefix: &str,
     event_root: &str,
-) -> Result<CollectOutcome> {
-    if let Some(blocked) = check_origin(req, env)? {
-        return Ok(CollectOutcome::ErrorResponse(blocked));
-    }
-
-    // 失敗ログに付与する `client_kind` をハンドラ冒頭で 1 度だけ正規化する。
-    // 正常系では使わないので、エラー経路でのみ参照する (Issue #564 設計 v4 §3)。
-    let client_kind = extract_client_kind(req);
-
+    client_kind: &str,
+) -> Result<BuildOutcome> {
     // クエリパラメータを 1 度だけ走査して `cursor` / `limit` を取り出す。
     let mut cursor: Option<String> = None;
     let mut limit_raw: Option<String> = None;
@@ -263,12 +379,8 @@ async fn collect_index_page(
         Some(s) => match s.parse::<u32>() {
             Ok(n) if (MIN_LIMIT..=MAX_LIMIT).contains(&n) => n,
             _ => {
-                let err = with_cors(
-                    Response::error(format!("limit must be {MIN_LIMIT}..={MAX_LIMIT}"), 400)?,
-                    req,
-                    env,
-                )?;
-                return Ok(CollectOutcome::ErrorResponse(err));
+                let err = no_store_error(format!("limit must be {MIN_LIMIT}..={MAX_LIMIT}"), 400)?;
+                return Ok(BuildOutcome::ErrorNoStore(err));
             }
         },
     };
@@ -276,9 +388,9 @@ async fn collect_index_page(
     let bucket = match env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
         Ok(b) => b,
         Err(e) => {
-            console_log_failed("kifu_bucket_binding", &client_kind, &e.to_string());
-            let err = with_cors(Response::error("Storage unavailable", 503)?, req, env)?;
-            return Ok(CollectOutcome::ErrorResponse(err));
+            console_log_failed("kifu_bucket_binding", client_kind, &e.to_string());
+            let err = no_store_error("Storage unavailable", 503)?;
+            return Ok(BuildOutcome::ErrorNoStore(err));
         }
     };
 
@@ -290,9 +402,9 @@ async fn collect_index_page(
     let page = match builder.execute().await {
         Ok(p) => p,
         Err(e) => {
-            console_log_failed(&format!("{event_root}_list"), &client_kind, &e.to_string());
-            let err = with_cors(Response::error("Storage error", 502)?, req, env)?;
-            return Ok(CollectOutcome::ErrorResponse(err));
+            console_log_failed(&format!("{event_root}_list"), client_kind, &e.to_string());
+            let err = no_store_error("Storage error", 502)?;
+            return Ok(BuildOutcome::ErrorNoStore(err));
         }
     };
 
@@ -306,7 +418,7 @@ async fn collect_index_page(
             Err(e) => {
                 console_log_failed(
                     &format!("{event_root}_get"),
-                    &client_kind,
+                    client_kind,
                     &format!("key={key} err={e}"),
                 );
                 continue;
@@ -326,7 +438,7 @@ async fn collect_index_page(
             Err(e) => {
                 console_log_failed(
                     &format!("{event_root}_read"),
-                    &client_kind,
+                    client_kind,
                     &format!("key={key} err={e}"),
                 );
                 continue;
@@ -337,7 +449,7 @@ async fn collect_index_page(
             Err(e) => {
                 console_log_failed(
                     &format!("{event_root}_parse"),
-                    &client_kind,
+                    client_kind,
                     &format!("key={key} err={e}"),
                 );
                 // 1 件壊れても他を返す (best-effort)。
@@ -350,7 +462,7 @@ async fn collect_index_page(
     } else {
         None
     };
-    Ok(CollectOutcome::Page(IndexPage {
+    Ok(BuildOutcome::Page(IndexPage {
         entries,
         next_cursor,
     }))
@@ -358,20 +470,57 @@ async fn collect_index_page(
 
 /// 単局ハンドラ。`<game_id>` (URL-decoded path 残部) を受け取り、kifu-by-id を
 /// 直接 get する。
+///
+/// 終局済棋譜は immutable のため Cache TTL を 600 秒で固定する (Issue #636)。
 async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response> {
     if let Some(blocked) = check_origin(req, env)? {
         return Ok(blocked);
     }
-
-    // 失敗ログに付与する `client_kind` をハンドラ冒頭で 1 度だけ正規化する
-    // (Issue #564 設計 v4 §3)。
     let client_kind = extract_client_kind(req);
+    let cache_key = req.url()?.to_string();
+    if let Some(hit) = cache_get_origin_neutral(&cache_key).await {
+        return with_cors(hit, req, env);
+    }
 
+    match build_single_game(env, game_id, &client_kind).await? {
+        SingleBuildOutcome::Game { game_id, csa, meta } => {
+            let payload = GameResponse {
+                game_id: game_id.as_str(),
+                csa,
+                meta,
+            };
+            let mut resp = Response::from_json(&payload)?;
+            set_cache_control(&mut resp, CacheableKind::SingleGame.cache_control_header())?;
+            cache_put_origin_neutral(&cache_key, &mut resp, "kifu_by_id", &client_kind).await;
+            with_cors(resp, req, env)
+        }
+        SingleBuildOutcome::ErrorNoStore(resp) => with_cors(resp, req, env),
+    }
+}
+
+/// 単局 build の結果。Game は cache する、それ以外は no-store。
+enum SingleBuildOutcome {
+    Game {
+        game_id: String,
+        csa: String,
+        meta: serde_json::Value,
+    },
+    ErrorNoStore(Response),
+}
+
+async fn build_single_game(
+    env: &Env,
+    game_id: &str,
+    client_kind: &str,
+) -> Result<SingleBuildOutcome> {
     let bucket = match env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
         Ok(b) => b,
         Err(e) => {
-            console_log_failed("kifu_bucket_binding", &client_kind, &e.to_string());
-            return with_cors(Response::error("Storage unavailable", 503)?, req, env);
+            console_log_failed("kifu_bucket_binding", client_kind, &e.to_string());
+            return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error(
+                "Storage unavailable",
+                503,
+            )?));
         }
     };
 
@@ -379,25 +528,21 @@ async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response>
     let csa_obj = match bucket.get(&by_id_key).execute().await {
         Ok(o) => o,
         Err(e) => {
-            console_log_failed("kifu_by_id_get", &client_kind, &format!("key={by_id_key} err={e}"));
-            return with_cors(Response::error("Storage error", 502)?, req, env);
+            console_log_failed("kifu_by_id_get", client_kind, &format!("key={by_id_key} err={e}"));
+            return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error("Storage error", 502)?));
         }
     };
     let Some(csa_obj) = csa_obj else {
-        return with_cors(Response::error("Not Found", 404)?, req, env);
+        return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error("Not Found", 404)?));
     };
     let Some(body) = csa_obj.body() else {
-        return with_cors(Response::error("Not Found", 404)?, req, env);
+        return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error("Not Found", 404)?));
     };
     let csa_text = match body.text().await {
         Ok(t) => t,
         Err(e) => {
-            console_log_failed(
-                "kifu_by_id_read",
-                &client_kind,
-                &format!("key={by_id_key} err={e}"),
-            );
-            return with_cors(Response::error("Storage error", 502)?, req, env);
+            console_log_failed("kifu_by_id_read", client_kind, &format!("key={by_id_key} err={e}"));
+            return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error("Storage error", 502)?));
         }
     };
 
@@ -410,25 +555,23 @@ async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response>
             // primary meta が無い (backfill 未実施 or meta put 失敗)。本 issue
             // scope では legacy fallback を行わず 404 を返す (Non-goals 設計
             // v3 §10)。
-            return with_cors(Response::error("Not Found", 404)?, req, env);
+            return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error("Not Found", 404)?));
         }
         Err(e) => {
             console_log_failed(
                 "kifu_by_id_meta_lookup",
-                &client_kind,
+                client_kind,
                 &format!("game_id={game_id} err={e}"),
             );
-            return with_cors(Response::error("Storage error", 502)?, req, env);
+            return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error("Storage error", 502)?));
         }
     };
 
-    let payload = GameResponse {
-        game_id,
+    Ok(SingleBuildOutcome::Game {
+        game_id: game_id.to_owned(),
         csa: csa_text,
         meta,
-    };
-    let resp = Response::from_json(&payload)?;
-    with_cors(resp, req, env)
+    })
 }
 
 /// `kifu-by-id/<id>.meta.json` を直接 get して `game_id` の meta を返す。
@@ -461,6 +604,9 @@ async fn find_meta_for(
 /// 許可リストに含まれていれば通し、含まれない場合は 403。Origin ヘッダ未送信の
 /// クライアント (curl 等) は allowlist 非空のときのみ素通しする
 /// （[`evaluate`] の仕様）。
+///
+/// 403 origin block レスポンスには `Cache-Control: no-store` を付与し、
+/// edge / ブラウザ cache が誤って blocked 応答を保持しないようにする。
 fn check_origin(req: &Request, env: &Env) -> Result<Option<Response>> {
     let allow_csv = env
         .var(ConfigKeys::WS_ALLOWED_ORIGINS)
@@ -471,12 +617,12 @@ fn check_origin(req: &Request, env: &Env) -> Result<Option<Response>> {
     if allow_list.is_empty() {
         // allowlist 未設定は viewer API では fail-closed。設定漏れを 403 で
         // 顕在化させ、無認可公開を防ぐ。
-        return Ok(Some(Response::error("Forbidden Origin", 403)?));
+        return Ok(Some(no_store_error("Forbidden Origin", 403)?));
     }
     let origin_header = req.headers().get("Origin")?;
     match evaluate(origin_header.as_deref(), allow_list.iter()) {
         OriginDecision::Allow => Ok(None),
-        OriginDecision::NotAllowed => Ok(Some(Response::error("Forbidden Origin", 403)?)),
+        OriginDecision::NotAllowed => Ok(Some(no_store_error("Forbidden Origin", 403)?)),
     }
 }
 
@@ -492,6 +638,10 @@ fn check_origin(req: &Request, env: &Env) -> Result<Option<Response>> {
 /// 双方に適用することで、CDN / ブラウザキャッシュが Origin あるいは
 /// preflight で送られた `Access-Control-Request-Headers` を取り違えて
 /// レスポンスを共有する事故を防ぐ。
+///
+/// Issue #636: cache から取り出した origin-neutral な Response も最終的に本関数で
+/// ACAO + Vary を被せる。cache に保存する側では ACAO を含めない (origin-neutral
+/// 化) ことで Origin ごとに cache が分散しないようにしている。
 fn with_cors(mut resp: Response, req: &Request, env: &Env) -> Result<Response> {
     let allow_csv = env
         .var(ConfigKeys::WS_ALLOWED_ORIGINS)
@@ -518,10 +668,92 @@ fn with_cors(mut resp: Response, req: &Request, env: &Env) -> Result<Response> {
     Ok(resp)
 }
 
+/// `Cache-Control: no-store` を付けたエラー応答を組み立てる。
+///
+/// 400 / 403 / 404 / 502 / 503 等、cache してはいけない応答全てに使う共通ヘルパ。
+/// `with_cors` で ACAO + Vary を被せる前段の素レスポンスを返す。
+fn no_store_error<T: AsRef<str>>(msg: T, status: u16) -> Result<Response> {
+    let mut resp = Response::error(msg.as_ref().to_string(), status)?;
+    resp.headers_mut().set("Cache-Control", "no-store")?;
+    Ok(resp)
+}
+
+/// Response に `Cache-Control` ヘッダを上書きで設定する。
+fn set_cache_control(resp: &mut Response, value: &str) -> Result<()> {
+    resp.headers_mut().set("Cache-Control", value)?;
+    Ok(())
+}
+
+/// `caches.default` から URL key で hit を取り出す。miss / 例外時は `None`。
+///
+/// 取り出した Response は origin-neutral なので、呼び出し側で `with_cors` を
+/// 被せて返却する契約。
+async fn cache_get_origin_neutral(cache_key: &str) -> Option<Response> {
+    let cache = worker::Cache::default();
+    match cache.get(cache_key.to_string(), true).await {
+        Ok(Some(resp)) => Some(resp),
+        Ok(None) => None,
+        Err(_) => None,
+    }
+}
+
+/// origin-neutral な Response を `caches.default` に put する。
+///
+/// `Response::cloned()` で put 用と返却用に分け、put が失敗しても元 Response は
+/// 返却できるようにする (best-effort、log のみ残す)。
+async fn cache_put_origin_neutral(
+    cache_key: &str,
+    resp: &mut Response,
+    event_root: &str,
+    client_kind: &str,
+) {
+    let put_response = match resp.cloned() {
+        Ok(c) => c,
+        Err(e) => {
+            console_log_failed(&format!("{event_root}_cache_clone"), client_kind, &e.to_string());
+            return;
+        }
+    };
+    let cache = worker::Cache::default();
+    if let Err(e) = cache.put(cache_key.to_string(), put_response).await {
+        // best-effort: cache.put に失敗しても元応答は返せる。log のみ残す。
+        console_log_failed(&format!("{event_root}_cache_put"), client_kind, &e.to_string());
+    }
+}
+
 /// 失敗ログを logfmt で出す統一窓口。viewer API の経路別 event 名と、
 /// 呼出側クライアントを特定する `client_kind` を持たせる
 /// (Issue #564 設計 v4 §3)。`client_kind` は [`normalize_client_kind`] により
 /// `[a-z0-9-]{1,64}` に正規化済みの ASCII 文字列、または `unknown` / `invalid`。
 fn console_log_failed(event: &str, client_kind: &str, detail: &str) {
     worker::console_log!("[viewer_api] event={event} client_kind={client_kind} detail={detail}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_control_header_for_list_kind() {
+        assert_eq!(CacheableKind::List.cache_control_header(), "public, max-age=60");
+    }
+
+    #[test]
+    fn cache_control_header_for_single_kind() {
+        assert_eq!(CacheableKind::SingleGame.cache_control_header(), "public, max-age=600");
+    }
+
+    #[test]
+    fn is_viewer_api_path_accepts_root_paths() {
+        assert!(is_viewer_api_path("/api/v1/games"));
+        assert!(is_viewer_api_path("/api/v1/games/live"));
+        assert!(is_viewer_api_path("/api/v1/games/abc-123"));
+    }
+
+    #[test]
+    fn is_viewer_api_path_rejects_extra_segments_and_trailing_slash() {
+        assert!(!is_viewer_api_path("/api/v1/games/"));
+        assert!(!is_viewer_api_path("/api/v1/games/x/y"));
+        assert!(!is_viewer_api_path("/api/v2/games"));
+    }
 }
