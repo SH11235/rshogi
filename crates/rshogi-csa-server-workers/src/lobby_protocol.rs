@@ -109,13 +109,28 @@ pub fn parse_login_lobby(line: &str) -> Result<LoginLobbyRequest, LoginLobbyErro
     })
 }
 
-/// 1 件のキューエントリ。WS 識別子は呼び出し側で別途保持する (DO ランタイム側で
-/// `WebSocket` 値に紐付ける)。
+/// 1 件のキューエントリ。WS 識別子 (`attachment_id`) は LobbyDO が採番した一意 id
+/// を保持し、同 handle で旧 WS が close 遅延した場合の race を回避する
+/// (https://github.com/SH11235/rshogi/issues/631)。
+///
+/// `last_pong_at_ms` は purge 判定用の epoch ms。`LOBBY_PONG` 受信ごとに更新し、
+/// `now - last_pong_at_ms >= ttl` で stale 判定する。LOGIN_LOBBY 受信直後は
+/// 「pong を 1 度受け取った」相当の状態として `last_pong_at_ms = now` で初期化
+/// する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueEntry {
     pub handle: String,
     pub game_name: String,
     pub color: Color,
+    /// LobbyDO 内で採番した一意な WS 識別子。private 経路の `pending_ws_attachment_ids`
+    /// と同じ値域を共有する (`ws-<u64>`)。`remove` / purge / pong 更新で
+    /// `(handle, attachment_id)` をキーとして照合し、旧 WS の遅延 close が新 entry
+    /// を誤削除する race を防ぐ。
+    pub attachment_id: String,
+    /// 最後に `LOBBY_PONG` (or LOGIN_LOBBY 直後の初期値) を受け取った時刻
+    /// (UNIX epoch ms)。`LOBBY_QUEUE_ENTRY_TTL_SEC` を超えると LobbyDO の Alarm
+    /// purge で stale 判定される。
+    pub last_pong_at_ms: u64,
 }
 
 /// LobbyDO の in-memory queue。
@@ -151,14 +166,57 @@ impl LobbyQueue {
         true
     }
 
-    /// handle で 1 件削除する。LOGOUT_LOBBY / WS close 時に呼ぶ。
-    pub fn remove(&mut self, handle: &str) {
-        self.entries.retain(|e| e.handle != handle);
+    /// `(handle, attachment_id)` で 1 件削除する。LOGOUT_LOBBY / WS close 時に呼ぶ。
+    /// 同 handle で別 `attachment_id` の entry (新 LOGIN による置換後) は触らない:
+    /// 旧 WS の close が遅延して届いた場合、新 entry を誤削除しない race-safe な API。
+    pub fn remove(&mut self, handle: &str, attachment_id: &str) {
+        self.entries
+            .retain(|e| !(e.handle == handle && e.attachment_id == attachment_id));
     }
 
     /// 指定 entry のスナップショットを返す (テスト用)。
     pub fn entries(&self) -> &[QueueEntry] {
         &self.entries
+    }
+
+    /// `(handle, attachment_id)` を一致させて `last_pong_at_ms` を更新する。
+    /// 一致 entry が無ければ no-op (既に dispatch / remove 済みなど)。
+    /// `LOBBY_PONG` 受信ごとに呼ぶ。
+    pub fn touch_pong(&mut self, handle: &str, attachment_id: &str, now_ms: u64) {
+        for entry in &mut self.entries {
+            if entry.handle == handle && entry.attachment_id == attachment_id {
+                entry.last_pong_at_ms = now_ms;
+                return;
+            }
+        }
+    }
+
+    /// `now_ms - last_pong_at_ms >= ttl_ms` を満たす entry を一括削除し、
+    /// 削除済 entry の `Vec` を返す。LobbyDO の Alarm purge 経路から呼び、戻り値の
+    /// `(handle, attachment_id)` を使って該当 WS にエラー送信 + close する責務は
+    /// 呼び出し側 (`lobby.rs`) が持つ。
+    ///
+    /// 境界: `last_pong_at_ms + ttl_ms == now_ms` は stale 扱い (`>=` で判定)。
+    /// `now_ms < last_pong_at_ms` のような時刻巻き戻りは実害が無いため触らない
+    /// (`saturating_sub` で 0 になり `0 >= ttl_ms` で false になる)。
+    pub fn purge_stale(&mut self, now_ms: u64, ttl_ms: u64) -> Vec<QueueEntry> {
+        let mut removed: Vec<QueueEntry> = Vec::new();
+        let mut i = 0;
+        while i < self.entries.len() {
+            if now_ms.saturating_sub(self.entries[i].last_pong_at_ms) >= ttl_ms {
+                removed.push(self.entries.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        removed
+    }
+
+    /// 全 entry のうち最も古い `last_pong_at_ms` を返す。LobbyDO の Alarm を
+    /// 次回 purge 用に setAlarm するときに `min + ttl_ms` で発火時刻を計算する。
+    /// 空 queue は `None`。
+    pub fn earliest_last_pong_at_ms(&self) -> Option<u64> {
+        self.entries.iter().map(|e| e.last_pong_at_ms).min()
     }
 
     /// 同 `game_name` 内で `DirectMatchStrategy` を回し、最初に成立したペアを返す。
@@ -547,6 +605,8 @@ mod tests {
             handle: h.to_owned(),
             game_name: g.to_owned(),
             color: c,
+            attachment_id: format!("ws-{h}"),
+            last_pong_at_ms: 1_000,
         }
     }
 
@@ -613,6 +673,87 @@ mod tests {
         assert_eq!(m1.white.handle, "b");
         assert_eq!(m2.black.handle, "c");
         assert_eq!(m2.white.handle, "d");
+    }
+
+    /// `remove` は `(handle, attachment_id)` の両方一致でのみ削除する。
+    /// 同 handle で別 attachment_id の entry (新 LOGIN による置換後) は触らない。
+    #[test]
+    fn remove_uses_attachment_id_to_avoid_race() {
+        let mut q = LobbyQueue::new();
+        let mut e1 = entry("alice", "g", Color::Black);
+        e1.attachment_id = "ws-1".to_owned();
+        q.enqueue(e1, 100);
+        // 旧 WS の close が遅延しても、新 ws-1 を別 attachment_id で remove
+        // しても何も削除されない。
+        q.remove("alice", "ws-old");
+        assert_eq!(q.len(), 1);
+        // 一致する attachment_id では削除される。
+        q.remove("alice", "ws-1");
+        assert_eq!(q.len(), 0);
+    }
+
+    /// `touch_pong` は `(handle, attachment_id)` 一致時のみ `last_pong_at_ms` を更新する。
+    #[test]
+    fn touch_pong_updates_only_matching_attachment() {
+        let mut q = LobbyQueue::new();
+        let mut e = entry("alice", "g", Color::Black);
+        e.attachment_id = "ws-1".to_owned();
+        e.last_pong_at_ms = 1_000;
+        q.enqueue(e, 100);
+
+        q.touch_pong("alice", "ws-different", 5_000);
+        assert_eq!(q.entries()[0].last_pong_at_ms, 1_000);
+
+        q.touch_pong("alice", "ws-1", 5_000);
+        assert_eq!(q.entries()[0].last_pong_at_ms, 5_000);
+    }
+
+    /// `purge_stale` は `now - last_pong_at_ms >= ttl_ms` の entry を抜き、削除済 entry を返す。
+    #[test]
+    fn purge_stale_removes_entries_past_ttl() {
+        let mut q = LobbyQueue::new();
+        let mut a = entry("a", "g", Color::Black);
+        a.attachment_id = "ws-a".to_owned();
+        a.last_pong_at_ms = 1_000;
+        q.enqueue(a, 100);
+        let mut b = entry("b", "g", Color::White);
+        b.attachment_id = "ws-b".to_owned();
+        b.last_pong_at_ms = 4_000;
+        q.enqueue(b, 100);
+
+        // now=6000, ttl=5000 → a (1000) は 5000ms 経過で stale、b (4000) は 2000ms で生存。
+        let removed = q.purge_stale(6_000, 5_000);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].handle, "a");
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.entries()[0].handle, "b");
+    }
+
+    /// 境界: `now - last_pong_at_ms == ttl_ms` は stale 扱い (`>=` で判定)。
+    #[test]
+    fn purge_stale_boundary_is_stale() {
+        let mut q = LobbyQueue::new();
+        let mut a = entry("a", "g", Color::Black);
+        a.attachment_id = "ws-a".to_owned();
+        a.last_pong_at_ms = 1_000;
+        q.enqueue(a, 100);
+        let removed = q.purge_stale(6_000, 5_000);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(q.len(), 0);
+    }
+
+    /// `earliest_last_pong_at_ms` は最古の last_pong を返す。空なら `None`。
+    #[test]
+    fn earliest_last_pong_returns_min() {
+        let mut q = LobbyQueue::new();
+        assert_eq!(q.earliest_last_pong_at_ms(), None);
+        let mut a = entry("a", "g", Color::Black);
+        a.last_pong_at_ms = 1_000;
+        q.enqueue(a, 100);
+        let mut b = entry("b", "g", Color::White);
+        b.last_pong_at_ms = 4_000;
+        q.enqueue(b, 100);
+        assert_eq!(q.earliest_last_pong_at_ms(), Some(1_000));
     }
 
     #[test]

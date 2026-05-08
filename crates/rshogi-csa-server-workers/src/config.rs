@@ -43,6 +43,13 @@ impl ConfigKeys {
     /// LobbyDO 内 in-memory queue の総数上限。超過時 LOGIN_LOBBY を `queue_full`
     /// で reject する。未設定時は 100 が既定値。
     pub const LOBBY_QUEUE_SIZE_LIMIT: &'static str = "LOBBY_QUEUE_SIZE_LIMIT";
+    /// 公開マッチング queue (`LobbyQueue`) の entry TTL (秒)。`LOBBY_PONG`
+    /// 受信から本値を超えると LobbyDO の Alarm purge で stale 判定され、
+    /// `LOGIN_LOBBY:incorrect queue_expired` 送信 + WS close される
+    /// (https://github.com/SH11235/rshogi/issues/631)。
+    /// network 分断や WS close 遅延で残った stale entry を一定時間で掃除し、
+    /// 後続ユーザの誤マッチを防ぐ目的。未設定時は 300 秒 (5 分) が既定値。
+    pub const LOBBY_QUEUE_ENTRY_TTL_SEC: &'static str = "LOBBY_QUEUE_ENTRY_TTL_SEC";
     /// 私的対局 (`CHALLENGE_LOBBY`) で発行された token の TTL (秒)。期限超過した
     /// 未消費 token は LobbyDO の Alarm ハンドラで `purge_expired` され、保留中の
     /// WS 接続がいれば切断される。未設定時は 3600 秒 (1 時間)。https://github.com/SH11235/rshogi/issues/582 の
@@ -200,6 +207,7 @@ impl ConfigKeys {
         Self::ALLOW_FLOODGATE_FEATURES,
         Self::ALLOW_VIEWER_API,
         Self::LOBBY_QUEUE_SIZE_LIMIT,
+        Self::LOBBY_QUEUE_ENTRY_TTL_SEC,
         Self::CHALLENGE_TTL_SEC,
         Self::PRIVATE_CHALLENGE_ENABLED,
     ];
@@ -239,6 +247,10 @@ impl ConfigKeys {
 /// `None` / 空文字 / パース失敗時のフォールバックとして参照する。
 pub(crate) const DEFAULT_CHALLENGE_TTL_SEC: u64 = 3600;
 
+/// `LOBBY_QUEUE_ENTRY_TTL_SEC` 既定値 (5 分)。stale public queue entry の
+/// 上限滞在時間として保守的な値を採る。
+pub(crate) const DEFAULT_LOBBY_QUEUE_ENTRY_TTL_SEC: u64 = 300;
+
 /// `AGREE_TIMEOUT_SECONDS` 既定値 (60 秒)。TCP frontend は 5 分既定だが、Workers
 /// DO は 1 部屋 = 1 instance で memory / room 枠を専有するため、より短めの既定で
 /// stuck DO を素早く解放する設計を採る (https://github.com/SH11235/rshogi/issues/600)。
@@ -257,6 +269,22 @@ pub fn parse_challenge_ttl_duration(raw: Option<&str>) -> std::time::Duration {
     match trimmed.parse::<u64>() {
         Ok(secs) => std::time::Duration::from_secs(secs),
         Err(_) => std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC),
+    }
+}
+
+/// `LOBBY_QUEUE_ENTRY_TTL_SEC` 文字列を `Duration` へ解決する。
+///
+/// `None` / 空文字 / `0` / 非数値 / `u64` 範囲外は [`DEFAULT_LOBBY_QUEUE_ENTRY_TTL_SEC`]
+/// にフォールバックする (env 不正で TTL 0 = 即時 purge となり全 queue 待機が
+/// 切断される事故を避ける安全側挙動。`AGREE_TIMEOUT_SECONDS` と同じ流儀)。
+pub fn parse_lobby_queue_entry_ttl_duration(raw: Option<&str>) -> std::time::Duration {
+    let trimmed = raw.unwrap_or("").trim();
+    if trimmed.is_empty() {
+        return std::time::Duration::from_secs(DEFAULT_LOBBY_QUEUE_ENTRY_TTL_SEC);
+    }
+    match trimmed.parse::<u64>() {
+        Ok(0) | Err(_) => std::time::Duration::from_secs(DEFAULT_LOBBY_QUEUE_ENTRY_TTL_SEC),
+        Ok(secs) => std::time::Duration::from_secs(secs),
     }
 }
 
@@ -718,6 +746,33 @@ mod tests {
     fn parse_challenge_ttl_duration_accepts_seconds() {
         assert_eq!(parse_challenge_ttl_duration(Some("60")), std::time::Duration::from_secs(60));
         assert_eq!(parse_challenge_ttl_duration(Some("0")), std::time::Duration::ZERO);
+    }
+
+    /// `LOBBY_QUEUE_ENTRY_TTL_SEC` 未設定 / 空文字 / `0` / 非数値は安全側既定 (300 秒)。
+    #[test]
+    fn parse_lobby_queue_entry_ttl_duration_defaults_when_unset_or_zero_or_invalid() {
+        let default = std::time::Duration::from_secs(DEFAULT_LOBBY_QUEUE_ENTRY_TTL_SEC);
+        assert_eq!(parse_lobby_queue_entry_ttl_duration(None), default);
+        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("")), default);
+        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("  ")), default);
+        // `0` は「無効化」を意図した運用ミスと解釈し、queue 全切断を避けるため
+        // 安全側既定にフォールバックする (TTL 0 = 即時 purge は許容しない)。
+        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("0")), default);
+        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("forever")), default);
+        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("-1")), default);
+    }
+
+    /// 数値はそのまま秒として採用する。
+    #[test]
+    fn parse_lobby_queue_entry_ttl_duration_accepts_seconds() {
+        assert_eq!(
+            parse_lobby_queue_entry_ttl_duration(Some("60")),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(
+            parse_lobby_queue_entry_ttl_duration(Some(" 600\n")),
+            std::time::Duration::from_secs(600)
+        );
     }
 
     /// 非数値はパース失敗時のフォールバック (= 既定値) で扱う。

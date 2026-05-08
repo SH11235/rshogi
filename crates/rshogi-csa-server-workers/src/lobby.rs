@@ -42,6 +42,7 @@ use worker::{
 
 use crate::config::{
     ConfigKeys, is_private_challenge_enabled, parse_challenge_ttl_duration, parse_clock_presets,
+    parse_lobby_queue_entry_ttl_duration,
 };
 use crate::lobby_protocol::{
     ChallengeLobbyError, LobbyQueue, LoginLobbyError, LoginLobbyPrivateError,
@@ -87,10 +88,15 @@ enum LobbyAttachment {
     /// LOGIN_LOBBY 到着前の匿名接続。`websocket_message` で初手は LOGIN_LOBBY を期待する。
     Pending,
     /// queue 登録済みの待機者。
+    /// `attachment_id` は LobbyDO 採番の WS 一意 id (`PrivatePending` と同じ値域)。
+    /// queue entry の `(handle, attachment_id)` と照合することで、同 handle で
+    /// 旧 WS の close が遅延しても新 entry が誤って削除されない race-safe な
+    /// 識別キーとして使う (https://github.com/SH11235/rshogi/issues/631)。
     Queued {
         handle: String,
         game_name: String,
         color: ColorTag,
+        attachment_id: String,
     },
     /// 私的対局 (`LOGIN_LOBBY <handle>+private-<token>+free`) で先行 LOGIN
     /// 済の待機者。両者揃った時点での GameRoom DO 起動経路は次 PR に分割する
@@ -201,7 +207,11 @@ impl DurableObject for Lobby {
                 ref handle,
                 ref game_name,
                 color,
-            } => self.handle_queued_line(&ws, handle, game_name, color, &line).await,
+                ref attachment_id,
+            } => {
+                self.handle_queued_line(&ws, handle, game_name, color, attachment_id, &line)
+                    .await
+            }
             LobbyAttachment::PrivatePending {
                 ref token,
                 ref handle,
@@ -218,12 +228,18 @@ impl DurableObject for Lobby {
         _was_clean: bool,
     ) -> Result<()> {
         match ws.deserialize_attachment::<LobbyAttachment>() {
-            Ok(Some(LobbyAttachment::Queued { handle, .. })) => {
-                self.queue.borrow_mut().remove(&handle);
+            Ok(Some(LobbyAttachment::Queued {
+                handle,
+                attachment_id,
+                ..
+            })) => {
+                self.queue.borrow_mut().remove(&handle, &attachment_id);
                 console_log!(
-                    "[Lobby] queued client closed: handle={handle} queue_size={}",
+                    "[Lobby] queued client closed: handle={handle} attachment_id={attachment_id} queue_size={}",
                     self.queue.borrow().len()
                 );
+                // queue 状態が変わった (entry 削除) ので alarm の earliest を更新する。
+                self.reschedule_alarm().await?;
             }
             Ok(Some(LobbyAttachment::PrivatePending {
                 token,
@@ -243,8 +259,17 @@ impl DurableObject for Lobby {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        self.handle_challenge_alarm().await?;
-        Response::ok("challenge alarm handled")
+        // 単一の Alarm 経路で 2 種類の TTL purge を順に処理する:
+        // 1. challenge_registry の期限切れ token を purge (`purge_expired`)
+        // 2. public queue の stale entry を purge (https://github.com/SH11235/rshogi/issues/631)
+        // 両 purge は独立で副作用が交錯しないため、順序は固定で良い (どちらが
+        // 先でも結果は同じ)。両 purge 後に earliest を再計算して alarm を
+        // **1 回だけ** 再予約する (`reschedule_alarm`) ことで、各 purge が個別に
+        // alarm を上書きする race を避ける。
+        self.handle_challenge_purge(self.now_ms()).await?;
+        self.handle_queue_purge(self.now_ms()).await?;
+        self.reschedule_alarm().await?;
+        Response::ok("lobby alarm handled")
     }
 }
 
@@ -292,6 +317,14 @@ impl Lobby {
         parse_challenge_ttl_duration(raw.as_deref())
     }
 
+    /// `LOBBY_QUEUE_ENTRY_TTL_SEC` env を `Duration` に解決する (未設定 / `0` /
+    /// 不正値は 300 秒既定にフォールバック)。
+    /// `config::parse_lobby_queue_entry_ttl_duration` の薄いラッパ。
+    fn queue_entry_ttl(&self) -> Duration {
+        let raw = self.env.var(ConfigKeys::LOBBY_QUEUE_ENTRY_TTL_SEC).ok().map(|v| v.to_string());
+        parse_lobby_queue_entry_ttl_duration(raw.as_deref())
+    }
+
     /// 現在時刻 (UNIX エポック ms)。`worker::Date::now()` 経由。`game_room.rs::now_ms`
     /// と挙動を揃える (絶対時刻で isolate 再構築でも進む)。
     fn now_ms(&self) -> u64 {
@@ -330,12 +363,33 @@ impl Lobby {
         Ok(format!("ws-{next}"))
     }
 
-    /// 次回の Alarm を `ChallengeRegistry::earliest_expiry_ms` に基づいて
-    /// 設定する。空 registry なら delete_alarm で予約を解除する。既存の Alarm
-    /// が earliest より早いケースは現実には発生しない (本 LobbyDO の Alarm は
-    /// challenge purge 専用で、他用途で予約されない) ため、単純に上書きする。
-    async fn reschedule_challenge_alarm(&self, reg: &ChallengeRegistry) -> Result<()> {
-        match reg.earliest_expiry_ms() {
+    /// 次回の Alarm を「challenge_registry の earliest_expiry_ms」と「public
+    /// queue の earliest_last_pong_at_ms + ttl_ms」の **両方を併合した earliest**
+    /// に基づいて設定する。両者空なら `delete_alarm` で予約を解除する。
+    ///
+    /// 本 LobbyDO の Alarm は challenge purge と queue purge の 2 用途を共有する
+    /// ため、各 purge / mark / unmark / enqueue / remove / pong update の **全て**
+    /// から本関数を呼ぶ契約。各経路が個別に `set_alarm` / `delete_alarm` を呼ぶと
+    /// race して earliest が壊れるので、必ず本関数経由で 1 本化する。
+    async fn reschedule_alarm(&self) -> Result<()> {
+        let reg = self.load_challenge_registry().await?;
+        self.reschedule_alarm_with(&reg).await
+    }
+
+    /// `reschedule_alarm` の inner 版。直前で `load_challenge_registry` 済の caller
+    /// (`handle_challenge_lobby` 等) が再 load を避けるために使う。
+    async fn reschedule_alarm_with(&self, reg: &ChallengeRegistry) -> Result<()> {
+        let challenge_earliest = reg.earliest_expiry_ms();
+        let ttl_ms = u64::try_from(self.queue_entry_ttl().as_millis()).unwrap_or(u64::MAX);
+        let queue_earliest =
+            self.queue.borrow().earliest_last_pong_at_ms().map(|t| t.saturating_add(ttl_ms));
+        let earliest = match (challenge_earliest, queue_earliest) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        match earliest {
             Some(epoch_ms) => {
                 let now_ms = self.now_ms();
                 let delay_ms =
@@ -412,10 +466,17 @@ impl Lobby {
             return self.send_login_error(ws, LoginLobbyError::UnknownGameName).await;
         }
 
+        // attachment id を採番し、queue entry / WS attachment / heartbeat 時刻を
+        // 同じ id で揃える。private 経路 (`pending_ws_attachment_ids`) と同じ
+        // 採番器を共有し、id 値域を一本化する (storage key も共通)。
+        let attachment_id = self.next_attachment_id().await?;
+        let now_ms = self.now_ms();
         let entry = QueueEntry {
             handle: req.handle.clone(),
             game_name: req.game_name.clone(),
             color: req.color,
+            attachment_id: attachment_id.clone(),
+            last_pong_at_ms: now_ms,
         };
         let limit = self.queue_size_limit();
         if !self.queue.borrow_mut().enqueue(entry, limit) {
@@ -427,22 +488,24 @@ impl Lobby {
         // 抜いてあるが、attachment が `Queued` のまま残ると `dispatch_match` の
         // `state.get_websockets()` 走査で旧 WS にも MATCHED が誤送される。close を
         // 先に行うことで websocket_close 経路に乗せ、attachment を消す。
-        evict_old_websockets_with_handle(&self.state, &ws, &req.handle);
+        evict_old_websockets_with_handle(&self.state, ws, &req.handle);
 
         // attachment を Queued に差し替えて待機状態に遷移。
         ws.serialize_attachment(&LobbyAttachment::Queued {
             handle: req.handle.clone(),
             game_name: req.game_name.clone(),
             color: ColorTag::from_core(req.color),
+            attachment_id: attachment_id.clone(),
         })
         .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
 
         send_line(ws, &build_login_ok_line(&req.handle))?;
         console_log!(
-            "[Lobby] LOGIN_LOBBY: handle={} game_name={} color={:?} queue_size={}",
+            "[Lobby] LOGIN_LOBBY: handle={} game_name={} color={:?} attachment_id={} queue_size={}",
             req.handle,
             req.game_name,
             req.color,
+            attachment_id,
             self.queue.borrow().len()
         );
 
@@ -450,6 +513,9 @@ impl Lobby {
         if let Some(matched) = self.queue.borrow_mut().try_pair() {
             self.dispatch_match(matched).await?;
         }
+        // queue 状態が変わった (enqueue / dispatch) ので earliest_last_pong_at_ms
+        // も変わる。alarm を min(challenge.earliest, queue.earliest+ttl) で更新。
+        self.reschedule_alarm().await?;
         Ok(())
     }
 
@@ -460,17 +526,24 @@ impl Lobby {
         handle: &str,
         _game_name: &str,
         _color: ColorTag,
+        attachment_id: &str,
         line: &str,
     ) -> Result<()> {
         match line {
             "LOGOUT_LOBBY" => {
-                self.queue.borrow_mut().remove(handle);
-                console_log!("[Lobby] LOGOUT_LOBBY: handle={handle}");
+                self.queue.borrow_mut().remove(handle, attachment_id);
+                console_log!("[Lobby] LOGOUT_LOBBY: handle={handle} attachment_id={attachment_id}");
                 let _ = ws.close(Some(1000), Some("logout"));
+                // queue が縮んだので alarm を再評価。
+                self.reschedule_alarm().await?;
                 Ok(())
             }
             "LOBBY_PONG" => {
-                // keep-alive 応答。現状は受信のみ (PING 送出は未実装)。
+                // keep-alive 応答。`(handle, attachment_id)` 一致時のみ
+                // `last_pong_at_ms` を更新し、stale 判定を延長する
+                // (https://github.com/SH11235/rshogi/issues/631)。
+                let now_ms = self.now_ms();
+                self.queue.borrow_mut().touch_pong(handle, attachment_id, now_ms);
                 Ok(())
             }
             _ => {
@@ -490,12 +563,26 @@ impl Lobby {
                 Ok(Some(a)) => a,
                 _ => continue,
             };
-            let LobbyAttachment::Queued { handle, color, .. } = att else {
+            let LobbyAttachment::Queued {
+                handle,
+                color,
+                attachment_id,
+                ..
+            } = att
+            else {
                 continue;
             };
-            let target_color = if handle == matched.black.handle {
+            // 同 handle で旧 WS が close 遅延しているケースでも誤って `MATCHED` を
+            // 送らないよう、`attachment_id` までを含めて完全一致で照合する
+            // (https://github.com/SH11235/rshogi/issues/631)。`try_pair` で
+            // queue から取り出した entry の `attachment_id` を真値とし、本 WS が
+            // 同 (handle, attachment_id) でなければ skip する。
+            let target_color = if handle == matched.black.handle
+                && attachment_id == matched.black.attachment_id
+            {
                 Color::Black
-            } else if handle == matched.white.handle {
+            } else if handle == matched.white.handle && attachment_id == matched.white.attachment_id
+            {
                 Color::White
             } else {
                 continue;
@@ -590,7 +677,7 @@ impl Lobby {
             // 早期 return でも、purge した reg は永続化する (取りこぼし回避)。
             if purged {
                 self.save_challenge_registry(&reg).await?;
-                self.reschedule_challenge_alarm(&reg).await?;
+                self.reschedule_alarm_with(&reg).await?;
             }
             send_line(ws, &build_challenge_incorrect_line("unknown_clock_preset"))?;
             return Ok(());
@@ -603,7 +690,7 @@ impl Lobby {
         {
             if purged {
                 self.save_challenge_registry(&reg).await?;
-                self.reschedule_challenge_alarm(&reg).await?;
+                self.reschedule_alarm_with(&reg).await?;
             }
             send_line(ws, &build_challenge_incorrect_line("bad_sfen"))?;
             return Ok(());
@@ -623,7 +710,7 @@ impl Lobby {
         match issue_result {
             Ok(token) => {
                 self.save_challenge_registry(&reg).await?;
-                self.reschedule_challenge_alarm(&reg).await?;
+                self.reschedule_alarm_with(&reg).await?;
                 let ttl_sec = ttl.as_secs();
                 send_line(ws, &build_challenge_ok_line(token.as_str(), ttl_sec))?;
                 console_log!(
@@ -638,7 +725,7 @@ impl Lobby {
                 // self_challenge でも purge があった場合は永続化する。
                 if purged {
                     self.save_challenge_registry(&reg).await?;
-                    self.reschedule_challenge_alarm(&reg).await?;
+                    self.reschedule_alarm_with(&reg).await?;
                 }
                 send_line(ws, &build_challenge_incorrect_line("self_challenge"))?;
             }
@@ -687,7 +774,7 @@ impl Lobby {
                 if !expired.is_empty() {
                     // expire 後に登録簿が変わったので、(空でなければ) save し直す。
                     self.save_challenge_registry(&reg).await?;
-                    self.reschedule_challenge_alarm(&reg).await?;
+                    self.reschedule_alarm_with(&reg).await?;
                 }
                 send_line(ws, &build_login_incorrect_line("challenge_expired"))?;
                 let _ = ws.close(Some(1000), Some("challenge_expired"));
@@ -699,7 +786,7 @@ impl Lobby {
         if handle != entry.inviter && handle != entry.opponent {
             if !expired.is_empty() {
                 self.save_challenge_registry(&reg).await?;
-                self.reschedule_challenge_alarm(&reg).await?;
+                self.reschedule_alarm_with(&reg).await?;
             }
             send_line(ws, &build_login_incorrect_line("not_invited"))?;
             let _ = ws.close(Some(1000), Some("not_invited"));
@@ -710,7 +797,7 @@ impl Lobby {
         if entry.pending_ws_attachment_ids.contains_key(&handle) {
             if !expired.is_empty() {
                 self.save_challenge_registry(&reg).await?;
-                self.reschedule_challenge_alarm(&reg).await?;
+                self.reschedule_alarm_with(&reg).await?;
             }
             send_line(ws, &build_login_incorrect_line("already_logged_in"))?;
             let _ = ws.close(Some(1000), Some("already_logged_in"));
@@ -726,7 +813,7 @@ impl Lobby {
             now_ms,
         );
         self.save_challenge_registry(&reg).await?;
-        self.reschedule_challenge_alarm(&reg).await?;
+        self.reschedule_alarm_with(&reg).await?;
 
         ws.serialize_attachment(&LobbyAttachment::PrivatePending {
             token: token.as_str().to_owned(),
@@ -756,7 +843,7 @@ impl Lobby {
         let token_obj = ChallengeToken::from_raw(token);
         reg.unmark_ws_logged_in(&token_obj, &PlayerName::new(handle), attachment_id);
         self.save_challenge_registry(&reg).await?;
-        self.reschedule_challenge_alarm(&reg).await?;
+        self.reschedule_alarm_with(&reg).await?;
         console_log!(
             "[Lobby] private LOGIN ws closed: handle={handle} token={token} attachment_id={attachment_id}"
         );
@@ -800,23 +887,56 @@ impl Lobby {
         Ok(())
     }
 
-    /// DO Alarm ハンドラから呼ぶ TTL purge。期限切れ entry を一括削除し、
-    /// 戻り値の `pending_ws_attachment_ids` を走査して該当 WS にエラー送信
-    /// + close する。残 entry があれば `earliest_expiry_ms` で Alarm を再設定。
-    async fn handle_challenge_alarm(&self) -> Result<()> {
-        let now_ms = self.now_ms();
+    /// Alarm 経路から呼ぶ challenge_registry の TTL purge。期限切れ entry を
+    /// 一括削除し、戻り値の `pending_ws_attachment_ids` を走査して該当 WS に
+    /// エラー送信 + close する。本関数自体は **alarm を再予約しない**:
+    /// alarm 再予約は呼び出し側 (`alarm()`) が queue purge とまとめて 1 回だけ
+    /// 行う契約 (https://github.com/SH11235/rshogi/issues/631)。
+    async fn handle_challenge_purge(&self, now_ms: u64) -> Result<()> {
         let mut reg = self.load_challenge_registry().await?;
         let expired = reg.purge_expired(now_ms);
         if expired.is_empty() {
-            // 期限切れが無いまま Alarm が早めに発火した場合 (clock skew) は
-            // 残 registry の earliest で再予約して終了。
-            self.reschedule_challenge_alarm(&reg).await?;
             return Ok(());
         }
         self.disconnect_pending_websockets(&expired).await;
         self.save_challenge_registry(&reg).await?;
-        self.reschedule_challenge_alarm(&reg).await?;
         console_log!("[Lobby] challenge purge_expired: removed={}", expired.len());
+        Ok(())
+    }
+
+    /// Alarm 経路から呼ぶ public queue の TTL purge。
+    /// `now - last_pong_at_ms >= LOBBY_QUEUE_ENTRY_TTL_SEC` の entry を抜き、
+    /// 該当 WS に `LOGIN_LOBBY:incorrect queue_expired` を送って close する。
+    /// 本関数も alarm を再予約しない (`alarm()` が最後にまとめて呼ぶ)。
+    async fn handle_queue_purge(&self, now_ms: u64) -> Result<()> {
+        let ttl_ms = u64::try_from(self.queue_entry_ttl().as_millis()).unwrap_or(u64::MAX);
+        let removed = self.queue.borrow_mut().purge_stale(now_ms, ttl_ms);
+        if removed.is_empty() {
+            return Ok(());
+        }
+        // 期限切れ `(handle, attachment_id)` 集合を pre-compute して 1 回の
+        // `state.get_websockets()` 走査に詰める (queue 上限 100 で O(n))。
+        let targets: Vec<(String, String)> =
+            removed.iter().map(|e| (e.handle.clone(), e.attachment_id.clone())).collect();
+        for ws in self.state.get_websockets() {
+            let att = match ws.deserialize_attachment::<LobbyAttachment>() {
+                Ok(Some(a)) => a,
+                _ => continue,
+            };
+            let LobbyAttachment::Queued {
+                handle: ws_handle,
+                attachment_id: ws_id,
+                ..
+            } = att
+            else {
+                continue;
+            };
+            if targets.iter().any(|(h, a)| h == &ws_handle && a == &ws_id) {
+                let _ = send_line(&ws, &build_login_incorrect_line("queue_expired"));
+                let _ = ws.close(Some(1000), Some("queue_expired"));
+            }
+        }
+        console_log!("[Lobby] queue purge_stale: removed={}", removed.len());
         Ok(())
     }
 

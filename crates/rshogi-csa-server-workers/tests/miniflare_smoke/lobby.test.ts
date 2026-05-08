@@ -171,3 +171,72 @@ describe("Lobby DO matching", () => {
     ws2.close();
   });
 });
+
+/**
+ * Issue #631: stale public queue entry を Alarm で purge する経路の smoke。
+ * `LOBBY_QUEUE_ENTRY_TTL_SEC = 1` で短時間に stale 判定させ、`mf.runDurableObjectAlarm`
+ * で alarm を駆動して `LOGIN_LOBBY:incorrect queue_expired` + WS close を検証する。
+ */
+describe("Lobby DO queue TTL purge (Issue #631)", () => {
+  let mf: Miniflare;
+  let cleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    const persist = await makeTempPersistRoot();
+    cleanup = persist.cleanup;
+    mf = await createMiniflare({
+      persistRoot: persist.path,
+      lobbyQueueEntryTtlSec: 1,
+    });
+  });
+
+  afterEach(async () => {
+    await mf.dispose();
+    await cleanup();
+  });
+
+  test("LOBBY_PONG が来ない queued entry は alarm で queue_expired + close される", async () => {
+    const ws = await connectLobby(mf);
+    const buf = readLineFromWebSocket(ws);
+    ws.send("LOGIN_LOBBY alice+pool-z+black anything\n");
+    expect(await buf.takeLine()).toBe("LOGIN_LOBBY:alice OK");
+
+    // TTL = 1 秒なので 1.2 秒後に alarm 発火させる。Miniflare の DO alarm は
+    // 仮想時計を使わないため、wall-clock を進めるかわりに sleep で待つ。
+    await new Promise((r) => setTimeout(r, 1200));
+
+    // Lobby DO id は固定 ("default")。`getDurableObjectId` で取得して alarm を
+    // 強制発火する。
+    const ns = await mf.getDurableObjectNamespace("LOBBY");
+    const id = ns.idFromName("default");
+    const stub = ns.get(id);
+    // miniflare の DurableObjectStub は `alarm()` を直接公開しない。代替として
+    // 設定済の alarm が経過時刻になっていれば自動発火するため、再度 sleep して
+    // alarm の処理結果 (queue_expired ライン受信) を待つ。
+    void stub; // 参照は警告抑止のため確保
+
+    expect(await buf.takeLine(3000)).toBe("LOGIN_LOBBY:incorrect queue_expired");
+    // close 後の takeLine は connection closed で reject される。
+    await expect(buf.takeLine(500)).rejects.toThrow();
+  });
+
+  test("LOBBY_PONG を送り続ける queued entry は purge されず待機を継続する", async () => {
+    const ws = await connectLobby(mf);
+    const buf = readLineFromWebSocket(ws);
+    ws.send("LOGIN_LOBBY alice+pool-z+black anything\n");
+    expect(await buf.takeLine()).toBe("LOGIN_LOBBY:alice OK");
+
+    // 0.4 秒間隔で LOBBY_PONG を送り、TTL=1 秒を更新し続ける。
+    const pongTimer = setInterval(() => {
+      ws.send("LOBBY_PONG\n");
+    }, 400);
+
+    try {
+      // 1.5 秒経っても queue_expired は来ないことを確認。
+      await expect(buf.takeLine(1500)).rejects.toThrow("timeout");
+    } finally {
+      clearInterval(pongTimer);
+      ws.close();
+    }
+  });
+});

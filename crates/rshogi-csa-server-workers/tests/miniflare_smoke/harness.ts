@@ -83,6 +83,11 @@ export interface HarnessOptions {
   wsAllowedOrigins?: string;
   adminApiToken?: string;
   lobbyQueueSizeLimit?: number;
+  /// 公開 lobby queue entry の TTL (秒、Issue #631)。`LOBBY_PONG` 受信から本値
+  /// を超えた entry は alarm で stale 判定され `LOGIN_LOBBY:incorrect queue_expired`
+  /// + WS close される。未指定時は server 既定 (300 秒) にフォールバック。
+  /// stale purge を smoke で再現するときは短い値 (例: 1) を渡す。
+  lobbyQueueEntryTtlSec?: number;
 }
 
 export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> {
@@ -128,6 +133,10 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       ALLOW_FLOODGATE_FEATURES: opts.allowFloodgateFeatures ? "true" : "false",
       WS_ALLOWED_ORIGINS: opts.wsAllowedOrigins ?? "https://example.com",
       LOBBY_QUEUE_SIZE_LIMIT: String(opts.lobbyQueueSizeLimit ?? 100),
+      // 未指定時は空文字を渡して server 側 fallback (= 300 秒既定) を使う。
+      // 数値を指定したテストでは alarm 経路で stale entry が purge される。
+      LOBBY_QUEUE_ENTRY_TTL_SEC:
+        opts.lobbyQueueEntryTtlSec === undefined ? "" : String(opts.lobbyQueueEntryTtlSec),
     },
     defaultPersistRoot: opts.persistRoot,
   });

@@ -164,6 +164,14 @@ ALLOW_VIEWER_API = "1"
 # LobbyDO 内 in-memory queue の総数上限。100 件を超える同時待機は LOGIN_LOBBY を
 # queue_full で reject する保守的既定。負荷に応じて引き上げ可。
 LOBBY_QUEUE_SIZE_LIMIT = "100"
+# 公開マッチング queue の entry TTL (秒)。`LOBBY_PONG` 受信から本値を超えた
+# entry を Lobby DO の Alarm purge で stale 判定し、`LOGIN_LOBBY:incorrect
+# queue_expired` 送信 + WS close する (Issue #631)。network 分断や close 遅延で
+# 残った stale entry を一定時間で掃除して後続ユーザの誤マッチを防ぐ。
+# 5 分は `csa_client` の lobby 待機運用 (60 秒 blocking recv で連続 LOGIN_LOBBY
+# する設計、Issue #631 のスコープ外で client 側 keep-alive 修正は別 PR)
+# を踏まえた保守的既定。`0` / 未設定 / 非数値は 300 秒既定にフォールバック。
+LOBBY_QUEUE_ENTRY_TTL_SEC = "300"
 # 私的対局 (CHALLENGE_LOBBY) で発行される token の TTL (秒)。期限超過した
 # 未消費 token は Lobby DO の Alarm ハンドラで自動削除する。1 時間 = 3600
 # は対戦相手が招待後にゆっくり PC を起動する想定の保守的既定。
