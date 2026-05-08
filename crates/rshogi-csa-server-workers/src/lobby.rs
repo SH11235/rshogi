@@ -168,10 +168,12 @@ impl DurableObject for Lobby {
             WebSocketIncomingMessage::String(s) => s,
             WebSocketIncomingMessage::Binary(_) => return Ok(()),
         };
-        // Issue #627: parser / allocation に流す前に元バイト数で上限判定する。
-        // `trim_end_matches` で改行を削った後だと判定対象が縮むため、必ず raw の
-        // 元の長さを使う。超過時は `1009 Message Too Big` で即 close し、
-        // 構造化 console_log を残す。
+        // Issue #627: アプリ層の parser / 追加 allocation (`to_owned` 等) に
+        // 流す前に、受信した `String` の元バイト数で上限判定する。ランタイム側
+        // の `String` 取り込みは既に済んでいるが、parser / trim 後の解釈処理は
+        // 弾ける。`trim_end_matches` で改行を削った後だと判定対象が縮むため、
+        // 必ず raw の元の長さを使う。超過時は `1009 Message Too Big` で即 close
+        // し、構造化 console_log を残す。
         if raw.len() > MAX_WS_LINE_BYTES {
             console_log!(
                 "[Lobby] event=ws_message_too_big bytes={} limit={}",
