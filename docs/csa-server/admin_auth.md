@@ -25,13 +25,16 @@ Floodgate audit ([#560](https://github.com/SH11235/rshogi/issues/560)) で導入
 ## 2. token 生成
 
 256bit (32 byte) 以上の URL-safe random を推奨。OSS repo に値が混入しない経路
-で生成する。例 (どれを使ってもよい):
+で生成する。例 (どれを使ってもよい、いずれも 32 byte = 256bit のエントロピー):
 
 ```bash
-# openssl
-openssl rand -base64 33 | tr -d '/+=' | head -c 43
+# openssl (64 文字の hex、長さが固定で読みやすい)
+openssl rand -hex 32
 
-# Python
+# openssl (URL-safe base64、'+' '/' を '-' '_' に置換、padding を除去)
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
+
+# Python (URL-safe base64、約 43 文字)
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 
 # /dev/urandom + xxd

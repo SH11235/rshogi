@@ -16,10 +16,16 @@
 //! - **constant-time 比較**: token は攻撃者が当てにいく対象なので、長さ一致時の
 //!   byte 比較は短絡せず [`subtle::ConstantTimeEq`] で xor を畳み込む。長さ自体
 //!   は公開情報として扱う (秘密の長さを `len()` で leak しない契約に依存しない)。
-//! - **fail-closed 既定**: secret 未設定 (Cloudflare secret 未登録 / local dev で
-//!   placeholder 空文字) は [`AdminAuthError::TokenNotConfigured`] を返し、
-//!   呼び出し側は 404 / 拒否で fail-closed する。攻撃者に「admin 機能は
-//!   存在するが token 未設定」を知らせない方針。
+//! - **fail-closed 既定**: secret 未設定 (Cloudflare secret 未配置、または
+//!   local dev で意図的に `ADMIN_API_TOKEN` を空文字へ書き換え) は
+//!   [`AdminAuthError::TokenNotConfigured`] を返し、呼び出し側は 404 / 拒否で
+//!   fail-closed する。攻撃者に「admin 機能は存在するが token 未設定」を
+//!   知らせない方針。`wrangler.toml.example` の placeholder
+//!   (`local-dev-admin-token-placeholder`) は他の `LOCAL_DEV_ONLY_VARS_KEYS`
+//!   (例: `ADMIN_HANDLE = "admin"`) と同じく **local dev で friction なく
+//!   admin 経路を通電させる** ための既知 dev token であり、production / staging
+//!   へは絶対に持ち込まない (`tests/wrangler_environment_toml_consistency.rs`
+//!   が混入を gate)。
 //!
 //! # ホスト target テスト方針
 //!
