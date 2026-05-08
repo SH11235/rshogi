@@ -174,17 +174,16 @@ CHALLENGE_TTL_SEC = "600"
 # 実値は Cloudflare 側の secret store にのみ存在し、`env.var(name)` 経由で
 # `[vars]` と同じ namespace から Worker code が読む（Cloudflare 仕様）。
 #
-# - ADMIN_HANDLE: `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル名。
-#   production と異なる値にすることで「staging で漏れた handle が production に
+# - ADMIN_API_TOKEN: WS 内 admin command (`%%ADMIN <token>`,
+#   https://github.com/SH11235/rshogi/issues/621) や将来の HTTP admin endpoint の
+#   認可基盤として `crate::admin_auth` から参照される 1 本の static API token
+#   (Floodgate audit https://github.com/SH11235/rshogi/issues/560 由来)。
+#   production と異なる値にすることで「staging で漏れた token が production に
 #   通用しない」分離を保つ。
-#   設定: `vp exec wrangler secret put ADMIN_HANDLE --config wrangler.staging.toml`
-#   確認: `vp exec wrangler secret list --config wrangler.staging.toml`
-#   詳細は `docs/csa-server/deployment.md` 参照。
-#
-# - ADMIN_API_TOKEN: HTTP admin endpoint や WS 内 admin command の認可基盤として
-#   `crate::admin_auth` から参照される 1 本の static API token (Floodgate audit
-#   https://github.com/SH11235/rshogi/issues/560 由来)。production と異なる値で
-#   分離する運用は ADMIN_HANDLE と同じ。
 #   設定: `vp exec wrangler secret put ADMIN_API_TOKEN --config wrangler.staging.toml`
 #   確認: `vp exec wrangler secret list --config wrangler.staging.toml`
 #   rotation / token 生成手順は `docs/csa-server/admin_auth.md` 参照。
+#
+# 旧 ADMIN_HANDLE (handle 自称 = admin 権限) は #621 で廃止された。Cloudflare 側に
+# secret として残っていれば `wrangler secret delete ADMIN_HANDLE --config
+# wrangler.staging.toml` で除去してよい。

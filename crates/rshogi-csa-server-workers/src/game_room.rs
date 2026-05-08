@@ -385,9 +385,12 @@ impl DurableObject for GameRoom {
 
         match attachment {
             WsAttachment::Pending => self.handle_login(&ws, &line).await,
-            WsAttachment::Player { role, handle, .. } => {
-                self.handle_game_line(&ws, role, &handle, &line).await
-            }
+            WsAttachment::Player {
+                role,
+                handle,
+                is_admin,
+                ..
+            } => self.handle_game_line(&ws, role, &handle, is_admin, &line).await,
             WsAttachment::Spectator { room_id, .. } => {
                 self.handle_spectator_line(&ws, &room_id, &line).await
             }
@@ -866,6 +869,7 @@ impl GameRoom {
         ws: &WebSocket,
         role: Role,
         handle: &str,
+        is_admin: bool,
         line: &str,
     ) -> Result<()> {
         if self.load_finished().await?.is_some() {
@@ -873,9 +877,21 @@ impl GameRoom {
             return Ok(());
         }
 
+        // Workers 固有プロトコル拡張: `%%ADMIN <token>` で admin 権限を session
+        // 内に昇格する (https://github.com/SH11235/rshogi/issues/621)。共有
+        // `parse_command` には乗せず Workers 内で完結させる。判定後は通常の
+        // CoreRoom 経路には流さない (admin elevation は副作用持ちの独立操作)。
+        if let Some(token) = crate::admin_auth::parse_admin_line(line) {
+            for out in self.handle_admin_elevation(ws, token).await? {
+                send_line(ws, &out)?;
+            }
+            return Ok(());
+        }
+
         let csa = CsaLine::new(line);
         if let Ok(cmd) = parse_command(&csa) {
-            if let Some(replies) = self.handle_player_control_command(handle, cmd).await? {
+            if let Some(replies) = self.handle_player_control_command(handle, is_admin, cmd).await?
+            {
                 for out in replies {
                     send_line(ws, &out)?;
                 }
@@ -1152,11 +1168,16 @@ impl GameRoom {
 
     /// プレイヤー接続から受け付ける制御系コマンドを処理する。
     ///
+    /// `is_admin` は当該 session が `%%ADMIN <token>` で昇格済みかを示す。
+    /// `%%SETBUOY` / `%%DELETEBUOY` 等の admin 権限要求コマンドは本フラグが
+    /// `true` のときのみ受理する (https://github.com/SH11235/rshogi/issues/621)。
+    ///
     /// `Some(replies)` を返した場合は、呼び出し側が返信行を送って通常の
     /// `CoreRoom::handle_line` 経路をスキップする。
     async fn handle_player_control_command(
         &self,
         handle: &str,
+        is_admin: bool,
         cmd: ClientCommand,
     ) -> Result<Option<Vec<String>>> {
         match cmd {
@@ -1173,7 +1194,7 @@ impl GameRoom {
                 moves,
                 count,
             } => {
-                if !self.is_admin_handle(handle) {
+                if !is_admin {
                     return Ok(Some(vec![
                         format!("##[SETBUOY] PERMISSION_DENIED {game_name}"),
                         "##[SETBUOY] END".to_owned(),
@@ -1205,7 +1226,7 @@ impl GameRoom {
                 ]))
             }
             ClientCommand::DeleteBuoy { game_name } => {
-                if !self.is_admin_handle(handle) {
+                if !is_admin {
                     return Ok(Some(vec![
                         format!("##[DELETEBUOY] PERMISSION_DENIED {game_name}"),
                         "##[DELETEBUOY] END".to_owned(),
@@ -1289,13 +1310,44 @@ impl GameRoom {
         }
     }
 
-    fn is_admin_handle(&self, handle: &str) -> bool {
-        let configured = self.env.var(ConfigKeys::ADMIN_HANDLE).ok().map(|v| v.to_string());
-        configured
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_some_and(|admin| admin == handle)
+    /// `%%ADMIN <token>` を受信した player 接続の admin elevation を処理する。
+    ///
+    /// 成功時 (`verify_admin_token_str` OK): WS attachment の `is_admin` を
+    /// `true` に上書きし、`##[ADMIN] OK` を返す。
+    /// 失敗時 (token 不一致 / secret 未配置): `##[ADMIN] PERMISSION_DENIED`
+    /// を返す (TokenNotConfigured と TokenMismatch を区別しないことで「admin
+    /// 機能が configured かどうか」の leak を防ぐ)。
+    /// 呼び出し側は本関数の返値を順次 `send_line` で WS に流す契約。
+    ///
+    /// 本関数は `parse_admin_line` が `Some(token)` を返した経路でのみ呼ばれる
+    /// 前提。token 部欠落 (`%%ADMIN` 単体 / whitespace のみ) は呼び出し側
+    /// (`handle_game_line`) で `parse_admin_line == None` として silent ignore
+    /// される設計 (`docs/csa-server/admin_auth.md` §応答仕様の通り)。
+    async fn handle_admin_elevation(&self, ws: &WebSocket, token: &str) -> Result<Vec<String>> {
+        match crate::admin_auth::verify_admin_token_str(token, &self.env) {
+            Ok(()) => {
+                self.upgrade_attachment_to_admin(ws)?;
+                Ok(vec!["##[ADMIN] OK".to_owned(), "##[ADMIN] END".to_owned()])
+            }
+            Err(_) => Ok(vec![
+                "##[ADMIN] PERMISSION_DENIED".to_owned(),
+                "##[ADMIN] END".to_owned(),
+            ]),
+        }
+    }
+
+    /// 既存の `WsAttachment::Player` を `is_admin = true` 版に上書きする。
+    /// `Player` 以外の variant に対しては no-op (`Spectator` / `Pending` は
+    /// admin 昇格対象外という型 invariant を [`WsAttachment::with_admin`] 側で
+    /// 守る契約)。
+    fn upgrade_attachment_to_admin(&self, ws: &WebSocket) -> Result<()> {
+        let att: WsAttachment = ws
+            .deserialize_attachment()
+            .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?
+            .unwrap_or(WsAttachment::Pending);
+        let updated = att.with_admin();
+        ws.serialize_attachment(&updated)
+            .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))
     }
 
     async fn reserve_initial_sfen_from_buoy(

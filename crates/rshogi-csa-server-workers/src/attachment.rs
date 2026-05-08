@@ -100,6 +100,17 @@ pub enum WsAttachment {
         handle: String,
         /// CSA LOGIN の `<game_name>` 部分。マッチング時の同名性チェックに使う。
         game_name: String,
+        /// `%%ADMIN <token>` で `verify_admin_token_str` を通過した session のみ
+        /// `true` (https://github.com/SH11235/rshogi/issues/621)。`%%SETBUOY` /
+        /// `%%DELETEBUOY` 等の admin 権限要求コマンドで参照する。LOGIN 時点では
+        /// 必ず `false` で初期化し、`%%ADMIN` を経由した同一 session 内でのみ
+        /// `true` に昇格する (handle 自称 + ADMIN_HANDLE 平文露出を絶つ目的)。
+        ///
+        /// `#[serde(default)]` により Hibernation 経由で復帰した旧 schema の
+        /// attachment は `false` で復元される (admin 権限はセッション再開で
+        /// 必ず再認可するべき性質なので保守的既定が妥当)。
+        #[serde(default)]
+        is_admin: bool,
     },
     /// 観戦者。`/ws/<room_id>/spectate` から接続したセッションに付与する。
     ///
@@ -146,13 +157,41 @@ pub enum WsAttachment {
 }
 
 impl WsAttachment {
-    /// プレイヤ attachment を構築する補助関数。
+    /// プレイヤ attachment を構築する補助関数。`is_admin` は `false` で初期化
+    /// する (admin 権限は `%%ADMIN <token>` を経由したときのみ
+    /// [`Self::with_admin`] で `true` に上げる契約)。
     pub fn player(role: Role, handle: impl Into<String>, game_name: impl Into<String>) -> Self {
         Self::Player {
             role,
             handle: handle.into(),
             game_name: game_name.into(),
+            is_admin: false,
         }
+    }
+
+    /// 既存の Player attachment を admin 昇格状態にする。Player 以外の variant
+    /// に対しては変更せず元の値を返す (`Spectator` / `Pending` は admin に
+    /// しない契約)。
+    pub fn with_admin(self) -> Self {
+        match self {
+            Self::Player {
+                role,
+                handle,
+                game_name,
+                is_admin: _,
+            } => Self::Player {
+                role,
+                handle,
+                game_name,
+                is_admin: true,
+            },
+            other => other,
+        }
+    }
+
+    /// admin 昇格済みの Player か。Player 以外は常に `false`。
+    pub fn is_admin(&self) -> bool {
+        matches!(self, Self::Player { is_admin: true, .. })
     }
 
     /// 観戦者 attachment を構築する補助関数。
@@ -227,6 +266,50 @@ mod tests {
         assert!(s.contains("\"role\":\"White\""));
         assert!(s.contains("\"handle\":\"bob\""));
         assert!(s.contains("\"game_name\":\"gamename\""));
+        assert!(s.contains("\"is_admin\":false"));
+    }
+
+    #[test]
+    fn player_default_is_not_admin() {
+        let att = WsAttachment::player(Role::Black, "alice", "g");
+        assert!(!att.is_admin());
+    }
+
+    #[test]
+    fn player_with_admin_marks_attachment_as_admin() {
+        let att = WsAttachment::player(Role::Black, "alice", "g").with_admin();
+        assert!(att.is_admin());
+    }
+
+    #[test]
+    fn with_admin_is_noop_for_non_player() {
+        // Spectator / Pending は admin 昇格対象外。`with_admin` 呼び出しは値を
+        // 変えない (型 invariants として保護する)。
+        let pending = WsAttachment::Pending;
+        assert_eq!(pending.clone().with_admin(), pending);
+        let spec = WsAttachment::spectator("room-1");
+        assert_eq!(spec.clone().with_admin(), spec);
+    }
+
+    #[test]
+    fn player_admin_round_trips_via_json() {
+        // is_admin = true な Player が serde 経由で完全復元されること。
+        let att = WsAttachment::player(Role::Black, "alice", "g").with_admin();
+        let s = serde_json::to_string(&att).unwrap();
+        assert!(s.contains("\"is_admin\":true"));
+        let back: WsAttachment = serde_json::from_str(&s).unwrap();
+        assert_eq!(att, back);
+        assert!(back.is_admin());
+    }
+
+    #[test]
+    fn player_legacy_attachment_defaults_is_admin_false() {
+        // 旧 schema (is_admin 導入前) で永続化された Player attachment を
+        // deserialize した際、is_admin が default = false で復元されること。
+        // Hibernation 復帰時に admin 権限が黙って引き継がれない契約。
+        let legacy = r#"{"type":"Player","role":"Black","handle":"alice","game_name":"g"}"#;
+        let restored: WsAttachment = serde_json::from_str(legacy).unwrap();
+        assert!(!restored.is_admin());
     }
 
     #[test]
