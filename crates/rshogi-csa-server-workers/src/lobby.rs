@@ -40,7 +40,9 @@ use worker::{
     WebSocketIncomingMessage, WebSocketPair, console_log, durable_object, wasm_bindgen,
 };
 
-use crate::config::{ConfigKeys, parse_challenge_ttl_duration, parse_clock_presets};
+use crate::config::{
+    ConfigKeys, is_private_challenge_enabled, parse_challenge_ttl_duration, parse_clock_presets,
+};
 use crate::lobby_protocol::{
     ChallengeLobbyError, LobbyQueue, LoginLobbyError, LoginLobbyPrivateError,
     LoginLobbyPrivateRequest, MatchedEntries, QueueEntry, build_challenge_incorrect_line,
@@ -351,8 +353,23 @@ impl Lobby {
     /// と「私的対局経路 (`<handle>+private-<token>+free`)」を peek 分岐する。
     /// `is_private_login_handle` で `true` を返した場合は私的経路に分岐し、
     /// CHALLENGE_LOBBY 行は専用パス (`handle_challenge_lobby`) に分岐させる。
+    ///
+    /// **私的対局 feature gate (https://github.com/SH11235/rshogi/issues/635)**:
+    /// `PRIVATE_CHALLENGE_ENABLED` が無効 (production の既定) のとき、私的対局
+    /// 2 経路 (`CHALLENGE_LOBBY ` / `LOGIN_LOBBY <handle>+private-...+free`) は
+    /// `parse_*` / registry load 等の副作用に入る前に `:incorrect unsupported`
+    /// を返して終了する。両者揃った後の対局起動経路 (consume → GameRoom DO 起動)
+    /// が未実装の状態で client が誤って使うと pending state でハマるため、production
+    /// 到達不能化を最入口で行う。
     async fn dispatch_pending_line(&self, ws: &WebSocket, line: &str) -> Result<()> {
         if line.starts_with("CHALLENGE_LOBBY ") {
+            // CHALLENGE_LOBBY は新規 token 発行要求であって login 状態への遷移を
+            // 伴わないため、disabled でも close せず `:incorrect unsupported` の
+            // 1 行返却にとどめる (既存 parser エラー `bad_format` 等と同じ流儀)。
+            if !is_private_challenge_enabled(&self.env) {
+                send_line(ws, &build_challenge_incorrect_line("unsupported"))?;
+                return Ok(());
+            }
             // 中身は `parse_challenge_lobby` 側で再度 strip + 構造化するので、ここでは
             // prefix の有無のみを判定して dispatch する。
             return self.handle_challenge_lobby(ws, line).await;
@@ -362,6 +379,15 @@ impl Lobby {
             if let Some(id) = rest.split_whitespace().next()
                 && is_private_login_handle(id)
             {
+                // private LOGIN_LOBBY は既存の private parser エラーが
+                // `send_private_login_error` で 1003 close している経路と
+                // 揃え、disabled でも `1003` close で「この login 形式は
+                // この server では受けない」扱いにする。
+                if !is_private_challenge_enabled(&self.env) {
+                    send_line(ws, &build_login_incorrect_line("unsupported"))?;
+                    let _ = ws.close(Some(1003), Some("private_challenge_disabled"));
+                    return Ok(());
+                }
                 return self.handle_login_lobby_private(ws, line).await;
             }
         }

@@ -168,6 +168,17 @@ LOBBY_QUEUE_SIZE_LIMIT = "100"
 # 未消費 token は Lobby DO の Alarm ハンドラで自動削除する。1 時間 = 3600
 # は対戦相手が招待後にゆっくり PC を起動する想定の保守的既定。
 CHALLENGE_TTL_SEC = "3600"
+# 私的対局 (CHALLENGE_LOBBY / LOGIN_LOBBY+private-<token>+free) 経路の opt-in
+# 有効化フラグ (https://github.com/SH11235/rshogi/issues/635)。production では
+# 「両者揃った後の対局起動経路 (consume → GameRoom DO 起動 + clock_spec /
+# initial_sfen バトンパス)」が未実装で、production client が誤って使うと
+# pending state でハマるため fail-closed で `"false"` を既定とする。
+# (同じ `[vars]` 内の他の opt-in フラグ `ALLOW_VIEWER_API` は本番運用済機能
+# なので `"1"` だが、本フラグは未完成機能の production 到達不能化が目的で
+# あるため fail-closed の `"false"` を採用している。)
+# staging では起動経路実装の動作確認時のみ `"true"` に切り替え、production
+# 昇格時は本値を `"true"` に変えて redeploy する。
+PRIVATE_CHALLENGE_ENABLED = "false"
 
 # --- secret として設定する値 ---
 # 本番運用に必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。

@@ -168,6 +168,12 @@ LOBBY_QUEUE_SIZE_LIMIT = "100"
 # 確認をテンポよく回すため短めの 600 秒 (10 分) で運用する。production 昇格
 # 時は 3600 秒に揃える。
 CHALLENGE_TTL_SEC = "600"
+# 私的対局 (CHALLENGE_LOBBY / LOGIN_LOBBY+private-<token>+free) 経路の opt-in
+# 有効化フラグ (https://github.com/SH11235/rshogi/issues/635)。両者揃った後の
+# 対局起動経路 (consume → GameRoom DO 起動) が未実装の現状、staging では起動
+# 経路実装の動作確認 (E2E 通電) を回す前提で `"true"` を既定とする。production
+# は fail-closed で `"false"` 既定 (production toml 側参照)。
+PRIVATE_CHALLENGE_ENABLED = "true"
 
 # --- secret として設定する値 ---
 # staging で必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。

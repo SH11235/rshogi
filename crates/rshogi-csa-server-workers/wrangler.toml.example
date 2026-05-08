@@ -147,3 +147,13 @@ LOBBY_QUEUE_SIZE_LIMIT = "100"
 # 未消費 token は Lobby DO の Alarm ハンドラで自動削除し、保留中の WS 接続
 # があれば切断信号を送る。Issue #582 の Workers 経路で参照する。
 CHALLENGE_TTL_SEC = "3600"
+# 私的対局 (CHALLENGE_LOBBY / LOGIN_LOBBY+private-<token>+free) 経路の opt-in
+# 有効化フラグ (Issue #635)。両者揃った後の対局起動経路 (consume → GameRoom
+# DO 起動 + clock_spec / initial_sfen バトンパス) が未実装のため、production
+# 既定と揃えて fail-closed の `"false"` を採用する。
+# 無効時は LobbyDO の dispatch_pending_line 入口で
+# `CHALLENGE_LOBBY:incorrect unsupported` /
+# `LOGIN_LOBBY:incorrect unsupported` を返して private 経路を到達不能化する
+# (private LOGIN_LOBBY は加えて 1003 close)。
+# local dev で機能を試す場合のみ明示的に `"true"` に変更する。
+PRIVATE_CHALLENGE_ENABLED = "false"

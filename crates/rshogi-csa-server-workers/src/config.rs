@@ -118,6 +118,22 @@ impl ConfigKeys {
     /// 設定不正値は安全側に倒し（無効化）、`worker::console_log!` で警告ログを
     /// 出す。
     pub const ALLOW_VIEWER_API: &'static str = "ALLOW_VIEWER_API";
+    /// 私的対局 (`CHALLENGE_LOBBY` および `LOGIN_LOBBY <handle>+private-<token>+free`)
+    /// 経路を opt-in 有効化するブール変数 (https://github.com/SH11235/rshogi/issues/635)。
+    /// `true` / `1` / `yes` / `on` で有効、`false` / `0` / `no` / `off` または
+    /// 未設定で無効化。
+    ///
+    /// 無効時 (= production の既定) は LobbyDO の `dispatch_pending_line` 入口で
+    /// 早期 reject し、`CHALLENGE_LOBBY:incorrect unsupported` /
+    /// `LOGIN_LOBBY:incorrect unsupported` を返す (private LOGIN_LOBBY は加えて
+    /// 1003 close)。両者揃った後の対局起動経路 (consume → GameRoom DO 起動 +
+    /// clock_spec / initial_sfen バトンパス) が未実装のため、production client が
+    /// 誤って使うと pending state でハマるのを防ぐ feature gate。
+    ///
+    /// staging では起動経路実装の動作確認時のみ `"true"` に切り替える。
+    /// 設定不正値 (`true` / `false` / 数字 / yes/no/on/off 以外) は `ALLOW_VIEWER_API`
+    /// と同じく安全側 (= 無効化) に倒し、`worker::console_log!` で警告ログを出す。
+    pub const PRIVATE_CHALLENGE_ENABLED: &'static str = "PRIVATE_CHALLENGE_ENABLED";
 
     /// deploy 対象コードの provenance commit sha (`DEPLOY_TRIGGER_SHA`)。
     ///
@@ -185,6 +201,7 @@ impl ConfigKeys {
         Self::ALLOW_VIEWER_API,
         Self::LOBBY_QUEUE_SIZE_LIMIT,
         Self::CHALLENGE_TTL_SEC,
+        Self::PRIVATE_CHALLENGE_ENABLED,
     ];
 
     /// **local dev のみ** の `wrangler.toml.example` `[vars]` テーブルに追加で
@@ -444,6 +461,30 @@ pub fn is_viewer_api_enabled(env: &worker::Env) -> bool {
         Ok(v) => v,
         Err(e) => {
             worker::console_log!("[viewer_api] event=invalid_allow_viewer_api err={e}");
+            false
+        }
+    }
+}
+
+/// 私的対局経路 (`CHALLENGE_LOBBY` / `LOGIN_LOBBY <handle>+private-<token>+free`)
+/// が有効化されているかを `[vars]` `PRIVATE_CHALLENGE_ENABLED` から判定する
+/// (https://github.com/SH11235/rshogi/issues/635)。
+///
+/// 値の解釈は [`rshogi_csa_server::config::parse_truthy_bool_env`] に委ねる。
+/// 設定不正値（`true` / `false` / 数字 / yes/no/on/off 以外）は安全側に倒し
+/// （= private challenge 無効化）、`worker::console_log!` で警告ログを出す。
+///
+/// 無効時は LobbyDO の `dispatch_pending_line` 入口で早期 reject し、
+/// `CHALLENGE_LOBBY:incorrect unsupported` / `LOGIN_LOBBY:incorrect unsupported`
+/// を返す。両者揃った後の対局起動経路 (consume → GameRoom DO 起動) が未実装の
+/// ため、production client が誤って使うと pending state でハマるのを防ぐ。
+#[cfg(target_arch = "wasm32")]
+pub fn is_private_challenge_enabled(env: &worker::Env) -> bool {
+    let raw = env.var(ConfigKeys::PRIVATE_CHALLENGE_ENABLED).ok().map(|v| v.to_string());
+    match rshogi_csa_server::config::parse_truthy_bool_env(raw.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            worker::console_log!("[lobby] event=invalid_private_challenge_enabled err={e}");
             false
         }
     }
