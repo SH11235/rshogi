@@ -108,7 +108,7 @@ pub const BACKFILL_CRON: &str = "0 * * * *";
 
 /// Sweep のみ走らせる cron 文字列 (15 / 30 / 45 分)。
 ///
-/// Issue #629 で導入した orphan sweep 高頻度化用。`try_delete_live_games_index`
+/// https://github.com/SH11235/rshogi/issues/629 で導入した orphan sweep 高頻度化用。`try_delete_live_games_index`
 /// が R2 transient で失敗した場合の復旧遅延を 1 時間 → 15 分に短縮する目的で、
 /// 本 cron では backfill (Class A put 増) を走らせず sweep のみ実行する。
 pub const SWEEP_ONLY_CRON: &str = "15,30,45 * * * *";

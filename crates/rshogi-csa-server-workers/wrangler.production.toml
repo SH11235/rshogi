@@ -75,16 +75,16 @@ bucket_name = "rshogi-csa-floodgate-history-prod"
 
 # --- Cron triggers ---
 # `[event(scheduled)]` ハンドラ (`lib.rs::scheduled`) を 2 つの cron で起動する
-# (Issue #629 で 1 → 2 に分離)。
+# (https://github.com/SH11235/rshogi/issues/629 で 1 → 2 に分離)。
 #
 # - `0 * * * *` (毎時 0 分):
 #   `kifu-by-id/<id>.meta.json` から `games-index/` を補完 (backfill) し、
-#   `live-games-index/` の orphan を掃除する (Issue #551)。backfill は 1 run =
+#   `live-games-index/` の orphan を掃除する (https://github.com/SH11235/rshogi/issues/551)。backfill は 1 run =
 #   1 page (1000 件) のみ。
 # - `15,30,45 * * * *` (15 / 30 / 45 分):
 #   `live-games-index/` の orphan 掃除のみを行う (backfill はスキップ)。
 #   delete best-effort 失敗からの復旧遅延を 1 時間 → 15 分に短縮するため、
-#   sweep のみ高頻度化する (Issue #629)。sweep は 1 cron 内で pagination
+#   sweep のみ高頻度化する (https://github.com/SH11235/rshogi/issues/629)。sweep は 1 cron 内で pagination
 #   loop し、cron 30s 制限内で複数 page を処理する。
 #
 # どちらの cron も `lib.rs::scheduled` で `event.cron()` を見て分岐する。
@@ -148,7 +148,7 @@ CLOCK_PRESETS = '''[
 RECONNECT_GRACE_SECONDS = "30"
 # LOGIN OK 後の AGREE 待ち TTL (秒)。`start_match` で Game_Summary を送信した
 # 直後に予約し、両者 AGREE で cancel する。発火時は対局成立前に部屋を解放
-# (Issue #600)。`0` / 未設定 / 非数値は 60 秒既定にフォールバック (TTL 0 =
+# (https://github.com/SH11235/rshogi/issues/600)。`0` / 未設定 / 非数値は 60 秒既定にフォールバック (TTL 0 =
 # 無効化は memory / room 枠の長期占有リスクを再現するため許容しない)。
 AGREE_TIMEOUT_SECONDS = "60"
 # Floodgate 系運用機能（再接続プロトコル等）を opt-in 有効化する。`true` / `1` /

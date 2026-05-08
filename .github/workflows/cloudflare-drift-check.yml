@@ -1,4 +1,4 @@
-# Cloudflare Workers (rshogi-csa-server-workers) deploy drift 検出 (Issue #639)。
+# Cloudflare Workers (rshogi-csa-server-workers) deploy drift 検出 (https://github.com/SH11235/rshogi/issues/639)。
 #
 # `wrangler rollback` は Cloudflare 側の version のみ巻き戻し、main にも修正
 # commit が入っていない場合、staging では「次の自動 deploy で同じ壊れたコードが
@@ -66,7 +66,7 @@ jobs:
       # 同 file 内の `Compute DEPLOY_TRIGGER_SHA` step と **必ず同じ集合** に揃える。
       # 不一致だと drift detection の比較基準と deploy 注入値が一致せず、false
       # positive / false negative の双方を生む。path リスト変更時は両 workflow を
-      # 同 PR で更新する運用契約 (Issue #639 Codex review で合意)。
+      # 同 PR で更新する運用契約 (https://github.com/SH11235/rshogi/issues/639 Codex review で合意)。
       - name: Compute expected DEPLOY_TRIGGER_SHA from main
         id: expected
         run: |
@@ -205,7 +205,7 @@ jobs:
           else
             echo "Opening new drift issue"
             gh issue create \
-              --title "Cloudflare Workers staging deploy drift (Issue #639)" \
+              --title "Cloudflare Workers staging deploy drift (https://github.com/SH11235/rshogi/issues/639)" \
               --label csa-deploy-drift \
               --body "$body"
           fi

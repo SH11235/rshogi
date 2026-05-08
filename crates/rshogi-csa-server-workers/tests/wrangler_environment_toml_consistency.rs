@@ -206,7 +206,7 @@ fn assert_no_runtime_injected_keys(env: &EnvironmentBindings) {
 /// 固定する。`[event(scheduled)]` ハンドラは production / staging 両方で稼働させる
 /// 契約 (片方だけ宣言だと backfill / orphan sweep が動かず orphan が滞留する)。
 ///
-/// Issue #629 で cron を 1 → 2 に増やした (sweep のみ 15 分間隔)。両 cron が
+/// https://github.com/SH11235/rshogi/issues/629 で cron を 1 → 2 に増やした (sweep のみ 15 分間隔)。両 cron が
 /// 必ず宣言されていること、かつ `lib.rs::BACKFILL_CRON` /
 /// `lib.rs::SWEEP_ONLY_CRON` 定数と文字列が一致していることを assert する
 /// (定数を変更したのに wrangler 側を更新し忘れる事故を防ぐ)。
@@ -222,7 +222,7 @@ fn assert_declares_backfill_cron_trigger(env: &EnvironmentBindings) {
     assert!(
         env.crons.contains(&rshogi_csa_server_workers::SWEEP_ONLY_CRON.to_owned()),
         "{file} ({label}) [triggers] crons must contain SWEEP_ONLY_CRON ({sweep:?}) for orphan sweep \
-         high-frequency path (Issue #629); got: {crons:?}",
+         high-frequency path (https://github.com/SH11235/rshogi/issues/629); got: {crons:?}",
         file = env.file_name,
         label = env.label,
         sweep = rshogi_csa_server_workers::SWEEP_ONLY_CRON,
@@ -231,7 +231,7 @@ fn assert_declares_backfill_cron_trigger(env: &EnvironmentBindings) {
 }
 
 /// 両環境の `[triggers] crons` が同じ集合 (順序含む) を宣言していることを assert
-/// する。production / staging で挙動を揃える契約 (Issue #629)。
+/// する。production / staging で挙動を揃える契約 (https://github.com/SH11235/rshogi/issues/629)。
 fn assert_crons_match(lhs: &EnvironmentBindings, rhs: &EnvironmentBindings) {
     assert_eq!(
         lhs.crons,

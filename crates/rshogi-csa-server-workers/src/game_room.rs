@@ -111,11 +111,11 @@ const MAX_SPECTATORS_PER_ROOM: usize = 50;
 /// のジッタと `Date::now()` ↔ `handle_line` の now_ms 伝搬遅延を吸収する。
 const ALARM_SAFETY_MS: u64 = 200;
 
-/// `try_delete_live_games_index` の delete 試行上限 (Issue #629)。R2 delete は
+/// `try_delete_live_games_index` の delete 試行上限 (https://github.com/SH11235/rshogi/issues/629)。R2 delete は
 /// idempotent なので transient error は積極的に retry する。
 const LIVE_INDEX_DELETE_MAX_ATTEMPTS: u32 = 3;
 
-/// `try_delete_live_games_index` の attempt 間 backoff (ミリ秒、Issue #629)。
+/// `try_delete_live_games_index` の attempt 間 backoff (ミリ秒、https://github.com/SH11235/rshogi/issues/629)。
 /// 配列長 = `LIVE_INDEX_DELETE_MAX_ATTEMPTS - 1`。最終 attempt の後は backoff
 /// せず giveup ログに抜けるため、最後の値は使われない。`100, 200` で合計 wall
 /// 300ms 以内に収める (Workers cron の 30s 制限を圧迫しない)。

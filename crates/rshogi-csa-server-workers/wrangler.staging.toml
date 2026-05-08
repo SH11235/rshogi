@@ -72,16 +72,16 @@ bucket_name = "rshogi-csa-floodgate-history-staging"
 
 # --- Cron triggers ---
 # `[event(scheduled)]` ハンドラ (`lib.rs::scheduled`) を 2 つの cron で起動する
-# (Issue #629 で 1 → 2 に分離)。
+# (https://github.com/SH11235/rshogi/issues/629 で 1 → 2 に分離)。
 #
 # - `0 * * * *` (毎時 0 分):
 #   `kifu-by-id/<id>.meta.json` から `games-index/` を補完 (backfill) し、
-#   `live-games-index/` の orphan を掃除する (Issue #551)。backfill は 1 run =
+#   `live-games-index/` の orphan を掃除する (https://github.com/SH11235/rshogi/issues/551)。backfill は 1 run =
 #   1 page (1000 件) のみ。
 # - `15,30,45 * * * *` (15 / 30 / 45 分):
 #   `live-games-index/` の orphan 掃除のみを行う (backfill はスキップ)。
 #   delete best-effort 失敗からの復旧遅延を 1 時間 → 15 分に短縮するため、
-#   sweep のみ高頻度化する (Issue #629)。sweep は 1 cron 内で pagination
+#   sweep のみ高頻度化する (https://github.com/SH11235/rshogi/issues/629)。sweep は 1 cron 内で pagination
 #   loop し、cron 30s 制限内で複数 page を処理する。
 #
 # どちらの cron も `lib.rs::scheduled` で `event.cron()` を見て分岐する。
@@ -153,7 +153,7 @@ CLOCK_PRESETS = '''[
 # 計測してから再評価する。
 RECONNECT_GRACE_SECONDS = "30"
 # LOGIN OK 後の AGREE 待ち TTL (秒)。両者 AGREE 前に片方が刺さった対局を DO 上
-# から自動解放する (Issue #600)。staging では E2E をテンポよく回すため短めの
+# から自動解放する (https://github.com/SH11235/rshogi/issues/600)。staging では E2E をテンポよく回すため短めの
 # 30 秒で運用し、production 昇格時に 60 秒へ揃える運用とする。`0` / 未設定 /
 # 非数値は 60 秒既定にフォールバック。
 AGREE_TIMEOUT_SECONDS = "30"

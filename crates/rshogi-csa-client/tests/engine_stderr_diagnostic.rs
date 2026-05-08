@@ -1,7 +1,7 @@
 //! USI engine subprocess 死亡時に stderr 末尾 / engine path / exit status を含む
 //! 診断 error を返すことを mock engine で検証する host 単体テスト。
 //!
-//! Issue #593 partial fix の regression guard。fatal communication error 経路
+//! https://github.com/SH11235/rshogi/issues/593 partial fix の regression guard。fatal communication error 経路
 //! (send BrokenPipe / recv Disconnected / wait_bestmove Disconnected) と
 //! stderr ring buffer (4 KB cap、CRLF 吸収) の挙動を 6 fixture で pin する。
 //!
