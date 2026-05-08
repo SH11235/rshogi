@@ -1,6 +1,6 @@
 //! viewer 配信用 R2 prefix の補完 / orphan 掃除を担う cron ジョブ群。
 //!
-//! Issue #551 設計 v3 に従い、以下 2 つの best-effort ジョブを実装する:
+//! https://github.com/SH11235/rshogi/issues/551 設計 v3 に従い、以下 2 つの best-effort ジョブを実装する:
 //!
 //! - [`run_games_index_backfill`]: `kifu-by-id/<id>.meta.json` を 1 ページ
 //!   (1000 件) 単位で list し、各 meta 本文から `games-index/<inv>-<id>.json`

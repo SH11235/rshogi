@@ -648,7 +648,7 @@ mod tests {
 
     /// 旧 schema (本フィールド導入前の cold start snapshot) に
     /// `black_reconnect_token` / `white_reconnect_token` フィールドが存在しなくても、
-    /// `#[serde(default)]` で `None` として deserialize できる。Issue #591 hotfix で
+    /// `#[serde(default)]` で `None` として deserialize できる。https://github.com/SH11235/rshogi/issues/591 hotfix で
     /// `start_match` が常に `Some` を書く挙動から `None` も書く挙動に変わったため、
     /// 旧 snapshot との互換性を回帰防止する。
     #[test]

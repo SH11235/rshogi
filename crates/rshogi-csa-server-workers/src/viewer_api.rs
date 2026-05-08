@@ -1,6 +1,6 @@
 //! viewer 配信 HTTP API (`/api/v1/games`) のルーティングと R2 アクセス。
 //!
-//! v3 設計 (Issue #542 issuecomment-4338088406) に準拠する 3 エンドポイント:
+//! v3 設計 (https://github.com/SH11235/rshogi/issues/542 issuecomment-4338088406) に準拠する 3 エンドポイント:
 //!
 //! - `GET /api/v1/games?cursor=<opaque>&limit=<N>` 一覧 (終局済)
 //!   `KIFU_BUCKET.list({prefix: "games-index/", cursor, limit})` を 1 回呼び、
@@ -10,7 +10,7 @@
 //! - `GET /api/v1/games/live?cursor=<opaque>&limit=<N>` 一覧 (進行中)
 //!   `KIFU_BUCKET.list({prefix: "live-games-index/", cursor, limit})` を 1 回呼び、
 //!   各オブジェクト本文 (= [`crate::live_games_index::LiveGamesIndexEntry`] の JSON)
-//!   を `live_games[]` に詰めて返す (Issue #549)。終局済 list と同じ pagination
+//!   を `live_games[]` に詰めて返す (https://github.com/SH11235/rshogi/issues/549)。終局済 list と同じ pagination
 //!   semantics、`/api/v1/games/<id>` のような単局エンドポイントは進行中対局には
 //!   設けない (= viewer 側は live entry を **発見手段** として扱い、行クリック時に
 //!   WS spectate 接続で実状態を確認する)。
@@ -27,10 +27,10 @@
 //!
 //! `try_handle` 配下に新しい `/api/v1/*` エンドポイントを追加する場合は、
 //! `check_origin` / `with_cors` の通過と `WS_ALLOWED_ORIGINS` allowlist 体系
-//! (Issue #550 で強化予定) に確実に乗ることを必ずレビューする。allowlist 未設定
+//! (https://github.com/SH11235/rshogi/issues/550 で強化予定) に確実に乗ることを必ずレビューする。allowlist 未設定
 //! 環境での挙動 (= Origin ヘッダなしで通る) も含めて回帰させない。
 //!
-//! # Cloudflare Cache API による R2 Class B ops 削減 (Issue #636)
+//! # Cloudflare Cache API による R2 Class B ops 削減 (https://github.com/SH11235/rshogi/issues/636)
 //!
 //! 1 リクエストで `bucket.list` (1 RTT) + 各 entry `bucket.get` (最大 N=100 RTT)
 //! を消費する N+1 パターンを Cloudflare の `caches.default` で短期キャッシュする。
@@ -85,7 +85,7 @@ const MIN_LIMIT: u32 = 1;
 /// 引き継ぐ (404 までの fallthrough)。
 ///
 /// `OPTIONS` は CORS preflight として viewer API 配下のパスでのみ受理する
-/// (Issue #564 設計 v4 §3)。`X-Client` を custom request header として送る
+/// (https://github.com/SH11235/rshogi/issues/564 設計 v4 §3)。`X-Client` を custom request header として送る
 /// クライアント (ramu-shogi web / desktop) のために `Access-Control-Allow-Headers`
 /// を返す必要がある。`ALLOW_VIEWER_API` 無効時は GET と同様 404 へフォールスルー
 /// し、preflight の段階で kill-switch を効かせる。
@@ -126,7 +126,7 @@ pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
             // 余分な階層 (`/api/v1/games/x/y`) や末尾 `/` は 404 で扱う。
             // viewer API 配下のエラー応答は一律 `Cache-Control: no-store` を
             // 付け、edge cache が誤って 404 を保持しないように倒す
-            // (Issue #636 review v1)。with_cors も通して ACAO + Vary を
+            // (https://github.com/SH11235/rshogi/issues/636 review v1)。with_cors も通して ACAO + Vary を
             // 揃える。
             let resp = no_store_error("Not Found", 404)?;
             return Ok(Some(with_cors(resp, req, env)?));
@@ -214,7 +214,7 @@ struct LiveListResponse {
 struct GameResponse<'a> {
     game_id: &'a str,
     csa: String,
-    /// `kifu-by-id/<id>.meta.json` から取得した正準メタ (Issue #551 設計 v3 §12)。
+    /// `kifu-by-id/<id>.meta.json` から取得した正準メタ (https://github.com/SH11235/rshogi/issues/551 設計 v3 §12)。
     /// meta 不在時は 404 を返す前提なので、ここは常に `Some` 相当だが JSON 上は
     /// serde 既定で field として出る。
     meta: serde_json::Value,
@@ -222,7 +222,7 @@ struct GameResponse<'a> {
 
 /// cache TTL を path 種別から決める純粋ロジック。
 ///
-/// Issue #636 で導入した `caches.default` per-URL cache の TTL 値固定化。
+/// https://github.com/SH11235/rshogi/issues/636 で導入した `caches.default` per-URL cache の TTL 値固定化。
 /// 値は `viewer_api` モジュール doc に書いた契約と一致させ、テストで固定する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CacheableKind {
@@ -246,7 +246,7 @@ impl CacheableKind {
 
 /// 終局済一覧ハンドラ。`games-index/` を 1 ページ list する。
 ///
-/// Issue #636 の cache 経路:
+/// https://github.com/SH11235/rshogi/issues/636 の cache 経路:
 /// 1. allowlist チェック → 403 origin block の場合は no-store で即返却
 /// 2. cache.get (key = request URL) → hit なら ACAO 被せて返す
 /// 3. miss なら collect_index_page で R2 list + N×get → origin-neutral Response
@@ -471,7 +471,7 @@ async fn collect_index_page(
 /// 単局ハンドラ。`<game_id>` (URL-decoded path 残部) を受け取り、kifu-by-id を
 /// 直接 get する。
 ///
-/// 終局済棋譜は immutable のため Cache TTL を 600 秒で固定する (Issue #636)。
+/// 終局済棋譜は immutable のため Cache TTL を 600 秒で固定する (https://github.com/SH11235/rshogi/issues/636)。
 async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response> {
     if let Some(blocked) = check_origin(req, env)? {
         return Ok(blocked);
@@ -576,7 +576,7 @@ async fn build_single_game(
 
 /// `kifu-by-id/<id>.meta.json` を直接 get して `game_id` の meta を返す。
 ///
-/// Issue #551 設計 v3 §12 で meta primary 化したことにより、`games-index/`
+/// https://github.com/SH11235/rshogi/issues/551 設計 v3 §12 で meta primary 化したことにより、`games-index/`
 /// を prefix list で走査する旧経路 (O(N)) は廃止し O(1) get に統一した。
 /// meta が存在しない場合は `Ok(None)` を返し、呼び出し側で 404 を返す。
 async fn find_meta_for(
@@ -634,12 +634,12 @@ fn check_origin(req: &Request, env: &Env) -> Result<Option<Response>> {
 /// Origin はリストに含まれている (もしくは Origin ヘッダなし)。
 ///
 /// `Vary` は `Origin, Access-Control-Request-Headers` を一括して設定する
-/// (Issue #564 設計 v4 §3 review v1 (e))。preflight (OPTIONS) と GET の
+/// (https://github.com/SH11235/rshogi/issues/564 設計 v4 §3 review v1 (e))。preflight (OPTIONS) と GET の
 /// 双方に適用することで、CDN / ブラウザキャッシュが Origin あるいは
 /// preflight で送られた `Access-Control-Request-Headers` を取り違えて
 /// レスポンスを共有する事故を防ぐ。
 ///
-/// Issue #636: cache から取り出した origin-neutral な Response も最終的に本関数で
+/// https://github.com/SH11235/rshogi/issues/636: cache から取り出した origin-neutral な Response も最終的に本関数で
 /// ACAO + Vary を被せる。cache に保存する側では ACAO を含めない (origin-neutral
 /// 化) ことで Origin ごとに cache が分散しないようにしている。
 fn with_cors(mut resp: Response, req: &Request, env: &Env) -> Result<Response> {
@@ -723,7 +723,7 @@ async fn cache_put_origin_neutral(
 
 /// 失敗ログを logfmt で出す統一窓口。viewer API の経路別 event 名と、
 /// 呼出側クライアントを特定する `client_kind` を持たせる
-/// (Issue #564 設計 v4 §3)。`client_kind` は [`normalize_client_kind`] により
+/// (https://github.com/SH11235/rshogi/issues/564 設計 v4 §3)。`client_kind` は [`normalize_client_kind`] により
 /// `[a-z0-9-]{1,64}` に正規化済みの ASCII 文字列、または `unknown` / `invalid`。
 fn console_log_failed(event: &str, client_kind: &str, detail: &str) {
     worker::console_log!("[viewer_api] event={event} client_kind={client_kind} detail={detail}");

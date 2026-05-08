@@ -184,7 +184,7 @@ pub enum PendingAlarmKind {
     /// `HandleOutcome::GameStarted` で cancel される。発火時は対局成立前
     /// (= `play_started_at_ms` 未確定 / `KEY_FINISHED` 未設定 / live-games-index
     /// 未 put) のため、`force_abnormal` ではなく `abort_pending_match_with_error`
-    /// + `KEY_FINISHED` セット相当の経路で部屋を解放する (Issue #600)。
+    /// + `KEY_FINISHED` セット相当の経路で部屋を解放する (https://github.com/SH11235/rshogi/issues/600)。
     AgreeTimeout,
 }
 
@@ -194,7 +194,7 @@ pub enum PendingAlarmKind {
 /// `PersistedConfig` への保存もスキップする。
 ///
 /// production の保守的既定 (`RECONNECT_GRACE_SECONDS=0`) では本関数は常に
-/// `(None, None)` を返し、Issue #591 の `LOGIN:incorrect reconnect_rejected`
+/// `(None, None)` を返し、https://github.com/SH11235/rshogi/issues/591 の `LOGIN:incorrect reconnect_rejected`
 /// 経路に client が到達しなくなる (`csa_client::run_one_game` の reconnect
 /// skip 判定で `summary.reconnect_token == None` のため reconnect 試行自体を
 /// skip する)。
@@ -223,7 +223,7 @@ pub(crate) fn classify_alarm_after_enter_grace(
     }
 }
 
-/// `start_match` 入口の防御ガード判定結果 (Issue #626)。
+/// `start_match` 入口の防御ガード判定結果 (https://github.com/SH11235/rshogi/issues/626)。
 ///
 /// `start_match` は副作用 (`KEY_CONFIG` put / buoy reservation / `set_alarm`) の
 /// 前にこの関数の判定で early return する。本 enum を介して入口判定を純粋関数
@@ -251,7 +251,7 @@ pub enum StartMatchGuard {
     AlarmPending(PendingAlarmKind),
 }
 
-/// `start_match` 入口の三段ガードを純粋関数として表現する (Issue #626)。
+/// `start_match` 入口の三段ガードを純粋関数として表現する (https://github.com/SH11235/rshogi/issues/626)。
 ///
 /// 引数は永続化キー (`KEY_FINISHED` / `KEY_CONFIG` / `KEY_PENDING_ALARM_KIND`)
 /// の存在 / 値を直接取り、内部参照型に依存しない (`PersistedConfig` /
@@ -470,7 +470,7 @@ mod tests {
         assert!(should_set_grace);
     }
 
-    /// `start_match` 入口の三段ガード仕様を pin する (Issue #626)。
+    /// `start_match` 入口の三段ガード仕様を pin する (https://github.com/SH11235/rshogi/issues/626)。
     ///
     /// `proceeds_when_no_state`: 何も永続化されていない初回 LOGIN マッチ成立直後の
     /// 経路で副作用なしの続行を許可する。
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(classify_start_match_guard(false, true, None), StartMatchGuard::AlreadyMatched);
     }
 
-    /// Issue #626 の主要シナリオ。`enter_grace_window` で `GraceExpired` alarm が
+    /// https://github.com/SH11235/rshogi/issues/626 の主要シナリオ。`enter_grace_window` で `GraceExpired` alarm が
     /// 予約済の状態で `start_match` を踏むと、`AgreeTimeout` で上書きしてしまう
     /// ため reject する。
     #[test]

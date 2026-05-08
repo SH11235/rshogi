@@ -4,7 +4,7 @@
 //! - `GET /ws/:room_id` → Origin 検査後、`room_id` を `id_from_name` で
 //!   決定論的に解決した Durable Object へ Upgrade 要求を転送する。
 //! - `GET /` と `GET /health` → サーバ識別と deploy 元 commit sha を JSON で返す
-//!   簡易ヘルスチェック。Issue #639 の rollback drift detection が `deployed_sha`
+//!   簡易ヘルスチェック。https://github.com/SH11235/rshogi/issues/639 の rollback drift detection が `deployed_sha`
 //!   を main HEAD と突合する基準にするため、JSON schema の安定性を保つこと。
 //! - 他は 404。
 
@@ -172,7 +172,7 @@ async fn forward_ws_to_room(
 ///
 /// `deployed_sha` は CI deploy 時に `wrangler deploy --var DEPLOYED_SHA:<sha>` で
 /// 注入された commit sha (= `.github/workflows/deploy-workers.yml` の `push.paths`
-/// にマッチする main 上の最新 commit)。Issue #639 の drift detection workflow が
+/// にマッチする main 上の最新 commit)。https://github.com/SH11235/rshogi/issues/639 の drift detection workflow が
 /// 本フィールドを `git log -1 --format=%H -- <paths>` の結果と突合して、Cloudflare
 /// 側に残った rollback 後の旧 version を検出する。
 ///

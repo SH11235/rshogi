@@ -45,7 +45,7 @@ impl ConfigKeys {
     pub const LOBBY_QUEUE_SIZE_LIMIT: &'static str = "LOBBY_QUEUE_SIZE_LIMIT";
     /// 私的対局 (`CHALLENGE_LOBBY`) で発行された token の TTL (秒)。期限超過した
     /// 未消費 token は LobbyDO の Alarm ハンドラで `purge_expired` され、保留中の
-    /// WS 接続がいれば切断される。未設定時は 3600 秒 (1 時間)。Issue #582 の
+    /// WS 接続がいれば切断される。未設定時は 3600 秒 (1 時間)。https://github.com/SH11235/rshogi/issues/582 の
     /// Workers 経路で参照する。
     pub const CHALLENGE_TTL_SEC: &'static str = "CHALLENGE_TTL_SEC";
     /// R2 バケットバインディング名（CSA V2 棋譜保存）。
@@ -97,7 +97,7 @@ impl ConfigKeys {
     pub const RECONNECT_GRACE_SECONDS: &'static str = "RECONNECT_GRACE_SECONDS";
     /// LOGIN OK 後の AGREE 待ち TTL (秒)。`start_match` で Game_Summary を送信した
     /// 直後に予約し、両者 AGREE 受領 (`HandleOutcome::GameStarted`) で cancel する。
-    /// 発火時は対局が成立する前に部屋を解放する (Issue #600)。
+    /// 発火時は対局が成立する前に部屋を解放する (https://github.com/SH11235/rshogi/issues/600)。
     /// `0` または未設定は安全側既定 [`DEFAULT_AGREE_TIMEOUT_SEC`] にフォールバック
     /// する (TTL 0 = 無効化は memory / room 枠の長期占有リスクを再現するため許容しない)。
     pub const AGREE_TIMEOUT_SECONDS: &'static str = "AGREE_TIMEOUT_SECONDS";
@@ -119,7 +119,7 @@ impl ConfigKeys {
     /// 注入される。ここでの `<sha>` は `github.sha` ではなく
     /// `.github/workflows/deploy-workers.yml` の `push.paths` にマッチする main 上の
     /// **最新 commit sha** (`git log -1 --format=%H -- <paths>`)。docs-only commit が
-    /// main HEAD にあっても本値は変わらないため、Issue #639 の drift detection
+    /// main HEAD にあっても本値は変わらないため、https://github.com/SH11235/rshogi/issues/639 の drift detection
     /// workflow で「deploy 対象コードの commit ↔ Cloudflare 上の current version」を
     /// 突合する基準として使える。
     ///
@@ -218,7 +218,7 @@ pub(crate) const DEFAULT_CHALLENGE_TTL_SEC: u64 = 3600;
 
 /// `AGREE_TIMEOUT_SECONDS` 既定値 (60 秒)。TCP frontend は 5 分既定だが、Workers
 /// DO は 1 部屋 = 1 instance で memory / room 枠を専有するため、より短めの既定で
-/// stuck DO を素早く解放する設計を採る (Issue #600)。
+/// stuck DO を素早く解放する設計を採る (https://github.com/SH11235/rshogi/issues/600)。
 pub(crate) const DEFAULT_AGREE_TIMEOUT_SEC: u64 = 60;
 
 /// `CHALLENGE_TTL_SEC` 文字列を `Duration` へ解決する。`None` / 空文字 /

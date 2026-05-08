@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// WS 受信 1 メッセージあたりの最大バイト数 (Issue #627)。
+/// WS 受信 1 メッセージあたりの最大バイト数 (https://github.com/SH11235/rshogi/issues/627)。
 ///
 /// CSA LOGIN / CHAT / move 行 / lobby command (`LOGIN_LOBBY` /
 /// `CHALLENGE_LOBBY` / `LOGOUT_LOBBY` 等) はいずれも数百バイト未満で収まる
@@ -25,14 +25,14 @@ use serde::{Deserialize, Serialize};
 /// で改行を削る **前** の元バイト数に対して行う。
 pub const MAX_WS_LINE_BYTES: usize = 4096;
 
-/// Spectator pending_queue に積める行数上限 (Issue #627)。
+/// Spectator pending_queue に積める行数上限 (https://github.com/SH11235/rshogi/issues/627)。
 ///
 /// snapshot 送信中に到着した broadcast 行を per-WS キューに積む経路で、
 /// チャット flood 等で無制限に成長する DoS 経路を遮断する。1 局 ≤ 512 手 +
 /// CHAT / START / 終局通知の余裕として 1024 を採る。
 pub const MAX_SPECTATOR_QUEUE_ITEMS: usize = 1024;
 
-/// Spectator pending_queue の累計バイト数上限 (Issue #627)。
+/// Spectator pending_queue の累計バイト数上限 (https://github.com/SH11235/rshogi/issues/627)。
 ///
 /// 行数上限とは独立に、長文 CHAT が積み上がるケースに備えて bytes 上限も
 /// 課す。`pending_queue` の各行 (`String`) の `len()` の総和で判定する。
@@ -331,7 +331,7 @@ mod tests {
         assert_ne!(player, spec);
     }
 
-    /// Issue #627: 受信メッセージサイズ上限の値が CSA プロトコル正常系に対し
+    /// https://github.com/SH11235/rshogi/issues/627: 受信メッセージサイズ上限の値が CSA プロトコル正常系に対し
     /// 十分余裕を持っていること、かつ Cloudflare WS の最大 32 MiB より
     /// 大幅に小さいことの sanity check。値変更時にビルド時 regression を検出する。
     /// `const { assert!(..) }` を使うことで run-time コストゼロで固定する。
@@ -346,7 +346,7 @@ mod tests {
         };
     }
 
-    /// Issue #627: spectator pending_queue 上限値が 1 局の通常運用に対し
+    /// https://github.com/SH11235/rshogi/issues/627: spectator pending_queue 上限値が 1 局の通常運用に対し
     /// 十分余裕を持っていることの sanity check (ビルド時固定)。
     #[test]
     fn spectator_queue_limits_are_sane() {

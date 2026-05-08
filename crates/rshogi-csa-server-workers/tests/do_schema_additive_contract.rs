@@ -9,7 +9,7 @@
 //! 限定する必要がある。
 //!
 //! 具体的には `CREATE TABLE IF NOT EXISTS <name> ( ... )` のみを許可する
-//! (Issue #638 / `docs/csa-server/deployment.md` §3.4.1)。SQLite の
+//! (https://github.com/SH11235/rshogi/issues/638 / `docs/csa-server/deployment.md` §3.4.1)。SQLite の
 //! `ALTER TABLE ... ADD COLUMN` は同名 column が既に存在すると
 //! `duplicate column name` で fail するため、再 exec で no-op にならない。
 //! column 追加が必要になった場合は `SCHEMA_SQL` に直接入れず、
