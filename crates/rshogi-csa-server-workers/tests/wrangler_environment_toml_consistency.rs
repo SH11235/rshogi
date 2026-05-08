@@ -7,7 +7,7 @@
 //! ことを各環境ファイルについて検証する。
 //!
 //! **本ファイルが各環境で扱わない値**（[`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`]、
-//! 例: `ADMIN_HANDLE`）は production / staging いずれも `wrangler secret put`
+//! 例: `ADMIN_API_TOKEN`）は production / staging いずれも `wrangler secret put`
 //! 経由で設定する仕様。本テストでは各環境 toml の `[vars]` に **これらの値が
 //! 含まれていないこと** も検証する。
 //!

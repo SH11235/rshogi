@@ -81,7 +81,7 @@ export interface HarnessOptions {
   byoyomiMin?: number;
   clockKind?: "countdown" | "countdown_msec" | "fischer" | "stopwatch";
   wsAllowedOrigins?: string;
-  adminHandle?: string;
+  adminApiToken?: string;
   lobbyQueueSizeLimit?: number;
 }
 
@@ -107,7 +107,11 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       BYOYOMI_MS: String(opts.byoyomiMs ?? 10_000),
       TOTAL_TIME_MIN: String(opts.totalTimeMin ?? 10),
       BYOYOMI_MIN: String(opts.byoyomiMin ?? 1),
-      ADMIN_HANDLE: opts.adminHandle ?? "admin",
+      // `ADMIN_API_TOKEN` 既定値は Worker 側 `wrangler.toml.example` の placeholder
+      // と同じ。`%%ADMIN <token>` E2E を書く場合は `adminApiToken: "..."` で
+      // 明示する。未設定時は `verify_admin_token_str` が `TokenNotConfigured` を
+      // 返し fail-closed する想定。
+      ADMIN_API_TOKEN: opts.adminApiToken ?? "local-dev-admin-token-placeholder",
       // `reconnectGraceSeconds: 0` 既定は production wrangler.production.toml の
       // `RECONNECT_GRACE_SECONDS = "0"` と整合し、再接続プロトコル無効構成を表す。
       // テストで `30` 等を明示する場合のみ Game_Summary に `Reconnect_Token:` 行が
