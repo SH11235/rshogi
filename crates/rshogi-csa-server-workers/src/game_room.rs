@@ -1618,6 +1618,12 @@ impl GameRoom {
             self.try_delete_live_games_index(&cfg_snapshot, started_at_ms).await;
         }
 
+        // moves テーブルを cleanup (https://github.com/SH11235/rshogi/issues/637)。
+        // `KEY_FINISHED` put 後に呼ぶことで、削除失敗時も後続 `ensure_core_loaded`
+        // が finished ガードで早期 return し replay は走らない (二重防御)。
+        // 失敗は best-effort で吸収し、WS close 等の残り処理は必ず進める。
+        self.clear_moves().await;
+
         // CoreRoom を落とす。再度 ensure_core_loaded しても finished ガードで戻る。
         self.core.borrow_mut().take();
 
@@ -2558,6 +2564,25 @@ impl GameRoom {
             sql.exec("SELECT ply, color, line, at_ms FROM moves ORDER BY ply ASC", None)?;
         let rows: Vec<MoveRow> = cursor.to_array()?;
         Ok(rows)
+    }
+
+    /// `moves` テーブルを空にする (https://github.com/SH11235/rshogi/issues/637)。
+    ///
+    /// 終局時に `finalize_if_ended` から呼び出され、同 room_id を再利用するリファクタ
+    /// が将来入った場合でも `replay_core_room` が古い moves を再生して
+    /// `MoveReplayFailed` を起こすのを防ぐ。現状は `KEY_FINISHED` ガードで弾かれる
+    /// 経路だが、二重防御として moves 行を確実に削除しておく。
+    ///
+    /// 失敗は best-effort で `console_log!` のみに落とし、`Result` には漏らさない
+    /// (呼び出し側 `finalize_if_ended` の WS close / live-games-index delete などの
+    /// 終局処理を止めないため)。`KEY_FINISHED` put が成功している前提で呼び出すため、
+    /// 削除失敗で moves が残っても、後続 `ensure_core_loaded` は finished ガードで
+    /// 早期 return し replay は走らない。
+    async fn clear_moves(&self) {
+        let sql = self.state.storage().sql();
+        if let Err(e) = sql.exec("DELETE FROM moves", None) {
+            console_log!("[GameRoom] event=clear_moves_failed err={:?}", e);
+        }
     }
 
     async fn load_slots(&self) -> Result<Vec<Slot>> {
