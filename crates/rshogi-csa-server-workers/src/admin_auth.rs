@@ -21,8 +21,7 @@
 //!   [`AdminAuthError::TokenNotConfigured`] を返し、呼び出し側は 404 / 拒否で
 //!   fail-closed する。攻撃者に「admin 機能は存在するが token 未設定」を
 //!   知らせない方針。`wrangler.toml.example` の placeholder
-//!   (`local-dev-admin-token-placeholder`) は他の `LOCAL_DEV_ONLY_VARS_KEYS`
-//!   (例: `ADMIN_HANDLE = "admin"`) と同じく **local dev で friction なく
+//!   (`local-dev-admin-token-placeholder`) は **local dev で friction なく
 //!   admin 経路を通電させる** ための既知 dev token であり、production / staging
 //!   へは絶対に持ち込まない (`tests/wrangler_environment_toml_consistency.rs`
 //!   が混入を gate)。
@@ -105,6 +104,27 @@ pub fn verify_token_str(provided: &str, secret: &str) -> Result<(), AdminAuthErr
     } else {
         Err(AdminAuthError::TokenMismatch)
     }
+}
+
+/// `%%ADMIN <token>` 形式の WS 行から token 部を抽出する pure helper
+/// ([#621](https://github.com/SH11235/rshogi/issues/621))。
+///
+/// 受理: `%%ADMIN <whitespace> <token>` (token 内 trim)。
+/// 受理しない: scheme 不一致 / token 部欠落 / token が空白のみ /
+/// `%%ADMIN` の直後に whitespace なし (`%%ADMINFOO` 等の prefix 衝突を弾く)。
+///
+/// 共有 [`rshogi_csa_server::protocol::command::parse_command`] には乗せず
+/// Workers 内で完結させる Workers 固有プロトコル拡張。共有 enum を増やすと
+/// TCP frontend の match expression 全箇所に手を入れる必要があるため、本
+/// コマンドは Workers のみで受理する設計を採る。TCP frontend には別途
+/// `admin_handles` ベースの認可機構が既に存在する。
+pub fn parse_admin_line(line: &str) -> Option<&str> {
+    let trimmed = line.trim_end();
+    let rest = trimmed.strip_prefix("%%ADMIN")?;
+    // `%%ADMIN` の直後に whitespace が無いと token 部が始まらないので reject。
+    let after_scheme = rest.strip_prefix(|c: char| c.is_ascii_whitespace())?;
+    let token = after_scheme.trim();
+    if token.is_empty() { None } else { Some(token) }
 }
 
 /// Worker 環境変数から `ADMIN_API_TOKEN` を読み出し、提供 token と
@@ -196,5 +216,46 @@ mod tests {
         assert_eq!(format!("{}", AdminAuthError::TokenNotConfigured), "admin token not configured",);
         assert_eq!(format!("{}", AdminAuthError::MissingCredential), "admin credential missing");
         assert_eq!(format!("{}", AdminAuthError::TokenMismatch), "admin token mismatch");
+    }
+
+    #[test]
+    fn parse_admin_line_accepts_canonical() {
+        assert_eq!(parse_admin_line("%%ADMIN abc123"), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_admin_line_strips_trailing_crlf() {
+        // WS 受信は通常 `trim_end_matches(['\r', '\n'])` 済だが、念のため pure
+        // helper 側でも trailing whitespace を吸収する。
+        assert_eq!(parse_admin_line("%%ADMIN abc123\r\n"), Some("abc123"));
+        assert_eq!(parse_admin_line("%%ADMIN abc123  "), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_admin_line_handles_extra_inner_whitespace() {
+        // %%ADMIN と token の間が複数 whitespace でも token は単一。
+        assert_eq!(parse_admin_line("%%ADMIN   abc123"), Some("abc123"));
+        assert_eq!(parse_admin_line("%%ADMIN\tabc123"), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_admin_line_rejects_missing_token() {
+        assert_eq!(parse_admin_line("%%ADMIN"), None);
+        assert_eq!(parse_admin_line("%%ADMIN "), None);
+        assert_eq!(parse_admin_line("%%ADMIN   \t  "), None);
+    }
+
+    #[test]
+    fn parse_admin_line_rejects_prefix_collision() {
+        // `%%ADMINFOO` のような prefix 衝突を弾く。
+        assert_eq!(parse_admin_line("%%ADMINFOO bar"), None);
+    }
+
+    #[test]
+    fn parse_admin_line_rejects_other_commands() {
+        assert_eq!(parse_admin_line("%%CHAT abc"), None);
+        assert_eq!(parse_admin_line("%%SETBUOY name"), None);
+        assert_eq!(parse_admin_line(""), None);
+        assert_eq!(parse_admin_line("ADMIN abc"), None);
     }
 }

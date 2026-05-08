@@ -1,14 +1,43 @@
-# admin 認可 (`ADMIN_API_TOKEN`) 運用ガイド
+# admin 認可 (`ADMIN_API_TOKEN` + `%%ADMIN`) 運用ガイド
 
-Floodgate audit ([#560](https://github.com/SH11235/rshogi/issues/560)) で導入
-した admin 認可基盤の運用手順。HTTP admin endpoint と WS 内 admin command
-(後続 [#621](https://github.com/SH11235/rshogi/issues/621) で消費) の両方が
-共通の `ADMIN_API_TOKEN` secret を踏む。
+Floodgate audit ([#560](https://github.com/SH11235/rshogi/issues/560) +
+[#621](https://github.com/SH11235/rshogi/issues/621)) で導入した admin 認可
+基盤の運用手順。WS 内 admin command (`%%ADMIN <token>`) と将来の HTTP admin
+endpoint が共通の `ADMIN_API_TOKEN` secret を踏む。
 
 本ドキュメントは「token をどう作って Cloudflare に登録し、どう rotate するか」
-の運用部分に閉じる。コード側の検証ロジック仕様は
+の運用部分と「admin client が token をどう提示するか」のフローをカバーする。
+コード側の検証ロジック仕様は
 [`crate::admin_auth`](../../crates/rshogi-csa-server-workers/src/admin_auth.rs)
 の docstring を参照。
+
+## 旧 `ADMIN_HANDLE` からの移行 (Breaking change, 2026-05-09)
+
+[#621](https://github.com/SH11235/rshogi/issues/621) で「LOGIN handle 自称 →
+admin 権限付与」(handle equality 比較) の経路は廃止された。今後は **すべての
+admin 権限要求コマンド (`%%SETBUOY` / `%%DELETEBUOY`) は同一 session 内で
+事前に `%%ADMIN <token>` を通過していなければ `PERMISSION_DENIED` で拒否
+される**。
+
+運用 client の更新点 (CSA WS シーケンス):
+
+```
+LOGIN <handle>+<game_name>+<color> <password>
+%%ADMIN <ADMIN_API_TOKEN>            ← 新規。session 内で 1 回踏めば良い
+%%SETBUOY <game_name> <moves> <count>
+...
+```
+
+`%%ADMIN` の応答は `##[ADMIN] OK` (成功) / `##[ADMIN] PERMISSION_DENIED`
+(token 不一致 / secret 未配置 / token 空、いずれも同一応答で leak しない)
++ `##[ADMIN] END`。session が close した時点で admin 権限は失われる。
+
+Cloudflare 側に旧 `ADMIN_HANDLE` secret が残っていれば、Worker code は
+読まなくなったので運用上の混乱を避けるため削除推奨:
+
+```bash
+vp exec wrangler secret delete ADMIN_HANDLE --config wrangler.<env>.toml
+```
 
 ## 1. 設計サマリ
 
@@ -119,5 +148,6 @@ gate 済み)。
 ## 8. 関連
 
 - 認可ロジック仕様: [`crates/rshogi-csa-server-workers/src/admin_auth.rs`](../../crates/rshogi-csa-server-workers/src/admin_auth.rs)
+- WS 内 admin command 実装: [`crates/rshogi-csa-server-workers/src/game_room.rs`](../../crates/rshogi-csa-server-workers/src/game_room.rs) (`handle_admin_elevation` / `upgrade_attachment_to_admin`)
 - Cloudflare secret 全般: [`docs/csa-server/deployment.md`](deployment.md) §2.5
-- 後続 issue: [#621](https://github.com/SH11235/rshogi/issues/621) (LOGIN/admin 認証強化、本 helper を WS 経路で消費)
+- 関連 issue: [#560](https://github.com/SH11235/rshogi/issues/560) (foundation), [#621](https://github.com/SH11235/rshogi/issues/621) (本コマンド)

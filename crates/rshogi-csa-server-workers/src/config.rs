@@ -81,21 +81,12 @@ impl ConfigKeys {
     /// 1 件以上登録された場合は strict mode となり、未登録 `game_name` の LOGIN は
     /// `LOGIN_LOBBY:incorrect unknown_game_name` で拒否される。
     pub const CLOCK_PRESETS: &'static str = "CLOCK_PRESETS";
-    /// 運営権限を持つハンドル名（`%%SETBUOY` / `%%DELETEBUOY`）。
-    ///
-    /// **production**: Cloudflare secret として `wrangler secret put ADMIN_HANDLE`
-    /// で設定する。OSS repo に handle 名が出ない経路で defense-in-depth を保つ。
-    /// **local dev**: `wrangler.toml.example` の `[vars]` に placeholder を残し、
-    /// `wrangler dev` を friction なく動かせるようにする。Worker code は
-    /// `env.var(ConfigKeys::ADMIN_HANDLE)` で var/secret どちらも読む（Cloudflare
-    /// 仕様で同じ namespace に展開される）。
-    pub const ADMIN_HANDLE: &'static str = "ADMIN_HANDLE";
     /// 管理 API トークン (Floodgate audit https://github.com/SH11235/rshogi/issues/560
-    /// 由来)。HTTP admin endpoint や WS 内 admin command (後続の
-    /// https://github.com/SH11235/rshogi/issues/621 で消費) の認可基盤として
-    /// [`crate::admin_auth`] から参照される 1 本の static API token。HMAC は
-    /// overkill 判定 (replay/canonical string 設計コスト > 利得)、Cloudflare
-    /// Access (Zero Trust) は運用層で別管理する。
+    /// 由来)。WS 内 admin command (`%%ADMIN <token>`,
+    /// https://github.com/SH11235/rshogi/issues/621) や将来の HTTP admin endpoint の
+    /// 認可基盤として [`crate::admin_auth`] から参照される 1 本の static API
+    /// token。HMAC は overkill 判定 (replay/canonical string 設計コスト > 利得)、
+    /// Cloudflare Access (Zero Trust) は運用層で別管理する。
     ///
     /// **production / staging**: Cloudflare secret として
     /// `wrangler secret put ADMIN_API_TOKEN` で配置する (rotation 手順は
@@ -162,7 +153,7 @@ impl ConfigKeys {
     /// `[vars]` テーブルで宣言されるべきキーの網羅列挙。本配列に含まれる定数は
     /// 全 deploy 環境で `[vars]` として平文管理される（公開しても運用上問題ない値）。
     ///
-    /// 本配列に含まれない定数（例: [`Self::ADMIN_HANDLE`]）は production / staging
+    /// 本配列に含まれない定数（例: [`Self::ADMIN_API_TOKEN`]）は production / staging
     /// いずれも `wrangler secret put` 経由で設定し、`wrangler.<env>.toml` には書かない。
     /// ただし [`Self::LOCAL_DEV_ONLY_VARS_KEYS`] に含まれていれば
     /// `wrangler.toml.example` の `[vars]` には placeholder として残し、local dev
@@ -203,8 +194,7 @@ impl ConfigKeys {
     /// `wrangler.toml.example` には `SHARED_PUBLIC_VARS_KEYS ∪ LOCAL_DEV_ONLY_VARS_KEYS`
     /// 全件を `[vars]` として記載することで、新規メンバーが `cp wrangler.toml.example
     /// wrangler.toml && wrangler dev` で即動作確認できる friction レス運用を維持する。
-    pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] =
-        &[Self::ADMIN_HANDLE, Self::ADMIN_API_TOKEN];
+    pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] = &[Self::ADMIN_API_TOKEN];
 
     /// **deploy 時に CI から runtime 注入される** `[vars]` キーの網羅列挙
     /// ([`Self::DEPLOYED_SHA`] 等)。`SHARED_PUBLIC_VARS_KEYS` / `LOCAL_DEV_ONLY_VARS_KEYS`
