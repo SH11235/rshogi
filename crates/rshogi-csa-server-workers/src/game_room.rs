@@ -479,10 +479,12 @@ impl GameRoom {
         let game_id = format!("{room_id}-{started}");
         // 双方の LOGIN は既に OK を返しているため、ここで `?` で Err を伝播させると
         // 両クライアントには Game_Summary も `##[ERROR]` 通知も届かず部屋が永久に
-        // 詰まる。`CLOCK_PRESETS` の不正設定 (`parse_clock_presets` Err) や、deploy
-        // race で Lobby OnceCell キャッシュと GameRoom env が乖離して `game_name`
-        // 未登録に落ちるケースも、buoy reservation 失敗と同じ pending match abort
-        // 経路に揃えて部屋を解放する。
+        // 詰まる。`CLOCK_PRESETS` の不正設定 (`parse_clock_presets` Err) や、env
+        // 設定の不整合で `game_name` 未登録に落ちるケースも、buoy reservation 失敗
+        // と同じ pending match abort 経路に揃えて部屋を解放する (Issue #641 で
+        // Lobby 側の OnceCell キャッシュ廃止後は両 DO ともに env を毎回読み直す
+        // ため deploy race による乖離は解消されたが、`CLOCK_PRESETS` 不正設定時の
+        // fail-fast 経路は残す)。
         let clock_spec = match resolve_clock_spec_for_game(&self.env, game_name) {
             Ok(spec) => spec,
             Err(e) => {
@@ -2357,11 +2359,13 @@ fn load_clock_spec_from_env(env: &Env) -> Result<ClockSpec> {
 ///   到達するのは Lobby を経由しない単体テスト経路、もしくはプリセット書き換え直後の
 ///   race など限定的なケース。
 ///
-/// **キャッシュなし設計**: Lobby DO は LOGIN ごとに `clock_presets()` を呼ぶため
-/// `OnceCell` キャッシュを持たせるが、GameRoom DO は 1 対局 = 1 インスタンスで
-/// `start_match` のたった 1 回でしか評価しないため、env 再パースのコストが無視できる。
-/// 各 DO のライフサイクルに合わせ計算を最小化することで設計の対称性より局所最適を
-/// 優先している。
+/// **キャッシュなし設計** (Issue #641): Lobby DO もキャッシュを廃止して毎 LOGIN
+/// 時に env を読み直す方針に揃えたため、本関数は両 DO 共通の挙動になっている。
+/// Cloudflare DO は hibernation から起床しても `OnceCell` キャッシュが更新されず、
+/// deploy で `CLOCK_PRESETS` を変更しても旧 instance が古い値を保持する race が
+/// 発生していたため、両 DO とも env を毎回読み直す方針に統一した。GameRoom DO は
+/// 1 対局 = 1 インスタンスで `start_match` のたった 1 回しか評価しないため
+/// もともと re-parse コストは問題にならない。
 fn resolve_clock_spec_for_game(env: &Env, game_name: &str) -> Result<ClockSpec> {
     use crate::config::{PresetResolution, resolve_clock_spec_from_presets_map};
     let raw = env.var(ConfigKeys::CLOCK_PRESETS).ok().map(|v| v.to_string());
