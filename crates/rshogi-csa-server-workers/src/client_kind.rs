@@ -1,6 +1,6 @@
 //! `X-Client` ヘッダ値を運用ログ向けに正規化する純粋ロジック。
 //!
-//! Issue #564 設計 v4 §3 に対応。viewer 配信 API のレスポンスログに
+//! https://github.com/SH11235/rshogi/issues/564 設計 v4 §3 に対応。viewer 配信 API のレスポンスログに
 //! `client_kind=<kind>` として埋め込むため、任意文字列が logfmt を破壊しない
 //! よう kebab-case ASCII (`[a-z0-9-]`) のみを許可するホワイトリスト方式で
 //! 正規化する。

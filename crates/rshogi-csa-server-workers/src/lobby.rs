@@ -16,10 +16,10 @@
 //!
 //! 認証は self-claim (`<password>` 値検証なし)、本家 Floodgate と同じ扱い。
 //!
-//! # 私的対局 (Issue #582) — 本 PR スコープ
+//! # 私的対局 (https://github.com/SH11235/rshogi/issues/582) — 本 PR スコープ
 //!
 //! 本 PR では以下のみ実装する。両者揃った後の対局起動経路 (consume → GameRoom
-//! DO 起動 + clock_spec / initial_sfen バトンパス) は Issue #582 follow-up
+//! DO 起動 + clock_spec / initial_sfen バトンパス) は https://github.com/SH11235/rshogi/issues/582 follow-up
 //! integration の後半スコープに分割する。
 //!
 //! - `CHALLENGE_LOBBY <inviter> <opponent> <color> <clock_preset> [<sfen>]` 受理
@@ -53,6 +53,8 @@ use rshogi_csa_server::matching::challenge::{
     ChallengeEntry, ChallengeRegistry, ChallengeToken, IssueError,
 };
 use rshogi_csa_server::types::{Color, PlayerName, ReconnectToken};
+
+use crate::attachment::MAX_WS_LINE_BYTES;
 
 /// LobbyDO 内 in-memory queue 上限の既定値 (`LOBBY_QUEUE_SIZE_LIMIT` 未設定時)。
 const DEFAULT_LOBBY_QUEUE_SIZE_LIMIT: usize = 100;
@@ -162,6 +164,24 @@ impl DurableObject for Lobby {
     }
 
     async fn websocket_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
+        // https://github.com/SH11235/rshogi/issues/627: 受信フレームの byte 数を **String/Binary 共通で** 上限判定する。
+        // Lobby protocol は text-only なので Binary は最終的に discard するが、Binary
+        // 経路を素通しにすると Cloudflare ランタイム側で 32 MiB の frame を受け取って
+        // しまい DoS 緩和が片肺になる。discard 前に len() を見て、超過なら 1009 close。
+        // `trim_end_matches` で改行を削った後だと判定対象が縮むため、必ず元の長さで判定。
+        let raw_len = match &msg {
+            WebSocketIncomingMessage::String(s) => s.len(),
+            WebSocketIncomingMessage::Binary(b) => b.len(),
+        };
+        if raw_len > MAX_WS_LINE_BYTES {
+            console_log!(
+                "[Lobby] event=ws_message_too_big bytes={} limit={}",
+                raw_len,
+                MAX_WS_LINE_BYTES,
+            );
+            let _ = ws.close(Some(1009), Some("message too big".to_owned()));
+            return Ok(());
+        }
         let raw = match msg {
             WebSocketIncomingMessage::String(s) => s,
             WebSocketIncomingMessage::Binary(_) => return Ok(()),
@@ -237,7 +257,7 @@ impl Lobby {
 
     /// `CLOCK_PRESETS` 環境変数をパースして得たマップを返す。
     ///
-    /// **キャッシュなし設計** (Issue #641): 以前は `OnceCell` で DO 起動時に 1 度
+    /// **キャッシュなし設計** (https://github.com/SH11235/rshogi/issues/641): 以前は `OnceCell` で DO 起動時に 1 度
     /// だけパースしていたが、Cloudflare DO は hibernation から起床しても OnceCell
     /// が更新されないため、deploy で `CLOCK_PRESETS` を変更しても旧 instance が
     /// 古い値を保持し続け、新 preset が `unknown_clock_preset` で reject される
@@ -602,7 +622,7 @@ impl Lobby {
 
     /// 私的対局 LOGIN_LOBBY (`<handle>+private-<token>+free`) の処理。
     ///
-    /// 検証順序 (Issue #582 仕様):
+    /// 検証順序 (https://github.com/SH11235/rshogi/issues/582 仕様):
     /// 1. パース失敗 (`+free` 以外 / hex 不正 / 引数不足) → `LOGIN_LOBBY:incorrect`
     ///    + 適切な reason
     /// 2. token 期限切れ / 未登録 → `LOGIN_LOBBY:incorrect challenge_expired`

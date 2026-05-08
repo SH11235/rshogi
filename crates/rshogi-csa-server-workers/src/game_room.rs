@@ -62,7 +62,10 @@ use rshogi_csa_server::types::{
 };
 use rshogi_csa_server::{FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryColor};
 
-use crate::attachment::{Role, WsAttachment, parse_login_handle};
+use crate::attachment::{
+    MAX_SPECTATOR_QUEUE_BYTES, MAX_SPECTATOR_QUEUE_ITEMS, MAX_WS_LINE_BYTES, Role, WsAttachment,
+    parse_login_handle,
+};
 use crate::config::{
     ConfigKeys, parse_agree_timeout_duration, parse_clock_presets, parse_clock_spec,
     resolve_reconnect_grace_from_strings,
@@ -173,7 +176,7 @@ pub struct GameRoom {
     core: RefCell<Option<CoreRoom>>,
     config: RefCell<Option<PersistedConfig>>,
     /// この isolate 寿命中に `live-games-index/<inv>-<id>.json` の put が成功
-    /// 済みかどうか (Issue #549)。hibernation で isolate が破棄されると
+    /// 済みかどうか (https://github.com/SH11235/rshogi/issues/549)。hibernation で isolate が破棄されると
     /// `false` に戻るため、cold start 後の最初の `ensure_core_loaded` で 1 回
     /// だけ retry が走る。`mark_play_started` 経路で put 成功した直後にも
     /// `true` を立て、同 isolate 内の後続 `ensure_core_loaded` で冗長 put が
@@ -253,6 +256,25 @@ impl DurableObject for GameRoom {
     }
 
     async fn websocket_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
+        // https://github.com/SH11235/rshogi/issues/627: 受信フレームの byte 数を **String/Binary 共通で** 上限判定する。
+        // CSA protocol は text-only なので Binary は最終的に discard するが、サイズ
+        // 上限を効かせるためには discard する前に len() を見る必要がある (Cloudflare
+        // ランタイムは frame 受信時点で 32 MiB まで取り込めてしまうため、binary 経路を
+        // 素通しにすると DoS 緩和が片肺になる)。`trim_end_matches` で改行を削った後だと
+        // 判定対象が縮むため必ず元の長さで判定。超過時は `1009 Message Too Big` で即 close。
+        let raw_len = match &msg {
+            WebSocketIncomingMessage::String(s) => s.len(),
+            WebSocketIncomingMessage::Binary(b) => b.len(),
+        };
+        if raw_len > MAX_WS_LINE_BYTES {
+            console_log!(
+                "[GameRoom] event=ws_message_too_big bytes={} limit={}",
+                raw_len,
+                MAX_WS_LINE_BYTES,
+            );
+            let _ = ws.close(Some(1009), Some("message too big".to_owned()));
+            return Ok(());
+        }
         let raw = match msg {
             WebSocketIncomingMessage::String(s) => s,
             WebSocketIncomingMessage::Binary(_) => return Ok(()),
@@ -475,7 +497,7 @@ impl GameRoom {
         white_handle: &str,
         game_name: &str,
     ) -> Result<bool> {
-        // Issue #626: `start_match` の呼び出し前に存在する重複起動防止ガード
+        // https://github.com/SH11235/rshogi/issues/626: `start_match` の呼び出し前に存在する重複起動防止ガード
         // (`handle_login` 側は `evaluate_match` の `MatchResult::Match` 判定、
         // `try_start_pending_match` 側は `handle_game_line` 入口の
         // `active_game_id().is_none()` 判定) が、cold start race (`KEY_CONFIG`
@@ -555,7 +577,7 @@ impl GameRoom {
         // 両クライアントには Game_Summary も `##[ERROR]` 通知も届かず部屋が永久に
         // 詰まる。`CLOCK_PRESETS` の不正設定 (`parse_clock_presets` Err) や、env
         // 設定の不整合で `game_name` 未登録に落ちるケースも、buoy reservation 失敗
-        // と同じ pending match abort 経路に揃えて部屋を解放する (Issue #641 で
+        // と同じ pending match abort 経路に揃えて部屋を解放する (https://github.com/SH11235/rshogi/issues/641 で
         // Lobby 側の OnceCell キャッシュ廃止後は両 DO ともに env を毎回読み直す
         // ため deploy race による乖離は解消されたが、`CLOCK_PRESETS` 不正設定時の
         // fail-fast 経路は残す)。
@@ -708,7 +730,7 @@ impl GameRoom {
         self.send_to_role(Role::Black, &summary_black).await?;
         self.send_to_role(Role::White, &summary_white).await?;
 
-        // AGREE 待ち TTL を予約する (Issue #600)。LOGIN OK 後に AGREE が届かない
+        // AGREE 待ち TTL を予約する (https://github.com/SH11235/rshogi/issues/600)。LOGIN OK 後に AGREE が届かない
         // まま片方が刺さると、`/api/v1/games/live` に出ない (mark_play_started が
         // 走らないので live-games-index に put しない) のに DO 側では memory /
         // room 枠を専有し続ける edge case を解消する。
@@ -780,7 +802,7 @@ impl GameRoom {
         // Playing 開始を確定できた瞬間だけ cfg を更新（冪等）。
         if let HandleOutcome::GameStarted = result.outcome {
             self.mark_play_started(now).await?;
-            // AGREE 待ち TTL タグを片付ける (Issue #600)。alarm 本体は直後の
+            // AGREE 待ち TTL タグを片付ける (https://github.com/SH11235/rshogi/issues/600)。alarm 本体は直後の
             // `reschedule_turn_alarm` が turn budget で上書きするため、タグだけ
             // 消せば後続 alarm 発火は既定 (TimeUp) として処理される。
             self.clear_agree_timeout_tag().await;
@@ -1393,9 +1415,9 @@ impl GameRoom {
         self.delete_grace_alarm_state().await?;
 
         // KEY_FINISHED が確定した後に live-games-index entry を best-effort で
-        // 削除する (Issue #549 §4)。「終局 entry も live entry も無い」矛盾
+        // 削除する (https://github.com/SH11235/rshogi/issues/549 §4)。「終局 entry も live entry も無い」矛盾
         // 状態を最小化するため、`KEY_FINISHED` put より後に delete を置く。
-        // delete 失敗時は orphan として残るが、cron sweep (Issue #551) が
+        // delete 失敗時は orphan として残るが、cron sweep (https://github.com/SH11235/rshogi/issues/551) が
         // 後追い掃除する契約。`play_started_at_ms` が None のまま終局した
         // (= AGREE 前 abnormal 等) ケースは live entry を put していないので
         // delete も skip する。
@@ -1498,7 +1520,7 @@ impl GameRoom {
         // すべての失敗を `if let Err` で吸収して Ok(()) で抜ける。`?` は意図的
         // に使わない。
         //
-        // 書き込み順序 (Issue #551 設計 v3 §1):
+        // 書き込み順序 (https://github.com/SH11235/rshogi/issues/551 設計 v3 §1):
         //   1. csa 本文 / by-id (上で完了)
         //   2. `kifu-by-id/<id>.meta.json` — backfill / orphan sweep の真の判定
         //      キー (primary)。csa 成功直後に書く。
@@ -1681,6 +1703,29 @@ impl GameRoom {
                 continue;
             };
             if snapshot_in_progress {
+                // https://github.com/SH11235/rshogi/issues/627: queue を push する前に上限を判定する。
+                // - 行数 > `MAX_SPECTATOR_QUEUE_ITEMS`
+                // - bytes (各 line の `len()` 総和 + 今回追加分) > `MAX_SPECTATOR_QUEUE_BYTES`
+                // のいずれか満たす場合は、attachment を上書きせずに観戦者を切断する。
+                // serialize_attachment をスキップすることで、close 後の hibernation
+                // 復帰時にも肥大化した queue が残らないことを保証する (Codex review)。
+                let next_items = pending_queue.len().saturating_add(1);
+                let current_bytes: usize = pending_queue.iter().map(|(s, _)| s.len()).sum();
+                let next_bytes = current_bytes.saturating_add(line.len());
+                if next_items > MAX_SPECTATOR_QUEUE_ITEMS || next_bytes > MAX_SPECTATOR_QUEUE_BYTES
+                {
+                    console_log!(
+                        "[GameRoom] event=spectator_queue_overflow room_id={} items={} bytes={} \
+                         limit_items={} limit_bytes={}",
+                        room_id,
+                        next_items,
+                        next_bytes,
+                        MAX_SPECTATOR_QUEUE_ITEMS,
+                        MAX_SPECTATOR_QUEUE_BYTES,
+                    );
+                    let _ = ws.close(Some(1009), Some("spectator queue overflow".to_owned()));
+                    continue;
+                }
                 // snapshot 送信中は queue に積むだけ。flush 経路で重複手は弾く。
                 pending_queue.push((line.to_owned(), ply));
                 let updated = WsAttachment::Spectator {
@@ -1781,7 +1826,7 @@ impl GameRoom {
         }
 
         // live-games-index put が抜けたまま hibernation で isolate が落ちた
-        // ケースを救済する (Issue #549 §5)。
+        // ケースを救済する (https://github.com/SH11235/rshogi/issues/549 §5)。
         self.retry_live_games_index_if_needed().await?;
         Ok(())
     }
@@ -1918,13 +1963,15 @@ impl GameRoom {
     ///
     /// 終局確定 (`KEY_FINISHED` put 成功) 直後に呼び、live 一覧から進行中
     /// 表示を消す。R2 delete は idempotent なので、transient error には最大
-    /// [`LIVE_INDEX_DELETE_MAX_ATTEMPTS`] 回まで retry し ([Issue #629])、各
-    /// attempt 間に [`LIVE_INDEX_DELETE_BACKOFF_MS`] の wall-clock 待機を挟む。
+    /// [`LIVE_INDEX_DELETE_MAX_ATTEMPTS`] 回まで retry し
+    /// (https://github.com/SH11235/rshogi/issues/629)、各 attempt 間に
+    /// [`LIVE_INDEX_DELETE_BACKOFF_MS`] の wall-clock 待機を挟む。
     ///
     /// 全試行が失敗した場合は `live_games_index_delete_giveup` イベントを記録
-    /// して諦める。残った orphan は Issue #551 の sweep ジョブ
-    /// (`run_live_orphan_sweep`) が 15 分以内に掃除する契約 (Issue #629 で 1
-    /// 時間 → 15 分に短縮)。
+    /// して諦める。残った orphan は
+    /// https://github.com/SH11235/rshogi/issues/551 の sweep ジョブ
+    /// (`run_live_orphan_sweep`) が 15 分以内に掃除する契約
+    /// (https://github.com/SH11235/rshogi/issues/629 で 1 時間 → 15 分に短縮)。
     ///
     /// key 生成失敗 / bucket binding 解決失敗は retry 不能なので 1 回で諦める
     /// (`live_games_index_delete_skip` を出して return)。
@@ -2356,7 +2403,7 @@ impl GameRoom {
         Ok(())
     }
 
-    /// AGREE 待ち TTL タグだけを片付ける best-effort helper (Issue #600)。
+    /// AGREE 待ち TTL タグだけを片付ける best-effort helper (https://github.com/SH11235/rshogi/issues/600)。
     /// `HandleOutcome::GameStarted` 観測時に呼ぶ。`KEY_GRACE_REGISTRY` は
     /// AGREE 経路では存在しない (grace 経路は対局成立後にしか入らない) ため
     /// 触らない。
@@ -2364,7 +2411,7 @@ impl GameRoom {
         let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
     }
 
-    /// alarm が `AgreeTimeout` 種別で発火した経路 (Issue #600)。
+    /// alarm が `AgreeTimeout` 種別で発火した経路 (https://github.com/SH11235/rshogi/issues/600)。
     ///
     /// - 既に終局済 / 対局成立済の場合は no-op (race ガード)。
     /// - そうでなければ両 player WS に `##[ERROR] agree_timeout` を送って close
@@ -2457,7 +2504,7 @@ fn load_clock_spec_from_env(env: &Env) -> Result<ClockSpec> {
 ///   到達するのは Lobby を経由しない単体テスト経路、もしくはプリセット書き換え直後の
 ///   race など限定的なケース。
 ///
-/// **キャッシュなし設計** (Issue #641): Lobby DO もキャッシュを廃止して毎 LOGIN
+/// **キャッシュなし設計** (https://github.com/SH11235/rshogi/issues/641): Lobby DO もキャッシュを廃止して毎 LOGIN
 /// 時に env を読み直す方針に揃えたため、本関数は両 DO 共通の挙動になっている。
 /// Cloudflare DO は hibernation から起床しても `OnceCell` キャッシュが更新されず、
 /// deploy で `CLOCK_PRESETS` を変更しても旧 instance が古い値を保持する race が
@@ -2492,7 +2539,7 @@ fn resolve_clock_spec_for_game(env: &Env, game_name: &str) -> Result<ClockSpec> 
 /// 実体ロジックは [`resolve_reconnect_grace_from_strings`] (host 単体テスト可能な
 /// pure helper) に委譲し、本関数は `worker::Env` 依存を切り出す薄い shim に閉じる。
 /// `AGREE_TIMEOUT_SECONDS` env を読み、AGREE 待ち TTL を `Duration` で返す
-/// (Issue #600)。値の解釈は [`parse_agree_timeout_duration`] に従う:
+/// (https://github.com/SH11235/rshogi/issues/600)。値の解釈は [`parse_agree_timeout_duration`] に従う:
 /// `None` / 空文字 / `0` / 非数値は [`crate::config::DEFAULT_AGREE_TIMEOUT_SEC`]
 /// にフォールバックする (env 不正で stuck DO が無限残存する事態を避ける)。
 fn resolve_agree_timeout(env: &Env) -> Duration {

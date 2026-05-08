@@ -112,7 +112,7 @@ pub const SWEEP_ONLY_CRON: &str = "15,30,45 * * * *";
 /// Workers ランタイムの scheduled イベント (cron trigger)。
 ///
 /// `wrangler.toml` の `[triggers] crons` で 2 つの cron を登録している
-/// (Issue #551 / Issue #629):
+/// (https://github.com/SH11235/rshogi/issues/551 / https://github.com/SH11235/rshogi/issues/629):
 ///
 /// - [`BACKFILL_CRON`] (`0 * * * *`): `run_games_index_backfill` →
 ///   `run_live_orphan_sweep` を順次実行する (= 既存挙動)。

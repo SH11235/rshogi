@@ -11,6 +11,33 @@
 
 use serde::{Deserialize, Serialize};
 
+/// WS 受信 1 メッセージあたりの最大バイト数 (https://github.com/SH11235/rshogi/issues/627)。
+///
+/// CSA LOGIN / CHAT / move 行 / lobby command (`LOGIN_LOBBY` /
+/// `CHALLENGE_LOBBY` / `LOGOUT_LOBBY` 等) はいずれも数百バイト未満で収まる
+/// 設計だが、Cloudflare WebSocket は最大 32 MiB のメッセージを許容するため、
+/// アプリ層で明示的な上限を入れないと巨大ペイロードが parser / allocation に
+/// 流れて CPU と memory を浪費する。
+///
+/// 4096 バイトはプロトコル正常系に対し 1 桁以上の余裕がある安全側の値。
+/// 受信側ハンドラで `raw.len() > MAX_WS_LINE_BYTES` を満たした WS は
+/// `1009 Message Too Big` で即時 close する契約。判定は `trim_end_matches`
+/// で改行を削る **前** の元バイト数に対して行う。
+pub const MAX_WS_LINE_BYTES: usize = 4096;
+
+/// Spectator pending_queue に積める行数上限 (https://github.com/SH11235/rshogi/issues/627)。
+///
+/// snapshot 送信中に到着した broadcast 行を per-WS キューに積む経路で、
+/// チャット flood 等で無制限に成長する DoS 経路を遮断する。1 局 ≤ 512 手 +
+/// CHAT / START / 終局通知の余裕として 1024 を採る。
+pub const MAX_SPECTATOR_QUEUE_ITEMS: usize = 1024;
+
+/// Spectator pending_queue の累計バイト数上限 (https://github.com/SH11235/rshogi/issues/627)。
+///
+/// 行数上限とは独立に、長文 CHAT が積み上がるケースに備えて bytes 上限も
+/// 課す。`pending_queue` の各行 (`String`) の `len()` の総和で判定する。
+pub const MAX_SPECTATOR_QUEUE_BYTES: usize = 64 * 1024;
+
 /// 先手・後手の別。`rshogi_csa_server::types::Color` が `serde::Serialize` を
 /// 実装していないため、attachment 用には独自のタグ付き列挙を使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,5 +329,35 @@ mod tests {
         let player = WsAttachment::player(Role::Black, "alice", "room-1");
         let spec = WsAttachment::spectator("room-1");
         assert_ne!(player, spec);
+    }
+
+    /// https://github.com/SH11235/rshogi/issues/627: 受信メッセージサイズ上限の値が CSA プロトコル正常系に対し
+    /// 十分余裕を持っていること、かつ Cloudflare WS の最大 32 MiB より
+    /// 大幅に小さいことの sanity check。値変更時にビルド時 regression を検出する。
+    /// `const { assert!(..) }` を使うことで run-time コストゼロで固定する。
+    #[test]
+    fn ws_message_size_limit_is_sane() {
+        const _: () = {
+            // 通常の CSA 行 (LOGIN / move / CHAT 等) は数百バイト未満で収まる。
+            // 1024 バイトを下回ると正常系を弾く恐れがあるため最低限の floor を設ける。
+            assert!(MAX_WS_LINE_BYTES >= 1024);
+            // 1 MiB を超えると DoS 防御として機能しないため天井も設ける。
+            assert!(MAX_WS_LINE_BYTES <= 1024 * 1024);
+        };
+    }
+
+    /// https://github.com/SH11235/rshogi/issues/627: spectator pending_queue 上限値が 1 局の通常運用に対し
+    /// 十分余裕を持っていることの sanity check (ビルド時固定)。
+    #[test]
+    fn spectator_queue_limits_are_sane() {
+        const _: () = {
+            // 1 局の指し手は最大 512 ply 程度。CHAT / START / 終局通知の余裕を
+            // 含めても 512 を下回ると正常系を弾く恐れがある。
+            assert!(MAX_SPECTATOR_QUEUE_ITEMS >= 512);
+            // 1 行 ≤ MAX_WS_LINE_BYTES * (件数上限) の理論上限よりは小さくて良いが、
+            // bytes 上限が件数上限 * 32 byte を下回ると、通常対局でも先に bytes 側で
+            // 詰まる。
+            assert!(MAX_SPECTATOR_QUEUE_BYTES >= MAX_SPECTATOR_QUEUE_ITEMS * 32);
+        };
     }
 }

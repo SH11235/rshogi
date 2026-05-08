@@ -30,13 +30,13 @@ struct EnvironmentBindings {
     do_bindings: Vec<String>,
     vars_keys: Vec<String>,
     compatibility_date: Option<String>,
-    /// `[vars] CLOCK_PRESETS` の値そのまま (JSON 配列文字列、空配列含む)。Issue #610 で
+    /// `[vars] CLOCK_PRESETS` の値そのまま (JSON 配列文字列、空配列含む)。https://github.com/SH11235/rshogi/issues/610 で
     /// 両環境の preset 名集合が揃っていることを assert するために保持する。
     raw_clock_presets: Option<String>,
     /// `[[migrations]]` 配列を生のまま保持する。`new_sqlite_classes` 等を
     /// 各 test が独自に検査するため、`Vec<toml::Value>` のまま持つ。
     migrations: Vec<toml::Value>,
-    /// `[triggers] crons = [...]` の値 (Issue #551)。空配列は未宣言。
+    /// `[triggers] crons = [...]` の値 (https://github.com/SH11235/rshogi/issues/551)。空配列は未宣言。
     crons: Vec<String>,
 }
 
@@ -176,7 +176,7 @@ fn assert_no_local_dev_only_keys(env: &EnvironmentBindings) {
     );
 }
 
-/// `ConfigKeys::RUNTIME_INJECTED_VARS_KEYS` (Issue #639 で追加した `DEPLOYED_SHA`
+/// `ConfigKeys::RUNTIME_INJECTED_VARS_KEYS` (https://github.com/SH11235/rshogi/issues/639 で追加した `DEPLOYED_SHA`
 /// 等、CI deploy 時に `wrangler deploy --var KEY:VALUE` で注入される値) が
 /// env toml の `[vars]` テーブルに **書かれていない** ことを検証する。
 ///
@@ -202,7 +202,7 @@ fn assert_no_runtime_injected_keys(env: &EnvironmentBindings) {
     );
 }
 
-/// Issue #551 で追加した `[triggers] crons` が各 deploy 環境に宣言されていることを
+/// https://github.com/SH11235/rshogi/issues/551 で追加した `[triggers] crons` が各 deploy 環境に宣言されていることを
 /// 固定する。`[event(scheduled)]` ハンドラは production / staging 両方で稼働させる
 /// 契約 (片方だけ宣言だと backfill / orphan sweep が動かず orphan が滞留する)。
 ///
@@ -249,7 +249,7 @@ fn assert_crons_match(lhs: &EnvironmentBindings, rhs: &EnvironmentBindings) {
 
 /// 両環境の `[vars] CLOCK_PRESETS` が同じ preset 名集合を宣言していることを assert する。
 /// staging / production で同じ `game_name` で接続したクライアントが同じ clock 設定で
-/// 動くことを保証するため、preset 名は両環境で揃える契約 (Issue #610)。
+/// 動くことを保証するため、preset 名は両環境で揃える契約 (https://github.com/SH11235/rshogi/issues/610)。
 ///
 /// 値（total_time_*, byoyomi_*）まで一致させると将来環境ごとに調整したいケースを
 /// 縛るため、ここでは「名前集合」の一致だけを pin する。
@@ -300,7 +300,7 @@ fn assert_clock_preset_names_match(lhs: &EnvironmentBindings, rhs: &EnvironmentB
     );
     assert!(
         !lhs_names.is_empty(),
-        "{file} ({label}): CLOCK_PRESETS must declare at least one preset (Issue #610)",
+        "{file} ({label}): CLOCK_PRESETS must declare at least one preset (https://github.com/SH11235/rshogi/issues/610)",
         file = lhs.file_name,
         label = lhs.label,
     );

@@ -36,7 +36,7 @@ pub fn kifu_by_id_object_key(game_id: &str) -> String {
 /// game_id から逆引きする棋譜メタ (`<id>.meta.json`) キー。
 ///
 /// `kifu_by_id_object_key` と同じ `encode_component(game_id)` を通すことで、
-/// CSA 本体キーと完全に同じエンコーディング規約に揃える (Issue #551 v3 §12)。
+/// CSA 本体キーと完全に同じエンコーディング規約に揃える (https://github.com/SH11235/rshogi/issues/551 v3 §12)。
 /// reader (viewer_api) と writer (game_room / backfill) で生成キーが乖離しない
 /// ように、本ヘルパを必ず経由して `<game_id>.meta.json` を構築する。
 pub fn kifu_by_id_meta_key(game_id: &str) -> String {

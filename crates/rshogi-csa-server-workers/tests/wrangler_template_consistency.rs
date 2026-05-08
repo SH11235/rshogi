@@ -29,7 +29,7 @@ struct TemplateBindings {
     r2_bindings: Vec<String>,
     do_bindings: Vec<String>,
     vars_keys: Vec<String>,
-    /// `[triggers] crons = [...]` の値を保持する (Issue #551)。空配列は未宣言。
+    /// `[triggers] crons = [...]` の値を保持する (https://github.com/SH11235/rshogi/issues/551)。空配列は未宣言。
     crons: Vec<String>,
 }
 
@@ -161,7 +161,7 @@ fn wrangler_template_vars_keys_match_config_keys() {
     assert_bidirectional("vars_keys", &expected, &TEMPLATE.vars_keys);
 }
 
-/// Issue #551 で追加した `[triggers] crons` が template に宣言されていることを
+/// https://github.com/SH11235/rshogi/issues/551 で追加した `[triggers] crons` が template に宣言されていることを
 /// 固定する。`[event(scheduled)]` ハンドラと cron trigger は同 PR で導入したので、
 /// 片方だけが残ったまま運用者が `cp wrangler.toml.example wrangler.toml` した場合
 /// に handler が永久 dormant にならないよう、template 側で必須化する。
@@ -186,14 +186,14 @@ fn wrangler_template_declares_backfill_cron_trigger() {
     );
 }
 
-/// `ConfigKeys::RUNTIME_INJECTED_VARS_KEYS` (Issue #639 で追加した `DEPLOYED_SHA`
+/// `ConfigKeys::RUNTIME_INJECTED_VARS_KEYS` (https://github.com/SH11235/rshogi/issues/639 で追加した `DEPLOYED_SHA`
 /// 等、CI deploy 時に `wrangler deploy --var KEY:VALUE` で注入される値) が
 /// `wrangler.toml.example` の `[vars]` テーブルに **書かれていない** ことを検証する。
 ///
 /// template の `[vars]` には `SHARED_PUBLIC_VARS_KEYS ∪ LOCAL_DEV_ONLY_VARS_KEYS`
 /// 全件を記載する規約だが、本配列の値は CI runtime 注入経路でのみ供給される設計
 /// なので template には書かない (書くと local dev で `/health` の `deployed_sha`
-/// が固定 placeholder を返し、Issue #639 の drift detection が想定する semantics
+/// が固定 placeholder を返し、https://github.com/SH11235/rshogi/issues/639 の drift detection が想定する semantics
 /// と齟齬になる)。
 #[test]
 fn wrangler_template_vars_must_not_contain_runtime_injected_keys() {

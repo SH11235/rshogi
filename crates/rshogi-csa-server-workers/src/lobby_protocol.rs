@@ -9,7 +9,7 @@
 //! - in-memory queue ([`LobbyQueue`]) と直接マッチング (`DirectMatchStrategy` 再利用)。
 //! - 出力 line のシリアライズ (`LOGIN_LOBBY:<handle> OK` / `MATCHED <room_id> <color>` 等)。
 //! - 私的対局 (`CHALLENGE_LOBBY` / `LOGIN_LOBBY <handle>+private-<token>+free`)
-//!   の入口パース。Issue #582 の Workers 側受け入れ基準のうち本 PR スコープ
+//!   の入口パース。https://github.com/SH11235/rshogi/issues/582 の Workers 側受け入れ基準のうち本 PR スコープ
 //!   (token 発行 + LOGIN 認識 + 永続化 + Alarm purge) で参照される。両者揃った
 //!   後の対局起動経路は次 PR に分割するため、本モジュールは対局室 (GameRoom DO)
 //!   起動側の知識を持たない。
@@ -244,7 +244,7 @@ pub fn build_login_incorrect_line(reason: &str) -> String {
 }
 
 /// `CHALLENGE_LOBBY <inviter> <opponent> <color> <clock_preset> [<sfen>]` の
-/// パース結果。Issue #582 Workers 経路で `%%CHALLENGE` の代わりとなる
+/// パース結果。https://github.com/SH11235/rshogi/issues/582 Workers 経路で `%%CHALLENGE` の代わりとなる
 /// メッセージで、`Lobby` DO の `websocket_message` 入口から駆動する。
 ///
 /// password / 認証は持たない (Workers 経路は self-claim、`<inviter>` を

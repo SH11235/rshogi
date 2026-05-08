@@ -68,7 +68,7 @@ pub fn games_index_key(ended_at_ms: u64, game_id: &str) -> Result<String, Storag
 
 /// games-index に書き込む 1 entry の wire format。
 ///
-/// API contract A (Issue #542 issuecomment-4338125621) に準拠し、`result_kind` /
+/// API contract A (https://github.com/SH11235/rshogi/issues/542 issuecomment-4338125621) に準拠し、`result_kind` /
 /// `end_reason` を **2 フィールドに分離** する。client 側 (ramu-shogi viewer)
 /// は両者を合わせて UI 表示用の構造化結果に変換する。
 ///
