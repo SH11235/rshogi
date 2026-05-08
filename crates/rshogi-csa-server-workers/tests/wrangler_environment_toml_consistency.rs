@@ -176,6 +176,32 @@ fn assert_no_local_dev_only_keys(env: &EnvironmentBindings) {
     );
 }
 
+/// `ConfigKeys::RUNTIME_INJECTED_VARS_KEYS` (Issue #639 で追加した `DEPLOYED_SHA`
+/// 等、CI deploy 時に `wrangler deploy --var KEY:VALUE` で注入される値) が
+/// env toml の `[vars]` テーブルに **書かれていない** ことを検証する。
+///
+/// 静的に書いてしまうと CI 注入値とどちらが勝つか分からなくなる (Cloudflare の
+/// `wrangler deploy` は `--var` 指定で `[vars]` をマージするが、`--keep-vars` を
+/// 付けない既定挙動では deploy の度に server-side `[vars]` が CLI 引数で上書きされる
+/// ため、toml に書いた値は混乱の元になる)。本配列は env toml に出してはならない
+/// 静的 invariant として gate する。
+fn assert_no_runtime_injected_keys(env: &EnvironmentBindings) {
+    let leaked: Vec<_> = ConfigKeys::RUNTIME_INJECTED_VARS_KEYS
+        .iter()
+        .filter(|name| env.vars_keys.iter().any(|t| t == **name))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "{file} ({label}) [vars] must not declare keys listed in \
+         ConfigKeys::RUNTIME_INJECTED_VARS_KEYS (these are injected by CI via \
+         `wrangler deploy --var KEY:VALUE` and must not be hard-coded in env toml): \
+         leaked = {leaked:?}; declared [vars] keys = {keys:?}",
+        file = env.file_name,
+        label = env.label,
+        keys = env.vars_keys,
+    );
+}
+
 /// Issue #551 で追加した `[triggers] crons` が各 deploy 環境に宣言されていることを
 /// 固定する。`[event(scheduled)]` ハンドラは production / staging 両方で稼働させる
 /// 契約 (片方だけ宣言だと backfill / orphan sweep が動かず orphan が滞留する)。
@@ -310,6 +336,11 @@ fn wrangler_production_vars_must_not_contain_local_dev_only_keys() {
 }
 
 #[test]
+fn wrangler_production_vars_must_not_contain_runtime_injected_keys() {
+    assert_no_runtime_injected_keys(&PRODUCTION);
+}
+
+#[test]
 fn wrangler_production_declares_sqlite_migration_for_game_room() {
     assert_declares_sqlite_migration_for_game_room(&PRODUCTION);
 }
@@ -339,6 +370,11 @@ fn wrangler_staging_vars_keys_match_shared_public_vars() {
 #[test]
 fn wrangler_staging_vars_must_not_contain_local_dev_only_keys() {
     assert_no_local_dev_only_keys(&STAGING);
+}
+
+#[test]
+fn wrangler_staging_vars_must_not_contain_runtime_injected_keys() {
+    assert_no_runtime_injected_keys(&STAGING);
 }
 
 #[test]

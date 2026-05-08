@@ -172,3 +172,28 @@ fn wrangler_template_declares_backfill_cron_trigger() {
         "wrangler.toml.example must declare [triggers] crons = [...] for the backfill scheduled handler",
     );
 }
+
+/// `ConfigKeys::RUNTIME_INJECTED_VARS_KEYS` (Issue #639 で追加した `DEPLOYED_SHA`
+/// 等、CI deploy 時に `wrangler deploy --var KEY:VALUE` で注入される値) が
+/// `wrangler.toml.example` の `[vars]` テーブルに **書かれていない** ことを検証する。
+///
+/// template の `[vars]` には `SHARED_PUBLIC_VARS_KEYS ∪ LOCAL_DEV_ONLY_VARS_KEYS`
+/// 全件を記載する規約だが、本配列の値は CI runtime 注入経路でのみ供給される設計
+/// なので template には書かない (書くと local dev で `/health` の `deployed_sha`
+/// が固定 placeholder を返し、Issue #639 の drift detection が想定する semantics
+/// と齟齬になる)。
+#[test]
+fn wrangler_template_vars_must_not_contain_runtime_injected_keys() {
+    let leaked: Vec<_> = ConfigKeys::RUNTIME_INJECTED_VARS_KEYS
+        .iter()
+        .filter(|name| TEMPLATE.vars_keys.iter().any(|t| t == **name))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "wrangler.toml.example [vars] must not declare keys listed in \
+         ConfigKeys::RUNTIME_INJECTED_VARS_KEYS (these are CI-injected at deploy time \
+         via `wrangler deploy --var KEY:VALUE`): leaked = {leaked:?}; \
+         declared [vars] keys = {keys:?}",
+        keys = TEMPLATE.vars_keys,
+    );
+}

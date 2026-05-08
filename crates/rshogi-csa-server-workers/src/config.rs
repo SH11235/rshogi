@@ -113,6 +113,24 @@ impl ConfigKeys {
     /// 出す。
     pub const ALLOW_VIEWER_API: &'static str = "ALLOW_VIEWER_API";
 
+    /// deploy 対象コードの provenance commit sha (`DEPLOY_TRIGGER_SHA`)。
+    ///
+    /// CI deploy 時に `wrangler deploy --var DEPLOYED_SHA:<sha>` 経由で runtime に
+    /// 注入される。ここでの `<sha>` は `github.sha` ではなく
+    /// `.github/workflows/deploy-workers.yml` の `push.paths` にマッチする main 上の
+    /// **最新 commit sha** (`git log -1 --format=%H -- <paths>`)。docs-only commit が
+    /// main HEAD にあっても本値は変わらないため、Issue #639 の drift detection
+    /// workflow で「deploy 対象コードの commit ↔ Cloudflare 上の current version」を
+    /// 突合する基準として使える。
+    ///
+    /// `/health` JSON の `deployed_sha` フィールドとして外部に公開する。未設定
+    /// (local dev / 古い deploy) では `"unknown"` を返す。
+    ///
+    /// 本値は env toml (`wrangler.<env>.toml`) や `wrangler.toml.example` の
+    /// `[vars]` テーブルには **書いてはならない** ([`Self::RUNTIME_INJECTED_VARS_KEYS`]
+    /// 経由で test gate)。
+    pub const DEPLOYED_SHA: &'static str = "DEPLOYED_SHA";
+
     /// `wrangler.toml` の `[[r2_buckets]] binding = "..."` で宣言されるべき名前の
     /// 網羅列挙。新規 R2 binding 定数を追加したら必ず本配列にも追加する。
     pub const ALL_R2_BINDINGS: &'static [&'static str] = &[
@@ -171,6 +189,27 @@ impl ConfigKeys {
     /// 全件を `[vars]` として記載することで、新規メンバーが `cp wrangler.toml.example
     /// wrangler.toml && wrangler dev` で即動作確認できる friction レス運用を維持する。
     pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] = &[Self::ADMIN_HANDLE];
+
+    /// **deploy 時に CI から runtime 注入される** `[vars]` キーの網羅列挙
+    /// ([`Self::DEPLOYED_SHA`] 等)。`SHARED_PUBLIC_VARS_KEYS` / `LOCAL_DEV_ONLY_VARS_KEYS`
+    /// とは排他で、env toml (`wrangler.<env>.toml`) と `wrangler.toml.example` の
+    /// **どちらの `[vars]` テーブルにも書いてはならない**。
+    ///
+    /// 値は CI workflow の `wrangler deploy --var KEY:VALUE` 引数で 1 回限り注入され、
+    /// 各 deploy 毎に最新値で上書きされる (Cloudflare の `--keep-vars` を付けない既定
+    /// 挙動に依存)。`tests/wrangler_template_consistency.rs` /
+    /// `tests/wrangler_environment_toml_consistency.rs` が「本配列のキーが
+    /// `[vars]` に含まれていないこと」を gate する。
+    ///
+    /// 新規定数追加時の振り分け基準（[`Self::SHARED_PUBLIC_VARS_KEYS`] の docstring
+    /// に併記している既存 3 分類との比較）:
+    /// - 全 deploy 環境で値が同じで運用者が toml で平文管理する公開値 →
+    ///   `SHARED_PUBLIC_VARS_KEYS`
+    /// - production / staging では secret、local dev は var で動かす値 →
+    ///   `LOCAL_DEV_ONLY_VARS_KEYS`
+    /// - **deploy 毎に CI が値を計算して注入する値** (commit sha / build ID 等) →
+    ///   本配列 `RUNTIME_INJECTED_VARS_KEYS`
+    pub const RUNTIME_INJECTED_VARS_KEYS: &'static [&'static str] = &[Self::DEPLOYED_SHA];
 }
 
 /// `CHALLENGE_TTL_SEC` 既定値 (1 時間)。`parse_challenge_ttl_duration` で

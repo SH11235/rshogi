@@ -1,0 +1,211 @@
+# Cloudflare Workers (rshogi-csa-server-workers) deploy drift 検出 (Issue #639)。
+#
+# `wrangler rollback` は Cloudflare 側の version のみ巻き戻し、main にも修正
+# commit が入っていない場合、staging では「次の自動 deploy で同じ壊れたコードが
+# 再 apply される」状態が常時化する。production も dispatch 再実行で壊れた版が
+# 再投入される race がある。
+#
+# 本 workflow は 1 日 1 回 cron で staging の `/health` JSON を取得し、`deployed_sha`
+# (= deploy 時に `wrangler deploy --var DEPLOYED_SHA:<sha>` で注入した
+# DEPLOY_TRIGGER_SHA) と main 上の **deploy-trigger path に触れた最新 commit** を
+# 突合する。乖離があれば label `csa-deploy-drift` の open issue を 1 件持つ
+# (なければ新規作成、あれば comment 追記)。
+#
+# 第 1 版は staging のみ対象。production は `workflow_dispatch` 経由でしか deploy
+# が走らないため自動再 apply の race が起きにくく、運用上は手動 `wrangler
+# deployments list` で同期確認する (docs/csa-server/deployment.md §5.4 参照)。
+# production 自動 drift 監視が必要になったら本 file に第 2 job を足す。
+#
+# 設計詳細 / `git revert` を default にした rollback flow は
+# `docs/csa-server/deployment.md` §5 を参照。
+
+name: Cloudflare Drift Check
+
+on:
+  schedule:
+    # UTC 06:17 ≈ JST 15:17 (運用時間帯に通知が届く)。1 日 1 回で十分:
+    # rollback は緊急避難用途、main 同期は `git revert` PR で 24h 以内に行う運用。
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+# drift 検査は read-only + issue 起票のみ。
+permissions:
+  contents: read
+  issues: write
+
+# 同時実行を 1 本に制限。前回 cron が走り終わる前に手動 dispatch を重ねた場合は
+# 古い run を cancel して最新だけ残す (drift 状態は単調に積み重なるので最新だけで十分)。
+concurrency:
+  group: cloudflare-drift-check
+  cancel-in-progress: true
+
+jobs:
+  check-staging-drift:
+    name: Check staging deploy drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: rshogi-csa-server-workers-staging
+    steps:
+      # `git log -1 --format=%H -- <paths>` で deploy-trigger path に触れた main 上の
+      # 最新 commit を取るため full history が必要。`fetch-depth: 0`。
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # `csa-deploy-drift` label が repo に未作成だと `gh issue create --label` が
+      # 失敗するため、idempotent に `gh label create || true` で先に確保する。
+      # 既に存在する場合は exit 1 になるので `|| true` で握り潰す。
+      - name: Ensure csa-deploy-drift label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create csa-deploy-drift \
+            --description "Cloudflare Workers deploy drift detected by cloudflare-drift-check.yml" \
+            --color C5DEF5 \
+            || true
+      # path リスト: `.github/workflows/deploy-workers.yml` の `push.paths` および
+      # 同 file 内の `Compute DEPLOY_TRIGGER_SHA` step と **必ず同じ集合** に揃える。
+      # 不一致だと drift detection の比較基準と deploy 注入値が一致せず、false
+      # positive / false negative の双方を生む。path リスト変更時は両 workflow を
+      # 同 PR で更新する運用契約 (Issue #639 Codex review で合意)。
+      - name: Compute expected DEPLOY_TRIGGER_SHA from main
+        id: expected
+        run: |
+          sha=$(git log -1 --format=%H origin/main -- \
+            crates/rshogi-csa-server-workers \
+            crates/rshogi-csa-server \
+            crates/rshogi-csa \
+            crates/rshogi-core \
+            Cargo.toml \
+            Cargo.lock \
+            .github/workflows/deploy-workers.yml)
+          if [ -z "$sha" ]; then
+            echo "::error::no commit found under deploy-trigger paths on origin/main"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "expected DEPLOY_TRIGGER_SHA from main: $sha"
+      # `vars.WORKERS_HEALTH_URL` は staging deploy job と共有の Environment 変数。
+      # 未設定時は warning + skip (drift detection の前提が整っていない構成では
+      # 本 job 自体を意味なく fail させない)。
+      - name: Fetch deployed_sha from staging /health
+        id: actual
+        env:
+          HEALTH_URL: ${{ vars.WORKERS_HEALTH_URL }}
+          EXPECTED_SHA: ${{ steps.expected.outputs.sha }}
+        run: |
+          if [ -z "$HEALTH_URL" ]; then
+            echo "::warning::WORKERS_HEALTH_URL not set on rshogi-csa-server-workers-staging Environment; skipping drift check"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 1 度目で乖離が出ても deploy 完了直後の rollout 伝播 lag (Cloudflare
+          # 側で数秒〜数十秒) を踏んだ可能性がある。5 分待って 2 度目を見る。
+          # `/health` 取得不能 / schema 不正は drift とは別フラグで報告し、
+          # 一過性ネットワーク障害を rollback drift と誤判定しない。
+          last_sha=""
+          fetched_any=false
+          for attempt in 1 2; do
+            body=$(curl -fsS --max-time 15 "$HEALTH_URL" || true)
+            if [ -z "$body" ]; then
+              echo "::warning::attempt $attempt: /health fetch failed (network or 5xx)"
+              sleep 5
+              continue
+            fi
+            # JSON parse 失敗 / `deployed_sha` 欠落は schema 不正として skip。
+            # `jq -e` を使い、抽出値が null/空文字でも非ゼロ exit を返させる
+            # ことで「壊れた JSON」と「`deployed_sha` 欠落」を同列に扱う。
+            if ! sha=$(jq -er '.deployed_sha // empty' <<<"$body" 2>/dev/null); then
+              echo "::warning::attempt $attempt: /health response missing deployed_sha or invalid JSON (body=$body)"
+              echo "schema_invalid=true" >> "$GITHUB_OUTPUT"
+              echo "sha=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            fetched_any=true
+            echo "attempt $attempt: deployed_sha=$sha"
+            if [ "$sha" = "$EXPECTED_SHA" ]; then
+              echo "sha=$sha" >> "$GITHUB_OUTPUT"
+              echo "match=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            last_sha=$sha
+            if [ "$attempt" -lt 2 ]; then
+              echo "drift candidate; waiting 5min for rollout propagation"
+              sleep 300
+            fi
+          done
+          # 一度も `/health` を取得できなかった場合は drift 判定を保留し warning
+          # で skip する (Cloudflare / network 一時障害を rollback drift と誤判定
+          # しないため)。
+          if [ "$fetched_any" = "false" ]; then
+            echo "::warning::could not fetch /health after 2 attempts; skipping drift check"
+            echo "health_unavailable=true" >> "$GITHUB_OUTPUT"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "sha=$last_sha" >> "$GITHUB_OUTPUT"
+          echo "match=false" >> "$GITHUB_OUTPUT"
+      - name: Report drift result
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED: ${{ steps.expected.outputs.sha }}
+          ACTUAL: ${{ steps.actual.outputs.sha }}
+          MATCH: ${{ steps.actual.outputs.match }}
+          SKIPPED: ${{ steps.actual.outputs.skipped }}
+          SCHEMA_INVALID: ${{ steps.actual.outputs.schema_invalid }}
+          HEALTH_UNAVAILABLE: ${{ steps.actual.outputs.health_unavailable }}
+        run: |
+          if [ "$SKIPPED" = "true" ]; then
+            echo "## Drift check skipped (WORKERS_HEALTH_URL not set)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$HEALTH_UNAVAILABLE" = "true" ]; then
+            {
+              echo "## Drift check skipped (/health unreachable)"
+              echo
+              echo "Network or Cloudflare error on both attempts. Will retry on next cron tick."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::staging /health unreachable; skipping drift comparison."
+            exit 0
+          fi
+          if [ "$SCHEMA_INVALID" = "true" ]; then
+            echo "## Drift check warning: /health JSON missing deployed_sha" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::staging /health does not expose deployed_sha; skipping drift comparison."
+            exit 0
+          fi
+          if [ "$MATCH" = "true" ]; then
+            {
+              echo "## staging deploy in sync"
+              echo
+              echo "- expected (main, deploy-trigger paths): \`$EXPECTED\`"
+              echo "- staging /health.deployed_sha: \`$ACTUAL\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # drift 確定。label 検索で重複起票を抑制し、既存 open issue があれば comment、
+          # なければ新規作成。`gh issue list --jq` は 0 件の場合 `null` を返しうるため
+          # `// empty` で空文字に正規化する (`null` を `gh issue comment` に渡すと fail)。
+          {
+            echo "## staging deploy drift detected"
+            echo
+            echo "- expected (main, deploy-trigger paths): \`$EXPECTED\`"
+            echo "- staging /health.deployed_sha: \`$ACTUAL\`"
+            echo
+            echo "Run \`git log $ACTUAL..$EXPECTED --oneline\` locally to inspect missing commits."
+            echo "See docs/csa-server/deployment.md §5 for the rollback drift recovery flow."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::staging deploy drift detected: expected=$EXPECTED actual=$ACTUAL"
+
+          existing=$(gh issue list --label csa-deploy-drift --state open --limit 1 --json number --jq '.[0].number // empty')
+          body=$(printf '## staging deploy drift\n\n- expected (main HEAD over deploy-trigger paths): `%s`\n- staging /health.deployed_sha: `%s`\n- detected at: %s\n- run: %s/%s/actions/runs/%s\n\nReproduce locally:\n```bash\ngit fetch origin main\ngit log %s..%s --oneline\n```\n\nRecovery: see docs/csa-server/deployment.md §5 (`git revert` 経路を default、`wrangler rollback` 後は 24h 以内に main 同期 PR を出す)。\n' \
+            "$EXPECTED" "$ACTUAL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${{ github.server_url }}" "${{ github.repository }}" "${{ github.run_id }}" "$ACTUAL" "$EXPECTED")
+          if [ -n "$existing" ]; then
+            echo "Updating existing open drift issue #$existing"
+            gh issue comment "$existing" --body "$body"
+          else
+            echo "Opening new drift issue"
+            gh issue create \
+              --title "Cloudflare Workers staging deploy drift (Issue #639)" \
+              --label csa-deploy-drift \
+              --body "$body"
+          fi

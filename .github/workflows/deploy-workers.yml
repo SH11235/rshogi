@@ -132,6 +132,12 @@ jobs:
           fi
       - uses: actions/checkout@v5
         if: steps.check.outputs.can_deploy == 'true'
+        with:
+          # Issue #639: drift detection の基準値となる DEPLOY_TRIGGER_SHA を
+          # `git log -1 --format=%H -- <paths>` で計算する。shallow checkout だと
+          # 過去の deploy-trigger commit が見えず、新規 PR を merge しても
+          # `DEPLOYED_SHA` が空文字で落ちるため full history を取る。
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         if: steps.check.outputs.can_deploy == 'true'
       - name: Add wasm32 target to pinned toolchain
@@ -194,6 +200,30 @@ jobs:
         if: steps.check.outputs.can_deploy == 'true'
         working-directory: crates/rshogi-csa-server-workers
         run: pnpm install --frozen-lockfile
+      # Issue #639: deploy 対象コードの provenance commit sha を `DEPLOY_TRIGGER_SHA`
+      # として算出する。`github.sha` は docs-only push でも main HEAD を指してしまい、
+      # drift workflow 側の `git log -1 -- <paths>` との比較が false positive になる。
+      # 同義の式を drift workflow (`cloudflare-drift-check.yml`) でも使うため、path
+      # リストは両 workflow で **必ず同じ集合に揃える** こと (本 file 冒頭の
+      # `push.paths` と一致)。path リスト変更時は両 workflow を同時に更新する。
+      - name: Compute DEPLOY_TRIGGER_SHA (staging)
+        if: steps.check.outputs.can_deploy == 'true'
+        id: trigger_sha
+        run: |
+          sha=$(git log -1 --format=%H -- \
+            crates/rshogi-csa-server-workers \
+            crates/rshogi-csa-server \
+            crates/rshogi-csa \
+            crates/rshogi-core \
+            Cargo.toml \
+            Cargo.lock \
+            .github/workflows/deploy-workers.yml)
+          if [ -z "$sha" ]; then
+            echo "::error::no commit found under deploy-trigger paths; check fetch-depth in actions/checkout"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "DEPLOY_TRIGGER_SHA=$sha"
       - name: Deploy via wrangler-action
         if: steps.check.outputs.can_deploy == 'true'
         uses: cloudflare/wrangler-action@v3
@@ -202,7 +232,9 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: crates/rshogi-csa-server-workers
           packageManager: pnpm
-          command: deploy --config wrangler.staging.toml
+          # `--var DEPLOYED_SHA:...` で worker 側の `env.var("DEPLOYED_SHA")` に注入。
+          # 値は `/health` JSON の `deployed_sha` として外部から観測可能になる。
+          command: deploy --config wrangler.staging.toml --var DEPLOYED_SHA:${{ steps.trigger_sha.outputs.sha }}
       - name: sccache stats
         if: always() && steps.check.outputs.can_deploy == 'true'
         run: sccache --show-stats || true
@@ -294,6 +326,11 @@ jobs:
           fi
       - uses: actions/checkout@v5
         if: steps.check.outputs.can_deploy == 'true'
+        with:
+          # Issue #639: 同 staging job の checkout コメント参照。drift detection 用
+          # DEPLOY_TRIGGER_SHA を path-aware `git log -1 --format=%H -- <paths>` で
+          # 取るため full history が必要。
+          fetch-depth: 0
       # in-flight 対局がゼロ件で安定するまで待つ best-effort drain。
       # `force_deploy=true` のときは skip。`WORKERS_DRAIN_URL` 未設定は
       # production 限定で fail-closed (staging は drain step を持たないので非該当)。
@@ -378,6 +415,25 @@ jobs:
         if: steps.check.outputs.can_deploy == 'true'
         working-directory: crates/rshogi-csa-server-workers
         run: pnpm install --frozen-lockfile
+      # Issue #639: staging job 同等。詳細は staging 側のコメント参照。
+      - name: Compute DEPLOY_TRIGGER_SHA (production)
+        if: steps.check.outputs.can_deploy == 'true'
+        id: trigger_sha
+        run: |
+          sha=$(git log -1 --format=%H -- \
+            crates/rshogi-csa-server-workers \
+            crates/rshogi-csa-server \
+            crates/rshogi-csa \
+            crates/rshogi-core \
+            Cargo.toml \
+            Cargo.lock \
+            .github/workflows/deploy-workers.yml)
+          if [ -z "$sha" ]; then
+            echo "::error::no commit found under deploy-trigger paths; check fetch-depth in actions/checkout"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "DEPLOY_TRIGGER_SHA=$sha"
       - name: Deploy via wrangler-action
         if: steps.check.outputs.can_deploy == 'true'
         uses: cloudflare/wrangler-action@v3
@@ -386,7 +442,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: crates/rshogi-csa-server-workers
           packageManager: pnpm
-          command: deploy --config wrangler.production.toml
+          command: deploy --config wrangler.production.toml --var DEPLOYED_SHA:${{ steps.trigger_sha.outputs.sha }}
       - name: sccache stats
         if: always() && steps.check.outputs.can_deploy == 'true'
         run: sccache --show-stats || true

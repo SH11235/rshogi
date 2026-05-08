@@ -3,7 +3,9 @@
 //! `#[event(fetch)]` から 1 本だけ呼ばれる薄いディスパッチャ。
 //! - `GET /ws/:room_id` → Origin 検査後、`room_id` を `id_from_name` で
 //!   決定論的に解決した Durable Object へ Upgrade 要求を転送する。
-//! - `GET /` と `GET /health` → サーバ識別を返す簡易ヘルスチェック。
+//! - `GET /` と `GET /health` → サーバ識別と deploy 元 commit sha を JSON で返す
+//!   簡易ヘルスチェック。Issue #639 の rollback drift detection が `deployed_sha`
+//!   を main HEAD と突合する基準にするため、JSON schema の安定性を保つこと。
 //! - 他は 404。
 
 use worker::{Env, Method, Request, Response, Result};
@@ -13,6 +15,10 @@ use crate::origin::{OriginDecision, evaluate};
 use crate::viewer_api;
 use crate::ws_route::{WsRoute, parse_ws_route};
 
+/// `/health` レスポンスで `DEPLOYED_SHA` 未設定時に返す既定値。local dev や
+/// `wrangler deploy --var DEPLOYED_SHA:` 引数を付けない経路で観測される。
+const HEALTH_UNKNOWN_SHA: &str = "unknown";
+
 /// `#[event(fetch)]` から委譲されるディスパッチ。
 pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
     let url = req.url()?;
@@ -20,7 +26,7 @@ pub async fn handle_fetch(req: Request, env: Env) -> Result<Response> {
     let method = req.method();
 
     if method == Method::Get && (path == "/" || path == "/health") {
-        return Response::ok(format!("rshogi-csa-server-workers v{}", env!("CARGO_PKG_VERSION")));
+        return health_response(&env);
     }
 
     // viewer 配信 API (`/api/v1/games[/...]`) は GameRoom DO を経由せず
@@ -160,4 +166,39 @@ async fn forward_ws_to_room(
     }
 
     stub.fetch_with_request(fwd).await
+}
+
+/// `/health` および `/` で返す JSON ペイロード。
+///
+/// `deployed_sha` は CI deploy 時に `wrangler deploy --var DEPLOYED_SHA:<sha>` で
+/// 注入された commit sha (= `.github/workflows/deploy-workers.yml` の `push.paths`
+/// にマッチする main 上の最新 commit)。Issue #639 の drift detection workflow が
+/// 本フィールドを `git log -1 --format=%H -- <paths>` の結果と突合して、Cloudflare
+/// 側に残った rollback 後の旧 version を検出する。
+///
+/// 未設定時 (`HEALTH_UNKNOWN_SHA = "unknown"`) は drift workflow 側で「schema
+/// 不正 / 古い deploy」として警告に倒す（`null` ではなく文字列を返すことで JSON
+/// schema を不変に保つ）。
+#[derive(serde::Serialize)]
+struct HealthPayload<'a> {
+    name: &'a str,
+    version: &'a str,
+    deployed_sha: &'a str,
+}
+
+/// `/health` `GET` レスポンスを生成する。`DEPLOYED_SHA` 未設定や空文字なら
+/// [`HEALTH_UNKNOWN_SHA`] を返す。
+fn health_response(env: &Env) -> Result<Response> {
+    let deployed_sha_owned = env.var(ConfigKeys::DEPLOYED_SHA).ok().map(|v| v.to_string());
+    let deployed_sha = deployed_sha_owned
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(HEALTH_UNKNOWN_SHA);
+    let payload = HealthPayload {
+        name: "rshogi-csa-server-workers",
+        version: env!("CARGO_PKG_VERSION"),
+        deployed_sha,
+    };
+    Response::from_json(&payload)
 }
