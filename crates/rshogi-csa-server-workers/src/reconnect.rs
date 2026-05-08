@@ -208,6 +208,60 @@ pub(crate) fn classify_alarm_after_enter_grace(
     }
 }
 
+/// `start_match` 入口の防御ガード判定結果 (Issue #626)。
+///
+/// `start_match` は副作用 (`KEY_CONFIG` put / buoy reservation / `set_alarm`) の
+/// 前にこの関数の判定で early return する。本 enum を介して入口判定を純粋関数
+/// として固定することで、cold start race (`KEY_CONFIG` read transient err 等) で
+/// `active_game_id` ガードが誤通過した場合に `AgreeTimeout` の `set_alarm` で
+/// 既存 `GraceExpired` alarm を上書きしないことを unit test で固定する。
+///
+/// `game_room::start_match` 側の実処理は逐次 early return で書かれているが、
+/// 判定の優先度・条件はこの関数とまったく同一であり、仕様の一意な参照点として
+/// 本関数を扱う (Codex review round 3 の方針)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartMatchGuard {
+    /// 副作用なしで `start_match` 本体を続行してよい。
+    Proceed,
+    /// `KEY_FINISHED` 既存 → 既に終局済みの DO で start_match を踏んだ。
+    AlreadyFinished,
+    /// `KEY_CONFIG` 既存 → 既に対局成立済 (`active_game_id` ガードを race で
+    /// すり抜けた cold start 復元経路想定)。
+    AlreadyMatched,
+    /// `KEY_PENDING_ALARM_KIND` 既存 → 別種別の alarm (典型的には
+    /// `GraceExpired`) が予約済。`AgreeTimeout` で上書きすると合意済み対局を
+    /// `agree_timeout` で abort してしまう経路。`AgreeTimeout` 残留も含めて
+    /// reject する (前回 start_match の古い alarm 本体が新 match を巻き込む
+    /// race を防ぐため)。
+    AlarmPending(PendingAlarmKind),
+}
+
+/// `start_match` 入口の三段ガードを純粋関数として表現する (Issue #626)。
+///
+/// 引数は永続化キー (`KEY_FINISHED` / `KEY_CONFIG` / `KEY_PENDING_ALARM_KIND`)
+/// の存在 / 値を直接取り、内部参照型に依存しない (`PersistedConfig` /
+/// `FinishedState` の中身は判定に使わないため bool で十分)。
+///
+/// 判定優先度は `finished_present` > `cfg_present` > `alarm_kind` の順で、より
+/// 強い既存状態を優先する。実処理 (`start_match`) 側は read を逐次 early return
+/// で行うが、判定ロジック自体はここで固定し unit test でカバレッジを担保する。
+pub(crate) fn classify_start_match_guard(
+    finished_present: bool,
+    cfg_present: bool,
+    alarm_kind: Option<PendingAlarmKind>,
+) -> StartMatchGuard {
+    if finished_present {
+        return StartMatchGuard::AlreadyFinished;
+    }
+    if cfg_present {
+        return StartMatchGuard::AlreadyMatched;
+    }
+    if let Some(kind) = alarm_kind {
+        return StartMatchGuard::AlarmPending(kind);
+    }
+    StartMatchGuard::Proceed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +453,79 @@ mod tests {
         let (kind, should_set_grace) = classify_alarm_after_enter_grace(None, 2_000);
         assert_eq!(kind, PendingAlarmKind::GraceExpired);
         assert!(should_set_grace);
+    }
+
+    /// `start_match` 入口の三段ガード仕様を pin する (Issue #626)。
+    ///
+    /// `proceeds_when_no_state`: 何も永続化されていない初回 LOGIN マッチ成立直後の
+    /// 経路で副作用なしの続行を許可する。
+    #[test]
+    fn classify_start_match_guard_proceeds_when_no_state() {
+        assert_eq!(classify_start_match_guard(false, false, None), StartMatchGuard::Proceed);
+    }
+
+    /// `KEY_FINISHED` 既存。defensive な fallback 経路 (通常は `handle_login` /
+    /// `handle_game_line` 入口の `load_finished` ガードで弾かれる)。
+    #[test]
+    fn classify_start_match_guard_rejects_when_finished() {
+        assert_eq!(classify_start_match_guard(true, false, None), StartMatchGuard::AlreadyFinished);
+    }
+
+    /// `KEY_CONFIG` 既存。`active_game_id` ガードを cold start race ですり抜けた
+    /// 経路を想定し、`AgreeTimeout` で `set_alarm` を上書きしないように reject する。
+    #[test]
+    fn classify_start_match_guard_rejects_when_config_present() {
+        assert_eq!(classify_start_match_guard(false, true, None), StartMatchGuard::AlreadyMatched);
+    }
+
+    /// Issue #626 の主要シナリオ。`enter_grace_window` で `GraceExpired` alarm が
+    /// 予約済の状態で `start_match` を踏むと、`AgreeTimeout` で上書きしてしまう
+    /// ため reject する。
+    #[test]
+    fn classify_start_match_guard_rejects_when_grace_expired_pending() {
+        assert_eq!(
+            classify_start_match_guard(false, false, Some(PendingAlarmKind::GraceExpired)),
+            StartMatchGuard::AlarmPending(PendingAlarmKind::GraceExpired)
+        );
+    }
+
+    /// `TimeUp` 残留 (理論上の race) も reject する。`KEY_CONFIG` が無い限り
+    /// `TimeUp` がここに残ること自体は通常起きないが、防御的に弾く。
+    #[test]
+    fn classify_start_match_guard_rejects_when_time_up_pending() {
+        assert_eq!(
+            classify_start_match_guard(false, false, Some(PendingAlarmKind::TimeUp)),
+            StartMatchGuard::AlarmPending(PendingAlarmKind::TimeUp)
+        );
+    }
+
+    /// 前回 `start_match` の `AgreeTimeout` 残留も reject する。続行扱いにすると
+    /// 古い alarm 本体が新 match を巻き込む race を防ぐため (Codex review round 2
+    /// → round 3 の合意点)。
+    #[test]
+    fn classify_start_match_guard_rejects_when_agree_timeout_pending() {
+        assert_eq!(
+            classify_start_match_guard(false, false, Some(PendingAlarmKind::AgreeTimeout)),
+            StartMatchGuard::AlarmPending(PendingAlarmKind::AgreeTimeout)
+        );
+    }
+
+    /// 判定優先度の固定: `finished_present=true` なら cfg / alarm に関わらず
+    /// `AlreadyFinished`。
+    #[test]
+    fn classify_start_match_guard_finished_takes_precedence() {
+        assert_eq!(
+            classify_start_match_guard(true, true, Some(PendingAlarmKind::GraceExpired)),
+            StartMatchGuard::AlreadyFinished
+        );
+    }
+
+    /// 判定優先度の固定: cfg があれば alarm_kind に関わらず `AlreadyMatched`。
+    #[test]
+    fn classify_start_match_guard_config_takes_precedence_over_alarm_kind() {
+        assert_eq!(
+            classify_start_match_guard(false, true, Some(PendingAlarmKind::GraceExpired)),
+            StartMatchGuard::AlreadyMatched
+        );
     }
 }

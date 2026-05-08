@@ -78,9 +78,9 @@ use crate::persistence::{
     FinishedState, MoveRow, PersistedConfig, ReplaySummary, replay_core_room,
 };
 use crate::reconnect::{
-    PendingAlarmKind, PendingReconnect, ReconnectMatchOutcome, ReconnectSnapshot,
-    build_resume_message, classify_alarm_after_enter_grace, color_from_str, color_to_str,
-    issue_tokens_if_enabled,
+    PendingAlarmKind, PendingReconnect, ReconnectMatchOutcome, ReconnectSnapshot, StartMatchGuard,
+    build_resume_message, classify_alarm_after_enter_grace, classify_start_match_guard,
+    color_from_str, color_to_str, issue_tokens_if_enabled,
 };
 use crate::session_state::{LoginReply, MatchResult, Slot, evaluate_match};
 use crate::spectator_control::{
@@ -465,6 +465,70 @@ impl GameRoom {
         white_handle: &str,
         game_name: &str,
     ) -> Result<bool> {
+        // Issue #626: `start_match` の呼び出し前に存在する重複起動防止ガード
+        // (`handle_login` 側は `evaluate_match` の `MatchResult::Match` 判定、
+        // `try_start_pending_match` 側は `handle_game_line` 入口の
+        // `active_game_id().is_none()` 判定) が、cold start race (`KEY_CONFIG`
+        // read transient err 等) で誤通過した場合、末尾の
+        // `set_alarm(agree_timeout)` で `enter_grace_window` 経由の `GraceExpired`
+        // alarm を上書きし、合意済み対局を `agree_timeout` で abort する race が
+        // 理論上残る。副作用 (buoy reservation / `KEY_CONFIG` put / `set_alarm`)
+        // の前に三段ガード (FINISHED / KEY_CONFIG / KEY_PENDING_ALARM_KIND) を
+        // 逐次 early return で配置し、いずれか set 済なら
+        // `abort_pending_match_with_error` で pending slot を片付けて
+        // `Ok(false)` を返す。判定ロジックは `reconnect::classify_start_match_guard`
+        // で純粋関数化し unit test で固定する。
+        //
+        // 各 read を逐次にしているのは、`finished` を読み終えた直後に後続 read が
+        // err になっても、判定済みの強い状態 (FINISHED) を優先して abort cleanup
+        // まで到達できるようにするため (Codex review round 3 の指摘)。
+        // `KEY_FINISHED` チェック: 通常は `handle_login` / `handle_game_line`
+        // 入口の `load_finished` ガードで弾かれる経路。defensive な fallback と
+        // して残し、Player attachment の WS は `abort_pending_match_with_error`
+        // で server-initiated close する (`handle_login` で `LOGIN OK` 送出 +
+        // attachment が Player に差し替わっているため、無言で `Ok(false)` だと
+        // WS が宙ぶらりんになる)。
+        let finished_present = self.load_finished().await?.is_some();
+        if let StartMatchGuard::AlreadyFinished =
+            classify_start_match_guard(finished_present, false, None)
+        {
+            console_log!("[GameRoom] start_match aborted: already finished");
+            self.abort_pending_match_with_error("##[ERROR] room already finished").await?;
+            return Ok(false);
+        }
+        // `KEY_CONFIG` チェック: race 想定では既存対局の Player WS は (a) 切断済
+        // (= attachment は Player のままだが close 済の状態を
+        // `abort_pending_match_with_error` が無視する) か (b) grace 中 (= 同様に
+        // 既に close 済) のいずれか。万一既存対局の生 WS が同 DO に残っている
+        // 場合は close されるが、KEY_CONFIG present + 新規 LOGIN 経路自体が
+        // cold start race 想定で、巻き込みは race 経路の defensive 副作用として
+        // 許容する (Codex round 2)。
+        let cfg_present = self.state.storage().get::<PersistedConfig>(KEY_CONFIG).await?.is_some();
+        if let StartMatchGuard::AlreadyMatched =
+            classify_start_match_guard(false, cfg_present, None)
+        {
+            console_log!("[GameRoom] start_match aborted: KEY_CONFIG already present");
+            self.abort_pending_match_with_error("##[ERROR] match already in progress")
+                .await?;
+            return Ok(false);
+        }
+        // `KEY_PENDING_ALARM_KIND` チェック: `GraceExpired` / `TimeUp` /
+        // `AgreeTimeout` のどれが残っていても reject する。`AgreeTimeout` の前回
+        // start_match 残留を続行扱いにすると、古い alarm 本体が新 match を巻き
+        // 込む可能性があるため (Codex round 2 → round 3 の合意点)。
+        let existing_kind: Option<PendingAlarmKind> =
+            self.state.storage().get(KEY_PENDING_ALARM_KIND).await?;
+        if let StartMatchGuard::AlarmPending(kind) =
+            classify_start_match_guard(false, false, existing_kind)
+        {
+            console_log!(
+                "[GameRoom] start_match aborted: pending_alarm_kind={kind:?} already present"
+            );
+            self.abort_pending_match_with_error("##[ERROR] match already has pending alarm")
+                .await?;
+            return Ok(false);
+        }
+
         // `room_id` は fetch 時に永続化している（DO インスタンス = room_id なので
         // 他 DO と衝突しない。game_id は `<room_id>-<epoch_ms>` 形式で、
         // 別 DO が同一ミリ秒にマッチしても R2 キー `YYYY/MM/DD/<game_id>.csa` が
