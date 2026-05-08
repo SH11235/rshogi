@@ -111,14 +111,29 @@ impl PendingReconnect {
         if now_ms > self.deadline_ms {
             return ReconnectMatchOutcome::Expired;
         }
-        if self.disconnected_handle != handle
-            || self.disconnected_color != color_to_str(color)
-            || self.expected_token != token
-        {
+        // handle / color は CSA LOGIN 行から自明に観測可能なため short-circuit
+        // 比較で問題ない。token は攻撃者が当てにいく対象 (128bit hex) のため、
+        // 比較は短絡なしの constant-time にする。
+        if self.disconnected_handle != handle || self.disconnected_color != color_to_str(color) {
+            return ReconnectMatchOutcome::Rejected;
+        }
+        if !ct_str_eq(self.expected_token.as_bytes(), token.as_bytes()) {
             return ReconnectMatchOutcome::Rejected;
         }
         ReconnectMatchOutcome::Accepted
     }
+}
+
+/// 同長の byte 列を constant-time で比較する。長さの不一致は `len()` 自身が
+/// 公開情報なので即 false にしてよい (timing leak しない)。同長時は `subtle`
+/// の `ConstantTimeEq` で 1 byte ごと xor を畳み込み、`Choice` の bool 化まで
+/// 定数時間で完了する。
+fn ct_str_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    a.ct_eq(b).into()
 }
 
 /// 再接続成立時にクライアントへ送出する状態再送メッセージを組み立てる。
