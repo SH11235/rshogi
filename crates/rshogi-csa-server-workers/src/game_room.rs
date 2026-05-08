@@ -256,26 +256,29 @@ impl DurableObject for GameRoom {
     }
 
     async fn websocket_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
-        let raw = match msg {
-            WebSocketIncomingMessage::String(s) => s,
-            WebSocketIncomingMessage::Binary(_) => return Ok(()),
+        // Issue #627: 受信フレームの byte 数を **String/Binary 共通で** 上限判定する。
+        // CSA protocol は text-only なので Binary は最終的に discard するが、サイズ
+        // 上限を効かせるためには discard する前に len() を見る必要がある (Cloudflare
+        // ランタイムは frame 受信時点で 32 MiB まで取り込めてしまうため、binary 経路を
+        // 素通しにすると DoS 緩和が片肺になる)。`trim_end_matches` で改行を削った後だと
+        // 判定対象が縮むため必ず元の長さで判定。超過時は `1009 Message Too Big` で即 close。
+        let raw_len = match &msg {
+            WebSocketIncomingMessage::String(s) => s.len(),
+            WebSocketIncomingMessage::Binary(b) => b.len(),
         };
-        // Issue #627: アプリ層の parser / 追加 allocation (`to_owned` 等) に
-        // 流す前に、受信した `String` の元バイト数で上限判定する。ランタイム側
-        // の `String` 取り込みは既に済んでいるが、parser / trim 後の解釈処理や
-        // attachment 経路 (spectator queue 等) への流入は弾ける。
-        // `trim_end_matches` で改行を削った後だと判定対象が縮むため、必ず raw の
-        // 元の長さを使う。超過時は `1009 Message Too Big` で即 close し、
-        // 構造化 console_log を残す (rate limit は #622 / 別 issue scope)。
-        if raw.len() > MAX_WS_LINE_BYTES {
+        if raw_len > MAX_WS_LINE_BYTES {
             console_log!(
                 "[GameRoom] event=ws_message_too_big bytes={} limit={}",
-                raw.len(),
+                raw_len,
                 MAX_WS_LINE_BYTES,
             );
             let _ = ws.close(Some(1009), Some("message too big".to_owned()));
             return Ok(());
         }
+        let raw = match msg {
+            WebSocketIncomingMessage::String(s) => s,
+            WebSocketIncomingMessage::Binary(_) => return Ok(()),
+        };
         let line = raw.trim_end_matches(['\r', '\n']).to_owned();
 
         let attachment: WsAttachment = ws
