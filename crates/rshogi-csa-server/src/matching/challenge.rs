@@ -19,7 +19,7 @@
 //!
 //! # スコープ
 //!
-//! 本モジュールは Issue #582 の **Core foundation** 部分。`%%CHALLENGE` /
+//! 本モジュールは https://github.com/SH11235/rshogi/issues/582 の **Core foundation** 部分。`%%CHALLENGE` /
 //! `CHALLENGE_LOBBY` の protocol parser、TCP `drive_private_game` lifecycle、
 //! Workers DO storage 永続化 / Alarm purge は別の follow-up PR で実装される。
 

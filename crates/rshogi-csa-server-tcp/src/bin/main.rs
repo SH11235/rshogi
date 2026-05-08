@@ -129,7 +129,7 @@ struct Cli {
     #[arg(long, default_value_t = 60)]
     shutdown_grace_sec: u64,
     /// 私的対局 (`%%CHALLENGE`) で発行する token の TTL (秒)。期限超過した
-    /// 未消費の challenge は `purge_expired` で自然枯死する。Issue #582 受入
+    /// 未消費の challenge は `purge_expired` で自然枯死する。https://github.com/SH11235/rshogi/issues/582 受入
     /// 基準: TCP / Workers 両方とも既定 3600 秒。
     #[arg(long, default_value_t = 3600)]
     challenge_ttl_sec: u64,

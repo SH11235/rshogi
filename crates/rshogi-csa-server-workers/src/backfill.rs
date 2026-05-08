@@ -7,7 +7,7 @@
 //!   key を再生成して上書き put する (派生 index 補完)。1 cron = 1 page のみ。
 //! - [`run_live_orphan_sweep`]: `live-games-index/` を pagination loop で list
 //!   し、対応する `kifu-by-id/<id>.meta.json` (= 終局済 primary 判定キー、設計
-//!   v3 §3) が存在する live entry を delete する (orphan 掃除)。Issue #629 で
+//!   v3 §3) が存在する live entry を delete する (orphan 掃除)。https://github.com/SH11235/rshogi/issues/629 で
 //!   1 page → 複数 page (`SWEEP_DEADLINE_MS` 内) に拡張した。
 //!
 //! `run_games_index_backfill` は 1 page (1000 件) のみ処理し、cursor の持ち越し
@@ -46,7 +46,7 @@ pub(crate) const META_SUFFIX: &str = ".meta.json";
 /// 経由で複数ページ一気に処理する案 (設計 v2 §5 (a)) を別 issue で検討する。
 pub(crate) const PAGE_SIZE: u32 = 1000;
 
-/// `run_live_orphan_sweep` の 1 cron 内 pagination 上限 (Issue #629)。
+/// `run_live_orphan_sweep` の 1 cron 内 pagination 上限 (https://github.com/SH11235/rshogi/issues/629)。
 ///
 /// Cloudflare Workers の cron 起動は wall-clock 30s 制限を持つため、安全側
 /// マージン (5s) を引いた 25s で打ち切り、未処理 page は次回 cron に持ち越す。
@@ -54,7 +54,7 @@ pub(crate) const PAGE_SIZE: u32 = 1000;
 /// ため、1 page (1000 件) で約 5-10s。25s なら 2-3 page を安全に処理できる。
 pub(crate) const SWEEP_DEADLINE_MS: u64 = 25_000;
 
-/// `run_live_orphan_sweep` の安全側 page 上限 (Issue #629)。`SWEEP_DEADLINE_MS`
+/// `run_live_orphan_sweep` の安全側 page 上限 (https://github.com/SH11235/rshogi/issues/629)。`SWEEP_DEADLINE_MS`
 /// を超えなくても、cursor が永遠に truncated を返し続ける異常時に無限 loop を
 /// 避けるための break 条件。100 page = 100,000 件で十分な余白。
 pub(crate) const SWEEP_MAX_PAGES: u32 = 100;
@@ -77,11 +77,11 @@ pub struct SweepStats {
     pub listed: u64,
     /// `kifu-by-id/<id>.meta.json` が存在する (= 終局済) ため delete した件数。
     pub deleted: u64,
-    /// 走査した R2 list page 数 (Issue #629)。pagination loop 化に伴って導入。
+    /// 走査した R2 list page 数 (https://github.com/SH11235/rshogi/issues/629)。pagination loop 化に伴って導入。
     /// 1 cron で複数 page を処理した状況をログから確認するための運用 metric。
     pub pages: u32,
     /// `SWEEP_DEADLINE_MS` 経過で打ち切った場合に `true`。`true` の cron が
-    /// 連続したら page size または cron 頻度の見直しが必要 (Issue #629)。
+    /// 連続したら page size または cron 頻度の見直しが必要 (https://github.com/SH11235/rshogi/issues/629)。
     pub deadline_reached: bool,
 }
 
@@ -251,7 +251,7 @@ mod imp {
     /// cron で finalize 経路の副作用で meta が put された後に消える、または
     /// 手動オペレーションで対処)。
     ///
-    /// Issue #629 で pagination loop 化した。R2 list の `truncated` が `true`
+    /// https://github.com/SH11235/rshogi/issues/629 で pagination loop 化した。R2 list の `truncated` が `true`
     /// の間は cursor を辿って次 page を処理し、以下のいずれかの条件で打ち切る:
     ///
     /// 1. `truncated() == false` (全件処理完了)

@@ -105,7 +105,7 @@ pub(crate) fn is_private_login_handle(raw: &str) -> bool {
 /// 私的対局 (`%%CHALLENGE`) issuance 経路で LOGIN の `<game_name>` トークンに
 /// 載せて使う予約 sentinel。inviter は `LOGIN <handle>+_challenge+<color> <pw> x1`
 /// で接続し、本 sentinel に到達した接続は通常のマッチング待機プールに乗らず
-/// `handle_challenge_issuance_path` に分岐する (Issue #582 受け入れ基準)。
+/// `handle_challenge_issuance_path` に分岐する (https://github.com/SH11235/rshogi/issues/582 受け入れ基準)。
 /// LOGIN handler の clock-preset strict mode 例外と issuance 分岐の双方から
 /// 参照されるため、文字列リテラル散在による typo を避けて const に集約する。
 pub(crate) const CHALLENGE_ISSUANCE_GAME_NAME: &str = "_challenge";
@@ -300,7 +300,7 @@ pub struct ServerConfig {
     /// 私的対局 (`%%CHALLENGE`) で発行する token の TTL。期限超過した未消費の
     /// challenge は `purge_expired` で自然枯死し、片側 LOGIN 済の session は
     /// `##[ERROR] challenge expired before opponent joined` で切断される。
-    /// 既定 1 時間 (Issue #582 の受け入れ基準: TCP / Workers 両方とも秒単位で 3600)。
+    /// 既定 1 時間 (https://github.com/SH11235/rshogi/issues/582 の受け入れ基準: TCP / Workers 両方とも秒単位で 3600)。
     pub challenge_ttl: Duration,
     /// `ChallengeRegistry::purge_expired` を回す軽量 task の周期。expire 検出の
     /// 上限遅延を決める。LOGIN 経路でも都度 `purge_expired` を呼ぶため、本周期は
@@ -2423,7 +2423,7 @@ where
     // 拡張行で配布する。再接続経路はトークン照合で同一対局・同一対局者を識別する。
     // ただし `reconnect_grace_duration == ZERO` の構成では再接続経路自体に立ち入ら
     // ないため、token は発行せず `Game_Summary` 末尾拡張行にも `Reconnect_Token:`
-    // 行を出さない (Issue #591 と同型の `LOGIN:incorrect reconnect_rejected` 経路を
+    // 行を出さない (https://github.com/SH11235/rshogi/issues/591 と同型の `LOGIN:incorrect reconnect_rejected` 経路を
     // 防ぐ)。
     let (black_reconnect_token, white_reconnect_token) =
         if state.config.reconnect_grace_duration.is_zero() {
@@ -3033,7 +3033,7 @@ where
 ///   されると inviter が再 LOGIN (= 認証コスト + handshake) を強いられ非対称。
 /// - 切断する場合でも何の信号も送らず close するだけで、`run_waiter` の
 ///   切断方針 (debug 用 trace のみ) と同質性は保ちつつ、ハンドシェイク
-///   コストだけ削れる。Issue #582 の TCP フロー §1 step 5 にある「LOGOUT
+///   コストだけ削れる。https://github.com/SH11235/rshogi/issues/582 の TCP フロー §1 step 5 にある「LOGOUT
 ///   応答は保証しない」という記述は「LOGOUT の応答行を返さない」意図であり、
 ///   本実装でも応答行は送らない (単に loop 脱出のみ)。応答可否ではなく
 ///   ループ離脱の trigger としての扱いの差異である。
@@ -3094,7 +3094,7 @@ where
 /// `CHALLENGE:OK <token> <ttl_sec>` を返す。失敗で接続を切らないのは、issuance
 /// クライアントが連続で複数 token を発行する用途を許容するため。
 ///
-/// **SFEN 検証の代替実装**: Issue #582 仕様文では `validate_handicap_sfen`
+/// **SFEN 検証の代替実装**: https://github.com/SH11235/rshogi/issues/582 仕様文では `validate_handicap_sfen`
 /// 経由とあるが、当該名の helper は core / TCP どちらにも存在しない。代わりに
 /// [`position_section_from_sfen`] と [`side_to_move_from_sfen`] の双方を呼び、
 /// どちらかが `Err` なら `bad_sfen` 判定とする。これは Game_Summary 構築経路
@@ -3271,7 +3271,7 @@ where
     }
 
     // 5. 先着 / 後着 を pending map で原子判定する。`already_logged_in` は
-    //    `LOGIN OK` を送る前に検出して `LOGIN:incorrect` のみ返す (Issue #582
+    //    `LOGIN OK` を送る前に検出して `LOGIN:incorrect` のみ返す (https://github.com/SH11235/rshogi/issues/582
     //    検証順 `color → expired → not_invited → already_logged_in` を満たす
     //    ため、OK と incorrect の二重送信を回避する)。
     let cancel: Arc<Notify> = Arc::new(Notify::new());
@@ -3493,7 +3493,7 @@ where
         }
         // 先着クライアントの TCP 切断 / EOF を監視する。issuance mode 中は AGREE /
         // REJECT 等のコマンドが意味を持たないため `recv_res` の中身は捨て、
-        // 切断検知をトリガーに pending map から自身を unregister する (Issue #582
+        // 切断検知をトリガーに pending map から自身を unregister する (https://github.com/SH11235/rshogi/issues/582
         // の stale handle race 回避: `cancel` ベースの `Arc::ptr_eq` 一致比較で
         // 同 handle の別セッションを巻き込まない)。`recv_line` は cancel-safe
         // なので select 内で捨てられても再起動経路に副作用を残さない。

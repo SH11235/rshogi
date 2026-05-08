@@ -409,7 +409,7 @@ fn run_one_game(
     //
     // 判定ロジック自体は `should_attempt_reconnect` pure helper に切り出して
     // unit test で pin している。token=None (production の grace=0 構成等) の
-    // 場合は reconnect 試行自体を skip するため、Issue #591 の
+    // 場合は reconnect 試行自体を skip するため、https://github.com/SH11235/rshogi/issues/591 の
     // `LOGIN:incorrect reconnect_rejected` 経路に到達しない。
     let reconnect_request = match session_result.as_ref() {
         Ok(outcome) => should_attempt_reconnect(outcome, shutdown.load(Ordering::SeqCst)),
@@ -475,7 +475,7 @@ fn run_one_game(
 ///
 /// production の grace=0 構成では server から `Reconnect_Token:` 拡張行が出ないため
 /// `outcome.summary.reconnect_token` が常に `None` で、本関数は `None` を返し、
-/// Issue #591 の `LOGIN:incorrect reconnect_rejected` 経路には到達しない。
+/// https://github.com/SH11235/rshogi/issues/591 の `LOGIN:incorrect reconnect_rejected` 経路には到達しない。
 fn should_attempt_reconnect(outcome: &SessionOutcome, shutdown: bool) -> Option<(String, String)> {
     if shutdown || outcome.result != GameResult::Interrupted {
         return None;
@@ -1094,7 +1094,7 @@ mod tests {
 
     /// production の保守的既定 (`grace=0`) で `Reconnect_Token:` 拡張行が出ない場合、
     /// `summary.reconnect_token == None` なので reconnect 試行を skip する。
-    /// 本 case が Issue #591 hotfix の client 側保証 (= `LOGIN:incorrect reconnect_rejected`
+    /// 本 case が https://github.com/SH11235/rshogi/issues/591 hotfix の client 側保証 (= `LOGIN:incorrect reconnect_rejected`
     /// 経路に到達しない) を pin する唯一の test。
     #[test]
     fn should_attempt_reconnect_returns_none_when_token_absent() {

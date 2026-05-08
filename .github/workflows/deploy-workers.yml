@@ -133,7 +133,7 @@ jobs:
       - uses: actions/checkout@v5
         if: steps.check.outputs.can_deploy == 'true'
         with:
-          # Issue #639: drift detection の基準値となる DEPLOY_TRIGGER_SHA を
+          # https://github.com/SH11235/rshogi/issues/639: drift detection の基準値となる DEPLOY_TRIGGER_SHA を
           # `git log -1 --format=%H -- <paths>` で計算する。shallow checkout だと
           # 過去の deploy-trigger commit が見えず、新規 PR を merge しても
           # `DEPLOYED_SHA` が空文字で落ちるため full history を取る。
@@ -200,7 +200,7 @@ jobs:
         if: steps.check.outputs.can_deploy == 'true'
         working-directory: crates/rshogi-csa-server-workers
         run: pnpm install --frozen-lockfile
-      # Issue #639: deploy 対象コードの provenance commit sha を `DEPLOY_TRIGGER_SHA`
+      # https://github.com/SH11235/rshogi/issues/639: deploy 対象コードの provenance commit sha を `DEPLOY_TRIGGER_SHA`
       # として算出する。`github.sha` は docs-only push でも main HEAD を指してしまい、
       # drift workflow 側の `git log -1 -- <paths>` との比較が false positive になる。
       # 同義の式を drift workflow (`cloudflare-drift-check.yml`) でも使うため、path
@@ -327,7 +327,7 @@ jobs:
       - uses: actions/checkout@v5
         if: steps.check.outputs.can_deploy == 'true'
         with:
-          # Issue #639: 同 staging job の checkout コメント参照。drift detection 用
+          # https://github.com/SH11235/rshogi/issues/639: 同 staging job の checkout コメント参照。drift detection 用
           # DEPLOY_TRIGGER_SHA を path-aware `git log -1 --format=%H -- <paths>` で
           # 取るため full history が必要。
           fetch-depth: 0
@@ -415,7 +415,7 @@ jobs:
         if: steps.check.outputs.can_deploy == 'true'
         working-directory: crates/rshogi-csa-server-workers
         run: pnpm install --frozen-lockfile
-      # Issue #639: staging job 同等。詳細は staging 側のコメント参照。
+      # https://github.com/SH11235/rshogi/issues/639: staging job 同等。詳細は staging 側のコメント参照。
       - name: Compute DEPLOY_TRIGGER_SHA (production)
         if: steps.check.outputs.can_deploy == 'true'
         id: trigger_sha

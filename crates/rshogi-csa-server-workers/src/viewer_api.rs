@@ -16,7 +16,7 @@
 //!   WS spectate 接続で実状態を確認する)。
 //! - `GET /api/v1/games/<game_id>` 単局 (終局済)
 //!   `kifu-by-id/<encoded_game_id>.csa` を直接 get する。本文 (CSA V2) と
-//!   `kifu-by-id/<encoded_game_id>.meta.json` から取得した正準メタ (Issue #551
+//!   `kifu-by-id/<encoded_game_id>.meta.json` から取得した正準メタ (https://github.com/SH11235/rshogi/issues/551
 //!   設計 v3 §12) を合わせて返す。
 //!
 //! いずれも GameRoom DO を経由せず、Worker 直 fetch のみで完結する (R2 read
@@ -589,7 +589,7 @@ async fn build_single_game(
         }
     };
 
-    // meta は `kifu-by-id/<id>.meta.json` を直接 get で取得する (Issue #551
+    // meta は `kifu-by-id/<id>.meta.json` を直接 get で取得する (https://github.com/SH11235/rshogi/issues/551
     // 設計 v3 §12)。primary meta が常設される契約なので、`games-index/` を
     // prefix list で走査する旧経路 (O(N) コスト) は廃止し、O(1) get に置換した。
     let meta = match find_meta_for(&bucket, game_id).await {

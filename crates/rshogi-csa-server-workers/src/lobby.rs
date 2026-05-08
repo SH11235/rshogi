@@ -633,7 +633,7 @@ impl Lobby {
     ///    `LOGIN_LOBBY:<handle> OK pending_match_dispatch_pending` 暫定応答を返す。
     ///
     /// **本 PR スコープ補足**: 両者揃った時点で `consume(token)` → GameRoom DO
-    /// 起動 + clock_spec / initial_sfen バトンパスする経路は Issue #582
+    /// 起動 + clock_spec / initial_sfen バトンパスする経路は https://github.com/SH11235/rshogi/issues/582
     /// follow-up integration の後半スコープに分割する。本 PR では LOGIN_LOBBY
     /// を受理して attachment を `PrivatePending` で登録するだけで、対局起動
     /// trigger を発火させない (WS は接続維持され、次 PR の dispatch 経路で
