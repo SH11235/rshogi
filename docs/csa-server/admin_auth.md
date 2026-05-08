@@ -28,9 +28,15 @@ LOGIN <handle>+<game_name>+<color> <password>
 ...
 ```
 
-`%%ADMIN` の応答は `##[ADMIN] OK` (成功) / `##[ADMIN] PERMISSION_DENIED`
-(token 不一致 / secret 未配置 / token 空、いずれも同一応答で leak しない)
-+ `##[ADMIN] END`。session が close した時点で admin 権限は失われる。
+`%%ADMIN <token>` 受信時の応答:
+
+| ケース | 応答 |
+|---|---|
+| `verify_admin_token_str` 成功 (token 一致) | `##[ADMIN] OK` + `##[ADMIN] END` (session を admin 昇格) |
+| token 不一致 / secret 未配置 | `##[ADMIN] PERMISSION_DENIED` + `##[ADMIN] END` (同一応答で「configured かどうか」を leak しない) |
+| token 部欠落 (`%%ADMIN` 単体 / `%%ADMIN` の後に whitespace のみ) | **応答なし (silent ignore)**。`%%SETBUOY` 引数欠落等と同じく malformed command として握り潰す |
+
+session が close した時点で admin 権限は失われる。
 
 Cloudflare 側に旧 `ADMIN_HANDLE` secret が残っていれば、Worker code は
 読まなくなったので運用上の混乱を避けるため削除推奨:
