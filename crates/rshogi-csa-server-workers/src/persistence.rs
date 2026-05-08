@@ -70,12 +70,72 @@ pub struct PersistedConfig {
 }
 
 /// 終局フラグ。一度 `Some` になったらその DO は同じ対局を二度開始しない。
+///
+/// `exported_at_ms` は R2 棋譜エクスポートが全 PUT 完了した時刻 (UNIX epoch ms)。
+/// `None` のあいだは終局はしているが R2 への書き出しが未完了で、Issue #623 の
+/// `KEY_EXPORT_PENDING` + `PendingAlarmKind::ExportRetry` 経路で再試行されている
+/// ことを示す。`#[serde(default)]` で旧 schema (本フィールド導入前の cold start
+/// snapshot) との互換を保つ。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinishedState {
     /// CSA 終局コード（`#RESIGN` / `#TIME_UP` / `#ILLEGAL_MOVE` 等）。
     pub(crate) result_code: String,
     /// 終局確定時刻（UNIX エポック ミリ秒）。
     pub(crate) ended_at_ms: u64,
+    /// R2 棋譜エクスポート完了時刻。`None` は export 未完了 (retry 待ち) を示す。
+    #[serde(default)]
+    pub(crate) exported_at_ms: Option<u64>,
+}
+
+/// 終局時の R2 export PUT のうち失敗した key を表すエントリ (Issue #623)。
+///
+/// `body_kind` で再 PUT 時に乗せる本文 (`csa` = CSA 本文 / `meta` = JSON meta) を
+/// 区別する。`key` 文字列の prefix 推測ではなく明示分類にするのは、key 形式の
+/// 将来変更に対する堅牢性のため (例: `kifu-by-id/` と `games-index/` で同 JSON
+/// body だが path が違う、`YYYY/MM/DD/` と `kifu-by-id/` で同 CSA 本文だが path
+/// が違う、といった対応関係を struct で固定する)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedExportObject {
+    /// R2 オブジェクトキー (例: `2026/05/08/g1.csa` / `kifu-by-id/g1.meta.json`)。
+    pub(crate) key: String,
+    /// 再 PUT 時に本文として乗せる種別。
+    pub(crate) body_kind: ExportBodyKind,
+}
+
+/// `FailedExportObject` の本文種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportBodyKind {
+    /// CSA V2 形式の棋譜本文 (`YYYY/MM/DD/<id>.csa` / `kifu-by-id/<id>.csa`)。
+    Csa,
+    /// `GamesIndexEntry` を serialize した JSON (`kifu-by-id/<id>.meta.json` /
+    /// `games-index/<inv>-<id>.json`)。
+    Meta,
+}
+
+/// 終局時に R2 export の一部または全部が失敗したときに DO storage へ残す
+/// retry payload (Issue #623)。
+///
+/// CSA 本文 / meta JSON は finalize 時点で計算済のものをそのまま保存する
+/// (cold start 後でも `load_moves` を呼び直さず再 PUT できる)。`failed_keys`
+/// は初回 finalize 時点で実際に PUT 失敗した key のみが残り、retry alarm が
+/// 順番に再 PUT する。`attempt` は再試行回数で、`RETRY_DELAYS_SEC` の上限を
+/// 超えたら exhausted として alarm を停止する (= pending entry は残置し
+/// 観測性を保つ)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportPendingState {
+    /// 対局 ID。観測ログ / cold start 後の retry 経路の primary key。
+    pub(crate) game_id: String,
+    /// 終局確定時刻。`exported_at_ms` を埋める際に再利用する。
+    pub(crate) ended_at_ms: u64,
+    /// 再 PUT 用の CSA V2 棋譜本文 (`Csa` 種別の `failed_keys` に流す)。
+    pub(crate) csa_text: String,
+    /// 再 PUT 用の meta JSON 本文 (`Meta` 種別の `failed_keys` に流す)。
+    pub(crate) meta_body: Vec<u8>,
+    /// 残っている再 PUT 対象 key 一覧 (初回 finalize で失敗したもの)。
+    pub(crate) failed_keys: Vec<FailedExportObject>,
+    /// これまでの retry 回数 (0 = 初回 finalize 後の最初の alarm が attempt=0)。
+    pub(crate) attempt: u32,
 }
 
 /// `moves` SQL テーブル 1 行分。replay / alarm で使う。
@@ -623,11 +683,59 @@ mod tests {
         let original = FinishedState {
             result_code: "#RESIGN".to_owned(),
             ended_at_ms: PLAY_STARTED_AT_MS + 9_000,
+            exported_at_ms: Some(PLAY_STARTED_AT_MS + 9_500),
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: FinishedState = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.result_code, original.result_code);
         assert_eq!(restored.ended_at_ms, original.ended_at_ms);
+        assert_eq!(restored.exported_at_ms, original.exported_at_ms);
+    }
+
+    /// 旧 schema (本 `exported_at_ms` フィールド導入前) で書かれた DO storage
+    /// 値が `#[serde(default)]` 経由で `None` として deserialize できることを
+    /// 固定する (Issue #623)。本契約が壊れると cold start 後の DO で
+    /// `load_finished` が失敗し、終局済 DO が新規 LOGIN を受け付ける退行になる。
+    #[test]
+    fn finished_state_deserializes_when_exported_at_ms_absent() {
+        let json = r##"{
+            "result_code": "#RESIGN",
+            "ended_at_ms": 1234567890
+        }"##;
+        let restored: FinishedState = serde_json::from_str(json).unwrap();
+        assert_eq!(restored.result_code, "#RESIGN");
+        assert_eq!(restored.ended_at_ms, 1_234_567_890);
+        assert_eq!(restored.exported_at_ms, None);
+    }
+
+    /// `ExportPendingState` の round-trip 固定 (Issue #623)。`failed_keys` の
+    /// `body_kind` が `csa` / `meta` の lower snake で wire される (rename_all)
+    /// ことも本テストで実装契約として固定する。
+    #[test]
+    fn export_pending_state_round_trips_through_serde_json() {
+        let original = ExportPendingState {
+            game_id: "lobby-1".to_owned(),
+            ended_at_ms: PLAY_STARTED_AT_MS + 10_000,
+            csa_text: "V2.2\nN+alice\nN-bob\n".to_owned(),
+            meta_body: br#"{"game_id":"lobby-1"}"#.to_vec(),
+            failed_keys: vec![
+                FailedExportObject {
+                    key: "2026/05/08/lobby-1.csa".to_owned(),
+                    body_kind: ExportBodyKind::Csa,
+                },
+                FailedExportObject {
+                    key: "kifu-by-id/lobby-1.meta.json".to_owned(),
+                    body_kind: ExportBodyKind::Meta,
+                },
+            ],
+            attempt: 1,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        // wire 形式で `body_kind` が snake_case の lower 表現になっていること
+        assert!(json.contains(r#""body_kind":"csa""#), "json={json}");
+        assert!(json.contains(r#""body_kind":"meta""#), "json={json}");
+        let restored: ExportPendingState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, original);
     }
 
     #[test]

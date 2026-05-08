@@ -68,6 +68,7 @@ use crate::config::{
     resolve_reconnect_grace_from_strings,
 };
 use crate::datetime::{format_csa_datetime, format_date_path, format_rfc3339_utc};
+use crate::export_retry::{is_exhausted, next_retry_delay_ms};
 use crate::floodgate_history::R2FloodgateHistoryStorage;
 use crate::games_index::{
     ClockSpec as IndexClockSpec, GamesIndexEntry, classify_result, games_index_key,
@@ -75,7 +76,8 @@ use crate::games_index::{
 };
 use crate::live_games_index::{LiveGamesIndexEntry, live_games_index_key};
 use crate::persistence::{
-    FinishedState, MoveRow, PersistedConfig, ReplaySummary, replay_core_room,
+    ExportBodyKind, ExportPendingState, FailedExportObject, FinishedState, MoveRow,
+    PersistedConfig, ReplaySummary, replay_core_room,
 };
 use crate::reconnect::{
     PendingAlarmKind, PendingReconnect, ReconnectMatchOutcome, ReconnectSnapshot, StartMatchGuard,
@@ -139,6 +141,67 @@ const KEY_GRACE_REGISTRY: &str = "grace_registry";
 /// `#[serde(rename = "pending_alarm_kind")]` と一致させること（理由は
 /// `KEY_GRACE_REGISTRY` と同じ）。
 const KEY_PENDING_ALARM_KIND: &str = "pending_alarm_kind";
+/// 終局時に R2 export PUT が一部または全部失敗したときに、再 PUT に必要な
+/// CSA 本文 / meta JSON / 失敗 key 一覧を保持する DO storage key (Issue #623)。
+/// `KEY_PENDING_ALARM_KIND = ExportRetry` とペアでセットされ、`alarm()` 経路で
+/// `handle_export_retry_alarm` が読み取る。retry 全消費後は alarm のみ停止し
+/// 本 key は残置する (運用観測用)。
+const KEY_EXPORT_PENDING: &str = "export_pending";
+
+/// 終局時 R2 export 試行の結果分類 (Issue #623)。
+///
+/// `export_kifu_to_r2` は本 enum を返し、呼び出し側 (`finalize_if_ended`) が
+/// `Complete` / `Pending` / `Skipped` に応じて pending 永続化 + retry alarm
+/// 予約 / 何もしない を分岐する。
+#[derive(Debug)]
+enum ExportAttempt {
+    /// すべての PUT が成功した (`exported_at_ms = Some` を埋められる)。
+    Complete,
+    /// 1 つ以上 PUT 失敗で retry 必要。本 variant が持つ
+    /// [`ExportPendingState`] を `KEY_EXPORT_PENDING` に永続化する。
+    Pending(Box<ExportPendingState>),
+    /// retry しても解決しない致命的失敗 (bucket binding 不在 / load_moves 失敗 /
+    /// SFEN 不正 / serialize 失敗等)。`exported_at_ms = None` のままで観測上は
+    /// 欠損として残るが、それ以外の処理は通常通り進める。
+    Skipped,
+}
+
+impl ExportAttempt {
+    /// `failed_keys` の長さで `Complete` / `Pending` を選ぶ helper。
+    fn from_failed_keys(
+        game_id: String,
+        ended_at_ms: u64,
+        csa_text: String,
+        meta_body: Vec<u8>,
+        failed_keys: Vec<FailedExportObject>,
+    ) -> Self {
+        if failed_keys.is_empty() {
+            ExportAttempt::Complete
+        } else {
+            ExportAttempt::Pending(Box::new(ExportPendingState {
+                game_id,
+                ended_at_ms,
+                csa_text,
+                meta_body,
+                failed_keys,
+                attempt: 0,
+            }))
+        }
+    }
+
+    /// 全 PUT 成功か (`exported_at_ms` を埋めて良いか)。
+    fn is_complete(&self) -> bool {
+        matches!(self, ExportAttempt::Complete)
+    }
+
+    /// pending 永続化対象を取り出す。`Complete` / `Skipped` は `None`。
+    fn into_pending(self) -> Option<ExportPendingState> {
+        match self {
+            ExportAttempt::Pending(state) => Some(*state),
+            _ => None,
+        }
+    }
+}
 
 /// R2 上の buoy 保存フォーマット。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,14 +396,24 @@ impl DurableObject for GameRoom {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        // alarm 種別タグを読み、各経路を分岐する。
+        // 既定値 (タグ未設定 / `TimeUp`) は時間切れ駆動とみなす。
+        //
+        // ⚠ Issue #623: `ExportRetry` は `KEY_FINISHED` 確定**後**に発火する
+        // 特殊な alarm なので、`load_finished` ガードよりも**前**に分岐する必要
+        // がある。それ以外 (`GraceExpired` / `AgreeTimeout` / `TimeUp`) は終局前
+        // 経路なので従来どおり `load_finished` ガードを先に通す。
+        let kind = self.load_pending_alarm_kind().await?;
+        if matches!(kind, Some(PendingAlarmKind::ExportRetry)) {
+            self.handle_export_retry_alarm().await?;
+            return Response::ok("export_retry handled");
+        }
+
         // 既に終局済みの DO でアラームが届いたら何もしない（念のためのガード）。
         if self.load_finished().await?.is_some() {
             return Response::ok("already finished");
         }
 
-        // alarm 種別タグを読み、`GraceExpired` / `AgreeTimeout` 経路を分岐する。
-        // 既定値 (タグ未設定 / `TimeUp`) は時間切れ駆動とみなす。
-        let kind = self.load_pending_alarm_kind().await?;
         if matches!(kind, Some(PendingAlarmKind::GraceExpired)) {
             self.handle_grace_expired_alarm().await?;
             return Response::ok("grace_expired handled");
@@ -1353,6 +1426,16 @@ impl GameRoom {
     }
 
     /// 終局したなら R2 に棋譜を書き出し、finished フラグを立てて両 ws を close する。
+    ///
+    /// R2 export PUT が一部または全部失敗した場合 (Issue #623):
+    /// 1. CSA 本文 / meta JSON / 失敗 key 一覧を [`ExportPendingState`] として
+    ///    `KEY_EXPORT_PENDING` に保存する
+    /// 2. `KEY_PENDING_ALARM_KIND = ExportRetry` をセット
+    /// 3. `RETRY_DELAYS_SEC[0]` 後に `state.alarm()` を予約 (`handle_export_retry_alarm`
+    ///    が再 PUT する)
+    ///
+    /// 終局確定 (`KEY_FINISHED` put) と WS close は **必ず** 実行される。export
+    /// 関連の失敗で finalize 自体を中断してはならない (P0: 対局結果欠損防止)。
     async fn finalize_if_ended(&self, result: &HandleResult) -> Result<()> {
         let HandleOutcome::GameEnded(ref game_result) = result.outcome else {
             return Ok(());
@@ -1361,11 +1444,10 @@ impl GameRoom {
         let code = primary_result_code(game_result).to_owned();
         let ended_at_ms = self.now_ms();
 
-        // 棋譜エクスポートは best-effort：R2 バインディングが設定されていない開発
-        // 環境や一時的な put 失敗で終局処理自体を止めないよう、ログだけ残して続行する。
-        if let Err(e) = self.export_kifu_to_r2(game_result, ended_at_ms).await {
-            console_log!("[GameRoom] kifu export failed: {e:?}");
-        }
+        // R2 export を試行し、失敗 PUT 一覧を集約する。bucket binding 不在 /
+        // serialize 失敗等の「retry しても解決しない致命的失敗」は内部で console_log
+        // し `ExportAttempt::Skipped` で返す (pending 化しない)。
+        let attempt = self.export_kifu_to_r2(game_result, ended_at_ms).await;
 
         // Floodgate 履歴の R2 永続化も同じ best-effort 方針。`ALLOW_FLOODGATE_FEATURES`
         // が立っていなければ何もしない。TCP 側 (`server.rs`) は append 失敗時に
@@ -1375,12 +1457,32 @@ impl GameRoom {
         // `console_log!` のみで吸収するため呼び出し側は `Result` を待たない。
         self.try_persist_floodgate_history(game_result, &code, ended_at_ms).await;
 
+        // export 全成功なら `exported_at_ms` を埋め、retry 経路は不要。
+        // 一部失敗なら `exported_at_ms = None` で書き、後述の pending 経路で
+        // 再 PUT を予約する。「retry できない skip 失敗」も `exported_at_ms = None`
+        // にしておくと観測上は欠損として残る (運用上の手動補修対象)。
+        let exported_at_ms = if attempt.is_complete() {
+            Some(ended_at_ms)
+        } else {
+            None
+        };
         let finished = FinishedState {
             result_code: code,
             ended_at_ms,
+            exported_at_ms,
         };
         self.state.storage().put(KEY_FINISHED, &finished).await?;
+        // grace / agree-timeout / time-up 系の alarm/registry を片付けてから
+        // ExportRetry alarm を張る。順序を逆にすると `delete_grace_alarm_state`
+        // が ExportRetry タグを巻き込んで消す race がある。
         self.delete_grace_alarm_state().await?;
+
+        // export 一部失敗なら pending 永続化 + retry alarm を貼る。pending put /
+        // alarm 書き込みは best-effort で失敗ログのみ残し、`finalize_if_ended` の
+        // 残り処理 (live-games-index 削除 / WS close) を必ず進める (Issue #623 主契約)。
+        if let Some(pending) = attempt.into_pending() {
+            self.schedule_export_retry(pending).await;
+        }
 
         // KEY_FINISHED が確定した後に live-games-index entry を best-effort で
         // 削除する (Issue #549 §4)。「終局 entry も live entry も無い」矛盾
@@ -1408,24 +1510,291 @@ impl GameRoom {
         Ok(())
     }
 
+    /// 終局時 export PUT 失敗の retry を予約する (Issue #623)。
+    ///
+    /// `KEY_EXPORT_PENDING` (本文 + 失敗 key 一覧) と `KEY_PENDING_ALARM_KIND =
+    /// ExportRetry` を put し、`RETRY_DELAYS_SEC[0]` 後に `state.alarm()` を貼る。
+    /// 各 storage 操作の失敗は logfmt で記録した上で吸収する (`finalize_if_ended`
+    /// の残り処理を止めないため)。pending payload が永続化できなければ retry
+    /// 経路は走らないが、その場合でも `exported_at_ms = None` のまま `KEY_FINISHED`
+    /// は確定しているので運用上 export 欠損として観測できる。
+    async fn schedule_export_retry(&self, pending: ExportPendingState) {
+        if let Err(e) = self.state.storage().put(KEY_EXPORT_PENDING, &pending).await {
+            console_log!(
+                "[GameRoom] event=export_pending_put_failed game_id={} err={:?}",
+                pending.game_id,
+                e,
+            );
+            return;
+        }
+        if let Err(e) = self
+            .state
+            .storage()
+            .put(KEY_PENDING_ALARM_KIND, &PendingAlarmKind::ExportRetry)
+            .await
+        {
+            console_log!(
+                "[GameRoom] event=export_retry_kind_put_failed game_id={} err={:?}",
+                pending.game_id,
+                e,
+            );
+            return;
+        }
+        let Some(delay_ms) = next_retry_delay_ms(pending.attempt) else {
+            // 最初の予約で `attempt = 0` のため到達しない契約。防御的に log のみ。
+            console_log!(
+                "[GameRoom] event=export_retry_initial_exhausted game_id={} attempt={}",
+                pending.game_id,
+                pending.attempt,
+            );
+            return;
+        };
+        if let Err(e) = self.state.storage().set_alarm(Duration::from_millis(delay_ms)).await {
+            console_log!(
+                "[GameRoom] event=export_retry_alarm_set_failed game_id={} delay_ms={} err={:?}",
+                pending.game_id,
+                delay_ms,
+                e,
+            );
+        } else {
+            console_log!(
+                "[GameRoom] event=export_retry_scheduled game_id={} attempt={} delay_ms={} failed_count={}",
+                pending.game_id,
+                pending.attempt,
+                delay_ms,
+                pending.failed_keys.len(),
+            );
+        }
+    }
+
+    /// `PendingAlarmKind::ExportRetry` で alarm が発火したときの再 PUT 経路 (Issue #623)。
+    ///
+    /// `KEY_EXPORT_PENDING` から保存済の本文 + 失敗 key 一覧を読み、各 key に
+    /// 対して再 PUT を試みる。全成功で `exported_at_ms` を埋めて pending を消し、
+    /// 一部失敗なら `attempt` を進めて次の遅延 (`RETRY_DELAYS_SEC[attempt]`) で
+    /// alarm を再予約する。retry 全消費後は `KEY_PENDING_ALARM_KIND` と alarm を
+    /// 消し、pending entry のみ残置する (運用観測用)。
+    async fn handle_export_retry_alarm(&self) -> Result<()> {
+        let pending: Option<ExportPendingState> =
+            self.state.storage().get(KEY_EXPORT_PENDING).await.ok().flatten();
+        let Some(mut pending) = pending else {
+            // pending が無い (race / 旧 deploy 状態の cleanup) は alarm タグだけ
+            // 片付けて終了する。`KEY_FINISHED` 経路は既に確定済の前提。
+            console_log!("[GameRoom] event=export_retry_no_pending");
+            let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+            let _ = self.state.storage().delete_alarm().await;
+            return Ok(());
+        };
+
+        let bucket = match self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
+            Ok(b) => b,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=export_retry_bucket_missing game_id={} attempt={} err={:?}",
+                    pending.game_id,
+                    pending.attempt,
+                    e,
+                );
+                // bucket binding 不在 = config 不正。retry を進めても解決しない
+                // ので alarm を停止し pending は残置 (deploy 修正で再開する想定
+                // だが、本 PR の scope ではここまで)。
+                let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+                let _ = self.state.storage().delete_alarm().await;
+                return Ok(());
+            }
+        };
+
+        // 失敗 key を順に再 PUT。成功した key は `still_failed` に積まない。
+        let mut still_failed: Vec<FailedExportObject> =
+            Vec::with_capacity(pending.failed_keys.len());
+        for failed in pending.failed_keys.drain(..) {
+            let body: Vec<u8> = match failed.body_kind {
+                ExportBodyKind::Csa => pending.csa_text.as_bytes().to_vec(),
+                ExportBodyKind::Meta => pending.meta_body.clone(),
+            };
+            match bucket.put(&failed.key, body).execute().await {
+                Ok(_) => {
+                    console_log!(
+                        "[GameRoom] event=export_retry_put_ok game_id={} key={} attempt={}",
+                        pending.game_id,
+                        failed.key,
+                        pending.attempt,
+                    );
+                }
+                Err(e) => {
+                    console_log!(
+                        "[GameRoom] event=export_retry_put_failed game_id={} key={} attempt={} err={:?}",
+                        pending.game_id,
+                        failed.key,
+                        pending.attempt,
+                        e,
+                    );
+                    still_failed.push(failed);
+                }
+            }
+        }
+
+        if still_failed.is_empty() {
+            // 全成功: pending を消し、`exported_at_ms` を埋め、alarm/タグを片付ける。
+            self.complete_export_retry(&pending).await;
+            return Ok(());
+        }
+
+        // 一部失敗: attempt を進めて次回 alarm を予約する (上限超なら停止)。
+        let next_attempt = pending.attempt.saturating_add(1);
+        pending.failed_keys = still_failed;
+        pending.attempt = next_attempt;
+
+        if is_exhausted(next_attempt) {
+            console_log!(
+                "[GameRoom] event=export_retry_exhausted game_id={} attempt={} remaining={}",
+                pending.game_id,
+                next_attempt,
+                pending.failed_keys.len(),
+            );
+            // pending を最新 attempt で書き直して観測性を保ち、alarm/タグだけ
+            // 停止する。
+            if let Err(e) = self.state.storage().put(KEY_EXPORT_PENDING, &pending).await {
+                console_log!(
+                    "[GameRoom] event=export_pending_put_failed game_id={} err={:?}",
+                    pending.game_id,
+                    e,
+                );
+            }
+            let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+            let _ = self.state.storage().delete_alarm().await;
+            return Ok(());
+        }
+
+        if let Err(e) = self.state.storage().put(KEY_EXPORT_PENDING, &pending).await {
+            console_log!(
+                "[GameRoom] event=export_pending_put_failed game_id={} err={:?}",
+                pending.game_id,
+                e,
+            );
+            return Ok(());
+        }
+        let Some(delay_ms) = next_retry_delay_ms(next_attempt) else {
+            // is_exhausted で先に return しているので到達しない。
+            return Ok(());
+        };
+        if let Err(e) = self.state.storage().set_alarm(Duration::from_millis(delay_ms)).await {
+            console_log!(
+                "[GameRoom] event=export_retry_alarm_set_failed game_id={} delay_ms={} err={:?}",
+                pending.game_id,
+                delay_ms,
+                e,
+            );
+        } else {
+            console_log!(
+                "[GameRoom] event=export_retry_rescheduled game_id={} attempt={} delay_ms={} failed_count={}",
+                pending.game_id,
+                next_attempt,
+                delay_ms,
+                pending.failed_keys.len(),
+            );
+        }
+        Ok(())
+    }
+
+    /// retry 全成功後の cleanup。pending を消し、`exported_at_ms` を埋め、alarm
+    /// 関連タグを停止する。各失敗は logfmt で吸収する (alarm 経路を Err で抜けて
+    /// retry 自体を破壊しないため)。
+    async fn complete_export_retry(&self, pending: &ExportPendingState) {
+        if let Err(e) = self.state.storage().delete(KEY_EXPORT_PENDING).await {
+            console_log!(
+                "[GameRoom] event=export_pending_delete_failed game_id={} err={:?}",
+                pending.game_id,
+                e,
+            );
+        }
+        let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
+        let _ = self.state.storage().delete_alarm().await;
+
+        // `KEY_FINISHED` の `exported_at_ms` を埋め直す。失敗してもログのみ
+        // (運用観測上、`exported_at_ms = None` のまま retry 完了になるが、
+        // pending 削除済なので二重 export はない)。
+        let now_ms = self.now_ms();
+        match self.state.storage().get::<FinishedState>(KEY_FINISHED).await {
+            Ok(Some(mut finished)) => {
+                finished.exported_at_ms = Some(now_ms);
+                if let Err(e) = self.state.storage().put(KEY_FINISHED, &finished).await {
+                    console_log!(
+                        "[GameRoom] event=export_retry_finished_update_failed game_id={} err={:?}",
+                        pending.game_id,
+                        e,
+                    );
+                } else {
+                    console_log!(
+                        "[GameRoom] event=export_retry_completed game_id={} attempt={}",
+                        pending.game_id,
+                        pending.attempt,
+                    );
+                }
+            }
+            Ok(None) => {
+                console_log!(
+                    "[GameRoom] event=export_retry_finished_missing game_id={}",
+                    pending.game_id,
+                );
+            }
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=export_retry_finished_load_failed game_id={} err={:?}",
+                    pending.game_id,
+                    e,
+                );
+            }
+        }
+    }
+
     /// R2 バケットに CSA V2 形式の棋譜を書き出す。
     ///
     /// キー体系: `YYYY/MM/DD/<game_id>.csa`。TCP 版 `FileKifuStorage` と同一
     /// 構造なので、外部のレート集計や HTML レンダリングなどの後段処理は R2 を
     /// mount するだけで TCP 版と同じパスで読める。
+    ///
+    /// 戻り値 [`ExportAttempt`] (Issue #623):
+    /// - `Complete`: 4 オブジェクト (csa 本文 / by-id / meta / games-index) すべて
+    ///   PUT 成功 (= retry 不要)。
+    /// - `Pending(state)`: 1 つ以上 PUT 失敗で retry 用の本文 + 失敗 key 一覧を
+    ///   保持。`finalize_if_ended` は本値を `KEY_EXPORT_PENDING` に永続化する。
+    /// - `Skipped`: bucket binding 不在 / `load_moves` 失敗 / SFEN 不正 / serialize
+    ///   失敗等の「retry しても解決しない致命的失敗」。本関数内で `console_log!`
+    ///   で吸収済みなので呼び出し側は何もしない (`exported_at_ms = None` だけ残る)。
+    ///
+    /// 本関数は `Result` ではなく `ExportAttempt` を返す。R2 PUT 失敗を上位に
+    /// 伝播させると `finalize_if_ended` が中断し WS close / `KEY_FINISHED` put が
+    /// 抜ける退行になるため、すべての失敗を構造化して返す契約 (Codex 設計
+    /// レビュー v2 反映)。
     async fn export_kifu_to_r2(
         &self,
         game_result: &rshogi_csa_server::game::result::GameResult,
         ended_at_ms: u64,
-    ) -> Result<()> {
+    ) -> ExportAttempt {
         use rshogi_csa_server::record::kifu::{KifuMove, KifuRecord};
 
         let cfg = match self.config.borrow().as_ref() {
             Some(c) => c.clone(),
-            None => return Ok(()),
+            None => {
+                // PersistedConfig 未確定 = AGREE 前の致命的経路で finalize に
+                // 入った race。CSA 本文を組み立てる材料がないので skip する。
+                console_log!("[GameRoom] event=export_skip reason=config_missing");
+                return ExportAttempt::Skipped;
+            }
         };
 
-        let moves_rows = self.load_moves().await?;
+        let moves_rows = match self.load_moves().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=export_skip game_id={} reason=load_moves:{:?}",
+                    cfg.game_id,
+                    e,
+                );
+                return ExportAttempt::Skipped;
+            }
+        };
         // MoveRow は raw CSA 行（例: `+7776FU,T3`）を保持しているので、トークン部のみを
         // 抽出して `KifuMove` に変換する。消費時間は at_ms 差分から秒に丸める。
         let mut kifu_moves: Vec<KifuMove> = Vec::with_capacity(moves_rows.len());
@@ -1453,6 +1822,21 @@ impl GameRoom {
         let start_str = format_csa_datetime(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
         let end_str = format_csa_datetime(ended_at_ms);
 
+        let initial_position = match cfg.initial_sfen.as_deref() {
+            Some(sfen) => match position_section_from_sfen(sfen) {
+                Ok(p) => p,
+                Err(reason) => {
+                    console_log!(
+                        "[GameRoom] event=export_skip game_id={} reason=invalid_sfen:{}",
+                        cfg.game_id,
+                        reason,
+                    );
+                    return ExportAttempt::Skipped;
+                }
+            },
+            None => standard_initial_position_block(),
+        };
+
         let record = KifuRecord {
             game_id: GameId::new(cfg.game_id.clone()),
             black: PlayerName::new(cfg.black_handle.clone()),
@@ -1463,42 +1847,65 @@ impl GameRoom {
             time_section,
             // Game_Summary の position_section と同じ SFEN 由来のブロックを使う。
             // 三点一致契約 (CoreRoom / Summary / 棋譜 initial_position) の R2 側。
-            initial_position: match cfg.initial_sfen.as_deref() {
-                Some(sfen) => position_section_from_sfen(sfen).map_err(Error::RustError)?,
-                None => standard_initial_position_block(),
-            },
+            initial_position,
             moves: kifu_moves,
             result: game_result.clone(),
         };
         let text = record.build_v2();
 
         let date_path = format_date_path(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
-        let key = format!("{date_path}/{}.csa", cfg.game_id);
+        let date_key = format!("{date_path}/{}.csa", cfg.game_id);
         let by_id_key = kifu_by_id_object_key(&cfg.game_id);
 
-        let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
-        bucket.put(&key, text.as_bytes().to_vec()).execute().await?;
-        bucket.put(&by_id_key, text.as_bytes().to_vec()).execute().await?;
-        console_log!("[GameRoom] kifu exported to R2 key='{key}'");
+        let bucket = match self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
+            Ok(b) => b,
+            Err(e) => {
+                console_log!(
+                    "[GameRoom] event=export_skip game_id={} reason=bucket_binding:{:?}",
+                    cfg.game_id,
+                    e,
+                );
+                return ExportAttempt::Skipped;
+            }
+        };
+
+        // 4 つの PUT を集約する。各 PUT は独立して試行し、失敗した key だけを
+        // `failed_keys` に積む。CSA 本文 PUT が失敗しても meta / index PUT は試す
+        // (Issue #623: best-effort 全 put → retry で残りを順送り)。
+        let mut failed_keys: Vec<FailedExportObject> = Vec::with_capacity(4);
+        let csa_bytes = text.as_bytes().to_vec();
+        for (key, label) in [
+            (date_key.as_str(), "date_key"),
+            (by_id_key.as_str(), "by_id_key"),
+        ] {
+            if let Err(e) = bucket.put(key, csa_bytes.clone()).execute().await {
+                console_log!(
+                    "[GameRoom] event=export_put_failed game_id={} {}={} err={:?}",
+                    cfg.game_id,
+                    label,
+                    key,
+                    e,
+                );
+                failed_keys.push(FailedExportObject {
+                    key: key.to_owned(),
+                    body_kind: ExportBodyKind::Csa,
+                });
+            }
+        }
 
         // viewer 配信 API 用の正準メタ (`kifu-by-id/<id>.meta.json`) と派生
-        // インデックス (`games-index/<inv>-<id>.json`) を続けて put する。
-        // CSA 本文 + by-id put は既に成功しているため、以降の put のいかなる
-        // 失敗も `finalize_if_ended` を Err にしてはならない (best-effort)。
-        // すべての失敗を `if let Err` で吸収して Ok(()) で抜ける。`?` は意図的
-        // に使わない。
+        // インデックス (`games-index/<inv>-<id>.json`)。
         //
         // 書き込み順序 (Issue #551 設計 v3 §1):
         //   1. csa 本文 / by-id (上で完了)
         //   2. `kifu-by-id/<id>.meta.json` — backfill / orphan sweep の真の判定
-        //      キー (primary)。csa 成功直後に書く。
+        //      キー (primary)。
         //   3. `games-index/<inv>-<id>.json` — meta から派生する一覧索引
         //      (secondary)。failure 時は backfill cron が meta を起点に再生成する。
         //
         // `source` 判定は `live-games-index/` の対局開始時 entry と完全に揃える
         // ため、`games_index::resolve_index_source` 共通 helper に集約済 (Issue
-        // #549 設計 v3 §3)。`floodgate-history/` への put 成否ではなく「Floodgate
-        // 環境設定下で起きた終局」を表す semantics は同 helper の契約に従う。
+        // #549 設計 v3 §3)。
         let source = resolve_index_source(&self.env);
 
         let (result_kind, end_reason) = classify_result(game_result);
@@ -1529,13 +1936,20 @@ impl GameRoom {
                     cfg.game_id,
                     e,
                 );
-                return Ok(());
+                // CSA 本文 PUT は試行済 (failed_keys に積まれているかも) なので、
+                // CSA 部分だけ pending 化する。meta/index は serialize できない以上
+                // retry でも解決しないので失敗 key として積まない (= 観測上は
+                // exported_at_ms=None のまま残る)。
+                return ExportAttempt::from_failed_keys(
+                    cfg.game_id.clone(),
+                    ended_at_ms,
+                    text,
+                    Vec::new(),
+                    failed_keys,
+                );
             }
         };
 
-        // (2) `kifu-by-id/<id>.meta.json` — primary。failure は backfill 経路で
-        // 復元できないので observable に log は残すが、後段の games-index put は
-        // 引き続き試行する (現行 best-effort 一連 put 方針を維持。設計 v2 §1)。
         let meta_key = kifu_by_id_meta_key(&cfg.game_id);
         if let Err(e) = bucket.put(&meta_key, body.clone()).execute().await {
             console_log!(
@@ -1544,9 +1958,12 @@ impl GameRoom {
                 meta_key,
                 e,
             );
+            failed_keys.push(FailedExportObject {
+                key: meta_key.clone(),
+                body_kind: ExportBodyKind::Meta,
+            });
         }
 
-        // (3) `games-index/<inv>-<id>.json` — secondary。
         let index_key = match games_index_key(ended_at_ms, &cfg.game_id) {
             Ok(k) => k,
             Err(e) => {
@@ -1555,19 +1972,38 @@ impl GameRoom {
                     cfg.game_id,
                     e,
                 );
-                return Ok(());
+                // games-index key 生成失敗は retry 不可。pending には CSA / meta
+                // のみ残す。
+                return ExportAttempt::from_failed_keys(
+                    cfg.game_id.clone(),
+                    ended_at_ms,
+                    text,
+                    body,
+                    failed_keys,
+                );
             }
         };
-        if let Err(e) = bucket.put(&index_key, body).execute().await {
+        if let Err(e) = bucket.put(&index_key, body.clone()).execute().await {
             console_log!(
                 "[GameRoom] event=games_index_put_failed game_id={} inv_key={} err={:?}",
                 cfg.game_id,
                 index_key,
                 e,
             );
+            failed_keys.push(FailedExportObject {
+                key: index_key.clone(),
+                body_kind: ExportBodyKind::Meta,
+            });
         }
 
-        Ok(())
+        if failed_keys.is_empty() {
+            console_log!(
+                "[GameRoom] event=export_complete game_id={} key={}",
+                cfg.game_id,
+                date_key,
+            );
+        }
+        ExportAttempt::from_failed_keys(cfg.game_id.clone(), ended_at_ms, text, body, failed_keys)
     }
 
     /// Floodgate 履歴 1 件を `FLOODGATE_HISTORY_BUCKET` に永続化する。`ALLOW_FLOODGATE_FEATURES`
@@ -2367,6 +2803,11 @@ impl GameRoom {
         let finished = FinishedState {
             result_code: "agree_timeout".to_owned(),
             ended_at_ms: self.now_ms(),
+            // R2 棋譜 export を行わない経路なので `exported_at_ms` を立てる
+            // 必要はない。`Some(now_ms)` にすると「export 完了」と誤って観測
+            // されるため、`None` のまま (= retry 待ちでもなく export 不要の
+            // 終了ステータス) を意味する値にしておく。
+            exported_at_ms: None,
         };
         self.state.storage().put(KEY_FINISHED, &finished).await?;
         // alarm 種別タグを片付ける (alarm は既に発火済なので `delete_alarm` は

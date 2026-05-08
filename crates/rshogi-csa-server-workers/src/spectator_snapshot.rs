@@ -267,6 +267,7 @@ mod tests {
         let finished = FinishedState {
             result_code: "#RESIGN".to_owned(),
             ended_at_ms: 1_010_000,
+            exported_at_ms: Some(1_010_500),
         };
         let lines = build_spectator_snapshot(SpectatorSnapshotInput {
             config: &cfg,
@@ -303,6 +304,7 @@ mod tests {
         let finished = FinishedState {
             result_code: "#TIME_UP".to_owned(),
             ended_at_ms: 1_010_000,
+            exported_at_ms: None,
         };
         let lines = build_spectator_snapshot(SpectatorSnapshotInput {
             config: &cfg,

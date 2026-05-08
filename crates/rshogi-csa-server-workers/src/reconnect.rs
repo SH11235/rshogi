@@ -186,6 +186,12 @@ pub enum PendingAlarmKind {
     /// 未 put) のため、`force_abnormal` ではなく `abort_pending_match_with_error`
     /// + `KEY_FINISHED` セット相当の経路で部屋を解放する (Issue #600)。
     AgreeTimeout,
+    /// R2 棋譜 export PUT 失敗の retry (Issue #623)。`KEY_FINISHED` 確定後の
+    /// alarm 経路。終局時に PUT 失敗したオブジェクトキーを `KEY_EXPORT_PENDING`
+    /// に保存しておき、本タグで `handle_export_retry_alarm` を駆動して再 PUT する。
+    /// 終局後発火の特殊性から `alarm()` 入口で `KEY_FINISHED` ガード**より前**に
+    /// 分岐させる必要がある (他種別と異なり「終局済 DO」での発火が正常経路)。
+    ExportRetry,
 }
 
 /// 再接続 grace が有効化されている (`grace > 0`) のときのみ対局者ごとの
@@ -410,6 +416,11 @@ mod tests {
         let restored: PendingAlarmKind =
             serde_json::from_str(&s).expect("deserialize GraceExpired");
         assert_eq!(restored, PendingAlarmKind::GraceExpired);
+        // Issue #623: ExportRetry も同形式で wire 互換であること。
+        let s =
+            serde_json::to_string(&PendingAlarmKind::ExportRetry).expect("serialize ExportRetry");
+        let restored: PendingAlarmKind = serde_json::from_str(&s).expect("deserialize ExportRetry");
+        assert_eq!(restored, PendingAlarmKind::ExportRetry);
     }
 
     #[test]

@@ -36,6 +36,10 @@ pub mod client_kind;
 pub(crate) mod backfill;
 pub mod config;
 pub mod datetime;
+// `export_retry` は finalize_if_ended / handle_export_retry_alarm から消費される
+// 純粋ロジック (RETRY_DELAYS_SEC 等)。ホスト target でも cargo test から到達できる
+// ように `pub mod` で公開する。
+pub mod export_retry;
 pub mod floodgate_history;
 pub mod games_index;
 pub mod live_games_index;
