@@ -30,7 +30,7 @@
 //!   DO storage 永続化 (cold start 復元 + `purge_expired` 後再保存)
 //! - DO Alarm による TTL purge と保留中 WS への切断信号送出
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -137,10 +137,6 @@ pub struct Lobby {
     state: State,
     env: Env,
     queue: RefCell<LobbyQueue>,
-    /// `CLOCK_PRESETS` 環境変数を 1 度だけパースして保持するキャッシュ。
-    /// 起動中に env vars は不変のため、初回 LOGIN_LOBBY のたびに JSON パースを
-    /// 走らせる無駄を避ける。空 HashMap = preset 未宣言 = strict mode 無効。
-    clock_presets: OnceCell<HashMap<String, ClockSpec>>,
 }
 
 impl DurableObject for Lobby {
@@ -149,7 +145,6 @@ impl DurableObject for Lobby {
             state,
             env,
             queue: RefCell::new(LobbyQueue::new()),
-            clock_presets: OnceCell::new(),
         }
     }
 
@@ -240,22 +235,31 @@ impl Lobby {
             .unwrap_or(DEFAULT_LOBBY_QUEUE_SIZE_LIMIT)
     }
 
-    /// `CLOCK_PRESETS` 環境変数をパースして得たマップを返す（OnceCell キャッシュ）。
+    /// `CLOCK_PRESETS` 環境変数をパースして得たマップを返す。
+    ///
+    /// **キャッシュなし設計** (Issue #641): 以前は `OnceCell` で DO 起動時に 1 度
+    /// だけパースしていたが、Cloudflare DO は hibernation から起床しても OnceCell
+    /// が更新されないため、deploy で `CLOCK_PRESETS` を変更しても旧 instance が
+    /// 古い値を保持し続け、新 preset が `unknown_clock_preset` で reject される
+    /// race が発生していた。`game_room.rs::resolve_clock_spec_for_game` は LOGIN
+    /// ごとに env を読み直していたため、Lobby と GameRoom で挙動が乖離する状態
+    /// だった。本関数も毎 LOGIN_LOBBY / CHALLENGE_LOBBY 受信ごとに env を読み直
+    /// すことで両 DO の挙動を対称化する。overhead は `CLOCK_PRESETS` の 1 KB 程度
+    /// JSON を 1 回パースするだけで、LOGIN は人手駆動の頻度のため許容範囲。
+    ///
     /// パース失敗時は空 HashMap として扱い、`console_log!` で警告を残して strict
     /// mode を無効化する（preset 設定不正で全 LOGIN がブロックされる事態を避ける
     /// 安全側挙動。`CLOCK_PRESETS` 値そのものは `parse_clock_presets` の起動時
-    /// テストでカバーする）。
-    fn clock_presets(&self) -> &HashMap<String, ClockSpec> {
-        self.clock_presets.get_or_init(|| {
-            let raw = self.env.var(ConfigKeys::CLOCK_PRESETS).ok().map(|v| v.to_string());
-            match parse_clock_presets(raw.as_deref()) {
-                Ok(map) => map,
-                Err(e) => {
-                    console_log!("[Lobby] event=invalid_clock_presets err={e}");
-                    HashMap::new()
-                }
+    /// テストでカバーする）。空 HashMap = preset 未宣言 = strict mode 無効。
+    fn clock_presets(&self) -> HashMap<String, ClockSpec> {
+        let raw = self.env.var(ConfigKeys::CLOCK_PRESETS).ok().map(|v| v.to_string());
+        match parse_clock_presets(raw.as_deref()) {
+            Ok(map) => map,
+            Err(e) => {
+                console_log!("[Lobby] event=invalid_clock_presets err={e}");
+                HashMap::new()
             }
-        })
+        }
     }
 
     /// `CHALLENGE_TTL_SEC` env を `Duration` に解決する (未設定時は 3600 秒の
