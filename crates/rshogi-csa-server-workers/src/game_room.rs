@@ -119,7 +119,18 @@ const LIVE_INDEX_DELETE_MAX_ATTEMPTS: u32 = 3;
 /// 配列長 = `LIVE_INDEX_DELETE_MAX_ATTEMPTS - 1`。最終 attempt の後は backoff
 /// せず giveup ログに抜けるため、最後の値は使われない。`100, 200` で合計 wall
 /// 300ms 以内に収める (Workers cron の 30s 制限を圧迫しない)。
+///
+/// 配列長の不変条件は下記 `const _: () = assert!(...)` で **コンパイル時** に gate
+/// する (https://github.com/SH11235/rshogi/issues/654)。将来 `MAX_ATTEMPTS` を
+/// 変更する際にこの配列も同時に更新しないとビルドが失敗するため、runtime
+/// out-of-bounds を防ぐ。
 const LIVE_INDEX_DELETE_BACKOFF_MS: [u64; 2] = [100, 200];
+
+const _: () = assert!(
+    LIVE_INDEX_DELETE_BACKOFF_MS.len() as u32 == LIVE_INDEX_DELETE_MAX_ATTEMPTS - 1,
+    "LIVE_INDEX_DELETE_BACKOFF_MS の長さは LIVE_INDEX_DELETE_MAX_ATTEMPTS - 1 と一致させてください \
+     (最終 attempt の後は backoff せず giveup するため、配列要素は MAX_ATTEMPTS - 1 個)"
+);
 
 /// Durable Object 初期化 SQL。
 ///
