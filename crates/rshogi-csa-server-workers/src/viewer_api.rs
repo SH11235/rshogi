@@ -39,15 +39,39 @@
 //!
 //! 重要な不変条件 (round-2 review で確定):
 //! - cache に保存する `Response` は **origin-neutral**。`Access-Control-Allow-Origin`
-//!   と `Vary: Origin, ...` を含めず、`Cache-Control: public, max-age=<TTL>` と
-//!   `Content-Type: application/json` のみを残す。
+//!   と `Vary: Origin, ...` を含めず、`Cache-Control: public, s-maxage=<TTL>,
+//!   max-age=0, must-revalidate` と `Content-Type: application/json` のみを残す。
 //! - cache hit / miss いずれの返却経路でも、最終ステップで [`with_cors`] により
 //!   現在 request の Origin に対する ACAO + Vary を被せる。
 //! - エラー応答 (400 / 403 / 404 / 502 / 503) は cache しない。`Cache-Control: no-store`
 //!   を明示して edge cache が誤って保持しないように倒す。
 //! - `ALLOW_VIEWER_API` kill-switch は [`try_handle`] 冒頭で評価されるため、
-//!   無効化中は cache lookup に到達しない。既存 cache entry は max-age 経過まで
-//!   edge に残るが viewer から参照されない。
+//!   無効化中は cache lookup に到達しない。既存 cache entry は s-maxage 経過まで
+//!   edge に残るが viewer から参照されない (browser は max-age=0 + must-revalidate
+//!   により毎回 worker に再検証を投げるため、kill-switch / allowlist 変更は即時に
+//!   ブラウザにも反映される)。
+//!
+//! ## Cache-Control directive 設計 (Issue #653 P2)
+//!
+//! Issue #648 の初期実装では `public, max-age=<TTL>` を採用していたが、これだと
+//! `caches.default` だけでなくブラウザ・共有 HTTP cache にも `max-age` が効いて
+//! しまう。`WS_ALLOWED_ORIGINS` から Origin を除外したり `ALLOW_VIEWER_API` を
+//! 落としても、すでに 200 を取得済みのブラウザは worker に再到達せず TTL 満了まで
+//! cache を返し続ける (`check_origin` / kill-switch は worker 到達時にしか効かない)。
+//!
+//! 現行設計 (#653): `public, s-maxage=<TTL>, max-age=0, must-revalidate`
+//! - `s-maxage=<TTL>`: shared cache (Cloudflare edge `caches.default` を含む) は
+//!   TTL 秒保存する。worker `Cache` API も `cache-control` の `max-age` か
+//!   `s-maxage` のいずれかが必要 (worker 0.8 cache.rs L65-66 の契約) で、
+//!   `s-maxage` 単独でも `cache.put` は受理される。
+//! - `max-age=0, must-revalidate`: ブラウザ・private HTTP cache は毎リクエスト
+//!   worker に再検証を要求する (origin = worker)。これにより allowlist / kill-switch
+//!   の変更が即時に効く。
+//! - 留意点: `s-maxage` は Cloudflare edge 専用ではなく、一般の shared proxy にも
+//!   TTL 秒キャッシュを許す。HTTPS 前提なので実害は限定的だが、仕様上はそう。
+//!   さらに Cloudflare 側で「Browser Cache TTL」や「Cache Rules」を設定している
+//!   と `max-age=0` を上書きされる可能性がある。本 worker と同居する staging /
+//!   production の Cache Rules では override しない運用前提。
 //!
 //! TTL は path 種別ごとに 2 値固定 (測定なし最適化禁止に従い細分化しない):
 //! - 終局済 list / live list: **60 秒**
@@ -234,12 +258,17 @@ pub(crate) enum CacheableKind {
 
 impl CacheableKind {
     /// `Cache-Control` ヘッダ値 (200 OK 用) を返す。
+    ///
+    /// `s-maxage` は Cloudflare edge (`caches.default`) を含む shared cache で
+    /// TTL 秒保存させる。`max-age=0, must-revalidate` でブラウザ・private cache は
+    /// 毎回 worker に再検証要求を投げ、`check_origin` / `ALLOW_VIEWER_API` の
+    /// 変更を即時に反映できる (Issue #653 P2)。worker 0.8 `Cache` API は
+    /// `max-age` か `s-maxage` のいずれかがあれば `cache.put` を受理する
+    /// (worker 0.8 cache.rs L65-66)。
     pub(crate) fn cache_control_header(self) -> &'static str {
         match self {
-            // public で max-age を設定しないと Cache API は put しない契約
-            // (worker 0.8 cache.rs 75-76 行)。
-            CacheableKind::List => "public, max-age=60",
-            CacheableKind::SingleGame => "public, max-age=600",
+            CacheableKind::List => "public, s-maxage=60, max-age=0, must-revalidate",
+            CacheableKind::SingleGame => "public, s-maxage=600, max-age=0, must-revalidate",
         }
     }
 }
@@ -256,19 +285,16 @@ async fn handle_list(req: &Request, env: &Env, url: &Url) -> Result<Response> {
         return Ok(blocked);
     }
     let client_kind = extract_client_kind(req);
-    serve_cached_list(
-        req,
-        env,
-        url,
-        CacheableKind::List,
-        GAMES_INDEX_PREFIX,
-        "games_index",
-        &client_kind,
-        |entries, next_cursor| ListResponse {
-            games: entries,
-            next_cursor,
-        },
-    )
+    let config = ListCacheConfig {
+        kind: CacheableKind::List,
+        prefix: GAMES_INDEX_PREFIX,
+        event_root: "games_index",
+        client_kind: &client_kind,
+    };
+    serve_cached_list(req, env, url, &config, |entries, next_cursor| ListResponse {
+        games: entries,
+        next_cursor,
+    })
     .await
 }
 
@@ -281,20 +307,33 @@ async fn handle_list_live(req: &Request, env: &Env, url: &Url) -> Result<Respons
         return Ok(blocked);
     }
     let client_kind = extract_client_kind(req);
-    serve_cached_list(
-        req,
-        env,
-        url,
-        CacheableKind::List,
-        LIVE_KEY_PREFIX,
-        "live_games_index",
-        &client_kind,
-        |entries, next_cursor| LiveListResponse {
-            live_games: entries,
-            next_cursor,
-        },
-    )
+    let config = ListCacheConfig {
+        kind: CacheableKind::List,
+        prefix: LIVE_KEY_PREFIX,
+        event_root: "live_games_index",
+        client_kind: &client_kind,
+    };
+    serve_cached_list(req, env, url, &config, |entries, next_cursor| LiveListResponse {
+        live_games: entries,
+        next_cursor,
+    })
     .await
+}
+
+/// 一覧系 (`/api/v1/games`, `/api/v1/games/live`) 共通の cache + R2 list 経路の
+/// 設定値をまとめる。`payload_builder` は generic 型パラメータのため別引数で
+/// 渡す (config に入れると `serve_cached_list` 全体に型パラメータが波及する)。
+struct ListCacheConfig<'a> {
+    /// edge cache TTL (List = 60 秒)。
+    kind: CacheableKind,
+    /// R2 list の prefix (`games-index/` / `live-games-index/`)。
+    prefix: &'a str,
+    /// logfmt event 名の root (`games_index` / `live_games_index`)。失敗時は
+    /// `<root>_list` / `<root>_get` 等に展開する。`*_cache_get` / `*_cache_put`
+    /// にも使う。
+    event_root: &'a str,
+    /// 呼出元クライアント識別 (`X-Client` 正規化済み)。
+    client_kind: &'a str,
 }
 
 /// 一覧系 (`/api/v1/games`, `/api/v1/games/live`) 共通の cache + R2 list 経路。
@@ -306,10 +345,7 @@ async fn serve_cached_list<P, B>(
     req: &Request,
     env: &Env,
     url: &Url,
-    kind: CacheableKind,
-    prefix: &str,
-    event_root: &str,
-    client_kind: &str,
+    config: &ListCacheConfig<'_>,
     payload_builder: B,
 ) -> Result<Response>
 where
@@ -317,18 +353,23 @@ where
     B: FnOnce(Vec<serde_json::Value>, Option<String>) -> P,
 {
     let cache_key = req.url()?.to_string();
-    if let Some(hit) = cache_get_origin_neutral(&cache_key).await {
+    let cache_get_event = format!("{}_cache_get", config.event_root);
+    if let Some(hit) =
+        cache_get_origin_neutral(&cache_key, &cache_get_event, config.client_kind).await
+    {
         return with_cors(hit, req, env);
     }
 
     // miss: R2 list + N×get を実施し、origin-neutral Response を組み立てる。
-    let outcome = collect_index_page(env, url, prefix, event_root, client_kind).await?;
+    let outcome =
+        collect_index_page(env, url, config.prefix, config.event_root, config.client_kind).await?;
     match outcome {
         BuildOutcome::Page(page) => {
             let payload = payload_builder(page.entries, page.next_cursor);
             let mut resp = Response::from_json(&payload)?;
-            set_cache_control(&mut resp, kind.cache_control_header())?;
-            cache_put_origin_neutral(&cache_key, &mut resp, event_root, client_kind).await;
+            set_cache_control(&mut resp, config.kind.cache_control_header())?;
+            cache_put_origin_neutral(&cache_key, &mut resp, config.event_root, config.client_kind)
+                .await;
             with_cors(resp, req, env)
         }
         BuildOutcome::ErrorNoStore(resp) => with_cors(resp, req, env),
@@ -478,7 +519,9 @@ async fn handle_get(req: &Request, env: &Env, game_id: &str) -> Result<Response>
     }
     let client_kind = extract_client_kind(req);
     let cache_key = req.url()?.to_string();
-    if let Some(hit) = cache_get_origin_neutral(&cache_key).await {
+    if let Some(hit) =
+        cache_get_origin_neutral(&cache_key, "kifu_by_id_cache_get", &client_kind).await
+    {
         return with_cors(hit, req, env);
     }
 
@@ -684,16 +727,29 @@ fn set_cache_control(resp: &mut Response, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// `caches.default` から URL key で hit を取り出す。miss / 例外時は `None`。
+/// `caches.default` から URL key で hit を取り出す。miss は `None`。
 ///
 /// 取り出した Response は origin-neutral なので、呼び出し側で `with_cors` を
 /// 被せて返却する契約。
-async fn cache_get_origin_neutral(cache_key: &str) -> Option<Response> {
+///
+/// `cache.get` が `Err` を返した場合 (Cache API 自体の障害) は `None` を返して
+/// miss と同じくフォールバック (R2 から再 fetch) させる。ただし運用上の観測性が
+/// 必要なため、`event` (`<root>_cache_get`) と `client_kind` 付きの logfmt を
+/// `console_log_failed` で残す (Issue #653)。サイレント抑制すると staging /
+/// 本番で Cache API が一切機能していない事象に気付けない。
+async fn cache_get_origin_neutral(
+    cache_key: &str,
+    event: &str,
+    client_kind: &str,
+) -> Option<Response> {
     let cache = worker::Cache::default();
     match cache.get(cache_key.to_string(), true).await {
         Ok(Some(resp)) => Some(resp),
         Ok(None) => None,
-        Err(_) => None,
+        Err(e) => {
+            console_log_failed(event, client_kind, &e.to_string());
+            None
+        }
     }
 }
 
@@ -735,12 +791,37 @@ mod tests {
 
     #[test]
     fn cache_control_header_for_list_kind() {
-        assert_eq!(CacheableKind::List.cache_control_header(), "public, max-age=60");
+        // Issue #653 P2: edge は s-maxage で TTL 秒保存し、ブラウザ・private cache は
+        // max-age=0 + must-revalidate で毎回 worker に再検証要求を投げる。
+        assert_eq!(
+            CacheableKind::List.cache_control_header(),
+            "public, s-maxage=60, max-age=0, must-revalidate"
+        );
     }
 
     #[test]
     fn cache_control_header_for_single_kind() {
-        assert_eq!(CacheableKind::SingleGame.cache_control_header(), "public, max-age=600");
+        assert_eq!(
+            CacheableKind::SingleGame.cache_control_header(),
+            "public, s-maxage=600, max-age=0, must-revalidate"
+        );
+    }
+
+    #[test]
+    fn cache_control_headers_force_browser_revalidation() {
+        // 全 cacheable 経路でブラウザ側の再検証 directive (`max-age=0` と
+        // `must-revalidate`) が抜けていないことを確定させる。`s-maxage` だけが
+        // 効いて `max-age` を落としても browser default の heuristic が走り
+        // うるため、明示的に検査する。
+        for kind in [CacheableKind::List, CacheableKind::SingleGame] {
+            let header = kind.cache_control_header();
+            assert!(header.contains("max-age=0"), "{kind:?} missing max-age=0: {header}");
+            assert!(
+                header.contains("must-revalidate"),
+                "{kind:?} missing must-revalidate: {header}"
+            );
+            assert!(header.contains("s-maxage="), "{kind:?} missing s-maxage: {header}");
+        }
     }
 
     #[test]
