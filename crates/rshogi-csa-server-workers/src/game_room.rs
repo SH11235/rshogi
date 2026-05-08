@@ -34,8 +34,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use worker::{
-    Date, DurableObject, Env, Error, Request, Response, ResponseBuilder, Result, State, WebSocket,
-    WebSocketIncomingMessage, WebSocketPair, console_log, durable_object, wasm_bindgen,
+    Date, Delay, DurableObject, Env, Error, Request, Response, ResponseBuilder, Result, State,
+    WebSocket, WebSocketIncomingMessage, WebSocketPair, console_log, durable_object, wasm_bindgen,
 };
 
 use rshogi_core::types::EnteringKingRule;
@@ -105,6 +105,16 @@ const MAX_SPECTATORS_PER_ROOM: usize = 50;
 /// Alarm 発火時刻に上乗せする安全側マージン（ミリ秒）。Cloudflare Alarm API
 /// のジッタと `Date::now()` ↔ `handle_line` の now_ms 伝搬遅延を吸収する。
 const ALARM_SAFETY_MS: u64 = 200;
+
+/// `try_delete_live_games_index` の delete 試行上限 (Issue #629)。R2 delete は
+/// idempotent なので transient error は積極的に retry する。
+const LIVE_INDEX_DELETE_MAX_ATTEMPTS: u32 = 3;
+
+/// `try_delete_live_games_index` の attempt 間 backoff (ミリ秒、Issue #629)。
+/// 配列長 = `LIVE_INDEX_DELETE_MAX_ATTEMPTS - 1`。最終 attempt の後は backoff
+/// せず giveup ログに抜けるため、最後の値は使われない。`100, 200` で合計 wall
+/// 300ms 以内に収める (Workers cron の 30s 制限を圧迫しない)。
+const LIVE_INDEX_DELETE_BACKOFF_MS: [u64; 2] = [100, 200];
 
 /// Durable Object 初期化 SQL。
 ///
@@ -1907,9 +1917,17 @@ impl GameRoom {
     /// `live-games-index/<inv>-<id>.json` を best-effort で delete する。
     ///
     /// 終局確定 (`KEY_FINISHED` put 成功) 直後に呼び、live 一覧から進行中
-    /// 表示を消す。失敗 (R2 一時障害 / key 生成失敗) は `console_log!` で
-    /// 吸収して `Result` を返さない。残った orphan は Issue #551 の sweep
-    /// ジョブで掃除する契約。
+    /// 表示を消す。R2 delete は idempotent なので、transient error には最大
+    /// [`LIVE_INDEX_DELETE_MAX_ATTEMPTS`] 回まで retry し ([Issue #629])、各
+    /// attempt 間に [`LIVE_INDEX_DELETE_BACKOFF_MS`] の wall-clock 待機を挟む。
+    ///
+    /// 全試行が失敗した場合は `live_games_index_delete_giveup` イベントを記録
+    /// して諦める。残った orphan は Issue #551 の sweep ジョブ
+    /// (`run_live_orphan_sweep`) が 15 分以内に掃除する契約 (Issue #629 で 1
+    /// 時間 → 15 分に短縮)。
+    ///
+    /// key 生成失敗 / bucket binding 解決失敗は retry 不能なので 1 回で諦める
+    /// (`live_games_index_delete_skip` を出して return)。
     async fn try_delete_live_games_index(&self, cfg: &PersistedConfig, started_at_ms: u64) {
         let key = match live_games_index_key(started_at_ms, &cfg.game_id) {
             Ok(k) => k,
@@ -1935,14 +1953,30 @@ impl GameRoom {
             }
         };
 
-        if let Err(e) = bucket.delete(&key).await {
-            console_log!(
-                "[GameRoom] event=live_games_index_delete_failed game_id={} key={} err={:?}",
-                cfg.game_id,
-                key,
-                e,
-            );
+        for attempt in 0..LIVE_INDEX_DELETE_MAX_ATTEMPTS {
+            match bucket.delete(&key).await {
+                Ok(_) => return,
+                Err(e) => {
+                    console_log!(
+                        "[GameRoom] event=live_games_index_delete_failed attempt={} game_id={} key={} err={:?}",
+                        attempt + 1,
+                        cfg.game_id,
+                        key,
+                        e,
+                    );
+                    // 最終 attempt の後は backoff せず giveup ログへ抜ける。
+                    if let Some(&backoff_ms) = LIVE_INDEX_DELETE_BACKOFF_MS.get(attempt as usize) {
+                        Delay::from(std::time::Duration::from_millis(backoff_ms)).await;
+                    }
+                }
+            }
         }
+        console_log!(
+            "[GameRoom] event=live_games_index_delete_giveup game_id={} key={} attempts={}",
+            cfg.game_id,
+            key,
+            LIVE_INDEX_DELETE_MAX_ATTEMPTS,
+        );
     }
 
     /// `moves` テーブルを ply 昇順で読み出す。

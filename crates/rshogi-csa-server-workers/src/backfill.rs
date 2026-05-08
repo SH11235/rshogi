@@ -4,14 +4,19 @@
 //!
 //! - [`run_games_index_backfill`]: `kifu-by-id/<id>.meta.json` を 1 ページ
 //!   (1000 件) 単位で list し、各 meta 本文から `games-index/<inv>-<id>.json`
-//!   key を再生成して上書き put する (派生 index 補完)。
-//! - [`run_live_orphan_sweep`]: `live-games-index/` を 1 ページ単位で list し、
-//!   対応する `kifu-by-id/<id>.meta.json` (= 終局済 primary 判定キー、設計 v3
-//!   §3) が存在する live entry を delete する (orphan 掃除)。
+//!   key を再生成して上書き put する (派生 index 補完)。1 cron = 1 page のみ。
+//! - [`run_live_orphan_sweep`]: `live-games-index/` を pagination loop で list
+//!   し、対応する `kifu-by-id/<id>.meta.json` (= 終局済 primary 判定キー、設計
+//!   v3 §3) が存在する live entry を delete する (orphan 掃除)。Issue #629 で
+//!   1 page → 複数 page (`SWEEP_DEADLINE_MS` 内) に拡張した。
 //!
-//! いずれも 1 page (1000 件) のみ処理し、cursor の持ち越しは行わない (= 次回
-//! cron で続行する eventual semantics)。本実装範囲では admin invoke endpoint
-//! や 1 万件超の bulk 並列化は Non-goals (設計 v3 §10)。
+//! `run_games_index_backfill` は 1 page (1000 件) のみ処理し、cursor の持ち越し
+//! は行わない (= 次回 cron で続行する eventual semantics)。
+//! `run_live_orphan_sweep` は cron 30s 制限の安全側 (`SWEEP_DEADLINE_MS`) 内で
+//! 複数 page を処理し、超過分は次回 cron に持ち越す (cursor は再開しない =
+//! 先頭から再走査するが、live key は新しい対局順なので大きな問題にならない)。
+//! 本実装範囲では admin invoke endpoint や 1 万件超の bulk 並列化は Non-goals
+//! (設計 v3 §10)。
 //!
 //! 進捗ログは logfmt 構造化 (`event=…_progress listed=… elapsed_ms=…`) で
 //! `console_log!` に流す。Cloudflare Workers の Logs / tail で grep 可能。
@@ -41,6 +46,19 @@ pub(crate) const META_SUFFIX: &str = ".meta.json";
 /// 経由で複数ページ一気に処理する案 (設計 v2 §5 (a)) を別 issue で検討する。
 pub(crate) const PAGE_SIZE: u32 = 1000;
 
+/// `run_live_orphan_sweep` の 1 cron 内 pagination 上限 (Issue #629)。
+///
+/// Cloudflare Workers の cron 起動は wall-clock 30s 制限を持つため、安全側
+/// マージン (5s) を引いた 25s で打ち切り、未処理 page は次回 cron に持ち越す。
+/// 各 object 処理は `head` + 条件付き `delete` (Class B) で平均 5-10ms 想定の
+/// ため、1 page (1000 件) で約 5-10s。25s なら 2-3 page を安全に処理できる。
+pub(crate) const SWEEP_DEADLINE_MS: u64 = 25_000;
+
+/// `run_live_orphan_sweep` の安全側 page 上限 (Issue #629)。`SWEEP_DEADLINE_MS`
+/// を超えなくても、cursor が永遠に truncated を返し続ける異常時に無限 loop を
+/// 避けるための break 条件。100 page = 100,000 件で十分な余白。
+pub(crate) const SWEEP_MAX_PAGES: u32 = 100;
+
 /// `run_games_index_backfill` の進捗統計。テスト容易性のため値型で返す。
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BackfillStats {
@@ -59,6 +77,12 @@ pub struct SweepStats {
     pub listed: u64,
     /// `kifu-by-id/<id>.meta.json` が存在する (= 終局済) ため delete した件数。
     pub deleted: u64,
+    /// 走査した R2 list page 数 (Issue #629)。pagination loop 化に伴って導入。
+    /// 1 cron で複数 page を処理した状況をログから確認するための運用 metric。
+    pub pages: u32,
+    /// `SWEEP_DEADLINE_MS` 経過で打ち切った場合に `true`。`true` の cron が
+    /// 連続したら page size または cron 頻度の見直しが必要 (Issue #629)。
+    pub deadline_reached: bool,
 }
 
 /// `kifu-by-id/<id>.meta.json` の本文を deserialize する最小 view。
@@ -85,7 +109,7 @@ pub(crate) struct LiveEntryGameId {
 mod imp {
     use super::{
         BackfillStats, KIFU_BY_ID_PREFIX, LiveEntryGameId, META_SUFFIX, MetaForIndexKey, PAGE_SIZE,
-        SweepStats,
+        SWEEP_DEADLINE_MS, SWEEP_MAX_PAGES, SweepStats,
     };
     use worker::{Date, Env, Result, console_log};
 
@@ -227,6 +251,17 @@ mod imp {
     /// cron で finalize 経路の副作用で meta が put された後に消える、または
     /// 手動オペレーションで対処)。
     ///
+    /// Issue #629 で pagination loop 化した。R2 list の `truncated` が `true`
+    /// の間は cursor を辿って次 page を処理し、以下のいずれかの条件で打ち切る:
+    ///
+    /// 1. `truncated() == false` (全件処理完了)
+    /// 2. 経過時間 ≥ `SWEEP_DEADLINE_MS` (cron 30s 制限を圧迫しないための安全
+    ///    側打ち切り。object loop 内でも判定して 1 page 完走を待たない)
+    /// 3. `pages >= SWEEP_MAX_PAGES` (異常時の無限 loop ガード)
+    ///
+    /// 打ち切った残りは次回 cron で先頭から再走査する (cursor は永続化しない =
+    /// live key prefix の昇順 lexicographic に依存した再走査)。
+    ///
     /// 各失敗は logfmt で記録し `Err` を伝播しない。
     pub async fn run_live_orphan_sweep(env: &Env) -> Result<SweepStats> {
         let started_at_ms = Date::now().as_millis();
@@ -240,63 +275,121 @@ mod imp {
             }
         };
 
-        let page = match bucket.list().prefix(LIVE_KEY_PREFIX).limit(PAGE_SIZE).execute().await {
-            Ok(p) => p,
-            Err(e) => {
-                console_log!("[backfill] event=live_orphan_sweep_list_failed err={:?}", e);
-                return Ok(stats);
+        let mut cursor: Option<String> = None;
+        'outer: loop {
+            let mut builder = bucket.list().prefix(LIVE_KEY_PREFIX).limit(PAGE_SIZE);
+            if let Some(c) = cursor.as_ref() {
+                builder = builder.cursor(c);
             }
-        };
-
-        for obj in page.objects() {
-            let live_key = obj.key();
-            stats.listed = stats.listed.saturating_add(1);
-
-            // live entry 本文から game_id を取り出す。key 文字列パースより本文
-            // の `game_id` field を信頼するほうが、key 形式の将来変更に対して
-            // 頑健。
-            let game_id = match read_live_entry_game_id(&bucket, &live_key).await {
-                Some(id) => id,
-                None => continue,
-            };
-
-            // primary meta が存在 = 終局済 → live は orphan として delete 対象。
-            let meta_key = kifu_by_id_meta_key(&game_id);
-            let head_result = match bucket.head(&meta_key).await {
-                Ok(o) => o,
+            let page = match builder.execute().await {
+                Ok(p) => p,
                 Err(e) => {
                     console_log!(
-                        "[backfill] event=live_orphan_sweep_head_failed game_id={} meta_key={} err={:?}",
-                        game_id,
-                        meta_key,
+                        "[backfill] event=live_orphan_sweep_list_failed pages={} err={:?}",
+                        stats.pages,
                         e,
                     );
-                    continue;
+                    break;
                 }
             };
-            if head_result.is_none() {
-                // meta が無い = まだ進行中 (or 終局時 meta put 失敗)。前者は
-                // 正常状態、後者は本 sweep の対象外 (設計 v3 §3 の意図的な保守)。
-                continue;
+            stats.pages = stats.pages.saturating_add(1);
+
+            for obj in page.objects() {
+                let live_key = obj.key();
+                stats.listed = stats.listed.saturating_add(1);
+
+                // live entry 本文から game_id を取り出す。key 文字列パースより
+                // 本文の `game_id` field を信頼するほうが、key 形式の将来変更
+                // に対して頑健。
+                let game_id = match read_live_entry_game_id(&bucket, &live_key).await {
+                    Some(id) => id,
+                    None => {
+                        if Date::now().as_millis().saturating_sub(started_at_ms)
+                            >= SWEEP_DEADLINE_MS
+                        {
+                            stats.deadline_reached = true;
+                            break 'outer;
+                        }
+                        continue;
+                    }
+                };
+
+                // primary meta が存在 = 終局済 → live は orphan として delete 対象。
+                let meta_key = kifu_by_id_meta_key(&game_id);
+                let head_result = match bucket.head(&meta_key).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        console_log!(
+                            "[backfill] event=live_orphan_sweep_head_failed game_id={} meta_key={} err={:?}",
+                            game_id,
+                            meta_key,
+                            e,
+                        );
+                        if Date::now().as_millis().saturating_sub(started_at_ms)
+                            >= SWEEP_DEADLINE_MS
+                        {
+                            stats.deadline_reached = true;
+                            break 'outer;
+                        }
+                        continue;
+                    }
+                };
+                if head_result.is_none() {
+                    // meta が無い = まだ進行中 (or 終局時 meta put 失敗)。前者は
+                    // 正常状態、後者は本 sweep の対象外 (設計 v3 §3 の意図的な保守)。
+                    if Date::now().as_millis().saturating_sub(started_at_ms) >= SWEEP_DEADLINE_MS {
+                        stats.deadline_reached = true;
+                        break 'outer;
+                    }
+                    continue;
+                }
+
+                if let Err(e) = bucket.delete(&live_key).await {
+                    console_log!(
+                        "[backfill] event=live_orphan_sweep_delete_failed game_id={} live_key={} err={:?}",
+                        game_id,
+                        live_key,
+                        e,
+                    );
+                    if Date::now().as_millis().saturating_sub(started_at_ms) >= SWEEP_DEADLINE_MS {
+                        stats.deadline_reached = true;
+                        break 'outer;
+                    }
+                    continue;
+                }
+                stats.deleted = stats.deleted.saturating_add(1);
+
+                if Date::now().as_millis().saturating_sub(started_at_ms) >= SWEEP_DEADLINE_MS {
+                    stats.deadline_reached = true;
+                    break 'outer;
+                }
             }
 
-            if let Err(e) = bucket.delete(&live_key).await {
-                console_log!(
-                    "[backfill] event=live_orphan_sweep_delete_failed game_id={} live_key={} err={:?}",
-                    game_id,
-                    live_key,
-                    e,
-                );
-                continue;
+            if !page.truncated() {
+                break;
             }
-            stats.deleted = stats.deleted.saturating_add(1);
+            if stats.pages >= SWEEP_MAX_PAGES {
+                console_log!(
+                    "[backfill] event=live_orphan_sweep_max_pages_reached pages={}",
+                    stats.pages,
+                );
+                break;
+            }
+            cursor = page.cursor();
+            if cursor.is_none() {
+                // truncated == true なのに cursor が None の場合は安全側に break
+                // (R2 仕様上は通常起こらない)。
+                break;
+            }
         }
 
         let elapsed_ms = Date::now().as_millis().saturating_sub(started_at_ms);
         console_log!(
-            "[backfill] event=live_orphan_sweep_progress listed={} deleted={} elapsed_ms={}",
+            "[backfill] event=live_orphan_sweep_progress listed={} deleted={} pages={} deadline_reached={} elapsed_ms={}",
             stats.listed,
             stats.deleted,
+            stats.pages,
+            stats.deadline_reached,
             elapsed_ms,
         );
         Ok(stats)
@@ -420,9 +513,31 @@ mod tests {
             stats,
             SweepStats {
                 listed: 0,
-                deleted: 0
+                deleted: 0,
+                pages: 0,
+                deadline_reached: false,
             }
         );
+    }
+
+    #[test]
+    fn sweep_deadline_is_safely_below_workers_30s_limit() {
+        // Cloudflare Workers cron の wall-clock 制限は 30s。`SWEEP_DEADLINE_MS`
+        // は安全側マージン (≥ 5s) を確保していないと、deadline 検知後の
+        // pagination break + 後続ログ出力中に 30s 制限を踏む恐れがある。
+        const _: () = assert!(
+            SWEEP_DEADLINE_MS + 5_000 <= 30_000,
+            "SWEEP_DEADLINE_MS must leave at least a 5s margin under the 30s cron limit",
+        );
+    }
+
+    #[test]
+    fn sweep_max_pages_caps_runaway_pagination() {
+        // `SWEEP_DEADLINE_MS` を超えなくても、cursor が壊れて truncated を
+        // 返し続けるような異常時に無限 loop を避けるための gate。1 page =
+        // 1000 件で 100 page = 100,000 件は live-games-index の現実的な
+        // 上限を大きく超えている。
+        const _: () = assert!(SWEEP_MAX_PAGES >= 1, "SWEEP_MAX_PAGES must allow at least 1 page");
     }
 
     #[test]

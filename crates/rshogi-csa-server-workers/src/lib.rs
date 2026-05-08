@@ -93,11 +93,34 @@ pub async fn fetch(
     router::handle_fetch(req, env).await
 }
 
+/// Backfill + sweep を両方走らせる cron 文字列 (毎時 0 分)。
+///
+/// `wrangler.{production,staging,toml.example}.toml` の `[triggers] crons` 配列
+/// 第 1 要素と一致させる。`scheduled` ハンドラは `event.cron()` の文字列マッチで
+/// backfill 実行可否を分岐するため、wrangler 側の表記を変える場合は本定数も
+/// 同期更新する (`tests/wrangler_environment_toml_consistency.rs` /
+/// `wrangler_template_consistency.rs` で gate)。
+pub const BACKFILL_CRON: &str = "0 * * * *";
+
+/// Sweep のみ走らせる cron 文字列 (15 / 30 / 45 分)。
+///
+/// Issue #629 で導入した orphan sweep 高頻度化用。`try_delete_live_games_index`
+/// が R2 transient で失敗した場合の復旧遅延を 1 時間 → 15 分に短縮する目的で、
+/// 本 cron では backfill (Class A put 増) を走らせず sweep のみ実行する。
+pub const SWEEP_ONLY_CRON: &str = "15,30,45 * * * *";
+
 /// Workers ランタイムの scheduled イベント (cron trigger)。
 ///
-/// `wrangler.toml` の `[triggers] crons = ["0 */1 * * *"]` (毎時 0 分) で起動し、
-/// 順次 `run_games_index_backfill` → `run_live_orphan_sweep` を呼ぶ
-/// (Issue #551 設計 v3 §11)。
+/// `wrangler.toml` の `[triggers] crons` で 2 つの cron を登録している
+/// (Issue #551 / Issue #629):
+///
+/// - [`BACKFILL_CRON`] (`0 * * * *`): `run_games_index_backfill` →
+///   `run_live_orphan_sweep` を順次実行する (= 既存挙動)。
+/// - [`SWEEP_ONLY_CRON`] (`15,30,45 * * * *`): `run_live_orphan_sweep` のみ。
+///   delete best-effort 失敗時の復旧遅延を 15 分以内に詰めるための高頻度経路。
+///
+/// `event.cron()` 文字列で分岐し、未知の cron 文字列に対しては安全側に倒して
+/// 既存挙動 (backfill + sweep) と等価動作する (= 設定変更時の暫定挙動を保証)。
 ///
 /// 各ジョブは内部的に best-effort で失敗を握り潰し `Result::Ok` で返すため、
 /// scheduled handler 側ではさらに伝播禁止 (cron の継続可用性を最優先する) で
@@ -111,12 +134,18 @@ pub async fn scheduled(
     _ctx: worker::ScheduleContext,
 ) {
     let cron = event.cron();
-    if let Err(e) = backfill::run_games_index_backfill(&env).await {
-        worker::console_log!(
-            "[scheduled] event=games_index_backfill_failed cron={} err={:?}",
-            cron,
-            e,
-        );
+    // SWEEP_ONLY_CRON では backfill を skip。それ以外は既存挙動 (backfill +
+    // sweep) を保つ。未知 cron 文字列は安全側 = 全部走らせる。
+    let run_backfill = cron != SWEEP_ONLY_CRON;
+
+    if run_backfill {
+        if let Err(e) = backfill::run_games_index_backfill(&env).await {
+            worker::console_log!(
+                "[scheduled] event=games_index_backfill_failed cron={} err={:?}",
+                cron,
+                e,
+            );
+        }
     }
     if let Err(e) = backfill::run_live_orphan_sweep(&env).await {
         worker::console_log!(
@@ -124,5 +153,27 @@ pub async fn scheduled(
             cron,
             e,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cron_constants_are_distinct() {
+        // 同一文字列に揃えると `event.cron()` 分岐が崩れる (sweep-only cron で
+        // backfill が走る、または backfill cron で sweep がスキップされる)。
+        assert_ne!(BACKFILL_CRON, SWEEP_ONLY_CRON);
+    }
+
+    #[test]
+    fn cron_constants_have_5_fields() {
+        // Cloudflare Workers cron expression は 5 field (minute hour dom month dow)。
+        // 6 field (秒つき) や 7 field (年つき) は受け付けないため、定数側で固定。
+        for cron in [BACKFILL_CRON, SWEEP_ONLY_CRON] {
+            let fields: Vec<&str> = cron.split_whitespace().collect();
+            assert_eq!(fields.len(), 5, "cron expression must have 5 fields, got {cron:?}");
+        }
     }
 }

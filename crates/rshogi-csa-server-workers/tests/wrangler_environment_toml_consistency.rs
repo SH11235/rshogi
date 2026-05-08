@@ -205,14 +205,45 @@ fn assert_no_runtime_injected_keys(env: &EnvironmentBindings) {
 /// Issue #551 で追加した `[triggers] crons` が各 deploy 環境に宣言されていることを
 /// 固定する。`[event(scheduled)]` ハンドラは production / staging 両方で稼働させる
 /// 契約 (片方だけ宣言だと backfill / orphan sweep が動かず orphan が滞留する)。
+///
+/// Issue #629 で cron を 1 → 2 に増やした (sweep のみ 15 分間隔)。両 cron が
+/// 必ず宣言されていること、かつ `lib.rs::BACKFILL_CRON` /
+/// `lib.rs::SWEEP_ONLY_CRON` 定数と文字列が一致していることを assert する
+/// (定数を変更したのに wrangler 側を更新し忘れる事故を防ぐ)。
 fn assert_declares_backfill_cron_trigger(env: &EnvironmentBindings) {
     assert!(
-        !env.crons.is_empty(),
-        "{file} ({label}) must declare [triggers] crons = [...] for the backfill scheduled handler; \
-         got: {crons:?}",
+        env.crons.contains(&rshogi_csa_server_workers::BACKFILL_CRON.to_owned()),
+        "{file} ({label}) [triggers] crons must contain BACKFILL_CRON ({backfill:?}); got: {crons:?}",
         file = env.file_name,
         label = env.label,
+        backfill = rshogi_csa_server_workers::BACKFILL_CRON,
         crons = env.crons,
+    );
+    assert!(
+        env.crons.contains(&rshogi_csa_server_workers::SWEEP_ONLY_CRON.to_owned()),
+        "{file} ({label}) [triggers] crons must contain SWEEP_ONLY_CRON ({sweep:?}) for orphan sweep \
+         high-frequency path (Issue #629); got: {crons:?}",
+        file = env.file_name,
+        label = env.label,
+        sweep = rshogi_csa_server_workers::SWEEP_ONLY_CRON,
+        crons = env.crons,
+    );
+}
+
+/// 両環境の `[triggers] crons` が同じ集合 (順序含む) を宣言していることを assert
+/// する。production / staging で挙動を揃える契約 (Issue #629)。
+fn assert_crons_match(lhs: &EnvironmentBindings, rhs: &EnvironmentBindings) {
+    assert_eq!(
+        lhs.crons,
+        rhs.crons,
+        "{lhs_file} ({lhs_label}) and {rhs_file} ({rhs_label}) must declare the same \
+         [triggers] crons array; lhs={lhs_crons:?} rhs={rhs_crons:?}",
+        lhs_file = lhs.file_name,
+        lhs_label = lhs.label,
+        rhs_file = rhs.file_name,
+        rhs_label = rhs.label,
+        lhs_crons = lhs.crons,
+        rhs_crons = rhs.crons,
     );
 }
 
@@ -395,4 +426,9 @@ fn wrangler_environment_compatibility_dates_match() {
 #[test]
 fn wrangler_environment_clock_preset_names_match() {
     assert_clock_preset_names_match(&PRODUCTION, &STAGING);
+}
+
+#[test]
+fn wrangler_environment_crons_match() {
+    assert_crons_match(&PRODUCTION, &STAGING);
 }

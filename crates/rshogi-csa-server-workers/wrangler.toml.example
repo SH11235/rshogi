@@ -64,12 +64,24 @@ bucket_name = "local-floodgate-history-dev"
 preview_bucket_name = "local-floodgate-history-dev"
 
 # --- Cron triggers ---
-# `[event(scheduled)]` ハンドラ (`lib.rs::scheduled`) を毎時 0 分に起動し、
-# `kifu-by-id/<id>.meta.json` から `games-index/` を補完 (backfill) し、
-# `live-games-index/` の orphan を掃除する (Issue #551)。1 run = 1 page (1000 件)
-# のみ処理する eventual semantics。bulk 1 万件超は admin invoke 経路を別途検討。
+# `[event(scheduled)]` ハンドラ (`lib.rs::scheduled`) を 2 つの cron で起動する
+# (Issue #629 で 1 → 2 に分離)。
+#
+# - `0 * * * *` (毎時 0 分):
+#   `kifu-by-id/<id>.meta.json` から `games-index/` を補完 (backfill) し、
+#   `live-games-index/` の orphan を掃除する (Issue #551)。backfill は 1 run =
+#   1 page (1000 件) のみ。bulk 1 万件超は admin invoke 経路を別途検討。
+# - `15,30,45 * * * *` (15 / 30 / 45 分):
+#   `live-games-index/` の orphan 掃除のみを行う (backfill はスキップ)。
+#   delete best-effort 失敗からの復旧遅延を 1 時間 → 15 分に短縮するため、
+#   sweep のみ高頻度化する (Issue #629)。sweep は 1 cron 内で pagination
+#   loop し、cron 30s 制限内で複数 page を処理する。
+#
+# どちらの cron も `lib.rs::scheduled` で `event.cron()` を見て分岐する。
+# 文字列を変更する場合は `lib.rs` の `BACKFILL_CRON` / `SWEEP_ONLY_CRON`
+# 定数も同期更新すること (wrangler test が違反を検知する)。
 [triggers]
-crons = ["0 */1 * * *"]
+crons = ["0 * * * *", "15,30,45 * * * *"]
 
 # --- 変数 ---
 # WebSocket Upgrade 時の Origin 許可リスト（カンマ区切り）。ブラウザ経由

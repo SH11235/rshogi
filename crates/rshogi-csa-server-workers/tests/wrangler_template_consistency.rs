@@ -165,11 +165,24 @@ fn wrangler_template_vars_keys_match_config_keys() {
 /// 固定する。`[event(scheduled)]` ハンドラと cron trigger は同 PR で導入したので、
 /// 片方だけが残ったまま運用者が `cp wrangler.toml.example wrangler.toml` した場合
 /// に handler が永久 dormant にならないよう、template 側で必須化する。
+///
+/// Issue #629 で sweep のみ高頻度 (15 分間隔) cron を追加したため、両 cron が
+/// 必ず宣言されていること、かつ `lib.rs::BACKFILL_CRON` /
+/// `lib.rs::SWEEP_ONLY_CRON` 定数と文字列が一致していることを assert する。
 #[test]
 fn wrangler_template_declares_backfill_cron_trigger() {
     assert!(
-        !TEMPLATE.crons.is_empty(),
-        "wrangler.toml.example must declare [triggers] crons = [...] for the backfill scheduled handler",
+        TEMPLATE.crons.contains(&rshogi_csa_server_workers::BACKFILL_CRON.to_owned()),
+        "wrangler.toml.example [triggers] crons must contain BACKFILL_CRON ({backfill:?}); got: {crons:?}",
+        backfill = rshogi_csa_server_workers::BACKFILL_CRON,
+        crons = TEMPLATE.crons,
+    );
+    assert!(
+        TEMPLATE.crons.contains(&rshogi_csa_server_workers::SWEEP_ONLY_CRON.to_owned()),
+        "wrangler.toml.example [triggers] crons must contain SWEEP_ONLY_CRON ({sweep:?}) for orphan sweep \
+         high-frequency path (Issue #629); got: {crons:?}",
+        sweep = rshogi_csa_server_workers::SWEEP_ONLY_CRON,
+        crons = TEMPLATE.crons,
     );
 }
 
