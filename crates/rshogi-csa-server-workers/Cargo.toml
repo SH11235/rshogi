@@ -25,6 +25,9 @@ serde_json.workspace = true
 # chrono はホスト／wasm32 で挙動を揃えるため `clock` 既定を切り、
 # serde 以外の機能は取り込まない。
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
+# Reconnect_Token のタイミング攻撃耐性比較に使う。`default-features = false`
+# で std を切っておくと wasm32-unknown-unknown でも問題なく動く (no_std 経路)。
+subtle = { version = "2", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # wasm32-unknown-unknown 以外では参照しない。worker-build / wrangler dev から

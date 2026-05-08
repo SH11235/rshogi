@@ -1882,6 +1882,7 @@ dependencies = [
  "rshogi-csa-server",
  "serde",
  "serde_json",
+ "subtle",
  "tokio",
  "toml",
  "worker",
