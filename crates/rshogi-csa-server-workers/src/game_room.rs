@@ -155,20 +155,24 @@ const KEY_EXPORT_PENDING: &str = "export_pending";
 /// 予約 / 何もしない を分岐する。
 #[derive(Debug)]
 enum ExportAttempt {
-    /// すべての PUT が成功した (`exported_at_ms = Some` を埋められる)。
+    /// 4 オブジェクト (csa 本文 / by-id / meta / games-index) すべて PUT 成功
+    /// (`exported_at_ms = Some` を埋められる)。
     Complete,
     /// 1 つ以上 PUT 失敗で retry 必要。本 variant が持つ
     /// [`ExportPendingState`] を `KEY_EXPORT_PENDING` に永続化する。
     Pending(Box<ExportPendingState>),
     /// retry しても解決しない致命的失敗 (bucket binding 不在 / load_moves 失敗 /
-    /// SFEN 不正 / serialize 失敗等)。`exported_at_ms = None` のままで観測上は
-    /// 欠損として残るが、それ以外の処理は通常通り進める。
+    /// SFEN 不正 / serialize 失敗 / games_index_key 生成失敗等)。
+    /// `exported_at_ms = None` のままで観測上は欠損として残るが、それ以外の処理
+    /// は通常通り進める。retry できるはずの CSA PUT 失敗が混在している場合は
+    /// `Pending` に倒し、CSA 部分だけ retry する (Codex code review #2 反映)。
     Skipped,
 }
 
 impl ExportAttempt {
-    /// `failed_keys` の長さで `Complete` / `Pending` を選ぶ helper。
-    fn from_failed_keys(
+    /// 4 オブジェクト全てが PUT 試行済の経路から呼ぶコンストラクタ。
+    /// `failed_keys` が空 = 全成功 → `Complete`、非空 → `Pending`。
+    fn from_full_attempt(
         game_id: String,
         ended_at_ms: u64,
         csa_text: String,
@@ -177,6 +181,36 @@ impl ExportAttempt {
     ) -> Self {
         if failed_keys.is_empty() {
             ExportAttempt::Complete
+        } else {
+            ExportAttempt::Pending(Box::new(ExportPendingState {
+                game_id,
+                ended_at_ms,
+                csa_text,
+                meta_body,
+                failed_keys,
+                attempt: 0,
+            }))
+        }
+    }
+
+    /// 4 オブジェクト中いずれかを **PUT 試行できなかった** 経路から呼ぶ
+    /// コンストラクタ (Codex code review #2 反映)。serialize 失敗 /
+    /// games_index_key 生成失敗で meta or index PUT が抜けたケースなど。
+    ///
+    /// retry 可能な CSA PUT 失敗が `failed_keys` にあれば `Pending` に倒し、
+    /// CSA 部分だけ再試行する (`exported_at_ms` は引き続き `None`)。
+    /// `failed_keys` が空 (= 4 中 N 個 PUT 成功 / 残りは retry 不能で skip) なら
+    /// `Skipped` を返し、`Complete` を**絶対に返さない** (= `exported_at_ms` を
+    /// 埋めない)。
+    fn from_partial_attempt(
+        game_id: String,
+        ended_at_ms: u64,
+        csa_text: String,
+        meta_body: Vec<u8>,
+        failed_keys: Vec<FailedExportObject>,
+    ) -> Self {
+        if failed_keys.is_empty() {
+            ExportAttempt::Skipped
         } else {
             ExportAttempt::Pending(Box::new(ExportPendingState {
                 game_id,
@@ -1936,11 +1970,11 @@ impl GameRoom {
                     cfg.game_id,
                     e,
                 );
-                // CSA 本文 PUT は試行済 (failed_keys に積まれているかも) なので、
-                // CSA 部分だけ pending 化する。meta/index は serialize できない以上
-                // retry でも解決しないので失敗 key として積まない (= 観測上は
-                // exported_at_ms=None のまま残る)。
-                return ExportAttempt::from_failed_keys(
+                // CSA 本文 PUT は試行済 (failed_keys に積まれているかも) だが、
+                // meta/index は serialize 失敗で本経路で PUT 試行できていない。
+                // 4 PUT 全成功にはなり得ないので `from_partial_attempt` で
+                // `Complete` を絶対返さない経路に倒す (Codex code review #2)。
+                return ExportAttempt::from_partial_attempt(
                     cfg.game_id.clone(),
                     ended_at_ms,
                     text,
@@ -1973,8 +2007,9 @@ impl GameRoom {
                     e,
                 );
                 // games-index key 生成失敗は retry 不可。pending には CSA / meta
-                // のみ残す。
-                return ExportAttempt::from_failed_keys(
+                // のみ残す。index PUT が抜けるため `from_partial_attempt` で
+                // `Complete` 経路を塞ぐ (Codex code review #2)。
+                return ExportAttempt::from_partial_attempt(
                     cfg.game_id.clone(),
                     ended_at_ms,
                     text,
@@ -2003,7 +2038,9 @@ impl GameRoom {
                 date_key,
             );
         }
-        ExportAttempt::from_failed_keys(cfg.game_id.clone(), ended_at_ms, text, body, failed_keys)
+        // 4 オブジェクトすべての PUT を試行できた経路。`failed_keys` の中身で
+        // `Complete` / `Pending` を選ぶ。
+        ExportAttempt::from_full_attempt(cfg.game_id.clone(), ended_at_ms, text, body, failed_keys)
     }
 
     /// Floodgate 履歴 1 件を `FLOODGATE_HISTORY_BUCKET` に永続化する。`ALLOW_FLOODGATE_FEATURES`
@@ -2595,9 +2632,19 @@ impl GameRoom {
             self.core.borrow_mut().as_mut().map(|core| core.force_abnormal(role.to_core()));
         if let Some(result) = result_opt {
             self.dispatch_broadcasts(&result.broadcasts).await?;
+            // `finalize_if_ended` は内部で `delete_grace_alarm_state` を呼んだ後に
+            // ExportRetry alarm を貼り直す可能性がある (Issue #623)。ここで重ねて
+            // `delete_grace_alarm_state` を呼ぶと `KEY_PENDING_ALARM_KIND=ExportRetry`
+            // を巻き込んで削除してしまい、retry alarm が発火しても kind が `None`
+            // で `KEY_FINISHED` ガードに弾かれる。`finalize_if_ended` の責務に任せ
+            // 再 cleanup しない。
             self.finalize_if_ended(&result).await?;
+        } else {
+            // force_abnormal が呼べなかった (CoreRoom 不在 = cold start 後 replay
+            // 失敗等) ケースでは finalize_if_ended が走らないので、grace registry /
+            // alarm tag は本経路で明示的に片付ける必要がある。
+            self.delete_grace_alarm_state().await?;
         }
-        self.delete_grace_alarm_state().await?;
         Ok(())
     }
 
