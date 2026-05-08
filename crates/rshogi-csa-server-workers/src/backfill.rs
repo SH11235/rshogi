@@ -277,6 +277,16 @@ mod imp {
 
         let mut cursor: Option<String> = None;
         'outer: loop {
+            // 各 page 取得前に deadline をチェックする
+            // (https://github.com/SH11235/rshogi/issues/654)。各 object 処理後の
+            // deadline チェックは loop 内にあるが、次反復先頭の `builder.execute`
+            // 前に確認しておかないと 30s cron 制限の境界で 1 page 余分に R2 list
+            // を発行してしまうケースが残る。1 page 取得 (R2 list) は約 50-200ms
+            // 必要なので、deadline ギリギリで再 list するより安全側で break する。
+            if Date::now().as_millis().saturating_sub(started_at_ms) >= SWEEP_DEADLINE_MS {
+                stats.deadline_reached = true;
+                break 'outer;
+            }
             let mut builder = bucket.list().prefix(LIVE_KEY_PREFIX).limit(PAGE_SIZE);
             if let Some(c) = cursor.as_ref() {
                 builder = builder.cursor(c);
