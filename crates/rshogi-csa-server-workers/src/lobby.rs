@@ -54,6 +54,8 @@ use rshogi_csa_server::matching::challenge::{
 };
 use rshogi_csa_server::types::{Color, PlayerName, ReconnectToken};
 
+use crate::attachment::MAX_WS_LINE_BYTES;
+
 /// LobbyDO 内 in-memory queue 上限の既定値 (`LOBBY_QUEUE_SIZE_LIMIT` 未設定時)。
 const DEFAULT_LOBBY_QUEUE_SIZE_LIMIT: usize = 100;
 
@@ -166,6 +168,19 @@ impl DurableObject for Lobby {
             WebSocketIncomingMessage::String(s) => s,
             WebSocketIncomingMessage::Binary(_) => return Ok(()),
         };
+        // Issue #627: parser / allocation に流す前に元バイト数で上限判定する。
+        // `trim_end_matches` で改行を削った後だと判定対象が縮むため、必ず raw の
+        // 元の長さを使う。超過時は `1009 Message Too Big` で即 close し、
+        // 構造化 console_log を残す。
+        if raw.len() > MAX_WS_LINE_BYTES {
+            console_log!(
+                "[Lobby] event=ws_message_too_big bytes={} limit={}",
+                raw.len(),
+                MAX_WS_LINE_BYTES,
+            );
+            let _ = ws.close(Some(1009), Some("message too big".to_owned()));
+            return Ok(());
+        }
         let line = raw.trim_end_matches(['\r', '\n']).to_owned();
 
         let attachment: LobbyAttachment = ws

@@ -62,7 +62,10 @@ use rshogi_csa_server::types::{
 };
 use rshogi_csa_server::{FloodgateHistoryEntry, FloodgateHistoryStorage, HistoryColor};
 
-use crate::attachment::{Role, WsAttachment, parse_login_handle};
+use crate::attachment::{
+    MAX_SPECTATOR_QUEUE_BYTES, MAX_SPECTATOR_QUEUE_ITEMS, MAX_WS_LINE_BYTES, Role, WsAttachment,
+    parse_login_handle,
+};
 use crate::config::{
     ConfigKeys, parse_agree_timeout_duration, parse_clock_presets, parse_clock_spec,
     resolve_reconnect_grace_from_strings,
@@ -257,6 +260,19 @@ impl DurableObject for GameRoom {
             WebSocketIncomingMessage::String(s) => s,
             WebSocketIncomingMessage::Binary(_) => return Ok(()),
         };
+        // Issue #627: parser / allocation に流す前に元バイト数で上限判定する。
+        // `trim_end_matches` で改行を削った後だと判定対象が縮むため、必ず raw の
+        // 元の長さを使う。超過時は `1009 Message Too Big` で即 close し、
+        // 構造化 console_log を残す (rate limit は #622 / 別 issue scope)。
+        if raw.len() > MAX_WS_LINE_BYTES {
+            console_log!(
+                "[GameRoom] event=ws_message_too_big bytes={} limit={}",
+                raw.len(),
+                MAX_WS_LINE_BYTES,
+            );
+            let _ = ws.close(Some(1009), Some("message too big".to_owned()));
+            return Ok(());
+        }
         let line = raw.trim_end_matches(['\r', '\n']).to_owned();
 
         let attachment: WsAttachment = ws
@@ -1681,6 +1697,29 @@ impl GameRoom {
                 continue;
             };
             if snapshot_in_progress {
+                // Issue #627: queue を push する前に上限を判定する。
+                // - 行数 > `MAX_SPECTATOR_QUEUE_ITEMS`
+                // - bytes (各 line の `len()` 総和 + 今回追加分) > `MAX_SPECTATOR_QUEUE_BYTES`
+                // のいずれか満たす場合は、attachment を上書きせずに観戦者を切断する。
+                // serialize_attachment をスキップすることで、close 後の hibernation
+                // 復帰時にも肥大化した queue が残らないことを保証する (Codex review)。
+                let next_items = pending_queue.len().saturating_add(1);
+                let current_bytes: usize = pending_queue.iter().map(|(s, _)| s.len()).sum();
+                let next_bytes = current_bytes.saturating_add(line.len());
+                if next_items > MAX_SPECTATOR_QUEUE_ITEMS || next_bytes > MAX_SPECTATOR_QUEUE_BYTES
+                {
+                    console_log!(
+                        "[GameRoom] event=spectator_queue_overflow room_id={} items={} bytes={} \
+                         limit_items={} limit_bytes={}",
+                        room_id,
+                        next_items,
+                        next_bytes,
+                        MAX_SPECTATOR_QUEUE_ITEMS,
+                        MAX_SPECTATOR_QUEUE_BYTES,
+                    );
+                    let _ = ws.close(Some(1009), Some("spectator queue overflow".to_owned()));
+                    continue;
+                }
                 // snapshot 送信中は queue に積むだけ。flush 経路で重複手は弾く。
                 pending_queue.push((line.to_owned(), ply));
                 let updated = WsAttachment::Spectator {
