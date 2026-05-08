@@ -1,0 +1,183 @@
+# Cloudflare Workers (rshogi-csa-server-workers) の production 外形監視 (synthetic check)。
+#
+# Refs https://github.com/SH11235/rshogi/issues/630
+#
+# `deploy-workers.yml` の smoke check は **deploy 直後 1 回のみ** であり、
+# production が静かに壊れた (R2 binding 障害 / DO migration 不整合 / cron 停止 等) 場合
+# 次の deploy までユーザ報告でしか気付けない。本 workflow は cron で定期的に
+# `/health` と `/api/v1/games/live` を curl + jq で叩き、応答が壊れていたら
+# `csa-synthetic-failure` label 付き issue を 1 本立てる (既存 open があれば
+# comment 追記)。issue 起票 pattern は `cloudflare-drift-check.yml` を踏襲する。
+#
+# 本 workflow は **dry-run mode (read-only API 叩きのみ)** で、production に
+# WS / R2 書き込みは発生させない。実対局 synthetic は staging のみ
+# (`synthetic-csa-staging.yml` 参照)。
+#
+# 頻度: 10 分間隔 (`*/10 * * * *`)。当面これで運用し、p95 実行時間と Actions
+# 月間 minutes を 1〜2 週間観測してから 5 分化検討。issue 本文の DO heartbeat
+# 5 分間隔は将来の上限目安として記載するが、初期は 10 分 (検知 MTTD 10 分) で
+# ノイズと billed minutes を抑える。
+#
+# `WORKERS_HEALTH_URL` (= `/health` の絶対 URL) は既存 deploy job と共有の
+# Environment 変数。`WORKERS_LIVE_GAMES_URL` は本 workflow で新たに参照する
+# `/api/v1/games/live` の絶対 URL。未設定時は warning + skip して fail させない
+# (drift-check workflow と同じ fail-safe)。
+
+name: Synthetic CSA (production)
+
+on:
+  schedule:
+    # `*/10 * * * *` = 10 分間隔 (UTC)。GitHub Actions の cron は best-effort で
+    # 1〜2 分の delay は許容される (peak hour はさらに遅延する場合あり)。MTTD は
+    # 10〜15 分の上振れを見込む。
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+# 同時実行は 1 本に絞る。前回 cron が遅延して overlap する場合は新しい run を
+# 優先 (旧 run を cancel) する: synthetic check は最新観測のみ意味があるため。
+concurrency:
+  group: synthetic-csa-production
+  cancel-in-progress: true
+
+# /health などの read-only 叩きと、failure 時の issue 起票 (label 作成 + create + comment)。
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  synthetic:
+    name: Production /health + /api/v1/games/live synthetic check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: rshogi-csa-server-workers-production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      # `csa-synthetic-failure` label が repo 未作成だと `gh issue create --label`
+      # が失敗するので idempotent に作る (drift-check と同じ pattern)。
+      - name: Ensure csa-synthetic-failure label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create csa-synthetic-failure \
+            --description "CSA Worker synthetic check failure detected by synthetic-csa-*.yml" \
+            --color B60205 \
+            || true
+      # Environment variable `WORKERS_HEALTH_URL` / `WORKERS_LIVE_GAMES_URL` を
+      # それぞれ 5 回までリトライ + 5 秒間隔で叩く。両方 200 + 想定 schema が
+      # 通れば PASS、片方でも崩れたら FAIL とする。
+      #
+      # 出力は `result.txt` (1 行サマリ) と `details.txt` (詳細ログ) に書き分ける。
+      # issue 起票 step がこれらを引用する。
+      - name: Run synthetic checks
+        id: probe
+        env:
+          HEALTH_URL: ${{ vars.WORKERS_HEALTH_URL }}
+          LIVE_URL: ${{ vars.WORKERS_LIVE_GAMES_URL }}
+        run: |
+          set -uo pipefail
+          : >details.txt
+          : >result.txt
+
+          if [ -z "$HEALTH_URL" ] || [ -z "$LIVE_URL" ]; then
+            echo "::warning::WORKERS_HEALTH_URL or WORKERS_LIVE_GAMES_URL not set on rshogi-csa-server-workers-production Environment; skipping synthetic check"
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          fail_reason=""
+
+          # /health: 200 + JSON + (deployed_sha が string) を確認。
+          # `deployed_sha` 値そのものの比較は drift-check workflow が担当する。
+          # ここでは schema が壊れていない (production が完全に応答不能でない)
+          # ことだけ見る。
+          health_ok=false
+          for attempt in 1 2 3 4 5; do
+            body=$(curl -fsS --max-time 10 "$HEALTH_URL" 2>>details.txt || true)
+            if [ -n "$body" ] && jq -e '.deployed_sha | type == "string"' >/dev/null 2>&1 <<<"$body"; then
+              health_ok=true
+              break
+            fi
+            echo "[/health attempt $attempt] body=$body" >>details.txt
+            sleep 5
+          done
+          if ! $health_ok; then
+            fail_reason="${fail_reason}/health did not return valid JSON with deployed_sha after 5 attempts; "
+          fi
+
+          # /api/v1/games/live: 200 + JSON + live_games が array であることを確認。
+          # 空配列でも OK (= 進行中対局なしの正常系)。
+          # response shape: `LiveListResponse { live_games, next_cursor }`
+          # (viewer_api.rs::handle_list_live)
+          live_ok=false
+          for attempt in 1 2 3 4 5; do
+            body=$(curl -fsS --max-time 10 "$LIVE_URL" 2>>details.txt || true)
+            if [ -n "$body" ] && jq -e '.live_games | type == "array"' >/dev/null 2>&1 <<<"$body"; then
+              live_ok=true
+              break
+            fi
+            echo "[/api/v1/games/live attempt $attempt] body=$body" >>details.txt
+            sleep 5
+          done
+          if ! $live_ok; then
+            fail_reason="${fail_reason}/api/v1/games/live did not return valid JSON with games array after 5 attempts; "
+          fi
+
+          if [ -z "$fail_reason" ]; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+            echo "production synthetic check passed" | tee result.txt
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "$fail_reason" | tee result.txt
+            # job 自体は continue させて issue 起票 step まで通す。
+            # 最後に明示的に exit 1。
+            echo "fail_reason=$fail_reason" >> "$GITHUB_OUTPUT"
+          fi
+      # FAIL のみ issue を起票 / 既存 open があれば comment 追記する。
+      # label `csa-synthetic-failure` で同 label の open issue を最大 1 本に集約。
+      - name: Open or update synthetic failure issue
+        if: steps.probe.outputs.status == 'fail'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REASON: ${{ steps.probe.outputs.fail_reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="CSA synthetic failure (production): periodic /health or /api/v1/games/live broken"
+          # body は HEREDOC で組み立てる (改行を保つため)。
+          # details.txt の末尾 100 行を引用 (curl error 等の判別に十分)。
+          {
+            echo "**Environment:** production"
+            echo
+            echo "**Triggered by:** \`synthetic-csa-production.yml\` cron"
+            echo
+            echo "**Run:** $RUN_URL"
+            echo
+            echo "**Reason:** $REASON"
+            echo
+            echo "<details><summary>curl details (last 100 lines)</summary>"
+            echo
+            echo '```'
+            tail -n 100 details.txt 2>/dev/null || true
+            echo '```'
+            echo
+            echo "</details>"
+          } >body.md
+
+          # `gh issue list --jq '.[0].number'` は open issue 0 件のとき literal "null" を
+          # 返す。`[ -n "$existing" ]` だと `null` を真と判定して `gh issue comment null ...`
+          # を実行してしまい、初回 failure で通知経路ごと壊れる。`// empty` で空文字に
+          # 倒す (drift-check workflow と同 pattern)。
+          existing=$(gh issue list --label csa-synthetic-failure --state open --limit 1 --json number --jq '.[0].number // empty' || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create \
+              --title "$title" \
+              --label csa-synthetic-failure \
+              --body-file body.md
+          fi
+      - name: Fail job if synthetic failed
+        if: steps.probe.outputs.status == 'fail'
+        run: exit 1

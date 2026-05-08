@@ -1,0 +1,301 @@
+# Cloudflare Workers (rshogi-csa-server-workers) の staging 実対局 synthetic check。
+#
+# Refs https://github.com/SH11235/rshogi/issues/630
+#
+# `csa_client` を 2 instance 起動し、`.claude/skills/csa-e2e-staging/SKILL.md` の
+# Scenario A (平手 1 局完走) 相当を毎時実行する。LOGIN → Game_Summary → AGREE →
+# 1 局完走 → R2 export → viewer API で `meta.end_reason` 確認 まで通電する。
+#
+# production には実対局 synthetic を流さない (R2 / DO の本番 traffic を増やさない、
+# kifu noise を出さない)。production の外形監視は read-only API curl のみで、
+# 別 workflow `synthetic-csa-production.yml` が担当する。
+#
+# 頻度: 毎時 0 分 (`0 * * * *`)。720 runs / 月。1 run の典型実行時間 (cache hit
+# で 3〜6 分、miss で 8〜12 分) を 1〜2 週間観測してから cron 頻度の妥当性を再評価。
+#
+# `target/release/csa_client` と `target/release/rshogi-usi` を毎回 release build
+# する。`Swatinem/rust-cache` の native cache key (`csa-synthetic-native`) を
+# 既存の wasm32 group と分離して衝突を避ける。NNUE モデルへの依存を排除するため
+# `rshogi-usi` は `MaterialLevel=9` で起動する (eval/nn.bin 読込なし)。
+#
+# 対局 preset は `byoyomi-msec-10-100` (countdown_msec, total 10s + byoyomi 100ms)。
+# Material 評価で 1 手最低思考時間が短くなるため数十秒〜2 分で完走する。終局
+# 理由は `#TIME_UP` か `%TORYO` のどちらでも synthetic としては OK
+# (Worker が GameRoom DO を回し R2 export まで貫通したか だけを見る)。
+#
+# 失敗時は `csa-synthetic-failure` label 付き issue を 1 本に集約 (production
+# workflow と同 label, 本文に environment を必ず入れる)。
+
+name: Synthetic CSA (staging)
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+# 毎時起動が前回 run の対局完走前に重なるリスクは低いが、念のため重複起動を防ぐ。
+# `cancel-in-progress: false` で進行中の対局を最後まで完走させる
+# (途中 cancel すると片側 client だけ残って Worker 側 grace 経路を不要に発火させる)。
+concurrency:
+  group: synthetic-csa-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  synthetic:
+    name: Staging Scenario A (平手 1 局完走) synthetic check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: rshogi-csa-server-workers-staging
+    env:
+      # rust-ci.yml は host job に `-C target-cpu=x86-64-v2` を渡している。本 job
+      # は ubuntu-latest 上で release build した binary をその場で動かすだけなので
+      # 既定 stable (x86-64) で問題なし。明示空文字で defensive に上書き。
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      - name: Ensure csa-synthetic-failure label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create csa-synthetic-failure \
+            --description "CSA Worker synthetic check failure detected by synthetic-csa-*.yml" \
+            --color B60205 \
+            || true
+      # `WORKERS_STAGING_BASE_URL` は staging の `https://...workers.dev` (path なし)。
+      # 未設定時は warning + skip でジョブを green に倒す (drift-check 等の他 workflow
+      # と揃えた fail-safe; 環境セットアップ未完で merge を block しない)。
+      - name: Check Environment variables
+        id: check
+        env:
+          BASE_URL: ${{ vars.WORKERS_STAGING_BASE_URL }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "::warning::WORKERS_STAGING_BASE_URL not set on rshogi-csa-server-workers-staging Environment; skipping synthetic check"
+            echo "can_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "can_run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.can_run == 'true'
+      - name: Pin toolchain
+        if: steps.check.outputs.can_run == 'true'
+        run: |
+          CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
+          rustup toolchain install "$CHANNEL" --profile minimal --no-self-update
+          rustup default "$CHANNEL"
+      - name: Setup sccache
+        if: steps.check.outputs.can_run == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Enable sccache
+        if: steps.check.outputs.can_run == 'true'
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      # native release build 用 cache key。`deploy-workers.yml` 等が使う wasm32
+      # group とは別 namespace にして cache key の衝突 (`RUSTFLAGS` 不一致での
+      # cache miss / 汚染) を防ぐ。
+      - uses: Swatinem/rust-cache@v2
+        if: steps.check.outputs.can_run == 'true'
+        with:
+          shared-key: csa-synthetic-native
+      - name: Build csa_client + rshogi-usi (release)
+        if: steps.check.outputs.can_run == 'true'
+        run: |
+          cargo build --release \
+            -p rshogi-csa-client \
+            -p rshogi-usi
+      - name: sccache stats
+        if: always() && steps.check.outputs.can_run == 'true'
+        run: sccache --show-stats || true
+      # 1 局完走 synthetic 本体。`&` で 2 client を bg 起動するが、bash run_in_background
+      # に頼らず、同期 `wait` で両 PID を回収して exit code を確実に検査する。
+      # 期待観測:
+      #   - 両 client の log に「ログイン成功」「対局情報受信」「対局開始」「対局終了」
+      #   - records/ 配下に `*.csa` + `*.sfen` が 1 ペア生成される
+      #   - viewer API で `meta.end_reason` が "RESIGN" / "TIME_UP" / "ABNORMAL" 等
+      #
+      # `--game-name byoyomi-msec-10-100` は CLOCK_PRESETS 登録名。strict mode
+      # 下では未登録 preset で `LOGIN_LOBBY:incorrect unknown_game_name` reject。
+      - name: Run Scenario A (1 局完走)
+        id: scenario
+        if: steps.check.outputs.can_run == 'true'
+        env:
+          BASE_URL: ${{ vars.WORKERS_STAGING_BASE_URL }}
+        run: |
+          set -uo pipefail
+          mkdir -p ./synthetic-records ./synthetic-logs
+
+          # workflow run id + attempt は GH Actions 上で必ず一意なので、`date +%s`
+          # 競合を避ける room_id として使う。
+          ROOM="synthetic-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "ROOM=$ROOM" | tee -a "$GITHUB_OUTPUT"
+          PRESET=byoyomi-msec-10-100
+          ENGINE=$(pwd)/target/release/rshogi-usi
+          CLIENT=$(pwd)/target/release/csa_client
+          # rshogi-usi は MaterialLevel=9 で NNUE 未ロード経路。USI_Hash 控えめ。
+          OPTS="MaterialLevel=9,USI_Hash=16,Threads=1,NetworkDelay=0,NetworkDelay2=0,MinimumThinkingTime=100,PvInterval=0"
+
+          # `--target staging` を渡しているので host / Origin は csa_client 内蔵
+          # プリセット (sh11235.workers.dev + Origin csa-client-local) が適用される。
+          # 利用 account が異なる場合は別途 `--host` / `--ws-origin` を渡す経路を
+          # 用意する必要があるが、本リポ標準 deploy 先のみ想定。
+
+          "$CLIENT" \
+            --target staging \
+            --room-id "$ROOM" \
+            --handle synthetic-alice \
+            --color black \
+            --game-name "$PRESET" \
+            --engine "$ENGINE" \
+            --options "$OPTS" \
+            --record-dir ./synthetic-records \
+            --max-games 1 \
+            >./synthetic-logs/black.log 2>&1 &
+          BLACK_PID=$!
+
+          "$CLIENT" \
+            --target staging \
+            --room-id "$ROOM" \
+            --handle synthetic-bob \
+            --color white \
+            --game-name "$PRESET" \
+            --engine "$ENGINE" \
+            --options "$OPTS" \
+            --record-dir ./synthetic-records \
+            --max-games 1 \
+            >./synthetic-logs/white.log 2>&1 &
+          WHITE_PID=$!
+
+          # 両 client の終了を `wait` で同期回収する (job timeout = 15min が外部
+          # safety net)。1 つでも非ゼロ exit したら fail とする。
+          rc=0
+          if ! wait "$BLACK_PID"; then
+            echo "::warning::black client exited non-zero" >&2
+            rc=1
+          fi
+          if ! wait "$WHITE_PID"; then
+            echo "::warning::white client exited non-zero" >&2
+            rc=1
+          fi
+
+          # 終局 lifecycle log の存在を確認。INFO レベルでも下 4 行は必ず出る。
+          for log in ./synthetic-logs/black.log ./synthetic-logs/white.log; do
+            for needle in "ログイン成功" "対局情報受信" "対局開始" "対局終了"; do
+              if ! grep -q "$needle" "$log"; then
+                echo "::warning::$log missing log line: $needle" >&2
+                rc=1
+              fi
+            done
+          done
+
+          if [ "$rc" = "0" ]; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+          fi
+      # 完走後、viewer API で R2 export まで貫通したかを確認する。`game_id` は
+      # client log の `[CSA] 対局情報受信: <game_id>` から抽出。
+      - name: Verify R2 export via viewer API
+        id: verify
+        if: steps.check.outputs.can_run == 'true' && steps.scenario.outputs.status == 'ok'
+        env:
+          BASE_URL: ${{ vars.WORKERS_STAGING_BASE_URL }}
+        run: |
+          set -uo pipefail
+          # `[CSA] 対局情報受信: <game_id>` の形式から先頭 1 件だけ取る。先後同 game_id。
+          GAME_ID=$(grep -ohE '対局情報受信: [^ ]+' ./synthetic-logs/black.log | head -n1 | awk '{print $2}')
+          if [ -z "$GAME_ID" ]; then
+            echo "::warning::could not extract game_id from black log" >&2
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "fail_reason=could not extract game_id from client log" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "GAME_ID=$GAME_ID"
+
+          # viewer API は R2 への put 完了から数秒〜十数秒のラグがある場合がある。
+          # 5 回までリトライ。`meta.end_reason` の存在で R2 export 成功を判定。
+          ok=false
+          last_body=""
+          for attempt in 1 2 3 4 5; do
+            body=$(curl -fsS --max-time 10 "${BASE_URL}/api/v1/games/${GAME_ID}" || true)
+            last_body="$body"
+            if [ -n "$body" ] && jq -e '.meta.end_reason | type == "string"' >/dev/null 2>&1 <<<"$body"; then
+              echo "viewer API response: $body" | head -c 500
+              echo
+              ok=true
+              break
+            fi
+            sleep 5
+          done
+
+          if $ok; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            echo "fail_reason=viewer API /api/v1/games/${GAME_ID} did not return meta.end_reason after 5 attempts" >> "$GITHUB_OUTPUT"
+            echo "last viewer body: $last_body"
+          fi
+      # logs / records を artifact に残しておくと、issue から辿って原因を追跡しやすい。
+      # success 時も保存しておくと「正常 run の baseline」と比較できる。
+      - name: Upload logs and records
+        if: always() && steps.check.outputs.can_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-csa-staging-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ./synthetic-logs/
+            ./synthetic-records/
+          if-no-files-found: ignore
+          retention-days: 7
+      # 失敗時 issue 起票 / 追記 (production workflow と同 label にまとめる)。
+      - name: Open or update synthetic failure issue
+        if: steps.check.outputs.can_run == 'true' && (steps.scenario.outputs.status == 'fail' || steps.verify.outputs.status == 'fail')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCENARIO_STATUS: ${{ steps.scenario.outputs.status }}
+          VERIFY_STATUS: ${{ steps.verify.outputs.status }}
+          VERIFY_REASON: ${{ steps.verify.outputs.fail_reason }}
+          ROOM: ${{ steps.scenario.outputs.ROOM }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="CSA synthetic failure (staging): Scenario A 平手 1 局完走 broken"
+          {
+            echo "**Environment:** staging"
+            echo
+            echo "**Triggered by:** \`synthetic-csa-staging.yml\` cron"
+            echo
+            echo "**Run:** $RUN_URL"
+            echo
+            echo "**Room ID:** \`$ROOM\`"
+            echo
+            echo "**Scenario A status:** $SCENARIO_STATUS"
+            echo "**R2 export verify status:** ${VERIFY_STATUS:-skipped}"
+            if [ -n "${VERIFY_REASON:-}" ]; then
+              echo
+              echo "**Verify reason:** $VERIFY_REASON"
+            fi
+            echo
+            echo "Logs are uploaded as the workflow artifact \`synthetic-csa-staging-${{ github.run_id }}-${{ github.run_attempt }}\` (\`synthetic-logs/black.log\`, \`synthetic-logs/white.log\`, \`synthetic-records/\`)."
+          } >body.md
+
+          # `gh issue list --jq '.[0].number'` は open issue 0 件のとき literal "null" を
+          # 返す。`[ -n "$existing" ]` だと `null` を真と判定して `gh issue comment null ...`
+          # を実行してしまい、初回 failure で通知経路ごと壊れる。`// empty` で空文字に
+          # 倒す (drift-check workflow と同 pattern)。
+          existing=$(gh issue list --label csa-synthetic-failure --state open --limit 1 --json number --jq '.[0].number // empty' || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create \
+              --title "$title" \
+              --label csa-synthetic-failure \
+              --body-file body.md
+          fi
+      - name: Fail job if synthetic failed
+        if: steps.check.outputs.can_run == 'true' && (steps.scenario.outputs.status == 'fail' || steps.verify.outputs.status == 'fail')
+        run: exit 1
