@@ -18,10 +18,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use rshogi_csa_client::engine::UsiEngine;
+use rshogi_csa_client::engine::{SpawnOptions, UsiEngine};
 use rshogi_csa_client::event::Event;
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 既存テストの 5 引数 spawn 呼び出しを集約するためのヘルパ。`stderr_passthrough` 以外は
+/// fixture でほぼ固定値のため、testless な call site を増やさず簡潔に書けるようにする。
+fn spawn_opts(stderr_passthrough: bool) -> SpawnOptions {
+    SpawnOptions {
+        ponder: false,
+        startup_timeout: SPAWN_TIMEOUT,
+        stderr_passthrough,
+    }
+}
 
 static SCRIPT_SEQ: AtomicU64 = AtomicU64::new(0);
 static TMPDIR_LOCK: Mutex<()> = Mutex::new(());
@@ -85,7 +95,7 @@ exit 1
 "#;
     let path = write_mock_script("dying_immediate", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
-    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false) {
+    let err = match UsiEngine::spawn(&path, &opts, spawn_opts(false)) {
         Ok(_) => panic!("spawn 即時死で error が期待される"),
         Err(e) => e,
     };
@@ -116,8 +126,8 @@ exit 1
 "#;
     let path = write_mock_script("dying_after_handshake", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
-    let mut engine = UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false)
-        .expect("初回 handshake は成功する想定");
+    let mut engine =
+        UsiEngine::spawn(&path, &opts, spawn_opts(false)).expect("初回 handshake は成功する想定");
     // engine プロセスは usiok+readyok を返した直後に exit。
     // new_game() は usinewgame + isready を送る。BrokenPipe か recv Disconnected
     // のいずれかから engine_exited_error() に合流する。
@@ -153,7 +163,7 @@ exit 1
     let path = write_mock_script("dying_during_go", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
     let mut engine =
-        UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false).expect("初回 handshake は成功");
+        UsiEngine::spawn(&path, &opts, spawn_opts(false)).expect("初回 handshake は成功");
     engine.new_game().expect("new_game は成功");
     let shutdown = AtomicBool::new(false);
     let (_tx, server_rx) = mpsc::channel::<Event>();
@@ -190,7 +200,7 @@ exit 1
     let path = write_mock_script("long_stderr_line", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
     // initialize は usiok 後 isready を送る → engine 死亡で error
-    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false) {
+    let err = match UsiEngine::spawn(&path, &opts, spawn_opts(false)) {
         Ok(_) => panic!("isready 送信前後で engine 死亡 → error が期待される"),
         Err(e) => e,
     };
@@ -220,7 +230,7 @@ exit 1
 "#;
     let path = write_mock_script("crlf_stderr", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
-    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false) {
+    let err = match UsiEngine::spawn(&path, &opts, spawn_opts(false)) {
         Ok(_) => panic!("isready 後 engine 死亡 → error が期待される"),
         Err(e) => e,
     };
@@ -251,7 +261,7 @@ exit 1
 "#;
     let path = write_mock_script("empty_line_not_eof", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
-    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, false) {
+    let err = match UsiEngine::spawn(&path, &opts, spawn_opts(false)) {
         Ok(_) => panic!("isready 後 engine 死亡 → error が期待される"),
         Err(e) => e,
     };
@@ -283,15 +293,19 @@ exit 1
 "#;
     let path = write_mock_script("passthrough_smoke", script);
     let opts: HashMap<String, toml::Value> = HashMap::new();
-    // 第 5 引数 stderr_passthrough = true。
-    let err = match UsiEngine::spawn(&path, &opts, false, SPAWN_TIMEOUT, true) {
+    // SpawnOptions { stderr_passthrough: true } で起動。
+    let err = match UsiEngine::spawn(&path, &opts, spawn_opts(true)) {
         Ok(_) => panic!("spawn 即時死で error が期待される"),
         Err(e) => e,
     };
     let msg = format!("{err:#}");
     assert_diagnostic_prefix(&msg, &path);
+    // STDERR_TAIL_MAX_LINES = 64 なので 2 行の `passthrough line A` / `passthrough line B`
+    // は cap 落ちしない前提で両方とも diagnostic msg に含まれていることを厳格 assert する。
+    // ring buffer cap が 1 行に縮まる将来変更があれば本 assertion は再検討が必要 (mock の
+    // 出力行数 / cap のいずれかを揃える)。
     assert!(
-        msg.contains("passthrough line A") || msg.contains("passthrough line B"),
-        "passthrough=true でも ring buffer に末尾が積まれているはず: {msg}"
+        msg.contains("passthrough line A") && msg.contains("passthrough line B"),
+        "passthrough=true でも ring buffer に末尾 (line A / line B 両方) が積まれているはず: {msg}"
     );
 }

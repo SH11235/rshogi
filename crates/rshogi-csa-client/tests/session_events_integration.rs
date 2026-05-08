@@ -24,7 +24,7 @@ use std::thread;
 use std::time::Duration;
 
 use rshogi_csa_client::config::CsaClientConfig;
-use rshogi_csa_client::engine::UsiEngine;
+use rshogi_csa_client::engine::{SpawnOptions, UsiEngine};
 use rshogi_csa_client::events::{
     DisconnectReason, MovePlayer, ReconnectState, SearchInfoEmitPolicy, SessionError,
     SessionEventSink, SessionProgress, SinkError,
@@ -279,9 +279,11 @@ fn fresh_session_emits_expected_event_sequence() {
     let mut engine = UsiEngine::spawn(
         &config.engine.path,
         &config.engine.options,
-        config.game.ponder,
-        Duration::from_secs(5),
-        false,
+        SpawnOptions {
+            ponder: config.game.ponder,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
     )
     .expect("spawn engine");
 
@@ -362,9 +364,11 @@ fn resumed_session_emits_resumed_event_and_no_history_replay() {
     let mut engine = UsiEngine::spawn(
         &config.engine.path,
         &config.engine.options,
-        config.game.ponder,
-        Duration::from_secs(5),
-        false,
+        SpawnOptions {
+            ponder: config.game.ponder,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
     )
     .expect("spawn engine");
 
@@ -432,9 +436,11 @@ fn resumed_state_last_sfen_matches_summary_position_section() {
     let mut engine = UsiEngine::spawn(
         &config.engine.path,
         &config.engine.options,
-        config.game.ponder,
-        Duration::from_secs(5),
-        false,
+        SpawnOptions {
+            ponder: config.game.ponder,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
     )
     .expect("spawn engine");
 
@@ -549,9 +555,11 @@ fn fatal_sink_triggers_clean_closure_and_returns_sink_aborted() {
     let mut engine = UsiEngine::spawn(
         &config.engine.path,
         &config.engine.options,
-        config.game.ponder,
-        Duration::from_secs(5),
-        false,
+        SpawnOptions {
+            ponder: config.game.ponder,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
     )
     .expect("spawn engine");
 
@@ -627,9 +635,11 @@ fn external_shutdown_emits_shutdown_disconnected_and_returns_shutdown_error() {
     let mut engine = UsiEngine::spawn(
         &config.engine.path,
         &config.engine.options,
-        config.game.ponder,
-        Duration::from_secs(5),
-        false,
+        SpawnOptions {
+            ponder: config.game.ponder,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
     )
     .expect("spawn engine");
 
@@ -698,9 +708,11 @@ fn external_shutdown_observed_through_legacy_run_game_session() {
     let mut engine = UsiEngine::spawn(
         &config.engine.path,
         &config.engine.options,
-        config.game.ponder,
-        Duration::from_secs(5),
-        false,
+        SpawnOptions {
+            ponder: config.game.ponder,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
     )
     .expect("spawn engine");
 
@@ -751,9 +763,11 @@ fn nonfatal_sink_does_not_invoke_on_error_and_session_continues() {
     let mut engine = UsiEngine::spawn(
         &config.engine.path,
         &config.engine.options,
-        config.game.ponder,
-        Duration::from_secs(5),
-        false,
+        SpawnOptions {
+            ponder: config.game.ponder,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
     )
     .expect("spawn engine");
 

@@ -82,7 +82,9 @@ pub mod transport;
 // `use rshogi_csa_client::{CsaClientConfig, UsiEngine, ...}` で参照できる。
 // 型名は実装側に合わせており、別名は付与しない。
 pub use config::CsaClientConfig;
-pub use engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine, UsiEngineDriver};
+pub use engine::{
+    BestMoveResult, SearchInfo, SearchOutcome, SpawnOptions, UsiEngine, UsiEngineDriver,
+};
 pub use event::Event;
 pub use events::{
     BestMoveEvent, DisconnectReason, GameEndEvent, GameEndReason, MoveEvent, MovePlayer,

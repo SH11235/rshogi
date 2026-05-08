@@ -33,6 +33,25 @@ const STDERR_JOIN_WAIT_GRACEFUL: Duration = Duration::from_millis(500);
 /// `Drop` (fast path) で stderr reader thread の join を待つ最大時間。
 const STDERR_JOIN_WAIT_DROP: Duration = Duration::from_millis(100);
 
+/// [`UsiEngine::spawn`] の起動オプション。
+///
+/// `bool` 引数 (ponder / stderr_passthrough) の意味取り違えを防ぐため、起動時に
+/// 個別意味を持つ flag は本 struct に集約する。`Default` impl は意図的に提供しない:
+/// 全 call site が値を明示することで「どの flag が ON か」を呼び出し位置で読めるようにする
+/// (TOML/CLI から渡された値をそのまま透過するのが既存運用)。
+pub struct SpawnOptions {
+    /// USI engine に ponder (相手手番中思考) を許可するか。CSA `--ponder` / TOML
+    /// `game.ponder` から伝搬される。
+    pub ponder: bool,
+    /// USI handshake (`usi` → `usiok` → `isready` → `readyok`) を待つ最大時間。
+    /// CSA TOML `engine.startup_timeout_sec` から伝搬される。
+    pub startup_timeout: Duration,
+    /// engine stderr を csa_client log に多重化するか。true のとき stderr reader
+    /// thread は ring buffer に push するのに加えて各行を `log::info!("[engine stderr] ...")`
+    /// に転送する。debug / 初期セットアップ用で、通常稼働時は false。
+    pub stderr_passthrough: bool,
+}
+
 /// USIエンジンプロセス
 pub struct UsiEngine {
     child: Child,
@@ -113,17 +132,21 @@ pub type InfoCallback<'a> = dyn FnMut(&SearchInfo, &str) + 'a;
 /// 利用例:
 ///
 /// ```ignore
-/// use rshogi_csa_client::{run_game_session_with_events, UsiEngine, UsiEngineDriver};
+/// use rshogi_csa_client::{
+///     run_game_session_with_events, SpawnOptions, UsiEngine, UsiEngineDriver,
+/// };
 ///
 /// // 1. 具象 `UsiEngine` をそのまま渡す
-/// let mut engine = UsiEngine::spawn(&path, &options, ponder, timeout, false)?;
+/// let opts = SpawnOptions { ponder, startup_timeout: timeout, stderr_passthrough: false };
+/// let mut engine = UsiEngine::spawn(&path, &options, opts)?;
 /// run_game_session_with_events(&config, &mut conn, &mut engine, shutdown, &mut sink)?;
 ///
 /// // 2. dyn dispatch で複数 engine 実装を切り替える
+/// let opts = SpawnOptions { ponder, startup_timeout: timeout, stderr_passthrough: false };
 /// let mut engine: Box<dyn UsiEngineDriver> = if use_builtin {
 ///     Box::new(BuiltinEngine::new(...))
 /// } else {
-///     Box::new(UsiEngine::spawn(&path, &options, ponder, timeout, false)?)
+///     Box::new(UsiEngine::spawn(&path, &options, opts)?)
 /// };
 /// run_game_session_with_events(&config, &mut conn, &mut *engine, shutdown, &mut sink)?;
 /// ```
@@ -250,17 +273,19 @@ pub struct SearchInfo {
 impl UsiEngine {
     /// USIエンジンを起動し、初期化する。
     ///
-    /// `stderr_passthrough` が true のとき、stderr reader thread は ring buffer
-    /// に push するのに加えて各行を `log::info!("[engine stderr] {line}")` で
-    /// csa_client log に多重化する。debug / 初期セットアップ時に engine 出力を
-    /// 即時確認するための機能で、通常稼働時は false を渡す。
+    /// `opts` は [`SpawnOptions`] を参照: ponder 可否 / handshake timeout /
+    /// stderr passthrough を集約する。bool 2 個 (ponder と stderr_passthrough) を
+    /// 位置引数で並べると call site で意味が逆転して気付きにくいため struct で渡す。
     pub fn spawn(
         path: &Path,
         options: &HashMap<String, toml::Value>,
-        ponder: bool,
-        timeout: Duration,
-        stderr_passthrough: bool,
+        opts: SpawnOptions,
     ) -> Result<Self> {
+        let SpawnOptions {
+            ponder,
+            startup_timeout: timeout,
+            stderr_passthrough,
+        } = opts;
         let mut cmd = Command::new(path);
         // 子プロセスを独立したプロセスグループで起動
         #[cfg(unix)]

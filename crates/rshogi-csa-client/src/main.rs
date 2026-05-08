@@ -19,10 +19,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Parser, ValueEnum};
+use clap::{ArgAction, Parser, ValueEnum};
 
 use rshogi_csa_client::config::CsaClientConfig;
-use rshogi_csa_client::engine::UsiEngine;
+use rshogi_csa_client::engine::{SpawnOptions, UsiEngine};
 use rshogi_csa_client::events::SessionOutcome;
 use rshogi_csa_client::jsonl::write_game_jsonl;
 use rshogi_csa_client::protocol::{CsaConnection, GameResult};
@@ -173,8 +173,39 @@ struct Cli {
     /// engine stderr を csa_client log に多重化する (`log::info!("[engine stderr] ...")`).
     /// debug / 初期セットアップ用。default は false (既存の ring buffer 末尾捕捉のみ)。
     /// TOML の `engine.stderr_passthrough` でも指定可。
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
-    engine_stderr_passthrough: Option<bool>,
+    ///
+    /// `--engine-stderr-passthrough` / `--no-engine-stderr-passthrough` のペアで指定する。
+    /// 両方指定された場合は clap の `overrides_with` により最後に指定された方が勝つ。
+    /// 旧形式 `--engine-stderr-passthrough=false` は廃止 (`--no-engine-stderr-passthrough` を使用)。
+    #[arg(
+        long = "engine-stderr-passthrough",
+        action = ArgAction::SetTrue,
+        overrides_with = "no_engine_stderr_passthrough_flag"
+    )]
+    engine_stderr_passthrough_flag: bool,
+
+    /// `--engine-stderr-passthrough` を打ち消す。TOML 値を CLI から明示的に false 上書きする
+    /// 用途で使用する。両方指定された場合は最後に指定された方が勝つ。
+    #[arg(
+        long = "no-engine-stderr-passthrough",
+        action = ArgAction::SetTrue,
+        overrides_with = "engine_stderr_passthrough_flag"
+    )]
+    no_engine_stderr_passthrough_flag: bool,
+}
+
+/// CLI で `--engine-stderr-passthrough` / `--no-engine-stderr-passthrough` のいずれかが
+/// 明示指定された場合のみ `Some(bool)` を返す。未指定時は `None` を返し、TOML/環境変数の
+/// 値をそのまま温存する。`overrides_with` のため両方指定後に最後に勝った方の flag のみ
+/// true になる前提。
+fn cli_engine_stderr_passthrough(cli: &Cli) -> Option<bool> {
+    match (cli.engine_stderr_passthrough_flag, cli.no_engine_stderr_passthrough_flag) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        // (false, false): 未指定 / (true, true): clap の overrides_with の挙動上ありえないが
+        // 念のため None で TOML 値を温存する。
+        _ => None,
+    }
 }
 
 fn main() -> Result<()> {
@@ -333,9 +364,11 @@ fn spawn_engine(config: &CsaClientConfig) -> Result<UsiEngine> {
     UsiEngine::spawn(
         &config.engine.path,
         &config.engine.options,
-        config.game.ponder,
-        Duration::from_secs(config.engine.startup_timeout_sec),
-        config.engine.stderr_passthrough,
+        SpawnOptions {
+            ponder: config.game.ponder,
+            startup_timeout: Duration::from_secs(config.engine.startup_timeout_sec),
+            stderr_passthrough: config.engine.stderr_passthrough,
+        },
     )
 }
 
@@ -737,7 +770,7 @@ fn apply_cli_overrides(config: &mut CsaClientConfig, cli: &Cli) {
     if let Some(ref dir) = cli.jsonl_out {
         config.record.jsonl_out = Some(dir.clone());
     }
-    if let Some(passthrough) = cli.engine_stderr_passthrough {
+    if let Some(passthrough) = cli_engine_stderr_passthrough(cli) {
         config.engine.stderr_passthrough = passthrough;
     }
     if let Some(ref opts) = cli.options {
@@ -854,7 +887,8 @@ mod tests {
             record_dir: None,
             jsonl_out: None,
             options: None,
-            engine_stderr_passthrough: None,
+            engine_stderr_passthrough_flag: false,
+            no_engine_stderr_passthrough_flag: false,
         }
     }
 
@@ -1084,5 +1118,60 @@ mod tests {
     fn should_attempt_reconnect_returns_none_when_result_is_not_interrupted() {
         let outcome = session_outcome_with(GameResult::Win, Some("a".repeat(32)));
         assert!(should_attempt_reconnect(&outcome, false).is_none());
+    }
+
+    // ───────────────────────────────────────────────
+    // `--engine-stderr-passthrough` / `--no-engine-stderr-passthrough` の clap
+    // パース挙動を pin する。`overrides_with` ペアで「未指定 = None」「肯定 / 否定 =
+    // Some(bool)」「両指定 = 最後勝ち」を表現するため、helper の判定が clap の
+    // 振る舞いと整合することを確認する。
+    // ───────────────────────────────────────────────
+
+    /// 引数解析用の minimal arg 列を組み立てる。Cli は `argv[0]` (= 実行ファイル名) と
+    /// その後に flag を取るため、binary 名 placeholder + 任意の追加引数で組み立てる。
+    fn parse_cli(extra: &[&str]) -> Cli {
+        let mut argv: Vec<&str> = vec!["rshogi-csa-client"];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv).expect("clap parse")
+    }
+
+    #[test]
+    fn cli_engine_stderr_passthrough_unset_returns_none() {
+        let cli = parse_cli(&[]);
+        assert_eq!(cli_engine_stderr_passthrough(&cli), None);
+    }
+
+    #[test]
+    fn cli_engine_stderr_passthrough_flag_only_returns_some_true() {
+        let cli = parse_cli(&["--engine-stderr-passthrough"]);
+        assert_eq!(cli_engine_stderr_passthrough(&cli), Some(true));
+    }
+
+    #[test]
+    fn cli_engine_stderr_passthrough_no_flag_only_returns_some_false() {
+        let cli = parse_cli(&["--no-engine-stderr-passthrough"]);
+        assert_eq!(cli_engine_stderr_passthrough(&cli), Some(false));
+    }
+
+    /// `--engine-stderr-passthrough --no-engine-stderr-passthrough` の順で指定された場合は
+    /// `overrides_with` により後勝ちで `Some(false)` になる。
+    #[test]
+    fn cli_engine_stderr_passthrough_flag_then_no_flag_returns_some_false() {
+        let cli = parse_cli(&[
+            "--engine-stderr-passthrough",
+            "--no-engine-stderr-passthrough",
+        ]);
+        assert_eq!(cli_engine_stderr_passthrough(&cli), Some(false));
+    }
+
+    /// `--no-engine-stderr-passthrough --engine-stderr-passthrough` の順で指定された場合は
+    /// `overrides_with` により後勝ちで `Some(true)` になる。
+    #[test]
+    fn cli_engine_stderr_passthrough_no_flag_then_flag_returns_some_true() {
+        let cli = parse_cli(&[
+            "--no-engine-stderr-passthrough",
+            "--engine-stderr-passthrough",
+        ]);
+        assert_eq!(cli_engine_stderr_passthrough(&cli), Some(true));
     }
 }
