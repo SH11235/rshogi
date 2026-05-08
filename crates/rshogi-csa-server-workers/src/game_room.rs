@@ -1314,10 +1314,15 @@ impl GameRoom {
     ///
     /// 成功時 (`verify_admin_token_str` OK): WS attachment の `is_admin` を
     /// `true` に上書きし、`##[ADMIN] OK` を返す。
-    /// 失敗時 (token 不一致 / secret 未配置 / token 空): `##[ADMIN]
-    /// PERMISSION_DENIED` を返す (TokenNotConfigured と TokenMismatch を区別
-    /// しないことで「admin 機能が configured かどうか」の leak を防ぐ)。
+    /// 失敗時 (token 不一致 / secret 未配置): `##[ADMIN] PERMISSION_DENIED`
+    /// を返す (TokenNotConfigured と TokenMismatch を区別しないことで「admin
+    /// 機能が configured かどうか」の leak を防ぐ)。
     /// 呼び出し側は本関数の返値を順次 `send_line` で WS に流す契約。
+    ///
+    /// 本関数は `parse_admin_line` が `Some(token)` を返した経路でのみ呼ばれる
+    /// 前提。token 部欠落 (`%%ADMIN` 単体 / whitespace のみ) は呼び出し側
+    /// (`handle_game_line`) で `parse_admin_line == None` として silent ignore
+    /// される設計 (`docs/csa-server/admin_auth.md` §応答仕様の通り)。
     async fn handle_admin_elevation(&self, ws: &WebSocket, token: &str) -> Result<Vec<String>> {
         match crate::admin_auth::verify_admin_token_str(token, &self.env) {
             Ok(()) => {
