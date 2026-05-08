@@ -179,3 +179,11 @@ CHALLENGE_TTL_SEC = "3600"
 #   設定: `vp exec wrangler secret put ADMIN_HANDLE --config wrangler.production.toml`
 #   確認: `vp exec wrangler secret list --config wrangler.production.toml`
 #   詳細は `docs/csa-server/deployment.md` §2.5 参照。
+#
+# - ADMIN_API_TOKEN: HTTP admin endpoint や WS 内 admin command (`%%ADMIN <token>`
+#   等、後続 https://github.com/SH11235/rshogi/issues/621 で消費) の認可基盤として
+#   `crate::admin_auth` から参照される 1 本の static API token (Floodgate audit
+#   https://github.com/SH11235/rshogi/issues/560 由来)。
+#   設定: `vp exec wrangler secret put ADMIN_API_TOKEN --config wrangler.production.toml`
+#   確認: `vp exec wrangler secret list --config wrangler.production.toml`
+#   rotation / token 生成手順は `docs/csa-server/admin_auth.md` 参照。

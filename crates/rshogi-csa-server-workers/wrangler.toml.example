@@ -119,6 +119,12 @@ BYOYOMI_MIN = "1"
 CLOCK_PRESETS = "[]"
 # `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル（LOGIN の handle 部分）。
 ADMIN_HANDLE = "admin"
+# admin 認可基盤 (HTTP admin endpoint / WS 内 admin command で共用される
+# static API token、https://github.com/SH11235/rshogi/issues/560)。
+# production / staging では `wrangler secret put ADMIN_API_TOKEN` で配置するため
+# 本テンプレートには placeholder のみを置く。local dev で admin 経路を通電させる
+# 場合のみ実値を埋める運用 (rotation 手順は `docs/csa-server/admin_auth.md` 参照)。
+ADMIN_API_TOKEN = "local-dev-admin-token-placeholder"
 # 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
 # `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
 RECONNECT_GRACE_SECONDS = "0"

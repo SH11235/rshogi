@@ -11,6 +11,7 @@
 ## 設計 / 運用 (Workers)
 
 - [`deployment.md`](deployment.md) — Cloudflare Workers の staging / production 構築・運用 runbook。
+- [`admin_auth.md`](admin_auth.md) — admin 認可 (`ADMIN_API_TOKEN`) の生成・登録・rotation 手順 ([#560](https://github.com/SH11235/rshogi/issues/560))。
 - [`viewer_access_control.md`](viewer_access_control.md) — viewer / spectate API の access control (Origin allowlist / kill-switch) 運用。
 - [`lobby_design.md`](lobby_design.md) — LobbyDO + マッチングの詳細設計 (`/ws/lobby`、`MATCHED` 通知、queue 戦略)。
 - [`lobby_e2e_runbook.md`](lobby_e2e_runbook.md) — Lobby マッチング対局を実機 staging で回す E2E 運用手順。

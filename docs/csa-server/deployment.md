@@ -286,6 +286,7 @@ Required reviewers の **作成時設定** 自体は §2.4.1 / §2.4.2 の通り
 | Secret | 用途 |
 |---|---|
 | `ADMIN_HANDLE` | `%%SETBUOY` / `%%DELETEBUOY` を許可する運営ハンドル名。OSS repo に handle 名が出ない経路で defense-in-depth を保つ |
+| `ADMIN_API_TOKEN` | HTTP admin endpoint や WS 内 admin command の認可基盤として `crate::admin_auth` から参照する static API token (Floodgate audit [#560](https://github.com/SH11235/rshogi/issues/560))。生成 / rotation 手順は [`docs/csa-server/admin_auth.md`](admin_auth.md) を参照。 |
 
 設定手順（`vp exec wrangler login` を済ませた後で）:
 
@@ -320,8 +321,12 @@ vp exec wrangler secret put ADMIN_HANDLE --config wrangler.production.toml
 | 一覧 | `vp exec wrangler secret list --config wrangler.<env>.toml` |
 
 整合性 test (`tests/wrangler_environment_toml_consistency.rs`) が
-`wrangler.<env>.toml` の `[vars]` に `ADMIN_HANDLE` が混入していたら CI で
-fail させる契約。
+`wrangler.<env>.toml` の `[vars]` に `ADMIN_HANDLE` / `ADMIN_API_TOKEN` 等
+[`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`](../../crates/rshogi-csa-server-workers/src/config.rs)
+の値が混入していたら CI で fail させる契約。
+
+`ADMIN_API_TOKEN` の token 生成方針 / rotation / 削除手順は
+[`docs/csa-server/admin_auth.md`](admin_auth.md) に集約してある。
 
 ### 2.6 (オプション) Health URL を Environment variable に設定
 

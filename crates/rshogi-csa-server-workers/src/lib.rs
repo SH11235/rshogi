@@ -22,6 +22,7 @@ compile_error!(
      the wasm32 runtime cannot use tokio multi-threaded primitives."
 );
 
+pub mod admin_auth;
 pub mod attachment;
 // `client_kind` は `X-Client` ヘッダ値を運用ログ向けに正規化する純粋ロジック。
 // `viewer_api` (wasm32 専用) から呼ばれるが、本体は I/O 非依存なのでホスト

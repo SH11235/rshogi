@@ -1,0 +1,113 @@
+# admin 認可 (`ADMIN_API_TOKEN`) 運用ガイド
+
+Floodgate audit ([#560](https://github.com/SH11235/rshogi/issues/560)) で導入
+した admin 認可基盤の運用手順。HTTP admin endpoint と WS 内 admin command
+(後続 [#621](https://github.com/SH11235/rshogi/issues/621) で消費) の両方が
+共通の `ADMIN_API_TOKEN` secret を踏む。
+
+本ドキュメントは「token をどう作って Cloudflare に登録し、どう rotate するか」
+の運用部分に閉じる。コード側の検証ロジック仕様は
+[`crate::admin_auth`](../../crates/rshogi-csa-server-workers/src/admin_auth.rs)
+の docstring を参照。
+
+## 1. 設計サマリ
+
+| 項目 | 採用案 | 理由 |
+|---|---|---|
+| 認可方式 | static API token | replay 対策や canonical string 設計が必要な HMAC は overkill |
+| 配置 | Cloudflare secret (`wrangler secret put ADMIN_API_TOKEN`) | OSS repo / CI ログ / `wrangler.<env>.toml` に値が残らない |
+| 比較 | [`subtle::ConstantTimeEq`] による constant-time | timing leak で token の brute force 加速を防ぐ |
+| Cloudflare Access | 別管理 (運用層) | コード変更なしで IP / SSO 制限を上乗せできる |
+| 旧 token grace | 持たない (1 token のみ valid) | rotation の窓を最短化、bookkeeping を排除 |
+
+[`subtle::ConstantTimeEq`]: https://docs.rs/subtle/latest/subtle/trait.ConstantTimeEq.html
+
+## 2. token 生成
+
+256bit (32 byte) 以上の URL-safe random を推奨。OSS repo に値が混入しない経路
+で生成する。例 (どれを使ってもよい):
+
+```bash
+# openssl
+openssl rand -base64 33 | tr -d '/+=' | head -c 43
+
+# Python
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+
+# /dev/urandom + xxd
+head -c 32 /dev/urandom | xxd -p -c 64
+```
+
+短い token (16 文字未満等) や辞書語ベースの token は brute force の標的に
+なるため避ける。staging と production は **必ず別の値** にして、staging で
+漏れた token が production に通用しない分離を保つ。
+
+## 3. 登録 (初回 / rotation 共通)
+
+`vp exec wrangler login` を済ませた後で、対象環境の toml を指定して
+`wrangler secret put` を実行する。
+
+```bash
+cd crates/rshogi-csa-server-workers
+
+# staging
+vp exec wrangler secret put ADMIN_API_TOKEN --config wrangler.staging.toml
+
+# production (staging とは別値)
+vp exec wrangler secret put ADMIN_API_TOKEN --config wrangler.production.toml
+```
+
+プロンプトに値を入力 (echo されない)。Cloudflare 側で encrypted at rest され、
+Worker code は `env.var(ConfigKeys::ADMIN_API_TOKEN)` で参照する (var / secret
+は同 namespace に展開される Cloudflare 仕様)。
+
+## 4. rotation 手順
+
+旧 token grace 期間は持たない設計のため、以下の順序で実施する:
+
+1. 新 token を §2 の手順で生成。
+2. `wrangler secret put ADMIN_API_TOKEN --config wrangler.<env>.toml` で上書き
+   (旧 token は即時無効化される)。
+3. 利用側 (運用 client / CI / cron 等) の保管値を新 token に差し替える。
+4. 1 局 / 1 endpoint 通電して動作確認 (例: HTTP admin endpoint の 200、または
+   WS 内 admin command が `OK` を返す)。
+
+旧 token grace を持たないため **手順 2 と 3 のラグを最小化** する。
+複数オペレータが旧 token を保持している運用なら、rotation 直前に共有チャネル
+(Slack 等) でアナウンスし、即時切替できる体制を整える。
+
+## 5. 削除 / 無効化
+
+```bash
+vp exec wrangler secret delete ADMIN_API_TOKEN --config wrangler.<env>.toml
+```
+
+削除後は admin 認可が必要な経路がすべて
+[`AdminAuthError::TokenNotConfigured`](../../crates/rshogi-csa-server-workers/src/admin_auth.rs)
+で fail-closed する (404 / 拒否で隠蔽)。即時 kill-switch として有効。
+
+## 6. 確認
+
+```bash
+# 登録済 secret 一覧 (値は表示されない)
+vp exec wrangler secret list --config wrangler.<env>.toml
+```
+
+`ADMIN_API_TOKEN` が一覧に含まれていない環境では admin 経路は通電しない。
+
+## 7. 整合性 gate
+
+整合性 test (`tests/wrangler_environment_toml_consistency.rs`) が、
+`wrangler.production.toml` / `wrangler.staging.toml` の `[vars]` に
+`ADMIN_API_TOKEN` が混入していたら CI で fail させる契約。本値は必ず secret 経由
+で配置し、env toml の `[vars]` テーブルには書かない。
+
+`wrangler.toml.example` (local dev template) には placeholder として
+`[vars]` に書くのが正しい運用 (`tests/wrangler_template_consistency.rs` で
+gate 済み)。
+
+## 8. 関連
+
+- 認可ロジック仕様: [`crates/rshogi-csa-server-workers/src/admin_auth.rs`](../../crates/rshogi-csa-server-workers/src/admin_auth.rs)
+- Cloudflare secret 全般: [`docs/csa-server/deployment.md`](deployment.md) §2.5
+- 後続 issue: [#621](https://github.com/SH11235/rshogi/issues/621) (LOGIN/admin 認証強化、本 helper を WS 経路で消費)

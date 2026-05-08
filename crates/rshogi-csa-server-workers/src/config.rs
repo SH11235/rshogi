@@ -90,6 +90,21 @@ impl ConfigKeys {
     /// `env.var(ConfigKeys::ADMIN_HANDLE)` で var/secret どちらも読む（Cloudflare
     /// 仕様で同じ namespace に展開される）。
     pub const ADMIN_HANDLE: &'static str = "ADMIN_HANDLE";
+    /// 管理 API トークン (Floodgate audit https://github.com/SH11235/rshogi/issues/560
+    /// 由来)。HTTP admin endpoint や WS 内 admin command (後続の
+    /// https://github.com/SH11235/rshogi/issues/621 で消費) の認可基盤として
+    /// [`crate::admin_auth`] から参照される 1 本の static API token。HMAC は
+    /// overkill 判定 (replay/canonical string 設計コスト > 利得)、Cloudflare
+    /// Access (Zero Trust) は運用層で別管理する。
+    ///
+    /// **production / staging**: Cloudflare secret として
+    /// `wrangler secret put ADMIN_API_TOKEN` で配置する (rotation 手順は
+    /// `docs/csa-server/admin_auth.md` 参照)。secret 経由なので OSS repo にも
+    /// CI ログにも値は残らない。
+    /// **local dev**: `wrangler.toml.example` の `[vars]` に placeholder を残し、
+    /// `wrangler dev` を friction なく動かせるようにする。Worker code は
+    /// `env.var(ConfigKeys::ADMIN_API_TOKEN)` で var/secret どちらも読む。
+    pub const ADMIN_API_TOKEN: &'static str = "ADMIN_API_TOKEN";
     /// 切断時の再接続猶予秒数。`0` または未設定なら再接続プロトコルを無効化し、
     /// WebSocket close を即時 `#ABNORMAL` に流す（保守的既定）。`> 0` を指定する
     /// 構成は `--allow-floodgate-features` (Workers では `ALLOW_FLOODGATE_FEATURES`)
@@ -188,7 +203,8 @@ impl ConfigKeys {
     /// `wrangler.toml.example` には `SHARED_PUBLIC_VARS_KEYS ∪ LOCAL_DEV_ONLY_VARS_KEYS`
     /// 全件を `[vars]` として記載することで、新規メンバーが `cp wrangler.toml.example
     /// wrangler.toml && wrangler dev` で即動作確認できる friction レス運用を維持する。
-    pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] = &[Self::ADMIN_HANDLE];
+    pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] =
+        &[Self::ADMIN_HANDLE, Self::ADMIN_API_TOKEN];
 
     /// **deploy 時に CI から runtime 注入される** `[vars]` キーの網羅列挙
     /// ([`Self::DEPLOYED_SHA`] 等)。`SHARED_PUBLIC_VARS_KEYS` / `LOCAL_DEV_ONLY_VARS_KEYS`
