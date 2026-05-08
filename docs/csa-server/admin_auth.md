@@ -47,6 +47,10 @@ head -c 32 /dev/urandom | xxd -p -c 64
 
 ## 3. 登録 (初回 / rotation 共通)
 
+`vp` は本リポの開発者環境で `pnpm exec` 相当を担う wrapper (詳細は
+[`docs/csa-server/deployment.md`](deployment.md) §1 参照、`vp exec wrangler X`
+と `pnpm exec wrangler X` は等価)。`vp` が無い環境では `pnpm exec` で読み替えてよい。
+
 `vp exec wrangler login` を済ませた後で、対象環境の toml を指定して
 `wrangler secret put` を実行する。
 
@@ -69,13 +73,16 @@ Worker code は `env.var(ConfigKeys::ADMIN_API_TOKEN)` で参照する (var / se
 旧 token grace 期間は持たない設計のため、以下の順序で実施する:
 
 1. 新 token を §2 の手順で生成。
-2. `wrangler secret put ADMIN_API_TOKEN --config wrangler.<env>.toml` で上書き
-   (旧 token は即時無効化される)。
+2. `wrangler secret put ADMIN_API_TOKEN --config wrangler.<env>.toml` を実行。
+   **実行が成功した瞬間に Cloudflare 側で旧 token は即時無効化される (猶予期間
+   なし)**。Worker は本 secret を `env.var()` で都度参照するため、追加の deploy
+   は不要 (次の HTTP/WS リクエストから新 token のみが有効)。
 3. 利用側 (運用 client / CI / cron 等) の保管値を新 token に差し替える。
+   **手順 2 と 3 の間は admin 経路がすべて `PERMISSION_DENIED` を返す**ため、
+   ラグを最小化する。
 4. 1 局 / 1 endpoint 通電して動作確認 (例: HTTP admin endpoint の 200、または
-   WS 内 admin command が `OK` を返す)。
+   WS 内 admin command が `##[ADMIN] OK` を返す)。
 
-旧 token grace を持たないため **手順 2 と 3 のラグを最小化** する。
 複数オペレータが旧 token を保持している運用なら、rotation 直前に共有チャネル
 (Slack 等) でアナウンスし、即時切替できる体制を整える。
 

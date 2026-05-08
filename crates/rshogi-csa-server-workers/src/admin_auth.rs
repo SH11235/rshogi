@@ -34,6 +34,8 @@
 //! [`verify_admin_token_str`] は wasm32 でのみコンパイルし、env 取得経路の
 //! 配線確認は `wrangler dev` / staging deploy 経由で行う。
 
+use std::fmt;
+
 use subtle::ConstantTimeEq;
 
 #[cfg(target_arch = "wasm32")]
@@ -58,6 +60,21 @@ pub enum AdminAuthError {
     /// token 比較が一致しなかった (長さ不一致 / 内容不一致)。
     TokenMismatch,
 }
+
+impl fmt::Display for AdminAuthError {
+    /// 運用ログ向けの簡潔表記。token 値や提供長など秘密に依存する情報は
+    /// 含めない (logging 経路で leak しない契約)。
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg = match self {
+            Self::TokenNotConfigured => "admin token not configured",
+            Self::MissingCredential => "admin credential missing",
+            Self::TokenMismatch => "admin token mismatch",
+        };
+        f.write_str(msg)
+    }
+}
+
+impl std::error::Error for AdminAuthError {}
 
 /// 提供 token と secret token を constant-time 比較する pure helper。
 ///
@@ -99,11 +116,14 @@ pub fn verify_token_str(provided: &str, secret: &str) -> Result<(), AdminAuthErr
 /// [`verify_token_str`] の判定順を参照。
 #[cfg(target_arch = "wasm32")]
 pub fn verify_admin_token_str(provided: &str, env: &Env) -> Result<(), AdminAuthError> {
-    let secret = env
-        .var(ConfigKeys::ADMIN_API_TOKEN)
-        .ok()
-        .map(|v| v.to_string())
-        .unwrap_or_default();
+    // `Err(_)` は「キー未設定」と Worker ランタイム側内部エラーを両方含むが、
+    // どちらも fail-closed の `TokenNotConfigured` 経路に集約してよい (admin
+    // 機能の存在 leak を防ぐ)。後続で worker::console_error! や tracing を
+    // 挟みたい場合は `Err(e)` arm で hook できるよう match 形式で固定する。
+    let secret = match env.var(ConfigKeys::ADMIN_API_TOKEN) {
+        Ok(v) => v.to_string(),
+        Err(_) => String::new(),
+    };
     verify_token_str(provided, &secret)
 }
 
@@ -167,5 +187,14 @@ mod tests {
         // (上位レイヤで trim したい場合は呼び出し側で行う契約)。
         assert!(verify_token_str("  spaced  ", "  spaced  ").is_ok());
         assert_eq!(verify_token_str("spaced", "  spaced  "), Err(AdminAuthError::TokenMismatch),);
+    }
+
+    #[test]
+    fn display_omits_token_or_credential_values() {
+        // 運用ログで Display を経由して error を文字列化したときに、token 値や
+        // credential 長さなど秘密に依存する情報が含まれないことを固定する。
+        assert_eq!(format!("{}", AdminAuthError::TokenNotConfigured), "admin token not configured",);
+        assert_eq!(format!("{}", AdminAuthError::MissingCredential), "admin credential missing");
+        assert_eq!(format!("{}", AdminAuthError::TokenMismatch), "admin token mismatch");
     }
 }
