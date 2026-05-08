@@ -309,3 +309,122 @@ exit 1
         "passthrough=true でも ring buffer に末尾 (line A / line B 両方) が積まれているはず: {msg}"
     );
 }
+
+// ───────────────────────────────────────────────
+// Fixture 8 (Linux only): engine が fork した孫プロセスが stderr fd を継承
+//   している状況で、`UsiEngine::drop` の `killpg(pgid, SIGKILL)` により
+//   孫プロセスにも SIGKILL が届き (reap は init / systemd 側) 、stderr reader
+//   thread が EOF を観測して leak しないこと。
+//
+//   Issue #618: 既存の `child.kill()` 単独では孫が継承した stderr fd が
+//   残り、reader thread が EOF を観測できず leak していた。
+//
+//   検証手順:
+//   1. mock USI engine が fork して長 sleep の孫を生成、孫 pid を tmp file へ書く。
+//   2. UsiEngine::spawn → handshake 完了。
+//   3. drop(engine) で kill_engine_process_tree() が走る。
+//   4. 孫 pid を /proc から polling で確認:
+//      - drop 直後に setpgid(0,0) が反映済み: 孫の pgid == child の pid
+//      - drop 後 1 秒以内に /proc/<pid>/stat が消滅 / state=Z (= SIGKILL 到達)
+//   `/proc` を直接読むため Linux 限定 fixture。Linux 以外 (macOS / *BSD) は skip。
+// ───────────────────────────────────────────────
+#[cfg(target_os = "linux")]
+#[test]
+fn descendant_process_killed_via_killpg_on_drop() {
+    use std::time::Instant;
+
+    // tmpfile に孫 pid を書く同期チャネル。test 側は read で「孫が起動したか」を待つ。
+    let pid_file = std::env::temp_dir().join(format!(
+        "csa_client_grandchild_pid_{}_{}.txt",
+        std::process::id(),
+        SCRIPT_SEQ.fetch_add(1, Ordering::SeqCst),
+    ));
+    // 既存 file が残っていれば除去 (sequence 衝突の hedge)。
+    let _ = std::fs::remove_file(&pid_file);
+
+    // mock USI engine: fork して sleep の孫を background 起動。
+    // - 孫は stderr を継承 (`exec 2>&-` を孫側で呼ばない)。
+    // - 孫 pid を pid_file へ書き出し、親側 handshake を完了させた上で `read` で待機。
+    // - 親 (engine) が SIGKILL されたら孫は孤児化、killpg なら孫も SIGKILL。
+    let script = format!(
+        r#"#!/usr/bin/env bash
+# 孫プロセスを background で fork。stderr は継承 (close しない)。
+( exec sleep 60 ) &
+GRANDCHILD_PID=$!
+printf '%s\n' "$GRANDCHILD_PID" > {pid_file}
+read line  # usi
+echo "id name mock_grandchild"
+echo "usiok"
+read line  # isready
+echo "readyok"
+# 親はこのまま read で待機。Drop で SIGKILL されるのを待つ。
+read line
+"#,
+        pid_file = pid_file.display(),
+    );
+    let path = write_mock_script("grandchild_killpg", &script);
+    let opts: HashMap<String, toml::Value> = HashMap::new();
+    let engine =
+        UsiEngine::spawn(&path, &opts, spawn_opts(false)).expect("初回 handshake は成功する想定");
+    let parent_pid = engine.child_pid_for_test();
+
+    // 孫 pid が pid_file に書かれるまで待つ (最大 2 秒)。
+    let grandchild_pid = {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(s) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = s.trim().parse::<i32>()
+            {
+                break pid;
+            }
+            if Instant::now() >= deadline {
+                panic!("孫プロセス pid が {pid_file:?} に書かれませんでした");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+
+    // 孫の pgid が parent_pid と一致することを /proc/<pid>/stat から確認。
+    // /proc/<pid>/stat の format: pid (comm) state ppid pgrp ...
+    // comm にはスペースが含まれ得るため、最後の `)` で分割してから token 化する。
+    let stat = std::fs::read_to_string(format!("/proc/{grandchild_pid}/stat"))
+        .expect("/proc/<pid>/stat 読み取りに失敗");
+    let after_comm =
+        stat.rsplit_once(')').expect("stat に ')' がない (format 不正)").1.trim_start();
+    let mut tokens = after_comm.split_whitespace();
+    let _state = tokens.next().expect("state token");
+    let _ppid = tokens.next().expect("ppid token");
+    let pgrp: i32 = tokens.next().expect("pgrp token").parse().expect("pgrp parse");
+    assert_eq!(
+        pgrp, parent_pid as i32,
+        "孫 pgid は parent (engine) pid と一致しているはず (setpgid 検証)"
+    );
+
+    // drop でプロセスツリー kill。
+    drop(engine);
+
+    // 孫 pid が消滅または zombie 状態 (Z) になるのを 2 秒 polling で確認。
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut ok = false;
+    while Instant::now() < deadline {
+        match std::fs::read_to_string(format!("/proc/{grandchild_pid}/stat")) {
+            Err(_) => {
+                ok = true;
+                break;
+            }
+            Ok(stat) => {
+                let after_comm = stat.rsplit_once(')').map(|s| s.1.trim_start()).unwrap_or("");
+                let state = after_comm.split_whitespace().next().unwrap_or("");
+                if state == "Z" {
+                    ok = true;
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(ok, "孫プロセス {grandchild_pid} は drop 後 2 秒以内に kill されるはず (#618)");
+
+    // tmp file 掃除 (best-effort)。
+    let _ = std::fs::remove_file(&pid_file);
+}

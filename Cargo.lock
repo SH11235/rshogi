@@ -1822,6 +1822,7 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
+ "nix",
  "rshogi-core",
  "rshogi-csa",
  "rshogi-csa-server",

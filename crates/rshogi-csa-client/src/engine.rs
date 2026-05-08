@@ -287,14 +287,25 @@ impl UsiEngine {
             stderr_passthrough,
         } = opts;
         let mut cmd = Command::new(path);
-        // 子プロセスを独立したプロセスグループで起動
+        // 子プロセスを独立したプロセスグループで起動。
+        // `Drop` / `quit()` 内 timeout 後に `killpg(pgid, SIGKILL)` で
+        // process group ごと kill するための前段。pgid == child.id() となる。
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            // SAFETY: setpgid は async-signal-safe
+            // SAFETY:
+            // - `pre_exec` クロージャは fork 後 exec 前の片側スレッド context で
+            //   実行され、`libc::setpgid` は async-signal-safe (POSIX.1-2017 に
+            //   定義された signal-safe API) なので allocation / lock を呼ばない。
+            // - `setpgid(0, 0)` は呼び出し元プロセスを leader とする新規 PG を
+            //   作るのみ。失敗時は -1 を返すので `last_os_error()` を `Err` で返し、
+            //   spawn 自体を失敗させて以降の killpg が「孫が同じ PG に居ない」状態
+            //   で SIGKILL を撒く事故を防ぐ。
             unsafe {
                 cmd.pre_exec(|| {
-                    libc::setpgid(0, 0);
+                    if libc::setpgid(0, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                     Ok(())
                 });
             }
@@ -570,14 +581,29 @@ impl UsiEngine {
         }
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
             log::warn!("[USI] quit タイムアウト、kill します");
-            let _ = self.child.kill();
+            kill_engine_process_tree(&mut self.child);
             let _ = self.child.wait();
         }
-        // stderr handle bounded join (graceful path のみ実施)
+        // stderr handle bounded join (graceful path のみ実施)。
+        //
+        // direct child が `quit` で正常終了しても、engine が fork した孫が
+        // stderr fd を継承していると reader thread は EOF を観測できず join が
+        // timeout する (#618)。timeout 後は process group ごと SIGKILL で
+        // 孫の stderr fd を強制 close し、reader thread を確実に終了させる。
+        // child は既に終了済みでも、`killpg` は同じ pgid に属する live な孫
+        // にだけ届くため副作用は無い。
         if let Some(handle) = self.stderr_reader_handle.take()
             && let Err(unfinished) = join_handle_bounded(handle, STDERR_JOIN_WAIT_GRACEFUL)
         {
-            drop(unfinished);
+            log::warn!(
+                "[USI] stderr reader join timeout (graceful)、孫プロセスへ killpg を発行します (#618)"
+            );
+            kill_engine_process_tree(&mut self.child);
+            // direct child は既に reaping 済みでも try_wait/wait は idempotent。
+            // killpg 後 reader thread が EOF で抜けるまでもう一度 short join。
+            if let Err(unfinished) = join_handle_bounded(unfinished, STDERR_JOIN_WAIT_DROP) {
+                drop(unfinished);
+            }
         }
         self.quit_sent = true;
     }
@@ -783,18 +809,32 @@ impl UsiEngine {
     pub fn drain(&self) {
         while self.rx.try_recv().is_ok() {}
     }
+
+    /// テスト専用: engine subprocess の raw pid を返す。`pre_exec(setpgid(0,0))`
+    /// により pgid と同値となる。`/proc/<pid>/stat` から孫の pgid 一致を検証する
+    /// regression test (#618) からのみ使用する。
+    #[doc(hidden)]
+    pub fn child_pid_for_test(&self) -> u32 {
+        self.child.id()
+    }
 }
 
 impl Drop for UsiEngine {
     fn drop(&mut self) {
-        // 既存 fast path を維持: send("quit") + sleep 100ms + kill + wait。
+        // 既存 fast path を維持: send("quit") + sleep 100ms + killpg + wait。
         // engine 死亡確定 (BrokenPipe) の場合 send 経由で `engine_exited_error()`
         // が走り 200ms wait を払うが、Drop 全体の遅延は最大 ~400ms に bounded。
         // panic-on-drop / test runner 経路で 3.5 秒+ の遅延を回避する設計。
+        //
+        // `kill_engine_process_tree` は unix では `killpg(pgid, SIGKILL)` を発行し、
+        // engine が fork した孫プロセス (stderr fd 継承パターン) にも SIGKILL を
+        // 届ける。kernel が孫の stderr fd を強制 close することで、stderr reader
+        // thread が EOF で抜け、leak を防ぐ (#618)。reap は direct child のみ
+        // `self.child.wait()` で行う (孫は init が reap)。
         if !self.quit_sent {
             let _ = self.send("quit");
             std::thread::sleep(Duration::from_millis(100));
-            let _ = self.child.kill();
+            kill_engine_process_tree(&mut self.child);
             let _ = self.child.wait();
         }
         // stderr handle が残っていれば best-effort で cleanup (bounded join 100ms、
@@ -805,6 +845,40 @@ impl Drop for UsiEngine {
             drop(unfinished);
         }
     }
+}
+
+/// engine 死亡確定時に `Child` および孫プロセスへ kill signal を送る共通 helper。
+///
+/// Unix では `pre_exec(setpgid(0,0))` で子プロセスを独立 process group に
+/// 置いているため、`killpg(pgid, SIGKILL)` を発行することで engine が fork
+/// した孫プロセスにも一括で SIGKILL が届く。孫が継承した stderr fd は kernel
+/// が強制 close するので、parent の stderr reader thread は EOF で終了する
+/// (PR #596 review で議論された stderr reader leak の根因対策)。
+///
+/// 注意: `wait()` で reap できるのは direct child のみ。孫プロセスは grand-
+/// parent (init / systemd) が reap する。本 helper は kill だけを担当し、
+/// reap は呼び出し側が `child.wait()` で direct child について行う前提。
+///
+/// `killpg` 失敗時 (例: child の id が i32 範囲外、または既に process group
+/// が空になっている) は `child.kill()` に fallback し、最低限の直系 child
+/// kill を保証する。
+///
+/// 非 Unix プラットフォームでは process group の概念がないため `child.kill()`
+/// に直接委譲する (Windows の Job Object 化は別 issue 扱い)。
+fn kill_engine_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // `child.id()` は raw pid (u32)。`setpgid(0,0)` 後は pgid と同値。
+        // i32 範囲外なら killpg は発行できないので fallback に回す。
+        if let Ok(pid_raw) = i32::try_from(child.id()) {
+            let pgid = nix::unistd::Pid::from_raw(pid_raw);
+            if nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL).is_ok() {
+                return;
+            }
+            // killpg 失敗 (ESRCH 等) → child 単独 kill に fallback。
+        }
+    }
+    let _ = child.kill();
 }
 
 /// `option name <NAME> type ...` からオプション名を抽出
