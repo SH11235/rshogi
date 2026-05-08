@@ -108,15 +108,44 @@ vp install                              # `packageManager` の pnpm 経由で de
 |---|---|
 | Workers requests | 100,000 / 日 |
 | Workers CPU time | 10 ms / リクエスト（wall clock 上限は 30 秒。DO の WS は accept_web_socket → Hibernation でリクエスト単位に分解されるので、通常運用では制約にならない） |
+| Durable Objects (SQLite-backed) ストレージ | 5 GB / アカウント (進行中対局 / grace registry / challenge registry を全部含む) |
 | R2 ストレージ | 10 GB / 月 |
-| R2 Class A ops（PUT 等） | 10M / 月 |
-| R2 Class B ops（GET 等） | 1M / 月 |
+| R2 Class A ops（書込系: PUT / COPY / POST / LIST） | 1M / 月 |
+| R2 Class B ops（読込系: GET / HEAD） | 10M / 月 |
 
-> ℹ️ 上記値は 2026-04 時点。Cloudflare 側の plan / limit は予告なく更新される
+> ℹ️ 上記値は 2026-05-09 に Cloudflare 公式ドキュメントで再確認した最新値。
+> 2026-04 時点で本表に記載していた「R2 Class A 10M / Class B 1M」は
+> [Issue #633](https://github.com/SH11235/rshogi/issues/633) で訂正:
+> 公式の正しい値は **Class A 1M / Class B 10M** (書込系の方が ops 制限が厳しく、
+> 読込系の方が 10 倍緩い)。Cloudflare 側の plan / limit は予告なく更新される
 > ことがあるため、最新値は
-> [Cloudflare Workers — Pricing](https://developers.cloudflare.com/workers/platform/pricing/)
-> および [R2 — Pricing](https://developers.cloudflare.com/r2/pricing/) を
-> 参照すること。
+> [Cloudflare Workers — Pricing](https://developers.cloudflare.com/workers/platform/pricing/)、
+> [R2 — Pricing](https://developers.cloudflare.com/r2/pricing/)、および
+> [Durable Objects — Limits](https://developers.cloudflare.com/durable-objects/platform/limits/)
+> を参照すること。
+
+### 1.1.1 Floodgate 想定 ops budget の見積もり
+
+Floodgate 相当 (1 日 50 対局想定) の月次 ops 消費を 1 対局あたり概算で:
+
+- **Class A ops/対局**: 対局開始時 live-games-index PUT + 終局時 CSA 本文
+  PUT (date_key + by_id) + meta PUT + games-index PUT + Floodgate history
+  PUT = **~6 ops/対局**。加えて cron sweep / backfill で同 prefix に
+  数回 LIST が乗る (+5 ops 程度、月次合計に按分)。`DeleteObject` は
+  Cloudflare R2 で Free operation のため Class A 集計外。
+- **Class B ops/対局**: viewer 1 アクセスで list 1 + per-entry get 100 (#636
+  の cache 60s で抑制効果込) = **~200 ops** (page size と viewer 数に依存)
+
+50 対局/日 × 30 日 = 1,500 対局/月 の試算:
+
+- Class A: 1,500 × 10 ≈ **15K ops/月** (Free 1M の 1.5%)
+- Class B: 1,500 × 200 ≈ **300K ops/月** (Free 10M の 3%)
+- DO storage: 終局後 cleanup (Issue #637) 前提で 100 MB 程度を上限想定
+
+**Free 枠は十分余裕がある** が、PR #648 の cache が外れる / viewer scrape
+botnet が来る等で Class B が 10x 増えると 30% 帯まで上昇する。alert 閾値
+70% を [Issue #625](https://github.com/SH11235/rshogi/issues/625) で配信
+連携することで監視を automate する。
 
 [Workers & Pages → Plans](https://dash.cloudflare.com/?to=/:account/workers/plans)
 で現プランを確認可能。CLI からは `vp exec wrangler login` を済ませた後で:
