@@ -28,13 +28,18 @@ LOGIN <handle>+<game_name>+<color> <password>
 ...
 ```
 
-`%%ADMIN <token>` 受信時の応答:
+`%%ADMIN [<token>]` 受信時の応答:
 
 | ケース | 応答 |
 |---|---|
 | `verify_admin_token_str` 成功 (token 一致) | `##[ADMIN] OK` + `##[ADMIN] END` (session を admin 昇格) |
-| token 不一致 / secret 未配置 | `##[ADMIN] PERMISSION_DENIED` + `##[ADMIN] END` (同一応答で「configured かどうか」を leak しない) |
-| token 部欠落 (`%%ADMIN` 単体 / `%%ADMIN` の後に whitespace のみ) | **応答なし (silent ignore)**。`%%SETBUOY` 引数欠落等と同じく malformed command として握り潰す |
+| token 不一致 / secret 未配置 / token 部欠落 (`%%ADMIN` 単体 / whitespace のみ) | `##[ADMIN] PERMISSION_DENIED` + `##[ADMIN] END` |
+
+失敗ケースを uniform `PERMISSION_DENIED` に統一する理由は、
+`%%ADMIN` (silent) と `%%ADMIN <wrong>` (response) を分岐すると、attacker
+からは応答有無で「`%%ADMIN` が認識される command」かが推定できてしまうため。
+`TokenNotConfigured` / `MissingCredential` / `TokenMismatch` を区別せず同じ
+応答を返すことで「admin 機能が configured かどうか」も含めて leak を防ぐ。
 
 session が close した時点で admin 権限は失われる。
 

@@ -1310,19 +1310,19 @@ impl GameRoom {
         }
     }
 
-    /// `%%ADMIN <token>` を受信した player 接続の admin elevation を処理する。
+    /// `%%ADMIN [<token>]` を受信した player 接続の admin elevation を処理する。
     ///
     /// 成功時 (`verify_admin_token_str` OK): WS attachment の `is_admin` を
     /// `true` に上書きし、`##[ADMIN] OK` を返す。
-    /// 失敗時 (token 不一致 / secret 未配置): `##[ADMIN] PERMISSION_DENIED`
-    /// を返す (TokenNotConfigured と TokenMismatch を区別しないことで「admin
-    /// 機能が configured かどうか」の leak を防ぐ)。
+    /// 失敗時 (`Err(_)` 全 variant: TokenNotConfigured / MissingCredential /
+    /// TokenMismatch): `##[ADMIN] PERMISSION_DENIED` を返す。3 variant を
+    /// 区別せず同じ応答を返すことで、admin command の認識有無や secret
+    /// configured 状態の leak を防ぐ (Copilot review 指摘)。
     /// 呼び出し側は本関数の返値を順次 `send_line` で WS に流す契約。
     ///
-    /// 本関数は `parse_admin_line` が `Some(token)` を返した経路でのみ呼ばれる
-    /// 前提。token 部欠落 (`%%ADMIN` 単体 / whitespace のみ) は呼び出し側
-    /// (`handle_game_line`) で `parse_admin_line == None` として silent ignore
-    /// される設計 (`docs/csa-server/admin_auth.md` §応答仕様の通り)。
+    /// `parse_admin_line` が `Some("")` を返した token 部欠落ケース (`%%ADMIN`
+    /// 単体等) もここに到達し、`verify_admin_token_str("")` →
+    /// `MissingCredential` → 同じ `PERMISSION_DENIED` 経路に乗る。
     async fn handle_admin_elevation(&self, ws: &WebSocket, token: &str) -> Result<Vec<String>> {
         match crate::admin_auth::verify_admin_token_str(token, &self.env) {
             Ok(()) => {

@@ -108,9 +108,12 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       TOTAL_TIME_MIN: String(opts.totalTimeMin ?? 10),
       BYOYOMI_MIN: String(opts.byoyomiMin ?? 1),
       // `ADMIN_API_TOKEN` 既定値は Worker 側 `wrangler.toml.example` の placeholder
-      // と同じ。`%%ADMIN <token>` E2E を書く場合は `adminApiToken: "..."` で
-      // 明示する。未設定時は `verify_admin_token_str` が `TokenNotConfigured` を
-      // 返し fail-closed する想定。
+      // と同じで、Miniflare 配下では admin auth は **configured** な状態で動く。
+      // 既定のまま test を書くと `verify_admin_token_str` は提供 token と placeholder
+      // の比較結果 (`TokenMismatch` または `MissingCredential`) を返す経路に乗る。
+      // 強制的に `TokenNotConfigured` (fail-closed) 経路を確認したいときは
+      // `adminApiToken: ""` を明示すること。`%%ADMIN <token>` 成功 E2E の場合は
+      // 同 token を `adminApiToken` で揃えて binding する。
       ADMIN_API_TOKEN: opts.adminApiToken ?? "local-dev-admin-token-placeholder",
       // `reconnectGraceSeconds: 0` 既定は production wrangler.production.toml の
       // `RECONNECT_GRACE_SECONDS = "0"` と整合し、再接続プロトコル無効構成を表す。

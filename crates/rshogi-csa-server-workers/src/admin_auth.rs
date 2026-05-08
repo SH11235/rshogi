@@ -106,12 +106,18 @@ pub fn verify_token_str(provided: &str, secret: &str) -> Result<(), AdminAuthErr
     }
 }
 
-/// `%%ADMIN <token>` 形式の WS 行から token 部を抽出する pure helper
+/// `%%ADMIN [<token>]` 形式の WS 行から token 部を抽出する pure helper
 /// ([#621](https://github.com/SH11235/rshogi/issues/621))。
 ///
-/// 受理: `%%ADMIN <whitespace> <token>` (token 内 trim)。
-/// 受理しない: scheme 不一致 / token 部欠落 / token が空白のみ /
-/// `%%ADMIN` の直後に whitespace なし (`%%ADMINFOO` 等の prefix 衝突を弾く)。
+/// 戻り値:
+/// - `None`: scheme 不一致 (`%%ADMINFOO` 等の prefix 衝突)、または非
+///   `%%ADMIN` 行。呼び出し側はこの場合に通常コマンド経路へ落とす。
+/// - `Some("")`: `%%ADMIN` 単体 / `%%ADMIN` の直後が whitespace のみ
+///   (token 部欠落)。呼び出し側は本値を `verify_admin_token_str` に渡せば、
+///   `MissingCredential` 経路で uniform に `PERMISSION_DENIED` が返る (
+///   admin command を識別したことが silent vs response の差で leak しないよう、
+///   `%%ADMIN <wrong>` と同じ応答を返す契約)。
+/// - `Some(<token>)`: token 部 (前後 whitespace trim 済み)。
 ///
 /// 共有 [`rshogi_csa_server::protocol::command::parse_command`] には乗せず
 /// Workers 内で完結させる Workers 固有プロトコル拡張。共有 enum を増やすと
@@ -121,10 +127,18 @@ pub fn verify_token_str(provided: &str, secret: &str) -> Result<(), AdminAuthErr
 pub fn parse_admin_line(line: &str) -> Option<&str> {
     let trimmed = line.trim_end();
     let rest = trimmed.strip_prefix("%%ADMIN")?;
-    // `%%ADMIN` の直後に whitespace が無いと token 部が始まらないので reject。
+    // `%%ADMIN` 単体 (line 全体が `%%ADMIN` または `%%ADMIN` + 末尾 whitespace
+    // のみ → trim_end で空) は token 部欠落として `Some("")` を返し、
+    // 呼び出し側で uniform PERMISSION_DENIED 応答に統一する (Copilot review
+    // 指摘: silent ignore は `%%ADMIN` vs `%%ADMIN <wrong>` の挙動差から
+    // admin command の存在を leak する)。
+    if rest.is_empty() {
+        return Some("");
+    }
+    // `%%ADMIN` の直後が whitespace でなければ prefix 衝突 (`%%ADMINFOO` 等)
+    // として `None` を返し、admin command として扱わない。
     let after_scheme = rest.strip_prefix(|c: char| c.is_ascii_whitespace())?;
-    let token = after_scheme.trim();
-    if token.is_empty() { None } else { Some(token) }
+    Some(after_scheme.trim())
 }
 
 /// Worker 環境変数から `ADMIN_API_TOKEN` を読み出し、提供 token と
@@ -239,10 +253,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_admin_line_rejects_missing_token() {
-        assert_eq!(parse_admin_line("%%ADMIN"), None);
-        assert_eq!(parse_admin_line("%%ADMIN "), None);
-        assert_eq!(parse_admin_line("%%ADMIN   \t  "), None);
+    fn parse_admin_line_returns_empty_for_missing_token() {
+        // token 部欠落は `Some("")` を返し、呼び出し側で uniform PERMISSION_DENIED
+        // に統一する。silent ignore は `%%ADMIN` vs `%%ADMIN <wrong>` の挙動差で
+        // admin command の存在を leak するため避ける。
+        assert_eq!(parse_admin_line("%%ADMIN"), Some(""));
+        assert_eq!(parse_admin_line("%%ADMIN "), Some(""));
+        assert_eq!(parse_admin_line("%%ADMIN   \t  "), Some(""));
+        // CRLF も trim_end で削られて空扱いになる。
+        assert_eq!(parse_admin_line("%%ADMIN\r\n"), Some(""));
     }
 
     #[test]
