@@ -48,7 +48,7 @@ jobs:
     steps:
       # `git log -1 --format=%H -- <paths>` で deploy-trigger path に触れた main 上の
       # 最新 commit を取るため full history が必要。`fetch-depth: 0`。
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
       # `csa-deploy-drift` label が repo に未作成だと `gh issue create --label` が

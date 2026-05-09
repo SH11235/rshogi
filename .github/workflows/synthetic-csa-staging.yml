@@ -56,7 +56,7 @@ jobs:
       # 既定 stable (x86-64) で問題なし。明示空文字で defensive に上書き。
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 1
       - name: Ensure csa-synthetic-failure label exists
@@ -91,14 +91,14 @@ jobs:
           rustup default "$CHANNEL"
       - name: Setup sccache
         if: steps.check.outputs.can_run == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - name: Enable sccache
         if: steps.check.outputs.can_run == 'true'
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       # native release build 用 cache key。`deploy-workers.yml` 等が使う wasm32
       # group とは別 namespace にして cache key の衝突 (`RUSTFLAGS` 不一致での
       # cache miss / 汚染) を防ぐ。
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: steps.check.outputs.can_run == 'true'
         with:
           shared-key: csa-synthetic-native
@@ -243,7 +243,7 @@ jobs:
       # success 時も保存しておくと「正常 run の baseline」と比較できる。
       - name: Upload logs and records
         if: always() && steps.check.outputs.can_run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: synthetic-csa-staging-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

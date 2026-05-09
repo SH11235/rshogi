@@ -35,8 +35,8 @@ jobs:
     outputs:
       rust_code: ${{ steps.filter.outputs.rust_code }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
         with:
           filters: |
@@ -61,7 +61,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -74,7 +74,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install mold linker
         run: |
           sudo apt-get update
@@ -85,10 +85,10 @@ jobs:
         with:
           components: clippy
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
       - name: Run Clippy
@@ -104,7 +104,7 @@ jobs:
     if: needs.changes.outputs.rust_code == 'true'
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install mold linker
         run: |
           sudo apt-get update
@@ -113,10 +113,10 @@ jobs:
           clang --version || true
       - uses: dtolnay/rust-toolchain@stable
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
       - name: Run tests
@@ -131,7 +131,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cargo-audit
       - name: Run security audit
@@ -172,7 +172,7 @@ jobs:
       # wasm32 標準の codegen に任せる（host target 用の baseline 設定の意図とも整合）。
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - name: Add wasm32 target to pinned toolchain
         # `rust-toolchain.toml` が channel を 1.93.1 に pin しているため、
@@ -188,10 +188,10 @@ jobs:
           echo "Adding wasm32-unknown-unknown to toolchain $CHANNEL"
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
           # host target キャッシュ (`lint` / `test` job) と完全分離する。

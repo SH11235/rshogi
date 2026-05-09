@@ -51,7 +51,7 @@ jobs:
     timeout-minutes: 5
     environment: rshogi-csa-server-workers-production
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 1
       # `csa-synthetic-failure` label が repo 未作成だと `gh issue create --label`
