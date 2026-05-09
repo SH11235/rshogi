@@ -23,9 +23,16 @@ pub fn encode_component(raw: &str) -> String {
     out
 }
 
+/// buoy R2 オブジェクトキーの prefix (`buoys/`)。
+///
+/// `delete_buoy` 経路の delete 対象を本 prefix 配下に限定するための path
+/// validation 定数 (https://github.com/SH11235/rshogi/issues/624)。`buoy_object_key`
+/// と削除側の runtime ガードで共有することで、prefix 文字列のずれを回避する。
+pub const BUOY_KEY_PREFIX: &str = "buoys/";
+
 /// buoy 保存先の R2 キー。
 pub fn buoy_object_key(game_name: &str) -> String {
-    format!("buoys/{}.json", encode_component(game_name))
+    format!("{BUOY_KEY_PREFIX}{}.json", encode_component(game_name))
 }
 
 /// game_id から逆引きする棋譜本体キー。
@@ -62,6 +69,29 @@ mod tests {
     fn encode_component_escapes_slash_and_dot_and_utf8() {
         assert_eq!(encode_component("../a/b"), "%2E%2E%2Fa%2Fb");
         assert_eq!(encode_component("対局"), "%E5%AF%BE%E5%B1%80");
+    }
+
+    #[test]
+    fn buoy_object_key_always_starts_with_prefix() {
+        // `delete_buoy` の runtime ガードで使う前提条件 (Issue #624 隣接懸念):
+        // 任意入力に対して `buoy_object_key` の戻り値は `BUOY_KEY_PREFIX` で
+        // 始まる。`encode_component` のエスケープ規則と相俟って、buoy 命名の
+        // 不正値が `buoys/` の外に逃げ出さないことを固定する。
+        for sample in [
+            "name",
+            "../escape",
+            "..%2F../still-buoys",
+            "対局",
+            "",
+            "/",
+            "buoys/",
+        ] {
+            let key = buoy_object_key(sample);
+            assert!(
+                key.starts_with(BUOY_KEY_PREFIX),
+                "buoy_object_key({sample:?}) = {key:?} did not start with {BUOY_KEY_PREFIX:?}"
+            );
+        }
     }
 
     #[test]
