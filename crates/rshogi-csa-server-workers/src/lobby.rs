@@ -850,6 +850,12 @@ impl Lobby {
         .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
 
         send_line(ws, &format!("LOGIN_LOBBY:{handle} OK pending_match_dispatch_pending"))?;
+        // 私的対局 token は診断用途で平文ログに残す (旧 console_log! と同等の挙動を
+        // 保つ移行)。CHALLENGE_LOBBY 発行時の TTL (`CHALLENGE_TTL_SEC`、既定
+        // 3600 秒) で自動失効するため、Tail Workers / R2 archive (#625 Phase B)
+        // 経由で漏えいしてもリプレイ攻撃ウィンドウは限定的。token を無害化したい
+        // 場合は本フィールドを `token_prefix: token.as_str().chars().take(8).collect::<String>()`
+        // 等に差し替える (本 PR スコープでは保留)。
         crate::structured_log!(
             event: "login_lobby_private",
             component: "lobby",

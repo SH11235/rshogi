@@ -429,7 +429,7 @@ async fn collect_index_page(
     let bucket = match env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
         Ok(b) => b,
         Err(e) => {
-            console_log_failed("kifu_bucket_binding", client_kind, &e.to_string());
+            log_viewer_api_failed("kifu_bucket_binding", client_kind, &e.to_string());
             let err = no_store_error("Storage unavailable", 503)?;
             return Ok(BuildOutcome::ErrorNoStore(err));
         }
@@ -443,7 +443,7 @@ async fn collect_index_page(
     let page = match builder.execute().await {
         Ok(p) => p,
         Err(e) => {
-            console_log_failed(&format!("{event_root}_list"), client_kind, &e.to_string());
+            log_viewer_api_failed(&format!("{event_root}_list"), client_kind, &e.to_string());
             let err = no_store_error("Storage error", 502)?;
             return Ok(BuildOutcome::ErrorNoStore(err));
         }
@@ -457,7 +457,7 @@ async fn collect_index_page(
         let fetched = match bucket.get(&key).execute().await {
             Ok(o) => o,
             Err(e) => {
-                console_log_failed(
+                log_viewer_api_failed(
                     &format!("{event_root}_get"),
                     client_kind,
                     &format!("key={key} err={e}"),
@@ -477,7 +477,7 @@ async fn collect_index_page(
         let bytes = match body.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                console_log_failed(
+                log_viewer_api_failed(
                     &format!("{event_root}_read"),
                     client_kind,
                     &format!("key={key} err={e}"),
@@ -488,7 +488,7 @@ async fn collect_index_page(
         match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(v) => entries.push(v),
             Err(e) => {
-                console_log_failed(
+                log_viewer_api_failed(
                     &format!("{event_root}_parse"),
                     client_kind,
                     &format!("key={key} err={e}"),
@@ -559,7 +559,7 @@ async fn build_single_game(
     let bucket = match env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
         Ok(b) => b,
         Err(e) => {
-            console_log_failed("kifu_bucket_binding", client_kind, &e.to_string());
+            log_viewer_api_failed("kifu_bucket_binding", client_kind, &e.to_string());
             return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error(
                 "Storage unavailable",
                 503,
@@ -571,7 +571,11 @@ async fn build_single_game(
     let csa_obj = match bucket.get(&by_id_key).execute().await {
         Ok(o) => o,
         Err(e) => {
-            console_log_failed("kifu_by_id_get", client_kind, &format!("key={by_id_key} err={e}"));
+            log_viewer_api_failed(
+                "kifu_by_id_get",
+                client_kind,
+                &format!("key={by_id_key} err={e}"),
+            );
             return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error("Storage error", 502)?));
         }
     };
@@ -584,7 +588,11 @@ async fn build_single_game(
     let csa_text = match body.text().await {
         Ok(t) => t,
         Err(e) => {
-            console_log_failed("kifu_by_id_read", client_kind, &format!("key={by_id_key} err={e}"));
+            log_viewer_api_failed(
+                "kifu_by_id_read",
+                client_kind,
+                &format!("key={by_id_key} err={e}"),
+            );
             return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error("Storage error", 502)?));
         }
     };
@@ -601,7 +609,7 @@ async fn build_single_game(
             return Ok(SingleBuildOutcome::ErrorNoStore(no_store_error("Not Found", 404)?));
         }
         Err(e) => {
-            console_log_failed(
+            log_viewer_api_failed(
                 "kifu_by_id_meta_lookup",
                 client_kind,
                 &format!("game_id={game_id} err={e}"),
@@ -735,7 +743,7 @@ fn set_cache_control(resp: &mut Response, value: &str) -> Result<()> {
 /// `cache.get` が `Err` を返した場合 (Cache API 自体の障害) は `None` を返して
 /// miss と同じくフォールバック (R2 から再 fetch) させる。ただし運用上の観測性が
 /// 必要なため、`event` (`<root>_cache_get`) と `client_kind` 付きの logfmt を
-/// `console_log_failed` で残す (Issue #653)。サイレント抑制すると staging /
+/// `log_viewer_api_failed` で残す (Issue #653)。サイレント抑制すると staging /
 /// 本番で Cache API が一切機能していない事象に気付けない。
 async fn cache_get_origin_neutral(
     cache_key: &str,
@@ -747,7 +755,7 @@ async fn cache_get_origin_neutral(
         Ok(Some(resp)) => Some(resp),
         Ok(None) => None,
         Err(e) => {
-            console_log_failed(event, client_kind, &e.to_string());
+            log_viewer_api_failed(event, client_kind, &e.to_string());
             None
         }
     }
@@ -766,14 +774,18 @@ async fn cache_put_origin_neutral(
     let put_response = match resp.cloned() {
         Ok(c) => c,
         Err(e) => {
-            console_log_failed(&format!("{event_root}_cache_clone"), client_kind, &e.to_string());
+            log_viewer_api_failed(
+                &format!("{event_root}_cache_clone"),
+                client_kind,
+                &e.to_string(),
+            );
             return;
         }
     };
     let cache = worker::Cache::default();
     if let Err(e) = cache.put(cache_key.to_string(), put_response).await {
         // best-effort: cache.put に失敗しても元応答は返せる。log のみ残す。
-        console_log_failed(&format!("{event_root}_cache_put"), client_kind, &e.to_string());
+        log_viewer_api_failed(&format!("{event_root}_cache_put"), client_kind, &e.to_string());
     }
 }
 
@@ -781,7 +793,7 @@ async fn cache_put_origin_neutral(
 /// 呼出側クライアントを特定する `client_kind` を持たせる
 /// (https://github.com/SH11235/rshogi/issues/564 設計 v4 §3)。`client_kind` は [`normalize_client_kind`] により
 /// `[a-z0-9-]{1,64}` に正規化済みの ASCII 文字列、または `unknown` / `invalid`。
-fn console_log_failed(event: &str, client_kind: &str, detail: &str) {
+fn log_viewer_api_failed(event: &str, client_kind: &str, detail: &str) {
     crate::structured_log!(
         event: event,
         component: "viewer_api",

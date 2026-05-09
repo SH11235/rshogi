@@ -70,11 +70,14 @@ pub(crate) mod spectator_snapshot;
 pub mod ws_route;
 pub mod x1_paths;
 
-// `observability` は `structured_log!` macro を提供する。`#[macro_export]` で
-// crate root に export されるため `pub use` 等は不要。本 mod 自体はホスト
-// target でも import 可能 (macro 定義は wasm32 限定の `worker::` 呼び出しを
-// 含むため、展開はホストでは失敗する点に注意)。
-pub mod observability;
+// `observability` は `structured_log!` macro を提供する。`#[macro_export]` は
+// crate root に export するため、外部 crate からの `use` 用途で `pub mod` 化
+// する必要はない (本 crate は cdylib として Workers ランタイム単独消費される
+// 想定で、library API として外部公開もしない)。`pub(crate)` でシグナルを
+// 「内部利用のみ」に絞り、誤って library 公開と誤読されないようにする。
+// macro 定義は wasm32 限定の `worker::` 呼び出しを含むため、ホスト target
+// では展開時に失敗する点に注意。
+pub(crate) mod observability;
 
 #[cfg(target_arch = "wasm32")]
 mod game_room;
