@@ -415,15 +415,16 @@ follow-up が必要**。
   異なるため挙動を保証できないが、`LOGIN:incorrect rate_limited retry_after=`
   format は TCP server で既に運用中で実害報告なし
 
-#### follow-up 起票
+#### follow-up 起票済
 
-本 PR merge 時に以下を別 issue として起票:
+[#682](https://github.com/SH11235/rshogi/issues/682):
+`feat(csa-client): rate_limit error の retry_after=<sec> を honoring して retry storm を抑える`
 
-- `feat(csa-client): rate_limit error の retry_after=<sec> を honoring する`
-  - main.rs:282-294 / 342-353 の Err arm で error メッセージを正規表現等で
-    parse し、`retry_after_sec` 秒以上 sleep するよう `retry_delay` を上書き
-  - test: mock server で `LOGIN_LOBBY:incorrect rate_limited retry_after=5`
-    を返したとき、次の retry が 5 秒以上待つこと
+- main.rs:282-294 / 342-353 の Err arm で error メッセージを parse し、
+  `retry_after_sec` 秒以上 sleep するよう `retry_delay` を上書き
+- mock server による integration test で sleep 時間 assert
+- PR3a の merge blocker ではない (= #622 着工は本 issue 完了を待たない) が、
+  Floodgate grade production 投入前には完了推奨
 
 ## 7. 関連
 
