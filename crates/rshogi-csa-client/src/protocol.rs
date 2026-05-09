@@ -594,3 +594,105 @@ pub(crate) fn parse_game_result(line: &str) -> Option<GameResult> {
 fn is_login_ok(response: &str) -> bool {
     response.starts_with("LOGIN:") && response.ends_with(" OK")
 }
+
+/// CSA サーバから返された `LOGIN:incorrect rate_limited retry_after=<sec>` /
+/// `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>` の `<sec>` を抽出する。
+///
+/// 本 helper は `bail!` などで `anyhow::Error` の表示文字列に変換された後も呼べる
+/// よう、入力は任意の `&str` を受け付け、`retry_after=` トークンに続く非空白の数値
+/// 列を greedy に parse する。トークンが含まれていない / 数値として parse できない
+/// 場合は `None` を返し、呼び出し側は既存の指数バックオフのみで retry する。
+///
+/// # 例
+///
+/// ```
+/// use rshogi_csa_client::protocol::extract_retry_after_sec;
+///
+/// assert_eq!(
+///     extract_retry_after_sec("LOGIN_LOBBY 拒否: incorrect rate_limited retry_after=10"),
+///     Some(10)
+/// );
+/// assert_eq!(
+///     extract_retry_after_sec("ログイン失敗: LOGIN:incorrect rate_limited retry_after=5"),
+///     Some(5)
+/// );
+/// assert_eq!(extract_retry_after_sec("LOGIN:incorrect unknown_game_name"), None);
+/// ```
+pub fn extract_retry_after_sec(err_msg: &str) -> Option<u64> {
+    err_msg
+        .split("retry_after=")
+        .nth(1)?
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        .next()?
+        .parse()
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_retry_after_sec_parses_lobby_login_format() {
+        // `acquire_lobby_match` が `bail!("[Lobby] LOGIN_LOBBY 拒否: {rest}")` を
+        // 出した場合の、anyhow Error display 形式そのまま。
+        assert_eq!(
+            extract_retry_after_sec(
+                "[Lobby] LOGIN_LOBBY 拒否: incorrect rate_limited retry_after=10"
+            ),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn extract_retry_after_sec_parses_login_format() {
+        // `protocol::login` の `bail!("ログイン失敗: {response}")` 経由。
+        assert_eq!(
+            extract_retry_after_sec("ログイン失敗: LOGIN:incorrect rate_limited retry_after=5"),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn extract_retry_after_sec_handles_raw_server_response() {
+        // server の生 raw 行 (= prefix なし) でも parse できる。
+        assert_eq!(
+            extract_retry_after_sec("LOGIN_LOBBY:incorrect rate_limited retry_after=42"),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn extract_retry_after_sec_returns_none_for_other_reasons() {
+        // `unknown_game_name` / `already_logged_in` 等の retry_after を伴わない
+        // reason は None を返し、呼び出し側は既存の指数バックオフだけを使う。
+        assert_eq!(extract_retry_after_sec("LOGIN:incorrect unknown_game_name"), None);
+        assert_eq!(extract_retry_after_sec("ログイン失敗: 接続が切断されました"), None);
+        assert_eq!(extract_retry_after_sec(""), None);
+    }
+
+    #[test]
+    fn extract_retry_after_sec_returns_none_for_non_numeric_value() {
+        // `retry_after=` の後に非数値が来た場合は安全側で None を返す。
+        assert_eq!(extract_retry_after_sec("LOGIN:incorrect rate_limited retry_after=NaN"), None);
+    }
+
+    #[test]
+    fn extract_retry_after_sec_handles_trailing_text() {
+        // 後続にスペース区切りで他のトークンが続いても、最初の数値だけを抽出する。
+        assert_eq!(extract_retry_after_sec("rate_limited retry_after=30 source=lobby"), Some(30));
+    }
+
+    #[test]
+    fn extract_retry_after_sec_uses_first_occurrence() {
+        // 複数回出現するケース (異常系) では最初の値を採用する。`split.nth(1)` の
+        // 仕様確認も兼ねる。
+        assert_eq!(extract_retry_after_sec("retry_after=7 retry_after=99"), Some(7));
+    }
+
+    #[test]
+    fn extract_retry_after_sec_handles_zero() {
+        // 0 秒も valid な値として通す (server が即時 retry を許可するケース)。
+        assert_eq!(extract_retry_after_sec("LOGIN:incorrect rate_limited retry_after=0"), Some(0));
+    }
+}

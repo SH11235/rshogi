@@ -91,7 +91,7 @@ pub use events::{
     NoopSessionEventSink, ReconnectState, SearchInfoEmitPolicy, SearchInfoSnapshot, SearchOrigin,
     SessionError, SessionEventSink, SessionOutcome, SessionProgress, Side, SinkError,
 };
-pub use protocol::{CsaConnection, GameResult, GameSummary};
+pub use protocol::{CsaConnection, GameResult, GameSummary, extract_retry_after_sec};
 pub use record::{GameRecord, RecordedMove};
 pub use session::{
     run_game_session, run_game_session_with_events, run_resumed_session,
