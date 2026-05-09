@@ -1386,3 +1386,139 @@ DO storage を喪失したシナリオでの運用方針を本節で確定する
    1 回あたりの影響対局数が **20 件以上** に達するか、または
    `live-games-index/` 手動削除 (§13.4 step 5) の運用負荷が **月 30 分以上**
    になった場合
+
+## 14. R2 backup / lifecycle / 棋譜永久保持 (#624)
+
+棋譜は Floodgate 相当 production の **絶対消失防止対象**。`bucket.delete()` の
+誤操作 / `%%DELETEBUOY` の暴走 / Cloudflare account 障害 / lifecycle rule
+誤適用 のいずれでも棋譜が消えないよう、複数層の防御を組む。
+
+### 14.1 R2 prefix taxonomy と削除ポリシー
+
+production の `KIFU_BUCKET` 配下で書き込まれる prefix と、許可される delete
+経路を以下に固定する。
+
+| prefix | 内容 | 想定 writer | 削除ポリシー |
+|---|---|---|---|
+| `<YYYY>/<MM>/<DD>/<game_id>.csa` | 日付別 棋譜本体 | `game_room::export_kifu_to_r2` (`finalize_if_ended` 経路) | **永久保持** (delete なし、lifecycle rule で保護) |
+| `kifu-by-id/<game_id>.csa` | game_id 逆引き 棋譜本体 | 同上 | **永久保持** (同上) |
+| `kifu-by-id/<game_id>.meta.json` | 棋譜メタ JSON | 同上 + `backfill` (meta repair) | **永久保持** (同上) |
+| `live-games-index/<inv_started_ms:014>-<game_id>.json` | viewer 配信用 進行中 index | `mark_play_started` / cron sweep | 終局/orphan 検出時に DO + sweep が delete 可 |
+| `games-index/<inv_ended_ms:014>-<game_id>.json` | viewer 配信用 終局済 index | 終局時 export (`games_index_key`) | **永久保持** (lifecycle rule で保護) |
+| `buoys/<encoded>.json` | %%SETBUOY 登録 | `store_buoy` | `%%DELETEBUOY` (admin 限定) で delete 可 |
+
+`<inv_*_ms:014>` は `INV_BASE - <epoch_ms>` をゼロパディング 14 桁化した値で、
+lex 順 = 時刻降順 を成立させる仕組み (`games_index.rs` / `live_games_index.rs`
+の `INV_BASE = 99_999_999_999_999` を参照)。日付階層 (`<YYYY>/<MM>/<DD>/`)
+は **棋譜本体 prefix のみ**で、`games-index/` / `live-games-index/` には付かない。
+
+**code 側の delete 経路** は本 doc 時点で 3 箇所のみ:
+
+1. `game_room::delete_buoy` — `buoys/` prefix のみ。`x1_paths::BUOY_KEY_PREFIX`
+   で runtime 検証 (#624 隣接懸念)。
+2. `game_room::try_delete_live_games_index` — `live-games-index/` のみ。
+   key は `live_games_index::live_games_index_key()` 経由で生成。
+3. `backfill::sweep_orphan_live_index` — 同 `live-games-index/` のみ。
+
+**棋譜本体 (`<YYYY>/...`, `kifu-by-id/...`, `games-index/...`) を delete する
+コードは存在しない**。レビュー時はこの不変条件を維持すること。
+
+### 14.2 R2 lifecycle rule 設計 (Pulumi IaC で declarative 化)
+
+`rshogi-cloudflare-iac` repo (PR #677 で R2 buckets を IaC 化済) に lifecycle
+policy を declarative に追記する。本 repo 側は **wrangler.toml では設定せず**、
+IaC 側を single source of truth とする (drift detection で gate 済)。
+
+設計:
+
+```
+{KIFU_BUCKET}:
+  rules:
+    - name: abort-incomplete-multipart
+      match: { prefix: "" }
+      abort_incomplete_multipart_upload:
+        days_after_initiation: 7
+    # 棋譜 prefix は明示的に expire しない (永久保持)。
+    # lifecycle rule で `delete` action を一切付与しないことで R2 側の自動削除
+    # 経路を完全に塞ぐ。誤って rule が増えた場合は drift detection で検出。
+```
+
+**注意**:
+- Cloudflare R2 lifecycle rule は現時点で「expire」「abort multipart」をサポート。
+  S3 互換の `noncurrent` 系は未対応 (versioning 自体が R2 native では未提供)。
+- `delete` action のある rule を追加する場合は **必ず** 棋譜 prefix を含まない
+  ことを Pulumi 側 unit test (rshogi-cloudflare-iac) でガードする。
+
+### 14.3 別 backup bucket への定期 cp cron (Phase 2)
+
+本 PR では設計のみ。実装は #624 Phase 2 別 PR で扱う。
+
+- backup bucket 名 (Phase 2 で確定する仮命名): `rshogi-csa-kifu-backup-prod`
+  (production), `rshogi-csa-kifu-backup-staging` (staging)。primary bucket
+  (`rshogi-csa-kifu-prod` / `rshogi-csa-kifu-staging`) と命名規約を揃える
+- 同 account / 別 bucket。Cloudflare account 障害には弱いが、誤 delete /
+  bucket 誤操作からは防御できる
+- Workers `scheduled` event で 1 日 1 回 (UTC 03:00) 実行
+- 前日の `<YYYY>/<MM>/<DD>/...` prefix を `KIFU_BUCKET.list` で列挙、
+  `BACKUP_BUCKET.put(key, body)` でコピー (上書き protection: HEAD で existence 確認後 skip)
+- `kifu-by-id/` は 1 日分の差分 list 困難のため、終局時の export 経路で
+  primary + backup の 2-bucket 同時 PUT を将来検討
+- ops budget: Class A 20 ops/日 = 600 ops/月 (Free 1M の 0.06%)
+
+### 14.4 restore runbook
+
+#### 14.4.1 単一棋譜の誤削除を疑った場合
+
+実 bucket 名は `wrangler.<env>.toml` の `[[r2_buckets]] binding = "KIFU_BUCKET"`
+配下の `bucket_name` (production: `rshogi-csa-kifu-prod`、staging:
+`rshogi-csa-kifu-staging`) を参照する。`--config` 指定なしで `wrangler r2`
+を叩くと環境を誤認するため、必ず env 別の toml を渡す。
+
+1. **R2 console** で `<YYYY>/<MM>/<DD>/<game_id>.csa` の存在を確認
+2. 不在なら backup bucket (Phase 2 配線後) から download:
+   ```bash
+   vp exec wrangler r2 object get \
+     --config crates/rshogi-csa-server-workers/wrangler.production.toml \
+     "<BACKUP_BUCKET_NAME>/<YYYY>/<MM>/<DD>/<game_id>.csa" \
+     --file=/tmp/restored.csa
+   ```
+3. primary bucket へ put し直す (`<KIFU_BUCKET_NAME>` は production なら
+   `rshogi-csa-kifu-prod`):
+   ```bash
+   vp exec wrangler r2 object put \
+     --config crates/rshogi-csa-server-workers/wrangler.production.toml \
+     "<KIFU_BUCKET_NAME>/<YYYY>/<MM>/<DD>/<game_id>.csa" \
+     --file=/tmp/restored.csa
+   ```
+4. `kifu-by-id/<game_id>.csa` と `<game_id>.meta.json` も同様に確認・復旧
+5. `games-index/<inv_ended_ms:014>-<game_id>.json` がある場合のみ viewer に
+   表示されるため、必要なら `backfill` 経路 (admin endpoint) でインデックス
+   再生成
+
+#### 14.4.2 大規模消失 / Cloudflare account 障害
+
+1. backup bucket の最新 snapshot 時刻を確認:
+   ```bash
+   vp exec wrangler r2 object list \
+     --config crates/rshogi-csa-server-workers/wrangler.production.toml \
+     "<BACKUP_BUCKET_NAME>" --prefix "<YYYY>/<MM>/<DD>/"
+   ```
+2. 喪失範囲を date prefix 単位で特定 (`<YYYY>/<MM>/<DD>` 別)
+3. backup bucket → primary bucket への一括 cp を Workers cron 手動 invoke
+   (`wrangler cron trigger backup-restore` で対応 trigger を起動) で復旧
+4. cp 完了後に `backfill` で `kifu-by-id/` と `games-index/` を再生成
+5. インシデント記録を作成 (`docs/csa-server/incidents/<YYYY-MM-DD>.md` 参照、
+   §13.4 step 6 の DO 喪失 incident と同じ命名規約)
+
+#### 14.4.3 backup bucket 自体が壊れた場合
+
+primary が生きている前提なら、primary → backup の再 sync で復旧。両方喪失の
+場合は Cloudflare サポートへエスカレーション (point-in-time restore は
+Cloudflare 側機能に依存)。
+
+### 14.5 follow-up
+
+- [ ] `rshogi-cloudflare-iac` で R2 lifecycle policy を Pulumi に追加 (Phase 1
+      doc 公開と同時に着手)
+- [ ] backup bucket への cp cron 実装 (#624 Phase 2)
+- [ ] viewer 経路で `games-index/` の bucket 整合性 doctor (Phase 2 と同時着手)

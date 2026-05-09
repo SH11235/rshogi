@@ -96,7 +96,8 @@ use crate::spectator_snapshot::{
 };
 use crate::ws_route::{WsRoute, parse_ws_route};
 use crate::x1_paths::{
-    buoy_object_key, default_fork_buoy_name, kifu_by_id_meta_key, kifu_by_id_object_key,
+    BUOY_KEY_PREFIX, buoy_object_key, default_fork_buoy_name, kifu_by_id_meta_key,
+    kifu_by_id_object_key,
 };
 
 const DEFAULT_MAX_MOVES: u32 = 256;
@@ -1546,6 +1547,16 @@ impl GameRoom {
     async fn delete_buoy(&self, game_name: &GameName) -> Result<()> {
         let bucket = self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING)?;
         let key = buoy_object_key(game_name.as_str());
+        // Defense-in-depth: %%DELETEBUOY 経路から `buoys/` prefix 以外の R2
+        // オブジェクト (棋譜 `<YYYY>/...` / `kifu-by-id/` / live-games-index 等) が
+        // 削除されないよう runtime で prefix を検証する (https://github.com/SH11235/rshogi/issues/624)。
+        // `buoy_object_key` は常に prefix を埋めるため通常経路では fail しない
+        // が、将来の helper 改修で prefix が抜けた場合の tripwire として残す。
+        if !key.starts_with(BUOY_KEY_PREFIX) {
+            return Err(Error::RustError(format!(
+                "delete_buoy refused: key '{key}' is not under '{BUOY_KEY_PREFIX}' prefix"
+            )));
+        }
         bucket.delete(&key).await
     }
 
