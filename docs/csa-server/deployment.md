@@ -1140,16 +1140,24 @@ admission gate (案 A: Worker 全体 maintenance flag / 案 B: cron で
   - 既存対局は `Issue #601` の drain 観測で zero 安定後 + worst case 63 分の
     余裕を取っているため race window では基本踏まれない。本判定の被害想定は
     「新規対局者の LOGIN 失敗」までで、進行中対局の破壊は対象外。
-  - 個人運用前提の現 peak (10 LOGIN_LOBBY/sec) では、race window 10 秒に
-    衝突する LOGIN 期待値は 100 件未満 / 月 (deploy 頻度 ≪ 1 回 / 日) と
-    見積もる。LOGIN 失敗時のリトライは csa-client 側で標準対応済 ([PR #683](https://github.com/SH11235/rshogi/pull/683))。
+  - 個人運用前提の現 peak (10 LOGIN_LOBBY/sec) と race window (10 秒、案 A/B 不採用時の
+    上限) を仮定すると、1 deploy あたりの衝突 LOGIN 期待値は
+    `10 LOGIN_LOBBY/sec × 10 秒 = 100 件/deploy` (= 衝突上限)。
+    月間期待値は **deploy 頻度に線形** (例: 月 1 回 deploy → 100 件/月、週 1 回 →
+    約 400 件/月、日 1 回 → 約 3000 件/月)。**本判定は月 4 回 (週 1 回) 以下の
+    deploy 頻度** を前提とし、**400 件/月** までを許容上限と置く。これを
+    超える deploy 頻度に変わった場合は次項の trigger で再評価する。
+    LOGIN 失敗時のリトライは csa-client 側で標準対応済 ([PR #683](https://github.com/SH11235/rshogi/pull/683))。
 - **将来再検討の trigger**:
   1. [Issue #632](https://github.com/SH11235/rshogi/issues/632) Phase 1 の実測で peak が
      「同時 ~100 対局 / 10 LOGIN_LOBBY/sec」を継続的に上回った場合
-  2. [Issue #625](https://github.com/SH11235/rshogi/issues/625) の alert で deploy 起因の LOGIN 失敗 (5xx burst)
-     が ops 観測され、被害が許容を超えた場合
-  3. 上記いずれかが発生したら新規 issue を起票して案 A / B のいずれかを実装。
-     本節の判定は **その時点の peak / 観測実績で再評価** すること。
+  2. [Issue #625](https://github.com/SH11235/rshogi/issues/625) の alert で deploy
+     起因の LOGIN 失敗 (5xx burst) が ops 観測され、被害が許容上限 (月 400 件/月)
+     を超えた場合
+  3. **deploy 頻度が月 4 回 (週 1 回) を超えた場合** (前述の月間期待値計算が
+     成り立たなくなり、許容上限を超える前提に変わるため)
+  4. 上記いずれかが発生したら新規 issue を起票して案 A / B のいずれかを実装。
+     本節の判定は **その時点の peak / 観測実績 / deploy 頻度で再評価** すること。
 
 #### 12.1.2 将来 trigger 用に保留する案 A / B
 
