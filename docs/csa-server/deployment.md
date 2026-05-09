@@ -1207,3 +1207,90 @@ GitHub Environment `rshogi-csa-server-workers-production` の variables に
   block され、CI feedback loop が壊れる。
 - staging の役割と矛盾するため `deploy-staging` job には drain step を入れず、
   `WORKERS_DRAIN_URL` も staging Environment には登録しない。
+
+## 13. DO storage 喪失時の運用方針 ([Issue #628](https://github.com/SH11235/rshogi/issues/628))
+
+進行中対局・AGREE 待ち state・grace registry・challenge registry・未 export
+moves は **GameRoom / LobbyDO の SQLite-backed DO storage にしか存在しない**
+(R2 へは終局後の棋譜のみ書き出される。`crates/rshogi-csa-server-workers/src/persistence.rs`)。
+DO storage を喪失したシナリオでの運用方針を本節で確定する。
+
+### 13.1 想定される喪失シナリオ
+
+- Cloudflare account レベルの障害 / 誤操作で DO instance が削除された
+- DO migration の `delete_classes` 等の誤適用 (本リポは additive-only contract
+  §3.4.1 で防御するが、手動 wrangler 操作で破ったケースを想定)
+- DO storage の SQLite が破損して `state.storage().sql()` が永続的に失敗する
+- Cloudflare 側の地域 incident で DO instance が再起動しても state が復元
+  されない (公式 SLA 上は極めて稀だが、ゼロではない)
+
+### 13.2 採用方針: 喪失時は未完局を一律 abort
+
+**2026-05-10 user 確認確定方針: snapshot / PITR (Point-in-Time Restore) は
+実装しない。DO storage を喪失した場合、未完局は一律 abort 扱い**。
+
+| 対象 | 喪失時の扱い |
+|---|---|
+| 進行中対局 (move 1 件以上) | resign-equivalent でクリーンアップ。両対局者へは disconnect / WS close で通知 |
+| AGREE 待ち (LOGIN 完了 / START 前) | 対局成立せず破棄。再 challenge 必要 |
+| grace registry / challenge registry | 全消失。新規 challenge から再開 |
+| 終局済み対局の棋譜 | R2 (`KIFU_BUCKET`, `FLOODGATE_HISTORY_BUCKET`) に既に書込済なら無事 |
+| 未 export moves (終局直後の R2 write 失敗等) | 復旧不能。データ喪失 |
+
+### 13.3 採用判断の根拠
+
+- **対象が個人運用**: rshogi-csa-server-workers は Floodgate 相当の個人運用前提
+  (#632 で確定: 同時 ~100 対局 / 10 LOGIN_LOBBY/sec が想定 peak)。喪失頻度は
+  極稀 (Cloudflare 公式 SLA + 自前運用の合算で年 1 回未満を想定) で、未完局
+  abort の被害も 1 回数百対局以下。
+- **snapshot コストが見合わない**: R2 への periodic shadow write (案 1) /
+  append-only mirror (案 2) は実装複雑度・R2 ops 消費・障害時 race の取り扱い
+  すべてが run-time コストになる。喪失頻度が極稀な前提では cost > benefit。
+- **観測経路は #625 で配線**: 喪失自体の検知は [Issue #625](https://github.com/SH11235/rshogi/issues/625) で alert 配線
+  予定 (DO error rate / live-games count の急減 等)。検知後は本節の手順で
+  運用復旧する。
+
+中期的に喪失頻度が観測実績で上がった場合のみ、別 issue で snapshot 方式を
+再検討する (本判定の trigger は #625 alert 結果 / 実 incident 報告)。
+
+### 13.4 喪失検知 → 復旧手順
+
+1. **検知**: [Issue #625](https://github.com/SH11235/rshogi/issues/625) の alert (DO error rate / live-games
+   count 急減 / `/api/v1/games/live` 5xx burst) または対局者からの報告。
+2. **対局者への一次連絡**: 公開チャンネル (Floodgate 相当の運用なら専用
+   Slack / Discord / 告知 page) で「DO storage 喪失により未完局を abort 中」を
+   告知。可能なら影響時刻範囲を併記。
+3. **DO instance の状態確認**:
+   ```bash
+   # 進行中対局が API 上見えるか
+   curl -s "https://rshogi-csa-server-workers.sh11235.workers.dev/api/v1/games/live" | jq
+   # DO 側が応答しているか (room_id を 1 件試す)
+   websocat "wss://rshogi-csa-server-workers.sh11235.workers.dev/ws/<room_id>"
+   ```
+4. **復旧**:
+   - 部分的喪失 (一部 DO instance のみ): 該当 instance に `start_match` してきた
+     対局のみ abort 通知。空の DO state から再開で OK。
+   - 全面喪失: 新 DO migration tag (`v<N+1>`) で空 schema 再構築 (§3.4 手順)。
+     全未完局を一斉 abort、対局者へは再 challenge を案内。
+5. **事後**: incident report を `docs/csa-server/incidents/<date>_do_loss.md` に
+   起票し、再発防止 (snapshot 再検討 / migration ガード強化等) を判定する。
+
+### 13.5 対局者への事前期待値共有
+
+- 「対局中の Cloudflare 障害 / DO 喪失時は未完局が abort される」を対局参加
+  説明 (公開 doc / runbook / Floodgate 告知 page) に明記する。
+- snapshot による途中再開は **意図的に提供していない** ことを併記
+  (snapshot は cost vs benefit で本運用規模では見送り、と記載)。
+- 終局済み対局の棋譜 (R2 backup) は本節の喪失対象外。R2 backup 戦略は
+  [Issue #624](https://github.com/SH11235/rshogi/issues/624) (R2 lifecycle / 同アカウント内 backup bucket) を参照。
+
+### 13.6 将来の snapshot 再検討トリガー
+
+以下のいずれかが観測されたら本判定を再評価し、snapshot 方式 (R2 shadow write
+/ append-only mirror) を別 issue で起票する:
+
+1. DO 喪失 incident が 1 件でも実際に発生し、abort された対局数が許容超 (基準:
+   月 10 対局以上)
+2. [Issue #625](https://github.com/SH11235/rshogi/issues/625) の alert で「DO state 異常」イベントが頻発 (月 5 件以上)
+3. peak 負荷が #632 想定 (10 LOGIN_LOBBY/sec) を継続的に上回り、未完局 abort
+   の影響範囲が ops 観測上無視できないと判定された場合
