@@ -296,10 +296,142 @@ Self-managed backend (R2 / S3 等) を使う場合は `PULUMI_CONFIG_PASSPHRASE`
 依存になり commit 可否が変わるので、Phase 2 で backend 移行する場合は
 本セクションを更新する。
 
-## 8. 参考
+## 9. Secret 管理 (Phase 2-D 以降)
+
+[#690](https://github.com/SH11235/rshogi/issues/690) で **Worker secret の値だけ
+Pulumi ESC を single source of truth に集約** した。Worker script / DO / vars /
+cron triggers の管理境界 (§3) は変えず、secret 値のみ「ESC に置き、
+`secret-sync.yml` で wrangler 経由 Cloudflare に流す」運用に移行する。
+
+§4.3 は Phase 1 時点での「wrangler 直叩きで `secret put`」手順を記録した
+historical 節として残す (旧手順を急遽踏みたい emergency rotation 用に温存)。
+通常 rotation は本 §9 の手順で行うこと。
+
+### 9.1 アーキテクチャ (採用案 B)
+
+```
+┌─ Pulumi ESC (sh11235 org) ──────────────────────────────────┐
+│ env: sh11235/rshogi-csa-server-workers-staging              │
+│   values.workerSecrets.ADMIN_API_TOKEN  (encrypted)          │
+│ env: sh11235/rshogi-csa-server-workers-production           │
+│   values.workerSecrets.ADMIN_API_TOKEN  (encrypted)          │
+└──────────────────────────────────┬──────────────────────────┘
+                                   │ (1) esc env open --format json
+                                   ▼
+                        ┌──────────────────────────┐
+                        │ secret-sync.yml          │
+                        │ (workflow_dispatch only) │
+                        └──────────────┬───────────┘
+                                       │ (2) wrangler secret bulk
+                                       ▼
+                  ┌──────────────────────────────────────┐
+                  │ Cloudflare Worker secret store       │
+                  │   ADMIN_API_TOKEN (per env)          │
+                  └──────────────────────────────────────┘
+```
+
+候補比較:
+
+| 案 | 概要 | 採否 | 理由 |
+|---|---|---|---|
+| A | Pulumi `WorkersScript` の `secret_text` binding で declarative 管理 | 不採用 | `@pulumi/cloudflare` v6 の WASM Worker marshal error が未解決 (§3 参照) |
+| B | ESC + `workflow_dispatch` + wrangler kick | **採用** | Worker script を Pulumi 配下に入れずに secret 値だけ集約できる |
+| C | 台帳のみ管理 (人手で wrangler 叩く) | 不採用 | 自動化目的を満たさない |
+
+### 9.2 ESC environment 構造の規約
+
+ESC environment 名は **per-repo per-env**:
+
+- `sh11235/rshogi-csa-server-workers-staging`
+- `sh11235/rshogi-csa-server-workers-production`
+
+YAML 構造の規約:
+
+```yaml
+values:
+  workerSecrets:
+    ADMIN_API_TOKEN:
+      fn::secret:
+        ciphertext: <encrypted ciphertext>
+    # 将来 Worker secret を追加するときは workerSecrets 配下にキーを足す
+```
+
+`values.workerSecrets` 配下のキー名がそのまま `wrangler secret bulk` に渡され、
+Worker code 側 `env.var("KEY")` で参照される名前と一致する必要がある。
+`workerSecrets` キーが空 / 不在のまま `secret-sync.yml` を起動すると
+fail-closed で abort する (空 push で既存 secret を消去 / 上書きしない既定)。
+
+### 9.3 通常の secret 追加 / rotation 手順
+
+```bash
+# 1. ESC env を編集して新値を投入 (standalone esc CLI 経由)
+esc env edit sh11235/rshogi-csa-server-workers-staging
+#   → エディタが開くので values.workerSecrets.<KEY> を fn::secret で追加 / 更新
+#   (詳細は https://www.pulumi.com/docs/esc/cli/commands/esc_env_edit/ 参照)
+#   ※ Pulumi CLI を入れているなら `pulumi env edit ...` でも同等
+
+# 2. ESC 単体で値を確認 (workflow を流さずに dry-run したい場合)
+esc env open sh11235/rshogi-csa-server-workers-staging --format json | \
+    jq '.workerSecrets | keys'
+#   ※ workflow と同じ standalone `esc` CLI を使う。Pulumi CLI 経由なら `pulumi env open ...`
+
+# 3. workflow_dispatch で wrangler 同期を kick
+gh workflow run secret-sync.yml --repo SH11235/rshogi -f environment=staging
+
+# 4. workflow log で「Fetched N secret key(s)」「Successfully created secret for key: ...」
+#    を確認
+gh run watch --repo SH11235/rshogi   # or: gh run list --workflow secret-sync.yml --repo SH11235/rshogi
+
+# 5. Cloudflare 側に反映されたか確認
+cd crates/rshogi-csa-server-workers
+npx wrangler secret list --config wrangler.staging.toml
+#   → ADMIN_API_TOKEN: SECRET_TEXT が並んでいれば成功
+```
+
+production も同手順で `staging` を `production` に置換するだけ。
+
+### 9.4 secret-sync.yml の責務範囲
+
+- **やること**:
+  - 指定 `environment` の ESC env を `esc env open --format json` で読み出す
+  - `.workerSecrets` を flat JSON object として書き出し、`wrangler secret bulk`
+    で 1 回の API 呼び出しで投入
+  - `Step Summary` に同期対象の ESC env 名 / wrangler config 名 / 反映確認コマンドを残す
+- **やらないこと**:
+  - Worker script 本体の deploy (= `deploy-workers.yml` の責務)
+  - ESC 側の値変更 (= 運用者が `esc env edit` で行う)
+  - 同期失敗時の自動 rollback (= ESC 値を戻して再 dispatch する手動 rollback 運用)
+
+### 9.5 必要 GitHub secret / 権限
+
+| key | 用途 | 流用元 |
+|---|---|---|
+| `PULUMI_ACCESS_TOKEN` | ESC env 読み取り | `pulumi-preview.yml` で既設定 |
+| `CLOUDFLARE_API_TOKEN` | `wrangler secret bulk` の Cloudflare API 呼び出し | `deploy-workers.yml` で既設定 (`Workers Scripts: Edit` scope を含むこと) |
+
+`secret-sync.yml` は `workflow_dispatch` のみ受け付け、かつ `if: github.ref == 'refs/heads/main'`
+で main 起動限定 (Phase 2-B 既知 quirks #9 対策)。任意ブランチで dispatch
+しても job 段で skip される。
+
+### 9.6 トラブルシュート
+
+- **`ESC env '...' does not contain a non-empty 'workerSecrets' object`**: ESC env
+  の YAML 構造が §9.2 規約に合っていない。`esc env get <env>` で `values`
+  ツリーを確認し、`workerSecrets` 配下にキーがあるか見る。
+- **`wrangler secret bulk` が 401 / 403**: `CLOUDFLARE_API_TOKEN` の scope に
+  `Workers Scripts: Edit` が含まれていない可能性。Cloudflare dashboard で token
+  scope を確認 (deploy-workers.yml が動いていれば deploy 用 scope は満たすが、
+  Cloudflare 側で scope を絞った別 token を使っている場合は要拡張)。
+- **`esc env open` が "no such environment"**: ESC env 名の typo か、
+  `PULUMI_ACCESS_TOKEN` の発行 org が `sh11235` 以外。`pulumi whoami` で確認。
+
+## 10. 参考
 
 - 設計判断 / 背景: [#675](https://github.com/SH11235/rshogi/issues/675) (umbrella)
 - Phase 1 実装単位: [#676](https://github.com/SH11235/rshogi/issues/676)
+- Phase 2-D (本 §9): [#690](https://github.com/SH11235/rshogi/issues/690)
 - [Pulumi Cloudflare Provider Registry](https://www.pulumi.com/registry/packages/cloudflare/)
 - [Pulumi Cloud Individual tier](https://www.pulumi.com/pricing/)
+- [Pulumi ESC docs](https://www.pulumi.com/docs/esc/)
+- [`pulumi/esc-action`](https://github.com/pulumi/esc-action)
 - 既存 wrangler 運用 runbook: [`deployment.md`](deployment.md)
