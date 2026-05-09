@@ -148,11 +148,11 @@ jobs:
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
       - name: Setup sccache
         if: steps.check.outputs.can_deploy == 'true'
-        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - name: Enable sccache
         if: steps.check.outputs.can_deploy == 'true'
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: steps.check.outputs.can_deploy == 'true'
         with:
           shared-key: wasm32
@@ -185,7 +185,7 @@ jobs:
       - name: Install worker-build
         if: steps.check.outputs.can_deploy == 'true' && steps.cache-worker-build.outputs.cache-hit != 'true'
         run: cargo install -q worker-build@^0.8 --locked
-      - uses: pnpm/action-setup@5d445ecbfcb90fdf1556a629d018c79e97ff973b # v6.0.6
+      - uses: pnpm/action-setup@91ab88e2619ed1f46221f0ba42d1492c02baf788 # v6.0.6
         if: steps.check.outputs.can_deploy == 'true'
         with:
           package_json_file: crates/rshogi-csa-server-workers/package.json
@@ -367,11 +367,11 @@ jobs:
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
       - name: Setup sccache
         if: steps.check.outputs.can_deploy == 'true'
-        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - name: Enable sccache
         if: steps.check.outputs.can_deploy == 'true'
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: steps.check.outputs.can_deploy == 'true'
         with:
           shared-key: wasm32
@@ -400,7 +400,7 @@ jobs:
       - name: Install worker-build
         if: steps.check.outputs.can_deploy == 'true' && steps.cache-worker-build.outputs.cache-hit != 'true'
         run: cargo install -q worker-build@^0.8 --locked
-      - uses: pnpm/action-setup@5d445ecbfcb90fdf1556a629d018c79e97ff973b # v6.0.6
+      - uses: pnpm/action-setup@91ab88e2619ed1f46221f0ba42d1492c02baf788 # v6.0.6
         if: steps.check.outputs.can_deploy == 'true'
         with:
           package_json_file: crates/rshogi-csa-server-workers/package.json

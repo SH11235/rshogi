@@ -91,14 +91,14 @@ jobs:
           rustup default "$CHANNEL"
       - name: Setup sccache
         if: steps.check.outputs.can_run == 'true'
-        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - name: Enable sccache
         if: steps.check.outputs.can_run == 'true'
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       # native release build 用 cache key。`deploy-workers.yml` 等が使う wasm32
       # group とは別 namespace にして cache key の衝突 (`RUSTFLAGS` 不一致での
       # cache miss / 汚染) を防ぐ。
-      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: steps.check.outputs.can_run == 'true'
         with:
           shared-key: csa-synthetic-native
