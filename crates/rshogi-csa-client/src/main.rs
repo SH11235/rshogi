@@ -221,16 +221,22 @@ fn compute_effective_retry_delay(err_msg: &str, retry_delay: Duration) -> Durati
 const SHUTDOWN_POLL: Duration = Duration::from_millis(200);
 
 fn sleep_with_shutdown(delay: Duration, shutdown: &AtomicBool) -> bool {
-    let deadline = Instant::now() + delay;
+    let deadline = Instant::now().checked_add(delay);
     loop {
         if shutdown.load(Ordering::SeqCst) {
             return false;
         }
-        let now = Instant::now();
-        if now >= deadline {
-            return true;
-        }
-        std::thread::sleep((deadline - now).min(SHUTDOWN_POLL));
+        let sleep_for = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return true;
+                }
+                remaining.min(SHUTDOWN_POLL)
+            }
+            None => SHUTDOWN_POLL,
+        };
+        std::thread::sleep(sleep_for);
     }
 }
 
@@ -1294,6 +1300,21 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(50),
             "事前 shutdown は即座に return すべき: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn sleep_with_shutdown_handles_huge_delay_when_shutdown_already_set() {
+        // server が異常に大きい retry_after を返しても Instant 加算 overflow で
+        // panic せず、shutdown が立っていれば即座に抜ける。
+        let shutdown = AtomicBool::new(true);
+        let start = Instant::now();
+        let completed = sleep_with_shutdown(Duration::from_secs(u64::MAX), &shutdown);
+        let elapsed = start.elapsed();
+        assert!(!completed);
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "巨大 delay でも事前 shutdown は即座に return すべき: {elapsed:?}"
         );
     }
 
