@@ -49,17 +49,17 @@ jobs:
       # ターゲットで warning を大量発生させる。
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@stable
       - name: Add wasm32 target to pinned toolchain
         run: |
           CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           # `rust-ci.yml` の `wasm-build` job、`deploy-workers.yml` と
           # 同じ wasm32 sysroot キャッシュ namespace を共有する。
@@ -81,18 +81,18 @@ jobs:
       #   `deploy-workers.yml` の同箇所と同契約。
       - name: Cache worker-build binary
         id: cache-worker-build
-        uses: actions/cache@v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cargo/bin/worker-build
           key: worker-build-${{ runner.os }}-${{ runner.arch }}-v0.8
       - name: Install worker-build
         if: steps.cache-worker-build.outputs.cache-hit != 'true'
         run: cargo install -q worker-build@^0.8 --locked
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@5d445ecbfcb90fdf1556a629d018c79e97ff973b # v6.0.6
         with:
           package_json_file: crates/rshogi-csa-server-workers/package.json
           run_install: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version-file: crates/rshogi-csa-server-workers/.node-version
           cache: 'pnpm'
