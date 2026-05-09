@@ -151,19 +151,10 @@ const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
 /// 切断 → 再接続待ちエントリの DO storage key (1 対局 = 0..=1 件)。
-///
-/// ⚠ `enter_grace_window` 内のローカル struct `GraceAlarmWrite` の
-/// `#[serde(rename = "grace_registry")]` と一致させること。`put_multiple` は
-/// struct のフィールド名 (rename 後) を storage key として使うため、ずれると
-/// `load_grace_registry` 側が `None` を返す silent failure になる。
 const KEY_GRACE_REGISTRY: &str = "grace_registry";
 /// 次に発火する `state.alarm()` の種別タグ。`None` は alarm 未予約 / 既存 alarm
 /// が時間切れ駆動 (TimeUp) であることを示す。grace 経路に入ったときだけ
 /// `GraceExpired` を書き込む。
-///
-/// ⚠ `enter_grace_window` 内のローカル struct `GraceAlarmWrite` の
-/// `#[serde(rename = "pending_alarm_kind")]` と一致させること（理由は
-/// `KEY_GRACE_REGISTRY` と同じ）。
 const KEY_PENDING_ALARM_KIND: &str = "pending_alarm_kind";
 /// 終局時に R2 export PUT が一部または全部失敗したときに、再 PUT に必要な
 /// CSA 本文 / meta JSON / 失敗 key 一覧を保持する DO storage key (Issue #623)。
@@ -856,10 +847,12 @@ impl GameRoom {
         // 走らないので live-games-index に put しない) のに DO 側では memory /
         // room 枠を専有し続ける edge case を解消する。
         //
-        // - 両者 AGREE で `HandleOutcome::GameStarted` が観測されたら
-        //   `clear_agree_timeout_tag` で kind タグだけ削除する。alarm 本体は
-        //   直後の `reschedule_turn_alarm` が turn budget で上書きするため、
-        //   別途 cancel する必要はない (タグが無いので alarm は TimeUp として処理される)。
+        // - 両者 AGREE で `HandleOutcome::GameStarted` が観測されたら、
+        //   `reschedule_turn_alarm` が turn budget で alarm 本体を上書きした **後**
+        //   に `clear_agree_timeout_tag` で kind タグを削除する (順序の意図は
+        //   Issue #597: タグ削除を後置することで「kind=None かつ alarm=AgreeTimeout
+        //   当時の発火時刻」の中間状態をコード上に作らない)。
+        //   タグが無くなった後は alarm が時間切れ駆動 (TimeUp) として扱われる。
         // - alarm が `AgreeTimeout` のまま発火したら `handle_agree_timeout_alarm` で
         //   部屋を解放する (`abort_pending_match_with_error` 相当 + `KEY_FINISHED`
         //   セット)。AGREE 前なので live-games-index は put 前 (cleanup 不要)、
@@ -936,10 +929,6 @@ impl GameRoom {
         // Playing 開始を確定できた瞬間だけ cfg を更新（冪等）。
         if let HandleOutcome::GameStarted = result.outcome {
             self.mark_play_started(now).await?;
-            // AGREE 待ち TTL タグを片付ける (https://github.com/SH11235/rshogi/issues/600)。alarm 本体は直後の
-            // `reschedule_turn_alarm` が turn budget で上書きするため、タグだけ
-            // 消せば後続 alarm 発火は既定 (TimeUp) として処理される。
-            self.clear_agree_timeout_tag().await;
         }
 
         // 着手を永続化。MoveAccepted の場合のみ moves テーブルに append する。
@@ -947,8 +936,20 @@ impl GameRoom {
             self.append_move(color, line, now).await?;
         }
 
-        self.dispatch_broadcasts(&result.broadcasts).await?;
+        // alarm 関連の更新は `dispatch_broadcasts` より前に済ませる (Issue #597)。
+        // broadcast 失敗で `?` 伝播すると後続の alarm 再予約も `clear_agree_timeout_tag`
+        // も走らなくなるため、`GameStarted` で broadcast 失敗した経路では既存の
+        // `AgreeTimeout` alarm が残ったまま発火し、`handle_agree_timeout_alarm` の
+        // `play_started_at_ms.is_some()` ガードで「タグ削除のみ」して return する
+        // (turn alarm が二度と貼られない) 経路が成立してしまう。
         self.reschedule_turn_alarm(&result.outcome).await?;
+        // AGREE 待ち TTL タグの片付けは新 turn alarm 設定後に行う。先にタグを
+        // 消すと「kind=None かつ alarm=AgreeTimeout 当時の発火時刻」の中間状態を
+        // コード順序として作ることになるため、alarm 上書き完了後に delete する。
+        if let HandleOutcome::GameStarted = result.outcome {
+            self.clear_agree_timeout_tag().await;
+        }
+        self.dispatch_broadcasts(&result.broadcasts).await?;
         self.finalize_if_ended(&result).await?;
         Ok(())
     }
@@ -2678,21 +2679,21 @@ impl GameRoom {
         let (alarm_kind, should_set_grace) =
             classify_alarm_after_enter_grace(existing_alarm, grace_deadline_ms);
 
-        #[derive(Serialize)]
-        struct GraceAlarmWrite<'a> {
-            #[serde(rename = "grace_registry")]
-            grace_registry: &'a PendingReconnect,
-            #[serde(rename = "pending_alarm_kind")]
-            pending_alarm_kind: PendingAlarmKind,
-        }
-
-        self.state
-            .storage()
-            .put_multiple(GraceAlarmWrite {
-                grace_registry: &pending,
-                pending_alarm_kind: alarm_kind,
-            })
-            .await?;
+        // `KEY_GRACE_REGISTRY` と `KEY_PENDING_ALARM_KIND` を順次 put する
+        // (Issue #597 隣接懸念 2)。`put_multiple` を使うとローカル struct の
+        // `#[serde(rename = "...")]` が各定数と一致する暗黙契約になり、定数を
+        // rename した際に silent failure となるリスクがあるため、定数を直接
+        // `put` に渡す形に分解する。
+        // 2 回の awaited put は単一 transaction ではないため、DO crash 等で
+        // 中間状態 (registry 有 / kind 無、または逆) が persist する可能性は残る。
+        // ただし `handle_grace_expired_alarm` は registry 不在時に
+        // `delete_grace_alarm_state` で tag を片付ける fallback を持つため、
+        // alarm 経路で発火した場合の整合性は recovery で吸収される。
+        // 再接続経路 (`handle_reconnect_request`) は registry 不在時に
+        // `LOGIN:incorrect reconnect_rejected` で拒否するのみで tag は触らない
+        // (= alarm 発火を待って `handle_grace_expired_alarm` が cleanup する)。
+        self.state.storage().put(KEY_GRACE_REGISTRY, &pending).await?;
+        self.state.storage().put(KEY_PENDING_ALARM_KIND, &alarm_kind).await?;
         if should_set_grace {
             let delay = grace_deadline_ms.saturating_sub(now_ms).saturating_add(ALARM_SAFETY_MS);
             self.state.storage().set_alarm(Duration::from_millis(delay)).await?;
