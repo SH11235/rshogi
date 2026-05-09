@@ -1,0 +1,10 @@
+name: rshogi-csa-server-workers
+description: 'Pulumi IaC for rshogi-csa-server-workers Cloudflare resources (issue #676)'
+runtime:
+  name: nodejs
+  options:
+    packagemanager: pnpm
+config:
+  pulumi:tags:
+    value:
+      pulumi:template: typescript

@@ -1,0 +1,14 @@
+{
+    "name": "rshogi-csa-server-workers-iac",
+    "main": "index.ts",
+    "private": true,
+    "packageManager": "pnpm@10.33.2",
+    "devDependencies": {
+        "@types/node": "22.19.18",
+        "typescript": "5.9.3"
+    },
+    "dependencies": {
+        "@pulumi/cloudflare": "6.15.0",
+        "@pulumi/pulumi": "3.237.0"
+    }
+}

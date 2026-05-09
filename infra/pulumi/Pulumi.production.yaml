@@ -1,0 +1,4 @@
+config:
+  cloudflare:apiToken:
+    secure: AAABANo8nbBvBYxnaGIDXZhzFbmzVOcvrI4Myz1HPScF624HOINWcX18HZVusAVEafQhuWgtoDW18zuSnArRIE0n74sgFC+kcsDC2HqEEdQQMJY/1w==
+  rshogi-csa-server-workers:accountId: d5d9818649d8722f73cd798c3b1ffb70

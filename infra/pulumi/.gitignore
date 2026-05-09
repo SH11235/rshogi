@@ -1,0 +1,7 @@
+# pnpm が package.json から install する Node deps。pnpm-lock.yaml は追跡し
+# node_modules/ のみ除外する。
+/node_modules/
+
+# TypeScript ビルド成果物 / Pulumi が生成するローカル cache。
+/bin/
+/.pulumi/

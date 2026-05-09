@@ -1,0 +1,137 @@
+# Pulumi (infra/pulumi/) の検証 / preview workflow。
+#
+# Phase 1 ([#676](https://github.com/SH11235/rshogi/issues/676)) では preview のみ。`pulumi up` (実 deploy) は CI からは
+# 走らせない (現行 wrangler-based deploy が稼働中に Pulumi 経由 deploy 経路も
+# 自動化すると競合 / 想定外 deploy のリスクがあるため)。
+# `pulumi up` 自動化は Phase 2 以降 (umbrella [#675](https://github.com/SH11235/rshogi/issues/675)) で慎重に統合する。
+#
+# ## 重要: PR では secrets を一切使わない設計
+#
+# `pull_request` trigger で `PULUMI_ACCESS_TOKEN` を扱うと、PR で変更された
+# Pulumi program (任意の TypeScript) が `process.env.PULUMI_ACCESS_TOKEN` 経由
+# で外部送信できてしまう。Pulumi token は Pulumi Cloud 上の stack config に
+# encrypted で stored された Cloudflare API token の復号権限にも繋がるため、
+# 内部ブランチ PR (内部 contributor からのものでも) で実行すれば secrets exfiltration
+# 経路となる。
+#
+# 対策として本 workflow は 2 job 構成:
+#   - validate-pr (pull_request)    : secrets を一切使わない静的検証 (TypeScript 型 check)
+#   - preview-staging (workflow_dispatch のみ) : secrets を使う実 preview
+#                                                信頼済み運用者が手動実行する
+#
+# secret 配線:
+#   - PULUMI_ACCESS_TOKEN : Pulumi Cloud token。Pulumi Cloud Console
+#                           https://app.pulumi.com/account/tokens で発行
+# token 未設定時は preview-staging job は warning + skip で抜ける (job 自体は green、
+# secrets 設定後の最初の dispatch で実 preview が走る)。
+
+name: Pulumi Preview
+
+on:
+  pull_request:
+    paths:
+      - 'infra/pulumi/**'
+      - '.github/workflows/pulumi-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pulumi-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------- validate-pr ----------------------------------------------------
+  # PR 時にのみ走る secret-free な静的検証。
+  # `tsc --noEmit` で TypeScript 型 check と pnpm install dry を行う。
+  # secrets を job context に渡さないため、PR の Pulumi code が悪意ある場合
+  # でも (内部 PR でも) Pulumi / Cloudflare token は漏洩しない。
+  # 実 preview (Cloudflare API 叩く / Pulumi Cloud と通信する) は別 job で
+  # workflow_dispatch のみ。
+  validate-pr:
+    name: Validate Pulumi project (no secrets)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PULUMI_DIR: infra/pulumi
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ${{ env.PULUMI_DIR }}/package.json
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ${{ env.PULUMI_DIR }}/.node-version
+          cache: 'pnpm'
+          cache-dependency-path: ${{ env.PULUMI_DIR }}/pnpm-lock.yaml
+      - name: Install Pulumi project deps
+        working-directory: ${{ env.PULUMI_DIR }}
+        run: pnpm install --frozen-lockfile
+      - name: TypeScript type-check
+        working-directory: ${{ env.PULUMI_DIR }}
+        run: pnpm exec tsc --noEmit
+
+  # ---------- preview-staging -----------------------------------------------
+  # workflow_dispatch のみ起動。信頼済み運用者が手動で staging stack の
+  # `pulumi preview` を実行する経路。`PULUMI_ACCESS_TOKEN` を secret として
+  # 渡し、Pulumi Cloud 経由で Cloudflare API に到達して実差分を取得する。
+  #
+  # PR トリガーでないため、PR 側に書かれた任意 Pulumi code を secret 環境で
+  # 実行することはない。
+  preview-staging:
+    name: pulumi preview (staging)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PULUMI_DIR: infra/pulumi
+    steps:
+      - name: Check Pulumi access token
+        id: check
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$PULUMI_ACCESS_TOKEN" ]; then
+            echo "can_preview=true" >> "$GITHUB_OUTPUT"
+            echo "✅ PULUMI_ACCESS_TOKEN configured; preview will proceed."
+          else
+            echo "can_preview=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## ⚠️ Pulumi preview skipped"
+              echo
+              echo "secret \`PULUMI_ACCESS_TOKEN\` が未設定です。"
+              echo "https://app.pulumi.com/account/tokens で Personal Access Token を発行し、"
+              echo "リポジトリ Settings → Secrets and variables → Actions に登録してください。"
+              echo
+              echo "See \`docs/csa-server/iac.md\` §6 for setup."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Pulumi preview skipped (PULUMI_ACCESS_TOKEN not configured)."
+          fi
+      - uses: actions/checkout@v5
+        if: steps.check.outputs.can_preview == 'true'
+      - uses: pnpm/action-setup@v4
+        if: steps.check.outputs.can_preview == 'true'
+        with:
+          package_json_file: ${{ env.PULUMI_DIR }}/package.json
+          run_install: false
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.can_preview == 'true'
+        with:
+          node-version-file: ${{ env.PULUMI_DIR }}/.node-version
+          cache: 'pnpm'
+          cache-dependency-path: ${{ env.PULUMI_DIR }}/pnpm-lock.yaml
+      - name: Install Pulumi project deps
+        if: steps.check.outputs.can_preview == 'true'
+        working-directory: ${{ env.PULUMI_DIR }}
+        run: pnpm install --frozen-lockfile
+      - uses: pulumi/actions@v6
+        if: steps.check.outputs.can_preview == 'true'
+        with:
+          command: preview
+          stack-name: SH11235/rshogi-csa-server-workers/staging
+          work-dir: ${{ env.PULUMI_DIR }}
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
