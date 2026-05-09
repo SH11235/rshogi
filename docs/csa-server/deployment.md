@@ -1265,6 +1265,8 @@ DO storage を喪失したシナリオでの運用方針を本節で確定する
    # 進行中対局が API 上見えるか
    curl -s "https://rshogi-csa-server-workers.sh11235.workers.dev/api/v1/games/live" | jq
    # DO 側が応答しているか (room_id を 1 件試す)
+   # ※ websocat 未インストールなら `cargo install websocat` で入れる。
+   #   本コマンドは WS 到達性の確認のみで、DO state (対局データ) の健全性は判定不可
    websocat "wss://rshogi-csa-server-workers.sh11235.workers.dev/ws/<room_id>"
    ```
 4. **復旧**:
@@ -1272,8 +1274,30 @@ DO storage を喪失したシナリオでの運用方針を本節で確定する
      対局のみ abort 通知。空の DO state から再開で OK。
    - 全面喪失: 新 DO migration tag (`v<N+1>`) で空 schema 再構築 (§3.4 手順)。
      全未完局を一斉 abort、対局者へは再 challenge を案内。
-5. **事後**: incident report を `docs/csa-server/incidents/<date>_do_loss.md` に
-   起票し、再発防止 (snapshot 再検討 / migration ガード強化等) を判定する。
+5. **`live-games-index/` の手動掃除** (DO loss では必須):
+   - DO 喪失 → 未完局 abort では `kifu-by-id/<id>.meta.json` (= 終局済み判定キー、
+     §0 §551) が put されないため、cron `run_live_orphan_sweep` (`backfill.rs`) は
+     該当 entry を削除しない。`/api/v1/games/live` と deploy drain (§12) で
+     stale な対局として残り続ける。
+   - 影響範囲の `game_id` を特定したら、R2 から該当 entry を直接削除する:
+     ```bash
+     # 影響 game_id を抽出: cutoff_ms = DO 喪失発生時刻 (epoch ms)、それ以前に
+     # 開始 (started_at_ms < cutoff_ms) した対局が abort 対象 (= 喪失時に進行中)
+     curl -s "https://rshogi-csa-server-workers.sh11235.workers.dev/api/v1/games/live" \
+       | jq -r '.live_games[] | select(.started_at_ms < <cutoff_ms>) | .game_id'
+     # 各 game_id に対応する live-games-index key を計算 (started_at_ms から prefix 構築)
+     # 詳細は live_games_index::live_games_index_key を参照
+     # KIFU_BUCKET の実 bucket 名は wrangler.{production,staging}.toml の
+     # `[[r2_buckets]]` (binding = "KIFU_BUCKET") の `bucket_name` を参照
+     wrangler r2 object delete <KIFU_BUCKET>/live-games-index/<inv-key>-<game_id>.json
+     ```
+   - 代替手段: 影響 `game_id` の abort 用 `kifu-by-id/<id>.meta.json` を手動 put して
+     cron sweep (15 分以内) に削除させる。abort 専用 meta フォーマットは未配線のため、
+     現状は **手動 R2 delete を推奨**。
+6. **事後**: incident report を `docs/csa-server/incidents/<date>_do_loss.md` に
+   起票 (本ディレクトリは未作成 = 必要時に新規作成、`git` は空ディレクトリを
+   追跡しないため事前生成は不要) し、再発防止 (snapshot 再検討 / migration
+   ガード強化 / abort meta 自動 put 経路の整備等) を判定する。
 
 ### 13.5 対局者への事前期待値共有
 
@@ -1293,4 +1317,6 @@ DO storage を喪失したシナリオでの運用方針を本節で確定する
    月 10 対局以上)
 2. [Issue #625](https://github.com/SH11235/rshogi/issues/625) の alert で「DO state 異常」イベントが頻発 (月 5 件以上)
 3. peak 負荷が #632 想定 (10 LOGIN_LOBBY/sec) を継続的に上回り、未完局 abort
-   の影響範囲が ops 観測上無視できないと判定された場合
+   1 回あたりの影響対局数が **20 件以上** に達するか、または
+   `live-games-index/` 手動削除 (§13.4 step 5) の運用負荷が **月 30 分以上**
+   になった場合
