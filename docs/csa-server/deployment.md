@@ -1109,14 +1109,80 @@ drain 対象外。
   では race window の完全排除はできない。「graceful drain」ではなく
   **"best-effort drain"** として doc / log で表記する。
 - 真の graceful drain (進行中対局を新 isolate に migrate) は Workers 制約上
-  実装不能。将来対局頻度が上がったら maintenance mode flag 経由の二段 deploy
-  (lobby が `start_match` を拒否する flag を入れて pre-deploy → drain →
-  本 deploy) を追加検討する。
+  実装不能。drain 完了 → `wrangler deploy` upload 開始までの race window を
+  完全排除する admission freeze (maintenance flag 経由の二段 deploy 等) は
+  2026-05-10 時点で **不採用** と判定 ([Issue #634](https://github.com/SH11235/rshogi/issues/634))。詳細・将来 trigger は §12.1.1 / §12.1.2 を参照。
 - 最低 drain 検出時間 = `poll_interval_sec × require_stable_zero` (default 設定
   では `30s × 3 = 90s`)。R2 list の eventual consistency を緩和するためのバッファ。
 - worst case 待機: `total_time_sec × 2 + byoyomi_sec × max_moves`
   (production CLOCK 設定で `600 × 2 + 10 × 256 = 3760s ≈ 63 分`) + 余裕で 3900s
   を default に設定。
+
+#### 12.1.1 admission freeze の判定 (2026-05-10, [Issue #634](https://github.com/SH11235/rshogi/issues/634))
+
+drain 完了から `wrangler deploy` upload 完了までの数秒〜十数秒の race window
+を完全排除するには、deploy 開始時に新規 `start_match` を一律拒否する
+admission gate (案 A: Worker 全体 maintenance flag / 案 B: cron で
+`admission_freeze` flag を timed gate) を導入する必要がある。
+
+**2026-05-10 時点の判定: C 案 (現状維持 + doc 明示) を採用**。
+
+- **判断根拠**: rshogi-csa-server-workers は Floodgate 相当の個人運用前提
+  (同時 ~100 対局 / 10 LOGIN_LOBBY/sec を想定 peak、[Issue #632](https://github.com/SH11235/rshogi/issues/632) で確定)。
+  この負荷帯では race window に LOGIN が衝突する確率は ops 観測上
+  無視できる程度であり、admission gate を入れる ops コスト (二段 deploy /
+  flag 配線 / 解除忘れ事故) のほうが大きい。
+- **race window 中の被害想定** (worst case):
+  - drain 直後 〜 `wrangler deploy` upload 完了までの数秒〜十数秒に
+    新規 LOGIN/`start_match` が来た場合、対象 isolate が deploy 中の cutover を
+    踏む。観測される現象は LOGIN 応答が 502 / WebSocket close、
+    あるいは `start_match` 直後の最初の DO write で transient error。
+  - 既存対局は `Issue #601` の drain 観測で zero 安定後 + worst case 63 分の
+    余裕を取っているため race window では基本踏まれない。本判定の被害想定は
+    「新規対局者の LOGIN 失敗」までで、進行中対局の破壊は対象外。
+  - 個人運用前提の現 peak (10 LOGIN_LOBBY/sec) と race window (10 秒、案 A/B 不採用時の
+    上限) を仮定すると、1 deploy あたりの衝突 LOGIN 期待値は
+    `10 LOGIN_LOBBY/sec × 10 秒 = 100 件/deploy` (= 衝突上限)。
+    月間期待値は **deploy 頻度に線形** (例: 月 1 回 deploy → 100 件/月、週 1 回 →
+    約 400 件/月、日 1 回 → 約 3000 件/月)。**本判定は月 4 回 (週 1 回) 以下の
+    deploy 頻度** を前提とし、**400 件/月** までを許容上限と置く。これを
+    超える deploy 頻度に変わった場合は次項の trigger で再評価する。
+    LOGIN 失敗時のリトライは csa-client 側で標準対応済 ([PR #683](https://github.com/SH11235/rshogi/pull/683))。
+- **将来再検討の trigger**:
+  1. [Issue #632](https://github.com/SH11235/rshogi/issues/632) Phase 1 の実測で peak が
+     「同時 ~100 対局 / 10 LOGIN_LOBBY/sec」を継続的に上回った場合
+  2. [Issue #625](https://github.com/SH11235/rshogi/issues/625) の alert で deploy
+     起因の LOGIN 失敗 (5xx burst) が ops 観測され、被害が許容上限 (月 400 件/月)
+     を超えた場合
+  3. **deploy 頻度が月 4 回 (週 1 回) を超えた場合** (前述の月間期待値計算が
+     成り立たなくなり、許容上限を超える前提に変わるため)
+  4. 上記いずれかが発生したら新規 issue を起票して案 A / B のいずれかを実装。
+     本節の判定は **その時点の peak / 観測実績 / deploy 頻度で再評価** すること。
+
+#### 12.1.2 将来 trigger 用に保留する案 A / B
+
+12.1.1 の trigger に到達した時点で実装候補となる案を doc 上に保持する。
+**現時点では実装しない**。
+
+- **案 A: Worker 全体 maintenance flag**
+  - `wrangler.production.toml` の `[vars]` に `MAINTENANCE_MODE` を追加し、
+    `wrangler deploy --var MAINTENANCE_MODE:true` で 1 step pre-deploy →
+    drain 観測 → 本 deploy (`MAINTENANCE_MODE` 解除) の二段化。
+  - LobbyDO / GameRoom DO は LOGIN 受信時に flag を読み、freeze 中は
+    `#LOGIN:incorrect maintenance_mode` で拒否。
+  - **長所**: 配線が単純 (env 変数 1 つ + DO 内分岐)。**短所**: 解除忘れで
+    permanent down リスク、deploy 失敗時の rollback で MAINTENANCE_MODE が
+    生き残る事故。
+- **案 B: cron で `admission_freeze` flag を timed gate**
+  - deploy GH Actions 開始時に R2 / KV へ `admission_freeze=<expires_at>` を put、
+    LobbyDO / GameRoom が LOGIN 時に flag を確認、`expires_at` 経過で自動失効。
+  - **長所**: 解除忘れ事故が起きにくい (TTL ベース)。**短所**: R2 / KV
+    eventual consistency により freeze 開始と解除が即時反映されない可能性 (案 A より
+    race window が長くなるケースもある)。
+
+両案とも 1 PR で実装できる規模だが、二段 deploy 化により deploy workflow の
+所要時間と ops UX (force_deploy 経路の影響範囲、staging との整合性等) が
+変わる。trigger 到達時に再度 trade-off を整理してから着手すること。
 
 ### 12.2 ローカル手動 deploy 経路
 
@@ -1207,6 +1273,119 @@ GitHub Environment `rshogi-csa-server-workers-production` の variables に
   block され、CI feedback loop が壊れる。
 - staging の役割と矛盾するため `deploy-staging` job には drain step を入れず、
   `WORKERS_DRAIN_URL` も staging Environment には登録しない。
+
+## 13. DO storage 喪失時の運用方針 ([Issue #628](https://github.com/SH11235/rshogi/issues/628))
+
+進行中対局・AGREE 待ち state・grace registry・challenge registry・未 export
+moves は **GameRoom / LobbyDO の SQLite-backed DO storage にしか存在しない**
+(R2 へは終局後の棋譜のみ書き出される。`crates/rshogi-csa-server-workers/src/persistence.rs`)。
+DO storage を喪失したシナリオでの運用方針を本節で確定する。
+
+### 13.1 想定される喪失シナリオ
+
+- Cloudflare account レベルの障害 / 誤操作で DO instance が削除された
+- DO migration の `delete_classes` 等の誤適用 (本リポは additive-only contract
+  §3.4.1 で防御するが、手動 wrangler 操作で破ったケースを想定)
+- DO storage の SQLite が破損して `state.storage().sql()` が永続的に失敗する
+- Cloudflare 側の地域 incident で DO instance が再起動しても state が復元
+  されない (公式 SLA 上は極めて稀だが、ゼロではない)
+
+### 13.2 採用方針: 喪失時は未完局を一律 abort
+
+**2026-05-10 user 確認確定方針: snapshot / PITR (Point-in-Time Restore) は
+実装しない。DO storage を喪失した場合、未完局は一律 abort 扱い**。
+
+| 対象 | 喪失時の扱い |
+|---|---|
+| 進行中対局 (move 1 件以上) | resign-equivalent でクリーンアップ。両対局者へは disconnect / WS close で通知 |
+| AGREE 待ち (LOGIN 完了 / START 前) | 対局成立せず破棄。再 challenge 必要 |
+| grace registry / challenge registry | 全消失。新規 challenge から再開 |
+| 終局済み対局の棋譜 | R2 (`KIFU_BUCKET`, `FLOODGATE_HISTORY_BUCKET`) に既に書込済なら無事 |
+| 未 export moves (終局直後の R2 write 失敗等) | 復旧不能。データ喪失 |
+
+### 13.3 採用判断の根拠
+
+- **対象が個人運用**: rshogi-csa-server-workers は Floodgate 相当の個人運用前提
+  (#632 で確定: 同時 ~100 対局 / 10 LOGIN_LOBBY/sec が想定 peak)。喪失頻度は
+  極稀 (Cloudflare 公式 SLA + 自前運用の合算で年 1 回未満を想定) で、未完局
+  abort の被害も 1 回数百対局以下。
+- **snapshot コストが見合わない**: R2 への periodic shadow write (案 1) /
+  append-only mirror (案 2) は実装複雑度・R2 ops 消費・障害時 race の取り扱い
+  すべてが run-time コストになる。喪失頻度が極稀な前提では cost > benefit。
+- **観測経路は #625 で配線**: 喪失自体の検知は [Issue #625](https://github.com/SH11235/rshogi/issues/625) で alert 配線
+  予定 (DO error rate / live-games count の急減 等)。検知後は本節の手順で
+  運用復旧する。
+
+中期的に喪失頻度が観測実績で上がった場合のみ、別 issue で snapshot 方式を
+再検討する (本判定の trigger は #625 alert 結果 / 実 incident 報告)。
+
+### 13.4 喪失検知 → 復旧手順
+
+1. **検知**: [Issue #625](https://github.com/SH11235/rshogi/issues/625) の alert (DO error rate / live-games
+   count 急減 / `/api/v1/games/live` 5xx burst) または対局者からの報告。
+2. **対局者への一次連絡**: 公開チャンネル (Floodgate 相当の運用なら専用
+   Slack / Discord / 告知 page) で「DO storage 喪失により未完局を abort 中」を
+   告知。可能なら影響時刻範囲を併記。
+3. **DO instance の状態確認**:
+   ```bash
+   # 進行中対局が API 上見えるか
+   curl -s "https://rshogi-csa-server-workers.sh11235.workers.dev/api/v1/games/live" | jq
+   # DO 側が応答しているか (room_id を 1 件試す)
+   # ※ websocat 未インストールなら `cargo install websocat` で入れる。
+   #   本コマンドは WS 到達性の確認のみで、DO state (対局データ) の健全性は判定不可
+   websocat "wss://rshogi-csa-server-workers.sh11235.workers.dev/ws/<room_id>"
+   ```
+4. **復旧**:
+   - 部分的喪失 (一部 DO instance のみ): 該当 instance に `start_match` してきた
+     対局のみ abort 通知。空の DO state から再開で OK。
+   - 全面喪失: 新 DO migration tag (`v<N+1>`) で空 schema 再構築 (§3.4 手順)。
+     全未完局を一斉 abort、対局者へは再 challenge を案内。
+5. **`live-games-index/` の手動掃除** (DO loss では必須):
+   - DO 喪失 → 未完局 abort では `kifu-by-id/<id>.meta.json` (= 終局済み判定キー、
+     §0 §551) が put されないため、cron `run_live_orphan_sweep` (`backfill.rs`) は
+     該当 entry を削除しない。`/api/v1/games/live` と deploy drain (§12) で
+     stale な対局として残り続ける。
+   - 影響範囲の `game_id` を特定したら、R2 から該当 entry を直接削除する:
+     ```bash
+     # 影響 game_id を抽出: cutoff_ms = DO 喪失発生時刻 (epoch ms)、それ以前に
+     # 開始 (started_at_ms < cutoff_ms) した対局が abort 対象 (= 喪失時に進行中)
+     curl -s "https://rshogi-csa-server-workers.sh11235.workers.dev/api/v1/games/live" \
+       | jq -r '.live_games[] | select(.started_at_ms < <cutoff_ms>) | .game_id'
+     # 各 game_id に対応する live-games-index key を計算 (started_at_ms から prefix 構築)
+     # 詳細は live_games_index::live_games_index_key を参照
+     # KIFU_BUCKET の実 bucket 名は wrangler.{production,staging}.toml の
+     # `[[r2_buckets]]` (binding = "KIFU_BUCKET") の `bucket_name` を参照
+     wrangler r2 object delete <KIFU_BUCKET>/live-games-index/<inv-key>-<game_id>.json
+     ```
+   - 代替手段: 影響 `game_id` の abort 用 `kifu-by-id/<id>.meta.json` を手動 put して
+     cron sweep (15 分以内) に削除させる。abort 専用 meta フォーマットは未配線のため、
+     現状は **手動 R2 delete を推奨**。
+6. **事後**: incident report を `docs/csa-server/incidents/<date>_do_loss.md` に
+   起票 (本ディレクトリは未作成 = 必要時に新規作成、`git` は空ディレクトリを
+   追跡しないため事前生成は不要) し、再発防止 (snapshot 再検討 / migration
+   ガード強化 / abort meta 自動 put 経路の整備等) を判定する。
+
+### 13.5 対局者への事前期待値共有
+
+- 「対局中の Cloudflare 障害 / DO 喪失時は未完局が abort される」を対局参加
+  説明 (公開 doc / runbook / Floodgate 告知 page) に明記する。
+- snapshot による途中再開は **意図的に提供していない** ことを併記
+  (snapshot は cost vs benefit で本運用規模では見送り、と記載)。
+- 終局済み対局の棋譜 (R2 backup) は本節の喪失対象外。R2 backup 戦略は
+  [Issue #624](https://github.com/SH11235/rshogi/issues/624) (R2 lifecycle / 同アカウント内 backup bucket) を参照。
+
+### 13.6 将来の snapshot 再検討トリガー
+
+以下のいずれかが観測されたら本判定を再評価し、snapshot 方式 (R2 shadow write
+/ append-only mirror) を別 issue で起票する:
+
+1. DO 喪失 incident が 1 件でも実際に発生し、abort された対局数が許容超 (基準:
+   月 10 対局以上)
+2. [Issue #625](https://github.com/SH11235/rshogi/issues/625) の alert で「DO state 異常」イベントが頻発 (月 5 件以上)
+3. peak 負荷が #632 想定 (10 LOGIN_LOBBY/sec) を継続的に上回り、未完局 abort
+   1 回あたりの影響対局数が **20 件以上** に達するか、または
+   `live-games-index/` 手動削除 (§13.4 step 5) の運用負荷が **月 30 分以上**
+   になった場合
 
 ## 14. R2 backup / lifecycle / 棋譜永久保持 (#624)
 

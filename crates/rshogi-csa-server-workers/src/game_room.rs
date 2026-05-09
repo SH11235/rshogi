@@ -35,7 +35,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use worker::{
     Date, Delay, DurableObject, Env, Error, Request, Response, ResponseBuilder, Result, State,
-    WebSocket, WebSocketIncomingMessage, WebSocketPair, console_log, durable_object, wasm_bindgen,
+    WebSocket, WebSocketIncomingMessage, WebSocketPair, durable_object, wasm_bindgen,
 };
 
 use rshogi_core::types::EnteringKingRule;
@@ -350,7 +350,10 @@ impl DurableObject for GameRoom {
             .serialize_attachment(&pending)
             .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
 
-        console_log!("[GameRoom] websocket upgrade accepted");
+        crate::structured_log!(
+            event: "websocket_upgrade_accepted",
+            component: "game_room",
+        );
 
         Ok(ResponseBuilder::new().with_status(101).with_websocket(pair.client).empty())
     }
@@ -367,10 +370,11 @@ impl DurableObject for GameRoom {
             WebSocketIncomingMessage::Binary(b) => b.len(),
         };
         if raw_len > MAX_WS_LINE_BYTES {
-            console_log!(
-                "[GameRoom] event=ws_message_too_big bytes={} limit={}",
-                raw_len,
-                MAX_WS_LINE_BYTES,
+            crate::structured_log!(
+                event: "ws_message_too_big",
+                component: "game_room",
+                bytes: raw_len,
+                limit: MAX_WS_LINE_BYTES,
             );
             let _ = ws.close(Some(1009), Some("message too big".to_owned()));
             return Ok(());
@@ -411,7 +415,11 @@ impl DurableObject for GameRoom {
         // 得ないが、診断のためにエラー内容をログへ残す。現実装では Player 以外 (Pending /
         // corrupt) は slot 解放できないので何もせず return する。
         let att: Option<WsAttachment> = ws.deserialize_attachment().unwrap_or_else(|e| {
-            console_log!("[GameRoom] websocket_close: deserialize_attachment failed: {e:?}");
+            crate::structured_log!(
+                event: "websocket_close_deserialize_failed",
+                component: "game_room",
+                err: format!("{e:?}"),
+            );
             None
         });
         let Some(WsAttachment::Player { role, .. }) = att else {
@@ -446,7 +454,11 @@ impl DurableObject for GameRoom {
             if let Err(e) = self.enter_grace_window(role, grace_duration).await {
                 // grace 経路のセットアップに失敗したら旧経路 (即時 force_abnormal)
                 // にフォールバックして部屋が宙ぶらりんにならないようにする。
-                console_log!("[GameRoom] enter_grace_window failed; fallback to abnormal: {e:?}");
+                crate::structured_log!(
+                    event: "enter_grace_window_failed",
+                    component: "game_room",
+                    err: format!("{e:?}"),
+                );
             } else {
                 return Ok(());
             }
@@ -575,7 +587,13 @@ impl GameRoom {
             game_name: game_name.clone(),
         });
         if let MatchResult::Conflict { reason } = evaluate_match(&next_slots) {
-            console_log!("[GameRoom] LOGIN rejected (conflict: {reason})");
+            crate::structured_log!(
+                event: "login_rejected",
+                component: "game_room",
+                handle: handle,
+                role: format!("{role:?}"),
+                reason: reason,
+            );
             send_line(ws, &LoginReply::Incorrect.to_line())?;
             return Ok(());
         }
@@ -637,7 +655,11 @@ impl GameRoom {
         if let StartMatchGuard::AlreadyFinished =
             classify_start_match_guard(finished_present, false, None)
         {
-            console_log!("[GameRoom] start_match aborted: already finished");
+            crate::structured_log!(
+                event: "start_match_aborted",
+                component: "game_room",
+                reason: "already_finished",
+            );
             self.abort_pending_match_with_error("##[ERROR] room already finished").await?;
             return Ok(false);
         }
@@ -652,7 +674,11 @@ impl GameRoom {
         if let StartMatchGuard::AlreadyMatched =
             classify_start_match_guard(false, cfg_present, None)
         {
-            console_log!("[GameRoom] start_match aborted: KEY_CONFIG already present");
+            crate::structured_log!(
+                event: "start_match_aborted",
+                component: "game_room",
+                reason: "key_config_already_present",
+            );
             self.abort_pending_match_with_error("##[ERROR] match already in progress")
                 .await?;
             return Ok(false);
@@ -666,8 +692,11 @@ impl GameRoom {
         if let StartMatchGuard::AlarmPending(kind) =
             classify_start_match_guard(false, false, existing_kind)
         {
-            console_log!(
-                "[GameRoom] start_match aborted: pending_alarm_kind={kind:?} already present"
+            crate::structured_log!(
+                event: "start_match_aborted",
+                component: "game_room",
+                reason: "pending_alarm_kind_present",
+                pending_alarm_kind: format!("{kind:?}"),
             );
             self.abort_pending_match_with_error("##[ERROR] match already has pending alarm")
                 .await?;
@@ -697,8 +726,11 @@ impl GameRoom {
         let clock_spec = match resolve_clock_spec_for_game(&self.env, game_name) {
             Ok(spec) => spec,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] clock spec resolution failed for game_name '{game_name}': {e:?}; rejecting pending match"
+                crate::structured_log!(
+                    event: "clock_spec_resolution_failed",
+                    component: "game_room",
+                    game_name: game_name,
+                    err: format!("{e:?}"),
                 );
                 self.abort_pending_match_with_error(&format!(
                     "##[ERROR] clock spec for '{game_name}' could not be resolved"
@@ -723,8 +755,10 @@ impl GameRoom {
         let grace = match resolve_reconnect_grace(&self.env) {
             Ok(d) => d,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] reconnect grace config error (aborting pending match): {e}"
+                crate::structured_log!(
+                    event: "reconnect_grace_config_error",
+                    component: "game_room",
+                    err: format!("{e}"),
                 );
                 self.abort_pending_match_with_error("##[ERROR] reconnect grace config error")
                     .await?;
@@ -739,8 +773,11 @@ impl GameRoom {
         {
             Ok(r) => r,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] buoy '{game_name}' reservation failed: {e:?}; rejecting pending match"
+                crate::structured_log!(
+                    event: "buoy_reservation_failed",
+                    component: "game_room",
+                    game_name: game_name,
+                    err: format!("{e:?}"),
                 );
                 self.abort_pending_match_with_error(&format!(
                     "##[ERROR] buoy '{game_name}' reservation failed"
@@ -753,7 +790,11 @@ impl GameRoom {
             BuoyReservation::Missing => None,
             BuoyReservation::Reserved(initial_sfen) => initial_sfen,
             BuoyReservation::Exhausted => {
-                console_log!("[GameRoom] buoy '{game_name}' exhausted; rejecting pending match");
+                crate::structured_log!(
+                    event: "buoy_exhausted",
+                    component: "game_room",
+                    game_name: game_name,
+                );
                 self.abort_pending_match_with_error(&format!(
                     "##[ERROR] buoy '{game_name}' exhausted"
                 ))
@@ -915,13 +956,22 @@ impl GameRoom {
         let result = {
             let mut borrow = self.core.borrow_mut();
             let Some(core) = borrow.as_mut() else {
-                console_log!("[GameRoom] handle_game_line: core missing (handle={handle})");
+                crate::structured_log!(
+                    event: "handle_game_line_core_missing",
+                    component: "game_room",
+                    handle: handle,
+                );
                 return Ok(());
             };
             match core.handle_line(color, &csa, now) {
                 Ok(r) => r,
                 Err(e) => {
-                    console_log!("[GameRoom] handle_line error: {e:?}");
+                    crate::structured_log!(
+                        event: "handle_line_error",
+                        component: "game_room",
+                        handle: handle,
+                        err: format!("{e:?}"),
+                    );
                     return Ok(());
                 }
             }
@@ -1128,7 +1178,11 @@ impl GameRoom {
                 _ => {}
             }
             if let Err(e) = send_line(ws, line) {
-                console_log!("[GameRoom] spectator queue flush failed (ignored): {e:?}");
+                crate::structured_log!(
+                    event: "spectator_queue_flush_failed",
+                    component: "game_room",
+                    err: format!("{e:?}"),
+                );
             }
         }
         // snapshot 終了状態へ戻す (`snapshot_in_progress = false`, queue は空)。
@@ -1427,10 +1481,12 @@ impl GameRoom {
             if put_result.is_some() {
                 return Ok(BuoyReservation::Reserved(reserved_initial_sfen));
             }
-            console_log!(
-                "[GameRoom] buoy '{}' reservation etag mismatch, retry {}/{MAX_ATTEMPTS}",
-                game_name.as_str(),
-                attempt + 1,
+            crate::structured_log!(
+                event: "buoy_reservation_etag_mismatch",
+                component: "game_room",
+                game_name: game_name.as_str(),
+                attempt: attempt + 1,
+                max_attempts: MAX_ATTEMPTS,
             );
         }
         Err(Error::RustError(format!(
@@ -1606,7 +1662,8 @@ impl GameRoom {
         // `ServerError::Storage` を伝播するが、Workers DO で Err を返すと alarm /
         // ws close が抜ける副作用があるため、kifu export と同じ silent log 方針で
         // 終局処理の前進を優先する。失敗は `try_persist_floodgate_history` 内で
-        // `console_log!` のみで吸収するため呼び出し側は `Result` を待たない。
+        // [`structured_log!`](crate::structured_log) のみで吸収するため呼び出し側は
+        // `Result` を待たない。
         self.try_persist_floodgate_history(game_result, &code, ended_at_ms).await;
 
         // export 全成功なら `exported_at_ms` を埋め、retry 経路は不要。
@@ -1678,10 +1735,11 @@ impl GameRoom {
     /// は確定しているので運用上 export 欠損として観測できる。
     async fn schedule_export_retry(&self, pending: ExportPendingState) {
         if let Err(e) = self.state.storage().put(KEY_EXPORT_PENDING, &pending).await {
-            console_log!(
-                "[GameRoom] event=export_pending_put_failed game_id={} err={:?}",
-                pending.game_id,
-                e,
+            crate::structured_log!(
+                event: "export_pending_put_failed",
+                component: "game_room",
+                game_id: pending.game_id,
+                err: format!("{e:?}"),
             );
             return;
         }
@@ -1691,36 +1749,40 @@ impl GameRoom {
             .put(KEY_PENDING_ALARM_KIND, &PendingAlarmKind::ExportRetry)
             .await
         {
-            console_log!(
-                "[GameRoom] event=export_retry_kind_put_failed game_id={} err={:?}",
-                pending.game_id,
-                e,
+            crate::structured_log!(
+                event: "export_retry_kind_put_failed",
+                component: "game_room",
+                game_id: pending.game_id,
+                err: format!("{e:?}"),
             );
             return;
         }
         let Some(delay_ms) = next_retry_delay_ms(pending.attempt) else {
             // 最初の予約で `attempt = 0` のため到達しない契約。防御的に log のみ。
-            console_log!(
-                "[GameRoom] event=export_retry_initial_exhausted game_id={} attempt={}",
-                pending.game_id,
-                pending.attempt,
+            crate::structured_log!(
+                event: "export_retry_initial_exhausted",
+                component: "game_room",
+                game_id: pending.game_id,
+                attempt: pending.attempt,
             );
             return;
         };
         if let Err(e) = self.state.storage().set_alarm(Duration::from_millis(delay_ms)).await {
-            console_log!(
-                "[GameRoom] event=export_retry_alarm_set_failed game_id={} delay_ms={} err={:?}",
-                pending.game_id,
-                delay_ms,
-                e,
+            crate::structured_log!(
+                event: "export_retry_alarm_set_failed",
+                component: "game_room",
+                game_id: pending.game_id,
+                delay_ms: delay_ms,
+                err: format!("{e:?}"),
             );
         } else {
-            console_log!(
-                "[GameRoom] event=export_retry_scheduled game_id={} attempt={} delay_ms={} failed_count={}",
-                pending.game_id,
-                pending.attempt,
-                delay_ms,
-                pending.failed_keys.len(),
+            crate::structured_log!(
+                event: "export_retry_scheduled",
+                component: "game_room",
+                game_id: pending.game_id,
+                attempt: pending.attempt,
+                delay_ms: delay_ms,
+                failed_count: pending.failed_keys.len(),
             );
         }
     }
@@ -1738,7 +1800,10 @@ impl GameRoom {
         let Some(mut pending) = pending else {
             // pending が無い (race / 旧 deploy 状態の cleanup) は alarm タグだけ
             // 片付けて終了する。`KEY_FINISHED` 経路は既に確定済の前提。
-            console_log!("[GameRoom] event=export_retry_no_pending");
+            crate::structured_log!(
+                event: "export_retry_no_pending",
+                component: "game_room",
+            );
             let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
             let _ = self.state.storage().delete_alarm().await;
             return Ok(());
@@ -1747,11 +1812,12 @@ impl GameRoom {
         let bucket = match self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
             Ok(b) => b,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=export_retry_bucket_missing game_id={} attempt={} err={:?}",
-                    pending.game_id,
-                    pending.attempt,
-                    e,
+                crate::structured_log!(
+                    event: "export_retry_bucket_missing",
+                    component: "game_room",
+                    game_id: pending.game_id,
+                    attempt: pending.attempt,
+                    err: format!("{e:?}"),
                 );
                 // bucket binding 不在 = config 不正。retry を進めても解決しない
                 // ので alarm を停止し pending は残置 (deploy 修正で再開する想定
@@ -1772,20 +1838,22 @@ impl GameRoom {
             };
             match bucket.put(&failed.key, body).execute().await {
                 Ok(_) => {
-                    console_log!(
-                        "[GameRoom] event=export_retry_put_ok game_id={} key={} attempt={}",
-                        pending.game_id,
-                        failed.key,
-                        pending.attempt,
+                    crate::structured_log!(
+                        event: "export_retry_put_ok",
+                        component: "game_room",
+                        game_id: pending.game_id,
+                        key: failed.key,
+                        attempt: pending.attempt,
                     );
                 }
                 Err(e) => {
-                    console_log!(
-                        "[GameRoom] event=export_retry_put_failed game_id={} key={} attempt={} err={:?}",
-                        pending.game_id,
-                        failed.key,
-                        pending.attempt,
-                        e,
+                    crate::structured_log!(
+                        event: "export_retry_put_failed",
+                        component: "game_room",
+                        game_id: pending.game_id,
+                        key: failed.key,
+                        attempt: pending.attempt,
+                        err: format!("{e:?}"),
                     );
                     still_failed.push(failed);
                 }
@@ -1804,19 +1872,21 @@ impl GameRoom {
         pending.attempt = next_attempt;
 
         if is_exhausted(next_attempt) {
-            console_log!(
-                "[GameRoom] event=export_retry_exhausted game_id={} attempt={} remaining={}",
-                pending.game_id,
-                next_attempt,
-                pending.failed_keys.len(),
+            crate::structured_log!(
+                event: "export_retry_exhausted",
+                component: "game_room",
+                game_id: pending.game_id,
+                attempt: next_attempt,
+                remaining: pending.failed_keys.len(),
             );
             // pending を最新 attempt で書き直して観測性を保ち、alarm/タグだけ
             // 停止する。
             if let Err(e) = self.state.storage().put(KEY_EXPORT_PENDING, &pending).await {
-                console_log!(
-                    "[GameRoom] event=export_pending_put_failed game_id={} err={:?}",
-                    pending.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "export_pending_put_failed",
+                    component: "game_room",
+                    game_id: pending.game_id,
+                    err: format!("{e:?}"),
                 );
             }
             let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
@@ -1825,10 +1895,11 @@ impl GameRoom {
         }
 
         if let Err(e) = self.state.storage().put(KEY_EXPORT_PENDING, &pending).await {
-            console_log!(
-                "[GameRoom] event=export_pending_put_failed game_id={} err={:?}",
-                pending.game_id,
-                e,
+            crate::structured_log!(
+                event: "export_pending_put_failed",
+                component: "game_room",
+                game_id: pending.game_id,
+                err: format!("{e:?}"),
             );
             return Ok(());
         }
@@ -1837,19 +1908,21 @@ impl GameRoom {
             return Ok(());
         };
         if let Err(e) = self.state.storage().set_alarm(Duration::from_millis(delay_ms)).await {
-            console_log!(
-                "[GameRoom] event=export_retry_alarm_set_failed game_id={} delay_ms={} err={:?}",
-                pending.game_id,
-                delay_ms,
-                e,
+            crate::structured_log!(
+                event: "export_retry_alarm_set_failed",
+                component: "game_room",
+                game_id: pending.game_id,
+                delay_ms: delay_ms,
+                err: format!("{e:?}"),
             );
         } else {
-            console_log!(
-                "[GameRoom] event=export_retry_rescheduled game_id={} attempt={} delay_ms={} failed_count={}",
-                pending.game_id,
-                next_attempt,
-                delay_ms,
-                pending.failed_keys.len(),
+            crate::structured_log!(
+                event: "export_retry_rescheduled",
+                component: "game_room",
+                game_id: pending.game_id,
+                attempt: next_attempt,
+                delay_ms: delay_ms,
+                failed_count: pending.failed_keys.len(),
             );
         }
         Ok(())
@@ -1860,10 +1933,11 @@ impl GameRoom {
     /// retry 自体を破壊しないため)。
     async fn complete_export_retry(&self, pending: &ExportPendingState) {
         if let Err(e) = self.state.storage().delete(KEY_EXPORT_PENDING).await {
-            console_log!(
-                "[GameRoom] event=export_pending_delete_failed game_id={} err={:?}",
-                pending.game_id,
-                e,
+            crate::structured_log!(
+                event: "export_pending_delete_failed",
+                component: "game_room",
+                game_id: pending.game_id,
+                err: format!("{e:?}"),
             );
         }
         let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
@@ -1877,30 +1951,34 @@ impl GameRoom {
             Ok(Some(mut finished)) => {
                 finished.exported_at_ms = Some(now_ms);
                 if let Err(e) = self.state.storage().put(KEY_FINISHED, &finished).await {
-                    console_log!(
-                        "[GameRoom] event=export_retry_finished_update_failed game_id={} err={:?}",
-                        pending.game_id,
-                        e,
+                    crate::structured_log!(
+                        event: "export_retry_finished_update_failed",
+                        component: "game_room",
+                        game_id: pending.game_id,
+                        err: format!("{e:?}"),
                     );
                 } else {
-                    console_log!(
-                        "[GameRoom] event=export_retry_completed game_id={} attempt={}",
-                        pending.game_id,
-                        pending.attempt,
+                    crate::structured_log!(
+                        event: "export_retry_completed",
+                        component: "game_room",
+                        game_id: pending.game_id,
+                        attempt: pending.attempt,
                     );
                 }
             }
             Ok(None) => {
-                console_log!(
-                    "[GameRoom] event=export_retry_finished_missing game_id={}",
-                    pending.game_id,
+                crate::structured_log!(
+                    event: "export_retry_finished_missing",
+                    component: "game_room",
+                    game_id: pending.game_id,
                 );
             }
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=export_retry_finished_load_failed game_id={} err={:?}",
-                    pending.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "export_retry_finished_load_failed",
+                    component: "game_room",
+                    game_id: pending.game_id,
+                    err: format!("{e:?}"),
                 );
             }
         }
@@ -1918,8 +1996,9 @@ impl GameRoom {
     /// - `Pending(state)`: 1 つ以上 PUT 失敗で retry 用の本文 + 失敗 key 一覧を
     ///   保持。`finalize_if_ended` は本値を `KEY_EXPORT_PENDING` に永続化する。
     /// - `Skipped`: bucket binding 不在 / `load_moves` 失敗 / SFEN 不正 / serialize
-    ///   失敗等の「retry しても解決しない致命的失敗」。本関数内で `console_log!`
-    ///   で吸収済みなので呼び出し側は何もしない (`exported_at_ms = None` だけ残る)。
+    ///   失敗等の「retry しても解決しない致命的失敗」。本関数内で
+    ///   [`structured_log!`](crate::structured_log) で吸収済みなので呼び出し側は
+    ///   何もしない (`exported_at_ms = None` だけ残る)。
     ///
     /// 本関数は `Result` ではなく `ExportAttempt` を返す。R2 PUT 失敗を上位に
     /// 伝播させると `finalize_if_ended` が中断し WS close / `KEY_FINISHED` put が
@@ -1937,7 +2016,11 @@ impl GameRoom {
             None => {
                 // PersistedConfig 未確定 = AGREE 前の致命的経路で finalize に
                 // 入った race。CSA 本文を組み立てる材料がないので skip する。
-                console_log!("[GameRoom] event=export_skip reason=config_missing");
+                crate::structured_log!(
+                    event: "export_skip",
+                    component: "game_room",
+                    reason: "config_missing",
+                );
                 return ExportAttempt::Skipped;
             }
         };
@@ -1945,10 +2028,12 @@ impl GameRoom {
         let moves_rows = match self.load_moves().await {
             Ok(rows) => rows,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=export_skip game_id={} reason=load_moves:{:?}",
-                    cfg.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "export_skip",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    reason: "load_moves",
+                    err: format!("{e:?}"),
                 );
                 return ExportAttempt::Skipped;
             }
@@ -1984,10 +2069,12 @@ impl GameRoom {
             Some(sfen) => match position_section_from_sfen(sfen) {
                 Ok(p) => p,
                 Err(reason) => {
-                    console_log!(
-                        "[GameRoom] event=export_skip game_id={} reason=invalid_sfen:{}",
-                        cfg.game_id,
-                        reason,
+                    crate::structured_log!(
+                        event: "export_skip",
+                        component: "game_room",
+                        game_id: cfg.game_id,
+                        reason: "invalid_sfen",
+                        detail: reason,
                     );
                     return ExportAttempt::Skipped;
                 }
@@ -2018,10 +2105,12 @@ impl GameRoom {
         let bucket = match self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
             Ok(b) => b,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=export_skip game_id={} reason=bucket_binding:{:?}",
-                    cfg.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "export_skip",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    reason: "bucket_binding",
+                    err: format!("{e:?}"),
                 );
                 return ExportAttempt::Skipped;
             }
@@ -2037,12 +2126,13 @@ impl GameRoom {
             (by_id_key.as_str(), "by_id_key"),
         ] {
             if let Err(e) = bucket.put(key, csa_bytes.clone()).execute().await {
-                console_log!(
-                    "[GameRoom] event=export_put_failed game_id={} {}={} err={:?}",
-                    cfg.game_id,
-                    label,
-                    key,
-                    e,
+                crate::structured_log!(
+                    event: "export_put_failed",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    label: label,
+                    key: key,
+                    err: format!("{e:?}"),
                 );
                 failed_keys.push(FailedExportObject {
                     key: key.to_owned(),
@@ -2089,10 +2179,12 @@ impl GameRoom {
         let body = match serde_json::to_vec(&entry) {
             Ok(b) => b,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=games_index_skip game_id={} reason=serialize:{:?}",
-                    cfg.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "games_index_skip",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    reason: "serialize",
+                    err: format!("{e:?}"),
                 );
                 // CSA 本文 PUT は試行済 (failed_keys に積まれているかも) だが、
                 // meta/index は serialize 失敗で本経路で PUT 試行できていない。
@@ -2110,11 +2202,12 @@ impl GameRoom {
 
         let meta_key = kifu_by_id_meta_key(&cfg.game_id);
         if let Err(e) = bucket.put(&meta_key, body.clone()).execute().await {
-            console_log!(
-                "[GameRoom] event=kifu_by_id_meta_put_failed game_id={} meta_key={} err={:?}",
-                cfg.game_id,
-                meta_key,
-                e,
+            crate::structured_log!(
+                event: "kifu_by_id_meta_put_failed",
+                component: "game_room",
+                game_id: cfg.game_id,
+                meta_key: meta_key,
+                err: format!("{e:?}"),
             );
             failed_keys.push(FailedExportObject {
                 key: meta_key.clone(),
@@ -2125,10 +2218,12 @@ impl GameRoom {
         let index_key = match games_index_key(ended_at_ms, &cfg.game_id) {
             Ok(k) => k,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=games_index_skip game_id={} reason=key:{:?}",
-                    cfg.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "games_index_skip",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    reason: "key",
+                    err: format!("{e:?}"),
                 );
                 // games-index key 生成失敗は retry 不可。pending には CSA / meta
                 // のみ残す。index PUT が抜けるため `from_partial_attempt` で
@@ -2143,11 +2238,12 @@ impl GameRoom {
             }
         };
         if let Err(e) = bucket.put(&index_key, body.clone()).execute().await {
-            console_log!(
-                "[GameRoom] event=games_index_put_failed game_id={} inv_key={} err={:?}",
-                cfg.game_id,
-                index_key,
-                e,
+            crate::structured_log!(
+                event: "games_index_put_failed",
+                component: "game_room",
+                game_id: cfg.game_id,
+                inv_key: index_key,
+                err: format!("{e:?}"),
             );
             failed_keys.push(FailedExportObject {
                 key: index_key.clone(),
@@ -2156,10 +2252,11 @@ impl GameRoom {
         }
 
         if failed_keys.is_empty() {
-            console_log!(
-                "[GameRoom] event=export_complete game_id={} key={}",
-                cfg.game_id,
-                date_key,
+            crate::structured_log!(
+                event: "export_complete",
+                component: "game_room",
+                game_id: cfg.game_id,
+                key: date_key,
             );
         }
         // 4 オブジェクトすべての PUT を試行できた経路。`failed_keys` の中身で
@@ -2169,9 +2266,10 @@ impl GameRoom {
 
     /// Floodgate 履歴 1 件を `FLOODGATE_HISTORY_BUCKET` に永続化する。`ALLOW_FLOODGATE_FEATURES`
     /// が opt-in されており、binding が設定されているときだけ append する。
-    /// すべての失敗は `console_log!` で握り潰して呼び出し側 `finalize_if_ended` の
-    /// 終局確定の前進を止めない（best-effort）。`Result` を返さないことで
-    /// シグネチャと振る舞いを一致させ、「Err を返し得る」と誤読される余地を消す。
+    /// すべての失敗は [`structured_log!`](crate::structured_log) で握り潰して呼び出し側
+    /// `finalize_if_ended` の終局確定の前進を止めない（best-effort）。`Result` を
+    /// 返さないことでシグネチャと振る舞いを一致させ、「Err を返し得る」と誤読される
+    /// 余地を消す。
     async fn try_persist_floodgate_history(
         &self,
         game_result: &rshogi_csa_server::game::result::GameResult,
@@ -2185,7 +2283,11 @@ impl GameRoom {
                 // `Err` 経路は `parse_allow_floodgate_features` の解析エラーまたは
                 // `validate_floodgate_feature_gate` の opt-in 漏れ等の **設定不正**。
                 // opt-in 未有効 (`Ok(None)`) と区別がつくよう "config error" を明示する。
-                console_log!("[GameRoom] floodgate history config error: {e}");
+                crate::structured_log!(
+                    event: "floodgate_history_config_error",
+                    component: "game_room",
+                    err: format!("{e}"),
+                );
                 return;
             }
         };
@@ -2208,7 +2310,11 @@ impl GameRoom {
         };
 
         if let Err(e) = storage.append(&entry).await {
-            console_log!("[GameRoom] floodgate history append failed: {e:?}");
+            crate::structured_log!(
+                event: "floodgate_history_append_failed",
+                component: "game_room",
+                err: format!("{e:?}"),
+            );
         }
     }
 
@@ -2279,14 +2385,14 @@ impl GameRoom {
                 let next_bytes = current_bytes.saturating_add(line.len());
                 if next_items > MAX_SPECTATOR_QUEUE_ITEMS || next_bytes > MAX_SPECTATOR_QUEUE_BYTES
                 {
-                    console_log!(
-                        "[GameRoom] event=spectator_queue_overflow room_id={} items={} bytes={} \
-                         limit_items={} limit_bytes={}",
-                        room_id,
-                        next_items,
-                        next_bytes,
-                        MAX_SPECTATOR_QUEUE_ITEMS,
-                        MAX_SPECTATOR_QUEUE_BYTES,
+                    crate::structured_log!(
+                        event: "spectator_queue_overflow",
+                        component: "game_room",
+                        room_id: room_id,
+                        items: next_items,
+                        bytes: next_bytes,
+                        limit_items: MAX_SPECTATOR_QUEUE_ITEMS,
+                        limit_bytes: MAX_SPECTATOR_QUEUE_BYTES,
                     );
                     let _ = ws.close(Some(1009), Some("spectator queue overflow".to_owned()));
                     continue;
@@ -2300,12 +2406,20 @@ impl GameRoom {
                     pending_queue,
                 };
                 if let Err(e) = ws.serialize_attachment(&updated) {
-                    console_log!("[GameRoom] spectator queue serialize failed (ignored): {e:?}");
+                    crate::structured_log!(
+                        event: "spectator_queue_serialize_failed",
+                        component: "game_room",
+                        err: format!("{e:?}"),
+                    );
                 }
                 continue;
             }
             if let Err(e) = send_line(&ws, line) {
-                console_log!("[GameRoom] spectator send failed (ignored): {e:?}");
+                crate::structured_log!(
+                    event: "spectator_send_failed",
+                    component: "game_room",
+                    err: format!("{e:?}"),
+                );
             }
         }
         Ok(())
@@ -2380,13 +2494,28 @@ impl GameRoom {
                 *self.config.borrow_mut() = Some(cfg);
             }
             ReplaySummary::InvalidSfen { reason } => {
-                console_log!("[GameRoom] replay CoreRoom::new failed: {reason}");
+                crate::structured_log!(
+                    event: "replay_invalid_sfen",
+                    component: "game_room",
+                    reason: reason,
+                );
             }
             ReplaySummary::UnknownColor { ply, color } => {
-                console_log!("[GameRoom] replay: unknown color '{color}' at ply={ply}");
+                crate::structured_log!(
+                    event: "replay_unknown_color",
+                    component: "game_room",
+                    ply: ply,
+                    color: color,
+                );
             }
             ReplaySummary::MoveReplayFailed { ply, line, reason } => {
-                console_log!("[GameRoom] replay move ply={ply} line='{line}' failed: {reason}");
+                crate::structured_log!(
+                    event: "replay_move_failed",
+                    component: "game_room",
+                    ply: ply,
+                    line: line,
+                    reason: reason,
+                );
             }
         }
 
@@ -2456,8 +2585,9 @@ impl GameRoom {
     ///
     /// `cfg.play_started_at_ms` が `None` の場合は live index put が成立しない
     /// (= mark_play_started 前) ため早期 return する。すべての失敗 (key
-    /// validation / serialize / R2 put) を `console_log!` で吸収し、`Result`
-    /// は返さない。put 成功時のみ `live_index_put_done` を `true` にセットする。
+    /// validation / serialize / R2 put) を [`structured_log!`](crate::structured_log)
+    /// で吸収し、`Result` は返さない。put 成功時のみ `live_index_put_done` を
+    /// `true` にセットする。
     async fn try_put_live_games_index(&self, cfg: &PersistedConfig) {
         let Some(started_at_ms) = cfg.play_started_at_ms else {
             return;
@@ -2466,10 +2596,12 @@ impl GameRoom {
         let key = match live_games_index_key(started_at_ms, &cfg.game_id) {
             Ok(k) => k,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=live_games_index_skip game_id={} reason=key:{:?}",
-                    cfg.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "live_games_index_skip",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    reason: "key",
+                    err: format!("{e:?}"),
                 );
                 return;
             }
@@ -2488,10 +2620,12 @@ impl GameRoom {
         let body = match serde_json::to_vec(&entry) {
             Ok(b) => b,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=live_games_index_skip game_id={} reason=serialize:{:?}",
-                    cfg.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "live_games_index_skip",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    reason: "serialize",
+                    err: format!("{e:?}"),
                 );
                 return;
             }
@@ -2500,10 +2634,12 @@ impl GameRoom {
         let bucket = match self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
             Ok(b) => b,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=live_games_index_skip game_id={} reason=bucket:{}",
-                    cfg.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "live_games_index_skip",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    reason: "bucket",
+                    err: format!("{e}"),
                 );
                 return;
             }
@@ -2514,11 +2650,12 @@ impl GameRoom {
                 self.live_index_put_done.set(true);
             }
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=live_games_index_put_failed game_id={} key={} err={:?}",
-                    cfg.game_id,
-                    key,
-                    e,
+                crate::structured_log!(
+                    event: "live_games_index_put_failed",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    key: key,
+                    err: format!("{e:?}"),
                 );
             }
         }
@@ -2544,10 +2681,12 @@ impl GameRoom {
         let key = match live_games_index_key(started_at_ms, &cfg.game_id) {
             Ok(k) => k,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=live_games_index_delete_skip game_id={} reason=key:{:?}",
-                    cfg.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "live_games_index_delete_skip",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    reason: "key",
+                    err: format!("{e:?}"),
                 );
                 return;
             }
@@ -2556,10 +2695,12 @@ impl GameRoom {
         let bucket = match self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
             Ok(b) => b,
             Err(e) => {
-                console_log!(
-                    "[GameRoom] event=live_games_index_delete_skip game_id={} reason=bucket:{}",
-                    cfg.game_id,
-                    e,
+                crate::structured_log!(
+                    event: "live_games_index_delete_skip",
+                    component: "game_room",
+                    game_id: cfg.game_id,
+                    reason: "bucket",
+                    err: format!("{e}"),
                 );
                 return;
             }
@@ -2569,12 +2710,13 @@ impl GameRoom {
             match bucket.delete(&key).await {
                 Ok(_) => return,
                 Err(e) => {
-                    console_log!(
-                        "[GameRoom] event=live_games_index_delete_failed attempt={} game_id={} key={} err={:?}",
-                        attempt + 1,
-                        cfg.game_id,
-                        key,
-                        e,
+                    crate::structured_log!(
+                        event: "live_games_index_delete_failed",
+                        component: "game_room",
+                        game_id: cfg.game_id,
+                        key: key,
+                        attempt: attempt + 1,
+                        err: format!("{e:?}"),
                     );
                     // 最終 attempt の後は backoff せず giveup ログへ抜ける。
                     if let Some(&backoff_ms) = LIVE_INDEX_DELETE_BACKOFF_MS.get(attempt as usize) {
@@ -2583,11 +2725,12 @@ impl GameRoom {
                 }
             }
         }
-        console_log!(
-            "[GameRoom] event=live_games_index_delete_giveup game_id={} key={} attempts={}",
-            cfg.game_id,
-            key,
-            LIVE_INDEX_DELETE_MAX_ATTEMPTS,
+        crate::structured_log!(
+            event: "live_games_index_delete_giveup",
+            component: "game_room",
+            game_id: cfg.game_id,
+            key: key,
+            attempts: LIVE_INDEX_DELETE_MAX_ATTEMPTS,
         );
     }
 
@@ -2607,15 +2750,19 @@ impl GameRoom {
     /// `MoveReplayFailed` を起こすのを防ぐ。現状は `KEY_FINISHED` ガードで弾かれる
     /// 経路だが、二重防御として moves 行を確実に削除しておく。
     ///
-    /// 失敗は best-effort で `console_log!` のみに落とし、`Result` には漏らさない
-    /// (呼び出し側 `finalize_if_ended` の WS close / live-games-index delete などの
-    /// 終局処理を止めないため)。`KEY_FINISHED` put が成功している前提で呼び出すため、
-    /// 削除失敗で moves が残っても、後続 `ensure_core_loaded` は finished ガードで
-    /// 早期 return し replay は走らない。
+    /// 失敗は best-effort で [`structured_log!`](crate::structured_log) のみに落とし、
+    /// `Result` には漏らさない (呼び出し側 `finalize_if_ended` の WS close /
+    /// live-games-index delete などの終局処理を止めないため)。`KEY_FINISHED` put が
+    /// 成功している前提で呼び出すため、削除失敗で moves が残っても、後続
+    /// `ensure_core_loaded` は finished ガードで早期 return し replay は走らない。
     async fn clear_moves(&self) {
         let sql = self.state.storage().sql();
         if let Err(e) = sql.exec("DELETE FROM moves", None) {
-            console_log!("[GameRoom] event=clear_moves_failed err={:?}", e);
+            crate::structured_log!(
+                event: "clear_moves_failed",
+                component: "game_room",
+                err: format!("{e:?}"),
+            );
         }
     }
 
@@ -2722,9 +2869,11 @@ impl GameRoom {
             let delay = grace_deadline_ms.saturating_sub(now_ms).saturating_add(ALARM_SAFETY_MS);
             self.state.storage().set_alarm(Duration::from_millis(delay)).await?;
         }
-        console_log!(
-            "[GameRoom] entered grace window: role={role:?} grace_secs={}",
-            grace_duration.as_secs()
+        crate::structured_log!(
+            event: "entered_grace_window",
+            component: "game_room",
+            role: format!("{role:?}"),
+            grace_secs: grace_duration.as_secs(),
         );
         Ok(())
     }
@@ -2817,7 +2966,11 @@ impl GameRoom {
         let role = match color_from_str(&pending.disconnected_color) {
             Ok(c) => Role::from_core(c),
             Err(e) => {
-                console_log!("[GameRoom] grace alarm: invalid color in registry: {e}");
+                crate::structured_log!(
+                    event: "grace_alarm_invalid_color",
+                    component: "game_room",
+                    err: format!("{e}"),
+                );
                 self.delete_grace_alarm_state().await?;
                 return Ok(());
             }
@@ -2866,9 +3019,11 @@ impl GameRoom {
         let pending: Option<PendingReconnect> =
             self.state.storage().get(KEY_GRACE_REGISTRY).await.ok().flatten();
         let Some(pending) = pending else {
-            console_log!(
-                "[GameRoom] reconnect rejected: no pending entry (game_id={})",
-                req.game_id
+            crate::structured_log!(
+                event: "reconnect_rejected",
+                component: "game_room",
+                reason: "no_pending_entry",
+                game_id: req.game_id.as_str(),
             );
             send_line(ws, "LOGIN:incorrect reconnect_rejected")?;
             return Ok(());
@@ -2879,10 +3034,12 @@ impl GameRoom {
         let cfg_game_id = self.config.borrow().as_ref().map(|c| c.game_id.clone());
         if cfg_game_id.as_deref() != Some(req.game_id.as_str()) {
             // DO instance が想定と違う対局に紐づいている (game_id 未一致)。
-            console_log!(
-                "[GameRoom] reconnect rejected: game_id mismatch (req={}, current={:?})",
-                req.game_id,
-                cfg_game_id
+            crate::structured_log!(
+                event: "reconnect_rejected",
+                component: "game_room",
+                reason: "game_id_mismatch",
+                requested_game_id: req.game_id.as_str(),
+                current_game_id: format!("{cfg_game_id:?}"),
             );
             send_line(ws, "LOGIN:incorrect reconnect_rejected")?;
             return Ok(());
@@ -2893,19 +3050,23 @@ impl GameRoom {
         match outcome {
             ReconnectMatchOutcome::Accepted => {}
             ReconnectMatchOutcome::Rejected => {
-                console_log!(
-                    "[GameRoom] reconnect rejected: handle/color/token mismatch (handle={}, role={:?})",
-                    handle,
-                    role
+                crate::structured_log!(
+                    event: "reconnect_rejected",
+                    component: "game_room",
+                    reason: "handle_color_token_mismatch",
+                    handle: handle,
+                    role: format!("{role:?}"),
                 );
                 send_line(ws, "LOGIN:incorrect reconnect_rejected")?;
                 return Ok(());
             }
             ReconnectMatchOutcome::Expired => {
-                console_log!(
-                    "[GameRoom] reconnect rejected: grace expired (deadline_ms={}, now_ms={})",
-                    pending.deadline_ms,
-                    now_ms
+                crate::structured_log!(
+                    event: "reconnect_rejected",
+                    component: "game_room",
+                    reason: "grace_expired",
+                    deadline_ms: pending.deadline_ms,
+                    now_ms: now_ms,
                 );
                 send_line(ws, "LOGIN:incorrect reconnect_rejected")?;
                 return Ok(());
@@ -2970,7 +3131,12 @@ impl GameRoom {
             // CoreRoom 不在 (異常系)。alarm を解除して保守的に振る舞う。
             let _ = self.state.storage().delete_alarm().await;
         }
-        console_log!("[GameRoom] reconnect succeeded: handle={} role={:?}", handle, role);
+        crate::structured_log!(
+            event: "reconnect_succeeded",
+            component: "game_room",
+            handle: handle,
+            role: format!("{role:?}"),
+        );
         Ok(())
     }
 
@@ -3033,7 +3199,10 @@ impl GameRoom {
             }
         }
 
-        console_log!("[GameRoom] agree timeout fired; releasing pending match");
+        crate::structured_log!(
+            event: "agree_timeout_fired",
+            component: "game_room",
+        );
         // `abort_pending_match_with_error` と同じ pending 解放ロジックを再利用
         // して、両 player に `##[ERROR] agree_timeout` を返した上で slot を空に
         // 戻す。
