@@ -1109,14 +1109,72 @@ drain 対象外。
   では race window の完全排除はできない。「graceful drain」ではなく
   **"best-effort drain"** として doc / log で表記する。
 - 真の graceful drain (進行中対局を新 isolate に migrate) は Workers 制約上
-  実装不能。将来対局頻度が上がったら maintenance mode flag 経由の二段 deploy
-  (lobby が `start_match` を拒否する flag を入れて pre-deploy → drain →
-  本 deploy) を追加検討する。
+  実装不能。drain 完了 → `wrangler deploy` upload 開始までの race window を
+  完全排除する admission freeze (maintenance flag 経由の二段 deploy 等) は
+  2026-05-10 時点で **不採用** と判定 ([Issue #634](https://github.com/SH11235/rshogi/issues/634))。詳細・将来 trigger は §12.1.1 / §12.1.2 を参照。
 - 最低 drain 検出時間 = `poll_interval_sec × require_stable_zero` (default 設定
   では `30s × 3 = 90s`)。R2 list の eventual consistency を緩和するためのバッファ。
 - worst case 待機: `total_time_sec × 2 + byoyomi_sec × max_moves`
   (production CLOCK 設定で `600 × 2 + 10 × 256 = 3760s ≈ 63 分`) + 余裕で 3900s
   を default に設定。
+
+#### 12.1.1 admission freeze の判定 (2026-05-10, [Issue #634](https://github.com/SH11235/rshogi/issues/634))
+
+drain 完了から `wrangler deploy` upload 完了までの数秒〜十数秒の race window
+を完全排除するには、deploy 開始時に新規 `start_match` を一律拒否する
+admission gate (案 A: Worker 全体 maintenance flag / 案 B: cron で
+`admission_freeze` flag を timed gate) を導入する必要がある。
+
+**2026-05-10 時点の判定: C 案 (現状維持 + doc 明示) を採用**。
+
+- **判断根拠**: rshogi-csa-server-workers は Floodgate 相当の個人運用前提
+  (同時 ~100 対局 / 10 LOGIN_LOBBY/sec を想定 peak、[Issue #632](https://github.com/SH11235/rshogi/issues/632) で確定)。
+  この負荷帯では race window に LOGIN が衝突する確率は ops 観測上
+  無視できる程度であり、admission gate を入れる ops コスト (二段 deploy /
+  flag 配線 / 解除忘れ事故) のほうが大きい。
+- **race window 中の被害想定** (worst case):
+  - drain 直後 〜 `wrangler deploy` upload 完了までの数秒〜十数秒に
+    新規 LOGIN/`start_match` が来た場合、対象 isolate が deploy 中の cutover を
+    踏む。観測される現象は LOGIN 応答が 502 / WebSocket close、
+    あるいは `start_match` 直後の最初の DO write で transient error。
+  - 既存対局は `Issue #601` の drain 観測で zero 安定後 + worst case 63 分の
+    余裕を取っているため race window では基本踏まれない。本判定の被害想定は
+    「新規対局者の LOGIN 失敗」までで、進行中対局の破壊は対象外。
+  - 個人運用前提の現 peak (10 LOGIN_LOBBY/sec) では、race window 10 秒に
+    衝突する LOGIN 期待値は 100 件未満 / 月 (deploy 頻度 ≪ 1 回 / 日) と
+    見積もる。LOGIN 失敗時のリトライは csa-client 側で標準対応済 ([PR #683](https://github.com/SH11235/rshogi/pull/683))。
+- **将来再検討の trigger**:
+  1. [Issue #632](https://github.com/SH11235/rshogi/issues/632) Phase 1 の実測で peak が
+     「同時 ~100 対局 / 10 LOGIN_LOBBY/sec」を継続的に上回った場合
+  2. [Issue #625](https://github.com/SH11235/rshogi/issues/625) の alert で deploy 起因の LOGIN 失敗 (5xx burst)
+     が ops 観測され、被害が許容を超えた場合
+  3. 上記いずれかが発生したら新規 issue を起票して案 A / B のいずれかを実装。
+     本節の判定は **その時点の peak / 観測実績で再評価** すること。
+
+#### 12.1.2 将来 trigger 用に保留する案 A / B
+
+12.1.1 の trigger に到達した時点で実装候補となる案を doc 上に保持する。
+**現時点では実装しない**。
+
+- **案 A: Worker 全体 maintenance flag**
+  - `wrangler.production.toml` の `[vars]` に `MAINTENANCE_MODE` を追加し、
+    `wrangler deploy --var MAINTENANCE_MODE:true` で 1 step pre-deploy →
+    drain 観測 → 本 deploy (`MAINTENANCE_MODE` 解除) の二段化。
+  - LobbyDO / GameRoom DO は LOGIN 受信時に flag を読み、freeze 中は
+    `#LOGIN:incorrect maintenance_mode` で拒否。
+  - **長所**: 配線が単純 (env 変数 1 つ + DO 内分岐)。**短所**: 解除忘れで
+    permanent down リスク、deploy 失敗時の rollback で MAINTENANCE_MODE が
+    生き残る事故。
+- **案 B: cron で `admission_freeze` flag を timed gate**
+  - deploy GH Actions 開始時に R2 / KV へ `admission_freeze=<expires_at>` を put、
+    LobbyDO / GameRoom が LOGIN 時に flag を確認、`expires_at` 経過で自動失効。
+  - **長所**: 解除忘れ事故が起きにくい (TTL ベース)。**短所**: R2 / KV
+    eventual consistency により freeze 開始と解除が即時反映されない可能性 (案 A より
+    race window が長くなるケースもある)。
+
+両案とも 1 PR で実装できる規模だが、二段 deploy 化により deploy workflow の
+所要時間と ops UX (force_deploy 経路の影響範囲、staging との整合性等) が
+変わる。trigger 到達時に再度 trade-off を整理してから着手すること。
 
 ### 12.2 ローカル手動 deploy 経路
 
