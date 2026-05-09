@@ -47,52 +47,69 @@ production は release より約 1.5% 低い instruction/node を達成する。
 
 各モデルに対して**必要十分な feature を指定**してビルドすること。feature が不足するとモデル読み込み失敗、過剰だと不要なコードパスや accumulator フィールドが残り NPS にバイアスが生じる。
 
-**モデル → feature 対応表**:
+**最新の feature 名は必ず実コードを確認すること**:
+```bash
+grep -E '^[a-z][a-z0-9-]+ =' /mnt/nvme1/development/rshogi/crates/rshogi-core/Cargo.toml
+```
+
+**モデル → feature 対応表**（2026-05 時点）:
 
 feature は以下の4カテゴリの組み合わせで構成する:
 
 1. **dispatch 除去**: `layerstack-only`（LayerStack モデルでは常に指定）
-2. **L1 サイズ**: `layerstacks-1536` / `layerstacks-768` / `layerstacks-512`（**必ず1つだけ**。複数同時有効は cycles +5.5% 退行）
+2. **L1×L2 サイズ**: 以下を**1つだけ**指定。複数同時有効は cycles +5.5% 退行
+   - `layerstacks-1536x16x32`（**default**, L0=1536, L1=16, L2=32, v100/v101 等の最新系）
+   - `layerstacks-1536x32x32`（L0=1536, L1=32, L2=32, v87/v88 等の旧 L1=32 系）
+   - `layerstacks-768x16x32`
+   - `layerstacks-512x16x32`
 3. **アーキテクチャ拡張**: `nnue-psqt`, `nnue-threat`（モデルに応じて）
-4. **最適化**: `nnue-progress-diff`（L1=1536 で有効。L1=768 では cache pressure 増加により cycles +2〜6% 退行するため指定しない）
+4. **最適化**: `nnue-progress-diff`（L1=1536 で有効。L0=768 系では cache pressure 増加により cycles +2〜6% 退行するため指定しない）
 
 | モデル種別 | 例 | 必須 feature |
 |---|---|---|
-| LayerStack 1536 | v87 | `layerstack-only,layerstacks-1536,nnue-progress-diff` |
-| LayerStack 1536 + PSQT | v88 | `layerstack-only,layerstacks-1536,nnue-psqt,nnue-progress-diff` |
-| LayerStack 1536 + Threat | v89, v91-1536 | `layerstack-only,layerstacks-1536,nnue-threat` |
-| LayerStack 1536 + PSQT + Threat | v90 | `layerstack-only,layerstacks-1536,nnue-psqt,nnue-threat` |
-| LayerStack 768 + Threat | v91-768 系 | `layerstack-only,layerstacks-768,nnue-threat` |
-| LayerStack 512 | | `layerstack-only,layerstacks-512` |
+| LayerStack 1536x16x32 (新標準) | v100 | `layerstack-only,nnue-progress-diff`（default で `layerstacks-1536x16x32`） |
+| LayerStack 1536x16x32 + PSQT | v101 | `layerstack-only,nnue-psqt,nnue-progress-diff` |
+| LayerStack 1536x32x32 | v87 (旧) | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-1536x32x32,nnue-progress-diff` |
+| LayerStack 1536x32x32 + PSQT | v88 (旧) | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-1536x32x32,nnue-psqt,nnue-progress-diff` |
+| LayerStack 1536x16x32 + Threat | v89, v91-1536 | `layerstack-only,nnue-threat` |
+| LayerStack 1536x16x32 + PSQT + Threat | v90 | `layerstack-only,nnue-psqt,nnue-threat` |
+| LayerStack 768x16x32 + Threat | v91-768 系 | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-768x16x32,nnue-threat` |
+| LayerStack 512x16x32 | | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-512x16x32` |
 | HalfKA_HM | danbo-v20 等 | (feature 指定なし、デフォルトで可) |
 
 **注意**:
-- `layerstacks-1536` はデフォルト feature に含まれる。768/512 モデル用にビルドする際は
-  `--no-default-features` で外す。その場合 `search-no-pass-rules`（デフォルトに含まれる）も
-  明示的に再指定すること。
-- `nnue-progress-diff` は L1=1536 限定の最適化。L1=768 では `StackEntryLayerStacks` の cache pressure 増加で退行する。
+- `layerstacks-1536x16x32` がデフォルト feature。`1536x32x32`/`768x16x32`/`512x16x32` 等を使うには
+  `--no-default-features` で外し、`search-no-pass-rules`（デフォルト含）を再指定する。
+- `nnue-progress-diff` は L0=1536 限定の最適化。L0=768/512 では `StackEntryLayerStacks` の cache pressure 増加で退行する。
+- 過去の `layerstacks-1536`（L1/L2 を区別しない）feature は廃止済み。`layerstacks-1536x16x32` または `layerstacks-1536x32x32` を使うこと。
 
 ```bash
-# 768 + Threat モデル用の例
+# 768x16x32 + Threat モデル用の例
 cargo build --profile production -p rshogi-usi \
   --no-default-features \
-  --features search-no-pass-rules,layerstack-only,layerstacks-768,nnue-threat
+  --features search-no-pass-rules,layerstack-only,layerstacks-768x16x32,nnue-threat
 ```
 
 **`layerstack-only` の効果**: HalfKP/HalfKA/HalfKA_HM のコードを除去し、`evaluate_dispatch` を直接呼び出しにバイパスする。LayerStack モデル同士の比較では常に指定すべき。
 
 **ビルド例**:
 ```bash
-# v87 用（LayerStack 1536, PSQT なし）
-cargo build --profile production -p rshogi-usi --features layerstack-only
-cp target/production/rshogi-usi target/production/rshogi-usi-ls1536
+# v100 用（LayerStack 1536x16x32, PSQT なし）— default feature を活用
+cargo build --profile production -p rshogi-usi --features layerstack-only,nnue-progress-diff
+cp target/production/rshogi-usi engines/rshogi-usi-1536x16x32-<purpose>
 
-# v88 用（LayerStack 1536 + PSQT）
-cargo build --profile production -p rshogi-usi --features layerstack-only,nnue-psqt
-cp target/production/rshogi-usi target/production/rshogi-usi-ls1536-psqt
+# v101 用（LayerStack 1536x16x32 + PSQT）
+cargo build --profile production -p rshogi-usi --features layerstack-only,nnue-psqt,nnue-progress-diff
+cp target/production/rshogi-usi engines/rshogi-usi-1536x16x32-psqt-<purpose>
 ```
 
 **重要**: `cargo build` は同一 profile で feature が異なっても同じ出力パスに書き出す。異なる feature のバイナリが必要な場合は、ビルド直後に別名にコピーすること。2つ目のビルドで1つ目が上書きされる。
+
+### バイナリ退避先
+
+長期保持したい評価用バイナリは **`engines/`** ディレクトリ（gitignored）に置く。
+`target/production/` は `cargo clean` で消える可能性、`/tmp/` は再起動で揮発するため。
+命名規則と既存バイナリの一覧は `engines/README.md` を参照。
 
 ## 実行手順
 

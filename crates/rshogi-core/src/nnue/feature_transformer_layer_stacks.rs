@@ -98,6 +98,193 @@ pub struct FeatureTransformerLayerStacks<const L1: usize> {
     pub(crate) has_threat: bool,
 }
 
+/// PSQT アキュムレータ ([i32; NUM_LAYER_STACK_BUCKETS=9]) への 9-i32 ベクトル加減算。
+///
+/// `ADD = true` で `*acc += weights[0..9]`、`false` で `*acc -= weights[0..9]`。
+/// 9 = NUM_LAYER_STACK_BUCKETS は power-of-2 でないため:
+///
+/// - AVX-512F: 16-lane を 9 lane mask で 1 命令（BW 不要、`add_epi32` は AVX-512F のみで OK）
+/// - AVX2: 8 lane + 1 scalar
+/// - SSE2 / NEON / WASM SIMD128: 4 + 4 + 1 scalar
+/// - スカラー fallback
+///
+/// 各 cfg ブロックは互いに排他（後段ブロックは前段の `not(target_feature = ...)` で除外）
+/// のため、コンパイル時にちょうど一つの SIMD パス（または scalar fallback）が選択される。
+///
+/// # オーバーフロー挙動
+/// 旧スカラー実装は `*acc += weights[bucket]` で debug build では i32 overflow check が
+/// 走っていた。新実装は SIMD intrinsics (`_mm*_add_epi32` 等) で wrapping、scalar
+/// fallback も `wrapping_add` で明示 wrap。実用上 PSQT 値は ±数千オーダーで、
+/// HALFKA_HM_DIMENSIONS の累積でも i32 (±2.1e9) を溢れることはなく、挙動差は実害なし。
+///
+/// # Safety
+/// `weights` は少なくとも 9 個の i32 が連続して読める必要がある（呼び出し元が保証）。
+#[cfg(feature = "nnue-psqt")]
+#[inline(always)]
+fn psqt_add_or_sub<const ADD: bool>(
+    psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
+    weights: *const i32,
+) {
+    const { assert!(NUM_LAYER_STACK_BUCKETS == 9, "psqt_add_or_sub assumes 9 buckets") }
+
+    // AVX-512F: 9 lane mask で 1 命令
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    {
+        // SAFETY: 9 lane mask = 0x01FF。psqt_acc は [i32; 9] = 36 bytes、weights も 9 i32
+        // 連続。mask されたレーンのみ load/store するため境界外アクセスなし。
+        unsafe {
+            use std::arch::x86_64::*;
+            let mask: __mmask16 = 0x01FF;
+            let acc_ptr = psqt_acc.as_mut_ptr();
+            let a = _mm512_maskz_loadu_epi32(mask, acc_ptr);
+            let w = _mm512_maskz_loadu_epi32(mask, weights);
+            let result = if ADD {
+                _mm512_add_epi32(a, w)
+            } else {
+                _mm512_sub_epi32(a, w)
+            };
+            _mm512_mask_storeu_epi32(acc_ptr, mask, result);
+        }
+    }
+
+    // AVX2: 8 lane (i32×8 = 32 bytes) + 1 scalar
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        not(target_feature = "avx512f")
+    ))]
+    {
+        // SAFETY: psqt_acc は [i32; 9] = 36 bytes、先頭 32 bytes (8 lane) は安全に
+        // load/store 可能。weights も 9 i32 連続なので 8 i32 load 安全。残り 1 lane は
+        // scalar で処理。
+        unsafe {
+            use std::arch::x86_64::*;
+            let acc_ptr = psqt_acc.as_mut_ptr();
+            let a = _mm256_loadu_si256(acc_ptr as *const __m256i);
+            let w = _mm256_loadu_si256(weights as *const __m256i);
+            let result = if ADD {
+                _mm256_add_epi32(a, w)
+            } else {
+                _mm256_sub_epi32(a, w)
+            };
+            _mm256_storeu_si256(acc_ptr as *mut __m256i, result);
+            let w8 = *weights.add(8);
+            if ADD {
+                psqt_acc[8] = psqt_acc[8].wrapping_add(w8);
+            } else {
+                psqt_acc[8] = psqt_acc[8].wrapping_sub(w8);
+            }
+        }
+    }
+
+    // SSE2: 4 + 4 + 1
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "sse2",
+        not(target_feature = "avx2"),
+        not(target_feature = "avx512f")
+    ))]
+    {
+        // SAFETY: psqt_acc/weights とも 9 i32 = 36 bytes 連続。0..4 と 4..8 の 16 bytes
+        // load/store は安全。
+        unsafe {
+            use std::arch::x86_64::*;
+            let acc_ptr = psqt_acc.as_mut_ptr();
+            for chunk in [0usize, 4] {
+                let a = _mm_loadu_si128(acc_ptr.add(chunk) as *const __m128i);
+                let w = _mm_loadu_si128(weights.add(chunk) as *const __m128i);
+                let result = if ADD {
+                    _mm_add_epi32(a, w)
+                } else {
+                    _mm_sub_epi32(a, w)
+                };
+                _mm_storeu_si128(acc_ptr.add(chunk) as *mut __m128i, result);
+            }
+            let w8 = *weights.add(8);
+            if ADD {
+                psqt_acc[8] = psqt_acc[8].wrapping_add(w8);
+            } else {
+                psqt_acc[8] = psqt_acc[8].wrapping_sub(w8);
+            }
+        }
+    }
+
+    // NEON (aarch64): 4 + 4 + 1
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: NEON i32x4 load/store は psqt_acc / weights の連続 4 i32 を扱う。
+        // 9 i32 = 36 bytes 確保済み。0..4 と 4..8 を別 register で処理し、8 番目を
+        // scalar で更新。
+        unsafe {
+            use std::arch::aarch64::*;
+            let acc_ptr = psqt_acc.as_mut_ptr();
+            for chunk in [0usize, 4] {
+                let a = vld1q_s32(acc_ptr.add(chunk));
+                let w = vld1q_s32(weights.add(chunk));
+                let result = if ADD {
+                    vaddq_s32(a, w)
+                } else {
+                    vsubq_s32(a, w)
+                };
+                vst1q_s32(acc_ptr.add(chunk), result);
+            }
+            let w8 = *weights.add(8);
+            if ADD {
+                psqt_acc[8] = psqt_acc[8].wrapping_add(w8);
+            } else {
+                psqt_acc[8] = psqt_acc[8].wrapping_sub(w8);
+            }
+        }
+    }
+
+    // WASM SIMD128: 4 + 4 + 1
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        // SAFETY: v128 i32x4 load/store は連続 16 bytes。psqt_acc/weights とも 36 bytes
+        // 確保済み。
+        unsafe {
+            use std::arch::wasm32::*;
+            let acc_ptr = psqt_acc.as_mut_ptr();
+            for chunk in [0usize, 4] {
+                let a = v128_load(acc_ptr.add(chunk) as *const v128);
+                let w = v128_load(weights.add(chunk) as *const v128);
+                let result = if ADD {
+                    i32x4_add(a, w)
+                } else {
+                    i32x4_sub(a, w)
+                };
+                v128_store(acc_ptr.add(chunk) as *mut v128, result);
+            }
+            let w8 = *weights.add(8);
+            if ADD {
+                psqt_acc[8] = psqt_acc[8].wrapping_add(w8);
+            } else {
+                psqt_acc[8] = psqt_acc[8].wrapping_sub(w8);
+            }
+        }
+    }
+
+    // スカラー fallback
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx512f"),
+        all(target_arch = "x86_64", target_feature = "avx2"),
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "aarch64", target_feature = "neon"),
+        all(target_arch = "wasm32", target_feature = "simd128"),
+    )))]
+    {
+        // SAFETY: weights は 9 i32 連続が保証されている。
+        for bucket in 0..NUM_LAYER_STACK_BUCKETS {
+            let w = unsafe { *weights.add(bucket) };
+            if ADD {
+                psqt_acc[bucket] = psqt_acc[bucket].wrapping_add(w);
+            } else {
+                psqt_acc[bucket] = psqt_acc[bucket].wrapping_sub(w);
+            }
+        }
+    }
+}
+
 impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     /// ファイルから読み込み（非圧縮形式）
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
@@ -413,6 +600,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     }
 
     /// PSQT 重みを加算
+    ///
+    /// `psqt_acc[bucket] += psqt_weights[index * 9 + bucket]` を 9 bucket 分まとめて実行する。
+    /// 内部実装は `psqt_add_or_sub::<true>` で SIMD 化されている。
     #[cfg(feature = "nnue-psqt")]
     #[inline]
     fn add_psqt_weights(&self, psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS], index: usize) {
@@ -422,9 +612,11 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             "psqt_weights index out of bounds: offset={offset}, len={}",
             self.psqt_weights.len()
         );
-        for (bucket, acc) in psqt_acc.iter_mut().enumerate() {
-            *acc += self.psqt_weights[offset + bucket];
-        }
+        // SAFETY: debug_assert で境界確認済み。release では呼び出し元 (refresh / diff) が
+        // active_indices を経由しており、index は features の有効範囲内。weights ポインタは
+        // 9 i32 連続を指す。
+        let weights_ptr = unsafe { self.psqt_weights.as_ptr().add(offset) };
+        psqt_add_or_sub::<true>(psqt_acc, weights_ptr);
     }
 
     /// PSQT 重みを減算
@@ -437,9 +629,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             "psqt_weights index out of bounds: offset={offset}, len={}",
             self.psqt_weights.len()
         );
-        for (bucket, acc) in psqt_acc.iter_mut().enumerate() {
-            *acc -= self.psqt_weights[offset + bucket];
-        }
+        // SAFETY: 同上。weights ポインタは 9 i32 連続を指す。
+        let weights_ptr = unsafe { self.psqt_weights.as_ptr().add(offset) };
+        psqt_add_or_sub::<false>(psqt_acc, weights_ptr);
     }
 
     /// 差分計算を使わずにAccumulatorを計算

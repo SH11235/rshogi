@@ -29,6 +29,11 @@ eval/*
 # Ignore tool-generated manifests under run outputs
 runs/
 
+# Retained USI engine binaries for evaluation runs (large binaries, model-specific)
+engines/*
+!engines/.gitkeep
+!engines/README.md
+
 # Avoid re-introducing accidentally generated manifest in tools crate root
 crates/tools/manifest.json
 
