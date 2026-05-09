@@ -70,6 +70,12 @@ pub(crate) mod spectator_snapshot;
 pub mod ws_route;
 pub mod x1_paths;
 
+// `observability` は `structured_log!` macro を提供する。`#[macro_export]` で
+// crate root に export されるため `pub use` 等は不要。本 mod 自体はホスト
+// target でも import 可能 (macro 定義は wasm32 限定の `worker::` 呼び出しを
+// 含むため、展開はホストでは失敗する点に注意)。
+pub mod observability;
+
 #[cfg(target_arch = "wasm32")]
 mod game_room;
 #[cfg(target_arch = "wasm32")]
@@ -145,18 +151,20 @@ pub async fn scheduled(
 
     if run_backfill {
         if let Err(e) = backfill::run_games_index_backfill(&env).await {
-            worker::console_log!(
-                "[scheduled] event=games_index_backfill_failed cron={} err={:?}",
-                cron,
-                e,
+            crate::structured_log!(
+                event: "games_index_backfill_failed",
+                component: "scheduled",
+                cron: cron,
+                err: format!("{e:?}"),
             );
         }
     }
     if let Err(e) = backfill::run_live_orphan_sweep(&env).await {
-        worker::console_log!(
-            "[scheduled] event=live_orphan_sweep_failed cron={} err={:?}",
-            cron,
-            e,
+        crate::structured_log!(
+            event: "live_orphan_sweep_failed",
+            component: "scheduled",
+            cron: cron,
+            err: format!("{e:?}"),
         );
     }
 }

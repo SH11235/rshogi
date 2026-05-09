@@ -37,7 +37,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use worker::{
     Date, DurableObject, Env, Error, Request, Response, ResponseBuilder, Result, State, WebSocket,
-    WebSocketIncomingMessage, WebSocketPair, console_log, durable_object, wasm_bindgen,
+    WebSocketIncomingMessage, WebSocketPair, durable_object, wasm_bindgen,
 };
 
 use crate::config::{
@@ -166,7 +166,10 @@ impl DurableObject for Lobby {
         server
             .serialize_attachment(&LobbyAttachment::Pending)
             .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
-        console_log!("[Lobby] websocket upgrade accepted");
+        crate::structured_log!(
+            event: "websocket_upgrade_accepted",
+            component: "lobby",
+        );
 
         Ok(ResponseBuilder::new().with_status(101).with_websocket(pair.client).empty())
     }
@@ -182,10 +185,11 @@ impl DurableObject for Lobby {
             WebSocketIncomingMessage::Binary(b) => b.len(),
         };
         if raw_len > MAX_WS_LINE_BYTES {
-            console_log!(
-                "[Lobby] event=ws_message_too_big bytes={} limit={}",
-                raw_len,
-                MAX_WS_LINE_BYTES,
+            crate::structured_log!(
+                event: "ws_message_too_big",
+                component: "lobby",
+                bytes: raw_len,
+                limit: MAX_WS_LINE_BYTES,
             );
             let _ = ws.close(Some(1009), Some("message too big".to_owned()));
             return Ok(());
@@ -234,9 +238,12 @@ impl DurableObject for Lobby {
                 ..
             })) => {
                 self.queue.borrow_mut().remove(&handle, &attachment_id);
-                console_log!(
-                    "[Lobby] queued client closed: handle={handle} attachment_id={attachment_id} queue_size={}",
-                    self.queue.borrow().len()
+                crate::structured_log!(
+                    event: "queued_client_closed",
+                    component: "lobby",
+                    handle: handle,
+                    attachment_id: attachment_id,
+                    queue_size: self.queue.borrow().len(),
                 );
                 // queue 状態が変わった (entry 削除) ので alarm の earliest を更新する。
                 self.reschedule_alarm().await?;
@@ -294,16 +301,21 @@ impl Lobby {
     /// すことで両 DO の挙動を対称化する。overhead は `CLOCK_PRESETS` の 1 KB 程度
     /// JSON を 1 回パースするだけで、LOGIN は人手駆動の頻度のため許容範囲。
     ///
-    /// パース失敗時は空 HashMap として扱い、`console_log!` で警告を残して strict
-    /// mode を無効化する（preset 設定不正で全 LOGIN がブロックされる事態を避ける
-    /// 安全側挙動。`CLOCK_PRESETS` 値そのものは `parse_clock_presets` の起動時
-    /// テストでカバーする）。空 HashMap = preset 未宣言 = strict mode 無効。
+    /// パース失敗時は空 HashMap として扱い、[`structured_log!`](crate::structured_log)
+    /// で警告を残して strict mode を無効化する（preset 設定不正で全 LOGIN が
+    /// ブロックされる事態を避ける安全側挙動。`CLOCK_PRESETS` 値そのものは
+    /// `parse_clock_presets` の起動時テストでカバーする）。
+    /// 空 HashMap = preset 未宣言 = strict mode 無効。
     fn clock_presets(&self) -> HashMap<String, ClockSpec> {
         let raw = self.env.var(ConfigKeys::CLOCK_PRESETS).ok().map(|v| v.to_string());
         match parse_clock_presets(raw.as_deref()) {
             Ok(map) => map,
             Err(e) => {
-                console_log!("[Lobby] event=invalid_clock_presets err={e}");
+                crate::structured_log!(
+                    event: "invalid_clock_presets",
+                    component: "lobby",
+                    err: format!("{e}"),
+                );
                 HashMap::new()
             }
         }
@@ -500,13 +512,14 @@ impl Lobby {
         .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
 
         send_line(ws, &build_login_ok_line(&req.handle))?;
-        console_log!(
-            "[Lobby] LOGIN_LOBBY: handle={} game_name={} color={:?} attachment_id={} queue_size={}",
-            req.handle,
-            req.game_name,
-            req.color,
-            attachment_id,
-            self.queue.borrow().len()
+        crate::structured_log!(
+            event: "login_lobby",
+            component: "lobby",
+            handle: req.handle,
+            game_name: req.game_name,
+            color: format!("{:?}", req.color),
+            attachment_id: attachment_id,
+            queue_size: self.queue.borrow().len(),
         );
 
         // ペアリング判定をその場で実行。成立したら両 WS に MATCHED を送って close。
@@ -532,7 +545,12 @@ impl Lobby {
         match line {
             "LOGOUT_LOBBY" => {
                 self.queue.borrow_mut().remove(handle, attachment_id);
-                console_log!("[Lobby] LOGOUT_LOBBY: handle={handle} attachment_id={attachment_id}");
+                crate::structured_log!(
+                    event: "logout_lobby",
+                    component: "lobby",
+                    handle: handle,
+                    attachment_id: attachment_id,
+                );
                 let _ = ws.close(Some(1000), Some("logout"));
                 // queue が縮んだので alarm を再評価。
                 self.reschedule_alarm().await?;
@@ -547,7 +565,11 @@ impl Lobby {
                 Ok(())
             }
             _ => {
-                console_log!("[Lobby] queued client sent unexpected line: {line}");
+                crate::structured_log!(
+                    event: "queued_unexpected_line",
+                    component: "lobby",
+                    line: line,
+                );
                 Ok(())
             }
         }
@@ -599,13 +621,14 @@ impl Lobby {
                 Color::White => sent_white = true,
             }
         }
-        console_log!(
-            "[Lobby] MATCHED dispatched: room_id={} black={} white={} (sent_black={} sent_white={})",
-            room_id,
-            matched.black.handle,
-            matched.white.handle,
-            sent_black,
-            sent_white,
+        crate::structured_log!(
+            event: "matched_dispatched",
+            component: "lobby",
+            room_id: room_id,
+            black_handle: matched.black.handle,
+            white_handle: matched.white.handle,
+            sent_black: sent_black,
+            sent_white: sent_white,
         );
         if !sent_black || !sent_white {
             // 片方の WS が close 済みなどで MATCHED が届かなかった場合、queue から
@@ -614,9 +637,12 @@ impl Lobby {
             // するため最終的に復帰できるが、サーバ側でも警告ログを残して
             // observability を確保する。GameRoom DO 側の login deadline (将来 PR で
             // 実装予定) でも片側不在は救済される。
-            console_log!(
-                "[Lobby] WARN: MATCHED dispatch incomplete. Black/white client may be orphaned, \
-                 client retry expected after recv timeout: room_id={room_id}"
+            crate::structured_log!(
+                event: "matched_dispatch_incomplete",
+                component: "lobby",
+                room_id: room_id,
+                sent_black: sent_black,
+                sent_white: sent_white,
             );
         }
         Ok(())
@@ -713,12 +739,13 @@ impl Lobby {
                 self.reschedule_alarm_with(&reg).await?;
                 let ttl_sec = ttl.as_secs();
                 send_line(ws, &build_challenge_ok_line(token.as_str(), ttl_sec))?;
-                console_log!(
-                    "[Lobby] CHALLENGE_LOBBY: issued token inviter={} opponent={} preset={} ttl_sec={}",
-                    req.inviter,
-                    req.opponent,
-                    req.clock_preset,
-                    ttl_sec,
+                crate::structured_log!(
+                    event: "challenge_lobby_issued",
+                    component: "lobby",
+                    inviter: req.inviter,
+                    opponent: req.opponent,
+                    preset: req.clock_preset,
+                    ttl_sec: ttl_sec,
                 );
             }
             Err(IssueError::SelfChallenge) => {
@@ -823,10 +850,12 @@ impl Lobby {
         .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
 
         send_line(ws, &format!("LOGIN_LOBBY:{handle} OK pending_match_dispatch_pending"))?;
-        console_log!(
-            "[Lobby] LOGIN_LOBBY private: handle={handle} token={} attachment_id={}",
-            token.as_str(),
-            attachment_id,
+        crate::structured_log!(
+            event: "login_lobby_private",
+            component: "lobby",
+            handle: handle,
+            token: token.as_str(),
+            attachment_id: attachment_id,
         );
         Ok(())
     }
@@ -844,8 +873,12 @@ impl Lobby {
         reg.unmark_ws_logged_in(&token_obj, &PlayerName::new(handle), attachment_id);
         self.save_challenge_registry(&reg).await?;
         self.reschedule_alarm_with(&reg).await?;
-        console_log!(
-            "[Lobby] private LOGIN ws closed: handle={handle} token={token} attachment_id={attachment_id}"
+        crate::structured_log!(
+            event: "private_login_ws_closed",
+            component: "lobby",
+            handle: handle,
+            token: token,
+            attachment_id: attachment_id,
         );
         Ok(())
     }
@@ -869,8 +902,11 @@ impl Lobby {
             }
             "LOBBY_PONG" => Ok(()),
             _ => {
-                console_log!(
-                    "[Lobby] private pending client sent unexpected line: handle={handle} line={line}"
+                crate::structured_log!(
+                    event: "private_pending_unexpected_line",
+                    component: "lobby",
+                    handle: handle,
+                    line: line,
                 );
                 Ok(())
             }
@@ -900,7 +936,11 @@ impl Lobby {
         }
         self.disconnect_pending_websockets(&expired).await;
         self.save_challenge_registry(&reg).await?;
-        console_log!("[Lobby] challenge purge_expired: removed={}", expired.len());
+        crate::structured_log!(
+            event: "challenge_purge_expired",
+            component: "lobby",
+            removed: expired.len(),
+        );
         Ok(())
     }
 
@@ -936,7 +976,11 @@ impl Lobby {
                 let _ = ws.close(Some(1000), Some("queue_expired"));
             }
         }
-        console_log!("[Lobby] queue purge_stale: removed={}", removed.len());
+        crate::structured_log!(
+            event: "queue_purge_stale",
+            component: "lobby",
+            removed: removed.len(),
+        );
         Ok(())
     }
 
@@ -1013,8 +1057,10 @@ fn evict_old_websockets_with_handle(state: &State, current_ws: &WebSocket, handl
         } = attachment
         {
             if existing == handle {
-                console_log!(
-                    "[Lobby] evict old queued WS with duplicate handle: handle={existing}"
+                crate::structured_log!(
+                    event: "evict_duplicate_handle_ws",
+                    component: "lobby",
+                    handle: existing,
                 );
                 let _ = ws.close(Some(1000), Some("evicted_by_new_login"));
             }

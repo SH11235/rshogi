@@ -777,12 +777,17 @@ async fn cache_put_origin_neutral(
     }
 }
 
-/// 失敗ログを logfmt で出す統一窓口。viewer API の経路別 event 名と、
+/// 失敗ログを構造化 JSON で出す統一窓口。viewer API の経路別 event 名と、
 /// 呼出側クライアントを特定する `client_kind` を持たせる
 /// (https://github.com/SH11235/rshogi/issues/564 設計 v4 §3)。`client_kind` は [`normalize_client_kind`] により
 /// `[a-z0-9-]{1,64}` に正規化済みの ASCII 文字列、または `unknown` / `invalid`。
 fn console_log_failed(event: &str, client_kind: &str, detail: &str) {
-    worker::console_log!("[viewer_api] event={event} client_kind={client_kind} detail={detail}");
+    crate::structured_log!(
+        event: event,
+        component: "viewer_api",
+        client_kind: client_kind,
+        detail: detail,
+    );
 }
 
 #[cfg(test)]

@@ -18,8 +18,8 @@
 //! 本実装範囲では admin invoke endpoint や 1 万件超の bulk 並列化は Non-goals
 //! (設計 v3 §10)。
 //!
-//! 進捗ログは logfmt 構造化 (`event=…_progress listed=… elapsed_ms=…`) で
-//! `console_log!` に流す。Cloudflare Workers の Logs / tail で grep 可能。
+//! 進捗ログは [`structured_log!`](crate::structured_log) で JSON 化して
+//! Cloudflare Workers の Logs / tail へ流す ([Issue #625](https://github.com/SH11235/rshogi/issues/625) Phase A)。
 //! いかなる失敗 (R2 binding 解決失敗 / list 失敗 / get 失敗 / put 失敗 /
 //! parse 失敗) も `Err` を返さず ログのみ残して `Ok` で抜ける契約。
 //! `scheduled` handler が次回 cron 起動を妨げないようにするため、伝播禁止。
@@ -111,7 +111,7 @@ mod imp {
         BackfillStats, KIFU_BY_ID_PREFIX, LiveEntryGameId, META_SUFFIX, MetaForIndexKey, PAGE_SIZE,
         SWEEP_DEADLINE_MS, SWEEP_MAX_PAGES, SweepStats,
     };
-    use worker::{Date, Env, Result, console_log};
+    use worker::{Date, Env, Result};
 
     use crate::config::ConfigKeys;
     use crate::games_index::games_index_key;
@@ -134,7 +134,11 @@ mod imp {
         let bucket = match env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
             Ok(b) => b,
             Err(e) => {
-                console_log!("[backfill] event=games_index_backfill_bucket_failed err={:?}", e);
+                crate::structured_log!(
+                    event: "games_index_backfill_bucket_failed",
+                    component: "backfill",
+                    err: format!("{e:?}"),
+                );
                 return Ok(stats);
             }
         };
@@ -142,7 +146,11 @@ mod imp {
         let page = match bucket.list().prefix(KIFU_BY_ID_PREFIX).limit(PAGE_SIZE).execute().await {
             Ok(p) => p,
             Err(e) => {
-                console_log!("[backfill] event=games_index_backfill_list_failed err={:?}", e);
+                crate::structured_log!(
+                    event: "games_index_backfill_list_failed",
+                    component: "backfill",
+                    err: format!("{e:?}"),
+                );
                 return Ok(stats);
             }
         };
@@ -159,10 +167,11 @@ mod imp {
             let fetched = match bucket.get(&key).execute().await {
                 Ok(o) => o,
                 Err(e) => {
-                    console_log!(
-                        "[backfill] event=games_index_backfill_get_failed key={} err={:?}",
-                        key,
-                        e,
+                    crate::structured_log!(
+                        event: "games_index_backfill_get_failed",
+                        component: "backfill",
+                        key: key,
+                        err: format!("{e:?}"),
                     );
                     stats.skipped = stats.skipped.saturating_add(1);
                     continue;
@@ -180,10 +189,11 @@ mod imp {
             let bytes = match body.bytes().await {
                 Ok(b) => b,
                 Err(e) => {
-                    console_log!(
-                        "[backfill] event=games_index_backfill_read_failed key={} err={:?}",
-                        key,
-                        e,
+                    crate::structured_log!(
+                        event: "games_index_backfill_read_failed",
+                        component: "backfill",
+                        key: key,
+                        err: format!("{e:?}"),
                     );
                     stats.skipped = stats.skipped.saturating_add(1);
                     continue;
@@ -192,10 +202,11 @@ mod imp {
             let meta: MetaForIndexKey = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
                 Err(e) => {
-                    console_log!(
-                        "[backfill] event=games_index_backfill_parse_failed key={} err={:?}",
-                        key,
-                        e,
+                    crate::structured_log!(
+                        event: "games_index_backfill_parse_failed",
+                        component: "backfill",
+                        key: key,
+                        err: format!("{e:?}"),
                     );
                     stats.skipped = stats.skipped.saturating_add(1);
                     continue;
@@ -205,10 +216,11 @@ mod imp {
             let index_key = match games_index_key(meta.ended_at_ms, &meta.game_id) {
                 Ok(k) => k,
                 Err(e) => {
-                    console_log!(
-                        "[backfill] event=games_index_backfill_key_failed game_id={} err={:?}",
-                        meta.game_id,
-                        e,
+                    crate::structured_log!(
+                        event: "games_index_backfill_key_failed",
+                        component: "backfill",
+                        game_id: meta.game_id,
+                        err: format!("{e:?}"),
                     );
                     stats.skipped = stats.skipped.saturating_add(1);
                     continue;
@@ -218,11 +230,12 @@ mod imp {
             // body は meta の wire そのまま。`GamesIndexEntry` の wire と等価
             // (両方とも export_kifu_to_r2 で同一 JSON を put している)。
             if let Err(e) = bucket.put(&index_key, bytes).execute().await {
-                console_log!(
-                    "[backfill] event=games_index_backfill_put_failed game_id={} index_key={} err={:?}",
-                    meta.game_id,
-                    index_key,
-                    e,
+                crate::structured_log!(
+                    event: "games_index_backfill_put_failed",
+                    component: "backfill",
+                    game_id: meta.game_id,
+                    index_key: index_key,
+                    err: format!("{e:?}"),
                 );
                 stats.skipped = stats.skipped.saturating_add(1);
                 continue;
@@ -231,12 +244,13 @@ mod imp {
         }
 
         let elapsed_ms = Date::now().as_millis().saturating_sub(started_at_ms);
-        console_log!(
-            "[backfill] event=games_index_backfill_progress listed={} put={} skipped={} elapsed_ms={}",
-            stats.listed,
-            stats.put,
-            stats.skipped,
-            elapsed_ms,
+        crate::structured_log!(
+            event: "games_index_backfill_progress",
+            component: "backfill",
+            listed: stats.listed,
+            put: stats.put,
+            skipped: stats.skipped,
+            elapsed_ms: elapsed_ms,
         );
         Ok(stats)
     }
@@ -270,7 +284,11 @@ mod imp {
         let bucket = match env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
             Ok(b) => b,
             Err(e) => {
-                console_log!("[backfill] event=live_orphan_sweep_bucket_failed err={:?}", e);
+                crate::structured_log!(
+                    event: "live_orphan_sweep_bucket_failed",
+                    component: "backfill",
+                    err: format!("{e:?}"),
+                );
                 return Ok(stats);
             }
         };
@@ -294,10 +312,11 @@ mod imp {
             let page = match builder.execute().await {
                 Ok(p) => p,
                 Err(e) => {
-                    console_log!(
-                        "[backfill] event=live_orphan_sweep_list_failed pages={} err={:?}",
-                        stats.pages,
-                        e,
+                    crate::structured_log!(
+                        event: "live_orphan_sweep_list_failed",
+                        component: "backfill",
+                        pages: stats.pages,
+                        err: format!("{e:?}"),
                     );
                     break;
                 }
@@ -329,11 +348,12 @@ mod imp {
                 let head_result = match bucket.head(&meta_key).await {
                     Ok(o) => o,
                     Err(e) => {
-                        console_log!(
-                            "[backfill] event=live_orphan_sweep_head_failed game_id={} meta_key={} err={:?}",
-                            game_id,
-                            meta_key,
-                            e,
+                        crate::structured_log!(
+                            event: "live_orphan_sweep_head_failed",
+                            component: "backfill",
+                            game_id: game_id,
+                            meta_key: meta_key,
+                            err: format!("{e:?}"),
                         );
                         if Date::now().as_millis().saturating_sub(started_at_ms)
                             >= SWEEP_DEADLINE_MS
@@ -355,11 +375,12 @@ mod imp {
                 }
 
                 if let Err(e) = bucket.delete(&live_key).await {
-                    console_log!(
-                        "[backfill] event=live_orphan_sweep_delete_failed game_id={} live_key={} err={:?}",
-                        game_id,
-                        live_key,
-                        e,
+                    crate::structured_log!(
+                        event: "live_orphan_sweep_delete_failed",
+                        component: "backfill",
+                        game_id: game_id,
+                        live_key: live_key,
+                        err: format!("{e:?}"),
                     );
                     if Date::now().as_millis().saturating_sub(started_at_ms) >= SWEEP_DEADLINE_MS {
                         stats.deadline_reached = true;
@@ -379,9 +400,10 @@ mod imp {
                 break;
             }
             if stats.pages >= SWEEP_MAX_PAGES {
-                console_log!(
-                    "[backfill] event=live_orphan_sweep_max_pages_reached pages={}",
-                    stats.pages,
+                crate::structured_log!(
+                    event: "live_orphan_sweep_max_pages_reached",
+                    component: "backfill",
+                    pages: stats.pages,
                 );
                 break;
             }
@@ -394,29 +416,31 @@ mod imp {
         }
 
         let elapsed_ms = Date::now().as_millis().saturating_sub(started_at_ms);
-        console_log!(
-            "[backfill] event=live_orphan_sweep_progress listed={} deleted={} pages={} deadline_reached={} elapsed_ms={}",
-            stats.listed,
-            stats.deleted,
-            stats.pages,
-            stats.deadline_reached,
-            elapsed_ms,
+        crate::structured_log!(
+            event: "live_orphan_sweep_progress",
+            component: "backfill",
+            listed: stats.listed,
+            deleted: stats.deleted,
+            pages: stats.pages,
+            deadline_reached: stats.deadline_reached,
+            elapsed_ms: elapsed_ms,
         );
         Ok(stats)
     }
 
     /// `live-games-index/<key>` の本文を読んで `game_id` field を返す。
     ///
-    /// 失敗はすべて logfmt で記録した上で `None` を返し、呼び出し側で entry
+    /// 失敗はすべて構造化ログで記録した上で `None` を返し、呼び出し側で entry
     /// を skip させる (sweep 全体を停止しない)。
     async fn read_live_entry_game_id(bucket: &worker::Bucket, key: &str) -> Option<String> {
         let fetched = match bucket.get(key).execute().await {
             Ok(o) => o,
             Err(e) => {
-                console_log!(
-                    "[backfill] event=live_orphan_sweep_get_failed key={} err={:?}",
-                    key,
-                    e,
+                crate::structured_log!(
+                    event: "live_orphan_sweep_get_failed",
+                    component: "backfill",
+                    key: key,
+                    err: format!("{e:?}"),
                 );
                 return None;
             }
@@ -426,10 +450,11 @@ mod imp {
         let bytes = match body.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                console_log!(
-                    "[backfill] event=live_orphan_sweep_read_failed key={} err={:?}",
-                    key,
-                    e,
+                crate::structured_log!(
+                    event: "live_orphan_sweep_read_failed",
+                    component: "backfill",
+                    key: key,
+                    err: format!("{e:?}"),
                 );
                 return None;
             }
@@ -437,10 +462,11 @@ mod imp {
         match serde_json::from_slice::<LiveEntryGameId>(&bytes) {
             Ok(v) => Some(v.game_id),
             Err(e) => {
-                console_log!(
-                    "[backfill] event=live_orphan_sweep_parse_failed key={} err={:?}",
-                    key,
-                    e,
+                crate::structured_log!(
+                    event: "live_orphan_sweep_parse_failed",
+                    component: "backfill",
+                    key: key,
+                    err: format!("{e:?}"),
                 );
                 None
             }

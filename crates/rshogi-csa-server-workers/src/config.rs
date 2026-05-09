@@ -122,8 +122,8 @@ impl ConfigKeys {
     /// / `no` / `off` または未設定で無効（= 該当 endpoint は 404 で既存ルーティング
     /// にフォールスルー）。production rollout 時の kill-switch を兼ね、本値を
     /// `"0"` に切り替えて redeploy することで viewer API を即時無効化できる。
-    /// 設定不正値は安全側に倒し（無効化）、`worker::console_log!` で警告ログを
-    /// 出す。
+    /// 設定不正値は安全側に倒し（無効化）、[`structured_log!`](crate::structured_log)
+    /// で警告ログを出す。
     pub const ALLOW_VIEWER_API: &'static str = "ALLOW_VIEWER_API";
     /// 私的対局 (`CHALLENGE_LOBBY` および `LOGIN_LOBBY <handle>+private-<token>+free`)
     /// 経路を opt-in 有効化するブール変数 (https://github.com/SH11235/rshogi/issues/635)。
@@ -139,7 +139,8 @@ impl ConfigKeys {
     ///
     /// staging では起動経路実装の動作確認時のみ `"true"` に切り替える。
     /// 設定不正値 (`true` / `false` / 数字 / yes/no/on/off 以外) は `ALLOW_VIEWER_API`
-    /// と同じく安全側 (= 無効化) に倒し、`worker::console_log!` で警告ログを出す。
+    /// と同じく安全側 (= 無効化) に倒し、[`structured_log!`](crate::structured_log)
+    /// で警告ログを出す。
     pub const PRIVATE_CHALLENGE_ENABLED: &'static str = "PRIVATE_CHALLENGE_ENABLED";
 
     /// deploy 対象コードの provenance commit sha (`DEPLOY_TRIGGER_SHA`)。
@@ -479,7 +480,8 @@ pub fn resolve_clock_spec_from_presets_map(
 ///
 /// 値の解釈は [`rshogi_csa_server::config::parse_truthy_bool_env`] に委ねる。
 /// 設定不正値（`true` / `false` / 数字 / yes/no/on/off 以外）は安全側に倒し
-/// （= viewer API 無効化）、`worker::console_log!` で警告ログを 1 回だけ出す。
+/// （= viewer API 無効化）、[`structured_log!`](crate::structured_log) で
+/// 警告ログを 1 回だけ出す。
 /// production rollout 時の kill-switch を兼ねる: 値を `"0"` に切り替えて
 /// redeploy することで該当 endpoint を即時 404 化できる。
 #[cfg(target_arch = "wasm32")]
@@ -488,7 +490,11 @@ pub fn is_viewer_api_enabled(env: &worker::Env) -> bool {
     match rshogi_csa_server::config::parse_truthy_bool_env(raw.as_deref()) {
         Ok(v) => v,
         Err(e) => {
-            worker::console_log!("[viewer_api] event=invalid_allow_viewer_api err={e}");
+            crate::structured_log!(
+                event: "invalid_allow_viewer_api",
+                component: "viewer_api",
+                err: format!("{e}"),
+            );
             false
         }
     }
@@ -500,7 +506,8 @@ pub fn is_viewer_api_enabled(env: &worker::Env) -> bool {
 ///
 /// 値の解釈は [`rshogi_csa_server::config::parse_truthy_bool_env`] に委ねる。
 /// 設定不正値（`true` / `false` / 数字 / yes/no/on/off 以外）は安全側に倒し
-/// （= private challenge 無効化）、`worker::console_log!` で警告ログを出す。
+/// （= private challenge 無効化）、[`structured_log!`](crate::structured_log)
+/// で警告ログを出す。
 ///
 /// 無効時は LobbyDO の `dispatch_pending_line` 入口で早期 reject し、
 /// `CHALLENGE_LOBBY:incorrect unsupported` / `LOGIN_LOBBY:incorrect unsupported`
@@ -512,7 +519,11 @@ pub fn is_private_challenge_enabled(env: &worker::Env) -> bool {
     match rshogi_csa_server::config::parse_truthy_bool_env(raw.as_deref()) {
         Ok(v) => v,
         Err(e) => {
-            worker::console_log!("[lobby] event=invalid_private_challenge_enabled err={e}");
+            crate::structured_log!(
+                event: "invalid_private_challenge_enabled",
+                component: "lobby",
+                err: format!("{e}"),
+            );
             false
         }
     }
