@@ -22,10 +22,10 @@ Floodgate audit (2026-05-08) で起票された P0 [#622](https://github.com/SH1
 
 | 攻撃 | 対象 | 影響 | 緩和層 |
 |---|---|---|---|
-| 大量 room_id への WS upgrade flood | `/ws/<room_id>`、GameRoom DO | DO instance 量産 → memory / storage / class A request 浪費 | 層 1 (WAF) + 層 2 (Worker token bucket) + 層 3 (room 作成 counter) |
-| LOGIN_LOBBY flood | `/ws/lobby`、LobbyDO | LobbyDO WS 上限 32,768 接続/DO → 全マッチング停止 | 層 1 (WAF) + 層 2 (Worker token bucket) |
+| 大量 room_id への WS upgrade flood | `/ws/<room_id>`、GameRoom DO | DO instance 量産 → memory / storage / class A request 浪費 | 層 1 (WAF) + 層 2 (atomic rate limiter) + 層 3 (room 作成 counter) |
+| LOGIN_LOBBY flood | `/ws/lobby`、LobbyDO | LobbyDO WS 上限 32,768 接続/DO → 全マッチング停止 | 層 1 (WAF) + 層 2 (atomic rate limiter) |
 | AGREE 不到達による DO 占有 | GameRoom DO | AGREE_TIMEOUT_SECONDS 経過まで slot 占有 (現状 60 sec、PR [#616](https://github.com/SH11235/rshogi/pull/616) で対処済) + その間に新規流入で複数 DO 占有 | 既存 AGREE_TIMEOUT_SECONDS + 本 issue の per-IP cap |
-| handle 自称による queue 浪費 | LobbyDO in-memory queue | LOBBY_QUEUE_SIZE_LIMIT (= 100 既定) を埋めて正規ユーザを締め出す | 層 2 (per-handle token bucket) + #664 (handle whitelist) |
+| handle 自称による queue 浪費 | LobbyDO in-memory queue | LOBBY_QUEUE_SIZE_LIMIT (= 100 既定) を埋めて正規ユーザを締め出す | 層 2 (per-handle atomic counter) + #664 (handle whitelist) |
 
 ### 2.2 緩和ターゲット (Codex review 反映 2026-05-09)
 
@@ -49,7 +49,11 @@ Floodgate audit (2026-05-08) で起票された P0 [#622](https://github.com/SH1
 
 - **クライアント IP の取得元**: `request.headers().get("CF-Connecting-IP")` のみを使う。
   `X-Forwarded-For` は Cloudflare 通過後も client が偽装可能なヘッダを含むため、本 PR の rate limit 鍵には使わない (claude review)
-- **`CF-Connecting-IP` 未取得時の挙動**: Cloudflare Workers では通常常に存在するが、内部 fetch 等で欠落するケースに備えて fail-open (rate limit を bypass) ではなく **fail-closed (拒否)** にするか、本 doc Q5 で明確化する
+- **`CF-Connecting-IP` 未取得時の挙動**: **fail-closed (拒否)**。Cloudflare Workers
+  では正規経路で常に存在するため、欠落は anomalous (内部 fetch / mock / 攻撃いずれも
+  通常運用では出ない)。本 PR では `CF-Connecting-IP` が空 / 取得失敗の request を
+  503 + `Retry-After` 短時間 (10 秒程度) で reject する設計に固定する (§5.3 で
+  fail-closed テストを必須化)
 
 ## 3. Open questions (user 確認必須)
 
@@ -155,18 +159,26 @@ Floodgate audit (2026-05-08) で起票された P0 [#622](https://github.com/SH1
   シナリオ確認を済ませ、互換性問題があれば閾値レスポンスを `Q4-B` (silent close) や
   `Q4-C` (専用 close code) に変える設計分岐ポイントとする
 
-## 4. 実装計画 (Q1-Q4 確定後の素案)
+## 4. 実装計画 (Q1-Q5 確定後の素案)
 
 ### 4.1 PR 構成案
 
-1 PR にすると差分が大きいので 2 PR に分割提案:
+1 PR にすると差分が大きいので 2 PR に分割提案。**`rate_limit.rs` の中身は Q2 採択
+結果で大きく変わる**ため、Q2 確定前に着手しない:
 
 - **PR3a: 層 2 + 層 3 + runbook** (Worker code-only)
-  - `crates/rshogi-csa-server-workers/src/rate_limit.rs` (新規 module、token bucket pure logic)
-  - `router.rs` / `lobby.rs` / `game_room.rs` の WS upgrade 経路で `rate_limit::check_*` を呼び込み
+  - `crates/rshogi-csa-server-workers/src/rate_limit.rs` (新規 module): Q2 採択次第:
+    - **Q2-A 採択時**: Cloudflare Workers Rate Limiting binding (`env.RATE_LIMITER`) の
+      薄い adapter のみ。`check_login_lobby(env, ip)` 等の呼び出し helper と env→threshold
+      マッピング、`Retry-After` 値計算が中心。token consume / refill は Cloudflare 側
+      実装に委譲し、本 crate には pure な token bucket logic は書かない
+    - **Q2-B 採択時 (Q2-A 不可の fallback)**: 専用 RateLimitDO の class 実装 +
+      薄い adapter。pure な token bucket logic (consume / refill / window 切替) は
+      DO 内 storage を読み書きする atomic 操作として書く必要があり、host テストで
+      pure helper として切り出す
+  - `router.rs` / `lobby.rs` / `game_room.rs` の WS upgrade 経路で `rate_limit::check_*` 呼び出し
   - `ConfigKeys` に閾値 env 追加 (Q3 表参照)
   - `docs/csa-server/rate_limit.md` (runbook、WAF ダッシュボード手順 + 環境変数 reference)
-  - host テストで token bucket logic を verify
 - **PR3b: WAF / IaC** (Cloudflare 側、Q1-A 採択時のみ)
   - Terraform / wrangler API 経由の WAF rule 定義
   - production / staging の rule 差分 doc
@@ -235,10 +247,13 @@ soft cap warning にのみ使う。以下を明示する:
 - [ ] **Q2 確定**: Workers Rate Limiting binding が使えなければ Q2-B (専用 DO) に
   降格する判断
 
-### 5.2 Host unit tests (atomic limiter pure logic)
+### 5.2 Host unit tests (Q2 採択結果に応じた pure logic 範囲)
 
 - [ ] `crates/rshogi-csa-server-workers/src/rate_limit.rs` の pure helper を host テストでカバー
-  (token consume / refill, window 切替, 多 IP 並列)
+  - **Q2-A 採択時**: env→threshold マッピング解決 / `Retry-After` 秒数算出 /
+    Cloudflare binding error の error mapping (atomic op 自体は Cloudflare 側保証)
+  - **Q2-B 採択時**: token consume / refill / window 切替 / 多 IP 並列 (DO storage
+    に対する atomic 操作の pure logic を切り出してテスト)
 - [ ] CHALLENGE_LOBBY ハンドラの per-IP / per-handle counter 増減 logic
 - [ ] `cargo test -p rshogi-csa-server-workers --lib rate_limit` 全 pass
 
