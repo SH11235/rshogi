@@ -239,16 +239,17 @@ soft cap warning にのみ使う。以下を明示する:
 
 ### 5.1 Pre-PR3a checklist
 
-- [x] **Q5 互換性確認** (2026-05-10 確認済): `crates/rshogi-csa-client` と
-  `crates/rshogi-csa-server-tcp` で `LOGIN(_LOBBY):incorrect <reason>` パーサ実装を
-  grep し、`rate_limited` トークン受信時の挙動を確認した (詳細: §6.1)。
-  - csa-client (LOGIN / LOGIN_LOBBY 両経路) は `bail!` で fatal exit、
-    自動 retry なし → loop リスクなし
-  - 既存 `<reason>` トークンの内容は client 側で評価していない (prefix 判定のみ)
-  - TCP server 側に `LOGIN:incorrect rate_limited retry_after=<sec>` precedent あり
-    ([`crates/rshogi-csa-server-tcp/src/server.rs::handle_connection`](../../crates/rshogi-csa-server-tcp/src/server.rs)、
-    test [`tests/tcp_session.rs::login_rate_limit_denies_burst`](../../crates/rshogi-csa-server-tcp/tests/tcp_session.rs))
-  - **Q4-A の `rate_limited retry_after=<sec>` を採択確定**。Q4-B/Q4-C への切替は不要
+- [x] **Q5 互換性確認** (2026-05-10 完了、Codex review 反映で修正): csa-client は
+  `bail!` 後に **main loop で exponential backoff retry** する (`main.rs:282-294` /
+  `342-353`) ため、初回 PR の「fatal exit / retry なし」結論は誤りだった。
+  実際の挙動は §6.1 を参照。**Q4-A は採択可能だが client 側 follow-up が必要**:
+  - csa-client は `<reason>` トークンを評価せず `bail!` → main loop で
+    `retry_delay` (初期値の倍々、`max_delay_sec` 上限) sleep 後 `continue`
+  - 結果: 同一 IP / handle が rate limit 後も `log2(max_delay/initial_delay)` 回
+    程度の retry storm を起こす (server 側 penalty を毎回延長)
+  - ただし bounded (kill-server には至らない、`max_delay_sec` で頻度上限が固定)
+  - **follow-up issue として csa-client に `retry_after=<sec>` honoring を起票**
+    (本 PR では doc 訂正のみ、コード変更は別 PR で扱う)
 - [ ] **Q1 確定**: IaC ロードマップ [#675](https://github.com/SH11235/rshogi/issues/675) Phase 3
   との合流で **Q1-A (IaC for WAF)** に確定見込み。production Cloudflare 契約で
   Rate Limiting Rules が利用可能か user 確認
@@ -320,50 +321,109 @@ soft cap warning にのみ使う。以下を明示する:
 
 #### csa-client (`rshogi-csa-client`)
 
-LOGIN (game room / TCP 経路): [`src/protocol.rs::login`](../../crates/rshogi-csa-client/src/protocol.rs) line 125-141:
+> **修正履歴**: 初回 PR push (2026-05-10) では「fatal exit、retry なし」と
+> 誤った結論を載せていた。Codex review (P1) で `bail!` は上位 main loop に
+> `Err` を返すだけでプロセス終了ではないと指摘され、実装を再確認して訂正した。
+
+##### LOGIN (game room / TCP 経路)
+
+[`src/protocol.rs::login`](../../crates/rshogi-csa-client/src/protocol.rs) line 125-141:
 
 ```rust
 if is_login_ok(&response) {
     log::info!("[CSA] ログイン成功: {id}");
     Ok(())
 } else {
-    bail!("ログイン失敗: {response}");  // ← 任意の <reason> を含めて fatal exit
+    bail!("ログイン失敗: {response}");
 }
 ```
 
 - `is_login_ok` は `LOGIN:` prefix + ` OK` suffix のセット判定 ([line 594])
-- `<reason>` トークン (`unknown_game_name` / `already_logged_in` /
-  `rate_limited retry_after=10` 等) を区別せず、**全ケースで `bail!`**
-- **自動 retry なし** → `rate_limited` 受信で client が retry loop に入るリスクなし
+- 不一致なら `<reason>` を文字列に含めて `Err` を返す (`bail!` は anyhow の
+  early return マクロ、プロセス終了ではない)
+- 上位 [`run_one_game`](../../crates/rshogi-csa-client/src/main.rs) を経由して
+  `main.rs:342-353` で catch:
+  ```rust
+  Err(e) => {
+      log::error!("対局エラー: {e}");
+      // ... engine 再起動 + retry_delay sleep + retry_delay *= 2
+      continue;  // 上位 loop で `--max-games` か shutdown まで再試行
+  }
+  ```
 
-LOGIN_LOBBY (Workers lobby 経路): [`src/main.rs:577-631`](../../crates/rshogi-csa-client/src/main.rs):
+##### LOGIN_LOBBY (Workers lobby 経路)
+
+[`src/main.rs:577-631`](../../crates/rshogi-csa-client/src/main.rs):
 
 ```rust
 if let Some(rest) = line.strip_prefix("LOGIN_LOBBY:") {
-    if rest.ends_with(" OK") { /* MATCHED 待機 */ continue; }
+    if rest.ends_with(" OK") { continue; }  // MATCHED 待機
     if rest.starts_with("incorrect") {
         bail!("[Lobby] LOGIN_LOBBY 拒否: {rest}");
     }
-    if rest == "expired" { bail!(...); }
 }
-// 未知 line は log::debug! で無視 (continue)
 ```
 
-- `LOGIN_LOBBY:incorrect <reason>` は `<reason>` の中身を見ず一律 `bail!`
-- 未知 prefix は debug log で無視するが、`incorrect` 系で `<reason>` を増やしても
-  fatal exit のまま動く
-- **自動 retry なし**
+`bail!` は `acquire_lobby_match` の戻り値経由で `main.rs:285-295` で catch:
+
+```rust
+Err(e) => {
+    log::error!("ロビー接続エラー: {e}");
+    std::thread::sleep(retry_delay);
+    retry_delay = (retry_delay * 2).min(Duration::from_secs(max_delay_sec));
+    continue;  // 上位 loop で再 `acquire_lobby_match`
+}
+```
+
+##### 実際の retry 挙動 (Q4-A 採択時)
+
+server が `LOGIN_LOBBY:incorrect rate_limited retry_after=10` を返したとき:
+
+1. csa-client: `bail!` → main loop catch
+2. `retry_delay` 秒 sleep (初期値 1-2 秒程度、`config.retry.initial_delay_sec`)
+3. `continue` で再 LOGIN_LOBBY 試行 → server で再度 rate_limited
+4. `retry_delay *= 2` で次回はより長く sleep
+5. `retry_delay > retry_after_sec` になれば server-side penalty が解けて成功
+
+**csa-client は `retry_after=<sec>` を honoring しない**ため、`retry_delay` が
+`retry_after_sec` を上回るまで penalty 中の retry が繰り返される。
+
+##### 影響量の評価
+
+- 試行回数: `log2(max_delay_sec / initial_delay_sec)` 程度 (初期 1s / 上限 60s
+  なら 6 回)
+- 頻度上限: `max_delay_sec` (60s 想定) で固定、kill-server には至らない
+- server 側コスト: 各 retry が rate limiter penalty を延長する可能性あり
+  (実装次第。Q2-A の Cloudflare Rate Limiting binding は sliding window 自動
+  更新なので penalty 延長は起きない)
+- production への実害: bounded だが運用観測上 **suboptimal** (Floodgate grade
+  には不適切、Sentry / 観測ダッシュボードに retry エラーが量産される)
 
 #### 結論
 
-- **Q4-A 採択は安全**。csa-client 側に retry loop 発生のリスクなし、`rate_limited`
-  トークンを区別する必要なし
-- 外部 Floodgate 互換 native client (本リポ外) は通常 `/ws/<room_id>` (LOGIN) で
-  接続するため `LOGIN_LOBBY:incorrect` プレフィックス自体に出会わない。LOGIN 経路で
-  `LOGIN:incorrect rate_limited retry_after=<sec>` を返すのは TCP server が既に
-  precedent を持っているので互換性問題なし
-- 副次改善案 (本 PR 範囲外、follow-up): csa-client 側で `retry_after=<sec>` を
-  parse してログを「`X 秒待ってから再試行`」形式で出す。UX 改善のみで security 影響なし
+**Q4-A は採択可能だが、csa-client 側で `retry_after=<sec>` honoring を行う
+follow-up が必要**。
+
+- 即座の breakage / kill-server リスクはなし → PR3a 着手 blocker ではない
+- ただし production 投入前に follow-up issue で csa-client の retry 戦略を改善
+  しておく方が望ましい (rate_limit error メッセージから `retry_after_sec` を
+  parse → `retry_delay = max(retry_after_sec, retry_delay)` を設定)
+- Q4-B (silent close) や Q4-C (専用 close code) に切り替えても、csa-client は
+  接続エラーで同様の retry loop を起こすため緩和にならない (= Q4 切替で
+  解決しない問題)
+- 外部 Floodgate 互換 native client (本リポ外) は実装ごとに retry 戦略が
+  異なるため挙動を保証できないが、`LOGIN:incorrect rate_limited retry_after=`
+  format は TCP server で既に運用中で実害報告なし
+
+#### follow-up 起票
+
+本 PR merge 時に以下を別 issue として起票:
+
+- `feat(csa-client): rate_limit error の retry_after=<sec> を honoring する`
+  - main.rs:282-294 / 342-353 の Err arm で error メッセージを正規表現等で
+    parse し、`retry_after_sec` 秒以上 sleep するよう `retry_delay` を上書き
+  - test: mock server で `LOGIN_LOBBY:incorrect rate_limited retry_after=5`
+    を返したとき、次の retry が 5 秒以上待つこと
 
 ## 7. 関連
 
