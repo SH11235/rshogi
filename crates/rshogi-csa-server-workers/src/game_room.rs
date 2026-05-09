@@ -926,30 +926,41 @@ impl GameRoom {
             }
         };
 
-        // Playing 開始を確定できた瞬間だけ cfg を更新（冪等）。
-        if let HandleOutcome::GameStarted = result.outcome {
-            self.mark_play_started(now).await?;
+        // outcome 別の永続化 + alarm + broadcast 順序 (Issue #597)。
+        //
+        // - `GameStarted` / `MoveAccepted`: 新 turn alarm の予約と
+        //   `clear_agree_timeout_tag` を **broadcast より前** に行う。broadcast 失敗で
+        //   `?` 伝播した場合でも alarm が turn budget に再予約済となり、既存の
+        //   `AgreeTimeout` alarm がそのまま発火して `handle_agree_timeout_alarm` の
+        //   `play_started_at_ms.is_some()` ガードで「タグ削除のみ」して return する
+        //   (turn alarm が二度と貼られない) 経路を回避する。
+        // - `GameEnded`: `reschedule_turn_alarm(GameEnded)` は `delete_alarm` のみ。
+        //   broadcast より先に削除すると、broadcast 失敗で `?` 伝播した時に
+        //   alarm 駆動の recovery (`finalize_if_ended` 経路) も失われ、`KEY_FINISHED`
+        //   未設定 / R2 export 未実行 / live-games-index 残留の状態で対局が
+        //   宙吊りになる。broadcast → alarm cleanup → `finalize_if_ended` の
+        //   旧順序を維持して既存 alarm 発火経路の recovery を温存する。
+        // - `Continue`: alarm 変更は不要 (旧順序維持)。
+        match &result.outcome {
+            HandleOutcome::GameStarted => {
+                self.mark_play_started(now).await?;
+                self.reschedule_turn_alarm(&result.outcome).await?;
+                // AGREE 待ち TTL タグの片付けは新 turn alarm 設定後に行う。先に
+                // タグを消すと「kind=None かつ alarm=AgreeTimeout 当時の発火時刻」の
+                // 中間状態をコード順序として作ることになる。
+                self.clear_agree_timeout_tag().await;
+                self.dispatch_broadcasts(&result.broadcasts).await?;
+            }
+            HandleOutcome::MoveAccepted { .. } => {
+                self.append_move(color, line, now).await?;
+                self.reschedule_turn_alarm(&result.outcome).await?;
+                self.dispatch_broadcasts(&result.broadcasts).await?;
+            }
+            HandleOutcome::GameEnded(_) | HandleOutcome::Continue => {
+                self.dispatch_broadcasts(&result.broadcasts).await?;
+                self.reschedule_turn_alarm(&result.outcome).await?;
+            }
         }
-
-        // 着手を永続化。MoveAccepted の場合のみ moves テーブルに append する。
-        if let HandleOutcome::MoveAccepted { .. } = result.outcome {
-            self.append_move(color, line, now).await?;
-        }
-
-        // alarm 関連の更新は `dispatch_broadcasts` より前に済ませる (Issue #597)。
-        // broadcast 失敗で `?` 伝播すると後続の alarm 再予約も `clear_agree_timeout_tag`
-        // も走らなくなるため、`GameStarted` で broadcast 失敗した経路では既存の
-        // `AgreeTimeout` alarm が残ったまま発火し、`handle_agree_timeout_alarm` の
-        // `play_started_at_ms.is_some()` ガードで「タグ削除のみ」して return する
-        // (turn alarm が二度と貼られない) 経路が成立してしまう。
-        self.reschedule_turn_alarm(&result.outcome).await?;
-        // AGREE 待ち TTL タグの片付けは新 turn alarm 設定後に行う。先にタグを
-        // 消すと「kind=None かつ alarm=AgreeTimeout 当時の発火時刻」の中間状態を
-        // コード順序として作ることになるため、alarm 上書き完了後に delete する。
-        if let HandleOutcome::GameStarted = result.outcome {
-            self.clear_agree_timeout_tag().await;
-        }
-        self.dispatch_broadcasts(&result.broadcasts).await?;
         self.finalize_if_ended(&result).await?;
         Ok(())
     }
@@ -2679,21 +2690,23 @@ impl GameRoom {
         let (alarm_kind, should_set_grace) =
             classify_alarm_after_enter_grace(existing_alarm, grace_deadline_ms);
 
-        // `KEY_GRACE_REGISTRY` と `KEY_PENDING_ALARM_KIND` を順次 put する
+        // `KEY_PENDING_ALARM_KIND` → `KEY_GRACE_REGISTRY` の順で put する
         // (Issue #597 隣接懸念 2)。`put_multiple` を使うとローカル struct の
         // `#[serde(rename = "...")]` が各定数と一致する暗黙契約になり、定数を
         // rename した際に silent failure となるリスクがあるため、定数を直接
         // `put` に渡す形に分解する。
+        //
         // 2 回の awaited put は単一 transaction ではないため、DO crash 等で
-        // 中間状態 (registry 有 / kind 無、または逆) が persist する可能性は残る。
-        // ただし `handle_grace_expired_alarm` は registry 不在時に
-        // `delete_grace_alarm_state` で tag を片付ける fallback を持つため、
-        // alarm 経路で発火した場合の整合性は recovery で吸収される。
-        // 再接続経路 (`handle_reconnect_request`) は registry 不在時に
-        // `LOGIN:incorrect reconnect_rejected` で拒否するのみで tag は触らない
-        // (= alarm 発火を待って `handle_grace_expired_alarm` が cleanup する)。
-        self.state.storage().put(KEY_GRACE_REGISTRY, &pending).await?;
+        // 中間状態が persist し得る。順序を「kind 先 → registry 後」と固定する
+        // ことで、中間状態は常に `kind=GraceExpired/TimeUp かつ registry=None`
+        // のみとなる。alarm 発火時は `handle_grace_expired_alarm` が registry
+        // 不在を検出して `delete_grace_alarm_state` で kind を片付け、`Ok` で
+        // return するため、orphan が残らない。逆順 (registry 先) だと「registry
+        // 有 / kind 無」状態が起こり得て、`alarm()` が kind=None を TimeUp と
+        // 解釈し `force_time_up` を走らせる経路が成立するため、この順序固定は
+        // 防御として効く。
         self.state.storage().put(KEY_PENDING_ALARM_KIND, &alarm_kind).await?;
+        self.state.storage().put(KEY_GRACE_REGISTRY, &pending).await?;
         if should_set_grace {
             let delay = grace_deadline_ms.saturating_sub(now_ms).saturating_add(ALARM_SAFETY_MS);
             self.state.storage().set_alarm(Duration::from_millis(delay)).await?;
