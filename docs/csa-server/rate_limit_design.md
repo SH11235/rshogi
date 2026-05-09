@@ -239,11 +239,19 @@ soft cap warning にのみ使う。以下を明示する:
 
 ### 5.1 Pre-PR3a checklist
 
-- [ ] **Q5 互換性確認**: `crates/rshogi-csa-client` と
-  `crates/rshogi-csa-server-tcp` で `LOGIN_LOBBY:incorrect <reason>` パーサ実装を
-  grep し、`rate_limited` トークン受信時の挙動 (自動 retry / エラー表示) を確認
-- [ ] **Q1 確定**: production Cloudflare 契約で WAF Rate Limiting Rules / Workers
-  Rate Limiting binding が利用可能か user 確認
+- [x] **Q5 互換性確認** (2026-05-10 確認済): `crates/rshogi-csa-client` と
+  `crates/rshogi-csa-server-tcp` で `LOGIN(_LOBBY):incorrect <reason>` パーサ実装を
+  grep し、`rate_limited` トークン受信時の挙動を確認した (詳細: §6.1)。
+  - csa-client (LOGIN / LOGIN_LOBBY 両経路) は `bail!` で fatal exit、
+    自動 retry なし → loop リスクなし
+  - 既存 `<reason>` トークンの内容は client 側で評価していない (prefix 判定のみ)
+  - TCP server 側に `LOGIN:incorrect rate_limited retry_after=<sec>` precedent あり
+    ([`crates/rshogi-csa-server-tcp/src/server.rs::handle_connection`](../../crates/rshogi-csa-server-tcp/src/server.rs)、
+    test [`tests/tcp_session.rs::login_rate_limit_denies_burst`](../../crates/rshogi-csa-server-tcp/tests/tcp_session.rs))
+  - **Q4-A の `rate_limited retry_after=<sec>` を採択確定**。Q4-B/Q4-C への切替は不要
+- [ ] **Q1 確定**: IaC ロードマップ [#675](https://github.com/SH11235/rshogi/issues/675) Phase 3
+  との合流で **Q1-A (IaC for WAF)** に確定見込み。production Cloudflare 契約で
+  Rate Limiting Rules が利用可能か user 確認
 - [ ] **Q2 確定**: Workers Rate Limiting binding が使えなければ Q2-B (専用 DO) に
   降格する判断
 
@@ -289,7 +297,75 @@ soft cap warning にのみ使う。以下を明示する:
 - [ ] staging E2E: 大量 LOGIN flood 試験で全マッチング停止が回避されることを観測
 - [ ] runbook (`docs/csa-server/rate_limit.md`) で WAF dashboard 手順 + env tuning gradient を doc 化
 
-## 6. 関連
+## 6. 補足調査結果
+
+### 6.1 Q5 client 互換性 grep (2026-05-10 実施)
+
+`Q4-A` (`LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`) を本リポ内 client 群に
+送信したときの挙動を grep で確認した結果。
+
+#### TCP server (`rshogi-csa-server-tcp`)
+
+`LOGIN:incorrect rate_limited retry_after=<sec>` を **既に実装済み**:
+
+- [`src/rate_limit.rs::IpLoginRateLimiter`](../../crates/rshogi-csa-server-tcp/src/rate_limit.rs):
+  per-IP 1 分窓カウンタ、超過時 `RateDecision::Deny { retry_after_sec }`
+- [`src/server.rs::handle_connection`](../../crates/rshogi-csa-server-tcp/src/server.rs)
+  (line 1088-1100 付近): 既定 10 trial/分、超過時に `LOGIN:incorrect rate_limited
+  retry_after={retry_after_sec}` 行を送って `return`
+- [`tests/tcp_session.rs::login_rate_limit_denies_burst`](../../crates/rshogi-csa-server-tcp/tests/tcp_session.rs):
+  12 連続 LOGIN で 11 回目以降に `LOGIN:incorrect rate_limited` が返ることを assert
+
+→ Workers 側で同 format を採用すれば TCP との挙動整合が取れる。precedent が確立済。
+
+#### csa-client (`rshogi-csa-client`)
+
+LOGIN (game room / TCP 経路): [`src/protocol.rs::login`](../../crates/rshogi-csa-client/src/protocol.rs) line 125-141:
+
+```rust
+if is_login_ok(&response) {
+    log::info!("[CSA] ログイン成功: {id}");
+    Ok(())
+} else {
+    bail!("ログイン失敗: {response}");  // ← 任意の <reason> を含めて fatal exit
+}
+```
+
+- `is_login_ok` は `LOGIN:` prefix + ` OK` suffix のセット判定 ([line 594])
+- `<reason>` トークン (`unknown_game_name` / `already_logged_in` /
+  `rate_limited retry_after=10` 等) を区別せず、**全ケースで `bail!`**
+- **自動 retry なし** → `rate_limited` 受信で client が retry loop に入るリスクなし
+
+LOGIN_LOBBY (Workers lobby 経路): [`src/main.rs:577-631`](../../crates/rshogi-csa-client/src/main.rs):
+
+```rust
+if let Some(rest) = line.strip_prefix("LOGIN_LOBBY:") {
+    if rest.ends_with(" OK") { /* MATCHED 待機 */ continue; }
+    if rest.starts_with("incorrect") {
+        bail!("[Lobby] LOGIN_LOBBY 拒否: {rest}");
+    }
+    if rest == "expired" { bail!(...); }
+}
+// 未知 line は log::debug! で無視 (continue)
+```
+
+- `LOGIN_LOBBY:incorrect <reason>` は `<reason>` の中身を見ず一律 `bail!`
+- 未知 prefix は debug log で無視するが、`incorrect` 系で `<reason>` を増やしても
+  fatal exit のまま動く
+- **自動 retry なし**
+
+#### 結論
+
+- **Q4-A 採択は安全**。csa-client 側に retry loop 発生のリスクなし、`rate_limited`
+  トークンを区別する必要なし
+- 外部 Floodgate 互換 native client (本リポ外) は通常 `/ws/<room_id>` (LOGIN) で
+  接続するため `LOGIN_LOBBY:incorrect` プレフィックス自体に出会わない。LOGIN 経路で
+  `LOGIN:incorrect rate_limited retry_after=<sec>` を返すのは TCP server が既に
+  precedent を持っているので互換性問題なし
+- 副次改善案 (本 PR 範囲外、follow-up): csa-client 側で `retry_after=<sec>` を
+  parse してログを「`X 秒待ってから再試行`」形式で出す。UX 改善のみで security 影響なし
+
+## 7. 関連
 
 - 親 issue: [#622](https://github.com/SH11235/rshogi/issues/622)
 - 並走 (Session A 同パッケージ):
