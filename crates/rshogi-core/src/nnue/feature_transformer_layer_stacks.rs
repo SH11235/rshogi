@@ -241,7 +241,8 @@ fn psqt_add_or_sub<const ADD: bool>(
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
         // SAFETY: v128 i32x4 load/store は連続 16 bytes。psqt_acc/weights とも 36 bytes
-        // 確保済み。
+        // 確保済み。WASM v128.load/store はアライメントヒントが advisory（非強制）なため、
+        // [i32; 9] の 4 バイトアラインポインタを *const v128 にキャストしても安全。
         unsafe {
             use std::arch::wasm32::*;
             let acc_ptr = psqt_acc.as_mut_ptr();
@@ -273,13 +274,15 @@ fn psqt_add_or_sub<const ADD: bool>(
         all(target_arch = "wasm32", target_feature = "simd128"),
     )))]
     {
-        // SAFETY: weights は 9 i32 連続が保証されている。
-        for bucket in 0..NUM_LAYER_STACK_BUCKETS {
-            let w = unsafe { *weights.add(bucket) };
+        // SAFETY: weights は 9 i32 連続が保証されている。slice 化することで
+        // 以降のループ本体を safe に保つ。
+        let w_slice: &[i32] =
+            unsafe { std::slice::from_raw_parts(weights, NUM_LAYER_STACK_BUCKETS) };
+        for (acc, &w) in psqt_acc.iter_mut().zip(w_slice) {
             if ADD {
-                psqt_acc[bucket] = psqt_acc[bucket].wrapping_add(w);
+                *acc = acc.wrapping_add(w);
             } else {
-                psqt_acc[bucket] = psqt_acc[bucket].wrapping_sub(w);
+                *acc = acc.wrapping_sub(w);
             }
         }
     }
@@ -629,7 +632,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             "psqt_weights index out of bounds: offset={offset}, len={}",
             self.psqt_weights.len()
         );
-        // SAFETY: 同上。weights ポインタは 9 i32 連続を指す。
+        // SAFETY: debug_assert で境界確認済み。release では呼び出し元 (refresh / diff) が
+        // active_indices を経由しており、index は features の有効範囲内。weights ポインタは
+        // 9 i32 連続を指す。
         let weights_ptr = unsafe { self.psqt_weights.as_ptr().add(offset) };
         psqt_add_or_sub::<false>(psqt_acc, weights_ptr);
     }
