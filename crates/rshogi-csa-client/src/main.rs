@@ -25,7 +25,7 @@ use rshogi_csa_client::config::CsaClientConfig;
 use rshogi_csa_client::engine::{SpawnOptions, UsiEngine};
 use rshogi_csa_client::events::SessionOutcome;
 use rshogi_csa_client::jsonl::write_game_jsonl;
-use rshogi_csa_client::protocol::{CsaConnection, GameResult, extract_retry_after_sec};
+use rshogi_csa_client::protocol::{CsaConnection, GameResult, compute_effective_retry_delay};
 use rshogi_csa_client::record::save_record;
 use rshogi_csa_client::session::{run_game_session, run_resumed_session};
 use rshogi_csa_client::transport::{ConnectOpts, TransportTarget};
@@ -194,23 +194,6 @@ struct Cli {
     no_engine_stderr_passthrough_flag: bool,
 }
 
-/// 連続対局ループで `acquire_lobby_match` / `run_one_game` が `Err` を返したときの
-/// 次 sleep 時間を決める。server の `rate_limited retry_after=<sec>` を honoring し、
-/// 既存の指数バックオフ (`retry_delay`) と比べて長い方を採用する。
-///
-/// retry_after を強制 max しない理由: 単発の `retry_after=1` 等で penalty 累積中の
-/// バックオフを巻き戻すと retry storm を再開してしまう。「server が要求する最小
-/// 待機」と「client が決めた指数バックオフ」の両方を満たす最短時間として `max` を取る。
-///
-/// `err_msg` に `retry_after=` トークンが含まれない / 数値 parse 失敗時は
-/// `retry_delay` をそのまま返す。
-fn compute_effective_retry_delay(err_msg: &str, retry_delay: Duration) -> Duration {
-    match extract_retry_after_sec(err_msg) {
-        Some(sec) => Duration::from_secs(sec).max(retry_delay),
-        None => retry_delay,
-    }
-}
-
 /// `delay` が経過するか `shutdown` が立つまで待機する。`shutdown` 検出時は早期に
 /// `false` を返し、呼び出し側はループを抜けるべき (= サーバ指定の長い `retry_after`
 /// を honor する間に Ctrl-C しても即座に終了できる)。
@@ -234,10 +217,32 @@ fn sleep_with_shutdown(delay: Duration, shutdown: &AtomicBool) -> bool {
                 }
                 remaining.min(SHUTDOWN_POLL)
             }
+            // overflow (例: `retry_after=u64::MAX`): deadline を計算できないので
+            // shutdown が立つまで SHUTDOWN_POLL 刻みで polling し続ける。実害は
+            // 低い (server が `u64::MAX` を返す事は無く、shutdown は必ずいずれ立つ)。
             None => SHUTDOWN_POLL,
         };
         std::thread::sleep(sleep_for);
     }
+}
+
+/// retry sleep の log 出力 + `sleep_with_shutdown` の組合わせを 1 か所に集約する。
+/// `acquire_lobby_match` / `run_one_game` の Err arm がそれぞれ同じブロックを
+/// 持つと将来の log フォーマット変更で片方の修正が漏れるため、helper 化している。
+///
+/// 戻り値は `sleep_with_shutdown` をそのまま転送し、`false` のとき呼び出し側は
+/// 連続対局ループを抜けるべき。
+fn sleep_retry(effective: Duration, backoff: Duration, shutdown: &AtomicBool) -> bool {
+    if effective > backoff {
+        log::warn!(
+            "サーバから retry_after を受信。{}秒後にリトライ (バックオフ {}秒を上書き)...",
+            effective.as_secs(),
+            backoff.as_secs()
+        );
+    } else {
+        log::info!("{}秒後にリトライ...", effective.as_secs());
+    }
+    sleep_with_shutdown(effective, shutdown)
 }
 
 /// CLI で `--engine-stderr-passthrough` / `--no-engine-stderr-passthrough` のいずれかが
@@ -334,16 +339,7 @@ fn main() -> Result<()> {
                         break;
                     }
                     let effective = compute_effective_retry_delay(&e.to_string(), retry_delay);
-                    if effective > retry_delay {
-                        log::warn!(
-                            "サーバから retry_after を受信。{}秒後にリトライ (バックオフ {}秒を上書き)...",
-                            effective.as_secs(),
-                            retry_delay.as_secs()
-                        );
-                    } else {
-                        log::info!("{}秒後にリトライ...", effective.as_secs());
-                    }
-                    if !sleep_with_shutdown(effective, &shutdown) {
+                    if !sleep_retry(effective, retry_delay, &shutdown) {
                         break;
                     }
                     retry_delay =
@@ -404,16 +400,7 @@ fn main() -> Result<()> {
                 // エラー後はエンジンを再起動（不整合な状態の可能性）
                 engine.quit();
                 let effective = compute_effective_retry_delay(&e.to_string(), retry_delay);
-                if effective > retry_delay {
-                    log::warn!(
-                        "サーバから retry_after を受信。{}秒後にリトライ (バックオフ {}秒を上書き)...",
-                        effective.as_secs(),
-                        retry_delay.as_secs()
-                    );
-                } else {
-                    log::info!("{}秒後にリトライ...", effective.as_secs());
-                }
-                if !sleep_with_shutdown(effective, &shutdown) {
+                if !sleep_retry(effective, retry_delay, &shutdown) {
                     break;
                 }
                 retry_delay =
@@ -1222,57 +1209,9 @@ mod tests {
     }
 
     // ───────────────────────────────────────────────
-    // `compute_effective_retry_delay` の挙動を pin する。retry_after は
-    // 「server が要求する最小待機」、retry_delay は「client の指数バックオフ」で、
-    // 両方を満たす最短時間として max を取る契約 (#682)。
-    // ───────────────────────────────────────────────
-
-    #[test]
-    fn compute_effective_retry_delay_uses_retry_after_when_longer() {
-        // server の retry_after=10 がバックオフ 2s より長いので 10s が採用される。
-        let actual = compute_effective_retry_delay(
-            "[Lobby] LOGIN_LOBBY 拒否: incorrect rate_limited retry_after=10",
-            Duration::from_secs(2),
-        );
-        assert_eq!(actual, Duration::from_secs(10));
-    }
-
-    #[test]
-    fn compute_effective_retry_delay_keeps_backoff_when_longer() {
-        // 既存の指数バックオフ 60s が server 指定 5s より長いケース。バックオフを
-        // 維持して storm を抑える契約。
-        let actual = compute_effective_retry_delay(
-            "ログイン失敗: LOGIN:incorrect rate_limited retry_after=5",
-            Duration::from_secs(60),
-        );
-        assert_eq!(actual, Duration::from_secs(60));
-    }
-
-    #[test]
-    fn compute_effective_retry_delay_falls_back_when_no_token() {
-        // retry_after を含まない error msg では retry_delay をそのまま返す
-        // (= 既存挙動を温存)。
-        let actual = compute_effective_retry_delay(
-            "対局エラー: connection reset by peer",
-            Duration::from_secs(8),
-        );
-        assert_eq!(actual, Duration::from_secs(8));
-    }
-
-    #[test]
-    fn compute_effective_retry_delay_handles_zero() {
-        // retry_after=0 は 0s を返し、retry_delay が 0 でなければ retry_delay が
-        // 採用される (max).
-        let actual = compute_effective_retry_delay(
-            "LOGIN_LOBBY:incorrect rate_limited retry_after=0",
-            Duration::from_secs(3),
-        );
-        assert_eq!(actual, Duration::from_secs(3));
-    }
-
-    // ───────────────────────────────────────────────
     // `sleep_with_shutdown` の挙動を pin する。retry_after で長時間 sleep する間も
     // Ctrl-C (= shutdown 立ち) を即座に観測して loop を抜けられる契約 (#682 follow-up)。
+    // `compute_effective_retry_delay` の test は protocol.rs 側に集約。
     // ───────────────────────────────────────────────
 
     #[test]

@@ -619,13 +619,24 @@ fn is_login_ok(response: &str) -> bool {
 /// assert_eq!(extract_retry_after_sec("LOGIN:incorrect unknown_game_name"), None);
 /// ```
 pub fn extract_retry_after_sec(err_msg: &str) -> Option<u64> {
-    err_msg
-        .split("retry_after=")
-        .nth(1)?
-        .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
-        .next()?
-        .parse()
-        .ok()
+    err_msg.split("retry_after=").nth(1)?.split_whitespace().next()?.parse().ok()
+}
+
+/// 連続対局ループで `Err` を受けたときに採用する次 sleep 時間を決める。
+/// server の `rate_limited retry_after=<sec>` (extract_retry_after_sec で抽出) を
+/// honoring し、既存の指数バックオフ (`retry_delay`) と比べて長い方を採用する。
+///
+/// retry_after を強制 max しない理由: 単発の `retry_after=1` 等で penalty 累積中の
+/// バックオフを巻き戻すと retry storm を再開してしまう。「server が要求する最小
+/// 待機」と「client が決めた指数バックオフ」の両方を満たす最短時間として `max` を取る。
+///
+/// `err_msg` に `retry_after=` トークンが含まれない / 数値 parse 失敗時は
+/// `retry_delay` をそのまま返す。
+pub fn compute_effective_retry_delay(err_msg: &str, retry_delay: Duration) -> Duration {
+    match extract_retry_after_sec(err_msg) {
+        Some(sec) => Duration::from_secs(sec).max(retry_delay),
+        None => retry_delay,
+    }
 }
 
 #[cfg(test)]
@@ -694,5 +705,54 @@ mod tests {
     fn extract_retry_after_sec_handles_zero() {
         // 0 秒も valid な値として通す (server が即時 retry を許可するケース)。
         assert_eq!(extract_retry_after_sec("LOGIN:incorrect rate_limited retry_after=0"), Some(0));
+    }
+
+    // ───────────────────────────────────────────────
+    // `compute_effective_retry_delay` の挙動を pin する。retry_after は
+    // 「server が要求する最小待機」、retry_delay は「client の指数バックオフ」で、
+    // 両方を満たす最短時間として max を取る契約 (#682)。
+    // ───────────────────────────────────────────────
+
+    #[test]
+    fn compute_effective_retry_delay_uses_retry_after_when_longer() {
+        // server の retry_after=10 がバックオフ 2s より長いので 10s が採用される。
+        let actual = compute_effective_retry_delay(
+            "[Lobby] LOGIN_LOBBY 拒否: incorrect rate_limited retry_after=10",
+            Duration::from_secs(2),
+        );
+        assert_eq!(actual, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn compute_effective_retry_delay_keeps_backoff_when_longer() {
+        // 既存の指数バックオフ 60s が server 指定 5s より長いケース。バックオフを
+        // 維持して storm を抑える契約。
+        let actual = compute_effective_retry_delay(
+            "ログイン失敗: LOGIN:incorrect rate_limited retry_after=5",
+            Duration::from_secs(60),
+        );
+        assert_eq!(actual, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn compute_effective_retry_delay_falls_back_when_no_token() {
+        // retry_after を含まない error msg では retry_delay をそのまま返す
+        // (= 既存挙動を温存)。
+        let actual = compute_effective_retry_delay(
+            "対局エラー: connection reset by peer",
+            Duration::from_secs(8),
+        );
+        assert_eq!(actual, Duration::from_secs(8));
+    }
+
+    #[test]
+    fn compute_effective_retry_delay_handles_zero() {
+        // retry_after=0 は 0s を返し、retry_delay が 0 でなければ retry_delay が
+        // 採用される (max).
+        let actual = compute_effective_retry_delay(
+            "LOGIN_LOBBY:incorrect rate_limited retry_after=0",
+            Duration::from_secs(3),
+        );
+        assert_eq!(actual, Duration::from_secs(3));
     }
 }

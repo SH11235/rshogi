@@ -7,12 +7,11 @@
 //! 1. server の raw 応答が `protocol::login` の `bail!("ログイン失敗: {response}")`
 //!    を経て `anyhow::Error` の display 文字列に乗っても、
 //!    `extract_retry_after_sec` が `<sec>` を抽出できること (round-trip)。
-//! 2. 抽出された `<sec>` を `compute_effective_retry_delay` 相当のロジック
-//!    (= `Duration::from_secs(sec).max(retry_delay)`) に流すと、次 sleep が
-//!    `<sec>` 秒以上になること。
+//! 2. 同 Err msg を `compute_effective_retry_delay` (lib pub fn) に流すと、次
+//!    sleep が `<sec>` 秒以上になること。
 //!
 //! 実 sleep 時間そのものを計測する test は flaky になりがちなので避けている。
-//! main loop の sleep 配線そのものは `src/main.rs` の `compute_effective_retry_delay`
+//! main loop の sleep 配線そのものは `src/main.rs` の `sleep_with_shutdown`
 //! unit test で pin している。
 
 use std::io::{BufRead, BufReader, Write};
@@ -20,7 +19,9 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 
-use rshogi_csa_client::protocol::{CsaConnection, extract_retry_after_sec};
+use rshogi_csa_client::protocol::{
+    CsaConnection, compute_effective_retry_delay, extract_retry_after_sec,
+};
 
 /// 1 接続を受け取り、与えた `handler` を別スレッドで実行する mock CSA TCP サーバ。
 /// `csa_reconnect_protocol.rs` と同じ pattern。
@@ -55,17 +56,6 @@ fn write_lines(writer: &mut std::net::TcpStream, lines: &[&str]) {
         writeln!(writer, "{}", line).expect("write line");
     }
     writer.flush().expect("flush");
-}
-
-/// `compute_effective_retry_delay` (main.rs 内) と同じ計算式。crate root から
-/// 直接呼べないため integration test 側で再実装する。仕様変更時は両者を同時に
-/// 更新する必要がある契約を pin するため、helper を `pub` にせず integration
-/// test 側で再実装している (= 仕様の二重 pin)。
-fn effective_delay(err_msg: &str, retry_delay: Duration) -> Duration {
-    match extract_retry_after_sec(err_msg) {
-        Some(sec) => Duration::from_secs(sec).max(retry_delay),
-        None => retry_delay,
-    }
 }
 
 #[test]
@@ -103,7 +93,7 @@ fn login_rate_limited_effective_delay_respects_retry_after() {
 
     let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
     let err = conn.login("alice", "pw").expect_err("expected rate_limited");
-    let actual = effective_delay(&err.to_string(), Duration::from_secs(1));
+    let actual = compute_effective_retry_delay(&err.to_string(), Duration::from_secs(1));
 
     assert!(
         actual >= Duration::from_secs(5),
@@ -123,7 +113,7 @@ fn login_rate_limited_keeps_backoff_when_longer() {
 
     let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
     let err = conn.login("alice", "pw").expect_err("expected rate_limited");
-    let actual = effective_delay(&err.to_string(), Duration::from_secs(60));
+    let actual = compute_effective_retry_delay(&err.to_string(), Duration::from_secs(60));
 
     assert_eq!(actual, Duration::from_secs(60));
 }
@@ -139,7 +129,7 @@ fn login_non_rate_limited_falls_back_to_backoff() {
 
     let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
     let err = conn.login("alice", "pw").expect_err("expected login failure");
-    let actual = effective_delay(&err.to_string(), Duration::from_secs(4));
+    let actual = compute_effective_retry_delay(&err.to_string(), Duration::from_secs(4));
 
     assert_eq!(actual, Duration::from_secs(4));
 }
@@ -152,6 +142,6 @@ fn lobby_login_rate_limited_response_round_trips() {
     // あることを pin する (raw transport 経由の round-trip 確認)。
     let lobby_err_msg = "[Lobby] LOGIN_LOBBY 拒否: incorrect rate_limited retry_after=10";
     assert_eq!(extract_retry_after_sec(lobby_err_msg), Some(10));
-    let actual = effective_delay(lobby_err_msg, Duration::from_secs(2));
+    let actual = compute_effective_retry_delay(lobby_err_msg, Duration::from_secs(2));
     assert_eq!(actual, Duration::from_secs(10));
 }
