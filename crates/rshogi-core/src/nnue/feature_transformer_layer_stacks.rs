@@ -851,15 +851,26 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
 
             if reset {
                 count_refresh!();
-                // 玉が移動した場合はキャッシュ経由で refresh
-                self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
-
-                // PSQT はキャッシュ非対象なのでフル再計算
+                // 玉が移動した場合はキャッシュ経由で refresh。
+                // PSQT も Finny Tables (AccCacheEntry) 経由で差分更新する。
                 #[cfg(feature = "nnue-psqt")]
-                if self.has_psqt {
-                    let mut active_indices = IndexList::new();
-                    append_active_indices(pos, perspective, &mut active_indices);
-                    self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
+                {
+                    // 同一 struct の異なるフィールドへの可変参照を同時に渡す。
+                    // accumulation: [..; 2] と psqt_accumulation: [..; 2] は別フィールドなので
+                    // 可変借用は競合しない。
+                    let main_acc = &mut acc.accumulation[p];
+                    let psqt_acc_slot = &mut acc.psqt_accumulation[p];
+                    self.refresh_perspective_with_cache(
+                        pos,
+                        perspective,
+                        main_acc,
+                        psqt_acc_slot,
+                        cache,
+                    );
+                }
+                #[cfg(not(feature = "nnue-psqt"))]
+                {
+                    self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
                 }
             } else {
                 count_update!();
@@ -977,14 +988,22 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         for perspective in [Color::Black, Color::White] {
             count_refresh!();
             let p = perspective as usize;
-            self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
-
-            // PSQT はキャッシュ非対象なのでフル再計算
+            // PSQT も Finny Tables (AccCacheEntry) 経由で差分更新する。
             #[cfg(feature = "nnue-psqt")]
-            if self.has_psqt {
-                let mut active_indices = IndexList::new();
-                append_active_indices(pos, perspective, &mut active_indices);
-                self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
+            {
+                let main_acc = &mut acc.accumulation[p];
+                let psqt_acc_slot = &mut acc.psqt_accumulation[p];
+                self.refresh_perspective_with_cache(
+                    pos,
+                    perspective,
+                    main_acc,
+                    psqt_acc_slot,
+                    cache,
+                );
+            }
+            #[cfg(not(feature = "nnue-psqt"))]
+            {
+                self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
             }
 
             // Threat はキャッシュ非対象なのでフル再計算
@@ -1008,11 +1027,16 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     /// 現在の `PieceList` を直接 cache に渡し、cache 内で slot-wise 差分
     /// を取って add/sub を適用する。`append_active_indices` + `sort_unstable`
     /// のオーバーヘッドを回避する。
+    ///
+    /// `nnue-psqt` 有効かつ `has_psqt == true` の場合は PSQT acc も
+    /// 同時に cache 経由で差分更新する（Finny Tables に PSQT を載せる経路）。
+    #[allow(clippy::too_many_arguments)]
     fn refresh_perspective_with_cache(
         &self,
         pos: &Position,
         perspective: Color,
         accumulation: &mut [i16; L1],
+        #[cfg(feature = "nnue-psqt")] psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
         cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
         let king_sq = pos.king_square(perspective);
@@ -1024,6 +1048,25 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         } else {
             pos.piece_list().piece_list_fw()
         };
+
+        #[cfg(feature = "nnue-psqt")]
+        if self.has_psqt {
+            cache.refresh_or_cache_with_psqt(
+                king_sq,
+                perspective,
+                piece_list,
+                &self.biases.0,
+                &self.psqt_biases,
+                accumulation,
+                psqt_acc,
+                move |bp| halfka_index(kb, pack_bonapiece(bp, hm)),
+                |acc, idx| self.add_weights(acc, idx),
+                |acc, idx| self.sub_weights(acc, idx),
+                |pacc, idx| self.add_psqt_weights(pacc, idx),
+                |pacc, idx| self.sub_psqt_weights(pacc, idx),
+            );
+            return;
+        }
 
         cache.refresh_or_cache(
             king_sq,
