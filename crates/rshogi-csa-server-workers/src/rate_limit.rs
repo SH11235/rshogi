@@ -69,19 +69,6 @@ impl RateLimitKind {
             Self::WsRoomUpgradePerIp => "ws_upgrade_ip",
         }
     }
-
-    /// `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>` 等の error reason
-    /// に埋める短い識別子。`LOGIN_LOBBY` / `CHALLENGE_LOBBY` の 1 行返却で client
-    /// 側が `<reason>` を区別できるよう付与する。`Retry-After` ヘッダとは別軸。
-    pub const fn reason_tag(self) -> &'static str {
-        match self {
-            Self::LobbyLoginPerIp | Self::WsRoomUpgradePerIp | Self::RoomCreatePerIp => {
-                "rate_limited"
-            }
-            Self::LobbyLoginPerHandle => "rate_limited",
-            Self::LobbyChallengePerIp | Self::LobbyChallengePerInviter => "rate_limited",
-        }
-    }
 }
 
 /// `ConfigKeys::*_RATE_PER_*_PER_MIN` から解決した 6 個の閾値。
@@ -237,8 +224,11 @@ impl TokenBucketState {
     /// refill rate = `capacity / 60` token/sec (= 60 秒で 1 capacity 分回復)。
     /// `tokens` は `capacity` で clamp する。
     ///
-    /// `now_ms < last_refill_ms` (時刻巻き戻り、isolate 移動時に観測しうる) では
-    /// refill を行わず `last_refill_ms = now_ms` だけ更新する (= 過剰 refill を防ぐ)。
+    /// `now_ms <= last_refill_ms` (時刻巻き戻り、isolate 移動時に観測しうる、
+    /// および同 ms 内連続 check) では refill を行わず `last_refill_ms = now_ms` だけ
+    /// 更新する (= 過剰 refill を防ぐ。等値時は `elapsed_ms = 0` で分岐しなくても
+    /// 結果は変わらないが、`> 0` 経路に統一して算術 overflow / 浮動小数誤差の
+    /// 余地を排除する)。
     pub fn refill(&mut self, capacity: u32, now_ms: u64) {
         if capacity == 0 {
             // capacity = 0 は env 解決時に fallback で弾いているはずだが、防御的に
@@ -458,10 +448,31 @@ impl DurableObject for RateLimiter {
         let now_ms = Date::now().as_millis();
 
         // lazy load。1 instance 1 回目だけ storage round-trip。
+        // `get` の戻り値を 3 経路で扱い、`Err` (transient storage 障害) は
+        // **fail-closed** に倒す:
+        // - `Ok(Some(state))` → 既存 bucket を復元
+        // - `Ok(None)`        → 真の cold start (= 当該 (kind, identifier) で
+        //                       初めての check)。満タン bucket で初期化して allow
+        //                       経路に乗る
+        // - `Err(_)`          → DO storage 一時障害 / ネットワーク。`Ok(None)` と
+        //                       一緒くたにすると過去残量を失った満タン bucket で
+        //                       allow 連発になり rate limit 緩和の脆弱性になる。
+        //                       fail-closed の deny を返し、in-memory cache も
+        //                       汚さない (次回 fetch で再 `get` を試みる)。
         let mut cell = self.bucket.borrow_mut();
         if cell.is_none() {
             let loaded: Option<TokenBucketState> =
-                self.state.storage().get(KEY_BUCKET).await.ok().flatten();
+                match self.state.storage().get::<TokenBucketState>(KEY_BUCKET).await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        // cell は触らずに deny を返して終了。次の fetch で再 lazy-load
+                        // を試みる (transient なら回復、永続障害なら毎回 deny で
+                        // safety を保つ)。
+                        let decision =
+                            RateLimitDecision::deny(FAIL_CLOSED_MISSING_IP_RETRY_AFTER_SEC);
+                        return response_json(&decision);
+                    }
+                };
             *cell = Some(loaded.unwrap_or_else(|| TokenBucketState::full(capacity, now_ms)));
         }
         let bucket = cell.as_mut().expect("lazy-init above");
@@ -469,7 +480,8 @@ impl DurableObject for RateLimiter {
         let decision = bucket.try_consume(capacity, now_ms);
 
         // persist。in-memory state と storage を一致させる (eviction 対策)。
-        // `put` 失敗は `?` で上位伝播 → caller 側で fail-closed (Err = deny) になる。
+        // `put` 失敗は `?` で上位伝播 → caller (Worker fetch handler) 側で
+        // fail-closed (Err = deny) になる (router / lobby ハンドラで `?` 伝播)。
         self.state.storage().put(KEY_BUCKET, bucket).await?;
 
         response_json(&decision)
@@ -657,16 +669,28 @@ mod tests {
     }
 
     #[test]
-    fn refill_is_no_op_on_clock_rewind() {
-        // `now_ms < last_refill_ms` は isolate 移動等で観測しうる時刻巻き戻り。
-        // refill を行わず last_refill_ms だけ揃え、tokens を勝手に増やさない。
+    fn refill_is_no_op_on_clock_rewind_or_same_ms() {
+        // `now_ms <= last_refill_ms` は isolate 移動等の時刻巻き戻り、または同 ms 内
+        // の連続 check で観測しうる。refill を行わず last_refill_ms だけ揃え、
+        // tokens を勝手に増やさない。
         let mut b = TokenBucketState {
             tokens: 3.0,
             last_refill_ms: 10_000,
         };
-        b.refill(10, 5_000); // 巻き戻り
+        // 巻き戻り (now_ms < last_refill_ms)
+        b.refill(10, 5_000);
         assert_eq!(b.tokens, 3.0);
         assert_eq!(b.last_refill_ms, 5_000);
+
+        // 等値 (now_ms == last_refill_ms): 同 ms 内連続 check で発火する境界。
+        // tokens は触らない。
+        let mut b2 = TokenBucketState {
+            tokens: 3.0,
+            last_refill_ms: 5_000,
+        };
+        b2.refill(10, 5_000);
+        assert_eq!(b2.tokens, 3.0);
+        assert_eq!(b2.last_refill_ms, 5_000);
     }
 
     #[test]
