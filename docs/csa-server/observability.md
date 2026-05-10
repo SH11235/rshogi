@@ -1,219 +1,228 @@
 # rshogi-csa-server-workers Observability Runbook
 
-[Issue #625](https://github.com/SH11235/rshogi/issues/625) で整備する 24/7 無人運用基盤の運用手順。本 doc は **Phase A 完了後の Phase B / C** の運用知識をまとめる。
+[Issue #625](https://github.com/SH11235/rshogi/issues/625) で整備する 24/7 無人運用基盤の運用手順。
 
 - **Phase A** (✅ 完了 [PR #691](https://github.com/SH11235/rshogi/pull/691)): `structured_log!` macro 導入、全 `console_log!` を JSON 化
-- **Phase B** (🚧 declare scaffold は [PR #697](https://github.com/SH11235/rshogi/issues/697) で merge 予定、bootstrap は user manual): Workers Logs → R2 archive + Cloudflare Notifications → Slack webhook
+- **Phase B** (🟡 部分完了 [PR #698](https://github.com/SH11235/rshogi/pull/698) + [PR #700 で本 doc 訂正](https://github.com/SH11235/rshogi/issues/700)): Cloudflare Notifications → Slack webhook 経路は実機検証済 (✅)。Workers Logs → R2 archive 経路は **Workers Free plan で利用不可** が判明し延期 (Paid plan 移行時に再活性化、§7 参照)
 - **Phase C** (✅ 完了 [PR #671](https://github.com/SH11235/rshogi/pull/671) で [#630](https://github.com/SH11235/rshogi/issues/630) と統合): synthetic monitoring
 
-## 1. アーキテクチャ概要
+> **Workers Free plan 制約 (本 doc の前提)**: rshogi-csa-server-workers は 2026-05-10 時点で Workers Free plan で運用しており、`workers_trace_events` dataset の Logpush は API レベルで `code 1004: exceeded max jobs allowed` で reject される (Free plan は 0 job 許可)。本 doc は Free plan 前提で書かれている。Paid plan 移行時は §7 に従って Logpush + R2 archive 経路を再活性化する。
+
+## 1. アーキテクチャ概要 (現状: Free plan)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ Cloudflare Worker (rshogi-csa-server-workers)               │
-│   ↓ structured_log!() macro (Phase A)                       │
-│ Workers Logs (workers_trace_events dataset)                 │
-└────────┬────────────────────────────────────────────────────┘
-         │ Logpush (NDJSON、30 秒 batch)
-         ↓
-┌─────────────────────────────────────────────────────────────┐
-│ R2 bucket: rshogi-csa-logs-{staging,prod}                   │
-│   - 構造化ログの長期保存 + jq / grep / Cloudflare Workers 経由検索  │
+│   ↓ structured_log!() macro (Phase A、JSON 形式)              │
+│ Workers console output (短期、wrangler tail で観察可能)        │
 └─────────────────────────────────────────────────────────────┘
+         (現状は archive 経路なし、wrangler tail で real-time のみ)
 
 ┌─────────────────────────────────────────────────────────────┐
 │ Cloudflare Notifications (account-level)                    │
-│   - alertType: failing_logpush_job_disabled_alert           │
-│     ↓ webhook (cf-webhook-auth header)                      │
-│   - alertType: dos_attack_l7 (将来追加)                       │
+│   - 配信先 webhook 1 件 (rshogi-staging-alerts) のみ登録済     │
+│   - alert policy は本 PR スコープ外で未追加 (§7.2 参照)         │
 └────────┬────────────────────────────────────────────────────┘
-         │ POST request (Cloudflare-format JSON payload)
+         │ POST request (Cloudflare-format JSON payload、Cloudflare が
+         │ Slack 形式と判別して dispatch する type=slack 設定)
          ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ Slack incoming webhook (rshogi 警報専用 channel)             │
-│   ※ Discord 切替時は translator Worker (別 PR で実装) 経由     │
+│ Slack incoming webhook (rshogi-cloudflare-alerts App)       │
+│   ※ Discord 切替時は translator Worker (別 PR) 経由           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 2. 既存 IaC リソース
+**Paid plan 移行後の追加構成** (§7 で詳細):
 
-| Resource 種別 | 名前 (production) | 名前 (staging) | Pulumi 配置 |
+```
+Workers console output ↓ Logpush (NDJSON、30 秒 batch、enabled flag で gate)
+                       ↓
+                       R2 bucket: rshogi-csa-logs-{staging,prod}
+                       ↓
+                       (任意) NotificationPolicy: failing_logpush_job_disabled_alert
+```
+
+## 2. IaC リソース現状 (2026-05-10 時点)
+
+| Resource 種別 | 名前 (production) | 名前 (staging) | 状態 | Pulumi 配置 |
+|---|---|---|---|---|
+| R2 bucket (logs archive) | `rshogi-csa-logs-prod` | `rshogi-csa-logs-staging` | ✅ 作成済 (Free plan では空、Paid 移行時に Logpush 投入先) | `infra/pulumi/index.ts` |
+| NotificationPolicyWebhooks | (未作成) | `rshogi-staging-alerts` (id `e9e6102c...`) | ✅ staging のみ作成済、Slack 疎通確認済 | `infra/pulumi/index.ts` |
+| LogpushJob | – | – | ❌ Free plan で作成不可、config 投入で declare をスキップ | `infra/pulumi/index.ts` (scaffold 維持) |
+| NotificationPolicy | – | – | ❌ 本 PR スコープ外、別 PR で追加 (§7.2 参照) | `infra/pulumi/index.ts` (scaffold 維持) |
+
+**Pulumi scaffold 設計**: `infra/pulumi/index.ts` の `readOptionalSecret(key)` ヘルパーで「config 値が unset または空文字列なら resource 自体を declare しない」条件分岐を持たせており、Free plan では Logpush 関連 config を投入しないことで自動的にスキップされる。Paid plan 移行時は §7.1 に従って config 投入のみで Logpush + alert を再活性化できる。
+
+## 3. Bootstrap 完了履歴 (Phase B 初回投入、2026-05-10)
+
+> **本節は履歴記録**。再 bootstrap が必要な状況 (新規 Cloudflare アカウントへの移植 / 既存 Pulumi state 喪失 / production stack 追加) でのみ参照する。
+
+### 3.1 完了済ステップ
+
+| # | 作業 | 結果 |
+|---|---|---|
+| 3.1.1 | `pulumi-rshogi-iac` token に `Account: Notifications: Edit` scope 追加 (user manual) | ✅ scope 追加完了。`Account: Logs: Edit` は Free plan で unused だが Paid 移行時に活性化する想定で keep |
+| 3.1.2 | Slack workspace に `rshogi-cloudflare-alerts` App 作成 + Incoming Webhook を target channel に install (user manual) | ✅ Webhook URL 取得済 |
+| 3.1.3 | R2 bucket `rshogi-csa-logs-staging` を Pulumi で create (`pulumi up`) | ✅ bucket 作成済 (空) |
+| 3.1.4 | Pulumi config 投入: `alertWebhookName`, `alertWebhookUrl` (--secret) | ✅ 投入済 |
+| 3.1.5 | `pulumi up` で `NotificationPolicyWebhooks` を create | ✅ id `e9e6102c...`、type=slack で作成 (Cloudflare が URL pattern から Slack 形式を自動検出) |
+| 3.1.6 | Slack 疎通確認 | ✅ Cloudflare からの test message が rshogi-cloudflare-alerts channel に届くこと確認 |
+
+### 3.2 試行したが失敗したステップ (記録)
+
+| # | 作業 | 失敗原因 | 対処 |
 |---|---|---|---|
-| R2 bucket (logs archive) | `rshogi-csa-logs-prod` | `rshogi-csa-logs-staging` | `infra/pulumi/index.ts` (#697 で追加) |
-| LogpushJob | `rshogi-csa-server-workers` | `rshogi-csa-server-workers-staging` | `infra/pulumi/index.ts` (#697 で追加) |
-| NotificationPolicyWebhooks | `rshogi-production-alerts` (default) | `rshogi-staging-alerts` (default) | `infra/pulumi/index.ts` (#697 で追加) |
-| NotificationPolicy (logpush 失敗) | `rshogi-production-logpush-failure` | `rshogi-staging-logpush-failure` | `infra/pulumi/index.ts` (#697 で追加) |
+| 3.2.1 | `LogpushJob` (workers_trace_events dataset) を create | Cloudflare API `code 1004: exceeded max jobs allowed` (Workers Free plan は 0 job 許可) | Logpush 関連 config を `pulumi config rm` で削除して LogpushJob declare 自体をスキップ。Paid 移行時に再活性化 (§7.1) |
+| 3.2.2 | `NotificationPolicy logpushFailureAlert` (alertType=failing_logpush_job_disabled_alert) を create | LogpushJob 不在で alert 対象がない (依存 chain で Pulumi が自動 skip) | Logpush 非依存の alert (Free plan 利用可は `workers_observability_alert` 等、§6 参照) を別 PR で declare |
+| 3.2.3 | `pulumi config set --secret alertWebhookSecret <random>` を投入 | Cloudflare Notifications API が "secret field は URL embedded secret (PagerDuty 形式) との一致検証用、Slack URL には不要" と reject (`malformed request: url formatting error`) | `pulumi config rm alertWebhookSecret` で削除。Slack 直結時は secret 不要、Discord translator Worker 経由時は Worker 内で `cf-webhook-auth` header と独自 HMAC 検証する設計に変更 (§5) |
 
-すべての resource は **Pulumi config secret が空の場合は declare されない** (`config.getSecret(...)` が undefined の時は resource 作成をスキップする条件分岐)。これは bootstrap 中の中途半端な state を構造的に防ぐ設計。
+### 3.3 再 bootstrap 時の手順 (新環境向け)
 
-## 3. Bootstrap 手順 (Phase B 初回投入)
-
-### 3.0 前提
-
-- `infra/pulumi/index.ts` の Phase B scaffold は merge 済 ([PR #697](https://github.com/SH11235/rshogi/issues/697))
-- Cloudflare Account ID (`d5d9818649d8722f73cd798c3b1ffb70`)
-- Pulumi CLI ログイン済 (`pulumi whoami` で確認)
-
-### 3.1 Cloudflare API token に scope 追加 (user manual)
-
-`pulumi-rshogi-iac` token (`iac/docs/cloudflare-api-tokens.md` 参照) に以下 2 scope を追加:
-
-- `Account: Logs: Write` (LogpushJob 作成に必須)
-- `Account: Notifications: Write` (NotificationPolicy / Webhooks 作成に必須)
-
-**手順** (token rotation):
-
-1. CF Dashboard → My Profile → API Tokens → `pulumi-rshogi-iac` → Edit
-2. Permissions に上記 2 行を追加 → Save
-3. **token 値が変わらないので Pulumi config の更新は不要** (CF が token を再発行する操作ではないため)。ただし更新後に `pulumi preview --stack staging` で auth 通ることを確認する
-
-代替案: 既存 token を revoke して新 token を発行 → `pulumi config set --secret cloudflare:apiToken --stack {staging,production}` (引数なしで対話 prompt 経由、§3.4 と同 pattern) で上書き。token 名前を変えたい場合 (例: `pulumi-rshogi-iac-v2`) はこちら。
-
-### 3.2 R2 access key 発行 (Logpush destination 用、user manual)
-
-LogpushJob は `r2://<bucket>/...?access-key-id=...&secret-access-key=...` 形式で R2 に書き込む。Pulumi が R2 bucket を declare する権限とは別に、**Logpush 自体が R2 に PUT する権限** が要る:
-
-1. CF Dashboard → R2 → Manage R2 API Tokens → "Create API Token"
-2. **Token name**: `logpush-rshogi-csa-logs` (任意)
-3. **Permissions**: `Object Read & Write`
-4. **Specify buckets**: `rshogi-csa-logs-staging` + `rshogi-csa-logs-prod` の 2 件のみ (Apply to specific buckets only)
-5. **TTL**: 未設定 (年 1 review)
-6. 発行後、画面に表示される `Access Key ID` と `Secret Access Key` を **その場でコピー** (二度と表示されない)
-
-> **既存 wrangler 用 token / Pulumi 用 token を流用しない**: Logpush は R2 への書き込みを reservoir のように継続的に行うため、本 destination から credential が漏れた場合の影響範囲を logs bucket のみに閉じ込める設計とする (least privilege)。
-
-### 3.3 Slack incoming webhook URL 取得 (user manual)
-
-1. Slack workspace で **rshogi 警報専用 channel** を作成 (例: `#rshogi-alerts`、初期は user のみ参加)
-2. https://api.slack.com/apps → "Create New App" → "From scratch" → name `rshogi-cloudflare-alerts` / 上記 workspace を選択
-3. 左サイドバー "Incoming Webhooks" → "Activate Incoming Webhooks" を ON
-4. "Add New Webhook to Workspace" → 上記 channel を選択 → Allow
-5. 表示される `Webhook URL` (`https://hooks.slack.com/services/T.../B.../...`) を **その場でコピー** (再表示は可能だが秘匿管理)
-
-### 3.4 Pulumi config 投入 (staging 先行)
-
-> **重要**: secret 値を **shell 引数で渡さない**。`pulumi config set --secret KEY 'value'` の形式は `~/.bash_history` / `~/.zsh_history` に値が残り、後から `history` / `Ctrl-R` で見える状態になる。`--secret` フラグは Pulumi state 上の暗号化のみで、shell history 漏洩は防がない。
-> 以下では `--secret` フラグのみ指定して **対話 prompt で stdin 入力** する形式 (Pulumi が echo を抑止する) と、**ファイル経由** で渡す形式の 2 通りを示す。
+新規環境で同等構成を作る場合の手順:
 
 ```bash
 cd infra/pulumi
-pulumi stack select staging
+pulumi stack select staging  # or production
 
-# 1. 平文で良い項目 (Cloudflare Notifications dashboard 表示名)
+# 1. R2 bucket を作成 (Free plan でも作成は可能)
+#    declare scaffold は config 投入なしでも bucket だけ create する設計
+pulumi up
+
+# 2. Notifications webhook 作成
+#    平文 (Cloudflare Dashboard 表示名)
 pulumi config set alertWebhookName 'rshogi-staging-alerts'
 
-# 2. secret は --secret のみ指定 (値を引数に置かない) → Pulumi が
-#    "Enter your value:" と prompt し、キー入力は echo されない
+#    secret 値: --secret のみ指定 → 対話 prompt で stdin 入力 (shell history に残らない)
 pulumi config set --secret alertWebhookUrl
-# (Slack webhook URL を貼り付け → Enter)
+# (Slack incoming webhook URL を貼り付け → Enter)
 
-# 3. translator Worker 経由にする場合の HMAC 検証用 random hex
-#    (Slack 直結なら本ステップは省略可、Slack incoming webhook は
-#    cf-webhook-auth header を無視する)
-openssl rand -hex 32 | pulumi config set --secret alertWebhookSecret
-# ↑ pipe 経由なら shell history には pulumi コマンドのみ残り値は残らない
-
-# 4. Logpush destination URL (R2 access key + secret embedded)
-#    URL は長いので /tmp の一時ファイル経由が安全 (作成直後に削除):
-umask 077  # 作成ファイルを 600 で保護
-cat > /tmp/logpush-destconf <<'DESTEOF'
-r2://rshogi-csa-logs-staging/?account-id=<ACCOUNT_ID>&access-key-id=<ACCESS_KEY_ID>&secret-access-key=<SECRET_ACCESS_KEY>
-DESTEOF
-# ↑ <ACCESS_KEY_ID> / <SECRET_ACCESS_KEY> を §3.2 で発行した値で書き換えて保存
-pulumi config set --secret logpushDestinationConf < /tmp/logpush-destconf
-shred -u /tmp/logpush-destconf  # ファイルを上書き削除
-
-# 5. enabled flag は平文 bool (true/false)。初期は両方 false で declare のみ
-pulumi config set logpushEnabled false
-pulumi config set notificationsEnabled false
-
-# preview で 4 種 resource (R2 bucket / LogpushJob / NotificationPolicyWebhooks /
-# NotificationPolicy) が create 予定であることを確認
-pulumi preview
-
-# 実 apply
+# 3. apply で webhook を Cloudflare 上に作成
+pulumi preview  # NotificationPolicyWebhooks 1 件の create を確認
 pulumi up
+
+# 4. Slack 疎通確認
+#    Cloudflare API で webhook 一覧を確認
+ACCOUNT_ID="d5d9818649d8722f73cd798c3b1ffb70"
+TOKEN=$(pulumi config --show-secrets --json | jq -r '.["cloudflare:apiToken"].value')
+curl -sS "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/alerting/v3/destinations/webhooks" \
+  -H "Authorization: Bearer $TOKEN" \
+  | jq '.result | map({id, name, type, last_success, last_failure})'
+
+#    Cloudflare Dashboard で test notification 送信 (or 後述 §3.4 の curl)
 ```
 
-> **shell history が既に汚染した場合**: `history -d <line_number>` で該当行を削除 + `history -c && history -w` で全消去。それでも `--secret` が掛かっているので Pulumi state 上は暗号化済 (Pulumi Cloud 側に平文は無い) だが、shell session 内 history file の上書きは別途必要。secret 値自体の rotation を強く推奨 (R2 access key / Slack webhook URL を再発行)。
+### 3.4 secret 漏洩防止 pattern (重要)
 
-`pulumi up` 直後の状態:
-- ✅ R2 bucket 作成済 (新規 1 件、`protect: true`)
-- ✅ NotificationPolicyWebhooks 作成済 (Cloudflare Notifications dashboard で確認可能)
-- ✅ LogpushJob 作成済だが `enabled: false`
-- ✅ NotificationPolicy 作成済だが `enabled: false`
+`pulumi config set --secret KEY 'value'` の **shell 引数渡しは禁止** (`~/.bash_history` / `~/.zsh_history` に値が残る、`--secret` フラグは Pulumi state 上の暗号化のみで shell history 漏洩は防がない)。
 
-### 3.5 Webhook 疎通確認
+| 投入方法 | 用途 | コマンド例 |
+|---|---|---|
+| **対話 prompt** (stdin、echo 抑止) | 単一の短い値 (URL 等) | `pulumi config set --secret KEY` |
+| **pipe** (生成器から直接) | random 生成値 | `openssl rand -hex 32 \| pulumi config set --secret KEY` |
+| **file redirect** (`< /tmp/file`、削除込み) | 長い multi-line 値 | `umask 077 && cat > /tmp/v && pulumi config set --secret KEY < /tmp/v && shred -u /tmp/v` |
 
-CF Dashboard → Notifications → Destinations → `rshogi-staging-alerts` を選択 → **"Send test notification"** クリック → Slack channel に test メッセージが届けば疎通 OK。
+shell history 既汚染時は: `history -d <line>` + `history -c && history -w` で消去 + secret 値を rotation (発行元で再発行)。
 
-届かない場合のチェックポイント:
-- Slack incoming webhook URL の typo
-- Slack workspace の channel が消えている / Webhook App が disable
-- (translator Worker 経由なら) Worker の URL / HMAC 検証の不一致
+## 4. ログ検索 / 調査運用 (Free plan)
 
-### 3.6 Logpush enable + 1 件目の archive 確認
+### 4.1 リアルタイム tail (現状の主経路)
+
+`wrangler tail` は Cloudflare Workers の console 出力を websocket で stream する。出力は **request invocation 単位の envelope JSON** で:
+
+```json
+{
+  "outcome": "ok",
+  "scriptName": "rshogi-csa-server-workers",
+  "event": { "request": {...}, ... },   ← request metadata (structured_log の event とは別物)
+  "logs": [
+    { "message": ["{\"event\":\"room_join\",\"ts_ms\":...,\"game_id\":\"...\"}"], "level": "log", "timestamp": ... },
+    { "message": ["plain string log"], "level": "log", ... }
+  ],
+  "exceptions": [ ... ]
+}
+```
+
+`structured_log!` macro が出した JSON 文字列は **`logs[].message[]` 配列の要素** として埋め込まれる。**top-level の `event` フィールドは request metadata** であって構造化ログの `event` フィールドではないので、`select(.event != null)` ではフィルタにならない (毎 invocation で truthy になる)。
+
+正しい抽出は §7.1.4 と同じく `fromjson?` で JSON message のみ展開:
 
 ```bash
-pulumi config set logpushEnabled true
-pulumi up
+# 1 行 1 invocation envelope → logs[].message を展開して 1 行 1 structured_log にフラット化
+wrangler tail rshogi-csa-server-workers --format json \
+  | jq -c '.logs[]?.message[]? | fromjson? // empty'
+
+# 特定 event だけフィルタ (例: room_join のみ)
+wrangler tail rshogi-csa-server-workers --format json \
+  | jq -c '.logs[]?.message[]? | fromjson? // empty | select(.event == "room_join")'
+
+# 特定 game_id を時系列で (リアルタイム strem なので "時系列" は到着順)
+wrangler tail rshogi-csa-server-workers --format json \
+  | jq -c '.logs[]?.message[]? | fromjson? // empty | select(.game_id == "<game_id>")'
+
+# staging 側
+wrangler tail rshogi-csa-server-workers-staging --format json \
+  | jq -c '.logs[]?.message[]? | fromjson? // empty'
 ```
 
-- 30 秒以内に Workers Log が R2 bucket に書き込まれ始める
-- 確認: `wrangler r2 object list rshogi-csa-logs-staging` で 1 件以上 NDJSON object が出てくる
-- Cloudflare Dashboard → Analytics & Logs → Logpush → `rshogi-csa-server-workers-staging` job の "Last 24h" success count を確認
+> `fromjson?` (`?` は jq のエラー抑制) で plain string message (panic / 通常 console.log) はスキップされ、`structured_log!` 由来の JSON だけが残る。`// empty` で fromjson 失敗時 (null) を行ごと捨てる。
 
-### 3.7 NotificationPolicy enable
+**制約**: `wrangler tail` は **接続中の event のみ受信** する (過去ログは見えない)。障害発生後の遡及調査には使えない。これが必要な場合は §7.1 で Paid plan に移行して Logpush + R2 archive を有効化する。
+
+### 4.2 Cloudflare Dashboard UI の実態 (2026-05 時点、API fallback 推奨)
+
+Cloudflare 新 UI (`https://dash.cloudflare.com/<account_id>/notifications`) は **「すべての通知 / All Notifications」タブ 1 枚のみ** で、destinations (webhook 一覧) を独立に表示・管理する画面が提供されていない。`/notifications/destinations` URL は `/notifications` に redirect される。
+
+実観測 (2026-05-10):
+
+- 「アカウントの管理 → 通知」ページ表示
+- 左側に「すべての通知」タブのみ
+- 中央エリアに「Cloudflare アカウントの通知を作成します」と「追加」ボタン (= 新規 notification policy 作成 wizard を起動)
+- **destinations 一覧 / webhook 編集 UI は無し**
+- policy 作成 wizard 内で既存 destination から選択 or 新規作成する fluent 経路に集約された
+
+つまり webhook destinations の管理は **policy wizard 内 + API のみ**。standalone destination 編集が必要なら API で直接操作する。
 
 ```bash
-pulumi config set notificationsEnabled true
-pulumi up
+ACCOUNT_ID="d5d9818649d8722f73cd798c3b1ffb70"
+TOKEN=$(pulumi config --show-secrets --json | jq -r '.["cloudflare:apiToken"].value')
+
+# webhook destinations 一覧
+curl -sS "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/alerting/v3/destinations/webhooks" \
+  -H "Authorization: Bearer $TOKEN" | jq '.result | map({id, name, type, last_success, last_failure})'
+
+# notification policies 一覧
+curl -sS "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/alerting/v3/policies" \
+  -H "Authorization: Bearer $TOKEN" | jq '.result | map({id, name, alert_type, enabled})'
+
+# 本 account / plan で使える alertType 一覧 (新 NotificationPolicy 設計時に参照)
+curl -sS "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/alerting/v3/available_alerts" \
+  -H "Authorization: Bearer $TOKEN" \
+  | jq '.result | to_entries | map({category: .key, alerts: (.value | map({type, display_name}))})'
 ```
 
-これで Logpush が連続失敗 (Cloudflare 側 retry 経過後 disable) した時に Slack 警報が飛ぶ状態になる。
+本リポでは **Pulumi で declare → 確認は API call** で完結する運用なので、Dashboard UI の制約は実害なし。
 
-### 3.8 production への展開
+### 4.3 Workers built-in observability (Cloudflare Dashboard、7 日保持)
 
-staging が一通り動作確認できたら、`pulumi stack select production` に切り替えて 3.4 〜 3.7 を繰り返す。本番 R2 bucket は `rshogi-csa-logs-prod`、Logpush job は `rshogi-csa-server-workers`。
+`wrangler.toml` に `[observability]` block を追加すると Cloudflare Dashboard の Workers script 詳細画面で過去 7 日分の log を検索できる (Free plan でも利用可能、本 PR では未設定)。
 
-production の `alertWebhookUrl` は staging と **同一 Slack channel に向けるか別 channel に分けるか** 運用判断 (Phase B 初期は同一 channel + tag で識別する low-tech 案を推奨)。
+将来必要になったら以下を追加:
 
-## 4. ログ検索 / 調査運用
+```toml
+# crates/rshogi-csa-server-workers/wrangler.{production,staging}.toml
+[observability]
+enabled = true
 
-### 4.1 ローカルから R2 archive を引く
-
-Logpush archive (NDJSON) の各行は `workers_trace_events` の **wrapper object** で、`structured_log!` macro が出した `{event, ts_ms, game_id, ...}` 形式の構造化ログは **`Logs[].Message` 内の文字列** として埋め込まれる (Logs は Worker 1 invocation 内の console 行配列)。`event` / `game_id` 等で集計するには **先に `Logs[].Message | fromjson` で展開** する必要がある。
-
-```bash
-# 直近 1 時間分の logs を local にダウンロード (Logpush は <object_key> = `<dataset>/<date>/<hash>.log.gz`)
-wrangler r2 object list rshogi-csa-logs-prod --prefix "$(date -u -d '1 hour ago' +%Y%m%dT%H)" 2>&1 | head -20
-wrangler r2 object get rshogi-csa-logs-prod <object_key> --file /tmp/logs.ndjson.gz
-gunzip -k /tmp/logs.ndjson.gz   # /tmp/logs.ndjson が展開される
-
-# 1 行 1 invocation wrapper → Logs[].Message を展開して 1 行 1 structured_log にフラット化
-jq -c '.Logs[]?.Message? | select(type == "string") | fromjson? // empty' /tmp/logs.ndjson > /tmp/structured.ndjson
-# (Message が JSON 形式で出ていない通常 console 出力は select で除外)
-
-# event 別集計
-jq -s 'group_by(.event) | map({event: .[0].event, count: length}) | sort_by(-.count)' /tmp/structured.ndjson
-
-# 特定 game_id の全 log を時系列順に
-jq -s 'sort_by(.ts_ms) | map(select(.game_id == "<game_id>"))' /tmp/structured.ndjson
+[observability.logs]
+enabled = true
+head_sampling_rate = 1.0
 ```
 
-> `Logs[].Message` の中身は `structured_log!` macro 由来の **JSON 文字列** (`worker::console_log!("{}", payload)` で出力)。一方で同 Worker 内で `panic!` / 通常の `console.log("string")` 等を呼ぶと plain string になるため、`fromjson?` でガードして除外する pattern を使う。
-
-### 4.2 リアルタイム tail
-
-`wrangler tail` は in-memory streaming で Logpush archive とは別経路。R2 archive の wrapper は通らず **`structured_log!` の JSON が直接 1 行ずつ流れる** (各 console_log 行が独立 message として届く):
-
-```bash
-wrangler tail rshogi-csa-server-workers --format json | jq 'select(.event != null)'
-```
+これは Logpush とは別経路 (Cloudflare 内部の log buffer)。Free plan でも 7 日保持される一方、archive を S3 / R2 に流すには Logpush が必要 (= Paid plan)。
 
 ## 5. Discord 切替方針 (将来)
 
-Cloudflare Notifications は **Slack 形式 payload を送る前提**。Discord webhook は native 形式 (`{"content": ...}` or `{"embeds": [...]}`) を期待しており、Cloudflare が送る `{name, text, data, ts, policy_id, account_id}` 形式と互換性がない。
+Cloudflare Notifications の webhook destination は **URL pattern から自動的に dispatch 形式を決定** する (例: `hooks.slack.com` なら Slack 形式 payload を送る、`type=slack` として保存される)。Discord webhook (`discord.com/api/webhooks/...`) は native 形式 (`{"content": ...}` or `{"embeds": [...]}`) を期待し、Cloudflare が送る `{name, text, data, ts, policy_id, account_id}` 形式と互換性がない。
 
 **translator Worker** (~50 行の Cloudflare Workers script) を 1 枚追加することで Discord (or 他チャネル) に乗換可能:
 
@@ -241,19 +250,146 @@ export default {
 # §3.4 と同じく shell 引数経由は禁止 (history 漏洩)。--secret のみ指定して
 # 対話 prompt で stdin 入力する。
 pulumi config set --secret alertWebhookUrl
-# (translator Worker URL を貼り付け → Enter。値: <ACCOUNT_ID> 等の placeholder ではなく
-# 実 URL を貼ること、prompt は echo されないので shell history には残らない)
+# (translator Worker URL を貼り付け → Enter、prompt は echo されないので shell history には残らない)
 pulumi up
 ```
 
-`NotificationPolicyWebhooks` の `url` のみ差し替わり、`NotificationPolicy` 側は変更不要。HMAC 検証する場合は translator Worker 内で `cf-webhook-auth` header と `alertWebhookSecret` を比較する。
+`NotificationPolicyWebhooks` の `url` のみ差し替わる (Cloudflare は新 URL pattern から `type` を再判定、Discord の場合 generic webhook として扱われる)。HMAC 検証する場合は translator Worker 内で `cf-webhook-auth` header を別途検証する (Cloudflare が自動で付ける header、Pulumi config の `alertWebhookSecret` は Slack 直結用途では使えなかった (§3.2.3 参照) ので translator Worker 側に独自 secret を持たせる設計とする)。
 
-## 6. 関連 Issue / PR / Doc
+## 6. Free plan で実用的な alert 追加方針 (別 PR)
+
+`/available_alerts` API を Free plan + 本アカウントで叩いた結果 (2026-05-10)、本 use case (Worker 監視) で利用可能な alertType は以下 4 種に絞られる:
+
+| alertType | カテゴリ | 用途 | Worker での実用性 |
+|---|---|---|---|
+| `workers_observability_alert` | Workers Observability | Workers Observability ダッシュボードで定義した custom alert rule (errors > N / 5min 等) が発火 → webhook 配信 | ✅ **本命**、自由に発火条件を組める |
+| `health_check_status_notification` | Health Checks | Cloudflare Health Check リソース別途セットアップ必須 (HTTP probe を URL 指定 → DOWN 検知時発火) | △ 別 resource 必要だが補完的に有用 (uptime 監視) |
+| `security_insights_alert` | Security Insights | Cloudflare の Security Insights (新規脅威検知) 一般、zone 全体向け | △ Worker specific ではないが受信して損なし |
+| `real_origin_monitoring` | Traffic Monitoring | "Cloudflare → origin 不到達" 検知。Workers は Cloudflare 内部実行で origin 概念なし | ❌ Worker には適用されない (zone-attached origin 専用) |
+
+**`dos_attack_l7` 等の DoS Protection alertType は Free plan の `/available_alerts` 結果に出現せず、Free plan は基本 DDoS 保護のみで configurable alert は Paid 限定** (これも 2026-05-10 検証で判明)。
+
+### 6.1 推奨実装方針 (`workers_observability_alert` ベース)
+
+別 PR で以下を実装:
+
+1. **`wrangler.{production,staging}.toml` に `[observability]` block 追加** (Workers Observability を有効化、Free plan 対応):
+   ```toml
+   [observability]
+   enabled = true
+   [observability.logs]
+   enabled = true
+   head_sampling_rate = 1.0
+   ```
+2. **Cloudflare Dashboard → Workers & Pages → 該当 Worker → "Observability" → "Alerts"** で具体的な発火条件を Web UI で定義 (例: `5xx errors > 10 in 5min` や `CPU time > 50ms p99` 等)
+3. **Pulumi で `workers_observability_alert` の NotificationPolicy を declare** して `alertWebhook` へ routing (本 doc の `infra/pulumi/index.ts` `logpushFailureAlert` ブロックを `alertType: "workers_observability_alert"` に書き換える形)
+
+### 6.2 補完: `health_check_status_notification`
+
+**uptime 監視** として推奨。手順:
+
+1. Cloudflare Dashboard → Traffic → Health Checks → "Create" で `https://csa.sh11235.com/health` 等を 1 分間隔 probe する Health Check を作成
+2. Pulumi で `health_check_status_notification` NotificationPolicy を declare、`filters.healthCheckIds` に Health Check ID を指定 (Pulumi cloudflare provider に Health Check resource もある、`cloudflare.HealthCheck`)
+
+本 doc 範囲外、別 PR で扱う (#625 follow-up issue として起票推奨、または直接小さい PR を起票)。
+
+## 7. Paid plan 移行時の手順
+
+[Workers Paid plan ($5/month)](https://dash.cloudflare.com/?to=/:account/workers/plans) に upgrade すると `workers_trace_events` Logpush が利用可能になる (100k events/day 込み、超過分は従量課金)。upgrade 後の手順:
+
+### 7.1 Logpush + R2 archive を活性化
+
+#### 7.1.1 R2 access key 発行 (user manual)
+
+1. https://dash.cloudflare.com/?to=/:account/r2/api-tokens → "Create API Token"
+2. **Token name**: `logpush-rshogi-csa-logs`
+3. **Permissions**: `Object Read & Write`
+4. **Specify buckets**: `rshogi-csa-logs-staging` + `rshogi-csa-logs-prod` の 2 件 (Apply to specific buckets only)
+5. **TTL**: 未設定 (年 1 review)
+6. 発行後、`Access Key ID` と `Secret Access Key` を **その場でコピー** (二度と表示されない)
+
+#### 7.1.2 Pulumi config 投入
+
+```bash
+cd infra/pulumi
+pulumi stack select staging  # production は別途同手順
+
+# Logpush destination URL (R2 access key + secret embedded、長い multi-line)
+umask 077
+cat > /tmp/logpush-destconf <<'DESTEOF'
+r2://rshogi-csa-logs-staging/?account-id=<ACCOUNT_ID>&access-key-id=<ACCESS_KEY_ID>&secret-access-key=<SECRET_ACCESS_KEY>
+DESTEOF
+# <ACCOUNT_ID> = d5d9818649d8722f73cd798c3b1ffb70
+# <ACCESS_KEY_ID> / <SECRET_ACCESS_KEY> を §7.1.1 で発行した値で書き換え
+pulumi config set --secret logpushDestinationConf < /tmp/logpush-destconf
+shred -u /tmp/logpush-destconf
+
+# 初期は disabled で declare のみ → 動作確認後に enable
+pulumi config set logpushEnabled false
+
+pulumi preview  # LogpushJob 1 件の create を確認
+pulumi up
+```
+
+#### 7.1.3 Logpush enable + R2 archive 確認
+
+```bash
+pulumi config set logpushEnabled true
+pulumi up
+# → 30 秒以内に LogpushJob が R2 bucket に書き込み始める
+
+wrangler r2 object list rshogi-csa-logs-staging --remote
+# → 1 件以上 NDJSON (.log.gz) object が出てくれば logs 流れ始め
+```
+
+#### 7.1.4 R2 archive のログ検索 (Paid plan 後の主経路)
+
+Logpush archive (NDJSON) の各行は `workers_trace_events` の **wrapper object** で、`structured_log!` macro が出した `{event, ts_ms, game_id, ...}` 形式の構造化ログは **`Logs[].Message` 内の文字列** として埋め込まれる (Logs は Worker 1 invocation 内の console 行配列)。`event` / `game_id` 等で集計するには **先に `Logs[].Message | fromjson` で展開** する必要がある:
+
+```bash
+# 直近 1 時間分の logs を local にダウンロード
+wrangler r2 object list rshogi-csa-logs-prod --prefix "$(date -u -d '1 hour ago' +%Y%m%dT%H)" --remote 2>&1 | head -20
+wrangler r2 object get rshogi-csa-logs-prod <object_key> --file /tmp/logs.ndjson.gz --remote
+gunzip -k /tmp/logs.ndjson.gz   # /tmp/logs.ndjson が展開される
+
+# 1 行 1 invocation wrapper → Logs[].Message を展開して 1 行 1 structured_log にフラット化
+jq -c '.Logs[]?.Message? | select(type == "string") | fromjson? // empty' /tmp/logs.ndjson > /tmp/structured.ndjson
+# (Message が JSON 形式で出ていない通常 console 出力は select で除外)
+
+# event 別集計
+jq -s 'group_by(.event) | map({event: .[0].event, count: length}) | sort_by(-.count)' /tmp/structured.ndjson
+
+# 特定 game_id の全 log を時系列順に
+jq -s 'sort_by(.ts_ms) | map(select(.game_id == "<game_id>"))' /tmp/structured.ndjson
+```
+
+### 7.2 NotificationPolicy alert を追加
+
+Paid plan 移行と同時 or 別 PR で `failing_logpush_job_disabled_alert` を再 declare:
+
+```bash
+pulumi config set notificationsEnabled true
+pulumi up
+# → NotificationPolicy logpushFailureAlert が create され、Logpush 失敗時に Slack 通知が飛ぶ
+```
+
+`infra/pulumi/index.ts` の現コードは `alertWebhook && logpushJob` の両方が存在する時のみ NotificationPolicy を declare する条件分岐があり、§7.1.2 で logpushJob が active 化されると自動的に NotificationPolicy 候補に乗る。
+
+### 7.3 wrangler.toml の `logpush = true` 確認
+
+Free plan 時点でも forward-compat で `logpush = true` を `wrangler.{production,staging}.toml` に設定済 ([PR #698](https://github.com/SH11235/rshogi/pull/698) で追加)。Paid 移行時に追加変更は不要。
+
+### 7.4 production への展開
+
+staging で `pulumi up` + R2 archive 確認 + alert test まで動作確認できたら、`pulumi stack select production` に切り替えて §7.1 〜 §7.2 を繰り返す。
+
+## 8. 関連 Issue / PR / Doc
 
 - [#625](https://github.com/SH11235/rshogi/issues/625): umbrella issue
-- [#697](https://github.com/SH11235/rshogi/issues/697): 本 Issue (Phase B Pulumi declare scaffold) / [PR #698](https://github.com/SH11235/rshogi/pull/698)
+- [#697](https://github.com/SH11235/rshogi/issues/697) / [PR #698](https://github.com/SH11235/rshogi/pull/698): Phase B Pulumi declare scaffold (merge 済)
+- [#700](https://github.com/SH11235/rshogi/issues/700): 本 doc を Free plan 前提に書き直す PR (本 issue)
 - [#691](https://github.com/SH11235/rshogi/pull/691): Phase A merge 済 (`structured_log!` macro 導入)
 - [#671](https://github.com/SH11235/rshogi/pull/671): Phase C / [#630](https://github.com/SH11235/rshogi/issues/630) (synthetic monitoring) merge 済
-- [#624](https://github.com/SH11235/rshogi/issues/624): R2 lifecycle / バックアップ — logs bucket も同 lifecycle 設計の対象 (90 日 retention 等)
-- [#628](https://github.com/SH11235/rshogi/issues/628): DO storage 喪失検知 alert を本 Issue の NotificationPolicy 上に追加予定 (別 PR)
-- [iac/docs/cloudflare-api-tokens.md](https://github.com/SH11235/iac/blob/main/docs/cloudflare-api-tokens.md): `pulumi-rshogi-iac` token の Logs:Write + Notifications:Write 追加 rotation 記録は本 Issue merge 後の別 PR
+- [#624](https://github.com/SH11235/rshogi/issues/624): R2 lifecycle / バックアップ — logs bucket も同 lifecycle 設計の対象 (Paid plan 移行時に再評価)
+- [#628](https://github.com/SH11235/rshogi/issues/628): DO storage 喪失検知 alert (Free plan で実装可、§6 の方針で別 PR)
+- [iac/docs/cloudflare-api-tokens.md](https://github.com/SH11235/iac/blob/main/docs/cloudflare-api-tokens.md): `pulumi-rshogi-iac` token の `Logs:Edit` / `Notifications:Edit` scope 詳細 (本 PR merge 後に Free plan 時点では Logs:Edit が unused である旨を別 PR で注記)
