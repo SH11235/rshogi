@@ -209,23 +209,27 @@ export const logpushJob = logpushDestinationConf
           // `workers_trace_events` dataset から R2 archive に書き出す field を明示列挙する。
           // 列挙しないと Cloudflare がデフォルトで全 field を embed してオブジェクトサイズが
           // 膨らむ + 構造化ログ (`Logs[].Message` に含む) の取り出しコストが上がる。
-          // 詳細は https://developers.cloudflare.com/logs/reference/log-fields/account/workers_trace_events/
+          // 公式 field 一覧 (Codex P1 指摘で訂正、本 dataset のみで有効な field):
+          // https://developers.cloudflare.com/logs/logpush/logpush-job/datasets/account/workers_trace_events/
+          // `RequestHeaders` / `ResponseHeaders` / `Diagnostics` は `http_requests` dataset の
+          // field で本 dataset では invalid (LogpushJob create / update が API で reject される)。
           outputOptions: {
               outputType: "ndjson",
               timestampFormat: "rfc3339",
               fieldNames: [
                   "EventTimestampMs",
                   "ScriptName",
+                  "ScriptTags",
                   "ScriptVersion",
+                  "Entrypoint",
                   "Outcome",
                   "EventType",
+                  "Event",
                   "Logs",
                   "Exceptions",
                   "DispatchNamespace",
-                  "RequestHeaders",
-                  "ResponseHeaders",
-                  "Event",
-                  "Diagnostics",
+                  "CPUTimeMs",
+                  "WallTimeMs",
               ],
           },
           // filter で本 Worker script のログのみに絞る (account 内の他 Worker
