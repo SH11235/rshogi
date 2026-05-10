@@ -46,6 +46,12 @@ pub mod games_index;
 pub mod live_games_index;
 pub mod lobby_protocol;
 pub mod origin;
+// `rate_limit` は host テスト可能な pure helper (TokenBucketState, threshold
+// resolution, Retry-After 算出) と wasm32-only な `RateLimiter` Durable Object を
+// 同居させる。DO 部分は `#[cfg(target_arch = "wasm32")]` で gate しているので、
+// ホスト target からも `cargo test` で pure logic を直接走らせられる
+// (issue #622 PR3a)。
+pub mod rate_limit;
 // `persistence` は DO ランタイム (`game_room`) からのみ消費される I/O 非依存の
 // 純粋ロジックを置く。ホスト target の通常ビルドでは消費者が存在しないので
 // `cargo build` の dead-code 解析と整合させるため、wasm32 ビルドとテスト時のみ
@@ -92,6 +98,8 @@ mod viewer_api;
 pub use game_room::GameRoom;
 #[cfg(target_arch = "wasm32")]
 pub use lobby::Lobby;
+#[cfg(target_arch = "wasm32")]
+pub use rate_limit::RateLimiter;
 
 /// Workers ランタイムの fetch イベント。`router::handle_fetch` に委譲する
 /// 薄いエントリポイント。

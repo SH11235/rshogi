@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Miniflare, WebSocket } from "miniflare";
-import { createMiniflare, makeTempPersistRoot } from "./harness";
+import { DEFAULT_TEST_CF_CONNECTING_IP, createMiniflare, makeTempPersistRoot } from "./harness";
 
 /**
  * Origin allowlist が WS Upgrade route で正しく機能するかを route レベルで固定する。
@@ -38,6 +38,10 @@ describe("Origin allowlist route behavior", () => {
     const res = await mf.dispatchFetch("https://example.com/ws/origin-missing-room", {
       headers: {
         Upgrade: "websocket",
+        // CF-Connecting-IP は issue #622 PR3a で必須化された (欠落で 503)。
+        // 本テストは Origin 検査の挙動を見るのが目的なので、rate limit は
+        // 緩和済 default (`DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN`) で素通し。
+        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
       },
     });
     expect(res.status).toBe(101);
@@ -50,6 +54,7 @@ describe("Origin allowlist route behavior", () => {
       headers: {
         Upgrade: "websocket",
         Origin: "https://example.com",
+        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
       },
     });
     expect(res.status).toBe(101);
@@ -58,10 +63,14 @@ describe("Origin allowlist route behavior", () => {
   });
 
   test("Origin が allowlist に含まれない → 403 Forbidden Origin", async () => {
+    // Origin 検査は CF-Connecting-IP より先に走るので、本テストは IP なしでも
+    // 403 が返る (ただし将来 hook 順序が変わると 503 になりうるので念のため
+    // IP も付けて検査の独立性を確保する)。
     const res = await mf.dispatchFetch("https://example.com/ws/origin-mismatch-room", {
       headers: {
         Upgrade: "websocket",
         Origin: "https://evil.example",
+        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
       },
     });
     expect(res.status).toBe(403);
@@ -91,6 +100,7 @@ describe("Origin allowlist route behavior (空 allowlist)", () => {
     const res = await mf.dispatchFetch("https://example.com/ws/empty-allow-missing-room", {
       headers: {
         Upgrade: "websocket",
+        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
       },
     });
     expect(res.status).toBe(101);
@@ -103,6 +113,7 @@ describe("Origin allowlist route behavior (空 allowlist)", () => {
       headers: {
         Upgrade: "websocket",
         Origin: "https://example.com",
+        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
       },
     });
     expect(res.status).toBe(403);

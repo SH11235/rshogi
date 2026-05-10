@@ -42,6 +42,16 @@ class_name = "GameRoom"
 name = "LOBBY"
 class_name = "Lobby"
 
+# RateLimiter: per-(kind, identifier) で sharding する atomic token bucket
+# (issue #622 PR3a)。LOGIN_LOBBY / CHALLENGE_LOBBY / `/ws/<room_id>` upgrade /
+# room create の 6 種類の rate limit を共通実装で担う。`id_from_name(format!(
+# "{kind}:{identifier}"))` で per-key DO instance を生成し、Cloudflare DO の
+# 単一スレッド実行モデルで `refill → try_consume → persist` の atomicity を担保する。
+# 詳細は `docs/csa-server/rate_limit.md` 参照。
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
 # SQLite-backed DO: `state.storage().sql()` を利用するため必須。
 # 本 migration tag は **初回 deploy 時にのみ apply される**。`new_sqlite_classes` の
 # 内容を変更する場合は新 tag (`v2` / `v3` ...) を **追加する** こと。既存 tag を
@@ -55,6 +65,15 @@ new_sqlite_classes = ["GameRoom"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Lobby"]
+
+# RateLimiter を SQLite-backed として追加 (issue #622 PR3a)。実体は
+# `state.storage().get/put` で 1 bucket 分の `TokenBucketState` (~16 byte JSON)
+# を読み書きするだけで SQLite 機能は使わない。`additive-only contract`
+# (`docs/csa-server/deployment.md` §3.4.1) に従い既存 tag (v1, v2) は触らず、
+# 新 tag = "v3" として add する (= forward-only)。
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["RateLimiter"]
 
 # --- R2: 棋譜保存 ---
 # `GameRoom` DO が終局時に CSA V2 棋譜を書き出す先。
@@ -187,6 +206,22 @@ CHALLENGE_TTL_SEC = "3600"
 # staging では起動経路実装の動作確認時のみ `"true"` に切り替え、production
 # 昇格時は本値を `"true"` に変えて redeploy する。
 PRIVATE_CHALLENGE_ENABLED = "false"
+
+# --- Rate limit / abuse protection (issue #622 PR3a) ---
+# 各値は **1 IP / 1 handle あたり 1 分間の最大試行回数**。`0` / 空 / 非数値 /
+# u32 範囲外は `crate::rate_limit::RateLimitThresholds::DEFAULTS` にフォール
+# バックする (env 設定不正で全 client が拒否される事故を避ける安全側挙動、
+# `LOBBY_QUEUE_ENTRY_TTL_SEC` と同じ流儀)。
+# production 既定は `docs/csa-server/rate_limit_design.md` §3 Q3 表の保守的値
+# (= staging E2E + 実トラフィック観測前)。Floodgate 相当 production 投入後に
+# real traffic baseline を見て調整する。閾値変更手順は
+# `docs/csa-server/rate_limit.md` の「閾値調整手順」節参照。
+LOBBY_LOGIN_RATE_PER_IP_PER_MIN = "10"
+LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN = "5"
+LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN = "5"
+LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN = "3"
+ROOM_CREATE_RATE_PER_IP_PER_MIN = "20"
+WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN = "60"
 
 # --- secret として設定する値 ---
 # 本番運用に必要だが OSS repo には書かない値は `wrangler secret put` 経由で設定する。

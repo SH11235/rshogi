@@ -12,6 +12,10 @@ use worker::{Env, Method, Request, Response, Result};
 
 use crate::config::{ConfigKeys, OriginAllowList, is_viewer_api_enabled};
 use crate::origin::{OriginDecision, evaluate};
+use crate::rate_limit::{
+    RateLimitKind, build_missing_ip_response, build_ws_upgrade_rate_limited_response,
+    check_and_consume_via_do, extract_client_ip, resolve_thresholds_from_env,
+};
 use crate::viewer_api;
 use crate::ws_route::{WsRoute, parse_ws_route};
 
@@ -83,6 +87,14 @@ async fn forward_ws_to_lobby(req: Request, env: Env) -> Result<Response> {
         "sec-websocket-version",
         "sec-websocket-protocol",
         "sec-websocket-extensions",
+        // Rate limit (issue #622 PR3a): LobbyDO 側で LOGIN_LOBBY / CHALLENGE_LOBBY
+        // 受信時に per-IP 限流するため、CF-Connecting-IP を DO に渡す。
+        // `accept_web_socket` は Worker fetch context を keep しないので、本ヘッダ
+        // を attachment に保存して `websocket_message` から参照する設計。
+        // 本リストに名前を載せていない他ヘッダは意図的に削ぎ落とすコントラクト
+        // (DO 側で信頼できるのは `Upgrade` / `Sec-WebSocket-*` / `CF-Connecting-IP`
+        // のみ) を維持する。
+        "cf-connecting-ip",
     ] {
         if let Some(v) = req.headers().get(name)? {
             let _ = fwd_headers.set(name, &v);
@@ -137,6 +149,73 @@ async fn forward_ws_to_room(
     let upgrade = req.headers().get("Upgrade")?.unwrap_or_default().to_ascii_lowercase();
     if upgrade != "websocket" {
         return Response::error("Upgrade required", 426);
+    }
+
+    // Rate limit (issue #622 PR3a): WS upgrade flood / GameRoom DO 起動 flood の
+    // 抑制。`parse_ws_route` 通過後 + Origin / Upgrade 検査済み + DO `id_from_name`
+    // 解決前にチェックする (`docs/csa-server/rate_limit_design.md` §4.4 hook 順序)。
+    //
+    // `parse_ws_route` で reject される `%%room_id` 不正値は本パスに到達しない
+    // ため、bucket への counter 増加経路を踏まない (= claude review #1 の
+    // 「不正値で counter 増加してはいけない」契約を満たす)。
+    //
+    // 二段階チェック:
+    // 1. `WsRoomUpgradePerIp` (looser cap, 既定 60/分) — player + spectator 共有
+    // 2. `RoomCreatePerIp` (tighter cap, 既定 20/分) — player route 固有 (新規
+    //    GameRoom DO 起動の代理指標)
+    //
+    // CF-Connecting-IP 欠落時は **fail-closed** で 503 + Retry-After 短時間 (10 秒)。
+    let Some(client_ip) = extract_client_ip(&req) else {
+        crate::structured_log!(
+            event: "rate_limit_missing_cf_ip",
+            component: "router",
+            path: request_path,
+        );
+        return build_missing_ip_response();
+    };
+    let thresholds = resolve_thresholds_from_env(&env);
+
+    // Step 1: WS upgrade per-IP (player + spectator 共通)。
+    let upgrade_decision = check_and_consume_via_do(
+        &env,
+        RateLimitKind::WsRoomUpgradePerIp,
+        &client_ip,
+        thresholds.ws_room_upgrade_per_ip,
+    )
+    .await?;
+    if !upgrade_decision.allowed {
+        crate::structured_log!(
+            event: "rate_limit_denied",
+            component: "router",
+            kind: "ws_room_upgrade_per_ip",
+            path: request_path,
+            ip: client_ip,
+            retry_after_sec: upgrade_decision.retry_after_sec,
+        );
+        return build_ws_upgrade_rate_limited_response(upgrade_decision.retry_after_sec);
+    }
+
+    // Step 2: player route のみ room create cap (tighter)。spectator route では
+    // 既存の viewer API gate (上で `is_viewer_api_enabled` 通過済) が別軸で抑える。
+    if !route.is_spectator() {
+        let create_decision = check_and_consume_via_do(
+            &env,
+            RateLimitKind::RoomCreatePerIp,
+            &client_ip,
+            thresholds.room_create_per_ip,
+        )
+        .await?;
+        if !create_decision.allowed {
+            crate::structured_log!(
+                event: "rate_limit_denied",
+                component: "router",
+                kind: "room_create_per_ip",
+                path: request_path,
+                ip: client_ip,
+                retry_after_sec: create_decision.retry_after_sec,
+            );
+            return build_ws_upgrade_rate_limited_response(create_decision.retry_after_sec);
+        }
     }
 
     // room_id から決定論的に DO インスタンスを解決する。`id_from_name` は

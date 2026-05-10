@@ -30,6 +30,14 @@ class_name = "GameRoom"
 name = "LOBBY"
 class_name = "Lobby"
 
+# RateLimiter: per-(kind, identifier) で sharding する atomic token bucket
+# (issue #622 PR3a)。`id_from_name(format!("{kind}:{identifier}"))` でルーティング
+# し、1 DO instance に 1 bucket を保持する。idle DO は Cloudflare 側で自動 GC。
+# 詳細は `docs/csa-server/rate_limit.md` 参照。
+[[durable_objects.bindings]]
+name = "RATE_LIMITER"
+class_name = "RateLimiter"
+
 # SQLite-backed DO: `state.storage().sql()` を利用するため必須。
 [[migrations]]
 tag = "v1"
@@ -40,6 +48,15 @@ new_sqlite_classes = ["GameRoom"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Lobby"]
+
+# RateLimiter を SQLite-backed として追加 (issue #622 PR3a)。実体は
+# `state.storage().get/put` で 1 bucket 分の `TokenBucketState` (~16 byte JSON)
+# を読み書きするだけで SQLite 機能は使わない。`additive-only contract`
+# (`docs/csa-server/deployment.md §3.4.1`) に従い、過去 tag (v1, v2) は触らず
+# 新 tag = "v3" として add する。
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["RateLimiter"]
 
 # --- R2 (棋譜保存) ---
 # `GameRoom` DO が終局時に CSA V2 棋譜を書き出す先。
@@ -162,3 +179,15 @@ CHALLENGE_TTL_SEC = "3600"
 # (private LOGIN_LOBBY は加えて 1003 close)。
 # local dev で機能を試す場合のみ明示的に `"true"` に変更する。
 PRIVATE_CHALLENGE_ENABLED = "false"
+
+# --- Rate limit / abuse protection (issue #622 PR3a) ---
+# 各値は **1 IP / 1 handle あたり 1 分間の最大試行回数**。`0` / 空 / 非数値 /
+# u32 範囲外は `crate::rate_limit::RateLimitThresholds::DEFAULTS` にフォール
+# バックする (env 設定不正で全 client が拒否される事故を避ける安全側挙動)。
+# 閾値の根拠 / 調整指針 / ログ grep 例は `docs/csa-server/rate_limit.md` 参照。
+LOBBY_LOGIN_RATE_PER_IP_PER_MIN = "10"
+LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN = "5"
+LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN = "5"
+LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN = "3"
+ROOM_CREATE_RATE_PER_IP_PER_MIN = "20"
+WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN = "60"

@@ -51,6 +51,10 @@ use crate::lobby_protocol::{
     build_room_id, is_private_login_handle, parse_challenge_lobby, parse_login_lobby,
     parse_login_lobby_with_free,
 };
+use crate::rate_limit::{
+    RateLimitDecision, RateLimitKind, build_challenge_lobby_rate_limited_line,
+    build_login_lobby_rate_limited_line, check_and_consume_via_do, resolve_thresholds_from_env,
+};
 use rshogi_csa_server::ClockSpec;
 use rshogi_csa_server::matching::challenge::{
     ChallengeEntry, ChallengeRegistry, ChallengeToken, IssueError,
@@ -86,7 +90,20 @@ const CHALLENGE_ALARM_SAFETY_MS: u64 = 200;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum LobbyAttachment {
     /// LOGIN_LOBBY 到着前の匿名接続。`websocket_message` で初手は LOGIN_LOBBY を期待する。
-    Pending,
+    ///
+    /// `client_ip`: 接続元 IP (`CF-Connecting-IP`、`router::forward_ws_to_lobby` が
+    /// 転送する)。LOGIN_LOBBY / CHALLENGE_LOBBY の per-IP rate limit
+    /// (issue [#622](https://github.com/SH11235/rshogi/issues/622) PR3a) で参照
+    /// する。`None` (CF 経由でない / ヘッダ欠落) は anomalous で **fail-closed**
+    /// (= 全コマンドを `rate_limited` で reject) する。
+    /// `#[serde(default)]` を付けて、本フィールド導入前 (= PR3a merge 前) に
+    /// upgrade した既存 hibernated WS が deserialize_attachment で None を読める
+    /// よう backward compat を確保する。新規接続の Pending は必ず `Some(_)` で
+    /// セットされ、`None` 経路は旧 attachment fall-through 時のみ。
+    Pending {
+        #[serde(default)]
+        client_ip: Option<String>,
+    },
     /// queue 登録済みの待機者。
     /// `attachment_id` は LobbyDO 採番の WS 一意 id (`PrivatePending` と同じ値域)。
     /// queue entry の `(handle, attachment_id)` と照合することで、同 handle で
@@ -158,17 +175,31 @@ impl DurableObject for Lobby {
         }
     }
 
-    async fn fetch(&self, _req: Request) -> Result<Response> {
+    async fn fetch(&self, req: Request) -> Result<Response> {
         let pair = WebSocketPair::new()?;
         let server = pair.server;
         self.state.accept_web_socket(&server);
 
+        // Rate limit (issue #622 PR3a) のため、`router::forward_ws_to_lobby` が
+        // 転送した `CF-Connecting-IP` を attachment に保存する。
+        // `accept_web_socket` 後の `websocket_message` ハンドラは Worker fetch
+        // context を持たないため、本フィールド経由でしか per-IP rate limit を
+        // 適用できない。ヘッダ欠落 / 空文字は `None` として扱い、後段の
+        // LOGIN_LOBBY / CHALLENGE_LOBBY ハンドラ側で fail-closed する。
+        let client_ip = crate::rate_limit::extract_client_ip(&req);
+
         server
-            .serialize_attachment(&LobbyAttachment::Pending)
+            .serialize_attachment(&LobbyAttachment::Pending {
+                client_ip: client_ip.clone(),
+            })
             .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))?;
         crate::structured_log!(
             event: "websocket_upgrade_accepted",
             component: "lobby",
+            // IP の有無のみ logged (= ヘッダ欠落の異常検知)。値そのものは
+            // LOGIN_LOBBY / CHALLENGE_LOBBY 受信時の `rate_limit_denied` ログで
+            // 必要時に出すため、upgrade 段階では記録量を抑える。
+            cf_ip_present: client_ip.is_some(),
         );
 
         Ok(ResponseBuilder::new().with_status(101).with_websocket(pair.client).empty())
@@ -203,10 +234,12 @@ impl DurableObject for Lobby {
         let attachment: LobbyAttachment = ws
             .deserialize_attachment()
             .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?
-            .unwrap_or(LobbyAttachment::Pending);
+            .unwrap_or(LobbyAttachment::Pending { client_ip: None });
 
         match attachment {
-            LobbyAttachment::Pending => self.dispatch_pending_line(&ws, &line).await,
+            LobbyAttachment::Pending { client_ip } => {
+                self.dispatch_pending_line(&ws, client_ip.as_deref(), &line).await
+            }
             LobbyAttachment::Queued {
                 ref handle,
                 ref game_name,
@@ -427,7 +460,12 @@ impl Lobby {
     /// を返して終了する。両者揃った後の対局起動経路 (consume → GameRoom DO 起動)
     /// が未実装の状態で client が誤って使うと pending state でハマるため、production
     /// 到達不能化を最入口で行う。
-    async fn dispatch_pending_line(&self, ws: &WebSocket, line: &str) -> Result<()> {
+    async fn dispatch_pending_line(
+        &self,
+        ws: &WebSocket,
+        client_ip: Option<&str>,
+        line: &str,
+    ) -> Result<()> {
         if line.starts_with("CHALLENGE_LOBBY ") {
             // CHALLENGE_LOBBY は新規 token 発行要求であって login 状態への遷移を
             // 伴わないため、disabled でも close せず `:incorrect unsupported` の
@@ -438,7 +476,7 @@ impl Lobby {
             }
             // 中身は `parse_challenge_lobby` 側で再度 strip + 構造化するので、ここでは
             // prefix の有無のみを判定して dispatch する。
-            return self.handle_challenge_lobby(ws, line).await;
+            return self.handle_challenge_lobby(ws, client_ip, line).await;
         }
         if let Some(rest) = line.strip_prefix("LOGIN_LOBBY ") {
             // `<id>` 部分だけを peek し、私的対局フォーマットなら専用 handler へ。
@@ -454,21 +492,41 @@ impl Lobby {
                     let _ = ws.close(Some(1003), Some("private_challenge_disabled"));
                     return Ok(());
                 }
-                return self.handle_login_lobby_private(ws, line).await;
+                return self.handle_login_lobby_private(ws, client_ip, line).await;
             }
         }
         // 既存経路 (公開マッチング) に委譲。`LOGIN_LOBBY` 以外のコマンドは
         // 既存 `handle_login_lobby` 内のパース失敗経路で `not_login_command`
         // として処理される。
-        self.handle_login_lobby(ws, line).await
+        self.handle_login_lobby(ws, client_ip, line).await
     }
 
     /// LOGIN_LOBBY 受信時の処理。
-    async fn handle_login_lobby(&self, ws: &WebSocket, line: &str) -> Result<()> {
+    async fn handle_login_lobby(
+        &self,
+        ws: &WebSocket,
+        client_ip: Option<&str>,
+        line: &str,
+    ) -> Result<()> {
         let req = match parse_login_lobby(line) {
             Ok(r) => r,
             Err(e) => return self.send_login_error(ws, e).await,
         };
+
+        // Rate limit (issue #622 PR3a): per-IP + per-handle の二段チェック。
+        // **parse 通過後** に走らせることで、`bad_format` 等の構文不正は
+        // counter を増やさずに既存経路で reject する (構文不正 flood は別軸の
+        // `MAX_WS_LINE_BYTES` + connection-level 削減で対処、本 limiter の対象外)。
+        // **fail-closed 順序**:
+        // 1. CF-Connecting-IP 欠落 → `rate_limited` で reject (per-IP / per-handle
+        //    どちらも IP を一次キーに使うため、IP 不在は両方とも適用不能)
+        // 2. per-IP 拒否 → reject
+        // 3. per-handle 拒否 → reject
+        // いずれの順で reject されても WS は close せず、client が retry できる
+        // 経路を保つ (`Q4-A` design: csa-client は retry_after honoring、PR #683)。
+        if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &req.handle).await? {
+            return self.send_rate_limited_login_lobby(ws, decision).await;
+        }
 
         // strict mode: `CLOCK_PRESETS` が宣言済みかつ未登録 `game_name` は拒否。
         // 空 (= preset 未宣言) のときは strict mode 自体を無効化し全 game_name を
@@ -655,6 +713,157 @@ impl Lobby {
         Ok(())
     }
 
+    /// LOGIN_LOBBY (公開 + 私的) の rate limit 二段チェック。
+    ///
+    /// 戻り値:
+    /// - `Ok(None)` → 全 bucket allow、caller は処理を継続する
+    /// - `Ok(Some(decision))` → どこかの bucket が deny、caller は
+    ///   `send_rate_limited_login_lobby(decision)` で client に応答する
+    /// - `Err(_)` → DO RPC 自体が失敗 (transient)。caller は `?` で伝播し、
+    ///   Worker 全体としては 500 系に倒れる (= fail-closed、本リクエストは reject
+    ///   される)
+    ///
+    /// **fail-closed 順序** (issue #622 PR3a 設計): CF-Connecting-IP 欠落 →
+    /// per-IP → per-handle。先に拒否された方の `decision` を返す。
+    async fn check_login_lobby_rate_limit(
+        &self,
+        client_ip: Option<&str>,
+        handle: &str,
+    ) -> Result<Option<RateLimitDecision>> {
+        let Some(ip) = client_ip else {
+            crate::structured_log!(
+                event: "rate_limit_missing_cf_ip",
+                component: "lobby",
+                kind: "lobby_login",
+                handle: handle,
+            );
+            return Ok(Some(RateLimitDecision::deny(
+                crate::rate_limit::FAIL_CLOSED_MISSING_IP_RETRY_AFTER_SEC,
+            )));
+        };
+        let thresholds = resolve_thresholds_from_env(&self.env);
+        let ip_decision = check_and_consume_via_do(
+            &self.env,
+            RateLimitKind::LobbyLoginPerIp,
+            ip,
+            thresholds.lobby_login_per_ip,
+        )
+        .await?;
+        if !ip_decision.allowed {
+            crate::structured_log!(
+                event: "rate_limit_denied",
+                component: "lobby",
+                kind: "lobby_login_per_ip",
+                ip: ip,
+                handle: handle,
+                retry_after_sec: ip_decision.retry_after_sec,
+            );
+            return Ok(Some(ip_decision));
+        }
+        let handle_decision = check_and_consume_via_do(
+            &self.env,
+            RateLimitKind::LobbyLoginPerHandle,
+            handle,
+            thresholds.lobby_login_per_handle,
+        )
+        .await?;
+        if !handle_decision.allowed {
+            crate::structured_log!(
+                event: "rate_limit_denied",
+                component: "lobby",
+                kind: "lobby_login_per_handle",
+                ip: ip,
+                handle: handle,
+                retry_after_sec: handle_decision.retry_after_sec,
+            );
+            return Ok(Some(handle_decision));
+        }
+        Ok(None)
+    }
+
+    /// CHALLENGE_LOBBY の rate limit 二段チェック。
+    /// LOGIN_LOBBY と対称な fail-closed 順序 (CF-Connecting-IP 欠落 → per-IP →
+    /// per-inviter handle)。
+    async fn check_challenge_lobby_rate_limit(
+        &self,
+        client_ip: Option<&str>,
+        inviter: &str,
+    ) -> Result<Option<RateLimitDecision>> {
+        let Some(ip) = client_ip else {
+            crate::structured_log!(
+                event: "rate_limit_missing_cf_ip",
+                component: "lobby",
+                kind: "lobby_challenge",
+                inviter: inviter,
+            );
+            return Ok(Some(RateLimitDecision::deny(
+                crate::rate_limit::FAIL_CLOSED_MISSING_IP_RETRY_AFTER_SEC,
+            )));
+        };
+        let thresholds = resolve_thresholds_from_env(&self.env);
+        let ip_decision = check_and_consume_via_do(
+            &self.env,
+            RateLimitKind::LobbyChallengePerIp,
+            ip,
+            thresholds.lobby_challenge_per_ip,
+        )
+        .await?;
+        if !ip_decision.allowed {
+            crate::structured_log!(
+                event: "rate_limit_denied",
+                component: "lobby",
+                kind: "lobby_challenge_per_ip",
+                ip: ip,
+                inviter: inviter,
+                retry_after_sec: ip_decision.retry_after_sec,
+            );
+            return Ok(Some(ip_decision));
+        }
+        let inviter_decision = check_and_consume_via_do(
+            &self.env,
+            RateLimitKind::LobbyChallengePerInviter,
+            inviter,
+            thresholds.lobby_challenge_per_inviter,
+        )
+        .await?;
+        if !inviter_decision.allowed {
+            crate::structured_log!(
+                event: "rate_limit_denied",
+                component: "lobby",
+                kind: "lobby_challenge_per_inviter",
+                ip: ip,
+                inviter: inviter,
+                retry_after_sec: inviter_decision.retry_after_sec,
+            );
+            return Ok(Some(inviter_decision));
+        }
+        Ok(None)
+    }
+
+    /// rate limit 拒否時の LOGIN_LOBBY 応答。design doc Q4-A の wire format
+    /// (`LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`) を採用する。
+    /// **WS は close しない**: csa-client 側 (PR #683) で `retry_after` を
+    /// honoring しつつ retry する経路を踏むため、close すると client が
+    /// 即座に再 upgrade する fast-loop を作ってしまい cap が効かなくなる。
+    async fn send_rate_limited_login_lobby(
+        &self,
+        ws: &WebSocket,
+        decision: RateLimitDecision,
+    ) -> Result<()> {
+        send_line(ws, &build_login_lobby_rate_limited_line(decision.retry_after_sec))?;
+        Ok(())
+    }
+
+    /// rate limit 拒否時の CHALLENGE_LOBBY 応答。LOGIN_LOBBY と対称。
+    async fn send_rate_limited_challenge_lobby(
+        &self,
+        ws: &WebSocket,
+        decision: RateLimitDecision,
+    ) -> Result<()> {
+        send_line(ws, &build_challenge_lobby_rate_limited_line(decision.retry_after_sec))?;
+        Ok(())
+    }
+
     /// `CHALLENGE_LOBBY` 受信時の処理。3 段検証 (`unknown_clock_preset` →
     /// `bad_sfen` → `self_challenge`) を順に行い、通過したら
     /// `ChallengeRegistry::issue` で token を発行して
@@ -664,7 +873,12 @@ impl Lobby {
     /// 実装しない (self-claim モデル、`PasswordStore` 等の認証層がないため)。
     /// 両者揃った時点での GameRoom DO 起動経路は次 PR に分割するため、本関数
     /// は token を登録するだけで対局起動の trigger を発火させない。
-    async fn handle_challenge_lobby(&self, ws: &WebSocket, line: &str) -> Result<()> {
+    async fn handle_challenge_lobby(
+        &self,
+        ws: &WebSocket,
+        client_ip: Option<&str>,
+        line: &str,
+    ) -> Result<()> {
         let req = match parse_challenge_lobby(line) {
             Ok(r) => r,
             Err(ChallengeLobbyError::NotChallengeCommand) => {
@@ -678,6 +892,18 @@ impl Lobby {
                 return Ok(());
             }
         };
+
+        // Rate limit (issue #622 PR3a): per-IP + per-inviter handle の二段チェック。
+        // **parse 通過後** に走らせ、構文不正は counter を増やさない。fail-closed
+        // 順序は LOGIN_LOBBY と対称 (1. CF-Connecting-IP 欠落 → reject、
+        // 2. per-IP、3. per-inviter handle)。`req.inviter` を per-handle 判定の
+        // identifier に使う (token registry を flood で埋める攻撃を inviter
+        // 単位で抑える、design doc §3 Q3 表)。
+        if let Some(decision) =
+            self.check_challenge_lobby_rate_limit(client_ip, &req.inviter).await?
+        {
+            return self.send_rate_limited_challenge_lobby(ws, decision).await;
+        }
 
         // 0. issue 直前に期限切れ entry を掃く。`handle_login_lobby_private` 入口
         //    でも同等の即時 purge を行うため、両入口で対称化することで
@@ -778,12 +1004,27 @@ impl Lobby {
     /// を受理して attachment を `PrivatePending` で登録するだけで、対局起動
     /// trigger を発火させない (WS は接続維持され、次 PR の dispatch 経路で
     /// 起動する)。
-    async fn handle_login_lobby_private(&self, ws: &WebSocket, line: &str) -> Result<()> {
+    async fn handle_login_lobby_private(
+        &self,
+        ws: &WebSocket,
+        client_ip: Option<&str>,
+        line: &str,
+    ) -> Result<()> {
         let req = match parse_login_lobby_with_free(line) {
             Ok(r) => r,
             Err(e) => return self.send_private_login_error(ws, e).await,
         };
         let LoginLobbyPrivateRequest { handle, token } = req;
+
+        // Rate limit (issue #622 PR3a): 私的 LOGIN_LOBBY も公開 LOGIN_LOBBY と
+        // 同じ IP / handle カウンタを共有する (どちらも `LOGIN_LOBBY` 系コマンドで、
+        // 同 IP / handle からの flood 攻撃面が同等)。
+        // private LOGIN_LOBBY ではエラー応答に `1003 close` が伴うのが既存仕様だが、
+        // rate limit reject 時は **WS を close せず** retry を許す (Q4-A 設計と
+        // 揃え、`send_rate_limited_login_lobby` は close しない)。
+        if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &handle).await? {
+            return self.send_rate_limited_login_lobby(ws, decision).await;
+        }
 
         // 認証直後に TTL purge を 1 回走らせて、対局相手の到着前に expire した
         // token を即時掃除する (Alarm の最終ガードに加えた即時パス)。

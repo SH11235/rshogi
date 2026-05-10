@@ -88,9 +88,38 @@ export interface HarnessOptions {
   /// + WS close される。未指定時は server 既定 (300 秒) にフォールバック。
   /// stale purge を smoke で再現するときは短い値 (例: 1) を渡す。
   lobbyQueueEntryTtlSec?: number;
+  /// 私的対局 (`CHALLENGE_LOBBY` / `LOGIN_LOBBY+private-...+free`) feature gate
+  /// (Issue #635)。未指定時は production と同じ `"false"` (= 早期 reject)。
+  /// 私的対局経路を smoke で通電させるテストでは `true` を渡す。
+  privateChallengeEnabled?: boolean;
+  /// Rate limit 閾値オーバーライド (issue #622 PR3a, 1 IP / 1 handle あたり 1 分間)。
+  /// 未指定時は **緩和済 default** ([`DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN`]) を
+  /// 全 6 keys に適用し、rate limit を検証していない既存 smoke (`smoke.test.ts`
+  /// 等) が偶発的に denial に当たらないようにする。`rate_limit.test.ts` のみ
+  /// 意図的に小さい値を渡してテストする。
+  rateLimitOverrides?: {
+    lobbyLoginPerIpPerMin?: number;
+    lobbyLoginPerHandlePerMin?: number;
+    lobbyChallengePerIpPerMin?: number;
+    lobbyChallengePerHandlePerMin?: number;
+    roomCreatePerIpPerMin?: number;
+    wsRoomUpgradePerIpPerMin?: number;
+  };
 }
 
+/// 緩和済 default 閾値 (`rateLimitOverrides` 未指定時に harness が注入する値)。
+/// 10_000/分 = 通常の smoke (1 test ~10 接続) では絶対に denial に当たらない上限。
+/// `rate_limit.test.ts` 側で意図的に小さな値 (`2`-`6` 程度) を渡してテストする。
+export const DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN = 10_000;
+
+/// テスト用デフォルト CF-Connecting-IP (`CsaClient.connect` / `connectLobby` の
+/// 既定値)。CF-Connecting-IP 欠落で fail-closed に倒れる経路を rate_limit smoke
+/// test 以外では踏まないよう、harness 側で必ず注入する契約 (issue #622 PR3a)。
+/// IP 値そのものは任意 (本テスト環境では loopback 想定の `127.0.0.1`)。
+export const DEFAULT_TEST_CF_CONNECTING_IP = "127.0.0.1";
+
 export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> {
+  const rl = opts.rateLimitOverrides ?? {};
   const mf = new Miniflare({
     scriptPath: SHIM_PATH,
     modules: true,
@@ -102,6 +131,11 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
     durableObjects: {
       GAME_ROOM: { className: "GameRoom", useSQLite: true },
       LOBBY: { className: "Lobby", useSQLite: true },
+      // RateLimiter (issue #622 PR3a): per-(kind, identifier) で sharding する
+      // atomic token bucket DO。Miniflare 4 の `useSQLite: true` は production
+      // wrangler.toml の `[[migrations]] new_sqlite_classes = ["RateLimiter"]`
+      // (tag = "v3") と整合する。
+      RATE_LIMITER: { className: "RateLimiter", useSQLite: true },
     },
     r2Buckets: ["KIFU_BUCKET", "FLOODGATE_HISTORY_BUCKET"],
     bindings: {
@@ -137,6 +171,28 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       // 数値を指定したテストでは alarm 経路で stale entry が purge される。
       LOBBY_QUEUE_ENTRY_TTL_SEC:
         opts.lobbyQueueEntryTtlSec === undefined ? "" : String(opts.lobbyQueueEntryTtlSec),
+      PRIVATE_CHALLENGE_ENABLED: opts.privateChallengeEnabled ? "true" : "false",
+      // Rate limit (issue #622 PR3a): 全 6 keys に緩和済 default を入れて、
+      // 既存 smoke が偶発的に denial に当たる経路を踏まないようにする。
+      // 個別テストは `rateLimitOverrides` で意図的に小さな値を上書きする。
+      LOBBY_LOGIN_RATE_PER_IP_PER_MIN: String(
+        rl.lobbyLoginPerIpPerMin ?? DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN,
+      ),
+      LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN: String(
+        rl.lobbyLoginPerHandlePerMin ?? DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN,
+      ),
+      LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN: String(
+        rl.lobbyChallengePerIpPerMin ?? DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN,
+      ),
+      LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN: String(
+        rl.lobbyChallengePerHandlePerMin ?? DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN,
+      ),
+      ROOM_CREATE_RATE_PER_IP_PER_MIN: String(
+        rl.roomCreatePerIpPerMin ?? DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN,
+      ),
+      WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN: String(
+        rl.wsRoomUpgradePerIpPerMin ?? DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN,
+      ),
     },
     defaultPersistRoot: opts.persistRoot,
   });
@@ -218,12 +274,23 @@ export class CsaClient {
   private closed = false;
   private closeReason: { code?: number; reason?: string } | undefined;
 
-  static async connect(mf: Miniflare, roomId: string, origin = "https://example.com"): Promise<CsaClient> {
+  static async connect(
+    mf: Miniflare,
+    roomId: string,
+    origin = "https://example.com",
+    /// CF-Connecting-IP のテスト注入。issue #622 PR3a で `/ws/<room_id>` upgrade
+    /// は本ヘッダ必須 (欠落で 503 fail-closed)。Miniflare は edge proxy を
+    /// シミュレートしないため、test 側で必ず注入する。同 IP からの連続接続は
+    /// `WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN` / `ROOM_CREATE_RATE_PER_IP_PER_MIN`
+    /// バケットを共有する点に注意 (test ごとに異なる IP を渡せば bucket 隔離)。
+    cfConnectingIp: string = DEFAULT_TEST_CF_CONNECTING_IP,
+  ): Promise<CsaClient> {
     const url = `https://example.com/ws/${encodeURIComponent(roomId)}`;
     const res = await mf.dispatchFetch(url, {
       headers: {
         Upgrade: "websocket",
         Origin: origin,
+        "CF-Connecting-IP": cfConnectingIp,
       },
     });
     if (res.status !== 101 || !res.webSocket) {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Miniflare, WebSocket } from "miniflare";
-import { createMiniflare, makeTempPersistRoot } from "./harness";
+import { DEFAULT_TEST_CF_CONNECTING_IP, createMiniflare, makeTempPersistRoot } from "./harness";
 
 /**
  * `/ws/lobby` route と `Lobby` Durable Object のマッチング動作を Miniflare で
@@ -68,10 +68,18 @@ function readLineFromWebSocket(ws: WebSocket): LobbyLineBuffer {
   };
 }
 
-async function connectLobby(mf: Miniflare): Promise<WebSocket> {
+async function connectLobby(
+  mf: Miniflare,
+  cfConnectingIp: string = DEFAULT_TEST_CF_CONNECTING_IP,
+): Promise<WebSocket> {
+  // CF-Connecting-IP は LobbyDO 側で per-IP rate limit (issue #622 PR3a) に
+  // 使われる。Miniflare は edge proxy をシミュレートしないので test 側で
+  // 必ず注入する。同 IP で多数 LOGIN_LOBBY を投げると `LOBBY_LOGIN_RATE_PER_IP_PER_MIN`
+  // バケットを共有する点に注意。
   const res = await mf.dispatchFetch("https://example.com/ws/lobby", {
     headers: {
       Upgrade: "websocket",
+      "CF-Connecting-IP": cfConnectingIp,
     },
   });
   if (res.status !== 101 || !res.webSocket) {

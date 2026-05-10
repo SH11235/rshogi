@@ -40,6 +40,46 @@ impl ConfigKeys {
     pub const GAME_ROOM_BINDING: &'static str = "GAME_ROOM";
     /// Durable Object バインディング名（Lobby マッチング待機キュー、1 instance 固定）。
     pub const LOBBY_BINDING: &'static str = "LOBBY";
+    /// Durable Object バインディング名（Rate limiter / abuse protection、issue
+    /// [#622](https://github.com/SH11235/rshogi/issues/622) PR3a）。
+    /// `id_from_name(format!("{kind}:{identifier}"))` で per-(kind, identifier)
+    /// に sharding し、1 DO instance に 1 token bucket を保持する。詳細は
+    /// [`crate::rate_limit`] と `docs/csa-server/rate_limit.md` を参照。
+    pub const RATE_LIMITER_BINDING: &'static str = "RATE_LIMITER";
+    /// Rate limit (issue [#622](https://github.com/SH11235/rshogi/issues/622)
+    /// PR3a) — 公開 + 私的 LOGIN_LOBBY の 1 IP あたり 1 分間の最大試行回数。
+    /// 設定不正値（空 / `0` / 非数値 / `u32` 範囲外）は安全側既定 (10) に
+    /// フォールバックする。閾値の根拠は `docs/csa-server/rate_limit_design.md`
+    /// §3 Q3 表参照。
+    pub const LOBBY_LOGIN_RATE_PER_IP_PER_MIN: &'static str = "LOBBY_LOGIN_RATE_PER_IP_PER_MIN";
+    /// Rate limit (issue [#622](https://github.com/SH11235/rshogi/issues/622)
+    /// PR3a) — 公開 LOGIN_LOBBY の 1 handle あたり 1 分間の最大試行回数。
+    /// 設定不正値は既定 (5) にフォールバック。
+    pub const LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN: &'static str =
+        "LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN";
+    /// Rate limit (issue [#622](https://github.com/SH11235/rshogi/issues/622)
+    /// PR3a) — CHALLENGE_LOBBY (private 招待発行) の 1 IP あたり 1 分間の最大試行
+    /// 回数。設定不正値は既定 (5) にフォールバック。
+    pub const LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN: &'static str =
+        "LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN";
+    /// Rate limit (issue [#622](https://github.com/SH11235/rshogi/issues/622)
+    /// PR3a) — CHALLENGE_LOBBY (private 招待発行) の 1 inviter handle あたり
+    /// 1 分間の最大試行回数。設定不正値は既定 (3) にフォールバック。
+    pub const LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN: &'static str =
+        "LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN";
+    /// Rate limit (issue [#622](https://github.com/SH11235/rshogi/issues/622)
+    /// PR3a) — `/ws/<room_id>` (player route) upgrade の 1 IP あたり 1 分間の
+    /// 最大回数。新規 GameRoom DO 起動の代理指標として使う (room 起動を厳密に
+    /// 数えるには DO 内 state を追う必要があり、本 PR では player route upgrade
+    /// 回数で近似する)。設定不正値は既定 (20) にフォールバック。
+    pub const ROOM_CREATE_RATE_PER_IP_PER_MIN: &'static str = "ROOM_CREATE_RATE_PER_IP_PER_MIN";
+    /// Rate limit (issue [#622](https://github.com/SH11235/rshogi/issues/622)
+    /// PR3a) — `/ws/<room_id>(/spectate)` upgrade 全般の 1 IP あたり 1 分間の
+    /// 最大回数。player + spectator 両 route が共有する looser cap で、
+    /// `ROOM_CREATE_RATE_PER_IP_PER_MIN` (player のみ tighter cap) と二段
+    /// チェックに使う。設定不正値は既定 (60) にフォールバック。
+    pub const WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN: &'static str =
+        "WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN";
     /// LobbyDO 内 in-memory queue の総数上限。超過時 LOGIN_LOBBY を `queue_full`
     /// で reject する。未設定時は 100 が既定値。
     pub const LOBBY_QUEUE_SIZE_LIMIT: &'static str = "LOBBY_QUEUE_SIZE_LIMIT";
@@ -170,8 +210,11 @@ impl ConfigKeys {
 
     /// `wrangler.toml` の `[[durable_objects.bindings]] name = "..."` で宣言される
     /// べき名前の網羅列挙。新規 DO binding 定数を追加したら必ず本配列にも追加する。
-    pub const ALL_DO_BINDINGS: &'static [&'static str] =
-        &[Self::GAME_ROOM_BINDING, Self::LOBBY_BINDING];
+    pub const ALL_DO_BINDINGS: &'static [&'static str] = &[
+        Self::GAME_ROOM_BINDING,
+        Self::LOBBY_BINDING,
+        Self::RATE_LIMITER_BINDING,
+    ];
 
     /// **deploy 対象の全環境**（production / staging）の `wrangler.<env>.toml`
     /// `[vars]` テーブルで宣言されるべきキーの網羅列挙。本配列に含まれる定数は
@@ -211,6 +254,17 @@ impl ConfigKeys {
         Self::LOBBY_QUEUE_ENTRY_TTL_SEC,
         Self::CHALLENGE_TTL_SEC,
         Self::PRIVATE_CHALLENGE_ENABLED,
+        // Rate limit thresholds (issue #622 PR3a) — 6 keys。各値の根拠は
+        // `docs/csa-server/rate_limit_design.md` §3 Q3 表と本ファイル冒頭の
+        // 各定数 docstring を参照。閾値を deploy なしで上書きしたい場合は
+        // `wrangler secret put <KEY>` ではなく `wrangler.<env>.toml` の `[vars]`
+        // 編集 + redeploy で反映する (本配列に含まれる = 平文管理 OK 値)。
+        Self::LOBBY_LOGIN_RATE_PER_IP_PER_MIN,
+        Self::LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN,
+        Self::LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN,
+        Self::LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN,
+        Self::ROOM_CREATE_RATE_PER_IP_PER_MIN,
+        Self::WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN,
     ];
 
     /// **local dev のみ** の `wrangler.toml.example` `[vars]` テーブルに追加で
