@@ -247,19 +247,21 @@ export const logpushJob = logpushDestinationConf
 
 // ---- NotificationPolicy (alert ルール) -----------------------------------
 //
-// Phase B 初版では「Logpush 自体が止まったら alert」の 1 件のみ宣言する。
-// これは observability の根幹 (logs が止まれば alert もできなくなる) を
-// 守る fail-safe。追加 alert (5xx burst / DO error 等) は別 PR で
-// 同パターンで extend する (本ファイルに `additionalNotificationPolicies` 配列を
-// 足す形で増やせる)。
+// 2 種を declare:
 //
-// alertType の選定:
-// - `failing_logpush_job_disabled_alert`: Logpush job が連続失敗で
-//   Cloudflare 側に自動 disable された時に発火 (=「ログが取れなくなった」検知)
-// - 5xx は Worker の場合 zone 経由ではなく Logpush データを external 監視で
-//   集計する方が確実 (Cloudflare Notifications の `http_alert_origin_error` は
-//   zone scope で Workers behind custom domain で限定的に動く)。本 PR では
-//   declare せず別 PR で `dos_attack_l7` 等と一緒に評価する。
+// 1. `logpushFailureAlert`: Logpush job が連続失敗で Cloudflare 側に
+//    自動 disable された時に発火 (= observability 根幹の fail-safe)。
+//    LogpushJob 依存なので Free plan では declare されない (logpushJob === undefined)。
+//    Paid plan 移行で logpushJob が active 化された時に自動的に declare 候補になる。
+//
+// 2. `workersObservabilityAlert`: Workers Observability dashboard で定義された
+//    custom alert rule (例: worker exception burst = `Outcome != "ok"` > 10 in 5min、
+//    `Outcome` は HTTP status ではなく Worker 実行結果分類: ok / exception /
+//    exceededCpu / scriptNotFound 等) が発火した時に発火。
+//    Worker 単体で alert rule を持てる Free plan で利用可能な唯一の Worker 監視 alert
+//    (PR #701 で `/available_alerts` API 検証済)。
+//
+// どちらも `notificationsEnabled` config bool で個別 enable/disable 可能。
 
 const notificationsEnabled =
     config.getBoolean("notificationsEnabled") ?? false;
@@ -272,13 +274,42 @@ export const logpushFailureAlert =
               alertType: "failing_logpush_job_disabled_alert",
               enabled: notificationsEnabled,
               description:
-                  "rshogi-csa-server-workers Logpush が連続失敗で disable された場合に発火。observability 根幹の fail-safe として #625 Phase B で declare。",
+                  "rshogi-csa-server-workers Logpush が連続失敗で disable された場合に発火。observability 根幹の fail-safe として #625 Phase B で declare。Workers Free plan では logpushJob 不在のため本 policy 自体も declare されない (Paid 移行時に自動 active)。",
               // `alertInterval` は本 alertType (failing_logpush_job_disabled_alert) では
               // Cloudflare Notifications API が無視する (single-shot alert として処理)。
-              // 5xx burst 等の continuous alert を別 PR で追加する際は `alertInterval: "30m"`
+              // continuous alert (例 worker exception burst を本 alertType の代わりに
+              // 別 alertType で定義する場合等) を別 PR で追加する際は `alertInterval: "30m"`
               // を再導入する判断とする。
               mechanisms: {
                   webhooks: [{ id: alertWebhook.id }],
               },
           })
         : undefined;
+
+// Workers Observability alert は alertWebhook のみに依存する (logpushJob 非依存)。
+// Free plan でも declare 可能で、Cloudflare Dashboard → Workers & Pages →
+// 該当 Worker → Observability → Alerts で定義した custom rule (errors > N / latency > X 等)
+// が発火した時に本 policy 経由で alertWebhook に routing される。
+//
+// alert rule 自体の定義は Cloudflare Dashboard UI 専用 (2026-05-10 時点 Pulumi
+// provider に Workers Observability alert rule resource は無い、`docs/csa-server/observability.md`
+// §6.1 参照)。本 declare は「rule が発火したら webhook に届ける」routing 設定のみ。
+//
+// `mechanisms.webhooks` は alertWebhook 1 件、filter なし (Cloudflare Dashboard 側
+// rule で Worker script を選んで定義するため、NotificationPolicy 側の filter 不要)。
+export const workersObservabilityAlert = alertWebhook
+    ? new cloudflare.NotificationPolicy(
+          `workersObservabilityAlert-${stack}`,
+          {
+              accountId,
+              name: `rshogi-${stack}-workers-observability`,
+              alertType: "workers_observability_alert",
+              enabled: notificationsEnabled,
+              description:
+                  "rshogi-csa-server-workers の Workers Observability dashboard で定義した custom alert rule (errors / latency 等) が発火した時に発火。Workers Free plan で利用可能な唯一の Worker 監視 alert として #625 Phase B 続編で declare。具体的 rule は Cloudflare Dashboard UI で別途定義する (Pulumi provider に Workers Observability alert rule resource は無い)。",
+              mechanisms: {
+                  webhooks: [{ id: alertWebhook.id }],
+              },
+          },
+      )
+    : undefined;
