@@ -27,7 +27,7 @@ export interface WebSocketLineBuffer {
 }
 
 /**
- * `WebSocket` から行単位読み取り用の [`WebSocketLineBuffer`] を組み立てる。
+ * `WebSocket` から行単位読み取り用の {@link WebSocketLineBuffer} を組み立てる。
  *
  * 使用例:
  * ```ts
