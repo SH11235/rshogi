@@ -182,36 +182,60 @@ export const alertWebhook = alertWebhookUrl
 const logpushDestinationConf = readOptionalSecret("logpushDestinationConf");
 const logpushEnabled = config.getBoolean("logpushEnabled") ?? false;
 
+// Worker script 名 (LogpushJob の name + filter で参照される single source of truth)。
+// `wrangler.{stack}.toml` の `name` フィールドと一致させる契約。
+// 不一致だと `logpush = true` 設定済 Worker のログが filter で除外され、R2 archive が空になる。
+const workerScriptName =
+    stack === "staging"
+        ? "rshogi-csa-server-workers-staging"
+        : "rshogi-csa-server-workers";
+
 export const logpushJob = logpushDestinationConf
     ? new cloudflare.LogpushJob(`workersLogpush-${stack}`, {
           accountId,
-          name: `rshogi-csa-server-workers-${stack}`,
+          name: workerScriptName,
           dataset: "workers_trace_events",
           destinationConf: logpushDestinationConf,
           enabled: logpushEnabled,
-          // 30 秒間隔 / 5 MB / 1000 records のいずれかで batch flush。
+          // 30 秒間隔 / 5 MiB / 1000 records のいずれかで batch flush。
           // 構造化ログ JSON 1 行 ≈ 200〜500 byte 想定で、平常時の log 量
           // (handle_line / lobby / room_join 各 ~10/sec ピーク見積) でも
           // 30 秒以内に flush される size に到達せず、interval が支配的になる。
           maxUploadIntervalSeconds: 30,
-          maxUploadBytes: 5_000_000,
+          // 5 MiB (= 5 * 1024 * 1024)。Cloudflare Logpush の standard デフォルトに揃える
+          // (Codex review: `5_000_000` は 5 MB で off-by-one、推奨は MiB 換算)。
+          maxUploadBytes: 5_242_880,
           maxUploadRecords: 1000,
+          // `workers_trace_events` dataset から R2 archive に書き出す field を明示列挙する。
+          // 列挙しないと Cloudflare がデフォルトで全 field を embed してオブジェクトサイズが
+          // 膨らむ + 構造化ログ (`Logs[].Message` に含む) の取り出しコストが上がる。
+          // 詳細は https://developers.cloudflare.com/logs/reference/log-fields/account/workers_trace_events/
           outputOptions: {
               outputType: "ndjson",
               timestampFormat: "rfc3339",
+              fieldNames: [
+                  "EventTimestampMs",
+                  "ScriptName",
+                  "ScriptVersion",
+                  "Outcome",
+                  "EventType",
+                  "Logs",
+                  "Exceptions",
+                  "DispatchNamespace",
+                  "RequestHeaders",
+                  "ResponseHeaders",
+                  "Event",
+                  "Diagnostics",
+              ],
           },
           // filter で本 Worker script のログのみに絞る (account 内の他 Worker
           // ログを巻き込まない)。`ScriptName` の正確な値は wrangler.toml の
-          // [env].name に一致する。staging stack は `rshogi-csa-server-workers-staging`、
-          // production stack は `rshogi-csa-server-workers`。
+          // [env].name に一致する (`workerScriptName` 変数を single source として使用)。
           filter: JSON.stringify({
               where: {
                   key: "ScriptName",
                   operator: "eq",
-                  value:
-                      stack === "staging"
-                          ? "rshogi-csa-server-workers-staging"
-                          : "rshogi-csa-server-workers",
+                  value: workerScriptName,
               },
           }),
       })
@@ -245,7 +269,10 @@ export const logpushFailureAlert =
               enabled: notificationsEnabled,
               description:
                   "rshogi-csa-server-workers Logpush が連続失敗で disable された場合に発火。observability 根幹の fail-safe として #625 Phase B で declare。",
-              alertInterval: "30m",
+              // `alertInterval` は本 alertType (failing_logpush_job_disabled_alert) では
+              // Cloudflare Notifications API が無視する (single-shot alert として処理)。
+              // 5xx burst 等の continuous alert を別 PR で追加する際は `alertInterval: "30m"`
+              // を再導入する判断とする。
               mechanisms: {
                   webhooks: [{ id: alertWebhook.id }],
               },

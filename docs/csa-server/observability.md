@@ -117,7 +117,7 @@ openssl rand -hex 32 | pulumi config set --secret alertWebhookSecret
 #    URL は長いので /tmp の一時ファイル経由が安全 (作成直後に削除):
 umask 077  # 作成ファイルを 600 で保護
 cat > /tmp/logpush-destconf <<'DESTEOF'
-r2://rshogi-csa-logs-staging/?account-id=d5d9818649d8722f73cd798c3b1ffb70&access-key-id=<ACCESS_KEY_ID>&secret-access-key=<SECRET_ACCESS_KEY>
+r2://rshogi-csa-logs-staging/?account-id=<ACCOUNT_ID>&access-key-id=<ACCESS_KEY_ID>&secret-access-key=<SECRET_ACCESS_KEY>
 DESTEOF
 # ↑ <ACCESS_KEY_ID> / <SECRET_ACCESS_KEY> を §3.2 で発行した値で書き換えて保存
 pulumi config set --secret logpushDestinationConf < /tmp/logpush-destconf
@@ -231,7 +231,8 @@ export default {
 # §3.4 と同じく shell 引数経由は禁止 (history 漏洩)。--secret のみ指定して
 # 対話 prompt で stdin 入力する。
 pulumi config set --secret alertWebhookUrl
-# (translator Worker URL を貼り付け → Enter)
+# (translator Worker URL を貼り付け → Enter。値: <ACCOUNT_ID> 等の placeholder ではなく
+# 実 URL を貼ること、prompt は echo されないので shell history には残らない)
 pulumi up
 ```
 
@@ -240,9 +241,9 @@ pulumi up
 ## 6. 関連 Issue / PR / Doc
 
 - [#625](https://github.com/SH11235/rshogi/issues/625): umbrella issue
-- [#697](https://github.com/SH11235/rshogi/issues/697): 本 PR (Phase B Pulumi declare scaffold)
+- [#697](https://github.com/SH11235/rshogi/issues/697): 本 Issue (Phase B Pulumi declare scaffold) / [PR #698](https://github.com/SH11235/rshogi/pull/698)
 - [#691](https://github.com/SH11235/rshogi/pull/691): Phase A merge 済 (`structured_log!` macro 導入)
 - [#671](https://github.com/SH11235/rshogi/pull/671): Phase C / [#630](https://github.com/SH11235/rshogi/issues/630) (synthetic monitoring) merge 済
 - [#624](https://github.com/SH11235/rshogi/issues/624): R2 lifecycle / バックアップ — logs bucket も同 lifecycle 設計の対象 (90 日 retention 等)
-- [#628](https://github.com/SH11235/rshogi/issues/628): DO storage 喪失検知 alert を本 PR の NotificationPolicy 上に追加予定 (別 PR)
-- [iac/docs/cloudflare-api-tokens.md](https://github.com/SH11235/iac/blob/main/docs/cloudflare-api-tokens.md): `pulumi-rshogi-iac` token の Logs:Write + Notifications:Write 追加 rotation 記録は本 PR merge 後の別 PR
+- [#628](https://github.com/SH11235/rshogi/issues/628): DO storage 喪失検知 alert を本 Issue の NotificationPolicy 上に追加予定 (別 PR)
+- [iac/docs/cloudflare-api-tokens.md](https://github.com/SH11235/iac/blob/main/docs/cloudflare-api-tokens.md): `pulumi-rshogi-iac` token の Logs:Write + Notifications:Write 追加 rotation 記録は本 Issue merge 後の別 PR

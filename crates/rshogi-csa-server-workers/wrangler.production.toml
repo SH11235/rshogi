@@ -21,6 +21,13 @@ main = "build/worker/shim.mjs"
 # が出ても自動追従しないため、運用判断で本 PR のような明示更新で進める方針。
 compatibility_date = "2026-04-21"
 
+# `logpush = true` は本 Worker のログを `workers_trace_events` dataset に流す
+# (Cloudflare Logpush が consume できる) ようにする。LogpushJob 側 (Pulumi declare、
+# `infra/pulumi/index.ts`) と本フラグの両方が揃って初めて R2 archive にログが
+# 落ちる。詳細は `docs/csa-server/observability.md` §1 / §3 を参照。
+# [#625 Phase B / PR #698]
+logpush = true
+
 # CI 環境では事前に `cargo install -q worker-build@^0.8 --locked` がインストール済みの
 # 前提（`.github/workflows/deploy-workers.yml` の独立 step `Install worker-build` で
 # `actions/cache` 経由 hit 時 skip + miss 時 install を行う）。本ファイルは
