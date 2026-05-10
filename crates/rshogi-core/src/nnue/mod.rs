@@ -96,6 +96,14 @@ pub use network::{
     set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
     set_nnue_architecture_override,
 };
+#[cfg(feature = "layerstacks-512x16x32")]
+pub use network_layer_stacks::NetworkLayerStacks512x16x32;
+#[cfg(feature = "layerstacks-768x16x32")]
+pub use network_layer_stacks::NetworkLayerStacks768x16x32;
+#[cfg(feature = "layerstacks-1536x16x32")]
+pub use network_layer_stacks::NetworkLayerStacks1536x16x32;
+#[cfg(feature = "layerstacks-1536x32x32")]
+pub use network_layer_stacks::NetworkLayerStacks1536x32x32;
 pub use network_layer_stacks::{LayerStacksNetwork, NetworkLayerStacks};
 pub use piece_list::{PieceList, PieceNumber};
 

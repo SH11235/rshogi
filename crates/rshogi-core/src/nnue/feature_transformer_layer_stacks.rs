@@ -431,6 +431,25 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         Ok(())
     }
 
+    /// PSQT が有効かを返す。
+    #[cfg(feature = "nnue-psqt")]
+    pub fn has_psqt(&self) -> bool {
+        self.has_psqt
+    }
+
+    /// PSQT バイアスを参照（外部の解析ツール向け）。
+    #[cfg(feature = "nnue-psqt")]
+    pub fn psqt_biases(&self) -> &[i32; NUM_LAYER_STACK_BUCKETS] {
+        &self.psqt_biases
+    }
+
+    /// PSQT 重みを参照（外部の解析ツール向け）。
+    /// レイアウト: `psqt_weights[feature_idx * NUM_LAYER_STACK_BUCKETS + bucket]`
+    #[cfg(feature = "nnue-psqt")]
+    pub fn psqt_weights(&self) -> &[i32] {
+        &self.psqt_weights
+    }
+
     /// Threat 重みをファイルから読み込み (i8, raw)
     #[cfg(feature = "nnue-threat")]
     pub fn read_threat_weights<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
