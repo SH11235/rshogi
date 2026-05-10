@@ -107,3 +107,13 @@ nnue-progress-diff = []
 [lib]
 name = "rshogi_core"
 path = "src/lib.rs"
+
+# PSQT 統計ダンプツール
+# `NetworkLayerStacks1536x16x32` のロードを行うため、`nnue-psqt` に加えて
+# `layerstacks-1536x16x32` が同時に有効な構成でのみビルドする。
+# （未対応構成では `cargo build --bin dump_psqt_stats` が
+#   "requires the features: nnue-psqt, layerstacks-1536x16x32" で明示的に失敗する）
+[[bin]]
+name = "dump_psqt_stats"
+path = "src/bin/dump_psqt_stats.rs"
+required-features = ["nnue-psqt", "layerstacks-1536x16x32"]

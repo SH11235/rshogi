@@ -20,10 +20,12 @@ fn main() {
 
 #[cfg(feature = "nnue-psqt")]
 fn main() {
-    use rshogi_core::nnue::NetworkLayerStacks1536x16x32;
+    use rshogi_core::nnue::{NUM_LAYER_STACK_BUCKETS, NetworkLayerStacks1536x16x32};
     use std::path::Path;
 
-    const NUM_BUCKETS: usize = 9;
+    // PSQT bucket 数はライブラリ側の定数を直接参照し、
+    // モデル仕様変更時にツール側を追従させる必要をなくす。
+    const NUM_BUCKETS: usize = NUM_LAYER_STACK_BUCKETS;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -49,7 +51,7 @@ fn main() {
 
         let ft = &net.feature_transformer;
         if !ft.has_psqt() {
-            println!("{:<60} (no PSQT)", path.display().to_string());
+            println!("{:<60} (no PSQT)", path.display());
             continue;
         }
 
@@ -81,6 +83,11 @@ fn main() {
         );
 
         // Per-bucket L2 norm
+        debug_assert_eq!(
+            total_count % NUM_BUCKETS,
+            0,
+            "psqt_weights length must be divisible by NUM_BUCKETS"
+        );
         let halfka_dim = total_count / NUM_BUCKETS;
         let mut per_bucket_l2 = [0.0f64; NUM_BUCKETS];
         let mut per_bucket_max = [i32::MIN; NUM_BUCKETS];
