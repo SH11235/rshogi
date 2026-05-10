@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Miniflare, WebSocket } from "miniflare";
 import { DEFAULT_TEST_CF_CONNECTING_IP, createMiniflare, makeTempPersistRoot } from "./harness";
+import { readLineFromWebSocket } from "./ws_test_helpers";
 
 /**
  * `/ws/lobby` route と `Lobby` Durable Object のマッチング動作を Miniflare で
@@ -9,64 +10,6 @@ import { DEFAULT_TEST_CF_CONNECTING_IP, createMiniflare, makeTempPersistRoot } f
  * 既存 `GameRoom` DO への引き渡しまでの完全 E2E (1 局完走) は本 smoke のスコープ外
  * (csa_client `--lobby` mode を含む実装が揃ってから別 smoke で検証する)。
  */
-
-interface LobbyLineBuffer {
-  takeLine(timeoutMs?: number): Promise<string>;
-}
-
-function readLineFromWebSocket(ws: WebSocket): LobbyLineBuffer {
-  let buffer = "";
-  const queue: string[] = [];
-  const waiters: Array<{ resolve: (s: string) => void; reject: (e: Error) => void }> = [];
-  let closed = false;
-
-  ws.addEventListener("message", (ev) => {
-    const data =
-      typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data as ArrayBuffer);
-    buffer += data;
-    while (true) {
-      const idx = buffer.indexOf("\n");
-      if (idx < 0) break;
-      const line = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 1);
-      const w = waiters.shift();
-      if (w) w.resolve(line);
-      else queue.push(line);
-    }
-  });
-  ws.addEventListener("close", () => {
-    closed = true;
-    while (waiters.length > 0) {
-      const w = waiters.shift();
-      w?.reject(new Error("connection closed"));
-    }
-  });
-
-  return {
-    takeLine(timeoutMs = 3000): Promise<string> {
-      if (queue.length > 0) return Promise.resolve(queue.shift()!);
-      if (closed) return Promise.reject(new Error("connection closed"));
-      return new Promise<string>((resolve, reject) => {
-        const entry = {
-          resolve: (s: string) => {
-            clearTimeout(timer);
-            resolve(s);
-          },
-          reject: (e: Error) => {
-            clearTimeout(timer);
-            reject(e);
-          },
-        };
-        const timer = setTimeout(() => {
-          const i = waiters.indexOf(entry);
-          if (i >= 0) waiters.splice(i, 1);
-          reject(new Error(`takeLine timeout after ${timeoutMs}ms`));
-        }, timeoutMs);
-        waiters.push(entry);
-      });
-    },
-  };
-}
 
 async function connectLobby(
   mf: Miniflare,

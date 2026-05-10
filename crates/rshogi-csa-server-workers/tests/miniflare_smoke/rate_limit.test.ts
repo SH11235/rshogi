@@ -5,6 +5,7 @@ import {
   createMiniflare,
   makeTempPersistRoot,
 } from "./harness";
+import { readLineFromWebSocket } from "./ws_test_helpers";
 
 /**
  * Issue #622 PR3a: rate limit / abuse protection の Miniflare 経由 E2E。
@@ -53,71 +54,6 @@ async function connectLobbyWithIp(
   }
   res.webSocket.accept();
   return res.webSocket;
-}
-
-/**
- * WebSocket から 1 行 (`\n` 区切り) を取り出す簡易バッファ。`lobby.test.ts` の
- * 同等関数を本 smoke に複製している (harness 側に出すと scope が広すぎる)。
- */
-function readLineFromWebSocket(
-  ws: WebSocket,
-): { takeLine(timeoutMs?: number): Promise<string> } {
-  let buffer = "";
-  const queue: string[] = [];
-  const waiters: Array<{
-    resolve: (s: string) => void;
-    reject: (e: Error) => void;
-  }> = [];
-  let closed = false;
-
-  ws.addEventListener("message", (ev) => {
-    const data =
-      typeof ev.data === "string"
-        ? ev.data
-        : new TextDecoder().decode(ev.data as ArrayBuffer);
-    buffer += data;
-    while (true) {
-      const idx = buffer.indexOf("\n");
-      if (idx < 0) break;
-      const line = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 1);
-      const w = waiters.shift();
-      if (w) w.resolve(line);
-      else queue.push(line);
-    }
-  });
-  ws.addEventListener("close", () => {
-    closed = true;
-    while (waiters.length > 0) {
-      const w = waiters.shift();
-      w?.reject(new Error("connection closed"));
-    }
-  });
-
-  return {
-    takeLine(timeoutMs = 3000): Promise<string> {
-      if (queue.length > 0) return Promise.resolve(queue.shift()!);
-      if (closed) return Promise.reject(new Error("connection closed"));
-      return new Promise<string>((resolve, reject) => {
-        const entry = {
-          resolve: (s: string) => {
-            clearTimeout(timer);
-            resolve(s);
-          },
-          reject: (e: Error) => {
-            clearTimeout(timer);
-            reject(e);
-          },
-        };
-        const timer = setTimeout(() => {
-          const i = waiters.indexOf(entry);
-          if (i >= 0) waiters.splice(i, 1);
-          reject(new Error(`takeLine timeout after ${timeoutMs}ms`));
-        }, timeoutMs);
-        waiters.push(entry);
-      });
-    },
-  };
 }
 
 // ---------------------------------------------------------------------------
