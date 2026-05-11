@@ -20,9 +20,10 @@
 
 ┌─────────────────────────────────────────────────────────────┐
 │ Cloudflare Notifications (account-level)                    │
-│   - 配信先 webhook 1 件 (rshogi-staging-alerts) 登録済         │
-│   - NotificationPolicy は API 直作成 (Pulumi v6.15.0 が       │
-│     workers_observability_alert を未対応のため、§6.1 参照)     │
+│   - 配信先 webhook (rshogi-staging-alerts) 登録済 ✅            │
+│   - NotificationPolicy (workers_observability_alert、        │
+│     id 23eb8141...) staging 側 API 直作成済 ✅                 │
+│     (Pulumi v6.15.0 alertType enum 未対応、§6.1 参照)          │
 │   - 具体的 alert rule 定義は Cloudflare Dashboard (user manual)│
 └────────┬────────────────────────────────────────────────────┘
          │ POST request (Cloudflare-format JSON payload、Cloudflare が
@@ -51,7 +52,7 @@ Workers console output ↓ Logpush (NDJSON、30 秒 batch、enabled flag で gat
 | R2 bucket (logs archive) | `rshogi-csa-logs-prod` | `rshogi-csa-logs-staging` | ✅ 作成済 (Free plan では空、Paid 移行時に Logpush 投入先) | `infra/pulumi/index.ts` |
 | NotificationPolicyWebhooks | (未作成) | `rshogi-staging-alerts` (id `e9e6102c...`) | ✅ staging のみ作成済、Slack 疎通確認済 | `infra/pulumi/index.ts` |
 | LogpushJob | – | – | ❌ Free plan で作成不可、config 投入で declare をスキップ | `infra/pulumi/index.ts` (scaffold 維持) |
-| NotificationPolicy `workers_observability_alert` 用 | (未作成) | `rshogi-staging-workers-observability` | ⚠️ Pulumi v6.15.0 alertType enum 未対応のため API 直作成 (§6.1 Step 2 参照)、Pulumi declare は provider 対応後に別 PR | (Pulumi 不可) |
+| NotificationPolicy `workers_observability_alert` 用 | (未作成) | `rshogi-staging-workers-observability` (id `23eb8141856748a3bf42094da6b3a1c4`) | ✅ API 直作成済 (2026-05-10、Pulumi v6.15.0 alertType enum 未対応のため、§6.1 Step 2 参照)、Pulumi declare は provider 対応後に別 PR | (Pulumi 不可) |
 | NotificationPolicy `logpushFailureAlert` | – | – | ❌ Free plan で logpushJob 不在のため依存 chain skip、Paid 移行時に自動 active | `infra/pulumi/index.ts` (scaffold 維持) |
 
 **Pulumi scaffold 設計**: `infra/pulumi/index.ts` の `readOptionalSecret(key)` ヘルパーで「config 値が unset または空文字列なら resource 自体を declare しない」条件分岐を持たせており、Free plan では Logpush 関連 config を投入しないことで自動的にスキップされる。Paid plan 移行時は §7.1 に従って config 投入のみで Logpush + alert を再活性化できる。
@@ -316,17 +317,38 @@ curl -sS -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/aler
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg wid "$WEBHOOK_ID" '{
     name: "rshogi-staging-workers-observability",
-    description: "Workers Observability dashboard で定義した custom alert rule が発火した時に Slack へ routing。#625 Phase B 続編 PR #704 で API 直作成 (Pulumi v6.15.0 の alertType enum に未収録のため)。",
+    description: "Workers Observability dashboard で定義した custom alert rule が発火 (FIRING_FAILED) または回復 (NORMAL) した時に Slack へ routing。#625 Phase B 続編 PR #704 で API 直作成 (Pulumi v6.15.0 alertType enum 未収録のため)。",
     alert_type: "workers_observability_alert",
     enabled: true,
-    alert_interval: "30m",
+    filters: {
+      status: ["FIRING_FAILED", "NORMAL"]
+    },
     mechanisms: {
       webhooks: [{ id: $wid }]
     }
-  }')" | jq '.result | {id, name, alert_type, enabled}'
+  }')" | jq '.result // .errors'
 ```
 
-> **`alert_interval: "30m"`**: `workers_observability_alert` は continuous fire 型で閾値超過が続く間に複数回発火し得る。30 分間隔で同じ incident からの通知を 1 回に絞ることで Slack 過剰通知を防ぐ ([Codex review #704 で指摘](https://github.com/SH11235/rshogi/pull/704))。
+> **`filters.status` 必須** (2026-05-10 実機検証で判明、PR #706): 空だと `code 17103: Filters selection must be provided to create a policy`。`/available_alerts` API の `workers_observability_alert.filter_options[0]` で確認できる仕様:
+> - Key: `status`
+> - AvailableValues: `FIRING_FAILED` (alert 発火時) / `NORMAL` (回復時)
+> - Range: `1-n` (1 つ以上必須)
+> 通常は両方指定して発火・回復どちらも通知する設計を推奨。
+
+> **`alert_interval` は本 alertType で non-supported** (2026-05-10 実機検証で判明、PR #706): PR #704 review (Codex) で suggest された `alert_interval: "30m"` を含めると `code 17009: Invalid alert interval.: customization of alerting interval is not supported for this alert type` で reject される。Cloudflare 側で自動的に重複通知を rate-limit する想定。継続発火型 alert の Slack 過剰通知は Cloudflare デフォルト挙動に委ねる。
+
+成功時の response 例 (staging で実機検証):
+
+```json
+{
+  "id": "23eb8141856748a3bf42094da6b3a1c4",
+  "name": "rshogi-staging-workers-observability",
+  "alert_type": "workers_observability_alert",
+  "enabled": true,
+  "filters": { "status": ["FIRING_FAILED", "NORMAL"] },
+  "mechanisms": { "webhooks": [{ "id": "<webhook_id>", "name": "rshogi-staging-alerts" }] }
+}
+```
 
 ##### Step 3: Cloudflare Dashboard で具体的な alert rule を定義 (user manual)
 
