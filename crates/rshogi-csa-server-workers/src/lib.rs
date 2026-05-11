@@ -43,6 +43,12 @@ pub mod datetime;
 pub mod export_retry;
 pub mod floodgate_history;
 pub mod games_index;
+// `handle_auth` は `WORKERS_HANDLE_AUTH` whitelist の parse + password SHA256
+// 比較 (issue #664) を担う。`HandleAuthRegistry` + `verify` は I/O 非依存の
+// pure helper でホスト target からテストできるよう `pub mod` で公開する。
+// wasm32 限定の `load_handle_auth_registry` (env 読み出し配線) は本 module 内で
+// `#[cfg(target_arch = "wasm32")]` 化する。
+pub mod handle_auth;
 pub mod live_games_index;
 pub mod lobby_protocol;
 pub mod origin;

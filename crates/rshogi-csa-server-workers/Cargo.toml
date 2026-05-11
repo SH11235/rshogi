@@ -28,6 +28,10 @@ chrono = { version = "0.4", default-features = false, features = ["serde"] }
 # Reconnect_Token のタイミング攻撃耐性比較に使う。`default-features = false`
 # で std を切っておくと wasm32-unknown-unknown でも問題なく動く (no_std 経路)。
 subtle = { version = "2", default-features = false }
+# `WORKERS_HANDLE_AUTH` whitelist (issue #664) の password SHA256 比較に使う。
+# pure-Rust 実装で wasm32-unknown-unknown でも問題なく動く。LOGIN は人手駆動で
+# 頻度が低いため `default-features = false` (asm 無効化) で十分。
+sha2 = { version = "0.10", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # wasm32-unknown-unknown 以外では参照しない。worker-build / wrangler dev から

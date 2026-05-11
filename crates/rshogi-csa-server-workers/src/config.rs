@@ -143,6 +143,28 @@ impl ConfigKeys {
     /// `wrangler dev` を friction なく動かせるようにする。Worker code は
     /// `env.var(ConfigKeys::ADMIN_API_TOKEN)` で var/secret どちらも読む。
     pub const ADMIN_API_TOKEN: &'static str = "ADMIN_API_TOKEN";
+    /// LOGIN handle 自称防止用 whitelist (Floodgate audit
+    /// [#664](https://github.com/SH11235/rshogi/issues/664)、親 [#621](https://github.com/SH11235/rshogi/issues/621))。
+    /// JSON 配列文字列で `[{"handle":"...","password_sha256":"..."}, ...]` 形式を
+    /// 受け取り、ここに登録された handle で `LOGIN` / `LOGIN_LOBBY` した
+    /// session に対して **password の SHA256 比較** を要求する。詳細は
+    /// [`crate::handle_auth`] と `docs/csa-server/admin_auth.md` §LOGIN handle
+    /// whitelist 節を参照。
+    ///
+    /// - whitelist に **無い** handle: 従来通り self-claim で素通し (Floodgate
+    ///   互換 client / 一般対局者の挙動を変えないため後方互換最優先)。
+    /// - whitelist に **ある** handle: SHA256(password) が登録 hash と一致した
+    ///   ときのみ LOGIN 受理、不一致は `LOGIN:incorrect handle_auth_failed` で reject。
+    /// - whitelist JSON 不正: fail-closed で **全 LOGIN reject** + structured_log
+    ///   警告 (不正設定で admin 自称が通る経路を絶つ)。
+    ///
+    /// **production / staging**: Cloudflare secret として
+    /// `wrangler secret put WORKERS_HANDLE_AUTH` で配置する (password hash を
+    /// 含むため公開 toml には書かない)。secret 未配置 / 空文字 / `"[]"` は
+    /// 「whitelist 未宣言」として self-claim 既定挙動を維持する。
+    /// **local dev**: `wrangler.toml.example` の `[vars]` に空配列 placeholder
+    /// (`"[]"`) を残し、friction なく `wrangler dev` を動かせるようにする。
+    pub const WORKERS_HANDLE_AUTH: &'static str = "WORKERS_HANDLE_AUTH";
     /// 切断時の再接続猶予秒数。`0` または未設定なら再接続プロトコルを無効化し、
     /// WebSocket close を即時 `#ABNORMAL` に流す（保守的既定）。`> 0` を指定する
     /// 構成は `--allow-floodgate-features` (Workers では `ALLOW_FLOODGATE_FEATURES`)
@@ -274,7 +296,8 @@ impl ConfigKeys {
     /// `wrangler.toml.example` には `SHARED_PUBLIC_VARS_KEYS ∪ LOCAL_DEV_ONLY_VARS_KEYS`
     /// 全件を `[vars]` として記載することで、新規メンバーが `cp wrangler.toml.example
     /// wrangler.toml && wrangler dev` で即動作確認できる friction レス運用を維持する。
-    pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] = &[Self::ADMIN_API_TOKEN];
+    pub const LOCAL_DEV_ONLY_VARS_KEYS: &'static [&'static str] =
+        &[Self::ADMIN_API_TOKEN, Self::WORKERS_HANDLE_AUTH];
 
     /// **deploy 時に CI から runtime 注入される** `[vars]` キーの網羅列挙
     /// ([`Self::DEPLOYED_SHA`] 等)。`SHARED_PUBLIC_VARS_KEYS` / `LOCAL_DEV_ONLY_VARS_KEYS`

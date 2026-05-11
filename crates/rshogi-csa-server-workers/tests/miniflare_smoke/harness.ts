@@ -82,6 +82,13 @@ export interface HarnessOptions {
   clockKind?: "countdown" | "countdown_msec" | "fischer" | "stopwatch";
   wsAllowedOrigins?: string;
   adminApiToken?: string;
+  /// `WORKERS_HANDLE_AUTH` whitelist (issue #664) のオーバーライド。
+  /// 既定は空配列 (`"[]"`) で「whitelist 未宣言」として self-claim 既定挙動を
+  /// 維持する (一般 smoke は無影響)。検証時は
+  /// `[{"handle":"alice","password_sha256":"<lowercase hex 64 chars>"}, ...]`
+  /// 形式 JSON 文字列を渡す。env JSON 不正経路 (fail-closed) を確認したいとき
+  /// は `"broken"` 等を渡す。
+  workersHandleAuth?: string;
   lobbyQueueSizeLimit?: number;
   /// 公開 lobby queue entry の TTL (秒、Issue #631)。`LOBBY_PONG` 受信から本値
   /// を超えた entry は alarm で stale 判定され `LOGIN_LOBBY:incorrect queue_expired`
@@ -154,6 +161,12 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       // `adminApiToken: ""` を明示すること。`%%ADMIN <token>` 成功 E2E の場合は
       // 同 token を `adminApiToken` で揃えて binding する。
       ADMIN_API_TOKEN: opts.adminApiToken ?? "local-dev-admin-token-placeholder",
+      // `WORKERS_HANDLE_AUTH` 既定値は wrangler.toml.example と揃えた空配列で、
+      // whitelist 未宣言モードとして self-claim 既定挙動を維持する。既存 smoke
+      // が偶発的に handle_auth_failed に当たる経路を踏まないようにする。
+      // 検証時のみ `handle_auth.test.ts` 等から JSON 文字列を渡して whitelist
+      // を有効化する。
+      WORKERS_HANDLE_AUTH: opts.workersHandleAuth ?? "[]",
       // `reconnectGraceSeconds: 0` 既定は production wrangler.production.toml の
       // `RECONNECT_GRACE_SECONDS = "0"` と整合し、再接続プロトコル無効構成を表す。
       // テストで `30` 等を明示する場合のみ Game_Summary に `Reconnect_Token:` 行が
