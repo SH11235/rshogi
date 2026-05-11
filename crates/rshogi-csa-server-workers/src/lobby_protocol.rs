@@ -22,7 +22,12 @@ use rshogi_csa_server::matching::{
 use rshogi_csa_server::types::{Color, PlayerName};
 
 /// LOGIN_LOBBY コマンドのパース結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` 派生は **手書き**: `password` は `"***"` でマスクして平文が assert
+/// 失敗時の panic message / tracing 経路に流れないようにする。`PartialEq` /
+/// `Eq` は password まで含めて比較する (テストで「password が parser に保持
+/// されている」ことを assert するため)。
+#[derive(Clone, PartialEq, Eq)]
 pub struct LoginLobbyRequest {
     pub handle: String,
     pub game_name: String,
@@ -32,18 +37,24 @@ pub struct LoginLobbyRequest {
     /// [`crate::handle_auth::HandleAuthRegistry::verify`] に渡して SHA256
     /// 比較する (issue [#664](https://github.com/SH11235/rshogi/issues/664))。
     ///
-    /// 構造体内に保持する間も生文字列のまま扱う。`rshogi_csa_server::types::Secret`
-    /// で wrap しないのは、本 struct が公開 API として `Debug` を出す経路が
-    /// 既に存在しないため (LOGIN_LOBBY のログは handle のみ structured_log で
-    /// 出力する) と、parser から呼び出し側 verify までの 1 ホップ限定で
-    /// 平文を保持するスコープが極小だから (Secret wrap はライフタイム以外の
-    /// 防御を増やさない)。
-    ///
-    /// ⚠️ 本 struct に `#[derive(Debug)]` / `Serialize` / `tracing` 経路で出力を
-    /// 派生させる際は、必ずこのフィールドをマスクまたは除外すること。平文が
-    /// log / wire に流れる前に [`crate::structured_log!`] 経由でフィルタする
-    /// のが現状の不変条件。
+    /// 構造体内に保持する間は生文字列のまま扱う (`rshogi_csa_server::types::Secret`
+    /// で wrap しない理由: parser から verify までの 1 ホップ限定スコープで、
+    /// `Debug` は手書きマスク済、Secret wrap はライフタイム以外の防御を増やさ
+    /// ない)。`Serialize` / `tracing` 派生時は必ず本フィールドをマスクまたは除外
+    /// すること (現状の `Debug` は手書きで `"***"` を出すが、`Serialize` が
+    /// 後から derive されると bypass される)。
     pub password: String,
+}
+
+impl std::fmt::Debug for LoginLobbyRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginLobbyRequest")
+            .field("handle", &self.handle)
+            .field("game_name", &self.game_name)
+            .field("color", &self.color)
+            .field("password", &"***")
+            .finish()
+    }
 }
 
 /// LOGIN_LOBBY パースエラー。
@@ -435,7 +446,10 @@ pub fn build_challenge_incorrect_line(reason: &str) -> String {
 }
 
 /// 私的対局 LOGIN (`<handle>+private-<24hex>+free`) のパース結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` 派生は **手書き** (`LoginLobbyRequest` と同じ理由): password は `"***"`
+/// でマスクして assert 失敗時の panic message / tracing 経路から平文を切り離す。
+#[derive(Clone, PartialEq, Eq)]
 pub struct LoginLobbyPrivateRequest {
     /// LOGIN 申告された handle (= challenge entry の `inviter` または `opponent`
     /// のいずれかと一致するはず。一致確認は `lobby.rs` 側で `ChallengeRegistry`
@@ -451,9 +465,20 @@ pub struct LoginLobbyPrivateRequest {
     /// 無認証で名乗れてしまう経路を塞ぐ。公開経路 ([`LoginLobbyRequest::password`])
     /// と同様、parser → verify の 1 ホップ限定で平文保持する。
     ///
-    /// ⚠️ `Debug` / `Serialize` / `tracing` 派生時に必ずマスクすること
-    /// ([`LoginLobbyRequest::password`] と同じ不変条件)。
+    /// ⚠️ `Debug` は手書きで `"***"` マスク済。`Serialize` / `tracing` を後から
+    /// derive する場合は再び必ずマスクすること ([`LoginLobbyRequest::password`]
+    /// と同じ不変条件)。
     pub password: String,
+}
+
+impl std::fmt::Debug for LoginLobbyPrivateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginLobbyPrivateRequest")
+            .field("handle", &self.handle)
+            .field("token", &self.token)
+            .field("password", &"***")
+            .finish()
+    }
 }
 
 /// 私的対局 LOGIN_LOBBY パースの失敗種別。
@@ -566,6 +591,17 @@ mod tests {
         // password token は parser に保持される (issue #664 で
         // WORKERS_HANDLE_AUTH 経路に渡せるようにするため)。
         assert_eq!(req.password, "anything");
+    }
+
+    /// `LoginLobbyRequest::Debug` は password を `"***"` でマスクする (issue
+    /// #664 PR #708 codex Minor review 由来)。`Debug` 派生を再導入すると平文が
+    /// panic message 経路に流れるため、本不変条件をテストで gate する。
+    #[test]
+    fn login_lobby_request_debug_masks_password() {
+        let req = parse_login_lobby("LOGIN_LOBBY alice+game-eval+black secret-password").unwrap();
+        let debug = format!("{req:?}");
+        assert!(debug.contains("password: \"***\""), "expected masked password, got: {debug}");
+        assert!(!debug.contains("secret-password"), "Debug must not leak plaintext: {debug}");
     }
 
     #[test]
@@ -933,6 +969,19 @@ mod tests {
         // password token は private 経路でも parser に保持される (issue #664
         // follow-up で `WORKERS_HANDLE_AUTH` 経路に渡せるようにするため)。
         assert_eq!(req.password, "pw");
+    }
+
+    /// `LoginLobbyPrivateRequest::Debug` は password を `"***"` でマスクする
+    /// (公開経路の `login_lobby_request_debug_masks_password` と同じ不変条件)。
+    #[test]
+    fn login_lobby_private_request_debug_masks_password() {
+        let req = parse_login_lobby_with_free(
+            "LOGIN_LOBBY alice+private-0123456789abcdef0123abcd+free secret-pw",
+        )
+        .unwrap();
+        let debug = format!("{req:?}");
+        assert!(debug.contains("password: \"***\""), "expected masked password, got: {debug}");
+        assert!(!debug.contains("secret-pw"), "Debug must not leak plaintext: {debug}");
     }
 
     /// 末尾 color が `free` 以外なら `ColorMustBeFree`。

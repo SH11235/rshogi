@@ -1348,9 +1348,16 @@ fn evict_old_websockets_with_handle(state: &State, current_ws: &WebSocket, handl
 
 /// LOGIN handle 自称防止 (issue #664) の lobby 経路版。
 /// `WORKERS_HANDLE_AUTH` whitelist 設定を 1 LOGIN_LOBBY あたり 1 回 fetch + parse
-/// し、登録 handle に限り SHA256(password) を要求する。private 経路
-/// (`LOGIN_LOBBY <handle>+private-<token>+free`) は token 経由で
-/// `inviter` / `opponent` が決定論的に固定されるため本関数を通らない契約。
+/// し、登録 handle に限り SHA256(password) を要求する。
+///
+/// 公開経路 ([`Lobby::handle_login_lobby`]) と private 経路
+/// ([`Lobby::handle_login_lobby_private`]) の双方から呼ばれる (codex-connector
+/// PR #708 P1 review 由来 — `CHALLENGE_LOBBY` の `opponent` 自己申告で whitelist
+/// 対象 handle を private 経由で名乗れる経路を塞ぐため、private 経路でも
+/// 同じ enforcement を走らせる)。private 経路では token validation **より先** に
+/// 評価することで reason を `handle_auth_failed` に uniform 化し、
+/// `not_invited` / `challenge_expired` との差分から whitelist 対象 handle が
+/// 推測される情報 leak も同時に塞ぐ。
 ///
 /// 戻り値 / fail-closed 規約は `game_room.rs::enforce_handle_auth` と同じ。
 /// reason は `handle_auth_failed` で uniform に拒否することで「whitelist が
