@@ -38,6 +38,11 @@ pub struct LoginLobbyRequest {
     /// 出力する) と、parser から呼び出し側 verify までの 1 ホップ限定で
     /// 平文を保持するスコープが極小だから (Secret wrap はライフタイム以外の
     /// 防御を増やさない)。
+    ///
+    /// ⚠️ 本 struct に `#[derive(Debug)]` / `Serialize` / `tracing` 経路で出力を
+    /// 派生させる際は、必ずこのフィールドをマスクまたは除外すること。平文が
+    /// log / wire に流れる前に [`crate::structured_log!`] 経由でフィルタする
+    /// のが現状の不変条件。
     pub password: String,
 }
 
@@ -439,6 +444,16 @@ pub struct LoginLobbyPrivateRequest {
     /// `private-` prefix を除いた 24 文字 hex 部分。`ChallengeToken::from_raw`
     /// で wrap 済の値を保持する。
     pub token: ChallengeToken,
+    /// `<password>` トークン。issue [#664](https://github.com/SH11235/rshogi/issues/664)
+    /// の private 経路 follow-up (codex-connector P1 review 由来) で必須化:
+    /// `CHALLENGE_LOBBY` の `opponent=<handle>` は発行者の自己申告で任意 handle
+    /// を仕込めるため、private LOGIN_LOBBY 経由で whitelist 対象 handle を
+    /// 無認証で名乗れてしまう経路を塞ぐ。公開経路 ([`LoginLobbyRequest::password`])
+    /// と同様、parser → verify の 1 ホップ限定で平文保持する。
+    ///
+    /// ⚠️ `Debug` / `Serialize` / `tracing` 派生時に必ずマスクすること
+    /// ([`LoginLobbyRequest::password`] と同じ不変条件)。
+    pub password: String,
 }
 
 /// 私的対局 LOGIN_LOBBY パースの失敗種別。
@@ -501,8 +516,10 @@ pub fn parse_login_lobby_with_free(
         .ok_or(LoginLobbyPrivateError::NotLoginCommand)?;
     let mut parts = rest.split_whitespace();
     let id = parts.next().ok_or(LoginLobbyPrivateError::BadFormat)?;
-    // password は受信するが本体では検証しない (self-claim)。引数の存在のみ確認。
-    let _password = parts.next().ok_or(LoginLobbyPrivateError::BadFormat)?;
+    // password は issue #664 follow-up (codex-connector P1) で必須化:
+    // `WORKERS_HANDLE_AUTH` whitelist 対象 handle が private 経路で無認証で
+    // 名乗れる経路を塞ぐため、parser で保持して呼び出し側 verify に渡す。
+    let password = parts.next().ok_or(LoginLobbyPrivateError::BadFormat)?;
     if parts.next().is_some() {
         return Err(LoginLobbyPrivateError::BadFormat);
     }
@@ -532,6 +549,7 @@ pub fn parse_login_lobby_with_free(
     Ok(LoginLobbyPrivateRequest {
         handle: handle.to_owned(),
         token: ChallengeToken::from_raw(hex_part),
+        password: password.to_owned(),
     })
 }
 
@@ -912,6 +930,9 @@ mod tests {
         .unwrap();
         assert_eq!(req.handle, "alice");
         assert_eq!(req.token.as_str(), "0123456789abcdef0123abcd");
+        // password token は private 経路でも parser に保持される (issue #664
+        // follow-up で `WORKERS_HANDLE_AUTH` 経路に渡せるようにするため)。
+        assert_eq!(req.password, "pw");
     }
 
     /// 末尾 color が `free` 以外なら `ColorMustBeFree`。

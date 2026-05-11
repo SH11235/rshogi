@@ -232,4 +232,60 @@ describe("WORKERS_HANDLE_AUTH whitelist (issue #664)", () => {
       }
     });
   });
+
+  /**
+   * Private LOGIN_LOBBY (`<handle>+private-<24hex>+free <password>`) 経路の
+   * whitelist 検証 (codex-connector P1 follow-up)。`CHALLENGE_LOBBY` の
+   * `opponent=<handle>` が発行者の自己申告のため、token を握った攻撃者が
+   * private 経由で whitelist 対象 handle を無認証で名乗れる経路を塞ぐ。
+   *
+   * challenge token 発行経路まで通電させると test が肥大化するため、
+   * **token 検証より前** に handle_auth が走ることを利用して「whitelist 対象
+   * handle + 不正 password」が `not_invited` / `challenge_expired` ではなく
+   * `handle_auth_failed` で uniform に拒否されることを assert する。
+   */
+  describe("LOGIN_LOBBY private 経路 (#664 codex-connector P1 follow-up)", () => {
+    test("whitelist あり + alice + 不正 password (架空 token) → handle_auth_failed", async () => {
+      const mf = await createMiniflare({
+        persistRoot,
+        workersHandleAuth: whitelistOnlyAlice(),
+        privateChallengeEnabled: true,
+      });
+      try {
+        const ws = await connectLobby(mf);
+        const buf = readLineFromWebSocket(ws);
+        // private token が未登録でも、handle_auth check が token validation より
+        // 先に走るので reason は `handle_auth_failed` で固定される (uniform 拒否)。
+        ws.send(
+          "LOGIN_LOBBY alice+private-0123456789abcdef0123abcd+free wrong-password\n",
+        );
+        expect(await buf.takeLine()).toBe("LOGIN_LOBBY:incorrect handle_auth_failed");
+        ws.close();
+      } finally {
+        await mf.dispose();
+      }
+    });
+
+    test("whitelist 外 handle (bob) + private 経路 → token validation に進む (challenge_expired)", async () => {
+      const mf = await createMiniflare({
+        persistRoot,
+        workersHandleAuth: whitelistOnlyAlice(),
+        privateChallengeEnabled: true,
+      });
+      try {
+        const ws = await connectLobby(mf);
+        const buf = readLineFromWebSocket(ws);
+        // bob は whitelist 外 → handle_auth は素通し → token 未登録のため
+        // `challenge_expired` で reject (handle_auth_failed ではない)。private
+        // 経路の backward compat を回帰する位置付け。
+        ws.send(
+          "LOGIN_LOBBY bob+private-0123456789abcdef0123abcd+free anything\n",
+        );
+        expect(await buf.takeLine()).toBe("LOGIN_LOBBY:incorrect challenge_expired");
+        ws.close();
+      } finally {
+        await mf.dispose();
+      }
+    });
+  });
 });

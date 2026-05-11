@@ -20,10 +20,14 @@
 //!   形式不正は **全 LOGIN reject** で fail-closed する。設定不正で admin 自称が
 //!   通る経路を絶つ。env が空 (`None` / `""` / `"[]"`) のみが「whitelist 未宣言」
 //!   として self-claim 既定挙動を維持する。
-//! - **private 経路は対象外**: `LOGIN_LOBBY <handle>+private-<token>+free` は
-//!   challenge token 経由で `inviter` / `opponent` が決定論的に固定されるため、
-//!   self-claim 自体が発生しない。本 module の whitelist 対象は **公開 LOGIN
-//!   経路 (`LOGIN` / 公開 `LOGIN_LOBBY`) のみ**に絞る。
+//! - **private 経路にも適用**: `LOGIN_LOBBY <handle>+private-<token>+free` も
+//!   whitelist 対象 (PR #708 codex-connector P1 review 由来)。`CHALLENGE_LOBBY`
+//!   の `opponent=<handle>` は発行者の自己申告のため、任意 handle を仕込んだ
+//!   token を握って private LOGIN_LOBBY 経由で名乗る経路が成立してしまう。
+//!   handle_auth を token validation より先に評価し reason を
+//!   `handle_auth_failed` に uniform 化することで、`not_invited` /
+//!   `challenge_expired` の差分から whitelist 対象 handle を推測される情報
+//!   leak も同時に塞ぐ。
 //!
 //! # ホスト target テスト方針
 //!
@@ -197,6 +201,9 @@ fn parse_hex_sha256(s: &str) -> Option<[u8; PASSWORD_SHA256_BYTES]> {
     }
     let mut out = [0u8; PASSWORD_SHA256_BYTES];
     let bytes = s.as_bytes();
+    // 先頭 `len() == PASSWORD_SHA256_HEX_LEN` (64、偶数) チェックで remainder が
+    // 常に空になることを保証しているため、`chunks_exact(2)` の末尾切り捨て副作用は
+    // 発生しない (奇数長は早期に `None` で reject)。
     for (i, chunk) in bytes.chunks_exact(2).enumerate() {
         let high = hex_nibble(chunk[0])?;
         let low = hex_nibble(chunk[1])?;

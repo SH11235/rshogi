@@ -1027,7 +1027,11 @@ impl Lobby {
             Ok(r) => r,
             Err(e) => return self.send_private_login_error(ws, e).await,
         };
-        let LoginLobbyPrivateRequest { handle, token } = req;
+        let LoginLobbyPrivateRequest {
+            handle,
+            token,
+            password,
+        } = req;
 
         // Rate limit (issue #622 PR3a): 私的 LOGIN_LOBBY も公開 LOGIN_LOBBY と
         // 同じ IP / handle カウンタを共有する (どちらも `LOGIN_LOBBY` 系コマンドで、
@@ -1037,6 +1041,20 @@ impl Lobby {
         // 揃え、`send_rate_limited_login_lobby` は close しない)。
         if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &handle).await? {
             return self.send_rate_limited_login_lobby(ws, decision).await;
+        }
+
+        // `WORKERS_HANDLE_AUTH` whitelist (issue #664) — private 経路 follow-up
+        // (codex-connector P1 review 由来)。`CHALLENGE_LOBBY` の `opponent` が
+        // 発行者の自己申告のため、攻撃者が `opponent=alice` で token を発行 →
+        // `LOGIN_LOBBY alice+private-<token>+free wrong-password` で whitelist
+        // 対象 handle を無認証で名乗れる経路を塞ぐ。rate_limit の後・challenge
+        // token validation の前に挟むことで、token 失敗より先に handle_auth を
+        // 評価する (handle_auth が成立しない以上、token 検証や `not_invited`
+        // 等の存在を返答に乗せる必要がないため uniform に `handle_auth_failed`
+        // を返す)。
+        if enforce_lobby_handle_auth(ws, &self.env, &handle, &password)? {
+            let _ = ws.close(Some(1003), Some("handle_auth_failed".to_owned()));
+            return Ok(());
         }
 
         // 認証直後に TTL purge を 1 回走らせて、対局相手の到着前に expire した
