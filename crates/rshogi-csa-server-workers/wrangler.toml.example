@@ -142,6 +142,19 @@ CLOCK_PRESETS = "[]"
 # 場合のみ実値を埋める運用 (rotation 手順は `docs/csa-server/admin_auth.md` 参照)。
 # 旧 `ADMIN_HANDLE` (handle 自称で admin 権限) は #621 で廃止された。
 ADMIN_API_TOKEN = "local-dev-admin-token-placeholder"
+# LOGIN handle 自称防止 whitelist (https://github.com/SH11235/rshogi/issues/664、
+# 親 https://github.com/SH11235/rshogi/issues/621)。
+# JSON 配列文字列で `[{"handle":"...","password_sha256":"..."}, ...]` を渡し、
+# 登録 handle に限り SHA256(password) を要求する (Floodgate operator handle の
+# 自称を防ぐ目的)。`password_sha256` は **lowercase hex 64 chars** 固定:
+#   echo -n "<password>" | sha256sum
+# 空配列 (`"[]"`) / 未設定 / 空文字 は「whitelist 未宣言」として既存 self-claim
+# 挙動を維持する。一般対局者 / Floodgate 互換 client は backward compat で全切断
+# ゼロ (登録 handle のみ強制)。
+# production / staging では `wrangler secret put WORKERS_HANDLE_AUTH` で配置
+# (password hash を含むため公開 toml には書かない)。本テンプレートには placeholder
+# のみを残す。詳細は `docs/csa-server/admin_auth.md` §LOGIN handle whitelist 節参照。
+WORKERS_HANDLE_AUTH = "[]"
 # 切断時の再接続猶予秒数。`0` または未設定で再接続プロトコルを無効化（保守的既定）。
 # `> 0` を指定する構成は ALLOW_FLOODGATE_FEATURES=true との同時設定が必須。
 RECONNECT_GRACE_SECONDS = "0"

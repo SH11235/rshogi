@@ -77,6 +77,7 @@ use crate::games_index::{
     ClockSpec as IndexClockSpec, GamesIndexEntry, classify_result, games_index_key,
     resolve_index_source,
 };
+use crate::handle_auth::{HandleAuthError, load_handle_auth_registry};
 use crate::live_games_index::{LiveGamesIndexEntry, live_games_index_key};
 use crate::persistence::{
     ExportBodyKind, ExportPendingState, FailedExportObject, FinishedState, MoveRow,
@@ -554,7 +555,10 @@ impl GameRoom {
             }
         };
         let ClientCommand::Login {
-            name, reconnect, ..
+            name,
+            password,
+            reconnect,
+            ..
         } = cmd
         else {
             // pending 状態で LOGIN 以外が来たら拒否して切断。
@@ -567,6 +571,18 @@ impl GameRoom {
             send_line(ws, &LoginReply::Incorrect.to_line())?;
             return Ok(());
         };
+
+        // `WORKERS_HANDLE_AUTH` whitelist (issue #664): registry に登録された
+        // handle に限り SHA256(password) を要求する。reconnect 経路の前に挟む
+        // (= reconnect token を持っていても、whitelist 対象 handle で password
+        // 検証に落ちる session は reconnect 経路にも入らない)。fail-closed:
+        // env JSON 不正 / 内部不整合は全 LOGIN reject し、`handle_auth_failed`
+        // で uniform に拒否することで「whitelist が設定されているか」を leak
+        // しない。
+        if enforce_handle_auth(ws, &self.env, &handle, password.expose())? {
+            let _ = ws.close(Some(1003), Some("handle_auth_failed".to_owned()));
+            return Ok(());
+        }
 
         // 再接続要求の経路分岐。LOGIN 行 3 つ目トークンが
         // `reconnect:<game_id>+<token>` の場合は新規対局参加 (slot 確保 + マッチ
@@ -3227,6 +3243,65 @@ impl GameRoom {
         // ガードで以後何もロードしない)。
         self.core.borrow_mut().take();
         Ok(())
+    }
+}
+
+/// LOGIN handle 自称防止 (issue #664)。`WORKERS_HANDLE_AUTH` whitelist の
+/// 1 LOGIN あたり 1 回 fetch + parse して、登録 handle に限り SHA256(password)
+/// を要求する。
+///
+/// 戻り値:
+/// - `Ok(false)` → LOGIN を allow (whitelist 未宣言 / handle 非登録 / password 一致)。
+/// - `Ok(true)` → LOGIN を deny。`LOGIN:incorrect handle_auth_failed` 送出済み、
+///   呼び出し側は 1003 で WS を close する責務。
+///
+/// fail-closed 規約:
+/// - registry parse 失敗 (JSON 不正 / 重複 / hash 形式不正) → deny。
+///   `whitelist が設定済か否か` を leak しないよう、verify mismatch と同じ
+///   `handle_auth_failed` reason で uniform に拒否する。
+/// - registry parse 成功 + `requires_auth == false` → allow (self-claim 既定挙動)。
+/// - registry parse 成功 + `verify` mismatch → deny。
+fn enforce_handle_auth(ws: &WebSocket, env: &Env, handle: &str, password: &str) -> Result<bool> {
+    let registry = match load_handle_auth_registry(env) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::structured_log!(
+                event: "handle_auth_registry_invalid",
+                component: "game_room",
+                err: format!("{e}"),
+            );
+            send_line(ws, "LOGIN:incorrect handle_auth_failed")?;
+            return Ok(true);
+        }
+    };
+    if !registry.requires_auth(handle) {
+        return Ok(false);
+    }
+    match registry.verify(handle, password) {
+        Ok(()) => Ok(false),
+        Err(HandleAuthError::PasswordMismatch) => {
+            crate::structured_log!(
+                event: "handle_auth_failed",
+                component: "game_room",
+                handle: handle,
+                reason: "password_mismatch",
+            );
+            send_line(ws, "LOGIN:incorrect handle_auth_failed")?;
+            Ok(true)
+        }
+        Err(e) => {
+            // `NotConfigured` 等の本来到達しない経路に出ても、fail-closed で
+            // uniform に reject する (silently allow しない)。
+            crate::structured_log!(
+                event: "handle_auth_failed",
+                component: "game_room",
+                handle: handle,
+                reason: "unexpected_verify_error",
+                err: format!("{e}"),
+            );
+            send_line(ws, "LOGIN:incorrect handle_auth_failed")?;
+            Ok(true)
+        }
     }
 }
 

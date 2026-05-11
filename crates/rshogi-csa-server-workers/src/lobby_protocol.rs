@@ -27,6 +27,18 @@ pub struct LoginLobbyRequest {
     pub handle: String,
     pub game_name: String,
     pub color: Color,
+    /// `<password>` トークン。whitelist 未宣言モードでは無視されるが、
+    /// `WORKERS_HANDLE_AUTH` で当該 handle が登録されている場合は
+    /// [`crate::handle_auth::HandleAuthRegistry::verify`] に渡して SHA256
+    /// 比較する (issue [#664](https://github.com/SH11235/rshogi/issues/664))。
+    ///
+    /// 構造体内に保持する間も生文字列のまま扱う。`rshogi_csa_server::types::Secret`
+    /// で wrap しないのは、本 struct が公開 API として `Debug` を出す経路が
+    /// 既に存在しないため (LOGIN_LOBBY のログは handle のみ structured_log で
+    /// 出力する) と、parser から呼び出し側 verify までの 1 ホップ限定で
+    /// 平文を保持するスコープが極小だから (Secret wrap はライフタイム以外の
+    /// 防御を増やさない)。
+    pub password: String,
 }
 
 /// LOGIN_LOBBY パースエラー。
@@ -77,8 +89,11 @@ pub fn parse_login_lobby(line: &str) -> Result<LoginLobbyRequest, LoginLobbyErro
     let rest = line.strip_prefix("LOGIN_LOBBY ").ok_or(LoginLobbyError::NotLoginCommand)?;
     let mut parts = rest.split_whitespace();
     let id = parts.next().ok_or(LoginLobbyError::BadFormat)?;
-    // password は受信するが本体では検証しない (self-claim)。引数の存在のみ確認。
-    let _password = parts.next().ok_or(LoginLobbyError::BadFormat)?;
+    // password は LOGIN_LOBBY の必須トークン。issue #664 で `WORKERS_HANDLE_AUTH`
+    // whitelist 経路に渡せるよう、parser でも保持する (whitelist 未宣言モードで
+    // 当該 handle が登録されていない場合は呼び出し側 `handle_login_lobby` で
+    // 値を捨てる)。
+    let password = parts.next().ok_or(LoginLobbyError::BadFormat)?;
     if parts.next().is_some() {
         return Err(LoginLobbyError::BadFormat);
     }
@@ -106,6 +121,7 @@ pub fn parse_login_lobby(line: &str) -> Result<LoginLobbyRequest, LoginLobbyErro
         handle: handle.to_owned(),
         game_name: game_name.to_owned(),
         color,
+        password: password.to_owned(),
     })
 }
 
@@ -529,6 +545,9 @@ mod tests {
         assert_eq!(req.handle, "alice");
         assert_eq!(req.game_name, "game-eval");
         assert_eq!(req.color, Color::Black);
+        // password token は parser に保持される (issue #664 で
+        // WORKERS_HANDLE_AUTH 経路に渡せるようにするため)。
+        assert_eq!(req.password, "anything");
     }
 
     #[test]

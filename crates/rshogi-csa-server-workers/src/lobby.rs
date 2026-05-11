@@ -44,6 +44,7 @@ use crate::config::{
     ConfigKeys, is_private_challenge_enabled, parse_challenge_ttl_duration, parse_clock_presets,
     parse_lobby_queue_entry_ttl_duration,
 };
+use crate::handle_auth::{HandleAuthError, load_handle_auth_registry};
 use crate::lobby_protocol::{
     ChallengeLobbyError, LobbyQueue, LoginLobbyError, LoginLobbyPrivateError,
     LoginLobbyPrivateRequest, MatchedEntries, QueueEntry, build_challenge_incorrect_line,
@@ -526,6 +527,18 @@ impl Lobby {
         // 経路を保つ (`Q4-A` design: csa-client は retry_after honoring、PR #683)。
         if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &req.handle).await? {
             return self.send_rate_limited_login_lobby(ws, decision).await;
+        }
+
+        // `WORKERS_HANDLE_AUTH` whitelist (issue #664): registry に登録された
+        // handle に限り SHA256(password) を要求する。rate_limit の後 / queue
+        // enqueue の前に挟むのは、`bad_format` 等の構文不正は counter を
+        // 増やさない既存契約に揃え、かつ password 検証失敗の度に queue 操作の
+        // 副作用が走らないようにするため。fail-closed: env JSON 不正 / 内部
+        // 不整合は全 LOGIN reject し、`handle_auth_failed` で uniform に拒否
+        // することで「whitelist が設定されているか」を leak しない。
+        if enforce_lobby_handle_auth(ws, &self.env, &req.handle, &req.password)? {
+            let _ = ws.close(Some(1003), Some("handle_auth_failed".to_owned()));
+            return Ok(());
         }
 
         // strict mode: `CLOCK_PRESETS` が宣言済みかつ未登録 `game_name` は拒否。
@@ -1311,6 +1324,64 @@ fn evict_old_websockets_with_handle(state: &State, current_ws: &WebSocket, handl
                 );
                 let _ = ws.close(Some(1000), Some("evicted_by_new_login"));
             }
+        }
+    }
+}
+
+/// LOGIN handle 自称防止 (issue #664) の lobby 経路版。
+/// `WORKERS_HANDLE_AUTH` whitelist 設定を 1 LOGIN_LOBBY あたり 1 回 fetch + parse
+/// し、登録 handle に限り SHA256(password) を要求する。private 経路
+/// (`LOGIN_LOBBY <handle>+private-<token>+free`) は token 経由で
+/// `inviter` / `opponent` が決定論的に固定されるため本関数を通らない契約。
+///
+/// 戻り値 / fail-closed 規約は `game_room.rs::enforce_handle_auth` と同じ。
+/// reason は `handle_auth_failed` で uniform に拒否することで「whitelist が
+/// 設定されているか」を leak しない。
+fn enforce_lobby_handle_auth(
+    ws: &WebSocket,
+    env: &Env,
+    handle: &str,
+    password: &str,
+) -> Result<bool> {
+    let registry = match load_handle_auth_registry(env) {
+        Ok(r) => r,
+        Err(e) => {
+            crate::structured_log!(
+                event: "handle_auth_registry_invalid",
+                component: "lobby",
+                err: format!("{e}"),
+            );
+            send_line(ws, &build_login_incorrect_line("handle_auth_failed"))?;
+            return Ok(true);
+        }
+    };
+    if !registry.requires_auth(handle) {
+        return Ok(false);
+    }
+    match registry.verify(handle, password) {
+        Ok(()) => Ok(false),
+        Err(HandleAuthError::PasswordMismatch) => {
+            crate::structured_log!(
+                event: "handle_auth_failed",
+                component: "lobby",
+                handle: handle,
+                reason: "password_mismatch",
+            );
+            send_line(ws, &build_login_incorrect_line("handle_auth_failed"))?;
+            Ok(true)
+        }
+        Err(e) => {
+            // `NotConfigured` 等の本来到達しない経路に出ても、fail-closed で
+            // uniform に reject する (silently allow しない)。
+            crate::structured_log!(
+                event: "handle_auth_failed",
+                component: "lobby",
+                handle: handle,
+                reason: "unexpected_verify_error",
+                err: format!("{e}"),
+            );
+            send_line(ws, &build_login_incorrect_line("handle_auth_failed"))?;
+            Ok(true)
         }
     }
 }
