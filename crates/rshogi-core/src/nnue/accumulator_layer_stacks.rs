@@ -113,6 +113,12 @@ struct AccCacheEntry<const L1: usize> {
     ///
     /// `refresh_or_cache_with_psqt` の `add_psqt_fn` / `sub_psqt_fn` で
     /// main acc と同一の差分タイミングで更新される。
+    ///
+    /// メモリフットプリント: `nnue-psqt` 有効時、各エントリは
+    /// `accumulation (2 × L1 bytes)` + `psqt_accumulation (36 bytes)` +
+    /// `piece_list (40 × 2 bytes)` + `valid (1 byte)` で構成され、64-byte
+    /// 境界にアライメントされる。L1=1536 で約 3,188 bytes + パディング。
+    /// `Square::NUM = 81` × 2 perspective = 162 エントリ ≈ 520 KB。
     #[cfg(feature = "nnue-psqt")]
     psqt_accumulation: [i32; NUM_LAYER_STACK_BUCKETS],
     /// キャッシュ時点の `PieceList`（perspective 固有の fb または fw 配列）
@@ -255,10 +261,20 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
     /// # 引数
     ///
     /// 上記 `refresh_or_cache` に加えて:
-    /// - `psqt_biases`: PSQT バイアス [NUM_LAYER_STACK_BUCKETS]（実体は通常ゼロ）
+    /// - `psqt_biases`: PSQT バイアス [NUM_LAYER_STACK_BUCKETS]（実体は対称差設計で常にゼロ、
+    ///   ただし cache hit 時は参照せず `entry.psqt_accumulation` を直接ロードする）
     /// - `psqt_acc`: 更新先の PSQT アキュムレータ
     /// - `add_psqt_fn`: PSQT 加算関数（9-i32 SIMD: `add_psqt_weights`）
     /// - `sub_psqt_fn`: PSQT 減算関数（9-i32 SIMD: `sub_psqt_weights`）
+    ///
+    /// # 引数数について
+    ///
+    /// 引数 11 個（うちクロージャ 5 つ）+ `#[allow(clippy::too_many_arguments)]`
+    /// 指定。構造体で束ねる選択肢もあるが、ホットパス（per-do_move 呼び出し）で
+    /// クロージャを呼び出すため **モノモルフィズム + インライン展開が必須**。
+    /// generic Fn パラメータの直接渡しが現状最も高速で、構造体経由（特に
+    /// `Box<dyn Fn>` での動的 dispatch）は NPS 退行のリスクがある。
+    /// 可読性は犠牲になるが性能優先の設計。
     #[cfg(feature = "nnue-psqt")]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn refresh_or_cache_with_psqt<FI, FA, FS, FAP, FSP>(

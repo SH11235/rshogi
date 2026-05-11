@@ -1030,6 +1030,13 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     ///
     /// `nnue-psqt` 有効かつ `has_psqt == true` の場合は PSQT acc も
     /// 同時に cache 経由で差分更新する（Finny Tables に PSQT を載せる経路）。
+    /// `has_psqt == false` のときは `psqt_acc` 引数は渡されるが参照されず、
+    /// 既存の `cache.refresh_or_cache()` パスにフォールスルーする。
+    ///
+    /// **シグネチャ注記**: `nnue-psqt` feature 有効時のみ `psqt_acc` 引数が
+    /// 追加される（`#[cfg(feature = "nnue-psqt")]` 付き）。Rust の有効な
+    /// cfg-gated parameter パターンだが、呼び出し側も同様の cfg ブロックで
+    /// 括る必要がある。
     #[allow(clippy::too_many_arguments)]
     fn refresh_perspective_with_cache(
         &self,
