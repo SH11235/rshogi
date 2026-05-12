@@ -482,8 +482,9 @@ follow-up が必要**。
 
 ### 8.3 alert / metrics 連携 (Session B 合流): 案 B 採択、follow-up issue 起票済
 
-- §4.2 / §7 で「Session B [#625](https://github.com/SH11235/rshogi/issues/625) 側で rate limit 拒否カウントを
-  観測する経路を別途整備」としていた件。2026-05-12 に **案 B** (rshogi に readonly endpoint を生やし、
+- §7 で「Session B [#625](https://github.com/SH11235/rshogi/issues/625) 側で rate limit 拒否カウントを
+  観測する経路を別途整備」としていた件 (§4.2 の既存 audit 領域との統合方針とも関係)。2026-05-12 に
+  **案 B** (rshogi に readonly endpoint を生やし、
   iac repo の `csa-monitor-workers` cron が 5 分間隔で fetch して Slack alert) を採択。
 - Workers Observability のログ検索は dashboard のみ (Free plan で programmatic query 不可、Logpush /
   Analytics Engine は Paid)、`RateLimiter` DO は多数 instance に sharding されていて横断集計できないため、
