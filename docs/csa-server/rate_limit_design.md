@@ -442,3 +442,53 @@ follow-up が必要**。
   と RateLimitDO 設計の重複に注意
 - Session B (ops) との依存: [#625](https://github.com/SH11235/rshogi/issues/625) (alerting / metrics)
   で本 PR の rate limit 拒否カウントを観測する経路を別途整備
+
+## 8. 実装後ステータス (2026-05-12 更新)
+
+設計段階の本 doc に対し、実装フェーズで確定した内容を以下に集約する。
+
+### 8.1 PR3a (層 2 + 層 3): 実装・production 投入済
+
+- PR [#699](https://github.com/SH11235/rshogi/pull/699) (squash `6070db5f`) で merge。Q2-B (専用 `RateLimiter`
+  Durable Object、per-(kind, identifier) sharded token bucket) を採択 (Cloudflare Workers Rate Limiting
+  binding が本アカウントで利用不可確認のため)。
+- production deploy 済: `deployed_sha=5f44a15b` (PR #699 follow-up commit、2026-05-11 dispatch deploy)。
+  6 個の閾値 env (Q3 表) は `wrangler.production.toml` / `wrangler.staging.toml` の `[vars]` に投入済
+  (`LOBBY_LOGIN_RATE_PER_IP_PER_MIN=10` / `LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN=5` /
+  `LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN=5` / `LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN=3` /
+  `ROOM_CREATE_RATE_PER_IP_PER_MIN=20` / `WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN=60`)。
+- **拒否レスポンスの実装結果** (Q4-A の最終形): `/ws/<room_id>(/spectate)` upgrade flood は
+  **HTTP 503 Service Unavailable + `Retry-After: <sec>` ヘッダ** + body `rate_limited; retry after <sec> seconds (issue #622, ...)`
+  (`rate_limit.rs::build_ws_upgrade_rate_limited_response`)。`LOGIN_LOBBY` / `CHALLENGE_LOBBY` flood は
+  WS 確立後の in-band 1 行 `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>` /
+  `CHALLENGE_LOBBY:incorrect rate_limited retry_after=<sec>`。CF-Connecting-IP 欠落時は fail-closed で
+  503 + `Retry-After: 10`。csa-client は PR [#683](https://github.com/SH11235/rshogi/pull/683) (#682) で
+  `retry_after=<sec>` honoring 対応済。
+- **動作確認 (2026-05-12)**: staging (`rshogi-csa-server-workers-staging.sh11235.workers.dev`) で
+  `/ws/<room_id>/spectate` に並列 WS upgrade を 90 件投げ、token bucket capacity=60 を超えた分が
+  503 + `Retry-After: 1` で拒否されることを確認。1 件ずつ逐次 (≈2s 間隔) では refill rate (1 token/sec)
+  が消費に追いつき発火しないため、smoke test は **並列バースト** で行うこと。
+
+### 8.2 PR3b (層 1: Cloudflare WAF / Rate Limiting Rules): Pro plan 移行待ちで保留
+
+- sh11235.com zone は **Cloudflare Free plan** (2026-05-12 user 確認)。Free plan では WAF Custom Rules /
+  advanced Rate Limiting Rules が使えず (basic DDoS protection のみ)、層 1 の declarative rule は実装不可。
+  → §3 Q1 の **Q1-C** が確定。層 1 の役割は当面 PR3a の Worker code 側 token bucket (層 2) が代替する。
+- **再着手トリガ**: user が sh11235.com zone を Pro plan ($25/mo) 以上にアップグレードした時点。その際は
+  rshogi [#675](https://github.com/SH11235/rshogi/issues/675) Phase 3 (Cloudflare IaC) と統合し、`iac` private
+  repo の Pulumi で `cloudflare.RulesetRule` (or `cloudflare.RateLimit`) を declare する
+  (`/ws/lobby` 30 接続/分・per-IP / `/ws/<room_id>` 60 接続/分・per-IP の Q3 表 §117-118 が出発点)。
+  `pulumi-iac` token に WAF / Rate Limiting scope の追加が必要 (`iac/docs/cloudflare-api-tokens.md`)。
+
+### 8.3 alert / metrics 連携 (Session B 合流): 案 B 採択、follow-up issue 起票済
+
+- §4.2 / §7 で「Session B [#625](https://github.com/SH11235/rshogi/issues/625) 側で rate limit 拒否カウントを
+  観測する経路を別途整備」としていた件。2026-05-12 に **案 B** (rshogi に readonly endpoint を生やし、
+  iac repo の `csa-monitor-workers` cron が 5 分間隔で fetch して Slack alert) を採択。
+- Workers Observability のログ検索は dashboard のみ (Free plan で programmatic query 不可、Logpush /
+  Analytics Engine は Paid)、`RateLimiter` DO は多数 instance に sharding されていて横断集計できないため、
+  別途 singleton 集計 DO (`RateLimitStats`、案 B-1) + `GET /admin/rate_limit_stats` endpoint を新設する。
+- Slack alert 閾値: **任意の kind が 5 分間に 30 件以上 denied** (2026-05-12 user 確定、徹底的設定。env で
+  可変、運用中チューニング)。
+- follow-up issue: rshogi [#711](https://github.com/SH11235/rshogi/issues/711) (RateLimitStats DO + endpoint)
+  / iac [#12](https://github.com/SH11235/iac/issues/12) (csa-monitor probe 追加)。実装は別セッション。
