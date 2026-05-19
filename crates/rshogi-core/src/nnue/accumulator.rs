@@ -190,16 +190,36 @@ impl<const N: usize> Default for AlignedI16<N> {
 /// キャッシュラインサイズ（64バイト）
 pub const CACHE_LINE_SIZE: usize = 64;
 
-/// 64バイトアラインメントでヒープに確保されたスライス
+/// `AlignedBox` のメモリ backing 種別
+enum AlignedBoxBacking {
+    /// `alloc_zeroed` で確保した通常ヒープ。Drop で `dealloc`。
+    Heap(Layout),
+    /// プロセス間共有メモリ（`mmap`）のマッピングを借用。Drop で `munmap`。
+    /// ロード後は read-only として扱う（`DerefMut` は panic する）。
+    #[cfg(target_os = "linux")]
+    Shared {
+        /// `mmap` が返したマッピング先頭（ページアライン）
+        map_base: *mut libc::c_void,
+        /// マッピング全長（ヘッダ + blob）
+        map_len: usize,
+    },
+}
+
+/// 64バイトアラインメントで確保されたスライス
 ///
 /// FeatureTransformerのweightsなど、大きな配列をアラインして確保するために使用。
 /// aligned load/store命令を使うためにはデータが64バイト境界に配置されている必要がある。
 ///
+/// backing は 2 種:
+/// - `Heap`: `new_zeroed` による通常ヒープ確保（`T: Copy + Default`）。
+/// - `Shared`: `from_shared` によるプロセス間共有メモリの借用（read-only、`DerefMut` 不可）。
+///
 /// # 安全性契約
 ///
-/// - `T: Copy + Default` を要求することで、`T` が `Drop` を実装できないことを保証
-/// - `Copy` トレイトは `Drop` と排他的（コンパイラが禁止）
-/// - これにより `drop` 時に `drop_in_place` を呼ぶ必要がなく、`dealloc` のみで安全
+/// - `new_zeroed` は `T: Copy + Default` を要求し、`Copy` は `Drop` と排他的なので
+///   `T` は `Drop` を実装できない。よって `drop` は `dealloc` のみで安全（`drop_in_place` 不要）。
+/// - `Shared` backing は複数プロセスから参照される read-only 領域。`DerefMut` は panic し、
+///   可変参照を一切発行しないことで Rust の排他参照不変条件を守る。
 ///
 /// # 使用例
 ///
@@ -210,7 +230,7 @@ pub const CACHE_LINE_SIZE: usize = 64;
 pub struct AlignedBox<T> {
     ptr: *mut T,
     len: usize,
-    layout: Layout,
+    backing: AlignedBoxBacking,
 }
 
 impl<T: Copy + Default> AlignedBox<T> {
@@ -235,7 +255,40 @@ impl<T: Copy + Default> AlignedBox<T> {
             std::alloc::handle_alloc_error(layout);
         }
 
-        Self { ptr, len, layout }
+        Self {
+            ptr,
+            len,
+            backing: AlignedBoxBacking::Heap(layout),
+        }
+    }
+}
+
+impl<T> AlignedBox<T> {
+    /// プロセス間共有メモリ上の領域を借用する `AlignedBox` を構築する。
+    ///
+    /// backing は `Shared` となり、Drop で `munmap` する。read-only 専用で
+    /// `DerefMut` は panic する。
+    ///
+    /// # Safety
+    /// 呼び出し元は以下を保証しなければならない:
+    /// - `data_ptr` は `len` 個の `T` を読める有効ポインタで、`T` のアライン要件
+    ///   （`align_of::<T>()`）を満たす。
+    /// - `data_ptr` は `[map_base, map_base + map_len)` の範囲内を指す。
+    /// - `map_base` / `map_len` は `mmap` で得たマッピングそのもの（Drop で `munmap` する）。
+    /// - この `AlignedBox` がそのマッピングの唯一の所有者（1 box : 1 mapping）。
+    /// - マッピングはロード完了後 read-only（書き込まれない）であること。
+    #[cfg(target_os = "linux")]
+    pub(crate) unsafe fn from_shared(
+        data_ptr: *mut T,
+        len: usize,
+        map_base: *mut libc::c_void,
+        map_len: usize,
+    ) -> Self {
+        Self {
+            ptr: data_ptr,
+            len,
+            backing: AlignedBoxBacking::Shared { map_base, map_len },
+        }
     }
 }
 
@@ -250,20 +303,46 @@ impl<T> Deref for AlignedBox<T> {
 
 impl<T> DerefMut for AlignedBox<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: ptr は有効で、len 要素分のメモリが確保されている
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+        match &self.backing {
+            AlignedBoxBacking::Heap(_) => {
+                // SAFETY: backing が Heap であることを確認済み。ptr は alloc_zeroed で
+                // 確保した有効ポインタで、len 要素分を排他的に所有する。
+                unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+            }
+            #[cfg(target_os = "linux")]
+            AlignedBoxBacking::Shared { .. } => {
+                // 共有メモリは複数プロセスから参照される read-only 領域。可変参照を
+                // 発行しないことで Rust の排他参照不変条件を守る。重みロード後の
+                // mutation は共有採用前（Heap）に完了しているためここには到達しない。
+                panic!("AlignedBox: 共有メモリ backing は read-only。可変参照は取得できない");
+            }
+        }
     }
 }
 
 impl<T> Drop for AlignedBox<T> {
     fn drop(&mut self) {
-        // SAFETY:
-        // - ptr は alloc_zeroed で確保したポインタ、layout は同じもの
-        // - AlignedBox::new_zeroed は T: Copy + Default を要求する
-        // - Copy トレイトは Drop と排他的なので、T は Drop を実装できない
-        // - したがって drop_in_place は不要で、dealloc のみで安全
-        unsafe {
-            dealloc(self.ptr as *mut u8, self.layout);
+        match &self.backing {
+            AlignedBoxBacking::Heap(layout) => {
+                // SAFETY:
+                // - ptr は alloc_zeroed で確保したポインタ、layout は同じもの
+                // - AlignedBox::new_zeroed は T: Copy + Default を要求する
+                // - Copy トレイトは Drop と排他的なので、T は Drop を実装できない
+                // - したがって drop_in_place は不要で、dealloc のみで安全
+                unsafe {
+                    dealloc(self.ptr as *mut u8, *layout);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            AlignedBoxBacking::Shared { map_base, map_len } => {
+                // SAFETY: map_base / map_len は from_shared が受け取った mmap 領域
+                // そのもの。1 box : 1 mapping のため他に参照はなく、Drop 後に
+                // この領域へアクセスする箇所はない。munmap 失敗は無視（プロセス
+                // 終了時に OS が回収するため実害なし）。
+                unsafe {
+                    libc::munmap(*map_base, *map_len);
+                }
+            }
         }
     }
 }

@@ -289,6 +289,19 @@ fn psqt_add_or_sub<const ADD: bool>(
 }
 
 impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
+    /// 重み配列をプロセス間共有メモリへ移行する（成功時のみ）。
+    ///
+    /// 多プロセス実行時のメモリ常駐・L3 競合を削減する。ネットワーク構築が完全に
+    /// 終わった後（重みへの全書込が済んだ後）に 1 回だけ呼ぶこと。共有後の重み box は
+    /// read-only になる。空 box（PSQT/Threat 無効モデル）は内部でスキップされる。
+    pub(crate) fn share_weights(&mut self) {
+        super::shared_weights::try_share(&mut self.weights, "FT weights");
+        #[cfg(feature = "nnue-psqt")]
+        super::shared_weights::try_share(&mut self.psqt_weights, "FT psqt");
+        #[cfg(feature = "nnue-threat")]
+        super::shared_weights::try_share(&mut self.threat_weights, "FT threat");
+    }
+
     /// ファイルから読み込み（非圧縮形式）
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
         // バイアスを読み込み

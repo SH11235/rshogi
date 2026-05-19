@@ -194,12 +194,8 @@ impl<
         let _ft_hash = u32::from_le_bytes(buf4);
 
         // Feature Transformer を読み込み（圧縮形式を自動検出）
-        // nnue-psqt/nnue-threat feature 有効時は
-        // read_psqt/read_threat_weights で変更するため mut
-        #[cfg(any(feature = "nnue-psqt", feature = "nnue-threat"))]
+        // read_psqt/read_threat_weights と末尾の share_weights() で変更するため mut
         let mut feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
-        #[cfg(not(any(feature = "nnue-psqt", feature = "nnue-threat")))]
-        let feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
 
         // PSQT 読み込み:
         // - psqt_override == Some(true): USI オプションで PSQT 強制 ON（arch_str を無視）
@@ -302,6 +298,10 @@ impl<
         {
             Self::log_load_diagnostics(&feature_transformer, &layer_stacks);
         }
+
+        // 重みをプロセス間共有メモリへ移行（多プロセス時のメモリ常駐・L3 競合を削減）。
+        // ネットワーク構築完了後・採用前に 1 回だけ実行する。
+        feature_transformer.share_weights();
 
         Ok(Self {
             feature_transformer,
