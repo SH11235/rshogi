@@ -441,7 +441,7 @@ mod linux {
                 }
                 // 内側ループ上限まで size 不一致が続いた → unlink せず local fallback。
                 //
-                // 採用方針 A（rev4 設計、Codex Approve 済）: `st_size != total` は
+                // 採用方針 A（rev4 設計で採用）: `st_size != total` は
                 // 「生存 creator が `shm_open`→`ftruncate` の数命令窓に居る」可能性を
                 // 排除できない唯一の曖昧ケースのため unlink しない。これにより
                 // 「生存 creator・健全セグメントを誤 unlink する経路が一つも無い」が
@@ -619,7 +619,12 @@ mod linux {
             // 後始末用にセグメント名を計算し、前回 run の取りこぼしを掃除する。
             let bytes: &[u8] =
                 // SAFETY: pattern は n 個の i16。i16 を u8 列として読むのは健全。
-                unsafe { std::slice::from_raw_parts(pattern.as_ptr() as *const u8, n * 2) };
+                unsafe {
+                    std::slice::from_raw_parts(
+                        pattern.as_ptr() as *const u8,
+                        n * std::mem::size_of::<i16>(),
+                    )
+                };
             let cseg = std::ffi::CString::new(segment_name(fnv1a_128(bytes), n)).unwrap();
             // SAFETY: cseg は有効な C 文字列。ENOENT は無視される。
             unsafe { libc::shm_unlink(cseg.as_ptr()) };
