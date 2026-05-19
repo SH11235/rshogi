@@ -423,7 +423,12 @@ mod linux {
             }
 
             if st.st_size as usize != spec.total {
-                // size != total（0 / 部分 / 別フォーマット）。
+                // size != total。内訳:
+                // - `st_size == 0`: creator が `shm_open` 後・`ftruncate` 前に死亡した
+                //   未完成セグメント（残骸）の可能性。
+                // - `0 < st_size < total`: `ftruncate` は size を 0→total へ atomic に
+                //   変えるため flock 規律下では通常発生しない。別フォーマット／別実装が
+                //   同名で作ったセグメント等、将来の互換性のための保険として同経路で扱う。
                 // lock を持ったまま待たず解放し、内側ループで shm_open からやり直す。
                 // SAFETY: fd 有効。
                 unsafe {
@@ -434,8 +439,19 @@ mod linux {
                     std::thread::sleep(SIZE_WAIT_SLEEP);
                     continue;
                 }
-                // 内側ループ上限まで size 不一致が続いた → unlink せず local fallback
-                // （生存 creator 誤 unlink の可能性を完全排除）。
+                // 内側ループ上限まで size 不一致が続いた → unlink せず local fallback。
+                //
+                // 採用方針 A（rev4 設計、Codex Approve 済）: `st_size != total` は
+                // 「生存 creator が `shm_open`→`ftruncate` の数命令窓に居る」可能性を
+                // 排除できない唯一の曖昧ケースのため unlink しない。これにより
+                // 「生存 creator・健全セグメントを誤 unlink する経路が一つも無い」が
+                // 例外なく成立する。
+                //
+                // 代償: creator が上記 μs 窓で SIGKILL されると size-0 残骸が残り、
+                // 同一 eval の共有が手動 cleanup（`rm /dev/shm/rshogi-nnue-*`）まで
+                // 無効化される。ただし現実的に最も起きやすい「memcpy 中の OOM kill」は
+                // size==total・ready!=1 になり下の `ready` 経路で自動 unlink+retry 回復
+                // するため、本経路で残骸化するのは μs 窓 kill のみ＝極めて稀。
                 return AttachResult::Fallback;
             }
 
