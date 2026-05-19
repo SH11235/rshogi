@@ -161,27 +161,22 @@ fn wrangler_template_vars_keys_match_config_keys() {
     assert_bidirectional("vars_keys", &expected, &TEMPLATE.vars_keys);
 }
 
-/// https://github.com/SH11235/rshogi/issues/551 で追加した `[triggers] crons` が template に宣言されていることを
-/// 固定する。`[event(scheduled)]` ハンドラと cron trigger は同 PR で導入したので、
-/// 片方だけが残ったまま運用者が `cp wrangler.toml.example wrangler.toml` した場合
-/// に handler が永久 dormant にならないよう、template 側で必須化する。
+/// `[triggers] crons` が template に宣言されていることを固定する。
+/// `[event(scheduled)]` ハンドラと cron trigger は同 PR で導入したので、片方
+/// だけが残ったまま運用者が `cp wrangler.toml.example wrangler.toml` した場合に
+/// handler が永久 dormant にならないよう、template 側で必須化する。
 ///
-/// https://github.com/SH11235/rshogi/issues/629 で sweep のみ高頻度 (15 分間隔) cron を追加したため、両 cron が
-/// 必ず宣言されていること、かつ `lib.rs::BACKFILL_CRON` /
-/// `lib.rs::SWEEP_ONLY_CRON` 定数と文字列が一致していることを assert する。
+/// backfill 用と sweep-only 用の 2 cron は Cloudflare の account あたり cron
+/// trigger 上限 (5) に収めるため単一 cron に統合済み。`[triggers] crons` が
+/// **ちょうど `[SCHEDULED_CRON]` 1 件** であることを assert する (旧 cron 残留を
+/// 検知するため `contains` ではなく完全一致)。
 #[test]
-fn wrangler_template_declares_backfill_cron_trigger() {
-    assert!(
-        TEMPLATE.crons.contains(&rshogi_csa_server_workers::BACKFILL_CRON.to_owned()),
-        "wrangler.toml.example [triggers] crons must contain BACKFILL_CRON ({backfill:?}); got: {crons:?}",
-        backfill = rshogi_csa_server_workers::BACKFILL_CRON,
-        crons = TEMPLATE.crons,
-    );
-    assert!(
-        TEMPLATE.crons.contains(&rshogi_csa_server_workers::SWEEP_ONLY_CRON.to_owned()),
-        "wrangler.toml.example [triggers] crons must contain SWEEP_ONLY_CRON ({sweep:?}) for orphan sweep \
-         high-frequency path (https://github.com/SH11235/rshogi/issues/629); got: {crons:?}",
-        sweep = rshogi_csa_server_workers::SWEEP_ONLY_CRON,
+fn wrangler_template_declares_scheduled_cron_trigger() {
+    assert_eq!(
+        TEMPLATE.crons,
+        vec![rshogi_csa_server_workers::SCHEDULED_CRON.to_owned()],
+        "wrangler.toml.example [triggers] crons must be exactly [SCHEDULED_CRON] ({scheduled:?}); got: {crons:?}",
+        scheduled = rshogi_csa_server_workers::SCHEDULED_CRON,
         crons = TEMPLATE.crons,
     );
 }

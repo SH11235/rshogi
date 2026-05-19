@@ -125,24 +125,30 @@ binding = "FLOODGATE_HISTORY_BUCKET"
 bucket_name = "rshogi-csa-floodgate-history-prod"
 
 # --- Cron triggers ---
-# `[event(scheduled)]` ハンドラ (`lib.rs::scheduled`) を 2 つの cron で起動する
-# (https://github.com/SH11235/rshogi/issues/629 で 1 → 2 に分離)。
+# `[event(scheduled)]` ハンドラ (`lib.rs::scheduled`) を単一 cron で起動する。
+# Cloudflare の account あたり cron trigger 上限 (5) に収めるため、以前の
+# backfill 用 (`0 * * * *`) と sweep-only 用 (`15,30,45 * * * *`) の 2 cron を
+# 1 cron に統合した。
 #
-# - `0 * * * *` (毎時 0 分):
+# 単一 cron `0,15,30,45 * * * *` は 0 / 15 / 30 / 45 分の 4 回発火する:
+#
+# - 0 分:
 #   `kifu-by-id/<id>.meta.json` から `games-index/` を補完 (backfill) し、
-#   `live-games-index/` の orphan を掃除する (https://github.com/SH11235/rshogi/issues/551)。backfill は 1 run =
-#   1 page (1000 件) のみ。
-# - `15,30,45 * * * *` (15 / 30 / 45 分):
+#   `live-games-index/` の orphan を掃除する。backfill は 1 run = 1 page
+#   (1000 件) のみ。
+# - 15 / 30 / 45 分:
 #   `live-games-index/` の orphan 掃除のみを行う (backfill はスキップ)。
 #   delete best-effort 失敗からの復旧遅延を 1 時間 → 15 分に短縮するため、
-#   sweep のみ高頻度化する (https://github.com/SH11235/rshogi/issues/629)。sweep は 1 cron 内で pagination
-#   loop し、cron 30s 制限内で複数 page を処理する。
+#   sweep のみ高頻度化する。sweep は 1 cron 内で pagination loop し、
+#   cron 30s 制限内で複数 page を処理する。
 #
-# どちらの cron も `lib.rs::scheduled` で `event.cron()` を見て分岐する。
-# 文字列を変更する場合は `lib.rs` の `BACKFILL_CRON` / `SWEEP_ONLY_CRON`
-# 定数も同期更新すること (wrangler test が違反を検知する)。
+# 単一 cron なので発火の区別は cron 文字列でできない。`lib.rs::scheduled` が
+# `event.schedule()` 由来の「時の何分か」を見て分岐する。cron 文字列を変更する
+# 場合は `lib.rs` の `SCHEDULED_CRON` 定数も同期更新すること (wrangler test が
+# 違反を検知する)。分フィールドには必ず `BACKFILL_MINUTE` (0) を含めること —
+# 0 分を外すと backfill が無音で永久停止する (sweep は全発火で走る)。
 [triggers]
-crons = ["0 * * * *", "15,30,45 * * * *"]
+crons = ["0,15,30,45 * * * *"]
 
 # --- 環境変数 ---
 # `[vars]` の値は機密でないが、本番 client URL に応じて運用者が更新する。

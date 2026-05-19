@@ -121,34 +121,51 @@ pub async fn fetch(
     router::handle_fetch(req, env).await
 }
 
-/// Backfill + sweep を両方走らせる cron 文字列 (毎時 0 分)。
+/// `[event(scheduled)]` ハンドラ (`scheduled`) を起動する単一 cron 文字列。
 ///
-/// `wrangler.{production,staging,toml.example}.toml` の `[triggers] crons` 配列
-/// 第 1 要素と一致させる。`scheduled` ハンドラは `event.cron()` の文字列マッチで
-/// backfill 実行可否を分岐するため、wrangler 側の表記を変える場合は本定数も
-/// 同期更新する (`tests/wrangler_environment_toml_consistency.rs` /
-/// `wrangler_template_consistency.rs` で gate)。
-pub const BACKFILL_CRON: &str = "0 * * * *";
+/// 0 / 15 / 30 / 45 分の 4 回発火する。`wrangler.{production,staging,toml.example}.toml`
+/// の `[triggers] crons` 配列と一致させる (`tests/wrangler_environment_toml_consistency.rs`
+/// / `wrangler_template_consistency.rs` で gate)。
+///
+/// 以前は backfill 用 (`0 * * * *`) と sweep-only 用 (`15,30,45 * * * *`) の 2 cron に
+/// 分けていたが、Cloudflare の account あたり cron trigger 上限 (5) に収めるため 1 cron に
+/// 統合した。発火時刻の分は `event.schedule()` から求め、[`BACKFILL_MINUTE`] のときだけ
+/// backfill を実行する。
+pub const SCHEDULED_CRON: &str = "0,15,30,45 * * * *";
 
-/// Sweep のみ走らせる cron 文字列 (15 / 30 / 45 分)。
+/// backfill (`run_games_index_backfill`) を実行する分 (0-59)。
 ///
-/// https://github.com/SH11235/rshogi/issues/629 で導入した orphan sweep 高頻度化用。`try_delete_live_games_index`
-/// が R2 transient で失敗した場合の復旧遅延を 1 時間 → 15 分に短縮する目的で、
-/// 本 cron では backfill (Class A put 増) を走らせず sweep のみ実行する。
-pub const SWEEP_ONLY_CRON: &str = "15,30,45 * * * *";
+/// [`SCHEDULED_CRON`] の 4 発火のうち、スケジュール時刻の「時の何分か」がこの値に一致する
+/// 発火でのみ backfill + sweep を行う。それ以外の発火は sweep のみ。
+pub const BACKFILL_MINUTE: i64 = 0;
+
+/// epoch ミリ秒から「時の何分か」(0-59) を求める純粋関数。
+///
+/// [`scheduled`] が単一 cron [`SCHEDULED_CRON`] の発火 (0/15/30/45 分) を
+/// `event.schedule()` の値で区別するために使う。`event.schedule()` は f64 を
+/// 返すが、現在の epoch ミリ秒 (~1.7e12) は f64 仮数部 (53bit ≈ 9e15) に収まり
+/// 整数部に精度劣化はない。`scheduled` 本体は wasm32 限定のため host target からは
+/// テスト経由でのみ到達する → `backfill` 等と同じく wasm32 + test ゲートする。
+#[cfg(any(target_arch = "wasm32", test))]
+fn minute_of_hour(epoch_ms: f64) -> i64 {
+    // 60_000 ミリ秒で割って 60 で剰余を取る。epoch は常に非負なので剰余も 0-59。
+    (epoch_ms / 60_000.0) as i64 % 60
+}
 
 /// Workers ランタイムの scheduled イベント (cron trigger)。
 ///
-/// `wrangler.toml` の `[triggers] crons` で 2 つの cron を登録している
-/// (https://github.com/SH11235/rshogi/issues/551 / https://github.com/SH11235/rshogi/issues/629):
+/// `wrangler.toml` の `[triggers] crons` で単一 cron [`SCHEDULED_CRON`]
+/// (`0,15,30,45 * * * *`) を登録しており、0 / 15 / 30 / 45 分の 4 回発火する。
+/// 単一 cron なので `event.cron()` は 4 発火すべてで同じ文字列を返す。発火の
+/// 区別は [`minute_of_hour`] に `event.schedule()` を渡して「時の何分か」を求めて
+/// 行う。`event.schedule()` は cron の予定時刻 (実起動時刻ではない) の epoch
+/// ミリ秒なので、起動が数秒遅延しても分判定は予定どおり安定する:
 ///
-/// - [`BACKFILL_CRON`] (`0 * * * *`): `run_games_index_backfill` →
-///   `run_live_orphan_sweep` を順次実行する (= 既存挙動)。
-/// - [`SWEEP_ONLY_CRON`] (`15,30,45 * * * *`): `run_live_orphan_sweep` のみ。
-///   delete best-effort 失敗時の復旧遅延を 15 分以内に詰めるための高頻度経路。
-///
-/// `event.cron()` 文字列で分岐し、未知の cron 文字列に対しては安全側に倒して
-/// 既存挙動 (backfill + sweep) と等価動作する (= 設定変更時の暫定挙動を保証)。
+/// - 分が [`BACKFILL_MINUTE`] (0 分) のとき: `run_games_index_backfill` →
+///   `run_live_orphan_sweep` を順次実行する。
+/// - それ以外 (15 / 30 / 45 分) のとき: `run_live_orphan_sweep` のみ。
+///   delete best-effort 失敗時の復旧遅延を 15 分以内に詰めるための高頻度経路
+///   (https://github.com/SH11235/rshogi/issues/629)。
 ///
 /// 各ジョブは内部的に best-effort で失敗を握り潰し `Result::Ok` で返すため、
 /// scheduled handler 側ではさらに伝播禁止 (cron の継続可用性を最優先する) で
@@ -162,9 +179,9 @@ pub async fn scheduled(
     _ctx: worker::ScheduleContext,
 ) {
     let cron = event.cron();
-    // SWEEP_ONLY_CRON では backfill を skip。それ以外は既存挙動 (backfill +
-    // sweep) を保つ。未知 cron 文字列は安全側 = 全部走らせる。
-    let run_backfill = cron != SWEEP_ONLY_CRON;
+    // 単一 cron のため発火の区別は cron 文字列でなくスケジュール時刻の分で行う。
+    let minute = minute_of_hour(event.schedule());
+    let run_backfill = minute == BACKFILL_MINUTE;
 
     if run_backfill {
         if let Err(e) = backfill::run_games_index_backfill(&env).await {
@@ -191,19 +208,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cron_constants_are_distinct() {
-        // 同一文字列に揃えると `event.cron()` 分岐が崩れる (sweep-only cron で
-        // backfill が走る、または backfill cron で sweep がスキップされる)。
-        assert_ne!(BACKFILL_CRON, SWEEP_ONLY_CRON);
+    fn scheduled_cron_has_5_fields() {
+        // Cloudflare Workers cron expression は 5 field (minute hour dom month dow)。
+        let fields: Vec<&str> = SCHEDULED_CRON.split_whitespace().collect();
+        assert_eq!(fields.len(), 5, "cron expression must have 5 fields, got {SCHEDULED_CRON:?}");
     }
 
     #[test]
-    fn cron_constants_have_5_fields() {
-        // Cloudflare Workers cron expression は 5 field (minute hour dom month dow)。
-        // 6 field (秒つき) や 7 field (年つき) は受け付けないため、定数側で固定。
-        for cron in [BACKFILL_CRON, SWEEP_ONLY_CRON] {
-            let fields: Vec<&str> = cron.split_whitespace().collect();
-            assert_eq!(fields.len(), 5, "cron expression must have 5 fields, got {cron:?}");
-        }
+    fn scheduled_cron_minute_field_contains_backfill_minute() {
+        // SCHEDULED_CRON の分フィールドに BACKFILL_MINUTE が含まれないと backfill が
+        // 永久に発火しない。分フィールドがカンマ区切りリスト形式 (`"0,15,30,45"`)
+        // であることを前提とする (range `"0-59"` / step `"*/15"` 記法は
+        // SCHEDULED_CRON では未使用なので考慮しない)。
+        let minute_field = SCHEDULED_CRON.split_whitespace().next().expect("cron must have fields");
+        let minutes: Vec<&str> = minute_field.split(',').collect();
+        assert!(
+            minutes.contains(&BACKFILL_MINUTE.to_string().as_str()),
+            "SCHEDULED_CRON minute field {minute_field:?} must include BACKFILL_MINUTE ({BACKFILL_MINUTE})",
+        );
+    }
+
+    #[test]
+    fn minute_of_hour_maps_epoch_ms_to_minute() {
+        // 0/15/30/45 分の各発火がそのまま分に落ちる。
+        assert_eq!(minute_of_hour(0.0), 0);
+        assert_eq!(minute_of_hour(900_000.0), 15);
+        assert_eq!(minute_of_hour(1_800_000.0), 30);
+        assert_eq!(minute_of_hour(2_700_000.0), 45);
+        // 1 時間ちょうど (3_600_000 ms) は剰余で 0 分に巻き戻る。
+        assert_eq!(minute_of_hour(3_600_000.0), 0);
+        assert_eq!(minute_of_hour(4_500_000.0), 15);
+    }
+
+    #[test]
+    fn minute_of_hour_truncates_sub_minute_delay() {
+        // cron 予定時刻からの起動遅延 (< 60s) は整数切り捨てで吸収され、
+        // 予定分に丸められる。45s 遅れた 0 分発火は 0 分、30s 遅れた 15 分発火は
+        // 15 分のまま。
+        assert_eq!(minute_of_hour(45_000.0), 0);
+        assert_eq!(minute_of_hour(900_000.0 + 30_000.0), 15);
+    }
+
+    #[test]
+    fn minute_of_hour_handles_current_epoch_scale() {
+        // 現在スケール (~1.7e12 ms) の epoch でも 0/15/30/45 分が正しく落ち、
+        // f64 仮数部の精度劣化が無いことを確認する。
+        // base = 2026-01-01T00:00:00Z = 1_767_225_600_000 ms (60_000 の倍数)。
+        let base = 1_767_225_600_000.0_f64;
+        assert_eq!(minute_of_hour(base), 0);
+        assert_eq!(minute_of_hour(base + 900_000.0), 15);
+        assert_eq!(minute_of_hour(base + 1_800_000.0), 30);
+        assert_eq!(minute_of_hour(base + 2_700_000.0), 45);
+        // 分境界の前後: :00:00.001 と :00:59.999 はどちらも 0 分に落ちる。
+        assert_eq!(minute_of_hour(base + 1.0), 0);
+        assert_eq!(minute_of_hour(base + 59_999.0), 0);
     }
 }

@@ -202,30 +202,24 @@ fn assert_no_runtime_injected_keys(env: &EnvironmentBindings) {
     );
 }
 
-/// https://github.com/SH11235/rshogi/issues/551 で追加した `[triggers] crons` が各 deploy 環境に宣言されていることを
-/// 固定する。`[event(scheduled)]` ハンドラは production / staging 両方で稼働させる
-/// 契約 (片方だけ宣言だと backfill / orphan sweep が動かず orphan が滞留する)。
+/// `[triggers] crons` が各 deploy 環境に宣言されていることを固定する。
+/// `[event(scheduled)]` ハンドラは production / staging 両方で稼働させる契約
+/// (片方だけ宣言だと backfill / orphan sweep が動かず orphan が滞留する)。
 ///
-/// https://github.com/SH11235/rshogi/issues/629 で cron を 1 → 2 に増やした (sweep のみ 15 分間隔)。両 cron が
-/// 必ず宣言されていること、かつ `lib.rs::BACKFILL_CRON` /
-/// `lib.rs::SWEEP_ONLY_CRON` 定数と文字列が一致していることを assert する
-/// (定数を変更したのに wrangler 側を更新し忘れる事故を防ぐ)。
-fn assert_declares_backfill_cron_trigger(env: &EnvironmentBindings) {
-    assert!(
-        env.crons.contains(&rshogi_csa_server_workers::BACKFILL_CRON.to_owned()),
-        "{file} ({label}) [triggers] crons must contain BACKFILL_CRON ({backfill:?}); got: {crons:?}",
+/// backfill 用と sweep-only 用の 2 cron は Cloudflare の account あたり cron
+/// trigger 上限 (5) に収めるため単一 cron に統合済み。`[triggers] crons` が
+/// **ちょうど `[SCHEDULED_CRON]` 1 件** であることを assert する。`contains`
+/// ではなく完全一致にするのは、旧 cron (`0 * * * *` 等) が残留して 2 件のままだと
+/// 統合の目的 (cron 数削減) が達成されず account 上限超過が再発するため。
+fn assert_declares_scheduled_cron_trigger(env: &EnvironmentBindings) {
+    assert_eq!(
+        env.crons,
+        vec![rshogi_csa_server_workers::SCHEDULED_CRON.to_owned()],
+        "{file} ({label}) [triggers] crons must be exactly [SCHEDULED_CRON] ({scheduled:?}); \
+         旧 cron が残ると account cron 上限超過が再発する。got: {crons:?}",
         file = env.file_name,
         label = env.label,
-        backfill = rshogi_csa_server_workers::BACKFILL_CRON,
-        crons = env.crons,
-    );
-    assert!(
-        env.crons.contains(&rshogi_csa_server_workers::SWEEP_ONLY_CRON.to_owned()),
-        "{file} ({label}) [triggers] crons must contain SWEEP_ONLY_CRON ({sweep:?}) for orphan sweep \
-         high-frequency path (https://github.com/SH11235/rshogi/issues/629); got: {crons:?}",
-        file = env.file_name,
-        label = env.label,
-        sweep = rshogi_csa_server_workers::SWEEP_ONLY_CRON,
+        scheduled = rshogi_csa_server_workers::SCHEDULED_CRON,
         crons = env.crons,
     );
 }
@@ -377,8 +371,8 @@ fn wrangler_production_declares_sqlite_migration_for_game_room() {
 }
 
 #[test]
-fn wrangler_production_declares_backfill_cron_trigger() {
-    assert_declares_backfill_cron_trigger(&PRODUCTION);
+fn wrangler_production_declares_scheduled_cron_trigger() {
+    assert_declares_scheduled_cron_trigger(&PRODUCTION);
 }
 
 // --- staging -------------------------------------------------------------
@@ -414,8 +408,8 @@ fn wrangler_staging_declares_sqlite_migration_for_game_room() {
 }
 
 #[test]
-fn wrangler_staging_declares_backfill_cron_trigger() {
-    assert_declares_backfill_cron_trigger(&STAGING);
+fn wrangler_staging_declares_scheduled_cron_trigger() {
+    assert_declares_scheduled_cron_trigger(&STAGING);
 }
 
 #[test]

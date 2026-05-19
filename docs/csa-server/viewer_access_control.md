@@ -186,10 +186,10 @@ stale window」「export retry pending」に起因する。
   ただし transient error / deadline / page 上限・meta PUT 失敗等で sweep が
   1 回で完了しない経路は残るため「削除済 entry が再出現しない」絶対保証は
   与えない。通常は次回 cron 周期で収束を試みる
-- **orphan 掃除の頻度**: `SWEEP_ONLY_CRON = "15,30,45 * * * *"` (15 分間隔、
-  https://github.com/SH11235/rshogi/issues/629)。R2 list deadline (25s) や
-  page 上限 (100 page) に達すると 1 cron 内で完了しない場合がある (次 cron で
-  継続)
+- **orphan 掃除の頻度**: 単一 cron `SCHEDULED_CRON = "0,15,30,45 * * * *"`
+  (15 分間隔) の各発火で sweep する (0 分は backfill も併走)。R2 list deadline
+  (25s) や page 上限 (100 page) に達すると 1 cron 内で完了しない場合がある
+  (次 cron で継続)
 - **list の網羅性**: 保証しない (1 page 上限あり、`next_cursor` で連結)
 
 ### 7.5 viewer 運用目標 (informative, 計測値ではない)
