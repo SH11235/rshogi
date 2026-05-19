@@ -51,6 +51,7 @@ pub(crate) mod network_halfkp;
 mod network_layer_stacks;
 pub mod piece_list;
 pub mod prelude;
+mod shared_weights;
 pub mod spec;
 pub mod stats;
 #[cfg(feature = "nnue-threat")]

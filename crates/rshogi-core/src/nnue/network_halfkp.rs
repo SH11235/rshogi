@@ -416,6 +416,14 @@ pub struct FeatureTransformerHalfKP<const L1: usize> {
 }
 
 impl<const L1: usize> FeatureTransformerHalfKP<L1> {
+    /// 重み配列をプロセス間共有メモリへ移行する（成功時のみ）。
+    ///
+    /// 多プロセス実行時のメモリ常駐・L3 競合を削減する。ネットワーク構築が完全に
+    /// 終わった後に 1 回だけ呼ぶこと。共有後の重み box は read-only になる。
+    pub(crate) fn share_weights(&mut self) {
+        super::shared_weights::try_share(&mut self.weights, "FT weights (HalfKP)");
+    }
+
     /// ファイルから読み込み
     pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
         let input_dim = HALFKP_DIMENSIONS;
@@ -1353,8 +1361,8 @@ impl<
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;
 
-        // Feature Transformer
-        let feature_transformer = FeatureTransformerHalfKP::read(reader)?;
+        // Feature Transformer（末尾の share_weights() で変更するため mut）
+        let mut feature_transformer = FeatureTransformerHalfKP::read(reader)?;
 
         // FC layers ハッシュ
         reader.read_exact(&mut buf4)?;
@@ -1367,6 +1375,9 @@ impl<
 
         // output: L3 → 1
         let output = AffineTransformHalfKP::read(reader)?;
+
+        // 重みをプロセス間共有メモリへ移行（多プロセス時のメモリ常駐・L3 競合を削減）。
+        feature_transformer.share_weights();
 
         Ok(Self {
             feature_transformer,
