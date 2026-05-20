@@ -1,6 +1,5 @@
 # ADR: Simple 量子化フォーマットの version とアーキ識別契約（エンジンを consumer とする）
 
-- Status: **Draft**（草案 — sh11235 のレビュー・確定待ち）
 - Date: 2026-05-20
 - Scope: rshogi（エンジン）／ rshogi-nnue（`nnue-format` クレートの `SimpleWeights`）
 - 個別タスク扱い: 本 ADR は rshogi-nnue #164 とは**独立した個別タスク**として扱う。
