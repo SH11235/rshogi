@@ -2,16 +2,6 @@
 
 - Date: 2026-05-20
 - Scope: rshogi（エンジン）／ rshogi-nnue（`nnue-format` クレートの `SimpleWeights`）
-- 個別タスク扱い: 本 ADR は rshogi-nnue #164 とは**独立した個別タスク**として扱う。
-  #164 のスレッドにはコメントしない。#164/#165 は背景として参照するのみ。
-- 既存レビューとの関係: 本 ADR の D2 は、PR 170 のレビューが提案した
-  `version = 0x7AF32F21` を**覆す**（後述 A1）。レビューは YaneuraOu の versioning
-  実装を参照せずに下した判断であり、本 ADR は YaneuraOu master の実証で差し替える。
-- rshogi-nnue 側追従: D2 / D3 / D4 / D5 / D6 は rshogi-nnue 側で同名 ADR
-  (`docs/decisions/2026-05-20-simple-quantised-format-engine-consumer.md`) と
-  `simple_weights::NNUE_VERSION = 0x7AF32F16` 変更として 2026-05-20 に landed
-  済 (本 ADR の reasoning に追従した形)。本 ADR 確定後の追加変更は engine 側
-  作業として実施。
 
 ---
 
