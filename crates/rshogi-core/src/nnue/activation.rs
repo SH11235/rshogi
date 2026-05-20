@@ -1553,8 +1553,17 @@ fn screlu_i32_to_u8(input: &[i32], output: &mut [u8]) {
 /// # 戻り値
 /// - `"CReLU"`: サフィックスなし
 /// - `"PairwiseCReLU"`: `-Pairwise` / `-PairwiseCReLU` サフィックス
-/// - `"SCReLU"`: `-SCReLU` サフィックス
+/// - `"SCReLU"`: `-SCReLU` サフィックス、またはネスト形式で `(SqrClippedReLU[`
+///   トークンが存在し `(ClippedReLU[` が存在しない場合
 /// - `"SCReLU-Pairwise"`: `-SCReLU-Pairwise`（現状 rust-core は未対応）
+///
+/// # LayerStacks の扱い
+///
+/// `(SqrClippedReLU[` と `(ClippedReLU[` の両方が登場するネスト形式
+/// (LayerStacks bucketed アーキ) の場合は `"CReLU"` を返す。LayerStacks 経路では
+/// dispatch 後にこの戻り値を使わない (L1→L2/L2→Out の活性化は LayerStacks 実装に
+/// ハードコード) ため戻り値は無害だが、新規の呼び出し元を追加する際はこの前提を
+/// 踏襲すること。
 pub fn detect_activation_from_arch(arch_str: &str) -> &'static str {
     // (1) サフィックス形式（engine 内部命名・rshogi が name() で生成する形式）
     // NOTE: 長い識別子を先に判定しないと誤検出する
