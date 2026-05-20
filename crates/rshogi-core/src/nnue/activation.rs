@@ -1556,17 +1556,34 @@ fn screlu_i32_to_u8(input: &[i32], output: &mut [u8]) {
 /// - `"SCReLU"`: `-SCReLU` サフィックス
 /// - `"SCReLU-Pairwise"`: `-SCReLU-Pairwise`（現状 rust-core は未対応）
 pub fn detect_activation_from_arch(arch_str: &str) -> &'static str {
+    // (1) サフィックス形式（engine 内部命名・rshogi が name() で生成する形式）
     // NOTE: 長い識別子を先に判定しないと誤検出する
     // 例: "-SCReLU-Pairwise" は "-SCReLU" と "-Pairwise" の両方を含む。
     if arch_str.contains("-SCReLU-Pairwise") {
-        "SCReLU-Pairwise"
-    } else if arch_str.contains(PairwiseCReLU::header_suffix()) {
-        PairwiseCReLU::name()
-    } else if arch_str.contains(SCReLU::header_suffix()) {
-        SCReLU::name()
-    } else {
-        CReLU::name()
+        return "SCReLU-Pairwise";
     }
+    if arch_str.contains(PairwiseCReLU::header_suffix()) {
+        return PairwiseCReLU::name();
+    }
+    if arch_str.contains(SCReLU::header_suffix()) {
+        return SCReLU::name();
+    }
+
+    // (2) ネスト形式（標準 NNUE arch 文字列の活性化トークン）
+    // `(SqrClippedReLU[` / `(ClippedReLU[` を開きカッコ付きで照合することで、
+    // `SqrClippedReLU` 内部の `ClippedReLU` 部分文字列を弾く。
+    //
+    // - bucket 無し SCReLU: `SqrClippedReLU` トークンのみ（ClippedReLU 単体は無い）
+    // - bucket 無し CReLU: `ClippedReLU` トークンのみ
+    // - LayerStacks (bucketed): 両方のトークンが混在（L1→L2 が SCReLU 系、
+    //   L2→Out が CReLU 系）— ここでは戻り値は使われないため CReLU を返す
+    let has_sqr = arch_str.contains("(SqrClippedReLU[");
+    let has_clipped = arch_str.contains("(ClippedReLU[");
+    if has_sqr && !has_clipped {
+        return SCReLU::name();
+    }
+
+    CReLU::name()
 }
 
 // =============================================================================
@@ -1598,6 +1615,34 @@ mod tests {
             detect_activation_from_arch("Features=HalfKA_hm[73305->512/2x2]-SCReLU-Pairwise"),
             "SCReLU-Pairwise"
         );
+    }
+
+    #[test]
+    fn test_detect_activation_nested_screlu() {
+        // bucket 無し SCReLU: `(SqrClippedReLU[` トークンのみ、`(ClippedReLU[` は無い
+        let arch = "Features=HalfKA_hm(Friend)[73305->1024x2],Network=AffineTransform\
+                    [1<-64](SqrClippedReLU[64](AffineTransform[64<-8](SqrClippedReLU[8](\
+                    AffineTransformSparseInput[8<-2048](InputSlice[2048(0:2048)]))))),fv_scale=14";
+        assert_eq!(detect_activation_from_arch(arch), "SCReLU");
+    }
+
+    #[test]
+    fn test_detect_activation_nested_crelu() {
+        // bucket 無し CReLU: `(ClippedReLU[` トークンのみ
+        let arch = "Features=HalfKA_hm(Friend)[73305->1024x2],Network=AffineTransform\
+                    [1<-64](ClippedReLU[64](AffineTransform[64<-8](ClippedReLU[8](\
+                    AffineTransformSparseInput[8<-2048](InputSlice[2048(0:2048)]))))),fv_scale=14";
+        assert_eq!(detect_activation_from_arch(arch), "CReLU");
+    }
+
+    #[test]
+    fn test_detect_activation_nested_layerstacks_mixed() {
+        // LayerStacks (bucketed) は SqrClippedReLU と ClippedReLU が混在 →
+        // CReLU を返す（LayerStacks 経路では戻り値は使われないため既存挙動を保持）
+        let arch = "Features=HalfKA_hm(Friend)[73305->1536x2],Network=AffineTransform\
+                    [1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](\
+                    AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28";
+        assert_eq!(detect_activation_from_arch(arch), "CReLU");
     }
 
     #[test]

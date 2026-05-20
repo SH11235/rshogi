@@ -170,14 +170,27 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
     if arch_str.contains("LayerStacks") {
         return Ok(FeatureSet::LayerStacks);
     }
-    // bullet-shogi LayerStacks 形式の判定:
-    // - Threat= を含むモデルは必ず LayerStacks
-    // - SqrClippedReLU を含むモデルは bullet-shogi LayerStacks（L2 活性化が SCReLU）
-    //   nnue-pytorch 単体モデルは ClippedReLU のみ使用
-    if arch_str.contains("Threat=") || arch_str.contains("SqrClippedReLU") {
+    // Threat= は LayerStacks 専用マーカ
+    if arch_str.contains("Threat=") {
         return Ok(FeatureSet::LayerStacks);
     }
-    // HalfKP/HalfKA_hm/HalfKA のキーワードを先に判定（FT_OUT が LayerStacks と衝突するため）
+    // LayerStacks の混在トークン判定（ネスト形式）:
+    // `(SqrClippedReLU[` と独立した `(ClippedReLU[` の**両方**を持つ場合は
+    // bucketed (LayerStacks) と確定する。
+    //
+    // - bucket 無し SCReLU: `SqrClippedReLU` トークンだけ
+    // - bucket 無し CReLU: `ClippedReLU` トークンだけ
+    // - LayerStacks: L1→L2 が SCReLU 系、L2→Out が CReLU 系で両者が混在する
+    //
+    // `(ClippedReLU[` を開きカッコ付きで照合することで、`SqrClippedReLU[`
+    // 内部の "ClippedReLU[" 部分文字列を弾く。
+    let has_sqr = arch_str.contains("(SqrClippedReLU[");
+    let has_clipped = arch_str.contains("(ClippedReLU[");
+    if has_sqr && has_clipped {
+        return Ok(FeatureSet::LayerStacks);
+    }
+
+    // Features= 名前による feature_set 決定
     if arch_str.contains("HalfKP") {
         return Ok(FeatureSet::HalfKP);
     }
@@ -194,7 +207,8 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
             _ => Err(format!("Unknown HalfKA input dimensions: {input_dim}")),
         };
     }
-    // キーワードが無い LayerStacks モデル（bullet-shogi 形式）: FT_OUT パターンで判定
+
+    // キーワード非該当のネスト形式 LayerStacks: FT_OUT パターンで補完判定
     if arch_str.contains("->1536x2]")
         || arch_str.contains("->768x2]")
         || arch_str.contains("->512x2]")
@@ -646,6 +660,48 @@ mod tests {
         let err = parse_feature_set_from_arch("Features=HalfKA,Network=AffineTransform[1<-96]")
             .unwrap_err();
         assert!(err.contains("missing input dimensions"));
+    }
+
+    #[test]
+    fn test_parse_feature_set_bucketless_screlu() {
+        // bucket 無し SCReLU: SqrClippedReLU トークンのみ（独立した ClippedReLU は
+        // 持たない）。旧実装は SqrClippedReLU を見て LayerStacks と誤分類していたが、
+        // 混在トークン判定により bucket 無し HalfKA_hm として正しく返す。
+        let arch = "Features=HalfKA_hm(Friend)[73305->1024x2],Network=AffineTransform\
+                    [1<-64](SqrClippedReLU[64](AffineTransform[64<-8](SqrClippedReLU[8](\
+                    AffineTransformSparseInput[8<-2048](InputSlice[2048(0:2048)]))))),fv_scale=14";
+        assert_eq!(parse_feature_set_from_arch(arch).unwrap(), FeatureSet::HalfKA_hm);
+    }
+
+    #[test]
+    fn test_parse_feature_set_bucketless_crelu() {
+        // bucket 無し CReLU: ClippedReLU トークンのみ。LayerStacks 混在パターンに
+        // 該当せず → keyword で HalfKA_hm を返す。
+        let arch = "Features=HalfKA_hm(Friend)[73305->1024x2],Network=AffineTransform\
+                    [1<-64](ClippedReLU[64](AffineTransform[64<-8](ClippedReLU[8](\
+                    AffineTransformSparseInput[8<-2048](InputSlice[2048(0:2048)]))))),fv_scale=14";
+        assert_eq!(parse_feature_set_from_arch(arch).unwrap(), FeatureSet::HalfKA_hm);
+    }
+
+    #[test]
+    fn test_parse_feature_set_bucketless_512_preset() {
+        // bucket 無し 512x2 preset: FT_OUT が LayerStacks フォールバックパターンと
+        // 衝突するが、ClippedReLU 単独で混在トークン非該当 → keyword 優先で
+        // HalfKA_hm を返す。
+        let arch = "Features=HalfKA_hm(Friend)[73305->512x2],Network=AffineTransform\
+                    [1<-96](ClippedReLU[96](AffineTransform[96<-8](ClippedReLU[8](\
+                    AffineTransformSparseInput[8<-1024](InputSlice[1024(0:1024)]))))),fv_scale=14";
+        assert_eq!(parse_feature_set_from_arch(arch).unwrap(), FeatureSet::HalfKA_hm);
+    }
+
+    #[test]
+    fn test_parse_feature_set_layerstacks_no_keyword() {
+        // LayerStacks: SqrClippedReLU + 独立 ClippedReLU の混在トークンを持つので
+        // keyword (HalfKA_hm) より優先して LayerStacks と確定する。
+        let arch = "Features=HalfKA_hm(Friend)[73305->1536x2],Network=AffineTransform\
+                    [1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](\
+                    AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28";
+        assert_eq!(parse_feature_set_from_arch(arch).unwrap(), FeatureSet::LayerStacks);
     }
 
     #[test]
