@@ -324,14 +324,19 @@ impl UsiEngine {
                 // EvalFile 未指定だが Material 有効 or NNUE 既ロード → 何もしない
             }
         }
-        // progress8kpabs モードで LS_PROGRESS_COEFF 未指定の場合はエラー
-        // NNUE が未ロード（Material 評価）の場合は bucket mode は使われないのでスキップ
-        if get_network().is_some() {
+        // progress8kpabs bucket mode で LS_PROGRESS_COEFF 未指定の場合はエラー。
+        // bucket mode は LayerStacks ネットワーク専用。Simple系アーキ
+        // (HalfKP/HalfKA/HalfKA_hm/HalfKaMerged/HalfKaHmSplit) や Material 評価では
+        // 使われないため、ロード済みネットワークが LayerStacks のときだけ検査する。
+        {
             use rshogi_core::nnue::{
-                LayerStackBucketMode, get_layer_stack_bucket_mode,
+                LayerStackBucketMode, NNUENetwork, get_layer_stack_bucket_mode,
                 get_layer_stack_progress_kpabs_weights,
             };
-            if get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs
+            let is_layer_stacks =
+                matches!(get_network().as_deref(), Some(NNUENetwork::LayerStacks(_)));
+            if is_layer_stacks
+                && get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs
                 && get_layer_stack_progress_kpabs_weights().iter().all(|&w| w == 0.0)
             {
                 panic!(
