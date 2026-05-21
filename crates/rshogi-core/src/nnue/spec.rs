@@ -29,8 +29,10 @@ impl FeatureSet {
             Self::HalfKP => "HalfKP",
             Self::HalfKA_hm => "HalfKA_hm",
             Self::HalfKA => "HalfKA",
-            Self::HalfKaMerged => "HalfKaMerged",
-            Self::HalfKaHmSplit => "HalfKaHmSplit",
+            // arch 文字列 (trainer の arch_feature_name) と一致させる。
+            // `parse_feature_set_from_arch` はこの underscore 名で判定する。
+            Self::HalfKaMerged => "HalfKA_merged",
+            Self::HalfKaHmSplit => "HalfKA_hm_split",
             Self::LayerStacks => "LayerStacks",
         }
     }

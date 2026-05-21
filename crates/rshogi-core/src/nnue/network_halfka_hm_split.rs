@@ -1260,9 +1260,9 @@ impl<
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "Unsupported model format: factorized (non-coalesced) HalfKaHmSplit^ model detected.\n\
-                     This engine only supports coalesced models (73,305 dimensions).\n\
-                     Factorized models (74,934 dimensions) are for training only.\n\n\
+                    "Unsupported model format: factorized (non-coalesced) HalfKA_hm_split^ model detected.\n\
+                     This engine only supports coalesced models (76,950 dimensions).\n\
+                     Factorized models are for training only.\n\n\
                      To fix: Re-export the model using nnue-pytorch serialize.py:\n\
                        python serialize.py model.ckpt output.nnue\n\n\
                      The serialize.py script automatically coalesces factor weights.\n\
@@ -1495,7 +1495,7 @@ impl<
 
     /// アーキテクチャ名を取得
     pub fn architecture_name(&self) -> String {
-        format!("HalfKaHmSplit^{}x2-{}-{}-{}", L1, L2, L3, A::name())
+        format!("HalfKA_hm_split^{}x2-{}-{}-{}", L1, L2, L3, A::name())
     }
 }
 
@@ -1602,20 +1602,20 @@ mod tests {
         // bullet-shogi 形式（qa= を含む）
         assert_eq!(
             parse_qa_from_arch(
-                "Features=HalfKaHmSplit[73305->512x2],fv_scale=5,l1_input=1024,l2=8,l3=96,qa=255,qb=64"
+                "Features=HalfKA_hm_split[76950->512x2],fv_scale=5,l1_input=1024,l2=8,l3=96,qa=255,qb=64"
             ),
             Some(255)
         );
         assert_eq!(
             parse_qa_from_arch(
-                "Features=HalfKaHmSplit[73305->512x2],fv_scale=5,l1_input=1024,l2=8,l3=96,qa=127,qb=64"
+                "Features=HalfKA_hm_split[76950->512x2],fv_scale=5,l1_input=1024,l2=8,l3=96,qa=127,qb=64"
             ),
             Some(127)
         );
         // nnue-pytorch 形式（qa= を含まない → None でデフォルト値 127 を使用）
         assert_eq!(
             parse_qa_from_arch(
-                "Features=HalfKaHmSplit[73305->512x2],Network=AffineTransform[1<-96]"
+                "Features=HalfKA_hm_split[76950->512x2],Network=AffineTransform[1<-96]"
             ),
             None
         );

@@ -53,10 +53,10 @@ mod tests {
     fn test_architecture_name_format() {
         for spec in HalfKaMerged_L256::SUPPORTED_SPECS {
             let name = spec.name();
-            // HalfKaMerged-256-L2-L3-Activation 形式
+            // HalfKA_merged-256-L2-L3-Activation 形式
             assert!(
-                name.starts_with("HalfKaMerged-256-"),
-                "Architecture name should start with 'HalfKaMerged-256-', got: {name}"
+                name.starts_with("HalfKA_merged-256-"),
+                "Architecture name should start with 'HalfKA_merged-256-', got: {name}"
             );
         }
     }

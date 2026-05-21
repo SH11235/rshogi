@@ -65,8 +65,8 @@ mod tests {
         for spec in HalfKaMerged_L512::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
-                name.starts_with("HalfKaMerged-512-"),
-                "Architecture name should start with 'HalfKaMerged-512-', got: {name}"
+                name.starts_with("HalfKA_merged-512-"),
+                "Architecture name should start with 'HalfKA_merged-512-', got: {name}"
             );
         }
     }

@@ -1128,8 +1128,8 @@ pub fn detect_format(bytes: &[u8], file_size: u64) -> io::Result<NnueFormatInfo>
                 FeatureSet::LayerStacks => "LayerStacks".to_string(),
                 FeatureSet::HalfKA_hm => format!("HalfKA_hm{}", l1),
                 FeatureSet::HalfKA => format!("HalfKA{}", l1),
-                FeatureSet::HalfKaMerged => format!("HalfKaMerged{}", l1),
-                FeatureSet::HalfKaHmSplit => format!("HalfKaHmSplit{}", l1),
+                FeatureSet::HalfKaMerged => format!("HalfKA_merged{}", l1),
+                FeatureSet::HalfKaHmSplit => format!("HalfKA_hm_split{}", l1),
                 FeatureSet::HalfKP => format!("HalfKP{}", l1),
             };
 

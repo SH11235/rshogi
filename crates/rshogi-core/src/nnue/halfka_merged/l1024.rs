@@ -70,8 +70,8 @@ mod tests {
         for spec in HalfKaMerged_L1024::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
-                name.starts_with("HalfKaMerged-1024-"),
-                "Architecture name should start with 'HalfKaMerged-1024-', got: {name}"
+                name.starts_with("HalfKA_merged-1024-"),
+                "Architecture name should start with 'HalfKA_merged-1024-', got: {name}"
             );
         }
     }

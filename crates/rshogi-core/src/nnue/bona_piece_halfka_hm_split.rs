@@ -199,7 +199,13 @@ mod tests {
     #[test]
     fn test_king_bucket_parity_with_halfka_hm() {
         use crate::nnue::bona_piece_halfka_hm::king_bucket as hm_kb;
-        for f in [File::File1, File::File3, File::File5, File::File7, File::File9] {
+        for f in [
+            File::File1,
+            File::File3,
+            File::File5,
+            File::File7,
+            File::File9,
+        ] {
             for r in [Rank::Rank1, Rank::Rank5, Rank::Rank9] {
                 let sq = Square::new(f, r);
                 for &c in &[Color::Black, Color::White] {

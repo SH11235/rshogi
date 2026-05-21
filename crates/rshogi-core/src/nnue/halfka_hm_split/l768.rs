@@ -54,8 +54,8 @@ mod tests {
         for spec in HalfKaHmSplit_L768::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
-                name.starts_with("HalfKaHmSplit-768-"),
-                "Architecture name should start with 'HalfKaHmSplit-768-', got: {name}"
+                name.starts_with("HalfKA_hm_split-768-"),
+                "Architecture name should start with 'HalfKA_hm_split-768-', got: {name}"
             );
         }
     }
