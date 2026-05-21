@@ -10,7 +10,9 @@ use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
 use crate::nnue::aliases::{
-    HalfKaHmSplit512_8_64CReLU, HalfKaHmSplit512_32_32CReLU, HalfKaHmSplit512CReLU,
+    HalfKaHmSplit512_8_64CReLU, HalfKaHmSplit512_8_64Pairwise, HalfKaHmSplit512_8_64SCReLU,
+    HalfKaHmSplit512_32_32CReLU, HalfKaHmSplit512_32_32Pairwise, HalfKaHmSplit512_32_32SCReLU,
+    HalfKaHmSplit512CReLU, HalfKaHmSplit512Pairwise, HalfKaHmSplit512SCReLU,
 };
 
 crate::define_l1_variants!(
@@ -22,11 +24,17 @@ crate::define_l1_variants!(
 
     variants {
         // L2=8, L3=64
-        (8,  64, CReLU)    => CReLU8x64      : HalfKaHmSplit512_8_64CReLU,
+        (8,  64, CReLU)         => CReLU8x64     : HalfKaHmSplit512_8_64CReLU,
+        (8,  64, SCReLU)        => SCReLU8x64    : HalfKaHmSplit512_8_64SCReLU,
+        (8,  64, PairwiseCReLU) => Pairwise8x64  : HalfKaHmSplit512_8_64Pairwise,
         // L2=8, L3=96
-        (8,  96, CReLU)    => CReLU8x96      : HalfKaHmSplit512CReLU,
+        (8,  96, CReLU)         => CReLU8x96     : HalfKaHmSplit512CReLU,
+        (8,  96, SCReLU)        => SCReLU8x96    : HalfKaHmSplit512SCReLU,
+        (8,  96, PairwiseCReLU) => Pairwise8x96  : HalfKaHmSplit512Pairwise,
         // L2=32, L3=32
-        (32, 32, CReLU)    => CReLU32x32     : HalfKaHmSplit512_32_32CReLU,
+        (32, 32, CReLU)         => CReLU32x32    : HalfKaHmSplit512_32_32CReLU,
+        (32, 32, SCReLU)        => SCReLU32x32   : HalfKaHmSplit512_32_32SCReLU,
+        (32, 32, PairwiseCReLU) => Pairwise32x32 : HalfKaHmSplit512_32_32Pairwise,
     }
 );
 
@@ -36,7 +44,7 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKaHmSplit_L512::SUPPORTED_SPECS.len(), 3);
+        assert_eq!(HalfKaHmSplit_L512::SUPPORTED_SPECS.len(), 9);
 
         // 8-64 CReLU
         let spec = &HalfKaHmSplit_L512::SUPPORTED_SPECS[0];
@@ -45,11 +53,6 @@ mod tests {
         assert_eq!(spec.l2, 8);
         assert_eq!(spec.l3, 64);
         assert_eq!(spec.activation, Activation::CReLU);
-
-        // 8-96 CReLU
-        let spec = &HalfKaHmSplit_L512::SUPPORTED_SPECS[1];
-        assert_eq!(spec.l2, 8);
-        assert_eq!(spec.l3, 96);
     }
 
     #[test]
@@ -71,13 +74,14 @@ mod tests {
         }
     }
 
-    /// マクロ生成: 活性化関数の output_dim_divisor テスト
+    /// マクロ生成: 3 種の活性化関数がすべて登録されていることを確認
     #[test]
-    fn test_activation_output_dim_divisor() {
-        for spec in HalfKaHmSplit_L512::SUPPORTED_SPECS {
-            assert_eq!(spec.activation, Activation::CReLU);
-            assert_eq!(spec.activation.output_dim_divisor(), 1);
-        }
+    fn test_supported_activations() {
+        let activations: Vec<_> =
+            HalfKaHmSplit_L512::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+        assert!(activations.contains(&Activation::CReLU));
+        assert!(activations.contains(&Activation::SCReLU));
+        assert!(activations.contains(&Activation::PairwiseCReLU));
     }
 
     /// マクロ生成: L2/L3 の組み合わせが複数あることを確認

@@ -1519,39 +1519,74 @@ fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
 // 型エイリアス
 // =============================================================================
 
-use super::activation::CReLU;
+use super::activation::{CReLU, PairwiseCReLU, SCReLU};
 
 // L1=256, FT_OUT=512
 /// HalfKaHmSplit 256x2-32-32 CReLU
 pub type HalfKaHmSplit256CReLU = NetworkHalfKaHmSplit<256, 512, 512, 32, 32, CReLU>;
+/// HalfKaHmSplit 256x2-32-32 SCReLU
+pub type HalfKaHmSplit256SCReLU = NetworkHalfKaHmSplit<256, 512, 512, 32, 32, SCReLU>;
+/// HalfKaHmSplit 256x2-32-32 PairwiseCReLU
+pub type HalfKaHmSplit256Pairwise = NetworkHalfKaHmSplit<256, 512, 256, 32, 32, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=64
 /// HalfKaHmSplit 512x2-8-64 CReLU
 pub type HalfKaHmSplit512_8_64CReLU = NetworkHalfKaHmSplit<512, 1024, 1024, 8, 64, CReLU>;
+/// HalfKaHmSplit 512x2-8-64 SCReLU
+pub type HalfKaHmSplit512_8_64SCReLU = NetworkHalfKaHmSplit<512, 1024, 1024, 8, 64, SCReLU>;
+/// HalfKaHmSplit 512x2-8-64 PairwiseCReLU
+pub type HalfKaHmSplit512_8_64Pairwise = NetworkHalfKaHmSplit<512, 1024, 512, 8, 64, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=96
 /// HalfKaHmSplit 512x2-8-96 CReLU
 pub type HalfKaHmSplit512CReLU = NetworkHalfKaHmSplit<512, 1024, 1024, 8, 96, CReLU>;
+/// HalfKaHmSplit 512x2-8-96 SCReLU
+pub type HalfKaHmSplit512SCReLU = NetworkHalfKaHmSplit<512, 1024, 1024, 8, 96, SCReLU>;
+/// HalfKaHmSplit 512x2-8-96 PairwiseCReLU
+pub type HalfKaHmSplit512Pairwise = NetworkHalfKaHmSplit<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=32, L3=32
 /// HalfKaHmSplit 512x2-32-32 CReLU
 pub type HalfKaHmSplit512_32_32CReLU = NetworkHalfKaHmSplit<512, 1024, 1024, 32, 32, CReLU>;
+/// HalfKaHmSplit 512x2-32-32 SCReLU
+pub type HalfKaHmSplit512_32_32SCReLU = NetworkHalfKaHmSplit<512, 1024, 1024, 32, 32, SCReLU>;
+/// HalfKaHmSplit 512x2-32-32 PairwiseCReLU
+pub type HalfKaHmSplit512_32_32Pairwise =
+    NetworkHalfKaHmSplit<512, 1024, 512, 32, 32, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=64
 /// HalfKaHmSplit 1024x2-8-64 CReLU
 pub type HalfKaHmSplit1024_8_64CReLU = NetworkHalfKaHmSplit<1024, 2048, 2048, 8, 64, CReLU>;
+/// HalfKaHmSplit 1024x2-8-64 SCReLU
+pub type HalfKaHmSplit1024_8_64SCReLU = NetworkHalfKaHmSplit<1024, 2048, 2048, 8, 64, SCReLU>;
+/// HalfKaHmSplit 1024x2-8-64 PairwiseCReLU
+pub type HalfKaHmSplit1024_8_64Pairwise =
+    NetworkHalfKaHmSplit<1024, 2048, 1024, 8, 64, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=96
 /// HalfKaHmSplit 1024x2-8-96 CReLU
 pub type HalfKaHmSplit1024CReLU = NetworkHalfKaHmSplit<1024, 2048, 2048, 8, 96, CReLU>;
+/// HalfKaHmSplit 1024x2-8-96 SCReLU
+pub type HalfKaHmSplit1024SCReLU = NetworkHalfKaHmSplit<1024, 2048, 2048, 8, 96, SCReLU>;
+/// HalfKaHmSplit 1024x2-8-96 PairwiseCReLU
+pub type HalfKaHmSplit1024Pairwise = NetworkHalfKaHmSplit<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
 /// HalfKaHmSplit 1024x2-8-32 CReLU
 pub type HalfKaHmSplit1024_8_32CReLU = NetworkHalfKaHmSplit<1024, 2048, 2048, 8, 32, CReLU>;
+/// HalfKaHmSplit 1024x2-8-32 SCReLU
+pub type HalfKaHmSplit1024_8_32SCReLU = NetworkHalfKaHmSplit<1024, 2048, 2048, 8, 32, SCReLU>;
+/// HalfKaHmSplit 1024x2-8-32 PairwiseCReLU
+pub type HalfKaHmSplit1024_8_32Pairwise =
+    NetworkHalfKaHmSplit<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // L1=768, FT_OUT=1536, L2=16, L3=64
 /// HalfKaHmSplit 768x2-16-64 CReLU
 pub type HalfKaHmSplit768CReLU = NetworkHalfKaHmSplit<768, 1536, 1536, 16, 64, CReLU>;
+/// HalfKaHmSplit 768x2-16-64 SCReLU
+pub type HalfKaHmSplit768SCReLU = NetworkHalfKaHmSplit<768, 1536, 1536, 16, 64, SCReLU>;
+/// HalfKaHmSplit 768x2-16-64 PairwiseCReLU
+pub type HalfKaHmSplit768Pairwise = NetworkHalfKaHmSplit<768, 1536, 768, 16, 64, PairwiseCReLU>;
 
 // =============================================================================
 // テスト

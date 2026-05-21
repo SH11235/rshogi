@@ -1521,39 +1521,73 @@ fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
 // 型エイリアス
 // =============================================================================
 
-use super::activation::CReLU;
+use super::activation::{CReLU, PairwiseCReLU, SCReLU};
 
 // L1=256, FT_OUT=512
 /// HalfKaMerged 256x2-32-32 CReLU
 pub type HalfKaMerged256CReLU = NetworkHalfKaMerged<256, 512, 512, 32, 32, CReLU>;
+/// HalfKaMerged 256x2-32-32 SCReLU
+pub type HalfKaMerged256SCReLU = NetworkHalfKaMerged<256, 512, 512, 32, 32, SCReLU>;
+/// HalfKaMerged 256x2-32-32 PairwiseCReLU
+pub type HalfKaMerged256Pairwise = NetworkHalfKaMerged<256, 512, 256, 32, 32, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=64
 /// HalfKaMerged 512x2-8-64 CReLU
 pub type HalfKaMerged512_8_64CReLU = NetworkHalfKaMerged<512, 1024, 1024, 8, 64, CReLU>;
+/// HalfKaMerged 512x2-8-64 SCReLU
+pub type HalfKaMerged512_8_64SCReLU = NetworkHalfKaMerged<512, 1024, 1024, 8, 64, SCReLU>;
+/// HalfKaMerged 512x2-8-64 PairwiseCReLU
+pub type HalfKaMerged512_8_64Pairwise = NetworkHalfKaMerged<512, 1024, 512, 8, 64, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=96
 /// HalfKaMerged 512x2-8-96 CReLU
 pub type HalfKaMerged512CReLU = NetworkHalfKaMerged<512, 1024, 1024, 8, 96, CReLU>;
+/// HalfKaMerged 512x2-8-96 SCReLU
+pub type HalfKaMerged512SCReLU = NetworkHalfKaMerged<512, 1024, 1024, 8, 96, SCReLU>;
+/// HalfKaMerged 512x2-8-96 PairwiseCReLU
+pub type HalfKaMerged512Pairwise = NetworkHalfKaMerged<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=32, L3=32
 /// HalfKaMerged 512x2-32-32 CReLU
 pub type HalfKaMerged512_32_32CReLU = NetworkHalfKaMerged<512, 1024, 1024, 32, 32, CReLU>;
+/// HalfKaMerged 512x2-32-32 SCReLU
+pub type HalfKaMerged512_32_32SCReLU = NetworkHalfKaMerged<512, 1024, 1024, 32, 32, SCReLU>;
+/// HalfKaMerged 512x2-32-32 PairwiseCReLU
+pub type HalfKaMerged512_32_32Pairwise = NetworkHalfKaMerged<512, 1024, 512, 32, 32, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=64
 /// HalfKaMerged 1024x2-8-64 CReLU
 pub type HalfKaMerged1024_8_64CReLU = NetworkHalfKaMerged<1024, 2048, 2048, 8, 64, CReLU>;
+/// HalfKaMerged 1024x2-8-64 SCReLU
+pub type HalfKaMerged1024_8_64SCReLU = NetworkHalfKaMerged<1024, 2048, 2048, 8, 64, SCReLU>;
+/// HalfKaMerged 1024x2-8-64 PairwiseCReLU
+pub type HalfKaMerged1024_8_64Pairwise =
+    NetworkHalfKaMerged<1024, 2048, 1024, 8, 64, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=96
 /// HalfKaMerged 1024x2-8-96 CReLU
 pub type HalfKaMerged1024CReLU = NetworkHalfKaMerged<1024, 2048, 2048, 8, 96, CReLU>;
+/// HalfKaMerged 1024x2-8-96 SCReLU
+pub type HalfKaMerged1024SCReLU = NetworkHalfKaMerged<1024, 2048, 2048, 8, 96, SCReLU>;
+/// HalfKaMerged 1024x2-8-96 PairwiseCReLU
+pub type HalfKaMerged1024Pairwise = NetworkHalfKaMerged<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
 /// HalfKaMerged 1024x2-8-32 CReLU
 pub type HalfKaMerged1024_8_32CReLU = NetworkHalfKaMerged<1024, 2048, 2048, 8, 32, CReLU>;
+/// HalfKaMerged 1024x2-8-32 SCReLU
+pub type HalfKaMerged1024_8_32SCReLU = NetworkHalfKaMerged<1024, 2048, 2048, 8, 32, SCReLU>;
+/// HalfKaMerged 1024x2-8-32 PairwiseCReLU
+pub type HalfKaMerged1024_8_32Pairwise =
+    NetworkHalfKaMerged<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // L1=768, FT_OUT=1536, L2=16, L3=64
 /// HalfKaMerged 768x2-16-64 CReLU
 pub type HalfKaMerged768CReLU = NetworkHalfKaMerged<768, 1536, 1536, 16, 64, CReLU>;
+/// HalfKaMerged 768x2-16-64 SCReLU
+pub type HalfKaMerged768SCReLU = NetworkHalfKaMerged<768, 1536, 1536, 16, 64, SCReLU>;
+/// HalfKaMerged 768x2-16-64 PairwiseCReLU
+pub type HalfKaMerged768Pairwise = NetworkHalfKaMerged<768, 1536, 768, 16, 64, PairwiseCReLU>;
 
 // =============================================================================
 // テスト
