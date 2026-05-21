@@ -435,8 +435,8 @@ mod tests {
     #[test]
     fn test_supported_specs_combined() {
         let specs = HalfKaHmSplitNetwork::supported_specs();
-        // 256: 1, 512: 3, 768: 1, 1024: 3
-        assert_eq!(specs.len(), 8);
+        // (256: 1, 512: 3, 768: 1, 1024: 3) × 3 活性化 (CReLU/SCReLU/Pairwise)
+        assert_eq!(specs.len(), 24);
 
         // 全て HalfKaHmSplit
         for spec in &specs {

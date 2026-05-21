@@ -1518,39 +1518,71 @@ fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
 // 型エイリアス
 // =============================================================================
 
-use super::activation::CReLU;
+use super::activation::{CReLU, PairwiseCReLU, SCReLU};
 
 // L1=256, FT_OUT=512
 /// HalfKA 256x2-32-32 CReLU
 pub type HalfKA256CReLU = NetworkHalfKA<256, 512, 512, 32, 32, CReLU>;
+/// HalfKA 256x2-32-32 SCReLU
+pub type HalfKA256SCReLU = NetworkHalfKA<256, 512, 512, 32, 32, SCReLU>;
+/// HalfKA 256x2-32-32 PairwiseCReLU
+pub type HalfKA256Pairwise = NetworkHalfKA<256, 512, 256, 32, 32, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=64
 /// HalfKA 512x2-8-64 CReLU
 pub type HalfKA512_8_64CReLU = NetworkHalfKA<512, 1024, 1024, 8, 64, CReLU>;
+/// HalfKA 512x2-8-64 SCReLU
+pub type HalfKA512_8_64SCReLU = NetworkHalfKA<512, 1024, 1024, 8, 64, SCReLU>;
+/// HalfKA 512x2-8-64 PairwiseCReLU
+pub type HalfKA512_8_64Pairwise = NetworkHalfKA<512, 1024, 512, 8, 64, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=96
 /// HalfKA 512x2-8-96 CReLU
 pub type HalfKA512CReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, CReLU>;
+/// HalfKA 512x2-8-96 SCReLU
+pub type HalfKA512SCReLU = NetworkHalfKA<512, 1024, 1024, 8, 96, SCReLU>;
+/// HalfKA 512x2-8-96 PairwiseCReLU
+pub type HalfKA512Pairwise = NetworkHalfKA<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=32, L3=32
 /// HalfKA 512x2-32-32 CReLU
 pub type HalfKA512_32_32CReLU = NetworkHalfKA<512, 1024, 1024, 32, 32, CReLU>;
+/// HalfKA 512x2-32-32 SCReLU
+pub type HalfKA512_32_32SCReLU = NetworkHalfKA<512, 1024, 1024, 32, 32, SCReLU>;
+/// HalfKA 512x2-32-32 PairwiseCReLU
+pub type HalfKA512_32_32Pairwise = NetworkHalfKA<512, 1024, 512, 32, 32, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=64
 /// HalfKA 1024x2-8-64 CReLU
 pub type HalfKA1024_8_64CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 64, CReLU>;
+/// HalfKA 1024x2-8-64 SCReLU
+pub type HalfKA1024_8_64SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 64, SCReLU>;
+/// HalfKA 1024x2-8-64 PairwiseCReLU
+pub type HalfKA1024_8_64Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 64, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=96
 /// HalfKA 1024x2-8-96 CReLU
 pub type HalfKA1024CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, CReLU>;
+/// HalfKA 1024x2-8-96 SCReLU
+pub type HalfKA1024SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 96, SCReLU>;
+/// HalfKA 1024x2-8-96 PairwiseCReLU
+pub type HalfKA1024Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
 /// HalfKA 1024x2-8-32 CReLU
 pub type HalfKA1024_8_32CReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, CReLU>;
+/// HalfKA 1024x2-8-32 SCReLU
+pub type HalfKA1024_8_32SCReLU = NetworkHalfKA<1024, 2048, 2048, 8, 32, SCReLU>;
+/// HalfKA 1024x2-8-32 PairwiseCReLU
+pub type HalfKA1024_8_32Pairwise = NetworkHalfKA<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // L1=768, FT_OUT=1536, L2=16, L3=64
 /// HalfKA 768x2-16-64 CReLU
 pub type HalfKA768CReLU = NetworkHalfKA<768, 1536, 1536, 16, 64, CReLU>;
+/// HalfKA 768x2-16-64 SCReLU
+pub type HalfKA768SCReLU = NetworkHalfKA<768, 1536, 1536, 16, 64, SCReLU>;
+/// HalfKA 768x2-16-64 PairwiseCReLU
+pub type HalfKA768Pairwise = NetworkHalfKA<768, 1536, 768, 16, 64, PairwiseCReLU>;
 
 // =============================================================================
 // テスト

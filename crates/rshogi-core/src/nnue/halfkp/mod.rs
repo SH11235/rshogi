@@ -424,8 +424,8 @@ mod tests {
     #[test]
     fn test_supported_specs_combined() {
         let specs = HalfKPNetwork::supported_specs();
-        // 256: 1, 512: 3, 768: 1, 1024: 2
-        assert_eq!(specs.len(), 7);
+        // (256: 1, 512: 3, 768: 1, 1024: 2) × 3 活性化 (CReLU/SCReLU/Pairwise)
+        assert_eq!(specs.len(), 21);
 
         // 全て HalfKP
         for spec in &specs {

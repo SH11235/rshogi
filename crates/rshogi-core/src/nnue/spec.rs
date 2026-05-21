@@ -405,6 +405,26 @@ pub const fn network_payload_halfkp(l1: usize, l2: usize, l3: usize) -> u64 {
         as u64
 }
 
+/// HalfKP の network_payload を計算（PairwiseCReLU 版）
+///
+/// PairwiseCReLU は活性化で次元を半減させるため、L1 層の dense 入力は
+/// `pad32(l1)`（CReLU/SCReLU の `pad32(l1 * 2)` ではない）。
+pub const fn network_payload_halfkp_pairwise(l1: usize, l2: usize, l3: usize) -> u64 {
+    const HALFKP_DIMENSIONS: usize = 125388;
+
+    let ft_bias = l1 * 2;
+    let ft_weight = HALFKP_DIMENSIONS * l1 * 2;
+    let l1_bias = l2 * 4;
+    let l1_weight = pad32(l1) * l2;
+    let l2_bias = l3 * 4;
+    let l2_weight = pad32(l2) * l3;
+    let output_bias = 4;
+    let output_weight = l3;
+
+    (ft_bias + ft_weight + l1_bias + l1_weight + l2_bias + l2_weight + output_bias + output_weight)
+        as u64
+}
+
 /// HalfKA_hm の network_payload を計算
 pub const fn network_payload_halfka_hm(l1: usize, l2: usize, l3: usize) -> u64 {
     const HALFKA_HM_DIMENSIONS: usize = 73305;
@@ -413,6 +433,23 @@ pub const fn network_payload_halfka_hm(l1: usize, l2: usize, l3: usize) -> u64 {
     let ft_weight = HALFKA_HM_DIMENSIONS * l1 * 2;
     let l1_bias = l2 * 4;
     let l1_weight = pad32(l1 * 2) * l2;
+    let l2_bias = l3 * 4;
+    let l2_weight = pad32(l2) * l3;
+    let output_bias = 4;
+    let output_weight = l3;
+
+    (ft_bias + ft_weight + l1_bias + l1_weight + l2_bias + l2_weight + output_bias + output_weight)
+        as u64
+}
+
+/// HalfKA_hm の network_payload を計算（PairwiseCReLU 版）
+pub const fn network_payload_halfka_hm_pairwise(l1: usize, l2: usize, l3: usize) -> u64 {
+    const HALFKA_HM_DIMENSIONS: usize = 73305;
+
+    let ft_bias = l1 * 2;
+    let ft_weight = HALFKA_HM_DIMENSIONS * l1 * 2;
+    let l1_bias = l2 * 4;
+    let l1_weight = pad32(l1) * l2;
     let l2_bias = l3 * 4;
     let l2_weight = pad32(l2) * l3;
     let output_bias = 4;
@@ -439,6 +476,23 @@ pub const fn network_payload_halfka(l1: usize, l2: usize, l3: usize) -> u64 {
         as u64
 }
 
+/// HalfKA の network_payload を計算（PairwiseCReLU 版）
+pub const fn network_payload_halfka_pairwise(l1: usize, l2: usize, l3: usize) -> u64 {
+    const HALFKA_DIMENSIONS: usize = 138510;
+
+    let ft_bias = l1 * 2;
+    let ft_weight = HALFKA_DIMENSIONS * l1 * 2;
+    let l1_bias = l2 * 4;
+    let l1_weight = pad32(l1) * l2;
+    let l2_bias = l3 * 4;
+    let l2_weight = pad32(l2) * l3;
+    let output_bias = 4;
+    let output_weight = l3;
+
+    (ft_bias + ft_weight + l1_bias + l1_weight + l2_bias + l2_weight + output_bias + output_weight)
+        as u64
+}
+
 /// HalfKaMerged の network_payload を計算
 pub const fn network_payload_halfka_merged(l1: usize, l2: usize, l3: usize) -> u64 {
     const HALFKA_MERGED_DIMENSIONS: usize = 131949;
@@ -447,6 +501,23 @@ pub const fn network_payload_halfka_merged(l1: usize, l2: usize, l3: usize) -> u
     let ft_weight = HALFKA_MERGED_DIMENSIONS * l1 * 2;
     let l1_bias = l2 * 4;
     let l1_weight = pad32(l1 * 2) * l2;
+    let l2_bias = l3 * 4;
+    let l2_weight = pad32(l2) * l3;
+    let output_bias = 4;
+    let output_weight = l3;
+
+    (ft_bias + ft_weight + l1_bias + l1_weight + l2_bias + l2_weight + output_bias + output_weight)
+        as u64
+}
+
+/// HalfKaMerged の network_payload を計算（PairwiseCReLU 版）
+pub const fn network_payload_halfka_merged_pairwise(l1: usize, l2: usize, l3: usize) -> u64 {
+    const HALFKA_MERGED_DIMENSIONS: usize = 131949;
+
+    let ft_bias = l1 * 2;
+    let ft_weight = HALFKA_MERGED_DIMENSIONS * l1 * 2;
+    let l1_bias = l2 * 4;
+    let l1_weight = pad32(l1) * l2;
     let l2_bias = l3 * 4;
     let l2_weight = pad32(l2) * l3;
     let output_bias = 4;
@@ -473,6 +544,23 @@ pub const fn network_payload_halfka_hm_split(l1: usize, l2: usize, l3: usize) ->
         as u64
 }
 
+/// HalfKaHmSplit の network_payload を計算（PairwiseCReLU 版）
+pub const fn network_payload_halfka_hm_split_pairwise(l1: usize, l2: usize, l3: usize) -> u64 {
+    const HALFKA_HM_SPLIT_DIMENSIONS: usize = 76950;
+
+    let ft_bias = l1 * 2;
+    let ft_weight = HALFKA_HM_SPLIT_DIMENSIONS * l1 * 2;
+    let l1_bias = l2 * 4;
+    let l1_weight = pad32(l1) * l2;
+    let l2_bias = l3 * 4;
+    let l2_weight = pad32(l2) * l3;
+    let output_bias = 4;
+    let output_weight = l3;
+
+    (ft_bias + ft_weight + l1_bias + l1_weight + l2_bias + l2_weight + output_bias + output_weight)
+        as u64
+}
+
 /// アーキテクチャ検出結果
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchDetectionResult {
@@ -490,10 +578,13 @@ pub struct ArchDetectionResult {
 /// サポートされているアーキテクチャの network_payload テーブル
 ///
 /// (FeatureSet, L1, L2, L3, network_payload)
-/// 活性化関数はファイルサイズに影響しないため、ここでは CReLU を仮定。
-/// 実際の活性化関数はヘッダーから判定する。
+/// CReLU/SCReLU は同一ファイルサイズ（活性化はスケール係数）なので 1 行で兼ねる。
+/// PairwiseCReLU は L1 層の dense 入力次元が半分になるためファイルサイズが異なり、
+/// 同じ (FeatureSet, L1, L2, L3) に対して別行を持つ。
+/// `detect_architecture_from_size` はサイズ一致でアーキを特定し、活性化は
+/// ヘッダーから別途判定するため、CReLU/Pairwise の 2 行併存で問題ない。
 const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
-    // HalfKP
+    // HalfKP (CReLU/SCReLU)
     (FeatureSet::HalfKP, 256, 32, 32, network_payload_halfkp(256, 32, 32)),
     (FeatureSet::HalfKP, 512, 8, 64, network_payload_halfkp(512, 8, 64)),
     (FeatureSet::HalfKP, 512, 8, 96, network_payload_halfkp(512, 8, 96)),
@@ -501,7 +592,15 @@ const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
     (FeatureSet::HalfKP, 768, 16, 64, network_payload_halfkp(768, 16, 64)),
     (FeatureSet::HalfKP, 1024, 8, 32, network_payload_halfkp(1024, 8, 32)),
     (FeatureSet::HalfKP, 1024, 8, 64, network_payload_halfkp(1024, 8, 64)),
-    // HalfKA_hm
+    // HalfKP (PairwiseCReLU)
+    (FeatureSet::HalfKP, 256, 32, 32, network_payload_halfkp_pairwise(256, 32, 32)),
+    (FeatureSet::HalfKP, 512, 8, 64, network_payload_halfkp_pairwise(512, 8, 64)),
+    (FeatureSet::HalfKP, 512, 8, 96, network_payload_halfkp_pairwise(512, 8, 96)),
+    (FeatureSet::HalfKP, 512, 32, 32, network_payload_halfkp_pairwise(512, 32, 32)),
+    (FeatureSet::HalfKP, 768, 16, 64, network_payload_halfkp_pairwise(768, 16, 64)),
+    (FeatureSet::HalfKP, 1024, 8, 32, network_payload_halfkp_pairwise(1024, 8, 32)),
+    (FeatureSet::HalfKP, 1024, 8, 64, network_payload_halfkp_pairwise(1024, 8, 64)),
+    // HalfKA_hm (CReLU/SCReLU)
     (FeatureSet::HalfKA_hm, 256, 32, 32, network_payload_halfka_hm(256, 32, 32)),
     (FeatureSet::HalfKA_hm, 512, 8, 64, network_payload_halfka_hm(512, 8, 64)),
     (FeatureSet::HalfKA_hm, 512, 8, 96, network_payload_halfka_hm(512, 8, 96)),
@@ -510,7 +609,64 @@ const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
     (FeatureSet::HalfKA_hm, 1024, 8, 32, network_payload_halfka_hm(1024, 8, 32)),
     (FeatureSet::HalfKA_hm, 1024, 8, 64, network_payload_halfka_hm(1024, 8, 64)),
     (FeatureSet::HalfKA_hm, 1024, 8, 96, network_payload_halfka_hm(1024, 8, 96)),
-    // HalfKA
+    // HalfKA_hm (PairwiseCReLU)
+    (
+        FeatureSet::HalfKA_hm,
+        256,
+        32,
+        32,
+        network_payload_halfka_hm_pairwise(256, 32, 32),
+    ),
+    (
+        FeatureSet::HalfKA_hm,
+        512,
+        8,
+        64,
+        network_payload_halfka_hm_pairwise(512, 8, 64),
+    ),
+    (
+        FeatureSet::HalfKA_hm,
+        512,
+        8,
+        96,
+        network_payload_halfka_hm_pairwise(512, 8, 96),
+    ),
+    (
+        FeatureSet::HalfKA_hm,
+        512,
+        32,
+        32,
+        network_payload_halfka_hm_pairwise(512, 32, 32),
+    ),
+    (
+        FeatureSet::HalfKA_hm,
+        768,
+        16,
+        64,
+        network_payload_halfka_hm_pairwise(768, 16, 64),
+    ),
+    (
+        FeatureSet::HalfKA_hm,
+        1024,
+        8,
+        32,
+        network_payload_halfka_hm_pairwise(1024, 8, 32),
+    ),
+    (
+        FeatureSet::HalfKA_hm,
+        1024,
+        8,
+        64,
+        network_payload_halfka_hm_pairwise(1024, 8, 64),
+    ),
+    (
+        FeatureSet::HalfKA_hm,
+        1024,
+        8,
+        96,
+        network_payload_halfka_hm_pairwise(1024, 8, 96),
+    ),
+    // HalfKA (CReLU/SCReLU)
     (FeatureSet::HalfKA, 256, 32, 32, network_payload_halfka(256, 32, 32)),
     (FeatureSet::HalfKA, 512, 8, 64, network_payload_halfka(512, 8, 64)),
     (FeatureSet::HalfKA, 512, 8, 96, network_payload_halfka(512, 8, 96)),
@@ -519,7 +675,16 @@ const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
     (FeatureSet::HalfKA, 1024, 8, 32, network_payload_halfka(1024, 8, 32)),
     (FeatureSet::HalfKA, 1024, 8, 64, network_payload_halfka(1024, 8, 64)),
     (FeatureSet::HalfKA, 1024, 8, 96, network_payload_halfka(1024, 8, 96)),
-    // HalfKaMerged
+    // HalfKA (PairwiseCReLU)
+    (FeatureSet::HalfKA, 256, 32, 32, network_payload_halfka_pairwise(256, 32, 32)),
+    (FeatureSet::HalfKA, 512, 8, 64, network_payload_halfka_pairwise(512, 8, 64)),
+    (FeatureSet::HalfKA, 512, 8, 96, network_payload_halfka_pairwise(512, 8, 96)),
+    (FeatureSet::HalfKA, 512, 32, 32, network_payload_halfka_pairwise(512, 32, 32)),
+    (FeatureSet::HalfKA, 768, 16, 64, network_payload_halfka_pairwise(768, 16, 64)),
+    (FeatureSet::HalfKA, 1024, 8, 32, network_payload_halfka_pairwise(1024, 8, 32)),
+    (FeatureSet::HalfKA, 1024, 8, 64, network_payload_halfka_pairwise(1024, 8, 64)),
+    (FeatureSet::HalfKA, 1024, 8, 96, network_payload_halfka_pairwise(1024, 8, 96)),
+    // HalfKaMerged (CReLU/SCReLU)
     (
         FeatureSet::HalfKaMerged,
         256,
@@ -564,7 +729,64 @@ const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
         96,
         network_payload_halfka_merged(1024, 8, 96),
     ),
-    // HalfKaHmSplit
+    // HalfKaMerged (PairwiseCReLU)
+    (
+        FeatureSet::HalfKaMerged,
+        256,
+        32,
+        32,
+        network_payload_halfka_merged_pairwise(256, 32, 32),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        512,
+        8,
+        64,
+        network_payload_halfka_merged_pairwise(512, 8, 64),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        512,
+        8,
+        96,
+        network_payload_halfka_merged_pairwise(512, 8, 96),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        512,
+        32,
+        32,
+        network_payload_halfka_merged_pairwise(512, 32, 32),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        768,
+        16,
+        64,
+        network_payload_halfka_merged_pairwise(768, 16, 64),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        1024,
+        8,
+        32,
+        network_payload_halfka_merged_pairwise(1024, 8, 32),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        1024,
+        8,
+        64,
+        network_payload_halfka_merged_pairwise(1024, 8, 64),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        1024,
+        8,
+        96,
+        network_payload_halfka_merged_pairwise(1024, 8, 96),
+    ),
+    // HalfKaHmSplit (CReLU/SCReLU)
     (
         FeatureSet::HalfKaHmSplit,
         256,
@@ -620,6 +842,63 @@ const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
         8,
         96,
         network_payload_halfka_hm_split(1024, 8, 96),
+    ),
+    // HalfKaHmSplit (PairwiseCReLU)
+    (
+        FeatureSet::HalfKaHmSplit,
+        256,
+        32,
+        32,
+        network_payload_halfka_hm_split_pairwise(256, 32, 32),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        512,
+        8,
+        64,
+        network_payload_halfka_hm_split_pairwise(512, 8, 64),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        512,
+        8,
+        96,
+        network_payload_halfka_hm_split_pairwise(512, 8, 96),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        512,
+        32,
+        32,
+        network_payload_halfka_hm_split_pairwise(512, 32, 32),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        768,
+        16,
+        64,
+        network_payload_halfka_hm_split_pairwise(768, 16, 64),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        1024,
+        8,
+        32,
+        network_payload_halfka_hm_split_pairwise(1024, 8, 32),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        1024,
+        8,
+        64,
+        network_payload_halfka_hm_split_pairwise(1024, 8, 64),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        1024,
+        8,
+        96,
+        network_payload_halfka_hm_split_pairwise(1024, 8, 96),
     ),
 ];
 
