@@ -5,10 +5,14 @@
 
 mod half_ka;
 mod half_ka_hm;
+mod half_ka_hm_split;
+mod half_ka_merged;
 mod half_kp;
 
 pub use half_ka::HalfKA;
 pub use half_ka_hm::HalfKA_hm;
+pub use half_ka_hm_split::HalfKaHmSplit;
+pub use half_ka_merged::HalfKaMerged;
 pub use half_kp::HalfKP;
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
@@ -220,6 +224,100 @@ impl FeatureSet for HalfKAFeatureSet {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
         HalfKA::append_changed_indices(dirty_piece, perspective, king_sq, &mut removed, &mut added);
+        (removed, added)
+    }
+
+    #[inline]
+    fn needs_refresh(dirty_piece: &DirtyPiece, perspective: Color) -> bool {
+        dirty_piece.king_moved[perspective.index()]
+    }
+}
+
+// =============================================================================
+// HalfKaMergedFeatureSet - Non-mirror + MergedPlane
+// =============================================================================
+
+/// HalfKaMerged 用の FeatureSet（non-mirror、両玉を 1 plane に畳む）
+#[allow(non_camel_case_types)]
+pub struct HalfKaMergedFeatureSet;
+
+impl FeatureSet for HalfKaMergedFeatureSet {
+    const DIMENSIONS: usize = HalfKaMerged::DIMENSIONS;
+    const MAX_ACTIVE: usize = HalfKaMerged::MAX_ACTIVE;
+    const REFRESH_TRIGGERS: &'static [TriggerEvent] = &[TriggerEvent::FriendKingMoved];
+
+    #[inline]
+    fn collect_active_indices(
+        pos: &Position,
+        perspective: Color,
+    ) -> IndexList<MAX_ACTIVE_FEATURES> {
+        let mut active = IndexList::new();
+        HalfKaMerged::append_active_indices(pos, perspective, &mut active);
+        active
+    }
+
+    #[inline]
+    fn collect_changed_indices(
+        dirty_piece: &DirtyPiece,
+        perspective: Color,
+        king_sq: Square,
+    ) -> ChangedFeatures {
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+        HalfKaMerged::append_changed_indices(
+            dirty_piece,
+            perspective,
+            king_sq,
+            &mut removed,
+            &mut added,
+        );
+        (removed, added)
+    }
+
+    #[inline]
+    fn needs_refresh(dirty_piece: &DirtyPiece, perspective: Color) -> bool {
+        dirty_piece.king_moved[perspective.index()]
+    }
+}
+
+// =============================================================================
+// HalfKaHmSplitFeatureSet - Half-Mirror + SplitPlane
+// =============================================================================
+
+/// HalfKaHmSplit 用の FeatureSet（Half-Mirror、両玉別 plane）
+#[allow(non_camel_case_types)]
+pub struct HalfKaHmSplitFeatureSet;
+
+impl FeatureSet for HalfKaHmSplitFeatureSet {
+    const DIMENSIONS: usize = HalfKaHmSplit::DIMENSIONS;
+    const MAX_ACTIVE: usize = HalfKaHmSplit::MAX_ACTIVE;
+    const REFRESH_TRIGGERS: &'static [TriggerEvent] = &[TriggerEvent::FriendKingMoved];
+
+    #[inline]
+    fn collect_active_indices(
+        pos: &Position,
+        perspective: Color,
+    ) -> IndexList<MAX_ACTIVE_FEATURES> {
+        let mut active = IndexList::new();
+        HalfKaHmSplit::append_active_indices(pos, perspective, &mut active);
+        active
+    }
+
+    #[inline]
+    fn collect_changed_indices(
+        dirty_piece: &DirtyPiece,
+        perspective: Color,
+        king_sq: Square,
+    ) -> ChangedFeatures {
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+        HalfKaHmSplit::append_changed_indices(
+            dirty_piece,
+            perspective,
+            king_sq,
+            &mut removed,
+            &mut added,
+        );
         (removed, added)
     }
 

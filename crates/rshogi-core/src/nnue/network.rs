@@ -26,6 +26,8 @@ use super::bona_piece_halfka_hm::FE_OLD_END;
 use super::constants::{MAX_ARCH_LEN, NNUE_VERSION, NNUE_VERSION_HALFKA};
 use super::halfka::{HalfKANetwork, HalfKAStack};
 use super::halfka_hm::{HalfKA_hmNetwork, HalfKA_hmStack};
+use super::halfka_hm_split::{HalfKaHmSplitNetwork, HalfKaHmSplitStack};
+use super::halfka_merged::{HalfKaMergedNetwork, HalfKaMergedStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
 use super::network_layer_stacks::LayerStacksNetwork;
 use super::spec::{Activation, FeatureSet};
@@ -270,6 +272,10 @@ pub enum NNUENetwork {
     /// HalfKA_hm 特徴量セット（L256/L512/L1024）
     #[allow(non_camel_case_types)]
     HalfKA_hm(HalfKA_hmNetwork),
+    /// HalfKaMerged 特徴量セット（L256/L512/L1024）
+    HalfKaMerged(HalfKaMergedNetwork),
+    /// HalfKaHmSplit 特徴量セット（L256/L512/L1024）
+    HalfKaHmSplit(HalfKaHmSplitNetwork),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPNetwork),
     /// LayerStacks（L1=1536/768 + 9バケット）
@@ -429,6 +435,14 @@ impl NNUENetwork {
                         let network = HalfKANetwork::read(reader, l1, l2, l3, activation)?;
                         Ok(Self::HalfKA(network))
                     }
+                    FeatureSet::HalfKaMerged => {
+                        let network = HalfKaMergedNetwork::read(reader, l1, l2, l3, activation)?;
+                        Ok(Self::HalfKaMerged(network))
+                    }
+                    FeatureSet::HalfKaHmSplit => {
+                        let network = HalfKaHmSplitNetwork::read(reader, l1, l2, l3, activation)?;
+                        Ok(Self::HalfKaHmSplit(network))
+                    }
                     FeatureSet::HalfKP => {
                         let network = HalfKPNetwork::read(reader, l1, l2, l3, activation)?;
                         Ok(Self::HalfKP(network))
@@ -479,6 +493,8 @@ impl NNUENetwork {
         match self {
             Self::HalfKA(net) => net.l1_size(),
             Self::HalfKA_hm(net) => net.l1_size(),
+            Self::HalfKaMerged(net) => net.l1_size(),
+            Self::HalfKaHmSplit(net) => net.l1_size(),
             Self::HalfKP(net) => net.l1_size(),
             Self::LayerStacks(net) => net.l1_size(),
         }
@@ -489,6 +505,8 @@ impl NNUENetwork {
         match self {
             Self::HalfKA(net) => net.architecture_name(),
             Self::HalfKA_hm(net) => net.architecture_name(),
+            Self::HalfKaMerged(net) => net.architecture_name(),
+            Self::HalfKaHmSplit(net) => net.architecture_name(),
             Self::HalfKP(net) => net.architecture_name(),
             Self::LayerStacks(_) => "LayerStacks",
         }
@@ -499,6 +517,8 @@ impl NNUENetwork {
         match self {
             Self::HalfKA(net) => net.architecture_spec(),
             Self::HalfKA_hm(net) => net.architecture_spec(),
+            Self::HalfKaMerged(net) => net.architecture_spec(),
+            Self::HalfKaHmSplit(net) => net.architecture_spec(),
             Self::HalfKP(net) => net.architecture_spec(),
             Self::LayerStacks(net) => net.architecture_spec(),
         }
@@ -597,6 +617,96 @@ impl NNUENetwork {
         match self {
             Self::HalfKA(net) => net.evaluate(pos, stack),
             _ => panic!("This method is only for HalfKA architecture."),
+        }
+    }
+
+    /// HalfKaMerged アキュムレータをフル再計算
+    pub fn refresh_accumulator_halfka_merged(&self, pos: &Position, stack: &mut HalfKaMergedStack) {
+        match self {
+            Self::HalfKaMerged(net) => net.refresh_accumulator(pos, stack),
+            _ => panic!("This method is only for HalfKaMerged architecture."),
+        }
+    }
+
+    /// HalfKaMerged 差分更新
+    pub fn update_accumulator_halfka_merged(
+        &self,
+        pos: &Position,
+        dirty: &super::accumulator::DirtyPiece,
+        stack: &mut HalfKaMergedStack,
+        source_idx: usize,
+    ) {
+        match self {
+            Self::HalfKaMerged(net) => net.update_accumulator(pos, dirty, stack, source_idx),
+            _ => panic!("This method is only for HalfKaMerged architecture."),
+        }
+    }
+
+    /// HalfKaMerged 前方差分更新
+    pub fn forward_update_incremental_halfka_merged(
+        &self,
+        pos: &Position,
+        stack: &mut HalfKaMergedStack,
+        source_idx: usize,
+    ) -> bool {
+        match self {
+            Self::HalfKaMerged(net) => net.forward_update_incremental(pos, stack, source_idx),
+            _ => panic!("This method is only for HalfKaMerged architecture."),
+        }
+    }
+
+    /// HalfKaMerged 評価
+    pub fn evaluate_halfka_merged(&self, pos: &Position, stack: &HalfKaMergedStack) -> Value {
+        match self {
+            Self::HalfKaMerged(net) => net.evaluate(pos, stack),
+            _ => panic!("This method is only for HalfKaMerged architecture."),
+        }
+    }
+
+    /// HalfKaHmSplit アキュムレータをフル再計算
+    pub fn refresh_accumulator_halfka_hm_split(
+        &self,
+        pos: &Position,
+        stack: &mut HalfKaHmSplitStack,
+    ) {
+        match self {
+            Self::HalfKaHmSplit(net) => net.refresh_accumulator(pos, stack),
+            _ => panic!("This method is only for HalfKaHmSplit architecture."),
+        }
+    }
+
+    /// HalfKaHmSplit 差分更新
+    pub fn update_accumulator_halfka_hm_split(
+        &self,
+        pos: &Position,
+        dirty: &super::accumulator::DirtyPiece,
+        stack: &mut HalfKaHmSplitStack,
+        source_idx: usize,
+    ) {
+        match self {
+            Self::HalfKaHmSplit(net) => net.update_accumulator(pos, dirty, stack, source_idx),
+            _ => panic!("This method is only for HalfKaHmSplit architecture."),
+        }
+    }
+
+    /// HalfKaHmSplit 前方差分更新
+    pub fn forward_update_incremental_halfka_hm_split(
+        &self,
+        pos: &Position,
+        stack: &mut HalfKaHmSplitStack,
+        source_idx: usize,
+    ) -> bool {
+        match self {
+            Self::HalfKaHmSplit(net) => net.forward_update_incremental(pos, stack, source_idx),
+            _ => panic!("This method is only for HalfKaHmSplit architecture."),
+        }
+    }
+
+    /// HalfKaHmSplit 評価
+    pub fn evaluate_halfka_hm_split(&self, pos: &Position, stack: &HalfKaHmSplitStack) -> Value {
+        match self {
+            Self::HalfKaHmSplit(net) => net.evaluate(pos, stack),
+            _ => panic!("This method is only for HalfKaHmSplit architecture."),
         }
     }
 
@@ -1018,6 +1128,8 @@ pub fn detect_format(bytes: &[u8], file_size: u64) -> io::Result<NnueFormatInfo>
                 FeatureSet::LayerStacks => "LayerStacks".to_string(),
                 FeatureSet::HalfKA_hm => format!("HalfKA_hm{}", l1),
                 FeatureSet::HalfKA => format!("HalfKA{}", l1),
+                FeatureSet::HalfKaMerged => format!("HalfKaMerged{}", l1),
+                FeatureSet::HalfKaHmSplit => format!("HalfKaHmSplit{}", l1),
                 FeatureSet::HalfKP => format!("HalfKP{}", l1),
             };
 
@@ -1206,6 +1318,62 @@ fn update_and_evaluate_halfka(
     network.evaluate_halfka(pos, stack)
 }
 
+fn update_and_evaluate_halfka_merged(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKaMergedStack,
+) -> Value {
+    if !stack.is_current_computed() {
+        let mut updated = false;
+
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            network.update_accumulator_halfka_merged(pos, &dirty, stack, prev_idx);
+            updated = true;
+        }
+
+        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+            updated = network.forward_update_incremental_halfka_merged(pos, stack, source_idx);
+        }
+
+        if !updated {
+            network.refresh_accumulator_halfka_merged(pos, stack);
+        }
+    }
+
+    network.evaluate_halfka_merged(pos, stack)
+}
+
+fn update_and_evaluate_halfka_hm_split(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKaHmSplitStack,
+) -> Value {
+    if !stack.is_current_computed() {
+        let mut updated = false;
+
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            network.update_accumulator_halfka_hm_split(pos, &dirty, stack, prev_idx);
+            updated = true;
+        }
+
+        if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
+            updated = network.forward_update_incremental_halfka_hm_split(pos, stack, source_idx);
+        }
+
+        if !updated {
+            network.refresh_accumulator_halfka_hm_split(pos, stack);
+        }
+    }
+
+    network.evaluate_halfka_hm_split(pos, stack)
+}
+
 /// HalfKP アキュムレータを更新して評価（内部実装）
 #[cfg(not(feature = "layerstack-only"))]
 #[inline]
@@ -1336,10 +1504,20 @@ pub fn evaluate_dispatch(
         #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKA_hm(s) => update_and_evaluate_halfka_hm(&network, pos, s),
         #[cfg(not(feature = "layerstack-only"))]
+        AccumulatorStackVariant::HalfKaMerged(s) => {
+            update_and_evaluate_halfka_merged(&network, pos, s)
+        }
+        #[cfg(not(feature = "layerstack-only"))]
+        AccumulatorStackVariant::HalfKaHmSplit(s) => {
+            update_and_evaluate_halfka_hm_split(&network, pos, s)
+        }
+        #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(&network, pos, s),
         #[cfg(feature = "layerstack-only")]
         AccumulatorStackVariant::HalfKA(_)
         | AccumulatorStackVariant::HalfKA_hm(_)
+        | AccumulatorStackVariant::HalfKaMerged(_)
+        | AccumulatorStackVariant::HalfKaHmSplit(_)
         | AccumulatorStackVariant::HalfKP(_) => {
             unreachable!("layerstack-only build: only LayerStacks variant is supported")
         }
@@ -1378,12 +1556,22 @@ pub fn ensure_accumulator_computed(
             update_accumulator_only_halfka_hm(&network, pos, s);
         }
         #[cfg(not(feature = "layerstack-only"))]
+        AccumulatorStackVariant::HalfKaMerged(s) => {
+            update_accumulator_only_halfka_merged(&network, pos, s);
+        }
+        #[cfg(not(feature = "layerstack-only"))]
+        AccumulatorStackVariant::HalfKaHmSplit(s) => {
+            update_accumulator_only_halfka_hm_split(&network, pos, s);
+        }
+        #[cfg(not(feature = "layerstack-only"))]
         AccumulatorStackVariant::HalfKP(s) => {
             update_accumulator_only_halfkp(&network, pos, s);
         }
         #[cfg(feature = "layerstack-only")]
         AccumulatorStackVariant::HalfKA(_)
         | AccumulatorStackVariant::HalfKA_hm(_)
+        | AccumulatorStackVariant::HalfKaMerged(_)
+        | AccumulatorStackVariant::HalfKaHmSplit(_)
         | AccumulatorStackVariant::HalfKP(_) => {
             unreachable!("layerstack-only build: only LayerStacks variant is supported")
         }
@@ -1446,6 +1634,60 @@ fn update_accumulator_only_halfka(network: &NNUENetwork, pos: &Position, stack: 
     // 失敗なら全計算
     if !updated {
         network.refresh_accumulator_halfka(pos, stack);
+        count_refresh!();
+    }
+}
+
+fn update_accumulator_only_halfka_merged(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKaMergedStack,
+) {
+    if stack.is_current_computed() {
+        count_already_computed!();
+        return;
+    }
+
+    let mut updated = false;
+
+    if let Some(prev_idx) = stack.current_previous()
+        && stack.is_entry_computed(prev_idx)
+    {
+        let dirty = stack.current_dirty_piece();
+        network.update_accumulator_halfka_merged(pos, &dirty, stack, prev_idx);
+        count_update!();
+        updated = true;
+    }
+
+    if !updated {
+        network.refresh_accumulator_halfka_merged(pos, stack);
+        count_refresh!();
+    }
+}
+
+fn update_accumulator_only_halfka_hm_split(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKaHmSplitStack,
+) {
+    if stack.is_current_computed() {
+        count_already_computed!();
+        return;
+    }
+
+    let mut updated = false;
+
+    if let Some(prev_idx) = stack.current_previous()
+        && stack.is_entry_computed(prev_idx)
+    {
+        let dirty = stack.current_dirty_piece();
+        network.update_accumulator_halfka_hm_split(pos, &dirty, stack, prev_idx);
+        count_update!();
+        updated = true;
+    }
+
+    if !updated {
+        network.refresh_accumulator_halfka_hm_split(pos, stack);
         count_refresh!();
     }
 }

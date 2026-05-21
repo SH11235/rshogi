@@ -223,6 +223,12 @@ impl NNUEEvaluator {
             (NNUENetwork::HalfKA_hm(net), AccumulatorStackVariant::HalfKA_hm(st)) => {
                 net.evaluate(pos, st)
             }
+            (NNUENetwork::HalfKaMerged(net), AccumulatorStackVariant::HalfKaMerged(st)) => {
+                net.evaluate(pos, st)
+            }
+            (NNUENetwork::HalfKaHmSplit(net), AccumulatorStackVariant::HalfKaHmSplit(st)) => {
+                net.evaluate(pos, st)
+            }
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 net.evaluate(pos, st)
             }
@@ -278,6 +284,20 @@ impl NNUEEvaluator {
                     net.refresh_accumulator(pos, st);
                 }
             }
+            (NNUENetwork::HalfKaMerged(net), AccumulatorStackVariant::HalfKaMerged(st)) => {
+                if let Some(cache) = &mut self.acc_cache_generic {
+                    net.refresh_accumulator_with_cache(pos, st, cache);
+                } else {
+                    net.refresh_accumulator(pos, st);
+                }
+            }
+            (NNUENetwork::HalfKaHmSplit(net), AccumulatorStackVariant::HalfKaHmSplit(st)) => {
+                if let Some(cache) = &mut self.acc_cache_generic {
+                    net.refresh_accumulator_with_cache(pos, st, cache);
+                } else {
+                    net.refresh_accumulator(pos, st);
+                }
+            }
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 if let Some(cache) = &mut self.acc_cache_generic {
                     net.refresh_accumulator_with_cache(pos, st, cache);
@@ -300,6 +320,12 @@ impl NNUEEvaluator {
             }
             (NNUENetwork::HalfKA_hm(net), AccumulatorStackVariant::HalfKA_hm(st)) => {
                 Self::update_halfka_hm_accumulator(net, pos, st, &mut self.acc_cache_generic);
+            }
+            (NNUENetwork::HalfKaMerged(net), AccumulatorStackVariant::HalfKaMerged(st)) => {
+                Self::update_halfka_merged_accumulator(net, pos, st, &mut self.acc_cache_generic);
+            }
+            (NNUENetwork::HalfKaHmSplit(net), AccumulatorStackVariant::HalfKaHmSplit(st)) => {
+                Self::update_halfka_hm_split_accumulator(net, pos, st, &mut self.acc_cache_generic);
             }
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 Self::update_halfkp_accumulator(net, pos, st, &mut self.acc_cache_generic);
@@ -381,6 +407,82 @@ impl NNUEEvaluator {
         }
 
         // 失敗なら全計算
+        if !updated {
+            if let Some(c) = cache {
+                net.refresh_accumulator_with_cache(pos, stack, c);
+            } else {
+                net.refresh_accumulator(pos, stack);
+            }
+            count_refresh!();
+        }
+    }
+
+    /// HalfKaMerged アキュムレータを更新
+    #[inline]
+    fn update_halfka_merged_accumulator(
+        net: &super::halfka_merged::HalfKaMergedNetwork,
+        pos: &Position,
+        stack: &mut super::halfka_merged::HalfKaMergedStack,
+        cache: &mut Option<AccumulatorCacheGeneric>,
+    ) {
+        if stack.is_current_computed() {
+            count_already_computed!();
+            return;
+        }
+
+        let mut updated = false;
+
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            if let Some(c) = cache {
+                net.update_accumulator_with_cache(pos, &dirty, stack, prev_idx, c);
+            } else {
+                net.update_accumulator(pos, &dirty, stack, prev_idx);
+            }
+            count_update!();
+            updated = true;
+        }
+
+        if !updated {
+            if let Some(c) = cache {
+                net.refresh_accumulator_with_cache(pos, stack, c);
+            } else {
+                net.refresh_accumulator(pos, stack);
+            }
+            count_refresh!();
+        }
+    }
+
+    /// HalfKaHmSplit アキュムレータを更新
+    #[inline]
+    fn update_halfka_hm_split_accumulator(
+        net: &super::halfka_hm_split::HalfKaHmSplitNetwork,
+        pos: &Position,
+        stack: &mut super::halfka_hm_split::HalfKaHmSplitStack,
+        cache: &mut Option<AccumulatorCacheGeneric>,
+    ) {
+        if stack.is_current_computed() {
+            count_already_computed!();
+            return;
+        }
+
+        let mut updated = false;
+
+        if let Some(prev_idx) = stack.current_previous()
+            && stack.is_entry_computed(prev_idx)
+        {
+            let dirty = stack.current_dirty_piece();
+            if let Some(c) = cache {
+                net.update_accumulator_with_cache(pos, &dirty, stack, prev_idx, c);
+            } else {
+                net.update_accumulator(pos, &dirty, stack, prev_idx);
+            }
+            count_update!();
+            updated = true;
+        }
+
         if !updated {
             if let Some(c) = cache {
                 net.refresh_accumulator_with_cache(pos, stack, c);

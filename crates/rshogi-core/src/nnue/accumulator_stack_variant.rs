@@ -16,6 +16,8 @@ use super::accumulator::DirtyPiece;
 use super::accumulator_layer_stacks::LayerStacksAccStack;
 use super::halfka::HalfKAStack;
 use super::halfka_hm::HalfKA_hmStack;
+use super::halfka_hm_split::HalfKaHmSplitStack;
+use super::halfka_merged::HalfKaMergedStack;
 use super::halfkp::HalfKPStack;
 use super::network::NNUENetwork;
 
@@ -37,6 +39,10 @@ pub enum AccumulatorStackVariant {
     HalfKA(HalfKAStack),
     /// HalfKA_hm 特徴量セット（L256/L512/L1024）
     HalfKA_hm(HalfKA_hmStack),
+    /// HalfKaMerged 特徴量セット（L256/L512/L1024）
+    HalfKaMerged(HalfKaMergedStack),
+    /// HalfKaHmSplit 特徴量セット（L256/L512/L1024）
+    HalfKaHmSplit(HalfKaHmSplitStack),
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPStack),
     /// LayerStacks（L1=1536/768 + 9バケット）
@@ -51,6 +57,12 @@ impl AccumulatorStackVariant {
         match network {
             NNUENetwork::HalfKA(net) => Self::HalfKA(HalfKAStack::from_network(net)),
             NNUENetwork::HalfKA_hm(net) => Self::HalfKA_hm(HalfKA_hmStack::from_network(net)),
+            NNUENetwork::HalfKaMerged(net) => {
+                Self::HalfKaMerged(HalfKaMergedStack::from_network(net))
+            }
+            NNUENetwork::HalfKaHmSplit(net) => {
+                Self::HalfKaHmSplit(HalfKaHmSplitStack::from_network(net))
+            }
             NNUENetwork::HalfKP(net) => Self::HalfKP(HalfKPStack::from_network(net)),
             NNUENetwork::LayerStacks(net) => Self::LayerStacks(net.new_acc_stack()),
         }
@@ -72,6 +84,12 @@ impl AccumulatorStackVariant {
             (Self::HalfKA_hm(stack), NNUENetwork::HalfKA_hm(net)) => {
                 stack.l1_size() == net.l1_size()
             }
+            (Self::HalfKaMerged(stack), NNUENetwork::HalfKaMerged(net)) => {
+                stack.l1_size() == net.l1_size()
+            }
+            (Self::HalfKaHmSplit(stack), NNUENetwork::HalfKaHmSplit(net)) => {
+                stack.l1_size() == net.l1_size()
+            }
             (Self::HalfKP(stack), NNUENetwork::HalfKP(net)) => stack.l1_size() == net.l1_size(),
             (Self::LayerStacks(st), NNUENetwork::LayerStacks(net)) => {
                 st.architecture_dims()
@@ -91,6 +109,8 @@ impl AccumulatorStackVariant {
         match self {
             Self::HalfKA(stack) => stack.reset(),
             Self::HalfKA_hm(stack) => stack.reset(),
+            Self::HalfKaMerged(stack) => stack.reset(),
+            Self::HalfKaHmSplit(stack) => stack.reset(),
             Self::HalfKP(stack) => stack.reset(),
             Self::LayerStacks(stack) => stack.reset(),
         }
@@ -102,6 +122,8 @@ impl AccumulatorStackVariant {
         match self {
             Self::HalfKA(stack) => stack.push(dirty_piece),
             Self::HalfKA_hm(stack) => stack.push(dirty_piece),
+            Self::HalfKaMerged(stack) => stack.push(dirty_piece),
+            Self::HalfKaHmSplit(stack) => stack.push(dirty_piece),
             Self::HalfKP(stack) => stack.push(dirty_piece),
             Self::LayerStacks(stack) => {
                 stack.push();
@@ -116,6 +138,8 @@ impl AccumulatorStackVariant {
         match self {
             Self::HalfKA(stack) => stack.pop(),
             Self::HalfKA_hm(stack) => stack.pop(),
+            Self::HalfKaMerged(stack) => stack.pop(),
+            Self::HalfKaHmSplit(stack) => stack.pop(),
             Self::HalfKP(stack) => stack.pop(),
             Self::LayerStacks(stack) => stack.pop(),
         }

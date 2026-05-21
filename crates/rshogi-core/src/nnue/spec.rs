@@ -9,11 +9,15 @@
 pub enum FeatureSet {
     /// HalfKP (classic NNUE)
     HalfKP,
-    /// HalfKA_hm^ (Half-Mirror + Factorization)
+    /// HalfKA_hm^ (Half-Mirror + MergedPlane)
     #[allow(non_camel_case_types)]
     HalfKA_hm,
-    /// HalfKA (非ミラー)
+    /// HalfKA (非ミラー + SplitPlane)
     HalfKA,
+    /// HalfKaMerged (非ミラー + MergedPlane)
+    HalfKaMerged,
+    /// HalfKaHmSplit (Half-Mirror + SplitPlane)
+    HalfKaHmSplit,
     /// LayerStacks (実験的)
     LayerStacks,
 }
@@ -25,6 +29,8 @@ impl FeatureSet {
             Self::HalfKP => "HalfKP",
             Self::HalfKA_hm => "HalfKA_hm",
             Self::HalfKA => "HalfKA",
+            Self::HalfKaMerged => "HalfKaMerged",
+            Self::HalfKaHmSplit => "HalfKaHmSplit",
             Self::LayerStacks => "LayerStacks",
         }
     }
@@ -164,7 +170,10 @@ pub fn parse_feature_input_dimensions(arch_str: &str) -> Option<usize> {
 
 /// アーキテクチャ文字列から FeatureSet を判定
 pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String> {
-    use super::constants::{HALFKA_DIMENSIONS, HALFKA_HM_DIMENSIONS};
+    use super::constants::{
+        HALFKA_DIMENSIONS, HALFKA_HM_DIMENSIONS, HALFKA_HM_SPLIT_DIMENSIONS,
+        HALFKA_MERGED_DIMENSIONS,
+    };
 
     // 明示的な "LayerStacks" キーワードがあれば確定
     if arch_str.contains("LayerStacks") {
@@ -193,9 +202,17 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
         return Ok(FeatureSet::LayerStacks);
     }
 
-    // Features= 名前で feature_set 決定
+    // Features= 名前で feature_set 決定。
+    // より特定的な名前（"HalfKA_hm_split" / "HalfKA_merged"）は、それを部分文字列
+    // として含む一般名（"HalfKA_hm" / "HalfKA"）より先に判定する。
     if arch_str.contains("HalfKP") {
         return Ok(FeatureSet::HalfKP);
+    }
+    if arch_str.contains("HalfKA_hm_split") {
+        return Ok(FeatureSet::HalfKaHmSplit);
+    }
+    if arch_str.contains("HalfKA_merged") {
+        return Ok(FeatureSet::HalfKaMerged);
     }
     if arch_str.contains("HalfKA_hm") {
         return Ok(FeatureSet::HalfKA_hm);
@@ -207,6 +224,8 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
         return match input_dim {
             HALFKA_HM_DIMENSIONS => Ok(FeatureSet::HalfKA_hm),
             HALFKA_DIMENSIONS => Ok(FeatureSet::HalfKA),
+            HALFKA_MERGED_DIMENSIONS => Ok(FeatureSet::HalfKaMerged),
+            HALFKA_HM_SPLIT_DIMENSIONS => Ok(FeatureSet::HalfKaHmSplit),
             _ => Err(format!("Unknown HalfKA input dimensions: {input_dim}")),
         };
     }
@@ -418,6 +437,40 @@ pub const fn network_payload_halfka(l1: usize, l2: usize, l3: usize) -> u64 {
         as u64
 }
 
+/// HalfKaMerged の network_payload を計算
+pub const fn network_payload_halfka_merged(l1: usize, l2: usize, l3: usize) -> u64 {
+    const HALFKA_MERGED_DIMENSIONS: usize = 131949;
+
+    let ft_bias = l1 * 2;
+    let ft_weight = HALFKA_MERGED_DIMENSIONS * l1 * 2;
+    let l1_bias = l2 * 4;
+    let l1_weight = pad32(l1 * 2) * l2;
+    let l2_bias = l3 * 4;
+    let l2_weight = pad32(l2) * l3;
+    let output_bias = 4;
+    let output_weight = l3;
+
+    (ft_bias + ft_weight + l1_bias + l1_weight + l2_bias + l2_weight + output_bias + output_weight)
+        as u64
+}
+
+/// HalfKaHmSplit の network_payload を計算
+pub const fn network_payload_halfka_hm_split(l1: usize, l2: usize, l3: usize) -> u64 {
+    const HALFKA_HM_SPLIT_DIMENSIONS: usize = 76950;
+
+    let ft_bias = l1 * 2;
+    let ft_weight = HALFKA_HM_SPLIT_DIMENSIONS * l1 * 2;
+    let l1_bias = l2 * 4;
+    let l1_weight = pad32(l1 * 2) * l2;
+    let l2_bias = l3 * 4;
+    let l2_weight = pad32(l2) * l3;
+    let output_bias = 4;
+    let output_weight = l3;
+
+    (ft_bias + ft_weight + l1_bias + l1_weight + l2_bias + l2_weight + output_bias + output_weight)
+        as u64
+}
+
 /// アーキテクチャ検出結果
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchDetectionResult {
@@ -464,6 +517,108 @@ const KNOWN_PAYLOADS: &[(FeatureSet, usize, usize, usize, u64)] = &[
     (FeatureSet::HalfKA, 1024, 8, 32, network_payload_halfka(1024, 8, 32)),
     (FeatureSet::HalfKA, 1024, 8, 64, network_payload_halfka(1024, 8, 64)),
     (FeatureSet::HalfKA, 1024, 8, 96, network_payload_halfka(1024, 8, 96)),
+    // HalfKaMerged
+    (
+        FeatureSet::HalfKaMerged,
+        256,
+        32,
+        32,
+        network_payload_halfka_merged(256, 32, 32),
+    ),
+    (FeatureSet::HalfKaMerged, 512, 8, 64, network_payload_halfka_merged(512, 8, 64)),
+    (FeatureSet::HalfKaMerged, 512, 8, 96, network_payload_halfka_merged(512, 8, 96)),
+    (
+        FeatureSet::HalfKaMerged,
+        512,
+        32,
+        32,
+        network_payload_halfka_merged(512, 32, 32),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        768,
+        16,
+        64,
+        network_payload_halfka_merged(768, 16, 64),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        1024,
+        8,
+        32,
+        network_payload_halfka_merged(1024, 8, 32),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        1024,
+        8,
+        64,
+        network_payload_halfka_merged(1024, 8, 64),
+    ),
+    (
+        FeatureSet::HalfKaMerged,
+        1024,
+        8,
+        96,
+        network_payload_halfka_merged(1024, 8, 96),
+    ),
+    // HalfKaHmSplit
+    (
+        FeatureSet::HalfKaHmSplit,
+        256,
+        32,
+        32,
+        network_payload_halfka_hm_split(256, 32, 32),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        512,
+        8,
+        64,
+        network_payload_halfka_hm_split(512, 8, 64),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        512,
+        8,
+        96,
+        network_payload_halfka_hm_split(512, 8, 96),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        512,
+        32,
+        32,
+        network_payload_halfka_hm_split(512, 32, 32),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        768,
+        16,
+        64,
+        network_payload_halfka_hm_split(768, 16, 64),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        1024,
+        8,
+        32,
+        network_payload_halfka_hm_split(1024, 8, 32),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        1024,
+        8,
+        64,
+        network_payload_halfka_hm_split(1024, 8, 64),
+    ),
+    (
+        FeatureSet::HalfKaHmSplit,
+        1024,
+        8,
+        96,
+        network_payload_halfka_hm_split(1024, 8, 96),
+    ),
 ];
 
 /// ファイルサイズと arch_len からアーキテクチャを検出

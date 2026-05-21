@@ -98,6 +98,24 @@ pub const HALFKA_PLANES: usize = 1548 + 81 * 2;
 /// 81（玉位置）× 1710（入力平面）
 pub const HALFKA_DIMENSIONS: usize = HALFKA_PLANES * 81; // 138,510
 
+// =============================================================================
+// HalfKaMerged アーキテクチャ用定数（Non-mirror + MergedPlane）
+// =============================================================================
+
+/// HalfKaMerged の総入力次元数
+///
+/// 81（玉位置、Direct）× 1629（両玉を 1 plane に畳んだ入力数）
+pub const HALFKA_MERGED_DIMENSIONS: usize = 81 * 1629; // 131,949
+
+// =============================================================================
+// HalfKaHmSplit アーキテクチャ用定数（Half-Mirror + SplitPlane）
+// =============================================================================
+
+/// HalfKaHmSplit の総入力次元数
+///
+/// 45（玉位置、Half-Mirror）× 1710（両玉別 plane の入力数）
+pub const HALFKA_HM_SPLIT_DIMENSIONS: usize = 45 * 1710; // 76,950
+
 /// 隠れ層1の次元数（YaneuraOu classic）
 pub const HIDDEN1_DIMENSIONS: usize = 32;
 
