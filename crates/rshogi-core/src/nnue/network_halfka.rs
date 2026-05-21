@@ -1273,8 +1273,9 @@ impl<
         // FV_SCALE 検出
         let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
 
-        // QA 検出（デフォルト 127）
-        let qa = parse_qa_from_arch(&arch_str).unwrap_or(127);
+        // QA 検出（qa= 明示が無ければ活性化種別から導出: SCReLU=255 / 他=127）
+        let qa = parse_qa_from_arch(&arch_str)
+            .unwrap_or_else(|| super::activation::default_qa_for_arch(&arch_str));
 
         // Feature Transformer ハッシュ
         reader.read_exact(&mut buf4)?;

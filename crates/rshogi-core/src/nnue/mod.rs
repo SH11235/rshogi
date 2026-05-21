@@ -115,7 +115,9 @@ pub use network_layer_stacks::{LayerStacksNetwork, NetworkLayerStacks};
 pub use piece_list::{PieceList, PieceNumber};
 
 // const generics 版統一実装（内部型は pub(crate) に隠蔽）
-pub use activation::{CReLU, FtActivation, PairwiseCReLU, SCReLU, detect_activation_from_arch};
+pub use activation::{
+    CReLU, FtActivation, PairwiseCReLU, SCReLU, default_qa_for_arch, detect_activation_from_arch,
+};
 pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
 
 // 型エイリアス（HalfKA*/HalfKP* の全バリアント）は pub(crate) に隠蔽

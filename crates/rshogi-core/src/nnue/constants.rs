@@ -180,12 +180,6 @@ pub const NNUE_PYTORCH_QUANTIZED_ONE: i32 = 127;
 /// - オーバーフロー検証: 16,129 × 127 × 512 < i32_MAX ✓
 pub const SCRELU_QA: i16 = 127;
 
-/// SCReLU L1層以降の量子化係数 (bullet-shogi 準拠)
-///
-/// L1層以降では QB = 64 を使用。
-/// i32 として定義（中間層の i32 演算で使用するため）
-pub const SCRELU_QB: i32 = 64;
-
 #[cfg(test)]
 mod tests {
     use super::*;
