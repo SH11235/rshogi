@@ -18,11 +18,11 @@ crate::define_l1_variants!(
 
     variants {
         // L2=8, L3=64 バリアント
-        (8,  64, CReLU,         "CReLU")    => CReLU8x64     : HalfKP512_8_64CReLU,
+        (8,  64, CReLU)    => CReLU8x64     : HalfKP512_8_64CReLU,
         // L2=8, L3=96 バリアント
-        (8,  96, CReLU,         "CReLU")    => CReLU8x96     : HalfKP512CReLU,
+        (8,  96, CReLU)    => CReLU8x96     : HalfKP512CReLU,
         // L2=32, L3=32 バリアント
-        (32, 32, CReLU,         "CReLU")    => CReLU32x32    : HalfKP512_32_32CReLU,
+        (32, 32, CReLU)    => CReLU32x32    : HalfKP512_32_32CReLU,
     }
 );
 

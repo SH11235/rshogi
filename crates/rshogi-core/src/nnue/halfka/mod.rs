@@ -242,7 +242,7 @@ impl HalfKANetwork {
     }
 
     /// アーキテクチャ名を取得
-    pub fn architecture_name(&self) -> &'static str {
+    pub fn architecture_name(&self) -> String {
         match self {
             Self::L256(net) => net.architecture_name(),
             Self::L512(net) => net.architecture_name(),

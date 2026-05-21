@@ -19,7 +19,7 @@ crate::define_l1_variants!(
     stack AccumulatorStackHalfKaHmSplit<256>,
 
     variants {
-        (32, 32, CReLU,         "CReLU")    => CReLU32x32        : HalfKaHmSplit256CReLU,
+        (32, 32, CReLU)    => CReLU32x32        : HalfKaHmSplit256CReLU,
     }
 );
 

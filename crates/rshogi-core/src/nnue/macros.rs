@@ -44,7 +44,7 @@ macro_rules! define_l1_variants {
 
         variants {
             $(
-                ($l2:literal, $l3:literal, $act:ident, $act_name:literal)
+                ($l2:literal, $l3:literal, $act:ident)
                     => $Var:ident : $Ty:ty
             ),+ $(,)?
         }
@@ -165,18 +165,12 @@ macro_rules! define_l1_variants {
             }
 
             /// アーキテクチャ名を取得
-            pub fn architecture_name(&self) -> &'static str {
-                match self {
-                    $(
-                        Self::$Var(_) => concat!(
-                            stringify!($FeatureSet), "-",
-                            stringify!($L1), "-",
-                            stringify!($l2), "-",
-                            stringify!($l3), "-",
-                            $act_name
-                        ),
-                    )+
-                }
+            ///
+            /// `architecture_spec().name()` に委譲する。feature set 名は
+            /// `FeatureSet::as_str()`、活性化名は `Activation::as_str()` を
+            /// 単一の真実源とし、判定と display 名の決定ロジックを共通化する。
+            pub fn architecture_name(&self) -> String {
+                self.architecture_spec().name()
             }
 
             /// アーキテクチャ仕様を取得

@@ -703,7 +703,7 @@ pub fn run() -> Result<()> {
             let mut evaluator =
                 NNUEEvaluator::new_with_position(Arc::clone(&network), &positions[0]);
             let result =
-                bench_evaluator(&mut evaluator, &positions, cli.warmup, cli.iterations, arch_name);
+                bench_evaluator(&mut evaluator, &positions, cli.warmup, cli.iterations, &arch_name);
 
             result.print();
 
@@ -735,7 +735,7 @@ pub fn run() -> Result<()> {
                     bucket_mode,
                     cli.warmup,
                     cli.iterations,
-                    arch_name,
+                    &arch_name,
                 )?;
             });
         }

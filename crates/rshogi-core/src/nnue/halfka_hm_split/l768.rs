@@ -20,7 +20,7 @@ crate::define_l1_variants!(
 
     variants {
         // L2=16, L3=64 バリアント
-        (16, 64, CReLU,         "CReLU")    => CReLU16x64    : HalfKaHmSplit768CReLU,
+        (16, 64, CReLU)    => CReLU16x64    : HalfKaHmSplit768CReLU,
     }
 );
 

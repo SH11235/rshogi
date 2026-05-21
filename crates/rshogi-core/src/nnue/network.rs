@@ -501,14 +501,14 @@ impl NNUENetwork {
     }
 
     /// アーキテクチャ名を取得
-    pub fn architecture_name(&self) -> &'static str {
+    pub fn architecture_name(&self) -> String {
         match self {
             Self::HalfKA(net) => net.architecture_name(),
             Self::HalfKA_hm(net) => net.architecture_name(),
             Self::HalfKaMerged(net) => net.architecture_name(),
             Self::HalfKaHmSplit(net) => net.architecture_name(),
             Self::HalfKP(net) => net.architecture_name(),
-            Self::LayerStacks(_) => "LayerStacks",
+            Self::LayerStacks(_) => "LayerStacks".to_string(),
         }
     }
 

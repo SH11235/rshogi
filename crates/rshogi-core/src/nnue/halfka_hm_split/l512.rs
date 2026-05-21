@@ -22,11 +22,11 @@ crate::define_l1_variants!(
 
     variants {
         // L2=8, L3=64
-        (8,  64, CReLU,         "CReLU")    => CReLU8x64      : HalfKaHmSplit512_8_64CReLU,
+        (8,  64, CReLU)    => CReLU8x64      : HalfKaHmSplit512_8_64CReLU,
         // L2=8, L3=96
-        (8,  96, CReLU,         "CReLU")    => CReLU8x96      : HalfKaHmSplit512CReLU,
+        (8,  96, CReLU)    => CReLU8x96      : HalfKaHmSplit512CReLU,
         // L2=32, L3=32
-        (32, 32, CReLU,         "CReLU")    => CReLU32x32     : HalfKaHmSplit512_32_32CReLU,
+        (32, 32, CReLU)    => CReLU32x32     : HalfKaHmSplit512_32_32CReLU,
     }
 );
 

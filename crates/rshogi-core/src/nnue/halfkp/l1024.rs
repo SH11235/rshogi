@@ -18,9 +18,9 @@ crate::define_l1_variants!(
 
     variants {
         // L2=8, L3=32 バリアント
-        (8,  32, CReLU,         "CReLU")    => CReLU8x32     : HalfKP1024_8_32CReLU,
+        (8,  32, CReLU)    => CReLU8x32     : HalfKP1024_8_32CReLU,
         // L2=8, L3=64 バリアント
-        (8,  64, CReLU,         "CReLU")    => CReLU8x64     : HalfKP1024_8_64CReLU,
+        (8,  64, CReLU)    => CReLU8x64     : HalfKP1024_8_64CReLU,
     }
 );
 

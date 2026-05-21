@@ -244,7 +244,7 @@ impl NNUEEvaluator {
     // =========================================================================
 
     /// アーキテクチャ名を取得
-    pub fn architecture_name(&self) -> &'static str {
+    pub fn architecture_name(&self) -> String {
         self.net.architecture_name()
     }
 
