@@ -126,16 +126,15 @@ impl<const N: usize> IndexList<N> {
 
     /// i 番目の要素を取得
     ///
-    /// `i < len()` を呼び出し側が保証すること（fast path 判定で長さを確認済みの
-    /// 箇所から使う）。範囲外アクセスは debug ビルドでパニックする。
+    /// `i >= len()` の場合はパニックする。`assume_init()` を含む safe public API
+    /// なので、release ビルドでも境界を検査して未初期化領域へのアクセス（UB）を
+    /// 防ぐ。fast path 判定で長さを確認済みの呼び出し（`get(0)`/`get(1)` を
+    /// `len()` が 1/2 と確定した文脈で呼ぶ）では、コンパイラがこの検査を除去する。
     #[inline]
     pub fn get(&self, i: usize) -> usize {
-        debug_assert!(
-            i < self.len as usize,
-            "IndexList::get: i={i} out of bounds (len={})",
-            self.len
-        );
-        // SAFETY: i < len なので indices[i] は push 済みで初期化されている
+        assert!(i < self.len as usize, "IndexList::get: i={i} out of bounds (len={})", self.len);
+        // SAFETY: 直前の assert! で i < len を保証。0..len の範囲は push 済みで
+        // 初期化されているため assume_init は健全。
         unsafe { self.indices[i].assume_init() as usize }
     }
 
