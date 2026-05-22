@@ -40,14 +40,12 @@ use std::marker::PhantomData;
 
 use super::accumulator::{
     AccumulatorCacheGeneric, Aligned as AlignedGeneric, AlignedBox, AlignedI16, DirtyPiece,
-    IndexList, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
+    IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
 };
 use super::activation::FtActivation;
-use super::bona_piece::halfkp_index;
 use super::constants::{FV_SCALE, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION};
 use super::features::{Feature, FeatureSet, HalfKP, HalfKPFeatureSet};
 use super::network::get_fv_scale_override;
-use super::piece_list::PieceNumber;
 use crate::position::Position;
 use crate::types::{Color, Value};
 
@@ -626,26 +624,23 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         cache: &mut AccumulatorCacheGeneric,
     ) {
         let king_sq = pos.king_square(perspective);
-        // HalfKP の feature index は後手視点で玉位置を反転する。
-        let king_sq_idx = if perspective == Color::Black {
-            king_sq
-        } else {
-            king_sq.inverse()
-        };
-        // 玉（PieceNumber::KING 以降）を除く 38 slot を渡す。
-        let piece_list = if perspective == Color::Black {
-            pos.piece_list().piece_list_fb()
-        } else {
-            pos.piece_list().piece_list_fw()
-        };
+        let active_indices = HalfKPFeatureSet::collect_active_indices(pos, perspective);
+
+        // IndexList を u32 のソート済み配列に変換
+        let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
+        let len = active_indices.len();
+        for (i, idx) in active_indices.iter().enumerate() {
+            sorted_buf[i] = idx as u32;
+        }
+        let sorted = &mut sorted_buf[..len];
+        sorted.sort_unstable();
 
         cache.refresh_or_cache(
             king_sq,
             perspective,
-            &piece_list[..PieceNumber::KING as usize],
+            sorted,
             &self.biases.0,
             accumulation,
-            move |bp| halfkp_index(king_sq_idx, bp),
             |acc, idx| {
                 debug_assert_eq!(acc.len(), L1);
                 // SAFETY: acc は呼び出し元で &mut [i16; L1] から作られたスライス。

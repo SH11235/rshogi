@@ -8,7 +8,7 @@
 //! AccumulatorStack は探索時の Accumulator と DirtyPiece を管理するスタック。
 //! StateInfo から Accumulator を分離し、do_move での初期化コストを削減する。
 
-use super::bona_piece::{BonaPiece, ExtBonaPiece};
+use super::bona_piece::ExtBonaPiece;
 use super::constants::{NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
 use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square, Value};
@@ -738,18 +738,13 @@ impl Default for AccumulatorStack {
 ///
 /// アキュムレータ値は1つの連続した AlignedBox に格納し、
 /// エントリごとにスライスで参照する（162個の個別ヒープ割り当てを回避）。
-///
-/// 差分は LayerStacks 版（`AccumulatorCacheLayerStacks`）と同じく PieceList
-/// スナップショットの slot 比較方式で求める。ソート済み index 配列のマージ差分
-/// と異なり `sort_unstable` と IndexList 構築が不要。
 pub struct AccumulatorCacheGeneric {
     /// 全エントリのアキュムレータ値を連続格納 [NUM_ENTRIES * l1]
     accumulations: AlignedBox<i16>,
-    /// 各エントリの PieceList スナップショット（perspective 固有の fb/fw 配列）
-    ///
-    /// `[NUM_ENTRIES][PieceNumber::NB]`。`BonaPiece::ZERO` は空きスロット。
-    /// cache hit 時に現在の PieceList と slot-wise 比較して差分を求める。
-    piece_lists: Box<[[BonaPiece; PieceNumber::NB]]>,
+    /// 各エントリのアクティブ特徴インデックス（ソート済み）
+    active_indices: Box<[[u32; MAX_ACTIVE_FEATURES]]>,
+    /// 各エントリの有効特徴数
+    num_active: Box<[u16]>,
     /// 各エントリの有効フラグ
     valid: Box<[bool]>,
     /// L1 サイズ
@@ -764,8 +759,8 @@ impl AccumulatorCacheGeneric {
     pub fn new(l1: usize) -> Self {
         Self {
             accumulations: AlignedBox::new_zeroed(NUM_CACHE_ENTRIES * l1),
-            piece_lists: vec![[BonaPiece::ZERO; PieceNumber::NB]; NUM_CACHE_ENTRIES]
-                .into_boxed_slice(),
+            active_indices: vec![[0u32; MAX_ACTIVE_FEATURES]; NUM_CACHE_ENTRIES].into_boxed_slice(),
+            num_active: vec![0u16; NUM_CACHE_ENTRIES].into_boxed_slice(),
             valid: vec![false; NUM_CACHE_ENTRIES].into_boxed_slice(),
             l1,
         }
@@ -792,73 +787,93 @@ impl AccumulatorCacheGeneric {
         &mut self.accumulations[start..start + self.l1]
     }
 
-    /// PieceList スナップショット差分で refresh を実行（Stockfish 風 slot 比較方式）
+    /// キャッシュからの差分で refresh を実行
     ///
-    /// キャッシュが有効な場合、現在の PieceList とキャッシュ済み PieceList を
-    /// slot-wise に比較し、変化した slot のみ `idx_fn` で feature index を算出して
-    /// add/sub を適用する。キャッシュが無効な場合は biases から full refresh する。
-    ///
-    /// 旧実装（ソート済み index 配列のマージ差分）と比較して、`collect_active_indices`
-    /// による IndexList 構築と `sort_unstable` を省く。i16 の wrapping 加減算は
-    /// 可換群をなし `idx_fn` は非 ZERO BonaPiece 上で単射なので、slot 比較差分は
-    /// マージ差分と bit 単位で一致する（同じ feature index 集合 C\N を sub、
-    /// N\C を add する。同一 BonaPiece が slot 間を移動した場合は -idx +idx で
-    /// 相殺する）。
-    ///
-    /// `piece_list` は perspective 固有の PieceList スライス（HalfKA 系は全 40 slot、
-    /// HalfKP は玉を除く 38 slot）。長さは feature set ごとに固定で、同一キャッシュ
-    /// への呼び出しでは常に同じ。
-    pub(crate) fn refresh_or_cache<FI, FA, FS>(
+    /// キャッシュが有効な場合、現在のアクティブ特徴量との差分を計算し、
+    /// add/sub のみでアキュムレータを更新する。
+    /// キャッシュが無効な場合は通常の full refresh を行い、キャッシュを更新する。
+    pub(crate) fn refresh_or_cache<FA, FS>(
         &mut self,
         king_sq: Square,
         perspective: Color,
-        piece_list: &[BonaPiece],
+        active: &[u32],
         biases: &[i16],
         accumulation: &mut [i16],
-        idx_fn: FI,
         add_fn: FA,
         sub_fn: FS,
     ) where
-        FI: Fn(BonaPiece) -> usize,
         FA: Fn(&mut [i16], usize),
         FS: Fn(&mut [i16], usize),
     {
-        debug_assert!(
-            piece_list.len() <= PieceNumber::NB,
-            "piece_list overflow: {}",
-            piece_list.len()
-        );
         let entry_idx = king_sq.raw() as usize * 2 + perspective as usize;
 
         if self.valid[entry_idx] {
-            // キャッシュ有効 → PieceList slot 差分
+            // キャッシュが有効 → 差分更新
             accumulation.copy_from_slice(self.acc_slice(entry_idx));
-            let cached = &self.piece_lists[entry_idx];
-            for (i, &current_bp) in piece_list.iter().enumerate() {
-                let cached_bp = cached[i];
-                if cached_bp != current_bp {
-                    if cached_bp != BonaPiece::ZERO {
-                        sub_fn(accumulation, idx_fn(cached_bp));
-                    }
-                    if current_bp != BonaPiece::ZERO {
-                        add_fn(accumulation, idx_fn(current_bp));
-                    }
-                }
-            }
+
+            // ソート済み配列のマージベース差分（O(n)）
+            let cached = &self.active_indices[entry_idx][..self.num_active[entry_idx] as usize];
+            Self::apply_diff(cached, active, accumulation, &add_fn, &sub_fn);
         } else {
             // キャッシュ無効 → バイアスから full refresh
             accumulation.copy_from_slice(biases);
-            for &bp in piece_list {
-                if bp != BonaPiece::ZERO {
-                    add_fn(accumulation, idx_fn(bp));
-                }
+            for &idx in active {
+                add_fn(accumulation, idx as usize);
             }
         }
 
         // キャッシュを更新
         self.acc_slice_mut(entry_idx).copy_from_slice(accumulation);
-        self.piece_lists[entry_idx][..piece_list.len()].copy_from_slice(piece_list);
+        debug_assert!(
+            active.len() <= MAX_ACTIVE_FEATURES,
+            "active features overflow: {}",
+            active.len()
+        );
+        let n = active.len().min(MAX_ACTIVE_FEATURES);
+        self.active_indices[entry_idx][..n].copy_from_slice(&active[..n]);
+        self.num_active[entry_idx] = n as u16;
         self.valid[entry_idx] = true;
+    }
+
+    /// ソート済み配列のマージベース差分を適用
+    #[inline]
+    fn apply_diff<FA, FS>(
+        cached: &[u32],
+        current: &[u32],
+        accumulation: &mut [i16],
+        add_fn: &FA,
+        sub_fn: &FS,
+    ) where
+        FA: Fn(&mut [i16], usize),
+        FS: Fn(&mut [i16], usize),
+    {
+        let mut ci = 0;
+        let mut ni = 0;
+
+        while ci < cached.len() && ni < current.len() {
+            let c = cached[ci];
+            let n = current[ni];
+            if c < n {
+                sub_fn(accumulation, c as usize);
+                ci += 1;
+            } else if c > n {
+                add_fn(accumulation, n as usize);
+                ni += 1;
+            } else {
+                ci += 1;
+                ni += 1;
+            }
+        }
+
+        while ci < cached.len() {
+            sub_fn(accumulation, cached[ci] as usize);
+            ci += 1;
+        }
+
+        while ni < current.len() {
+            add_fn(accumulation, current[ni] as usize);
+            ni += 1;
+        }
     }
 }
 
