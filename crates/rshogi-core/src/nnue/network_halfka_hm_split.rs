@@ -470,12 +470,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
 
                 acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
 
-                for index in removed.iter() {
-                    self.sub_weights(&mut acc.accumulation[p].0, index);
-                }
-                for index in added.iter() {
-                    self.add_weights(&mut acc.accumulation[p].0, index);
-                }
+                self.apply_diff_fused(&mut acc.accumulation[p].0, &removed, &added);
             }
         }
 
@@ -515,12 +510,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
 
                 acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
 
-                for index in removed.iter() {
-                    self.sub_weights(&mut acc.accumulation[p].0, index);
-                }
-                for index in added.iter() {
-                    self.add_weights(&mut acc.accumulation[p].0, index);
-                }
+                self.apply_diff_fused(&mut acc.accumulation[p].0, &removed, &added);
             }
         }
 
@@ -621,12 +611,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
                 let accumulation =
                     &mut stack.entry_at_mut(current_idx).accumulator.accumulation[p].0;
 
-                for index in removed.iter() {
-                    self.sub_weights(accumulation, index);
-                }
-                for index in added.iter() {
-                    self.add_weights(accumulation, index);
-                }
+                self.apply_diff_fused(accumulation, &removed, &added);
             }
         }
 
@@ -735,6 +720,208 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
         #[allow(unreachable_code)]
         for (acc, &w) in accumulation.iter_mut().zip(weights) {
             *acc = acc.wrapping_sub(w);
+        }
+    }
+
+    /// index 番目の重み行（L1 要素）を取得
+    #[inline]
+    fn weight_row(&self, index: usize) -> &[i16] {
+        let offset = index * L1;
+        &self.weights[offset..offset + L1]
+    }
+
+    /// removed/added を融合した差分更新（fast path）
+    ///
+    /// `removed`/`added` がともに 1 要素なら sub+add を 1 パスに、ともに 2 要素なら
+    /// 2 組を 1 パスに融合する。それ以外は従来どおり sub ループ → add ループの
+    /// 2 パスにフォールバックする。do_move の大半は quiet（1 sub+1 add）/
+    /// capture（2 sub+2 add）なので fast path に乗る。
+    ///
+    /// i16 の wrapping 加減算は可換群をなすため、融合パスは `sub_weights` ループ
+    /// → `add_weights` ループと bit 単位で一致する。LayerStacks の
+    /// `try_apply_dirty_piece_fast` は DirtyPiece から特徴 index を再計算するが、
+    /// ここでは `append_changed_indices` が生成済みの IndexList を再利用して
+    /// 再計算を避ける。
+    #[inline]
+    fn apply_diff_fused(
+        &self,
+        accumulation: &mut [i16],
+        removed: &IndexList<MAX_CHANGED_FEATURES>,
+        added: &IndexList<MAX_CHANGED_FEATURES>,
+    ) {
+        match (removed.len(), added.len()) {
+            (1, 1) => {
+                self.apply_sub_add_fused(accumulation, removed.get(0), added.get(0));
+            }
+            (2, 2) => {
+                self.apply_double_sub_add_fused(
+                    accumulation,
+                    removed.get(0),
+                    added.get(0),
+                    removed.get(1),
+                    added.get(1),
+                );
+            }
+            _ => {
+                for index in removed.iter() {
+                    self.sub_weights(accumulation, index);
+                }
+                for index in added.iter() {
+                    self.add_weights(accumulation, index);
+                }
+            }
+        }
+    }
+
+    /// `acc = acc - weights[sub_index] + weights[add_index]` を 1 パスで適用
+    #[inline]
+    fn apply_sub_add_fused(&self, accumulation: &mut [i16], sub_index: usize, add_index: usize) {
+        let sub_weights = self.weight_row(sub_index);
+        let add_weights = self.weight_row(add_index);
+
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            // SAFETY:
+            // - accumulation は AlignedI16<L1>（#[repr(C, align(64))]）由来で
+            //   32 バイト境界に揃う。weight 行は AlignedBox 先頭が 64 バイト
+            //   アライン、各行は L1×2 バイト（L1 は 16 の倍数）なので全行先頭も
+            //   32 バイト境界に揃い、aligned load/store が安全。
+            // - L1 要素を 16 要素ずつ L1/16 回で完全に走査する。
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let sub_ptr = sub_weights.as_ptr();
+                let add_ptr = add_weights.as_ptr();
+                for i in 0..(L1 / 16) {
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    let sub_vec = _mm256_load_si256(sub_ptr.add(i * 16) as *const __m256i);
+                    let add_vec = _mm256_load_si256(add_ptr.add(i * 16) as *const __m256i);
+                    let result = _mm256_add_epi16(_mm256_sub_epi16(acc_vec, sub_vec), add_vec);
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                }
+            }
+            return;
+        }
+
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "avx2")
+        ))]
+        {
+            // SAFETY:
+            // - accumulation / weight 行は 16 バイト境界にある。
+            // - L1 要素を 8 要素ずつ L1/8 回で完全に走査する。
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let sub_ptr = sub_weights.as_ptr();
+                let add_ptr = add_weights.as_ptr();
+                for i in 0..(L1 / 8) {
+                    let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
+                    let sub_vec = _mm_load_si128(sub_ptr.add(i * 8) as *const __m128i);
+                    let add_vec = _mm_load_si128(add_ptr.add(i * 8) as *const __m128i);
+                    let result = _mm_add_epi16(_mm_sub_epi16(acc_vec, sub_vec), add_vec);
+                    _mm_store_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
+                }
+            }
+            return;
+        }
+
+        #[allow(unreachable_code)]
+        for ((acc, &sub_w), &add_w) in
+            accumulation.iter_mut().zip(sub_weights.iter()).zip(add_weights.iter())
+        {
+            *acc = acc.wrapping_sub(sub_w).wrapping_add(add_w);
+        }
+    }
+
+    /// `acc = acc - sub0 + add0 - sub1 + add1` を 1 パスで適用
+    #[inline]
+    fn apply_double_sub_add_fused(
+        &self,
+        accumulation: &mut [i16],
+        sub_index0: usize,
+        add_index0: usize,
+        sub_index1: usize,
+        add_index1: usize,
+    ) {
+        let sub_weights0 = self.weight_row(sub_index0);
+        let add_weights0 = self.weight_row(add_index0);
+        let sub_weights1 = self.weight_row(sub_index1);
+        let add_weights1 = self.weight_row(add_index1);
+
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            // SAFETY: apply_sub_add_fused と同様（accumulation / 4 本の weight 行
+            // はいずれも 32 バイト境界）。L1 要素を 16 要素ずつ L1/16 回で走査。
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let sub_ptr0 = sub_weights0.as_ptr();
+                let add_ptr0 = add_weights0.as_ptr();
+                let sub_ptr1 = sub_weights1.as_ptr();
+                let add_ptr1 = add_weights1.as_ptr();
+                for i in 0..(L1 / 16) {
+                    let acc_vec = _mm256_load_si256(acc_ptr.add(i * 16) as *const __m256i);
+                    let sub_vec0 = _mm256_load_si256(sub_ptr0.add(i * 16) as *const __m256i);
+                    let add_vec0 = _mm256_load_si256(add_ptr0.add(i * 16) as *const __m256i);
+                    let sub_vec1 = _mm256_load_si256(sub_ptr1.add(i * 16) as *const __m256i);
+                    let add_vec1 = _mm256_load_si256(add_ptr1.add(i * 16) as *const __m256i);
+                    let result = _mm256_add_epi16(
+                        _mm256_add_epi16(_mm256_sub_epi16(acc_vec, sub_vec0), add_vec0),
+                        _mm256_sub_epi16(add_vec1, sub_vec1),
+                    );
+                    _mm256_store_si256(acc_ptr.add(i * 16) as *mut __m256i, result);
+                }
+            }
+            return;
+        }
+
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sse2",
+            not(target_feature = "avx2")
+        ))]
+        {
+            // SAFETY: accumulation / 4 本の weight 行は 16 バイト境界。
+            // L1 要素を 8 要素ずつ L1/8 回で走査。
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let sub_ptr0 = sub_weights0.as_ptr();
+                let add_ptr0 = add_weights0.as_ptr();
+                let sub_ptr1 = sub_weights1.as_ptr();
+                let add_ptr1 = add_weights1.as_ptr();
+                for i in 0..(L1 / 8) {
+                    let acc_vec = _mm_load_si128(acc_ptr.add(i * 8) as *const __m128i);
+                    let sub_vec0 = _mm_load_si128(sub_ptr0.add(i * 8) as *const __m128i);
+                    let add_vec0 = _mm_load_si128(add_ptr0.add(i * 8) as *const __m128i);
+                    let sub_vec1 = _mm_load_si128(sub_ptr1.add(i * 8) as *const __m128i);
+                    let add_vec1 = _mm_load_si128(add_ptr1.add(i * 8) as *const __m128i);
+                    let result = _mm_add_epi16(
+                        _mm_add_epi16(_mm_sub_epi16(acc_vec, sub_vec0), add_vec0),
+                        _mm_sub_epi16(add_vec1, sub_vec1),
+                    );
+                    _mm_store_si128(acc_ptr.add(i * 8) as *mut __m128i, result);
+                }
+            }
+            return;
+        }
+
+        #[allow(unreachable_code)]
+        for ((((acc, &sub_w0), &add_w0), &sub_w1), &add_w1) in accumulation
+            .iter_mut()
+            .zip(sub_weights0.iter())
+            .zip(add_weights0.iter())
+            .zip(sub_weights1.iter())
+            .zip(add_weights1.iter())
+        {
+            *acc = acc
+                .wrapping_sub(sub_w0)
+                .wrapping_add(add_w0)
+                .wrapping_sub(sub_w1)
+                .wrapping_add(add_w1);
         }
     }
 

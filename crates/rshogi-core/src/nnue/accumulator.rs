@@ -124,6 +124,21 @@ impl<const N: usize> IndexList<N> {
         self.len as usize
     }
 
+    /// i 番目の要素を取得
+    ///
+    /// `i < len()` を呼び出し側が保証すること（fast path 判定で長さを確認済みの
+    /// 箇所から使う）。範囲外アクセスは debug ビルドでパニックする。
+    #[inline]
+    pub fn get(&self, i: usize) -> usize {
+        debug_assert!(
+            i < self.len as usize,
+            "IndexList::get: i={i} out of bounds (len={})",
+            self.len
+        );
+        // SAFETY: i < len なので indices[i] は push 済みで初期化されている
+        unsafe { self.indices[i].assume_init() as usize }
+    }
+
     /// 要素を逆順に並べ替え
     #[inline]
     pub fn reverse(&mut self) {
