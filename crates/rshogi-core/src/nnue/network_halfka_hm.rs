@@ -465,6 +465,7 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
                     &mut added,
                 );
 
+                self.prefetch_diff_weights(&removed, &added);
                 acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
 
                 self.apply_diff_fused(&mut acc.accumulation[p].0, &removed, &added);
@@ -505,6 +506,7 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
                     &mut added,
                 );
 
+                self.prefetch_diff_weights(&removed, &added);
                 acc.accumulation[p].0.copy_from_slice(&prev_acc.accumulation[p].0);
 
                 self.apply_diff_fused(&mut acc.accumulation[p].0, &removed, &added);
@@ -725,6 +727,31 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
     fn weight_row(&self, index: usize) -> &[i16] {
         let offset = index * L1;
         &self.weights[offset..offset + L1]
+    }
+
+    /// 差分 weight 行の先頭キャッシュラインを prefetch する（P5 試行）
+    ///
+    /// `apply_diff_fused` 直前の `copy_from_slice`（L1 サイズ）と weight 行ロードを
+    /// オーバーラップさせる狙い。
+    #[inline]
+    fn prefetch_diff_weights(
+        &self,
+        removed: &IndexList<MAX_CHANGED_FEATURES>,
+        added: &IndexList<MAX_CHANGED_FEATURES>,
+    ) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::_mm_prefetch;
+            let base = self.weights.as_ptr();
+            for idx in removed.iter().chain(added.iter()) {
+                // SAFETY: idx は append_changed_indices が生成した有効 feature index で
+                // idx*L1 は weights 配列内を指す。_mm_prefetch は無効アドレスでも
+                // faulting しないヒント命令で副作用はない。
+                unsafe {
+                    _mm_prefetch(base.add(idx * L1) as *const i8, 3);
+                }
+            }
+        }
     }
 
     /// removed/added を融合した差分更新（fast path）
