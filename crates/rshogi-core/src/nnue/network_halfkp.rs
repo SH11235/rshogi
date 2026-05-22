@@ -720,7 +720,36 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         let offset = index * L1;
         let weights = &self.weights[offset..offset + L1];
 
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            // SAFETY:
+            // - accumulation / weight 行はいずれも 64 バイト境界（accumulation は
+            //   AlignedI16<L1> 由来、weight 行は AlignedBox 先頭 64 バイト + 各行
+            //   L1×2 バイトで L1 は 32 の倍数）。aligned load/store が安全。
+            // - L1 要素を 32 要素ずつ L1/32 回で完全に走査する。
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+                for i in 0..(L1 / 32) {
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
+                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const __m512i);
+                    let result = _mm512_add_epi16(acc_vec, weight_vec);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
+                }
+            }
+            return;
+        }
+
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(target_feature = "avx512bw")
+        ))]
         {
             unsafe {
                 use std::arch::x86_64::*;
@@ -775,7 +804,36 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         let offset = index * L1;
         let weights = &self.weights[offset..offset + L1];
 
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            // SAFETY:
+            // - accumulation / weight 行はいずれも 64 バイト境界（accumulation は
+            //   AlignedI16<L1> 由来、weight 行は AlignedBox 先頭 64 バイト + 各行
+            //   L1×2 バイトで L1 は 32 の倍数）。aligned load/store が安全。
+            // - L1 要素を 32 要素ずつ L1/32 回で完全に走査する。
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let weight_ptr = weights.as_ptr();
+                for i in 0..(L1 / 32) {
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
+                    let weight_vec = _mm512_load_si512(weight_ptr.add(i * 32) as *const __m512i);
+                    let result = _mm512_sub_epi16(acc_vec, weight_vec);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
+                }
+            }
+            return;
+        }
+
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(target_feature = "avx512bw")
+        ))]
         {
             unsafe {
                 use std::arch::x86_64::*;
@@ -881,7 +939,35 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         let sub_weights = self.weight_row(sub_index);
         let add_weights = self.weight_row(add_index);
 
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            // SAFETY: apply_sub_add_fused の AVX2 パスと同様、accumulation /
+            // weight 行は 64 バイト境界。L1 要素を 32 要素ずつ L1/32 回で走査。
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let sub_ptr = sub_weights.as_ptr();
+                let add_ptr = add_weights.as_ptr();
+                for i in 0..(L1 / 32) {
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
+                    let sub_vec = _mm512_load_si512(sub_ptr.add(i * 32) as *const __m512i);
+                    let add_vec = _mm512_load_si512(add_ptr.add(i * 32) as *const __m512i);
+                    let result = _mm512_add_epi16(_mm512_sub_epi16(acc_vec, sub_vec), add_vec);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
+                }
+            }
+            return;
+        }
+
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(target_feature = "avx512bw")
+        ))]
         {
             // SAFETY:
             // - accumulation は AlignedI16<L1>（#[repr(C, align(64))]）由来で
@@ -953,7 +1039,42 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         let sub_weights1 = self.weight_row(sub_index1);
         let add_weights1 = self.weight_row(add_index1);
 
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            // SAFETY: apply_double_sub_add_fused の AVX2 パスと同様、accumulation /
+            // 4 本の weight 行は 64 バイト境界。L1 要素を 32 要素ずつ L1/32 回で走査。
+            unsafe {
+                use std::arch::x86_64::*;
+                let acc_ptr = accumulation.as_mut_ptr();
+                let sub_ptr0 = sub_weights0.as_ptr();
+                let add_ptr0 = add_weights0.as_ptr();
+                let sub_ptr1 = sub_weights1.as_ptr();
+                let add_ptr1 = add_weights1.as_ptr();
+                for i in 0..(L1 / 32) {
+                    let acc_vec = _mm512_load_si512(acc_ptr.add(i * 32) as *const __m512i);
+                    let sub_vec0 = _mm512_load_si512(sub_ptr0.add(i * 32) as *const __m512i);
+                    let add_vec0 = _mm512_load_si512(add_ptr0.add(i * 32) as *const __m512i);
+                    let sub_vec1 = _mm512_load_si512(sub_ptr1.add(i * 32) as *const __m512i);
+                    let add_vec1 = _mm512_load_si512(add_ptr1.add(i * 32) as *const __m512i);
+                    let result = _mm512_add_epi16(
+                        _mm512_add_epi16(_mm512_sub_epi16(acc_vec, sub_vec0), add_vec0),
+                        _mm512_sub_epi16(add_vec1, sub_vec1),
+                    );
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
+                }
+            }
+            return;
+        }
+
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            not(target_feature = "avx512bw")
+        ))]
         {
             // SAFETY: apply_sub_add_fused と同様（accumulation / 4 本の weight 行
             // はいずれも 32 バイト境界）。L1 要素を 16 要素ずつ L1/16 回で走査。
