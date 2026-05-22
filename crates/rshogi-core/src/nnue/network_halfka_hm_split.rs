@@ -542,7 +542,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
         &self,
         pos: &Position,
         perspective: Color,
-        accumulation: &mut [i16; L1],
+        accumulation: &mut [i16],
         cache: &mut AccumulatorCacheGeneric,
     ) {
         let king_sq = pos.king_square(perspective);
@@ -562,21 +562,8 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
             sorted,
             &self.biases,
             accumulation,
-            |acc, idx| {
-                debug_assert_eq!(acc.len(), L1);
-                // SAFETY: acc は refresh_perspective_with_cache が &mut [i16; L1] から
-                // refresh_or_cache に渡したスライス。キャッシュも同じ L1 で確保され
-                // 長さは常に L1 に一致する。固定長配列化で SIMD ループ長が
-                // コンパイル時定数として確定する。
-                let arr: &mut [i16; L1] = unsafe { &mut *(acc.as_mut_ptr() as *mut [i16; L1]) };
-                self.add_weights(arr, idx);
-            },
-            |acc, idx| {
-                debug_assert_eq!(acc.len(), L1);
-                // SAFETY: 上記と同じ理由で安全
-                let arr: &mut [i16; L1] = unsafe { &mut *(acc.as_mut_ptr() as *mut [i16; L1]) };
-                self.sub_weights(arr, idx);
-            },
+            |acc, idx| self.add_weights(acc, idx),
+            |acc, idx| self.sub_weights(acc, idx),
         );
     }
 
@@ -634,7 +621,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
 
     /// 重みを加算（SIMD最適化版）
     #[inline]
-    fn add_weights(&self, accumulation: &mut [i16; L1], index: usize) {
+    fn add_weights(&self, accumulation: &mut [i16], index: usize) {
         let offset = index * L1;
         let weights = &self.weights[offset..offset + L1];
 
@@ -686,7 +673,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
 
     /// 重みを減算（SIMD最適化版）
     #[inline]
-    fn sub_weights(&self, accumulation: &mut [i16; L1], index: usize) {
+    fn sub_weights(&self, accumulation: &mut [i16], index: usize) {
         let offset = index * L1;
         let weights = &self.weights[offset..offset + L1];
 
@@ -758,7 +745,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
     #[inline]
     fn apply_diff_fused(
         &self,
-        accumulation: &mut [i16; L1],
+        accumulation: &mut [i16],
         removed: &IndexList<MAX_CHANGED_FEATURES>,
         added: &IndexList<MAX_CHANGED_FEATURES>,
     ) {
@@ -788,12 +775,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
 
     /// `acc = acc - weights[sub_index] + weights[add_index]` を 1 パスで適用
     #[inline]
-    fn apply_sub_add_fused(
-        &self,
-        accumulation: &mut [i16; L1],
-        sub_index: usize,
-        add_index: usize,
-    ) {
+    fn apply_sub_add_fused(&self, accumulation: &mut [i16], sub_index: usize, add_index: usize) {
         let sub_weights = self.weight_row(sub_index);
         let add_weights = self.weight_row(add_index);
 
@@ -858,7 +840,7 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
     #[inline]
     fn apply_double_sub_add_fused(
         &self,
-        accumulation: &mut [i16; L1],
+        accumulation: &mut [i16],
         sub_index0: usize,
         add_index0: usize,
         sub_index1: usize,
