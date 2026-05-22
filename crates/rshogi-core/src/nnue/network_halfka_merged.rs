@@ -46,9 +46,10 @@ use std::sync::OnceLock;
 
 use super::accumulator::{
     AccumulatorCacheGeneric, Aligned, AlignedBox, AlignedI16, DirtyPiece, IndexList,
-    MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
+    MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
 };
 use super::activation::FtActivation;
+use super::bona_piece_halfka_merged::{halfka_index, king_index, pack_bonapiece};
 use super::constants::{
     FV_SCALE_HALFKA, HALFKA_MERGED_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA,
 };
@@ -546,22 +547,20 @@ impl<const L1: usize> FeatureTransformerHalfKaMerged<L1> {
         cache: &mut AccumulatorCacheGeneric,
     ) {
         let king_sq = pos.king_square(perspective);
-        let active_indices = HalfKaMergedFeatureSet::collect_active_indices(pos, perspective);
-
-        let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
-        let len = active_indices.len();
-        for (i, idx) in active_indices.iter().enumerate() {
-            sorted_buf[i] = idx as u32;
-        }
-        let sorted = &mut sorted_buf[..len];
-        sorted.sort_unstable();
+        let k_index = king_index(king_sq, perspective);
+        let piece_list = if perspective == Color::Black {
+            pos.piece_list().piece_list_fb()
+        } else {
+            pos.piece_list().piece_list_fw()
+        };
 
         cache.refresh_or_cache(
             king_sq,
             perspective,
-            sorted,
+            piece_list,
             &self.biases,
             accumulation,
+            move |bp| halfka_index(k_index, pack_bonapiece(bp)),
             |acc, idx| self.add_weights(acc, idx),
             |acc, idx| self.sub_weights(acc, idx),
         );
