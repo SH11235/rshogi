@@ -24,7 +24,6 @@ pub const E_KING: usize = 1629;
 pub const PIECE_INPUTS: usize = E_KING; // 1629
 
 /// HalfKaMerged 用の BonaPiece（内部は通常の BonaPiece と同じレイアウト）
-#[allow(non_camel_case_types)]
 pub type BonaPieceHalfKaMerged = BonaPiece;
 
 // =============================================================================

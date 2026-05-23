@@ -1,6 +1,3 @@
-// NOTE: 公式表記(HalfKaMerged)をenum名に保持するため、非CamelCaseを許可する。
-#![allow(non_camel_case_types)]
-
 //! HalfKaMerged アーキテクチャ階層
 //!
 //! L1 サイズごとにモジュールを分割し、L2/L3/活性化の組み合わせを enum で表現。
@@ -9,15 +6,15 @@
 //!
 //! ```text
 //! HalfKaMergedNetwork
-//! ├── L256(HalfKaMerged_L256)
+//! ├── L256(HalfKaMergedL256)
 //! │   ├── CReLU_32_32
 //! │   ├── SCReLU_32_32
 //! │   └── Pairwise_32_32
-//! ├── L512(HalfKaMerged_L512)
+//! ├── L512(HalfKaMergedL512)
 //! │   ├── CReLU_8_96
 //! │   ├── SCReLU_8_96
 //! │   └── Pairwise_8_96
-//! └── L1024(HalfKaMerged_L1024)
+//! └── L1024(HalfKaMergedL1024)
 //!     ├── CReLU_8_96
 //!     ├── SCReLU_8_96
 //!     ├── Pairwise_8_96
@@ -30,10 +27,10 @@ mod l256;
 mod l512;
 mod l768;
 
-pub use l256::HalfKaMerged_L256;
-pub use l512::HalfKaMerged_L512;
-pub use l768::HalfKaMerged_L768;
-pub use l1024::HalfKaMerged_L1024;
+pub use l256::HalfKaMergedL256;
+pub use l512::HalfKaMergedL512;
+pub use l768::HalfKaMergedL768;
+pub use l1024::HalfKaMergedL1024;
 
 use crate::nnue::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
 use crate::nnue::network_halfka_merged::AccumulatorStackHalfKaMerged;
@@ -46,10 +43,10 @@ use crate::types::Value;
 /// L1 サイズごとにバリアントを持つ。
 /// L2/L3/活性化の追加で変更不要（L1 enum 内に閉じる）。
 pub enum HalfKaMergedNetwork {
-    L256(HalfKaMerged_L256),
-    L512(HalfKaMerged_L512),
-    L768(HalfKaMerged_L768),
-    L1024(HalfKaMerged_L1024),
+    L256(HalfKaMergedL256),
+    L512(HalfKaMergedL512),
+    L768(HalfKaMergedL768),
+    L1024(HalfKaMergedL1024),
 }
 
 impl HalfKaMergedNetwork {
@@ -209,19 +206,19 @@ impl HalfKaMergedNetwork {
 
         match l1 {
             256 => {
-                let net = HalfKaMerged_L256::read(reader, l2, l3, activation)?;
+                let net = HalfKaMergedL256::read(reader, l2, l3, activation)?;
                 Ok(Self::L256(net))
             }
             512 => {
-                let net = HalfKaMerged_L512::read(reader, l2, l3, activation)?;
+                let net = HalfKaMergedL512::read(reader, l2, l3, activation)?;
                 Ok(Self::L512(net))
             }
             768 => {
-                let net = HalfKaMerged_L768::read(reader, l2, l3, activation)?;
+                let net = HalfKaMergedL768::read(reader, l2, l3, activation)?;
                 Ok(Self::L768(net))
             }
             1024 => {
-                let net = HalfKaMerged_L1024::read(reader, l2, l3, activation)?;
+                let net = HalfKaMergedL1024::read(reader, l2, l3, activation)?;
                 Ok(Self::L1024(net))
             }
             _ => Err(std::io::Error::new(
@@ -264,10 +261,10 @@ impl HalfKaMergedNetwork {
     /// サポートするアーキテクチャ一覧
     pub fn supported_specs() -> Vec<ArchitectureSpec> {
         let mut specs = Vec::new();
-        specs.extend_from_slice(HalfKaMerged_L256::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKaMerged_L512::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKaMerged_L768::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKaMerged_L1024::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaMergedL256::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaMergedL512::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaMergedL768::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaMergedL1024::SUPPORTED_SPECS);
         specs
     }
 }

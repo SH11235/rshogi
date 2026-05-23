@@ -1,6 +1,4 @@
 //! HalfKaHmMerged L1=512 のアーキテクチャバリアント
-// NOTE: 公式表記(HalfKaHmMerged)をenum名に保持するため、非CamelCaseを許可する。
-#![allow(non_camel_case_types)]
 
 use crate::nnue::accumulator::DirtyPiece;
 use crate::nnue::network_halfka_hm_merged::AccumulatorStackHalfKaHmMerged;

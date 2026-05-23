@@ -1,6 +1,4 @@
 //! HalfKaMerged L1=512 のアーキテクチャバリアント
-// NOTE: 公式表記(HalfKaMerged)をenum名に保持するため、非CamelCaseを許可する。
-#![allow(non_camel_case_types)]
 
 use crate::nnue::accumulator::DirtyPiece;
 use crate::nnue::network_halfka_merged::AccumulatorStackHalfKaMerged;
@@ -16,7 +14,7 @@ use crate::nnue::aliases::{
 };
 
 crate::define_l1_variants!(
-    enum HalfKaMerged_L512,
+    enum HalfKaMergedL512,
     feature_set HalfKaMerged,
     l1 512,
     acc crate::nnue::network_halfka_merged::AccumulatorHalfKaMerged<512>,
@@ -44,10 +42,10 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKaMerged_L512::SUPPORTED_SPECS.len(), 9);
+        assert_eq!(HalfKaMergedL512::SUPPORTED_SPECS.len(), 9);
 
         // 8-64 CReLU
-        let spec = &HalfKaMerged_L512::SUPPORTED_SPECS[0];
+        let spec = &HalfKaMergedL512::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKaMerged);
         assert_eq!(spec.l1, 512);
         assert_eq!(spec.l2, 8);
@@ -57,7 +55,7 @@ mod tests {
 
     #[test]
     fn test_l1_size() {
-        for spec in HalfKaMerged_L512::SUPPORTED_SPECS {
+        for spec in HalfKaMergedL512::SUPPORTED_SPECS {
             assert_eq!(spec.l1, 512);
         }
     }
@@ -65,7 +63,7 @@ mod tests {
     /// マクロ生成: architecture_name() の命名規則テスト
     #[test]
     fn test_architecture_name_format() {
-        for spec in HalfKaMerged_L512::SUPPORTED_SPECS {
+        for spec in HalfKaMergedL512::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
                 name.starts_with("HalfKaMerged-512-"),
@@ -78,7 +76,7 @@ mod tests {
     #[test]
     fn test_supported_activations() {
         let activations: Vec<_> =
-            HalfKaMerged_L512::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+            HalfKaMergedL512::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
         assert!(activations.contains(&Activation::CReLU));
         assert!(activations.contains(&Activation::SCReLU));
         assert!(activations.contains(&Activation::PairwiseCReLU));
@@ -88,7 +86,7 @@ mod tests {
     #[test]
     fn test_multiple_l2_l3_combinations() {
         let combinations: Vec<_> =
-            HalfKaMerged_L512::SUPPORTED_SPECS.iter().map(|s| (s.l2, s.l3)).collect();
+            HalfKaMergedL512::SUPPORTED_SPECS.iter().map(|s| (s.l2, s.l3)).collect();
 
         assert!(combinations.contains(&(8, 64)), "Should support L2=8, L3=64");
         assert!(combinations.contains(&(8, 96)), "Should support L2=8, L3=96");

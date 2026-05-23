@@ -1,6 +1,4 @@
 //! HalfKaHmSplit L1=768 のアーキテクチャバリアント
-// NOTE: 公式表記(HalfKaHmSplit)をenum名に保持するため、非CamelCaseを許可する。
-#![allow(non_camel_case_types)]
 
 use crate::nnue::accumulator::DirtyPiece;
 use crate::nnue::network_halfka_hm_split::AccumulatorStackHalfKaHmSplit;
@@ -14,7 +12,7 @@ use crate::nnue::aliases::{
 };
 
 crate::define_l1_variants!(
-    enum HalfKaHmSplit_L768,
+    enum HalfKaHmSplitL768,
     feature_set HalfKaHmSplit,
     l1 768,
     acc crate::nnue::network_halfka_hm_split::AccumulatorHalfKaHmSplit<768>,
@@ -34,10 +32,10 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKaHmSplit_L768::SUPPORTED_SPECS.len(), 3);
+        assert_eq!(HalfKaHmSplitL768::SUPPORTED_SPECS.len(), 3);
 
         // 16-64 CReLU
-        let spec = &HalfKaHmSplit_L768::SUPPORTED_SPECS[0];
+        let spec = &HalfKaHmSplitL768::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKaHmSplit);
         assert_eq!(spec.l1, 768);
         assert_eq!(spec.l2, 16);
@@ -47,7 +45,7 @@ mod tests {
 
     #[test]
     fn test_l1_size() {
-        for spec in HalfKaHmSplit_L768::SUPPORTED_SPECS {
+        for spec in HalfKaHmSplitL768::SUPPORTED_SPECS {
             assert_eq!(spec.l1, 768);
         }
     }
@@ -55,7 +53,7 @@ mod tests {
     /// マクロ生成: architecture_name() の命名規則テスト
     #[test]
     fn test_architecture_name_format() {
-        for spec in HalfKaHmSplit_L768::SUPPORTED_SPECS {
+        for spec in HalfKaHmSplitL768::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
                 name.starts_with("HalfKaHmSplit-768-"),
@@ -68,7 +66,7 @@ mod tests {
     #[test]
     fn test_supported_activations() {
         let activations: Vec<_> =
-            HalfKaHmSplit_L768::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+            HalfKaHmSplitL768::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
         assert!(activations.contains(&Activation::CReLU));
         assert!(activations.contains(&Activation::SCReLU));
         assert!(activations.contains(&Activation::PairwiseCReLU));

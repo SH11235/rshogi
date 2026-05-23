@@ -1,6 +1,3 @@
-// NOTE: 公式表記(HalfKaHmMerged)をenum名に保持するため、非CamelCaseを許可する。
-#![allow(non_camel_case_types)]
-
 //! HalfKaHmMerged アーキテクチャ階層
 //!
 //! L1 サイズごとにモジュールを分割し、L2/L3/活性化の組み合わせを enum で表現。
@@ -17,6 +14,10 @@
 //! │   ├── CReLU_8_96
 //! │   ├── SCReLU_8_96
 //! │   └── Pairwise_8_96
+//! ├── L768(HalfKaHmMergedL768)
+//! │   ├── CReLU_16_64
+//! │   ├── SCReLU_16_64
+//! │   └── Pairwise_16_64
 //! └── L1024(HalfKaHmMergedL1024)
 //!     ├── CReLU_8_96
 //!     ├── SCReLU_8_96

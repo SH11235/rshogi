@@ -70,7 +70,6 @@ use super::bona_piece::BonaPiece;
 ///
 /// 内部的にはHalfKPと同じBonaPieceを使用するが、
 /// pack_bonapiece関数で適切に変換する。
-#[allow(non_camel_case_types)]
 pub type BonaPieceHalfKaHmMerged = BonaPiece;
 
 // =============================================================================

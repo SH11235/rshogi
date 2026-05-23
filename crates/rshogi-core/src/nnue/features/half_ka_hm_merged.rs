@@ -27,7 +27,6 @@ use crate::types::{Color, Square};
 ///
 /// キングバケット（Half-Mirror）とFactorizationを組み合わせた特徴量。
 /// 自玉が動いた場合にアキュムレータの全計算が必要になる。
-#[allow(non_camel_case_types)]
 pub struct HalfKaHmMerged;
 
 impl Feature for HalfKaHmMerged {

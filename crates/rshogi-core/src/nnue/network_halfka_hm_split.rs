@@ -1,6 +1,3 @@
-// NOTE: 公式表記(HalfKaHmSplit)をenum名に保持するため、非CamelCaseを許可する。
-#![allow(non_camel_case_types)]
-
 //! NetworkHalfKaHmSplit - const generics ベースの HalfKaHmSplit ネットワーク統一実装
 //!
 //! HalfKaHmSplit^ 特徴量を使用し、L1/L2/L3 のサイズと活性化関数を型パラメータで切り替え可能にした実装。

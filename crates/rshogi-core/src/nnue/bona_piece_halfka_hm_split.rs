@@ -20,7 +20,6 @@ pub const FE_HAND_END: usize = 90;
 pub const PIECE_INPUTS: usize = 1548 + 81 * 2;
 
 /// HalfKaHmSplit 用の BonaPiece（内部は通常の BonaPiece と同じレイアウト）
-#[allow(non_camel_case_types)]
 pub type BonaPieceHalfKaHmSplit = BonaPiece;
 
 // =============================================================================

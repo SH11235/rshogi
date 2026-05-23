@@ -72,7 +72,6 @@ pub enum NNUEArchitectureOverride {
     /// HalfKP
     HalfKP = 1,
     /// HalfKaHmMerged
-    #[allow(non_camel_case_types)]
     HalfKaHmMerged = 2,
     /// HalfKaSplit
     HalfKaSplit = 3,
@@ -270,7 +269,6 @@ pub enum NNUENetwork {
     /// HalfKaSplit 特徴量セット（L256/L512/L1024）
     HalfKaSplit(HalfKaSplitNetwork),
     /// HalfKaHmMerged 特徴量セット（L256/L512/L1024）
-    #[allow(non_camel_case_types)]
     HalfKaHmMerged(HalfKaHmMergedNetwork),
     /// HalfKaMerged 特徴量セット（L256/L512/L1024）
     HalfKaMerged(HalfKaMergedNetwork),

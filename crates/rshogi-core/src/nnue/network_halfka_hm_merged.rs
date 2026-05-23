@@ -1,6 +1,3 @@
-// NOTE: 公式表記(HalfKaHmMerged)をenum名に保持するため、非CamelCaseを許可する。
-#![allow(non_camel_case_types)]
-
 //! NetworkHalfKaHmMerged - const generics ベースの HalfKaHmMerged ネットワーク統一実装
 //!
 //! HalfKaHmMerged^ 特徴量を使用し、L1/L2/L3 のサイズと活性化関数を型パラメータで切り替え可能にした実装。

@@ -33,7 +33,6 @@ use super::network::NNUENetwork;
 /// - **HalfKaHmMerged**: L256/L512/L1024 を HalfKaHmMergedStack で管理
 /// - **HalfKP**: L256/L512 を HalfKPStack で管理
 /// - **LayerStacks**: 1536次元 + 9バケット
-#[allow(non_camel_case_types)]
 pub enum AccumulatorStackVariant {
     /// HalfKaSplit 特徴量セット（L256/L512/L1024）
     HalfKaSplit(HalfKaSplitStack),

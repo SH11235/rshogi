@@ -1,6 +1,3 @@
-// NOTE: 公式表記(HalfKaHmSplit)をenum名に保持するため、非CamelCaseを許可する。
-#![allow(non_camel_case_types)]
-
 //! HalfKaHmSplit アーキテクチャ階層
 //!
 //! L1 サイズごとにモジュールを分割し、L2/L3/活性化の組み合わせを enum で表現。
@@ -9,15 +6,15 @@
 //!
 //! ```text
 //! HalfKaHmSplitNetwork
-//! ├── L256(HalfKaHmSplit_L256)
+//! ├── L256(HalfKaHmSplitL256)
 //! │   ├── CReLU_32_32
 //! │   ├── SCReLU_32_32
 //! │   └── Pairwise_32_32
-//! ├── L512(HalfKaHmSplit_L512)
+//! ├── L512(HalfKaHmSplitL512)
 //! │   ├── CReLU_8_96
 //! │   ├── SCReLU_8_96
 //! │   └── Pairwise_8_96
-//! └── L1024(HalfKaHmSplit_L1024)
+//! └── L1024(HalfKaHmSplitL1024)
 //!     ├── CReLU_8_96
 //!     ├── SCReLU_8_96
 //!     ├── Pairwise_8_96
@@ -30,10 +27,10 @@ mod l256;
 mod l512;
 mod l768;
 
-pub use l256::HalfKaHmSplit_L256;
-pub use l512::HalfKaHmSplit_L512;
-pub use l768::HalfKaHmSplit_L768;
-pub use l1024::HalfKaHmSplit_L1024;
+pub use l256::HalfKaHmSplitL256;
+pub use l512::HalfKaHmSplitL512;
+pub use l768::HalfKaHmSplitL768;
+pub use l1024::HalfKaHmSplitL1024;
 
 use crate::nnue::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
 use crate::nnue::network_halfka_hm_split::AccumulatorStackHalfKaHmSplit;
@@ -46,10 +43,10 @@ use crate::types::Value;
 /// L1 サイズごとにバリアントを持つ。
 /// L2/L3/活性化の追加で変更不要（L1 enum 内に閉じる）。
 pub enum HalfKaHmSplitNetwork {
-    L256(HalfKaHmSplit_L256),
-    L512(HalfKaHmSplit_L512),
-    L768(HalfKaHmSplit_L768),
-    L1024(HalfKaHmSplit_L1024),
+    L256(HalfKaHmSplitL256),
+    L512(HalfKaHmSplitL512),
+    L768(HalfKaHmSplitL768),
+    L1024(HalfKaHmSplitL1024),
 }
 
 impl HalfKaHmSplitNetwork {
@@ -209,19 +206,19 @@ impl HalfKaHmSplitNetwork {
 
         match l1 {
             256 => {
-                let net = HalfKaHmSplit_L256::read(reader, l2, l3, activation)?;
+                let net = HalfKaHmSplitL256::read(reader, l2, l3, activation)?;
                 Ok(Self::L256(net))
             }
             512 => {
-                let net = HalfKaHmSplit_L512::read(reader, l2, l3, activation)?;
+                let net = HalfKaHmSplitL512::read(reader, l2, l3, activation)?;
                 Ok(Self::L512(net))
             }
             768 => {
-                let net = HalfKaHmSplit_L768::read(reader, l2, l3, activation)?;
+                let net = HalfKaHmSplitL768::read(reader, l2, l3, activation)?;
                 Ok(Self::L768(net))
             }
             1024 => {
-                let net = HalfKaHmSplit_L1024::read(reader, l2, l3, activation)?;
+                let net = HalfKaHmSplitL1024::read(reader, l2, l3, activation)?;
                 Ok(Self::L1024(net))
             }
             _ => Err(std::io::Error::new(
@@ -264,10 +261,10 @@ impl HalfKaHmSplitNetwork {
     /// サポートするアーキテクチャ一覧
     pub fn supported_specs() -> Vec<ArchitectureSpec> {
         let mut specs = Vec::new();
-        specs.extend_from_slice(HalfKaHmSplit_L256::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKaHmSplit_L512::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKaHmSplit_L768::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKaHmSplit_L1024::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaHmSplitL256::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaHmSplitL512::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaHmSplitL768::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaHmSplitL1024::SUPPORTED_SPECS);
         specs
     }
 }
