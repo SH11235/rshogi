@@ -13,7 +13,7 @@ use crate::nnue::aliases::{HalfKA_hm256CReLU, HalfKA_hm256Pairwise, HalfKA_hm256
 
 crate::define_l1_variants!(
     enum HalfKA_hm_L256,
-    feature_set HalfKA_hm,
+    feature_set HalfKaHmMerged,
     l1 256,
     acc crate::nnue::network_halfka_hm::AccumulatorHalfKA_hm<256>,
     stack AccumulatorStackHalfKA_hm<256>,
@@ -34,7 +34,7 @@ mod tests {
         assert_eq!(HalfKA_hm_L256::SUPPORTED_SPECS.len(), 3);
 
         let spec = &HalfKA_hm_L256::SUPPORTED_SPECS[0];
-        assert_eq!(spec.feature_set, FeatureSet::HalfKA_hm);
+        assert_eq!(spec.feature_set, FeatureSet::HalfKaHmMerged);
         assert_eq!(spec.l1, 256);
         assert_eq!(spec.l2, 32);
         assert_eq!(spec.l3, 32);
@@ -55,10 +55,10 @@ mod tests {
     fn test_architecture_name_format() {
         for spec in HalfKA_hm_L256::SUPPORTED_SPECS {
             let name = spec.name();
-            // HalfKA_hm-256-L2-L3-Activation 形式
+            // HalfKaHmMerged-256-L2-L3-Activation 形式
             assert!(
-                name.starts_with("HalfKA_hm-256-"),
-                "Architecture name should start with 'HalfKA_hm-256-', got: {name}"
+                name.starts_with("HalfKaHmMerged-256-"),
+                "Architecture name should start with 'HalfKaHmMerged-256-', got: {name}"
             );
         }
     }

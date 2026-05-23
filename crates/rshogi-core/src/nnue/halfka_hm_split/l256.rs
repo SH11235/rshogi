@@ -57,10 +57,10 @@ mod tests {
     fn test_architecture_name_format() {
         for spec in HalfKaHmSplit_L256::SUPPORTED_SPECS {
             let name = spec.name();
-            // HalfKA_hm_split-256-L2-L3-Activation 形式
+            // HalfKaHmSplit-256-L2-L3-Activation 形式
             assert!(
-                name.starts_with("HalfKA_hm_split-256-"),
-                "Architecture name should start with 'HalfKA_hm_split-256-', got: {name}"
+                name.starts_with("HalfKaHmSplit-256-"),
+                "Architecture name should start with 'HalfKaHmSplit-256-', got: {name}"
             );
         }
     }

@@ -68,8 +68,8 @@ mod tests {
         for spec in HalfKaHmSplit_L1024::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
-                name.starts_with("HalfKA_hm_split-1024-"),
-                "Architecture name should start with 'HalfKA_hm_split-1024-', got: {name}"
+                name.starts_with("HalfKaHmSplit-1024-"),
+                "Architecture name should start with 'HalfKaHmSplit-1024-', got: {name}"
             );
         }
     }

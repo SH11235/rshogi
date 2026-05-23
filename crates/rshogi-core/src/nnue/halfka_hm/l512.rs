@@ -17,7 +17,7 @@ use crate::nnue::aliases::{
 
 crate::define_l1_variants!(
     enum HalfKA_hm_L512,
-    feature_set HalfKA_hm,
+    feature_set HalfKaHmMerged,
     l1 512,
     acc crate::nnue::network_halfka_hm::AccumulatorHalfKA_hm<512>,
     stack AccumulatorStackHalfKA_hm<512>,
@@ -48,7 +48,7 @@ mod tests {
 
         // 8-64 CReLU
         let spec = &HalfKA_hm_L512::SUPPORTED_SPECS[0];
-        assert_eq!(spec.feature_set, FeatureSet::HalfKA_hm);
+        assert_eq!(spec.feature_set, FeatureSet::HalfKaHmMerged);
         assert_eq!(spec.l1, 512);
         assert_eq!(spec.l2, 8);
         assert_eq!(spec.l3, 64);
@@ -68,8 +68,8 @@ mod tests {
         for spec in HalfKA_hm_L512::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
-                name.starts_with("HalfKA_hm-512-"),
-                "Architecture name should start with 'HalfKA_hm-512-', got: {name}"
+                name.starts_with("HalfKaHmMerged-512-"),
+                "Architecture name should start with 'HalfKaHmMerged-512-', got: {name}"
             );
         }
     }

@@ -13,7 +13,7 @@ use crate::nnue::aliases::{HalfKA_hm768CReLU, HalfKA_hm768Pairwise, HalfKA_hm768
 
 crate::define_l1_variants!(
     enum HalfKA_hm_L768,
-    feature_set HalfKA_hm,
+    feature_set HalfKaHmMerged,
     l1 768,
     acc crate::nnue::network_halfka_hm::AccumulatorHalfKA_hm<768>,
     stack AccumulatorStackHalfKA_hm<768>,
@@ -36,7 +36,7 @@ mod tests {
 
         // 16-64 CReLU
         let spec = &HalfKA_hm_L768::SUPPORTED_SPECS[0];
-        assert_eq!(spec.feature_set, FeatureSet::HalfKA_hm);
+        assert_eq!(spec.feature_set, FeatureSet::HalfKaHmMerged);
         assert_eq!(spec.l1, 768);
         assert_eq!(spec.l2, 16);
         assert_eq!(spec.l3, 64);
@@ -56,8 +56,8 @@ mod tests {
         for spec in HalfKA_hm_L768::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
-                name.starts_with("HalfKA_hm-768-"),
-                "Architecture name should start with 'HalfKA_hm-768-', got: {name}"
+                name.starts_with("HalfKaHmMerged-768-"),
+                "Architecture name should start with 'HalfKaHmMerged-768-', got: {name}"
             );
         }
     }

@@ -21,7 +21,7 @@
 /// ```ignore
 /// define_l1_variants!(
 ///     enum HalfKA_hm_L512,
-///     feature_set HalfKA_hm,
+///     feature_set HalfKaHmMerged,
 ///     l1 512,
 ///     acc AccumulatorHalfKA_hm<512>,
 ///     stack AccumulatorStackHalfKA_hm<512>,

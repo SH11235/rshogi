@@ -355,8 +355,8 @@ impl NNUENetwork {
                         parsed.feature_set
                     }
                     NNUEArchitectureOverride::HalfKP => FeatureSet::HalfKP,
-                    NNUEArchitectureOverride::HalfKA_hm => FeatureSet::HalfKA_hm,
-                    NNUEArchitectureOverride::HalfKA => FeatureSet::HalfKA,
+                    NNUEArchitectureOverride::HalfKA_hm => FeatureSet::HalfKaHmMerged,
+                    NNUEArchitectureOverride::HalfKA => FeatureSet::HalfKaSplit,
                     NNUEArchitectureOverride::LayerStacks
                     | NNUEArchitectureOverride::LayerStacksPSQT => FeatureSet::LayerStacks,
                 };
@@ -427,11 +427,11 @@ impl NNUENetwork {
                 let l3 = detection.spec.l3;
 
                 match detection.spec.feature_set {
-                    FeatureSet::HalfKA_hm => {
+                    FeatureSet::HalfKaHmMerged => {
                         let network = HalfKA_hmNetwork::read(reader, l1, l2, l3, activation)?;
                         Ok(Self::HalfKA_hm(network))
                     }
-                    FeatureSet::HalfKA => {
+                    FeatureSet::HalfKaSplit => {
                         let network = HalfKANetwork::read(reader, l1, l2, l3, activation)?;
                         Ok(Self::HalfKA(network))
                     }
@@ -1126,10 +1126,10 @@ pub fn detect_format(bytes: &[u8], file_size: u64) -> io::Result<NnueFormatInfo>
             // アーキテクチャ名を決定
             let architecture = match feature_set {
                 FeatureSet::LayerStacks => "LayerStacks".to_string(),
-                FeatureSet::HalfKA_hm => format!("HalfKA_hm{}", l1),
-                FeatureSet::HalfKA => format!("HalfKA{}", l1),
-                FeatureSet::HalfKaMerged => format!("HalfKA_merged{}", l1),
-                FeatureSet::HalfKaHmSplit => format!("HalfKA_hm_split{}", l1),
+                FeatureSet::HalfKaHmMerged => format!("HalfKaHmMerged{}", l1),
+                FeatureSet::HalfKaSplit => format!("HalfKaSplit{}", l1),
+                FeatureSet::HalfKaMerged => format!("HalfKaMerged{}", l1),
+                FeatureSet::HalfKaHmSplit => format!("HalfKaHmSplit{}", l1),
                 FeatureSet::HalfKP => format!("HalfKP{}", l1),
             };
 
@@ -1869,7 +1869,7 @@ mod tests {
             detect_format(&bytes, unknown_file_size).expect("Should fallback to header parsing");
 
         // ヘッダーからパースした値が使われることを確認
-        assert_eq!(info.architecture, "HalfKA_hm512");
+        assert_eq!(info.architecture, "HalfKaHmMerged512");
         assert_eq!(info.l1_dimension, 512);
         assert_eq!(info.l2_dimension, 8);
         assert_eq!(info.l3_dimension, 96);

@@ -432,7 +432,7 @@ mod tests {
 
         // 全て HalfKA
         for spec in &specs {
-            assert_eq!(spec.feature_set, FeatureSet::HalfKA);
+            assert_eq!(spec.feature_set, FeatureSet::HalfKaSplit);
         }
     }
 
@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn test_architecture_spec_consistency() {
         for spec in HalfKANetwork::supported_specs() {
-            assert_eq!(spec.feature_set, FeatureSet::HalfKA);
+            assert_eq!(spec.feature_set, FeatureSet::HalfKaSplit);
             assert!(spec.l1 == 256 || spec.l1 == 512 || spec.l1 == 768 || spec.l1 == 1024);
             assert!(spec.l2 > 0 && spec.l2 <= 128);
             assert!(spec.l3 > 0 && spec.l3 <= 128);

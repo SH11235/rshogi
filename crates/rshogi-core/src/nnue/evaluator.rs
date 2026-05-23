@@ -802,7 +802,7 @@ mod tests {
         for spec in &halfka_specs {
             assert_eq!(
                 spec.feature_set,
-                crate::nnue::spec::FeatureSet::HalfKA,
+                crate::nnue::spec::FeatureSet::HalfKaSplit,
                 "HalfKA spec has wrong feature_set: {spec:?}"
             );
         }
@@ -810,7 +810,7 @@ mod tests {
         for spec in &halfka_hm_specs {
             assert_eq!(
                 spec.feature_set,
-                crate::nnue::spec::FeatureSet::HalfKA_hm,
+                crate::nnue::spec::FeatureSet::HalfKaHmMerged,
                 "HalfKA_hm spec has wrong feature_set: {spec:?}"
             );
         }
