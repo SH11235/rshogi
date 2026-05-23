@@ -8,7 +8,6 @@ license = "GPL-3.0-only"
 repository = "https://github.com/SH11235/rshogi"
 
 [features]
-# Phase 1 互換: 旧 feature 名 alias 経由で新 `ls-size-1536x16x32` を引き込む。
 default = ["layerstacks-1536x16x32"]
 # 診断ログ（EvalHashヒット率など）
 diagnostics = ["rshogi-core/diagnostics"]
@@ -16,18 +15,20 @@ diagnostics = ["rshogi-core/diagnostics"]
 threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
 
-# === Phase 1 新 atomic feature 群 (Edition 軸 ADR) ===
-# 設計: docs/decisions/2026-05-24-build-edition-flavor-design.md
-# LS 拡張 slot
-ls-ext-psqt   = ["rshogi-core/ls-ext-psqt"]
-ls-ext-threat = ["rshogi-core/ls-ext-threat"]
+# === Edition 軸 atomic feature 群 (本 crate で必要なものだけ forward) ===
+# 設計は docs/decisions/2026-05-24-build-edition-flavor-design.md を参照。
+# tools は LS network 上の解析ユーティリティ前提なので architecture 経路 (ls-arch /
+# halfkx-arch) や FT slot は forward しない。必要になったら追加する。
 # LS L1 サイズ slot
 ls-size-1536x16x32 = ["rshogi-core/ls-size-1536x16x32"]
 ls-size-1536x32x32 = ["rshogi-core/ls-size-1536x32x32"]
 ls-size-768x16x32  = ["rshogi-core/ls-size-768x16x32"]
 ls-size-512x16x32  = ["rshogi-core/ls-size-512x16x32"]
+# LS 拡張 slot
+ls-ext-psqt   = ["rshogi-core/ls-ext-psqt"]
+ls-ext-threat = ["rshogi-core/ls-ext-threat"]
 
-# === 旧 feature 名 alias (Phase 2 で deprecate 予定) ===
+# === 旧 feature 名 alias ===
 nnue-psqt              = ["ls-ext-psqt"]
 nnue-threat            = ["ls-ext-threat"]
 layerstacks-1536x16x32 = ["ls-size-1536x16x32"]

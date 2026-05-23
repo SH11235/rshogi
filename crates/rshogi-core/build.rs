@@ -1,16 +1,8 @@
-//! Cargo feature 整合性チェック (Edition 軸 ADR Phase 1)
+//! Cargo feature 組合せ整合性チェック。
 //!
-//! 設計: `docs/decisions/2026-05-24-build-edition-flavor-design.md`
-//!
-//! - `mode-{universal,family,specific}` のうち**ちょうど 1 個**有効化されたとき、
-//!   その mode に応じた整合性ルール (size / activation / ft の重複、`ls-arch`
-//!   の依存、`nnue-progress-diff` の L0=1536 specific 制約等) を panic で fail-fast。
-//! - `mode-*` がゼロのときは Phase 1 互換モード扱いで checks を緩和する。
-//!   旧 `layerstacks-*` / `layerstack-only` / `nnue-{psqt,threat,progress-diff}` の
-//!   atomic 指定の従来 build がそのまま動く。
-//!
-//! 純粋ロジックは `build/checks.rs` に `validate_feature_combination` として
-//! 切り出してあり、`tests/build_rs_checks.rs` から `include!` して単体テストする。
+//! 純粋ロジックは `build/checks.rs` の `validate_feature_combination` に切り出して
+//! あり、`tests/build_rs_checks.rs` から `include!` して単体テストする。
+//! 詳細は `docs/decisions/2026-05-24-build-edition-flavor-design.md` を参照。
 
 use std::env;
 

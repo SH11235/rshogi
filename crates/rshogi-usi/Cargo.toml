@@ -39,8 +39,8 @@ threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-m
 # NNUE progress8kpabs 差分更新最適化（L1=1536 で有効、L1=768 で退行）
 nnue-progress-diff = ["rshogi-core/nnue-progress-diff"]
 
-# === Phase 1 新 atomic feature 群 (Edition 軸 ADR) ===
-# 設計: docs/decisions/2026-05-24-build-edition-flavor-design.md
+# === Edition 軸 atomic feature 群 ===
+# 設計は docs/decisions/2026-05-24-build-edition-flavor-design.md を参照。
 # Architecture 経路
 ls-arch     = ["rshogi-core/ls-arch"]
 halfkx-arch = ["rshogi-core/halfkx-arch"]
@@ -52,7 +52,7 @@ ls-size-512x16x32  = ["rshogi-core/ls-size-512x16x32"]
 # LS 拡張 slot
 ls-ext-psqt   = ["rshogi-core/ls-ext-psqt"]
 ls-ext-threat = ["rshogi-core/ls-ext-threat"]
-# FT 種別 slot (Phase 1: declaration のみ)
+# FT 種別 slot
 ft-halfkp           = ["rshogi-core/ft-halfkp"]
 ft-halfka_split     = ["rshogi-core/ft-halfka_split"]
 ft-halfka_merged    = ["rshogi-core/ft-halfka_merged"]
@@ -67,8 +67,8 @@ mode-universal = ["rshogi-core/mode-universal"]
 mode-family    = ["rshogi-core/mode-family"]
 mode-specific  = ["rshogi-core/mode-specific"]
 
-# === 旧 feature 名 alias (Phase 2 で deprecate 予定) ===
-# rshogi-core 側 alias と同じく旧名でビルドできる互換維持。
+# === 旧 feature 名 alias ===
+# 旧 build スクリプト・CI 設定がそのまま動くよう alias で互換維持する。
 layerstack-only        = ["ls-arch"]
 nnue-psqt              = ["ls-ext-psqt"]
 nnue-threat            = ["ls-ext-threat"]

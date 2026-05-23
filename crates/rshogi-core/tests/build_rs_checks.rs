@@ -1,9 +1,7 @@
-//! build.rs の整合性チェック (`validate_feature_combination`) を単体テストする。
+//! build.rs の整合性チェック (`validate_feature_combination`) の単体テスト。
 //!
 //! 純粋関数は `crates/rshogi-core/build/checks.rs` に切り出されており、
-//! ここでは `include!` で取り込んで run-time の `&dyn Fn(&str) -> bool` lookup を
-//! 渡しテストする。実際の build script panic 発火確認は cargo build 経由の
-//! shell smoke test で行うが、ロジックの単体検証はここで完結する。
+//! ここでは `include!` で取り込んで `&dyn Fn(&str) -> bool` lookup を渡して呼ぶ。
 
 include!("../build/checks.rs");
 
@@ -14,8 +12,15 @@ fn lookup(features: &[&str]) -> impl Fn(&str) -> bool {
 }
 
 #[test]
-fn phase1_compat_no_mode_passes() {
-    // Phase 1 互換: 旧 atomic feature 直指定 (mode-* なし) は通る。
+fn empty_features_pass() {
+    let has = lookup(&[]);
+    assert!(validate_feature_combination(&has).is_ok());
+}
+
+#[test]
+fn unknown_legacy_names_pass() {
+    // バリデータは旧 feature 名そのものを直接見ないことを確認。
+    // (Cargo の alias 展開を経由しないシナリオ。)
     let has = lookup(&[
         "layerstack-only",
         "layerstacks-1536x16x32",
@@ -26,8 +31,15 @@ fn phase1_compat_no_mode_passes() {
 }
 
 #[test]
-fn empty_features_pass() {
-    let has = lookup(&[]);
+fn legacy_alias_resolved_combo_passes() {
+    // 旧 build script `--features layerstack-only,layerstacks-1536x16x32,nnue-psqt,nnue-progress-diff`
+    // を Cargo が alias 展開して build.rs に渡す実際の feature 名集合を再現。
+    let has = lookup(&[
+        "ls-arch",
+        "ls-size-1536x16x32",
+        "ls-ext-psqt",
+        "nnue-progress-diff",
+    ]);
     assert!(validate_feature_combination(&has).is_ok());
 }
 
@@ -60,7 +72,6 @@ fn universal_plus_specific_rejected() {
 fn family_plus_specific_rejected() {
     let has = lookup(&["mode-family", "mode-specific", "ls-size-1536x16x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
-    // mode-universal は含まれていないので「ちょうど 1 個」エラーに落ちる。
     assert!(err.contains("must be exactly 1"));
 }
 
@@ -180,7 +191,7 @@ fn progress_diff_in_universal_rejected() {
 
 #[test]
 fn family_multiple_sizes_ok() {
-    // family mode では複数 size 同時 OK (dispatch する用途)。
+    // family mode は dispatch 用途で複数 size 同時 OK。
     let has = lookup(&[
         "mode-family",
         "ls-arch",
@@ -192,9 +203,8 @@ fn family_multiple_sizes_ok() {
 }
 
 #[test]
-fn ls_arch_plus_halfkx_arch_rejected_phase1() {
-    // Phase 1: ls-arch は旧 layerstack-only 意味論 (HalfKX 経路除去) を保持しているため
-    // halfkx-arch との同時指定は不整合。Phase 2 で意味論再定義後に解禁予定。
+fn ls_arch_plus_halfkx_arch_rejected() {
+    // `ls-arch` は HalfKX 経路を除去する意味論なので halfkx-arch と同時指定不可。
     let has = lookup(&[
         "mode-universal",
         "ls-arch",
@@ -207,8 +217,7 @@ fn ls_arch_plus_halfkx_arch_rejected_phase1() {
 
 #[test]
 fn ls_arch_plus_halfkx_arch_rejected_without_mode() {
-    // アーキテクチャ整合性 check は mode-* がなくても適用される。
-    // 旧 build script は halfkx-arch を立てないため Phase 1 互換は破壊しない。
+    // mode-* がなくてもアーキ整合性チェックは適用される。
     let has = lookup(&["ls-arch", "halfkx-arch"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("ls-arch") && err.contains("halfkx-arch"));
@@ -216,7 +225,7 @@ fn ls_arch_plus_halfkx_arch_rejected_without_mode() {
 
 #[test]
 fn ls_arch_with_ft_halfkp_rejected() {
-    // ADR「LS は halfka_hm_merged だけ通る」: LS で他 FT を立てると reject。
+    // LS network は現状 ft-halfka_hm_merged のみサポート。
     let has = lookup(&[
         "mode-specific",
         "ls-arch",
@@ -241,8 +250,6 @@ fn ls_arch_with_ft_halfka_split_rejected() {
 
 #[test]
 fn ls_arch_with_ft_halfkp_rejected_in_family() {
-    // ADR 「LS は halfka_hm_merged だけ通る」は mode に関わらず適用。
-    // family mode で ls-arch + 不正 FT を立てれば reject される。
     let has = lookup(&[
         "mode-family",
         "ls-arch",
@@ -256,7 +263,6 @@ fn ls_arch_with_ft_halfkp_rejected_in_family() {
 
 #[test]
 fn ls_arch_with_ft_halfkp_rejected_without_mode() {
-    // Phase 1 互換 (mode-* なし) build でも LS × 不正 FT は reject される。
     let has = lookup(&["ls-arch", "ft-halfkp"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("ft-halfka_hm_merged のみ"));
@@ -264,7 +270,6 @@ fn ls_arch_with_ft_halfkp_rejected_without_mode() {
 
 #[test]
 fn ls_arch_with_ft_halfka_hm_merged_ok() {
-    // LS + 唯一サポートされている FT variant の組合せは pass。
     let has = lookup(&[
         "mode-specific",
         "ls-arch",
@@ -277,7 +282,7 @@ fn ls_arch_with_ft_halfka_hm_merged_ok() {
 
 #[test]
 fn halfkx_arch_with_ft_halfkp_ok() {
-    // HalfKX 側では ft-halfkp は valid (Phase 1 の LS 制約は ls-arch 限定)。
+    // HalfKX 側では ft-halfkp は valid (LS network 制約は ls-arch 限定)。
     let has = lookup(&[
         "mode-specific",
         "halfkx-arch",
