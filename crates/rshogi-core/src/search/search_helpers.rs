@@ -109,25 +109,24 @@ pub(super) fn check_abort(
 
 /// NNUE 評価
 ///
-/// `ls-arch` feature 時は `evaluate_dispatch` をバイパスし、
-/// `network_ptr` から直接 LayerStacks 評価を呼ぶ。
+/// `ls-arch` feature かつ実行中ネットワークが LayerStacks のときは
+/// `evaluate_dispatch` をバイパスし、`network_ptr` から直接 LayerStacks 評価を呼ぶ。
 /// これにより `get_network()` の RwLock::read + Arc::clone を完全回避する。
+/// HalfKX 系ネットワークがロードされている場合は通常の `evaluate_dispatch` を使う。
 #[inline]
 pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
     #[cfg(feature = "ls-arch")]
     {
         let ptr = st.network_ptr;
-        if !ptr.is_null() {
+        if !ptr.is_null()
+            && let AccumulatorStackVariant::LayerStacks(ref mut s) = st.nnue_stack
+        {
             // SAFETY: network_ptr は reset() で Arc::as_ptr() から設定。
             // Arc は NETWORK の RwLock 内に保持され、探索中に drop されない。
+            // nnue_stack が LayerStacks variant のとき network も LayerStacks
+            // (reset() で from_network により対応付けされる) と保証されているため、
+            // as_layer_stacks() は panic しない。
             let network = unsafe { &*ptr };
-            let AccumulatorStackVariant::LayerStacks(ref mut s) = st.nnue_stack else {
-                // SAFETY: `ls-arch` feature が有効なとき、`from_network()` は
-                // 常に `LayerStacks` 変数体を返し、`nnue_stack` は `reset()` 以降
-                // 変更されない。よって `network_ptr` が非 null であれば `LayerStacks`
-                // 以外のアームに到達することはない。
-                unsafe { std::hint::unreachable_unchecked() }
-            };
             let net = network.as_layer_stacks();
             return update_and_evaluate_layer_stacks_cached(net, pos, s, &mut st.acc_cache);
         }
