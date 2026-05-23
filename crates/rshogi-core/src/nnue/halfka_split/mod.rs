@@ -1,23 +1,23 @@
-// NOTE: 公式表記(HalfKA_hm)をenum名に保持するため、非CamelCaseを許可する。
+// NOTE: 公式表記(HalfKaSplit)をenum名に保持するため、非CamelCaseを許可する。
 #![allow(non_camel_case_types)]
 
-//! HalfKA_hm アーキテクチャ階層
+//! HalfKaSplit アーキテクチャ階層
 //!
 //! L1 サイズごとにモジュールを分割し、L2/L3/活性化の組み合わせを enum で表現。
 //!
 //! # 構造
 //!
 //! ```text
-//! HalfKaHmMergedNetwork
-//! ├── L256(HalfKaHmMergedL256)
+//! HalfKaSplitNetwork
+//! ├── L256(HalfKaSplitL256)
 //! │   ├── CReLU_32_32
 //! │   ├── SCReLU_32_32
 //! │   └── Pairwise_32_32
-//! ├── L512(HalfKaHmMergedL512)
+//! ├── L512(HalfKaSplitL512)
 //! │   ├── CReLU_8_96
 //! │   ├── SCReLU_8_96
 //! │   └── Pairwise_8_96
-//! └── L1024(HalfKaHmMergedL1024)
+//! └── L1024(HalfKaSplitL1024)
 //!     ├── CReLU_8_96
 //!     ├── SCReLU_8_96
 //!     ├── Pairwise_8_96
@@ -30,49 +30,49 @@ mod l256;
 mod l512;
 mod l768;
 
-pub use l256::HalfKaHmMergedL256;
-pub use l512::HalfKaHmMergedL512;
-pub use l768::HalfKaHmMergedL768;
-pub use l1024::HalfKaHmMergedL1024;
+pub use l256::HalfKaSplitL256;
+pub use l512::HalfKaSplitL512;
+pub use l768::HalfKaSplitL768;
+pub use l1024::HalfKaSplitL1024;
 
 use crate::nnue::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
-use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
+use crate::nnue::network_halfka_split::AccumulatorStackHalfKaSplit;
 use crate::nnue::spec::{Activation, ArchitectureSpec};
 use crate::position::Position;
 use crate::types::Value;
 
-/// HalfKA_hm 特徴量セットのネットワーク（第2階層）
+/// HalfKaSplit 特徴量セットのネットワーク（第2階層）
 ///
 /// L1 サイズごとにバリアントを持つ。
 /// L2/L3/活性化の追加で変更不要（L1 enum 内に閉じる）。
-pub enum HalfKaHmMergedNetwork {
-    L256(HalfKaHmMergedL256),
-    L512(HalfKaHmMergedL512),
-    L768(HalfKaHmMergedL768),
-    L1024(HalfKaHmMergedL1024),
+pub enum HalfKaSplitNetwork {
+    L256(HalfKaSplitL256),
+    L512(HalfKaSplitL512),
+    L768(HalfKaSplitL768),
+    L1024(HalfKaSplitL1024),
 }
 
-impl HalfKaHmMergedNetwork {
+impl HalfKaSplitNetwork {
     /// 評価値を計算
     #[inline(always)]
-    pub fn evaluate(&self, pos: &Position, stack: &HalfKaHmMergedStack) -> Value {
+    pub fn evaluate(&self, pos: &Position, stack: &HalfKaSplitStack) -> Value {
         match (self, stack) {
-            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => net.evaluate(pos, st),
-            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => net.evaluate(pos, st),
-            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => net.evaluate(pos, st),
-            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => net.evaluate(pos, st),
+            (Self::L256(net), HalfKaSplitStack::L256(st)) => net.evaluate(pos, st),
+            (Self::L512(net), HalfKaSplitStack::L512(st)) => net.evaluate(pos, st),
+            (Self::L768(net), HalfKaSplitStack::L768(st)) => net.evaluate(pos, st),
+            (Self::L1024(net), HalfKaSplitStack::L1024(st)) => net.evaluate(pos, st),
             _ => unreachable!("L1 mismatch: network={}, stack={}", self.l1_size(), stack.l1_size()),
         }
     }
 
     /// Accumulator をフル再計算
     #[inline(always)]
-    pub fn refresh_accumulator(&self, pos: &Position, stack: &mut HalfKaHmMergedStack) {
+    pub fn refresh_accumulator(&self, pos: &Position, stack: &mut HalfKaSplitStack) {
         match (self, stack) {
-            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => net.refresh_accumulator(pos, st),
-            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => net.refresh_accumulator(pos, st),
-            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => net.refresh_accumulator(pos, st),
-            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => net.refresh_accumulator(pos, st),
+            (Self::L256(net), HalfKaSplitStack::L256(st)) => net.refresh_accumulator(pos, st),
+            (Self::L512(net), HalfKaSplitStack::L512(st)) => net.refresh_accumulator(pos, st),
+            (Self::L768(net), HalfKaSplitStack::L768(st)) => net.refresh_accumulator(pos, st),
+            (Self::L1024(net), HalfKaSplitStack::L1024(st)) => net.refresh_accumulator(pos, st),
             _ => unreachable!("L1 mismatch"),
         }
     }
@@ -82,20 +82,20 @@ impl HalfKaHmMergedNetwork {
     pub fn refresh_accumulator_with_cache(
         &self,
         pos: &Position,
-        stack: &mut HalfKaHmMergedStack,
+        stack: &mut HalfKaSplitStack,
         cache: &mut AccumulatorCacheGeneric,
     ) {
         match (self, stack) {
-            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => {
+            (Self::L256(net), HalfKaSplitStack::L256(st)) => {
                 net.refresh_accumulator_with_cache(pos, st, cache)
             }
-            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => {
+            (Self::L512(net), HalfKaSplitStack::L512(st)) => {
                 net.refresh_accumulator_with_cache(pos, st, cache)
             }
-            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => {
+            (Self::L768(net), HalfKaSplitStack::L768(st)) => {
                 net.refresh_accumulator_with_cache(pos, st, cache)
             }
-            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => {
+            (Self::L1024(net), HalfKaSplitStack::L1024(st)) => {
                 net.refresh_accumulator_with_cache(pos, st, cache)
             }
             _ => unreachable!("L1 mismatch"),
@@ -108,20 +108,20 @@ impl HalfKaHmMergedNetwork {
         &self,
         pos: &Position,
         dirty: &DirtyPiece,
-        stack: &mut HalfKaHmMergedStack,
+        stack: &mut HalfKaSplitStack,
         source_idx: usize,
     ) {
         match (self, stack) {
-            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => {
+            (Self::L256(net), HalfKaSplitStack::L256(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
-            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => {
+            (Self::L512(net), HalfKaSplitStack::L512(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
-            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => {
+            (Self::L768(net), HalfKaSplitStack::L768(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
-            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => {
+            (Self::L1024(net), HalfKaSplitStack::L1024(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
             _ => unreachable!("L1 mismatch"),
@@ -134,21 +134,21 @@ impl HalfKaHmMergedNetwork {
         &self,
         pos: &Position,
         dirty: &DirtyPiece,
-        stack: &mut HalfKaHmMergedStack,
+        stack: &mut HalfKaSplitStack,
         source_idx: usize,
         cache: &mut AccumulatorCacheGeneric,
     ) {
         match (self, stack) {
-            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => {
+            (Self::L256(net), HalfKaSplitStack::L256(st)) => {
                 net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
             }
-            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => {
+            (Self::L512(net), HalfKaSplitStack::L512(st)) => {
                 net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
             }
-            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => {
+            (Self::L768(net), HalfKaSplitStack::L768(st)) => {
                 net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
             }
-            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => {
+            (Self::L1024(net), HalfKaSplitStack::L1024(st)) => {
                 net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
             }
             _ => unreachable!("L1 mismatch"),
@@ -160,20 +160,20 @@ impl HalfKaHmMergedNetwork {
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut HalfKaHmMergedStack,
+        stack: &mut HalfKaSplitStack,
         source_idx: usize,
     ) -> bool {
         match (self, stack) {
-            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => {
+            (Self::L256(net), HalfKaSplitStack::L256(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
-            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => {
+            (Self::L512(net), HalfKaSplitStack::L512(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
-            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => {
+            (Self::L768(net), HalfKaSplitStack::L768(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
-            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => {
+            (Self::L1024(net), HalfKaSplitStack::L1024(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
             _ => unreachable!("L1 mismatch"),
@@ -200,7 +200,7 @@ impl HalfKaHmMergedNetwork {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "HalfKA_hm L1={l1} network missing L2/L3 dimensions in header. \
+                    "HalfKaSplit L1={l1} network missing L2/L3 dimensions in header. \
                      This is an old bullet-shogi format that is no longer supported. \
                      Please re-export the model with a newer version of bullet-shogi."
                 ),
@@ -209,24 +209,24 @@ impl HalfKaHmMergedNetwork {
 
         match l1 {
             256 => {
-                let net = HalfKaHmMergedL256::read(reader, l2, l3, activation)?;
+                let net = HalfKaSplitL256::read(reader, l2, l3, activation)?;
                 Ok(Self::L256(net))
             }
             512 => {
-                let net = HalfKaHmMergedL512::read(reader, l2, l3, activation)?;
+                let net = HalfKaSplitL512::read(reader, l2, l3, activation)?;
                 Ok(Self::L512(net))
             }
             768 => {
-                let net = HalfKaHmMergedL768::read(reader, l2, l3, activation)?;
+                let net = HalfKaSplitL768::read(reader, l2, l3, activation)?;
                 Ok(Self::L768(net))
             }
             1024 => {
-                let net = HalfKaHmMergedL1024::read(reader, l2, l3, activation)?;
+                let net = HalfKaSplitL1024::read(reader, l2, l3, activation)?;
                 Ok(Self::L1024(net))
             }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Unsupported HalfKA_hm L1: {l1}"),
+                format!("Unsupported HalfKaSplit L1: {l1}"),
             )),
         }
     }
@@ -264,36 +264,34 @@ impl HalfKaHmMergedNetwork {
     /// サポートするアーキテクチャ一覧
     pub fn supported_specs() -> Vec<ArchitectureSpec> {
         let mut specs = Vec::new();
-        specs.extend_from_slice(HalfKaHmMergedL256::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKaHmMergedL512::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKaHmMergedL768::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKaHmMergedL1024::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaSplitL256::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaSplitL512::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaSplitL768::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaSplitL1024::SUPPORTED_SPECS);
         specs
     }
 }
 
-/// HalfKA_hm Accumulator スタック（L1 のみで決まる）
+/// HalfKaSplit Accumulator スタック（L1 のみで決まる）
 ///
 /// L2/L3/活性化の追加で変更不要。
-pub enum HalfKaHmMergedStack {
-    L256(AccumulatorStackHalfKA_hm<256>),
-    L512(AccumulatorStackHalfKA_hm<512>),
-    L768(AccumulatorStackHalfKA_hm<768>),
-    L1024(AccumulatorStackHalfKA_hm<1024>),
+pub enum HalfKaSplitStack {
+    L256(AccumulatorStackHalfKaSplit<256>),
+    L512(AccumulatorStackHalfKaSplit<512>),
+    L768(AccumulatorStackHalfKaSplit<768>),
+    L1024(AccumulatorStackHalfKaSplit<1024>),
 }
 
-impl HalfKaHmMergedStack {
+impl HalfKaSplitStack {
     /// ネットワークに対応するスタックを生成
     ///
     /// バリアントマッチを使用し、新しい L1 追加時にコンパイル時に漏れ検知。
-    pub fn from_network(net: &HalfKaHmMergedNetwork) -> Self {
+    pub fn from_network(net: &HalfKaSplitNetwork) -> Self {
         match net {
-            HalfKaHmMergedNetwork::L256(_) => Self::L256(AccumulatorStackHalfKA_hm::<256>::new()),
-            HalfKaHmMergedNetwork::L512(_) => Self::L512(AccumulatorStackHalfKA_hm::<512>::new()),
-            HalfKaHmMergedNetwork::L768(_) => Self::L768(AccumulatorStackHalfKA_hm::<768>::new()),
-            HalfKaHmMergedNetwork::L1024(_) => {
-                Self::L1024(AccumulatorStackHalfKA_hm::<1024>::new())
-            }
+            HalfKaSplitNetwork::L256(_) => Self::L256(AccumulatorStackHalfKaSplit::<256>::new()),
+            HalfKaSplitNetwork::L512(_) => Self::L512(AccumulatorStackHalfKaSplit::<512>::new()),
+            HalfKaSplitNetwork::L768(_) => Self::L768(AccumulatorStackHalfKaSplit::<768>::new()),
+            HalfKaSplitNetwork::L1024(_) => Self::L1024(AccumulatorStackHalfKaSplit::<1024>::new()),
         }
     }
 
@@ -402,9 +400,9 @@ impl HalfKaHmMergedStack {
     }
 }
 
-impl Default for HalfKaHmMergedStack {
+impl Default for HalfKaSplitStack {
     fn default() -> Self {
-        Self::L512(AccumulatorStackHalfKA_hm::<512>::new())
+        Self::L512(AccumulatorStackHalfKaSplit::<512>::new())
     }
 }
 
@@ -416,32 +414,32 @@ mod tests {
     #[test]
     fn test_halfka_stack_from_network_l1_size() {
         // L256 ネットワークを仮定したスタック
-        let stack = HalfKaHmMergedStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
+        let stack = HalfKaSplitStack::L256(AccumulatorStackHalfKaSplit::<256>::new());
         assert_eq!(stack.l1_size(), 256);
 
-        let stack = HalfKaHmMergedStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
+        let stack = HalfKaSplitStack::L512(AccumulatorStackHalfKaSplit::<512>::new());
         assert_eq!(stack.l1_size(), 512);
 
-        let stack = HalfKaHmMergedStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
+        let stack = HalfKaSplitStack::L1024(AccumulatorStackHalfKaSplit::<1024>::new());
         assert_eq!(stack.l1_size(), 1024);
     }
 
     #[test]
     fn test_supported_specs_combined() {
-        let specs = HalfKaHmMergedNetwork::supported_specs();
+        let specs = HalfKaSplitNetwork::supported_specs();
         // (256: 1, 512: 3, 768: 1, 1024: 3) × 3 活性化 (CReLU/SCReLU/Pairwise)
         assert_eq!(specs.len(), 24);
 
-        // 全て HalfKA_hm
+        // 全て HalfKaSplit
         for spec in &specs {
-            assert_eq!(spec.feature_set, FeatureSet::HalfKaHmMerged);
+            assert_eq!(spec.feature_set, FeatureSet::HalfKaSplit);
         }
     }
 
     /// push/pop の対称性と状態の一貫性テスト（L256）
     #[test]
     fn test_push_pop_index_consistency_l256() {
-        let mut stack = HalfKaHmMergedStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
+        let mut stack = HalfKaSplitStack::L256(AccumulatorStackHalfKaSplit::<256>::new());
         let dirty = DirtyPiece::default();
 
         stack.reset();
@@ -463,7 +461,7 @@ mod tests {
     /// push/pop の対称性と状態の一貫性テスト（L512）
     #[test]
     fn test_push_pop_index_consistency_l512() {
-        let mut stack = HalfKaHmMergedStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
+        let mut stack = HalfKaSplitStack::L512(AccumulatorStackHalfKaSplit::<512>::new());
         let dirty = DirtyPiece::default();
 
         stack.reset();
@@ -479,7 +477,7 @@ mod tests {
     /// push/pop の対称性と状態の一貫性テスト（L1024）
     #[test]
     fn test_push_pop_index_consistency_l1024() {
-        let mut stack = HalfKaHmMergedStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
+        let mut stack = HalfKaSplitStack::L1024(AccumulatorStackHalfKaSplit::<1024>::new());
         let dirty = DirtyPiece::default();
 
         stack.reset();
@@ -495,7 +493,7 @@ mod tests {
     /// deep push/pop テスト（探索木の深さをシミュレート）
     #[test]
     fn test_deep_push_pop() {
-        let mut stack = HalfKaHmMergedStack::default();
+        let mut stack = HalfKaSplitStack::default();
         let dirty = DirtyPiece::default();
 
         stack.reset();
@@ -518,8 +516,8 @@ mod tests {
     /// アーキテクチャの仕様一覧の一貫性テスト
     #[test]
     fn test_architecture_spec_consistency() {
-        for spec in HalfKaHmMergedNetwork::supported_specs() {
-            assert_eq!(spec.feature_set, FeatureSet::HalfKaHmMerged);
+        for spec in HalfKaSplitNetwork::supported_specs() {
+            assert_eq!(spec.feature_set, FeatureSet::HalfKaSplit);
             assert!(spec.l1 == 256 || spec.l1 == 512 || spec.l1 == 768 || spec.l1 == 1024);
             assert!(spec.l2 > 0 && spec.l2 <= 128);
             assert!(spec.l3 > 0 && spec.l3 <= 128);

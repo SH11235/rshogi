@@ -32,8 +32,8 @@ use std::sync::Arc;
 use super::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
 use super::accumulator_layer_stacks::LayerStacksAccCache;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
-use super::halfka::HalfKaSplitStack;
-use super::halfka_hm::HalfKaHmMergedStack;
+use super::halfka_hm_merged::HalfKaHmMergedStack;
+use super::halfka_split::HalfKaSplitStack;
 use super::halfkp::HalfKPStack;
 use super::network::NNUENetwork;
 use super::spec::ArchitectureSpec;
@@ -62,7 +62,7 @@ pub struct NNUEEvaluator {
     /// LayerStacks アーキテクチャ以外では None
     acc_cache: Option<LayerStacksAccCache>,
     /// 非LayerStacks用 AccumulatorCaches（Finny Tables）
-    /// HalfKP/HalfKA/HalfKA_hm で使用。LayerStacks では None
+    /// HalfKP/HalfKaSplit/HalfKaHmMerged で使用。LayerStacks では None
     acc_cache_generic: Option<AccumulatorCacheGeneric>,
 }
 
@@ -217,10 +217,10 @@ impl NNUEEvaluator {
     #[inline(always)]
     pub fn evaluate_only(&self, pos: &Position) -> Value {
         match (&*self.net, &self.stack) {
-            (NNUENetwork::HalfKA(net), AccumulatorStackVariant::HalfKA(st)) => {
+            (NNUENetwork::HalfKaSplit(net), AccumulatorStackVariant::HalfKaSplit(st)) => {
                 net.evaluate(pos, st)
             }
-            (NNUENetwork::HalfKA_hm(net), AccumulatorStackVariant::HalfKA_hm(st)) => {
+            (NNUENetwork::HalfKaHmMerged(net), AccumulatorStackVariant::HalfKaHmMerged(st)) => {
                 net.evaluate(pos, st)
             }
             (NNUENetwork::HalfKaMerged(net), AccumulatorStackVariant::HalfKaMerged(st)) => {
@@ -270,14 +270,14 @@ impl NNUEEvaluator {
     /// アキュムレータをフル再計算
     fn refresh_accumulator(&mut self, pos: &Position) {
         match (&*self.net, &mut self.stack) {
-            (NNUENetwork::HalfKA(net), AccumulatorStackVariant::HalfKA(st)) => {
+            (NNUENetwork::HalfKaSplit(net), AccumulatorStackVariant::HalfKaSplit(st)) => {
                 if let Some(cache) = &mut self.acc_cache_generic {
                     net.refresh_accumulator_with_cache(pos, st, cache);
                 } else {
                     net.refresh_accumulator(pos, st);
                 }
             }
-            (NNUENetwork::HalfKA_hm(net), AccumulatorStackVariant::HalfKA_hm(st)) => {
+            (NNUENetwork::HalfKaHmMerged(net), AccumulatorStackVariant::HalfKaHmMerged(st)) => {
                 if let Some(cache) = &mut self.acc_cache_generic {
                     net.refresh_accumulator_with_cache(pos, st, cache);
                 } else {
@@ -315,10 +315,10 @@ impl NNUEEvaluator {
     /// アキュムレータが計算済みか確認し、必要に応じて更新
     fn ensure_accumulator_computed(&mut self, pos: &Position) {
         match (&*self.net, &mut self.stack) {
-            (NNUENetwork::HalfKA(net), AccumulatorStackVariant::HalfKA(st)) => {
+            (NNUENetwork::HalfKaSplit(net), AccumulatorStackVariant::HalfKaSplit(st)) => {
                 Self::update_halfka_accumulator(net, pos, st, &mut self.acc_cache_generic);
             }
-            (NNUENetwork::HalfKA_hm(net), AccumulatorStackVariant::HalfKA_hm(st)) => {
+            (NNUENetwork::HalfKaHmMerged(net), AccumulatorStackVariant::HalfKaHmMerged(st)) => {
                 Self::update_halfka_hm_accumulator(net, pos, st, &mut self.acc_cache_generic);
             }
             (NNUENetwork::HalfKaMerged(net), AccumulatorStackVariant::HalfKaMerged(st)) => {
@@ -337,10 +337,10 @@ impl NNUEEvaluator {
         }
     }
 
-    /// HalfKA アキュムレータを更新
+    /// HalfKaSplit アキュムレータを更新
     #[inline]
     fn update_halfka_accumulator(
-        net: &super::halfka::HalfKaSplitNetwork,
+        net: &super::halfka_split::HalfKaSplitNetwork,
         pos: &Position,
         stack: &mut HalfKaSplitStack,
         cache: &mut Option<AccumulatorCacheGeneric>,
@@ -377,10 +377,10 @@ impl NNUEEvaluator {
         }
     }
 
-    /// HalfKA_hm アキュムレータを更新
+    /// HalfKaHmMerged アキュムレータを更新
     #[inline]
     fn update_halfka_hm_accumulator(
-        net: &super::halfka_hm::HalfKaHmMergedNetwork,
+        net: &super::halfka_hm_merged::HalfKaHmMergedNetwork,
         pos: &Position,
         stack: &mut HalfKaHmMergedStack,
         cache: &mut Option<AccumulatorCacheGeneric>,
@@ -582,30 +582,30 @@ mod tests {
     /// AccumulatorStackVariant::matches_network のテスト
     #[test]
     fn test_stack_variant_type_checking() {
-        use crate::nnue::network_halfka::AccumulatorStackHalfKA;
-        use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
+        use crate::nnue::network_halfka_hm_merged::AccumulatorStackHalfKaHmMerged;
+        use crate::nnue::network_halfka_split::AccumulatorStackHalfKaSplit;
         use crate::nnue::network_halfkp::AccumulatorStackHalfKP;
 
-        // HalfKA スタックの各 L1 サイズ
-        let halfka_nm_l256 = AccumulatorStackVariant::HalfKA(HalfKaSplitStack::L256(
-            AccumulatorStackHalfKA::<256>::new(),
+        // HalfKaSplit スタックの各 L1 サイズ
+        let halfka_nm_l256 = AccumulatorStackVariant::HalfKaSplit(HalfKaSplitStack::L256(
+            AccumulatorStackHalfKaSplit::<256>::new(),
         ));
-        let halfka_nm_l512 = AccumulatorStackVariant::HalfKA(HalfKaSplitStack::L512(
-            AccumulatorStackHalfKA::<512>::new(),
+        let halfka_nm_l512 = AccumulatorStackVariant::HalfKaSplit(HalfKaSplitStack::L512(
+            AccumulatorStackHalfKaSplit::<512>::new(),
         ));
-        let halfka_nm_l1024 = AccumulatorStackVariant::HalfKA(HalfKaSplitStack::L1024(
-            AccumulatorStackHalfKA::<1024>::new(),
+        let halfka_nm_l1024 = AccumulatorStackVariant::HalfKaSplit(HalfKaSplitStack::L1024(
+            AccumulatorStackHalfKaSplit::<1024>::new(),
         ));
 
-        // HalfKA_hm スタックの各 L1 サイズ
-        let halfka_hm_l256 = AccumulatorStackVariant::HalfKA_hm(HalfKaHmMergedStack::L256(
-            AccumulatorStackHalfKA_hm::<256>::new(),
+        // HalfKaHmMerged スタックの各 L1 サイズ
+        let halfka_hm_l256 = AccumulatorStackVariant::HalfKaHmMerged(HalfKaHmMergedStack::L256(
+            AccumulatorStackHalfKaHmMerged::<256>::new(),
         ));
-        let halfka_hm_l512 = AccumulatorStackVariant::HalfKA_hm(HalfKaHmMergedStack::L512(
-            AccumulatorStackHalfKA_hm::<512>::new(),
+        let halfka_hm_l512 = AccumulatorStackVariant::HalfKaHmMerged(HalfKaHmMergedStack::L512(
+            AccumulatorStackHalfKaHmMerged::<512>::new(),
         ));
-        let halfka_hm_l1024 = AccumulatorStackVariant::HalfKA_hm(HalfKaHmMergedStack::L1024(
-            AccumulatorStackHalfKA_hm::<1024>::new(),
+        let halfka_hm_l1024 = AccumulatorStackVariant::HalfKaHmMerged(HalfKaHmMergedStack::L1024(
+            AccumulatorStackHalfKaHmMerged::<1024>::new(),
         ));
 
         // HalfKP スタックの各 L1 サイズ
@@ -617,12 +617,12 @@ mod tests {
         ));
 
         // 型の確認
-        assert!(matches!(halfka_nm_l256, AccumulatorStackVariant::HalfKA(_)));
-        assert!(matches!(halfka_nm_l512, AccumulatorStackVariant::HalfKA(_)));
-        assert!(matches!(halfka_nm_l1024, AccumulatorStackVariant::HalfKA(_)));
-        assert!(matches!(halfka_hm_l256, AccumulatorStackVariant::HalfKA_hm(_)));
-        assert!(matches!(halfka_hm_l512, AccumulatorStackVariant::HalfKA_hm(_)));
-        assert!(matches!(halfka_hm_l1024, AccumulatorStackVariant::HalfKA_hm(_)));
+        assert!(matches!(halfka_nm_l256, AccumulatorStackVariant::HalfKaSplit(_)));
+        assert!(matches!(halfka_nm_l512, AccumulatorStackVariant::HalfKaSplit(_)));
+        assert!(matches!(halfka_nm_l1024, AccumulatorStackVariant::HalfKaSplit(_)));
+        assert!(matches!(halfka_hm_l256, AccumulatorStackVariant::HalfKaHmMerged(_)));
+        assert!(matches!(halfka_hm_l512, AccumulatorStackVariant::HalfKaHmMerged(_)));
+        assert!(matches!(halfka_hm_l1024, AccumulatorStackVariant::HalfKaHmMerged(_)));
         assert!(matches!(halfkp_l256, AccumulatorStackVariant::HalfKP(_)));
         assert!(matches!(halfkp_l512, AccumulatorStackVariant::HalfKP(_)));
 
@@ -645,15 +645,15 @@ mod tests {
     /// 実行され、LayerStacks variant を実質テストしない silent no-op 状態だった。
     #[test]
     fn test_all_variants_push_pop_consistency() {
-        use crate::nnue::network_halfka::AccumulatorStackHalfKA;
-        use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
+        use crate::nnue::network_halfka_hm_merged::AccumulatorStackHalfKaHmMerged;
+        use crate::nnue::network_halfka_split::AccumulatorStackHalfKaSplit;
         use crate::nnue::network_halfkp::AccumulatorStackHalfKP;
 
         let dirty = DirtyPiece::default();
 
-        // HalfKA L512
-        let mut stack = AccumulatorStackVariant::HalfKA(HalfKaSplitStack::L512(
-            AccumulatorStackHalfKA::<512>::new(),
+        // HalfKaSplit L512
+        let mut stack = AccumulatorStackVariant::HalfKaSplit(HalfKaSplitStack::L512(
+            AccumulatorStackHalfKaSplit::<512>::new(),
         ));
         stack.reset();
         stack.push(dirty);
@@ -662,9 +662,9 @@ mod tests {
         stack.pop();
         // パニックしなければ成功
 
-        // HalfKA_hm L512
-        let mut stack = AccumulatorStackVariant::HalfKA_hm(HalfKaHmMergedStack::L512(
-            AccumulatorStackHalfKA_hm::<512>::new(),
+        // HalfKaHmMerged L512
+        let mut stack = AccumulatorStackVariant::HalfKaHmMerged(HalfKaHmMergedStack::L512(
+            AccumulatorStackHalfKaHmMerged::<512>::new(),
         ));
         stack.reset();
         stack.push(dirty);
@@ -778,15 +778,15 @@ mod tests {
     /// network.rs の NNUENetwork enum が全アーキテクチャをカバーしていることの確認
     #[test]
     fn test_network_enum_coverage() {
-        use crate::nnue::halfka::HalfKaSplitNetwork;
-        use crate::nnue::halfka_hm::HalfKaHmMergedNetwork;
+        use crate::nnue::halfka_hm_merged::HalfKaHmMergedNetwork;
+        use crate::nnue::halfka_split::HalfKaSplitNetwork;
         use crate::nnue::halfkp::HalfKPNetwork;
 
-        // HalfKA サポートアーキテクチャ数
+        // HalfKaSplit サポートアーキテクチャ数
         let halfka_specs = HalfKaSplitNetwork::supported_specs();
         assert_eq!(halfka_specs.len(), 24); // (256:1 + 512:3 + 768:1 + 1024:3) × 3 活性化
 
-        // HalfKA_hm サポートアーキテクチャ数
+        // HalfKaHmMerged サポートアーキテクチャ数
         let halfka_hm_specs = HalfKaHmMergedNetwork::supported_specs();
         assert_eq!(halfka_hm_specs.len(), 24); // (256:1 + 512:3 + 768:1 + 1024:3) × 3 活性化
 
@@ -799,7 +799,7 @@ mod tests {
             assert_eq!(
                 spec.feature_set,
                 crate::nnue::spec::FeatureSet::HalfKaSplit,
-                "HalfKA spec has wrong feature_set: {spec:?}"
+                "HalfKaSplit spec has wrong feature_set: {spec:?}"
             );
         }
 
@@ -807,7 +807,7 @@ mod tests {
             assert_eq!(
                 spec.feature_set,
                 crate::nnue::spec::FeatureSet::HalfKaHmMerged,
-                "HalfKA_hm spec has wrong feature_set: {spec:?}"
+                "HalfKaHmMerged spec has wrong feature_set: {spec:?}"
             );
         }
 

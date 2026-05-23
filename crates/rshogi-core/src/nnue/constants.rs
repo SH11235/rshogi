@@ -53,10 +53,10 @@ pub const NUM_REFRESH_TRIGGERS: usize = 1;
 pub const HALFKP_DIMENSIONS: usize = 81 * super::bona_piece::FE_END;
 
 // =============================================================================
-// HalfKA_hm^ アーキテクチャ用定数
+// HalfKaHmMerged^ アーキテクチャ用定数
 // =============================================================================
 
-/// HalfKA_hm^のバージョン（nnue-pytorch互換）
+/// HalfKaHmMerged^のバージョン（nnue-pytorch互換）
 pub const NNUE_VERSION_HALFKA: u32 = 0x7AF32F20;
 
 /// キングバケット数（Half-Mirror: 9段 × 5筋）
@@ -65,10 +65,10 @@ pub const KING_BUCKETS: usize = 45;
 /// 駒入力数（DISTINGUISH_GOLDS有効時のe_king = 1629）
 pub const PIECE_INPUTS_HALFKA: usize = 1629;
 
-/// HalfKA_hm^のベース入力数（キングバケット × 駒入力）
+/// HalfKaHmMerged^のベース入力数（キングバケット × 駒入力）
 pub const BASE_INPUTS_HALFKA: usize = KING_BUCKETS * PIECE_INPUTS_HALFKA; // 73,305
 
-/// HalfKA_hm^の総入力次元数
+/// HalfKaHmMerged^の総入力次元数
 ///
 /// nnue-pytorch標準のcoalesce済みモデル専用。
 /// Factorizationの重みはBase側に畳み込み済みのため、推論時はBaseのみで計算する。
@@ -78,22 +78,22 @@ pub const BASE_INPUTS_HALFKA: usize = KING_BUCKETS * PIECE_INPUTS_HALFKA; // 73,
 /// nnue-pytorch serialize.py でエクスポートすると自動的にcoalesceされる。
 pub const HALFKA_HM_DIMENSIONS: usize = BASE_INPUTS_HALFKA; // 73,305
 
-/// HalfKA_hm^のFactorization込み入力次元数（未coalesce）
+/// HalfKaHmMerged^のFactorization込み入力次元数（未coalesce）
 ///
 /// 訓練時のみ使用。推論用モデルは serialize.py で自動的に coalesce される。
 /// この定数は互換性エラー検出のために定義。
 pub const HALFKA_HM_DIMENSIONS_FACTORIZED: usize = BASE_INPUTS_HALFKA + PIECE_INPUTS_HALFKA; // 74,934
 
 // =============================================================================
-// HalfKA（非ミラー）アーキテクチャ用定数（Hisui 仕様）
+// HalfKaSplit（非ミラー）アーキテクチャ用定数（Hisui 仕様）
 // =============================================================================
 
-/// HalfKA（非ミラー）の入力平面数
+/// HalfKaSplit（非ミラー）の入力平面数
 ///
 /// Hisui の学習設定: 1548 + 81 * 2 = 1710
 pub const HALFKA_PLANES: usize = 1548 + 81 * 2;
 
-/// HalfKA（非ミラー）の総入力次元数
+/// HalfKaSplit（非ミラー）の総入力次元数
 ///
 /// 81（玉位置）× 1710（入力平面）
 pub const HALFKA_DIMENSIONS: usize = HALFKA_PLANES * 81; // 138,510

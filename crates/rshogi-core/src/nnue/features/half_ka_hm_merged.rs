@@ -1,4 +1,4 @@
-//! HalfKA_hm^ 特徴量
+//! HalfKaHmMerged^ 特徴量
 //!
 //! Half-Mirror King + All pieces (coalesced)
 //!
@@ -15,20 +15,22 @@ use super::Feature;
 use super::TriggerEvent;
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use crate::nnue::bona_piece::BonaPiece;
-use crate::nnue::bona_piece_halfka_hm::{halfka_index, is_hm_mirror, king_bucket, pack_bonapiece};
+use crate::nnue::bona_piece_halfka_hm_merged::{
+    halfka_index, is_hm_mirror, king_bucket, pack_bonapiece,
+};
 use crate::nnue::constants::HALFKA_HM_DIMENSIONS;
 use crate::nnue::piece_list::PieceNumber;
 use crate::position::Position;
 use crate::types::{Color, Square};
 
-/// HalfKA_hm^ 特徴量
+/// HalfKaHmMerged^ 特徴量
 ///
 /// キングバケット（Half-Mirror）とFactorizationを組み合わせた特徴量。
 /// 自玉が動いた場合にアキュムレータの全計算が必要になる。
 #[allow(non_camel_case_types)]
-pub struct HalfKA_hm;
+pub struct HalfKaHmMerged;
 
-impl Feature for HalfKA_hm {
+impl Feature for HalfKaHmMerged {
     /// 特徴量の次元数: BASE (45×1629) = 73,305
     const DIMENSIONS: usize = HALFKA_HM_DIMENSIONS;
 
@@ -125,20 +127,20 @@ mod tests {
     #[test]
     fn test_halfka_hm_dimensions() {
         // coalesce済みモデル: BASE (45×1629) = 73,305
-        assert_eq!(HalfKA_hm::DIMENSIONS, 73_305);
-        assert_eq!(HalfKA_hm::DIMENSIONS, BASE_INPUTS_HALFKA);
+        assert_eq!(HalfKaHmMerged::DIMENSIONS, 73_305);
+        assert_eq!(HalfKaHmMerged::DIMENSIONS, BASE_INPUTS_HALFKA);
     }
 
     #[test]
     fn test_halfka_hm_max_active() {
         // coalesce済みモデルではFactorization無し
         // 合法局面では盤上駒 + 手駒 + 両王 = 40駒
-        assert_eq!(HalfKA_hm::MAX_ACTIVE, 40);
+        assert_eq!(HalfKaHmMerged::MAX_ACTIVE, 40);
     }
 
     #[test]
     fn test_halfka_hm_refresh_trigger() {
-        assert_eq!(HalfKA_hm::REFRESH_TRIGGER, TriggerEvent::FriendKingMoved);
+        assert_eq!(HalfKaHmMerged::REFRESH_TRIGGER, TriggerEvent::FriendKingMoved);
     }
 
     #[test]
@@ -148,7 +150,7 @@ mod tests {
             .unwrap();
         let mut active = IndexList::new();
 
-        HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
+        HalfKaHmMerged::append_active_indices(&pos, Color::Black, &mut active);
 
         // 初期局面: 盤上38駒 + 両方の王2 = 40
         // coalesce済みモデルではFactorization無し
@@ -175,7 +177,7 @@ mod tests {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
 
-        HalfKA_hm::append_changed_indices(
+        HalfKaHmMerged::append_changed_indices(
             &dirty_piece,
             Color::Black,
             king_sq,
@@ -216,7 +218,7 @@ mod tests {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
 
-        HalfKA_hm::append_changed_indices(
+        HalfKaHmMerged::append_changed_indices(
             &dirty_piece,
             Color::Black,
             king_sq,
@@ -249,7 +251,7 @@ mod tests {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
 
-        HalfKA_hm::append_changed_indices(
+        HalfKaHmMerged::append_changed_indices(
             &dirty_piece,
             Color::Black,
             king_sq,
@@ -272,7 +274,7 @@ mod tests {
             .unwrap();
 
         let mut active = IndexList::new();
-        HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
+        HalfKaHmMerged::append_active_indices(&pos, Color::Black, &mut active);
 
         // PieceList の全40エントリ（盤上36 + 手駒4）が特徴量として追加される
         assert_eq!(active.len(), 40, "手駒の枚数分すべての特徴量が追加されるべき");
@@ -287,7 +289,7 @@ mod tests {
             .unwrap();
 
         let mut active = IndexList::new();
-        HalfKA_hm::append_active_indices(&pos, Color::Black, &mut active);
+        HalfKaHmMerged::append_active_indices(&pos, Color::Black, &mut active);
 
         // PieceList の全40エントリ（盤上32 + 手駒8）が特徴量として追加される
         assert_eq!(active.len(), 40, "手駒の枚数分すべての特徴量が追加されるべき");
@@ -310,7 +312,7 @@ mod tests {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
 
-        HalfKA_hm::append_changed_indices(
+        HalfKaHmMerged::append_changed_indices(
             &dirty_piece,
             Color::Black,
             king_sq,
@@ -341,7 +343,7 @@ mod tests {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
 
-        HalfKA_hm::append_changed_indices(
+        HalfKaHmMerged::append_changed_indices(
             &dirty_piece,
             Color::Black,
             king_sq,
@@ -373,7 +375,7 @@ mod tests {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
 
-        HalfKA_hm::append_changed_indices(
+        HalfKaHmMerged::append_changed_indices(
             &dirty_piece,
             Color::Black,
             king_sq,
@@ -390,7 +392,7 @@ mod tests {
     #[test]
     fn test_append_changed_indices_enemy_king_move() {
         // 相手の王の移動: 5一→4一
-        // HalfKA_hmでは相手の王も特徴量に含めるため、差分更新で処理される
+        // HalfKaHmMergedでは相手の王も特徴量に含めるため、差分更新で処理される
         let sq_51 = Square::new(File::File5, Rank::Rank1);
         let sq_41 = Square::new(File::File4, Rank::Rank1);
         let king_sq = Square::new(File::File5, Rank::Rank9); // 自玉は5九
@@ -408,7 +410,7 @@ mod tests {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
 
-        HalfKA_hm::append_changed_indices(
+        HalfKaHmMerged::append_changed_indices(
             &dirty_piece,
             Color::Black,
             king_sq,

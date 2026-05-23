@@ -5,8 +5,8 @@
 //! # 設計
 //!
 //! **「Accumulator は L1 だけで決まる」** を活用し、4バリアントに集約:
-//! - HalfKA(HalfKaSplitStack): L256/L512/L1024 を内包
-//! - HalfKA_hm(HalfKaHmMergedStack): L256/L512/L1024 を内包
+//! - HalfKaSplit(HalfKaSplitStack): L256/L512/L1024 を内包
+//! - HalfKaHmMerged(HalfKaHmMergedStack): L256/L512/L1024 を内包
 //! - HalfKP(HalfKPStack): L256/L512 を内包
 //! - LayerStacks: 1536次元 + 9バケット
 //!
@@ -14,10 +14,10 @@
 
 use super::accumulator::DirtyPiece;
 use super::accumulator_layer_stacks::LayerStacksAccStack;
-use super::halfka::HalfKaSplitStack;
-use super::halfka_hm::HalfKaHmMergedStack;
+use super::halfka_hm_merged::HalfKaHmMergedStack;
 use super::halfka_hm_split::HalfKaHmSplitStack;
 use super::halfka_merged::HalfKaMergedStack;
+use super::halfka_split::HalfKaSplitStack;
 use super::halfkp::HalfKPStack;
 use super::network::NNUENetwork;
 
@@ -29,16 +29,16 @@ use super::network::NNUENetwork;
 /// # 4バリアント構造
 ///
 /// L1 サイズのみで分類し、L2/L3/活性化は内部で処理:
-/// - **HalfKA**: L256/L512/L1024 を HalfKaSplitStack で管理
-/// - **HalfKA_hm**: L256/L512/L1024 を HalfKaHmMergedStack で管理
+/// - **HalfKaSplit**: L256/L512/L1024 を HalfKaSplitStack で管理
+/// - **HalfKaHmMerged**: L256/L512/L1024 を HalfKaHmMergedStack で管理
 /// - **HalfKP**: L256/L512 を HalfKPStack で管理
 /// - **LayerStacks**: 1536次元 + 9バケット
 #[allow(non_camel_case_types)]
 pub enum AccumulatorStackVariant {
-    /// HalfKA 特徴量セット（L256/L512/L1024）
-    HalfKA(HalfKaSplitStack),
-    /// HalfKA_hm 特徴量セット（L256/L512/L1024）
-    HalfKA_hm(HalfKaHmMergedStack),
+    /// HalfKaSplit 特徴量セット（L256/L512/L1024）
+    HalfKaSplit(HalfKaSplitStack),
+    /// HalfKaHmMerged 特徴量セット（L256/L512/L1024）
+    HalfKaHmMerged(HalfKaHmMergedStack),
     /// HalfKaMerged 特徴量セット（L256/L512/L1024）
     HalfKaMerged(HalfKaMergedStack),
     /// HalfKaHmSplit 特徴量セット（L256/L512/L1024）
@@ -55,8 +55,10 @@ impl AccumulatorStackVariant {
     /// 指定されたネットワークのアーキテクチャに対応するスタックバリアントを生成する。
     pub fn from_network(network: &NNUENetwork) -> Self {
         match network {
-            NNUENetwork::HalfKA(net) => Self::HalfKA(HalfKaSplitStack::from_network(net)),
-            NNUENetwork::HalfKA_hm(net) => Self::HalfKA_hm(HalfKaHmMergedStack::from_network(net)),
+            NNUENetwork::HalfKaSplit(net) => Self::HalfKaSplit(HalfKaSplitStack::from_network(net)),
+            NNUENetwork::HalfKaHmMerged(net) => {
+                Self::HalfKaHmMerged(HalfKaHmMergedStack::from_network(net))
+            }
             NNUENetwork::HalfKaMerged(net) => {
                 Self::HalfKaMerged(HalfKaMergedStack::from_network(net))
             }
@@ -80,8 +82,10 @@ impl AccumulatorStackVariant {
     /// 一致しない場合は `from_network` で再作成が必要。
     pub fn matches_network(&self, network: &NNUENetwork) -> bool {
         match (self, network) {
-            (Self::HalfKA(stack), NNUENetwork::HalfKA(net)) => stack.l1_size() == net.l1_size(),
-            (Self::HalfKA_hm(stack), NNUENetwork::HalfKA_hm(net)) => {
+            (Self::HalfKaSplit(stack), NNUENetwork::HalfKaSplit(net)) => {
+                stack.l1_size() == net.l1_size()
+            }
+            (Self::HalfKaHmMerged(stack), NNUENetwork::HalfKaHmMerged(net)) => {
                 stack.l1_size() == net.l1_size()
             }
             (Self::HalfKaMerged(stack), NNUENetwork::HalfKaMerged(net)) => {
@@ -107,8 +111,8 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn reset(&mut self) {
         match self {
-            Self::HalfKA(stack) => stack.reset(),
-            Self::HalfKA_hm(stack) => stack.reset(),
+            Self::HalfKaSplit(stack) => stack.reset(),
+            Self::HalfKaHmMerged(stack) => stack.reset(),
             Self::HalfKaMerged(stack) => stack.reset(),
             Self::HalfKaHmSplit(stack) => stack.reset(),
             Self::HalfKP(stack) => stack.reset(),
@@ -120,8 +124,8 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
         match self {
-            Self::HalfKA(stack) => stack.push(dirty_piece),
-            Self::HalfKA_hm(stack) => stack.push(dirty_piece),
+            Self::HalfKaSplit(stack) => stack.push(dirty_piece),
+            Self::HalfKaHmMerged(stack) => stack.push(dirty_piece),
             Self::HalfKaMerged(stack) => stack.push(dirty_piece),
             Self::HalfKaHmSplit(stack) => stack.push(dirty_piece),
             Self::HalfKP(stack) => stack.push(dirty_piece),
@@ -136,8 +140,8 @@ impl AccumulatorStackVariant {
     #[inline]
     pub fn pop(&mut self) {
         match self {
-            Self::HalfKA(stack) => stack.pop(),
-            Self::HalfKA_hm(stack) => stack.pop(),
+            Self::HalfKaSplit(stack) => stack.pop(),
+            Self::HalfKaHmMerged(stack) => stack.pop(),
             Self::HalfKaMerged(stack) => stack.pop(),
             Self::HalfKaHmSplit(stack) => stack.pop(),
             Self::HalfKP(stack) => stack.pop(),
@@ -168,8 +172,8 @@ mod tests {
         assert!(stack.is_halfkp());
         assert!(matches!(stack, AccumulatorStackVariant::HalfKP(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::LayerStacks(_)));
-        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA(_)));
-        assert!(!matches!(stack, AccumulatorStackVariant::HalfKA_hm(_)));
+        assert!(!matches!(stack, AccumulatorStackVariant::HalfKaSplit(_)));
+        assert!(!matches!(stack, AccumulatorStackVariant::HalfKaHmMerged(_)));
     }
 
     #[test]
@@ -259,11 +263,11 @@ mod tests {
     /// 各 L1 サイズでスタックが正しく作成されることを確認
     #[test]
     fn test_halfka_hm_stack_l1_sizes() {
-        use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
+        use crate::nnue::network_halfka_hm_merged::AccumulatorStackHalfKaHmMerged;
 
-        let l256_stack = HalfKaHmMergedStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
-        let l512_stack = HalfKaHmMergedStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
-        let l1024_stack = HalfKaHmMergedStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
+        let l256_stack = HalfKaHmMergedStack::L256(AccumulatorStackHalfKaHmMerged::<256>::new());
+        let l512_stack = HalfKaHmMergedStack::L512(AccumulatorStackHalfKaHmMerged::<512>::new());
+        let l1024_stack = HalfKaHmMergedStack::L1024(AccumulatorStackHalfKaHmMerged::<1024>::new());
 
         assert_eq!(l256_stack.l1_size(), 256);
         assert_eq!(l512_stack.l1_size(), 512);

@@ -172,11 +172,11 @@ mod tests {
     }
 
     /// パリティ検証: SplitPlane の pack は「マス反転のみ（fold なし）」。
-    /// bp < E_KING(1629) の範囲では fold が発火しないため、検証済み HalfKA_hm の
+    /// bp < E_KING(1629) の範囲では fold が発火しないため、検証済み HalfKaHmMerged の
     /// pack（反転 + fold）と一致するはず。
     #[test]
     fn test_pack_parity_with_halfka_hm_below_eking() {
-        use crate::nnue::bona_piece_halfka_hm::pack_bonapiece as hm_pack;
+        use crate::nnue::bona_piece_halfka_hm_merged::pack_bonapiece as hm_pack;
         for v in 0..1629u16 {
             let bp = BonaPiece::new(v);
             for &m in &[false, true] {
@@ -186,7 +186,7 @@ mod tests {
     }
 
     /// パリティ検証: SplitPlane は敵玉を fold しない。bp >= E_KING の玉 plane では
-    /// HalfKA_hm（fold あり）と異なり、値が 81 引かれない。
+    /// HalfKaHmMerged（fold あり）と異なり、値が 81 引かれない。
     #[test]
     fn test_pack_no_fold_above_eking() {
         // E_KING(1629) は piece_index=(1629-90)/81=19, sq=0。mirror 無しでそのまま。
@@ -195,10 +195,10 @@ mod tests {
         assert_eq!(pack_bonapiece(BonaPiece::new(1709), false), 1709);
     }
 
-    /// king_bucket は検証済み HalfKA_hm と同一ロジック（45 バケット Half-Mirror）。
+    /// king_bucket は検証済み HalfKaHmMerged と同一ロジック（45 バケット Half-Mirror）。
     #[test]
     fn test_king_bucket_parity_with_halfka_hm() {
-        use crate::nnue::bona_piece_halfka_hm::king_bucket as hm_kb;
+        use crate::nnue::bona_piece_halfka_hm_merged::king_bucket as hm_kb;
         for f in [
             File::File1,
             File::File3,

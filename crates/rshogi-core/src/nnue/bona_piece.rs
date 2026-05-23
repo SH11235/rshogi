@@ -196,7 +196,7 @@ impl ExtBonaPiece {
     /// 盤上駒から ExtBonaPiece を生成
     ///
     /// Piece と Square から、先手/後手両視点の BonaPiece を計算する。
-    /// King の場合は `bona_piece_halfka_hm` の定数を使用して King 用 BonaPiece を生成。
+    /// King の場合は `bona_piece_halfka_hm_merged` の定数を使用して King 用 BonaPiece を生成。
     #[inline]
     pub fn from_board(piece: Piece, sq: Square) -> Self {
         if piece.is_none() {
@@ -206,8 +206,8 @@ impl ExtBonaPiece {
         let color = piece.color();
 
         if pt == PieceType::King {
-            // King 用 BonaPiece: HalfKA_hm の F_KING / E_KING を使用
-            use super::bona_piece_halfka_hm::{E_KING, F_KING};
+            // King 用 BonaPiece: HalfKaHmMerged の F_KING / E_KING を使用
+            use super::bona_piece_halfka_hm_merged::{E_KING, F_KING};
             let (fb, fw) = if color == Color::Black {
                 // 先手玉: fb = F_KING + sq, fw = E_KING + sq.inverse()
                 (

@@ -23,8 +23,8 @@
 ///     enum HalfKaHmMergedL512,
 ///     feature_set HalfKaHmMerged,
 ///     l1 512,
-///     acc AccumulatorHalfKA_hm<512>,
-///     stack AccumulatorStackHalfKA_hm<512>,
+///     acc AccumulatorHalfKaHmMerged<512>,
+///     stack AccumulatorStackHalfKaHmMerged<512>,
 ///
 ///     variants {
 ///         (8,  96, CReLU,        "CReLU")    => CReLU_8_96     : HalfKaHmMerged512CReLU,
@@ -215,5 +215,5 @@ pub use define_l1_variants;
 
 #[cfg(test)]
 mod tests {
-    // マクロのコンパイルテストは halfka/l*.rs で実施
+    // マクロのコンパイルテストは halfka_split/l*.rs で実施
 }

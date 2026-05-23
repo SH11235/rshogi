@@ -1,40 +1,40 @@
-//! HalfKA L1=1024 のアーキテクチャバリアント
-// NOTE: 公式表記(HalfKA)をenum名に保持するため、非CamelCaseを許可する。
+//! HalfKaSplit L1=1024 のアーキテクチャバリアント
+// NOTE: 公式表記(HalfKaSplit)をenum名に保持するため、非CamelCaseを許可する。
 #![allow(non_camel_case_types)]
 
 use crate::nnue::accumulator::DirtyPiece;
-use crate::nnue::network_halfka::AccumulatorStackHalfKA;
+use crate::nnue::network_halfka_split::AccumulatorStackHalfKaSplit;
 use crate::nnue::spec::{Activation, ArchitectureSpec, FeatureSet};
 use crate::position::Position;
 use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
 use crate::nnue::aliases::{
-    HalfKA1024_8_32CReLU, HalfKA1024_8_32Pairwise, HalfKA1024_8_32SCReLU, HalfKA1024_8_64CReLU,
-    HalfKA1024_8_64Pairwise, HalfKA1024_8_64SCReLU, HalfKA1024CReLU, HalfKA1024Pairwise,
-    HalfKA1024SCReLU,
+    HalfKaSplit1024_8_32CReLU, HalfKaSplit1024_8_32Pairwise, HalfKaSplit1024_8_32SCReLU,
+    HalfKaSplit1024_8_64CReLU, HalfKaSplit1024_8_64Pairwise, HalfKaSplit1024_8_64SCReLU,
+    HalfKaSplit1024CReLU, HalfKaSplit1024Pairwise, HalfKaSplit1024SCReLU,
 };
 
 crate::define_l1_variants!(
-    enum HalfKA_L1024,
+    enum HalfKaSplitL1024,
     feature_set HalfKaSplit,
     l1 1024,
-    acc crate::nnue::network_halfka::AccumulatorHalfKA<1024>,
-    stack AccumulatorStackHalfKA<1024>,
+    acc crate::nnue::network_halfka_split::AccumulatorHalfKaSplit<1024>,
+    stack AccumulatorStackHalfKaSplit<1024>,
 
     variants {
         // L2=8, L3=64 バリアント
-        (8,  64, CReLU)         => CReLU8x64     : HalfKA1024_8_64CReLU,
-        (8,  64, SCReLU)        => SCReLU8x64    : HalfKA1024_8_64SCReLU,
-        (8,  64, PairwiseCReLU) => Pairwise8x64  : HalfKA1024_8_64Pairwise,
+        (8,  64, CReLU)         => CReLU8x64     : HalfKaSplit1024_8_64CReLU,
+        (8,  64, SCReLU)        => SCReLU8x64    : HalfKaSplit1024_8_64SCReLU,
+        (8,  64, PairwiseCReLU) => Pairwise8x64  : HalfKaSplit1024_8_64Pairwise,
         // L2=8, L3=96 バリアント
-        (8,  96, CReLU)         => CReLU8x96     : HalfKA1024CReLU,
-        (8,  96, SCReLU)        => SCReLU8x96    : HalfKA1024SCReLU,
-        (8,  96, PairwiseCReLU) => Pairwise8x96  : HalfKA1024Pairwise,
+        (8,  96, CReLU)         => CReLU8x96     : HalfKaSplit1024CReLU,
+        (8,  96, SCReLU)        => SCReLU8x96    : HalfKaSplit1024SCReLU,
+        (8,  96, PairwiseCReLU) => Pairwise8x96  : HalfKaSplit1024Pairwise,
         // L2=8, L3=32 バリアント
-        (8,  32, CReLU)         => CReLU8x32     : HalfKA1024_8_32CReLU,
-        (8,  32, SCReLU)        => SCReLU8x32    : HalfKA1024_8_32SCReLU,
-        (8,  32, PairwiseCReLU) => Pairwise8x32  : HalfKA1024_8_32Pairwise,
+        (8,  32, CReLU)         => CReLU8x32     : HalfKaSplit1024_8_32CReLU,
+        (8,  32, SCReLU)        => SCReLU8x32    : HalfKaSplit1024_8_32SCReLU,
+        (8,  32, PairwiseCReLU) => Pairwise8x32  : HalfKaSplit1024_8_32Pairwise,
     }
 );
 
@@ -44,10 +44,10 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKA_L1024::SUPPORTED_SPECS.len(), 9);
+        assert_eq!(HalfKaSplitL1024::SUPPORTED_SPECS.len(), 9);
 
         // 8-64 CReLU
-        let spec = &HalfKA_L1024::SUPPORTED_SPECS[0];
+        let spec = &HalfKaSplitL1024::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKaSplit);
         assert_eq!(spec.l1, 1024);
         assert_eq!(spec.l2, 8);
@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn test_l1_size() {
-        for spec in HalfKA_L1024::SUPPORTED_SPECS {
+        for spec in HalfKaSplitL1024::SUPPORTED_SPECS {
             assert_eq!(spec.l1, 1024);
         }
     }
@@ -65,7 +65,7 @@ mod tests {
     /// マクロ生成: architecture_name() の命名規則テスト
     #[test]
     fn test_architecture_name_format() {
-        for spec in HalfKA_L1024::SUPPORTED_SPECS {
+        for spec in HalfKaSplitL1024::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
                 name.starts_with("HalfKaSplit-1024-"),
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn test_supported_activations() {
         let activations: Vec<_> =
-            HalfKA_L1024::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+            HalfKaSplitL1024::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
         assert!(activations.contains(&Activation::CReLU));
         assert!(activations.contains(&Activation::SCReLU));
         assert!(activations.contains(&Activation::PairwiseCReLU));
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn test_multiple_l2_l3_combinations() {
         let combinations: Vec<_> =
-            HalfKA_L1024::SUPPORTED_SPECS.iter().map(|s| (s.l2, s.l3)).collect();
+            HalfKaSplitL1024::SUPPORTED_SPECS.iter().map(|s| (s.l2, s.l3)).collect();
 
         assert!(combinations.contains(&(8, 64)), "Should support L2=8, L3=64");
         assert!(combinations.contains(&(8, 96)), "Should support L2=8, L3=96");

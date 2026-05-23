@@ -1,6 +1,6 @@
-//! BonaPiece for HalfKA_hm^ - Half-Mirror & Factorization版
+//! BonaPiece for HalfKaHmMerged^ - Half-Mirror & Factorization版
 //!
-//! HalfKA_hm^アーキテクチャ用のBonaPiece定義。
+//! HalfKaHmMerged^アーキテクチャ用のBonaPiece定義。
 //! nnue-pytorchの実装に準拠し、以下の特徴を持つ:
 //! - キングバケット: 45バケット (Half-Mirror: 9段 × 5筋)
 //! - Factorization: 駒のみの特徴量を追加
@@ -62,29 +62,29 @@ pub const PIECE_INPUTS: usize = E_KING; // 1629
 //   e_king: 1629..1710
 
 // =============================================================================
-// BonaPieceHalfKA_hm (HalfKA_hm 用BonaPieceのラッパー)
+// BonaPieceHalfKaHmMerged (HalfKaHmMerged 用BonaPieceのラッパー)
 // =============================================================================
 use super::bona_piece::BonaPiece;
 
-/// HalfKA_hm^用のBonaPiece
+/// HalfKaHmMerged^用のBonaPiece
 ///
 /// 内部的にはHalfKPと同じBonaPieceを使用するが、
 /// pack_bonapiece関数で適切に変換する。
 #[allow(non_camel_case_types)]
-pub type BonaPieceHalfKA_hm = BonaPiece;
+pub type BonaPieceHalfKaHmMerged = BonaPiece;
 
 // =============================================================================
-// pack_bonapiece - HalfKA_hm^用パッキング
+// pack_bonapiece - HalfKaHmMerged^用パッキング
 // =============================================================================
 
-/// BonaPieceをHalfKA_hm^用にパック
+/// BonaPieceをHalfKaHmMerged^用にパック
 ///
 /// C++のpack_bonapiece関数を移植:
 /// 1. 手駒（<90）: そのまま
 /// 2. 盤上駒（>=90）: hm_mirrorが必要な場合はマス目を反転
 /// 3. 敵王（>=e_king）: -81してf_king平面に揃える
 #[inline]
-pub fn pack_bonapiece(bp: BonaPieceHalfKA_hm, hm_mirror: bool) -> usize {
+pub fn pack_bonapiece(bp: BonaPieceHalfKaHmMerged, hm_mirror: bool) -> usize {
     let mut pp = bp.value() as usize;
 
     // 手駒はミラー不要
@@ -164,7 +164,7 @@ pub fn is_hm_mirror(ksq: Square, perspective: Color) -> bool {
     sq.file() as usize >= 5
 }
 
-/// HalfKA_hm^の特徴インデックスを計算
+/// HalfKaHmMerged^の特徴インデックスを計算
 ///
 /// C++実装:
 /// ```cpp

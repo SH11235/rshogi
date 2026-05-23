@@ -1459,23 +1459,23 @@ mod tests {
 
     #[test]
     fn test_detect_activation_from_arch() {
-        assert_eq!(detect_activation_from_arch("Features=HalfKA_hm[73305->512x2]"), "CReLU");
+        assert_eq!(detect_activation_from_arch("Features=HalfKaHmMerged[73305->512x2]"), "CReLU");
         assert_eq!(
-            detect_activation_from_arch("Features=HalfKA_hm[73305->512x2]-SCReLU"),
+            detect_activation_from_arch("Features=HalfKaHmMerged[73305->512x2]-SCReLU"),
             "SCReLU"
         );
         assert_eq!(
-            detect_activation_from_arch("Features=HalfKA_hm[73305->512/2x2]-Pairwise"),
+            detect_activation_from_arch("Features=HalfKaHmMerged[73305->512/2x2]-Pairwise"),
             "PairwiseCReLU"
         );
         // "PairwiseCReLU" の識別子は "-Pairwise" なので nnue-pytorch の "-PairwiseCReLU" も拾える
         assert_eq!(
-            detect_activation_from_arch("Features=HalfKA_hm[73305->512/2x2]-PairwiseCReLU"),
+            detect_activation_from_arch("Features=HalfKaHmMerged[73305->512/2x2]-PairwiseCReLU"),
             "PairwiseCReLU"
         );
         // "-SCReLU-Pairwise" は未対応なので誤って SCReLU や Pairwise と判定しない
         assert_eq!(
-            detect_activation_from_arch("Features=HalfKA_hm[73305->512/2x2]-SCReLU-Pairwise"),
+            detect_activation_from_arch("Features=HalfKaHmMerged[73305->512/2x2]-SCReLU-Pairwise"),
             "SCReLU-Pairwise"
         );
     }
@@ -1483,7 +1483,7 @@ mod tests {
     #[test]
     fn test_detect_activation_nested_screlu() {
         // bucket 無し SCReLU: `(SqrClippedReLU[` トークンのみ、`(ClippedReLU[` は無い
-        let arch = "Features=HalfKA_hm(Friend)[73305->1024x2],Network=AffineTransform\
+        let arch = "Features=HalfKaHmMerged(Friend)[73305->1024x2],Network=AffineTransform\
                     [1<-64](SqrClippedReLU[64](AffineTransform[64<-8](SqrClippedReLU[8](\
                     AffineTransformSparseInput[8<-2048](InputSlice[2048(0:2048)]))))),fv_scale=14";
         assert_eq!(detect_activation_from_arch(arch), "SCReLU");
@@ -1492,7 +1492,7 @@ mod tests {
     #[test]
     fn test_detect_activation_nested_crelu() {
         // bucket 無し CReLU: `(ClippedReLU[` トークンのみ
-        let arch = "Features=HalfKA_hm(Friend)[73305->1024x2],Network=AffineTransform\
+        let arch = "Features=HalfKaHmMerged(Friend)[73305->1024x2],Network=AffineTransform\
                     [1<-64](ClippedReLU[64](AffineTransform[64<-8](ClippedReLU[8](\
                     AffineTransformSparseInput[8<-2048](InputSlice[2048(0:2048)]))))),fv_scale=14";
         assert_eq!(detect_activation_from_arch(arch), "CReLU");
@@ -1502,7 +1502,7 @@ mod tests {
     fn test_detect_activation_nested_layerstacks_mixed() {
         // LayerStacks (bucketed) は SqrClippedReLU と ClippedReLU が混在 →
         // CReLU を返す（LayerStacks 経路では戻り値は使われないため既存挙動を保持）
-        let arch = "Features=HalfKA_hm(Friend)[73305->1536x2],Network=AffineTransform\
+        let arch = "Features=HalfKaHmMerged(Friend)[73305->1536x2],Network=AffineTransform\
                     [1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](\
                     AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28";
         assert_eq!(detect_activation_from_arch(arch), "CReLU");
@@ -1602,8 +1602,8 @@ mod tests {
 
     #[test]
     fn test_detect_activation() {
-        assert_eq!(detect_activation_from_arch("HalfKA_hm^512x2-8-96"), "CReLU");
-        assert_eq!(detect_activation_from_arch("HalfKA_hm^512x2-8-96-SCReLU"), "SCReLU");
+        assert_eq!(detect_activation_from_arch("HalfKaHmMerged^512x2-8-96"), "CReLU");
+        assert_eq!(detect_activation_from_arch("HalfKaHmMerged^512x2-8-96-SCReLU"), "SCReLU");
         assert_eq!(detect_activation_from_arch("HalfKP256x2-32-32-PairwiseCReLU"), "PairwiseCReLU");
     }
 

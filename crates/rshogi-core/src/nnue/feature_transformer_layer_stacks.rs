@@ -1,6 +1,6 @@
 //! FeatureTransformerLayerStacks - LayerStacksアーキテクチャ用のL1次元Feature Transformer
 //!
-//! HalfKA_hm^ 特徴量（キングバケット×BonaPiece）から、
+//! HalfKaHmMerged^ 特徴量（キングバケット×BonaPiece）から、
 //! 片側 L1 次元×両視点の中間表現を生成する。
 
 use super::accumulator::{Aligned, AlignedBox};
@@ -9,11 +9,11 @@ use super::accumulator_layer_stacks::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, AccumulatorStackLayerStacks,
 };
 use super::bona_piece::BonaPiece;
-use super::bona_piece_halfka_hm::{halfka_index, is_hm_mirror, king_bucket, pack_bonapiece};
+use super::bona_piece_halfka_hm_merged::{halfka_index, is_hm_mirror, king_bucket, pack_bonapiece};
 use super::constants::HALFKA_HM_DIMENSIONS;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
-use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKaHmMergedFeatureSet};
+use super::features::{Feature, FeatureSet, HalfKaHmMerged, HalfKaHmMergedFeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 use super::stats::{count_refresh, count_update};
 #[cfg(feature = "nnue-threat")]
@@ -37,7 +37,7 @@ fn append_changed_indices(
     removed: &mut IndexList<MAX_CHANGED_FEATURES>,
     added: &mut IndexList<MAX_CHANGED_FEATURES>,
 ) {
-    <HalfKA_hm as Feature>::append_changed_indices(
+    <HalfKaHmMerged as Feature>::append_changed_indices(
         dirty_piece,
         perspective,
         king_sq,
@@ -52,7 +52,7 @@ fn append_active_indices(
     perspective: Color,
     active: &mut IndexList<MAX_ACTIVE_FEATURES>,
 ) {
-    <HalfKA_hm as Feature>::append_active_indices(pos, perspective, active);
+    <HalfKaHmMerged as Feature>::append_active_indices(pos, perspective, active);
 }
 
 #[inline]
@@ -781,9 +781,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
 
             // Threat 更新
             //
-            // Threat は HalfKA とは独立な index 空間を持ち、king_sq に依存するのは
+            // Threat は HalfKaSplit とは独立な index 空間を持ち、king_sq に依存するのは
             // `is_hm_mirror` のみ。玉移動があっても HM mirror 境界を跨がなければ
-            // 差分更新で正しく計算できる。HalfKA 用の `reset = king_moved` を流用
+            // 差分更新で正しく計算できる。HalfKaSplit 用の `reset = king_moved` を流用
             // せず、Threat 専用の `needs_threat_refresh` を使う。
             #[cfg(feature = "nnue-threat")]
             if self.has_threat {
@@ -931,7 +931,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
 
             // Threat 更新（キャッシュ版も非キャッシュ版と同じロジック）
             //
-            // HalfKA 用の `reset = king_moved` ではなく、Threat 専用の
+            // HalfKaSplit 用の `reset = king_moved` ではなく、Threat 専用の
             // `needs_threat_refresh` (is_hm_mirror 境界跨ぎのみ true) を使う。
             // 詳細: `threat_features::needs_threat_refresh` doc 参照。
             #[cfg(feature = "nnue-threat")]

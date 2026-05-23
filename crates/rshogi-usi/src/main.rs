@@ -326,7 +326,7 @@ impl UsiEngine {
         }
         // progress8kpabs bucket mode で LS_PROGRESS_COEFF 未指定の場合はエラー。
         // bucket mode は LayerStacks ネットワーク専用。Simple系アーキ
-        // (HalfKP/HalfKA/HalfKA_hm/HalfKaMerged/HalfKaHmSplit) や Material 評価では
+        // (HalfKP/HalfKaSplit/HalfKaHmMerged/HalfKaMerged/HalfKaHmSplit) や Material 評価では
         // 使われないため、ロード済みネットワークが LayerStacks のときだけ検査する。
         {
             use rshogi_core::nnue::{

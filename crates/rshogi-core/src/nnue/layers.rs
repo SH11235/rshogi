@@ -945,8 +945,8 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 /// | アーキテクチャ | L1 | NPS | 備考 |
 /// |---------------|-----|-----|------|
 /// | HalfKP 256x2-32-32 | 256 | ~703 kNPS | 本構造体を使用 |
-/// | HalfKA_hm 512x2-8-96 | 512 | ~512 kNPS | 動的版使用 |
-/// | HalfKA_hm 1024x2-8-96 | 1024 | ~406 kNPS | 動的版使用 |
+/// | HalfKaHmMerged 512x2-8-96 | 512 | ~512 kNPS | 動的版使用 |
+/// | HalfKaHmMerged 1024x2-8-96 | 1024 | ~406 kNPS | 動的版使用 |
 pub struct ClippedReLU<const DIM: usize>;
 
 impl<const DIM: usize> ClippedReLU<DIM> {

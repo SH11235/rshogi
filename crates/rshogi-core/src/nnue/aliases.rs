@@ -1,10 +1,10 @@
 //! 型エイリアスの集約（追加時はここだけ更新）
 //!
 //! 新しいアーキテクチャ追加時に、型エイリアスをここに追加するだけで
-//! prelude.rs 経由で halfka/*.rs や halfkp/*.rs から利用可能になる。
+//! prelude.rs 経由で halfka_split/*.rs や halfkp/*.rs から利用可能になる。
 
-// HalfKA_hm 型エイリアス
-pub use crate::nnue::network_halfka_hm::{
+// HalfKaHmMerged 型エイリアス
+pub use crate::nnue::network_halfka_hm_merged::{
     // L1=256, L2=32, L3=32
     HalfKaHmMerged256CReLU,
     HalfKaHmMerged256Pairwise,
@@ -39,40 +39,40 @@ pub use crate::nnue::network_halfka_hm::{
     HalfKaHmMerged1024SCReLU,
 };
 
-// HalfKA 型エイリアス
-pub use crate::nnue::network_halfka::{
+// HalfKaSplit 型エイリアス
+pub use crate::nnue::network_halfka_split::{
     // L1=256, L2=32, L3=32
-    HalfKA256CReLU,
-    HalfKA256Pairwise,
-    HalfKA256SCReLU,
+    HalfKaSplit256CReLU,
+    HalfKaSplit256Pairwise,
+    HalfKaSplit256SCReLU,
     // L1=512, L2=8, L3=64
-    HalfKA512_8_64CReLU,
-    HalfKA512_8_64Pairwise,
-    HalfKA512_8_64SCReLU,
+    HalfKaSplit512_8_64CReLU,
+    HalfKaSplit512_8_64Pairwise,
+    HalfKaSplit512_8_64SCReLU,
     // L1=512, L2=32, L3=32
-    HalfKA512_32_32CReLU,
-    HalfKA512_32_32Pairwise,
-    HalfKA512_32_32SCReLU,
+    HalfKaSplit512_32_32CReLU,
+    HalfKaSplit512_32_32Pairwise,
+    HalfKaSplit512_32_32SCReLU,
     // L1=512, L2=8, L3=96
-    HalfKA512CReLU,
-    HalfKA512Pairwise,
-    HalfKA512SCReLU,
+    HalfKaSplit512CReLU,
+    HalfKaSplit512Pairwise,
+    HalfKaSplit512SCReLU,
     // L1=768, L2=16, L3=64
-    HalfKA768CReLU,
-    HalfKA768Pairwise,
-    HalfKA768SCReLU,
+    HalfKaSplit768CReLU,
+    HalfKaSplit768Pairwise,
+    HalfKaSplit768SCReLU,
     // L1=1024, L2=8, L3=32
-    HalfKA1024_8_32CReLU,
-    HalfKA1024_8_32Pairwise,
-    HalfKA1024_8_32SCReLU,
+    HalfKaSplit1024_8_32CReLU,
+    HalfKaSplit1024_8_32Pairwise,
+    HalfKaSplit1024_8_32SCReLU,
     // L1=1024, L2=8, L3=64
-    HalfKA1024_8_64CReLU,
-    HalfKA1024_8_64Pairwise,
-    HalfKA1024_8_64SCReLU,
+    HalfKaSplit1024_8_64CReLU,
+    HalfKaSplit1024_8_64Pairwise,
+    HalfKaSplit1024_8_64SCReLU,
     // L1=1024, L2=8, L3=96
-    HalfKA1024CReLU,
-    HalfKA1024Pairwise,
-    HalfKA1024SCReLU,
+    HalfKaSplit1024CReLU,
+    HalfKaSplit1024Pairwise,
+    HalfKaSplit1024SCReLU,
 };
 
 // HalfKaMerged 型エイリアス

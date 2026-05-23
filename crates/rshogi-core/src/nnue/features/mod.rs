@@ -3,16 +3,16 @@
 //! YaneuraOu の FeatureSet/Feature 構造に準拠した特徴量定義。
 //! 将来の sfnn 対応を見据えた拡張可能な設計。
 
-mod half_ka;
-mod half_ka_hm;
+mod half_ka_hm_merged;
 mod half_ka_hm_split;
 mod half_ka_merged;
+mod half_ka_split;
 mod half_kp;
 
-pub use half_ka::HalfKA;
-pub use half_ka_hm::HalfKA_hm;
+pub use half_ka_hm_merged::HalfKaHmMerged;
 pub use half_ka_hm_split::HalfKaHmSplit;
 pub use half_ka_merged::HalfKaMerged;
+pub use half_ka_split::HalfKaSplit;
 pub use half_kp::HalfKP;
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
@@ -145,17 +145,17 @@ impl FeatureSet for HalfKPFeatureSet {
 }
 
 // =============================================================================
-// HalfKaHmMergedFeatureSet - HalfKA_hm^ NNUE 用の FeatureSet
+// HalfKaHmMergedFeatureSet - HalfKaHmMerged^ NNUE 用の FeatureSet
 // =============================================================================
 
-/// HalfKA_hm^ 用の FeatureSet（nnue-pytorch互換）
+/// HalfKaHmMerged^ 用の FeatureSet（nnue-pytorch互換）
 ///
 /// Half-Mirror King + All pieces with Factorization
 pub struct HalfKaHmMergedFeatureSet;
 
 impl FeatureSet for HalfKaHmMergedFeatureSet {
-    const DIMENSIONS: usize = HalfKA_hm::DIMENSIONS;
-    const MAX_ACTIVE: usize = HalfKA_hm::MAX_ACTIVE;
+    const DIMENSIONS: usize = HalfKaHmMerged::DIMENSIONS;
+    const MAX_ACTIVE: usize = HalfKaHmMerged::MAX_ACTIVE;
     const REFRESH_TRIGGERS: &'static [TriggerEvent] = &[TriggerEvent::FriendKingMoved];
 
     #[inline]
@@ -164,7 +164,7 @@ impl FeatureSet for HalfKaHmMergedFeatureSet {
         perspective: Color,
     ) -> IndexList<MAX_ACTIVE_FEATURES> {
         let mut active = IndexList::new();
-        HalfKA_hm::append_active_indices(pos, perspective, &mut active);
+        HalfKaHmMerged::append_active_indices(pos, perspective, &mut active);
         active
     }
 
@@ -176,7 +176,7 @@ impl FeatureSet for HalfKaHmMergedFeatureSet {
     ) -> ChangedFeatures {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
-        HalfKA_hm::append_changed_indices(
+        HalfKaHmMerged::append_changed_indices(
             dirty_piece,
             perspective,
             king_sq,
@@ -193,15 +193,15 @@ impl FeatureSet for HalfKaHmMergedFeatureSet {
 }
 
 // =============================================================================
-// HalfKaSplitFeatureSet - HalfKA NNUE 用の FeatureSet
+// HalfKaSplitFeatureSet - HalfKaSplit NNUE 用の FeatureSet
 // =============================================================================
 
-/// HalfKA 用の FeatureSet（non-mirror）
+/// HalfKaSplit 用の FeatureSet（non-mirror）
 pub struct HalfKaSplitFeatureSet;
 
 impl FeatureSet for HalfKaSplitFeatureSet {
-    const DIMENSIONS: usize = HalfKA::DIMENSIONS;
-    const MAX_ACTIVE: usize = HalfKA::MAX_ACTIVE;
+    const DIMENSIONS: usize = HalfKaSplit::DIMENSIONS;
+    const MAX_ACTIVE: usize = HalfKaSplit::MAX_ACTIVE;
     const REFRESH_TRIGGERS: &'static [TriggerEvent] = &[TriggerEvent::FriendKingMoved];
 
     #[inline]
@@ -210,7 +210,7 @@ impl FeatureSet for HalfKaSplitFeatureSet {
         perspective: Color,
     ) -> IndexList<MAX_ACTIVE_FEATURES> {
         let mut active = IndexList::new();
-        HalfKA::append_active_indices(pos, perspective, &mut active);
+        HalfKaSplit::append_active_indices(pos, perspective, &mut active);
         active
     }
 
@@ -222,7 +222,13 @@ impl FeatureSet for HalfKaSplitFeatureSet {
     ) -> ChangedFeatures {
         let mut removed = IndexList::new();
         let mut added = IndexList::new();
-        HalfKA::append_changed_indices(dirty_piece, perspective, king_sq, &mut removed, &mut added);
+        HalfKaSplit::append_changed_indices(
+            dirty_piece,
+            perspective,
+            king_sq,
+            &mut removed,
+            &mut added,
+        );
         (removed, added)
     }
 

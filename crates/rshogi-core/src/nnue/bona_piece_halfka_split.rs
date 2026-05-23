@@ -1,12 +1,12 @@
-//! BonaPiece for HalfKA - Non-mirror版
+//! BonaPiece for HalfKaSplit - Non-mirror版
 //!
-//! HalfKAアーキテクチャ用のBonaPiece定義。
+//! HalfKaSplitアーキテクチャ用のBonaPiece定義。
 //! nnue-pytorchの実装に準拠し、以下の特徴を持つ:
 //! - キング位置: 81マス直指定（ミラーなし）
 //! - 入力平面数: 1710（1548 + 81 * 2）
 //!
-//! 注意: HalfKA^（factorized）は学習時のみの分解。
-//! 推論時はHalfKAのBase特徴量のみで計算する。
+//! 注意: HalfKaSplit^（factorized）は学習時のみの分解。
+//! 推論時はHalfKaSplitのBase特徴量のみで計算する。
 
 use crate::types::{Color, Square};
 
@@ -14,15 +14,15 @@ use crate::types::{Color, Square};
 // 定数定義（YaneuraOu evaluate.h準拠、DISTINGUISH_GOLDS無効）
 // =============================================================================
 
-// HalfKAのBonaPieceレイアウト参照用の定数（ロジックでは直接使わない）
+// HalfKaSplitのBonaPieceレイアウト参照用の定数（ロジックでは直接使わない）
 // const FE_HAND_END: usize = 90;
 // const FE_OLD_END: usize = 1548; // e_dragon + 81 = 1467 + 81
 
-/// HalfKAの入力平面数（1548 + 81 * 2 = 1710）
+/// HalfKaSplitの入力平面数（1548 + 81 * 2 = 1710）
 pub const PIECE_INPUTS: usize = 1548 + 81 * 2;
 
 // =============================================================================
-// HalfKAインデックス計算（Non-mirror）
+// HalfKaSplitインデックス計算（Non-mirror）
 // =============================================================================
 
 /// King位置を81マス直指定で取得（視点に応じて反転）
@@ -35,7 +35,7 @@ pub fn king_index(ksq: Square, perspective: Color) -> usize {
     }
 }
 
-/// HalfKAの特徴インデックスを計算
+/// HalfKaSplitの特徴インデックスを計算
 ///
 /// C++実装:
 /// ```cpp

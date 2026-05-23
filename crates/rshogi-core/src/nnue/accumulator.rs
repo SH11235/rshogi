@@ -22,7 +22,7 @@ use std::ops::{Deref, DerefMut};
 
 /// 差分更新での最大変化特徴量数
 /// HalfKP: 駒3 + 手駒2 = 5
-/// HalfKA_hm^（coalesced）: 各変化=最大5
+/// HalfKaHmMerged^（coalesced）: 各変化=最大5
 /// 余裕を持たせて16
 pub const MAX_CHANGED_FEATURES: usize = 16;
 
@@ -30,7 +30,7 @@ pub const MAX_CHANGED_FEATURES: usize = 16;
 ///
 /// アーキテクチャごとの理論上限:
 /// - HalfKP: 盤上38 + 手駒14 = 52
-/// - HalfKA_hm^（coalesced）: 盤上38 + 自玉1 + 敵玉1 + 手駒14 = 54
+/// - HalfKaHmMerged^（coalesced）: 盤上38 + 自玉1 + 敵玉1 + 手駒14 = 54
 ///
 /// この値は`Feature::MAX_ACTIVE`（合法局面での最大値）より大きく設定し、
 /// テスト用の非合法局面にも安全に対応できるマージンを持たせている。
@@ -93,7 +93,7 @@ impl<const N: usize> IndexList<N> {
             return false;
         }
         // SAFETY: pos < N なので範囲内。MaybeUninit への書き込みは常に安全。
-        // feature index は最大でも 138,509 (HalfKA) で u32 の範囲内。
+        // feature index は最大でも 138,509 (HalfKaSplit) で u32 の範囲内。
         debug_assert!(
             index <= u32::MAX as usize,
             "IndexList::push: index {index} exceeds u32::MAX"
@@ -732,7 +732,7 @@ impl Default for AccumulatorStack {
 /// 玉位置×視点ごとのアキュムレータキャッシュ（Finny Tables、汎用版）
 ///
 /// 81マス × 2視点 = 162 エントリ。
-/// 非LayerStacks（HalfKP/HalfKA/HalfKA_hm）で使用する。
+/// 非LayerStacks（HalfKP/HalfKaSplit/HalfKaHmMerged）で使用する。
 /// L1サイズは実行時に決定される。
 ///
 /// アキュムレータ値は1つの連続した AlignedBox に格納し、

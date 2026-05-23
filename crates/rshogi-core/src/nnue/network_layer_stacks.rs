@@ -1,12 +1,12 @@
 //! NetworkLayerStacks - LayerStacksアーキテクチャのNNUEネットワーク
 //!
-//! HalfKA_hm^ 特徴量 + LayerStacks 構造の NNUE を実装する。
+//! HalfKaHmMerged^ 特徴量 + LayerStacks 構造の NNUE を実装する。
 //! nnue-pytorch で学習したファイルを読み込み、評価を行う。
 //!
 //! ## アーキテクチャ
 //!
 //! ```text
-//! Feature Transformer (HalfKA_hm^): 73,305 → L1 (各視点)
+//! Feature Transformer (HalfKaHmMerged^): 73,305 → L1 (各視点)
 //! 視点結合: 両視点を連結 → L1*2
 //! SqrClippedReLU: L1*2 → L1
 //! LayerStacks (両玉の相対段ベースの9バケット選択後):
@@ -105,7 +105,7 @@ fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16;
 
 /// LayerStacksアーキテクチャのNNUEネットワーク
 ///
-/// HalfKA_hm^ 特徴量（73,305次元）+ L1次元 Feature Transformer + 9バケット LayerStacks
+/// HalfKaHmMerged^ 特徴量（73,305次元）+ L1次元 Feature Transformer + 9バケット LayerStacks
 pub struct NetworkLayerStacks<
     const L1: usize,
     const LS_L1_OUT: usize,
@@ -852,7 +852,7 @@ impl LayerStacksNetwork {
                 // --- Tier 2: 祖先探索 + forward_update_incremental ---
                 // Tier 1 で失敗しても、MAX_DEPTH=4 以内の computed 祖先があれば
                 // そこから forward 方向に dirty_piece を適用して更新できる。
-                // HalfKA_hm / HalfKA / HalfKP では既に有効だが LayerStacks では
+                // HalfKaHmMerged / HalfKaSplit / HalfKP では既に有効だが LayerStacks では
                 // 未使用だった。
                 if !updated {
                     if let Some((source_idx, _depth)) = $stack.find_usable_accumulator() {

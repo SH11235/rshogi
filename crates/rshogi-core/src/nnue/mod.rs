@@ -5,12 +5,12 @@
 //!
 //! サポートするアーキテクチャ:
 //! - **HalfKP**: 従来のclassic NNUE（水匠/tanuki互換）
-//! - **HalfKA**: nnue-pytorch互換（Non-mirror）
-//! - **HalfKA_hm^**: nnue-pytorch互換（Half-Mirror + Factorization）
+//! - **HalfKaSplit**: nnue-pytorch互換（Non-mirror）
+//! - **HalfKaHmMerged^**: nnue-pytorch互換（Half-Mirror + Factorization）
 //!
 //! # const generics 版統一実装
 //!
-//! `NetworkHalfKA_hm<L1, L2, L3, A>` で複数のアーキテクチャに対応:
+//! `NetworkHalfKaHmMerged<L1, L2, L3, A>` で複数のアーキテクチャに対応:
 //! - L1: FT出力次元（256, 512, 1024）
 //! - L2: 隠れ層1出力次元（8, 32）
 //! - L3: 隠れ層2出力次元（32, 96）
@@ -28,20 +28,20 @@ mod accumulator_stack_variant;
 pub mod activation;
 pub mod aliases;
 mod bona_piece;
-mod bona_piece_halfka;
-mod bona_piece_halfka_hm;
+mod bona_piece_halfka_hm_merged;
 mod bona_piece_halfka_hm_split;
 mod bona_piece_halfka_merged;
+mod bona_piece_halfka_split;
 mod constants;
 mod diff;
 mod evaluator;
 mod feature_transformer;
 mod feature_transformer_layer_stacks;
 pub mod features;
-pub(crate) mod halfka;
-pub(crate) mod halfka_hm;
+pub(crate) mod halfka_hm_merged;
 pub(crate) mod halfka_hm_split;
 pub(crate) mod halfka_merged;
+pub(crate) mod halfka_split;
 pub(crate) mod halfkp;
 mod layer_stacks;
 mod layers;
@@ -49,10 +49,10 @@ mod leb128;
 #[macro_use]
 pub mod macros;
 mod network;
-pub(crate) mod network_halfka;
-pub(crate) mod network_halfka_hm;
+pub(crate) mod network_halfka_hm_merged;
 pub(crate) mod network_halfka_hm_split;
 pub(crate) mod network_halfka_merged;
+pub(crate) mod network_halfka_split;
 pub(crate) mod network_halfkp;
 mod network_layer_stacks;
 pub mod piece_list;
@@ -72,8 +72,8 @@ pub use accumulator_layer_stacks::{
 };
 pub use accumulator_stack_variant::AccumulatorStackVariant;
 pub use bona_piece::{BonaPiece, ExtBonaPiece, FE_END, halfkp_index};
-pub use bona_piece_halfka_hm::{
-    BonaPieceHalfKA_hm, E_KING, F_KING, FE_HAND_END, FE_OLD_END, PIECE_INPUTS, halfka_index,
+pub use bona_piece_halfka_hm_merged::{
+    BonaPieceHalfKaHmMerged, E_KING, F_KING, FE_HAND_END, FE_OLD_END, PIECE_INPUTS, halfka_index,
     is_hm_mirror, king_bucket, pack_bonapiece,
 };
 pub use constants::*;
@@ -81,8 +81,8 @@ pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
 pub use feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 pub use features::{
-    Feature, FeatureSet, HalfKA, HalfKA_hm, HalfKP, HalfKPFeatureSet, HalfKaHmMergedFeatureSet,
-    HalfKaSplitFeatureSet, TriggerEvent,
+    Feature, FeatureSet, HalfKP, HalfKPFeatureSet, HalfKaHmMerged, HalfKaHmMergedFeatureSet,
+    HalfKaSplit, HalfKaSplitFeatureSet, TriggerEvent,
 };
 pub use layer_stacks::{
     LayerStackBucket, LayerStacks, compute_bucket_index, compute_king_ranks,
@@ -120,7 +120,7 @@ pub use activation::{
 };
 pub use spec::{Activation, ArchitectureSpec, FeatureSet as SpecFeatureSet};
 
-// 型エイリアス（HalfKA*/HalfKP* の全バリアント）は pub(crate) に隠蔽
+// 型エイリアス（HalfKaSplit*/HalfKP* の全バリアント）は pub(crate) に隠蔽
 // 外部からは NNUEEvaluator を通じてのみ NNUE 評価を行う
 // 内部モジュールは crate::nnue::aliases 経由で直接インポート
 

@@ -99,7 +99,7 @@
 //!
 //! ## 正規化 (Stockfish FullThreats 準拠)
 //!
-//! HalfKA_hm と同じ perspective 基準で正規化する:
+//! HalfKaHmMerged と同じ perspective 基準で正規化する:
 //!
 //! ```text
 //! 1. Perspective 基準正規化:
@@ -113,7 +113,7 @@
 //! - from_sq と to_sq の両方に同じ perspective 変換を適用 (相対位置が保存される)
 //! - 駒色は perspective で swap: `oriented_color = attacker_color ^ perspective`
 //! - orient 後のマスと oriented_color を使って色別 attack LUT を引く
-//! - HalfKA_hm と Threat で正規化基準を統一
+//! - HalfKaHmMerged と Threat で正規化基準を統一
 //!
 //! ## pair_base テーブル
 //!
@@ -155,8 +155,8 @@ use super::accumulator::IndexList;
 #[cfg(feature = "nnue-threat")]
 use super::bona_piece::BonaPiece;
 #[cfg(feature = "nnue-threat")]
-use super::bona_piece_halfka_hm::is_hm_mirror;
-use super::bona_piece_halfka_hm::{E_KING, F_KING};
+use super::bona_piece_halfka_hm_merged::is_hm_mirror;
+use super::bona_piece_halfka_hm_merged::{E_KING, F_KING};
 #[cfg(feature = "nnue-threat")]
 use super::threat_exclusion;
 
@@ -644,7 +644,7 @@ fn threat_index(
 
 /// マスを perspective 基準 + HM mirror で正規化（Stockfish 準拠）
 ///
-/// HalfKA_hm と同じ perspective 基準。
+/// HalfKaHmMerged と同じ perspective 基準。
 /// 方向性駒の利き方向の整合は、色別 attack LUT で解決する。
 #[inline]
 pub(crate) fn normalize_sq(sq: Square, perspective: Color, hm_mirror: bool) -> Square {
@@ -868,7 +868,7 @@ pub fn for_each_active_threat_index<F: FnMut(usize)>(
 #[cfg(feature = "nnue-threat")]
 pub(crate) fn decode_board_square_fb(bp: BonaPiece) -> Option<Square> {
     use super::bona_piece::{FE_END, FE_HAND_END};
-    use super::bona_piece_halfka_hm::{E_KING, F_KING};
+    use super::bona_piece_halfka_hm_merged::{E_KING, F_KING};
 
     let v = bp.value() as usize;
     if v == 0 {
@@ -1881,7 +1881,7 @@ mod tests {
     #[test]
     fn test_decode_board_square_fb() {
         use super::super::bona_piece::{E_PAWN, F_PAWN};
-        use super::super::bona_piece_halfka_hm::{E_KING, F_KING};
+        use super::super::bona_piece_halfka_hm_merged::{E_KING, F_KING};
 
         // ZERO → None
         assert!(decode_board_square_fb(BonaPiece::ZERO).is_none());
@@ -1910,7 +1910,7 @@ mod tests {
     #[test]
     fn test_decode_board_threat_info_fb() {
         use super::super::bona_piece::{E_HORSE, E_ROOK, F_HORSE, F_PAWN, F_ROOK};
-        use super::super::bona_piece_halfka_hm::F_KING;
+        use super::super::bona_piece_halfka_hm_merged::F_KING;
 
         // F_PAWN + 40: Black Pawn at sq=40
         let bp = BonaPiece::new(F_PAWN + 40);
@@ -2081,7 +2081,7 @@ mod tests {
 
     use super::super::accumulator::{ChangedBonaPiece, DirtyPiece};
     use super::super::bona_piece::ExtBonaPiece;
-    use super::super::bona_piece_halfka_hm::{E_KING, F_KING};
+    use super::super::bona_piece_halfka_hm_merged::{E_KING, F_KING};
 
     /// DirtyPiece を king move で組み立てるヘルパー
     fn make_king_move_dirty(king_color: Color, from_sq: Square, to_sq: Square) -> DirtyPiece {

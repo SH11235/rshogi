@@ -1,9 +1,9 @@
-//! HalfKA_hm L1=768 のアーキテクチャバリアント
-// NOTE: 公式表記(HalfKA_hm)をenum名に保持するため、非CamelCaseを許可する。
+//! HalfKaHmMerged L1=768 のアーキテクチャバリアント
+// NOTE: 公式表記(HalfKaHmMerged)をenum名に保持するため、非CamelCaseを許可する。
 #![allow(non_camel_case_types)]
 
 use crate::nnue::accumulator::DirtyPiece;
-use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
+use crate::nnue::network_halfka_hm_merged::AccumulatorStackHalfKaHmMerged;
 use crate::nnue::spec::{Activation, ArchitectureSpec, FeatureSet};
 use crate::position::Position;
 use crate::types::Value;
@@ -17,8 +17,8 @@ crate::define_l1_variants!(
     enum HalfKaHmMergedL768,
     feature_set HalfKaHmMerged,
     l1 768,
-    acc crate::nnue::network_halfka_hm::AccumulatorHalfKA_hm<768>,
-    stack AccumulatorStackHalfKA_hm<768>,
+    acc crate::nnue::network_halfka_hm_merged::AccumulatorHalfKaHmMerged<768>,
+    stack AccumulatorStackHalfKaHmMerged<768>,
 
     variants {
         // L2=16, L3=64 バリアント

@@ -1,4 +1,4 @@
-//! HalfKA 特徴量
+//! HalfKaSplit 特徴量
 //!
 //! King + All pieces (non-mirror)
 //!
@@ -13,19 +13,19 @@ use super::Feature;
 use super::TriggerEvent;
 use crate::nnue::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use crate::nnue::bona_piece::BonaPiece;
-use crate::nnue::bona_piece_halfka::{halfka_index, king_index};
+use crate::nnue::bona_piece_halfka_split::{halfka_index, king_index};
 use crate::nnue::constants::HALFKA_DIMENSIONS;
 use crate::nnue::piece_list::PieceNumber;
 use crate::position::Position;
 use crate::types::{Color, Square};
 
-/// HalfKA 特徴量
+/// HalfKaSplit 特徴量
 ///
 /// キング位置は81マス直指定（ミラーなし）。
 /// 自玉が動いた場合にアキュムレータの全計算が必要になる。
-pub struct HalfKA;
+pub struct HalfKaSplit;
 
-impl Feature for HalfKA {
+impl Feature for HalfKaSplit {
     /// 特徴量の次元数: 81×1710 = 138,510
     const DIMENSIONS: usize = HALFKA_DIMENSIONS;
 
@@ -110,16 +110,16 @@ mod tests {
 
     #[test]
     fn test_halfka_dimensions() {
-        assert_eq!(HalfKA::DIMENSIONS, 138_510);
+        assert_eq!(HalfKaSplit::DIMENSIONS, 138_510);
     }
 
     #[test]
     fn test_halfka_max_active() {
-        assert_eq!(HalfKA::MAX_ACTIVE, 40);
+        assert_eq!(HalfKaSplit::MAX_ACTIVE, 40);
     }
 
     #[test]
     fn test_halfka_refresh_trigger() {
-        assert_eq!(HalfKA::REFRESH_TRIGGER, TriggerEvent::FriendKingMoved);
+        assert_eq!(HalfKaSplit::REFRESH_TRIGGER, TriggerEvent::FriendKingMoved);
     }
 }

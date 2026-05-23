@@ -20,7 +20,7 @@ pub const E_KING: usize = 1629;
 /// 駒入力数（pack 後の最大値 = E_KING、敵玉は pack で -81 される）
 ///
 /// pack_bonapiece 適用後の範囲は 0..=1628 だが、`PIECE_INPUTS` 自体は E_KING に
-/// 揃える（HalfKA_hm と同じ慣習）。
+/// 揃える（HalfKaHmMerged と同じ慣習）。
 pub const PIECE_INPUTS: usize = E_KING; // 1629
 
 /// HalfKaMerged 用の BonaPiece（内部は通常の BonaPiece と同じレイアウト）
@@ -114,11 +114,11 @@ mod tests {
     }
 
     /// パリティ検証: MergedPlane の pack は「マス反転なし + 敵玉 fold」であり、
-    /// 検証済み HalfKA_hm の pack を hm_mirror=false で呼んだ結果と全 BonaPiece 値
-    /// で一致するはず（HalfKA_hm の hm_mirror=false も「反転なし + fold」のため）。
+    /// 検証済み HalfKaHmMerged の pack を hm_mirror=false で呼んだ結果と全 BonaPiece 値
+    /// で一致するはず（HalfKaHmMerged の hm_mirror=false も「反転なし + fold」のため）。
     #[test]
     fn test_pack_parity_with_halfka_hm_no_mirror() {
-        use crate::nnue::bona_piece_halfka_hm::pack_bonapiece as hm_pack;
+        use crate::nnue::bona_piece_halfka_hm_merged::pack_bonapiece as hm_pack;
         for v in 0..1710u16 {
             let bp = BonaPiece::new(v);
             assert_eq!(pack_bonapiece(bp), hm_pack(bp, false), "mismatch at bp={v}");

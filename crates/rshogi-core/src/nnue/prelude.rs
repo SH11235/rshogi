@@ -9,7 +9,9 @@ pub use crate::types::Value;
 
 // NNUE 型
 pub use crate::nnue::accumulator::DirtyPiece;
-pub use crate::nnue::network_halfka_hm::{AccumulatorHalfKA_hm, AccumulatorStackHalfKA_hm};
+pub use crate::nnue::network_halfka_hm_merged::{
+    AccumulatorHalfKaHmMerged, AccumulatorStackHalfKaHmMerged,
+};
 pub use crate::nnue::network_halfkp::{AccumulatorHalfKP, AccumulatorStackHalfKP};
 pub use crate::nnue::spec::{Activation, ArchitectureSpec, FeatureSet};
 
