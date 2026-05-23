@@ -176,7 +176,7 @@ pub fn parse_feature_input_dimensions(arch_str: &str) -> Option<usize> {
 /// 区切り文字が無い場合は文字列末尾まで。
 ///
 /// 部分文字列 (`contains`) 判定を排し、`==` での厳密な keyword 一致を行うために使う。
-pub fn parse_feature_set_keyword(arch_str: &str) -> Option<&str> {
+pub(crate) fn parse_feature_set_keyword(arch_str: &str) -> Option<&str> {
     let features_key = "Features=";
     let start = arch_str.find(features_key)?;
     let after_key = &arch_str[start + features_key.len()..];
