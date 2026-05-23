@@ -59,6 +59,20 @@ fn validate_feature_combination(
         );
     }
 
+    // Phase 1 限定: ls-arch (旧 layerstack-only 意味論) と halfkx-arch の同時指定は
+    // 整合性が取れないため reject。Phase 2 で `ls-arch` の意味論を include-only に
+    // 再定義した段階でこの制約は外す。
+    let halfkx_arch = has_feature("halfkx-arch");
+    if ls_arch && halfkx_arch {
+        return Err(
+            "Phase 1 では ls-arch と halfkx-arch の同時指定は未サポートです。\
+             `ls-arch` は現状旧 `layerstack-only` 意味論 (HalfKX 経路を除去) を継承して \
+             いるため、`halfkx-arch` と組合せると build 構成が不整合になります。\
+             Phase 2 で `edition-universal` 経由で本対応予定。"
+                .to_string(),
+        );
+    }
+
     if mode_specific {
         if ls_size_count > 1 {
             return Err(format!(
@@ -89,6 +103,29 @@ fn validate_feature_combination(
             return Err(format!(
                 "mode-specific では ft-* を 1 個までしか指定できません (現在 {ft_count} 個有効)。"
             ));
+        }
+
+        // ADR「Phase 1 の build.rs check では実装済 FT のみ enable」に従い、
+        // LS network 上では `ft-halfka_hm_merged` (= 旧 HalfKA_hm) のみ valid。
+        // 他 4 variant (`ft-halfkp` / `ft-halfka_split` / `ft-halfka_merged`
+        // / `ft-halfka_hm_split`) は LS network 側 FT generic 化 (Issue #734)
+        // 完了後にサポート予定。
+        if ls_arch {
+            let invalid_ls_ft: &[&str] = &[
+                "ft-halfkp",
+                "ft-halfka_split",
+                "ft-halfka_merged",
+                "ft-halfka_hm_split",
+            ];
+            for ft in invalid_ls_ft {
+                if has_feature(ft) {
+                    return Err(format!(
+                        "Phase 1 では LayerStack (ls-arch) network は ft-halfka_hm_merged のみ \
+                         サポートします (`{ft}` 指定済み)。\
+                         他 FT variant は SH11235/rshogi#734 で LS 側 FT generic 化後に対応予定。"
+                    ));
+                }
+            }
         }
     }
 

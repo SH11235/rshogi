@@ -190,3 +190,67 @@ fn family_multiple_sizes_ok() {
     ]);
     assert!(validate_feature_combination(&has).is_ok());
 }
+
+#[test]
+fn ls_arch_plus_halfkx_arch_rejected_phase1() {
+    // Phase 1: ls-arch は旧 layerstack-only 意味論 (HalfKX 経路除去) を保持しているため
+    // halfkx-arch との同時指定は不整合。Phase 2 で意味論再定義後に解禁予定。
+    let has = lookup(&[
+        "mode-universal",
+        "ls-arch",
+        "halfkx-arch",
+        "ls-size-1536x16x32",
+    ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("ls-arch") && err.contains("halfkx-arch"));
+}
+
+#[test]
+fn ls_arch_with_ft_halfkp_rejected() {
+    // ADR「LS は halfka_hm_merged だけ通る」: LS で他 FT を立てると reject。
+    let has = lookup(&[
+        "mode-specific",
+        "ls-arch",
+        "ls-size-1536x16x32",
+        "ft-halfkp",
+    ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("ft-halfka_hm_merged のみ"));
+}
+
+#[test]
+fn ls_arch_with_ft_halfka_split_rejected() {
+    let has = lookup(&[
+        "mode-specific",
+        "ls-arch",
+        "ls-size-1536x16x32",
+        "ft-halfka_split",
+    ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("ft-halfka_hm_merged のみ"));
+}
+
+#[test]
+fn ls_arch_with_ft_halfka_hm_merged_ok() {
+    // LS + 唯一サポートされている FT variant の組合せは pass。
+    let has = lookup(&[
+        "mode-specific",
+        "ls-arch",
+        "ls-size-1536x16x32",
+        "ft-halfka_hm_merged",
+        "nnue-progress-diff",
+    ]);
+    assert!(validate_feature_combination(&has).is_ok());
+}
+
+#[test]
+fn halfkx_arch_with_ft_halfkp_ok() {
+    // HalfKX 側では ft-halfkp は valid (Phase 1 の LS 制約は ls-arch 限定)。
+    let has = lookup(&[
+        "mode-specific",
+        "halfkx-arch",
+        "ft-halfkp",
+        "halfkx-activation-crelu",
+    ]);
+    assert!(validate_feature_combination(&has).is_ok());
+}
