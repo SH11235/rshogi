@@ -170,6 +170,22 @@ pub fn parse_feature_input_dimensions(arch_str: &str) -> Option<usize> {
     num_str.parse::<usize>().ok()
 }
 
+/// `Features=` キーの直後にある特徴量セット名トークンを切り出す
+///
+/// 戻り値は `Features=` の後ろから区切り文字 (`(`, `[`, `^`, `,`, 空白) の直前まで。
+/// 区切り文字が無い場合は文字列末尾まで。
+///
+/// 部分文字列 (`contains`) 判定を排し、`==` での厳密な keyword 一致を行うために使う。
+pub fn parse_feature_set_keyword(arch_str: &str) -> Option<&str> {
+    let features_key = "Features=";
+    let start = arch_str.find(features_key)?;
+    let after_key = &arch_str[start + features_key.len()..];
+    let end = after_key
+        .find(|c: char| matches!(c, '(' | '[' | '^' | ',') || c.is_whitespace())
+        .unwrap_or(after_key.len());
+    Some(&after_key[..end])
+}
+
 /// アーキテクチャ文字列から FeatureSet を判定
 pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String> {
     use super::constants::{
@@ -204,32 +220,42 @@ pub fn parse_feature_set_from_arch(arch_str: &str) -> Result<FeatureSet, String>
         return Ok(FeatureSet::LayerStacks);
     }
 
-    // Features= 名前で feature_set 決定。
-    // より特定的な名前（"HalfKA_hm_split" / "HalfKA_merged"）は、それを部分文字列
-    // として含む一般名（"HalfKA_hm" / "HalfKA"）より先に判定する。
-    if arch_str.contains("HalfKP") {
-        return Ok(FeatureSet::HalfKP);
-    }
-    if arch_str.contains("HalfKA_hm_split") {
-        return Ok(FeatureSet::HalfKaHmSplit);
-    }
-    if arch_str.contains("HalfKA_merged") {
-        return Ok(FeatureSet::HalfKaMerged);
-    }
-    if arch_str.contains("HalfKA_hm") {
-        return Ok(FeatureSet::HalfKA_hm);
-    }
-    if arch_str.contains("HalfKA") {
-        let input_dim = parse_feature_input_dimensions(arch_str).ok_or_else(|| {
-            "HalfKA architecture is missing input dimensions in arch string.".to_string()
-        })?;
-        return match input_dim {
-            HALFKA_HM_DIMENSIONS => Ok(FeatureSet::HalfKA_hm),
-            HALFKA_DIMENSIONS => Ok(FeatureSet::HalfKA),
-            HALFKA_MERGED_DIMENSIONS => Ok(FeatureSet::HalfKaMerged),
-            HALFKA_HM_SPLIT_DIMENSIONS => Ok(FeatureSet::HalfKaHmSplit),
-            _ => Err(format!("Unknown HalfKA input dimensions: {input_dim}")),
-        };
+    // Features= キーワードを切り出して `==` で完全一致判定する。
+    // underscore 表記 (`HalfKA_hm` 等) と PascalCase 表記 (`HalfKaHmMerged` 等) の両方を
+    // 同じ enum に解決して、両綴りで emit された .bin ヘッダを共通にロードできる。
+    if let Some(name) = parse_feature_set_keyword(arch_str) {
+        match name {
+            "HalfKP" => return Ok(FeatureSet::HalfKP),
+
+            // plane を明示する綴り (両表記)。
+            "HalfKA_merged" | "HalfKaMerged" => return Ok(FeatureSet::HalfKaMerged),
+            "HalfKA_hm_split" | "HalfKaHmSplit" => return Ok(FeatureSet::HalfKaHmSplit),
+
+            // mirror + merged: underscore / PascalCase の同義綴り。
+            "HalfKA_hm" | "HalfKaHmMerged" => return Ok(FeatureSet::HalfKA_hm),
+            // 非ミラー + split: PascalCase 綴り (underscore 綴りは plane 暗黙の "HalfKA" 経由)。
+            "HalfKaSplit" => return Ok(FeatureSet::HalfKA),
+
+            // "HalfKA" 単独は plane 暗黙: bullet-shogi 互換のため input_dim で
+            // disambiguate する (HALFKA_HM_DIMENSIONS なら HalfKA_hm、等)。
+            "HalfKA" => {
+                let input_dim = parse_feature_input_dimensions(arch_str).ok_or_else(|| {
+                    "HalfKA architecture is missing input dimensions in arch string.".to_string()
+                })?;
+                return match input_dim {
+                    HALFKA_HM_DIMENSIONS => Ok(FeatureSet::HalfKA_hm),
+                    HALFKA_DIMENSIONS => Ok(FeatureSet::HalfKA),
+                    HALFKA_MERGED_DIMENSIONS => Ok(FeatureSet::HalfKaMerged),
+                    HALFKA_HM_SPLIT_DIMENSIONS => Ok(FeatureSet::HalfKaHmSplit),
+                    _ => Err(format!("Unknown HalfKA input dimensions: {input_dim}")),
+                };
+            }
+
+            // 空 keyword (`Features=,...` 形式) は LayerStacks フォールバックへ落とす。
+            "" => {}
+
+            other => return Err(format!("Unknown feature set keyword: {other}")),
+        }
     }
 
     // HalfKX キーワードを持たないネスト形式 LayerStacks: FT_OUT パターンで補完判定
@@ -1105,10 +1131,185 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_feature_set_keyword_extraction() {
+        // 区切り文字種別ごとの切り出し確認。
+        assert_eq!(parse_feature_set_keyword("Features=HalfKP[125388->256x2]"), Some("HalfKP"));
+        assert_eq!(
+            parse_feature_set_keyword("Features=HalfKA_hm(Friend)[73305->1536x2]"),
+            Some("HalfKA_hm")
+        );
+        assert_eq!(
+            parse_feature_set_keyword("Features=HalfKA_hm^[73305->512x2]-SCReLU"),
+            Some("HalfKA_hm")
+        );
+        assert_eq!(
+            parse_feature_set_keyword("Features=HalfKA,Network=AffineTransform[1<-96]"),
+            Some("HalfKA")
+        );
+        // 新名 emit 用 keyword
+        assert_eq!(
+            parse_feature_set_keyword("Features=HalfKaHmMerged[73305->1024x2]"),
+            Some("HalfKaHmMerged")
+        );
+        assert_eq!(
+            parse_feature_set_keyword("Features=HalfKaSplit[138510->512x2]"),
+            Some("HalfKaSplit")
+        );
+        // Features= 不在
+        assert_eq!(parse_feature_set_keyword("Threat=Foo"), None);
+    }
+
+    #[test]
+    fn test_parse_feature_set_legacy_aliases() {
+        // underscore 表記の keyword (HalfKA_hm / HalfKA_merged / HalfKA_hm_split) が
+        // 対応する enum 値に解決すること。
+        assert_eq!(
+            parse_feature_set_from_arch("Features=HalfKA_hm[73305->1024x2]").unwrap(),
+            FeatureSet::HalfKA_hm
+        );
+        assert_eq!(
+            parse_feature_set_from_arch("Features=HalfKA_merged[138510->512x2]").unwrap(),
+            FeatureSet::HalfKaMerged
+        );
+        assert_eq!(
+            parse_feature_set_from_arch("Features=HalfKA_hm_split[73305->512x2]").unwrap(),
+            FeatureSet::HalfKaHmSplit
+        );
+    }
+
+    #[test]
+    fn test_parse_feature_set_new_aliases() {
+        // PascalCase 表記の keyword (HalfKaHmMerged / HalfKaMerged / HalfKaHmSplit /
+        // HalfKaSplit) が対応する enum 値に解決すること。
+        assert_eq!(
+            parse_feature_set_from_arch("Features=HalfKaHmMerged[73305->1024x2]").unwrap(),
+            FeatureSet::HalfKA_hm
+        );
+        assert_eq!(
+            parse_feature_set_from_arch("Features=HalfKaMerged[138510->512x2]").unwrap(),
+            FeatureSet::HalfKaMerged
+        );
+        assert_eq!(
+            parse_feature_set_from_arch("Features=HalfKaHmSplit[73305->512x2]").unwrap(),
+            FeatureSet::HalfKaHmSplit
+        );
+        assert_eq!(
+            parse_feature_set_from_arch("Features=HalfKaSplit[138510->512x2]").unwrap(),
+            FeatureSet::HalfKA
+        );
+    }
+
+    #[test]
+    fn test_parse_feature_set_old_new_alias_equivalence() {
+        // 旧名 / 新名のどちらでも同 enum 値が得られること (rename 後互換の核)。
+        let pairs: &[(&str, &str)] = &[
+            ("Features=HalfKA_hm[73305->1024x2]", "Features=HalfKaHmMerged[73305->1024x2]"),
+            ("Features=HalfKA_merged[138510->512x2]", "Features=HalfKaMerged[138510->512x2]"),
+            ("Features=HalfKA_hm_split[73305->512x2]", "Features=HalfKaHmSplit[73305->512x2]"),
+        ];
+        for (legacy, modern) in pairs {
+            let legacy_resolved = parse_feature_set_from_arch(legacy).unwrap();
+            let modern_resolved = parse_feature_set_from_arch(modern).unwrap();
+            assert_eq!(legacy_resolved, modern_resolved, "legacy={legacy} vs modern={modern}",);
+        }
+        // "HalfKA" は plane 暗黙のため input_dim でしか曖昧解消できず、
+        // 新名 "HalfKaSplit" が同等 (非ミラー Split) になる代表ケースを確認。
+        assert_eq!(
+            parse_feature_set_from_arch("Features=HalfKA[138510->512x2]").unwrap(),
+            parse_feature_set_from_arch("Features=HalfKaSplit[138510->512x2]").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_parse_feature_set_real_model_arch_strings() {
+        // 実モデルの .bin ヘッダから抽出した arch 文字列で回帰防止する。
+        // simple-arch sweep (5 feature_set × CReLU/SCReLU/Pairwise) と bullet-shogi
+        // LayerStacks (bucketed) を網羅する。
+        let cases: &[(&str, FeatureSet)] = &[
+            // simple-arch CReLU (各 feature_set)
+            (
+                "Features=HalfKP(Friend)[125388->512x2],Network=AffineTransform[1<-64]\
+                 (ClippedReLU[64](AffineTransform[64<-8](ClippedReLU[8](\
+                 AffineTransformSparseInput[8<-1024](InputSlice[1024(0:1024)]))))),\
+                 fv_scale=28",
+                FeatureSet::HalfKP,
+            ),
+            (
+                "Features=HalfKA(Friend)[138510->512x2],Network=AffineTransform[1<-64]\
+                 (ClippedReLU[64](AffineTransform[64<-8](ClippedReLU[8](\
+                 AffineTransformSparseInput[8<-1024](InputSlice[1024(0:1024)]))))),\
+                 fv_scale=28",
+                FeatureSet::HalfKA,
+            ),
+            (
+                "Features=HalfKA_merged(Friend)[131949->512x2],Network=AffineTransform\
+                 [1<-64](ClippedReLU[64](AffineTransform[64<-8](ClippedReLU[8](\
+                 AffineTransformSparseInput[8<-1024](InputSlice[1024(0:1024)]))))),\
+                 fv_scale=28",
+                FeatureSet::HalfKaMerged,
+            ),
+            (
+                "Features=HalfKA_hm_split(Friend)[76950->512x2],Network=AffineTransform\
+                 [1<-64](ClippedReLU[64](AffineTransform[64<-8](ClippedReLU[8](\
+                 AffineTransformSparseInput[8<-1024](InputSlice[1024(0:1024)]))))),\
+                 fv_scale=28",
+                FeatureSet::HalfKaHmSplit,
+            ),
+            (
+                "Features=HalfKA_hm(Friend)[73305->512x2],Network=AffineTransform[1<-64]\
+                 (ClippedReLU[64](AffineTransform[64<-8](ClippedReLU[8](\
+                 AffineTransformSparseInput[8<-1024](InputSlice[1024(0:1024)]))))),\
+                 fv_scale=28",
+                FeatureSet::HalfKA_hm,
+            ),
+            // simple-arch SCReLU (HalfKA_hm) — SqrClippedReLU 単独で keyword 経路へ
+            (
+                "Features=HalfKA_hm(Friend)[73305->512x2],Network=AffineTransform[1<-64]\
+                 (SqrClippedReLU[64](AffineTransform[64<-8](SqrClippedReLU[8](\
+                 AffineTransformSparseInput[8<-1024](InputSlice[1024(0:1024)]))))),\
+                 fv_scale=28",
+                FeatureSet::HalfKA_hm,
+            ),
+            // simple-arch Pairwise (HalfKA_hm 512/2)
+            (
+                "Features=HalfKA_hm(Friend)[73305->512/2x2]-Pairwise,Network=\
+                 AffineTransform[1<-64](ClippedReLU[64](AffineTransform[64<-8]\
+                 (ClippedReLU[8](AffineTransformSparseInput[8<-512]\
+                 (InputSlice[512(0:512)]))))),fv_scale=28",
+                FeatureSet::HalfKA_hm,
+            ),
+            // bullet-shogi LayerStacks bucketed (FT_OUT=1536, 混在活性化)
+            (
+                "Features=HalfKA_hm(Friend)[73305->1536x2],Network=AffineTransform[1<-32]\
+                 (ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](\
+                 AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
+                FeatureSet::LayerStacks,
+            ),
+            // bucketless SCReLU 1024x2 (bullet-shogi スタイルの `^` 付き keyword)
+            (
+                "Features=HalfKA_hm^[73305->1024x2]-SCReLU,fv_scale=16,l2=8,l3=96,qa=127,qb=64",
+                FeatureSet::HalfKA_hm,
+            ),
+        ];
+        for (arch, expected) in cases {
+            let got = parse_feature_set_from_arch(arch)
+                .unwrap_or_else(|e| panic!("parse failed for arch={arch}: {e}"));
+            assert_eq!(&got, expected, "arch={arch}");
+        }
+    }
+
+    #[test]
+    fn test_parse_feature_set_unknown_keyword_errors() {
+        // 既知 feature 名の prefix を持つ未知 keyword (例: "HalfKaFoo") は
+        // 曖昧マッチさせず、明示的なエラーで弾く。
+        let err = parse_feature_set_from_arch("Features=HalfKaFoo[73305->512x2]").unwrap_err();
+        assert!(err.contains("Unknown feature set keyword"));
+    }
+
+    #[test]
     fn test_parse_feature_set_bucketless_screlu() {
-        // bucket 無し SCReLU: `(SqrClippedReLU[` トークンのみ。混在トークンに該当
-        // しないため keyword で HalfKA_hm を返す。旧実装は SqrClippedReLU 単独でも
-        // LayerStacks と誤分類していた。
+        // bucket 無し SCReLU: `(SqrClippedReLU[` トークンのみ。混在活性化トークン
+        // に該当しないため keyword から HalfKA_hm を返す。
         let arch = "Features=HalfKA_hm(Friend)[73305->1024x2],Network=AffineTransform\
                     [1<-64](SqrClippedReLU[64](AffineTransform[64<-8](SqrClippedReLU[8](\
                     AffineTransformSparseInput[8<-2048](InputSlice[2048(0:2048)]))))),fv_scale=14";
