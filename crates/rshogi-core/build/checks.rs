@@ -53,6 +53,26 @@ fn validate_feature_combination(
         );
     }
 
+    // LS-only build (ls-arch + halfkx-arch なし) では HalfKX 経路がコンパイルされて
+    // いないため、ft-halfka_hm_merged 以外を立てると runtime に HalfKX モデルを load
+    // した際 `evaluate_dispatch` の `unreachable!` arm に到達してパニックする。
+    // mode (family / universal / specific) に関わらず build-time で reject する。
+    if ls_arch && !halfkx_arch {
+        for ft in &[
+            "ft-halfkp",
+            "ft-halfka_split",
+            "ft-halfka_merged",
+            "ft-halfka_hm_split",
+        ] {
+            if has_feature(ft) {
+                return Err(format!(
+                    "LS-only build (ls-arch + not(halfkx-arch)) では \
+                     ft-halfka_hm_merged のみサポートします (`{ft}` 指定済み)。"
+                ));
+            }
+        }
+    }
+
     if mode_specific {
         if ls_size_count > 1 {
             return Err(format!(
@@ -83,24 +103,6 @@ fn validate_feature_combination(
             return Err(format!(
                 "mode-specific では ft-* を 1 個までしか指定できません (現在 {ft_count} 個有効)。"
             ));
-        }
-
-        // LS network 単独 specific build では `ft-halfka_hm_merged` のみ実装済み。
-        // halfkx-arch が同時に立っていれば他 FT は HalfKX 経路にルーティング可能なため許容。
-        if ls_arch && !halfkx_arch {
-            for ft in &[
-                "ft-halfkp",
-                "ft-halfka_split",
-                "ft-halfka_merged",
-                "ft-halfka_hm_split",
-            ] {
-                if has_feature(ft) {
-                    return Err(format!(
-                        "LayerStack 単独 specific build (ls-arch + not(halfkx-arch)) では \
-                         ft-halfka_hm_merged のみサポートします (`{ft}` 指定済み)。"
-                    ));
-                }
-            }
         }
     }
 

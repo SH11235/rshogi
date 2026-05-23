@@ -437,9 +437,9 @@ impl Position {
 
     #[inline]
     fn should_update_board_effects() -> bool {
-        // halfkx-arch が無効な build では material 経路を含まないため
-        // board_effects は不要 (コンパイル時に false が確定し、do_move/undo_move 内の
-        // board_effects 関連コードや is_nnue_initialized の RwLock が全て除去される)。
+        // halfkx-arch が無効な build は NNUE 経路のみで評価するため material fallback が
+        // 不要 → board_effects も不要。コンパイル時に false が確定し、do_move/undo_move
+        // 内の board_effects 関連コードや is_nnue_initialized の RwLock が全て除去される。
         #[cfg(not(feature = "halfkx-arch"))]
         {
             false

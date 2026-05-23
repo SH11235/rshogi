@@ -268,6 +268,34 @@ fn ls_arch_with_halfkx_arch_specific_ft_halfkp_ok() {
 }
 
 #[test]
+fn ls_only_family_with_ft_halfkp_rejected() {
+    // mode-family でも LS-only (halfkx-arch なし) + ft-halfkp は reject。
+    // halfkx-arch なしでは HalfKX 経路がコンパイルされず runtime panic 可能性のため。
+    let has = lookup(&[
+        "mode-family",
+        "ls-arch",
+        "ls-size-1536x16x32",
+        "ls-size-768x16x32",
+        "ft-halfkp",
+    ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("ft-halfka_hm_merged のみ"));
+}
+
+#[test]
+fn ls_only_universal_with_ft_halfkp_rejected() {
+    // mode-universal で halfkx-arch を意図的に外したケースも reject。
+    let has = lookup(&[
+        "mode-universal",
+        "ls-arch",
+        "ls-size-1536x16x32",
+        "ft-halfkp",
+    ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("ft-halfka_hm_merged のみ"));
+}
+
+#[test]
 fn halfkx_specific_with_ft_halfkp_ok() {
     // HalfKX 単独 (ls-arch なし) では ft-halfkp は valid。
     let has = lookup(&[
