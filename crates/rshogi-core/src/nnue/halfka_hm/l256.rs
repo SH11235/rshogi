@@ -9,19 +9,21 @@ use crate::position::Position;
 use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
-use crate::nnue::aliases::{HalfKA_hm256CReLU, HalfKA_hm256Pairwise, HalfKA_hm256SCReLU};
+use crate::nnue::aliases::{
+    HalfKaHmMerged256CReLU, HalfKaHmMerged256Pairwise, HalfKaHmMerged256SCReLU,
+};
 
 crate::define_l1_variants!(
-    enum HalfKA_hm_L256,
+    enum HalfKaHmMergedL256,
     feature_set HalfKaHmMerged,
     l1 256,
     acc crate::nnue::network_halfka_hm::AccumulatorHalfKA_hm<256>,
     stack AccumulatorStackHalfKA_hm<256>,
 
     variants {
-        (32, 32, CReLU)         => CReLU32x32    : HalfKA_hm256CReLU,
-        (32, 32, SCReLU)        => SCReLU32x32   : HalfKA_hm256SCReLU,
-        (32, 32, PairwiseCReLU) => Pairwise32x32 : HalfKA_hm256Pairwise,
+        (32, 32, CReLU)         => CReLU32x32    : HalfKaHmMerged256CReLU,
+        (32, 32, SCReLU)        => SCReLU32x32   : HalfKaHmMerged256SCReLU,
+        (32, 32, PairwiseCReLU) => Pairwise32x32 : HalfKaHmMerged256Pairwise,
     }
 );
 
@@ -31,9 +33,9 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKA_hm_L256::SUPPORTED_SPECS.len(), 3);
+        assert_eq!(HalfKaHmMergedL256::SUPPORTED_SPECS.len(), 3);
 
-        let spec = &HalfKA_hm_L256::SUPPORTED_SPECS[0];
+        let spec = &HalfKaHmMergedL256::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKaHmMerged);
         assert_eq!(spec.l1, 256);
         assert_eq!(spec.l2, 32);
@@ -45,7 +47,7 @@ mod tests {
     fn test_l1_size() {
         // 静的メソッドでのテスト用にダミーのネットワークを読み込む必要があるが、
         // ファイルがないのでここではスペックの確認のみ
-        for spec in HalfKA_hm_L256::SUPPORTED_SPECS {
+        for spec in HalfKaHmMergedL256::SUPPORTED_SPECS {
             assert_eq!(spec.l1, 256);
         }
     }
@@ -53,7 +55,7 @@ mod tests {
     /// マクロ生成: architecture_name() の命名規則テスト
     #[test]
     fn test_architecture_name_format() {
-        for spec in HalfKA_hm_L256::SUPPORTED_SPECS {
+        for spec in HalfKaHmMergedL256::SUPPORTED_SPECS {
             let name = spec.name();
             // HalfKaHmMerged-256-L2-L3-Activation 形式
             assert!(
@@ -67,7 +69,7 @@ mod tests {
     #[test]
     fn test_supported_activations() {
         let activations: Vec<_> =
-            HalfKA_hm_L256::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+            HalfKaHmMergedL256::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
         assert!(activations.contains(&Activation::CReLU));
         assert!(activations.contains(&Activation::SCReLU));
         assert!(activations.contains(&Activation::PairwiseCReLU));
@@ -76,7 +78,7 @@ mod tests {
     /// マクロ生成: L2/L3 の妥当な範囲チェック
     #[test]
     fn test_l2_l3_valid_range() {
-        for spec in HalfKA_hm_L256::SUPPORTED_SPECS {
+        for spec in HalfKaHmMergedL256::SUPPORTED_SPECS {
             assert!(
                 spec.l2 > 0 && spec.l2 <= 128,
                 "L2 should be in range (0, 128], got: {}",

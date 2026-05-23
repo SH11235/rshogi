@@ -145,16 +145,15 @@ impl FeatureSet for HalfKPFeatureSet {
 }
 
 // =============================================================================
-// HalfKA_hmFeatureSet - HalfKA_hm^ NNUE 用の FeatureSet
+// HalfKaHmMergedFeatureSet - HalfKA_hm^ NNUE 用の FeatureSet
 // =============================================================================
 
 /// HalfKA_hm^ 用の FeatureSet（nnue-pytorch互換）
 ///
 /// Half-Mirror King + All pieces with Factorization
-#[allow(non_camel_case_types)]
-pub struct HalfKA_hm_FeatureSet;
+pub struct HalfKaHmMergedFeatureSet;
 
-impl FeatureSet for HalfKA_hm_FeatureSet {
+impl FeatureSet for HalfKaHmMergedFeatureSet {
     const DIMENSIONS: usize = HalfKA_hm::DIMENSIONS;
     const MAX_ACTIVE: usize = HalfKA_hm::MAX_ACTIVE;
     const REFRESH_TRIGGERS: &'static [TriggerEvent] = &[TriggerEvent::FriendKingMoved];
@@ -194,13 +193,13 @@ impl FeatureSet for HalfKA_hm_FeatureSet {
 }
 
 // =============================================================================
-// HalfKAFeatureSet - HalfKA NNUE 用の FeatureSet
+// HalfKaSplitFeatureSet - HalfKA NNUE 用の FeatureSet
 // =============================================================================
 
 /// HalfKA 用の FeatureSet（non-mirror）
-pub struct HalfKAFeatureSet;
+pub struct HalfKaSplitFeatureSet;
 
-impl FeatureSet for HalfKAFeatureSet {
+impl FeatureSet for HalfKaSplitFeatureSet {
     const DIMENSIONS: usize = HalfKA::DIMENSIONS;
     const MAX_ACTIVE: usize = HalfKA::MAX_ACTIVE;
     const REFRESH_TRIGGERS: &'static [TriggerEvent] = &[TriggerEvent::FriendKingMoved];
@@ -238,7 +237,6 @@ impl FeatureSet for HalfKAFeatureSet {
 // =============================================================================
 
 /// HalfKaMerged 用の FeatureSet（non-mirror、両玉を 1 plane に畳む）
-#[allow(non_camel_case_types)]
 pub struct HalfKaMergedFeatureSet;
 
 impl FeatureSet for HalfKaMergedFeatureSet {
@@ -285,7 +283,6 @@ impl FeatureSet for HalfKaMergedFeatureSet {
 // =============================================================================
 
 /// HalfKaHmSplit 用の FeatureSet（Half-Mirror、両玉別 plane）
-#[allow(non_camel_case_types)]
 pub struct HalfKaHmSplitFeatureSet;
 
 impl FeatureSet for HalfKaHmSplitFeatureSet {

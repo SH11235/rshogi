@@ -5,8 +5,8 @@
 //! # 設計
 //!
 //! **「Accumulator は L1 だけで決まる」** を活用し、4バリアントに集約:
-//! - HalfKA(HalfKAStack): L256/L512/L1024 を内包
-//! - HalfKA_hm(HalfKA_hmStack): L256/L512/L1024 を内包
+//! - HalfKA(HalfKaSplitStack): L256/L512/L1024 を内包
+//! - HalfKA_hm(HalfKaHmMergedStack): L256/L512/L1024 を内包
 //! - HalfKP(HalfKPStack): L256/L512 を内包
 //! - LayerStacks: 1536次元 + 9バケット
 //!
@@ -14,8 +14,8 @@
 
 use super::accumulator::DirtyPiece;
 use super::accumulator_layer_stacks::LayerStacksAccStack;
-use super::halfka::HalfKAStack;
-use super::halfka_hm::HalfKA_hmStack;
+use super::halfka::HalfKaSplitStack;
+use super::halfka_hm::HalfKaHmMergedStack;
 use super::halfka_hm_split::HalfKaHmSplitStack;
 use super::halfka_merged::HalfKaMergedStack;
 use super::halfkp::HalfKPStack;
@@ -29,16 +29,16 @@ use super::network::NNUENetwork;
 /// # 4バリアント構造
 ///
 /// L1 サイズのみで分類し、L2/L3/活性化は内部で処理:
-/// - **HalfKA**: L256/L512/L1024 を HalfKAStack で管理
-/// - **HalfKA_hm**: L256/L512/L1024 を HalfKA_hmStack で管理
+/// - **HalfKA**: L256/L512/L1024 を HalfKaSplitStack で管理
+/// - **HalfKA_hm**: L256/L512/L1024 を HalfKaHmMergedStack で管理
 /// - **HalfKP**: L256/L512 を HalfKPStack で管理
 /// - **LayerStacks**: 1536次元 + 9バケット
 #[allow(non_camel_case_types)]
 pub enum AccumulatorStackVariant {
     /// HalfKA 特徴量セット（L256/L512/L1024）
-    HalfKA(HalfKAStack),
+    HalfKA(HalfKaSplitStack),
     /// HalfKA_hm 特徴量セット（L256/L512/L1024）
-    HalfKA_hm(HalfKA_hmStack),
+    HalfKA_hm(HalfKaHmMergedStack),
     /// HalfKaMerged 特徴量セット（L256/L512/L1024）
     HalfKaMerged(HalfKaMergedStack),
     /// HalfKaHmSplit 特徴量セット（L256/L512/L1024）
@@ -55,8 +55,8 @@ impl AccumulatorStackVariant {
     /// 指定されたネットワークのアーキテクチャに対応するスタックバリアントを生成する。
     pub fn from_network(network: &NNUENetwork) -> Self {
         match network {
-            NNUENetwork::HalfKA(net) => Self::HalfKA(HalfKAStack::from_network(net)),
-            NNUENetwork::HalfKA_hm(net) => Self::HalfKA_hm(HalfKA_hmStack::from_network(net)),
+            NNUENetwork::HalfKA(net) => Self::HalfKA(HalfKaSplitStack::from_network(net)),
+            NNUENetwork::HalfKA_hm(net) => Self::HalfKA_hm(HalfKaHmMergedStack::from_network(net)),
             NNUENetwork::HalfKaMerged(net) => {
                 Self::HalfKaMerged(HalfKaMergedStack::from_network(net))
             }
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_push_pop_index_consistency_halfka_hm() {
-        let mut stack = HalfKA_hmStack::default();
+        let mut stack = HalfKaHmMergedStack::default();
         let dirty = DirtyPiece::default();
 
         stack.reset();
@@ -261,9 +261,9 @@ mod tests {
     fn test_halfka_hm_stack_l1_sizes() {
         use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
 
-        let l256_stack = HalfKA_hmStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
-        let l512_stack = HalfKA_hmStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
-        let l1024_stack = HalfKA_hmStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
+        let l256_stack = HalfKaHmMergedStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
+        let l512_stack = HalfKaHmMergedStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
+        let l1024_stack = HalfKaHmMergedStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
 
         assert_eq!(l256_stack.l1_size(), 256);
         assert_eq!(l512_stack.l1_size(), 512);
@@ -312,13 +312,13 @@ mod tests {
         // 各スタックのサイズを確認（デバッグ用）
         let variant_size = size_of::<AccumulatorStackVariant>();
         let layer_stacks_size = size_of::<LayerStacksAccStack>();
-        let halfka_stack_size = size_of::<HalfKA_hmStack>();
+        let halfka_stack_size = size_of::<HalfKaHmMergedStack>();
         let halfkp_stack_size = size_of::<HalfKPStack>();
 
         // 新設計では最大のバリアントのサイズ + タグになる
         // 各サブスタックも enum なので効率的
         eprintln!("AccumulatorStackVariant size: {variant_size} bytes");
-        eprintln!("HalfKA_hmStack size: {halfka_stack_size} bytes");
+        eprintln!("HalfKaHmMergedStack size: {halfka_stack_size} bytes");
         eprintln!("HalfKPStack size: {halfkp_stack_size} bytes");
         eprintln!("LayerStacks size: {layer_stacks_size} bytes");
 

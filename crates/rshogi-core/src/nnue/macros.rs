@@ -20,16 +20,16 @@
 ///
 /// ```ignore
 /// define_l1_variants!(
-///     enum HalfKA_hm_L512,
+///     enum HalfKaHmMergedL512,
 ///     feature_set HalfKaHmMerged,
 ///     l1 512,
 ///     acc AccumulatorHalfKA_hm<512>,
 ///     stack AccumulatorStackHalfKA_hm<512>,
 ///
 ///     variants {
-///         (8,  96, CReLU,        "CReLU")    => CReLU_8_96     : HalfKA_hm512CReLU,
-///         (8,  96, SCReLU,       "SCReLU")   => SCReLU_8_96    : HalfKA_hm512SCReLU,
-///         (8,  96, PairwiseCReLU,"Pairwise") => Pairwise_8_96  : HalfKA_hm512Pairwise,
+///         (8,  96, CReLU,        "CReLU")    => CReLU_8_96     : HalfKaHmMerged512CReLU,
+///         (8,  96, SCReLU,       "SCReLU")   => SCReLU_8_96    : HalfKaHmMerged512SCReLU,
+///         (8,  96, PairwiseCReLU,"Pairwise") => Pairwise_8_96  : HalfKaHmMerged512Pairwise,
 ///     }
 /// );
 /// ```

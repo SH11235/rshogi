@@ -8,16 +8,16 @@
 //! # 構造
 //!
 //! ```text
-//! HalfKA_hmNetwork
-//! ├── L256(HalfKA_hm_L256)
+//! HalfKaHmMergedNetwork
+//! ├── L256(HalfKaHmMergedL256)
 //! │   ├── CReLU_32_32
 //! │   ├── SCReLU_32_32
 //! │   └── Pairwise_32_32
-//! ├── L512(HalfKA_hm_L512)
+//! ├── L512(HalfKaHmMergedL512)
 //! │   ├── CReLU_8_96
 //! │   ├── SCReLU_8_96
 //! │   └── Pairwise_8_96
-//! └── L1024(HalfKA_hm_L1024)
+//! └── L1024(HalfKaHmMergedL1024)
 //!     ├── CReLU_8_96
 //!     ├── SCReLU_8_96
 //!     ├── Pairwise_8_96
@@ -30,10 +30,10 @@ mod l256;
 mod l512;
 mod l768;
 
-pub use l256::HalfKA_hm_L256;
-pub use l512::HalfKA_hm_L512;
-pub use l768::HalfKA_hm_L768;
-pub use l1024::HalfKA_hm_L1024;
+pub use l256::HalfKaHmMergedL256;
+pub use l512::HalfKaHmMergedL512;
+pub use l768::HalfKaHmMergedL768;
+pub use l1024::HalfKaHmMergedL1024;
 
 use crate::nnue::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
 use crate::nnue::network_halfka_hm::AccumulatorStackHalfKA_hm;
@@ -45,34 +45,34 @@ use crate::types::Value;
 ///
 /// L1 サイズごとにバリアントを持つ。
 /// L2/L3/活性化の追加で変更不要（L1 enum 内に閉じる）。
-pub enum HalfKA_hmNetwork {
-    L256(HalfKA_hm_L256),
-    L512(HalfKA_hm_L512),
-    L768(HalfKA_hm_L768),
-    L1024(HalfKA_hm_L1024),
+pub enum HalfKaHmMergedNetwork {
+    L256(HalfKaHmMergedL256),
+    L512(HalfKaHmMergedL512),
+    L768(HalfKaHmMergedL768),
+    L1024(HalfKaHmMergedL1024),
 }
 
-impl HalfKA_hmNetwork {
+impl HalfKaHmMergedNetwork {
     /// 評価値を計算
     #[inline(always)]
-    pub fn evaluate(&self, pos: &Position, stack: &HalfKA_hmStack) -> Value {
+    pub fn evaluate(&self, pos: &Position, stack: &HalfKaHmMergedStack) -> Value {
         match (self, stack) {
-            (Self::L256(net), HalfKA_hmStack::L256(st)) => net.evaluate(pos, st),
-            (Self::L512(net), HalfKA_hmStack::L512(st)) => net.evaluate(pos, st),
-            (Self::L768(net), HalfKA_hmStack::L768(st)) => net.evaluate(pos, st),
-            (Self::L1024(net), HalfKA_hmStack::L1024(st)) => net.evaluate(pos, st),
+            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => net.evaluate(pos, st),
+            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => net.evaluate(pos, st),
+            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => net.evaluate(pos, st),
+            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => net.evaluate(pos, st),
             _ => unreachable!("L1 mismatch: network={}, stack={}", self.l1_size(), stack.l1_size()),
         }
     }
 
     /// Accumulator をフル再計算
     #[inline(always)]
-    pub fn refresh_accumulator(&self, pos: &Position, stack: &mut HalfKA_hmStack) {
+    pub fn refresh_accumulator(&self, pos: &Position, stack: &mut HalfKaHmMergedStack) {
         match (self, stack) {
-            (Self::L256(net), HalfKA_hmStack::L256(st)) => net.refresh_accumulator(pos, st),
-            (Self::L512(net), HalfKA_hmStack::L512(st)) => net.refresh_accumulator(pos, st),
-            (Self::L768(net), HalfKA_hmStack::L768(st)) => net.refresh_accumulator(pos, st),
-            (Self::L1024(net), HalfKA_hmStack::L1024(st)) => net.refresh_accumulator(pos, st),
+            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => net.refresh_accumulator(pos, st),
+            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => net.refresh_accumulator(pos, st),
+            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => net.refresh_accumulator(pos, st),
+            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => net.refresh_accumulator(pos, st),
             _ => unreachable!("L1 mismatch"),
         }
     }
@@ -82,20 +82,20 @@ impl HalfKA_hmNetwork {
     pub fn refresh_accumulator_with_cache(
         &self,
         pos: &Position,
-        stack: &mut HalfKA_hmStack,
+        stack: &mut HalfKaHmMergedStack,
         cache: &mut AccumulatorCacheGeneric,
     ) {
         match (self, stack) {
-            (Self::L256(net), HalfKA_hmStack::L256(st)) => {
+            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => {
                 net.refresh_accumulator_with_cache(pos, st, cache)
             }
-            (Self::L512(net), HalfKA_hmStack::L512(st)) => {
+            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => {
                 net.refresh_accumulator_with_cache(pos, st, cache)
             }
-            (Self::L768(net), HalfKA_hmStack::L768(st)) => {
+            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => {
                 net.refresh_accumulator_with_cache(pos, st, cache)
             }
-            (Self::L1024(net), HalfKA_hmStack::L1024(st)) => {
+            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => {
                 net.refresh_accumulator_with_cache(pos, st, cache)
             }
             _ => unreachable!("L1 mismatch"),
@@ -108,20 +108,20 @@ impl HalfKA_hmNetwork {
         &self,
         pos: &Position,
         dirty: &DirtyPiece,
-        stack: &mut HalfKA_hmStack,
+        stack: &mut HalfKaHmMergedStack,
         source_idx: usize,
     ) {
         match (self, stack) {
-            (Self::L256(net), HalfKA_hmStack::L256(st)) => {
+            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
-            (Self::L512(net), HalfKA_hmStack::L512(st)) => {
+            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
-            (Self::L768(net), HalfKA_hmStack::L768(st)) => {
+            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
-            (Self::L1024(net), HalfKA_hmStack::L1024(st)) => {
+            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => {
                 net.update_accumulator(pos, dirty, st, source_idx)
             }
             _ => unreachable!("L1 mismatch"),
@@ -134,21 +134,21 @@ impl HalfKA_hmNetwork {
         &self,
         pos: &Position,
         dirty: &DirtyPiece,
-        stack: &mut HalfKA_hmStack,
+        stack: &mut HalfKaHmMergedStack,
         source_idx: usize,
         cache: &mut AccumulatorCacheGeneric,
     ) {
         match (self, stack) {
-            (Self::L256(net), HalfKA_hmStack::L256(st)) => {
+            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => {
                 net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
             }
-            (Self::L512(net), HalfKA_hmStack::L512(st)) => {
+            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => {
                 net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
             }
-            (Self::L768(net), HalfKA_hmStack::L768(st)) => {
+            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => {
                 net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
             }
-            (Self::L1024(net), HalfKA_hmStack::L1024(st)) => {
+            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => {
                 net.update_accumulator_with_cache(pos, dirty, st, source_idx, cache)
             }
             _ => unreachable!("L1 mismatch"),
@@ -160,20 +160,20 @@ impl HalfKA_hmNetwork {
     pub fn forward_update_incremental(
         &self,
         pos: &Position,
-        stack: &mut HalfKA_hmStack,
+        stack: &mut HalfKaHmMergedStack,
         source_idx: usize,
     ) -> bool {
         match (self, stack) {
-            (Self::L256(net), HalfKA_hmStack::L256(st)) => {
+            (Self::L256(net), HalfKaHmMergedStack::L256(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
-            (Self::L512(net), HalfKA_hmStack::L512(st)) => {
+            (Self::L512(net), HalfKaHmMergedStack::L512(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
-            (Self::L768(net), HalfKA_hmStack::L768(st)) => {
+            (Self::L768(net), HalfKaHmMergedStack::L768(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
-            (Self::L1024(net), HalfKA_hmStack::L1024(st)) => {
+            (Self::L1024(net), HalfKaHmMergedStack::L1024(st)) => {
                 net.forward_update_incremental(pos, st, source_idx)
             }
             _ => unreachable!("L1 mismatch"),
@@ -209,19 +209,19 @@ impl HalfKA_hmNetwork {
 
         match l1 {
             256 => {
-                let net = HalfKA_hm_L256::read(reader, l2, l3, activation)?;
+                let net = HalfKaHmMergedL256::read(reader, l2, l3, activation)?;
                 Ok(Self::L256(net))
             }
             512 => {
-                let net = HalfKA_hm_L512::read(reader, l2, l3, activation)?;
+                let net = HalfKaHmMergedL512::read(reader, l2, l3, activation)?;
                 Ok(Self::L512(net))
             }
             768 => {
-                let net = HalfKA_hm_L768::read(reader, l2, l3, activation)?;
+                let net = HalfKaHmMergedL768::read(reader, l2, l3, activation)?;
                 Ok(Self::L768(net))
             }
             1024 => {
-                let net = HalfKA_hm_L1024::read(reader, l2, l3, activation)?;
+                let net = HalfKaHmMergedL1024::read(reader, l2, l3, activation)?;
                 Ok(Self::L1024(net))
             }
             _ => Err(std::io::Error::new(
@@ -264,10 +264,10 @@ impl HalfKA_hmNetwork {
     /// サポートするアーキテクチャ一覧
     pub fn supported_specs() -> Vec<ArchitectureSpec> {
         let mut specs = Vec::new();
-        specs.extend_from_slice(HalfKA_hm_L256::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKA_hm_L512::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKA_hm_L768::SUPPORTED_SPECS);
-        specs.extend_from_slice(HalfKA_hm_L1024::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaHmMergedL256::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaHmMergedL512::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaHmMergedL768::SUPPORTED_SPECS);
+        specs.extend_from_slice(HalfKaHmMergedL1024::SUPPORTED_SPECS);
         specs
     }
 }
@@ -275,23 +275,25 @@ impl HalfKA_hmNetwork {
 /// HalfKA_hm Accumulator スタック（L1 のみで決まる）
 ///
 /// L2/L3/活性化の追加で変更不要。
-pub enum HalfKA_hmStack {
+pub enum HalfKaHmMergedStack {
     L256(AccumulatorStackHalfKA_hm<256>),
     L512(AccumulatorStackHalfKA_hm<512>),
     L768(AccumulatorStackHalfKA_hm<768>),
     L1024(AccumulatorStackHalfKA_hm<1024>),
 }
 
-impl HalfKA_hmStack {
+impl HalfKaHmMergedStack {
     /// ネットワークに対応するスタックを生成
     ///
     /// バリアントマッチを使用し、新しい L1 追加時にコンパイル時に漏れ検知。
-    pub fn from_network(net: &HalfKA_hmNetwork) -> Self {
+    pub fn from_network(net: &HalfKaHmMergedNetwork) -> Self {
         match net {
-            HalfKA_hmNetwork::L256(_) => Self::L256(AccumulatorStackHalfKA_hm::<256>::new()),
-            HalfKA_hmNetwork::L512(_) => Self::L512(AccumulatorStackHalfKA_hm::<512>::new()),
-            HalfKA_hmNetwork::L768(_) => Self::L768(AccumulatorStackHalfKA_hm::<768>::new()),
-            HalfKA_hmNetwork::L1024(_) => Self::L1024(AccumulatorStackHalfKA_hm::<1024>::new()),
+            HalfKaHmMergedNetwork::L256(_) => Self::L256(AccumulatorStackHalfKA_hm::<256>::new()),
+            HalfKaHmMergedNetwork::L512(_) => Self::L512(AccumulatorStackHalfKA_hm::<512>::new()),
+            HalfKaHmMergedNetwork::L768(_) => Self::L768(AccumulatorStackHalfKA_hm::<768>::new()),
+            HalfKaHmMergedNetwork::L1024(_) => {
+                Self::L1024(AccumulatorStackHalfKA_hm::<1024>::new())
+            }
         }
     }
 
@@ -400,7 +402,7 @@ impl HalfKA_hmStack {
     }
 }
 
-impl Default for HalfKA_hmStack {
+impl Default for HalfKaHmMergedStack {
     fn default() -> Self {
         Self::L512(AccumulatorStackHalfKA_hm::<512>::new())
     }
@@ -414,19 +416,19 @@ mod tests {
     #[test]
     fn test_halfka_stack_from_network_l1_size() {
         // L256 ネットワークを仮定したスタック
-        let stack = HalfKA_hmStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
+        let stack = HalfKaHmMergedStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
         assert_eq!(stack.l1_size(), 256);
 
-        let stack = HalfKA_hmStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
+        let stack = HalfKaHmMergedStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
         assert_eq!(stack.l1_size(), 512);
 
-        let stack = HalfKA_hmStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
+        let stack = HalfKaHmMergedStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
         assert_eq!(stack.l1_size(), 1024);
     }
 
     #[test]
     fn test_supported_specs_combined() {
-        let specs = HalfKA_hmNetwork::supported_specs();
+        let specs = HalfKaHmMergedNetwork::supported_specs();
         // (256: 1, 512: 3, 768: 1, 1024: 3) × 3 活性化 (CReLU/SCReLU/Pairwise)
         assert_eq!(specs.len(), 24);
 
@@ -439,7 +441,7 @@ mod tests {
     /// push/pop の対称性と状態の一貫性テスト（L256）
     #[test]
     fn test_push_pop_index_consistency_l256() {
-        let mut stack = HalfKA_hmStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
+        let mut stack = HalfKaHmMergedStack::L256(AccumulatorStackHalfKA_hm::<256>::new());
         let dirty = DirtyPiece::default();
 
         stack.reset();
@@ -461,7 +463,7 @@ mod tests {
     /// push/pop の対称性と状態の一貫性テスト（L512）
     #[test]
     fn test_push_pop_index_consistency_l512() {
-        let mut stack = HalfKA_hmStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
+        let mut stack = HalfKaHmMergedStack::L512(AccumulatorStackHalfKA_hm::<512>::new());
         let dirty = DirtyPiece::default();
 
         stack.reset();
@@ -477,7 +479,7 @@ mod tests {
     /// push/pop の対称性と状態の一貫性テスト（L1024）
     #[test]
     fn test_push_pop_index_consistency_l1024() {
-        let mut stack = HalfKA_hmStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
+        let mut stack = HalfKaHmMergedStack::L1024(AccumulatorStackHalfKA_hm::<1024>::new());
         let dirty = DirtyPiece::default();
 
         stack.reset();
@@ -493,7 +495,7 @@ mod tests {
     /// deep push/pop テスト（探索木の深さをシミュレート）
     #[test]
     fn test_deep_push_pop() {
-        let mut stack = HalfKA_hmStack::default();
+        let mut stack = HalfKaHmMergedStack::default();
         let dirty = DirtyPiece::default();
 
         stack.reset();
@@ -516,7 +518,7 @@ mod tests {
     /// アーキテクチャの仕様一覧の一貫性テスト
     #[test]
     fn test_architecture_spec_consistency() {
-        for spec in HalfKA_hmNetwork::supported_specs() {
+        for spec in HalfKaHmMergedNetwork::supported_specs() {
             assert_eq!(spec.feature_set, FeatureSet::HalfKaHmMerged);
             assert!(spec.l1 == 256 || spec.l1 == 512 || spec.l1 == 768 || spec.l1 == 1024);
             assert!(spec.l2 > 0 && spec.l2 <= 128);

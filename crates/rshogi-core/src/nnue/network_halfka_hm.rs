@@ -19,21 +19,21 @@
 //!
 //! | 型エイリアス | L1 | L2 | L3 | 活性化 |
 //! |-------------|------|-----|-----|--------|
-//! | HalfKA_hm256CReLU | 256 | 32 | 32 | CReLU |
-//! | HalfKA_hm256SCReLU | 256 | 32 | 32 | SCReLU |
-//! | HalfKA_hm256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
-//! | HalfKA_hm512CReLU | 512 | 8 | 96 | CReLU |
-//! | HalfKA_hm512SCReLU | 512 | 8 | 96 | SCReLU |
-//! | HalfKA_hm512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
-//! | HalfKA_hm512_32_32CReLU | 512 | 32 | 32 | CReLU |
-//! | HalfKA_hm512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
-//! | HalfKA_hm512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
-//! | HalfKA_hm1024CReLU | 1024 | 8 | 96 | CReLU |
-//! | HalfKA_hm1024SCReLU | 1024 | 8 | 96 | SCReLU |
-//! | HalfKA_hm1024Pairwise | 1024 | 8 | 96 | PairwiseCReLU |
-//! | HalfKA_hm1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
-//! | HalfKA_hm1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
-//! | HalfKA_hm1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
+//! | HalfKaHmMerged256CReLU | 256 | 32 | 32 | CReLU |
+//! | HalfKaHmMerged256SCReLU | 256 | 32 | 32 | SCReLU |
+//! | HalfKaHmMerged256Pairwise | 256 | 32 | 32 | PairwiseCReLU |
+//! | HalfKaHmMerged512CReLU | 512 | 8 | 96 | CReLU |
+//! | HalfKaHmMerged512SCReLU | 512 | 8 | 96 | SCReLU |
+//! | HalfKaHmMerged512Pairwise | 512 | 8 | 96 | PairwiseCReLU |
+//! | HalfKaHmMerged512_32_32CReLU | 512 | 32 | 32 | CReLU |
+//! | HalfKaHmMerged512_32_32SCReLU | 512 | 32 | 32 | SCReLU |
+//! | HalfKaHmMerged512_32_32Pairwise | 512 | 32 | 32 | PairwiseCReLU |
+//! | HalfKaHmMerged1024CReLU | 1024 | 8 | 96 | CReLU |
+//! | HalfKaHmMerged1024SCReLU | 1024 | 8 | 96 | SCReLU |
+//! | HalfKaHmMerged1024Pairwise | 1024 | 8 | 96 | PairwiseCReLU |
+//! | HalfKaHmMerged1024_8_32CReLU | 1024 | 8 | 32 | CReLU |
+//! | HalfKaHmMerged1024_8_32SCReLU | 1024 | 8 | 32 | SCReLU |
+//! | HalfKaHmMerged1024_8_32Pairwise | 1024 | 8 | 32 | PairwiseCReLU |
 //!
 //! # 特徴量
 //!
@@ -50,7 +50,7 @@ use super::accumulator::{
 };
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE_HALFKA, HALFKA_HM_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA};
-use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
+use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKaHmMergedFeatureSet};
 use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -427,7 +427,7 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
 
             accumulation.copy_from_slice(&self.biases);
 
-            let active_indices = HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective);
+            let active_indices = HalfKaHmMergedFeatureSet::collect_active_indices(pos, perspective);
             for index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
@@ -446,11 +446,12 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let reset = HalfKA_hm_FeatureSet::needs_refresh(dirty_piece, perspective);
+            let reset = HalfKaHmMergedFeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
                 acc.accumulation[p].0.copy_from_slice(&self.biases);
-                let active_indices = HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective);
+                let active_indices =
+                    HalfKaHmMergedFeatureSet::collect_active_indices(pos, perspective);
                 for index in active_indices.iter() {
                     self.add_weights(&mut acc.accumulation[p].0, index);
                 }
@@ -485,7 +486,7 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let reset = HalfKA_hm_FeatureSet::needs_refresh(dirty_piece, perspective);
+            let reset = HalfKaHmMergedFeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
                 self.refresh_perspective_with_cache(
@@ -543,7 +544,7 @@ impl<const L1: usize> FeatureTransformerHalfKA_hm<L1> {
         cache: &mut AccumulatorCacheGeneric,
     ) {
         let king_sq = pos.king_square(perspective);
-        let active_indices = HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective);
+        let active_indices = HalfKaHmMergedFeatureSet::collect_active_indices(pos, perspective);
 
         let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
         let len = active_indices.len();
@@ -1829,67 +1830,67 @@ use super::activation::{CReLU, PairwiseCReLU, SCReLU};
 
 // L1=256, FT_OUT=512
 /// HalfKA_hm 256x2-32-32 CReLU
-pub type HalfKA_hm256CReLU = NetworkHalfKA_hm<256, 512, 512, 32, 32, CReLU>;
+pub type HalfKaHmMerged256CReLU = NetworkHalfKA_hm<256, 512, 512, 32, 32, CReLU>;
 /// HalfKA_hm 256x2-32-32 SCReLU
-pub type HalfKA_hm256SCReLU = NetworkHalfKA_hm<256, 512, 512, 32, 32, SCReLU>;
+pub type HalfKaHmMerged256SCReLU = NetworkHalfKA_hm<256, 512, 512, 32, 32, SCReLU>;
 /// HalfKA_hm 256x2-32-32 PairwiseCReLU
-pub type HalfKA_hm256Pairwise = NetworkHalfKA_hm<256, 512, 256, 32, 32, PairwiseCReLU>;
+pub type HalfKaHmMerged256Pairwise = NetworkHalfKA_hm<256, 512, 256, 32, 32, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=64
 /// HalfKA_hm 512x2-8-64 CReLU
-pub type HalfKA_hm512_8_64CReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 64, CReLU>;
+pub type HalfKaHmMerged512_8_64CReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 64, CReLU>;
 /// HalfKA_hm 512x2-8-64 SCReLU
-pub type HalfKA_hm512_8_64SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 64, SCReLU>;
+pub type HalfKaHmMerged512_8_64SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 64, SCReLU>;
 /// HalfKA_hm 512x2-8-64 PairwiseCReLU
-pub type HalfKA_hm512_8_64Pairwise = NetworkHalfKA_hm<512, 1024, 512, 8, 64, PairwiseCReLU>;
+pub type HalfKaHmMerged512_8_64Pairwise = NetworkHalfKA_hm<512, 1024, 512, 8, 64, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=8, L3=96
 /// HalfKA_hm 512x2-8-96 CReLU
-pub type HalfKA_hm512CReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 96, CReLU>;
+pub type HalfKaHmMerged512CReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 96, CReLU>;
 /// HalfKA_hm 512x2-8-96 SCReLU
-pub type HalfKA_hm512SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 96, SCReLU>;
+pub type HalfKaHmMerged512SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 8, 96, SCReLU>;
 /// HalfKA_hm 512x2-8-96 PairwiseCReLU
-pub type HalfKA_hm512Pairwise = NetworkHalfKA_hm<512, 1024, 512, 8, 96, PairwiseCReLU>;
+pub type HalfKaHmMerged512Pairwise = NetworkHalfKA_hm<512, 1024, 512, 8, 96, PairwiseCReLU>;
 
 // L1=512, FT_OUT=1024, L2=32, L3=32
 /// HalfKA_hm 512x2-32-32 CReLU
-pub type HalfKA_hm512_32_32CReLU = NetworkHalfKA_hm<512, 1024, 1024, 32, 32, CReLU>;
+pub type HalfKaHmMerged512_32_32CReLU = NetworkHalfKA_hm<512, 1024, 1024, 32, 32, CReLU>;
 /// HalfKA_hm 512x2-32-32 SCReLU
-pub type HalfKA_hm512_32_32SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 32, 32, SCReLU>;
+pub type HalfKaHmMerged512_32_32SCReLU = NetworkHalfKA_hm<512, 1024, 1024, 32, 32, SCReLU>;
 /// HalfKA_hm 512x2-32-32 PairwiseCReLU
-pub type HalfKA_hm512_32_32Pairwise = NetworkHalfKA_hm<512, 1024, 512, 32, 32, PairwiseCReLU>;
+pub type HalfKaHmMerged512_32_32Pairwise = NetworkHalfKA_hm<512, 1024, 512, 32, 32, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=64
 /// HalfKA_hm 1024x2-8-64 CReLU
-pub type HalfKA_hm1024_8_64CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 64, CReLU>;
+pub type HalfKaHmMerged1024_8_64CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 64, CReLU>;
 /// HalfKA_hm 1024x2-8-64 SCReLU
-pub type HalfKA_hm1024_8_64SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 64, SCReLU>;
+pub type HalfKaHmMerged1024_8_64SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 64, SCReLU>;
 /// HalfKA_hm 1024x2-8-64 PairwiseCReLU
-pub type HalfKA_hm1024_8_64Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 64, PairwiseCReLU>;
+pub type HalfKaHmMerged1024_8_64Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 64, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=96
 /// HalfKA_hm 1024x2-8-96 CReLU
-pub type HalfKA_hm1024CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 96, CReLU>;
+pub type HalfKaHmMerged1024CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 96, CReLU>;
 /// HalfKA_hm 1024x2-8-96 SCReLU
-pub type HalfKA_hm1024SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 96, SCReLU>;
+pub type HalfKaHmMerged1024SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 96, SCReLU>;
 /// HalfKA_hm 1024x2-8-96 PairwiseCReLU
-pub type HalfKA_hm1024Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
+pub type HalfKaHmMerged1024Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 96, PairwiseCReLU>;
 
 // L1=1024, FT_OUT=2048, L2=8, L3=32
 /// HalfKA_hm 1024x2-8-32 CReLU
-pub type HalfKA_hm1024_8_32CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 32, CReLU>;
+pub type HalfKaHmMerged1024_8_32CReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 32, CReLU>;
 /// HalfKA_hm 1024x2-8-32 SCReLU
-pub type HalfKA_hm1024_8_32SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 32, SCReLU>;
+pub type HalfKaHmMerged1024_8_32SCReLU = NetworkHalfKA_hm<1024, 2048, 2048, 8, 32, SCReLU>;
 /// HalfKA_hm 1024x2-8-32 PairwiseCReLU
-pub type HalfKA_hm1024_8_32Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
+pub type HalfKaHmMerged1024_8_32Pairwise = NetworkHalfKA_hm<1024, 2048, 1024, 8, 32, PairwiseCReLU>;
 
 // L1=768, FT_OUT=1536, L2=16, L3=64
 /// HalfKA_hm 768x2-16-64 CReLU
-pub type HalfKA_hm768CReLU = NetworkHalfKA_hm<768, 1536, 1536, 16, 64, CReLU>;
+pub type HalfKaHmMerged768CReLU = NetworkHalfKA_hm<768, 1536, 1536, 16, 64, CReLU>;
 /// HalfKA_hm 768x2-16-64 SCReLU
-pub type HalfKA_hm768SCReLU = NetworkHalfKA_hm<768, 1536, 1536, 16, 64, SCReLU>;
+pub type HalfKaHmMerged768SCReLU = NetworkHalfKA_hm<768, 1536, 1536, 16, 64, SCReLU>;
 /// HalfKA_hm 768x2-16-64 PairwiseCReLU
-pub type HalfKA_hm768Pairwise = NetworkHalfKA_hm<768, 1536, 768, 16, 64, PairwiseCReLU>;
+pub type HalfKaHmMerged768Pairwise = NetworkHalfKA_hm<768, 1536, 768, 16, 64, PairwiseCReLU>;
 
 // =============================================================================
 // テスト
@@ -1960,8 +1961,8 @@ mod tests {
     #[test]
     fn test_type_aliases() {
         // 型エイリアスがコンパイルできることを確認
-        fn _check_halfka_256_crelu(_: HalfKA_hm256CReLU) {}
-        fn _check_halfka_512_crelu(_: HalfKA_hm512CReLU) {}
-        fn _check_halfka_1024_crelu(_: HalfKA_hm1024CReLU) {}
+        fn _check_halfka_256_crelu(_: HalfKaHmMerged256CReLU) {}
+        fn _check_halfka_512_crelu(_: HalfKaHmMerged512CReLU) {}
+        fn _check_halfka_1024_crelu(_: HalfKaHmMerged1024CReLU) {}
     }
 }

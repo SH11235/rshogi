@@ -20,7 +20,6 @@ use crate::position::Position;
 use crate::types::{Color, Square};
 
 /// HalfKaHmSplit 特徴量
-#[allow(non_camel_case_types)]
 pub struct HalfKaHmSplit;
 
 impl Feature for HalfKaHmSplit {

@@ -9,10 +9,12 @@ use crate::position::Position;
 use crate::types::Value;
 
 // 型エイリアスを aliases 経由でインポート
-use crate::nnue::aliases::{HalfKA_hm768CReLU, HalfKA_hm768Pairwise, HalfKA_hm768SCReLU};
+use crate::nnue::aliases::{
+    HalfKaHmMerged768CReLU, HalfKaHmMerged768Pairwise, HalfKaHmMerged768SCReLU,
+};
 
 crate::define_l1_variants!(
-    enum HalfKA_hm_L768,
+    enum HalfKaHmMergedL768,
     feature_set HalfKaHmMerged,
     l1 768,
     acc crate::nnue::network_halfka_hm::AccumulatorHalfKA_hm<768>,
@@ -20,9 +22,9 @@ crate::define_l1_variants!(
 
     variants {
         // L2=16, L3=64 バリアント
-        (16, 64, CReLU)         => CReLU16x64    : HalfKA_hm768CReLU,
-        (16, 64, SCReLU)        => SCReLU16x64   : HalfKA_hm768SCReLU,
-        (16, 64, PairwiseCReLU) => Pairwise16x64 : HalfKA_hm768Pairwise,
+        (16, 64, CReLU)         => CReLU16x64    : HalfKaHmMerged768CReLU,
+        (16, 64, SCReLU)        => SCReLU16x64   : HalfKaHmMerged768SCReLU,
+        (16, 64, PairwiseCReLU) => Pairwise16x64 : HalfKaHmMerged768Pairwise,
     }
 );
 
@@ -32,10 +34,10 @@ mod tests {
 
     #[test]
     fn test_supported_specs() {
-        assert_eq!(HalfKA_hm_L768::SUPPORTED_SPECS.len(), 3);
+        assert_eq!(HalfKaHmMergedL768::SUPPORTED_SPECS.len(), 3);
 
         // 16-64 CReLU
-        let spec = &HalfKA_hm_L768::SUPPORTED_SPECS[0];
+        let spec = &HalfKaHmMergedL768::SUPPORTED_SPECS[0];
         assert_eq!(spec.feature_set, FeatureSet::HalfKaHmMerged);
         assert_eq!(spec.l1, 768);
         assert_eq!(spec.l2, 16);
@@ -45,7 +47,7 @@ mod tests {
 
     #[test]
     fn test_l1_size() {
-        for spec in HalfKA_hm_L768::SUPPORTED_SPECS {
+        for spec in HalfKaHmMergedL768::SUPPORTED_SPECS {
             assert_eq!(spec.l1, 768);
         }
     }
@@ -53,7 +55,7 @@ mod tests {
     /// マクロ生成: architecture_name() の命名規則テスト
     #[test]
     fn test_architecture_name_format() {
-        for spec in HalfKA_hm_L768::SUPPORTED_SPECS {
+        for spec in HalfKaHmMergedL768::SUPPORTED_SPECS {
             let name = spec.name();
             assert!(
                 name.starts_with("HalfKaHmMerged-768-"),
@@ -66,7 +68,7 @@ mod tests {
     #[test]
     fn test_supported_activations() {
         let activations: Vec<_> =
-            HalfKA_hm_L768::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
+            HalfKaHmMergedL768::SUPPORTED_SPECS.iter().map(|s| s.activation).collect();
         assert!(activations.contains(&Activation::CReLU));
         assert!(activations.contains(&Activation::SCReLU));
         assert!(activations.contains(&Activation::PairwiseCReLU));

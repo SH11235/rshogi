@@ -18,7 +18,6 @@ use crate::position::Position;
 use crate::types::{Color, Square};
 
 /// HalfKaMerged 特徴量
-#[allow(non_camel_case_types)]
 pub struct HalfKaMerged;
 
 impl Feature for HalfKaMerged {

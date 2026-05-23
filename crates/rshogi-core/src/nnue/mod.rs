@@ -81,8 +81,8 @@ pub use diff::get_changed_features;
 pub use feature_transformer::FeatureTransformer;
 pub use feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 pub use features::{
-    Feature, FeatureSet, HalfKA, HalfKA_hm, HalfKA_hm_FeatureSet, HalfKAFeatureSet, HalfKP,
-    HalfKPFeatureSet, TriggerEvent,
+    Feature, FeatureSet, HalfKA, HalfKA_hm, HalfKP, HalfKPFeatureSet, HalfKaHmMergedFeatureSet,
+    HalfKaSplitFeatureSet, TriggerEvent,
 };
 pub use layer_stacks::{
     LayerStackBucket, LayerStacks, compute_bucket_index, compute_king_ranks,

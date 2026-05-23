@@ -13,7 +13,7 @@ use super::bona_piece_halfka_hm::{halfka_index, is_hm_mirror, king_bucket, pack_
 use super::constants::HALFKA_HM_DIMENSIONS;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
-use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKA_hm_FeatureSet};
+use super::features::{Feature, FeatureSet, HalfKA_hm, HalfKaHmMergedFeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 use super::stats::{count_refresh, count_update};
 #[cfg(feature = "nnue-threat")]
@@ -719,7 +719,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let reset = HalfKA_hm_FeatureSet::needs_refresh(dirty_piece, perspective);
+            let reset = HalfKaHmMergedFeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
                 // 玉が移動した場合は全計算
@@ -860,7 +860,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let reset = HalfKA_hm_FeatureSet::needs_refresh(dirty_piece, perspective);
+            let reset = HalfKaHmMergedFeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
                 count_refresh!();

@@ -32,8 +32,8 @@ use std::sync::Arc;
 use super::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
 use super::accumulator_layer_stacks::LayerStacksAccCache;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
-use super::halfka::HalfKAStack;
-use super::halfka_hm::HalfKA_hmStack;
+use super::halfka::HalfKaSplitStack;
+use super::halfka_hm::HalfKaHmMergedStack;
 use super::halfkp::HalfKPStack;
 use super::network::NNUENetwork;
 use super::spec::ArchitectureSpec;
@@ -340,9 +340,9 @@ impl NNUEEvaluator {
     /// HalfKA アキュムレータを更新
     #[inline]
     fn update_halfka_accumulator(
-        net: &super::halfka::HalfKANetwork,
+        net: &super::halfka::HalfKaSplitNetwork,
         pos: &Position,
-        stack: &mut HalfKAStack,
+        stack: &mut HalfKaSplitStack,
         cache: &mut Option<AccumulatorCacheGeneric>,
     ) {
         if stack.is_current_computed() {
@@ -380,9 +380,9 @@ impl NNUEEvaluator {
     /// HalfKA_hm アキュムレータを更新
     #[inline]
     fn update_halfka_hm_accumulator(
-        net: &super::halfka_hm::HalfKA_hmNetwork,
+        net: &super::halfka_hm::HalfKaHmMergedNetwork,
         pos: &Position,
-        stack: &mut HalfKA_hmStack,
+        stack: &mut HalfKaHmMergedStack,
         cache: &mut Option<AccumulatorCacheGeneric>,
     ) {
         if stack.is_current_computed() {
@@ -587,29 +587,26 @@ mod tests {
         use crate::nnue::network_halfkp::AccumulatorStackHalfKP;
 
         // HalfKA スタックの各 L1 サイズ
-        let halfka_nm_l256 = AccumulatorStackVariant::HalfKA(HalfKAStack::L256(
+        let halfka_nm_l256 = AccumulatorStackVariant::HalfKA(HalfKaSplitStack::L256(
             AccumulatorStackHalfKA::<256>::new(),
         ));
-        let halfka_nm_l512 = AccumulatorStackVariant::HalfKA(HalfKAStack::L512(
+        let halfka_nm_l512 = AccumulatorStackVariant::HalfKA(HalfKaSplitStack::L512(
             AccumulatorStackHalfKA::<512>::new(),
         ));
-        let halfka_nm_l1024 = AccumulatorStackVariant::HalfKA(HalfKAStack::L1024(
+        let halfka_nm_l1024 = AccumulatorStackVariant::HalfKA(HalfKaSplitStack::L1024(
             AccumulatorStackHalfKA::<1024>::new(),
         ));
 
         // HalfKA_hm スタックの各 L1 サイズ
-        let halfka_hm_l256 =
-            AccumulatorStackVariant::HalfKA_hm(HalfKA_hmStack::L256(AccumulatorStackHalfKA_hm::<
-                256,
-            >::new()));
-        let halfka_hm_l512 =
-            AccumulatorStackVariant::HalfKA_hm(HalfKA_hmStack::L512(AccumulatorStackHalfKA_hm::<
-                512,
-            >::new()));
-        let halfka_hm_l1024 =
-            AccumulatorStackVariant::HalfKA_hm(HalfKA_hmStack::L1024(AccumulatorStackHalfKA_hm::<
-                1024,
-            >::new()));
+        let halfka_hm_l256 = AccumulatorStackVariant::HalfKA_hm(HalfKaHmMergedStack::L256(
+            AccumulatorStackHalfKA_hm::<256>::new(),
+        ));
+        let halfka_hm_l512 = AccumulatorStackVariant::HalfKA_hm(HalfKaHmMergedStack::L512(
+            AccumulatorStackHalfKA_hm::<512>::new(),
+        ));
+        let halfka_hm_l1024 = AccumulatorStackVariant::HalfKA_hm(HalfKaHmMergedStack::L1024(
+            AccumulatorStackHalfKA_hm::<1024>::new(),
+        ));
 
         // HalfKP スタックの各 L1 サイズ
         let halfkp_l256 = AccumulatorStackVariant::HalfKP(HalfKPStack::L256(
@@ -655,7 +652,7 @@ mod tests {
         let dirty = DirtyPiece::default();
 
         // HalfKA L512
-        let mut stack = AccumulatorStackVariant::HalfKA(HalfKAStack::L512(
+        let mut stack = AccumulatorStackVariant::HalfKA(HalfKaSplitStack::L512(
             AccumulatorStackHalfKA::<512>::new(),
         ));
         stack.reset();
@@ -666,10 +663,9 @@ mod tests {
         // パニックしなければ成功
 
         // HalfKA_hm L512
-        let mut stack =
-            AccumulatorStackVariant::HalfKA_hm(HalfKA_hmStack::L512(AccumulatorStackHalfKA_hm::<
-                512,
-            >::new()));
+        let mut stack = AccumulatorStackVariant::HalfKA_hm(HalfKaHmMergedStack::L512(
+            AccumulatorStackHalfKA_hm::<512>::new(),
+        ));
         stack.reset();
         stack.push(dirty);
         stack.push(dirty);
@@ -782,16 +778,16 @@ mod tests {
     /// network.rs の NNUENetwork enum が全アーキテクチャをカバーしていることの確認
     #[test]
     fn test_network_enum_coverage() {
-        use crate::nnue::halfka::HalfKANetwork;
-        use crate::nnue::halfka_hm::HalfKA_hmNetwork;
+        use crate::nnue::halfka::HalfKaSplitNetwork;
+        use crate::nnue::halfka_hm::HalfKaHmMergedNetwork;
         use crate::nnue::halfkp::HalfKPNetwork;
 
         // HalfKA サポートアーキテクチャ数
-        let halfka_specs = HalfKANetwork::supported_specs();
+        let halfka_specs = HalfKaSplitNetwork::supported_specs();
         assert_eq!(halfka_specs.len(), 24); // (256:1 + 512:3 + 768:1 + 1024:3) × 3 活性化
 
         // HalfKA_hm サポートアーキテクチャ数
-        let halfka_hm_specs = HalfKA_hmNetwork::supported_specs();
+        let halfka_hm_specs = HalfKaHmMergedNetwork::supported_specs();
         assert_eq!(halfka_hm_specs.len(), 24); // (256:1 + 512:3 + 768:1 + 1024:3) × 3 活性化
 
         // HalfKP サポートアーキテクチャ数

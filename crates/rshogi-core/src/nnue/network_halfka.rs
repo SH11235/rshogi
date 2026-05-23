@@ -50,7 +50,7 @@ use super::accumulator::{
 };
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE_HALFKA, HALFKA_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION_HALFKA};
-use super::features::{Feature, FeatureSet, HalfKA, HalfKAFeatureSet};
+use super::features::{Feature, FeatureSet, HalfKA, HalfKaSplitFeatureSet};
 use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -427,7 +427,7 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
 
             accumulation.copy_from_slice(&self.biases);
 
-            let active_indices = HalfKAFeatureSet::collect_active_indices(pos, perspective);
+            let active_indices = HalfKaSplitFeatureSet::collect_active_indices(pos, perspective);
             for index in active_indices.iter() {
                 self.add_weights(accumulation, index);
             }
@@ -446,11 +446,12 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let reset = HalfKAFeatureSet::needs_refresh(dirty_piece, perspective);
+            let reset = HalfKaSplitFeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
                 acc.accumulation[p].0.copy_from_slice(&self.biases);
-                let active_indices = HalfKAFeatureSet::collect_active_indices(pos, perspective);
+                let active_indices =
+                    HalfKaSplitFeatureSet::collect_active_indices(pos, perspective);
                 for index in active_indices.iter() {
                     self.add_weights(&mut acc.accumulation[p].0, index);
                 }
@@ -485,7 +486,7 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
     ) {
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
-            let reset = HalfKAFeatureSet::needs_refresh(dirty_piece, perspective);
+            let reset = HalfKaSplitFeatureSet::needs_refresh(dirty_piece, perspective);
 
             if reset {
                 self.refresh_perspective_with_cache(
@@ -543,7 +544,7 @@ impl<const L1: usize> FeatureTransformerHalfKA<L1> {
         cache: &mut AccumulatorCacheGeneric,
     ) {
         let king_sq = pos.king_square(perspective);
-        let active_indices = HalfKAFeatureSet::collect_active_indices(pos, perspective);
+        let active_indices = HalfKaSplitFeatureSet::collect_active_indices(pos, perspective);
 
         let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
         let len = active_indices.len();

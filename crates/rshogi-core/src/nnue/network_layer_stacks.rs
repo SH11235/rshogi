@@ -1068,9 +1068,9 @@ mod tests {
         pos.set_sfen(SFEN_HIRATE).unwrap();
 
         // アクティブ特徴量を確認
-        use crate::nnue::features::{FeatureSet, HalfKA_hm_FeatureSet};
+        use crate::nnue::features::{FeatureSet, HalfKaHmMergedFeatureSet};
         use crate::types::Color;
-        let active_black = HalfKA_hm_FeatureSet::collect_active_indices(&pos, Color::Black);
+        let active_black = HalfKaHmMergedFeatureSet::collect_active_indices(&pos, Color::Black);
         eprintln!("Active features for Black: {} features", active_black.len());
         let first_5: Vec<usize> = active_black.iter().take(5).collect();
         eprintln!("  First 5 indices: {first_5:?}");

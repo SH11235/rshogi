@@ -16,7 +16,7 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use rshogi_core::nnue::{
-    AccumulatorLayerStacks, AffineTransform, FeatureSet, HalfKA_hm_FeatureSet,
+    AccumulatorLayerStacks, AffineTransform, FeatureSet, HalfKaHmMergedFeatureSet,
     LayerStackBucketMode, LayerStacksNetwork, NNUE_PYTORCH_L3, NNUENetwork, NetworkLayerStacks,
     SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_progress8kpabs_bucket_index,
     get_layer_stack_progress_kpabs_weights, set_layer_stack_bucket_mode,
@@ -187,7 +187,7 @@ fn recompute_ft_scalar<
     for (dst, &b) in acc.iter_mut().zip(network.feature_transformer.biases.0.iter()) {
         *dst = i32::from(b);
     }
-    let active = HalfKA_hm_FeatureSet::collect_active_indices(pos, perspective);
+    let active = HalfKaHmMergedFeatureSet::collect_active_indices(pos, perspective);
     for index in active.iter() {
         let offset = index * L1;
         for (i, dst) in acc.iter_mut().enumerate() {
@@ -216,8 +216,8 @@ fn dump_debug_first<
     eprintln!("[debug] side_to_move={:?}", pos.side_to_move());
     eprintln!("[debug] bucket={bucket_index} raw={raw} score={score}");
 
-    let black_active = HalfKA_hm_FeatureSet::collect_active_indices(pos, Color::Black);
-    let white_active = HalfKA_hm_FeatureSet::collect_active_indices(pos, Color::White);
+    let black_active = HalfKaHmMergedFeatureSet::collect_active_indices(pos, Color::Black);
+    let white_active = HalfKaHmMergedFeatureSet::collect_active_indices(pos, Color::White);
     eprintln!(
         "[debug] active_features black={} white={}",
         black_active.len(),

@@ -6,37 +6,37 @@
 // HalfKA_hm 型エイリアス
 pub use crate::nnue::network_halfka_hm::{
     // L1=256, L2=32, L3=32
-    HalfKA_hm256CReLU,
-    HalfKA_hm256Pairwise,
-    HalfKA_hm256SCReLU,
+    HalfKaHmMerged256CReLU,
+    HalfKaHmMerged256Pairwise,
+    HalfKaHmMerged256SCReLU,
     // L1=512, L2=8, L3=64
-    HalfKA_hm512_8_64CReLU,
-    HalfKA_hm512_8_64Pairwise,
-    HalfKA_hm512_8_64SCReLU,
+    HalfKaHmMerged512_8_64CReLU,
+    HalfKaHmMerged512_8_64Pairwise,
+    HalfKaHmMerged512_8_64SCReLU,
     // L1=512, L2=32, L3=32
-    HalfKA_hm512_32_32CReLU,
-    HalfKA_hm512_32_32Pairwise,
-    HalfKA_hm512_32_32SCReLU,
+    HalfKaHmMerged512_32_32CReLU,
+    HalfKaHmMerged512_32_32Pairwise,
+    HalfKaHmMerged512_32_32SCReLU,
     // L1=512, L2=8, L3=96
-    HalfKA_hm512CReLU,
-    HalfKA_hm512Pairwise,
-    HalfKA_hm512SCReLU,
+    HalfKaHmMerged512CReLU,
+    HalfKaHmMerged512Pairwise,
+    HalfKaHmMerged512SCReLU,
     // L1=768, L2=16, L3=64
-    HalfKA_hm768CReLU,
-    HalfKA_hm768Pairwise,
-    HalfKA_hm768SCReLU,
+    HalfKaHmMerged768CReLU,
+    HalfKaHmMerged768Pairwise,
+    HalfKaHmMerged768SCReLU,
     // L1=1024, L2=8, L3=32
-    HalfKA_hm1024_8_32CReLU,
-    HalfKA_hm1024_8_32Pairwise,
-    HalfKA_hm1024_8_32SCReLU,
+    HalfKaHmMerged1024_8_32CReLU,
+    HalfKaHmMerged1024_8_32Pairwise,
+    HalfKaHmMerged1024_8_32SCReLU,
     // L1=1024, L2=8, L3=64
-    HalfKA_hm1024_8_64CReLU,
-    HalfKA_hm1024_8_64Pairwise,
-    HalfKA_hm1024_8_64SCReLU,
+    HalfKaHmMerged1024_8_64CReLU,
+    HalfKaHmMerged1024_8_64Pairwise,
+    HalfKaHmMerged1024_8_64SCReLU,
     // L1=1024, L2=8, L3=96
-    HalfKA_hm1024CReLU,
-    HalfKA_hm1024Pairwise,
-    HalfKA_hm1024SCReLU,
+    HalfKaHmMerged1024CReLU,
+    HalfKaHmMerged1024Pairwise,
+    HalfKaHmMerged1024SCReLU,
 };
 
 // HalfKA 型エイリアス
