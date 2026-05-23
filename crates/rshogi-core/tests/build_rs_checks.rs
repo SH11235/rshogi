@@ -206,6 +206,15 @@ fn ls_arch_plus_halfkx_arch_rejected_phase1() {
 }
 
 #[test]
+fn ls_arch_plus_halfkx_arch_rejected_without_mode() {
+    // アーキテクチャ整合性 check は mode-* がなくても適用される。
+    // 旧 build script は halfkx-arch を立てないため Phase 1 互換は破壊しない。
+    let has = lookup(&["ls-arch", "halfkx-arch"]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("ls-arch") && err.contains("halfkx-arch"));
+}
+
+#[test]
 fn ls_arch_with_ft_halfkp_rejected() {
     // ADR「LS は halfka_hm_merged だけ通る」: LS で他 FT を立てると reject。
     let has = lookup(&[
@@ -226,6 +235,29 @@ fn ls_arch_with_ft_halfka_split_rejected() {
         "ls-size-1536x16x32",
         "ft-halfka_split",
     ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("ft-halfka_hm_merged のみ"));
+}
+
+#[test]
+fn ls_arch_with_ft_halfkp_rejected_in_family() {
+    // ADR 「LS は halfka_hm_merged だけ通る」は mode に関わらず適用。
+    // family mode で ls-arch + 不正 FT を立てれば reject される。
+    let has = lookup(&[
+        "mode-family",
+        "ls-arch",
+        "ls-size-1536x16x32",
+        "ls-size-768x16x32",
+        "ft-halfkp",
+    ]);
+    let err = validate_feature_combination(&has).unwrap_err();
+    assert!(err.contains("ft-halfka_hm_merged のみ"));
+}
+
+#[test]
+fn ls_arch_with_ft_halfkp_rejected_without_mode() {
+    // Phase 1 互換 (mode-* なし) build でも LS × 不正 FT は reject される。
+    let has = lookup(&["ls-arch", "ft-halfkp"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("ft-halfka_hm_merged のみ"));
 }
