@@ -6,7 +6,7 @@
 
 use super::accumulator::{DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::bona_piece::BonaPiece;
-#[cfg(feature = "nnue-psqt")]
+#[cfg(feature = "ls-ext-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square};
@@ -21,12 +21,12 @@ pub struct AccumulatorLayerStacks<const L1: usize> {
 
     /// Threat アキュムレータ [perspective][dimension]
     /// Threat weights (i8) の累積値。評価時に piece accumulation と加算して SCReLU に入力する。
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(feature = "ls-ext-threat")]
     pub threat_accumulation: [[i16; L1]; 2],
 
     /// PSQT アキュムレータ [perspective][bucket]
     /// 各駒の PSQT 重みを視点ごとに累積する。
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     pub psqt_accumulation: [[i32; NUM_LAYER_STACK_BUCKETS]; 2],
 
     /// 計算済みフラグ
@@ -41,9 +41,9 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
     pub fn new() -> Self {
         Self {
             accumulation: [[0; L1]; 2],
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             threat_accumulation: [[0; L1]; 2],
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             psqt_accumulation: [[0; NUM_LAYER_STACK_BUCKETS]; 2],
             computed_accumulation: false,
             computed_score: false,
@@ -68,7 +68,7 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
     }
 
     /// 指定視点の Threat 累積値を取得
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(feature = "ls-ext-threat")]
     #[inline]
     pub fn get_threat(&self, perspective: usize) -> &[i16; L1] {
         debug_assert!(perspective < 2);
@@ -76,7 +76,7 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
     }
 
     /// 指定視点の Threat 累積値を取得（可変）
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(feature = "ls-ext-threat")]
     #[inline]
     pub fn get_threat_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
         debug_assert!(perspective < 2);
@@ -102,7 +102,7 @@ impl<const L1: usize> Default for AccumulatorLayerStacks<L1> {
 /// 差分のみ add/sub でアキュムレータを更新することで、
 /// `append_active_indices` + `sort_unstable` のオーバーヘッドを回避する。
 ///
-/// `nnue-psqt` feature 有効時は PSQT アキュムレータも同時にキャッシュし、
+/// `ls-ext-psqt` feature 有効時は PSQT アキュムレータも同時にキャッシュし、
 /// 玉移動時の PSQT フル再計算（40 駒 × 9 bucket = 360 i32 加算）を
 /// slot 差分（通常 0〜数 slot）に置き換える。
 #[repr(C, align(64))]
@@ -114,12 +114,12 @@ struct AccCacheEntry<const L1: usize> {
     /// `refresh_or_cache_with_psqt` の `add_psqt_fn` / `sub_psqt_fn` で
     /// main acc と同一の差分タイミングで更新される。
     ///
-    /// メモリフットプリント: `nnue-psqt` 有効時、各エントリは
+    /// メモリフットプリント: `ls-ext-psqt` 有効時、各エントリは
     /// `accumulation (2 × L1 bytes)` + `psqt_accumulation (36 bytes)` +
     /// `piece_list (40 × 2 bytes)` + `valid (1 byte)` で構成され、64-byte
     /// 境界にアライメントされる。L1=1536 で約 3,188 bytes + パディング。
     /// `Square::NUM = 81` × 2 perspective = 162 エントリ ≈ 520 KB。
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     psqt_accumulation: [i32; NUM_LAYER_STACK_BUCKETS],
     /// キャッシュ時点の `PieceList`（perspective 固有の fb または fw 配列）
     ///
@@ -134,7 +134,7 @@ impl<const L1: usize> AccCacheEntry<L1> {
     fn new_invalid() -> Self {
         Self {
             accumulation: [0; L1],
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             psqt_accumulation: [0; NUM_LAYER_STACK_BUCKETS],
             piece_list: [BonaPiece::ZERO; PieceNumber::NB],
             valid: false,
@@ -275,7 +275,7 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
     /// generic Fn パラメータの直接渡しが現状最も高速で、構造体経由（特に
     /// `Box<dyn Fn>` での動的 dispatch）は NPS 退行のリスクがある。
     /// 可読性は犠牲になるが性能優先の設計。
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn refresh_or_cache_with_psqt<FI, FA, FS, FAP, FSP>(
         &mut self,
@@ -622,16 +622,16 @@ impl<const L1: usize> Default for AccumulatorStackLayerStacks<L1> {
 
 /// LayerStacks アキュムレータスタックの L1 サイズ dispatch enum
 ///
-/// Cargo feature `layerstacks-1536x16x32` / `layerstacks-1536x32x32`
-/// / `layerstacks-768x16x32` / `layerstacks-512x16x32` で有効なバリアントが制御される。
+/// Cargo feature `ls-size-1536x16x32` / `ls-size-1536x32x32`
+/// / `ls-size-768x16x32` / `ls-size-512x16x32` で有効なバリアントが制御される。
 pub enum LayerStacksAccStack {
-    #[cfg(feature = "layerstacks-1536x16x32")]
+    #[cfg(feature = "ls-size-1536x16x32")]
     L1536x16x32(AccumulatorStackLayerStacks<1536>),
-    #[cfg(feature = "layerstacks-1536x32x32")]
+    #[cfg(feature = "ls-size-1536x32x32")]
     L1536x32x32(AccumulatorStackLayerStacks<1536>),
-    #[cfg(feature = "layerstacks-768x16x32")]
+    #[cfg(feature = "ls-size-768x16x32")]
     L768x16x32(AccumulatorStackLayerStacks<768>),
-    #[cfg(feature = "layerstacks-512x16x32")]
+    #[cfg(feature = "ls-size-512x16x32")]
     L512x16x32(AccumulatorStackLayerStacks<512>),
 }
 
@@ -642,19 +642,19 @@ pub enum LayerStacksAccStack {
 macro_rules! ls_match {
     ($val:expr, $pat:ident => $body:expr) => {
         match $val {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32($pat) => $body,
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32($pat) => $body,
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32($pat) => $body,
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32($pat) => $body,
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -665,19 +665,19 @@ impl LayerStacksAccStack {
     /// L1 サイズを取得
     pub fn l1_size(&self) -> usize {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(_) => 1536,
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(_) => 1536,
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(_) => 768,
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(_) => 512,
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -686,19 +686,19 @@ impl LayerStacksAccStack {
     /// アーキテクチャ寸法 (L1, L2, L3) を返す
     pub fn architecture_dims(&self) -> (usize, usize, usize) {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(_) => (1536, 16, 32),
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(_) => (1536, 32, 32),
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(_) => (768, 16, 32),
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(_) => (512, 16, 32),
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -735,13 +735,13 @@ impl LayerStacksAccStack {
 
 /// LayerStacks アキュムレータキャッシュの L1 サイズ dispatch enum
 pub enum LayerStacksAccCache {
-    #[cfg(feature = "layerstacks-1536x16x32")]
+    #[cfg(feature = "ls-size-1536x16x32")]
     L1536x16x32(AccumulatorCacheLayerStacks<1536>),
-    #[cfg(feature = "layerstacks-1536x32x32")]
+    #[cfg(feature = "ls-size-1536x32x32")]
     L1536x32x32(AccumulatorCacheLayerStacks<1536>),
-    #[cfg(feature = "layerstacks-768x16x32")]
+    #[cfg(feature = "ls-size-768x16x32")]
     L768x16x32(AccumulatorCacheLayerStacks<768>),
-    #[cfg(feature = "layerstacks-512x16x32")]
+    #[cfg(feature = "ls-size-512x16x32")]
     L512x16x32(AccumulatorCacheLayerStacks<512>),
 }
 
@@ -753,19 +753,19 @@ impl LayerStacksAccCache {
     /// `network.l1_size()` と比較するために使う。
     pub fn l1_size(&self) -> usize {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(_) => 1536,
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(_) => 1536,
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(_) => 768,
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(_) => 512,
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -774,19 +774,19 @@ impl LayerStacksAccCache {
     /// アーキテクチャ寸法 (L1, L2, L3) を返す
     pub fn architecture_dims(&self) -> (usize, usize, usize) {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(_) => (1536, 16, 32),
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(_) => (1536, 32, 32),
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(_) => (768, 16, 32),
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(_) => (512, 16, 32),
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -795,19 +795,19 @@ impl LayerStacksAccCache {
     /// 全エントリを無効化
     pub fn invalidate(&mut self) {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(c) => c.invalidate(),
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(c) => c.invalidate(),
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(c) => c.invalidate(),
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(c) => c.invalidate(),
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -997,7 +997,7 @@ mod tests {
     }
 
     /// PSQT 拡張: cold start → main acc / PSQT acc 双方を full refresh で計算
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     #[test]
     fn test_psqt_refresh_or_cache_cold_start() {
         let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
@@ -1049,7 +1049,7 @@ mod tests {
     }
 
     /// PSQT 拡張: 2 回目のキャッシュヒット時に PSQT も差分で更新される
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     #[test]
     fn test_psqt_refresh_or_cache_hit_updates_psqt() {
         let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();

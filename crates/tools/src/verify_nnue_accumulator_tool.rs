@@ -102,7 +102,7 @@ fn verify_with_network<
                     if diffs > 0 {
                         eprintln!("  piece_acc[{p}]: {diffs}/{} differ", r.len());
                     }
-                    #[cfg(feature = "nnue-threat")]
+                    #[cfg(feature = "ls-ext-threat")]
                     {
                         let rt = acc_refresh.get_threat(p);
                         let ut = acc_update.get_threat(p);
@@ -181,13 +181,13 @@ pub fn run() -> Result<()> {
     println!("Model loaded successfully (L1={}).", net.l1_size());
 
     let (total_tests, fail): (usize, usize) = match net {
-        #[cfg(feature = "layerstacks-1536x16x32")]
+        #[cfg(feature = "ls-size-1536x16x32")]
         LayerStacksNetwork::L1536x16x32(concrete_net) => verify_with_network(&cli, concrete_net)?,
-        #[cfg(feature = "layerstacks-1536x32x32")]
+        #[cfg(feature = "ls-size-1536x32x32")]
         LayerStacksNetwork::L1536x32x32(concrete_net) => verify_with_network(&cli, concrete_net)?,
-        #[cfg(feature = "layerstacks-768x16x32")]
+        #[cfg(feature = "ls-size-768x16x32")]
         LayerStacksNetwork::L768x16x32(concrete_net) => verify_with_network(&cli, concrete_net)?,
-        #[cfg(feature = "layerstacks-512x16x32")]
+        #[cfg(feature = "ls-size-512x16x32")]
         LayerStacksNetwork::L512x16x32(concrete_net) => verify_with_network(&cli, concrete_net)?,
         #[allow(unreachable_patterns)]
         _ => anyhow::bail!("有効な LayerStacks バリアントがありません"),

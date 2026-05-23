@@ -31,7 +31,7 @@ use super::halfka_split::{HalfKaSplitNetwork, HalfKaSplitStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
 use super::network_layer_stacks::LayerStacksNetwork;
 use super::spec::{Activation, FeatureSet};
-#[cfg(not(feature = "layerstack-only"))]
+#[cfg(not(feature = "ls-arch"))]
 use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
 use crate::position::Position;
@@ -1184,19 +1184,19 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
     #[cfg(feature = "nnue-progress-diff")]
     if matches!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Progress8KPAbs) {
         let bucket = match stack {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             LayerStacksAccStack::L1536x16x32(s) => ensure_progress_bucket(pos, s),
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             LayerStacksAccStack::L1536x32x32(s) => ensure_progress_bucket(pos, s),
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             LayerStacksAccStack::L768x16x32(s) => ensure_progress_bucket(pos, s),
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             LayerStacksAccStack::L512x16x32(s) => ensure_progress_bucket(pos, s),
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         };
@@ -1247,7 +1247,7 @@ fn ensure_progress_bucket<const L1: usize>(
 }
 
 /// HalfKaHmMerged アキュムレータを更新して評価（内部実装）
-#[cfg(not(feature = "layerstack-only"))]
+#[cfg(not(feature = "ls-arch"))]
 #[inline]
 fn update_and_evaluate_halfka_hm(
     network: &NNUENetwork,
@@ -1283,7 +1283,7 @@ fn update_and_evaluate_halfka_hm(
 }
 
 /// HalfKaSplit アキュムレータを更新して評価（内部実装）
-#[cfg(not(feature = "layerstack-only"))]
+#[cfg(not(feature = "ls-arch"))]
 #[inline]
 fn update_and_evaluate_halfka(
     network: &NNUENetwork,
@@ -1375,7 +1375,7 @@ fn update_and_evaluate_halfka_hm_split(
 }
 
 /// HalfKP アキュムレータを更新して評価（内部実装）
-#[cfg(not(feature = "layerstack-only"))]
+#[cfg(not(feature = "ls-arch"))]
 #[inline]
 fn update_and_evaluate_halfkp(
     network: &NNUENetwork,
@@ -1499,29 +1499,29 @@ pub fn evaluate_dispatch(
             let net = network.as_layer_stacks();
             update_and_evaluate_layer_stacks_cached(net, pos, s, acc_cache)
         }
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKaSplit(s) => update_and_evaluate_halfka(&network, pos, s),
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKaHmMerged(s) => {
             update_and_evaluate_halfka_hm(&network, pos, s)
         }
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKaMerged(s) => {
             update_and_evaluate_halfka_merged(&network, pos, s)
         }
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKaHmSplit(s) => {
             update_and_evaluate_halfka_hm_split(&network, pos, s)
         }
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(&network, pos, s),
-        #[cfg(feature = "layerstack-only")]
+        #[cfg(feature = "ls-arch")]
         AccumulatorStackVariant::HalfKaSplit(_)
         | AccumulatorStackVariant::HalfKaHmMerged(_)
         | AccumulatorStackVariant::HalfKaMerged(_)
         | AccumulatorStackVariant::HalfKaHmSplit(_)
         | AccumulatorStackVariant::HalfKP(_) => {
-            unreachable!("layerstack-only build: only LayerStacks variant is supported")
+            unreachable!("ls-arch build: only LayerStacks variant is supported")
         }
     }
 }
@@ -1549,39 +1549,39 @@ pub fn ensure_accumulator_computed(
             let net = network.as_layer_stacks();
             net.update_accumulator(pos, s, acc_cache);
         }
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKaSplit(s) => {
             update_accumulator_only_halfka(&network, pos, s);
         }
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKaHmMerged(s) => {
             update_accumulator_only_halfka_hm(&network, pos, s);
         }
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKaMerged(s) => {
             update_accumulator_only_halfka_merged(&network, pos, s);
         }
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKaHmSplit(s) => {
             update_accumulator_only_halfka_hm_split(&network, pos, s);
         }
-        #[cfg(not(feature = "layerstack-only"))]
+        #[cfg(not(feature = "ls-arch"))]
         AccumulatorStackVariant::HalfKP(s) => {
             update_accumulator_only_halfkp(&network, pos, s);
         }
-        #[cfg(feature = "layerstack-only")]
+        #[cfg(feature = "ls-arch")]
         AccumulatorStackVariant::HalfKaSplit(_)
         | AccumulatorStackVariant::HalfKaHmMerged(_)
         | AccumulatorStackVariant::HalfKaMerged(_)
         | AccumulatorStackVariant::HalfKaHmSplit(_)
         | AccumulatorStackVariant::HalfKP(_) => {
-            unreachable!("layerstack-only build: only LayerStacks variant is supported")
+            unreachable!("ls-arch build: only LayerStacks variant is supported")
         }
     }
 }
 
 /// HalfKaHmMerged アキュムレータを更新のみ（評価なし）
-#[cfg(not(feature = "layerstack-only"))]
+#[cfg(not(feature = "ls-arch"))]
 #[inline]
 fn update_accumulator_only_halfka_hm(
     network: &NNUENetwork,
@@ -1613,7 +1613,7 @@ fn update_accumulator_only_halfka_hm(
 }
 
 /// HalfKaSplit アキュムレータを更新のみ（評価なし）
-#[cfg(not(feature = "layerstack-only"))]
+#[cfg(not(feature = "ls-arch"))]
 #[inline]
 fn update_accumulator_only_halfka(
     network: &NNUENetwork,
@@ -1699,7 +1699,7 @@ fn update_accumulator_only_halfka_hm_split(
 }
 
 /// HalfKP アキュムレータを更新のみ（評価なし）
-#[cfg(not(feature = "layerstack-only"))]
+#[cfg(not(feature = "ls-arch"))]
 #[inline]
 fn update_accumulator_only_halfkp(network: &NNUENetwork, pos: &Position, stack: &mut HalfKPStack) {
     if stack.is_current_computed() {

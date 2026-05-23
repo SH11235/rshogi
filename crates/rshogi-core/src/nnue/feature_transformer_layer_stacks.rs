@@ -11,12 +11,12 @@ use super::accumulator_layer_stacks::{
 use super::bona_piece::BonaPiece;
 use super::bona_piece_halfka_hm_merged::{halfka_index, is_hm_mirror, king_bucket, pack_bonapiece};
 use super::constants::HALFKA_HM_DIMENSIONS;
-#[cfg(feature = "nnue-psqt")]
+#[cfg(feature = "ls-ext-psqt")]
 use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::features::{Feature, FeatureSet, HalfKaHmMerged, HalfKaHmMergedFeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 use super::stats::{count_refresh, count_update};
-#[cfg(feature = "nnue-threat")]
+#[cfg(feature = "ls-ext-threat")]
 use super::threat_features::{self, MAX_CHANGED_THREAT_FEATURES, THREAT_DIMENSIONS};
 use crate::position::Position;
 use crate::types::Color;
@@ -78,23 +78,23 @@ pub struct FeatureTransformerLayerStacks<const L1: usize> {
     pub weights: AlignedBox<i16>,
 
     /// PSQT バイアス [NUM_LAYER_STACK_BUCKETS]
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     pub(crate) psqt_biases: [i32; NUM_LAYER_STACK_BUCKETS],
 
     /// PSQT 重み [HALFKA_HM_DIMENSIONS × NUM_LAYER_STACK_BUCKETS]
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     pub(crate) psqt_weights: AlignedBox<i32>,
 
     /// PSQT が有効か（アーキテクチャ文字列で判定）
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     pub(crate) has_psqt: bool,
 
     /// Threat 重み [THREAT_DIMENSIONS × L1]
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(feature = "ls-ext-threat")]
     pub(crate) threat_weights: AlignedBox<i8>,
 
     /// Threat が有効か（アーキテクチャ文字列で判定）
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(feature = "ls-ext-threat")]
     pub(crate) has_threat: bool,
 }
 
@@ -119,7 +119,7 @@ pub struct FeatureTransformerLayerStacks<const L1: usize> {
 ///
 /// # Safety
 /// `weights` は少なくとも 9 個の i32 が連続して読める必要がある（呼び出し元が保証）。
-#[cfg(feature = "nnue-psqt")]
+#[cfg(feature = "ls-ext-psqt")]
 #[inline(always)]
 fn psqt_add_or_sub<const ADD: bool>(
     psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
@@ -296,9 +296,9 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     /// read-only になる。空 box（PSQT/Threat 無効モデル）は内部でスキップされる。
     pub(crate) fn share_weights(&mut self) {
         super::shared_weights::try_share(&mut self.weights, "FT weights");
-        #[cfg(feature = "nnue-psqt")]
+        #[cfg(feature = "ls-ext-psqt")]
         super::shared_weights::try_share(&mut self.psqt_weights, "FT psqt");
-        #[cfg(feature = "nnue-threat")]
+        #[cfg(feature = "ls-ext-threat")]
         super::shared_weights::try_share(&mut self.threat_weights, "FT threat");
     }
 
@@ -323,15 +323,15 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         Ok(Self {
             biases: Aligned(biases),
             weights,
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             psqt_weights: AlignedBox::new_zeroed(0),
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             has_psqt: false,
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             threat_weights: AlignedBox::new_zeroed(0),
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             has_threat: false,
         })
     }
@@ -359,15 +359,15 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             return Ok(Self {
                 biases: Aligned(biases),
                 weights,
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 psqt_weights: AlignedBox::new_zeroed(0),
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 has_psqt: false,
-                #[cfg(feature = "nnue-threat")]
+                #[cfg(feature = "ls-ext-threat")]
                 threat_weights: AlignedBox::new_zeroed(0),
-                #[cfg(feature = "nnue-threat")]
+                #[cfg(feature = "ls-ext-threat")]
                 has_threat: false,
             });
         }
@@ -395,15 +395,15 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             return Ok(Self {
                 biases: Aligned(biases),
                 weights,
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 psqt_weights: AlignedBox::new_zeroed(0),
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 has_psqt: false,
-                #[cfg(feature = "nnue-threat")]
+                #[cfg(feature = "ls-ext-threat")]
                 threat_weights: AlignedBox::new_zeroed(0),
-                #[cfg(feature = "nnue-threat")]
+                #[cfg(feature = "ls-ext-threat")]
                 has_threat: false,
             });
         }
@@ -420,7 +420,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     }
 
     /// PSQT 重み/バイアスをファイルから読み込み
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     pub fn read_psqt<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
         let mut buf4 = [0u8; 4];
 
@@ -445,26 +445,26 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     }
 
     /// PSQT が有効かを返す。
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     pub fn has_psqt(&self) -> bool {
         self.has_psqt
     }
 
     /// PSQT バイアスを参照（外部の解析ツール向け）。
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     pub fn psqt_biases(&self) -> &[i32; NUM_LAYER_STACK_BUCKETS] {
         &self.psqt_biases
     }
 
     /// PSQT 重みを参照（外部の解析ツール向け）。
     /// レイアウト: `psqt_weights[feature_idx * NUM_LAYER_STACK_BUCKETS + bucket]`
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     pub fn psqt_weights(&self) -> &[i32] {
         &self.psqt_weights
     }
 
     /// Threat 重みをファイルから読み込み (i8, raw)
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(feature = "ls-ext-threat")]
     pub fn read_threat_weights<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
         let weight_count = THREAT_DIMENSIONS * L1;
         self.threat_weights = AlignedBox::new_zeroed(weight_count);
@@ -492,7 +492,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     }
 
     /// Threat 重みの行を取得（i8[L1]）
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(feature = "ls-ext-threat")]
     #[inline]
     fn threat_weight_row(&self, index: usize) -> &[i8] {
         let offset = index * L1;
@@ -505,7 +505,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     ///
     /// i8 重みを i16 に sign-extend してから加算。
     /// AVX2: `_mm256_cvtepi8_epi16` で 16 要素ずつ変換 + `_mm256_add_epi16`。
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(feature = "ls-ext-threat")]
     #[inline]
     fn add_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
         // AVX2 ループは `L1 / 16` 回で全要素を処理する前提のため、
@@ -567,7 +567,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     }
 
     /// Threat 重み (i8) を i16 アキュムレータから減算（SIMD 最適化）
-    #[cfg(feature = "nnue-threat")]
+    #[cfg(feature = "ls-ext-threat")]
     #[inline]
     fn sub_threat_weights(&self, accumulation: &mut [i16; L1], index: usize) {
         const {
@@ -622,7 +622,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     }
 
     /// PSQT アキュムレータのフル計算
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     fn refresh_psqt(
         &self,
         active_indices: &IndexList<MAX_ACTIVE_FEATURES>,
@@ -638,7 +638,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     ///
     /// `psqt_acc[bucket] += psqt_weights[index * 9 + bucket]` を 9 bucket 分まとめて実行する。
     /// 内部実装は `psqt_add_or_sub::<true>` で SIMD 化されている。
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     #[inline]
     fn add_psqt_weights(&self, psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS], index: usize) {
         let offset = index * NUM_LAYER_STACK_BUCKETS;
@@ -655,7 +655,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     }
 
     /// PSQT 重みを減算
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     #[inline]
     fn sub_psqt_weights(&self, psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS], index: usize) {
         let offset = index * NUM_LAYER_STACK_BUCKETS;
@@ -688,13 +688,13 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             }
 
             // PSQT アキュムレータ
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             if self.has_psqt {
                 self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
             }
 
             // Threat アキュムレータ（bias なし: piece FT と bias を共有）
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
                 let threat_acc = acc.get_threat_mut(p);
@@ -732,7 +732,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     self.add_weights(accumulation, index);
                 }
 
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 if self.has_psqt {
                     self.refresh_psqt(&active_indices, &mut acc.psqt_accumulation[p]);
                 }
@@ -767,7 +767,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 }
 
                 // PSQT 差分更新
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 if self.has_psqt {
                     acc.psqt_accumulation[p] = prev_acc.psqt_accumulation[p];
                     for index in removed.iter() {
@@ -785,7 +785,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             // `is_hm_mirror` のみ。玉移動があっても HM mirror 境界を跨がなければ
             // 差分更新で正しく計算できる。HalfKaSplit 用の `reset = king_moved` を流用
             // せず、Threat 専用の `needs_threat_refresh` を使う。
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
                 let reset_threat =
@@ -866,7 +866,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 count_refresh!();
                 // 玉が移動した場合はキャッシュ経由で refresh。
                 // PSQT も Finny Tables (AccCacheEntry) 経由で差分更新する。
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 {
                     // 同一 struct の異なるフィールドへの可変参照を同時に渡す。
                     // accumulation: [..; 2] と psqt_accumulation: [..; 2] は別フィールドなので
@@ -881,7 +881,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                         cache,
                     );
                 }
-                #[cfg(not(feature = "nnue-psqt"))]
+                #[cfg(not(feature = "ls-ext-psqt"))]
                 {
                     self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
                 }
@@ -917,7 +917,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 }
 
                 // PSQT 差分更新
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 if self.has_psqt {
                     acc.psqt_accumulation[p] = prev_acc.psqt_accumulation[p];
                     for index in removed.iter() {
@@ -934,7 +934,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             // HalfKaSplit 用の `reset = king_moved` ではなく、Threat 専用の
             // `needs_threat_refresh` (is_hm_mirror 境界跨ぎのみ true) を使う。
             // 詳細: `threat_features::needs_threat_refresh` doc 参照。
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
                 let reset_threat =
@@ -1002,7 +1002,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             count_refresh!();
             let p = perspective as usize;
             // PSQT も Finny Tables (AccCacheEntry) 経由で差分更新する。
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             {
                 let main_acc = &mut acc.accumulation[p];
                 let psqt_acc_slot = &mut acc.psqt_accumulation[p];
@@ -1014,13 +1014,13 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                     cache,
                 );
             }
-            #[cfg(not(feature = "nnue-psqt"))]
+            #[cfg(not(feature = "ls-ext-psqt"))]
             {
                 self.refresh_perspective_with_cache(pos, perspective, acc.get_mut(p), cache);
             }
 
             // Threat はキャッシュ非対象なのでフル再計算
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             if self.has_threat {
                 let king_sq = pos.king_square(perspective);
                 let threat_acc = acc.get_threat_mut(p);
@@ -1041,13 +1041,13 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
     /// を取って add/sub を適用する。`append_active_indices` + `sort_unstable`
     /// のオーバーヘッドを回避する。
     ///
-    /// `nnue-psqt` 有効かつ `has_psqt == true` の場合は PSQT acc も
+    /// `ls-ext-psqt` 有効かつ `has_psqt == true` の場合は PSQT acc も
     /// 同時に cache 経由で差分更新する（Finny Tables に PSQT を載せる経路）。
     /// `has_psqt == false` のときは `psqt_acc` 引数は渡されるが参照されず、
     /// 既存の `cache.refresh_or_cache()` パスにフォールスルーする。
     ///
-    /// **シグネチャ注記**: `nnue-psqt` feature 有効時のみ `psqt_acc` 引数が
-    /// 追加される（`#[cfg(feature = "nnue-psqt")]` 付き）。Rust の有効な
+    /// **シグネチャ注記**: `ls-ext-psqt` feature 有効時のみ `psqt_acc` 引数が
+    /// 追加される（`#[cfg(feature = "ls-ext-psqt")]` 付き）。Rust の有効な
     /// cfg-gated parameter パターンだが、呼び出し側も同様の cfg ブロックで
     /// 括る必要がある。
     #[allow(clippy::too_many_arguments)]
@@ -1056,7 +1056,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
         pos: &Position,
         perspective: Color,
         accumulation: &mut [i16; L1],
-        #[cfg(feature = "nnue-psqt")] psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
+        #[cfg(feature = "ls-ext-psqt")] psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
         cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
         let king_sq = pos.king_square(perspective);
@@ -1069,7 +1069,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             pos.piece_list().piece_list_fw()
         };
 
-        #[cfg(feature = "nnue-psqt")]
+        #[cfg(feature = "ls-ext-psqt")]
         if self.has_psqt {
             cache.refresh_or_cache_with_psqt(
                 king_sq,
@@ -1119,11 +1119,11 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
             for perspective in [Color::Black, Color::White] {
                 let p = perspective as usize;
                 current_acc.get_mut(p).copy_from_slice(source_acc.get(p));
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 {
                     current_acc.psqt_accumulation[p] = source_acc.psqt_accumulation[p];
                 }
-                #[cfg(feature = "nnue-threat")]
+                #[cfg(feature = "ls-ext-threat")]
                 if self.has_threat {
                     current_acc.get_threat_mut(p).copy_from_slice(source_acc.get_threat(p));
                 }
@@ -1169,7 +1169,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
                 // PSQT 差分更新
                 // try_apply_dirty_piece_fast は main path 専用なので、
                 // PSQT は removed/added を必ず明示的に適用する。
-                #[cfg(feature = "nnue-psqt")]
+                #[cfg(feature = "ls-ext-psqt")]
                 if self.has_psqt {
                     let psqt_acc = &mut stack.current_mut().accumulator.psqt_accumulation[p];
                     for index in removed.iter() {
@@ -1184,7 +1184,7 @@ impl<const L1: usize> FeatureTransformerLayerStacks<L1> {
 
         // Threat: パス長 1 なら pos が正しい after-state なので差分更新可能。
         // パス長 2+ では中間局面を再構成できないため full refresh。
-        #[cfg(feature = "nnue-threat")]
+        #[cfg(feature = "ls-ext-threat")]
         if self.has_threat {
             if path.len() == 1 {
                 // 1 ply: pos が正しい after-state なので差分更新可能
@@ -1838,15 +1838,15 @@ mod tests {
         FeatureTransformerLayerStacks::<TEST_L1> {
             biases: Aligned([0; TEST_L1]),
             weights: AlignedBox::new_zeroed(HALFKA_HM_DIMENSIONS * TEST_L1),
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             psqt_weights: AlignedBox::new_zeroed(0),
-            #[cfg(feature = "nnue-psqt")]
+            #[cfg(feature = "ls-ext-psqt")]
             has_psqt: false,
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             threat_weights: AlignedBox::new_zeroed(0),
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             has_threat: false,
         }
     }
@@ -2105,7 +2105,7 @@ mod tests {
     // PSQT テスト
     // =========================================================================
 
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     fn make_test_transformer_with_psqt() -> FeatureTransformerLayerStacks<TEST_L1> {
         let psqt_weight_count = HALFKA_HM_DIMENSIONS * NUM_LAYER_STACK_BUCKETS;
         let mut psqt_weights = AlignedBox::new_zeroed(psqt_weight_count);
@@ -2123,15 +2123,15 @@ mod tests {
             psqt_biases: [10, 20, 30, 40, 50, 60, 70, 80, 90],
             psqt_weights,
             has_psqt: true,
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             threat_weights: AlignedBox::new_zeroed(0),
-            #[cfg(feature = "nnue-threat")]
+            #[cfg(feature = "ls-ext-threat")]
             has_threat: false,
         }
     }
 
     /// refresh_psqt と add/sub_psqt_weights による差分更新が一致することを確認
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     #[test]
     fn test_psqt_refresh_matches_incremental() {
         let ft = make_test_transformer_with_psqt();
@@ -2163,7 +2163,7 @@ mod tests {
     }
 
     /// PSQT 有効モデルで既知の入力に対して期待値を確認
-    #[cfg(feature = "nnue-psqt")]
+    #[cfg(feature = "ls-ext-psqt")]
     #[test]
     fn test_psqt_known_values() {
         let ft = make_test_transformer_with_psqt();

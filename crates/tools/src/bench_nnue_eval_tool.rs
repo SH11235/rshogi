@@ -640,13 +640,13 @@ fn run_layer_stack_bench<
 macro_rules! with_ls_net {
     ($ls_net:expr, |$inner:ident| $body:expr) => {
         match $ls_net {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             LayerStacksNetwork::L1536x16x32($inner) => $body,
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             LayerStacksNetwork::L1536x32x32($inner) => $body,
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             LayerStacksNetwork::L768x16x32($inner) => $body,
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             LayerStacksNetwork::L512x16x32($inner) => $body,
             #[allow(unreachable_patterns)]
             _ => bail!("有効な LayerStacks バリアントがありません"),

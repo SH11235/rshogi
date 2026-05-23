@@ -1292,28 +1292,28 @@ impl UsiEngine {
                 if let NNUENetwork::LayerStacks(ref net) = *network {
                     // L1 variant に dispatch し、refresh + evaluate_with_diagnostics を実行
                     match net {
-                        #[cfg(feature = "layerstacks-1536x16x32")]
+                        #[cfg(feature = "ls-size-1536x16x32")]
                         LayerStacksNetwork::L1536x16x32(inner) => {
                             let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::<1536>::new();
                             inner.refresh_accumulator(&self.position, &mut acc);
                             let value = inner.evaluate_with_diagnostics(&self.position, &acc);
                             println!("info string Static eval (diagnostics): {}", value.raw());
                         }
-                        #[cfg(feature = "layerstacks-1536x32x32")]
+                        #[cfg(feature = "ls-size-1536x32x32")]
                         LayerStacksNetwork::L1536x32x32(inner) => {
                             let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::<1536>::new();
                             inner.refresh_accumulator(&self.position, &mut acc);
                             let value = inner.evaluate_with_diagnostics(&self.position, &acc);
                             println!("info string Static eval (diagnostics): {}", value.raw());
                         }
-                        #[cfg(feature = "layerstacks-768x16x32")]
+                        #[cfg(feature = "ls-size-768x16x32")]
                         LayerStacksNetwork::L768x16x32(inner) => {
                             let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::<768>::new();
                             inner.refresh_accumulator(&self.position, &mut acc);
                             let value = inner.evaluate_with_diagnostics(&self.position, &acc);
                             println!("info string Static eval (diagnostics): {}", value.raw());
                         }
-                        #[cfg(feature = "layerstacks-512x16x32")]
+                        #[cfg(feature = "ls-size-512x16x32")]
                         LayerStacksNetwork::L512x16x32(inner) => {
                             let mut acc = rshogi_core::nnue::AccumulatorLayerStacks::<512>::new();
                             inner.refresh_accumulator(&self.position, &mut acc);

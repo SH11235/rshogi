@@ -27,12 +27,12 @@ use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN};
 #[cfg(any(
-    feature = "layerstacks-1536x16x32",
-    feature = "layerstacks-768x16x32",
-    feature = "layerstacks-512x16x32"
+    feature = "ls-size-1536x16x32",
+    feature = "ls-size-768x16x32",
+    feature = "ls-size-512x16x32"
 ))]
 use super::constants::{LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN};
-#[cfg(feature = "layerstacks-1536x32x32")]
+#[cfg(feature = "ls-size-1536x32x32")]
 use super::constants::{LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
@@ -59,7 +59,7 @@ fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usi
 }
 
 /// i16 配列の要素和: dst[i] = a[i] + b[i] (SIMD 最適化)
-#[cfg(feature = "nnue-threat")]
+#[cfg(feature = "ls-ext-threat")]
 #[inline]
 fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16; L1]) {
     // AVX2 ループは `L1 / 16` 回で全要素を処理する前提。L1 が 16 の倍数で
@@ -201,23 +201,23 @@ impl<
         // - psqt_override == Some(true): USI オプションで PSQT 強制 ON（arch_str を無視）
         // - psqt_override == Some(false): USI オプションで PSQT 強制 OFF（arch_str を無視）
         // - psqt_override == None: arch_str から自動検出
-        #[cfg(feature = "nnue-psqt")]
+        #[cfg(feature = "ls-ext-psqt")]
         {
             let has_psqt = psqt_override.unwrap_or_else(|| arch_str.contains("PSQT="));
             if has_psqt {
                 feature_transformer.read_psqt(reader)?;
             }
         }
-        #[cfg(not(feature = "nnue-psqt"))]
+        #[cfg(not(feature = "ls-ext-psqt"))]
         if psqt_override.unwrap_or_else(|| arch_str.contains("PSQT=")) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "PSQT model requires nnue-psqt feature",
+                "PSQT model requires ls-ext-psqt feature",
             ));
         }
 
         // Threat 読み込み（arch_str に "Threat=" があれば）
-        #[cfg(feature = "nnue-threat")]
+        #[cfg(feature = "ls-ext-threat")]
         {
             let has_threat = arch_str.contains("Threat=");
             if has_threat {
@@ -253,11 +253,11 @@ impl<
                 feature_transformer.read_threat_weights(reader)?;
             }
         }
-        #[cfg(not(feature = "nnue-threat"))]
+        #[cfg(not(feature = "ls-ext-threat"))]
         if arch_str.contains("Threat=") {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Threat model requires nnue-threat feature",
+                "Threat model requires ls-ext-threat feature",
             ));
         }
 
@@ -371,7 +371,7 @@ impl<
 
         // Threat の寄与を含めて combined accumulator を構築する。
         // 無効なら piece_acc を直接 SCReLU に渡す。
-        #[cfg(feature = "nnue-threat")]
+        #[cfg(feature = "ls-ext-threat")]
         {
             if self.feature_transformer.has_threat {
                 let mut us_combined = Aligned([0i16; L1]);
@@ -396,7 +396,7 @@ impl<
                 sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
             }
         }
-        #[cfg(not(feature = "nnue-threat"))]
+        #[cfg(not(feature = "ls-ext-threat"))]
         {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }
@@ -407,7 +407,7 @@ impl<
         // PSQT ショートカット (Stockfish 準拠: (stm - nstm) / 2)
         // 各駒は両視点に逆符号で寄与するため、stm - nstm は正味の配置価値を
         // 約2倍にカウントする。/2 はこの二重カウントを補正する正規化。
-        #[cfg(feature = "nnue-psqt")]
+        #[cfg(feature = "ls-ext-psqt")]
         let psqt_value = if self.feature_transformer.has_psqt {
             let stm = side_to_move as usize;
             let nstm = (!side_to_move) as usize;
@@ -416,7 +416,7 @@ impl<
         } else {
             0
         };
-        #[cfg(not(feature = "nnue-psqt"))]
+        #[cfg(not(feature = "ls-ext-psqt"))]
         let psqt_value = 0;
 
         let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
@@ -459,7 +459,7 @@ impl<
 
         // Threat 結合 (evaluate_with_bucket と同一ロジック)
         let mut transformed: Aligned<[u8; L1]> = Aligned([0u8; L1]);
-        #[cfg(feature = "nnue-threat")]
+        #[cfg(feature = "ls-ext-threat")]
         {
             if self.feature_transformer.has_threat {
                 let mut us_combined = [0i16; L1];
@@ -484,7 +484,7 @@ impl<
                 sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
             }
         }
-        #[cfg(not(feature = "nnue-threat"))]
+        #[cfg(not(feature = "ls-ext-threat"))]
         {
             sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
         }
@@ -510,7 +510,7 @@ impl<
         info!("[NNUE Eval] raw_score (with skip): {raw_score}");
 
         // PSQT ショートカット
-        #[cfg(feature = "nnue-psqt")]
+        #[cfg(feature = "ls-ext-psqt")]
         let psqt_value = if self.feature_transformer.has_psqt {
             let stm = side_to_move as usize;
             let nstm = (!side_to_move) as usize;
@@ -531,7 +531,7 @@ impl<
             info!("[NNUE Eval] PSQT: disabled");
             0
         };
-        #[cfg(not(feature = "nnue-psqt"))]
+        #[cfg(not(feature = "ls-ext-psqt"))]
         let psqt_value = {
             info!("[NNUE Eval] PSQT: disabled (feature not enabled)");
             0
@@ -604,16 +604,16 @@ impl<
     }
 }
 
-#[cfg(feature = "layerstacks-1536x16x32")]
+#[cfg(feature = "ls-size-1536x16x32")]
 pub type NetworkLayerStacks1536x16x32 =
     NetworkLayerStacks<1536, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32>;
-#[cfg(feature = "layerstacks-1536x32x32")]
+#[cfg(feature = "ls-size-1536x32x32")]
 pub type NetworkLayerStacks1536x32x32 =
     NetworkLayerStacks<1536, LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN, 64>;
-#[cfg(feature = "layerstacks-768x16x32")]
+#[cfg(feature = "ls-size-768x16x32")]
 pub type NetworkLayerStacks768x16x32 =
     NetworkLayerStacks<768, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32>;
-#[cfg(feature = "layerstacks-512x16x32")]
+#[cfg(feature = "ls-size-512x16x32")]
 pub type NetworkLayerStacks512x16x32 =
     NetworkLayerStacks<512, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32>;
 
@@ -623,20 +623,20 @@ pub type NetworkLayerStacks512x16x32 =
 
 /// LayerStacks ネットワークの L1 サイズ dispatch enum
 ///
-/// Cargo feature `layerstacks-1536x16x32` / `layerstacks-1536x32x32`
-/// / `layerstacks-768x16x32` / `layerstacks-512x16x32` で
+/// Cargo feature `ls-size-1536x16x32` / `ls-size-1536x32x32`
+/// / `ls-size-768x16x32` / `ls-size-512x16x32` で
 /// 有効なバリアントが制御される。
 ///
 /// **重要**: 大会ビルドでは必ず単一バリアントのみを有効化すること。複数バリアントを
 /// 同時有効にすると dispatch match の overhead で約 5% NPS 退行する（実測値）。
 pub enum LayerStacksNetwork {
-    #[cfg(feature = "layerstacks-1536x16x32")]
+    #[cfg(feature = "ls-size-1536x16x32")]
     L1536x16x32(Box<NetworkLayerStacks1536x16x32>),
-    #[cfg(feature = "layerstacks-1536x32x32")]
+    #[cfg(feature = "ls-size-1536x32x32")]
     L1536x32x32(Box<NetworkLayerStacks1536x32x32>),
-    #[cfg(feature = "layerstacks-768x16x32")]
+    #[cfg(feature = "ls-size-768x16x32")]
     L768x16x32(Box<NetworkLayerStacks768x16x32>),
-    #[cfg(feature = "layerstacks-512x16x32")]
+    #[cfg(feature = "ls-size-512x16x32")]
     L512x16x32(Box<NetworkLayerStacks512x16x32>),
 }
 
@@ -650,19 +650,19 @@ impl LayerStacksNetwork {
     /// L1 サイズを取得
     pub fn l1_size(&self) -> usize {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(_) => 1536,
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(_) => 1536,
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(_) => 768,
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(_) => 512,
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -671,7 +671,7 @@ impl LayerStacksNetwork {
     /// アーキテクチャ仕様を取得
     pub fn architecture_spec(&self) -> super::spec::ArchitectureSpec {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(_) => super::spec::ArchitectureSpec::new(
                 super::spec::FeatureSet::LayerStacks,
                 1536,
@@ -679,7 +679,7 @@ impl LayerStacksNetwork {
                 32,
                 super::spec::Activation::CReLU,
             ),
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(_) => super::spec::ArchitectureSpec::new(
                 super::spec::FeatureSet::LayerStacks,
                 1536,
@@ -687,7 +687,7 @@ impl LayerStacksNetwork {
                 32,
                 super::spec::Activation::CReLU,
             ),
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(_) => super::spec::ArchitectureSpec::new(
                 super::spec::FeatureSet::LayerStacks,
                 768,
@@ -695,7 +695,7 @@ impl LayerStacksNetwork {
                 32,
                 super::spec::Activation::CReLU,
             ),
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(_) => super::spec::ArchitectureSpec::new(
                 super::spec::FeatureSet::LayerStacks,
                 512,
@@ -704,10 +704,10 @@ impl LayerStacksNetwork {
                 super::spec::Activation::CReLU,
             ),
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -716,19 +716,19 @@ impl LayerStacksNetwork {
     /// FV_SCALE を取得
     pub fn fv_scale(&self) -> i32 {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(net) => net.fv_scale,
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(net) => net.fv_scale,
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(net) => net.fv_scale,
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(net) => net.fv_scale,
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -743,22 +743,22 @@ impl LayerStacksNetwork {
         psqt_override: Option<bool>,
     ) -> io::Result<Self> {
         match (l1, l2, l3) {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             (1536, 16, 32) => {
                 let net = NetworkLayerStacks1536x16x32::read_with_options(reader, psqt_override)?;
                 Ok(Self::L1536x16x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             (1536, 32, 32) => {
                 let net = NetworkLayerStacks1536x32x32::read_with_options(reader, psqt_override)?;
                 Ok(Self::L1536x32x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             (768, 16, 32) => {
                 let net = NetworkLayerStacks768x16x32::read_with_options(reader, psqt_override)?;
                 Ok(Self::L768x16x32(Box::new(net)))
             }
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             (512, 16, 32) => {
                 let net = NetworkLayerStacks512x16x32::read_with_options(reader, psqt_override)?;
                 Ok(Self::L512x16x32(Box::new(net)))
@@ -779,22 +779,22 @@ impl LayerStacksNetwork {
         let (net_l1, net_l2, net_l3) = self.architecture_dims();
         let (stack_l1, stack_l2, stack_l3) = stack.architecture_dims();
         match (self, stack) {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             (
                 Self::L1536x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(st),
             ) => net.evaluate(pos, &st.current().accumulator),
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             (
                 Self::L1536x32x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(st),
             ) => net.evaluate(pos, &st.current().accumulator),
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             (
                 Self::L768x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x16x32(st),
             ) => net.evaluate(pos, &st.current().accumulator),
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             (
                 Self::L512x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(st),
@@ -876,28 +876,28 @@ impl LayerStacksNetwork {
         }
 
         match (self, stack) {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             (
                 Self::L1536x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(st),
             ) => {
                 do_update!(net, st, L1536x16x32);
             }
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             (
                 Self::L1536x32x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(st),
             ) => {
                 do_update!(net, st, L1536x32x32);
             }
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             (
                 Self::L768x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x16x32(st),
             ) => {
                 do_update!(net, st, L768x16x32);
             }
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             (
                 Self::L512x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(st),
@@ -914,35 +914,35 @@ impl LayerStacksNetwork {
     /// 新しい L1 サイズに対応する AccStack を作成
     pub fn new_acc_stack(&self) -> super::accumulator_layer_stacks::LayerStacksAccStack {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1536>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<1536>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x16x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<768>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(
                     super::accumulator_layer_stacks::AccumulatorStackLayerStacks::<512>::new(),
                 )
             }
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }
@@ -951,35 +951,35 @@ impl LayerStacksNetwork {
     /// 新しい L1 サイズに対応する AccCache を作成
     pub fn new_acc_cache(&self) -> super::accumulator_layer_stacks::LayerStacksAccCache {
         match self {
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             Self::L1536x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L1536x16x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1536>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             Self::L1536x32x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L1536x32x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<1536>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             Self::L768x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L768x16x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<768>::new(),
                 )
             }
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             Self::L512x16x32(_) => {
                 super::accumulator_layer_stacks::LayerStacksAccCache::L512x16x32(
                     super::accumulator_layer_stacks::AccumulatorCacheLayerStacks::<512>::new(),
                 )
             }
             #[cfg(not(any(
-                feature = "layerstacks-1536x16x32",
-                feature = "layerstacks-1536x32x32",
-                feature = "layerstacks-768x16x32",
-                feature = "layerstacks-512x16x32"
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         }

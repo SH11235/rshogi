@@ -688,17 +688,17 @@ mod tests {
         // 外側の `any(...)` でいずれかの variant が有効なときだけ import が使われる
         // ようにして unused-import 警告を抑える。
         #[cfg(any(
-            feature = "layerstacks-1536x16x32",
-            feature = "layerstacks-1536x32x32",
-            feature = "layerstacks-768x16x32",
-            feature = "layerstacks-512x16x32"
+            feature = "ls-size-1536x16x32",
+            feature = "ls-size-1536x32x32",
+            feature = "ls-size-768x16x32",
+            feature = "ls-size-512x16x32"
         ))]
         {
             use crate::nnue::accumulator_layer_stacks::{
                 AccumulatorStackLayerStacks, LayerStacksAccStack,
             };
 
-            #[cfg(feature = "layerstacks-1536x16x32")]
+            #[cfg(feature = "ls-size-1536x16x32")]
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L1536x16x32(AccumulatorStackLayerStacks::<1536>::new()),
@@ -710,7 +710,7 @@ mod tests {
                 stack.pop();
             }
 
-            #[cfg(feature = "layerstacks-1536x32x32")]
+            #[cfg(feature = "ls-size-1536x32x32")]
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L1536x32x32(AccumulatorStackLayerStacks::<1536>::new()),
@@ -722,7 +722,7 @@ mod tests {
                 stack.pop();
             }
 
-            #[cfg(feature = "layerstacks-768x16x32")]
+            #[cfg(feature = "ls-size-768x16x32")]
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L768x16x32(AccumulatorStackLayerStacks::<768>::new()),
@@ -734,7 +734,7 @@ mod tests {
                 stack.pop();
             }
 
-            #[cfg(feature = "layerstacks-512x16x32")]
+            #[cfg(feature = "ls-size-512x16x32")]
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L512x16x32(AccumulatorStackLayerStacks::<512>::new()),
