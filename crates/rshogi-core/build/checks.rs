@@ -11,32 +11,6 @@ fn validate_feature_combination(
     let ls_arch = has_feature("ls-arch");
     let halfkx_arch = has_feature("halfkx-arch");
 
-    // `ls-arch` は現状「LS を含めて HalfKX 経路を除去」の意味論なので
-    // `halfkx-arch` と組合せると build 構成が不整合になる。
-    if ls_arch && halfkx_arch {
-        return Err(
-            "ls-arch と halfkx-arch は同時指定できません \
-             (`ls-arch` は HalfKX 経路を除去する意味論のため)。"
-                .to_string(),
-        );
-    }
-
-    // LS network 上で動く FT は現状 `ft-halfka_hm_merged` のみ実装済み。
-    if ls_arch {
-        for ft in &[
-            "ft-halfkp",
-            "ft-halfka_split",
-            "ft-halfka_merged",
-            "ft-halfka_hm_split",
-        ] {
-            if has_feature(ft) {
-                return Err(format!(
-                    "LayerStack (ls-arch) network は現状 ft-halfka_hm_merged のみサポートします (`{ft}` 指定済み)。"
-                ));
-            }
-        }
-    }
-
     let mode_universal = has_feature("mode-universal");
     let mode_family = has_feature("mode-family");
     let mode_specific = has_feature("mode-specific");
@@ -109,6 +83,24 @@ fn validate_feature_combination(
             return Err(format!(
                 "mode-specific では ft-* を 1 個までしか指定できません (現在 {ft_count} 個有効)。"
             ));
+        }
+
+        // LS network 単独 specific build では `ft-halfka_hm_merged` のみ実装済み。
+        // halfkx-arch が同時に立っていれば他 FT は HalfKX 経路にルーティング可能なため許容。
+        if ls_arch && !halfkx_arch {
+            for ft in &[
+                "ft-halfkp",
+                "ft-halfka_split",
+                "ft-halfka_merged",
+                "ft-halfka_hm_split",
+            ] {
+                if has_feature(ft) {
+                    return Err(format!(
+                        "LayerStack 単独 specific build (ls-arch + not(halfkx-arch)) では \
+                         ft-halfka_hm_merged のみサポートします (`{ft}` 指定済み)。"
+                    ));
+                }
+            }
         }
     }
 

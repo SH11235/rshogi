@@ -588,14 +588,6 @@ impl AttackOrderTable {
 static ATTACK_ORDER_TABLE: LazyLock<AttackOrderTable> = LazyLock::new(AttackOrderTable::new);
 
 // =============================================================================
-// Threat index 計算ヘルパ
-// =============================================================================
-
-/// 指定 (board_class, oriented_color, from_sq_n, to_sq_n) の attack offset を計算
-///
-/// 戻り値 = `from_offset_table[pattern][from_sq_n] + attack_order_table[pattern][from_sq_n][to_sq_n]`
-///
-// =============================================================================
 // Threat index 計算
 // =============================================================================
 

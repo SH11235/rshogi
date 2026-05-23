@@ -31,7 +31,7 @@ use super::halfka_split::{HalfKaSplitNetwork, HalfKaSplitStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
 use super::network_layer_stacks::LayerStacksNetwork;
 use super::spec::{Activation, FeatureSet};
-#[cfg(not(feature = "ls-arch"))]
+#[cfg(feature = "halfkx-arch")]
 use super::stats::{count_already_computed, count_refresh, count_update};
 use crate::eval::material;
 use crate::position::Position;
@@ -1247,7 +1247,7 @@ fn ensure_progress_bucket<const L1: usize>(
 }
 
 /// HalfKaHmMerged アキュムレータを更新して評価（内部実装）
-#[cfg(not(feature = "ls-arch"))]
+#[cfg(feature = "halfkx-arch")]
 #[inline]
 fn update_and_evaluate_halfka_hm(
     network: &NNUENetwork,
@@ -1283,7 +1283,7 @@ fn update_and_evaluate_halfka_hm(
 }
 
 /// HalfKaSplit アキュムレータを更新して評価（内部実装）
-#[cfg(not(feature = "ls-arch"))]
+#[cfg(feature = "halfkx-arch")]
 #[inline]
 fn update_and_evaluate_halfka(
     network: &NNUENetwork,
@@ -1318,6 +1318,7 @@ fn update_and_evaluate_halfka(
     network.evaluate_halfka(pos, stack)
 }
 
+#[cfg(feature = "halfkx-arch")]
 fn update_and_evaluate_halfka_merged(
     network: &NNUENetwork,
     pos: &Position,
@@ -1346,6 +1347,7 @@ fn update_and_evaluate_halfka_merged(
     network.evaluate_halfka_merged(pos, stack)
 }
 
+#[cfg(feature = "halfkx-arch")]
 fn update_and_evaluate_halfka_hm_split(
     network: &NNUENetwork,
     pos: &Position,
@@ -1375,7 +1377,7 @@ fn update_and_evaluate_halfka_hm_split(
 }
 
 /// HalfKP アキュムレータを更新して評価（内部実装）
-#[cfg(not(feature = "ls-arch"))]
+#[cfg(feature = "halfkx-arch")]
 #[inline]
 fn update_and_evaluate_halfkp(
     network: &NNUENetwork,
@@ -1499,29 +1501,29 @@ pub fn evaluate_dispatch(
             let net = network.as_layer_stacks();
             update_and_evaluate_layer_stacks_cached(net, pos, s, acc_cache)
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaSplit(s) => update_and_evaluate_halfka(&network, pos, s),
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaHmMerged(s) => {
             update_and_evaluate_halfka_hm(&network, pos, s)
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaMerged(s) => {
             update_and_evaluate_halfka_merged(&network, pos, s)
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaHmSplit(s) => {
             update_and_evaluate_halfka_hm_split(&network, pos, s)
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKP(s) => update_and_evaluate_halfkp(&network, pos, s),
-        #[cfg(feature = "ls-arch")]
+        #[cfg(not(feature = "halfkx-arch"))]
         AccumulatorStackVariant::HalfKaSplit(_)
         | AccumulatorStackVariant::HalfKaHmMerged(_)
         | AccumulatorStackVariant::HalfKaMerged(_)
         | AccumulatorStackVariant::HalfKaHmSplit(_)
         | AccumulatorStackVariant::HalfKP(_) => {
-            unreachable!("ls-arch build: only LayerStacks variant is supported")
+            unreachable!("halfkx-arch disabled: HalfKX variant cannot exist in this build")
         }
     }
 }
@@ -1549,39 +1551,39 @@ pub fn ensure_accumulator_computed(
             let net = network.as_layer_stacks();
             net.update_accumulator(pos, s, acc_cache);
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaSplit(s) => {
             update_accumulator_only_halfka(&network, pos, s);
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaHmMerged(s) => {
             update_accumulator_only_halfka_hm(&network, pos, s);
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaMerged(s) => {
             update_accumulator_only_halfka_merged(&network, pos, s);
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaHmSplit(s) => {
             update_accumulator_only_halfka_hm_split(&network, pos, s);
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKP(s) => {
             update_accumulator_only_halfkp(&network, pos, s);
         }
-        #[cfg(feature = "ls-arch")]
+        #[cfg(not(feature = "halfkx-arch"))]
         AccumulatorStackVariant::HalfKaSplit(_)
         | AccumulatorStackVariant::HalfKaHmMerged(_)
         | AccumulatorStackVariant::HalfKaMerged(_)
         | AccumulatorStackVariant::HalfKaHmSplit(_)
         | AccumulatorStackVariant::HalfKP(_) => {
-            unreachable!("ls-arch build: only LayerStacks variant is supported")
+            unreachable!("halfkx-arch disabled: HalfKX variant cannot exist in this build")
         }
     }
 }
 
 /// HalfKaHmMerged アキュムレータを更新のみ（評価なし）
-#[cfg(not(feature = "ls-arch"))]
+#[cfg(feature = "halfkx-arch")]
 #[inline]
 fn update_accumulator_only_halfka_hm(
     network: &NNUENetwork,
@@ -1613,7 +1615,7 @@ fn update_accumulator_only_halfka_hm(
 }
 
 /// HalfKaSplit アキュムレータを更新のみ（評価なし）
-#[cfg(not(feature = "ls-arch"))]
+#[cfg(feature = "halfkx-arch")]
 #[inline]
 fn update_accumulator_only_halfka(
     network: &NNUENetwork,
@@ -1644,6 +1646,7 @@ fn update_accumulator_only_halfka(
     }
 }
 
+#[cfg(feature = "halfkx-arch")]
 fn update_accumulator_only_halfka_merged(
     network: &NNUENetwork,
     pos: &Position,
@@ -1671,6 +1674,7 @@ fn update_accumulator_only_halfka_merged(
     }
 }
 
+#[cfg(feature = "halfkx-arch")]
 fn update_accumulator_only_halfka_hm_split(
     network: &NNUENetwork,
     pos: &Position,
@@ -1699,7 +1703,7 @@ fn update_accumulator_only_halfka_hm_split(
 }
 
 /// HalfKP アキュムレータを更新のみ（評価なし）
-#[cfg(not(feature = "ls-arch"))]
+#[cfg(feature = "halfkx-arch")]
 #[inline]
 fn update_accumulator_only_halfkp(network: &NNUENetwork, pos: &Position, stack: &mut HalfKPStack) {
     if stack.is_current_computed() {

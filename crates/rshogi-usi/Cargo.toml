@@ -21,10 +21,13 @@ log.workspace = true
 env_logger.workspace = true
 
 # Local dependencies
-rshogi-core = { version = "0.2", path = "../rshogi-core" }
+# rshogi-core の default features は本 crate の default で明示的に再構築する
+# (preset edition specific build 時に複数 edition が unify されるのを防ぐため)。
+rshogi-core = { version = "0.2", path = "../rshogi-core", default-features = false }
 
 [features]
-default = []
+# default は rshogi-core 側 default (search-no-pass-rules + edition-universal) と一致させる。
+default = ["search-no-pass-rules", "edition-universal"]
 # 探索統計収集（枝刈り発生回数等のカウント）
 search-stats = ["rshogi-core/search-stats"]
 # NNUE統計収集（refresh/update比率等のカウント）
@@ -38,6 +41,8 @@ threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
 # NNUE progress8kpabs 差分更新最適化（L1=1536 で有効、L1=768 で退行）
 nnue-progress-diff = ["rshogi-core/nnue-progress-diff"]
+# 探索経路限定で pass_rights を無効化
+search-no-pass-rules = ["rshogi-core/search-no-pass-rules"]
 
 # === Edition 軸 atomic feature 群 ===
 # 設計は docs/decisions/2026-05-24-build-edition-flavor-design.md を参照。
@@ -66,6 +71,23 @@ halfkx-activation-pairwise = ["rshogi-core/halfkx-activation-pairwise"]
 mode-universal = ["rshogi-core/mode-universal"]
 mode-family    = ["rshogi-core/mode-family"]
 mode-specific  = ["rshogi-core/mode-specific"]
+
+# === preset edition (user-facing canonical API) ===
+# 各 preset は rshogi-core 側の同名 preset へ forward する。
+edition-universal = ["rshogi-core/edition-universal"]
+edition-halfkx     = ["rshogi-core/edition-halfkx"]
+edition-halfkx-any = ["rshogi-core/edition-halfkx-any"]
+edition-ls             = ["rshogi-core/edition-ls"]
+edition-ls-any-any-any = ["rshogi-core/edition-ls-any-any-any"]
+edition-halfkp-crelu             = ["rshogi-core/edition-halfkp-crelu"]
+edition-halfka_hm_merged-screlu  = ["rshogi-core/edition-halfka_hm_merged-screlu"]
+edition-ls-halfka_hm_merged-1536x16x32-none        = ["rshogi-core/edition-ls-halfka_hm_merged-1536x16x32-none"]
+edition-ls-halfka_hm_merged-1536x16x32-psqt        = ["rshogi-core/edition-ls-halfka_hm_merged-1536x16x32-psqt"]
+edition-ls-halfka_hm_merged-1536x16x32-threat      = ["rshogi-core/edition-ls-halfka_hm_merged-1536x16x32-threat"]
+edition-ls-halfka_hm_merged-1536x16x32-psqt_threat = ["rshogi-core/edition-ls-halfka_hm_merged-1536x16x32-psqt_threat"]
+edition-ls-halfka_hm_merged-1536x32x32-none        = ["rshogi-core/edition-ls-halfka_hm_merged-1536x32x32-none"]
+edition-ls-halfka_hm_merged-768x16x32-none         = ["rshogi-core/edition-ls-halfka_hm_merged-768x16x32-none"]
+edition-ls-halfka_hm_merged-512x16x32-none         = ["rshogi-core/edition-ls-halfka_hm_merged-512x16x32-none"]
 
 # === 旧 feature 名 alias ===
 # 旧 build スクリプト・CI 設定がそのまま動くよう alias で互換維持する。
