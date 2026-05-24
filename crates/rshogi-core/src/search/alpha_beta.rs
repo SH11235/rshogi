@@ -12,9 +12,9 @@ use std::sync::Arc;
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
 #[cfg(feature = "ls-arch")]
-use crate::nnue::NNUENetwork;
-#[cfg(feature = "ls-arch")]
 use crate::nnue::LayerStacksAccCache;
+#[cfg(feature = "ls-arch")]
+use crate::nnue::NNUENetwork;
 use crate::nnue::{AccumulatorStackVariant, get_network};
 use crate::position::Position;
 use crate::search::PieceToHistory;
