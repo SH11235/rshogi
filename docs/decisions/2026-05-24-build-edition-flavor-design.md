@@ -100,14 +100,9 @@ specific 系は const generics と早期 LTO 除去で最大 perf、universal/fa
 | ft (LS / HalfKX 共通) | `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged` | ✗ | ✓ |
 
 注: `ft` slot は LS / HalfKX どちらの family でも **5 variant 全てを命名規則
-として認める**。ただし**実装の現状**: LayerStack network
-(`network_layer_stacks.rs`) は HalfKaHmMerged (= 旧 `HalfKA_hm`) 専用に
-hardcode されており、他 4 variant (`halfkp` / `halfka_split` / `halfka_merged`
-/ `halfka_hm_split`) を LS で使うには LS の FT 部分を generic 化する別作業が
-必要 (→ Issue SH11235/rshogi#734、本 ADR の Phase 1/2 のスコープ外)。Phase 1
-の build.rs check では実装済 FT のみ enable (LS は `halfka_hm_merged` だけ通る)。
-LS FT generic 化が完了したら他 4 variant も build に通せるようになる、という
-forward-compatible な命名設計。
+として認める**。LS FT generic 化 (Issue SH11235/rshogi#734) で実装側も 5 variant
+対応へ追従済 (本 ADR §「LS FT generic 化」参照)。build.rs check も 5 variant 全
+許容に緩和済み。
 | size (LS) | `1536x16x32` / `1536x32x32` / `768x16x32` / `512x16x32` | ✗ | ✓ |
 | ext (LS) | `psqt` / `threat` / `psqt_threat` | ✓ (`none` = 拡張なし固定) | ✓ |
 
@@ -329,6 +324,47 @@ mode sentinel と組合せて以下の不正組合せを fail-fast:
 
 family / universal mode では複数 feature 有効化を**正当**として扱い、specific
 mode のみ厳格な 1-of-N チェックを適用する。
+
+### LS FT generic 化 (Issue SH11235/rshogi#734)
+
+LayerStack network は ADR 初版時点で HalfKaHmMerged 専用 hardcode、本 ADR の
+命名規則とは forward-compatible のままだった。Issue #734 で実装側を以下方針で
+5 variant 対応に追従する:
+
+**設計**: trait + 関連型 (`LsFeatureSpec` trait) + outer enum (cfg-gated flat 変数)
+の二段構成。
+
+- `LsFeatureSpec` trait (`crates/rshogi-core/src/nnue/ls_feature_spec.rs`):
+  `type Set: FeatureSet` / `const DIMENSIONS: usize` /
+  `fn feature_index_from_bona_piece(bp, perspective, king_sq) -> usize` の 3 要素
+  を集約。5 個の zero-sized marker type (`HalfKpSpec`, `HalfKaSplitSpec`,
+  `HalfKaMergedSpec`, `HalfKaHmSplitSpec`, `HalfKaHmMergedSpec`) が実装する。
+- `FeatureTransformerLayerStacks<L1, FT>` / `NetworkLayerStacks<L1, ..., FT>` を
+  `FT: LsFeatureSpec` で parameterize。FT-specific な append_active /
+  append_changed / needs_refresh / feature_index は `FT::Set` 経由 / `FT::*` 経由
+  で呼ぶ。Monomorphization で specific edition では現状と bit-identical な機械語
+  になる。
+- `LayerStacksNetwork` enum: 5 FT × 4 size = 最大 20 variant を `#[cfg]` ゲートで
+  列挙 (例: `HmMerged_L1536x16x32(Box<NetworkLayerStacks<1536, ..., HalfKaHmMergedSpec>>)`)。
+  build.rs で feature 組合せに応じて active variant が決まる。dispatch は
+  既存の `parse_feature_set_keyword(arch_str)` で FT 検出 → 該当 variant に
+  分岐する。
+
+**WHY trait + 関連型 (not Box<dyn LayerStacksEval>, not 5 並列モジュール)**:
+- `Box<dyn>` は per-evaluate vtable indirection を発生させ NPS 退行リスクが大きい
+  (ホットパス)。
+- 5 並列モジュール (既存 HalfKX network 群と同じパターン) は ~2,000 行 × 5 の
+  コード重複で保守コスト過大。LS FT 部分は構造上 trait で抽象化できる。
+- trait + 関連型は specific edition (1 variant のみ active) で monomorphization
+  され既存と同等のコードが出る。family edition (複数 variant active) では outer
+  enum dispatch 1 段だけ追加され、HalfKX 系の既存 dispatch 構造と整合的。
+
+**build.rs check の緩和**: 「LS-only build (`ls-arch` + `!halfkx-arch`) では
+`ft-halfka_hm_merged` のみサポート」制約は実装追従済 = 削除。代わりに「`ls-arch`
+が有効なら `ft-*` を少なくとも 1 個必須」を追加。
+
+**動作確認**: 既存 HalfKaHmMerged モデル (v100-400 等) の bit-identical 維持 +
+他 4 FT は read smoke test + verify_nnue_accumulator スモークを通す。
 
 ### Flavor 軸の扱い (本 ADR では宣言のみ、内容は別 Issue)
 
