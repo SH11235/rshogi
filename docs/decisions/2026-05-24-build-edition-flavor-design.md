@@ -331,24 +331,26 @@ LayerStack network は ADR 初版時点で HalfKaHmMerged 専用 hardcode、本 
 命名規則とは forward-compatible のままだった。Issue #734 で実装側を以下方針で
 5 variant 対応に追従する:
 
-**設計**: trait + 関連型 (`LsFeatureSpec` trait) + outer enum (cfg-gated flat 変数)
-の二段構成。
+**設計**: trait + 関連型 (`LsFeatureSpec` trait) + 2 段 enum dispatch
+(`LayerStacksNetwork` 外側 FT 軸 + `LsNetByFt<FT>` 内側 L1 軸) の構成。
 
 - `LsFeatureSpec` trait (`crates/rshogi-core/src/nnue/ls_feature_spec.rs`):
-  `type Set: FeatureSet` / `const DIMENSIONS: usize` /
-  `fn feature_index_from_bona_piece(bp, perspective, king_sq) -> usize` の 3 要素
-  を集約。5 個の zero-sized marker type (`HalfKpSpec`, `HalfKaSplitSpec`,
-  `HalfKaMergedSpec`, `HalfKaHmSplitSpec`, `HalfKaHmMergedSpec`) が実装する。
+  `type Set: FeatureSet` / `type Feature: Feature` / `const DIMENSIONS: usize` /
+  `fn feature_index(bp, perspective, king_sq) -> usize` の 4 要素を集約。5 個の
+  zero-sized marker type (`HalfKpSpec`, `HalfKaSplitSpec`, `HalfKaMergedSpec`,
+  `HalfKaHmSplitSpec`, `HalfKaHmMergedSpec`) が実装する。
 - `FeatureTransformerLayerStacks<L1, FT>` / `NetworkLayerStacks<L1, ..., FT>` を
-  `FT: LsFeatureSpec` で parameterize。FT-specific な append_active /
-  append_changed / needs_refresh / feature_index は `FT::Set` 経由 / `FT::*` 経由
-  で呼ぶ。Monomorphization で specific edition では現状と bit-identical な機械語
-  になる。
-- `LayerStacksNetwork` enum: 5 FT × 4 size = 最大 20 variant を `#[cfg]` ゲートで
-  列挙 (例: `HmMerged_L1536x16x32(Box<NetworkLayerStacks<1536, ..., HalfKaHmMergedSpec>>)`)。
-  build.rs で feature 組合せに応じて active variant が決まる。dispatch は
-  既存の `parse_feature_set_keyword(arch_str)` で FT 検出 → 該当 variant に
-  分岐する。
+  `FT: LsFeatureSpec` で parameterize。FT-specific な `append_active_indices` /
+  `append_changed_indices` / `needs_refresh` / `feature_index` は `FT::Feature` /
+  `FT::Set` / `FT::feature_index` 経由で呼ぶ。Monomorphization で specific
+  edition では HalfKaHmMerged 専用の旧実装と機械語が一致する想定。
+- 外側 `LayerStacksNetwork` enum は FT 軸の 5 variant (`HalfKaHmMerged` /
+  `HalfKaHmSplit` / `HalfKaMerged` / `HalfKaSplit` / `HalfKP`)、内側 `LsNetByFt<FT>`
+  enum は L1 軸の 4 variant (`L1536x16x32` / `L1536x32x32` / `L768x16x32` /
+  `L512x16x32`) を持つ 2 段構成。各 variant は `#[cfg]` ゲート、active な FT × L1
+  組合せの分だけ展開される。dispatch は `peek_layer_stacks_feature_set` (専用 peek、
+  `Features=` keyword 優先で arch_str から FT 検出) で外側 variant を決定し、`(L1, L2, L3)`
+  寸法で内側 variant を決定する。
 
 **WHY trait + 関連型 (not Box<dyn LayerStacksEval>, not 5 並列モジュール)**:
 - `Box<dyn>` は per-evaluate vtable indirection を発生させ NPS 退行リスクが大きい
@@ -356,15 +358,23 @@ LayerStack network は ADR 初版時点で HalfKaHmMerged 専用 hardcode、本 
 - 5 並列モジュール (既存 HalfKX network 群と同じパターン) は ~2,000 行 × 5 の
   コード重複で保守コスト過大。LS FT 部分は構造上 trait で抽象化できる。
 - trait + 関連型は specific edition (1 variant のみ active) で monomorphization
-  され既存と同等のコードが出る。family edition (複数 variant active) では outer
-  enum dispatch 1 段だけ追加され、HalfKX 系の既存 dispatch 構造と整合的。
+  され既存と同等のコードが出る。family / universal edition (複数 variant active)
+  では outer enum dispatch 1 段だけ追加され、HalfKX 系の既存 dispatch 構造と整合的。
+
+**WHY 2 段 enum (not flat 20 variant)**:
+- flat 20 variant では tools / main.rs の dispatch macro が肥大化し、追加 size /
+  FT のたびに各所を更新する必要が出る。
+- 2 段に分けると FT 軸と L1 軸が直交し、`ls_match_ft!` / 内部 `ls_match_size!`
+  マクロで各軸の network 共通操作 (`l1_size`, `evaluate`, `update_accumulator`)
+  を 1 箇所で記述できる。
 
 **build.rs check の緩和**: 「LS-only build (`ls-arch` + `!halfkx-arch`) では
 `ft-halfka_hm_merged` のみサポート」制約は実装追従済 = 削除。代わりに「`ls-arch`
 が有効なら `ft-*` を少なくとも 1 個必須」を追加。
 
 **動作確認**: 既存 HalfKaHmMerged モデル (v100-400 等) の bit-identical 維持 +
-他 4 FT は read smoke test + verify_nnue_accumulator スモークを通す。
+他 4 FT は `cargo test` smoke レベル。verify_nnue_accumulator による 100/100 PASS
+は実モデル投入時の follow-up とする。
 
 ### Flavor 軸の扱い (本 ADR では宣言のみ、内容は別 Issue)
 

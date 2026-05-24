@@ -55,8 +55,16 @@ impl LsFeatureSpec for HalfKpSpec {
     const DIMENSIONS: usize = HALFKP_DIMENSIONS;
 
     #[inline]
-    fn feature_index(bp: BonaPiece, _perspective: Color, king_sq: Square) -> usize {
-        halfkp_index(king_sq, bp)
+    fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize {
+        // HalfKP は後手視点で king_sq を上下反転する (HM mirror ではなく Y 反転)。
+        // `features/half_kp.rs` の `append_active_indices` / `append_changed_indices`
+        // と同じ座標系を再現する必要がある。
+        let king = if perspective == Color::Black {
+            king_sq
+        } else {
+            king_sq.inverse()
+        };
+        halfkp_index(king, bp)
     }
 }
 

@@ -159,7 +159,6 @@ edition-halfkx-any = [
 ]
 
 # LayerStack family (全 size / 全 FT / 全 ext dispatch)。
-# Issue #734 で LS network を FT generic 化したため、5 variant 全て family build に含める。
 edition-ls             = ["edition-ls-any-any-any"]
 edition-ls-any-any-any = [
   "mode-family", "ls-arch",
@@ -218,8 +217,7 @@ edition-ls-halfka_hm_merged-512x16x32-none = [
   "mode-specific", "ls-arch", "ft-halfka_hm_merged", "ls-size-512x16x32",
 ]
 
-# Issue #734 で LS network を FT generic 化したため、他 4 FT (halfkp / halfka_split /
-# halfka_merged / halfka_hm_split) も specific preset を 1536x16x32-none で代表的に整備する。
+# LS specific preset (halfka_hm_merged 以外の 4 FT、1536x16x32-none で代表整備)。
 # 残りの (size × ext) 組合せは需要発生時に同パターンで追加する。
 edition-ls-halfka_hm_split-1536x16x32-none = [
   "mode-specific", "ls-arch", "ft-halfka_hm_split", "ls-size-1536x16x32",

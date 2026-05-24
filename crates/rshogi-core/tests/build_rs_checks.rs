@@ -224,8 +224,6 @@ fn ls_arch_plus_halfkx_arch_ok() {
 
 #[test]
 fn ls_specific_with_ft_halfkp_ok() {
-    // Issue #734 で LS network を 5 variant 対応にしたため、ft-halfkp + ls-arch
-    // 単独 specific build も valid になった。
     let has = lookup(&[
         "mode-specific",
         "ls-arch",
@@ -296,7 +294,6 @@ fn ls_arch_with_halfkx_arch_specific_ft_halfkp_ok() {
 
 #[test]
 fn ls_only_family_with_multi_ft_ok() {
-    // mode-family + LS-only + 複数 FT (Issue #734 後は dispatch で valid)。
     let has = lookup(&[
         "mode-family",
         "ls-arch",
@@ -310,7 +307,6 @@ fn ls_only_family_with_multi_ft_ok() {
 
 #[test]
 fn ls_only_universal_with_all_ft_ok() {
-    // mode-universal + LS-only + 全 FT も valid。
     let has = lookup(&[
         "mode-universal",
         "ls-arch",
@@ -326,7 +322,6 @@ fn ls_only_universal_with_all_ft_ok() {
 
 #[test]
 fn ls_arch_without_ft_rejected() {
-    // Issue #734 後、ls-arch を有効化したら ft-* が 1 個以上必須。
     let has = lookup(&["mode-specific", "ls-arch", "ls-size-1536x16x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("ft-* を 1 個以上"));

@@ -2206,13 +2206,8 @@ mod tests {
     }
 
     // =========================================================================
-    // FT generic 化 smoke tests (Issue #734)
+    // 5 FT smoke tests
     // =========================================================================
-    //
-    // 5 種類の FT を `FeatureTransformerLayerStacks<L1, FT>` で instantiate して
-    // refresh_accumulator が panic せず piece feature 数だけ active index が
-    // 立つことを確認する。FT generic 化の monomorphization が 5 variant で機能
-    // することを最低限保証する smoke 層。
 
     use crate::nnue::ls_feature_spec::{
         HalfKaHmSplitSpec, HalfKaMergedSpec, HalfKaSplitSpec, HalfKpSpec, LsFeatureSpec,

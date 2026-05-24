@@ -1297,8 +1297,16 @@ impl LayerStacksNetwork {
 
 /// reader の現在位置から LayerStacks ヘッダの arch_str を peek し、FT を判別する。
 ///
-/// 読み取り後、reader 位置を呼び出し時点まで `Seek` で戻す。失敗時は seek もベスト
-/// エフォートで戻す (再 seek が失敗した場合は元のエラーを優先する)。
+/// LayerStacks の arch_str は典型的に `LayerStacks(... Features=<FT_NAME>(...) ...)` の
+/// 形をとる。`Features=` 直後のキーワード (HalfKaHmMerged / HalfKaHmSplit / HalfKaMerged
+/// / HalfKaSplit / HalfKP / 旧 underscore 表記) を最優先で読み取り、無ければ汎用
+/// `parse_feature_set_from_arch` (= "LayerStacks" → FeatureSet::LayerStacks fallback) に
+/// 委譲する。完全に判別不能なモデルは `FeatureSet::LayerStacks` を返し、上位の
+/// `read_with_feature_set` で HalfKaHmMerged 互換扱いになる。
+///
+/// 読み取り後は `Seek::seek(SeekFrom::Start(original))` で reader 位置を巻き戻す。
+/// `BufReader<File>` 等の seekable reader では seek 時に内部 buffer が破棄・再同期される
+/// ため、後続の本読み込みに影響しない。peek 自体が失敗しても巻き戻しは試みる。
 #[cfg(feature = "ls-arch")]
 fn peek_layer_stacks_feature_set<R: Read + Seek>(
     reader: &mut R,
@@ -1306,7 +1314,6 @@ fn peek_layer_stacks_feature_set<R: Read + Seek>(
     let original = reader.stream_position()?;
     let result = (|| -> io::Result<super::spec::FeatureSet> {
         let mut buf4 = [0u8; 4];
-        // version + struct hash を読み飛ばし、arch_len → arch_str を読む。
         reader.read_exact(&mut buf4)?;
         reader.read_exact(&mut buf4)?;
         reader.read_exact(&mut buf4)?;
@@ -1320,16 +1327,27 @@ fn peek_layer_stacks_feature_set<R: Read + Seek>(
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
         let arch_str = String::from_utf8_lossy(&arch);
-        match super::spec::parse_feature_set_from_arch(&arch_str) {
-            Ok(fs) => Ok(fs),
-            Err(_) => {
-                // arch_str から FT を特定できないモデルは旧 HalfKaHmMerged と見なす。
-                Ok(super::spec::FeatureSet::LayerStacks)
-            }
-        }
+        Ok(detect_layer_stacks_feature_set(&arch_str))
     })();
     reader.seek(SeekFrom::Start(original))?;
     result
+}
+
+/// arch_str から LS の FT を判別する pure helper (peek の純粋ロジック部分)。
+#[cfg(feature = "ls-arch")]
+fn detect_layer_stacks_feature_set(arch_str: &str) -> super::spec::FeatureSet {
+    use super::spec::FeatureSet as Fs;
+    if let Some(name) = super::spec::parse_feature_set_keyword(arch_str) {
+        match name {
+            "HalfKP" => return Fs::HalfKP,
+            "HalfKA_merged" | "HalfKaMerged" => return Fs::HalfKaMerged,
+            "HalfKA_hm_split" | "HalfKaHmSplit" => return Fs::HalfKaHmSplit,
+            "HalfKA_hm" | "HalfKaHmMerged" => return Fs::HalfKaHmMerged,
+            "HalfKaSplit" => return Fs::HalfKaSplit,
+            _ => {}
+        }
+    }
+    super::spec::parse_feature_set_from_arch(arch_str).unwrap_or(Fs::LayerStacks)
 }
 
 #[cfg(test)]

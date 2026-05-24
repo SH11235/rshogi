@@ -52,9 +52,6 @@ fn validate_feature_combination(
         );
     }
 
-    // ls-arch が有効なら ft-* を 1 個以上必須化する (Issue #734 で LS network を
-    // FT generic 化した結果、5 variant 全てが LS で valid になった)。HalfKX 経路の
-    // 有無は問わない。
     let ft_features: &[&str] = &[
         "ft-halfkp",
         "ft-halfka_split",
@@ -64,11 +61,7 @@ fn validate_feature_combination(
     ];
     let ft_count = ft_features.iter().filter(|f| has_feature(f)).count();
     if ls_arch && ft_count == 0 {
-        return Err(
-            "ls-arch を有効化するには ft-* を 1 個以上必要です \
-             (Issue #734 後、LS で 5 variant 全て対応)。"
-                .to_string(),
-        );
+        return Err("ls-arch を有効化するには ft-* を 1 個以上必要です。".to_string());
     }
 
     if mode_specific {
