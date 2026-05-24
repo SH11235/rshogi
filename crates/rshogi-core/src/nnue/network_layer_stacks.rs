@@ -853,6 +853,11 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         // (self, stack) tuple match で同じ L1 variant の組のみ matched arm を持つ。
         // 2 サイズ以上 enable のときだけ cross-pair の不一致 arm が到達可能で、
         // 単一 size build では 1 arm の match 自体が exhaustive となる。
+        //
+        // 以下の 6-pair cfg は本 file 内で 4 箇所 (本 fallback / update_accumulator
+        // の net_dims / stack_dims / fallback) に同じ式を持つ。LS サイズ追加時は
+        // すべての any(all(...)) を C(N,2) に揃えて同期更新すること (match arm は
+        // item ではないため共通 cfg を file-local macro に括り出せない)。
         match (self, stack) {
             #[cfg(feature = "ls-size-1536x16x32")]
             (
