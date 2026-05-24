@@ -1297,12 +1297,12 @@ impl LayerStacksNetwork {
 
 /// reader の現在位置から LayerStacks ヘッダの arch_str を peek し、FT を判別する。
 ///
-/// LayerStacks の arch_str は典型的に `LayerStacks(... Features=<FT_NAME>(...) ...)` の
-/// 形をとる。`Features=` 直後のキーワード (HalfKaHmMerged / HalfKaHmSplit / HalfKaMerged
-/// / HalfKaSplit / HalfKP / 旧 underscore 表記) を最優先で読み取り、無ければ汎用
-/// `parse_feature_set_from_arch` (= "LayerStacks" → FeatureSet::LayerStacks fallback) に
-/// 委譲する。完全に判別不能なモデルは `FeatureSet::LayerStacks` を返し、上位の
-/// `read_with_feature_set` で HalfKaHmMerged 互換扱いになる。
+/// tatara emit 形式の arch_str は `Features=<FT>(Friend)[<dim>->1536x2],...` で、
+/// `Features=` 直後のキーワード (HalfKaHmMerged / HalfKaHmSplit / HalfKaMerged /
+/// HalfKaSplit / HalfKP の PascalCase 5 種) を最優先で読み取る。無ければ汎用
+/// `parse_feature_set_from_arch` (LayerStacks fallback 含む) に委譲する。完全に
+/// 判別不能なモデルは `FeatureSet::LayerStacks` を返し、上位の `read_with_feature_set`
+/// で HalfKaHmMerged 互換扱いになる。
 ///
 /// 読み取り後は `Seek::seek(SeekFrom::Start(original))` で reader 位置を巻き戻す。
 /// `BufReader<File>` 等の seekable reader では seek 時に内部 buffer が破棄・再同期される

@@ -38,6 +38,11 @@ pub trait LsFeatureSpec: 'static {
     /// 特徴量の入力次元 (FT weight 行数)。`Self::Set::DIMENSIONS` と一致する。
     const DIMENSIONS: usize;
 
+    /// piece_list のうち玉位置 (`PieceNumber::KING` 以降) を active index に含めるか。
+    /// HalfKP は玉除外 (`false`)、HalfKa* は玉込みで全 40 slot を扱う (`true`)。
+    /// 各 FT の `Feature::append_active_indices` が piece_list を走査する範囲と一致する。
+    const INCLUDE_KING_IN_PIECE_LIST: bool;
+
     /// 単一 `BonaPiece` を feature index に変換する。
     ///
     /// `try_apply_dirty_piece_fast` (DirtyPiece の old/new BonaPiece → index 変換) と
@@ -53,6 +58,7 @@ impl LsFeatureSpec for HalfKpSpec {
     type Set = HalfKPFeatureSet;
     type Feature = HalfKP;
     const DIMENSIONS: usize = HALFKP_DIMENSIONS;
+    const INCLUDE_KING_IN_PIECE_LIST: bool = false;
 
     #[inline]
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize {
@@ -75,6 +81,7 @@ impl LsFeatureSpec for HalfKaSplitSpec {
     type Set = HalfKaSplitFeatureSet;
     type Feature = HalfKaSplit;
     const DIMENSIONS: usize = HALFKA_DIMENSIONS;
+    const INCLUDE_KING_IN_PIECE_LIST: bool = true;
 
     #[inline]
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize {
@@ -91,6 +98,7 @@ impl LsFeatureSpec for HalfKaMergedSpec {
     type Set = HalfKaMergedFeatureSet;
     type Feature = HalfKaMerged;
     const DIMENSIONS: usize = HALFKA_MERGED_DIMENSIONS;
+    const INCLUDE_KING_IN_PIECE_LIST: bool = true;
 
     #[inline]
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize {
@@ -108,6 +116,7 @@ impl LsFeatureSpec for HalfKaHmSplitSpec {
     type Set = HalfKaHmSplitFeatureSet;
     type Feature = HalfKaHmSplit;
     const DIMENSIONS: usize = HALFKA_HM_SPLIT_DIMENSIONS;
+    const INCLUDE_KING_IN_PIECE_LIST: bool = true;
 
     #[inline]
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize {
@@ -128,6 +137,7 @@ impl LsFeatureSpec for HalfKaHmMergedSpec {
     type Set = HalfKaHmMergedFeatureSet;
     type Feature = HalfKaHmMerged;
     const DIMENSIONS: usize = HALFKA_HM_DIMENSIONS;
+    const INCLUDE_KING_IN_PIECE_LIST: bool = true;
 
     #[inline]
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize {
@@ -186,8 +196,7 @@ mod tests {
 
         // FT 別の "active" 範囲: HalfKP は玉除外 (piece_list[..KING])、HalfKa* は玉込み (全 40 slot)。
         // append_active_indices と同じ範囲で feature_index を呼び、index 集合を作る。
-        let include_king = !std::any::type_name::<FT>().ends_with("HalfKpSpec");
-        let end = if include_king {
+        let end = if FT::INCLUDE_KING_IN_PIECE_LIST {
             crate::nnue::piece_list::PieceNumber::NB
         } else {
             crate::nnue::piece_list::PieceNumber::KING as usize
