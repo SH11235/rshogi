@@ -90,11 +90,13 @@ pub use layer_stacks::{
 };
 pub use layers::{AffineTransform, ClippedReLU};
 #[cfg(feature = "ls-arch")]
+pub use network::evaluate_layer_stacks;
+#[cfg(feature = "ls-arch")]
 pub(crate) use network::update_and_evaluate_layer_stacks_cached;
 pub use network::{
     LayerStackBucketMode, NNUENetwork, NnueFormatInfo, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
     compute_layer_stack_progress8kpabs_bucket_index, compute_progress8kpabs_sum, detect_format,
-    ensure_accumulator_computed, evaluate_dispatch, evaluate_layer_stacks, get_fv_scale_override,
+    ensure_accumulator_computed, evaluate_dispatch, get_fv_scale_override,
     get_layer_stack_bucket_mode, get_layer_stack_progress_kpabs_weights, get_network, init_nnue,
     init_nnue_from_bytes, is_halfka_256_loaded, is_halfka_512_loaded, is_halfka_1024_loaded,
     is_halfka_hm_256_loaded, is_halfka_hm_512_loaded, is_halfka_hm_1024_loaded,

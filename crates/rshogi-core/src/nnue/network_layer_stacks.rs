@@ -735,6 +735,7 @@ impl LayerStacksNetwork {
     }
 
     /// ファイルから読み込み（exact architecture で dispatch）
+    #[cfg(feature = "ls-arch")]
     pub fn read_with_options<R: Read + Seek>(
         reader: &mut R,
         l1: usize,
@@ -771,6 +772,7 @@ impl LayerStacksNetwork {
     }
 
     /// 評価値を計算
+    #[cfg(feature = "ls-arch")]
     pub fn evaluate(
         &self,
         pos: &Position,
@@ -807,6 +809,7 @@ impl LayerStacksNetwork {
     }
 
     /// アキュムレータを更新（キャッシュ対応）
+    #[cfg(feature = "ls-arch")]
     pub fn update_accumulator(
         &self,
         pos: &Position,
@@ -912,6 +915,7 @@ impl LayerStacksNetwork {
     }
 
     /// 新しい L1 サイズに対応する AccStack を作成
+    #[cfg(feature = "ls-arch")]
     pub fn new_acc_stack(&self) -> super::accumulator_layer_stacks::LayerStacksAccStack {
         match self {
             #[cfg(feature = "ls-size-1536x16x32")]
@@ -949,6 +953,7 @@ impl LayerStacksNetwork {
     }
 
     /// 新しい L1 サイズに対応する AccCache を作成
+    #[cfg(feature = "ls-arch")]
     pub fn new_acc_cache(&self) -> super::accumulator_layer_stacks::LayerStacksAccCache {
         match self {
             #[cfg(feature = "ls-size-1536x16x32")]
@@ -988,8 +993,10 @@ impl LayerStacksNetwork {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "ls-size-1536x16x32")]
     use super::*;
     use crate::nnue::constants::{FV_SCALE_HALFKA, NNUE_PYTORCH_L1};
+    #[cfg(feature = "ls-size-1536x16x32")]
     use crate::position::{Position, SFEN_HIRATE};
 
     const TEST_L1: usize = NNUE_PYTORCH_L1;
@@ -1010,6 +1017,7 @@ mod tests {
     /// - FT weight nonzero: 2,143,627
     /// - L1 bias (bucket 0): [-15, 57, -182, -97, -202, -55, 120, 1, 87, -133, -16, 44, -27, -37, -201, -186]
     /// - Initial position score: 0 (epoch82は学習初期のため)
+    #[cfg(feature = "ls-size-1536x16x32")]
     #[test]
     #[ignore]
     fn test_load_layer_stacks_file() {

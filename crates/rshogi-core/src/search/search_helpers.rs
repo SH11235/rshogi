@@ -131,7 +131,11 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
             return update_and_evaluate_layer_stacks_cached(net, pos, s, &mut st.acc_cache);
         }
     }
-    evaluate_dispatch(pos, &mut st.nnue_stack, &mut st.acc_cache)
+    #[cfg(feature = "ls-arch")]
+    let acc_cache = &mut st.acc_cache;
+    #[cfg(not(feature = "ls-arch"))]
+    let acc_cache = &mut None;
+    evaluate_dispatch(pos, &mut st.nnue_stack, acc_cache)
 }
 
 /// NNUE アキュムレータを計算済みにする（評価値の計算はしない）
@@ -141,7 +145,11 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
 #[cfg(feature = "use-lazy-evaluate")]
 #[inline]
 pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
-    ensure_accumulator_computed(pos, &mut st.nnue_stack, &mut st.acc_cache)
+    #[cfg(feature = "ls-arch")]
+    let acc_cache = &mut st.acc_cache;
+    #[cfg(not(feature = "ls-arch"))]
+    let acc_cache = &mut None;
+    ensure_accumulator_computed(pos, &mut st.nnue_stack, acc_cache)
 }
 
 /// do_move + nodes++ + nnue_push をまとめたラッパー

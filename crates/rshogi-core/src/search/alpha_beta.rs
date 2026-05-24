@@ -13,7 +13,9 @@ use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
 #[cfg(feature = "ls-arch")]
 use crate::nnue::NNUENetwork;
-use crate::nnue::{AccumulatorStackVariant, LayerStacksAccCache, get_network};
+#[cfg(feature = "ls-arch")]
+use crate::nnue::LayerStacksAccCache;
+use crate::nnue::{AccumulatorStackVariant, get_network};
 use crate::position::Position;
 use crate::search::PieceToHistory;
 use crate::tt::{ProbeResult, TTData, TranspositionTable};
@@ -376,6 +378,7 @@ pub struct SearchState {
     pub nnue_stack: AccumulatorStackVariant,
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
     /// LayerStacks アーキテクチャ以外では None
+    #[cfg(feature = "ls-arch")]
     pub acc_cache: Option<LayerStacksAccCache>,
     /// check_abort呼び出しカウンター
     pub calls_cnt: i32,
@@ -404,6 +407,7 @@ impl SearchState {
             #[cfg(feature = "ls-arch")]
             network_ptr: std::ptr::null(),
             nnue_stack: AccumulatorStackVariant::new_default(),
+            #[cfg(feature = "ls-arch")]
             acc_cache: None,
             calls_cnt: 0,
             #[cfg(feature = "search-stats")]
@@ -754,26 +758,25 @@ impl SearchWorker {
                 self.state.nnue_stack.reset();
             }
             // LayerStacks 用 AccumulatorCaches を初期化
-            if network.is_layer_stacks() {
-                if let crate::nnue::NNUENetwork::LayerStacks(ls_net) = &*network {
-                    // 既存 cache があっても exact architecture が不一致なら破棄。
-                    // 同一プロセスで EvalFile をリロードして LayerStacks 形状が変わった場合、旧 cache
-                    // variant を保持したままだと `LayerStacksNetwork::update_accumulator`
-                    // の cache 経路が pattern match で外れ、Finny-table caching が静かに無効化される。
-                    let need_new_cache = match &self.state.acc_cache {
-                        None => true,
-                        Some(cache) => {
-                            cache.architecture_dims()
-                                != (
-                                    ls_net.architecture_spec().l1,
-                                    ls_net.architecture_spec().l2,
-                                    ls_net.architecture_spec().l3,
-                                )
-                        }
-                    };
-                    if need_new_cache {
-                        self.state.acc_cache = Some(ls_net.new_acc_cache());
+            #[cfg(feature = "ls-arch")]
+            if let crate::nnue::NNUENetwork::LayerStacks(ls_net) = &*network {
+                // 既存 cache があっても exact architecture が不一致なら破棄。
+                // 同一プロセスで EvalFile をリロードして LayerStacks 形状が変わった場合、旧 cache
+                // variant を保持したままだと `LayerStacksNetwork::update_accumulator`
+                // の cache 経路が pattern match で外れ、Finny-table caching が静かに無効化される。
+                let need_new_cache = match &self.state.acc_cache {
+                    None => true,
+                    Some(cache) => {
+                        cache.architecture_dims()
+                            != (
+                                ls_net.architecture_spec().l1,
+                                ls_net.architecture_spec().l2,
+                                ls_net.architecture_spec().l3,
+                            )
                     }
+                };
+                if need_new_cache {
+                    self.state.acc_cache = Some(ls_net.new_acc_cache());
                 }
                 // 新しいゲーム開始時にキャッシュを無効化（usinewgame 経由で呼ばれる）
                 if let Some(cache) = &mut self.state.acc_cache {
@@ -785,7 +788,10 @@ impl SearchWorker {
         } else {
             // NNUE未初期化の場合はデフォルト（HalfKP）でリセット
             self.state.nnue_stack.reset();
-            self.state.acc_cache = None;
+            #[cfg(feature = "ls-arch")]
+            {
+                self.state.acc_cache = None;
+            }
         }
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる

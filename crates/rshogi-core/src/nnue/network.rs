@@ -18,7 +18,9 @@
 //! **「Accumulator は L1 だけで決まる」** を活用し、L2/L3/活性化の追加時に
 //! このファイルの変更は最小限で済む。
 
-use super::accumulator_layer_stacks::{LayerStacksAccCache, LayerStacksAccStack};
+use super::accumulator_layer_stacks::LayerStacksAccCache;
+#[cfg(feature = "ls-arch")]
+use super::accumulator_layer_stacks::LayerStacksAccStack;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
 use super::bona_piece::BonaPiece;
@@ -29,6 +31,7 @@ use super::halfka_hm_split::{HalfKaHmSplitNetwork, HalfKaHmSplitStack};
 use super::halfka_merged::{HalfKaMergedNetwork, HalfKaMergedStack};
 use super::halfka_split::{HalfKaSplitNetwork, HalfKaSplitStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
+#[cfg(feature = "ls-arch")]
 use super::network_layer_stacks::LayerStacksNetwork;
 use super::spec::{Activation, FeatureSet};
 #[cfg(feature = "halfkx-arch")]
@@ -279,6 +282,7 @@ pub enum NNUENetwork {
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPNetwork),
     /// LayerStacks（L1=1536/768 + 9バケット）
+    #[cfg(feature = "ls-arch")]
     LayerStacks(LayerStacksNetwork),
 }
 
@@ -361,33 +365,48 @@ impl NNUENetwork {
                     | NNUEArchitectureOverride::LayerStacksPSQT => FeatureSet::LayerStacks,
                 };
 
-                // PSQT オーバーライド:
-                // LayerStacks → Some(false) (PSQT 強制 OFF)
-                // LayerStacksPSQT → Some(true) (PSQT 強制 ON)
-                // Auto → None (arch_str から自動検出)
-                let psqt_override = match arch_override {
-                    NNUEArchitectureOverride::LayerStacks => Some(false),
-                    NNUEArchitectureOverride::LayerStacksPSQT => Some(true),
-                    _ => None,
-                };
-
                 // LayerStacks は特殊処理（FT が LEB128 圧縮のためファイルサイズ検出の対象外）
                 if effective_feature_set == FeatureSet::LayerStacks {
-                    reader.seek(SeekFrom::Start(0))?;
-                    let (l1_from_arch, l2_from_arch, l3_from_arch) =
-                        super::spec::parse_arch_dimensions(&arch_str);
-                    let l1 = if l1_from_arch == 0 {
-                        1536
-                    } else {
-                        l1_from_arch
-                    };
-                    let (l2, l3) = match (l2_from_arch, l3_from_arch) {
-                        (0, 0) => (16, 32),
-                        dims => dims,
-                    };
-                    let network =
-                        LayerStacksNetwork::read_with_options(reader, l1, l2, l3, psqt_override)?;
-                    return Ok(Self::LayerStacks(network));
+                    #[cfg(feature = "ls-arch")]
+                    {
+                        // PSQT オーバーライド:
+                        // LayerStacks → Some(false) (PSQT 強制 OFF)
+                        // LayerStacksPSQT → Some(true) (PSQT 強制 ON)
+                        // Auto → None (arch_str から自動検出)
+                        let psqt_override = match arch_override {
+                            NNUEArchitectureOverride::LayerStacks => Some(false),
+                            NNUEArchitectureOverride::LayerStacksPSQT => Some(true),
+                            _ => None,
+                        };
+                        reader.seek(SeekFrom::Start(0))?;
+                        let (l1_from_arch, l2_from_arch, l3_from_arch) =
+                            super::spec::parse_arch_dimensions(&arch_str);
+                        let l1 = if l1_from_arch == 0 {
+                            1536
+                        } else {
+                            l1_from_arch
+                        };
+                        let (l2, l3) = match (l2_from_arch, l3_from_arch) {
+                            (0, 0) => (16, 32),
+                            dims => dims,
+                        };
+                        let network = LayerStacksNetwork::read_with_options(
+                            reader,
+                            l1,
+                            l2,
+                            l3,
+                            psqt_override,
+                        )?;
+                        return Ok(Self::LayerStacks(network));
+                    }
+                    #[cfg(not(feature = "ls-arch"))]
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "LayerStacks NNUE model requires the `ls-arch` feature; \
+                             rebuild rshogi-core with an Edition that enables it.",
+                        ));
+                    }
                 }
 
                 // 4. ファイルサイズからアーキテクチャを検出
@@ -470,7 +489,14 @@ impl NNUENetwork {
 
     /// LayerStacks アーキテクチャかどうか
     pub fn is_layer_stacks(&self) -> bool {
-        matches!(self, Self::LayerStacks(_))
+        #[cfg(feature = "ls-arch")]
+        {
+            matches!(self, Self::LayerStacks(_))
+        }
+        #[cfg(not(feature = "ls-arch"))]
+        {
+            false
+        }
     }
 
     /// HalfKaSplit アーキテクチャかどうか
@@ -496,6 +522,7 @@ impl NNUENetwork {
             Self::HalfKaMerged(net) => net.l1_size(),
             Self::HalfKaHmSplit(net) => net.l1_size(),
             Self::HalfKP(net) => net.l1_size(),
+            #[cfg(feature = "ls-arch")]
             Self::LayerStacks(net) => net.l1_size(),
         }
     }
@@ -508,6 +535,7 @@ impl NNUENetwork {
             Self::HalfKaMerged(net) => net.architecture_name(),
             Self::HalfKaHmSplit(net) => net.architecture_name(),
             Self::HalfKP(net) => net.architecture_name(),
+            #[cfg(feature = "ls-arch")]
             Self::LayerStacks(_) => "LayerStacks".to_string(),
         }
     }
@@ -520,6 +548,7 @@ impl NNUENetwork {
             Self::HalfKaMerged(net) => net.architecture_spec(),
             Self::HalfKaHmSplit(net) => net.architecture_spec(),
             Self::HalfKP(net) => net.architecture_spec(),
+            #[cfg(feature = "ls-arch")]
             Self::LayerStacks(net) => net.architecture_spec(),
         }
     }
@@ -527,6 +556,7 @@ impl NNUENetwork {
     /// LayerStacksNetwork への参照を取得
     ///
     /// LayerStacks アーキテクチャでない場合は panic。
+    #[cfg(feature = "ls-arch")]
     pub fn as_layer_stacks(&self) -> &LayerStacksNetwork {
         match self {
             Self::LayerStacks(net) => net,
@@ -1170,6 +1200,7 @@ pub fn get_network() -> Option<Arc<NNUENetwork>> {
 /// 結果を `CACHED_PROGRESS_BUCKET` に格納して `evaluate()` 内の全駒スキャンを回避する。
 /// Threat なし環境では +3〜4% NPS、Threat あり環境では cache 圧迫で退行するため
 /// 運用モデルに応じて明示指定する。
+#[cfg(feature = "ls-arch")]
 #[inline(always)]
 pub(crate) fn update_and_evaluate_layer_stacks_cached(
     net: &LayerStacksNetwork,
@@ -1453,6 +1484,7 @@ pub fn is_halfka_1024_loaded() -> bool {
 ///
 /// # Panics
 /// NNUEが未ロードかつMaterial評価も無効の場合はパニックする。
+#[cfg(feature = "ls-arch")]
 pub fn evaluate_layer_stacks(pos: &Position, stack: &mut LayerStacksAccStack) -> Value {
     if material::is_material_enabled() {
         return material::evaluate_material(pos);
@@ -1484,6 +1516,10 @@ pub fn evaluate_dispatch(
     stack: &mut AccumulatorStackVariant,
     acc_cache: &mut Option<LayerStacksAccCache>,
 ) -> Value {
+    // ls-arch 無効ビルドでは LayerStacks variant が存在せず acc_cache は使われない。
+    #[cfg(not(feature = "ls-arch"))]
+    let _ = acc_cache;
+
     if material::is_material_enabled() {
         return material::evaluate_material(pos);
     }
@@ -1497,6 +1533,7 @@ pub fn evaluate_dispatch(
 
     // バリアントに応じて適切な評価関数を呼び出し
     match stack {
+        #[cfg(feature = "ls-arch")]
         AccumulatorStackVariant::LayerStacks(s) => {
             let net = network.as_layer_stacks();
             update_and_evaluate_layer_stacks_cached(net, pos, s, acc_cache)
@@ -1540,6 +1577,10 @@ pub fn ensure_accumulator_computed(
     stack: &mut AccumulatorStackVariant,
     acc_cache: &mut Option<LayerStacksAccCache>,
 ) {
+    // ls-arch 無効ビルドでは LayerStacks variant が存在せず acc_cache は使われない。
+    #[cfg(not(feature = "ls-arch"))]
+    let _ = acc_cache;
+
     // NNUEがなければ何もしない
     let Some(network) = get_network() else {
         return;
@@ -1547,6 +1588,7 @@ pub fn ensure_accumulator_computed(
 
     // バリアントに応じてアキュムレータを更新（評価はしない）
     match stack {
+        #[cfg(feature = "ls-arch")]
         AccumulatorStackVariant::LayerStacks(s) => {
             let net = network.as_layer_stacks();
             net.update_accumulator(pos, s, acc_cache);
@@ -1776,6 +1818,7 @@ mod tests {
     /// テスト結果 (epoch82.nnue):
     /// - LayerStacks として正しく認識される
     /// - 評価値: 0 (学習初期のモデル)
+    #[cfg(feature = "ls-arch")]
     #[test]
     #[ignore]
     fn test_nnue_network_auto_detect_layer_stacks() {

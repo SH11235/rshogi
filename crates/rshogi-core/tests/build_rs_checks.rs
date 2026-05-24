@@ -253,9 +253,9 @@ fn ls_specific_with_ft_halfka_hm_merged_ok() {
 
 #[test]
 fn ls_arch_with_halfkx_arch_specific_ft_halfkp_ok() {
-    // mode-specific + ls-arch + halfkx-arch + ft-halfkp は許容。
-    // ft-halfkp は HalfKX 経路にルーティングされ、LS は ft-halfka_hm_merged 用ではなく
-    // 単に LS data 構造を提供するだけ (HalfKX specific preset の workaround パターン)。
+    // mode-specific + ls-arch + halfkx-arch + ft-halfkp + ls-size-* は許容。
+    // ft-halfkp は HalfKX 経路にルーティングされ、LS data 構造は ls-arch のため確保される。
+    // user が atomic feature を直接指定するこの組合せが build.rs check で reject されないことを保証する。
     let has = lookup(&[
         "mode-specific",
         "ls-arch",

@@ -723,6 +723,7 @@ impl LayerStacksAccStack {
     }
 
     /// 現在のエントリの dirty_piece を設定
+    #[cfg(feature = "ls-arch")]
     #[inline]
     pub fn set_current_dirty_piece(&mut self, dirty: DirtyPiece) {
         ls_match!(self, s => s.current_mut().dirty_piece = dirty);

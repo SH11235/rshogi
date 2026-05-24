@@ -30,6 +30,7 @@
 use std::sync::Arc;
 
 use super::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
+#[cfg(feature = "ls-arch")]
 use super::accumulator_layer_stacks::LayerStacksAccCache;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::halfka_hm_merged::HalfKaHmMergedStack;
@@ -60,6 +61,7 @@ pub struct NNUEEvaluator {
     stack: AccumulatorStackVariant,
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
     /// LayerStacks アーキテクチャ以外では None
+    #[cfg(feature = "ls-arch")]
     acc_cache: Option<LayerStacksAccCache>,
     /// 非LayerStacks用 AccumulatorCaches（Finny Tables）
     /// HalfKP/HalfKaSplit/HalfKaHmMerged で使用。LayerStacks では None
@@ -79,12 +81,13 @@ impl NNUEEvaluator {
     /// ```
     pub fn new_with_position(net: Arc<NNUENetwork>, pos: &Position) -> Self {
         let stack = AccumulatorStackVariant::from_network(&net);
+        #[cfg(feature = "ls-arch")]
         let acc_cache = if let NNUENetwork::LayerStacks(ls_net) = &*net {
             Some(ls_net.new_acc_cache())
         } else {
             None
         };
-        let acc_cache_generic = if !matches!(*net, NNUENetwork::LayerStacks(_)) {
+        let acc_cache_generic = if !net.is_layer_stacks() {
             Some(AccumulatorCacheGeneric::new(net.l1_size()))
         } else {
             None
@@ -92,6 +95,7 @@ impl NNUEEvaluator {
         let mut evaluator = Self {
             net,
             stack,
+            #[cfg(feature = "ls-arch")]
             acc_cache,
             acc_cache_generic,
         };
@@ -109,12 +113,13 @@ impl NNUEEvaluator {
     ///
     /// - `pos`: 初期化する局面
     pub fn clone_for_thread(&self, pos: &Position) -> Self {
+        #[cfg(feature = "ls-arch")]
         let acc_cache = if let NNUENetwork::LayerStacks(ls_net) = &*self.net {
             Some(ls_net.new_acc_cache())
         } else {
             None
         };
-        let acc_cache_generic = if !matches!(*self.net, NNUENetwork::LayerStacks(_)) {
+        let acc_cache_generic = if !self.net.is_layer_stacks() {
             Some(AccumulatorCacheGeneric::new(self.net.l1_size()))
         } else {
             None
@@ -122,6 +127,7 @@ impl NNUEEvaluator {
         let mut evaluator = Self {
             net: Arc::clone(&self.net),
             stack: AccumulatorStackVariant::from_network(&self.net),
+            #[cfg(feature = "ls-arch")]
             acc_cache,
             acc_cache_generic,
         };
@@ -232,6 +238,7 @@ impl NNUEEvaluator {
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 net.evaluate(pos, st)
             }
+            #[cfg(feature = "ls-arch")]
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
                 net.evaluate(pos, st)
             }
@@ -305,6 +312,7 @@ impl NNUEEvaluator {
                     net.refresh_accumulator(pos, st);
                 }
             }
+            #[cfg(feature = "ls-arch")]
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
                 net.update_accumulator(pos, st, &mut self.acc_cache);
             }
@@ -330,6 +338,7 @@ impl NNUEEvaluator {
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 Self::update_halfkp_accumulator(net, pos, st, &mut self.acc_cache_generic);
             }
+            #[cfg(feature = "ls-arch")]
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
                 net.update_accumulator(pos, st, &mut self.acc_cache);
             }

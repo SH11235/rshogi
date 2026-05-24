@@ -151,13 +151,11 @@ edition-universal = [
 ]
 
 # HalfKX family (全 FT / activation dispatch)。
-# 最小 LS data 構造 (ls-arch + ls-size-512x16x32) 同梱の理由は edition-halfkp-crelu の注記参照。
 edition-halfkx     = ["edition-halfkx-any"]
 edition-halfkx-any = [
   "mode-family", "halfkx-arch",
   "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
   "halfkx-activation-crelu", "halfkx-activation-screlu", "halfkx-activation-pairwise",
-  "ls-arch", "ls-size-512x16x32",
 ]
 
 # LayerStack family (全 size / 全 ext dispatch、現状 FT は halfka_hm_merged のみ)
@@ -170,22 +168,20 @@ edition-ls-any-any-any = [
 ]
 
 # HalfKP specific (suisho5 等)。
-# 注: 現状 `AccumulatorStackVariant::LayerStacks` variant が cfg gate なしで常在の
-# ため、ls-size-* がゼロの build では LS data 構造が空 enum 化して dead code 警告が
-# 出る。これを避けるため最小 LS data 構造 (ls-arch + ls-size-512x16x32) を同梱して
-# いる。AccumulatorStackVariant に cfg gate を入れる別 refactor で純粋 HalfKX
-# specific 化予定。
+# `AccumulatorStackVariant::LayerStacks` / `NNUENetwork::LayerStacks` の enum variant
+# と LS 実行時 state (acc_cache field) は `ls-arch` で cfg gate されるため、HalfKX
+# specific edition には含めない。`LayerStacksAccCache` 型と `evaluate_dispatch` の
+# シグネチャは public API 互換のため非 ls-arch build にも残るが、HalfKX-only run では
+# `Option<LayerStacksAccCache>` は常に `None` を取る。
 edition-halfkp-crelu = [
   "mode-specific", "halfkx-arch",
   "ft-halfkp", "halfkx-activation-crelu",
-  "ls-arch", "ls-size-512x16x32",
 ]
 
-# HalfKaHmMerged HalfKX specific。LS 同梱の理由は edition-halfkp-crelu の注記参照。
+# HalfKaHmMerged HalfKX specific。
 edition-halfka_hm_merged-screlu = [
   "mode-specific", "halfkx-arch",
   "ft-halfka_hm_merged", "halfkx-activation-screlu",
-  "ls-arch", "ls-size-512x16x32",
 ]
 
 # LayerStack specific (1536x16x32、全 ext 組合せ)。L0=1536 系は progress-diff 同梱。

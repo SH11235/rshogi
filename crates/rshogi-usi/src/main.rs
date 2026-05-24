@@ -330,11 +330,10 @@ impl UsiEngine {
         // 使われないため、ロード済みネットワークが LayerStacks のときだけ検査する。
         {
             use rshogi_core::nnue::{
-                LayerStackBucketMode, NNUENetwork, get_layer_stack_bucket_mode,
+                LayerStackBucketMode, get_layer_stack_bucket_mode,
                 get_layer_stack_progress_kpabs_weights,
             };
-            let is_layer_stacks =
-                matches!(get_network().as_deref(), Some(NNUENetwork::LayerStacks(_)));
+            let is_layer_stacks = get_network().as_deref().is_some_and(|n| n.is_layer_stacks());
             if is_layer_stacks
                 && get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs
                 && get_layer_stack_progress_kpabs_weights().iter().all(|&w| w == 0.0)
@@ -1285,7 +1284,7 @@ impl UsiEngine {
         let mut stack = AccumulatorStackVariant::from_network(&network);
 
         if diagnostics {
-            #[cfg(feature = "diagnostics")]
+            #[cfg(all(feature = "diagnostics", feature = "ls-arch"))]
             {
                 use rshogi_core::nnue::{LayerStacksNetwork, NNUENetwork};
                 // diagnostics モード: LayerStacks のみ対応
@@ -1329,8 +1328,17 @@ impl UsiEngine {
                     println!("info string Error: diagnostics is only supported for LayerStacks");
                 }
             }
+            #[cfg(all(feature = "diagnostics", not(feature = "ls-arch")))]
+            {
+                let _ = &network;
+                println!(
+                    "info string Error: 'eval diag' requires the `ls-arch` feature \
+                     (LayerStacks diagnostics)"
+                );
+            }
             #[cfg(not(feature = "diagnostics"))]
             {
+                let _ = &network;
                 println!("info string Error: build with --features diagnostics to use 'eval diag'");
             }
         } else {
