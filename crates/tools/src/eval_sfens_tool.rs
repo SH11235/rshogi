@@ -16,11 +16,11 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use rshogi_core::nnue::{
-    AccumulatorLayerStacks, AffineTransform, FeatureSet, LayerStackBucketMode, LayerStacksNetwork,
-    LsFeatureSpec, LsNetByFt, NNUE_PYTORCH_L3, NNUENetwork, NetworkLayerStacks,
-    SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_progress8kpabs_bucket_index,
-    get_layer_stack_progress_kpabs_weights, set_layer_stack_bucket_mode,
-    set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
+    AccumulatorLayerStacks, AffineTransform, FeatureSet, LayerStackBucketMode, LsFeatureSpec,
+    NNUE_PYTORCH_L3, NNUENetwork, NetworkLayerStacks, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+    compute_layer_stack_progress8kpabs_bucket_index, get_layer_stack_progress_kpabs_weights,
+    ls_dispatch_ft_size, set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
+    sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::Color;
@@ -403,56 +403,11 @@ pub fn run() -> Result<()> {
         _ => anyhow::bail!("eval_sfens は LayerStacks NNUE のみ対応"),
     };
 
-    macro_rules! with_network {
-        ($net:expr, |$inner:ident| $body:expr) => {
-            match $net {
-                #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-1536x16x32"))]
-                LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L1536x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-1536x32x32"))]
-                LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L1536x32x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-768x16x32"))]
-                LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L768x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-512x16x32"))]
-                LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L512x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-1536x16x32"))]
-                LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L1536x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-1536x32x32"))]
-                LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L1536x32x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-768x16x32"))]
-                LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L768x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-512x16x32"))]
-                LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L512x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-1536x16x32"))]
-                LayerStacksNetwork::HalfKaMerged(LsNetByFt::L1536x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-1536x32x32"))]
-                LayerStacksNetwork::HalfKaMerged(LsNetByFt::L1536x32x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-768x16x32"))]
-                LayerStacksNetwork::HalfKaMerged(LsNetByFt::L768x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-512x16x32"))]
-                LayerStacksNetwork::HalfKaMerged(LsNetByFt::L512x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-1536x16x32"))]
-                LayerStacksNetwork::HalfKaSplit(LsNetByFt::L1536x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-1536x32x32"))]
-                LayerStacksNetwork::HalfKaSplit(LsNetByFt::L1536x32x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-768x16x32"))]
-                LayerStacksNetwork::HalfKaSplit(LsNetByFt::L768x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-512x16x32"))]
-                LayerStacksNetwork::HalfKaSplit(LsNetByFt::L512x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfkp", feature = "ls-size-1536x16x32"))]
-                LayerStacksNetwork::HalfKP(LsNetByFt::L1536x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfkp", feature = "ls-size-1536x32x32"))]
-                LayerStacksNetwork::HalfKP(LsNetByFt::L1536x32x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfkp", feature = "ls-size-768x16x32"))]
-                LayerStacksNetwork::HalfKP(LsNetByFt::L768x16x32($inner)) => $body,
-                #[cfg(all(feature = "ft-halfkp", feature = "ls-size-512x16x32"))]
-                LayerStacksNetwork::HalfKP(LsNetByFt::L512x16x32($inner)) => $body,
-                #[allow(unreachable_patterns)]
-                _ => anyhow::bail!("有効な LayerStacks (FT × L1) バリアントがありません"),
-            }
-        };
-    }
-
-    with_network!(ls_net, |concrete_net| run_eval_for_network(&cli, concrete_net))
+    ls_dispatch_ft_size!(
+        ls_net,
+        |concrete_net| run_eval_for_network(&cli, concrete_net),
+        _ => anyhow::bail!("有効な LayerStacks (FT × L1) バリアントがありません"),
+    )
 }
 
 #[cfg(test)]

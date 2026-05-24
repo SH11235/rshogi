@@ -119,6 +119,8 @@ pub use network_layer_stacks::NetworkLayerStacks1536x16x32;
 #[cfg(all(feature = "ls-size-1536x32x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks1536x32x32;
 pub use network_layer_stacks::{LayerStacksNetwork, LsNetByFt, NetworkLayerStacks};
+// `#[macro_export]` で crate root に出る ls_dispatch_ft_size! を nnue:: パスからも参照可能にする。
+pub use crate::ls_dispatch_ft_size;
 pub use piece_list::{PieceList, PieceNumber};
 
 // const generics 版統一実装（内部型は pub(crate) に隠蔽）

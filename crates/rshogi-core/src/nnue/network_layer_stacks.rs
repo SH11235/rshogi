@@ -850,6 +850,9 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         pos: &Position,
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
     ) -> Value {
+        // (self, stack) tuple match で同じ L1 variant の組のみ matched arm を持つ。
+        // 2 サイズ以上 enable のときだけ cross-pair の不一致 arm が到達可能で、
+        // 単一 size build では 1 arm の match 自体が exhaustive となる。
         match (self, stack) {
             #[cfg(feature = "ls-size-1536x16x32")]
             (
@@ -871,7 +874,14 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 Self::L512x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(st),
             ) => net.evaluate(pos, &st.current().accumulator),
-            #[allow(unreachable_patterns)]
+            #[cfg(any(
+                all(feature = "ls-size-1536x16x32", feature = "ls-size-1536x32x32"),
+                all(feature = "ls-size-1536x16x32", feature = "ls-size-768x16x32"),
+                all(feature = "ls-size-1536x16x32", feature = "ls-size-512x16x32"),
+                all(feature = "ls-size-1536x32x32", feature = "ls-size-768x16x32"),
+                all(feature = "ls-size-1536x32x32", feature = "ls-size-512x16x32"),
+                all(feature = "ls-size-768x16x32", feature = "ls-size-512x16x32"),
+            ))]
             _ => panic!(
                 "LayerStacksNetwork / LayerStacksAccStack の L1 サイズが不一致 (net={:?}, stack={:?})",
                 self.architecture_dims(),
@@ -888,7 +898,26 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         stack: &mut super::accumulator_layer_stacks::LayerStacksAccStack,
         cache: &mut Option<super::accumulator_layer_stacks::LayerStacksAccCache>,
     ) {
+        // mismatch arm の panic で表示する用に事前計算しておく (stack は match 内で
+        // mutable borrow されるため arm 内では参照できない)。2 サイズ以上 enable の
+        // ときだけ mismatch arm が到達可能なので同じ cfg gate を共有する。
+        #[cfg(any(
+            all(feature = "ls-size-1536x16x32", feature = "ls-size-1536x32x32"),
+            all(feature = "ls-size-1536x16x32", feature = "ls-size-768x16x32"),
+            all(feature = "ls-size-1536x16x32", feature = "ls-size-512x16x32"),
+            all(feature = "ls-size-1536x32x32", feature = "ls-size-768x16x32"),
+            all(feature = "ls-size-1536x32x32", feature = "ls-size-512x16x32"),
+            all(feature = "ls-size-768x16x32", feature = "ls-size-512x16x32"),
+        ))]
         let net_dims = self.architecture_dims();
+        #[cfg(any(
+            all(feature = "ls-size-1536x16x32", feature = "ls-size-1536x32x32"),
+            all(feature = "ls-size-1536x16x32", feature = "ls-size-768x16x32"),
+            all(feature = "ls-size-1536x16x32", feature = "ls-size-512x16x32"),
+            all(feature = "ls-size-1536x32x32", feature = "ls-size-768x16x32"),
+            all(feature = "ls-size-1536x32x32", feature = "ls-size-512x16x32"),
+            all(feature = "ls-size-768x16x32", feature = "ls-size-512x16x32"),
+        ))]
         let stack_dims = stack.architecture_dims();
         macro_rules! do_update {
             ($net:expr, $stack:expr, $cache_variant:ident) => {{
@@ -972,7 +1001,14 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             ) => {
                 do_update!(net, st, L512x16x32);
             }
-            #[allow(unreachable_patterns)]
+            #[cfg(any(
+                all(feature = "ls-size-1536x16x32", feature = "ls-size-1536x32x32"),
+                all(feature = "ls-size-1536x16x32", feature = "ls-size-768x16x32"),
+                all(feature = "ls-size-1536x16x32", feature = "ls-size-512x16x32"),
+                all(feature = "ls-size-1536x32x32", feature = "ls-size-768x16x32"),
+                all(feature = "ls-size-1536x32x32", feature = "ls-size-512x16x32"),
+                all(feature = "ls-size-768x16x32", feature = "ls-size-512x16x32"),
+            ))]
             _ => panic!(
                 "LayerStacksNetwork / LayerStacksAccStack の L1 サイズが不一致 (net={:?}, stack={:?})",
                 net_dims, stack_dims
@@ -1113,6 +1149,129 @@ pub enum LayerStacksNetwork {
     HalfKaSplit(LsNetByFt<HalfKaSplitSpec>),
     #[cfg(feature = "ft-halfkp")]
     HalfKP(LsNetByFt<HalfKpSpec>),
+}
+
+/// `LayerStacksNetwork` の FT × L1 軸を 1 段 match で展開する公開マクロ。
+///
+/// 5 FT × 4 L1 = 20 (FT, L1) 組合せを `all(ft-*, ls-size-*)` cfg gate 付きで列挙し、
+/// マッチした variant の内部 `&NetworkLayerStacks<L1, ..., FT>` (concrete 型) を
+/// `$inner` として body に渡す。tools crate (bench / eval / verify) の dispatch
+/// マクロをこれに統合することで、FT/L1 軸が増えたときの 3 ファイル同時更新漏れを防ぐ。
+///
+/// マッチアームは呼び出し crate 側の cfg を見て展開されるため、`rshogi-core` 側で
+/// 有効な variant を caller 側がすべては有効化していない場合に備えて `_ =>`
+/// fallback を引数として受け取る。caller のすべての (`ft-*`, `ls-size-*`) feature が
+/// 揃っている = 20 arm で exhaustive なときは fallback arm を cfg gate でドロップし、
+/// `#[allow(unreachable_patterns)]` を不要にする。
+///
+/// 構文 (既存の `with_ls_net!` 等と互換):
+/// ```ignore
+/// use rshogi_core::nnue::ls_dispatch_ft_size;
+/// ls_dispatch_ft_size!(ls_net, |net| {
+///     run_layer_stack_bench(net, /* ... */)?;
+/// }, _ => bail!("有効な LayerStacks (FT × L1) バリアントがありません"))
+/// ```
+#[macro_export]
+macro_rules! ls_dispatch_ft_size {
+    ($net:expr, |$inner:ident| $body:expr, _ => $fallback:expr $(,)?) => {
+        match $net {
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-1536x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
+                $crate::nnue::LsNetByFt::L1536x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-1536x32x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
+                $crate::nnue::LsNetByFt::L1536x32x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-768x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
+                $crate::nnue::LsNetByFt::L768x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-512x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmMerged(
+                $crate::nnue::LsNetByFt::L512x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-1536x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
+                $crate::nnue::LsNetByFt::L1536x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-1536x32x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
+                $crate::nnue::LsNetByFt::L1536x32x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-768x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
+                $crate::nnue::LsNetByFt::L768x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-512x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaHmSplit(
+                $crate::nnue::LsNetByFt::L512x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-1536x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaMerged(
+                $crate::nnue::LsNetByFt::L1536x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-1536x32x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaMerged(
+                $crate::nnue::LsNetByFt::L1536x32x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-768x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaMerged(
+                $crate::nnue::LsNetByFt::L768x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-512x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaMerged(
+                $crate::nnue::LsNetByFt::L512x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-1536x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaSplit(
+                $crate::nnue::LsNetByFt::L1536x16x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-1536x32x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaSplit(
+                $crate::nnue::LsNetByFt::L1536x32x32($inner),
+            ) => $body,
+            #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-768x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaSplit($crate::nnue::LsNetByFt::L768x16x32(
+                $inner,
+            )) => $body,
+            #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-512x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKaSplit($crate::nnue::LsNetByFt::L512x16x32(
+                $inner,
+            )) => $body,
+            #[cfg(all(feature = "ft-halfkp", feature = "ls-size-1536x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1536x16x32(
+                $inner,
+            )) => $body,
+            #[cfg(all(feature = "ft-halfkp", feature = "ls-size-1536x32x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1536x32x32(
+                $inner,
+            )) => $body,
+            #[cfg(all(feature = "ft-halfkp", feature = "ls-size-768x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L768x16x32(
+                $inner,
+            )) => $body,
+            #[cfg(all(feature = "ft-halfkp", feature = "ls-size-512x16x32"))]
+            $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L512x16x32(
+                $inner,
+            )) => $body,
+            // caller の (ft-*, ls-size-*) を 5 × 4 全部有効化したときは 20 arm が
+            // exhaustive。そのときだけ fallback arm を cfg gate でドロップして
+            // unreachable warning を避ける。
+            #[cfg(not(all(
+                feature = "ft-halfka_hm_merged",
+                feature = "ft-halfka_hm_split",
+                feature = "ft-halfka_merged",
+                feature = "ft-halfka_split",
+                feature = "ft-halfkp",
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32",
+            )))]
+            _ => $fallback,
+        }
+    };
 }
 
 /// LayerStacksNetwork の FT variants を網羅する dispatch マクロ。

@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorLayerStacks, LayerStackBucketMode, LayerStacksNetwork, LsFeatureSpec, NNUENetwork,
-    NetworkLayerStacks, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, set_layer_stack_bucket_mode,
-    set_layer_stack_progress_kpabs_weights,
+    NetworkLayerStacks, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, ls_dispatch_ft_size,
+    set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
 
@@ -161,87 +161,11 @@ fn load_progress_coeff_weights(coeff_path: &PathBuf) -> Result<Box<[f32]>> {
 
 /// LayerStacksNetwork の FT × L1 軸を網羅して `verify_with_network` を呼び出す。
 fn ls_verify_dispatch(net: &LayerStacksNetwork, cli: &Cli) -> Result<(usize, usize)> {
-    use rshogi_core::nnue::LsNetByFt;
-    match net {
-        #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-1536x16x32"))]
-        LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L1536x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-1536x32x32"))]
-        LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L1536x32x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-768x16x32"))]
-        LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L768x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-512x16x32"))]
-        LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L512x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-1536x16x32"))]
-        LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L1536x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-1536x32x32"))]
-        LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L1536x32x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-768x16x32"))]
-        LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L768x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-512x16x32"))]
-        LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L512x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-1536x16x32"))]
-        LayerStacksNetwork::HalfKaMerged(LsNetByFt::L1536x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-1536x32x32"))]
-        LayerStacksNetwork::HalfKaMerged(LsNetByFt::L1536x32x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-768x16x32"))]
-        LayerStacksNetwork::HalfKaMerged(LsNetByFt::L768x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-512x16x32"))]
-        LayerStacksNetwork::HalfKaMerged(LsNetByFt::L512x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-1536x16x32"))]
-        LayerStacksNetwork::HalfKaSplit(LsNetByFt::L1536x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-1536x32x32"))]
-        LayerStacksNetwork::HalfKaSplit(LsNetByFt::L1536x32x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-768x16x32"))]
-        LayerStacksNetwork::HalfKaSplit(LsNetByFt::L768x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-512x16x32"))]
-        LayerStacksNetwork::HalfKaSplit(LsNetByFt::L512x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfkp", feature = "ls-size-1536x16x32"))]
-        LayerStacksNetwork::HalfKP(LsNetByFt::L1536x16x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfkp", feature = "ls-size-1536x32x32"))]
-        LayerStacksNetwork::HalfKP(LsNetByFt::L1536x32x32(inner)) => {
-            verify_with_network(cli, inner)
-        }
-        #[cfg(all(feature = "ft-halfkp", feature = "ls-size-768x16x32"))]
-        LayerStacksNetwork::HalfKP(LsNetByFt::L768x16x32(inner)) => verify_with_network(cli, inner),
-        #[cfg(all(feature = "ft-halfkp", feature = "ls-size-512x16x32"))]
-        LayerStacksNetwork::HalfKP(LsNetByFt::L512x16x32(inner)) => verify_with_network(cli, inner),
-        #[allow(unreachable_patterns)]
+    ls_dispatch_ft_size!(
+        net,
+        |inner| verify_with_network(cli, inner),
         _ => anyhow::bail!("有効な LayerStacks (FT × L1) バリアントがありません"),
-    }
+    )
 }
 
 pub fn run() -> Result<()> {
