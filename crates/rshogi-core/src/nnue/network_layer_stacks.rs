@@ -1,12 +1,13 @@
 //! NetworkLayerStacks - LayerStacksアーキテクチャのNNUEネットワーク
 //!
-//! HalfKaHmMerged^ 特徴量 + LayerStacks 構造の NNUE を実装する。
+//! 5 種類の FT (HalfKp / HalfKaSplit / HalfKaMerged / HalfKaHmSplit / HalfKaHmMerged)
+//! いずれかを `LsFeatureSpec` 経由で受け取り、LayerStacks 構造の NNUE を実装する。
 //! nnue-pytorch で学習したファイルを読み込み、評価を行う。
 //!
 //! ## アーキテクチャ
 //!
 //! ```text
-//! Feature Transformer (HalfKaHmMerged^): 73,305 → L1 (各視点)
+//! Feature Transformer (FT::DIMENSIONS 次元): → L1 (各視点)
 //! 視点結合: 両視点を連結 → L1*2
 //! SqrClippedReLU: L1*2 → L1
 //! LayerStacks (両玉の相対段ベースの9バケット選択後):
@@ -36,6 +37,17 @@ use super::constants::{LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN};
 use super::constants::{LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
 use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
+#[cfg(feature = "ft-halfka_hm_merged")]
+use super::ls_feature_spec::HalfKaHmMergedSpec;
+#[cfg(feature = "ft-halfka_hm_split")]
+use super::ls_feature_spec::HalfKaHmSplitSpec;
+#[cfg(feature = "ft-halfka_merged")]
+use super::ls_feature_spec::HalfKaMergedSpec;
+#[cfg(feature = "ft-halfka_split")]
+use super::ls_feature_spec::HalfKaSplitSpec;
+#[cfg(feature = "ft-halfkp")]
+use super::ls_feature_spec::HalfKpSpec;
+use super::ls_feature_spec::LsFeatureSpec;
 use super::network::{
     LayerStackBucketMode, compute_layer_stack_progress8kpabs_bucket_index, get_fv_scale_override,
     get_layer_stack_bucket_mode, get_layer_stack_progress_kpabs_weights, parse_fv_scale_from_arch,
@@ -45,7 +57,10 @@ use crate::types::{Color, Value};
 #[cfg(feature = "diagnostics")]
 use log::info;
 use std::fs::File;
+#[cfg(feature = "ls-arch")]
+use std::io::SeekFrom;
 use std::io::{self, BufReader, Cursor, Read, Seek};
+use std::marker::PhantomData;
 use std::path::Path;
 
 #[inline]
@@ -105,19 +120,22 @@ fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16;
 
 /// LayerStacksアーキテクチャのNNUEネットワーク
 ///
-/// HalfKaHmMerged^ 特徴量（73,305次元）+ L1次元 Feature Transformer + 9バケット LayerStacks
+/// `FT` は LS の Feature Transformer 軸 (5 種類のうち 1 つ) を表す marker type。
+/// FT::DIMENSIONS 次元 + L1次元 Feature Transformer + 9バケット LayerStacks。
 pub struct NetworkLayerStacks<
     const L1: usize,
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    FT: LsFeatureSpec,
 > {
-    /// Feature Transformer (73,305 → L1)
-    pub feature_transformer: FeatureTransformerLayerStacks<L1>,
+    /// Feature Transformer (FT::DIMENSIONS → L1)
+    pub feature_transformer: FeatureTransformerLayerStacks<L1, FT>,
     /// LayerStacks (9バケット)
     pub layer_stacks: LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
     /// 評価値スケーリング係数（アーキテクチャ文字列から取得、USIオプションでオーバーライド可）
     pub fv_scale: i32,
+    _ft: PhantomData<FT>,
 }
 
 impl<
@@ -125,7 +143,8 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
-> NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+    FT: LsFeatureSpec,
+> NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>
 {
     /// ファイルから読み込み
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
@@ -307,13 +326,14 @@ impl<
             feature_transformer,
             layer_stacks,
             fv_scale,
+            _ft: PhantomData,
         })
     }
 
     /// 読み込み時の診断ログを出力
     #[cfg(feature = "diagnostics")]
     fn log_load_diagnostics(
-        ft: &FeatureTransformerLayerStacks<L1>,
+        ft: &FeatureTransformerLayerStacks<L1, FT>,
         ls: &LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
     ) {
         // FT統計
@@ -604,49 +624,105 @@ impl<
     }
 }
 
-#[cfg(feature = "ls-size-1536x16x32")]
-pub type NetworkLayerStacks1536x16x32 =
-    NetworkLayerStacks<1536, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32>;
-#[cfg(feature = "ls-size-1536x32x32")]
-pub type NetworkLayerStacks1536x32x32 =
-    NetworkLayerStacks<1536, LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN, 64>;
-#[cfg(feature = "ls-size-768x16x32")]
-pub type NetworkLayerStacks768x16x32 =
-    NetworkLayerStacks<768, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32>;
-#[cfg(feature = "ls-size-512x16x32")]
-pub type NetworkLayerStacks512x16x32 =
-    NetworkLayerStacks<512, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32>;
+// 旧 alias (HalfKaHmMerged 固定の名前): 既存 tools / tests からの参照を切らないため
+// 互換のため保持する。新規コードは `NetworkLayerStacks<L1, ..., FT>` を直接書く。
+#[cfg(all(feature = "ls-size-1536x16x32", feature = "ft-halfka_hm_merged"))]
+pub type NetworkLayerStacks1536x16x32 = NetworkLayerStacks<
+    1536,
+    LAYER_STACK_16X32_L1_OUT,
+    LAYER_STACK_16X32_L2_IN,
+    32,
+    HalfKaHmMergedSpec,
+>;
+#[cfg(all(feature = "ls-size-1536x32x32", feature = "ft-halfka_hm_merged"))]
+pub type NetworkLayerStacks1536x32x32 = NetworkLayerStacks<
+    1536,
+    LAYER_STACK_32X32_L1_OUT,
+    LAYER_STACK_32X32_L2_IN,
+    64,
+    HalfKaHmMergedSpec,
+>;
+#[cfg(all(feature = "ls-size-768x16x32", feature = "ft-halfka_hm_merged"))]
+pub type NetworkLayerStacks768x16x32 = NetworkLayerStacks<
+    768,
+    LAYER_STACK_16X32_L1_OUT,
+    LAYER_STACK_16X32_L2_IN,
+    32,
+    HalfKaHmMergedSpec,
+>;
+#[cfg(all(feature = "ls-size-512x16x32", feature = "ft-halfka_hm_merged"))]
+pub type NetworkLayerStacks512x16x32 = NetworkLayerStacks<
+    512,
+    LAYER_STACK_16X32_L1_OUT,
+    LAYER_STACK_16X32_L2_IN,
+    32,
+    HalfKaHmMergedSpec,
+>;
 
 // =============================================================================
-// LayerStacksNetwork - L1 サイズ dispatch enum
+// LayerStacksNetwork - 2-tier (FT, L1) dispatch enum
 // =============================================================================
 
-/// LayerStacks ネットワークの L1 サイズ dispatch enum
+/// LayerStacks ネットワークの FT 別内部 enum。L1 サイズ軸を持つ。
 ///
-/// Cargo feature `ls-size-1536x16x32` / `ls-size-1536x32x32`
-/// / `ls-size-768x16x32` / `ls-size-512x16x32` で
-/// 有効なバリアントが制御される。
+/// 外側の `LayerStacksNetwork` が FT 軸 (5 種類のうち 1 つ) で dispatch し、
+/// この内部 enum が L1 軸 (4 サイズのうち 1 つ) で dispatch する。
 ///
-/// **重要**: 大会ビルドでは必ず単一バリアントのみを有効化すること。複数バリアントを
-/// 同時有効にすると dispatch match の overhead で約 5% NPS 退行する（実測値）。
-pub enum LayerStacksNetwork {
+/// **重要**: 大会ビルドでは必ず単一 (FT, L1) のみを有効化すること。複数
+/// バリアントを同時有効にすると dispatch match の overhead が出る (実測 ~5%)。
+pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
     #[cfg(feature = "ls-size-1536x16x32")]
-    L1536x16x32(Box<NetworkLayerStacks1536x16x32>),
+    L1536x16x32(
+        Box<NetworkLayerStacks<1536, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
+    ),
     #[cfg(feature = "ls-size-1536x32x32")]
-    L1536x32x32(Box<NetworkLayerStacks1536x32x32>),
+    L1536x32x32(
+        Box<NetworkLayerStacks<1536, LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN, 64, FT>>,
+    ),
     #[cfg(feature = "ls-size-768x16x32")]
-    L768x16x32(Box<NetworkLayerStacks768x16x32>),
+    L768x16x32(
+        Box<NetworkLayerStacks<768, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
+    ),
     #[cfg(feature = "ls-size-512x16x32")]
-    L512x16x32(Box<NetworkLayerStacks512x16x32>),
+    L512x16x32(
+        Box<NetworkLayerStacks<512, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
+    ),
+    #[cfg(not(any(
+        feature = "ls-size-1536x16x32",
+        feature = "ls-size-1536x32x32",
+        feature = "ls-size-768x16x32",
+        feature = "ls-size-512x16x32",
+    )))]
+    _Unused(std::convert::Infallible, PhantomData<FT>),
 }
 
-impl LayerStacksNetwork {
-    /// アーキテクチャ寸法 (L1, L2, L3) を返す
-    pub fn architecture_dims(&self) -> (usize, usize, usize) {
-        let spec = self.architecture_spec();
-        (spec.l1, spec.l2, spec.l3)
-    }
+/// `LsNetByFt<FT>` の variants 上で同じ式を展開する dispatch マクロ。
+///
+/// すべての ls-size-* feature が無効の場合 (例: WASM ビルド) は本来到達不能で、
+/// wildcard arm が必要になる。
+macro_rules! ls_match_size {
+    ($val:expr, $pat:ident => $body:expr) => {
+        match $val {
+            #[cfg(feature = "ls-size-1536x16x32")]
+            LsNetByFt::L1536x16x32($pat) => $body,
+            #[cfg(feature = "ls-size-1536x32x32")]
+            LsNetByFt::L1536x32x32($pat) => $body,
+            #[cfg(feature = "ls-size-768x16x32")]
+            LsNetByFt::L768x16x32($pat) => $body,
+            #[cfg(feature = "ls-size-512x16x32")]
+            LsNetByFt::L512x16x32($pat) => $body,
+            #[cfg(not(any(
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32",
+            )))]
+            _ => unreachable!("no LayerStacks size variant enabled"),
+        }
+    };
+}
 
+impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
     /// L1 サイズを取得
     pub fn l1_size(&self) -> usize {
         match self {
@@ -662,81 +738,53 @@ impl LayerStacksNetwork {
                 feature = "ls-size-1536x16x32",
                 feature = "ls-size-1536x32x32",
                 feature = "ls-size-768x16x32",
-                feature = "ls-size-512x16x32"
+                feature = "ls-size-512x16x32",
             )))]
-            _ => unreachable!("no LayerStacks variant enabled"),
+            _ => unreachable!("no LayerStacks size variant enabled"),
+        }
+    }
+
+    /// (L1, L2, L3) を取得
+    pub fn architecture_dims(&self) -> (usize, usize, usize) {
+        match self {
+            #[cfg(feature = "ls-size-1536x16x32")]
+            Self::L1536x16x32(_) => (1536, 16, 32),
+            #[cfg(feature = "ls-size-1536x32x32")]
+            Self::L1536x32x32(_) => (1536, 32, 32),
+            #[cfg(feature = "ls-size-768x16x32")]
+            Self::L768x16x32(_) => (768, 16, 32),
+            #[cfg(feature = "ls-size-512x16x32")]
+            Self::L512x16x32(_) => (512, 16, 32),
+            #[cfg(not(any(
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32",
+            )))]
+            _ => unreachable!("no LayerStacks size variant enabled"),
         }
     }
 
     /// アーキテクチャ仕様を取得
     pub fn architecture_spec(&self) -> super::spec::ArchitectureSpec {
-        match self {
-            #[cfg(feature = "ls-size-1536x16x32")]
-            Self::L1536x16x32(_) => super::spec::ArchitectureSpec::new(
-                super::spec::FeatureSet::LayerStacks,
-                1536,
-                16,
-                32,
-                super::spec::Activation::CReLU,
-            ),
-            #[cfg(feature = "ls-size-1536x32x32")]
-            Self::L1536x32x32(_) => super::spec::ArchitectureSpec::new(
-                super::spec::FeatureSet::LayerStacks,
-                1536,
-                32,
-                32,
-                super::spec::Activation::CReLU,
-            ),
-            #[cfg(feature = "ls-size-768x16x32")]
-            Self::L768x16x32(_) => super::spec::ArchitectureSpec::new(
-                super::spec::FeatureSet::LayerStacks,
-                768,
-                16,
-                32,
-                super::spec::Activation::CReLU,
-            ),
-            #[cfg(feature = "ls-size-512x16x32")]
-            Self::L512x16x32(_) => super::spec::ArchitectureSpec::new(
-                super::spec::FeatureSet::LayerStacks,
-                512,
-                16,
-                32,
-                super::spec::Activation::CReLU,
-            ),
-            #[cfg(not(any(
-                feature = "ls-size-1536x16x32",
-                feature = "ls-size-1536x32x32",
-                feature = "ls-size-768x16x32",
-                feature = "ls-size-512x16x32"
-            )))]
-            _ => unreachable!("no LayerStacks variant enabled"),
-        }
+        let (l1, l2, l3) = self.architecture_dims();
+        super::spec::ArchitectureSpec::new(
+            super::spec::FeatureSet::LayerStacks,
+            l1,
+            l2,
+            l3,
+            super::spec::Activation::CReLU,
+        )
     }
 
     /// FV_SCALE を取得
     pub fn fv_scale(&self) -> i32 {
-        match self {
-            #[cfg(feature = "ls-size-1536x16x32")]
-            Self::L1536x16x32(net) => net.fv_scale,
-            #[cfg(feature = "ls-size-1536x32x32")]
-            Self::L1536x32x32(net) => net.fv_scale,
-            #[cfg(feature = "ls-size-768x16x32")]
-            Self::L768x16x32(net) => net.fv_scale,
-            #[cfg(feature = "ls-size-512x16x32")]
-            Self::L512x16x32(net) => net.fv_scale,
-            #[cfg(not(any(
-                feature = "ls-size-1536x16x32",
-                feature = "ls-size-1536x32x32",
-                feature = "ls-size-768x16x32",
-                feature = "ls-size-512x16x32"
-            )))]
-            _ => unreachable!("no LayerStacks variant enabled"),
-        }
+        ls_match_size!(self, net => net.fv_scale)
     }
 
-    /// ファイルから読み込み（exact architecture で dispatch）
+    /// (L1, L2, L3) と PSQT override から読み込み (FT は型レベルで固定)。
     #[cfg(feature = "ls-arch")]
-    pub fn read_with_options<R: Read + Seek>(
+    fn read_with_options<R: Read + Seek>(
         reader: &mut R,
         l1: usize,
         l2: usize,
@@ -746,22 +794,46 @@ impl LayerStacksNetwork {
         match (l1, l2, l3) {
             #[cfg(feature = "ls-size-1536x16x32")]
             (1536, 16, 32) => {
-                let net = NetworkLayerStacks1536x16x32::read_with_options(reader, psqt_override)?;
+                let net = NetworkLayerStacks::<
+                    1536,
+                    LAYER_STACK_16X32_L1_OUT,
+                    LAYER_STACK_16X32_L2_IN,
+                    32,
+                    FT,
+                >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L1536x16x32(Box::new(net)))
             }
             #[cfg(feature = "ls-size-1536x32x32")]
             (1536, 32, 32) => {
-                let net = NetworkLayerStacks1536x32x32::read_with_options(reader, psqt_override)?;
+                let net = NetworkLayerStacks::<
+                    1536,
+                    LAYER_STACK_32X32_L1_OUT,
+                    LAYER_STACK_32X32_L2_IN,
+                    64,
+                    FT,
+                >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L1536x32x32(Box::new(net)))
             }
             #[cfg(feature = "ls-size-768x16x32")]
             (768, 16, 32) => {
-                let net = NetworkLayerStacks768x16x32::read_with_options(reader, psqt_override)?;
+                let net = NetworkLayerStacks::<
+                    768,
+                    LAYER_STACK_16X32_L1_OUT,
+                    LAYER_STACK_16X32_L2_IN,
+                    32,
+                    FT,
+                >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L768x16x32(Box::new(net)))
             }
             #[cfg(feature = "ls-size-512x16x32")]
             (512, 16, 32) => {
-                let net = NetworkLayerStacks512x16x32::read_with_options(reader, psqt_override)?;
+                let net = NetworkLayerStacks::<
+                    512,
+                    LAYER_STACK_16X32_L1_OUT,
+                    LAYER_STACK_16X32_L2_IN,
+                    32,
+                    FT,
+                >::read_with_options(reader, psqt_override)?;
                 Ok(Self::L512x16x32(Box::new(net)))
             }
             _ => Err(io::Error::new(
@@ -771,15 +843,13 @@ impl LayerStacksNetwork {
         }
     }
 
-    /// 評価値を計算
+    /// 評価値を計算 (stack の L1 と一致する variant 上で実行)。
     #[cfg(feature = "ls-arch")]
     pub fn evaluate(
         &self,
         pos: &Position,
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
     ) -> Value {
-        let (net_l1, net_l2, net_l3) = self.architecture_dims();
-        let (stack_l1, stack_l2, stack_l3) = stack.architecture_dims();
         match (self, stack) {
             #[cfg(feature = "ls-size-1536x16x32")]
             (
@@ -803,12 +873,14 @@ impl LayerStacksNetwork {
             ) => net.evaluate(pos, &st.current().accumulator),
             #[allow(unreachable_patterns)]
             _ => panic!(
-                "LayerStacksNetwork/LayerStacksAccStack architecture mismatch: network={net_l1}x{net_l2}x{net_l3}, stack={stack_l1}x{stack_l2}x{stack_l3}"
+                "LayerStacksNetwork / LayerStacksAccStack の L1 サイズが不一致 (net={:?}, stack={:?})",
+                self.architecture_dims(),
+                stack.architecture_dims()
             ),
         }
     }
 
-    /// アキュムレータを更新（キャッシュ対応）
+    /// アキュムレータを更新 (キャッシュ対応)。
     #[cfg(feature = "ls-arch")]
     pub fn update_accumulator(
         &self,
@@ -816,8 +888,8 @@ impl LayerStacksNetwork {
         stack: &mut super::accumulator_layer_stacks::LayerStacksAccStack,
         cache: &mut Option<super::accumulator_layer_stacks::LayerStacksAccCache>,
     ) {
-        let (net_l1, net_l2, net_l3) = self.architecture_dims();
-        let (stack_l1, stack_l2, stack_l3) = stack.architecture_dims();
+        let net_dims = self.architecture_dims();
+        let stack_dims = stack.architecture_dims();
         macro_rules! do_update {
             ($net:expr, $stack:expr, $cache_variant:ident) => {{
                 let current_entry = $stack.current();
@@ -827,7 +899,6 @@ impl LayerStacksNetwork {
 
                 let mut updated = false;
 
-                // --- Tier 1: 直前局面 (depth=1) で差分更新 ---
                 if let Some(prev_idx) = current_entry.previous {
                     let prev_computed = $stack.entry_at(prev_idx).accumulator.computed_accumulation;
                     if prev_computed {
@@ -852,18 +923,12 @@ impl LayerStacksNetwork {
                     }
                 }
 
-                // --- Tier 2: 祖先探索 + forward_update_incremental ---
-                // Tier 1 で失敗しても、MAX_DEPTH=4 以内の computed 祖先があれば
-                // そこから forward 方向に dirty_piece を適用して更新できる。
-                // HalfKaHmMerged / HalfKaSplit / HalfKP では既に有効だが LayerStacks では
-                // 未使用だった。
                 if !updated {
                     if let Some((source_idx, _depth)) = $stack.find_usable_accumulator() {
                         updated = $net.forward_update_incremental(pos, $stack, source_idx);
                     }
                 }
 
-                // --- Tier 3: 全計算 (cache 経由) ---
                 if !updated {
                     let acc = &mut $stack.current_mut().accumulator;
                     if let Some(
@@ -909,7 +974,8 @@ impl LayerStacksNetwork {
             }
             #[allow(unreachable_patterns)]
             _ => panic!(
-                "LayerStacksNetwork/LayerStacksAccStack architecture mismatch: network={net_l1}x{net_l2}x{net_l3}, stack={stack_l1}x{stack_l2}x{stack_l3}"
+                "LayerStacksNetwork / LayerStacksAccStack の L1 サイズが不一致 (net={:?}, stack={:?})",
+                net_dims, stack_dims
             ),
         }
     }
@@ -946,9 +1012,9 @@ impl LayerStacksNetwork {
                 feature = "ls-size-1536x16x32",
                 feature = "ls-size-1536x32x32",
                 feature = "ls-size-768x16x32",
-                feature = "ls-size-512x16x32"
+                feature = "ls-size-512x16x32",
             )))]
-            _ => unreachable!("no LayerStacks variant enabled"),
+            _ => unreachable!("no LayerStacks size variant enabled"),
         }
     }
 
@@ -984,11 +1050,286 @@ impl LayerStacksNetwork {
                 feature = "ls-size-1536x16x32",
                 feature = "ls-size-1536x32x32",
                 feature = "ls-size-768x16x32",
-                feature = "ls-size-512x16x32"
+                feature = "ls-size-512x16x32",
             )))]
-            _ => unreachable!("no LayerStacks variant enabled"),
+            _ => unreachable!("no LayerStacks size variant enabled"),
         }
     }
+
+    /// `eval diag` 用: refresh + evaluate_with_diagnostics を全 L1 variant 上で実行する。
+    ///
+    /// `LayerStacksNetwork::refresh_and_evaluate_with_diagnostics` から委譲される。
+    #[cfg(all(feature = "ls-arch", feature = "diagnostics"))]
+    pub fn refresh_and_evaluate_with_diagnostics(&self, pos: &Position) -> Value {
+        match self {
+            #[cfg(feature = "ls-size-1536x16x32")]
+            Self::L1536x16x32(net) => {
+                let mut acc = AccumulatorLayerStacks::<1536>::new();
+                net.refresh_accumulator(pos, &mut acc);
+                net.evaluate_with_diagnostics(pos, &acc)
+            }
+            #[cfg(feature = "ls-size-1536x32x32")]
+            Self::L1536x32x32(net) => {
+                let mut acc = AccumulatorLayerStacks::<1536>::new();
+                net.refresh_accumulator(pos, &mut acc);
+                net.evaluate_with_diagnostics(pos, &acc)
+            }
+            #[cfg(feature = "ls-size-768x16x32")]
+            Self::L768x16x32(net) => {
+                let mut acc = AccumulatorLayerStacks::<768>::new();
+                net.refresh_accumulator(pos, &mut acc);
+                net.evaluate_with_diagnostics(pos, &acc)
+            }
+            #[cfg(feature = "ls-size-512x16x32")]
+            Self::L512x16x32(net) => {
+                let mut acc = AccumulatorLayerStacks::<512>::new();
+                net.refresh_accumulator(pos, &mut acc);
+                net.evaluate_with_diagnostics(pos, &acc)
+            }
+            #[cfg(not(any(
+                feature = "ls-size-1536x16x32",
+                feature = "ls-size-1536x32x32",
+                feature = "ls-size-768x16x32",
+                feature = "ls-size-512x16x32",
+            )))]
+            _ => unreachable!("no LayerStacks size variant enabled"),
+        }
+    }
+}
+
+/// LayerStacks ネットワークの FT 軸 dispatch enum。各 variant の内部に L1 軸 dispatch
+/// `LsNetByFt<FT>` を持つ二段構造。
+///
+/// active な FT variant は `ft-*` feature で、active な L1 variant は `ls-size-*` feature で
+/// 制御される。
+pub enum LayerStacksNetwork {
+    #[cfg(feature = "ft-halfka_hm_merged")]
+    HalfKaHmMerged(LsNetByFt<HalfKaHmMergedSpec>),
+    #[cfg(feature = "ft-halfka_hm_split")]
+    HalfKaHmSplit(LsNetByFt<HalfKaHmSplitSpec>),
+    #[cfg(feature = "ft-halfka_merged")]
+    HalfKaMerged(LsNetByFt<HalfKaMergedSpec>),
+    #[cfg(feature = "ft-halfka_split")]
+    HalfKaSplit(LsNetByFt<HalfKaSplitSpec>),
+    #[cfg(feature = "ft-halfkp")]
+    HalfKP(LsNetByFt<HalfKpSpec>),
+}
+
+/// LayerStacksNetwork の FT variants を網羅する dispatch マクロ。
+///
+/// 全 FT feature が無効の場合 (現状の build.rs check では ls-arch + ft-* >= 1 を必須化
+/// しているため発生しないが、念のため) は wildcard arm でコンパイルを通す。
+macro_rules! ls_match_ft {
+    ($val:expr, $pat:ident => $body:expr) => {
+        match $val {
+            #[cfg(feature = "ft-halfka_hm_merged")]
+            LayerStacksNetwork::HalfKaHmMerged($pat) => $body,
+            #[cfg(feature = "ft-halfka_hm_split")]
+            LayerStacksNetwork::HalfKaHmSplit($pat) => $body,
+            #[cfg(feature = "ft-halfka_merged")]
+            LayerStacksNetwork::HalfKaMerged($pat) => $body,
+            #[cfg(feature = "ft-halfka_split")]
+            LayerStacksNetwork::HalfKaSplit($pat) => $body,
+            #[cfg(feature = "ft-halfkp")]
+            LayerStacksNetwork::HalfKP($pat) => $body,
+            #[cfg(not(any(
+                feature = "ft-halfka_hm_merged",
+                feature = "ft-halfka_hm_split",
+                feature = "ft-halfka_merged",
+                feature = "ft-halfka_split",
+                feature = "ft-halfkp",
+            )))]
+            _ => unreachable!("no LayerStacks FT variant enabled"),
+        }
+    };
+}
+
+impl LayerStacksNetwork {
+    /// アーキテクチャ寸法 (L1, L2, L3) を返す
+    pub fn architecture_dims(&self) -> (usize, usize, usize) {
+        ls_match_ft!(self, by_ft => by_ft.architecture_dims())
+    }
+
+    /// L1 サイズを取得
+    pub fn l1_size(&self) -> usize {
+        ls_match_ft!(self, by_ft => by_ft.l1_size())
+    }
+
+    /// アーキテクチャ仕様を取得
+    pub fn architecture_spec(&self) -> super::spec::ArchitectureSpec {
+        ls_match_ft!(self, by_ft => by_ft.architecture_spec())
+    }
+
+    /// FV_SCALE を取得
+    pub fn fv_scale(&self) -> i32 {
+        ls_match_ft!(self, by_ft => by_ft.fv_scale())
+    }
+
+    /// ファイルから読み込み (FT は arch_str から検出、L1/L2/L3 は呼び出し元が渡す)。
+    #[cfg(feature = "ls-arch")]
+    pub fn read_with_options<R: Read + Seek>(
+        reader: &mut R,
+        l1: usize,
+        l2: usize,
+        l3: usize,
+        psqt_override: Option<bool>,
+    ) -> io::Result<Self> {
+        let ft_set = peek_layer_stacks_feature_set(reader)?;
+        Self::read_with_feature_set(reader, ft_set, l1, l2, l3, psqt_override)
+    }
+
+    /// ファイルから読み込み (FT 明示)。テスト・診断ツールから FT を強制したい場合に使う。
+    #[cfg(feature = "ls-arch")]
+    pub fn read_with_feature_set<R: Read + Seek>(
+        reader: &mut R,
+        feature_set: super::spec::FeatureSet,
+        l1: usize,
+        l2: usize,
+        l3: usize,
+        psqt_override: Option<bool>,
+    ) -> io::Result<Self> {
+        // FT 軸を `match feature_set` で dispatch する。各 FT について該当 `ft-*` feature が
+        // 有効なら `LsNetByFt::<spec>` に読み込み、無効なら Unsupported エラーを返す。
+        // arch_str が `LayerStacks` キーワードのみの旧モデル (FT 未指定) は HalfKaHmMerged
+        // (= 旧 HalfKA_hm デフォルト) と見なす。
+        macro_rules! read_into_variant {
+            ($ft_feat:literal, $ft_spec:ty, $self_variant:ident, $name:literal) => {{
+                #[cfg(feature = $ft_feat)]
+                {
+                    let inner = LsNetByFt::<$ft_spec>::read_with_options(
+                        reader,
+                        l1,
+                        l2,
+                        l3,
+                        psqt_override,
+                    )?;
+                    Ok(Self::$self_variant(inner))
+                }
+                #[cfg(not(feature = $ft_feat))]
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    concat!(
+                        "LayerStacks FT `",
+                        $name,
+                        "` model requires the corresponding `",
+                        $ft_feat,
+                        "` feature; rebuild rshogi-core with an Edition that enables it.",
+                    ),
+                ))
+            }};
+        }
+        use super::spec::FeatureSet as Fs;
+        match feature_set {
+            Fs::HalfKaHmMerged | Fs::LayerStacks => {
+                read_into_variant!(
+                    "ft-halfka_hm_merged",
+                    HalfKaHmMergedSpec,
+                    HalfKaHmMerged,
+                    "HalfKaHmMerged"
+                )
+            }
+            Fs::HalfKaHmSplit => {
+                read_into_variant!(
+                    "ft-halfka_hm_split",
+                    HalfKaHmSplitSpec,
+                    HalfKaHmSplit,
+                    "HalfKaHmSplit"
+                )
+            }
+            Fs::HalfKaMerged => {
+                read_into_variant!(
+                    "ft-halfka_merged",
+                    HalfKaMergedSpec,
+                    HalfKaMerged,
+                    "HalfKaMerged"
+                )
+            }
+            Fs::HalfKaSplit => {
+                read_into_variant!("ft-halfka_split", HalfKaSplitSpec, HalfKaSplit, "HalfKaSplit")
+            }
+            Fs::HalfKP => {
+                read_into_variant!("ft-halfkp", HalfKpSpec, HalfKP, "HalfKP")
+            }
+        }
+    }
+
+    /// 評価値を計算
+    #[cfg(feature = "ls-arch")]
+    pub fn evaluate(
+        &self,
+        pos: &Position,
+        stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+    ) -> Value {
+        ls_match_ft!(self, by_ft => by_ft.evaluate(pos, stack))
+    }
+
+    /// アキュムレータを更新 (キャッシュ対応)
+    #[cfg(feature = "ls-arch")]
+    pub fn update_accumulator(
+        &self,
+        pos: &Position,
+        stack: &mut super::accumulator_layer_stacks::LayerStacksAccStack,
+        cache: &mut Option<super::accumulator_layer_stacks::LayerStacksAccCache>,
+    ) {
+        ls_match_ft!(self, by_ft => by_ft.update_accumulator(pos, stack, cache))
+    }
+
+    /// 新しい L1 サイズに対応する AccStack を作成
+    #[cfg(feature = "ls-arch")]
+    pub fn new_acc_stack(&self) -> super::accumulator_layer_stacks::LayerStacksAccStack {
+        ls_match_ft!(self, by_ft => by_ft.new_acc_stack())
+    }
+
+    /// 新しい L1 サイズに対応する AccCache を作成
+    #[cfg(feature = "ls-arch")]
+    pub fn new_acc_cache(&self) -> super::accumulator_layer_stacks::LayerStacksAccCache {
+        ls_match_ft!(self, by_ft => by_ft.new_acc_cache())
+    }
+
+    /// 診断ログ向け: refresh + evaluate_with_diagnostics を全 FT × L1 variant 上で実行する。
+    ///
+    /// `eval diag` USI コマンドから呼ばれる。FT/L1 軸をすべて束ねた high-level helper。
+    #[cfg(all(feature = "ls-arch", feature = "diagnostics"))]
+    pub fn refresh_and_evaluate_with_diagnostics(&self, pos: &Position) -> Value {
+        ls_match_ft!(self, by_ft => by_ft.refresh_and_evaluate_with_diagnostics(pos))
+    }
+}
+
+/// reader の現在位置から LayerStacks ヘッダの arch_str を peek し、FT を判別する。
+///
+/// 読み取り後、reader 位置を呼び出し時点まで `Seek` で戻す。失敗時は seek もベスト
+/// エフォートで戻す (再 seek が失敗した場合は元のエラーを優先する)。
+#[cfg(feature = "ls-arch")]
+fn peek_layer_stacks_feature_set<R: Read + Seek>(
+    reader: &mut R,
+) -> io::Result<super::spec::FeatureSet> {
+    let original = reader.stream_position()?;
+    let result = (|| -> io::Result<super::spec::FeatureSet> {
+        let mut buf4 = [0u8; 4];
+        // version + struct hash を読み飛ばし、arch_len → arch_str を読む。
+        reader.read_exact(&mut buf4)?;
+        reader.read_exact(&mut buf4)?;
+        reader.read_exact(&mut buf4)?;
+        let arch_len = u32::from_le_bytes(buf4) as usize;
+        if arch_len == 0 || arch_len > MAX_ARCH_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid arch string length: {arch_len} (max: {MAX_ARCH_LEN})"),
+            ));
+        }
+        let mut arch = vec![0u8; arch_len];
+        reader.read_exact(&mut arch)?;
+        let arch_str = String::from_utf8_lossy(&arch);
+        match super::spec::parse_feature_set_from_arch(&arch_str) {
+            Ok(fs) => Ok(fs),
+            Err(_) => {
+                // arch_str から FT を特定できないモデルは旧 HalfKaHmMerged と見なす。
+                Ok(super::spec::FeatureSet::LayerStacks)
+            }
+        }
+    })();
+    reader.seek(SeekFrom::Start(original))?;
+    result
 }
 
 #[cfg(test)]

@@ -9,7 +9,6 @@ fn validate_feature_combination(
     has_feature: &dyn Fn(&str) -> bool,
 ) -> Result<(), String> {
     let ls_arch = has_feature("ls-arch");
-    let halfkx_arch = has_feature("halfkx-arch");
 
     let mode_universal = has_feature("mode-universal");
     let mode_family = has_feature("mode-family");
@@ -53,24 +52,23 @@ fn validate_feature_combination(
         );
     }
 
-    // LS-only build (ls-arch + halfkx-arch なし) では HalfKX 経路がコンパイルされて
-    // いないため、ft-halfka_hm_merged 以外を立てると runtime に HalfKX モデルを load
-    // した際 `evaluate_dispatch` の `unreachable!` arm に到達してパニックする。
-    // mode (family / universal / specific) に関わらず build-time で reject する。
-    if ls_arch && !halfkx_arch {
-        for ft in &[
-            "ft-halfkp",
-            "ft-halfka_split",
-            "ft-halfka_merged",
-            "ft-halfka_hm_split",
-        ] {
-            if has_feature(ft) {
-                return Err(format!(
-                    "LS-only build (ls-arch + not(halfkx-arch)) では \
-                     ft-halfka_hm_merged のみサポートします (`{ft}` 指定済み)。"
-                ));
-            }
-        }
+    // ls-arch が有効なら ft-* を 1 個以上必須化する (Issue #734 で LS network を
+    // FT generic 化した結果、5 variant 全てが LS で valid になった)。HalfKX 経路の
+    // 有無は問わない。
+    let ft_features: &[&str] = &[
+        "ft-halfkp",
+        "ft-halfka_split",
+        "ft-halfka_merged",
+        "ft-halfka_hm_split",
+        "ft-halfka_hm_merged",
+    ];
+    let ft_count = ft_features.iter().filter(|f| has_feature(f)).count();
+    if ls_arch && ft_count == 0 {
+        return Err(
+            "ls-arch を有効化するには ft-* を 1 個以上必要です \
+             (Issue #734 後、LS で 5 variant 全て対応)。"
+                .to_string(),
+        );
     }
 
     if mode_specific {
@@ -91,14 +89,6 @@ fn validate_feature_combination(
                 "mode-specific では halfkx-activation-* を 1 個までしか指定できません (現在 {activation_count} 個有効)。"
             ));
         }
-        let ft_features: &[&str] = &[
-            "ft-halfkp",
-            "ft-halfka_split",
-            "ft-halfka_merged",
-            "ft-halfka_hm_split",
-            "ft-halfka_hm_merged",
-        ];
-        let ft_count = ft_features.iter().filter(|f| has_feature(f)).count();
         if ft_count > 1 {
             return Err(format!(
                 "mode-specific では ft-* を 1 個までしか指定できません (現在 {ft_count} 個有効)。"

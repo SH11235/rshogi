@@ -158,11 +158,12 @@ edition-halfkx-any = [
   "halfkx-activation-crelu", "halfkx-activation-screlu", "halfkx-activation-pairwise",
 ]
 
-# LayerStack family (全 size / 全 ext dispatch、現状 FT は halfka_hm_merged のみ)
+# LayerStack family (全 size / 全 FT / 全 ext dispatch)。
+# Issue #734 で LS network を FT generic 化したため、5 variant 全て family build に含める。
 edition-ls             = ["edition-ls-any-any-any"]
 edition-ls-any-any-any = [
   "mode-family", "ls-arch",
-  "ft-halfka_hm_merged",
+  "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
   "ls-size-1536x16x32", "ls-size-1536x32x32", "ls-size-768x16x32", "ls-size-512x16x32",
   "ls-ext-psqt", "ls-ext-threat",
 ]
@@ -215,6 +216,26 @@ edition-ls-halfka_hm_merged-768x16x32-none = [
 ]
 edition-ls-halfka_hm_merged-512x16x32-none = [
   "mode-specific", "ls-arch", "ft-halfka_hm_merged", "ls-size-512x16x32",
+]
+
+# Issue #734 で LS network を FT generic 化したため、他 4 FT (halfkp / halfka_split /
+# halfka_merged / halfka_hm_split) も specific preset を 1536x16x32-none で代表的に整備する。
+# 残りの (size × ext) 組合せは需要発生時に同パターンで追加する。
+edition-ls-halfka_hm_split-1536x16x32-none = [
+  "mode-specific", "ls-arch", "ft-halfka_hm_split", "ls-size-1536x16x32",
+  "nnue-progress-diff",
+]
+edition-ls-halfka_merged-1536x16x32-none = [
+  "mode-specific", "ls-arch", "ft-halfka_merged", "ls-size-1536x16x32",
+  "nnue-progress-diff",
+]
+edition-ls-halfka_split-1536x16x32-none = [
+  "mode-specific", "ls-arch", "ft-halfka_split", "ls-size-1536x16x32",
+  "nnue-progress-diff",
+]
+edition-ls-halfkp-1536x16x32-none = [
+  "mode-specific", "ls-arch", "ft-halfkp", "ls-size-1536x16x32",
+  "nnue-progress-diff",
 ]
 
 # === 旧 feature 名 alias ===

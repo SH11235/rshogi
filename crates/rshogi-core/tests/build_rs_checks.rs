@@ -50,6 +50,7 @@ fn universal_alone_ok() {
         "ls-arch",
         "ls-size-1536x16x32",
         "ls-size-768x16x32",
+        "ft-halfka_hm_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
 }
@@ -89,6 +90,7 @@ fn specific_multiple_sizes_rejected() {
         "ls-arch",
         "ls-size-1536x16x32",
         "ls-size-1536x32x32",
+        "ft-halfka_hm_merged",
     ]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("ls-size-* を 1 個だけ"));
@@ -125,6 +127,7 @@ fn specific_single_size_ok() {
         "ls-arch",
         "ls-size-1536x16x32",
         "ls-ext-psqt",
+        "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -136,6 +139,7 @@ fn progress_diff_with_512_rejected() {
         "mode-specific",
         "ls-arch",
         "ls-size-512x16x32",
+        "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
     let err = validate_feature_combination(&has).unwrap_err();
@@ -148,6 +152,7 @@ fn progress_diff_with_768_rejected() {
         "mode-specific",
         "ls-arch",
         "ls-size-768x16x32",
+        "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
     let err = validate_feature_combination(&has).unwrap_err();
@@ -160,6 +165,7 @@ fn progress_diff_with_1536x32x32_ok() {
         "mode-specific",
         "ls-arch",
         "ls-size-1536x32x32",
+        "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -171,6 +177,7 @@ fn progress_diff_in_family_rejected() {
         "mode-family",
         "ls-arch",
         "ls-size-1536x16x32",
+        "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
     let err = validate_feature_combination(&has).unwrap_err();
@@ -183,6 +190,7 @@ fn progress_diff_in_universal_rejected() {
         "mode-universal",
         "ls-arch",
         "ls-size-1536x16x32",
+        "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
     let err = validate_feature_combination(&has).unwrap_err();
@@ -191,52 +199,73 @@ fn progress_diff_in_universal_rejected() {
 
 #[test]
 fn family_multiple_sizes_ok() {
-    // family mode は dispatch 用途で複数 size 同時 OK。
     let has = lookup(&[
         "mode-family",
         "ls-arch",
         "ls-size-1536x16x32",
         "ls-size-768x16x32",
         "ls-size-512x16x32",
+        "ft-halfka_hm_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
 }
 
 #[test]
 fn ls_arch_plus_halfkx_arch_ok() {
-    // universal は ls-arch + halfkx-arch 両方 on。両者は include-only 意味論なので共存可。
     let has = lookup(&[
         "mode-universal",
         "ls-arch",
         "halfkx-arch",
         "ls-size-1536x16x32",
+        "ft-halfka_hm_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
 }
 
 #[test]
-fn ls_specific_with_ft_halfkp_rejected() {
-    // LS 単独 specific (halfkx-arch なし) では ft-halfka_hm_merged 以外不可。
+fn ls_specific_with_ft_halfkp_ok() {
+    // Issue #734 で LS network を 5 variant 対応にしたため、ft-halfkp + ls-arch
+    // 単独 specific build も valid になった。
     let has = lookup(&[
         "mode-specific",
         "ls-arch",
         "ls-size-1536x16x32",
         "ft-halfkp",
     ]);
-    let err = validate_feature_combination(&has).unwrap_err();
-    assert!(err.contains("ft-halfka_hm_merged のみ"));
+    assert!(validate_feature_combination(&has).is_ok());
 }
 
 #[test]
-fn ls_specific_with_ft_halfka_split_rejected() {
+fn ls_specific_with_ft_halfka_split_ok() {
     let has = lookup(&[
         "mode-specific",
         "ls-arch",
         "ls-size-1536x16x32",
         "ft-halfka_split",
     ]);
-    let err = validate_feature_combination(&has).unwrap_err();
-    assert!(err.contains("ft-halfka_hm_merged のみ"));
+    assert!(validate_feature_combination(&has).is_ok());
+}
+
+#[test]
+fn ls_specific_with_ft_halfka_merged_ok() {
+    let has = lookup(&[
+        "mode-specific",
+        "ls-arch",
+        "ls-size-1536x16x32",
+        "ft-halfka_merged",
+    ]);
+    assert!(validate_feature_combination(&has).is_ok());
+}
+
+#[test]
+fn ls_specific_with_ft_halfka_hm_split_ok() {
+    let has = lookup(&[
+        "mode-specific",
+        "ls-arch",
+        "ls-size-1536x16x32",
+        "ft-halfka_hm_split",
+    ]);
+    assert!(validate_feature_combination(&has).is_ok());
 }
 
 #[test]
@@ -254,8 +283,6 @@ fn ls_specific_with_ft_halfka_hm_merged_ok() {
 #[test]
 fn ls_arch_with_halfkx_arch_specific_ft_halfkp_ok() {
     // mode-specific + ls-arch + halfkx-arch + ft-halfkp + ls-size-* は許容。
-    // ft-halfkp は HalfKX 経路にルーティングされ、LS data 構造は ls-arch のため確保される。
-    // user が atomic feature を直接指定するこの組合せが build.rs check で reject されないことを保証する。
     let has = lookup(&[
         "mode-specific",
         "ls-arch",
@@ -268,31 +295,41 @@ fn ls_arch_with_halfkx_arch_specific_ft_halfkp_ok() {
 }
 
 #[test]
-fn ls_only_family_with_ft_halfkp_rejected() {
-    // mode-family でも LS-only (halfkx-arch なし) + ft-halfkp は reject。
-    // halfkx-arch なしでは HalfKX 経路がコンパイルされず runtime panic 可能性のため。
+fn ls_only_family_with_multi_ft_ok() {
+    // mode-family + LS-only + 複数 FT (Issue #734 後は dispatch で valid)。
     let has = lookup(&[
         "mode-family",
         "ls-arch",
         "ls-size-1536x16x32",
         "ls-size-768x16x32",
         "ft-halfkp",
+        "ft-halfka_hm_merged",
     ]);
-    let err = validate_feature_combination(&has).unwrap_err();
-    assert!(err.contains("ft-halfka_hm_merged のみ"));
+    assert!(validate_feature_combination(&has).is_ok());
 }
 
 #[test]
-fn ls_only_universal_with_ft_halfkp_rejected() {
-    // mode-universal で halfkx-arch を意図的に外したケースも reject。
+fn ls_only_universal_with_all_ft_ok() {
+    // mode-universal + LS-only + 全 FT も valid。
     let has = lookup(&[
         "mode-universal",
         "ls-arch",
         "ls-size-1536x16x32",
         "ft-halfkp",
+        "ft-halfka_split",
+        "ft-halfka_merged",
+        "ft-halfka_hm_split",
+        "ft-halfka_hm_merged",
     ]);
+    assert!(validate_feature_combination(&has).is_ok());
+}
+
+#[test]
+fn ls_arch_without_ft_rejected() {
+    // Issue #734 後、ls-arch を有効化したら ft-* が 1 個以上必須。
+    let has = lookup(&["mode-specific", "ls-arch", "ls-size-1536x16x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
-    assert!(err.contains("ft-halfka_hm_merged のみ"));
+    assert!(err.contains("ft-* を 1 個以上"));
 }
 
 #[test]

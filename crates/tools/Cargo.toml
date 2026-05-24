@@ -8,7 +8,7 @@ license = "GPL-3.0-only"
 repository = "https://github.com/SH11235/rshogi"
 
 [features]
-default = ["layerstacks-1536x16x32"]
+default = ["layerstacks-1536x16x32", "ft-halfka_hm_merged"]
 # 診断ログ（EvalHashヒット率など）
 diagnostics = ["rshogi-core/diagnostics"]
 # Threat exclusion profiles
@@ -27,6 +27,12 @@ ls-size-512x16x32  = ["rshogi-core/ls-size-512x16x32"]
 # LS 拡張 slot
 ls-ext-psqt   = ["rshogi-core/ls-ext-psqt"]
 ls-ext-threat = ["rshogi-core/ls-ext-threat"]
+# FT slot (LS の Feature Transformer 軸、5 variants)
+ft-halfkp           = ["rshogi-core/ft-halfkp"]
+ft-halfka_split     = ["rshogi-core/ft-halfka_split"]
+ft-halfka_merged    = ["rshogi-core/ft-halfka_merged"]
+ft-halfka_hm_split  = ["rshogi-core/ft-halfka_hm_split"]
+ft-halfka_hm_merged = ["rshogi-core/ft-halfka_hm_merged"]
 
 # === 旧 feature 名 alias ===
 nnue-psqt              = ["ls-ext-psqt"]

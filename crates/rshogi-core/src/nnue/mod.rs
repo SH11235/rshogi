@@ -46,6 +46,7 @@ pub(crate) mod halfkp;
 mod layer_stacks;
 mod layers;
 mod leb128;
+mod ls_feature_spec;
 #[macro_use]
 pub mod macros;
 mod network;
@@ -89,6 +90,10 @@ pub use layer_stacks::{
     sqr_clipped_relu_transform,
 };
 pub use layers::{AffineTransform, ClippedReLU};
+pub use ls_feature_spec::{
+    HalfKaHmMergedSpec, HalfKaHmSplitSpec, HalfKaMergedSpec, HalfKaSplitSpec, HalfKpSpec,
+    LsFeatureSpec,
+};
 #[cfg(feature = "ls-arch")]
 pub use network::evaluate_layer_stacks;
 #[cfg(feature = "ls-arch")]
@@ -105,15 +110,15 @@ pub use network::{
     set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
     set_nnue_architecture_override,
 };
-#[cfg(feature = "ls-size-512x16x32")]
+#[cfg(all(feature = "ls-size-512x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks512x16x32;
-#[cfg(feature = "ls-size-768x16x32")]
+#[cfg(all(feature = "ls-size-768x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks768x16x32;
-#[cfg(feature = "ls-size-1536x16x32")]
+#[cfg(all(feature = "ls-size-1536x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks1536x16x32;
-#[cfg(feature = "ls-size-1536x32x32")]
+#[cfg(all(feature = "ls-size-1536x32x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks1536x32x32;
-pub use network_layer_stacks::{LayerStacksNetwork, NetworkLayerStacks};
+pub use network_layer_stacks::{LayerStacksNetwork, LsNetByFt, NetworkLayerStacks};
 pub use piece_list::{PieceList, PieceNumber};
 
 // const generics 版統一実装（内部型は pub(crate) に隠蔽）

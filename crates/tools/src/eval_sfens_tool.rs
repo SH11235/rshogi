@@ -16,8 +16,8 @@ use std::mem::size_of;
 use std::path::PathBuf;
 
 use rshogi_core::nnue::{
-    AccumulatorLayerStacks, AffineTransform, FeatureSet, HalfKaHmMergedFeatureSet,
-    LayerStackBucketMode, LayerStacksNetwork, NNUE_PYTORCH_L3, NNUENetwork, NetworkLayerStacks,
+    AccumulatorLayerStacks, AffineTransform, FeatureSet, LayerStackBucketMode, LayerStacksNetwork,
+    LsFeatureSpec, LsNetByFt, NNUE_PYTORCH_L3, NNUENetwork, NetworkLayerStacks,
     SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_progress8kpabs_bucket_index,
     get_layer_stack_progress_kpabs_weights, set_layer_stack_bucket_mode,
     set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
@@ -178,8 +178,9 @@ fn recompute_ft_scalar<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    FT: LsFeatureSpec,
 >(
-    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
+    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>,
     pos: &Position,
     perspective: Color,
 ) -> [i32; L1] {
@@ -187,7 +188,7 @@ fn recompute_ft_scalar<
     for (dst, &b) in acc.iter_mut().zip(network.feature_transformer.biases.0.iter()) {
         *dst = i32::from(b);
     }
-    let active = HalfKaHmMergedFeatureSet::collect_active_indices(pos, perspective);
+    let active = <FT::Set as FeatureSet>::collect_active_indices(pos, perspective);
     for index in active.iter() {
         let offset = index * L1;
         for (i, dst) in acc.iter_mut().enumerate() {
@@ -202,8 +203,9 @@ fn dump_debug_first<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    FT: LsFeatureSpec,
 >(
-    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
+    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>,
     pos: &Position,
     acc: &AccumulatorLayerStacks<L1>,
     sfen: &str,
@@ -216,8 +218,8 @@ fn dump_debug_first<
     eprintln!("[debug] side_to_move={:?}", pos.side_to_move());
     eprintln!("[debug] bucket={bucket_index} raw={raw} score={score}");
 
-    let black_active = HalfKaHmMergedFeatureSet::collect_active_indices(pos, Color::Black);
-    let white_active = HalfKaHmMergedFeatureSet::collect_active_indices(pos, Color::White);
+    let black_active = <FT::Set as FeatureSet>::collect_active_indices(pos, Color::Black);
+    let white_active = <FT::Set as FeatureSet>::collect_active_indices(pos, Color::White);
     eprintln!(
         "[debug] active_features black={} white={}",
         black_active.len(),
@@ -311,9 +313,10 @@ fn run_eval_for_network<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    FT: LsFeatureSpec,
 >(
     cli: &Cli,
-    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
+    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>,
 ) -> Result<()> {
     eprintln!("fv_scale: {}", network.fv_scale);
     eprintln!(
@@ -403,16 +406,48 @@ pub fn run() -> Result<()> {
     macro_rules! with_network {
         ($net:expr, |$inner:ident| $body:expr) => {
             match $net {
-                #[cfg(feature = "ls-size-1536x16x32")]
-                LayerStacksNetwork::L1536x16x32($inner) => $body,
-                #[cfg(feature = "ls-size-1536x32x32")]
-                LayerStacksNetwork::L1536x32x32($inner) => $body,
-                #[cfg(feature = "ls-size-768x16x32")]
-                LayerStacksNetwork::L768x16x32($inner) => $body,
-                #[cfg(feature = "ls-size-512x16x32")]
-                LayerStacksNetwork::L512x16x32($inner) => $body,
+                #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-1536x16x32"))]
+                LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L1536x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-1536x32x32"))]
+                LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L1536x32x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-768x16x32"))]
+                LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L768x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_hm_merged", feature = "ls-size-512x16x32"))]
+                LayerStacksNetwork::HalfKaHmMerged(LsNetByFt::L512x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-1536x16x32"))]
+                LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L1536x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-1536x32x32"))]
+                LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L1536x32x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-768x16x32"))]
+                LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L768x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_hm_split", feature = "ls-size-512x16x32"))]
+                LayerStacksNetwork::HalfKaHmSplit(LsNetByFt::L512x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-1536x16x32"))]
+                LayerStacksNetwork::HalfKaMerged(LsNetByFt::L1536x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-1536x32x32"))]
+                LayerStacksNetwork::HalfKaMerged(LsNetByFt::L1536x32x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-768x16x32"))]
+                LayerStacksNetwork::HalfKaMerged(LsNetByFt::L768x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_merged", feature = "ls-size-512x16x32"))]
+                LayerStacksNetwork::HalfKaMerged(LsNetByFt::L512x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-1536x16x32"))]
+                LayerStacksNetwork::HalfKaSplit(LsNetByFt::L1536x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-1536x32x32"))]
+                LayerStacksNetwork::HalfKaSplit(LsNetByFt::L1536x32x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-768x16x32"))]
+                LayerStacksNetwork::HalfKaSplit(LsNetByFt::L768x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfka_split", feature = "ls-size-512x16x32"))]
+                LayerStacksNetwork::HalfKaSplit(LsNetByFt::L512x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfkp", feature = "ls-size-1536x16x32"))]
+                LayerStacksNetwork::HalfKP(LsNetByFt::L1536x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfkp", feature = "ls-size-1536x32x32"))]
+                LayerStacksNetwork::HalfKP(LsNetByFt::L1536x32x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfkp", feature = "ls-size-768x16x32"))]
+                LayerStacksNetwork::HalfKP(LsNetByFt::L768x16x32($inner)) => $body,
+                #[cfg(all(feature = "ft-halfkp", feature = "ls-size-512x16x32"))]
+                LayerStacksNetwork::HalfKP(LsNetByFt::L512x16x32($inner)) => $body,
                 #[allow(unreachable_patterns)]
-                _ => anyhow::bail!("有効な LayerStacks バリアントがありません"),
+                _ => anyhow::bail!("有効な LayerStacks (FT × L1) バリアントがありません"),
             }
         };
     }

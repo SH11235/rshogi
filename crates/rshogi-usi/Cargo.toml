@@ -88,6 +88,11 @@ edition-ls-halfka_hm_merged-1536x16x32-psqt_threat = ["rshogi-core/edition-ls-ha
 edition-ls-halfka_hm_merged-1536x32x32-none        = ["rshogi-core/edition-ls-halfka_hm_merged-1536x32x32-none"]
 edition-ls-halfka_hm_merged-768x16x32-none         = ["rshogi-core/edition-ls-halfka_hm_merged-768x16x32-none"]
 edition-ls-halfka_hm_merged-512x16x32-none         = ["rshogi-core/edition-ls-halfka_hm_merged-512x16x32-none"]
+# Issue #734 で LS の FT generic 化後に追加された他 4 FT specific preset。
+edition-ls-halfka_hm_split-1536x16x32-none = ["rshogi-core/edition-ls-halfka_hm_split-1536x16x32-none"]
+edition-ls-halfka_merged-1536x16x32-none   = ["rshogi-core/edition-ls-halfka_merged-1536x16x32-none"]
+edition-ls-halfka_split-1536x16x32-none    = ["rshogi-core/edition-ls-halfka_split-1536x16x32-none"]
+edition-ls-halfkp-1536x16x32-none          = ["rshogi-core/edition-ls-halfkp-1536x16x32-none"]
 
 # === 旧 feature 名 alias ===
 # 旧 build スクリプト・CI 設定がそのまま動くよう alias で互換維持する。
