@@ -144,6 +144,8 @@ impl LsFeatureSpec for HalfKaHmMergedSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nnue::accumulator::{IndexList, MAX_ACTIVE_FEATURES};
+    use crate::position::{Position, SFEN_HIRATE};
 
     #[test]
     fn test_dimensions_match_feature_set() {
@@ -161,5 +163,82 @@ mod tests {
             HalfKaHmMergedSpec::DIMENSIONS,
             <HalfKaHmMergedFeatureSet as FeatureSet>::DIMENSIONS
         );
+    }
+
+    /// `FT::feature_index(bp, perspective, king_sq)` が、対応する `FT::Feature` の
+    /// `append_active_indices(pos, perspective, _)` が生成する index 集合と完全一致する
+    /// ことを確認する。座標系 (HM mirror, king_sq.inverse() 等) の取り違えがあれば
+    /// ここで検出される。
+    fn assert_feature_index_matches_active_indices<FT: LsFeatureSpec>(
+        pos: &Position,
+        perspective: crate::types::Color,
+    ) {
+        let king_sq = pos.king_square(perspective);
+
+        let mut expected = IndexList::<MAX_ACTIVE_FEATURES>::new();
+        <FT::Feature as Feature>::append_active_indices(pos, perspective, &mut expected);
+
+        let piece_list = if perspective == crate::types::Color::Black {
+            pos.piece_list().piece_list_fb()
+        } else {
+            pos.piece_list().piece_list_fw()
+        };
+
+        // FT 別の "active" 範囲: HalfKP は玉除外 (piece_list[..KING])、HalfKa* は玉込み (全 40 slot)。
+        // append_active_indices と同じ範囲で feature_index を呼び、index 集合を作る。
+        let include_king = !std::any::type_name::<FT>().ends_with("HalfKpSpec");
+        let end = if include_king {
+            crate::nnue::piece_list::PieceNumber::NB
+        } else {
+            crate::nnue::piece_list::PieceNumber::KING as usize
+        };
+
+        let mut actual: Vec<usize> = piece_list[..end]
+            .iter()
+            .filter(|bp| **bp != BonaPiece::ZERO)
+            .map(|bp| FT::feature_index(*bp, perspective, king_sq))
+            .collect();
+
+        let mut expected_vec: Vec<usize> = expected.iter().collect();
+        actual.sort_unstable();
+        expected_vec.sort_unstable();
+
+        assert_eq!(
+            actual, expected_vec,
+            "{:?}: FT::feature_index と FT::Feature::append_active_indices の index 集合が不一致",
+            perspective
+        );
+    }
+
+    fn check_for_spec<FT: LsFeatureSpec>() {
+        let mut pos = Position::new();
+        pos.set_sfen(SFEN_HIRATE).unwrap();
+        assert_feature_index_matches_active_indices::<FT>(&pos, crate::types::Color::Black);
+        assert_feature_index_matches_active_indices::<FT>(&pos, crate::types::Color::White);
+    }
+
+    #[test]
+    fn feature_index_matches_append_active_halfkp() {
+        check_for_spec::<HalfKpSpec>();
+    }
+
+    #[test]
+    fn feature_index_matches_append_active_halfka_split() {
+        check_for_spec::<HalfKaSplitSpec>();
+    }
+
+    #[test]
+    fn feature_index_matches_append_active_halfka_merged() {
+        check_for_spec::<HalfKaMergedSpec>();
+    }
+
+    #[test]
+    fn feature_index_matches_append_active_halfka_hm_split() {
+        check_for_spec::<HalfKaHmSplitSpec>();
+    }
+
+    #[test]
+    fn feature_index_matches_append_active_halfka_hm_merged() {
+        check_for_spec::<HalfKaHmMergedSpec>();
     }
 }

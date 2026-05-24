@@ -1341,9 +1341,9 @@ fn detect_layer_stacks_feature_set(arch_str: &str) -> super::spec::FeatureSet {
         match name {
             "HalfKP" => return Fs::HalfKP,
             "HalfKA_merged" | "HalfKaMerged" => return Fs::HalfKaMerged,
+            "HalfKA_split" | "HalfKaSplit" => return Fs::HalfKaSplit,
             "HalfKA_hm_split" | "HalfKaHmSplit" => return Fs::HalfKaHmSplit,
             "HalfKA_hm" | "HalfKaHmMerged" => return Fs::HalfKaHmMerged,
-            "HalfKaSplit" => return Fs::HalfKaSplit,
             _ => {}
         }
     }
@@ -1352,10 +1352,10 @@ fn detect_layer_stacks_feature_set(arch_str: &str) -> super::spec::FeatureSet {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "ls-size-1536x16x32")]
+    #[cfg(all(feature = "ls-size-1536x16x32", feature = "ft-halfka_hm_merged"))]
     use super::*;
     use crate::nnue::constants::{FV_SCALE_HALFKA, NNUE_PYTORCH_L1};
-    #[cfg(feature = "ls-size-1536x16x32")]
+    #[cfg(all(feature = "ls-size-1536x16x32", feature = "ft-halfka_hm_merged"))]
     use crate::position::{Position, SFEN_HIRATE};
 
     const TEST_L1: usize = NNUE_PYTORCH_L1;
@@ -1376,7 +1376,7 @@ mod tests {
     /// - FT weight nonzero: 2,143,627
     /// - L1 bias (bucket 0): [-15, 57, -182, -97, -202, -55, 120, 1, 87, -133, -16, 44, -27, -37, -201, -186]
     /// - Initial position score: 0 (epoch82は学習初期のため)
-    #[cfg(feature = "ls-size-1536x16x32")]
+    #[cfg(all(feature = "ls-size-1536x16x32", feature = "ft-halfka_hm_merged"))]
     #[test]
     #[ignore]
     fn test_load_layer_stacks_file() {
