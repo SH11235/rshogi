@@ -8,7 +8,14 @@ license = "GPL-3.0-only"
 repository = "https://github.com/SH11235/rshogi"
 
 [features]
-default = ["layerstacks-1536x16x32", "ft-halfka_hm_merged"]
+default = [
+    "layerstacks-1536x16x32",
+    "ft-halfkp",
+    "ft-halfka_split",
+    "ft-halfka_merged",
+    "ft-halfka_hm_split",
+    "ft-halfka_hm_merged",
+]
 # 診断ログ（EvalHashヒット率など）
 diagnostics = ["rshogi-core/diagnostics"]
 # Threat exclusion profiles
