@@ -1548,4 +1548,84 @@ mod tests {
             eprintln!("{:15}: {:6} (raw: {:6})", name, val.raw(), raw);
         }
     }
+
+    /// `detect_layer_stacks_feature_set` が実 NNUE ファイルの arch_str (PascalCase 表記
+    /// で tatara が emit する現行形式) と underscore 表記 (forward-compat) の両方を
+    /// 正しく分岐することを確認する。実ファイルが無くても文字列だけで検証できる。
+    ///
+    /// 実 NNUE の arch_str は `LayerStacks` キーワードを含まないため、`SqrClippedReLU` +
+    /// `ClippedReLU` の混在指紋で `parse_feature_set_from_arch` は `LayerStacks` を
+    /// 返してしまう (これが PR #745 で修正した CRITICAL bug の根因)。
+    /// `detect_layer_stacks_feature_set` は `Features=` keyword 優先で FT を識別する。
+    #[cfg(feature = "ls-arch")]
+    #[test]
+    fn test_detect_feature_set_from_real_arch_strings() {
+        use crate::nnue::spec::FeatureSet as Fs;
+
+        // 実 NNUE ファイル (eval/psqt-validate-2026-05-24/) と同一形式の arch_str。
+        // PSQT on/off と、underscore / PascalCase の両表記を網羅する。
+        let cases: &[(&str, Fs)] = &[
+            // 実ファイル: PascalCase + PSQT off
+            (
+                "Features=HalfKP(Friend)[125388->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
+                Fs::HalfKP,
+            ),
+            (
+                "Features=HalfKaSplit(Friend)[138510->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
+                Fs::HalfKaSplit,
+            ),
+            (
+                "Features=HalfKaMerged(Friend)[131949->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
+                Fs::HalfKaMerged,
+            ),
+            (
+                "Features=HalfKaHmSplit(Friend)[76950->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
+                Fs::HalfKaHmSplit,
+            ),
+            (
+                "Features=HalfKaHmMerged(Friend)[73305->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
+                Fs::HalfKaHmMerged,
+            ),
+            // 実ファイル: PascalCase + PSQT on (PSQT=9 が arch_str に入る)
+            (
+                "Features=HalfKP(Friend)[125388->1536x2],PSQT=9,Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
+                Fs::HalfKP,
+            ),
+            (
+                "Features=HalfKaSplit(Friend)[138510->1536x2],PSQT=9,Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
+                Fs::HalfKaSplit,
+            ),
+            (
+                "Features=HalfKaHmMerged(Friend)[73305->1536x2],PSQT=9,Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
+                Fs::HalfKaHmMerged,
+            ),
+            // forward-compat: underscore 表記 (現 tatara は emit しないが将来形式変更時の保険)
+            ("Features=HalfKA_merged(Friend)[131949->1536x2]", Fs::HalfKaMerged),
+            ("Features=HalfKA_split(Friend)[138510->1536x2]", Fs::HalfKaSplit),
+            ("Features=HalfKA_hm_split(Friend)[76950->1536x2]", Fs::HalfKaHmSplit),
+            ("Features=HalfKA_hm(Friend)[73305->1536x2]", Fs::HalfKaHmMerged),
+        ];
+
+        for (arch_str, expected) in cases {
+            let got = detect_layer_stacks_feature_set(arch_str);
+            assert_eq!(
+                got, *expected,
+                "arch_str={arch_str:?} → expected {expected:?}, got {got:?}"
+            );
+        }
+    }
+
+    /// `Features=` keyword が見つからない / 不明な FT のみ、`LayerStacks` fallback に
+    /// 落ちることを確認する。
+    #[cfg(feature = "ls-arch")]
+    #[test]
+    fn test_detect_feature_set_fallback() {
+        use crate::nnue::spec::FeatureSet as Fs;
+        // Features= が無く LayerStacks キーワードがあるケース → fallback で LayerStacks
+        let got = detect_layer_stacks_feature_set("LayerStacks(...)");
+        assert_eq!(got, Fs::LayerStacks);
+        // 完全に未知 → fallback の unwrap_or で LayerStacks
+        let got = detect_layer_stacks_feature_set("unknown-arch-string");
+        assert_eq!(got, Fs::LayerStacks);
+    }
 }
