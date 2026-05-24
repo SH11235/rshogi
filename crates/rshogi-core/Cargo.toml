@@ -103,10 +103,9 @@ ls-size-512x16x32  = []
 ls-ext-psqt   = []
 ls-ext-threat = []
 
-# FT (Feature Transformer) 種別 slot。
-# 現状 LS network は ft-halfka_hm_merged 専用、他 4 variant は LS 側で未対応のため
-# build.rs check で mode-specific + ls-arch (HalfKX 経路なし) の組合せでのみ reject される。
-# HalfKX 経路では将来全 variant に対応予定。
+# FT (Feature Transformer) 種別 slot (5 variant)。
+# LS / HalfKX どちらの family でも 5 variant 全対応。mode-specific では 1 個固定、
+# family / universal では複数 OR を許容して runtime dispatch。
 ft-halfkp           = []
 ft-halfka_split     = []
 ft-halfka_merged    = []
