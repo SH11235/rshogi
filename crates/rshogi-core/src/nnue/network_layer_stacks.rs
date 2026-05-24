@@ -1340,10 +1340,10 @@ fn detect_layer_stacks_feature_set(arch_str: &str) -> super::spec::FeatureSet {
     if let Some(name) = super::spec::parse_feature_set_keyword(arch_str) {
         match name {
             "HalfKP" => return Fs::HalfKP,
-            "HalfKA_merged" | "HalfKaMerged" => return Fs::HalfKaMerged,
-            "HalfKA_split" | "HalfKaSplit" => return Fs::HalfKaSplit,
-            "HalfKA_hm_split" | "HalfKaHmSplit" => return Fs::HalfKaHmSplit,
-            "HalfKA_hm" | "HalfKaHmMerged" => return Fs::HalfKaHmMerged,
+            "HalfKaSplit" => return Fs::HalfKaSplit,
+            "HalfKaMerged" => return Fs::HalfKaMerged,
+            "HalfKaHmSplit" => return Fs::HalfKaHmSplit,
+            "HalfKaHmMerged" => return Fs::HalfKaHmMerged,
             _ => {}
         }
     }
@@ -1549,23 +1549,19 @@ mod tests {
         }
     }
 
-    /// `detect_layer_stacks_feature_set` が実 NNUE ファイルの arch_str (PascalCase 表記
-    /// で tatara が emit する現行形式) と underscore 表記 (forward-compat) の両方を
-    /// 正しく分岐することを確認する。実ファイルが無くても文字列だけで検証できる。
+    /// `detect_layer_stacks_feature_set` が tatara emit 形式の arch_str (PascalCase) を
+    /// 5 FT 全てで正しく分岐することを確認する。
     ///
-    /// 実 NNUE の arch_str は `LayerStacks` キーワードを含まないため、`SqrClippedReLU` +
-    /// `ClippedReLU` の混在指紋で `parse_feature_set_from_arch` は `LayerStacks` を
-    /// 返してしまう (これが PR #745 で修正した CRITICAL bug の根因)。
-    /// `detect_layer_stacks_feature_set` は `Features=` keyword 優先で FT を識別する。
+    /// 実 NNUE の arch_str は `LayerStacks` キーワードを含まないため、`SqrClippedReLU`
+    /// と `ClippedReLU` の混在指紋で `parse_feature_set_from_arch` は `LayerStacks` を
+    /// 返してしまう (旧バグの根因)。`detect_layer_stacks_feature_set` は `Features=`
+    /// keyword 優先で FT を識別する。
     #[cfg(feature = "ls-arch")]
     #[test]
     fn test_detect_feature_set_from_real_arch_strings() {
         use crate::nnue::spec::FeatureSet as Fs;
 
-        // 実 NNUE ファイル (eval/psqt-validate-2026-05-24/) と同一形式の arch_str。
-        // PSQT on/off と、underscore / PascalCase の両表記を網羅する。
         let cases: &[(&str, Fs)] = &[
-            // 実ファイル: PascalCase + PSQT off
             (
                 "Features=HalfKP(Friend)[125388->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
                 Fs::HalfKP,
@@ -1586,24 +1582,14 @@ mod tests {
                 "Features=HalfKaHmMerged(Friend)[73305->1536x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
                 Fs::HalfKaHmMerged,
             ),
-            // 実ファイル: PascalCase + PSQT on (PSQT=9 が arch_str に入る)
             (
                 "Features=HalfKP(Friend)[125388->1536x2],PSQT=9,Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
                 Fs::HalfKP,
             ),
             (
-                "Features=HalfKaSplit(Friend)[138510->1536x2],PSQT=9,Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
-                Fs::HalfKaSplit,
-            ),
-            (
                 "Features=HalfKaHmMerged(Friend)[73305->1536x2],PSQT=9,Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28",
                 Fs::HalfKaHmMerged,
             ),
-            // forward-compat: underscore 表記 (現 tatara は emit しないが将来形式変更時の保険)
-            ("Features=HalfKA_merged(Friend)[131949->1536x2]", Fs::HalfKaMerged),
-            ("Features=HalfKA_split(Friend)[138510->1536x2]", Fs::HalfKaSplit),
-            ("Features=HalfKA_hm_split(Friend)[76950->1536x2]", Fs::HalfKaHmSplit),
-            ("Features=HalfKA_hm(Friend)[73305->1536x2]", Fs::HalfKaHmMerged),
         ];
 
         for (arch_str, expected) in cases {
