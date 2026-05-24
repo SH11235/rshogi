@@ -63,16 +63,38 @@ rshogi-core = "0.2"
 
 ## ビルド
 
+`.cargo/config.toml` で `target-cpu=native` を採用しているため、`cargo build` だけで
+build マシンの SIMD (AVX2 等) は自動で有効になる。
+
 ```bash
-# ビルド
+# 開発用 build (全 NNUE arch を runtime dispatch)
 cargo build --release
 
 # テスト実行
 cargo test
-
-# AVX2 SIMD最適化を有効にしてビルド
-cargo build --release --features simd_avx2
 ```
+
+複数 NNUE architecture binary を `engines/` 配下で並行管理したい場合 (selfplay / SPRT /
+tournament 等) は `cargo xtask` 経由で preset edition ごとに別 binary を build できる:
+
+```bash
+# 利用可能な preset edition を列挙
+cargo xtask list-editions
+
+# 特定 preset を build (engines/rshogi-usi-<edition> に配置 + .meta.toml 記録)
+cargo xtask build --edition ls-halfka_hm_merged-1536x16x32-psqt
+
+# 複数 preset を一気に build
+cargo xtask build --edition X,Y
+cargo xtask build --all-presets
+
+# engines/ 配下の binary 一覧 (preset / commit / age / status を表示)
+cargo xtask list-binaries
+```
+
+詳細は [`docs/build.md`](docs/build.md) と ADR
+[`docs/decisions/2026-05-24-build-edition-flavor-design.md`](docs/decisions/2026-05-24-build-edition-flavor-design.md)
+を参照。
 
 ## このエンジンを使用したアプリ
 
