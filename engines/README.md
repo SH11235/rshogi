@@ -9,46 +9,58 @@
 - `/tmp/` は再起動で揮発するので NG。
 - `.gitignore` で本体は除外、README と `.gitkeep` のみコミット対象。
 
-## 推奨フロー: `cargo xtask` 経由
+## ビルドフロー: `cargo xtask` 経由
 
-新規 build は `cargo xtask` 経由を推奨。preset edition 命名規則で binary を配置し、
-同階層に `<binary>.meta.toml` (commit / profile / built_at / rustc) を残す:
-
-```bash
-cargo xtask build --edition ls-halfka_hm_merged-1536x16x32-psqt
-# → engines/rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt
-# → engines/rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt.meta.toml
-
-cargo xtask list-binaries  # commit/age/status を表表示
-```
-
-詳細な workflow / preset の選び方 / manifest フィールド説明は
+binary の配置は `cargo xtask build` で行う。preset edition 命名規則で配置し、
+同階層に `<binary>.meta.toml` (commit / profile / built_at / rustc) を残す。
+preset の選び方・slot 値の意味論・manifest フィールドの詳細は
 [`docs/build.md`](../docs/build.md) を参照。
 
-## Legacy: 手動命名で残っている binary
+### 典型コマンド
 
-xtask 導入前 (Issue #738) の手動命名 binary。Issue #739 で xtask 命名規則に
-rename 予定:
+```bash
+# 利用可能な preset 一覧
+cargo xtask list-editions
+
+# 1 preset を build (engines/rshogi-usi-<edition slug> に配置)
+cargo xtask build --edition ls-halfka_hm_merged-1536x16x32-psqt
+
+# 複数 preset を順次 build
+cargo xtask build --edition ls-halfka_hm_merged-1536x16x32-psqt,ls-halfka_hm_merged-1536x16x32-none
+
+# engines/ 配下の binary 一覧 + manifest を整形表示
+cargo xtask list-binaries
+```
+
+### 命名規則
 
 ```
-rshogi-usi-<arch>-<flags>-<purpose>
+engines/rshogi-usi-<edition slug>[-flavor-<flavor>][.exe]
 ```
 
-- `<arch>`: NNUE アーキテクチャ。例 `1536x16x32`, `768x16x32`, `halfkahm`
-- `<flags>`: 有効化した特徴。`psqt`, `threat`, `progdiff` 等。複数は `-` 連結
-- `<purpose>`: 用途識別子。例 `v100v101cmp`, `baseline`, `spsa-tuned`
+- `<edition slug>` = preset edition 名から `edition-` 接頭辞を除いたもの
+- `flavor` が `default` の場合は省略
+- Windows host では `.exe` 拡張子付与
 
 例:
-- `rshogi-usi-1536x16x32-v100v101cmp` — v100 vs v101 比較用、PSQT なし
-- `rshogi-usi-1536x16x32-psqt-v100v101cmp` — v101 評価用、PSQT 有効
 
-### 現在の保持 legacy binary
+```
+edition=edition-ls-halfka_hm_merged-1536x16x32-psqt, flavor=default
+  → engines/rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt
+  → engines/rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt.meta.toml
+```
 
-| ファイル | 対応モデル | feature | 用途 | ビルド日 |
-|---|---|---|---|---|
-| rshogi-usi-1536x16x32-v100v101cmp | v100 系 (1536x16x32, no PSQT) | `layerstack-only,nnue-progress-diff` (default で `layerstacks-1536x16x32`) | v100 vs v101 比較 | 2026-05-09 |
-| rshogi-usi-1536x16x32-psqt-v100v101cmp | v101 系 (1536x16x32, PSQT) | `layerstack-only,nnue-psqt,nnue-progress-diff` | v101 評価 | TBD |
+### manifest
 
-ビルド profile は **production** で統一（公平な NPS 比較のため）。
-新 xtask 経由 build もデフォルト profile は `production` (詳細は
-[`docs/build.md`](../docs/build.md))。
+`engines/<binary>.meta.toml` には commit hash / profile / built_at / rustc 等を記録する。
+selfplay/SPRT の事後検証 (「この binary はどの commit / profile か」) で使う。
+schema とフィールド説明は [`docs/build.md` の build manifest 節](../docs/build.md#build-manifest)
+を参照。
+
+`cargo xtask list-binaries` の STATUS 列で manifest 不在 / 古い commit / dirty build を
+即座に判別できる。
+
+## PGO build
+
+PGO build は `scripts/build_pgo.sh` 経由 (xtask 統合 scope 外、`target/production/` に出力)。
+engines/ に長期保持したい場合は build 後に手動で copy + 命名する。
