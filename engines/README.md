@@ -35,17 +35,16 @@ cargo xtask list-binaries
 ### 命名規則
 
 ```
-engines/rshogi-usi-<edition slug>[-flavor-<flavor>][.exe]
+engines/rshogi-usi-<edition slug>[.exe]
 ```
 
 - `<edition slug>` = preset edition 名から `edition-` 接頭辞を除いたもの
-- `flavor` が `default` の場合は省略
 - Windows host では `.exe` 拡張子付与
 
 例:
 
 ```
-edition=edition-ls-halfka_hm_merged-1536x16x32-psqt, flavor=default
+edition=edition-ls-halfka_hm_merged-1536x16x32-psqt
   → engines/rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt
   → engines/rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt.meta.toml
 ```

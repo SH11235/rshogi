@@ -124,9 +124,9 @@ cargo xtask build [--edition <preset>[,<preset>...]] [--all-presets]
 - `--edition <name>` : preset edition (`edition-` 接頭辞省略可)。複数指定可
   (カンマ区切り or `--edition` 複数回)。
 - `--all-presets`    : `list-editions` の全 preset を順次 build。`--edition` と排他。
-- `--flavor <name>`  : Edition 軸と直交する flavor。`default` 以外は binary 名末尾に
-  `-flavor-<name>` が付加される (例 `engines/rshogi-usi-X-flavor-tournament`)。
-  Flavor 軸の中身 (`tournament` の具体内容等) は将来の別 Issue で決定。
+- `--flavor <name>`  : binary 命名規則の予約 slot。`default` 以外は binary 名末尾に
+  `-flavor-<name>` が付加されるが、**現状は命名上の slot のみで build 内容は不変**
+  (ADR で軸の存在のみ宣言、具体 flavor は別 Issue で実装される予定)。
   `[a-z0-9][a-z0-9_-]*` の slug のみ受け付ける。
 - `--profile <name>` : cargo profile。デフォルト `production` (LTO=fat、Full LTO、
   単一 codegen unit)。`release` は dev iteration 向け (thin LTO)、`profiling` は
@@ -147,9 +147,6 @@ build 後、`engines/rshogi-usi-<edition slug>[-flavor-<flavor>]` と
 ```
 edition=edition-ls-halfka_hm_merged-1536x16x32-psqt, flavor=default
   → engines/rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt
-
-edition=edition-ls, flavor=tournament
-  → engines/rshogi-usi-ls-flavor-tournament
 ```
 
 ### `cargo xtask list-editions`
@@ -180,7 +177,6 @@ $ cargo xtask list-binaries
 BINARY                                            EDITION                                        PROFILE     COMMIT    AGE  SIZE    STATUS
 rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt    edition-ls-halfka_hm_merged-1536x16x32-psqt    production  5616ea7c  2h   2.9 MB  current
 rshogi-usi-ls-halfka_hm_merged-1536x16x32-threat  edition-ls-halfka_hm_merged-1536x16x32-threat  production  4a34e06b  5d   2.8 MB  stale
-rshogi-usi-custom-experiment                      -                                              -           -         12d  2.7 MB  (no manifest)
 ```
 
 STATUS 列:
@@ -190,7 +186,7 @@ STATUS 列:
 | `current` | manifest 記録の commit が HEAD と一致 |
 | `stale`   | HEAD と異なる commit で build されている (古い) |
 | `dirty`   | manifest 記録時に working tree が dirty だった |
-| `(no manifest)` | xtask 経由 build でない旧 binary (`.meta.toml` 不在) |
+| `(no manifest)` | xtask 経由 build でない binary (`.meta.toml` 不在、user が手動配置した場合) |
 | `(manifest broken)` | `.meta.toml` が存在するが parse 失敗 (stderr に warning も出力) |
 
 ## build manifest
