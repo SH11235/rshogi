@@ -9,6 +9,7 @@ members = [
     "crates/rshogi-csa-server-workers",
     "crates/rshogi-usi",
     "crates/tools",
+    "crates/xtask",
 ]
 
 [workspace.dependencies]
