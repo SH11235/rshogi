@@ -24,7 +24,6 @@ const CORE_CARGO_TOML: &str = include_str!("../../rshogi-core/Cargo.toml");
 const USI_PACKAGE: &str = "rshogi-usi";
 const USI_BINARY: &str = "rshogi-usi";
 const DEFAULT_PROFILE: &str = "production";
-const DEFAULT_FLAVOR: &str = "default";
 const EDITION_PREFIX: &str = "edition-";
 const MANIFEST_SUFFIX: &str = ".meta.toml";
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -38,7 +37,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum SubCmd {
-    /// preset edition を build して `engines/rshogi-usi-<edition>[-flavor-<flavor>]` に配置する。
+    /// preset edition を build して `engines/rshogi-usi-<edition>` に配置する。
     /// 同階層に `<binary>.meta.toml` も書き出し、後追い可能なメタ情報を残す。
     Build {
         /// preset edition 名 (`edition-` 接頭辞省略可、複数指定可)。
@@ -49,10 +48,6 @@ enum SubCmd {
         /// `--edition` と排他。
         #[arg(long, conflicts_with = "edition")]
         all_presets: bool,
-        /// Flavor 名 (Edition 軸と直交、`default` 以外は binary 名に `-flavor-<flavor>` として付加される)。
-        /// Flavor 軸の中身は本 task の対象外で、引数だけ受けて命名規則に従う。
-        #[arg(long, default_value = DEFAULT_FLAVOR)]
-        flavor: String,
         /// cargo profile (`production` / `release` / `dev` / 任意 custom profile)。
         #[arg(long, default_value = DEFAULT_PROFILE)]
         profile: String,
@@ -70,9 +65,8 @@ fn main() -> Result<()> {
         SubCmd::Build {
             edition,
             all_presets,
-            flavor,
             profile,
-        } => run_build(edition, all_presets, &flavor, &profile),
+        } => run_build(edition, all_presets, &profile),
         SubCmd::ListEditions => run_list_editions(),
         SubCmd::ListBinaries => run_list_binaries(),
     }
@@ -85,12 +79,7 @@ fn run_list_editions() -> Result<()> {
     Ok(())
 }
 
-fn run_build(
-    edition_args: Vec<String>,
-    all_presets: bool,
-    flavor: &str,
-    profile: &str,
-) -> Result<()> {
+fn run_build(edition_args: Vec<String>, all_presets: bool, profile: &str) -> Result<()> {
     let available = preset_editions(CORE_CARGO_TOML)?;
     let editions: Vec<String> = if all_presets {
         if !edition_args.is_empty() {
@@ -110,7 +99,6 @@ fn run_build(
             );
         }
     }
-    validate_flavor(flavor)?;
 
     let workspace_root = workspace_root()?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
@@ -130,7 +118,6 @@ fn run_build(
         workspace_root: &workspace_root,
         target_dir: &target_dir,
         profile,
-        flavor,
         commit: commit.as_deref(),
         commit_dirty,
         rustc_version: rustc_version.as_deref(),
@@ -159,17 +146,13 @@ struct BuildContext<'a> {
     workspace_root: &'a Path,
     target_dir: &'a Path,
     profile: &'a str,
-    flavor: &'a str,
     commit: Option<&'a str>,
     commit_dirty: bool,
     rustc_version: Option<&'a str>,
 }
 
 fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
-    println!(
-        "==> Building {edition_feature} (profile={}, flavor={})",
-        ctx.profile, ctx.flavor
-    );
+    println!("==> Building {edition_feature} (profile={})", ctx.profile);
     let status = Command::new(ctx.cargo)
         .current_dir(ctx.workspace_root)
         .args([
@@ -201,7 +184,7 @@ fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
         );
     }
 
-    let dst = engines_path(ctx.workspace_root, edition_feature, ctx.flavor)?;
+    let dst = engines_path(ctx.workspace_root, edition_feature)?;
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create engines dir: {}", parent.display()))?;
@@ -212,7 +195,6 @@ fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
     let manifest = Manifest {
         schema_version: MANIFEST_SCHEMA_VERSION,
         edition: edition_feature.to_string(),
-        flavor: ctx.flavor.to_string(),
         profile: ctx.profile.to_string(),
         commit: ctx.commit.unwrap_or("unknown").to_string(),
         commit_dirty: ctx.commit_dirty,
@@ -343,11 +325,12 @@ fn read_manifest_status(path: &Path) -> ManifestStatus {
     }
 }
 
+// serde 既定で未知フィールドは silently ignore されるため、`flavor` 等の旧 v1
+// manifest フィールドが残った既存 binary も parse 失敗せずに読める (backward-compat)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
     schema_version: u32,
     edition: String,
-    flavor: String,
     profile: String,
     commit: String,
     commit_dirty: bool,
@@ -397,15 +380,12 @@ fn preset_editions(cargo_toml: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// `engines/rshogi-usi-<edition slug>[-flavor-<flavor>]<EXE_SUFFIX>` を組み立てる。
-fn engines_path(workspace_root: &Path, edition_feature: &str, flavor: &str) -> Result<PathBuf> {
+/// `engines/rshogi-usi-<edition slug><EXE_SUFFIX>` を組み立てる。
+fn engines_path(workspace_root: &Path, edition_feature: &str) -> Result<PathBuf> {
     let slug = edition_feature
         .strip_prefix(EDITION_PREFIX)
         .with_context(|| format!("edition feature `{edition_feature}` missing prefix"))?;
     let mut name = format!("{USI_BINARY}-{slug}");
-    if flavor != DEFAULT_FLAVOR {
-        name.push_str(&format!("-flavor-{flavor}"));
-    }
     name.push_str(std::env::consts::EXE_SUFFIX);
     Ok(workspace_root.join("engines").join(name))
 }
@@ -414,22 +394,6 @@ fn manifest_path_for(binary_path: &Path) -> PathBuf {
     let mut s = binary_path.as_os_str().to_owned();
     s.push(MANIFEST_SUFFIX);
     PathBuf::from(s)
-}
-
-/// flavor 名は engines/ 直下の単一ファイル名として展開されるため、path traversal
-/// やシェルメタ文字を許容しない。`default` 含む `[a-z0-9][a-z0-9_-]*` のみ許可。
-fn validate_flavor(flavor: &str) -> Result<()> {
-    let mut chars = flavor.chars();
-    let first = chars.next().with_context(|| "flavor must not be empty".to_string())?;
-    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
-        bail!("flavor `{flavor}` must start with a lowercase ASCII letter or digit");
-    }
-    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
-        bail!(
-            "flavor `{flavor}` must match `[a-z0-9][a-z0-9_-]*` (lowercase ASCII, digits, `_`, `-`)"
-        );
-    }
-    Ok(())
 }
 
 /// cargo profile 名から `target/<dir>` のディレクトリ名を返す。
@@ -629,23 +593,11 @@ mod tests {
     }
 
     #[test]
-    fn engines_path_default_flavor_omits_suffix() {
+    fn engines_path_strips_edition_prefix() {
         let root = PathBuf::from("/tmp/rshogi");
-        let p =
-            engines_path(&root, "edition-ls-halfka_hm_merged-1536x16x32-psqt", "default").unwrap();
+        let p = engines_path(&root, "edition-ls-halfka_hm_merged-1536x16x32-psqt").unwrap();
         let expected = format!(
             "/tmp/rshogi/engines/rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt{}",
-            std::env::consts::EXE_SUFFIX
-        );
-        assert_eq!(p, PathBuf::from(expected));
-    }
-
-    #[test]
-    fn engines_path_custom_flavor_appends_suffix() {
-        let root = PathBuf::from("/tmp/rshogi");
-        let p = engines_path(&root, "edition-ls", "tournament").unwrap();
-        let expected = format!(
-            "/tmp/rshogi/engines/rshogi-usi-ls-flavor-tournament{}",
             std::env::consts::EXE_SUFFIX
         );
         assert_eq!(p, PathBuf::from(expected));
@@ -657,25 +609,6 @@ mod tests {
         assert_eq!(profile_dir("release"), "release");
         assert_eq!(profile_dir("production"), "production");
         assert_eq!(profile_dir("profiling"), "profiling");
-    }
-
-    #[test]
-    fn validate_flavor_accepts_canonical_values() {
-        for ok in ["default", "tournament", "pgo", "tournament-2", "abc_def"] {
-            validate_flavor(ok).unwrap_or_else(|e| panic!("flavor `{ok}` should be valid: {e}"));
-        }
-    }
-
-    #[test]
-    fn validate_flavor_rejects_path_traversal_and_shell_meta() {
-        for bad in [
-            "", "..", "../etc", "foo/bar", "FOO", "foo bar", "foo;rm", "-leading",
-        ] {
-            assert!(
-                validate_flavor(bad).is_err(),
-                "flavor `{bad}` should be rejected but was accepted"
-            );
-        }
     }
 
     #[test]
@@ -727,7 +660,6 @@ mod tests {
         let m = Manifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             edition: "edition-universal".into(),
-            flavor: "default".into(),
             profile: "production".into(),
             commit: "deadbeef".into(),
             commit_dirty: false,
@@ -746,7 +678,6 @@ mod tests {
         let manifest = Manifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             edition: "edition-ls-halfka_hm_merged-1536x16x32-psqt".into(),
-            flavor: "default".into(),
             profile: "production".into(),
             commit: "5616ea7c056ff21b6705c0ef00ca7266b7b2849f".into(),
             commit_dirty: false,
@@ -758,13 +689,35 @@ mod tests {
         let parsed: Manifest = toml::from_str(&text).unwrap();
         assert_eq!(parsed.schema_version, manifest.schema_version);
         assert_eq!(parsed.edition, manifest.edition);
-        assert_eq!(parsed.flavor, manifest.flavor);
         assert_eq!(parsed.profile, manifest.profile);
         assert_eq!(parsed.commit, manifest.commit);
         assert_eq!(parsed.commit_dirty, manifest.commit_dirty);
         assert_eq!(parsed.built_at, manifest.built_at);
         assert_eq!(parsed.rustc, manifest.rustc);
         assert_eq!(parsed.binary, manifest.binary);
+    }
+
+    #[test]
+    fn manifest_parses_legacy_flavor_field() {
+        // 旧 v1 manifest は `flavor` フィールドを含む。schema_version 据置のまま
+        // field 削除しても serde が unknown を ignore して parse 成功すること
+        // (backward-compat: 既存 binary の `(manifest broken)` 化を防ぐ)。
+        let legacy = r#"
+schema_version = 1
+edition = "edition-universal"
+flavor = "default"
+profile = "production"
+commit = "deadbeef"
+commit_dirty = false
+built_at = "2026-05-24T22:30:00+09:00"
+rustc = "rustc 1.85.0"
+binary = "rshogi-usi-universal"
+"#;
+        let parsed: Manifest = toml::from_str(legacy).unwrap_or_else(|e| {
+            panic!("legacy manifest with `flavor` field should parse, got: {e:#}")
+        });
+        assert_eq!(parsed.edition, "edition-universal");
+        assert_eq!(parsed.profile, "production");
     }
 
     #[test]
