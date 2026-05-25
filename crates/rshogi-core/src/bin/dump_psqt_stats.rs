@@ -20,12 +20,8 @@ fn main() {
 
 #[cfg(feature = "ls-ext-psqt")]
 fn main() {
-    use rshogi_core::nnue::{NUM_LAYER_STACK_BUCKETS, NetworkLayerStacks1536x16x32};
+    use rshogi_core::nnue::NetworkLayerStacks1536x16x32;
     use std::path::Path;
-
-    // PSQT bucket 数はライブラリ側の定数を直接参照し、
-    // モデル仕様変更時にツール側を追従させる必要をなくす。
-    const NUM_BUCKETS: usize = NUM_LAYER_STACK_BUCKETS;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -34,10 +30,10 @@ fn main() {
     }
 
     println!(
-        "{:<60} {:>12} {:>12} {:>10} {:>10} {:>10} {:>10}",
-        "model", "L2_total", "L2_bias", "min_w", "max_w", "mean|w|", "nonzero%"
+        "{:<60} {:>4} {:>12} {:>12} {:>10} {:>10} {:>10} {:>10}",
+        "model", "N", "L2_total", "L2_bias", "min_w", "max_w", "mean|w|", "nonzero%"
     );
-    println!("{}", "-".repeat(140));
+    println!("{}", "-".repeat(150));
 
     for path_str in &args {
         let path = Path::new(path_str);
@@ -55,8 +51,12 @@ fn main() {
             continue;
         }
 
+        // PSQT bucket 数は net file から読まれた runtime 値を使う。
+        let num_buckets = ft.psqt_num_buckets();
         let weights: &[i32] = ft.psqt_weights();
-        let biases = ft.psqt_biases();
+        // psqt_biases() は固定長 [i32; MAX_LAYER_STACK_BUCKETS]、先頭 num_buckets のみ有効。
+        let biases_all = ft.psqt_biases();
+        let biases = &biases_all[..num_buckets];
 
         // 全体統計
         let total_count = weights.len();
@@ -78,29 +78,29 @@ fn main() {
             .unwrap_or_else(|| path.display().to_string());
 
         println!(
-            "{:<60} {:>12.0} {:>12.0} {:>10} {:>10} {:>10.2} {:>9.2}%",
-            label, l2_total, l2_bias, min_w, max_w, mean_abs, nonzero_pct
+            "{:<60} {:>4} {:>12.0} {:>12.0} {:>10} {:>10} {:>10.2} {:>9.2}%",
+            label, num_buckets, l2_total, l2_bias, min_w, max_w, mean_abs, nonzero_pct
         );
 
         // Per-bucket L2 norm
         debug_assert_eq!(
-            total_count % NUM_BUCKETS,
+            total_count % num_buckets,
             0,
-            "psqt_weights length must be divisible by NUM_BUCKETS"
+            "psqt_weights length must be divisible by num_buckets"
         );
-        let halfka_dim = total_count / NUM_BUCKETS;
-        let mut per_bucket_l2 = [0.0f64; NUM_BUCKETS];
-        let mut per_bucket_max = [i32::MIN; NUM_BUCKETS];
-        let mut per_bucket_min = [i32::MAX; NUM_BUCKETS];
+        let halfka_dim = total_count / num_buckets;
+        let mut per_bucket_l2 = vec![0.0f64; num_buckets];
+        let mut per_bucket_max = vec![i32::MIN; num_buckets];
+        let mut per_bucket_min = vec![i32::MAX; num_buckets];
         for feature_idx in 0..halfka_dim {
-            for bucket in 0..NUM_BUCKETS {
-                let w = weights[feature_idx * NUM_BUCKETS + bucket];
+            for bucket in 0..num_buckets {
+                let w = weights[feature_idx * num_buckets + bucket];
                 per_bucket_l2[bucket] += (w as f64).powi(2);
                 per_bucket_max[bucket] = per_bucket_max[bucket].max(w);
                 per_bucket_min[bucket] = per_bucket_min[bucket].min(w);
             }
         }
-        for v in &mut per_bucket_l2 {
+        for v in per_bucket_l2.iter_mut() {
             *v = v.sqrt();
         }
 
@@ -115,7 +115,7 @@ fn main() {
         }
         println!();
         print!("    per-bucket [min,max]: ");
-        for i in 0..NUM_BUCKETS {
+        for i in 0..num_buckets {
             print!("b{i}=[{},{}] ", per_bucket_min[i], per_bucket_max[i]);
         }
         println!();

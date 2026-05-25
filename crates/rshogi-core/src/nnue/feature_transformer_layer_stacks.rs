@@ -12,7 +12,7 @@ use super::accumulator_layer_stacks::{
 };
 use super::bona_piece::BonaPiece;
 #[cfg(feature = "ls-ext-psqt")]
-use super::constants::NUM_LAYER_STACK_BUCKETS;
+use super::constants::MAX_LAYER_STACK_BUCKETS;
 use super::features::{Feature, FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 use super::ls_feature_spec::LsFeatureSpec;
@@ -78,13 +78,24 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
     /// 64バイトアラインメントで確保
     pub weights: AlignedBox<i16>,
 
-    /// PSQT バイアス [NUM_LAYER_STACK_BUCKETS]
+    /// PSQT バイアス（先頭 `num_buckets` 個のみ有効、それ以降はゼロ）
+    ///
+    /// 配列のサイズは hot-path 固定 (`MAX_LAYER_STACK_BUCKETS`) だが、有効範囲は
+    /// `num_buckets` で動的に決まる。未使用エリアは load 時に 0 で初期化され、
+    /// `psqt_add_or_sub` が `n` 引数で範囲を絞るため副作用無し。
     #[cfg(feature = "ls-ext-psqt")]
-    pub(crate) psqt_biases: [i32; NUM_LAYER_STACK_BUCKETS],
+    pub(crate) psqt_biases: [i32; MAX_LAYER_STACK_BUCKETS],
 
-    /// PSQT 重み [FT::DIMENSIONS × NUM_LAYER_STACK_BUCKETS]
+    /// PSQT 重み (長さ = `FT::DIMENSIONS × num_buckets`、layout
+    /// `psqt_weights[feature_idx * num_buckets + bucket]`)
     #[cfg(feature = "ls-ext-psqt")]
     pub(crate) psqt_weights: AlignedBox<i32>,
+
+    /// PSQT 重みの bucket 数 (= net file の `num_buckets`)。
+    ///
+    /// PSQT block を持たない net では `0` (PSQT block を読まずに skip)。
+    #[cfg(feature = "ls-ext-psqt")]
+    pub(crate) psqt_num_buckets: usize,
 
     /// PSQT が有効か（アーキテクチャ文字列で判定）
     #[cfg(feature = "ls-ext-psqt")]
@@ -101,192 +112,43 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
     _ft: PhantomData<FT>,
 }
 
-/// PSQT アキュムレータ ([i32; NUM_LAYER_STACK_BUCKETS=9]) への 9-i32 ベクトル加減算。
+/// PSQT アキュムレータ (`[i32; MAX_LAYER_STACK_BUCKETS]`) の先頭 `n` 要素に
+/// `weights[0..n]` を加算 (`ADD = true`) または減算する。
 ///
-/// `ADD = true` で `*acc += weights[0..9]`、`false` で `*acc -= weights[0..9]`。
-/// 9 = NUM_LAYER_STACK_BUCKETS は power-of-2 でないため:
+/// `n` は net file の `num_buckets` で、`MAX_LAYER_STACK_BUCKETS` 以下。配列の
+/// `[n..]` 範囲は load 時にゼロで残っているため、ここを触らないことで意味的整合性
+/// (未使用 bucket の値は不変) を保つ。
 ///
-/// - AVX-512F: 16-lane を 9 lane mask で 1 命令（BW 不要、`add_epi32` は AVX-512F のみで OK）
-/// - AVX2: 8 lane + 1 scalar
-/// - SSE2 / NEON / WASM SIMD128: 4 + 4 + 1 scalar
-/// - スカラー fallback
+/// # 実装方針
 ///
-/// 各 cfg ブロックは互いに排他（後段ブロックは前段の `not(target_feature = ...)` で除外）
-/// のため、コンパイル時にちょうど一つの SIMD パス（または scalar fallback）が選択される。
+/// 旧実装は 9-bucket 固定 SIMD path (AVX-512 mask / AVX2 8+1 / SSE2/NEON 4+4+1)
+/// を持っていたが、`n` が runtime 値になり mask/tail 構造が壊れるため、
+/// 単一の scalar loop に統合した。`#[inline(always)]` で呼び出し元 (add/sub の
+/// 1 引数) へ展開され、N ≤ 16 の loop は LLVM が auto-vectorize しやすい形を
+///保つ。実測 NPS 退行があれば別 ADR で再 SIMD 化を検討する。
 ///
 /// # オーバーフロー挙動
-/// 旧スカラー実装は `*acc += weights[bucket]` で debug build では i32 overflow check が
-/// 走っていた。新実装は SIMD intrinsics (`_mm*_add_epi32` 等) で wrapping、scalar
-/// fallback も `wrapping_add` で明示 wrap。実用上 PSQT 値は ±数千オーダーで、
-/// FT::DIMENSIONS の累積でも i32 (±2.1e9) を溢れることはなく、挙動差は実害なし。
+/// `wrapping_add` / `wrapping_sub` で明示 wrap。PSQT 値は ±数千オーダー、FT
+/// 累積でも i32 を溢れないため挙動差は実害無し。
 ///
 /// # Safety
-/// `weights` は少なくとも 9 個の i32 が連続して読める必要がある（呼び出し元が保証）。
+/// `weights` は少なくとも `n` 個の i32 が連続して読める必要がある（呼び出し元が保証）。
 #[cfg(feature = "ls-ext-psqt")]
 #[inline(always)]
 fn psqt_add_or_sub<const ADD: bool>(
-    psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
+    psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
     weights: *const i32,
+    n: usize,
 ) {
-    const { assert!(NUM_LAYER_STACK_BUCKETS == 9, "psqt_add_or_sub assumes 9 buckets") }
-
-    // AVX-512F: 9 lane mask で 1 命令
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
-    {
-        // SAFETY: 9 lane mask = 0x01FF。psqt_acc は [i32; 9] = 36 bytes、weights も 9 i32
-        // 連続。mask されたレーンのみ load/store するため境界外アクセスなし。
-        unsafe {
-            use std::arch::x86_64::*;
-            let mask: __mmask16 = 0x01FF;
-            let acc_ptr = psqt_acc.as_mut_ptr();
-            let a = _mm512_maskz_loadu_epi32(mask, acc_ptr);
-            let w = _mm512_maskz_loadu_epi32(mask, weights);
-            let result = if ADD {
-                _mm512_add_epi32(a, w)
-            } else {
-                _mm512_sub_epi32(a, w)
-            };
-            _mm512_mask_storeu_epi32(acc_ptr, mask, result);
-        }
-    }
-
-    // AVX2: 8 lane (i32×8 = 32 bytes) + 1 scalar
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        not(target_feature = "avx512f")
-    ))]
-    {
-        // SAFETY: psqt_acc は [i32; 9] = 36 bytes、先頭 32 bytes (8 lane) は安全に
-        // load/store 可能。weights も 9 i32 連続なので 8 i32 load 安全。残り 1 lane は
-        // scalar で処理。
-        unsafe {
-            use std::arch::x86_64::*;
-            let acc_ptr = psqt_acc.as_mut_ptr();
-            let a = _mm256_loadu_si256(acc_ptr as *const __m256i);
-            let w = _mm256_loadu_si256(weights as *const __m256i);
-            let result = if ADD {
-                _mm256_add_epi32(a, w)
-            } else {
-                _mm256_sub_epi32(a, w)
-            };
-            _mm256_storeu_si256(acc_ptr as *mut __m256i, result);
-            let w8 = *weights.add(8);
-            if ADD {
-                psqt_acc[8] = psqt_acc[8].wrapping_add(w8);
-            } else {
-                psqt_acc[8] = psqt_acc[8].wrapping_sub(w8);
-            }
-        }
-    }
-
-    // SSE2: 4 + 4 + 1
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "sse2",
-        not(target_feature = "avx2"),
-        not(target_feature = "avx512f")
-    ))]
-    {
-        // SAFETY: psqt_acc/weights とも 9 i32 = 36 bytes 連続。0..4 と 4..8 の 16 bytes
-        // load/store は安全。
-        unsafe {
-            use std::arch::x86_64::*;
-            let acc_ptr = psqt_acc.as_mut_ptr();
-            for chunk in [0usize, 4] {
-                let a = _mm_loadu_si128(acc_ptr.add(chunk) as *const __m128i);
-                let w = _mm_loadu_si128(weights.add(chunk) as *const __m128i);
-                let result = if ADD {
-                    _mm_add_epi32(a, w)
-                } else {
-                    _mm_sub_epi32(a, w)
-                };
-                _mm_storeu_si128(acc_ptr.add(chunk) as *mut __m128i, result);
-            }
-            let w8 = *weights.add(8);
-            if ADD {
-                psqt_acc[8] = psqt_acc[8].wrapping_add(w8);
-            } else {
-                psqt_acc[8] = psqt_acc[8].wrapping_sub(w8);
-            }
-        }
-    }
-
-    // NEON (aarch64): 4 + 4 + 1
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    {
-        // SAFETY: NEON i32x4 load/store は psqt_acc / weights の連続 4 i32 を扱う。
-        // 9 i32 = 36 bytes 確保済み。0..4 と 4..8 を別 register で処理し、8 番目を
-        // scalar で更新。
-        unsafe {
-            use std::arch::aarch64::*;
-            let acc_ptr = psqt_acc.as_mut_ptr();
-            for chunk in [0usize, 4] {
-                let a = vld1q_s32(acc_ptr.add(chunk));
-                let w = vld1q_s32(weights.add(chunk));
-                let result = if ADD {
-                    vaddq_s32(a, w)
-                } else {
-                    vsubq_s32(a, w)
-                };
-                vst1q_s32(acc_ptr.add(chunk), result);
-            }
-            let w8 = *weights.add(8);
-            if ADD {
-                psqt_acc[8] = psqt_acc[8].wrapping_add(w8);
-            } else {
-                psqt_acc[8] = psqt_acc[8].wrapping_sub(w8);
-            }
-        }
-    }
-
-    // WASM SIMD128: 4 + 4 + 1
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    {
-        // SAFETY: v128 i32x4 load/store は連続 16 bytes。psqt_acc/weights とも 36 bytes
-        // 確保済み。WASM v128.load/store はアライメントヒントが advisory（非強制）なため、
-        // [i32; 9] の 4 バイトアラインポインタを *const v128 にキャストしても安全。
-        unsafe {
-            use std::arch::wasm32::*;
-            let acc_ptr = psqt_acc.as_mut_ptr();
-            for chunk in [0usize, 4] {
-                let a = v128_load(acc_ptr.add(chunk) as *const v128);
-                let w = v128_load(weights.add(chunk) as *const v128);
-                let result = if ADD {
-                    i32x4_add(a, w)
-                } else {
-                    i32x4_sub(a, w)
-                };
-                v128_store(acc_ptr.add(chunk) as *mut v128, result);
-            }
-            let w8 = *weights.add(8);
-            if ADD {
-                psqt_acc[8] = psqt_acc[8].wrapping_add(w8);
-            } else {
-                psqt_acc[8] = psqt_acc[8].wrapping_sub(w8);
-            }
-        }
-    }
-
-    // スカラー fallback
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx512f"),
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "x86_64", target_feature = "sse2"),
-        all(target_arch = "aarch64", target_feature = "neon"),
-        all(target_arch = "wasm32", target_feature = "simd128"),
-    )))]
-    {
-        // SAFETY: weights は 9 i32 連続が保証されている。slice 化することで
-        // 以降のループ本体を safe に保つ。
-        let w_slice: &[i32] =
-            unsafe { std::slice::from_raw_parts(weights, NUM_LAYER_STACK_BUCKETS) };
-        for (acc, &w) in psqt_acc.iter_mut().zip(w_slice) {
-            if ADD {
-                *acc = acc.wrapping_add(w);
-            } else {
-                *acc = acc.wrapping_sub(w);
-            }
+    debug_assert!(n <= MAX_LAYER_STACK_BUCKETS);
+    // SAFETY: 呼び出し元は `weights` が n 個 i32 連続して読めることを保証する。
+    //         長さ n の slice を作るのは安全。これ以降は safe rust。
+    let w_slice: &[i32] = unsafe { std::slice::from_raw_parts(weights, n) };
+    for (acc, &w) in psqt_acc[..n].iter_mut().zip(w_slice) {
+        if ADD {
+            *acc = acc.wrapping_add(w);
+        } else {
+            *acc = acc.wrapping_sub(w);
         }
     }
 }
@@ -327,7 +189,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             biases: Aligned(biases),
             weights,
             #[cfg(feature = "ls-ext-psqt")]
-            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_num_buckets: 0,
             #[cfg(feature = "ls-ext-psqt")]
             psqt_weights: AlignedBox::new_zeroed(0),
             #[cfg(feature = "ls-ext-psqt")]
@@ -364,7 +228,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 biases: Aligned(biases),
                 weights,
                 #[cfg(feature = "ls-ext-psqt")]
-                psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+                psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+                #[cfg(feature = "ls-ext-psqt")]
+                psqt_num_buckets: 0,
                 #[cfg(feature = "ls-ext-psqt")]
                 psqt_weights: AlignedBox::new_zeroed(0),
                 #[cfg(feature = "ls-ext-psqt")]
@@ -401,7 +267,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 biases: Aligned(biases),
                 weights,
                 #[cfg(feature = "ls-ext-psqt")]
-                psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+                psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+                #[cfg(feature = "ls-ext-psqt")]
+                psqt_num_buckets: 0,
                 #[cfg(feature = "ls-ext-psqt")]
                 psqt_weights: AlignedBox::new_zeroed(0),
                 #[cfg(feature = "ls-ext-psqt")]
@@ -426,24 +294,51 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     }
 
     /// PSQT 重み/バイアスをファイルから読み込み
+    ///
+    /// `num_buckets` は net file の `num_buckets` field (legacy `.bin` は
+    /// `DEFAULT_NUM_BUCKETS = 9`)。`MAX_LAYER_STACK_BUCKETS` を超える値は
+    /// 呼び出し元で reject されている前提だが、debug_assert で再確認する。
+    ///
+    /// ## 不変条件: `psqt_biases[num_buckets..MAX]` は常にゼロ
+    ///
+    /// `psqt_biases` は固定長 `[i32; MAX_LAYER_STACK_BUCKETS]` だが、有効範囲は
+    /// 先頭 `num_buckets` 要素のみ。本関数は冒頭で `[0; MAX]` で zero 化してから
+    /// 先頭 N 要素を file から読む。`[N..MAX]` 領域は不変条件としてゼロを保つ:
+    ///
+    /// - `read_psqt` は 1 回のみ呼ばれる (`network_layer_stacks::read_with_options`
+    ///   が PSQT block ごとに 1 回 dispatch する構造)
+    /// - 評価パスの `psqt_add_or_sub` は引数 `n` で `[..n]` のみ操作し
+    ///   `[n..MAX]` を触らない
+    /// - `refresh_or_cache_with_psqt` の `*psqt_acc = *psqt_biases` は
+    ///   `[i32; MAX]` の Copy で `[N..MAX]` のゼロ部分も伝播する
+    ///   (副作用なしで PSQT acc の `[N..MAX]` も 0 のままになる)
+    ///
+    /// 上記により評価時に `[N..MAX]` 要素が undefined / non-zero 値で読まれることが無い。
     #[cfg(feature = "ls-ext-psqt")]
-    pub fn read_psqt<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+    pub fn read_psqt<R: Read>(&mut self, reader: &mut R, num_buckets: usize) -> io::Result<()> {
+        debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
         let mut buf4 = [0u8; 4];
 
-        // Biases: i32[NUM_LAYER_STACK_BUCKETS]
-        for bias in self.psqt_biases.iter_mut() {
+        // Biases: i32 × num_buckets (固定長配列の先頭 num_buckets 要素にのみ書き、
+        // それ以降はゼロのまま残す)。
+        self.psqt_biases = [0i32; MAX_LAYER_STACK_BUCKETS];
+        for bias in self.psqt_biases[..num_buckets].iter_mut() {
             reader.read_exact(&mut buf4)?;
             *bias = i32::from_le_bytes(buf4);
         }
 
-        // Weights: i32[FT::DIMENSIONS × NUM_LAYER_STACK_BUCKETS]
-        let weight_count = FT::DIMENSIONS * NUM_LAYER_STACK_BUCKETS;
+        // Weights: i32 × FT::DIMENSIONS × num_buckets
+        // layout: `psqt_weights[feature_idx * num_buckets + bucket]` (feature-major、
+        // 各 feature 内で bucket 連番)。tatara `save_quantised` (`crates/nnue-format/
+        // src/layerstack_weights.rs:518-541`) の write 順と対称。
+        let weight_count = FT::DIMENSIONS * num_buckets;
         self.psqt_weights = AlignedBox::new_zeroed(weight_count);
         for w in self.psqt_weights.iter_mut() {
             reader.read_exact(&mut buf4)?;
             *w = i32::from_le_bytes(buf4);
         }
 
+        self.psqt_num_buckets = num_buckets;
         // 注意: 読み込みが途中で失敗した場合、psqt_biases だけが更新された
         // 中途半端な状態になるが、呼び出し元でエラーが伝播し Self は破棄されるため問題ない。
         self.has_psqt = true;
@@ -456,17 +351,23 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         self.has_psqt
     }
 
-    /// PSQT バイアスを参照（外部の解析ツール向け）。
+    /// PSQT バイアスを参照（外部の解析ツール向け、固定長配列の先頭 `psqt_num_buckets` 要素のみ有効）。
     #[cfg(feature = "ls-ext-psqt")]
-    pub fn psqt_biases(&self) -> &[i32; NUM_LAYER_STACK_BUCKETS] {
+    pub fn psqt_biases(&self) -> &[i32; MAX_LAYER_STACK_BUCKETS] {
         &self.psqt_biases
     }
 
     /// PSQT 重みを参照（外部の解析ツール向け）。
-    /// レイアウト: `psqt_weights[feature_idx * NUM_LAYER_STACK_BUCKETS + bucket]`
+    /// レイアウト: `psqt_weights[feature_idx * psqt_num_buckets + bucket]`
     #[cfg(feature = "ls-ext-psqt")]
     pub fn psqt_weights(&self) -> &[i32] {
         &self.psqt_weights
+    }
+
+    /// PSQT bucket 数 (= net file の `num_buckets`)。PSQT が無効なら 0。
+    #[cfg(feature = "ls-ext-psqt")]
+    pub fn psqt_num_buckets(&self) -> usize {
+        self.psqt_num_buckets
     }
 
     /// Threat 重みをファイルから読み込み (i8, raw)
@@ -632,7 +533,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     fn refresh_psqt(
         &self,
         active_indices: &IndexList<MAX_ACTIVE_FEATURES>,
-        psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
+        psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
     ) {
         *psqt_acc = self.psqt_biases;
         for index in active_indices.iter() {
@@ -642,39 +543,42 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
     /// PSQT 重みを加算
     ///
-    /// `psqt_acc[bucket] += psqt_weights[index * 9 + bucket]` を 9 bucket 分まとめて実行する。
-    /// 内部実装は `psqt_add_or_sub::<true>` で SIMD 化されている。
+    /// `psqt_acc[bucket] += psqt_weights[index * n + bucket]` を `n` (=
+    /// `self.psqt_num_buckets`) bucket 分まとめて実行する。配列の `[n..MAX]` は
+    /// 触らない (load 時に 0 のまま)。
     #[cfg(feature = "ls-ext-psqt")]
     #[inline]
-    fn add_psqt_weights(&self, psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS], index: usize) {
-        let offset = index * NUM_LAYER_STACK_BUCKETS;
+    fn add_psqt_weights(&self, psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS], index: usize) {
+        let n = self.psqt_num_buckets;
+        let offset = index * n;
         debug_assert!(
-            offset + NUM_LAYER_STACK_BUCKETS <= self.psqt_weights.len(),
-            "psqt_weights index out of bounds: offset={offset}, len={}",
+            offset + n <= self.psqt_weights.len(),
+            "psqt_weights index out of bounds: offset={offset}, n={n}, len={}",
             self.psqt_weights.len()
         );
         // SAFETY: debug_assert で境界確認済み。release では呼び出し元 (refresh / diff) が
         // active_indices を経由しており、index は features の有効範囲内。weights ポインタは
-        // 9 i32 連続を指す。
+        // n i32 連続を指す。
         let weights_ptr = unsafe { self.psqt_weights.as_ptr().add(offset) };
-        psqt_add_or_sub::<true>(psqt_acc, weights_ptr);
+        psqt_add_or_sub::<true>(psqt_acc, weights_ptr, n);
     }
 
     /// PSQT 重みを減算
     #[cfg(feature = "ls-ext-psqt")]
     #[inline]
-    fn sub_psqt_weights(&self, psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS], index: usize) {
-        let offset = index * NUM_LAYER_STACK_BUCKETS;
+    fn sub_psqt_weights(&self, psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS], index: usize) {
+        let n = self.psqt_num_buckets;
+        let offset = index * n;
         debug_assert!(
-            offset + NUM_LAYER_STACK_BUCKETS <= self.psqt_weights.len(),
-            "psqt_weights index out of bounds: offset={offset}, len={}",
+            offset + n <= self.psqt_weights.len(),
+            "psqt_weights index out of bounds: offset={offset}, n={n}, len={}",
             self.psqt_weights.len()
         );
         // SAFETY: debug_assert で境界確認済み。release では呼び出し元 (refresh / diff) が
         // active_indices を経由しており、index は features の有効範囲内。weights ポインタは
-        // 9 i32 連続を指す。
+        // n i32 連続を指す。
         let weights_ptr = unsafe { self.psqt_weights.as_ptr().add(offset) };
-        psqt_add_or_sub::<false>(psqt_acc, weights_ptr);
+        psqt_add_or_sub::<false>(psqt_acc, weights_ptr, n);
     }
 
     /// 差分計算を使わずにAccumulatorを計算
@@ -1062,7 +966,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         pos: &Position,
         perspective: Color,
         accumulation: &mut [i16; L1],
-        #[cfg(feature = "ls-ext-psqt")] psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
+        #[cfg(feature = "ls-ext-psqt")] psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
         cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
         let king_sq = pos.king_square(perspective);
@@ -1834,7 +1738,7 @@ mod tests {
     use super::*;
     use crate::nnue::accumulator::ChangedBonaPiece;
     use crate::nnue::bona_piece::ExtBonaPiece;
-    use crate::nnue::constants::{HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
+    use crate::nnue::constants::{DEFAULT_NUM_BUCKETS, HALFKA_HM_DIMENSIONS, NNUE_PYTORCH_L1};
     use crate::nnue::ls_feature_spec::HalfKaHmMergedSpec;
     use crate::nnue::piece_list::PieceNumber;
     use crate::types::{File, Piece, PieceType, Rank, Square};
@@ -1849,7 +1753,9 @@ mod tests {
             biases: Aligned([0; TEST_L1]),
             weights: AlignedBox::new_zeroed(TestSpec::DIMENSIONS * TEST_L1),
             #[cfg(feature = "ls-ext-psqt")]
-            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_num_buckets: 0,
             #[cfg(feature = "ls-ext-psqt")]
             psqt_weights: AlignedBox::new_zeroed(0),
             #[cfg(feature = "ls-ext-psqt")]
@@ -2124,19 +2030,26 @@ mod tests {
 
     #[cfg(feature = "ls-ext-psqt")]
     fn make_test_transformer_with_psqt() -> TestFt {
-        let psqt_weight_count = TestSpec::DIMENSIONS * NUM_LAYER_STACK_BUCKETS;
+        let n = DEFAULT_NUM_BUCKETS; // legacy デフォルトの 9 で test
+        let psqt_weight_count = TestSpec::DIMENSIONS * n;
         let mut psqt_weights = AlignedBox::new_zeroed(psqt_weight_count);
         for feat in 0..TestSpec::DIMENSIONS {
-            for bucket in 0..NUM_LAYER_STACK_BUCKETS {
-                psqt_weights[feat * NUM_LAYER_STACK_BUCKETS + bucket] =
+            for bucket in 0..n {
+                psqt_weights[feat * n + bucket] =
                     (feat as i32 * 7 + bucket as i32 * 3) % 1000 - 500;
             }
+        }
+
+        let mut psqt_biases = [0i32; MAX_LAYER_STACK_BUCKETS];
+        for (i, b) in psqt_biases[..n].iter_mut().enumerate() {
+            *b = (i as i32 + 1) * 10; // [10, 20, ..., 90]
         }
 
         FeatureTransformerLayerStacks::<TEST_L1, TestSpec> {
             biases: Aligned([0; TEST_L1]),
             weights: AlignedBox::new_zeroed(TestSpec::DIMENSIONS * TEST_L1),
-            psqt_biases: [10, 20, 30, 40, 50, 60, 70, 80, 90],
+            psqt_biases,
+            psqt_num_buckets: n,
             psqt_weights,
             has_psqt: true,
             #[cfg(feature = "ls-ext-threat")]
@@ -2160,7 +2073,7 @@ mod tests {
         let _ = active_initial.push(300);
 
         // フル計算
-        let mut full_acc = [0i32; NUM_LAYER_STACK_BUCKETS];
+        let mut full_acc = [0i32; MAX_LAYER_STACK_BUCKETS];
         ft.refresh_psqt(&active_initial, &mut full_acc);
 
         // 差分: 200 を削除、400 を追加 → [100, 300, 400]
@@ -2173,7 +2086,7 @@ mod tests {
         let _ = active_updated.push(100);
         let _ = active_updated.push(300);
         let _ = active_updated.push(400);
-        let mut full_updated = [0i32; NUM_LAYER_STACK_BUCKETS];
+        let mut full_updated = [0i32; MAX_LAYER_STACK_BUCKETS];
         ft.refresh_psqt(&active_updated, &mut full_updated);
 
         assert_eq!(incr_acc, full_updated, "差分更新とフル計算の結果が不一致");
@@ -2189,19 +2102,24 @@ mod tests {
         let _ = active.push(0);
         let _ = active.push(1);
 
-        let mut acc = [0i32; NUM_LAYER_STACK_BUCKETS];
+        let mut acc = [0i32; MAX_LAYER_STACK_BUCKETS];
         ft.refresh_psqt(&active, &mut acc);
 
         // feat=0: (0*7 + b*3) % 1000 - 500 = b*3 - 500
         // feat=1: (1*7 + b*3) % 1000 - 500 = 7 + b*3 - 500
         // bias + feat0 + feat1
-        for (bucket, val) in acc.iter().enumerate() {
+        let n = ft.psqt_num_buckets;
+        for (bucket, val) in acc[..n].iter().enumerate() {
             let b = bucket as i32;
             let bias = (b + 1) * 10; // [10, 20, ..., 90]
             let w0 = b * 3 - 500;
             let w1 = 7 + b * 3 - 500;
             let expected = bias + w0 + w1;
             assert_eq!(*val, expected, "bucket {bucket}: expected {expected}, got {val}");
+        }
+        // 未使用 bucket は 0 のまま
+        for val in acc[n..].iter() {
+            assert_eq!(*val, 0, "unused buckets should remain zero");
         }
     }
 
@@ -2220,7 +2138,9 @@ mod tests {
             biases: Aligned([0; TEST_L1]),
             weights,
             #[cfg(feature = "ls-ext-psqt")]
-            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_num_buckets: 0,
             #[cfg(feature = "ls-ext-psqt")]
             psqt_weights: AlignedBox::new_zeroed(0),
             #[cfg(feature = "ls-ext-psqt")]

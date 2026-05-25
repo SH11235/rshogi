@@ -7,7 +7,7 @@
 use super::accumulator::{DirtyPiece, IndexList, MAX_PATH_LENGTH};
 use super::bona_piece::BonaPiece;
 #[cfg(feature = "ls-ext-psqt")]
-use super::constants::NUM_LAYER_STACK_BUCKETS;
+use super::constants::MAX_LAYER_STACK_BUCKETS;
 use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square};
 
@@ -27,7 +27,7 @@ pub struct AccumulatorLayerStacks<const L1: usize> {
     /// PSQT アキュムレータ [perspective][bucket]
     /// 各駒の PSQT 重みを視点ごとに累積する。
     #[cfg(feature = "ls-ext-psqt")]
-    pub psqt_accumulation: [[i32; NUM_LAYER_STACK_BUCKETS]; 2],
+    pub psqt_accumulation: [[i32; MAX_LAYER_STACK_BUCKETS]; 2],
 
     /// 計算済みフラグ
     pub computed_accumulation: bool,
@@ -44,7 +44,7 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
             #[cfg(feature = "ls-ext-threat")]
             threat_accumulation: [[0; L1]; 2],
             #[cfg(feature = "ls-ext-psqt")]
-            psqt_accumulation: [[0; NUM_LAYER_STACK_BUCKETS]; 2],
+            psqt_accumulation: [[0; MAX_LAYER_STACK_BUCKETS]; 2],
             computed_accumulation: false,
             computed_score: false,
         }
@@ -103,7 +103,7 @@ impl<const L1: usize> Default for AccumulatorLayerStacks<L1> {
 /// `append_active_indices` + `sort_unstable` のオーバーヘッドを回避する。
 ///
 /// `ls-ext-psqt` feature 有効時は PSQT アキュムレータも同時にキャッシュし、
-/// 玉移動時の PSQT フル再計算（40 駒 × 9 bucket = 360 i32 加算）を
+/// 玉移動時の PSQT フル再計算（40 駒 × num_buckets bucket = 数百 i32 加算）を
 /// slot 差分（通常 0〜数 slot）に置き換える。
 #[repr(C, align(64))]
 struct AccCacheEntry<const L1: usize> {
@@ -120,7 +120,7 @@ struct AccCacheEntry<const L1: usize> {
     /// 境界にアライメントされる。L1=1536 で約 3,188 bytes + パディング。
     /// `Square::NUM = 81` × 2 perspective = 162 エントリ ≈ 520 KB。
     #[cfg(feature = "ls-ext-psqt")]
-    psqt_accumulation: [i32; NUM_LAYER_STACK_BUCKETS],
+    psqt_accumulation: [i32; MAX_LAYER_STACK_BUCKETS],
     /// キャッシュ時点の `PieceList`（perspective 固有の fb または fw 配列）
     ///
     /// `PieceNumber::NB = 40` 固定長。BonaPiece::ZERO は slot 未使用を表す。
@@ -135,7 +135,7 @@ impl<const L1: usize> AccCacheEntry<L1> {
         Self {
             accumulation: [0; L1],
             #[cfg(feature = "ls-ext-psqt")]
-            psqt_accumulation: [0; NUM_LAYER_STACK_BUCKETS],
+            psqt_accumulation: [0; MAX_LAYER_STACK_BUCKETS],
             piece_list: [BonaPiece::ZERO; PieceNumber::NB],
             valid: false,
         }
@@ -255,13 +255,13 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
     /// cache miss 時は両方を biases から full refresh する。
     ///
     /// 既存の `refresh_or_cache` と比較して PSQT を Finny Tables に載せる経路:
-    /// 玉移動時の PSQT フル再計算（40 駒 × 9 bucket = 360 i32 加算）を
+    /// 玉移動時の PSQT フル再計算（40 駒 × num_buckets bucket = 数百 i32 加算）を
     /// slot 差分（通常 0〜数 slot）に置き換える。
     ///
     /// # 引数
     ///
     /// 上記 `refresh_or_cache` に加えて:
-    /// - `psqt_biases`: PSQT バイアス [NUM_LAYER_STACK_BUCKETS]（実体は対称差設計で常にゼロ、
+    /// - `psqt_biases`: PSQT バイアス [MAX_LAYER_STACK_BUCKETS]（実体は対称差設計で常にゼロ、
     ///   ただし cache hit 時は参照せず `entry.psqt_accumulation` を直接ロードする）
     /// - `psqt_acc`: 更新先の PSQT アキュムレータ
     /// - `add_psqt_fn`: PSQT 加算関数（9-i32 SIMD: `add_psqt_weights`）
@@ -283,9 +283,9 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         perspective: Color,
         piece_list: &[BonaPiece; PieceNumber::NB],
         biases: &[i16; L1],
-        psqt_biases: &[i32; NUM_LAYER_STACK_BUCKETS],
+        psqt_biases: &[i32; MAX_LAYER_STACK_BUCKETS],
         accumulation: &mut [i16; L1],
-        psqt_acc: &mut [i32; NUM_LAYER_STACK_BUCKETS],
+        psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
         idx_fn: FI,
         add_fn: FA,
         sub_fn: FS,
@@ -295,8 +295,8 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         FI: Fn(BonaPiece) -> usize,
         FA: Fn(&mut [i16; L1], usize),
         FS: Fn(&mut [i16; L1], usize),
-        FAP: Fn(&mut [i32; NUM_LAYER_STACK_BUCKETS], usize),
-        FSP: Fn(&mut [i32; NUM_LAYER_STACK_BUCKETS], usize),
+        FAP: Fn(&mut [i32; MAX_LAYER_STACK_BUCKETS], usize),
+        FSP: Fn(&mut [i32; MAX_LAYER_STACK_BUCKETS], usize),
     {
         let entry = &mut self.entries[king_sq.raw() as usize][perspective as usize];
 
@@ -1006,14 +1006,14 @@ mod tests {
         let perspective = Color::Black;
 
         let biases = [0i16; TEST_L1];
-        let psqt_biases = [0i32; NUM_LAYER_STACK_BUCKETS];
+        let psqt_biases = [0i32; MAX_LAYER_STACK_BUCKETS];
 
         let mut piece_list = [BonaPiece::ZERO; PieceNumber::NB];
         piece_list[0] = BonaPiece(5);
         piece_list[1] = BonaPiece(10);
 
         let mut acc = [0i16; TEST_L1];
-        let mut psqt_acc = [0i32; NUM_LAYER_STACK_BUCKETS];
+        let mut psqt_acc = [0i32; MAX_LAYER_STACK_BUCKETS];
         cache.refresh_or_cache_with_psqt(
             king_sq,
             perspective,
@@ -1057,7 +1057,7 @@ mod tests {
         let king_sq = Square::SQ_55;
         let perspective = Color::Black;
         let biases = [0i16; TEST_L1];
-        let psqt_biases = [0i32; NUM_LAYER_STACK_BUCKETS];
+        let psqt_biases = [0i32; MAX_LAYER_STACK_BUCKETS];
 
         let add_main = |a: &mut [i16; TEST_L1], idx: usize| {
             a[0] = a[0].wrapping_add(idx as i16);
@@ -1065,12 +1065,12 @@ mod tests {
         let sub_main = |a: &mut [i16; TEST_L1], idx: usize| {
             a[0] = a[0].wrapping_sub(idx as i16);
         };
-        let add_psqt = |p: &mut [i32; NUM_LAYER_STACK_BUCKETS], idx: usize| {
+        let add_psqt = |p: &mut [i32; MAX_LAYER_STACK_BUCKETS], idx: usize| {
             for (b, v) in p.iter_mut().enumerate() {
                 *v = v.wrapping_add(idx as i32 + b as i32);
             }
         };
-        let sub_psqt = |p: &mut [i32; NUM_LAYER_STACK_BUCKETS], idx: usize| {
+        let sub_psqt = |p: &mut [i32; MAX_LAYER_STACK_BUCKETS], idx: usize| {
             for (b, v) in p.iter_mut().enumerate() {
                 *v = v.wrapping_sub(idx as i32 + b as i32);
             }
@@ -1082,7 +1082,7 @@ mod tests {
         pl1[1] = BonaPiece(10);
         pl1[2] = BonaPiece(15);
         let mut acc1 = [0i16; TEST_L1];
-        let mut psqt1 = [0i32; NUM_LAYER_STACK_BUCKETS];
+        let mut psqt1 = [0i32; MAX_LAYER_STACK_BUCKETS];
         cache.refresh_or_cache_with_psqt(
             king_sq,
             perspective,
@@ -1102,7 +1102,7 @@ mod tests {
         let mut pl2 = pl1;
         pl2[2] = BonaPiece(20);
         let mut acc2 = [0i16; TEST_L1];
-        let mut psqt2 = [0i32; NUM_LAYER_STACK_BUCKETS];
+        let mut psqt2 = [0i32; MAX_LAYER_STACK_BUCKETS];
         cache.refresh_or_cache_with_psqt(
             king_sq,
             perspective,
@@ -1121,7 +1121,7 @@ mod tests {
         // cache hit 経由の結果が full refresh と完全一致することを確認
         let mut cache2 = AccumulatorCacheLayerStacks::<TEST_L1>::new();
         let mut acc_full = [0i16; TEST_L1];
-        let mut psqt_full = [0i32; NUM_LAYER_STACK_BUCKETS];
+        let mut psqt_full = [0i32; MAX_LAYER_STACK_BUCKETS];
         cache2.refresh_or_cache_with_psqt(
             king_sq,
             perspective,

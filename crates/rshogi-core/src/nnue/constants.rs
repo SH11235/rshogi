@@ -57,7 +57,18 @@ pub const HALFKP_DIMENSIONS: usize = 81 * super::bona_piece::FE_END;
 // =============================================================================
 
 /// HalfKaHmMerged^のバージョン（nnue-pytorch互換）
+///
+/// LayerStack の **legacy layout** (bucket 数固定 9、`num_buckets` field 無し) でも
+/// 同じ値を共有する。HalfKa 系 / HalfKaHm 系の `.bin` および legacy LayerStack `.bin`
+/// は `arch_str` から特定される。
 pub const NNUE_VERSION_HALFKA: u32 = 0x7AF32F20;
+
+/// LayerStack 可変 bucket 数 layout の version (tatara ADR `2026-05-23` 由来)。
+///
+/// `arch_str` の直後に `num_buckets: u32` field を持つ self-describing layout。
+/// 旧版 (`NNUE_VERSION_HALFKA = 0x7AF32F20`) は本 field を持たず、暗黙の
+/// `num_buckets = 9` として読む。
+pub const NNUE_VERSION_LAYERSTACK_V2: u32 = 0x7AF32F21;
 
 /// キングバケット数（Half-Mirror: 9段 × 5筋）
 pub const KING_BUCKETS: usize = 45;
@@ -138,8 +149,28 @@ pub const LAYER_STACK_16X32_MAIN_DIM: usize = 15;
 /// LayerStacks の L2 出力次元数
 pub const NNUE_PYTORCH_L3: usize = 32;
 
-/// LayerStacks のバケット数
-pub const NUM_LAYER_STACK_BUCKETS: usize = 9;
+/// LayerStacks の **既定** バケット数
+///
+/// tatara ADR `2026-05-23-num-buckets-configurable.md` §8 の既定 `--num-buckets = 9`
+/// と一致。legacy `.bin` (`NNUE_VERSION_HALFKA`、`num_buckets` field 無し) は本値で
+/// 読み込む。新 layout (`NNUE_VERSION_LAYERSTACK_V2`) では `.bin` header の
+/// `num_buckets: u32` field を読んで上書きする。
+pub const DEFAULT_NUM_BUCKETS: usize = 9;
+
+/// LayerStacks の bucket 数の **上限**
+///
+/// engine 内の `psqt_accumulation` 等の固定長配列のサイズを決める値。`.bin` から
+/// 読んだ `num_buckets` が本値を超えると `InvalidData` で reject する。
+///
+/// 16 は tatara 側の N sweep (例: 5, 8, 9, 12, 16) を吸収しつつ、Accumulator の
+/// memory footprint 増分を最小に保つ値として選択 (ADR `2026-05-26` §2.3.2 / §2.6)。
+/// 将来 N > 16 を扱いたい場合は本値を上げる。
+pub const MAX_LAYER_STACK_BUCKETS: usize = 16;
+
+// NOTE: 旧 `NUM_LAYER_STACK_BUCKETS` は廃止。用途別に以下を使い分ける:
+// - 配布 net (legacy `.bin`) の暗黙 bucket 数: `DEFAULT_NUM_BUCKETS`
+// - hot-path 固定長配列のサイズ: `MAX_LAYER_STACK_BUCKETS`
+// - net instance の実 bucket 数: `NetworkLayerStacks::num_buckets`
 
 /// LayerStacks 16x32 バリアントの L1層出力次元数（main 15 + skip 1 = 16）
 pub const LAYER_STACK_16X32_L1_OUT: usize = LAYER_STACK_16X32_MAIN_DIM + 1; // 16

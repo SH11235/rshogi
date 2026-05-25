@@ -706,6 +706,17 @@ impl UsiEngine {
                                 "message": format!("NNUE loaded: {value}"),
                             });
                             eprintln!("info string {payload}");
+                            // LayerStack ネットなら net header の num_buckets を出力
+                            // (file/option desync 検知用、ADR `2026-05-26` §2.8)。
+                            if let Some(net) = get_network().as_deref()
+                                && net.is_layer_stacks()
+                            {
+                                #[cfg(feature = "ls-arch")]
+                                {
+                                    let n = net.as_layer_stacks().num_buckets();
+                                    eprintln!("info string NNUE LayerStack num_buckets={n}");
+                                }
+                            }
                         }
                         Err(e) => {
                             self.eval_file_explicit = Some(false);
