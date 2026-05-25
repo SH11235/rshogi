@@ -16,6 +16,7 @@ use super::constants::NUM_LAYER_STACK_BUCKETS;
 use super::features::{Feature, FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 use super::ls_feature_spec::LsFeatureSpec;
+use super::piece_list::PieceNumber;
 use super::stats::{count_refresh, count_update};
 #[cfg(feature = "ls-ext-threat")]
 use super::threat_features::{self, MAX_CHANGED_THREAT_FEATURES, THREAT_DIMENSIONS};
@@ -1067,10 +1068,31 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     ) {
         let king_sq = pos.king_square(perspective);
 
-        let piece_list = if perspective == Color::Black {
+        let raw_piece_list = if perspective == Color::Black {
             pos.piece_list().piece_list_fb()
         } else {
             pos.piece_list().piece_list_fw()
+        };
+
+        // HalfKP (= !INCLUDE_KING_IN_PIECE_LIST) は玉 BonaPiece を特徴量に含めないため
+        // piece_list の玉スロット (PieceNumber::KING / KING+1) を BonaPiece::ZERO で
+        // マスクしてから cache に渡す。これで `refresh_or_cache` 内の
+        // `if bp != ZERO { idx_fn(bp) }` 判定で玉 BP が自動的にスキップされ、
+        // `halfkp_index(king, F_KING+sq)` の OOR を避ける。cache.piece_list との
+        // 比較も両側 ZERO で一貫し、相手玉移動時に no-op となる。
+        // INCLUDE_KING_IN_PIECE_LIST は const なので HalfKa* 系では本ブロックは
+        // dead-code eliminated される (`piece_list_owned` は原本のコピー)。
+        let piece_list_owned;
+        let piece_list: &[BonaPiece; PieceNumber::NB] = if FT::INCLUDE_KING_IN_PIECE_LIST {
+            raw_piece_list
+        } else {
+            piece_list_owned = {
+                let mut pl = *raw_piece_list;
+                pl[PieceNumber::KING as usize] = BonaPiece::ZERO;
+                pl[(PieceNumber::KING + 1) as usize] = BonaPiece::ZERO;
+                pl
+            };
+            &piece_list_owned
         };
 
         let idx_fn = move |bp: BonaPiece| FT::feature_index(bp, perspective, king_sq);
@@ -1400,6 +1422,28 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             };
             (old_bp, new_bp)
         };
+
+        // HalfKP (= !INCLUDE_KING_IN_PIECE_LIST) は玉の BonaPiece を特徴量に含めない。
+        // 自玉移動は `needs_refresh` (FriendKingMoved) で full refresh が走るが、
+        // 相手玉移動は refresh が走らずこの fast path に dirty_piece が流れてくる。
+        // 玉 BP (>= FE_END) を `FT::feature_index` に渡すと OOR で panic するため、
+        // ここで検出して slow path (`append_changed_indices` 経由、玉 BP を除外する)
+        // にフォールバックする。INCLUDE_KING_IN_PIECE_LIST は const なので HalfKa*
+        // 系では分岐ごと dead-code eliminate される。
+        if !FT::INCLUDE_KING_IN_PIECE_LIST {
+            use super::bona_piece::FE_END;
+            let dn = dirty_piece.dirty_num as usize;
+            for entry in changed.iter().take(dn) {
+                let (old_bp, new_bp) = if perspective == Color::Black {
+                    (entry.old_piece.fb, entry.new_piece.fb)
+                } else {
+                    (entry.old_piece.fw, entry.new_piece.fw)
+                };
+                if (old_bp.value() as usize) >= FE_END || (new_bp.value() as usize) >= FE_END {
+                    return false;
+                }
+            }
+        }
 
         // dirty_num==1: 駒の移動（非捕獲）。打ち駒は old_bp==ZERO のためフォールバック。
         // dirty_num==2: 駒を取る指し手のみ。全 BonaPiece は非 ZERO のはずだが、
@@ -2266,5 +2310,71 @@ mod tests {
     #[test]
     fn smoke_refresh_halfkp() {
         smoke_refresh_for_spec::<HalfKpSpec>();
+    }
+
+    /// HalfKp + cache 経由 refresh: 玉成り/捕獲含む複雑な ply32 局面で
+    /// `refresh_or_cache` 内の `idx_fn(king_BP)` OOR を踏まないことを保証する。
+    /// 修正前は `feature_transformer_layer_stacks.rs:31` の
+    /// `feature_index_out_of_range` で panic していた。
+    ///
+    /// 期待動作:
+    /// 1. 初回 refresh (cache miss): piece_list 40 slot 走査時に玉スロットを
+    ///    BonaPiece::ZERO でマスクして idx_fn を呼ばないこと
+    /// 2. 同局面でもう一度 refresh (cache hit, piece_list 不変): 差分 0 で
+    ///    cache の accumulation をそのまま返すこと
+    /// 3. 相手玉が異なる位置の派生局面 (cache hit, 玉 slot 差分のみ): 玉 slot
+    ///    マスクにより差分 0 と認識し、再び idx_fn を呼ばないこと
+    #[test]
+    fn refresh_with_cache_halfkp_complex_position() {
+        let weights = AlignedBox::<i16>::new_zeroed(HalfKpSpec::DIMENSIONS * TEST_L1);
+        let ft = FeatureTransformerLayerStacks::<TEST_L1, HalfKpSpec> {
+            biases: Aligned([0; TEST_L1]),
+            weights,
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_weights: AlignedBox::new_zeroed(0),
+            #[cfg(feature = "ls-ext-psqt")]
+            has_psqt: false,
+            #[cfg(feature = "ls-ext-threat")]
+            threat_weights: AlignedBox::new_zeroed(0),
+            #[cfg(feature = "ls-ext-threat")]
+            has_threat: false,
+            _ft: PhantomData,
+        };
+
+        let mut pos = Position::new();
+        pos.set_sfen(
+            "+B1sg1gsnl/2+N2k1b1/pP2pp2p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
+        )
+        .unwrap();
+
+        let mut acc = AccumulatorLayerStacks::<TEST_L1>::new();
+        let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
+
+        // 1) cache miss: 玉スロットを ZERO でマスクして full refresh
+        ft.refresh_accumulator_with_cache(&pos, &mut acc, &mut cache);
+        assert!(acc.computed_accumulation);
+        for v in acc.get(0).iter().chain(acc.get(1).iter()) {
+            assert_eq!(*v, 0, "zero-weights refresh should keep accumulation at 0");
+        }
+
+        // 2) cache hit (piece_list 不変): 差分 0
+        ft.refresh_accumulator_with_cache(&pos, &mut acc, &mut cache);
+        for v in acc.get(0).iter().chain(acc.get(1).iter()) {
+            assert_eq!(*v, 0);
+        }
+
+        // 3) 相手玉が異なる位置の派生局面: 玉 slot 差分を idx_fn 経由で
+        //    `halfkp_index(king, F_KING+sq)` させない (=玉マスクで早期スキップ)
+        let mut pos2 = Position::new();
+        pos2.set_sfen(
+            "+B1sg1gsnl/2+N4b1/pP2ppk1p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
+        )
+        .unwrap();
+        ft.refresh_accumulator_with_cache(&pos2, &mut acc, &mut cache);
+        for v in acc.get(0).iter().chain(acc.get(1).iter()) {
+            assert_eq!(*v, 0);
+        }
     }
 }

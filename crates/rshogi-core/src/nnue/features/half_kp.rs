@@ -428,4 +428,36 @@ mod tests {
         assert!(max_b <= max_valid, "Black max index out of range");
         assert!(max_w <= max_valid, "White max index out of range");
     }
+
+    /// 駒成り (+B, +N) + 駒台手駒ありの ply32 局面で `append_active_indices`
+    /// が玉スロット (`[..PieceNumber::KING]`) を正しく除外し続けることを保証する
+    /// regression test。`feature_transformer_layer_stacks` 側 (cache refresh /
+    /// fast diff) で同等の OOR バグ修正に対応する pair test
+    /// (`refresh_with_cache_halfkp_complex_position`) もそちらに置いてある。
+    #[test]
+    fn test_halfkp_active_indices_in_range_with_promoted_and_hand() {
+        use crate::nnue::accumulator::{IndexList, MAX_ACTIVE_FEATURES};
+
+        let mut pos = Position::new();
+        pos.set_sfen(
+            "+B1sg1gsnl/2+N2k1b1/pP2pp2p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
+        )
+        .unwrap();
+
+        let max_valid = 81 * FE_END - 1;
+        for perspective in [Color::Black, Color::White] {
+            let mut active: IndexList<MAX_ACTIVE_FEATURES> = IndexList::new();
+            HalfKP::append_active_indices(&pos, perspective, &mut active);
+            for (i, idx) in active.iter().enumerate() {
+                assert!(
+                    idx <= max_valid,
+                    "{:?} slot {} idx {} > {}",
+                    perspective,
+                    i,
+                    idx,
+                    max_valid
+                );
+            }
+        }
+    }
 }
