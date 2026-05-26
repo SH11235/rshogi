@@ -159,7 +159,7 @@ pub const DEFAULT_NUM_BUCKETS: usize = 9;
 /// 配列サイズと一致する。`.bin` から読んだ `num_buckets` が本値を超える場合は
 /// `InvalidData` で reject し、本値を上げた engine を再ビルドさせる。
 /// 16 を採るのは AVX-512 1 命令 = 16 lane と一致し、tatara の sweep 範囲
-/// (5/8/9/12/16) を吸収できるため。
+/// (5/8/9/12/16 等) を吸収できるため。
 pub const MAX_LAYER_STACK_BUCKETS: usize = 16;
 
 /// LayerStacks 16x32 バリアントの L1層出力次元数（main 15 + skip 1 = 16）
