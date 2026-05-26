@@ -4303,8 +4303,8 @@ mod tests {
 
     /// release ビルドでは `run_connection_isolated` 経路の `catch_unwind` が
     /// `panic!` を tracing event に変換してタスクを正常終了させる。
-    /// `handle_connection` を叩かずに同経路の async catch_unwind を直接呼び、
-    /// debug build と release build の挙動契約が分岐していることを確認する。
+    /// このテストは `handle_connection` を叩かずに同経路の async catch_unwind を
+    /// 直接呼び、debug build と release build の挙動契約が分岐していることを確認する。
     ///
     /// 注: テスト名に "isolates" を含むが、これは `run_connection_isolated`
     /// そのものの connection レベル隔離ではなく、同関数が依拠する
