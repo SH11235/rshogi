@@ -28,7 +28,7 @@ use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 use super::constants::{
     DEFAULT_NUM_BUCKETS, FV_SCALE_HALFKA, MAX_ARCH_LEN, MAX_LAYER_STACK_BUCKETS,
-    NNUE_VERSION_HALFKA, NNUE_VERSION_LAYERSTACK_V2,
+    NNUE_VERSION_HALFKA, NNUE_VERSION_LAYERSTACK_NUM_BUCKETS,
 };
 #[cfg(any(
     feature = "ls-size-1536x16x32",
@@ -183,26 +183,28 @@ impl<
 
         // version（呼び出し元 NNUENetwork::read で大枠の受理範囲を確認済み）
         // ここでは LayerStack として受理する 2 つ:
-        // - `NNUE_VERSION_HALFKA` (= legacy `0x7AF32F20`): num_buckets field 無し、暗黙 9
-        // - `NNUE_VERSION_LAYERSTACK_V2` (= `0x7AF32F21`): arch_str 直後に num_buckets u32
+        // - `NNUE_VERSION_HALFKA` (= `0x7AF32F20`): num_buckets field 無し、暗黙 9
+        // - `NNUE_VERSION_LAYERSTACK_NUM_BUCKETS` (= `0x7AF32F21`): arch_str 直後に
+        //   num_buckets u32 field を持つ self-describing layout
         //
         // HalfKP version `NNUE_VERSION (0x7AF32F16)` を `NNUE_ARCHITECTURE=LayerStacks`
         // override 経由で本関数に渡されるケースの防衛: silent な偽 9-bucket 読込を
         // 避けるため、ここで明示的に reject する。
         reader.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
-        if version != NNUE_VERSION_HALFKA && version != NNUE_VERSION_LAYERSTACK_V2 {
+        if version != NNUE_VERSION_HALFKA && version != NNUE_VERSION_LAYERSTACK_NUM_BUCKETS {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "LayerStack reader expected version {NNUE_VERSION_HALFKA:#x} (legacy) or \
-                     {NNUE_VERSION_LAYERSTACK_V2:#x} (V2), got {version:#x}. \
+                    "LayerStack reader expected version {NNUE_VERSION_HALFKA:#x} (legacy, \
+                     implicit num_buckets=9) or {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x} \
+                     (self-describing with num_buckets header), got {version:#x}. \
                      Non-LayerStack `.bin` cannot be dispatched to LayerStacks even via \
                      `NNUE_ARCHITECTURE=LayerStacks` override."
                 ),
             ));
         }
-        let has_num_buckets_field = version == NNUE_VERSION_LAYERSTACK_V2;
+        let has_num_buckets_field = version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS;
 
         // 構造ハッシュ
         reader.read_exact(&mut buf4)?;
@@ -222,10 +224,10 @@ impl<
         // アーキテクチャ文字列を解析
         let arch_str = String::from_utf8_lossy(&arch);
 
-        // V2: num_buckets: u32 を arch_str 直後・ft_hash 直前に読む。
+        // num_buckets-header layout: u32 を arch_str 直後・ft_hash 直前に読む。
         // legacy: field 無し → DEFAULT_NUM_BUCKETS (9) として進める。
-        // tatara `save_quantised` (`crates/nnue-format/src/layerstack_weights.rs:481`)
-        // の write 順と対称 (ADR `2026-05-26` §2.2)。
+        // tatara `save_quantised` の write 順と対称 (version → network_hash →
+        // arch_len → arch_str → num_buckets → ft_hash → FT/PSQT/LayerStack blocks)。
         let num_buckets = if has_num_buckets_field {
             reader.read_exact(&mut buf4)?;
             let n = u32::from_le_bytes(buf4) as usize;

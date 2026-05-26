@@ -150,9 +150,17 @@ fn psqt_add_or_sub<const ADD: bool>(
     {
         // SAFETY:
         // - `psqt_acc` は `[i32; 16]` = 64 bytes 連続 (AVX-512 1 vector と一致)。
-        // - `weights` は呼び出し元が n 個 i32 連続を保証する。
-        // - mask の上位 (16-n) bit はゼロのため対応レーンは load/store されず
-        //   範囲外アクセスなし。
+        //   全 16 レーンが有効領域内。
+        // - `weights` は呼び出し元が **n 個 i32 連続を読める** ことを保証する。
+        //   ポインタ自体は n 個分の領域を指し、`weights.add(k)` for `k < n` は
+        //   in-bounds。
+        // - mask `(1 << n) - 1` は下位 n bit のみ立つ。`_mm512_maskz_loadu_epi32`
+        //   と `_mm512_mask_storeu_epi32` は **mask bit が 0 のレーンに対応する
+        //   メモリアドレスへの load/store を発行しない** (Intel SDM Vol. 2C:
+        //   VMOVDQU32 with `{k1}{z}` — "Masked-out elements are zeroed. No fault
+        //   is signaled for masked-out elements regardless of whether the
+        //   corresponding memory operand would have caused a fault")。よって
+        //   `weights[n..16]` が割り当て外でも安全。
         unsafe {
             use std::arch::x86_64::*;
             const _ASSERT: () = assert!(MAX_LAYER_STACK_BUCKETS == 16);
@@ -181,10 +189,20 @@ fn psqt_add_or_sub<const ADD: bool>(
     ))]
     {
         // SAFETY:
-        // - `psqt_acc` は `[i32; 16]` = 64 bytes 連続、2 つの 8-lane chunk を覆える。
-        // - `weights` は呼び出し元が n 個 i32 連続を保証。
-        // - `_mm256_maskload_epi32` / `_mm256_maskstore_epi32` は mask 最上位 bit
-        //   が 0 のレーンを skip するため、chunk 内の余ったレーンは触らない。
+        // - `psqt_acc` は `[i32; 16]` = 64 bytes 連続、`acc_ptr.add(0)` と
+        //   `acc_ptr.add(8)` の両方が in-bounds (offset 32 / 64 bytes、配列終端は
+        //   64 bytes)。
+        // - `weights` は呼び出し元が **n 個 i32 連続を読める** ことを保証する。
+        //   chunk loop は `covered += 8` で進むため、`weights.add(covered)` は
+        //   `covered < n` の chunk 内では下位レーン (`indices[0]`) が必ず in-bounds。
+        // - `_mm256_maskload_epi32` / `_mm256_maskstore_epi32` (VPMASKMOVD) は
+        //   **mask 最上位 bit が 0 のレーンに対応するメモリアドレスへの load/store
+        //   を発行しない** (Intel SDM Vol. 2B: VPMASKMOVD — "If the mask is 0,
+        //   the corresponding memory location is not accessed and no fault is
+        //   signaled")。よって `weights[k]` (mask = 0 のレーン位置) が割り当て外で
+        //   あっても安全。
+        // - mask は `_mm256_cmpgt_epi32(remaining_broadcast, indices)` で下位
+        //   `remaining` 個のレーンのみ all-ones、それ以上は all-zeros として生成。
         unsafe {
             use std::arch::x86_64::*;
             let acc_ptr = psqt_acc.as_mut_ptr();

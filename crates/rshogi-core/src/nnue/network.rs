@@ -27,7 +27,7 @@ use super::bona_piece::BonaPiece;
 use super::bona_piece_halfka_hm_merged::FE_OLD_END;
 use super::constants::{
     MAX_ARCH_LEN, MAX_LAYER_STACK_BUCKETS, NNUE_VERSION, NNUE_VERSION_HALFKA,
-    NNUE_VERSION_LAYERSTACK_V2,
+    NNUE_VERSION_LAYERSTACK_NUM_BUCKETS,
 };
 use super::halfka_hm_merged::{HalfKaHmMergedNetwork, HalfKaHmMergedStack};
 use super::halfka_hm_split::{HalfKaHmSplitNetwork, HalfKaHmSplitStack};
@@ -341,7 +341,7 @@ impl NNUENetwork {
         let version = u32::from_le_bytes(buf4);
 
         match version {
-            NNUE_VERSION | NNUE_VERSION_HALFKA | NNUE_VERSION_LAYERSTACK_V2 => {
+            NNUE_VERSION | NNUE_VERSION_HALFKA | NNUE_VERSION_LAYERSTACK_NUM_BUCKETS => {
                 // 3. hash と arch_len を読む
                 reader.read_exact(&mut buf4)?; // ネットワークハッシュ
                 reader.read_exact(&mut buf4)?; // arch_len
@@ -367,11 +367,33 @@ impl NNUENetwork {
                 };
 
                 // FeatureSet を決定: USI オプションが明示指定されていればそちらを優先。
-                // version が V2 (`NNUE_VERSION_LAYERSTACK_V2`) なら LayerStack の
-                // self-describing layout なので、override 無しの場合は無条件で
-                // LayerStacks に dispatch する。
+                // `NNUE_VERSION_LAYERSTACK_NUM_BUCKETS` は LayerStack 専用の
+                // self-describing layout。arch_str 直後に `num_buckets: u32` field を
+                // 持つため、非-LayerStack reader に渡すと file_size 検出が失敗 (ft_hash
+                // 等が 4 byte ずれる) するか、悪ければ別 arch として誤読する。誤読を
+                // 確実に防ぐため、当該 version + 非-LayerStack override の組合せをここで明示
+                // reject する。
                 let arch_override = get_nnue_architecture_override();
-                let effective_feature_set = if version == NNUE_VERSION_LAYERSTACK_V2
+                if version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS
+                    && !matches!(
+                        arch_override,
+                        NNUEArchitectureOverride::Auto
+                            | NNUEArchitectureOverride::LayerStacks
+                            | NNUEArchitectureOverride::LayerStacksPSQT,
+                    )
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "NNUE (version {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x}, LayerStack \
+                             with num_buckets header) は LayerStack 専用 layout。\
+                             NNUE_ARCHITECTURE override の値 (LayerStack 以外) では読めない。\
+                             override を `Auto` / `LayerStacks` / `LayerStacksPSQT` のいずれかに \
+                             変更するか、対応する legacy net を使用すること。"
+                        ),
+                    ));
+                }
+                let effective_feature_set = if version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS
                     && matches!(arch_override, NNUEArchitectureOverride::Auto)
                 {
                     FeatureSet::LayerStacks
@@ -503,7 +525,7 @@ impl NNUENetwork {
                 format!(
                     "Unknown NNUE version: {version:#x}. Expected {NNUE_VERSION:#x} (HalfKP), \
                      {NNUE_VERSION_HALFKA:#x} (HalfKaHmMerged^ / legacy LayerStack), or \
-                     {NNUE_VERSION_LAYERSTACK_V2:#x} (LayerStack V2 with num_buckets field)"
+                     {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x} (LayerStack with num_buckets header)"
                 ),
             )),
         }
@@ -1124,7 +1146,7 @@ pub fn detect_format(bytes: &[u8], file_size: u64) -> io::Result<NnueFormatInfo>
     let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
 
     match version {
-        NNUE_VERSION | NNUE_VERSION_HALFKA | NNUE_VERSION_LAYERSTACK_V2 => {
+        NNUE_VERSION | NNUE_VERSION_HALFKA | NNUE_VERSION_LAYERSTACK_NUM_BUCKETS => {
             // アーキテクチャ文字列長を読み取り
             let arch_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
 
@@ -2235,6 +2257,74 @@ mod tests {
         for &sum in &[-100.0, 0.0, 100.0] {
             assert_eq!(progress_sum_to_bucket(sum, 1), 0);
         }
+    }
+
+    /// LayerStack num_buckets-header layout の最小ヘッダを in-memory で作成
+    ///
+    /// `num_buckets` 検証や override 分岐の reject 経路を unit test するために、
+    /// FT/PSQT/LayerStack block を含まないヘッダだけの buffer を返す。
+    /// load 側は header 検証で reject する想定なので、それ以降の block は不要。
+    #[cfg(feature = "ls-arch")]
+    fn build_num_buckets_header(num_buckets: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // network_hash (dummy)
+        let arch = b"Features=HalfKaHmMerged^(40),LayerStacks,FV_SCALE=28";
+        bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(arch);
+        bytes.extend_from_slice(&num_buckets.to_le_bytes());
+        bytes
+    }
+
+    /// num_buckets-header layout で `num_buckets = 0` / 上限超過の値は
+    /// `InvalidData` で reject される
+    #[cfg(feature = "ls-arch")]
+    #[test]
+    fn test_layer_stack_num_buckets_out_of_range_rejected() {
+        for &n in &[0u32, (MAX_LAYER_STACK_BUCKETS as u32) + 1, 100, 1024] {
+            let bytes = build_num_buckets_header(n);
+            let err = match NNUENetwork::from_bytes(&bytes) {
+                Ok(_) => panic!(
+                    "num_buckets={n} は reject されるべき (許容範囲 1..={MAX_LAYER_STACK_BUCKETS})"
+                ),
+                Err(e) => e,
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "n={n}");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("num_buckets") || msg.contains(&n.to_string()),
+                "n={n} のエラーメッセージに num_buckets / 値が含まれていない: {msg}"
+            );
+        }
+    }
+
+    /// num_buckets-header layout を `NNUE_ARCHITECTURE=HalfKP` 等の
+    /// 非-LayerStack override で読むと早期 reject される (silent misread を防ぐ)
+    #[cfg(feature = "ls-arch")]
+    #[test]
+    fn test_layer_stack_num_buckets_header_with_non_layerstack_override_rejected() {
+        let bytes = build_num_buckets_header(9);
+        let previous_override = get_nnue_architecture_override();
+        for override_mode in [
+            NNUEArchitectureOverride::HalfKP,
+            NNUEArchitectureOverride::HalfKaHmMerged,
+            NNUEArchitectureOverride::HalfKaSplit,
+        ] {
+            set_nnue_architecture_override(override_mode);
+            let err = match NNUENetwork::from_bytes(&bytes) {
+                Ok(_) => panic!(
+                    "num_buckets-header net を {override_mode:?} override で読んだら reject されるべき"
+                ),
+                Err(e) => e,
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{override_mode:?}");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("LayerStack"),
+                "{override_mode:?} のエラーメッセージに LayerStack が含まれていない: {msg}"
+            );
+        }
+        set_nnue_architecture_override(previous_override);
     }
 
     #[cfg(feature = "nnue-progress-diff")]

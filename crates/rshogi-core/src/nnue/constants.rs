@@ -68,7 +68,7 @@ pub const NNUE_VERSION_HALFKA: u32 = 0x7AF32F20;
 /// `arch_str` の直後に `num_buckets: u32` field が挿入された layout。
 /// `NNUE_VERSION_HALFKA` は本 field を持たないため、engine は version で
 /// 「field を読むか / 暗黙 9 で進めるか」を分岐する。
-pub const NNUE_VERSION_LAYERSTACK_V2: u32 = 0x7AF32F21;
+pub const NNUE_VERSION_LAYERSTACK_NUM_BUCKETS: u32 = 0x7AF32F21;
 
 /// キングバケット数（Half-Mirror: 9段 × 5筋）
 pub const KING_BUCKETS: usize = 45;
