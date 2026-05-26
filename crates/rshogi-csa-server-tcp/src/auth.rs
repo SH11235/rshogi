@@ -80,9 +80,9 @@ impl PlainPasswordHasher {
 impl PasswordHasher for PlainPasswordHasher {
     fn verify(&self, candidate: &Secret, stored_hash: &str) -> bool {
         // 注意: 平文比較かつ長さ不一致で即 return するため、処理時間からパスワード長を
-        // 推定する攻撃に対して定数時間ではない。本実装は shogi-server 互換
-        // players.yaml の平文保存に合わせた暫定経路であり、ハッシュ方式への移行時は
-        // 長さ分岐ごと `subtle::ConstantTimeEq` 等の完全定数時間比較に置き換える。
+        // 推定する攻撃に対して定数時間ではない。shogi-server 互換 players.yaml の
+        // 平文保存に合わせた暫定経路で、ハッシュ方式への移行時は長さ分岐ごと
+        // `subtle::ConstantTimeEq` 等の完全定数時間比較に置き換える。
         let a = candidate.expose().as_bytes();
         let b = stored_hash.as_bytes();
         if a.len() != b.len() {

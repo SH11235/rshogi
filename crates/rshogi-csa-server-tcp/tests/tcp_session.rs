@@ -626,8 +626,8 @@ fn kifu_and_zerozero_list_match_format_contract() {
         let _ = read_until(&mut rb, "#LOSE").await;
 
         // 棋譜の場所は YYYY/MM/DD/<game_id>.csa（game_id は YYYYMMDDHHMMSS+連番）。
-        // 本テストは「format contract」として日付ディレクトリ配置も検証対象に含める
-        // ため、再帰探索ではなく game_id から組み立てた具体パスをポーリングする。
+        // 「format contract」として日付ディレクトリ配置も検証対象に含めるため、
+        // 再帰探索ではなく game_id から組み立てた具体パスをポーリングする。
         // `relative_kifu_path` が壊れて別ディレクトリへ書き出すような回帰は、ここで
         // タイムアウト → panic で検知される。
         let yyyy = &game_id[0..4];
@@ -1188,10 +1188,10 @@ fn monitor2_subscribes_and_receives_moves_and_chat() {
         // (subscriber は drop されて prune される)。厳密な「届かない」検証は
         // タイミング依存なので、後続手を送って observer の recv_line が短時間
         // (100ms) 以内に何も届かない (あるいは subscriber が落ちて何か別行が
-        // 届く) ことで妥協する。本テストでは購読解除 reply の最終行まで
-        // 完了した時点を off 済みとみなし、以降は検証しない (スケジューラ
-        // タイミングで broadcaster の retain (prune) が未実行のまま 1 通だけ
-        // 取りこぼす可能性がある)。
+        // 届く) ことで妥協する。購読解除 reply の最終行まで完了した時点を
+        // off 済みとみなし、以降は検証しない (スケジューラタイミングで
+        // broadcaster の retain (prune) が未実行のまま 1 通だけ取りこぼす
+        // 可能性がある)。
 
         // 対局を投了で畳んでテスト clean-up する。
         send_line(&mut wb, "%TORYO").await;
@@ -1482,7 +1482,7 @@ fn fork_creates_single_use_buoy_from_existing_game() {
 
         // 固定 sleep だと並行実行下で persist_kifu 完了前に %%FORK が走り、
         // kifu_storage.load が NotFound を返して `##[FORK] NOT_FOUND` に落ちる
-        // race が出る (PR #497 と同種)。CSA ファイル書き込みを polling で待つ。
+        // race が出る。CSA ファイル書き込みを polling で待つ。
         let _ = wait_for_csa_text(&topdir, &source_game_id).await;
 
         let (mut ra, mut wa) = connect(addr).await;
@@ -1586,8 +1586,8 @@ fn fork_gracefully_errors_and_keeps_connection_alive() {
         let _ = read_until(&mut rw, "#LOSE").await;
 
         // 固定 sleep だと並行実行下で persist_kifu 完了前に %%FORK が走り、
-        // 期待する `##[FORK] ERROR` ではなく `NOT_FOUND` に落ちる race が出る
-        // (PR #497 と同種)。CSA ファイル書き込みを polling で待つ。
+        // 期待する `##[FORK] ERROR` ではなく `NOT_FOUND` に落ちる race が出る。
+        // CSA ファイル書き込みを polling で待つ。
         let _ = wait_for_csa_text(&topdir, &source_game_id).await;
 
         // nth_move=999 は範囲外。切断せず ERROR + END を返す。
@@ -2692,7 +2692,7 @@ fn private_match_issue_succeeds_with_valid_inputs() {
             "token must be lowercase hex: {resp:?}",
         );
         // ttl: spawn_server に渡した ServerConfig::challenge_ttl を動的に取り出して比較。
-        // sensible_defaults() の値が変わっても本テストの期待値は config から導出される。
+        // sensible_defaults() の値が変わっても期待値は config から導出されるため壊れない。
         let expected_ttl = rshogi_csa_server_tcp::server::ServerConfig::sensible_defaults()
             .challenge_ttl
             .as_secs();
@@ -3013,7 +3013,7 @@ fn private_match_ttl_expiry_disconnects_pending_session() {
             // `##[ERROR] ...` を送って transport を drop する。並行負荷下では
             // FIN が先に届いて `read_line_raw` が `Ok(0) → None` を返すケースが
             // 観測されるため、line と EOF の両方を許容する形で期限切れの観測を
-            // 確定する (= 「サーバ側 close まで来たか」が本テストの目的、
+            // 確定する (= 「サーバ側 close まで来たか」を確認するのが目的、
             // wire 上の 1 行は best-effort)。
             let line = read_line_raw(&mut ra).await;
             match line {
@@ -3092,8 +3092,8 @@ fn private_match_consumed_token_cannot_be_reused() {
 ///    `unregister` する経路が想定どおり動けば「`already_logged_in` で弾かれない」。
 ///
 /// 注: 現状の `run_private_match_waiter` の `tokio::select!` 経路に `recv_line`
-/// 監視が無い場合は本テストは failure する。failure 時は実装側 (production code)
-/// に切断検知経路の追加が要るシグナルになる。
+/// 監視が無い場合は test が failure する。failure 時は production code に
+/// 切断検知経路の追加が要るシグナルになる。
 #[test]
 fn private_match_pending_session_unregister_avoids_stale_race() {
     run_local(|| async {

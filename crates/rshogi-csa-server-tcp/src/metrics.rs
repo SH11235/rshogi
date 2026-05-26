@@ -173,7 +173,7 @@ mod tests {
 
     /// メトリクス名は外部から観測される運用契約。意図せぬ rename を CI で止める
     /// ため、定数の文字列値を完全一致で固定する。新しい系列を追加する場合は
-    /// 本テストも更新する（exporter のラベル付与方式と Prometheus 命名規約に
+    /// この test も更新する（exporter のラベル付与方式と Prometheus 命名規約に
     /// 準拠していることを併せて確認する）。
     #[test]
     fn metric_names_are_byte_stable() {
@@ -190,9 +190,9 @@ mod tests {
     /// `csa_games_finished_total{result_code}` ラベルに乗る値は外部 (Prometheus
     /// dashboards / alert rules) から観測される運用契約のため、`primary_result_code`
     /// が返し得る値と合成 `#ABORTED` の合算が **既知 allowlist に閉じている**こと
-    /// を CI で固定する。新しい `GameResult` variant を `core` に追加する PR は
-    /// `primary_result_code` の更新を強制され、その時点で本テストが落ちて漏れに
-    /// 気付ける。
+    /// を CI で固定する。新しい `GameResult` variant が追加されると
+    /// `primary_result_code` の更新が強制され、その時点でこの test が落ちて
+    /// 漏れに気付ける。
     #[test]
     fn result_code_label_values_are_in_known_allowlist() {
         use rshogi_csa_server::game::result::{GameResult, IllegalReason};

@@ -3035,7 +3035,7 @@ where
 ///   切断方針 (debug 用 trace のみ) と同質性は保ちつつ、ハンドシェイク
 ///   コストだけ削れる。https://github.com/SH11235/rshogi/issues/582 の TCP フロー §1 step 5 にある「LOGOUT
 ///   応答は保証しない」という記述は「LOGOUT の応答行を返さない」意図であり、
-///   本実装でも応答行は送らない (単に loop 脱出のみ)。応答可否ではなく
+///   ここでも応答行は送らない (単に loop 脱出のみ)。応答可否ではなく
 ///   ループ離脱の trigger としての扱いの差異である。
 async fn run_challenge_issuer<R, K, P, H>(
     state: Rc<SharedState<R, K, P, H>>,
@@ -4302,7 +4302,7 @@ mod tests {
     }
 
     /// release ビルドでは `run_connection_isolated` 経路の `catch_unwind` が
-    /// `panic!` を tracing event に変換してタスクを正常終了させる。本テストは
+    /// `panic!` を tracing event に変換してタスクを正常終了させる。
     /// `handle_connection` を叩かずに同経路の async catch_unwind を直接呼び、
     /// debug build と release build の挙動契約が分岐していることを確認する。
     ///
