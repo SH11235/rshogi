@@ -72,9 +72,9 @@ pub struct PersistedConfig {
 /// 終局フラグ。一度 `Some` になったらその DO は同じ対局を二度開始しない。
 ///
 /// `exported_at_ms` は R2 棋譜エクスポートが全 PUT 完了した時刻 (UNIX epoch ms)。
-/// `None` のあいだは終局はしているが R2 への書き出しが未完了で、Issue #623 の
+/// `None` のあいだは終局はしているが R2 への書き出しが未完了で、R2 export retry の
 /// `KEY_EXPORT_PENDING` + `PendingAlarmKind::ExportRetry` 経路で再試行されている
-/// ことを示す。`#[serde(default)]` で旧 schema (本フィールド導入前の cold start
+/// ことを示す。`#[serde(default)]` で旧 schema (このフィールド導入前の cold start
 /// snapshot) との互換を保つ。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinishedState {
@@ -87,7 +87,7 @@ pub struct FinishedState {
     pub(crate) exported_at_ms: Option<u64>,
 }
 
-/// 終局時の R2 export PUT のうち失敗した key を表すエントリ (Issue #623)。
+/// 終局時の R2 export PUT のうち失敗した key を表すエントリ (R2 export retry)。
 ///
 /// `body_kind` で再 PUT 時に乗せる本文 (`csa` = CSA 本文 / `meta` = JSON meta) を
 /// 区別する。`key` 文字列の prefix 推測ではなく明示分類にするのは、key 形式の
@@ -114,7 +114,7 @@ pub enum ExportBodyKind {
 }
 
 /// 終局時に R2 export の一部または全部が失敗したときに DO storage へ残す
-/// retry payload (Issue #623)。
+/// retry payload。
 ///
 /// CSA 本文 / meta JSON は finalize 時点で計算済のものをそのまま保存する
 /// (cold start 後でも `load_moves` を呼び直さず再 PUT できる)。`failed_keys`
@@ -692,9 +692,9 @@ mod tests {
         assert_eq!(restored.exported_at_ms, original.exported_at_ms);
     }
 
-    /// 旧 schema (本 `exported_at_ms` フィールド導入前) で書かれた DO storage
+    /// 旧 schema (`exported_at_ms` フィールド導入前) で書かれた DO storage
     /// 値が `#[serde(default)]` 経由で `None` として deserialize できることを
-    /// 固定する (Issue #623)。本契約が壊れると cold start 後の DO で
+    /// 固定する。この契約が壊れると cold start 後の DO で
     /// `load_finished` が失敗し、終局済 DO が新規 LOGIN を受け付ける退行になる。
     #[test]
     fn finished_state_deserializes_when_exported_at_ms_absent() {
@@ -708,9 +708,9 @@ mod tests {
         assert_eq!(restored.exported_at_ms, None);
     }
 
-    /// `ExportPendingState` の round-trip 固定 (Issue #623)。`failed_keys` の
-    /// `body_kind` が `csa` / `meta` の lower snake で wire される (rename_all)
-    /// ことも本テストで実装契約として固定する。
+    /// `ExportPendingState` の round-trip 固定 (R2 export retry の永続化契約)。
+    /// `failed_keys` の `body_kind` が `csa` / `meta` の lower snake で
+    /// wire される (rename_all) ことも実装契約として固定する。
     #[test]
     fn export_pending_state_round_trips_through_serde_json() {
         let original = ExportPendingState {

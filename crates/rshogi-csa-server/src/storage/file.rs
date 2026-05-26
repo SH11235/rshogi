@@ -251,7 +251,7 @@ mod tests {
         // Multi-thread runtime + JoinSet で 50 件並列 append を発火する。
         // OS の write(2) アトミック性に依存しなくても 50 行が壊れず保存されることを
         // 確認する「スモークテスト」。`append_lock` が無くても OS の write 追記が
-        // 単一 syscall で完了するサイズなら通ってしまうため、本テストはロック欠落の
+        // 単一 syscall で完了するサイズなら通ってしまうため、ロック欠落の
         // 回帰検出までは保証しない。ロック欠落を決定的に検出したい場合は
         // [`append_lock_serializes_critical_section`] を参照。
         let dir = unique_topdir("append_smoke");

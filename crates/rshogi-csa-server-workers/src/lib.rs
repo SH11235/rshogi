@@ -44,9 +44,9 @@ pub mod export_retry;
 pub mod floodgate_history;
 pub mod games_index;
 // `handle_auth` は `WORKERS_HANDLE_AUTH` whitelist の parse + password SHA256
-// 比較 (issue #664) を担う。`HandleAuthRegistry` + `verify` は I/O 非依存の
+// 比較を担う。`HandleAuthRegistry` + `verify` は I/O 非依存の
 // pure helper でホスト target からテストできるよう `pub mod` で公開する。
-// wasm32 限定の `load_handle_auth_registry` (env 読み出し配線) は本 module 内で
+// wasm32 限定の `load_handle_auth_registry` (env 読み出し配線) はこの module 内で
 // `#[cfg(target_arch = "wasm32")]` 化する。
 pub mod handle_auth;
 pub mod live_games_index;
@@ -55,8 +55,7 @@ pub mod origin;
 // `rate_limit` は host テスト可能な pure helper (TokenBucketState, threshold
 // resolution, Retry-After 算出) と wasm32-only な `RateLimiter` Durable Object を
 // 同居させる。DO 部分は `#[cfg(target_arch = "wasm32")]` で gate しているので、
-// ホスト target からも `cargo test` で pure logic を直接走らせられる
-// (issue #622 PR3a)。
+// ホスト target からも `cargo test` で pure logic を直接走らせられる。
 pub mod rate_limit;
 // `persistence` は DO ランタイム (`game_room`) からのみ消費される I/O 非依存の
 // 純粋ロジックを置く。ホスト target の通常ビルドでは消費者が存在しないので

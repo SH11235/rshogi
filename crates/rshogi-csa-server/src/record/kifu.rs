@@ -498,7 +498,7 @@ PI
         let end = "2026-04-17T12:10:00Z";
 
         // (variant, expected_result_code) を網羅する。新しい variant が `GameResult` に
-        // 増えた場合、本テストの match と list 両方を更新する必要がある (single source
+        // 増えた場合、このテストの match と list 両方を更新する必要がある (single source
         // of truth として `primary_result_code` も同時に更新する契約)。
         // `winner` / `loser` は `primary_result_code` が無視するため片側のみ網羅する。
         let cases: Vec<(GameResult, &str)> = vec![

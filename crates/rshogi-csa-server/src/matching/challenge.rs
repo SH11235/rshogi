@@ -313,10 +313,9 @@ impl ChallengeRegistry {
         self.entries.values().map(|e| e.expires_at_ms).min()
     }
 
-    /// 登録件数 (テスト専用 accessor)。本 PR スコープ内では production 経路で
-    /// 件数を観測する用途が無いため `#[cfg(test)]` で閉じる。Workers の Alarm
-    /// reset 判定で使うなら `earliest_expiry_ms().is_some()` で代替できるため、
-    /// 件数公開は YAGNI。
+    /// 登録件数 (テスト専用 accessor)。production 経路で件数を観測する用途が
+    /// 無いため `#[cfg(test)]` で閉じる。Workers の Alarm reset 判定で使うなら
+    /// `earliest_expiry_ms().is_some()` で代替できるため、件数公開は YAGNI。
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()

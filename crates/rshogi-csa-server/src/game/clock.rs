@@ -142,7 +142,7 @@ impl ClockSpec {
 ///
 /// - `total_time_seconds`: 持ち時間本体（秒）。使い切ると秒読みへ移行。
 /// - `byoyomi_seconds`: 1 手あたりの秒読み時間（秒）。使い切ると時間切れ。
-/// - `least_time_per_move`: CSA 2014 改訂では `0`。本実装も `0` 固定。
+/// - `least_time_per_move`: CSA 2014 改訂では `0`。ここでも `0` 固定。
 /// - 経過時間は整数秒に切り捨て（`elapsed_sec = elapsed_ms / 1000`）。
 #[derive(Debug, Clone)]
 pub struct SecondsCountdownClock {

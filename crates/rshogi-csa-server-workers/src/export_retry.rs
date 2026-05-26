@@ -1,14 +1,14 @@
-//! 終局時 R2 export PUT 失敗時の retry policy (Issue #623)。
+//! 終局時 R2 export PUT 失敗時の retry policy。
 //!
 //! 終局時に CSA 本文 / by-id / meta / games-index の 4 オブジェクトを R2 に
 //! 書き出すが、Cloudflare の transient 失敗で 1 つでも PUT に失敗すると以前は
-//! 棋譜が恒久欠損していた。本モジュールは:
+//! 棋譜が恒久欠損していた。このモジュールは:
 //!
 //! - DO storage に [`ExportPendingState`](crate::persistence::ExportPendingState)
 //!   を残して再 PUT に必要な body / key を保持する
 //! - [`PendingAlarmKind::ExportRetry`](crate::reconnect::PendingAlarmKind::ExportRetry)
 //!   タグで `state.alarm()` 経路を分岐する (`KEY_FINISHED` ガードよりも前で受ける)
-//! - 本モジュール内の純粋ロジック ([`next_retry_delay_ms`] / [`is_exhausted`])
+//! - このモジュール内の純粋ロジック ([`next_retry_delay_ms`] / [`is_exhausted`])
 //!   で次回 alarm 遅延と打ち切り判定を一元化する
 //!
 //! 純粋ロジックのみ置く方針なので I/O (DO storage / R2 binding) は呼び出し側

@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn live_games_index_key_inv_ms_zero_pads_for_recent_timestamp() {
-        // 2026-04-29 頃の epoch ms (13 桁) でも inv は 14 桁ゼロパディングで揃う。
+        // epoch ms (13 桁) でも inv は 14 桁ゼロパディングで揃う。
         let started = 1_777_391_025_209_u64;
         let key = live_games_index_key(started, "lobby-cross-fischer-1777391025209").unwrap();
         // INV_BASE - 1_777_391_025_209 = 98_222_608_974_790 (14 桁)

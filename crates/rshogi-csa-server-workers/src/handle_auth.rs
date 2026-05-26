@@ -21,9 +21,9 @@
 //!   通る経路を絶つ。env が空 (`None` / `""` / `"[]"`) のみが「whitelist 未宣言」
 //!   として self-claim 既定挙動を維持する。
 //! - **private 経路にも適用**: `LOGIN_LOBBY <handle>+private-<token>+free` も
-//!   whitelist 対象 (PR #708 codex-connector P1 review 由来)。`CHALLENGE_LOBBY`
-//!   の `opponent=<handle>` は発行者の自己申告のため、任意 handle を仕込んだ
-//!   token を握って private LOGIN_LOBBY 経由で名乗る経路が成立してしまう。
+//!   whitelist 対象。`CHALLENGE_LOBBY` の `opponent=<handle>` は発行者の
+//!   自己申告のため、任意 handle を仕込んだ token を握って
+//!   private LOGIN_LOBBY 経由で名乗る経路が成立してしまう。
 //!   handle_auth を token validation より先に評価し reason を
 //!   `handle_auth_failed` に uniform 化することで、`not_invited` /
 //!   `challenge_expired` の差分から whitelist 対象 handle を推測される情報

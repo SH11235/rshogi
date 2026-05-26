@@ -2,7 +2,8 @@
 //!
 //! Cloudflare Workers Logs / Tail Workers / dashboard から JSON フィールドで
 //! aggregate / grep できるよう、全 log を 1 行 JSON で出力する。
-//! ([Issue #625](https://github.com/SH11235/rshogi/issues/625) Phase A)
+//! (Cloudflare Workers Logs Phase A,
+//! <https://github.com/SH11235/rshogi/issues/625>)
 //!
 //! # 必須キー
 //!
@@ -50,11 +51,11 @@
 //!
 //! # ホスト target
 //!
-//! 本 macro は [`worker::Date::now`] と [`worker::console_log!`] を経由する
+//! このマクロは [`worker::Date::now`] と [`worker::console_log!`] を経由する
 //! ため、wasm32 でのみ展開される ([`worker`] crate がホスト target で参照
 //! 不可)。ホスト test 経路では呼び出さない契約。
 
-/// 構造化ログ ([Issue #625](https://github.com/SH11235/rshogi/issues/625) Phase A) の唯一の出力経路。
+/// 構造化ログ (Cloudflare Workers Logs Phase A) の唯一の出力経路。
 ///
 /// 詳細は [`crate::observability`] module の doc を参照。
 #[macro_export]

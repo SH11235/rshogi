@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn buoy_object_key_always_starts_with_prefix() {
-        // `delete_buoy` の runtime ガードで使う前提条件 (Issue #624 隣接懸念):
+        // `delete_buoy` の runtime ガードで使う前提条件 (バックアップ経路の隣接懸念):
         // 任意入力に対して `buoy_object_key` の戻り値は `BUOY_KEY_PREFIX` で
         // 始まる。`encode_component` のエスケープ規則と相俟って、buoy 命名の
         // 不正値が `buoys/` の外に逃げ出さないことを固定する。

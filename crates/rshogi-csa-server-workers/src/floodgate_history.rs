@@ -470,7 +470,7 @@ mod tests {
     /// instance を同じ backing storage で構築して `list_recent` が永続化された
     /// entry を返すことを確認する。`InMemoryFloodgateHistoryStorage` は R2 アダプタ
     /// と同じ trait を実装し、同じ key 生成ロジック (`entry_key`) を共有するため、
-    /// 本テストの pass は trait の cold-start 契約を host target 上で固定する。
+    /// このテストの pass は trait の cold-start 契約を host target 上で固定する。
     #[tokio::test(flavor = "current_thread")]
     async fn cold_start_then_list_recent_returns_persisted_entry() {
         let backing = Arc::new(Mutex::new(BTreeMap::new()));
@@ -507,7 +507,7 @@ mod tests {
     /// sort することで、複数日にまたがる append でも `list_recent` が正しく
     /// 新しい順を返す。R2 アダプタの day-walking ループ自体は wrangler dev で
     /// 検証するが、キー設計（end_time の年月日要素を埋める）が day 境界を
-    /// またいで sortable である事実は本テストで固定する。
+    /// またいで sortable である事実をここで固定する。
     #[tokio::test(flavor = "current_thread")]
     async fn list_recent_orders_entries_across_day_boundaries() {
         let backing = Arc::new(Mutex::new(BTreeMap::new()));
@@ -534,7 +534,7 @@ mod tests {
     /// 固定する。R2 の page-boundary を超えるシナリオは wrangler dev で実 R2 を
     /// 使って検証するが、キー設計自体が page 境界をまたいでも単調順序を持つ
     /// （= `Vec::extend` で全ページ収集 → `into_iter().rev()` で正しく新しい順を
-    /// 取り出せる）事実は本テストで固定する。
+    /// 取り出せる）事実をここで固定する。
     #[test]
     fn entry_key_sorts_lexicographically_with_end_time() {
         let early = entry("g1", "2026-04-26T08:30:15+00:00");

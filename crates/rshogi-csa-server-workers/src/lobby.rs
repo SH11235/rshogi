@@ -16,11 +16,11 @@
 //!
 //! 認証は self-claim (`<password>` 値検証なし)、本家 Floodgate と同じ扱い。
 //!
-//! # 私的対局 (https://github.com/SH11235/rshogi/issues/582) — 本 PR スコープ
+//! # 私的対局 (https://github.com/SH11235/rshogi/issues/582)
 //!
-//! 本 PR では以下のみ実装する。両者揃った後の対局起動経路 (consume → GameRoom
-//! DO 起動 + clock_spec / initial_sfen バトンパス) は https://github.com/SH11235/rshogi/issues/582 follow-up
-//! integration の後半スコープに分割する。
+//! ここでは以下のみ実装する。両者揃った後の対局起動経路 (consume → GameRoom
+//! DO 起動 + clock_spec / initial_sfen バトンパス) は別モジュール (follow-up
+//! integration の後半スコープ) に分割されている。
 //!
 //! - `CHALLENGE_LOBBY <inviter> <opponent> <color> <clock_preset> [<sfen>]` 受理
 //!   と token 発行 (`CHALLENGE_LOBBY:OK <token> <ttl_sec>` 応答)
@@ -181,10 +181,10 @@ impl DurableObject for Lobby {
         let server = pair.server;
         self.state.accept_web_socket(&server);
 
-        // Rate limit (issue #622 PR3a) のため、`router::forward_ws_to_lobby` が
+        // Rate limit のため、`router::forward_ws_to_lobby` が
         // 転送した `CF-Connecting-IP` を attachment に保存する。
         // `accept_web_socket` 後の `websocket_message` ハンドラは Worker fetch
-        // context を持たないため、本フィールド経由でしか per-IP rate limit を
+        // context を持たないため、このフィールド経由でしか per-IP rate limit を
         // 適用できない。ヘッダ欠落 / 空文字は `None` として扱い、後段の
         // LOGIN_LOBBY / CHALLENGE_LOBBY ハンドラ側で fail-closed する。
         let client_ip = crate::rate_limit::extract_client_ip(&req);
@@ -514,22 +514,22 @@ impl Lobby {
             Err(e) => return self.send_login_error(ws, e).await,
         };
 
-        // Rate limit (issue #622 PR3a): per-IP + per-handle の二段チェック。
+        // Rate limit: per-IP + per-handle の二段チェック。
         // **parse 通過後** に走らせることで、`bad_format` 等の構文不正は
         // counter を増やさずに既存経路で reject する (構文不正 flood は別軸の
-        // `MAX_WS_LINE_BYTES` + connection-level 削減で対処、本 limiter の対象外)。
+        // `MAX_WS_LINE_BYTES` + connection-level 削減で対処、この limiter の対象外)。
         // **fail-closed 順序**:
         // 1. CF-Connecting-IP 欠落 → `rate_limited` で reject (per-IP / per-handle
         //    どちらも IP を一次キーに使うため、IP 不在は両方とも適用不能)
         // 2. per-IP 拒否 → reject
         // 3. per-handle 拒否 → reject
         // いずれの順で reject されても WS は close せず、client が retry できる
-        // 経路を保つ (`Q4-A` design: csa-client は retry_after honoring、PR #683)。
+        // 経路を保つ (`Q4-A` design: csa-client は retry_after honoring)。
         if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &req.handle).await? {
             return self.send_rate_limited_login_lobby(ws, decision).await;
         }
 
-        // `WORKERS_HANDLE_AUTH` whitelist (issue #664): registry に登録された
+        // `WORKERS_HANDLE_AUTH` whitelist: registry に登録された
         // handle に限り SHA256(password) を要求する。rate_limit の後 / queue
         // enqueue の前に挟むのは、`bad_format` 等の構文不正は counter を
         // 増やさない既存契約に揃え、かつ password 検証失敗の度に queue 操作の
@@ -733,10 +733,10 @@ impl Lobby {
     /// - `Ok(Some(decision))` → どこかの bucket が deny、caller は
     ///   `send_rate_limited_login_lobby(decision)` で client に応答する
     /// - `Err(_)` → DO RPC 自体が失敗 (transient)。caller は `?` で伝播し、
-    ///   Worker 全体としては 500 系に倒れる (= fail-closed、本リクエストは reject
+    ///   Worker 全体としては 500 系に倒れる (= fail-closed、当該リクエストは reject
     ///   される)
     ///
-    /// **fail-closed 順序** (issue #622 PR3a 設計): CF-Connecting-IP 欠落 →
+    /// **fail-closed 順序**: CF-Connecting-IP 欠落 →
     /// per-IP → per-handle。先に拒否された方の `decision` を返す。
     async fn check_login_lobby_rate_limit(
         &self,
@@ -855,8 +855,8 @@ impl Lobby {
 
     /// rate limit 拒否時の LOGIN_LOBBY 応答。design doc Q4-A の wire format
     /// (`LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`) を採用する。
-    /// **WS は close しない**: csa-client 側 (PR #683) で `retry_after` を
-    /// honoring しつつ retry する経路を踏むため、close すると client が
+    /// **WS は close しない**: csa-client 側で `retry_after` を honoring
+    /// しつつ retry する経路を踏むため、close すると client が
     /// 即座に再 upgrade する fast-loop を作ってしまい cap が効かなくなる。
     async fn send_rate_limited_login_lobby(
         &self,
@@ -882,10 +882,10 @@ impl Lobby {
     /// `ChallengeRegistry::issue` で token を発行して
     /// `CHALLENGE_LOBBY:OK <token> <ttl_sec>` を返す。
     ///
-    /// **本 PR スコープ補足**: `unknown_opponent_handle` の検証は Workers では
+    /// **スコープ補足**: `unknown_opponent_handle` の検証は Workers では
     /// 実装しない (self-claim モデル、`PasswordStore` 等の認証層がないため)。
-    /// 両者揃った時点での GameRoom DO 起動経路は次 PR に分割するため、本関数
-    /// は token を登録するだけで対局起動の trigger を発火させない。
+    /// 両者揃った時点での GameRoom DO 起動経路は別モジュールに分割されており、
+    /// この関数は token を登録するだけで対局起動の trigger を発火させない。
     async fn handle_challenge_lobby(
         &self,
         ws: &WebSocket,
@@ -906,7 +906,7 @@ impl Lobby {
             }
         };
 
-        // Rate limit (issue #622 PR3a): per-IP + per-inviter handle の二段チェック。
+        // Rate limit: per-IP + per-inviter handle の二段チェック。
         // **parse 通過後** に走らせ、構文不正は counter を増やさない。fail-closed
         // 順序は LOGIN_LOBBY と対称 (1. CF-Connecting-IP 欠落 → reject、
         // 2. per-IP、3. per-inviter handle)。`req.inviter` を per-handle 判定の
@@ -1011,11 +1011,11 @@ impl Lobby {
     /// 5. 通過 → `mark_ws_logged_in` で attachment id を登録し、
     ///    `LOGIN_LOBBY:<handle> OK pending_match_dispatch_pending` 暫定応答を返す。
     ///
-    /// **本 PR スコープ補足**: 両者揃った時点で `consume(token)` → GameRoom DO
+    /// **スコープ補足**: 両者揃った時点で `consume(token)` → GameRoom DO
     /// 起動 + clock_spec / initial_sfen バトンパスする経路は https://github.com/SH11235/rshogi/issues/582
-    /// follow-up integration の後半スコープに分割する。本 PR では LOGIN_LOBBY
+    /// follow-up integration の後半スコープに分割されている。ここでは LOGIN_LOBBY
     /// を受理して attachment を `PrivatePending` で登録するだけで、対局起動
-    /// trigger を発火させない (WS は接続維持され、次 PR の dispatch 経路で
+    /// trigger を発火させない (WS は接続維持され、別モジュールの dispatch 経路で
     /// 起動する)。
     async fn handle_login_lobby_private(
         &self,
@@ -1033,7 +1033,7 @@ impl Lobby {
             password,
         } = req;
 
-        // Rate limit (issue #622 PR3a): 私的 LOGIN_LOBBY も公開 LOGIN_LOBBY と
+        // Rate limit: 私的 LOGIN_LOBBY も公開 LOGIN_LOBBY と
         // 同じ IP / handle カウンタを共有する (どちらも `LOGIN_LOBBY` 系コマンドで、
         // 同 IP / handle からの flood 攻撃面が同等)。
         // private LOGIN_LOBBY ではエラー応答に `1003 close` が伴うのが既存仕様だが、
@@ -1043,8 +1043,8 @@ impl Lobby {
             return self.send_rate_limited_login_lobby(ws, decision).await;
         }
 
-        // `WORKERS_HANDLE_AUTH` whitelist (issue #664) — private 経路 follow-up
-        // (codex-connector P1 review 由来)。`CHALLENGE_LOBBY` の `opponent` が
+        // `WORKERS_HANDLE_AUTH` whitelist — private 経路でも適用する。
+        // `CHALLENGE_LOBBY` の `opponent` が
         // 発行者の自己申告のため、攻撃者が `opponent=alice` で token を発行 →
         // `LOGIN_LOBBY alice+private-<token>+free wrong-password` で whitelist
         // 対象 handle を無認証で名乗れる経路を塞ぐ。rate_limit の後・challenge
@@ -1124,10 +1124,10 @@ impl Lobby {
         send_line(ws, &format!("LOGIN_LOBBY:{handle} OK pending_match_dispatch_pending"))?;
         // 私的対局 token は診断用途で平文ログに残す (旧 console_log! と同等の挙動を
         // 保つ移行)。CHALLENGE_LOBBY 発行時の TTL (`CHALLENGE_TTL_SEC`、既定
-        // 3600 秒) で自動失効するため、Tail Workers / R2 archive (#625 Phase B)
-        // 経由で漏えいしてもリプレイ攻撃ウィンドウは限定的。token を無害化したい
-        // 場合は本フィールドを `token_prefix: token.as_str().chars().take(8).collect::<String>()`
-        // 等に差し替える (本 PR スコープでは保留)。
+        // 3600 秒) で自動失効するため、Tail Workers / R2 archive 経由で
+        // 漏えいしてもリプレイ攻撃ウィンドウは限定的。token を無害化したい
+        // 場合はこのフィールドを `token_prefix: token.as_str().chars().take(8).collect::<String>()`
+        // 等に差し替える (現状は保留)。
         crate::structured_log!(
             event: "login_lobby_private",
             component: "lobby",
@@ -1161,8 +1161,8 @@ impl Lobby {
         Ok(())
     }
 
-    /// 私的対局 attachment 状態で受信した line。本 PR スコープでは対局起動が
-    /// 動かないため、`LOGOUT_LOBBY` を受理して切断する以外は ignore する。
+    /// 私的対局 attachment 状態で受信した line。対局起動経路はこのモジュール
+    /// では発火しないため、`LOGOUT_LOBBY` を受理して切断する以外は ignore する。
     /// `LOBBY_PONG` は keep-alive として silent に受理する。
     async fn handle_private_pending_line(
         &self,
@@ -1346,15 +1346,15 @@ fn evict_old_websockets_with_handle(state: &State, current_ws: &WebSocket, handl
     }
 }
 
-/// LOGIN handle 自称防止 (issue #664) の lobby 経路版。
+/// LOGIN handle 自称防止の lobby 経路版。
 /// `WORKERS_HANDLE_AUTH` whitelist 設定を 1 LOGIN_LOBBY あたり 1 回 fetch + parse
 /// し、登録 handle に限り SHA256(password) を要求する。
 ///
 /// 公開経路 ([`Lobby::handle_login_lobby`]) と private 経路
-/// ([`Lobby::handle_login_lobby_private`]) の双方から呼ばれる (codex-connector
-/// PR #708 P1 review 由来 — `CHALLENGE_LOBBY` の `opponent` 自己申告で whitelist
-/// 対象 handle を private 経由で名乗れる経路を塞ぐため、private 経路でも
-/// 同じ enforcement を走らせる)。private 経路では token validation **より先** に
+/// ([`Lobby::handle_login_lobby_private`]) の双方から呼ばれる。
+/// `CHALLENGE_LOBBY` の `opponent` 自己申告で whitelist 対象 handle を private
+/// 経由で名乗れる経路を塞ぐため、private 経路でも同じ enforcement を走らせる。
+/// private 経路では token validation **より先** に
 /// 評価することで reason を `handle_auth_failed` に uniform 化し、
 /// `not_invited` / `challenge_expired` との差分から whitelist 対象 handle が
 /// 推測される情報 leak も同時に塞ぐ。

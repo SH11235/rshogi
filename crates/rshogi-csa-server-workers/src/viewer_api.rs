@@ -51,18 +51,18 @@
 //!   により毎回 worker に再検証を投げるため、kill-switch / allowlist 変更は即時に
 //!   ブラウザにも反映される)。
 //!
-//! ## Cache-Control directive 設計 (Issue #653 P2)
+//! ## Cache-Control directive 設計
 //!
-//! Issue #648 の初期実装では `public, max-age=<TTL>` を採用していたが、これだと
+//! 初期実装では `public, max-age=<TTL>` を採用していたが、これだと
 //! `caches.default` だけでなくブラウザ・共有 HTTP cache にも `max-age` が効いて
 //! しまう。`WS_ALLOWED_ORIGINS` から Origin を除外したり `ALLOW_VIEWER_API` を
 //! 落としても、すでに 200 を取得済みのブラウザは worker に再到達せず TTL 満了まで
 //! cache を返し続ける (`check_origin` / kill-switch は worker 到達時にしか効かない)。
 //!
-//! 現行設計 (#653): `public, s-maxage=<TTL>, max-age=0, must-revalidate`
+//! 現行設計: `public, s-maxage=<TTL>, max-age=0, must-revalidate`
 //! - `s-maxage=<TTL>`: shared cache (Cloudflare edge `caches.default` を含む) は
 //!   TTL 秒保存する。worker `Cache` API も `cache-control` の `max-age` か
-//!   `s-maxage` のいずれかが必要 (worker 0.8 cache.rs L65-66 の契約) で、
+//!   `s-maxage` のいずれかが必要 (worker 0.8 の `Cache::put` 契約) で、
 //!   `s-maxage` 単独でも `cache.put` は受理される。
 //! - `max-age=0, must-revalidate`: ブラウザ・private HTTP cache は毎リクエスト
 //!   worker に再検証を要求する (origin = worker)。これにより allowlist / kill-switch
@@ -262,9 +262,8 @@ impl CacheableKind {
     /// `s-maxage` は Cloudflare edge (`caches.default`) を含む shared cache で
     /// TTL 秒保存させる。`max-age=0, must-revalidate` でブラウザ・private cache は
     /// 毎回 worker に再検証要求を投げ、`check_origin` / `ALLOW_VIEWER_API` の
-    /// 変更を即時に反映できる (Issue #653 P2)。worker 0.8 `Cache` API は
-    /// `max-age` か `s-maxage` のいずれかがあれば `cache.put` を受理する
-    /// (worker 0.8 cache.rs L65-66)。
+    /// 変更を即時に反映できる。worker 0.8 `Cache` API は
+    /// `max-age` か `s-maxage` のいずれかがあれば `cache.put` を受理する。
     pub(crate) fn cache_control_header(self) -> &'static str {
         match self {
             CacheableKind::List => "public, s-maxage=60, max-age=0, must-revalidate",
@@ -743,7 +742,7 @@ fn set_cache_control(resp: &mut Response, value: &str) -> Result<()> {
 /// `cache.get` が `Err` を返した場合 (Cache API 自体の障害) は `None` を返して
 /// miss と同じくフォールバック (R2 から再 fetch) させる。ただし運用上の観測性が
 /// 必要なため、`event` (`<root>_cache_get`) と `client_kind` 付きの logfmt を
-/// `log_viewer_api_failed` で残す (Issue #653)。サイレント抑制すると staging /
+/// `log_viewer_api_failed` で残す。サイレント抑制すると staging /
 /// 本番で Cache API が一切機能していない事象に気付けない。
 async fn cache_get_origin_neutral(
     cache_key: &str,
@@ -808,7 +807,7 @@ mod tests {
 
     #[test]
     fn cache_control_header_for_list_kind() {
-        // Issue #653 P2: edge は s-maxage で TTL 秒保存し、ブラウザ・private cache は
+        // edge は s-maxage で TTL 秒保存し、ブラウザ・private cache は
         // max-age=0 + must-revalidate で毎回 worker に再検証要求を投げる。
         assert_eq!(
             CacheableKind::List.cache_control_header(),

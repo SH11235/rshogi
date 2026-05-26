@@ -7,11 +7,11 @@
 //! `ConfigKeys` への追加を忘れたケースもコード側で参照されない dead binding を
 //! 抱え込む原因になる。
 //!
-//! 過去事例: PR #500 で `R2FloodgateHistoryStorage` を新設し
+//! 過去事例: `R2FloodgateHistoryStorage` 新設で
 //! `ConfigKeys::FLOODGATE_HISTORY_BUCKET_BINDING` を追加したが、対応する
-//! `[[r2_buckets]]` エントリの template への追加が漏れていた（PR #505 で修正）。
+//! `[[r2_buckets]]` エントリの template への追加が漏れた回帰がある。
 //!
-//! 本テストは `wrangler.toml.example` を TOML として parse し、`ConfigKeys` の
+//! ここでは `wrangler.toml.example` を TOML として parse し、`ConfigKeys` の
 //! 網羅配列 (`ALL_R2_BINDINGS` / `ALL_DO_BINDINGS` /
 //! `SHARED_PUBLIC_VARS_KEYS` ∪ `LOCAL_DEV_ONLY_VARS_KEYS`) と template の宣言が
 //! **双方向に一致** することを assert する。
@@ -150,7 +150,7 @@ fn wrangler_template_do_bindings_match_config_keys() {
 /// 単独と整合することを検証する。
 ///
 /// `[vars]` 値は運用側で書き換える前提なので空文字や placeholder で構わない。
-/// 本テストは「キーの集合が一致すること」のみを検証し、値の内容には関与しない。
+/// ここでは「キーの集合が一致すること」のみを検証し、値の内容には関与しない。
 #[test]
 fn wrangler_template_vars_keys_match_config_keys() {
     let expected: Vec<&'static str> = ConfigKeys::SHARED_PUBLIC_VARS_KEYS

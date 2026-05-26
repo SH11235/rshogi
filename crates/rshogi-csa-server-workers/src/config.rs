@@ -70,7 +70,7 @@ impl ConfigKeys {
     /// Rate limit (issue [#622](https://github.com/SH11235/rshogi/issues/622)
     /// PR3a) — `/ws/<room_id>` (player route) upgrade の 1 IP あたり 1 分間の
     /// 最大回数。新規 GameRoom DO 起動の代理指標として使う (room 起動を厳密に
-    /// 数えるには DO 内 state を追う必要があり、本 PR では player route upgrade
+    /// 数えるには DO 内 state を追う必要があるため、player route upgrade
     /// 回数で近似する)。設定不正値は既定 (20) にフォールバック。
     pub const ROOM_CREATE_RATE_PER_IP_PER_MIN: &'static str = "ROOM_CREATE_RATE_PER_IP_PER_MIN";
     /// Rate limit (issue [#622](https://github.com/SH11235/rshogi/issues/622)
@@ -276,11 +276,11 @@ impl ConfigKeys {
         Self::LOBBY_QUEUE_ENTRY_TTL_SEC,
         Self::CHALLENGE_TTL_SEC,
         Self::PRIVATE_CHALLENGE_ENABLED,
-        // Rate limit thresholds (issue #622 PR3a) — 6 keys。各値の根拠は
-        // `docs/csa-server/rate_limit_design.md` §3 Q3 表と本ファイル冒頭の
+        // Rate limit thresholds — 6 keys。各値の根拠は
+        // `docs/csa-server/rate_limit_design.md` §3 Q3 表とこのファイル冒頭の
         // 各定数 docstring を参照。閾値を deploy なしで上書きしたい場合は
         // `wrangler secret put <KEY>` ではなく `wrangler.<env>.toml` の `[vars]`
-        // 編集 + redeploy で反映する (本配列に含まれる = 平文管理 OK 値)。
+        // 編集 + redeploy で反映する (この配列に含まれる = 平文管理 OK 値)。
         Self::LOBBY_LOGIN_RATE_PER_IP_PER_MIN,
         Self::LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN,
         Self::LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN,

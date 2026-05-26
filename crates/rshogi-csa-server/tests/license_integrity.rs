@@ -6,9 +6,9 @@
 //! を引き継がせる必要がある。各 `Cargo.toml` の `license` フィールドが手作業で
 //! 書き換わって不揃いになる事故を、ビルド時 / cargo test 時に確実に止める。
 //!
-//! 本テストは workspace ルートの `Cargo.toml` の `members` を動的に走査するため、
-//! 将来 `crates/rshogi-csa-server-*` という名前で新クレートが追加された場合も
-//! 自動で検査対象になる（追加 PR が license を忘れるとここで落ちる）。
+//! workspace ルートの `Cargo.toml` の `members` を動的に走査するため、将来
+//! `crates/rshogi-csa-server-*` という名前で新クレートが追加された場合も
+//! 自動で検査対象になる（追加時に license を忘れるとここで落ちる）。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// csa-server 系クレートのライセンスとして許可される唯一の値。
 const REQUIRED_LICENSE: &str = "GPL-3.0-only";
 
-/// workspace 内クレートのうち、本テストが整合性を要求する名前接頭辞。
+/// workspace 内クレートのうち、整合性を要求する名前接頭辞。
 const SCOPED_PREFIX: &str = "rshogi-csa-server";
 
 /// `CARGO_MANIFEST_DIR` から workspace ルート（= `Cargo.toml` に

@@ -15,11 +15,11 @@
 //! `run_live_orphan_sweep` は cron 30s 制限の安全側 (`SWEEP_DEADLINE_MS`) 内で
 //! 複数 page を処理し、超過分は次回 cron に持ち越す (cursor は再開しない =
 //! 先頭から再走査するが、live key は新しい対局順なので大きな問題にならない)。
-//! 本実装範囲では admin invoke endpoint や 1 万件超の bulk 並列化は Non-goals
+//! admin invoke endpoint や 1 万件超の bulk 並列化はスコープ外
 //! (設計 v3 §10)。
 //!
 //! 進捗ログは [`structured_log!`](crate::structured_log) で JSON 化して
-//! Cloudflare Workers の Logs / tail へ流す ([Issue #625](https://github.com/SH11235/rshogi/issues/625) Phase A)。
+//! Cloudflare Workers の Logs / tail へ流す (Cloudflare Workers Logs Phase A)。
 //! いかなる失敗 (R2 binding 解決失敗 / list 失敗 / get 失敗 / put 失敗 /
 //! parse 失敗) も `Err` を返さず ログのみ残して `Ok` で抜ける契約。
 //! `scheduled` handler が次回 cron 起動を妨げないようにするため、伝播禁止。
@@ -34,7 +34,7 @@
 use serde::Deserialize;
 
 /// `kifu-by-id/` prefix。`<id>.csa` と `<id>.meta.json` が同居するため、
-/// `.meta.json` で suffix 判定する側で本 prefix を再利用する。
+/// `.meta.json` で suffix 判定する側でこの prefix を再利用する。
 pub(crate) const KIFU_BY_ID_PREFIX: &str = "kifu-by-id/";
 
 /// `kifu-by-id/<id>.meta.json` の suffix。list 結果から meta だけを抽出する。

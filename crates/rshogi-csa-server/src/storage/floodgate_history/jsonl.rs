@@ -14,7 +14,7 @@
 //! - **クロスプロセス並行 append は非対応**: 単一プロセス前提。複数プロセスが
 //!   同ファイルを書く運用は想定しない（YAGNI）
 //! - **ローテーションは外部任せ**: ファイルサイズ管理は logrotate 等の外部
-//!   ツールに任せ、本実装は append のみ責任を持つ
+//!   ツールに任せ、append のみ責任を持つ
 
 use std::path::PathBuf;
 
@@ -34,7 +34,7 @@ use super::types::FloodgateHistoryEntry;
 /// 開いて 1 entry を書く。POSIX 上の `O_APPEND` 書き込みは「現在のファイル末尾
 /// にカーソルを移動 → write」を 1 syscall で行うため、同一プロセス内の追記は
 /// 上述 Mutex で直列化、他プロセスからの追記は OS 任せ（PIPE_BUF 以下なら atomic、
-/// 超える場合は interleave 可能だが本実装は単一プロセス前提）。
+/// 超える場合は interleave 可能だが単一プロセス前提）。
 #[derive(Debug)]
 pub struct JsonlFloodgateHistoryStorage {
     path: PathBuf,

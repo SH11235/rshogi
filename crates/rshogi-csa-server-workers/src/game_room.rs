@@ -159,15 +159,15 @@ const KEY_GRACE_REGISTRY: &str = "grace_registry";
 /// `GraceExpired` を書き込む。
 const KEY_PENDING_ALARM_KIND: &str = "pending_alarm_kind";
 /// 終局時に R2 export PUT が一部または全部失敗したときに、再 PUT に必要な
-/// CSA 本文 / meta JSON / 失敗 key 一覧を保持する DO storage key (Issue #623)。
+/// CSA 本文 / meta JSON / 失敗 key 一覧を保持する DO storage key (R2 export retry)。
 /// `KEY_PENDING_ALARM_KIND = ExportRetry` とペアでセットされ、`alarm()` 経路で
 /// `handle_export_retry_alarm` が読み取る。retry 全消費後は alarm のみ停止し
-/// 本 key は残置する (運用観測用)。
+/// この key は残置する (運用観測用)。
 const KEY_EXPORT_PENDING: &str = "export_pending";
 
-/// 終局時 R2 export 試行の結果分類 (Issue #623)。
+/// 終局時 R2 export 試行の結果分類 (R2 export retry)。
 ///
-/// `export_kifu_to_r2` は本 enum を返し、呼び出し側 (`finalize_if_ended`) が
+/// `export_kifu_to_r2` はこの enum を返し、呼び出し側 (`finalize_if_ended`) が
 /// `Complete` / `Pending` / `Skipped` に応じて pending 永続化 + retry alarm
 /// 予約 / 何もしない を分岐する。
 #[derive(Debug)]
@@ -175,14 +175,14 @@ enum ExportAttempt {
     /// 4 オブジェクト (csa 本文 / by-id / meta / games-index) すべて PUT 成功
     /// (`exported_at_ms = Some` を埋められる)。
     Complete,
-    /// 1 つ以上 PUT 失敗で retry 必要。本 variant が持つ
+    /// 1 つ以上 PUT 失敗で retry 必要。この variant が持つ
     /// [`ExportPendingState`] を `KEY_EXPORT_PENDING` に永続化する。
     Pending(Box<ExportPendingState>),
     /// retry しても解決しない致命的失敗 (bucket binding 不在 / load_moves 失敗 /
     /// SFEN 不正 / serialize 失敗 / games_index_key 生成失敗等)。
     /// `exported_at_ms = None` のままで観測上は欠損として残るが、それ以外の処理
     /// は通常通り進める。retry できるはずの CSA PUT 失敗が混在している場合は
-    /// `Pending` に倒し、CSA 部分だけ retry する (Codex code review #2 反映)。
+    /// `Pending` に倒し、CSA 部分だけ retry する。
     Skipped,
 }
 
@@ -211,8 +211,8 @@ impl ExportAttempt {
     }
 
     /// 4 オブジェクト中いずれかを **PUT 試行できなかった** 経路から呼ぶ
-    /// コンストラクタ (Codex code review #2 反映)。serialize 失敗 /
-    /// games_index_key 生成失敗で meta or index PUT が抜けたケースなど。
+    /// コンストラクタ。serialize 失敗 / games_index_key 生成失敗で
+    /// meta or index PUT が抜けたケースなど。
     ///
     /// retry 可能な CSA PUT 失敗が `failed_keys` にあれば `Pending` に倒し、
     /// CSA 部分だけ再試行する (`exported_at_ms` は引き続き `None`)。
@@ -484,7 +484,7 @@ impl DurableObject for GameRoom {
         // alarm 種別タグを読み、各経路を分岐する。
         // 既定値 (タグ未設定 / `TimeUp`) は時間切れ駆動とみなす。
         //
-        // ⚠ Issue #623: `ExportRetry` は `KEY_FINISHED` 確定**後**に発火する
+        // ⚠ `ExportRetry` は `KEY_FINISHED` 確定**後**に発火する
         // 特殊な alarm なので、`load_finished` ガードよりも**前**に分岐する必要
         // がある。それ以外 (`GraceExpired` / `AgreeTimeout` / `TimeUp`) は終局前
         // 経路なので従来どおり `load_finished` ガードを先に通す。
@@ -572,7 +572,7 @@ impl GameRoom {
             return Ok(());
         };
 
-        // `WORKERS_HANDLE_AUTH` whitelist (issue #664): registry に登録された
+        // `WORKERS_HANDLE_AUTH` whitelist: registry に登録された
         // handle に限り SHA256(password) を要求する。reconnect 経路の前に挟む
         // (= reconnect token を持っていても、whitelist 対象 handle で password
         // 検証に落ちる session は reconnect 経路にも入らない)。fail-closed:
@@ -907,9 +907,9 @@ impl GameRoom {
         //
         // - 両者 AGREE で `HandleOutcome::GameStarted` が観測されたら、
         //   `reschedule_turn_alarm` が turn budget で alarm 本体を上書きした **後**
-        //   に `clear_agree_timeout_tag` で kind タグを削除する (順序の意図は
-        //   Issue #597: タグ削除を後置することで「kind=None かつ alarm=AgreeTimeout
-        //   当時の発火時刻」の中間状態をコード上に作らない)。
+        //   に `clear_agree_timeout_tag` で kind タグを削除する (タグ削除を後置
+        //   することで「kind=None かつ alarm=AgreeTimeout 当時の発火時刻」の
+        //   中間状態をコード上に作らない)。
         //   タグが無くなった後は alarm が時間切れ駆動 (TimeUp) として扱われる。
         // - alarm が `AgreeTimeout` のまま発火したら `handle_agree_timeout_alarm` で
         //   部屋を解放する (`abort_pending_match_with_error` 相当 + `KEY_FINISHED`
@@ -993,7 +993,7 @@ impl GameRoom {
             }
         };
 
-        // outcome 別の永続化 + alarm + broadcast 順序 (Issue #597)。
+        // outcome 別の永続化 + alarm + broadcast 順序 (AgreeTimeout タグ管理)。
         //
         // - `GameStarted` / `MoveAccepted`: 新 turn alarm の予約と
         //   `clear_agree_timeout_tag` を **broadcast より前** に行う。broadcast 失敗で
@@ -1651,7 +1651,7 @@ impl GameRoom {
 
     /// 終局したなら R2 に棋譜を書き出し、finished フラグを立てて両 ws を close する。
     ///
-    /// R2 export PUT が一部または全部失敗した場合 (Issue #623):
+    /// R2 export PUT が一部または全部失敗した場合 (R2 export retry):
     /// 1. CSA 本文 / meta JSON / 失敗 key 一覧を [`ExportPendingState`] として
     ///    `KEY_EXPORT_PENDING` に保存する
     /// 2. `KEY_PENDING_ALARM_KIND = ExportRetry` をセット
@@ -1704,7 +1704,7 @@ impl GameRoom {
 
         // export 一部失敗なら pending 永続化 + retry alarm を貼る。pending put /
         // alarm 書き込みは best-effort で失敗ログのみ残し、`finalize_if_ended` の
-        // 残り処理 (live-games-index 削除 / WS close) を必ず進める (Issue #623 主契約)。
+        // 残り処理 (live-games-index 削除 / WS close) を必ず進める (R2 export retry 主契約)。
         if let Some(pending) = attempt.into_pending() {
             self.schedule_export_retry(pending).await;
         }
@@ -1741,7 +1741,7 @@ impl GameRoom {
         Ok(())
     }
 
-    /// 終局時 export PUT 失敗の retry を予約する (Issue #623)。
+    /// 終局時 export PUT 失敗の retry を予約する。
     ///
     /// `KEY_EXPORT_PENDING` (本文 + 失敗 key 一覧) と `KEY_PENDING_ALARM_KIND =
     /// ExportRetry` を put し、`RETRY_DELAYS_SEC[0]` 後に `state.alarm()` を貼る。
@@ -1803,7 +1803,7 @@ impl GameRoom {
         }
     }
 
-    /// `PendingAlarmKind::ExportRetry` で alarm が発火したときの再 PUT 経路 (Issue #623)。
+    /// `PendingAlarmKind::ExportRetry` で alarm が発火したときの再 PUT 経路。
     ///
     /// `KEY_EXPORT_PENDING` から保存済の本文 + 失敗 key 一覧を読み、各 key に
     /// 対して再 PUT を試みる。全成功で `exported_at_ms` を埋めて pending を消し、
@@ -1836,8 +1836,8 @@ impl GameRoom {
                     err: format!("{e:?}"),
                 );
                 // bucket binding 不在 = config 不正。retry を進めても解決しない
-                // ので alarm を停止し pending は残置 (deploy 修正で再開する想定
-                // だが、本 PR の scope ではここまで)。
+                // ので alarm を停止し pending は残置 (deploy 修正で再開する想定、
+                // 自動回復経路は持たない)。
                 let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
                 let _ = self.state.storage().delete_alarm().await;
                 return Ok(());
@@ -2006,13 +2006,13 @@ impl GameRoom {
     /// 構造なので、外部のレート集計や HTML レンダリングなどの後段処理は R2 を
     /// mount するだけで TCP 版と同じパスで読める。
     ///
-    /// 戻り値 [`ExportAttempt`] (Issue #623):
+    /// 戻り値 [`ExportAttempt`] (R2 export retry):
     /// - `Complete`: 4 オブジェクト (csa 本文 / by-id / meta / games-index) すべて
     ///   PUT 成功 (= retry 不要)。
     /// - `Pending(state)`: 1 つ以上 PUT 失敗で retry 用の本文 + 失敗 key 一覧を
-    ///   保持。`finalize_if_ended` は本値を `KEY_EXPORT_PENDING` に永続化する。
+    ///   保持。`finalize_if_ended` がこの値を `KEY_EXPORT_PENDING` に永続化する。
     /// - `Skipped`: bucket binding 不在 / `load_moves` 失敗 / SFEN 不正 / serialize
-    ///   失敗等の「retry しても解決しない致命的失敗」。本関数内で
+    ///   失敗等の「retry しても解決しない致命的失敗」。この関数内で
     ///   [`structured_log!`](crate::structured_log) で吸収済みなので呼び出し側は
     ///   何もしない (`exported_at_ms = None` だけ残る)。
     ///
@@ -2134,7 +2134,7 @@ impl GameRoom {
 
         // 4 つの PUT を集約する。各 PUT は独立して試行し、失敗した key だけを
         // `failed_keys` に積む。CSA 本文 PUT が失敗しても meta / index PUT は試す
-        // (Issue #623: best-effort 全 put → retry で残りを順送り)。
+        // (best-effort 全 put → retry で残りを順送り)。
         let mut failed_keys: Vec<FailedExportObject> = Vec::with_capacity(4);
         let csa_bytes = text.as_bytes().to_vec();
         for (key, label) in [
@@ -2203,9 +2203,9 @@ impl GameRoom {
                     err: format!("{e:?}"),
                 );
                 // CSA 本文 PUT は試行済 (failed_keys に積まれているかも) だが、
-                // meta/index は serialize 失敗で本経路で PUT 試行できていない。
+                // meta/index は serialize 失敗でこの経路で PUT 試行できていない。
                 // 4 PUT 全成功にはなり得ないので `from_partial_attempt` で
-                // `Complete` を絶対返さない経路に倒す (Codex code review #2)。
+                // `Complete` を絶対返さない経路に倒す。
                 return ExportAttempt::from_partial_attempt(
                     cfg.game_id.clone(),
                     ended_at_ms,
@@ -2243,7 +2243,7 @@ impl GameRoom {
                 );
                 // games-index key 生成失敗は retry 不可。pending には CSA / meta
                 // のみ残す。index PUT が抜けるため `from_partial_attempt` で
-                // `Complete` 経路を塞ぐ (Codex code review #2)。
+                // `Complete` 経路を塞ぐ。
                 return ExportAttempt::from_partial_attempt(
                     cfg.game_id.clone(),
                     ended_at_ms,
@@ -2392,10 +2392,10 @@ impl GameRoom {
             if snapshot_in_progress {
                 // https://github.com/SH11235/rshogi/issues/627: queue を push する前に上限を判定する。
                 // - 行数 > `MAX_SPECTATOR_QUEUE_ITEMS`
-                // - bytes (各 line の `len()` 総和 + 今回追加分) > `MAX_SPECTATOR_QUEUE_BYTES`
+                // - bytes (各 line の `len()` 総和 + 新規 line 分) > `MAX_SPECTATOR_QUEUE_BYTES`
                 // のいずれか満たす場合は、attachment を上書きせずに観戦者を切断する。
                 // serialize_attachment をスキップすることで、close 後の hibernation
-                // 復帰時にも肥大化した queue が残らないことを保証する (Codex review)。
+                // 復帰時にも肥大化した queue が残らないことを保証する。
                 let next_items = pending_queue.len().saturating_add(1);
                 let current_bytes: usize = pending_queue.iter().map(|(s, _)| s.len()).sum();
                 let next_bytes = current_bytes.saturating_add(line.len());
@@ -2864,8 +2864,8 @@ impl GameRoom {
         let (alarm_kind, should_set_grace) =
             classify_alarm_after_enter_grace(existing_alarm, grace_deadline_ms);
 
-        // `KEY_PENDING_ALARM_KIND` → `KEY_GRACE_REGISTRY` の順で put する
-        // (Issue #597 隣接懸念 2)。`put_multiple` を使うとローカル struct の
+        // `KEY_PENDING_ALARM_KIND` → `KEY_GRACE_REGISTRY` の順で put する。
+        // `put_multiple` を使うとローカル struct の
         // `#[serde(rename = "...")]` が各定数と一致する暗黙契約になり、定数を
         // rename した際に silent failure となるリスクがあるため、定数を直接
         // `put` に渡す形に分解する。
@@ -2996,7 +2996,7 @@ impl GameRoom {
         if let Some(result) = result_opt {
             self.dispatch_broadcasts(&result.broadcasts).await?;
             // `finalize_if_ended` は内部で `delete_grace_alarm_state` を呼んだ後に
-            // ExportRetry alarm を貼り直す可能性がある (Issue #623)。ここで重ねて
+            // ExportRetry alarm を貼り直す可能性がある (R2 export retry)。ここで重ねて
             // `delete_grace_alarm_state` を呼ぶと `KEY_PENDING_ALARM_KIND=ExportRetry`
             // を巻き込んで削除してしまい、retry alarm が発火しても kind が `None`
             // で `KEY_FINISHED` ガードに弾かれる。`finalize_if_ended` の責務に任せ
@@ -3246,7 +3246,7 @@ impl GameRoom {
     }
 }
 
-/// LOGIN handle 自称防止 (issue #664)。`WORKERS_HANDLE_AUTH` whitelist の
+/// LOGIN handle 自称防止。`WORKERS_HANDLE_AUTH` whitelist の
 /// 1 LOGIN あたり 1 回 fetch + parse して、登録 handle に限り SHA256(password)
 /// を要求する。
 ///

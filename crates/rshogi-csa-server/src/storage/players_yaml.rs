@@ -6,7 +6,7 @@
 //! Ruby `YAML.dump` で書き出される `players.yaml` 形式（[design.md] 1110 行）に
 //! 合わせ、トップレベルはプレイヤ名（String）→ レコード（Ruby Symbol キー）の
 //! マップで構成する。Ruby の `Symbol` は YAML 上で `":name"` のようにコロン接頭辞
-//! つき文字列で表現されるため、本実装でも `:name`/`:rate`/`:win`/`:loss`/
+//! つき文字列で表現されるため、ここでも `:name`/`:rate`/`:win`/`:loss`/
 //! `:last_game_id`/`:last_modified` をキーとして読み書きする:
 //!
 //! ```yaml
@@ -473,7 +473,7 @@ mod tests {
         records.insert("bob".to_owned(), rec("bob", 2400, 80, 60));
 
         let yaml = render_document(&records).unwrap();
-        // Ruby `YAML.dump` のキー順は内部 Hash 挿入順だが、本実装では BTreeMap で
+        // Ruby `YAML.dump` のキー順は内部 Hash 挿入順だが、ここでは BTreeMap で
         // 名前昇順に正規化する。アルファベット順で alice → bob が確定。
         // `:name`/`:rate`/`:win`/`:loss`/`:last_game_id`/`:last_modified` の
         // Ruby Symbol キーが quote 無しで出力されることを byte 比較で固定する。

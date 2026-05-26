@@ -681,7 +681,7 @@ mod tests {
         // 5 二に既に先手歩が居る局面で、敵玉頭でもある同筋（file 5）に歩打を試みる。
         // 検証順は「在庫 → 二歩 → 合法手探索 → 打ち歩詰判定」なので、
         // 二歩が先に検出され Violation::DoublePawn が返るはず。
-        // 本テストの主目的は Uchifuzume に誤分類しないことの確認。
+        // ここでは Uchifuzume に誤分類しないことを確認する。
         let v = Validator::new(EnteringKingRule::Point24);
         let pos = pos_from_sfen("4k4/4P4/9/9/9/9/9/9/4K4 b P 1");
         let err = v.validate_move(&pos, &token("+0052FU")).unwrap_err();

@@ -78,7 +78,8 @@ impl GameSummaryBuilder {
         if !self.position_section.ends_with('\n') {
             out.push('\n');
         }
-        // 観戦者向け拡張行: 残時間 (ms 粒度)。reconnect.rs:148-149 と同形式。
+        // 観戦者向け拡張行: 残時間 (ms 粒度)。Workers reconnect 経路の
+        // `Black/White_Time_Remaining_Ms:` 行と同形式。
         let _ = writeln!(out, "Black_Time_Remaining_Ms:{black_remaining_ms}");
         let _ = writeln!(out, "White_Time_Remaining_Ms:{white_remaining_ms}");
         out.push_str("END Game_Summary\n");
@@ -377,7 +378,7 @@ mod tests {
     fn position_section_from_sfen_equals_standard_block_for_hirate() {
         // 平手 SFEN で `position_section_from_sfen` を呼んだ結果は、既存の
         // `standard_initial_position_block()` とほぼ一致するはず (差は無い想定)。
-        // 完全一致は駒並びや手番・持ち駒なしの表現次第だが、本実装では両者とも
+        // 完全一致は駒並びや手番・持ち駒なしの表現次第だが、ここでは両者とも
         // `PI` 行を使わず P1-P9 + 手番のみなので全行一致する。
         let hirate = rshogi_core::position::SFEN_HIRATE;
         let block = position_section_from_sfen(hirate).unwrap();

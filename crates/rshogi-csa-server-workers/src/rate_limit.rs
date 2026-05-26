@@ -1,11 +1,11 @@
-//! Rate limit / abuse protection (issue #622 PR3a)。
+//! Rate limit / abuse protection。
 //!
 //! Floodgate 相当 production 昇格 blocker。`/ws/lobby` への LOGIN_LOBBY /
 //! CHALLENGE_LOBBY flood、`/ws/<room_id>` upgrade flood、room 起動 flood を
 //! Worker code 側の **atomic token bucket** で抑制する。Cloudflare Workers
 //! Rate Limiting binding は本アカウントで利用不可確認のため、専用 Durable
 //! Object (`RateLimiterDO`) を per-key sharding で実装する (Q2-B 採択、
-//! 2026-05-10 user 確認、`docs/csa-server/rate_limit_design.md` §3 Q2)。
+//! `docs/csa-server/rate_limit_design.md` §3 Q2)。
 //!
 //! # 設計の前提
 //!
@@ -85,7 +85,7 @@ pub struct RateLimitThresholds {
 }
 
 impl RateLimitThresholds {
-    /// 設計 doc §3 Q3 表の推奨初期値 (2026-05-10 user 確定)。env 未設定 / 不正値の
+    /// 設計 doc §3 Q3 表の推奨初期値。env 未設定 / 不正値の
     /// fallback として参照する。
     pub const DEFAULTS: Self = Self {
         lobby_login_per_ip: 10,
@@ -113,10 +113,10 @@ impl RateLimitThresholds {
 /// 空文字 / `0` / 非数値 / 範囲外は `fallback` を返す。
 ///
 /// `0` を fallback に倒すのは「env 設定で 0 を入れて運用を無効化する」と
-/// 「typo / 範囲外で 0 になる」の区別が付かないため。本 PR では「rate limit
-/// は常に有効」を staging / production 共通の不変条件として固定し、
-/// env 経由で無効化する経路を提供しない (運用で外したくなった場合は
-/// 巨大な値を入れて事実上無効化する設計に倒す)。
+/// 「typo / 範囲外で 0 になる」の区別が付かないため。「rate limit は常に
+/// 有効」を staging / production 共通の不変条件として固定し、env 経由で
+/// 無効化する経路を提供しない (運用で外したくなった場合は巨大な値を
+/// 入れて事実上無効化する設計に倒す)。
 pub fn resolve_positive_u32_threshold(raw: Option<&str>, fallback: u32) -> u32 {
     let trimmed = raw.unwrap_or("").trim();
     if trimmed.is_empty() {
@@ -536,13 +536,13 @@ mod tests {
 
     use super::*;
 
-    /// 60_000 ms = 1 minute は capacity 全量を refill する根拠時間。本テストで
-    /// 1 minute スパンの境界挙動を全部回す。
+    /// 60_000 ms = 1 minute は capacity 全量を refill する根拠時間。
+    /// 1 minute スパンの境界挙動をまとめて検証する。
     const ONE_MINUTE_MS: u64 = 60_000;
 
     #[test]
     fn defaults_match_design_doc_q3_table() {
-        // 設計 doc §3 Q3 表の 6 推奨値 (2026-05-10 user 確定)。
+        // 設計 doc §3 Q3 表の 6 推奨値。
         let d = RateLimitThresholds::DEFAULTS;
         assert_eq!(d.lobby_login_per_ip, 10);
         assert_eq!(d.lobby_login_per_handle, 5);

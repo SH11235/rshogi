@@ -6,9 +6,9 @@
 //! した定数（[`ConfigKeys::SHARED_PUBLIC_VARS_KEYS`]）が過不足なく宣言されている
 //! ことを各環境ファイルについて検証する。
 //!
-//! **本ファイルが各環境で扱わない値**（[`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`]、
+//! **このファイルで各環境向けに扱わない値**（[`ConfigKeys::LOCAL_DEV_ONLY_VARS_KEYS`]、
 //! 例: `ADMIN_API_TOKEN`）は production / staging いずれも `wrangler secret put`
-//! 経由で設定する仕様。本テストでは各環境 toml の `[vars]` に **これらの値が
+//! 経由で設定する仕様。ここでは各環境 toml の `[vars]` に **これらの値が
 //! 含まれていないこと** も検証する。
 //!
 //! `wrangler.toml.example` (local dev template) は別テスト

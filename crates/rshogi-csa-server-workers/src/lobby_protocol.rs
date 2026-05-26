@@ -9,9 +9,9 @@
 //! - in-memory queue ([`LobbyQueue`]) と直接マッチング (`DirectMatchStrategy` 再利用)。
 //! - 出力 line のシリアライズ (`LOGIN_LOBBY:<handle> OK` / `MATCHED <room_id> <color>` 等)。
 //! - 私的対局 (`CHALLENGE_LOBBY` / `LOGIN_LOBBY <handle>+private-<token>+free`)
-//!   の入口パース。https://github.com/SH11235/rshogi/issues/582 の Workers 側受け入れ基準のうち本 PR スコープ
-//!   (token 発行 + LOGIN 認識 + 永続化 + Alarm purge) で参照される。両者揃った
-//!   後の対局起動経路は次 PR に分割するため、本モジュールは対局室 (GameRoom DO)
+//!   の入口パース。https://github.com/SH11235/rshogi/issues/582 の Workers 側受け入れ基準のうち
+//!   token 発行 + LOGIN 認識 + 永続化 + Alarm purge で参照される。対局起動経路は
+//!   別モジュール側に分離されており、ここは対局室 (GameRoom DO)
 //!   起動側の知識を持たない。
 
 use rshogi_csa_server::matching::challenge::ChallengeToken;
@@ -105,7 +105,7 @@ pub fn parse_login_lobby(line: &str) -> Result<LoginLobbyRequest, LoginLobbyErro
     let rest = line.strip_prefix("LOGIN_LOBBY ").ok_or(LoginLobbyError::NotLoginCommand)?;
     let mut parts = rest.split_whitespace();
     let id = parts.next().ok_or(LoginLobbyError::BadFormat)?;
-    // password は LOGIN_LOBBY の必須トークン。issue #664 で `WORKERS_HANDLE_AUTH`
+    // password は LOGIN_LOBBY の必須トークン。`WORKERS_HANDLE_AUTH`
     // whitelist 経路に渡せるよう、parser でも保持する (whitelist 未宣言モードで
     // 当該 handle が登録されていない場合は呼び出し側 `handle_login_lobby` で
     // 値を捨てる)。
@@ -541,7 +541,7 @@ pub fn parse_login_lobby_with_free(
         .ok_or(LoginLobbyPrivateError::NotLoginCommand)?;
     let mut parts = rest.split_whitespace();
     let id = parts.next().ok_or(LoginLobbyPrivateError::BadFormat)?;
-    // password は issue #664 follow-up (codex-connector P1) で必須化:
+    // password は private 経路でも必須:
     // `WORKERS_HANDLE_AUTH` whitelist 対象 handle が private 経路で無認証で
     // 名乗れる経路を塞ぐため、parser で保持して呼び出し側 verify に渡す。
     let password = parts.next().ok_or(LoginLobbyPrivateError::BadFormat)?;
@@ -588,14 +588,13 @@ mod tests {
         assert_eq!(req.handle, "alice");
         assert_eq!(req.game_name, "game-eval");
         assert_eq!(req.color, Color::Black);
-        // password token は parser に保持される (issue #664 で
-        // WORKERS_HANDLE_AUTH 経路に渡せるようにするため)。
+        // password token は parser に保持される (WORKERS_HANDLE_AUTH 経路に渡せるようにするため)。
         assert_eq!(req.password, "anything");
     }
 
-    /// `LoginLobbyRequest::Debug` は password を `"***"` でマスクする (issue
-    /// #664 PR #708 codex Minor review 由来)。`Debug` 派生を再導入すると平文が
-    /// panic message 経路に流れるため、本不変条件をテストで gate する。
+    /// `LoginLobbyRequest::Debug` は password を `"***"` でマスクする。
+    /// `Debug` 派生を再導入すると平文が panic message 経路に流れるため、
+    /// この不変条件をテストで gate する。
     #[test]
     fn login_lobby_request_debug_masks_password() {
         let req = parse_login_lobby("LOGIN_LOBBY alice+game-eval+black secret-password").unwrap();
@@ -638,7 +637,7 @@ mod tests {
 
     /// 既存 `parse_login_lobby` は私的対局の `+free` を `BadColor` として
     /// 拒否し続ける (`dispatch_pending_line` 側で `is_private_login_handle` 経由
-    /// で先に分岐させる契約)。本テストは「私的対局専用 parser 追加で公開
+    /// で先に分岐させる契約)。このテストは「私的対局専用 parser 追加で公開
     /// マッチング parser が `+free` を黙って通すようになっていない」ことを
     /// 固定する後方互換 regression。
     #[test]
@@ -966,8 +965,8 @@ mod tests {
         .unwrap();
         assert_eq!(req.handle, "alice");
         assert_eq!(req.token.as_str(), "0123456789abcdef0123abcd");
-        // password token は private 経路でも parser に保持される (issue #664
-        // follow-up で `WORKERS_HANDLE_AUTH` 経路に渡せるようにするため)。
+        // password token は private 経路でも parser に保持される
+        // (`WORKERS_HANDLE_AUTH` 経路に渡せるようにするため)。
         assert_eq!(req.password, "pw");
     }
 
