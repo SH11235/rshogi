@@ -2380,4 +2380,81 @@ mod tests {
             assert_eq!(*v, 0);
         }
     }
+
+    /// HalfKp + 非ゼロ weights/biases で `refresh_accumulator` (slow path、
+    /// `append_active_indices` 経由) と `refresh_accumulator_with_cache`
+    /// (fast cache path、玉スロット ZERO マスク経由) の結果が **bit 一致** する
+    /// ことを保証する数値正確性テスト。
+    ///
+    /// crash-free regression (`refresh_with_cache_halfkp_complex_position`) は
+    /// panic しないことだけ検証するが、本テストは fix が **計算的にも正しい**
+    /// ことを担保する。
+    ///
+    /// シナリオ:
+    /// 1. 初期局面 (ply32 SFEN) で slow と cache が一致
+    /// 2. 相手玉が異なる位置の派生局面でも slow と cache が一致
+    ///    (cache hit-with-diff path の正しさを保証)
+    ///
+    /// PR #757 review #3 への対応 (HalfKp 限定 1 件、5 FT 全体への展開は別 Issue)。
+    #[test]
+    fn refresh_with_cache_halfkp_matches_slow_path() {
+        // 非ゼロ deterministic weights/biases で FT 構築 (seed 固定)
+        let mut weights = AlignedBox::<i16>::new_zeroed(HalfKpSpec::DIMENSIONS * TEST_L1);
+        // 簡易擬似乱数: i に対し i16 範囲で安定なパターン
+        for (i, slot) in weights.iter_mut().enumerate() {
+            *slot = (((i as u32).wrapping_mul(2_654_435_761) >> 16) as i16) % 127 - 63;
+        }
+        let mut biases = Aligned([0i16; TEST_L1]);
+        for (i, b) in biases.0.iter_mut().enumerate() {
+            *b = ((i as i16) % 17) - 8;
+        }
+
+        let make_ft = || FeatureTransformerLayerStacks::<TEST_L1, HalfKpSpec> {
+            biases,
+            weights: weights.clone(),
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_weights: AlignedBox::new_zeroed(0),
+            #[cfg(feature = "ls-ext-psqt")]
+            has_psqt: false,
+            #[cfg(feature = "ls-ext-threat")]
+            threat_weights: AlignedBox::new_zeroed(0),
+            #[cfg(feature = "ls-ext-threat")]
+            has_threat: false,
+            _ft: PhantomData,
+        };
+        let ft_slow = make_ft();
+        let ft_cache = make_ft();
+
+        let sfens = [
+            // 1) 駒成り + 駒台手駒ありの典型 ply32 局面
+            "+B1sg1gsnl/2+N2k1b1/pP2pp2p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
+            // 2) 相手玉位置が異なる派生局面 (cache hit-with-diff path を踏ませる)
+            "+B1sg1gsnl/2+N4b1/pP2ppk1p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
+        ];
+
+        let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
+
+        for (idx, sfen) in sfens.iter().enumerate() {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+
+            // slow path: append_active_indices 経由で full refresh (玉 BP は除外)
+            let mut acc_slow = AccumulatorLayerStacks::<TEST_L1>::new();
+            ft_slow.refresh_accumulator(&pos, &mut acc_slow);
+
+            // fast cache path: 玉スロットを ZERO マスクして cache に渡す
+            let mut acc_cache = AccumulatorLayerStacks::<TEST_L1>::new();
+            ft_cache.refresh_accumulator_with_cache(&pos, &mut acc_cache, &mut cache);
+
+            for p in 0..2 {
+                let slow = acc_slow.get(p);
+                let fast = acc_cache.get(p);
+                for (j, (s, f)) in slow.iter().zip(fast.iter()).enumerate() {
+                    assert_eq!(s, f, "sfen #{idx} perspective {p} slot {j}: slow={s} cache={f}");
+                }
+            }
+        }
+    }
 }
