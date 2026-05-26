@@ -2306,7 +2306,9 @@ mod tests {
             biases: Aligned([0; TEST_L1]),
             weights,
             #[cfg(feature = "ls-ext-psqt")]
-            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_num_buckets: 0,
             #[cfg(feature = "ls-ext-psqt")]
             psqt_weights: AlignedBox::new_zeroed(0),
             #[cfg(feature = "ls-ext-psqt")]
@@ -2367,7 +2369,9 @@ mod tests {
             biases,
             weights: weights.clone(),
             #[cfg(feature = "ls-ext-psqt")]
-            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_num_buckets: 0,
             #[cfg(feature = "ls-ext-psqt")]
             psqt_weights: AlignedBox::new_zeroed(0),
             #[cfg(feature = "ls-ext-psqt")]
@@ -2418,7 +2422,9 @@ mod tests {
             biases: Aligned([0; TEST_L1]),
             weights,
             #[cfg(feature = "ls-ext-psqt")]
-            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_num_buckets: 0,
             #[cfg(feature = "ls-ext-psqt")]
             psqt_weights: AlignedBox::new_zeroed(0),
             #[cfg(feature = "ls-ext-psqt")]
