@@ -93,7 +93,9 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
 
     /// PSQT 重みの bucket 数 (= net file の `num_buckets`)。
     ///
-    /// PSQT block を持たない net では `0` (PSQT block を読まずに skip)。
+    /// `has_psqt == false` のとき `0`。このとき `add/sub_psqt_weights` は
+    /// `has_psqt` ガード (`refresh_psqt` / 各 caller) により呼ばれないため、
+    /// `0` が伝播して `index * 0 = 0` で誤動作する経路は無い。
     #[cfg(feature = "ls-ext-psqt")]
     pub(crate) psqt_num_buckets: usize,
 
@@ -115,21 +117,21 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
 /// PSQT アキュムレータ (`[i32; MAX_LAYER_STACK_BUCKETS]`) の先頭 `n` 要素に
 /// `weights[0..n]` を加算 (`ADD = true`) または減算する。
 ///
-/// `n` は net file の `num_buckets` で、`MAX_LAYER_STACK_BUCKETS` 以下。配列の
-/// `[n..]` 範囲は load 時にゼロで残っているため、ここを触らないことで意味的整合性
-/// (未使用 bucket の値は不変) を保つ。
+/// `n` は net file の `num_buckets` で、`MAX_LAYER_STACK_BUCKETS = 16` 以下。
+/// 配列の `[n..MAX]` 範囲は load 時にゼロのまま残し、本関数はここを触らない
+/// (未使用 bucket の値を保存)。
+///
+/// `wrapping_add` / `wrapping_sub` で明示 wrap する。PSQT 値は ±数千オーダー、
+/// FT 累積でも i32 を溢れないため挙動差は無視できる。
 ///
 /// # 実装方針
 ///
-/// 旧実装は 9-bucket 固定 SIMD path (AVX-512 mask / AVX2 8+1 / SSE2/NEON 4+4+1)
-/// を持っていたが、`n` が runtime 値になり mask/tail 構造が壊れるため、
-/// 単一の scalar loop に統合した。`#[inline(always)]` で呼び出し元 (add/sub の
-/// 1 引数) へ展開され、N ≤ 16 の loop は LLVM が auto-vectorize しやすい形を
-///保つ。実測 NPS 退行があれば別 ADR で再 SIMD 化を検討する。
-///
-/// # オーバーフロー挙動
-/// `wrapping_add` / `wrapping_sub` で明示 wrap。PSQT 値は ±数千オーダー、FT
-/// 累積でも i32 を溢れないため挙動差は実害無し。
+/// `MAX_LAYER_STACK_BUCKETS = 16` が AVX-512 1 命令のレーン数と一致するため、
+/// AVX-512F では runtime `n` から `(1 << n) - 1` の 16-bit mask を作り
+/// `_mm512_maskz_loadu_epi32` + `_mm512_mask_storeu_epi32` の 1 セットで完了する。
+/// AVX2 (AVX-512 無し) では `_mm256_maskload_epi32` / `_mm256_maskstore_epi32`
+/// で 8 lane ごとに mask する (n ≤ 16 のため最大 2 chunk)。SSE2 / NEON /
+/// WASM SIMD128 が無い build は scalar fallback。
 ///
 /// # Safety
 /// `weights` は少なくとも `n` 個の i32 が連続して読める必要がある（呼び出し元が保証）。
@@ -141,14 +143,85 @@ fn psqt_add_or_sub<const ADD: bool>(
     n: usize,
 ) {
     debug_assert!(n <= MAX_LAYER_STACK_BUCKETS);
-    // SAFETY: 呼び出し元は `weights` が n 個 i32 連続して読めることを保証する。
-    //         長さ n の slice を作るのは安全。これ以降は safe rust。
-    let w_slice: &[i32] = unsafe { std::slice::from_raw_parts(weights, n) };
-    for (acc, &w) in psqt_acc[..n].iter_mut().zip(w_slice) {
-        if ADD {
-            *acc = acc.wrapping_add(w);
-        } else {
-            *acc = acc.wrapping_sub(w);
+
+    // AVX-512F: 16-lane mask で 1 命令にまとめる
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    {
+        // SAFETY:
+        // - `psqt_acc` は `[i32; 16]` = 64 bytes 連続 (AVX-512 1 vector と一致)。
+        // - `weights` は呼び出し元が n 個 i32 連続を保証する。
+        // - mask の上位 (16-n) bit はゼロのため対応レーンは load/store されず
+        //   範囲外アクセスなし。
+        unsafe {
+            use std::arch::x86_64::*;
+            const _ASSERT: () = assert!(MAX_LAYER_STACK_BUCKETS == 16);
+            let mask: __mmask16 = if n >= 16 {
+                !0u16
+            } else {
+                ((1u32 << n) - 1) as u16
+            };
+            let acc_ptr = psqt_acc.as_mut_ptr();
+            let a = _mm512_maskz_loadu_epi32(mask, acc_ptr);
+            let w = _mm512_maskz_loadu_epi32(mask, weights);
+            let result = if ADD {
+                _mm512_add_epi32(a, w)
+            } else {
+                _mm512_sub_epi32(a, w)
+            };
+            _mm512_mask_storeu_epi32(acc_ptr, mask, result);
+        }
+    }
+
+    // AVX2 (AVX-512 無し): 8-lane × 最大 2 chunk を runtime mask で処理
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        not(target_feature = "avx512f")
+    ))]
+    {
+        // SAFETY:
+        // - `psqt_acc` は `[i32; 16]` = 64 bytes 連続、2 つの 8-lane chunk を覆える。
+        // - `weights` は呼び出し元が n 個 i32 連続を保証。
+        // - `_mm256_maskload_epi32` / `_mm256_maskstore_epi32` は mask 最上位 bit
+        //   が 0 のレーンを skip するため、chunk 内の余ったレーンは触らない。
+        unsafe {
+            use std::arch::x86_64::*;
+            let acc_ptr = psqt_acc.as_mut_ptr();
+            let indices = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+            let mut covered = 0usize;
+            while covered < n {
+                let remaining = (n - covered).min(8) as i32;
+                let r = _mm256_set1_epi32(remaining);
+                let mask = _mm256_cmpgt_epi32(r, indices);
+                let a = _mm256_maskload_epi32(acc_ptr.add(covered), mask);
+                let w = _mm256_maskload_epi32(weights.add(covered), mask);
+                let result = if ADD {
+                    _mm256_add_epi32(a, w)
+                } else {
+                    _mm256_sub_epi32(a, w)
+                };
+                _mm256_maskstore_epi32(acc_ptr.add(covered), mask, result);
+                covered += 8;
+            }
+        }
+    }
+
+    // 上記のいずれの SIMD path にも該当しない build (SSE2 のみ / NEON / WASM /
+    // その他) は scalar fallback。`MAX = 16` で n ≤ 16 のループは LLVM が
+    // auto-vectorize する余地がある。
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "avx512f"),
+        all(target_arch = "x86_64", target_feature = "avx2"),
+    )))]
+    {
+        // SAFETY: 呼び出し元は `weights` が n 個 i32 連続して読めることを保証する。
+        let w_slice: &[i32] = unsafe { std::slice::from_raw_parts(weights, n) };
+        for (acc, &w) in psqt_acc[..n].iter_mut().zip(w_slice) {
+            if ADD {
+                *acc = acc.wrapping_add(w);
+            } else {
+                *acc = acc.wrapping_sub(w);
+            }
         }
     }
 }

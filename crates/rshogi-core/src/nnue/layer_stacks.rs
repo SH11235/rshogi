@@ -596,6 +596,9 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
 /// 引数:
 /// - f_king_rank: 味方玉の段（0-8、味方から見た相対段）
 /// - e_king_rank: 相手玉の段（0-8、相手から見た相対段）
+///
+/// 本関数は legacy 9-bucket 固定方式 (king-rank 由来)。本番評価の bucket 選択は
+/// `network_layer_stacks::compute_layer_stacks_bucket_index` (progress-based) を経由する。
 pub fn compute_bucket_index(f_king_rank: usize, e_king_rank: usize) -> usize {
     // 味方玉の段 → bucket オフセット
     const F_TO_INDEX: [usize; 9] = [0, 0, 0, 3, 3, 3, 6, 6, 6];
@@ -606,7 +609,6 @@ pub fn compute_bucket_index(f_king_rank: usize, e_king_rank: usize) -> usize {
     let f_idx = F_TO_INDEX[f_king_rank.min(8)];
     let e_idx = E_TO_INDEX[e_king_rank.min(8)];
 
-    // 本関数の king-rank 方式は legacy 9 bucket 専用 (test 用)。
     (f_idx + e_idx).min(DEFAULT_NUM_BUCKETS - 1)
 }
 

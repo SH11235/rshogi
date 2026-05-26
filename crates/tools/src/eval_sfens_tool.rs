@@ -363,7 +363,12 @@ fn run_eval_for_network<
         let bucket_index = match cli.bucket_mode {
             BucketMode::Progress8kpabs => {
                 let weights = get_layer_stack_progress_kpabs_weights();
-                compute_layer_stack_progress8kpabs_bucket_index(&pos, side_to_move, weights)
+                compute_layer_stack_progress8kpabs_bucket_index(
+                    &pos,
+                    side_to_move,
+                    weights,
+                    network.num_buckets,
+                )
             }
         };
         let raw = network.layer_stacks.evaluate_raw(bucket_index, &transformed);
