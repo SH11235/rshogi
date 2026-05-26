@@ -1074,23 +1074,16 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             pos.piece_list().piece_list_fw()
         };
 
-        // HalfKP (= !INCLUDE_KING_IN_PIECE_LIST) は玉 BonaPiece を特徴量に含めないため
-        // piece_list の玉スロット (PieceNumber::KING / KING+1) を BonaPiece::ZERO で
-        // マスクしてから cache に渡す。これで `refresh_or_cache` 内の
-        // `if bp != ZERO { idx_fn(bp) }` 判定で玉 BP が自動的にスキップされ、
-        // `halfkp_index(king, F_KING+sq)` の OOR を避ける。cache.piece_list との
-        // 比較も両側 ZERO で一貫し、相手玉移動時に no-op となる。
-        // INCLUDE_KING_IN_PIECE_LIST は const なので HalfKa* 系では本ブロックは
-        // dead-code eliminated される (`piece_list_owned` は原本のコピー)。
+        // HalfKp は玉 BonaPiece を特徴量に含めないため、`refresh_or_cache` の
+        // `if bp != ZERO` で skip されるよう玉スロット (KING / KING+1) を ZERO に
+        // マスクして cache に渡す。`INCLUDE_KING_IN_PIECE_LIST = const` なので
+        // HalfKa* 系では本分岐ごと DCE される。
         let piece_list_owned;
         let piece_list: &[BonaPiece; PieceNumber::NB] = if FT::INCLUDE_KING_IN_PIECE_LIST {
             raw_piece_list
         } else {
             piece_list_owned = {
                 let mut pl = *raw_piece_list;
-                // piece_list の玉スロット 2 つ (PieceNumber::KING=先手玉, KING+1=後手玉)
-                // を ZERO 化。slot 38/39 が両玉に予約されているのは piece_list.rs の
-                // PIECE_NUMBER_BASE で確定。
                 pl[PieceNumber::KING as usize] = BonaPiece::ZERO;
                 pl[(PieceNumber::KING + 1) as usize] = BonaPiece::ZERO;
                 pl
@@ -1426,17 +1419,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             (old_bp, new_bp)
         };
 
-        // HalfKP (= !INCLUDE_KING_IN_PIECE_LIST) は玉の BonaPiece を特徴量に含めない。
-        // 自玉移動は `needs_refresh` (FriendKingMoved) で full refresh が走るが、
-        // 相手玉移動は refresh が走らずこの fast path に dirty_piece が流れてくる。
-        // 玉 BP (>= FE_END) を `FT::feature_index` に渡すと OOR で panic するため、
-        // ここで検出して slow path (`append_changed_indices` 経由、玉 BP を除外する)
-        // にフォールバックする。INCLUDE_KING_IN_PIECE_LIST は const なので HalfKa*
-        // 系では分岐ごと dead-code eliminate される。
-        //
-        // `dirty_num == 0` (パス手・盤面変化なし) の場合は `dn == 0` で本ループは
-        // no-op、続く `match dirty_piece.dirty_num` の `_ => false` で fallback する
-        // ため、guard 自体の早期 return は不要。
+        // HalfKp で相手玉移動は `needs_refresh` で拾えず fast path に流れる。
+        // 玉 BonaPiece (`>= FE_END`) を `FT::feature_index` に渡すと OOR になるため
+        // slow path (`append_changed_indices` が玉 BP を除外) にフォールバックする。
         if !FT::INCLUDE_KING_IN_PIECE_LIST {
             use super::bona_piece::FE_END;
             let dn = dirty_piece.dirty_num as usize;
