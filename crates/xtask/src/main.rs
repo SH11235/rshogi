@@ -716,8 +716,10 @@ binary = "rshogi-usi-universal"
         let parsed: Manifest = toml::from_str(legacy).unwrap_or_else(|e| {
             panic!("legacy manifest with `flavor` field should parse, got: {e:#}")
         });
+        assert_eq!(parsed.schema_version, 1);
         assert_eq!(parsed.edition, "edition-universal");
         assert_eq!(parsed.profile, "production");
+        assert_eq!(parsed.binary, "rshogi-usi-universal");
     }
 
     #[test]

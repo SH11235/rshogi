@@ -1,6 +1,6 @@
 # ビルド設定の Edition 軸設計 (Flavor 軸は非採用、Supplement 参照)
 
-- **Status**: Proposed (本体) / Flavor 軸は 2026-05-25 supplement で非採用に確定
+- **Status**: Accepted (Edition 軸) / Flavor 軸は 2026-05-25 supplement で非採用に確定
 - **Date**: 2026-05-24 (本体) / 2026-05-25 (Flavor 軸 retire supplement)
 - **設計レビュー**: local Codex (REQUEST CHANGES → 反映済) / local Claude (APPROVE WITH SUGGESTIONS → 反映済) / GitHub Codex bot + Claude bot (PR #733 で auto-review、Critical 1 + Major 2 + Minor 2 + 事実誤り 1 を全て反映)
 
