@@ -56,8 +56,19 @@ pub const HALFKP_DIMENSIONS: usize = 81 * super::bona_piece::FE_END;
 // HalfKaHmMerged^ アーキテクチャ用定数
 // =============================================================================
 
-/// HalfKaHmMerged^のバージョン（nnue-pytorch互換）
+/// HalfKaHmMerged^のバージョン（nnue-pytorch互換）。
+///
+/// HalfKa 系 / HalfKaHm 系の `.bin` と、bucket 数 9 固定で `num_buckets` field を
+/// 持たない LayerStack `.bin` がこの値を共有する。後者の dispatch は arch_str で
+/// 判別する。
 pub const NNUE_VERSION_HALFKA: u32 = 0x7AF32F20;
+
+/// LayerStack `.bin` の自己記述 layout のバージョン。
+///
+/// `arch_str` の直後に `num_buckets: u32` field が挿入された layout。
+/// `NNUE_VERSION_HALFKA` は本 field を持たないため、engine は version で
+/// 「field を読むか / 暗黙 9 で進めるか」を分岐する。
+pub const NNUE_VERSION_LAYERSTACK_NUM_BUCKETS: u32 = 0x7AF32F21;
 
 /// キングバケット数（Half-Mirror: 9段 × 5筋）
 pub const KING_BUCKETS: usize = 45;
@@ -138,8 +149,18 @@ pub const LAYER_STACK_16X32_MAIN_DIM: usize = 15;
 /// LayerStacks の L2 出力次元数
 pub const NNUE_PYTORCH_L3: usize = 32;
 
-/// LayerStacks のバケット数
-pub const NUM_LAYER_STACK_BUCKETS: usize = 9;
+/// LayerStacks の bucket 数を `.bin` header から読めない legacy 形式
+/// (`NNUE_VERSION_HALFKA`) で前提とする値。tatara の `--num-buckets` 既定値
+/// (= 9) と一致するため、9-bucket 学習済みの配布 net をそのまま読める。
+pub const DEFAULT_NUM_BUCKETS: usize = 9;
+
+/// engine が受理する LayerStack bucket 数の上限。`PSQT accumulator` や PSQT
+/// SIMD path (AVX-512 16-lane mask、AVX2 8-lane × 2 chunk) の固定長レジスタ・
+/// 配列サイズと一致する。`.bin` から読んだ `num_buckets` が本値を超える場合は
+/// `InvalidData` で reject し、本値を上げた engine を再ビルドさせる。
+/// 16 を採るのは AVX-512 1 命令 = 16 lane と一致し、tatara の sweep 範囲
+/// (5/8/9/12/16 等) を吸収できるため。
+pub const MAX_LAYER_STACK_BUCKETS: usize = 16;
 
 /// LayerStacks 16x32 バリアントの L1層出力次元数（main 15 + skip 1 = 16）
 pub const LAYER_STACK_16X32_L1_OUT: usize = LAYER_STACK_16X32_MAIN_DIM + 1; // 16

@@ -23,8 +23,8 @@ use clap::Parser;
 
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
-    AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DirtyPiece, LayerStackBucketMode,
-    LsFeatureSpec, NNUEEvaluator, NNUENetwork, NetworkLayerStacks,
+    AccumulatorCacheLayerStacks, AccumulatorLayerStacks, DEFAULT_NUM_BUCKETS, DirtyPiece,
+    LayerStackBucketMode, LsFeatureSpec, NNUEEvaluator, NNUENetwork, NetworkLayerStacks,
     SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_progress8kpabs_bucket_index,
     get_layer_stack_progress_kpabs_weights, ls_dispatch_ft_size, parse_layer_stack_bucket_mode,
     set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
@@ -137,12 +137,7 @@ struct LayerStackBenchResult {
 }
 
 impl LayerStackBenchResult {
-    fn print(
-        &self,
-        arch_name: &str,
-        bucket_mode: LayerStackBucketMode,
-        bucket_counts: &[usize; 9],
-    ) {
+    fn print(&self, arch_name: &str, bucket_mode: LayerStackBucketMode, bucket_counts: &[usize]) {
         println!("=== {arch_name} / {} ===", self.bench_name);
         println!("  bucket_mode:         {}", bucket_mode.as_str());
         println!("  dataset buckets:     {}", format_bucket_counts(bucket_counts));
@@ -176,8 +171,10 @@ struct LayerStackCases<const L1: usize> {
     propagate_cases: Vec<LayerStackPropagateCase<L1>>,
     eval_cases: Vec<LayerStackEvalCase<L1>>,
     update_cache_cases: Vec<LayerStackUpdateCacheCase<L1>>,
-    bucket_counts: [usize; 9],
-    update_bucket_counts: [usize; 9],
+    /// 各 bucket への dataset 分布 (長さ = `net.num_buckets`)
+    bucket_counts: Vec<usize>,
+    /// 各 bucket への dataset 分布 (1 手進めた後、長さ = `net.num_buckets`)
+    update_bucket_counts: Vec<usize>,
 }
 
 impl BenchResult {
@@ -263,7 +260,16 @@ fn load_progress_kpabs_weights(path: &PathBuf) -> Result<Box<[f32]>> {
 }
 
 /// progress8kpabs bucket 計算のマイクロベンチマーク
-fn bench_progress_bucket(positions: &[Position], weights: &[f32], warmup: u64, iterations: u64) {
+///
+/// `num_buckets` は net file 由来の bucket 数。net をロードしていない bench-only
+/// 経路では caller が渡す (通常は `net.num_buckets()` または `DEFAULT_NUM_BUCKETS`)。
+fn bench_progress_bucket(
+    positions: &[Position],
+    weights: &[f32],
+    num_buckets: usize,
+    warmup: u64,
+    iterations: u64,
+) {
     // ウォームアップ
     for i in 0..warmup {
         let pos = &positions[i as usize % positions.len()];
@@ -271,6 +277,7 @@ fn bench_progress_bucket(positions: &[Position], weights: &[f32], warmup: u64, i
             pos,
             pos.side_to_move(),
             weights,
+            num_buckets,
         ));
     }
 
@@ -282,6 +289,7 @@ fn bench_progress_bucket(positions: &[Position], weights: &[f32], warmup: u64, i
             pos,
             pos.side_to_move(),
             weights,
+            num_buckets,
         ));
     }
     let duration = start.elapsed();
@@ -290,31 +298,43 @@ fn bench_progress_bucket(positions: &[Position], weights: &[f32], warmup: u64, i
     let ops_per_sec = 1_000_000_000.0 / ns_per_op;
 
     // 各局面の bucket 値を表示
-    println!("=== progress8kpabs bucket ===");
+    println!("=== progress8kpabs bucket (N={num_buckets}) ===");
     for (i, pos) in positions.iter().enumerate() {
-        let bucket =
-            compute_layer_stack_progress8kpabs_bucket_index(pos, pos.side_to_move(), weights);
+        let bucket = compute_layer_stack_progress8kpabs_bucket_index(
+            pos,
+            pos.side_to_move(),
+            weights,
+            num_buckets,
+        );
         println!("  position[{i}]: bucket={bucket}");
     }
     println!("  {:.1} ns/op ({:.0} ops/sec)", ns_per_op, ops_per_sec);
     println!();
     println!("--- progress8kpabs JSON ---");
-    println!(r#"{{"bucket_ns":{:.1},"bucket_ops_per_sec":{:.0}}}"#, ns_per_op, ops_per_sec);
+    println!(
+        r#"{{"bucket_ns":{:.1},"bucket_ops_per_sec":{:.0},"num_buckets":{}}}"#,
+        ns_per_op, ops_per_sec, num_buckets
+    );
     println!();
 }
 
-fn compute_layer_stack_bucket_index(pos: &Position, mode: LayerStackBucketMode) -> usize {
+fn compute_layer_stack_bucket_index(
+    pos: &Position,
+    mode: LayerStackBucketMode,
+    num_buckets: usize,
+) -> usize {
     let side_to_move = pos.side_to_move();
     match mode {
         LayerStackBucketMode::Progress8KPAbs => compute_layer_stack_progress8kpabs_bucket_index(
             pos,
             side_to_move,
             get_layer_stack_progress_kpabs_weights(),
+            num_buckets,
         ),
     }
 }
 
-fn format_bucket_counts(bucket_counts: &[usize; 9]) -> String {
+fn format_bucket_counts(bucket_counts: &[usize]) -> String {
     let parts: Vec<String> = bucket_counts
         .iter()
         .enumerate()
@@ -359,17 +379,18 @@ fn prepare_layer_stack_cases<
     positions: &[Position],
     bucket_mode: LayerStackBucketMode,
 ) -> Result<LayerStackCases<L1>> {
+    let num_buckets = net.num_buckets;
     let mut propagate_cases = Vec::with_capacity(positions.len());
     let mut eval_cases = Vec::with_capacity(positions.len());
     let mut update_cache_cases = Vec::with_capacity(positions.len());
-    let mut bucket_counts = [0usize; 9];
-    let mut update_bucket_counts = [0usize; 9];
+    let mut bucket_counts = vec![0usize; num_buckets];
+    let mut update_bucket_counts = vec![0usize; num_buckets];
 
     for pos in positions {
         let mut accumulator = AccumulatorLayerStacks::<L1>::new();
         net.refresh_accumulator(pos, &mut accumulator);
 
-        let bucket_index = compute_layer_stack_bucket_index(pos, bucket_mode);
+        let bucket_index = compute_layer_stack_bucket_index(pos, bucket_mode, num_buckets);
         bucket_counts[bucket_index] += 1;
 
         let (us_acc, them_acc) = if pos.side_to_move() == Color::Black {
@@ -394,7 +415,8 @@ fn prepare_layer_stack_cases<
         if let Some(mv) = select_non_king_legal_move(pos) {
             let mut next_pos = pos.clone();
             let dirty_piece = next_pos.do_move(mv, pos.gives_check(mv));
-            let next_bucket_index = compute_layer_stack_bucket_index(&next_pos, bucket_mode);
+            let next_bucket_index =
+                compute_layer_stack_bucket_index(&next_pos, bucket_mode, num_buckets);
             update_bucket_counts[next_bucket_index] += 1;
 
             update_cache_cases.push(LayerStackUpdateCacheCase {
@@ -581,7 +603,7 @@ fn print_ls_json(
     mode: BenchMode,
     arch_name: &str,
     bucket_mode: LayerStackBucketMode,
-    bucket_counts: &[usize; 9],
+    bucket_counts: &[usize],
     result: &LayerStackBenchResult,
 ) {
     println!("--- JSON ---");
@@ -675,14 +697,20 @@ pub fn run() -> Result<()> {
         None
     };
 
-    // progress8kpabs bucket ベンチマーク
-    if let Some(weights) = progress_weights.as_deref() {
-        bench_progress_bucket(&positions, weights, cli.warmup, cli.iterations);
-    }
-
     println!("Loading NNUE file: {}", cli.nnue_file.display());
     let network = Arc::new(NNUENetwork::load(&cli.nnue_file)?);
     let arch_name = network.architecture_name();
+
+    // progress8kpabs bucket ベンチマーク (net 由来の num_buckets で駆動)
+    if let Some(weights) = progress_weights.as_deref() {
+        let num_buckets = if network.is_layer_stacks() {
+            network.as_layer_stacks().num_buckets()
+        } else {
+            // 非 LayerStack net: 微小ベンチに net 由来 N が無いので default
+            DEFAULT_NUM_BUCKETS
+        };
+        bench_progress_bucket(&positions, weights, num_buckets, cli.warmup, cli.iterations);
+    }
     println!("Architecture: {arch_name}");
     println!();
 

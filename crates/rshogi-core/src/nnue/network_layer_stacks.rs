@@ -26,7 +26,10 @@
 
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
-use super::constants::{FV_SCALE_HALFKA, MAX_ARCH_LEN};
+use super::constants::{
+    DEFAULT_NUM_BUCKETS, FV_SCALE_HALFKA, MAX_ARCH_LEN, MAX_LAYER_STACK_BUCKETS,
+    NNUE_VERSION_HALFKA, NNUE_VERSION_LAYERSTACK_NUM_BUCKETS,
+};
 #[cfg(any(
     feature = "ls-size-1536x16x32",
     feature = "ls-size-768x16x32",
@@ -64,11 +67,15 @@ use std::marker::PhantomData;
 use std::path::Path;
 
 #[inline]
-fn compute_layer_stacks_bucket_index(pos: &Position, side_to_move: Color) -> usize {
+fn compute_layer_stacks_bucket_index(
+    pos: &Position,
+    side_to_move: Color,
+    num_buckets: usize,
+) -> usize {
     match get_layer_stack_bucket_mode() {
         LayerStackBucketMode::Progress8KPAbs => {
             let weights = get_layer_stack_progress_kpabs_weights();
-            compute_layer_stack_progress8kpabs_bucket_index(pos, side_to_move, weights)
+            compute_layer_stack_progress8kpabs_bucket_index(pos, side_to_move, weights, num_buckets)
         }
     }
 }
@@ -121,7 +128,9 @@ fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16;
 /// LayerStacksアーキテクチャのNNUEネットワーク
 ///
 /// `FT` は LS の Feature Transformer 軸 (5 種類のうち 1 つ) を表す marker type。
-/// FT::DIMENSIONS 次元 + L1次元 Feature Transformer + 9バケット LayerStacks。
+/// FT::DIMENSIONS 次元 + L1 次元 Feature Transformer + `num_buckets` 個の bucket
+/// による LayerStacks。`num_buckets` は net file の header から読まれる
+/// (ADR `2026-05-26`)。
 pub struct NetworkLayerStacks<
     const L1: usize,
     const LS_L1_OUT: usize,
@@ -131,10 +140,12 @@ pub struct NetworkLayerStacks<
 > {
     /// Feature Transformer (FT::DIMENSIONS → L1)
     pub feature_transformer: FeatureTransformerLayerStacks<L1, FT>,
-    /// LayerStacks (9バケット)
+    /// LayerStacks (`num_buckets` 個の bucket)
     pub layer_stacks: LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>,
     /// 評価値スケーリング係数（アーキテクチャ文字列から取得、USIオプションでオーバーライド可）
     pub fv_scale: i32,
+    /// bucket 数 (= net file の `num_buckets` field、legacy `.bin` は 9)
+    pub num_buckets: usize,
     _ft: PhantomData<FT>,
 }
 
@@ -170,8 +181,30 @@ impl<
     ) -> io::Result<Self> {
         let mut buf4 = [0u8; 4];
 
-        // version（呼び出し元で検証済み）
+        // version（呼び出し元 NNUENetwork::read で大枠の受理範囲を確認済み）
+        // ここでは LayerStack として受理する 2 つ:
+        // - `NNUE_VERSION_HALFKA` (= `0x7AF32F20`): num_buckets field 無し、暗黙 9
+        // - `NNUE_VERSION_LAYERSTACK_NUM_BUCKETS` (= `0x7AF32F21`): arch_str 直後に
+        //   num_buckets u32 field を持つ self-describing layout
+        //
+        // HalfKP version `NNUE_VERSION (0x7AF32F16)` を `NNUE_ARCHITECTURE=LayerStacks`
+        // override 経由で本関数に渡されるケースの防衛: silent な偽 9-bucket 読込を
+        // 避けるため、ここで明示的に reject する。
         reader.read_exact(&mut buf4)?;
+        let version = u32::from_le_bytes(buf4);
+        if version != NNUE_VERSION_HALFKA && version != NNUE_VERSION_LAYERSTACK_NUM_BUCKETS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "LayerStack reader expected version {NNUE_VERSION_HALFKA:#x} (legacy, \
+                     implicit num_buckets=9) or {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x} \
+                     (self-describing with num_buckets header), got {version:#x}. \
+                     Non-LayerStack `.bin` cannot be dispatched to LayerStacks even via \
+                     `NNUE_ARCHITECTURE=LayerStacks` override."
+                ),
+            ));
+        }
+        let has_num_buckets_field = version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS;
 
         // 構造ハッシュ
         reader.read_exact(&mut buf4)?;
@@ -190,6 +223,28 @@ impl<
 
         // アーキテクチャ文字列を解析
         let arch_str = String::from_utf8_lossy(&arch);
+
+        // num_buckets-header layout: u32 を arch_str 直後・ft_hash 直前に読む。
+        // legacy: field 無し → DEFAULT_NUM_BUCKETS (9) として進める。
+        // tatara `save_quantised` の write 順と対称 (version → network_hash →
+        // arch_len → arch_str → num_buckets → ft_hash → FT/PSQT/LayerStack blocks)。
+        let num_buckets = if has_num_buckets_field {
+            reader.read_exact(&mut buf4)?;
+            let n = u32::from_le_bytes(buf4) as usize;
+            if n == 0 || n > MAX_LAYER_STACK_BUCKETS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "NNUE LayerStack num_buckets={n} out of range (1..={MAX_LAYER_STACK_BUCKETS}). \
+                         Rebuild rshogi-core with a larger MAX_LAYER_STACK_BUCKETS if needed \
+                         (see ADR 2026-05-26)."
+                    ),
+                ));
+            }
+            n
+        } else {
+            DEFAULT_NUM_BUCKETS
+        };
 
         // FV_SCALE 検出
         let fv_scale = parse_fv_scale_from_arch(&arch_str).unwrap_or(FV_SCALE_HALFKA);
@@ -224,7 +279,7 @@ impl<
         {
             let has_psqt = psqt_override.unwrap_or_else(|| arch_str.contains("PSQT="));
             if has_psqt {
-                feature_transformer.read_psqt(reader)?;
+                feature_transformer.read_psqt(reader, num_buckets)?;
             }
         }
         #[cfg(not(feature = "ls-ext-psqt"))]
@@ -280,8 +335,8 @@ impl<
             ));
         }
 
-        // LayerStacks を読み込み（FC層は常に非圧縮）
-        let layer_stacks = LayerStacks::read(reader)?;
+        // LayerStacks を読み込み（FC 層は常に非圧縮、num_buckets 個分）
+        let layer_stacks = LayerStacks::read(reader, num_buckets)?;
 
         // EOF検証: 余りデータがないことを確認
         // factorizedモデル（非coalesced）を誤って読んだ場合、
@@ -326,6 +381,7 @@ impl<
             feature_transformer,
             layer_stacks,
             fv_scale,
+            num_buckets,
             _ft: PhantomData,
         })
     }
@@ -366,7 +422,7 @@ impl<
     /// 配列はMaybeUninitで確保し、直後のsqr_clipped_relu_transformで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks<L1>) -> Value {
         let side_to_move = pos.side_to_move();
-        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move);
+        let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move, self.num_buckets);
         self.evaluate_with_bucket(pos, acc, bucket_index)
     }
 
@@ -780,6 +836,11 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
     /// FV_SCALE を取得
     pub fn fv_scale(&self) -> i32 {
         ls_match_size!(self, net => net.fv_scale)
+    }
+
+    /// 現在 load されている net の bucket 数 (= `.bin` header の `num_buckets`)
+    pub fn num_buckets(&self) -> usize {
+        ls_match_size!(self, net => net.num_buckets)
     }
 
     /// (L1, L2, L3) と PSQT override から読み込み (FT は型レベルで固定)。
@@ -1317,6 +1378,11 @@ impl LayerStacksNetwork {
     /// L1 サイズを取得
     pub fn l1_size(&self) -> usize {
         ls_match_ft!(self, by_ft => by_ft.l1_size())
+    }
+
+    /// 現在 load されている net の bucket 数 (= `.bin` header の `num_buckets`)
+    pub fn num_buckets(&self) -> usize {
+        ls_match_ft!(self, by_ft => by_ft.num_buckets())
     }
 
     /// アーキテクチャ仕様を取得

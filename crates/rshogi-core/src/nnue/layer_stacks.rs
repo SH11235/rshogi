@@ -16,7 +16,7 @@
 //! ```
 
 use super::accumulator::Aligned;
-use super::constants::{NNUE_PYTORCH_L3, NUM_LAYER_STACK_BUCKETS};
+use super::constants::{DEFAULT_NUM_BUCKETS, MAX_LAYER_STACK_BUCKETS, NNUE_PYTORCH_L3};
 use super::layers::AffineTransform;
 use std::io::{self, Read};
 
@@ -171,19 +171,22 @@ impl<
 }
 
 // =============================================================================
-// LayerStacks (9バケット)
+// LayerStacks (可変 num_buckets)
 // =============================================================================
 
-/// LayerStacks: 9個のバケットを持つ構造
+/// LayerStacks: 可変長 `num_buckets` 個の bucket を持つ構造
+///
+/// `buckets` は load 時に 1 回だけ `Vec::with_capacity` + push で構築され、
+/// 以後 **read-only**。ホットパスでは indexing のみで再 alloc は発生しない
+/// (ADR `2026-05-26` §2.7.3)。
 pub struct LayerStacks<
     const L1: usize,
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
 > {
-    /// 9個のバケット
-    pub buckets:
-        [LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>; NUM_LAYER_STACK_BUCKETS],
+    /// `num_buckets` 個の bucket。長さは net file の `num_buckets` で決まる。
+    pub buckets: Vec<LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>>,
 }
 
 impl<
@@ -193,28 +196,46 @@ impl<
     const LS_L2_PADDED_INPUT: usize,
 > LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
 {
-    /// 新規作成
+    /// 新規作成 (default `DEFAULT_NUM_BUCKETS` 個の bucket をゼロ初期化)
     pub fn new() -> Self {
-        Self {
-            buckets: std::array::from_fn(|_| LayerStackBucket::new()),
-        }
+        Self::with_num_buckets(DEFAULT_NUM_BUCKETS)
     }
 
-    /// ファイルから読み込み
+    /// 指定 `num_buckets` でゼロ初期化
     ///
-    /// FC層は常に非圧縮形式（raw bytes）で保存されている。
-    /// LEB128圧縮はFeature Transformerにのみ適用される。
-    pub fn read<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut stacks = Self::new();
+    /// `num_buckets` は engine 側で `1..=MAX_LAYER_STACK_BUCKETS` を満たすことを
+    /// 呼び出し元 (`read_with_options` 等) が保証する。
+    pub fn with_num_buckets(num_buckets: usize) -> Self {
+        debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
+        let mut buckets = Vec::with_capacity(num_buckets);
+        for _ in 0..num_buckets {
+            buckets.push(LayerStackBucket::new());
+        }
+        Self { buckets }
+    }
 
-        // fc_hash をスキップしてバケットごとに読み込み
+    /// 現在の bucket 数
+    #[inline]
+    pub fn num_buckets(&self) -> usize {
+        self.buckets.len()
+    }
+
+    /// ファイルから `num_buckets` 個の bucket を読み込む
+    ///
+    /// FC 層は常に非圧縮形式（raw bytes）で保存されている。
+    /// LEB128 圧縮は Feature Transformer にのみ適用される。
+    ///
+    /// `num_buckets` は net file header の `num_buckets` field (legacy `.bin` の
+    /// 場合は `DEFAULT_NUM_BUCKETS = 9`)。
+    pub fn read<R: Read>(reader: &mut R, num_buckets: usize) -> io::Result<Self> {
+        let mut stacks = Self::with_num_buckets(num_buckets);
+
+        // fc_hash をスキップして bucket ごとに読み込み
         let mut buf4 = [0u8; 4];
-
         for bucket in stacks.buckets.iter_mut() {
             // fc_hash を読み飛ばす
             reader.read_exact(&mut buf4)?;
             let _fc_hash = u32::from_le_bytes(buf4);
-
             // バケットを読み込み（常に非圧縮形式）
             *bucket = LayerStackBucket::read(reader)?;
         }
@@ -224,9 +245,11 @@ impl<
 
     /// 生スコアを計算（スケーリング前）
     pub fn evaluate_raw(&self, bucket_index: usize, input: &[u8; L1]) -> i32 {
-        debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
-        // SAFETY: bucket_index は progress_sum_to_bucket() または clamp(0, NUM-1) 由来で
-        //         常に NUM_LAYER_STACK_BUCKETS 未満。
+        debug_assert!(bucket_index < self.buckets.len());
+        // SAFETY: bucket_index は progress_sum_to_bucket() で `[0, num_buckets)` に
+        //         clamp 済み (network_layer_stacks 経由)。`self.buckets` は load 時
+        //         に push のみで構築され以後 read-only のため、長さ
+        //         `num_buckets` が保持される。
         unsafe { self.buckets.get_unchecked(bucket_index) }.propagate(input)
     }
 
@@ -239,7 +262,7 @@ impl<
         bucket_index: usize,
         input: &[u8; L1],
     ) -> (i32, [i32; LS_L1_OUT], i32) {
-        debug_assert!(bucket_index < NUM_LAYER_STACK_BUCKETS);
+        debug_assert!(bucket_index < self.buckets.len());
         self.buckets[bucket_index].propagate_with_diagnostics(input)
     }
 }
@@ -573,6 +596,9 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
 /// 引数:
 /// - f_king_rank: 味方玉の段（0-8、味方から見た相対段）
 /// - e_king_rank: 相手玉の段（0-8、相手から見た相対段）
+///
+/// 本関数は legacy 9-bucket 固定方式 (king-rank 由来)。本番評価の bucket 選択は
+/// `network_layer_stacks::compute_layer_stacks_bucket_index` (progress-based) を経由する。
 pub fn compute_bucket_index(f_king_rank: usize, e_king_rank: usize) -> usize {
     // 味方玉の段 → bucket オフセット
     const F_TO_INDEX: [usize; 9] = [0, 0, 0, 3, 3, 3, 6, 6, 6];
@@ -583,7 +609,7 @@ pub fn compute_bucket_index(f_king_rank: usize, e_king_rank: usize) -> usize {
     let f_idx = F_TO_INDEX[f_king_rank.min(8)];
     let e_idx = E_TO_INDEX[e_king_rank.min(8)];
 
-    (f_idx + e_idx).min(NUM_LAYER_STACK_BUCKETS - 1)
+    (f_idx + e_idx).min(DEFAULT_NUM_BUCKETS - 1)
 }
 
 /// Position から両玉の相対段を計算
@@ -644,7 +670,16 @@ mod tests {
     #[test]
     fn test_layer_stacks_new() {
         let stacks = TestLayerStacks::new();
-        assert_eq!(stacks.buckets.len(), NUM_LAYER_STACK_BUCKETS);
+        assert_eq!(stacks.buckets.len(), DEFAULT_NUM_BUCKETS);
+    }
+
+    #[test]
+    fn test_layer_stacks_with_num_buckets() {
+        for &n in &[1usize, 5, 8, 9, 12, MAX_LAYER_STACK_BUCKETS] {
+            let stacks = TestLayerStacks::with_num_buckets(n);
+            assert_eq!(stacks.buckets.len(), n);
+            assert_eq!(stacks.num_buckets(), n);
+        }
     }
 
     #[test]

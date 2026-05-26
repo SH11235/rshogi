@@ -25,7 +25,10 @@ use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
 use super::bona_piece::BonaPiece;
 use super::bona_piece_halfka_hm_merged::FE_OLD_END;
-use super::constants::{MAX_ARCH_LEN, NNUE_VERSION, NNUE_VERSION_HALFKA};
+use super::constants::{
+    MAX_ARCH_LEN, MAX_LAYER_STACK_BUCKETS, NNUE_VERSION, NNUE_VERSION_HALFKA,
+    NNUE_VERSION_LAYERSTACK_NUM_BUCKETS,
+};
 use super::halfka_hm_merged::{HalfKaHmMergedNetwork, HalfKaHmMergedStack};
 use super::halfka_hm_split::{HalfKaHmSplitNetwork, HalfKaHmSplitStack};
 use super::halfka_merged::{HalfKaMergedNetwork, HalfKaMergedStack};
@@ -44,7 +47,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 /// グローバルなNNUEネットワーク（HalfKP/HalfKaSplit/HalfKaHmMerged^）
 static NETWORK: LazyLock<RwLock<Option<Arc<NNUENetwork>>>> = LazyLock::new(|| RwLock::new(None));
@@ -138,18 +141,34 @@ impl LayerStackBucketMode {
 /// progress8kpabs で使用する重み数（81 king squares x FE_OLD_END BonaPiece）
 pub const SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS: usize = 81 * FE_OLD_END;
 
-/// sigmoid(x)*8 = k となる x の閾値 (k=1..7)。
-/// x = ln(k / (8-k)) で事前計算。
-/// sum との比較のみで bucket index を決定でき、exp() が不要になる。
-const PROGRESS_BUCKET_THRESHOLDS: [f32; 7] = [
-    -1.945_910_1, // k=1: ln(1/7)
-    -1.098_612_3, // k=2: ln(1/3)
-    -0.510_825_6, // k=3: ln(3/5)
-    0.0,          // k=4: ln(1)
-    0.510_825_6,  // k=5: ln(5/3)
-    1.098_612_3,  // k=6: ln(3)
-    1.945_910_1,  // k=7: ln(7)
-];
+/// `sigmoid(x) * N = k` となる x の閾値 (k = 1..N-1) を N ごとに保持するテーブル。
+///
+/// `OnceLock` で N 値ごとに lazy 初期化し、`ln(k / (N-k))` を pre-compute する。
+/// ホットパス (`progress_sum_to_bucket`) では slice を取って `partition_point`
+/// で `floor(sigmoid(sum) * N)` 相当を求める。tatara `progress_kpabs::bucket`
+/// (`floor(p * N).clamp(0, N-1)`) と等価 (ADR `2026-05-26` §2.4.1 で証明)。
+///
+/// 配列添字 N (`1..=MAX_LAYER_STACK_BUCKETS`) ごとに `OnceLock<Box<[f32]>>`。
+/// 添字 0 は使われない placeholder。
+static PROGRESS_BUCKET_THRESHOLDS: [OnceLock<Box<[f32]>>; MAX_LAYER_STACK_BUCKETS + 1] =
+    [const { OnceLock::new() }; MAX_LAYER_STACK_BUCKETS + 1];
+
+/// N bucket 用の閾値 slice を取得 (必要なら初期化)。
+fn layer_stack_progress_thresholds(num_buckets: usize) -> &'static [f32] {
+    debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
+    PROGRESS_BUCKET_THRESHOLDS[num_buckets]
+        .get_or_init(|| {
+            // N - 1 個の閾値 (N = 1 なら空配列)
+            let mut v = Vec::with_capacity(num_buckets.saturating_sub(1));
+            let n_f = num_buckets as f32;
+            for k in 1..num_buckets {
+                // t_k = ln(k / (N - k)), sigmoid(t_k) = k / N
+                v.push(((k as f32) / (n_f - k as f32)).ln());
+            }
+            v.into_boxed_slice()
+        })
+        .as_ref()
+}
 
 // progress8kpabs の差分計算済み bucket index キャッシュ（スレッドローカル）
 //
@@ -322,7 +341,7 @@ impl NNUENetwork {
         let version = u32::from_le_bytes(buf4);
 
         match version {
-            NNUE_VERSION | NNUE_VERSION_HALFKA => {
+            NNUE_VERSION | NNUE_VERSION_HALFKA | NNUE_VERSION_LAYERSTACK_NUM_BUCKETS => {
                 // 3. hash と arch_len を読む
                 reader.read_exact(&mut buf4)?; // ネットワークハッシュ
                 reader.read_exact(&mut buf4)?; // arch_len
@@ -347,20 +366,51 @@ impl NNUENetwork {
                     _ => Activation::CReLU,
                 };
 
-                // FeatureSet を決定: USI オプションが明示指定されていればそちらを優先
+                // FeatureSet を決定: USI オプションが明示指定されていればそちらを優先。
+                // `NNUE_VERSION_LAYERSTACK_NUM_BUCKETS` は LayerStack 専用の
+                // self-describing layout。arch_str 直後に `num_buckets: u32` field を
+                // 持つため、非-LayerStack reader に渡すと file_size 検出が失敗 (ft_hash
+                // 等が 4 byte ずれる) するか、悪ければ別 arch として誤読する。誤読を
+                // 確実に防ぐため、当該 version + 非-LayerStack override の組合せをここで明示
+                // reject する。
                 let arch_override = get_nnue_architecture_override();
-                let effective_feature_set = match arch_override {
-                    NNUEArchitectureOverride::Auto => {
-                        // 自動検出: ヘッダーから FeatureSet を取得
-                        let parsed = super::spec::parse_architecture(&arch_str)
-                            .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
-                        parsed.feature_set
+                if version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS
+                    && !matches!(
+                        arch_override,
+                        NNUEArchitectureOverride::Auto
+                            | NNUEArchitectureOverride::LayerStacks
+                            | NNUEArchitectureOverride::LayerStacksPSQT,
+                    )
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "NNUE (version {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x}, LayerStack \
+                             with num_buckets header) は LayerStack 専用 layout。\
+                             NNUE_ARCHITECTURE override の値 (LayerStack 以外) では読めない。\
+                             override を `Auto` / `LayerStacks` / `LayerStacksPSQT` のいずれかに \
+                             変更するか、対応する legacy net を使用すること。"
+                        ),
+                    ));
+                }
+                let effective_feature_set = if version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS
+                    && matches!(arch_override, NNUEArchitectureOverride::Auto)
+                {
+                    FeatureSet::LayerStacks
+                } else {
+                    match arch_override {
+                        NNUEArchitectureOverride::Auto => {
+                            // 自動検出: ヘッダーから FeatureSet を取得
+                            let parsed = super::spec::parse_architecture(&arch_str)
+                                .map_err(|msg| io::Error::new(io::ErrorKind::InvalidData, msg))?;
+                            parsed.feature_set
+                        }
+                        NNUEArchitectureOverride::HalfKP => FeatureSet::HalfKP,
+                        NNUEArchitectureOverride::HalfKaHmMerged => FeatureSet::HalfKaHmMerged,
+                        NNUEArchitectureOverride::HalfKaSplit => FeatureSet::HalfKaSplit,
+                        NNUEArchitectureOverride::LayerStacks
+                        | NNUEArchitectureOverride::LayerStacksPSQT => FeatureSet::LayerStacks,
                     }
-                    NNUEArchitectureOverride::HalfKP => FeatureSet::HalfKP,
-                    NNUEArchitectureOverride::HalfKaHmMerged => FeatureSet::HalfKaHmMerged,
-                    NNUEArchitectureOverride::HalfKaSplit => FeatureSet::HalfKaSplit,
-                    NNUEArchitectureOverride::LayerStacks
-                    | NNUEArchitectureOverride::LayerStacksPSQT => FeatureSet::LayerStacks,
                 };
 
                 // LayerStacks は特殊処理（FT が LEB128 圧縮のためファイルサイズ検出の対象外）
@@ -473,7 +523,9 @@ impl NNUENetwork {
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "Unknown NNUE version: {version:#x}. Expected {NNUE_VERSION:#x} (HalfKP) or {NNUE_VERSION_HALFKA:#x} (HalfKaHmMerged^)"
+                    "Unknown NNUE version: {version:#x}. Expected {NNUE_VERSION:#x} (HalfKP), \
+                     {NNUE_VERSION_HALFKA:#x} (HalfKaHmMerged^ / legacy LayerStack), or \
+                     {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x} (LayerStack with num_buckets header)"
                 ),
             )),
         }
@@ -826,13 +878,17 @@ pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode
     }
 }
 
-/// progress8kpabs 重みに基づいて LayerStacks bucket index (0..=7) を計算
+/// progress8kpabs 重みに基づいて LayerStacks bucket index `[0, num_buckets)` を計算
 ///
 /// `CACHED_PROGRESS_BUCKET` にキャッシュされた値がある場合はそちらを消費する。
+/// `num_buckets` は net file の `num_buckets` (active net 由来) を渡す。
+/// キャッシュは active net 1 つの不変条件のもとで作成・消費される
+/// (ADR `2026-05-26` §2.4.3)。
 pub fn compute_layer_stack_progress8kpabs_bucket_index(
     pos: &Position,
     _side_to_move: Color,
     weights: &[f32],
+    num_buckets: usize,
 ) -> usize {
     // 差分計算済みキャッシュがあれば消費して返す
     let cached = CACHED_PROGRESS_BUCKET.with(|c| c.replace(None));
@@ -841,7 +897,7 @@ pub fn compute_layer_stack_progress8kpabs_bucket_index(
     }
     // フォールバック: 全駒スキャン
     let sum = compute_progress8kpabs_sum(pos, weights);
-    progress_sum_to_bucket(sum)
+    progress_sum_to_bucket(sum, num_buckets)
 }
 
 /// progress8kpabs の重み付き和を全駒スキャンで計算（refresh 用）
@@ -967,9 +1023,16 @@ pub fn update_progress8kpabs_sum_diff(
 }
 
 /// progress_sum から bucket index を計算（閾値比較のみ）
+///
+/// 戻り値は `[0, num_buckets)`。式は tatara の
+/// `floor(sigmoid(sum) × num_buckets).clamp(0, num_buckets - 1)` と等価。
+/// 閾値テーブルは N ごとに `OnceLock` で lazy 構築される。
+///
+/// ADR `2026-05-26` §2.4.1 の等価性証明を参照。
 #[inline]
-pub fn progress_sum_to_bucket(sum: f32) -> usize {
-    PROGRESS_BUCKET_THRESHOLDS.partition_point(|&threshold| sum >= threshold)
+pub fn progress_sum_to_bucket(sum: f32, num_buckets: usize) -> usize {
+    let thresholds = layer_stack_progress_thresholds(num_buckets);
+    thresholds.partition_point(|&t| sum >= t)
 }
 
 /// NNUEを初期化（バージョン自動判別）
@@ -1083,7 +1146,7 @@ pub fn detect_format(bytes: &[u8], file_size: u64) -> io::Result<NnueFormatInfo>
     let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
 
     match version {
-        NNUE_VERSION | NNUE_VERSION_HALFKA => {
+        NNUE_VERSION | NNUE_VERSION_HALFKA | NNUE_VERSION_LAYERSTACK_NUM_BUCKETS => {
             // アーキテクチャ文字列長を読み取り
             let arch_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
 
@@ -1212,15 +1275,19 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
     // progress8kpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
     #[cfg(feature = "nnue-progress-diff")]
     if matches!(get_layer_stack_bucket_mode(), LayerStackBucketMode::Progress8KPAbs) {
+        // bucket binning は net の num_buckets で駆動する (file から読んだ値、
+        // ADR `2026-05-26` §2.4.3)。enum dispatch 経由で各 variant の値を取り、
+        // ensure_progress_bucket に伝播する。
+        let num_buckets = net.num_buckets();
         let bucket = match stack {
             #[cfg(feature = "ls-size-1536x16x32")]
-            LayerStacksAccStack::L1536x16x32(s) => ensure_progress_bucket(pos, s),
+            LayerStacksAccStack::L1536x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(feature = "ls-size-1536x32x32")]
-            LayerStacksAccStack::L1536x32x32(s) => ensure_progress_bucket(pos, s),
+            LayerStacksAccStack::L1536x32x32(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(feature = "ls-size-768x16x32")]
-            LayerStacksAccStack::L768x16x32(s) => ensure_progress_bucket(pos, s),
+            LayerStacksAccStack::L768x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(feature = "ls-size-512x16x32")]
-            LayerStacksAccStack::L512x16x32(s) => ensure_progress_bucket(pos, s),
+            LayerStacksAccStack::L512x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(not(any(
                 feature = "ls-size-1536x16x32",
                 feature = "ls-size-1536x32x32",
@@ -1245,6 +1312,7 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
 fn ensure_progress_bucket<const L1: usize>(
     pos: &Position,
     stack: &mut super::accumulator_layer_stacks::AccumulatorStackLayerStacks<L1>,
+    num_buckets: usize,
 ) -> usize {
     if !stack.current().computed_progress {
         let weights = get_layer_stack_progress_kpabs_weights();
@@ -1272,7 +1340,7 @@ fn ensure_progress_bucket<const L1: usize>(
             entry.computed_progress = true;
         }
     }
-    progress_sum_to_bucket(stack.current().progress_sum)
+    progress_sum_to_bucket(stack.current().progress_sum, num_buckets)
 }
 
 /// HalfKaHmMerged アキュムレータを更新して評価（内部実装）
@@ -1773,6 +1841,7 @@ fn update_accumulator_only_halfkp(network: &NNUENetwork, pos: &Position, stack: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nnue::constants::DEFAULT_NUM_BUCKETS;
     use crate::position::SFEN_HIRATE;
 
     /// NNUEが初期化されていない場合のフォールバック動作をテスト
@@ -2117,33 +2186,145 @@ mod tests {
         pos.set_sfen(SFEN_HIRATE).unwrap();
 
         let weights = vec![0.0f32; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS];
-        let b = compute_layer_stack_progress8kpabs_bucket_index(&pos, pos.side_to_move(), &weights);
-        assert_eq!(b, 4, "zero-weight progress8kpabs should map to the middle bucket");
+        // legacy 配布 net 互換の N=9 (DEFAULT_NUM_BUCKETS) で確認: sigmoid(0) = 0.5 →
+        // floor(0.5 * 9) = 4 (中間 bucket)。
+        let b = compute_layer_stack_progress8kpabs_bucket_index(
+            &pos,
+            pos.side_to_move(),
+            &weights,
+            DEFAULT_NUM_BUCKETS,
+        );
+        assert_eq!(b, 4, "zero-weight progress8kpabs at N=9 should map to bucket 4");
     }
 
     #[test]
     fn test_progress_bucket_thresholds_match_sigmoid() {
-        const NUM_BUCKETS: usize = 8;
-        // テーブル引きが元の sigmoid 方式と一致することを確認
-        let sigmoid_bucket = |sum: f32| -> usize {
+        // tatara `progress_kpabs::bucket` の `floor(p * N).clamp(0, N-1)` と engine 側
+        // partition_point 方式が N ∈ {1, 2, 3, 4, 5, 8, 9, 12, 16} で一致することを
+        // 各 sum 値で確認 (ADR `2026-05-26` §2.4.1 の等価性 + tests)。
+        let sigmoid_bucket = |sum: f32, n: usize| -> usize {
             let p = (1.0 / (1.0 + (-sum).exp())).clamp(0.0, 1.0);
-            let raw = (p * NUM_BUCKETS as f32).floor() as i32;
-            raw.clamp(0, (NUM_BUCKETS - 1) as i32) as usize
+            let raw = (p * n as f32).floor() as i32;
+            raw.clamp(0, (n as i32) - 1) as usize
         };
-        let threshold_bucket = |sum: f32| -> usize {
-            PROGRESS_BUCKET_THRESHOLDS
-                .iter()
-                .filter(|&&t| sum >= t)
-                .count()
-                .min(NUM_BUCKETS - 1)
-        };
-
-        // 閾値から離れた値では完全一致すべき
-        for &sum in &[
-            -10.0, -5.0, -3.0, -2.5, -1.5, -0.8, -0.3, 0.0, 0.3, 0.8, 1.5, 2.5, 3.0, 5.0, 10.0,
-        ] {
-            assert_eq!(sigmoid_bucket(sum), threshold_bucket(sum), "mismatch at sum={sum}");
+        let sums = [
+            f32::NEG_INFINITY,
+            -10.0,
+            -5.0,
+            -3.0,
+            -2.5,
+            -1.5,
+            -0.8,
+            -0.3,
+            0.0,
+            0.3,
+            0.8,
+            1.5,
+            2.5,
+            3.0,
+            5.0,
+            10.0,
+            f32::INFINITY,
+        ];
+        for &n in &[1usize, 2, 3, 4, 5, 8, 9, 12, MAX_LAYER_STACK_BUCKETS] {
+            for &sum in &sums {
+                let want = sigmoid_bucket(sum, n);
+                let got = progress_sum_to_bucket(sum, n);
+                assert_eq!(want, got, "mismatch at n={n}, sum={sum}");
+            }
         }
+        // 閾値 t_k ちょうど での tie-break: sum = t_k ⇔ sigmoid(t_k) = k/N で
+        // tatara floor(k) = k、engine partition_point = k。
+        for n in 2..=MAX_LAYER_STACK_BUCKETS {
+            for k in 1..n {
+                let t_k = ((k as f32) / (n as f32 - k as f32)).ln();
+                assert_eq!(
+                    progress_sum_to_bucket(t_k, n),
+                    k,
+                    "tie-break failed at n={n}, k={k}, t_k={t_k}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_progress_sum_to_bucket_extremes() {
+        for n in 1..=MAX_LAYER_STACK_BUCKETS {
+            assert_eq!(progress_sum_to_bucket(f32::NEG_INFINITY, n), 0);
+            assert_eq!(progress_sum_to_bucket(f32::INFINITY, n), n - 1);
+        }
+        // N=1 は常に bucket 0
+        for &sum in &[-100.0, 0.0, 100.0] {
+            assert_eq!(progress_sum_to_bucket(sum, 1), 0);
+        }
+    }
+
+    /// LayerStack num_buckets-header layout の最小ヘッダを in-memory で作成
+    ///
+    /// `num_buckets` 検証や override 分岐の reject 経路を unit test するために、
+    /// FT/PSQT/LayerStack block を含まないヘッダだけの buffer を返す。
+    /// load 側は header 検証で reject する想定なので、それ以降の block は不要。
+    #[cfg(feature = "ls-arch")]
+    fn build_num_buckets_header(num_buckets: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // network_hash (dummy)
+        let arch = b"Features=HalfKaHmMerged^(40),LayerStacks,FV_SCALE=28";
+        bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(arch);
+        bytes.extend_from_slice(&num_buckets.to_le_bytes());
+        bytes
+    }
+
+    /// num_buckets-header layout で `num_buckets = 0` / 上限超過の値は
+    /// `InvalidData` で reject される
+    #[cfg(feature = "ls-arch")]
+    #[test]
+    fn test_layer_stack_num_buckets_out_of_range_rejected() {
+        for &n in &[0u32, (MAX_LAYER_STACK_BUCKETS as u32) + 1, 100, 1024] {
+            let bytes = build_num_buckets_header(n);
+            let err = match NNUENetwork::from_bytes(&bytes) {
+                Ok(_) => panic!(
+                    "num_buckets={n} は reject されるべき (許容範囲 1..={MAX_LAYER_STACK_BUCKETS})"
+                ),
+                Err(e) => e,
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "n={n}");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("num_buckets") || msg.contains(&n.to_string()),
+                "n={n} のエラーメッセージに num_buckets / 値が含まれていない: {msg}"
+            );
+        }
+    }
+
+    /// num_buckets-header layout を `NNUE_ARCHITECTURE=HalfKP` 等の
+    /// 非-LayerStack override で読むと早期 reject される (silent misread を防ぐ)
+    #[cfg(feature = "ls-arch")]
+    #[test]
+    fn test_layer_stack_num_buckets_header_with_non_layerstack_override_rejected() {
+        let bytes = build_num_buckets_header(9);
+        let previous_override = get_nnue_architecture_override();
+        for override_mode in [
+            NNUEArchitectureOverride::HalfKP,
+            NNUEArchitectureOverride::HalfKaHmMerged,
+            NNUEArchitectureOverride::HalfKaSplit,
+        ] {
+            set_nnue_architecture_override(override_mode);
+            let err = match NNUENetwork::from_bytes(&bytes) {
+                Ok(_) => panic!(
+                    "num_buckets-header net を {override_mode:?} override で読んだら reject されるべき"
+                ),
+                Err(e) => e,
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{override_mode:?}");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("LayerStack"),
+                "{override_mode:?} のエラーメッセージに LayerStack が含まれていない: {msg}"
+            );
+        }
+        set_nnue_architecture_override(previous_override);
     }
 
     #[cfg(feature = "nnue-progress-diff")]
@@ -2181,7 +2362,7 @@ mod tests {
 
             // 全駒スキャンによる正解値
             let expected_sum = compute_progress8kpabs_sum(&pos, &weights);
-            let expected_bucket = progress_sum_to_bucket(expected_sum);
+            let expected_bucket = progress_sum_to_bucket(expected_sum, DEFAULT_NUM_BUCKETS);
 
             if dirty.king_moved[0] || dirty.king_moved[1] {
                 // 玉が動いた場合は差分更新不可（全計算にフォールバック）
@@ -2192,7 +2373,7 @@ mod tests {
                 let sq_wk = pos.king_square(Color::White).inverse().index();
                 let diff_sum =
                     update_progress8kpabs_sum_diff(prev_sum, &dirty, sq_bk, sq_wk, &weights);
-                let diff_bucket = progress_sum_to_bucket(diff_sum);
+                let diff_bucket = progress_sum_to_bucket(diff_sum, DEFAULT_NUM_BUCKETS);
 
                 assert!(
                     (diff_sum - expected_sum).abs() < 1e-5,
