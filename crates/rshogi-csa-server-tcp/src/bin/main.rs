@@ -739,7 +739,7 @@ mod tests {
 
     /// `ALLOW_FLOODGATE_FEATURES_FLAG` 定数と clap が生成する CLI フラグ名が
     /// 一致することを固定する。`Cli::allow_floodgate_features` のフィールド名を
-    /// リネームしたら本テストが落ち、エラーメッセージ生成側との同期忘れを検知する。
+    /// リネームすると test が落ち、エラーメッセージ生成側との同期忘れを検知する。
     #[test]
     fn allow_floodgate_features_flag_matches_clap_long() {
         let cmd = Cli::command();

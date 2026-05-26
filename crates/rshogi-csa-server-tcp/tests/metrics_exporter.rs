@@ -70,8 +70,8 @@ async fn fetch_metrics(addr: SocketAddr) -> String {
 /// - ラベル無しの値が初期 `0` で出る（Prometheus の `rate(...)` / `absent(...)`
 ///   クエリが起動直後でも展開できる）
 ///
-/// histogram (`csa_move_latency_seconds`) は意図的に事前 record しないため、
-/// 値発火前は出力に出ない（観測値の汚染を避ける契約）。本テストでは含めない。
+/// histogram (`csa_move_latency_seconds`) は意図的に事前 record せず、
+/// 値発火前は出力に出ない（観測値の汚染を避ける契約）。
 #[tokio::test(flavor = "current_thread")]
 async fn exporter_serves_help_type_and_zero_init_for_main_series() {
     let addr = ephemeral_loopback_addr();

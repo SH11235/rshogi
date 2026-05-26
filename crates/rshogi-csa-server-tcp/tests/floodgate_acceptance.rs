@@ -1,9 +1,9 @@
 //! Floodgate 運用機能の受入シナリオ統合テスト。
 //!
-//! 本テストは TCP listener や fake client を立てる「フル E2E」ではなく、
 //! `ServerConfig` を Floodgate 全機能 ON で組み立てたときの起動経路と
-//! intent 算出の **横断的整合性** を固定する smoke 統合テスト。各機能の
-//! 個別テストはそれぞれの crate / モジュールに網羅されている:
+//! intent 算出の **横断的整合性** を固定する smoke 統合テスト (TCP listener や
+//! fake client を立てる「フル E2E」ではない)。各機能の個別テストはそれぞれの
+//! crate / モジュールに網羅されている:
 //!
 //! - Players レート永続化: `rshogi_csa_server::storage::players_yaml::tests`
 //! - スケジューラ: `rshogi_csa_server::scheduler::tests` +
@@ -12,7 +12,7 @@
 //! - LeastDiff ペアリング: `rshogi_csa_server::matching::pairing::tests`
 //! - 駒落ち / 重複ログイン: `rshogi_csa_server_tcp::server::tests`
 //!
-//! 本受入は「全部入りで起動できるか」を上から見て確認する位置付けで、
+//! 「全部入りで起動できるか」を上から見て確認する位置付けで、
 //! 実 TCP / 実エンジン接続を伴う E2E は負荷試験ハーネス側で扱う。
 
 use std::collections::HashMap;

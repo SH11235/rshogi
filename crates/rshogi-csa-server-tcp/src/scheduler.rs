@@ -611,7 +611,7 @@ mod tests {
     use super::*;
 
     /// `build_strategy` が `"direct"` / `"least_diff"` を受理し、その他は
-    /// エラーにする契約を固定。新しい戦略を追加するときに本テストを更新する。
+    /// エラーにする契約を固定。新しい戦略を追加するときはこの test も更新する。
     #[test]
     fn build_strategy_accepts_known_strategies_and_rejects_unknown() {
         // `dyn PairingLogic` は Debug 非実装なので `unwrap` ベースのアサートは

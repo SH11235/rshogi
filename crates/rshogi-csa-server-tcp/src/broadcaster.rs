@@ -110,7 +110,7 @@ impl Broadcaster for InMemoryBroadcaster {
         line: &CsaLine,
     ) -> Result<(), TransportError> {
         if !matches!(tag, BroadcastTag::Spectator) {
-            // Admin/Player タグは本実装では使われない。未対応経路が来たら黙って no-op。
+            // Admin/Player タグは未対応経路。来たら黙って no-op。
             return Ok(());
         }
         let mut guard = self.inner.lock().await;
@@ -156,7 +156,7 @@ mod tests {
             .broadcast_tag(&RoomId::new("g1"), BroadcastTag::Player, &CsaLine::new("X"))
             .await
             .unwrap();
-        // Player タグは本実装では無視される。
+        // Player タグは無視される。
         assert!(rx.try_recv().is_err());
     }
 
