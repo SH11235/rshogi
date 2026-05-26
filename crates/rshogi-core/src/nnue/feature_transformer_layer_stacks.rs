@@ -1433,6 +1433,10 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         // ここで検出して slow path (`append_changed_indices` 経由、玉 BP を除外する)
         // にフォールバックする。INCLUDE_KING_IN_PIECE_LIST は const なので HalfKa*
         // 系では分岐ごと dead-code eliminate される。
+        //
+        // `dirty_num == 0` (パス手・盤面変化なし) の場合は `dn == 0` で本ループは
+        // no-op、続く `match dirty_piece.dirty_num` の `_ => false` で fallback する
+        // ため、guard 自体の早期 return は不要。
         if !FT::INCLUDE_KING_IN_PIECE_LIST {
             use super::bona_piece::FE_END;
             let dn = dirty_piece.dirty_num as usize;
@@ -2315,18 +2319,8 @@ mod tests {
         smoke_refresh_for_spec::<HalfKpSpec>();
     }
 
-    /// HalfKp + cache 経由 refresh: 玉成り/捕獲含む複雑な ply32 局面で
-    /// `refresh_or_cache` 内の `idx_fn(king_BP)` OOR を踏まないことを保証する。
-    /// 修正前は `feature_transformer_layer_stacks.rs:31` の
-    /// `feature_index_out_of_range` で panic していた。
-    ///
-    /// 期待動作:
-    /// 1. 初回 refresh (cache miss): piece_list 40 slot 走査時に玉スロットを
-    ///    BonaPiece::ZERO でマスクして idx_fn を呼ばないこと
-    /// 2. 同局面でもう一度 refresh (cache hit, piece_list 不変): 差分 0 で
-    ///    cache の accumulation をそのまま返すこと
-    /// 3. 相手玉が異なる位置の派生局面 (cache hit, 玉 slot 差分のみ): 玉 slot
-    ///    マスクにより差分 0 と認識し、再び idx_fn を呼ばないこと
+    /// HalfKp + cache 経由 refresh で玉 BonaPiece (`>= FE_END`) を `idx_fn` に渡さない
+    /// ことを ply32 局面 (駒成り + 駒台手駒あり) と相手玉位置違い派生局面で保証する。
     #[test]
     fn refresh_with_cache_halfkp_complex_position() {
         let weights = AlignedBox::<i16>::new_zeroed(HalfKpSpec::DIMENSIONS * TEST_L1);
@@ -2355,21 +2349,17 @@ mod tests {
         let mut acc = AccumulatorLayerStacks::<TEST_L1>::new();
         let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
 
-        // 1) cache miss: 玉スロットを ZERO でマスクして full refresh
         ft.refresh_accumulator_with_cache(&pos, &mut acc, &mut cache);
         assert!(acc.computed_accumulation);
         for v in acc.get(0).iter().chain(acc.get(1).iter()) {
             assert_eq!(*v, 0, "zero-weights refresh should keep accumulation at 0");
         }
 
-        // 2) cache hit (piece_list 不変): 差分 0
         ft.refresh_accumulator_with_cache(&pos, &mut acc, &mut cache);
         for v in acc.get(0).iter().chain(acc.get(1).iter()) {
             assert_eq!(*v, 0);
         }
 
-        // 3) 相手玉が異なる位置の派生局面: 玉 slot 差分を idx_fn 経由で
-        //    `halfkp_index(king, F_KING+sq)` させない (=玉マスクで早期スキップ)
         let mut pos2 = Position::new();
         pos2.set_sfen(
             "+B1sg1gsnl/2+N4b1/pP2ppk1p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
@@ -2381,26 +2371,12 @@ mod tests {
         }
     }
 
-    /// HalfKp + 非ゼロ weights/biases で `refresh_accumulator` (slow path、
-    /// `append_active_indices` 経由) と `refresh_accumulator_with_cache`
-    /// (fast cache path、玉スロット ZERO マスク経由) の結果が **bit 一致** する
-    /// ことを保証する数値正確性テスト。
-    ///
-    /// crash-free regression (`refresh_with_cache_halfkp_complex_position`) は
-    /// panic しないことだけ検証するが、本テストは fix が **計算的にも正しい**
-    /// ことを担保する。
-    ///
-    /// シナリオ:
-    /// 1. 初期局面 (ply32 SFEN) で slow と cache が一致
-    /// 2. 相手玉が異なる位置の派生局面でも slow と cache が一致
-    ///    (cache hit-with-diff path の正しさを保証)
-    ///
-    /// PR #757 review #3 への対応 (HalfKp 限定 1 件、5 FT 全体への展開は別 Issue)。
+    /// HalfKp で `refresh_accumulator` (slow path) と `refresh_accumulator_with_cache`
+    /// (fast cache path、玉スロット ZERO マスク経由) の accumulation が
+    /// 非ゼロ weights 下で bit 一致することを保証する。
     #[test]
     fn refresh_with_cache_halfkp_matches_slow_path() {
-        // 非ゼロ deterministic weights/biases で FT 構築 (seed 固定)
         let mut weights = AlignedBox::<i16>::new_zeroed(HalfKpSpec::DIMENSIONS * TEST_L1);
-        // 簡易擬似乱数: i に対し i16 範囲で安定なパターン
         for (i, slot) in weights.iter_mut().enumerate() {
             *slot = (((i as u32).wrapping_mul(2_654_435_761) >> 16) as i16) % 127 - 63;
         }
@@ -2428,9 +2404,7 @@ mod tests {
         let ft_cache = make_ft();
 
         let sfens = [
-            // 1) 駒成り + 駒台手駒ありの典型 ply32 局面
             "+B1sg1gsnl/2+N2k1b1/pP2pp2p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
-            // 2) 相手玉位置が異なる派生局面 (cache hit-with-diff path を踏ませる)
             "+B1sg1gsnl/2+N4b1/pP2ppk1p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
         ];
 
@@ -2440,11 +2414,9 @@ mod tests {
             let mut pos = Position::new();
             pos.set_sfen(sfen).unwrap();
 
-            // slow path: append_active_indices 経由で full refresh (玉 BP は除外)
             let mut acc_slow = AccumulatorLayerStacks::<TEST_L1>::new();
             ft_slow.refresh_accumulator(&pos, &mut acc_slow);
 
-            // fast cache path: 玉スロットを ZERO マスクして cache に渡す
             let mut acc_cache = AccumulatorLayerStacks::<TEST_L1>::new();
             ft_cache.refresh_accumulator_with_cache(&pos, &mut acc_cache, &mut cache);
 
@@ -2456,5 +2428,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// HalfKp の `try_apply_dirty_piece_fast` が玉 BonaPiece (`>= FE_END`) を含む
+    /// `DirtyPiece` を受け取ったとき `false` を返して slow path にフォールバック
+    /// することを直接検証する。
+    #[test]
+    fn try_apply_dirty_piece_fast_halfkp_rejects_king_bp() {
+        let weights = AlignedBox::<i16>::new_zeroed(HalfKpSpec::DIMENSIONS * TEST_L1);
+        let ft = FeatureTransformerLayerStacks::<TEST_L1, HalfKpSpec> {
+            biases: Aligned([0; TEST_L1]),
+            weights,
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_biases: [0; NUM_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "ls-ext-psqt")]
+            psqt_weights: AlignedBox::new_zeroed(0),
+            #[cfg(feature = "ls-ext-psqt")]
+            has_psqt: false,
+            #[cfg(feature = "ls-ext-threat")]
+            threat_weights: AlignedBox::new_zeroed(0),
+            #[cfg(feature = "ls-ext-threat")]
+            has_threat: false,
+            _ft: PhantomData,
+        };
+
+        let king_sq = Square::new(File::File5, Rank::Rank9);
+        let mut acc = Aligned([0i16; TEST_L1]);
+
+        let mut dp_king_move = DirtyPiece::new();
+        dp_king_move.dirty_num = 1;
+        dp_king_move.piece_no[0] = PieceNumber(PieceNumber::KING + 1);
+        dp_king_move.changed_piece[0] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::from_board(
+                Piece::W_KING,
+                Square::new(File::File5, Rank::Rank1),
+            ),
+            new_piece: ExtBonaPiece::from_board(
+                Piece::W_KING,
+                Square::new(File::File4, Rank::Rank1),
+            ),
+        };
+        assert!(
+            !ft.try_apply_dirty_piece_fast(&mut acc.0, &dp_king_move, Color::Black, king_sq),
+            "HalfKp fast path must reject king BonaPiece move"
+        );
+
+        let mut dp_pawn = DirtyPiece::new();
+        dp_pawn.dirty_num = 1;
+        dp_pawn.piece_no[0] = PieceNumber(0);
+        dp_pawn.changed_piece[0] = ChangedBonaPiece {
+            old_piece: ExtBonaPiece::from_board(
+                Piece::B_PAWN,
+                Square::new(File::File7, Rank::Rank7),
+            ),
+            new_piece: ExtBonaPiece::from_board(
+                Piece::B_PAWN,
+                Square::new(File::File7, Rank::Rank6),
+            ),
+        };
+        assert!(
+            ft.try_apply_dirty_piece_fast(&mut acc.0, &dp_pawn, Color::Black, king_sq),
+            "HalfKp fast path must accept non-king BonaPiece move"
+        );
     }
 }

@@ -429,11 +429,8 @@ mod tests {
         assert!(max_w <= max_valid, "White max index out of range");
     }
 
-    /// 駒成り (+B, +N) + 駒台手駒ありの ply32 局面で `append_active_indices`
-    /// が玉スロット (`[..PieceNumber::KING]`) を正しく除外し続けることを保証する
-    /// regression test。`feature_transformer_layer_stacks` 側 (cache refresh /
-    /// fast diff) で同等の OOR バグ修正に対応する pair test
-    /// (`refresh_with_cache_halfkp_complex_position`) もそちらに置いてある。
+    /// 駒成り + 駒台手駒ありの ply32 局面でも `append_active_indices` が玉スロット
+    /// (`[..PieceNumber::KING]`) を除外し、全 index が `81 * FE_END` 範囲内であることを保証する。
     #[test]
     fn test_halfkp_active_indices_in_range_with_promoted_and_hand() {
         use crate::nnue::accumulator::{IndexList, MAX_ACTIVE_FEATURES};
