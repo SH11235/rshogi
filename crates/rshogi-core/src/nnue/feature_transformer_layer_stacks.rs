@@ -1088,6 +1088,9 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         } else {
             piece_list_owned = {
                 let mut pl = *raw_piece_list;
+                // piece_list の玉スロット 2 つ (PieceNumber::KING=先手玉, KING+1=後手玉)
+                // を ZERO 化。slot 38/39 が両玉に予約されているのは piece_list.rs の
+                // PIECE_NUMBER_BASE で確定。
                 pl[PieceNumber::KING as usize] = BonaPiece::ZERO;
                 pl[(PieceNumber::KING + 1) as usize] = BonaPiece::ZERO;
                 pl
