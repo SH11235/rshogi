@@ -176,6 +176,31 @@ cargo run -p tools --release --bin psv_to_jsonl -- \
 {"sfen":"lnsgkgsnl/...","score":123,"depth":0,"best_move":"7g7f","nodes":0}
 ```
 
+### jsonl_to_psv
+
+`tournament` / `analyze_selfplay` 互換の自己対局 JSONL を PSV に変換。
+各 `move` 行の `sfen_before` と `move_usi`、`result` 行の勝敗から
+PackedSfenValue を生成する。スコアはログ内の `eval.score_cp` / `eval.score_mate`
+を暫定値として入れるため、別エンジンで教師スコアを付け直す場合は後段で
+`rescore_psv` を実行する。
+
+```bash
+cargo run -p tools --release --bin jsonl_to_psv -- \
+  --input-dir runs/selfplay \
+  --pattern "*.jsonl" \
+  --output selfplay_from_jsonl.psv \
+  --missing-score zero
+```
+
+| オプション | 説明 | デフォルト |
+|------------|------|------------|
+| `--input` | 入力 JSONL ファイル、ディレクトリ、glob（カンマ区切り可） | - |
+| `--input-dir` | 入力ディレクトリ（`--input` と排他） | - |
+| `--pattern` | ディレクトリ入力時の glob パターン | `*.jsonl` |
+| `-o, --output` | 出力 PSV ファイル | 必須 |
+| `--missing-score` | `eval` 欠損局面の扱い。`skip` または `zero` | `skip` |
+| `--max-games` | 変換する最大対局数（0=全件） | `0` |
+
 ### expand_psv_from_policy
 
 dlshogi 系 ONNX モデルのポリシー出力を使い、各局面の合法手のうち選択確率が閾値を超える手の
