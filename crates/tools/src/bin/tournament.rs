@@ -31,21 +31,37 @@
 ///   --engine-usi-option "1:RoundUpToFullSecond=false" \
 ///   --out-dir "runs/selfplay/$(date +%Y%m%d_%H%M%S)-rshogi-vs-yaneuraou-suisho5"
 /// ```
+///
+/// # 実行中の動的制御（再起動不要）
+///
+/// `<out-dir>/control.json` を書き換えると、再起動せず対局境界で以下を変更できる:
+///
+/// ```json
+/// { "target_games": 300, "concurrency": 16 }
+/// ```
+///
+/// - `target_games`: 各方向・各ペアあたりの目標対局数（CLI `--games` と同じ単位）。
+///   増やすと既存ペアに追加チケットを供給し、減らすと in-flight を drain して停止する。
+/// - `concurrency`: ワーカー数。増やすと即座に追加 spawn（NNUE ロード相当のコストあり）、
+///   減らすと対象ワーカーが現局面完了後に退役する。
+///
+/// 変更は `<out-dir>/control_history.jsonl` に追記され、`pair_index` 整合は維持されるため
+/// `analyze_selfplay` の集計と矛盾しない。
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use clap::Parser as _;
 use crossbeam_channel as chan;
-use rand::prelude::IndexedRandom;
-use serde::Serialize;
+use rand::Rng as _;
+use serde::{Deserialize, Serialize};
 
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
@@ -704,6 +720,63 @@ fn worker_main(
     }
 }
 
+/// ワーカー spawn に必要な不変設定への参照束。チャネル送受信は保持しない。
+///
+/// これにより、終了処理でチャネル送信元を自由に drop してチャネルを閉じられる
+/// （送信元を握り続ける長命なローカルが無いため、借用が終端まで残らない）。
+struct SpawnCtx<'a> {
+    engine_paths: &'a [PathBuf],
+    engine_labels: &'a [String],
+    engine_usi_options: &'a [Vec<String>],
+    threads: usize,
+    hash_mb: u32,
+    max_moves: u32,
+    timeout_margin_ms: u64,
+    byoyomi: u64,
+    btime: u64,
+    binc: u64,
+    go_depth: Option<u32>,
+    go_nodes: Option<u64>,
+    start_defs: &'a [ParsedPosition],
+}
+
+/// ワーカースレッドを 1 つ起動して `handles` に追加する。初期起動と動的増員で共用する。
+fn spawn_worker(
+    ctx: &SpawnCtx,
+    ticket_rx: &chan::Receiver<Option<MatchTicket>>,
+    result_tx: &chan::Sender<MatchResult>,
+    shutdown: &Arc<AtomicBool>,
+    handles: &mut Vec<thread::JoinHandle<()>>,
+) {
+    let cfg = WorkerConfig {
+        engine_paths: ctx.engine_paths.to_vec(),
+        engine_labels: ctx.engine_labels.to_vec(),
+        engine_usi_options: ctx.engine_usi_options.to_vec(),
+        threads: ctx.threads,
+        hash_mb: ctx.hash_mb,
+        max_moves: ctx.max_moves,
+        timeout_margin_ms: ctx.timeout_margin_ms,
+        byoyomi: ctx.byoyomi,
+        btime: ctx.btime,
+        binc: ctx.binc,
+        go_depth: ctx.go_depth,
+        go_nodes: ctx.go_nodes,
+        start_positions: ctx
+            .start_defs
+            .iter()
+            .map(|p| ParsedPosition {
+                startpos: p.startpos,
+                sfen: p.sfen.clone(),
+                moves: p.moves.clone(),
+            })
+            .collect(),
+    };
+    let rx = ticket_rx.clone();
+    let tx = result_tx.clone();
+    let sd = shutdown.clone();
+    handles.push(thread::spawn(move || worker_main(cfg, rx, tx, sd)));
+}
+
 // ---------------------------------------------------------------------------
 // メイン
 // ---------------------------------------------------------------------------
@@ -983,48 +1056,13 @@ fn main() -> Result<()> {
         None => (0..n).flat_map(|i| ((i + 1)..n).map(move |j| (i, j))).collect(),
     };
 
-    // 全ペア × games × 2方向のチケット生成
-    // cli.games は「各方向の対局数」なので、1ペアあたり cli.games * 2 局
-    let total_per_pair = cli.games * 2;
-    let mut tickets: Vec<MatchTicket> = Vec::new();
-    let mut rng = rand::rng();
-    {
-        let mut ticket_id = 0u64;
-        for &(i, j) in &pair_indices {
-            // ペア内の通し index (0, 1, 2, ...)。
-            // game_idx % 2 == 0 が pair の 1 局目、== 1 が 2 局目（先後入替）。
-            for game_idx in 0..total_per_pair {
-                // base-vs-N モードでは base (bi) を先にする向きから始めたいので、
-                // i < j の前提のもとで base が i 側にあるとは限らない点に注意する必要はない。
-                // 任意の (i, j) に対し、偶数 game_idx で (i, j)、奇数で (j, i) という扱いで
-                // pair_slot が 0 の手番と 1 の手番が必ず 1 ペアを成す。
-                let (black_idx, white_idx) = if game_idx % 2 == 0 { (i, j) } else { (j, i) };
-                let startpos_idx = if start_defs.len() == 1 {
-                    0
-                } else if game_idx % 2 == 0 {
-                    *((0..start_defs.len()).collect::<Vec<_>>()).choose(&mut rng).unwrap()
-                } else {
-                    tickets.last().unwrap().startpos_idx
-                };
-                // `pair_index` / `pair_slot` は `ticket_id` 基準で一意化する。
-                // ペア (偶数 ticket_id, 奇数 ticket_id) が常に 1 組になるよう
-                // `pair_index = ticket_id / 2`, `pair_slot = ticket_id % 2`。
-                let pair_slot = (ticket_id % 2) as u32;
-                let pair_index = (ticket_id / 2) as u32;
-                tickets.push(MatchTicket {
-                    id: ticket_id,
-                    black_idx,
-                    white_idx,
-                    startpos_idx,
-                    pair_slot,
-                    pair_index,
-                });
-                ticket_id += 1;
-            }
-        }
-    }
+    // チケットは事前生成せず、共有 atomic な目標値を参照する TicketSource から逐次発行する。
+    // これにより実行中に control.json で target_games を増減でき、対局境界で追従する。
+    // cli.games は「各方向の対局数」。1 ペアあたり cli.games * 2 局。
+    let target_per_dir = Arc::new(AtomicU32::new(cli.games));
+    let mut source =
+        TicketSource::new(pair_indices.clone(), start_defs.len(), target_per_dir.clone());
 
-    let total_games = tickets.len() as u32;
     let mode_label = if base_idx.is_some() {
         "base-vs-N"
     } else {
@@ -1036,8 +1074,8 @@ fn main() -> Result<()> {
         pair_indices.len(),
         mode_label,
         cli.games,
-        total_per_pair,
-        total_games,
+        cli.games * 2,
+        source.current_target_total(),
         cli.concurrency
     );
 
@@ -1110,171 +1148,200 @@ fn main() -> Result<()> {
     let (ticket_tx, ticket_rx) = chan::bounded::<Option<MatchTicket>>(0);
     let (result_tx, result_rx) = chan::bounded::<MatchResult>(0);
 
+    // ワーカー spawn 用の不変設定（チャネル送受信は持たない）。
+    // チャネルを保持しないことで、終了時に送信元を drop してチャネルを閉じ、
+    // ワーカー数を数えずに安全に全ワーカーを退役させられる。
+    let spawn_ctx = SpawnCtx {
+        engine_paths: &cli.engines,
+        engine_labels: &engine_labels,
+        engine_usi_options: &engine_usi_options,
+        threads: cli.threads,
+        hash_mb: cli.hash_mb,
+        max_moves: cli.max_moves,
+        timeout_margin_ms: cli.timeout_margin_ms,
+        byoyomi: cli.byoyomi,
+        btime: cli.btime,
+        binc: cli.binc,
+        go_depth: cli.depth,
+        go_nodes: cli.nodes,
+        start_defs: &start_defs,
+    };
+
     // ワーカースレッドの起動
     let mut handles = Vec::new();
     for _ in 0..cli.concurrency {
-        let engine_paths = cli.engines.clone();
-        let labels = engine_labels.clone();
-        let usi_opts = engine_usi_options.clone();
-        let threads = cli.threads;
-        let hash_mb = cli.hash_mb;
-        let max_moves = cli.max_moves;
-        let timeout_margin_ms = cli.timeout_margin_ms;
-        let byoyomi = cli.byoyomi;
-        let btime = cli.btime;
-        let binc = cli.binc;
-        let go_depth = cli.depth;
-        let go_nodes = cli.nodes;
-        let start_positions: Vec<ParsedPosition> = start_defs
-            .iter()
-            .map(|p| ParsedPosition {
-                startpos: p.startpos,
-                sfen: p.sfen.clone(),
-                moves: p.moves.clone(),
-            })
-            .collect();
-        let rx = ticket_rx.clone();
-        let tx = result_tx.clone();
-        let sd = shutdown.clone();
-        handles.push(thread::spawn(move || {
-            worker_main(
-                WorkerConfig {
-                    engine_paths,
-                    engine_labels: labels,
-                    engine_usi_options: usi_opts,
-                    threads,
-                    hash_mb,
-                    max_moves,
-                    timeout_margin_ms,
-                    byoyomi,
-                    btime,
-                    binc,
-                    go_depth,
-                    go_nodes,
-                    start_positions,
-                },
-                rx,
-                tx,
-                sd,
-            );
-        }));
+        spawn_worker(&spawn_ctx, &ticket_rx, &result_tx, &shutdown, &mut handles);
     }
-    // メインスレッドは result_tx を持たないので drop
-    drop(result_tx);
 
-    // 勝敗カウンター: pair_key → (wins_i, wins_j, draws) (i < j)
+    // 勝敗カウンターと出力をまとめる集計器。
     let mut pair_stats: HashMap<(usize, usize), (u32, u32, u32)> = HashMap::new();
     for &(i, j) in &pair_indices {
         pair_stats.insert((i, j), (0, 0, 0));
     }
-
     let start_time = Instant::now();
-    let mut completed = 0u32;
-    let mut ticket_iter = tickets.into_iter();
-    let mut next_ticket: Option<MatchTicket> = ticket_iter.next();
-    // SPRT が境界到達した時点で feeding を停止する。
-    // 停止後は total_to_complete = sent に落として、
-    // 在庫（ワーカーが今受け取っているチケット）だけを drain する。
-    let mut sent: u32 = 0;
-    let mut total_to_complete: u32 = total_games;
-    let mut sprt_stopped = false;
+    let mut agg = Aggregator {
+        engine_labels: &engine_labels,
+        pair_writers,
+        pair_stats,
+        pair_game_count,
+        completed: 0,
+        sprt_state,
+        stop_feeding: false,
+        // 0 だと進捗が一切出ないため最低 1 に丸める。
+        report_interval: cli.report_interval.max(1),
+        start_time,
+    };
 
-    // メインイベントループ
-    while completed < total_to_complete && !shutdown.load(Ordering::Relaxed) {
-        if sprt_stopped {
-            next_ticket = None;
+    // 制御プレーンの状態。
+    let control_path = cli.out_dir.join("control.json");
+    let history_path = cli.out_dir.join("control_history.jsonl");
+    let mut applied = ControlState {
+        target_games: cli.games,
+        concurrency: cli.concurrency,
+    };
+    println!(
+        "[control] 実行中の動的制御: {} を {}ms 間隔でポーリング (例: echo '{{\"target_games\":N,\"concurrency\":M}}' > {})",
+        control_path.display(),
+        CONTROL_POLL_INTERVAL.as_millis(),
+        control_path.display(),
+    );
+
+    let mut tickets_sent: u32 = 0;
+    let mut live_workers = cli.concurrency;
+    let mut desired_workers = cli.concurrency;
+    let mut last_poll: Option<Instant> = None;
+    // 発行済みだがまだ送信できていないチケットを保持する（peek 相当）。
+    // `select!` で recv 側が選ばれてもチケットを失わないよう、送信成功時のみ消費する。
+    let mut pending: Option<MatchTicket> = None;
+
+    // メインイベントループ。
+    // - 供給: TicketSource から逐次チケットを発行（target_games に追従）
+    // - 退役: live_workers > desired_workers なら poison(None) を 1 つ送る
+    // - 増員: live_workers < desired_workers なら worker を spawn
+    // - 終了: 供給するものが無く、in-flight も 0 になったら抜ける
+    while !shutdown.load(Ordering::Relaxed) {
+        // control.json を throttle ポーリング。
+        if last_poll.is_none_or(|t| t.elapsed() >= CONTROL_POLL_INTERVAL) {
+            last_poll = Some(Instant::now());
+            apply_control(
+                &control_path,
+                &history_path,
+                &mut applied,
+                &target_per_dir,
+                &mut desired_workers,
+                agg.completed,
+            );
         }
-        match &next_ticket {
-            None => {
-                // チケットは全送信済み、結果を待つ
-                match result_rx.recv() {
-                    Ok(result) => {
-                        process_result(
-                            &result,
-                            &engine_labels,
-                            &mut pair_writers,
-                            &mut pair_stats,
-                            &mut pair_game_count,
-                        )?;
-                        completed += 1;
-                        handle_sprt_observation(
-                            &mut sprt_state,
-                            &result,
-                            &mut sprt_stopped,
-                            &mut total_to_complete,
-                            sent,
-                            completed,
-                        );
-                        if completed.is_multiple_of(cli.report_interval)
-                            || completed == total_to_complete
-                        {
-                            print_progress(
-                                completed,
-                                total_to_complete,
-                                &pair_stats,
-                                &engine_labels,
-                                start_time,
-                            );
-                        }
-                    }
-                    Err(_) => break,
-                }
+
+        // 増員（即時 spawn）。
+        while live_workers < desired_workers {
+            spawn_worker(&spawn_ctx, &ticket_rx, &result_tx, &shutdown, &mut handles);
+            live_workers += 1;
+        }
+
+        // 供給ペイロード: poison(worker 退役) を最優先、次に通常チケット。
+        // None = 今は供給するものが無い。チケットは送信成功まで `pending` に peek 保持し、
+        // 送信前に target が下がった場合は `still_wanted` で再評価して破棄する。
+        let offer: Option<Option<MatchTicket>> = if live_workers > desired_workers {
+            Some(None)
+        } else if agg.stop_feeding {
+            None
+        } else {
+            if pending.as_ref().is_some_and(|t| !source.still_wanted(t)) {
+                pending = None; // target 減少で不要になった未送信チケットを破棄
             }
-            Some(t) => {
+            if pending.is_none() {
+                pending = source.peek_ticket();
+            }
+            pending.clone().map(Some)
+        };
+        let target_total = source.current_target_total();
+
+        match offer {
+            Some(payload) => {
+                let is_poison = payload.is_none();
                 chan::select! {
-                    send(ticket_tx, Some(t.clone())) -> res => {
+                    send(ticket_tx, payload.clone()) -> res => {
                         if res.is_ok() {
-                            sent += 1;
-                            next_ticket = ticket_iter.next();
+                            if is_poison {
+                                live_workers -= 1;
+                            } else if let Some(ticket) = pending.take() {
+                                // 送信成功時のみ状態を確定して消費。
+                                source.commit_sent(&ticket);
+                                tickets_sent += 1;
+                            }
                         }
                     }
                     recv(result_rx) -> result => {
                         if let Ok(result) = result {
-                            process_result(
-                                &result,
-                                &engine_labels,
-                                &mut pair_writers,
-                                &mut pair_stats,
-                                &mut pair_game_count,
-                            )?;
-                            completed += 1;
-                            handle_sprt_observation(
-                                &mut sprt_state,
-                                &result,
-                                &mut sprt_stopped,
-                                &mut total_to_complete,
-                                sent,
-                                completed,
-                            );
-                            if completed.is_multiple_of(cli.report_interval)
-                                || completed == total_to_complete
-                            {
-                                print_progress(
-                                    completed,
-                                    total_to_complete,
-                                    &pair_stats,
-                                    &engine_labels,
-                                    start_time,
-                                );
-                            }
+                            agg.on_result(&result, tickets_sent, target_total)?;
                         }
                     }
+                }
+            }
+            None => {
+                let inflight = tickets_sent.saturating_sub(agg.completed);
+                if inflight == 0 {
+                    // 終了直前に最後の制御変更（target 増加）を取りこぼさないよう強制ポーリング。
+                    last_poll = Some(Instant::now());
+                    apply_control(
+                        &control_path,
+                        &history_path,
+                        &mut applied,
+                        &target_per_dir,
+                        &mut desired_workers,
+                        agg.completed,
+                    );
+                    if (!agg.stop_feeding && source.has_next()) || live_workers > desired_workers {
+                        continue;
+                    }
+                    break;
+                }
+                // in-flight を drain。
+                match result_rx.recv() {
+                    Ok(result) => agg.on_result(&result, tickets_sent, target_total)?,
+                    Err(_) => break,
                 }
             }
         }
     }
 
-    // ワーカーを停止
-    for _ in 0..cli.concurrency {
-        let _ = ticket_tx.send(None);
-    }
+    // ワーカーの停止。送信元をすべて drop してチャネルを閉じることで、実在ワーカー数を
+    // 数えずに idle ワーカーの `rx.recv()` を Err にして退役させる（worker 起動失敗・
+    // poison 退役・shutdown など、どの経路でワーカーが抜けても live_workers の数え違いで
+    // hang しない）。drop 後は残った in-flight 結果を drain し、全ワーカーが result 送信元を
+    // 手放したら join する。
+    drop(ticket_tx);
+    drop(result_tx);
+    while result_rx.recv().is_ok() {}
     for h in handles {
         let _ = h.join();
     }
 
+    // 集計器を分解して以降の表示に使う。
+    let Aggregator {
+        mut pair_writers,
+        pair_stats,
+        sprt_state,
+        completed,
+        ..
+    } = agg;
+
     // ライターをフラッシュ
     for (_, pw) in pair_writers.iter_mut() {
         pw.flush()?;
+    }
+
+    // 完了直前の進捗を 1 行出す（report_interval で割り切れない端数対策）。
+    // 直近のループで既に同じ行を出している場合（completed が interval の倍数）は重複を避ける。
+    if completed > 0 && !completed.is_multiple_of(cli.report_interval.max(1)) {
+        print_progress(
+            completed,
+            source.current_target_total().max(completed),
+            &pair_stats,
+            &engine_labels,
+            start_time,
+        );
     }
 
     println!();
@@ -1294,10 +1361,9 @@ fn main() -> Result<()> {
 fn handle_sprt_observation(
     sprt_state: &mut Option<SprtState>,
     result: &MatchResult,
-    sprt_stopped: &mut bool,
-    total_to_complete: &mut u32,
-    sent: u32,
+    stop_feeding: &mut bool,
     completed: u32,
+    tickets_sent: u32,
 ) {
     let Some(state) = sprt_state.as_mut() else {
         return;
@@ -1305,17 +1371,317 @@ fn handle_sprt_observation(
     let was_terminal = state.stopped_at.is_some();
     let _ = state.observe(result);
     state.maybe_report(false);
-    if !was_terminal && state.stopped_at.is_some() && !*sprt_stopped {
-        *sprt_stopped = true;
-        *total_to_complete = sent;
-        let remaining = total_to_complete.saturating_sub(completed);
-        println!("[SPRT] terminal decision reached; draining {} in-flight game(s)...", remaining);
+    if !was_terminal && state.stopped_at.is_some() && !*stop_feeding {
+        // 境界到達: 新規チケット供給を止め、在庫（in-flight）だけ drain する。
+        *stop_feeding = true;
+        let inflight = tickets_sent.saturating_sub(completed);
+        println!("[SPRT] terminal decision reached; draining {inflight} in-flight game(s)...");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 制御プレーン（実行中の動的制御）
+// ---------------------------------------------------------------------------
+
+/// `control.json` をポーリングする間隔。対局は秒オーダーなので 500ms で十分応答できる。
+const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 現在有効な制御値。`control.json` と差分があったフィールドだけ適用する。
+#[derive(Clone, Copy)]
+struct ControlState {
+    /// 各方向・各ペアあたりの対局数（CLI `--games` と同じ単位）。
+    target_games: u32,
+    concurrency: usize,
+}
+
+/// `control.json` の受理スキーマ。各フィールドは任意で、存在するものだけ反映する。
+#[derive(Deserialize)]
+struct ControlFile {
+    target_games: Option<u32>,
+    concurrency: Option<usize>,
+}
+
+/// `control_history.jsonl` の 1 レコード。再現性のため変更を時系列で残す。
+#[derive(Serialize)]
+struct ControlHistoryEntry {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_games: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    concurrency: Option<usize>,
+    /// 変更を適用した時点で完了していた対局数。
+    completed: u32,
+}
+
+/// `control.json` を読み、前回適用値との差分を反映する。
+///
+/// - ファイルが無い / 読めない / パースできない場合は無視（実行は継続）。
+/// - `target_games` は共有 atomic を書き換えるだけで、`TicketSource` が次回参照時に追従する。
+/// - `concurrency` は `desired_workers` を更新し、メインループが worker を追加 spawn / 退役させる。
+/// - 差分があれば `control_history.jsonl` に追記する。
+///
+/// 長時間 background 運用での堅牢性を優先し、ファイル不在 / 読込失敗 / パース失敗 /
+/// history 追記失敗はいずれも警告のみで実行を継続する（対局を落とさない）。
+fn apply_control(
+    control_path: &Path,
+    history_path: &Path,
+    applied: &mut ControlState,
+    target_per_dir: &AtomicU32,
+    desired_workers: &mut usize,
+    completed: u32,
+) {
+    let Ok(text) = fs::read_to_string(control_path) else {
+        return;
+    };
+    let parsed: ControlFile = match serde_json::from_str(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[control] {} のパースに失敗したため無視します: {e}", control_path.display());
+            return;
+        }
+    };
+
+    let mut changed_target: Option<u32> = None;
+    let mut changed_conc: Option<usize> = None;
+
+    if let Some(t) = parsed.target_games
+        && t != applied.target_games
+    {
+        applied.target_games = t;
+        target_per_dir.store(t, Ordering::Relaxed);
+        changed_target = Some(t);
+    }
+    if let Some(c) = parsed.concurrency {
+        if c == 0 {
+            eprintln!("[control] concurrency=0 は不正のため無視します");
+        } else if c != applied.concurrency {
+            applied.concurrency = c;
+            *desired_workers = c;
+            changed_conc = Some(c);
+        }
+    }
+
+    if changed_target.is_some() || changed_conc.is_some() {
+        println!(
+            "[control] applied: target_games={changed_target:?} concurrency={changed_conc:?} (completed={completed})"
+        );
+        if let Err(e) = append_control_history(
+            history_path,
+            &ControlHistoryEntry {
+                kind: "control",
+                timestamp: Local::now().to_rfc3339(),
+                target_games: changed_target,
+                concurrency: changed_conc,
+                completed,
+            },
+        ) {
+            eprintln!(
+                "[control] {} への履歴追記に失敗しました（実行は継続）: {e}",
+                history_path.display()
+            );
+        }
+    }
+}
+
+fn append_control_history(path: &Path, entry: &ControlHistoryEntry) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    serde_json::to_writer(&mut file, entry)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// チケット供給源（動的 target 対応）
+// ---------------------------------------------------------------------------
+
+/// ペアごとに対局チケットを逐次生成する供給源。
+///
+/// 事前生成した `Vec` の代わりに、各ペアの発行済み数と共有 `target_per_dir`（atomic）を
+/// 突き合わせて「まだ目標に達していない最初のペア」へ次のチケットを割り当てる。
+/// これにより実行中の `target_games` 増減に対局境界で追従できる。
+///
+/// `pair_index` / `pair_slot` は通し `id` から導出（`pair_index = id / 2`, `pair_slot = id % 2`）。
+/// 各ペアの発行数は常に偶数境界で次ペアへ移るため、SPRT/pentanomial の 2 局ペアが
+/// ペア境界をまたぐことはない。
+struct TicketSource {
+    pair_indices: Vec<(usize, usize)>,
+    start_defs_len: usize,
+    target_per_dir: Arc<AtomicU32>,
+    /// ペアごとの発行済みゲーム数。
+    emitted: Vec<u32>,
+    next_id: u64,
+    /// 直前に発行したチケットの開始局面 index。先後入替の 2 局目で再利用する。
+    last_startpos_idx: usize,
+}
+
+impl TicketSource {
+    fn new(
+        pair_indices: Vec<(usize, usize)>,
+        start_defs_len: usize,
+        target_per_dir: Arc<AtomicU32>,
+    ) -> Self {
+        let pair_count = pair_indices.len();
+        TicketSource {
+            pair_indices,
+            start_defs_len,
+            target_per_dir,
+            emitted: vec![0; pair_count],
+            next_id: 0,
+            last_startpos_idx: 0,
+        }
+    }
+
+    /// 各ペアあたりの目標ゲーム数（双方向なので `target_games * 2`）。
+    fn target_per_pair(&self) -> u32 {
+        self.target_per_dir.load(Ordering::Relaxed).saturating_mul(2)
+    }
+
+    /// 現在の目標値での全ペア合計ゲーム数。進捗表示の分母に使う。
+    fn current_target_total(&self) -> u32 {
+        self.target_per_pair().saturating_mul(self.pair_indices.len() as u32)
+    }
+
+    /// ペア `k` がまだチケットを発行すべきか。
+    ///
+    /// `emitted < target` に加え、`emitted` が奇数（= ペアの 1 局目だけ発行済み）なら
+    /// target を下回っていても 2 局目を発行してペアを完結させる。これにより実行中に
+    /// `target_games` を下げても pentanomial の 2 局ペアが片側だけで残らない。
+    fn pair_needs_more(emitted: u32, target_per_pair: u32) -> bool {
+        emitted < target_per_pair || !emitted.is_multiple_of(2)
+    }
+
+    /// 現在の目標値で、まだ発行すべきチケットが残っているか。
+    fn has_next(&self) -> bool {
+        let target = self.target_per_pair();
+        self.emitted.iter().any(|&e| Self::pair_needs_more(e, target))
+    }
+
+    /// 次に発行すべきチケットを計算する（状態は進めない）。全ペアが目標到達なら `None`。
+    ///
+    /// 状態を進めないため、`peek_ticket` で得たチケットを送信前に保持している間に
+    /// `target_games` が変化しても、`still_wanted` で現在値に対して再評価できる。
+    /// 送信が確定したら `commit_sent` で状態を進める。
+    fn peek_ticket(&self) -> Option<MatchTicket> {
+        let target = self.target_per_pair();
+        let pair_pos = self.emitted.iter().position(|&e| Self::pair_needs_more(e, target))?;
+        let (i, j) = self.pair_indices[pair_pos];
+        let game_idx = self.emitted[pair_pos];
+
+        // 偶数 game_idx が 1 局目 (i 先手)、奇数が 2 局目（先後入替）。
+        let (black_idx, white_idx) = if game_idx.is_multiple_of(2) {
+            (i, j)
+        } else {
+            (j, i)
+        };
+        let startpos_idx = if self.start_defs_len <= 1 {
+            0
+        } else if game_idx.is_multiple_of(2) {
+            rand::rng().random_range(0..self.start_defs_len)
+        } else {
+            // 2 局目は 1 局目と同じ開始局面を先後入替で使う。
+            self.last_startpos_idx
+        };
+
+        let id = self.next_id;
+        Some(MatchTicket {
+            id,
+            black_idx,
+            white_idx,
+            startpos_idx,
+            pair_slot: (id % 2) as u32,
+            pair_index: (id / 2) as u32,
+        })
+    }
+
+    /// `peek_ticket` が返したチケットの送信が確定したので状態を進める。
+    ///
+    /// `pair_indices` は `(min, max)` 正規化済み前提。チケットの先後 idx を同じく
+    /// `(min, max)` に正規化して該当ペアを引き、その発行数を 1 進める。
+    fn commit_sent(&mut self, ticket: &MatchTicket) {
+        self.last_startpos_idx = ticket.startpos_idx;
+        self.next_id = ticket.id + 1;
+        let pair = (ticket.black_idx.min(ticket.white_idx), ticket.black_idx.max(ticket.white_idx));
+        if let Some(pos) = self.pair_indices.iter().position(|&p| p == pair) {
+            self.emitted[pos] += 1;
+        }
+    }
+
+    /// 保持中の peek 済みチケットが、現在の `target_games` でもまだ送信対象か。
+    ///
+    /// 送信前に target を下げた場合に、未送信のチケットを破棄して取りこぼさず反映するために使う。
+    /// 2 局目（奇数 slot）はペアを完結させるため常に送る。1 局目（偶数 slot）は対象ペアが
+    /// まだ target 未達のときだけ送る。
+    fn still_wanted(&self, ticket: &MatchTicket) -> bool {
+        if !ticket.pair_slot.is_multiple_of(2) {
+            return true;
+        }
+        let pair = (ticket.black_idx.min(ticket.white_idx), ticket.black_idx.max(ticket.white_idx));
+        match self.pair_indices.iter().position(|&p| p == pair) {
+            Some(pos) => Self::pair_needs_more(self.emitted[pos], self.target_per_pair()),
+            None => false,
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // ヘルパー
 // ---------------------------------------------------------------------------
+
+/// 対局結果の集計とファイル出力をまとめる。メインループの各 recv 地点から共通で呼ぶ。
+struct Aggregator<'a> {
+    engine_labels: &'a [String],
+    pair_writers: HashMap<(usize, usize), PairWriter>,
+    pair_stats: HashMap<(usize, usize), (u32, u32, u32)>,
+    pair_game_count: HashMap<(usize, usize), u32>,
+    completed: u32,
+    sprt_state: Option<SprtState>,
+    /// SPRT 境界到達後は新規供給を止めて drain する。
+    stop_feeding: bool,
+    report_interval: u32,
+    start_time: Instant,
+}
+
+impl Aggregator<'_> {
+    /// 1 件の対局結果を取り込む。集計・JSONL 出力・SPRT 観測・進捗表示まで行う。
+    fn on_result(
+        &mut self,
+        result: &MatchResult,
+        tickets_sent: u32,
+        target_total: u32,
+    ) -> Result<()> {
+        process_result(
+            result,
+            self.engine_labels,
+            &mut self.pair_writers,
+            &mut self.pair_stats,
+            &mut self.pair_game_count,
+        )?;
+        self.completed += 1;
+        handle_sprt_observation(
+            &mut self.sprt_state,
+            result,
+            &mut self.stop_feeding,
+            self.completed,
+            tickets_sent,
+        );
+        if self.completed.is_multiple_of(self.report_interval) {
+            print_progress(
+                self.completed,
+                target_total.max(self.completed),
+                &self.pair_stats,
+                self.engine_labels,
+                self.start_time,
+            );
+        }
+        Ok(())
+    }
+}
 
 fn process_result(
     result: &MatchResult,
@@ -1518,10 +1884,271 @@ fn usi_option_name(option: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::build_engine_usi_options;
+    use super::{ControlFile, TicketSource, build_engine_usi_options};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    /// peek + commit でチケットを 1 つ発行する（メインループと同じ消費手順）。
+    fn pull(source: &mut TicketSource) -> Option<super::MatchTicket> {
+        let t = source.peek_ticket()?;
+        source.commit_sent(&t);
+        Some(t)
+    }
+
+    /// 現在の目標値で発行できる分をすべて取り出す。
+    fn drain_source(source: &mut TicketSource) -> Vec<super::MatchTicket> {
+        let mut out = Vec::new();
+        while let Some(t) = pull(source) {
+            out.push(t);
+        }
+        out
+    }
+
+    /// pentanomial 整合: 各 pair_index がちょうど 2 回・slot 0/1 で現れ、
+    /// その 2 局は同じエンジンペア (min,max) に属すること。
+    fn assert_pentanomial_integrity(tickets: &[super::MatchTicket]) {
+        use std::collections::HashMap;
+        let mut by_pair_index: HashMap<u32, Vec<&super::MatchTicket>> = HashMap::new();
+        for t in tickets {
+            by_pair_index.entry(t.pair_index).or_default().push(t);
+        }
+        for (pi, group) in &by_pair_index {
+            assert_eq!(group.len(), 2, "pair_index {pi} は 2 局で構成されるべき");
+            let mut slots: Vec<u32> = group.iter().map(|t| t.pair_slot).collect();
+            slots.sort_unstable();
+            assert_eq!(slots, vec![0, 1], "pair_index {pi} の slot は 0,1");
+            let norm = |t: &super::MatchTicket| {
+                (t.black_idx.min(t.white_idx), t.black_idx.max(t.white_idx))
+            };
+            assert_eq!(norm(group[0]), norm(group[1]), "pair_index {pi} は同一エンジンペア");
+        }
+    }
+
+    #[test]
+    fn ticket_source_single_pair_emits_expected_pairs() {
+        let target = Arc::new(AtomicU32::new(2)); // 各方向 2 局 = 1 ペアあたり 4 局
+        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone());
+        assert_eq!(source.current_target_total(), 4);
+
+        let tickets = drain_source(&mut source);
+        assert_eq!(tickets.len(), 4);
+        assert!(!source.has_next());
+        // id 連番 0..4、pair_index = id/2、pair_slot = id%2
+        let ids: Vec<u64> = tickets.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3]);
+        assert_pentanomial_integrity(&tickets);
+        // 偶数 slot は (0,1)、奇数 slot は先後入替 (1,0)
+        assert_eq!((tickets[0].black_idx, tickets[0].white_idx), (0, 1));
+        assert_eq!((tickets[1].black_idx, tickets[1].white_idx), (1, 0));
+    }
+
+    #[test]
+    fn ticket_source_target_increase_continues_consistently() {
+        let target = Arc::new(AtomicU32::new(1)); // 1 ペアあたり 2 局
+        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone());
+        let first = drain_source(&mut source);
+        assert_eq!(first.len(), 2);
+        assert!(!source.has_next());
+
+        // 実行中に target を増やす → 追加分を発行できる
+        target.store(3, Ordering::Relaxed); // 1 ペアあたり 6 局
+        assert!(source.has_next());
+        let more = drain_source(&mut source);
+        assert_eq!(more.len(), 4); // 6 - 2
+
+        let mut all = first;
+        all.extend(more);
+        // id は連番のまま、pair_index/slot 整合も維持
+        let ids: Vec<u64> = all.iter().map(|t| t.id).collect();
+        assert_eq!(ids, (0..6).collect::<Vec<_>>());
+        assert_pentanomial_integrity(&all);
+    }
+
+    #[test]
+    fn ticket_source_target_decrease_stops_feeding() {
+        let target = Arc::new(AtomicU32::new(3)); // 1 ペアあたり 6 局
+        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone());
+        // 2 局だけ発行
+        assert!(pull(&mut source).is_some());
+        assert!(pull(&mut source).is_some());
+        // target を発行済みより小さくする → それ以上は発行しない
+        target.store(1, Ordering::Relaxed); // 1 ペアあたり 2 局（既に到達）
+        assert!(!source.has_next());
+        assert!(pull(&mut source).is_none());
+    }
+
+    #[test]
+    fn ticket_source_round_robin_keeps_pairs_within_engine_pair() {
+        let target = Arc::new(AtomicU32::new(1)); // 各ペア 2 局
+        let pairs = vec![(0, 1), (0, 2), (1, 2)];
+        let mut source = TicketSource::new(pairs.clone(), 1, target.clone());
+        assert_eq!(source.current_target_total(), 6);
+        let tickets = drain_source(&mut source);
+        assert_eq!(tickets.len(), 6);
+        assert_pentanomial_integrity(&tickets);
+    }
+
+    #[test]
+    fn ticket_source_round_robin_target_increase_backfills_all_pairs() {
+        use std::collections::HashMap;
+        let target = Arc::new(AtomicU32::new(1)); // 各ペア 2 局
+        let pairs = vec![(0, 1), (0, 2), (1, 2)];
+        let mut source = TicketSource::new(pairs.clone(), 1, target.clone());
+        let first = drain_source(&mut source);
+        assert_eq!(first.len(), 6);
+
+        // 実行中に target を増加 → 全ペアに均等に backfill される。
+        target.store(2, Ordering::Relaxed); // 各ペア 4 局
+        let more = drain_source(&mut source);
+        assert_eq!(more.len(), 6); // 12 - 6
+
+        let mut all = first;
+        all.extend(more);
+        assert_eq!(all.len(), 12);
+        assert_pentanomial_integrity(&all);
+        // 各エンジンペアが等しく 4 局ずつ
+        let mut per_pair: HashMap<(usize, usize), usize> = HashMap::new();
+        for t in &all {
+            *per_pair
+                .entry((t.black_idx.min(t.white_idx), t.black_idx.max(t.white_idx)))
+                .or_default() += 1;
+        }
+        for p in &pairs {
+            assert_eq!(per_pair.get(p), Some(&4), "ペア {p:?} は 4 局");
+        }
+    }
+
+    #[test]
+    fn ticket_source_decrease_mid_pair_completes_pair() {
+        // ペアの 1 局目だけ発行した状態で target を下げても、2 局目を発行してペアを完結させる。
+        let target = Arc::new(AtomicU32::new(3)); // 1 ペアあたり 6 局
+        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone());
+        let slot0 = pull(&mut source).unwrap();
+        assert_eq!(slot0.pair_slot, 0);
+
+        // 発行済み (=1, 奇数) より小さい target に下げる。
+        target.store(0, Ordering::Relaxed);
+        // 奇数 emitted のため 2 局目はまだ発行できる。
+        assert!(source.has_next());
+        let slot1 = pull(&mut source).unwrap();
+        assert_eq!(slot1.pair_slot, 1);
+        assert_eq!(slot0.pair_index, slot1.pair_index);
+        // ペアが完結したので以降は発行しない。
+        assert!(!source.has_next());
+        assert!(pull(&mut source).is_none());
+        assert_pentanomial_integrity(&[slot0, slot1]);
+    }
+
+    #[test]
+    fn ticket_source_peek_does_not_advance_state() {
+        let target = Arc::new(AtomicU32::new(2));
+        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone());
+        let a = source.peek_ticket().unwrap();
+        let b = source.peek_ticket().unwrap();
+        assert_eq!(a.id, b.id, "peek は状態を進めない");
+        source.commit_sent(&a);
+        let c = source.peek_ticket().unwrap();
+        assert_eq!(c.id, a.id + 1, "commit 後は次の id");
+    }
+
+    #[test]
+    fn ticket_source_still_wanted_reflects_target_decrease() {
+        let target = Arc::new(AtomicU32::new(2)); // 各ペア 4 局
+        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone());
+
+        // 未コミットの 1 局目（偶数 slot）は、target を下げると不要になる。
+        let fresh = source.peek_ticket().unwrap();
+        assert_eq!(fresh.pair_slot, 0);
+        assert!(source.still_wanted(&fresh));
+        target.store(0, Ordering::Relaxed);
+        assert!(!source.still_wanted(&fresh), "target=0 では未送信の 1 局目は破棄対象");
+
+        // 1 局目 commit 済みで 2 局目（奇数 slot）は target=0 でも常に送る（ペア完結）。
+        target.store(2, Ordering::Relaxed);
+        let slot0 = pull(&mut source).unwrap();
+        let slot1 = source.peek_ticket().unwrap();
+        assert_eq!(slot1.pair_slot, 1);
+        assert_eq!(slot0.pair_index, slot1.pair_index);
+        target.store(0, Ordering::Relaxed);
+        assert!(source.still_wanted(&slot1), "2 局目はペア完結のため常に送る");
+    }
+
+    #[test]
+    fn apply_control_applies_changes_and_records_history() {
+        use super::{ControlState, apply_control};
+        let dir = tempfile::tempdir().unwrap();
+        let control_path = dir.path().join("control.json");
+        let history_path = dir.path().join("control_history.jsonl");
+
+        let target = AtomicU32::new(100);
+        let mut desired = 4usize;
+        let mut applied = ControlState {
+            target_games: 100,
+            concurrency: 4,
+        };
+
+        // ファイル不在 → 何もしない（履歴も作られない）。
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 0);
+        assert!(!history_path.exists());
+
+        // target と concurrency を変更。
+        std::fs::write(&control_path, r#"{"target_games": 150, "concurrency": 8}"#).unwrap();
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 10);
+        assert_eq!(target.load(Ordering::Relaxed), 150);
+        assert_eq!(desired, 8);
+        assert_eq!(applied.target_games, 150);
+        assert_eq!(applied.concurrency, 8);
+        let history = std::fs::read_to_string(&history_path).unwrap();
+        assert_eq!(history.lines().count(), 1, "変更 1 件で履歴 1 行");
+
+        // 同じ内容の再ポーリングは no-op（履歴が増えない）。
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 20);
+        let history = std::fs::read_to_string(&history_path).unwrap();
+        assert_eq!(history.lines().count(), 1, "差分なしでは履歴が増えない");
+
+        // concurrency=0 は無視され、target だけ反映される。
+        std::fs::write(&control_path, r#"{"target_games": 200, "concurrency": 0}"#).unwrap();
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 30);
+        assert_eq!(target.load(Ordering::Relaxed), 200);
+        assert_eq!(desired, 8, "concurrency=0 は無視");
+
+        // 壊れた JSON は無視され、実行継続（既存値も維持）。
+        std::fs::write(&control_path, "{ not json").unwrap();
+        apply_control(&control_path, &history_path, &mut applied, &target, &mut desired, 40);
+        assert_eq!(target.load(Ordering::Relaxed), 200);
+    }
+
+    #[test]
+    fn ticket_source_swap_game_reuses_start_position() {
+        // 複数開始局面でも、ペアの 2 局目は 1 局目と同じ開始局面を使う。
+        let target = Arc::new(AtomicU32::new(1));
+        let mut source = TicketSource::new(vec![(0, 1)], 8, target.clone());
+        let tickets = drain_source(&mut source);
+        assert_eq!(tickets.len(), 2);
+        assert_eq!(
+            tickets[0].startpos_idx, tickets[1].startpos_idx,
+            "先後入替の 2 局目は同一開始局面"
+        );
+    }
+
+    #[test]
+    fn control_file_parses_partial_fields() {
+        let only_target: ControlFile = serde_json::from_str(r#"{"target_games": 5}"#).unwrap();
+        assert_eq!(only_target.target_games, Some(5));
+        assert_eq!(only_target.concurrency, None);
+
+        let both: ControlFile =
+            serde_json::from_str(r#"{"target_games": 12, "concurrency": 8}"#).unwrap();
+        assert_eq!(both.target_games, Some(12));
+        assert_eq!(both.concurrency, Some(8));
+
+        let empty: ControlFile = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.target_games, None);
+        assert_eq!(empty.concurrency, None);
     }
 
     #[test]
