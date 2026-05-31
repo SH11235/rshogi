@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["SH11235"]
 description = "rshogi の内部 build 自動化タスク (preset edition build + engines/ 配置)"
-license = "GPL-3.0-only"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/sh11235/rshogi"
 publish = false
 

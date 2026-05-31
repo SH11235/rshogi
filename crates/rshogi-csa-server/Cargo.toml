@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["SH11235"]
 description = "Core logic for a CSA protocol shogi game server (transport-agnostic)."
-license = "GPL-3.0-only"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/SH11235/rshogi"
 
 [dependencies]

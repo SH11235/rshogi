@@ -4,7 +4,7 @@ Rust で書かれた将棋エンジンです。
 
 [![Crates.io](https://img.shields.io/crates/v/rshogi-core.svg)](https://crates.io/crates/rshogi-core)
 [![Documentation](https://docs.rs/rshogi-core/badge.svg)](https://docs.rs/rshogi-core)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-blue.svg)](LICENSE)
 
 ## 特徴
 
@@ -106,4 +106,4 @@ cargo xtask list-binaries
 
 ## ライセンス
 
-GPL-3.0-only License - 詳細は [LICENSE](LICENSE) を参照してください。
+GPL-3.0-or-later License - 詳細は [LICENSE](LICENSE) を参照してください。

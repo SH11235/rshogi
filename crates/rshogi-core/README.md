@@ -44,7 +44,7 @@ println!("Best move: {}", result.best_move.to_usi());
 
 ## License
 
-GPL-3.0-only License
+GPL-3.0-or-later License
 
 ## 参考・影響 / Acknowledgements
 

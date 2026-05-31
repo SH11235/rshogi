@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["SH11235"]
 description = "CSA protocol client (CLI bridge) that wires a USI engine to a CSA server (TCP / WebSocket)."
-license = "GPL-3.0-only"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/SH11235/rshogi"
 
 # crate を library + binary 構成に分割。consumer (Tauri 等) は lib を取り込み、
