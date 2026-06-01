@@ -694,8 +694,15 @@ fn worker_main(
             });
         };
 
-        match run_game(black, white, start_pos, tc, &config, game_id, &mut on_move, None) {
-            Ok(result) => {
+        // run_game の panic を捕捉する。捕捉しないと worker が結果を送らず終了し、
+        // メインの `result_rx.recv()` が in-flight 分を永久に待ってハングする。
+        // panic 時はエラー結果を 1 件送り、状態が不確かなエンジンを使い続けないよう
+        // この worker を退役させる（チケットごとに必ず結果 1 件を保証）。
+        let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_game(black, white, start_pos, tc, &config, game_id, &mut on_move, None)
+        }));
+        match run_result {
+            Ok(Ok(result)) => {
                 let _ = tx.send(MatchResult {
                     ticket,
                     outcome: result.outcome,
@@ -705,7 +712,7 @@ fn worker_main(
                     error: false,
                 });
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("worker: game error: {e}");
                 let _ = tx.send(MatchResult {
                     ticket,
@@ -715,6 +722,18 @@ fn worker_main(
                     move_logs,
                     error: true,
                 });
+            }
+            Err(_) => {
+                eprintln!("worker: game {game_id} panicked; retiring worker");
+                let _ = tx.send(MatchResult {
+                    ticket,
+                    outcome: GameOutcome::Draw,
+                    reason: "error: worker panic".to_string(),
+                    plies: 0,
+                    move_logs,
+                    error: true,
+                });
+                return;
             }
         }
     }
