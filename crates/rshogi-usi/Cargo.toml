@@ -23,7 +23,7 @@ env_logger.workspace = true
 # Local dependencies
 # rshogi-core の default features は本 crate の default で明示的に再構築する
 # (preset edition specific build 時に複数 edition が unify されるのを防ぐため)。
-rshogi-core = { version = "0.3", path = "../rshogi-core", default-features = false }
+rshogi-core = { version = "0.4", path = "../rshogi-core", default-features = false }
 
 [features]
 # default は rshogi-core 側 default (search-no-pass-rules + edition-universal) と一致させる。
