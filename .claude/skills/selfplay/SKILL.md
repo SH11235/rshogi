@@ -190,6 +190,34 @@ cargo run -p tools --release --bin tournament -- \
 
 **注意:** `run_in_background: true` で起動し、`TaskOutput` で完了を監視すること。
 
+#### 実行中の動的制御（再起動不要）
+
+長時間 run（SPRT 数千局・base-vs-N 等）の最中に、**再起動せず**対局境界で並列度や対局数を
+変えたいときは `<out-dir>/control.json` を書き換える。producer ループが 500ms 間隔で
+ポーリングし、次の対局境界で反映する。background task で回している最中でも、別途
+ファイルを書くだけで介入できる（Ctrl-C → パラメータ変更 → 再起動で進行中の対局結果を
+無駄にする / out-dir が分割されて集計が面倒になる、を回避）。
+
+```bash
+# <out-dir>/control.json （存在するフィールドだけ反映。両方任意）
+echo '{"target_games": 300, "concurrency": 8}' > runs/selfplay/{DIR}/control.json
+```
+
+- **`target_games`**: 各方向・各ペアあたりの目標対局数（CLI `--games` と同じ単位）。
+  - 増やす → 既存ペアに追加チケットを供給して続行
+  - 減らす → 進行中ペアは 2 局目まで完結させた上で新規供給を停止し drain（pentanomial の
+    片側ペア残りを防ぐ）
+- **`concurrency`**: ワーカー数。増やすと即座に追加 spawn、減らすと対象ワーカーが現局面
+  完了後に退役する。`0` 以下は無視。
+- 変更は `<out-dir>/control_history.jsonl` に追記され、`pair_index` 整合は維持されるので
+  `analyze_selfplay` の集計と矛盾しない。
+
+留意点:
+- 変更は**対局境界**でのみ反映。進行中の 1 局は途中で再ターゲットされない。
+- `concurrency` 増加は worker 追加ごとに engine spawn（NNUE ロード相当）のコストがかかる。
+- SPRT の**途中トグル**（実行中に SPRT を有効化）は未対応。SPRT は起動時 `--sprt` で指定する。
+- 不正な JSON / 読み込み失敗 / 履歴追記失敗は警告のみで実行継続（対局は落とさない）。
+
 #### 外部エンジンとの対局例
 
 rshogi と YaneuraOu のように異なるエンジンを対局させる場合、
@@ -263,6 +291,9 @@ cargo run -p tools --release --bin tournament -- \
   ため、完了順が前後しても正しく集計される。
 - ログファイルには `pair_index` / `pair_slot` が自動で書き込まれるので、後から
   `analyze_selfplay --sprt` で再判定できる。
+- 走らせている最中に並列度を変えたい / `--games` 上限を増減したいときは、再起動せず
+  `<out-dir>/control.json` で調整できる（上記「実行中の動的制御」を参照）。SPRT の
+  途中有効化のみ未対応。
 
 境界到達時の標準出力例:
 
