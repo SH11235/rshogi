@@ -77,18 +77,13 @@ struct BenchRecord {
     nyugyoku: String,
     black_points: u32,
     white_points: u32,
+    declarable: bool,
     in_check: bool,
     source: Source,
     game_id: String,
     end_kind: String,
     result: String,
     min_rating: Option<u32>,
-}
-
-#[derive(Debug, Clone)]
-struct Candidate {
-    record: BenchRecord,
-    usi_line: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -113,11 +108,14 @@ struct Stats {
     startpos_positions: u64,
 }
 
+/// CSA `'**` 評価値の符号規約を %TORYO 終局の勝敗と突き合わせて推定する。
+/// mover_view: 指し手側視点と仮定した正規化が勝敗と一致した件数。
+/// black_view: 常に先手視点と仮定した値が勝敗と一致した件数。
 #[derive(Debug, Default, Serialize)]
 struct SignValidation {
     checked_toryo_games: u64,
-    resign_side_negative: u64,
-    contradictory: u64,
+    agree_mover_view: u64,
+    agree_black_view: u64,
     samples: Vec<SignSample>,
 }
 
@@ -125,17 +123,18 @@ struct SignValidation {
 struct SignSample {
     game_id: String,
     file: String,
-    resign_side: char,
     last_eval_raw: i32,
-    normalized_black: i32,
-    ok: bool,
+    last_eval_side: char,
+    winner: String,
+    agree_mover_view: bool,
+    agree_black_view: bool,
 }
 
 #[derive(Debug)]
 struct ExtractedGame {
-    candidates: Vec<Candidate>,
-    nyugyoku_candidates: Vec<Candidate>,
-    startpos_candidate: Option<Candidate>,
+    candidates: Vec<BenchRecord>,
+    nyugyoku_candidates: Vec<BenchRecord>,
+    startpos_candidate: Option<BenchRecord>,
     end_kind: String,
 }
 
@@ -237,11 +236,8 @@ fn main() -> Result<()> {
     stats.nyugyoku_positions = sampled_nyugyoku.len() as u64;
     stats.startpos_positions = sampled_startpos.len() as u64;
 
-    write_jsonl(&cli.out_dir.join("label_bench.jsonl"), sampled.iter().map(|c| &c.record))?;
-    write_jsonl(
-        &cli.out_dir.join("label_bench_nyugyoku.jsonl"),
-        sampled_nyugyoku.iter().map(|c| &c.record),
-    )?;
+    write_jsonl(&cli.out_dir.join("label_bench.jsonl"), sampled.iter())?;
+    write_jsonl(&cli.out_dir.join("label_bench_nyugyoku.jsonl"), sampled_nyugyoku.iter())?;
     write_startpos(&cli.out_dir.join("startpos_ply100_balanced.txt"), &sampled_startpos)?;
     write_stats(&cli.out_dir.join("stats.json"), &stats)?;
 
@@ -250,9 +246,9 @@ fn main() -> Result<()> {
 
 fn push_game(
     game: ExtractedGame,
-    all: &mut Vec<Candidate>,
-    nyugyoku: &mut Vec<Candidate>,
-    startpos: &mut Vec<Candidate>,
+    all: &mut Vec<BenchRecord>,
+    nyugyoku: &mut Vec<BenchRecord>,
+    startpos: &mut Vec<BenchRecord>,
     stats: &mut Stats,
 ) {
     add_count(&mut stats.end_kind, &game.end_kind);
@@ -317,20 +313,30 @@ fn process_csa_file(path: &Path, cli: &Cli, stats: &mut Stats) -> Result<Option<
     }
 
     let game_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
+    let last_move_side = match game.moves.last() {
+        Some(mv) => csa_side(&mv.raw)?,
+        None => {
+            add_count(&mut stats.skipped_by_reason, "no_moves");
+            return Ok(None);
+        }
+    };
+    let result_label = result_from_csa(&game.end_kind, last_move_side);
+
     let mut pos = Position::new();
     pos.set_hirate();
-    let mut usi_moves = Vec::new();
     let mut candidates = Vec::new();
     let mut entered_any = false;
     let mut startpos_candidate = None;
-    let mut last_eval = None;
-    let mut last_side = None;
+    let mut last_eval_pair: Option<(i32, Color)> = None;
 
     for mv in &game.moves {
         let side = csa_side(&mv.raw)?;
-        let eval_cp_black = mv.eval_raw.map(|v| normalize_csa_eval(v, side));
-        last_eval = mv.eval_raw;
-        last_side = Some(side);
+        // floodgate の '** 評価値は手番によらず常に先手視点
+        // (stats.json の sign_validation で %TORYO 勝敗と突き合わせて検証している)
+        let eval_cp_black = mv.eval_raw;
+        if let Some(raw) = mv.eval_raw {
+            last_eval_pair = Some((raw, side));
+        }
         let record = make_record(
             &pos,
             pos.game_ply() as u32,
@@ -338,25 +344,22 @@ fn process_csa_file(path: &Path, cli: &Cli, stats: &mut Stats) -> Result<Option<
             Source::Floodgate,
             &game_id,
             &game.end_kind,
-            result_from_csa(&game.end_kind, side),
+            result_label.clone(),
             Some(min_rating),
         );
         entered_any |= record.nyugyoku != "none";
-        let usi_line = usi_line(&usi_moves);
-        let candidate = Candidate { record, usi_line };
-        update_population(&candidate.record, stats);
-        maybe_set_startpos(&candidate, cli, &mut startpos_candidate);
-        candidates.push(candidate);
+        update_population(&record, stats);
+        maybe_set_startpos(&record, cli, &mut startpos_candidate);
+        candidates.push(record);
 
         let core_move = csa_to_legal_move(&pos, &mv.raw)?;
-        usi_moves.push(core_move.to_usi());
         let gives_check = pos.gives_check(core_move);
         pos.do_move(core_move, gives_check);
     }
 
     add_count(&mut stats.games_by_source, "floodgate");
-    update_sign_validation(path, &game_id, &game, last_eval, last_side, stats);
-    let nyugyoku_candidates = if game.end_kind == "%KACHI" && entered_any {
+    update_sign_validation(path, &game_id, &game, last_eval_pair, &result_label, stats);
+    let nyugyoku_candidates = if game.end_kind == "%KACHI" || entered_any {
         candidates.clone()
     } else {
         Vec::new()
@@ -475,6 +478,7 @@ fn convert_jsonl_game(
     .to_string();
 
     let mut candidates = Vec::new();
+    let mut entered_any = false;
     let mut startpos_candidate = None;
     for mv in moves {
         if is_terminal_move(&mv.move_usi) {
@@ -504,20 +508,20 @@ fn convert_jsonl_game(
             result_label.clone(),
             None,
         );
-        let usi_line = if mv.sfen_before.starts_with("lnsgkgsnl/") {
-            "startpos".to_string()
-        } else {
-            format!("sfen {}", mv.sfen_before)
-        };
-        let candidate = Candidate { record, usi_line };
-        update_population(&candidate.record, stats);
-        maybe_set_startpos(&candidate, cli, &mut startpos_candidate);
-        candidates.push(candidate);
+        entered_any |= record.nyugyoku != "none";
+        update_population(&record, stats);
+        maybe_set_startpos(&record, cli, &mut startpos_candidate);
+        candidates.push(record);
     }
 
+    let nyugyoku_candidates = if entered_any {
+        candidates.clone()
+    } else {
+        Vec::new()
+    };
     Ok(ExtractedGame {
         candidates,
-        nyugyoku_candidates: Vec::new(),
+        nyugyoku_candidates,
         startpos_candidate,
         end_kind,
     })
@@ -544,7 +548,7 @@ fn make_record(
         (false, false) => "none",
     }
     .to_string();
-    let _declaration_probe = pos.declaration_win(EnteringKingRule::Point27);
+    let declarable = pos.declaration_win(EnteringKingRule::Point27) != Move::NONE;
 
     BenchRecord {
         sfen: pos.to_sfen(),
@@ -556,6 +560,7 @@ fn make_record(
         nyugyoku,
         black_points,
         white_points,
+        declarable,
         in_check: pos.in_check(),
         source,
         game_id: game_id.to_string(),
@@ -574,7 +579,52 @@ fn csa_to_legal_move(pos: &Position, raw: &str) -> Result<Move> {
             return Ok(mv);
         }
     }
+    // YO 準拠の generate_legal は歩・大駒などの不成を生成しないため、
+    // AobaZero 等が指す不成は USI 経由で直接構築して擬似合法性のみ検証する
+    if let Some(usi) = csa_fallback_usi(pos, &spec, raw)
+        && let Some(mv) = Move::from_usi(&usi)
+        && pos.pseudo_legal_with_all(mv, true)
+    {
+        return Ok(mv);
+    }
     bail!("合法手に一致しない CSA 指し手: {raw}, sfen={}", pos.to_sfen())
+}
+
+fn csa_fallback_usi(pos: &Position, spec: &CsaMoveSpec, raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let to = csa_digits_to_usi(bytes[3], bytes[4]);
+    match spec.from {
+        Some(from_sq) => {
+            let pt = pos.piece_on(from_sq).piece_type();
+            let promote = if pt == spec.piece_type_after {
+                false
+            } else if pt.promote() == Some(spec.piece_type_after) {
+                true
+            } else {
+                // 移動元の駒種が棋譜と食い違う場合は再生の乖離なので変換しない
+                return None;
+            };
+            let from = csa_digits_to_usi(bytes[1], bytes[2]);
+            Some(format!("{from}{to}{}", if promote { "+" } else { "" }))
+        }
+        None => {
+            let letter = match spec.piece_type_after {
+                PieceType::Pawn => 'P',
+                PieceType::Lance => 'L',
+                PieceType::Knight => 'N',
+                PieceType::Silver => 'S',
+                PieceType::Gold => 'G',
+                PieceType::Bishop => 'B',
+                PieceType::Rook => 'R',
+                _ => return None,
+            };
+            Some(format!("{letter}*{to}"))
+        }
+    }
+}
+
+fn csa_digits_to_usi(file: u8, rank: u8) -> String {
+    format!("{}{}", file as char, (b'a' + (rank - b'1')) as char)
 }
 
 #[derive(Debug)]
@@ -729,7 +779,7 @@ fn csa_side(raw: &str) -> Result<Color> {
     }
 }
 
-fn normalize_csa_eval(eval_raw: i32, side: Color) -> i32 {
+fn mover_view_to_black(eval_raw: i32, side: Color) -> i32 {
     if side == Color::Black {
         eval_raw
     } else {
@@ -741,42 +791,49 @@ fn update_sign_validation(
     path: &Path,
     game_id: &str,
     game: &CsaGame,
-    last_eval: Option<i32>,
-    last_side: Option<Color>,
+    last_eval_pair: Option<(i32, Color)>,
+    result_label: &str,
     stats: &mut Stats,
 ) {
     if game.end_kind != "%TORYO" {
         return;
     }
-    let (Some(raw), Some(side)) = (last_eval, last_side) else {
+    let Some((raw, side)) = last_eval_pair else {
         return;
     };
-    let resign_side = !side;
-    let ok = if resign_side == Color::Black {
-        raw < 0
-    } else {
-        raw > 0
+    let winner_black = match result_label {
+        "black_win" => true,
+        "white_win" => false,
+        _ => return,
     };
+    if raw == 0 {
+        return;
+    }
+    let agree_mover_view = (mover_view_to_black(raw, side) > 0) == winner_black;
+    let agree_black_view = (raw > 0) == winner_black;
     stats.sign_validation.checked_toryo_games += 1;
-    if ok {
-        stats.sign_validation.resign_side_negative += 1;
-    } else {
-        stats.sign_validation.contradictory += 1;
+    if agree_mover_view {
+        stats.sign_validation.agree_mover_view += 1;
+    }
+    if agree_black_view {
+        stats.sign_validation.agree_black_view += 1;
     }
     if stats.sign_validation.samples.len() < 20 {
         stats.sign_validation.samples.push(SignSample {
             game_id: game_id.to_string(),
             file: path.display().to_string(),
-            resign_side: color_label(resign_side),
             last_eval_raw: raw,
-            normalized_black: normalize_csa_eval(raw, side),
-            ok,
+            last_eval_side: color_label(side),
+            winner: result_label.to_string(),
+            agree_mover_view,
+            agree_black_view,
         });
     }
 }
 
 fn result_from_csa(end_kind: &str, last_move_side: Color) -> String {
     match end_kind {
+        // 投了・時間切れ・反則は手番側 (= 最終手の次に指す側) の負け
         "%TORYO" | "%TIME_UP" | "%ILLEGAL_MOVE" => {
             if last_move_side == Color::Black {
                 "black_win"
@@ -784,11 +841,12 @@ fn result_from_csa(end_kind: &str, last_move_side: Color) -> String {
                 "white_win"
             }
         }
+        // 宣言勝ちは手番側 (= 最終手の次に指す側) の勝ち
         "%KACHI" => {
             if last_move_side == Color::Black {
-                "black_win"
-            } else {
                 "white_win"
+            } else {
+                "black_win"
             }
         }
         "%SENNICHITE" | "%HIKIWAKE" | "%JISHOGI" => "draw",
@@ -829,29 +887,29 @@ fn update_population(record: &BenchRecord, stats: &mut Stats) {
     add_count(&mut stats.population_by_cell, &cell_key(record));
 }
 
-fn maybe_set_startpos(candidate: &Candidate, cli: &Cli, slot: &mut Option<Candidate>) {
+fn maybe_set_startpos(record: &BenchRecord, cli: &Cli, slot: &mut Option<BenchRecord>) {
     let lower = cli.startpos_ply.saturating_sub(cli.startpos_window);
     let upper = cli.startpos_ply.saturating_add(cli.startpos_window);
-    let Some(eval) = candidate.record.eval_cp_black else {
+    let Some(eval) = record.eval_cp_black else {
         return;
     };
     if slot.is_none()
-        && (lower..=upper).contains(&candidate.record.ply)
+        && (lower..=upper).contains(&record.ply)
         && eval.abs() <= cli.startpos_eval_abs_max
     {
-        *slot = Some(candidate.clone());
+        *slot = Some(record.clone());
     }
 }
 
 fn stratified_sample(
-    all: &[Candidate],
+    all: &[BenchRecord],
     per_cell: usize,
     rng: &mut ChaCha8Rng,
     stats: &mut Stats,
-) -> Vec<Candidate> {
-    let mut cells: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
-    for candidate in all {
-        cells.entry(cell_key(&candidate.record)).or_default().push(candidate.clone());
+) -> Vec<BenchRecord> {
+    let mut cells: BTreeMap<String, Vec<BenchRecord>> = BTreeMap::new();
+    for record in all {
+        cells.entry(cell_key(record)).or_default().push(record.clone());
     }
     let mut out = Vec::new();
     for (cell, mut values) in cells {
@@ -863,18 +921,22 @@ fn stratified_sample(
     out
 }
 
-fn sample_nyugyoku(mut values: Vec<Candidate>, max: usize, rng: &mut ChaCha8Rng) -> Vec<Candidate> {
+fn sample_nyugyoku(
+    mut values: Vec<BenchRecord>,
+    max: usize,
+    rng: &mut ChaCha8Rng,
+) -> Vec<BenchRecord> {
     values.shuffle(rng);
     values.truncate(max);
     values
 }
 
-fn dedup_startpos(values: Vec<Candidate>) -> Vec<Candidate> {
+fn dedup_startpos(values: Vec<BenchRecord>) -> Vec<BenchRecord> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for candidate in values {
-        if seen.insert(candidate.record.sfen.clone()) {
-            out.push(candidate);
+    for record in values {
+        if seen.insert(record.sfen.clone()) {
+            out.push(record);
         }
     }
     out
@@ -915,14 +977,6 @@ fn is_terminal_move(move_usi: &str) -> bool {
     matches!(move_usi, "resign" | "win" | "timeout" | "illegal" | "none")
 }
 
-fn usi_line(moves: &[String]) -> String {
-    if moves.is_empty() {
-        "startpos".to_string()
-    } else {
-        format!("startpos moves {}", moves.join(" "))
-    }
-}
-
 fn write_jsonl<'a, I>(path: &Path, records: I) -> Result<()>
 where
     I: IntoIterator<Item = &'a BenchRecord>,
@@ -937,11 +991,12 @@ where
     Ok(())
 }
 
-fn write_startpos(path: &Path, records: &[Candidate]) -> Result<()> {
+fn write_startpos(path: &Path, records: &[BenchRecord]) -> Result<()> {
     let file = File::create(path).with_context(|| format!("出力できません: {}", path.display()))?;
     let mut writer = BufWriter::new(file);
+    // 既存の互角局面集 (data/floodgate/floodgate_r3900_*.txt) と同じ素の SFEN 1 行形式
     for record in records {
-        writeln!(writer, "{}", record.usi_line)?;
+        writeln!(writer, "{}", record.sfen)?;
     }
     writer.flush()?;
     Ok(())
@@ -958,9 +1013,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn csa_eval_is_normalized_to_black_view() {
-        assert_eq!(normalize_csa_eval(120, Color::Black), 120);
-        assert_eq!(normalize_csa_eval(120, Color::White), -120);
+    fn mover_view_conversion_flips_white() {
+        assert_eq!(mover_view_to_black(120, Color::Black), 120);
+        assert_eq!(mover_view_to_black(120, Color::White), -120);
+    }
+
+    #[test]
+    fn csa_fusei_falls_back_to_direct_construction() {
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/7P1/9/9/9/9/9/4K4 b - 1").expect("sfen");
+        let mv = csa_to_legal_move(&pos, "+2322FU").expect("fusei should be accepted");
+        assert_eq!(mv.to_usi(), "2c2b");
     }
 
     #[test]
@@ -969,6 +1032,14 @@ mod tests {
         pos.set_hirate();
         let mv = csa_to_legal_move(&pos, "+7776FU").expect("legal csa");
         assert_eq!(mv.to_usi(), "7g7f");
+    }
+
+    #[test]
+    fn kachi_winner_is_side_to_move_after_last_move() {
+        assert_eq!(result_from_csa("%KACHI", Color::Black), "white_win");
+        assert_eq!(result_from_csa("%KACHI", Color::White), "black_win");
+        assert_eq!(result_from_csa("%TORYO", Color::Black), "black_win");
+        assert_eq!(result_from_csa("%TORYO", Color::White), "white_win");
     }
 
     #[test]
