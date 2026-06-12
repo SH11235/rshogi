@@ -867,6 +867,7 @@ fn infer_labels_from_meta(
                     }
                 }
             }
+            // meta 行を処理済み。残り行は不要なので内側ループを抜ける
             break;
         }
     }
@@ -894,14 +895,21 @@ fn infer_labels_from_meta(
             note: "--sprt-test-label 指定からもう片方を base と判断".to_string(),
             assumed: false,
         }
-    } else if let Some(mb) = meta_base.filter(|m| *m == black || *m == white) {
+    } else if let Some(mb) = meta_base.as_ref().filter(|m| **m == black || **m == white) {
         InferredLabels {
-            test: other(&mb),
-            base: mb,
+            test: other(mb),
+            base: mb.clone(),
             note: "meta の base_label 記録（tournament --base-label）から判断".to_string(),
             assumed: false,
         }
     } else {
+        // base_label 記録がラベル組に含まれない（別 run の混入や stale な記録）場合、
+        // 黙ってヒューリスティックに落とすと推定根拠を誤解させるため通知する
+        if let Some(mb) = &meta_base {
+            eprintln!(
+                "警告: meta の base_label ({mb}) がラベル組 ({black}, {white}) に含まれないため無視します"
+            );
+        }
         let black_has_base = black.to_ascii_lowercase().contains("base");
         let white_has_base = white.to_ascii_lowercase().contains("base");
         match (black_has_base, white_has_base) {
@@ -1150,7 +1158,8 @@ fn print_sprt_text_report(penta: Penta, output: &SprtJsonOutput) {
             "H0 採択: {} が {} より nelo {:+.1} 以上強いとは言えない",
             output.test, output.base, output.nelo1
         ),
-        _ => "境界未到達 (判定保留)".to_string(),
+        "running" => "境界未到達 (判定保留)".to_string(),
+        other => format!("不明な decision: {other}"),
     };
     println!("decision:   {} — {}", output.decision, decision_note);
     match &output.nelo {
@@ -1429,6 +1438,7 @@ fn main() -> Result<()> {
         };
 
         // SPRT meta が無いログ（通常 run）では meta のラベル情報から base/test を推定する。
+        // CLI で両ラベルが明示済みなら推定不要。
         let inferred = if meta_sprt.is_none()
             && (cli.sprt_base_label.is_none() || cli.sprt_test_label.is_none())
         {
@@ -2137,6 +2147,19 @@ mod tests {
     fn infer_base_name_heuristic() {
         let dir = tempfile::tempdir().unwrap();
         let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "ftfact-100", "base-100", None);
+        let files: Vec<&str> = vec![a.as_str()];
+        let inf = infer_labels_from_meta(&files, None, None).unwrap().unwrap();
+        assert_eq!(inf.base, "base-100");
+        assert_eq!(inf.test, "ftfact-100");
+        assert!(!inf.assumed);
+    }
+
+    /// base_label 記録がラベル組に含まれない場合は無視して後続の推定にフォールバックする。
+    #[test]
+    fn infer_ignores_base_label_not_in_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let a =
+            write_meta_jsonl_labels(dir.path(), "a.jsonl", "ftfact-100", "base-100", Some("v999"));
         let files: Vec<&str> = vec![a.as_str()];
         let inf = infer_labels_from_meta(&files, None, None).unwrap().unwrap();
         assert_eq!(inf.base, "base-100");
