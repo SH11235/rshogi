@@ -69,6 +69,11 @@ dir = "./records"
 filename_template = "{datetime}_{sente}_vs_{gote}"
 save_csa = true
 save_sfen = true
+# analyze_selfplay 互換 JSONL（meta / move / result 行）。既定 ON で
+# `dir/jsonl/` に 1 局 1 ファイル保存される。出力先を変えるときだけ
+# jsonl_out を指定する。
+save_jsonl = true
+# jsonl_out = "./runs/csa-jsonl"
 
 [log]
 level = "info"

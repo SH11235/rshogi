@@ -88,11 +88,17 @@ cargo run -p rshogi-csa-client --release -- \
 Worker で動かしたい場合は TOML 直書きの host を `wss://<your-subdomain>/ws/lobby` に
 向ける必要があり、現状の `--lobby` モードは未対応 (`--target staging|production` 必須)。
 
-## JSONL 出力モード — `tools::analyze_selfplay` で集計
+## JSONL 出力 — `tools::analyze_selfplay` で集計
 
-`--jsonl-out <DIR>` を付けて起動すると、対局完了ごとに analyze_selfplay 互換の JSONL を
+対局完了ごとに analyze_selfplay 互換の JSONL を
 `<DIR>/<datetime>_<sente>_vs_<gote>.jsonl` として書き出す。サーバーへ送信するわけでは
-なく、完全にローカル CLI 解析専用の opt-in 機能 (既定 OFF)。
+なく、完全にローカル CLI 解析専用。既定 ON で `record.dir/jsonl/`
+(デフォルト `./records/jsonl/`) に保存され、`--jsonl-out <DIR>` または TOML の
+`record.jsonl_out` で出力先を上書きできる。止めたい場合は TOML で
+`record.save_jsonl = false`（または記録ごと止める `record.enabled = false`）。
+
+JSONL には CSA 棋譜 (`T<sec>` = 秒単位) から復元できない ms 単位の消費時間や
+`nodes` / `nps` / `seldepth` が含まれるため、既定 ON で取り損ねを防いでいる。
 
 スキーマは selfplay (`tools/src/bin/tournament.rs`) の出力と同じ `meta` / `move` /
 `result` の 3 種類で、`move.eval` は `score_cp` / `score_mate` / `depth` / `seldepth` /
@@ -101,8 +107,7 @@ Worker で動かしたい場合は TOML 直書きの host を `wss://<your-subdo
 そのまま流用できる。
 
 ```bash
-# 1. CSA 経由対局を JSONL 付きで実行（--target staging の例）
-mkdir -p runs/csa-jsonl
+# 1. CSA 経由対局を実行（--target staging の例。JSONL は既定 ON）
 cargo run -p rshogi-csa-client --release -- \
   --target staging \
   --room-id e2e-jsonl-1 \
@@ -111,23 +116,23 @@ cargo run -p rshogi-csa-client --release -- \
   --game-name byoyomi-msec-10-100 \
   --engine /path/to/your/rshogi-usi \
   --options "EvalFile=/path/to/your-nnue.bin,USI_Hash=256" \
-  --jsonl-out runs/csa-jsonl \
   --max-games 5
 
-# 2. selfplay と同じツールで集計
-cargo run -p tools --release --bin analyze_selfplay -- runs/csa-jsonl/*.jsonl
+# 2. selfplay と同じツールで集計（既定の出力先は ./records/jsonl/）
+cargo run -p tools --release --bin analyze_selfplay -- records/jsonl/*.jsonl
 
 # JSON で受け取りたい場合
-cargo run -p tools --release --bin analyze_selfplay -- --json runs/csa-jsonl/*.jsonl
+cargo run -p tools --release --bin analyze_selfplay -- --json records/jsonl/*.jsonl
 ```
 
-TOML 設定の `[record]` セクションでも指定可能:
+出力先・ON/OFF は TOML 設定の `[record]` セクションでも指定可能:
 
 ```toml
 [record]
 enabled = true
 dir = "./records"
-jsonl_out = "./runs/csa-jsonl"
+save_jsonl = true                  # false で JSONL のみ停止
+jsonl_out = "./runs/csa-jsonl"     # 省略時は dir/jsonl/
 ```
 
 注意点:

@@ -164,9 +164,10 @@ pub struct RecordConfig {
     pub filename_template: String,
     pub save_csa: bool,
     pub save_sfen: bool,
-    /// JSONL 出力先ディレクトリ。`None` のとき JSONL は生成しない。
-    /// 指定すると `<datetime>_<sente>_vs_<gote>.jsonl` を出力し、
-    /// `tools::analyze_selfplay` で読み込めるスキーマで meta / move / result 行を書き込む。
+    /// `tools::analyze_selfplay` 互換 JSONL を保存するか。CSA 棋譜から復元できない
+    /// ms 単位の消費時間や nodes / nps / seldepth を含むため既定 ON。
+    pub save_jsonl: bool,
+    /// JSONL 出力先ディレクトリの上書き。`None` のとき `dir/jsonl/` に保存する。
     #[serde(default)]
     pub jsonl_out: Option<PathBuf>,
 }
@@ -179,8 +180,20 @@ impl Default for RecordConfig {
             filename_template: "{datetime}_{sente}_vs_{gote}".to_string(),
             save_csa: true,
             save_sfen: true,
+            save_jsonl: true,
             jsonl_out: None,
         }
+    }
+}
+
+impl RecordConfig {
+    /// JSONL の出力先を返す。記録自体が無効 (`enabled = false`) か
+    /// `save_jsonl = false` のときは `None`（= JSONL を出力しない）。
+    pub fn jsonl_dir(&self) -> Option<PathBuf> {
+        if !self.enabled || !self.save_jsonl {
+            return None;
+        }
+        Some(self.jsonl_out.clone().unwrap_or_else(|| self.dir.join("jsonl")))
     }
 }
 
@@ -224,5 +237,50 @@ impl CsaClientConfig {
             bail!("keepalive.ping_interval_sec must be >= 30 (CSA protocol requirement)");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jsonl_dir_defaults_under_record_dir() {
+        let config = RecordConfig::default();
+        assert_eq!(config.jsonl_dir(), Some(PathBuf::from("./records/jsonl")));
+    }
+
+    #[test]
+    fn jsonl_dir_honors_explicit_override() {
+        let config = RecordConfig {
+            jsonl_out: Some(PathBuf::from("/tmp/csa-jsonl")),
+            ..RecordConfig::default()
+        };
+        assert_eq!(config.jsonl_dir(), Some(PathBuf::from("/tmp/csa-jsonl")));
+    }
+
+    #[test]
+    fn jsonl_dir_none_when_save_jsonl_off() {
+        let config = RecordConfig {
+            save_jsonl: false,
+            ..RecordConfig::default()
+        };
+        assert_eq!(config.jsonl_dir(), None);
+    }
+
+    #[test]
+    fn jsonl_dir_none_when_record_disabled() {
+        let config = RecordConfig {
+            enabled: false,
+            ..RecordConfig::default()
+        };
+        assert_eq!(config.jsonl_dir(), None);
+    }
+
+    #[test]
+    fn record_toml_without_save_jsonl_defaults_on() {
+        let config: CsaClientConfig = toml::from_str("[record]\nenabled = true\n").unwrap();
+        assert!(config.record.save_jsonl);
+        assert_eq!(config.record.jsonl_dir(), Some(PathBuf::from("./records/jsonl")));
     }
 }

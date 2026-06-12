@@ -160,9 +160,8 @@ struct Cli {
     #[arg(long)]
     record_dir: Option<PathBuf>,
 
-    /// JSONL 出力ディレクトリ。指定すると対局完了ごとに analyze_selfplay 互換の
-    /// JSONL ファイルを `<datetime>_<sente>_vs_<gote>.jsonl` として書き出す。
-    /// 未指定時は JSONL を出力しない（既定 OFF）。TOML の `record.jsonl_out` でも指定可。
+    /// analyze_selfplay 互換 JSONL の出力先上書き（未指定時は `record.dir/jsonl/`）。
+    /// 出力を止めるには TOML で `record.save_jsonl = false` を指定する。
     #[arg(long)]
     jsonl_out: Option<PathBuf>,
 
@@ -363,9 +362,9 @@ fn main() -> Result<()> {
                     log::error!("棋譜保存エラー: {e}");
                 }
 
-                // JSONL 出力（opt-in、--jsonl-out / record.jsonl_out 指定時のみ）
-                if let Some(ref jsonl_dir) = config.record.jsonl_out {
-                    match write_game_jsonl(jsonl_dir, &record, &config, &result) {
+                // analyze_selfplay 互換 JSONL（ON/OFF と出力先は RecordConfig::jsonl_dir）
+                if let Some(jsonl_dir) = config.record.jsonl_dir() {
+                    match write_game_jsonl(&jsonl_dir, &record, &config, &result) {
                         Ok(path) => log::info!("[REC] JSONL 保存: {}", path.display()),
                         Err(e) => log::error!("JSONL 保存エラー: {e}"),
                     }
