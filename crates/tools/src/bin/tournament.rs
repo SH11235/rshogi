@@ -285,6 +285,10 @@ struct MetaLogEntry {
     engine_cmd: EngineCommandMeta,
     start_positions: Vec<String>,
     output: String,
+    /// base-vs-N モード（`--base-label`）時のみ付与される基準エンジンのラベル。
+    /// analyze_selfplay 側で SPRT post-hoc のラベル役割（base / test）推定に利用する。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_label: Option<String>,
     /// SPRT 実行時のみ付与される。base / test ラベルと Wald パラメータを含み、
     /// analyze_selfplay 側でラベル自動推定に利用する。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1153,6 +1157,7 @@ fn main() -> Result<()> {
                 },
                 start_positions: start_commands.clone(),
                 output: path.display().to_string(),
+                base_label: cli.base_label.clone(),
                 sprt: sprt_meta,
             };
             pw.write_json(&meta)?;

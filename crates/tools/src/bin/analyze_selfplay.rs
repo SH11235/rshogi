@@ -35,17 +35,18 @@ struct Cli {
     json: bool,
 
     /// SPRT post-hoc 判定表示を有効化。
-    /// ラベル / パラメータは tournament.rs が meta 行に書き出した SPRT 情報から自動推定する。
-    /// ラベルは meta にも CLI にも無い場合エラー。数値パラメータは meta にも CLI にも無い
-    /// 場合のみハードコード fallback (nelo0=0, nelo1=5, alpha=0.05, beta=0.05) を使う。
+    /// ラベルは CLI → meta の SPRT 情報 → meta のラベル情報（base_label 記録 /
+    /// "base" を含むラベル名等）の順で自動推定し、推定時は根拠を表示する。
+    /// 数値パラメータは CLI → meta → ハードコード fallback
+    /// (nelo0=0, nelo1=5, alpha=0.05, beta=0.05) の順で解決する。
     #[arg(long, default_value_t = false)]
     sprt: bool,
 
-    /// H1 側（challenger / test）のラベル。未指定時は meta から推定（meta にも無ければエラー）。
+    /// H1 側（challenger / test）のラベル。未指定時は meta から推定。
     #[arg(long)]
     sprt_test_label: Option<String>,
 
-    /// H0 側（base）のラベル。未指定時は meta から推定（meta にも無ければエラー）。
+    /// H0 側（base）のラベル。未指定時は meta から推定。
     #[arg(long)]
     sprt_base_label: Option<String>,
 
@@ -75,6 +76,10 @@ struct Cli {
 struct MetaLog {
     settings: MetaSettings,
     engine_cmd: EngineCommandMeta,
+    /// tournament.rs が base-vs-N モード（--base-label）時のみ出力。
+    /// SPRT post-hoc のラベル役割（base / test）推定に使う。
+    #[serde(default)]
+    base_label: Option<String>,
     /// tournament.rs が --sprt 実行時のみ出力。未指定時のラベル自動推定に使う。
     #[serde(default)]
     sprt: Option<SprtMetaLog>,
@@ -652,8 +657,8 @@ fn parse_file(path: &str) -> Result<FileResult> {
 /// # 動作
 /// - meta 行に SPRT 情報が書かれているのは `tournament.rs --sprt` 実行で生成された
 ///   base/test ペアの jsonl のみ
-/// - `cli_base` / `cli_test` が共に与えられた場合、一致しない meta は無視する（別 run のログが
-///   混在しても CLI 明示ラベルが優先して絞り込めるようにする）
+/// - `cli_base` / `cli_test` が与えられた場合、一致しない meta は無視する（片方のみの指定でも
+///   適用。別 run のログが混在しても CLI 明示ラベルが優先して絞り込めるようにする）
 /// - 残った meta が複数あり、`(base_label, test_label, nelo0, nelo1, alpha, beta)` が
 ///   揃って一致するなら採用。ラベル不一致は `bail!`、Wald パラメータ不一致も `bail!`
 ///   （LLR 境界が変わるため誤集計防止）
@@ -703,10 +708,17 @@ fn collect_sprt_meta(
                 .with_context(|| format!("metaパースエラー: {path}"))?;
             let Some(sprt) = meta.sprt else { break };
 
-            // CLI でラベルが両方明示されている場合は、ラベル不一致 meta を無視する。
+            // CLI で明示されたラベルと一致しない meta を無視する（片方のみの指定でも適用）。
             // これにより、異なる run の jsonl が混在していても CLI 明示で解析対象を絞れる。
-            if let (Some(cb), Some(ct)) = (cli_base, cli_test)
-                && (sprt.base_label != cb || sprt.test_label != ct)
+            // infer_labels_from_meta のフィルタ規則と揃えてあり、片側指定で別 run が
+            // 混在しても不一致 bail せずに補完まで到達できる。
+            if let Some(cb) = cli_base
+                && sprt.base_label != cb
+            {
+                break;
+            }
+            if let Some(ct) = cli_test
+                && sprt.test_label != ct
             {
                 break;
             }
@@ -748,6 +760,172 @@ fn collect_sprt_meta(
         }
     }
     Ok(found.map(|(m, _)| m))
+}
+
+/// meta 行のラベル情報から推定した SPRT のラベル役割。
+#[derive(Debug)]
+struct InferredLabels {
+    base: String,
+    test: String,
+    /// 推定根拠（notice 表示用）
+    note: String,
+    /// 根拠なしの既定（label_black=test）に落ちた場合 true。呼び出し側で警告に格上げする
+    assumed: bool,
+}
+
+/// SPRT meta を持たないログ向けに、meta 行の `label_black` / `label_white` /
+/// `base_label` から base / test の役割を推定する。
+///
+/// 役割の決定優先順:
+/// 1. CLI で片方のみ指定 → もう片方をペアの残りラベルで補完
+/// 2. meta の `base_label`（tournament.rs が base-vs-N モードで記録）
+/// 3. ラベル名に "base" を含む側が一意なら、それを base
+/// 4. label_black を test とみなす既定（`assumed=true`）
+///
+/// CLI ラベルが与えられた場合、それを含まない meta は別 run とみなして無視する。
+/// 残った meta 間でラベル組（順不同）が一致しない場合、または同一ラベル組でも
+/// `base_label` 記録が矛盾する場合は bail。
+/// meta が読めない / 同一ラベル同士で役割を割り当てられない場合は `None`。
+fn infer_labels_from_meta(
+    files: &[&str],
+    cli_base: Option<&str>,
+    cli_test: Option<&str>,
+) -> Result<Option<InferredLabels>> {
+    // (label_black, label_white, meta の base_label, パス)
+    let mut found: Option<(String, String, Option<String>, String)> = None;
+    for &path in files {
+        if path.contains(".summary.") {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(path) else {
+            continue;
+        };
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let Ok(line) = line else { break };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // 破損行は collect_sprt_meta が同じ走査で警告済みのため、ここでは黙ってスキップ
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                break;
+            };
+            if value.get("type").and_then(|v| v.as_str()) != Some("meta") {
+                break;
+            }
+            let meta: MetaLog = serde_json::from_value(value)
+                .with_context(|| format!("metaパースエラー: {path}"))?;
+            let black = meta
+                .engine_cmd
+                .label_black
+                .clone()
+                .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_black));
+            let white = meta
+                .engine_cmd
+                .label_white
+                .clone()
+                .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_white));
+            // 同一ラベル同士は役割を割り当てられない
+            if black == white {
+                break;
+            }
+            // CLI 指定ラベルを含まない meta は別 run とみなして無視
+            if let Some(cb) = cli_base
+                && cb != black
+                && cb != white
+            {
+                break;
+            }
+            if let Some(ct) = cli_test
+                && ct != black
+                && ct != white
+            {
+                break;
+            }
+            match found.as_mut() {
+                None => found = Some((black, white, meta.base_label.clone(), path.to_string())),
+                Some((eb, ew, ebase, epath)) => {
+                    let same_pair =
+                        (*eb == black && *ew == white) || (*eb == white && *ew == black);
+                    if !same_pair {
+                        bail!(
+                            "入力ファイル間でラベル組が一致しません: {epath} は ({eb}, {ew})、\
+                             {path} は ({black}, {white})。\
+                             --sprt-base-label / --sprt-test-label を明示してください"
+                        );
+                    }
+                    // base_label 記録の矛盾は base/test の符号反転に直結するため黙認しない
+                    match (ebase.as_ref(), meta.base_label.as_ref()) {
+                        (Some(a), Some(b)) if a != b => bail!(
+                            "入力ファイル間で meta の base_label が一致しません: \
+                             {epath} は {a}、{path} は {b}。\
+                             --sprt-base-label を明示してください"
+                        ),
+                        (None, Some(_)) => *ebase = meta.base_label.clone(),
+                        _ => {}
+                    }
+                }
+            }
+            break;
+        }
+    }
+    let Some((black, white, meta_base, _)) = found else {
+        return Ok(None);
+    };
+    let other = |one: &str| {
+        if one == black {
+            white.clone()
+        } else {
+            black.clone()
+        }
+    };
+    let inferred = if let Some(cb) = cli_base {
+        InferredLabels {
+            test: other(cb),
+            base: cb.to_string(),
+            note: "--sprt-base-label 指定からもう片方を test と判断".to_string(),
+            assumed: false,
+        }
+    } else if let Some(ct) = cli_test {
+        InferredLabels {
+            base: other(ct),
+            test: ct.to_string(),
+            note: "--sprt-test-label 指定からもう片方を base と判断".to_string(),
+            assumed: false,
+        }
+    } else if let Some(mb) = meta_base.filter(|m| *m == black || *m == white) {
+        InferredLabels {
+            test: other(&mb),
+            base: mb,
+            note: "meta の base_label 記録（tournament --base-label）から判断".to_string(),
+            assumed: false,
+        }
+    } else {
+        let black_has_base = black.to_ascii_lowercase().contains("base");
+        let white_has_base = white.to_ascii_lowercase().contains("base");
+        match (black_has_base, white_has_base) {
+            (true, false) => InferredLabels {
+                test: white.clone(),
+                base: black.clone(),
+                note: "ラベル名に \"base\" を含む側を base と判断".to_string(),
+                assumed: false,
+            },
+            (false, true) => InferredLabels {
+                test: black.clone(),
+                base: white.clone(),
+                note: "ラベル名に \"base\" を含む側を base と判断".to_string(),
+                assumed: false,
+            },
+            _ => InferredLabels {
+                test: black.clone(),
+                base: white.clone(),
+                note: "役割を示す情報が無いため label_black を test とみなした".to_string(),
+                assumed: true,
+            },
+        }
+    };
+    Ok(Some(inferred))
 }
 
 /// 単一 JSONL ファイルから base/test ペアに該当する Penta を集計する。
@@ -953,7 +1131,7 @@ fn build_sprt_json(
 
 fn print_sprt_text_report(penta: Penta, output: &SprtJsonOutput) {
     println!();
-    println!("=== SPRT (post-hoc): {} vs {} ===", output.test, output.base);
+    println!("=== SPRT (post-hoc): {} (test) vs {} (base) ===", output.test, output.base);
     println!(
         "hypotheses: H0 = nelo0={:+.1}  H1 = nelo1={:+.1}  (alpha={}, beta={})",
         output.nelo0, output.nelo1, output.alpha, output.beta
@@ -961,16 +1139,29 @@ fn print_sprt_text_report(penta: Penta, output: &SprtJsonOutput) {
     println!("bounds:     LLR ∈ [{:+.3}, {:+.3}]", output.lower, output.upper);
     println!("pairs:      {}", output.pairs);
     println!("LLR:        {:+.3}", output.llr);
-    println!("decision:   {}", output.decision);
+    // accept_h0/h1 はラベル役割の取り違えに弱いため、どちらが強い判定なのかを
+    // ラベル実名で言語化して併記する。
+    let decision_note = match output.decision.as_str() {
+        "accept_h1" => format!(
+            "H1 採択: {} は {} より強い (nelo {:+.1} 以上)",
+            output.test, output.base, output.nelo1
+        ),
+        "accept_h0" => format!(
+            "H0 採択: {} が {} より nelo {:+.1} 以上強いとは言えない",
+            output.test, output.base, output.nelo1
+        ),
+        _ => "境界未到達 (判定保留)".to_string(),
+    };
+    println!("decision:   {} — {}", output.decision, decision_note);
     match &output.nelo {
-        Some(n) => println!("nelo:       {:+.2} ± {:.2}", n.value, n.ci95),
+        Some(n) => println!("nelo:       {:+.2} ± {:.2} ({} 視点)", n.value, n.ci95, output.test),
         None => println!("nelo:       n/a (variance 0)"),
     }
     match &output.logistic_elo {
-        Some(n) => println!("elo:        {:+.2} ± {:.2}", n.value, n.ci95),
+        Some(n) => println!("elo:        {:+.2} ± {:.2} ({} 視点)", n.value, n.ci95, output.test),
         None => println!("elo:        n/a"),
     }
-    println!("penta:      {}", penta);
+    println!("penta:      {} ({} 視点)", penta, output.test);
     println!("=================================");
 }
 
@@ -1237,22 +1428,45 @@ fn main() -> Result<()> {
             None
         };
 
+        // SPRT meta が無いログ（通常 run）では meta のラベル情報から base/test を推定する。
+        let inferred = if meta_sprt.is_none()
+            && (cli.sprt_base_label.is_none() || cli.sprt_test_label.is_none())
+        {
+            infer_labels_from_meta(
+                &files,
+                cli.sprt_base_label.as_deref(),
+                cli.sprt_test_label.as_deref(),
+            )?
+        } else {
+            None
+        };
+        if let Some(inf) = &inferred {
+            let prefix = if inf.assumed { "警告" } else { "情報" };
+            eprintln!(
+                "{prefix}: SPRT ラベルを meta から推定: test={} / base={}（{}）。\
+                 役割が逆の場合は --sprt-base-label / --sprt-test-label を明示してください",
+                inf.test, inf.base, inf.note
+            );
+        }
+
         let base_label = cli
             .sprt_base_label
             .clone()
             .or_else(|| meta_sprt.as_ref().map(|m| m.base_label.clone()))
+            .or_else(|| inferred.as_ref().map(|i| i.base.clone()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "--sprt 有効時は --sprt-base-label が必須です（meta 行に SPRT 情報が無いため自動推定できませんでした）"
+                    "--sprt 有効時は base ラベルが必要です（meta からの推定もできませんでした）。--sprt-base-label を明示してください"
                 )
             })?;
         let test_label = cli
             .sprt_test_label
             .clone()
             .or_else(|| meta_sprt.as_ref().map(|m| m.test_label.clone()))
+            .or_else(|| inferred.as_ref().map(|i| i.test.clone()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "--sprt 有効時は --sprt-test-label が必須です（meta 行に SPRT 情報が無いため自動推定できませんでした）"
+                    "--sprt 有効時は test ラベルが必要です（meta からの推定もできませんでした）。--sprt-test-label を明示してください"
                 )
             })?;
         if base_label == test_label {
@@ -1402,8 +1616,10 @@ fn print_text(
             .map(|(e, c)| format!(" | nElo:{:+.0} ±{:.0}", -e, c))
             .unwrap_or_default();
 
+        // 行内の並びは辞書順で先後の意味を持たないため、符号の視点を明示する
         let elo_str = match (elo, ci) {
-            (Some(e), Some(c)) => format!(" | Elo差:{:+.0} ±{:.0}{}", e, c, nelo_str),
+            (Some(e), Some(c)) => format!(" | Elo差:{:+.0} ±{:.0}{} ({an}視点)", e, c, nelo_str),
+            _ if !nelo_str.is_empty() => format!("{nelo_str} ({an}視点)"),
             _ => nelo_str,
         };
 
@@ -1759,6 +1975,28 @@ mod tests {
         assert_eq!(got.nelo1, 4.0);
     }
 
+    /// CLI で片方のみ指定された場合も、一致しない SPRT meta は無視される
+    /// （infer_labels_from_meta のフィルタ規則と対称）。
+    #[test]
+    fn one_sided_cli_label_filters_unrelated_sprt_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let matching_sprt = "{\"base_label\":\"v100\",\"test_label\":\"v101\",\"nelo0\":0.0,\"nelo1\":4.0,\"alpha\":0.05,\"beta\":0.05}";
+        let unrelated_sprt = "{\"base_label\":\"v200\",\"test_label\":\"v201\",\"nelo0\":0.0,\"nelo1\":5.0,\"alpha\":0.01,\"beta\":0.01}";
+        let a = write_meta_jsonl(dir.path(), "a.jsonl", Some(matching_sprt));
+        let b = write_meta_jsonl(dir.path(), "b.jsonl", Some(unrelated_sprt));
+        let files: Vec<&str> = vec![a.as_str(), b.as_str()];
+
+        let res = collect_sprt_meta(&files, Some("v100"), None).unwrap();
+        let got = res.expect("matching meta should be picked up");
+        assert_eq!(got.base_label, "v100");
+        assert_eq!(got.test_label, "v101");
+
+        let res = collect_sprt_meta(&files, None, Some("v201")).unwrap();
+        let got = res.expect("matching meta should be picked up");
+        assert_eq!(got.base_label, "v200");
+        assert_eq!(got.test_label, "v201");
+    }
+
     /// CLI ラベル未指定で異ラベルの meta が混在する場合は従来通り bail! する。
     #[test]
     fn without_cli_labels_conflicting_meta_bails() {
@@ -1838,6 +2076,153 @@ mod tests {
 
         let err = collect_sprt_penta(&path.display().to_string(), "a", "b").unwrap_err();
         assert!(err.to_string().contains("resultパースエラー"));
+    }
+
+    fn write_meta_jsonl_labels(
+        dir: &std::path::Path,
+        name: &str,
+        label_black: &str,
+        label_white: &str,
+        base_label: Option<&str>,
+    ) -> String {
+        let path = dir.join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        let base_field = match base_label {
+            Some(s) => format!(",\"base_label\":\"{s}\""),
+            None => String::new(),
+        };
+        writeln!(
+            f,
+            "{{\"type\":\"meta\",\"timestamp\":\"t\",\"settings\":{{\"games\":2}},\
+             \"engine_cmd\":{{\"path_black\":\"/b\",\"path_white\":\"/w\",\
+             \"label_black\":\"{label_black}\",\"label_white\":\"{label_white}\",\
+             \"usi_options_black\":[],\"usi_options_white\":[]}}{base_field}}}"
+        )
+        .unwrap();
+        path.display().to_string()
+    }
+
+    /// meta の base_label 記録（tournament --base-label）があればそれを base とする。
+    #[test]
+    fn infer_uses_meta_base_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "cand", "anchor", Some("anchor"));
+        let files: Vec<&str> = vec![a.as_str()];
+        let inf = infer_labels_from_meta(&files, None, None).unwrap().unwrap();
+        assert_eq!(inf.base, "anchor");
+        assert_eq!(inf.test, "cand");
+        assert!(!inf.assumed);
+    }
+
+    /// CLI で片方のみ指定された場合、もう片方をペアの残りラベルで補完する。
+    /// CLI 指定は meta の base_label 記録より優先される。
+    #[test]
+    fn infer_completes_one_sided_cli_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "x", "y", Some("x"));
+        let files: Vec<&str> = vec![a.as_str()];
+
+        let inf = infer_labels_from_meta(&files, Some("y"), None).unwrap().unwrap();
+        assert_eq!(inf.base, "y");
+        assert_eq!(inf.test, "x");
+
+        let inf = infer_labels_from_meta(&files, None, Some("y")).unwrap().unwrap();
+        assert_eq!(inf.base, "x");
+        assert_eq!(inf.test, "y");
+        assert!(!inf.assumed);
+    }
+
+    /// 片方のラベルだけが "base" を含むなら、それを base と推定する。
+    #[test]
+    fn infer_base_name_heuristic() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "ftfact-100", "base-100", None);
+        let files: Vec<&str> = vec![a.as_str()];
+        let inf = infer_labels_from_meta(&files, None, None).unwrap().unwrap();
+        assert_eq!(inf.base, "base-100");
+        assert_eq!(inf.test, "ftfact-100");
+        assert!(!inf.assumed);
+    }
+
+    /// 役割を示す情報が皆無なら label_black=test の既定に落ち、assumed=true になる。
+    #[test]
+    fn infer_falls_back_to_label_black_as_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "v100", "v101", None);
+        let files: Vec<&str> = vec![a.as_str()];
+        let inf = infer_labels_from_meta(&files, None, None).unwrap().unwrap();
+        assert_eq!(inf.test, "v100");
+        assert_eq!(inf.base, "v101");
+        assert!(inf.assumed);
+    }
+
+    /// 両ラベルが "base" を含む場合はヒューリスティックを使わず既定に落ちる。
+    #[test]
+    fn infer_ambiguous_base_names_fall_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "base-a", "base-b", None);
+        let files: Vec<&str> = vec![a.as_str()];
+        let inf = infer_labels_from_meta(&files, None, None).unwrap().unwrap();
+        assert!(inf.assumed);
+    }
+
+    /// 同一ラベル組でもファイル間で base_label 記録が矛盾する場合は bail する
+    /// （入力順で base/test の符号が反転するのを防ぐ）。
+    #[test]
+    fn infer_conflicting_base_label_records_bail() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "cand", "anchor", Some("anchor"));
+        let b = write_meta_jsonl_labels(dir.path(), "b.jsonl", "cand", "anchor", Some("cand"));
+        let files: Vec<&str> = vec![a.as_str(), b.as_str()];
+        let err = infer_labels_from_meta(&files, None, None).unwrap_err();
+        assert!(err.to_string().contains("base_label"));
+    }
+
+    /// base_label 記録を持つファイルと持たないファイルの混在は矛盾ではなく、
+    /// 記録を持つ側から base を解決する。
+    #[test]
+    fn infer_merges_base_label_from_later_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "cand", "anchor", None);
+        let b = write_meta_jsonl_labels(dir.path(), "b.jsonl", "cand", "anchor", Some("anchor"));
+        let files: Vec<&str> = vec![a.as_str(), b.as_str()];
+        let inf = infer_labels_from_meta(&files, None, None).unwrap().unwrap();
+        assert_eq!(inf.base, "anchor");
+        assert_eq!(inf.test, "cand");
+        assert!(!inf.assumed);
+    }
+
+    /// 入力ファイル間でラベル組が一致しない場合は bail する。
+    #[test]
+    fn infer_conflicting_label_pairs_bails() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "x", "y", None);
+        let b = write_meta_jsonl_labels(dir.path(), "b.jsonl", "p", "q", None);
+        let files: Vec<&str> = vec![a.as_str(), b.as_str()];
+        let err = infer_labels_from_meta(&files, None, None).unwrap_err();
+        assert!(err.to_string().contains("ラベル組"));
+    }
+
+    /// CLI ラベル指定があれば、それを含まない別 run の meta は無視して bail しない。
+    #[test]
+    fn infer_cli_label_filters_unrelated_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "x", "y", None);
+        let b = write_meta_jsonl_labels(dir.path(), "b.jsonl", "p", "q", None);
+        let files: Vec<&str> = vec![a.as_str(), b.as_str()];
+        let inf = infer_labels_from_meta(&files, Some("y"), None).unwrap().unwrap();
+        assert_eq!(inf.base, "y");
+        assert_eq!(inf.test, "x");
+    }
+
+    /// 同一ラベル同士（自己対局）は役割を割り当てられないため None を返す。
+    #[test]
+    fn infer_identical_labels_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_meta_jsonl_labels(dir.path(), "a.jsonl", "same", "same", None);
+        let files: Vec<&str> = vec![a.as_str()];
+        let res = infer_labels_from_meta(&files, None, None).unwrap();
+        assert!(res.is_none());
     }
 
     /// 破損 JSON の先頭行は当該ファイルのみスキップし、他ファイルから収集できる。
