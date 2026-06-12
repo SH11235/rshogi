@@ -262,6 +262,7 @@ fn push_game(
 fn collect_csa_paths(inputs: &[String]) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for input in inputs {
+        let before = paths.len();
         let path = Path::new(input);
         if path.is_dir() {
             for entry in walkdir::WalkDir::new(path) {
@@ -271,7 +272,15 @@ fn collect_csa_paths(inputs: &[String]) -> Result<Vec<PathBuf>> {
                 }
             }
         } else {
-            paths.extend(glob::glob(input)?.filter_map(Result::ok).filter(|p| is_csa_path(p)));
+            for entry in glob::glob(input)? {
+                let p = entry?;
+                if is_csa_path(&p) {
+                    paths.push(p);
+                }
+            }
+        }
+        if paths.len() == before {
+            bail!("CSA 入力に一致するファイルがありません: {input}");
         }
     }
     paths.sort();
@@ -332,7 +341,9 @@ fn process_csa_file(path: &Path, cli: &Cli, stats: &mut Stats) -> Result<Option<
     for mv in &game.moves {
         let side = csa_side(&mv.raw)?;
         // floodgate の '** 評価値は手番によらず常に先手視点
-        // (stats.json の sign_validation で %TORYO 勝敗と突き合わせて検証している)
+        // (stats.json の sign_validation で %TORYO 勝敗と突き合わせて検証している)。
+        // この値は「指し手側がこの局面を探索して報告した探索値」なので、
+        // do_move 前の局面に対応付ける (PSV の score と同じ規約)
         let eval_cp_black = mv.eval_raw;
         if let Some(raw) = mv.eval_raw {
             last_eval_pair = Some((raw, side));
@@ -442,7 +453,10 @@ fn process_jsonl_file(path: &Path, cli: &Cli, stats: &mut Stats) -> Result<Vec<E
     }
 
     let mut games = Vec::new();
-    for (game_id, moves) in pending {
+    // HashMap の反復順は非決定的なので、--seed 固定の再現性のために game_id 順で処理する
+    let mut ordered: Vec<(u32, Vec<JsonlMove>)> = pending.into_iter().collect();
+    ordered.sort_by_key(|(game_id, _)| *game_id);
+    for (game_id, moves) in ordered {
         let Some(result) = results.get(&game_id) else {
             add_count(&mut stats.skipped_by_reason, "jsonl_orphan_game");
             continue;
