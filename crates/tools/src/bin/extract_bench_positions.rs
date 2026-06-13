@@ -418,6 +418,10 @@ fn parse_csa(path: &Path) -> Result<CsaGame> {
             end_kind = trimmed.split(',').next().unwrap_or(trimmed).to_string();
         } else if trimmed.starts_with("P+") || trimmed.starts_with("P-") {
             non_hirate = true;
+        } else if trimmed.starts_with("PI") && trimmed.len() > 2 {
+            // `PI` 単独は平手だが `PI82HI` のように駒除去が続くと駒落ち。
+            // 以降の手は平手から再生するため駒落ち局面は除外する。
+            non_hirate = true;
         }
     }
 
@@ -594,7 +598,8 @@ fn csa_to_legal_move(pos: &Position, raw: &str) -> Result<Move> {
         }
     }
     // YO 準拠の generate_legal は歩・大駒などの不成を生成しないため、
-    // AobaZero 等が指す不成は USI 経由で直接構築して擬似合法性のみ検証する
+    // AobaZero 等が指す不成は USI 経由で直接構築して擬似合法性のみ検証する。
+    // 棋譜由来の手なので自玉の王手放置は実在せず、擬似合法性の検証で足りる。
     if let Some(usi) = csa_fallback_usi(pos, &spec, raw)
         && let Some(mv) = Move::from_usi(&usi)
         && pos.pseudo_legal_with_all(mv, true)
@@ -801,6 +806,9 @@ fn mover_view_to_black(eval_raw: i32, side: Color) -> i32 {
     }
 }
 
+/// 符号規約検証で stats.json に残すサンプル局面の上限。
+const MAX_SIGN_SAMPLES: usize = 20;
+
 fn update_sign_validation(
     path: &Path,
     game_id: &str,
@@ -832,7 +840,7 @@ fn update_sign_validation(
     if agree_black_view {
         stats.sign_validation.agree_black_view += 1;
     }
-    if stats.sign_validation.samples.len() < 20 {
+    if stats.sign_validation.samples.len() < MAX_SIGN_SAMPLES {
         stats.sign_validation.samples.push(SignSample {
             game_id: game_id.to_string(),
             file: path.display().to_string(),
@@ -1018,7 +1026,9 @@ fn write_startpos(path: &Path, records: &[BenchRecord]) -> Result<()> {
 
 fn write_stats(path: &Path, stats: &Stats) -> Result<()> {
     let file = File::create(path).with_context(|| format!("出力できません: {}", path.display()))?;
-    serde_json::to_writer_pretty(file, stats)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, stats)?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -1094,5 +1104,94 @@ mod tests {
         assert_eq!(game.black_rate, Some(3200));
         assert_eq!(game.white_rate, Some(3100));
         assert_eq!(game.moves[0].eval_raw, Some(30));
+        assert!(!game.non_hirate);
+    }
+
+    #[test]
+    fn parse_csa_detects_partial_handicap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("handicap.csa");
+        fs::write(
+            &path,
+            concat!(
+                "V2.2\n",
+                "'black_rate:black:3200\n",
+                "'white_rate:white:3100\n",
+                "PI82HI\n",
+                "-\n",
+                "-3334FU\n",
+                "%TORYO\n",
+            ),
+        )
+        .expect("write csa");
+        let game = parse_csa(&path).expect("parse csa");
+        assert!(game.non_hirate);
+    }
+
+    #[test]
+    fn entering_points_counts_enemy_field_and_hand() {
+        let mut pos = Position::new();
+        // 1段目に先手飛(5点)、2段目に先手歩(1点)、持駒に角(5点)+金2(2点)。
+        pos.set_sfen("R7k/4P4/9/9/9/9/9/9/4K4 b B2G 1").expect("sfen");
+        assert_eq!(entering_points(&pos, Color::Black), 13);
+        assert_eq!(entering_points(&pos, Color::White), 0);
+    }
+
+    #[test]
+    fn eval_band_boundaries() {
+        assert_eq!(eval_band(None), "unknown");
+        assert_eq!(eval_band(Some(0)), "0-150");
+        assert_eq!(eval_band(Some(150)), "0-150");
+        assert_eq!(eval_band(Some(-151)), "151-600");
+        assert_eq!(eval_band(Some(600)), "151-600");
+        assert_eq!(eval_band(Some(601)), "601-1500");
+        assert_eq!(eval_band(Some(1500)), "601-1500");
+        assert_eq!(eval_band(Some(1501)), "1501+");
+        assert_eq!(eval_band(Some(29_999)), "1501+");
+        assert_eq!(eval_band(Some(-30_000)), "mate");
+    }
+
+    #[test]
+    fn progress_band_boundaries() {
+        assert_eq!(progress_band(1), "1-40");
+        assert_eq!(progress_band(40), "1-40");
+        assert_eq!(progress_band(41), "41-80");
+        assert_eq!(progress_band(80), "41-80");
+        assert_eq!(progress_band(81), "81-120");
+        assert_eq!(progress_band(120), "81-120");
+        assert_eq!(progress_band(121), "121+");
+    }
+
+    #[test]
+    fn dedup_startpos_keeps_first_occurrence() {
+        let input = vec![
+            record_with_sfen("sfen_a"),
+            record_with_sfen("sfen_b"),
+            record_with_sfen("sfen_a"),
+        ];
+        let out = dedup_startpos(input);
+        let sfens: Vec<&str> = out.iter().map(|r| r.sfen.as_str()).collect();
+        assert_eq!(sfens, vec!["sfen_a", "sfen_b"]);
+    }
+
+    fn record_with_sfen(sfen: &str) -> BenchRecord {
+        BenchRecord {
+            sfen: sfen.to_string(),
+            ply: 1,
+            eval_cp_black: None,
+            stm: 'b',
+            progress_band: "1-40".to_string(),
+            eval_band: "unknown".to_string(),
+            nyugyoku: "none".to_string(),
+            black_points: 0,
+            white_points: 0,
+            declarable: false,
+            in_check: false,
+            source: Source::Floodgate,
+            game_id: "g".to_string(),
+            end_kind: "%TORYO".to_string(),
+            result: "black_win".to_string(),
+            min_rating: None,
+        }
     }
 }
