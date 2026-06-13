@@ -4,8 +4,8 @@
 の各局面を rshogi の探索で深く評価し、ground truth ラベル `eval_deep` 等を追記する
 ツールです。`rescore_psv` のような PSV 経由ではなく jsonl を直接読み書きします。
 
-教師ラベル品質ベンチ（Track 0）の ground truth 生成に使います。背景は
-`docs/plans/20260613_teacher_dl_l3_roadmap.md`（T0.2）を参照。
+教師ラベル品質ベンチ（局面クラス別のラベル精度測定）の ground truth 生成に使います。
+深い探索値を「正解」とみなし、教師候補モデルの評価値とクラス別に突き合わせる用途です。
 
 ## ビルド
 

@@ -30,8 +30,8 @@ use serde_json::{Value as JsonValue, json};
 
 use rshogi_core::nnue::{
     LayerStackBucketMode, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, get_layer_stack_bucket_mode,
-    init_nnue, parse_layer_stack_bucket_mode, set_fv_scale_override, set_layer_stack_bucket_mode,
-    set_layer_stack_progress_kpabs_weights,
+    init_nnue, is_layer_stacks_loaded, parse_layer_stack_bucket_mode, set_fv_scale_override,
+    set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
@@ -414,7 +414,13 @@ fn configure_eval(cli: &Cli) -> Result<()> {
     init_nnue(&cli.nnue).context("Failed to load NNUE model")?;
     eprintln!("NNUE model loaded: {}", cli.nnue.display());
 
-    if get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs && !coeff_loaded {
+    // progress bucket は LayerStacks のときだけ使う。非 LS モデル (HalfKP 等) では係数不要なので、
+    // USI エンジンと同じく LS ロード時のみ係数必須を課す（bucket mode の getter は値に依らず
+    // Progress8KPAbs を返すため、is_layer_stacks_loaded で実ネットワークを判定する）。
+    if is_layer_stacks_loaded()
+        && get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs
+        && !coeff_loaded
+    {
         bail!(
             "LS_BUCKET_MODE=progress8kpabs requires --ls-progress-coeff. \
              Without it the progress bucket selection diverges from training and labels are wrong."
@@ -447,6 +453,18 @@ fn validate_paths(input: &Path, output: &Path) -> Result<()> {
         && a == b
     {
         bail!("--in and --out resolve to the same file");
+    }
+    // canonicalize は hardlink（別 path・同一 inode）を検出できない。出力 create が入力を
+    // truncate する事故を防ぐため、dev/ino でも同一性を弾く。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(im), Ok(om)) = (fs::metadata(input), fs::metadata(output))
+            && im.dev() == om.dev()
+            && im.ino() == om.ino()
+        {
+            bail!("--in and --out are the same file (same dev/ino)");
+        }
     }
     if let Ok(meta) = fs::symlink_metadata(output)
         && meta.file_type().is_symlink()
