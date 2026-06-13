@@ -72,7 +72,7 @@ struct Cli {
     ls_bucket_mode: Option<String>,
 
     /// progress8kpabs 用の進行度係数ファイル（USI `LS_PROGRESS_COEFF` と同じ）。
-    /// bucket mode が progress8kpabs（LS ビルドの既定）のとき必須。
+    /// LayerStacks モデルで bucket mode が progress8kpabs のとき必須（非 LS モデルでは不要）。
     #[arg(long)]
     ls_progress_coeff: Option<PathBuf>,
 
@@ -164,8 +164,13 @@ fn run(cli: &Cli) -> Result<()> {
     if stats.errors > 0 {
         eprintln!("Skipped {} records due to errors", stats.errors);
     }
+    // 中断時は出力が in-order prefix で途切れるため非ゼロ終了する。書き出し済みの prefix は
+    // 検査用に残すが、exit 0 だと不完全な ground truth を成功成果物として扱われてしまう。
     if INTERRUPTED.load(Ordering::SeqCst) {
-        eprintln!("Interrupted: output may be truncated to the in-order prefix");
+        bail!(
+            "interrupted: output truncated to the in-order prefix ({} records written)",
+            stats.written
+        );
     }
     Ok(())
 }
