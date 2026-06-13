@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use rand::Rng;
 use rand::SeedableRng;
-use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
 use rshogi_core::movegen::{MoveList, generate_legal};
 use rshogi_core::position::Position;
@@ -133,9 +133,45 @@ struct SignSample {
 #[derive(Debug)]
 struct ExtractedGame {
     candidates: Vec<BenchRecord>,
-    nyugyoku_candidates: Vec<BenchRecord>,
+    is_nyugyoku: bool,
     startpos_candidate: Option<BenchRecord>,
     end_kind: String,
+}
+
+/// ストリームから容量上限の一様サンプルを保持する reservoir (Algorithm R)。
+/// メモリは入力件数ではなく容量に比例する。
+#[derive(Debug)]
+struct Reservoir {
+    capacity: usize,
+    seen: usize,
+    items: Vec<BenchRecord>,
+}
+
+impl Reservoir {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            seen: 0,
+            items: Vec::new(),
+        }
+    }
+
+    /// 保持を決めたときだけ clone する。棄却される大半の offer は確率計算のみで割当なし。
+    fn offer(&mut self, record: &BenchRecord, rng: &mut ChaCha8Rng) {
+        self.seen += 1;
+        if self.items.len() < self.capacity {
+            self.items.push(record.clone());
+        } else if self.capacity > 0 {
+            let j = rng.random_range(0..self.seen);
+            if j < self.capacity {
+                self.items[j] = record.clone();
+            }
+        }
+    }
+
+    fn into_items(self) -> Vec<BenchRecord> {
+        self.items
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -204,13 +240,24 @@ fn main() -> Result<()> {
         .with_context(|| format!("出力ディレクトリを作成できません: {}", cli.out_dir.display()))?;
 
     let mut stats = Stats::default();
-    let mut all = Vec::new();
-    let mut nyugyoku = Vec::new();
+    // reservoir sampling で全局面を貯めずに層化サンプルを得る。RNG は処理パス
+    // (CSA パスソート順 → JSONL game_id 順) で消費するため seed 固定で決定的。
+    let mut rng = ChaCha8Rng::seed_from_u64(cli.seed);
+    let mut cells: BTreeMap<String, Reservoir> = BTreeMap::new();
+    let mut nyugyoku = Reservoir::new(cli.nyugyoku_max);
     let mut startpos = Vec::new();
 
     for path in collect_csa_paths(&cli.csa_dir)? {
         match process_csa_file(&path, &cli, &mut stats) {
-            Ok(Some(game)) => push_game(game, &mut all, &mut nyugyoku, &mut startpos, &mut stats),
+            Ok(Some(game)) => push_game(
+                game,
+                &cli,
+                &mut rng,
+                &mut cells,
+                &mut nyugyoku,
+                &mut startpos,
+                &mut stats,
+            ),
             Ok(None) => {}
             Err(err) => {
                 add_count(&mut stats.skipped_by_reason, "csa_parse_error");
@@ -223,13 +270,12 @@ fn main() -> Result<()> {
         let games = process_jsonl_file(&path, &cli, &mut stats)
             .with_context(|| format!("JSONL 処理に失敗しました: {}", path.display()))?;
         for game in games {
-            push_game(game, &mut all, &mut nyugyoku, &mut startpos, &mut stats);
+            push_game(game, &cli, &mut rng, &mut cells, &mut nyugyoku, &mut startpos, &mut stats);
         }
     }
 
-    let mut rng = ChaCha8Rng::seed_from_u64(cli.seed);
-    let sampled = stratified_sample(&all, cli.per_cell, &mut rng, &mut stats);
-    let sampled_nyugyoku = sample_nyugyoku(nyugyoku, cli.nyugyoku_max, &mut rng);
+    let sampled = drain_cells(cells, &mut stats);
+    let sampled_nyugyoku = nyugyoku.into_items();
     let sampled_startpos = dedup_startpos(startpos);
 
     stats.label_bench = sampled.len() as u64;
@@ -246,17 +292,35 @@ fn main() -> Result<()> {
 
 fn push_game(
     game: ExtractedGame,
-    all: &mut Vec<BenchRecord>,
-    nyugyoku: &mut Vec<BenchRecord>,
+    cli: &Cli,
+    rng: &mut ChaCha8Rng,
+    cells: &mut BTreeMap<String, Reservoir>,
+    nyugyoku: &mut Reservoir,
     startpos: &mut Vec<BenchRecord>,
     stats: &mut Stats,
 ) {
     add_count(&mut stats.end_kind, &game.end_kind);
-    all.extend(game.candidates);
-    nyugyoku.extend(game.nyugyoku_candidates);
+    for record in &game.candidates {
+        cells
+            .entry(cell_key(record))
+            .or_insert_with(|| Reservoir::new(cli.per_cell))
+            .offer(record, rng);
+        if game.is_nyugyoku {
+            nyugyoku.offer(record, rng);
+        }
+    }
     if let Some(candidate) = game.startpos_candidate {
         startpos.push(candidate);
     }
+}
+
+fn drain_cells(cells: BTreeMap<String, Reservoir>, stats: &mut Stats) -> Vec<BenchRecord> {
+    let mut out = Vec::new();
+    for (cell, reservoir) in cells {
+        add_count_by(&mut stats.accepted_by_cell, &cell, reservoir.items.len() as u64);
+        out.extend(reservoir.into_items());
+    }
+    out
 }
 
 fn collect_csa_paths(inputs: &[String]) -> Result<Vec<PathBuf>> {
@@ -370,14 +434,10 @@ fn process_csa_file(path: &Path, cli: &Cli, stats: &mut Stats) -> Result<Option<
 
     add_count(&mut stats.games_by_source, "floodgate");
     update_sign_validation(path, &game_id, &game, last_eval_pair, &result_label, stats);
-    let nyugyoku_candidates = if game.end_kind == "%KACHI" || entered_any {
-        candidates.clone()
-    } else {
-        Vec::new()
-    };
+    let is_nyugyoku = game.end_kind == "%KACHI" || entered_any;
     Ok(Some(ExtractedGame {
         candidates,
-        nyugyoku_candidates,
+        is_nyugyoku,
         startpos_candidate,
         end_kind: game.end_kind,
     }))
@@ -532,14 +592,9 @@ fn convert_jsonl_game(
         candidates.push(record);
     }
 
-    let nyugyoku_candidates = if entered_any {
-        candidates.clone()
-    } else {
-        Vec::new()
-    };
     Ok(ExtractedGame {
         candidates,
-        nyugyoku_candidates,
+        is_nyugyoku: entered_any,
         startpos_candidate,
         end_kind,
     })
@@ -923,36 +978,6 @@ fn maybe_set_startpos(record: &BenchRecord, cli: &Cli, slot: &mut Option<BenchRe
     }
 }
 
-fn stratified_sample(
-    all: &[BenchRecord],
-    per_cell: usize,
-    rng: &mut ChaCha8Rng,
-    stats: &mut Stats,
-) -> Vec<BenchRecord> {
-    let mut cells: BTreeMap<String, Vec<BenchRecord>> = BTreeMap::new();
-    for record in all {
-        cells.entry(cell_key(record)).or_default().push(record.clone());
-    }
-    let mut out = Vec::new();
-    for (cell, mut values) in cells {
-        values.shuffle(rng);
-        let take = values.len().min(per_cell);
-        add_count_by(&mut stats.accepted_by_cell, &cell, take as u64);
-        out.extend(values.into_iter().take(take));
-    }
-    out
-}
-
-fn sample_nyugyoku(
-    mut values: Vec<BenchRecord>,
-    max: usize,
-    rng: &mut ChaCha8Rng,
-) -> Vec<BenchRecord> {
-    values.shuffle(rng);
-    values.truncate(max);
-    values
-}
-
 fn dedup_startpos(values: Vec<BenchRecord>) -> Vec<BenchRecord> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -1172,6 +1197,33 @@ mod tests {
         let out = dedup_startpos(input);
         let sfens: Vec<&str> = out.iter().map(|r| r.sfen.as_str()).collect();
         assert_eq!(sfens, vec!["sfen_a", "sfen_b"]);
+    }
+
+    #[test]
+    fn reservoir_keeps_all_when_under_capacity() {
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let mut reservoir = Reservoir::new(5);
+        for i in 0..3 {
+            reservoir.offer(&record_with_sfen(&format!("s{i}")), &mut rng);
+        }
+        let sfens: Vec<String> = reservoir.into_items().into_iter().map(|r| r.sfen).collect();
+        assert_eq!(sfens, vec!["s0", "s1", "s2"]);
+    }
+
+    #[test]
+    fn reservoir_caps_at_capacity_and_is_deterministic() {
+        let run = || {
+            let mut rng = ChaCha8Rng::seed_from_u64(7);
+            let mut reservoir = Reservoir::new(10);
+            for i in 0..1000 {
+                reservoir.offer(&record_with_sfen(&format!("s{i}")), &mut rng);
+            }
+            reservoir.into_items().into_iter().map(|r| r.sfen).collect::<Vec<_>>()
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(first.len(), 10);
+        assert_eq!(first, second);
     }
 
     fn record_with_sfen(sfen: &str) -> BenchRecord {
