@@ -34,6 +34,7 @@
 | `benchmark` | エンジン性能ベンチマーク |
 | `compare_eval_nnue` | NNUE評価値の比較 |
 | `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出 |
+| `label_bench_dl` | `label_bench` jsonl の各局面を DL水匠 (標準 dlshogi ONNX) で静的評価し `eval_dl` を追記（`dlshogi-onnx` feature） |
 
 ### NNUE 学習
 
@@ -72,6 +73,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
 - [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群
 - [extract_bench_positions](docs/extract_bench_positions.md) - 教師ラベル品質測定用ベンチ局面の抽出
+- [label_bench_dl](docs/label_bench_dl.md) - label_bench jsonl への DL水匠 (dlshogi ONNX) 評価値追記
 
 各ツールのオプション一覧は `--help` で確認できます。
 
