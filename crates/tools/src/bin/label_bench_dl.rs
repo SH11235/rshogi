@@ -95,6 +95,13 @@ fn main() -> anyhow::Result<()> {
     if cli.r#in == cli.out {
         anyhow::bail!("--in and --out must differ (got the same path)");
     }
+    // 字面が違っても同一ファイル（`./x` と `x`、symlink 等）を指す場合、出力 create が
+    // 入力を truncate して壊すため、解決後パスでも弾く（label_bench_positions と同じ方針）。
+    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(&cli.r#in), std::fs::canonicalize(&cli.out))
+        && a == b
+    {
+        anyhow::bail!("--in and --out resolve to the same file");
+    }
     if cli.out.exists()
         && std::fs::symlink_metadata(&cli.out)
             .map(|m| m.file_type().is_symlink())
