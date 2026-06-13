@@ -56,6 +56,7 @@ compare_nodes.toml
 docs/experiment-archive/
 docs/bullet/
 docs/ideas/
+docs/plans/
 pr_summaries/
 
 # SPSA tuning results (personal, evaluation-function dependent)
