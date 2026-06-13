@@ -76,7 +76,7 @@ struct Cli {
     #[arg(long)]
     ls_progress_coeff: Option<PathBuf>,
 
-    /// 探索深さ上限（0=無制限）。`--nodes` と両方 0 は不可。
+    /// 探索深さ上限（0 以下=無制限）。`--nodes` と両方とも無制限は不可。
     #[arg(long, default_value_t = 25)]
     depth: i32,
 
@@ -178,6 +178,8 @@ struct RunStats {
 /// producer + worker + collector のストリーミングパイプライン本体。
 fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result<RunStats> {
     // in-flight（acquire 済みで未書き出し）件数の上限。reorder buffer もこの値でバウンドする。
+    // 下限を num_threads+1 にするのは、num_threads と等しいと全トークンを worker が握って
+    // collector が次の seq を永久に待つデッドロックになり得るため。
     let inflight_cap = (num_threads * 4).max(num_threads + 1);
 
     let (token_tx, token_rx) = bounded::<()>(inflight_cap);
@@ -348,6 +350,10 @@ fn insert_deep_fields(obj: &mut serde_json::Map<String, JsonValue>, label: &Deep
     obj.insert("eval_deep".to_string(), json!(label.eval_deep));
     if let Some(mate) = label.mate_deep {
         obj.insert("mate_deep".to_string(), json!(mate));
+    } else {
+        // 既ラベル jsonl の再ラベル時、非詰みなら旧 mate_deep を消す（他フィールドは上書き
+        // されるのに mate_deep だけ前回の詰み手数が残る不整合を防ぐ）。
+        obj.remove("mate_deep");
     }
     obj.insert("bestmove_deep".to_string(), json!(label.bestmove_deep));
     obj.insert("pv_deep".to_string(), json!(label.pv_deep));
@@ -547,6 +553,14 @@ mod tests {
         let out = augment(r#"{"sfen":"x"}"#, &sample_label(Some(-3)));
         let v: JsonValue = serde_json::from_str(&out).expect("valid json");
         assert_eq!(v.as_object().unwrap().get("mate_deep").and_then(JsonValue::as_i64), Some(-3));
+    }
+
+    #[test]
+    fn insert_clears_stale_mate_field_on_relabel() {
+        // 既に mate_deep を持つ（前回詰みラベル）レコードを非詰みで再ラベルすると消える
+        let out = augment(r#"{"sfen":"x","mate_deep":5}"#, &sample_label(None));
+        let v: JsonValue = serde_json::from_str(&out).expect("valid json");
+        assert!(!v.as_object().unwrap().contains_key("mate_deep"));
     }
 
     #[test]
