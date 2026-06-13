@@ -1,6 +1,6 @@
 # rshogi tools リファレンス
 
-crates/tools/src/bin/ 配下の全32バイナリの一覧と解説。
+crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 ## 対局・トーナメント
 
@@ -23,6 +23,7 @@ crates/tools/src/bin/ 配下の全32バイナリの一覧と解説。
 | `compare_eval_nnue` | 教師 NNUE と生徒 NNUE の評価値一致度を検証（MAE・相関係数・スコア帯別誤差） |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。alignment 調査用 |
 | `verify_nnue_accumulator` | NNUE accumulator の refresh vs differential update 一致テスト。PSQT・Threat・LayerStacks 対応 |
+| `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出（層化サンプル + 入玉オーバーサンプル + 互角局面） |
 
 ## NNUE 学習
 

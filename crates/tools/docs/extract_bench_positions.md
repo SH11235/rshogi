@@ -2,6 +2,13 @@
 
 `extract_bench_positions` は、floodgate CSA 棋譜と selfplay JSONL から、教師モデルのラベル品質を局面クラス別に測るためのベンチ局面を抽出するツールです。
 
+## ビルド
+
+```bash
+cargo build -p tools --bin extract_bench_positions --release
+# → target/release/extract_bench_positions
+```
+
 ## 使い方
 
 ```bash
@@ -14,12 +21,27 @@ cargo run -p tools --bin extract_bench_positions -- \
   --seed 1
 ```
 
-`--csa-dir` はディレクトリまたは glob を複数指定できます。`--jsonl` も glob を複数指定できます。
+`--csa-dir` はディレクトリ（再帰探索）または glob を複数指定できます。`--jsonl` も glob を複数指定できます。
+
+## オプション
+
+| フラグ | 既定 | 説明 |
+|---|---|---|
+| `--csa-dir <PATH/GLOB>` | — | floodgate CSA のディレクトリまたは glob（複数可） |
+| `--jsonl <GLOB>` | — | selfplay JSONL の glob（複数可） |
+| `--out-dir <DIR>` | （必須） | 出力ディレクトリ |
+| `--min-rating <u32>` | 3000 | floodgate 両者に要求する最小レート（不明レートは除外） |
+| `--per-cell <usize>` | 200 | `label_bench` の層化セルあたり採択数 |
+| `--nyugyoku-max <usize>` | 50000 | 入玉オーバーサンプルの最大局面数 |
+| `--startpos-eval-abs-max <i32>` | 150 | `startpos` 出力に許す絶対評価値上限 |
+| `--startpos-ply <u32>` | 100 | `startpos` 出力の中心 ply |
+| `--startpos-window <u32>` | 4 | `startpos` 出力の ply 窓幅 |
+| `--seed <u64>` | 1 | 決定的サンプリング用 seed |
 
 ## 出力
 
 - `label_bench.jsonl`: `progress_band`, `eval_band`, `nyugyoku`, `in_check`, `stm` のセルごとに層化サンプリングした局面。
-- `label_bench_nyugyoku.jsonl`: `%KACHI` 終局、またはいずれかの玉が敵陣へ入った対局 (floodgate / selfplay とも) の全局面オーバーサンプル。
+- `label_bench_nyugyoku.jsonl`: `%KACHI` 終局、またはいずれかの玉が敵陣へ入った対局 (floodgate / selfplay とも) の全局面オーバーサンプル。入玉**局面**だけではなく入玉対局の序中盤も含む全局面なので、多くのレコードは `nyugyoku == "none"` になる。実際に玉が敵陣にいる局面だけが欲しい場合は `nyugyoku != "none"` で絞る。
 - `startpos_ply100_balanced.txt`: 素の SFEN 1 行形式の開始局面リスト (`data/floodgate/floodgate_r3900_*.txt` と同形式)。既定では ply 100±4、かつ `|eval_cp_black| <= 150`、対局ごとに 1 局面、SFEN 重複排除。
 - `stats.json`: 母集団数、採択数、ソース別対局数、終局種別、CSA 評価値符号検証の要約。
 
@@ -62,4 +84,10 @@ CSA の評価コメントは指し手直後の `'** <cp> ...` を読みます。
 
 ## CSA 不成への対応
 
-YO 準拠の合法手生成は歩・大駒などの不成を生成しないため、AobaZero 等が指す不成は合法手照合に失敗します。その場合は USI 表記へ直接変換し、`pseudo_legal_with_all` で検証して受理します。
+YO 準拠の合法手生成は歩・大駒などの不成を生成しないため、AobaZero 等が指す不成は合法手照合に失敗します。その場合は USI 表記へ直接変換し、`pseudo_legal_with_all` で検証して受理します (棋譜由来の手なので自玉の王手放置は実在しないという前提)。
+
+## 決定性とメモリ
+
+サンプリングは seed 固定の reservoir sampling (Algorithm R) です。入力順 (CSA はパスソート順、JSONL は game_id ソート順) が同じなら、**同一 `--seed` で全出力が bit 一致**します。
+
+全局面を貯めずにストリームで間引くため、**ピークメモリは入力件数に非依存**で、おおむね `セル数 × per_cell + nyugyoku_max + 互角局面数` の上限で頭打ちになります。数千万〜億局面規模の棋譜を流しても数十 MB 級に収まります。
