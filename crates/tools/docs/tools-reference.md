@@ -24,6 +24,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。alignment 調査用 |
 | `verify_nnue_accumulator` | NNUE accumulator の refresh vs differential update 一致テスト。PSQT・Threat・LayerStacks 対応 |
 | `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出（層化サンプル + 入玉オーバーサンプル + 互角局面） |
+| `label_bench_positions` | ベンチ局面 jsonl を深い探索（depth / nodes 指定）でラベル付けし `eval_deep` 等を追記（ground truth、局面ごと隔離で `--threads` 非依存に bit 一致） |
 
 ## NNUE 学習
 
