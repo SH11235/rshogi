@@ -283,6 +283,10 @@ fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result
     }
     writer.flush()?;
 
+    // collector が終わったら token channel を閉じる。中断時に producer が token_rx.recv() で
+    // 止まっていても（worker が break して以降トークンが返らない）、ここで close すれば recv が
+    // Err になり producer が抜けて join がハングしない。通常完了時は producer が先に終わっており無害。
+    drop(token_tx);
     producer.join().map_err(|_| anyhow::anyhow!("producer thread panicked"))??;
     for handle in workers {
         let _ = handle.join();
