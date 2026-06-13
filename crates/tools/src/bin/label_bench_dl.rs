@@ -102,6 +102,18 @@ fn main() -> anyhow::Result<()> {
     {
         anyhow::bail!("--in and --out resolve to the same file");
     }
+    // canonicalize は hardlink（別 path・同一 inode）を検出できない。出力 create が入力を
+    // truncate する事故を防ぐため、dev/ino でも同一性を弾く。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(im), Ok(om)) = (std::fs::metadata(&cli.r#in), std::fs::metadata(&cli.out))
+            && im.dev() == om.dev()
+            && im.ino() == om.ino()
+        {
+            anyhow::bail!("--in and --out are the same file (same dev/ino)");
+        }
+    }
     if cli.out.exists()
         && std::fs::symlink_metadata(&cli.out)
             .map(|m| m.file_type().is_symlink())
@@ -111,6 +123,15 @@ fn main() -> anyhow::Result<()> {
     }
     if cli.onnx_batch_size == 0 {
         anyhow::bail!("--onnx-batch-size must be > 0");
+    }
+    if cli.onnx_tensorrt && cli.onnx_gpu_id < 0 {
+        anyhow::bail!("--onnx-tensorrt requires a GPU (--onnx-gpu-id >= 0)");
+    }
+    if !cli.onnx_eval_scale.is_finite() || cli.onnx_eval_scale <= 0.0 {
+        anyhow::bail!(
+            "--onnx-eval-scale must be a positive finite value, got {}",
+            cli.onnx_eval_scale
+        );
     }
 
     let cfg = OnnxValueConfig {
