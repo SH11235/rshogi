@@ -33,6 +33,7 @@
 |--------|------|
 | `benchmark` | エンジン性能ベンチマーク |
 | `compare_eval_nnue` | NNUE評価値の比較 |
+| `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出 |
 
 ### NNUE 学習
 
@@ -70,6 +71,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [gensfen](docs/gensfen.md) - 教師局面生成ツールの詳細
 - [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
 - [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群
+- [extract_bench_positions](docs/extract_bench_positions.md) - 教師ラベル品質測定用ベンチ局面の抽出
 
 各ツールのオプション一覧は `--help` で確認できます。
 
