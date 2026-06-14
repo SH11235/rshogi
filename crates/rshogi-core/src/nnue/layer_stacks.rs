@@ -313,7 +313,7 @@ fn l1_sqr_clipped_relu_activation<const LS_L1_OUT: usize, const LS_L2_IN: usize>
 ) {
     let main_dim = LS_L1_OUT - 1;
     debug_assert_eq!(LS_L2_IN, main_dim * 2);
-    // LayerStacks の main_dim は現状 15 または 31 で、SIMD 化のメリットが小さい。
+    // LayerStacks の main_dim は現状 7 / 15 / 31 で、SIMD 化のメリットが小さい。
     // 注意: 二乗は i64 で計算する必要がある。
     // i32 乗算は |val| > ~46340 (sqrt(i32::MAX)) でオーバーフローし、
     // 中盤局面の L1 出力は数万〜数十万に達するため i64 が必須。
