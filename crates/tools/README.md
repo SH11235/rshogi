@@ -76,6 +76,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [extract_bench_positions](docs/extract_bench_positions.md) - 教師ラベル品質測定用ベンチ局面の抽出
 - [label_bench_positions](docs/label_bench_positions.md) - ベンチ局面の深い探索ラベリング（ground truth）
 - [label_bench_dl](docs/label_bench_dl.md) - label_bench jsonl への DL水匠 (dlshogi ONNX) 評価値追記
+- [rescore_psv](docs/rescore_psv.md) - PSV 評価値の ONNX 再スコアリング（qsearch-leaf ラベル / dual-output 対応）
 
 各ツールのオプション一覧は `--help` で確認できます。
 
