@@ -216,8 +216,9 @@ rescore_psv --input "data/*.bin" --output-dir rescored_leaflabel/ \
 
 前提・制約:
 
-- `--nnue`（葉探索用）と ONNX ラベラー（`--dlshogi-onnx-model` / `--onnx-model`）の
-  両方が必須。
+- `--nnue`（葉探索用）と `--dlshogi-onnx-model`（葉ラベル用）の両方が必須。
+- **dlshogi モデル専用**（`--onnx-model` の AobaZero は非対応）。AobaZero 特徴量は手数
+  （game_ply）を含み、葉へ進めても root の game_ply が渡って葉特徴量に混入するため。
 - `--apply-qsearch-leaf`（局面置換）とは併用不可（前者は据え置き・ラベルのみ、後者は置換）。
 - `--expand-output-dir` とは併用不可（policy 出力が葉局面に対応し root 局面と不整合になるため）。
 

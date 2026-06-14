@@ -570,15 +570,16 @@ fn main() -> Result<()> {
 
     // --qsearch-leaf-label の前提チェック
     // root 局面を保持しつつラベルだけ葉評価にするには、葉を求める NNUE と
-    // 葉を評価する ONNX ラベラーの両方が要る。
+    // 葉を評価する ONNX ラベラーの両方が要る。AobaZero 特徴量は手数 (game_ply) を
+    // 含み、葉へ進めても root の game_ply が渡って葉特徴量に混入するため dlshogi 限定。
     if cli.qsearch_leaf_label {
         if cli.nnue.is_none() {
             anyhow::bail!("--qsearch-leaf-label requires --nnue (qsearch で葉局面を求めるため)");
         }
-        if !(use_onnx || use_dlshogi_onnx) {
+        if !use_dlshogi_onnx {
             anyhow::bail!(
-                "--qsearch-leaf-label requires an ONNX labeling model \
-                 (--dlshogi-onnx-model or --onnx-model)"
+                "--qsearch-leaf-label requires --dlshogi-onnx-model \
+                 (AobaZero 特徴量は game_ply を含み葉局面と不整合のため非対応)"
             );
         }
         if cli.apply_qsearch_leaf {
@@ -2676,6 +2677,9 @@ where
 
     let mut f1_buf = vec![0.0f32; batch_size * f1_size];
     let mut f2_buf = vec![0.0f32; batch_size * f2_size];
+    // qsearch-leaf-label モードで「葉で STM が反転したか」を局面ごとに記録するバッファ。
+    // f1/f2 と同様ループ外で 1 回確保し、各バッチ先頭で reset して再利用する。
+    let mut stm_flags = vec![false; batch_size];
     let mut buffer = [0u8; PackedSfenValue::SIZE];
     let mut skipped_count: u64 = 0;
     let mut error_count: u64 = 0;
@@ -2753,9 +2757,9 @@ where
         let f2_slices: Vec<&mut [f32]> =
             f2_buf[..actual_batch * f2_size].chunks_mut(f2_size).collect();
 
-        // qsearch-leaf-label モードでは局面ごとに「葉で STM が反転したか」を記録し、
-        // 出力時に葉の評価を root 手番視点へ符号調整する。非モード時は全 false。
-        let mut stm_flags = vec![false; actual_batch];
+        // 葉で STM が反転したかの記録領域を当バッチ分だけ reset（非モード時は全 false）。
+        let stm_flags = &mut stm_flags[..actual_batch];
+        stm_flags.fill(false);
 
         f1_slices
             .into_par_iter()
@@ -3123,4 +3127,64 @@ fn process_file_with_dlshogi_onnx(
     process_file_with_onnx_pipeline(&config, |pos, f1, f2, _psv| {
         make_input_features(pos, f1, f2);
     })
+}
+
+#[cfg(all(test, any(feature = "aobazero-onnx", feature = "dlshogi-onnx")))]
+mod marker_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// 必須キーを満たす最小 marker テキスト（expand=false）。`extra` に qsearch 系の追加行を差し込む。
+    fn base_marker(extra: &str) -> String {
+        format!(
+            "version={MARKER_VERSION}\n\
+             mode=onnx\n\
+             model_kind=dlshogi\n\
+             model_path=/tmp/model.onnx\n\
+             model_size=100\n\
+             model_mtime_ns=123\n\
+             input_path=/tmp/in.psv\n\
+             input_size=200\n\
+             input_mtime_ns=456\n\
+             process_count=10\n\
+             skip_in_check=false\n\
+             score_clip=10000\n\
+             eval_scale_bits=0x44160000\n\
+             onnx_draw_ply=0\n\
+             {extra}\
+             expand=false\n\
+             rescore_output_size=400\n"
+        )
+    }
+
+    fn parse_text(text: &str) -> DoneMarker {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.done");
+        std::fs::File::create(&path).unwrap().write_all(text.as_bytes()).unwrap();
+        parse_marker(&path).unwrap()
+    }
+
+    #[test]
+    fn old_marker_without_qsearch_keys_defaults_to_false() {
+        // 旧 marker（qsearch_leaf_label 行なし）は false / None 扱いで後方互換
+        let m = parse_text(&base_marker(""));
+        assert!(!m.fingerprint.qsearch_leaf_label);
+        assert_eq!(m.fingerprint.qsearch_max_ply, None);
+    }
+
+    #[test]
+    fn new_marker_leaf_label_true_roundtrips() {
+        let m = parse_text(&base_marker("qsearch_leaf_label=true\nqsearch_max_ply=20\n"));
+        assert!(m.fingerprint.qsearch_leaf_label);
+        assert_eq!(m.fingerprint.qsearch_max_ply, Some(20));
+        // serialize → parse で一致（max_ply 行は leaf_label=true 時のみ出力）
+        assert_eq!(m, parse_text(&serialize_marker(&m)));
+    }
+
+    #[test]
+    fn leaf_label_false_has_no_max_ply() {
+        let m = parse_text(&base_marker("qsearch_leaf_label=false\n"));
+        assert!(!m.fingerprint.qsearch_leaf_label);
+        assert_eq!(m.fingerprint.qsearch_max_ply, None);
+    }
 }
