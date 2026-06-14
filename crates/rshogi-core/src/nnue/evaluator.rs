@@ -700,6 +700,7 @@ mod tests {
             feature = "ls-size-1536x16x32",
             feature = "ls-size-1536x32x32",
             feature = "ls-size-768x16x32",
+            feature = "ls-size-768x8x32",
             feature = "ls-size-512x16x32"
         ))]
         {
@@ -735,6 +736,18 @@ mod tests {
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L768x16x32(AccumulatorStackLayerStacks::<768>::new()),
+                );
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+
+            #[cfg(feature = "ls-size-768x8x32")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L768x8x32(AccumulatorStackLayerStacks::<768>::new()),
                 );
                 stack.reset();
                 stack.push(dirty);

@@ -53,6 +53,7 @@ halfkx-arch = ["rshogi-core/halfkx-arch"]
 ls-size-1536x16x32 = ["rshogi-core/ls-size-1536x16x32"]
 ls-size-1536x32x32 = ["rshogi-core/ls-size-1536x32x32"]
 ls-size-768x16x32  = ["rshogi-core/ls-size-768x16x32"]
+ls-size-768x8x32   = ["rshogi-core/ls-size-768x8x32"]
 ls-size-512x16x32  = ["rshogi-core/ls-size-512x16x32"]
 # LS 拡張 slot
 ls-ext-psqt   = ["rshogi-core/ls-ext-psqt"]
@@ -87,6 +88,7 @@ edition-ls-halfka_hm_merged-1536x16x32-threat      = ["rshogi-core/edition-ls-ha
 edition-ls-halfka_hm_merged-1536x16x32-psqt_threat = ["rshogi-core/edition-ls-halfka_hm_merged-1536x16x32-psqt_threat"]
 edition-ls-halfka_hm_merged-1536x32x32-none        = ["rshogi-core/edition-ls-halfka_hm_merged-1536x32x32-none"]
 edition-ls-halfka_hm_merged-768x16x32-none         = ["rshogi-core/edition-ls-halfka_hm_merged-768x16x32-none"]
+edition-ls-halfka_hm_merged-768x8x32-none          = ["rshogi-core/edition-ls-halfka_hm_merged-768x8x32-none"]
 edition-ls-halfka_hm_merged-512x16x32-none         = ["rshogi-core/edition-ls-halfka_hm_merged-512x16x32-none"]
 # LS specific preset (halfka_hm_merged 以外の 4 FT、1536x16x32-none で代表整備)。
 edition-ls-halfka_hm_split-1536x16x32-none = ["rshogi-core/edition-ls-halfka_hm_split-1536x16x32-none"]
@@ -102,6 +104,7 @@ nnue-threat            = ["ls-ext-threat"]
 layerstacks-1536x16x32 = ["ls-size-1536x16x32"]
 layerstacks-1536x32x32 = ["ls-size-1536x32x32"]
 layerstacks-768x16x32  = ["ls-size-768x16x32"]
+layerstacks-768x8x32   = ["ls-size-768x8x32"]
 layerstacks-512x16x32  = ["ls-size-512x16x32"]
 
 [[bin]]

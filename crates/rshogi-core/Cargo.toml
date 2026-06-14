@@ -95,6 +95,7 @@ halfkx-arch = []
 ls-size-1536x16x32 = []
 ls-size-1536x32x32 = []
 ls-size-768x16x32  = []
+ls-size-768x8x32   = []
 ls-size-512x16x32  = []
 
 # LayerStack 拡張 slot (psqt / threat)
@@ -144,7 +145,7 @@ edition-universal = [
   "mode-universal",
   "ls-arch", "halfkx-arch",
   "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
-  "ls-size-1536x16x32", "ls-size-1536x32x32", "ls-size-768x16x32", "ls-size-512x16x32",
+  "ls-size-1536x16x32", "ls-size-1536x32x32", "ls-size-768x16x32", "ls-size-768x8x32", "ls-size-512x16x32",
   "ls-ext-psqt", "ls-ext-threat",
   "halfkx-activation-crelu", "halfkx-activation-screlu", "halfkx-activation-pairwise",
 ]
@@ -162,7 +163,7 @@ edition-ls             = ["edition-ls-any-any-any"]
 edition-ls-any-any-any = [
   "mode-family", "ls-arch",
   "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
-  "ls-size-1536x16x32", "ls-size-1536x32x32", "ls-size-768x16x32", "ls-size-512x16x32",
+  "ls-size-1536x16x32", "ls-size-1536x32x32", "ls-size-768x16x32", "ls-size-768x8x32", "ls-size-512x16x32",
   "ls-ext-psqt", "ls-ext-threat",
 ]
 
@@ -208,9 +209,12 @@ edition-ls-halfka_hm_merged-1536x32x32-none = [
   "nnue-progress-diff",
 ]
 
-# LayerStack specific (768x16x32 / 512x16x32、none のみ)。L0=768/512 系は progress-diff 不可。
+# LayerStack specific (768x16x32 / 768x8x32 / 512x16x32、none のみ)。L0=768/512 系は progress-diff 不可。
 edition-ls-halfka_hm_merged-768x16x32-none = [
   "mode-specific", "ls-arch", "ft-halfka_hm_merged", "ls-size-768x16x32",
+]
+edition-ls-halfka_hm_merged-768x8x32-none = [
+  "mode-specific", "ls-arch", "ft-halfka_hm_merged", "ls-size-768x8x32",
 ]
 edition-ls-halfka_hm_merged-512x16x32-none = [
   "mode-specific", "ls-arch", "ft-halfka_hm_merged", "ls-size-512x16x32",
@@ -241,6 +245,7 @@ layerstack-only        = ["ls-arch"]
 layerstacks-1536x16x32 = ["ls-size-1536x16x32"]
 layerstacks-1536x32x32 = ["ls-size-1536x32x32"]
 layerstacks-768x16x32  = ["ls-size-768x16x32"]
+layerstacks-768x8x32   = ["ls-size-768x8x32"]
 layerstacks-512x16x32  = ["ls-size-512x16x32"]
 nnue-psqt              = ["ls-ext-psqt"]
 nnue-threat            = ["ls-ext-threat"]

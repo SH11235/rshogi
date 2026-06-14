@@ -177,6 +177,15 @@ pub const LAYER_STACK_32X32_MAIN_DIM: usize = LAYER_STACK_32X32_L1_OUT - 1; // 3
 /// LayerStacks 32x32 バリアントの L2層入力次元数（sqr 31 + crelu 31 = 62）
 pub const LAYER_STACK_32X32_L2_IN: usize = LAYER_STACK_32X32_MAIN_DIM * 2; // 62
 
+/// LayerStacks 8x32 バリアントの main 次元数
+pub const LAYER_STACK_8X32_MAIN_DIM: usize = 7;
+
+/// LayerStacks 8x32 バリアントの L1層出力次元数（main 7 + skip 1 = 8）
+pub const LAYER_STACK_8X32_L1_OUT: usize = LAYER_STACK_8X32_MAIN_DIM + 1; // 8
+
+/// LayerStacks 8x32 バリアントの L2層入力次元数（sqr 7 + crelu 7 = 14）
+pub const LAYER_STACK_8X32_L2_IN: usize = LAYER_STACK_8X32_MAIN_DIM * 2; // 14
+
 /// nnue-pytorch の隠れ層重みスケール
 pub const NNUE_PYTORCH_WEIGHT_SCALE_HIDDEN: i32 = 64;
 

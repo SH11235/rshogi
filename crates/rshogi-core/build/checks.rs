@@ -40,6 +40,7 @@ fn validate_feature_combination(
         "ls-size-1536x16x32",
         "ls-size-1536x32x32",
         "ls-size-768x16x32",
+        "ls-size-768x8x32",
         "ls-size-512x16x32",
     ];
     let ls_size_count = ls_size_features
