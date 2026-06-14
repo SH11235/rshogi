@@ -162,6 +162,8 @@ cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
 | `--onnx-tensorrt-cache` | — | TensorRT エンジンキャッシュの保存先 |
 | `--onnx-eval-scale` | 600.0 | 勝率→cp 変換スケール（有限値・正値必須） |
 | `--skip-in-check` | false | 王手親局面の rescore 出力を抑制（後述） |
+| `--qsearch-leaf-label` | false | root 局面を保持し、ラベルだけを qsearch 葉の評価にする（後述）。`--nnue`（葉探索用）併用必須 |
+| `--max-ply` | 16 | qsearch の最大深さ（`--qsearch-leaf-label` の葉探索でも使用） |
 | `--threads` | 1 | 処理スレッド数（rayon による特徴量構築の並列化） |
 
 ### ポリシー展開オプション（`--expand-output-dir` 指定時）
@@ -188,6 +190,39 @@ cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
 （教師データ中の王手局面は通常 1 桁 %）。
 `--expand-skip-parent-in-check` と `--expand-skip-child-in-check` で expand 側の
 王手フィルタを独立に制御できる。
+
+### `--qsearch-leaf-label`（root 局面据え置き・ラベルのみ葉評価）
+
+DL 系 ONNX モードで、**局面は root のまま保持し、ラベル（score）だけを qsearch 葉の
+評価にする**モード。NNUE 系のように探索でラベル付けする運用では探索部が qsearch を含む
+ため葉解決は不要だが、DL 系の静的評価でラベル付けする場合は葉の評価を root 局面に
+付与したいことがある（PV 末端の静かな局面の評価を教師ラベルにする）。
+
+```bash
+rescore_psv --input "data/*.bin" --output-dir rescored_leaflabel/ \
+  --dlshogi-onnx-model model.onnx \
+  --nnue suisho5.bin \
+  --qsearch-leaf-label \
+  --onnx-tensorrt --onnx-tensorrt-cache /tmp/trt_cache
+```
+
+挙動:
+
+- 各局面で `--nnue` の NNUE による qsearch を走らせ、PV 末端（葉）まで進めてから
+  **葉局面を ONNX で評価**する。**出力 sfen は常に root（局面は置換しない）**。
+- 葉で手番が反転（PV 長が奇数）した場合、葉の評価を root 手番視点へ符号反転して score にする。
+- 王手 root は葉探索せず原局面のまま評価する（`--apply-qsearch-leaf` と同じ扱い）。
+  `--skip-in-check` 併用で王手 root を出力から除外することも可能。
+
+前提・制約:
+
+- `--nnue`（葉探索用）と ONNX ラベラー（`--dlshogi-onnx-model` / `--onnx-model`）の
+  両方が必須。
+- `--apply-qsearch-leaf`（局面置換）とは併用不可（前者は据え置き・ラベルのみ、後者は置換）。
+- `--expand-output-dir` とは併用不可（policy 出力が葉局面に対応し root 局面と不整合になるため）。
+
+> `--apply-qsearch-leaf`（局面を葉に置換）→ ONNX で rescore → 元 root と merge、の 3 工程と
+> 同じ結果を 1 パスで得られる。中間 leaf ファイルを作らないため大規模教師でのディスク・I/O を節約できる。
 
 ### ポリシー展開（`--expand-output-dir`）について
 
@@ -219,8 +254,11 @@ fingerprint に含まれる項目:
 - `process_count`（`--limit` 適用後）
 - `--skip-in-check`、`--score-clip`、`--onnx-eval-scale`（`f32::to_bits()` の hex で保存）
 - AobaZero モデル時のみ `--onnx-draw-ply`
+- `--qsearch-leaf-label`、および有効時のみ `--max-ply`（葉ラベルモードは出力内容を変えるため）
 - expand 有効時: `--expand-threshold`（to_bits hex）、`--expand-skip-parent-in-check`、
   `--expand-skip-child-in-check`、`--expand-output-dir` の canonicalize 済みパス
+
+> 旧 marker（`--qsearch-leaf-label` キーを持たない）は欠落時 `false` 扱いで後方互換。
 
 `Ctrl-C` で中断した場合は marker を書き出さない（中途半端に処理したファイルを
 完了扱いにしない）。プロセス kill / panic には atomic rename + `sync_all()` で

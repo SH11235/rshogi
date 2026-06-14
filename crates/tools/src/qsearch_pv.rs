@@ -338,6 +338,20 @@ pub fn qsearch_with_pv_nnue(
     }
 }
 
+/// PV を辿って局面を葉まで進め、進めた後の手番が始点と変わったか（= PV 長が奇数か）を返す。
+///
+/// qsearch-leaf ラベル付け（root 局面据え置き・ラベルのみ葉評価）で、葉の評価値を root の
+/// 手番視点に揃えるための符号反転要否を判定する。将棋は全ての手で手番が入れ替わるため、
+/// 結果は PV 長の偶奇と一致する。`pos` は葉局面まで進んだ状態で返る。
+pub fn apply_pv(pos: &mut Position, pv: &[Move]) -> bool {
+    let start_stm = pos.side_to_move();
+    for mv in pv {
+        let gives_check = pos.gives_check(*mv);
+        let _ = pos.do_move(*mv, gives_check);
+    }
+    pos.side_to_move() != start_stm
+}
+
 /// 軽量版 qsearch with PV
 ///
 /// # 引数
@@ -517,5 +531,29 @@ mod tests {
         let result = qsearch_with_pv(&mut pos, &evaluator, -30000, 30000, 0, 0);
 
         assert!(result.pv.is_empty(), "PV should be empty when max_ply = 0");
+    }
+
+    #[test]
+    fn test_apply_pv_stm_matches_parity() {
+        let ev = MaterialEvaluator;
+
+        // 平手は駒取りなし → PV 空 → STM 不変・葉=root
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let r = qsearch_with_pv(&mut pos, &ev, -30000, 30000, 0, 32);
+        let mut leaf = Position::new();
+        leaf.set_hirate();
+        assert!(!apply_pv(&mut leaf, &r.pv));
+        assert_eq!(leaf.side_to_move(), pos.side_to_move());
+
+        // 駒取りがある局面 → 葉まで辿った後の STM 反転は PV 長の偶奇と一致
+        let sfen = "4k4/9/9/9/4p4/4P4/9/9/4K4 b - 1";
+        let mut p2 = Position::new();
+        p2.set_sfen(sfen).unwrap();
+        let r2 = qsearch_with_pv(&mut p2, &ev, -30000, 30000, 0, 32);
+        let mut leaf2 = Position::new();
+        leaf2.set_sfen(sfen).unwrap();
+        let changed = apply_pv(&mut leaf2, &r2.pv);
+        assert_eq!(changed, r2.pv.len() % 2 == 1);
     }
 }

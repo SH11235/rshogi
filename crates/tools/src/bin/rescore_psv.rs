@@ -62,7 +62,7 @@ use rshogi_core::nnue::init_nnue;
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search};
 use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen};
-use tools::qsearch_pv::{NnueStacks, qsearch_with_pv_nnue};
+use tools::qsearch_pv::{NnueStacks, apply_pv, qsearch_with_pv_nnue};
 
 /// 探索用スタックサイズ（64MB）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
@@ -115,6 +115,13 @@ struct Cli {
     /// qsearch leaf置換も同時に適用
     #[arg(long)]
     apply_qsearch_leaf: bool,
+
+    /// root 局面を保持したまま、ラベルだけを qsearch 葉の評価にする（局面は置換しない）。
+    /// `--nnue`（葉探索用）＋ `--dlshogi-onnx-model`/`--onnx-model`（葉ラベル用）と併用する。
+    /// DL 系の静的評価でラベル付けする教師生成で、葉の評価を root 局面に付与する用途。
+    /// `--apply-qsearch-leaf`（局面置換）とは併用不可。
+    #[arg(long)]
+    qsearch_leaf_label: bool,
 
     /// qsearchの最大深さ
     #[arg(long, default_value_t = 16)]
@@ -393,6 +400,8 @@ fn onnx_marker_decide(
         input2_channels: 0,
         profile_path: None,
         expand: expand_cfg,
+        qsearch_leaf_label: cli.qsearch_leaf_label,
+        qsearch_max_ply: cli.max_ply,
     };
     let current = build_run_fingerprint(&cfg)?;
 
@@ -559,6 +568,33 @@ fn main() -> Result<()> {
         );
     }
 
+    // --qsearch-leaf-label の前提チェック
+    // root 局面を保持しつつラベルだけ葉評価にするには、葉を求める NNUE と
+    // 葉を評価する ONNX ラベラーの両方が要る。
+    if cli.qsearch_leaf_label {
+        if cli.nnue.is_none() {
+            anyhow::bail!("--qsearch-leaf-label requires --nnue (qsearch で葉局面を求めるため)");
+        }
+        if !(use_onnx || use_dlshogi_onnx) {
+            anyhow::bail!(
+                "--qsearch-leaf-label requires an ONNX labeling model \
+                 (--dlshogi-onnx-model or --onnx-model)"
+            );
+        }
+        if cli.apply_qsearch_leaf {
+            anyhow::bail!(
+                "--qsearch-leaf-label and --apply-qsearch-leaf are mutually exclusive \
+                 (前者は局面据え置き・ラベルのみ、後者は局面置換)"
+            );
+        }
+        if cli.expand_output_dir.is_some() {
+            anyhow::bail!(
+                "--qsearch-leaf-label is mutually exclusive with --expand-output-dir \
+                 (policy 出力は葉局面に対応し root 局面と不整合になるため)"
+            );
+        }
+    }
+
     // --expand-output-dir は ONNX モード必須
     if cli.expand_output_dir.is_some() && !(use_onnx || use_dlshogi_onnx) {
         anyhow::bail!(
@@ -638,8 +674,9 @@ fn main() -> Result<()> {
         anyhow::bail!("--output-dir and --expand-output-dir must point to different directories");
     }
 
-    // NNUEモデルのロード（NNUE内部評価モードのみ）
-    if !use_engine && !use_onnx && !use_dlshogi_onnx {
+    // NNUEモデルのロード（NNUE内部評価モード、または ONNX ラベラー併用の
+    // --qsearch-leaf-label で葉探索に NNUE を使う場合）
+    if (!use_engine && !use_onnx && !use_dlshogi_onnx) || cli.qsearch_leaf_label {
         let nnue = cli.nnue.as_ref().unwrap();
         if !nnue.exists() {
             anyhow::bail!("NNUE model file not found: {}", nnue.display());
@@ -1160,9 +1197,6 @@ fn process_record(
         return ProcessResult::Skip;
     }
 
-    // 元の手番を記録
-    let original_stm = pos.side_to_move();
-
     // qsearch leaf置換を適用する場合
     let (final_sfen, stm_changed) = if apply_leaf && !pos.in_check() {
         let result = qsearch_with_pv_nnue(
@@ -1174,13 +1208,8 @@ fn process_record(
             max_ply,
         );
 
-        // PVに沿って局面を進める
-        for mv in &result.pv {
-            let gives_check = pos.gives_check(*mv);
-            let _ = pos.do_move(*mv, gives_check);
-        }
-
-        let stm_changed = pos.side_to_move() != original_stm;
+        // PV に沿って葉局面まで進める。STM 反転有無も同時に得る。
+        let stm_changed = apply_pv(&mut pos, &result.pv);
         let new_sfen = pack_position(&pos);
         (new_sfen, stm_changed)
     } else {
@@ -1969,6 +1998,12 @@ struct OnnxPipelineConfig<'a> {
     input2_channels: usize,
     profile_path: Option<&'a std::path::Path>,
     expand: Option<ExpandConfig<'a>>,
+    /// root 局面据え置き・ラベルのみ葉評価モード（`--qsearch-leaf-label`）。
+    /// 真のとき各局面を NNUE qsearch で葉まで進めてから特徴量を構築し、
+    /// 出力 sfen は root のまま・STM 変化時はスコアを符号反転する。
+    qsearch_leaf_label: bool,
+    /// qsearch の最大深さ（`qsearch_leaf_label` 時のみ使用）
+    qsearch_max_ply: i32,
 }
 
 /// ポリシー展開機能の設定（`OnnxPipelineConfig::expand` が `Some` のときのみ動作）
@@ -2007,6 +2042,11 @@ struct RunFingerprint {
     score_clip: i16,
     eval_scale_bits: u32,
     onnx_draw_ply: i32,
+    // 出力内容を変える要素: root 据え置き・葉ラベルモードと葉探索深さ。
+    // モード差で resume / marker が誤って一致しないよう fingerprint に含める。
+    // max_ply は葉ラベル時のみ意味を持つので Option（expand_* と同じ扱い）。
+    qsearch_leaf_label: bool,
+    qsearch_max_ply: Option<i32>,
     expand: bool,
     expand_threshold_bits: Option<u32>,
     expand_skip_parent_in_check: Option<bool>,
@@ -2071,6 +2111,14 @@ fn serialize_marker(marker: &DoneMarker) -> String {
     let _ = writeln!(out, "score_clip={}", f.score_clip);
     let _ = writeln!(out, "eval_scale_bits=0x{:08x}", f.eval_scale_bits);
     let _ = writeln!(out, "onnx_draw_ply={}", f.onnx_draw_ply);
+    let _ = writeln!(out, "qsearch_leaf_label={}", f.qsearch_leaf_label);
+    if f.qsearch_leaf_label {
+        let _ = writeln!(
+            out,
+            "qsearch_max_ply={}",
+            f.qsearch_max_ply.expect("qsearch_leaf_label=true requires max_ply")
+        );
+    }
     let _ = writeln!(out, "expand={}", f.expand);
     if f.expand {
         let _ = writeln!(
@@ -2146,6 +2194,11 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
         anyhow::bail!("Unsupported marker version: {version} (expected {MARKER_VERSION})");
     }
     let expand = parse_bool(get("expand")?)?;
+    // 後方互換: 旧 marker には無いキー。欠落時は false（葉ラベル未使用）扱い。
+    let qsearch_leaf_label = match map.get("qsearch_leaf_label") {
+        Some(v) => parse_bool(v)?,
+        None => false,
+    };
     let fingerprint = RunFingerprint {
         version,
         mode: get("mode")?.clone(),
@@ -2161,6 +2214,12 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
         score_clip: get("score_clip")?.parse().context("invalid score_clip")?,
         eval_scale_bits: parse_hex_u32(get("eval_scale_bits")?)?,
         onnx_draw_ply: get("onnx_draw_ply")?.parse().context("invalid onnx_draw_ply")?,
+        qsearch_leaf_label,
+        qsearch_max_ply: if qsearch_leaf_label {
+            Some(get("qsearch_max_ply")?.parse().context("invalid qsearch_max_ply")?)
+        } else {
+            None
+        },
         expand,
         expand_threshold_bits: if expand {
             Some(parse_hex_u32(get("expand_threshold_bits")?)?)
@@ -2320,6 +2379,8 @@ fn build_run_fingerprint(config: &OnnxPipelineConfig<'_>) -> Result<RunFingerpri
         score_clip: config.score_clip,
         eval_scale_bits: config.eval_scale.to_bits(),
         onnx_draw_ply: config.onnx_draw_ply,
+        qsearch_leaf_label: config.qsearch_leaf_label,
+        qsearch_max_ply: config.qsearch_leaf_label.then_some(config.qsearch_max_ply),
         expand: config.expand.is_some(),
         expand_threshold_bits: config.expand.map(|e| e.threshold.to_bits()),
         expand_skip_parent_in_check: config.expand.map(|e| e.skip_parent_in_check),
@@ -2377,6 +2438,8 @@ where
         input2_channels,
         profile_path,
         expand,
+        qsearch_leaf_label,
+        qsearch_max_ply,
     } = *config;
     use ort::ep::ExecutionProvider;
     use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
@@ -2690,16 +2753,43 @@ where
         let f2_slices: Vec<&mut [f32]> =
             f2_buf[..actual_batch * f2_size].chunks_mut(f2_size).collect();
 
-        f1_slices.into_par_iter().zip(f2_slices).zip(batch_records.par_iter()).for_each(
-            |((f1, f2), (psv, sfen, _in_check))| {
+        // qsearch-leaf-label モードでは局面ごとに「葉で STM が反転したか」を記録し、
+        // 出力時に葉の評価を root 手番視点へ符号調整する。非モード時は全 false。
+        let mut stm_flags = vec![false; actual_batch];
+
+        f1_slices
+            .into_par_iter()
+            .zip(f2_slices)
+            .zip(batch_records.par_iter())
+            .zip(stm_flags.par_iter_mut())
+            .for_each(|(((f1, f2), (psv, sfen, _in_check)), stm_flag)| {
                 let mut pos = Position::new();
                 if pos.set_sfen(sfen).is_err() {
                     batch_errors.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
+                // root 局面据え置き・ラベルのみ葉評価: NNUE qsearch で葉まで進めてから
+                // 特徴量を構築する（DL は葉局面を評価）。王手 root は葉探索せず原局面のまま。
+                if qsearch_leaf_label && !pos.in_check() {
+                    thread_local! {
+                        static NNUE_STACKS: RefCell<NnueStacks> = RefCell::new(NnueStacks::new());
+                    }
+                    NNUE_STACKS.with(|stacks| {
+                        let mut stacks = stacks.borrow_mut();
+                        stacks.reset();
+                        let result = qsearch_with_pv_nnue(
+                            &mut pos,
+                            &mut stacks,
+                            QSEARCH_ALPHA_INIT,
+                            QSEARCH_BETA_INIT,
+                            0,
+                            qsearch_max_ply,
+                        );
+                        *stm_flag = apply_pv(&mut pos, &result.pv);
+                    });
+                }
                 build_features(&pos, f1, f2, psv);
-            },
-        );
+            });
 
         error_count += batch_errors.load(Ordering::Relaxed);
 
@@ -2749,12 +2839,21 @@ where
             let winrate = values[i];
             let clamped = winrate.clamp(0.001, 0.999);
             let logit = (clamped / (1.0 - clamped)).ln();
-            let raw_score = (logit * eval_scale) as i32;
+            // qsearch-leaf-label モードで葉の STM が root と異なる場合、推論値は葉の
+            // 手番視点なので root 視点へ符号反転する。
+            let leaf_score = logit * eval_scale;
+            let signed_score = if stm_flags[i] {
+                -leaf_score
+            } else {
+                leaf_score
+            };
+            let raw_score = signed_score as i32;
             let clipped = raw_score.abs() > score_clip as i32;
             let new_score = raw_score.clamp(-(score_clip as i32), score_clip as i32) as i16;
             if clipped {
                 clipped_count += 1;
             }
+            // 出力 sfen は常に root の `psv.sfen`（局面は置換しない）。葉評価はラベルのみに反映。
             let new_psv = PackedSfenValue {
                 sfen: psv.sfen,
                 score: new_score,
@@ -2965,6 +3064,8 @@ fn process_file_with_onnx(
         input2_channels: INPUT2_CHANNELS,
         profile_path: cli.ort_profile.as_deref(),
         expand,
+        qsearch_leaf_label: cli.qsearch_leaf_label,
+        qsearch_max_ply: cli.max_ply,
     };
     process_file_with_onnx_pipeline(&config, move |pos, f1, f2, psv| {
         make_input_features(pos, f1, f2, psv.game_ply as i32, draw_ply);
@@ -3016,6 +3117,8 @@ fn process_file_with_dlshogi_onnx(
         input2_channels: INPUT2_CHANNELS,
         profile_path: cli.ort_profile.as_deref(),
         expand,
+        qsearch_leaf_label: cli.qsearch_leaf_label,
+        qsearch_max_ply: cli.max_ply,
     };
     process_file_with_onnx_pipeline(&config, |pos, f1, f2, _psv| {
         make_input_features(pos, f1, f2);
