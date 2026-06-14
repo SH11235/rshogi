@@ -123,6 +123,15 @@ struct Cli {
     #[arg(long)]
     qsearch_leaf_label: bool,
 
+    /// `--qsearch-leaf-label` と併用し、同一 1 パスで葉局面に置換したレコードを
+    /// 別ディレクトリにも書き出す（leaf-REPLACEMENT arm）。
+    /// `--output-dir` 側は root 局面 + 葉ラベル（leaf-LABEL arm）のまま。
+    /// このディレクトリには葉局面 + 葉評価（符号反転なし）を書き出す。
+    /// `--apply-qsearch-leaf` → DL rescore の 2 工程と bit 一致する。
+    /// `--output-dir` とは別ディレクトリ必須。
+    #[arg(long)]
+    qsearch_leaf_replacement_output: Option<PathBuf>,
+
     /// qsearchの最大深さ
     #[arg(long, default_value_t = 16)]
     max_ply: i32,
@@ -361,6 +370,7 @@ fn onnx_marker_decide(
     input_path: &std::path::Path,
     rescore_output_path: &std::path::Path,
     expand_output_path: Option<&std::path::Path>,
+    replacement_output: Option<&std::path::Path>,
     process_count: u64,
 ) -> Result<OnnxMarkerDecision> {
     // 現在 run の OnnxPipelineConfig を組み立てて fingerprint を作る
@@ -402,6 +412,7 @@ fn onnx_marker_decide(
         expand: expand_cfg,
         qsearch_leaf_label: cli.qsearch_leaf_label,
         qsearch_max_ply: cli.max_ply,
+        replacement_output,
     };
     let current = build_run_fingerprint(&cfg)?;
 
@@ -409,6 +420,9 @@ fn onnx_marker_decide(
     let canonical_input = current.input_path.clone();
     ensure_safe_output_path(rescore_output_path, &canonical_input)?;
     if let Some(p) = expand_output_path {
+        ensure_safe_output_path(p, &canonical_input)?;
+    }
+    if let Some(p) = replacement_output {
         ensure_safe_output_path(p, &canonical_input)?;
     }
 
@@ -427,6 +441,17 @@ fn onnx_marker_decide(
                 }
                 (false, None, None) => true,
                 _ => false,
+            }
+            && match (
+                marker.fingerprint.replacement,
+                marker.output_sizes.replacement_output_size,
+                marker.fingerprint.replacement_output_path.as_ref(),
+            ) {
+                (true, Some(size), Some(path)) => {
+                    path.exists() && fs::metadata(path)?.len() == size
+                }
+                (false, None, None) => true,
+                _ => false,
             };
 
         if marker.fingerprint == current && bodies_match {
@@ -436,9 +461,11 @@ fn onnx_marker_decide(
         // 不一致時の再生成手順。
         // 破壊操作の順序は意図的:
         //   1. 旧 expand artifact 削除（失敗しうる、入力衝突も事前検証）
-        //   2. 現 rescore 出力 truncate
-        //   3. 現 expand 出力 truncate
-        //   4. marker 削除（最後）
+        //   2. 旧 replacement artifact 削除（同上）
+        //   3. 現 rescore 出力 truncate
+        //   4. 現 expand 出力 truncate
+        //   5. 現 replacement 出力 truncate
+        //   6. marker 削除（最後）
         // この順なら、どの段階で失敗しても次回実行時に marker 不一致判定が
         // 働き、続きからやり直せる。"truncate してから remove_file" の順だと、
         // 後段失敗時に truncate 済み出力 + 古い marker が残ってデータ損失に
@@ -466,29 +493,59 @@ fn onnx_marker_decide(
             }
         }
 
-        // 2. 現 rescore 出力 truncate
+        // 2. 旧 replacement artifact 削除
+        if let Some(old) = &marker.fingerprint.replacement_output_path {
+            if is_same_file(old, &canonical_input) {
+                anyhow::bail!(
+                    "Stale leaf-replacement artifact {} resolves to the current input file {}. \
+                     Refusing to delete to prevent input data loss. \
+                     Move the input or change --qsearch-leaf-replacement-output.",
+                    old.display(),
+                    canonical_input.display()
+                );
+            }
+            let same_as_current = replacement_output.is_some_and(|p| is_same_file(p, old));
+            if !same_as_current && old.exists() {
+                fs::remove_file(old).with_context(|| {
+                    format!("Failed to remove stale leaf-replacement artifact {}", old.display())
+                })?;
+            }
+        }
+
+        // 3. 現 rescore 出力 truncate
         if rescore_output_path.exists() {
             File::options().write(true).open(rescore_output_path)?.set_len(0)?;
         }
-        // 3. 現 expand 出力 truncate
+        // 4. 現 expand 出力 truncate
         if let Some(p) = expand_output_path
             && p.exists()
         {
             File::options().write(true).open(p)?.set_len(0)?;
         }
-        // 4. marker 削除（最後）
+        // 5. 現 replacement 出力 truncate
+        if let Some(p) = replacement_output
+            && p.exists()
+        {
+            File::options().write(true).open(p)?.set_len(0)?;
+        }
+        // 6. marker 削除（最後）
         fs::remove_file(&marker_path)
             .with_context(|| format!("Failed to remove stale marker {}", marker_path.display()))?;
         return Ok(OnnxMarkerDecision::TruncateAndProcess);
     }
 
     // marker 不存在
-    if expand_output_path.is_some() {
-        // expand 有効時は marker 必須。truncate して最初から
+    if expand_output_path.is_some() || replacement_output.is_some() {
+        // expand / replacement 有効時は marker 必須。truncate して最初から
         if rescore_output_path.exists() {
             File::options().write(true).open(rescore_output_path)?.set_len(0)?;
         }
         if let Some(p) = expand_output_path
+            && p.exists()
+        {
+            File::options().write(true).open(p)?.set_len(0)?;
+        }
+        if let Some(p) = replacement_output
             && p.exists()
         {
             File::options().write(true).open(p)?.set_len(0)?;
@@ -596,6 +653,15 @@ fn main() -> Result<()> {
         }
     }
 
+    // --qsearch-leaf-replacement-output は --qsearch-leaf-label 前提。
+    // leaf-label の qsearch 葉を再利用して、葉局面置換 arm を同時生成する。
+    if cli.qsearch_leaf_replacement_output.is_some() && !cli.qsearch_leaf_label {
+        anyhow::bail!(
+            "--qsearch-leaf-replacement-output requires --qsearch-leaf-label \
+             (葉局面は leaf-label の qsearch 結果を再利用するため)"
+        );
+    }
+
     // --expand-output-dir は ONNX モード必須
     if cli.expand_output_dir.is_some() && !(use_onnx || use_dlshogi_onnx) {
         anyhow::bail!(
@@ -659,7 +725,15 @@ fn main() -> Result<()> {
             format!("Failed to create expand output directory: {}", d.display())
         })?;
     }
-    // 両 dir を canonicalize して衝突を検出
+    // leaf-replacement 出力ディレクトリの作成
+    if let Some(d) = &cli.qsearch_leaf_replacement_output
+        && !d.exists()
+    {
+        fs::create_dir_all(d).with_context(|| {
+            format!("Failed to create leaf-replacement output directory: {}", d.display())
+        })?;
+    }
+    // 各 dir を canonicalize して衝突を検出
     let canonical_rescore_dir = cli.output_dir.canonicalize().with_context(|| {
         format!("Failed to canonicalize --output-dir {}", cli.output_dir.display())
     })?;
@@ -673,6 +747,19 @@ fn main() -> Result<()> {
         && &canonical_rescore_dir == ed
     {
         anyhow::bail!("--output-dir and --expand-output-dir must point to different directories");
+    }
+    let canonical_replacement_dir = match &cli.qsearch_leaf_replacement_output {
+        Some(d) => Some(d.canonicalize().with_context(|| {
+            format!("Failed to canonicalize --qsearch-leaf-replacement-output {}", d.display())
+        })?),
+        None => None,
+    };
+    if let Some(rd) = &canonical_replacement_dir
+        && &canonical_rescore_dir == rd
+    {
+        anyhow::bail!(
+            "--output-dir and --qsearch-leaf-replacement-output must point to different directories"
+        );
     }
 
     // NNUEモデルのロード（NNUE内部評価モード、または ONNX ラベラー併用の
@@ -784,6 +871,9 @@ fn main() -> Result<()> {
             cli.expand_skip_child_in_check,
         );
     }
+    if let Some(d) = &cli.qsearch_leaf_replacement_output {
+        eprintln!("Leaf-replacement output directory: {}", d.display());
+    }
     if cli.delete_input {
         eprintln!("Delete input after processing: yes");
     }
@@ -804,6 +894,8 @@ fn main() -> Result<()> {
         let output_path = cli.output_dir.join(file_name);
         #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
         let expand_output_path = canonical_expand_dir.as_ref().map(|d| d.join(file_name));
+        #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+        let replacement_output_path = canonical_replacement_dir.as_ref().map(|d| d.join(file_name));
 
         // 入力ファイルサイズと process_count を最初に確定（marker 判定の前提）
         let input_file_size = fs::metadata(input_path)?.len();
@@ -833,6 +925,7 @@ fn main() -> Result<()> {
                 input_path,
                 &output_path,
                 expand_output_path.as_deref(),
+                replacement_output_path.as_deref(),
                 process_count,
             )?;
             match decision {
@@ -942,6 +1035,7 @@ fn main() -> Result<()> {
                 input_path,
                 &output_path,
                 expand_output_path.as_deref(),
+                replacement_output_path.as_deref(),
                 process_count,
             )?;
         }
@@ -2005,6 +2099,11 @@ struct OnnxPipelineConfig<'a> {
     qsearch_leaf_label: bool,
     /// qsearch の最大深さ（`qsearch_leaf_label` 時のみ使用）
     qsearch_max_ply: i32,
+    /// leaf-REPLACEMENT arm の出力パス（`--qsearch-leaf-replacement-output`）。
+    /// `qsearch_leaf_label` 併用時のみ Some。葉局面に置換したレコード
+    /// （葉 sfen + 葉評価・符号反転なし）をこのパスに書き出す。leaf-LABEL arm
+    /// （`output_path`）とは 1:1 lockstep で同数のレコードを書く。
+    replacement_output: Option<&'a std::path::Path>,
 }
 
 /// ポリシー展開機能の設定（`OnnxPipelineConfig::expand` が `Some` のときのみ動作）
@@ -2053,6 +2152,10 @@ struct RunFingerprint {
     expand_skip_parent_in_check: Option<bool>,
     expand_skip_child_in_check: Option<bool>,
     expand_output_path: Option<PathBuf>,
+    // leaf-REPLACEMENT arm（`--qsearch-leaf-replacement-output`）。expand_* と同じ
+    // Option パターン。出力内容を変えるため fingerprint に含める。
+    replacement: bool,
+    replacement_output_path: Option<PathBuf>,
 }
 
 /// 完了マーカーの出力サイズ情報（fingerprint とは分離）
@@ -2061,6 +2164,7 @@ struct RunFingerprint {
 struct OutputSizes {
     rescore_output_size: u64,
     expand_output_size: Option<u64>,
+    replacement_output_size: Option<u64>,
 }
 
 /// 完了マーカー全体（fingerprint + output sizes）
@@ -2143,6 +2247,17 @@ fn serialize_marker(marker: &DoneMarker) -> String {
             f.expand_output_path.as_ref().expect("expand=true requires path").display()
         );
     }
+    let _ = writeln!(out, "replacement={}", f.replacement);
+    if f.replacement {
+        let _ = writeln!(
+            out,
+            "replacement_output_path={}",
+            f.replacement_output_path
+                .as_ref()
+                .expect("replacement=true requires path")
+                .display()
+        );
+    }
     let _ = writeln!(out, "rescore_output_size={}", marker.output_sizes.rescore_output_size);
     if f.expand {
         let _ = writeln!(
@@ -2152,6 +2267,16 @@ fn serialize_marker(marker: &DoneMarker) -> String {
                 .output_sizes
                 .expand_output_size
                 .expect("expand=true requires expand_output_size")
+        );
+    }
+    if f.replacement {
+        let _ = writeln!(
+            out,
+            "replacement_output_size={}",
+            marker
+                .output_sizes
+                .replacement_output_size
+                .expect("replacement=true requires replacement_output_size")
         );
     }
     out
@@ -2200,6 +2325,11 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
         Some(v) => parse_bool(v)?,
         None => false,
     };
+    // 後方互換: 旧 marker には無いキー。欠落時は false（replacement arm 未使用）扱い。
+    let replacement = match map.get("replacement") {
+        Some(v) => parse_bool(v)?,
+        None => false,
+    };
     let fingerprint = RunFingerprint {
         version,
         mode: get("mode")?.clone(),
@@ -2242,6 +2372,12 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
         } else {
             None
         },
+        replacement,
+        replacement_output_path: if replacement {
+            Some(PathBuf::from(get("replacement_output_path")?))
+        } else {
+            None
+        },
     };
     let output_sizes = OutputSizes {
         rescore_output_size: get("rescore_output_size")?
@@ -2249,6 +2385,15 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
             .context("invalid rescore_output_size")?,
         expand_output_size: if expand {
             Some(get("expand_output_size")?.parse().context("invalid expand_output_size")?)
+        } else {
+            None
+        },
+        replacement_output_size: if replacement {
+            Some(
+                get("replacement_output_size")?
+                    .parse()
+                    .context("invalid replacement_output_size")?,
+            )
         } else {
             None
         },
@@ -2365,6 +2510,14 @@ fn build_run_fingerprint(config: &OnnxPipelineConfig<'_>) -> Result<RunFingerpri
         }
         None => None,
     };
+    let replacement_output_path = match config.replacement_output {
+        Some(rp) => {
+            let p = canonicalize_predicted_path(rp)?;
+            ensure_marker_safe_path("--qsearch-leaf-replacement-output (entry)", &p)?;
+            Some(p)
+        }
+        None => None,
+    };
     Ok(RunFingerprint {
         version: MARKER_VERSION,
         mode: "onnx".to_string(),
@@ -2387,6 +2540,8 @@ fn build_run_fingerprint(config: &OnnxPipelineConfig<'_>) -> Result<RunFingerpri
         expand_skip_parent_in_check: config.expand.map(|e| e.skip_parent_in_check),
         expand_skip_child_in_check: config.expand.map(|e| e.skip_child_in_check),
         expand_output_path,
+        replacement: config.replacement_output.is_some(),
+        replacement_output_path,
     })
 }
 
@@ -2441,6 +2596,7 @@ where
         expand,
         qsearch_leaf_label,
         qsearch_max_ply,
+        replacement_output,
     } = *config;
     use ort::ep::ExecutionProvider;
     use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
@@ -2660,6 +2816,19 @@ where
         None
     };
 
+    // leaf-REPLACEMENT 出力 writer（replacement 有効時のみ）。expand と同様 main 側で
+    // truncate(0) 済みなので append open で常に先頭から書く。leaf-LABEL 出力（writer）と
+    // 同一ループで 1:1 lockstep に書くため、レコード数は両者で一致する。
+    let mut replacement_writer: Option<BufWriter<File>> = if let Some(rp) = replacement_output {
+        let f =
+            File::options().create(true).append(true).open(rp).with_context(|| {
+                format!("Failed to open leaf-replacement output {}", rp.display())
+            })?;
+        Some(BufWriter::new(f))
+    } else {
+        None
+    };
+
     // 既存レコード分の入力をスキップ（expand 無効 + marker 不存在の legacy
     // resume パス。main 側で truncate(0) 済みなら resume_count == 0 になり no-op）
     let mut remaining = process_count;
@@ -2680,6 +2849,13 @@ where
     // qsearch-leaf-label モードで「葉で STM が反転したか」を局面ごとに記録するバッファ。
     // f1/f2 と同様ループ外で 1 回確保し、各バッチ先頭で reset して再利用する。
     let mut stm_flags = vec![false; batch_size];
+    // leaf-REPLACEMENT 有効時、葉局面の packed sfen を局面ごとに記録するバッファ。
+    // f1/f2 と同様ループ外で 1 回確保し再利用する。非有効時は pack を行わず空のまま。
+    let mut leaf_sfens: Vec<[u8; 32]> = if replacement_output.is_some() {
+        vec![[0u8; 32]; batch_size]
+    } else {
+        Vec::new()
+    };
     let mut buffer = [0u8; PackedSfenValue::SIZE];
     let mut skipped_count: u64 = 0;
     let mut error_count: u64 = 0;
@@ -2760,40 +2936,73 @@ where
         // 葉で STM が反転したかの記録領域を当バッチ分だけ reset（非モード時は全 false）。
         let stm_flags = &mut stm_flags[..actual_batch];
         stm_flags.fill(false);
+        // leaf-REPLACEMENT 有効時のみ葉局面の packed sfen を書き込む領域を当バッチ分に絞る。
+        // 非有効時は空スライス（pack を行わないため zip しない）。
+        let leaf_sfens_slice: &mut [[u8; 32]] = if replacement_output.is_some() {
+            &mut leaf_sfens[..actual_batch]
+        } else {
+            &mut []
+        };
 
-        f1_slices
-            .into_par_iter()
-            .zip(f2_slices)
-            .zip(batch_records.par_iter())
-            .zip(stm_flags.par_iter_mut())
-            .for_each(|(((f1, f2), (psv, sfen, _in_check)), stm_flag)| {
-                let mut pos = Position::new();
-                if pos.set_sfen(sfen).is_err() {
-                    batch_errors.fetch_add(1, Ordering::Relaxed);
-                    return;
+        // 1 局面分の特徴量構築（必要なら葉まで進めて葉 sfen を packed_leaf に書く）。
+        let build_one = |f1: &mut [f32],
+                         f2: &mut [f32],
+                         psv: &PackedSfenValue,
+                         sfen: &str,
+                         stm_flag: &mut bool,
+                         packed_leaf: Option<&mut [u8; 32]>| {
+            let mut pos = Position::new();
+            if pos.set_sfen(sfen).is_err() {
+                batch_errors.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            // root 局面据え置き・ラベルのみ葉評価: NNUE qsearch で葉まで進めてから
+            // 特徴量を構築する（DL は葉局面を評価）。王手 root は葉探索せず原局面のまま。
+            if qsearch_leaf_label && !pos.in_check() {
+                thread_local! {
+                    static NNUE_STACKS: RefCell<NnueStacks> = RefCell::new(NnueStacks::new());
                 }
-                // root 局面据え置き・ラベルのみ葉評価: NNUE qsearch で葉まで進めてから
-                // 特徴量を構築する（DL は葉局面を評価）。王手 root は葉探索せず原局面のまま。
-                if qsearch_leaf_label && !pos.in_check() {
-                    thread_local! {
-                        static NNUE_STACKS: RefCell<NnueStacks> = RefCell::new(NnueStacks::new());
-                    }
-                    NNUE_STACKS.with(|stacks| {
-                        let mut stacks = stacks.borrow_mut();
-                        stacks.reset();
-                        let result = qsearch_with_pv_nnue(
-                            &mut pos,
-                            &mut stacks,
-                            QSEARCH_ALPHA_INIT,
-                            QSEARCH_BETA_INIT,
-                            0,
-                            qsearch_max_ply,
-                        );
-                        *stm_flag = apply_pv(&mut pos, &result.pv);
-                    });
-                }
-                build_features(&pos, f1, f2, psv);
-            });
+                NNUE_STACKS.with(|stacks| {
+                    let mut stacks = stacks.borrow_mut();
+                    stacks.reset();
+                    let result = qsearch_with_pv_nnue(
+                        &mut pos,
+                        &mut stacks,
+                        QSEARCH_ALPHA_INIT,
+                        QSEARCH_BETA_INIT,
+                        0,
+                        qsearch_max_ply,
+                    );
+                    *stm_flag = apply_pv(&mut pos, &result.pv);
+                });
+            }
+            // 葉まで進めた pos を pack（王手 root は原局面のまま）。replacement arm 用。
+            if let Some(slot) = packed_leaf {
+                *slot = pack_position(&pos);
+            }
+            build_features(&pos, f1, f2, psv);
+        };
+
+        if replacement_output.is_some() {
+            f1_slices
+                .into_par_iter()
+                .zip(f2_slices)
+                .zip(batch_records.par_iter())
+                .zip(stm_flags.par_iter_mut())
+                .zip(leaf_sfens_slice.par_iter_mut())
+                .for_each(|((((f1, f2), (psv, sfen, _in_check)), stm_flag), leaf)| {
+                    build_one(f1, f2, psv, sfen, stm_flag, Some(leaf));
+                });
+        } else {
+            f1_slices
+                .into_par_iter()
+                .zip(f2_slices)
+                .zip(batch_records.par_iter())
+                .zip(stm_flags.par_iter_mut())
+                .for_each(|(((f1, f2), (psv, sfen, _in_check)), stm_flag)| {
+                    build_one(f1, f2, psv, sfen, stm_flag, None);
+                });
+        }
 
         error_count += batch_errors.load(Ordering::Relaxed);
 
@@ -2857,7 +3066,8 @@ where
             if clipped {
                 clipped_count += 1;
             }
-            // 出力 sfen は常に root の `psv.sfen`（局面は置換しない）。葉評価はラベルのみに反映。
+            // leaf-LABEL arm: 出力 sfen は常に root の `psv.sfen`（局面は置換しない）。
+            // 葉評価はラベルのみに反映（符号反転は signed_score に適用済み）。
             let new_psv = PackedSfenValue {
                 sfen: psv.sfen,
                 score: new_score,
@@ -2867,6 +3077,31 @@ where
                 padding: 0,
             };
             writer.write_all(&new_psv.to_bytes())?;
+
+            // leaf-REPLACEMENT arm（有効時のみ、leaf-LABEL と 1:1 lockstep）。
+            // `--apply-qsearch-leaf` → DL rescore の 2 工程と bit 一致させる:
+            // - sfen は葉局面の packed sfen
+            // - score は葉評価（符号反転なし＝葉手番視点）に clip 適用
+            // - game_result は STM 反転時のみ符号反転
+            if let Some(rw) = replacement_writer.as_mut() {
+                let leaf_raw = leaf_score as i32;
+                let leaf_clipped_score =
+                    leaf_raw.clamp(-(score_clip as i32), score_clip as i32) as i16;
+                let leaf_game_result = if stm_flags[i] {
+                    -psv.game_result
+                } else {
+                    psv.game_result
+                };
+                let replacement_psv = PackedSfenValue {
+                    sfen: leaf_sfens[i],
+                    score: leaf_clipped_score,
+                    move16: 0,
+                    game_ply: psv.game_ply,
+                    game_result: leaf_game_result,
+                    padding: 0,
+                };
+                rw.write_all(&replacement_psv.to_bytes())?;
+            }
         }
 
         // expand 機能（policy ベースの子局面生成）
@@ -2966,6 +3201,14 @@ where
         inner.sync_all()?;
     }
 
+    if let Some(mut rw) = replacement_writer.take() {
+        rw.flush()?;
+        let inner = rw
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("replacement writer into_inner error: {}", e.error()))?;
+        inner.sync_all()?;
+    }
+
     progress.finish_with_message("Done");
 
     // 統計情報
@@ -3010,11 +3253,16 @@ where
             Some(e) => Some(fs::metadata(e.output_path)?.len()),
             None => None,
         };
+        let replacement_size = match replacement_output {
+            Some(rp) => Some(fs::metadata(rp)?.len()),
+            None => None,
+        };
         let marker = DoneMarker {
             fingerprint,
             output_sizes: OutputSizes {
                 rescore_output_size: rescore_size,
                 expand_output_size: expand_size,
+                replacement_output_size: replacement_size,
             },
         };
         write_marker_atomic(output_path, &marker)?;
@@ -3070,6 +3318,8 @@ fn process_file_with_onnx(
         expand,
         qsearch_leaf_label: cli.qsearch_leaf_label,
         qsearch_max_ply: cli.max_ply,
+        // leaf-label は dlshogi 限定のため AobaZero では replacement arm を持たない。
+        replacement_output: None,
     };
     process_file_with_onnx_pipeline(&config, move |pos, f1, f2, psv| {
         make_input_features(pos, f1, f2, psv.game_ply as i32, draw_ply);
@@ -3086,6 +3336,7 @@ fn process_file_with_dlshogi_onnx(
     input_path: &std::path::Path,
     output_path: &std::path::Path,
     expand_output_path: Option<&std::path::Path>,
+    replacement_output_path: Option<&std::path::Path>,
     process_count: u64,
 ) -> Result<()> {
     use tools::dlshogi_features::{
@@ -3123,6 +3374,7 @@ fn process_file_with_dlshogi_onnx(
         expand,
         qsearch_leaf_label: cli.qsearch_leaf_label,
         qsearch_max_ply: cli.max_ply,
+        replacement_output: replacement_output_path,
     };
     process_file_with_onnx_pipeline(&config, |pos, f1, f2, _psv| {
         make_input_features(pos, f1, f2);
@@ -3186,5 +3438,37 @@ mod marker_tests {
         let m = parse_text(&base_marker("qsearch_leaf_label=false\n"));
         assert!(!m.fingerprint.qsearch_leaf_label);
         assert_eq!(m.fingerprint.qsearch_max_ply, None);
+    }
+
+    #[test]
+    fn old_marker_without_replacement_key_defaults_to_false() {
+        // 旧 marker（replacement 行なし）は false / None 扱いで後方互換
+        let m = parse_text(&base_marker(""));
+        assert!(!m.fingerprint.replacement);
+        assert_eq!(m.fingerprint.replacement_output_path, None);
+        assert_eq!(m.output_sizes.replacement_output_size, None);
+    }
+
+    #[test]
+    fn replacement_false_has_no_path_or_size() {
+        let m = parse_text(&base_marker("replacement=false\n"));
+        assert!(!m.fingerprint.replacement);
+        assert_eq!(m.fingerprint.replacement_output_path, None);
+        assert_eq!(m.output_sizes.replacement_output_size, None);
+    }
+
+    #[test]
+    fn replacement_true_roundtrips() {
+        let m = parse_text(&base_marker(
+            "qsearch_leaf_label=true\nqsearch_max_ply=16\n\
+             replacement=true\n\
+             replacement_output_path=/tmp/repl/in.psv\n\
+             replacement_output_size=320\n",
+        ));
+        assert!(m.fingerprint.replacement);
+        assert_eq!(m.fingerprint.replacement_output_path, Some(PathBuf::from("/tmp/repl/in.psv")));
+        assert_eq!(m.output_sizes.replacement_output_size, Some(320));
+        // serialize → parse で一致（replacement_* 行は replacement=true 時のみ出力）
+        assert_eq!(m, parse_text(&serialize_marker(&m)));
     }
 }

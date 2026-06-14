@@ -163,6 +163,7 @@ cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
 | `--onnx-eval-scale` | 600.0 | 勝率→cp 変換スケール（有限値・正値必須） |
 | `--skip-in-check` | false | 王手親局面の rescore 出力を抑制（後述） |
 | `--qsearch-leaf-label` | false | root 局面を保持し、ラベルだけを qsearch 葉の評価にする（後述）。`--nnue`（葉探索用）併用必須 |
+| `--qsearch-leaf-replacement-output` | — | `--qsearch-leaf-label` と併用し、同一 1 パスで葉局面に置換したレコードを別ディレクトリにも書き出す（後述）。`--qsearch-leaf-label` 必須・`--output-dir` と別ディレクトリ必須 |
 | `--max-ply` | 16 | qsearch の最大深さ（`--qsearch-leaf-label` の葉探索でも使用） |
 | `--threads` | 1 | 処理スレッド数（rayon による特徴量構築の並列化） |
 
@@ -225,6 +226,49 @@ rescore_psv --input "data/*.bin" --output-dir rescored_leaflabel/ \
 > `--apply-qsearch-leaf`（局面を葉に置換）→ ONNX で rescore → 元 root と merge、の 3 工程と
 > 同じ結果を 1 パスで得られる。中間 leaf ファイルを作らないため大規模教師でのディスク・I/O を節約できる。
 
+### `--qsearch-leaf-replacement-output`（葉局面置換 arm を同時生成）
+
+`--qsearch-leaf-label` と併用すると、**同一 1 パスで** 2 つの教師データを生成できる:
+
+- **leaf-LABEL arm**（`--output-dir`）: root 局面 + 葉ラベル（既存の `--qsearch-leaf-label` 出力）
+- **leaf-REPLACEMENT arm**（`--qsearch-leaf-replacement-output`）: **葉局面に置換**したレコード
+
+```bash
+rescore_psv --input "data/*.bin" \
+  --output-dir rescored_leaflabel/ \
+  --qsearch-leaf-replacement-output rescored_leafrepl/ \
+  --dlshogi-onnx-model model.onnx \
+  --nnue suisho5.bin \
+  --qsearch-leaf-label \
+  --onnx-tensorrt --onnx-tensorrt-cache /tmp/trt_cache
+```
+
+「葉の qsearch + DL 評価」を 1 回だけ実行して 2 arm を同時に得るため、大規模教師での
+再計算を半減できる（`--apply-qsearch-leaf` → DL rescore の 2 工程を別々に走らせる必要がない）。
+
+leaf-REPLACEMENT レコードの仕様（`--apply-qsearch-leaf` → DL rescore の 2 工程と bit 一致）:
+
+- `sfen` = **葉局面の packed sfen**（局面を葉に置換）
+- `score` = 葉の DL 評価（**符号反転しない＝葉手番視点**）。`--score-clip` 適用
+- `move16` = 0
+- `game_ply` = root の `game_ply`
+- `game_result` = 葉で STM 反転時のみ `-game_result`、反転なしなら `game_result`
+- `padding` = 0
+
+leaf-LABEL arm（`--output-dir` 側）は現状の `--qsearch-leaf-label` 出力のまま
+（root sfen + root 手番視点へ符号反転した score + root の `game_result`）。
+
+両 arm は同一ループで 1:1 lockstep に書き出すためレコード数が一致する。
+`--skip-in-check` で王手 root を落とす場合は両 arm から同様に除外される。
+
+前提・制約:
+
+- `--qsearch-leaf-label` 必須（葉局面はそのモードの qsearch 結果を再利用する）。
+- したがって dlshogi モデル専用。
+- `--output-dir` と `--qsearch-leaf-replacement-output` は別ディレクトリ必須
+  （同一指定は起動時エラー）。
+- 出力ファイル名は入力ファイル名と同じ。
+
 ### ポリシー展開（`--expand-output-dir`）について
 
 `--expand-output-dir` を指定すると、同じ ONNX 推論の policy 出力を使って
@@ -243,10 +287,10 @@ ONNX モードでは、各入力ファイルの処理完了時に rescore 出力
 次回同じ入力に対して実行すると:
 
 - **marker の設定 fingerprint が現在の CLI と完全一致 + 出力サイズが記録と一致** → ファイル skip
-- **fingerprint 不一致（モデル差し替え・`--onnx-eval-scale` 変更・expand 設定変更など）** →
-  rescore/expand 両出力を truncate して再生成
-- **marker が無い（従来互換）+ expand 無効** → 既存のレコード数ベース resume にフォールバック
-- **marker が無い + expand 有効** → 両出力を truncate して最初から処理
+- **fingerprint 不一致（モデル差し替え・`--onnx-eval-scale` 変更・expand / replacement 設定変更など）** →
+  rescore / expand / replacement 全出力を truncate して再生成
+- **marker が無い（従来互換）+ expand / replacement いずれも無効** → 既存のレコード数ベース resume にフォールバック
+- **marker が無い + expand または replacement 有効** → 全出力を truncate して最初から処理
 
 fingerprint に含まれる項目:
 
@@ -258,8 +302,10 @@ fingerprint に含まれる項目:
 - `--qsearch-leaf-label`、および有効時のみ `--max-ply`（葉ラベルモードは出力内容を変えるため）
 - expand 有効時: `--expand-threshold`（to_bits hex）、`--expand-skip-parent-in-check`、
   `--expand-skip-child-in-check`、`--expand-output-dir` の canonicalize 済みパス
+- replacement 有効時: `--qsearch-leaf-replacement-output` の canonicalize 済みパス
+  （`replacement` フラグ + `replacement_output_path` + `replacement_output_size`）
 
-> 旧 marker（`--qsearch-leaf-label` キーを持たない）は欠落時 `false` 扱いで後方互換。
+> 旧 marker（`--qsearch-leaf-label` / `replacement` キーを持たない）は欠落時 `false` 扱いで後方互換。
 
 `Ctrl-C` で中断した場合は marker を書き出さない（中途半端に処理したファイルを
 完了扱いにしない）。プロセス kill / panic には atomic rename + `sync_all()` で
@@ -282,12 +328,14 @@ fingerprint に含まれる項目:
 
 ONNX モードでは以下を起動時 / ファイルごとに検証し、データ破壊を防止する:
 
-- `--output-dir` と `--expand-output-dir` が同一ディレクトリ → エラー
+- `--output-dir` と `--expand-output-dir` / `--qsearch-leaf-replacement-output` が
+  同一ディレクトリ → エラー
 - 入力ファイル = 予定出力パス（未作成でも parent canonicalize で検出）→ エラー
-- 既存出力が symlink → エラー（symlink 越しの truncate で入力を破壊しないため）
+- 既存出力（rescore / expand / replacement）が symlink → エラー
+  （symlink 越しの truncate で入力を破壊しないため）
 - Unix のみ: 既存出力が入力と同じ inode（hardlink）→ エラー
-- marker 不一致で旧 expand artifact を削除する前に、旧 artifact が現在の入力と
-  同一実体でないことを検証 → 同一なら削除せずエラー（段階的パイプライン対策）
+- marker 不一致で旧 expand / replacement artifact を削除する前に、旧 artifact が現在の
+  入力と同一実体でないことを検証 → 同一なら削除せずエラー（段階的パイプライン対策）
 
 ### `--threads` について
 
@@ -420,6 +468,8 @@ AobaZero ONNX model loaded. Batch size: 1024
 | `--expand-threshold must be a finite value in (0.0, 100.0]` | 範囲外 / NaN / inf | 有限値かつ `0 < v <= 100` を指定 |
 | `--onnx-eval-scale must be a positive finite value` | 0 以下 / NaN / inf | 正の有限値（通常 600.0）を指定 |
 | `--output-dir and --expand-output-dir must point to different directories` | 同一ディレクトリ指定 | 別ディレクトリを指定 |
+| `--qsearch-leaf-replacement-output requires --qsearch-leaf-label` | replacement のみ指定 | `--qsearch-leaf-label` を併用 |
+| `--output-dir and --qsearch-leaf-replacement-output must point to different directories` | 同一ディレクトリ指定 | 別ディレクトリを指定 |
 | `Output path is a symlink (refusing to truncate a symlink)` | 出力予定パスが symlink | symlink を削除するか別ディレクトリを使う |
 | `Output path is a hardlink to the input file` | 出力予定が入力の hardlink（Unix） | 別ディレクトリを指定 |
 | `Stale expand artifact ... resolves to the current input file` | 旧 expand 出力と現在 input が同一（段階的パイプライン） | 入力を移動するか `--expand-output-dir` を変更 |
