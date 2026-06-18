@@ -1397,6 +1397,18 @@ fn write_hand_piece_hcp(stream: &mut BitStreamWriter, pt: PieceType, color: Colo
     }
 }
 
+/// HCP 形式で駒箱の駒を書き込む（色なしの駒箱コード）。
+fn write_piecebox_hcp(stream: &mut BitStreamWriter, pt: PieceType) {
+    let idx = piece_type_to_index(pt);
+
+    for entry in &HCP_HAND_TABLE {
+        if entry.piece_idx == idx && entry.is_piecebox {
+            stream.write_n_bit(entry.code as u32, entry.bits as usize);
+            return;
+        }
+    }
+}
+
 /// Position から HCP (HuffmanCodedPos / Apery/cshogi) 形式の 32 バイトを生成
 ///
 /// `pack_position` (PSfen/YaneuraOu 形式) との違い:
@@ -1432,26 +1444,46 @@ pub fn pack_position_hcp(pos: &Position) -> [u8; 32] {
 
     // 5. 手駒（cshogi `to_hcp` 準拠: 先手→後手、歩→飛 の順）
     //
-    // Apery HuffmanCodedPos は標準 40 枚の局面で盤上＋手駒がちょうど 256bit になるよう
-    // 符号長が設計されている。cshogi は駒箱（盤上にも手駒にも無い駒）を書き出さず、
-    // 残りビットは 0 のままにする。よって駒箱パディングは行わない。
+    // 駒種は歩→香→桂→銀→金→角→飛 の順。各駒種の総数（歩18・香桂銀金各4・角飛各2）は
+    // (盤上 + 手駒 + 駒箱) で保存される。
     let piece_order = [
-        PieceType::Pawn,
-        PieceType::Lance,
-        PieceType::Knight,
-        PieceType::Silver,
-        PieceType::Gold,
-        PieceType::Bishop,
-        PieceType::Rook,
+        (PieceType::Pawn, 18u32),
+        (PieceType::Lance, 4),
+        (PieceType::Knight, 4),
+        (PieceType::Silver, 4),
+        (PieceType::Gold, 4),
+        (PieceType::Bishop, 2),
+        (PieceType::Rook, 2),
     ];
 
     for &color in &[Color::Black, Color::White] {
         let hand = pos.hand(color);
-        for &pt in &piece_order {
+        for &(pt, _) in &piece_order {
             let count = hand.count(pt);
             for _ in 0..count {
                 write_hand_piece_hcp(&mut stream, pt, color);
             }
+        }
+    }
+
+    // 6. 駒箱（盤上にも手駒にも無い駒）。標準 40 枚局面では全駒種 0 のため何も書かれず、
+    // 盤上＋手駒でちょうど 256bit に収まる。駒落ち等 40 枚未満の局面では cshogi `to_hcp`
+    // と同じく、不足分を駒種ごとに駒箱コードで書く（書かないと残りビットの 0 が
+    // `unpack_hcp` で歩として誤読される）。
+    let mut on_board = [0u32; 8]; // piece_type_to_index (1..=7) で添字付け
+    for sq_idx in 0..81u8 {
+        let sq = Square::from_u8(sq_idx).expect("sq_idx should be in valid range 0-80");
+        let piece = pos.piece_on(sq);
+        if piece.is_some() {
+            on_board[piece_type_to_index(piece.piece_type())] += 1;
+        }
+    }
+    for &(pt, total) in &piece_order {
+        let idx = piece_type_to_index(pt);
+        let in_hand = pos.hand(Color::Black).count(pt) + pos.hand(Color::White).count(pt);
+        let in_box = total.saturating_sub(on_board[idx] + in_hand);
+        for _ in 0..in_box {
+            write_piecebox_hcp(&mut stream, pt);
         }
     }
 
@@ -1701,6 +1733,19 @@ mod tests {
             (
                 "1+L3+R1+Np/2g1+Ln2s/5s3/l2p2pP1/1gp4N1/P1PPb1G2/b+s1Sp2G1/L8/K3k4 w N6Pr3p 1",
                 "a1acda002771784079f07b6d80115f052516bc5460c46b0793f81a00001824ff",
+            ),
+            // 駒落ち（盤上 + 手駒が 40 枚未満）: 不足分を駒箱コードで書く
+            (
+                "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B7/LNSGKGSNL b - 1",
+                "58a449210cd757211c9b42585e85f0288457213c9b4258aebf427c1c9342185e",
+            ),
+            (
+                "lnsgkgsnl/7b1/ppppppppp/9/9/9/PPPPPPPPP/7R1/LNSGKGSNL b - 1",
+                "58a449210cd757217e8e4d212caf427814c2ab109e4d212c9742382685303c5e",
+            ),
+            (
+                "lnsgkgsn1/1r5b1/ppppppppp/9/9/9/1PPPPPPPP/1B5R1/LNSGKGSN1 b - 1",
+                "58240ac1f555889f635308cbab101e85f02a84675308cbf557888f635260504a",
             ),
         ];
         for (sfen, expected) in cases {
