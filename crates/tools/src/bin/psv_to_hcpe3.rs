@@ -6,8 +6,9 @@
 //! （moveNum=1 / candidateNum=1 / visitNum=1、policy target は best move の one-hot）。
 //! `--format hcpe` は dlshogi 同梱 psv_to_hcpe.py と同じ 38 バイト hcpe を出力する。
 //!
-//! hcp（HuffmanCodedPos, 32B）・手番・eval・game_result の視点変換は cshogi の
-//! `to_hcp` / `move16_from_psv` と同一ロジックを `tools::packed_sfen` で再現する。
+//! 盤面の hcp（HuffmanCodedPos, 32B）は `tools::packed_sfen::pack_position_hcp`、
+//! 指し手 move16 と勝敗・eval の視点変換は本ファイル内で行う（いずれも hcpe / hcpe3
+//! 形式の参照実装 cshogi の `to_hcp` / `move16_from_psv` と一致）。
 //! load-all を避けてチャンクストリーミングし、ピークメモリを入力件数に非依存にする。
 //!
 //! # 使用例
@@ -115,12 +116,13 @@ fn game_result_byte(game_result: i8, side_to_move: Color) -> u8 {
     }
 }
 
-/// PSV の YaneuraOu move16 を cshogi move16 へ（cshogi `move16_from_psv` と同一）。
+/// PSV の YaneuraOu move16 を hcpe / hcpe3 が要求する move16 へ変換する。
 ///
-/// 盤上マス番号・駒打ち表現（`from = 81 + 駒種`）は両者同一で、成り（YaneuraOu の bit14）
-/// だけ cshogi 側で `0x1800` ずれる。bit15 を含めない全有効入力で cshogi と一致を確認済み。
+/// 盤上マス番号・駒打ち表現（`from = 81 + 駒種`）は YaneuraOu と同一で、成り（bit14）
+/// だけ 0x1800 ずれる。bit15 を含めない全有効入力で、形式の参照実装である cshogi
+/// `move16_from_psv` と一致することを確認済み。
 #[inline]
-fn cshogi_move16_from_psv(yo_move16: u16) -> u16 {
+fn move16_psv_to_hcpe(yo_move16: u16) -> u16 {
     if yo_move16 & 0x4000 != 0 {
         yo_move16.wrapping_sub(0x1800)
     } else {
@@ -178,7 +180,7 @@ fn convert(record: &[u8; PackedSfenValue::SIZE], format: Format) -> ConvResult {
     }
 
     let hcp = pack_position_hcp(&pos);
-    let move16 = cshogi_move16_from_psv(psv.move16);
+    let move16 = move16_psv_to_hcpe(psv.move16);
     let result = game_result_byte(psv.game_result, pos.side_to_move());
 
     match format {
@@ -400,12 +402,12 @@ mod tests {
     }
 
     #[test]
-    fn cshogi_move16_matches_oracle() {
+    fn move16_psv_to_hcpe_matches_oracle() {
         // none / 通常手 / 駒打ちは無変換、成りのみ 0x1800 ずれる（cshogi move16_from_psv 準拠）。
-        assert_eq!(cshogi_move16_from_psv(0x0000), 0x0000); // none
-        assert_eq!(cshogi_move16_from_psv(0x162b), 0x162b); // 通常手
-        assert_eq!(cshogi_move16_from_psv(0x2917), 0x2917); // 歩打ち（from=82=81+1）
-        assert_eq!(cshogi_move16_from_psv(0x4b2a), 0x332a); // 成り
-        assert_eq!(cshogi_move16_from_psv(0x62bb), 0x4abb); // 成り
+        assert_eq!(move16_psv_to_hcpe(0x0000), 0x0000); // none
+        assert_eq!(move16_psv_to_hcpe(0x162b), 0x162b); // 通常手
+        assert_eq!(move16_psv_to_hcpe(0x2917), 0x2917); // 歩打ち（from=82=81+1）
+        assert_eq!(move16_psv_to_hcpe(0x4b2a), 0x332a); // 成り
+        assert_eq!(move16_psv_to_hcpe(0x62bb), 0x4abb); // 成り
     }
 }
