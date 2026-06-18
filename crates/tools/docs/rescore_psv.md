@@ -287,10 +287,10 @@ ONNX モードでは、各入力ファイルの処理完了時に rescore 出力
 次回同じ入力に対して実行すると:
 
 - **marker の設定 fingerprint が現在の CLI と完全一致 + 出力サイズが記録と一致** → ファイル skip
-- **fingerprint 不一致（モデル差し替え・`--onnx-eval-scale` 変更・expand / replacement 設定変更など）** →
+- **fingerprint 不一致（ONNX モデル差し替え・`--onnx-eval-scale` 変更・葉ラベル時の `--nnue` 差し替え・expand / replacement 設定変更など）** →
   rescore / expand / replacement 全出力を truncate して再生成
-- **marker が無い（従来互換）+ expand / replacement いずれも無効** → 既存のレコード数ベース resume にフォールバック
-- **marker が無い + expand または replacement 有効** → 全出力を truncate して最初から処理
+- **marker が無い（従来互換）+ expand / replacement / `--qsearch-leaf-label` いずれも無効** → 既存のレコード数ベース resume にフォールバック
+- **marker が無い + expand / replacement / `--qsearch-leaf-label` のいずれか有効** → 全出力を truncate して最初から処理（レコード数ベース resume は使わない）
 
 fingerprint に含まれる項目:
 
@@ -299,7 +299,8 @@ fingerprint に含まれる項目:
 - `process_count`（`--limit` 適用後）
 - `--skip-in-check`、`--score-clip`、`--onnx-eval-scale`（`f32::to_bits()` の hex で保存）
 - AobaZero モデル時のみ `--onnx-draw-ply`
-- `--qsearch-leaf-label`、および有効時のみ `--max-ply`（葉ラベルモードは出力内容を変えるため）
+- `--qsearch-leaf-label`、および有効時のみ `--max-ply` と葉探索用 `--nnue` のパス（canonicalize 済み）・
+  サイズ・mtime（ns）。葉ラベルは葉局面＝出力が `--nnue` に依存するため、NNUE 差し替えも fingerprint で検知する
 - expand 有効時: `--expand-threshold`（to_bits hex）、`--expand-skip-parent-in-check`、
   `--expand-skip-child-in-check`、`--expand-output-dir` の canonicalize 済みパス
 - replacement 有効時: `--qsearch-leaf-replacement-output` の canonicalize 済みパス

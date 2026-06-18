@@ -412,6 +412,7 @@ fn onnx_marker_decide(
         expand: expand_cfg,
         qsearch_leaf_label: cli.qsearch_leaf_label,
         qsearch_max_ply: cli.max_ply,
+        qsearch_nnue_path: cli.nnue.as_deref(),
         replacement_output,
     };
     let current = build_run_fingerprint(&cfg)?;
@@ -535,8 +536,10 @@ fn onnx_marker_decide(
     }
 
     // marker 不存在
-    if expand_output_path.is_some() || replacement_output.is_some() {
-        // expand / replacement 有効時は marker 必須。truncate して最初から
+    // leaf-label は marker 必須にする。record 数ベースの legacy resume では、旧通常 rescore の
+    // marker 無し出力（レコード数だけ一致）を完了扱いし、葉ラベルを生成せず stale 出力を温存する。
+    if expand_output_path.is_some() || replacement_output.is_some() || cli.qsearch_leaf_label {
+        // expand / replacement / leaf-label 有効時は marker 必須。truncate して最初から
         if rescore_output_path.exists() {
             File::options().write(true).open(rescore_output_path)?.set_len(0)?;
         }
@@ -2099,6 +2102,10 @@ struct OnnxPipelineConfig<'a> {
     qsearch_leaf_label: bool,
     /// qsearch の最大深さ（`qsearch_leaf_label` 時のみ使用）
     qsearch_max_ply: i32,
+    /// 葉探索用 NNUE モデルのパス（`qsearch_leaf_label` 時のみ Some）。
+    /// 葉 PV ＝ ONNX が評価する葉局面が NNUE に依存するため、NNUE 差し替えを
+    /// marker で検知できるよう fingerprint に path/size/mtime を含める。
+    qsearch_nnue_path: Option<&'a std::path::Path>,
     /// leaf-REPLACEMENT arm の出力パス（`--qsearch-leaf-replacement-output`）。
     /// `qsearch_leaf_label` 併用時のみ Some。葉局面に置換したレコード
     /// （葉 sfen + 葉評価・符号反転なし）をこのパスに書き出す。leaf-LABEL arm
@@ -2147,6 +2154,11 @@ struct RunFingerprint {
     // max_ply は葉ラベル時のみ意味を持つので Option（expand_* と同じ扱い）。
     qsearch_leaf_label: bool,
     qsearch_max_ply: Option<i32>,
+    // 葉探索用 NNUE（`--nnue`）。葉ラベルモードでは葉局面＝出力が NNUE に依存するため、
+    // path/size/mtime を fingerprint に含める。qsearch_max_ply と同じく leaf_label 時のみ Some。
+    qsearch_nnue_path: Option<PathBuf>,
+    qsearch_nnue_size: Option<u64>,
+    qsearch_nnue_mtime_ns: Option<u128>,
     expand: bool,
     expand_threshold_bits: Option<u32>,
     expand_skip_parent_in_check: Option<bool>,
@@ -2222,6 +2234,24 @@ fn serialize_marker(marker: &DoneMarker) -> String {
             out,
             "qsearch_max_ply={}",
             f.qsearch_max_ply.expect("qsearch_leaf_label=true requires max_ply")
+        );
+        let _ = writeln!(
+            out,
+            "qsearch_nnue_path={}",
+            f.qsearch_nnue_path
+                .as_ref()
+                .expect("qsearch_leaf_label=true requires nnue path")
+                .display()
+        );
+        let _ = writeln!(
+            out,
+            "qsearch_nnue_size={}",
+            f.qsearch_nnue_size.expect("qsearch_leaf_label=true requires nnue size")
+        );
+        let _ = writeln!(
+            out,
+            "qsearch_nnue_mtime_ns={}",
+            f.qsearch_nnue_mtime_ns.expect("qsearch_leaf_label=true requires nnue mtime")
         );
     }
     let _ = writeln!(out, "expand={}", f.expand);
@@ -2348,6 +2378,21 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
         qsearch_leaf_label,
         qsearch_max_ply: if qsearch_leaf_label {
             Some(get("qsearch_max_ply")?.parse().context("invalid qsearch_max_ply")?)
+        } else {
+            None
+        },
+        qsearch_nnue_path: if qsearch_leaf_label {
+            Some(PathBuf::from(get("qsearch_nnue_path")?))
+        } else {
+            None
+        },
+        qsearch_nnue_size: if qsearch_leaf_label {
+            Some(get("qsearch_nnue_size")?.parse().context("invalid qsearch_nnue_size")?)
+        } else {
+            None
+        },
+        qsearch_nnue_mtime_ns: if qsearch_leaf_label {
+            Some(get("qsearch_nnue_mtime_ns")?.parse().context("invalid qsearch_nnue_mtime_ns")?)
         } else {
             None
         },
@@ -2518,6 +2563,22 @@ fn build_run_fingerprint(config: &OnnxPipelineConfig<'_>) -> Result<RunFingerpri
         }
         None => None,
     };
+    // 葉探索用 NNUE のメタを fingerprint へ（葉ラベル時のみ）。NNUE を差し替えると葉局面＝
+    // 出力が変わるのに、含めないと marker が一致して stale な葉ラベルを再利用してしまう。
+    let (qsearch_nnue_path, qsearch_nnue_size, qsearch_nnue_mtime_ns) = if config.qsearch_leaf_label
+    {
+        let p = config
+            .qsearch_nnue_path
+            .context("--qsearch-leaf-label requires --nnue path for fingerprint")?;
+        let cp = p
+            .canonicalize()
+            .with_context(|| format!("Failed to canonicalize --nnue {}", p.display()))?;
+        ensure_marker_safe_path("--nnue (qsearch leaf)", &cp)?;
+        let (size, mtime) = file_size_mtime_ns(&cp)?;
+        (Some(cp), Some(size), Some(mtime))
+    } else {
+        (None, None, None)
+    };
     Ok(RunFingerprint {
         version: MARKER_VERSION,
         mode: "onnx".to_string(),
@@ -2535,6 +2596,9 @@ fn build_run_fingerprint(config: &OnnxPipelineConfig<'_>) -> Result<RunFingerpri
         onnx_draw_ply: config.onnx_draw_ply,
         qsearch_leaf_label: config.qsearch_leaf_label,
         qsearch_max_ply: config.qsearch_leaf_label.then_some(config.qsearch_max_ply),
+        qsearch_nnue_path,
+        qsearch_nnue_size,
+        qsearch_nnue_mtime_ns,
         expand: config.expand.is_some(),
         expand_threshold_bits: config.expand.map(|e| e.threshold.to_bits()),
         expand_skip_parent_in_check: config.expand.map(|e| e.skip_parent_in_check),
@@ -2596,6 +2660,8 @@ where
         expand,
         qsearch_leaf_label,
         qsearch_max_ply,
+        // fingerprint 用。pipeline 本体では使わず build_run_fingerprint(config) で参照する。
+        qsearch_nnue_path: _,
         replacement_output,
     } = *config;
     use ort::ep::ExecutionProvider;
@@ -3318,7 +3384,8 @@ fn process_file_with_onnx(
         expand,
         qsearch_leaf_label: cli.qsearch_leaf_label,
         qsearch_max_ply: cli.max_ply,
-        // leaf-label は dlshogi 限定のため AobaZero では replacement arm を持たない。
+        // leaf-label は dlshogi 限定のため AobaZero では葉探索 NNUE / replacement arm を持たない。
+        qsearch_nnue_path: None,
         replacement_output: None,
     };
     process_file_with_onnx_pipeline(&config, move |pos, f1, f2, psv| {
@@ -3374,6 +3441,7 @@ fn process_file_with_dlshogi_onnx(
         expand,
         qsearch_leaf_label: cli.qsearch_leaf_label,
         qsearch_max_ply: cli.max_ply,
+        qsearch_nnue_path: cli.nnue.as_deref(),
         replacement_output: replacement_output_path,
     };
     process_file_with_onnx_pipeline(&config, |pos, f1, f2, _psv| {
@@ -3416,20 +3484,34 @@ mod marker_tests {
         parse_marker(&path).unwrap()
     }
 
+    /// leaf-label=true の marker に必要な qsearch 系キー（max_ply + 葉探索 NNUE のメタ）。
+    const LEAF_LABEL_KEYS: &str = "qsearch_leaf_label=true\n\
+         qsearch_max_ply=20\n\
+         qsearch_nnue_path=/tmp/nn.bin\n\
+         qsearch_nnue_size=42\n\
+         qsearch_nnue_mtime_ns=789\n";
+
     #[test]
     fn old_marker_without_qsearch_keys_defaults_to_false() {
         // 旧 marker（qsearch_leaf_label 行なし）は false / None 扱いで後方互換
         let m = parse_text(&base_marker(""));
         assert!(!m.fingerprint.qsearch_leaf_label);
         assert_eq!(m.fingerprint.qsearch_max_ply, None);
+        assert_eq!(m.fingerprint.qsearch_nnue_path, None);
+        assert_eq!(m.fingerprint.qsearch_nnue_size, None);
+        assert_eq!(m.fingerprint.qsearch_nnue_mtime_ns, None);
     }
 
     #[test]
     fn new_marker_leaf_label_true_roundtrips() {
-        let m = parse_text(&base_marker("qsearch_leaf_label=true\nqsearch_max_ply=20\n"));
+        let m = parse_text(&base_marker(LEAF_LABEL_KEYS));
         assert!(m.fingerprint.qsearch_leaf_label);
         assert_eq!(m.fingerprint.qsearch_max_ply, Some(20));
-        // serialize → parse で一致（max_ply 行は leaf_label=true 時のみ出力）
+        // 葉探索 NNUE のメタも fingerprint に取り込まれる（差し替え検知用）。
+        assert_eq!(m.fingerprint.qsearch_nnue_path, Some(PathBuf::from("/tmp/nn.bin")));
+        assert_eq!(m.fingerprint.qsearch_nnue_size, Some(42));
+        assert_eq!(m.fingerprint.qsearch_nnue_mtime_ns, Some(789));
+        // serialize → parse で一致（max_ply / nnue 行は leaf_label=true 時のみ出力）
         assert_eq!(m, parse_text(&serialize_marker(&m)));
     }
 
@@ -3438,6 +3520,7 @@ mod marker_tests {
         let m = parse_text(&base_marker("qsearch_leaf_label=false\n"));
         assert!(!m.fingerprint.qsearch_leaf_label);
         assert_eq!(m.fingerprint.qsearch_max_ply, None);
+        assert_eq!(m.fingerprint.qsearch_nnue_path, None);
     }
 
     #[test]
@@ -3461,6 +3544,9 @@ mod marker_tests {
     fn replacement_true_roundtrips() {
         let m = parse_text(&base_marker(
             "qsearch_leaf_label=true\nqsearch_max_ply=16\n\
+             qsearch_nnue_path=/tmp/nn.bin\n\
+             qsearch_nnue_size=42\n\
+             qsearch_nnue_mtime_ns=789\n\
              replacement=true\n\
              replacement_output_path=/tmp/repl/in.psv\n\
              replacement_output_size=320\n",
