@@ -18,8 +18,22 @@
 ### 必須チェック
 1. `cargo fmt && cargo clippy --fix --allow-dirty --tests`
 2. `cargo test`
+3. `bash scripts/check-tracked-abs-paths.sh`（tracked file に machine 依存の絶対パスを書かない。データは `$SHOGI_DATA`、外部 repo は `/path/to/...` を使う）
 - Clippy の警告は `cargo clippy --fix --allow-dirty --tests` → 手動修正 → 再実行でゼロに。必要なら再度 `cargo fmt`。
 - 警告抑止のために安易に `#[allow(...)]` や未使用変数へ `_` 接頭辞を付けることは禁止。
+
+### 共有データ（`$SHOGI_DATA`）
+
+教師データ / NNUE モデル / progress 係数 / 学習 checkpoint は repo 外の共有 root
+（環境変数 `$SHOGI_DATA`）に置く。layout:
+
+- `teachers/` — 教師データ (PSV / packed bin)
+- `nnue/` — engine 配備モデル（USI `EvalFile` で読む）
+- `progress/` — progress 係数（`LS_PROGRESS_COEFF`）
+- `runs/bullet/`, `runs/tatara/` — 各 trainer の学習 checkpoint
+
+各自の共有データ root を `SHOGI_DATA` に export して使う。tracked file には machine
+固有の絶対パスでなく `$SHOGI_DATA` を書く（外部 repo は `/path/to/...` placeholder）。
 
 ## ツール開発（crates/tools）
 

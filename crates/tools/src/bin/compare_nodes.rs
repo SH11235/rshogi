@@ -9,12 +9,12 @@
 //! ```bash
 //! cargo run --release -p tools --bin compare_nodes -- \
 //!   --engine-a ./target/release/rshogi-usi \
-//!   --engine-b /mnt/nvme1/development/YaneuraOu/source/YaneuraOu-by-gcc \
+//!   --engine-b /path/to/YaneuraOu/source/YaneuraOu-by-gcc \
 //!   --options-a "Threads=1" \
 //!   --options-b "FV_SCALE=24,Threads=1,PvInterval=0" \
 //!   --hash 512 \
-//!   --eval-a /mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu/suisho5.bin \
-//!   --eval-b /mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu \
+//!   --eval-a $SHOGI_DATA/nnue/halfkp_256x2-32-32_crelu/suisho5.bin \
+//!   --eval-b $SHOGI_DATA/nnue/halfkp_256x2-32-32_crelu \
 //!   --sfens start_sfens_ply24.txt \
 //!   --depth 20 \
 //!   --sample 100 \
@@ -25,12 +25,12 @@
 //! ```bash
 //! cargo run --release -p tools --bin compare_nodes -- \
 //!   --engine-a ./target/release/rshogi-usi \
-//!   --engine-b /mnt/nvme1/development/YaneuraOu/source/YaneuraOu-by-gcc \
+//!   --engine-b /path/to/YaneuraOu/source/YaneuraOu-by-gcc \
 //!   --options-a "Threads=1" \
 //!   --options-b "FV_SCALE=24,Threads=1,PvInterval=0" \
 //!   --hash 256 \
-//!   --eval-a /mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu/suisho5.bin \
-//!   --eval-b /mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu \
+//!   --eval-a $SHOGI_DATA/nnue/halfkp_256x2-32-32_crelu/suisho5.bin \
+//!   --eval-b $SHOGI_DATA/nnue/halfkp_256x2-32-32_crelu \
 //!   --sfen "l6nl/1r1sgkgs1/p3pp1p1/2pp2p1p/1p1n3P1/P1P2PP1P/1PSPP1N2/2GK2SR1/LN3G2L b Bb 29" \
 //!   --depth 18 \
 //!   --workers 1

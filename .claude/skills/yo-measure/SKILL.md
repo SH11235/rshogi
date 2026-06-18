@@ -35,15 +35,15 @@ rshogi と YaneuraOu (YO) の両エンジンにデバッグログを挿入→ビ
 | rshogi pruning | `crates/rshogi-core/src/search/pruning.rs` |
 | rshogi mate | `crates/rshogi-core/src/mate/` (`mod.rs`, `move_mate.rs`, `drop_mate.rs`, `helpers.rs`) |
 | rshogi position | `crates/rshogi-core/src/position/pos.rs` |
-| YO 探索 | `/mnt/nvme1/development/YaneuraOu/source/engine/yaneuraou-engine/yaneuraou-search.cpp` |
-| YO movepick | `/mnt/nvme1/development/YaneuraOu/source/movepick.cpp` |
-| YO mate | `/mnt/nvme1/development/YaneuraOu/source/mate/mate1ply_without_effect.cpp` |
-| YO position | `/mnt/nvme1/development/YaneuraOu/source/position.h`, `position.cpp` |
+| YO 探索 | `/path/to/YaneuraOu/source/engine/yaneuraou-engine/yaneuraou-search.cpp` |
+| YO movepick | `/path/to/YaneuraOu/source/movepick.cpp` |
+| YO mate | `/path/to/YaneuraOu/source/mate/mate1ply_without_effect.cpp` |
+| YO position | `/path/to/YaneuraOu/source/position.h`, `position.cpp` |
 | 乖離ステータス | `docs/performance/yo_alignment_status.md` |
 | ノード数比較 | `crates/tools/src/bin/compare_nodes.rs` (`cargo run --release -p tools --bin compare_nodes`) |
-| NNUE eval | `/mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu/suisho5.bin` |
+| NNUE eval | `$SHOGI_DATA/nnue/halfkp_256x2-32-32_crelu/suisho5.bin` |
 | rshogi binary | `target/release/rshogi-usi` |
-| YO binary | `/mnt/nvme1/development/YaneuraOu/source/YaneuraOu-by-gcc` |
+| YO binary | `/path/to/YaneuraOu/source/YaneuraOu-by-gcc` |
 
 ## 実行フロー
 
@@ -376,7 +376,7 @@ if (pos.key() == 0x3134ab787c99c53dULL) {
 cargo build --release 2>&1 | tail -5
 
 # YO（並列ビルド）
-cd /mnt/nvme1/development/YaneuraOu/source && \
+cd /path/to/YaneuraOu/source && \
   make clean COMPILER=g++ > /dev/null 2>&1 && \
   make COMPILER=g++ -j$(nproc) 2>&1 | tail -5
 ```
@@ -394,9 +394,9 @@ cd /mnt/nvme1/development/YaneuraOu/source && \
 
 ```bash
 #!/bin/bash
-EVAL=/mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu/suisho5.bin
-RS=/mnt/nvme1/development/rshogi/target/release/rshogi-usi
-YO=/mnt/nvme1/development/YaneuraOu/source/YaneuraOu-by-gcc
+EVAL=$SHOGI_DATA/nnue/halfkp_256x2-32-32_crelu/suisho5.bin
+RS=target/release/rshogi-usi
+YO=/path/to/YaneuraOu/source/YaneuraOu-by-gcc
 HASH=${HASH:-256}
 POS="{POSITION}"
 

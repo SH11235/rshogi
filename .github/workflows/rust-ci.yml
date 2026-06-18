@@ -203,3 +203,15 @@ jobs:
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
+
+  abs-paths:
+    # tracked file に machine 依存の絶対パスが混入していないか検査する
+    # (検出対象の具体は scripts/check-tracked-abs-paths.sh を参照)。docs / skills を
+    # 含む全 tracked file が対象なので changes フィルタを通さず PR ごとに常に走らせる
+    # (grep のみで toolchain 不要)。
+    name: No machine-absolute paths
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check tracked files for machine-absolute paths
+        run: bash scripts/check-tracked-abs-paths.sh
