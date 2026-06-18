@@ -306,7 +306,9 @@ fingerprint に含まれる項目:
 - replacement 有効時: `--qsearch-leaf-replacement-output` の canonicalize 済みパス
   （`replacement` フラグ + `replacement_output_path` + `replacement_output_size`）
 
-> 旧 marker（`--qsearch-leaf-label` / `replacement` キーを持たない）は欠落時 `false` 扱いで後方互換。
+> 後方互換: 旧 marker の `--qsearch-leaf-label` / `replacement` キー欠落は `false` 扱い。
+> `--qsearch-leaf-label=true` だが葉探索 NNUE キーを持たない旧 leaf-label marker は、NNUE メタを
+> `None` として読み（parse error にしない）、現設定（NNUE あり）と fingerprint 不一致になって再生成される。
 
 `Ctrl-C` で中断した場合は marker を書き出さない（中途半端に処理したファイルを
 完了扱いにしない）。プロセス kill / panic には atomic rename + `sync_all()` で

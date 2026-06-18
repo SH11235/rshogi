@@ -2381,21 +2381,18 @@ fn parse_marker(path: &std::path::Path) -> Result<DoneMarker> {
         } else {
             None
         },
-        qsearch_nnue_path: if qsearch_leaf_label {
-            Some(PathBuf::from(get("qsearch_nnue_path")?))
-        } else {
-            None
-        },
-        qsearch_nnue_size: if qsearch_leaf_label {
-            Some(get("qsearch_nnue_size")?.parse().context("invalid qsearch_nnue_size")?)
-        } else {
-            None
-        },
-        qsearch_nnue_mtime_ns: if qsearch_leaf_label {
-            Some(get("qsearch_nnue_mtime_ns")?.parse().context("invalid qsearch_nnue_mtime_ns")?)
-        } else {
-            None
-        },
+        // 葉探索 NNUE のメタは leaf-label モードより後に追加したキーのため、leaf_label=true でも
+        // キー欠落（葉探索 NNUE 未追跡の旧 leaf-label marker）を None として許容する。現 fingerprint は
+        // Some(nnue) になるので不一致 → marker 不一致経路で再生成され、hard parse error にはしない。
+        qsearch_nnue_path: map.get("qsearch_nnue_path").map(PathBuf::from),
+        qsearch_nnue_size: map
+            .get("qsearch_nnue_size")
+            .map(|v| v.parse().context("invalid qsearch_nnue_size"))
+            .transpose()?,
+        qsearch_nnue_mtime_ns: map
+            .get("qsearch_nnue_mtime_ns")
+            .map(|v| v.parse().context("invalid qsearch_nnue_mtime_ns"))
+            .transpose()?,
         expand,
         expand_threshold_bits: if expand {
             Some(parse_hex_u32(get("expand_threshold_bits")?)?)
@@ -3521,6 +3518,18 @@ mod marker_tests {
         assert!(!m.fingerprint.qsearch_leaf_label);
         assert_eq!(m.fingerprint.qsearch_max_ply, None);
         assert_eq!(m.fingerprint.qsearch_nnue_path, None);
+    }
+
+    #[test]
+    fn old_leaf_label_marker_without_nnue_keys_parses_as_none() {
+        // 葉探索 NNUE キーを持たない旧 leaf-label marker は parse error にせず None として読む。
+        // 現 fingerprint は Some(nnue) のため不一致になり、marker 不一致経路で再生成される。
+        let m = parse_text(&base_marker("qsearch_leaf_label=true\nqsearch_max_ply=20\n"));
+        assert!(m.fingerprint.qsearch_leaf_label);
+        assert_eq!(m.fingerprint.qsearch_max_ply, Some(20));
+        assert_eq!(m.fingerprint.qsearch_nnue_path, None);
+        assert_eq!(m.fingerprint.qsearch_nnue_size, None);
+        assert_eq!(m.fingerprint.qsearch_nnue_mtime_ns, None);
     }
 
     #[test]
