@@ -1397,18 +1397,6 @@ fn write_hand_piece_hcp(stream: &mut BitStreamWriter, pt: PieceType, color: Colo
     }
 }
 
-/// HCP 形式で駒箱パディングを書き込む
-///
-/// HCP_HAND_TABLE の歩(piece_idx=1)の駒箱エントリを使用する。
-fn write_piecebox_padding_hcp(stream: &mut BitStreamWriter) {
-    for entry in &HCP_HAND_TABLE {
-        if entry.piece_idx == 1 && entry.is_piecebox {
-            stream.write_n_bit(entry.code as u32, entry.bits as usize);
-            return;
-        }
-    }
-}
-
 /// Position から HCP (HuffmanCodedPos / Apery/cshogi) 形式の 32 バイトを生成
 ///
 /// `pack_position` (PSfen/YaneuraOu 形式) との違い:
@@ -1442,15 +1430,19 @@ pub fn pack_position_hcp(pos: &Position) -> [u8; 32] {
         write_board_piece_hcp(&mut stream, piece);
     }
 
-    // 5. 手駒
+    // 5. 手駒（cshogi `to_hcp` 準拠: 先手→後手、歩→飛 の順）
+    //
+    // Apery HuffmanCodedPos は標準 40 枚の局面で盤上＋手駒がちょうど 256bit になるよう
+    // 符号長が設計されている。cshogi は駒箱（盤上にも手駒にも無い駒）を書き出さず、
+    // 残りビットは 0 のままにする。よって駒箱パディングは行わない。
     let piece_order = [
-        PieceType::Rook,
-        PieceType::Bishop,
-        PieceType::Gold,
-        PieceType::Silver,
-        PieceType::Knight,
-        PieceType::Lance,
         PieceType::Pawn,
+        PieceType::Lance,
+        PieceType::Knight,
+        PieceType::Silver,
+        PieceType::Gold,
+        PieceType::Bishop,
+        PieceType::Rook,
     ];
 
     for &color in &[Color::Black, Color::White] {
@@ -1461,12 +1453,6 @@ pub fn pack_position_hcp(pos: &Position) -> [u8; 32] {
                 write_hand_piece_hcp(&mut stream, pt, color);
             }
         }
-    }
-
-    // 6. 駒箱パディング
-    // HCP の駒箱エントリ（歩）は 3 ビット
-    while stream.bit_position() + 3 <= 256 {
-        write_piecebox_padding_hcp(&mut stream);
     }
 
     stream.finish()
@@ -1698,6 +1684,30 @@ mod tests {
             unpacked_sfen.contains("+B"),
             "Promoted bishop should be preserved: {unpacked_sfen}"
         );
+    }
+
+    #[test]
+    fn test_pack_position_hcp_matches_cshogi() {
+        // cshogi `Board.to_hcp` を ground truth に、手駒・成り駒を含む局面で 32byte HCP が
+        // bit 一致することを確認する（手駒の駒種順序と駒箱パディング無しの回帰テスト）。
+        fn to_hex(bytes: &[u8; 32]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+        let cases = [
+            (
+                "ln5nl/2rs1kgs1/3ppg1p1/2p3p1p/p4p3/1PPPP2PP/P2SKSNR1/1B7/LN3G2L w B2Pgp 1",
+                "559c89120cd756c40f5ec58157593c1481ad88057f4ae082f0714c2861003ebc",
+            ),
+            (
+                "1+L3+R1+Np/2g1+Ln2s/5s3/l2p2pP1/1gp4N1/P1PPb1G2/b+s1Sp2G1/L8/K3k4 w N6Pr3p 1",
+                "a1acda002771784079f07b6d80115f052516bc5460c46b0793f81a00001824ff",
+            ),
+        ];
+        for (sfen, expected) in cases {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).expect("set_sfen should succeed");
+            assert_eq!(to_hex(&pack_position_hcp(&pos)), expected, "HCP mismatch for {sfen}");
+        }
     }
 
     #[test]

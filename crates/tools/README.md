@@ -24,6 +24,7 @@
 | `preprocess_psv` | PSV ファイルの前処理（qsearch leaf置換等） |
 | `validate_psv` | PSV ファイルの不正局面検出・除去 |
 | `psv_to_jsonl` | PSV 形式 → JSONL 変換（デバッグ・確認用） |
+| `psv_to_hcpe3` | PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming） |
 | `fix_scores` | スコアの補正 |
 | `psv_dedup` / `psv_dedup_bloom` / `psv_dedup_partition` | PSV 局面の重複除去（3 方式。使い分けは [pack_tools.md](docs/pack_tools.md#重複除去ツールの選び方)） |
 
@@ -77,6 +78,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [label_bench_positions](docs/label_bench_positions.md) - ベンチ局面の深い探索ラベリング（ground truth）
 - [label_bench_dl](docs/label_bench_dl.md) - label_bench jsonl への DL水匠 (dlshogi ONNX) 評価値追記
 - [rescore_psv](docs/rescore_psv.md) - PSV 評価値の ONNX 再スコアリング（qsearch-leaf ラベル / dual-output 対応）
+- [psv_to_hcpe3](docs/psv_to_hcpe3.md) - PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming）
 
 各ツールのオプション一覧は `--help` で確認できます。
 
