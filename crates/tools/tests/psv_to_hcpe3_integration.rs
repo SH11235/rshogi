@@ -82,6 +82,32 @@ fn output_path_with_tmp_extension_is_not_truncated() {
 }
 
 #[test]
+fn limit_restricts_output_record_count() {
+    // --limit N は先頭 N レコードだけ変換する（出力 = N × 46 バイト）。
+    let input = fixture("psv_to_hcpe3_sample.psv");
+    let out = std::env::temp_dir().join("psv_to_hcpe3_it_limit.bin");
+    let status = Command::new(BIN)
+        .args([
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            out.to_str().unwrap(),
+            "--format",
+            "hcpe3",
+            "--limit",
+            "10",
+        ])
+        .status()
+        .expect("failed to run psv_to_hcpe3");
+    assert!(status.success());
+    assert_eq!(
+        std::fs::metadata(&out).unwrap().len(),
+        10 * 46,
+        "--limit 10 must emit 10 records"
+    );
+}
+
+#[test]
 fn output_is_thread_count_independent() {
     // 出力はスレッド数・チャンク境界に依らず bit 一致でなければならない。
     let input = fixture("psv_to_hcpe3_sample.psv");

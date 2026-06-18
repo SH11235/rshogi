@@ -161,15 +161,20 @@ fn build_hcpe(psv: &PackedSfenValue, hcp: &[u8; 32], move16: u16, result: u8) ->
 fn convert(record: &[u8; PackedSfenValue::SIZE], format: Format) -> ConvResult {
     let psv = match PackedSfenValue::from_bytes(record) {
         Some(v) => v,
-        None => return ConvResult::Error("failed to parse PackedSfenValue".to_string()),
+        None => return ConvResult::Error("PackedSfenValue のパースに失敗".to_string()),
     };
+    // game_result は手番側視点の -1/0/1 のみが正当。範囲外は破損レコードとして
+    // skip+count に乗せる（不正値をサイレントに DRAW へ写さない）。
+    if !matches!(psv.game_result, -1..=1) {
+        return ConvResult::Error(format!("不正な game_result: {}", psv.game_result));
+    }
     let sfen = match unpack_sfen(&psv.sfen) {
         Ok(s) => s,
-        Err(e) => return ConvResult::Error(format!("failed to unpack SFEN: {e}")),
+        Err(e) => return ConvResult::Error(format!("SFEN の展開に失敗: {e}")),
     };
     let mut pos = Position::new();
     if let Err(e) = pos.set_sfen(&sfen) {
-        return ConvResult::Error(format!("failed to set SFEN: {e}"));
+        return ConvResult::Error(format!("SFEN の適用に失敗: {e}"));
     }
 
     let hcp = pack_position_hcp(&pos);
@@ -199,7 +204,7 @@ fn write_results(
             ConvResult::Error(e) => {
                 errors += 1;
                 if verbose {
-                    eprintln!("Error converting record: {e}");
+                    eprintln!("レコード変換エラー: {e}");
                 }
             }
         }
@@ -212,26 +217,24 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if !cli.input.exists() {
-        anyhow::bail!("Input file not found: {}", cli.input.display());
+        anyhow::bail!("入力ファイルが見つかりません: {}", cli.input.display());
     }
     if cli.chunk == 0 {
-        anyhow::bail!("--chunk must be greater than 0");
+        anyhow::bail!("--chunk は 1 以上を指定してください");
     }
 
     // 入出力が同一パスならデータ消失を防ぐためエラーにする
     let in_canonical = cli
         .input
         .canonicalize()
-        .with_context(|| format!("Failed to canonicalize input path: {}", cli.input.display()))?;
+        .with_context(|| format!("入力パスの正規化に失敗: {}", cli.input.display()))?;
     if cli.output.exists() {
-        let out_canonical = cli.output.canonicalize().with_context(|| {
-            format!("Failed to canonicalize output path: {}", cli.output.display())
-        })?;
+        let out_canonical = cli
+            .output
+            .canonicalize()
+            .with_context(|| format!("出力パスの正規化に失敗: {}", cli.output.display()))?;
         if in_canonical == out_canonical {
-            anyhow::bail!(
-                "Input and output paths resolve to the same file: {}",
-                in_canonical.display()
-            );
+            anyhow::bail!("入力と出力が同一ファイルです: {}", in_canonical.display());
         }
     }
 
@@ -243,10 +246,10 @@ fn main() -> Result<()> {
     }
 
     ctrlc::set_handler(|| {
-        eprintln!("\nInterrupted, finishing current chunk...");
+        eprintln!("\n中断シグナルを受信しました。処理を終了します...");
         INTERRUPTED.store(true, Ordering::SeqCst);
     })
-    .context("Failed to set Ctrl-C handler")?;
+    .context("Ctrl-C ハンドラの設定に失敗")?;
 
     let file_size = std::fs::metadata(&cli.input)?.len();
     let estimated_records = file_size / PackedSfenValue::SIZE as u64;
@@ -256,7 +259,7 @@ fn main() -> Result<()> {
         estimated_records
     };
     eprintln!(
-        "Input: {} ({} bytes, ~{} records), format={:?}",
+        "入力: {} ({} バイト, 約 {} レコード), format={:?}",
         cli.input.display(),
         file_size,
         estimated_records,
@@ -270,8 +273,8 @@ fn main() -> Result<()> {
             .expect("valid template"),
     );
 
-    let in_file = File::open(&cli.input)
-        .with_context(|| format!("Failed to open {}", cli.input.display()))?;
+    let in_file =
+        File::open(&cli.input).with_context(|| format!("{} を開けません", cli.input.display()))?;
     let mut reader = BufReader::with_capacity(IO_BUF_SIZE, in_file);
 
     // 一時ファイルに書き、正常完了時のみ最終パスへ rename する（中断時の破損出力を防ぐ）。
@@ -281,8 +284,18 @@ fn main() -> Result<()> {
         s.push(".partial");
         PathBuf::from(s)
     };
+    // 入力が偶然 `<output>.partial` と同一ファイルだと、書き込み開始で入力を truncate して
+    // しまうため拒否する（`tmp_output` が存在＝入力と同じ実体ならここで検出できる）。
+    if tmp_output.exists() {
+        let tmp_canonical = tmp_output
+            .canonicalize()
+            .with_context(|| format!("一時パスの正規化に失敗: {}", tmp_output.display()))?;
+        if tmp_canonical == in_canonical {
+            anyhow::bail!("一時ファイル {} が入力と同一です", tmp_output.display());
+        }
+    }
     let out_file = File::create(&tmp_output)
-        .with_context(|| format!("Failed to create {}", tmp_output.display()))?;
+        .with_context(|| format!("{} を作成できません", tmp_output.display()))?;
     let mut writer = BufWriter::with_capacity(IO_BUF_SIZE, out_file);
 
     let format = cli.format;
@@ -332,10 +345,10 @@ fn main() -> Result<()> {
     drop(writer);
 
     if interrupted {
-        progress.abandon_with_message("Interrupted");
+        progress.abandon_with_message("中断");
         // 中断時は不完全な一時ファイルを削除する
         let _ = std::fs::remove_file(&tmp_output);
-        eprintln!("Interrupted before completion; output not written.");
+        eprintln!("完了前に中断されました。出力は書き込まれていません。");
         return Ok(());
     }
 
@@ -345,19 +358,25 @@ fn main() -> Result<()> {
     if reached_eof && trailing_bytes != 0 {
         total_errors += 1;
         if verbose {
-            eprintln!("Error: {trailing_bytes} trailing bytes are not a full PSV record");
+            eprintln!("エラー: 末尾 {trailing_bytes} バイトは完全な PSV レコードではありません");
         }
     }
 
     std::fs::rename(&tmp_output, &cli.output).with_context(|| {
-        format!("Failed to rename {} -> {}", tmp_output.display(), cli.output.display())
+        format!("{} -> {} のリネームに失敗", tmp_output.display(), cli.output.display())
     })?;
+    // エラーレコードがあると推定 total と実 pos がずれるため、実処理件数で長さを確定して完了させる。
     progress.set_length(total_written + total_errors);
-    progress.finish();
+    progress.finish_with_message("完了");
 
-    eprintln!("Written: {} records ({:?}) -> {}", total_written, format, cli.output.display());
+    eprintln!(
+        "書き出し: {} レコード ({:?}) -> {}",
+        total_written,
+        format,
+        cli.output.display()
+    );
     if total_errors > 0 {
-        eprintln!("Note: {total_errors} records failed to convert and were skipped");
+        eprintln!("注意: {total_errors} レコードを変換できずスキップしました");
     }
 
     Ok(())
