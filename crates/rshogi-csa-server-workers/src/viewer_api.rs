@@ -737,13 +737,16 @@ fn set_cache_control(resp: &mut Response, value: &str) -> Result<()> {
 /// `caches.default` から URL key で hit を取り出す。miss は `None`。
 ///
 /// 取り出した Response は origin-neutral なので、呼び出し側で `with_cors` を
-/// 被せて返却する契約。
+/// 被せて返却する契約。`Cache::get` が返す Response はヘッダ guard が immutable で
+/// `with_cors` の `headers.set` が必ず失敗する (= hit のたび 500) ため、ここで
+/// mutable な Response に作り直してから返す。
 ///
-/// `cache.get` が `Err` を返した場合 (Cache API 自体の障害) は `None` を返して
-/// miss と同じくフォールバック (R2 から再 fetch) させる。ただし運用上の観測性が
-/// 必要なため、`event` (`<root>_cache_get`) と `client_kind` 付きの logfmt を
-/// `log_viewer_api_failed` で残す。サイレント抑制すると staging /
-/// 本番で Cache API が一切機能していない事象に気付けない。
+/// `cache.get` が `Err` を返した場合 (Cache API 自体の障害)、または mutable 化の
+/// body 読み出しに失敗した場合は `None` を返して miss と同じくフォールバック
+/// (R2 から再 fetch) させる。ただし運用上の観測性が必要なため、`event`
+/// (`<root>_cache_get`) と `client_kind` 付きの logfmt を `log_viewer_api_failed`
+/// で残す。サイレント抑制すると staging / 本番で Cache API が一切機能していない
+/// 事象に気付けない。
 async fn cache_get_origin_neutral(
     cache_key: &str,
     event: &str,
@@ -751,13 +754,30 @@ async fn cache_get_origin_neutral(
 ) -> Option<Response> {
     let cache = worker::Cache::default();
     match cache.get(cache_key.to_string(), true).await {
-        Ok(Some(resp)) => Some(resp),
+        Ok(Some(resp)) => match into_mutable_response(resp).await {
+            Ok(resp) => Some(resp),
+            Err(e) => {
+                log_viewer_api_failed(event, client_kind, &e.to_string());
+                None
+            }
+        },
         Ok(None) => None,
         Err(e) => {
             log_viewer_api_failed(event, client_kind, &e.to_string());
             None
         }
     }
+}
+
+/// `Cache::get` が返す Response はヘッダ guard が immutable で、後段 `with_cors` の
+/// `headers.set` が `Err` になる。body / status / headers を複製した mutable な
+/// Response に作り直す。`Headers::clone` は `new Headers(...)` で guard=none の
+/// 複製を作るため、複製後のヘッダは書き換え可能になる。
+async fn into_mutable_response(mut resp: Response) -> Result<Response> {
+    let status = resp.status_code();
+    let headers = resp.headers().clone();
+    let bytes = resp.bytes().await?;
+    Ok(Response::from_bytes(bytes)?.with_status(status).with_headers(headers))
 }
 
 /// origin-neutral な Response を `caches.default` に put する。
