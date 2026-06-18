@@ -2506,7 +2506,15 @@ impl GameRoom {
             ReplaySummary::Restored { core } => {
                 // `core` は `Box<CoreRoom>` で返るためここで unbox する
                 // (`ReplaySummary` の variant 間サイズ差対策、persistence.rs 参照)。
-                *self.core.borrow_mut() = Some(*core);
+                let mut core = *core;
+                // replay 後の turn_started_at_ms は最後の手の歴史的時刻のまま。
+                // hibernation evict を跨いだ復元で最初の手が即 TimeUp になるのを
+                // 防ぐため、計測起点を現在時刻へ張り直す。
+                // NOTE: 復元では turn alarm を再予約していないため、最後の手の時点で
+                // set_alarm した絶対 deadline が evict 中に発火し force_time_up する
+                // 経路はこれだけでは塞げない (別経路として要対処)。
+                core.reset_turn_started_at(self.now_ms());
+                *self.core.borrow_mut() = Some(core);
                 *self.config.borrow_mut() = Some(cfg);
             }
             ReplaySummary::InvalidSfen { reason } => {

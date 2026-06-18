@@ -316,6 +316,18 @@ impl GameRoom {
         self.finish(result)
     }
 
+    /// cold-start 復元直後に、現在手番の経過計測起点を現在時刻へ張り直す。
+    ///
+    /// replay は局面と時計消費を再現するが `turn_started_at_ms` には最後の手の
+    /// 歴史的時刻が残る。張り直さないと復元後の最初の手で `apply_move` の
+    /// `now_ms - turn_started_at_ms` が evict 滞留ぶん過大になり即 `TimeUp` する。
+    /// `Playing` 以外は起点を持たない（`AgreeWaiting` 復元では `None` のまま）ため no-op。
+    pub fn reset_turn_started_at(&mut self, now_ms: u64) {
+        if matches!(self.status, GameStatus::Playing) {
+            self.turn_started_at_ms = Some(now_ms);
+        }
+    }
+
     /// 切断を検出したときに呼ぶ。再接続猶予 0 秒で即時 `#ABNORMAL` 確定。
     ///
     /// 勝者確定は「対局中の切断」に限り、それ以前
@@ -721,6 +733,20 @@ mod tests {
         assert_eq!(r2.broadcasts[0].target, BroadcastTarget::Players);
         assert_eq!(r2.broadcasts[0].line.as_str(), "START:20140101120000");
         assert!(matches!(room.status(), GameStatus::Playing));
+    }
+
+    #[test]
+    fn reset_turn_started_at_sets_now_when_playing_and_noop_before_start() {
+        // START 前 (AgreeWaiting) は起点を作らない。
+        let mut room = make_room();
+        room.reset_turn_started_at(12_345);
+        assert!(matches!(room.status(), GameStatus::AgreeWaiting));
+        assert_eq!(room.turn_started_at_ms, None);
+
+        // START 後 (Playing) は計測起点を渡した now へ張り直す。
+        agree_both(&mut room);
+        room.reset_turn_started_at(67_890);
+        assert_eq!(room.turn_started_at_ms, Some(67_890));
     }
 
     #[test]
