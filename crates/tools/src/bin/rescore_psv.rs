@@ -47,16 +47,18 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use glob::glob;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use rshogi_core::nnue::init_nnue;
 use rshogi_core::position::Position;
@@ -593,6 +595,332 @@ fn expand_input_patterns(patterns: &[String]) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+// ============================================================
+// 進捗表示（% / 残り時間 / 完了予定時刻）
+// ============================================================
+
+/// 件数を k/M 短縮表記にする（523456 -> "523.5k", 1000000 -> "1.00M"）。
+fn compact_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.2}M", n as f64 / 1.0e6)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1.0e3)
+    } else {
+        n.to_string()
+    }
+}
+
+/// 秒速を短縮表記にする（8338.0 -> "8.3k"）。
+fn compact_rate(per_sec: f64) -> String {
+    if per_sec >= 1_000_000.0 {
+        format!("{:.2}M", per_sec / 1.0e6)
+    } else if per_sec >= 1_000.0 {
+        format!("{:.1}k", per_sec / 1.0e3)
+    } else {
+        format!("{per_sec:.0}")
+    }
+}
+
+/// Duration を `H:MM:SS`（1h 以上）または `MM:SS` に整形する。
+fn fmt_hms(d: Duration) -> String {
+    let s = d.as_secs();
+    let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{sec:02}")
+    } else {
+        format!("{m:02}:{sec:02}")
+    }
+}
+
+/// `now + eta` をローカル時刻 `HH:MM` にする。eta が未確定（速度 0）のときは `--:--`。
+fn finish_clock(eta: Duration, per_sec: f64) -> String {
+    if per_sec <= 0.0 || eta.is_zero() {
+        return "--:--".to_string();
+    }
+    match chrono::Duration::from_std(eta) {
+        Ok(d) => (chrono::Local::now() + d).format("%H:%M").to_string(),
+        Err(_) => "--:--".to_string(),
+    }
+}
+
+/// テンプレートに共通のカスタムキー（短縮件数・完了予定時刻）を足す。
+fn with_progress_keys(style: ProgressStyle) -> ProgressStyle {
+    style
+        .with_key("cpos", |s: &ProgressState, w: &mut dyn std::fmt::Write| {
+            let _ = write!(w, "{}", compact_count(s.pos()));
+        })
+        .with_key("clen", |s: &ProgressState, w: &mut dyn std::fmt::Write| {
+            let _ = write!(w, "{}", compact_count(s.len().unwrap_or(0)));
+        })
+        .with_key("finish_at", |s: &ProgressState, w: &mut dyn std::fmt::Write| {
+            let _ = write!(w, "{}", finish_clock(s.eta(), s.per_sec()));
+        })
+}
+
+#[cfg(test)]
+mod progress_format_tests {
+    use super::{Duration, compact_count, compact_rate, fmt_hms};
+
+    #[test]
+    fn compact_count_thresholds() {
+        assert_eq!(compact_count(0), "0");
+        assert_eq!(compact_count(999), "999");
+        assert_eq!(compact_count(1_000), "1.0k");
+        assert_eq!(compact_count(523_456), "523.5k");
+        assert_eq!(compact_count(1_000_000), "1.00M");
+        assert_eq!(compact_count(3_840_000), "3.84M");
+    }
+
+    #[test]
+    fn compact_rate_thresholds() {
+        assert_eq!(compact_rate(500.0), "500");
+        assert_eq!(compact_rate(8338.0), "8.3k");
+        assert_eq!(compact_rate(1_500_000.0), "1.50M");
+    }
+
+    #[test]
+    fn fmt_hms_minutes_and_hours() {
+        assert_eq!(fmt_hms(Duration::from_secs(0)), "00:00");
+        assert_eq!(fmt_hms(Duration::from_secs(90)), "01:30");
+        assert_eq!(fmt_hms(Duration::from_secs(600)), "10:00");
+        assert_eq!(fmt_hms(Duration::from_secs(3661)), "1:01:01");
+    }
+}
+
+/// 非TTY 時に定期ログ行を間引くための状態。
+struct LogThrottle {
+    last: Option<Instant>,
+    last_pct: f64,
+}
+
+const LOG_INTERVAL: Duration = Duration::from_secs(15);
+const LOG_PCT_STEP: f64 = 5.0;
+
+/// rescore 全体の進捗管理。glob の全ファイルを分母とした overall バーと、
+/// ファイル単位バーを束ねる。TTY ではバー描画、非TTY では定期ログ行に切替える。
+struct RescoreProgress {
+    multi: MultiProgress,
+    /// overall バーは複数ファイル時のみ（単一ファイルは per-file バーがそのまま全体）。
+    overall: Option<ProgressBar>,
+    total_files: usize,
+    is_tty: bool,
+    log: Arc<Mutex<LogThrottle>>,
+}
+
+impl RescoreProgress {
+    fn new(overall_total: u64, total_files: usize) -> Self {
+        let is_tty = std::io::stderr().is_terminal();
+        let multi = if is_tty {
+            MultiProgress::new()
+        } else {
+            // 非TTY ではバー描画をやめ、進捗は定期ログ行で出す（CR スパム回避）。
+            MultiProgress::with_draw_target(ProgressDrawTarget::hidden())
+        };
+        let overall = if total_files > 1 {
+            let pb = multi.add(ProgressBar::new(overall_total));
+            pb.set_style(
+                with_progress_keys(ProgressStyle::default_bar().template(
+                    "全体 {percent:>3}% {cpos}/{clen} ({prefix}) {per_sec} 残り {eta_precise} 完了 {finish_at}",
+                ).expect("valid template")),
+            );
+            if is_tty {
+                pb.enable_steady_tick(Duration::from_millis(500));
+            }
+            Some(pb)
+        } else {
+            None
+        };
+        Self {
+            multi,
+            overall,
+            total_files,
+            is_tty,
+            log: Arc::new(Mutex::new(LogThrottle {
+                last: None,
+                last_pct: 0.0,
+            })),
+        }
+    }
+
+    /// 完了済み / skip されたファイル 1 個分を overall に反映する（per-file バーは作らない）。
+    fn skip_file(&self, n: u64) {
+        if let Some(o) = &self.overall {
+            o.inc(n);
+        }
+    }
+
+    /// 処理するファイル 1 個分の per-file 進捗ハンドルを作る。`shard_idx` は 1 始まり。
+    fn start_file(&self, label: &str, shard_idx: usize, len: u64) -> FileProgress {
+        let file = self.multi.add(ProgressBar::new(len));
+        if self.total_files > 1 {
+            file.set_style(
+                with_progress_keys(
+                    ProgressStyle::default_bar()
+                        .template("└ {prefix} {percent:>3}% {bar:30.cyan/blue} {cpos}/{clen}")
+                        .expect("valid template"),
+                )
+                .progress_chars("██░"),
+            );
+            file.set_prefix(label.to_string());
+            if let Some(o) = &self.overall {
+                o.set_prefix(format!("shard {shard_idx}/{}", self.total_files));
+            }
+        } else {
+            file.set_style(
+                with_progress_keys(
+                    ProgressStyle::default_bar()
+                        .template("[{elapsed_precise}] {bar:30.cyan/blue} {percent:>3}% {cpos}/{clen} {per_sec} 残り {eta_precise} 完了 {finish_at}")
+                        .expect("valid template"),
+                )
+                .progress_chars("██░"),
+            );
+        }
+        if self.is_tty {
+            file.enable_steady_tick(Duration::from_millis(500));
+        }
+        FileProgress {
+            file,
+            overall: self.overall.clone(),
+            is_tty: self.is_tty,
+            log: Arc::clone(&self.log),
+            label: label.to_string(),
+            shard_idx,
+            total_files: self.total_files,
+        }
+    }
+
+    /// 全ファイル完了。非TTY では overall の最終行を必ず 1 行出す。
+    fn finish(&self) {
+        if let Some(o) = &self.overall {
+            if !self.is_tty {
+                eprintln!(
+                    "[rescore] 全体 完了 {}/{} ({} files) {} pos/s 所要 {}",
+                    compact_count(o.position()),
+                    compact_count(o.length().unwrap_or(0)),
+                    self.total_files,
+                    compact_rate(o.per_sec()),
+                    fmt_hms(o.elapsed()),
+                );
+            }
+            o.finish_and_clear();
+        }
+    }
+}
+
+/// 1 ファイル分の進捗ハンドル。`inc` で per-file と overall を同時に進める。
+/// 複数スレッドから呼ぶ search/engine 用に `Clone`（内部の ProgressBar / Arc は共有）。
+#[derive(Clone)]
+struct FileProgress {
+    file: ProgressBar,
+    overall: Option<ProgressBar>,
+    is_tty: bool,
+    log: Arc<Mutex<LogThrottle>>,
+    label: String,
+    shard_idx: usize,
+    total_files: usize,
+}
+
+impl FileProgress {
+    /// resume で既処理だった分を起点として進める（per-file/overall とも前進）。
+    /// 追記再開する ONNX 直推論モード専用。NNUE/USI モードは出力を File::create で
+    /// truncate して全件を再処理するため起点補正は不要（全件 inc で 100% に到達する）。
+    #[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+    fn advance_start(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        self.file.inc(n);
+        if let Some(o) = &self.overall {
+            o.inc(n);
+        }
+    }
+
+    fn inc(&self, n: u64) {
+        self.file.inc(n);
+        if let Some(o) = &self.overall {
+            o.inc(n);
+        }
+        if !self.is_tty {
+            self.maybe_log(false);
+        }
+    }
+
+    fn set_message(&self, msg: &'static str) {
+        self.file.set_message(msg);
+    }
+
+    fn finish_with_message(&self, msg: &'static str) {
+        if !self.is_tty {
+            self.maybe_log(true);
+        }
+        if self.total_files > 1 {
+            // 複数ファイル時は overall を残して per-file バーだけ消す。
+            self.file.finish_and_clear();
+        } else {
+            self.file.finish_with_message(msg);
+        }
+    }
+
+    fn abandon_with_message(&self, msg: &'static str) {
+        self.file.abandon_with_message(msg);
+    }
+
+    /// 非TTY 用の 1 行ログ。`force` 時は throttle を無視して必ず出す。
+    fn maybe_log(&self, force: bool) {
+        // overall（複数ファイル）か per-file（単一）を「全体進捗」として使う。
+        let primary = self.overall.as_ref().unwrap_or(&self.file);
+        let pos = primary.position();
+        let len = primary.length().unwrap_or(0);
+        let pct = if len > 0 {
+            pos as f64 / len as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        {
+            let mut th = self.log.lock().expect("log throttle poisoned");
+            if !force {
+                let due_time = th.last.map(|t| t.elapsed() >= LOG_INTERVAL).unwrap_or(true);
+                let due_pct = pct - th.last_pct >= LOG_PCT_STEP;
+                if !due_time && !due_pct {
+                    return;
+                }
+            }
+            th.last = Some(Instant::now());
+            th.last_pct = pct;
+        }
+
+        let rate = compact_rate(primary.per_sec());
+        let elapsed = fmt_hms(primary.elapsed());
+        let eta = fmt_hms(primary.eta());
+        let clock = finish_clock(primary.eta(), primary.per_sec());
+        if self.overall.is_some() {
+            let fpos = self.file.position();
+            let flen = self.file.length().unwrap_or(0);
+            let fpct = if flen > 0 {
+                fpos as f64 / flen as f64 * 100.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "[rescore] 全体 {pct:.1}% {}/{} shard {}/{} ({} {fpct:.1}%) {rate} pos/s elapsed {elapsed} ETA {eta} (完了 {clock})",
+                compact_count(pos),
+                compact_count(len),
+                self.shard_idx,
+                self.total_files,
+                self.label,
+            );
+        } else {
+            eprintln!(
+                "[rescore] {} {pct:.1}% {}/{} {rate} pos/s elapsed {elapsed} ETA {eta} (完了 {clock})",
+                self.label,
+                compact_count(pos),
+                compact_count(len),
+            );
+        }
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
@@ -884,6 +1212,20 @@ fn main() -> Result<()> {
 
     // 各ファイルを処理
     let total_files = input_files.len();
+    // 全ファイル件数（--limit を各ファイルに適用）を合算し overall 進捗の分母にする。
+    // metadata の stat だけで全件 load しない。skip / resume は処理中に overall へ反映する。
+    let overall_total: u64 = input_files
+        .iter()
+        .map(|p| {
+            let rc = fs::metadata(p).map(|m| m.len()).unwrap_or(0) / PackedSfenValue::SIZE as u64;
+            if cli.limit > 0 && cli.limit < rc {
+                cli.limit
+            } else {
+                rc
+            }
+        })
+        .sum();
+    let rprog = RescoreProgress::new(overall_total, total_files);
     for (file_idx, input_path) in input_files.iter().enumerate() {
         if INTERRUPTED.load(Ordering::SeqCst) {
             eprintln!("Processing interrupted");
@@ -939,6 +1281,7 @@ fn main() -> Result<()> {
                         total_files,
                         output_path.display()
                     );
+                    rprog.skip_file(process_count);
                     continue;
                 }
                 OnnxMarkerDecision::TruncateAndProcess => {
@@ -976,6 +1319,7 @@ fn main() -> Result<()> {
                         out_records,
                         output_path.display()
                     );
+                    rprog.skip_file(process_count);
                     continue;
                 }
                 if out_records > 0 {
@@ -1021,6 +1365,7 @@ fn main() -> Result<()> {
         }
 
         // 処理実行
+        let fprog = rprog.start_file(&file_name.to_string_lossy(), file_idx + 1, process_count);
         #[cfg(feature = "aobazero-onnx")]
         if use_onnx {
             process_file_with_onnx(
@@ -1029,6 +1374,7 @@ fn main() -> Result<()> {
                 &output_path,
                 expand_output_path.as_deref(),
                 process_count,
+                &fprog,
             )?;
         }
         #[cfg(feature = "dlshogi-onnx")]
@@ -1040,6 +1386,7 @@ fn main() -> Result<()> {
                 expand_output_path.as_deref(),
                 replacement_output_path.as_deref(),
                 process_count,
+                &fprog,
             )?;
         }
         if !use_onnx && !use_dlshogi_onnx {
@@ -1050,11 +1397,12 @@ fn main() -> Result<()> {
                     input_path,
                     &output_path,
                     process_count,
+                    &fprog,
                 )?;
             } else if cli.search_depth.is_some() {
-                process_file_with_search(&cli, input_path, &output_path, process_count)?;
+                process_file_with_search(&cli, input_path, &output_path, process_count, &fprog)?;
             } else {
-                process_file(&cli, input_path, &output_path, process_count)?;
+                process_file(&cli, input_path, &output_path, process_count, &fprog)?;
             }
         }
 
@@ -1079,6 +1427,7 @@ fn main() -> Result<()> {
         }
         eprintln!();
     }
+    rprog.finish();
 
     // エンジン終了
     for mut eng in engines {
@@ -1100,15 +1449,8 @@ fn process_file(
     input_path: &PathBuf,
     output_path: &PathBuf,
     process_count: u64,
+    progress: &FileProgress,
 ) -> Result<()> {
-    // 進捗バー設定
-    let progress = ProgressBar::new(process_count);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
-            .expect("valid template"),
-    );
-
     // チャンクストリーミング: 読み込み → rayon 並列処理 → 書き出しをチャンク単位で繰り返す
     // 全レコードをメモリに溜めず、ピークメモリ = チャンクサイズ分のみ
     const CHUNK_SIZE: usize = 1_000_000;
@@ -1372,16 +1714,9 @@ fn process_file_with_search(
     input_path: &PathBuf,
     output_path: &PathBuf,
     process_count: u64,
+    progress: &FileProgress,
 ) -> Result<()> {
     let search_depth = cli.search_depth.expect("search_depth should be Some");
-
-    // 進捗バー設定
-    let progress = ProgressBar::new(process_count);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
-            .expect("valid template"),
-    );
 
     // 入力ファイルを読み込み
     let in_file = File::open(input_path)
@@ -1462,10 +1797,7 @@ fn process_file_with_search(
     // 結果収集用チャネル
     let (tx, rx) = mpsc::channel::<SearchProcessResult>();
 
-    // 進捗カウンタ（スレッド間共有）
-    let progress_arc = std::sync::Arc::new(progress);
-
-    progress_arc.set_message("Processing...");
+    progress.set_message("Processing...");
 
     // ワーカースレッドを起動
     let handles: Vec<_> = chunks
@@ -1473,7 +1805,7 @@ fn process_file_with_search(
         .enumerate()
         .map(|(chunk_idx, chunk)| {
             let tx = tx.clone();
-            let progress = std::sync::Arc::clone(&progress_arc);
+            let progress = progress.clone();
 
             thread::Builder::new()
                 .stack_size(SEARCH_STACK_SIZE)
@@ -1534,7 +1866,7 @@ fn process_file_with_search(
         let _ = handle.join();
     }
 
-    progress_arc.finish_with_message("Done");
+    progress.finish_with_message("Done");
 
     // ソート済み結果から直接書き出し（中間 Vec を排除）
     eprintln!("Writing output...");
@@ -1844,15 +2176,9 @@ fn process_file_with_engine(
     input_path: &PathBuf,
     output_path: &PathBuf,
     process_count: u64,
+    progress: &FileProgress,
 ) -> Result<()> {
     let num_engines = engines.len();
-
-    let progress = ProgressBar::new(process_count);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
-            .expect("valid template"),
-    );
 
     // 入力ファイルを読み込み
     let in_file = File::open(input_path)
@@ -1930,16 +2256,15 @@ fn process_file_with_engine(
     let clipped_count = AtomicU64::new(0);
 
     let (tx, rx) = mpsc::channel::<EngineProcessResult>();
-    let progress_arc = std::sync::Arc::new(progress);
 
-    progress_arc.set_message("Processing...");
+    progress.set_message("Processing...");
 
     std::thread::scope(|s| {
         let mut handles = Vec::new();
 
         for (engine, chunk) in engines.iter_mut().zip(chunks) {
             let tx = tx.clone();
-            let progress = std::sync::Arc::clone(&progress_arc);
+            let progress = progress.clone();
             let error_count = &error_count;
             let _clipped_count = &clipped_count;
 
@@ -2020,7 +2345,7 @@ fn process_file_with_engine(
             let _ = h.join();
         }
 
-        progress_arc.finish_with_message("Done");
+        progress.finish_with_message("Done");
 
         let final_errors = error_count.load(Ordering::SeqCst);
         let final_clipped = clipped_count.load(Ordering::SeqCst);
@@ -2630,6 +2955,7 @@ fn canonicalize_predicted_path(path: &std::path::Path) -> Result<PathBuf> {
 fn process_file_with_onnx_pipeline<F>(
     config: &OnnxPipelineConfig<'_>,
     build_features: F,
+    progress: &FileProgress,
 ) -> Result<()>
 where
     F: Fn(&Position, &mut [f32], &mut [f32], &PackedSfenValue) + Send + Sync,
@@ -2666,7 +2992,6 @@ where
     use ort::session::Session;
     use ort::value::TensorRef;
     use rshogi_core::movegen::{MoveList, generate_legal};
-    use std::time::Instant;
     use tools::dlshogi_features::{MAX_MOVE_LABEL_NUM, make_move_label};
 
     /// 合法手のロジットを softmax 正規化して `out` に書き込む
@@ -2832,13 +3157,6 @@ where
 
     eprintln!("{model_name} ONNX model loaded. Batch size: {batch_size}");
 
-    // 進捗バー
-    let progress = ProgressBar::new(process_count);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
-            .expect("valid template"),
-    );
     progress.set_message("Processing...");
 
     // ストリーミング読み込み + バッチ処理
@@ -2899,13 +3217,17 @@ where
     if resume_count > 0 {
         let skip = resume_count.min(remaining);
         let mut skip_buf = [0u8; PackedSfenValue::SIZE];
+        let mut skipped = 0u64;
         for _ in 0..skip {
             if reader.read_exact(&mut skip_buf).is_err() {
                 break;
             }
             remaining -= 1;
+            skipped += 1;
         }
-        eprintln!("Resuming: skipped {skip} already-processed records");
+        // 既処理分を進捗の起点として反映（per-file/overall とも前進）。
+        progress.advance_start(skipped);
+        eprintln!("Resuming: skipped {skipped} already-processed records");
     }
 
     let mut skipped_count: u64 = 0;
@@ -3416,7 +3738,12 @@ where
     let rescore_written = total_processed.saturating_sub(skipped_count);
     let total = total_processed + error_count;
     if error_count > 0 {
-        eprintln!("Note: {error_count} positions had errors");
+        // 破損/パース不能でスキップしたレコードは推論バッチに入らず進捗に計上されないため、
+        // それらがあると進捗表示が 100% に届かないことがある（rescore 出力は有効分のみで正常）。
+        eprintln!(
+            "Note: {error_count} 件のレコードでエラー（破損 / パース不能）。スキップ分は \
+             進捗に計上されないため、進捗表示が 100% に届かないことがある（rescore 出力は正常）。"
+        );
     }
     if skipped_count > 0 && total > 0 {
         eprintln!(
@@ -3484,6 +3811,7 @@ fn process_file_with_onnx(
     output_path: &std::path::Path,
     expand_output_path: Option<&std::path::Path>,
     process_count: u64,
+    progress: &FileProgress,
 ) -> Result<()> {
     use tools::aobazero_features::{
         FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
@@ -3523,9 +3851,13 @@ fn process_file_with_onnx(
         qsearch_nnue_path: None,
         replacement_output: None,
     };
-    process_file_with_onnx_pipeline(&config, move |pos, f1, f2, psv| {
-        make_input_features(pos, f1, f2, psv.game_ply as i32, draw_ply);
-    })
+    process_file_with_onnx_pipeline(
+        &config,
+        move |pos, f1, f2, psv| {
+            make_input_features(pos, f1, f2, psv.game_ply as i32, draw_ply);
+        },
+        progress,
+    )
 }
 
 // ============================================================
@@ -3540,6 +3872,7 @@ fn process_file_with_dlshogi_onnx(
     expand_output_path: Option<&std::path::Path>,
     replacement_output_path: Option<&std::path::Path>,
     process_count: u64,
+    progress: &FileProgress,
 ) -> Result<()> {
     use tools::dlshogi_features::{
         FEATURES1_SIZE, FEATURES2_SIZE, INPUT1_CHANNELS, INPUT2_CHANNELS, make_input_features,
@@ -3579,9 +3912,13 @@ fn process_file_with_dlshogi_onnx(
         qsearch_nnue_path: cli.nnue.as_deref(),
         replacement_output: replacement_output_path,
     };
-    process_file_with_onnx_pipeline(&config, |pos, f1, f2, _psv| {
-        make_input_features(pos, f1, f2);
-    })
+    process_file_with_onnx_pipeline(
+        &config,
+        |pos, f1, f2, _psv| {
+            make_input_features(pos, f1, f2);
+        },
+        progress,
+    )
 }
 
 #[cfg(all(test, any(feature = "aobazero-onnx", feature = "dlshogi-onnx")))]
