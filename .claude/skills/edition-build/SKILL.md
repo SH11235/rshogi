@@ -171,11 +171,11 @@ Cargo.toml の `edition-*` feature 定義で確認する (meta.toml には featu
 | 同上 + Threat | `layerstacks-halfka_hm_merged-1536x16x32-threat` | `layerstack-arch,nnue-threat,nnue-progress-diff` |
 | 同上 + PSQT + Threat | `layerstacks-halfka_hm_merged-1536x16x32-psqt_threat` | `layerstack-arch,nnue-psqt,nnue-threat,nnue-progress-diff` |
 | 同上 + Threat (cross-side, id10) | (preset 無し、profile 軸は手動) | `layerstack-arch,nnue-threat,threat-profile-cross-side,nnue-progress-diff` |
-| LayerStack 1536x32x32 (旧 L1=32) | `layerstacks-halfka_hm_merged-1536x32x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,layerstacks-1536x32x32,nnue-progress-diff` |
-| LayerStack 768x16x32 | `layerstacks-halfka_hm_merged-768x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,layerstacks-768x16x32` |
-| LayerStack 768x8x32 | `layerstacks-halfka_hm_merged-768x8x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,layerstacks-768x8x32` |
-| LayerStack 512x16x32 | `layerstacks-halfka_hm_merged-512x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,layerstacks-512x16x32` |
-| LayerStack 1024x16x32 | `layerstacks-halfka_hm_merged-1024x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,layerstacks-1024x16x32` |
+| LayerStack 1536x32x32 (旧 L1=32) | `layerstacks-halfka_hm_merged-1536x32x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,ft-halfka_hm_merged,layerstacks-1536x32x32,nnue-progress-diff` |
+| LayerStack 768x16x32 | `layerstacks-halfka_hm_merged-768x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,ft-halfka_hm_merged,layerstacks-768x16x32` |
+| LayerStack 768x8x32 | `layerstacks-halfka_hm_merged-768x8x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,ft-halfka_hm_merged,layerstacks-768x8x32` |
+| LayerStack 512x16x32 | `layerstacks-halfka_hm_merged-512x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,ft-halfka_hm_merged,layerstacks-512x16x32` |
+| LayerStack 1024x16x32 | `layerstacks-halfka_hm_merged-1024x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,ft-halfka_hm_merged,layerstacks-1024x16x32` |
 | LayerStack 1536x16x32 + HalfKP | `layerstacks-halfkp-1536x16x32-none` | `layerstack-arch,ft-halfkp,nnue-progress-diff` |
 | 非 LayerStack 旧 (CReLU/SCReLU) | `halfkp-crelu` / `halfka_hm_merged-screlu` 等 | preset 推奨 |
 
@@ -184,7 +184,7 @@ Cargo.toml の `edition-*` feature 定義で確認する (meta.toml には featu
 ```bash
 cargo build --profile production -p rshogi-usi \
   --no-default-features \
-  --features search-no-pass-rules,layerstack-arch,layerstacks-768x16x32
+  --features search-no-pass-rules,layerstack-arch,ft-halfka_hm_merged,layerstacks-768x16x32
 # binary を engines/ にコピーして退避
 cp target/production/rshogi-usi engines/rshogi-usi-custom-768x16x32-<purpose>
 ```
