@@ -395,7 +395,7 @@ cd /path/to/YaneuraOu/source && \
 ```bash
 #!/bin/bash
 EVAL=$SHOGI_DATA/nnue/halfkp_256x2-32-32_crelu/suisho5.bin
-RS=target/release/rshogi-usi
+RS=/path/to/rshogi/target/release/rshogi-usi
 YO=/path/to/YaneuraOu/source/YaneuraOu-by-gcc
 HASH=${HASH:-256}
 POS="{POSITION}"
