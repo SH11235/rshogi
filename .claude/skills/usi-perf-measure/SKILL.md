@@ -90,7 +90,7 @@ movegen-heavy | l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgs
 ### 基本形（2 バイナリ A/B）
 
 ```bash
-taskset -c 0 /mnt/nvme1/development/rshogi/target/release/search_only_ab \
+taskset -c 0 target/release/search_only_ab \
   --baseline  <BASELINE_BINARY> \
   --candidate <CANDIDATE_BINARY> \
   --positions /tmp/search_only_sentinel_4pos.txt \
@@ -103,7 +103,7 @@ taskset -c 0 /mnt/nvme1/development/rshogi/target/release/search_only_ab \
   --eval-file <MODEL_PATH> \
   --material-level none \
   --usi-option LS_BUCKET_MODE=progress8kpabs \
-  --usi-option LS_PROGRESS_COEFF=/mnt/nvme1/development/bullet-shogi/data/progress/nodchip_progress_e1_f1_cuda.bin \
+  --usi-option LS_PROGRESS_COEFF=$SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
   --usi-option FV_SCALE=28 \
   --usi-option Threads=1 \
   --json-out <RESULT_JSON>

@@ -24,7 +24,7 @@ rshogi の指定領域を YaneuraOu (YO) の対応実装と行単位で対照比
 ## ファイル対応表
 
 rshogi のルートパス: `crates/rshogi-core/src/`
-YO のベースパス: `/mnt/nvme1/development/YaneuraOu/source/`
+YO のベースパス: `/path/to/YaneuraOu/source/`
 
 **重要**: YO ソースは必ず上記の正規パスを使用すること。
 

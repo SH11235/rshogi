@@ -28,7 +28,7 @@ target/release/label_bench_positions \
   --out runs/label_bench/label_bench.deep.jsonl \
   --nnue eval/ls_halfka_hm_merged_1536x16x32_none/bullet_v100-400.bin \
   --fv-scale 28 \
-  --ls-progress-coeff /mnt/nvme1/development/bullet-shogi/data/progress/progress_hao_full_cuda.e1.bin \
+  --ls-progress-coeff $SHOGI_DATA/progress/progress_hao_full_cuda.e1.bin \
   --depth 25 --nodes 500000 \
   --threads 8
 ```

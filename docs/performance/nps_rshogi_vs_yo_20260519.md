@@ -19,7 +19,7 @@
 `feat/piece-list-cache` ブランチ (HEAD `50ba5511`, 2026-04-24) からリビルド:
 
 ```bash
-cd /mnt/nvme1/development/YaneuraOu/source
+cd /path/to/YaneuraOu/source
 make clean
 make -j16 tournament \
   TARGET_CPU=AVX2 \
@@ -30,7 +30,7 @@ cp -p YaneuraOu-by-gcc YaneuraOu-sfnnwop1536-v2-plcache
 
 - `YANEURAOU_ENGINE_NNUE_SFNNwoP1536_V2` = v102 互換 (1536x16x32 LayerStack +
   progress8kpabs)。`_V2_32x32` は 1536x32x32 用なので不可。
-- 成果物: `/mnt/nvme1/development/YaneuraOu/source/YaneuraOu-sfnnwop1536-v2-plcache`
+- 成果物: `/path/to/YaneuraOu/source/YaneuraOu-sfnnwop1536-v2-plcache`
   (id name `YaneuraOu NNUE 9.22git 64AVX2 TOURNAMENT`)。旧 `sfnnwop1536-v2` は温存。
 
 ## 計測条件

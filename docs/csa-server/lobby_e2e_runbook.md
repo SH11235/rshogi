@@ -18,7 +18,7 @@
 - `target/release/rshogi-csa-client` と `target/release/rshogi-usi` がローカルに
   ビルド済み。`cargo build -p rshogi-csa-client --release && cargo build -p rshogi-usi --release`
   で揃う。
-- `vp` ラッパー (`/home/sh11235/.vite-plus/bin/vp`) で `wrangler` が呼べること
+- `vp` ラッパー (`~/.vite-plus/bin/vp`) で `wrangler` が呼べること
   (`wrangler tail` / `wrangler r2 object get` を本 runbook で利用)。
 - staging 既定値:
 

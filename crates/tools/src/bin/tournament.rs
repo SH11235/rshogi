@@ -21,12 +21,12 @@
 /// cargo run -p tools --release --bin tournament -- \
 ///   --concurrency 8 \
 ///   --engine target/release/rshogi-usi --engine-label rshogi \
-///   --engine /mnt/nvme1/development/YaneuraOu/source/YaneuraOu-halfkp_256x2-32-32 --engine-label yaneuraou \
+///   --engine /path/to/YaneuraOu/source/YaneuraOu-halfkp_256x2-32-32 --engine-label yaneuraou \
 ///   --games 50 --byoyomi 500 --threads 2 \
 ///   --usi-option "FV_SCALE=24" \
 ///   --strict-engine-usi-option \
 ///   --engine-usi-option "0:EvalFile=eval/halfkp_256x2-32-32_crelu/suisho5.bin" \
-///   --engine-usi-option "1:EvalDir=/mnt/nvme1/development/rshogi/eval/halfkp_256x2-32-32_crelu" \
+///   --engine-usi-option "1:EvalDir=$SHOGI_DATA/nnue/halfkp_256x2-32-32_crelu" \
 ///   --engine-usi-option "1:NetworkDelay2=0" \
 ///   --engine-usi-option "1:RoundUpToFullSecond=false" \
 ///   --out-dir "runs/selfplay/$(date +%Y%m%d_%H%M%S)-rshogi-vs-yaneuraou-suisho5"
