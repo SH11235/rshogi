@@ -230,7 +230,7 @@ PSS 計測が機構の直接証明（重み常駐 N×→1×）。
 
 `tournament` で shm-on vs shm-off（同一バイナリ、`RSHOGI_NNUE_SHARED_WEIGHTS` のみ差）の
 head-to-head 自己対局を並列度別に実施（各 20 局、byoyomi 1000 / hash 256 / threads 1、
-model allfp16-r3-400、production + `layerstack-only,nnue-progress-diff` ビルド）。
+model allfp16-r3-400、production + `layerstack-arch,nnue-progress-diff` ビルド）。
 `analyze_selfplay` の avg_nps:
 
 | concurrency | プロセス数 | shm-off avg_nps | shm-on avg_nps | Δ |

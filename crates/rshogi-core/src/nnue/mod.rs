@@ -61,9 +61,9 @@ pub mod prelude;
 mod shared_weights;
 pub mod spec;
 pub mod stats;
-#[cfg(feature = "ls-ext-threat")]
+#[cfg(feature = "nnue-threat")]
 pub(crate) mod threat_exclusion;
-#[cfg(feature = "ls-ext-threat")]
+#[cfg(feature = "nnue-threat")]
 pub(crate) mod threat_features;
 
 pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};
@@ -94,9 +94,9 @@ pub use ls_feature_spec::{
     HalfKaHmMergedSpec, HalfKaHmSplitSpec, HalfKaMergedSpec, HalfKaSplitSpec, HalfKpSpec,
     LsFeatureSpec,
 };
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 pub use network::evaluate_layer_stacks;
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 pub(crate) use network::update_and_evaluate_layer_stacks_cached;
 pub use network::{
     LayerStackBucketMode, NNUENetwork, NnueFormatInfo, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
@@ -110,15 +110,15 @@ pub use network::{
     set_fv_scale_override, set_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
     set_nnue_architecture_override,
 };
-#[cfg(all(feature = "ls-size-512x16x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-512x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks512x16x32;
-#[cfg(all(feature = "ls-size-768x8x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-768x8x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks768x8x32;
-#[cfg(all(feature = "ls-size-768x16x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-768x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks768x16x32;
-#[cfg(all(feature = "ls-size-1536x16x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-1536x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks1536x16x32;
-#[cfg(all(feature = "ls-size-1536x32x32", feature = "ft-halfka_hm_merged"))]
+#[cfg(all(feature = "layerstacks-1536x32x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks1536x32x32;
 pub use network_layer_stacks::{LayerStacksNetwork, LsNetByFt, NetworkLayerStacks};
 // `#[macro_export]` で crate root に出る ls_dispatch_ft_size! を nnue:: パスからも参照可能にする。

@@ -711,7 +711,7 @@ impl UsiEngine {
                             if let Some(net) = get_network().as_deref()
                                 && net.is_layer_stacks()
                             {
-                                #[cfg(feature = "ls-arch")]
+                                #[cfg(feature = "layerstack-arch")]
                                 {
                                     let n = net.as_layer_stacks().num_buckets();
                                     eprintln!("info string NNUE LayerStack num_buckets={n}");
@@ -1295,7 +1295,7 @@ impl UsiEngine {
         let mut stack = AccumulatorStackVariant::from_network(&network);
 
         if diagnostics {
-            #[cfg(all(feature = "diagnostics", feature = "ls-arch"))]
+            #[cfg(all(feature = "diagnostics", feature = "layerstack-arch"))]
             {
                 use rshogi_core::nnue::NNUENetwork;
                 if let NNUENetwork::LayerStacks(ref net) = *network {
@@ -1305,11 +1305,11 @@ impl UsiEngine {
                     println!("info string Error: diagnostics is only supported for LayerStacks");
                 }
             }
-            #[cfg(all(feature = "diagnostics", not(feature = "ls-arch")))]
+            #[cfg(all(feature = "diagnostics", not(feature = "layerstack-arch")))]
             {
                 let _ = &network;
                 println!(
-                    "info string Error: 'eval diag' requires the `ls-arch` feature \
+                    "info string Error: 'eval diag' requires the `layerstack-arch` feature \
                      (LayerStacks diagnostics)"
                 );
             }

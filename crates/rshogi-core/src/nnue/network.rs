@@ -19,7 +19,7 @@
 //! このファイルの変更は最小限で済む。
 
 use super::accumulator_layer_stacks::LayerStacksAccCache;
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 use super::accumulator_layer_stacks::LayerStacksAccStack;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::activation::detect_activation_from_arch;
@@ -34,7 +34,7 @@ use super::halfka_hm_split::{HalfKaHmSplitNetwork, HalfKaHmSplitStack};
 use super::halfka_merged::{HalfKaMergedNetwork, HalfKaMergedStack};
 use super::halfka_split::{HalfKaSplitNetwork, HalfKaSplitStack};
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 use super::network_layer_stacks::LayerStacksNetwork;
 use super::spec::{Activation, FeatureSet};
 #[cfg(feature = "halfkx-arch")]
@@ -299,7 +299,7 @@ pub enum NNUENetwork {
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPNetwork),
     /// LayerStacks（L1=1536/768 + 9バケット）
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     LayerStacks(LayerStacksNetwork),
 }
 
@@ -415,7 +415,7 @@ impl NNUENetwork {
 
                 // LayerStacks は特殊処理（FT が LEB128 圧縮のためファイルサイズ検出の対象外）
                 if effective_feature_set == FeatureSet::LayerStacks {
-                    #[cfg(feature = "ls-arch")]
+                    #[cfg(feature = "layerstack-arch")]
                     {
                         // PSQT オーバーライド:
                         // LayerStacks → Some(false) (PSQT 強制 OFF)
@@ -447,11 +447,11 @@ impl NNUENetwork {
                         )?;
                         return Ok(Self::LayerStacks(network));
                     }
-                    #[cfg(not(feature = "ls-arch"))]
+                    #[cfg(not(feature = "layerstack-arch"))]
                     {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            "LayerStacks NNUE model requires the `ls-arch` feature; \
+                            "LayerStacks NNUE model requires the `layerstack-arch` feature; \
                              rebuild rshogi-core with an Edition that enables it.",
                         ));
                     }
@@ -539,11 +539,11 @@ impl NNUENetwork {
 
     /// LayerStacks アーキテクチャかどうか
     pub fn is_layer_stacks(&self) -> bool {
-        #[cfg(feature = "ls-arch")]
+        #[cfg(feature = "layerstack-arch")]
         {
             matches!(self, Self::LayerStacks(_))
         }
-        #[cfg(not(feature = "ls-arch"))]
+        #[cfg(not(feature = "layerstack-arch"))]
         {
             false
         }
@@ -572,7 +572,7 @@ impl NNUENetwork {
             Self::HalfKaMerged(net) => net.l1_size(),
             Self::HalfKaHmSplit(net) => net.l1_size(),
             Self::HalfKP(net) => net.l1_size(),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks(net) => net.l1_size(),
         }
     }
@@ -585,7 +585,7 @@ impl NNUENetwork {
             Self::HalfKaMerged(net) => net.architecture_name(),
             Self::HalfKaHmSplit(net) => net.architecture_name(),
             Self::HalfKP(net) => net.architecture_name(),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks(_) => "LayerStacks".to_string(),
         }
     }
@@ -598,7 +598,7 @@ impl NNUENetwork {
             Self::HalfKaMerged(net) => net.architecture_spec(),
             Self::HalfKaHmSplit(net) => net.architecture_spec(),
             Self::HalfKP(net) => net.architecture_spec(),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks(net) => net.architecture_spec(),
         }
     }
@@ -606,7 +606,7 @@ impl NNUENetwork {
     /// LayerStacksNetwork への参照を取得
     ///
     /// LayerStacks アーキテクチャでない場合は panic。
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     pub fn as_layer_stacks(&self) -> &LayerStacksNetwork {
         match self {
             Self::LayerStacks(net) => net,
@@ -1261,7 +1261,7 @@ pub fn get_network() -> Option<Arc<NNUENetwork>> {
 /// 結果を `CACHED_PROGRESS_BUCKET` に格納して `evaluate()` 内の全駒スキャンを回避する。
 /// Threat なし環境では +3〜4% NPS、Threat あり環境では cache 圧迫で退行するため
 /// 運用モデルに応じて明示指定する。
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 #[inline(always)]
 pub(crate) fn update_and_evaluate_layer_stacks_cached(
     net: &LayerStacksNetwork,
@@ -1280,22 +1280,22 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
         // ensure_progress_bucket に伝播する。
         let num_buckets = net.num_buckets();
         let bucket = match stack {
-            #[cfg(feature = "ls-size-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x16x32")]
             LayerStacksAccStack::L1536x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "ls-size-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x32x32")]
             LayerStacksAccStack::L1536x32x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "ls-size-768x16x32")]
+            #[cfg(feature = "layerstacks-768x16x32")]
             LayerStacksAccStack::L768x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "ls-size-768x8x32")]
+            #[cfg(feature = "layerstacks-768x8x32")]
             LayerStacksAccStack::L768x8x32(s) => ensure_progress_bucket(pos, s, num_buckets),
-            #[cfg(feature = "ls-size-512x16x32")]
+            #[cfg(feature = "layerstacks-512x16x32")]
             LayerStacksAccStack::L512x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(not(any(
-                feature = "ls-size-1536x16x32",
-                feature = "ls-size-1536x32x32",
-                feature = "ls-size-768x16x32",
-                feature = "ls-size-768x8x32",
-                feature = "ls-size-512x16x32"
+                feature = "layerstacks-1536x16x32",
+                feature = "layerstacks-1536x32x32",
+                feature = "layerstacks-768x16x32",
+                feature = "layerstacks-768x8x32",
+                feature = "layerstacks-512x16x32"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         };
@@ -1553,7 +1553,7 @@ pub fn is_halfka_1024_loaded() -> bool {
 ///
 /// # Panics
 /// NNUEが未ロードかつMaterial評価も無効の場合はパニックする。
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 pub fn evaluate_layer_stacks(pos: &Position, stack: &mut LayerStacksAccStack) -> Value {
     if material::is_material_enabled() {
         return material::evaluate_material(pos);
@@ -1585,8 +1585,8 @@ pub fn evaluate_dispatch(
     stack: &mut AccumulatorStackVariant,
     acc_cache: &mut Option<LayerStacksAccCache>,
 ) -> Value {
-    // ls-arch 無効ビルドでは LayerStacks variant が存在せず acc_cache は使われない。
-    #[cfg(not(feature = "ls-arch"))]
+    // layerstack-arch 無効ビルドでは LayerStacks variant が存在せず acc_cache は使われない。
+    #[cfg(not(feature = "layerstack-arch"))]
     let _ = acc_cache;
 
     if material::is_material_enabled() {
@@ -1602,7 +1602,7 @@ pub fn evaluate_dispatch(
 
     // バリアントに応じて適切な評価関数を呼び出し
     match stack {
-        #[cfg(feature = "ls-arch")]
+        #[cfg(feature = "layerstack-arch")]
         AccumulatorStackVariant::LayerStacks(s) => {
             let net = network.as_layer_stacks();
             update_and_evaluate_layer_stacks_cached(net, pos, s, acc_cache)
@@ -1646,8 +1646,8 @@ pub fn ensure_accumulator_computed(
     stack: &mut AccumulatorStackVariant,
     acc_cache: &mut Option<LayerStacksAccCache>,
 ) {
-    // ls-arch 無効ビルドでは LayerStacks variant が存在せず acc_cache は使われない。
-    #[cfg(not(feature = "ls-arch"))]
+    // layerstack-arch 無効ビルドでは LayerStacks variant が存在せず acc_cache は使われない。
+    #[cfg(not(feature = "layerstack-arch"))]
     let _ = acc_cache;
 
     // NNUEがなければ何もしない
@@ -1657,7 +1657,7 @@ pub fn ensure_accumulator_computed(
 
     // バリアントに応じてアキュムレータを更新（評価はしない）
     match stack {
-        #[cfg(feature = "ls-arch")]
+        #[cfg(feature = "layerstack-arch")]
         AccumulatorStackVariant::LayerStacks(s) => {
             let net = network.as_layer_stacks();
             net.update_accumulator(pos, s, acc_cache);
@@ -1855,7 +1855,7 @@ mod tests {
     /// テスト結果 (epoch82.nnue):
     /// - LayerStacks として正しく認識される
     /// - 評価値: 0 (学習初期のモデル)
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     #[test]
     #[ignore]
     fn test_nnue_network_auto_detect_layer_stacks() {
@@ -2234,7 +2234,7 @@ mod tests {
     /// `num_buckets` 検証や override 分岐の reject 経路を unit test するために、
     /// FT/PSQT/LayerStack block を含まないヘッダだけの buffer を返す。
     /// load 側は header 検証で reject する想定なので、それ以降の block は不要。
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     fn build_num_buckets_header(num_buckets: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
@@ -2248,7 +2248,7 @@ mod tests {
 
     /// num_buckets-header layout で `num_buckets = 0` / 上限超過の値は
     /// `InvalidData` で reject される
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     #[test]
     fn test_layer_stack_num_buckets_out_of_range_rejected() {
         for &n in &[0u32, (MAX_LAYER_STACK_BUCKETS as u32) + 1, 100, 1024] {
@@ -2270,7 +2270,7 @@ mod tests {
 
     /// num_buckets-header layout を `NNUE_ARCHITECTURE=HalfKP` 等の
     /// 非-LayerStack override で読むと早期 reject される (silent misread を防ぐ)
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     #[test]
     fn test_layer_stack_num_buckets_header_with_non_layerstack_override_rejected() {
         let bytes = build_num_buckets_header(9);

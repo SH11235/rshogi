@@ -176,7 +176,7 @@ pub const MAX_LAYER_STACK_BUCKETS: usize = 16;
 `AccumulatorLayerStacks::psqt_accumulation` (`accumulator_layer_stacks.rs:30`):
 
 ```rust
-#[cfg(feature = "ls-ext-psqt")]
+#[cfg(feature = "nnue-psqt")]
 pub psqt_accumulation: [[i32; MAX_LAYER_STACK_BUCKETS]; 2],
 ```
 
@@ -186,7 +186,7 @@ pub psqt_accumulation: [[i32; MAX_LAYER_STACK_BUCKETS]; 2],
 `FeatureTransformerLayerStacks::psqt_biases` (`feature_transformer_layer_stacks.rs:83`):
 
 ```rust
-#[cfg(feature = "ls-ext-psqt")]
+#[cfg(feature = "nnue-psqt")]
 pub(crate) psqt_biases: [i32; MAX_LAYER_STACK_BUCKETS],
 ```
 

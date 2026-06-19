@@ -103,7 +103,7 @@ fn verify_with_network<
                     if diffs > 0 {
                         eprintln!("  piece_acc[{p}]: {diffs}/{} differ", r.len());
                     }
-                    #[cfg(feature = "ls-ext-threat")]
+                    #[cfg(feature = "nnue-threat")]
                     {
                         let rt = acc_refresh.get_threat(p);
                         let ut = acc_update.get_threat(p);

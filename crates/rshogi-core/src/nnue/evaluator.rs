@@ -30,7 +30,7 @@
 use std::sync::Arc;
 
 use super::accumulator::{AccumulatorCacheGeneric, DirtyPiece};
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 use super::accumulator_layer_stacks::LayerStacksAccCache;
 use super::accumulator_stack_variant::AccumulatorStackVariant;
 use super::halfka_hm_merged::HalfKaHmMergedStack;
@@ -61,7 +61,7 @@ pub struct NNUEEvaluator {
     stack: AccumulatorStackVariant,
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
     /// LayerStacks アーキテクチャ以外では None
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     acc_cache: Option<LayerStacksAccCache>,
     /// 非LayerStacks用 AccumulatorCaches（Finny Tables）
     /// HalfKP/HalfKaSplit/HalfKaHmMerged で使用。LayerStacks では None
@@ -81,7 +81,7 @@ impl NNUEEvaluator {
     /// ```
     pub fn new_with_position(net: Arc<NNUENetwork>, pos: &Position) -> Self {
         let stack = AccumulatorStackVariant::from_network(&net);
-        #[cfg(feature = "ls-arch")]
+        #[cfg(feature = "layerstack-arch")]
         let acc_cache = if let NNUENetwork::LayerStacks(ls_net) = &*net {
             Some(ls_net.new_acc_cache())
         } else {
@@ -95,7 +95,7 @@ impl NNUEEvaluator {
         let mut evaluator = Self {
             net,
             stack,
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             acc_cache,
             acc_cache_generic,
         };
@@ -113,7 +113,7 @@ impl NNUEEvaluator {
     ///
     /// - `pos`: 初期化する局面
     pub fn clone_for_thread(&self, pos: &Position) -> Self {
-        #[cfg(feature = "ls-arch")]
+        #[cfg(feature = "layerstack-arch")]
         let acc_cache = if let NNUENetwork::LayerStacks(ls_net) = &*self.net {
             Some(ls_net.new_acc_cache())
         } else {
@@ -127,7 +127,7 @@ impl NNUEEvaluator {
         let mut evaluator = Self {
             net: Arc::clone(&self.net),
             stack: AccumulatorStackVariant::from_network(&self.net),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             acc_cache,
             acc_cache_generic,
         };
@@ -238,7 +238,7 @@ impl NNUEEvaluator {
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 net.evaluate(pos, st)
             }
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
                 net.evaluate(pos, st)
             }
@@ -312,7 +312,7 @@ impl NNUEEvaluator {
                     net.refresh_accumulator(pos, st);
                 }
             }
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
                 net.update_accumulator(pos, st, &mut self.acc_cache);
             }
@@ -338,7 +338,7 @@ impl NNUEEvaluator {
             (NNUENetwork::HalfKP(net), AccumulatorStackVariant::HalfKP(st)) => {
                 Self::update_halfkp_accumulator(net, pos, st, &mut self.acc_cache_generic);
             }
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             (NNUENetwork::LayerStacks(net), AccumulatorStackVariant::LayerStacks(st)) => {
                 net.update_accumulator(pos, st, &mut self.acc_cache);
             }
@@ -697,18 +697,18 @@ mod tests {
         // 外側の `any(...)` でいずれかの variant が有効なときだけ import が使われる
         // ようにして unused-import 警告を抑える。
         #[cfg(any(
-            feature = "ls-size-1536x16x32",
-            feature = "ls-size-1536x32x32",
-            feature = "ls-size-768x16x32",
-            feature = "ls-size-768x8x32",
-            feature = "ls-size-512x16x32"
+            feature = "layerstacks-1536x16x32",
+            feature = "layerstacks-1536x32x32",
+            feature = "layerstacks-768x16x32",
+            feature = "layerstacks-768x8x32",
+            feature = "layerstacks-512x16x32"
         ))]
         {
             use crate::nnue::accumulator_layer_stacks::{
                 AccumulatorStackLayerStacks, LayerStacksAccStack,
             };
 
-            #[cfg(feature = "ls-size-1536x16x32")]
+            #[cfg(feature = "layerstacks-1536x16x32")]
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L1536x16x32(AccumulatorStackLayerStacks::<1536>::new()),
@@ -720,7 +720,7 @@ mod tests {
                 stack.pop();
             }
 
-            #[cfg(feature = "ls-size-1536x32x32")]
+            #[cfg(feature = "layerstacks-1536x32x32")]
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L1536x32x32(AccumulatorStackLayerStacks::<1536>::new()),
@@ -732,7 +732,7 @@ mod tests {
                 stack.pop();
             }
 
-            #[cfg(feature = "ls-size-768x16x32")]
+            #[cfg(feature = "layerstacks-768x16x32")]
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L768x16x32(AccumulatorStackLayerStacks::<768>::new()),
@@ -744,7 +744,7 @@ mod tests {
                 stack.pop();
             }
 
-            #[cfg(feature = "ls-size-768x8x32")]
+            #[cfg(feature = "layerstacks-768x8x32")]
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L768x8x32(AccumulatorStackLayerStacks::<768>::new()),
@@ -756,7 +756,7 @@ mod tests {
                 stack.pop();
             }
 
-            #[cfg(feature = "ls-size-512x16x32")]
+            #[cfg(feature = "layerstacks-512x16x32")]
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L512x16x32(AccumulatorStackLayerStacks::<512>::new()),

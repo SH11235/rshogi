@@ -11,9 +11,9 @@ use std::sync::Arc;
 #[cfg(not(feature = "search-no-pass-rules"))]
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 use crate::nnue::LayerStacksAccCache;
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 use crate::nnue::NNUENetwork;
 use crate::nnue::{AccumulatorStackVariant, get_network};
 use crate::position::Position;
@@ -372,13 +372,13 @@ pub struct SearchState {
     ///
     /// `reset()` 時に `Arc::as_ptr()` で設定する。対応する Arc は NETWORK の
     /// RwLock 内に保持されており、探索中に drop されることはない。
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     pub network_ptr: *const NNUENetwork,
     /// NNUE Accumulator スタック
     pub nnue_stack: AccumulatorStackVariant,
     /// LayerStacks 用 AccumulatorCaches（Finny Tables）
     /// LayerStacks アーキテクチャ以外では None
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     pub acc_cache: Option<LayerStacksAccCache>,
     /// check_abort呼び出しカウンター
     pub calls_cnt: i32,
@@ -404,10 +404,10 @@ impl SearchState {
             root_moves: RootMoves::new(),
             pv_table: PvTable::new(),
             previous_pv: Vec::new(),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             network_ptr: std::ptr::null(),
             nnue_stack: AccumulatorStackVariant::new_default(),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             acc_cache: None,
             calls_cnt: 0,
             #[cfg(feature = "search-stats")]
@@ -739,7 +739,7 @@ impl SearchWorker {
             .low_ply_history
             .clear_with_init(self.search_tune_params.low_ply_history_init as i16);
         // NNUE AccumulatorStack: ネットワークに応じたバリアントに更新・リセット
-        #[cfg(feature = "ls-arch")]
+        #[cfg(feature = "layerstack-arch")]
         {
             self.state.network_ptr = std::ptr::null();
         }
@@ -747,7 +747,7 @@ impl SearchWorker {
             // 探索中の get_network() RwLock + Arc::clone 回避用に raw pointer をキャッシュ。
             // Arc は NETWORK (RwLock<Option<Arc<NNUENetwork>>>) 内に保持され、
             // 次の reset() / clear_nnue() まで drop されない。
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             {
                 self.state.network_ptr = Arc::as_ptr(&network);
             }
@@ -758,7 +758,7 @@ impl SearchWorker {
                 self.state.nnue_stack.reset();
             }
             // LayerStacks 用 AccumulatorCaches を初期化
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             if let crate::nnue::NNUENetwork::LayerStacks(ls_net) = &*network {
                 // 既存 cache があっても exact architecture が不一致なら破棄。
                 // 同一プロセスで EvalFile をリロードして LayerStacks 形状が変わった場合、旧 cache
@@ -788,7 +788,7 @@ impl SearchWorker {
         } else {
             // NNUE未初期化の場合はデフォルト（HalfKP）でリセット
             self.state.nnue_stack.reset();
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             {
                 self.state.acc_cache = None;
             }
@@ -3710,7 +3710,7 @@ impl SearchWorker {
 //    SearchWorkerがスレッド間でmoveされても、history フィールドも一緒にmoveされるため、
 //    ポインタの参照先は常に有効であり、データ競合も発生しない。
 //
-// 2. `network_ptr: *const NNUENetwork`（SearchState、ls-arch feature時のみ）:
+// 2. `network_ptr: *const NNUENetwork`（SearchState、layerstack-arch feature時のみ）:
 //    グローバル NETWORK (RwLock<Option<Arc<NNUENetwork>>>) 内の Arc が指す
 //    NNUENetwork への読み取り専用ポインタ。NNUENetwork は Arc 経由で保持されるため
 //    Sync であり、探索中に重みデータが変更されることはない。

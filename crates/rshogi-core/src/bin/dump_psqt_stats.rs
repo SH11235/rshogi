@@ -6,19 +6,19 @@
 //!
 //! 使用例:
 //! ```bash
-//! cargo run --release --bin dump_psqt_stats --features ls-ext-psqt -- \
+//! cargo run --release --bin dump_psqt_stats --features nnue-psqt -- \
 //!   /path/to/v101-100/quantised.bin \
 //!   /path/to/v101-200/quantised.bin \
 //!   /path/to/v101-380/quantised.bin
 //! ```
 
-#[cfg(not(feature = "ls-ext-psqt"))]
+#[cfg(not(feature = "nnue-psqt"))]
 fn main() {
-    eprintln!("Error: dump_psqt_stats requires --features ls-ext-psqt");
+    eprintln!("Error: dump_psqt_stats requires --features nnue-psqt");
     std::process::exit(1);
 }
 
-#[cfg(feature = "ls-ext-psqt")]
+#[cfg(feature = "nnue-psqt")]
 fn main() {
     use rshogi_core::nnue::NetworkLayerStacks1536x16x32;
     use std::path::Path;

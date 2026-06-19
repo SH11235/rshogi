@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 
 #[cfg(feature = "use-lazy-evaluate")]
 use crate::nnue::ensure_accumulator_computed;
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 use crate::nnue::{AccumulatorStackVariant, update_and_evaluate_layer_stacks_cached};
 use crate::nnue::{DirtyPiece, evaluate_dispatch};
 use crate::position::Position;
@@ -109,13 +109,13 @@ pub(super) fn check_abort(
 
 /// NNUE 評価
 ///
-/// `ls-arch` feature かつ実行中ネットワークが LayerStacks のときは
+/// `layerstack-arch` feature かつ実行中ネットワークが LayerStacks のときは
 /// `evaluate_dispatch` をバイパスし、`network_ptr` から直接 LayerStacks 評価を呼ぶ。
 /// これにより `get_network()` の RwLock::read + Arc::clone を完全回避する。
 /// HalfKX 系ネットワークがロードされている場合は通常の `evaluate_dispatch` を使う。
 #[inline]
 pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     {
         let ptr = st.network_ptr;
         if !ptr.is_null()
@@ -131,9 +131,9 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
             return update_and_evaluate_layer_stacks_cached(net, pos, s, &mut st.acc_cache);
         }
     }
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     let acc_cache = &mut st.acc_cache;
-    #[cfg(not(feature = "ls-arch"))]
+    #[cfg(not(feature = "layerstack-arch"))]
     let acc_cache = &mut None;
     evaluate_dispatch(pos, &mut st.nnue_stack, acc_cache)
 }
@@ -145,9 +145,9 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
 #[cfg(feature = "use-lazy-evaluate")]
 #[inline]
 pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     let acc_cache = &mut st.acc_cache;
-    #[cfg(not(feature = "ls-arch"))]
+    #[cfg(not(feature = "layerstack-arch"))]
     let acc_cache = &mut None;
     ensure_accumulator_computed(pos, &mut st.nnue_stack, acc_cache)
 }

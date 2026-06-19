@@ -13,7 +13,7 @@
 //! L2/L3/活性化の追加時にこのファイルの変更は不要。
 
 use super::accumulator::DirtyPiece;
-#[cfg(feature = "ls-arch")]
+#[cfg(feature = "layerstack-arch")]
 use super::accumulator_layer_stacks::LayerStacksAccStack;
 use super::halfka_hm_merged::HalfKaHmMergedStack;
 use super::halfka_hm_split::HalfKaHmSplitStack;
@@ -46,7 +46,7 @@ pub enum AccumulatorStackVariant {
     /// HalfKP 特徴量セット（L256/L512）
     HalfKP(HalfKPStack),
     /// LayerStacks（L1=1536/768 + 9バケット）
-    #[cfg(feature = "ls-arch")]
+    #[cfg(feature = "layerstack-arch")]
     LayerStacks(LayerStacksAccStack),
 }
 
@@ -67,7 +67,7 @@ impl AccumulatorStackVariant {
                 Self::HalfKaHmSplit(HalfKaHmSplitStack::from_network(net))
             }
             NNUENetwork::HalfKP(net) => Self::HalfKP(HalfKPStack::from_network(net)),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             NNUENetwork::LayerStacks(net) => Self::LayerStacks(net.new_acc_stack()),
         }
     }
@@ -97,7 +97,7 @@ impl AccumulatorStackVariant {
                 stack.l1_size() == net.l1_size()
             }
             (Self::HalfKP(stack), NNUENetwork::HalfKP(net)) => stack.l1_size() == net.l1_size(),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             (Self::LayerStacks(st), NNUENetwork::LayerStacks(net)) => {
                 st.architecture_dims()
                     == (
@@ -119,7 +119,7 @@ impl AccumulatorStackVariant {
             Self::HalfKaMerged(stack) => stack.reset(),
             Self::HalfKaHmSplit(stack) => stack.reset(),
             Self::HalfKP(stack) => stack.reset(),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks(stack) => stack.reset(),
         }
     }
@@ -133,7 +133,7 @@ impl AccumulatorStackVariant {
             Self::HalfKaMerged(stack) => stack.push(dirty_piece),
             Self::HalfKaHmSplit(stack) => stack.push(dirty_piece),
             Self::HalfKP(stack) => stack.push(dirty_piece),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks(stack) => {
                 stack.push();
                 stack.set_current_dirty_piece(dirty_piece);
@@ -150,7 +150,7 @@ impl AccumulatorStackVariant {
             Self::HalfKaMerged(stack) => stack.pop(),
             Self::HalfKaHmSplit(stack) => stack.pop(),
             Self::HalfKP(stack) => stack.pop(),
-            #[cfg(feature = "ls-arch")]
+            #[cfg(feature = "layerstack-arch")]
             Self::LayerStacks(stack) => stack.pop(),
         }
     }
@@ -177,7 +177,7 @@ mod tests {
         let stack = AccumulatorStackVariant::default();
         assert!(stack.is_halfkp());
         assert!(matches!(stack, AccumulatorStackVariant::HalfKP(_)));
-        #[cfg(feature = "ls-arch")]
+        #[cfg(feature = "layerstack-arch")]
         assert!(!matches!(stack, AccumulatorStackVariant::LayerStacks(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::HalfKaSplit(_)));
         assert!(!matches!(stack, AccumulatorStackVariant::HalfKaHmMerged(_)));
@@ -330,7 +330,7 @@ mod tests {
         eprintln!("AccumulatorStackVariant size: {variant_size} bytes");
         eprintln!("HalfKaHmMergedStack size: {halfka_stack_size} bytes");
         eprintln!("HalfKPStack size: {halfkp_stack_size} bytes");
-        #[cfg(feature = "ls-arch")]
+        #[cfg(feature = "layerstack-arch")]
         {
             let layer_stacks_size = size_of::<LayerStacksAccStack>();
             eprintln!("LayerStacks size: {layer_stacks_size} bytes");

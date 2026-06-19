@@ -568,11 +568,11 @@ mod tests {
 
     #[test]
     fn normalize_edition_accepts_both_forms() {
-        assert_eq!(normalize_edition("ls"), "edition-ls");
-        assert_eq!(normalize_edition("edition-ls"), "edition-ls");
+        assert_eq!(normalize_edition("layerstacks"), "edition-layerstacks");
+        assert_eq!(normalize_edition("edition-layerstacks"), "edition-layerstacks");
         assert_eq!(
-            normalize_edition("ls-halfka_hm_merged-1536x16x32-psqt"),
-            "edition-ls-halfka_hm_merged-1536x16x32-psqt"
+            normalize_edition("layerstacks-halfka_hm_merged-1536x16x32-psqt"),
+            "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt"
         );
     }
 
@@ -582,8 +582,8 @@ mod tests {
         for required in [
             "edition-universal",
             "edition-halfkx",
-            "edition-ls",
-            "edition-ls-halfka_hm_merged-1536x16x32-psqt",
+            "edition-layerstacks",
+            "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt",
         ] {
             assert!(
                 editions.iter().any(|e| e == required),
@@ -595,9 +595,10 @@ mod tests {
     #[test]
     fn engines_path_strips_edition_prefix() {
         let root = PathBuf::from("/tmp/rshogi");
-        let p = engines_path(&root, "edition-ls-halfka_hm_merged-1536x16x32-psqt").unwrap();
+        let p =
+            engines_path(&root, "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt").unwrap();
         let expected = format!(
-            "/tmp/rshogi/engines/rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt{}",
+            "/tmp/rshogi/engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt{}",
             std::env::consts::EXE_SUFFIX
         );
         assert_eq!(p, PathBuf::from(expected));
@@ -677,13 +678,13 @@ mod tests {
     fn manifest_round_trip_preserves_fields() {
         let manifest = Manifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
-            edition: "edition-ls-halfka_hm_merged-1536x16x32-psqt".into(),
+            edition: "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt".into(),
             profile: "production".into(),
             commit: "5616ea7c056ff21b6705c0ef00ca7266b7b2849f".into(),
             commit_dirty: false,
             built_at: "2026-05-24T22:30:00+09:00".into(),
             rustc: "rustc 1.85.0 (abc 2026-01-01)".into(),
-            binary: "rshogi-usi-ls-halfka_hm_merged-1536x16x32-psqt".into(),
+            binary: "rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt".into(),
         };
         let text = toml::to_string_pretty(&manifest).unwrap();
         let parsed: Manifest = toml::from_str(&text).unwrap();

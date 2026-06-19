@@ -8,7 +8,7 @@
 fn validate_feature_combination(
     has_feature: &dyn Fn(&str) -> bool,
 ) -> Result<(), String> {
-    let ls_arch = has_feature("ls-arch");
+    let layerstack_arch = has_feature("layerstack-arch");
 
     let mode_universal = has_feature("mode-universal");
     let mode_family = has_feature("mode-family");
@@ -36,20 +36,20 @@ fn validate_feature_combination(
         ));
     }
 
-    let ls_size_features: &[&str] = &[
-        "ls-size-1536x16x32",
-        "ls-size-1536x32x32",
-        "ls-size-768x16x32",
-        "ls-size-768x8x32",
-        "ls-size-512x16x32",
+    let layerstacks_features: &[&str] = &[
+        "layerstacks-1536x16x32",
+        "layerstacks-1536x32x32",
+        "layerstacks-768x16x32",
+        "layerstacks-768x8x32",
+        "layerstacks-512x16x32",
     ];
-    let ls_size_count = ls_size_features
+    let layerstacks_count = layerstacks_features
         .iter()
         .filter(|f| has_feature(f))
         .count();
-    if ls_arch && ls_size_count == 0 {
+    if layerstack_arch && layerstacks_count == 0 {
         return Err(
-            "ls-arch を有効化するには ls-size-* を 1 個以上必要です。".to_string(),
+            "layerstack-arch を有効化するには layerstacks-* を 1 個以上必要です。".to_string(),
         );
     }
 
@@ -61,14 +61,14 @@ fn validate_feature_combination(
         "ft-halfka_hm_merged",
     ];
     let ft_count = ft_features.iter().filter(|f| has_feature(f)).count();
-    if ls_arch && ft_count == 0 {
-        return Err("ls-arch を有効化するには ft-* を 1 個以上必要です。".to_string());
+    if layerstack_arch && ft_count == 0 {
+        return Err("layerstack-arch を有効化するには ft-* を 1 個以上必要です。".to_string());
     }
 
     if mode_specific {
-        if ls_size_count > 1 {
+        if layerstacks_count > 1 {
             return Err(format!(
-                "mode-specific では ls-size-* を 1 個だけ指定してください (現在 {ls_size_count} 個有効)。"
+                "mode-specific では layerstacks-* を 1 個だけ指定してください (現在 {layerstacks_count} 個有効)。"
             ));
         }
         let activations: &[&str] = &[
@@ -94,11 +94,11 @@ fn validate_feature_combination(
     // 退行構成での誤指定を弾く。
     if has_feature("nnue-progress-diff") {
         let valid = mode_specific
-            && (has_feature("ls-size-1536x16x32")
-                || has_feature("ls-size-1536x32x32"));
+            && (has_feature("layerstacks-1536x16x32")
+                || has_feature("layerstacks-1536x32x32"));
         if !valid {
             return Err(
-                "nnue-progress-diff は mode-specific + ls-size-1536x16x32 / ls-size-1536x32x32 \
+                "nnue-progress-diff は mode-specific + layerstacks-1536x16x32 / layerstacks-1536x32x32 \
                  でのみ有効です。他構成では NPS が退行します。"
                     .to_string(),
             );

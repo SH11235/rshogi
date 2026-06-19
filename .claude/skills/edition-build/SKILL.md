@@ -1,12 +1,12 @@
 ---
-description: rshogi engine の preset edition build と NNUE format 互換性管理。xtask で多数の architecture variant (HalfKP / HalfKA / HalfKA_HM、LayerStack 1536x16x32 / 1536x32x32 / 768x16x32 / 512x16x32、PSQT / Threat / progress-diff) を build し engines/ 配下に配置する。古い engine binary が新 NNUE ckpt format (`Unknown NNUE version: 0x...`) を load できない場合の rebuild 手順、preset から外れた手動 cargo build 時の feature 表、build profile (release / production) 選択基準を扱う。「engine build」「edition build」「format 互換性」「Unknown NNUE version」「preset 一覧」等のリクエストに使用する。
+description: rshogi engine の preset edition build と NNUE format 互換性管理。xtask で多数の architecture variant (HalfKP / HalfKA / HalfKA_HM、LayerStack 1536x16x32 / 1536x32x32 / 768x16x32 / 768x8x32 / 512x16x32、PSQT / Threat / progress-diff) を build し engines/ 配下に配置する。古い engine binary が新 NNUE ckpt format (`Unknown NNUE version: 0x...`) を load できない場合の rebuild 手順、preset から外れた手動 cargo build 時の feature 表、build profile (release / production) 選択基準を扱う。「engine build」「edition build」「format 互換性」「Unknown NNUE version」「preset 一覧」等のリクエストに使用する。
 user-invocable: true
 ---
 
 # rshogi engine build / edition 管理スキル
 
 rshogi は HalfKP / HalfKA / HalfKA_HM (split / merged) などの feature-set、LayerStack
-1536x16x32 / 1536x32x32 / 768x16x32 / 512x16x32 などの dim、PSQT / Threat 等の拡張、を
+1536x16x32 / 1536x32x32 / 768x16x32 / 768x8x32 / 512x16x32 などの dim、PSQT / Threat 等の拡張、を
 組み合わせた多数の architecture variant をサポートする。これらは Cargo feature の組合せで
 build し、preset として `xtask` から呼び出せる。
 
@@ -26,20 +26,20 @@ cargo run --release -p xtask -- list-editions
 
 | preset 名 | 説明 |
 |---|---|
-| `edition-ls-halfka_hm_merged-1536x16x32-none` | LayerStack 1536x16x32 + HalfKA_HM merged (default 推奨) |
-| `edition-ls-halfka_hm_merged-1536x16x32-psqt` | 同上 + PSQT |
-| `edition-ls-halfka_hm_merged-1536x16x32-threat` | 同上 + Threat |
-| `edition-ls-halfka_hm_merged-1536x16x32-psqt_threat` | 同上 + PSQT + Threat |
-| `edition-ls-halfka_hm_merged-1536x32x32-none` | 旧 L1=32 系 |
-| `edition-ls-halfka_hm_merged-768x16x32-none` | 縮小 L0=768 |
-| `edition-ls-halfka_hm_merged-512x16x32-none` | 縮小 L0=512 |
-| `edition-ls-halfka_hm_split-1536x16x32-none` | HalfKA_HM split |
-| `edition-ls-halfka_split-1536x16x32-none` | HalfKA split |
-| `edition-ls-halfka_merged-1536x16x32-none` | HalfKA merged |
-| `edition-ls-halfkp-1536x16x32-none` | HalfKP |
+| `edition-layerstacks-halfka_hm_merged-1536x16x32-none` | LayerStack 1536x16x32 + HalfKA_HM merged (default 推奨) |
+| `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt` | 同上 + PSQT |
+| `edition-layerstacks-halfka_hm_merged-1536x16x32-threat` | 同上 + Threat |
+| `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt_threat` | 同上 + PSQT + Threat |
+| `edition-layerstacks-halfka_hm_merged-1536x32x32-none` | 旧 L1=32 系 |
+| `edition-layerstacks-halfka_hm_merged-768x16x32-none` | 縮小 L0=768 |
+| `edition-layerstacks-halfka_hm_merged-512x16x32-none` | 縮小 L0=512 |
+| `edition-layerstacks-halfka_hm_split-1536x16x32-none` | HalfKA_HM split |
+| `edition-layerstacks-halfka_split-1536x16x32-none` | HalfKA split |
+| `edition-layerstacks-halfka_merged-1536x16x32-none` | HalfKA merged |
+| `edition-layerstacks-halfkp-1536x16x32-none` | HalfKP |
 | `edition-halfka_hm_merged-screlu` | 非 LayerStack 旧 (SCReLU) |
 | `edition-halfkp-crelu` | 非 LayerStack 旧 (CReLU) |
-| `edition-ls-any-any-any` | 動的 dispatch 全部入り (計測用) |
+| `edition-layerstacks-any-any-any` | 動的 dispatch 全部入り (計測用) |
 
 ## 2. xtask build (推奨経路)
 
@@ -47,12 +47,12 @@ preset 名 (`edition-` 接頭辞省略可、複数指定可) を指定:
 
 ```bash
 # 単一 edition
-cargo run --release -p xtask -- build --edition ls-halfkp-1536x16x32-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfkp-1536x16x32-none --profile production
 
 # 複数 edition (順次 build)
 cargo run --release -p xtask -- build \
-  --edition ls-halfkp-1536x16x32-none \
-  --edition ls-halfka_hm_merged-1536x16x32-none \
+  --edition layerstacks-halfkp-1536x16x32-none \
+  --edition layerstacks-halfka_hm_merged-1536x16x32-none \
   --profile production
 
 # 全 preset
@@ -138,10 +138,11 @@ feature は 4 カテゴリの組み合わせ:
 
 1. **feature-set** (どれか 1 つ): `ft-halfkp` / `ft-halfka_split` / `ft-halfka_merged`
    / `ft-halfka_hm_split` / `ft-halfka_hm_merged`
-2. **dispatch 除去**: `layerstack-only` (LayerStack モデルでは常に指定。HalfKP/HalfKA
-   dispatch を除去し `evaluate_dispatch` を直接呼ぶ)
+2. **architecture 経路** (LayerStack は必須): `layerstack-arch` (LayerStack network
+   経路を含める。単一 arch の mode-specific build では HalfKP/HalfKA dispatch が外れ
+   `evaluate_dispatch` を直接呼ぶ)
 3. **L1×L2 dim** (どれか 1 つ): `layerstacks-1536x16x32` (default) / `layerstacks-1536x32x32`
-   / `layerstacks-768x16x32` / `layerstacks-512x16x32`。複数同時指定は cycles +5.5% 退行
+   / `layerstacks-768x16x32` / `layerstacks-768x8x32` / `layerstacks-512x16x32`。複数同時指定は cycles +5.5% 退行
 4. **拡張 / 最適化**: `nnue-psqt` / `nnue-threat` / `nnue-progress-diff` (L0=1536 限定、
    L0=768/512 では cache pressure 増加で cycles +2-6% 退行するため指定しない)
 5. **Threat profile** (Threat 使用時に任意で 1 つ): `threat-profile-same-class` (id1) /
@@ -163,15 +164,16 @@ Cargo.toml の `edition-*` feature 定義で確認する (meta.toml には featu
 
 | アーキ | preset 名 (`xtask build --edition`) | 手動 build features |
 |---|---|---|
-| LayerStack 1536x16x32 | `ls-halfka_hm_merged-1536x16x32-none` | `layerstack-only,nnue-progress-diff` (default に `layerstacks-1536x16x32` 含む) |
-| 同上 + PSQT | `ls-halfka_hm_merged-1536x16x32-psqt` | `layerstack-only,nnue-psqt,nnue-progress-diff` |
-| 同上 + Threat | `ls-halfka_hm_merged-1536x16x32-threat` | `layerstack-only,nnue-threat,nnue-progress-diff` |
-| 同上 + PSQT + Threat | `ls-halfka_hm_merged-1536x16x32-psqt_threat` | `layerstack-only,nnue-psqt,nnue-threat,nnue-progress-diff` |
-| 同上 + Threat (cross-side, id10) | (preset 無し、profile 軸は手動) | `layerstack-only,nnue-threat,threat-profile-cross-side,nnue-progress-diff` |
-| LayerStack 1536x32x32 (旧 L1=32) | `ls-halfka_hm_merged-1536x32x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-1536x32x32,nnue-progress-diff` |
-| LayerStack 768x16x32 | `ls-halfka_hm_merged-768x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-768x16x32` |
-| LayerStack 512x16x32 | `ls-halfka_hm_merged-512x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-512x16x32` |
-| LayerStack 1536x16x32 + HalfKP | `ls-halfkp-1536x16x32-none` | `layerstack-only,ft-halfkp,nnue-progress-diff` |
+| LayerStack 1536x16x32 | `layerstacks-halfka_hm_merged-1536x16x32-none` | `layerstack-arch,nnue-progress-diff` (default に `layerstacks-1536x16x32` 含む) |
+| 同上 + PSQT | `layerstacks-halfka_hm_merged-1536x16x32-psqt` | `layerstack-arch,nnue-psqt,nnue-progress-diff` |
+| 同上 + Threat | `layerstacks-halfka_hm_merged-1536x16x32-threat` | `layerstack-arch,nnue-threat,nnue-progress-diff` |
+| 同上 + PSQT + Threat | `layerstacks-halfka_hm_merged-1536x16x32-psqt_threat` | `layerstack-arch,nnue-psqt,nnue-threat,nnue-progress-diff` |
+| 同上 + Threat (cross-side, id10) | (preset 無し、profile 軸は手動) | `layerstack-arch,nnue-threat,threat-profile-cross-side,nnue-progress-diff` |
+| LayerStack 1536x32x32 (旧 L1=32) | `layerstacks-halfka_hm_merged-1536x32x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,layerstacks-1536x32x32,nnue-progress-diff` |
+| LayerStack 768x16x32 | `layerstacks-halfka_hm_merged-768x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,layerstacks-768x16x32` |
+| LayerStack 768x8x32 | `layerstacks-halfka_hm_merged-768x8x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,layerstacks-768x8x32` |
+| LayerStack 512x16x32 | `layerstacks-halfka_hm_merged-512x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-arch,layerstacks-512x16x32` |
+| LayerStack 1536x16x32 + HalfKP | `layerstacks-halfkp-1536x16x32-none` | `layerstack-arch,ft-halfkp,nnue-progress-diff` |
 | 非 LayerStack 旧 (CReLU/SCReLU) | `halfkp-crelu` / `halfka_hm_merged-screlu` 等 | preset 推奨 |
 
 ### 手動 cargo build (preset 外実験)
@@ -179,7 +181,7 @@ Cargo.toml の `edition-*` feature 定義で確認する (meta.toml には featu
 ```bash
 cargo build --profile production -p rshogi-usi \
   --no-default-features \
-  --features search-no-pass-rules,layerstack-only,layerstacks-768x16x32
+  --features search-no-pass-rules,layerstack-arch,layerstacks-768x16x32
 # binary を engines/ にコピーして退避
 cp target/production/rshogi-usi engines/rshogi-usi-custom-768x16x32-<purpose>
 ```

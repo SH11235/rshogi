@@ -18,26 +18,24 @@ fn empty_features_pass() {
 }
 
 #[test]
-fn unknown_legacy_names_pass() {
-    // バリデータは旧 feature 名そのものを直接見ないことを確認。
-    // (Cargo の alias 展開を経由しないシナリオ。)
+fn unrecognized_feature_names_ignored() {
+    // バリデータは自身が参照する既知 feature 名以外を無視する
+    // (mode sentinel も無いので緩和されて Ok)。
     let has = lookup(&[
-        "layerstack-only",
+        "some-unrecognized-feature",
         "layerstacks-1536x16x32",
         "nnue-psqt",
-        "nnue-progress-diff",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
 }
 
 #[test]
-fn legacy_alias_resolved_combo_passes() {
-    // 旧 build script `--features layerstack-only,layerstacks-1536x16x32,nnue-psqt,nnue-progress-diff`
-    // を Cargo が alias 展開して build.rs に渡す実際の feature 名集合を再現。
+fn atomic_features_without_mode_pass() {
+    // mode sentinel 未指定 (atomic feature 直指定) の build は check を緩和して Ok。
     let has = lookup(&[
-        "ls-arch",
-        "ls-size-1536x16x32",
-        "ls-ext-psqt",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
+        "nnue-psqt",
         "nnue-progress-diff",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -47,9 +45,9 @@ fn legacy_alias_resolved_combo_passes() {
 fn universal_alone_ok() {
     let has = lookup(&[
         "mode-universal",
-        "ls-arch",
-        "ls-size-1536x16x32",
-        "ls-size-768x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
+        "layerstacks-768x16x32",
         "ft-halfka_hm_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -64,36 +62,36 @@ fn universal_plus_family_rejected() {
 
 #[test]
 fn universal_plus_specific_rejected() {
-    let has = lookup(&["mode-universal", "mode-specific", "ls-size-1536x16x32"]);
+    let has = lookup(&["mode-universal", "mode-specific", "layerstacks-1536x16x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("edition-universal"));
 }
 
 #[test]
 fn family_plus_specific_rejected() {
-    let has = lookup(&["mode-family", "mode-specific", "ls-size-1536x16x32"]);
+    let has = lookup(&["mode-family", "mode-specific", "layerstacks-1536x16x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("must be exactly 1"));
 }
 
 #[test]
 fn ls_arch_without_size_rejected() {
-    let has = lookup(&["mode-family", "ls-arch"]);
+    let has = lookup(&["mode-family", "layerstack-arch"]);
     let err = validate_feature_combination(&has).unwrap_err();
-    assert!(err.contains("ls-size-* を 1 個以上"));
+    assert!(err.contains("layerstacks-* を 1 個以上"));
 }
 
 #[test]
 fn specific_multiple_sizes_rejected() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-1536x16x32",
-        "ls-size-1536x32x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
+        "layerstacks-1536x32x32",
         "ft-halfka_hm_merged",
     ]);
     let err = validate_feature_combination(&has).unwrap_err();
-    assert!(err.contains("ls-size-* を 1 個だけ"));
+    assert!(err.contains("layerstacks-* を 1 個だけ"));
 }
 
 #[test]
@@ -124,9 +122,9 @@ fn specific_multiple_ft_rejected() {
 fn specific_single_size_ok() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-1536x16x32",
-        "ls-ext-psqt",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
+        "nnue-psqt",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -137,8 +135,8 @@ fn specific_single_size_ok() {
 fn progress_diff_with_512_rejected() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-512x16x32",
+        "layerstack-arch",
+        "layerstacks-512x16x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -150,8 +148,8 @@ fn progress_diff_with_512_rejected() {
 fn progress_diff_with_768_rejected() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-768x16x32",
+        "layerstack-arch",
+        "layerstacks-768x16x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -163,8 +161,8 @@ fn progress_diff_with_768_rejected() {
 fn progress_diff_with_1536x32x32_ok() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-1536x32x32",
+        "layerstack-arch",
+        "layerstacks-1536x32x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -175,8 +173,8 @@ fn progress_diff_with_1536x32x32_ok() {
 fn progress_diff_in_family_rejected() {
     let has = lookup(&[
         "mode-family",
-        "ls-arch",
-        "ls-size-1536x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -188,8 +186,8 @@ fn progress_diff_in_family_rejected() {
 fn progress_diff_in_universal_rejected() {
     let has = lookup(&[
         "mode-universal",
-        "ls-arch",
-        "ls-size-1536x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -201,10 +199,10 @@ fn progress_diff_in_universal_rejected() {
 fn family_multiple_sizes_ok() {
     let has = lookup(&[
         "mode-family",
-        "ls-arch",
-        "ls-size-1536x16x32",
-        "ls-size-768x16x32",
-        "ls-size-512x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
+        "layerstacks-768x16x32",
+        "layerstacks-512x16x32",
         "ft-halfka_hm_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -214,9 +212,9 @@ fn family_multiple_sizes_ok() {
 fn ls_arch_plus_halfkx_arch_ok() {
     let has = lookup(&[
         "mode-universal",
-        "ls-arch",
+        "layerstack-arch",
         "halfkx-arch",
-        "ls-size-1536x16x32",
+        "layerstacks-1536x16x32",
         "ft-halfka_hm_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -226,8 +224,8 @@ fn ls_arch_plus_halfkx_arch_ok() {
 fn ls_specific_with_ft_halfkp_ok() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-1536x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
         "ft-halfkp",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -237,8 +235,8 @@ fn ls_specific_with_ft_halfkp_ok() {
 fn ls_specific_with_ft_halfka_split_ok() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-1536x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
         "ft-halfka_split",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -248,8 +246,8 @@ fn ls_specific_with_ft_halfka_split_ok() {
 fn ls_specific_with_ft_halfka_merged_ok() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-1536x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
         "ft-halfka_merged",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -259,8 +257,8 @@ fn ls_specific_with_ft_halfka_merged_ok() {
 fn ls_specific_with_ft_halfka_hm_split_ok() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-1536x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
         "ft-halfka_hm_split",
     ]);
     assert!(validate_feature_combination(&has).is_ok());
@@ -270,8 +268,8 @@ fn ls_specific_with_ft_halfka_hm_split_ok() {
 fn ls_specific_with_ft_halfka_hm_merged_ok() {
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
-        "ls-size-1536x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
         "ft-halfka_hm_merged",
         "nnue-progress-diff",
     ]);
@@ -280,12 +278,12 @@ fn ls_specific_with_ft_halfka_hm_merged_ok() {
 
 #[test]
 fn ls_arch_with_halfkx_arch_specific_ft_halfkp_ok() {
-    // mode-specific + ls-arch + halfkx-arch + ft-halfkp + ls-size-* は許容。
+    // mode-specific + layerstack-arch + halfkx-arch + ft-halfkp + layerstacks-* は許容。
     let has = lookup(&[
         "mode-specific",
-        "ls-arch",
+        "layerstack-arch",
         "halfkx-arch",
-        "ls-size-512x16x32",
+        "layerstacks-512x16x32",
         "ft-halfkp",
         "halfkx-activation-crelu",
     ]);
@@ -296,9 +294,9 @@ fn ls_arch_with_halfkx_arch_specific_ft_halfkp_ok() {
 fn ls_only_family_with_multi_ft_ok() {
     let has = lookup(&[
         "mode-family",
-        "ls-arch",
-        "ls-size-1536x16x32",
-        "ls-size-768x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
+        "layerstacks-768x16x32",
         "ft-halfkp",
         "ft-halfka_hm_merged",
     ]);
@@ -309,8 +307,8 @@ fn ls_only_family_with_multi_ft_ok() {
 fn ls_only_universal_with_all_ft_ok() {
     let has = lookup(&[
         "mode-universal",
-        "ls-arch",
-        "ls-size-1536x16x32",
+        "layerstack-arch",
+        "layerstacks-1536x16x32",
         "ft-halfkp",
         "ft-halfka_split",
         "ft-halfka_merged",
@@ -322,14 +320,14 @@ fn ls_only_universal_with_all_ft_ok() {
 
 #[test]
 fn ls_arch_without_ft_rejected() {
-    let has = lookup(&["mode-specific", "ls-arch", "ls-size-1536x16x32"]);
+    let has = lookup(&["mode-specific", "layerstack-arch", "layerstacks-1536x16x32"]);
     let err = validate_feature_combination(&has).unwrap_err();
     assert!(err.contains("ft-* を 1 個以上"));
 }
 
 #[test]
 fn halfkx_specific_with_ft_halfkp_ok() {
-    // HalfKX 単独 (ls-arch なし) では ft-halfkp は valid。
+    // HalfKX 単独 (layerstack-arch なし) では ft-halfkp は valid。
     let has = lookup(&[
         "mode-specific",
         "halfkx-arch",
