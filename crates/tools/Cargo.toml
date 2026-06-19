@@ -72,7 +72,7 @@ rshogi-csa = { path = "../rshogi-csa" }
 
 # Additional dependencies
 sysinfo = "0.37"
-reqwest = { version = "0.12", features = ["blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "system-proxy"] }
 walkdir = "2.5"
 url = "2.5"
 rayon = "1.10"
