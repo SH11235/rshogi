@@ -240,17 +240,6 @@ edition-ls-halfkp-1536x16x32-none = [
   "nnue-progress-diff",
 ]
 
-# === 旧 feature 名 alias ===
-# 旧 build スクリプト・CI 設定がそのまま動くよう alias で互換維持する。
-layerstack-only        = ["ls-arch"]
-layerstacks-1536x16x32 = ["ls-size-1536x16x32"]
-layerstacks-1536x32x32 = ["ls-size-1536x32x32"]
-layerstacks-768x16x32  = ["ls-size-768x16x32"]
-layerstacks-768x8x32   = ["ls-size-768x8x32"]
-layerstacks-512x16x32  = ["ls-size-512x16x32"]
-nnue-psqt              = ["ls-ext-psqt"]
-nnue-threat            = ["ls-ext-threat"]
-
 [lib]
 name = "rshogi_core"
 path = "src/lib.rs"

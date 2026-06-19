@@ -15,7 +15,7 @@ cargo build -p tools --bin label_bench_positions --release
 ```
 
 LayerStacks モデルを評価器に使うため、ビルドはその architecture を含む edition で
-行ってください（既定 feature の `layerstacks-1536x16x32` 系）。
+行ってください（既定 feature の `ls-size-1536x16x32` 系）。
 
 ## 使い方
 

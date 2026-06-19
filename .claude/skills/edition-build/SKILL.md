@@ -138,16 +138,16 @@ feature は 4 カテゴリの組み合わせ:
 
 1. **feature-set** (どれか 1 つ): `ft-halfkp` / `ft-halfka_split` / `ft-halfka_merged`
    / `ft-halfka_hm_split` / `ft-halfka_hm_merged`
-2. **dispatch 除去**: `layerstack-only` (LayerStack モデルでは常に指定。HalfKP/HalfKA
+2. **dispatch 除去**: `ls-arch` (LayerStack モデルでは常に指定。HalfKP/HalfKA
    dispatch を除去し `evaluate_dispatch` を直接呼ぶ)
-3. **L1×L2 dim** (どれか 1 つ): `layerstacks-1536x16x32` (default) / `layerstacks-1536x32x32`
-   / `layerstacks-768x16x32` / `layerstacks-512x16x32`。複数同時指定は cycles +5.5% 退行
-4. **拡張 / 最適化**: `nnue-psqt` / `nnue-threat` / `nnue-progress-diff` (L0=1536 限定、
+3. **L1×L2 dim** (どれか 1 つ): `ls-size-1536x16x32` (default) / `ls-size-1536x32x32`
+   / `ls-size-768x16x32` / `ls-size-512x16x32`。複数同時指定は cycles +5.5% 退行
+4. **拡張 / 最適化**: `ls-ext-psqt` / `ls-ext-threat` / `nnue-progress-diff` (L0=1536 限定、
    L0=768/512 では cache pressure 増加で cycles +2-6% 退行するため指定しない)
 5. **Threat profile** (Threat 使用時に任意で 1 つ): `threat-profile-same-class` (id1) /
    `threat-profile-same-class-major-pawn` (id2) / `threat-profile-cross-side` (id10)。
    除外 pair で次元を削減した変種で、未指定は full (id0)。edition grammar に profile 軸が
-   無いため preset は無く、`nnue-threat` に手動で 1 つ足す。engine と学習 net の profile は
+   無いため preset は無く、`ls-ext-threat` に手動で 1 つ足す。engine と学習 net の profile は
    一致必須 (不一致は EvalFile load 時に reject)。
 
 最新 feature 名は実コード確認:
@@ -163,15 +163,15 @@ Cargo.toml の `edition-*` feature 定義で確認する (meta.toml には featu
 
 | アーキ | preset 名 (`xtask build --edition`) | 手動 build features |
 |---|---|---|
-| LayerStack 1536x16x32 | `ls-halfka_hm_merged-1536x16x32-none` | `layerstack-only,nnue-progress-diff` (default に `layerstacks-1536x16x32` 含む) |
-| 同上 + PSQT | `ls-halfka_hm_merged-1536x16x32-psqt` | `layerstack-only,nnue-psqt,nnue-progress-diff` |
-| 同上 + Threat | `ls-halfka_hm_merged-1536x16x32-threat` | `layerstack-only,nnue-threat,nnue-progress-diff` |
-| 同上 + PSQT + Threat | `ls-halfka_hm_merged-1536x16x32-psqt_threat` | `layerstack-only,nnue-psqt,nnue-threat,nnue-progress-diff` |
-| 同上 + Threat (cross-side, id10) | (preset 無し、profile 軸は手動) | `layerstack-only,nnue-threat,threat-profile-cross-side,nnue-progress-diff` |
-| LayerStack 1536x32x32 (旧 L1=32) | `ls-halfka_hm_merged-1536x32x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-1536x32x32,nnue-progress-diff` |
-| LayerStack 768x16x32 | `ls-halfka_hm_merged-768x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-768x16x32` |
-| LayerStack 512x16x32 | `ls-halfka_hm_merged-512x16x32-none` | `--no-default-features --features search-no-pass-rules,layerstack-only,layerstacks-512x16x32` |
-| LayerStack 1536x16x32 + HalfKP | `ls-halfkp-1536x16x32-none` | `layerstack-only,ft-halfkp,nnue-progress-diff` |
+| LayerStack 1536x16x32 | `ls-halfka_hm_merged-1536x16x32-none` | `ls-arch,nnue-progress-diff` (default に `ls-size-1536x16x32` 含む) |
+| 同上 + PSQT | `ls-halfka_hm_merged-1536x16x32-psqt` | `ls-arch,ls-ext-psqt,nnue-progress-diff` |
+| 同上 + Threat | `ls-halfka_hm_merged-1536x16x32-threat` | `ls-arch,ls-ext-threat,nnue-progress-diff` |
+| 同上 + PSQT + Threat | `ls-halfka_hm_merged-1536x16x32-psqt_threat` | `ls-arch,ls-ext-psqt,ls-ext-threat,nnue-progress-diff` |
+| 同上 + Threat (cross-side, id10) | (preset 無し、profile 軸は手動) | `ls-arch,ls-ext-threat,threat-profile-cross-side,nnue-progress-diff` |
+| LayerStack 1536x32x32 (旧 L1=32) | `ls-halfka_hm_merged-1536x32x32-none` | `--no-default-features --features search-no-pass-rules,ls-arch,ls-size-1536x32x32,nnue-progress-diff` |
+| LayerStack 768x16x32 | `ls-halfka_hm_merged-768x16x32-none` | `--no-default-features --features search-no-pass-rules,ls-arch,ls-size-768x16x32` |
+| LayerStack 512x16x32 | `ls-halfka_hm_merged-512x16x32-none` | `--no-default-features --features search-no-pass-rules,ls-arch,ls-size-512x16x32` |
+| LayerStack 1536x16x32 + HalfKP | `ls-halfkp-1536x16x32-none` | `ls-arch,ft-halfkp,nnue-progress-diff` |
 | 非 LayerStack 旧 (CReLU/SCReLU) | `halfkp-crelu` / `halfka_hm_merged-screlu` 等 | preset 推奨 |
 
 ### 手動 cargo build (preset 外実験)
@@ -179,14 +179,14 @@ Cargo.toml の `edition-*` feature 定義で確認する (meta.toml には featu
 ```bash
 cargo build --profile production -p rshogi-usi \
   --no-default-features \
-  --features search-no-pass-rules,layerstack-only,layerstacks-768x16x32
+  --features search-no-pass-rules,ls-arch,ls-size-768x16x32
 # binary を engines/ にコピーして退避
 cp target/production/rshogi-usi engines/rshogi-usi-custom-768x16x32-<purpose>
 ```
 
 注意:
 
-- `layerstacks-1536x16x32` がデフォルト feature。他 dim 使うには `--no-default-features`
+- `ls-size-1536x16x32` がデフォルト feature。他 dim 使うには `--no-default-features`
   で外し、`search-no-pass-rules` (default 含) を再指定する
 - 過去の `layerstacks-1536` (L1/L2 区別なし) feature は廃止済
 - `cargo build` は同一 profile・同一 crate で feature が異なっても同じ出力パスに書き出す。

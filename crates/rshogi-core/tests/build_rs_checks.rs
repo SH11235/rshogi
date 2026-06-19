@@ -18,22 +18,9 @@ fn empty_features_pass() {
 }
 
 #[test]
-fn unknown_legacy_names_pass() {
-    // バリデータは旧 feature 名そのものを直接見ないことを確認。
-    // (Cargo の alias 展開を経由しないシナリオ。)
-    let has = lookup(&[
-        "layerstack-only",
-        "layerstacks-1536x16x32",
-        "nnue-psqt",
-        "nnue-progress-diff",
-    ]);
-    assert!(validate_feature_combination(&has).is_ok());
-}
-
-#[test]
-fn legacy_alias_resolved_combo_passes() {
-    // 旧 build script `--features layerstack-only,layerstacks-1536x16x32,nnue-psqt,nnue-progress-diff`
-    // を Cargo が alias 展開して build.rs に渡す実際の feature 名集合を再現。
+fn names_without_mode_sentinel_pass() {
+    // mode-* sentinel を含まない build (canonical atomic feature の直接指定など) は
+    // 組合せ妥当性を user 責任とし、validator は Ok を返す。
     let has = lookup(&[
         "ls-arch",
         "ls-size-1536x16x32",
