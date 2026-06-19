@@ -45,9 +45,9 @@ struct Cli {
 enum Cmd {
     /// Floodgateレーティングページから高レートプレイヤー名を取得
     FetchRatings {
-        /// レーティングページ URL
-        #[arg(long, default_value = fg::RATING_PAGE_URL)]
-        url: String,
+        /// レーティングページ URL（未指定なら直近の日付のページを自動取得）
+        #[arg(long)]
+        url: Option<String>,
         /// レーティング閾値（この値以上のプレイヤーを出力）
         #[arg(long, default_value_t = 3900)]
         min_rating: u32,
@@ -57,7 +57,7 @@ enum Cmd {
     },
     /// 00LIST.floodgateインデックスをダウンロード
     FetchIndex {
-        /// Root URL (HTTP only)
+        /// Root URL（既定は HTTPS。http 指定時もサーバ側 301 で https へ誘導）
         #[arg(long, default_value = fg::DEFAULT_ROOT)]
         root: String,
         /// 出力ファイルパス
@@ -69,7 +69,7 @@ enum Cmd {
         /// 00LIST.floodgateのパス
         #[arg(long, default_value = "00LIST.floodgate")]
         index: String,
-        /// Root URL (HTTP only)
+        /// Root URL（既定は HTTPS。http 指定時もサーバ側 301 で https へ誘導）
         #[arg(long, default_value = fg::DEFAULT_ROOT)]
         root: String,
         /// 出力ディレクトリ
@@ -156,7 +156,7 @@ fn main() -> Result<()> {
             url,
             min_rating,
             out,
-        } => run_fetch_ratings(&url, min_rating, &out),
+        } => run_fetch_ratings(url.as_deref(), min_rating, &out),
         Cmd::FetchIndex { root, out } => run_fetch_index(&root, &out),
         Cmd::Download {
             index,
@@ -204,10 +204,19 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_fetch_ratings(url: &str, min_rating: u32, out: &str) -> Result<()> {
-    eprintln!("Fetching rating page from: {url}");
+fn run_fetch_ratings(url: Option<&str>, min_rating: u32, out: &str) -> Result<()> {
     let client = Client::builder().build()?;
-    let html = fg::http_get_text(&client, url)?;
+    let html = match url {
+        Some(u) => {
+            eprintln!("Fetching rating page from: {u}");
+            fg::http_get_text(&client, u)?
+        }
+        None => {
+            let (u, html) = fg::fetch_latest_rating_page(&client)?;
+            eprintln!("Fetched latest rating page: {u}");
+            html
+        }
+    };
     let all = fg::parse_rating_page(&html);
     eprintln!("Found {} players on rating page", all.len());
     let filtered: Vec<_> = all.iter().filter(|(_, r)| *r >= min_rating as f64).collect();
