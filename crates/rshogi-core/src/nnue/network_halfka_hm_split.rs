@@ -1066,15 +1066,18 @@ impl<const L1: usize> FeatureTransformerHalfKaHmSplit<L1> {
 // AffineTransformHalfKaHmSplit - const generics 版アフィン変換（ループ逆転最適化版）
 // =============================================================================
 
-/// アフィン変換層（ループ逆転最適化 + スクランブル重み形式）
+/// アフィン変換層（ループ逆転最適化対応）
 ///
 /// YaneuraOu/Stockfish スタイルの SIMD 最適化を実装。
-/// 重みはスクランブル形式 `weights[input_chunk][output][4]` で保持し、
-/// ループ逆転により入力をブロードキャストして全出力に同時適用する。
+/// 重みの格納レイアウトは `should_use_scrambled_weights()` で決まる:
+/// x86 AVX2 かつ OUTPUT が 8 の倍数、または x86 SSSE3 かつ OUTPUT が 4 の倍数では
+/// スクランブル形式 `weights[input_chunk][output][4]`、それ以外では行優先
+/// `weights[output][input]`。
+/// スクランブル形式ではループ逆転で入力をブロードキャストして全出力に同時適用する。
 pub struct AffineTransformHalfKaHmSplit<const INPUT: usize, const OUTPUT: usize> {
     /// バイアス [OUTPUT]
     pub biases: [i32; OUTPUT],
-    /// 重み（スクランブル形式、64バイトアライン）
+    /// 重み（格納レイアウトは should_use_scrambled_weights() に従う、64バイトアライン）
     pub weights: AlignedBox<i8>,
 }
 
@@ -1082,34 +1085,31 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
     /// パディング済み入力次元（32の倍数）
     const PADDED_INPUT: usize = INPUT.div_ceil(32) * 32;
 
-    // SIMD最適化用の定数・メソッド（AVX2/SSSE3環境でのみコンパイル）
-    #[cfg(any(target_feature = "avx2", target_feature = "ssse3"))]
     /// チャンクサイズ（u8×4 = i32として読む単位）
     const CHUNK_SIZE: usize = 4;
 
-    #[cfg(any(target_feature = "avx2", target_feature = "ssse3"))]
     /// 入力チャンク数
     const NUM_INPUT_CHUNKS: usize = Self::PADDED_INPUT / Self::CHUNK_SIZE;
 
-    #[cfg(any(target_feature = "avx2", target_feature = "ssse3"))]
-    /// スクランブル形式を使用するかどうか
-    /// AVX2: OUTPUT % 8 == 0、SSSE3: OUTPUT % 4 == 0
+    /// 重み格納レイアウトの単一判定。read()/propagate() がすべてこれを参照し、
+    /// 格納時と読み出し時のレイアウト不一致を防ぐ。true のとき重みはスクランブル形式
+    /// （input_chunk-major）で格納・参照される。スクランブル経路を持たない target
+    /// （wasm SIMD / スカラー）では常に false。
     #[inline]
     const fn should_use_scrambled_weights() -> bool {
         if cfg!(all(target_arch = "x86_64", target_feature = "avx2")) {
-            OUTPUT.is_multiple_of(8)
+            OUTPUT.is_multiple_of(8) && OUTPUT > 0
         } else if cfg!(all(
             target_arch = "x86_64",
             target_feature = "ssse3",
             not(target_feature = "avx2")
         )) {
-            OUTPUT.is_multiple_of(4)
+            OUTPUT.is_multiple_of(4) && OUTPUT > 0
         } else {
             false
         }
     }
 
-    #[cfg(any(target_feature = "avx2", target_feature = "ssse3"))]
     /// 重みインデックスのスクランブル変換
     ///
     /// 元のレイアウト: weights[output][input]
@@ -1132,49 +1132,19 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
             *bias = i32::from_le_bytes(buf4);
         }
 
-        // 重みを読み込み（スクランブル形式で格納）
+        // 重みを読み込み。格納レイアウトは should_use_scrambled_weights() の単一判定に従う。
         let weight_size = OUTPUT * Self::PADDED_INPUT;
         let mut weights = AlignedBox::new_zeroed(weight_size);
 
-        // スクランブル形式の場合は変換しながら格納
-        #[cfg(any(
-            all(target_arch = "x86_64", target_feature = "avx2"),
-            all(
-                target_arch = "x86_64",
-                target_feature = "ssse3",
-                not(target_feature = "avx2")
-            )
-        ))]
-        {
-            let mut buf1 = [0u8; 1];
-            for i in 0..weight_size {
-                reader.read_exact(&mut buf1)?;
-                let idx = if Self::should_use_scrambled_weights() {
-                    Self::get_weight_index_scrambled(i)
-                } else {
-                    i
-                };
-                weights[idx] = buf1[0] as i8;
-            }
-        }
-
-        // スカラー環境: 標準形式で格納
-        #[cfg(not(any(
-            all(target_arch = "x86_64", target_feature = "avx2"),
-            all(
-                target_arch = "x86_64",
-                target_feature = "ssse3",
-                not(target_feature = "avx2")
-            )
-        )))]
-        {
-            let mut row_buf = vec![0u8; Self::PADDED_INPUT];
-            for o in 0..OUTPUT {
-                reader.read_exact(&mut row_buf)?;
-                for i in 0..Self::PADDED_INPUT {
-                    weights[o * Self::PADDED_INPUT + i] = row_buf[i] as i8;
-                }
-            }
+        let mut buf1 = [0u8; 1];
+        for i in 0..weight_size {
+            reader.read_exact(&mut buf1)?;
+            let idx = if Self::should_use_scrambled_weights() {
+                Self::get_weight_index_scrambled(i)
+            } else {
+                i
+            };
+            weights[idx] = buf1[0] as i8;
         }
 
         Ok(Self { biases, weights })
@@ -1205,6 +1175,8 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
         // WASM SIMD128: 標準形式の重みで内積
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
+            // 本経路は重みを行優先で読む。スクランブル格納と共存しないことを単一判定で保証する。
+            const { assert!(!Self::should_use_scrambled_weights()) };
             // SAFETY:
             // - WASM SIMD128 はアライメント不要（v128_load/v128_store は任意アドレスで動作。
             //   biases は [i32; OUTPUT] でアライメント4バイトだが WASM では制約なし）
@@ -1305,6 +1277,8 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
         }
 
         // スカラー fallback（avx2 は ssse3 を暗黙に含むが、意図を明示するため列挙）
+        // スクランブル / 行優先のどちらの格納でも正しく読めるよう、weight index は
+        // should_use_scrambled_weights() の単一判定で解決する。
         #[cfg(not(any(
             all(target_arch = "x86_64", target_feature = "avx2"),
             all(target_arch = "x86_64", target_feature = "ssse3"),
@@ -1313,9 +1287,14 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
         {
             output.copy_from_slice(&self.biases);
             for (j, out) in output.iter_mut().enumerate() {
-                let weight_offset = j * Self::PADDED_INPUT;
                 for (i, &in_val) in input.iter().enumerate().take(INPUT) {
-                    *out += self.weights[weight_offset + i] as i32 * in_val as i32;
+                    let logical = j * Self::PADDED_INPUT + i;
+                    let weight_idx = if Self::should_use_scrambled_weights() {
+                        Self::get_weight_index_scrambled(logical)
+                    } else {
+                        logical
+                    };
+                    *out += self.weights[weight_idx] as i32 * in_val as i32;
                 }
             }
         }
@@ -1333,8 +1312,8 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
         unsafe {
             use std::arch::x86_64::*;
 
-            // OUTPUT % 8 == 0 の場合のみループ逆転を使用
-            if OUTPUT.is_multiple_of(8) {
+            // スクランブル格納時（AVX2 では OUTPUT % 8 == 0）のみループ逆転を使用
+            if Self::should_use_scrambled_weights() {
                 const MAX_REGS: usize = 128; // 最大 1024 出力まで対応
                 let num_regs = OUTPUT / 8;
                 debug_assert!(num_regs <= MAX_REGS);
@@ -1411,8 +1390,8 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
         unsafe {
             use std::arch::x86_64::*;
 
-            // OUTPUT が 4 の倍数 ∧ 非ゼロの場合のみループ逆転を使用
-            if OUTPUT.is_multiple_of(4) && OUTPUT > 0 {
+            // スクランブル格納時（SSSE3 では OUTPUT % 4 == 0 ∧ 非ゼロ）のみループ逆転を使用
+            if Self::should_use_scrambled_weights() {
                 const MAX_REGS: usize = 256; // 最大 1024 出力まで対応
                 let num_regs = OUTPUT / 4;
                 debug_assert!(num_regs <= MAX_REGS);

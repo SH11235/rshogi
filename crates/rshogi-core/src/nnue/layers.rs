@@ -241,7 +241,7 @@ pub(crate) unsafe fn haddx4(
 pub struct AffineTransform<const INPUT_DIM: usize, const OUTPUT_DIM: usize> {
     /// バイアス
     pub biases: [i32; OUTPUT_DIM],
-    /// 重み（転置形式で保持、64バイトアライン）
+    /// 重み（格納レイアウトは should_use_scrambled_weights() に従う、64バイトアライン）
     pub weights: AlignedBox<i8>,
 }
 
@@ -258,43 +258,27 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
     /// チャンクサイズ（u8×4 = i32として読む単位）
     /// スクランブル形式重みとループ逆転最適化用
-    #[cfg(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(
-            target_arch = "x86_64",
-            target_feature = "ssse3",
-            not(target_feature = "avx2")
-        )
-    ))]
     const CHUNK_SIZE: usize = 4;
 
     /// 入力チャンク数（ループ逆転最適化用）
-    #[cfg(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(
-            target_arch = "x86_64",
-            target_feature = "ssse3",
-            not(target_feature = "avx2")
-        )
-    ))]
     const NUM_INPUT_CHUNKS: usize = Self::PADDED_INPUT / Self::CHUNK_SIZE;
 
-    /// スクランブル形式のウェイトを使用するかどうか
-    /// AVX2: OUTPUT_DIM % 8 == 0、SSSE3: OUTPUT_DIM % 4 == 0 の場合に使用
-    #[cfg(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(
-            target_arch = "x86_64",
-            target_feature = "ssse3",
-            not(target_feature = "avx2")
-        )
-    ))]
+    /// 重み格納レイアウトの単一判定。`read`/`read_leb128`/`propagate` が
+    /// すべてこれを参照し、格納時と読み出し時のレイアウト不一致を防ぐ。
+    /// true のとき重みはスクランブル形式（input_chunk-major）で格納・参照される。
+    /// スクランブル経路を持たない target（wasm SIMD / SSE2 / スカラー）では常に false。
     #[inline]
     const fn should_use_scrambled_weights() -> bool {
         if cfg!(all(target_arch = "x86_64", target_feature = "avx2")) {
             OUTPUT_DIM.is_multiple_of(8) && OUTPUT_DIM > 0
-        } else {
+        } else if cfg!(all(
+            target_arch = "x86_64",
+            target_feature = "ssse3",
+            not(target_feature = "avx2")
+        )) {
             OUTPUT_DIM.is_multiple_of(4) && OUTPUT_DIM > 0
+        } else {
+            false
         }
     }
 
@@ -306,26 +290,10 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     ///
     /// i = output * PADDED_INPUT + input の元インデックスに対して
     /// スクランブル後のインデックスを返す
-    #[cfg(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(
-            target_arch = "x86_64",
-            target_feature = "ssse3",
-            not(target_feature = "avx2")
-        )
-    ))]
     #[inline]
     const fn get_weight_index_scrambled(i: usize) -> usize {
-        // i = output * PADDED_INPUT + input
-        // output = i / PADDED_INPUT
-        // input = i % PADDED_INPUT
-        // input_chunk = input / CHUNK_SIZE
-        // byte_in_chunk = input % CHUNK_SIZE
-        //
         // 変換後: input_chunk * OUTPUT_DIM * CHUNK_SIZE + output * CHUNK_SIZE + byte_in_chunk
-        (i / Self::CHUNK_SIZE) % (Self::PADDED_INPUT / Self::CHUNK_SIZE)
-            * OUTPUT_DIM
-            * Self::CHUNK_SIZE
+        (i / Self::CHUNK_SIZE) % Self::NUM_INPUT_CHUNKS * OUTPUT_DIM * Self::CHUNK_SIZE
             + i / Self::PADDED_INPUT * Self::CHUNK_SIZE
             + i % Self::CHUNK_SIZE
     }
@@ -349,45 +317,19 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         }
 
         // 重みを読み込み（64バイトアラインで確保）
+        // 格納レイアウトは should_use_scrambled_weights() の単一判定に従う。
         let weight_size = OUTPUT_DIM * Self::PADDED_INPUT;
         let mut weights = AlignedBox::new_zeroed(weight_size);
         let mut buf1 = [0u8; 1];
 
-        // AVX2: OUTPUT_DIM % 8 == 0、SSSE3: OUTPUT_DIM % 4 == 0 の場合はスクランブル形式で格納
-        #[cfg(any(
-            all(target_arch = "x86_64", target_feature = "avx2"),
-            all(
-                target_arch = "x86_64",
-                target_feature = "ssse3",
-                not(target_feature = "avx2")
-            )
-        ))]
-        {
-            for i in 0..weight_size {
-                reader.read_exact(&mut buf1)?;
-                let idx = if Self::should_use_scrambled_weights() {
-                    Self::get_weight_index_scrambled(i)
-                } else {
-                    i
-                };
-                weights[idx] = buf1[0] as i8;
-            }
-        }
-
-        // 非AVX2/非SSSE3環境: 元の順序で格納
-        #[cfg(not(any(
-            all(target_arch = "x86_64", target_feature = "avx2"),
-            all(
-                target_arch = "x86_64",
-                target_feature = "ssse3",
-                not(target_feature = "avx2")
-            )
-        )))]
-        {
-            for i in 0..weight_size {
-                reader.read_exact(&mut buf1)?;
-                weights[i] = buf1[0] as i8;
-            }
+        for i in 0..weight_size {
+            reader.read_exact(&mut buf1)?;
+            let idx = if Self::should_use_scrambled_weights() {
+                Self::get_weight_index_scrambled(i)
+            } else {
+                i
+            };
+            weights[idx] = buf1[0] as i8;
         }
 
         Ok(Self { biases, weights })
@@ -405,44 +347,18 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         }
 
         // 重みを読み込み（64バイトアラインで確保）
+        // 格納レイアウトは should_use_scrambled_weights() の単一判定に従う。
         let weight_size = OUTPUT_DIM * Self::PADDED_INPUT;
         let mut weights = AlignedBox::new_zeroed(weight_size);
 
-        // AVX2/SSSE3: スクランブル形式で格納
-        #[cfg(any(
-            all(target_arch = "x86_64", target_feature = "avx2"),
-            all(
-                target_arch = "x86_64",
-                target_feature = "ssse3",
-                not(target_feature = "avx2")
-            )
-        ))]
-        {
-            for i in 0..weight_size {
-                let val = read_signed_leb128(reader)?;
-                let idx = if Self::should_use_scrambled_weights() {
-                    Self::get_weight_index_scrambled(i)
-                } else {
-                    i
-                };
-                weights[idx] = val as i8;
-            }
-        }
-
-        // 非AVX2/非SSSE3環境: 元の順序で格納
-        #[cfg(not(any(
-            all(target_arch = "x86_64", target_feature = "avx2"),
-            all(
-                target_arch = "x86_64",
-                target_feature = "ssse3",
-                not(target_feature = "avx2")
-            )
-        )))]
-        {
-            for i in 0..weight_size {
-                let val = read_signed_leb128(reader)?;
-                weights[i] = val as i8;
-            }
+        for i in 0..weight_size {
+            let val = read_signed_leb128(reader)?;
+            let idx = if Self::should_use_scrambled_weights() {
+                Self::get_weight_index_scrambled(i)
+            } else {
+                i
+            };
+            weights[idx] = val as i8;
         }
 
         Ok(Self { biases, weights })
@@ -512,10 +428,12 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             unsafe {
                 use std::arch::x86_64::*;
 
-                // OUTPUT_DIM % 16 == 0 の場合: ループ逆転最適化版（AVX-512）
-                // 入力をブロードキャストして全出力に同時適用
+                // スクランブル格納かつ OUTPUT_DIM % 16 == 0 の場合のみループ逆転最適化版（AVX-512）。
+                // should_use_scrambled_weights() を && 条件にすることで、行優先格納時に
+                // スクランブル前提の本経路へ落ちないことを単一判定で保証する（%16 ⊂ %8 なので
+                // スクランブル成立時は本条件 == %16）。
                 #[allow(clippy::needless_range_loop)]
-                if OUTPUT_DIM.is_multiple_of(16) && OUTPUT_DIM > 0 {
+                if Self::should_use_scrambled_weights() && OUTPUT_DIM.is_multiple_of(16) {
                     // 出力レジスタ数（16出力/レジスタ）
                     const MAX_REGS: usize = 64; // 最大1024出力まで対応
                     let num_regs = OUTPUT_DIM / 16;
@@ -580,13 +498,13 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             unsafe {
                 use std::arch::x86_64::*;
 
-                // OUTPUT_DIM % 8 == 0 の場合: ループ逆転最適化版
-                // 入力をブロードキャストして全出力に同時適用
+                // スクランブル格納時（AVX2 では OUTPUT_DIM % 8 == 0）: ループ逆転最適化版。
+                // それ以外（行優先格納）はフォールスルーして下の行優先ループで処理する。
                 //
                 // 疎入力処理は密度40%では効果なし（find_nnzオーバーヘッドが利点を上回る）
                 // 計測結果: 疎入力版 634K NPS vs 密版 655K NPS
                 #[allow(clippy::needless_range_loop)]
-                if OUTPUT_DIM.is_multiple_of(8) && OUTPUT_DIM > 0 {
+                if Self::should_use_scrambled_weights() {
                     // 出力レジスタ数（8出力/レジスタ）
                     const MAX_REGS: usize = 128; // 最大1024出力まで対応
                     let num_regs = OUTPUT_DIM / 8;
@@ -674,10 +592,10 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             unsafe {
                 use std::arch::x86_64::*;
 
-                // OUTPUT_DIM % 4 == 0 の場合: ループ逆転最適化版
-                // 入力をブロードキャストして全出力に同時適用
+                // スクランブル格納時（SSSE3 では OUTPUT_DIM % 4 == 0）: ループ逆転最適化版。
+                // それ以外（行優先格納）はフォールスルーして下の行優先ループで処理する。
                 #[allow(clippy::needless_range_loop)]
-                if OUTPUT_DIM.is_multiple_of(4) && OUTPUT_DIM > 0 {
+                if Self::should_use_scrambled_weights() {
                     // 出力レジスタ数（4出力/レジスタ）
                     const MAX_REGS: usize = 256; // 最大1024出力まで対応
                     let num_regs = OUTPUT_DIM / 4;
@@ -752,6 +670,8 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             not(target_feature = "ssse3")
         ))]
         {
+            // 本経路は重みを行優先で読む。スクランブル格納と共存しないことを単一判定で保証する。
+            const { assert!(!Self::should_use_scrambled_weights()) };
             // SAFETY:
             // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
             // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
@@ -814,6 +734,8 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         // WASM SIMD128
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
+            // 本経路は重みを行優先で読む。スクランブル格納と共存しないことを単一判定で保証する。
+            const { assert!(!Self::should_use_scrambled_weights()) };
             // SAFETY:
             // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
             // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
@@ -894,6 +816,8 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         }
 
         // スカラーフォールバック
+        // スクランブル / 行優先のどちらの格納でも正しく読めるよう、weight index は
+        // should_use_scrambled_weights() の単一判定で解決する（x86 では本経路は到達不能）。
         #[allow(unreachable_code)]
         {
             // バイアスで初期化
@@ -903,7 +827,12 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             for (i, &in_byte) in input.iter().enumerate().take(INPUT_DIM) {
                 let in_val = in_byte as i32;
                 for (j, out) in output.iter_mut().enumerate() {
-                    let weight_idx = j * Self::PADDED_INPUT + i;
+                    let logical = j * Self::PADDED_INPUT + i;
+                    let weight_idx = if Self::should_use_scrambled_weights() {
+                        Self::get_weight_index_scrambled(logical)
+                    } else {
+                        logical
+                    };
                     *out += self.weights[weight_idx] as i32 * in_val;
                 }
             }
@@ -1177,28 +1106,11 @@ mod tests {
         // スクランブル形式が有効な場合は変換して設定
         for i in 0..32 {
             let raw_idx = i * 512 + i; // 元のインデックス: weights[output][input]
-            #[cfg(any(
-                all(target_arch = "x86_64", target_feature = "avx2"),
-                all(
-                    target_arch = "x86_64",
-                    target_feature = "ssse3",
-                    not(target_feature = "avx2")
-                )
-            ))]
             let idx = if AffineTransform::<512, 32>::should_use_scrambled_weights() {
                 AffineTransform::<512, 32>::get_weight_index_scrambled(raw_idx)
             } else {
                 raw_idx
             };
-            #[cfg(not(any(
-                all(target_arch = "x86_64", target_feature = "avx2"),
-                all(
-                    target_arch = "x86_64",
-                    target_feature = "ssse3",
-                    not(target_feature = "avx2")
-                )
-            )))]
-            let idx = raw_idx;
             weights[idx] = 1;
         }
 
