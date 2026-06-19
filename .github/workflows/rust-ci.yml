@@ -228,8 +228,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
-    # SDE エミュレーションはネイティブ比で大幅に遅いため、初回実測まで広めに取る。
-    timeout-minutes: 45
+    # SDE エミュレーションは遅いが対象は rshogi-core の単体テストのみで短時間。余裕を見た上限。
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -245,12 +245,8 @@ jobs:
             chip: icx
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - name: Install mold linker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mold clang
-          mold --version || true
-          clang --version || true
+      # mold linker は .cargo/config.toml で wired されていないため install しない
+      # (rshogi-core のみのリンクで効果が無く runner setup 時間を浪費するだけ)。
       - uses: dtolnay/rust-toolchain@stable
       - name: Setup Intel SDE
         uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
