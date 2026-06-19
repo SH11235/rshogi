@@ -596,6 +596,58 @@ mod tests {
         }
     }
 
+    /// hibernation evict を跨いだ cold start で replay 直後の `turn_started_at_ms`
+    /// は最後の手の歴史的時刻のまま残る。張り直さずに次の手を指すと、復元時刻と
+    /// の差（evict 滞留ぶん = 数十分）がそのまま elapsed になり即 `TimeUp` する。
+    /// この対照テストはバグ条件が実際に成立することを固定する。
+    #[test]
+    fn cold_start_without_reset_spuriously_times_out() {
+        let mut cfg = baseline_config();
+        cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
+        let moves = vec![move_row(1, "black", "+7776FU,T3", 3_000)];
+        let ReplaySummary::Restored { mut core } = replay_core_room(&cfg, &moves) else {
+            panic!("expected Restored");
+        };
+        // 黒の手の 30 分後に白が指す（白番の長考中に DO が evict された状況）。
+        let resumed_at_ms = PLAY_STARTED_AT_MS + 30 * 60_000;
+        let result = core
+            .handle_line(Color::White, &CsaLine::new("-3334FU,T1"), resumed_at_ms + 1_000)
+            .expect("handle_line itself must succeed");
+        assert!(
+            matches!(
+                result.outcome,
+                HandleOutcome::GameEnded(GameResult::TimeUp {
+                    loser: Color::White
+                })
+            ),
+            "張り直し無しでは復元滞留ぶんで即 TimeUp するはず: {:?}",
+            result.outcome
+        );
+    }
+
+    /// `reset_turn_started_at(now)` を復元直後に呼べば、計測起点が現在時刻に
+    /// 張り直され、復元後の最初の手が evict 滞留ぶんで誤 `TimeUp` しない。
+    #[test]
+    fn cold_start_reset_turn_started_at_avoids_spurious_time_up() {
+        let mut cfg = baseline_config();
+        cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
+        let moves = vec![move_row(1, "black", "+7776FU,T3", 3_000)];
+        let ReplaySummary::Restored { mut core } = replay_core_room(&cfg, &moves) else {
+            panic!("expected Restored");
+        };
+        let resumed_at_ms = PLAY_STARTED_AT_MS + 30 * 60_000;
+        core.reset_turn_started_at(resumed_at_ms);
+        let result = core
+            .handle_line(Color::White, &CsaLine::new("-3334FU,T1"), resumed_at_ms + 1_000)
+            .expect("post-restore move must not spuriously time out");
+        match result.outcome {
+            HandleOutcome::MoveAccepted { next_turn, .. } => {
+                assert_eq!(next_turn, Color::Black);
+            }
+            other => panic!("expected MoveAccepted, got {other:?}"),
+        }
+    }
+
     /// `MoveRow::at_ms` が 0 未満や `play_started_at_ms` より小さい異常値でも、
     /// `replay_core_room` が `at_ms.max(0).max(play_started_at_ms)` で正規化する
     /// 結果として時計が巻き戻らないことを直接検証する。`directly_played` ヘルパに
