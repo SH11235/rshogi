@@ -1881,6 +1881,71 @@ pub type HalfKaHmSplit768Pairwise = NetworkHalfKaHmSplit<768, 1536, 768, 16, 64,
 mod tests {
     use super::*;
 
+    /// read→propagate を、SIMD レイアウト（スクランブル形式
+    /// `weights[input_chunk][output][4]`）に依存しない行優先スカラー参照と bit 一致で
+    /// 照合し、重み格納レイアウトと読み出しのドリフトを検出する。OUTPUT=8/4 は
+    /// スクランブル経路（AVX2 は %8、SSSE3 は %4）、OUTPUT=1 は行優先（出力層）、
+    /// INPUT が 32 の非倍数は PADDED に padding 列が生じる境界を踏む。
+    macro_rules! affine_reference_test {
+        ($name:ident, $in:literal, $out:literal) => {
+            #[test]
+            fn $name() {
+                const INPUT_DIM: usize = $in;
+                const OUTPUT_DIM: usize = $out;
+                const PADDED: usize = crate::nnue::layers::padded_input(INPUT_DIM);
+
+                let mut biases = [0i32; OUTPUT_DIM];
+                let mut logical = vec![0i8; OUTPUT_DIM * PADDED];
+                let mut bytes: Vec<u8> = Vec::new();
+                for o in 0..OUTPUT_DIM {
+                    let b = (o as i32) * 1000 - 3000;
+                    biases[o] = b;
+                    bytes.extend_from_slice(&b.to_le_bytes());
+                }
+                for o in 0..OUTPUT_DIM {
+                    for inp in 0..PADDED {
+                        // padding 列（inp >= INPUT_DIM）は 0、実重みは ±25 程度に散らす
+                        let w = if inp < INPUT_DIM {
+                            (((o * 31 + inp * 7) % 51) as i32 - 25) as i8
+                        } else {
+                            0
+                        };
+                        logical[o * PADDED + inp] = w;
+                        bytes.push(w as u8);
+                    }
+                }
+
+                let transform =
+                    AffineTransformHalfKaHmSplit::<INPUT_DIM, OUTPUT_DIM>::read(&mut &bytes[..])
+                        .unwrap();
+
+                let mut input = crate::nnue::accumulator::Aligned([0u8; PADDED]);
+                for inp in 0..INPUT_DIM {
+                    input.0[inp] = ((inp * 13 + 5) % 128) as u8;
+                }
+
+                let mut expected = [0i32; OUTPUT_DIM];
+                for o in 0..OUTPUT_DIM {
+                    let mut acc = biases[o];
+                    for inp in 0..INPUT_DIM {
+                        acc += logical[o * PADDED + inp] as i32 * input.0[inp] as i32;
+                    }
+                    expected[o] = acc;
+                }
+
+                let mut output = [0i32; OUTPUT_DIM];
+                transform.propagate(&input.0, &mut output);
+
+                assert_eq!(output, expected);
+            }
+        };
+    }
+
+    affine_reference_test!(test_affine_reference_halfka_hm_split_256x8, 256, 8);
+    affine_reference_test!(test_affine_reference_halfka_hm_split_512x4, 512, 4);
+    affine_reference_test!(test_affine_reference_halfka_hm_split_512x1, 512, 1);
+    affine_reference_test!(test_affine_reference_halfka_hm_split_760x8, 760, 8);
+
     #[test]
     fn test_accumulator_halfka_256() {
         let mut acc = AccumulatorHalfKaHmSplit::<256>::new();

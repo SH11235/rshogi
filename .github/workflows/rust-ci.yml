@@ -332,11 +332,11 @@ jobs:
           # host / wasm32-unknown キャッシュと混在させないため専用 namespace を確保する。
           shared-key: wasm32-wasip1
       - name: Run NNUE layout tests on wasm (SIMD128 path)
-        run: cargo test -p rshogi-core nnue::layers --target wasm32-wasip1
+        run: cargo test -p rshogi-core affine_reference --target wasm32-wasip1
         env:
           RUSTFLAGS: "-C target-feature=+simd128"
       - name: Run NNUE layout tests on wasm (scalar fallback)
-        run: cargo test -p rshogi-core nnue::layers --target wasm32-wasip1
+        run: cargo test -p rshogi-core affine_reference --target wasm32-wasip1
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
