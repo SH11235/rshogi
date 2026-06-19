@@ -14,14 +14,10 @@ pub(crate) const fn padded_input(input_dim: usize) -> usize {
 }
 
 /// AVX2での水平加算（i32×8 → i32）
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    not(all(
-        target_feature = "avx512f",
-        any(target_feature = "avx512vnni", target_feature = "avx512bw")
-    ))
-))]
+///
+/// AVX-512 ビルドでも propagate の AVX2 フォールスルー経路から参照されるため
+/// compile-in する（_mm256 命令のみで avx512 ビルドでも利用可能）。
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
 unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
     // SAFETY: 呼び出し側が avx2 フィーチャを保証する
@@ -92,14 +88,9 @@ unsafe fn m512_add_dpbusd_epi32(
 /// AVX2用 DPBUSD エミュレーション（u8×i8→i32積和演算）
 ///
 /// VNNI非対応CPU向け。`maddubs` + `madd` の2命令で積和演算を実行。
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    not(all(
-        target_feature = "avx512f",
-        any(target_feature = "avx512vnni", target_feature = "avx512bw")
-    ))
-))]
+/// AVX-512 ビルドでも propagate の AVX2 フォールスルー経路から参照されるため
+/// compile-in する。
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
 unsafe fn m256_add_dpbusd_epi32(
     acc: &mut std::arch::x86_64::__m256i,
@@ -573,14 +564,11 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
         }
 
         // AVX2: 256bit = 32 x u8/i8
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx2",
-            not(all(
-                target_feature = "avx512f",
-                any(target_feature = "avx512vnni", target_feature = "avx512bw")
-            ))
-        ))]
+        // AVX-512 ビルドでも compile-in する。AVX-512 経路は OUTPUT_DIM % 16 == 0 のみ
+        // 処理して return するため、それ以外（例 OUTPUT_DIM=8）はここへフォールスルーする。
+        // これを not(avx512) で除外するとフォールスルー先が消え、スクランブル重みを
+        // 行優先で誤読する scalar fallback に落ちて誤った積和になる。
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             // SAFETY:
             // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
@@ -1233,4 +1221,71 @@ mod tests {
             assert_eq!(val, 10 + (i + 1) as i32, "mismatch at index {i}");
         }
     }
+
+    /// propagate の出力を、SIMD レイアウト（スクランブル形式）に依存しない
+    /// 行優先スカラー参照と bit 一致で照合する。
+    ///
+    /// OUTPUT_DIM が 16 の倍数でない L1（例 768x8）は AVX-512 経路では
+    /// %16==0 分岐に入れず AVX2 経路へフォールスルーする。AVX-512 ビルドで
+    /// その AVX2 経路が compile-out されるとスクランブル重みを行優先で誤読する
+    /// スカラーに落ちるため、その境界を固定する。
+    macro_rules! affine_reference_test {
+        ($name:ident, $in:literal, $out:literal) => {
+            #[test]
+            fn $name() {
+                const INPUT_DIM: usize = $in;
+                const OUTPUT_DIM: usize = $out;
+                const PADDED: usize = padded_input(INPUT_DIM);
+
+                let mut biases = [0i32; OUTPUT_DIM];
+                let mut logical = vec![0i8; OUTPUT_DIM * PADDED];
+                let mut bytes: Vec<u8> = Vec::new();
+                for o in 0..OUTPUT_DIM {
+                    let b = (o as i32) * 1000 - 3000;
+                    biases[o] = b;
+                    bytes.extend_from_slice(&b.to_le_bytes());
+                }
+                for o in 0..OUTPUT_DIM {
+                    for inp in 0..PADDED {
+                        // padding（inp >= INPUT_DIM）は 0、実重みは ±25 程度に散らす
+                        let w = if inp < INPUT_DIM {
+                            (((o * 31 + inp * 7) % 51) as i32 - 25) as i8
+                        } else {
+                            0
+                        };
+                        logical[o * PADDED + inp] = w;
+                        bytes.push(w as u8);
+                    }
+                }
+
+                let transform =
+                    AffineTransform::<INPUT_DIM, OUTPUT_DIM>::read(&mut &bytes[..]).unwrap();
+
+                let mut input = Aligned([0u8; PADDED]);
+                for inp in 0..INPUT_DIM {
+                    input.0[inp] = ((inp * 13 + 5) % 128) as u8;
+                }
+
+                let mut expected = [0i32; OUTPUT_DIM];
+                for o in 0..OUTPUT_DIM {
+                    let mut acc = biases[o];
+                    for inp in 0..INPUT_DIM {
+                        acc += logical[o * PADDED + inp] as i32 * input.0[inp] as i32;
+                    }
+                    expected[o] = acc;
+                }
+
+                let mut output = [0i32; OUTPUT_DIM];
+                transform.propagate(&input.0, &mut output);
+
+                assert_eq!(output, expected);
+            }
+        };
+    }
+
+    affine_reference_test!(test_affine_reference_256x8, 256, 8);
+    affine_reference_test!(test_affine_reference_768x8, 768, 8);
+    affine_reference_test!(test_affine_reference_1536x16, 1536, 16);
+    // INPUT_DIM が 32 の倍数でなく PADDED に padding 列が生じる境界も照合する
+    affine_reference_test!(test_affine_reference_760x8, 760, 8);
 }
