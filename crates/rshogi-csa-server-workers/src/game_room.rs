@@ -2506,15 +2506,7 @@ impl GameRoom {
             ReplaySummary::Restored { core } => {
                 // `core` は `Box<CoreRoom>` で返るためここで unbox する
                 // (`ReplaySummary` の variant 間サイズ差対策、persistence.rs 参照)。
-                let mut core = *core;
-                // replay 後の turn_started_at_ms は最後の手の歴史的時刻のまま。
-                // hibernation evict を跨いだ復元で最初の手が即 TimeUp になるのを
-                // 防ぐため、計測起点を現在時刻へ張り直す。
-                // NOTE: 復元では turn alarm を再予約していないため、最後の手の時点で
-                // set_alarm した絶対 deadline が evict 中に発火し force_time_up する
-                // 経路はこれだけでは塞げない (別経路として要対処)。
-                core.reset_turn_started_at(self.now_ms());
-                *self.core.borrow_mut() = Some(core);
+                *self.core.borrow_mut() = Some(*core);
                 *self.config.borrow_mut() = Some(cfg);
             }
             ReplaySummary::InvalidSfen { reason } => {
@@ -2546,6 +2538,21 @@ impl GameRoom {
         // live-games-index put が抜けたまま hibernation で isolate が落ちた
         // ケースを救済する (https://github.com/SH11235/rshogi/issues/549 §5)。
         self.retry_live_games_index_if_needed().await?;
+
+        // replay 後の turn_started_at_ms は最後の手の歴史的時刻のまま。hibernation
+        // evict を跨いだ復元で最初の手が即 TimeUp になるのを防ぐため、計測起点を
+        // 現在時刻へ張り直す。上の retry I/O より後に行うのは、cold start が対局者の
+        // 着手で起きた場合、retry の R2 待ち時間がそのまま次手の elapsed に課金され、
+        // 短い byoyomi / msec 時計では復元 I/O だけで TimeUp になり得るため。
+        // ここに到達した時点で core が Some なのは直前の replay が Restored だった
+        // 場合のみ (warm path は早期 return 済み)。Playing 以外は setter 側で no-op。
+        // NOTE: 復元では turn alarm を再予約していないため、最後の手の時点で set_alarm
+        // した絶対 deadline が evict 中に発火し force_time_up する経路はこれだけでは
+        // 塞げない (別経路として要対処)。
+        let now_ms = self.now_ms();
+        if let Some(core) = self.core.borrow_mut().as_mut() {
+            core.reset_turn_started_at(now_ms);
+        }
         Ok(())
     }
 
