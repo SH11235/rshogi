@@ -328,6 +328,23 @@ impl GameRoom {
         }
     }
 
+    /// 現在手番が `now_ms` 時点で残している持ち時間 (ms)。`0` は時間切れ。
+    /// `Playing` 以外は `None`。
+    ///
+    /// turn alarm 発火時に「evict 滞留での早発火か、実際の時間切れか」を区別する
+    /// ために使う。`reset_turn_started_at` で cold-start 復元時に起点が `now` へ
+    /// 張り直されるため、evict 早発火では満額の残時間が返り、warm な真の時間切れ
+    /// （alarm は `turn_budget + margin + safety` 後に発火）では `0` が返る。
+    pub fn current_turn_remaining_ms(&self, now_ms: u64) -> Option<u64> {
+        if !matches!(self.status, GameStatus::Playing) {
+            return None;
+        }
+        let started = self.turn_started_at_ms.unwrap_or(now_ms);
+        let elapsed = now_ms.saturating_sub(started);
+        let budget = self.clock.turn_budget_ms(self.current_turn()).max(0) as u64;
+        Some(budget.saturating_sub(elapsed))
+    }
+
     /// 切断を検出したときに呼ぶ。再接続猶予 0 秒で即時 `#ABNORMAL` 確定。
     ///
     /// 勝者確定は「対局中の切断」に限り、それ以前
@@ -747,6 +764,27 @@ mod tests {
         agree_both(&mut room);
         room.reset_turn_started_at(67_890);
         assert_eq!(room.turn_started_at_ms, Some(67_890));
+    }
+
+    #[test]
+    fn current_turn_remaining_ms_is_none_before_start() {
+        let room = make_room();
+        assert_eq!(room.current_turn_remaining_ms(0), None);
+    }
+
+    #[test]
+    fn current_turn_remaining_ms_reflects_elapsed_and_zero_on_timeup() {
+        let mut room = make_room();
+        agree_both(&mut room); // now=0 で START → 現手番の計測起点も 0、満額 budget
+        let budget = room.clock_turn_budget_ms(room.current_turn()).max(0) as u64;
+        assert!(budget > 0);
+        // 経過 0 → 残 == budget（evict 早発火: 復元で起点が now に張り直された状況に相当）
+        assert_eq!(room.current_turn_remaining_ms(0), Some(budget));
+        // 経過 < budget → 残 = budget - elapsed
+        assert_eq!(room.current_turn_remaining_ms(budget / 2), Some(budget - budget / 2));
+        // budget 到達/超過 → 0（warm な真の時間切れ: alarm は budget+margin+safety 後に発火）
+        assert_eq!(room.current_turn_remaining_ms(budget), Some(0));
+        assert_eq!(room.current_turn_remaining_ms(budget + 5_000), Some(0));
     }
 
     #[test]

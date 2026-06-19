@@ -509,6 +509,33 @@ impl DurableObject for GameRoom {
         }
 
         self.ensure_core_loaded().await?;
+
+        // hibernation evict を跨ぐと、最後の手で予約した絶対 deadline alarm が evict
+        // 中に到来して発火し得る。cold-start 復元では ensure_core_loaded が
+        // turn_started_at を now へ張り直すため、まだ残時間があれば「実際の時間切れ
+        // ではなく evict 滞留での早発火」とみなし、force_time_up せず残時間で alarm を
+        // 張り直す。warm な真の時間切れでは alarm は turn_budget + margin + safety 後に
+        // 発火し、残時間は 0 になるのでこの分岐を通らない。
+        let now_ms = self.now_ms();
+        let remaining_ms = {
+            let borrow = self.core.borrow();
+            let Some(core) = borrow.as_ref() else {
+                return Response::ok("no core");
+            };
+            core.current_turn_remaining_ms(now_ms)
+        };
+        if let Some(remaining) = remaining_ms.filter(|&r| r > 0) {
+            let margin_ms = self
+                .config
+                .borrow()
+                .as_ref()
+                .map(|c| c.time_margin_ms)
+                .unwrap_or(DEFAULT_TIME_MARGIN_MS);
+            let total = remaining.saturating_add(margin_ms).saturating_add(ALARM_SAFETY_MS);
+            self.state.storage().set_alarm(Duration::from_millis(total)).await?;
+            return Response::ok("turn_alarm rescheduled after cold restart");
+        }
+
         let outcome = {
             let mut borrow = self.core.borrow_mut();
             let Some(core) = borrow.as_mut() else {
@@ -2546,9 +2573,8 @@ impl GameRoom {
         // 短い byoyomi / msec 時計では復元 I/O だけで TimeUp になり得るため。
         // ここに到達した時点で core が Some なのは直前の replay が Restored だった
         // 場合のみ (warm path は早期 return 済み)。Playing 以外は setter 側で no-op。
-        // NOTE: 復元では turn alarm を再予約していないため、最後の手の時点で set_alarm
-        // した絶対 deadline が evict 中に発火し force_time_up する経路はこれだけでは
-        // 塞げない (別経路として要対処)。
+        // evict 中に予約済み絶対 deadline alarm が早発火するケースは `alarm` ハンドラ
+        // 側で `current_turn_remaining_ms` を再判定して reschedule することで救済する。
         let now_ms = self.now_ms();
         if let Some(core) = self.core.borrow_mut().as_mut() {
             core.reset_turn_started_at(now_ms);
