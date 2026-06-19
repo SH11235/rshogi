@@ -138,8 +138,10 @@ jobs:
           # 過去の deploy-trigger commit が見えず、新規 PR を merge しても
           # `DEPLOYED_SHA` が空文字で落ちるため full history を取る。
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         if: steps.check.outputs.can_deploy == 'true'
+        with:
+          toolchain: stable
       - name: Add wasm32 target to pinned toolchain
         if: steps.check.outputs.can_deploy == 'true'
         run: |
@@ -357,8 +359,10 @@ jobs:
             --max-wait-sec "$MAX_WAIT" \
             --poll-interval-sec 30 \
             --require-stable-zero 3
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         if: steps.check.outputs.can_deploy == 'true'
+        with:
+          toolchain: stable
       - name: Add wasm32 target to pinned toolchain
         if: steps.check.outputs.can_deploy == 'true'
         run: |

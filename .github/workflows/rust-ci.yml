@@ -63,8 +63,9 @@ jobs:
     if: needs.changes.outputs.rust_code == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
+          toolchain: stable
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -82,8 +83,9 @@ jobs:
           sudo apt-get install -y mold clang
           mold --version || true
           clang --version || true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
+          toolchain: stable
           components: clippy
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -112,7 +114,9 @@ jobs:
           sudo apt-get install -y mold clang
           mold --version || true
           clang --version || true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - name: Enable sccache
@@ -133,8 +137,10 @@ jobs:
     if: needs.changes.outputs.rust_code == 'true'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-audit
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@b1366b959af4acf9da276c715d1f12893b19397d # cargo-audit
       - name: Run security audit
         run: cargo audit --deny warnings
 
@@ -174,10 +180,12 @@ jobs:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
       - name: Add wasm32 target to pinned toolchain
         # `rust-toolchain.toml` が channel を 1.93.1 に pin しているため、
-        # cargo は dtolnay/rust-toolchain@stable が install した stable (1.95.0) では
+        # cargo は dtolnay/rust-toolchain が install した stable では
         # なく rust-toolchain.toml の channel を使う（`rustup show active-toolchain` で
         # 確認できる）。dtolnay action の `targets:` パラメータは default toolchain
         # （= stable）にのみ wasm32 target を追加するため、cargo の実行時には反映
@@ -248,7 +256,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       # mold linker は .cargo/config.toml で wired されていないため install しない
       # (rshogi-core のみのリンクで効果が無く runner setup 時間を浪費するだけ)。
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
       - name: Setup Intel SDE
         uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
         with:
@@ -298,7 +308,9 @@ jobs:
       CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
       - name: Add wasm32-wasip1 target to pinned toolchain
         # rust-toolchain.toml が channel を pin しているため、その toolchain に
         # wasm32-wasip1 target を明示的に追加する（wasm-build job と同じ理由）。

@@ -81,8 +81,10 @@ jobs:
           else
             echo "can_run=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         if: steps.check.outputs.can_run == 'true'
+        with:
+          toolchain: stable
       - name: Pin toolchain
         if: steps.check.outputs.can_run == 'true'
         run: |
