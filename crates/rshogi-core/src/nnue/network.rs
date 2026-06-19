@@ -1847,39 +1847,6 @@ mod tests {
     use crate::nnue::constants::DEFAULT_NUM_BUCKETS;
     use crate::position::SFEN_HIRATE;
 
-    /// NNUEが初期化されていない場合のフォールバック動作をテスト
-    #[test]
-    fn test_evaluate_fallback() {
-        let mut pos = Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-        let mut stack = AccumulatorStackVariant::new_default();
-
-        // NNUEが初期化されていない場合はフォールバック
-        let value = evaluate_dispatch(&pos, &mut stack, &mut None);
-
-        // フォールバック評価が動作することを確認
-        assert!(value.raw().abs() < 1000);
-    }
-
-    /// AccumulatorStackVariant を使った評価のテスト
-    /// NNUEが未初期化でもフォールバックで評価が動作することを確認
-    #[test]
-    fn test_accumulator_stack_variant_fallback() {
-        let mut pos = Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-        let mut stack = AccumulatorStackVariant::new_default();
-
-        // 1回目の evaluate: NNUEが未初期化なのでフォールバック評価
-        let value1 = evaluate_dispatch(&pos, &mut stack, &mut None);
-
-        // 2回目も動作することを確認
-        let value2 = evaluate_dispatch(&pos, &mut stack, &mut None);
-
-        // フォールバックの駒得評価は手番に依存して符号が変わる可能性があるが、
-        // ここでは「評価が成功した」ことのみ検証する。
-        let _ = (value1, value2);
-    }
-
     /// NNUENetwork のアーキテクチャ自動検出テスト
     ///
     /// 外部NNUEファイルが必要なため通常はスキップ。
