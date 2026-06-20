@@ -773,6 +773,10 @@ pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
     L1536x32x32(
         Box<NetworkLayerStacks<1536, LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN, 64, FT>>,
     ),
+    #[cfg(feature = "layerstacks-1024x16x32")]
+    L1024x16x32(
+        Box<NetworkLayerStacks<1024, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
+    ),
     #[cfg(feature = "layerstacks-768x16x32")]
     L768x16x32(
         Box<NetworkLayerStacks<768, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
@@ -784,10 +788,6 @@ pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
     #[cfg(feature = "layerstacks-512x16x32")]
     L512x16x32(
         Box<NetworkLayerStacks<512, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
-    ),
-    #[cfg(feature = "layerstacks-1024x16x32")]
-    L1024x16x32(
-        Box<NetworkLayerStacks<1024, LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, 32, FT>>,
     ),
     #[cfg(not(any(
         feature = "layerstacks-1536x16x32",

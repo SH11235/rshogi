@@ -630,14 +630,14 @@ pub enum LayerStacksAccStack {
     L1536x16x32(AccumulatorStackLayerStacks<1536>),
     #[cfg(feature = "layerstacks-1536x32x32")]
     L1536x32x32(AccumulatorStackLayerStacks<1536>),
+    #[cfg(feature = "layerstacks-1024x16x32")]
+    L1024x16x32(AccumulatorStackLayerStacks<1024>),
     #[cfg(feature = "layerstacks-768x16x32")]
     L768x16x32(AccumulatorStackLayerStacks<768>),
     #[cfg(feature = "layerstacks-768x8x32")]
     L768x8x32(AccumulatorStackLayerStacks<768>),
     #[cfg(feature = "layerstacks-512x16x32")]
     L512x16x32(AccumulatorStackLayerStacks<512>),
-    #[cfg(feature = "layerstacks-1024x16x32")]
-    L1024x16x32(AccumulatorStackLayerStacks<1024>),
 }
 
 /// LayerStacks dispatch match の網羅性を確保するマクロ
@@ -763,14 +763,14 @@ pub enum LayerStacksAccCache {
     L1536x16x32(AccumulatorCacheLayerStacks<1536>),
     #[cfg(feature = "layerstacks-1536x32x32")]
     L1536x32x32(AccumulatorCacheLayerStacks<1536>),
+    #[cfg(feature = "layerstacks-1024x16x32")]
+    L1024x16x32(AccumulatorCacheLayerStacks<1024>),
     #[cfg(feature = "layerstacks-768x16x32")]
     L768x16x32(AccumulatorCacheLayerStacks<768>),
     #[cfg(feature = "layerstacks-768x8x32")]
     L768x8x32(AccumulatorCacheLayerStacks<768>),
     #[cfg(feature = "layerstacks-512x16x32")]
     L512x16x32(AccumulatorCacheLayerStacks<512>),
-    #[cfg(feature = "layerstacks-1024x16x32")]
-    L1024x16x32(AccumulatorCacheLayerStacks<1024>),
 }
 
 impl LayerStacksAccCache {
