@@ -90,6 +90,7 @@ edition-layerstacks-halfka_hm_merged-1536x16x32-threat      = ["rshogi-core/edit
 edition-layerstacks-halfka_hm_merged-1536x16x32-psqt_threat = ["rshogi-core/edition-layerstacks-halfka_hm_merged-1536x16x32-psqt_threat"]
 edition-layerstacks-halfka_hm_merged-1536x32x32-none        = ["rshogi-core/edition-layerstacks-halfka_hm_merged-1536x32x32-none"]
 edition-layerstacks-halfka_hm_merged-1024x16x32-none        = ["rshogi-core/edition-layerstacks-halfka_hm_merged-1024x16x32-none"]
+edition-layerstacks-halfka_hm_merged-1024x16x32-threat      = ["rshogi-core/edition-layerstacks-halfka_hm_merged-1024x16x32-threat"]
 edition-layerstacks-halfka_hm_merged-768x16x32-none         = ["rshogi-core/edition-layerstacks-halfka_hm_merged-768x16x32-none"]
 edition-layerstacks-halfka_hm_merged-768x8x32-none          = ["rshogi-core/edition-layerstacks-halfka_hm_merged-768x8x32-none"]
 edition-layerstacks-halfka_hm_merged-512x16x32-none         = ["rshogi-core/edition-layerstacks-halfka_hm_merged-512x16x32-none"]

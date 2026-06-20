@@ -215,6 +215,9 @@ edition-layerstacks-halfka_hm_merged-1536x32x32-none = [
 edition-layerstacks-halfka_hm_merged-1024x16x32-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32",
 ]
+edition-layerstacks-halfka_hm_merged-1024x16x32-threat = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
+]
 edition-layerstacks-halfka_hm_merged-768x16x32-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x16x32",
 ]

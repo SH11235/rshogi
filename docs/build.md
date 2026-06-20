@@ -63,7 +63,7 @@ cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt
 cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt,layerstacks-halfka_hm_merged-1536x16x32-threat
 cargo xtask build --edition X --edition Y
 
-# 全 preset を build (現状 20 件)
+# 全 preset を build (現状 21 件)
 cargo xtask build --all-presets
 
 # engines/ 配下の binary 一覧 + manifest を表表示
@@ -159,7 +159,7 @@ edition-layerstacks
 edition-layerstacks-any-any-any
 edition-layerstacks-halfka_hm_merged-1536x16x32-none
 edition-layerstacks-halfka_hm_merged-1536x16x32-psqt
-... (現状 20 件)
+... (現状 21 件)
 edition-universal
 ```
 
