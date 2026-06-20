@@ -3044,7 +3044,8 @@ fn main() -> Result<()> {
         timeout_margin_ms: cli.timeout_margin_ms,
         pass_rights: None,
         go_depth: None,
-        go_nodes: cli.nodes,
+        go_nodes_black: cli.nodes,
+        go_nodes_white: cli.nodes,
     };
     let tc = if cli.nodes.is_some() {
         // ノード数指定時は時間制御不要だが、タイムアウト検出用に十分大きな値を設定

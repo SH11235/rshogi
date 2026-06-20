@@ -162,6 +162,11 @@ struct Cli {
     #[arg(long)]
     nodes: Option<u64>,
 
+    /// Per-engine fixed node budget (overrides global --nodes for that engine).
+    /// Format: INDEX:NODES (0-based), can be repeated.
+    #[arg(long = "engine-nodes", num_args = 1..)]
+    engine_nodes: Option<Vec<String>>,
+
     /// Base engine label for "base-vs-N" mode.
     /// Only pairs that include this engine are scheduled; non-base pairings are skipped.
     /// The label must match one of the `--engine-label` (or path-derived) values.
@@ -325,6 +330,12 @@ struct EngineCommandMeta {
     label_white: String,
     usi_options_black: Vec<String>,
     usi_options_white: Vec<String>,
+    /// 解決済みの固定ノード予算（手番別）。`--engine-nodes` / global `--nodes` で
+    /// エンジンに割り当てた値で、None はノード制限なし（時間 or depth で停止）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes_black: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes_white: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -342,6 +353,10 @@ struct EngineMetaEntry {
     label: String,
     path: String,
     usi_options: Vec<String>,
+    /// 解決済みの固定ノード予算。`--engine-nodes` / global `--nodes` でこの index に
+    /// 割り当てた値で、None はノード制限なし（時間 or depth で停止）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -599,7 +614,8 @@ struct WorkerConfig {
     btime: u64,
     binc: u64,
     go_depth: Option<u32>,
-    go_nodes: Option<u64>,
+    /// エンジン index ごとの固定ノード数。`go_nodes[i]` が `engine_paths[i]` に対応する。
+    go_nodes: Vec<Option<u64>>,
     start_positions: Vec<ParsedPosition>,
 }
 
@@ -676,7 +692,8 @@ fn worker_main(
             timeout_margin_ms,
             pass_rights: None,
             go_depth,
-            go_nodes,
+            go_nodes_black: go_nodes[ticket.black_idx],
+            go_nodes_white: go_nodes[ticket.white_idx],
         };
         let game_id = (ticket.id as u32) + 1;
 
@@ -759,7 +776,8 @@ struct SpawnCtx<'a> {
     btime: u64,
     binc: u64,
     go_depth: Option<u32>,
-    go_nodes: Option<u64>,
+    /// エンジン index ごとの固定ノード数。`go_nodes[i]` が `engine_paths[i]` に対応する。
+    go_nodes: &'a [Option<u64>],
     start_defs: &'a [ParsedPosition],
 }
 
@@ -783,7 +801,7 @@ fn spawn_worker(
         btime: ctx.btime,
         binc: ctx.binc,
         go_depth: ctx.go_depth,
-        go_nodes: ctx.go_nodes,
+        go_nodes: ctx.go_nodes.to_vec(),
         start_positions: ctx
             .start_defs
             .iter()
@@ -861,19 +879,27 @@ fn main() -> Result<()> {
         }
     }
 
+    // エンジンごとの固定ノード数を解決する。
+    // --engine-nodes が指定されたエンジンはその値を、それ以外は global --nodes を使う。
+    let engine_nodes = resolve_engine_nodes(n, cli.nodes, cli.engine_nodes.as_deref())?;
+
     // 時間管理のバリデーション
     let use_byoyomi = cli.byoyomi > 0;
     let use_fischer = cli.btime > 0 || cli.binc > 0;
-    let use_fixed = cli.depth.is_some() || cli.nodes.is_some();
+    // engine_nodes は cli.nodes も織り込んだ解決済み Vec なので、resolve 後の状態で判定する。
+    let use_fixed = cli.depth.is_some() || engine_nodes.iter().any(|n| n.is_some());
     if use_byoyomi && use_fischer {
         bail!("--byoyomi と --btime/--binc は同時に指定できません");
     }
     if !use_byoyomi && !use_fischer && !use_fixed {
-        bail!("時間管理を指定してください: --byoyomi, --btime/--binc, --depth, --nodes のいずれか");
+        bail!(
+            "時間管理を指定してください: --byoyomi, --btime/--binc, --depth, --nodes, --engine-nodes のいずれか"
+        );
     }
     if use_fischer && cli.btime == 0 && cli.binc == 0 {
         bail!("フィッシャー時計: --btime または --binc の少なくとも一方を正の値で指定してください");
     }
+    ensure_node_coverage(&engine_nodes, use_byoyomi || use_fischer, cli.depth.is_some())?;
 
     // 開始局面のロード
     let (start_defs, start_commands) =
@@ -1015,6 +1041,7 @@ fn main() -> Result<()> {
                     label: engine_labels[i].clone(),
                     path: cli.engines[i].display().to_string(),
                     usi_options: engine_usi_options[i].clone(),
+                    nodes: engine_nodes[i],
                 })
                 .collect(),
             start_positions: start_commands.clone(),
@@ -1154,6 +1181,8 @@ fn main() -> Result<()> {
                     label_white: engine_labels[j].clone(),
                     usi_options_black: engine_usi_options[i].clone(),
                     usi_options_white: engine_usi_options[j].clone(),
+                    nodes_black: engine_nodes[i],
+                    nodes_white: engine_nodes[j],
                 },
                 start_positions: start_commands.clone(),
                 output: path.display().to_string(),
@@ -1187,7 +1216,7 @@ fn main() -> Result<()> {
         btime: cli.btime,
         binc: cli.binc,
         go_depth: cli.depth,
-        go_nodes: cli.nodes,
+        go_nodes: &engine_nodes,
         start_defs: &start_defs,
     };
 
@@ -1906,9 +1935,66 @@ fn usi_option_name(option: &str) -> &str {
     option.split_once('=').map_or(option, |(name, _)| name).trim()
 }
 
+/// エンジン index ごとの固定ノード数を解決する。
+///
+/// `specs` は `"INDEX:NODES"` 形式（0 始まり）。指定のないエンジンは `global` に
+/// フォールバックする。`global` も `None` なら、そのエンジンにはノード制限がない。
+fn resolve_engine_nodes(
+    n: usize,
+    global: Option<u64>,
+    specs: Option<&[String]>,
+) -> Result<Vec<Option<u64>>> {
+    let mut nodes = vec![global; n];
+    if let Some(specs) = specs {
+        for spec in specs {
+            let (idx_str, nodes_str) = spec
+                .split_once(':')
+                .with_context(|| format!("invalid --engine-nodes format: {spec}"))?;
+            let idx: usize =
+                idx_str.parse().with_context(|| format!("invalid engine index: {idx_str}"))?;
+            if idx >= n {
+                bail!("--engine-nodes index {idx} out of range (0..{n})");
+            }
+            let value: u64 =
+                nodes_str.parse().with_context(|| format!("invalid node count: {nodes_str}"))?;
+            if value == 0 {
+                bail!(
+                    "--engine-nodes: ノード数は 1 以上が必要 (index {idx} に 0 が指定された)。\
+                     `go nodes 0` は USI 仕様上未定義で停止条件にならない"
+                );
+            }
+            nodes[idx] = Some(value);
+        }
+    }
+    Ok(nodes)
+}
+
+/// 時間制御 (`--byoyomi`/`--btime`) も `--depth` も無い固定ノード探索では、全エンジンに
+/// ノード数が要る。ノードも時間も無いエンジンは停止条件が無く `go` が即停止扱いになるため。
+fn ensure_node_coverage(
+    engine_nodes: &[Option<u64>],
+    has_time: bool,
+    has_depth: bool,
+) -> Result<()> {
+    if has_time || has_depth {
+        return Ok(());
+    }
+    if let Some(idx) = engine_nodes.iter().position(|n| n.is_none()) {
+        bail!(
+            "時間制御 (--byoyomi/--btime) も --depth も無い場合、全エンジンにノード数が必要です \
+             (engine index {idx} に予算がありません)。全エンジンを --engine-nodes \"IDX:NODES\" で \
+             指定するか、global --nodes も併せて指定してください"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ControlFile, TicketSource, build_engine_usi_options};
+    use super::{
+        ControlFile, TicketSource, build_engine_usi_options, ensure_node_coverage,
+        resolve_engine_nodes,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -2173,6 +2259,54 @@ mod tests {
         let empty: ControlFile = serde_json::from_str("{}").unwrap();
         assert_eq!(empty.target_games, None);
         assert_eq!(empty.concurrency, None);
+    }
+
+    #[test]
+    fn engine_nodes_overrides_global_per_engine_with_fallback() {
+        let specs = strings(&["0:2000", "2:8000"]);
+        let resolved = resolve_engine_nodes(3, Some(5000), Some(&specs)).unwrap();
+        // index 0/2 は個別指定、index 1 は global --nodes にフォールバック。
+        assert_eq!(resolved, vec![Some(2000), Some(5000), Some(8000)]);
+    }
+
+    #[test]
+    fn engine_nodes_without_global_leaves_unspecified_engines_unlimited() {
+        let specs = strings(&["1:4000"]);
+        let resolved = resolve_engine_nodes(2, None, Some(&specs)).unwrap();
+        assert_eq!(resolved, vec![None, Some(4000)]);
+    }
+
+    #[test]
+    fn engine_nodes_rejects_out_of_range_index() {
+        let specs = strings(&["2:1000"]);
+        assert!(resolve_engine_nodes(2, None, Some(&specs)).is_err());
+    }
+
+    #[test]
+    fn engine_nodes_rejects_malformed_spec() {
+        assert!(resolve_engine_nodes(2, None, Some(&strings(&["0-1000"]))).is_err());
+        assert!(resolve_engine_nodes(2, None, Some(&strings(&["x:1000"]))).is_err());
+        assert!(resolve_engine_nodes(2, None, Some(&strings(&["0:notanumber"]))).is_err());
+        // ノード数 0 は停止条件にならないため弾く。
+        assert!(resolve_engine_nodes(2, None, Some(&strings(&["0:0"]))).is_err());
+    }
+
+    #[test]
+    fn engine_nodes_duplicate_index_last_wins() {
+        let specs = strings(&["0:1000", "0:2000"]);
+        let resolved = resolve_engine_nodes(2, None, Some(&specs)).unwrap();
+        assert_eq!(resolved, vec![Some(2000), None]);
+    }
+
+    #[test]
+    fn ensure_node_coverage_requires_budget_only_when_no_time_or_depth() {
+        // 時間制御も depth も無く、予算のないエンジン (None) があるとエラー。
+        assert!(ensure_node_coverage(&[Some(1000), None], false, false).is_err());
+        // 全エンジンに予算があれば OK。
+        assert!(ensure_node_coverage(&[Some(1000), Some(2000)], false, false).is_ok());
+        // 時間制御 or depth があれば None でも OK (未指定エンジンはそちらで停止する)。
+        assert!(ensure_node_coverage(&[Some(1000), None], true, false).is_ok());
+        assert!(ensure_node_coverage(&[None, None], false, true).is_ok());
     }
 
     #[test]

@@ -15,8 +15,10 @@ pub struct GameConfig {
     pub pass_rights: Option<(u8, u8)>,
     /// Some(n) の場合は `go depth n` を使用（byoyomi より優先）
     pub go_depth: Option<u32>,
-    /// Some(n) の場合は `go nodes n` を使用
-    pub go_nodes: Option<u64>,
+    /// 先手に適用するノード数。Some(n) の場合は `go nodes n` を使用。
+    pub go_nodes_black: Option<u64>,
+    /// 後手に適用するノード数。Some(n) の場合は `go nodes n` を使用。
+    pub go_nodes_white: Option<u64>,
 }
 
 /// 1手ごとに呼ばれるイベント
@@ -97,7 +99,11 @@ pub fn run_game(
             engine_label: engine_label.clone(),
             pass_rights,
             go_depth: config.go_depth,
-            go_nodes: config.go_nodes,
+            go_nodes: if side == Color::Black {
+                config.go_nodes_black
+            } else {
+                config.go_nodes_white
+            },
         };
         let cb = info_cb.as_mut().map(|b| b.as_mut() as &mut dyn FnMut(&str, &SearchRequest<'_>));
         let search = engine.search(&req, cb)?;
