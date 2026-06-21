@@ -89,6 +89,11 @@ struct Cli {
     #[arg(long, default_value_t = 200_000)]
     chunk: usize,
 
+    /// evalfix の係数 a。指定すると eval を `round_ties_even(score × 756.0865/a)` で焼き込み ±32767 で
+    /// クランプする（python `psv_to_hcpe_flat.py --evalfix_a` と bit 一致）。未指定なら生 score を書く。
+    #[arg(long)]
+    evalfix_a: Option<f64>,
+
     /// 詳細出力（変換できなかったレコードを逐次ログ）
     #[arg(short, long)]
     verbose: bool,
@@ -136,14 +141,27 @@ fn move16_psv_to_hcpe(yo_move16: u16) -> u16 {
     }
 }
 
-fn build_hcpe3(psv: &PackedSfenValue, hcp: &[u8; 32], move16: u16, result: u8) -> ConvResult {
+/// dlshogi 固定 decode 定数 = 1/0.0013226。evalfix bake のスケール分子。
+const EVAL_DECODE_CONST: f64 = 756.0864962951762;
+
+/// evalfix: 生 score に `756.0865/a` を掛けて焼き込む。round-half-even（python `round` 互換）で丸め、
+/// ±32767 にクランプする。`eval_scale=None` なら生 score をそのまま返す。
+#[inline]
+fn baked_eval(score: i16, eval_scale: Option<f64>) -> i16 {
+    match eval_scale {
+        Some(s) => (f64::from(score) * s).round_ties_even().clamp(-32767.0, 32767.0) as i16,
+        None => score,
+    }
+}
+
+fn build_hcpe3(eval: i16, hcp: &[u8; 32], move16: u16, result: u8) -> ConvResult {
     let mut data = [0u8; RECORD_BUF];
     data[0..32].copy_from_slice(hcp);
     data[32..34].copy_from_slice(&1u16.to_le_bytes()); // moveNum
     data[34] = result;
     data[35] = 0; // opponent
     data[36..38].copy_from_slice(&move16.to_le_bytes()); // selectedMove16
-    data[38..40].copy_from_slice(&psv.score.to_le_bytes()); // eval
+    data[38..40].copy_from_slice(&eval.to_le_bytes()); // eval
     data[40..42].copy_from_slice(&1u16.to_le_bytes()); // candidateNum
     data[42..44].copy_from_slice(&move16.to_le_bytes()); // move16（= selectedMove16）
     data[44..46].copy_from_slice(&1u16.to_le_bytes()); // visitNum
@@ -153,10 +171,10 @@ fn build_hcpe3(psv: &PackedSfenValue, hcp: &[u8; 32], move16: u16, result: u8) -
     }
 }
 
-fn build_hcpe(psv: &PackedSfenValue, hcp: &[u8; 32], move16: u16, result: u8) -> ConvResult {
+fn build_hcpe(eval: i16, hcp: &[u8; 32], move16: u16, result: u8) -> ConvResult {
     let mut data = [0u8; RECORD_BUF];
     data[0..32].copy_from_slice(hcp);
-    data[32..34].copy_from_slice(&psv.score.to_le_bytes()); // eval
+    data[32..34].copy_from_slice(&eval.to_le_bytes()); // eval
     data[34..36].copy_from_slice(&move16.to_le_bytes()); // bestMove16
     data[36] = result; // gameResult
     data[37] = 0; // dummy
@@ -166,7 +184,11 @@ fn build_hcpe(psv: &PackedSfenValue, hcp: &[u8; 32], move16: u16, result: u8) ->
     }
 }
 
-fn convert(record: &[u8; PackedSfenValue::SIZE], format: Format) -> ConvResult {
+fn convert(
+    record: &[u8; PackedSfenValue::SIZE],
+    format: Format,
+    eval_scale: Option<f64>,
+) -> ConvResult {
     let psv = match PackedSfenValue::from_bytes(record) {
         Some(v) => v,
         None => return ConvResult::Error("PackedSfenValue のパースに失敗".to_string()),
@@ -188,10 +210,11 @@ fn convert(record: &[u8; PackedSfenValue::SIZE], format: Format) -> ConvResult {
     let hcp = pack_position_hcp(&pos);
     let move16 = move16_psv_to_hcpe(psv.move16);
     let result = game_result_byte(psv.game_result, pos.side_to_move());
+    let eval = baked_eval(psv.score, eval_scale);
 
     match format {
-        Format::Hcpe3 => build_hcpe3(&psv, &hcp, move16, result),
-        Format::Hcpe => build_hcpe(&psv, &hcp, move16, result),
+        Format::Hcpe3 => build_hcpe3(eval, &hcp, move16, result),
+        Format::Hcpe => build_hcpe(eval, &hcp, move16, result),
     }
 }
 
@@ -307,6 +330,7 @@ fn main() -> Result<()> {
     let mut writer = BufWriter::with_capacity(IO_BUF_SIZE, out_file);
 
     let format = cli.format;
+    let eval_scale = cli.evalfix_a.map(|a| EVAL_DECODE_CONST / a);
     let verbose = cli.verbose;
     let limit = cli.limit;
     let mut remaining = if limit > 0 { limit } else { usize::MAX };
@@ -341,7 +365,7 @@ fn main() -> Result<()> {
         remaining -= chunk.len();
 
         let results: Vec<ConvResult> =
-            chunk.par_iter().map(|record| convert(record, format)).collect();
+            chunk.par_iter().map(|record| convert(record, format, eval_scale)).collect();
 
         let (written, errors) = write_results(&results, &mut writer, verbose)?;
         total_written += written;
