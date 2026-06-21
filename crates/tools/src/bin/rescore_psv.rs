@@ -632,14 +632,16 @@ fn fmt_hms(d: Duration) -> String {
     }
 }
 
-/// `now + eta` をローカル時刻 `HH:MM` にする。eta が未確定（速度 0）のときは `--:--`。
+/// `now + eta` をローカル時刻 `MM/DD HH:MM` にする。長時間ジョブは日跨ぎするため
+/// 日付を必ず付ける。速度未確定（per_sec が 0）のときのみ `--/-- --:--`。
+/// 完了時は eta=0 だが per_sec は確定済みで、`now + 0` が現在時刻＝到着時刻になる。
 fn finish_clock(eta: Duration, per_sec: f64) -> String {
-    if per_sec <= 0.0 || eta.is_zero() {
-        return "--:--".to_string();
+    if per_sec <= 0.0 {
+        return "--/-- --:--".to_string();
     }
     match chrono::Duration::from_std(eta) {
-        Ok(d) => (chrono::Local::now() + d).format("%H:%M").to_string(),
-        Err(_) => "--:--".to_string(),
+        Ok(d) => (chrono::Local::now() + d).format("%m/%d %H:%M").to_string(),
+        Err(_) => "--/-- --:--".to_string(),
     }
 }
 
@@ -794,7 +796,7 @@ impl RescoreProgress {
         if let Some(o) = &self.overall {
             if !self.is_tty {
                 eprintln!(
-                    "[rescore] 全体 完了 {}/{} ({} files) {} pos/s 所要 {}",
+                    "[rescore] overall done {}/{} ({} files) {} pos/s took {}",
                     compact_count(o.position()),
                     compact_count(o.length().unwrap_or(0)),
                     self.total_files,
@@ -892,8 +894,9 @@ impl FileProgress {
 
         let rate = compact_rate(primary.per_sec());
         let elapsed = fmt_hms(primary.elapsed());
-        let eta = fmt_hms(primary.eta());
-        let clock = finish_clock(primary.eta(), primary.per_sec());
+        // remaining = 残り時間（duration）、eta_clock = 完了予定の絶対時刻（ETA 本来の意味）。
+        let remaining = fmt_hms(primary.eta());
+        let eta_clock = finish_clock(primary.eta(), primary.per_sec());
         if self.overall.is_some() {
             let fpos = self.file.position();
             let flen = self.file.length().unwrap_or(0);
@@ -903,7 +906,7 @@ impl FileProgress {
                 0.0
             };
             eprintln!(
-                "[rescore] 全体 {pct:.1}% {}/{} shard {}/{} ({} {fpct:.1}%) {rate} pos/s elapsed {elapsed} ETA {eta} (完了 {clock})",
+                "[rescore] overall {pct:.1}% {}/{} shard {}/{} ({} {fpct:.1}%) {rate} pos/s elapsed {elapsed} remaining {remaining} ETA {eta_clock}",
                 compact_count(pos),
                 compact_count(len),
                 self.shard_idx,
@@ -912,7 +915,7 @@ impl FileProgress {
             );
         } else {
             eprintln!(
-                "[rescore] {} {pct:.1}% {}/{} {rate} pos/s elapsed {elapsed} ETA {eta} (完了 {clock})",
+                "[rescore] {} {pct:.1}% {}/{} {rate} pos/s elapsed {elapsed} remaining {remaining} ETA {eta_clock}",
                 self.label,
                 compact_count(pos),
                 compact_count(len),
