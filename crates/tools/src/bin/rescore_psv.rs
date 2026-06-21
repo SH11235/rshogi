@@ -2947,6 +2947,96 @@ fn canonicalize_predicted_path(path: &std::path::Path) -> Result<PathBuf> {
     Ok(canonical_parent.join(file_name))
 }
 
+/// 入力特徴の host バッファ。CUDA pinned (page-locked) が使える環境では真の async H2D に
+/// なり、pageable→pinned ステージング (CPU 介在) が消える。pinned 割当に失敗する環境
+/// (CPU 推論など) では通常の `Vec` にフォールバックする。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+enum HostBuf {
+    Paged(Vec<f32>),
+    /// CUDA pinned 確保ブロックへの生ポインタ。free は `PinnedPool` が一括で行う。
+    Pinned(PinnedBuf),
+}
+
+/// CUDA pinned 確保ブロックを指す生ポインタ。確保・解放は [`PinnedPool`] が所有する。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+struct PinnedBuf {
+    ptr: *mut f32,
+    len: usize,
+}
+
+// SAFETY: pinned host memory (cudaHostAlloc 由来) は任意の CPU スレッドからアクセス可能な
+// 通常のホストメモリである。スロット (= PinnedBuf を含む PreparedBatch) の所有権は mpsc
+// channel で move 移送され、同一バッファに同時アクセスするスレッドは高々 1 つに保たれる
+// (producer が書き込み → ready 送信 → consumer が読み取り → free 返却)。よって PinnedBuf を
+// スレッド間で送っても data race は発生しない。ort の `Allocator` 自体は Sync でないため、
+// スロットには Allocator ではなく生ポインタを載せて channel 越しに渡す。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+unsafe impl Send for PinnedBuf {}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl HostBuf {
+    #[inline]
+    fn as_slice(&self) -> &[f32] {
+        match self {
+            HostBuf::Paged(v) => v.as_slice(),
+            // SAFETY: ptr/len は生存中の pinned 割当を指し、len 要素分が有効。排他アクセスは
+            // channel による所有権移送で保証される (上の unsafe impl Send 参照)。
+            HostBuf::Pinned(p) => unsafe { std::slice::from_raw_parts(p.ptr, p.len) },
+        }
+    }
+
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [f32] {
+        match self {
+            HostBuf::Paged(v) => v.as_mut_slice(),
+            // SAFETY: 上と同じ不変条件。`&mut self` 経由なので Rust の借用規則でも排他。
+            HostBuf::Pinned(p) => unsafe { std::slice::from_raw_parts_mut(p.ptr, p.len) },
+        }
+    }
+}
+
+/// pinned 割当の所有者。ort `Allocator` と確保済み生ポインタ群を保持し、drop 時にまとめて
+/// free する。`Allocator` は Sync でないため、確保したメモリはスロットへ生ポインタで渡し、
+/// 解放だけをこの型に集約する。`PinnedPool` は thread::scope より長生きさせること
+/// (スコープ内で全スロットが drop された後に free する)。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+struct PinnedPool {
+    allocator: ort::memory::Allocator,
+    ptrs: Vec<*mut f32>,
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl PinnedPool {
+    /// `len` 要素 (f32) 分の pinned バッファを確保しゼロ初期化して返す。
+    fn alloc_zeroed(&mut self, len: usize) -> Result<PinnedBuf> {
+        let mut block = self.allocator.alloc::<f32>(len).map_err(onnx_ort_err)?;
+        // ゼロ初期化用に block を借用して書き込む（所有権はまだ block 側）。
+        {
+            let zero_ptr = block.as_mut_ptr().cast::<f32>();
+            // SAFETY: alloc が len*size_of::<f32>() バイトを確保済み（pinned は CPU アクセス可）。
+            // write_bytes::<f32>(_, 0, len) は len*size_of::<f32>() = len*4 バイトをゼロ化し、
+            // 確保サイズと一致する。
+            unsafe { std::ptr::write_bytes(zero_ptr, 0, len) };
+        }
+        // 所有権を block から取り出す（以後の free は PinnedPool::drop が担う）。zero_ptr と
+        // 同一アドレスだが、こちらは「移動した所有ポインタ」を表す。
+        let ptr = block.into_raw().cast::<f32>();
+        self.ptrs.push(ptr);
+        Ok(PinnedBuf { ptr, len })
+    }
+}
+
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+impl Drop for PinnedPool {
+    fn drop(&mut self) {
+        for &ptr in &self.ptrs {
+            // SAFETY: ptr は self.allocator.alloc → into_raw で得たもの。確保した allocator で
+            // ちょうど 1 回だけ free する (ptrs に重複登録しない)。
+            unsafe { self.allocator.free(ptr) };
+        }
+    }
+}
+
 /// ストリーミング読み込み + rayon 並列特徴量構築 + ゼロコピー GPU 推論
 ///
 /// AobaZero / 標準 dlshogi の両方で共通のパイプライン処理。
@@ -3244,6 +3334,26 @@ where
         MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
             .map_err(onnx_ort_err)?;
 
+    // 入力特徴 host バッファを CUDA pinned (page-locked) 化するための allocator。
+    // pinned 化で pageable→pinned ステージング (CPU 介在) が消え、真の async H2D になる。
+    // GPU 推論 (gpu_id >= 0) のときのみ確保を試み、失敗したら pageable Vec にフォールバック。
+    let mut pinned_pool = if gpu_id >= 0 {
+        MemoryInfo::new(
+            AllocationDevice::CUDA_PINNED,
+            gpu_id,
+            AllocatorType::Device,
+            MemoryType::CPUInput,
+        )
+        .and_then(|info| ort::memory::Allocator::new(&session, info))
+        .map(|allocator| PinnedPool {
+            allocator,
+            ptrs: Vec::new(),
+        })
+        .ok()
+    } else {
+        None
+    };
+
     // フェーズ別 wall time 計測（RESCORE_PHASE_TIMING=1 のとき末尾で出力）。read/build は
     // producer、run/write は consumer の別スレッドで計測するため、オーバーラップ分は
     // 各フェーズの合算が wall を超える。供給コストと GPU コストの絶対値切り分けに使う。
@@ -3254,8 +3364,8 @@ where
     // producer が埋め、consumer（主スレッド）が GPU 推論・書き出しに使う。f1/f2 等は
     // slot プールで再利用し、ピークメモリは入力件数に非依存（PIPELINE_SLOTS 個ぶん）。
     struct PreparedBatch {
-        f1: Vec<f32>,
-        f2: Vec<f32>,
+        f1: HostBuf,
+        f2: HostBuf,
         records: Vec<(PackedSfenValue, String)>,
         stm_flags: Vec<bool>,
         in_checks: Vec<bool>,
@@ -3274,14 +3384,60 @@ where
     // 前の直列ループ実装と bit 一致。slot は free/ready の 2 本のチャネルで循環し、同時生存は
     // PIPELINE_SLOTS 個。
     const PIPELINE_SLOTS: usize = 2;
+
+    // 入力特徴バッファ (f1/f2) を PIPELINE_SLOTS 個ぶん確保。pinned_pool があれば pinned で
+    // 全スロットを一括確保し、1 件でも失敗したら pool を捨てて全スロットを pageable Vec で
+    // 作り直す (all-or-nothing。pinned/pageable 混在を避ける)。pinned_pool への &mut 借用は
+    // ここで完結させ、thread::scope には確保済みバッファ (HostBuf) のみ move する
+    // (pinned_pool は scope 後の drop で free)。
+    let mut slot_bufs: Vec<(HostBuf, HostBuf)> = Vec::with_capacity(PIPELINE_SLOTS);
+    let pinned_ok = if let Some(pool) = pinned_pool.as_mut() {
+        let mut ok = true;
+        for _ in 0..PIPELINE_SLOTS {
+            // 個別に評価してから match (同一 pool への &mut 借用を逐次化する)。f1 が Err でも
+            // f2 の確保は走るが、その PinnedBuf は `_` アームで即 drop される。ptr は確保成功時に
+            // pool.ptrs へ登録済みなので PinnedPool::drop で漏れなく free される (リークなし)。
+            let f1 = pool.alloc_zeroed(batch_size * f1_size);
+            let f2 = pool.alloc_zeroed(batch_size * f2_size);
+            match (f1, f2) {
+                (Ok(f1), Ok(f2)) => slot_bufs.push((HostBuf::Pinned(f1), HostBuf::Pinned(f2))),
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        ok
+    } else {
+        false
+    };
+    if !pinned_ok {
+        if gpu_id >= 0 {
+            eprintln!(
+                "Warning: CUDA pinned host buffer の確保に失敗。pageable Vec にフォールバックします"
+            );
+        }
+        // ここまでに確保した pinned (slot_bufs 内 + pool.ptrs に登録済) を解放する。
+        // PinnedBuf 自体は Drop を持たず、free は pinned_pool の drop に集約しているため、
+        // 先に slot_bufs を空にしてから pinned_pool を drop する (登録 ptr を 1 回ずつ free)。
+        slot_bufs.clear();
+        drop(pinned_pool.take());
+        for _ in 0..PIPELINE_SLOTS {
+            slot_bufs.push((
+                HostBuf::Paged(vec![0.0f32; batch_size * f1_size]),
+                HostBuf::Paged(vec![0.0f32; batch_size * f2_size]),
+            ));
+        }
+    }
+
     let (t_read, t_build) = thread::scope(|scope| -> Result<(u128, u128)> {
         let (free_tx, free_rx) = mpsc::channel::<PreparedBatch>();
         let (ready_tx, ready_rx) = mpsc::channel::<PreparedBatch>();
-        for _ in 0..PIPELINE_SLOTS {
+        for (f1, f2) in slot_bufs {
             free_tx
                 .send(PreparedBatch {
-                    f1: vec![0.0f32; batch_size * f1_size],
-                    f2: vec![0.0f32; batch_size * f2_size],
+                    f1,
+                    f2,
                     records: Vec::with_capacity(batch_size),
                     stm_flags: vec![false; batch_size],
                     in_checks: vec![false; batch_size],
@@ -3370,6 +3526,8 @@ where
                         leaf_sfens,
                         ..
                     } = &mut slot;
+                    let f1 = f1.as_mut_slice();
+                    let f2 = f2.as_mut_slice();
                     f1[..actual_batch * f1_size].fill(0.0);
                     f2[..actual_batch * f2_size].fill(0.0);
                     let f1_slices: Vec<&mut [f32]> =
@@ -3493,19 +3651,21 @@ where
                 //   毎回新規作成の方が速い。
                 // - output_policy のバインド省略も逆効果（10% 悪化）。
                 //   ORT が未バインド出力の処理にオーバーヘッドを生じる。
-                // - ボトルネックは cudaMemcpyAsync（CPU→GPU 転送）で全体の 96.1%（nsys 計測）。
-                //   転送量削減（FP16 化等）以外での大幅改善は困難。
+                // - 旧実装は pageable な Vec から H2D していたため cudaMemcpyAsync が実質同期
+                //   (CPU staging 介在) となり全体の ~96% を占めていた (nsys)。入力 host バッファを
+                //   pinned (page-locked) 化することでこの staging を消し、真の async H2D にしている
+                //   (HostBuf / PinnedPool 参照)。
                 let shape1: [usize; 4] = [actual_batch, input1_channels, 9, 9];
                 let input1 = TensorRef::<f32>::from_array_view((
                     shape1,
-                    &batch.f1[..actual_batch * f1_size],
+                    &batch.f1.as_slice()[..actual_batch * f1_size],
                 ))
                 .map_err(onnx_ort_err)?;
 
                 let shape2: [usize; 4] = [actual_batch, input2_channels, 9, 9];
                 let input2 = TensorRef::<f32>::from_array_view((
                     shape2,
-                    &batch.f2[..actual_batch * f2_size],
+                    &batch.f2.as_slice()[..actual_batch * f2_size],
                 ))
                 .map_err(onnx_ort_err)?;
 

@@ -351,6 +351,13 @@ CPU 前処理を待ってアイドルする区間を潰し、GPU を連続的に
 決定性: PSV のデコードを直列段階に残してバッチ構成を不変に保つため、出力は逐次実装と
 bit 一致する。
 
+入力特徴の host バッファは、GPU 推論時（`--onnx-gpu-id >= 0`）は **CUDA pinned (page-locked)
+メモリ**で確保する。pageable メモリだと `cudaMemcpyAsync` が CUDA 内部で pageable→pinned
+ステージング（CPU 介在）を伴い実質同期化するが、pinned 化でこれが消えて真の async H2D に
+なる。pinned 確保に失敗した環境では通常の pageable バッファに自動フォールバックする
+（出力は pinned/pageable で bit 一致）。計測例: TensorRT FP16 / batch 1024 / RTX 5090(WSL2)
+で約 +26%、CUDA EP / 同条件で約 +21%（いずれも 2M records, min-of-3, 出力 byte 一致）。
+
 ### `--threads` について
 
 特徴量構築（CPU 処理）を rayon で並列化するスレッド数（0 で論理コア数）。前処理は
@@ -554,10 +561,14 @@ AobaZero ONNX model loaded. Batch size: 1024
   FP32 で推論する場合は `--onnx-tensorrt` を指定せず CUDA EP を使うこと
 - TensorRT は初回実行時にモデルを GPU 固有にコンパイルする（数十秒〜数分）。
   `--onnx-tensorrt-cache` でキャッシュを保存すると 2 回目以降は高速起動する
-- このツールのボトルネックは CPU→GPU のデータ転送（全処理時間の 96%、nsys 計測）であり、
-  FP16 による高速化は主に転送量の半減と Tensor Core 活用に起因する
-- `--threads` による特徴量構築の並列化は、ボトルネックが CPU→GPU 転送（96%）に
-  あるため原理的に全体時間への影響がない。計測でもいずれの構成 (CUDA FP32 / TensorRT FP16、
-  90k / 1.05M records) で有意な差は観測されなかった
+- 入力 host バッファが pageable だった旧実装では、CPU→GPU 転送（`cudaMemcpyAsync`）が
+  pageable→pinned ステージングで実質同期化し全処理時間の ~96%（nsys 計測）を占めていた。
+  現在は GPU 推論時に host バッファを CUDA pinned 化してこの staging を解消している
+  （「ONNX モードの供給パイプライン」参照）。pinned 化後は転送が真の async になり overlap
+  されるため、転送は支配項ではなくなり、入力 FP16 化による転送量半減の効果も小さい
+  （本番 batch では計測上ほぼ誤差内）
+- `--threads` による特徴量構築の並列化は GPU 推論とオーバーラップされる。供給（read+build）が
+  GPU 推論より速ければ全体時間への影響は小さい（軽量モデル・高速 GPU で前処理が供給律速に
+  なる場合のみ寄与する）
 - 参考: 同等の Python ツール [psv-utils](https://github.com/KazApps/psv-utils) と比較して、
   本ツールは CUDA EP / TensorRT EP どちらでも約 6〜9% 速い（1,051,780 records, 温度管理付き計測）
