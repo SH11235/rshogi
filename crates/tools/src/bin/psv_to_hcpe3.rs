@@ -6,9 +6,11 @@
 //! （moveNum=1 / candidateNum=1 / visitNum=1、policy target は best move の one-hot）。
 //! `--format hcpe` は dlshogi 同梱 psv_to_hcpe.py と同じ 38 バイト hcpe を出力する。
 //!
-//! 盤面の hcp（HuffmanCodedPos, 32B）は `tools::packed_sfen::pack_position_hcp`、
-//! 指し手 move16 と勝敗・eval の視点変換は本ファイル内で行う（いずれも hcpe / hcpe3
-//! 形式の参照実装 cshogi の `to_hcp` / `move16_from_psv` と一致）。
+//! 盤面の hcp（HuffmanCodedPos, 32B）は、PSV の packed sfen を SFEN 文字列・`Position`
+//! 構築を経由せず `tools::packed_sfen::unpack_sfen_to_parts` → `pack_hcp_from_parts` で
+//! 直接展開する（ホットパスでのヒープ割り当てを避ける）。指し手 move16 と勝敗・eval の
+//! 視点変換は本ファイル内で行う（いずれも hcpe / hcpe3 形式の参照実装 cshogi の
+//! `to_hcp` / `move16_from_psv` と一致）。
 //! load-all を避けてチャンクストリーミングし、ピークメモリを入力件数に非依存にする。
 //!
 //! # 使用例
@@ -29,16 +31,16 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::prelude::*;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
-use rshogi_core::position::Position;
 use rshogi_core::types::Color;
-use tools::packed_sfen::{PackedSfenValue, pack_position_hcp, unpack_sfen};
+use tools::packed_sfen::{PackedSfenValue, pack_hcp_from_parts, unpack_sfen_to_parts};
 
 /// hcpe3 レコード長（hcp[32] + moveNum:u16 + result:u8 + opponent:u8
 /// + selectedMove16:u16 + eval:i16 + candidateNum:u16 + move16:u16 + visitNum:u16）
@@ -49,6 +51,9 @@ const HCPE_SIZE: usize = 38;
 const RECORD_BUF: usize = HCPE3_SIZE;
 
 const IO_BUF_SIZE: usize = 1 << 20;
+
+/// 非TTY 実行時にテキスト進捗を出す最小間隔（秒）。
+const PROGRESS_LOG_SECS: u64 = 5;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Format {
@@ -89,8 +94,9 @@ struct Cli {
     #[arg(long, default_value_t = 200_000)]
     chunk: usize,
 
-    /// evalfix の係数 a。指定すると eval を `round_ties_even(score × 756.0865/a)` で焼き込み ±32767 で
-    /// クランプする（python `psv_to_hcpe_flat.py --evalfix_a` と bit 一致）。未指定なら生 score を書く。
+    /// evalfix の係数 a（有限の正数）。指定すると eval を `round_ties_even(score × 756.0865/a)` で
+    /// 焼き込み ±32767 でクランプする（python `psv_to_hcpe_flat.py --evalfix_a` と bit 一致）。
+    /// 未指定なら生 score を書く。0・負・非有限値はエラー。
     #[arg(long)]
     evalfix_a: Option<f64>,
 
@@ -198,18 +204,16 @@ fn convert(
     if !matches!(psv.game_result, -1..=1) {
         return ConvResult::Error(format!("不正な game_result: {}", psv.game_result));
     }
-    let sfen = match unpack_sfen(&psv.sfen) {
-        Ok(s) => s,
+    // ホットパス: String 生成も Position 構築も挟まず packed → hcp を直接展開する
+    // (CLAUDE.md「ホットパスでのヒープ割り当て禁止」。完全に stack 上で完結)。
+    let parts = match unpack_sfen_to_parts(&psv.sfen) {
+        Ok(p) => p,
         Err(e) => return ConvResult::Error(format!("SFEN の展開に失敗: {e}")),
     };
-    let mut pos = Position::new();
-    if let Err(e) = pos.set_sfen(&sfen) {
-        return ConvResult::Error(format!("SFEN の適用に失敗: {e}"));
-    }
 
-    let hcp = pack_position_hcp(&pos);
+    let hcp = pack_hcp_from_parts(&parts);
     let move16 = move16_psv_to_hcpe(psv.move16);
-    let result = game_result_byte(psv.game_result, pos.side_to_move());
+    let result = game_result_byte(psv.game_result, parts.side_to_move);
     let eval = baked_eval(psv.score, eval_scale);
 
     match format {
@@ -252,6 +256,13 @@ fn main() -> Result<()> {
     }
     if cli.chunk == 0 {
         anyhow::bail!("--chunk は 1 以上を指定してください");
+    }
+    // evalfix のスケールは `EVAL_DECODE_CONST / a` を掛ける係数のため、a は有限の正数のみ許可する。
+    // 0/負/NaN/inf を素通しすると全 eval が 0 や符号反転で静かに壊れるので、出力作成前に弾く。
+    if let Some(a) = cli.evalfix_a
+        && (!a.is_finite() || a <= 0.0)
+    {
+        anyhow::bail!("--evalfix-a は有限の正数を指定してください（指定値: {a}）");
     }
 
     // 入出力が同一パスならデータ消失を防ぐためエラーにする
@@ -297,12 +308,23 @@ fn main() -> Result<()> {
         cli.format
     );
 
+    // 非TTY(background / redirect)では indicatif の progress bar はログに何も描かれず、
+    // 大量変換が「無反応 = ハング」に見えてしまう。TTY なら従来通り bar を描き、非TTY では
+    // bar を隠して代わりに周期テキスト進捗(下のループ)を出す。
+    let is_tty = std::io::stderr().is_terminal();
     let progress = ProgressBar::new(total);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) ETA: {eta}")
-            .expect("valid template"),
-    );
+    if is_tty {
+        progress.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) ETA: {eta}",
+                )
+                .expect("valid template"),
+        );
+    } else {
+        progress.set_draw_target(ProgressDrawTarget::hidden());
+        eprintln!("(非TTY: 進捗を {PROGRESS_LOG_SECS} 秒ごとにテキスト出力します)");
+    }
 
     let in_file =
         File::open(&cli.input).with_context(|| format!("{} を開けません", cli.input.display()))?;
@@ -328,6 +350,13 @@ fn main() -> Result<()> {
     let out_file = File::create(&tmp_output)
         .with_context(|| format!("{} を作成できません", tmp_output.display()))?;
     let mut writer = BufWriter::with_capacity(IO_BUF_SIZE, out_file);
+    // 処理中は一時ファイルに書き、完了時に最終パスへ rename する。実行中に最終パスが
+    // 存在しなくても異常ではない（途中経過は下記 .partial を見る）。
+    eprintln!(
+        "出力(処理中): {} → 完了時に {} へ rename",
+        tmp_output.display(),
+        cli.output.display()
+    );
 
     let format = cli.format;
     let eval_scale = cli.evalfix_a.map(|a| EVAL_DECODE_CONST / a);
@@ -340,6 +369,8 @@ fn main() -> Result<()> {
     let mut total_errors = 0u64;
     let mut interrupted = false;
     let mut reached_eof = false;
+    let start = Instant::now();
+    let mut last_report = start;
 
     while remaining > 0 {
         if INTERRUPTED.load(Ordering::Acquire) {
@@ -371,6 +402,25 @@ fn main() -> Result<()> {
         total_written += written;
         total_errors += errors;
         progress.inc(results.len() as u64);
+
+        // 非TTY では progress bar が出ないため、一定間隔でテキスト進捗を出す。
+        if !is_tty {
+            let now = Instant::now();
+            if now.duration_since(last_report).as_secs() >= PROGRESS_LOG_SECS {
+                last_report = now;
+                let done = total_written + total_errors;
+                let secs = start.elapsed().as_secs_f64();
+                let rate = done as f64 / secs.max(1e-9);
+                let eta = if total > done && rate > 0.0 {
+                    (total - done) as f64 / rate
+                } else {
+                    0.0
+                };
+                eprintln!(
+                    "進捗: {done}/{total} レコード ({rate:.0} rec/s, 経過 {secs:.0}s, ETA {eta:.0}s)"
+                );
+            }
+        }
     }
 
     writer.flush()?;
@@ -440,5 +490,47 @@ mod tests {
         assert_eq!(move16_psv_to_hcpe(0x40a5), 0x28a5); // 歩打ち P*5b（bit14, from=1）
         assert_eq!(move16_psv_to_hcpe(0x4380), 0x2b80); // 金打ち G*1a（bit14, from=7）
         assert_eq!(move16_psv_to_hcpe(0x9f46), 0x5f46); // 成り 7i8h+（bit15 → hcpe bit14）
+    }
+
+    #[test]
+    fn baked_eval_round_half_even_and_clamp() {
+        // evalfix 未指定なら生 score を素通し。
+        assert_eq!(baked_eval(0, None), 0);
+        assert_eq!(baked_eval(12345, None), 12345);
+        assert_eq!(baked_eval(-30000, None), -30000);
+
+        // python `round`（round-half-even / 偶数丸め）と一致すること。
+        // scale=2.5 で .5 ちょうどに乗る値を選ぶ。
+        assert_eq!(baked_eval(1, Some(2.5)), 2); // 2.5 → 偶数側 2
+        assert_eq!(baked_eval(3, Some(2.5)), 8); // 7.5 → 偶数側 8
+        assert_eq!(baked_eval(1, Some(0.5)), 0); // 0.5 → 偶数側 0
+        assert_eq!(baked_eval(3, Some(0.5)), 2); // 1.5 → 偶数側 2
+
+        // ±32767 クランプ。
+        assert_eq!(baked_eval(32767, Some(2.0)), 32767); // 65534 → クランプ
+        assert_eq!(baked_eval(-30000, Some(2.0)), -32767); // -60000 → クランプ
+    }
+
+    #[test]
+    fn baked_eval_matches_python_golden() {
+        // 本番スケール（EVAL_DECODE_CONST / a, a=1141.38…）での焼き込み結果が python 参照
+        // `psv_to_hcpe_flat.py`（`round` = round-half-even, ±32767 クランプ）の値と一致すること。
+        // EVAL_DECODE_CONST や式を誤変更すると golden が崩れて落ちる（決定性 + 定数の回帰検出）。
+        let scale = Some(EVAL_DECODE_CONST / 1_141.381_354_386_831);
+        let golden: [(i16, i16); 10] = [
+            (0, 0),
+            (1, 1),
+            (2, 1),
+            (100, 66),
+            (1000, 662),
+            (-1000, -662),
+            (12345, 8178),
+            (-12345, -8178),
+            (32767, 21706),
+            (-32767, -21706),
+        ];
+        for (score, expected) in golden {
+            assert_eq!(baked_eval(score, scale), expected, "score={score}");
+        }
     }
 }

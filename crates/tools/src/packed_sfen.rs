@@ -351,6 +351,33 @@ fn piece_type_from_index(index: usize) -> Option<PieceType> {
 /// 末尾の0埋め部分が歩として誤読される可能性があります。
 /// 詳細は `pack_position` のドキュメントを参照してください。
 pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
+    let u = unpack_sfen_to_parts(packed)?;
+    Ok(generate_sfen(&u.board, &u.hands, u.side_to_move))
+}
+
+/// packed SFEN(YaneuraOu PSV の盤面 32B)から、Position を構築せずに取り出した素の局面要素。
+///
+/// 変換ツールのホットパスで String 生成・Position 構築のヒープ割り当てを避け、
+/// `pack_hcp_from_parts` で hcp へ直接書くために使う。
+pub struct UnpackedSfen {
+    /// マス index(0..81)順の駒。空マスは `Piece::NONE`。
+    pub board: [Piece; 81],
+    /// 手駒 [先手, 後手]。
+    pub hands: [Hand; 2],
+    /// 手番。
+    pub side_to_move: Color,
+    /// 先手玉のマス index(0..81)。
+    pub black_king_sq: u8,
+    /// 後手玉のマス index(0..81)。
+    pub white_king_sq: u8,
+}
+
+/// YaneuraOu PSV の盤面(32B packed SFEN)を String/Position を経由せず素の局面要素へ展開する。
+///
+/// `unpack_sfen` が内部で組み立てる board/hands/手番をそのまま返すだけで、SFEN 文字列化を
+/// 行わない。完全に stack 上で完結する(ヒープ割り当てなし)ため、大量変換のホットパスは
+/// これと `pack_hcp_from_parts` を直接使い、文字列・Position 経由の往復を排除する。
+pub fn unpack_sfen_to_parts(packed: &[u8; 32]) -> Result<UnpackedSfen, String> {
     let mut stream = BitStream::new(packed);
 
     // 手番 (1bit)
@@ -374,6 +401,11 @@ pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
     let white_king_sq = stream.read_n_bit(7) as u8;
     if white_king_sq >= 81 {
         return Err(format!("Invalid white king position: {white_king_sq}"));
+    }
+    // 先後の玉が同一マスだと後手玉の代入が先手玉を上書きし、玉欠けの不正局面を
+    // Position 検証を経ずに HCP 化してしまう。破損レコードとして弾く。
+    if black_king_sq == white_king_sq {
+        return Err(format!("先手玉と後手玉が同一マス: {black_king_sq}"));
     }
     board[white_king_sq as usize] = Piece::W_KING;
 
@@ -450,6 +482,11 @@ pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
         };
 
         let pt = piece_type_from_index(piece_idx).ok_or("Invalid hand piece type")?;
+        // 破損 PSV で手駒が過剰だと `Hand::add`（飽和なし）が隣接駒種のビットへ桁あふれする。
+        // 追加前に駒種上限で弾き、ビットフィールドの破壊と count() の誤読を防ぐ。
+        if hands[color.index()].count(pt) >= INVENTORY_MAX[piece_type_to_index(pt)] {
+            return Err(format!("手駒が上限を超過: {pt:?}"));
+        }
         hands[color.index()] = hands[color.index()].add(pt);
     }
 
@@ -457,8 +494,38 @@ pub fn unpack_sfen(packed: &[u8; 32]) -> Result<String, String> {
         return Err("Hand piece parsing exceeded maximum iterations".to_string());
     }
 
-    // SFEN文字列を生成
-    Ok(generate_sfen(&board, &hands, side_to_move))
+    // 駒種ごとの総数（盤上 + 手駒、成りは基底駒種に合算）が上限を超える破損レコードを弾く。
+    // `set_sfen` 除去で失われた `validate_piece_inventory` 相当の検証を allocation-free に復元し、
+    // 「壊れた PSV はスキップしてカウント」という従来契約を維持する。
+    let mut totals = [0u32; 8];
+    for &piece in &board {
+        if piece.is_some() {
+            totals[piece_type_to_index(piece.piece_type())] += 1;
+        }
+    }
+    for pt in [
+        PieceType::Pawn,
+        PieceType::Lance,
+        PieceType::Knight,
+        PieceType::Silver,
+        PieceType::Bishop,
+        PieceType::Rook,
+        PieceType::Gold,
+    ] {
+        let idx = piece_type_to_index(pt);
+        let total = totals[idx] + hands[0].count(pt) + hands[1].count(pt);
+        if total > INVENTORY_MAX[idx] {
+            return Err(format!("{pt:?} の総数が上限超過: {total} > {}", INVENTORY_MAX[idx]));
+        }
+    }
+
+    Ok(UnpackedSfen {
+        board,
+        hands,
+        side_to_move,
+        black_king_sq,
+        white_king_sq,
+    })
 }
 
 /// HuffmanCodedPos (Apery/cshogi 形式) をSFEN文字列に変換
@@ -1118,6 +1185,11 @@ impl BitStreamWriter {
 
 /// 駒種インデックスを取得
 /// 戻り値: 1=歩, 2=香, 3=桂, 4=銀, 5=角, 6=飛, 7=金
+/// 駒種ごとの総数上限（盤上 + 手駒、成り駒は基底駒種に合算）。`piece_type_to_index` の
+/// 添字（1..=7、0=玉/空は未使用）で引く。`Position::set_sfen` の `validate_piece_inventory`
+/// と同じ上限で、破損 PSV を Position を構築せずに弾くために使う。
+const INVENTORY_MAX: [u32; 8] = [0, 18, 4, 4, 4, 2, 2, 4];
+
 fn piece_type_to_index(pt: PieceType) -> usize {
     match pt {
         PieceType::Pawn | PieceType::ProPawn => 1,
@@ -1414,29 +1486,44 @@ fn write_piecebox_hcp(stream: &mut BitStreamWriter, pt: PieceType) {
 ///   - ハフマンテーブル: HCP_HUFFMAN_TABLE を使用（KNIGHT=0x07, SILVER=0x0b で PSfen と逆）
 ///   - 手駒: HCP_HAND_TABLE による独立した prefix-free コードを使用
 pub fn pack_position_hcp(pos: &Position) -> [u8; 32] {
+    let mut board = [Piece::NONE; 81];
+    for sq_idx in 0..81u8 {
+        let sq = Square::from_u8(sq_idx).expect("sq_idx should be in valid range 0-80");
+        board[sq_idx as usize] = pos.piece_on(sq);
+    }
+    let parts = UnpackedSfen {
+        board,
+        hands: [pos.hand(Color::Black), pos.hand(Color::White)],
+        side_to_move: pos.side_to_move(),
+        black_king_sq: pos.king_square(Color::Black).index() as u8,
+        white_king_sq: pos.king_square(Color::White).index() as u8,
+    };
+    pack_hcp_from_parts(&parts)
+}
+
+/// 素の局面要素（`UnpackedSfen`）から HuffmanCodedPos（hcp, 32B）を直接書く。
+///
+/// `pack_position_hcp` の Position 非依存版。`unpack_sfen_to_parts` と組み合わせると、
+/// PSV → hcp 変換を String 生成も Position 構築も挟まず（ヒープ割り当てゼロで）行える。
+/// 出力は `pack_position_hcp` と bit 一致する。
+pub fn pack_hcp_from_parts(parts: &UnpackedSfen) -> [u8; 32] {
     let mut stream = BitStreamWriter::new();
 
     // 1. 手番 (1bit): 0=先手, 1=後手
-    stream.write_one_bit(pos.side_to_move() == Color::White);
+    stream.write_one_bit(parts.side_to_move == Color::White);
 
     // 2. 先手玉位置 (7bit)
-    let black_king_sq = pos.king_square(Color::Black);
-    stream.write_n_bit(black_king_sq.index() as u32, 7);
+    stream.write_n_bit(parts.black_king_sq as u32, 7);
 
     // 3. 後手玉位置 (7bit)
-    let white_king_sq = pos.king_square(Color::White);
-    stream.write_n_bit(white_king_sq.index() as u32, 7);
+    stream.write_n_bit(parts.white_king_sq as u32, 7);
 
     // 4. 盤上の駒 (81マス、玉はスキップ)
-    for sq_idx in 0..81u8 {
-        let sq = Square::from_u8(sq_idx).expect("sq_idx should be in valid range 0-80");
-        let piece = pos.piece_on(sq);
-
+    for &piece in &parts.board {
         // 玉はスキップ
         if piece.is_some() && piece.piece_type() == PieceType::King {
             continue;
         }
-
         write_board_piece_hcp(&mut stream, piece);
     }
 
@@ -1455,7 +1542,7 @@ pub fn pack_position_hcp(pos: &Position) -> [u8; 32] {
     ];
 
     for &color in &[Color::Black, Color::White] {
-        let hand = pos.hand(color);
+        let hand = parts.hands[color.index()];
         for &(pt, _) in &piece_order {
             let count = hand.count(pt);
             for _ in 0..count {
@@ -1469,16 +1556,14 @@ pub fn pack_position_hcp(pos: &Position) -> [u8; 32] {
     // と同じく、不足分を駒種ごとに駒箱コードで書く（書かないと残りビットの 0 が
     // `unpack_hcp` で歩として誤読される）。
     let mut on_board = [0u32; 8]; // piece_type_to_index (1..=7) で添字付け
-    for sq_idx in 0..81u8 {
-        let sq = Square::from_u8(sq_idx).expect("sq_idx should be in valid range 0-80");
-        let piece = pos.piece_on(sq);
+    for &piece in &parts.board {
         if piece.is_some() {
             on_board[piece_type_to_index(piece.piece_type())] += 1;
         }
     }
     for &(pt, total) in &piece_order {
         let idx = piece_type_to_index(pt);
-        let in_hand = pos.hand(Color::Black).count(pt) + pos.hand(Color::White).count(pt);
+        let in_hand = parts.hands[0].count(pt) + parts.hands[1].count(pt);
         let in_box = total.saturating_sub(on_board[idx] + in_hand);
         for _ in 0..in_box {
             write_piecebox_hcp(&mut stream, pt);
@@ -1751,6 +1836,47 @@ mod tests {
             pos.set_sfen(sfen).expect("set_sfen should succeed");
             assert_eq!(to_hex(&pack_position_hcp(&pos)), expected, "HCP mismatch for {sfen}");
         }
+    }
+
+    #[test]
+    fn test_direct_path_matches_position_path() {
+        // 最適化(ホットパス)で使う「packed → unpack_sfen_to_parts → pack_hcp_from_parts」直接経路が、
+        // 従来の「packed → unpack_sfen(String) → set_sfen → pack_position_hcp」と bit 一致することを
+        // 保証する回帰テスト。手駒・成り駒・駒落ち(駒箱)を含む局面で確認する。
+        let sfens = [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1", // 平手
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPP1P/1B5R1/LNSGKGSNL b P 1", // 手駒あり
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1+B5R1/LNSGKGSNL b - 1", // 成り駒
+            "lnsgkgsn1/1r5b1/ppppppppp/9/9/9/1PPPPPPPP/1B5R1/LNSGKGSN1 b - 1", // 駒落ち(駒箱)
+            "9/9/9/9/4k4/9/9/9/4K4 w 2G2g 1",                                  // 手駒多数・偏り
+        ];
+        for sfen in sfens {
+            // 従来経路で参照 hcp を作る
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).expect("set_sfen should succeed");
+            let packed = pack_position(&pos);
+            let reference = pack_position_hcp(&pos);
+
+            // 直接経路（String も Position も経由しない）
+            let parts = unpack_sfen_to_parts(&packed).expect("unpack_sfen_to_parts should succeed");
+            let direct = pack_hcp_from_parts(&parts);
+
+            assert_eq!(direct, reference, "direct path hcp mismatch for {sfen}");
+            // 手番も一致すること（convert はここから result を作る）
+            assert_eq!(parts.side_to_move, pos.side_to_move(), "side_to_move mismatch for {sfen}");
+        }
+    }
+
+    #[test]
+    fn unpack_sfen_to_parts_rejects_duplicate_king_square() {
+        // 破損 PSV: 先手玉と後手玉が同一マス。BitStreamWriter で先頭ビット
+        // (手番1bit + 先手玉7bit + 後手玉7bit) を逆生成して与える。
+        let mut w = BitStreamWriter::new();
+        w.write_one_bit(false); // 手番=先手
+        w.write_n_bit(40, 7); // 先手玉 = マス40
+        w.write_n_bit(40, 7); // 後手玉 = マス40（同一 → 不正）
+        let packed = w.finish();
+        assert!(unpack_sfen_to_parts(&packed).is_err(), "同一マスの両玉は破損として弾くべき");
     }
 
     #[test]

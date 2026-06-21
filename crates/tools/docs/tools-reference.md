@@ -46,7 +46,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `filter_teacher_data` | 王手除外・スコアフィルタ・クリップなどの前処理を適用 |
 | `fix_scores` | preprocess で上書きされたスコアを元ファイルから復元 |
 | `psv_to_jsonl` | PSV 形式を JSONL 形式に変換 |
-| `psv_to_hcpe3` | PSV を dlshogi 学習用 hcpe3 / hcpe に変換（cshogi と byte 一致、streaming） |
+| `psv_to_hcpe3` | PSV を dlshogi 学習用 hcpe3 / hcpe に変換（cshogi と byte 一致、streaming、`--evalfix-a` で eval 焼き込み） |
 | `pack_to_psv` | GenSfen .pack を PackedSfenValue (PSV) 形式に展開 |
 
 ## 重複除去・検証
