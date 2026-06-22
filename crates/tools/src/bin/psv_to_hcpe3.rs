@@ -155,6 +155,7 @@ const EVAL_DECODE_CONST: f64 = 756.0864962951762;
 #[inline]
 fn baked_eval(score: i16, eval_scale: Option<f64>) -> i16 {
     match eval_scale {
+        // python 参照実装が np.clip(score, -32767, 32767)（対称 ±32767）のため、i16::MIN(-32768) は使わない。
         Some(s) => (f64::from(score) * s).round_ties_even().clamp(-32767.0, 32767.0) as i16,
         None => score,
     }

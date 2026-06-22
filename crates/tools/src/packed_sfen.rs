@@ -1183,13 +1183,13 @@ impl BitStreamWriter {
     }
 }
 
-/// 駒種インデックスを取得
-/// 戻り値: 1=歩, 2=香, 3=桂, 4=銀, 5=角, 6=飛, 7=金
 /// 駒種ごとの総数上限（盤上 + 手駒、成り駒は基底駒種に合算）。`piece_type_to_index` の
 /// 添字（1..=7、0=玉/空は未使用）で引く。`Position::set_sfen` の `validate_piece_inventory`
 /// と同じ上限で、破損 PSV を Position を構築せずに弾くために使う。
 const INVENTORY_MAX: [u32; 8] = [0, 18, 4, 4, 4, 2, 2, 4];
 
+/// 駒種インデックスを取得
+/// 戻り値: 1=歩, 2=香, 3=桂, 4=銀, 5=角, 6=飛, 7=金
 fn piece_type_to_index(pt: PieceType) -> usize {
     match pt {
         PieceType::Pawn | PieceType::ProPawn => 1,
