@@ -822,7 +822,7 @@ mod tests {
 
             any_in_check |= from_sfen.in_check();
         }
-        // in_check() == true の局面を最低 1 件は通し、王手計算の parity を実際に検証する。
-        assert!(any_in_check, "王手局面が含まれていない（テストの意味が薄れる）");
+        // 王手計算の parity を実際に検証するため、in_check() == true の局面を最低 1 件通す。
+        assert!(any_in_check, "王手局面を最低 1 件含むこと");
     }
 }
