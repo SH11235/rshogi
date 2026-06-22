@@ -101,11 +101,13 @@ impl Position {
             if pc.is_none() {
                 continue;
             }
-            // sq_idx は 0..Square::NUM(81) なので from_u8 は必ず Some。
+            // sq_idx は board.iter() の添字で 0..Square::NUM(81) の範囲内。範囲外になるのは
+            // 入力エラーではなく内部不変条件の破壊（ロジックバグ）なので panic させる。
             let sq = Square::from_u8(sq_idx as u8)
-                .ok_or_else(|| SfenError::Board(format!("Invalid square index: {sq_idx}")))?;
+                .expect("sq_idx は 0..Square::NUM の範囲内であり from_u8 は必ず Some");
             self.put_piece(pc, sq);
             if pc.piece_type() == PieceType::King {
+                // put_piece は king_square を更新しないため、parse_board と同様に明示的にセットする。
                 self.king_square[pc.color().index()] = sq;
             }
         }
@@ -792,7 +794,11 @@ mod tests {
             "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1+B5R1/LNSGKGSNL w - 1",
             "lnsgkgsn1/1r5b1/ppppppppp/9/9/9/1PPPPPPPP/1B5R1/LNSGKGSN1 b - 1",
             "9/9/9/9/4k4/9/9/9/4K4 w 2G2g 1",
+            // 手番側（先手）が王手を受けている局面。先手玉 5e を後手飛車 5a が同一筋で王手。
+            // finalize_after_population の王手計算が set_from_parts でも働くことを確認する。
+            "4r4/9/9/9/4K4/9/9/9/4k4 b - 1",
         ];
+        let mut any_in_check = false;
         for sfen in sfens {
             let mut from_sfen = Position::new();
             from_sfen.set_sfen(sfen).expect("set_sfen should succeed");
@@ -813,6 +819,10 @@ mod tests {
             assert_eq!(from_parts.to_sfen(), from_sfen.to_sfen(), "sfen mismatch for {sfen}");
             assert_eq!(from_parts.key(), from_sfen.key(), "key mismatch for {sfen}");
             assert_eq!(from_parts.in_check(), from_sfen.in_check(), "in_check mismatch for {sfen}");
+
+            any_in_check |= from_sfen.in_check();
         }
+        // in_check() == true の局面を最低 1 件は通し、王手計算の parity を実際に検証する。
+        assert!(any_in_check, "王手局面が含まれていない（テストの意味が薄れる）");
     }
 }
