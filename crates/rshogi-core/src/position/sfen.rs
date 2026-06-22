@@ -3,7 +3,7 @@
 use crate::eval::material::compute_material_value;
 use crate::nnue::piece_list::piece_number_base;
 use crate::nnue::{ExtBonaPiece, PieceNumber};
-use crate::types::{Color, File, Piece, PieceType, Rank, Square};
+use crate::types::{Color, File, Hand, Piece, PieceType, Rank, Square};
 
 use super::pos::{Position, is_minor_piece};
 use super::zobrist::{zobrist_hand, zobrist_no_pawns, zobrist_psq, zobrist_side};
@@ -78,6 +78,48 @@ impl Position {
             self.game_ply = 1;
         }
 
+        self.finalize_after_population()
+    }
+
+    /// SFEN 文字列を経ずに、盤面・手駒・手番から局面を構築する。
+    ///
+    /// `set_sfen` の文字列パース（`generate_sfen` 由来の `String` 生成や `split` の `Vec` 確保）
+    /// を避けたいホットパス（PSV → 局面の大量変換など）向け。`board` はマス index（0..81、
+    /// `Square` の index と同順）で空マスは `Piece::NONE`、`hand` は `[先手, 後手]`。手数は 1
+    /// に設定する（PSV 変換用途では手数は評価に影響しない）。`set_sfen` と同じ後処理
+    /// （PieceList / ハッシュ / 利き / pin / 王手 / material の再計算と在庫検証）を通すため、
+    /// 得られる局面は同一盤面を `set_sfen` で構築したものと一致する。
+    pub fn set_from_parts(
+        &mut self,
+        board: &[Piece; Square::NUM],
+        hand: &[Hand; Color::NUM],
+        side_to_move: Color,
+    ) -> Result<(), SfenError> {
+        *self = Position::new();
+
+        for (sq_idx, &pc) in board.iter().enumerate() {
+            if pc.is_none() {
+                continue;
+            }
+            // sq_idx は 0..Square::NUM(81) なので from_u8 は必ず Some。
+            let sq = Square::from_u8(sq_idx as u8)
+                .ok_or_else(|| SfenError::Board(format!("Invalid square index: {sq_idx}")))?;
+            self.put_piece(pc, sq);
+            if pc.piece_type() == PieceType::King {
+                self.king_square[pc.color().index()] = sq;
+            }
+        }
+
+        self.hand = *hand;
+        self.side_to_move = side_to_move;
+        self.game_ply = 1;
+
+        self.finalize_after_population()
+    }
+
+    /// 盤面・手駒・手番を投入済みの状態から、PieceList・ハッシュ・利き・pin・王手・material を
+    /// 再計算し、駒在庫を検証して局面を確定する（`set_sfen` / `set_from_parts` 共通の後処理）。
+    fn finalize_after_population(&mut self) -> Result<(), SfenError> {
         self.validate_piece_inventory()?;
 
         // PieceList の初期化
@@ -737,5 +779,40 @@ mod tests {
         assert_eq!(piece_to_sfen(Piece::W_PAWN), "p");
         assert_eq!(piece_to_sfen(Piece::B_PRO_PAWN), "+P");
         assert_eq!(piece_to_sfen(Piece::W_HORSE), "+b");
+    }
+
+    #[test]
+    fn test_set_from_parts_matches_set_sfen() {
+        // set_from_parts（String を経由しない構築）が、同一盤面を set_sfen で構築した
+        // 局面と一致することを保証する。手駒・成り駒・駒落ち・後手番を網羅。
+        // 手数は set_from_parts が 1 固定のため、SFEN 側も手数 1 で揃える。
+        let sfens = [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPP1P/1B5R1/LNSGKGSNL b P 1",
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1+B5R1/LNSGKGSNL w - 1",
+            "lnsgkgsn1/1r5b1/ppppppppp/9/9/9/1PPPPPPPP/1B5R1/LNSGKGSN1 b - 1",
+            "9/9/9/9/4k4/9/9/9/4K4 w 2G2g 1",
+        ];
+        for sfen in sfens {
+            let mut from_sfen = Position::new();
+            from_sfen.set_sfen(sfen).expect("set_sfen should succeed");
+
+            // 構築済み局面から素の要素を取り出す
+            let mut board = [Piece::NONE; Square::NUM];
+            for (i, cell) in board.iter_mut().enumerate() {
+                let sq = Square::from_u8(i as u8).expect("valid square index");
+                *cell = from_sfen.piece_on(sq);
+            }
+            let hand = [from_sfen.hand(Color::Black), from_sfen.hand(Color::White)];
+
+            let mut from_parts = Position::new();
+            from_parts
+                .set_from_parts(&board, &hand, from_sfen.side_to_move())
+                .expect("set_from_parts should succeed");
+
+            assert_eq!(from_parts.to_sfen(), from_sfen.to_sfen(), "sfen mismatch for {sfen}");
+            assert_eq!(from_parts.key(), from_sfen.key(), "key mismatch for {sfen}");
+            assert_eq!(from_parts.in_check(), from_sfen.in_check(), "in_check mismatch for {sfen}");
+        }
     }
 }

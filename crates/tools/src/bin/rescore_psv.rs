@@ -63,7 +63,7 @@ use std::time::{Duration, Instant};
 use rshogi_core::nnue::init_nnue;
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search};
-use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen};
+use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen, unpack_sfen_to_parts};
 use tools::qsearch_pv::{NnueStacks, apply_pv, qsearch_with_pv_nnue};
 
 /// 探索用スタックサイズ（64MB）
@@ -1624,15 +1624,15 @@ fn process_record(
         None => return ProcessResult::Error(anyhow::anyhow!("Failed to parse PackedSfenValue")),
     };
 
-    // PackedSfen → SFEN → Position
-    let sfen = match unpack_sfen(&psv.sfen) {
-        Ok(s) => s,
+    // PackedSfen → 局面（String/Position 経由の往復を避け、parts から直接構築）
+    let parts = match unpack_sfen_to_parts(&psv.sfen) {
+        Ok(p) => p,
         Err(e) => return ProcessResult::Error(anyhow::anyhow!("Failed to unpack SFEN: {e}")),
     };
 
     let mut pos = Position::new();
-    if let Err(e) = pos.set_sfen(&sfen) {
-        return ProcessResult::Error(anyhow::anyhow!("Failed to set SFEN: {e:?}"));
+    if let Err(e) = pos.set_from_parts(&parts.board, &parts.hands, parts.side_to_move) {
+        return ProcessResult::Error(anyhow::anyhow!("Failed to set position: {e:?}"));
     }
 
     // 王手局面をスキップ
@@ -1946,15 +1946,15 @@ fn process_record_with_search(
         None => return ProcessResult::Error(anyhow::anyhow!("Failed to parse PackedSfenValue")),
     };
 
-    // PackedSfen → SFEN → Position
-    let sfen = match unpack_sfen(&psv.sfen) {
-        Ok(s) => s,
+    // PackedSfen → 局面（String/Position 経由の往復を避け、parts から直接構築）
+    let parts = match unpack_sfen_to_parts(&psv.sfen) {
+        Ok(p) => p,
         Err(e) => return ProcessResult::Error(anyhow::anyhow!("Failed to unpack SFEN: {e}")),
     };
 
     let mut pos = Position::new();
-    if let Err(e) = pos.set_sfen(&sfen) {
-        return ProcessResult::Error(anyhow::anyhow!("Failed to set SFEN: {e:?}"));
+    if let Err(e) = pos.set_from_parts(&parts.board, &parts.hands, parts.side_to_move) {
+        return ProcessResult::Error(anyhow::anyhow!("Failed to set position: {e:?}"));
     }
 
     // 王手局面をスキップ

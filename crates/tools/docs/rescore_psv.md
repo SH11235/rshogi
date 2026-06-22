@@ -167,6 +167,12 @@ cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
 | `--max-ply` | 16 | qsearch の最大深さ（`--qsearch-leaf-label` の葉探索でも使用） |
 | `--threads` | 1 | 処理スレッド数（rayon による特徴量構築の並列化） |
 
+> **性能メモ（内部 NNUE 評価モード）**: PSV → 局面の復元は SFEN 文字列・`Position::set_sfen`
+> を経由せず `unpack_sfen_to_parts` → `Position::set_from_parts` で直接構築する（per-record の
+> `String`/`Vec` 確保を排除）。これにより多スレッド時の malloc 競合（kernel 時間）が解消され、
+> 静的 NNUE 評価で 1M 件 4.99s→1.51s（約 3.3x、system time 63.5s→0.6s、出力 bit 一致）を確認。
+> 外部 USI エンジン / ONNX モードは SFEN 文字列が必要なため従来経路のまま（GPU 律速で影響は軽微）。
+
 ### ポリシー展開オプション（`--expand-output-dir` 指定時）
 
 | オプション | デフォルト | 説明 |
