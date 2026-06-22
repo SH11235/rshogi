@@ -1,4 +1,4 @@
-# gensfen — NNUE 学習用教師局面 (PSV/pack) 生成ツール
+# gensfen — NNUE 学習用教師局面 (PSV/pack/hcpe3) 生成ツール
 
 NativeBackend で `--eval-file` 指定の評価関数を使い、エンジン同士の対局を回しながら
 `PackedSfenValue` 形式の教師局面を生成する。棋力評価（Elo 比較・SPRT 等）には
@@ -123,9 +123,11 @@ position sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
 | `--output-training-data PATH` | `<out-dir>/gensfen.psv` | 学習データ出力先 |
-| `--training-data-format FORMAT` | psv | `psv`（40バイト固定）または `pack`（32バイト + メタ） |
-| `--skip-initial-ply N` | 0 | 序盤 1〜N 手目をスキップ |
-| `--skip-in-check BOOL` | false | 王手局面をスキップ |
+| `--training-data-format FORMAT` | psv | `psv`（40バイト固定）/ `pack`（32バイト + メタ）/ `hcpe3`（可変長棋譜 + policy） |
+| `--hcpe3-policy-total N` | 1000 | hcpe3 の policy 分布に割り当てる visit 総票数 |
+| `--hcpe3-policy-temp F` | 600.0 | hcpe3 の policy softmax 温度（centipawn 単位、大きいほど分布を均す） |
+| `--skip-initial-ply N` | 0 | 序盤 1〜N 手目をスキップ（hcpe3 でも prefix 連続なので可） |
+| `--skip-in-check BOOL` | false | 王手局面をスキップ（**hcpe3 では不可** = 中間スキップが replay を壊す） |
 
 ### 重複回避（gensfen 固有）
 
@@ -243,6 +245,39 @@ PackedSfenValue 形式（40バイト/局面）で、Nodchip learner 互換。
 | 39 | 1 | padding |
 
 手数制限やタイムアウトで終了した対局（InProgress）の局面は含まれない。
+
+### pack 形式
+
+`--training-data-format pack` は 1 対局を可変長で書く（開始局面 hcp + 各手の move16/score
++ 終局マーカー）。局面は開始局面から指し手を辿って復元する。
+
+### hcpe3 形式
+
+`--training-data-format hcpe3` は 1 対局を可変長で書き、**各手に MultiPV の policy 分布**を
+持たせる（value 専用の psv/pack に対し policy も学習できる）。policy 候補は
+`--random-multi-pv N`（N>1）を指定したときに収集される。`--random-multi-pv-diff 0` を併用すると
+着手を PV1 と同評価の候補に限定できる（同評価が PV1 だけなら実着手は PV1 になる）。なお
+selectedMove16 には実際に着手した手を記録するため、ランダム着手を使っても replay は崩れない。
+
+レコード（局面は開始局面 hcp から `selectedMove16` を辿って復元する = 手列が連続している必要）:
+
+| フィールド | サイズ | 内容 |
+|-----------|--------|------|
+| hcp | 32 | 開始局面 |
+| moveNum | 2 | 手数 |
+| result | 1 | 0=引き分け / 1=先手勝ち / 2=後手勝ち |
+| opponent | 1 | 予約（0） |
+| 以下を moveNum 回 | | |
+| selectedMove16 | 2 | 実着手（hcpe move16） |
+| eval | 2 | 手番側視点 cp。詰みは 32000-ply 符号化 |
+| candidateNum | 2 | policy 候補数 |
+| 以下を candidateNum 回 | | |
+| move16 | 2 | 候補手（hcpe move16） |
+| visitNum | 2 | softmax 量子化した票数 |
+
+policy の票数は各候補の eval を温度 `--hcpe3-policy-temp` の softmax で確率化し
+`--hcpe3-policy-total` 票へ量子化する（詰み候補は ±10000 にクリップ、PV1 は必ず 1 票以上）。
+`--random-multi-pv` 未指定（候補なし）のときは実着手の one-hot（visit=1）になる。
 
 ## 中断・再開（Resume）
 

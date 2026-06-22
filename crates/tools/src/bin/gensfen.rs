@@ -22,8 +22,9 @@ use tools::packed_sfen::{
     pack_position_hcp,
 };
 use tools::selfplay::{
-    EngineConfig, EngineProcess, EvalLog, GameEngines, GameOutcome, NativeBackend, ParsedPosition,
-    SearchParams, TimeControl, UsiBackend, build_position, load_start_positions, side_label,
+    EngineConfig, EngineProcess, EvalLog, GameEngines, GameOutcome, MultiPvCandidate,
+    NativeBackend, ParsedPosition, SearchParams, TimeControl, UsiBackend, build_position,
+    load_start_positions, side_label,
 };
 
 const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
@@ -232,9 +233,17 @@ struct Cli {
     )]
     skip_in_check: bool,
 
-    /// 学習データの出力形式（psv または pack）
+    /// 学習データの出力形式（psv / pack / hcpe3）
     #[arg(long, default_value = "psv")]
     training_data_format: String,
+
+    /// hcpe3 形式の policy 分布に割り当てる visit の総票数
+    #[arg(long, default_value_t = 1000)]
+    hcpe3_policy_total: u16,
+
+    /// hcpe3 形式の policy softmax の温度（centipawn 単位、大きいほど分布を均す）
+    #[arg(long, default_value_t = 600.0)]
+    hcpe3_policy_temp: f64,
 
     /// Number of concurrent worker threads
     #[arg(long, default_value_t = 1)]
@@ -483,8 +492,20 @@ impl MetricsCollector {
 enum TrainingFormat {
     /// PackedSfenValue 40バイト固定長形式
     Psv,
-    /// cshogi 可変長対局棋譜形式
+    /// 可変長対局棋譜形式
     Pack,
+    /// 可変長対局棋譜 + 各手の MultiPV policy 分布を持つ hcpe3 形式
+    Hcpe3,
+}
+
+/// hcpe3 形式でのみ使う追加データ（局面 replay 用の実着手と policy 分布）
+struct Hcpe3EntryData {
+    /// 実際に着手した手（rshogi move16）。replay でこの手を辿って局面を再構成する
+    selected_move16: u16,
+    /// 手番側視点の eval。詰みは 32000-ply 符号化
+    eval: i16,
+    /// policy 分布 (rshogi move16, visit)。multipv 昇順
+    policy: Vec<(u16, u16)>,
 }
 
 /// 学習データ出力用のエントリ（game_result未設定の一時データ）
@@ -499,6 +520,8 @@ struct TrainingEntry {
     game_ply: u16,
     /// 手番（game_result計算用）
     side_to_move: Color,
+    /// hcpe3 形式のときのみ Some（Psv/Pack では None で確保なし）
+    hcpe3: Option<Hcpe3EntryData>,
 }
 
 /// 学習データ収集器
@@ -507,6 +530,10 @@ struct TrainingDataCollector {
     entries: Vec<TrainingEntry>,
     writer: BufWriter<File>,
     format: TrainingFormat,
+    /// hcpe3 policy 分布の visit 総票数（softmax 量子化に使用）
+    policy_total: u16,
+    /// hcpe3 policy softmax の温度
+    policy_temp: f64,
     skip_initial_ply: u32,
     skip_in_check: bool,
     total_written: u64,
@@ -526,6 +553,8 @@ impl TrainingDataCollector {
         skip_initial_ply: u32,
         skip_in_check: bool,
         format: TrainingFormat,
+        policy_total: u16,
+        policy_temp: f64,
     ) -> Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -546,6 +575,8 @@ impl TrainingDataCollector {
             entries: Vec::new(),
             writer: BufWriter::new(file),
             format,
+            policy_total,
+            policy_temp,
             skip_initial_ply,
             skip_in_check,
             total_written: 0,
@@ -568,6 +599,15 @@ impl TrainingDataCollector {
         self.entries.len()
     }
 
+    /// 記録局面が 1 手飛んだとき、replay が必要な hcpe3 形式では蓄積中のセグメントを
+    /// 破棄して次の記録局面から取り直す（Psv/Pack は各局面が独立なので影響を受けない）。
+    fn discard_segment_on_gap(&mut self) {
+        if self.format == TrainingFormat::Hcpe3 {
+            self.entries.clear();
+            self.start_hcp = None;
+        }
+    }
+
     /// 局面を記録（game_resultは後で設定）
     /// 注: game_plyとスキップ判定はpos.game_ply()を使用する
     /// （startpos+movesやSFEN手数指定のケースに対応するため）
@@ -577,6 +617,8 @@ impl TrainingDataCollector {
         score_cp: Option<i32>,
         score_mate: Option<i32>,
         best_move: Option<Move>,
+        played_move: Option<Move>,
+        candidates: &[MultiPvCandidate],
     ) {
         let current_ply = pos.game_ply();
 
@@ -604,7 +646,9 @@ impl TrainingDataCollector {
             // 通常のセンチポーンスコア
             cp.clamp(-10000, 10000) as i16
         } else {
-            // スコアがない場合は記録しない
+            // スコアがない場合は記録しない。hcpe3 は手列を連続させて replay するため、
+            // 蓄積途中で 1 手飛ぶと復元不能になる。途中のセグメントを破棄して取り直す。
+            self.discard_segment_on_gap();
             return;
         };
 
@@ -614,13 +658,33 @@ impl TrainingDataCollector {
         // PackedSfenを生成
         let packed_sfen = pack_position(pos);
 
-        // .pack 形式: 最初のエントリで開始局面の HCP を記録
-        if self.format == TrainingFormat::Pack && self.start_hcp.is_none() {
+        // Pack/hcpe3 形式: 最初のエントリで開始局面の HCP を記録（以降を replay する起点）
+        if matches!(self.format, TrainingFormat::Pack | TrainingFormat::Hcpe3)
+            && self.start_hcp.is_none()
+        {
             let is_hirate = packed_sfen == self.hirate_packed_sfen;
             let hcp = pack_position_hcp(pos);
             let ply = current_ply.clamp(0, u16::MAX as i32) as u16;
             self.start_hcp = Some((hcp, ply, is_hirate));
         }
+
+        // hcpe3 形式は replay 整合のため selectedMove16 を実着手にし、各手に MultiPV policy を持たせる
+        let hcpe3 = if self.format == TrainingFormat::Hcpe3 {
+            let selected_move16 = played_move.map_or(0, move_to_move16);
+            let eval = score_mate.map_or(score, mate_to_eval);
+            let policy = if candidates.is_empty() {
+                vec![(selected_move16, 1u16)]
+            } else {
+                multipv_to_policy(candidates, self.policy_total, self.policy_temp)
+            };
+            Some(Hcpe3EntryData {
+                selected_move16,
+                eval,
+                policy,
+            })
+        } else {
+            None
+        };
 
         self.entries.push(TrainingEntry {
             sfen: packed_sfen,
@@ -628,6 +692,7 @@ impl TrainingDataCollector {
             move16,
             game_ply: current_ply.clamp(0, u16::MAX as i32) as u16,
             side_to_move: pos.side_to_move(),
+            hcpe3,
         });
     }
 
@@ -648,6 +713,7 @@ impl TrainingDataCollector {
         match self.format {
             TrainingFormat::Psv => self.finish_game_psv(outcome)?,
             TrainingFormat::Pack => self.finish_game_pack(outcome)?,
+            TrainingFormat::Hcpe3 => self.finish_game_hcpe3(outcome)?,
         }
 
         self.entries.clear();
@@ -743,6 +809,54 @@ impl TrainingDataCollector {
         Ok(())
     }
 
+    /// hcpe3 形式で書き出す（可変長対局棋譜 + 各手の policy 分布）。
+    ///
+    /// レイアウト:
+    ///   [hcp: 32byte][moveNum: u16 LE][result: u8][opponent: u8]
+    ///   moveNum 回: [selectedMove16: u16 LE][eval: i16 LE][candidateNum: u16 LE]
+    ///               candidateNum 回: [move16: u16 LE][visitNum: u16 LE]
+    /// result は 0=draw / 1=black_win / 2=white_win。move16 は hcpe 形式。
+    /// 局面は hcp から selectedMove16 を順に辿って再構成するため手列が連続している必要がある。
+    fn finish_game_hcpe3(&mut self, outcome: GameOutcome) -> Result<()> {
+        let (hcp, _start_ply, _is_hirate) =
+            self.start_hcp.ok_or_else(|| anyhow!("hcpe3 format: start_hcp not set"))?;
+        let move_num: u16 = self.entries.len().try_into().map_err(|_| {
+            anyhow!("hcpe3 format: too many moves in one game ({})", self.entries.len())
+        })?;
+        let result: u8 = match outcome {
+            GameOutcome::BlackWin => 1,
+            GameOutcome::WhiteWin => 2,
+            GameOutcome::Draw => 0,
+            GameOutcome::InProgress => unreachable!(),
+        };
+
+        self.writer.write_all(&hcp)?;
+        self.writer.write_all(&move_num.to_le_bytes())?;
+        self.writer.write_all(&[result, 0u8])?;
+
+        for entry in &self.entries {
+            let h = entry
+                .hcpe3
+                .as_ref()
+                .ok_or_else(|| anyhow!("hcpe3 format: entry has no policy data"))?;
+            let selected = move_to_hcpe_move16(move16_to_move(h.selected_move16));
+            let candidate_num: u16 =
+                h.policy.len().try_into().map_err(|_| {
+                    anyhow!("hcpe3 format: too many candidates ({})", h.policy.len())
+                })?;
+            self.writer.write_all(&selected.to_le_bytes())?;
+            self.writer.write_all(&h.eval.to_le_bytes())?;
+            self.writer.write_all(&candidate_num.to_le_bytes())?;
+            for (move16, visit) in &h.policy {
+                let hcpe_move16 = move_to_hcpe_move16(move16_to_move(*move16));
+                self.writer.write_all(&hcpe_move16.to_le_bytes())?;
+                self.writer.write_all(&visit.to_le_bytes())?;
+            }
+            self.total_written += 1;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<()> {
         self.writer.flush()?;
         Ok(())
@@ -832,6 +946,103 @@ impl ShuffledStartpos {
         self.cursor += 1;
         idx
     }
+}
+
+/// hcpe3 形式に固有の制約を検証する。
+///
+/// hcpe3 は hcp から各手を replay して局面を再構成するため手列が連続している必要がある。
+/// 中間局面を間引く `--skip-in-check` は replay を壊すので拒否する（序盤 prefix の
+/// `--skip-initial-ply` は連続性を保つため許可）。policy のパラメータも検証する。
+fn validate_hcpe3_opts(
+    format: TrainingFormat,
+    skip_in_check: bool,
+    policy_total: u16,
+    policy_temp: f64,
+) -> Result<()> {
+    if format != TrainingFormat::Hcpe3 {
+        return Ok(());
+    }
+    if skip_in_check {
+        bail!(
+            "hcpe3 format does not support --skip-in-check (skipping mid-game positions breaks move replay)"
+        );
+    }
+    if policy_total == 0 {
+        bail!("--hcpe3-policy-total must be >= 1");
+    }
+    if !(policy_temp.is_finite() && policy_temp > 0.0) {
+        bail!("--hcpe3-policy-temp must be a finite value > 0");
+    }
+    Ok(())
+}
+
+/// 詰みスコア（手番側視点・手数）を hcpe3 eval の 32000-ply 符号化へ。
+/// `|eval| >= 30001` に収め、学習器が詰み帯（`|eval| >= 30000`）を勝率回帰から
+/// 除外する規約と整合させる。
+fn mate_to_eval(score_mate: i32) -> i16 {
+    if score_mate >= 0 {
+        (32000 - score_mate).clamp(30001, 32767) as i16
+    } else {
+        (-32000 - score_mate).clamp(-32767, -30001) as i16
+    }
+}
+
+/// MultiPV 候補を hcpe3 の policy 分布 `(move16, visit)` へ変換する。
+///
+/// 各候補スコアを温度 `temp` の softmax で確率化し、largest-remainder 法で `total` 票へ
+/// 厳密配分する（`sum(visit) == total`）。詰みは `±10000` にクリップして softmax を安定
+/// させる。決定性のため multipv 昇順で安定ソートし、余り票も端数の大きい順（同点は multipv
+/// 昇順）で決定的に配る。PV1 は必ず 1 票以上残す（0 票の候補は落とす）。
+fn multipv_to_policy(candidates: &[MultiPvCandidate], total: u16, temp: f64) -> Vec<(u16, u16)> {
+    let mut sorted: Vec<&MultiPvCandidate> = candidates.iter().collect();
+    sorted.sort_by_key(|c| c.multipv);
+
+    let scalar = |c: &MultiPvCandidate| -> f64 {
+        match c.score_mate {
+            Some(m) if m >= 0 => 10000.0,
+            Some(_) => -10000.0,
+            None => c.score_cp.clamp(-10000, 10000) as f64,
+        }
+    };
+    let max_s = sorted.iter().map(|c| scalar(c)).fold(f64::NEG_INFINITY, f64::max);
+    let weights: Vec<f64> = sorted.iter().map(|c| ((scalar(c) - max_s) / temp).exp()).collect();
+    let sum: f64 = weights.iter().sum();
+
+    // 各候補の理想票と floor を取り、不足分を端数の大きい順に 1 票ずつ配る。
+    let ideals: Vec<f64> = weights.iter().map(|w| w / sum * total as f64).collect();
+    let mut visits: Vec<u32> = ideals.iter().map(|x| x.floor() as u32).collect();
+    let mut leftover = total as u32 - visits.iter().sum::<u32>();
+    let mut order: Vec<usize> = (0..sorted.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ra = ideals[a] - ideals[a].floor();
+        let rb = ideals[b] - ideals[b].floor();
+        rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(&b))
+    });
+    for &i in &order {
+        if leftover == 0 {
+            break;
+        }
+        visits[i] += 1;
+        leftover -= 1;
+    }
+
+    // PV1 は最低 1 票。0 票なら最大票の候補から 1 票移す（総票数は不変）。
+    if let Some(pv1) = sorted.iter().position(|c| c.multipv == 1)
+        && visits[pv1] == 0
+        && let Some(donor) = (0..visits.len()).max_by_key(|&i| visits[i])
+        && visits[donor] > 0
+    {
+        visits[donor] -= 1;
+        visits[pv1] += 1;
+    }
+
+    let mut out: Vec<(u16, u16)> = Vec::with_capacity(sorted.len());
+    for (c, &v) in sorted.iter().zip(&visits) {
+        if v > 0 {
+            out.push((move_to_move16(c.first_move), v as u16));
+        }
+    }
+    out
 }
 
 /// MultiPV 候補からランダムに1手を選択する
@@ -1005,6 +1216,8 @@ struct WorkerConfig {
     skip_initial_ply: u32,
     skip_in_check: bool,
     training_format: TrainingFormat,
+    hcpe3_policy_total: u16,
+    hcpe3_policy_temp: f64,
     // gensfen: NativeBackend モード
     native_mode: bool,
     /// USI 単一エンジン最適化（先後同一エンジン時に 1 プロセスで兼用）。
@@ -1112,6 +1325,8 @@ fn worker_main(
                 cfg.skip_initial_ply,
                 cfg.skip_in_check,
                 cfg.training_format,
+                cfg.hcpe3_policy_total,
+                cfg.hcpe3_policy_temp,
             )?)
         } else {
             None
@@ -1311,21 +1526,6 @@ fn worker_main(
                                         false
                                     };
 
-                                    // 学習データには PV1 のスコアと PV1 の手を記録する。
-                                    // MultiPV ランダム選択で別の手がプレイされても、
-                                    // 教師ラベルとしては「この局面での最善手 = PV1」が正しい。
-                                    // （tanuki- の gensfen と同じ方式）
-                                    if !skip_record
-                                        && let Some(ref mut collector) = training_data_collector
-                                    {
-                                        collector.record_position(
-                                            &pos,
-                                            eval_log.as_ref().and_then(|e| e.score_cp),
-                                            eval_log.as_ref().and_then(|e| e.score_mate),
-                                            Some(mv),
-                                        );
-                                    }
-
                                     // --- gensfen: MultiPV ランダム選択 ---
                                     let played_mv = if cfg.random_multi_pv > 1 {
                                         if let Some(selected) = select_multipv_random(
@@ -1343,6 +1543,21 @@ fn worker_main(
                                     } else {
                                         mv
                                     };
+
+                                    // Psv/Pack は最善手 PV1 を、hcpe3 は replay 整合のため実着手
+                                    // played_mv を selectedMove16 に記録する（policy は MultiPV 候補）。
+                                    if !skip_record
+                                        && let Some(ref mut collector) = training_data_collector
+                                    {
+                                        collector.record_position(
+                                            &pos,
+                                            eval_log.as_ref().and_then(|e| e.score_cp),
+                                            eval_log.as_ref().and_then(|e| e.score_mate),
+                                            Some(mv),
+                                            Some(played_mv),
+                                            &search.multipv_candidates,
+                                        );
+                                    }
 
                                     let gives_check = if played_mv.is_pass() {
                                         false
@@ -1745,13 +1960,24 @@ fn main() -> Result<()> {
     let training_format = match cli.training_data_format.as_str() {
         "psv" => TrainingFormat::Psv,
         "pack" => TrainingFormat::Pack,
-        other => bail!("unknown training data format: '{}' (expected 'psv' or 'pack')", other),
+        "hcpe3" => TrainingFormat::Hcpe3,
+        other => {
+            bail!("unknown training data format: '{}' (expected 'psv', 'pack', or 'hcpe3')", other)
+        }
     };
+
+    validate_hcpe3_opts(
+        training_format,
+        cli.skip_in_check,
+        cli.hcpe3_policy_total,
+        cli.hcpe3_policy_temp,
+    )?;
 
     // 学習データ出力の初期化（デフォルトで有効、--no-training-data で無効化）
     let training_data_ext = match training_format {
         TrainingFormat::Psv => "psv",
         TrainingFormat::Pack => "pack",
+        TrainingFormat::Hcpe3 => "hcpe3",
     };
     let training_data_path = Some(
         cli.output_training_data
@@ -2068,6 +2294,8 @@ fn main() -> Result<()> {
             skip_initial_ply: cli.skip_initial_ply,
             skip_in_check: cli.skip_in_check,
             training_format,
+            hcpe3_policy_total: cli.hcpe3_policy_total,
+            hcpe3_policy_temp: cli.hcpe3_policy_temp,
             native_mode,
             usi_single,
             eval_hash_size_mb: DEFAULT_EVAL_HASH_SIZE_MB,
@@ -2641,5 +2869,399 @@ mod tests {
         // 範囲 3 に対して count 10 → 3 個に制限される
         let plies = sample_random_move_plies(1, 3, 10, &mut rng);
         assert_eq!(plies.len(), 3);
+    }
+
+    #[test]
+    fn mate_to_eval_encodes_32000_minus_ply() {
+        assert_eq!(mate_to_eval(1), 31999);
+        assert_eq!(mate_to_eval(39), 31961);
+        assert_eq!(mate_to_eval(-1), -31999);
+        assert_eq!(mate_to_eval(-39), -31961);
+        // 巨大 ply でも詰み帯（|eval| >= 30000）に収まる
+        assert!(mate_to_eval(5000) >= 30001);
+        assert!(mate_to_eval(-5000) <= -30001);
+    }
+
+    #[test]
+    fn multipv_to_policy_sorts_and_keeps_pv1() {
+        use rshogi_core::types::Move;
+        use tools::packed_sfen::move_to_move16;
+        use tools::selfplay::MultiPvCandidate;
+
+        let m1 = Move::from_usi("7g7f").unwrap();
+        let m2 = Move::from_usi("2g2f").unwrap();
+        let m3 = Move::from_usi("3g3f").unwrap();
+        // 到着順は逆でも multipv 昇順に整列する
+        let candidates = vec![
+            MultiPvCandidate {
+                multipv: 3,
+                score_cp: -500,
+                score_mate: None,
+                first_move: m3,
+            },
+            MultiPvCandidate {
+                multipv: 1,
+                score_cp: 100,
+                score_mate: None,
+                first_move: m1,
+            },
+            MultiPvCandidate {
+                multipv: 2,
+                score_cp: 90,
+                score_mate: None,
+                first_move: m2,
+            },
+        ];
+        let policy = multipv_to_policy(&candidates, 1000, 600.0);
+        assert!(!policy.is_empty());
+        // PV1 (m1) が先頭で 1 票以上
+        assert_eq!(policy[0].0, move_to_move16(m1));
+        assert!(policy[0].1 >= 1);
+        let sum: i32 = policy.iter().map(|(_, v)| *v as i32).sum();
+        // 量子化の丸めで total と多少ずれるが近い
+        assert!((sum - 1000).abs() <= policy.len() as i32);
+    }
+
+    #[test]
+    fn multipv_to_policy_ties_are_equal() {
+        use rshogi_core::types::Move;
+        use tools::selfplay::MultiPvCandidate;
+
+        let m1 = Move::from_usi("7g7f").unwrap();
+        let m2 = Move::from_usi("2g2f").unwrap();
+        let candidates = vec![
+            MultiPvCandidate {
+                multipv: 1,
+                score_cp: 50,
+                score_mate: None,
+                first_move: m1,
+            },
+            MultiPvCandidate {
+                multipv: 2,
+                score_cp: 50,
+                score_mate: None,
+                first_move: m2,
+            },
+        ];
+        let policy = multipv_to_policy(&candidates, 1000, 600.0);
+        assert_eq!(policy.len(), 2);
+        assert_eq!(policy[0].1, policy[1].1);
+    }
+
+    #[test]
+    fn validate_hcpe3_opts_enforces_constraints() {
+        // hcpe3 は中間スキップ・不正 policy パラメータを拒否する
+        assert!(validate_hcpe3_opts(TrainingFormat::Hcpe3, true, 1000, 600.0).is_err());
+        assert!(validate_hcpe3_opts(TrainingFormat::Hcpe3, false, 0, 600.0).is_err());
+        assert!(validate_hcpe3_opts(TrainingFormat::Hcpe3, false, 1000, 0.0).is_err());
+        assert!(validate_hcpe3_opts(TrainingFormat::Hcpe3, false, 1000, f64::NAN).is_err());
+        assert!(validate_hcpe3_opts(TrainingFormat::Hcpe3, false, 1000, 600.0).is_ok());
+        // 他形式には制約を課さない
+        assert!(validate_hcpe3_opts(TrainingFormat::Pack, true, 0, 0.0).is_ok());
+    }
+
+    #[test]
+    fn finish_game_hcpe3_byte_layout() {
+        use rshogi_core::position::Position;
+        use rshogi_core::types::Move;
+        use tools::selfplay::MultiPvCandidate;
+
+        let path =
+            std::env::temp_dir().join(format!("gensfen_hcpe3_layout_{}.hcpe3", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let mv = Move::from_usi("7g7f").unwrap();
+        let candidates = vec![MultiPvCandidate {
+            multipv: 1,
+            score_cp: 123,
+            score_mate: None,
+            first_move: mv,
+        }];
+
+        {
+            let mut col =
+                TrainingDataCollector::new(&path, 0, false, TrainingFormat::Hcpe3, 1000, 600.0)
+                    .unwrap();
+            col.start_game();
+            col.record_position(&pos, Some(123), None, Some(mv), Some(mv), &candidates);
+            col.finish_game(GameOutcome::BlackWin).unwrap();
+            col.flush().unwrap();
+        }
+
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // 1 局面 1 候補 = hcp(32)+moveNum(2)+result(1)+opponent(1)
+        //   + selectedMove16(2)+eval(2)+candidateNum(2) + 1*(move16(2)+visit(2)) = 46
+        assert_eq!(bytes.len(), 46);
+        assert_eq!(u16::from_le_bytes([bytes[32], bytes[33]]), 1); // moveNum
+        assert_eq!(bytes[34], 1); // result = BLACK_WIN
+        assert_eq!(bytes[35], 0); // opponent(予約)
+        assert_eq!(i16::from_le_bytes([bytes[38], bytes[39]]), 123); // eval
+        assert_eq!(u16::from_le_bytes([bytes[40], bytes[41]]), 1); // candidateNum
+        assert_eq!(bytes[36..38], bytes[42..44]); // selectedMove16 == 候補 move16
+        assert_eq!(u16::from_le_bytes([bytes[44], bytes[45]]), 1000); // visit（PV1 単独で全票）
+    }
+
+    #[test]
+    fn finish_game_hcpe3_multi_candidate_layout() {
+        use rshogi_core::position::Position;
+        use rshogi_core::types::Move;
+        use tools::selfplay::MultiPvCandidate;
+
+        let path =
+            std::env::temp_dir().join(format!("gensfen_hcpe3_multi_{}.hcpe3", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let m1 = Move::from_usi("7g7f").unwrap();
+        let m2 = Move::from_usi("2g2f").unwrap();
+        let m3 = Move::from_usi("3g3f").unwrap();
+        let candidates = vec![
+            MultiPvCandidate {
+                multipv: 1,
+                score_cp: 100,
+                score_mate: None,
+                first_move: m1,
+            },
+            MultiPvCandidate {
+                multipv: 2,
+                score_cp: 80,
+                score_mate: None,
+                first_move: m2,
+            },
+            MultiPvCandidate {
+                multipv: 3,
+                score_cp: 60,
+                score_mate: None,
+                first_move: m3,
+            },
+        ];
+
+        {
+            let mut col =
+                TrainingDataCollector::new(&path, 0, false, TrainingFormat::Hcpe3, 1000, 600.0)
+                    .unwrap();
+            col.start_game();
+            col.record_position(&pos, Some(100), None, Some(m1), Some(m1), &candidates);
+            col.finish_game(GameOutcome::WhiteWin).unwrap();
+            col.flush().unwrap();
+        }
+
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let candidate_num = u16::from_le_bytes([bytes[40], bytes[41]]);
+        assert_eq!(candidate_num, 3);
+        // hcp(32)+moveNum(2)+result(1)+opponent(1) + selectedMove16(2)+eval(2)+candidateNum(2)
+        //   + 3*(move16(2)+visit(2)) = 54
+        assert_eq!(bytes.len(), 54);
+        assert_eq!(bytes[34], 2); // result = WHITE_WIN
+    }
+
+    fn legal_candidate(rank: u32, cp: i32, usi: &str) -> tools::selfplay::MultiPvCandidate {
+        use rshogi_core::types::Move;
+        tools::selfplay::MultiPvCandidate {
+            multipv: rank,
+            score_cp: cp,
+            score_mate: None,
+            first_move: Move::from_usi(usi).unwrap(),
+        }
+    }
+
+    #[test]
+    fn multipv_to_policy_visits_sum_to_total() {
+        use tools::packed_sfen::move_to_move16;
+        let candidates = vec![
+            legal_candidate(1, 100, "7g7f"),
+            legal_candidate(2, 63, "2g2f"),
+            legal_candidate(3, 26, "3g3f"),
+            legal_candidate(4, -40, "6g6f"),
+            legal_candidate(5, -120, "5g5f"),
+        ];
+        for total in [1u16, 7, 1000, 1001, 65535] {
+            let policy = multipv_to_policy(&candidates, total, 600.0);
+            let sum: u32 = policy.iter().map(|(_, v)| *v as u32).sum();
+            assert_eq!(sum, total as u32, "total={total}");
+            assert_eq!(policy[0].0, move_to_move16(candidates[0].first_move));
+            assert!(policy[0].1 >= 1);
+        }
+    }
+
+    #[test]
+    fn multipv_to_policy_is_deterministic() {
+        let candidates = vec![
+            legal_candidate(3, 26, "3g3f"),
+            legal_candidate(1, 100, "7g7f"),
+            legal_candidate(2, 63, "2g2f"),
+        ];
+        let a = multipv_to_policy(&candidates, 1000, 600.0);
+        let b = multipv_to_policy(&candidates, 1000, 600.0);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn finish_game_hcpe3_records_played_move_not_pv1() {
+        use rshogi_core::position::Position;
+        use rshogi_core::types::Move;
+
+        let path =
+            std::env::temp_dir().join(format!("gensfen_hcpe3_played_{}.hcpe3", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let best = Move::from_usi("7g7f").unwrap();
+        let played = Move::from_usi("2g2f").unwrap();
+        let candidates = vec![legal_candidate(1, 100, "7g7f")];
+
+        {
+            let mut col =
+                TrainingDataCollector::new(&path, 0, false, TrainingFormat::Hcpe3, 1000, 600.0)
+                    .unwrap();
+            col.start_game();
+            // 実着手 played != 最善手 best。selectedMove16 は replay 用に played を記録する
+            col.record_position(&pos, Some(100), None, Some(best), Some(played), &candidates);
+            col.finish_game(GameOutcome::BlackWin).unwrap();
+            col.flush().unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // selectedMove16(36..38) は実着手、候補 move16(42..44) は PV1 = 最善手。両者は異なる
+        assert_ne!(bytes[36..38], bytes[42..44]);
+    }
+
+    #[test]
+    fn finish_game_hcpe3_one_hot_without_candidates() {
+        use rshogi_core::position::Position;
+        use rshogi_core::types::Move;
+
+        let path =
+            std::env::temp_dir().join(format!("gensfen_hcpe3_onehot_{}.hcpe3", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let mv = Move::from_usi("7g7f").unwrap();
+        {
+            let mut col =
+                TrainingDataCollector::new(&path, 0, false, TrainingFormat::Hcpe3, 1000, 600.0)
+                    .unwrap();
+            col.start_game();
+            // --random-multi-pv 未指定相当: 候補なし → 実着手の one-hot (visit=1)
+            col.record_position(&pos, Some(50), None, Some(mv), Some(mv), &[]);
+            col.finish_game(GameOutcome::BlackWin).unwrap();
+            col.flush().unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(bytes.len(), 46);
+        assert_eq!(u16::from_le_bytes([bytes[40], bytes[41]]), 1); // candidateNum
+        assert_eq!(u16::from_le_bytes([bytes[44], bytes[45]]), 1); // visit
+    }
+
+    #[test]
+    fn finish_game_hcpe3_multi_move_is_contiguous() {
+        use rshogi_core::position::Position;
+        use rshogi_core::types::Move;
+
+        let path = std::env::temp_dir()
+            .join(format!("gensfen_hcpe3_multimove_{}.hcpe3", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let m1 = Move::from_usi("7g7f").unwrap();
+        {
+            let mut col =
+                TrainingDataCollector::new(&path, 0, false, TrainingFormat::Hcpe3, 1000, 600.0)
+                    .unwrap();
+            col.start_game();
+            col.record_position(
+                &pos,
+                Some(20),
+                None,
+                Some(m1),
+                Some(m1),
+                &[legal_candidate(1, 20, "7g7f")],
+            );
+            let gc = pos.gives_check(m1);
+            pos.do_move(m1, gc);
+            let m2 = Move::from_usi("3c3d").unwrap();
+            col.record_position(
+                &pos,
+                Some(-15),
+                None,
+                Some(m2),
+                Some(m2),
+                &[legal_candidate(1, -15, "3c3d")],
+            );
+            col.finish_game(GameOutcome::Draw).unwrap();
+            col.flush().unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(u16::from_le_bytes([bytes[32], bytes[33]]), 2); // moveNum
+        // hcp(32)+moveNum(2)+result(1)+opponent(1) + 2*(selectedMove16(2)+eval(2)+candidateNum(2)+1*(2+2)) = 56
+        assert_eq!(bytes.len(), 56);
+    }
+
+    #[test]
+    fn hcpe3_no_score_discards_partial_segment() {
+        use rshogi_core::position::Position;
+        use rshogi_core::types::Move;
+        use tools::packed_sfen::pack_position_hcp;
+
+        let path =
+            std::env::temp_dir().join(format!("gensfen_hcpe3_gap_{}.hcpe3", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let m1 = Move::from_usi("7g7f").unwrap();
+        // 欠落後に着手を進め、取り直しの起点が「次の有効局面」になることを確認する
+        let gc = pos.gives_check(m1);
+        let mut after = pos.clone();
+        after.do_move(m1, gc);
+        let m2 = Move::from_usi("3c3d").unwrap();
+        let expected_hcp = pack_position_hcp(&after);
+        {
+            let mut col =
+                TrainingDataCollector::new(&path, 0, false, TrainingFormat::Hcpe3, 1000, 600.0)
+                    .unwrap();
+            col.start_game();
+            // 局面A を記録 → 評価値欠落でセグメント破棄 → 局面C（着手後）で取り直す
+            col.record_position(
+                &pos,
+                Some(50),
+                None,
+                Some(m1),
+                Some(m1),
+                &[legal_candidate(1, 50, "7g7f")],
+            );
+            col.record_position(&pos, None, None, Some(m1), Some(m1), &[]);
+            col.record_position(
+                &after,
+                Some(40),
+                None,
+                Some(m2),
+                Some(m2),
+                &[legal_candidate(1, 40, "3c3d")],
+            );
+            col.finish_game(GameOutcome::BlackWin).unwrap();
+            col.flush().unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        // 破棄により書き出されるのは欠落後の 1 手だけで、起点 HCP は局面C（取り直し局面）
+        assert_eq!(u16::from_le_bytes([bytes[32], bytes[33]]), 1);
+        assert_eq!(&bytes[0..32], &expected_hcp);
     }
 }

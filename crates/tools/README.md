@@ -10,7 +10,7 @@
 |--------|------|
 | `tournament` | 複数エンジンの round-robin 並列トーナメント、SPRT 検定 |
 | `analyze_selfplay` | tournament 出力の集計・Elo/nElo 算出・SPRT post-hoc 判定 |
-| `gensfen` | NNUE 学習用 PSV/pack 教師局面の生成（USI engine vs engine／NativeBackend） |
+| `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（USI engine vs engine／NativeBackend） |
 | `floodgate_pipeline` | Floodgate棋譜のダウンロード・変換（[詳細](docs/floodgate_pipeline.md)） |
 
 ### 学習データ処理
