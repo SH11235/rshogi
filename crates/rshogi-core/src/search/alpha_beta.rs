@@ -2698,6 +2698,14 @@ impl SearchWorker {
                         + (singular_value < singular_beta - Value::new(double_margin)) as i32
                         + (singular_value < singular_beta - Value::new(triple_margin)) as i32;
 
+                    // engine 自身に打ち切り予算（時間・ノード・infinite）が無い深さ固定探索では、
+                    // double/triple 延長が child の探索深さを親より深くし続け、置換表飽和下で
+                    // 延長が連鎖して探索木が爆発し `go depth N` が事実上終了しなくなる。止める
+                    // 手段が無いため、この場合のみ単延長に制限して net の深さ成長を抑え終了を保証する。
+                    if !limits.has_interrupt_budget() {
+                        extension = extension.min(1);
+                    }
+
                     // singular確定時にdepthを+1
                     depth += 1;
                 } else if singular_value >= beta && !singular_value.is_mate_score() {
