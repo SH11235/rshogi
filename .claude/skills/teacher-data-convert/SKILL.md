@@ -21,9 +21,12 @@ user-invocable: true
 1. **両ツールとも `--threads` 既定は `0`（全コア）**。既定で全 CPU を使い切るため、
    **他の重い CPU 処理（例: DL 学習のデータローダ）と並走するときは、明示的に `--threads N` で
    上限を下げて譲る**こと（指定しないと全コアを掴んで他ジョブを圧迫する）。値の選び方は下記。
-2. **実行中、最終出力パスにファイルは存在しない**。両ツールとも処理中は `<output>.partial`
-   （rescore は `--output-dir` 配下）に書き、正常完了時のみ最終名へ `rename` する。
-   「出力が無い＝ハング」と誤認しないこと。**進捗は `.partial` のサイズ増加で確認**できる。
+2. **実行中の出力ファイルの状態はツールで異なる**（「出力が無い＝ハング」と誤認しない）。
+   - `psv_to_hcpe3`: 処理中は `<output>.partial` に書き、正常完了時のみ最終名へ `rename`。
+     **進捗は `<output>.partial` のサイズ増加で確認**。中断時は `.partial` を削除（壊れた最終出力を残さない）。
+   - `rescore_psv`: `--output-dir` 配下の出力ファイルに**直接書き込み**（`.partial` は無い）。
+     完了時に `<filename>.done` サイドカーを書く。**進捗は出力ファイル本体のサイズ増加で確認**。
+     中断時は出力が中途残存し、再実行時に `.done` マーカー／既存出力レコード数で skip/resume を判定する。
 3. **非 TTY（background / リダイレクト）では progress bar は出ない**が、`psv_to_hcpe3` は数秒ごとに
    テキスト進捗（件数 / rec/s / ETA）を出す。ログが「冒頭 1 行だけで止まって見える」のは正常。
 
@@ -47,7 +50,9 @@ user-invocable: true
 ```bash
 # 代表サンプルで 1/4/8/16/… とスレッド数を振り、rec/s の飽和点を見る
 for t in 1 4 8 16 32; do
-  /usr/bin/time -v <tool> ... --threads $t   # wall / user / sys / rec/s を比較
+  /usr/bin/time -v ./target/release/rescore_psv --input "$SHOGI_DATA/teachers/<sample>.bin" \
+    --output-dir "$SHOGI_DATA/teachers/<out_dir_t${t}>" \
+    --nnue "$SHOGI_DATA/nnue/<model>.bin" --threads $t   # wall / user / sys / rec/s を比較
 done
 ```
 
@@ -70,7 +75,8 @@ cargo build --release -p tools --bin psv_to_hcpe3
   --output "$SHOGI_DATA/teachers/<out>.hcpe" --format hcpe --evalfix-a <a>
 ```
 
-- `--evalfix-a <a>`: `round_ties_even(score × 定数 / a)` で eval を焼き込み ±32767 でクランプ
+- `--evalfix-a <a>`: `round_ties_even(score × 756.0865 / a)` で eval を焼き込み ±32767 でクランプ
+  （`756.0865` は dlshogi 固定 decode 定数。`<a>` のみが教師セット側のスケールに合わせる可変値）
   （python 参照 `psv_to_hcpe_flat.py --evalfix_a` と bit 一致）。**`<a>` は有限の正数のみ**（0/負/非有限はエラー）。
   未指定なら生 score をそのまま書く。`<a>` の値は教師セット側のスケールに合わせる。
 - ストリーミング処理でピークメモリは入力件数に非依存（`--chunk` 件分のみ）。
@@ -100,17 +106,20 @@ cargo build --release -p tools --bin rescore_psv
 ## 大規模実行の運用
 
 - **長時間ジョブは background 実行**（CLAUDE.md「長時間実行タスク」）。
-- 進捗は `.partial`（rescore は `--output-dir` 配下）のサイズ増加、または stderr のテキスト進捗で監視。
+- 進捗は出力サイズの増加（`psv_to_hcpe3` は `<output>.partial`、`rescore_psv` は `--output-dir` 配下の
+  出力ファイル本体）、または stderr のテキスト進捗で監視。
 - 物理 read が 0（`/proc/<pid>/io` の `read_bytes=0`）でも、入力先頭が page cache に載っているだけのことが多い。
   `rchar` と出力サイズが**同調して増えていれば正常な前進**。ループ疑いは「出力が増えず rchar だけ増える」ケース。
-- 中断（Ctrl-C / SIGINT）時は `.partial` を削除して終了するため、壊れた最終出力は残らない。
+- 中断（Ctrl-C / SIGINT）時: `psv_to_hcpe3` は `.partial` を削除（壊れた最終出力を残さない）。
+  `rescore_psv` は出力ファイルが中途残存し、再実行時に `.done` マーカー／既存出力レコード数で skip/resume される。
 
 ## 出力検証（必須）
 
 大量変換・再評価は**出力の bit 一致を必ず確認**する:
 
 ```bash
-# 参照実装やゴールデン出力との一致（先頭 N バイトを比較）
+# 参照実装やゴールデン出力との一致（先頭 N バイトを比較。N はバイト数）
+# 例: 先頭 K レコードなら hcpe3=46B×K / hcpe=38B×K を N に指定
 cmp -n <N> <out> <reference>
 
 # スレッド数非依存の確認（同一入力・同一パラメータで threads を変えても一致すること）
