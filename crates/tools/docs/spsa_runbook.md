@@ -1069,7 +1069,111 @@ cargo run --release -p tools --bin spsa -- \
   必要なら手動で結合する。
 - **途中再開**が必要な場合は新規 fresh start ではなく `--resume` を使うこと。
 
-## 11. トラブルシューティング
+## 11. チューン済み params の実戦投入（トーナメント / CSA / 大会）
+
+SPSA で得た `.params`（rshogi 形式）を、再ビルドせずに実戦エンジンへ適用する。
+適用は **すべてランタイム**（USI `setoption`）で行われ、`tune_params.rs` の
+default を書き換える焼き込み（rebuild 必須）とは別経路。
+
+### 前提: rshogi 形式であること
+
+実戦投入できるのは **rshogi 形式**（1 列目が `SPSA_` 接頭辞）のファイルのみ。
+YO 形式（`correction_value_1` 等）は名前が一致せず無視される。YO 駆動 SPSA の
+`final.params` は YO 形式なので、§10.2 `yo_to_rshogi_params` で rshogi 形式へ
+変換してから投入する。
+
+```bash
+# rshogi 形式であることの簡易ガード
+head -1 <file>.params | grep -q '^SPSA_' || echo "NG: rshogi 形式ではない"
+```
+
+### 11.1 エンジン本体 (rshogi-usi) の 3 経路
+
+`isready` 時に `maybe_load_spsa_params()` が走り、優先順位順に読み込む
+（`crates/rshogi-usi/src/main.rs`）。
+
+1. **USI option `SPSAParamsFile`（明示パス・推奨）**
+
+   ```
+   setoption name SPSAParamsFile value /path/to/v99-400-suisho10.rshogi.params
+   ```
+
+   どの params を使ったかが起動ログ・設定に残るためトレーサビリティが高い。
+   大会本番はこれを推奨。
+
+2. **バイナリ同ディレクトリの `spsa.params` 自動ロード（設定不要）**
+
+   エンジンバイナリと同じディレクトリに `spsa.params` という名前で置く（or symlink）と
+   オプション指定なしで自動適用される。配備物に同梱したい場合に便利。
+
+   ```bash
+   ln -snf /path/to/v99-400-suisho10.rshogi.params <engine_dir>/spsa.params
+   ```
+
+   ※ 自動ロードのファイル名は **厳密に `spsa.params`**。配布名のままでは拾われない。
+
+3. **個別 `SPSA_*` の setoption（一時上書き）**
+
+   ```
+   setoption name SPSA_FUTILITY_MARGIN_BASE value 89
+   ```
+
+いずれもロード時に各値が min/max にクランプされ、
+`info string SPSA params loaded: N parameters from <path> (clamped: M)` を出力する
+（`clamped` が 0 以外なら範囲外があった合図）。
+
+### 11.2 トーナメントツール
+
+`.params` を直接渡せる（内部で `Name=Value` の setoption に展開）。
+
+```bash
+cargo run --release -p tools --bin tournament -- \
+  --engine ./target/production/rshogi-usi --engine-label tuned \
+  --engine ./target/production/rshogi-usi --engine-label base \
+  --engine-params-file "0:spsa_params/v99-400-suisho10.rshogi.params" \
+  ...
+```
+
+- `--engine-params-file "INDEX:path"` … 指定 INDEX のエンジンへファイル全項目を設定
+- `--engine-usi-option "INDEX:Name=Value"` … 個別指定（`INDEX:SPSAParamsFile=path` も可）
+
+### 11.3 CSA クライアント（大会接続）
+
+`.params` の直読みは未対応。`[engine.options]` に **`SPSAParamsFile`** を 1 行書き、
+エンジン本体の自動ロードに委ねる（個別 `SPSA_*` の列挙も可だが非現実的）。
+
+```toml
+[engine.options]
+USI_Hash = 1024
+Threads = 8
+EvalFile = "eval/v99-400.bin"
+SPSAParamsFile = "/path/to/v99-400-suisho10.rshogi.params"
+```
+
+`csa_client` が起動時に各キーを `setoption name <key> value <val>` で送る。
+CLI `--options "K=V,..."` は同名キーを上書きする。
+
+### 11.4 配布と運用
+
+チューン済み params は repo 外の共有 note repo（git 管理）に置き、各環境からは
+`<rshogi>/spsa_params/` への symlink で参照する運用を推奨（rshogi 本体の
+`spsa_params/` は `.gitignore` 管理外のため、配布は `git pull` に一本化できる）。
+
+```bash
+# 各環境で最新化 → spsa_params/ に相対 symlink
+git -C <…>/rshogi-notes pull
+ln -snf ../../rshogi-notes/spsa/<name>.rshogi.params <rshogi>/spsa_params/
+```
+
+### 11.5 注意
+
+- **未検証の SPSA エンドポイントをそのまま大会投入しない**。本番採用前に
+  selfplay / SPRT で base 比較し、Elo が有意に勝ち越すことを確認する。
+- 過去に採用済みの値（例: Phase 1b の Futility/Razoring/NMP）は
+  `tune_params.rs` の default に焼き込み済み（rebuild 経路）。ファイル投入経路で
+  上書きすると二重適用ではなく **ファイル側が勝つ**（setoption は default を上書き）。
+
+## 12. トラブルシューティング
 
 実機での typical な詰まりどころと対処（症状ベース）。
 
