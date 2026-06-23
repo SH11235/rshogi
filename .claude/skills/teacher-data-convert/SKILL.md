@@ -18,9 +18,9 @@ user-invocable: true
 
 ## ⚠️ 最初に押さえる罠
 
-1. **`rescore_psv` の `--threads` 既定は `1`（単スレッド）**。一方 `psv_to_hcpe3` の既定は `0`（全コア）。
-   この非対称が最大の罠。rescore で `--threads` を指定し忘れると、数十億件を**単スレッドで数十時間**かけてしまう。
-   **rescore_psv は必ず `--threads` を明示する**（値の選び方は下記）。
+1. **両ツールとも `--threads` 既定は `0`（全コア）**。既定で全 CPU を使い切るため、
+   **他の重い CPU 処理（例: DL 学習のデータローダ）と並走するときは、明示的に `--threads N` で
+   上限を下げて譲る**こと（指定しないと全コアを掴んで他ジョブを圧迫する）。値の選び方は下記。
 2. **実行中、最終出力パスにファイルは存在しない**。両ツールとも処理中は `<output>.partial`
    （rescore は `--output-dir` 配下）に書き、正常完了時のみ最終名へ `rename` する。
    「出力が無い＝ハング」と誤認しないこと。**進捗は `.partial` のサイズ増加で確認**できる。
@@ -81,10 +81,10 @@ cargo build --release -p tools --bin psv_to_hcpe3
 ```bash
 cargo build --release -p tools --bin rescore_psv
 
-# 内部 NNUE 静的評価。★ --threads を必ず明示（既定 1）。物理コア数を目安に。
+# 内部 NNUE 静的評価。既定は全コア。他ジョブと並走するなら --threads で上限を下げる。
 ./target/release/rescore_psv --input "$SHOGI_DATA/teachers/<pool>.bin" \
   --output-dir "$SHOGI_DATA/teachers/<out_dir>" \
-  --nnue "$SHOGI_DATA/nnue/<model>.bin" --threads <物理コア数>
+  --nnue "$SHOGI_DATA/nnue/<model>.bin" --threads <物理コア数以下>
 
 # qsearch 評価 / 葉ラベル等は --use-qsearch / --qsearch-leaf-label（docs 参照）
 ```
