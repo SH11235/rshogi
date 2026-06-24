@@ -218,6 +218,17 @@ edition-layerstacks-halfka_hm_merged-1024x16x32-none = [
 edition-layerstacks-halfka_hm_merged-1024x16x32-threat = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
 ]
+# 1024 threat の削減 profile 版 (nnue-threat に threat-profile-* を 1 つ束ねた変種)。
+# L0=1024 系のため nnue-progress-diff は含めない (build.rs ポリシー)。
+# engine と学習 net の threat profile id 一致は EvalFile load 時に dims mismatch で reject される。
+edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
+  "threat-profile-same-class",
+]
+edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class_major_pawn = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
+  "threat-profile-same-class-major-pawn",
+]
 edition-layerstacks-halfka_hm_merged-768x16x32-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x16x32",
 ]

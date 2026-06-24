@@ -149,9 +149,12 @@ feature は 4 カテゴリの組み合わせ:
    L0=768/512 では cache pressure 増加で cycles +2-6% 退行するため指定しない)
 5. **Threat profile** (Threat 使用時に任意で 1 つ): `threat-profile-same-class` (id1) /
    `threat-profile-same-class-major-pawn` (id2) / `threat-profile-cross-side` (id10)。
-   除外 pair で次元を削減した変種で、未指定は full (id0)。edition grammar に profile 軸が
-   無いため preset は無く、`nnue-threat` に手動で 1 つ足す。engine と学習 net の profile は
-   一致必須 (不一致は EvalFile load 時に reject)。
+   除外 pair で次元を削減した変種で、未指定は full (id0)。edition grammar に profile 軸は
+   無いが、需要のある profile は ext 値に複合語として畳んだ concrete preset を整備する
+   (例: `layerstacks-halfka_hm_merged-1024x16x32-threat_same_class` /
+   `…-threat_same_class_major_pawn`)。preset が無い profile は `nnue-threat` に
+   `threat-profile-*` を手動で 1 つ足す。engine と学習 net の profile は
+   一致必須 (不一致は EvalFile load 時に dims mismatch で reject)。
 
 最新 feature 名は実コード確認:
 
