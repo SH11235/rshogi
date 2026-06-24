@@ -1027,8 +1027,8 @@ fn main() -> Result<()> {
     #[cfg(not(feature = "dlshogi-onnx"))]
     if use_dlshogi_onnx {
         anyhow::bail!(
-            "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature.\n\
-             Rebuild with: cargo build --release -p tools --features dlshogi-onnx --bin rescore_psv"
+            "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature (on by default; this build disabled it).\n\
+             Rebuild with default features: cargo build --release -p tools --bin rescore_psv"
         );
     }
 

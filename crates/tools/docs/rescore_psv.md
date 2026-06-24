@@ -77,17 +77,21 @@ $env:PATH = "C:\path\to\TensorRT\lib;C:\path\to\onnxruntime-win-x64-gpu-1.24.2\l
 
 ### ビルド
 
-モデル形式に応じた feature フラグを指定する。
+標準 dlshogi 系 ONNX（DL水匠等、`--dlshogi-onnx-model`）の `dlshogi-onnx` は default
+feature なので、追加フラグ無しの default build でそのまま使える。`ort` は load-dynamic の
+ため build 時に libonnxruntime は不要（ONNX Runtime は実行時に dlopen）。AobaZero 系
+（`--onnx-model`）を使う場合のみ `aobazero-onnx` を追加で有効化する。
 
-| feature | 対象モデル |
-|---|---|
-| `aobazero-onnx` | AobaZero 系 ONNX モデル |
-| `dlshogi-onnx` | 標準 dlshogi 系 ONNX モデル（DL水匠等） |
+| feature | 対象モデル | default |
+|---|---|---|
+| `dlshogi-onnx` | 標準 dlshogi 系 ONNX モデル（DL水匠等） | ✅ |
+| `aobazero-onnx` | AobaZero 系 ONNX モデル | — |
 
 ```bash
+# default build（dlshogi ONNX 有効）
+cargo build --release -p tools --bin rescore_psv
+# AobaZero モデルも使う場合
 cargo build --release -p tools --features aobazero-onnx --bin rescore_psv
-# または
-cargo build --release -p tools --features dlshogi-onnx --bin rescore_psv
 ```
 
 ### 実行例
@@ -104,7 +108,7 @@ cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
   --threads 12
 
 # 標準 dlshogi ONNX モデル（GPU）
-cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
+cargo run --release -p tools --bin rescore_psv -- \
   --input data/train.psv \
   --output-dir data/rescored/ \
   --dlshogi-onnx-model DL_suisho.onnx \
@@ -114,7 +118,7 @@ cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
   --threads 12
 
 # TensorRT + FP16（約 2.5 倍高速、初回はエンジンコンパイルに時間がかかる）
-cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
+cargo run --release -p tools --bin rescore_psv -- \
   --input data/train.psv \
   --output-dir data/rescored/ \
   --dlshogi-onnx-model DL_suisho.onnx \
@@ -135,7 +139,7 @@ cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
 
 # rescore + ポリシー展開を 1 パスで実行（--expand-output-dir）
 # 同一推論で value → rescore 出力、policy → 子局面出力
-cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
+cargo run --release -p tools --bin rescore_psv -- \
   --input data/train.psv \
   --output-dir data/rescored/ \
   --expand-output-dir data/expanded/ \

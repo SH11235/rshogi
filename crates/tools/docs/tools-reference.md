@@ -25,7 +25,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `verify_nnue_accumulator` | NNUE accumulator の refresh vs differential update 一致テスト。PSQT・Threat・LayerStacks 対応 |
 | `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出（層化サンプル + 入玉オーバーサンプル + 互角局面） |
 | `label_bench_positions` | ベンチ局面 jsonl を深い探索（depth / nodes 指定）でラベル付けし `eval_deep` 等を追記（ground truth、局面ごと隔離で `--threads` 非依存に bit 一致） |
-| `label_bench_dl` | `label_bench` jsonl の各局面を DL水匠 (標準 dlshogi ONNX) value head で静的評価し `eval_dl`（先手視点 cp）を追記（`dlshogi-onnx` feature） |
+| `label_bench_dl` | `label_bench` jsonl の各局面を DL水匠 (標準 dlshogi ONNX) value head で静的評価し `eval_dl`（先手視点 cp）を追記（`dlshogi-onnx` feature、default 有効） |
 
 ## NNUE 学習
 

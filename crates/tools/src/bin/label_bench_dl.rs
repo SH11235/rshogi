@@ -4,8 +4,9 @@
 //! `sfen` を DL水匠 value head で静的評価して `eval_dl`（既定）フィールドを追記する。
 //! 後段で ground truth の `eval_deep` とクラス別に比較するための入力を作る。
 //!
-//! `--features dlshogi-onnx` でビルドした場合のみ推論が動く。feature 無しビルドでも
-//! コンパイルは通り、実行時に再ビルド手順を案内して終了する。
+//! `dlshogi-onnx` は default feature なので、追加フラグ無しの default build で推論が動く。
+//! `dlshogi-onnx` を外したビルド (`--no-default-features` 等) でもコンパイルは通り、実行時に
+//! 再ビルド手順を案内して終了する。
 
 use clap::Parser;
 #[cfg(any(feature = "dlshogi-onnx", test))]
@@ -76,8 +77,8 @@ fn insert_field(mut obj: Map<String, Value>, field: &str, value: i32) -> Map<Str
 #[cfg(not(feature = "dlshogi-onnx"))]
 fn main() {
     eprintln!(
-        "label_bench_dl requires the 'dlshogi-onnx' feature.\n\
-         Rebuild with: cargo build --release -p tools --features dlshogi-onnx --bin label_bench_dl"
+        "label_bench_dl requires the 'dlshogi-onnx' feature (on by default; this build disabled it).\n\
+         Rebuild with default features: cargo build --release -p tools --bin label_bench_dl"
     );
     std::process::exit(1);
 }

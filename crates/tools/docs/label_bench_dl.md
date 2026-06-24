@@ -6,10 +6,10 @@
 
 ## ビルド
 
-ONNX 推論は `dlshogi-onnx` feature を有効にしたビルドでのみ動きます。feature 無しでもコンパイルは通りますが、実行すると再ビルド手順を案内して終了します。
+ONNX 推論に使う `dlshogi-onnx` は default feature なので、追加フラグ無しの default build でそのまま動きます（`ort` は load-dynamic のため build 時に libonnxruntime は不要、ONNX Runtime は実行時に dlopen）。`dlshogi-onnx` を外したビルド（`--no-default-features` で default 一式を外す等）ではコンパイルは通りますが、実行すると再ビルド手順を案内して終了します。
 
 ```bash
-cargo build --release -p tools --features dlshogi-onnx --bin label_bench_dl
+cargo build --release -p tools --bin label_bench_dl
 # → target/release/label_bench_dl
 ```
 
@@ -27,7 +27,7 @@ export LD_LIBRARY_PATH=/path/to/onnxruntime/lib:/usr/local/cuda/lib64:/usr/lib/x
 ## 使い方
 
 ```bash
-cargo run --release -p tools --features dlshogi-onnx --bin label_bench_dl -- \
+cargo run --release -p tools --bin label_bench_dl -- \
   --in runs/label_bench/<date>/label_bench.jsonl \
   --out runs/label_bench/<date>/label_bench.dl.jsonl \
   --dlshogi-onnx-model /path/to/DL_suisho.onnx \
