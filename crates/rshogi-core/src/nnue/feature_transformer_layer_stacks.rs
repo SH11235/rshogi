@@ -17,6 +17,8 @@ use super::features::{Feature, FeatureSet};
 use super::leb128::read_compressed_tensor_i16_all;
 use super::ls_feature_spec::LsFeatureSpec;
 use super::piece_list::PieceNumber;
+#[cfg(feature = "nnue-threat")]
+use super::stats::count_threat_multiply;
 use super::stats::{count_refresh, count_update};
 #[cfg(feature = "nnue-threat")]
 use super::threat_features::{self, MAX_CHANGED_THREAT_FEATURES, THREAT_DIMENSIONS};
@@ -1248,6 +1250,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 for perspective in [Color::Black, Color::White] {
                     let p = perspective as usize;
                     let king_sq = pos.king_square(perspective);
+                    count_threat_multiply!();
                     let threat_acc = stack.current_mut().accumulator.get_threat_mut(p);
                     threat_acc.fill(0);
                     threat_features::for_each_active_threat_index(
