@@ -1064,12 +1064,16 @@ pub fn append_changed_threat_indices(
     // Step 2: Source squares 収集
     // ---------------------------------------------------------------
 
+    // before_occ & after_occ は両 occ より blocker が少なく slider 利きが広がるので、その
+    // attackers は before/after 双方の attackers を包含する superset になる。source_bb は
+    // superset であれば足りる(余分な source は Step 3 の再列挙で同一 edge を生み diff で相殺)。
+    // よって 1 回の attackers_to_occ で両 occ 分を集められる。
+    let lenient_occ = before_occ & after_occ;
     let mut source_bb = changed_bb;
     let mut ch_iter = changed_bb;
     while !ch_iter.is_empty() {
         let sq = ch_iter.pop();
-        source_bb |= pos.attackers_to_occ(sq, before_occ);
-        source_bb |= pos.attackers_to_occ(sq, after_occ);
+        source_bb |= pos.attackers_to_occ(sq, lenient_occ);
     }
 
     // ---------------------------------------------------------------
@@ -1734,6 +1738,7 @@ mod tests {
     // =========================================================================
 
     use super::super::accumulator::IndexList;
+    use crate::movegen::{MoveList, generate_legal};
     use crate::types::Move;
 
     /// 差分更新の結果が full refresh と一致することを検証するヘルパー。
@@ -1883,6 +1888,27 @@ mod tests {
             verify_incremental(&mut pos, m);
             let gc = pos.gives_check(m);
             pos.do_move(m, gc);
+        }
+    }
+
+    /// 複数局面の全合法手で差分更新を full refresh と照合する網羅テスト。
+    /// source 収集を lenient occ 1 回に畳んでも slider の blocker 変化(取り/成り/打ち)で
+    /// removed/added が不変であることを担保する。中盤局面(成駒・手駒・開き線)を含める。
+    #[test]
+    fn test_changed_indices_all_legal_moves() {
+        let sfens = [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "+Bn1g2s1l/2skg2r1/ppppp1n1p/5bpp1/5p1P1/2P6/PP1PP1P1P/1SK2S1R1/LN1G1G1NL w Lp 24",
+        ];
+        for sfen in sfens {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).expect("valid sfen");
+            let mut list = MoveList::new();
+            generate_legal(&pos, &mut list);
+            assert!(!list.is_empty(), "no legal moves for {sfen}");
+            for &m in &list {
+                verify_incremental(&mut pos, m);
+            }
         }
     }
 
