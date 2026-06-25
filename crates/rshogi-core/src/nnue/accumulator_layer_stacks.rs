@@ -523,23 +523,19 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     ///
     /// アキュムレータの差分更新における祖先探索には複数のアプローチがある:
     ///
-    /// - **YaneuraOu方式**: 1手前のみをチェック（シンプルだが差分更新の機会を逃す）
-    /// - **Stockfish方式**: スタック全体を探索し、各ステップで玉移動をチェック
+    /// - **YaneuraOu方式**: 1手前のみをチェック（`max_depth=1`。シンプルだが差分更新機会を逃す）
+    /// - **Stockfish方式**: スタックを遡って計算済み祖先を探し、各ステップで玉移動をチェック
     ///
-    /// このプロジェクトでは、HalfKP側（accumulator.rs）と同じロジックを採用している。
-    /// 最大8手前まで探索し、各ステップで玉移動があれば即座に打ち切る方式である。
-    /// この方式により、1手前限定より多くの差分更新機会を得つつ、玉移動時の
-    /// 無駄な探索を早期に打ち切ることでNPS向上が観測されている。
+    /// 本実装は Stockfish 方式。遡及上限 `max_depth` は呼び出し側が **runtime のモデル種別**
+    /// (`has_threat`) で渡す（threat モデル=1 / それ以外=4。理由は呼び出し側コメント参照）。
+    /// edition-universal など threat 非対応モデルも同一バイナリで動く構成があるため、
+    /// compile-time feature でなく runtime で分ける。各ステップで玉移動があれば即座に打ち切る。
     ///
     /// ## 戻り値
     ///
     /// `Some((計算済みエントリのインデックス, 経由する局面数))` - 玉移動がない範囲で
     /// 計算済み祖先が見つかった場合。`None` - 使用可能な祖先が見つからない場合。
-    pub fn find_usable_accumulator(&self) -> Option<(usize, usize)> {
-        // representative 4局面 x 2 rounds の search-only A/B では
-        // MAX_DEPTH=4 が MAX_DEPTH=1 比で +2.15% だったため維持する。
-        const MAX_DEPTH: usize = 4;
-
+    pub fn find_usable_accumulator(&self, max_depth: usize) -> Option<(usize, usize)> {
         debug_assert!(self.current < self.entries.len());
         // SAFETY: current は do_move/undo_move の対称呼び出しで常に範囲内。
         let current = unsafe { self.entries.get_unchecked(self.current) };
@@ -564,7 +560,7 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
             }
 
             // 探索上限に達した
-            if depth >= MAX_DEPTH {
+            if depth >= max_depth {
                 return None;
             }
 
