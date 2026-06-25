@@ -1064,16 +1064,12 @@ pub fn append_changed_threat_indices(
     // Step 2: Source squares 収集
     // ---------------------------------------------------------------
 
-    // before_occ & after_occ は両 occ より blocker が少なく slider 利きが広がるので、その
-    // attackers は before/after 双方の attackers を包含する superset になる。source_bb は
-    // superset であれば足りる(余分な source は Step 3 の再列挙で同一 edge を生み diff で相殺)。
-    // よって 1 回の attackers_to_occ で両 occ 分を集められる。
-    let lenient_occ = before_occ & after_occ;
     let mut source_bb = changed_bb;
     let mut ch_iter = changed_bb;
     while !ch_iter.is_empty() {
         let sq = ch_iter.pop();
-        source_bb |= pos.attackers_to_occ(sq, lenient_occ);
+        source_bb |= pos.attackers_to_occ(sq, before_occ);
+        source_bb |= pos.attackers_to_occ(sq, after_occ);
     }
 
     // ---------------------------------------------------------------
@@ -1891,9 +1887,9 @@ mod tests {
         }
     }
 
-    /// 複数局面の全合法手で差分更新を full refresh と照合する網羅テスト。
-    /// source 収集を lenient occ 1 回に畳んでも slider の blocker 変化(取り/成り/打ち)で
-    /// removed/added が不変であることを担保する。中盤局面(成駒・手駒・開き線)を含める。
+    /// 複数局面の全合法手で差分更新(append_changed)を full refresh と照合する網羅テスト。
+    /// slider の blocker 変化(取り/成り/打ち)を広くカバーするため、成駒・手駒・開き線を含む
+    /// 中盤局面を入れる。
     #[test]
     fn test_changed_indices_all_legal_moves() {
         let sfens = [
