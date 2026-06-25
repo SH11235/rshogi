@@ -5,8 +5,8 @@
 //! 後段で ground truth の `eval_deep` とクラス別に比較するための入力を作る。
 //!
 //! `dlshogi-onnx` は default feature なので、追加フラグ無しの default build で推論が動く。
-//! `dlshogi-onnx` を外したビルド (`--no-default-features` 等) でもコンパイルは通り、実行時に
-//! 再ビルド手順を案内して終了する。
+//! `dlshogi-onnx` を外したビルド (ONNX 依存だけなら `--no-default-features --features nnue-arch`)
+//! でもコンパイルは通り、実行時に再ビルド手順を案内して終了する。
 
 use clap::Parser;
 #[cfg(any(feature = "dlshogi-onnx", test))]
@@ -75,12 +75,11 @@ fn insert_field(mut obj: Map<String, Value>, field: &str, value: i32) -> Map<Str
 }
 
 #[cfg(not(feature = "dlshogi-onnx"))]
-fn main() {
-    eprintln!(
+fn main() -> anyhow::Result<()> {
+    anyhow::bail!(
         "label_bench_dl requires the 'dlshogi-onnx' feature (on by default; this build disabled it).\n\
          Rebuild with default features: cargo build --release -p tools --bin label_bench_dl"
-    );
-    std::process::exit(1);
+    )
 }
 
 #[cfg(feature = "dlshogi-onnx")]

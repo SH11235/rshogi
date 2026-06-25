@@ -8,17 +8,21 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/SH11235/rshogi"
 
 [features]
-default = [
+# default は解析対象 NNUE アーキテクチャ集合 (nnue-arch) と DL 教師リスコア用 ONNX
+# (dlshogi-onnx) から成る。ort は load-dynamic なので dlshogi-onnx を default にしても
+# build 時に libonnxruntime は不要 (実行時 dlopen)。両者を分離しておくことで ONNX 依存
+# だけを外したビルド (`--no-default-features --features nnue-arch`) を表現でき、CI も
+# その構成 (ONNX 無効フォールバック経路) を lint できる。
+default = ["nnue-arch", "dlshogi-onnx"]
+
+# 解析対象 NNUE アーキテクチャ (LayerStack L1 サイズ + FT variant 5 種) の既定集合。
+nnue-arch = [
     "layerstacks-1536x16x32",
     "ft-halfkp",
     "ft-halfka_split",
     "ft-halfka_merged",
     "ft-halfka_hm_split",
     "ft-halfka_hm_merged",
-    # DL 教師リスコア (rescore_psv --dlshogi-onnx-model 等) を追加フラグ無しの
-    # default build で使えるようにする。ort は load-dynamic なので build 時に
-    # libonnxruntime は不要 (ONNX Runtime は実行時に dlopen)。
-    "dlshogi-onnx",
 ]
 # 診断ログ（EvalHashヒット率など）
 diagnostics = ["rshogi-core/diagnostics"]
