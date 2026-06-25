@@ -1734,6 +1734,7 @@ mod tests {
     // =========================================================================
 
     use super::super::accumulator::IndexList;
+    use crate::movegen::{MoveList, generate_legal};
     use crate::types::Move;
 
     /// 差分更新の結果が full refresh と一致することを検証するヘルパー。
@@ -1883,6 +1884,34 @@ mod tests {
             verify_incremental(&mut pos, m);
             let gc = pos.gives_check(m);
             pos.do_move(m, gc);
+        }
+    }
+
+    /// 複数局面の全合法手で差分更新(append_changed)を full refresh と照合する網羅テスト。
+    /// slider の blocker 変化(取り/成り/開き線/大駒打ち)を広くカバーするため、成駒・手駒(大駒含む)・
+    /// 密集局面を入れる。
+    #[test]
+    fn test_changed_indices_all_legal_moves() {
+        let sfens = [
+            // 平手初形
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            // 成駒(+B)・開き線のある中盤
+            "+Bn1g2s1l/2skg2r1/ppppp1n1p/5bpp1/5p1P1/2P6/PP1PP1P1P/1SK2S1R1/LN1G1G1NL w Lp 24",
+            // 両者が角を手駒に持つ複雑な中盤(大駒打ちが blocker 変化を生む)
+            "l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1",
+            // 飛を手駒に持つ密集局面(飛打ち + 取り/成りが多い)
+            "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1",
+        ];
+        for sfen in sfens {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).expect("valid sfen");
+            let mut list = MoveList::new();
+            generate_legal(&pos, &mut list);
+            assert!(!list.is_empty(), "no legal moves for {sfen}");
+            for &m in &list {
+                // verify_incremental は内部で undo_move するため pos は不変。各手を独立検証。
+                verify_incremental(&mut pos, m);
+            }
         }
     }
 
