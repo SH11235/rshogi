@@ -36,7 +36,7 @@
 | `compare_eval_nnue` | NNUE評価値の比較 |
 | `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出 |
 | `label_bench_positions` | ベンチ局面 jsonl を深い探索でラベル付けし `eval_deep` を追記（ground truth） |
-| `label_bench_dl` | `label_bench` jsonl の各局面を DL水匠 (標準 dlshogi ONNX) で静的評価し `eval_dl` を追記（`dlshogi-onnx` feature） |
+| `label_bench_dl` | `label_bench` jsonl の各局面を DL水匠 (標準 dlshogi ONNX) で静的評価し `eval_dl` を追記（`dlshogi-onnx` feature、default 有効） |
 
 ### NNUE 学習
 

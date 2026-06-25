@@ -77,17 +77,21 @@ $env:PATH = "C:\path\to\TensorRT\lib;C:\path\to\onnxruntime-win-x64-gpu-1.24.2\l
 
 ### ビルド
 
-モデル形式に応じた feature フラグを指定する。
+標準 dlshogi 系 ONNX（DL水匠等、`--dlshogi-onnx-model`）の `dlshogi-onnx` は default
+feature なので、追加フラグ無しの default build でそのまま使える。`ort` は load-dynamic の
+ため build 時に libonnxruntime は不要（ONNX Runtime は実行時に dlopen）。AobaZero 系
+（`--onnx-model`）を使う場合のみ `aobazero-onnx` を追加で有効化する。
 
-| feature | 対象モデル |
-|---|---|
-| `aobazero-onnx` | AobaZero 系 ONNX モデル |
-| `dlshogi-onnx` | 標準 dlshogi 系 ONNX モデル（DL水匠等） |
+| feature | 対象モデル | default |
+|---|---|---|
+| `dlshogi-onnx` | 標準 dlshogi 系 ONNX モデル（DL水匠等） | ✅ |
+| `aobazero-onnx` | AobaZero 系 ONNX モデル | — |
 
 ```bash
+# default build（dlshogi ONNX 有効）
+cargo build --release -p tools --bin rescore_psv
+# AobaZero モデルも使う場合
 cargo build --release -p tools --features aobazero-onnx --bin rescore_psv
-# または
-cargo build --release -p tools --features dlshogi-onnx --bin rescore_psv
 ```
 
 ### 実行例
@@ -104,7 +108,7 @@ cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
   --threads 12
 
 # 標準 dlshogi ONNX モデル（GPU）
-cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
+cargo run --release -p tools --bin rescore_psv -- \
   --input data/train.psv \
   --output-dir data/rescored/ \
   --dlshogi-onnx-model DL_suisho.onnx \
@@ -114,7 +118,7 @@ cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
   --threads 12
 
 # TensorRT + FP16（約 2.5 倍高速、初回はエンジンコンパイルに時間がかかる）
-cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
+cargo run --release -p tools --bin rescore_psv -- \
   --input data/train.psv \
   --output-dir data/rescored/ \
   --dlshogi-onnx-model DL_suisho.onnx \
@@ -135,7 +139,7 @@ cargo run --release -p tools --features aobazero-onnx --bin rescore_psv -- \
 
 # rescore + ポリシー展開を 1 パスで実行（--expand-output-dir）
 # 同一推論で value → rescore 出力、policy → 子局面出力
-cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
+cargo run --release -p tools --bin rescore_psv -- \
   --input data/train.psv \
   --output-dir data/rescored/ \
   --expand-output-dir data/expanded/ \
@@ -187,13 +191,10 @@ cargo run --release -p tools --features dlshogi-onnx --bin rescore_psv -- \
 
 ### `--skip-in-check` の挙動
 
-王手局面を rescore 出力から除外するフラグ。**ONNX モードでは 2026-04 以降、
-挙動が変更されている**:
-
-- 旧挙動: 推論バッチに入れる前にドロップ（推論もスキップ）
-- 新挙動: **推論は実行し、rescore の書き出しだけ抑制**（expand 機能と独立動作させるため）
-
-出力 PSV のバイト列は変わらない。推論コストは王手親局面の割合分わずかに増加する
+王手局面を rescore の出力から除外するフラグ。ONNX モードでは推論自体は実行し、
+**rescore の書き出しだけを抑制**する（expand 機能と独立に動かすため。除外局面でも
+policy 推論結果は子局面 expand に使える）。除外局面は出力 PSV に現れないため出力
+バイト列はこの内部分離の影響を受けず、推論コストのみ王手親局面の割合分わずかに増える
 （教師データ中の王手局面は通常 1 桁 %）。
 `--expand-skip-parent-in-check` と `--expand-skip-child-in-check` で expand 側の
 王手フィルタを独立に制御できる。

@@ -1027,8 +1027,8 @@ fn main() -> Result<()> {
     #[cfg(not(feature = "dlshogi-onnx"))]
     if use_dlshogi_onnx {
         anyhow::bail!(
-            "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature.\n\
-             Rebuild with: cargo build --release -p tools --features dlshogi-onnx --bin rescore_psv"
+            "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature (on by default; this build disabled it).\n\
+             Rebuild with default features: cargo build --release -p tools --bin rescore_psv"
         );
     }
 
@@ -3469,9 +3469,9 @@ where
                 };
                 let phase_t = Instant::now();
                 // バッチ分のレコードをストリーム読み込み。
-                // 注: 旧実装は `--skip-in-check` でこの段階で親をドロップしていたが、
-                // expand 機能（ポリシー推論）と独立に動かすため、推論は常に実行し、
-                // 王手フラグだけを記録して rescore 書き出し / expand 書き出しの個別判定に使う。
+                // `--skip-in-check` 指定時もこの段階で親局面はドロップしない。推論は常に実行し
+                // 王手フラグだけを記録して、rescore 書き出しと expand 書き出しの王手スキップを
+                // 個別判定する（expand のポリシー推論を --skip-in-check と独立に動かすため）。
                 slot.records.clear();
                 let mut errs: u64 = 0;
                 while slot.records.len() < batch_size && remaining > 0 {

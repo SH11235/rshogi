@@ -17,7 +17,7 @@
 //!
 //! # 標準 dlshogi モデル (DL水匠等)
 //! ORT_DYLIB_PATH=/path/to/libonnxruntime.so \
-//! cargo run --release -p tools --features dlshogi-onnx --bin expand_psv_from_policy -- \
+//! cargo run --release -p tools --bin expand_psv_from_policy -- \
 //!   --input data.psv --output expanded.psv \
 //!   --dlshogi-onnx-model dlshogi_model.onnx
 //! ```
@@ -144,9 +144,8 @@ fn run(cli: &Cli) -> Result<()> {
     #[cfg(not(feature = "dlshogi-onnx"))]
     if use_dlshogi {
         anyhow::bail!(
-            "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature.\n\
-             Rebuild with: cargo build --release -p tools --features dlshogi-onnx \
-             --bin expand_psv_from_policy"
+            "--dlshogi-onnx-model requires the 'dlshogi-onnx' feature (on by default; this build disabled it).\n\
+             Rebuild with default features: cargo build --release -p tools --bin expand_psv_from_policy"
         );
     }
 
@@ -555,9 +554,9 @@ fn main() -> Result<()> {
     {
         let _ = cli;
         anyhow::bail!(
-            "This binary requires the 'aobazero-onnx' or 'dlshogi-onnx' feature.\n\
-             Rebuild with: cargo build --release -p tools \
-             --features aobazero-onnx,dlshogi-onnx --bin expand_psv_from_policy"
+            "This binary requires the 'dlshogi-onnx' (on by default) or 'aobazero-onnx' feature; this build has neither (e.g. --no-default-features).\n\
+             Rebuild with default features: cargo build --release -p tools --bin expand_psv_from_policy\n\
+             (add --features aobazero-onnx for AobaZero models)"
         );
     }
 
