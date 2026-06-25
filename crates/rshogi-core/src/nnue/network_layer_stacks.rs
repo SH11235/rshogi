@@ -1144,7 +1144,18 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 }
 
                 if !updated {
-                    if let Some((source_idx, _depth)) = $stack.find_usable_accumulator() {
+                    // 遡及上限は runtime のモデル種別で決める。non-threat は forward-chain の
+                    // piece/PSQT 差分が玉移動 refresh より安く深さ 4 が速いが、threat モデルは
+                    // path>=2 の forward update が threat accumulator を full 再列挙する(Finny 非対象)
+                    // ため refresh(piece は Finny)に落ちる深さ 1 が速い(1 は YaneuraOu 方式相当)。
+                    // edition-universal は threat 非対応モデルも同一バイナリで動くので runtime 判定。
+                    #[cfg(feature = "nnue-threat")]
+                    let max_depth = if $net.feature_transformer.has_threat { 1 } else { 4 };
+                    #[cfg(not(feature = "nnue-threat"))]
+                    let max_depth = 4;
+                    if let Some((source_idx, _depth)) =
+                        $stack.find_usable_accumulator(max_depth)
+                    {
                         updated = $net.forward_update_incremental(pos, $stack, source_idx);
                     }
                 }
