@@ -63,7 +63,8 @@
 //! ```
 //!
 //! Profile 1 (same-class) は 192,640、profile 2 (same-class-major-pawn) は 173,568、
-//! profile 10 (cross-side) は 96,320。詳細は [`super::threat_exclusion`] を参照。
+//! profile 3 (step-attacker) は 33,408 (= 36 × (72+112+328+416)、attacker が
+//! 歩桂銀金のみ)、profile 10 (cross-side) は 96,320。詳細は [`super::threat_exclusion`] を参照。
 //!
 //! # index 構造
 //!
@@ -401,6 +402,7 @@ fn pair_base(
     if cfg!(any(
         feature = "threat-profile-same-class",
         feature = "threat-profile-same-class-major-pawn",
+        feature = "threat-profile-step-attacker",
         feature = "threat-profile-cross-side",
     )) && base == EXCLUDED_PAIR_BASE
     {
@@ -1455,6 +1457,7 @@ mod tests {
         #[cfg(not(any(
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
+            feature = "threat-profile-step-attacker",
             feature = "threat-profile-cross-side",
         )))]
         assert_eq!(THREAT_DIMENSIONS, 216_720, "profile 0 (full)");
@@ -1464,6 +1467,9 @@ mod tests {
 
         #[cfg(feature = "threat-profile-same-class-major-pawn")]
         assert_eq!(THREAT_DIMENSIONS, 173_568, "profile 2 (same-class-major-pawn)");
+
+        #[cfg(feature = "threat-profile-step-attacker")]
+        assert_eq!(THREAT_DIMENSIONS, 33_408, "profile 3 (step-attacker)");
 
         #[cfg(feature = "threat-profile-cross-side")]
         assert_eq!(THREAT_DIMENSIONS, 96_320, "profile 10 (cross-side)");
@@ -1701,6 +1707,7 @@ mod tests {
     #[cfg(not(any(
         feature = "threat-profile-same-class",
         feature = "threat-profile-same-class-major-pawn",
+        feature = "threat-profile-step-attacker",
         feature = "threat-profile-cross-side",
     )))]
     fn test_canonical_startpos_threat_indices() {
@@ -1731,6 +1738,42 @@ mod tests {
 
         assert_eq!(indices_b, expected, "Black perspective canonical mismatch");
         assert_eq!(indices_w, expected, "White perspective canonical mismatch (symmetric pos)");
+    }
+
+    /// step-attacker (profile 3) の startpos canonical。tatara
+    /// (`shogi-features` `ThreatIndexer::new(ThreatProfile::StepAttacker)`) で生成した
+    /// 同 startpos の sorted index と一致することを固定し、tatara ↔ rshogi の index
+    /// layout 一致を機械的に保証する (bullet-shogi に step-attacker が無く bullet golden が
+    /// 取れないため)。slider attacker を除外するので full の 34 値から step 駒由来の 16 値に減る。
+    #[test]
+    #[cfg(feature = "threat-profile-step-attacker")]
+    fn test_canonical_startpos_threat_indices_step_attacker() {
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .expect("Failed to parse startpos");
+
+        let king_sq_b = pos.king_square(Color::Black);
+        let mut indices_b = Vec::new();
+        append_active_threat_indices(&pos, Color::Black, king_sq_b, &mut indices_b);
+        indices_b.sort();
+
+        let king_sq_w = pos.king_square(Color::White);
+        let mut indices_w = Vec::new();
+        append_active_threat_indices(&pos, Color::White, king_sq_w, &mut indices_w);
+        indices_w.sort();
+
+        // tatara `ThreatProfile::StepAttacker` で生成。両 repo 同時更新のこと。
+        #[rustfmt::skip]
+        let expected: &[usize] = &[
+            1315, 1316, 1399, 1400, 5215, 5381, 10643, 10746,
+            19015, 19016, 19099, 19100, 24672, 25162, 31045, 31148,
+        ];
+
+        assert_eq!(indices_b, expected, "Black perspective step-attacker canonical mismatch");
+        assert_eq!(
+            indices_w, expected,
+            "White perspective step-attacker canonical mismatch (symmetric pos)"
+        );
     }
 
     // =========================================================================

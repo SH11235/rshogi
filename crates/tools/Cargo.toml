@@ -29,6 +29,7 @@ diagnostics = ["rshogi-core/diagnostics"]
 # Threat exclusion profiles
 threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
+threat-profile-step-attacker = ["rshogi-core/threat-profile-step-attacker"]
 threat-profile-cross-side = ["rshogi-core/threat-profile-cross-side"]
 
 # === Edition 軸 atomic feature 群 (本 crate で必要なものだけ forward) ===
