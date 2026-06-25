@@ -36,7 +36,8 @@ pub struct NnueStats {
     pub refresh_diff_sum: AtomicU64,
     /// threat full 列挙 (`for_each_active_threat_index`) 呼び出し回数（perspective 単位）
     pub threat_full_count: AtomicU64,
-    /// threat 差分更新 (`append_changed_threat_indices`) 呼び出し回数（perspective 単位）
+    /// threat 差分更新 (`append_changed_threat_indices`) が実処理を行った回数
+    /// （`dirty_num == 0` の早期リターンは除く; perspective 単位）
     pub threat_diff_count: AtomicU64,
     /// うち multi-ply jump (`forward_update_incremental` path>=2) 起因の threat full 再列挙回数（perspective 単位）
     pub threat_multiply_count: AtomicU64,
@@ -321,16 +322,18 @@ impl NnueStatsSnapshot {
         let threat_total = self.threat_full_count + self.threat_diff_count;
         if threat_total > 0 {
             let full_pct = self.threat_full_count as f64 / threat_total as f64 * 100.0;
-            let mul_pct = self.threat_multiply_count as f64 / threat_total as f64 * 100.0;
+            let diff_pct = self.threat_diff_count as f64 / threat_total as f64 * 100.0;
+            // multiply は full enum の内訳なので、比率の分母は threat_total ではなく threat_full_count
+            let mul_pct = if self.threat_full_count > 0 {
+                self.threat_multiply_count as f64 / self.threat_full_count as f64 * 100.0
+            } else {
+                0.0
+            };
             eprintln!("threat updates:        {:>12}", threat_total);
             eprintln!("  full enum:           {:>12} ({:>5.1}%)", self.threat_full_count, full_pct);
+            eprintln!("  diff:                {:>12} ({:>5.1}%)", self.threat_diff_count, diff_pct);
             eprintln!(
-                "  diff:                {:>12} ({:>5.1}%)",
-                self.threat_diff_count,
-                100.0 - full_pct
-            );
-            eprintln!(
-                "  multiply full(#2):   {:>12} ({:>5.1}%)",
+                "  multiply(of full):   {:>12} ({:>5.1}%)",
                 self.threat_multiply_count, mul_pct
             );
         }
