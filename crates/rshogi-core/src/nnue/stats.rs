@@ -34,6 +34,12 @@ pub struct NnueStats {
     pub refresh_diff_histogram: [AtomicU64; 8],
     /// refresh cache hit 時の差分駒数の累積合計（平均計算用）
     pub refresh_diff_sum: AtomicU64,
+    /// threat full 列挙 (`for_each_active_threat_index`) 呼び出し回数（perspective 単位）
+    pub threat_full_count: AtomicU64,
+    /// threat 差分更新 (`append_changed_threat_indices`) 呼び出し回数（perspective 単位）
+    pub threat_diff_count: AtomicU64,
+    /// うち multi-ply jump (`forward_update_incremental` path>=2) 起因の threat full 再列挙回数（perspective 単位）
+    pub threat_multiply_count: AtomicU64,
 }
 
 #[cfg(feature = "nnue-stats")]
@@ -59,6 +65,9 @@ impl NnueStats {
                 AtomicU64::new(0),
             ],
             refresh_diff_sum: AtomicU64::new(0),
+            threat_full_count: AtomicU64::new(0),
+            threat_diff_count: AtomicU64::new(0),
+            threat_multiply_count: AtomicU64::new(0),
         }
     }
 
@@ -75,6 +84,9 @@ impl NnueStats {
             bin.store(0, Ordering::Relaxed);
         }
         self.refresh_diff_sum.store(0, Ordering::Relaxed);
+        self.threat_full_count.store(0, Ordering::Relaxed);
+        self.threat_diff_count.store(0, Ordering::Relaxed);
+        self.threat_multiply_count.store(0, Ordering::Relaxed);
     }
 
     /// refresh_accumulator 呼び出しをカウント
@@ -136,6 +148,24 @@ impl NnueStats {
         self.refresh_diff_sum.fetch_add(diff as u64, Ordering::Relaxed);
     }
 
+    /// threat full 列挙をカウント
+    #[inline]
+    pub fn count_threat_full(&self) {
+        self.threat_full_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// threat 差分更新をカウント
+    #[inline]
+    pub fn count_threat_diff(&self) {
+        self.threat_diff_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// multi-ply jump 起因の threat full 再列挙をカウント
+    #[inline]
+    pub fn count_threat_multiply(&self) {
+        self.threat_multiply_count.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 統計情報を取得
     pub fn snapshot(&self) -> NnueStatsSnapshot {
         let mut hist = [0u64; 8];
@@ -152,7 +182,17 @@ impl NnueStats {
             cache_miss_count: self.cache_miss_count.load(Ordering::Relaxed),
             refresh_diff_histogram: hist,
             refresh_diff_sum: self.refresh_diff_sum.load(Ordering::Relaxed),
+            threat_full_count: self.threat_full_count.load(Ordering::Relaxed),
+            threat_diff_count: self.threat_diff_count.load(Ordering::Relaxed),
+            threat_multiply_count: self.threat_multiply_count.load(Ordering::Relaxed),
         }
+    }
+}
+
+#[cfg(feature = "nnue-stats")]
+impl Default for NnueStats {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -168,6 +208,9 @@ pub struct NnueStatsSnapshot {
     pub cache_miss_count: u64,
     pub refresh_diff_histogram: [u64; 8],
     pub refresh_diff_sum: u64,
+    pub threat_full_count: u64,
+    pub threat_diff_count: u64,
+    pub threat_multiply_count: u64,
 }
 
 impl NnueStatsSnapshot {
@@ -274,6 +317,22 @@ impl NnueStatsSnapshot {
                 };
                 eprintln!("  diff {:>5}:  {:>12} ({:>5.1}%)", labels[i], cnt, pct);
             }
+        }
+        let threat_total = self.threat_full_count + self.threat_diff_count;
+        if threat_total > 0 {
+            let full_pct = self.threat_full_count as f64 / threat_total as f64 * 100.0;
+            let mul_pct = self.threat_multiply_count as f64 / threat_total as f64 * 100.0;
+            eprintln!("threat updates:        {:>12}", threat_total);
+            eprintln!("  full enum:           {:>12} ({:>5.1}%)", self.threat_full_count, full_pct);
+            eprintln!(
+                "  diff:                {:>12} ({:>5.1}%)",
+                self.threat_diff_count,
+                100.0 - full_pct
+            );
+            eprintln!(
+                "  multiply full(#2):   {:>12} ({:>5.1}%)",
+                self.threat_multiply_count, mul_pct
+            );
         }
         eprintln!("==============================");
     }
@@ -415,9 +474,51 @@ macro_rules! count_refresh_diff {
     };
 }
 
+/// threat full 列挙カウント（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_threat_full {
+    () => {
+        $crate::nnue::stats::NNUE_STATS.count_threat_full()
+    };
+}
+/// threat full 列挙カウント（no-op）
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_threat_full {
+    () => {};
+}
+
+/// threat 差分カウント（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_threat_diff {
+    () => {
+        $crate::nnue::stats::NNUE_STATS.count_threat_diff()
+    };
+}
+/// threat 差分カウント（no-op）
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_threat_diff {
+    () => {};
+}
+
+/// multi-ply threat full カウント（feature有効時のみ）
+#[cfg(feature = "nnue-stats")]
+macro_rules! count_threat_multiply {
+    () => {
+        $crate::nnue::stats::NNUE_STATS.count_threat_multiply()
+    };
+}
+/// multi-ply threat full カウント（no-op）
+#[cfg(not(feature = "nnue-stats"))]
+macro_rules! count_threat_multiply {
+    () => {};
+}
+
 pub(crate) use count_already_computed;
 pub(crate) use count_cache_hit;
 pub(crate) use count_cache_miss;
 pub(crate) use count_refresh;
 pub(crate) use count_refresh_diff;
+pub(crate) use count_threat_diff;
+pub(crate) use count_threat_full;
+pub(crate) use count_threat_multiply;
 pub(crate) use count_update;

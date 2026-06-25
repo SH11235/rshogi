@@ -158,6 +158,8 @@ use super::bona_piece::BonaPiece;
 use super::bona_piece_halfka_hm_merged::is_hm_mirror;
 use super::bona_piece_halfka_hm_merged::{E_KING, F_KING};
 #[cfg(feature = "nnue-threat")]
+use super::stats::{count_threat_diff, count_threat_full};
+#[cfg(feature = "nnue-threat")]
 use super::threat_exclusion;
 
 use std::sync::LazyLock;
@@ -795,6 +797,7 @@ pub fn for_each_active_threat_index<F: FnMut(usize)>(
     king_sq: Square,
     mut f: F,
 ) {
+    count_threat_full!();
     let hm = is_hm_mirror(king_sq, perspective);
     let occupied = pos.occupied();
     let from_offset_table = &*FROM_OFFSET_TABLE;
@@ -996,6 +999,7 @@ pub fn append_changed_threat_indices(
     if dirty_piece.dirty_num == 0 {
         return true;
     }
+    count_threat_diff!();
 
     let hm = is_hm_mirror(king_sq, perspective);
     let from_offset_table = &*FROM_OFFSET_TABLE;
