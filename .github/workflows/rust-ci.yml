@@ -96,6 +96,11 @@ jobs:
           cache-on-failure: true
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # workspace clippy は default features (dlshogi-onnx 有効) で走るため、tools の
+      # #[cfg(not(feature = "dlshogi-onnx"))] フォールバック経路を踏まない。ONNX 依存を
+      # 外した構成でも lint し、その分岐の warning を検出する。
+      - name: Run Clippy (tools, ONNX 依存無効)
+        run: cargo clippy -p tools --no-default-features --features nnue-arch --all-targets -- -D warnings
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true

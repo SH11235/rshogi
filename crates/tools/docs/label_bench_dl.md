@@ -6,7 +6,7 @@
 
 ## ビルド
 
-ONNX 推論に使う `dlshogi-onnx` は default feature なので、追加フラグ無しの default build でそのまま動きます（`ort` は load-dynamic のため build 時に libonnxruntime は不要、ONNX Runtime は実行時に dlopen）。`dlshogi-onnx` を外したビルド（`--no-default-features` で default 一式を外す等）ではコンパイルは通りますが、実行すると再ビルド手順を案内して終了します。
+ONNX 推論に使う `dlshogi-onnx` は default feature なので、追加フラグ無しの default build でそのまま動きます（`ort` は load-dynamic のため build 時に libonnxruntime は不要、ONNX Runtime は実行時に dlopen）。`dlshogi-onnx` を外したビルド（ONNX 依存だけ外すなら `--no-default-features --features nnue-arch`）ではコンパイルは通りますが、実行すると再ビルド手順を案内して終了します。
 
 ```bash
 cargo build --release -p tools --bin label_bench_dl
