@@ -29,7 +29,7 @@ target/release/yardstick_score \
 | フラグ | 既定 | 説明 |
 |---|---|---|
 | `<labeled>...` | （必須） | 採点する jsonl（`yardstick_label` 出力）。複数指定可 |
-| `--out <FILE>` | — | 結果 JSON の出力先（per-file/per-group の数値を機械可読で残す） |
+| `--out <FILE>` | — | 結果 JSON の出力先（per-file/per-group の数値を機械可読で残す）。入力ラベル jsonl と同一パス/inode は拒否（高価なラベルの上書き防止） |
 
 ## 指標
 
