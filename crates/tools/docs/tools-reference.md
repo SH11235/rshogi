@@ -51,6 +51,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `psv_to_jsonl` | PSV 形式を JSONL 形式に変換 |
 | `psv_to_hcpe3` | PSV を dlshogi 学習用 hcpe3 / hcpe に変換（cshogi と byte 一致、streaming、`--evalfix-a` で eval 焼き込み） |
 | `pack_to_psv` | GenSfen .pack を PackedSfenValue (PSV) 形式に展開 |
+| `prep_hcpe` | hcpe 教師プールの汚染除去・Bloom 重複除去・決定的 shuffle・件数制限・分割（[詳細](prep_hcpe.md)） |
 
 ## 重複除去・検証
 
