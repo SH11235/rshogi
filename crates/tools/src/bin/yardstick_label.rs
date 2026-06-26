@@ -583,7 +583,11 @@ fn run_pipeline(
     drop(token_tx);
     producer.join().map_err(|_| anyhow::anyhow!("producer thread panicked"))??;
     for handle in workers {
-        let _ = handle.join();
+        if let Err(e) = handle.join() {
+            // 探索パニックは fatal hook が exit(101) するのでここには通常来ない。巻き戻し中の
+            // drop パニック等で join が Err になる稀なケースは握りつぶさず記録する。
+            eprintln!("worker thread panicked: {e:?}");
+        }
     }
 
     Ok(RunStats {

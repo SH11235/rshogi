@@ -82,8 +82,8 @@ struct GroupMetrics {
     ref_sign_acc: f64,
     /// 較正後 win-prob 空間での labeler vs 保存 eval の MAE。
     winprob_mae: f64,
-    /// eval_label vs eval_ref の Spearman 順位相関。
-    spearman: f64,
+    /// eval_label vs eval_ref の Spearman 順位相関（n<2・分散 0 等で未定義なら null）。
+    spearman: Option<f64>,
 }
 
 /// 1 ファイル（= 1 labeler config）の採点結果。
@@ -103,6 +103,11 @@ struct FileReport {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(out) = &cli.out {
+        // 採点を全部終えてから create するため、--out が入力ラベル jsonl と同一だと高価な
+        // ラベルを結果 JSON で上書きしてしまう。同一パス/同一 inode を事前に弾く。
+        validate_out_not_input(out, &cli.labeled)?;
+    }
     let mut reports = Vec::new();
     for path in &cli.labeled {
         let report = score_file(path)?;
@@ -116,6 +121,37 @@ fn main() -> Result<()> {
         w.write_all(b"\n")?;
         w.flush()?;
         eprintln!("wrote results json: {}", out.display());
+    }
+    Ok(())
+}
+
+/// `--out`（結果 JSON）が入力ラベル jsonl のどれかと同一パス/同一 inode なら弾く。
+fn validate_out_not_input(out: &Path, inputs: &[PathBuf]) -> Result<()> {
+    let out_canon = std::fs::canonicalize(out).ok();
+    #[cfg(unix)]
+    let out_devino = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(out).ok().map(|m| (m.dev(), m.ino()))
+    };
+    for input in inputs {
+        if input == out {
+            bail!("--out must differ from every input ({})", out.display());
+        }
+        if let (Some(oc), Some(ic)) = (&out_canon, std::fs::canonicalize(input).ok())
+            && *oc == ic
+        {
+            bail!("--out resolves to input {}", input.display());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let (Some((od, oi)), Some(im)) = (out_devino, std::fs::metadata(input).ok())
+                && od == im.dev()
+                && oi == im.ino()
+            {
+                bail!("--out is the same file as input {} (same dev/ino)", input.display());
+            }
+        }
     }
     Ok(())
 }
@@ -234,10 +270,12 @@ fn group_metrics(name: &str, group: &[&ScoreRecord], a_label: f64, a_ref: f64) -
             .sum::<f64>()
             / n as f64
     };
-    let spearman = spearman_corr(
+    let spearman_raw = spearman_corr(
         &group.iter().map(|r| r.eval_label as f64).collect::<Vec<_>>(),
         &group.iter().map(|r| r.eval_ref as f64).collect::<Vec<_>>(),
     );
+    // NaN（n<2・分散 0）は null として持つ（JSON で明示 null、表では "—"）。
+    let spearman = spearman_raw.is_finite().then_some(spearman_raw);
     GroupMetrics {
         group: name.to_string(),
         n,
@@ -378,7 +416,7 @@ fn pearson(xs: &[f64], ys: &[f64]) -> f64 {
     sxy / (sxx.sqrt() * syy.sqrt())
 }
 
-/// 出現順を安定させた distinct（BTreeMap で key ソート、決定的）。
+/// 出現した値を辞書順（BTreeMap の key 順）で重複排除して返す（決定的）。
 fn distinct<'a>(it: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
     let mut m: BTreeMap<&'a str, ()> = BTreeMap::new();
     for x in it {
@@ -398,8 +436,9 @@ fn print_report(r: &FileReport) {
         "group", "n", "lbl_loss", "ref_loss", "lbl_sgn", "ref_sgn", "wp_mae", "spearman"
     );
     for g in &r.groups {
+        let spearman = g.spearman.map_or_else(|| "—".to_string(), |v| format!("{v:.4}"));
         println!(
-            "{:<22} {:>7} {:>10.4} {:>10.4} {:>9.4} {:>9.4} {:>9.4} {:>9.4}",
+            "{:<22} {:>7} {:>10.4} {:>10.4} {:>9.4} {:>9.4} {:>9.4} {:>9}",
             g.group,
             g.n,
             g.label_logloss,
@@ -407,7 +446,7 @@ fn print_report(r: &FileReport) {
             g.label_sign_acc,
             g.ref_sign_acc,
             g.winprob_mae,
-            g.spearman
+            spearman
         );
     }
 }

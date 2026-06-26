@@ -35,7 +35,7 @@ target/release/yardstick_score \
 
 符号規約はすべて手番側視点。詰み（labeler が詰みスコアを返した `mate_label`、または保存 eval が
 飽和域 \|eval_ref\| >= 30000、加えて防御的に \|eval_label\| >= 30000）は較正・logloss・一致から除外
-します（飽和域は勝率較正を歪めるため）。`spearman` は単一値 group（分散 0）で `null`（NaN）になります。
+します（飽和域は勝率較正を歪めるため）。`spearman` は n<2・分散 0 の group で未定義になり、表では `—`、`--out` JSON では `null` です。
 
 - **主指標: WDL logloss** = mean[ CE(sigmoid(eval/a), wdl) ]。`a` は labeler ごとに WDL logloss
   最小化で較正したスケール（1 engine につき 1 つの global scale。class ごとには較正しない＝scale を
