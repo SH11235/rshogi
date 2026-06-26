@@ -26,6 +26,8 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出（層化サンプル + 入玉オーバーサンプル + 互角局面） |
 | `label_bench_positions` | ベンチ局面 jsonl を深い探索（depth / nodes 指定）でラベル付けし `eval_deep` 等を追記（ground truth、局面ごと隔離で `--threads` 非依存に bit 一致） |
 | `label_bench_dl` | `label_bench` jsonl の各局面を DL水匠 (標準 dlshogi ONNX) value head で静的評価し `eval_dl`（先手視点 cp）を追記（`dlshogi-onnx` feature、default 有効） |
+| `yardstick_label` | ラベル品質「物差し」ステージ 1。held-out hcpe を labeler（NNUE + 固定 depth）の決定的探索でラベル付けし採点用 jsonl（手番側視点 `wdl`/`eval_ref`/`eval_label` + class）を出す |
+| `yardstick_score` | ラベル品質「物差し」ステージ 2。`yardstick_label` 出力を engine ごとに勝率スケール較正し per-class の WDL logloss / 参照天井（符号一致）/ リファレンス一致（win-prob MAE・Spearman）を出す |
 
 ## NNUE 学習
 

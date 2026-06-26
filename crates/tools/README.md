@@ -37,6 +37,7 @@
 | `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出 |
 | `label_bench_positions` | ベンチ局面 jsonl を深い探索でラベル付けし `eval_deep` を追記（ground truth） |
 | `label_bench_dl` | `label_bench` jsonl の各局面を DL水匠 (標準 dlshogi ONNX) で静的評価し `eval_dl` を追記（`dlshogi-onnx` feature、default 有効） |
+| `yardstick_label` / `yardstick_score` | ラベル品質「物差し」。held-out hcpe を labeler でラベル付け（stage 1）→ engine ごとに勝率較正して per-class WDL logloss / 参照天井 / リファレンス一致を採点（stage 2） |
 
 ### NNUE 学習
 
@@ -77,6 +78,8 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [extract_bench_positions](docs/extract_bench_positions.md) - 教師ラベル品質測定用ベンチ局面の抽出
 - [label_bench_positions](docs/label_bench_positions.md) - ベンチ局面の深い探索ラベリング（ground truth）
 - [label_bench_dl](docs/label_bench_dl.md) - label_bench jsonl への DL水匠 (dlshogi ONNX) 評価値追記
+- [yardstick_label](docs/yardstick_label.md) - held-out hcpe を labeler の固定 depth 探索でラベル付け（物差し stage 1）
+- [yardstick_score](docs/yardstick_score.md) - labeler の WDL logloss / 参照天井 / リファレンス一致を採点（物差し stage 2）
 - [rescore_psv](docs/rescore_psv.md) - PSV 評価値の ONNX 再スコアリング（qsearch-leaf ラベル / dual-output 対応）
 - [psv_to_hcpe3](docs/psv_to_hcpe3.md) - PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming、`--evalfix-a` で eval 焼き込み）
 
