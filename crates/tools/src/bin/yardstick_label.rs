@@ -110,6 +110,15 @@ struct Cli {
     /// 先頭から処理する最大レコード数（0=全件）。smoke 用。
     #[arg(long, default_value_t = 0)]
     limit: usize,
+
+    /// 反復深化の中間 depth を 1 回の探索で捕捉し depth ごとに別ファイルへ出す（L0 用）。
+    /// 例 `--capture-depths 9,12,15`。指定時 `--out PATH.jsonl` は `PATH_d9.jsonl` 等の N
+    /// ファイルになり、`--depth` は最大 capture depth へ上書きされる。`--nodes 0`（depth 固定）
+    /// では捕捉した中間 depth のスコアは単独固定 depth 探索と bit 一致する（反復深化の depth d
+    /// までの挙動は最終 depth に依存しないため）→ N depth を探索 1 回ぶんのコストで採れる。
+    /// `--nodes` でノード制限すると共有ノード予算により単独探索とズレうる。
+    #[arg(long)]
+    capture_depths: Option<String>,
 }
 
 /// ステージ 2 が読む採点用レコード。符号規約はすべて手番側視点。
@@ -139,8 +148,9 @@ struct ScoreRecord {
 }
 
 /// 1 局面の処理結果。`Error` でも seq スロットを消費するので順序は崩れない。
+/// `Ok` は出力ファイルごとの 1 行（capture-depths 時は depth 数、通常は 1）。
 enum Outcome {
-    Ok(String),
+    Ok(Vec<String>),
     Skip,
     Error(String),
 }
@@ -162,8 +172,23 @@ fn install_fatal_panic_hook() {
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    validate_paths(&cli.input, &cli.output)?;
-    if cli.depth <= 0 && cli.nodes == 0 {
+    // capture-depths 指定時は depth ごとの N 出力、未指定時は --out 単一。探索深さは capture の
+    // 最大 depth（中間 depth は反復深化の副産物として 1 回の探索で捕捉する）。
+    let targets: Option<Vec<i32>> =
+        cli.capture_depths.as_deref().map(parse_capture_depths).transpose()?;
+    let outputs: Vec<PathBuf> = match &targets {
+        Some(ds) => capture_output_paths(&cli.output, ds),
+        None => vec![cli.output.clone()],
+    };
+    let effective_depth = match &targets {
+        // parse_capture_depths が昇順を保証するので最大 depth = 末尾。
+        Some(ds) => *ds.last().expect("non-empty capture depths"),
+        None => cli.depth,
+    };
+    for out in &outputs {
+        validate_paths(&cli.input, out)?;
+    }
+    if effective_depth <= 0 && cli.nodes == 0 {
         bail!("--depth and --nodes are both unlimited; specify at least one to bound the search");
     }
 
@@ -183,15 +208,18 @@ fn run(cli: &Cli) -> Result<()> {
     };
 
     eprintln!(
-        "Labeling {} ({} records) -> {} (depth={}, nodes={}, hash={}MB/worker, threads={})",
+        "Labeling {} ({} records) -> {} file(s) (depth={}, nodes={}, hash={}MB/worker, threads={})",
         cli.input.display(),
         total,
-        cli.output.display(),
-        cli.depth,
+        outputs.len(),
+        effective_depth,
         cli.nodes,
         cli.hash_mb,
         num_threads,
     );
+    for out in &outputs {
+        eprintln!("  out: {}", out.display());
+    }
 
     ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
         .context("Failed to set Ctrl-C handler")?;
@@ -203,7 +231,8 @@ fn run(cli: &Cli) -> Result<()> {
             .expect("valid template"),
     );
 
-    let stats = run_pipeline(cli, num_threads, &progress)?;
+    let stats =
+        run_pipeline(cli, &outputs, targets.as_deref(), effective_depth, num_threads, &progress)?;
 
     progress.finish_with_message("Done");
     eprintln!("Wrote {} labeled records", stats.written);
@@ -229,7 +258,16 @@ struct RunStats {
 }
 
 /// producer + worker + collector のストリーミングパイプライン本体。
-fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result<RunStats> {
+/// `outputs` は出力ファイル（capture-depths 時は depth 数、通常は 1）、`targets` は capture
+/// する depth 列（昇順）、`depth` は実探索深さ（= capture の最大 depth）。
+fn run_pipeline(
+    cli: &Cli,
+    outputs: &[PathBuf],
+    targets: Option<&[i32]>,
+    depth: i32,
+    num_threads: usize,
+    progress: &ProgressBar,
+) -> Result<RunStats> {
     let inflight_cap = (num_threads * 4).max(num_threads + 1);
 
     let (token_tx, token_rx) = bounded::<()>(inflight_cap);
@@ -239,16 +277,17 @@ fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result
     let (work_tx, work_rx) = unbounded::<(usize, [u8; HCPE_RECORD_SIZE])>();
     let (res_tx, res_rx) = unbounded::<(usize, Outcome)>();
 
-    let depth = cli.depth;
     let nodes = cli.nodes;
     let hash_mb = cli.hash_mb;
     let source = cli.source.clone();
+    let targets_owned: Option<Vec<i32>> = targets.map(<[i32]>::to_vec);
 
     let mut workers = Vec::with_capacity(num_threads);
     for worker_idx in 0..num_threads {
         let work_rx = work_rx.clone();
         let res_tx = res_tx.clone();
         let source = source.clone();
+        let targets = targets_owned.clone();
         let handle = thread::Builder::new()
             .name(format!("yardstick-worker-{worker_idx}"))
             .stack_size(SEARCH_STACK_SIZE)
@@ -257,7 +296,14 @@ fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result
                     if INTERRUPTED.load(Ordering::SeqCst) {
                         break;
                     }
-                    let outcome = process_record(&bytes, hash_mb, depth, nodes, source.as_deref());
+                    let outcome = process_record(
+                        &bytes,
+                        hash_mb,
+                        depth,
+                        nodes,
+                        source.as_deref(),
+                        targets.as_deref(),
+                    );
                     if res_tx.send((seq, outcome)).is_err() {
                         break;
                     }
@@ -302,10 +348,15 @@ fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result
         Ok(())
     });
 
-    // collector: seq 順に並べ替えて逐次書き出す。
-    let out_file = File::create(&cli.output)
-        .with_context(|| format!("Failed to create {}", cli.output.display()))?;
-    let mut writer = BufWriter::new(out_file);
+    // collector: seq 順に並べ替えて逐次書き出す。出力は depth ごとに分かれた N 個の writer。
+    let mut writers: Vec<BufWriter<File>> = outputs
+        .iter()
+        .map(|p| {
+            File::create(p)
+                .with_context(|| format!("Failed to create {}", p.display()))
+                .map(BufWriter::new)
+        })
+        .collect::<Result<_>>()?;
     let mut next = 0usize;
     let mut buf: std::collections::BTreeMap<usize, Outcome> = std::collections::BTreeMap::new();
     let mut written = 0u64;
@@ -316,9 +367,15 @@ fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result
         buf.insert(seq, outcome);
         while let Some(outcome) = buf.remove(&next) {
             match outcome {
-                Outcome::Ok(line) => {
-                    writer.write_all(line.as_bytes())?;
-                    writer.write_all(b"\n")?;
+                // lines[i] は writers[i]（= depth i）へ。process_record が outputs と同数の
+                // 行を返す不変条件なので zip で 1 対 1 に書き出す（崩れると silent な行ズレに
+                // なるため debug ビルドで検出する）。
+                Outcome::Ok(lines) => {
+                    debug_assert_eq!(lines.len(), writers.len());
+                    for (writer, line) in writers.iter_mut().zip(&lines) {
+                        writer.write_all(line.as_bytes())?;
+                        writer.write_all(b"\n")?;
+                    }
                     written += 1;
                 }
                 Outcome::Skip => skipped += 1,
@@ -332,7 +389,9 @@ fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result
             let _ = token_tx.send(());
         }
     }
-    writer.flush()?;
+    for writer in &mut writers {
+        writer.flush()?;
+    }
 
     drop(token_tx);
     producer.join().map_err(|_| anyhow::anyhow!("producer thread panicked"))??;
@@ -348,12 +407,14 @@ fn run_pipeline(cli: &Cli, num_threads: usize, progress: &ProgressBar) -> Result
 }
 
 /// hcpe 1 レコードを labeler でラベル付けし採点用 jsonl 行にする。
+/// `targets` 指定時は 1 回の探索で各 depth の中間スコアを捕捉し depth 数だけの行を返す。
 fn process_record(
     bytes: &[u8; HCPE_RECORD_SIZE],
     hash_mb: usize,
     depth: i32,
     nodes: u64,
     source: Option<&str>,
+    targets: Option<&[i32]>,
 ) -> Outcome {
     let eval_ref = i16::from_le_bytes([bytes[32], bytes[33]]) as i32;
     let game_result = bytes[36];
@@ -387,24 +448,62 @@ fn process_record(
         limits.nodes = nodes;
     }
     limits.set_start_time();
-    let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
-    let score = result.score;
 
-    let record = ScoreRecord {
-        stm: if stm == Color::Black { 'b' } else { 'w' },
-        wdl,
-        eval_ref,
-        eval_label: score.to_cp(),
-        eval_band: eval_band(eval_ref),
-        nyugyoku,
-        in_check,
-        mate_ref: eval_ref.abs() >= MATE_ABS,
-        mate_label: score.is_mate_score(),
-        source: source.map(str::to_string),
+    // 出力 1 行を組み立てる（eval_label / mate_label 以外は depth 間で共有）。
+    let stm_char = if stm == Color::Black { 'b' } else { 'w' };
+    let make_line = |eval_label: i32, mate_label: bool| -> Result<String, String> {
+        let record = ScoreRecord {
+            stm: stm_char,
+            wdl,
+            eval_ref,
+            eval_label,
+            eval_band: eval_band(eval_ref),
+            nyugyoku,
+            in_check,
+            mate_ref: eval_ref.abs() >= MATE_ABS,
+            mate_label,
+            source: source.map(str::to_string),
+        };
+        serde_json::to_string(&record).map_err(|e| format!("serialize error: {e}"))
     };
-    match serde_json::to_string(&record) {
-        Ok(s) => Outcome::Ok(s),
-        Err(e) => Outcome::Error(format!("serialize error: {e}")),
+
+    let lines: Result<Vec<String>, String> = match targets {
+        // capture mode: 1 回の探索で各 target depth の反復深化中間スコアを捕捉する。
+        // 反復深化は depth 1,2,… と単調増加するので、各 target に「target 以下で最後に完了した
+        // depth」のスコアが残る（target に到達すれば exact、早期終了（詰み等）なら最深 depth）。
+        Some(targets) => {
+            let mut captured: Vec<Option<(i32, bool)>> = vec![None; targets.len()];
+            let result = {
+                let cap = &mut captured;
+                let on_info = |info: &SearchInfo| {
+                    if info.multi_pv != 1 {
+                        return;
+                    }
+                    for (slot, &td) in cap.iter_mut().zip(targets) {
+                        if info.depth <= td {
+                            *slot = Some((info.score.to_cp(), info.score.is_mate_score()));
+                        }
+                    }
+                };
+                search.go(&mut pos, limits, Some(on_info))
+            };
+            let fallback = (result.score.to_cp(), result.score.is_mate_score());
+            captured
+                .into_iter()
+                .map(|c| {
+                    let (eval, mate) = c.unwrap_or(fallback);
+                    make_line(eval, mate)
+                })
+                .collect()
+        }
+        None => {
+            let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+            make_line(result.score.to_cp(), result.score.is_mate_score()).map(|s| vec![s])
+        }
+    };
+    match lines {
+        Ok(lines) => Outcome::Ok(lines),
+        Err(e) => Outcome::Error(e),
     }
 }
 
@@ -553,6 +652,50 @@ fn count_records(path: &Path) -> Result<u64> {
     Ok(len / HCPE_RECORD_SIZE as u64)
 }
 
+/// `--capture-depths` の "9,12,15" を昇順・重複排除した正の depth 列に。
+fn parse_capture_depths(s: &str) -> Result<Vec<i32>> {
+    let mut depths: Vec<i32> = Vec::new();
+    for tok in s.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let d: i32 =
+            tok.parse().with_context(|| format!("invalid --capture-depths entry '{tok}'"))?;
+        if d <= 0 {
+            bail!("--capture-depths entries must be > 0 (got {d})");
+        }
+        depths.push(d);
+    }
+    if depths.is_empty() {
+        bail!("--capture-depths is empty");
+    }
+    depths.sort_unstable();
+    depths.dedup();
+    Ok(depths)
+}
+
+/// `--out base.jsonl` と depth 列から、depth ごとの出力パス `base_d<depth>.jsonl` を作る。
+/// 拡張子が無ければ末尾に `_d<depth>` を付ける。
+fn capture_output_paths(base: &Path, depths: &[i32]) -> Vec<PathBuf> {
+    let parent = base.parent();
+    let stem = base.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = base.extension().map(|e| e.to_string_lossy().into_owned());
+    depths
+        .iter()
+        .map(|d| {
+            let name = match &ext {
+                Some(ext) => format!("{stem}_d{d}.{ext}"),
+                None => format!("{stem}_d{d}"),
+            };
+            match parent {
+                Some(p) if !p.as_os_str().is_empty() => p.join(name),
+                _ => PathBuf::from(name),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,6 +723,29 @@ mod tests {
         assert_eq!(eval_band(29_999), "1501+");
         assert_eq!(eval_band(30_000), "mate");
         assert_eq!(eval_band(-32_767), "mate");
+    }
+
+    #[test]
+    fn parse_capture_depths_sorts_dedups_validates() {
+        assert_eq!(parse_capture_depths("15,9,12,9").unwrap(), vec![9, 12, 15]);
+        assert_eq!(parse_capture_depths(" 9 , 12 ").unwrap(), vec![9, 12]);
+        assert!(parse_capture_depths("").is_err());
+        assert!(parse_capture_depths("9,0").is_err());
+        assert!(parse_capture_depths("9,x").is_err());
+    }
+
+    #[test]
+    fn capture_output_paths_inserts_depth_suffix() {
+        let p = capture_output_paths(Path::new("runs/threat.jsonl"), &[9, 12]);
+        assert_eq!(
+            p,
+            vec![
+                PathBuf::from("runs/threat_d9.jsonl"),
+                PathBuf::from("runs/threat_d12.jsonl")
+            ]
+        );
+        let p2 = capture_output_paths(Path::new("threat"), &[15]);
+        assert_eq!(p2, vec![PathBuf::from("threat_d15")]);
     }
 
     /// 玉位置と入玉 class（初期局面はどちらも自陣なので none）。

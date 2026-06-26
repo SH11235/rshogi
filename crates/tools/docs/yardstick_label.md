@@ -59,6 +59,26 @@ depth を物差しの変数にするときは `--nodes 0` で depth を binding 
 | `--threads <usize>` | 0 | worker スレッド数（0=全コア）。出力は thread 数非依存に bit 一致 |
 | `--source <STR>` | — | 出力に付与する source ラベル（hcpe はソースを持たないので任意。例 `floodgate`） |
 | `--limit <usize>` | 0 | 先頭から処理する最大レコード数（0=全件）。smoke 用 |
+| `--capture-depths <CSV>` | — | 反復深化の中間 depth を 1 回の探索で捕捉し depth ごとに別ファイルへ（L0 用）。例 `9,12,15` |
+
+## depth sweep を 1 回の探索で（`--capture-depths`）
+
+depth 選定（L0）で複数 depth を比べるとき、`--depth 9` / `12` / `15` を別々に 3 回探索する代わりに
+`--capture-depths 9,12,15` を使うと、**1 回の depth-15 探索の反復深化の副産物**として各 depth のスコアを
+捕捉し、`<out>_d9.jsonl` / `_d12.jsonl` / `_d15.jsonl` の 3 ファイルに書き分けます（探索 1 回ぶんの
+コストで N depth＝約 1/N の時間）。
+
+```bash
+target/release/yardstick_label \
+  --in floodgate_2025_val_r3000.hcpe --out runs/threat1024_floodgate.jsonl \
+  --nnue threat-full-1024-400.bin --fv-scale 28 --ls-progress-coeff progress_hao_full_cuda.e1.bin \
+  --capture-depths 9,12,15 --nodes 0 --threads 0 --source floodgate
+# → runs/threat1024_floodgate_{d9,d12,d15}.jsonl
+```
+
+`--nodes 0`（depth 固定）では、捕捉した中間 depth のスコアは**単独固定 depth 探索と bit 一致**します
+（反復深化の depth d までの挙動は最終 depth に依存しないため）。`--nodes` でノード制限する
+場合は共有ノード予算により単独探索とズレうるので、その用途では `--depth` 個別実行を使ってください。
 
 ## 出力フィールド（手番側視点）
 
