@@ -44,6 +44,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `split_psv` | PSV ファイルを局面数または容量で複数ファイルへ分割 |
 | `merge_psv` | 複数の PSV ファイルを順序どおりストリーミング結合 |
 | `rescore_psv` | PSV 評価値を NNUE / 外部エンジン / ONNX (dlshogi・AobaZero) で再計算。qsearch-leaf ラベル付け（root 局面 + 葉評価）と置換/ラベルの dual-output に対応 |
+| `rescore_hcpe` | hcpe 教師の eval を NNUE 固定 depth 探索で付け替え（局面/結果は保持）。共有コア `teacher_labeler` 経由で `yardstick_label` とラベル bit 一致。fresh-per-position で分散ラベリング可、チャンク単位 resume 対応 |
 | `preprocess_psv` | PSV ファイルに qsearch leaf 置換を適用。チャンクストリーミング処理対応 |
 | `filter_teacher_data` | 王手除外・スコアフィルタ・クリップなどの前処理を適用 |
 | `fix_scores` | preprocess で上書きされたスコアを元ファイルから復元 |
