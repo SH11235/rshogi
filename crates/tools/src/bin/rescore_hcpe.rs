@@ -301,32 +301,49 @@ fn output_is_complete(out_path: &Path, input: &Path, config_fp: &str) -> Result<
 /// （basename+size や値合計では中身違い・別パラメータの衝突を防げないため内容ハッシュにする）。
 fn config_fingerprint(cli: &Cli, tune_params: &[(String, i32)]) -> Result<String> {
     let mut h = Sha256::new();
-    h.update(
-        format!(
-            "depth={};nodes={};fv={};hash={};clip={};skip_in_check={};limit={};bucket={}\n",
-            cli.depth,
-            cli.nodes,
-            cli.fv_scale,
-            cli.hash_mb,
-            cli.score_clip,
-            cli.skip_in_check,
-            cli.limit,
-            cli.ls_bucket_mode.as_deref().unwrap_or("-"),
-        )
-        .as_bytes(),
+    // 各セクションを「タグ + 長さ」で囲んで domain separation する（可変長の連結で境界が曖昧に
+    // なり、別々の (net,係数,SPSA) が同一バイト列を産む構造的衝突を防ぐ）。
+    let scalars = format!(
+        "depth={};nodes={};fv={};hash={};clip={};skip_in_check={};limit={};bucket={}",
+        cli.depth,
+        cli.nodes,
+        cli.fv_scale,
+        cli.hash_mb,
+        cli.score_clip,
+        cli.skip_in_check,
+        cli.limit,
+        cli.ls_bucket_mode.as_deref().unwrap_or("-"),
     );
-    hash_file_into(&mut h, &cli.nnue)?;
+    update_tagged(&mut h, b"scalars", scalars.as_bytes());
+    hash_file_tagged(&mut h, b"nnue", &cli.nnue)?;
     match &cli.ls_progress_coeff {
-        Some(p) => hash_file_into(&mut h, p)?,
-        None => h.update(b"no-coeff\n"),
+        Some(p) => hash_file_tagged(&mut h, b"coeff", p)?,
+        None => update_tagged(&mut h, b"coeff", b""),
     }
+    // SPSA は件数 + 各 (名前長, 名前, 値) で長さ前置（名前境界も曖昧にしない）。
+    h.update(b"spsa");
+    h.update((tune_params.len() as u64).to_le_bytes());
     for (name, value) in tune_params {
+        h.update((name.len() as u64).to_le_bytes());
         h.update(name.as_bytes());
-        h.update(b"=");
         h.update(value.to_le_bytes());
-        h.update(b";");
     }
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// `タグ + u64長 + バイト列` を hasher に投入する（セクション境界の曖昧さを排除）。
+fn update_tagged(hasher: &mut Sha256, tag: &[u8], bytes: &[u8]) {
+    hasher.update(tag);
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// `タグ + u64ファイルサイズ + ファイル内容` を hasher に投入する。
+fn hash_file_tagged(hasher: &mut Sha256, tag: &[u8], path: &Path) -> Result<()> {
+    let len = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?.len();
+    hasher.update(tag);
+    hasher.update(len.to_le_bytes());
+    hash_file_into(hasher, path)
 }
 
 /// ファイル内容を sha256 hasher に流し込む（net/係数の取り違えを resume 検証で検出するため）。
