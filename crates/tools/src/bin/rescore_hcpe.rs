@@ -24,6 +24,7 @@ use clap::Parser;
 use crossbeam_channel::{bounded, unbounded};
 use glob::glob;
 use indicatif::{ProgressBar, ProgressStyle};
+use sha2::{Digest, Sha256};
 
 use rshogi_core::position::Position;
 use tools::packed_sfen::unpack_hcp;
@@ -108,12 +109,12 @@ enum Outcome {
     Error(String),
 }
 
-/// ファイル 1 つの集計。
+/// ファイル 1 つの集計（破損レコードがあれば process_file は bail するため、Ok 返却時の
+/// `skipped` は in-check スキップのみ）。
 #[derive(Default)]
 struct FileStats {
     written: u64,
     skipped: u64,
-    errors: u64,
 }
 
 fn main() -> Result<()> {
@@ -227,7 +228,6 @@ fn run(cli: &Cli) -> Result<()> {
             Ok(stats) => {
                 total.written += stats.written;
                 total.skipped += stats.skipped;
-                total.errors += stats.errors;
                 processed += 1;
             }
             Err(e) => {
@@ -296,37 +296,56 @@ fn output_is_complete(out_path: &Path, input: &Path, config_fp: &str) -> Result<
     Ok(out_bytes % HCPE_RECORD_SIZE as u64 == 0 && out_bytes / HCPE_RECORD_SIZE as u64 == or)
 }
 
-/// ラベルに影響する config を決定的文字列にまとめる（resume 一致判定用）。net/progress 係数は
-/// path basename + サイズ、SPSA は (件数:値合計) を指紋にする。
+/// ラベルに影響する config を sha256 指紋にまとめる（resume 一致判定用）。スカラ config に加え、
+/// **net・progress 係数はファイル内容**を、SPSA は**順序固定の (名前,値) 列**をハッシュへ流し込む
+/// （basename+size や値合計では中身違い・別パラメータの衝突を防げないため内容ハッシュにする）。
 fn config_fingerprint(cli: &Cli, tune_params: &[(String, i32)]) -> Result<String> {
-    let nnue_fp = file_fingerprint(&cli.nnue)?;
-    let coeff_fp = match &cli.ls_progress_coeff {
-        Some(p) => file_fingerprint(p)?,
-        None => "-".to_string(),
-    };
-    let spsa_sum: i64 = tune_params.iter().map(|(_, v)| *v as i64).sum();
-    Ok(format!(
-        "depth={};nodes={};fv={};hash={};clip={};skip_in_check={};limit={};bucket={};coeff={};nnue={};spsa={}:{}",
-        cli.depth,
-        cli.nodes,
-        cli.fv_scale,
-        cli.hash_mb,
-        cli.score_clip,
-        cli.skip_in_check,
-        cli.limit,
-        cli.ls_bucket_mode.as_deref().unwrap_or("-"),
-        coeff_fp,
-        nnue_fp,
-        tune_params.len(),
-        spsa_sum,
-    ))
+    let mut h = Sha256::new();
+    h.update(
+        format!(
+            "depth={};nodes={};fv={};hash={};clip={};skip_in_check={};limit={};bucket={}\n",
+            cli.depth,
+            cli.nodes,
+            cli.fv_scale,
+            cli.hash_mb,
+            cli.score_clip,
+            cli.skip_in_check,
+            cli.limit,
+            cli.ls_bucket_mode.as_deref().unwrap_or("-"),
+        )
+        .as_bytes(),
+    );
+    hash_file_into(&mut h, &cli.nnue)?;
+    match &cli.ls_progress_coeff {
+        Some(p) => hash_file_into(&mut h, p)?,
+        None => h.update(b"no-coeff\n"),
+    }
+    for (name, value) in tune_params {
+        h.update(name.as_bytes());
+        h.update(b"=");
+        h.update(value.to_le_bytes());
+        h.update(b";");
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// ファイルの指紋（basename:size）。net/係数の取り違えを resume 検証で検出する。
-fn file_fingerprint(path: &Path) -> Result<String> {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let size = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?.len();
-    Ok(format!("{name}:{size}"))
+/// ファイル内容を sha256 hasher に流し込む（net/係数の取り違えを resume 検証で検出するため）。
+fn hash_file_into(hasher: &mut Sha256, path: &Path) -> Result<()> {
+    let mut reader = BufReader::new(
+        File::open(path)
+            .with_context(|| format!("Failed to open {} for hashing", path.display()))?,
+    );
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .with_context(|| format!("read {} for hashing", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(())
 }
 
 /// 完了メタ（`<out>.meta`）を原子的に書く（`.meta.tmp` → rename）。
@@ -412,7 +431,13 @@ fn process_file(
         input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
     );
 
-    let tmp_path = out_path.with_extension("tmp");
+    // `out_path` のフルネームに `.tmp` を足す（`with_extension` だと `foo` と `foo.hcpe` が
+    // 同じ `foo.tmp` に衝突するため）。
+    let tmp_path = {
+        let mut s = out_path.to_path_buf().into_os_string();
+        s.push(".tmp");
+        PathBuf::from(s)
+    };
 
     // in-flight をトークンで一定上限に抑える streaming パイプライン（peak メモリは入力サイズ非依存）。
     let inflight_cap = (num_threads * 4).max(num_threads + 1);
@@ -516,7 +541,6 @@ fn process_file(
                 }
                 Outcome::Skip => stats.skipped += 1,
                 Outcome::Error(msg) => {
-                    stats.errors += 1;
                     if first_error.is_none() {
                         first_error = Some(format!("record {next}: {msg}"));
                     }
