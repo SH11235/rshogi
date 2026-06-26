@@ -39,6 +39,7 @@ diagnostics = ["rshogi-core/diagnostics"]
 # Threat exclusion profiles
 threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
+threat-profile-step-attacker = ["rshogi-core/threat-profile-step-attacker"]
 threat-profile-cross-side = ["rshogi-core/threat-profile-cross-side"]
 # NNUE progress8kpabs 差分更新最適化（L1=1536 で有効、L1=768 で退行）
 nnue-progress-diff = ["rshogi-core/nnue-progress-diff"]
@@ -93,6 +94,7 @@ edition-layerstacks-halfka_hm_merged-1024x16x32-none        = ["rshogi-core/edit
 edition-layerstacks-halfka_hm_merged-1024x16x32-threat      = ["rshogi-core/edition-layerstacks-halfka_hm_merged-1024x16x32-threat"]
 edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class            = ["rshogi-core/edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class"]
 edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class_major_pawn = ["rshogi-core/edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class_major_pawn"]
+edition-layerstacks-halfka_hm_merged-1024x16x32-threat_step_attacker         = ["rshogi-core/edition-layerstacks-halfka_hm_merged-1024x16x32-threat_step_attacker"]
 edition-layerstacks-halfka_hm_merged-768x16x32-none         = ["rshogi-core/edition-layerstacks-halfka_hm_merged-768x16x32-none"]
 edition-layerstacks-halfka_hm_merged-768x8x32-none          = ["rshogi-core/edition-layerstacks-halfka_hm_merged-768x8x32-none"]
 edition-layerstacks-halfka_hm_merged-512x16x32-none         = ["rshogi-core/edition-layerstacks-halfka_hm_merged-512x16x32-none"]

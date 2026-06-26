@@ -78,6 +78,7 @@ search-no-pass-rules = []
 # 詳細は crates/rshogi-core/src/nnue/threat_exclusion.rs の module doc 参照。
 threat-profile-same-class = []               # profile 1: 同種ペア全除外
 threat-profile-same-class-major-pawn = []   # profile 2: 同種 + 大駒→歩除外
+threat-profile-step-attacker = []           # profile 3: occupancy 依存 slider (香角飛馬竜) を attacker 除外
 threat-profile-cross-side = []               # profile 10: 同 side / 同種を除外、敵味方跨ぎ異種のみ
 
 # === Edition 軸 atomic feature 群 ===
@@ -228,6 +229,10 @@ edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class = [
 edition-layerstacks-halfka_hm_merged-1024x16x32-threat_same_class_major_pawn = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
   "threat-profile-same-class-major-pawn",
+]
+edition-layerstacks-halfka_hm_merged-1024x16x32-threat_step_attacker = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-1024x16x32", "nnue-threat",
+  "threat-profile-step-attacker",
 ]
 edition-layerstacks-halfka_hm_merged-768x16x32-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-768x16x32",

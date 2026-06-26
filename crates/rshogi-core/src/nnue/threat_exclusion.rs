@@ -20,6 +20,7 @@
 //! | 0  | (default) | なし (Baseline) | 216,720 |
 //! | 1  | `threat-profile-same-class` | 同種ペア全除外 (9 クラス × 4 side = 36 pair) | 192,640 |
 //! | 2  | `threat-profile-same-class-major-pawn` | profile 1 + 大駒 attacker → Pawn attacked (4 大駒 × 4 side = 16 pair 追加) | 173,568 |
+//! | 3  | `threat-profile-step-attacker` | occupancy 依存 slider (香角飛馬竜) を attacker から除外 (`ac==1 \|\| ac>=5`)、単発利き駒 (歩桂銀金) のみ attacker | 33,408 |
 //! | 10 | `threat-profile-cross-side` | 同 side (`as==ds`) と同種 (`ac==dc`) を除外、敵味方跨ぎの異種 pair のみ残す | 96,320 |
 //!
 //! # 設計: pair_base の sentinel
@@ -77,6 +78,7 @@
 const _PROFILE_EXCLUSIVITY: () = {
     let count = cfg!(feature = "threat-profile-same-class") as usize
         + cfg!(feature = "threat-profile-same-class-major-pawn") as usize
+        + cfg!(feature = "threat-profile-step-attacker") as usize
         + cfg!(feature = "threat-profile-cross-side") as usize;
     assert!(count <= 1, "Multiple threat profiles selected. Choose at most one.");
 };
@@ -88,6 +90,8 @@ const _PROFILE_EXCLUSIVITY: () = {
 pub const THREAT_PROFILE_ID: u32 = {
     if cfg!(feature = "threat-profile-cross-side") {
         10
+    } else if cfg!(feature = "threat-profile-step-attacker") {
+        3
     } else if cfg!(feature = "threat-profile-same-class-major-pawn") {
         2
     } else if cfg!(feature = "threat-profile-same-class") {
@@ -131,6 +135,12 @@ pub const fn is_excluded(as_: usize, ac: usize, ds: usize, dc: usize) -> bool {
         return true;
     }
 
+    // occupancy 依存 slider (Lance=1, Bishop=5, Rook=6, Horse=7, Dragon=8) を attacker
+    // から除外し、単発利き駒 (Pawn/Knight/Silver/GoldLike) のみ attacker に残す (profile 3)
+    if cfg!(feature = "threat-profile-step-attacker") && (ac == 1 || ac >= 5) {
+        return true;
+    }
+
     false
 }
 
@@ -143,6 +153,7 @@ mod tests {
         #[cfg(not(any(
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
+            feature = "threat-profile-step-attacker",
             feature = "threat-profile-cross-side",
         )))]
         assert_eq!(THREAT_PROFILE_ID, 0);
@@ -153,12 +164,29 @@ mod tests {
         #[cfg(not(any(
             feature = "threat-profile-same-class",
             feature = "threat-profile-same-class-major-pawn",
+            feature = "threat-profile-step-attacker",
             feature = "threat-profile-cross-side",
         )))]
         {
             assert!(!is_excluded(0, 0, 0, 0));
             assert!(!is_excluded(0, 8, 1, 8));
             assert!(!is_excluded(0, 5, 0, 0));
+        }
+    }
+
+    #[test]
+    fn test_block_step_attacker() {
+        #[cfg(feature = "threat-profile-step-attacker")]
+        {
+            assert_eq!(THREAT_PROFILE_ID, 3);
+            // slider attacker (Lance=1, Bishop=5..Dragon=8) は除外
+            assert!(is_excluded(0, 1, 0, 0)); // Lance attacker
+            assert!(is_excluded(0, 8, 1, 0)); // Dragon attacker
+            assert!(is_excluded(0, 6, 0, 3)); // Rook attacker
+            // 単発利き駒 (Pawn=0, Knight=2, Silver=3, GoldLike=4) は残す (attacked 非依存)
+            assert!(!is_excluded(0, 0, 0, 0)); // Pawn attacker
+            assert!(!is_excluded(0, 2, 0, 6)); // Knight attacker → Rook attacked
+            assert!(!is_excluded(0, 4, 1, 8)); // GoldLike attacker → Dragon attacked
         }
     }
 
