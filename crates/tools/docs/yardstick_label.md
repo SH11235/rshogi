@@ -86,6 +86,7 @@ depth を物差しの変数にするときは `--nodes 0` で depth を binding 
 | `--depth <i32>` | 12 | 探索深さ上限（0 以下=無制限）。`--nodes` と両方 0 は不可 |
 | `--nodes <u64>` | 0 | 探索ノード数上限（0=無制限）。depth を変数にするなら 0 |
 | `--hash-mb <usize>` | 128 | worker ごとの置換表サイズ（MB）。局面ごとに作り直すため過大にしない |
+| `--spsa-params <FILE>` | — | SPSA 探索パラメータ `.params`（USI `SPSAParamsFile` と同形式 CSV）を各局面の探索へ setoption 相当で適用（NNUE 探索モードのみ。`--onnx-model` では無視）。未指定は engine 既定値 |
 | `--threads <usize>` | 0 | worker スレッド数（0=全コア）。出力は thread 数非依存に bit 一致 |
 | `--source <STR>` | — | 出力に付与する source ラベル（hcpe はソースを持たないので任意。例 `floodgate`） |
 | `--limit <usize>` | 0 | 先頭から処理する最大レコード数（0=全件）。smoke 用 |
