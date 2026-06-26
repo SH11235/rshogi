@@ -138,7 +138,7 @@ jobs:
           # 過去の deploy-trigger commit が見えず、新規 PR を merge しても
           # `DEPLOYED_SHA` が空文字で落ちるため full history を取る。
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
         if: steps.check.outputs.can_deploy == 'true'
         with:
           toolchain: stable
@@ -180,7 +180,7 @@ jobs:
       - name: Cache worker-build binary
         if: steps.check.outputs.can_deploy == 'true'
         id: cache-worker-build
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/worker-build
           key: worker-build-${{ runner.os }}-${{ runner.arch }}-v0.8
@@ -359,7 +359,7 @@ jobs:
             --max-wait-sec "$MAX_WAIT" \
             --poll-interval-sec 30 \
             --require-stable-zero 3
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+      - uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # master
         if: steps.check.outputs.can_deploy == 'true'
         with:
           toolchain: stable
@@ -397,7 +397,7 @@ jobs:
       - name: Cache worker-build binary
         if: steps.check.outputs.can_deploy == 'true'
         id: cache-worker-build
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/worker-build
           key: worker-build-${{ runner.os }}-${{ runner.arch }}-v0.8
