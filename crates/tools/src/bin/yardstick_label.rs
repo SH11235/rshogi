@@ -276,6 +276,10 @@ fn run_nnue_mode(cli: &Cli, total: u64, progress: &ProgressBar) -> Result<RunSta
     for out in &outputs {
         validate_paths(&cli.input, out)?;
     }
+    // `--spsa-params` は collector が truncate する出力先と衝突すると破壊されるので弾く。
+    if let Some(spsa) = &cli.spsa_params {
+        validate_side_input_not_clobbered(spsa, &outputs)?;
+    }
     if effective_depth <= 0 && cli.nodes == 0 {
         bail!("--depth and --nodes are both unlimited; specify at least one to bound the search");
     }
@@ -487,7 +491,7 @@ fn run_pipeline(
             warn_unapplied_tune_params(&parsed);
             Arc::from(parsed)
         }
-        None => Arc::from(Vec::new()),
+        None => Arc::from([]),
     };
 
     let mut workers = Vec::with_capacity(num_threads);
@@ -895,6 +899,36 @@ fn validate_paths(input: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `--spsa-params` のような read-only な side input が、collector が `create` で truncate する
+/// 出力先と同一ファイルを指していないか検証する（衝突すると side input を破壊してしまう）。
+/// `validate_paths` の入出力チェックと同じく、canonical path と（hardlink 対策の）dev/ino の
+/// 両方で同一性を弾く。
+fn validate_side_input_not_clobbered(side_input: &Path, outputs: &[PathBuf]) -> Result<()> {
+    for out in outputs {
+        let same = side_input == out
+            || matches!(
+                (fs::canonicalize(side_input), fs::canonicalize(out)),
+                (Ok(a), Ok(b)) if a == b
+            );
+        #[cfg(unix)]
+        let same = same || {
+            use std::os::unix::fs::MetadataExt;
+            matches!(
+                (fs::metadata(side_input), fs::metadata(out)),
+                (Ok(sm), Ok(om)) if sm.dev() == om.dev() && sm.ino() == om.ino()
+            )
+        };
+        if same {
+            bail!(
+                "--spsa-params {} and output {} are the same file (output would be truncated)",
+                side_input.display(),
+                out.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// 進捗バーの分母用に hcpe レコード数を数える（ファイルサイズ / 38）。
 fn count_records(path: &Path) -> Result<u64> {
     let len = fs::metadata(path)
@@ -956,7 +990,10 @@ fn parse_spsa_params_content(content: &str) -> Vec<(String, i32)> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let val_part = trimmed.split("//").next().unwrap_or(trimmed).replace("[[NOT USED]]", "");
+        let val_part = trimmed
+            .split_once("//")
+            .map_or(trimmed, |(before, _)| before)
+            .replace("[[NOT USED]]", "");
         let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
         if cols.len() < 3 {
             continue;
@@ -1079,6 +1116,21 @@ BAD_VALUE,int,xyz,0,8\n";
             ]
         );
         assert!(parse_spsa_params_content("# only a comment\n").is_empty());
+    }
+
+    #[test]
+    fn validate_side_input_rejects_output_collision() {
+        let outputs = vec![
+            PathBuf::from("runs/none1536_d9.jsonl"),
+            PathBuf::from("runs/none1536_d15.jsonl"),
+        ];
+        // spsa params が出力先と同一パス → 拒否（出力 truncate で破壊されるため）。
+        assert!(
+            validate_side_input_not_clobbered(Path::new("runs/none1536_d15.jsonl"), &outputs)
+                .is_err()
+        );
+        // 別パスなら OK。
+        assert!(validate_side_input_not_clobbered(Path::new("spsa/v99.params"), &outputs).is_ok());
     }
 
     #[test]
