@@ -233,8 +233,10 @@ fn collect_records(
                     kept.push(record);
                 } else {
                     // Algorithm R: kept_seen 番目（0-index）の生き残りを確率 target/(kept_seen+1) で採用。
+                    // u64 のまま比較し（先に usize へ cast すると 32-bit で切り詰めうる）、採用時のみ
+                    // index 化する（このとき j < target ≤ usize::MAX なので安全）。
                     let j = rng.random_range(0..=kept_seen);
-                    if (j as usize) < target {
+                    if j < target as u64 {
                         kept[j as usize] = record;
                     }
                 }
@@ -283,6 +285,21 @@ fn run(config: Config) -> Result<Summary> {
 
     let inputs = sorted_unique_paths(config.inputs);
     let excludes = sorted_unique_paths(config.excludes);
+
+    // 総入力レコード数（ファイルサイズから安価に算出）が --expected-records を超えると、bloom の
+    // 実効偽陽性率が悪化し dedup が新規局面を余計に落とす（安全側だが学習データ損失）。事前に警告。
+    let mut total_input_records: u64 = 0;
+    for path in &inputs {
+        total_input_records += validate_file(path)?;
+    }
+    if total_input_records > config.expected_records {
+        eprintln!(
+            "warning: 総入力 {total_input_records} レコードが --expected-records {} を超えています。\
+             bloom の偽陽性率が悪化し dedup が余計に落とす可能性があります（--expected-records を上げてください）",
+            config.expected_records
+        );
+    }
+
     let exclude_keys = load_exclude_keys(&excludes)?;
     let mut bloom = BloomFilter::new(config.expected_records, config.false_positive_rate)?;
     let mut rng = ChaCha8Rng::seed_from_u64(config.seed);

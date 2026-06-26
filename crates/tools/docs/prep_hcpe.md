@@ -44,14 +44,23 @@ cargo run -p tools --release --bin prep_hcpe -- \
 除外局面（汚染除去・クロス重複）は exact な `HashSet<[u8; 32]>` に保持するため、偽陰性は
 ありません（= 除外集合の局面は確実に全て落ちる。汚染が出力に漏れない）。自己重複は
 512-bit blocked Bloom filter で判定します。偽陽性により、ごく少数の新規局面が重複として
-落ちる可能性があります（汚染漏れ方向ではないので安全側）。
+落ちる可能性があります（汚染漏れ方向ではないので安全側）。なお blocked 方式は全 hash を単一
+512-bit ブロックへ撃つため、同一サイズでも古典式より実効偽陽性率は高めに出ます。総入力が
+`--expected-records` を超えると偽陽性率がさらに悪化するため、超過時は警告を出します（dedup の
+over-drop を避けるには `--expected-records` を実入力規模に合わせてください）。
 
 **ピークメモリは `--target` で有界**です。`--target N`（>0）を指定すると、フィルタ通過後の
 レコードを **reservoir sampling（Algorithm R）** で N 件の無偏標本だけ保持するため、メモリは
 入力件数ではなく `target` で頭打ちになります（100M なら本体 ≈ 3.54 GiB）。`--target 0`（全件）
 のときのみ、shuffle のため全生き残りをメモリに保持します（= 生き残り件数に線形）。Bloom は
-既定設定で約 343 MiB、除外 `HashSet` は除外件数に比例（val 数万件なら無視できる量）。reservoir
-と最終 shuffle は同一の seed 付き `ChaCha8Rng` を使うため、同じ入力・seed なら出力は byte 一致します。
+既定設定で約 343 MiB。
+
+**除外集合のメモリは別枠**で `--target` の有界化には含まれません。`--exclude` の全 key を exact
+`HashSet<[u8; 32]>` に保持するため、除外件数に比例して増えます（val 数万件なら無視できますが、
+例えば 60M 件の pool をクロス重複除去のため `--exclude` に渡すと key 本体 ≈ 1.9 GiB に hashbrown の
+管理領域（load factor・容量 2 冪丸め）が加わり実効おおむね 3〜4 GiB になります。target 100M の
+records ≈ 3.5 GiB と bloom ≈ 0.34 GiB を合わせると合計 ~8 GiB 級になります）。reservoir と最終 shuffle は同一の seed 付き `ChaCha8Rng` を
+使うため、同じ入力・seed なら出力は byte 一致します。
 
 各入力・除外ファイルのサイズが 38 byte の倍数でなければ、処理をエラー終了します。
 終了時に `read / excluded(contam) / deduped / kept / written / chunks` を表示します。
