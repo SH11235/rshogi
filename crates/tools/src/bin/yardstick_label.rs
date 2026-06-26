@@ -24,6 +24,7 @@
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
@@ -101,6 +102,12 @@ struct Cli {
     /// worker ごとの置換表サイズ（MB）。局面ごとに作り直すため過大にしない。
     #[arg(long, default_value_t = 128)]
     hash_mb: usize,
+
+    /// SPSA 探索パラメータ `.params` ファイル（USI `SPSAParamsFile` と同形式 CSV:
+    /// `name,type,value,...`）。指定すると各局面の探索へ setoption 相当（`set_search_tune_option`）
+    /// で適用する（NNUE 探索モードのみ。`--onnx-model` では無視）。未指定は engine 既定値。
+    #[arg(long)]
+    spsa_params: Option<PathBuf>,
 
     /// worker スレッド数（0=利用可能 CPU 数）。出力は thread 数非依存に bit 一致。
     #[arg(long, default_value_t = 0)]
@@ -220,6 +227,11 @@ fn run(cli: &Cli) -> Result<()> {
     );
 
     let stats = if cli.onnx_model.is_some() {
+        if cli.spsa_params.is_some() {
+            eprintln!(
+                "warning: --spsa-params is ignored with --onnx-model (static eval has no search)"
+            );
+        }
         run_onnx_mode(cli, &progress)?
     } else {
         run_nnue_mode(cli, total, &progress)?
@@ -468,6 +480,15 @@ fn run_pipeline(
     let hash_mb = cli.hash_mb;
     let source = cli.source.clone();
     let targets_owned: Option<Vec<i32>> = targets.map(<[i32]>::to_vec);
+    // SPSA 探索パラメータは worker 間で共有し、各局面の Search へ適用する（空なら engine 既定値）。
+    let tune_params: Arc<[(String, i32)]> = match &cli.spsa_params {
+        Some(path) => {
+            let parsed = parse_spsa_params(path)?;
+            warn_unapplied_tune_params(&parsed);
+            Arc::from(parsed)
+        }
+        None => Arc::from(Vec::new()),
+    };
 
     let mut workers = Vec::with_capacity(num_threads);
     for worker_idx in 0..num_threads {
@@ -475,6 +496,7 @@ fn run_pipeline(
         let res_tx = res_tx.clone();
         let source = source.clone();
         let targets = targets_owned.clone();
+        let tune_params = Arc::clone(&tune_params);
         let handle = thread::Builder::new()
             .name(format!("yardstick-worker-{worker_idx}"))
             .stack_size(SEARCH_STACK_SIZE)
@@ -490,6 +512,7 @@ fn run_pipeline(
                         nodes,
                         source.as_deref(),
                         targets.as_deref(),
+                        &tune_params,
                     );
                     if res_tx.send((seq, outcome)).is_err() {
                         break;
@@ -678,6 +701,7 @@ fn process_record(
     nodes: u64,
     source: Option<&str>,
     targets: Option<&[i32]>,
+    tune_params: &[(String, i32)],
 ) -> Outcome {
     let (mut pos, meta) = match parse_hcpe_record(bytes) {
         ParseHcpe::Ok(parsed) => *parsed,
@@ -687,6 +711,10 @@ fn process_record(
 
     let mut search = Search::new(hash_mb);
     search.set_num_threads(1);
+    // SPSA 探索パラメータを setoption 相当で適用（未指定なら空 = engine 既定値）。
+    for (name, value) in tune_params {
+        search.set_search_tune_option(name, *value);
+    }
     let mut limits = LimitsType::default();
     limits.depth = depth;
     if nodes > 0 {
@@ -905,6 +933,77 @@ fn parse_capture_depths(s: &str) -> Result<Vec<i32>> {
     Ok(depths)
 }
 
+/// SPSA `.params`（USI `SPSAParamsFile` と同形式）を `(USI 名, 値)` の列に読み込む。
+/// 行形式: `name,type,value[,min,max,c_end,r_end] [// comment] [[[NOT USED]]]`。空行・`#`
+/// コメント・列不足・値パース不能の行は読み飛ばす（USI 側ローダと同方針）。適用は探索ごとに
+/// `set_search_tune_option` で行うため、未知名は適用時に無視され、範囲外は clamp される。
+fn parse_spsa_params(path: &Path) -> Result<Vec<(String, i32)>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read --spsa-params {}", path.display()))?;
+    let params = parse_spsa_params_content(&content);
+    if params.is_empty() {
+        bail!("--spsa-params {} contained no applicable rows", path.display());
+    }
+    eprintln!("Loaded {} SPSA param(s) from {}", params.len(), path.display());
+    Ok(params)
+}
+
+/// `.params` の本文を `(USI 名, 値)` の列にパースする（IO なし。`parse_spsa_params` の本体）。
+fn parse_spsa_params_content(content: &str) -> Vec<(String, i32)> {
+    let mut params = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let val_part = trimmed.split("//").next().unwrap_or(trimmed).replace("[[NOT USED]]", "");
+        let cols: Vec<&str> = val_part.split(',').map(str::trim).collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        let (name, type_name, value_str) = (cols[0], cols[1], cols[2]);
+        let parsed = if type_name.eq_ignore_ascii_case("int") {
+            match value_str.parse::<f64>() {
+                Ok(v) => v.round() as i32,
+                Err(_) => continue,
+            }
+        } else {
+            match value_str.parse::<i32>() {
+                Ok(v) => v,
+                Err(_) => continue,
+            }
+        };
+        params.push((name.to_string(), parsed));
+    }
+    params
+}
+
+/// ロード時に 1 度だけ使い捨ての `Search` へ全 params を適用し、実際に適用される件数・clamp 件数・
+/// 未知名を warn する。`.params` の名前 typo（例: net-mismatch なファイルの取り違え）を黙殺せず早期に
+/// 気付けるようにするためで、USI ローダ（`maybe_load_spsa_params` の applied/clamped ログ）と挙動を揃える。
+/// 実探索は局面ごとに同じ (name,value) を決定的に適用するので、この検証は決定性に影響しない。
+fn warn_unapplied_tune_params(params: &[(String, i32)]) {
+    let mut probe = Search::new(1);
+    let mut applied = 0usize;
+    let mut clamped = 0usize;
+    let mut unknown: Vec<&str> = Vec::new();
+    for (name, value) in params {
+        match probe.set_search_tune_option(name, *value) {
+            Some(result) => {
+                applied += 1;
+                if result.clamped {
+                    clamped += 1;
+                }
+            }
+            None => unknown.push(name),
+        }
+    }
+    eprintln!("SPSA params applied: {applied} (clamped {clamped}, unknown {})", unknown.len());
+    if !unknown.is_empty() {
+        eprintln!("  warning: unknown SPSA param name(s) ignored: {}", unknown.join(", "));
+    }
+}
+
 /// `--out base.jsonl` と depth 列から、depth ごとの出力パス `base_d<depth>.jsonl` を作る。
 /// 拡張子が無ければ末尾に `_d<depth>` を付ける。
 fn capture_output_paths(base: &Path, depths: &[i32]) -> Vec<PathBuf> {
@@ -953,6 +1052,33 @@ mod tests {
         assert_eq!(eval_band(29_999), "1501+");
         assert_eq!(eval_band(30_000), "mate");
         assert_eq!(eval_band(-32_767), "mate");
+    }
+
+    #[test]
+    fn parse_spsa_params_content_parses_rounds_and_skips() {
+        // int は f64 として読んで round、空行/コメント/列不足/値不正は読み飛ばす。
+        let content = "\
+# comment\n\
+\n\
+SPSA_IIR_SHALLOW,int,1,0,8,1,0.4\n\
+SPSA_LMR_DELTA_SCALE,int,933.7,0,4096,20,204.8 // trailing comment\n\
+SPSA_DRAW_JITTER_OFFSET,int,-1,-16,16 [[NOT USED]]\n\
+NON_INT_SPIN,spin,7,0,100\n\
+NON_INT_FRACTION,spin,3.5,0,100\n\
+TOO_FEW,int\n\
+BAD_VALUE,int,xyz,0,8\n";
+        let params = parse_spsa_params_content(content);
+        assert_eq!(
+            params,
+            vec![
+                ("SPSA_IIR_SHALLOW".to_string(), 1),
+                ("SPSA_LMR_DELTA_SCALE".to_string(), 934),
+                ("SPSA_DRAW_JITTER_OFFSET".to_string(), -1),
+                // 非 int 型は i32 直読み（round しない）。小数は parse 失敗で読み飛ばす。
+                ("NON_INT_SPIN".to_string(), 7),
+            ]
+        );
+        assert!(parse_spsa_params_content("# only a comment\n").is_empty());
     }
 
     #[test]
