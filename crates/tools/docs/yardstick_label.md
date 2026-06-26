@@ -27,6 +27,36 @@ cargo build -p tools --bin yardstick_label --release \
 LS サイズ slot（`layerstacks-1536x16x32` など）は同時に 1 つだけ有効にします。default feature は
 1536 を含むため、別サイズ（1024 等）のモデルを使う時は `--no-default-features` で切り替えます。
 
+ONNX labeler モード（`--onnx-model`）は `dlshogi-onnx` feature（default 有効）でビルドすれば動きます
+（NNUE arch には依存しないので default build で可）。
+
+## DL value head で静的評価する（`--onnx-model`、engine 軸比較用）
+
+`--onnx-model` を指定すると、NNUE 探索の代わりに **DL（標準 dlshogi ONNX, DL水匠 等）の value head を
+1 forward pass** で回し、その静的評価を `eval_label` にします。NNUE labeler と**同じ採点用 jsonl**を出すので、
+ステージ 2 で「NNUE@depth-d vs DL水匠-static」を同一 held-out・同一実結果で apples-to-apples に比較できます
+（例: Floodgate 局面集を DL水匠 で rescore し、NNUE 探索ラベルと WDL 予測精度を並べる）。
+
+ONNX 推論には GPU 版 ONNX Runtime（+ CUDA/cuDNN、TensorRT 使用時は TensorRT）が要り、`ORT_DYLIB_PATH`
+/ `LD_LIBRARY_PATH` で明示します（`label_bench_dl` と同じ）。`ort` は 1.24 系想定。
+
+```bash
+export ORT_DYLIB_PATH=/path/to/onnxruntime-linux-x64-gpu-1.24.x/lib/libonnxruntime.so
+export LD_LIBRARY_PATH=/path/to/onnxruntime/lib:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+target/release/yardstick_label \
+  --in floodgate_2025_val_r3000.hcpe --out runs/dlsuisho_floodgate.jsonl \
+  --onnx-model /path/to/DL_suisho.onnx --onnx-gpu-id 0 --onnx-batch-size 1024 --onnx-eval-scale 600 \
+  --source floodgate
+```
+
+ONNX モードは静的（探索深さなし）なので `--capture-depths` 不可・`--nnue`/`--depth`/`--threads` は不要、
+出力は単一ファイル。GPU バッチ推論なので NNUE 探索（CPU）の数十分に対し数分で終わります。
+
+決定性: 出力は入力順（バッチ streaming で順序保存）。CUDA EP（FP32）は **同一 ORT/driver/model なら実行間で
+bit 一致**しますが、ORT/driver/cuBLAS のバージョンが変わると微小に変わりえます。TensorRT EP（FP16, `--onnx-tensorrt`）
+は **bit 一致を保証しません**（FP32 とも微小に異なる）。labeler 間を比較する時は **推論 mode/ORT/driver/model を固定**
+してください。なお NNUE 探索モードの「`--threads` 非依存に bit 一致」は ONNX モードには当てはまりません（別経路）。
+
 ## 使い方
 
 ```bash
@@ -49,7 +79,7 @@ depth を物差しの変数にするときは `--nodes 0` で depth を binding 
 |---|---|---|
 | `--in <FILE>` | （必須） | 入力 hcpe（cshogi HuffmanCodedPosAndEval, 38B/レコード） |
 | `--out <FILE>` | （必須） | 出力 jsonl（採点用フィールドのみ、入力順） |
-| `--nnue <FILE>` | （必須） | labeler の NNUE モデル |
+| `--nnue <FILE>` | — | labeler の NNUE モデル。**NNUE 探索モードでは必須**（`--onnx-model` 指定時は不要・無視） |
 | `--fv-scale <i32>` | 0 | FV_SCALE オーバーライド（0=ヘッダ自動判定）。評価器に合わせ明示（threat/none 系=28） |
 | `--ls-bucket-mode <STR>` | — | LayerStacks bucket mode。LS ビルド既定は `progress8kpabs` なので通常不要 |
 | `--ls-progress-coeff <FILE>` | — | progress8kpabs 用の進行度係数。LS モデル + progress8kpabs のとき必須 |
@@ -60,6 +90,12 @@ depth を物差しの変数にするときは `--nodes 0` で depth を binding 
 | `--source <STR>` | — | 出力に付与する source ラベル（hcpe はソースを持たないので任意。例 `floodgate`） |
 | `--limit <usize>` | 0 | 先頭から処理する最大レコード数（0=全件）。smoke 用 |
 | `--capture-depths <CSV>` | — | 反復深化の中間 depth を 1 回の探索で捕捉し depth ごとに別ファイルへ（L0 用）。例 `9,12,15` |
+| `--onnx-model <PATH>` | — | DL ONNX value head で静的評価する ONNX labeler モード（`dlshogi-onnx` feature 要、下記） |
+| `--onnx-tensorrt` | false | ONNX: TensorRT EP (FP16)。未指定は CUDA EP (FP32) |
+| `--onnx-tensorrt-cache <PATH>` | — | ONNX: TensorRT エンジンキャッシュ保存先 |
+| `--onnx-batch-size <usize>` | 1024 | ONNX: 1 推論あたりの最大局面数 |
+| `--onnx-gpu-id <i32>` | 0 | ONNX: CUDA device id（負値で CPU） |
+| `--onnx-eval-scale <f32>` | 600 | ONNX: winrate→cp 変換スケール |
 
 ## depth sweep を 1 回の探索で（`--capture-depths`）
 

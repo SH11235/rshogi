@@ -6,6 +6,10 @@
 //! この出力を読み、engine ごとに勝率スケールを較正して per-class の WDL logloss /
 //! 参照天井 / リファレンス一致を算出する。
 //!
+//! labeler は 2 種: NNUE 評価器 + 固定 depth 探索（既定）と、`--onnx-model` 指定時の DL（dlshogi
+//! ONNX, DL水匠 等）value head の静的 1 forward。後者で「NNUE@depth-d vs DL水匠-static」を同一
+//! held-out で比較できる。
+//!
 //! 設計上の不変条件（`label_bench_positions` と同じ）:
 //! - 局面ごとに `Search` を作り直し 1 スレッド固定（`set_num_threads(1)`）で探索する。
 //!   これにより 1 局面の評価は他局面・処理順・`--threads` から独立し、同一入力なら
@@ -55,7 +59,7 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 #[command(
     name = "yardstick_label",
     version,
-    about = "held-out hcpe を NNUE labeler の固定 depth 探索でラベル付けし採点用 jsonl を出す"
+    about = "held-out hcpe を labeler (NNUE 固定 depth 探索 / DL ONNX 静的) でラベル付けし採点用 jsonl を出す"
 )]
 struct Cli {
     /// 入力 hcpe（cshogi HuffmanCodedPosAndEval, 38B/レコード）。
@@ -66,9 +70,9 @@ struct Cli {
     #[arg(long = "out")]
     output: PathBuf,
 
-    /// labeler の NNUE モデルファイル。
+    /// labeler の NNUE モデルファイル（NNUE 探索モード。`--onnx-model` 指定時は不要）。
     #[arg(long)]
-    nnue: PathBuf,
+    nnue: Option<PathBuf>,
 
     /// FV_SCALE オーバーライド（0=ヘッダ自動判定、1 以上=指定値）。評価器の native 値に
     /// 合わせて明示すること（threat/none LayerStacks 系は 28）。
@@ -119,6 +123,32 @@ struct Cli {
     /// `--nodes` でノード制限すると共有ノード予算により単独探索とズレうる。
     #[arg(long)]
     capture_depths: Option<String>,
+
+    /// DL（標準 dlshogi ONNX, DL水匠 等）value head で静的評価する ONNX labeler モード。
+    /// 指定すると NNUE 探索の代わりに 1 forward pass で `eval_label` を付ける（`--nnue`/`--depth`/
+    /// `--capture-depths` は無視/不可、出力は単一ファイル）。`dlshogi-onnx` feature が要る。
+    #[arg(long)]
+    onnx_model: Option<PathBuf>,
+
+    /// ONNX: TensorRT EP (FP16) を使う。未指定は CUDA EP (FP32)。
+    #[arg(long)]
+    onnx_tensorrt: bool,
+
+    /// ONNX: TensorRT エンジンキャッシュの保存先（`--onnx-tensorrt` 時のみ）。
+    #[arg(long)]
+    onnx_tensorrt_cache: Option<PathBuf>,
+
+    /// ONNX: 1 回の推論あたりの最大局面数。
+    #[arg(long, default_value_t = 1024)]
+    onnx_batch_size: usize,
+
+    /// ONNX: CUDA device id（負値で CPU 推論）。
+    #[arg(long, default_value_t = 0)]
+    onnx_gpu_id: i32,
+
+    /// ONNX: winrate→cp 変換スケール。
+    #[arg(long, default_value_t = 600.0)]
+    onnx_eval_scale: f32,
 }
 
 /// ステージ 2 が読む採点用レコード。符号規約はすべて手番側視点。
@@ -172,6 +202,52 @@ fn install_fatal_panic_hook() {
 }
 
 fn run(cli: &Cli) -> Result<()> {
+    ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
+        .context("Failed to set Ctrl-C handler")?;
+
+    let total_records = count_records(&cli.input)?;
+    let total = if cli.limit > 0 {
+        total_records.min(cli.limit as u64)
+    } else {
+        total_records
+    };
+
+    let progress = ProgressBar::new(total);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
+            .expect("valid template"),
+    );
+
+    let stats = if cli.onnx_model.is_some() {
+        run_onnx_mode(cli, &progress)?
+    } else {
+        run_nnue_mode(cli, total, &progress)?
+    };
+
+    progress.finish_with_message("Done");
+    eprintln!("Wrote {} labeled records", stats.written);
+    if stats.skipped > 0 {
+        eprintln!("Skipped {} records (invalid wdl/board)", stats.skipped);
+    }
+    if stats.errors > 0 {
+        eprintln!("Skipped {} records due to errors", stats.errors);
+    }
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        bail!(
+            "interrupted: output truncated to the in-order prefix ({} records written)",
+            stats.written
+        );
+    }
+    Ok(())
+}
+
+/// NNUE 探索 labeler モード（固定 depth / capture-depths）。
+fn run_nnue_mode(cli: &Cli, total: u64, progress: &ProgressBar) -> Result<RunStats> {
+    let nnue = cli.nnue.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("--nnue is required for NNUE search mode (or use --onnx-model)")
+    })?;
+
     // capture-depths 指定時は depth ごとの N 出力、未指定時は --out 単一。探索深さは capture の
     // 最大 depth（中間 depth は反復深化の副産物として 1 回の探索で捕捉する）。
     let targets: Option<Vec<i32>> =
@@ -192,19 +268,12 @@ fn run(cli: &Cli) -> Result<()> {
         bail!("--depth and --nodes are both unlimited; specify at least one to bound the search");
     }
 
-    configure_eval(cli)?;
+    configure_eval(cli, nnue)?;
 
     let num_threads = if cli.threads > 0 {
         cli.threads
     } else {
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-    };
-
-    let total_records = count_records(&cli.input)?;
-    let total = if cli.limit > 0 {
-        total_records.min(cli.limit as u64)
-    } else {
-        total_records
     };
 
     eprintln!(
@@ -221,34 +290,152 @@ fn run(cli: &Cli) -> Result<()> {
         eprintln!("  out: {}", out.display());
     }
 
-    ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
-        .context("Failed to set Ctrl-C handler")?;
+    run_pipeline(cli, &outputs, targets.as_deref(), effective_depth, num_threads, progress)
+}
 
-    let progress = ProgressBar::new(total);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ({per_sec}) {msg}")
-            .expect("valid template"),
-    );
+/// ONNX (DL value head) 静的 labeler モード。build に `dlshogi-onnx` feature が無いと使えない。
+#[cfg(not(feature = "dlshogi-onnx"))]
+fn run_onnx_mode(_cli: &Cli, _progress: &ProgressBar) -> Result<RunStats> {
+    bail!(
+        "--onnx-model requires the 'dlshogi-onnx' feature (on by default; this build disabled it). \
+         Rebuild without --no-default-features, or add --features dlshogi-onnx."
+    )
+}
 
-    let stats =
-        run_pipeline(cli, &outputs, targets.as_deref(), effective_depth, num_threads, &progress)?;
+#[cfg(feature = "dlshogi-onnx")]
+fn run_onnx_mode(cli: &Cli, progress: &ProgressBar) -> Result<RunStats> {
+    use tools::onnx_value::{OnnxValueConfig, OnnxValueEvaluator};
 
-    progress.finish_with_message("Done");
-    eprintln!("Wrote {} labeled records", stats.written);
-    if stats.skipped > 0 {
-        eprintln!("Skipped {} records (invalid wdl/board)", stats.skipped);
-    }
-    if stats.errors > 0 {
-        eprintln!("Skipped {} records due to errors", stats.errors);
-    }
-    if INTERRUPTED.load(Ordering::SeqCst) {
+    let model = cli.onnx_model.as_ref().expect("onnx mode requires --onnx-model");
+    if cli.capture_depths.is_some() {
         bail!(
-            "interrupted: output truncated to the in-order prefix ({} records written)",
-            stats.written
+            "--capture-depths is not supported with --onnx-model (static eval has no search depth)"
         );
     }
-    Ok(())
+    if cli.onnx_batch_size == 0 {
+        bail!("--onnx-batch-size must be > 0");
+    }
+    if cli.onnx_tensorrt && cli.onnx_gpu_id < 0 {
+        bail!("--onnx-tensorrt requires a GPU (--onnx-gpu-id >= 0)");
+    }
+    if !cli.onnx_eval_scale.is_finite() || cli.onnx_eval_scale <= 0.0 {
+        bail!("--onnx-eval-scale must be a positive finite value, got {}", cli.onnx_eval_scale);
+    }
+    if cli.onnx_tensorrt_cache.is_some() && !cli.onnx_tensorrt {
+        eprintln!("warning: --onnx-tensorrt-cache is ignored without --onnx-tensorrt");
+    }
+    validate_paths(&cli.input, &cli.output)?;
+
+    let cfg = OnnxValueConfig {
+        model_path: model.clone(),
+        gpu_id: cli.onnx_gpu_id,
+        use_tensorrt: cli.onnx_tensorrt,
+        tensorrt_cache: cli.onnx_tensorrt_cache.clone(),
+        eval_scale: cli.onnx_eval_scale,
+        batch_size: cli.onnx_batch_size,
+    };
+    let mut evaluator = OnnxValueEvaluator::new(&cfg)?;
+    eprintln!(
+        "ONNX value model loaded: {} -> {} (batch={}, gpu={}, tensorrt={})",
+        model.display(),
+        cli.output.display(),
+        cli.onnx_batch_size,
+        cli.onnx_gpu_id,
+        cli.onnx_tensorrt,
+    );
+
+    let file = File::open(&cli.input)
+        .with_context(|| format!("Failed to open {}", cli.input.display()))?;
+    let mut reader = BufReader::new(file);
+    let out = File::create(&cli.output)
+        .with_context(|| format!("Failed to create {}", cli.output.display()))?;
+    let mut writer = BufWriter::new(out);
+
+    let source = cli.source.as_deref();
+    let mut positions: Vec<Position> = Vec::with_capacity(cli.onnx_batch_size);
+    let mut metas: Vec<RecMeta> = Vec::with_capacity(cli.onnx_batch_size);
+    let mut written = 0u64;
+    let mut skipped = 0u64;
+    let mut errors = 0u64;
+    let mut seq = 0usize;
+    let mut buf = [0u8; HCPE_RECORD_SIZE];
+
+    // バッチ単位の static 推論。eval_label = DL value head の手番側視点 cp。DL value head は
+    // 静的勝率を返すだけで詰みスコアを返さないので mate_label は常に false。
+    let flush = |positions: &mut Vec<Position>,
+                 metas: &mut Vec<RecMeta>,
+                 evaluator: &mut OnnxValueEvaluator,
+                 writer: &mut BufWriter<File>,
+                 written: &mut u64|
+     -> Result<()> {
+        if positions.is_empty() {
+            return Ok(());
+        }
+        let cps = evaluator.evaluate(positions.as_slice())?;
+        // 推論出力数が入力局面数と完全一致しないと zip が末尾を無言で落とす。実行時に弾く
+        // （positions と metas は同じ ParseHcpe::Ok 分岐で 1:1 に push するので常に同数）。
+        anyhow::ensure!(
+            cps.len() == positions.len() && metas.len() == positions.len(),
+            "ONNX returned {} evals for {} positions (metas={})",
+            cps.len(),
+            positions.len(),
+            metas.len(),
+        );
+        for (meta, &cp) in metas.iter().zip(&cps) {
+            let line = score_line(meta, source, cp, false).map_err(|e| anyhow::anyhow!(e))?;
+            writeln!(writer, "{line}")?;
+            *written += 1;
+        }
+        positions.clear();
+        metas.clear();
+        Ok(())
+    };
+
+    loop {
+        if cli.limit > 0 && seq >= cli.limit {
+            break;
+        }
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
+        match reader.read_exact(&mut buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e).context("Failed to read hcpe record"),
+        }
+        seq += 1;
+        match parse_hcpe_record(&buf) {
+            ParseHcpe::Ok(parsed) => {
+                let (pos, meta) = *parsed;
+                positions.push(pos);
+                metas.push(meta);
+            }
+            ParseHcpe::Skip => {
+                skipped += 1;
+                progress.inc(1);
+            }
+            ParseHcpe::Error(msg) => {
+                errors += 1;
+                eprintln!("skip record {}: {msg}", seq - 1);
+                progress.inc(1);
+            }
+        }
+        if positions.len() >= cli.onnx_batch_size {
+            let n = positions.len() as u64;
+            flush(&mut positions, &mut metas, &mut evaluator, &mut writer, &mut written)?;
+            progress.inc(n);
+        }
+    }
+    let n = positions.len() as u64;
+    flush(&mut positions, &mut metas, &mut evaluator, &mut writer, &mut written)?;
+    progress.inc(n);
+    writer.flush()?;
+
+    Ok(RunStats {
+        written,
+        skipped,
+        errors,
+    })
 }
 
 struct RunStats {
@@ -406,6 +593,78 @@ fn run_pipeline(
     })
 }
 
+/// labeler 非依存の共有フィールド（eval_label/mate_label 以外）。NNUE 探索・ONNX 双方で使う。
+struct RecMeta {
+    stm: Color,
+    wdl: f64,
+    eval_ref: i32,
+    nyugyoku: &'static str,
+    in_check: bool,
+}
+
+enum ParseHcpe {
+    // Position が大きいので Box 化（variant 間サイズ差を抑える）。
+    Ok(Box<(Position, RecMeta)>),
+    Skip,
+    Error(String),
+}
+
+/// hcpe 1 レコードを Position + 共有フィールドへ展開する（labeler 共通の前段）。
+fn parse_hcpe_record(bytes: &[u8; HCPE_RECORD_SIZE]) -> ParseHcpe {
+    let eval_ref = i16::from_le_bytes([bytes[32], bytes[33]]) as i32;
+    let game_result = bytes[36];
+
+    let mut hcp = [0u8; 32];
+    hcp.copy_from_slice(&bytes[0..32]);
+    let sfen = match unpack_hcp(&hcp) {
+        Ok(s) => s,
+        Err(e) => return ParseHcpe::Error(format!("unpack_hcp failed: {e}")),
+    };
+    let mut pos = Position::new();
+    if let Err(e) = pos.set_sfen(&sfen) {
+        return ParseHcpe::Error(format!("set_sfen failed: {e:?}: {sfen}"));
+    }
+    let stm = pos.side_to_move();
+    let Some(wdl) = wdl_stm(game_result, stm) else {
+        // gameResult が不正（0/1/2 以外）なレコードは採点対象外。
+        return ParseHcpe::Skip;
+    };
+    let nyugyoku = nyugyoku_label(&pos);
+    let in_check = pos.in_check();
+    ParseHcpe::Ok(Box::new((
+        pos,
+        RecMeta {
+            stm,
+            wdl,
+            eval_ref,
+            nyugyoku,
+            in_check,
+        },
+    )))
+}
+
+/// 共有フィールド + labeler 値から採点用 jsonl 1 行を組み立てる。
+fn score_line(
+    meta: &RecMeta,
+    source: Option<&str>,
+    eval_label: i32,
+    mate_label: bool,
+) -> Result<String, String> {
+    let record = ScoreRecord {
+        stm: if meta.stm == Color::Black { 'b' } else { 'w' },
+        wdl: meta.wdl,
+        eval_ref: meta.eval_ref,
+        eval_label,
+        eval_band: eval_band(meta.eval_ref),
+        nyugyoku: meta.nyugyoku,
+        in_check: meta.in_check,
+        mate_ref: meta.eval_ref.abs() >= MATE_ABS,
+        mate_label,
+        source: source.map(str::to_string),
+    };
+    serde_json::to_string(&record).map_err(|e| format!("serialize error: {e}"))
+}
+
 /// hcpe 1 レコードを labeler でラベル付けし採点用 jsonl 行にする。
 /// `targets` 指定時は 1 回の探索で各 depth の中間スコアを捕捉し depth 数だけの行を返す。
 fn process_record(
@@ -416,29 +675,11 @@ fn process_record(
     source: Option<&str>,
     targets: Option<&[i32]>,
 ) -> Outcome {
-    let eval_ref = i16::from_le_bytes([bytes[32], bytes[33]]) as i32;
-    let game_result = bytes[36];
-
-    let mut hcp = [0u8; 32];
-    hcp.copy_from_slice(&bytes[0..32]);
-    let sfen = match unpack_hcp(&hcp) {
-        Ok(s) => s,
-        Err(e) => return Outcome::Error(format!("unpack_hcp failed: {e}")),
+    let (mut pos, meta) = match parse_hcpe_record(bytes) {
+        ParseHcpe::Ok(parsed) => *parsed,
+        ParseHcpe::Skip => return Outcome::Skip,
+        ParseHcpe::Error(e) => return Outcome::Error(e),
     };
-
-    let mut pos = Position::new();
-    if let Err(e) = pos.set_sfen(&sfen) {
-        return Outcome::Error(format!("set_sfen failed: {e:?}: {sfen}"));
-    }
-    let stm = pos.side_to_move();
-
-    let Some(wdl) = wdl_stm(game_result, stm) else {
-        // gameResult が不正（0/1/2 以外）なレコードは採点対象外。
-        return Outcome::Skip;
-    };
-
-    let nyugyoku = nyugyoku_label(&pos);
-    let in_check = pos.in_check();
 
     let mut search = Search::new(hash_mb);
     search.set_num_threads(1);
@@ -449,23 +690,8 @@ fn process_record(
     }
     limits.set_start_time();
 
-    // 出力 1 行を組み立てる（eval_label / mate_label 以外は depth 間で共有）。
-    let stm_char = if stm == Color::Black { 'b' } else { 'w' };
-    let make_line = |eval_label: i32, mate_label: bool| -> Result<String, String> {
-        let record = ScoreRecord {
-            stm: stm_char,
-            wdl,
-            eval_ref,
-            eval_label,
-            eval_band: eval_band(eval_ref),
-            nyugyoku,
-            in_check,
-            mate_ref: eval_ref.abs() >= MATE_ABS,
-            mate_label,
-            source: source.map(str::to_string),
-        };
-        serde_json::to_string(&record).map_err(|e| format!("serialize error: {e}"))
-    };
+    let make_line =
+        |eval_label: i32, mate_label: bool| score_line(&meta, source, eval_label, mate_label);
 
     let lines: Result<Vec<String>, String> = match targets {
         // capture mode: 1 回の探索で各 target depth の反復深化中間スコアを捕捉する。
@@ -549,9 +775,9 @@ fn eval_band(eval: i32) -> &'static str {
 
 /// 評価器（NNUE + LayerStacks bucket 設定）を USI エンジンと同じ手順で構成する。
 /// `label_bench_positions::configure_eval` と同じく progress8kpabs で係数未指定なら弾く。
-fn configure_eval(cli: &Cli) -> Result<()> {
-    if !cli.nnue.exists() {
-        bail!("NNUE model file not found: {}", cli.nnue.display());
+fn configure_eval(cli: &Cli, nnue: &Path) -> Result<()> {
+    if !nnue.exists() {
+        bail!("NNUE model file not found: {}", nnue.display());
     }
     if cli.fv_scale != 0 {
         set_fv_scale_override(cli.fv_scale);
@@ -573,8 +799,8 @@ fn configure_eval(cli: &Cli) -> Result<()> {
         coeff_loaded = true;
         eprintln!("LS_PROGRESS_COEFF: {}", path.display());
     }
-    init_nnue(&cli.nnue).context("Failed to load NNUE model")?;
-    eprintln!("NNUE model loaded: {}", cli.nnue.display());
+    init_nnue(nnue).context("Failed to load NNUE model")?;
+    eprintln!("NNUE model loaded: {}", nnue.display());
     if is_layer_stacks_loaded()
         && get_layer_stack_bucket_mode() == LayerStackBucketMode::Progress8KPAbs
         && !coeff_loaded
