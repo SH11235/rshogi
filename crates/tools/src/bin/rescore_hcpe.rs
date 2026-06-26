@@ -139,13 +139,36 @@ fn run(cli: &Cli) -> Result<()> {
     if cli.depth <= 0 && cli.nodes == 0 {
         bail!("--depth and --nodes are both unlimited; specify at least one to bound the search");
     }
-    if cli.score_clip <= 0 {
-        bail!("--score-clip must be > 0 (got {})", cli.score_clip);
+    // clamp 後に `as i16` で wrap しないよう i16 範囲に収める。
+    if cli.score_clip <= 0 || cli.score_clip > i16::MAX as i32 {
+        bail!("--score-clip must be in 1..={} (got {})", i16::MAX, cli.score_clip);
     }
 
     let inputs = expand_inputs(&cli.input)?;
     if inputs.is_empty() {
         bail!("no input files matched {:?}", cli.input);
+    }
+    // 出力は入力 basename で書くため、別ディレクトリの同名入力は出力衝突＝silent なチャンク欠落に
+    // なる。重複 basename と予約サフィックス（.tmp/.meta）を弾く。
+    let mut seen_names = std::collections::HashSet::new();
+    for input in &inputs {
+        let name = input
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("input has no file name: {}", input.display()))?
+            .to_string_lossy()
+            .into_owned();
+        if name.ends_with(".tmp") || name.ends_with(".meta") {
+            bail!(
+                "input file name '{name}' uses a reserved suffix (.tmp/.meta): {}",
+                input.display()
+            );
+        }
+        if !seen_names.insert(name.clone()) {
+            bail!(
+                "duplicate input file name '{name}' across directories — outputs would collide in --out-dir; \
+                 rename chunks to be unique"
+            );
+        }
     }
     fs::create_dir_all(&cli.out_dir)
         .with_context(|| format!("Failed to create out-dir {}", cli.out_dir.display()))?;
@@ -173,6 +196,9 @@ fn run(cli: &Cli) -> Result<()> {
     } else {
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
     };
+    // ラベルに影響する config の指紋。resume 完了メタ（`.meta`）と突き合わせ、設定違いや --limit の
+    // 短縮出力を「完了」と誤認しないようにする。
+    let config_fp = config_fingerprint(cli, &tune_params)?;
     eprintln!(
         "rescore_hcpe: {} file(s), depth={}, nodes={}, hash={}MB/worker, threads={}, score_clip=±{}",
         inputs.len(),
@@ -186,33 +212,140 @@ fn run(cli: &Cli) -> Result<()> {
     let mut total = FileStats::default();
     let mut processed = 0usize;
     let mut skipped_files = 0usize;
+    let mut failed_files = 0usize;
     for input in &inputs {
         if INTERRUPTED.load(Ordering::SeqCst) {
             break;
         }
         let out_path = output_path_for(&cli.out_dir, input)?;
-        if out_path.exists() && !cli.overwrite {
+        if !cli.overwrite && output_is_complete(&out_path, input, &config_fp)? {
             skipped_files += 1;
-            continue; // resume: 完了済みチャンクは skip
+            continue; // resume: 同一 config・件数一致の完了済みチャンクのみ skip
         }
-        let stats = process_file(cli, input, &out_path, &tune_params, num_threads)?;
-        total.written += stats.written;
-        total.skipped += stats.skipped;
-        total.errors += stats.errors;
-        processed += 1;
+        // 1 ファイルの失敗（破損レコード・IO）はそのファイルだけ未完了として続行し、最後に非ゼロ終了。
+        match process_file(cli, input, &out_path, &tune_params, num_threads, &config_fp) {
+            Ok(stats) => {
+                total.written += stats.written;
+                total.skipped += stats.skipped;
+                total.errors += stats.errors;
+                processed += 1;
+            }
+            Err(e) => {
+                failed_files += 1;
+                eprintln!(
+                    "FAILED {}: {e:#} (left unrenamed; will be retried on resume)",
+                    input.display()
+                );
+            }
+        }
         if INTERRUPTED.load(Ordering::SeqCst) {
-            break; // 中断: この .tmp は rename されず残る（次回再処理）
+            break; // 中断: 処理中の .tmp は rename されず残る（次回再処理）
         }
     }
 
     eprintln!(
-        "DONE: processed {processed} file(s), skipped {skipped_files} existing; \
-         wrote {} records ({} skipped, {} errors)",
-        total.written, total.skipped, total.errors,
+        "DONE: processed {processed} file(s), skipped {skipped_files} existing, failed {failed_files}; \
+         wrote {} records ({} in-check skipped)",
+        total.written, total.skipped,
     );
     if INTERRUPTED.load(Ordering::SeqCst) {
         bail!("interrupted: current file left as .tmp and will be redone on resume");
     }
+    if failed_files > 0 {
+        bail!(
+            "{failed_files} file(s) failed and were not written; fix the inputs and re-run to resume"
+        );
+    }
+    Ok(())
+}
+
+/// 出力チャンクの完了メタ（`<out>.meta`）のパス。
+fn meta_path_for(out_path: &Path) -> PathBuf {
+    let mut s = out_path.to_path_buf().into_os_string();
+    s.push(".meta");
+    PathBuf::from(s)
+}
+
+/// 出力が「同一 config・同一入力で完全に書かれて完了している」かを検証する（resume の skip 判定）。
+/// `.meta`（input_bytes / output_records / config）と出力サイズの整合を確認し、いずれかが食い違えば
+/// false（= 再処理）。破損・短縮出力・設定違い・--limit 短縮を完了と誤認しない。
+fn output_is_complete(out_path: &Path, input: &Path, config_fp: &str) -> Result<bool> {
+    if !out_path.exists() {
+        return Ok(false);
+    }
+    let Ok(meta) = fs::read_to_string(meta_path_for(out_path)) else {
+        return Ok(false); // メタ無し（旧 .tmp→rename 前など）→ 安全側で再処理
+    };
+    let (mut input_bytes, mut output_records, mut cfg) = (None, None, None);
+    for line in meta.lines() {
+        if let Some(v) = line.strip_prefix("input_bytes=") {
+            input_bytes = v.trim().parse::<u64>().ok();
+        } else if let Some(v) = line.strip_prefix("output_records=") {
+            output_records = v.trim().parse::<u64>().ok();
+        } else if let Some(v) = line.strip_prefix("config=") {
+            cfg = Some(v.to_string());
+        }
+    }
+    let (Some(ib), Some(or), Some(cfg)) = (input_bytes, output_records, cfg) else {
+        return Ok(false);
+    };
+    if cfg != config_fp || fs::metadata(input)?.len() != ib {
+        return Ok(false);
+    }
+    let out_bytes = fs::metadata(out_path)?.len();
+    Ok(out_bytes % HCPE_RECORD_SIZE as u64 == 0 && out_bytes / HCPE_RECORD_SIZE as u64 == or)
+}
+
+/// ラベルに影響する config を決定的文字列にまとめる（resume 一致判定用）。net/progress 係数は
+/// path basename + サイズ、SPSA は (件数:値合計) を指紋にする。
+fn config_fingerprint(cli: &Cli, tune_params: &[(String, i32)]) -> Result<String> {
+    let nnue_fp = file_fingerprint(&cli.nnue)?;
+    let coeff_fp = match &cli.ls_progress_coeff {
+        Some(p) => file_fingerprint(p)?,
+        None => "-".to_string(),
+    };
+    let spsa_sum: i64 = tune_params.iter().map(|(_, v)| *v as i64).sum();
+    Ok(format!(
+        "depth={};nodes={};fv={};hash={};clip={};skip_in_check={};limit={};bucket={};coeff={};nnue={};spsa={}:{}",
+        cli.depth,
+        cli.nodes,
+        cli.fv_scale,
+        cli.hash_mb,
+        cli.score_clip,
+        cli.skip_in_check,
+        cli.limit,
+        cli.ls_bucket_mode.as_deref().unwrap_or("-"),
+        coeff_fp,
+        nnue_fp,
+        tune_params.len(),
+        spsa_sum,
+    ))
+}
+
+/// ファイルの指紋（basename:size）。net/係数の取り違えを resume 検証で検出する。
+fn file_fingerprint(path: &Path) -> Result<String> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let size = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?.len();
+    Ok(format!("{name}:{size}"))
+}
+
+/// 完了メタ（`<out>.meta`）を原子的に書く（`.meta.tmp` → rename）。
+fn write_meta(
+    out_path: &Path,
+    input_bytes: u64,
+    output_records: u64,
+    config_fp: &str,
+) -> Result<()> {
+    let meta_path = meta_path_for(out_path);
+    let mut tmp = meta_path.clone().into_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let body =
+        format!("input_bytes={input_bytes}\noutput_records={output_records}\nconfig={config_fp}\n");
+    fs::write(&tmp, body).with_context(|| format!("Failed to write {}", tmp.display()))?;
+    fs::rename(&tmp, &meta_path).with_context(|| {
+        format!("Failed to rename {} -> {}", tmp.display(), meta_path.display())
+    })?;
     Ok(())
 }
 
@@ -258,7 +391,11 @@ fn process_file(
     out_path: &Path,
     tune_params: &Arc<[(String, i32)]>,
     num_threads: usize,
+    config_fp: &str,
 ) -> Result<FileStats> {
+    let input_bytes = fs::metadata(input)
+        .with_context(|| format!("Failed to stat {}", input.display()))?
+        .len();
     let total_records = count_records(input)?;
     let total = if cli.limit > 0 {
         total_records.min(cli.limit as u64)
@@ -340,7 +477,11 @@ fn process_file(
             match reader.read_exact(&mut buf) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e).context("Failed to read hcpe record"),
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("Failed to read hcpe record {seq} from {}", input_path.display())
+                    });
+                }
             }
             if token_rx.recv().is_err() {
                 break;
@@ -362,6 +503,9 @@ fn process_file(
     let mut next = 0usize;
     let mut buf: std::collections::BTreeMap<usize, Outcome> = std::collections::BTreeMap::new();
     let mut stats = FileStats::default();
+    // 破損レコード（unpack/set_sfen 失敗）は黙って落とすとレコード対応が崩れたファイルを完了扱い
+    // しかねないので、最初のエラーを捕え、ファイル全体を未完了（rename しない）として扱う。
+    let mut first_error: Option<String> = None;
     while let Ok((seq, outcome)) = res_rx.recv() {
         buf.insert(seq, outcome);
         while let Some(outcome) = buf.remove(&next) {
@@ -373,7 +517,9 @@ fn process_file(
                 Outcome::Skip => stats.skipped += 1,
                 Outcome::Error(msg) => {
                     stats.errors += 1;
-                    eprintln!("skip record {next} in {}: {msg}", input.display());
+                    if first_error.is_none() {
+                        first_error = Some(format!("record {next}: {msg}"));
+                    }
                 }
             }
             next += 1;
@@ -382,11 +528,14 @@ fn process_file(
         }
     }
 
+    // producer が backpressure（token_rx.recv）でブロックしたまま collector が抜けた場合に、
+    // token_tx を drop して disconnect で解放する（Ctrl-C 中断時のデッドロック防止）。
+    drop(token_tx);
     let producer_result = producer.join().expect("producer thread panicked");
     for handle in workers {
         handle.join().expect("worker thread panicked");
     }
-    producer_result?;
+    producer_result.with_context(|| format!("producer failed on {}", input.display()))?;
     writer.flush()?;
     drop(writer);
     progress.finish_and_clear();
@@ -395,9 +544,15 @@ fn process_file(
         // 中断時は .tmp を残して rename しない（次回 resume で同チャンクを最初からやり直す）。
         return Ok(stats);
     }
+    if let Some(err) = first_error {
+        // 破損レコードあり: .tmp を残し rename しない（完了扱いを防ぐ）。
+        bail!("{} in {} (file left unrenamed)", err, input.display());
+    }
     fs::rename(&tmp_path, out_path).with_context(|| {
         format!("Failed to rename {} -> {}", tmp_path.display(), out_path.display())
     })?;
+    // 完了メタを書く（resume の完了検証用）。
+    write_meta(out_path, input_bytes, stats.written, config_fp)?;
     Ok(stats)
 }
 
