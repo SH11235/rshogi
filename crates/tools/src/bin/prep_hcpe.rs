@@ -76,7 +76,9 @@ impl BloomFilter {
         if num_elements == 0 {
             bail!("--expected-records は 1 以上で指定してください");
         }
-        if false_positive_rate <= 0.0 || false_positive_rate >= 1.0 {
+        // 開区間 (0, 1) の外を弾く。NaN は両比較が false になるため、否定形で NaN も拒否する
+        // （`<= 0.0 || >= 1.0` 形だと NaN がすり抜け、後段 num_blocks=0 で 0 除算 panic になる）。
+        if !(false_positive_rate > 0.0 && false_positive_rate < 1.0) {
             bail!("--false-positive-rate は 0 より大きく 1 より小さくしてください");
         }
 
@@ -212,13 +214,16 @@ fn collect_records(
     exclude_keys: &HashSet<PositionKey>,
     bloom: &mut BloomFilter,
     target: usize,
+    input_records: u64,
     rng: &mut ChaCha8Rng,
 ) -> Result<(Vec<Record>, Summary)> {
-    // target>0 のとき reservoir は最大 target 件しか保持しないので容量を target に固定する。
-    // 逐次 push の幾何成長だと最終容量が target を大きく超え、再確保中は旧/新領域が同時に
-    // 必要になって OOM しやすい（doc 例の target=100M で約 3.54 GiB）。
+    // target>0 のとき reservoir は最大 min(target, 生き残り件数) 件しか保持しない。逐次 push の
+    // 幾何成長だと最終容量が必要量を大きく超え、再確保中は旧/新領域が同時に必要になって OOM
+    // しやすい（doc 例の target=100M で約 3.54 GiB）ため事前確保する。容量は生き残り件数の上限
+    // である総入力件数 input_records で頭打ちにする。これにより (a) target≫入力 のときの過剰確保と
+    // (b) 巨大 target（usize::MAX 近傍）での capacity overflow panic の両方を避ける。
     let mut kept: Vec<Record> = if target > 0 {
-        Vec::with_capacity(target)
+        Vec::with_capacity(target.min(input_records as usize))
     } else {
         Vec::new()
     };
@@ -310,8 +315,14 @@ fn run(config: Config) -> Result<Summary> {
     let mut bloom = BloomFilter::new(config.expected_records, config.false_positive_rate)?;
     let mut rng = ChaCha8Rng::seed_from_u64(config.seed);
     // streaming で集める（target>0 は reservoir でメモリ有界）。reservoir と shuffle は同一 rng。
-    let (mut records, mut summary) =
-        collect_records(&inputs, &exclude_keys, &mut bloom, config.target, &mut rng)?;
+    let (mut records, mut summary) = collect_records(
+        &inputs,
+        &exclude_keys,
+        &mut bloom,
+        config.target,
+        total_input_records,
+        &mut rng,
+    )?;
 
     // reservoir の保持順は一様でないので、最終出力順を seed 固定で無作為化する。
     records.shuffle(&mut rng);
@@ -386,6 +397,15 @@ mod tests {
     }
 
     #[test]
+    fn bloom_new_rejects_invalid_false_positive_rate() {
+        // 開区間 (0, 1) の外と NaN はすべて弾く（NaN を通すと num_blocks=0 で 0 除算 panic）。
+        for fpr in [0.0, 1.0, -0.1, 1.5, f64::NAN, f64::INFINITY] {
+            assert!(BloomFilter::new(100, fpr).is_err(), "fpr={fpr} は拒否されるべき");
+        }
+        assert!(BloomFilter::new(100, 1e-6).is_ok());
+    }
+
+    #[test]
     fn exclude_filter_drops_matching_keys() -> Result<()> {
         let dir = tempdir()?;
         let input = dir.path().join("input.hcpe");
@@ -395,7 +415,8 @@ mod tests {
         let mut bloom = BloomFilter::new(100, 1e-9)?;
         let mut rng = ChaCha8Rng::seed_from_u64(0);
 
-        let (records, summary) = collect_records(&[input], &exclude_keys, &mut bloom, 0, &mut rng)?;
+        let (records, summary) =
+            collect_records(&[input], &exclude_keys, &mut bloom, 0, 3, &mut rng)?;
 
         assert_eq!(records, vec![record(1, 10), record(3, 30)]);
         assert_eq!(summary.excluded, 1);
@@ -411,7 +432,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(0);
 
         let (records, summary) =
-            collect_records(&[input], &HashSet::new(), &mut bloom, 0, &mut rng)?;
+            collect_records(&[input], &HashSet::new(), &mut bloom, 0, 3, &mut rng)?;
 
         assert_eq!(records, vec![record(1, 10), record(2, 20)]);
         assert_eq!(summary.deduped, 1);
@@ -430,7 +451,7 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(123);
 
         let (records, summary) =
-            collect_records(&inputs, &HashSet::new(), &mut bloom, 4, &mut rng)?;
+            collect_records(&inputs, &HashSet::new(), &mut bloom, 4, recs.len() as u64, &mut rng)?;
 
         assert_eq!(records.len(), 4); // target で有界
         assert_eq!(summary.kept, 10); // 生き残り総数
@@ -443,7 +464,14 @@ mod tests {
         // 同一 seed で再実行すると同一標本（決定的）。
         let mut bloom2 = BloomFilter::new(100, 1e-9)?;
         let mut rng2 = ChaCha8Rng::seed_from_u64(123);
-        let (records2, _) = collect_records(&inputs, &HashSet::new(), &mut bloom2, 4, &mut rng2)?;
+        let (records2, _) = collect_records(
+            &inputs,
+            &HashSet::new(),
+            &mut bloom2,
+            4,
+            recs.len() as u64,
+            &mut rng2,
+        )?;
         assert_eq!(records, records2);
         Ok(())
     }
