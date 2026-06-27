@@ -1089,8 +1089,8 @@ head -1 <file>.params | grep -q '^SPSA_' || echo "NG: rshogi 形式ではない"
 
 ### 11.1 エンジン本体 (rshogi-usi) の 3 経路
 
-`isready` 時に `maybe_load_spsa_params()` が走り、優先順位順に読み込む
-（`crates/rshogi-usi/src/main.rs`）。
+適用経路は **ファイルロード（経路1・2）** と **個別 setoption（経路3）** の 2 系統で、
+固定の優先度ではなく **後に適用された方が勝つ（last-writer-wins）**（`crates/rshogi-usi/src/main.rs`）。
 
 1. **USI option `SPSAParamsFile`（明示パス・推奨）**
 
@@ -1112,16 +1112,30 @@ head -1 <file>.params | grep -q '^SPSA_' || echo "NG: rshogi 形式ではない"
 
    ※ 自動ロードのファイル名は **厳密に `spsa.params`**。配布名のままでは拾われない。
 
+   経路 1・2 はどちらも `maybe_load_spsa_params()` による**同一のファイルロード機構**で、
+   **初回 `isready` 時に 1 回だけ**走る。`SPSAParamsFile` が指定されていればその明示パスを、
+   未指定なら `spsa.params` を読む（= 1 が 2 に優先するのはこの「読むパスの選択」の話）。
+   読み込み時に各値が min/max にクランプされ、
+   `info string SPSA params loaded: N parameters from <path> (clamped: M)` を出力する
+   （`clamped` が 0 以外なら範囲外があった合図）。その場合は `.params` の該当行の値が
+   min/max に収まっているか確認し、必要なら `generate_spsa_params` でレンジを見直す。
+
 3. **個別 `SPSA_*` の setoption（一時上書き）**
 
    ```
    setoption name SPSA_FUTILITY_MARGIN_BASE value 89
    ```
 
-いずれもロード時に各値が min/max にクランプされ、
-`info string SPSA params loaded: N parameters from <path> (clamped: M)` を出力する
-（`clamped` が 0 以外なら範囲外があった合図）。その場合は `.params` の該当行の値が
-min/max に収まっているか確認し、必要なら `generate_spsa_params` でレンジを見直す。
+   経路 1・2 とは別機構で、setoption を受けた**その場で即時適用**される
+   （クランプ時は値ごとに `info string Warning: ... clamped to ...` を出力。経路 1・2 の
+   `SPSA params loaded` ログは出さない）。
+
+> **適用順序（last-writer-wins）**: 上記は固定優先度ではなく、同じパラメータに対しては
+> **後に適用された方が最終値になる**。ファイルロード（経路 1・2）は `isready` 時に走るため、
+> それ**より前**に送った個別 `SPSA_*`（経路 3）はファイル値で上書きされる。逆に、初回 `isready`
+> より**後**に送る個別 `SPSA_*` は、ファイルが再ロードされない限り上書きされない
+> （`SPSAParamsFile` を再設定すると次の `isready` で再ロードされる）。トーナメントでの
+> 具体的な落とし穴は §11.2 の注意を参照。
 
 ### 11.2 トーナメントツール
 
