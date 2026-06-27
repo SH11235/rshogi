@@ -46,6 +46,12 @@ pub struct LabelerEvalConfig<'a> {
 
 /// 評価器（NNUE + LayerStacks bucket 設定）を USI エンジンと同じ手順で構成する。
 /// `label_bench_positions::configure_eval` と同じく progress8kpabs で係数未指定なら弾く。
+///
+/// # 注意（グローバル状態）
+/// `set_fv_scale_override` / `set_layer_stack_bucket_mode` /
+/// `set_layer_stack_progress_kpabs_weights` / `init_nnue` はいずれもプロセスグローバルな状態を
+/// 書き換える。**1 プロセスにつき起動時に 1 回だけ呼ぶこと。** 同一プロセス内で複数の設定を
+/// 切り替えるとグローバル状態が競合するため、その用途では別途排他制御が必要になる。
 pub fn configure_eval(cfg: &LabelerEvalConfig) -> Result<()> {
     if !cfg.nnue.exists() {
         bail!("NNUE model file not found: {}", cfg.nnue.display());
@@ -138,7 +144,8 @@ pub fn parse_spsa_params(path: &Path) -> Result<Vec<(String, i32)>> {
 }
 
 /// `.params` の本文を `(USI 名, 値)` の列にパースする（IO なし。`parse_spsa_params` の本体）。
-pub fn parse_spsa_params_content(content: &str) -> Vec<(String, i32)> {
+/// クレート内専用（`parse_spsa_params` からのみ呼ぶ。テストは `super::*` で参照する）。
+fn parse_spsa_params_content(content: &str) -> Vec<(String, i32)> {
     let mut params = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();

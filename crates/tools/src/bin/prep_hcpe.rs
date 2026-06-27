@@ -76,7 +76,7 @@ impl BloomFilter {
         if num_elements == 0 {
             bail!("--expected-records は 1 以上で指定してください");
         }
-        if !(0.0..1.0).contains(&false_positive_rate) || false_positive_rate == 0.0 {
+        if false_positive_rate <= 0.0 || false_positive_rate >= 1.0 {
             bail!("--false-positive-rate は 0 より大きく 1 より小さくしてください");
         }
 
@@ -187,9 +187,8 @@ fn for_each_record(path: &Path, mut f: impl FnMut(Record) -> Result<()>) -> Resu
 }
 
 fn position_key(record: &Record) -> PositionKey {
-    let mut key = [0_u8; KEY_SIZE];
-    key.copy_from_slice(&record[..KEY_SIZE]);
-    key
+    // KEY_SIZE < RECORD_SIZE は型で保証されているため try_into は infallible。
+    record[..KEY_SIZE].try_into().unwrap()
 }
 
 fn load_exclude_keys(paths: &[PathBuf]) -> Result<HashSet<PositionKey>> {
@@ -215,7 +214,14 @@ fn collect_records(
     target: usize,
     rng: &mut ChaCha8Rng,
 ) -> Result<(Vec<Record>, Summary)> {
-    let mut kept: Vec<Record> = Vec::new();
+    // target>0 のとき reservoir は最大 target 件しか保持しないので容量を target に固定する。
+    // 逐次 push の幾何成長だと最終容量が target を大きく超え、再確保中は旧/新領域が同時に
+    // 必要になって OOM しやすい（doc 例の target=100M で約 3.54 GiB）。
+    let mut kept: Vec<Record> = if target > 0 {
+        Vec::with_capacity(target)
+    } else {
+        Vec::new()
+    };
     let mut summary = Summary::default();
     // これまでに「生き残った」レコード数（reservoir のインデックス）。
     let mut kept_seen: u64 = 0;
