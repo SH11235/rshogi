@@ -1120,13 +1120,15 @@ head -1 <file>.params | grep -q '^SPSA_' || echo "NG: rshogi 形式ではない"
 
 いずれもロード時に各値が min/max にクランプされ、
 `info string SPSA params loaded: N parameters from <path> (clamped: M)` を出力する
-（`clamped` が 0 以外なら範囲外があった合図）。
+（`clamped` が 0 以外なら範囲外があった合図）。その場合は `.params` の該当行の値が
+min/max に収まっているか確認し、必要なら `generate_spsa_params` でレンジを見直す。
 
 ### 11.2 トーナメントツール
 
-`.params` を直接渡せる（内部で `Name=Value` の setoption に展開）。
+`.params` を直接渡せる（内部で個別 `SPSA_*=Value` の setoption に展開）。
 
 ```bash
+# 以下は <rshogi> プロジェクトルートから実行する前提（相対パスは cwd 依存。絶対パスも可）
 cargo run --release -p tools --bin tournament -- \
   --engine ./target/production/rshogi-usi --engine-label tuned \
   --engine ./target/production/rshogi-usi --engine-label base \
@@ -1136,6 +1138,14 @@ cargo run --release -p tools --bin tournament -- \
 
 - `--engine-params-file "INDEX:path"` … 指定 INDEX のエンジンへファイル全項目を設定
 - `--engine-usi-option "INDEX:Name=Value"` … 個別指定（`INDEX:SPSAParamsFile=path` も可）
+
+> **注意（自動ロードによる上書き）**: `--engine-params-file` は個別 `SPSA_*` setoption
+> として送るだけで `SPSAParamsFile` をセットしない。一方エンジンは `isready` 時に
+> §11.1-2 の自動ロード（バイナリ同ディレクトリの `spsa.params`）を実行するため、
+> その `spsa.params` が存在すると `--engine-params-file` の値が**後から上書きされる**。
+> §11.1-2 を試した後や、同一バイナリで base/tuned を比較する場合は特に注意。
+> 確実に効かせるには `--engine-usi-option "INDEX:SPSAParamsFile=path"` を使う、
+> もしくはバイナリ横に `spsa.params` を置かない。
 
 ### 11.3 CSA クライアント（大会接続）
 
@@ -1157,10 +1167,12 @@ CLI `--options "K=V,..."` は同名キーを上書きする。
 
 チューン済み params は repo 外の共有 note repo（git 管理）に置き、各環境からは
 `<rshogi>/spsa_params/` への symlink で参照する運用を推奨（rshogi 本体の
-`spsa_params/` は `.gitignore` 管理外のため、配布は `git pull` に一本化できる）。
+`spsa_params/` は `.gitignore` に登録済みで git 追跡対象外のため、配布は
+`git pull` に一本化できる）。
 
 ```bash
-# 各環境で最新化 → spsa_params/ に相対 symlink
+# 前提: rshogi/ と rshogi-notes/ が同一親ディレクトリ下にあること（相対 symlink のため）
+# 初回のみ: mkdir -p <rshogi>/spsa_params/
 git -C <…>/rshogi-notes pull
 ln -snf ../../rshogi-notes/spsa/<name>.rshogi.params <rshogi>/spsa_params/
 ```
