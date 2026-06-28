@@ -469,6 +469,7 @@ fn process_file(
             limit: cli.limit,
             config_fp,
             num_threads,
+            overwrite: cli.overwrite,
         },
         &progress,
         transform,
@@ -485,6 +486,9 @@ struct StreamParams<'a> {
     limit: usize,
     config_fp: &'a str,
     num_threads: usize,
+    /// `--overwrite` 指定時は残存 `.tmp` を信頼せず最初から処理する（config 指紋では捕捉できない
+    /// バイナリのコード変更後などに、旧 prefix と新 suffix が混在した出力を完了扱いするのを防ぐ）。
+    overwrite: bool,
 }
 
 /// 1 レコードを fresh-per-position 探索で再ラベルする `transform` を組む（探索 config を捕捉）。
@@ -521,6 +525,7 @@ fn run_streaming(
         limit,
         config_fp,
         num_threads,
+        overwrite,
     } = *params;
     // `out_path` のフルネームに `.tmp` を足す（`with_extension` だと `foo` と `foo.hcpe` が
     // 同じ `foo.tmp` に衝突するため）。
@@ -532,16 +537,20 @@ fn run_streaming(
     let tmp_meta_path = tmp_meta_path_for(&tmp_path);
 
     // resume 判定: checkpoint を信頼できるなら (input_seq, output_records) から、駄目なら (0,0)。
+    // `--overwrite` 時は config 指紋が一致しても残存 `.tmp` を信頼せず最初から（再ラベル強制）。
     let tmp_size = fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
-    let (start_seq, start_written) =
-        match decide_resume(read_tmp_meta(&tmp_meta_path), input_bytes, config_fp, tmp_size, total)
-        {
-            ResumeDecision::Resume {
-                input_seq,
-                output_records,
-            } => (input_seq, output_records),
-            ResumeDecision::Fresh => (0, 0),
-        };
+    let decision = if overwrite {
+        ResumeDecision::Fresh
+    } else {
+        decide_resume(read_tmp_meta(&tmp_meta_path), input_bytes, config_fp, tmp_size, total)
+    };
+    let (start_seq, start_written) = match decision {
+        ResumeDecision::Resume {
+            input_seq,
+            output_records,
+        } => (input_seq, output_records),
+        ResumeDecision::Fresh => (0, 0),
+    };
 
     // `.tmp` を output_records*38 に切り詰めて append（fresh は 0 に truncate = stale を破棄）。
     let mut file = OpenOptions::new()
@@ -986,6 +995,10 @@ mod tests {
     }
 
     fn run(input_path: &Path, out_path: &Path, config_fp: &str) -> FileStats {
+        run_opt(input_path, out_path, config_fp, false)
+    }
+
+    fn run_opt(input_path: &Path, out_path: &Path, config_fp: &str, overwrite: bool) -> FileStats {
         let input_bytes = fs::metadata(input_path).unwrap().len();
         let total = input_bytes / REC as u64;
         let params = StreamParams {
@@ -996,6 +1009,7 @@ mod tests {
             limit: 0,
             config_fp,
             num_threads: 2,
+            overwrite,
         };
         run_streaming(&params, &ProgressBar::hidden(), arc_transform()).unwrap()
     }
@@ -1112,6 +1126,25 @@ mod tests {
         write_tmp_meta(&tmp_meta, input.len() as u64, "OTHER", 5, 5).unwrap();
         run(&input_path, &out_path, "cfg");
         // garbage は破棄され最初から処理される → fresh と一致。
+        assert_eq!(fs::read(&out_path).unwrap(), full);
+    }
+
+    #[test]
+    fn overwrite_discards_tmp_even_when_config_matches() {
+        // config 指紋はバイナリのコード変更を捕捉しないため、--overwrite では同一 config の残存
+        // .tmp も信頼してはいけない（旧 prefix + 新 suffix の混在を完了扱いするのを防ぐ）。
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("chunk.hcpe");
+        let input = make_input(15);
+        fs::write(&input_path, &input).unwrap();
+        let full = expected_output(&input);
+        let out_path = dir.path().join("chunk_out.hcpe");
+        let (tmp, tmp_meta) = tmp_paths(&out_path);
+        // config 一致だが prefix が garbage な checkpoint（信頼すると混在出力になる）。
+        fs::write(&tmp, vec![0xFFu8; 5 * REC]).unwrap();
+        write_tmp_meta(&tmp_meta, input.len() as u64, "cfg", 5, 5).unwrap();
+        run_opt(&input_path, &out_path, "cfg", true);
+        // overwrite なので garbage は破棄され最初から処理 → fresh と一致。
         assert_eq!(fs::read(&out_path).unwrap(), full);
     }
 

@@ -28,6 +28,9 @@ gameResult は保持）。`yardstick_label`（ラベル品質の物差し）と*
   - `.tmp.meta` が無い（旧バイナリ残置）・config / 入力サイズ不一致・`.tmp` が checkpoint 分に
     満たない（torn write）等、少しでも矛盾すれば `.tmp` を信頼せず最初から処理する（後方互換・
     安全側）。完了 rename 後は `.tmp.meta` を削除する。
+  - `--overwrite` 指定時は config 指紋が一致しても残存 `.tmp` を信頼せず最初から処理する。config
+    指紋はバイナリのコード変更を捕捉しないため、探索コード修正後などに同一 config で再ラベルを
+    強制する際、旧 prefix と新 suffix が混在した出力を完了扱いするのを防ぐ。
 - **入力 basename は一意必須**: 出力は入力ファイル名で書くため、別ディレクトリでも同名チャンクが
   あると出力が衝突して silent にチャンクが欠落する。重複 basename と予約サフィックス（`.tmp`/
   `.meta`）は起動時にエラーで弾く。
@@ -74,7 +77,7 @@ rescore_hcpe \
 | `--score-clip <i32>` | 32000 | 出力 eval を ±この値に clamp して i16 へ収める |
 | `--skip-in-check` | false | 王手局面を出力から除外 |
 | `--limit <usize>` | 0 | ファイルごとの先頭最大レコード数（0=全件）。smoke 用 |
-| `--overwrite` | false | 出力が既に存在しても再処理（既定は skip = resume） |
+| `--overwrite` | false | 完了済み出力も処理中 `.tmp` も無視して最初から再処理（既定は skip = resume） |
 
 ## 関連
 
