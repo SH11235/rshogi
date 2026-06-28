@@ -247,7 +247,7 @@ fn run(cli: &Cli) -> Result<()> {
             }
         }
         if INTERRUPTED.load(Ordering::SeqCst) {
-            break; // 中断: 処理中の .tmp は rename されず残る（次回再処理）
+            break; // 中断: 処理中の .tmp は rename されず残る（次回は .tmp.meta の checkpoint から再開）
         }
     }
 
@@ -257,7 +257,9 @@ fn run(cli: &Cli) -> Result<()> {
         total.written, total.skipped,
     );
     if INTERRUPTED.load(Ordering::SeqCst) {
-        bail!("interrupted: current file left as .tmp and will be redone on resume");
+        bail!(
+            "interrupted: current file left as .tmp; resume continues from its .tmp.meta checkpoint"
+        );
     }
     if failed_files > 0 {
         bail!(
@@ -702,11 +704,16 @@ fn run_streaming(
         drop(writer);
         return Ok(stats);
     }
-    drop(writer);
     if let Some(err) = first_error {
         // 破損レコードあり: .tmp を残し rename しない（完了扱いを防ぐ）。
+        drop(writer);
         bail!("{} in {} (file left unrenamed)", err, input.display());
     }
+    // 完了前に出力データを durable 化してから rename する。fsync を欠くと電源断時に「正しいサイズ +
+    // 完了 `.meta`」だけ残り中身が未永続な出力を `output_is_complete` が完了誤認しうる（checkpoint
+    // 経路と同じ flush→fsync→（rename/meta）順を完了経路でも徹底する）。
+    writer.get_ref().sync_data()?;
+    drop(writer);
     fs::rename(&tmp_path, out_path).with_context(|| {
         format!("Failed to rename {} -> {}", tmp_path.display(), out_path.display())
     })?;
@@ -1030,6 +1037,45 @@ mod tests {
         let stats = run(&input_path, &out_path, "cfg");
         assert_eq!(fs::read(&out_path).unwrap(), full, "resume 出力が fresh と byte 不一致");
         assert_eq!(stats.written, (full.len() / REC) as u64);
+        assert!(!tmp.exists() && !tmp_meta.exists());
+    }
+
+    #[test]
+    fn resume_skips_done_prefix_and_truncates_excess_tmp() {
+        // 「途中再開で [0,k) を実際に再処理しない」ことと「checkpoint を超える余剰 / torn な .tmp を
+        // 切り詰める」ことを end-to-end で担保する。
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("chunk.hcpe");
+        let n = 20usize;
+        let input = make_input(n);
+        let input_bytes = input.len() as u64;
+
+        let k = 8usize;
+        let prefix = expected_output(&input[..k * REC]); // 破壊前の正しい prefix。
+        let m = (prefix.len() / REC) as u64;
+        // 期待出力 = 正しい prefix + 後半 [k,n)（後半入力は破壊しない）。
+        let mut expected = prefix.clone();
+        expected.extend_from_slice(&expected_output(&input[k * REC..]));
+
+        let out_path = dir.path().join("chunk_out.hcpe");
+        let (tmp, tmp_meta) = tmp_paths(&out_path);
+        // .tmp = 正しい prefix + 余剰 1 レコード + 端数（未 flush 分が disk に残った想定）。
+        let mut tmp_bytes = prefix.clone();
+        tmp_bytes.extend_from_slice(&[0xABu8; REC]);
+        tmp_bytes.extend_from_slice(&[0xCDu8; 11]);
+        fs::write(&tmp, &tmp_bytes).unwrap();
+        write_tmp_meta(&tmp_meta, input_bytes, "cfg", k as u64, m).unwrap();
+
+        // 入力 [0,k) を破壊して書き出す。resume が誤って再処理すると prefix が変わり test が落ちる。
+        let mut corrupted = input.clone();
+        for r in corrupted[..k * REC].chunks_mut(REC) {
+            r[0] = 0; // 0 % 3 == 0 → 再処理されれば Skip 化して出力が変わる。
+        }
+        fs::write(&input_path, &corrupted).unwrap();
+
+        run(&input_path, &out_path, "cfg");
+        // [0,k) は skip され（破壊入力は読まれず）、余剰 .tmp も切り詰められて期待出力に一致。
+        assert_eq!(fs::read(&out_path).unwrap(), expected);
         assert!(!tmp.exists() && !tmp_meta.exists());
     }
 
