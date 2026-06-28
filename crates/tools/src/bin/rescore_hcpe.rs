@@ -9,11 +9,15 @@
 //!   入力分割（シャード）に依存せず、同一局面は常に同一ラベル → 複数機のシャードを連結可能。
 //! - **resume**: 入力をチャンクファイル群で渡し、出力済みファイルは skip（`--output-dir` に
 //!   入力ファイル名で出力、`.tmp` → rename で原子的に完了マーク）。GPU 学習等で中断 → 同じ
-//!   コマンドで再実行すると未処理チャンクから再開できる。中断時の損失は最大 1 チャンク。
+//!   コマンドで再実行すると未処理チャンクから再開できる。さらに処理中チャンクは **intra-chunk
+//!   resume**: `.tmp` に書けた連続プレフィックスを `.tmp.meta`（config 指紋 + 入力サイズ +
+//!   入力 seq + 出力件数の checkpoint）で裏取りし、チャンク途中から再開する。fresh-per-position
+//!   の決定性ゆえ途中再開でも全件フレッシュ処理と bit 一致するため、中断/電源断時の損失は
+//!   最悪でも checkpoint 間隔（数百レコード ≒ 数秒）に収まる。
 //! - 符号規約は手番側視点 cp（hcpe 保存 eval と同じ）。出力は探索値を `--score-clip` で i16 に収める。
 
-use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,6 +112,10 @@ enum Outcome {
     Skip,
     Error(String),
 }
+
+/// 1 レコードを再ラベルする決定的 transform。worker 間で共有するため `Arc<dyn Fn>`。
+/// 本番は固定 depth 探索、テストは search を伴わない決定的関数を注入する。
+type RelabelFn = Arc<dyn Fn(&[u8; HCPE_RECORD_SIZE]) -> Outcome + Send + Sync>;
 
 /// ファイル 1 つの集計（破損レコードがあれば process_file は bail するため、Ok 返却時の
 /// `skipped` は in-check スキップのみ）。
@@ -448,6 +456,70 @@ fn process_file(
         input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
     );
 
+    // 1 レコードを再ラベルする決定的 transform。worker 間で共有する（探索 config を捕捉）。
+    let transform = make_relabel_transform(cli, Arc::clone(tune_params));
+    run_streaming(
+        &StreamParams {
+            input,
+            out_path,
+            input_bytes,
+            total,
+            limit: cli.limit,
+            config_fp,
+            num_threads,
+        },
+        &progress,
+        transform,
+    )
+}
+
+/// `run_streaming` に渡す 1 ファイル分の入出力パラメータ（引数過多回避のためまとめる）。
+#[derive(Clone, Copy)]
+struct StreamParams<'a> {
+    input: &'a Path,
+    out_path: &'a Path,
+    input_bytes: u64,
+    total: u64,
+    limit: usize,
+    config_fp: &'a str,
+    num_threads: usize,
+}
+
+/// 1 レコードを fresh-per-position 探索で再ラベルする `transform` を組む（探索 config を捕捉）。
+/// `run_streaming` の worker 間で共有するため `Arc<dyn Fn .. + Send + Sync>` にする。テストは
+/// search を伴わない決定的 transform を注入して resume の byte 一致を検証する。
+fn make_relabel_transform(cli: &Cli, tune_params: Arc<[(String, i32)]>) -> RelabelFn {
+    let depth = cli.depth;
+    let nodes = cli.nodes;
+    let hash_mb = cli.hash_mb;
+    let score_clip = cli.score_clip;
+    let skip_in_check = cli.skip_in_check;
+    Arc::new(move |bytes| {
+        relabel_record(bytes, depth, nodes, hash_mb, &tune_params, score_clip, skip_in_check)
+    })
+}
+
+/// resume 判定 + streaming 本体。`.tmp` へ seq 順に書き、`.tmp.meta` に checkpoint を刻みつつ、
+/// 完了したら `out_path` へ atomic rename し `<out>.meta` を書く。`transform` は 1 レコードを
+/// 再ラベルする決定的な純関数（fresh-per-position なので処理順非依存に bit 一致）。
+///
+/// intra-chunk resume: 起動時に `.tmp.meta` の checkpoint が現 config / 入力サイズと一致し、
+/// かつ `.tmp` に `output_records` 分が durable に在るときだけ、`input_seq` から再開する
+/// （[0,input_seq) は再処理しない）。少しでも矛盾すれば最初から（後方互換・安全側）。
+fn run_streaming(
+    params: &StreamParams,
+    progress: &ProgressBar,
+    transform: RelabelFn,
+) -> Result<FileStats> {
+    let StreamParams {
+        input,
+        out_path,
+        input_bytes,
+        total,
+        limit,
+        config_fp,
+        num_threads,
+    } = *params;
     // `out_path` のフルネームに `.tmp` を足す（`with_extension` だと `foo` と `foo.hcpe` が
     // 同じ `foo.tmp` に衝突するため）。
     let tmp_path = {
@@ -455,6 +527,35 @@ fn process_file(
         s.push(".tmp");
         PathBuf::from(s)
     };
+    let tmp_meta_path = tmp_meta_path_for(&tmp_path);
+
+    // resume 判定: checkpoint を信頼できるなら (input_seq, output_records) から、駄目なら (0,0)。
+    let tmp_size = fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+    let (start_seq, start_written) =
+        match decide_resume(read_tmp_meta(&tmp_meta_path), input_bytes, config_fp, tmp_size, total)
+        {
+            ResumeDecision::Resume {
+                input_seq,
+                output_records,
+            } => (input_seq, output_records),
+            ResumeDecision::Fresh => (0, 0),
+        };
+
+    // `.tmp` を output_records*38 に切り詰めて append（fresh は 0 に truncate = stale を破棄）。
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false) // 全消去ではなく set_len で N*38 へ切り詰める（resume プレフィックスを残す）。
+        .open(&tmp_path)
+        .with_context(|| format!("Failed to open {}", tmp_path.display()))?;
+    file.set_len(start_written * HCPE_RECORD_SIZE as u64)
+        .with_context(|| format!("Failed to truncate {}", tmp_path.display()))?;
+    file.seek(SeekFrom::End(0))
+        .with_context(|| format!("Failed to seek {}", tmp_path.display()))?;
+    let mut writer = BufWriter::new(file);
+    // 初期 checkpoint を刻む（直後に落ちても (start_seq,start_written) で整合する）。
+    write_tmp_meta(&tmp_meta_path, input_bytes, config_fp, start_seq, start_written)?;
+    progress.set_position(start_seq);
 
     // in-flight をトークンで一定上限に抑える streaming パイプライン（peak メモリは入力サイズ非依存）。
     let inflight_cap = (num_threads * 4).max(num_threads + 1);
@@ -465,17 +566,11 @@ fn process_file(
     let (work_tx, work_rx) = unbounded::<(usize, [u8; HCPE_RECORD_SIZE])>();
     let (res_tx, res_rx) = unbounded::<(usize, Outcome)>();
 
-    let depth = cli.depth;
-    let nodes = cli.nodes;
-    let hash_mb = cli.hash_mb;
-    let score_clip = cli.score_clip;
-    let skip_in_check = cli.skip_in_check;
-
     let mut workers = Vec::with_capacity(num_threads);
     for worker_idx in 0..num_threads {
         let work_rx = work_rx.clone();
         let res_tx = res_tx.clone();
-        let tune_params = Arc::clone(tune_params);
+        let transform = Arc::clone(&transform);
         let handle = thread::Builder::new()
             .name(format!("rescore-hcpe-{worker_idx}"))
             .stack_size(SEARCH_STACK_SIZE)
@@ -484,15 +579,7 @@ fn process_file(
                     if INTERRUPTED.load(Ordering::SeqCst) {
                         break;
                     }
-                    let outcome = relabel_record(
-                        &bytes,
-                        depth,
-                        nodes,
-                        hash_mb,
-                        &tune_params,
-                        score_clip,
-                        skip_in_check,
-                    );
+                    let outcome = transform(&bytes);
                     if res_tx.send((seq, outcome)).is_err() {
                         break;
                     }
@@ -505,12 +592,18 @@ fn process_file(
     drop(res_tx);
 
     let input_path = input.to_path_buf();
-    let limit = cli.limit;
     let producer = thread::spawn(move || -> Result<()> {
-        let file = File::open(&input_path)
+        let mut file = File::open(&input_path)
             .with_context(|| format!("Failed to open {}", input_path.display()))?;
+        // resume: [0,start_seq) は処理済みなので入力を seek して飛ばす。
+        if start_seq > 0 {
+            file.seek(SeekFrom::Start(start_seq * HCPE_RECORD_SIZE as u64))
+                .with_context(|| {
+                    format!("Failed to seek {} to record {start_seq}", input_path.display())
+                })?;
+        }
         let mut reader = BufReader::new(file);
-        let mut seq = 0usize;
+        let mut seq = start_seq as usize;
         let mut buf = [0u8; HCPE_RECORD_SIZE];
         loop {
             if (limit > 0 && seq >= limit) || INTERRUPTED.load(Ordering::SeqCst) {
@@ -537,17 +630,18 @@ fn process_file(
         Ok(())
     });
 
-    // collector: seq 順に並べ替えて .tmp へ逐次書き出す。
-    let mut writer = BufWriter::new(
-        File::create(&tmp_path)
-            .with_context(|| format!("Failed to create {}", tmp_path.display()))?,
-    );
-    let mut next = 0usize;
+    // collector: seq 順に並べ替えて .tmp へ逐次書き出す。resume 時は次の入力 seq / 既出力件数から開始。
+    let mut next = start_seq as usize;
     let mut buf: std::collections::BTreeMap<usize, Outcome> = std::collections::BTreeMap::new();
-    let mut stats = FileStats::default();
+    // start_written は既に `.tmp` に在る出力件数。skipped は [0,start_seq) の非出力分（= seq-written）。
+    let mut stats = FileStats {
+        written: start_written,
+        skipped: start_seq - start_written,
+    };
     // 破損レコード（unpack/set_sfen 失敗）は黙って落とすとレコード対応が崩れたファイルを完了扱い
     // しかねないので、最初のエラーを捕え、ファイル全体を未完了（rename しない）として扱う。
     let mut first_error: Option<String> = None;
+    let mut last_ckpt = next;
     while let Ok((seq, outcome)) = res_rx.recv() {
         buf.insert(seq, outcome);
         while let Some(outcome) = buf.remove(&next) {
@@ -567,6 +661,19 @@ fn process_file(
             progress.inc(1);
             let _ = token_tx.send(());
         }
+        // 周期 checkpoint: flush→fsync(.tmp)→atomic meta の順で「meta.output_records ≤ durable .tmp」
+        // を保つ。途中で落ちても meta が指す位置を超えて再開しない（決定性ゆえ多少の再処理は bit 一致）。
+        if next - last_ckpt >= RESUME_CHECKPOINT_RECORDS && first_error.is_none() {
+            checkpoint_tmp(
+                &mut writer,
+                &tmp_meta_path,
+                input_bytes,
+                config_fp,
+                next as u64,
+                stats.written,
+            )?;
+            last_ckpt = next;
+        }
     }
 
     // producer が backpressure（token_rx.recv）でブロックしたまま collector が抜けた場合に、
@@ -578,13 +685,24 @@ fn process_file(
     }
     producer_result.with_context(|| format!("producer failed on {}", input.display()))?;
     writer.flush()?;
-    drop(writer);
     progress.finish_and_clear();
 
     if INTERRUPTED.load(Ordering::SeqCst) {
-        // 中断時は .tmp を残して rename しない（次回 resume で同チャンクを最初からやり直す）。
+        // 中断時は .tmp を rename せず残し、最新の checkpoint を刻む（次回はそこから再開）。
+        if first_error.is_none() {
+            checkpoint_tmp(
+                &mut writer,
+                &tmp_meta_path,
+                input_bytes,
+                config_fp,
+                next as u64,
+                stats.written,
+            )?;
+        }
+        drop(writer);
         return Ok(stats);
     }
+    drop(writer);
     if let Some(err) = first_error {
         // 破損レコードあり: .tmp を残し rename しない（完了扱いを防ぐ）。
         bail!("{} in {} (file left unrenamed)", err, input.display());
@@ -594,7 +712,135 @@ fn process_file(
     })?;
     // 完了メタを書く（resume の完了検証用）。
     write_meta(out_path, input_bytes, stats.written, config_fp)?;
+    // 完了後は intra-chunk resume 用の sidecar を残さない。
+    if let Err(e) = fs::remove_file(&tmp_meta_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("warning: failed to remove {}: {e}", tmp_meta_path.display());
+    }
     Ok(stats)
+}
+
+/// チャンク途中再開（`.tmp` プレフィックス活用）の checkpoint 間隔（入力レコード数）。worst-case
+/// ロスはこの間隔分（数百レコード ≒ 実測 46-82 pos/s で数秒）。決定性ゆえ間隔は正しさに無関係。
+const RESUME_CHECKPOINT_RECORDS: usize = 256;
+
+/// intra-chunk resume の checkpoint パス（`<out>.tmp.meta`）。完了メタ `<out>.meta` とは別物。
+fn tmp_meta_path_for(tmp_path: &Path) -> PathBuf {
+    let mut s = tmp_path.to_path_buf().into_os_string();
+    s.push(".meta");
+    PathBuf::from(s)
+}
+
+/// `.tmp.meta` の checkpoint 内容（config 指紋 + 入力サイズ + 入力 seq + 出力件数）。
+struct TmpMeta {
+    input_bytes: u64,
+    config_fp: String,
+    input_seq: u64,
+    output_records: u64,
+}
+
+/// `.tmp.meta` を読む。欠損・パース不能・項目不足は `None`（= 信頼しない）。
+fn read_tmp_meta(path: &Path) -> Option<TmpMeta> {
+    let body = fs::read_to_string(path).ok()?;
+    let (mut input_bytes, mut config_fp, mut input_seq, mut output_records) =
+        (None, None, None, None);
+    for line in body.lines() {
+        if let Some(v) = line.strip_prefix("input_bytes=") {
+            input_bytes = v.trim().parse::<u64>().ok();
+        } else if let Some(v) = line.strip_prefix("config=") {
+            config_fp = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("input_seq=") {
+            input_seq = v.trim().parse::<u64>().ok();
+        } else if let Some(v) = line.strip_prefix("output_records=") {
+            output_records = v.trim().parse::<u64>().ok();
+        }
+    }
+    Some(TmpMeta {
+        input_bytes: input_bytes?,
+        config_fp: config_fp?,
+        input_seq: input_seq?,
+        output_records: output_records?,
+    })
+}
+
+/// `.tmp.meta` を原子的に書く（`.tmp.meta.tmp` → fsync → rename）。
+fn write_tmp_meta(
+    path: &Path,
+    input_bytes: u64,
+    config_fp: &str,
+    input_seq: u64,
+    output_records: u64,
+) -> Result<()> {
+    let mut tmp = path.to_path_buf().into_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let body = format!(
+        "input_bytes={input_bytes}\nconfig={config_fp}\ninput_seq={input_seq}\noutput_records={output_records}\n"
+    );
+    {
+        let mut f =
+            File::create(&tmp).with_context(|| format!("Failed to write {}", tmp.display()))?;
+        f.write_all(body.as_bytes())
+            .with_context(|| format!("Failed to write {}", tmp.display()))?;
+        f.sync_all().with_context(|| format!("Failed to fsync {}", tmp.display()))?;
+    }
+    fs::rename(&tmp, path)
+        .with_context(|| format!("Failed to rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// checkpoint を刻む: `.tmp` を flush + fsync してから `.tmp.meta` を更新する。この順序により
+/// 不変条件「meta.output_records ≤ durable な `.tmp` レコード数」が常に成立し、電源断でも
+/// meta が指す位置を超えて再開しない（meta 紛失時は `.tmp` 不信＝最初から、で安全側）。
+fn checkpoint_tmp(
+    writer: &mut BufWriter<File>,
+    tmp_meta_path: &Path,
+    input_bytes: u64,
+    config_fp: &str,
+    input_seq: u64,
+    output_records: u64,
+) -> Result<()> {
+    writer.flush()?;
+    writer.get_ref().sync_data()?;
+    write_tmp_meta(tmp_meta_path, input_bytes, config_fp, input_seq, output_records)
+}
+
+/// intra-chunk resume の判定結果。
+enum ResumeDecision {
+    /// `.tmp` を破棄して最初から。
+    Fresh,
+    /// `.tmp` の先頭 `output_records` を活かし、入力 `input_seq` から再開する。
+    Resume { input_seq: u64, output_records: u64 },
+}
+
+/// checkpoint を信頼して途中再開してよいかを判定する純関数（テスト容易性のため IO と分離）。
+/// 現 config / 入力サイズ一致、整合性（consumed ≥ written、入力範囲内）、かつ `.tmp` に
+/// `output_records` 分が durable に在ること（`output_records*38 ≤ tmp_size`）を全て満たすときだけ
+/// `Resume`。一つでも崩れれば `Fresh`（後方互換・安全側）。
+fn decide_resume(
+    meta: Option<TmpMeta>,
+    input_bytes: u64,
+    config_fp: &str,
+    tmp_size: u64,
+    total: u64,
+) -> ResumeDecision {
+    let Some(m) = meta else {
+        return ResumeDecision::Fresh; // `.tmp.meta` 無し（旧バイナリ残置等）→ 最初から。
+    };
+    if m.input_bytes != input_bytes || m.config_fp != config_fp {
+        return ResumeDecision::Fresh; // 設定 / 入力が変わった → 最初から。
+    }
+    if m.output_records > m.input_seq || m.input_seq > total {
+        return ResumeDecision::Fresh; // 矛盾した checkpoint（consumed<written / 入力範囲外）。
+    }
+    if m.output_records * HCPE_RECORD_SIZE as u64 > tmp_size {
+        return ResumeDecision::Fresh; // `.tmp` が checkpoint 分を満たさない（torn write 等）。
+    }
+    ResumeDecision::Resume {
+        input_seq: m.input_seq,
+        output_records: m.output_records,
+    }
 }
 
 /// hcpe 1 レコードを fresh-per-position の固定 depth 探索で再評価し、eval だけ差し替えた 38B を返す。
@@ -677,5 +923,240 @@ mod tests {
         assert_eq!(out[34], 0xAB);
         assert_eq!(out[35], 0xCD);
         assert_eq!(out[36], 1);
+    }
+
+    // ---- intra-chunk resume の検証 ----
+    // search を伴わない決定的 transform を注入し、「全件フレッシュ出力」と「途中 checkpoint →
+    // resume 出力」が byte 完全一致することを確かめる（net 不要で決定性の本体を担保）。
+
+    const REC: usize = HCPE_RECORD_SIZE;
+
+    /// 決定的 transform: `byte[0] % 3 == 0` を Skip（skip_in_check 同様に出力件数 < 入力件数を作る）、
+    /// それ以外は eval([32..34]) を byte[0] 由来の値へ差し替えて Ok。
+    fn test_transform(bytes: &[u8; HCPE_RECORD_SIZE]) -> Outcome {
+        if bytes[0].is_multiple_of(3) {
+            return Outcome::Skip;
+        }
+        let mut out = *bytes;
+        let v = (bytes[0] as i16).wrapping_mul(7).wrapping_sub(3);
+        out[32..34].copy_from_slice(&v.to_le_bytes());
+        Outcome::Ok(Box::new(out))
+    }
+
+    fn arc_transform() -> RelabelFn {
+        Arc::new(test_transform)
+    }
+
+    /// byte[0] にレコードごとに変化を持たせた入力（skip 分布を分散させる）。
+    fn make_input(records: usize) -> Vec<u8> {
+        let mut v = vec![0u8; records * REC];
+        for i in 0..records {
+            v[i * REC] = (i as u8).wrapping_mul(5).wrapping_add(1);
+            v[i * REC + 1] = i as u8;
+        }
+        v
+    }
+
+    /// 入力（の連続プレフィックス）に transform を適用した期待出力（Ok のみ連結）。
+    fn expected_output(input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for chunk in input.chunks(REC) {
+            let mut b = [0u8; REC];
+            b.copy_from_slice(chunk);
+            if let Outcome::Ok(rec) = test_transform(&b) {
+                out.extend_from_slice(rec.as_ref());
+            }
+        }
+        out
+    }
+
+    fn tmp_paths(out_path: &Path) -> (PathBuf, PathBuf) {
+        let mut s = out_path.to_path_buf().into_os_string();
+        s.push(".tmp");
+        let tmp = PathBuf::from(s);
+        let tmp_meta = tmp_meta_path_for(&tmp);
+        (tmp, tmp_meta)
+    }
+
+    fn run(input_path: &Path, out_path: &Path, config_fp: &str) -> FileStats {
+        let input_bytes = fs::metadata(input_path).unwrap().len();
+        let total = input_bytes / REC as u64;
+        let params = StreamParams {
+            input: input_path,
+            out_path,
+            input_bytes,
+            total,
+            limit: 0,
+            config_fp,
+            num_threads: 2,
+        };
+        run_streaming(&params, &ProgressBar::hidden(), arc_transform()).unwrap()
+    }
+
+    #[test]
+    fn fresh_output_matches_expected_transform() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("chunk.hcpe");
+        let input = make_input(20);
+        fs::write(&input_path, &input).unwrap();
+        let out_path = dir.path().join("chunk_out.hcpe");
+        run(&input_path, &out_path, "cfg");
+        assert_eq!(fs::read(&out_path).unwrap(), expected_output(&input));
+        // 完了後は sidecar を残さない。
+        let (tmp, tmp_meta) = tmp_paths(&out_path);
+        assert!(!tmp.exists() && !tmp_meta.exists());
+    }
+
+    #[test]
+    fn resume_from_checkpoint_matches_fresh_bytewise() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("chunk.hcpe");
+        let n = 20usize;
+        let input = make_input(n);
+        fs::write(&input_path, &input).unwrap();
+        let input_bytes = input.len() as u64;
+        let full = expected_output(&input);
+
+        // crafted checkpoint: 入力 [0,k) を処理した状態を .tmp + .tmp.meta で再現（途中中断の模擬）。
+        let k = 8usize;
+        let prefix = expected_output(&input[..k * REC]);
+        let m = (prefix.len() / REC) as u64;
+        assert!(m < k as u64, "skip があるので出力件数 < 入力件数のはず");
+        let out_path = dir.path().join("chunk_out.hcpe");
+        let (tmp, tmp_meta) = tmp_paths(&out_path);
+        fs::write(&tmp, &prefix).unwrap();
+        write_tmp_meta(&tmp_meta, input_bytes, "cfg", k as u64, m).unwrap();
+
+        let stats = run(&input_path, &out_path, "cfg");
+        assert_eq!(fs::read(&out_path).unwrap(), full, "resume 出力が fresh と byte 不一致");
+        assert_eq!(stats.written, (full.len() / REC) as u64);
+        assert!(!tmp.exists() && !tmp_meta.exists());
+    }
+
+    #[test]
+    fn resume_at_total_just_finalizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("chunk.hcpe");
+        let n = 12usize;
+        let input = make_input(n);
+        fs::write(&input_path, &input).unwrap();
+        let full = expected_output(&input);
+        let out_path = dir.path().join("chunk_out.hcpe");
+        let (tmp, tmp_meta) = tmp_paths(&out_path);
+        // 全件処理済（flush 済だが rename 前に落ちた）状態。
+        fs::write(&tmp, &full).unwrap();
+        write_tmp_meta(&tmp_meta, input.len() as u64, "cfg", n as u64, (full.len() / REC) as u64)
+            .unwrap();
+        run(&input_path, &out_path, "cfg");
+        assert_eq!(fs::read(&out_path).unwrap(), full);
+        assert!(!tmp.exists() && !tmp_meta.exists());
+    }
+
+    #[test]
+    fn stale_tmp_discarded_on_config_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("chunk.hcpe");
+        let input = make_input(15);
+        fs::write(&input_path, &input).unwrap();
+        let full = expected_output(&input);
+        let out_path = dir.path().join("chunk_out.hcpe");
+        let (tmp, tmp_meta) = tmp_paths(&out_path);
+        // 別 config の checkpoint と garbage な .tmp（信頼すると壊れる）。
+        fs::write(&tmp, vec![0xFFu8; 5 * REC]).unwrap();
+        write_tmp_meta(&tmp_meta, input.len() as u64, "OTHER", 5, 5).unwrap();
+        run(&input_path, &out_path, "cfg");
+        // garbage は破棄され最初から処理される → fresh と一致。
+        assert_eq!(fs::read(&out_path).unwrap(), full);
+    }
+
+    fn meta(ib: u64, cfg: &str, seq: u64, rec: u64) -> TmpMeta {
+        TmpMeta {
+            input_bytes: ib,
+            config_fp: cfg.to_string(),
+            input_seq: seq,
+            output_records: rec,
+        }
+    }
+
+    #[test]
+    fn decide_resume_variants() {
+        let ib = 100 * REC as u64;
+        let total = 100u64;
+        let cfg = "c";
+        let ok = |d: ResumeDecision, seq: u64, rec: u64| matches!(d, ResumeDecision::Resume { input_seq, output_records } if input_seq == seq && output_records == rec);
+        let fresh = |d: ResumeDecision| matches!(d, ResumeDecision::Fresh);
+
+        // 正常: resume。
+        assert!(ok(
+            decide_resume(Some(meta(ib, cfg, 50, 40)), ib, cfg, 40 * REC as u64, total),
+            50,
+            40
+        ));
+        // meta 無し / config 不一致 / input_bytes 不一致 → Fresh。
+        assert!(fresh(decide_resume(None, ib, cfg, 0, total)));
+        assert!(fresh(decide_resume(
+            Some(meta(ib, "x", 50, 40)),
+            ib,
+            cfg,
+            40 * REC as u64,
+            total
+        )));
+        assert!(fresh(decide_resume(
+            Some(meta(ib + 1, cfg, 50, 40)),
+            ib,
+            cfg,
+            40 * REC as u64,
+            total
+        )));
+        // 矛盾: written>seq / seq>total → Fresh。
+        assert!(fresh(decide_resume(
+            Some(meta(ib, cfg, 40, 50)),
+            ib,
+            cfg,
+            50 * REC as u64,
+            total
+        )));
+        assert!(fresh(decide_resume(
+            Some(meta(ib, cfg, 101, 40)),
+            ib,
+            cfg,
+            40 * REC as u64,
+            total
+        )));
+        // .tmp が checkpoint 分に満たない（torn write）→ Fresh。
+        assert!(fresh(decide_resume(
+            Some(meta(ib, cfg, 50, 40)),
+            ib,
+            cfg,
+            40 * REC as u64 - 1,
+            total
+        )));
+        // .tmp が余分に長い（未 flush 分が disk に残る）→ Resume（後で N*38 に切り詰める）。
+        assert!(ok(
+            decide_resume(Some(meta(ib, cfg, 50, 40)), ib, cfg, 45 * REC as u64, total),
+            50,
+            40
+        ));
+        // seq==total（完了直前）→ Resume。
+        assert!(ok(
+            decide_resume(Some(meta(ib, cfg, 100, 80)), ib, cfg, 80 * REC as u64, total),
+            100,
+            80
+        ));
+    }
+
+    #[test]
+    fn tmp_meta_roundtrip_and_missing_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.tmp.meta");
+        write_tmp_meta(&p, 1234, "abc", 50, 40).unwrap();
+        let m = read_tmp_meta(&p).unwrap();
+        assert_eq!(
+            (m.input_bytes, m.config_fp.as_str(), m.input_seq, m.output_records),
+            (1234, "abc", 50, 40)
+        );
+        // 項目欠損 → None。
+        fs::write(&p, "input_bytes=1\nconfig=c\n").unwrap();
+        assert!(read_tmp_meta(&p).is_none());
     }
 }
