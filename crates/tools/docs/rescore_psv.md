@@ -365,6 +365,23 @@ bit 一致する。
 （出力は pinned/pageable で bit 一致）。計測例: TensorRT FP16 / batch 1024 / RTX 5090(WSL2)
 で約 +26%、CUDA EP / 同条件で約 +21%（いずれも 2M records, min-of-3, 出力 byte 一致）。
 
+出力（推論結果）の host バッファも同様に、入力 pinned が確保できた GPU 経路では
+**CUDA pinned (page-locked) メモリ**にバインドする（`IoBinding` の出力先を
+`AllocationDevice::CUDA_PINNED` に設定）。pageable 出力だと `run_binding` 内の D2H が
+pageable staging を伴い実質同期化するが、pinned 化で真の async D2H になり `run` フェーズ
+内部の GPU アイドルが縮む。pinned 不使用時（CPU 推論 / pinned 確保失敗）は従来どおり CPU
+pageable に保ち、出力は pinned/pageable で bit 一致する（メモリ場所のみの変更で数値不変）。
+計測例: TensorRT FP16 / batch 1024 / RTX 5090(WSL2) / 10M records で wall 63.2s→57–58s
+（throughput +8〜11%、GPU util 約 73–76%→80–84%、出力 byte 一致）。なお本構成では
+これにより GPU 推論（`run`）の所要が供給（`read`+`build`）を下回り、以降は特徴量供給が
+新たな上限になる。
+
+> CUDA Graph について: TensorRT EP は `trt_cuda_graph_enable` を備えるが、本パイプラインの
+> 出力取得経路（`bind_output_to_device` + `run_binding`）は ort 2.0-rc.12 では CUDA Graph 有効時に
+> 出力 OrtValue の型情報取得で panic し利用不可。加えて CUDA Graph は入出力アドレス固定・
+> 形状固定が前提で、本実装の slot 二重化（入力アドレスが毎回変わる）・端数バッチ（形状が変わる）
+> とも非互換のため、現状は非採用。
+
 ### `--threads` について
 
 特徴量構築（CPU 処理）を rayon で並列化するスレッド数（0 で論理コア数）。前処理は

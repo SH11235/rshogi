@@ -3332,11 +3332,6 @@ where
     let mut logits_buf: Vec<f32> = Vec::with_capacity(600);
     let mut probs_buf: Vec<f32> = Vec::with_capacity(600);
 
-    // MemoryInfo はバッチサイズに依存しないのでループ外で1回だけ作成
-    let output_mem =
-        MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
-            .map_err(onnx_ort_err)?;
-
     // 入力特徴 host バッファを CUDA pinned (page-locked) 化するための allocator。
     // pinned 化で pageable→pinned ステージング (CPU 介在) が消え、真の async H2D になる。
     // GPU 推論 (gpu_id >= 0) のときのみ確保を試み、失敗したら pageable Vec にフォールバック。
@@ -3432,6 +3427,23 @@ where
             ));
         }
     }
+
+    // 出力 host バッファのメモリ種別。MemoryInfo はバッチサイズに依存しないのでループ外で
+    // 1 回だけ作成する。入力を pinned 化できた GPU 経路では出力も CUDA pinned (page-locked)
+    // にして run_binding 内の D2H を pageable staging 無しの真の async D2H にする
+    // (入力 pinned の出力版)。pinned 不使用時 (CPU 推論 / pinned 確保失敗) は従来どおり CPU
+    // pageable に保つ。pinned はメモリ場所のみの変更で数値は不変 (出力 bit 一致)。
+    let output_mem = if pinned_ok {
+        MemoryInfo::new(
+            AllocationDevice::CUDA_PINNED,
+            gpu_id,
+            AllocatorType::Device,
+            MemoryType::CPUOutput,
+        )
+    } else {
+        MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Device, MemoryType::CPUOutput)
+    }
+    .map_err(onnx_ort_err)?;
 
     let (t_read, t_build) = thread::scope(|scope| -> Result<(u128, u128)> {
         let (free_tx, free_rx) = mpsc::channel::<PreparedBatch>();
