@@ -58,6 +58,16 @@ aobazero-onnx = ["dep:ort", "dep:ndarray"]
 # 標準dlshogi ONNX直接推論（DL水匠等、ONNX Runtime + CUDA が必要）
 dlshogi-onnx = ["dep:ort", "dep:ndarray"]
 
+# 棋譜プレイヤー TUI（PSV / tournament JSONL 共通の対局再生ビューア）。
+# default に含めない: 学習パイプライン専用に checkout・ビルドする側へ
+# 対話的 TUI 依存 (ratatui/crossterm) を持ち込まないため。
+kifu-player = ["dep:ratatui", "dep:crossterm"]
+
+[[bin]]
+name = "kifu_player"
+path = "src/bin/kifu_player.rs"
+required-features = ["kifu-player"]
+
 [dependencies]
 # Workspace dependencies
 anyhow.workspace = true
@@ -95,3 +105,7 @@ sha2 = "0.10"
 # AobaZero ONNX direct inference (optional, behind "aobazero-onnx" feature)
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic", "api-24"] }
 ndarray = { version = "0.16", optional = true }
+
+# 棋譜プレイヤー TUI (optional, behind "kifu-player" feature)
+ratatui = { version = "0.29", optional = true }
+crossterm = { version = "0.28", optional = true }
