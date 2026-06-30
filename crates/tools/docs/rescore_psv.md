@@ -358,12 +358,12 @@ CPU 前処理を待ってアイドルする区間を潰し、GPU を連続的に
 決定性: PSV のデコードを直列段階に残してバッチ構成を不変に保つため、出力は逐次実装と
 bit 一致する。
 
-入力特徴の host バッファは、GPU 推論時（`--onnx-gpu-id >= 0`）は **CUDA pinned (page-locked)
-メモリ**で確保する。pageable メモリだと `cudaMemcpyAsync` が CUDA 内部で pageable→pinned
-ステージング（CPU 介在）を伴い実質同期化するが、pinned 化でこれが消えて真の async H2D に
-なる。pinned 確保に失敗した環境では通常の pageable バッファに自動フォールバックする
-（出力は pinned/pageable で bit 一致）。計測例: TensorRT FP16 / batch 1024 / RTX 5090(WSL2)
-で約 +26%、CUDA EP / 同条件で約 +21%（いずれも 2M records, min-of-3, 出力 byte 一致）。
+入力特徴と出力（推論結果）の host バッファは、GPU 推論時（`--onnx-gpu-id >= 0`）に確保できれば
+**CUDA pinned (page-locked) メモリ**を使う（`IoBinding` の入出力先を `AllocationDevice::CUDA_PINNED`
+に設定）。pageable だと H2D（`cudaMemcpyAsync`）や `run_binding` 内の D2H が pageable→pinned
+ステージング（CPU 介在）を伴い実質同期化するが、pinned 化でこれが消えて真の async 転送になる。
+pinned を確保できない環境（CPU 推論 / 確保失敗）では通常の pageable バッファに自動フォール
+バックする。pinned 化はメモリ場所のみの差で、出力は pinned/pageable で bit 一致する（数値不変）。
 
 ### `--threads` について
 
@@ -377,22 +377,6 @@ GPU 推論とオーバーラップされるので、GPU が前処理より遅い
 1 回の `session.run` あたりの局面数。大きくすると GPU 呼び出し回数と per-call
 オーバーヘッドが減り GPU 利用率が上がる。VRAM に余裕がある場合は拡大を検討する
 （特徴量バッファは batch_size に比例し、slot プール枚数ぶん確保される）。
-
-### 計測例（DL_suisho15b.onnx, BS=1024, RTX 3080 Ti, 500k records）
-
-供給と GPU 推論のオーバーラップ有無の比較（同一入力で出力は bit 一致）:
-
-| 構成 | wall | GPU util | SM clock |
-|---|---|---|---|
-| オーバーラップなし | 60.6 s | 91.9% | 1695 MHz |
-| パイプライン | 52.2 s | 97.3% | 1929 MHz |
-
-GPU を連続供給するとアイドル区間が消えるだけでなく、boost clock を維持できるため
-推論自体も速くなり、合計 -14%（約 +16% pos/s）。供給律速がより顕著な高速 GPU では
-効果はさらに大きい。
-
-> 注: GPU のサーマルスロットリングが計測に大きく影響するため、
-> 連続計測時は GPU 温度を冷却（目安 60℃ 以下）してから実行すること。
 
 ## 進捗表示（進捗率・残り時間・完了予定時刻）
 
@@ -527,7 +511,7 @@ rescore_psv --input "expanded1/*.bin" --output-dir rescored_expanded1/ \
 - 入力ディレクトリ（例 `expanded1/`）と新しい `--expand-output-dir`（例
   `expanded2/`）も **別ディレクトリ**を指定
 - 旧段の expand 出力が次段の入力と同じファイル実体になる誤設定は起動時に検出
-  してエラー（安全装置、PR #463 で追加）
+  してエラー（安全装置）
 
 ## 動作確認
 
@@ -579,14 +563,12 @@ AobaZero ONNX model loaded. Batch size: 1024
   FP32 で推論する場合は `--onnx-tensorrt` を指定せず CUDA EP を使うこと
 - TensorRT は初回実行時にモデルを GPU 固有にコンパイルする（数十秒〜数分）。
   `--onnx-tensorrt-cache` でキャッシュを保存すると 2 回目以降は高速起動する
-- 入力 host バッファが pageable だった旧実装では、CPU→GPU 転送（`cudaMemcpyAsync`）が
-  pageable→pinned ステージングで実質同期化し全処理時間の ~96%（nsys 計測）を占めていた。
-  現在は GPU 推論時に host バッファを CUDA pinned 化してこの staging を解消している
-  （「ONNX モードの供給パイプライン」参照）。pinned 化後は転送が真の async になり overlap
-  されるため、転送は支配項ではなくなり、入力 FP16 化による転送量半減の効果も小さい
-  （本番 batch では計測上ほぼ誤差内）
+- GPU 推論時は host バッファを CUDA pinned 化し、CPU↔GPU 転送（`cudaMemcpyAsync` / D2H）の
+  pageable→pinned ステージング（CPU 介在で実質同期化）を解消する（「ONNX モードの供給
+  パイプライン」参照）。pinned 化で転送は真の async になり推論と overlap されるため、転送は
+  支配項ではなく、入力 FP16 化による転送量半減の効果も小さい
 - `--threads` による特徴量構築の並列化は GPU 推論とオーバーラップされる。供給（read+build）が
   GPU 推論より速ければ全体時間への影響は小さい（軽量モデル・高速 GPU で前処理が供給律速に
   なる場合のみ寄与する）
-- 参考: 同等の Python ツール [psv-utils](https://github.com/KazApps/psv-utils) と比較して、
-  本ツールは CUDA EP / TensorRT EP どちらでも約 6〜9% 速い（1,051,780 records, 温度管理付き計測）
+- 参考: 同等機能の Python ツール [psv-utils](https://github.com/KazApps/psv-utils) がある
+  （本ツールは Rust 実装）
