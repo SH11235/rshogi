@@ -3428,11 +3428,11 @@ where
         }
     }
 
-    // 出力 host バッファのメモリ種別。MemoryInfo はバッチサイズに依存しないのでループ外で
-    // 1 回だけ作成する。入力を pinned 化できた GPU 経路では出力も CUDA pinned (page-locked)
-    // にして run_binding 内の D2H を pageable staging 無しの真の async D2H にする
-    // (入力 pinned の出力版)。pinned 不使用時 (CPU 推論 / pinned 確保失敗) は従来どおり CPU
-    // pageable に保つ。pinned はメモリ場所のみの変更で数値は不変 (出力 bit 一致)。
+    // 出力 host バッファのメモリ種別 (バッチサイズ非依存なのでループ外で 1 回だけ作成)。
+    // pinned 化の可否は入力 pinned (pinned_ok) に従う: 入力を pinned 化できた GPU 経路では出力も
+    // CUDA pinned (page-locked) にして run_binding 内の D2H を真の async D2H にする。それ以外
+    // (CPU 推論 / 入力 pinned 確保失敗) は CPU pageable。pinned 化はメモリ場所のみの差で出力は
+    // bit 一致。出力 pinned の実確保は run_binding 内で行われ、失敗時は fallback せずエラーになる。
     let output_mem = if pinned_ok {
         MemoryInfo::new(
             AllocationDevice::CUDA_PINNED,
