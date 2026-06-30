@@ -52,12 +52,10 @@ impl GameSource for JsonlSource {
 
         for path in &paths {
             let file_idx = pair_files.len();
-            match index_one_file(path, file_idx, &mut entries, &mut warnings)? {
-                Some(meta) => pair_files.push(meta),
-                None => warnings.push(format!(
-                    "{}: 先頭行が type:\"meta\" ではないため対局ファイルとして扱わず読み飛ばしました",
-                    path.display()
-                )),
+            // スキップ理由ごとの warning は index_one_file 側で push 済みなので、
+            // ここでは Some/None の振り分けだけ行う（二重・不正確な warning を防ぐ）。
+            if let Some(meta) = index_one_file(path, file_idx, &mut entries, &mut warnings)? {
+                pair_files.push(meta);
             }
         }
 
@@ -71,9 +69,9 @@ impl GameSource for JsonlSource {
     fn load_game(&self, index: &GameIndex, entry: &GameIndexEntry) -> Result<GameRecord> {
         let GameSourceRef::Jsonl {
             file_idx,
+            game_id,
             start_offset,
             end_offset,
-            ..
         } = entry.source
         else {
             bail!("JsonlSource::load_game received a non-JSONL GameIndexEntry");
@@ -100,6 +98,18 @@ impl GameSource for JsonlSource {
             }
             let move_line: MoveLine = serde_json::from_value(value)
                 .context("failed to parse move line while loading game")?;
+            // インデックス時のバイト範囲が他 game の行を巻き込んでいないことの
+            // 防御的検証。現行の tournament.rs 書き込みモデルでは起こらない
+            // はずだが、将来の書き込みモデル変更や手作業で連結したファイル等で
+            // 不変条件が崩れた場合に、誤った対局として静かに表示しないため。
+            if move_line.game_id != game_id {
+                bail!(
+                    "{}: 範囲 [{start_offset}, {end_offset}) に game_id={} の move 行が \
+                     混入しています（期待値 game_id={game_id}）。索引が壊れている可能性があります。",
+                    meta.path.display(),
+                    move_line.game_id
+                );
+            }
             moves.push(build_move_view(&move_line)?);
         }
 
@@ -126,6 +136,7 @@ struct MetaEngineCmd {
 
 #[derive(Deserialize)]
 struct MoveLine {
+    game_id: u32,
     ply: u32,
     sfen_before: String,
     move_usi: String,
@@ -158,10 +169,14 @@ struct ResultLine {
     startpos_idx: Option<u32>,
 }
 
-/// 1ペアファイルを索引する。先頭行が `type:"meta"` でなければ
-/// 「対局ファイルではない」とみなし `Ok(None)` を返す（エラーにしない）。
-/// `game_id` の行が result 行の後に再出現する等の契約違反は `Err` を返し、
-/// 呼び出し側 (`build_index`) の `?` で索引構築全体を中断させる。
+/// 1ペアファイルを索引する。先頭行が `type:"meta"` として解釈できない
+/// （JSON として不正・type が違う・`engine_cmd` 等の必須フィールドが無い）場合は
+/// 「対局ファイルではない」とみなし、このファイルだけを warning 付きで読み飛ばす
+/// （`Ok(None)`、index 全体は中断しない）。一方、`game_id` の行が result 行の後に
+/// 再出現する等の**ファイル中盤での**契約違反は `Err` を返し、呼び出し側
+/// (`build_index`) の `?` で索引構築全体を中断させる（1ファイルの破損が
+/// 他の健全なファイルの可視性を奪わない先頭行と、対局単位の整合性を保証する
+/// 必要がある中盤以降とで、扱いを意図的に分けている）。
 fn index_one_file(
     path: &Path,
     file_idx: usize,
@@ -174,16 +189,33 @@ fn index_one_file(
     let mut line_buf = Vec::new();
 
     let Some((_, meta_len)) = read_line(&mut reader, &mut offset, &mut line_buf)? else {
-        return Ok(None); // 空ファイル
+        return Ok(None); // 空ファイル。対局ファイルとして不自然ではないので warning は出さない。
     };
     let Ok(meta_value) = serde_json::from_slice::<Value>(&line_buf) else {
+        warnings.push(format!(
+            "{}: 先頭行が JSON として解釈できないため対局ファイルとして扱わず読み飛ばしました",
+            path.display()
+        ));
         return Ok(None);
     };
     if meta_value.get("type").and_then(Value::as_str) != Some("meta") {
+        warnings.push(format!(
+            "{}: 先頭行が type:\"meta\" ではないため対局ファイルとして扱わず読み飛ばしました",
+            path.display()
+        ));
         return Ok(None);
     }
-    let meta_line: MetaLine = serde_json::from_value(meta_value)
-        .with_context(|| format!("{}: invalid meta line", path.display()))?;
+    // meta 行として認識はできたが構造が想定と異なる（`engine_cmd` 欠落等）場合は、
+    // 「対局ファイルではない」場合と同様に当該ファイルだけを読み飛ばす。
+    // ここで `?` により build_index 全体を中断させると、out-dir 中の1ファイルの
+    // schema 不整合で他の健全な数千局が一切見られなくなってしまう。
+    let meta_line: MetaLine = match serde_json::from_value(meta_value) {
+        Ok(m) => m,
+        Err(e) => {
+            warnings.push(format!("{}: invalid meta line ({e}), skipped", path.display()));
+            return Ok(None);
+        }
+    };
     let _ = meta_len;
 
     let mut open: HashMap<u32, u64> = HashMap::new();
@@ -499,5 +531,67 @@ mod tests {
         let index = JsonlSource::new(dir.path()).build_index().expect("build_index");
         assert_eq!(index.entries.len(), 0);
         assert!(!index.warnings.is_empty());
+    }
+
+    #[test]
+    fn skips_file_with_malformed_meta_line_without_aborting_whole_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // type:"meta" だが engine_cmd が欠落している壊れたファイル。
+        write_file(dir.path(), "broken-vs-meta.jsonl", &[r#"{"type":"meta"}"#.to_string()]);
+        // 健全なファイルも同じ out-dir に置く。
+        write_file(
+            dir.path(),
+            "a-vs-b.jsonl",
+            &[
+                meta_line("a", "b"),
+                move_line(1, 1, "7g7f"),
+                result_line(1, "draw", 1, false),
+            ],
+        );
+
+        let index = JsonlSource::new(dir.path()).build_index().expect("build_index must not abort");
+        assert_eq!(index.pair_files.len(), 1, "壊れたファイルは除外され、健全な方だけ残る");
+        assert_eq!(index.entries.len(), 1);
+        assert!(index.warnings.iter().any(|w| w.contains("broken-vs-meta.jsonl")));
+    }
+
+    #[test]
+    fn load_game_rejects_byte_range_with_foreign_game_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_file(
+            dir.path(),
+            "a-vs-b.jsonl",
+            &[
+                meta_line("a", "b"),
+                move_line(1, 1, "7g7f"),
+                result_line(1, "draw", 1, false),
+                move_line(2, 1, "2g2f"),
+                result_line(2, "draw", 1, false),
+            ],
+        );
+        let source = JsonlSource::new(dir.path());
+        let index = source.build_index().expect("build_index");
+
+        // game_id=2 の実体を指すバイト範囲はそのままに、entry の game_id だけ
+        // 1 に書き換えて「索引が壊れている」状態を人為的に再現する。
+        let mut tampered = index.entries[1].clone();
+        let GameSourceRef::Jsonl {
+            file_idx,
+            start_offset,
+            end_offset,
+            ..
+        } = tampered.source
+        else {
+            panic!("expected Jsonl source");
+        };
+        tampered.source = GameSourceRef::Jsonl {
+            file_idx,
+            game_id: 1,
+            start_offset,
+            end_offset,
+        };
+
+        let err = source.load_game(&index, &tampered).expect_err("must reject mismatched game_id");
+        assert!(format!("{err}").contains("混入"), "err: {err}");
     }
 }

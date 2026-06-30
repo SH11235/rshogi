@@ -36,6 +36,15 @@ pub fn run(source: Box<dyn GameSource>) -> Result<()> {
         anyhow::bail!("対局が1件も見つかりませんでした");
     }
 
+    // raw mode/alternate screen 中に panic すると端末が壊れたまま残るため、
+    // 復元してから元の panic hook に委譲する。
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        original_hook(panic_info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -331,12 +340,14 @@ fn black_pov_cp(mv: &MoveView) -> Option<f64> {
     Some(black_pov.clamp(-GRAPH_CP_CLAMP, GRAPH_CP_CLAMP))
 }
 
-/// `(ply, black_pov_cp, mover)` の点列。X 軸には実際の `ply` を使う
-/// （PSV の `skip_initial_ply`/`skip_in_check` による欠番がそのまま見えるように）。
-fn eval_points(game: &GameRecord) -> Vec<(f64, f64, Color)> {
+/// `game.moves` と同じ長さ・同じ並びの打点列（評価値が無い手は `None`）。
+/// 「手」のインデックスで隣接判定するために、評価値の有無でフィルタした
+/// flat なリストにはしない（フィルタ後に隣接させると、評価値が欠けた手を
+/// 挟んだ前後の手が直線で繋がってしまい、欠損が無かったように見えてしまう）。
+fn eval_points(game: &GameRecord) -> Vec<Option<(f64, f64, Color)>> {
     game.moves
         .iter()
-        .filter_map(|mv| black_pov_cp(mv).map(|cp| (mv.ply as f64, cp, mv.side)))
+        .map(|mv| black_pov_cp(mv).map(|cp| (mv.ply as f64, cp, mv.side)))
         .collect()
 }
 
@@ -348,14 +359,15 @@ fn draw_eval_graph(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout:
         frame.render_widget(Paragraph::new("(対局を選択してください)").block(block), area);
         return;
     };
-    let points = eval_points(game);
-    if points.len() < 2 {
+    let aligned = eval_points(game);
+    let plotted: Vec<(f64, f64, Color)> = aligned.iter().filter_map(|p| *p).collect();
+    if plotted.len() < 2 {
         frame.render_widget(Paragraph::new("(表示できる評価値がありません)").block(block), area);
         return;
     }
 
-    let min_ply = points.first().map(|p| p.0).unwrap_or(0.0);
-    let max_ply = points.last().map(|p| p.0).unwrap_or(1.0).max(min_ply + 1.0);
+    let min_ply = plotted.first().map(|p| p.0).unwrap_or(0.0);
+    let max_ply = plotted.last().map(|p| p.0).unwrap_or(1.0).max(min_ply + 1.0);
     let cursor_ply = current_move(app).map(|mv| mv.ply as f64);
 
     let canvas = Canvas::default()
@@ -372,9 +384,11 @@ fn draw_eval_graph(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout:
                 color: RColor::DarkGray,
             });
             // 着手側で色分けした線分（着手後の評価値を、その着手側の色で結ぶ）。
-            for pair in points.windows(2) {
-                let (x1, y1, _) = pair[0];
-                let (x2, y2, side2) = pair[1];
+            // 評価値の無い手を挟む区間は線を引かない（隣接する「手」同士のみ結ぶ）。
+            for pair in aligned.windows(2) {
+                let (Some((x1, y1, _)), Some((x2, y2, side2))) = (pair[0], pair[1]) else {
+                    continue;
+                };
                 let color = if side2 == Color::Black {
                     RColor::Yellow
                 } else {
@@ -583,5 +597,24 @@ mod tests {
     #[test]
     fn black_pov_cp_none_when_no_eval() {
         assert_eq!(black_pov_cp(&mv(Color::Black, None, None)), None);
+    }
+
+    #[test]
+    fn eval_points_preserves_gap_position_for_missing_eval() {
+        // 中央の手だけ評価値が無い対局。draw_eval_graph 側はこの None を
+        // 「前後の手を直線で繋がない」境界として使うため、None の位置が
+        // 元の手の並びと一致していることをここで固定する。
+        let game = GameRecord {
+            moves: vec![
+                mv(Color::Black, Some(10), None),
+                mv(Color::White, None, None),
+                mv(Color::Black, Some(-5), None),
+            ],
+        };
+        let points = eval_points(&game);
+        assert_eq!(points.len(), 3);
+        assert!(points[0].is_some());
+        assert!(points[1].is_none(), "評価値の無い手は None のまま保持される");
+        assert!(points[2].is_some());
     }
 }

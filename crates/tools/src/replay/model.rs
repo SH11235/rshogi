@@ -1,7 +1,4 @@
 //! 棋譜プレイヤー TUI が PSV / tournament JSONL を共通に扱うためのデータモデル。
-//!
-//! 設計の背景は `rshogi-notes/rshogi/plans/20260701_kifu_player_tui_design.md`
-//! を参照（OSS repo には置かない private な設計メモ）。
 
 use std::path::PathBuf;
 
