@@ -107,5 +107,5 @@ ort = { version = "2.0.0-rc.12", optional = true, default-features = false, feat
 ndarray = { version = "0.16", optional = true }
 
 # 棋譜プレイヤー TUI (optional, behind "kifu-player" feature)
-ratatui = { version = "0.29", optional = true }
+ratatui = { version = "0.30", optional = true }
 crossterm = { version = "0.28", optional = true }
