@@ -64,6 +64,9 @@ use rshogi_core::nnue::init_nnue;
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search};
 use tools::packed_sfen::{PackedSfenValue, pack_position, unpack_sfen, unpack_sfen_to_parts};
+// UnpackedSfen は ONNX 経路専用。ONNX 無効ビルドの unused import を避けるため cfg で囲う。
+#[cfg(any(feature = "aobazero-onnx", feature = "dlshogi-onnx"))]
+use tools::packed_sfen::UnpackedSfen;
 use tools::qsearch_pv::{NnueStacks, apply_pv, qsearch_with_pv_nnue};
 
 /// 探索用スタックサイズ（64MB）
@@ -3364,7 +3367,7 @@ where
     struct PreparedBatch {
         f1: HostBuf,
         f2: HostBuf,
-        records: Vec<(PackedSfenValue, String)>,
+        records: Vec<(PackedSfenValue, UnpackedSfen)>,
         stm_flags: Vec<bool>,
         in_checks: Vec<bool>,
         leaf_sfens: Vec<[u8; 32]>,
@@ -3507,14 +3510,14 @@ where
                             continue;
                         }
                     };
-                    let sfen = match unpack_sfen(&psv.sfen) {
-                        Ok(s) => s,
+                    let parts = match unpack_sfen_to_parts(&psv.sfen) {
+                        Ok(p) => p,
                         Err(_) => {
                             errs += 1;
                             continue;
                         }
                     };
-                    slot.records.push((psv, sfen));
+                    slot.records.push((psv, parts));
                 }
                 let actual_batch = slot.records.len();
                 if phase_timing {
@@ -3553,7 +3556,7 @@ where
                     // 葉で STM が反転したかの記録領域を当バッチ分だけ reset（非モード時は全 false）。
                     let stm_flags = &mut stm_flags[..actual_batch];
                     stm_flags.fill(false);
-                    // root 王手フラグの記録領域も当バッチ分だけ reset（set_sfen 失敗時は false 据え置き）。
+                    // root 王手フラグの記録領域も当バッチ分だけ reset（局面構築失敗時は false 据え置き）。
                     let in_checks = &mut in_checks[..actual_batch];
                     in_checks.fill(false);
                     // leaf-REPLACEMENT 有効時のみ葉局面の packed sfen を書き込む領域を当バッチ分に絞る。
@@ -3569,16 +3572,19 @@ where
                         |f1: &mut [f32],
                          f2: &mut [f32],
                          psv: &PackedSfenValue,
-                         sfen: &str,
+                         parts: &UnpackedSfen,
                          stm_flag: &mut bool,
                          in_check_slot: &mut bool,
                          packed_leaf: Option<&mut [u8; 32]>| {
                             let mut pos = Position::new();
-                            if pos.set_sfen(sfen).is_err() {
+                            if pos
+                                .set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
+                                .is_err()
+                            {
                                 batch_errors.fetch_add(1, Ordering::Relaxed);
                                 return;
                             }
-                            // 王手フラグは直列 read の probe ではなくここで求める（同じ set_sfen 後の
+                            // 王手フラグは直列 read の probe ではなくここで求める（同じ局面構築後の
                             // root 局面から 1 回だけ）。書き出し時の skip_in_check / expand 判定に使う。
                             let root_in_check = pos.in_check();
                             *in_check_slot = root_in_check;
@@ -3618,9 +3624,11 @@ where
                             .zip(stm_flags.par_iter_mut())
                             .zip(in_checks.par_iter_mut())
                             .zip(leaf_sfens_slice.par_iter_mut())
-                            .for_each(|(((((f1, f2), (psv, sfen)), stm_flag), in_check), leaf)| {
-                                build_one(f1, f2, psv, sfen, stm_flag, in_check, Some(leaf));
-                            });
+                            .for_each(
+                                |(((((f1, f2), (psv, parts)), stm_flag), in_check), leaf)| {
+                                    build_one(f1, f2, psv, parts, stm_flag, in_check, Some(leaf));
+                                },
+                            );
                     } else {
                         f1_slices
                             .into_par_iter()
@@ -3628,8 +3636,8 @@ where
                             .zip(records.par_iter())
                             .zip(stm_flags.par_iter_mut())
                             .zip(in_checks.par_iter_mut())
-                            .for_each(|((((f1, f2), (psv, sfen)), stm_flag), in_check)| {
-                                build_one(f1, f2, psv, sfen, stm_flag, in_check, None);
+                            .for_each(|((((f1, f2), (psv, parts)), stm_flag), in_check)| {
+                                build_one(f1, f2, psv, parts, stm_flag, in_check, None);
                             });
                     }
                 }
@@ -3707,7 +3715,7 @@ where
 
                 // rescore 書き出し（テンソルから直接読み取り、to_vec() コピーを排除）
                 // skip_in_check が真かつ親が王手の場合は書き出しを抑制（推論結果は破棄）。
-                for (i, (psv, _sfen)) in batch.records.iter().enumerate() {
+                for (i, (psv, _parts)) in batch.records.iter().enumerate() {
                     if skip_in_check && batch.in_checks[i] {
                         skipped_count += 1;
                         continue;
@@ -3783,13 +3791,16 @@ where
                         );
                     }
 
-                    for (i, (psv, sfen)) in batch.records.iter().enumerate() {
+                    for (i, (psv, parts)) in batch.records.iter().enumerate() {
                         if expand_cfg.skip_parent_in_check && batch.in_checks[i] {
                             continue;
                         }
 
                         let mut pos = Position::new();
-                        if pos.set_sfen(sfen).is_err() {
+                        if pos
+                            .set_from_parts(&parts.board, &parts.hands, parts.side_to_move)
+                            .is_err()
+                        {
                             continue;
                         }
                         let color = pos.side_to_move();
