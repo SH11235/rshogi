@@ -11,6 +11,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `csa_client` | USI エンジンを floodgate 等の CSA サーバーに接続して連続対局 |
 | `analyze_selfplay` | 自己対局の JSONL ログを集計。勝率・Elo 差・NPS 等を表示 |
 | `jsonl_to_kif` | tournament 等の JSONL 対局ログから KIF 棋譜を生成（id/skip/limit でフィルタ可） |
+| `kifu_player` | PSV / tournament JSONL を同じ TUI で再生・閲覧（`kifu-player` feature、評価値グラフ付き。[詳細](kifu_player.md)） |
 
 ## ベンチマーク・評価
 

@@ -13,6 +13,12 @@
 | `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（USI engine vs engine／NativeBackend） |
 | `floodgate_pipeline` | Floodgate棋譜のダウンロード・変換（[詳細](docs/floodgate_pipeline.md)） |
 
+### 棋譜閲覧
+
+| ツール | 説明 |
+|--------|------|
+| `kifu_player` | PSV / tournament JSONL を同じ TUI で再生・評価値グラフ付きで閲覧（`kifu-player` feature、[詳細](docs/kifu_player.md)） |
+
 ### 学習データ処理
 
 | ツール | 説明 |
@@ -74,6 +80,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 各ツールの詳細は `docs/` を参照：
 
 - [tournament](docs/tournament.md) - 並列トーナメント・SPRT 検定
+- [kifu_player](docs/kifu_player.md) - PSV / tournament JSONL 共通の棋譜プレイヤー TUI（評価値グラフ付き）
 - [gensfen](docs/gensfen.md) - 教師局面生成ツールの詳細
 - [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
 - [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群

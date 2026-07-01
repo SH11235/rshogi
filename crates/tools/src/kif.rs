@@ -314,16 +314,19 @@ fn engine_names_for(meta: Option<&KifMeta>) -> (String, String) {
     (black_display, white_display)
 }
 
-fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms: u64) -> String {
+/// 指し手1つ分の棋譜風ラベル（消費時間を含まない）。
+///
+/// `crates/tools/src/replay/` の棋譜プレイヤー TUI から、PSV/JSONL 共通の
+/// 手の表示ラベルとして再利用する（PSV には消費時間情報が無いため、
+/// 時間表示を含む `format_move_kif` ではなくこちらを直接使う）。
+pub(crate) fn format_move_label(ply: u32, pos: &Position, mv: Move) -> String {
     let prefix = if pos.side_to_move() == Color::Black {
         "▲"
     } else {
         "△"
     };
     if mv.is_pass() {
-        let per_move = format_mm_ss(elapsed_ms);
-        let total = format_hh_mm_ss(total_ms);
-        return format!("{:>4} {}パス   ({:>5}/{})", ply, prefix, per_move, total);
+        return format!("{:>4} {}パス", ply, prefix);
     }
     let dest = square_label_kanji(mv.to());
     let (label, from_suffix) = if mv.is_drop() {
@@ -335,12 +338,14 @@ fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms
         let suffix = format!("({}{})", square_file_digit(from), square_rank_digit(from));
         (piece_label(piece.piece_type(), promoted).to_string(), suffix)
     };
+    format!("{:>4} {}{}{}{}", ply, prefix, dest, label, from_suffix)
+}
+
+fn format_move_kif(ply: u32, pos: &Position, mv: Move, elapsed_ms: u64, total_ms: u64) -> String {
+    let label = format_move_label(ply, pos, mv);
     let per_move = format_mm_ss(elapsed_ms);
     let total = format_hh_mm_ss(total_ms);
-    format!(
-        "{:>4} {}{}{}{}   ({:>5}/{})",
-        ply, prefix, dest, label, from_suffix, per_move, total
-    )
+    format!("{}   ({:>5}/{})", label, per_move, total)
 }
 
 fn square_label_kanji(sq: Square) -> String {
@@ -370,7 +375,8 @@ fn square_rank_digit(sq: Square) -> char {
     char::from_digit(idx as u32, 10).unwrap_or('1')
 }
 
-fn piece_label(piece_type: PieceType, promoted: bool) -> &'static str {
+/// `replay::tui` の盤面・持ち駒表示からも再利用する駒名ラベル。
+pub(crate) fn piece_label(piece_type: PieceType, promoted: bool) -> &'static str {
     match (piece_type, promoted) {
         (PieceType::Pawn, false) => "歩",
         (PieceType::Pawn, true) => "と",
