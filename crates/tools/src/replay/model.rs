@@ -91,12 +91,18 @@ impl GameIndexEntry {
 #[derive(Debug, Clone)]
 pub struct GameRecord {
     pub moves: Vec<MoveView>,
+    /// 先頭の手数が 1 より大きいとき、それを「記録の欠落」(⋯N手欠落⋯) として
+    /// 表示するか。PSV は `skip_initial_ply` で先頭手が落ちうるので true。JSONL の
+    /// 定跡開始局面（例: 24手目から）は正当な開始で欠落ではないため false。
+    pub leading_gap_is_drop: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct MoveView {
-    /// 出典上の手数。PSV は `skip_initial_ply`/`skip_in_check` により欠番がありうる
-    /// ため、連番である保証はない（欠番はそのまま表示する）。
+    /// 局面の絶対手数。PSV は `game_ply`、JSONL は `sfen_before` の SFEN 手数カウンタから
+    /// 採る（JSONL の対局内 1 始まり `ply` は使わない。定跡途中開始でも正しい手数にするため）。
+    /// PSV は `skip_initial_ply`/`skip_in_check` により欠番がありうるので連番の保証はない
+    /// （欠番はそのまま表示する）。
     pub ply: u32,
     pub side: Color,
     pub sfen_before: String,

@@ -156,7 +156,11 @@ impl GameSource for PsvSource {
             });
         }
 
-        Ok(GameRecord { moves })
+        // PSV は skip_initial_ply で先頭手が落ちうるので、先頭手数>1 は欠落として表示する。
+        Ok(GameRecord {
+            moves,
+            leading_gap_is_drop: true,
+        })
     }
 }
 

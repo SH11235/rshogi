@@ -113,7 +113,12 @@ impl GameSource for JsonlSource {
             moves.push(build_move_view(&move_line)?);
         }
 
-        Ok(GameRecord { moves })
+        // JSONL は定跡途中開始でも絶対手数を持つ正当な開始なので、先頭手数>1 を
+        // 欠落として扱わない。
+        Ok(GameRecord {
+            moves,
+            leading_gap_is_drop: false,
+        })
     }
 }
 
@@ -137,7 +142,8 @@ struct MetaEngineCmd {
 #[derive(Deserialize)]
 struct MoveLine {
     game_id: u32,
-    ply: u32,
+    // JSONL の `ply` は対局内 1 始まりで絶対手数ではないため使わない（絶対手数は
+    // `sfen_before` の SFEN 手数カウンタから `build_move_view` で取り直す）。
     sfen_before: String,
     move_usi: String,
     #[serde(default)]
@@ -310,12 +316,20 @@ fn build_move_view(line: &MoveLine) -> Result<MoveView> {
     pos.set_sfen(&line.sfen_before)
         .map_err(|e| anyhow!("failed to parse sfen_before '{}': {e}", line.sfen_before))?;
     let side = pos.side_to_move();
+    // JSONL の `ply` は対局内 1 始まりで、定跡途中開始（例: 24手目）の絶対手数を
+    // 持たない。SFEN の手数カウンタ（`set_sfen` が `game_ply` に格納）が絶対手数なので
+    // そちらを採用する。手数は 1 以上が正常で、0 は不正 SFEN なので debug で検知する。
+    let abs_ply = {
+        let ply = pos.game_ply();
+        debug_assert!(ply >= 1, "SFEN 手数が 0 以下: sfen_before={:?}", line.sfen_before);
+        ply.max(1) as u32
+    };
 
     // resign/win/timeout/illegal 等の終局用の擬似指し手は Move::from_usi が None
     // を返すため、実手と区別してそのまま文字列を表示する。
     let (mv, kif_label) = match Move::from_usi(&line.move_usi) {
-        Some(mv) => (mv, format_move_label(line.ply, &pos, mv)),
-        None => (Move::NONE, format!("{:>4} {}", line.ply, line.move_usi)),
+        Some(mv) => (mv, format_move_label(abs_ply, &pos, mv)),
+        None => (Move::NONE, format!("{:>4} {}", abs_ply, line.move_usi)),
     };
 
     let annotation = MoveAnnotation {
@@ -332,7 +346,7 @@ fn build_move_view(line: &MoveLine) -> Result<MoveView> {
     };
 
     Ok(MoveView {
-        ply: line.ply,
+        ply: abs_ply,
         side,
         sfen_before: line.sfen_before.clone(),
         mv,
@@ -390,6 +404,17 @@ mod tests {
         format!(
             r#"{{"type":"result","game_id":{game_id},"outcome":"{outcome}","reason":"r","plies":{plies},"error":{error}}}"#
         )
+    }
+
+    #[test]
+    fn build_move_view_uses_absolute_ply_from_sfen_not_jsonl_ply() {
+        // 定跡途中開始（SFEN 手数=24）で、JSONL の対局内 ply=1 ではなく SFEN の
+        // 絶対手数 24 を採用することを固定する。
+        let json = r#"{"type":"move","game_id":1,"ply":1,"side_to_move":"b","sfen_before":"lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 24","move_usi":"7g7f","engine":"e","elapsed_ms":10,"think_limit_ms":100,"timed_out":false}"#;
+        let line: MoveLine = serde_json::from_str(json).expect("parse move line");
+        let view = build_move_view(&line).expect("build move view");
+        assert_eq!(view.ply, 24, "SFEN 手数カウンタを絶対手数として使う");
+        assert!(view.kif_label.contains("24"), "ラベルにも絶対手数を出す: {}", view.kif_label);
     }
 
     #[test]

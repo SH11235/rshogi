@@ -390,19 +390,21 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            // 盤面は罫線込みで24行の本文＋Blockの上下枠2行=26行を必要とする。
-            Constraint::Min(26),
+            // 盤面は罫線＋筋ラベル込みで25行の本文＋Blockの上下枠2行=27行を必要とする。
+            Constraint::Min(27),
             Constraint::Length(9),
             Constraint::Length(3),
         ])
         .split(frame.area());
 
+    // 盤面は内容ぴったりの固定幅（`BOARD_PANEL_WIDTH`）にし、余りは指し手パネルへ回す
+    // （盤面を広い割合で確保すると右側が広大なデッドゾーンになるため）。
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(25),
-            Constraint::Percentage(45),
-            Constraint::Percentage(30),
+            Constraint::Length(BOARD_PANEL_WIDTH),
+            Constraint::Min(40),
         ])
         .split(root[0]);
 
@@ -505,7 +507,7 @@ fn empty_state_text(app: &App) -> &'static str {
 
 fn draw_board(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
     let lines = match current_move(app) {
-        Some(mv) => render_board(&mv.sfen_before, mv.mv),
+        Some(mv) => render_board(&mv.sfen_before, mv.mv, mv.annotation.timed_out.unwrap_or(false)),
         None => vec![Line::from(empty_state_text(app))],
     };
     let para = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("盤面"));
@@ -533,24 +535,34 @@ fn draw_move_list(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout::
 }
 
 fn move_list_item(game: &GameRecord, i: usize, mv: &MoveView) -> ListItem<'static> {
-    match ply_gap_before(game, i) {
-        Some(skipped) => ListItem::new(Line::from(vec![
-            Span::styled(format!("⋯{skipped}手欠落⋯ "), Style::default().fg(RColor::DarkGray)),
-            Span::raw(mv.kif_label.clone()),
-        ])),
-        None => ListItem::new(mv.kif_label.clone()),
+    let mut spans = Vec::new();
+    if let Some(skipped) = ply_gap_before(game, i) {
+        spans.push(Span::styled(
+            format!("⋯{skipped}手欠落⋯ "),
+            Style::default().fg(RColor::DarkGray),
+        ));
     }
+    spans.push(Span::raw(mv.kif_label.clone()));
+    let annotation = annotation_inline(mv);
+    if !annotation.is_empty() {
+        // 注釈は補助情報なので淡色で並べる。1行に収まらなければ幅で自然に切れる。
+        spans.push(Span::styled(format!("  {annotation}"), Style::default().fg(RColor::DarkGray)));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 /// index `i` の手の直前に手数の欠番があれば、欠落した手数を返す。
-/// PSV の `skip_initial_ply`/`skip_in_check` によるレコード欠番を可視化する用途
-/// （JSONL は通常連番で記録されるため実質発火しない）。
+/// PSV の `skip_initial_ply`/`skip_in_check` によるレコード欠番を可視化する用途。
 ///
-/// `i == 0` は対局の最初の1手ぶんが欠けている可能性（`skip_initial_ply`）を
-/// 「ply は1から始まるはず」という前提で検出する（`game.moves` は呼び出し元
+/// `i == 0`（先頭欠番）は `game.leading_gap_is_drop` が true のときだけ検出する。
+/// JSONL は定跡途中開始で先頭手数が 1 超になりうるが、それは欠落ではないため
+/// false を設定しており、先頭マーカーは出さない（`game.moves` は呼び出し元
 /// `move_list_item` で非空を確認済みなので `game.moves[0]` へのアクセスは安全）。
 fn ply_gap_before(game: &GameRecord, i: usize) -> Option<u32> {
     if i == 0 {
+        if !game.leading_gap_is_drop {
+            return None;
+        }
         let first_ply = game.moves[0].ply;
         return (first_ply > 1).then(|| first_ply - 1);
     }
@@ -704,13 +716,15 @@ fn draw_status_bar(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout:
         Mode::Filter => format!("検索: {}_", app.filter_input),
         Mode::Help => "何かキーを押すとヘルプを閉じます".to_string(),
         Mode::Browse => {
-            let annotation = current_move(app).map(annotation_line).unwrap_or_default();
+            // 通常時はヘルプを行頭に固定する（手を動かしても位置がずれないよう、可変長の
+            // 注釈はここに出さず指し手パネル側へ移した）。エラー等の status がある時は、
+            // 長いヘルプで末尾 truncate されて隠れないよう status を先頭に置く（優先情報）。
             let help = format!(
                 "h/l:手  j/k:対局  n/N:評価値急変  s:並替({})  /:検索  ?:ヘルプ  q:終了",
                 app.sort_mode.label()
             );
             if app.status.is_empty() {
-                format!("{annotation}   [{help}]")
+                format!("[{help}]")
             } else {
                 format!("{}   [{help}]", app.status)
             }
@@ -775,7 +789,9 @@ fn current_move(app: &App) -> Option<&MoveView> {
     app.current_game.as_ref().and_then(|g| g.moves.get(app.current_move))
 }
 
-fn annotation_line(mv: &MoveView) -> String {
+/// 指し手行に並べる注釈（評価値・探索情報）。engine ラベルは対局ラベルと重複して
+/// 冗長なので出さない。注釈が無い手は空文字を返す（行に何も足さない）。
+fn annotation_inline(mv: &MoveView) -> String {
     let a = &mv.annotation;
     let mut parts = Vec::new();
     if let Some(v) = a.score_mate {
@@ -784,34 +800,27 @@ fn annotation_line(mv: &MoveView) -> String {
         parts.push(format!("評価値{v:+}"));
     }
     if let Some(v) = a.depth {
-        parts.push(format!("depth={v}"));
+        parts.push(format!("depth{v}"));
     }
     if let Some(v) = a.seldepth {
-        parts.push(format!("seldepth={v}"));
+        parts.push(format!("seldepth{v}"));
     }
     if let Some(v) = a.nodes {
-        parts.push(format!("nodes={v}"));
+        parts.push(format!("nodes{v}"));
     }
     if let Some(v) = a.nps {
-        parts.push(format!("nps={v}"));
+        parts.push(format!("nps{v}"));
     }
     if let Some(v) = a.elapsed_ms {
-        parts.push(format!("経過={v}ms"));
+        parts.push(format!("経過{v}ms"));
     }
-    if let Some(v) = a.think_limit_ms {
-        parts.push(format!("制限={v}ms"));
-    }
+    // think_limit_ms（制限）は出さない：depth 制限の対局では書き込み側が既定値を入れる
+    // ため実際の制御（例: depth 15）と乖離して誤解を招く。実消費は 経過 が、時間切れは
+    // TIMEOUT が表す。
     if a.timed_out == Some(true) {
         parts.push("TIMEOUT".to_string());
     }
-    if let Some(v) = &a.engine_label {
-        parts.push(format!("engine={v}"));
-    }
-    if parts.is_empty() {
-        "(注釈なし)".to_string()
-    } else {
-        parts.join("  ")
-    }
+    parts.join(" ")
 }
 
 /// `mv` の着手元・着手先マス。駒打ちは着手元を持たない。パス等の通常手ではない
@@ -828,24 +837,64 @@ fn move_highlight_squares(mv: Move) -> (Option<Square>, Option<Square>) {
     }
 }
 
-/// 盤面1マスぶんの表示幅（全角2文字ぶん=4カラム）。罫線の横棒もこの幅に揃える。
+/// 盤面1マスぶんの表示幅（カラム数）。全角駒(2カラム)を左右均等に中央寄せするため
+/// 偶数にする。罫線の横棒・座標ラベルもこの幅に揃える。9×9 の全格子だと高さは19行で
+/// 固定なので、正方形寄りに見せるにはこの幅で横方向に広げて縦横比を調整する。
 const CELL_WIDTH: usize = 4;
 
-/// 空マスの内容（全角スペース2つ＝ `CELL_WIDTH` に揃う）。
-const EMPTY_CELL: &str = "\u{3000}\u{3000}";
+/// 盤面パネルの確保幅（カラム数）。段ラベル付きの駒行が最大幅で、
+/// 左枠 `│` 1 ＋ 9×(`CELL_WIDTH`＋区切り `│` 1) ＋ 段ラベル " 段" 3 ＋ Block 枠 2、
+/// これに余白 1 を足す。`CELL_WIDTH` から算出するので幅を変えても追従する。
+const BOARD_PANEL_WIDTH: u16 = 1 + 9 * (CELL_WIDTH as u16 + 1) + 3 + 2 + 1;
 
-/// マス1つぶんの内容を表示幅 `CELL_WIDTH` に揃える。
+/// 最終手ハイライトの背景色（中明度の緑）。前景（駒の先後色）を残したまま、指し終えた
+/// 手の移動先（駒）と移動元（空マス）の両方をこの色で示す。中間の明度なので暗い端末でも
+/// 明るい端末でも背景から浮き、黄/シアンの駒色とも両立する。
+const LAST_MOVE_BG: RColor = RColor::Rgb(58, 125, 70);
+
+/// 盤面上端の筋ラベル（左＝９筋 … 右＝１筋、全角）。
+const FILE_LABELS: [&str; 9] = ["９", "８", "７", "６", "５", "４", "３", "２", "１"];
+
+/// 盤面右端の段ラベル（上＝一段 … 下＝九段）。
+const RANK_LABELS: [&str; 9] = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
+
+/// 盤面表示用の一文字グリフ。盤上の駒種（成り駒は `Pro*`）を受け取る。
 ///
-/// `piece_label` は 歩/金 等は1文字、成香/成桂/成銀 は2文字を返し、そのまま
-/// 並べると後者だけ表示幅が倍になり罫線とズレる。半角スペースではなく
-/// 全角スペース(U+3000)で埋めるのは、東アジア幅が異なる文字を混在させると
-/// 環境によって列がズレる恐れがあるため（全角文字だけで幅を揃える）。
-fn pad_cell(label: &str) -> String {
-    if label.chars().count() >= 2 {
-        label.to_string()
-    } else {
-        format!("\u{3000}{label}")
+/// 指し手・持駒パネルは綴り表記の `piece_label`（成香/成桂/成銀）を使うが、盤面は
+/// 罫線と揃えるため成り駒も全角一文字で表す（成香→杏 / 成桂→圭 / 成銀→全）。これで
+/// と/馬/龍 も含め全駒が全角一文字(2カラム)になり、`center_cell` で均等に中央寄せできる。
+fn board_glyph(piece_type: PieceType) -> &'static str {
+    match piece_type {
+        PieceType::ProLance => "杏",
+        PieceType::ProKnight => "圭",
+        PieceType::ProSilver => "全",
+        _ => piece_label(piece_type, piece_type.is_promoted()),
     }
+}
+
+/// 全角駒グリフ(2カラム)を `CELL_WIDTH` カラムのマスに中央寄せする。余白は半角スペース
+/// (U+0020)で埋める：半角スペースは環境非依存で必ず1カラムなので、全角文字と混在しても
+/// 列がズレない。`CELL_WIDTH` が偶数なら左右対称に揃う。
+fn center_cell(glyph: &str) -> String {
+    let pad = CELL_WIDTH.saturating_sub(2);
+    let left = pad / 2;
+    let right = pad - left;
+    format!("{}{glyph}{}", " ".repeat(left), " ".repeat(right))
+}
+
+/// 空マス（`CELL_WIDTH` ぶんの半角スペース）。
+fn empty_cell() -> String {
+    " ".repeat(CELL_WIDTH)
+}
+
+/// 上端の筋ラベル行。各筋の数字を罫線のマス位置に中央寄せで並べる。
+fn file_label_line() -> String {
+    let mut s = String::from(" "); // 左枠（┌）のカラムぶん
+    for label in FILE_LABELS {
+        s.push_str(&center_cell(label));
+        s.push(' '); // 縦罫線（┬／│）のカラムぶん
+    }
+    s
 }
 
 /// 罫線の1行ぶん（`left`/`mid`/`right` は角・交点の文字）。
@@ -860,13 +909,33 @@ fn horizontal_border(left: char, mid: char, right: char) -> String {
     s
 }
 
-fn render_board(sfen: &str, mv: Move) -> Vec<Line<'static>> {
+fn render_board(sfen: &str, mv: Move, timed_out: bool) -> Vec<Line<'static>> {
     let mut pos = Position::new();
     if pos.set_sfen(sfen).is_err() {
         return vec![Line::from("(局面を表示できません)")];
     }
 
-    let (highlight_from, highlight_to) = move_highlight_squares(mv);
+    // `sfen` は着手前の局面。実際に指された通常手・駒打ちだけを適用して指了後の局面を
+    // 表示し、移動先（駒）と移動元（空マス）をハイライトする。手番・王手・持駒も適用後を
+    // 反映する（王手表示＝最終手が王手だったこと）。
+    //
+    // 適用しないケース（記録局面＝指了前のまま表示）:
+    // - pass 手・終局擬似手（is_normal=false）: pass 権 state を持たない局面で
+    //   do_pass_move が panic するため、そもそも適用しない。
+    // - タイムアウト行（timed_out）: 記録側はタイムアウトでも bestmove を move_usi に
+    //   残すが局面には適用せず終局する。この bestmove は実際には指されておらず、遅れて
+    //   返った手だと非合法で do_move が panic しうるため適用しない。
+    // これらを除いた「適用する mv」は、記録側が実際に指した合法手なので do_move は安全。
+    let apply = mv.is_normal() && !timed_out;
+    let (highlight_from, highlight_to) = if apply {
+        move_highlight_squares(mv)
+    } else {
+        (None, None)
+    };
+    if apply {
+        let gives_check = pos.gives_check(mv);
+        pos.do_move(mv, gives_check);
+    }
 
     let mut lines = Vec::new();
     let turn = if pos.side_to_move() == Color::Black {
@@ -886,6 +955,7 @@ fn render_board(sfen: &str, mv: Move) -> Vec<Line<'static>> {
     lines.push(Line::from(format!("後手持駒: {}", hand_text(&pos, Color::White))));
     lines.push(Line::from(""));
 
+    lines.push(Line::from(file_label_line()));
     lines.push(Line::from(horizontal_border('┌', '┬', '┐')));
     for rank in 0..9u8 {
         let mut spans = vec![Span::raw("│")];
@@ -902,21 +972,20 @@ fn render_board(sfen: &str, mv: Move) -> Vec<Line<'static>> {
             } else {
                 Style::default().fg(RColor::Cyan)
             };
-            // 着手先は反転表示、着手元は下線でハイライトする
-            // （色だけだと駒の先後色分けと衝突するため modifier で区別する）。
-            if highlight_to == Some(sq) {
-                style = style.add_modifier(Modifier::REVERSED);
-            } else if highlight_from == Some(sq) {
-                style = style.add_modifier(Modifier::UNDERLINED);
+            // 最終手の移動先（駒あり）・移動元（空マス）の両方を背景色＋太字でハイライト
+            // する。前景（駒の先後色）を残すので駒は常に読め、太字で視認性を上げる。
+            if highlight_to == Some(sq) || highlight_from == Some(sq) {
+                style = style.bg(LAST_MOVE_BG).add_modifier(Modifier::BOLD);
             }
             let text = if piece.is_none() {
-                EMPTY_CELL.to_string()
+                empty_cell()
             } else {
-                pad_cell(piece_label(piece.piece_type(), piece.piece_type().is_promoted()))
+                center_cell(board_glyph(piece.piece_type()))
             };
             spans.push(Span::styled(text, style));
             spans.push(Span::raw("│"));
         }
+        spans.push(Span::raw(format!(" {}", RANK_LABELS[rank as usize])));
         lines.push(Line::from(spans));
         if rank < 8 {
             lines.push(Line::from(horizontal_border('├', '┼', '┤')));
@@ -1058,6 +1127,7 @@ mod tests {
                 mv(Color::White, None, None),
                 mv(Color::Black, Some(-5), None),
             ],
+            leading_gap_is_drop: false,
         };
         let points = eval_points(&game);
         assert_eq!(points.len(), 3);
@@ -1197,7 +1267,10 @@ mod tests {
             .enumerate()
             .map(|(i, cp)| mv_with_ply((i + 1) as u32, Color::Black, *cp, None))
             .collect();
-        GameRecord { moves }
+        GameRecord {
+            moves,
+            leading_gap_is_drop: false,
+        }
     }
 
     #[test]
@@ -1228,7 +1301,10 @@ mod tests {
     #[test]
     fn empty_state_reports_error_game_distinctly_from_plain_empty_game() {
         let error_entry = jsonl_entry(1, None, None, None, None, true, 0);
-        let empty_game = GameRecord { moves: Vec::new() };
+        let empty_game = GameRecord {
+            moves: Vec::new(),
+            leading_gap_is_drop: false,
+        };
         assert_eq!(
             empty_state(Some(&error_entry), "", Some(&empty_game)),
             Some(EmptyState::ErrorGame)
@@ -1247,6 +1323,7 @@ mod tests {
         let entry = jsonl_entry(1, None, None, None, None, false, 0);
         let game = GameRecord {
             moves: vec![mv(Color::Black, Some(0), None)],
+            leading_gap_is_drop: false,
         };
         assert_eq!(empty_state(Some(&entry), "", Some(&game)), None);
     }
@@ -1267,6 +1344,7 @@ mod tests {
                 mv_with_ply(1, Color::Black, None, None),
                 mv_with_ply(4, Color::White, None, None),
             ],
+            leading_gap_is_drop: true,
         };
         assert_eq!(ply_gap_before(&game, 0), None, "先頭が ply=1 なら先頭欠番はない");
         assert_eq!(ply_gap_before(&game, 1), Some(2), "1 の次が 4 なら 2,3 の 2 手が欠落");
@@ -1281,9 +1359,42 @@ mod tests {
                 mv_with_ply(12, Color::Black, None, None),
                 mv_with_ply(13, Color::White, None, None),
             ],
+            leading_gap_is_drop: true,
         };
         assert_eq!(ply_gap_before(&game, 0), Some(11), "ply=12 開始なら 1〜11 の 11 手が欠落");
         assert_eq!(ply_gap_before(&game, 1), None, "12 の次が 13 なら欠番なし");
+    }
+
+    #[test]
+    fn ply_gap_before_no_leading_marker_for_jsonl_book_start() {
+        // JSONL の定跡途中開始（先頭 ply=24）は欠落ではないので先頭マーカーを出さない。
+        let game = GameRecord {
+            moves: vec![
+                mv_with_ply(24, Color::Black, None, None),
+                mv_with_ply(25, Color::White, None, None),
+            ],
+            leading_gap_is_drop: false,
+        };
+        assert_eq!(ply_gap_before(&game, 0), None, "定跡開始は先頭欠番扱いにしない");
+        assert_eq!(ply_gap_before(&game, 1), None);
+    }
+
+    #[test]
+    fn annotation_inline_omits_engine_and_is_empty_without_data() {
+        let mut m = mv_with_ply(1, Color::Black, None, None);
+        assert_eq!(annotation_inline(&m), "", "注釈が無ければ空文字（行に何も足さない）");
+        m.annotation = MoveAnnotation {
+            score_cp: Some(-77),
+            depth: Some(15),
+            engine_label: Some("vol4B_nnued15_30m".to_string()),
+            ..Default::default()
+        };
+        let s = annotation_inline(&m);
+        assert!(s.contains("評価値-77") && s.contains("depth15"), "評価値と探索情報を出す: {s}");
+        assert!(
+            !s.contains("engine") && !s.contains("vol4B"),
+            "engine は冗長なので出さない: {s}"
+        );
     }
 
     #[test]
@@ -1293,6 +1404,7 @@ mod tests {
                 mv_with_ply(1, Color::Black, None, None),
                 mv_with_ply(2, Color::White, None, None),
             ],
+            leading_gap_is_drop: false,
         };
         assert_eq!(ply_gap_before(&game, 1), None);
     }
@@ -1308,6 +1420,7 @@ mod tests {
                 mv_with_ply(5, Color::White, None, None),
                 mv_with_ply(3, Color::Black, None, None),
             ],
+            leading_gap_is_drop: false,
         };
         assert_eq!(ply_gap_before(&game, 1), None);
         assert_eq!(ply_gap_before(&game, 2), None);
@@ -1335,13 +1448,34 @@ mod tests {
     // --- 盤面セル幅・罫線 ---
 
     #[test]
-    fn pad_cell_normalizes_single_char_labels_to_two_chars() {
-        // "歩" 等の1文字ラベルは全角スペースで埋めて2文字（=成香等と同じ表示幅）に揃う。
-        assert_eq!(pad_cell("歩").chars().count(), 2);
-        // "成香" 等は元から2文字なのでそのまま。
-        assert_eq!(pad_cell("成香").chars().count(), 2);
-        assert_eq!(pad_cell("成香"), "成香");
-        assert_eq!(pad_cell("歩"), "\u{3000}歩");
+    fn board_glyph_is_single_char_for_every_piece() {
+        use PieceType::*;
+        // 盤面グリフは罫線と揃えるため、成り駒を含め必ず全角一文字。
+        for pt in [
+            Pawn, Lance, Knight, Silver, Gold, Bishop, Rook, King, ProPawn, ProLance, ProKnight,
+            ProSilver, Horse, Dragon,
+        ] {
+            assert_eq!(board_glyph(pt).chars().count(), 1, "{pt:?}");
+        }
+        // 成香/成桂/成銀 は盤面では一文字表記（杏/圭/全）になる。
+        assert_eq!(board_glyph(ProLance), "杏");
+        assert_eq!(board_glyph(ProKnight), "圭");
+        assert_eq!(board_glyph(ProSilver), "全");
+    }
+
+    #[test]
+    fn center_cell_fills_cell_width_and_centers_glyph() {
+        // 半角スペース(1カラム)×spaces + 全角グリフ(2カラム) == CELL_WIDTH。
+        let c = center_cell("玉");
+        let spaces = c.chars().filter(|ch| *ch == ' ').count();
+        assert_eq!(spaces + 2, CELL_WIDTH, "セルは CELL_WIDTH カラムに揃う");
+        assert!(c.contains('玉'));
+        // 偶数幅なら左右対称。
+        if CELL_WIDTH.is_multiple_of(2) {
+            let left = c.chars().take_while(|ch| *ch == ' ').count();
+            let right = c.chars().rev().take_while(|ch| *ch == ' ').count();
+            assert_eq!(left, right, "偶数幅は左右対称に中央寄せ");
+        }
     }
 
     #[test]
@@ -1351,5 +1485,56 @@ mod tests {
         assert!(border.ends_with('┐'));
         assert_eq!(border.chars().filter(|&c| c == '┬').count(), 8, "9マス間の交点は8箇所");
         assert_eq!(border.chars().filter(|&c| c == '─').count(), CELL_WIDTH * 9);
+    }
+
+    // --- 盤面レンダリング（着手適用・指了後局面・成り駒グリフ） ---
+
+    const HIRATE: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+    fn joined(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn render_board_applies_move_and_flips_turn() {
+        // ▲７六歩: 7七(idx 60)→7六(idx 59)。index = (筋-1)*9 + (段-1)。
+        let mv = Move::new_move(Square::from_u8(60).unwrap(), Square::from_u8(59).unwrap(), false);
+        let after = joined(&render_board(HIRATE, mv, false));
+        let none = joined(&render_board(HIRATE, Move::NONE, false));
+        assert_ne!(after, none, "通常手は do_move で盤面に反映される");
+        assert!(!after.contains("先手番") && after.contains("後手番"), "指了後は後手番");
+        assert!(none.contains("先手番"), "Move::NONE は do_move せず手番も変わらない");
+    }
+
+    #[test]
+    fn render_board_does_not_apply_timed_out_move() {
+        // タイムアウト行の bestmove は実際には指されていないので適用しない
+        // （盤面・手番は指了前のまま）。
+        let mv = Move::new_move(Square::from_u8(60).unwrap(), Square::from_u8(59).unwrap(), false);
+        let timed_out = joined(&render_board(HIRATE, mv, true));
+        let none = joined(&render_board(HIRATE, Move::NONE, false));
+        assert_eq!(timed_out, none, "timed_out の手は do_move せず指了前の局面のまま");
+        assert!(timed_out.contains("先手番"), "手番も変わらない");
+    }
+
+    #[test]
+    fn render_board_shows_promoted_pieces_as_single_char_glyph() {
+        // 各成り駒を1つずつ置いた局面（Move::NONE なので do_move しない）。
+        let sfen = "3k5/9/9/9/+P+L+N+S+B+R3/9/9/9/3K5 b - 1";
+        let s = joined(&render_board(sfen, Move::NONE, false));
+        for g in ["と", "杏", "圭", "全", "馬", "龍"] {
+            assert!(s.contains(g), "成り駒 {g} を一文字グリフで表示");
+        }
+        assert!(!s.contains('成') && !s.contains('+'), "盤面に 成/+ の生表記は出さない");
+    }
+
+    #[test]
+    fn render_board_unparsable_sfen_shows_placeholder() {
+        let lines = render_board("not-a-sfen", Move::NONE, false);
+        assert_eq!(joined(&lines), "(局面を表示できません)");
     }
 }
