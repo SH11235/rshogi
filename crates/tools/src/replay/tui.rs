@@ -397,14 +397,13 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         ])
         .split(frame.area());
 
-    // 盤面は内容ぴったりの固定幅にし、余りは指し手パネルへ回す（盤面を広い割合で
-    // 確保すると右側が広大なデッドゾーンになるため）。盤面の最大行幅は罫線46＋段
-    // ラベル3＋Block枠2＝51桁なので 52 を確保する。
+    // 盤面は内容ぴったりの固定幅（`BOARD_PANEL_WIDTH`）にし、余りは指し手パネルへ回す
+    // （盤面を広い割合で確保すると右側が広大なデッドゾーンになるため）。
     let main = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(25),
-            Constraint::Length(52),
+            Constraint::Length(BOARD_PANEL_WIDTH),
             Constraint::Min(40),
         ])
         .split(root[0]);
@@ -508,7 +507,7 @@ fn empty_state_text(app: &App) -> &'static str {
 
 fn draw_board(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
     let lines = match current_move(app) {
-        Some(mv) => render_board(&mv.sfen_before, mv.mv),
+        Some(mv) => render_board(&mv.sfen_before, mv.mv, mv.annotation.timed_out == Some(true)),
         None => vec![Line::from(empty_state_text(app))],
     };
     let para = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("盤面"));
@@ -842,6 +841,11 @@ fn move_highlight_squares(mv: Move) -> (Option<Square>, Option<Square>) {
 /// 固定なので、正方形寄りに見せるにはこの幅で横方向に広げて縦横比を調整する。
 const CELL_WIDTH: usize = 4;
 
+/// 盤面パネルの確保幅（カラム数）。段ラベル付きの駒行が最大幅で、
+/// 左枠 `│` 1 ＋ 9×(`CELL_WIDTH`＋区切り `│` 1) ＋ 段ラベル " 段" 3 ＋ Block 枠 2、
+/// これに余白 1 を足す。`CELL_WIDTH` から算出するので幅を変えても追従する。
+const BOARD_PANEL_WIDTH: u16 = 1 + 9 * (CELL_WIDTH as u16 + 1) + 3 + 2 + 1;
+
 /// 最終手ハイライトの背景色（中明度の緑）。前景（駒の先後色）を残したまま、指し終えた
 /// 手の移動先（駒）と移動元（空マス）の両方をこの色で示す。中間の明度なので暗い端末でも
 /// 明るい端末でも背景から浮き、黄/シアンの駒色とも両立する。
@@ -904,21 +908,30 @@ fn horizontal_border(left: char, mid: char, right: char) -> String {
     s
 }
 
-fn render_board(sfen: &str, mv: Move) -> Vec<Line<'static>> {
+fn render_board(sfen: &str, mv: Move, timed_out: bool) -> Vec<Line<'static>> {
     let mut pos = Position::new();
     if pos.set_sfen(sfen).is_err() {
         return vec![Line::from("(局面を表示できません)")];
     }
 
-    // `sfen` は着手前の局面。通常手・駒打ち（is_normal）は指了後の局面を表示するため
-    // mv を適用し、移動先（駒）と移動元（空マス）をハイライトする。手番・王手・持駒も
-    // 適用後を反映する（王手表示＝最終手が王手だったこと）。記録側は合法手のみ USI で
-    // 書き、終局・不正手は Move::from_usi が None → Move::NONE になるため、適用する mv は
-    // sfen_before に対し必ず合法で do_move は安全。pass 手・終局擬似手（is_normal=false）は
-    // 適用しない（pass 権 state を持たない局面で do_pass_move が panic するため）ので、
-    // その場合は記録局面（指了前）のまま表示する。
-    let (highlight_from, highlight_to) = move_highlight_squares(mv);
-    if mv.is_normal() {
+    // `sfen` は着手前の局面。実際に指された通常手・駒打ちだけを適用して指了後の局面を
+    // 表示し、移動先（駒）と移動元（空マス）をハイライトする。手番・王手・持駒も適用後を
+    // 反映する（王手表示＝最終手が王手だったこと）。
+    //
+    // 適用しないケース（記録局面＝指了前のまま表示）:
+    // - pass 手・終局擬似手（is_normal=false）: pass 権 state を持たない局面で
+    //   do_pass_move が panic するため、そもそも適用しない。
+    // - タイムアウト行（timed_out）: 記録側はタイムアウトでも bestmove を move_usi に
+    //   残すが局面には適用せず終局する。この bestmove は実際には指されておらず、遅れて
+    //   返った手だと非合法で do_move が panic しうるため適用しない。
+    // これらを除いた「適用する mv」は、記録側が実際に指した合法手なので do_move は安全。
+    let apply = mv.is_normal() && !timed_out;
+    let (highlight_from, highlight_to) = if apply {
+        move_highlight_squares(mv)
+    } else {
+        (None, None)
+    };
+    if apply {
         let gives_check = pos.gives_check(mv);
         pos.do_move(mv, gives_check);
     }
@@ -1489,18 +1502,29 @@ mod tests {
     fn render_board_applies_move_and_flips_turn() {
         // ▲７六歩: 7七(idx 60)→7六(idx 59)。index = (筋-1)*9 + (段-1)。
         let mv = Move::new_move(Square::from_u8(60).unwrap(), Square::from_u8(59).unwrap(), false);
-        let after = joined(&render_board(HIRATE, mv));
-        let none = joined(&render_board(HIRATE, Move::NONE));
+        let after = joined(&render_board(HIRATE, mv, false));
+        let none = joined(&render_board(HIRATE, Move::NONE, false));
         assert_ne!(after, none, "通常手は do_move で盤面に反映される");
         assert!(!after.contains("先手番") && after.contains("後手番"), "指了後は後手番");
         assert!(none.contains("先手番"), "Move::NONE は do_move せず手番も変わらない");
     }
 
     #[test]
+    fn render_board_does_not_apply_timed_out_move() {
+        // タイムアウト行の bestmove は実際には指されていないので適用しない
+        // （盤面・手番は指了前のまま）。
+        let mv = Move::new_move(Square::from_u8(60).unwrap(), Square::from_u8(59).unwrap(), false);
+        let timed_out = joined(&render_board(HIRATE, mv, true));
+        let none = joined(&render_board(HIRATE, Move::NONE, false));
+        assert_eq!(timed_out, none, "timed_out の手は do_move せず指了前の局面のまま");
+        assert!(timed_out.contains("先手番"), "手番も変わらない");
+    }
+
+    #[test]
     fn render_board_shows_promoted_pieces_as_single_char_glyph() {
         // 各成り駒を1つずつ置いた局面（Move::NONE なので do_move しない）。
         let sfen = "3k5/9/9/9/+P+L+N+S+B+R3/9/9/9/3K5 b - 1";
-        let s = joined(&render_board(sfen, Move::NONE));
+        let s = joined(&render_board(sfen, Move::NONE, false));
         for g in ["と", "杏", "圭", "全", "馬", "龍"] {
             assert!(s.contains(g), "成り駒 {g} を一文字グリフで表示");
         }
@@ -1509,7 +1533,7 @@ mod tests {
 
     #[test]
     fn render_board_unparsable_sfen_shows_placeholder() {
-        let lines = render_board("not-a-sfen", Move::NONE);
+        let lines = render_board("not-a-sfen", Move::NONE, false);
         assert_eq!(joined(&lines), "(局面を表示できません)");
     }
 }
