@@ -88,7 +88,7 @@ impl GameIndexEntry {
 }
 
 /// 1局を開いたときに遅延構築する、再生用の完全な手順。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GameRecord {
     pub moves: Vec<MoveView>,
     /// 先頭の手数が 1 より大きいとき、それを「記録の欠落」(⋯N手欠落⋯) として

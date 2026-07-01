@@ -853,17 +853,17 @@ const FILE_LABELS: [&str; 9] = ["９", "８", "７", "６", "５", "４", "３",
 /// 盤面右端の段ラベル（上＝一段 … 下＝九段）。
 const RANK_LABELS: [&str; 9] = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
 
-/// 盤面表示用の一文字グリフ。
+/// 盤面表示用の一文字グリフ。盤上の駒種（成り駒は `Pro*`）を受け取る。
 ///
 /// 指し手・持駒パネルは綴り表記の `piece_label`（成香/成桂/成銀）を使うが、盤面は
 /// 罫線と揃えるため成り駒も全角一文字で表す（成香→杏 / 成桂→圭 / 成銀→全）。これで
 /// と/馬/龍 も含め全駒が全角一文字(2カラム)になり、`center_cell` で均等に中央寄せできる。
-fn board_glyph(piece_type: PieceType, promoted: bool) -> &'static str {
-    match (piece_type, promoted) {
-        (PieceType::Lance, true) | (PieceType::ProLance, _) => "杏",
-        (PieceType::Knight, true) | (PieceType::ProKnight, _) => "圭",
-        (PieceType::Silver, true) | (PieceType::ProSilver, _) => "全",
-        _ => piece_label(piece_type, promoted),
+fn board_glyph(piece_type: PieceType) -> &'static str {
+    match piece_type {
+        PieceType::ProLance => "杏",
+        PieceType::ProKnight => "圭",
+        PieceType::ProSilver => "全",
+        _ => piece_label(piece_type, piece_type.is_promoted()),
     }
 }
 
@@ -910,9 +910,13 @@ fn render_board(sfen: &str, mv: Move) -> Vec<Line<'static>> {
         return vec![Line::from("(局面を表示できません)")];
     }
 
-    // `sfen` は着手前の局面。最終手を指した後の局面を表示するため mv を適用し、
-    // 最終手の移動先（駒）と移動元（空マス）をハイライトする。手番・王手・持駒も
-    // 適用後の局面を反映する（王手表示＝最終手が王手だったことを示す）。
+    // `sfen` は着手前の局面。通常手・駒打ち（is_normal）は指了後の局面を表示するため
+    // mv を適用し、移動先（駒）と移動元（空マス）をハイライトする。手番・王手・持駒も
+    // 適用後を反映する（王手表示＝最終手が王手だったこと）。記録側は合法手のみ USI で
+    // 書き、終局・不正手は Move::from_usi が None → Move::NONE になるため、適用する mv は
+    // sfen_before に対し必ず合法で do_move は安全。pass 手・終局擬似手（is_normal=false）は
+    // 適用しない（pass 権 state を持たない局面で do_pass_move が panic するため）ので、
+    // その場合は記録局面（指了前）のまま表示する。
     let (highlight_from, highlight_to) = move_highlight_squares(mv);
     if mv.is_normal() {
         let gives_check = pos.gives_check(mv);
@@ -962,7 +966,7 @@ fn render_board(sfen: &str, mv: Move) -> Vec<Line<'static>> {
             let text = if piece.is_none() {
                 empty_cell()
             } else {
-                center_cell(board_glyph(piece.piece_type(), piece.piece_type().is_promoted()))
+                center_cell(board_glyph(piece.piece_type()))
             };
             spans.push(Span::styled(text, style));
             spans.push(Span::raw("│"));
@@ -1433,18 +1437,16 @@ mod tests {
     fn board_glyph_is_single_char_for_every_piece() {
         use PieceType::*;
         // 盤面グリフは罫線と揃えるため、成り駒を含め必ず全角一文字。
-        for pt in [Pawn, Lance, Knight, Silver, Gold, Bishop, Rook, King] {
-            assert_eq!(board_glyph(pt, false).chars().count(), 1, "{pt:?} 非成");
-            assert_eq!(board_glyph(pt, true).chars().count(), 1, "{pt:?} 成");
-        }
-        for pt in [ProPawn, ProLance, ProKnight, ProSilver, Horse, Dragon] {
-            assert_eq!(board_glyph(pt, true).chars().count(), 1, "{pt:?}");
+        for pt in [
+            Pawn, Lance, Knight, Silver, Gold, Bishop, Rook, King, ProPawn, ProLance, ProKnight,
+            ProSilver, Horse, Dragon,
+        ] {
+            assert_eq!(board_glyph(pt).chars().count(), 1, "{pt:?}");
         }
         // 成香/成桂/成銀 は盤面では一文字表記（杏/圭/全）になる。
-        assert_eq!(board_glyph(Lance, true), "杏");
-        assert_eq!(board_glyph(Knight, true), "圭");
-        assert_eq!(board_glyph(Silver, true), "全");
-        assert_eq!(board_glyph(ProSilver, false), "全");
+        assert_eq!(board_glyph(ProLance), "杏");
+        assert_eq!(board_glyph(ProKnight), "圭");
+        assert_eq!(board_glyph(ProSilver), "全");
     }
 
     #[test]
@@ -1469,5 +1471,45 @@ mod tests {
         assert!(border.ends_with('┐'));
         assert_eq!(border.chars().filter(|&c| c == '┬').count(), 8, "9マス間の交点は8箇所");
         assert_eq!(border.chars().filter(|&c| c == '─').count(), CELL_WIDTH * 9);
+    }
+
+    // --- 盤面レンダリング（着手適用・指了後局面・成り駒グリフ） ---
+
+    const HIRATE: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+    fn joined(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn render_board_applies_move_and_flips_turn() {
+        // ▲７六歩: 7七(idx 60)→7六(idx 59)。index = (筋-1)*9 + (段-1)。
+        let mv = Move::new_move(Square::from_u8(60).unwrap(), Square::from_u8(59).unwrap(), false);
+        let after = joined(&render_board(HIRATE, mv));
+        let none = joined(&render_board(HIRATE, Move::NONE));
+        assert_ne!(after, none, "通常手は do_move で盤面に反映される");
+        assert!(!after.contains("先手番") && after.contains("後手番"), "指了後は後手番");
+        assert!(none.contains("先手番"), "Move::NONE は do_move せず手番も変わらない");
+    }
+
+    #[test]
+    fn render_board_shows_promoted_pieces_as_single_char_glyph() {
+        // 各成り駒を1つずつ置いた局面（Move::NONE なので do_move しない）。
+        let sfen = "3k5/9/9/9/+P+L+N+S+B+R3/9/9/9/3K5 b - 1";
+        let s = joined(&render_board(sfen, Move::NONE));
+        for g in ["と", "杏", "圭", "全", "馬", "龍"] {
+            assert!(s.contains(g), "成り駒 {g} を一文字グリフで表示");
+        }
+        assert!(!s.contains('成') && !s.contains('+'), "盤面に 成/+ の生表記は出さない");
+    }
+
+    #[test]
+    fn render_board_unparsable_sfen_shows_placeholder() {
+        let lines = render_board("not-a-sfen", Move::NONE);
+        assert_eq!(joined(&lines), "(局面を表示できません)");
     }
 }
