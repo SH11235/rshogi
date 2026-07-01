@@ -188,7 +188,7 @@ fn index_one_file(
     let mut offset: u64 = 0;
     let mut line_buf = Vec::new();
 
-    let Some((_, meta_len)) = read_line(&mut reader, &mut offset, &mut line_buf)? else {
+    let Some(_) = read_line(&mut reader, &mut offset, &mut line_buf)? else {
         return Ok(None); // 空ファイル。対局ファイルとして不自然ではないので warning は出さない。
     };
     let Ok(meta_value) = serde_json::from_slice::<Value>(&line_buf) else {
@@ -216,7 +216,6 @@ fn index_one_file(
             return Ok(None);
         }
     };
-    let _ = meta_len;
 
     let mut open: HashMap<u32, u64> = HashMap::new();
     let mut closed: HashSet<u32> = HashSet::new();

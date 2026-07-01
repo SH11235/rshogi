@@ -108,7 +108,10 @@ impl App {
             return;
         };
         match self.source.load_game(&self.index, entry) {
-            Ok(game) => self.current_game = Some(game),
+            Ok(game) => {
+                self.status.clear();
+                self.current_game = Some(game);
+            }
             Err(e) => self.status = format!("対局の読み込みに失敗しました: {e}"),
         }
     }
@@ -366,8 +369,12 @@ fn draw_eval_graph(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout:
         return;
     }
 
-    let min_ply = plotted.first().map(|p| p.0).unwrap_or(0.0);
-    let max_ply = plotted.last().map(|p| p.0).unwrap_or(1.0).max(min_ply + 1.0);
+    // x_bounds は「評価値がある手」ではなく対局全体の ply 範囲に合わせる。
+    // plotted 基準にすると、先頭 N 手が eval=None の対局で current_move が
+    // その範囲にあるとき cursor_ply < min_ply になり、カーソル縦線が
+    // Canvas のクリップで描画されなくなる。
+    let min_ply = game.moves.first().map(|mv| mv.ply as f64).unwrap_or(0.0);
+    let max_ply = game.moves.last().map(|mv| mv.ply as f64).unwrap_or(1.0).max(min_ply + 1.0);
     let cursor_ply = current_move(app).map(|mv| mv.ply as f64);
 
     let canvas = Canvas::default()
