@@ -88,9 +88,13 @@ impl GameIndexEntry {
 }
 
 /// 1局を開いたときに遅延構築する、再生用の完全な手順。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GameRecord {
     pub moves: Vec<MoveView>,
+    /// 先頭の手数が 1 より大きいとき、それを「記録の欠落」(⋯N手欠落⋯) として
+    /// 表示するか。PSV は `skip_initial_ply` で先頭手が落ちうるので true。JSONL の
+    /// 定跡開始局面（例: 24手目から）は正当な開始で欠落ではないため false。
+    pub leading_gap_is_drop: bool,
 }
 
 #[derive(Debug, Clone)]
