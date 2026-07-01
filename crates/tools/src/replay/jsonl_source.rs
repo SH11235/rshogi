@@ -318,8 +318,12 @@ fn build_move_view(line: &MoveLine) -> Result<MoveView> {
     let side = pos.side_to_move();
     // JSONL の `ply` は対局内 1 始まりで、定跡途中開始（例: 24手目）の絶対手数を
     // 持たない。SFEN の手数カウンタ（`set_sfen` が `game_ply` に格納）が絶対手数なので
-    // そちらを採用する。
-    let abs_ply = pos.game_ply().max(1) as u32;
+    // そちらを採用する。手数は 1 以上が正常で、0 は不正 SFEN なので debug で検知する。
+    let abs_ply = {
+        let ply = pos.game_ply();
+        debug_assert!(ply >= 1, "SFEN 手数が 0 以下: sfen_before={:?}", line.sfen_before);
+        ply.max(1) as u32
+    };
 
     // resign/win/timeout/illegal 等の終局用の擬似指し手は Move::from_usi が None
     // を返すため、実手と区別してそのまま文字列を表示する。

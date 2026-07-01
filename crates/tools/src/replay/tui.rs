@@ -507,7 +507,7 @@ fn empty_state_text(app: &App) -> &'static str {
 
 fn draw_board(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout::Rect) {
     let lines = match current_move(app) {
-        Some(mv) => render_board(&mv.sfen_before, mv.mv, mv.annotation.timed_out == Some(true)),
+        Some(mv) => render_board(&mv.sfen_before, mv.mv, mv.annotation.timed_out.unwrap_or(false)),
         None => vec![Line::from(empty_state_text(app))],
     };
     let para = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("盤面"));
@@ -716,8 +716,9 @@ fn draw_status_bar(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout:
         Mode::Filter => format!("検索: {}_", app.filter_input),
         Mode::Help => "何かキーを押すとヘルプを閉じます".to_string(),
         Mode::Browse => {
-            // ヘルプは常に行頭に固定する（手を動かしても位置がずれないよう、可変長の
-            // 注釈はここに出さず指し手パネル側へ移した）。
+            // 通常時はヘルプを行頭に固定する（手を動かしても位置がずれないよう、可変長の
+            // 注釈はここに出さず指し手パネル側へ移した）。エラー等の status がある時は、
+            // 長いヘルプで末尾 truncate されて隠れないよう status を先頭に置く（優先情報）。
             let help = format!(
                 "h/l:手  j/k:対局  n/N:評価値急変  s:並替({})  /:検索  ?:ヘルプ  q:終了",
                 app.sort_mode.label()
@@ -725,7 +726,7 @@ fn draw_status_bar(frame: &mut ratatui::Frame, app: &App, area: ratatui::layout:
             if app.status.is_empty() {
                 format!("[{help}]")
             } else {
-                format!("[{help}]   {}", app.status)
+                format!("{}   [{help}]", app.status)
             }
         }
     };
