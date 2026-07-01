@@ -1097,8 +1097,8 @@ mod tests {
 
     #[test]
     fn numeric_query_does_not_match_label_substring_but_matches_exact_pair_index() {
-        // 実データで発見された問題: "vol4B_raw" というラベルに対して "4" と
-        // 打つと、pair_index=4 の絞り込みのつもりでもラベル部分一致でノイズが出る。
+        // "vol4B_raw" のようにラベルに数字を含むデータでは、pair_index=4 の
+        // 絞り込みのつもりで "4" と打ってもラベル部分一致でノイズが出てしまう。
         let index = empty_index();
         let entry = jsonl_entry(1, Some(4), None, None, None, false, 0);
         let filter = parse_filter("4");
