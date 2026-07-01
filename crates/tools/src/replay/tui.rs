@@ -814,9 +814,9 @@ fn annotation_inline(mv: &MoveView) -> String {
     if let Some(v) = a.elapsed_ms {
         parts.push(format!("経過{v}ms"));
     }
-    if let Some(v) = a.think_limit_ms {
-        parts.push(format!("制限{v}ms"));
-    }
+    // think_limit_ms（制限）は出さない：depth 制限の対局では書き込み側が既定値を入れる
+    // ため実際の制御（例: depth 15）と乖離して誤解を招く。実消費は 経過 が、時間切れは
+    // TIMEOUT が表す。
     if a.timed_out == Some(true) {
         parts.push("TIMEOUT".to_string());
     }
@@ -842,9 +842,10 @@ fn move_highlight_squares(mv: Move) -> (Option<Square>, Option<Square>) {
 /// 固定なので、正方形寄りに見せるにはこの幅で横方向に広げて縦横比を調整する。
 const CELL_WIDTH: usize = 4;
 
-/// 最終手ハイライトの背景色（淡い紺）。前景（駒色）を残したまま、指し終えた手の
-/// 移動先（駒）と移動元（空マス）の両方をこの色で示す。
-const LAST_MOVE_BG: RColor = RColor::Rgb(38, 62, 110);
+/// 最終手ハイライトの背景色（中明度の緑）。前景（駒の先後色）を残したまま、指し終えた
+/// 手の移動先（駒）と移動元（空マス）の両方をこの色で示す。中間の明度なので暗い端末でも
+/// 明るい端末でも背景から浮き、黄/シアンの駒色とも両立する。
+const LAST_MOVE_BG: RColor = RColor::Rgb(58, 125, 70);
 
 /// 盤面上端の筋ラベル（左＝９筋 … 右＝１筋、全角）。
 const FILE_LABELS: [&str; 9] = ["９", "８", "７", "６", "５", "４", "３", "２", "１"];
@@ -953,10 +954,10 @@ fn render_board(sfen: &str, mv: Move) -> Vec<Line<'static>> {
             } else {
                 Style::default().fg(RColor::Cyan)
             };
-            // 最終手の移動先（駒あり）・移動元（空マス）の両方を背景色でハイライトする。
-            // 前景（駒の先後色）を残すので駒は常に読める。
+            // 最終手の移動先（駒あり）・移動元（空マス）の両方を背景色＋太字でハイライト
+            // する。前景（駒の先後色）を残すので駒は常に読め、太字で視認性を上げる。
             if highlight_to == Some(sq) || highlight_from == Some(sq) {
-                style = style.bg(LAST_MOVE_BG);
+                style = style.bg(LAST_MOVE_BG).add_modifier(Modifier::BOLD);
             }
             let text = if piece.is_none() {
                 empty_cell()
