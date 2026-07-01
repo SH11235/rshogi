@@ -550,7 +550,10 @@ fn ply_gap_before(game: &GameRecord, i: usize) -> Option<u32> {
     }
     let prev_ply = game.moves[i - 1].ply;
     let cur_ply = game.moves[i].ply;
-    (cur_ply > prev_ply + 1).then_some(cur_ply - prev_ply - 1)
+    // `then_some` は引数を先行評価するため、条件が false のときも
+    // `cur_ply - prev_ply - 1` が評価されて u32 アンダーフローしうる。
+    // 遅延評価の `then` でガードする。
+    (cur_ply > prev_ply + 1).then(|| cur_ply - prev_ply - 1)
 }
 
 /// 評価値グラフの Y 軸クランプ幅（cp 換算）。詰みはこの符号付き値に丸める。
@@ -1267,6 +1270,22 @@ mod tests {
             ],
         };
         assert_eq!(ply_gap_before(&game, 1), None);
+    }
+
+    #[test]
+    fn ply_gap_before_does_not_underflow_when_ply_does_not_increase() {
+        // 壊れた/想定外の入力で ply が減る・同値になるケースでも、
+        // 条件が false の枝で `cur_ply - prev_ply - 1` を評価して
+        // u32 アンダーフローしないことを固定する。
+        let game = GameRecord {
+            moves: vec![
+                mv_with_ply(5, Color::Black, None, None),
+                mv_with_ply(5, Color::White, None, None),
+                mv_with_ply(3, Color::Black, None, None),
+            ],
+        };
+        assert_eq!(ply_gap_before(&game, 1), None);
+        assert_eq!(ply_gap_before(&game, 2), None);
     }
 
     // --- 着手ハイライト ---
