@@ -390,7 +390,8 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(24),
+            // 盤面は罫線込みで24行の本文＋Blockの上下枠2行=26行を必要とする。
+            Constraint::Min(26),
             Constraint::Length(9),
             Constraint::Length(3),
         ])
@@ -544,9 +545,14 @@ fn move_list_item(game: &GameRecord, i: usize, mv: &MoveView) -> ListItem<'stati
 /// index `i` の手の直前に手数の欠番があれば、欠落した手数を返す。
 /// PSV の `skip_initial_ply`/`skip_in_check` によるレコード欠番を可視化する用途
 /// （JSONL は通常連番で記録されるため実質発火しない）。
+///
+/// `i == 0` は対局の最初の1手ぶんが欠けている可能性（`skip_initial_ply`）を
+/// 「ply は1から始まるはず」という前提で検出する（`game.moves` は呼び出し元
+/// `move_list_item` で非空を確認済みなので `game.moves[0]` へのアクセスは安全）。
 fn ply_gap_before(game: &GameRecord, i: usize) -> Option<u32> {
     if i == 0 {
-        return None;
+        let first_ply = game.moves[0].ply;
+        return (first_ply > 1).then(|| first_ply - 1);
     }
     let prev_ply = game.moves[i - 1].ply;
     let cur_ply = game.moves[i].ply;
@@ -724,7 +730,12 @@ fn draw_help_popup(frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         Line::from("k / ↑    前の対局"),
         Line::from("n        次の評価値急変手へジャンプ"),
         Line::from("N        前の評価値急変手へジャンプ"),
-        Line::from("s        対局リストの並べ替えを切り替え（発見順/勝敗別/エンジンペア別）"),
+        Line::from(format!(
+            "s        対局リストの並べ替えを切り替え（{}/{}/{}）",
+            SortMode::Discovery.label(),
+            SortMode::Outcome.label(),
+            SortMode::EnginePair.label()
+        )),
         Line::from("/        検索・フィルタ入力（Enter/Esc で終了、Esc はクリアも兼ねる）"),
         Line::from("?        このヘルプの表示・終了"),
         Line::from("q / Esc  終了（ヘルプ表示中は閉じるだけ）"),
@@ -1253,12 +1264,26 @@ mod tests {
     fn ply_gap_before_detects_skipped_plies() {
         let game = GameRecord {
             moves: vec![
-                mv_with_ply(12, Color::Black, None, None),
-                mv_with_ply(15, Color::White, None, None),
+                mv_with_ply(1, Color::Black, None, None),
+                mv_with_ply(4, Color::White, None, None),
             ],
         };
-        assert_eq!(ply_gap_before(&game, 0), None, "先頭の手には欠番の概念がない");
-        assert_eq!(ply_gap_before(&game, 1), Some(2), "12 の次が 15 なら 13,14 の 2 手が欠落");
+        assert_eq!(ply_gap_before(&game, 0), None, "先頭が ply=1 なら先頭欠番はない");
+        assert_eq!(ply_gap_before(&game, 1), Some(2), "1 の次が 4 なら 2,3 の 2 手が欠落");
+    }
+
+    #[test]
+    fn ply_gap_before_detects_leading_gap_from_skip_initial_ply() {
+        // skip_initial_ply により最初の記録レコードが ply=1 より後ろから
+        // 始まるケース（対局内の隣接手同士では検出できない先頭欠番）。
+        let game = GameRecord {
+            moves: vec![
+                mv_with_ply(12, Color::Black, None, None),
+                mv_with_ply(13, Color::White, None, None),
+            ],
+        };
+        assert_eq!(ply_gap_before(&game, 0), Some(11), "ply=12 開始なら 1〜11 の 11 手が欠落");
+        assert_eq!(ply_gap_before(&game, 1), None, "12 の次が 13 なら欠番なし");
     }
 
     #[test]
