@@ -56,7 +56,7 @@ jobs:
       # 既定 stable (x86-64) で問題なし。明示空文字で defensive に上書き。
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
       - name: Ensure csa-synthetic-failure label exists
@@ -82,7 +82,7 @@ jobs:
           else
             echo "can_run=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         if: steps.check.outputs.can_run == 'true'
         with:
           toolchain: stable
@@ -94,7 +94,7 @@ jobs:
           rustup default "$CHANNEL"
       - name: Setup sccache
         if: steps.check.outputs.can_run == 'true'
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - name: Enable sccache
         if: steps.check.outputs.can_run == 'true'
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
