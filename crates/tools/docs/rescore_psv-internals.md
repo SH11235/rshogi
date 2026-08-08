@@ -76,18 +76,21 @@ atomic rename + `sync_all()` で書く。プロセス kill / panic に耐える�
 
 再実行時の判定:
 
-- marker の fingerprint が現在の CLI と完全一致 + 出力サイズが記録と一致 → skip
+- `.done` marker の fingerprint が現在の CLI と完全一致 + 出力サイズが記録と一致 → skip
 - fingerprint 不一致 → rescore / expand / replacement 全出力を truncate して再生成
-- marker なし + expand / replacement / `--qsearch-leaf-label` いずれも無効 →
-  レコード数ベース resume にフォールバック
-- marker なし + 上記いずれか有効 → 全出力を truncate して最初から処理
+- `--out-scores` で `.done` なし → `.in-progress` fingerprint 一致時だけ
+  レコード数ベース resume。不一致・欠落・破損時は sidecar を truncate
+- full PSV で marker なし + expand / replacement / `--qsearch-leaf-label` いずれも無効 →
+  従来のレコード数ベース resume にフォールバック
+- full PSV で marker なし + 上記いずれか有効 → 全出力を truncate して最初から処理
 
 fingerprint に含まれる項目:
 
 - モデルパス（canonicalize 済み）、モデルサイズ、モデル mtime（ns）
 - 入力パス、入力サイズ、入力 mtime（ns）
 - `process_count`（`--limit` 適用後）
-- `--skip-in-check`、`--score-clip`、`--onnx-eval-scale`（`f32::to_bits()` の hex）
+- `--out-scores`、`--skip-in-check`、`--score-clip`、`--onnx-eval-scale`
+  （`f32::to_bits()` の hex）、`--onnx-tensorrt`
 - AobaZero モデル時のみ `--onnx-draw-ply`
 - `--qsearch-leaf-label`、および有効時のみ `--max-ply` と葉探索用 `--nnue` の
   パス・サイズ・mtime（葉 PV = 出力が NNUE に依存するため差し替えを検知する）
@@ -96,8 +99,12 @@ fingerprint に含まれる項目:
 - replacement 有効時: `--qsearch-leaf-replacement-output` の canonicalize 済みパス
   とその出力サイズ
 
-後方互換: 旧 marker の `--qsearch-leaf-label` / `replacement` キー欠落は `false`
-扱い。`--qsearch-leaf-label=true` だが
+後方互換: 旧 marker の `use_tensorrt` キー欠落は unknown として読み、現在値の
+`true` / `false` のどちらとも fingerprint を一致させない。このためキー無し旧 marker は
+更新後の初回実行で出力を truncate して一度だけ再生成され、再生成後の marker には同キーが入る。
+`out_scores` キー欠落は従来どおり `false` 扱い（旧 sidecar 出力は存在しないため安全）。
+旧 marker の `--qsearch-leaf-label` / `replacement` キー欠落も `false` 扱い。
+`--qsearch-leaf-label=true` だが
 葉探索 NNUE キーを持たない旧 marker は NNUE メタを `None` として読み、現設定と
 fingerprint 不一致になって再生成される。
 

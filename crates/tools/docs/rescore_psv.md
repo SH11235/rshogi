@@ -142,11 +142,12 @@ ort は load-dynamic のためビルド時に libonnxruntime は不要（実行�
 |---|---|---|
 | `--input` | （必須） | 入力 PSV。glob / 複数指定可 |
 | `--output-dir` | （必須） | 出力ディレクトリ（入力ファイル名で出力） |
+| `--out-scores` | false | dlshogi ONNX の score のみを `<入力名>.scores.i16` に出力（後述） |
 | `--threads` | 0（論理コア数） | 並列処理スレッド数 |
-| `--limit` | 0（無制限） | 各入力ファイルで処理するレコード数上限 |
+| `--limit` | 0（無制限） | 各入力ファイルで処理するレコード数上限（`--out-scores` と併用不可） |
 | `--score-clip` | 10000 | スコアを ± この値にクリップ |
 | `--skip-in-check` | false | 王手局面を出力から除外 |
-| `--delete-input` | false | 各ファイル処理完了後に入力を削除（ディスク節約） |
+| `--delete-input` | false | 各ファイル処理完了後に入力を削除（ディスク節約、`--out-scores` と併用不可） |
 | `--verbose` | false | 詳細出力 |
 
 ### ONNX モード
@@ -222,6 +223,32 @@ ort は load-dynamic のためビルド時に libonnxruntime は不要（実行�
 スタートのコマンドがそのままこの形（`--input "data/shard_*.bin"`）。
 `nohup` / `tmux` で流しっぱなしにしておき、GPU 温度で止めた後の再開や、モデル
 差し替え時の一括再スコアに使える。
+
+### score sidecar 出力（`--out-scores`）
+
+```bash
+rescore_psv --input "data/*.psv" --output-dir scores/ \
+  --dlshogi-onnx-model model.onnx --out-scores
+```
+
+フル PSV の代わりに `<入力ファイル名>.scores.i16` を生成する。record `i` の score は
+offset `i * 2` にある little-endian i16 で、ファイルサイズは厳密に
+`base PSV の全 records × 2` byte となる。通常のフル PSV
+出力と同じ推論・符号変換・clip を通り、
+通常出力の offset 32..34 を行順に抽出したものと bit 一致する。
+
+このモードは `--dlshogi-onnx-model` の直接推論専用で、NNUE、qsearch、search、外部
+engine、AobaZero ONNX、leaf label/replacement、expand、入力を削除する `--delete-input`、
+処理件数を制限する `--limit`（0 より大きい値）、および行を減らす `--skip-in-check` とは
+併用できない。入力は 40 byte の倍数でなければ
+即時エラーになる。run 開始時に `<入力名>.scores.i16.in-progress` を作り、
+入力・ONNX モデル・ラベル条件の fingerprint を記録する。中断後はこの marker が現在の
+設定と一致し、既存 sidecar が 2 byte の倍数であるときだけ、サイズを 2 で割った record
+位置から追記再開する。一致時に奇数 byte なら即時エラーになる。marker が無い、壊れている、
+または fingerprint が異なる場合は、既存サイズにかかわらず sidecar を truncate して最初から生成する。
+完了時は全 record 数との厳密一致を再検証して `.done` marker を書き、in-progress marker を
+削除する。decode / 局面構築エラーを含むバッチは書き出し前に停止するため、既存 sidecar の
+prefix は常に base PSV と行対応する。
 
 ### 王手局面を教師データから除外する
 
@@ -311,7 +338,16 @@ rescore_psv --input data.bin --output-dir rescored/ \
 - **ONNX モード**: 入力ファイルごとに完了マーカー `<出力名>.done` を書く。
   再実行時、マーカーの設定 fingerprint（モデル・入力・主要フラグ）が現在の CLI と
   一致し出力サイズも一致すれば skip、不一致なら該当ファイルの全出力を truncate
-  して自動再生成する。`Ctrl-C` 中断時はマーカーを書かない。
+  して自動再生成する。`Ctrl-C` 中断時は `.done` を書かない。
+- **`--out-scores` の中断再開**: `<出力名>.in-progress` に `.done` と同じ形式の
+  fingerprint を保持する。入力 path/size/mtime、モデル path/size/mtime、全入力件数、
+  `--onnx-eval-scale`、`--score-clip`、`--onnx-tensorrt` など fingerprint が追跡する
+  条件が一致する場合だけ既存 prefix へ追記する。不一致・marker 欠落時は truncate して
+  再生成する。run 中に入力またはモデルの metadata が変化した場合も `.done` を書かず、
+  次回実行時に再生成する。出力 sidecar
+  自身の mtime は fingerprint に含めないため、追記による mtime 更新は resume を妨げない。
+  `Ctrl-C` 中断時は in-progress marker を残し、正常完了時だけ `.done` へ昇格する。
+  同じ出力 sidecar への複数プロセスからの同時書き込みは非対応。
 - **NNUE / 探索 / 外部エンジンモード**: マーカーは使わず、出力レコード数が入力
   レコード数以上のファイルを skip する（ファイル粒度。中途半端なファイルは最初
   から再処理）。
