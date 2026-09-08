@@ -766,6 +766,7 @@ impl TimeManagement {
     /// ponderhitを検出した際の処理（YO準拠）
     ///
     /// - `ponderhit_time` を更新し、以後の `set_search_end()` の秒境界切り上げ計算に反映する。
+    /// - movetime/rtimeの固定期限が設定済みなら、hitまでの時間を加算して予算を移す。
     /// - ponder状態を解除して通常探索へ移行する（`is_pondering=false`）。
     /// - ponder中に時間を使い切っていた場合（`stop_on_ponderhit=true`）のみ、停止時刻を確定させる。
     pub fn on_ponderhit(&mut self) {
@@ -776,6 +777,10 @@ impl TimeManagement {
         }
 
         self.set_ponderhit();
+        // movetime/rtimeで既に決めた予算を、hit後から使う開始時刻基準の期限へ移す。
+        if self.search_end > 0 {
+            self.search_end = self.search_end.saturating_add(self.ponderhit_offset());
+        }
         self.is_pondering = false;
         self.last_stop_threshold = None;
 
@@ -1157,6 +1162,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_fixed_time_ponder_budget_starts_at_hit() {
+        for rtime in [false, true] {
+            let mut tm = create_time_manager();
+            let mut limits = LimitsType::new();
+            if rtime {
+                limits.rtime = 1000;
+            } else {
+                limits.movetime = 1000;
+            }
+            limits.ponder = true;
+            limits.start_time = Some(Instant::now() - Duration::from_secs(20));
+            // ply=0でrtimeの乱数加算をなくし、期限の境界を正確に確認する。
+            tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
+            assert_eq!(tm.search_end(), 1000);
+            assert!(!tm.should_stop_immediately());
+            tm.on_ponderhit();
+            let offset = tm.ponderhit_offset();
+            assert_eq!(tm.search_end(), offset + 1000);
+            assert!(!tm.should_stop_internal(offset + 999));
+            assert!(tm.should_stop_internal(offset + 1000));
+            let deadline = tm.search_end();
+            tm.on_ponderhit();
+            assert_eq!(tm.search_end(), deadline, "重複hitで予算を延長しない");
+
+            limits.ponder = false;
+            tm.init(&limits, Color::Black, 0, DEFAULT_MAX_MOVES_TO_DRAW);
+            tm.on_ponderhit();
+            assert_eq!(tm.search_end(), 1000, "通常goの固定期限は変更しない");
+            assert!(tm.should_stop_immediately());
+        }
+    }
     #[test]
     fn test_on_ponderhit_ignored_when_not_pondering() {
         let stop = Arc::new(AtomicBool::new(false));
