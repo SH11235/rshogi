@@ -14,6 +14,7 @@
 //!
 //! 環境変数（すべて `SPSA_TEST_ENGINE_` 接頭辞）:
 //! - `SPAWN_LOG`: PID を起動ごとに追記。
+//! - `WAIT_SPAWNS`: 最初の go で SPAWN_LOG が指定行数に達するまで待機（15 秒で exit(2)）。
 //! - `PROTOCOL_LOG`: PID と受信コマンドを1行1 write で追記。
 //! - `FAIL_ONCE_MARKER`: create_new に成功した個体だけ go で異常終了。
 //! - `FAIL_AFTER_GO`: 上記失敗を各個体の指定回数の go 後まで遅延（既定0）。
@@ -91,6 +92,14 @@ fn main() {
             None
         } else if trimmed.starts_with("go") {
             go_count += 1;
+            if go_count == 1
+                && let Ok(count) = std::env::var("SPSA_TEST_ENGINE_WAIT_SPAWNS")
+            {
+                let count = count.parse::<usize>().expect("WAIT_SPAWNS must be an integer");
+                let path = std::env::var_os("SPSA_TEST_ENGINE_SPAWN_LOG")
+                    .expect("SPAWN_LOG required for WAIT_SPAWNS");
+                wait_spawns(std::path::Path::new(&path), count);
+            }
             if go_count > fail_after
                 && marker.as_ref().is_some_and(|path| {
                     OpenOptions::new().write(true).create_new(true).open(path).is_ok()
@@ -167,6 +176,17 @@ fn main() {
     flooding.store(false, Ordering::Release);
     if let Some(handle) = flood_thread {
         let _ = handle.join();
+    }
+}
+
+fn wait_spawns(path: &std::path::Path, count: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !std::fs::read_to_string(path).is_ok_and(|log| log.lines().count() >= count) {
+        if std::time::Instant::now() >= deadline {
+            eprintln!("spawn deadline: {} (expected at least {count} lines)", path.display());
+            std::process::exit(2);
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 

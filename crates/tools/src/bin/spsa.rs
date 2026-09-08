@@ -3312,9 +3312,13 @@ fn main() -> Result<()> {
 
     let worker_params = params.clone();
     std::thread::scope(|scope| -> Result<()> {
+        let remaining_pairs = total_pairs - completed_pairs;
+        if remaining_pairs == 0 {
+            return Ok(());
+        }
         let pool = WorkerPool::new(
             scope,
-            cli.concurrency.min(2 * batch_pairs as usize),
+            cli.concurrency.min(2 * batch_pairs.min(remaining_pairs) as usize),
             WorkerContext {
                 base_cfg: &base_cfg,
                 params: &worker_params,

@@ -1407,7 +1407,8 @@ resume できないときは、§10.7 の手順で旧 run の最終値だけを�
 
 ## 14. engine プール・再試行・停止
 
-worker は run 開始時に `min(concurrency, 2 × batch_pairs)` 個生成し、各 worker が
+worker は run 開始時に `min(concurrency, 2 × min(batch_pairs, remaining_pairs))` 個生成する。
+`remaining_pairs` は run 開始時の残り pair 数で、0 なら pool を作らず engine も起動しない。各 worker が
 plus/minus の engine 2 本を全 batch で再利用する。batch 末の barrier と更新・保存は従来どおり。
 各対局では全 active パラメータを絶対値で送り、plus 設定＋isready → minus 設定＋isready →
 plus usinewgame＋isready → minus usinewgame＋isready の順で開始する。

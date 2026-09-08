@@ -1014,6 +1014,38 @@ fn initialization_failure_cancels_before_engine_drop_and_next_go() {
 }
 
 #[test]
+fn remaining_pairs_caps_pool_at_two_workers() {
+    let test = PoolTest::new();
+    assert_success(&test.run(
+        "resign",
+        1,
+        100,
+        4,
+        &[],
+        &[("SPSA_TEST_ENGINE_WAIT_SPAWNS", Path::new("4"))],
+    ));
+    assert_eq!(test.meta()["completed_pairs"], 1);
+    assert_eq!(count_lines(&test.path("spawns")), 4);
+    assert!(!test.path("run/.lock").exists());
+}
+
+#[test]
+fn completed_resume_does_not_spawn_engines() {
+    let test = PoolTest::new();
+    assert_success(&test.run("resign", 1, 100, 4, &[], &[]));
+    let spawns = std::fs::read(test.path("spawns")).unwrap();
+    let final_params = test.bytes("final.params");
+    let meta = test.bytes("meta.json");
+    assert_eq!(test.meta()["completed_pairs"], 1);
+
+    assert_success(&test.run("resign", 1, 100, 4, &["--resume"], &[]));
+    assert_eq!(std::fs::read(test.path("spawns")).unwrap(), spawns);
+    assert_eq!(test.bytes("final.params"), final_params);
+    assert_eq!(test.bytes("meta.json"), meta);
+    assert!(!test.path("run/.lock").exists());
+}
+
+#[test]
 fn persistent_pool_spawns_four_engines_across_three_batches() {
     let test = PoolTest::new();
     assert_success(&test.run("resign", 3, 1, 2, &[], &[]));
