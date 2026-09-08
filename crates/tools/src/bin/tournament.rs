@@ -66,6 +66,7 @@ use serde::{Deserialize, Serialize};
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::types::{EvalLog, side_label};
+use tools::selfplay::{DrawRule, ResignRule};
 use tools::selfplay::{
     EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
 };
@@ -137,6 +138,12 @@ struct Cli {
     /// Maximum plies per game
     #[arg(long, default_value_t = 512)]
     max_moves: u32,
+    /// 評価値による投了裁定 (movecount=3,score=600)。既定 off。
+    #[arg(long, value_parser = clap::value_parser!(ResignRule))]
+    adjudicate_resign: Option<ResignRule>,
+    /// 評価値による引分裁定 (movenumber=34,movecount=8,score=20)。手数は ply。
+    #[arg(long, value_parser = clap::value_parser!(DrawRule))]
+    adjudicate_draw: Option<DrawRule>,
 
     /// Output directory (required)
     #[arg(long)]
@@ -314,6 +321,10 @@ struct MetaSettings {
     games: u32,
     seed: u64,
     max_moves: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adjudicate_resign: Option<ResignRule>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adjudicate_draw: Option<DrawRule>,
     byoyomi: u64,
     #[serde(skip_serializing_if = "is_zero_u64")]
     btime: u64,
@@ -661,6 +672,8 @@ struct WorkerConfig {
     threads: usize,
     hash_mb: u32,
     max_moves: u32,
+    adjudicate_resign: Option<ResignRule>,
+    adjudicate_draw: Option<DrawRule>,
     timeout_margin_ms: u64,
     byoyomi: u64,
     btime: u64,
@@ -684,6 +697,8 @@ fn worker_main(
         threads,
         hash_mb,
         max_moves,
+        adjudicate_resign,
+        adjudicate_draw,
         timeout_margin_ms,
         byoyomi,
         btime,
@@ -754,6 +769,8 @@ fn worker_main(
         let tc = TimeControl::new(btime, btime, binc, binc, byoyomi);
         let config = GameConfig {
             max_moves,
+            resign_rule: adjudicate_resign,
+            draw_rule: adjudicate_draw,
             timeout_margin_ms,
             pass_rights: None,
             go_depth,
@@ -840,6 +857,8 @@ struct SpawnCtx<'a> {
     threads: usize,
     hash_mb: u32,
     max_moves: u32,
+    adjudicate_resign: Option<ResignRule>,
+    adjudicate_draw: Option<DrawRule>,
     timeout_margin_ms: u64,
     byoyomi: u64,
     btime: u64,
@@ -865,6 +884,8 @@ fn spawn_worker(
         threads: ctx.threads,
         hash_mb: ctx.hash_mb,
         max_moves: ctx.max_moves,
+        adjudicate_resign: ctx.adjudicate_resign,
+        adjudicate_draw: ctx.adjudicate_draw,
         timeout_margin_ms: ctx.timeout_margin_ms,
         byoyomi: ctx.byoyomi,
         btime: ctx.btime,
@@ -1097,6 +1118,8 @@ fn main() -> Result<()> {
             games: cli.games * 2,
             seed,
             max_moves: cli.max_moves,
+            adjudicate_resign: cli.adjudicate_resign,
+            adjudicate_draw: cli.adjudicate_draw,
             byoyomi: cli.byoyomi,
             btime: cli.btime,
             binc: cli.binc,
@@ -1240,6 +1263,8 @@ fn main() -> Result<()> {
                     games: cli.games * 2, // 各方向 cli.games 局、双方向で合計
                     seed,
                     max_moves: cli.max_moves,
+                    adjudicate_resign: cli.adjudicate_resign,
+                    adjudicate_draw: cli.adjudicate_draw,
                     byoyomi: cli.byoyomi,
                     btime: cli.btime,
                     binc: cli.binc,
@@ -1286,6 +1311,8 @@ fn main() -> Result<()> {
         threads: cli.threads,
         hash_mb: cli.hash_mb,
         max_moves: cli.max_moves,
+        adjudicate_resign: cli.adjudicate_resign,
+        adjudicate_draw: cli.adjudicate_draw,
         timeout_margin_ms: cli.timeout_margin_ms,
         byoyomi: cli.byoyomi,
         btime: cli.btime,
@@ -2251,6 +2278,117 @@ fn ensure_node_coverage(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
+    #[test]
+    fn adjudication_flags_parse_and_default_off() {
+        let args = [
+            "tournament",
+            "--engine",
+            "base",
+            "--engine",
+            "test",
+            "--out-dir",
+            "out",
+        ];
+        let cli = super::Cli::try_parse_from(args).unwrap();
+        assert_eq!(cli.adjudicate_resign, None);
+        assert_eq!(cli.adjudicate_draw, None);
+        for separator in [",", " "] {
+            let resign = ["movecount=3", "score=600"].join(separator);
+            let draw = ["movenumber=34", "movecount=8", "score=20"].join(separator);
+            let cli = super::Cli::try_parse_from(args.into_iter().chain([
+                "--adjudicate-resign",
+                resign.as_str(),
+                "--adjudicate-draw",
+                draw.as_str(),
+            ]))
+            .unwrap();
+            assert_eq!(
+                cli.adjudicate_resign,
+                Some(super::ResignRule {
+                    movecount: 3,
+                    score: 600
+                })
+            );
+            assert_eq!(
+                cli.adjudicate_draw,
+                Some(super::DrawRule {
+                    movenumber: 34,
+                    movecount: 8,
+                    score: 20
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn adjudication_flags_reject_invalid_fields() {
+        for (flag, value) in [
+            ("--adjudicate-resign", "movecount=3,score=600,unknown=1"),
+            ("--adjudicate-resign", "movecount=3"),
+            ("--adjudicate-resign", "score=600"),
+            ("--adjudicate-resign", "movecount=3,score=600,score=20"),
+            ("--adjudicate-resign", "movecount=0,score=600"),
+            ("--adjudicate-resign", "movecount=3,score=-1"),
+            ("--adjudicate-resign", "movecount=3,score=2147483648"),
+            ("--adjudicate-resign", "movecount=x,score=600"),
+            ("--adjudicate-resign", "movecount=3,score"),
+            ("--adjudicate-draw", "movenumber=34,movecount=8,score=20,unknown=1"),
+            ("--adjudicate-draw", "movecount=8,score=20"),
+            ("--adjudicate-draw", "movenumber=34,score=20"),
+            ("--adjudicate-draw", "movenumber=34,movecount=8"),
+            ("--adjudicate-draw", "movenumber=34,movecount=8,score=20,movenumber=40"),
+            ("--adjudicate-draw", "movenumber=34,movecount=0,score=20"),
+        ] {
+            assert!(
+                super::Cli::try_parse_from([
+                    "tournament",
+                    "--engine",
+                    "base",
+                    "--engine",
+                    "test",
+                    "--out-dir",
+                    "out",
+                    flag,
+                    value,
+                ])
+                .is_err(),
+                "{flag} {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn adjudication_meta_omits_disabled_rules() {
+        let mut settings = super::MetaSettings {
+            games: 2,
+            seed: 0,
+            max_moves: 512,
+            adjudicate_resign: None,
+            adjudicate_draw: None,
+            byoyomi: 100,
+            btime: 0,
+            binc: 0,
+            timeout_margin_ms: 0,
+            threads: 1,
+            hash_mb: 16,
+            depth: None,
+            nodes: None,
+        };
+        let json = serde_json::to_value(&settings).unwrap();
+        assert!(json.get("adjudicate_resign").is_none());
+        assert!(json.get("adjudicate_draw").is_none());
+        settings.adjudicate_resign = Some("movecount=3,score=600".parse().unwrap());
+        settings.adjudicate_draw = Some("movenumber=34,movecount=8,score=20".parse().unwrap());
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["adjudicate_resign"], serde_json::json!({"movecount":3,"score":600}));
+        assert_eq!(
+            json["adjudicate_draw"],
+            serde_json::json!({"movenumber":34,"movecount":8,"score":20})
+        );
+    }
+
     use super::{
         ControlFile, MatchResult, SprtState, TicketSource, build_engine_usi_options,
         deterministic_startpos_index, ensure_node_coverage, resolve_engine_nodes, splitmix64,

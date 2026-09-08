@@ -31,6 +31,10 @@ cargo run --release -p tools --bin generate_spsa_params -- \
 
 ## 3. SPSA実行
 
+対局 driver は開始局面を含む 4 回同一局面で千日手を自動終局する。
+通常は引分、連続王手の千日手は王手側の反則負けとして評価に算入する。
+SPSA では評価値による投了・引分裁定は無効。
+
 > 以下のコマンド例は **starting point** であり、最適値ではない。
 > `--total-pairs` は対象 param 数 × 50〜500 程度の幅で結果を見ながら増減
 > するのが基本。`--early-stop-*` 三点は閾値の運用実績がまだ無いため、

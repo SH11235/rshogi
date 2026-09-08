@@ -2,6 +2,7 @@ use anyhow::Result;
 use rshogi_core::movegen::is_legal_with_pass;
 use rshogi_core::types::{Color, Move};
 
+use super::adjudication::{DrawRule, ResignRule, RuleAdjudicator, ScoreAdjudicator};
 use super::engine::EngineProcess;
 use super::position::{ParsedPosition, build_position};
 use super::time_control::TimeControl;
@@ -9,6 +10,10 @@ use super::types::{EvalLog, GameOutcome, InfoCallback, SearchRequest};
 
 /// ゲーム設定
 pub struct GameConfig {
+    /// 評価値による投了裁定。既定は無効。
+    pub resign_rule: Option<ResignRule>,
+    /// 評価値による引分裁定。既定は無効。
+    pub draw_rule: Option<DrawRule>,
     pub max_moves: u32,
     pub timeout_margin_ms: u64,
     /// パス権利の初期値 (先手, 後手)。None の場合はパス権なし。
@@ -65,6 +70,8 @@ pub fn run_game(
     let pass_black = config.pass_rights.map(|(b, _)| b);
     let pass_white = config.pass_rights.map(|(_, w)| w);
     let mut pos = build_position(start_pos, pass_black, pass_white)?;
+    let mut rules = RuleAdjudicator::new(&pos);
+    let mut scores = ScoreAdjudicator::new(config.resign_rule, config.draw_rule);
     let mut tc = tc;
     let mut outcome = GameOutcome::InProgress;
     let mut outcome_reason = "max_moves".to_string();
@@ -157,6 +164,14 @@ pub fn run_game(
                             pos.gives_check(mv)
                         };
                         pos.do_move(mv, gives_check);
+                        if let Some(verdict) = rules
+                            .after_move(&pos, side, gives_check, plies_played)
+                            .or_else(|| scores.after_move(side, eval_log.as_ref(), plies_played))
+                        {
+                            outcome = verdict.outcome;
+                            outcome_reason = verdict.reason.to_string();
+                            terminal = true;
+                        }
                         tc.update_after_move(side, search.elapsed_ms);
                         move_usi = mv_str.clone();
                         raw_move_usi = None;

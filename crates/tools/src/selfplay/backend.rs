@@ -198,6 +198,7 @@ impl SearchBackend for NativeBackend {
         let best_move_usi = best_move.map(|m| m.to_usi());
 
         let eval = Some(EvalLog {
+            score_bound: None,
             score_cp: if result.score.is_mate_score() {
                 None
             } else {

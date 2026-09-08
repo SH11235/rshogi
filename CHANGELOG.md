@@ -14,6 +14,14 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+### tournament: ルールによる自動終局
+
+- 千日手を 4 回同一局面で自動終局し、連続王手の千日手は王手側の反則負けとする。
+  共有 driver を使う SPSA にも適用する。
+- `--adjudicate-resign` / `--adjudicate-draw` に評価値裁定を追加（既定 off）。
+  千日手と引分裁定は通常の引分として WLD / pentanomial に算入する。
+- `analyze_selfplay` に全 result 行の終局理由分布と `max_moves` 到達率を追加した。
+
 ### rescore_psv: routing bucket 数の防御と NNUE score sidecar
 
 - `--ls-progress-buckets` が NNUE ファイルの格納 bucket 数と不一致の場合はエラーに

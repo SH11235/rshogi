@@ -3041,6 +3041,8 @@ fn main() -> Result<()> {
     };
 
     let game_cfg = GameConfig {
+        resign_rule: None,
+        draw_rule: None,
         max_moves: cli.max_moves,
         timeout_margin_ms: cli.timeout_margin_ms,
         pass_rights: None,
