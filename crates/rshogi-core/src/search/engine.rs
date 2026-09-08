@@ -2468,6 +2468,49 @@ mod tests {
     }
 
     #[test]
+    fn ponderhit_before_go_returns_bestmove_without_stop() {
+        let guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        let mut search = Search::new_with_eval_hash(1, 1);
+        search.reset_flags();
+        let stop = search.stop_flag();
+        let ponderhit = search.ponderhit_handle();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let search_barrier = Arc::clone(&barrier);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(move || {
+                let mut pos = Position::new();
+                pos.set_hirate();
+                search_barrier.wait();
+                let result = search.go(
+                    &mut pos,
+                    LimitsType {
+                        ponder: true,
+                        depth: 1,
+                        ..LimitsType::default()
+                    },
+                    None::<fn(&SearchInfo)>,
+                );
+                tx.send((result.best_move, search.ponderhit_flag_for_test())).unwrap();
+            })
+            .unwrap();
+        ponderhit.signal();
+        barrier.wait();
+        let result = rx.recv_timeout(Duration::from_secs(5));
+        // 回帰時にも探索スレッドを残さず、stop による返却を成功扱いしない。
+        if result.is_err() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        worker.join().unwrap();
+        let (best_move, pending) = result.expect("ponderhit alone must release bestmove");
+        assert_ne!(best_move, Move::NONE);
+        assert!(!pending);
+        drop(guard);
+    }
+
+    #[test]
     fn ponderhit_handle_signals_search() {
         let search = Search::new_with_eval_hash(1, 1);
         let handle = search.ponderhit_handle();
