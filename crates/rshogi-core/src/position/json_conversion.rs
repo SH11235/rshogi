@@ -60,7 +60,7 @@ impl Position {
             }
 
             for cell in row {
-                let square = Square::from_usi(&cell.square)
+                let square = Square::from_usi_strict(&cell.square)
                     .ok_or_else(|| format!("invalid square: {}", cell.square))?;
 
                 if let Some(piece_json) = &cell.piece {
@@ -138,7 +138,8 @@ impl Position {
         let mut error: Option<String> = None;
 
         for mv in moves {
-            let parsed = Move::from_usi(mv).ok_or_else(|| format!("failed to parse move: {mv}"))?;
+            let parsed =
+                Move::from_usi_strict(mv).ok_or_else(|| format!("failed to parse move: {mv}"))?;
             let parsed_raw = parsed.raw();
 
             let mut list = MoveList::new();
@@ -332,6 +333,40 @@ mod tests {
         assert_eq!(piece.promoted, None);
     }
 
+    #[test]
+    fn test_strict_replay_rejects_trailing_characters() {
+        for token in [
+            "7g7fgarbage",
+            "7g7f+garbage",
+            "7g7fx",
+            "7g7f++",
+            "P*5e+",
+            "P*5egarbage",
+            "7g7f ",
+            "7g7f歩",
+        ] {
+            let error =
+                Position::replay_moves_strict("startpos", &[token.into()], None).unwrap_err();
+            assert_eq!(error, format!("failed to parse move: {token}"));
+        }
+        let moves = ["7g7f".into(), "3c3dgarbage".into()];
+        assert_eq!(
+            Position::replay_moves_strict("startpos", &moves, None).unwrap_err(),
+            "failed to parse move: 3c3dgarbage"
+        );
+    }
+
+    #[test]
+    fn test_json_board_rejects_trailing_square_characters() {
+        for square in ["1aextra", "1a+", "1a ", "1a歩"] {
+            let mut board = Position::initial_board_json();
+            board.cells[0][0].square = square.into();
+            assert_eq!(
+                Position::from_board_state_json(&board).err(),
+                Some(format!("invalid square: {square}"))
+            );
+        }
+    }
     #[test]
     fn test_sfen_roundtrip() {
         let sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
