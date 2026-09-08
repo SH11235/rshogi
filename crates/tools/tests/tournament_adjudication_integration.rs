@@ -54,7 +54,7 @@ fn driver_adjudicates_repetition_and_only_exact_scores() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let engine = dir.path().join("engine.sh");
-        // 平手から金を往復。position の手数から手を選び、色交換後も同じ手順を返す。
+        // 平手から金を往復。moves の数から手を選び、色交換後も同じ手順を返す。
         fs::write(
             &engine,
             r#"#!/bin/sh
@@ -62,7 +62,14 @@ while IFS= read -r line; do
   case "$line" in
     usi) printf 'id name repetition\nusiok\n' ;;
     isready) printf 'readyok\n' ;;
-    position*) for token in $line; do ply=$token; done ;;
+    position*)
+      ply=1
+      in_moves=0
+      for token in $line; do
+        if [ "$in_moves" = 1 ]; then ply=$((ply + 1)); fi
+        if [ "$token" = moves ]; then in_moves=1; fi
+      done
+      ;;
     go*)
       case $((ply % 4)) in
         1) move=3i4h ;; 2) move=7a6b ;; 3) move=4h3i ;; 0) move=6b7a ;;

@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use rshogi_core::movegen::is_legal_with_pass;
+use rshogi_core::movegen::{MoveList, generate_legal_all_with_pass};
 use rshogi_core::position::{Position, SFEN_HIRATE};
 use rshogi_core::types::Move;
 
@@ -145,6 +145,15 @@ where
     }
 }
 
+// core の is_legal は生成済みの疑似合法手を前提とするため、外部入力には直接使わない。
+// スタック上の完全合法手集合で検査し、空き升からの移動・持駒不足・行き所のない駒も排除する。
+pub(crate) fn is_legal_game_move(pos: &Position, mv: Move) -> bool {
+    let mut legal_moves = MoveList::new();
+    generate_legal_all_with_pass(pos, &mut legal_moves);
+    // 生成手の上位ビットには駒情報があるが、USI から読んだ手にはない。
+    legal_moves.iter().any(|legal| legal.raw() == mv.raw())
+}
+
 pub fn build_position(
     parsed: &ParsedPosition,
     pass_rights_black: Option<u8>,
@@ -167,7 +176,7 @@ pub fn build_position(
     for mv_str in &parsed.moves {
         let mv = Move::from_usi(mv_str)
             .ok_or_else(|| anyhow!("invalid move in start position: {mv_str}"))?;
-        if !is_legal_with_pass(&pos, mv) {
+        if !is_legal_game_move(&pos, mv) {
             bail!("illegal move '{mv_str}' in start position");
         }
         let gives_check = if mv.is_pass() {
@@ -216,6 +225,19 @@ mod tests {
                 .unwrap();
         assert!(parsed_sfen_only.sfen.is_some());
         assert!(parsed_sfen_only.moves.is_empty());
+    }
+
+    #[test]
+    fn invalid_opening_moves_are_rejected_without_applying_them() {
+        for line in [
+            "startpos moves 7g7f 7g7f",
+            "startpos moves R*5e",
+            "startpos moves none",
+            "sfen 4k4/9/9/9/9/9/9/9/4K4 b P 1 moves P*4a",
+        ] {
+            let parsed = parse_position_line(line).unwrap();
+            assert!(build_position(&parsed, None, None).is_err(), "{line}");
+        }
     }
 
     #[test]
