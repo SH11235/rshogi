@@ -337,6 +337,13 @@ mod linux {
             return None;
         }
 
+        // 初回書込 (fault) より前にヒントを置き、THP 割当を促す。ヒントのみで内容も
+        // アドレスも変わらないため失敗は無視する。
+        // SAFETY: base / total は上の mmap で得た領域そのもの。
+        unsafe {
+            libc::madvise(base, spec.total, libc::MADV_HUGEPAGE);
+        }
+
         // ヘッダと blob を書き込む。
         // SAFETY: base は total バイトの有効な書込可能マッピング先頭。ページアラインの
         // ため `*mut ShmHeader` として整列している。shm は zero-fill 済みのため
