@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use rshogi_core::position::Position;
-use rshogi_core::types::Color;
+use rshogi_core::types::{Color, Hand, Piece, Square};
 use serde::Serialize;
 
 use super::{EvalLog, GameOutcome};
@@ -30,20 +30,35 @@ fn loss(side: Color, reason: &'static str) -> Verdict {
     }
 }
 
-fn position_key(pos: &Position) -> String {
-    let sfen = pos.to_sfen();
-    let board = sfen.rsplit_once(' ').map_or(sfen.as_str(), |(board, _)| board);
-    let rights = if pos.is_pass_rights_enabled() {
-        (pos.pass_rights(Color::Black), pos.pass_rights(Color::White))
-    } else {
-        (0, 0)
-    };
-    format!("{board} {} {}", rights.0, rights.1)
+// ハッシュ衝突時も盤・持駒を厳密比較する。キー自体にヒープ領域を持たない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct PositionKey {
+    board: [Piece; Square::NUM],
+    hands: [Hand; 2],
+    side: Color,
+    pass_rights: [u8; 2],
+}
+
+fn position_key(pos: &Position) -> PositionKey {
+    let mut board = [Piece::NONE; Square::NUM];
+    for sq in Square::all() {
+        board[sq.index()] = pos.piece_on(sq);
+    }
+    PositionKey {
+        board,
+        hands: [pos.hand(Color::Black), pos.hand(Color::White)],
+        side: pos.side_to_move(),
+        pass_rights: if pos.is_pass_rights_enabled() {
+            [pos.pass_rights(Color::Black), pos.pass_rights(Color::White)]
+        } else {
+            [0, 0]
+        },
+    }
 }
 
 /// 4 回同一局面と連続王手の千日手を判定する。
 pub struct RuleAdjudicator {
-    history: HashMap<String, (u32, u32)>,
+    history: HashMap<PositionKey, (u32, u32)>,
     check_streak: [u32; 2],
 }
 
@@ -184,6 +199,8 @@ impl ScoreAdjudicator {
         eval: Option<&EvalLog>,
         ply: u32,
     ) -> Option<Verdict> {
+        // bound は確定評価ではないため、欠落評価と同様に連続回数をリセットする。
+        let eval = eval.filter(|e| e.score_bound.is_none());
         if let Some(rule) = self.resign {
             let losing = eval.is_some_and(|e| match e.score_mate {
                 Some(mate) => mate < 0,
@@ -249,6 +266,30 @@ mod tests {
     }
 
     const HIRATE: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+    /// キー生成のみの比較。対局全体の速度向上を表す測定ではない。
+    /// `cargo test -p tools --lib benchmark_position_key -- --ignored --nocapture`
+    /// 2026-09-09、test profile、10万回の ABBA: SFEN 129.48/129.72ms、固定長 3.17/3.12ms。
+    #[test]
+    #[ignore = "手動性能測定: --ignored --nocapture"]
+    fn benchmark_position_key() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let pos = position(HIRATE);
+        for fixed in [false, true, true, false] {
+            let start = Instant::now();
+            for _ in 0..100_000 {
+                if fixed {
+                    black_box(position_key(black_box(&pos)));
+                } else {
+                    let sfen = black_box(&pos).to_sfen();
+                    let board = sfen.rsplit_once(' ').unwrap().0;
+                    black_box(format!("{board} 0 0"));
+                }
+            }
+            eprintln!("fixed={fixed}: {:?} / 100000 keys", start.elapsed());
+        }
+    }
 
     #[test]
     fn fourth_occurrence_includes_start_position() {
@@ -446,6 +487,33 @@ mod tests {
                 GameOutcome::Draw,
                 "adjudication_draw",
             );
+        }
+    }
+
+    #[test]
+    fn bound_scores_reset_adjudication_streaks_through_usi_parser() {
+        for token in ["lowerbound", "upperbound"] {
+            for score in ["cp -700", "mate -3", "cp 0"] {
+                let mut snap = super::super::InfoSnapshot::default();
+                snap.update_from_line(&format!("info score {score} {token} pv 7g7f"));
+                let eval = snap.into_eval_log();
+                let mut scores = ScoreAdjudicator::new(
+                    Some(ResignRule {
+                        movecount: 2,
+                        score: 600,
+                    }),
+                    Some(DrawRule {
+                        movenumber: 0,
+                        movecount: 2,
+                        score: 20,
+                    }),
+                );
+                let exact = if score == "cp 0" { cp(0) } else { cp(-700) };
+                assert!(scores.after_move(Color::Black, Some(&exact), 1).is_none());
+                assert!(scores.after_move(Color::Black, eval.as_ref(), 3).is_none());
+                assert!(scores.after_move(Color::Black, Some(&exact), 5).is_none());
+                assert!(scores.after_move(Color::Black, Some(&exact), 7).is_some());
+            }
         }
     }
 

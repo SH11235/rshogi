@@ -91,6 +91,10 @@ test エンジンが base より +5 nelo 以上強いかを有意水準 95% で�
   16 ply 相当）。連続回数は 34 手未満でも数え、mate score・条件外の cp・
   評価値欠落でリセットする。
 
+`lowerbound` / `upperbound` 付きの score は確定評価ではないため、投了・引分裁定の
+両方で評価値欠落と同様に連続回数をリセットする。move 行の `eval.score_bound` に
+`lowerbound` / `upperbound` を記録する（確定評価と旧ログでは省略）。
+
 各フラグの key はすべて必須で、`,` または空白区切りに対応する（値全体を引用符で囲む）。
 未知・重複 key はエラー。`movecount` は 1 以上、`score` は非負の i32、`movenumber` は
 非負の u32 とする。有効な設定は meta の `settings.adjudicate_resign` /
