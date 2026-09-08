@@ -1422,7 +1422,7 @@ plus usinewgame＋isready → minus usinewgame＋isready の順で開始する�
 batch の確定済み plus/minus 値でやり直す。乱数は引き直さず、成功した結果を一度だけ集計する。
 再試行は stderr に `retry batch=... game_id=... attempt=... cause=...` と1行記録する。
 `attempt=2` は初回失敗後の2回目の試行を表す。CSV/meta の schema は変えない。
-通常の resign / win / illegal_move / no_bestmove / 時計 timeout / max_moves と局面構築エラーは再試行しない。
+通常の resign / win / illegal_move / no_bestmove / 時計 timeout / max_moves / sennichite / sennichite_perpetual_check と局面構築エラーは再試行しない。
 これは1局単位の再試行であり、後続 PR2 の PairTask 単位の再試行とは別物。
 
 watchdog は「運用上の探索期限超過。hang と低速を区別せず、勝敗には採用しない」。
