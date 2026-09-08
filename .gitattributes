@@ -1,5 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+crates/tools/tests/golden/** text eol=lf
 
 # Rust source files
 *.rs text eol=lf

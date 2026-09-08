@@ -277,6 +277,7 @@ impl SearchBackend for UsiBackend {
         };
 
         let req = SearchRequest {
+            limit_only_timeout_ms: None,
             sfen: &params.sfen,
             moves: "",
             time_args: params.time_args,

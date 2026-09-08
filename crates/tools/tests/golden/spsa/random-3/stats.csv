@@ -1,0 +1,3 @@
+iteration,batch_pairs,plus_wins,minus_wins,draws,raw_result,active_params,avg_abs_shift,updated_params,avg_abs_update,max_abs_update,total_games
+1,2,4,0,0,+4.000000,2,0.862719,2,0.005196,0.006929,4
+2,2,4,0,0,+4.000000,2,0.772112,2,0.003403,0.004538,8

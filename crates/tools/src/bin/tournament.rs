@@ -768,6 +768,8 @@ fn worker_main(
         let start_pos = &start_positions[ticket.startpos_idx];
         let tc = TimeControl::new(btime, btime, binc, binc, byoyomi);
         let config = GameConfig {
+            limit_only_timeout_ms: None,
+            cancel: None,
             max_moves,
             resign_rule: adjudicate_resign,
             draw_rule: adjudicate_draw,

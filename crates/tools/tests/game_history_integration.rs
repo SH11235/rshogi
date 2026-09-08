@@ -85,6 +85,8 @@ done
         draw_rule: None,
         max_moves: replies.len() as u32,
         timeout_margin_ms: 1000,
+        limit_only_timeout_ms: None,
+        cancel: None,
         pass_rights: rights,
         go_depth: Some(1),
         go_nodes_black: None,

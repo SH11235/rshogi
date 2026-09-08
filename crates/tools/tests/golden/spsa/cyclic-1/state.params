@@ -1,0 +1,2 @@
+SPSA_TEST_INT,int,5.011466,0,10,1,0.001 //test integer param
+SPSA_TEST_FLOAT,float,1.501195,0,3,0.5,0.001 //test float param
