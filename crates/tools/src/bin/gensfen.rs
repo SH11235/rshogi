@@ -324,7 +324,8 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     fv_scale: i32,
 
-    /// 置換表を対局間で保持する（TT をクリアしない）。
+    /// NativeBackend の TT・EvalHash・履歴を対局間で保持する。
+    /// USI backend は isready のみ送信し、保持動作は接続先エンジンに依存する。
     /// tanuki- は毎対局クリアするため、デフォルト false。実験用。
     /// --keep-tt=true で有効化、--keep-tt=false で明示的に無効化。
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]

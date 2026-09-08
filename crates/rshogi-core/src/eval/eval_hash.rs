@@ -119,15 +119,14 @@ pub fn set_eval_hash_enabled(enabled: bool) {
 /// ## 設計原理
 /// - `key_xor = key ^ score` として格納
 /// - 読み取り時に `key = key_xor ^ score` で復元
-/// - 競合状態で不整合な読み取りが発生した場合、XOR結果が元のkeyと一致しない
-/// - キー不一致はキャッシュミスとして扱われ、安全に無視される
+/// - 競合状態で片方だけ更新された torn read は、XOR 結果が元の key と一致せず
+///   実質的に検出される（キー不一致 = キャッシュミス扱い）
 ///
 /// ## Memory Ordering について
-/// Relaxed orderingを使用。これは以下の理由で安全：
-/// 1. キャッシュの正確性はXORエンコーディングで保証される
+/// Relaxed orderingを使用。これは以下の理由で許容できる：
+/// 1. torn read は XOR 照合でほぼ確実にキャッシュミスに落ちる
 /// 2. 競合時の「偽陰性」（キャッシュミス）は許容される
-/// 3. 「偽陽性」（誤ったデータを返す）は発生しない（キー検証で排除）
-/// 4. Stockfish/YaneuraOuも同様のアプローチを採用
+/// 3. Stockfish/YaneuraOuも同様のアプローチを採用
 ///
 /// Release/Acquireを使用しない理由：
 /// - x86_64では差がない（ハードウェアが強いメモリモデルを提供）
@@ -185,7 +184,8 @@ impl EvalHash {
     }
 
     pub fn probe(&self, key: u64) -> Option<i32> {
-        if self.table.is_empty() {
+        // key 0 は未書込 entry (0, 0) と区別できないため常に miss とする
+        if self.table.is_empty() || key == 0 {
             return None;
         }
         #[cfg(feature = "diagnostics")]
@@ -203,7 +203,7 @@ impl EvalHash {
     }
 
     pub fn store(&self, key: u64, score: i32) {
-        if self.table.is_empty() {
+        if self.table.is_empty() || key == 0 {
             return;
         }
         let idx = self.index(key);
@@ -211,6 +211,16 @@ impl EvalHash {
         // i32 → u32 → u64: 符号付き整数をビットパターンを保持したまま拡張
         // probe時に逆変換で元の値を復元する
         entry.store_pair(key, score as u32 as u64);
+    }
+
+    /// 全 entry を未書込状態に戻す（in-place。再確保しない）
+    ///
+    /// 評価設定 (EvalFile / FV_SCALE / bucket routing / MaterialLevel 等) の変更後に
+    /// 旧設定の評価値が key 一致で hit するのを防ぐため、TT クリアと同じ箇所で呼ぶ。
+    pub fn clear(&self) {
+        for entry in self.table.iter() {
+            entry.store_pair(0, 0);
+        }
     }
 
     pub fn prefetch(&self, key: u64) {
@@ -373,10 +383,19 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_hash_key_zero() {
-        // キー0でも正常動作
+    fn test_eval_hash_key_zero_never_hits() {
         let hash = EvalHash::new(1);
         hash.store(0, 42);
-        assert_eq!(hash.probe(0), Some(42));
+        assert_eq!(hash.probe(0), None);
+    }
+
+    #[test]
+    fn test_eval_hash_clear() {
+        let hash = EvalHash::new(1);
+        let key = 0x1234_5678_9ABC_DEF0;
+        hash.store(key, 77);
+        assert_eq!(hash.probe(key), Some(77));
+        hash.clear();
+        assert_eq!(hash.probe(key), None);
     }
 }

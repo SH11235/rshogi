@@ -37,3 +37,19 @@ Wald パラメータは `--sprt-nelo0` / `--sprt-nelo1` / `--sprt-alpha` /
 
 追加統計には `error局`、`errorペア`、`再試行ペア`、`枯渇ペア` を表示する。
 `枯渇ペア` が 1 以上なら、そのテストはインフラ障害により invalid である。
+
+## 終局理由
+
+「終局理由」には `reason` 別の件数と、入力ファイルを通じた全 result 行数に対する
+割合を表示する。error 局・再試行前の世代・重複行・未完了ペアの行も各 1 件として数える。
+これは終局状況の監視用であり、WLD / SPRT のペア除外条件は変わらない。
+`error` で始まる reason は `error` にまとめ、reason の無い旧ログは `unknown` とする。
+
+表示順は `resign`, `win`, `sennichite`, `sennichite_perpetual_check`,
+`adjudication_resign`, `adjudication_draw`, `max_moves`, `timeout`, `illegal_move`,
+`no_bestmove`, `error`、続いてその他の理由を辞書順とし、0 件は省略する。
+`max_moves 到達率` は 0 件でも別行で明示する。result 行の無い入力ではこのセクションは表示しない。
+`--json` では `extra.reasons` に `{ "理由": 件数 }` を出力する。
+
+`sennichite` / `adjudication_draw` / `max_moves` は通常の引分として、
+`sennichite_perpetual_check` / `adjudication_resign` は勝者の勝ちとして集計する。

@@ -2,8 +2,21 @@ use rshogi_core::types::Color;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// USI score の上下界。None は確定評価を表す。
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ScoreBound {
+    /// 真の評価は報告値以上。
+    Lowerbound,
+    /// 真の評価は報告値以下。
+    Upperbound,
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct EvalLog {
+    /// 評価値の上下界。旧ログには存在しない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_bound: Option<ScoreBound>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score_cp: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,6 +50,8 @@ pub struct UsiMultiPvCandidate {
 
 #[derive(Default, Clone)]
 pub struct InfoSnapshot {
+    /// 最後の主 PV 評価値に付随する上下界。
+    pub score_bound: Option<ScoreBound>,
     pub score_cp: Option<i32>,
     pub score_mate: Option<i32>,
     pub depth: Option<u32>,
@@ -55,7 +70,8 @@ impl InfoSnapshot {
     /// - multipv=1 の情報はメインフィールドを更新する
     /// - 全 multipv の候補を `multipv_candidates` に蓄積する（同一 multipv は上書き）
     pub fn update_from_line(&mut self, line: &str) {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let tokens: Vec<&str> =
+            line.split_whitespace().take_while(|token| *token != "string").collect();
         if tokens.first().copied() != Some("info") {
             return;
         }
@@ -72,6 +88,8 @@ impl InfoSnapshot {
         }
 
         // score と pv を抽出（全 multipv 共通のパース）
+        let mut score_seen = false;
+        let mut score_bound = None;
         let mut score_cp: Option<i32> = None;
         let mut score_mate: Option<i32> = None;
         let mut depth: Option<u32> = None;
@@ -84,6 +102,8 @@ impl InfoSnapshot {
         let mut i = 1;
         while i < tokens.len() {
             match tokens[i] {
+                "lowerbound" => score_bound = Some(ScoreBound::Lowerbound),
+                "upperbound" => score_bound = Some(ScoreBound::Upperbound),
                 "depth" if i + 1 < tokens.len() => {
                     depth = tokens[i + 1].parse::<u32>().ok();
                     i += 1;
@@ -106,11 +126,13 @@ impl InfoSnapshot {
                 }
                 "score" if i + 2 < tokens.len() => match tokens[i + 1] {
                     "cp" => {
+                        score_seen = true;
                         score_cp = tokens[i + 2].parse::<i32>().ok();
                         score_mate = None;
                         i += 2;
                     }
                     "mate" => {
+                        score_seen = true;
                         score_mate = tokens[i + 2].parse::<i32>().ok();
                         score_cp = None;
                         i += 2;
@@ -147,7 +169,8 @@ impl InfoSnapshot {
             if nps.is_some() {
                 self.nps = nps;
             }
-            if score_cp.is_some() || score_mate.is_some() {
+            if score_seen {
+                self.score_bound = score_bound;
                 self.score_cp = score_cp;
                 self.score_mate = score_mate;
             }
@@ -187,6 +210,7 @@ impl InfoSnapshot {
             return None;
         }
         Some(EvalLog {
+            score_bound: self.score_bound,
             score_cp: self.score_cp,
             score_mate: self.score_mate,
             depth: self.depth,
@@ -204,7 +228,10 @@ impl InfoSnapshot {
 }
 
 pub struct SearchRequest<'a> {
+    /// 履歴の基点の SFEN。現在局面は moves を適用して復元する。
     pub sfen: &'a str,
+    /// 基点からの合法手列（USI、空白区切り）。単独局面の探索では空文字列。
+    pub moves: &'a str,
     pub time_args: TimeArgs,
     pub think_limit_ms: u64,
     pub timeout_margin_ms: u64,
@@ -214,7 +241,7 @@ pub struct SearchRequest<'a> {
     pub ply: u32,
     pub side: Color,
     pub engine_label: String,
-    /// パス権利（先手, 後手）: Someの場合はpassrightsキーワードで送信
+    /// 基点のパス権利（先手, 後手）。moves の再生前に適用する。
     pub pass_rights: Option<(u8, u8)>,
     /// Some(n) の場合は `go depth n` を送信（byoyomiより優先）
     pub go_depth: Option<u32>,
@@ -273,6 +300,45 @@ pub type InfoCallback<'a> = dyn FnMut(&str, &SearchRequest<'_>) + 'a;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn score_bounds_follow_primary_score_and_survive_log_roundtrip() {
+        for (token, bound) in [
+            ("lowerbound", ScoreBound::Lowerbound),
+            ("upperbound", ScoreBound::Upperbound),
+        ] {
+            let mut snap = InfoSnapshot::default();
+            snap.update_from_line(&format!("info score cp 0 {token} pv 7g7f"));
+            snap.update_from_line("info nodes 100");
+            snap.update_from_line("info multipv 2 score cp 10 pv 2g2f");
+            snap.update_from_line("info string score cp 900");
+            assert_eq!(snap.score_cp, Some(0));
+            assert_eq!(snap.score_bound, Some(bound));
+            let log = snap.clone().into_eval_log().unwrap();
+            let json = serde_json::to_string(&log).unwrap();
+            let log: EvalLog = serde_json::from_str(&json).unwrap();
+            assert_eq!(log.score_bound, Some(bound));
+            snap.update_from_line("info score mate -3 pv 7g7f");
+            assert_eq!(snap.score_bound, None);
+            assert_eq!(snap.score_cp, None);
+            assert_eq!(snap.score_mate, Some(-3));
+        }
+        let old: EvalLog = serde_json::from_str(r#"{"score_cp":0}"#).unwrap();
+        assert_eq!(old.score_bound, None);
+        assert!(serde_json::to_value(old).unwrap().get("score_bound").is_none());
+    }
+
+    #[test]
+    fn unparsed_score_clears_previous_exact_evaluation() {
+        for score in ["mate +", "mate -", "cp invalid"] {
+            let mut snap = InfoSnapshot::default();
+            snap.update_from_line("info score cp 0 pv 7g7f");
+            snap.update_from_line(&format!("info score {score}"));
+            let eval = snap.into_eval_log().unwrap();
+            assert_eq!(eval.score_cp, None);
+            assert_eq!(eval.score_mate, None);
+        }
+    }
 
     #[test]
     fn info_snapshot_parses_primary_pv() {

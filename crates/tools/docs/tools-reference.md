@@ -6,8 +6,8 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `tournament` | 複数エンジンの round-robin 並列トーナメント。error ペアを同条件で再対局し、`--seed` による matchup ごとの決定的な開始局面選択、seed 付き meta、JSONL 出力に対応（[詳細](tournament.md)） |
-| `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、engine vs engine／NativeBackend、native LS progress 係数、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)。[詳細](gensfen.md)） |
+| `tournament` | 複数エンジンの round-robin 並列トーナメント。error ペアを同条件で再対局し、`--seed` による matchup ごとの決定的な開始局面選択、seed 付き meta、JSONL 出力、千日手の自動終局・エンジンへの対局履歴送信に対応（[詳細](tournament.md)） |
+| `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、engine vs engine／NativeBackend、native LS progress 係数、`--keep-tt` による native TT・EvalHash・履歴の対局間保持、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)。[詳細](gensfen.md)） |
 | `nyugyoku_gensfen` | CSA manifest から入玉アンカー局面を disk-partition exact dedup で抽出し、checkpoint/resume 付きで gensfen 用 `startpos.txt` と provenance を生成（[詳細](nyugyoku_gensfen.md)） |
 | `csa_client` | USI エンジンを floodgate 等の CSA サーバーに接続して連続対局 |
 | `analyze_selfplay` | 自己対局の JSONL ログを attempt 世代別に集計。勝率・Elo 差・NPS・error 件数等を表示（[詳細](analyze_selfplay.md)） |
@@ -87,7 +87,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `spsa` | [SPSA チューナー](spsa_runbook.md#14-engine-プール再試行停止)。永続 engine プール、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
+| `spsa` | [SPSA チューナー](spsa_runbook.md#14-engine-プール再試行停止)。永続 engine プール、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
 | `generate_spsa_params` | SearchTuneParams から SPSA 用 .params ファイルを生成 |
 | `generate_net_spsa_params` | LayerStacks `.bin` を走査し、net 重み delta 用 SPSA `.params` を生成（[詳細](generate_net_spsa_params.md)） |
 | `apply_net_spsa_params` | SPSA の net 重み delta を LayerStacks `.bin` へ焼き込み、feature 非依存の読み戻し検証と SHA-256 report を行う（[詳細](apply_net_spsa_params.md)） |

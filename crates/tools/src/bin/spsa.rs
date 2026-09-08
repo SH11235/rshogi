@@ -3247,6 +3247,8 @@ fn main() -> Result<()> {
     let game_cfg = GameConfig {
         limit_only_timeout_ms: cli.nodes.map(|_| cli.nodes_timeout_ms),
         cancel: Some(cancel),
+        resign_rule: None,
+        draw_rule: None,
         max_moves: cli.max_moves,
         timeout_margin_ms: cli.timeout_margin_ms,
         pass_rights: None,

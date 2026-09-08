@@ -12,6 +12,8 @@ use super::bona_piece::ExtBonaPiece;
 use super::constants::{NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
 use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square, Value};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::alloc::alloc;
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
@@ -204,9 +206,13 @@ impl<const N: usize> Default for AlignedI16<N> {
 /// キャッシュラインサイズ（64バイト）
 pub const CACHE_LINE_SIZE: usize = 64;
 
+/// Transparent Huge Page のサイズ（x86_64 / aarch64 Linux の 2MiB）
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const HUGEPAGE_SIZE: usize = 2 * 1024 * 1024;
+
 /// `AlignedBox` のメモリ backing 種別
 enum AlignedBoxBacking {
-    /// `alloc_zeroed` で確保した通常ヒープ。Drop で `dealloc`。
+    /// `new_zeroed` がグローバルアロケータで確保した通常ヒープ。Drop で `dealloc`。
     Heap(Layout),
     /// プロセス間共有メモリ（`mmap`）のマッピングを借用。Drop で `munmap`。
     /// ロード後は read-only として扱う（`DerefMut` は panic する）。
@@ -259,11 +265,39 @@ impl<T: Copy + Default> AlignedBox<T> {
             .checked_mul(len)
             .expect("AlignedBox::new_zeroed: size overflow");
         let align = CACHE_LINE_SIZE.max(std::mem::align_of::<T>());
+        // FT 重み級の大きな配列は THP 境界に置き madvise する。THP enabled=madvise の
+        // 環境では madvise 無しだと 4KiB ページのままになる。
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let use_hugepage = size >= HUGEPAGE_SIZE;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let align = if use_hugepage {
+            align.max(HUGEPAGE_SIZE)
+        } else {
+            align
+        };
 
         // SAFETY: align は 2 のべき乗で、size は align の倍数に切り上げられる
         let layout = Layout::from_size_align(size, align).expect("Invalid layout").pad_to_align();
 
-        // SAFETY: layout は有効、alloc_zeroed は失敗時に null を返す
+        // hugepage 経路では alloc → madvise → 手動ゼロ埋めの順にする。alloc_zeroed は
+        // 非既定 align では内部 memset で先に fault するため、ゼロ埋めより前にヒントを置く。
+        // SAFETY: layout は有効で size は非ゼロ (>= HUGEPAGE_SIZE)、alloc / alloc_zeroed は
+        // 失敗時に null を返す。write_bytes は alloc が返した layout.size() バイトの
+        // 確保範囲内への書込で、alloc_zeroed と同じ初期状態にする。
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let ptr = if use_hugepage {
+            unsafe {
+                let raw = alloc(layout);
+                if !raw.is_null() {
+                    libc::madvise(raw as *mut libc::c_void, layout.size(), libc::MADV_HUGEPAGE);
+                    std::ptr::write_bytes(raw, 0, layout.size());
+                }
+                raw as *mut T
+            }
+        } else {
+            unsafe { alloc_zeroed(layout) as *mut T }
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let ptr = unsafe { alloc_zeroed(layout) as *mut T };
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
@@ -319,7 +353,7 @@ impl<T> DerefMut for AlignedBox<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match &self.backing {
             AlignedBoxBacking::Heap(_) => {
-                // SAFETY: backing が Heap であることを確認済み。ptr は alloc_zeroed で
+                // SAFETY: backing が Heap であることを確認済み。ptr は new_zeroed が
                 // 確保した有効ポインタで、len 要素分を排他的に所有する。
                 unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
             }
@@ -339,7 +373,7 @@ impl<T> Drop for AlignedBox<T> {
         match &self.backing {
             AlignedBoxBacking::Heap(layout) => {
                 // SAFETY:
-                // - ptr は alloc_zeroed で確保したポインタ、layout は同じもの
+                // - ptr は new_zeroed が確保したポインタ、layout は確保時と同じもの
                 // - AlignedBox::new_zeroed は T: Copy + Default を要求する
                 // - Copy トレイトは Drop と排他的なので、T は Drop を実装できない
                 // - したがって drop_in_place は不要で、dealloc のみで安全

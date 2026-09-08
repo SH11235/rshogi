@@ -195,11 +195,15 @@ impl EngineProcess {
             bail!("limit_only_timeout_ms must be positive");
         }
         // パス権がある場合は passrights を付加
-        let position_cmd = if let Some((b, w)) = req.pass_rights {
+        let mut position_cmd = if let Some((b, w)) = req.pass_rights {
             format!("position sfen {} passrights {} {}", req.sfen, b, w)
         } else {
             format!("position sfen {}", req.sfen)
         };
+        if !req.moves.is_empty() {
+            position_cmd.push_str(" moves ");
+            position_cmd.push_str(req.moves);
+        }
         self.write_line(&position_cmd)?;
         let time_args = &req.time_args;
         // depth/nodes 制限の有無

@@ -4,6 +4,7 @@
 
 use std::ptr::NonNull;
 
+use crate::eval::{EvalHash, eval_hash_enabled};
 #[cfg(feature = "use-lazy-evaluate")]
 use crate::nnue::ensure_accumulator_computed;
 #[cfg(feature = "layerstack-arch")]
@@ -139,6 +140,28 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
     evaluate_dispatch(pos, &mut st.nnue_stack, acc_cache)
 }
 
+/// EvalHash を介した NNUE 静的評価（YaneuraOu の `Eval::evaluate` 相当）
+///
+/// hit 時はアキュムレータを更新しない。後続ノードの `update_accumulator` は
+/// 未計算の祖先を遡って差分適用 / refresh するため、skip しても整合は保たれる。
+#[inline]
+pub(super) fn nnue_evaluate_cached(
+    st: &mut SearchState,
+    ctx: &SearchContext<'_>,
+    pos: &Position,
+) -> Value {
+    if !eval_hash_enabled() {
+        return nnue_evaluate(st, pos);
+    }
+    let key = pos.key();
+    if let Some(raw) = ctx.eval_hash.probe(key) {
+        return Value::new(raw);
+    }
+    let value = nnue_evaluate(st, pos);
+    ctx.eval_hash.store(key, value.raw());
+    value
+}
+
 /// NNUE アキュムレータを計算済みにする（評価値の計算はしない）
 ///
 /// `use-lazy-evaluate` 有効時のみ使用する。
@@ -164,8 +187,12 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
     mv: Move,
     gives_check: bool,
     prefetcher: &P,
+    eval_hash: &EvalHash,
 ) {
     let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, prefetcher);
+    if eval_hash_enabled() {
+        eval_hash.prefetch(pos.key());
+    }
     st.nodes += 1;
     st.nnue_stack.push(dirty_piece);
 }
