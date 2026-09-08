@@ -228,7 +228,10 @@ impl InfoSnapshot {
 }
 
 pub struct SearchRequest<'a> {
+    /// 履歴の基点の SFEN。現在局面は moves を適用して復元する。
     pub sfen: &'a str,
+    /// 基点からの合法手列（USI、空白区切り）。単独局面の探索では空文字列。
+    pub moves: &'a str,
     pub time_args: TimeArgs,
     pub think_limit_ms: u64,
     pub timeout_margin_ms: u64,
@@ -236,7 +239,7 @@ pub struct SearchRequest<'a> {
     pub ply: u32,
     pub side: Color,
     pub engine_label: String,
-    /// パス権利（先手, 後手）: Someの場合はpassrightsキーワードで送信
+    /// 基点のパス権利（先手, 後手）。moves の再生前に適用する。
     pub pass_rights: Option<(u8, u8)>,
     /// Some(n) の場合は `go depth n` を送信（byoyomiより優先）
     pub go_depth: Option<u32>,
