@@ -11,7 +11,7 @@
 | `tournament` | 複数エンジンの round-robin 並列トーナメント、error ペア再対局、SPRT 検定。`--seed` による matchup ごとの決定的な開始局面選択と seed 付き meta 出力に対応（[詳細](docs/tournament.md)） |
 | `analyze_selfplay` | tournament 出力の世代別ペア集計・Elo/nElo 算出・SPRT post-hoc 判定（[詳細](docs/analyze_selfplay.md)） |
 | `floodgate_record` | csa_client の per-game JSONL から 1 エンジンの戦績を集計（先後別勝率・相手別・後手勝ち/負け/引分・実戦 NPS、`--config` で csa_client 設定から入力導出、`--fetch-ratings` で wdoor 現在レート併記・履歴記録。floodgate 連続対局向け、[詳細](docs/floodgate_record.md)） |
-| `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、USI engine vs engine／NativeBackend、native LS progress 係数、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)） |
+| `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、USI engine vs engine／NativeBackend、native LS progress 係数、`--keep-tt` による native TT・EvalHash・履歴の対局間保持、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)） |
 | `floodgate_pipeline` | Floodgate棋譜のダウンロード・変換・`live-mirror --push` MONITOR2 着手通知付きリアルタイムミラー（[詳細](docs/floodgate_pipeline.md)） |
 | `nyugyoku_gensfen` | CSA manifest から入玉アンカー局面を disk-partition exact dedup で抽出し、checkpoint/resume 付きで gensfen 用 `startpos.txt` と出典 TSV を生成（[詳細](docs/nyugyoku_gensfen.md)） |
 | `book_from_csa` | CSA 棋譜群から YANEURAOU-DB2016 テキスト定跡 `.db` を生成（消費時間による定跡手判定・レート/勝敗フィルタ、[詳細](docs/book_from_csa.md)） |

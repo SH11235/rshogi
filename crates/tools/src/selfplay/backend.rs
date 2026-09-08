@@ -84,8 +84,9 @@ pub struct SearchParams {
 pub trait SearchBackend {
     /// 新しい対局の準備
     ///
-    /// `keep_tt` が true の場合は置換表を保持する。
-    /// false の場合は置換表と履歴をクリアする。
+    /// NativeBackend は true で TT・EvalHash・履歴を保持し、false ですべてクリアする。
+    /// USI backend は true で isready、false で usinewgame + isready を送る。
+    /// キャッシュ保持は接続先に依存し、rshogi は isready でも TT・EvalHash をクリアする。
     fn prepare_game(&mut self, keep_tt: bool) -> Result<()>;
 
     /// 探索を実行して結果を返す
@@ -115,10 +116,11 @@ impl NativeBackend {
 impl SearchBackend for NativeBackend {
     fn prepare_game(&mut self, keep_tt: bool) -> Result<()> {
         if keep_tt {
-            // TT・履歴ともに保持（USI の sync_ready() と同等）
+            // TT・EvalHash・履歴を保持（USI backend の保持動作は接続先に依存）
         } else {
-            // TT・履歴ともにクリア（USI の usinewgame と同等）
+            // TT・EvalHash・履歴をクリア（rshogi USI の usinewgame と同等）
             self.engine.clear_tt();
+            self.engine.clear_eval_hash();
             self.engine.clear_histories();
         }
         Ok(())
