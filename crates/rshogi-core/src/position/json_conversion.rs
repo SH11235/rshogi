@@ -1,5 +1,5 @@
 use crate::eval::material::compute_material_value;
-use crate::movegen::{MoveList, generate_legal_with_pass};
+use crate::movegen::{MoveList, generate_legal_all_with_pass};
 use crate::types::json::{
     BoardStateJson, CellJson, HandJson, HandsJson, PieceJson, ReplayResultJson,
 };
@@ -111,7 +111,7 @@ impl Position {
         Ok(pos.to_board_state_json())
     }
 
-    /// 棋譜を厳密に適用し、不正手で停止する。
+    /// 棋譜を厳密に適用し、不正手で停止する。合法な不成も省略せず受理する。
     ///
     /// # Arguments
     /// * `sfen` - 開始局面のSFEN
@@ -142,7 +142,7 @@ impl Position {
             let parsed_raw = parsed.raw();
 
             let mut list = MoveList::new();
-            generate_legal_with_pass(&position, &mut list);
+            generate_legal_all_with_pass(&position, &mut list);
             let is_legal = list.iter().any(|candidate| candidate.raw() == parsed_raw);
             if !is_legal {
                 error = Some(format!("illegal move: {mv}"));
@@ -341,6 +341,80 @@ mod tests {
         assert_eq!(pos.to_sfen(), sfen);
     }
 
+    #[test]
+    fn test_strict_replay_accepts_non_promotions_for_both_sides() {
+        for (sfen, usi, piece) in [
+            ("k8/9/9/4P4/9/9/9/9/8K b - 1", "5d5c", "P"),
+            ("k8/9/9/4L4/9/9/9/9/8K b - 1", "5d5b", "L"),
+            ("k8/9/9/4B4/9/9/9/9/8K b - 1", "5d4c", "B"),
+            ("k8/9/9/4R4/9/9/9/9/8K b - 1", "5d5c", "R"),
+            ("k8/9/9/9/9/4p4/9/9/8K w - 1", "5f5g", "P"),
+            ("k8/9/9/9/9/4l4/9/9/8K w - 1", "5f5h", "L"),
+            ("k8/9/9/9/9/4b4/9/9/8K w - 1", "5f6g", "B"),
+            ("k8/9/9/9/9/4r4/9/9/8K w - 1", "5f5g", "R"),
+        ] {
+            for rights in [None, Some((1, 1))] {
+                let result = Position::replay_moves_strict(sfen, &[usi.into()], rights).unwrap();
+                assert_eq!(result.error, None, "{sfen}: {usi}");
+                assert_eq!(result.applied, [usi]);
+                assert_eq!(result.last_ply, 0);
+                let cell = result
+                    .board
+                    .cells
+                    .iter()
+                    .flatten()
+                    .find(|cell| cell.square == usi[2..4])
+                    .unwrap();
+                let actual = cell.piece.as_ref().unwrap();
+                assert_eq!(actual.piece_type, piece);
+                assert_ne!(actual.promoted, Some(true));
+            }
+        }
+    }
+
+    #[test]
+    fn test_strict_replay_rejects_dead_piece_non_promotions() {
+        for (sfen, usi) in [
+            ("k8/4P4/9/9/9/9/9/9/8K b - 1", "5b5a"),
+            ("k8/4L4/9/9/9/9/9/9/8K b - 1", "5b5a"),
+            ("k8/9/4N4/9/9/9/9/9/8K b - 1", "5c4a"),
+            ("k8/9/9/4N4/9/9/9/9/8K b - 1", "5d4b"),
+            ("k8/9/9/9/9/9/9/4p4/8K w - 1", "5h5i"),
+            ("k8/9/9/9/9/9/9/4l4/8K w - 1", "5h5i"),
+            ("k8/9/9/9/9/9/4n4/9/8K w - 1", "5g6i"),
+            ("k8/9/9/9/9/4n4/9/9/8K w - 1", "5f6h"),
+        ] {
+            for rights in [None, Some((1, 1))] {
+                let result = Position::replay_moves_strict(sfen, &[usi.into()], rights).unwrap();
+                assert_eq!(result.error, Some(format!("illegal move: {usi}")));
+                assert!(result.applied.is_empty());
+                assert_eq!(result.last_ply, -1);
+                assert_eq!(result.board, Position::parse_sfen_to_json(sfen).unwrap());
+                let promotion = format!("{usi}+");
+                let promoted =
+                    Position::replay_moves_strict(sfen, std::slice::from_ref(&promotion), rights)
+                        .unwrap();
+                assert_eq!(promoted.error, None, "{sfen}: {promotion}");
+                assert_eq!(promoted.applied, [promotion]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_strict_replay_in_check_rejects_pass_and_accepts_non_promoting_evasion() {
+        // 角で王手している飛車を取る不成は合法。王手放置やパスは不可。
+        let sfen = "k8/9/4r4/3B5/9/9/9/9/4K4 b - 1";
+        for rights in [None, Some((1, 1))] {
+            for usi in ["pass", "6d7c"] {
+                let result = Position::replay_moves_strict(sfen, &[usi.into()], rights).unwrap();
+                assert_eq!(result.error, Some(format!("illegal move: {usi}")));
+                assert!(result.applied.is_empty());
+            }
+            let result = Position::replay_moves_strict(sfen, &["6d5c".into()], rights).unwrap();
+            assert_eq!(result.error, None);
+            assert_eq!(result.applied, ["6d5c"]);
+        }
+    }
     #[test]
     fn test_replay_moves_strict_accepts_usi_without_piece_info() {
         let moves = vec!["7g7f".to_string()];
