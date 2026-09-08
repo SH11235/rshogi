@@ -103,6 +103,8 @@ struct EngineCommandMeta {
 /// 通常JSONLのresult行
 #[derive(Clone, Deserialize)]
 struct ResultLog {
+    #[serde(default)]
+    reason: Option<String>,
     outcome: String,
     /// 勝者のエンジンラベル（tournament.rs が出力、旧形式では None）
     #[serde(default)]
@@ -242,6 +244,7 @@ struct HeadToHeadStats {
 
 #[derive(Default)]
 struct FileExtraStats {
+    reasons: BTreeMap<String, u32>,
     total_plies: u64,
     completed_games: u32,
     black_wins: u32,
@@ -349,6 +352,7 @@ struct MoveBucketStats {
 
 #[derive(Default)]
 struct AggregatedExtraStats {
+    reasons: BTreeMap<String, u32>,
     total_plies: u64,
     completed_games: u32,
     black_wins: u32,
@@ -415,6 +419,7 @@ struct JsonHeadToHead {
 
 #[derive(Serialize)]
 struct JsonExtra {
+    reasons: BTreeMap<String, u32>,
     average_plies: f64,
     black_win_rate_decisive: f64,
     white_win_rate_decisive: f64,
@@ -642,6 +647,12 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
         } else if trimmed.contains("\"type\":\"result\"") {
             let result: ResultLog = serde_json::from_str(trimmed)
                 .with_context(|| format!("resultパースエラー: {path}"))?;
+            let reason = match result.reason.as_deref() {
+                Some(reason) if reason.starts_with("error") => "error",
+                Some(reason) => reason,
+                None => "unknown",
+            };
+            *stats.extra.reasons.entry(reason.to_string()).or_default() += 1;
             let pair_index = result.pair_index.unwrap_or(seq / 2);
             let slot = result.pair_slot.unwrap_or(seq % 2).min(1) as usize;
             seq += 1;
@@ -1231,6 +1242,9 @@ fn main() -> Result<()> {
                 stats.b_sente_wins += result.b_sente_wins;
                 engine_ids.insert(result.black);
                 engine_ids.insert(result.white);
+                for (reason, count) in result.extra.reasons {
+                    *extra.reasons.entry(reason).or_default() += count;
+                }
                 extra.total_plies += result.extra.total_plies;
                 extra.completed_games += result.extra.completed_games;
                 extra.black_wins += result.extra.black_wins;
@@ -1689,6 +1703,8 @@ fn print_text(
         }
     }
 
+    print_reasons(&extra.reasons);
+
     if extra.completed_games > 0 || extra.retry.error_games > 0 {
         println!();
         println!("追加統計");
@@ -1798,6 +1814,44 @@ fn print_text(
             }
         }
     }
+}
+
+const REASON_ORDER: [&str; 11] = [
+    "resign",
+    "win",
+    "sennichite",
+    "sennichite_perpetual_check",
+    "adjudication_resign",
+    "adjudication_draw",
+    "max_moves",
+    "timeout",
+    "illegal_move",
+    "no_bestmove",
+    "error",
+];
+
+fn print_reasons(reasons: &BTreeMap<String, u32>) {
+    let total: u64 = reasons.values().map(|&count| u64::from(count)).sum();
+    if total == 0 {
+        return;
+    }
+    println!("\n終局理由（全 result 行: {total}、error 局・重複行を含む）");
+    let ordered = REASON_ORDER.into_iter().chain(
+        reasons
+            .keys()
+            .map(String::as_str)
+            .filter(|reason| !REASON_ORDER.contains(reason)),
+    );
+    for reason in ordered {
+        if let Some(&count) = reasons.get(reason).filter(|&&count| count > 0) {
+            println!("  {reason}: {count} ({:.2}%)", f64::from(count) / total as f64 * 100.0);
+        }
+    }
+    let max_moves = reasons.get("max_moves").copied().unwrap_or(0);
+    println!(
+        "  max_moves 到達率: {:.2}% ({max_moves}/{total})",
+        f64::from(max_moves) / total as f64 * 100.0
+    );
 }
 
 fn win_rate(wins: u32, losses: u32, draws: u32) -> f64 {
@@ -1952,6 +2006,7 @@ fn print_json(
         engines: json_engines,
         head_to_head: json_h2h,
         extra: JsonExtra {
+            reasons: extra.reasons.clone(),
             average_plies: if extra.completed_games > 0 {
                 extra.total_plies as f64 / extra.completed_games as f64
             } else {
@@ -2219,6 +2274,46 @@ mod tests {
             },
             "live SPRT と同じ世代入力は retry 世代の WW 1 ペアだけになる"
         );
+    }
+
+    #[test]
+    fn reasons_count_all_results_without_changing_wld_or_penta() {
+        let (dir, path) = write_retry_log(&[
+            r#"{"type":"result","outcome":"draw","reason":"sennichite"}"#,
+            r#"{"type":"result","outcome":"white_win","winner":"test","reason":"sennichite_perpetual_check"}"#,
+            r#"{"type":"result","outcome":"draw","reason":"max_moves"}"#,
+            r#"{"type":"result","outcome":"draw","reason":"adjudication_draw"}"#,
+            r#"{"type":"result","outcome":"black_win","winner":"base","reason":"adjudication_resign"}"#,
+            r#"{"type":"result","outcome":"draw"}"#,
+            r#"{"type":"result","outcome":"draw","reason":"error: worker panic","error":true}"#,
+            r#"{"type":"result","outcome":"draw","reason":"error: engine exit","error":true}"#,
+            r#"{"type":"result","outcome":"draw","reason":"max_moves","pair_index":0,"pair_slot":0}"#,
+        ]);
+        let parsed = parse_normal_file(&path).unwrap();
+        assert_eq!((parsed.black_wins, parsed.white_wins, parsed.draws), (1, 1, 4));
+        assert_eq!(parsed.done, 6);
+        assert_eq!(
+            parsed.extra.reasons,
+            BTreeMap::from([
+                ("sennichite".to_string(), 1),
+                ("sennichite_perpetual_check".to_string(), 1),
+                ("max_moves".to_string(), 2),
+                ("adjudication_draw".to_string(), 1),
+                ("adjudication_resign".to_string(), 1),
+                ("unknown".to_string(), 1),
+                ("error".to_string(), 2),
+            ])
+        );
+        assert_eq!(
+            collect_sprt_penta(&path, "base", "test").unwrap(),
+            Penta {
+                wd: 1,
+                dd: 1,
+                dl: 1,
+                ..Penta::ZERO
+            }
+        );
+        dir.close().unwrap();
     }
 
     #[test]
