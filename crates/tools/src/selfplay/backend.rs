@@ -119,6 +119,7 @@ impl SearchBackend for NativeBackend {
         } else {
             // TT・履歴ともにクリア（USI の usinewgame と同等）
             self.engine.clear_tt();
+            self.engine.clear_eval_hash();
             self.engine.clear_histories();
         }
         Ok(())

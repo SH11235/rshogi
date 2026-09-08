@@ -329,11 +329,13 @@ impl UsiEngine {
     }
 
     /// isreadyコマンド: 準備完了を通知
-    /// YaneuraOu準拠: isready 受信時にTTをクリアする
+    /// YaneuraOu準拠: isready 受信時にTTをクリアする。
+    /// setoption 後は必ず isready が来るので、評価設定変更で陳腐化した EvalHash もここで捨てる。
     fn cmd_isready(&mut self) -> Result<()> {
         self.wait_for_search();
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
+            search.clear_eval_hash();
         }
         self.maybe_load_spsa_params();
         // EvalFile の状態を確認し、必要なら NNUE をロード
@@ -1147,6 +1149,7 @@ impl UsiEngine {
 
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
+            search.clear_eval_hash();
             search.clear_histories(); // YaneuraOu準拠：履歴統計もクリア
         }
         self.position = Position::new();

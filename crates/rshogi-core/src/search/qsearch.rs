@@ -12,7 +12,7 @@ use super::eval_helpers::correction_value;
 use super::movepicker::piece_value;
 use super::search_helpers::{
     check_abort, clear_cont_history_for_null, cont_history_tables, do_move_and_push, nnue_evaluate,
-    nnue_pop, set_cont_history_for_move,
+    nnue_evaluate_cached, nnue_pop, set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
 #[cfg(feature = "tt-trace")]
@@ -245,7 +245,7 @@ pub(super) fn qsearch<const NT: u8>(
                 return mate_value;
             }
         }
-        unadjusted_static_eval = nnue_evaluate(st, pos);
+        unadjusted_static_eval = nnue_evaluate_cached(st, ctx, pos);
         unadjusted_static_eval
     };
 
@@ -464,7 +464,7 @@ pub(super) fn qsearch<const NT: u8>(
         // 実際に探索された手をカウント
         inc_stat!(st, qs_moves_searched);
 
-        do_move_and_push(st, pos, mv, gives_check, ctx.tt);
+        do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
 
         // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
         if mv.is_pass() {
