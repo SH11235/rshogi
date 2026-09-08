@@ -142,6 +142,49 @@ impl TTEntry {
     }
 }
 
+/// 共有テーブル上の格納形式。複数フィールドの整合性は Cluster のガードが保証する。
+#[repr(C)]
+pub(super) struct AtomicTTEntry {
+    words: [std::sync::atomic::AtomicU16; 5],
+}
+
+impl AtomicTTEntry {
+    pub(super) const fn new() -> Self {
+        Self {
+            words: [const { std::sync::atomic::AtomicU16::new(0) }; 5],
+        }
+    }
+
+    pub(super) fn load(&self) -> TTEntry {
+        use std::sync::atomic::Ordering;
+        let words = self.words.each_ref().map(|word| word.load(Ordering::Relaxed));
+        TTEntry {
+            key16: words[0],
+            depth8: words[1] as u8,
+            gen_bound8: (words[1] >> 8) as u8,
+            move16: words[2],
+            value16: words[3] as i16,
+            eval16: words[4] as i16,
+        }
+    }
+
+    pub(super) fn store(&self, entry: TTEntry) {
+        use std::sync::atomic::Ordering;
+        let words = [
+            entry.key16,
+            entry.depth8 as u16 | ((entry.gen_bound8 as u16) << 8),
+            entry.move16,
+            entry.value16 as u16,
+            entry.eval16 as u16,
+        ];
+        for (word, value) in self.words.iter().zip(words) {
+            word.store(value, Ordering::Relaxed);
+        }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<AtomicTTEntry>() == 10);
+
 /// 置換表から読み取ったデータ
 #[derive(Clone, Copy, Debug)]
 pub struct TTData {

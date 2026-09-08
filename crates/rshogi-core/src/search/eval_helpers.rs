@@ -199,9 +199,9 @@ pub(super) fn update_correction_history(
 
 /// 置換表プローブ
 #[allow(clippy::too_many_arguments)]
-pub(super) fn probe_transposition<const NT: u8>(
+pub(super) fn probe_transposition<'a, const NT: u8>(
     st: &mut SearchState,
-    ctx: &SearchContext<'_>,
+    ctx: &SearchContext<'a>,
     pos: &mut Position,
     depth: Depth,
     beta: Value,
@@ -210,7 +210,7 @@ pub(super) fn probe_transposition<const NT: u8>(
     in_check: bool,
     excluded_move: Move,
     cut_node: bool,
-) -> ProbeOutcome {
+) -> ProbeOutcome<'a> {
     let key = pos.key();
 
     let tt_result = ctx.tt.probe(key, pos);

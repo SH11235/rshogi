@@ -252,9 +252,9 @@ use super::stats::{inc_stat, inc_stat_by_depth};
 /// 置換表プローブの結果をまとめたコンテキスト
 ///
 /// TTプローブ後の即時カットオフ判定や、後続の枝刈りロジックで使用される。
-pub(super) struct TTContext {
+pub(super) struct TTContext<'a> {
     pub(super) key: u64,
-    pub(super) result: ProbeResult,
+    pub(super) result: ProbeResult<'a>,
     pub(super) data: TTData,
     pub(super) hit: bool,
     pub(super) mv: Move,
@@ -263,9 +263,9 @@ pub(super) struct TTContext {
 }
 
 /// 置換表プローブの結果（続行 or カットオフ）
-pub(super) enum ProbeOutcome {
+pub(super) enum ProbeOutcome<'a> {
     /// 探索続行（TTContext付き）
-    Continue(TTContext),
+    Continue(TTContext<'a>),
     /// 即時カットオフ値（ヒストリ更新用情報付き）
     Cutoff {
         value: Value,
@@ -1197,7 +1197,8 @@ impl SearchWorker {
 
         // ルートでもTTプローブを行う
         let key = pos.key();
-        let tt_result = self.tt.probe(key, pos);
+        let tt = Arc::clone(&self.tt);
+        let tt_result = tt.probe(key, pos);
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
         // rootNode では ttMove = rootMoves[0]
@@ -1923,7 +1924,8 @@ impl SearchWorker {
 
         // rootでもTT probeを行い、ttHit/ttPvを更新
         let key = pos.key();
-        let tt_result = self.tt.probe(key, pos);
+        let tt = Arc::clone(&self.tt);
+        let tt_result = tt.probe(key, pos);
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
         // rootNode && pvIdx 経路では rootMoves[pv_idx] を ttMove 相当として扱う。
