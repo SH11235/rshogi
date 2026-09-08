@@ -1157,8 +1157,8 @@ mod windows_main {
     const READY_TIMEOUT: Duration = Duration::from_secs(120);
     const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
     const POLL_INTERVAL: Duration = Duration::from_millis(10);
-    /// `bestmove` 後、遅延到着する ETW イベントの flush を待つ時間。
-    const FLUSH_WAIT: Duration = Duration::from_millis(500);
+    /// セッション STOP 後、consumer の ProcessTrace が残バッファを処理し終えるのを待つ上限。
+    const DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 
     #[derive(Parser, Debug, Clone)]
     #[command(
@@ -1464,13 +1464,15 @@ mod windows_main {
             pub timestamp: i64,
             /// switch out される旧スレッドの TID
             pub old_tid: u32,
+            /// switch in される新スレッドの TID
+            pub new_tid: u32,
             /// PMC カウンタ値（先頭 `len` 個が有効）
             pub counters: [u64; MAX_PMC_SOURCES],
             /// 有効なカウンタ数
             pub len: usize,
         }
 
-        /// ETW Thread Start/End イベントから PID→TID 集合を維持する。
+        /// ETW Thread Start イベントから PID→TID 集合を維持する。
         #[derive(Debug, Default)]
         pub struct ThreadTracker {
             tids_by_pid: HashMap<u32, HashSet<u32>>,
@@ -1478,16 +1480,21 @@ mod windows_main {
 
         impl ThreadTracker {
             pub fn on_thread_start(&mut self, pid: u32, tid: u32) {
+                // TID は再利用されるため、別 PID に残っている同じ TID の所属を先に外す
+                for (other_pid, tids) in self.tids_by_pid.iter_mut() {
+                    if *other_pid != pid {
+                        tids.remove(&tid);
+                    }
+                }
                 self.tids_by_pid.entry(pid).or_default().insert(tid);
             }
 
-            pub fn on_thread_end(&mut self, pid: u32, tid: u32) {
-                if let Some(tids) = self.tids_by_pid.get_mut(&pid) {
-                    tids.remove(&tid);
-                    if tids.is_empty() {
-                        self.tids_by_pid.remove(&pid);
-                    }
-                }
+            /// Thread End では所属を外さない (購読もしない)。ETW は per-CPU バッファ単位で
+            /// 配送されるため、終了スレッドの最終 CSwitch (switch-out) が End より後に処理
+            /// されることがあり、End で即削除するとその最終スライスが非対象扱いになる。
+            /// セッションは run ごとに作り直すので、run 終了時にここで全部消す。
+            pub fn clear(&mut self) {
+                self.tids_by_pid.clear();
             }
 
             pub fn belongs_to(&self, pid: u32, tid: u32) -> bool {
@@ -1500,6 +1507,12 @@ mod windows_main {
         struct CpuBaseline {
             timestamp: i64,
             counters: [u64; MAX_PMC_SOURCES],
+            /// この CSwitch で switch in したスレッド (= 次の CSwitch まで CPU を占有する)
+            new_tid: u32,
+            new_is_target: bool,
+            /// counters が設定数ぶん揃っているか。PMC 未添付 / 不足のイベントでも
+            /// switch-in の TID と時刻は基準として保持し、差分だけを無効にする
+            counters_valid: bool,
         }
 
         /// 1 run 分の PMC 差分積算器。
@@ -1517,6 +1530,14 @@ mod windows_main {
             attributed_switches: u64,
             /// 区間内なのにカウンタ巻き戻りで skip した CSwitch 数（診断用）
             regressed_switches: u64,
+            /// 対象スレッド実行中に CSwitch の連鎖 (prev.new_tid == cur.old_tid) が途切れた回数
+            chain_breaks_target: u64,
+            /// 対象スレッドが絡む CSwitch に PMC が付いていなかった回数
+            pmc_gaps_target: u64,
+            /// run 中に対象所属の TID が別 PID の Thread Start で再利用された回数。
+            /// 再利用後は遅延到着した旧スレッドの switch-out と再利用先の切替を
+            /// 区別できないため、この run は判別不能として拒否する
+            tid_reuse_target: u64,
         }
 
         impl PmcAccumulator {
@@ -1530,6 +1551,9 @@ mod windows_main {
                     totals: [0; MAX_PMC_SOURCES],
                     attributed_switches: 0,
                     regressed_switches: 0,
+                    chain_breaks_target: 0,
+                    pmc_gaps_target: 0,
+                    tid_reuse_target: 0,
                 }
             }
 
@@ -1570,20 +1594,48 @@ mod windows_main {
                 (overlap_end - overlap_start) as f64 / (slice_end - slice_start) as f64
             }
 
-            fn record(&mut self, sample: &CSwitchSample, old_tid_is_target: bool) {
+            fn record(
+                &mut self,
+                sample: &CSwitchSample,
+                old_tid_is_target: bool,
+                new_tid_is_target: bool,
+            ) {
                 let n = self.n_counters;
-                if sample.len < n {
-                    // 設定した source 数より少ないカウンタしか付いていないイベントは
-                    // 差分の対応が取れないため、基準値の更新もせず捨てる。
-                    return;
-                }
-                if old_tid_is_target && let Some(prev) = self.per_cpu_last.get(&sample.cpu).copied()
+                let prev = self.per_cpu_last.get(&sample.cpu).copied();
+                let overlaps = prev.is_some_and(|p| {
+                    self.window_overlap_fraction(p.timestamp, sample.timestamp) > 0.0
+                });
+                // 連鎖検査: 前回 switch in したスレッドが今回 switch out するはず。
+                // 途切れていればその間のイベントが欠けている (配送ロス / 未観測)。
+                let chain_ok = prev
+                    .is_none_or(|p| p.new_tid == sample.old_tid && sample.timestamp >= p.timestamp);
+                if !chain_ok
+                    && overlaps
+                    && (old_tid_is_target || prev.is_some_and(|p| p.new_is_target))
                 {
-                    let fraction = self.window_overlap_fraction(prev.timestamp, sample.timestamp);
-                    // カウンタ巻き戻り（セッション再構成等）は差分にできないのでスキップ
-                    let monotonic =
-                        prev.counters[..n].iter().zip(&sample.counters[..n]).all(|(p, c)| c >= p);
-                    if fraction > 0.0 {
+                    self.chain_breaks_target += 1;
+                }
+                let counters_valid = sample.len >= n;
+                // 連鎖が正しければ switch-in 時点の所属が正。Thread Start (別 PID での TID
+                // 再利用) が遅延到着した旧スレッドの switch-out より先に処理されると
+                // old_tid_is_target が false になるため、switch-in 時の所属も見る。
+                let slice_is_target = old_tid_is_target || prev.is_some_and(|p| p.new_is_target);
+                if chain_ok
+                    && slice_is_target
+                    && overlaps
+                    && let Some(prev) = prev
+                {
+                    if !counters_valid || !prev.counters_valid {
+                        // 対象スライスが window に掛かるのに、その両端どちらかに PMC が無い
+                        self.pmc_gaps_target += 1;
+                    } else {
+                        let fraction =
+                            self.window_overlap_fraction(prev.timestamp, sample.timestamp);
+                        // カウンタ巻き戻り（セッション再構成等）は差分にできないのでスキップ
+                        let monotonic = prev.counters[..n]
+                            .iter()
+                            .zip(&sample.counters[..n])
+                            .all(|(p, c)| c >= p);
                         if monotonic {
                             for (total, (prev_v, now)) in self
                                 .totals
@@ -1605,14 +1657,39 @@ mod windows_main {
                     CpuBaseline {
                         timestamp: sample.timestamp,
                         counters: sample.counters,
+                        new_tid: sample.new_tid,
+                        new_is_target: new_tid_is_target,
+                        counters_valid,
                     },
                 );
             }
+
+            /// window 終了時点でまだ対象スレッドが走っている (最終 switch-out 未到着) CPU 数。
+            /// drain 完了後に 0 でなければ最終スライスの CSwitch が届いていない。
+            fn unclosed_target_slices(&self) -> usize {
+                let end = self.window_end.unwrap_or(i64::MAX);
+                self.per_cpu_last
+                    .values()
+                    .filter(|b| b.new_is_target && b.timestamp < end)
+                    .count()
+            }
+        }
+
+        /// 1 run 分の積算結果と欠落診断。
+        #[derive(Debug, Clone)]
+        pub struct PmcTotals {
+            pub totals: Vec<u64>,
+            pub attributed_switches: u64,
+            pub regressed_switches: u64,
+            pub chain_breaks_target: u64,
+            pub pmc_gaps_target: u64,
+            pub tid_reuse_target: u64,
+            pub unclosed_target_slices: usize,
         }
 
         /// ThreadTracker と PmcAccumulator を束ねた、ETW コールバックが呼ぶ純ロジック部。
         ///
-        /// ThreadTracker はプログラム全体で生かし続け（thread イベントの取りこぼし防止）、
+        /// セッションは run ごとに作り直すので、ThreadTracker は `take_totals` で全消去し、
         /// PmcAccumulator は run ごとに `install` で作り直す。
         #[derive(Debug, Default)]
         pub struct PmcEngineState {
@@ -1622,17 +1699,21 @@ mod windows_main {
 
         impl PmcEngineState {
             pub fn on_thread_start(&mut self, pid: u32, tid: u32) {
+                // 所属を書き換える前に判定する: 対象所属の TID が別 PID で始まったら再利用
+                if let Some(acc) = &mut self.acc
+                    && pid != acc.target_pid
+                    && self.tracker.belongs_to(acc.target_pid, tid)
+                {
+                    acc.tid_reuse_target += 1;
+                }
                 self.tracker.on_thread_start(pid, tid);
-            }
-
-            pub fn on_thread_end(&mut self, pid: u32, tid: u32) {
-                self.tracker.on_thread_end(pid, tid);
             }
 
             pub fn on_cswitch(&mut self, sample: &CSwitchSample) {
                 if let Some(acc) = &mut self.acc {
-                    let is_target = self.tracker.belongs_to(acc.target_pid, sample.old_tid);
-                    acc.record(sample, is_target);
+                    let old_is_target = self.tracker.belongs_to(acc.target_pid, sample.old_tid);
+                    let new_is_target = self.tracker.belongs_to(acc.target_pid, sample.new_tid);
+                    acc.record(sample, old_is_target, new_is_target);
                 }
             }
 
@@ -1656,15 +1737,18 @@ mod windows_main {
                 }
             }
 
-            /// 積算結果 (counter 合計, 帰属 CSwitch 数, 巻き戻り skip 数) を取り出し、
-            /// 積算器を破棄する。
-            pub fn take_totals(&mut self) -> Option<(Vec<u64>, u64, u64)> {
-                self.acc.take().map(|acc| {
-                    (
-                        acc.totals[..acc.n_counters].to_vec(),
-                        acc.attributed_switches,
-                        acc.regressed_switches,
-                    )
+            /// 積算結果と欠落診断を取り出し、積算器と対象 PID の TID 所属を破棄する。
+            pub fn take_totals(&mut self) -> Option<PmcTotals> {
+                let acc = self.acc.take()?;
+                self.tracker.clear();
+                Some(PmcTotals {
+                    totals: acc.totals[..acc.n_counters].to_vec(),
+                    attributed_switches: acc.attributed_switches,
+                    regressed_switches: acc.regressed_switches,
+                    chain_breaks_target: acc.chain_breaks_target,
+                    pmc_gaps_target: acc.pmc_gaps_target,
+                    tid_reuse_target: acc.tid_reuse_target,
+                    unclosed_target_slices: acc.unclosed_target_slices(),
                 })
             }
         }
@@ -1675,14 +1759,22 @@ mod windows_main {
 
             const PID: u32 = 100;
             const TID: u32 = 1001;
+            const OTHER: u32 = 999;
 
-            fn cswitch(cpu: u16, timestamp: i64, old_tid: u32, values: &[u64]) -> CSwitchSample {
+            fn cswitch(
+                cpu: u16,
+                timestamp: i64,
+                old_tid: u32,
+                new_tid: u32,
+                values: &[u64],
+            ) -> CSwitchSample {
                 let mut counters = [0u64; MAX_PMC_SOURCES];
                 counters[..values.len()].copy_from_slice(values);
                 CSwitchSample {
                     cpu,
                     timestamp,
                     old_tid,
+                    new_tid,
                     counters,
                     len: values.len(),
                 }
@@ -1696,35 +1788,54 @@ mod windows_main {
                 state
             }
 
+            fn state_with_window(open: i64, close: i64) -> PmcEngineState {
+                let mut state = PmcEngineState::default();
+                state.on_thread_start(PID, TID);
+                state.install(PID, 2);
+                state.open_window(open);
+                state.close_window(close);
+                state
+            }
+
+            fn assert_complete(t: &PmcTotals) {
+                assert_eq!(t.chain_breaks_target, 0);
+                assert_eq!(t.pmc_gaps_target, 0);
+                assert_eq!(t.tid_reuse_target, 0);
+                assert_eq!(t.unclosed_target_slices, 0);
+            }
+
             #[test]
             fn delta_attributed_to_old_thread_in_window() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000]));
-                state.on_cswitch(&cswitch(0, 20, TID, &[1500, 2600]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![500, 600]);
-                assert_eq!(switches, 1);
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![500, 600]);
+                assert_eq!(t.attributed_switches, 1);
+                assert_complete(&t);
             }
 
             #[test]
             fn first_cswitch_on_cpu_only_records_baseline() {
                 let mut state = state_with_target();
                 // 前回値が無い CPU では差分を計算できない
-                state.on_cswitch(&cswitch(0, 10, TID, &[1000, 2000]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![0, 0]);
-                assert_eq!(switches, 0);
+                state.on_cswitch(&cswitch(0, 10, TID, OTHER, &[1000, 2000]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+                assert_eq!(t.attributed_switches, 0);
+                assert_complete(&t);
             }
 
             #[test]
             fn non_target_tid_updates_baseline_without_attribution() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000]));
-                state.on_cswitch(&cswitch(0, 20, 999, &[1500, 2600]));
-                // 直後に target が switch out: 基準値は 999 の切り替え時点まで進んでいる
-                state.on_cswitch(&cswitch(0, 30, TID, &[1600, 2700]));
-                let (totals, _, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![100, 100]);
+                state.on_cswitch(&cswitch(0, 10, OTHER, 888, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 20, 888, TID, &[1500, 2600]));
+                // 直後に target が switch out: 基準値は 888 の切り替え時点まで進んでいる
+                state.on_cswitch(&cswitch(0, 30, TID, OTHER, &[1600, 2700]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![100, 100]);
+                assert_complete(&t);
             }
 
             #[test]
@@ -1733,11 +1844,12 @@ mod windows_main {
                 state.on_thread_start(PID, TID);
                 state.install(PID, 2);
                 // window 未オープンの間は一切集計しない（基準値の更新のみ）
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000]));
-                state.on_cswitch(&cswitch(0, 20, TID, &[1500, 2600]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![0, 0]);
-                assert_eq!(switches, 0);
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+                assert_eq!(t.attributed_switches, 0);
+                assert_complete(&t);
             }
 
             #[test]
@@ -1746,189 +1858,357 @@ mod windows_main {
                 state.on_thread_start(PID, TID);
                 state.install(PID, 2);
                 state.open_window(100);
-                state.on_cswitch(&cswitch(0, 60, 999, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 60, OTHER, TID, &[1000, 2000]));
                 // スライス [60,140] のうち window [100,∞) と重なるのは後半 40/80 = 50%
-                state.on_cswitch(&cswitch(0, 140, TID, &[1500, 2600]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![250, 300]);
-                assert_eq!(switches, 1);
+                state.on_cswitch(&cswitch(0, 140, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![250, 300]);
+                assert_eq!(t.attributed_switches, 1);
+                assert_complete(&t);
             }
 
             #[test]
             fn close_boundary_slice_is_prorated() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
                 state.close_window(20);
                 // スライス [10,30] のうち window [0,20] と重なるのは前半 10/20 = 50%
-                state.on_cswitch(&cswitch(0, 30, TID, &[1500, 2600]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![250, 300]);
-                assert_eq!(switches, 1);
+                state.on_cswitch(&cswitch(0, 30, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![250, 300]);
+                assert_eq!(t.attributed_switches, 1);
+                assert_complete(&t);
             }
 
             #[test]
             fn slice_spanning_entire_window_is_prorated() {
-                let mut state = PmcEngineState::default();
-                state.on_thread_start(PID, TID);
-                state.install(PID, 2);
-                state.open_window(100);
-                state.close_window(200);
-                state.on_cswitch(&cswitch(0, 50, 999, &[1000, 1000]));
+                let mut state = state_with_window(100, 200);
+                state.on_cswitch(&cswitch(0, 50, OTHER, TID, &[1000, 1000]));
                 // スライス [50,250] が window [100,200] を両側に跨ぐ → 100/200 = 50%
-                state.on_cswitch(&cswitch(0, 250, TID, &[1400, 1600]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![200, 300]);
-                assert_eq!(switches, 1);
+                state.on_cswitch(&cswitch(0, 250, TID, OTHER, &[1400, 1600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![200, 300]);
+                assert_eq!(t.attributed_switches, 1);
+                assert_complete(&t);
             }
 
             #[test]
             fn slice_entirely_outside_window_is_excluded() {
-                let mut state = PmcEngineState::default();
-                state.on_thread_start(PID, TID);
-                state.install(PID, 2);
-                state.open_window(100);
-                state.close_window(200);
+                let mut state = state_with_window(100, 200);
                 // close 後に始まり close 後に終わるスライス
-                state.on_cswitch(&cswitch(0, 210, 999, &[1000, 1000]));
-                state.on_cswitch(&cswitch(0, 220, TID, &[1500, 1500]));
+                state.on_cswitch(&cswitch(0, 210, OTHER, TID, &[1000, 1000]));
+                state.on_cswitch(&cswitch(0, 220, TID, OTHER, &[1500, 1500]));
                 // open 前に始まり open 前に終わるスライス（別 CPU）
-                state.on_cswitch(&cswitch(1, 10, 999, &[3000, 3000]));
-                state.on_cswitch(&cswitch(1, 90, TID, &[3500, 3500]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![0, 0]);
-                assert_eq!(switches, 0);
+                state.on_cswitch(&cswitch(1, 10, OTHER, TID, &[3000, 3000]));
+                state.on_cswitch(&cswitch(1, 90, TID, OTHER, &[3500, 3500]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+                assert_eq!(t.attributed_switches, 0);
+                assert_complete(&t);
             }
 
             #[test]
             fn proration_rounds_to_nearest() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 5, 999, &[1000, 1000]));
+                state.on_cswitch(&cswitch(0, 5, OTHER, TID, &[1000, 1000]));
                 state.close_window(10);
                 // スライス [5,20] のうち window [0,10] との重なりは 5/15 = 1/3。
                 // 差分 [10,20] → [3.33..,6.66..] → 最近接丸めで [3,7]
-                state.on_cswitch(&cswitch(0, 20, TID, &[1010, 1020]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![3, 7]);
-                assert_eq!(switches, 1);
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1010, 1020]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![3, 7]);
+                assert_eq!(t.attributed_switches, 1);
             }
 
             #[test]
             fn zero_length_slice_counts_fully_when_inside_window() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 1000]));
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 1000]));
                 // 長さ 0 のスライスは終端が window 内なら全額
-                state.on_cswitch(&cswitch(0, 10, TID, &[1005, 1006]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![5, 6]);
-                assert_eq!(switches, 1);
+                state.on_cswitch(&cswitch(0, 10, TID, OTHER, &[1005, 1006]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![5, 6]);
+                assert_eq!(t.attributed_switches, 1);
             }
 
             #[test]
             fn late_arriving_event_inside_window_is_still_counted() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
                 // 区間を閉じた後に、区間内タイムスタンプのイベントが遅延到着するケース
                 state.close_window(100);
-                state.on_cswitch(&cswitch(0, 50, TID, &[1200, 2300]));
-                let (totals, _, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![200, 300]);
+                state.on_cswitch(&cswitch(0, 50, TID, OTHER, &[1200, 2300]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![200, 300]);
+                assert_complete(&t);
             }
 
             #[test]
             fn counter_regression_is_skipped_and_counted() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
                 // 巻き戻った値は差分にしない（基準値は更新され、診断カウンタに乗る）
-                state.on_cswitch(&cswitch(0, 20, TID, &[500, 2600]));
-                state.on_cswitch(&cswitch(0, 30, TID, &[600, 2700]));
-                let (totals, switches, regressed) =
-                    state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![100, 100]);
-                assert_eq!(switches, 1);
-                assert_eq!(regressed, 1);
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[500, 2600]));
+                state.on_cswitch(&cswitch(0, 25, OTHER, TID, &[550, 2650]));
+                state.on_cswitch(&cswitch(0, 30, TID, OTHER, &[600, 2700]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![50, 50]);
+                assert_eq!(t.attributed_switches, 1);
+                assert_eq!(t.regressed_switches, 1);
             }
 
             #[test]
             fn per_cpu_baselines_are_independent() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 1000]));
-                state.on_cswitch(&cswitch(1, 11, 999, &[500, 500]));
-                state.on_cswitch(&cswitch(0, 20, TID, &[1100, 1200]));
-                state.on_cswitch(&cswitch(1, 21, TID, &[530, 540]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![130, 240]);
-                assert_eq!(switches, 2);
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 1000]));
+                state.on_cswitch(&cswitch(1, 11, OTHER, TID, &[500, 500]));
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1100, 1200]));
+                state.on_cswitch(&cswitch(1, 21, TID, OTHER, &[530, 540]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![130, 240]);
+                assert_eq!(t.attributed_switches, 2);
+                assert_complete(&t);
             }
 
             #[test]
-            fn thread_end_removes_tid_from_target() {
+            fn membership_persists_until_take_totals_clears_tracker() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000]));
-                state.on_thread_end(PID, TID);
-                state.on_cswitch(&cswitch(0, 20, TID, &[1500, 2600]));
-                let (totals, _, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![0, 0]);
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![500, 600]);
+                // 同じ PID を再 install しても Thread Start を観測するまでは非対象
+                state.install(PID, 2);
+                state.open_window(0);
+                state.on_cswitch(&cswitch(0, 30, OTHER, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 40, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+            }
+
+            #[test]
+            fn thread_start_moves_reused_tid_to_new_pid_and_flags_run() {
+                let mut state = state_with_target();
+                // 同じ TID が別 PID で再利用されたら、旧 PID の所属からは外れ、run は拒否対象
+                state.on_thread_start(PID + 1, TID);
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+                assert_eq!(t.tid_reuse_target, 1);
+            }
+
+            #[test]
+            fn tid_reuse_before_install_is_not_flagged() {
+                let mut state = PmcEngineState::default();
+                state.on_thread_start(PID, TID);
+                state.on_thread_start(PID + 1, TID);
+                state.install(PID, 2);
+                state.open_window(0);
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.tid_reuse_target, 0);
+            }
+
+            #[test]
+            fn thread_start_of_unrelated_tid_is_not_flagged() {
+                let mut state = state_with_target();
+                state.on_thread_start(PID + 1, 4242);
+                let t = state.take_totals().expect("accumulator installed");
+                assert_complete(&t);
+            }
+
+            #[test]
+            fn reused_tid_switch_in_on_other_cpu_flags_run() {
+                let mut state = state_with_target();
+                // 旧対象スレッド終了後、別 CPU で再利用先 (非対象) の switch-in が
+                // 遅延した Thread Start(PID+1, TID) より先に届く配送順。switch-in 時は
+                // 残存所属で new_is_target=true になり差分が帰属しうるので run ごと拒否する
+                state.on_cswitch(&cswitch(1, 10, OTHER, TID, &[1000, 2000]));
+                state.on_thread_start(PID + 1, TID);
+                state.on_cswitch(&cswitch(1, 20, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.tid_reuse_target, 1);
+            }
+
+            #[test]
+            fn delayed_switch_out_after_tid_reuse_is_attributed_but_flagged() {
+                let mut state = state_with_target();
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                // 別 PID で同じ TID の Thread Start が、旧スレッドの switch-out より先に届く。
+                // 連鎖が正しいので switch-in 時の所属で帰属はするが、run 自体は再利用として拒否
+                state.on_thread_start(PID + 1, TID);
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![500, 600]);
+                assert_eq!(t.attributed_switches, 1);
+                assert_eq!(t.tid_reuse_target, 1);
+                assert_eq!(t.chain_breaks_target, 0);
             }
 
             #[test]
             fn install_resets_previous_run() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000]));
-                state.on_cswitch(&cswitch(0, 20, TID, &[1500, 2600]));
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1500, 2600]));
                 state.install(PID, 2);
                 state.open_window(0);
                 // per-CPU 基準値もリセットされるため、最初の CSwitch は基準値記録のみ
-                state.on_cswitch(&cswitch(0, 30, TID, &[9999, 9999]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![0, 0]);
-                assert_eq!(switches, 0);
+                state.on_cswitch(&cswitch(0, 30, TID, OTHER, &[9999, 9999]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+                assert_eq!(t.attributed_switches, 0);
             }
 
             #[test]
-            fn short_counter_events_are_ignored() {
+            fn pmc_gap_on_target_switch_out_is_counted() {
                 let mut state = state_with_target();
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000]));
-                // counter 数が不足するイベントは基準値も更新しない
-                state.on_cswitch(&cswitch(0, 15, TID, &[9999]));
-                state.on_cswitch(&cswitch(0, 20, TID, &[1500, 2600]));
-                let (totals, _, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![500, 600]);
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                // 対象の switch-out に counter が足りない → 差分を取れず欠落
+                state.on_cswitch(&cswitch(0, 15, TID, OTHER, &[9999]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+                assert_eq!(t.pmc_gaps_target, 1);
             }
 
             #[test]
-            fn slice_touching_window_edge_has_zero_overlap() {
+            fn pmc_gap_on_target_switch_in_is_detected_at_switch_out() {
+                let mut state = state_with_target();
+                // switch-in 側に PMC が無い: 基準は TID・時刻だけ保持し、次の対象 switch-out で欠落と判定
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[]));
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+                assert_eq!(t.attributed_switches, 0);
+                assert_eq!(t.pmc_gaps_target, 1);
+                assert_eq!(t.chain_breaks_target, 0);
+            }
+
+            #[test]
+            fn pmc_less_event_between_other_threads_is_harmless() {
+                let mut state = state_with_target();
+                state.on_cswitch(&cswitch(0, 10, OTHER, 888, &[]));
+                state.on_cswitch(&cswitch(0, 20, 888, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 30, TID, OTHER, &[1100, 2100]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![100, 100]);
+                assert_complete(&t);
+            }
+
+            #[test]
+            fn pmc_gap_outside_window_is_not_counted() {
                 let mut state = PmcEngineState::default();
                 state.on_thread_start(PID, TID);
                 state.install(PID, 2);
                 state.open_window(100);
-                state.close_window(200);
-                state.on_cswitch(&cswitch(0, 60, 999, &[1000, 1000]));
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 50, TID, OTHER, &[5]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.pmc_gaps_target, 0);
+            }
+
+            #[test]
+            fn chain_break_while_target_runs_is_counted() {
+                let mut state = state_with_target();
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                // TID が走っているはずなのに別スレッドが switch out → 間のイベント欠落
+                state.on_cswitch(&cswitch(0, 20, 888, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+                assert_eq!(t.chain_breaks_target, 1);
+            }
+
+            #[test]
+            fn chain_break_outside_window_is_not_counted() {
+                let mut state = PmcEngineState::default();
+                state.on_thread_start(PID, TID);
+                state.install(PID, 2);
+                state.open_window(100);
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 20, 888, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.chain_breaks_target, 0);
+            }
+
+            #[test]
+            fn chain_break_between_other_threads_is_ignored() {
+                let mut state = state_with_target();
+                state.on_cswitch(&cswitch(0, 10, OTHER, 888, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 20, 777, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.chain_breaks_target, 0);
+            }
+
+            #[test]
+            fn timestamp_reversal_while_target_runs_is_a_chain_break() {
+                let mut state = state_with_target();
+                state.on_cswitch(&cswitch(0, 20, OTHER, TID, &[1000, 2000]));
+                state.on_cswitch(&cswitch(0, 10, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![0, 0]);
+                assert_eq!(t.chain_breaks_target, 1);
+            }
+
+            #[test]
+            fn unclosed_target_slice_is_reported() {
+                let mut state = state_with_target();
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                state.close_window(100);
+                // 最終 switch-out が届かないまま集計 → 未閉鎖
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.unclosed_target_slices, 1);
+            }
+
+            #[test]
+            fn closed_target_slice_is_not_reported() {
+                let mut state = state_with_target();
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000]));
+                state.close_window(100);
+                state.on_cswitch(&cswitch(0, 120, TID, OTHER, &[1500, 2600]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.unclosed_target_slices, 0);
+            }
+
+            #[test]
+            fn target_switched_in_after_close_is_not_unclosed() {
+                let mut state = state_with_target();
+                state.close_window(100);
+                state.on_cswitch(&cswitch(0, 150, OTHER, TID, &[1000, 2000]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.unclosed_target_slices, 0);
+            }
+
+            #[test]
+            fn slice_touching_window_edge_has_zero_overlap() {
+                let mut state = state_with_window(100, 200);
+                state.on_cswitch(&cswitch(0, 60, OTHER, TID, &[1000, 1000]));
                 // スライス [60,100] は終端が open 境界ちょうど → 重なり長 0 → 除外
-                state.on_cswitch(&cswitch(0, 100, TID, &[1200, 1200]));
-                // スライス [100,200] は window に完全内包 → 全額
-                state.on_cswitch(&cswitch(0, 200, TID, &[1500, 1500]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![300, 300]);
-                assert_eq!(switches, 1);
+                state.on_cswitch(&cswitch(0, 100, TID, OTHER, &[1200, 1200]));
+                state.on_cswitch(&cswitch(0, 120, OTHER, TID, &[1250, 1250]));
+                // スライス [120,200] は window に完全内包 → 全額
+                state.on_cswitch(&cswitch(0, 200, TID, OTHER, &[1500, 1500]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![250, 250]);
+                assert_eq!(t.attributed_switches, 1);
+                assert_complete(&t);
             }
 
             #[test]
             fn extra_counters_beyond_configured_are_ignored() {
                 let mut state = state_with_target();
                 // 設定 (n=2) より多い counter が届いた場合は先頭 n 個だけを使う
-                state.on_cswitch(&cswitch(0, 10, 999, &[1000, 2000, 111]));
-                state.on_cswitch(&cswitch(0, 20, TID, &[1500, 2600, 999]));
-                let (totals, switches, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals, vec![500, 600]);
-                assert_eq!(switches, 1);
+                state.on_cswitch(&cswitch(0, 10, OTHER, TID, &[1000, 2000, 111]));
+                state.on_cswitch(&cswitch(0, 20, TID, OTHER, &[1500, 2600, 999]));
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals, vec![500, 600]);
+                assert_eq!(t.attributed_switches, 1);
             }
 
             #[test]
             fn install_clamps_counter_count_to_max() {
                 let mut state = PmcEngineState::default();
                 state.install(PID, MAX_PMC_SOURCES + 5);
-                let (totals, _, _) = state.take_totals().expect("accumulator installed");
-                assert_eq!(totals.len(), MAX_PMC_SOURCES);
+                let t = state.take_totals().expect("accumulator installed");
+                assert_eq!(t.totals.len(), MAX_PMC_SOURCES);
             }
         }
     }
@@ -1945,37 +2225,36 @@ mod windows_main {
         use std::thread::{self, JoinHandle};
 
         use anyhow::{Context, Result, bail};
+        use std::time::{Duration, Instant};
         use windows_sys::Win32::Foundation::{
-            ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BAD_LENGTH, ERROR_INSUFFICIENT_BUFFER,
-            ERROR_MORE_DATA, ERROR_SUCCESS, ERROR_WMI_INSTANCE_NOT_FOUND,
+            ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BAD_LENGTH, ERROR_CANCELLED,
+            ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_SUCCESS,
+            ERROR_WMI_INSTANCE_NOT_FOUND,
         };
         use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
         use windows_sys::Win32::System::Diagnostics::Etw::{
             CLASSIC_EVENT_ID, CONTROLTRACE_HANDLE, CloseTrace, ControlTraceW,
             EVENT_HEADER_EXT_TYPE_PMC_COUNTERS, EVENT_HEADER_FLAG_PROCESSOR_INDEX, EVENT_RECORD,
-            EVENT_TRACE_CONTROL_FLUSH, EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_STOP,
-            EVENT_TRACE_FLAG_CSWITCH, EVENT_TRACE_FLAG_THREAD, EVENT_TRACE_LOGFILEW,
-            EVENT_TRACE_LOGFILEW_0, EVENT_TRACE_LOGFILEW_1, EVENT_TRACE_PROPERTIES,
-            EVENT_TRACE_REAL_TIME_MODE, KERNEL_LOGGER_NAMEW, OpenTraceW,
-            PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_RAW_TIMESTAMP,
-            PROCESS_TRACE_MODE_REAL_TIME, PROCESSTRACE_HANDLE, PROFILE_SOURCE_INFO, ProcessTrace,
-            StartTraceW, SystemTraceControlGuid, TracePmcCounterListInfo, TracePmcEventListInfo,
-            TraceProfileSourceListInfo, TraceQueryInformation, TraceSetInformation,
-            WNODE_FLAG_TRACED_GUID,
+            EVENT_TRACE_CONTROL_QUERY, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_FLAG_CSWITCH,
+            EVENT_TRACE_FLAG_THREAD, EVENT_TRACE_LOGFILEW, EVENT_TRACE_LOGFILEW_0,
+            EVENT_TRACE_LOGFILEW_1, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE,
+            KERNEL_LOGGER_NAMEW, OpenTraceW, PROCESS_TRACE_MODE_EVENT_RECORD,
+            PROCESS_TRACE_MODE_RAW_TIMESTAMP, PROCESS_TRACE_MODE_REAL_TIME, PROCESSTRACE_HANDLE,
+            PROFILE_SOURCE_INFO, ProcessTrace, StartTraceW, SystemTraceControlGuid,
+            TracePmcCounterListInfo, TracePmcEventListInfo, TraceProfileSourceListInfo,
+            TraceQueryInformation, TraceSetInformation, WNODE_FLAG_TRACED_GUID,
         };
 
         use super::pmc::{CSwitchSample, MAX_PMC_SOURCES, PmcEngineState};
 
         /// NT カーネル Thread プロバイダの GUID {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}。
-        /// CSwitch / Thread Start / Thread End イベントはこの provider で届く。
+        /// CSwitch / Thread Start イベントはこの provider で届く。
         const THREAD_PROVIDER_GUID: windows_sys::core::GUID =
             windows_sys::core::GUID::from_u128(0x3d6fa8d1_fe05_11d0_9dda_00c04fd7ba7c);
 
         const CSWITCH_OPCODE: u8 = 36;
         const THREAD_START_OPCODE: u8 = 1;
-        const THREAD_END_OPCODE: u8 = 2;
         const THREAD_DC_START_OPCODE: u8 = 3;
-        const THREAD_DC_END_OPCODE: u8 = 4;
 
         fn guid_eq(a: &windows_sys::core::GUID, b: &windows_sys::core::GUID) -> bool {
             a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
@@ -2018,6 +2297,7 @@ mod windows_main {
         /// NT Kernel Logger セッションの RAII guard。drop で必ず stop する。
         pub struct KernelSession {
             handle: CONTROLTRACE_HANDLE,
+            stopped: bool,
         }
 
         impl KernelSession {
@@ -2040,7 +2320,10 @@ mod windows_main {
                 }
 
                 // ここから先のエラーでも Self の Drop でセッションが stop される
-                let session = Self { handle };
+                let session = Self {
+                    handle,
+                    stopped: false,
+                };
 
                 // Ctrl+C 等でプロセスが即死するとセッションが OS に残るため、
                 // 終了前に stop を試みるハンドラを登録する
@@ -2125,27 +2408,37 @@ mod windows_main {
                 })
             }
 
-            /// バッファを強制 flush し、real-time consumer への配送を促す。
-            pub fn flush(&self) -> Result<()> {
+            /// セッションを停止する。STOP は CPU が保持中の未満杯バッファも含めて全部を
+            /// consumer へ配送してから完了するので、この後 consumer の ProcessTrace が
+            /// 自然終了するのを待てば末尾のイベントまで回収できる (FLUSH + 固定時間待ちでは
+            /// pin コアの未満杯バッファが配送されないことがある)。戻り値は STOP 時点の累計ロス数。
+            pub fn stop(&mut self) -> Result<LostCounts> {
                 let mut props = PropsBuf::new();
                 // SAFETY: handle は有効なセッションハンドル。props は有効なバッファ。
                 let status = unsafe {
-                    ControlTraceW(
-                        self.handle,
-                        null(),
-                        props.as_mut_ptr(),
-                        EVENT_TRACE_CONTROL_FLUSH,
-                    )
+                    ControlTraceW(self.handle, null(), props.as_mut_ptr(), EVENT_TRACE_CONTROL_STOP)
                 };
-                if status != ERROR_SUCCESS {
-                    bail!("ControlTraceW(flush) が失敗しました (code {status})");
+                if status != ERROR_SUCCESS && status != ERROR_MORE_DATA {
+                    // 失敗時は stopped のままにせず、Drop の停止処理に委ねる
+                    bail!("ControlTraceW(stop) が失敗しました (code {status})");
                 }
-                Ok(())
+                self.stopped = true;
+                CTRL_SESSION_HANDLE.store(0, Ordering::SeqCst);
+                // SAFETY: console_ctrl_handler は登録時と同じ 'static な関数ポインタ。
+                let _ = unsafe { SetConsoleCtrlHandler(Some(console_ctrl_handler), 0) };
+                let p = props.props_mut();
+                Ok(LostCounts {
+                    events_lost: p.EventsLost,
+                    realtime_buffers_lost: p.RealTimeBuffersLost,
+                })
             }
         }
 
         impl Drop for KernelSession {
             fn drop(&mut self) {
+                if self.stopped {
+                    return;
+                }
                 // 正常経路で stop するため、Ctrl ハンドラからの二重 stop を解除する
                 CTRL_SESSION_HANDLE.store(0, Ordering::SeqCst);
                 // SAFETY: console_ctrl_handler は登録時と同じ 'static な関数ポインタ。
@@ -2201,7 +2494,7 @@ mod windows_main {
                 p.MaximumBuffers = 256;
                 p.FlushTimer = 1; // 秒。real-time 配送の遅延上限を短くする
                 p.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-                // 消費するのは Thread Start/End (TID 追跡) と CSwitch (PMC 添付) のみ
+                // 消費するのは Thread Start (TID 追跡) と CSwitch (PMC 添付) のみ
                 p.EnableFlags = EVENT_TRACE_FLAG_THREAD | EVENT_TRACE_FLAG_CSWITCH;
             }
             // SAFETY:
@@ -2212,7 +2505,9 @@ mod windows_main {
 
         /// 前回の異常終了等で残った NT Kernel Logger セッションを停止する。
         fn stop_existing_session() -> Result<()> {
-            eprintln!(
+            // stdout に出す: 昇格 runner (PowerShell 5.1, $ErrorActionPreference=Stop) は
+            // native の stderr 出力を終了エラー扱いにしてプロセスを落とすため
+            println!(
                 "既存の NT Kernel Logger セッションを検出したため停止して回収します \
                  (前回の異常終了、または xperf/wpr 等の並行セッション)"
             );
@@ -2317,7 +2612,7 @@ mod windows_main {
         /// イベントを `PmcEngineState` へ流し込む。
         pub struct Consumer {
             handle: PROCESSTRACE_HANDLE,
-            thread: Option<JoinHandle<()>>,
+            thread: Option<JoinHandle<u32>>,
             /// コールバックが Context 経由で参照するため、consumer スレッド join まで
             /// Arc を所有し続ける（解放順の保証）。
             shared: Option<Arc<Mutex<PmcEngineState>>>,
@@ -2356,7 +2651,7 @@ mod windows_main {
                     thread::Builder::new().name("etw-consumer".to_string()).spawn(move || {
                         // SAFETY: handle は OpenTraceW が返した有効な処理ハンドル。
                         // ProcessTrace はセッション停止か CloseTrace まで block する。
-                        let _ = unsafe { ProcessTrace(&thread_handle, 1, null(), null()) };
+                        unsafe { ProcessTrace(&thread_handle, 1, null(), null()) }
                     });
                 let thread = match spawned {
                     Ok(thread) => thread,
@@ -2377,18 +2672,79 @@ mod windows_main {
             }
         }
 
+        impl Consumer {
+            /// セッション STOP 後に ProcessTrace が自然終了する (= 残りのバッファを
+            /// 全部処理した) のを待つ。timeout 内に終わらなければ CloseTrace で
+            /// 打ち切り、エラーにする (末尾が欠けた値を正常値として返さない)。
+            pub fn drain(mut self, timeout: Duration) -> Result<()> {
+                let status = self.shutdown(timeout)?;
+                if status != ERROR_SUCCESS && status != ERROR_CANCELLED {
+                    bail!("ProcessTrace が異常終了しました (code {status})");
+                }
+                Ok(())
+            }
+
+            /// consumer スレッドを有限時間で片付ける。`natural_wait` の間は ProcessTrace の
+            /// 自然終了を待ち、間に合わなければ CloseTrace で打ち切って DETACH_GRACE だけ
+            /// 待つ。それでも終わらなければスレッドを detach し、コールバックが Context
+            /// 経由で触る Arc は解放せず意図的にリークする。
+            fn shutdown(&mut self, natural_wait: Duration) -> Result<u32> {
+                let Some(thread) = self.thread.take() else {
+                    return Ok(ERROR_SUCCESS);
+                };
+                let finished = wait_finished(&thread, natural_wait);
+                if !finished {
+                    // SAFETY: handle は OpenTraceW で得た有効なハンドル。
+                    let _ = unsafe { CloseTrace(self.handle) };
+                    if !wait_finished(&thread, DETACH_GRACE) {
+                        if let Some(shared) = self.shared.take() {
+                            std::mem::forget(shared);
+                        }
+                        drop(thread);
+                        bail!(
+                            "ETW consumer: {natural_wait:?} + {DETACH_GRACE:?} 以内に ProcessTrace が \
+                             終了しませんでした (末尾イベントの回収不能)"
+                        );
+                    }
+                }
+                let joined = thread.join();
+                if finished {
+                    // SAFETY: ProcessTrace 復帰後の handle を閉じる (打ち切り経路では閉じ済み)。
+                    let _ = unsafe { CloseTrace(self.handle) };
+                }
+                self.shared.take();
+                let status = joined
+                    .map_err(|_| anyhow::anyhow!("ETW consumer スレッドが panic しました"))?;
+                if !finished {
+                    bail!(
+                        "ETW consumer: {natural_wait:?} 以内に ProcessTrace が終了せず打ち切りました \
+                         (末尾イベントの回収不能)"
+                    );
+                }
+                Ok(status)
+            }
+        }
+
         impl Drop for Consumer {
             fn drop(&mut self) {
-                if let Some(thread) = self.thread.take() {
-                    // SAFETY: handle は OpenTraceW で得た有効なハンドル。CloseTrace により
-                    // ProcessTrace が復帰する (ERROR_CTX_CLOSE_PENDING は正常系)。
-                    let _ = unsafe { CloseTrace(self.handle) };
-                    let _ = thread.join();
-                }
-                // Arc はスレッド join 後に手放す。コールバックが解放済み領域へ触れる
-                // ことはない。
-                self.shared.take();
+                // drain されなかった経路 (初期化失敗 / STOP 失敗) でも無期限に待たない
+                let _ = self.shutdown(Duration::ZERO);
             }
+        }
+
+        /// CloseTrace 後に ProcessTrace の復帰を待つ猶予。
+        const DETACH_GRACE: Duration = Duration::from_secs(5);
+
+        /// スレッドの終了を timeout まで 20ms 間隔で待つ。
+        fn wait_finished(thread: &JoinHandle<u32>, timeout: Duration) -> bool {
+            let deadline = Instant::now() + timeout;
+            while !thread.is_finished() {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            true
         }
 
         /// ProcessTrace から呼ばれるイベントコールバック。
@@ -2420,13 +2776,6 @@ mod windows_main {
                         state.on_thread_start(pid, tid);
                     }
                 }
-                THREAD_END_OPCODE | THREAD_DC_END_OPCODE => {
-                    if let Some((pid, tid)) = read_pid_tid(record)
-                        && let Ok(mut state) = shared.lock()
-                    {
-                        state.on_thread_end(pid, tid);
-                    }
-                }
                 _ => {}
             }
         }
@@ -2441,13 +2790,17 @@ mod windows_main {
             // 確認済み。read_unaligned なので alignment 要件はない。
             let old_tid =
                 unsafe { (record.UserData as *const u8).add(4).cast::<u32>().read_unaligned() };
+            // SAFETY: 同上。先頭 4 byte が NewThreadId。
+            let new_tid = unsafe { record.UserData.cast::<u32>().read_unaligned() };
 
-            if record.ExtendedData.is_null() {
-                return;
-            }
             let mut counters = [0u64; MAX_PMC_SOURCES];
             let mut len = 0usize;
-            for i in 0..record.ExtendedDataCount as usize {
+            let ext_count = if record.ExtendedData.is_null() {
+                0
+            } else {
+                record.ExtendedDataCount as usize
+            };
+            for i in 0..ext_count {
                 // SAFETY: ExtendedData は ExtendedDataCount 要素の有効配列。
                 let item = unsafe { record.ExtendedData.add(i).read_unaligned() };
                 if u32::from(item.ExtType) != EVENT_HEADER_EXT_TYPE_PMC_COUNTERS
@@ -2463,10 +2816,9 @@ mod windows_main {
                 len = count;
                 break;
             }
-            if len == 0 {
-                // PMC の付かない CSwitch（設定反映前など）は差分の対応が取れないため捨てる
-                return;
-            }
+            // PMC の付かない CSwitch (len == 0) も積算器へ渡す。差分は取れないが、
+            // 対象→他→対象の切替を見落とすと他スレッド分が対象に帰属するため、
+            // 基準の無効化と欠落検出には必要。
 
             // EVENT_HEADER_FLAG_PROCESSOR_INDEX が立っていれば union は u16 の
             // ProcessorIndex として書かれている。立っていなければ従来レイアウト
@@ -2484,6 +2836,7 @@ mod windows_main {
                 // ClientContext=1 + PROCESS_TRACE_MODE_RAW_TIMESTAMP により生の QPC 値
                 timestamp: record.EventHeader.TimeStamp,
                 old_tid,
+                new_tid,
                 counters,
                 len,
             };
@@ -2768,7 +3121,7 @@ mod windows_main {
     /// 1 run: エンジンを fresh spawn し、探索区間の PMC カウンタを集計する。
     fn run_one(
         cli: &Cli,
-        session: &etw::KernelSession,
+        source_indices: &[u32],
         shared: &Arc<Mutex<PmcEngineState>>,
         source_names: &[String],
         position: &PositionCase,
@@ -2778,6 +3131,12 @@ mod windows_main {
     ) -> Result<RunSample> {
         // spawn 前に基準を取ることで、spawn〜initialize 間の Thread Start ロスも
         // lost 検査の窓に含める（この区間のロスは TID 追跡を静かに欠けさせるため）。
+        // セッションと consumer は run ごとに作り、run 末尾で STOP → ProcessTrace の
+        // 自然終了を待つ。pin した idle コアではエンジンが数秒無中断で走り、bestmove 時の
+        // 最終 switch-out 1 件だけがその CPU のバッファに残るが、FLUSH + 固定時間待ちでは
+        // この未満杯バッファが配送されず、最終スライス (= 計測区間の大半) が静かに欠ける。
+        let mut session = etw::KernelSession::start(source_indices)?;
+        let consumer = etw::Consumer::start(Arc::clone(shared))?;
         let lost_before = session.query_lost_counts()?;
         let mut engine = UsiEngine::spawn(cli, variant, cli.cpu)?;
         // spawn 直後に対象 PID を登録し、Thread Start の観測窓を最大化する。ただし
@@ -2835,12 +3194,11 @@ mod windows_main {
             bail!("{}: engine exited with status {status}", engine.label);
         }
 
-        // 遅延到着イベントを取り込む: バッファを flush してから配送を待つ
-        session.flush()?;
-        thread::sleep(FLUSH_WAIT);
+        // STOP → drain: 残バッファを全部 consumer に流し切ってから集計する
+        let lost_after = session.stop()?;
+        consumer.drain(DRAIN_TIMEOUT)?;
 
         // イベントロスがあった run は計測値が静かに欠けるため、集計せず破棄する
-        let lost_after = session.query_lost_counts()?;
         if lost_after != lost_before {
             bail!(
                 "{}: ETW イベントロスを検出しました (events_lost +{}, \
@@ -2853,10 +3211,27 @@ mod windows_main {
             );
         }
 
+        let pmc_totals = lock_state(shared)?
+            .take_totals()
+            .ok_or_else(|| anyhow!("{}: PMC accumulator not installed", engine.label))?;
+        // 最終スライス未到着 / 連鎖欠落 / PMC 欠落は静かな過小計測になるため破棄する
+        if pmc_totals.unclosed_target_slices > 0
+            || pmc_totals.chain_breaks_target > 0
+            || pmc_totals.pmc_gaps_target > 0
+            || pmc_totals.tid_reuse_target > 0
+        {
+            bail!(
+                "{}: PMC 積算が不完全です (unclosed_target_slices={}, chain_breaks_target={}, \
+                 pmc_gaps_target={}, tid_reuse_target={})。この run の計測値は破棄します。",
+                engine.label,
+                pmc_totals.unclosed_target_slices,
+                pmc_totals.chain_breaks_target,
+                pmc_totals.pmc_gaps_target,
+                pmc_totals.tid_reuse_target,
+            );
+        }
         let (totals, attributed_switches, regressed_switches) =
-            lock_state(shared)?
-                .take_totals()
-                .ok_or_else(|| anyhow!("{}: PMC accumulator not installed", engine.label))?;
+            (pmc_totals.totals, pmc_totals.attributed_switches, pmc_totals.regressed_switches);
         if attributed_switches == 0 {
             bail!(
                 "{}: 計測区間内にエンジンスレッドへ帰属する PMC 付き CSwitch を観測できません\n\
@@ -2908,11 +3283,7 @@ mod windows_main {
         let source_names = parse_pmc_source_names(&cli.pmc_sources)?;
         let source_indices = resolve_profile_sources(&source_names)?;
 
-        let session = etw::KernelSession::start(&source_indices)?;
         let shared = Arc::new(Mutex::new(PmcEngineState::default()));
-        // consumer は session より後に宣言し、逆順 drop で
-        // 「consumer 停止 → セッション stop」の順に片付ける
-        let consumer = etw::Consumer::start(Arc::clone(&shared))?;
 
         let mut samples = Vec::new();
         for round_idx in 0..cli.rounds {
@@ -2930,7 +3301,7 @@ mod windows_main {
 
                     let sample = run_one(
                         &cli,
-                        &session,
+                        &source_indices,
                         &shared,
                         &source_names,
                         position,
@@ -2960,9 +3331,6 @@ mod windows_main {
                 }
             }
         }
-
-        drop(consumer);
-        drop(session);
 
         let summary = build_summary(&samples)?;
         print_summary(&summary);
