@@ -113,6 +113,7 @@ SPSA は paired antithetic スケジュールで対局を組む。**1 pair (2 �
 - `--byoyomi <ms>` (既定 1000ms): 1 手あたりの秒読み時間制御。最も単純で SPSA 向き
 - `--btime <ms> --binc <ms>`: Fischer モード（持ち時間 + 加算）。長い対局の挙動を測りたい時のみ
 - `--nodes <N>`: ノード数固定。CPU 性能差に依存しない厳密比較が必要な場合のみ
+  - 1手の探索期限は `--nodes-timeout-ms` で指定する（[§14](#14-engine-プール再試行停止) 参照）。
   （SPSA はノイズ低減のため通常は時間ベースで十分）
 
 ```bash
@@ -1393,3 +1394,78 @@ resume できないときは、§10.7 の手順で旧 run の最終値だけを�
 - 単一 seed のばらつきを確認したい場合は、`--seed` を変えた独立 run dir を
   数本 (3〜5 本) 走らせて `stats.csv` を比較する
 - チューニング対象が広すぎる。`--active-only-regex` でグループ別に分割して順次チューニング
+
+## 14. engine プール・再試行・停止
+
+worker は run 開始時に `min(concurrency, 2 × batch_pairs)` 個生成し、各 worker が
+plus/minus の engine 2 本を全 batch で再利用する。batch 末の barrier と更新・保存は従来どおり。
+各対局では全 active パラメータを絶対値で送り、plus 設定＋isready → minus 設定＋isready →
+plus usinewgame＋isready → minus usinewgame＋isready の順で開始する。
+
+| オプション | 既定値 | 意味 |
+|---|---:|---|
+| `--engine-retries N` | 1 | 初回を除く追加試行数。spawn・初期化失敗も予算に含める |
+| `--nodes-timeout-ms MS` | 600000 | `--nodes` 使用時の1探索（1手）の期限。正数のみ。10分は未較正の初期値 |
+
+再試行の対象は engine 異常終了・pipe 切断・usi/isready の read timeout・watchdog。
+その worker の engine 2 本を破棄して再生成し、同じ1局の task（局面・色・game_id・時間制御初期値）と
+batch の確定済み plus/minus 値でやり直す。乱数は引き直さず、成功した結果を一度だけ集計する。
+再試行は stderr に `retry batch=... game_id=... attempt=... cause=...` と1行記録する。
+`attempt=2` は初回失敗後の2回目の試行を表す。CSV/meta の schema は変えない。
+通常の resign / win / illegal_move / no_bestmove / 時計 timeout / max_moves と局面構築エラーは再試行しない。
+これは1局単位の再試行であり、後続 PR2 の PairTask 単位の再試行とは別物。
+
+watchdog は「運用上の探索期限超過。hang と低速を区別せず、勝敗には採用しない」。
+期限で `stop` を送り、`timeout-margin-ms` の猶予で応答を回収する。
+stop 後の bestmove も、受信時点で期限を超えた bestmove も正常結果には戻さず、再試行対象にする。
+共有 search API は depth-only にも対応するが、spsa に `--depth` は追加していない。
+tournament / backend は watchdog を有効にせず、既存の動作を維持する。
+
+正常終了・early-stop・致命的エラーでは task channel を閉じて待機 worker を起こし、全 worker を join してから
+run-dir lock を解放する。cancel は task 取得後・再 spawn 前・各手の開始前に確認する。
+初期化途中も含め、最終試行の spawn / initialize 失敗ではローカル engine の破棄前に cancel を通知する。
+再試行可能な初期化失敗は全体 cancel を立てず、engine failure として再試行する。
+panic hook は既定 hook によるメッセージ出力後、unwind 開始前に cancel を通知するため、
+初期化途中のローカル engine の破棄より先に他 worker へ停止を伝える。
+探索中の即時割り込みは行わず、実行中の探索の終了を待つ。usi/isready は無関係な行が来続けても
+usi→usiok と isready→readyok の各段で120秒（初期化は最大240秒）で timeout になる。engine の終了は quit → 300ms 待機 → kill。
+ただし同期 stdin write（quit を含む）の停滞は保証対象外であり、全 hang の有限時間停止を保証するものではない。
+
+fresh 開始では最初の batch 前に completed_pairs=0 の v4 meta を保存する。
+engine failure から通常の Err で戻った場合、state/meta/CSV は直前の batch 境界を保持し、新たな final.params は作らない。
+同じ `--total-pairs`・`--seed` と `--resume` で重複行なく再開できる。
+state→meta 保存途中のクラッシュ耐性や、6桁保存からの f64 軌道の完全復元は保証しない。
+
+決定的な対局応答について values.csv / stats.csv / state.params を固定 SHA `8a740655` と比較する。
+実 engine の定跡乱数や usinewgame で消えないプロセス内状態は、再 spawn の頻度変更により変化しうるため互換性保証の対象外。
+
+### 互換性 golden の再生成
+
+固定 SHA `8a740655` からビルド済みの基準 spsa を `BASELINE` に指定する。
+mock は必ずこの worktree で新しくビルドする。Git Bash / Bash でリポジトリルートから実行:
+
+```bash
+cargo build -p tools --bin spsa_test_engine
+BASELINE=/path/to/baseline/spsa.exe
+MOCK="$PWD/target/debug/spsa_test_engine.exe" # Linux は .exe を外す
+GOLDEN=crates/tools/tests/golden/spsa
+OUT="target/spsa-golden-$(date +%s)"
+for mode in cyclic random; do
+  random=false; [ "$mode" = random ] && random=true
+  for concurrency in 1 3; do
+    run="$OUT/$mode-$concurrency"
+    SPSA_TEST_ENGINE_MODE=value_driven "$BASELINE" \
+      --run-dir "$run" --engine-path "$MOCK" \
+      --init-from "$GOLDEN/canonical.params" --startpos-file "$GOLDEN/startpos.txt" \
+      --total-pairs 4 --batch-pairs 2 --concurrency "$concurrency" \
+      --seed 1 --nodes 1000 --threads 1 --hash-mb 16 --random-startpos "$random" || exit 1
+    mkdir -p "$GOLDEN/$mode-$concurrency"
+    cp "$run/values.csv" "$run/stats.csv" "$run/state.params" "$GOLDEN/$mode-$concurrency/"
+  done
+done
+cargo test -p tools --test spsa_run_dir_integration value_driven_matches_fixed_sha_golden
+```
+
+2026-09-09 の生成時には SPSA 本体の改修前にも同じ条件で現行 HEAD を実行し、4条件×3成果物が基準と
+SHA-256 一致することを確認した。value_driven は SPSA_TEST_INT が6以上なら win、それ以外は resign を返し、
+両 batch の raw_result=+4 の非ゼロ更新を検証する。mock は局面に依存しないため、局面選択 RNG 自体は既存 prep unit test が検証する。

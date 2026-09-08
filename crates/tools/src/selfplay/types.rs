@@ -208,6 +208,8 @@ pub struct SearchRequest<'a> {
     pub time_args: TimeArgs,
     pub think_limit_ms: u64,
     pub timeout_margin_ms: u64,
+    /// 時間制御なしの nodes/depth 探索の期限（1 手、正のミリ秒）。
+    pub limit_only_timeout_ms: Option<u64>,
     pub game_id: u32,
     pub ply: u32,
     pub side: Color,
@@ -224,6 +226,8 @@ pub struct SearchOutcome {
     pub bestmove: Option<String>,
     pub elapsed_ms: u64,
     pub timed_out: bool,
+    /// 運用上の探索期限を超過した結果。勝敗に使わない。
+    pub watchdog_fired: bool,
     pub eval: Option<EvalLog>,
 }
 

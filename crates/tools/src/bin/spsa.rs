@@ -2,6 +2,10 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -178,6 +182,14 @@ struct Cli {
     /// ノード数制限。指定時は時間制御の代わりに `go nodes N` を使用する。
     #[arg(long)]
     nodes: Option<u64>,
+
+    /// 通信障害時の追加試行数（初回を含まない）。
+    #[arg(long, default_value_t = 1)]
+    engine_retries: u32,
+
+    /// nodes 探索 1 手の運用上の期限。既定 10 分は未較正の初期値。
+    #[arg(long, default_value_t = 600_000, value_parser = clap::value_parser!(u64).range(1..))]
+    nodes_timeout_ms: u64,
 
     /// 1局あたり最大手数
     #[arg(long, default_value_t = 320)]
@@ -484,7 +496,7 @@ struct BatchGameStats {
 
 /// 1 batch 分の事前計算結果（flips / shifts / plus / minus / startpos インデックス）。
 ///
-/// `compute_batch_prep` で生成し、`run_batch_games_parallel` の入力として使う。
+/// `compute_batch_prep` で生成し、`WorkerPool::run_batch` の入力として使う。
 /// fishtest 流: 同 batch 内の全 game pair で共通の flip ベクトルと rounded plus/minus 値を使う。
 struct BatchPrep {
     base_seed: u64,
@@ -497,24 +509,6 @@ struct BatchPrep {
     /// この batch 内で消化する game の (累積) 開始 game 番号。stats / log 表示と
     /// `pick_startpos_index` の cyclic 進行に使う。
     batch_total_games_start: usize,
-}
-
-struct BatchRunContext<'a> {
-    concurrency: usize,
-    base_cfg: &'a EngineConfig,
-    params: &'a [SpsaParam],
-    plus_values: &'a [f64],
-    minus_values: &'a [f64],
-    start_positions: &'a [ParsedPosition],
-    start_pos_indices: &'a [usize],
-    game_cfg: &'a GameConfig,
-    tc: TimeControl,
-    total_games_start: usize,
-    /// batch 番号 (1-origin) を log 表示用に渡す。
-    iteration: u32,
-    base_seed: u64,
-    translator: &'a EngineNameTranslator,
-    active_mask: &'a [bool],
 }
 
 /// rshogi `.params` の名前 → エンジン側 USI option 名 への翻訳器
@@ -2137,7 +2131,7 @@ fn compute_batch_prep(
     // 開局選択ノイズと先手有利バイアスを互いにキャンセルする (fishtest 互換)。
     //
     // batch_pairs 個の startpos を選び、各 pair で game 2k と 2k+1 が同じ index を
-    // 共有する。`plus_is_black` は呼び出し側 (run_batch_games_parallel) で
+    // 共有する。`plus_is_black` は呼び出し側 (WorkerPool::run_batch) で
     // `idx % 2 == 0` を参照するので、ここでは index 配列のみを生成すれば足りる。
     //
     // `pick_startpos_index` の `game_index` 引数は cyclic mode (random=false) で
@@ -2169,173 +2163,180 @@ fn compute_batch_prep(
     })
 }
 
-fn duplicate_engine_config(cfg: &EngineConfig) -> EngineConfig {
-    EngineConfig {
-        path: cfg.path.clone(),
-        args: cfg.args.clone(),
-        threads: cfg.threads,
-        hash_mb: cfg.hash_mb,
-        network_delay: cfg.network_delay,
-        network_delay2: cfg.network_delay2,
-        minimum_thinking_time: cfg.minimum_thinking_time,
-        slowmover: cfg.slowmover,
-        ponder: cfg.ponder,
-        usi_options: cfg.usi_options.clone(),
+#[derive(Debug)]
+struct UpdateStats {
+    updated_params: usize,
+    avg_abs_update: f64,
+    max_abs_update: f64,
+}
+
+fn apply_spsa_update(
+    params: &mut [SpsaParam],
+    flips: &[f64],
+    param_schedules: &[ParamScheduleConstants],
+    active_mask: &[bool],
+    schedule: ScheduleConfig,
+    k_for_update: u32,
+    raw_result: f64,
+) -> UpdateStats {
+    let big_a = schedule.a_ratio * schedule.total_iterations as f64;
+    let mut update_sums = vec![0.0f64; params.len()];
+    for (idx, (p, (&flip, sched))) in
+        params.iter().zip(flips.iter().zip(param_schedules.iter())).enumerate()
+    {
+        if !active_mask[idx] || p.c_end.abs() <= f64::EPSILON {
+            continue;
+        }
+        let (c_k, r_k) = sched.at_iteration(k_for_update, big_a, schedule.alpha, schedule.gamma);
+        update_sums[idx] = r_k * c_k * raw_result * flip;
+    }
+
+    // θ 更新。1 batch = 1 update (fishtest 流)。
+    let mut updated_params = 0usize;
+    let mut abs_update_sum = 0.0f64;
+    let mut max_abs_update = 0.0f64;
+    for (idx, p) in params.iter_mut().enumerate() {
+        if !active_mask[idx] || p.c_end.abs() <= f64::EPSILON {
+            continue;
+        }
+        let before = p.value;
+        let signal = update_sums[idx];
+        // θ 内部状態は is_int に関わらず f64 のまま保持する (fishtest 流)。
+        p.value = clamped_value(p, p.value + signal * schedule.mobility);
+        let abs_update = (p.value - before).abs();
+        updated_params += 1;
+        abs_update_sum += abs_update;
+        if abs_update > max_abs_update {
+            max_abs_update = abs_update;
+        }
+    }
+    let avg_abs_update = if updated_params > 0 {
+        abs_update_sum / updated_params as f64
+    } else {
+        0.0
+    };
+
+    UpdateStats {
+        updated_params,
+        avg_abs_update,
+        max_abs_update,
     }
 }
 
-fn run_batch_games_parallel(ctx: BatchRunContext<'_>) -> Result<BatchGameStats> {
-    let BatchRunContext {
-        concurrency,
-        base_cfg,
-        params,
-        plus_values,
-        minus_values,
-        start_positions,
-        start_pos_indices,
-        game_cfg,
-        tc,
-        total_games_start,
-        iteration,
-        base_seed,
-        translator,
-        active_mask,
-    } = ctx;
+struct BatchValues {
+    plus: Vec<f64>,
+    minus: Vec<f64>,
+}
 
-    let game_count = start_pos_indices.len();
-    if game_count == 0 {
-        return Ok(BatchGameStats {
+#[derive(Clone, Copy)]
+struct WorkerContext<'a> {
+    base_cfg: &'a EngineConfig,
+    params: &'a [SpsaParam],
+    start_positions: &'a [ParsedPosition],
+    game_cfg: &'a GameConfig,
+    tc: TimeControl,
+    translator: &'a EngineNameTranslator,
+    active_mask: &'a [bool],
+}
+
+struct PoolTask {
+    iteration: u32,
+    game: GameTask,
+    values: Arc<BatchValues>,
+}
+
+struct WorkerPool<'scope> {
+    tasks: Option<crossbeam_channel::Sender<PoolTask>>,
+    results: crossbeam_channel::Receiver<Result<GameTaskResult>>,
+    cancel: Arc<AtomicBool>,
+    handles: Vec<std::thread::ScopedJoinHandle<'scope, ()>>,
+}
+
+impl<'scope> WorkerPool<'scope> {
+    fn new<'env: 'scope>(
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        count: usize,
+        ctx: WorkerContext<'scope>,
+        retries: u32,
+    ) -> Result<Self> {
+        let (tasks, task_rx) = unbounded::<PoolTask>();
+        let (result_tx, results) = unbounded();
+        let cancel = ctx
+            .game_cfg
+            .cancel
+            .clone()
+            .context("worker pool requires a shared cancel flag")?;
+        let mut handles = Vec::new();
+        for idx in 0..count {
+            let task_rx = task_rx.clone();
+            let result_tx = result_tx.clone();
+            let cancel = cancel.clone();
+            handles.push(scope.spawn(move || {
+                // panic も結果 channel へ通知し、他 worker の sender による受信待ちを防ぐ。
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    worker_loop(ctx, idx, task_rx, &result_tx, &cancel, retries)
+                }));
+                let error = match result {
+                    Ok(Ok(())) => return,
+                    Ok(Err(error)) => error,
+                    Err(_) => anyhow::anyhow!("worker panic"),
+                };
+                cancel.store(true, Ordering::Release);
+                let _ = result_tx.send(Err(error));
+            }));
+        }
+        Ok(Self {
+            tasks: Some(tasks),
+            results,
+            cancel,
+            handles,
+        })
+    }
+
+    fn run_batch(&self, prep: &BatchPrep, iteration: u32) -> Result<BatchGameStats> {
+        let values = Arc::new(BatchValues {
+            plus: prep.plus_values.clone(),
+            minus: prep.minus_values.clone(),
+        });
+        let game_count = prep.start_pos_indices.len();
+        for (idx, &start_pos_index) in prep.start_pos_indices.iter().enumerate() {
+            self.tasks
+                .as_ref()
+                .context("worker pool closed")?
+                .send(PoolTask {
+                    iteration,
+                    game: GameTask {
+                        game_idx: u32::try_from(idx).context("game index overflow")?,
+                        plus_is_black: idx % 2 == 0,
+                        start_pos_index,
+                        game_id: u32::try_from(prep.batch_total_games_start + idx + 1)
+                            .context("game id overflow")?,
+                    },
+                    values: values.clone(),
+                })
+                .context("failed to dispatch game task")?;
+        }
+        let mut stats = BatchGameStats {
             step_sum: 0.0,
             plus_wins: 0,
             minus_wins: 0,
             draws: 0,
-        });
-    }
-    let worker_count = concurrency.clamp(1, game_count);
-    let (task_tx, task_rx) = unbounded::<GameTask>();
-    let (result_tx, result_rx) = unbounded::<Result<GameTaskResult>>();
-
-    std::thread::scope(|scope| -> Result<BatchGameStats> {
-        for worker_idx in 0..worker_count {
-            let task_rx = task_rx.clone();
-            let result_tx = result_tx.clone();
-            let worker_cfg = duplicate_engine_config(base_cfg);
-            let worker_label = format!("batch{iteration}_worker{}", worker_idx + 1);
-            scope.spawn(move || {
-                let mut plus_engine =
-                    match EngineProcess::spawn(&worker_cfg, format!("plus_{worker_label}")) {
-                        Ok(engine) => engine,
-                        Err(err) => {
-                            let _ = result_tx.send(Err(err));
-                            return;
-                        }
-                    };
-                let mut minus_engine =
-                    match EngineProcess::spawn(&worker_cfg, format!("minus_{worker_label}")) {
-                        Ok(engine) => engine,
-                        Err(err) => {
-                            let _ = result_tx.send(Err(err));
-                            return;
-                        }
-                    };
-                for task in task_rx {
-                    let result = (|| -> Result<GameTaskResult> {
-                        // plus/minus engine は常に plus/minus パラメータを保持する。
-                        // paired antithetic の先後入替は下の run_game 呼び出し順だけで行う。
-                        apply_parameter_vector(
-                            &mut plus_engine,
-                            params,
-                            plus_values,
-                            translator,
-                            active_mask,
-                        )?;
-                        apply_parameter_vector(
-                            &mut minus_engine,
-                            params,
-                            minus_values,
-                            translator,
-                            active_mask,
-                        )?;
-                        plus_engine.new_game()?;
-                        minus_engine.new_game()?;
-
-                        let start_pos = &start_positions[task.start_pos_index];
-                        let mut on_move = |_event: &MoveEvent| {};
-                        let result = if task.plus_is_black {
-                            run_game(
-                                &mut plus_engine,
-                                &mut minus_engine,
-                                start_pos,
-                                tc,
-                                game_cfg,
-                                task.game_id,
-                                &mut on_move,
-                                None,
-                            )?
-                        } else {
-                            run_game(
-                                &mut minus_engine,
-                                &mut plus_engine,
-                                start_pos,
-                                tc,
-                                game_cfg,
-                                task.game_id,
-                                &mut on_move,
-                                None,
-                            )?
-                        };
-                        let plus_score =
-                            plus_score_from_outcome(result.outcome, task.plus_is_black);
-                        Ok(GameTaskResult {
-                            game_idx: task.game_idx,
-                            plus_is_black: task.plus_is_black,
-                            plus_score,
-                            outcome: result.outcome,
-                        })
-                    })();
-                    if result_tx.send(result).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(task_rx);
-        drop(result_tx);
-
-        for (idx, &start_pos_index) in start_pos_indices.iter().enumerate() {
-            let game_idx = u32::try_from(idx).context("game index overflow")?;
-            let game_id = u32::try_from(total_games_start + idx + 1).context("game id overflow")?;
-            task_tx
-                .send(GameTask {
-                    game_idx,
-                    plus_is_black: idx % 2 == 0,
-                    start_pos_index,
-                    game_id,
-                })
-                .context("failed to dispatch game task")?;
-        }
-        drop(task_tx);
-
-        let mut step_sum = 0.0f64;
-        let mut plus_wins = 0u32;
-        let mut minus_wins = 0u32;
-        let mut draws = 0u32;
-
+        };
         for _ in 0..game_count {
             let result =
-                result_rx.recv().context("failed to receive game result from worker")??;
-            step_sum += result.plus_score;
+                self.results.recv().context("failed to receive game result from worker")??;
+            stats.step_sum += result.plus_score;
             if result.plus_score > 0.0 {
-                plus_wins += 1;
+                stats.plus_wins += 1;
             } else if result.plus_score < 0.0 {
-                minus_wins += 1;
+                stats.minus_wins += 1;
             } else {
-                draws += 1;
+                stats.draws += 1;
             }
             eprintln!(
                 "batch={} seed={} game={}/{} plus_is_black={} outcome={} plus_score={:+.1}",
                 iteration,
-                base_seed,
+                prep.base_seed,
                 result.game_idx + 1,
                 game_count,
                 result.plus_is_black,
@@ -2343,14 +2344,209 @@ fn run_batch_games_parallel(ctx: BatchRunContext<'_>) -> Result<BatchGameStats> 
                 result.plus_score
             );
         }
+        Ok(stats)
+    }
+}
 
-        Ok(BatchGameStats {
-            step_sum,
-            plus_wins,
-            minus_wins,
-            draws,
-        })
+#[derive(Debug)]
+struct WorkerCancelled;
+
+impl std::fmt::Display for WorkerCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("worker cancelled")
+    }
+}
+
+impl std::error::Error for WorkerCancelled {}
+
+fn play_pool_task(
+    ctx: WorkerContext<'_>,
+    task: &PoolTask,
+    plus: &mut EngineProcess,
+    minus: &mut EngineProcess,
+) -> Result<GameTaskResult> {
+    use tools::selfplay::game::EngineFailure;
+    apply_parameter_vector(plus, ctx.params, &task.values.plus, ctx.translator, ctx.active_mask)
+        .context(EngineFailure)?;
+    apply_parameter_vector(minus, ctx.params, &task.values.minus, ctx.translator, ctx.active_mask)
+        .context(EngineFailure)?;
+    plus.new_game().context(EngineFailure)?;
+    minus.new_game().context(EngineFailure)?;
+    let game = task.game;
+    let (black, white) = if game.plus_is_black {
+        (plus, minus)
+    } else {
+        (minus, plus)
+    };
+    let result = run_game(
+        black,
+        white,
+        &ctx.start_positions[game.start_pos_index],
+        ctx.tc,
+        ctx.game_cfg,
+        game.game_id,
+        &mut |_: &MoveEvent| {},
+        None,
+    )?;
+    if result.reason == "watchdog" {
+        return Err(anyhow::anyhow!("watchdog: 運用上の探索期限超過").context(EngineFailure));
+    }
+    if result.reason == "cancelled" {
+        return Err(WorkerCancelled.into());
+    }
+    Ok(GameTaskResult {
+        game_idx: game.game_idx,
+        plus_is_black: game.plus_is_black,
+        plus_score: plus_score_from_outcome(result.outcome, game.plus_is_black),
+        outcome: result.outcome,
     })
+}
+
+fn spawn_worker_engines(
+    ctx: WorkerContext<'_>,
+    idx: usize,
+    cancel: &AtomicBool,
+    last_attempt: bool,
+) -> Result<(EngineProcess, EngineProcess)> {
+    use tools::selfplay::game::EngineFailure;
+    if cancel.load(Ordering::Acquire) {
+        return Err(WorkerCancelled.into());
+    }
+    // 最終失敗だけを通知し、? によるローカル engine の破棄より先に cancel を立てる。
+    let notify_failure = |error| {
+        if last_attempt {
+            cancel.store(true, Ordering::Release);
+        }
+        error
+    };
+    let mut plus =
+        EngineProcess::spawn_uninitialized(ctx.base_cfg, format!("plus_worker{}", idx + 1))
+            .context(EngineFailure)
+            .map_err(notify_failure)?;
+    plus.initialize(ctx.base_cfg).context(EngineFailure).map_err(notify_failure)?;
+    if cancel.load(Ordering::Acquire) {
+        return Err(WorkerCancelled.into());
+    }
+    let mut minus =
+        EngineProcess::spawn_uninitialized(ctx.base_cfg, format!("minus_worker{}", idx + 1))
+            .context(EngineFailure)
+            .map_err(notify_failure)?;
+    minus.initialize(ctx.base_cfg).context(EngineFailure).map_err(notify_failure)?;
+    Ok((plus, minus))
+}
+
+/// engine を所有する変数より後に宣言し、異常終了では破棄より先に通知する。
+struct WorkerCancelGuard<'a> {
+    cancel: &'a AtomicBool,
+    armed: bool,
+}
+
+impl Drop for WorkerCancelGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn worker_loop(
+    ctx: WorkerContext<'_>,
+    idx: usize,
+    tasks: crossbeam_channel::Receiver<PoolTask>,
+    results: &crossbeam_channel::Sender<Result<GameTaskResult>>,
+    cancel: &AtomicBool,
+    retries: u32,
+) -> Result<()> {
+    use tools::selfplay::game::EngineFailure;
+    if cancel.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let mut initial_spawn = None;
+    let mut engines = None;
+    let mut guard = WorkerCancelGuard {
+        cancel,
+        armed: true,
+    };
+    let result = (|| {
+        let spawned = spawn_worker_engines(ctx, idx, cancel, retries == 0);
+        if retries == 0 && spawned.is_err() {
+            return spawned.map(|_| ());
+        }
+        initial_spawn = Some(spawned);
+        for task in tasks {
+            if cancel.load(Ordering::Acquire) {
+                break;
+            }
+            for attempt in 0..=retries {
+                if cancel.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                let result = (|| {
+                    if engines.is_none() {
+                        engines = Some(match initial_spawn.take() {
+                            Some(result) => result?,
+                            None => spawn_worker_engines(ctx, idx, cancel, attempt == retries)?,
+                        });
+                    }
+                    let (plus, minus) = engines.as_mut().context("missing worker engines")?;
+                    play_pool_task(ctx, &task, plus, minus)
+                })();
+                match result {
+                    Ok(result) => {
+                        if results.send(Ok(result)).is_err() {
+                            return Ok(());
+                        }
+                        break;
+                    }
+                    Err(error) => {
+                        if error.downcast_ref::<EngineFailure>().is_none() || attempt == retries {
+                            return Err(error.context(format!(
+                                "batch={} game_id={}",
+                                task.iteration, task.game.game_id
+                            )));
+                        }
+                        if cancel.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
+                        eprintln!(
+                            "retry batch={} game_id={} attempt={} cause={}",
+                            task.iteration,
+                            task.game.game_id,
+                            u64::from(attempt) + 2,
+                            format!("{error:#}").replace(['\r', '\n'], " ")
+                        );
+                        drop(engines.take());
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    // 初回 spawn・再試行・手境界の全経路で、他 worker による中止は通知しない。
+    // 根本原因の Err は engine Drop 後に届くため、中止通知で先取りさせない。
+    let result = match result {
+        Err(error)
+            if cancel.load(Ordering::Acquire)
+                && error.downcast_ref::<WorkerCancelled>().is_some() =>
+        {
+            Ok(())
+        }
+        result => result,
+    };
+    if result.is_ok() {
+        guard.armed = false;
+    }
+    result
+}
+
+impl Drop for WorkerPool<'_> {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        drop(self.tasks.take());
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// `print_startup_summary` の入力をまとめた構造体。位置引数の取り違えを防ぎ、
@@ -3040,7 +3236,17 @@ fn main() -> Result<()> {
         usi_options,
     };
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    let panic_cancel = cancel.clone();
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        // unwind 前に通知し、初期化途中のローカル engine の Drop にも先行する。
+        panic_cancel.store(true, Ordering::Release);
+    }));
     let game_cfg = GameConfig {
+        limit_only_timeout_ms: cli.nodes.map(|_| cli.nodes_timeout_ms),
+        cancel: Some(cancel),
         max_moves: cli.max_moves,
         timeout_margin_ms: cli.timeout_margin_ms,
         pass_rights: None,
@@ -3075,142 +3281,14 @@ fn main() -> Result<()> {
         })
         .collect();
 
-    for batch_idx in start_batch..end_batch {
-        // この batch で消化する game pair 数。最終 batch は端数になり得る。
-        let pairs_remaining = total_pairs - completed_pairs;
-        let this_batch_pairs = pairs_remaining.min(batch_pairs);
-        if this_batch_pairs == 0 {
-            break;
-        }
-
-        // params は batch 末で更新するため、prep_ctx は batch ごとに作り直す。
-        let batch_ctx = BatchPrepCtx {
-            big_a,
-            schedule,
-            params: &params,
-            param_schedules: &param_schedules,
-            active_only_regex: active_only_regex.as_ref(),
-            translator: &translator,
-            start_positions_len: start_positions.len(),
-            batch_pairs: this_batch_pairs as usize,
-            random_startpos: cli.random_startpos,
-        };
-
-        // Phase A: 事前計算。schedule の k 軸 = batch 開始時点の累積 game pair 数。
-        // RNG 用の batch_idx は 0-origin で渡す (`seed_for_iteration` 内で `+1` され
-        // 重複しない iter_term を作るため、ここで `+1` する必要はない)。
-        let prep =
-            compute_batch_prep(&batch_ctx, batch_idx, completed_pairs, base_seed, total_games)?;
-
-        // Phase B: ゲーム実行 (heavy)。
-        let stats = run_batch_games_parallel(BatchRunContext {
-            concurrency: cli.concurrency,
-            base_cfg: &base_cfg,
-            params: &params,
-            plus_values: &prep.plus_values,
-            minus_values: &prep.minus_values,
-            start_positions: &start_positions,
-            start_pos_indices: &prep.start_pos_indices,
-            game_cfg: &game_cfg,
-            tc,
-            total_games_start: prep.batch_total_games_start,
-            iteration: batch_idx + 1,
-            base_seed: prep.base_seed,
-            translator: &translator,
-            active_mask: &active_mask,
-        })?;
-
-        // Phase C: 集計と更新。
-        let games_in_batch = (this_batch_pairs * 2) as usize;
-        total_games = total_games.checked_add(games_in_batch).context("total_games overflow")?;
-        completed_pairs = completed_pairs
-            .checked_add(this_batch_pairs)
-            .context("completed_pairs overflow")?;
-
-        let raw_result = stats.step_sum;
-        let plus_wins = stats.plus_wins;
-        let minus_wins = stats.minus_wins;
-        let draws = stats.draws;
-
-        // Fishtest 更新: signal_j = R_k_j × c_k_j × result × flip_j。
-        // k 軸は batch 開始時点 (`completed_pairs - this_batch_pairs`) の累積 pair 数を使う。
-        let k_for_update = completed_pairs - this_batch_pairs;
-        let mut update_sums = vec![0.0f64; params.len()];
-        for (idx, (p, (&flip, sched))) in
-            params.iter().zip(prep.flips.iter().zip(param_schedules.iter())).enumerate()
-        {
-            if !is_param_active(p, active_only_regex.as_ref(), &translator)
-                || p.c_end.abs() <= f64::EPSILON
-            {
-                continue;
-            }
-            let (c_k, r_k) =
-                sched.at_iteration(k_for_update, big_a, schedule.alpha, schedule.gamma);
-            update_sums[idx] = r_k * c_k * raw_result * flip;
-        }
-
-        // θ 更新。1 batch = 1 update (fishtest 流)。
-        let mut updated_params = 0usize;
-        let mut abs_update_sum = 0.0f64;
-        let mut max_abs_update = 0.0f64;
-        for (idx, p) in params.iter_mut().enumerate() {
-            if !is_param_active(p, active_only_regex.as_ref(), &translator)
-                || p.c_end.abs() <= f64::EPSILON
-            {
-                continue;
-            }
-            let before = p.value;
-            let signal = update_sums[idx];
-            // θ 内部状態は is_int に関わらず f64 のまま保持する (fishtest 流)。
-            p.value = clamped_value(p, p.value + signal * cli.mobility);
-            let abs_update = (p.value - before).abs();
-            updated_params += 1;
-            abs_update_sum += abs_update;
-            if abs_update > max_abs_update {
-                max_abs_update = abs_update;
-            }
-        }
-        let avg_abs_update = if updated_params > 0 {
-            abs_update_sum / updated_params as f64
-        } else {
-            0.0
-        };
-
-        // stats.csv: v4 仕様 1 batch = 1 行。
-        if let Some(writer) = stats_csv_writer.as_mut() {
-            let row = IterationStats {
-                iteration: batch_idx + 1,
-                batch_pairs: this_batch_pairs,
-                plus_wins,
-                minus_wins,
-                draws,
-                raw_result,
-                active_params: prep.active_params,
-                avg_abs_shift: prep.avg_abs_shift,
-                updated_params,
-                avg_abs_update,
-                max_abs_update,
-                total_games,
-            };
-            write_stats_csv_row(writer, row)?;
-            writer.flush()?;
-        }
-
-        write_params(&state_params, &params)?;
-        if let Some(writer) = param_values_csv_writer.as_mut() {
-            write_param_values_csv_row(writer, batch_idx + 1, &params)?;
-            writer.flush()?;
-        }
-        // state.params 更新 → meta 更新の transactional 復旧用に、書き込み直後の
-        // state.params を hash して meta に焼き込む。
-        let current_params_sha256 = sha256_hex_of_file(&state_params)?;
+    if is_fresh_start {
         let meta = ResumeMetaData {
             format_version: META_FORMAT_VERSION,
             state_params_file: state_params.display().to_string(),
-            completed_iterations: batch_idx + 1,
+            completed_iterations: 0,
             total_games,
-            last_raw_result_mean: raw_result,
-            last_avg_abs_update: avg_abs_update,
+            last_raw_result_mean: 0.0,
+            last_avg_abs_update: 0.0,
             updated_at_utc: Utc::now().to_rfc3339(),
             schedule,
             init_params_sha256: init_snapshot.init_params_sha256.clone(),
@@ -3222,65 +3300,197 @@ fn main() -> Result<()> {
             engine_param_mapping_path: init_snapshot.engine_param_mapping_path.clone(),
             engine_param_mapping_sha256: init_snapshot.engine_param_mapping_sha256.clone(),
             init_mode: init_snapshot.init_mode,
-            current_params_sha256,
+            current_params_sha256: sha256_hex_of_file(&state_params)?,
             total_pairs,
             batch_pairs,
             completed_pairs,
         };
         save_meta(&meta_path, &meta)?;
-        eprintln!(
-            "batch={}/{} k_pair={}/{} batch_pairs={} raw_result={:+.3} \
-             avg_abs_update={:.6} max_abs_update={:.6} checkpoint={} meta={}",
-            batch_idx + 1,
-            end_batch,
-            completed_pairs,
-            total_pairs,
-            this_batch_pairs,
-            raw_result,
-            avg_abs_update,
-            max_abs_update,
-            state_params.display(),
-            meta_path.display()
-        );
+    }
 
-        if let Some(config) = early_stop_config {
-            // raw_result_variance は v3 で「seed 横断分散」だった。v4 は単一 batch
-            // なので raw_result の絶対値を **batch_pairs で正規化** した値 (= 1 game pair
-            // あたりの平均勝率乖離; 0..1 の範囲) を分散の代理指標として使う。
-            // raw_result == 0 ⇔ +1/-1 が完全に拮抗 ⇔ SPSA 収束のシグナル。
-            // 旧 v3 と完全互換ではないため、閾値設計はユーザ側で再調整が必要 (docs に明記)。
-            let raw_result_variance = if this_batch_pairs == 0 {
-                0.0
-            } else {
-                raw_result.abs() / this_batch_pairs as f64
-            };
-            let early_stop_hit = avg_abs_update <= config.avg_abs_update_threshold
-                && raw_result_variance <= config.result_variance_threshold;
-            if early_stop_hit {
-                early_stop_consecutive = early_stop_consecutive.saturating_add(1);
-            } else {
-                early_stop_consecutive = 0;
-            }
-            eprintln!(
-                "batch={} early_stop_hit={} consecutive={}/{} \
-                 thresholds(avg_abs_update<={:.6}, |raw_result|/batch_pairs<={:.6})",
-                batch_idx + 1,
-                early_stop_hit,
-                early_stop_consecutive,
-                config.patience,
-                config.avg_abs_update_threshold,
-                config.result_variance_threshold
-            );
-            if early_stop_consecutive >= config.patience {
-                eprintln!(
-                    "early stop triggered at batch={} (consecutive={})",
-                    batch_idx + 1,
-                    early_stop_consecutive
-                );
+    let worker_params = params.clone();
+    std::thread::scope(|scope| -> Result<()> {
+        let pool = WorkerPool::new(
+            scope,
+            cli.concurrency.min(2 * batch_pairs as usize),
+            WorkerContext {
+                base_cfg: &base_cfg,
+                params: &worker_params,
+                start_positions: &start_positions,
+                game_cfg: &game_cfg,
+                tc,
+                translator: &translator,
+                active_mask: &active_mask,
+            },
+            cli.engine_retries,
+        )?;
+        for batch_idx in start_batch..end_batch {
+            // この batch で消化する game pair 数。最終 batch は端数になり得る。
+            let pairs_remaining = total_pairs - completed_pairs;
+            let this_batch_pairs = pairs_remaining.min(batch_pairs);
+            if this_batch_pairs == 0 {
                 break;
             }
+
+            // params は batch 末で更新するため、prep_ctx は batch ごとに作り直す。
+            let batch_ctx = BatchPrepCtx {
+                big_a,
+                schedule,
+                params: &params,
+                param_schedules: &param_schedules,
+                active_only_regex: active_only_regex.as_ref(),
+                translator: &translator,
+                start_positions_len: start_positions.len(),
+                batch_pairs: this_batch_pairs as usize,
+                random_startpos: cli.random_startpos,
+            };
+
+            // Phase A: 事前計算。schedule の k 軸 = batch 開始時点の累積 game pair 数。
+            // RNG 用の batch_idx は 0-origin で渡す (`seed_for_iteration` 内で `+1` され
+            // 重複しない iter_term を作るため、ここで `+1` する必要はない)。
+            let prep =
+                compute_batch_prep(&batch_ctx, batch_idx, completed_pairs, base_seed, total_games)?;
+
+            // Phase B: ゲーム実行 (heavy)。
+            let stats = pool.run_batch(&prep, batch_idx + 1)?;
+
+            // Phase C: 集計と更新。
+            let games_in_batch = (this_batch_pairs * 2) as usize;
+            total_games =
+                total_games.checked_add(games_in_batch).context("total_games overflow")?;
+            completed_pairs = completed_pairs
+                .checked_add(this_batch_pairs)
+                .context("completed_pairs overflow")?;
+
+            let raw_result = stats.step_sum;
+            let plus_wins = stats.plus_wins;
+            let minus_wins = stats.minus_wins;
+            let draws = stats.draws;
+
+            // Fishtest 更新: signal_j = R_k_j × c_k_j × result × flip_j。
+            // k 軸は batch 開始時点 (`completed_pairs - this_batch_pairs`) の累積 pair 数を使う。
+            let k_for_update = completed_pairs - this_batch_pairs;
+            let UpdateStats {
+                updated_params,
+                avg_abs_update,
+                max_abs_update,
+            } = apply_spsa_update(
+                &mut params,
+                &prep.flips,
+                &param_schedules,
+                &active_mask,
+                schedule,
+                k_for_update,
+                raw_result,
+            );
+            // stats.csv: v4 仕様 1 batch = 1 行。
+            if let Some(writer) = stats_csv_writer.as_mut() {
+                let row = IterationStats {
+                    iteration: batch_idx + 1,
+                    batch_pairs: this_batch_pairs,
+                    plus_wins,
+                    minus_wins,
+                    draws,
+                    raw_result,
+                    active_params: prep.active_params,
+                    avg_abs_shift: prep.avg_abs_shift,
+                    updated_params,
+                    avg_abs_update,
+                    max_abs_update,
+                    total_games,
+                };
+                write_stats_csv_row(writer, row)?;
+                writer.flush()?;
+            }
+
+            write_params(&state_params, &params)?;
+            if let Some(writer) = param_values_csv_writer.as_mut() {
+                write_param_values_csv_row(writer, batch_idx + 1, &params)?;
+                writer.flush()?;
+            }
+            // state.params 更新 → meta 更新の transactional 復旧用に、書き込み直後の
+            // state.params を hash して meta に焼き込む。
+            let current_params_sha256 = sha256_hex_of_file(&state_params)?;
+            let meta = ResumeMetaData {
+                format_version: META_FORMAT_VERSION,
+                state_params_file: state_params.display().to_string(),
+                completed_iterations: batch_idx + 1,
+                total_games,
+                last_raw_result_mean: raw_result,
+                last_avg_abs_update: avg_abs_update,
+                updated_at_utc: Utc::now().to_rfc3339(),
+                schedule,
+                init_params_sha256: init_snapshot.init_params_sha256.clone(),
+                init_from_sha256: init_snapshot.init_from_sha256.clone(),
+                init_from_path: init_snapshot.init_from_path.clone(),
+                param_name_set_sha256: param_name_set_sha256(&params),
+                active_param_count,
+                engine_path: init_snapshot.engine_path.clone(),
+                engine_param_mapping_path: init_snapshot.engine_param_mapping_path.clone(),
+                engine_param_mapping_sha256: init_snapshot.engine_param_mapping_sha256.clone(),
+                init_mode: init_snapshot.init_mode,
+                current_params_sha256,
+                total_pairs,
+                batch_pairs,
+                completed_pairs,
+            };
+            save_meta(&meta_path, &meta)?;
+            eprintln!(
+                "batch={}/{} k_pair={}/{} batch_pairs={} raw_result={:+.3} \
+             avg_abs_update={:.6} max_abs_update={:.6} checkpoint={} meta={}",
+                batch_idx + 1,
+                end_batch,
+                completed_pairs,
+                total_pairs,
+                this_batch_pairs,
+                raw_result,
+                avg_abs_update,
+                max_abs_update,
+                state_params.display(),
+                meta_path.display()
+            );
+
+            if let Some(config) = early_stop_config {
+                // raw_result_variance は v3 で「seed 横断分散」だった。v4 は単一 batch
+                // なので raw_result の絶対値を **batch_pairs で正規化** した値 (= 1 game pair
+                // あたりの平均勝率乖離; 0..1 の範囲) を分散の代理指標として使う。
+                // raw_result == 0 ⇔ +1/-1 が完全に拮抗 ⇔ SPSA 収束のシグナル。
+                // 旧 v3 と完全互換ではないため、閾値設計はユーザ側で再調整が必要 (docs に明記)。
+                let raw_result_variance = if this_batch_pairs == 0 {
+                    0.0
+                } else {
+                    raw_result.abs() / this_batch_pairs as f64
+                };
+                let early_stop_hit = avg_abs_update <= config.avg_abs_update_threshold
+                    && raw_result_variance <= config.result_variance_threshold;
+                if early_stop_hit {
+                    early_stop_consecutive = early_stop_consecutive.saturating_add(1);
+                } else {
+                    early_stop_consecutive = 0;
+                }
+                eprintln!(
+                    "batch={} early_stop_hit={} consecutive={}/{} \
+                 thresholds(avg_abs_update<={:.6}, |raw_result|/batch_pairs<={:.6})",
+                    batch_idx + 1,
+                    early_stop_hit,
+                    early_stop_consecutive,
+                    config.patience,
+                    config.avg_abs_update_threshold,
+                    config.result_variance_threshold
+                );
+                if early_stop_consecutive >= config.patience {
+                    eprintln!(
+                        "early stop triggered at batch={} (consecutive={})",
+                        batch_idx + 1,
+                        early_stop_consecutive
+                    );
+                    break;
+                }
+            }
         }
-    }
+
+        Ok(())
+    })?;
 
     // 正常完了時に <run-dir>/final.params を atomic に書き出す。
     // state.params は反復ごとに更新され続ける live state なので、外部ツール
@@ -3296,6 +3506,55 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_cancel_guard_notifies_before_resource_drop_on_panic_and_error() {
+        struct Resource<'a>(&'a AtomicBool, &'a AtomicBool);
+        impl Drop for Resource<'_> {
+            fn drop(&mut self) {
+                self.1.store(self.0.load(Ordering::Acquire), Ordering::Release);
+            }
+        }
+        for panic in [false, true] {
+            let cancel = AtomicBool::new(false);
+            let observed = AtomicBool::new(false);
+            let result = std::panic::catch_unwind(|| -> anyhow::Result<()> {
+                let resource = Resource(&cancel, &observed);
+                let guard = WorkerCancelGuard {
+                    cancel: &cancel,
+                    armed: true,
+                };
+                if panic {
+                    panic!("worker panic test");
+                }
+                // Err による unwind でも宣言の逆順で guard が先に drop される。
+                let error: anyhow::Result<()> = Err(anyhow::anyhow!("fatal error"));
+                error?;
+                drop(guard);
+                drop(resource);
+                Ok(())
+            });
+            assert!(cancel.load(Ordering::Acquire));
+            assert!(observed.load(Ordering::Acquire));
+            if panic {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn worker_cancel_guard_disarms_on_success() {
+        let cancel = AtomicBool::new(false);
+        let mut guard = WorkerCancelGuard {
+            cancel: &cancel,
+            armed: true,
+        };
+        guard.armed = false;
+        drop(guard);
+        assert!(!cancel.load(Ordering::Acquire));
+    }
 
     // ========================================================================
     // decide_init_action: 16 通り (4 boolean 入力) を網羅
@@ -4344,7 +4603,7 @@ mod tests {
     /// Paired antithetic の color 反転規約 (`plus_is_black = idx % 2 == 0`) を
     /// **規約の文書化テスト** として明示する。
     ///
-    /// 設計意図: 実装側 (`run_batch_games_parallel`) のロジック `plus_is_black =
+    /// 設計意図: 実装側 (`WorkerPool::run_batch`) のロジック `plus_is_black =
     /// idx % 2 == 0` と同じ式をここに再掲することで、「pair 化した index 列と
     /// 組み合わせたとき先後が正しく入れ替わる」という規約を 1 箇所に固定する。
     /// 誰かが規約 (例: `idx % 2 != 0` 反転、別の pair 化方式) を変えた場合、
@@ -4542,5 +4801,95 @@ mod tests {
             "16 pair で start_pos がほぼ全て同一になるのは異常 (got {} unique)",
             unique.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    fn param() -> SpsaParam {
+        SpsaParam {
+            name: "P".into(),
+            type_name: "int".into(),
+            is_int: true,
+            value: 5.0,
+            min: 0.0,
+            max: 10.0,
+            c_end: 2.0,
+            r_end: 0.125,
+            comment: String::new(),
+            not_used: false,
+        }
+    }
+
+    fn update(
+        params: &mut [SpsaParam],
+        flips: &[f64],
+        active: &[bool],
+        mobility: f64,
+        raw: f64,
+    ) -> UpdateStats {
+        let schedule = ScheduleConfig {
+            alpha: 0.0,
+            gamma: 0.0,
+            a_ratio: 0.0,
+            mobility,
+            total_iterations: 4,
+        };
+        let constants: Vec<_> = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 4, 0.0, 0.0, 0.0))
+            .collect();
+        apply_spsa_update(params, flips, &constants, active, schedule, 0, raw)
+    }
+
+    #[test]
+    fn update_one_integer_keeps_fractional_theta() {
+        let mut params = [param()];
+        let stats = update(&mut params, &[1.0], &[true], 1.0, 1.0);
+        assert_eq!(params[0].value, 5.25);
+        assert_eq!(stats.updated_params, 1);
+        assert_eq!(stats.avg_abs_update, 0.25);
+        assert_eq!(stats.max_abs_update, 0.25);
+    }
+
+    #[test]
+    fn update_flip_reverses_signal() {
+        let mut params = [param(), param()];
+        update(&mut params, &[1.0, -1.0], &[true, true], 1.0, 1.0);
+        assert_eq!((params[0].value, params[1].value), (5.25, 4.75));
+    }
+
+    #[test]
+    fn update_mobility_is_applied_once() {
+        let mut params = [param()];
+        let stats = update(&mut params, &[1.0], &[true], 3.0, 2.0);
+        assert_eq!(params[0].value, 6.5);
+        assert_eq!(stats.avg_abs_update, 1.5);
+    }
+
+    #[test]
+    fn update_clamps_and_counts_unchanged_targets() {
+        let mut params = [param(), param()];
+        params[0].value = 9.75;
+        params[1].value = 10.0;
+        let stats = update(&mut params, &[1.0, 1.0], &[true, true], 8.0, 1.0);
+        assert_eq!((params[0].value, params[1].value), (10.0, 10.0));
+        assert_eq!(stats.updated_params, 2);
+        assert_eq!(stats.avg_abs_update, 0.125);
+        assert_eq!(stats.max_abs_update, 0.25);
+    }
+
+    #[test]
+    fn update_excludes_inactive_and_near_zero_c_end() {
+        let mut params = [param(), param(), param()];
+        params[1].c_end = 0.0;
+        params[2].c_end = f64::EPSILON;
+        let stats = update(&mut params, &[1.0; 3], &[false, true, true], 1.0, 1.0);
+        assert!(params.iter().all(|p| p.value == 5.0));
+        assert_eq!(stats.updated_params, 0);
+        assert_eq!(stats.avg_abs_update, 0.0);
+        assert_eq!(stats.max_abs_update, 0.0);
     }
 }

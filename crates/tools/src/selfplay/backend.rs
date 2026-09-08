@@ -274,6 +274,7 @@ impl SearchBackend for UsiBackend {
         };
 
         let req = SearchRequest {
+            limit_only_timeout_ms: None,
             sfen: &params.sfen,
             time_args: params.time_args,
             think_limit_ms: params.think_limit_ms,
