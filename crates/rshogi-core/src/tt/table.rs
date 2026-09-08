@@ -350,6 +350,39 @@ mod tests {
     }
 
     #[test]
+    fn test_tt_special_move_roundtrip() {
+        for rank1 in ["4k4", "4k3p", "4k3P"] {
+            for turn in ["b", "w"] {
+                let mut pos = Position::new();
+                pos.set_sfen(&format!("{rank1}/9/9/9/9/9/9/9/4K4 {turn} - 1")).unwrap();
+                for mv in [Move::PASS, Move::WIN] {
+                    let tt = TranspositionTable::new(1);
+                    let key = pos.key();
+                    tt.probe(key, &pos).write(
+                        key,
+                        Value::new(50),
+                        false,
+                        Bound::Exact,
+                        10,
+                        mv,
+                        Value::ZERO,
+                        tt.generation(),
+                    );
+                    let read = tt.probe(key, &pos);
+                    if mv.is_pass() {
+                        assert!(read.found);
+                        assert_eq!(read.data.mv, Move::PASS);
+                        assert_eq!(read.data.value.raw(), 50);
+                        // 保存値の復元と、この局面での着手可否は別。
+                        assert!(!pos.pseudo_legal(read.data.mv));
+                    } else {
+                        assert!(!read.found, "宣言勝ち結果をTT着手として復元しない");
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn test_tt_probe_empty() {
         let tt = TranspositionTable::new(1);
         let pos = Position::new();

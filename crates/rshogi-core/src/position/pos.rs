@@ -393,11 +393,20 @@ impl Position {
     /// TT等に保存された16bit指し手を安全に取り出す
     /// - 無効な符号化や手番不一致の手はNone
     /// - 合法性までは保証しないが、明らかに不整合な手を弾く
-    /// - 駒情報（moved_piece_after）を上位16bitに付加して返す
+    /// - 通常手は駒情報（moved_piece_after）を上位16bitに付加して返す
+    /// - PASSは盤面やパス権に依存せず保持する。可否は can_pass() で別途判定する
+    /// - WINは着手ではなく宣言勝ちの結果なのでNone。declaration_win() で判定する
     pub fn to_move(&self, mv: Move) -> Option<Move> {
         // 下位16bitの符号化を先に検証する。
         // TT競合で壊れた move16 をここで弾き、probe() 側でcontinueできるようにする。
-        Move::from_u16_checked(mv.raw())?;
+        let mv = Move::from_u16_checked(mv.raw())?;
+
+        if mv.is_pass() {
+            return Some(Move::PASS);
+        }
+        if mv.is_win() {
+            return None;
+        }
 
         if mv.is_none() {
             return Some(Move::NONE);
@@ -3110,6 +3119,35 @@ mod tests {
         pos
     }
 
+    #[test]
+    fn test_to_move_special_values_do_not_read_board_coordinates() {
+        for rank1 in ["4k4", "4k3p", "4k3P"] {
+            for turn in ["b", "w"] {
+                let mut pos = make_pos(&format!("{rank1}/9/9/9/9/9/9/9/4K4 {turn} - 1"));
+                for rights in [None, Some((0, 0)), Some((1, 1))] {
+                    if let Some((black, white)) = rights {
+                        pos.enable_pass_rights(black, white);
+                    }
+                    assert_eq!(pos.to_move(Move::PASS), Some(Move::PASS));
+                    // 上位の駒情報も、16bit特殊値の正規化時に取り除く。
+                    assert_eq!(pos.to_move(Move::PASS.with_piece(Piece::B_PAWN)), Some(Move::PASS));
+                    assert_eq!(pos.to_move(Move::WIN), None);
+                    assert_eq!(pos.to_move(Move::WIN.with_piece(Piece::B_PAWN)), None);
+                    assert_eq!(pos.to_move(Move::NONE), Some(Move::NONE));
+                    let can_pass = rights == Some((1, 1));
+                    assert_eq!(pos.can_pass(), can_pass);
+                    assert_eq!(pos.pseudo_legal(Move::PASS), can_pass);
+                    assert_eq!(pos.is_legal(Move::PASS), can_pass);
+                }
+            }
+        }
+        let mut checked = make_pos("4k4/9/9/9/9/9/9/4r4/4K4 b - 1");
+        checked.enable_pass_rights(1, 1);
+        assert!(checked.in_check());
+        assert_eq!(checked.to_move(Move::PASS), Some(Move::PASS));
+        assert!(!checked.pseudo_legal(Move::PASS));
+        assert!(!checked.is_legal(Move::PASS));
+    }
     #[test]
     fn test_declaration_win_none_rule() {
         let pos = make_pos("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
