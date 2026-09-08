@@ -137,7 +137,7 @@ TT/履歴が共有されるため棋力評価には不向きだが、教師局�
 | `--progress-buckets N` | (progresskpabs 時必須) | 学習時と同じ routing bucket 数 |
 | `--progress-file PATH` | (progresskpabs 時必須) | native LayerStacks 用 progresskpabs 係数ファイル |
 | `--fv-scale N` | 0（自動判定） | FV_SCALE オーバーライド（NativeBackend 専用）。arch 文字列の fv_scale が実際の学習スケールと食い違うネットで指定する。USI モードでは `--usi-option FV_SCALE=N` を使う |
-| `--keep-tt[=BOOL]` | false | TT を対局間で保持（実験用） |
+| `--keep-tt[=BOOL]` | false | NativeBackend では TT・EvalHash・履歴を対局間で保持。false ではすべてクリア（実験用） |
 | `--engine-path PATH` | (USI 時必須) | エンジンバイナリパス |
 | `--engine-path-black/white PATH` | — | 先後別エンジン |
 | `--engine-args ARG...` | — | エンジンに渡す追加引数 |
@@ -148,6 +148,11 @@ TT/履歴が共有されるため棋力評価には不向きだが、教師局�
 | `--minimum-thinking-time N` | — | MinimumThinkingTime USI オプション |
 | `--slowmover N` | — | SlowMover USI オプション |
 | `--ponder` | false | USI_Ponder を有効化 |
+
+USI backend では `--keep-tt=true` は `isready` のみ、false は `usinewgame` と
+`isready` を送信する。実際のキャッシュ保持は接続先エンジンに依存し、rshogi は
+`isready` でも TT・EvalHash をクリアするため、true でも両キャッシュは保持されない。
+EvalHash の保持は、評価キャッシュの利用が有効な場合にキャッシュのウォーム状態へ影響する。
 
 ### 開始局面
 

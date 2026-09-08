@@ -800,6 +800,11 @@ impl Search {
         self.thread_pool.update_eval_hash(Arc::clone(&self.eval_hash));
     }
 
+    /// EvalHash を in-place でクリアする（worker と共有する Arc をそのまま使う）
+    pub fn clear_eval_hash(&self) {
+        self.eval_hash.clear();
+    }
+
     /// EvalHashへの参照を取得
     pub fn eval_hash(&self) -> Arc<EvalHash> {
         Arc::clone(&self.eval_hash)
