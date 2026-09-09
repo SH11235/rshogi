@@ -62,6 +62,8 @@ const WORKER_ROOT = resolve(import.meta.dirname, "../..");
 const SHIM_PATH = resolve(WORKER_ROOT, "build/worker/shim.mjs");
 
 export interface HarnessOptions {
+  /** 障害注入テスト用の Worker エントリポイント。 */
+  scriptPath?: string;
   /// Miniflare の persist 先ディレクトリ。テスト並列実行や 2 回目の `vitest run`
   /// で R2 / DO storage が交差汚染しないよう、呼び出し側で一時ディレクトリを
   /// 切って必ず指定する契約。`makeTempPersistRoot()` のヘルパで作るのが基本経路。
@@ -133,7 +135,7 @@ export const DEFAULT_TEST_CF_CONNECTING_IP = "127.0.0.1";
 export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> {
   const rl = opts.rateLimitOverrides ?? {};
   const mf = new Miniflare({
-    scriptPath: SHIM_PATH,
+    scriptPath: opts.scriptPath ?? SHIM_PATH,
     modules: true,
     modulesRules: [
       { type: "ESModule", include: ["**/*.js", "**/*.mjs"], fallthrough: true },

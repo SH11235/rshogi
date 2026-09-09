@@ -317,7 +317,7 @@ pub fn replay_core_room(cfg: &PersistedConfig, moves: &[MoveRow]) -> ReplaySumma
 }
 
 /// 終局の永続化を再開するため、確定済みの裁定を取り出す。
-/// 配信済みか判別できない着手通知は再送せず、終局保存と接続終了だけを行う。
+/// 着手通知は再送せず、終局通知は保存経路が接続ごとの進捗に従って送る。
 pub fn pending_finalization(core: &CoreRoom) -> Option<HandleResult> {
     let GameStatus::Finished(result) = core.status() else {
         return None;

@@ -111,6 +111,9 @@ pub enum WsAttachment {
         /// 必ず再認可するべき性質なので保守的既定が妥当)。
         #[serde(default)]
         is_admin: bool,
+        /// この接続へ送信済みの終局通知行。休眠後の再送を抑止する。
+        #[serde(default)]
+        terminal_sent: Vec<String>,
     },
     /// 観戦者。`/ws/<room_id>/spectate` から接続したセッションに付与する。
     ///
@@ -161,10 +164,53 @@ pub enum WsAttachment {
         /// 程度に収まる想定)。性能課題が顕在化したら別 Issue で gating する。
         #[serde(default)]
         pending_queue: Vec<(String, Option<u32>)>,
+        /// この接続へ送信済みの終局通知行。
+        #[serde(default)]
+        terminal_sent: Vec<String>,
     },
 }
 
 impl WsAttachment {
+    /// 未送信の終局行を送り、各行の成功直後に接続の進捗を保存する。
+    /// 両コールバックは同期処理とし、送信と進捗更新の間で休眠させない。
+    pub fn deliver_terminal<E>(
+        &mut self,
+        result: &rshogi_csa_server::game::result::GameResult,
+        mut send: impl FnMut(&str) -> Result<(), E>,
+        mut persist: impl FnMut(&Self) -> Result<(), E>,
+    ) -> Result<(), E> {
+        use rshogi_csa_server::game::result::Audience;
+        let audience = match self {
+            Self::Player { role, .. } if Some(role.to_core()) == result.winner() => {
+                Audience::Winner
+            }
+            Self::Player { .. } => Audience::Loser,
+            Self::Spectator { .. } => Audience::Spectator,
+            Self::Pending => return Ok(()),
+        };
+        for line in result
+            .server_messages()
+            .sends
+            .into_iter()
+            .filter(|(target, _)| *target == audience || *target == Audience::All)
+            .flat_map(|(_, lines)| lines)
+        {
+            let sent = match self {
+                Self::Player { terminal_sent, .. } | Self::Spectator { terminal_sent, .. } => {
+                    terminal_sent
+                }
+                Self::Pending => return Ok(()),
+            };
+            if sent.contains(&line) {
+                continue;
+            }
+            send(&line)?;
+            sent.push(line);
+            persist(self)?;
+        }
+        Ok(())
+    }
+
     /// プレイヤ attachment を構築する補助関数。`is_admin` は `false` で初期化
     /// する (admin 権限は `%%ADMIN <token>` を経由したときのみ
     /// [`Self::with_admin`] で `true` に上げる契約)。
@@ -174,6 +220,7 @@ impl WsAttachment {
             handle: handle.into(),
             game_name: game_name.into(),
             is_admin: false,
+            terminal_sent: Vec::new(),
         }
     }
 
@@ -187,11 +234,13 @@ impl WsAttachment {
                 handle,
                 game_name,
                 is_admin: _,
+                terminal_sent,
             } => Self::Player {
                 role,
                 handle,
                 game_name,
                 is_admin: true,
+                terminal_sent,
             },
             other => other,
         }
@@ -214,6 +263,7 @@ impl WsAttachment {
             snapshot_in_progress: false,
             last_ply_in_snapshot: 0,
             pending_queue: Vec::new(),
+            terminal_sent: Vec::new(),
         }
     }
 
@@ -227,11 +277,16 @@ impl WsAttachment {
     /// 変更せず元の値を返す。
     pub fn reset_spectator_snapshot(self) -> Self {
         match self {
-            Self::Spectator { room_id, .. } => Self::Spectator {
+            Self::Spectator {
+                room_id,
+                terminal_sent,
+                ..
+            } => Self::Spectator {
                 room_id,
                 snapshot_in_progress: false,
                 last_ply_in_snapshot: 0,
                 pending_queue: Vec::new(),
+                terminal_sent,
             },
             other => other,
         }
@@ -268,6 +323,72 @@ pub fn parse_login_handle(raw: &str) -> Option<(String, String, Role)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_delivery_resumes_after_partial_send_without_duplicates() {
+        use rshogi_csa_server::game::result::GameResult;
+        use rshogi_csa_server::types::Color;
+        for result in [
+            GameResult::Sennichite,
+            GameResult::OuteSennichite {
+                loser: Color::Black,
+            },
+        ] {
+            for fail_at in [0, 1] {
+                let mut connections = [
+                    WsAttachment::player(Role::Black, "black", "game"),
+                    WsAttachment::player(Role::White, "white", "game"),
+                ];
+                let mut saved =
+                    connections.each_ref().map(|att| serde_json::to_string(att).unwrap());
+                let mut received: [Vec<String>; 2] = Default::default();
+                for index in 0..2 {
+                    let delivered = connections[index].deliver_terminal(
+                        &result,
+                        |line| {
+                            if index == 1 && received[index].len() == fail_at {
+                                return Err("send failed");
+                            }
+                            received[index].push(line.to_owned());
+                            Ok(())
+                        },
+                        |att| {
+                            saved[index] = serde_json::to_string(att).unwrap();
+                            Ok(())
+                        },
+                    );
+                    assert_eq!(delivered.is_err(), index == 1);
+                }
+                for index in 0..2 {
+                    let mut restored: WsAttachment = serde_json::from_str(&saved[index]).unwrap();
+                    for _ in 0..2 {
+                        restored
+                            .deliver_terminal(
+                                &result,
+                                |line| {
+                                    received[index].push(line.to_owned());
+                                    Ok::<_, &str>(())
+                                },
+                                |att| {
+                                    saved[index] = serde_json::to_string(att).unwrap();
+                                    Ok(())
+                                },
+                            )
+                            .unwrap();
+                    }
+                }
+                let expected = if result == GameResult::Sennichite {
+                    [vec!["#SENNICHITE", "#DRAW"], vec!["#SENNICHITE", "#DRAW"]]
+                } else {
+                    [
+                        vec!["#OUTE_SENNICHITE", "#LOSE"],
+                        vec!["#OUTE_SENNICHITE", "#WIN"],
+                    ]
+                };
+                assert_eq!(received, expected);
+            }
+        }
+    }
 
     #[test]
     fn pending_roundtrips_via_json() {
@@ -400,6 +521,7 @@ mod tests {
             room_id: "room-xyz".to_owned(),
             snapshot_in_progress: true,
             last_ply_in_snapshot: 7,
+            terminal_sent: Vec::new(),
             pending_queue: vec![
                 ("+5756FU,T2".to_owned(), Some(8)),
                 ("##[CHAT] alice: hi".to_owned(), None),
@@ -418,6 +540,7 @@ mod tests {
             room_id: "room-xyz".to_owned(),
             snapshot_in_progress: true,
             last_ply_in_snapshot: 7,
+            terminal_sent: Vec::new(),
             pending_queue: vec![
                 ("+5756FU,T2".to_owned(), Some(8)),
                 ("##[CHAT] alice: hi".to_owned(), None),
@@ -430,6 +553,7 @@ mod tests {
                 snapshot_in_progress: false,
                 last_ply_in_snapshot: 0,
                 pending_queue: Vec::new(),
+                terminal_sent: Vec::new(),
             }
         );
     }
@@ -455,6 +579,7 @@ mod tests {
                 snapshot_in_progress,
                 last_ply_in_snapshot,
                 pending_queue,
+                ..
             } => {
                 assert_eq!(room_id, "room-xyz");
                 assert!(!snapshot_in_progress);

@@ -1469,7 +1469,12 @@ impl GameRoom {
         let att = ws
             .deserialize_attachment::<WsAttachment>()
             .map_err(|e| Error::RustError(format!("deserialize_attachment: {e}")))?;
-        let Some(WsAttachment::Spectator { room_id, .. }) = att else {
+        let Some(WsAttachment::Spectator {
+            room_id,
+            terminal_sent,
+            ..
+        }) = att
+        else {
             return Ok(());
         };
         let updated = WsAttachment::Spectator {
@@ -1477,6 +1482,7 @@ impl GameRoom {
             snapshot_in_progress,
             last_ply_in_snapshot,
             pending_queue,
+            terminal_sent,
         };
         ws.serialize_attachment(&updated)
             .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))
@@ -1492,6 +1498,7 @@ impl GameRoom {
             room_id,
             snapshot_in_progress,
             pending_queue,
+            terminal_sent,
             ..
         }) = att
         else {
@@ -1502,6 +1509,7 @@ impl GameRoom {
             snapshot_in_progress,
             last_ply_in_snapshot: last_ply,
             pending_queue,
+            terminal_sent,
         };
         ws.serialize_attachment(&updated)
             .map_err(|e| Error::RustError(format!("serialize_attachment: {e}")))
@@ -1893,6 +1901,10 @@ impl GameRoom {
 
         let clock_insert = spectator_clock_insert_after(entries);
         for (index, entry) in entries.iter().enumerate() {
+            // 終局通知は接続ごとの進捗を管理する保存経路で送る。
+            if entry.line.as_str().starts_with('#') && !entry.line.as_str().starts_with("##") {
+                continue;
+            }
             match entry.target {
                 BroadcastTarget::Black => {
                     self.send_to_role(Role::Black, entry.line.as_str()).await?;
@@ -1934,6 +1946,40 @@ impl GameRoom {
         self.send_to_spectators(&line, None).await
     }
 
+    /// 終局行を接続ごとに再開し、未送信の接続を残したまま保存完了にしない。
+    fn dispatch_terminal(
+        &self,
+        result: &rshogi_csa_server::game::result::GameResult,
+    ) -> Result<()> {
+        let mut first_error = None;
+        for ws in self.state.get_websockets() {
+            let Some(mut att) = ws.deserialize_attachment::<WsAttachment>()? else {
+                continue;
+            };
+            if let Err(error) = att.deliver_terminal(
+                result,
+                |line| send_line(&ws, line),
+                |attachment| ws.serialize_attachment(attachment),
+            ) {
+                if matches!(att, WsAttachment::Spectator { .. }) {
+                    // 観戦者の配信障害で対局者の結果保存を止めない。
+                    let _ = ws.close(Some(1011), Some("terminal delivery failed".to_owned()));
+                    crate::structured_log!(
+                        event: "spectator_send_failed",
+                        component: "game_room",
+                        err: format!("{error:?}"),
+                    );
+                } else {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     /// 終局したなら R2 に棋譜を書き出し、finished フラグを立てて両 ws を close する。
     ///
     /// R2 export PUT が一部または全部失敗した場合 (R2 export retry):
@@ -1949,6 +1995,17 @@ impl GameRoom {
         let HandleOutcome::GameEnded(ref game_result) = result.outcome else {
             return Ok(());
         };
+        // 対局不成立の REJECT は勝敗通知を伴わない。
+        let play_started = self
+            .config
+            .borrow()
+            .as_ref()
+            .is_some_and(|cfg| cfg.play_started_at_ms.is_some());
+        if play_started
+            || result.broadcasts.iter().any(|entry| entry.line.as_str().starts_with('#'))
+        {
+            self.dispatch_terminal(game_result)?;
+        }
         use rshogi_csa_server::record::kifu::primary_result_code;
         let code = primary_result_code(game_result).to_owned();
         let ended_at_ms = self.now_ms();
@@ -2725,6 +2782,7 @@ impl GameRoom {
                 snapshot_in_progress,
                 last_ply_in_snapshot,
                 mut pending_queue,
+                terminal_sent,
             }) = att
             else {
                 continue;
@@ -2760,6 +2818,7 @@ impl GameRoom {
                     snapshot_in_progress,
                     last_ply_in_snapshot,
                     pending_queue,
+                    terminal_sent,
                 };
                 if let Err(e) = ws.serialize_attachment(&updated) {
                     crate::structured_log!(
@@ -3451,6 +3510,10 @@ impl GameRoom {
             return Ok(());
         };
         self.ensure_core_loaded().await?;
+        // 復元が終局を確定した場合、予約済みの export retry を保持する。
+        if self.load_finished().await?.is_some() {
+            return Ok(());
+        }
         let role = match color_from_str(&pending.disconnected_color) {
             Ok(c) => Role::from_core(c),
             Err(e) => {
