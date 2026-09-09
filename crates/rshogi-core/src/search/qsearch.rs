@@ -203,6 +203,7 @@ pub(super) fn qsearch<const NT: u8>(
             let mate_move = pos.mate_1ply();
             if mate_move.is_some() {
                 let mate_value = Value::mate_in(ply + 1);
+                let stored_value = value_to_tt(mate_value, ply);
                 #[cfg(feature = "tt-trace")]
                 let allow_write = ctx.allow_tt_write
                     && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Exact, DEPTH_QS);
@@ -221,7 +222,7 @@ pub(super) fn qsearch<const NT: u8>(
                         // SAFETY: ply < MAX_PLY < STACK_SIZE。
                         is_pv: unsafe { st.stack.get_unchecked(ply as usize) }.tt_pv,
                         tt_move: mate_move,
-                        stored_value: mate_value,
+                        stored_value,
                         eval: unadjusted_static_eval,
                         root_move: if ply >= 1 {
                             st.stack[0].current_move
@@ -232,7 +233,7 @@ pub(super) fn qsearch<const NT: u8>(
                     // mate1ではss->ttPvを使用
                     tt_result.write(
                         key,
-                        mate_value,
+                        stored_value,
                         unsafe { st.stack.get_unchecked(ply as usize) }.tt_pv,
                         Bound::Exact,
                         DEPTH_QS,
