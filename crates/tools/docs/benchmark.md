@@ -30,6 +30,8 @@ cargo run -p tools --bin benchmark --release -- \
 | オプション | 説明 | デフォルト |
 |-----------|------|-----------|
 | `--threads` | 測定するスレッド数（カンマ区切り） | 1 |
+| `--eval-hash-mb` | 評価ハッシュ容量（MB）。USI では `EvalHash` | 256 |
+| `--use-eval-hash true/false` | 評価ハッシュ使用。USI では `UseEvalHash` | true |
 | `--tt-mb` | 置換表サイズ（MB） | 1024 |
 | `--limit-type` | 制限タイプ (depth/nodes/movetime) | movetime |
 | `--limit` | 制限値 | 15000 |
@@ -154,3 +156,9 @@ Position-by-position breakdown:
 - `--iterations` を増やして平均を取る
 - システムの他のプロセスを停止
 - CPU の省電力機能を無効化
+
+### USI 設定と受信期限
+
+USI モードは `EvalHash` / `UseEvalHash` をエンジンへ送信します。これらの名前を実装するエンジンが対象です。専用フラグの後に `--usi-option Name=Value` を指定順で送るため、同名の追加設定が最後に適用されます。
+
+探索の受信期限は movetime なら指定時間の 2 倍 + 5 秒、depth / nodes なら 300 秒です。`info` 行を受け取っても延長しません。期限後は `stop` を送り、最大 10 秒応答を回収します。回収した `bestmove` は正常測定として採用せず、タイムアウトで終了します。探索途中の値を成功した測定結果に含めません。
