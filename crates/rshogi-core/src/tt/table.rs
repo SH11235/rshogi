@@ -335,7 +335,8 @@ impl ProbeResult<'_> {
     /// エントリに書き込む（内部で16bitに切り詰め）
     ///
     /// probe後の別writerによる更新を再読込し、排他下で置換条件を判定する。
-    /// 競合時はこの書込みを見送る。
+    /// probe時または書込み時の競合で見送った場合はfalse、置換条件を適用して格納した場合はtrueを返す。
+    /// trueでも置換条件により既存の値が保持されることがある。
     pub fn write(
         &self,
         key: u64,
@@ -346,16 +347,17 @@ impl ProbeResult<'_> {
         mv: Move,
         eval: Value,
         generation8: u8,
-    ) {
+    ) -> bool {
         let Some((cluster, index)) = self.writer else {
-            return;
+            return false;
         };
         let Some(guard) = cluster.try_lock() else {
-            return;
+            return false;
         };
         let mut entry = guard.load(index);
         entry.save(key, value, is_pv, bound, depth, mv, eval, generation8);
         guard.store(index, entry);
+        true
     }
 }
 
@@ -386,7 +388,16 @@ mod tests {
         assert_eq!(replaced.data.mv, Move::NONE, "different key must not inherit previous move");
         tt.probe(1, &pos)
             .write(1, Value::new(30), false, Bound::Exact, 30, mv, Value::ZERO, 0);
-        old_probe.write(1, Value::new(1), false, Bound::Lower, 1, Move::NONE, Value::ZERO, 0);
+        assert!(old_probe.write(
+            1,
+            Value::new(1),
+            false,
+            Bound::Lower,
+            1,
+            Move::NONE,
+            Value::ZERO,
+            0
+        ));
         let preserved = tt.probe(1, &pos);
         assert_eq!(preserved.data.value.raw(), 30, "save policy must use latest depth");
         assert_eq!(preserved.data.mv.to_usi(), "7g7f");
@@ -399,12 +410,78 @@ mod tests {
         let writer = tt.probe(1, &pos);
         let cluster = tt.first_entry(1, pos.side_to_move());
         let guard = cluster.try_lock().unwrap();
-        assert!(!tt.probe(1, &pos).found);
-        writer.write(1, Value::new(99), false, Bound::Exact, 10, Move::NONE, Value::ZERO, 0);
+        let skipped_probe = tt.probe(1, &pos);
+        assert!(!skipped_probe.found);
+        assert!(!writer.write(
+            1,
+            Value::new(99),
+            false,
+            Bound::Exact,
+            10,
+            Move::NONE,
+            Value::ZERO,
+            0
+        ));
         assert!(!guard.load(0).is_occupied());
         drop(guard);
-        writer.write(1, Value::new(99), false, Bound::Exact, 10, Move::NONE, Value::ZERO, 0);
+        assert!(!skipped_probe.write(
+            1,
+            Value::new(99),
+            false,
+            Bound::Exact,
+            10,
+            Move::NONE,
+            Value::ZERO,
+            0
+        ));
+        assert!(!tt.probe(1, &pos).found);
+        assert!(writer.write(
+            1,
+            Value::new(99),
+            false,
+            Bound::Exact,
+            10,
+            Move::NONE,
+            Value::ZERO,
+            0
+        ));
         assert_eq!(tt.probe(1, &pos).data.value.raw(), 99);
+    }
+
+    #[test]
+    fn test_probe_contention_writer_stays_skipped_after_unlock() {
+        let tt = TranspositionTable::new(0);
+        let pos = Position::new();
+        assert!(tt.probe(1, &pos).write(
+            1,
+            Value::new(99),
+            false,
+            Bound::Exact,
+            10,
+            Move::NONE,
+            Value::ZERO,
+            0,
+        ));
+        let cluster = tt.first_entry(1, pos.side_to_move());
+        let guard = cluster.try_lock().unwrap();
+        let skipped_probe = tt.probe(1, &pos);
+        assert!(!skipped_probe.found);
+        drop(guard);
+
+        assert!(!skipped_probe.write(
+            1,
+            Value::new(42),
+            false,
+            Bound::Exact,
+            20,
+            Move::NONE,
+            Value::ZERO,
+            0,
+        ));
+        let preserved = tt.probe(1, &pos);
+        assert!(preserved.found);
+        assert_eq!(preserved.data.value.raw(), 99);
+        assert_eq!(preserved.data.depth, 10);
     }
 
     #[test]
