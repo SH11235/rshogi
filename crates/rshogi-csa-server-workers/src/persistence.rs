@@ -434,6 +434,113 @@ mod tests {
     }
 
     #[test]
+    fn replay_preserves_full_repetition_history_and_terminal_broadcasts() {
+        let long_cycle = [
+            "+5949OU", "-5141OU", "+4939OU", "-4131OU", "+3938OU", "-3132OU", "+3837OU", "-3233OU",
+            "+3747OU", "-3343OU", "+4757OU", "-4353OU", "+5767OU", "-5363OU", "+6768OU", "-6362OU",
+            "+6869OU", "-6261OU", "+6959OU", "-6151OU",
+        ];
+        for (sfen, cycle, code) in [
+            ("4k4/9/9/9/9/9/9/9/4K4 b Pp 1", long_cycle.as_slice(), "#SENNICHITE"),
+            (
+                "9/6k2/9/9/9/9/9/6R2/K8 w - 1",
+                ["-3242OU", "+3848HI", "-4232OU", "+4838HI"].as_slice(),
+                "#OUTE_SENNICHITE",
+            ),
+            (
+                "9/5k3/9/9/9/9/9/6R2/K8 b - 1",
+                ["+3848HI", "-4232OU", "+4838HI", "-3242OU"].as_slice(),
+                "#OUTE_SENNICHITE",
+            ),
+        ] {
+            let mut cfg = baseline_config();
+            cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
+            cfg.initial_sfen = Some(sfen.to_owned());
+            let cfg: PersistedConfig =
+                serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+            let rows: Vec<_> = cycle
+                .iter()
+                .cycle()
+                .take(cycle.len() * 3)
+                .enumerate()
+                .map(|(ply, line)| {
+                    move_row(
+                        ply as i64 + 1,
+                        if line.starts_with('+') {
+                            "black"
+                        } else {
+                            "white"
+                        },
+                        line,
+                        0,
+                    )
+                })
+                .collect();
+            let rows: Vec<MoveRow> =
+                serde_json::from_str(&serde_json::to_string(&rows).unwrap()).unwrap();
+            let mut uninterrupted = directly_played(&cfg, &[]);
+            let split = rows.len() - 1;
+            for row in &rows[..split] {
+                let side = if row.color == "black" {
+                    Color::Black
+                } else {
+                    Color::White
+                };
+                let result = uninterrupted
+                    .handle_line(side, &CsaLine::new(&row.line), PLAY_STARTED_AT_MS)
+                    .unwrap();
+                assert!(matches!(result.outcome, HandleOutcome::MoveAccepted { .. }));
+            }
+            let ReplaySummary::Restored { mut core } = replay_core_room(&cfg, &rows[..split])
+            else {
+                panic!("restore failed");
+            };
+            let last = &rows[split];
+            let side = if last.color == "black" {
+                Color::Black
+            } else {
+                Color::White
+            };
+            let expected = uninterrupted
+                .handle_line(side, &CsaLine::new(&last.line), PLAY_STARTED_AT_MS)
+                .unwrap();
+            let actual =
+                core.handle_line(side, &CsaLine::new(&last.line), PLAY_STARTED_AT_MS).unwrap();
+            assert_eq!(actual.outcome, expected.outcome);
+            if code == "#SENNICHITE" {
+                assert!(matches!(actual.outcome, HandleOutcome::GameEnded(GameResult::Sennichite)));
+                assert!(actual.broadcasts.iter().any(|b| b.line.as_str() == "#DRAW"));
+            } else {
+                assert!(matches!(
+                    actual.outcome,
+                    HandleOutcome::GameEnded(GameResult::OuteSennichite {
+                        loser: Color::Black
+                    })
+                ));
+                assert!(actual.broadcasts.iter().any(|b| b.line.as_str() == "#LOSE"));
+                assert!(actual.broadcasts.iter().any(|b| b.line.as_str() == "#WIN"));
+            }
+            assert!(actual.broadcasts.iter().any(|b| b.line.as_str() == code));
+            assert!(actual.broadcasts.iter().any(
+                |b| b.ply == Some(rows.len() as u32) && b.line.as_str().starts_with(&last.line)
+            ));
+            let messages = |result: &rshogi_csa_server::game::room::HandleResult| {
+                result
+                    .broadcasts
+                    .iter()
+                    .map(|b| (b.target, b.line.as_str().to_owned(), b.ply))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(messages(&actual), messages(&expected));
+            let ReplaySummary::Restored { core: finished } = replay_core_room(&cfg, &rows) else {
+                panic!("terminal move restore failed");
+            };
+            assert_eq!(finished.status(), core.status());
+            assert_eq!(finished.moves_played(), rows.len() as u32);
+        }
+    }
+
+    #[test]
     fn replay_without_play_started_returns_agree_waiting_room() {
         let cfg = baseline_config();
         let summary = replay_core_room(&cfg, &[]);
