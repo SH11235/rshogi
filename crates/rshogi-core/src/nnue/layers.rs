@@ -462,6 +462,22 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// → スパース最適化には高すぎるため、密な行列積方式が正しい選択。
     /// 詳細は `network.rs` の diagnostics 計測コードを参照。
     pub fn propagate(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
+        self.propagate_impl::<true>(input, output);
+    }
+
+    /// 入力が `[0, 127]` に収まることを呼び出し側が保証する場合の順伝播。
+    ///
+    /// 隣接 2 項の `u8 * i8` 和は最悪でも `127 * -128 * 2` で i16 に収まるため、
+    /// `maddubs` を分割せずに使える。全 u8 範囲を渡すと i16 飽和で結果が変わる。
+    pub fn propagate_7bit(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
+        debug_assert!(
+            input[..INPUT_DIM].iter().all(|&x| x <= 127),
+            "propagate_7bit received an input above 127"
+        );
+        self.propagate_impl::<false>(input, output);
+    }
+
+    fn propagate_impl<const FULL_RANGE: bool>(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
         debug_assert!(
             input.len() >= Self::PADDED_INPUT,
             "input length {} is less than PADDED_INPUT {}",
@@ -519,7 +535,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                         // 内側: 全出力レジスタに積和演算
                         for k in 0..num_regs {
-                            m512_add_dpbusd_epi32::<true>(
+                            m512_add_dpbusd_epi32::<FULL_RANGE>(
                                 &mut acc[k],
                                 in_val,
                                 _mm512_load_si512(col.add(k)),
@@ -590,7 +606,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                         // 内側: 全出力レジスタに積和演算
                         for k in 0..num_regs {
-                            m256_add_dpbusd_epi32::<true>(
+                            m256_add_dpbusd_epi32::<FULL_RANGE>(
                                 &mut acc[k],
                                 in_val,
                                 _mm256_load_si256(col.add(k)),
@@ -621,7 +637,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                         let w_vec = _mm256_load_si256(
                             weights_ptr.add(weight_row_offset + offset) as *const __m256i
                         );
-                        m256_add_dpbusd_epi32::<true>(&mut acc, in_vec, w_vec);
+                        m256_add_dpbusd_epi32::<FULL_RANGE>(&mut acc, in_vec, w_vec);
                     }
 
                     *out = bias + hsum_i32_avx2(acc);
@@ -678,7 +694,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                         // 内側: 全出力レジスタに積和演算
                         for k in 0..num_regs {
-                            m128_add_dpbusd_epi32::<true>(
+                            m128_add_dpbusd_epi32::<FULL_RANGE>(
                                 &mut acc[k],
                                 in_val,
                                 _mm_load_si128(col.add(k)),
@@ -709,7 +725,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                         let w_vec = _mm_load_si128(
                             weights_ptr.add(weight_row_offset + offset) as *const __m128i
                         );
-                        m128_add_dpbusd_epi32::<true>(&mut acc, in_vec, w_vec);
+                        m128_add_dpbusd_epi32::<FULL_RANGE>(&mut acc, in_vec, w_vec);
                     }
 
                     *out = bias + hsum_i32_sse2(acc);
@@ -1184,6 +1200,49 @@ mod tests {
                 .unwrap()
                 .propagate(input, output);
         });
+    }
+
+    /// 入力が 7bit に収まる限り、専用経路は全範囲経路と同じ値を返す。
+    #[test]
+    fn propagate_7bit_matches_full_range_for_7bit_input() {
+        fn check<const INPUT: usize, const OUTPUT: usize>() {
+            let padded = padded_input(INPUT);
+            let mut bytes = Vec::new();
+            for o in 0..OUTPUT {
+                bytes.extend_from_slice(&((o as i32) * 91 - 733).to_le_bytes());
+            }
+            let mut state = 0x243f_6a88_85a3_08d3u64;
+            let mut next = move || {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (state >> 33) as u8
+            };
+            for _ in 0..padded * OUTPUT {
+                bytes.push(next());
+            }
+            let layer = AffineTransform::<INPUT, OUTPUT>::read(&mut &bytes[..]).unwrap();
+
+            let mut input = AlignedBox::<u8>::new_zeroed(padded);
+            for (i, x) in input.iter_mut().take(INPUT).enumerate() {
+                *x = match i % 4 {
+                    0 => 0,
+                    1 => 127,
+                    2 => 126,
+                    _ => next() % 128,
+                };
+            }
+
+            let mut full = [0i32; OUTPUT];
+            let mut seven = [0i32; OUTPUT];
+            layer.propagate(&input, &mut full);
+            layer.propagate_7bit(&input, &mut seven);
+            assert_eq!(full, seven, "INPUT={INPUT}, OUTPUT={OUTPUT}");
+        }
+
+        check::<1536, 16>();
+        check::<32, 32>();
+        check::<32, 1>();
+        check::<512, 8>();
+        check::<760, 8>();
     }
 
     use crate::nnue::accumulator::Aligned;
