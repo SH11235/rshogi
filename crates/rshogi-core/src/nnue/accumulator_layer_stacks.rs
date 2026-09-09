@@ -50,37 +50,42 @@ impl<const L1: usize> AccumulatorLayerStacks<L1> {
         }
     }
 
-    /// 指定視点の累積値を取得
+    /// 指定視点の累積値を取得。
+    ///
+    /// # Panics
+    /// `perspective` が0（先手）・1（後手）以外の場合。
     #[inline]
     pub fn get(&self, perspective: usize) -> &[i16; L1] {
-        debug_assert!(perspective < 2);
-        // SAFETY: perspective は Color::Black(0) または Color::White(1) であり、
-        //         accumulation は [_; 2] なので常に範囲内。
-        unsafe { self.accumulation.get_unchecked(perspective) }
+        &self.accumulation[perspective]
     }
 
-    /// 指定視点の累積値を取得（可変）
+    /// 指定視点の累積値を取得（可変）。
+    ///
+    /// # Panics
+    /// `perspective` が0（先手）・1（後手）以外の場合。
     #[inline]
     pub fn get_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
-        debug_assert!(perspective < 2);
-        // SAFETY: 同上。
-        unsafe { self.accumulation.get_unchecked_mut(perspective) }
+        &mut self.accumulation[perspective]
     }
 
-    /// 指定視点の Threat 累積値を取得
+    /// 指定視点の Threat 累積値を取得。
+    ///
+    /// # Panics
+    /// `perspective` が0（先手）・1（後手）以外の場合。
     #[cfg(feature = "nnue-threat")]
     #[inline]
     pub fn get_threat(&self, perspective: usize) -> &[i16; L1] {
-        debug_assert!(perspective < 2);
-        unsafe { self.threat_accumulation.get_unchecked(perspective) }
+        &self.threat_accumulation[perspective]
     }
 
-    /// 指定視点の Threat 累積値を取得（可変）
+    /// 指定視点の Threat 累積値を取得（可変）。
+    ///
+    /// # Panics
+    /// `perspective` が0（先手）・1（後手）以外の場合。
     #[cfg(feature = "nnue-threat")]
     #[inline]
     pub fn get_threat_mut(&mut self, perspective: usize) -> &mut [i16; L1] {
-        debug_assert!(perspective < 2);
-        unsafe { self.threat_accumulation.get_unchecked_mut(perspective) }
+        &mut self.threat_accumulation[perspective]
     }
 }
 
@@ -427,21 +432,16 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         }
     }
 
-    /// 現在のエントリを取得
+    /// 現在のエントリを取得。
     #[inline]
     pub fn current(&self) -> &StackEntryLayerStacks<L1> {
-        debug_assert!(self.current < self.entries.len());
-        // SAFETY: current は push/pop の対でインクリメント/デクリメントされ、
-        //         do_move と undo_move の対称呼び出しにより 0 <= current < STACK_SIZE が保証される。
-        unsafe { self.entries.get_unchecked(self.current) }
+        &self.entries[self.current]
     }
 
-    /// 現在のエントリを取得（可変）
+    /// 現在のエントリを取得（可変）。
     #[inline]
     pub fn current_mut(&mut self) -> &mut StackEntryLayerStacks<L1> {
-        debug_assert!(self.current < self.entries.len());
-        // SAFETY: 同上。do_move/undo_move の対称呼び出しで current は常に範囲内。
-        unsafe { self.entries.get_unchecked_mut(self.current) }
+        &mut self.entries[self.current]
     }
 
     /// 現在のインデックスを取得
@@ -453,22 +453,18 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     /// 指定インデックスのエントリを取得
     #[inline]
     pub(crate) fn entry_at(&self, index: usize) -> &StackEntryLayerStacks<L1> {
-        debug_assert!(index < self.entries.len());
-        // SAFETY: index は previous チェーンまたは find_usable_accumulator 由来で常に
-        //         current 以下の有効なインデックス（STACK_SIZE 未満）。
-        unsafe { self.entries.get_unchecked(index) }
+        &self.entries[index]
     }
 
-    /// スタックをプッシュ
+    /// スタックをプッシュ。
+    ///
+    /// # Panics
+    /// 容量上限の場合。current と既存エントリは変更しない。
     #[inline]
     pub fn push(&mut self) {
         let prev = self.current;
-        self.current += 1;
-        debug_assert!(self.current < Self::STACK_SIZE);
-        // SAFETY: current < STACK_SIZE は上の debug_assert で検証。
-        //         push は do_move ごとに 1 回呼ばれ、pop と対になるため
-        //         current は常に STACK_SIZE 未満。
-        let entry = unsafe { self.entries.get_unchecked_mut(self.current) };
+        let next = prev + 1;
+        let entry = self.entries.get_mut(next).expect("accumulator stack capacity exceeded");
         entry.previous = Some(prev);
         entry.accumulator.computed_accumulation = false;
         entry.accumulator.computed_score = false;
@@ -477,36 +473,34 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         {
             entry.computed_progress = false;
         }
+        self.current = next;
     }
 
-    /// スタックをポップ
+    /// スタックをポップ。
+    ///
+    /// # Panics
+    /// ルートの場合。current は変更しない。
     #[inline]
     pub fn pop(&mut self) {
-        debug_assert!(self.current > 0);
-        self.current -= 1;
+        self.current = self.current.checked_sub(1).expect("cannot pop accumulator root");
     }
 
     /// 前回と現在のアキュムレータを同時に取得（clone不要）
     ///
     /// `split_at_mut`を使用して、prev_idx の accumulator への不変参照と
     /// 現在の accumulator への可変参照を同時に返す。
+    ///
+    /// # Panics
+    /// `prev_idx` が現在位置より前でない場合（ルートを含む）。
     #[inline]
     pub fn get_prev_and_current_accumulators(
         &mut self,
         prev_idx: usize,
     ) -> (&AccumulatorLayerStacks<L1>, &mut AccumulatorLayerStacks<L1>) {
         let cur_idx = self.current;
-        debug_assert!(prev_idx < cur_idx, "prev_idx ({prev_idx}) must be < cur_idx ({cur_idx})");
-        debug_assert!(cur_idx < self.entries.len());
+        assert!(prev_idx < cur_idx, "previous index must precede current index");
         let (left, right) = self.entries.split_at_mut(cur_idx);
-        // SAFETY: prev_idx < cur_idx（上の debug_assert で検証）かつ left の長さは cur_idx。
-        //         right は少なくとも 1 要素を持つ（cur_idx < entries.len() を保証）。
-        unsafe {
-            (
-                &left.get_unchecked(prev_idx).accumulator,
-                &mut right.get_unchecked_mut(0).accumulator,
-            )
-        }
+        (&left[prev_idx].accumulator, &mut right[0].accumulator)
     }
 
     /// スタックをリセット
@@ -539,11 +533,10 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     /// ## 戻り値
     ///
     /// `Some((計算済みエントリのインデックス, 経由する局面数))` - 玉移動がない範囲で
-    /// 計算済み祖先が見つかった場合。`None` - 使用可能な祖先が見つからない場合。
+    /// 計算済み祖先が見つかった場合。`None` - 使用可能な祖先が見つからない場合、
+    /// または public previous が範囲外・自己参照・前方参照の場合。
     pub fn find_usable_accumulator(&self, max_depth: usize) -> Option<(usize, usize)> {
-        debug_assert!(self.current < self.entries.len());
-        // SAFETY: current は do_move/undo_move の対称呼び出しで常に範囲内。
-        let current = unsafe { self.entries.get_unchecked(self.current) };
+        let current = &self.entries[self.current];
 
         // 現局面で玉が動いていたら差分更新不可
         if current.dirty_piece.king_moved[0] || current.dirty_piece.king_moved[1] {
@@ -553,11 +546,14 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         // 直前局面をチェック（depth=1から開始）
         let mut prev_idx = current.previous?;
         let mut depth = 1;
+        let mut child_idx = self.current;
 
         loop {
-            debug_assert!(prev_idx < self.entries.len());
-            // SAFETY: prev_idx は previous チェーンを辿った有効なインデックス（STACK_SIZE 未満）。
-            let prev = unsafe { self.entries.get_unchecked(prev_idx) };
+            // previous は公開 field。範囲外・自己参照・前方参照を辿らない。
+            if prev_idx >= child_idx {
+                return None;
+            }
+            let prev = self.entries.get(prev_idx)?;
 
             // 計算済みなら成功
             if prev.accumulator.computed_accumulation {
@@ -577,6 +573,7 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
                 return None;
             }
 
+            child_idx = prev_idx;
             prev_idx = next_prev_idx;
             depth += 1;
         }
@@ -586,7 +583,7 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     ///
     /// 戻り値:
     /// - Some(path): source_idx に到達できた場合、source側から適用する順のインデックス列
-    /// - None: パスが途切れた場合、または MAX_PATH_LENGTH を超えた場合
+    /// - None: パスが途切れた場合、MAX_PATH_LENGTH 超過、または previous が祖先を指さない場合
     pub fn collect_path(&self, source_idx: usize) -> Option<IndexList<MAX_PATH_LENGTH>> {
         self.collect_path_internal(source_idx)
     }
@@ -601,8 +598,8 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
                 return None;
             }
             match self.entries[idx].previous {
-                Some(prev) => idx = prev,
-                None => return None,
+                Some(prev) if prev < idx => idx = prev,
+                _ => return None,
             }
         }
 
@@ -903,6 +900,106 @@ mod tests {
         for idx in added.iter() {
             acc[0] = acc[0].wrapping_add(idx as i16);
         }
+    }
+
+    #[test]
+    fn safe_boundary_perspectives() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let mut acc = AccumulatorLayerStacks::<4>::new();
+        acc.get_mut(0)[0] = 12;
+        acc.get_mut(1)[0] = 34;
+        for invalid in [2, usize::MAX] {
+            assert!(catch_unwind(|| acc.get(invalid)).is_err());
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    acc.get_mut(invalid);
+                }))
+                .is_err()
+            );
+            #[cfg(feature = "nnue-threat")]
+            {
+                assert!(catch_unwind(|| acc.get_threat(invalid)).is_err());
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| {
+                        acc.get_threat_mut(invalid);
+                    }))
+                    .is_err()
+                );
+            }
+        }
+        assert_eq!(acc.get(0)[0], 12);
+        assert_eq!(acc.get(1)[0], 34);
+        #[cfg(feature = "nnue-threat")]
+        {
+            acc.get_threat_mut(1)[0] = 56;
+            assert_eq!(acc.get_threat(1)[0], 56);
+        }
+    }
+
+    #[test]
+    fn safe_boundary_stack_preserves_state_after_failure() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        type Stack = AccumulatorStackLayerStacks<4>;
+        let mut stack = Stack::new();
+        stack.current_mut().accumulator.get_mut(0)[0] = 17;
+        assert!(catch_unwind(AssertUnwindSafe(|| stack.pop())).is_err());
+        assert_eq!(stack.current_index(), 0);
+        assert_eq!(stack.current().accumulator.get(0)[0], 17);
+        for _ in 1..Stack::STACK_SIZE {
+            stack.push();
+        }
+        let last = stack.current_index();
+        stack.current_mut().accumulator.get_mut(0)[0] = 29;
+        assert!(catch_unwind(AssertUnwindSafe(|| stack.push())).is_err());
+        assert_eq!(stack.current_index(), last);
+        assert_eq!(stack.current().accumulator.get(0)[0], 29);
+        for invalid in [last, usize::MAX] {
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    stack.get_prev_and_current_accumulators(invalid);
+                }))
+                .is_err()
+            );
+            assert_eq!(stack.current_index(), last);
+        }
+        for _ in 0..last {
+            stack.pop();
+        }
+        assert_eq!(stack.current().accumulator.get(0)[0], 17);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                stack.get_prev_and_current_accumulators(0);
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn safe_boundary_previous_links_and_valid_path() {
+        let mut stack = AccumulatorStackLayerStacks::<4>::new();
+        stack.current_mut().accumulator.computed_accumulation = true;
+        stack.push();
+        stack.push();
+        assert_eq!(stack.find_usable_accumulator(4), Some((0, 2)));
+        assert_eq!(stack.collect_path(0).unwrap().iter().collect::<Vec<_>>(), vec![1, 2]);
+        let (previous, current) = stack.get_prev_and_current_accumulators(0);
+        assert!(previous.computed_accumulation);
+        current.get_mut(1)[0] = 71;
+        assert_eq!(stack.current().accumulator.get(1)[0], 71);
+        for invalid in [2, 3, usize::MAX] {
+            stack.current_mut().previous = Some(invalid);
+            assert_eq!(stack.find_usable_accumulator(usize::MAX), None);
+            assert!(stack.collect_path(0).is_none());
+        }
+        stack.current_mut().previous = Some(1);
+        stack.pop();
+        stack.current_mut().previous = Some(1);
+        stack.push();
+        assert_eq!(stack.find_usable_accumulator(usize::MAX), None);
+        assert!(stack.collect_path(0).is_none());
+        stack.reset();
+        assert_eq!(stack.current_index(), 0);
+        assert!(stack.current().previous.is_none());
     }
 
     #[test]
