@@ -1480,3 +1480,8 @@ cargo test -p tools --test spsa_run_dir_integration value_driven_matches_fixed_s
 2026-09-09 の生成時には SPSA 本体の改修前にも同じ条件で現行 HEAD を実行し、4条件×3成果物が基準と
 SHA-256 一致することを確認した。value_driven は SPSA_TEST_INT が6以上なら win、それ以外は resign を返し、
 両 batch の raw_result=+4 の非ゼロ更新を検証する。mock は局面に依存しないため、局面選択 RNG 自体は既存 prep unit test が検証する。
+
+### 重複パラメータの拒否
+
+同じ名前の行、および同じ net 係数 ID を表す行（数値 index の先頭ゼロなど）は、元ファイルの行番号を示して拒否します。`[[NOT USED]]` 行も重複検査の対象です。重複行を後勝ちまたは加算と解釈しません。既存ファイルは自動修正しないため、意図した 1 行へ整理してください。
+エンジン名の mapping を使う場合は、送信対象行の翻訳先も検査します。符号反転の有無にかかわらず同じ係数への衝突は対局開始前に拒否します。
