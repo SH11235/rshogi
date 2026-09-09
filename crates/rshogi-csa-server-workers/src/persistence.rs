@@ -18,7 +18,9 @@
 use serde::{Deserialize, Serialize};
 
 use rshogi_csa_server::ClockSpec;
-use rshogi_csa_server::game::room::{GameRoom as CoreRoom, GameRoomConfig};
+use rshogi_csa_server::game::room::{
+    GameRoom as CoreRoom, GameRoomConfig, GameStatus, HandleOutcome, HandleResult,
+};
 use rshogi_csa_server::types::{Color, CsaLine, GameId, PlayerName};
 
 /// マッチ成立時に永続化する対局設定。`CoreRoom` の再構築に必要な最小情報。
@@ -200,8 +202,8 @@ pub enum ReplaySummary {
     /// 失敗系の小さい variant とのサイズ差を抑える目的で `Box` でくるんで持つ
     /// (clippy::large_enum_variant)。
     Restored {
-        /// 復元済み `CoreRoom`。`AgreeWaiting`（`play_started_at_ms = None`）または
-        /// `Playing`（AGREE 再送後）のどちらかの状態にある。
+        /// 復元済み `CoreRoom`。終局手まで保存済みなら `Finished` となるため、
+        /// 呼び出し側は未完了の終局永続化を再開する。
         core: Box<CoreRoom>,
     },
     /// 開始局面 SFEN が `CoreRoom::new` で拒否された。`reason` は console_log 用。
@@ -314,11 +316,22 @@ pub fn replay_core_room(cfg: &PersistedConfig, moves: &[MoveRow]) -> ReplaySumma
     }
 }
 
+/// 終局の永続化を再開するため、確定済みの裁定を取り出す。
+/// 配信済みか判別できない着手通知は再送せず、終局保存と接続終了だけを行う。
+pub fn pending_finalization(core: &CoreRoom) -> Option<HandleResult> {
+    let GameStatus::Finished(result) = core.status() else {
+        return None;
+    };
+    Some(HandleResult {
+        outcome: HandleOutcome::GameEnded(result.clone()),
+        broadcasts: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rshogi_csa_server::game::result::GameResult;
-    use rshogi_csa_server::game::room::{GameStatus, HandleOutcome};
     use rshogi_csa_server::record::kifu::primary_result_code;
 
     /// `play_started_at_ms` の代表値（適当な epoch ms）。テスト全体で共有。
@@ -495,6 +508,7 @@ mod tests {
             else {
                 panic!("restore failed");
             };
+            assert!(pending_finalization(&core).is_none());
             let last = &rows[split];
             let side = if last.color == "black" {
                 Color::Black
@@ -537,7 +551,30 @@ mod tests {
             };
             assert_eq!(finished.status(), core.status());
             assert_eq!(finished.moves_played(), rows.len() as u32);
+            for ended in [&core, &finished] {
+                let pending = pending_finalization(ended).expect("終局の永続化が必要");
+                assert_eq!(pending.outcome, expected.outcome);
+                assert!(pending.broadcasts.is_empty());
+            }
         }
+    }
+
+    #[test]
+    fn pending_finalization_preserves_max_moves_after_terminal_move_replay() {
+        let mut cfg = baseline_config();
+        assert!(pending_finalization(&directly_played(&cfg, &[])).is_none());
+        cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
+        cfg.max_moves = 1;
+        let rows = [move_row(1, "black", "+7776FU", 0)];
+        let ReplaySummary::Restored { mut core } = replay_core_room(&cfg, &rows) else {
+            panic!("terminal move restore failed");
+        };
+        assert_eq!(core.force_time_up(Color::White).outcome, HandleOutcome::Continue);
+        let pending = pending_finalization(&core).expect("終局の永続化が必要");
+        assert_eq!(pending.outcome, HandleOutcome::GameEnded(GameResult::MaxMoves));
+        assert!(pending.broadcasts.is_empty());
+        assert_eq!(core.moves_played(), 1);
+        assert_eq!(pending_finalization(&core).unwrap().outcome, pending.outcome);
     }
 
     #[test]

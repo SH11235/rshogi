@@ -80,7 +80,7 @@ use crate::handle_auth::{HandleAuthError, load_handle_auth_registry};
 use crate::live_games_index::{LiveGamesIndexEntry, live_games_index_key};
 use crate::persistence::{
     ExportBodyKind, ExportPendingState, FailedExportObject, FinishedState, MoveRow,
-    PersistedConfig, ReplaySummary, replay_core_room,
+    PersistedConfig, ReplaySummary, pending_finalization, replay_core_room,
 };
 use crate::player_identity::{derive_player_identity, legacy_player_id};
 use crate::reconnect::{
@@ -1116,12 +1116,7 @@ impl GameRoom {
         //   `AgreeTimeout` alarm がそのまま発火して `handle_agree_timeout_alarm` の
         //   `play_started_at_ms.is_some()` ガードで「タグ削除のみ」して return する
         //   (turn alarm が二度と貼られない) 経路を回避する。
-        // - `GameEnded`: `reschedule_turn_alarm(GameEnded)` は `delete_alarm` のみ。
-        //   broadcast より先に削除すると、broadcast 失敗で `?` 伝播した時に
-        //   alarm 駆動の recovery (`finalize_if_ended` 経路) も失われ、`KEY_FINISHED`
-        //   未設定 / R2 export 未実行 / live-games-index 残留の状態で対局が
-        //   宙吊りになる。broadcast → alarm cleanup → `finalize_if_ended` の
-        //   旧順序を維持して既存 alarm 発火経路の recovery を温存する。
+        // - `GameEnded`: 終局保存が失敗しても再試行できるよう、alarm は保存後に解除する。
         // - `Continue`: alarm 変更は不要 (旧順序維持)。
         match &result.outcome {
             HandleOutcome::GameStarted => {
@@ -1139,23 +1134,11 @@ impl GameRoom {
                 self.dispatch_broadcasts(&result.broadcasts).await?;
             }
             HandleOutcome::GameEnded(_) => {
-                // 千日手 / 連続王手千日手 / 最大手数で「盤面を進めた最終手」がある
-                // 終局では、その手を broadcast だけでなく moves テーブルにも永続化
-                // する。core `apply_move` は本手を `do_move` してから `GameEnded` を
-                // 返し、`<token>,T<sec>` の move broadcast を積む (room.rs:509-513)
-                // ため、この行が append されないと R2 棋譜 export と late-joiner
-                // snapshot から終局手が欠落する。判定は move broadcast
-                // (`'+'/'-'` 始まり + ply=Some) の有無で行い、%TORYO / %KACHI /
-                // TimeUp / 反則負け等の盤面を進めない終局では該当 entry が無く
-                // append されない。append は MoveAccepted 経路と同じく raw client
-                // 行を保存し、broadcast より前に行う (append→dispatch→alarm cleanup
-                // の順を保ち、alarm cleanup を dispatch より前へ出さない = 1033-1047
-                // の broadcast→alarm cleanup 順序の根拠を崩さない)。
+                // 盤面を進めた終局手も保存し、棋譜と復元後の裁定を一致させる。
                 if result.broadcasts.iter().any(is_move_broadcast) {
                     self.append_move(color, line, now).await?;
                 }
                 self.dispatch_broadcasts(&result.broadcasts).await?;
-                self.reschedule_turn_alarm(&result.outcome).await?;
             }
             HandleOutcome::Continue => {
                 self.dispatch_broadcasts(&result.broadcasts).await?;
@@ -1999,6 +1982,8 @@ impl GameRoom {
             exported_at_ms,
         };
         self.state.storage().put(KEY_FINISHED, &finished).await?;
+        // 終局保存に失敗しても alarm から再試行できるよう、解除は保存後に行う。
+        let _ = self.state.storage().delete_alarm().await;
         // grace / agree-timeout / time-up 系の alarm/registry を片付けてから
         // ExportRetry alarm を張る。順序を逆にすると `delete_grace_alarm_state`
         // が ExportRetry タグを巻き込んで消す race がある。
@@ -2837,6 +2822,11 @@ impl GameRoom {
         // hibernation を跨いで再 attach した場合に retry が必要なので、
         // 早期 return ではなく `live_index_put_done` の照合を先に行う。
         if self.core.borrow().is_some() {
+            let pending = self.core.borrow().as_ref().and_then(pending_finalization);
+            if let Some(result) = pending {
+                self.finalize_if_ended(&result).await?;
+                return Ok(());
+            }
             self.retry_live_games_index_if_needed().await?;
             return Ok(());
         }
@@ -2872,6 +2862,13 @@ impl GameRoom {
                 // (`ReplaySummary` の variant 間サイズ差対策、persistence.rs 参照)。
                 *self.core.borrow_mut() = Some(*core);
                 *self.config.borrow_mut() = Some(cfg);
+
+                // 終局手の保存と終局確定の間で中断しても、復元した裁定を永続化する。
+                let pending = self.core.borrow().as_ref().and_then(pending_finalization);
+                if let Some(result) = pending {
+                    self.finalize_if_ended(&result).await?;
+                    return Ok(());
+                }
 
                 // live-games-index put が抜けたまま hibernation で isolate が落ちた
                 // ケースを救済する (https://github.com/SH11235/rshogi/issues/549 §5)。
