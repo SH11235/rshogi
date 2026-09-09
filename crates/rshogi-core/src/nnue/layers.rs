@@ -48,7 +48,7 @@ unsafe fn hsum_i32_avx2(v: std::arch::x86_64::__m256i) -> i32 {
 /// 512bit = 64バイト = 16 x i32 を一度に処理。
 #[cfg(all(target_arch = "x86_64", target_feature = "avx512vnni"))]
 #[inline]
-unsafe fn m512_add_dpbusd_epi32(
+unsafe fn m512_add_dpbusd_epi32<const FULL_RANGE: bool>(
     acc: &mut std::arch::x86_64::__m512i,
     a: std::arch::x86_64::__m512i,
     b: std::arch::x86_64::__m512i,
@@ -69,7 +69,7 @@ unsafe fn m512_add_dpbusd_epi32(
     not(target_feature = "avx512vnni")
 ))]
 #[inline]
-unsafe fn m512_add_dpbusd_epi32(
+unsafe fn m512_add_dpbusd_epi32<const FULL_RANGE: bool>(
     acc: &mut std::arch::x86_64::__m512i,
     a: std::arch::x86_64::__m512i,
     b: std::arch::x86_64::__m512i,
@@ -77,22 +77,33 @@ unsafe fn m512_add_dpbusd_epi32(
     // SAFETY: 呼び出し側が avx512bw フィーチャを保証する
     unsafe {
         use std::arch::x86_64::*;
-        // maddubs: u8×i8 → i16 (飽和加算)
-        let product = _mm512_maddubs_epi16(a, b);
-        // madd: i16×i16 → i32 (隣接ペアの積和)
-        let product32 = _mm512_madd_epi16(product, _mm512_set1_epi16(1));
-        *acc = _mm512_add_epi32(*acc, product32);
+        if FULL_RANGE {
+            // 7bit 部分と最上位 bit を別々に積和する。各隣接和は i16 内に
+            // 収まり（最小 -32768）、i32 化してから合算すれば qa255 も飽和しない。
+            let low = _mm512_and_si512(a, _mm512_set1_epi8(127));
+            let high = _mm512_andnot_si512(_mm512_set1_epi8(127), a);
+            let product = _mm512_maddubs_epi16(low, b);
+            let high_product = _mm512_maddubs_epi16(high, b);
+            let high32 = _mm512_madd_epi16(high_product, _mm512_set1_epi16(1));
+            // madd: i16×i16 → i32 (隣接ペアの積和)
+            let product32 = _mm512_madd_epi16(product, _mm512_set1_epi16(1));
+            *acc = _mm512_add_epi32(*acc, _mm512_add_epi32(product32, high32));
+        } else {
+            let product = _mm512_maddubs_epi16(a, b);
+            let product32 = _mm512_madd_epi16(product, _mm512_set1_epi16(1));
+            *acc = _mm512_add_epi32(*acc, product32);
+        }
     }
 }
 
 /// AVX2用 DPBUSD エミュレーション（u8×i8→i32積和演算）
 ///
-/// VNNI非対応CPU向け。`maddubs` + `madd` の2命令で積和演算を実行。
+/// VNNI非対応CPU向け。入力を分割した `maddubs` + `madd` で飽和なしの積和演算を実行。
 /// AVX-512 ビルドでも propagate の AVX2 フォールスルー経路から参照されるため
 /// compile-in する。
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
-unsafe fn m256_add_dpbusd_epi32(
+pub(crate) unsafe fn m256_add_dpbusd_epi32<const FULL_RANGE: bool>(
     acc: &mut std::arch::x86_64::__m256i,
     a: std::arch::x86_64::__m256i,
     b: std::arch::x86_64::__m256i,
@@ -100,9 +111,21 @@ unsafe fn m256_add_dpbusd_epi32(
     // SAFETY: 呼び出し側が avx2 フィーチャを保証する
     unsafe {
         use std::arch::x86_64::*;
-        let product = _mm256_maddubs_epi16(a, b);
-        let product32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
-        *acc = _mm256_add_epi32(*acc, product32);
+        if FULL_RANGE {
+            // 7bit 部分と最上位 bit を別々に積和する。各隣接和は i16 内に
+            // 収まり（最小 -32768）、i32 化してから合算すれば qa255 も飽和しない。
+            let low = _mm256_and_si256(a, _mm256_set1_epi8(127));
+            let high = _mm256_andnot_si256(_mm256_set1_epi8(127), a);
+            let product = _mm256_maddubs_epi16(low, b);
+            let high_product = _mm256_maddubs_epi16(high, b);
+            let high32 = _mm256_madd_epi16(high_product, _mm256_set1_epi16(1));
+            let product32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
+            *acc = _mm256_add_epi32(*acc, _mm256_add_epi32(product32, high32));
+        } else {
+            let product = _mm256_maddubs_epi16(a, b);
+            let product32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
+            *acc = _mm256_add_epi32(*acc, product32);
+        }
     }
 }
 
@@ -138,7 +161,7 @@ unsafe fn hsum_i32_sse2(v: std::arch::x86_64::__m128i) -> i32 {
     not(target_feature = "avx2")
 ))]
 #[inline]
-unsafe fn m128_add_dpbusd_epi32(
+pub(crate) unsafe fn m128_add_dpbusd_epi32<const FULL_RANGE: bool>(
     acc: &mut std::arch::x86_64::__m128i,
     a: std::arch::x86_64::__m128i,
     b: std::arch::x86_64::__m128i,
@@ -146,9 +169,21 @@ unsafe fn m128_add_dpbusd_epi32(
     // SAFETY: 呼び出し側が ssse3 フィーチャを保証する
     unsafe {
         use std::arch::x86_64::*;
-        let product = _mm_maddubs_epi16(a, b); // SSSE3命令
-        let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
-        *acc = _mm_add_epi32(*acc, product32);
+        if FULL_RANGE {
+            // 7bit 部分と最上位 bit を別々に積和する。各隣接和は i16 内に
+            // 収まり（最小 -32768）、i32 化してから合算すれば qa255 も飽和しない。
+            let low = _mm_and_si128(a, _mm_set1_epi8(127));
+            let high = _mm_andnot_si128(_mm_set1_epi8(127), a);
+            let product = _mm_maddubs_epi16(low, b);
+            let high_product = _mm_maddubs_epi16(high, b);
+            let high32 = _mm_madd_epi16(high_product, _mm_set1_epi16(1));
+            let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
+            *acc = _mm_add_epi32(*acc, _mm_add_epi32(product32, high32));
+        } else {
+            let product = _mm_maddubs_epi16(a, b);
+            let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
+            *acc = _mm_add_epi32(*acc, product32);
+        }
     }
 }
 
@@ -427,6 +462,22 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// → スパース最適化には高すぎるため、密な行列積方式が正しい選択。
     /// 詳細は `network.rs` の diagnostics 計測コードを参照。
     pub fn propagate(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
+        self.propagate_impl::<true>(input, output);
+    }
+
+    /// 入力が `[0, 127]` に収まることを呼び出し側が保証する場合の順伝播。
+    ///
+    /// 隣接 2 項の `u8 * i8` 和は最悪でも `127 * -128 * 2` で i16 に収まるため、
+    /// `maddubs` を分割せずに使える。全 u8 範囲を渡すと i16 飽和で結果が変わる。
+    pub fn propagate_7bit(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
+        debug_assert!(
+            input[..INPUT_DIM].iter().all(|&x| x <= 127),
+            "propagate_7bit received an input above 127"
+        );
+        self.propagate_impl::<false>(input, output);
+    }
+
+    fn propagate_impl<const FULL_RANGE: bool>(&self, input: &[u8], output: &mut [i32; OUTPUT_DIM]) {
         debug_assert!(
             input.len() >= Self::PADDED_INPUT,
             "input length {} is less than PADDED_INPUT {}",
@@ -484,7 +535,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                         // 内側: 全出力レジスタに積和演算
                         for k in 0..num_regs {
-                            m512_add_dpbusd_epi32(
+                            m512_add_dpbusd_epi32::<FULL_RANGE>(
                                 &mut acc[k],
                                 in_val,
                                 _mm512_load_si512(col.add(k)),
@@ -555,7 +606,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                         // 内側: 全出力レジスタに積和演算
                         for k in 0..num_regs {
-                            m256_add_dpbusd_epi32(
+                            m256_add_dpbusd_epi32::<FULL_RANGE>(
                                 &mut acc[k],
                                 in_val,
                                 _mm256_load_si256(col.add(k)),
@@ -573,7 +624,6 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                 // OUTPUT_DIM % 8 != 0 の場合: 従来の実装（出力ごとに処理）
                 let num_chunks = Self::PADDED_INPUT / 32;
-                let one = _mm256_set1_epi16(1);
                 let input_ptr = input.as_ptr();
                 let weights_ptr = self.weights.as_ptr();
 
@@ -587,9 +637,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                         let w_vec = _mm256_load_si256(
                             weights_ptr.add(weight_row_offset + offset) as *const __m256i
                         );
-                        let prod16 = _mm256_maddubs_epi16(in_vec, w_vec);
-                        let prod32 = _mm256_madd_epi16(prod16, one);
-                        acc = _mm256_add_epi32(acc, prod32);
+                        m256_add_dpbusd_epi32::<FULL_RANGE>(&mut acc, in_vec, w_vec);
                     }
 
                     *out = bias + hsum_i32_avx2(acc);
@@ -646,7 +694,11 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                         // 内側: 全出力レジスタに積和演算
                         for k in 0..num_regs {
-                            m128_add_dpbusd_epi32(&mut acc[k], in_val, _mm_load_si128(col.add(k)));
+                            m128_add_dpbusd_epi32::<FULL_RANGE>(
+                                &mut acc[k],
+                                in_val,
+                                _mm_load_si128(col.add(k)),
+                            );
                         }
                     }
 
@@ -660,7 +712,6 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
                 // OUTPUT_DIM % 4 != 0 の場合: SSSE3の_mm_maddubs_epi16を使う通常版
                 let num_chunks = Self::PADDED_INPUT / 16;
-                let one = _mm_set1_epi16(1);
                 let input_ptr = input.as_ptr();
                 let weights_ptr = self.weights.as_ptr();
 
@@ -674,10 +725,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                         let w_vec = _mm_load_si128(
                             weights_ptr.add(weight_row_offset + offset) as *const __m128i
                         );
-                        // SSSE3: _mm_maddubs_epi16
-                        let prod16 = _mm_maddubs_epi16(in_vec, w_vec);
-                        let prod32 = _mm_madd_epi16(prod16, one);
-                        acc = _mm_add_epi32(acc, prod32);
+                        m128_add_dpbusd_epi32::<FULL_RANGE>(&mut acc, in_vec, w_vec);
                     }
 
                     *out = bias + hsum_i32_sse2(acc);
@@ -1069,9 +1117,134 @@ impl<const DIM: usize> ClippedReLU<DIM> {
     }
 }
 
+// read 時のレイアウト変換も含め、全 u8 範囲を整数参照と照合する。
+#[cfg(test)]
+pub(crate) fn check_qa255_affine<const INPUT: usize, const OUTPUT: usize>(
+    propagate: impl Fn(&[u8], &[u8], &mut [i32; OUTPUT]),
+) {
+    let padded = padded_input(INPUT);
+    for qa in [127u8, 128, 255] {
+        for pattern in 0..4 {
+            let mut bytes = Vec::new();
+            let biases: Vec<i32> = (0..OUTPUT).map(|o| o as i32 * 73 - 201).collect();
+            for bias in &biases {
+                bytes.extend_from_slice(&bias.to_le_bytes());
+            }
+            let mut weights = vec![0i8; padded * OUTPUT];
+            for o in 0..OUTPUT {
+                for i in 0..INPUT {
+                    weights[o * padded + i] = match pattern {
+                        0 => 127,
+                        1 => -128,
+                        2 => {
+                            if (i / 2 + o) % 2 == 0 {
+                                127
+                            } else {
+                                -128
+                            }
+                        }
+                        _ => ((i * 37 + o * 19) % 256) as u8 as i8,
+                    };
+                }
+            }
+            bytes.extend(weights.iter().map(|w| *w as u8));
+            let mut input = AlignedBox::<u8>::new_zeroed(padded);
+            for (i, x) in input.iter_mut().take(INPUT).enumerate() {
+                *x = if pattern < 3 {
+                    qa
+                } else {
+                    [0, 1, 126, 127, 128, 129, 254, 255][i % 8].min(qa)
+                };
+            }
+            let mut actual = [0i32; OUTPUT];
+            propagate(&bytes, &input, &mut actual);
+            for o in 0..OUTPUT {
+                let expected = biases[o]
+                    + (0..INPUT)
+                        .map(|i| i32::from(input[i]) * i32::from(weights[o * padded + i]))
+                        .sum::<i32>();
+                assert_eq!(actual[o], expected, "qa={qa}, pattern={pattern}, output={o}");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qa255_affine_reference_matches_integer() {
+        check_qa255_affine::<32, 32>(|bytes, input, output| {
+            AffineTransform::<32, 32>::read(&mut &bytes[..])
+                .unwrap()
+                .propagate(input, output);
+        });
+        check_qa255_affine::<512, 8>(|bytes, input, output| {
+            AffineTransform::<512, 8>::read(&mut &bytes[..])
+                .unwrap()
+                .propagate(input, output);
+        });
+        check_qa255_affine::<32, 4>(|bytes, input, output| {
+            AffineTransform::<32, 4>::read(&mut &bytes[..])
+                .unwrap()
+                .propagate(input, output);
+        });
+        check_qa255_affine::<32, 1>(|bytes, input, output| {
+            AffineTransform::<32, 1>::read(&mut &bytes[..])
+                .unwrap()
+                .propagate(input, output);
+        });
+        check_qa255_affine::<760, 8>(|bytes, input, output| {
+            AffineTransform::<760, 8>::read(&mut &bytes[..])
+                .unwrap()
+                .propagate(input, output);
+        });
+    }
+
+    /// 入力が 7bit に収まる限り、専用経路は全範囲経路と同じ値を返す。
+    #[test]
+    fn propagate_7bit_matches_full_range_for_7bit_input() {
+        fn check<const INPUT: usize, const OUTPUT: usize>() {
+            let padded = padded_input(INPUT);
+            let mut bytes = Vec::new();
+            for o in 0..OUTPUT {
+                bytes.extend_from_slice(&((o as i32) * 91 - 733).to_le_bytes());
+            }
+            let mut state = 0x243f_6a88_85a3_08d3u64;
+            let mut next = move || {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (state >> 33) as u8
+            };
+            for _ in 0..padded * OUTPUT {
+                bytes.push(next());
+            }
+            let layer = AffineTransform::<INPUT, OUTPUT>::read(&mut &bytes[..]).unwrap();
+
+            let mut input = AlignedBox::<u8>::new_zeroed(padded);
+            for (i, x) in input.iter_mut().take(INPUT).enumerate() {
+                *x = match i % 4 {
+                    0 => 0,
+                    1 => 127,
+                    2 => 126,
+                    _ => next() % 128,
+                };
+            }
+
+            let mut full = [0i32; OUTPUT];
+            let mut seven = [0i32; OUTPUT];
+            layer.propagate(&input, &mut full);
+            layer.propagate_7bit(&input, &mut seven);
+            assert_eq!(full, seven, "INPUT={INPUT}, OUTPUT={OUTPUT}");
+        }
+
+        check::<1536, 16>();
+        check::<32, 32>();
+        check::<32, 1>();
+        check::<512, 8>();
+        check::<760, 8>();
+    }
+
     use crate::nnue::accumulator::Aligned;
 
     fn affine_file_bytes<const INPUT: usize, const OUTPUT: usize>(weight: i8) -> Vec<u8> {
