@@ -1118,16 +1118,15 @@ fn print_sprt_text_report(penta: Penta, output: &SprtJsonOutput) {
     println!("bounds:     LLR ∈ [{:+.3}, {:+.3}]", output.lower, output.upper);
     println!("pairs:      {}", output.pairs);
     println!("LLR:        {:+.3}", output.llr);
-    // accept_h0/h1 はラベル役割の取り違えに弱いため、どちらが強い判定なのかを
-    // ラベル実名で言語化して併記する。
+    // 採択した仮説と到達した境界を、ラベルの視点とともに示す。
     let decision_note = match output.decision.as_str() {
         "accept_h1" => format!(
-            "H1 採択: {} は {} より強い (nelo {:+.1} 以上)",
+            "H1 採択: {} (test) 対 {} (base) の LLR が上界へ到達 (H1: nelo {:+.1})",
             output.test, output.base, output.nelo1
         ),
         "accept_h0" => format!(
-            "H0 採択: {} が {} より nelo {:+.1} 以上強いとは言えない",
-            output.test, output.base, output.nelo1
+            "H0 採択: {} (test) 対 {} (base) の LLR が下界へ到達 (H0: nelo {:+.1})",
+            output.test, output.base, output.nelo0
         ),
         "running" => "境界未到達 (判定保留)".to_string(),
         "invalid" => "不完全入力の部分集計（採否なし）".to_string(),
