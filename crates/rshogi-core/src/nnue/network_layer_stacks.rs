@@ -2255,7 +2255,7 @@ mod tests {
     fn initialized_layerstack_forward_matches_explicit_buffer() {
         use super::super::ls_feature_spec::HalfKpSpec;
         use super::*;
-        let mut network = NetworkLayerStacks::<32, 16, 30, 32, HalfKpSpec> {
+        let mut network = NetworkLayerStacks::<64, 16, 30, 32, HalfKpSpec> {
             feature_transformer: FeatureTransformerLayerStacks::read(&mut std::io::repeat(0))
                 .unwrap(),
             layer_stacks: LayerStacks::with_num_buckets(1),
@@ -2269,8 +2269,8 @@ mod tests {
         bucket.l2.weights.fill(1);
         bucket.l2.biases.fill(1024);
         bucket.output.weights.fill(1);
-        let mut acc = AccumulatorLayerStacks::<32>::new();
-        for i in 0..32 {
+        let mut acc = AccumulatorLayerStacks::<64>::new();
+        for i in 0..64 {
             acc.accumulation[0][i] = (i * 7) as i16;
             acc.accumulation[1][i] = (255 - i * 3) as i16;
         }
@@ -2282,12 +2282,13 @@ mod tests {
                 "4k4/9/9/9/9/9/9/9/4K4 w - 1"
             })
             .unwrap();
-            let mut transformed = Aligned([0u8; 32]);
+            let mut transformed = Aligned([0u8; 64]);
             sqr_clipped_relu_transform(
                 acc.get(side as usize),
                 acc.get(1 - side as usize),
                 &mut transformed.0,
             );
+            assert!(transformed.0.iter().any(|&v| v != 0));
             let expected = network.layer_stacks.evaluate_raw(0, &transformed.0)
                 / get_fv_scale_override().unwrap_or(16);
             assert_eq!(network.evaluate_with_bucket(&pos, &acc, 0), Value::new(expected));
