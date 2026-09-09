@@ -1158,7 +1158,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn qa255_affine_matches_integer_reference() {
+    fn qa255_affine_reference_matches_integer() {
         check_qa255_affine::<32, 32>(|bytes, input, output| {
             AffineTransform::<32, 32>::read(&mut &bytes[..])
                 .unwrap()

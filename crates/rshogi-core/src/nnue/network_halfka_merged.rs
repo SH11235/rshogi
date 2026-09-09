@@ -1896,7 +1896,7 @@ pub type HalfKaMerged768Pairwise = NetworkHalfKaMerged<768, 1536, 768, 16, 64, P
 mod tests {
     use super::*;
     #[test]
-    fn qa255_affine_matches_integer_reference() {
+    fn qa255_affine_reference_matches_integer() {
         super::super::layers::check_qa255_affine::<32, 32>(|bytes, input, output| {
             let transform = AffineTransformHalfKaMerged::<32, 32>::read(&mut &bytes[..]).unwrap();
             transform.propagate(input, output);

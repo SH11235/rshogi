@@ -1895,7 +1895,7 @@ pub type HalfKaHmSplit768Pairwise = NetworkHalfKaHmSplit<768, 1536, 768, 16, 64,
 mod tests {
     use super::*;
     #[test]
-    fn qa255_affine_matches_integer_reference() {
+    fn qa255_affine_reference_matches_integer() {
         super::super::layers::check_qa255_affine::<32, 32>(|bytes, input, output| {
             let transform = AffineTransformHalfKaHmSplit::<32, 32>::read(&mut &bytes[..]).unwrap();
             transform.propagate(input, output);
