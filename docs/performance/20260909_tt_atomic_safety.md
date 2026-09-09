@@ -85,8 +85,9 @@ value/boundの対応は証明できず、別途一貫性検証またはTT値の�
   自動修正は実行できなかったが、上記の通常Clippyは警告ゼロ。
 - `cargo test`: CSA clientの `csa_entering_king_rule` 5件がTCP bindのEPERMで失敗。
   workspace全体のgateは未達で、TCP bindが許可された環境で再実行が必要。
-- `cargo test -p rshogi-core`: unit 1,051件、通常doctest 40件、
-  drop/resizeのcompile-fail doctest 2件が通過（計16件ignored）。
+- `cargo test -p rshogi-core`: unit 1,051件が通過。
+  doctestはdrop/resizeのcompile-fail 2件のみで、いずれも通過。
+  同時に走る40件は `tests/build_rs_checks.rs` のintegration testであり、doctestではない。
 - `tt-trace,search-stats` 有効のcore全対象ClippyとTTテスト20件: 通過。
 - build-std付きThreadSanitizer: TTテスト20件通過。コマンドは後掲と同じ。
 - `bash scripts/check-tracked-abs-paths.sh` / `git diff --check`: 通過。
@@ -142,7 +143,7 @@ uptime
 ./target/release/search_only_ab \
   --baseline /path/to/base/engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none \
   --candidate ./engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none \
-  --positions /path/to/positions.txt --movetime-ms 3000 --pattern abba --rounds 2 \
+  --positions /path/to/positions.txt --movetime-ms 3000 --pattern abba --rounds 3 \
   --threads 1 --hash-mb 16 --cpu 2 \
   --eval-file "$SHOGI_DATA/nnue/20260713-wrm-n2s1200-1536x16x32/ls-1536x16x32-halfka-hm-merged-wrm-n2s1200-400.bin" \
   --usi-option LS_BUCKET_MODE=kingrank9

@@ -1819,7 +1819,7 @@ impl SearchWorker {
             } else {
                 (depth + 6).min(MAX_PLY - 1)
             };
-            // root 保存は統計・トレースを伴わないため、競合による skip をそのまま許容する。
+            // root 保存は統計・トレースを伴わないため、格納可否を見ない。
             let _ = tt_ctx_root.result.write(
                 key,
                 value_to_tt(best_value, 0),

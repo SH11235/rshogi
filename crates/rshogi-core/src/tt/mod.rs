@@ -12,8 +12,9 @@
 //!
 //! クラスターインデックスは64bitキーの上位ビットで決定し、
 //! クラスター内マッチングに下位16bitを使用する。
-//! 10バイトatomic格納 × 3 + 1バイト排他 + 1パディング = 32バイト/クラスター。
-//! 読み書きはクラスタ単位の短い排他でsnapshotの整合性を保証し、競合時は待たずにmiss/書込み省略とする。
+//! payload の AtomicU64 × 3 + 短縮キーの AtomicU16 × 3 + 2バイトパディング
+//! = 32バイト/クラスター。排他は取らず、payload 内のフィールド対応だけを不可分に保つ。
+//! 短縮キーと payload は別ワードなので、異なる書込みの組が観測されうる。
 
 mod alloc;
 mod entry;
@@ -23,7 +24,7 @@ pub use entry::{TTData, TTEntry};
 pub use table::{ProbeResult, TranspositionTable};
 
 /// クラスターサイズ（エントリ数）
-/// YaneuraOu準拠: 10bytes × 3 + lock/padding 2bytes = 32bytes
+/// YaneuraOu準拠: payload 8bytes × 3 + 短縮キー 2bytes × 3 + padding 2bytes = 32bytes
 pub const CLUSTER_SIZE: usize = 3;
 
 /// Generation関連の定数
