@@ -117,7 +117,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [ek_testset](docs/ek_testset.md) - held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点
 - [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
 - [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（u8 127 張り付き）を実局面で計測
-- [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - regex 対象外の有効な基準値も両 engine へ適用。永続 engine プールで batch チューニング。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
+- [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - regex 対象外の有効な基準値も両 engine へ適用。有限な schedule を事前検査。永続 engine プールで batch チューニング。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
 - [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から net 重み delta 用 SPSA `.params` を生成
 - [apply_net_spsa_params](docs/apply_net_spsa_params.md) - 重複行を拒否。 net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する
 - [rescore_psv](docs/rescore_psv.md) - PSV 評価値の再スコアリング（推奨: dlshogi ONNX + TensorRT FP16。qsearch-leaf ラベル / policy 展開 / レジューム / score sidecar（`--out-scores`、dlshogi ONNX と NNUE 静的評価）対応。LayerStacks routing は格納 bucket 数との不一致を拒否し、旧世代 net のみ `--allow-routing-buckets-mismatch` で明示許可）
