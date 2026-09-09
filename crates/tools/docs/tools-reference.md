@@ -22,7 +22,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | ツール | 説明 |
 |--------|------|
 | `benchmark` | USI の評価ハッシュ設定・受信期限に対応。 YaneuraOu bench 互換の標準ベンチマーク。マルチスレッド対応 |
-| `bench_nnue_eval` | NNUE 推論単体の性能測定（cycles/eval, instructions/eval）。LayerStacks は progresskpabs / kingrank9 の bucket 分布を計測可能 |
+| `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval の ns/op。LayerStacks 専用モードは bucket 分布も出力（[詳細](bench_nnue_eval.md)） |
 | `search_only_ab` | search-only A/B ベンチマーク。起動・ロード時間を除外して cycles/node, instructions/node を正確計測。Linux は `perf stat --control`、Windows は ETW NT Kernel Logger の PMC counting（要管理者権限、Hyper-V/VBS 共存可）。CLI 差異は `--perf-events`(Linux) ↔ `--pmc-sources`(Windows) の置き換えと、Windows での `--cpus` shard 並列未対応の 2 点。JSON レポートは `samples` / `summary` が両 OS でスキーマ互換（`cli` ブロックのみ `perf_events` / `pmc_sources` のフィールド名差があり非互換） |
 | `eval_sfens` | SFEN 局面を LayerStacks NNUE で静的評価（`score` は歩=90 の内部スケール、`score_cp` は cp） |
 | `nnue_saturation` | LayerStacks NNUE の活性飽和率（u8 127 張り付き）を実局面で計測（[詳細](nnue_saturation.md)） |
@@ -87,7 +87,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `spsa` | regex 対象外の有効な基準値も両 engine へ適用。[SPSA チューナー](spsa_runbook.md#14-engine-プール再試行停止)。永続 engine プール、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
+| `spsa` | regex 対象外の有効な基準値も両 engine へ適用。schedule の有限性を事前検査。[SPSA チューナー](spsa_runbook.md#14-engine-プール再試行停止)。永続 engine プール、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
 | `generate_spsa_params` | 実エンジンと共通の既定値から SPSA 用 .params ファイルを生成 |
 | `generate_net_spsa_params` | LayerStacks `.bin` を走査し、net 重み delta 用 SPSA `.params` を生成（[詳細](generate_net_spsa_params.md)） |
 | `apply_net_spsa_params` | 重複係数を拒否し、SPSA の net 重み delta を LayerStacks `.bin` へ焼き込み、feature 非依存の読み戻し検証と SHA-256 report を行う（[詳細](apply_net_spsa_params.md)） |

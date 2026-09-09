@@ -226,7 +226,7 @@ struct Cli {
 
     /// 早期停止: result_variance 代理指標の閾値（以下で条件成立）。
     ///
-    /// 比較対象は `|raw_result| / batch_pairs` (0..1 の正規化値、+1/-1 の game pair が
+    /// 比較対象は `|raw_result| / batch_pairs` (0..2 の値、各 game の +1/-1 が
     /// 完全に拮抗すると 0 に近づく)。`raw_result` の絶対値そのものではない点に注意。
     /// 閾値値はチューニング対象の感度に応じて再調整すること。
     #[arg(long)]
@@ -327,6 +327,98 @@ struct ScheduleConfig {
     a_ratio: f64,
     mobility: f64,
     total_iterations: u32,
+}
+
+/// CLI の浮動小数点値は比較より先に非有限値を拒否する。
+fn validate_cli_finite(cli: &Cli) -> Result<()> {
+    for (name, value) in [
+        ("alpha", Some(cli.alpha)),
+        ("gamma", Some(cli.gamma)),
+        ("a-ratio", Some(cli.a_ratio)),
+        ("mobility", Some(cli.mobility)),
+        ("early-stop-avg-abs-update-threshold", cli.early_stop_avg_abs_update_threshold),
+        ("early-stop-result-variance-threshold", cli.early_stop_result_variance_threshold),
+    ] {
+        if let Some(value) = value
+            && !value.is_finite()
+        {
+            bail!("--{name} must be finite");
+        }
+    }
+    Ok(())
+}
+
+/// 正の指数の単調性から全 k の分母・摂動・更新の保守的上界を調べる。
+/// batch の勝敗和は最大 2 * batch_pairs。全反復の走査や更新式の変更はしない。
+fn validate_schedule_bounds(
+    schedule: ScheduleConfig,
+    params: &[SpsaParam],
+    active: &[bool],
+    constants: &[ParamScheduleConstants],
+    batch_pairs: u32,
+) -> Result<()> {
+    let n = f64::from(schedule.total_iterations);
+    let big_a = schedule.a_ratio * n;
+    let gamma_max = n.powf(schedule.gamma);
+    let alpha_min = (big_a + 1.0).powf(schedule.alpha);
+    let alpha_max = (big_a + n).powf(schedule.alpha);
+    for value in [big_a, big_a + n, gamma_max, alpha_min, alpha_max] {
+        if !value.is_finite() {
+            bail!("schedule constants overflow");
+        }
+    }
+    if gamma_max <= 0.0 || alpha_min <= 0.0 || alpha_max <= 0.0 {
+        bail!("schedule denominator underflow");
+    }
+    let raw_max = 2.0 * f64::from(batch_pairs.min(schedule.total_iterations));
+    for ((p, enabled), c) in params.iter().zip(active).zip(constants) {
+        if !enabled {
+            continue;
+        }
+        let check = |value: f64| -> Result<()> {
+            if !value.is_finite() {
+                bail!("{}: non-finite schedule/update bound", p.name);
+            }
+            Ok(())
+        };
+        check(c.c_0)?;
+        check(c.a_0)?;
+        let c_max = c.c_0.abs();
+        let c_min = c_max / gamma_max;
+        let range_max = p.min.abs().max(p.max.abs());
+        check(range_max + c_max)?;
+        check(c_max * params.len() as f64)?;
+        check(2.0 * range_max * params.len() as f64)?;
+        // 既存の c_end=0 による更新停止は保持する。
+        if p.c_end == 0.0 {
+            continue;
+        }
+        let denominator_min = c_min * c_min;
+        if denominator_min == 0.0 {
+            bail!("{}: schedule denominator underflow", p.name);
+        }
+        check(c_max * c_max)?;
+        let r_max = c.a_0.abs() / alpha_min / denominator_min;
+        check(r_max)?;
+        let signal_max = r_max * c_max * raw_max;
+        check(signal_max)?;
+        check(range_max + signal_max * schedule.mobility.abs())?;
+        for k in [0, schedule.total_iterations - 1] {
+            let (c_k, r_k) = c.at_iteration(k, big_a, schedule.alpha, schedule.gamma);
+            check(c_k)?;
+            check(r_k)?;
+        }
+    }
+    Ok(())
+}
+
+/// 早期停止専用の勝敗和の絶対値 / pair 数（0..2）。更新式には使わない。
+fn early_stop_result_magnitude(raw_result: f64, pairs: u32) -> f64 {
+    if pairs == 0 {
+        0.0
+    } else {
+        raw_result.abs() / f64::from(pairs)
+    }
 }
 
 /// Fishtest 方式の per-param スケジュール定数。イテレーション開始前に一度だけ計算する。
@@ -2695,6 +2787,7 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    validate_cli_finite(&cli)?;
 
     // v3 multi-seed 機能撤去: --seeds / --parallel-seeds は hard error。
     // 移行ガイドへ案内 (crates/tools/docs/spsa_runbook.md および CHANGELOG.md の v4 エントリ)。
@@ -3315,6 +3408,7 @@ fn main() -> Result<()> {
             )
         })
         .collect();
+    validate_schedule_bounds(schedule, &params, &active_mask, &param_schedules, batch_pairs)?;
 
     if is_fresh_start {
         let meta = ResumeMetaData {
@@ -3492,14 +3586,10 @@ fn main() -> Result<()> {
             if let Some(config) = early_stop_config {
                 // raw_result_variance は v3 で「seed 横断分散」だった。v4 は単一 batch
                 // なので raw_result の絶対値を **batch_pairs で正規化** した値 (= 1 game pair
-                // あたりの平均勝率乖離; 0..1 の範囲) を分散の代理指標として使う。
+                // あたりの平均勝率乖離; 0..2 の範囲) を分散の代理指標として使う。
                 // raw_result == 0 ⇔ +1/-1 が完全に拮抗 ⇔ SPSA 収束のシグナル。
                 // 旧 v3 と完全互換ではないため、閾値設計はユーザ側で再調整が必要 (docs に明記)。
-                let raw_result_variance = if this_batch_pairs == 0 {
-                    0.0
-                } else {
-                    raw_result.abs() / this_batch_pairs as f64
-                };
+                let raw_result_variance = early_stop_result_magnitude(raw_result, this_batch_pairs);
                 let early_stop_hit = avg_abs_update <= config.avg_abs_update_threshold
                     && raw_result_variance <= config.result_variance_threshold;
                 if early_stop_hit {
@@ -3509,7 +3599,7 @@ fn main() -> Result<()> {
                 }
                 eprintln!(
                     "batch={} early_stop_hit={} consecutive={}/{} \
-                 thresholds(avg_abs_update<={:.6}, |raw_result|/batch_pairs<={:.6})",
+                 thresholds(avg_abs_update<={:.6}, |raw_result|/batch_pairs[0..2]<={:.6})",
                     batch_idx + 1,
                     early_stop_hit,
                     early_stop_consecutive,
@@ -3573,6 +3663,82 @@ mod tests {
                 && error.contains("line 2"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn schedule_bounds_reject_overflow_and_underflow_without_changing_normal_math() {
+        let schedule = ScheduleConfig {
+            alpha: 1.0,
+            gamma: 1.0,
+            a_ratio: 0.25,
+            mobility: 1.0,
+            total_iterations: 4,
+        };
+        let mut p = make_param("X", 10.0, 2.0);
+        p.r_end = 0.5;
+        let build = |s: ScheduleConfig, p: &SpsaParam| {
+            ParamScheduleConstants::compute(
+                p.c_end,
+                p.r_end,
+                s.total_iterations,
+                s.a_ratio,
+                s.alpha,
+                s.gamma,
+            )
+        };
+        let c = build(schedule, &p);
+        validate_schedule_bounds(schedule, &[p.clone()], &[true], &[c], 2).unwrap();
+        assert_eq!((c.c_0, c.a_0), (8.0, 10.0));
+        assert_eq!(c.at_iteration(0, 1.0, 1.0, 1.0), (8.0, 0.078125));
+        assert_eq!(c.at_iteration(3, 1.0, 1.0, 1.0), (2.0, 0.5));
+        for bad in [
+            ScheduleConfig {
+                alpha: 1e308,
+                ..schedule
+            },
+            ScheduleConfig {
+                gamma: 1e308,
+                ..schedule
+            },
+            ScheduleConfig {
+                a_ratio: 1e308,
+                ..schedule
+            },
+            ScheduleConfig {
+                mobility: 1e308,
+                ..schedule
+            },
+        ] {
+            assert!(
+                validate_schedule_bounds(bad, &[p.clone()], &[true], &[build(bad, &p)], 2).is_err()
+            );
+        }
+        p.c_end = 1e-200;
+        assert!(
+            validate_schedule_bounds(schedule, &[p.clone()], &[true], &[build(schedule, &p)], 2)
+                .is_err()
+        );
+        p.c_end = 0.0;
+        validate_schedule_bounds(schedule, &[p.clone()], &[true], &[build(schedule, &p)], 2)
+            .unwrap();
+        let normal = ScheduleConfig {
+            alpha: 0.602,
+            gamma: 0.101,
+            a_ratio: 0.1,
+            mobility: 1.0,
+            total_iterations: u32::MAX,
+        };
+        p.c_end = 2.0;
+        validate_schedule_bounds(normal, &[p.clone()], &[true], &[build(normal, &p)], 8).unwrap();
+    }
+
+    #[test]
+    fn early_stop_magnitude_keeps_zero_to_two_threshold_units() {
+        assert_eq!(early_stop_result_magnitude(2.0, 1), 2.0);
+        assert_eq!(early_stop_result_magnitude(-2.0, 1), 2.0);
+        assert_eq!(early_stop_result_magnitude(0.0, 1), 0.0);
+        assert_eq!(early_stop_result_magnitude(1.0, 1), 1.0);
+        assert_eq!(early_stop_result_magnitude(0.0, 0), 0.0);
     }
 
     use super::*;

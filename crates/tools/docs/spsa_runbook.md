@@ -81,7 +81,7 @@ cargo run --release -p tools --bin spsa -- \
 | `--byoyomi <ms>` | 100〜1000 ms | 1 手秒読み (既定 1000)。NPS が安定する程度に。短すぎるとエンジンが thinking time を使い切れず評価ノイズが増える |
 | `--seed S` | 任意 | base seed (省略時はランダム)。SPSA の乱数列は seed と batch index から決定論的に生成される |
 | `--max-moves` / `--timeout-margin-ms` | 既定 320 / 1000 ms | 対局打ち切り上限と timeout 検出マージン。慣習値で十分なケースが多い |
-| `--early-stop-*` 三点 | 初回 run では **指定しない** | 閾値の運用実績がまだ無く、特に `--early-stop-result-variance-threshold` は `\|raw_result\| / batch_pairs` (0..1 正規化値) との比較なので、よく考えずに小さい値を入れるとほぼ全 batch で誤発火する。挙動を観測してから設定する (§9.3) |
+| `--early-stop-*` 三点 | 初回 run では **指定しない** | 閾値の運用実績がまだ無く、特に `--early-stop-result-variance-threshold` は `\|raw_result\| / batch_pairs` (0..2 の値) との比較なので、よく考えずに小さい値を入れるとほぼ全 batch で誤発火する。挙動を観測してから設定する (§9.3) |
 
 `<run-dir>` には以下が自動生成される:
 
@@ -754,7 +754,7 @@ avg_abs_shift,updated_params,avg_abs_update,max_abs_update,total_games
 - `|raw_result| / batch_pairs < 0.002` 程度なら +/- 摂動の勝率差がほぼ 0 (= 結果が拮抗)
 
 `--early-stop-result-variance-threshold` の比較対象は **`|raw_result| / batch_pairs`**
-(0..1 の正規化値、+1/-1 の game pair が完全に拮抗すると 0 に近づく) であり、
+(0..2 の値、各 game の +1/-1 が完全に拮抗すると 0 に近づく) であり、
 `raw_result` の絶対値そのものではない点に注意。閾値値はチューニング対象の感度に
 応じて調整する (枝刈り系は感度高、history 初期値は低、等)。
 
@@ -1497,3 +1497,9 @@ SHA-256 一致することを確認した。value_driven は SPSA_TEST_INT が6�
 
 同じ名前の行、および同じ net 係数 ID を表す行（数値 index の先頭ゼロなど）は、元ファイルの行番号を示して拒否します。`[[NOT USED]]` 行も重複検査の対象です。重複行を後勝ちまたは加算と解釈しません。既存ファイルは自動修正しないため、意図した 1 行へ整理してください。
 エンジン名の mapping を使う場合は、送信対象行の翻訳先も検査します。符号反転の有無にかかわらず同じ係数への衝突は対局開始前に拒否します。
+
+### Schedule の入力検証と停止指標の単位
+
+`alpha` / `gamma` / `a-ratio` / `mobility` と早期停止の閾値は有限値が必要です。既存の正負範囲に加え、対局開始前に schedule の定数、分母の underflow、摂動と最大勝敗和による更新量の保守的な上界を検査します。巨大な有限値でも安全な上界を確認できない組合せは拒否します。通常の schedule 式・既定値・更新係数は変更しません。`c_end=0` による更新停止は維持します。
+
+早期停止の `|raw_result| / batch_pairs` は 0..2 です。1 pair の両局勝ちも両局負けも 2、両局引分または 1 勝 1 敗なら 0、1 勝 1 引分なら 1 です。分散推定値ではなく勝敗和の絶対値の代理指標です。既存の閾値は同じ単位のまま使え、半分への換算は不要です。逐次的な停止規則の較正や棋力保証を意味しません。
