@@ -1387,7 +1387,31 @@ impl SearchWorker {
                 self.root_quiet_stat_score(mover, mv)
             };
             self.state.stack[0].stat_score = root_stat_score;
-            let value = if move_count == 1 {
+            let pass_bonus = if mv.is_pass() {
+                get_scaled_pass_move_bonus(pos.game_ply())
+            } else {
+                0
+            };
+            // 非ゼロ PASS は mate を除外する加算のため、狭い窓の bound を流用しない。
+            let value = if pass_bonus != 0 {
+                new_depth = self.root_extend_new_depth(
+                    mv,
+                    tt_move_root,
+                    tt_value_root,
+                    tt_data.depth,
+                    new_depth,
+                );
+                -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
+                    pos,
+                    new_depth,
+                    -Value::INFINITE,
+                    Value::INFINITE,
+                    1,
+                    false,
+                    limits,
+                    time_manager,
+                )
+            } else if move_count == 1 {
                 new_depth = self.root_extend_new_depth(
                     mv,
                     tt_move_root,
@@ -1607,6 +1631,7 @@ impl SearchWorker {
             if self.state.abort {
                 return Value::ZERO;
             }
+            let value = apply_pass_move_bonus(value, pass_bonus);
 
             // averageScore/meanSquaredScoreは全rootムーブに対して更新
             {
@@ -2007,7 +2032,31 @@ impl SearchWorker {
             let mut new_depth = depth - 1;
 
             // PVS: 最初の手（このPVラインの候補）はPV探索
-            let value = if rm_idx == pv_idx {
+            let pass_bonus = if mv.is_pass() {
+                get_scaled_pass_move_bonus(pos.game_ply())
+            } else {
+                0
+            };
+            // 非ゼロ PASS は mate を除外する加算のため、狭い窓の bound を流用しない。
+            let value = if pass_bonus != 0 {
+                new_depth = self.root_extend_new_depth(
+                    mv,
+                    tt_move_root,
+                    tt_value_root,
+                    tt_data.depth,
+                    new_depth,
+                );
+                -self.search_node_wrapper::<{ NodeType::PV as u8 }>(
+                    pos,
+                    new_depth,
+                    -Value::INFINITE,
+                    Value::INFINITE,
+                    1,
+                    false,
+                    limits,
+                    time_manager,
+                )
+            } else if rm_idx == pv_idx {
                 new_depth = self.root_extend_new_depth(
                     mv,
                     tt_move_root,
@@ -2216,6 +2265,7 @@ impl SearchWorker {
             if self.state.abort {
                 return Value::ZERO;
             }
+            let value = apply_pass_move_bonus(value, pass_bonus);
 
             // スコア更新
             let mut updated_alpha = rm_idx == pv_idx; // PVラインの先頭は維持
@@ -3093,7 +3143,33 @@ impl SearchWorker {
             // =============================================================
             // 探索
             // =============================================================
-            let mut value = if depth >= 2 && move_count > 1 {
+            let pass_bonus = if mv.is_pass() {
+                get_scaled_pass_move_bonus(pos.game_ply())
+            } else {
+                0
+            };
+            let mut value = if pass_bonus != 0 {
+                if mv == tt_move
+                    && ((tt_value != Value::NONE && tt_value.is_mate_score() && tt_data.depth > 0)
+                        || (tt_data.depth > 1 && st.root_depth > 8))
+                {
+                    new_depth = new_depth.max(1);
+                }
+                st.stack[ply as usize].reduction = 0;
+                st.set_child_follow_pv(ply, mv);
+                -Self::search_node::<{ NodeType::PV as u8 }>(
+                    st,
+                    ctx,
+                    pos,
+                    new_depth,
+                    -Value::INFINITE,
+                    Value::INFINITE,
+                    ply + 1,
+                    false,
+                    limits,
+                    time_manager,
+                )
+            } else if depth >= 2 && move_count > 1 {
                 inc_stat!(st, lmr_applied);
                 // d = max(1, min(newDepth - r/1024, newDepth + 2)) + PvNode
                 // 内側のmax(1, ...)で1以上が保証され、pv_node(0or1)加算で減ることはない
@@ -3349,20 +3425,10 @@ impl SearchWorker {
 
             pos.undo_move(mv);
 
-            // パス手評価ボーナス: パス手を実行した場合、評価値にボーナスを加算
-            // スケーリングなし（常に設定値の100%を適用）
-            // 負のボーナスも適用（パス抑制用途）
-            // 注意: 詰みスコアには加算しない（mate距離が壊れるため）
-            if mv.is_pass() && !value.is_mate_score() {
-                let bonus = get_scaled_pass_move_bonus(pos.game_ply());
-                if bonus != 0 {
-                    value += Value::new(bonus);
-                }
-            }
-
             if st.abort {
                 return Value::ZERO;
             }
+            value = apply_pass_move_bonus(value, pass_bonus);
 
             // =============================================================
             // スコア更新
@@ -4006,3 +4072,13 @@ impl SearchWorker {
 //    Sync であり、探索中に重みデータが変更されることはない。
 //    各ワーカーが独立した reset() で設定し、探索中は読み取りのみ行う。
 unsafe impl Send for SearchWorker {}
+
+/// 完了した PASS の有限スコアだけに加算し、詰み領域へ入れない。
+#[inline]
+pub(super) fn apply_pass_move_bonus(value: Value, bonus: i32) -> Value {
+    if bonus == 0 || value.is_mate_score() {
+        return value;
+    }
+    let limit = Value::MATE_IN_MAX_PLY.raw() - 1;
+    Value::new(value.raw().saturating_add(bonus).clamp(-limit, limit))
+}

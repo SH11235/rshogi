@@ -8,3 +8,6 @@ mod history_update;
 mod multi_pv;
 mod skill;
 mod time_management;
+
+#[cfg(all(not(feature = "search-no-pass-rules"), not(target_arch = "wasm32")))]
+mod pass_bonus;

@@ -393,11 +393,20 @@ impl Position {
     /// TT等に保存された16bit指し手を安全に取り出す
     /// - 無効な符号化や手番不一致の手はNone
     /// - 合法性までは保証しないが、明らかに不整合な手を弾く
-    /// - 駒情報（moved_piece_after）を上位16bitに付加して返す
+    /// - 通常手は駒情報（moved_piece_after）を上位16bitに付加して返す
+    /// - PASSは盤面やパス権に依存せず保持する。可否は can_pass() で別途判定する
+    /// - WINは着手ではなく宣言勝ちの結果なのでNone。declaration_win() で判定する
     pub fn to_move(&self, mv: Move) -> Option<Move> {
         // 下位16bitの符号化を先に検証する。
         // TT競合で壊れた move16 をここで弾き、probe() 側でcontinueできるようにする。
-        Move::from_u16_checked(mv.raw())?;
+        let mv = Move::from_u16_checked(mv.raw())?;
+
+        if mv.is_pass() {
+            return Some(Move::PASS);
+        }
+        if mv.is_win() {
+            return None;
+        }
 
         if mv.is_none() {
             return Some(Move::NONE);
