@@ -368,6 +368,20 @@ struct TournamentMeta {
     output_dir: String,
     #[serde(flatten)]
     retry: RetrySummary,
+    run_status: RunStatus,
+    /// 発行した通常ペアのうち、有効な 2 局が揃っていない数。
+    incomplete_pairs: u32,
+    /// 送信済みだが worker から結果を回収できなかったチケット数。
+    unreturned_games: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RunStatus {
+    Running,
+    Completed,
+    Interrupted,
+    WorkerFailed,
 }
 
 #[derive(Clone, Copy, Default, Serialize)]
@@ -689,6 +703,7 @@ fn worker_main(
     rx: chan::Receiver<Option<MatchTicket>>,
     tx: chan::Sender<MatchResult>,
     shutdown: Arc<AtomicBool>,
+    worker_failed: Arc<AtomicBool>,
 ) {
     let WorkerConfig {
         engine_paths,
@@ -729,6 +744,7 @@ fn worker_main(
             }
             Err(e) => {
                 eprintln!("worker: failed to spawn engine {i} ({}): {e}", path.display());
+                worker_failed.store(true, Ordering::Relaxed);
                 shutdown.store(true, Ordering::Relaxed);
                 return;
             }
@@ -877,6 +893,7 @@ fn spawn_worker(
     ticket_rx: &chan::Receiver<Option<MatchTicket>>,
     result_tx: &chan::Sender<MatchResult>,
     shutdown: &Arc<AtomicBool>,
+    worker_failed: &Arc<AtomicBool>,
     handles: &mut Vec<thread::JoinHandle<()>>,
 ) {
     let cfg = WorkerConfig {
@@ -908,7 +925,18 @@ fn spawn_worker(
     let rx = ticket_rx.clone();
     let tx = result_tx.clone();
     let sd = shutdown.clone();
-    handles.push(thread::spawn(move || worker_main(cfg, rx, tx, sd)));
+    let failed = worker_failed.clone();
+    handles.push(thread::spawn(move || {
+        // panic で結果送信元だけが消えても、main が channel 待ちを続けないよう通知する。
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker_main(cfg, rx, tx, sd.clone(), failed.clone());
+        }))
+        .is_err()
+        {
+            failed.store(true, Ordering::Relaxed);
+            sd.store(true, Ordering::Relaxed);
+        }
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,6 +1131,7 @@ fn main() -> Result<()> {
         .collect();
     let timestamp = Local::now();
     let shutdown = Arc::new(AtomicBool::new(false));
+    let worker_failed = Arc::new(AtomicBool::new(false));
 
     // Ctrl-C ハンドラ
     {
@@ -1143,6 +1172,9 @@ fn main() -> Result<()> {
         start_positions: start_commands.clone(),
         output_dir: cli.out_dir.display().to_string(),
         retry: RetrySummary::default(),
+        run_status: RunStatus::Running,
+        incomplete_pairs: 0,
+        unreturned_games: 0,
     };
     // meta.json 書き出し
     {
@@ -1327,7 +1359,7 @@ fn main() -> Result<()> {
     // ワーカースレッドの起動
     let mut handles = Vec::new();
     for _ in 0..cli.concurrency {
-        spawn_worker(&spawn_ctx, &ticket_rx, &result_tx, &shutdown, &mut handles);
+        spawn_worker(&spawn_ctx, &ticket_rx, &result_tx, &shutdown, &worker_failed, &mut handles);
     }
 
     // 勝敗カウンターと出力をまとめる集計器。
@@ -1395,7 +1427,14 @@ fn main() -> Result<()> {
 
         // 増員（即時 spawn）。
         while live_workers < desired_workers {
-            spawn_worker(&spawn_ctx, &ticket_rx, &result_tx, &shutdown, &mut handles);
+            spawn_worker(
+                &spawn_ctx,
+                &ticket_rx,
+                &result_tx,
+                &shutdown,
+                &worker_failed,
+                &mut handles,
+            );
             live_workers += 1;
         }
 
@@ -1444,6 +1483,8 @@ fn main() -> Result<()> {
                             }
                         }
                     }
+                    // 全 worker の初期化失敗でも送信待ちへ残らず shutdown を再確認する。
+                    default(Duration::from_millis(100)) => {}
                 }
             }
             None => {
@@ -1467,7 +1508,7 @@ fn main() -> Result<()> {
                     break;
                 }
                 // in-flight を drain。
-                match result_rx.recv() {
+                match result_rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(result) => {
                         agg.on_result(&result, tickets_sent, target_total)?;
                         source.observe_result(&result);
@@ -1475,7 +1516,8 @@ fn main() -> Result<()> {
                             live_workers = live_workers.saturating_sub(1);
                         }
                     }
-                    Err(_) => break,
+                    Err(chan::RecvTimeoutError::Timeout) => continue,
+                    Err(chan::RecvTimeoutError::Disconnected) => break,
                 }
             }
         }
@@ -1488,10 +1530,22 @@ fn main() -> Result<()> {
     // 手放したら join する。
     drop(ticket_tx);
     drop(result_tx);
-    while result_rx.recv().is_ok() {}
-    for h in handles {
-        let _ = h.join();
+    while let Ok(result) = result_rx.recv() {
+        agg.on_result(&result, tickets_sent, source.current_target_total())?;
+        source.observe_result(&result);
     }
+    for h in handles {
+        if h.join().is_err() {
+            worker_failed.store(true, Ordering::Relaxed);
+        }
+    }
+    let run_status = if worker_failed.load(Ordering::Relaxed) {
+        RunStatus::WorkerFailed
+    } else if shutdown.load(Ordering::Relaxed) {
+        RunStatus::Interrupted
+    } else {
+        RunStatus::Completed
+    };
 
     // 集計器を分解して以降の表示に使う。
     let Aggregator {
@@ -1520,13 +1574,30 @@ fn main() -> Result<()> {
         );
     }
 
-    let retry_summary = source.retry_summary();
+    let mut retry_summary = source.retry_summary();
+    retry_summary.invalid |= run_status != RunStatus::Completed;
     tournament_meta.retry = retry_summary;
+    tournament_meta.run_status = run_status;
+    tournament_meta.incomplete_pairs = source
+        .emitted
+        .iter()
+        .sum::<u32>()
+        .div_ceil(2)
+        .saturating_sub(valid_completed / 2);
+    tournament_meta.unreturned_games = tickets_sent.saturating_sub(completed);
     let meta_file = File::create(cli.out_dir.join("meta.json"))?;
     serde_json::to_writer_pretty(BufWriter::new(meta_file), &tournament_meta)?;
 
     println!();
-    println!("=== Tournament Complete ===");
+    println!(
+        "{}",
+        match run_status {
+            RunStatus::Completed => "=== Tournament Complete ===",
+            RunStatus::Interrupted => "=== Tournament Interrupted ===",
+            RunStatus::WorkerFailed => "=== Tournament Worker Failed ===",
+            RunStatus::Running => unreachable!(),
+        }
+    );
     println!("Total: {} games in {:.1}s", completed, start_time.elapsed().as_secs_f64());
     print_final_table(&pair_stats, &engine_labels);
     println!(
@@ -1539,8 +1610,13 @@ fn main() -> Result<()> {
     println!("Output: {}", cli.out_dir.display());
     println!("===========================");
 
-    if let Some(state) = sprt_state.as_ref() {
-        print_sprt_final(state, retry_summary);
+    if run_status == RunStatus::Completed {
+        if let Some(state) = sprt_state.as_ref() {
+            print_sprt_final(state, retry_summary);
+        }
+    } else {
+        println!("SPRT decision withheld: run did not complete.");
+        bail!("tournament did not complete; recovered results and run status were saved");
     }
 
     Ok(())
@@ -2477,6 +2553,52 @@ mod tests {
     fn splitmix64_matches_reference_vectors() {
         assert_eq!(splitmix64(0), 0xE220_A839_7B1D_CDAF);
         assert_eq!(splitmix64(0x9E37_79B9_7F4A_7C15), 0x6E78_9E6A_A1B9_65F4);
+    }
+
+    #[test]
+    fn worker_panic_notifies_shutdown_before_main_join() {
+        let ctx = super::SpawnCtx {
+            engine_paths: &[],
+            engine_labels: &[],
+            engine_usi_options: &[],
+            threads: 1,
+            hash_mb: 1,
+            max_moves: 1,
+            adjudicate_resign: None,
+            adjudicate_draw: None,
+            timeout_margin_ms: 1,
+            byoyomi: 0,
+            btime: 0,
+            binc: 0,
+            go_depth: None,
+            go_nodes: &[],
+            start_defs: &[],
+        };
+        let (ticket_tx, ticket_rx) = super::chan::bounded(1);
+        let (result_tx, _result_rx) = super::chan::bounded(1);
+        let shutdown = Arc::new(super::AtomicBool::new(false));
+        let failed = Arc::new(super::AtomicBool::new(false));
+        let mut handles = Vec::new();
+        super::spawn_worker(&ctx, &ticket_rx, &result_tx, &shutdown, &failed, &mut handles);
+        // 内部の不正 fixture で安全な slice 境界 panic を起こし、外側の監督経路を検証する。
+        ticket_tx
+            .send(Some(super::MatchTicket {
+                id: 0,
+                black_idx: 0,
+                white_idx: 1,
+                startpos_idx: 0,
+                pair_index: 0,
+                pair_slot: 0,
+                attempt: 0,
+            }))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !shutdown.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert!(failed.load(Ordering::Relaxed));
+        handles.pop().unwrap().join().unwrap();
     }
 
     #[test]
