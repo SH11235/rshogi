@@ -24,6 +24,7 @@ use tools::selfplay::{
 };
 use tools::spsa_param_mapping::{
     MappingTable, NOT_USED_MARKER as PARAM_NOT_USED_MARKER, RawParamRow, parse_param_line,
+    register_unique_parameter,
 };
 
 /// `meta.json` のフォーマットバージョン。
@@ -900,27 +901,18 @@ fn schedule_matches(lhs: ScheduleConfig, rhs: ScheduleConfig) -> bool {
         && lhs.total_iterations == rhs.total_iterations
 }
 
+/// エンジンへ適用できる項目。regex は摂動・更新の選択にだけ使う。
+fn is_param_applicable(param: &SpsaParam, translator: &EngineNameTranslator) -> bool {
+    !param.not_used && (!translator.is_enabled() || translator.is_mapped(&param.name))
+}
+
 fn is_param_active(
     param: &SpsaParam,
     active_only_regex: Option<&Regex>,
     translator: &EngineNameTranslator,
 ) -> bool {
-    if param.not_used {
-        return false;
-    }
-    if let Some(re) = active_only_regex
-        && !re.is_match(&param.name)
-    {
-        return false;
-    }
-    // P1: マッピング表がロード済みかつ name が未マッピングの場合、エンジン側で
-    // setoption が黙ってスキップされるため SPSA で摂動・更新するのは無駄かつ有害
-    // （unmapped.rshogi 系の値がランダムウォークして .params を汚染する）。
-    // ここで active 集合から除外する。
-    if translator.is_enabled() && !translator.is_mapped(&param.name) {
-        return false;
-    }
-    true
+    is_param_applicable(param, translator)
+        && active_only_regex.is_none_or(|re| re.is_match(&param.name))
 }
 
 fn format_param_value_for_csv(param: &SpsaParam) -> String {
@@ -1916,13 +1908,28 @@ fn read_hostname() -> String {
 }
 
 fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
+    read_params_with_translator(path, &EngineNameTranslator::empty())
+}
+
+fn read_params_with_translator(
+    path: &Path,
+    translator: &EngineNameTranslator,
+) -> Result<Vec<SpsaParam>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut params = Vec::new();
+    let mut names = HashMap::new();
+    let mut translated_names = HashMap::new();
     for (idx, line) in reader.lines().enumerate() {
         let line_no = idx + 1;
         let line = line?;
         if let Some(raw) = parse_param_line(&line, line_no)? {
+            register_unique_parameter(&mut names, &raw.name, line_no)?;
+            if !raw.not_used && (!translator.is_enabled() || translator.is_mapped(&raw.name)) {
+                let (target, _) = translator.translate(&raw.name, 0.0);
+                register_unique_parameter(&mut translated_names, target, line_no)
+                    .with_context(|| format!("translated parameter {} -> {target}", raw.name))?;
+            }
             params.push(SpsaParam::from_raw(raw, line_no)?);
         }
     }
@@ -2020,15 +2027,13 @@ fn apply_parameter_vector(
     params: &[SpsaParam],
     values: &[f64],
     translator: &EngineNameTranslator,
-    active_mask: &[bool],
+    application_mask: &[bool],
 ) -> Result<()> {
     debug_assert_eq!(params.len(), values.len());
-    debug_assert_eq!(params.len(), active_mask.len());
-    for ((p, &v), &active) in params.iter().zip(values.iter()).zip(active_mask.iter()) {
-        // 非 active (not_used / regex 不一致 / translator enabled & unmapped) は
-        // engine 側で `set_option_if_available` が黙ってスキップする上、SPSA 側でも
-        // 値が変わらないので毎ゲーム送信は無駄。
-        if !active {
+    debug_assert_eq!(params.len(), application_mask.len());
+    for ((p, &v), &applicable) in params.iter().zip(values.iter()).zip(application_mask.iter()) {
+        // regex 対象外も基準値を送る。not_used / unmapped だけを除外する。
+        if !applicable {
             continue;
         }
         let (engine_name, engine_value) = translator.translate(&p.name, v);
@@ -2200,8 +2205,23 @@ fn compute_batch_prep(
     let mut plus_values: Vec<f64> = Vec::with_capacity(ctx.params.len());
     let mut minus_values: Vec<f64> = Vec::with_capacity(ctx.params.len());
     for (p, s) in ctx.params.iter().zip(shifts.iter()) {
-        plus_values.push(round_int(p, p.value + s));
-        minus_values.push(round_int(p, p.value - s));
+        let plus = round_int(p, p.value + s);
+        let minus = round_int(p, p.value - s);
+        if is_param_active(p, ctx.active_only_regex, ctx.translator) {
+            plus_values.push(plus);
+            minus_values.push(minus);
+        } else {
+            // 固定項目は両側・全 batch で同じ値。既存の active 項目の乱数列を
+            // 変えないため、上の抽選回数は維持し、固定値だけを共通化する。
+            let value = clamped_value(p, p.value);
+            let fixed = if p.is_int {
+                clamped_value(p, value.round())
+            } else {
+                value
+            };
+            plus_values.push(fixed);
+            minus_values.push(fixed);
+        }
     }
 
     let mut active_params = 0usize;
@@ -2328,7 +2348,7 @@ struct WorkerContext<'a> {
     game_cfg: &'a GameConfig,
     tc: TimeControl,
     translator: &'a EngineNameTranslator,
-    active_mask: &'a [bool],
+    application_mask: &'a [bool],
 }
 
 struct PoolTask {
@@ -2458,10 +2478,22 @@ fn play_pool_task(
     minus: &mut EngineProcess,
 ) -> Result<GameTaskResult> {
     use tools::selfplay::game::EngineFailure;
-    apply_parameter_vector(plus, ctx.params, &task.values.plus, ctx.translator, ctx.active_mask)
-        .context(EngineFailure)?;
-    apply_parameter_vector(minus, ctx.params, &task.values.minus, ctx.translator, ctx.active_mask)
-        .context(EngineFailure)?;
+    apply_parameter_vector(
+        plus,
+        ctx.params,
+        &task.values.plus,
+        ctx.translator,
+        ctx.application_mask,
+    )
+    .context(EngineFailure)?;
+    apply_parameter_vector(
+        minus,
+        ctx.params,
+        &task.values.minus,
+        ctx.translator,
+        ctx.application_mask,
+    )
+    .context(EngineFailure)?;
     plus.new_game().context(EngineFailure)?;
     minus.new_game().context(EngineFailure)?;
     let game = task.game;
@@ -2927,7 +2959,7 @@ fn main() -> Result<()> {
         }
         None => EngineNameTranslator::empty(),
     };
-    let mut params = read_params(&state_params)?;
+    let mut params = read_params_with_translator(&state_params, &translator)?;
     // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する
     // (v4 流: schedule の k 軸は累積 game pair 数)。field 名は v3 互換のため維持。
     let schedule = ScheduleConfig {
@@ -3235,12 +3267,13 @@ fn main() -> Result<()> {
     let (start_positions, _) =
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
     // active mask は iteration 中に変化しない（params の値だけが更新され、name/not_used
-    // /regex マッチ性は不変）ため、ここで 1 度だけ計算してホットパス (apply_parameter_vector)
-    // で再利用する。
+    // /regex マッチ性は不変）ため、適用用と摂動・更新用を分けて 1 度だけ計算する。
     let active_mask: Vec<bool> = params
         .iter()
         .map(|p| is_param_active(p, active_only_regex.as_ref(), &translator))
         .collect();
+    let application_mask: Vec<bool> =
+        params.iter().map(|p| is_param_applicable(p, &translator)).collect();
     let active_param_count = active_mask.iter().filter(|&&b| b).count();
     if active_param_count == 0 {
         bail!(
@@ -3420,7 +3453,7 @@ fn main() -> Result<()> {
                 game_cfg: &game_cfg,
                 tc,
                 translator: &translator,
-                active_mask: &active_mask,
+                application_mask: &application_mask,
             },
             cli.engine_retries,
         )?;
@@ -3601,6 +3634,37 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn duplicate_parameter_rows_and_translated_aliases_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.params");
+        for (first, second) in [
+            ("SPSA_X", "SPSA_X"),
+            ("SPSA_NET_ft_b_1", "SPSA_NET_ft_b_01"),
+        ] {
+            std::fs::write(&path, format!("# header\n{first},int,1,0,10,1,0.002\n\n{second},int,2,0,10,1,0.002 [[NOT USED]]\n")).unwrap();
+            let error = read_params(&path).unwrap_err().to_string();
+            assert!(error.contains("line 4") && error.contains("line 2"), "{error}");
+        }
+        std::fs::write(&path, "# header\nSPSA_A,int,1,0,10,1,0.002\nSPSA_B,int,2,0,10,1,0.002\n")
+            .unwrap();
+        assert_eq!(read_params(&path).unwrap().len(), 2);
+        let translator = EngineNameTranslator {
+            table: HashMap::from([
+                ("SPSA_A".into(), ("SPSA_NET_ft_b_1".into(), false)),
+                ("SPSA_B".into(), ("SPSA_NET_ft_b_01".into(), true)),
+            ]),
+            enabled: true,
+        };
+        let error = format!("{:#}", read_params_with_translator(&path, &translator).unwrap_err());
+        assert!(
+            error.contains("translated parameter SPSA_B")
+                && error.contains("line 3")
+                && error.contains("line 2"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn schedule_bounds_reject_overflow_and_underflow_without_changing_normal_math() {
         let schedule = ScheduleConfig {
@@ -4691,6 +4755,51 @@ mod tests {
     /// `compute_batch_prep` のスナップショットテスト。`ChaCha8Rng` は決定論的なため、
     /// 同じ `(base_seed, iter)` に対して flips / shifts / start_pos_indices が完全一致する。
     /// 並列化後も Phase A の事前計算結果がブレないことを保証。
+    #[test]
+    fn fixed_baseline_eligibility_and_rounding_are_shared() {
+        let mut params = vec![
+            make_param("fixed", 20.5, 1.0),
+            make_param("active", 5.0, 1.0),
+            make_param("unused", 3.0, 1.0),
+            make_param("unmapped", 4.0, 1.0),
+        ];
+        params[2].not_used = true;
+        let translator = EngineNameTranslator {
+            table: [
+                ("fixed".into(), ("Fixed".into(), true)),
+                ("active".into(), ("Active".into(), false)),
+                ("unused".into(), ("Unused".into(), false)),
+            ]
+            .into(),
+            enabled: true,
+        };
+        let regex = Regex::new("^active$").unwrap();
+        assert_eq!(
+            params.iter().map(|p| is_param_applicable(p, &translator)).collect::<Vec<_>>(),
+            vec![true, true, false, false]
+        );
+        assert_eq!(
+            params
+                .iter()
+                .map(|p| is_param_active(p, Some(&regex), &translator))
+                .collect::<Vec<_>>(),
+            vec![false, true, false, false]
+        );
+        let schedules = params
+            .iter()
+            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+            .collect::<Vec<_>>();
+        let mut ctx = make_test_ctx(&params, &schedules, &translator, 2);
+        ctx.active_only_regex = Some(&regex);
+        for batch in 0..32 {
+            let prep = compute_batch_prep(&ctx, batch, batch, 42, 0).unwrap();
+            assert_eq!(prep.plus_values[0], 21.0);
+            assert_eq!(prep.minus_values[0], 21.0);
+            assert_eq!(translator.translate("fixed", prep.plus_values[0]), ("Fixed", -21.0));
+            assert_eq!(prep.active_params, 1);
+        }
+    }
+
     #[test]
     fn compute_batch_prep_is_deterministic_across_calls() {
         let params = vec![

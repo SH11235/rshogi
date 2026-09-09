@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use crate::config::{BenchmarkConfig, EvalConfig, LimitType};
 use crate::positions::load_positions;
 use crate::report::{BenchResult, BenchmarkReport, EvalInfo, ThreadResult};
+use crate::selfplay::engine::receive_before_deadline;
 use crate::system::collect_system_info;
 
 /// USIエンジンクライアント
@@ -57,6 +58,8 @@ impl UsiEngine {
         tt_mb: u32,
         threads: usize,
         eval_config: &EvalConfig,
+        eval_hash_mb: u32,
+        use_eval_hash: bool,
         verbose: bool,
     ) -> Result<Self> {
         // verbose モードでは stderr を表示（デバッグ用）
@@ -105,6 +108,9 @@ impl UsiEngine {
         // オプション設定
         engine.send(&format!("setoption name USI_Hash value {tt_mb}"))?;
         engine.send(&format!("setoption name Threads value {threads}"))?;
+
+        engine.send(&format!("setoption name EvalHash value {eval_hash_mb}"))?;
+        engine.send(&format!("setoption name UseEvalHash value {use_eval_hash}"))?;
 
         // 評価オプション設定
         if let Some(nnue_path) = &eval_config.nnue_file {
@@ -160,14 +166,11 @@ impl UsiEngine {
         self.send(&format!("position sfen {sfen}"))?;
         self.send(&format!("go {} {limit}", limit_type.to_usi_cmd()))?;
 
-        let mut last_info = InfoSnapshot::default();
-        let start = Instant::now();
-
         // 制限タイプに応じた適切なタイムアウトを設定
         let timeout = match limit_type {
             LimitType::Movetime => {
                 // movetime の 2 倍 + 5 秒のマージン
-                Duration::from_millis(limit * 2 + 5000)
+                Duration::from_millis(limit.saturating_mul(2).saturating_add(5000))
             }
             LimitType::Depth | LimitType::Nodes => {
                 // depth/nodes は時間予測が難しいため保守的に 5 分
@@ -175,13 +178,37 @@ impl UsiEngine {
             }
         };
 
+        self.receive_bench_result(sfen, verbose, timeout, Duration::from_secs(10))
+    }
+
+    fn receive_bench_result(
+        &mut self,
+        sfen: &str,
+        verbose: bool,
+        timeout: Duration,
+        stop_grace: Duration,
+    ) -> Result<BenchResult> {
+        let start = Instant::now();
+        let mut deadline = start.checked_add(timeout).context("benchmark deadline overflow")?;
+        let mut stopped = false;
+        let mut last_info = InfoSnapshot::default();
         loop {
-            let line = self.rx.recv_timeout(timeout).with_context(|| {
-                format!(
-                    "Timeout after {:?} waiting for engine response (limit_type={:?}, limit={})",
-                    timeout, limit_type, limit
-                )
-            })?;
+            let line = match receive_before_deadline(&self.rx, deadline) {
+                Ok(line) => line,
+                Err(mpsc::RecvTimeoutError::Timeout) if !stopped => {
+                    self.send("stop")?;
+                    stopped = true;
+                    deadline =
+                        Instant::now().checked_add(stop_grace).context("stop deadline overflow")?;
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    anyhow::bail!("Benchmark timed out after stop grace")
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("Engine disconnected during benchmark")
+                }
+            };
 
             if line.starts_with("info") {
                 last_info.update_from_line(&line);
@@ -189,6 +216,9 @@ impl UsiEngine {
                     println!("    {line}");
                 }
             } else if line.starts_with("bestmove") {
+                if stopped {
+                    anyhow::bail!("Benchmark timed out; engine returned bestmove after stop");
+                }
                 let bestmove =
                     line.split_whitespace().nth(1).map(|s| s.to_string()).unwrap_or_else(|| {
                         eprintln!("Warning: Invalid bestmove format: {line}");
@@ -276,6 +306,8 @@ pub fn run_usi_benchmark(config: &BenchmarkConfig, engine_path: &Path) -> Result
             config.tt_mb,
             *threads,
             &config.eval_config,
+            config.eval_hash_mb,
+            config.use_eval_hash,
             config.verbose,
         )?;
         let mut thread_results = Vec::new();
@@ -323,4 +355,91 @@ pub fn run_usi_benchmark(config: &BenchmarkConfig, engine_path: &Path) -> Result
         eval_info: Some(EvalInfo::from(&config.eval_config)),
         results: all_results,
     })
+}
+
+#[cfg(all(test, unix))]
+mod contract_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn benchmark_bounds_chatty_search_and_stop_and_sends_eval_hash_options() {
+        let dir = tempfile::tempdir().unwrap();
+        for (mode, use_hash) in [
+            ("normal", true),
+            ("stop", false),
+            ("flood", true),
+            ("exit", false),
+        ] {
+            let path = dir.path().join(format!("{mode}.sh"));
+            let log = dir.path().join(format!("{mode}.log"));
+            // テスト用 mock の固定パスだけを埋め込む。
+            let script = format!(
+                r#"#!/bin/sh
+flood=
+trap 'if [ -n "$flood" ]; then kill "$flood" 2>/dev/null; wait "$flood" 2>/dev/null; fi' 0
+while IFS= read -r line; do
+  printf '%s
+' "$line" >> '{}'
+  case "$line" in
+    usi) printf 'usiok
+' ;;
+    isready) printf 'readyok
+' ;;
+    go*)
+      case '{}' in
+        normal) printf 'info nodes 5 depth 1
+bestmove resign
+' ;;
+        exit) exit 0 ;;
+        *) (while :; do printf 'info depth 1 nodes 1
+'; sleep 0.005; done) & flood=$! ;;
+      esac ;;
+    stop) if [ '{}' = "stop" ]; then printf 'bestmove resign
+'; fi ;;
+    quit) break ;;
+  esac
+done
+"#,
+                log.display(),
+                mode,
+                mode
+            );
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let eval = EvalConfig {
+                nnue_file: None,
+                usi_options: vec!["EvalHash=32".into(), "UseEvalHash=false".into()],
+            };
+            let mut engine = UsiEngine::spawn(&path, 1, 1, &eval, 16, use_hash, false).unwrap();
+            engine.send("go depth 1").unwrap();
+            let start = Instant::now();
+            let result = engine.receive_bench_result(
+                "fixture",
+                false,
+                Duration::from_millis(30),
+                Duration::from_millis(40),
+            );
+            assert!(start.elapsed() < Duration::from_secs(2), "{mode}");
+            assert_eq!(result.is_ok(), mode == "normal", "{mode}");
+            drop(engine);
+            let commands = std::fs::read_to_string(log).unwrap();
+            let lines = commands.lines().collect::<Vec<_>>();
+            let dedicated = lines
+                .iter()
+                .position(|line| *line == "setoption name EvalHash value 16")
+                .unwrap();
+            let override_pos = lines
+                .iter()
+                .position(|line| *line == "setoption name EvalHash value 32")
+                .unwrap();
+            assert!(dedicated < override_pos);
+            let first_flag = format!("setoption name UseEvalHash value {use_hash}");
+            assert!(lines.contains(&first_flag.as_str()));
+            assert_eq!(
+                lines.iter().filter(|line| **line == "stop").count(),
+                usize::from(matches!(mode, "stop" | "flood"))
+            );
+        }
+    }
 }
