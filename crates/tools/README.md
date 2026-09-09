@@ -56,7 +56,7 @@
 
 | ツール | 説明 |
 |--------|------|
-| `benchmark` | エンジン性能ベンチマーク |
+| `benchmark` | USI の評価ハッシュ設定・受信期限に対応。 エンジン性能ベンチマーク |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能（[詳細](docs/compare_nodes.md)） |
 | `compare_eval_nnue` | NNUE評価値の比較 |
 | `dump_effect_bucket_golden` | 形式一致 golden 用に effect bucket active index を config 別に dump（[詳細](docs/dump_effect_bucket_golden.md)） |
@@ -117,9 +117,9 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
 - [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（u8 127 張り付き）を実局面で計測
 - [SPSA の既定値生成](docs/spsa_runbook.md) - 無指定の探索・USI 宣言と共通の値から `.params` を生成
-- [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - 永続 engine プールで batch チューニング。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
+- [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - regex 対象外の有効な基準値も両 engine へ適用。永続 engine プールで batch チューニング。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
 - [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から net 重み delta 用 SPSA `.params` を生成
-- [apply_net_spsa_params](docs/apply_net_spsa_params.md) - net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する
+- [apply_net_spsa_params](docs/apply_net_spsa_params.md) - 重複行を拒否。 net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する
 - [rescore_psv](docs/rescore_psv.md) - PSV 評価値の再スコアリング（推奨: dlshogi ONNX + TensorRT FP16。qsearch-leaf ラベル / policy 展開 / レジューム / score sidecar（`--out-scores`、dlshogi ONNX と NNUE 静的評価）対応。LayerStacks routing は格納 bucket 数との不一致を拒否し、旧世代 net のみ `--allow-routing-buckets-mismatch` で明示許可）
 - [psv_gate_by_king_zone](docs/psv_gate_by_king_zone.md) - 入玉ドメインの base/override score 合成と行対応 mask bitmap
 - [psv_dual_label](docs/psv_dual_label.md) - 通常 PSV の score 退避、dual-label PSV の生成・sidecar 抽出・fail-closed 検証
@@ -139,3 +139,5 @@ cargo run -p tools --release --bin benchmark -- --internal
 ## 使用例
 
 より多くのコマンド例は [examples/README.md](examples/README.md) を参照。
+
+- [spsa_stats_to_plot_csv](docs/spsa_stats_to_plot_csv.md) - 入力 alias を拒否し、変換成功時だけ plot CSV を置換
