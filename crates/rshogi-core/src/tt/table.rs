@@ -5,62 +5,49 @@
 //! - probe/write操作
 
 use super::alloc::{AllocKind, Allocation};
-use super::entry::{AtomicTTEntry, TTData, TTEntry};
+use super::entry::{TTData, TTEntry};
 use super::{CLUSTER_SIZE, GENERATION_DELTA};
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
 use crate::types::{Bound, Color, Move, Value};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU64, Ordering};
 
-/// 3 エントリと排他フラグを同じ32バイトに格納する。
+/// 3 エントリを32バイトに格納し、payloadと短縮キーを別々のatomicで共有する。
 #[repr(C, align(32))]
 pub struct Cluster {
-    entries: [AtomicTTEntry; CLUSTER_SIZE],
-    locked: AtomicBool,
-    padding: u8,
+    data: [AtomicU64; CLUSTER_SIZE],
+    keys: [AtomicU16; CLUSTER_SIZE],
+    padding: [u8; 2],
 }
 
 impl Cluster {
     const fn new() -> Self {
         Self {
-            entries: [const { AtomicTTEntry::new() }; CLUSTER_SIZE],
-            locked: AtomicBool::new(false),
-            padding: 0,
+            data: [const { AtomicU64::new(0) }; CLUSTER_SIZE],
+            keys: [const { AtomicU16::new(0) }; CLUSTER_SIZE],
+            padding: [0; 2],
         }
     }
 
-    /// TT は読み捨て可能なキャッシュなので、競合時は待機せず利用を見送る。
-    fn try_lock(&self) -> Option<ClusterGuard<'_>> {
-        self.locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()
-            .map(|_| ClusterGuard { cluster: self })
+    #[inline]
+    fn load(&self, index: usize) -> TTEntry {
+        let key = self.keys[index].load(Ordering::Relaxed);
+        let payload = self.data[index].load(Ordering::Relaxed);
+        TTEntry::from_payload(key, payload)
+    }
+
+    #[inline]
+    fn store(&self, index: usize, entry: TTEntry) {
+        // keyとpayloadの同時公開は保証しない。payload内の対応だけを不可分に保つ。
+        self.keys[index].store(entry.key16(), Ordering::Relaxed);
+        self.data[index].store(entry.payload(), Ordering::Relaxed);
     }
 }
 
 impl Default for Cluster {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-struct ClusterGuard<'a> {
-    cluster: &'a Cluster,
-}
-
-impl ClusterGuard<'_> {
-    fn load(&self, index: usize) -> TTEntry {
-        self.cluster.entries[index].load()
-    }
-    fn store(&self, index: usize, entry: TTEntry) {
-        self.cluster.entries[index].store(entry);
-    }
-}
-
-impl Drop for ClusterGuard<'_> {
-    fn drop(&mut self) {
-        self.cluster.locked.store(false, Ordering::Release);
     }
 }
 
@@ -71,7 +58,7 @@ struct ClusterTable {
     len: usize,
 }
 
-// SAFETY: 共有参照から触れる格納要素はすべてatomicで、snapshotはClusterGuardで排他する。
+// SAFETY: 共有参照から更新する格納要素はすべてatomicで、読み取りは所有値に復号する。
 // 割当の解放・resize・clearは &mut self を要求し、借用中のprobe writerとは共存しない。
 unsafe impl Sync for ClusterTable {}
 
@@ -81,7 +68,7 @@ impl ClusterTable {
         let alloc = Allocation::allocate(bytes, std::mem::align_of::<Cluster>());
         let ptr = alloc.ptr().as_ptr() as *mut Cluster;
         // SAFETY: Clusterのアラインメントとlen個分の領域を確保済み。全フィールドはゼロが有効で、
-        // AtomicBoolはfalse、AtomicU16は0となる。初期化中の割当はまだ共有されていない。
+        // AtomicU64/AtomicU16とpaddingは0となる。初期化中の割当はまだ共有されていない。
         unsafe {
             std::ptr::write_bytes(ptr, 0, len);
         }
@@ -181,22 +168,15 @@ impl TranspositionTable {
     }
 
     /// 置換表を検索（クラスター内は16bitキーでマッチング）。
-    /// 他スレッドが同じクラスターを操作中ならmissを返し、このprobeからの書込みも省略する。
+    /// keyとpayloadの一貫性は保証せず、短縮キーと手の整合性で候補を検査する。
     pub fn probe(&self, key: u64, pos: &Position) -> ProbeResult<'_> {
         let cluster = self.first_entry(key, pos.side_to_move());
-        let Some(guard) = cluster.try_lock() else {
-            return ProbeResult {
-                found: false,
-                data: TTData::EMPTY,
-                writer: None,
-            };
-        };
         let key16 = key as u16;
         let gen8 = self.generation();
         let mut replace = 0;
         let mut min_value = i32::MAX;
         for index in 0..CLUSTER_SIZE {
-            let entry = guard.load(index);
+            let entry = cluster.load(index);
             if entry.key16() == key16 {
                 let mut data = entry.read();
                 if data.mv != Move::NONE {
@@ -215,7 +195,7 @@ impl TranspositionTable {
                 return ProbeResult {
                     found: entry.is_occupied(),
                     data,
-                    writer: Some((cluster, index)),
+                    writer: (cluster, index),
                 };
             }
             let value = entry.depth8() as i32 - entry.relative_age(gen8) as i32;
@@ -227,7 +207,7 @@ impl TranspositionTable {
         ProbeResult {
             found: false,
             data: TTData::EMPTY,
-            writer: Some((cluster, replace)),
+            writer: (cluster, replace),
         }
     }
 
@@ -239,11 +219,8 @@ impl TranspositionTable {
         let sample_count = 1000.min(self.cluster_count);
 
         for cluster in self.table.iter().take(sample_count) {
-            let Some(guard) = cluster.try_lock() else {
-                continue;
-            };
             for index in 0..CLUSTER_SIZE {
-                let entry = guard.load(index);
+                let entry = cluster.load(index);
                 if entry.is_occupied() && entry.relative_age(gen8) <= max_age_internal {
                     count += 1;
                 }
@@ -328,15 +305,15 @@ pub struct ProbeResult<'a> {
     /// 読み取ったデータ
     pub data: TTData,
     /// 書き込み用エントリ
-    writer: Option<(&'a Cluster, usize)>,
+    writer: (&'a Cluster, usize),
 }
 
 impl ProbeResult<'_> {
     /// エントリに書き込む（内部で16bitに切り詰め）
     ///
-    /// probe後の別writerによる更新を再読込し、排他下で置換条件を判定する。
-    /// probe時または書込み時の競合で見送った場合はfalse、置換条件を適用して格納した場合はtrueを返す。
-    /// trueでも置換条件により既存の値が保持されることがある。
+    /// probe後のslotを再読込し、置換条件を適用して格納する。競合による省略はなく常にtrue。
+    /// trueは格納操作の完了を表し、値の変更や並行writerによる上書きがないことは保証しない。
+    /// 統計・トレースの成功判定契約を保つため、戻り値を維持する。
     ///
     /// 戻り値を捨てる呼び出しは、格納の成否に依存する記録 (統計・トレース) を
     /// 伴わないことを `let _ =` で明示する。
@@ -352,15 +329,10 @@ impl ProbeResult<'_> {
         eval: Value,
         generation8: u8,
     ) -> bool {
-        let Some((cluster, index)) = self.writer else {
-            return false;
-        };
-        let Some(guard) = cluster.try_lock() else {
-            return false;
-        };
-        let mut entry = guard.load(index);
+        let (cluster, index) = self.writer;
+        let mut entry = cluster.load(index);
         entry.save(key, value, is_pv, bound, depth, mv, eval, generation8);
-        guard.store(index, entry);
+        cluster.store(index, entry);
         true
     }
 }
@@ -376,6 +348,71 @@ impl TtPrefetch for TranspositionTable {
 mod tests {
     use super::*;
     use crate::position::{Position, SFEN_HIRATE};
+
+    #[test]
+    fn test_key_can_mix_with_complete_payload() {
+        let tt = TranspositionTable::new(0);
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let cluster = tt.first_entry(1, pos.side_to_move());
+        let mut entry = TTEntry::new();
+        entry.save(2, Value::new(900), true, Bound::Lower, 20, Move::NONE, Value::new(-50), 8);
+        cluster.store(0, entry);
+        // 別writerのkeyだけが見える状態でも、key照合はpayloadの出所を検証できない。
+        cluster.keys[0].store(1, Ordering::Relaxed);
+        let probe = tt.probe(1, &pos);
+        assert!(probe.found);
+        assert_eq!(probe.data.value.raw(), 900);
+        assert_eq!(probe.data.eval.raw(), -50);
+        assert_eq!(probe.data.depth, 20);
+        assert_eq!(probe.data.bound, Bound::Lower);
+        assert!(probe.data.is_pv);
+        assert!(probe.data.bound.can_cutoff(probe.data.value, Value::new(100)));
+    }
+
+    #[test]
+    fn test_probe_key_and_move_validation_limits() {
+        use super::super::entry::TTEntry;
+        let tt = TranspositionTable::new(0);
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let cluster = tt.first_entry(1, pos.side_to_move());
+        let mut entry = TTEntry::new();
+        entry.save(2, Value::new(900), false, Bound::Lower, 10, Move::NONE, Value::ZERO, 0);
+        cluster.store(0, entry);
+        assert!(!tt.probe(1, &pos).found);
+
+        // 移動元が空なら、短縮キーが一致しても採用しない。
+        entry.save(
+            1,
+            Value::new(900),
+            false,
+            Bound::Lower,
+            10,
+            Move::from_usi("7f7e").unwrap(),
+            Value::ZERO,
+            0,
+        );
+        cluster.store(0, entry);
+        assert!(!tt.probe(1, &pos).found);
+
+        // 駒の移動規則はprobeでは検証せず、探索側の疑似合法検査で除外する。
+        entry.save(
+            1,
+            Value::new(900),
+            false,
+            Bound::Lower,
+            10,
+            Move::from_usi("7g7e").unwrap(),
+            Value::ZERO,
+            0,
+        );
+        cluster.store(0, entry);
+        let probe = tt.probe(1, &pos);
+        assert!(probe.found);
+        assert!(!pos.pseudo_legal(probe.data.mv));
+        assert!(probe.data.bound.can_cutoff(probe.data.value, Value::new(100)));
+    }
 
     #[test]
     fn test_stale_writer_rechecks_latest_entry() {
@@ -433,88 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cluster_contention_skips_probe_and_write() {
-        let tt = TranspositionTable::new(0);
-        let pos = Position::new();
-        let writer = tt.probe(1, &pos);
-        let cluster = tt.first_entry(1, pos.side_to_move());
-        let guard = cluster.try_lock().unwrap();
-        let skipped_probe = tt.probe(1, &pos);
-        assert!(!skipped_probe.found);
-        assert!(!writer.write(
-            1,
-            Value::new(99),
-            false,
-            Bound::Exact,
-            10,
-            Move::NONE,
-            Value::ZERO,
-            0
-        ));
-        assert!(!guard.load(0).is_occupied());
-        drop(guard);
-        assert!(!skipped_probe.write(
-            1,
-            Value::new(99),
-            false,
-            Bound::Exact,
-            10,
-            Move::NONE,
-            Value::ZERO,
-            0
-        ));
-        assert!(!tt.probe(1, &pos).found);
-        assert!(writer.write(
-            1,
-            Value::new(99),
-            false,
-            Bound::Exact,
-            10,
-            Move::NONE,
-            Value::ZERO,
-            0
-        ));
-        assert_eq!(tt.probe(1, &pos).data.value.raw(), 99);
-    }
-
-    #[test]
-    fn test_probe_contention_writer_stays_skipped_after_unlock() {
-        let tt = TranspositionTable::new(0);
-        let pos = Position::new();
-        assert!(tt.probe(1, &pos).write(
-            1,
-            Value::new(99),
-            false,
-            Bound::Exact,
-            10,
-            Move::NONE,
-            Value::ZERO,
-            0,
-        ));
-        let cluster = tt.first_entry(1, pos.side_to_move());
-        let guard = cluster.try_lock().unwrap();
-        let skipped_probe = tt.probe(1, &pos);
-        assert!(!skipped_probe.found);
-        drop(guard);
-
-        assert!(!skipped_probe.write(
-            1,
-            Value::new(42),
-            false,
-            Bound::Exact,
-            20,
-            Move::NONE,
-            Value::ZERO,
-            0,
-        ));
-        let preserved = tt.probe(1, &pos);
-        assert!(preserved.found);
-        assert_eq!(preserved.data.value.raw(), 99);
-        assert_eq!(preserved.data.depth, 10);
-    }
-
-    #[test]
-    fn test_competing_writers_publish_consistent_entries() {
+    fn test_competing_writers_share_slot_without_skipping() {
         use std::sync::{Arc, Barrier};
         let tt = TranspositionTable::new(0);
         let mut pos = Position::new();
@@ -527,10 +483,10 @@ mod tests {
                 let pos = &pos;
                 scope.spawn(move || {
                     let mv = Move::from_usi(if key == 1 { "7g7f" } else { "2g2f" }).unwrap();
+                    let writer = tt.probe(key, pos);
                     barrier.wait();
                     for _ in 0..10_000 {
-                        // 競合時の skip 自体が検証対象なので、ここでは成否を問わない。
-                        let _ = tt.probe(key, pos).write(
+                        assert!(writer.write(
                             key,
                             Value::new(key as i32 * 100),
                             key == 1,
@@ -539,7 +495,7 @@ mod tests {
                             mv,
                             Value::new(-(key as i32)),
                             0,
-                        );
+                        ));
                     }
                 });
             }
@@ -553,14 +509,18 @@ mod tests {
                         for key in [1, 2] {
                             let probe = tt.probe(key, pos);
                             if probe.found {
-                                assert_eq!(probe.data.value.raw(), key as i32 * 100);
-                                assert_eq!(probe.data.eval.raw(), -(key as i32));
-                                assert_eq!(probe.data.depth, key as i32 * 10);
-                                assert_eq!(probe.data.is_pv, key == 1);
-                                assert_eq!(probe.data.bound, Bound::Exact);
+                                // keyとの対応は保証しないが、payload内は同じ書込みに由来する。
+                                let data = probe.data;
+                                let source = data.value.raw() / 100;
+                                assert!([1, 2].contains(&source));
+                                assert_eq!(data.value.raw(), source * 100);
+                                assert_eq!(data.eval.raw(), -source);
+                                assert_eq!(data.depth, source * 10);
+                                assert_eq!(data.bound, Bound::Exact);
+                                assert_eq!(data.is_pv, source == 1);
                                 assert_eq!(
-                                    probe.data.mv.to_usi(),
-                                    if key == 1 { "7g7f" } else { "2g2f" }
+                                    data.mv.to_usi(),
+                                    if source == 1 { "7g7f" } else { "2g2f" }
                                 );
                             }
                         }
