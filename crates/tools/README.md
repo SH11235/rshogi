@@ -138,3 +138,5 @@ cargo run -p tools --release --bin benchmark -- --internal
 ## 使用例
 
 より多くのコマンド例は [examples/README.md](examples/README.md) を参照。
+
+- [spsa_stats_to_plot_csv](docs/spsa_stats_to_plot_csv.md) - 入力 alias を拒否し、変換成功時だけ plot CSV を置換

@@ -92,7 +92,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `generate_net_spsa_params` | LayerStacks `.bin` を走査し、net 重み delta 用 SPSA `.params` を生成（[詳細](generate_net_spsa_params.md)） |
 | `apply_net_spsa_params` | SPSA の net 重み delta を LayerStacks `.bin` へ焼き込み、feature 非依存の読み戻し検証と SHA-256 report を行う（[詳細](apply_net_spsa_params.md)） |
 | `spsa_param_diff` | SPSA .params の最終差分と履歴差分を集計 |
-| `spsa_stats_to_plot_csv` | SPSA 統計を可視化用 CSV に整形（移動平均計算） |
+| `spsa_stats_to_plot_csv` | SPSA 統計を可視化用 CSV に整形。入力 alias を拒否し成功時だけ置換（[詳細](spsa_stats_to_plot_csv.md)） |
 | `params_to_shogitest_options` | SPSA .params を shogitest 互換オプション文字列に変換 |
 
 ## 外部連携・ログ解析
