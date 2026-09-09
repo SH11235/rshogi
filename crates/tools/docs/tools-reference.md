@@ -88,7 +88,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | ツール | 説明 |
 |--------|------|
 | `spsa` | [SPSA チューナー](spsa_runbook.md#14-engine-プール再試行停止)。永続 engine プール、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
-| `generate_spsa_params` | SearchTuneParams から SPSA 用 .params ファイルを生成 |
+| `generate_spsa_params` | 実エンジンと共通の既定値から SPSA 用 .params ファイルを生成 |
 | `generate_net_spsa_params` | LayerStacks `.bin` を走査し、net 重み delta 用 SPSA `.params` を生成（[詳細](generate_net_spsa_params.md)） |
 | `apply_net_spsa_params` | SPSA の net 重み delta を LayerStacks `.bin` へ焼き込み、feature 非依存の読み戻し検証と SHA-256 report を行う（[詳細](apply_net_spsa_params.md)） |
 | `spsa_param_diff` | SPSA .params の最終差分と履歴差分を集計 |
