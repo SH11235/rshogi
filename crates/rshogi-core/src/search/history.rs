@@ -72,10 +72,12 @@ const PIECE_NUM: usize = Piece::NUM; // NONE含む
 // 定数
 // =============================================================================
 
-/// TTMoveHistory更新ボーナス（TT手がbest moveだった場合）
+/// 互換用の旧 TTMoveHistory ボーナス定数。
+/// 実探索の更新は `SearchTuneParams::tt_move_history_bonus` を使う。
 pub const TT_MOVE_HISTORY_BONUS: i32 = 811;
 
-/// TTMoveHistory更新ペナルティ（TT手がbest moveでなかった場合）
+/// 互換用の旧 TTMoveHistory ペナルティ定数。
+/// 実探索の更新は `SearchTuneParams::tt_move_history_malus` を使う。
 pub const TT_MOVE_HISTORY_MALUS: i32 = -848;
 
 /// ContinuationHistory更新の重み [(ply_back, weight)]
