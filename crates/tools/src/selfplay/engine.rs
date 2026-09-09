@@ -16,6 +16,29 @@ pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
 pub const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const STDERR_BUFFER_LINES: usize = 2;
 
+// 巨大な1行も保持・一時バッファともに制限し、超過分は改行まで読み捨てる。
+fn read_stderr_line(reader: &mut impl BufRead) -> std::io::Result<Option<String>> {
+    const MAX_BYTES: usize = 4096;
+    let mut line = Vec::new();
+    let mut seen = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(seen.then(|| String::from_utf8_lossy(&line).into_owned()));
+        }
+        seen = true;
+        let end = available.iter().position(|byte| *byte == b'\n');
+        let count = end.map_or(available.len(), |index| index + 1);
+        let text_len = end.unwrap_or(available.len());
+        let keep = text_len.min(MAX_BYTES - line.len());
+        line.extend_from_slice(&available[..keep]);
+        reader.consume(count);
+        if end.is_some() {
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+        }
+    }
+}
+
 /// エンジンプロセス起動時の設定。
 pub struct EngineConfig {
     pub path: PathBuf,
@@ -47,6 +70,20 @@ impl EngineProcess {
     pub fn spawn(cfg: &EngineConfig, label: String) -> Result<Self> {
         let mut proc = Self::spawn_uninitialized(cfg, label)?;
         proc.initialize(cfg)?;
+        Ok(proc)
+    }
+
+    /// usi/isready を含む初期化全体に期限を設けて起動する。
+    pub fn spawn_with_timeout(
+        cfg: &EngineConfig,
+        label: String,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| anyhow!("invalid startup timeout"))?;
+        let mut proc = Self::spawn_uninitialized(cfg, label)?;
+        proc.initialize_until(cfg, Some(deadline))?;
         Ok(proc)
     }
 
@@ -95,20 +132,15 @@ impl EngineProcess {
         let recent_stderr = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_LINES)));
         let stderr_buffer = recent_stderr.clone();
         std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        if let Ok(mut buffer) = stderr_buffer.lock() {
-                            if buffer.len() == STDERR_BUFFER_LINES {
-                                buffer.pop_front();
-                            }
-                            buffer.push_back(line);
-                        } else {
-                            break;
-                        }
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_stderr_line(&mut reader) {
+                if let Ok(mut buffer) = stderr_buffer.lock() {
+                    if buffer.len() == STDERR_BUFFER_LINES {
+                        buffer.pop_front();
                     }
-                    Err(_) => break,
+                    buffer.push_back(line);
+                } else {
+                    break;
                 }
             }
         });
@@ -126,10 +158,21 @@ impl EngineProcess {
 
     /// 起動済みプロセスの USI handshake と初期オプション設定を行う。
     pub fn initialize(&mut self, cfg: &EngineConfig) -> Result<()> {
+        self.initialize_until(cfg, None)
+    }
+
+    fn initialize_until(
+        &mut self,
+        cfg: &EngineConfig,
+        total_deadline: Option<Instant>,
+    ) -> Result<()> {
+        let deadline = total_deadline.unwrap_or_else(|| Instant::now() + ENGINE_READY_TIMEOUT);
         self.write_line("usi")?;
-        let deadline = Instant::now() + ENGINE_READY_TIMEOUT;
         loop {
             let line = self.recv_line_until(deadline)?;
+            if total_deadline.is_some() && line.starts_with("info string Error") {
+                bail!("{}: engine initialization: {line}", self.label);
+            }
             if let Some(rest) = line.strip_prefix("option ") {
                 if let Some(name) = parse_option_name(rest) {
                     self.opt_names.insert(name);
@@ -171,7 +214,17 @@ impl EngineProcess {
                 self.write_line(&format!("setoption name {}", opt.trim()))?;
             }
         }
-        self.sync_ready()?;
+        self.write_line("isready")?;
+        let deadline = total_deadline.unwrap_or_else(|| Instant::now() + ENGINE_READY_TIMEOUT);
+        loop {
+            let line = self.recv_line_until(deadline)?;
+            if total_deadline.is_some() && line.starts_with("info string Error") {
+                bail!("{}: engine initialization: {line}", self.label);
+            }
+            if line == "readyok" {
+                break;
+            }
+        }
         self.write_line("usinewgame")?;
         Ok(())
     }
@@ -457,11 +510,11 @@ impl EngineProcess {
         Ok(())
     }
 
-    fn recv_line_until(&self, deadline: Instant) -> Result<String> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            bail!("{}", self.engine_read_timeout_message(ENGINE_READY_TIMEOUT));
-        }
+    /// 継続的な info 出力でも延長されない絶対期限で1行受信する。
+    pub fn recv_line_until(&self, deadline: Instant) -> Result<String> {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| anyhow!("{}", self.engine_read_timeout_message(Duration::ZERO)))?;
         self.recv_line(remaining)
     }
 
@@ -602,4 +655,19 @@ pub fn find_engine_in_dir(dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod stderr_tests {
+    use super::*;
+
+    #[test]
+    fn stderr_large_line_is_capped_and_next_line_preserved() {
+        let mut data = vec![b'x'; 100_000];
+        data.extend_from_slice(b"\nnext\n");
+        let mut reader = BufReader::with_capacity(17, data.as_slice());
+        assert_eq!(read_stderr_line(&mut reader).unwrap().unwrap().len(), 4096);
+        assert_eq!(read_stderr_line(&mut reader).unwrap().unwrap(), "next");
+        assert_eq!(read_stderr_line(&mut reader).unwrap(), None);
+    }
 }
