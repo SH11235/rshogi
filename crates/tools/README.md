@@ -56,7 +56,7 @@
 
 | ツール | 説明 |
 |--------|------|
-| `benchmark` | エンジン性能ベンチマーク |
+| `benchmark` | USI の評価ハッシュ設定・受信期限に対応。 エンジン性能ベンチマーク |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能（[詳細](docs/compare_nodes.md)） |
 | `compare_eval_nnue` | NNUE評価値の比較 |
 | `dump_effect_bucket_golden` | 形式一致 golden 用に effect bucket active index を config 別に dump（[詳細](docs/dump_effect_bucket_golden.md)） |

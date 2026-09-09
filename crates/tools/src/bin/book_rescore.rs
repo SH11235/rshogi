@@ -741,7 +741,9 @@ fn worker_loop(
             .with_context(|| {
                 format!("worker {worker_id}: {:?} 探索に失敗しました: {}", task.kind, task.key)
             });
-        if result_tx.send(WorkerMessage::Task(result)).is_err() {
+        // 失敗後は応答の対応関係を保証できないため、この engine を再利用しない。
+        let failed = result.is_err();
+        if result_tx.send(WorkerMessage::Task(result)).is_err() || failed {
             break;
         }
     }
@@ -771,6 +773,9 @@ fn search_one(
     timeout: Duration,
 ) -> Result<SearchResult> {
     let outcome = engine.search_raw_go(&task.position_tail, go_args, timeout, None)?;
+    if outcome.timed_out {
+        bail!("探索がタイムアウトしました: {}", task.key);
+    }
     let eval = outcome
         .eval
         .ok_or_else(|| anyhow!("info score が得られませんでした: {}", task.key))?;
@@ -984,6 +989,47 @@ fn ratio(num: u64, den: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn worker_retires_after_search_error_before_next_task() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mock.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+ case "$line" in
+ usi) echo usiok ;;
+ isready) echo readyok ;;
+ go*) echo 'bestmove resign' ;;
+ quit) break ;;
+ esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        for key in ["first", "second"] {
+            tx.send(SearchTask {
+                kind: JournalKind::Child,
+                key: key.into(),
+                position_tail: START.into(),
+            })
+            .unwrap();
+        }
+        drop(tx);
+        let (result_tx, result_rx) = crossbeam_channel::unbounded();
+        worker_loop(0, &path, &[], "depth 1", "fixture", rx, result_tx);
+        // score がない最初の応答で失敗し、次のタスクは探索しない。
+        assert!(matches!(result_rx.try_recv(), Ok(WorkerMessage::Task(Err(_)))));
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(crossbeam_channel::TryRecvError::Disconnected)
+        ));
+    }
+
     use super::*;
 
     const START: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
