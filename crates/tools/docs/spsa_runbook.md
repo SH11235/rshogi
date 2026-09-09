@@ -22,6 +22,8 @@ cargo build --release -p tools --bin generate_spsa_params --bin spsa --bin spsa_
   YO 命名の .params (例: suisho 系の suisho*.params)。YO 駆動時は §10.6 の
   ケース A、rshogi 駆動時は §10.6 のケース B / `yo_to_rshogi_params` 経由
 
+探索の無指定時の既定値を正本として、USI 宣言と生成 `.params` も同じ値を使います。旧版では 170 項目中 13 項目の宣言値が実際の既定値と異なっていました。既存 `.params` は自動変更されません。比較条件を確認するときは使用したファイルとエンジン版を保存し、再生成した値との差分を確認してください。今回の修正は実エンジンの既定値を変更せず、古い宣言値へ戻すものでもありません。
+
 rshogi デフォルト値から始める場合の生成コマンド:
 
 ```bash
