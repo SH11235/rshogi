@@ -24,6 +24,7 @@ use tools::selfplay::{
 };
 use tools::spsa_param_mapping::{
     MappingTable, NOT_USED_MARKER as PARAM_NOT_USED_MARKER, RawParamRow, parse_param_line,
+    register_unique_parameter,
 };
 
 /// `meta.json` のフォーマットバージョン。
@@ -1824,13 +1825,28 @@ fn read_hostname() -> String {
 }
 
 fn read_params(path: &Path) -> Result<Vec<SpsaParam>> {
+    read_params_with_translator(path, &EngineNameTranslator::empty())
+}
+
+fn read_params_with_translator(
+    path: &Path,
+    translator: &EngineNameTranslator,
+) -> Result<Vec<SpsaParam>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut params = Vec::new();
+    let mut names = HashMap::new();
+    let mut translated_names = HashMap::new();
     for (idx, line) in reader.lines().enumerate() {
         let line_no = idx + 1;
         let line = line?;
         if let Some(raw) = parse_param_line(&line, line_no)? {
+            register_unique_parameter(&mut names, &raw.name, line_no)?;
+            if !raw.not_used && (!translator.is_enabled() || translator.is_mapped(&raw.name)) {
+                let (target, _) = translator.translate(&raw.name, 0.0);
+                register_unique_parameter(&mut translated_names, target, line_no)
+                    .with_context(|| format!("translated parameter {} -> {target}", raw.name))?;
+            }
             params.push(SpsaParam::from_raw(raw, line_no)?);
         }
     }
@@ -2834,7 +2850,7 @@ fn main() -> Result<()> {
         }
         None => EngineNameTranslator::empty(),
     };
-    let mut params = read_params(&state_params)?;
+    let mut params = read_params_with_translator(&state_params, &translator)?;
     // schedule.total_iterations は **k 軸の上限 = total_pairs** として再解釈する
     // (v4 流: schedule の k 軸は累積 game pair 数)。field 名は v3 互換のため維持。
     let schedule = ScheduleConfig {
@@ -3511,6 +3527,37 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn duplicate_parameter_rows_and_translated_aliases_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input.params");
+        for (first, second) in [
+            ("SPSA_X", "SPSA_X"),
+            ("SPSA_NET_ft_b_1", "SPSA_NET_ft_b_01"),
+        ] {
+            std::fs::write(&path, format!("# header\n{first},int,1,0,10,1,0.002\n\n{second},int,2,0,10,1,0.002 [[NOT USED]]\n")).unwrap();
+            let error = read_params(&path).unwrap_err().to_string();
+            assert!(error.contains("line 4") && error.contains("line 2"), "{error}");
+        }
+        std::fs::write(&path, "# header\nSPSA_A,int,1,0,10,1,0.002\nSPSA_B,int,2,0,10,1,0.002\n")
+            .unwrap();
+        assert_eq!(read_params(&path).unwrap().len(), 2);
+        let translator = EngineNameTranslator {
+            table: HashMap::from([
+                ("SPSA_A".into(), ("SPSA_NET_ft_b_1".into(), false)),
+                ("SPSA_B".into(), ("SPSA_NET_ft_b_01".into(), true)),
+            ]),
+            enabled: true,
+        };
+        let error = format!("{:#}", read_params_with_translator(&path, &translator).unwrap_err());
+        assert!(
+            error.contains("translated parameter SPSA_B")
+                && error.contains("line 3")
+                && error.contains("line 2"),
+            "{error}"
+        );
+    }
+
     use super::*;
 
     #[test]
