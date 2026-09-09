@@ -38,7 +38,7 @@
 //! 2. QCaptureInit - 捕獲手の生成
 //! 3. QCapture - 捕獲手
 
-use super::{HistoryTables, LOW_PLY_HISTORY_SIZE, PieceToHistory};
+use super::{ContHistKey, HistoryTables, LOW_PLY_HISTORY_SIZE};
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
 use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Value};
@@ -151,8 +151,8 @@ impl Stage {
 pub struct MovePicker {
     // History参照は保持しない（next_move時に渡す）
 
-    // ContinuationHistory参照（スコアリング用、ply毎に異なるため保持）
-    continuation_history: [*const PieceToHistory; 6],
+    // キーだけを保持し、スコアリング時の生存中 HistoryTables から解決する。
+    continuation_history: [ContHistKey; 6],
 
     // 状態
     stage: Stage,
@@ -183,18 +183,28 @@ impl MovePicker {
     /// 通常探索・静止探索用コンストラクタ（History参照を保持しない）
     ///
     /// `pos`は初期化時のみ使用し、フィールドとして保持しない。
-    /// `continuation_history`はスコアリング時に使用するため、ポインタとして保持する。
+    /// `continuation_history` は 1〜6 手前のキーであり、参照を保持しない。
+    /// 履歴は `next_move` に渡された owner から、その段階のスコアリング時に読む。
     ///
-    /// # Safety
+    /// 旧 API の `[&PieceToHistory; 6]` は `[ContHistKey; 6]` に置き換える。
+    /// 履歴のない手前の ply には `ContHistKey::null_sentinel()` を指定する。
+    /// 単独の `PieceToHistory` を渡す代わりに、選択したキーに対応する
+    /// `HistoryTables::continuation_history` 内のテーブルへ値を設定する。
     ///
-    /// `continuation_history`のポインタは、MovePickerのライフタイム中有効でなければならない。
-    /// これは探索ノード内でのみMovePickerを使用することで保証される。
+    /// ```compile_fail
+    /// use rshogi_core::{position::Position, search::{MovePicker, PieceToHistory}, types::Move};
+    /// let pos = Position::new();
+    /// let picker = {
+    ///     let table = Box::new(PieceToHistory::new());
+    ///     MovePicker::new(&pos, Move::NONE, 1, 0, [&*table; 6], false)
+    /// };
+    /// ```
     pub fn new(
         pos: &Position,
         tt_move: Move,
         depth: Depth,
         ply: i32,
-        continuation_history: [&PieceToHistory; 6],
+        continuation_history: [ContHistKey; 6],
         generate_all_legal_moves: bool,
     ) -> Self {
         let stage = if pos.in_check() {
@@ -221,14 +231,7 @@ impl MovePicker {
         };
 
         Self {
-            continuation_history: [
-                continuation_history[0] as *const _,
-                continuation_history[1] as *const _,
-                continuation_history[2] as *const _,
-                continuation_history[3] as *const _,
-                continuation_history[4] as *const _,
-                continuation_history[5] as *const _,
-            ],
+            continuation_history,
             stage,
             tt_move,
             probcut_threshold: None,
@@ -253,7 +256,7 @@ impl MovePicker {
         pos: &Position,
         tt_move: Move,
         ply: i32,
-        continuation_history: [&PieceToHistory; 6],
+        continuation_history: [ContHistKey; 6],
         generate_all_legal_moves: bool,
     ) -> Self {
         debug_assert!(pos.in_check());
@@ -266,14 +269,7 @@ impl MovePicker {
             };
 
         Self {
-            continuation_history: [
-                continuation_history[0] as *const _,
-                continuation_history[1] as *const _,
-                continuation_history[2] as *const _,
-                continuation_history[3] as *const _,
-                continuation_history[4] as *const _,
-                continuation_history[5] as *const _,
-            ],
+            continuation_history,
             stage,
             tt_move,
             probcut_threshold: None,
@@ -299,7 +295,7 @@ impl MovePicker {
         tt_move: Move,
         threshold: Value,
         ply: i32,
-        continuation_history: [&PieceToHistory; 6],
+        continuation_history: [ContHistKey; 6],
         generate_all_legal_moves: bool,
     ) -> Self {
         debug_assert!(!pos.in_check());
@@ -314,14 +310,7 @@ impl MovePicker {
         };
 
         Self {
-            continuation_history: [
-                continuation_history[0] as *const _,
-                continuation_history[1] as *const _,
-                continuation_history[2] as *const _,
-                continuation_history[3] as *const _,
-                continuation_history[4] as *const _,
-                continuation_history[5] as *const _,
-            ],
+            continuation_history,
             stage,
             tt_move,
             probcut_threshold: Some(threshold),
@@ -611,19 +600,11 @@ impl MovePicker {
         debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
         // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
         let moves = unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) };
-        // SAFETY:
-        // - continuation_history のポインタは MovePicker の寿命中有効。
-        // - ここでは読み取り専用でのみ参照する。
-        // - moves とは無関係な領域なのでエイリアスは発生しない。
-        let (ch0, ch1, ch2, ch3, ch5) = unsafe {
-            (
-                &*self.continuation_history[0],
-                &*self.continuation_history[1],
-                &*self.continuation_history[2],
-                &*self.continuation_history[3],
-                &*self.continuation_history[5],
-            )
-        };
+        let tables = self.continuation_history.map(|key| {
+            history.continuation_history[key.in_check as usize][key.capture as usize]
+                .get_table(key.piece, key.to)
+        });
+        let [ch0, ch1, ch2, ch3, _, ch5] = tables;
 
         if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
             debug_assert!(self.ply >= 0, "ply must be non-negative: {}", self.ply);
@@ -681,10 +662,9 @@ impl MovePicker {
     /// 回避手のスコアを計算
     fn score_evasions(&mut self, pos: &Position, history: &HistoryTables) {
         let us = self.side_to_move;
-        // SAFETY:
-        // - continuation_history[0] は MovePicker の寿命中有効。
-        // - 読み取り専用でのみ使用し、moves とは無関係な領域を指す。
-        let ch = unsafe { &*self.continuation_history[0] };
+        let key = self.continuation_history[0];
+        let ch = history.continuation_history[key.in_check as usize][key.capture as usize]
+            .get_table(key.piece, key.to);
 
         debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
         // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
@@ -896,6 +876,97 @@ pub(crate) fn piece_value(pc: Piece) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Square;
+
+    fn all_moves(mut picker: MovePicker, pos: &Position, history: &HistoryTables) -> Vec<Move> {
+        std::iter::from_fn(|| {
+            let mv = picker.next_move(pos, history);
+            mv.is_some().then_some(mv)
+        })
+        .collect()
+    }
+
+    #[test]
+    fn continuation_keys_do_not_retain_owner() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let keys = [ContHistKey::null_sentinel(); 6];
+        let picker = {
+            let history = HistoryTables::new_boxed();
+            let picker = MovePicker::new(&pos, Move::NONE, 1, 0, keys, false);
+            drop(history);
+            picker
+        };
+        let history = HistoryTables::new_boxed();
+        let actual = all_moves(picker, &pos, &history);
+        let control =
+            all_moves(MovePicker::new(&pos, Move::NONE, 1, 0, keys, false), &pos, &history);
+        assert_eq!(actual, control);
+        assert_eq!(actual.len(), 30);
+        let mut unique = actual.clone();
+        unique.sort_by_key(|mv| mv.to_usi());
+        unique.dedup();
+        assert_eq!(unique.len(), 30);
+    }
+
+    #[test]
+    fn continuation_keys_score_lazily_after_tt() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let tt = pos.to_move(Move::from_usi("7g7f").unwrap()).unwrap();
+        let target = pos.to_move(Move::from_usi("2g2f").unwrap()).unwrap();
+        let key =
+            ContHistKey::new(true, true, Piece::new(Color::White, PieceType::Rook), Square::SQ_55);
+        let mut keys = [ContHistKey::null_sentinel(); 6];
+        keys[0] = key;
+        let mut history = HistoryTables::new_boxed();
+        let mut picker = MovePicker::new(&pos, tt, 1, 0, keys, false);
+        assert_eq!(picker.next_move(&pos, &history), tt);
+        // TT 手の探索から戻るまで quiet のスコアはまだ確定しない。
+        let control = all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history);
+        assert_ne!(control[1], target);
+        history.continuation_history[1][1].get_table_mut(key.piece, key.to).update(
+            target.moved_piece_after(),
+            target.to(),
+            10000,
+        );
+        assert_eq!(picker.next_move(&pos, &history), target);
+        let mut expected = all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history);
+        expected.drain(..2);
+        assert_eq!(all_moves(picker, &pos, &history), expected);
+    }
+
+    #[test]
+    fn continuation_keys_evasion_and_probcut() {
+        let mut pos = Position::new();
+        pos.set_sfen("k8/9/9/9/9/9/9/4r4/4K4 b - 1").unwrap();
+        assert!(pos.in_check());
+        let tt = pos.to_move(Move::from_usi("5i6i").unwrap()).unwrap();
+        let target = pos.to_move(Move::from_usi("5i4i").unwrap()).unwrap();
+        let key =
+            ContHistKey::new(false, true, Piece::new(Color::Black, PieceType::Gold), Square::SQ_99);
+        let keys = [key; 6];
+        let mut history = HistoryTables::new_boxed();
+        let mut picker = MovePicker::new_evasions(&pos, tt, 0, keys, false);
+        assert_eq!(picker.next_move(&pos, &history), tt);
+        history.continuation_history[0][1].get_table_mut(key.piece, key.to).update(
+            target.moved_piece_after(),
+            target.to(),
+            10000,
+        );
+        let rest = all_moves(picker, &pos, &history);
+        let quiet = rest.iter().find(|mv| !pos.capture_stage(**mv)).copied();
+        assert_eq!(quiet, Some(target));
+        let ordinary = all_moves(MovePicker::new(&pos, tt, 1, 0, keys, false), &pos, &history);
+        assert_eq!(ordinary[1..], rest);
+
+        pos.set_sfen("K8/9/9/4r4/4R4/9/9/9/8k b - 1").unwrap();
+        let capture = pos.to_move(Move::from_usi("5e5d").unwrap()).unwrap();
+        let picker = MovePicker::new_probcut(&pos, capture, Value::ZERO, 0, keys, false);
+        drop(history);
+        let live = HistoryTables::new_boxed();
+        assert_eq!(all_moves(picker, &pos, &live), vec![capture]);
+    }
 
     #[test]
     fn test_stage_next() {
