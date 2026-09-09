@@ -45,7 +45,7 @@ use super::accumulator::{
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION};
 use super::features::{Feature, FeatureSet, HalfKP, HalfKPFeatureSet};
-use super::network::get_fv_scale_override;
+use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
 
@@ -1740,23 +1740,29 @@ impl<
     /// 評価値を計算
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
-    /// 各配列はMaybeUninitで確保し、直後のtransform/propagateで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKP<L1>) -> Value {
-        // SAFETY: 各配列は直後のtransform_raw/activate/propagateで全要素が上書きされる
+        self.evaluate_with_scale(pos, acc, get_fv_scale_override())
+    }
+
+    fn evaluate_with_scale(
+        &self,
+        pos: &Position,
+        acc: &AccumulatorHalfKP<L1>,
+        scale_override: Option<i32>,
+    ) -> Value {
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
         // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
-        let mut ft_out_i16: AlignedGeneric<[i16; FT_OUT]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut ft_out_i16 = AlignedGeneric([0i16; FT_OUT]);
         self.feature_transformer
             .transform_raw(acc, pos.side_to_move(), &mut ft_out_i16.0);
 
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
         // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
-        let mut transformed: AlignedGeneric<[u8; L1_INPUT]> =
-            unsafe { AlignedGeneric::new_uninit() };
+        let mut transformed = AlignedGeneric([0u8; L1_INPUT]);
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
 
         // l1 層 - 64バイトアライン
-        let mut l1_out: AlignedGeneric<[i32; L2]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut l1_out = AlignedGeneric([0i32; L2]);
         self.l1.propagate(&transformed.0, &mut l1_out.0);
 
         // デバッグ: L1出力の範囲チェック
@@ -1773,11 +1779,11 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l1_relu: AlignedGeneric<[u8; L2]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut l1_relu = AlignedGeneric([0u8; L2]);
         A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
 
         // l2 層 - 64バイトアライン
-        let mut l2_out: AlignedGeneric<[i32; L3]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut l2_out = AlignedGeneric([0i32; L3]);
         self.l2.propagate(&l1_relu.0, &mut l2_out.0);
 
         // デバッグ: L2出力の範囲チェック
@@ -1794,7 +1800,7 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l2_relu: AlignedGeneric<[u8; L3]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut l2_relu = AlignedGeneric([0u8; L3]);
         A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
 
         // output 層（4バイトなのでゼロ初期化のコストは無視可能）
@@ -1802,7 +1808,7 @@ impl<
         self.output.propagate(&l2_relu.0, &mut output);
 
         // スケーリング
-        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        let fv_scale = scale_override.unwrap_or(self.fv_scale);
         let eval = output[0] / fv_scale;
 
         // デバッグ: 最終評価値の範囲チェック
@@ -1849,17 +1855,6 @@ impl<
 fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
     if let Some(start) = arch_str.find("qa=") {
         let rest = &arch_str[start + 3..];
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-        rest[..end].parse().ok()
-    } else {
-        None
-    }
-}
-
-/// アーキテクチャ文字列から FV_SCALE をパース
-fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
-    if let Some(start) = arch_str.find("fv_scale=") {
-        let rest = &arch_str[start + 9..];
         let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
         rest[..end].parse().ok()
     } else {
@@ -1935,6 +1930,31 @@ pub type HalfKP768Pairwise = NetworkHalfKP<768, 1536, 768, 16, 64, PairwiseCReLU
 // =============================================================================
 // テスト
 // =============================================================================
+
+/// loader 回帰用の、両視点と全 dense 層に非ゼロ重みを持つ HalfKP payload。
+#[cfg(test)]
+pub(crate) fn halfkp_loader_fixture(l1: usize, arch: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for value in [NNUE_VERSION, 0, arch.len() as u32] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend_from_slice(arch.as_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    for _ in 0..l1 {
+        bytes.extend_from_slice(&64i16.to_le_bytes());
+    }
+    for _ in 0..HALFKP_DIMENSIONS * l1 {
+        bytes.extend_from_slice(&1i16.to_le_bytes());
+    }
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    for (input, output, bias) in [(2 * l1, 32, 0i32), (32, 32, 0), (32, 1, 128)] {
+        for _ in 0..output {
+            bytes.extend_from_slice(&bias.to_le_bytes());
+        }
+        bytes.extend(std::iter::repeat_n(1u8, super::layers::padded_input(input) * output));
+    }
+    bytes
+}
 
 #[cfg(test)]
 mod tests {
@@ -2054,6 +2074,38 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn halfkp_scale_metadata_read_and_evaluate() {
+        use std::io::Cursor;
+        type Net = NetworkHalfKP<32, 64, 64, 32, 32, CReLU>;
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .unwrap();
+        // グローバル値は変更せず、auto/明示上書きの同じ評価経路へ引数で渡す。
+        assert_eq!(get_fv_scale_override(), None);
+        for (metadata, expected_scale) in [
+            ("", FV_SCALE),
+            (",fv_scale=0", FV_SCALE),
+            (",fv_scale=-1", FV_SCALE),
+            (",fv_scale=129", FV_SCALE),
+            (",fv_scale=2147483647", FV_SCALE),
+            (",fv_scale=1", 1),
+            (",fv_scale=16", 16),
+            (",fv_scale=128", 128),
+        ] {
+            let arch = format!("Features=HalfKP(Friend)[125388->32x2],l2=32,l3=32{metadata}");
+            let net = Net::read(&mut Cursor::new(halfkp_loader_fixture(32, &arch))).unwrap();
+            assert_eq!(net.fv_scale, expected_scale, "{metadata}");
+            let mut acc = AccumulatorHalfKP::<32>::new();
+            net.refresh_accumulator(&pos, &mut acc);
+            assert!(acc.accumulation[0].0.iter().all(|v| *v == 102));
+            // 64*102 -> CReLU /64 -> 32*102 -> /64 -> 32*51 +128 =1760。
+            assert_eq!(net.evaluate(&pos, &acc).raw(), 1760 / expected_scale, "{metadata}");
+            assert_eq!(net.evaluate_with_scale(&pos, &acc, Some(4)).raw(), 440);
+            assert_eq!(net.evaluate_with_scale(&pos, &acc, None).raw(), 1760 / expected_scale);
+        }
     }
 
     #[test]
