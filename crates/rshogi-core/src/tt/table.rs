@@ -337,6 +337,10 @@ impl ProbeResult<'_> {
     /// probe後の別writerによる更新を再読込し、排他下で置換条件を判定する。
     /// probe時または書込み時の競合で見送った場合はfalse、置換条件を適用して格納した場合はtrueを返す。
     /// trueでも置換条件により既存の値が保持されることがある。
+    ///
+    /// 戻り値を捨てる呼び出しは、格納の成否に依存する記録 (統計・トレース) を
+    /// 伴わないことを `let _ =` で明示する。
+    #[must_use]
     pub fn write(
         &self,
         key: u64,
@@ -380,14 +384,39 @@ mod tests {
         pos.set_hirate();
         let old_probe = tt.probe(1, &pos);
         let mv = Move::from_usi("7g7f").unwrap();
-        tt.probe(2, &pos)
-            .write(2, Value::new(20), false, Bound::Exact, 20, mv, Value::ZERO, 0);
-        old_probe.write(1, Value::new(10), false, Bound::Lower, 10, Move::NONE, Value::ZERO, 0);
+        assert!(tt.probe(2, &pos).write(
+            2,
+            Value::new(20),
+            false,
+            Bound::Exact,
+            20,
+            mv,
+            Value::ZERO,
+            0
+        ));
+        assert!(old_probe.write(
+            1,
+            Value::new(10),
+            false,
+            Bound::Lower,
+            10,
+            Move::NONE,
+            Value::ZERO,
+            0
+        ));
         let replaced = tt.probe(1, &pos);
         assert!(replaced.found);
         assert_eq!(replaced.data.mv, Move::NONE, "different key must not inherit previous move");
-        tt.probe(1, &pos)
-            .write(1, Value::new(30), false, Bound::Exact, 30, mv, Value::ZERO, 0);
+        assert!(tt.probe(1, &pos).write(
+            1,
+            Value::new(30),
+            false,
+            Bound::Exact,
+            30,
+            mv,
+            Value::ZERO,
+            0
+        ));
         assert!(old_probe.write(
             1,
             Value::new(1),
@@ -500,7 +529,8 @@ mod tests {
                     let mv = Move::from_usi(if key == 1 { "7g7f" } else { "2g2f" }).unwrap();
                     barrier.wait();
                     for _ in 0..10_000 {
-                        tt.probe(key, pos).write(
+                        // 競合時の skip 自体が検証対象なので、ここでは成否を問わない。
+                        let _ = tt.probe(key, pos).write(
                             key,
                             Value::new(key as i32 * 100),
                             key == 1,
@@ -540,7 +570,7 @@ mod tests {
             }
         });
         for key in [1, 2] {
-            tt.probe(key, &pos).write(
+            assert!(tt.probe(key, &pos).write(
                 key,
                 Value::new(key as i32 * 100),
                 false,
@@ -549,7 +579,7 @@ mod tests {
                 Move::NONE,
                 Value::ZERO,
                 0,
-            );
+            ));
             assert!(tt.probe(key, &pos).found);
         }
     }
@@ -561,7 +591,7 @@ mod tests {
         pos.set_hirate();
         assert_eq!(tt.cluster_count * CLUSTER_SIZE, 98_304);
         for key in 1..=3 {
-            tt.probe(key, &pos).write(
+            assert!(tt.probe(key, &pos).write(
                 key,
                 Value::new(key as i32),
                 false,
@@ -570,12 +600,12 @@ mod tests {
                 Move::NONE,
                 Value::ZERO,
                 0,
-            );
+            ));
         }
         for key in 1..=3 {
             assert!(tt.probe(key, &pos).found);
         }
-        tt.probe(4, &pos).write(
+        assert!(tt.probe(4, &pos).write(
             4,
             Value::ZERO,
             false,
@@ -584,10 +614,10 @@ mod tests {
             Move::NONE,
             Value::ZERO,
             0,
-        );
+        ));
         assert!(!tt.probe(1, &pos).found, "shallowest entry must be replaced");
         tt.new_search();
-        tt.probe(2, &pos).write(
+        assert!(tt.probe(2, &pos).write(
             2,
             Value::ZERO,
             false,
@@ -596,8 +626,8 @@ mod tests {
             Move::NONE,
             Value::ZERO,
             tt.generation(),
-        );
-        tt.probe(5, &pos).write(
+        ));
+        assert!(tt.probe(5, &pos).write(
             5,
             Value::ZERO,
             false,
@@ -606,7 +636,7 @@ mod tests {
             Move::NONE,
             Value::ZERO,
             tt.generation(),
-        );
+        ));
         // depth-age: key2=2、key3=31-8、key4=41-8。
         assert!(!tt.probe(2, &pos).found);
         tt.clear();
@@ -655,7 +685,7 @@ mod tests {
         assert!(!probe1.found);
 
         // 書き込み
-        probe1.write(
+        assert!(probe1.write(
             key,
             Value::new(50),
             true,
@@ -664,7 +694,7 @@ mod tests {
             Move::NONE,
             Value::ZERO,
             tt.generation(),
-        );
+        ));
 
         // 2回目はヒット
         let probe2 = tt.probe(key, &pos);
@@ -708,7 +738,7 @@ mod tests {
 
         // 書き込み（DEPTH_ENTRY_OFFSETを考慮して有効な深さ）
         let probe1 = tt.probe(key, &pos);
-        probe1.write(
+        assert!(probe1.write(
             key,
             Value::new(100),
             false,
@@ -717,7 +747,7 @@ mod tests {
             Move::NONE,
             Value::ZERO,
             tt.generation(),
-        );
+        ));
 
         // クリア
         tt.clear();
