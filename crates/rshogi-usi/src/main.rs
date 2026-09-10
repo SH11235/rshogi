@@ -1514,7 +1514,11 @@ impl UsiEngine {
                         }
                         if let Some(mv) = Move::from_usi(tokens[idx]) {
                             if let Some(normalized) = self.position.to_move(mv) {
-                                limits.search_moves.push(normalized);
+                                if normalized.is_pass() && !self.position.can_pass() {
+                                    eprintln!("warning: invalid searchmoves: {}", tokens[idx]);
+                                } else {
+                                    limits.search_moves.push(normalized);
+                                }
                             } else {
                                 eprintln!("warning: invalid searchmoves: {}", tokens[idx]);
                             }
@@ -1871,6 +1875,57 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
             .unwrap();
     }
 
+    #[test]
+    #[serial]
+    fn parse_go_searchmoves_special_values() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut engine = UsiEngine::new();
+                let tokens = [
+                    "go",
+                    "searchmoves",
+                    "pass",
+                    "0000",
+                    "win",
+                    "5i4i",
+                    "depth",
+                    "1",
+                ];
+                for rank1 in ["4k4", "4k3p", "4k3P"] {
+                    engine.position.set_sfen(&format!("{rank1}/9/9/9/9/9/9/9/4K4 b - 1")).unwrap();
+                    let ordinary =
+                        engine.position.to_move(Move::from_usi("5i4i").unwrap()).unwrap();
+                    let limits = engine.parse_go_options(&tokens);
+                    assert_eq!(limits.search_moves, [ordinary]);
+                    engine.position.enable_pass_rights(1, 1);
+                    let limits = engine.parse_go_options(&tokens);
+                    assert_eq!(limits.search_moves, [Move::PASS, Move::PASS, ordinary]);
+                    assert_eq!(limits.depth, 1);
+                    let pass_only = engine.parse_go_options(&["go", "searchmoves", "pass"]);
+                    let roots = rshogi_core::search::RootMoves::from_legal_moves(
+                        &engine.position,
+                        &pass_only.search_moves,
+                    );
+                    assert_eq!(roots.len(), 1);
+                    assert!(roots.find(Move::PASS).is_some());
+                    engine.position.enable_pass_rights(0, 1);
+                    assert_eq!(engine.parse_go_options(&tokens).search_moves, [ordinary]);
+                }
+                engine.position.set_sfen("4k4/9/9/9/9/9/9/4r4/4K4 b - 1").unwrap();
+                engine.position.enable_pass_rights(1, 1);
+                assert!(engine.position.in_check());
+                assert!(
+                    engine
+                        .parse_go_options(&["go", "searchmoves", "pass", "0000", "win"])
+                        .search_moves
+                        .is_empty()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
     #[test]
     #[serial]
     fn parse_go_mate_sets_limits() {
