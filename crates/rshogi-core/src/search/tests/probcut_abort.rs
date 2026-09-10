@@ -185,7 +185,8 @@ fn probcut_abort_restores_position_and_does_not_publish_tt() {
                 ChildOutcome::SearchAbort,
                 ChildOutcome::Complete,
             ] {
-                for beta in [-1000, 0] {
+                // 番兵値 ZERO がちょうど cutoff 条件を満たす境界も含める。
+                for beta in [-1000, -SearchTuneParams::default().probcut_beta_margin_base, 0] {
                     for existing_parent in [false, true] {
                         run_case(outcome, beta, existing_parent);
                     }
