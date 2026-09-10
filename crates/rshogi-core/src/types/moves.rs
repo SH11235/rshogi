@@ -315,7 +315,21 @@ impl Move {
         }
     }
 
+    /// USIの指し手トークン全体を検証して変換する（合法性は判定しない）。
+    ///
+    /// 通常手は4文字、成りは末尾 `+` を含む5文字、打ちは4文字に限る。
+    /// `none` / `pass` / `0000` は従来の特殊値として受理し、`win` は受理しない。
+    /// 余分な文字・空白を含む入力はNone。行全体は呼出側でトークンに分割する。
+    pub fn from_usi_strict(s: &str) -> Option<Move> {
+        match s.len() {
+            4 => Self::from_usi(s),
+            5 if s.as_bytes()[1] != b'*' && s.ends_with('+') => Self::from_usi(s),
+            _ => None,
+        }
+    }
     /// USI形式の文字列からMoveに変換（パス対応）
+    ///
+    /// 互換性のため通常手・打ちの末尾を許容する。全体の字句検証には `from_usi_strict()` を使う。
     ///
     /// # パス手の形式
     /// - `"pass"`: 独自形式
@@ -485,6 +499,42 @@ mod tests {
         assert_eq!(Move::NONE.to_usi(), "none");
     }
 
+    #[test]
+    fn test_strict_usi_move_token_boundaries() {
+        for token in [
+            "7g7f", "2c2b+", "P*5e", "L*5e", "N*5e", "S*5e", "G*5e", "B*5e", "R*5e", "none",
+            "pass", "0000",
+        ] {
+            assert_eq!(Move::from_usi_strict(token), Move::from_usi(token), "{token}");
+            assert!(Move::from_usi_strict(token).is_some());
+        }
+        for token in [
+            "",
+            "7g7",
+            "7g7fgarbage",
+            "7g7f+garbage",
+            "7g7fx",
+            "7g7f++",
+            "P*5e+",
+            "P*5egarbage",
+            "7g7f ",
+            "7g7f\n",
+            "7g7f\0",
+            "7g7f歩",
+            "７g7f",
+            "pass+",
+            "passgarbage",
+            "0000+",
+            "none+",
+            "win",
+        ] {
+            assert_eq!(Move::from_usi_strict(token), None, "{token:?}");
+        }
+        // 寛容な既存APIを使う正規化経路の互換性は維持する。
+        assert_eq!(Move::from_usi("7g7fgarbage"), Move::from_usi("7g7f"));
+        assert_eq!(Move::from_usi("7g7f++"), Move::from_usi("7g7f+"));
+        assert_eq!(Move::from_usi("P*5e+"), Move::from_usi("P*5e"));
+    }
     #[test]
     fn test_move_from_usi() {
         // 通常移動

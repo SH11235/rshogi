@@ -116,6 +116,7 @@ impl Square {
     }
 
     /// USI形式の文字列からSquareに変換
+    /// 互換性のため先頭2文字を解析する。全体の検証には `from_usi_strict()` を使う。
     pub fn from_usi(s: &str) -> Option<Square> {
         let mut chars = s.chars();
         let file = File::from_usi_char(chars.next()?)?;
@@ -123,6 +124,13 @@ impl Square {
         Some(Square::new(file, rank))
     }
 
+    /// USI座標トークン全体を検証する。ASCIIの筋・段2文字以外はNone。
+    pub fn from_usi_strict(s: &str) -> Option<Square> {
+        if s.len() != 2 {
+            return None;
+        }
+        Self::from_usi(s)
+    }
     /// 方向オフセットを足したSquareを返す（盤外ならNone）
     ///
     /// YaneuraOuのSQ_U/SQ_D/SQ_L/SQ_R等に対応するオフセットをそのまま扱える。
@@ -214,6 +222,21 @@ impl<T> IndexMut<Square> for [T] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_strict_usi_square_token_boundaries() {
+        for file in File::ALL {
+            for rank in Rank::ALL {
+                let square = Square::new(file, rank);
+                assert_eq!(Square::from_usi_strict(&square.to_usi()), Some(square));
+            }
+        }
+        for token in [
+            "", "7", "7gg", "7g7f", "7g+", "7g ", "7g\n", "7g\0", "7g歩", "７g", "0a", "1j",
+        ] {
+            assert_eq!(Square::from_usi_strict(token), None, "{token:?}");
+        }
+        assert_eq!(Square::from_usi("7gextra"), Square::from_usi("7g"));
+    }
     #[test]
     fn test_square_new() {
         let sq = Square::new(File::File1, Rank::Rank1);
