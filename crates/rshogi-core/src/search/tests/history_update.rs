@@ -1,145 +1,249 @@
-use crate::search::{
-    ContHistKey, LimitsType, Search, SearchInfo, Stack,
-    history::{
-        CONTINUATION_HISTORY_WEIGHTS, ContinuationHistory, PawnHistory, TT_MOVE_HISTORY_BONUS,
-        TT_MOVE_HISTORY_MALUS,
-    },
-    tt_history::TTMoveHistory,
+//! alpha_beta の完了処理が実際の履歴 entry を更新することを観測する。
+use crate::eval::EvalHash;
+use crate::nnue::{
+    AccumulatorStackVariant, halfka_split::HalfKaSplitStack,
+    network_halfka_split::AccumulatorStackHalfKaSplit,
 };
-use crate::types::{Move, Piece, Square};
+use crate::position::Position;
+use crate::search::{
+    ContHistKey, LimitsType, NodeType, RootMoves, SearchTuneParams, SearchWorker, Stack,
+    TimeManagement,
+    history::{ContinuationHistory, PawnHistory},
+};
+use crate::tt::TranspositionTable;
+use crate::types::{Bound, DEPTH_QS, Move, Piece, Square, Value};
+use std::sync::{Arc, atomic::AtomicBool};
 
-// Search関連のテストではスタック使用量が大きいため、必要に応じてスタックサイズを拡張する。
-const STACK_SIZE: usize = 64 * 1024 * 1024; // 64MB
-
-/// TT手がbestだった場合にTTMoveHistoryが加点されることを確認
-#[test]
-fn tt_move_history_updates_on_bestmove() {
-    // NNUE 未ロードでも探索できるよう material 評価を有効化 (guard が終了時に復元)
-    let guard = crate::eval::material::test_support::lock_material();
-    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
-
-    std::thread::Builder::new()
-        .stack_size(STACK_SIZE)
-        .spawn(|| {
-            let mut search = Search::new(16);
-            let mut pos = crate::position::Position::new();
-            pos.set_hirate();
-
-            let limits = LimitsType {
-                depth: 1,
-                ..Default::default()
-            };
-
-            // 実際の探索を流して、TT手がbestとして保存されるようにする
-            let _ = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
-
-            let opts = search.time_options(); // just to avoid warnings
-            assert!(opts.minimum_thinking_time > 0);
-
-            // 内部のtt_move_historyがゼロでないことを確認できるAPIがないので、
-            // 少なくともpanicしないことのみを確認する（実際の更新はMovePicker内で加点される）
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-
-    drop(guard);
-}
-
-/// ContinuationHistoryがquiet bestmoveで更新されることを確認
-/// NOTE: SearchWorker内部へのアクセスが制限されているため、
-/// 簡易的に探索が完了することを確認するのみ
-#[test]
-fn continuation_history_updates_on_quiet_best() {
-    // NNUE 未ロードでも探索できるよう material 評価を有効化 (guard が終了時に復元)
-    let guard = crate::eval::material::test_support::lock_material();
-    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
-
-    std::thread::Builder::new()
-        .stack_size(STACK_SIZE)
-        .spawn(|| {
-            let mut search = Search::new(16);
-            let mut pos = crate::position::Position::new();
-            pos.set_hirate();
-
-            // 2手だけ指して、継続手の履歴が取れる状況を作る
-            let mv1 = Move::from_usi("7g7f").unwrap();
-            let mv2 = Move::from_usi("3c3d").unwrap();
-
-            let gives_check1 = pos.gives_check(mv1);
-            pos.do_move(mv1, gives_check1);
-            let gives_check2 = pos.gives_check(mv2);
-            pos.do_move(mv2, gives_check2);
-
-            let limits = LimitsType {
-                depth: 2,
-                ..Default::default()
-            };
-
-            // 探索を実行（ContinuationHistoryが内部で更新されることを確認）
-            let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
-
-            // 結果が存在することを確認
-            assert!(result.best_move.is_some(), "探索結果が存在するべき");
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-
-    drop(guard);
-}
-
-// =============================================================================
-// TTMoveHistory TDDテスト
-// =============================================================================
-
-/// TTMoveHistory: 正のボーナス(+811)が正しく加点されることを確認
-#[test]
-fn tt_move_history_positive_update() {
-    let mut history = TTMoveHistory::new();
-
-    // 初期値は0
-    assert_eq!(history.get(), 0);
-
-    // 正のボーナスを適用
-    history.update(TT_MOVE_HISTORY_BONUS);
-
-    // 値が正になっていることを確認
-    let value = history.get();
-    assert!(
-        value > 0,
-        "TTMoveHistory should be positive after +{TT_MOVE_HISTORY_BONUS} bonus, got {value}"
+fn observe_completed_node(
+    sfen: &str,
+    best_usi: &str,
+    tt_is_best: bool,
+    sentinel_move: Option<Move>,
+    tune: SearchTuneParams,
+) {
+    let mut pos = Position::new();
+    pos.set_sfen(sfen).unwrap();
+    let alpha = crate::eval::material::evaluate_material(&pos);
+    let beta = alpha + Value::new(1);
+    let before_pos = (pos.to_sfen(), pos.key());
+    let best = pos.to_move(Move::from_usi(best_usi).unwrap()).unwrap();
+    assert!(pos.is_legal(best));
+    let legal = RootMoves::from_legal_moves(&pos, &[]);
+    let other = legal.iter().map(|rm| rm.pv[0]).find(|mv| *mv != best && !mv.is_pass()).unwrap();
+    let tt_move = if tt_is_best { best } else { other };
+    let mut worker = SearchWorker::new(
+        Arc::new(TranspositionTable::new(1)),
+        Arc::new(EvalHash::new(1)),
+        0,
+        0,
+        tune,
     );
-}
-
-/// TTMoveHistory: 負のボーナス(-848)が正しく減点されることを確認
-#[test]
-fn tt_move_history_negative_update() {
-    let mut history = TTMoveHistory::new();
-
-    // まず正の値を蓄積
-    for _ in 0..5 {
-        history.update(TT_MOVE_HISTORY_BONUS);
+    let limits = LimitsType {
+        depth: 1,
+        ..Default::default()
+    };
+    worker.prepare_search(&limits);
+    worker.state.root_depth = 8;
+    worker.state.nnue_stack = AccumulatorStackVariant::HalfKaSplit(HalfKaSplitStack::L256(
+        AccumulatorStackHalfKaSplit::new(),
+    ));
+    let ply = 6;
+    let keys: [ContHistKey; 6] = std::array::from_fn(|i| {
+        ContHistKey::new(i % 2 == 0, i % 3 == 0, Piece::W_PAWN, Square::from_u8(i as u8).unwrap())
+    });
+    for (i, key) in keys.iter().enumerate() {
+        let prev = ply - i as i32 - 1;
+        worker.set_cont_history_for_move(prev, key.in_check, key.capture, key.piece, key.to);
+        worker.state.stack[prev as usize].current_move = other;
     }
-    let before = history.get();
-    assert!(before > 0, "History should be positive before malus");
-
-    // 負のボーナスを適用
-    history.update(TT_MOVE_HISTORY_MALUS);
-
-    // 値が減少していることを確認
-    let after = history.get();
-    assert!(
-        after < before,
-        "TTMoveHistory should decrease after {TT_MOVE_HISTORY_MALUS} malus"
+    if let Some(mv) = sentinel_move {
+        worker.clear_cont_history_for_null(ply - 1);
+        worker.state.stack[(ply - 1) as usize].current_move = mv;
+    }
+    // 子 qsearch は確定 TT 値で返り、NNUE や追加の履歴更新を実行しない。
+    for rm in legal.iter() {
+        let mv = rm.pv[0];
+        let mut child = pos.clone();
+        let check = child.gives_check(mv);
+        child.do_move(mv, check);
+        let score = -(alpha.raw() + if mv == best { 100 } else { -100 });
+        let _ = worker.tt.probe(child.key(), &child).write(
+            child.key(),
+            Value::new(score),
+            false,
+            Bound::Exact,
+            DEPTH_QS,
+            Move::NONE,
+            Value::ZERO,
+            worker.tt.generation(),
+        );
+    }
+    let _ = worker.tt.probe(pos.key(), &pos).write(
+        pos.key(),
+        Value::NONE,
+        false,
+        Bound::None,
+        0,
+        tt_move,
+        Value::ZERO,
+        worker.tt.generation(),
     );
+    let pc = best.moved_piece_after();
+    let to = best.to();
+    let us = pos.side_to_move();
+    let pawn_idx = pos.pawn_history_index();
+    let capture = pos.capture_stage(best);
+    let captured = capture.then(|| pos.piece_on(to).piece_type());
+    // SAFETY: 探索していない間だけ owner の読み取り参照を保持する。
+    let before = {
+        let h = unsafe { worker.history.as_ref_unchecked() };
+        (
+            h.tt_move_history.get(),
+            h.main_history.get(us, best),
+            h.pawn_history.get(pawn_idx, pc, to),
+            keys.map(|key| {
+                h.continuation_history[key.in_check as usize][key.capture as usize]
+                    .get(key.piece, key.to, pc, to)
+            }),
+            h.continuation_history[0][0].get(Piece::NONE, Square::SQ_11, pc, to),
+            captured.map(|pt| h.capture_history.get(pc, to, pt)),
+            h.main_history.get(us, other),
+        )
+    };
+    let original_pc = pos.moved_piece(best);
+    // SAFETY: 同じく探索前の短い読み取りのみ。
+    let original_before = {
+        let h = unsafe { worker.history.as_ref_unchecked() };
+        (
+            h.pawn_history.get(pawn_idx, original_pc, to),
+            keys.map(|key| {
+                h.continuation_history[key.in_check as usize][key.capture as usize].get(
+                    key.piece,
+                    key.to,
+                    original_pc,
+                    to,
+                )
+            }),
+            captured.map(|pt| h.capture_history.get(original_pc, to, pt)),
+        )
+    };
+    assert_eq!(before.0, 0);
+    let mut tm =
+        TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let value = worker.search_node_wrapper::<{ NodeType::NonPV as u8 }>(
+        &mut pos, 1, alpha, beta, ply, true, &limits, &mut tm,
+    );
+    assert!(value >= beta);
+    assert!(!worker.state.abort);
+    assert_eq!((pos.to_sfen(), pos.key()), before_pos);
+    let stored = worker.tt.probe(pos.key(), &pos);
+    assert_eq!(stored.data.mv, best);
+    // SAFETY: 探索完了後で可変参照と同時保持しない。
+    let h = unsafe { worker.history.as_ref_unchecked() };
+    assert_eq!(
+        h.tt_move_history.get() as i32,
+        if tt_is_best {
+            tune.tt_move_history_bonus
+        } else {
+            tune.tt_move_history_malus
+        }
+    );
+    if let Some(pt) = captured {
+        assert!(h.capture_history.get(pc, to, pt) > before.5.unwrap());
+        assert_eq!(h.main_history.get(us, best), before.1);
+        assert_eq!(h.pawn_history.get(pawn_idx, pc, to), before.2);
+    } else {
+        assert!(h.main_history.get(us, best) > before.1);
+        assert!(h.pawn_history.get(pawn_idx, pc, to) > before.2);
+    }
+    for (i, key) in keys.iter().enumerate() {
+        let after = h.continuation_history[key.in_check as usize][key.capture as usize]
+            .get(key.piece, key.to, pc, to);
+        let updated = crate::search::history::continuation_history_weight(&tune, i + 1) > 0
+            && !capture
+            && (!pos.in_check() || i < 2)
+            && !(sentinel_move.is_some() && i == 0);
+        if updated {
+            assert!(after > before.3[i], "continuation back {}", i + 1);
+        } else {
+            assert_eq!(after, before.3[i], "excluded continuation back {}", i + 1);
+        }
+    }
+    if best.is_promotion() {
+        let original_pc = pos.moved_piece(best);
+        assert_ne!(original_pc, pc);
+        assert_eq!(h.pawn_history.get(pawn_idx, original_pc, to), original_before.0);
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(
+                h.continuation_history[key.in_check as usize][key.capture as usize].get(
+                    key.piece,
+                    key.to,
+                    original_pc,
+                    to
+                ),
+                original_before.1[i]
+            );
+        }
+        if let Some(pt) = captured {
+            assert_eq!(h.capture_history.get(original_pc, to, pt), original_before.2.unwrap());
+        }
+    }
+    assert_eq!(h.continuation_history[0][0].get(Piece::NONE, Square::SQ_11, pc, to), before.4);
+    if !tt_is_best && !pos.capture_stage(other) {
+        assert!(h.main_history.get(us, other) < before.6);
+    }
 }
 
-/// TTMoveHistory: YaneuraOu定数の正しさを確認
 #[test]
-fn tt_move_history_constants_are_correct() {
-    assert_eq!(TT_MOVE_HISTORY_BONUS, 811);
-    assert_eq!(TT_MOVE_HISTORY_MALUS, -848);
+fn completed_search_observes_history_entries() {
+    let guard = crate::eval::material::test_support::lock_material();
+    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let quiet = "8k/9/9/9/4P4/9/9/9/K8 b - 1";
+            for tune in [
+                SearchTuneParams::default(),
+                SearchTuneParams {
+                    tt_move_history_bonus: 129,
+                    tt_move_history_malus: -97,
+                    continuation_history_weight_3: 0,
+                    ..SearchTuneParams::default()
+                },
+            ] {
+                for tt_best in [true, false] {
+                    observe_completed_node(quiet, "5e5d", tt_best, None, tune);
+                }
+            }
+            observe_completed_node(
+                "8k/9/4S4/9/9/9/9/9/K8 b - 1",
+                "5c5b+",
+                true,
+                None,
+                SearchTuneParams::default(),
+            );
+            observe_completed_node(
+                "8k/4p4/4R4/9/9/9/9/9/K8 b - 1",
+                "5c5b+",
+                true,
+                None,
+                SearchTuneParams::default(),
+            );
+            observe_completed_node(
+                "k8/9/9/9/9/9/9/4r4/4K4 b - 1",
+                "5i4i",
+                true,
+                None,
+                SearchTuneParams::default(),
+            );
+            for mv in [Move::NULL, Move::PASS] {
+                observe_completed_node(quiet, "5e5d", true, Some(mv), SearchTuneParams::default());
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    drop(guard);
 }
 
 // =============================================================================
@@ -167,54 +271,6 @@ fn continuation_history_basic_update() {
     // 値が増加
     let value = cont_hist.get(prev_pc, prev_to, pc, to);
     assert!(value > 0, "ContinuationHistory should increase after update");
-}
-
-/// ContinuationHistory重みの定数が正しいことを確認
-#[test]
-fn continuation_history_weights_are_correct() {
-    // YaneuraOu準拠の重み
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS.len(), 6);
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[0], (1, 1157));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[1], (2, 648));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[2], (3, 288));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[3], (4, 576));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[4], (5, 140));
-    assert_eq!(CONTINUATION_HISTORY_WEIGHTS[5], (6, 441));
-}
-
-/// ContinuationHistory: 複数ply更新の重み付けをテスト
-#[test]
-fn continuation_history_weighted_updates() {
-    // ContinuationHistoryは大きいのでBoxで作成（スタックオーバーフロー防止）
-    let mut cont_hist = ContinuationHistory::new_boxed();
-
-    let base_bonus = 1000;
-    let pc = Piece::B_PAWN;
-    // SAFETY: 60は有効なSquareインデックス
-    let to = unsafe { Square::from_u8_unchecked(60) }; // 7六相当
-
-    // 各plyに対して重み付き更新をシミュレート
-    for (ply_back, weight) in CONTINUATION_HISTORY_WEIGHTS.iter() {
-        let prev_pc = Piece::B_PAWN;
-        // SAFETY: ply_back % 81 は有効なSquareインデックス
-        let prev_to = unsafe { Square::from_u8_unchecked((*ply_back % 81) as u8) };
-        let near_ply_offset = if *ply_back < 2 { 80 } else { 0 };
-        let adjusted_bonus = base_bonus * weight / 1024 + near_ply_offset;
-
-        cont_hist.update(prev_pc, prev_to, pc, to, adjusted_bonus);
-    }
-
-    // 1手前（weight=1157）の更新が最も大きいはず
-    // SAFETY: 1と5は有効なSquareインデックス
-    let sq_1 = unsafe { Square::from_u8_unchecked(1) };
-    let sq_5 = unsafe { Square::from_u8_unchecked(5) };
-    let value_1_ply = cont_hist.get(Piece::B_PAWN, sq_1, pc, to);
-    let value_5_ply = cont_hist.get(Piece::B_PAWN, sq_5, pc, to);
-
-    assert!(
-        value_1_ply > value_5_ply,
-        "1 ply back (weight=1157) should have higher value than 5 ply back (weight=140)"
-    );
 }
 
 // =============================================================================

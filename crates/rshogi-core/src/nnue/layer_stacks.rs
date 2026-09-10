@@ -121,7 +121,7 @@ impl<
         let mut output_arr = [0i32; 1];
 
         // L1: L1 → LS_L1_OUT
-        self.l1.propagate(input, &mut l1_out);
+        self.l1.propagate_7bit(input, &mut l1_out);
 
         // Split: [main_dim, 1]
         // l1_skip は最後の 1 要素、残り main_dim 要素を L2 入力へ変換する。
@@ -133,13 +133,13 @@ impl<
         l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
 
         // L2: LS_L2_IN → 32
-        self.l2.propagate(&l2_input.0, &mut l2_out);
+        self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         let output = clipped_relu_affine_32_to_1_avx2(&l2_out, &self.output);
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let output = {
             clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
-            self.output.propagate(&l2_relu.0, &mut output_arr);
+            self.output.propagate_7bit(&l2_relu.0, &mut output_arr);
             output_arr[0]
         };
 
@@ -167,19 +167,19 @@ impl<
         let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
         let mut output_arr = [0i32; 1];
 
-        self.l1.propagate(input, &mut l1_out);
+        self.l1.propagate_7bit(input, &mut l1_out);
         let l1_skip = l1_out[Self::MAIN_DIM];
         l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
         counts.l1_act_sat += l2_input.0[..LS_L2_IN].iter().filter(|&&v| v == 127).count() as u64;
         counts.l1_act_total += LS_L2_IN as u64;
 
-        self.l2.propagate(&l2_input.0, &mut l2_out);
+        self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
         counts.l2_act_sat +=
             l2_relu.0[..NNUE_PYTORCH_L3].iter().filter(|&&v| v == 127).count() as u64;
         counts.l2_act_total += NNUE_PYTORCH_L3 as u64;
 
-        self.output.propagate(&l2_relu.0, &mut output_arr);
+        self.output.propagate_7bit(&l2_relu.0, &mut output_arr);
         output_arr[0] + l1_skip
     }
 
@@ -194,18 +194,18 @@ impl<
         let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
         let mut output_arr = [0i32; 1];
 
-        self.l1.propagate(input, &mut l1_out);
+        self.l1.propagate_7bit(input, &mut l1_out);
 
         // Split: [main_dim, 1]
         let l1_skip = l1_out[Self::MAIN_DIM];
         l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
 
         // L2: LS_L2_IN → 32
-        self.l2.propagate(&l2_input.0, &mut l2_out);
+        self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
         // Output: 32 → 1
-        self.output.propagate(&l2_relu.0, &mut output_arr);
+        self.output.propagate_7bit(&l2_relu.0, &mut output_arr);
 
         // Skip connection
         let raw_score = output_arr[0] + l1_skip;

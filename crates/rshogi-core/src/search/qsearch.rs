@@ -208,7 +208,19 @@ pub(super) fn qsearch<const NT: u8>(
                     && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Exact, DEPTH_QS);
                 #[cfg(not(feature = "tt-trace"))]
                 let allow_write = ctx.allow_tt_write;
-                if allow_write {
+                if allow_write
+                    && tt_result.write(
+                        key,
+                        mate_value,
+                        // SAFETY: ply < MAX_PLY < STACK_SIZEを満たす探索局面のttPvを使う。
+                        unsafe { st.stack.get_unchecked(ply as usize) }.tt_pv,
+                        Bound::Exact,
+                        DEPTH_QS,
+                        mate_move,
+                        unadjusted_static_eval,
+                        ctx.tt.generation(),
+                    )
+                {
                     #[cfg(feature = "tt-trace")]
                     maybe_trace_tt_write(TtWriteTrace {
                         stage: "qsearch_mate1_store",
@@ -229,17 +241,6 @@ pub(super) fn qsearch<const NT: u8>(
                             Move::NONE
                         },
                     });
-                    // mate1ではss->ttPvを使用
-                    tt_result.write(
-                        key,
-                        mate_value,
-                        unsafe { st.stack.get_unchecked(ply as usize) }.tt_pv,
-                        Bound::Exact,
-                        DEPTH_QS,
-                        mate_move,
-                        unadjusted_static_eval,
-                        ctx.tt.generation(),
-                    );
                     inc_stat_by_depth!(st, tt_write_by_depth, 0);
                 }
                 return mate_value;
@@ -295,7 +296,18 @@ pub(super) fn qsearch<const NT: u8>(
                 && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, DEPTH_UNSEARCHED);
             #[cfg(not(feature = "tt-trace"))]
             let allow_write = ctx.allow_tt_write;
-            if allow_write {
+            if allow_write
+                && tt_result.write(
+                    key,
+                    value_to_tt(v, ply),
+                    false,
+                    Bound::Lower,
+                    DEPTH_UNSEARCHED,
+                    Move::NONE,
+                    unadjusted_static_eval,
+                    ctx.tt.generation(),
+                )
+            {
                 #[cfg(feature = "tt-trace")]
                 maybe_trace_tt_write(TtWriteTrace {
                     stage: "qsearch_stand_pat_store",
@@ -314,16 +326,6 @@ pub(super) fn qsearch<const NT: u8>(
                         Move::NONE
                     },
                 });
-                tt_result.write(
-                    key,
-                    value_to_tt(v, ply),
-                    false,
-                    Bound::Lower,
-                    DEPTH_UNSEARCHED,
-                    Move::NONE,
-                    unadjusted_static_eval,
-                    ctx.tt.generation(),
-                );
                 inc_stat_by_depth!(st, tt_write_by_depth, 0);
             }
         }
@@ -521,7 +523,18 @@ pub(super) fn qsearch<const NT: u8>(
         ctx.allow_tt_write && helper_tt_write_enabled_for_depth(ctx.thread_id, bound, DEPTH_QS);
     #[cfg(not(feature = "tt-trace"))]
     let allow_write = ctx.allow_tt_write;
-    if allow_write {
+    if allow_write
+        && tt_result.write(
+            key,
+            value_to_tt(best_value, ply),
+            pv_hit,
+            bound,
+            DEPTH_QS,
+            best_move,
+            unadjusted_static_eval,
+            ctx.tt.generation(),
+        )
+    {
         #[cfg(feature = "tt-trace")]
         maybe_trace_tt_write(TtWriteTrace {
             stage: "qsearch_store",
@@ -540,16 +553,6 @@ pub(super) fn qsearch<const NT: u8>(
                 Move::NONE
             },
         });
-        tt_result.write(
-            key,
-            value_to_tt(best_value, ply),
-            pv_hit,
-            bound,
-            DEPTH_QS,
-            best_move,
-            unadjusted_static_eval,
-            ctx.tt.generation(),
-        );
         inc_stat_by_depth!(st, tt_write_by_depth, 0);
     }
 

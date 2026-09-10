@@ -1,4 +1,3 @@
-use crate::eval::material::compute_material_value;
 use crate::movegen::{MoveList, generate_legal_all_with_pass};
 use crate::types::json::{
     BoardStateJson, CellJson, HandJson, HandsJson, PieceJson, ReplayResultJson,
@@ -87,15 +86,7 @@ impl Position {
         position.hand[Color::Black.index()] = hand_from_json(&json.hands.sente)?;
         position.hand[Color::White.index()] = hand_from_json(&json.hands.gote)?;
 
-        position.compute_hash();
-        position.update_blockers_and_pinners();
-        position.update_check_squares();
-        position.recompute_board_effects();
-
-        let them = !position.side_to_move;
-        position.state_mut().checkers =
-            position.attackers_to_c(position.king_square[position.side_to_move.index()], them);
-        position.state_mut().material_value = compute_material_value(&position);
+        position.finalize_after_population().map_err(|e| e.to_string())?;
 
         Ok(position)
     }
@@ -310,6 +301,110 @@ const fn hand_max(pt: PieceType) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_same_position(actual: &Position, expected: &Position) {
+        assert_eq!(actual.to_sfen(), expected.to_sfen());
+        assert_eq!(actual.key(), expected.key());
+        assert_eq!(actual.state().pawn_key, expected.state().pawn_key);
+        assert_eq!(actual.state().minor_piece_key, expected.state().minor_piece_key);
+        assert_eq!(actual.state().non_pawn_key, expected.state().non_pawn_key);
+        assert_eq!(actual.state().checkers, expected.state().checkers);
+        assert_eq!(actual.state().blockers_for_king, expected.state().blockers_for_king);
+        assert_eq!(actual.state().pinners, expected.state().pinners);
+        assert_eq!(actual.state().check_squares, expected.state().check_squares);
+        assert_eq!(actual.state().material_value, expected.state().material_value);
+        assert_eq!(actual.piece_list().piece_list_fb(), expected.piece_list().piece_list_fb());
+        assert_eq!(actual.piece_list().piece_list_fw(), expected.piece_list().piece_list_fw());
+        for i in 0..Square::NUM {
+            let sq = Square::from_u8(i as u8).unwrap();
+            if actual.piece_on(sq).is_some() {
+                assert_eq!(
+                    actual.piece_list().piece_no_of_board(sq),
+                    expected.piece_list().piece_no_of_board(sq)
+                );
+            }
+            for color in [Color::Black, Color::White] {
+                assert_eq!(actual.board_effect(color, sq), expected.board_effect(color, sq));
+            }
+        }
+        for color in [Color::Black, Color::White] {
+            for pt in PieceType::HAND_PIECES {
+                for n in 1..=actual.hand(color).count(pt) {
+                    let bp = crate::nnue::ExtBonaPiece::from_hand(color, pt, n as u8);
+                    assert_eq!(
+                        actual.piece_list().piece_no_of_hand(bp.fb),
+                        expected.piece_list().piece_no_of_hand(bp.fb)
+                    );
+                }
+            }
+        }
+        assert_eq!(legal_moves(actual), legal_moves(expected));
+    }
+
+    fn legal_moves(pos: &Position) -> Vec<String> {
+        let mut list = MoveList::new();
+        crate::movegen::generate_legal_all(pos, &mut list);
+        let mut moves: Vec<_> = list.iter().map(|mv| mv.to_usi()).collect();
+        moves.sort();
+        moves
+    }
+
+    #[test]
+    fn test_json_restores_complete_position() {
+        for sfen in [
+            SFEN_HIRATE,
+            "8l/1l+R2P3/p2pBG1pp/kps1p4/Nn1P2G2/P1P1P2PP/1PS6/1KSG3+r1/LN2+p3L w Sbgn3p 124",
+            "4k4/9/9/9/9/9/9/9/4K4 b 2R2B4G4S4N4L18P 37",
+            "4r4/9/9/9/4K4/9/9/9/4k4 b - 1",
+        ] {
+            let mut expected = Position::new();
+            expected.set_sfen(sfen).unwrap();
+            let mut actual =
+                Position::from_board_state_json(&expected.to_board_state_json()).unwrap();
+            assert_same_position(&actual, &expected);
+
+            let board =
+                std::array::from_fn(|i| expected.piece_on(Square::from_u8(i as u8).unwrap()));
+            let mut parts = Position::new();
+            parts.set_from_parts(&board, &expected.hand, expected.side_to_move()).unwrap();
+            parts.game_ply = expected.game_ply();
+            assert_same_position(&actual, &parts);
+
+            for usi in legal_moves(&expected) {
+                let mv = expected.to_move(Move::from_usi(&usi).unwrap()).unwrap();
+                actual.do_move(mv, actual.gives_check(mv));
+                expected.do_move(mv, expected.gives_check(mv));
+                assert_same_position(&actual, &expected);
+                actual.undo_move(mv);
+                expected.undo_move(mv);
+                assert_same_position(&actual, &parts);
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_rejects_total_piece_inventory_overflow() {
+        for (sfen, extra) in [
+            (SFEN_HIRATE, PieceType::Pawn),
+            ("4k4/9/9/9/4+b4/9/9/9/4K4 b B 1", PieceType::Bishop),
+            ("4k4/9/9/9/9/9/9/9/4K4 b Rr 1", PieceType::Rook),
+        ] {
+            let mut source = Position::new();
+            source.set_sfen(sfen).unwrap();
+            source.hand[Color::Black.index()] = source.hand(Color::Black).add(extra);
+            let json_error =
+                Position::from_board_state_json(&source.to_board_state_json()).err().unwrap();
+            let mut restored = Position::new();
+            let sfen_error = restored.set_sfen(&source.to_sfen()).unwrap_err();
+            let board = std::array::from_fn(|i| source.piece_on(Square::from_u8(i as u8).unwrap()));
+            let parts_error = restored
+                .set_from_parts(&board, &source.hand, source.side_to_move())
+                .unwrap_err();
+            assert_eq!(json_error, sfen_error.to_string());
+            assert_eq!(sfen_error, parts_error);
+            assert!(json_error.contains("Too many"));
+        }
+    }
 
     #[test]
     fn test_initial_board_json() {

@@ -615,7 +615,7 @@ impl GameRoom {
                 });
             }
             RepetitionVerdict::OuteSennichiteLose => {
-                // `OuteSennichiteLose` ⇔ `Position::repetition_state` の `Lose` で、
+                // 対局全履歴の4回目に `OuteSennichiteLose` と判定されたとき、
                 // 「手番側 (= side-to-move after the last move = from.opposite()) が
                 // 連続王手していた側で反則負け」を意味する。循環の最終手 (from) が
                 // 非王手 (=受け手の escape) で閉じ、from.opposite() がサイクル中ずっと
@@ -630,7 +630,7 @@ impl GameRoom {
                 });
             }
             RepetitionVerdict::OuteSennichiteWin => {
-                // `OuteSennichiteWin` ⇔ `Position::repetition_state` の `Win` で、
+                // 対局全履歴の4回目に `OuteSennichiteWin` と判定されたとき、
                 // 「手番側 (from.opposite()) が勝ち」= 直前に指した from が連続王手
                 // していた側で反則負け。循環の最終手が from による王手で閉じた場合に発火。
                 let mut result = self.finish(GameResult::OuteSennichite { loser: from });
@@ -1456,7 +1456,7 @@ mod tests {
     fn oute_sennichite_win_variant_loses_the_last_checker() {
         // Win variant: 開始 SFEN で白が既に黒飛の王手下にある (side=W)。
         // 4 手 1 サイクル (白退避 → 黒再王手 → 白退避 → 黒再王手) で開始 SFEN に復帰。
-        // 連続王手は反則行為なので 1 サイクルで反則確定 (競技将棋ルール準拠)。
+        // 3 サイクル後の同一局面4回目で反則確定。
         // 循環最終手 (+4838HI) は黒の王手手なので from=Black、連続王手側の黒が敗者。
         let mut room = room_with_sfen(EnteringKingRule::Point24, "9/6k2/9/9/9/9/9/6R2/K8 w - 1");
         agree_both(&mut room);
@@ -1465,6 +1465,12 @@ mod tests {
             (Color::Black, "+3848HI"),
             (Color::White, "-4232OU"),
         ];
+        for _ in 0..2 {
+            for (c, tok) in prefix.iter().chain(std::iter::once(&(Color::Black, "+4838HI"))) {
+                let r = room.handle_line(*c, &line(tok), 0).unwrap();
+                assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+            }
+        }
         for (c, tok) in &prefix {
             let r = room.handle_line(*c, &line(tok), 0).unwrap();
             assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
@@ -1493,6 +1499,12 @@ mod tests {
             (Color::White, "-4232OU"),
             (Color::Black, "+4838HI"),
         ];
+        for _ in 0..2 {
+            for (c, tok) in prefix.iter().chain(std::iter::once(&(Color::White, "-3242OU"))) {
+                let r = room.handle_line(*c, &line(tok), 0).unwrap();
+                assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));
+            }
+        }
         for (c, tok) in &prefix {
             let r = room.handle_line(*c, &line(tok), 0).unwrap();
             assert!(matches!(r.outcome, HandleOutcome::MoveAccepted { .. }));

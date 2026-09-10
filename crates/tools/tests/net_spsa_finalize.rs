@@ -212,6 +212,25 @@ fn applies_spsa_final_params_without_comments_using_expected_sha256() {
         output_layout.coefficient(&id).expect("output coefficient"),
         input_layout.coefficient(&id).expect("input coefficient") + 2
     );
+    // 同じ ID の別表記を追加しても、既存の確定 net を上書きしない。
+    std::fs::write(&params_path, "# fixture\nSPSA_NET_out_b_b0_0,int,1,-3,3,1,0.002\nSPSA_NET_out_b_b00_00,int,2,-3,3,1,0.002\n").unwrap();
+    let rejected = run(
+        env!("CARGO_BIN_EXE_apply_net_spsa_params"),
+        &[
+            "--nnue",
+            base_path.to_str().unwrap(),
+            "--params",
+            params_path.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+            "--expected-net-sha256",
+            &expected_sha256,
+        ],
+    );
+    assert!(!rejected.status.success());
+    let error = String::from_utf8_lossy(&rejected.stderr);
+    assert!(error.contains("line 3") && error.contains("line 2"), "{error}");
+    assert_eq!(std::fs::read(&output_path).unwrap(), output);
 }
 
 #[test]

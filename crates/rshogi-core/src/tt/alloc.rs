@@ -222,6 +222,5 @@ impl Drop for Allocation {
     }
 }
 
-// SAFETY: Allocation owns raw memory for the TT and is protected by higher-level synchronization.
+// SAFETY: 割当を単独所有し、所有権の移動後も同じレイアウトで解放する。共有の安全性は格納型側で保証する。
 unsafe impl Send for Allocation {}
-unsafe impl Sync for Allocation {}
