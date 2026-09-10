@@ -158,7 +158,7 @@ fn mate1_tt_normal_and_none_stores_remain_unchanged() {
     let pos = fixture();
     for (index, value) in [Value::new(123), Value::new(-456), Value::NONE].into_iter().enumerate() {
         let key = pos.key().wrapping_add(index as u64);
-        tt.probe(key, &pos).write(
+        assert!(tt.probe(key, &pos).write(
             key,
             value_to_tt(value, 5),
             false,
@@ -167,7 +167,7 @@ fn mate1_tt_normal_and_none_stores_remain_unchanged() {
             Move::NONE,
             Value::NONE,
             tt.generation(),
-        );
+        ));
         let hit = tt.probe(key, &pos);
         assert!(hit.found);
         assert_eq!(hit.data.value, value);
