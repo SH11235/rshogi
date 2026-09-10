@@ -135,7 +135,7 @@ selfplay ベースの NPS 差だけでは「計算量削減」と「cache pressu
 **計測ツール**: `crates/tools/src/bin/search_only_ab.rs` (perf stat --control 方式、
 初期化コストを完全排除、`abba` 順序で順序バイアス補正)
 
-詳細と再現コマンドは [threat_table_cpi_measurement_20260412.md](./threat_table_cpi_measurement_20260412.md) を参照。
+計測は `search_only_ab` (探索区間限定の A/B、`perf stat --control`) で行った。
 
 ### CPI (cycles/node ÷ instructions/node) 一覧
 

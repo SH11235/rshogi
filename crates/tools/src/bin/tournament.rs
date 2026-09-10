@@ -1782,7 +1782,13 @@ impl TicketSource {
             return Some(ticket);
         }
         let target = self.target_per_pair();
-        let pair_pos = self.emitted.iter().position(|&e| Self::pair_needs_more(e, target))?;
+        // 目標増加で前のカードが未達に戻っても、発行中の先後交換ペアを先に閉じる。
+        // 通常発行数由来の pair_index とカード内 slot を同じ 2 局へ対応させるため。
+        let pair_pos = self
+            .emitted
+            .iter()
+            .position(|&e| !e.is_multiple_of(2))
+            .or_else(|| self.emitted.iter().position(|&e| Self::pair_needs_more(e, target)))?;
         let (i, j) = self.pair_indices[pair_pos];
         let game_idx = self.emitted[pair_pos];
 
@@ -2517,6 +2523,103 @@ mod tests {
         let ids: Vec<u64> = all.iter().map(|t| t.id).collect();
         assert_eq!(ids, (0..6).collect::<Vec<_>>());
         assert_pentanomial_integrity(&all);
+    }
+
+    #[test]
+    fn target_increase_mid_card_keeps_all_completed_pairs() {
+        let target = Arc::new(AtomicU32::new(1));
+        let mut source = TicketSource::new(vec![(0, 1), (0, 2)], 1000, target.clone(), 42);
+        let mut tickets = (0..3).map(|_| pull(&mut source).unwrap()).collect::<Vec<_>>();
+        target.store(2, Ordering::Relaxed);
+        tickets.extend(drain_source(&mut source));
+        assert_eq!(tickets.len(), 8);
+        assert_pentanomial_integrity(&tickets);
+        assert_eq!(tickets.iter().map(|t| t.id).collect::<Vec<_>>(), (0..8).collect::<Vec<_>>());
+
+        let labels = strings(&["base", "other", "test"]);
+        let mut aggregate = super::Aggregator {
+            engine_labels: &labels,
+            pair_writers: Default::default(),
+            pair_stats: [((0, 1), (0, 0, 0)), ((0, 2), (0, 0, 0))].into(),
+            pair_game_count: Default::default(),
+            direct_buffer: Default::default(),
+            direct_completed_pairs: Default::default(),
+            completed: 0,
+            valid_completed: 0,
+            sprt_state: None,
+            stop_feeding: false,
+            report_interval: 10,
+            start_time: std::time::Instant::now(),
+        };
+        let mut sprt = SprtState::new(
+            super::SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap(),
+            0,
+            2,
+            10,
+            "base".into(),
+            "test".into(),
+        );
+        let mut completed_pairs = 0;
+        // 到着順が発行順と違っても、対象カードの勝敗だけを集計する。
+        for ticket in tickets.into_iter().rev() {
+            let outcome = if ticket.black_idx == 2 {
+                super::GameOutcome::BlackWin
+            } else if ticket.white_idx == 2 {
+                super::GameOutcome::WhiteWin
+            } else {
+                super::GameOutcome::Draw
+            };
+            let game = result(ticket, outcome, false);
+            source.observe_result(&game);
+            completed_pairs += u32::from(aggregate.observe_direct_result(&game));
+            sprt.observe(&game);
+        }
+        assert_eq!(completed_pairs, 4);
+        assert!(aggregate.direct_buffer.is_empty());
+        assert_eq!(aggregate.pair_stats[&(0, 1)], (0, 0, 4));
+        assert_eq!(aggregate.pair_stats[&(0, 2)], (0, 4, 0));
+        assert!(source.retry_observations.is_empty());
+        assert_eq!(
+            sprt.penta,
+            super::Penta {
+                ww: 2,
+                ..super::Penta::ZERO
+            }
+        );
+    }
+
+    #[test]
+    fn target_increase_mid_card_still_retries_failed_pair() {
+        let target = Arc::new(AtomicU32::new(1));
+        let mut source = TicketSource::new(vec![(0, 1), (0, 2)], 1000, target.clone(), 42);
+        let first = pull(&mut source).unwrap();
+        let second = pull(&mut source).unwrap();
+        let open = pull(&mut source).unwrap();
+        target.store(2, Ordering::Relaxed);
+        let close = pull(&mut source).unwrap();
+        assert_pentanomial_integrity(&[open.clone(), close.clone()]);
+        source.observe_result(&result(open.clone(), super::GameOutcome::Draw, true));
+        source.observe_result(&result(close.clone(), super::GameOutcome::Draw, false));
+        let retries = [pull(&mut source).unwrap(), pull(&mut source).unwrap()];
+        assert_pentanomial_integrity(&retries);
+        for (retry, original) in retries.iter().zip([&open, &close]) {
+            assert_eq!(retry.attempt, 1);
+            assert_eq!(retry.pair_index, original.pair_index);
+            assert_eq!(retry.startpos_idx, original.startpos_idx);
+            assert_eq!(
+                (retry.black_idx, retry.white_idx),
+                (original.black_idx, original.white_idx)
+            );
+            assert!(retry.id > close.id);
+            source.observe_result(&result(retry.clone(), super::GameOutcome::Draw, false));
+        }
+        let mut normal = vec![first, second, open, close];
+        normal.extend(drain_source(&mut source));
+        assert_eq!(normal.len(), 8);
+        assert_pentanomial_integrity(&normal);
+        assert_eq!(source.retry_summary().retried_pairs, 1);
+        assert!(!source.retry_summary().invalid);
+        assert!(source.retry_observations.is_empty());
     }
 
     #[test]
