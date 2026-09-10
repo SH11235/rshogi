@@ -11,6 +11,70 @@ use crate::search::{LimitsType, SearchTuneParams};
 use crate::tt::TranspositionTable;
 
 #[test]
+fn test_node_budget_respects_ponder_and_external_stop() {
+    use crate::search::{TimeManagement, alpha_beta::SearchState};
+    use crate::types::Color;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for split_path in [false, true] {
+        for thread_id in [0, 1] {
+            for mode in 0..3 {
+                let stop = Arc::new(AtomicBool::new(false));
+                let hit = Arc::new(AtomicBool::new(false));
+                let limits = LimitsType {
+                    nodes: 100,
+                    ponder: mode != 0,
+                    ..LimitsType::new()
+                };
+                let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::clone(&hit));
+                tm.init(&limits, Color::Black, 0, 256);
+                let mut worker = SearchWorker::new(
+                    Arc::new(TranspositionTable::new(1)),
+                    Arc::new(EvalHash::new(1)),
+                    0,
+                    thread_id,
+                    SearchTuneParams::default(),
+                );
+                let mut state = SearchState::new();
+                state.nodes = limits.nodes;
+                worker.state.nodes = limits.nodes;
+                let mut check = |tm: &mut TimeManagement| {
+                    if split_path {
+                        state.calls_cnt = 1;
+                        super::super::search_helpers::check_abort(
+                            &mut state,
+                            &worker.create_context(),
+                            &limits,
+                            tm,
+                        )
+                    } else {
+                        worker.state.calls_cnt = 1;
+                        worker.check_abort(&limits, tm)
+                    }
+                };
+                if mode == 0 {
+                    assert!(check(&mut tm), "通常探索はノード上限で停止する");
+                    continue;
+                }
+                assert!(!check(&mut tm), "ponder 中はノード上限で停止しない");
+                if mode == 1 {
+                    hit.store(true, Ordering::Relaxed);
+                    assert!(!check(&mut tm));
+                    if thread_id == 0 {
+                        assert!(!tm.is_pondering());
+                        assert!(check(&mut tm), "hit 後は既に消費したノード予算で停止する");
+                        continue;
+                    }
+                    assert!(hit.load(Ordering::Relaxed), "helper は main の通知を消費しない");
+                }
+                stop.store(true, Ordering::Relaxed);
+                assert!(check(&mut tm), "ponder 中も外部 stop は有効");
+            }
+        }
+    }
+}
+
+#[test]
 fn test_reduction_values() {
     // reduction(true, 10, 5) などが正の値を返すことを確認
     let tune = SearchTuneParams::default();

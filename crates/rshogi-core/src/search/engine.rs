@@ -1589,7 +1589,9 @@ where
                 // （check_abort は頻度制御で呼び出されるため、abort フラグが
                 //   立っていないまま search_root が返ることがある）
                 if worker.state.abort
-                    || (limits.nodes > 0 && worker.state.nodes >= limits.nodes)
+                    || (limits.nodes > 0
+                        && !time_manager.is_pondering()
+                        && worker.state.nodes >= limits.nodes)
                     || time_manager.stop_requested()
                 {
                     worker.state.abort = true;
