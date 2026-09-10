@@ -59,8 +59,8 @@ pub(super) fn check_abort(
         return true;
     }
 
-    // ノード数制限チェック
-    if limits.nodes > 0 && st.nodes >= limits.nodes {
+    // ponder 中は予算を使い切っても、GUI の通知まで探索を継続する。
+    if limits.nodes > 0 && !time_manager.is_pondering() && st.nodes >= limits.nodes {
         #[cfg(debug_assertions)]
         eprintln!("check_abort: node limit reached nodes={} limit={}", st.nodes, limits.nodes);
         st.abort = true;
