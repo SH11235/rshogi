@@ -8,7 +8,7 @@
 use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
 use rshogi_core::types::{
-    Color as CoreColor, EnteringKingRule, File, Move, PieceType, Rank, RepetitionState, Square,
+    Color as CoreColor, EnteringKingRule, File, Move, PieceType, Rank, Square,
 };
 
 use crate::types::{Color, CsaMoveToken};
@@ -124,34 +124,57 @@ impl Validator {
         Err(Violation::Illegal)
     }
 
-    /// 千日手判定。`pos` は最後の `do_move` 直後の局面を渡す。
+    /// 対局履歴全体の同一局面4回目を判定する。`pos` は合法手適用後の局面。
     ///
-    /// `Position::repetition_state` 内部で連続王手判定も行われるため、
-    /// 千日手成立時の勝敗側もここで切り分ける。
-    ///
-    /// **発火タイミング:**
-    /// - 通常千日手 (Draw): 同一局面 4 回目の到達で発火する。`state.repetition < 0`
-    ///   (= `times >= 3` = 4 回目以降の出現) を必須条件としており、それ以前の非決定的
-    ///   な再来では `None` を返す。これは競技将棋の「同一局面 4 回で引き分け」ルール
-    ///   に一致する。
-    /// - 連続王手千日手 (Win/Lose): 1 サイクル目の再来で発火する。連続王手は
-    ///   反則行為であり、1 循環で反則確定すればそれ以降は続行する意味がないため、
-    ///   非決定的な (`rep > 0` の) 再来でも Verdict を返す。
+    /// 盤面・双方の持駒・手番が一致する直近4回の区間で、一方の全着手が王手なら
+    /// その側が負けとなる。探索用の16手窓や `state.repetition` は使用しない。
+    /// SFENだけを再設定すると履歴は失われるため、復元時は開始局面から指し手を再生する。
     pub fn classify_repetition(&self, pos: &Position) -> RepetitionVerdict {
-        let state = pos.state();
-        if state.repetition == 0 {
-            return RepetitionVerdict::None;
-        }
-        match state.repetition_type {
-            RepetitionState::None | RepetitionState::Superior | RepetitionState::Inferior => {
-                RepetitionVerdict::None
+        let current = pos.state();
+        let mut index = pos.state_index();
+        let mut occurrences = 1;
+        let mut rewind: Option<Position> = None;
+        let max_back = current.plies_from_null.max(0) as usize;
+        for distance in 1..=max_back {
+            let Some(previous) = pos.state_at(index).previous_index() else {
+                break;
+            };
+            index = previous;
+            let state = pos.state_at(index);
+            if distance % 2 != 0
+                || state.board_key != current.board_key
+                || state.hand_key != current.hand_key
+            {
+                continue;
             }
-            // 非決定的な再来 (rep > 0) では発火せず対局続行。決定的 (rep < 0) でのみ発火。
-            RepetitionState::Draw if state.repetition < 0 => RepetitionVerdict::Sennichite,
-            RepetitionState::Draw => RepetitionVerdict::None,
-            RepetitionState::Lose => RepetitionVerdict::OuteSennichiteLose,
-            RepetitionState::Win => RepetitionVerdict::OuteSennichiteWin,
+            // ハッシュは候補抽出だけに使い、衝突時も盤面と持駒を実際に比較する。
+            // clone/undoは一致候補があるときだけ行い、元の対局履歴は変更しない。
+            let past = rewind.get_or_insert_with(|| pos.clone());
+            while past.state_index() != index {
+                let mv = past.state().last_move;
+                past.undo_move(mv);
+            }
+            if past.side_to_move() != pos.side_to_move()
+                || [CoreColor::Black, CoreColor::White]
+                    .iter()
+                    .any(|&c| past.hand(c) != pos.hand(c))
+                || Square::all().any(|sq| past.piece_on(sq) != pos.piece_on(sq))
+            {
+                continue;
+            }
+            occurrences += 1;
+            if occurrences == 4 {
+                let side = pos.side_to_move();
+                return if current.continuous_check[side.index()] >= distance as i32 {
+                    RepetitionVerdict::OuteSennichiteLose
+                } else if current.continuous_check[(!side).index()] >= distance as i32 {
+                    RepetitionVerdict::OuteSennichiteWin
+                } else {
+                    RepetitionVerdict::Sennichite
+                };
+            }
         }
+        RepetitionVerdict::None
     }
 
     /// 通常の千日手（4 回出現の引き分け）が成立しているか。
@@ -770,6 +793,62 @@ mod tests {
     }
 
     #[test]
+    fn full_history_repetition_at_60_ply_includes_starting_hands() {
+        for hands in ["-", "Pp"] {
+            let mut pos = pos_from_sfen(&format!("4k4/9/9/9/9/9/9/9/4K4 b {hands} 1"));
+            let v = Validator::new(EnteringKingRule::Point24);
+            let cycle = [
+                "5i4i", "5a4a", "4i3i", "4a3a", "3i3h", "3a3b", "3h3g", "3b3c", "3g4g", "3c4c",
+                "4g5g", "4c5c", "5g6g", "5c6c", "6g6h", "6c6b", "6h6i", "6b6a", "6i5i", "6a5a",
+            ];
+            for ply in 0..60 {
+                let mv = pos.to_move(Move::from_usi(cycle[ply % 20]).unwrap()).unwrap();
+                let mut legal = MoveList::new();
+                generate_legal_all(&pos, &mut legal);
+                assert!(legal.iter().any(|&candidate| candidate == mv));
+                pos.do_move(mv, pos.gives_check(mv));
+                let expected = if ply == 59 {
+                    RepetitionVerdict::Sennichite
+                } else {
+                    RepetitionVerdict::None
+                };
+                assert_eq!(v.classify_repetition(&pos), expected, "ply {}", ply + 1);
+            }
+            assert_eq!(pos.state().repetition, 0, "search window remains unchanged");
+        }
+    }
+
+    #[test]
+    fn interrupted_checking_interval_is_draw_at_fourth_occurrence() {
+        let mut pos = pos_from_sfen("9/6k2/9/9/9/9/9/6R2/K8 w - 1");
+        let v = Validator::new(EnteringKingRule::Point24);
+        let checking = ["-3242OU", "+3848HI", "-4232OU", "+4838HI"];
+        apply_moves(&mut pos, EnteringKingRule::Point24, &checking);
+        assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::None);
+        let detour = [
+            "-3242OU", "+9989OU", "-4252OU", "+8999OU", "-5242OU", "+3848HI", "-4232OU", "+4838HI",
+        ];
+        apply_moves(&mut pos, EnteringKingRule::Point24, &detour);
+        assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::None);
+        apply_moves(&mut pos, EnteringKingRule::Point24, &checking);
+        assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::Sennichite);
+    }
+
+    #[test]
+    fn hash_collision_does_not_replace_exact_board_comparison() {
+        let mut pos = pos_from_sfen(rshogi_core::position::SFEN_HIRATE);
+        let v = Validator::new(EnteringKingRule::Point24);
+        let initial_key = pos.state().board_key;
+        let cycle = ["+4948KI", "-4142KI", "+4849KI", "-4241KI"];
+        for _ in 0..2 {
+            apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        }
+        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle[..2]);
+        pos.state_mut().board_key = initial_key;
+        assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::None);
+    }
+
+    #[test]
     fn classify_repetition_returns_sennichite_after_12_ply_gold_dance() {
         // 平手初期局面から両者の左金を 4 九 ↔ 4 八 / 4 一 ↔ 4 二 と循環させて
         // 3 サイクル (= 12 手) で初期局面 4 回目の到達 → 通常千日手。
@@ -798,8 +877,10 @@ mod tests {
         let mut pos = pos_from_sfen("9/6k2/9/9/9/9/9/6R2/K8 w - 1");
         let v = Validator::new(EnteringKingRule::Point24);
         let cycle = ["-3242OU", "+3848HI", "-4232OU", "+4838HI"];
-        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
-        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        for _ in 0..2 {
+            apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+            assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::None);
+        }
         apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
         assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::OuteSennichiteWin);
         // `is_oute_sennichite` は勝敗を区別しない薄いラッパなので両 variant で true。
@@ -819,8 +900,10 @@ mod tests {
         let mut pos = pos_from_sfen("9/5k3/9/9/9/9/9/6R2/K8 b - 1");
         let v = Validator::new(EnteringKingRule::Point24);
         let cycle = ["+3848HI", "-4232OU", "+4838HI", "-3242OU"];
-        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
-        apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+        for _ in 0..2 {
+            apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
+            assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::None);
+        }
         apply_moves(&mut pos, EnteringKingRule::Point24, &cycle);
         assert_eq!(v.classify_repetition(&pos), RepetitionVerdict::OuteSennichiteLose);
     }

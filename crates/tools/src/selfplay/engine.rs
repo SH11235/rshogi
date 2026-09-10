@@ -11,10 +11,45 @@ use anyhow::{Result, anyhow, bail};
 
 use super::types::{InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest, duration_to_millis};
 
+/// queue に行が残っていても、期限到達後は読み続けない。
+pub(crate) fn receive_before_deadline(
+    receiver: &Receiver<String>,
+    deadline: Instant,
+) -> std::result::Result<String, RecvTimeoutError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(RecvTimeoutError::Timeout);
+    }
+    receiver.recv_timeout(remaining)
+}
+
 pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
 pub const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const STDERR_BUFFER_LINES: usize = 2;
+
+// 巨大な1行も保持・一時バッファともに制限し、超過分は改行まで読み捨てる。
+fn read_stderr_line(reader: &mut impl BufRead) -> std::io::Result<Option<String>> {
+    const MAX_BYTES: usize = 4096;
+    let mut line = Vec::new();
+    let mut seen = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(seen.then(|| String::from_utf8_lossy(&line).into_owned()));
+        }
+        seen = true;
+        let end = available.iter().position(|byte| *byte == b'\n');
+        let count = end.map_or(available.len(), |index| index + 1);
+        let text_len = end.unwrap_or(available.len());
+        let keep = text_len.min(MAX_BYTES - line.len());
+        line.extend_from_slice(&available[..keep]);
+        reader.consume(count);
+        if end.is_some() {
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+        }
+    }
+}
 
 /// エンジンプロセス起動時の設定。
 pub struct EngineConfig {
@@ -47,6 +82,20 @@ impl EngineProcess {
     pub fn spawn(cfg: &EngineConfig, label: String) -> Result<Self> {
         let mut proc = Self::spawn_uninitialized(cfg, label)?;
         proc.initialize(cfg)?;
+        Ok(proc)
+    }
+
+    /// usi/isready を含む初期化全体に期限を設けて起動する。
+    pub fn spawn_with_timeout(
+        cfg: &EngineConfig,
+        label: String,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| anyhow!("invalid startup timeout"))?;
+        let mut proc = Self::spawn_uninitialized(cfg, label)?;
+        proc.initialize_until(cfg, Some(deadline))?;
         Ok(proc)
     }
 
@@ -95,20 +144,15 @@ impl EngineProcess {
         let recent_stderr = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_BUFFER_LINES)));
         let stderr_buffer = recent_stderr.clone();
         std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        if let Ok(mut buffer) = stderr_buffer.lock() {
-                            if buffer.len() == STDERR_BUFFER_LINES {
-                                buffer.pop_front();
-                            }
-                            buffer.push_back(line);
-                        } else {
-                            break;
-                        }
+            let mut reader = BufReader::new(stderr);
+            while let Ok(Some(line)) = read_stderr_line(&mut reader) {
+                if let Ok(mut buffer) = stderr_buffer.lock() {
+                    if buffer.len() == STDERR_BUFFER_LINES {
+                        buffer.pop_front();
                     }
-                    Err(_) => break,
+                    buffer.push_back(line);
+                } else {
+                    break;
                 }
             }
         });
@@ -126,10 +170,21 @@ impl EngineProcess {
 
     /// 起動済みプロセスの USI handshake と初期オプション設定を行う。
     pub fn initialize(&mut self, cfg: &EngineConfig) -> Result<()> {
+        self.initialize_until(cfg, None)
+    }
+
+    fn initialize_until(
+        &mut self,
+        cfg: &EngineConfig,
+        total_deadline: Option<Instant>,
+    ) -> Result<()> {
+        let deadline = total_deadline.unwrap_or_else(|| Instant::now() + ENGINE_READY_TIMEOUT);
         self.write_line("usi")?;
-        let deadline = Instant::now() + ENGINE_READY_TIMEOUT;
         loop {
             let line = self.recv_line_until(deadline)?;
+            if total_deadline.is_some() && line.starts_with("info string Error") {
+                bail!("{}: engine initialization: {line}", self.label);
+            }
             if let Some(rest) = line.strip_prefix("option ") {
                 if let Some(name) = parse_option_name(rest) {
                     self.opt_names.insert(name);
@@ -171,7 +226,17 @@ impl EngineProcess {
                 self.write_line(&format!("setoption name {}", opt.trim()))?;
             }
         }
-        self.sync_ready()?;
+        self.write_line("isready")?;
+        let deadline = total_deadline.unwrap_or_else(|| Instant::now() + ENGINE_READY_TIMEOUT);
+        loop {
+            let line = self.recv_line_until(deadline)?;
+            if total_deadline.is_some() && line.starts_with("info string Error") {
+                bail!("{}: engine initialization: {line}", self.label);
+            }
+            if line == "readyok" {
+                break;
+            }
+        }
         self.write_line("usinewgame")?;
         Ok(())
     }
@@ -363,11 +428,30 @@ impl EngineProcess {
     ///
     /// `position_tail` は `position sfen ...` の `sfen` 以降にそのまま渡す。
     /// 例: `lnsg... b - 1 moves 7g7f`。
+    /// 受信期限は info 行で延長せず、期限後は stop を送り最大 10 秒応答を回収する。
+    /// 回収できても `timed_out=true` は探索成功ではないため、呼出側で判定する。
     pub fn search_raw_go(
         &mut self,
         position_tail: &str,
         go_args: &str,
         timeout: Duration,
+        info_callback: Option<&mut dyn FnMut(&str)>,
+    ) -> Result<SearchOutcome> {
+        self.search_raw_go_with_stop_grace(
+            position_tail,
+            go_args,
+            timeout,
+            Duration::from_secs(10),
+            info_callback,
+        )
+    }
+
+    fn search_raw_go_with_stop_grace(
+        &mut self,
+        position_tail: &str,
+        go_args: &str,
+        timeout: Duration,
+        stop_grace: Duration,
         mut info_callback: Option<&mut dyn FnMut(&str)>,
     ) -> Result<SearchOutcome> {
         self.write_line(&format!("position sfen {position_tail}"))?;
@@ -379,9 +463,11 @@ impl EngineProcess {
         self.write_line(&go_cmd)?;
 
         let start = Instant::now();
+        let deadline =
+            start.checked_add(timeout).ok_or_else(|| anyhow!("search deadline overflow"))?;
         let mut snapshot = InfoSnapshot::default();
         loop {
-            match self.rx.recv_timeout(timeout) {
+            match receive_before_deadline(&self.rx, deadline) {
                 Ok(line) => {
                     if line.starts_with("info") {
                         snapshot.update_from_line(&line);
@@ -404,9 +490,11 @@ impl EngineProcess {
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     self.write_line("stop")?;
-                    let stop_deadline = Duration::from_secs(10);
+                    let stop_deadline = Instant::now()
+                        .checked_add(stop_grace)
+                        .ok_or_else(|| anyhow!("stop deadline overflow"))?;
                     loop {
-                        match self.rx.recv_timeout(stop_deadline) {
+                        match receive_before_deadline(&self.rx, stop_deadline) {
                             Ok(line) if line.starts_with("info") => {
                                 snapshot.update_from_line(&line);
                             }
@@ -457,11 +545,11 @@ impl EngineProcess {
         Ok(())
     }
 
-    fn recv_line_until(&self, deadline: Instant) -> Result<String> {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            bail!("{}", self.engine_read_timeout_message(ENGINE_READY_TIMEOUT));
-        }
+    /// 継続的な info 出力でも延長されない絶対期限で1行受信する。
+    pub fn recv_line_until(&self, deadline: Instant) -> Result<String> {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| anyhow!("{}", self.engine_read_timeout_message(Duration::ZERO)))?;
         self.recv_line(remaining)
     }
 
@@ -518,8 +606,17 @@ impl EngineProcess {
         }
     }
 
+    /// `set_option_if_available` が実際に送信するかどうか。
+    ///
+    /// `usi` に対して 1 つもオプションを広告しないエンジンでは広告名の集合が空になるため、
+    /// 判別できず全て送信対象として扱う。呼び出し側が「初期化で送られなかった必須オプション」
+    /// を補う際は、送信済みの再送を避けるためにこの述語で判定する。
+    pub fn is_option_available(&self, name: &str) -> bool {
+        self.opt_names.is_empty() || self.opt_names.contains(name)
+    }
+
     pub fn set_option_if_available(&mut self, name: &str, value: &str) -> Result<()> {
-        if self.opt_names.is_empty() || self.opt_names.contains(name) {
+        if self.is_option_available(name) {
             self.write_line(&format!("setoption name {} value {}", name, value))?;
         }
         Ok(())
@@ -602,4 +699,110 @@ pub fn find_engine_in_dir(dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod stderr_tests {
+    use super::*;
+
+    #[test]
+    fn stderr_large_line_is_capped_and_next_line_preserved() {
+        let mut data = vec![b'x'; 100_000];
+        data.extend_from_slice(b"\nnext\n");
+        let mut reader = BufReader::with_capacity(17, data.as_slice());
+        assert_eq!(read_stderr_line(&mut reader).unwrap().unwrap().len(), 4096);
+        assert_eq!(read_stderr_line(&mut reader).unwrap().unwrap(), "next");
+        assert_eq!(read_stderr_line(&mut reader).unwrap(), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod deadline_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn expired_deadline_does_not_consume_queued_info() {
+        let (tx, rx) = mpsc::channel();
+        tx.send("info depth 1".into()).unwrap();
+        assert!(matches!(
+            receive_before_deadline(&rx, Instant::now()),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(rx.try_recv().unwrap(), "info depth 1");
+    }
+
+    #[test]
+    fn raw_go_bounds_both_phases_with_chatty_engine_and_handles_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mock.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+flood=
+trap 'if [ -n "$flood" ]; then kill "$flood" 2>/dev/null; wait "$flood" 2>/dev/null; fi' 0
+while IFS= read -r line; do
+  printf '%s
+' "$line" >> "$1"
+  case "$line" in
+    usi) printf 'usiok
+' ;;
+    isready) printf 'readyok
+' ;;
+    go*)
+      case "$2" in
+        normal) printf 'bestmove resign
+' ;;
+        exit) exit 0 ;;
+        *) (while :; do printf 'info depth 1 nodes 1
+'; sleep 0.005; done) & flood=$! ;;
+      esac ;;
+    stop) if [ "$2" = "stop" ]; then printf 'bestmove resign
+'; fi ;;
+    quit) break ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for mode in ["normal", "stop", "flood", "exit"] {
+            let log = dir.path().join(mode);
+            let cfg = EngineConfig {
+                path: path.clone(),
+                args: vec![log.display().to_string(), mode.into()],
+                threads: 1,
+                hash_mb: 1,
+                network_delay: None,
+                network_delay2: None,
+                minimum_thinking_time: None,
+                slowmover: None,
+                ponder: false,
+                usi_options: vec![],
+            };
+            let mut engine = EngineProcess::spawn(&cfg, mode.into()).unwrap();
+            let start = Instant::now();
+            let result = engine.search_raw_go_with_stop_grace(
+                "fixture b - 1",
+                "depth 1",
+                Duration::from_millis(30),
+                Duration::from_millis(40),
+                None,
+            );
+            assert!(start.elapsed() < Duration::from_secs(2), "{mode}");
+            if mode == "exit" {
+                assert!(result.is_err());
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result.timed_out, mode != "normal");
+                assert_eq!(result.bestmove.is_some(), mode != "flood");
+            }
+            drop(engine);
+            let commands = std::fs::read_to_string(log).unwrap();
+            assert_eq!(
+                commands.lines().filter(|line| *line == "stop").count(),
+                usize::from(matches!(mode, "stop" | "flood"))
+            );
+        }
+    }
 }

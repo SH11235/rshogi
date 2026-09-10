@@ -1436,23 +1436,13 @@ where
             eprintln!("info string declaration win: {}", decl_move.to_usi());
         }
 
-        // ponder/infinite 待機: bestmove を早出ししない（USI仕様準拠）
-        if let Some(ref ms) = main_state {
-            while !worker.state.abort
-                && !time_manager.stop_requested()
-                && (time_manager.is_pondering() || limits.infinite)
-            {
-                if ms.ponderhit_flag.swap(false, Ordering::Relaxed) {
-                    time_manager.on_ponderhit();
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
-        }
+        wait_for_search_release(worker.state.abort, limits, time_manager, main_state.as_deref());
         return 0;
     }
 
     if worker.state.root_moves.is_empty() {
         worker.state.best_move = Move::NONE;
+        wait_for_search_release(worker.state.abort, limits, time_manager, main_state.as_deref());
         return 0;
     }
 
@@ -1599,7 +1589,9 @@ where
                 // （check_abort は頻度制御で呼び出されるため、abort フラグが
                 //   立っていないまま search_root が返ることがある）
                 if worker.state.abort
-                    || (limits.nodes > 0 && worker.state.nodes >= limits.nodes)
+                    || (limits.nodes > 0
+                        && !time_manager.is_pondering()
+                        && worker.state.nodes >= limits.nodes)
                     || time_manager.stop_requested()
                 {
                     worker.state.abort = true;
@@ -1846,20 +1838,8 @@ where
         }
     }
 
-    // ponder中 / go infinite中はGUIからstop/ponderhitが来るまでbestmoveを出力してはならない（YaneuraOu準拠）
-    // 反復深化ループが自然に終了した場合（MAX_PLY到達や詰み確定）でもここで待機する
-    if let Some(ref ms) = main_state {
-        while !worker.state.abort
-            && !time_manager.stop_requested()
-            && (time_manager.is_pondering() || limits.infinite)
-        {
-            if ms.ponderhit_flag.swap(false, Ordering::Relaxed) {
-                time_manager.on_ponderhit();
-            }
-            // YaneuraOu 同様、探索終了後の待機では短時間 sleep して busy wait を避ける。
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
+    // 反復深化が自然終了した場合も、終局分岐と同じ通知待機を通る。
+    wait_for_search_release(worker.state.abort, limits, time_manager, main_state.as_deref());
 
     // 中断した探索で信頼できないPVになった場合のフォールバック
     if worker.state.abort
@@ -1880,6 +1860,25 @@ where
     effective_multi_pv
 }
 
+/// mainだけが終了通知を待つ。helperは待たずに呼出側へ戻る。
+fn wait_for_search_release(
+    aborted: bool,
+    limits: &LimitsType,
+    time_manager: &mut TimeManagement,
+    main_state: Option<&MainThreadState<'_>>,
+) {
+    if let Some(ms) = main_state {
+        while !aborted
+            && !time_manager.stop_requested()
+            && (time_manager.is_pondering() || limits.infinite)
+        {
+            if ms.ponderhit_flag.swap(false, Ordering::Relaxed) {
+                time_manager.on_ponderhit();
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
 fn root_score_is_initialized(score: Value) -> bool {
     let raw = score.raw();
     -Value::INFINITE.raw() < raw && raw < Value::INFINITE.raw()
@@ -2011,6 +2010,91 @@ mod tests {
     /// SearchWorkerは大きなスタック領域を使うため、テストは別スレッドで実行
     const STACK_SIZE: usize = 64 * 1024 * 1024; // 64MB
 
+    #[test]
+    fn terminal_roots_wait_after_initialization() {
+        use std::sync::mpsc;
+        let mate = "4k4/9/9/9/9/9/4r4/4g4/4K4 b - 1";
+        let declaration = "KGG6/SS7/PPPPPP3/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1";
+        for (sfen, expected) in [(mate, Move::NONE), (declaration, Move::WIN)] {
+            for mode in 0..4 {
+                let (ready_tx, ready_rx) = mpsc::channel();
+                let (done_tx, done_rx) = mpsc::channel();
+                let thread = std::thread::Builder::new()
+                    .stack_size(STACK_SIZE)
+                    .spawn(move || {
+                        let mut search = Search::new_with_eval_hash(1, 1);
+                        let mut pos = Position::new();
+                        pos.set_sfen(sfen).unwrap();
+                        if expected == Move::NONE {
+                            assert!(pos.in_check());
+                            assert!(
+                                super::super::RootMoves::from_legal_moves(&pos, &[]).is_empty()
+                            );
+                        }
+                        let mut limits = LimitsType::new();
+                        limits.ponder = mode == 1 || mode == 2;
+                        limits.infinite = mode == 3;
+                        limits.set_start_time();
+                        search.start_time = limits.start_time;
+                        let mut tm = TimeManagement::new(
+                            Arc::clone(&search.stop),
+                            Arc::clone(&search.ponderhit_flag),
+                        );
+                        tm.init(&limits, pos.side_to_move(), pos.game_ply(), 256);
+                        let mut worker = SearchWorker::new(
+                            Arc::clone(&search.tt),
+                            Arc::clone(&search.eval_hash),
+                            256,
+                            0,
+                            SearchTuneParams::default(),
+                        );
+                        worker.entering_king_rule = EnteringKingRule::Point27;
+                        worker.prepare_search(&limits);
+                        search.worker = Some(worker);
+                        // F01のinit resetより後に同期し、通知消失と終局待機を分離する。
+                        ready_tx
+                            .send((Arc::clone(&search.stop), Arc::clone(&search.ponderhit_flag)))
+                            .unwrap();
+                        search.search_with_callback(
+                            &mut pos,
+                            &limits,
+                            &mut tm,
+                            1,
+                            |_info: &SearchInfo| {},
+                            false,
+                        );
+                        done_tx.send(search.worker.as_ref().unwrap().state.best_move).unwrap();
+                    })
+                    .unwrap();
+                let (stop, hit) = ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                if mode != 0 {
+                    assert!(matches!(
+                        done_rx.recv_timeout(Duration::from_millis(100)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ));
+                    if mode == 1 {
+                        hit.store(true, Ordering::Relaxed);
+                    } else {
+                        if mode == 3 {
+                            hit.store(true, Ordering::Relaxed);
+                            assert!(
+                                matches!(
+                                    done_rx.recv_timeout(Duration::from_millis(50)),
+                                    Err(mpsc::RecvTimeoutError::Timeout)
+                                ),
+                                "infiniteはhitだけで終了しない"
+                            );
+                        }
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                }
+                let result = done_rx.recv_timeout(Duration::from_secs(2));
+                stop.store(true, Ordering::Relaxed);
+                thread.join().unwrap();
+                assert_eq!(result.unwrap(), expected, "mode={mode}");
+            }
+        }
+    }
     #[test]
     fn test_aggregate_best_move_changes_empty() {
         let (sum, threads) = aggregate_best_move_changes(&[]);
@@ -2465,6 +2549,49 @@ mod tests {
         assert!(root_score_is_initialized(Value::new(0)));
         assert!(root_score_is_initialized(Value::mate_in(1)));
         assert!(root_score_is_initialized(Value::mated_in(1)));
+    }
+
+    #[test]
+    fn ponderhit_before_go_returns_bestmove_without_stop() {
+        let guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        let mut search = Search::new_with_eval_hash(1, 1);
+        search.reset_flags();
+        let stop = search.stop_flag();
+        let ponderhit = search.ponderhit_handle();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let search_barrier = Arc::clone(&barrier);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(move || {
+                let mut pos = Position::new();
+                pos.set_hirate();
+                search_barrier.wait();
+                let result = search.go(
+                    &mut pos,
+                    LimitsType {
+                        ponder: true,
+                        depth: 1,
+                        ..LimitsType::default()
+                    },
+                    None::<fn(&SearchInfo)>,
+                );
+                tx.send((result.best_move, search.ponderhit_flag_for_test())).unwrap();
+            })
+            .unwrap();
+        ponderhit.signal();
+        barrier.wait();
+        let result = rx.recv_timeout(Duration::from_secs(5));
+        // 回帰時にも探索スレッドを残さず、stop による返却を成功扱いしない。
+        if result.is_err() {
+            stop.store(true, Ordering::SeqCst);
+        }
+        worker.join().unwrap();
+        let (best_move, pending) = result.expect("ponderhit alone must release bestmove");
+        assert_ne!(best_move, Move::NONE);
+        assert!(!pending);
+        drop(guard);
     }
 
     #[test]
