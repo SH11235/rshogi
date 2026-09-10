@@ -3214,20 +3214,23 @@ mod windows_main {
         let pmc_totals = lock_state(shared)?
             .take_totals()
             .ok_or_else(|| anyhow!("{}: PMC accumulator not installed", engine.label))?;
-        // 最終スライス未到着 / 連鎖欠落 / PMC 欠落は静かな過小計測になるため破棄する
+        // 最終スライス未到着 / 連鎖欠落 / PMC 欠落 / 巻き戻りは静かな過小計測になるため破棄する
         if pmc_totals.unclosed_target_slices > 0
             || pmc_totals.chain_breaks_target > 0
             || pmc_totals.pmc_gaps_target > 0
             || pmc_totals.tid_reuse_target > 0
+            || pmc_totals.regressed_switches > 0
         {
             bail!(
                 "{}: PMC 積算が不完全です (unclosed_target_slices={}, chain_breaks_target={}, \
-                 pmc_gaps_target={}, tid_reuse_target={})。この run の計測値は破棄します。",
+                 pmc_gaps_target={}, tid_reuse_target={}, regressed_switches={})。\
+                 この run の計測値は破棄します。",
                 engine.label,
                 pmc_totals.unclosed_target_slices,
                 pmc_totals.chain_breaks_target,
                 pmc_totals.pmc_gaps_target,
                 pmc_totals.tid_reuse_target,
+                pmc_totals.regressed_switches,
             );
         }
         let (totals, attributed_switches, regressed_switches) =
@@ -3240,7 +3243,7 @@ mod windows_main {
             );
         }
         let mut perf = PerfCounters::from_totals(source_names, &totals);
-        // 巻き戻り skip の診断値。0 でない run は帰属差分を取りこぼしている
+        // 上の破棄検査を通過した run では常に 0。JSON schema 維持のため残す
         perf.extra.insert("regressed_switches".to_string(), regressed_switches);
         if perf.cycles.is_none() {
             bail!("PMC totals do not contain TotalCycles");

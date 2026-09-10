@@ -43,8 +43,7 @@ cargo build --release -p tools --bin search_only_ab
 ### 破棄 (bail) する条件
 
 次のいずれかを検出した run は計測値を採用せず、エラーで終了する。静かに過小計測した
-値を正常値として返さないための設計で、`regressed_switches` (カウンタ巻き戻り) だけは
-診断値として JSON に残す。
+値を正常値として返さないための設計。
 
 | 条件 | 意味 |
 |---|---|
@@ -52,6 +51,7 @@ cargo build --release -p tools --bin search_only_ab
 | 連鎖不一致 (`chain_breaks_target`) | 前回 switch-in した TID と今回 switch-out した TID が違う、または timestamp 逆転。対象スレッドが絡む区間でのみ数える |
 | PMC 欠落 (`pmc_gaps_target`) | 対象スライスの両端どちらかの CSwitch に PMC が付いていない (基準は TID・時刻だけ保持して次の switch-out で判定) |
 | TID 再利用 (`tid_reuse_target`) | run 中に対象所属の TID が別 PID の Thread Start で再利用された。配送順によって旧スレッドと再利用先を区別できないので run ごと拒否 |
+| カウンタ巻き戻り (`regressed_switches`) | 対象スライス両端の PMC が単調増加でない。その差分を帰属できないため、他のスライスが正常でも合計は過小になる |
 | drain timeout | STOP 後 15 秒以内に `ProcessTrace` が終了しない (CloseTrace 後さらに 5 秒待って detach) |
 | ETW イベントロス | セッション統計の `EventsLost` / `RealTimeBuffersLost` が run 中に増えた |
 
