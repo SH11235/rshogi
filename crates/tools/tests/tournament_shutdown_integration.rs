@@ -156,3 +156,39 @@ fn normal_completion_remains_valid() {
     assert_eq!(meta["unreturned_games"], 0);
     assert!(output.contains("Tournament Complete"));
 }
+
+#[test]
+fn recovered_complete_pair_is_rejected_by_analyzer_after_interruption() {
+    let (dir, meta, _) = run_case("interrupt", 2);
+    assert_eq!(meta["incomplete_pairs"], 0);
+    assert_eq!(meta["unreturned_games"], 0);
+    for partial in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"));
+        command.arg(dir.path().join("out/a-vs-b.jsonl")).args([
+            "--json",
+            "--sprt",
+            "--sprt-base-label",
+            "a",
+            "--sprt-test-label",
+            "b",
+            "--sprt-nelo0",
+            "0",
+            "--sprt-nelo1",
+            "10",
+            "--sprt-alpha",
+            "0.05",
+            "--sprt-beta",
+            "0.05",
+        ]);
+        if partial {
+            command.arg("--allow-partial");
+        }
+        let output = command.output().unwrap();
+        let analysis: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|err| panic!("{err}: {}", String::from_utf8_lossy(&output.stderr)));
+        assert_eq!(output.status.success(), partial);
+        assert_eq!(analysis["sprt"]["pairs"], 1);
+        assert_eq!(analysis["extra"]["invalid"], true);
+        assert_eq!(analysis["sprt"]["decision"], "invalid");
+    }
+}
