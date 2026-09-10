@@ -1,3 +1,4 @@
+pub mod adjudication;
 pub mod backend;
 pub mod engine;
 pub mod game;
@@ -20,3 +21,5 @@ pub use types::{
     EvalLog, GameOutcome, InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest, TimeArgs,
     duration_to_millis, side_label,
 };
+
+pub use adjudication::{DrawRule, ResignRule};

@@ -22,6 +22,8 @@ cargo build --release -p tools --bin generate_spsa_params --bin spsa --bin spsa_
   YO 命名の .params (例: suisho 系の suisho*.params)。YO 駆動時は §10.6 の
   ケース A、rshogi 駆動時は §10.6 のケース B / `yo_to_rshogi_params` 経由
 
+探索の無指定時の既定値を正本として、USI 宣言と生成 `.params` も同じ値を使います。旧版では 170 項目中 13 項目の宣言値が実際の既定値と異なっていました。既存 `.params` は自動変更されません。比較条件を確認するときは使用したファイルとエンジン版を保存し、再生成した値との差分を確認してください。今回の修正は実エンジンの既定値を変更せず、古い宣言値へ戻すものでもありません。
+
 rshogi デフォルト値から始める場合の生成コマンド:
 
 ```bash
@@ -30,6 +32,16 @@ cargo run --release -p tools --bin generate_spsa_params -- \
 ```
 
 ## 3. SPSA実行
+
+対局 driver は開始局面を含む 4 回同一局面で千日手を自動終局する。
+通常は引分、連続王手の千日手は王手側の反則負けとして評価に算入する。
+SPSA では評価値による投了・引分裁定は無効。
+各探索には対局開始局面と、その局の全指し手を `position sfen ... moves ...` で渡す。
+開始局面ファイルの手順適用後を履歴の基点とし、毎局・再試行時に履歴をリセットする。
+TT 等のキャッシュ保持とは別の処理であり、エンジンが対局中の反復を探索で利用できる。
+履歴を送らない旧 driver と探索条件が異なるため、更新前後の結果を同一 run に混ぜず、
+新しい run-dir を使用して実験記録に driver のコミットを残す。
+詳細は [対局履歴の仕様](tournament.md#エンジンに渡す対局履歴) を参照。
 
 > 以下のコマンド例は **starting point** であり、最適値ではない。
 > `--total-pairs` は対象 param 数 × 50〜500 程度の幅で結果を見ながら増減
@@ -69,7 +81,7 @@ cargo run --release -p tools --bin spsa -- \
 | `--byoyomi <ms>` | 100〜1000 ms | 1 手秒読み (既定 1000)。NPS が安定する程度に。短すぎるとエンジンが thinking time を使い切れず評価ノイズが増える |
 | `--seed S` | 任意 | base seed (省略時はランダム)。SPSA の乱数列は seed と batch index から決定論的に生成される |
 | `--max-moves` / `--timeout-margin-ms` | 既定 320 / 1000 ms | 対局打ち切り上限と timeout 検出マージン。慣習値で十分なケースが多い |
-| `--early-stop-*` 三点 | 初回 run では **指定しない** | 閾値の運用実績がまだ無く、特に `--early-stop-result-variance-threshold` は `\|raw_result\| / batch_pairs` (0..1 正規化値) との比較なので、よく考えずに小さい値を入れるとほぼ全 batch で誤発火する。挙動を観測してから設定する (§9.3) |
+| `--early-stop-*` 三点 | 初回 run では **指定しない** | 閾値の運用実績がまだ無く、特に `--early-stop-result-variance-threshold` は `\|raw_result\| / batch_pairs` (0..2 の値) との比較なので、よく考えずに小さい値を入れるとほぼ全 batch で誤発火する。挙動を観測してから設定する (§9.3) |
 
 `<run-dir>` には以下が自動生成される:
 
@@ -113,6 +125,7 @@ SPSA は paired antithetic スケジュールで対局を組む。**1 pair (2 �
 - `--byoyomi <ms>` (既定 1000ms): 1 手あたりの秒読み時間制御。最も単純で SPSA 向き
 - `--btime <ms> --binc <ms>`: Fischer モード（持ち時間 + 加算）。長い対局の挙動を測りたい時のみ
 - `--nodes <N>`: ノード数固定。CPU 性能差に依存しない厳密比較が必要な場合のみ
+  - 1手の探索期限は `--nodes-timeout-ms` で指定する（[§14](#14-engine-プール再試行停止) 参照）。
   （SPSA はノイズ低減のため通常は時間ベースで十分）
 
 ```bash
@@ -326,6 +339,16 @@ cargo run --release -p tools --bin spsa_stats_to_plot_csv -- \
 `.params` ファイルを変更せず、実行時に対象を絞る。
 
 マッチしないパラメータは摂動されず `.params` ファイルの現在値で固定される。
+有効な対象外項目も両エンジンへ送信する。整数項目の小数の現在値は、最近接整数
+（同距離は 0 から遠い側）へ丸めて範囲内に収め、両側・全 batch で同じ値を使う。
+実数項目は範囲内の現在値を送る。保存する現在値自体は変更しない。
+`[[NOT USED]]` と、mapping 指定時に対応のない項目は送信・摂動・更新すべての対象外。
+有効な params の設定は各対局前に送るため、同名の初期 USI option より優先する。
+
+旧版の段階的 run では、対象外項目の保存値と実際の engine default / 明示 USI option
+が異なる場合がある。元成果物を保持し、使用 binary・option・baseline を確認して
+影響する比較を再評価する。すべての既存 run が影響したとは限らない。
+
 前回チューニング済みの値をベースに別グループをチューニングする段階的ワークフローに対応。
 
 指定可能な全パターン一覧:
@@ -731,7 +754,7 @@ avg_abs_shift,updated_params,avg_abs_update,max_abs_update,total_games
 - `|raw_result| / batch_pairs < 0.002` 程度なら +/- 摂動の勝率差がほぼ 0 (= 結果が拮抗)
 
 `--early-stop-result-variance-threshold` の比較対象は **`|raw_result| / batch_pairs`**
-(0..1 の正規化値、+1/-1 の game pair が完全に拮抗すると 0 に近づく) であり、
+(0..2 の値、各 game の +1/-1 が完全に拮抗すると 0 に近づく) であり、
 `raw_result` の絶対値そのものではない点に注意。閾値値はチューニング対象の感度に
 応じて調整する (枝刈り系は感度高、history 初期値は低、等)。
 
@@ -1393,3 +1416,90 @@ resume できないときは、§10.7 の手順で旧 run の最終値だけを�
 - 単一 seed のばらつきを確認したい場合は、`--seed` を変えた独立 run dir を
   数本 (3〜5 本) 走らせて `stats.csv` を比較する
 - チューニング対象が広すぎる。`--active-only-regex` でグループ別に分割して順次チューニング
+
+## 14. engine プール・再試行・停止
+
+worker は run 開始時に `min(concurrency, 2 × min(batch_pairs, remaining_pairs))` 個生成する。
+`remaining_pairs` は run 開始時の残り pair 数で、0 なら pool を作らず engine も起動しない。各 worker が
+plus/minus の engine 2 本を全 batch で再利用する。batch 末の barrier と更新・保存は従来どおり。
+各対局では全 active パラメータを絶対値で送り、plus 設定＋isready → minus 設定＋isready →
+plus usinewgame＋isready → minus usinewgame＋isready の順で開始する。
+
+| オプション | 既定値 | 意味 |
+|---|---:|---|
+| `--engine-retries N` | 1 | 初回を除く追加試行数。spawn・初期化失敗も予算に含める |
+| `--nodes-timeout-ms MS` | 600000 | `--nodes` 使用時の1探索（1手）の期限。正数のみ。10分は未較正の初期値 |
+
+再試行の対象は engine 異常終了・pipe 切断・usi/isready の read timeout・watchdog。
+その worker の engine 2 本を破棄して再生成し、同じ1局の task（局面・色・game_id・時間制御初期値）と
+batch の確定済み plus/minus 値でやり直す。乱数は引き直さず、成功した結果を一度だけ集計する。
+再試行は stderr に `retry batch=... game_id=... attempt=... cause=...` と1行記録する。
+`attempt=2` は初回失敗後の2回目の試行を表す。CSV/meta の schema は変えない。
+通常の resign / win / illegal_move / no_bestmove / 時計 timeout / max_moves / sennichite / sennichite_perpetual_check と局面構築エラーは再試行しない。
+これは1局単位の再試行であり、後続 PR2 の PairTask 単位の再試行とは別物。
+
+watchdog は「運用上の探索期限超過。hang と低速を区別せず、勝敗には採用しない」。
+期限で `stop` を送り、`timeout-margin-ms` の猶予で応答を回収する。
+stop 後の bestmove も、受信時点で期限を超えた bestmove も正常結果には戻さず、再試行対象にする。
+共有 search API は depth-only にも対応するが、spsa に `--depth` は追加していない。
+tournament / backend は watchdog を有効にせず、既存の動作を維持する。
+
+正常終了・early-stop・致命的エラーでは task channel を閉じて待機 worker を起こし、全 worker を join してから
+run-dir lock を解放する。cancel は task 取得後・再 spawn 前・各手の開始前に確認する。
+初期化途中も含め、最終試行の spawn / initialize 失敗ではローカル engine の破棄前に cancel を通知する。
+再試行可能な初期化失敗は全体 cancel を立てず、engine failure として再試行する。
+panic hook は既定 hook によるメッセージ出力後、unwind 開始前に cancel を通知するため、
+初期化途中のローカル engine の破棄より先に他 worker へ停止を伝える。
+探索中の即時割り込みは行わず、実行中の探索の終了を待つ。usi/isready は無関係な行が来続けても
+usi→usiok と isready→readyok の各段で120秒（初期化は最大240秒）で timeout になる。engine の終了は quit → 300ms 待機 → kill。
+ただし同期 stdin write（quit を含む）の停滞は保証対象外であり、全 hang の有限時間停止を保証するものではない。
+
+fresh 開始では最初の batch 前に completed_pairs=0 の v4 meta を保存する。
+engine failure から通常の Err で戻った場合、state/meta/CSV は直前の batch 境界を保持し、新たな final.params は作らない。
+同じ `--total-pairs`・`--seed` と `--resume` で重複行なく再開できる。
+state→meta 保存途中のクラッシュ耐性や、6桁保存からの f64 軌道の完全復元は保証しない。
+
+決定的な対局応答について values.csv / stats.csv / state.params を固定 SHA `8a740655` と比較する。
+実 engine の定跡乱数や usinewgame で消えないプロセス内状態は、再 spawn の頻度変更により変化しうるため互換性保証の対象外。
+
+### 互換性 golden の再生成
+
+固定 SHA `8a740655` からビルド済みの基準 spsa を `BASELINE` に指定する。
+mock は必ずこの worktree で新しくビルドする。Git Bash / Bash でリポジトリルートから実行:
+
+```bash
+cargo build -p tools --bin spsa_test_engine
+BASELINE=/path/to/baseline/spsa.exe
+MOCK="$PWD/target/debug/spsa_test_engine.exe" # Linux は .exe を外す
+GOLDEN=crates/tools/tests/golden/spsa
+OUT="target/spsa-golden-$(date +%s)"
+for mode in cyclic random; do
+  random=false; [ "$mode" = random ] && random=true
+  for concurrency in 1 3; do
+    run="$OUT/$mode-$concurrency"
+    SPSA_TEST_ENGINE_MODE=value_driven "$BASELINE" \
+      --run-dir "$run" --engine-path "$MOCK" \
+      --init-from "$GOLDEN/canonical.params" --startpos-file "$GOLDEN/startpos.txt" \
+      --total-pairs 4 --batch-pairs 2 --concurrency "$concurrency" \
+      --seed 1 --nodes 1000 --threads 1 --hash-mb 16 --random-startpos "$random" || exit 1
+    mkdir -p "$GOLDEN/$mode-$concurrency"
+    cp "$run/values.csv" "$run/stats.csv" "$run/state.params" "$GOLDEN/$mode-$concurrency/"
+  done
+done
+cargo test -p tools --test spsa_run_dir_integration value_driven_matches_fixed_sha_golden
+```
+
+2026-09-09 の生成時には SPSA 本体の改修前にも同じ条件で現行 HEAD を実行し、4条件×3成果物が基準と
+SHA-256 一致することを確認した。value_driven は SPSA_TEST_INT が6以上なら win、それ以外は resign を返し、
+両 batch の raw_result=+4 の非ゼロ更新を検証する。mock は局面に依存しないため、局面選択 RNG 自体は既存 prep unit test が検証する。
+
+### 重複パラメータの拒否
+
+同じ名前の行、および同じ net 係数 ID を表す行（数値 index の先頭ゼロなど）は、元ファイルの行番号を示して拒否します。`[[NOT USED]]` 行も重複検査の対象です。重複行を後勝ちまたは加算と解釈しません。既存ファイルは自動修正しないため、意図した 1 行へ整理してください。
+エンジン名の mapping を使う場合は、送信対象行の翻訳先も検査します。符号反転の有無にかかわらず同じ係数への衝突は対局開始前に拒否します。
+
+### Schedule の入力検証と停止指標の単位
+
+`alpha` / `gamma` / `a-ratio` / `mobility` と早期停止の閾値は有限値が必要です。既存の正負範囲に加え、対局開始前に schedule の定数、分母の underflow、摂動と最大勝敗和による更新量の保守的な上界を検査します。巨大な有限値でも安全な上界を確認できない組合せは拒否します。通常の schedule 式・既定値・更新係数は変更しません。`c_end=0` による更新停止は維持します。
+
+早期停止の `|raw_result| / batch_pairs` は 0..2 です。1 pair の両局勝ちも両局負けも 2、両局引分または 1 勝 1 敗なら 0、1 勝 1 引分なら 1 です。分散推定値ではなく勝敗和の絶対値の代理指標です。既存の閾値は同じ単位のまま使え、半分への換算は不要です。逐次的な停止規則の較正や棋力保証を意味しません。

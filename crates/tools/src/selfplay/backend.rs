@@ -198,6 +198,7 @@ impl SearchBackend for NativeBackend {
         let best_move_usi = best_move.map(|m| m.to_usi());
 
         let eval = Some(EvalLog {
+            score_bound: None,
             score_cp: if result.score.is_mate_score() {
                 None
             } else {
@@ -276,7 +277,9 @@ impl SearchBackend for UsiBackend {
         };
 
         let req = SearchRequest {
+            limit_only_timeout_ms: None,
             sfen: &params.sfen,
+            moves: "",
             time_args: params.time_args,
             think_limit_ms: params.think_limit_ms,
             timeout_margin_ms: params.timeout_margin_ms,

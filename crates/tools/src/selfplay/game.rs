@@ -1,16 +1,36 @@
-use anyhow::Result;
-use rshogi_core::movegen::is_legal_with_pass;
+use anyhow::{Context, Result};
 use rshogi_core::types::{Color, Move};
 
+use super::adjudication::{DrawRule, ResignRule, RuleAdjudicator, ScoreAdjudicator};
 use super::engine::EngineProcess;
-use super::position::{ParsedPosition, build_position};
+use super::position::{ParsedPosition, build_position, is_legal_game_move};
 use super::time_control::TimeControl;
 use super::types::{EvalLog, GameOutcome, InfoCallback, SearchRequest};
 
+/// 対局の通常結果や局面エラーと区別するエンジン通信障害。
+#[derive(Debug)]
+pub struct EngineFailure;
+
+impl std::fmt::Display for EngineFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("engine infrastructure error")
+    }
+}
+
+impl std::error::Error for EngineFailure {}
+
 /// ゲーム設定
 pub struct GameConfig {
+    /// 評価値による投了裁定。既定は無効。
+    pub resign_rule: Option<ResignRule>,
+    /// 評価値による引分裁定。既定は無効。
+    pub draw_rule: Option<DrawRule>,
     pub max_moves: u32,
     pub timeout_margin_ms: u64,
+    /// 時間制御なしの nodes/depth 探索の期限（1 手、正のミリ秒）。
+    pub limit_only_timeout_ms: Option<u64>,
+    /// 各手の開始前に確認する停止要求。探索中の割り込みは行わない。
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// パス権利の初期値 (先手, 後手)。None の場合はパス権なし。
     pub pass_rights: Option<(u8, u8)>,
     /// Some(n) の場合は `go depth n` を使用（byoyomi より優先）
@@ -62,17 +82,39 @@ pub fn run_game(
     on_move: &mut dyn FnMut(&MoveEvent),
     mut info_cb: Option<Box<InfoCallback<'_>>>,
 ) -> Result<GameResult> {
+    anyhow::ensure!(
+        config.limit_only_timeout_ms != Some(0),
+        "limit_only_timeout_ms must be positive"
+    );
     let pass_black = config.pass_rights.map(|(b, _)| b);
     let pass_white = config.pass_rights.map(|(_, w)| w);
     let mut pos = build_position(start_pos, pass_black, pass_white)?;
+    // 千日手裁定と同じく、開始局面ファイルの手順適用後を対局履歴の基点にする。
+    // 毎手この SFEN と指し手列を送ることで、エンジン側にも反復の履歴を復元させる。
+    let initial_sfen = pos.to_sfen();
+    let initial_pass_rights = config
+        .pass_rights
+        .map(|_| (pos.pass_rights(Color::Black), pos.pass_rights(Color::White)));
+    let mut moves = String::new();
+    let mut rules = RuleAdjudicator::new(&pos);
+    let mut scores = ScoreAdjudicator::new(config.resign_rule, config.draw_rule);
     let mut tc = tc;
     let mut outcome = GameOutcome::InProgress;
     let mut outcome_reason = "max_moves".to_string();
     let mut plies_played = 0u32;
 
-    let pass_rights_enabled = config.pass_rights.is_some();
-
     for ply_idx in 0..config.max_moves {
+        if config
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Ok(GameResult {
+                outcome: GameOutcome::InProgress,
+                reason: "cancelled".into(),
+                plies: plies_played,
+            });
+        }
         plies_played = ply_idx + 1;
         let side = pos.side_to_move();
         let engine = if side == Color::Black {
@@ -83,21 +125,18 @@ pub fn run_game(
         let engine_label = engine.label.clone();
         let sfen_before = pos.to_sfen();
         let think_limit_ms = tc.think_limit_ms(side);
-        let pass_rights = if pass_rights_enabled {
-            Some((pos.pass_rights(Color::Black), pos.pass_rights(Color::White)))
-        } else {
-            None
-        };
         let req = SearchRequest {
-            sfen: &sfen_before,
+            sfen: &initial_sfen,
+            moves: &moves,
             time_args: tc.time_args(),
             think_limit_ms,
             timeout_margin_ms: config.timeout_margin_ms,
+            limit_only_timeout_ms: config.limit_only_timeout_ms,
             game_id,
             ply: plies_played,
             side,
             engine_label: engine_label.clone(),
-            pass_rights,
+            pass_rights: initial_pass_rights,
             go_depth: config.go_depth,
             go_nodes: if side == Color::Black {
                 config.go_nodes_black
@@ -106,8 +145,15 @@ pub fn run_game(
             },
         };
         let cb = info_cb.as_mut().map(|b| b.as_mut() as &mut dyn FnMut(&str, &SearchRequest<'_>));
-        let search = engine.search(&req, cb)?;
+        let search = engine.search(&req, cb).context(EngineFailure)?;
 
+        if search.watchdog_fired {
+            return Ok(GameResult {
+                outcome: GameOutcome::InProgress,
+                reason: "watchdog".into(),
+                plies: plies_played,
+            });
+        }
         let timed_out = search.timed_out;
         let mut move_usi = search.bestmove.clone().unwrap_or_else(|| "none".to_string());
         let mut raw_move_usi = None;
@@ -150,16 +196,29 @@ pub fn run_game(
                     terminal = true;
                 }
                 _ => match Move::from_usi(mv_str) {
-                    Some(mv) if is_legal_with_pass(&pos, mv) => {
+                    Some(mv) if is_legal_game_move(&pos, mv) => {
                         let gives_check = if mv.is_pass() {
                             false
                         } else {
                             pos.gives_check(mv)
                         };
                         pos.do_move(mv, gives_check);
+                        // 特殊応答や不正手は追加しない。受信文字列の余分な末尾なども引き継がない。
+                        move_usi = mv.to_usi();
+                        if !moves.is_empty() {
+                            moves.push(' ');
+                        }
+                        moves.push_str(&move_usi);
+                        if let Some(verdict) = rules
+                            .after_move(&pos, side, gives_check, plies_played)
+                            .or_else(|| scores.after_move(side, eval_log.as_ref(), plies_played))
+                        {
+                            outcome = verdict.outcome;
+                            outcome_reason = verdict.reason.to_string();
+                            terminal = true;
+                        }
                         tc.update_after_move(side, search.elapsed_ms);
-                        move_usi = mv_str.clone();
-                        raw_move_usi = None;
+                        raw_move_usi = (move_usi != *mv_str).then(|| mv_str.clone());
                     }
                     _ => {
                         outcome = if side == Color::Black {

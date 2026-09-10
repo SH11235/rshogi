@@ -8,8 +8,8 @@
 
 | ツール | 説明 |
 |--------|------|
-| `tournament` | 複数エンジンの round-robin 並列トーナメント、error ペア再対局、SPRT 検定。`--seed` による matchup ごとの決定的な開始局面選択と seed 付き meta 出力に対応（[詳細](docs/tournament.md)） |
-| `analyze_selfplay` | tournament 出力の世代別ペア集計・Elo/nElo 算出・SPRT post-hoc 判定（[詳細](docs/analyze_selfplay.md)） |
+| `tournament` | 複数エンジンの round-robin 並列トーナメント、動的目標変更時の先後交換ペア維持、error ペア再対局、SPRT 検定。`--seed` による matchup ごとの決定的な開始局面選択と seed 付き meta 出力、千日手の自動終局・エンジンへの対局履歴送信に対応（[詳細](docs/tournament.md)） |
+| `analyze_selfplay` | tournament 出力の世代別ペア集計・Elo/nElo 算出・SPRT post-hoc 判定（[詳細](docs/analyze_selfplay.md)、[LLR 計算・再計算時の注意](docs/tournament.md#llr-の計算と保存ログの再計算)） |
 | `floodgate_record` | csa_client の per-game JSONL から 1 エンジンの戦績を集計（先後別勝率・相手別・後手勝ち/負け/引分・実戦 NPS、`--config` で csa_client 設定から入力導出、`--fetch-ratings` で wdoor 現在レート併記・履歴記録。floodgate 連続対局向け、[詳細](docs/floodgate_record.md)） |
 | `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、USI engine vs engine／NativeBackend、native LS progress 係数、`--keep-tt` による native TT・EvalHash・履歴の対局間保持、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)） |
 | `floodgate_pipeline` | Floodgate棋譜のダウンロード・変換・`live-mirror --push` MONITOR2 着手通知付きリアルタイムミラー（[詳細](docs/floodgate_pipeline.md)） |
@@ -56,7 +56,8 @@
 
 | ツール | 説明 |
 |--------|------|
-| `benchmark` | エンジン性能ベンチマーク |
+| `benchmark` | USI の評価ハッシュ設定・受信期限に対応。 エンジン性能ベンチマーク |
+| `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval を分けて計測（[詳細](docs/bench_nnue_eval.md)） |
 | `search_only_ab` | search-only A/B ベンチマーク。cycles/node・instructions/node を Linux は perf、Windows は ETW PMC で計測（[詳細](docs/search_only_ab.md)） |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能（[詳細](docs/compare_nodes.md)） |
 | `compare_eval_nnue` | NNUE評価値の比較 |
@@ -118,8 +119,10 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [ek_testset](docs/ek_testset.md) - held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点
 - [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
 - [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（u8 127 張り付き）を実局面で計測
+- [SPSA の既定値生成](docs/spsa_runbook.md) - 無指定の探索・USI 宣言と共通の値から `.params` を生成
+- [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - regex 対象外の有効な基準値も両 engine へ適用。有限な schedule を事前検査。永続 engine プールで batch チューニング。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
 - [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から net 重み delta 用 SPSA `.params` を生成
-- [apply_net_spsa_params](docs/apply_net_spsa_params.md) - net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する
+- [apply_net_spsa_params](docs/apply_net_spsa_params.md) - 重複行を拒否。 net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する
 - [rescore_psv](docs/rescore_psv.md) - PSV 評価値の再スコアリング（推奨: dlshogi ONNX + TensorRT FP16。qsearch-leaf ラベル / policy 展開 / レジューム / score sidecar（`--out-scores`、dlshogi ONNX と NNUE 静的評価）対応。LayerStacks routing は格納 bucket 数との不一致を拒否し、旧世代 net のみ `--allow-routing-buckets-mismatch` で明示許可）
 - [psv_gate_by_king_zone](docs/psv_gate_by_king_zone.md) - 入玉ドメインの base/override score 合成と行対応 mask bitmap
 - [psv_dual_label](docs/psv_dual_label.md) - 通常 PSV の score 退避、dual-label PSV の生成・sidecar 抽出・fail-closed 検証
@@ -139,3 +142,5 @@ cargo run -p tools --release --bin benchmark -- --internal
 ## 使用例
 
 より多くのコマンド例は [examples/README.md](examples/README.md) を参照。
+
+- [spsa_stats_to_plot_csv](docs/spsa_stats_to_plot_csv.md) - 入力 alias を拒否し、変換成功時だけ plot CSV を置換

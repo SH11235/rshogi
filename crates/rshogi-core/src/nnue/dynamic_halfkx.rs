@@ -788,15 +788,23 @@ mod tests {
         )
         .unwrap();
 
-        let mut pos = Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-        let mut dynamic_stack = DynamicHalfKxStack::new(&dynamic);
-        dynamic.refresh(&pos, &mut dynamic_stack);
-        let dynamic_value = dynamic.evaluate(&pos, &mut dynamic_stack);
+        for sfen in [
+            SFEN_HIRATE,
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+            "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            // 各局面で双方を fresh に構築し、他局面の accumulator を流用しない。
+            let mut dynamic_stack = DynamicHalfKxStack::new(&dynamic);
+            dynamic.refresh(&pos, &mut dynamic_stack);
+            let dynamic_value = dynamic.evaluate(&pos, &mut dynamic_stack);
 
-        let mut static_stack = HalfKPStack::from_network(&static_net);
-        static_net.refresh_accumulator(&pos, &mut static_stack);
-        let static_value = static_net.evaluate(&pos, &static_stack);
-        assert_eq!(dynamic_value, static_value);
+            let mut static_stack = HalfKPStack::from_network(&static_net);
+            static_net.refresh_accumulator(&pos, &mut static_stack);
+            let static_value = static_net.evaluate(&pos, &static_stack);
+            assert_eq!(dynamic_value, static_value, "{sfen}");
+            println!("fresh HalfKP: {sfen}: {static_value:?}");
+        }
     }
 }

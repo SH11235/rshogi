@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use tools::output_path::{
     ensure_created_paths_distinct, ensure_distinct_output_paths, ensure_safe_output_path,
 };
-use tools::spsa_param_mapping::parse_param_line;
+use tools::spsa_param_mapping::{parse_param_line, register_unique_parameter};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -192,11 +192,13 @@ fn validate_sha256(value: &str, source: &str) -> Result<()> {
 
 fn parse_deltas(contents: &str) -> Result<Vec<NetDelta>> {
     let mut deltas = Vec::new();
+    let mut names = std::collections::HashMap::new();
     for (index, line) in contents.lines().enumerate() {
         let line_no = index + 1;
         let Some(row) = parse_param_line(line, line_no)? else {
             continue;
         };
+        register_unique_parameter(&mut names, &row.name, line_no)?;
         if row.not_used {
             continue;
         }
@@ -317,6 +319,22 @@ fn write_json(file: &mut File, path: &Path, report: &ApplyReport<'_>) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn duplicate_net_ids_are_rejected_before_finalizing() {
+        for second in ["SPSA_NET_ft_b_1", "SPSA_NET_ft_b_01"] {
+            let rows = format!(
+                "# header\nSPSA_NET_ft_b_1,int,1,-10,10,1,0.002\n{second},int,2,-10,10,1,0.002\n"
+            );
+            let error = parse_deltas(&rows).unwrap_err().to_string();
+            assert!(error.contains("line 3") && error.contains("line 2"), "{error}");
+        }
+        let rows = "SPSA_NET_ft_b_1,int,1,-10,10,1,0.002\nSPSA_NET_ft_b_2,int,2,-10,10,1,0.002\n";
+        let deltas = parse_deltas(rows).unwrap();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].delta, 1);
+        assert_eq!(deltas[1].delta, 2);
+    }
+
     use super::*;
 
     #[test]
