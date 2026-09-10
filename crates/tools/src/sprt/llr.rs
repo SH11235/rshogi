@@ -3,7 +3,7 @@
 //! Michel Van den Bergh "Normalized Elo Practical" §4.1 に基づき、
 //! MLE を ITP 法（Oliveira-Takahashi 2020）で解いて LLR を計算する。
 //!
-//! shogitest の `src/sprt.rs` を参考に Rust 化。式の変更はなし。
+//! MLE / ITP solver は shogitest 由来。ゼロ件数の事前補正は fishtest の方式に従う。
 
 use std::num::FpCategory;
 
@@ -88,11 +88,11 @@ impl SprtParameters {
     ///
     /// `pair_count == 0` の場合は `0.0` を返す（情報なし）。
     pub fn llr(&self, penta: Penta) -> f64 {
-        let Some(raw_probs) = penta.to_probs() else {
+        if penta.pair_count() == 0 {
             return 0.0;
-        };
-        let prob = regularize(raw_probs);
-        let count = penta.pair_count() as f64;
+        }
+        let (count, prob) =
+            regularize_counts([penta.ll, penta.dl, penta.dd + penta.wl, penta.wd, penta.ww]);
         llr(
             count,
             prob,
@@ -186,15 +186,15 @@ fn mle<const N: usize>(
     Some(p)
 }
 
-/// `max(x_i, 1e-3)` でゼロ確率にフロアを当てる。
+/// ゼロ件数だけに 0.001 の事前件数を与え、補正後の総数で正規化する。
 ///
-/// shogitest 仕様に合わせて**再正規化はしない**（総和 > 1 になる）。
-/// これは `mle` の反復内で θ が事後的に確率比を補正するため、
-/// 経験分布のフロアだけ調整すれば最終 MLE は正しく収束するという設計。
-/// ゼロ確率エントリを放置すると `ln(0)` / `0 割り` を踏むため、最低限
-/// 1e-3 を下限とする。
-fn regularize<const N: usize>(x: [f64; N]) -> [f64; N] {
-    x.map(|v| v.max(1e-3))
+/// 確率そのものに下限を置くと、標本増加後も補正の影響が消えない。
+/// LLR の重みもこの総数を使い、確率と件数の尺度を一致させる。
+/// 入力は少なくとも1件の観測を持つ pentanomial 件数。
+fn regularize_counts<const N: usize>(counts: [u64; N]) -> (f64, [f64; N]) {
+    let adjusted = counts.map(|v| if v == 0 { 1e-3 } else { v as f64 });
+    let total: f64 = adjusted.iter().sum();
+    (total, adjusted.map(|v| v / total))
 }
 
 fn mean<const N: usize>(x: [f64; N], p: [f64; N]) -> f64 {
@@ -294,6 +294,85 @@ mod tests {
 
     fn approx(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
+    }
+
+    fn from_counts([ll, dl, dd, wd, ww]: [u64; 5]) -> Penta {
+        Penta {
+            ll,
+            dl,
+            dd,
+            wl: 0,
+            wd,
+            ww,
+        }
+    }
+
+    #[test]
+    fn count_prior_is_normalized_and_does_not_floor_rare_observations() {
+        let (count, prob) = regularize_counts([1, 0, 9999, 0, 0]);
+        assert!(approx(count, 10000.003, 1e-10));
+        assert!(approx(prob.iter().sum(), 1.0, 1e-14));
+        assert!(approx(prob[0] * count, 1.0, 1e-14));
+        assert!(prob[0] < 0.001);
+        assert!(approx(prob[1] * count, 0.001, 1e-14));
+        let (_, small) = regularize_counts([0, 80, 800, 120, 0]);
+        let (_, large) = regularize_counts([0, 800, 8000, 1200, 0]);
+        assert!(large[0] < small[0] / 9.99);
+        let (count, prob) = regularize_counts([1, 2, 3, 4, 5]);
+        assert_eq!(count, 15.0);
+        assert_eq!(prob, [1.0 / 15.0, 2.0 / 15.0, 3.0 / 15.0, 4.0 / 15.0, 5.0 / 15.0]);
+    }
+
+    #[test]
+    fn normalized_input_and_mle_have_unit_mass() {
+        let (_, prob) = regularize_counts([0, 84, 840, 126, 0]);
+        assert!(approx(prob.iter().sum(), 1.0, 1e-14));
+        for nelo in [0.0, 10.0] {
+            let t = nelo / (800.0 / 10.0_f64.ln()) * 2.0_f64.sqrt();
+            let fitted = mle(prob, [0.0, 0.25, 0.5, 0.75, 1.0], 0.5, t).unwrap();
+            assert!(fitted.iter().all(|p| p.is_finite() && *p > 0.0));
+            assert!(approx(fitted.iter().sum(), 1.0, 1e-7));
+        }
+    }
+
+    #[test]
+    fn llr_matches_fixed_fishtest_reference_fixtures() {
+        // fishtest 93fe81eb8256b870ab759ec4470f6251fe985827 / LLR_normalized(0,10,counts)。
+        // 収束法・許容誤差が異なるため、対象 fixture の算術比較に限定する。
+        let params = SprtParameters::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        for (counts, expected) in [
+            ([0, 84, 840, 126, 0], 2.9601723907362505),
+            ([0, 80, 800, 120, 0], 2.819208007021372),
+            ([0, 800, 8000, 1200, 0], 28.192797103084338),
+            ([1, 99, 800, 99, 1], -0.8292501841377201),
+            ([10, 20, 30, 40, 50], 2.7590827443800676),
+            ([0, 0, 1000, 0, 0], -1.6478779934022174),
+        ] {
+            let actual = params.llr(from_counts(counts));
+            assert!(approx(actual, expected, 1e-5), "{counts:?}: {actual} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn sparse_boundary_uses_count_prior_and_pair_llr_scale() {
+        use crate::sprt::decision::{Decision, judge};
+        let params = SprtParameters::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let penta = from_counts([0, 84, 840, 126, 0]);
+        let old_prob = penta.to_probs().unwrap().map(|p| p.max(0.001));
+        assert!(approx(old_prob.iter().sum(), 1.002, 1e-14));
+        // 同じ Rust solver と観測1050ペアで、確率 floor だけを対照にする。
+        let old_llr = llr(
+            1050.0,
+            old_prob,
+            [0.0, 0.25, 0.5, 0.75, 1.0],
+            params.t0 * 2.0_f64.sqrt(),
+            params.t1 * 2.0_f64.sqrt(),
+        );
+        assert!(approx(old_llr, 2.880187829, 1e-7));
+        assert!(old_llr < params.llr_bounds().1);
+        assert_eq!(judge(&params, from_counts([0, 80, 800, 120, 0])), Decision::Running);
+        assert_eq!(judge(&params, penta), Decision::AcceptH1);
+        assert_eq!(penta.pair_count(), 1050);
     }
 
     #[test]
