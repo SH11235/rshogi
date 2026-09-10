@@ -229,29 +229,20 @@ impl WsAttachment {
             if sent.contains(&entry.line) {
                 continue;
             }
-            let queued = if let Self::Spectator {
-                snapshot_in_progress: true,
-                pending_queue,
-                ..
-            } = self
-            {
-                if pending_queue.len() >= MAX_SPECTATOR_QUEUE_ITEMS
-                    || pending_queue.iter().map(|(line, _)| line.len()).sum::<usize>()
-                        + entry.line.len()
-                        > MAX_SPECTATOR_QUEUE_BYTES
-                {
-                    *self = before;
-                    close(1009, "spectator queue overflow");
-                    return Ok(());
+            // snapshot 送信中はキューに積んでも届いた保証にならない。snapshot 完了後の
+            // 再開で直接送り、途中で中断すれば未配信として 1011 で閉じられる。
+            if matches!(
+                self,
+                Self::Spectator {
+                    snapshot_in_progress: true,
+                    ..
                 }
-                pending_queue.push((entry.line.clone(), entry.ply));
-                true
-            } else {
-                false
-            };
+            ) {
+                return Ok(());
+            }
             let in_snapshot = matches!(self, Self::Spectator { last_ply_in_snapshot, .. }
                 if entry.ply.is_some_and(|ply| ply <= *last_ply_in_snapshot));
-            if queued || in_snapshot {
+            if in_snapshot {
                 self.terminal_sent_mut().unwrap().push(entry.line.clone());
                 if let Err(error) = persist(self) {
                     *self = before;
@@ -737,15 +728,16 @@ mod tests {
             att.deliver_terminal(
                 &entries,
                 |_| panic!("snapshot 中の送信"),
-                |_| Ok::<_, ()>(()),
+                |_| -> Result<(), ()> { panic!("snapshot 中の記録") },
                 |_, _| panic!("close"),
             )
             .unwrap();
         }
+        assert!(!att.terminal_complete(&entries));
         let WsAttachment::Spectator { pending_queue, .. } = att else {
             unreachable!()
         };
-        assert_eq!(pending_queue, vec![("REJECT:3".into(), Some(3)), ("REJECT:4".into(), Some(4))]);
+        assert!(pending_queue.is_empty());
     }
 
     #[test]

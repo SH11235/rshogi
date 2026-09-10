@@ -14,6 +14,7 @@ export class GameRoom {
   constructor(state, env) {
     this.state = state;
     this.plan = null;
+    this.preFaults = {};
     this.ops = [];
     this.injectedAt = null;
     this.dead = false;
@@ -40,7 +41,13 @@ export class GameRoom {
         const bound = value.bind(target);
         if (names !== 'all' && !names.includes(key)) return bound;
         return (...args) => {
-          const error = fault(`${prefix}.${String(key)}`);
+          const name = `${prefix}.${String(key)}`;
+          // 計画した障害とは別に、再試行経路へ入れるための事前障害。
+          if (name === 'r2.kifu.put' && this.preFaults.kifuPutFailures > 0) {
+            this.preFaults.kifuPutFailures -= 1;
+            return Promise.reject(new Error('injected pre-fault r2.kifu.put'));
+          }
+          const error = fault(name);
           if (error) {
             if (prefix.startsWith('r2')) return Promise.reject(error);
             throw error;
@@ -109,6 +116,7 @@ export class GameRoom {
     }
     const command = await request.json();
     if (command.plan) {
+      this.preFaults = { ...(command.preFaults ?? {}) };
       this.plan = command.plan;
       this.ops = [];
       this.injectedAt = null;

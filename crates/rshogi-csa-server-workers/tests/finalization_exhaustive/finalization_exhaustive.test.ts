@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { Miniflare } from 'miniflare';
+import type { Miniflare, WebSocket } from 'miniflare';
 import {
   CsaClient,
   createMiniflare,
@@ -10,6 +10,7 @@ import {
   makeTempPersistRoot,
   type HarnessOptions,
 } from '../miniflare_smoke/harness.ts';
+import { readLineFromWebSocket, type WebSocketLineBuffer } from '../miniflare_smoke/ws_test_helpers';
 
 // 終局処理の副作用操作 N 番目ごとに障害を注入し、実際に予約された alarm だけで
 // 再開させたうえで、終局処理の不変条件を検査する。
@@ -19,6 +20,7 @@ import {
 // 変更したら `pnpm run test:finalization-exhaustive` を手動で実行する。
 
 type Mode = 'fail' | 'crash';
+type Watcher = 'black' | 'white' | 'spectator';
 
 interface RoomState {
   fired: { fired: boolean; failed?: boolean } | null;
@@ -32,10 +34,17 @@ interface RoomState {
   moves: number;
 }
 
+interface SpectatorClient {
+  buffer: WebSocketLineBuffer;
+  closeCode: () => number | undefined;
+  close: () => void;
+}
+
 interface Game {
   gameId: string;
   black: CsaClient;
   white: CsaClient;
+  spectator: SpectatorClient | null;
   control: (command: object) => Promise<RoomState>;
 }
 
@@ -44,13 +53,17 @@ interface Scenario {
   options?: Partial<HarnessOptions>;
   /** AGREE 前で止め、対局を開始しない。 */
   beforeAgree?: boolean;
+  /** snapshot を受け取り終えた観戦者を 1 人つなぐ。 */
+  spectator?: boolean;
+  /** 計画した障害とは別に仕込む事前障害 (再試行経路へ入れるため)。 */
+  preFaults?: { kifuPutFailures?: number };
   trigger: (game: Game) => Promise<void>;
 }
 
 interface Observation {
   state: RoomState;
-  lines: { black: string[]; white: string[] };
-  closed: { black: number | undefined; white: number | undefined };
+  lines: Partial<Record<Watcher, string[]>>;
+  closed: Partial<Record<Watcher, number | undefined>>;
   kifuMoves: number | null;
   historyObjects: number;
   liveEntries: number;
@@ -72,6 +85,8 @@ const SHORT_CLOCK: Partial<HarnessOptions> = { clockKind: 'countdown_msec', tota
 
 const SCENARIOS: Scenario[] = [
   { name: 'sennichite', trigger: async (g) => g.white.send(CYCLE[3]) },
+  { name: 'sennichite-spectator', spectator: true, trigger: async (g) => g.white.send(CYCLE[3]) },
+  { name: 'sennichite-r2-retry', preFaults: { kifuPutFailures: 1 }, trigger: async (g) => g.white.send(CYCLE[3]) },
   { name: 'toryo', trigger: async (g) => g.white.send('%TORYO') },
   { name: 'disconnect', trigger: async (g) => { await g.white.close(); } },
   {
@@ -118,17 +133,33 @@ describe('終局処理の網羅障害注入', () => {
   });
 
   async function server(scenario: Scenario): Promise<Miniflare> {
-    const existing = servers.get(scenario.name);
+    const key = JSON.stringify(scenario.options ?? {});
+    const existing = servers.get(key);
     if (existing) return existing.mf;
     const persist = await makeTempPersistRoot();
     const mf = await createMiniflare({
       persistRoot: persist.path,
       allowFloodgateFeatures: true,
+      allowViewerApi: true,
       scriptPath: resolve(import.meta.dirname, 'exhaustive-worker.mjs'),
       ...scenario.options,
     });
-    servers.set(scenario.name, { mf, cleanup: persist.cleanup });
+    servers.set(key, { mf, cleanup: persist.cleanup });
     return mf;
+  }
+
+  async function connectSpectator(mf: Miniflare, gameId: string): Promise<SpectatorClient> {
+    const res = await mf.dispatchFetch(`https://example.com/ws/${encodeURIComponent(gameId)}/spectate`, {
+      headers: { Upgrade: 'websocket', Origin: 'https://example.com', 'CF-Connecting-IP': '127.0.0.1' },
+    });
+    const ws = res.webSocket as WebSocket;
+    let code: number | undefined;
+    ws.addEventListener('close', (ev) => { code = ev.code; });
+    const buffer = readLineFromWebSocket(ws);
+    ws.accept();
+    ws.send(`%%MONITOR2ON ${gameId}\n`);
+    while ((await buffer.takeLine(5000)) !== '##[MONITOR2] END');
+    return { buffer, closeCode: () => code, close: () => ws.close() };
   }
 
   async function startGame(mf: Miniflare, scenario: Scenario): Promise<Game> {
@@ -152,7 +183,7 @@ describe('終局処理の網羅障害注入', () => {
     const summary = await black.drainGameSummary();
     await white.drainGameSummary();
     const gameId = summary.find(l => l.startsWith('Game_ID:'))!.slice('Game_ID:'.length);
-    if (scenario.beforeAgree) return { gameId, black, white, control };
+    if (scenario.beforeAgree) return { gameId, black, white, spectator: null, control };
     black.send('AGREE');
     white.send('AGREE');
     await black.recvUntil(l => l.startsWith('START:'));
@@ -163,7 +194,8 @@ describe('終局処理の網羅障害注入', () => {
       await black.recvUntil(l => l.startsWith(line));
       await white.recvUntil(l => l.startsWith(line));
     }
-    return { gameId, black, white, control };
+    const spectator = scenario.spectator ? await connectSpectator(mf, gameId) : null;
+    return { gameId, black, white, spectator, control };
   }
 
   async function settle(game: Game): Promise<RoomState> {
@@ -190,11 +222,11 @@ describe('終局処理の網羅障害注入', () => {
     return state;
   }
 
-  async function drain(client: CsaClient): Promise<string[]> {
+  async function drain(take: (timeoutMs: number) => Promise<string>): Promise<string[]> {
     const lines: string[] = [];
     for (;;) {
       try {
-        lines.push((await client.recvLine(50)).replace(/,T\d+$/, ''));
+        lines.push((await take(50)).replace(/,T\d+$/, ''));
       } catch {
         return lines;
       }
@@ -208,10 +240,22 @@ describe('終局処理の網羅障害注入', () => {
     const kifuText = kifuKey ? await (await kifu.get(kifuKey))!.text() : null;
     const live = (await kifu.list({ prefix: 'live-games-index/' })).objects.filter(o => o.key.includes(game.gameId));
     const history = (await (await getFloodgateHistoryBucket(mf)).list()).objects.filter(o => o.key.includes(game.gameId));
+    const lines: Observation['lines'] = {
+      black: await drain(t => game.black.recvLine(t)),
+      white: await drain(t => game.white.recvLine(t)),
+    };
+    const closed: Observation['closed'] = {
+      black: game.black.closeInfo()?.code,
+      white: game.white.closeInfo()?.code,
+    };
+    if (game.spectator) {
+      lines.spectator = await drain(t => game.spectator!.buffer.takeLine(t));
+      closed.spectator = game.spectator.closeCode();
+    }
     return {
       state,
-      lines: { black: await drain(game.black), white: await drain(game.white) },
-      closed: { black: game.black.closeInfo()?.code, white: game.white.closeInfo()?.code },
+      lines,
+      closed,
       kifuMoves: kifuText === null ? null : kifuText.split('\n').filter(l => /^[+-]\d{4}/.test(l)).length,
       historyObjects: history.length,
       liveEntries: live.length,
@@ -221,12 +265,13 @@ describe('終局処理の網羅障害注入', () => {
   async function runCase(scenario: Scenario, plan: { at: number; mode: Mode }): Promise<Observation> {
     const mf = await server(scenario);
     const game = await startGame(mf, scenario);
-    await game.control({ plan });
+    await game.control({ plan, preFaults: scenario.preFaults });
     await scenario.trigger(game);
     const state = await drive(game);
     const observation = await observe(mf, game, state);
     await game.black.close();
     await game.white.close();
+    game.spectator?.close();
     return observation;
   }
 
@@ -242,7 +287,8 @@ describe('終局処理の網羅障害注入', () => {
 
   function check(baseline: Observation, observed: Observation): string[] {
     const problems: string[] = [];
-    const told = [...observed.lines.black, ...observed.lines.white].some(l => l.startsWith('#'));
+    const allLines = (o: Observation) => Object.values(o.lines).flat();
+    const told = allLines(observed).some(l => l.startsWith('#'));
     if (!observed.state.finished) {
       problems.push(told
         ? `確定していないのに結果を告知した (alarm=${observed.state.alarm})`
@@ -253,8 +299,8 @@ describe('終局処理の網羅障害注入', () => {
     if (observed.state.finished.result_code !== base.result_code) {
       // 裁定の保存前に入力が失われ、別の経路で確定しただけなら許容する。
       // 元の裁定を誰かに告知していた場合だけが違反。
-      const baseResultLines = new Set([...baseline.lines.black, ...baseline.lines.white].filter(l => l.startsWith('#')));
-      const toldBase = [...observed.lines.black, ...observed.lines.white].some(l => baseResultLines.has(l));
+      const baseResultLines = new Set(allLines(baseline).filter(l => l.startsWith('#')));
+      const toldBase = allLines(observed).some(l => baseResultLines.has(l));
       problems.push(toldBase
         ? `告知と異なる裁定で確定した: ${observed.state.finished.result_code}`
         : `${INPUT_LOST_OTHER_RESULT}: ${observed.state.finished.result_code}`);
@@ -266,14 +312,14 @@ describe('終局処理の網羅障害注入', () => {
     if (observed.kifuMoves !== baseline.kifuMoves) problems.push(`棋譜の手数が違う: ${observed.kifuMoves}`);
     if (observed.historyObjects !== baseline.historyObjects) problems.push(`floodgate 履歴が ${observed.historyObjects} 件`);
     if (observed.liveEntries !== 0) problems.push(CRON_RECOVERED);
-    for (const color of ['black', 'white'] as const) {
-      const got = observed.lines[color];
-      const want = baseline.lines[color];
+    for (const watcher of Object.keys(baseline.lines) as Watcher[]) {
+      const got = observed.lines[watcher] ?? [];
+      const want = baseline.lines[watcher] ?? [];
       if (!isSubsequence(got, want)) {
-        problems.push(`${color} が重複・余計・順序違いの行を受信: ${JSON.stringify(got)}`);
-      } else if (got.length < want.length && observed.closed[color] === 1000) {
+        problems.push(`${watcher} が重複・余計・順序違いの行を受信: ${JSON.stringify(got)}`);
+      } else if (got.length < want.length && observed.closed[watcher] === 1000) {
         // 送信に失敗した接続は 1011 で閉じる契約なので、欠落を許すのはその場合だけ。
-        problems.push(`${color} が正常 close なのに行が欠けた: ${JSON.stringify(got)}`);
+        problems.push(`${watcher} が正常 close なのに行が欠けた: ${JSON.stringify(got)}`);
       }
     }
     return problems;
