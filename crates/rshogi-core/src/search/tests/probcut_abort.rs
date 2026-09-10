@@ -57,7 +57,7 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
     child.do_move(capture, gives_check);
     // 通常子探索を呼ぶため、最初の qsearch を確定 TT 値で制御する。
     let qs_value = Value::new(-(prob_beta + 100));
-    worker.tt.probe(child.key(), &child).write(
+    assert!(worker.tt.probe(child.key(), &child).write(
         child.key(),
         qs_value,
         false,
@@ -66,9 +66,9 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
         Move::NONE,
         qs_value,
         worker.tt.generation(),
-    );
+    ));
     if existing_parent {
-        worker.tt.probe(pos.key(), &pos).write(
+        assert!(worker.tt.probe(pos.key(), &pos).write(
             pos.key(),
             Value::NONE,
             false,
@@ -77,7 +77,7 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
             Move::NONE,
             Value::new(17),
             worker.tt.generation(),
-        );
+        ));
     }
     let parent_probe = worker.tt.probe(pos.key(), &pos);
     assert_eq!(parent_probe.found, existing_parent);
