@@ -350,8 +350,3 @@ jq -r '.samples[] | "\(.position_name)\t\(.variant)\t\(.info.nodes)\t\(.perf.ins
   | sort
 ```
 
-## 今までの計測（参照）
-
-- `docs/performance/nps_benchmark_layerstack.md` — L0 別の NPS 退行調査
-- `docs/performance/accumulator_cache_benchmark_20260326.md` — Accumulator cache の効果
-- `docs/performance/propagate_yo_comparison.md` — YO 比較
