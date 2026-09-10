@@ -616,7 +616,11 @@ impl PoolTest {
             .arg("--engine-path")
             .arg(FAKE_ENGINE_BIN)
             .arg("--init-from")
-            .arg(fixtures.join("canonical.params"))
+            .arg(if self.path("canonical.params").exists() {
+                self.path("canonical.params")
+            } else {
+                fixtures.join("canonical.params")
+            })
             .arg("--startpos-file")
             .arg(fixtures.join("startpos.txt"))
             .args([
@@ -1043,6 +1047,71 @@ fn completed_resume_does_not_spawn_engines() {
     assert_eq!(test.bytes("final.params"), final_params);
     assert_eq!(test.bytes("meta.json"), meta);
     assert!(!test.path("run/.lock").exists());
+}
+
+#[test]
+fn regex_excluded_baseline_is_applied_to_both_engines_without_updates() {
+    let test = PoolTest::new();
+    std::fs::write(
+        test.path("canonical.params"),
+        concat!(
+            "FIXED_INT,int,20.4,0,100,1,0.1
+",
+            "FIXED_FLOAT,float,1.7,0,10,1,0.1
+",
+            "UNUSED,int,3,0,10,1,0.1 [[NOT USED]]
+",
+            "SPSA_TEST_INT,int,5,0,10,2,0.1
+",
+        ),
+    )
+    .unwrap();
+    let protocol = test.path("protocol");
+    assert_success(&test.run(
+        "value_driven",
+        3,
+        1,
+        1,
+        &["--active-only-regex", "^SPSA_TEST_INT$"],
+        &[("SPSA_TEST_ENGINE_PROTOCOL_LOG", &protocol)],
+    ));
+    let log = std::fs::read_to_string(protocol).unwrap();
+    let mut engines = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    for line in log.lines() {
+        let (pid, command) = line.split_once(' ').unwrap();
+        engines.entry(pid).or_default().push(command);
+    }
+    assert_eq!(engines.len(), 2);
+    for commands in engines.values() {
+        let mut fixed_int = None;
+        let mut fixed_float = None;
+        let mut active = Vec::new();
+        let mut goes = 0;
+        for command in commands {
+            if let Some(value) = command.strip_prefix("setoption name FIXED_INT value ") {
+                fixed_int = Some(value);
+            }
+            if let Some(value) = command.strip_prefix("setoption name FIXED_FLOAT value ") {
+                fixed_float = Some(value);
+            }
+            if let Some(value) = command.strip_prefix("setoption name SPSA_TEST_INT value ") {
+                active.push(value);
+            }
+            assert!(!command.starts_with("setoption name UNUSED "));
+            if command.starts_with("go ") {
+                assert_eq!(fixed_int, Some("20"));
+                assert_eq!(fixed_float, Some("1.700000"));
+                assert!(!active.is_empty());
+                goes += 1;
+            }
+        }
+        assert!(goes >= 3);
+    }
+    let state = String::from_utf8(test.bytes("state.params")).unwrap();
+    assert!(state.contains("FIXED_INT,int,20.400000,"));
+    assert!(state.contains("FIXED_FLOAT,float,1.700000,"));
+    assert!(state.contains("UNUSED,int,3.000000,"));
+    assert!(!state.contains("SPSA_TEST_INT,int,5.000000,"), "{state}");
 }
 
 #[test]
