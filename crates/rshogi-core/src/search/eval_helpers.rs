@@ -199,9 +199,9 @@ pub(super) fn update_correction_history(
 
 /// 置換表プローブ
 #[allow(clippy::too_many_arguments)]
-pub(super) fn probe_transposition<const NT: u8>(
+pub(super) fn probe_transposition<'a, const NT: u8>(
     st: &mut SearchState,
-    ctx: &SearchContext<'_>,
+    ctx: &SearchContext<'a>,
     pos: &mut Position,
     depth: Depth,
     beta: Value,
@@ -210,7 +210,7 @@ pub(super) fn probe_transposition<const NT: u8>(
     in_check: bool,
     excluded_move: Move,
     cut_node: bool,
-) -> ProbeOutcome {
+) -> ProbeOutcome<'a> {
     let key = pos.key();
 
     let tt_result = ctx.tt.probe(key, pos);
@@ -364,7 +364,18 @@ pub(super) fn probe_transposition<const NT: u8>(
                 && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Exact, stored_depth);
             #[cfg(not(feature = "tt-trace"))]
             let allow_write = ctx.allow_tt_write;
-            if allow_write {
+            if allow_write
+                && tt_result.write(
+                    key,
+                    stored_value,
+                    st.stack[ply as usize].tt_pv,
+                    Bound::Exact,
+                    stored_depth,
+                    mate_move,
+                    Value::NONE,
+                    ctx.tt.generation(),
+                )
+            {
                 #[cfg(feature = "tt-trace")]
                 maybe_trace_tt_write(TtWriteTrace {
                     stage: "ab_mate1_store",
@@ -383,16 +394,6 @@ pub(super) fn probe_transposition<const NT: u8>(
                         Move::NONE
                     },
                 });
-                tt_result.write(
-                    key,
-                    stored_value,
-                    st.stack[ply as usize].tt_pv,
-                    Bound::Exact,
-                    stored_depth,
-                    mate_move,
-                    Value::NONE,
-                    ctx.tt.generation(),
-                );
                 inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
             }
             // 1手詰めカットオフではヒストリ更新不要（mate_moveは特殊）
@@ -519,7 +520,18 @@ pub(super) fn compute_eval_context(
         && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::None, DEPTH_UNSEARCHED);
     #[cfg(not(feature = "tt-trace"))]
     let eval_allow_write = !in_check && !tt_ctx.hit && ctx.allow_tt_write;
-    if eval_allow_write {
+    if eval_allow_write
+        && tt_ctx.result.write(
+            tt_ctx.key,
+            Value::NONE,
+            st.stack[ply as usize].tt_pv,
+            Bound::None,
+            DEPTH_UNSEARCHED,
+            Move::NONE,
+            unadjusted_static_eval,
+            ctx.tt.generation(),
+        )
+    {
         #[cfg(feature = "tt-trace")]
         maybe_trace_tt_write(TtWriteTrace {
             stage: "ab_eval_store_none",
@@ -538,16 +550,6 @@ pub(super) fn compute_eval_context(
                 Move::NONE
             },
         });
-        tt_ctx.result.write(
-            tt_ctx.key,
-            Value::NONE,
-            st.stack[ply as usize].tt_pv,
-            Bound::None,
-            DEPTH_UNSEARCHED,
-            Move::NONE,
-            unadjusted_static_eval,
-            ctx.tt.generation(),
-        );
         inc_stat_by_depth!(st, tt_write_by_depth, 0);
     }
 

@@ -203,6 +203,15 @@ CSA v1.2.1 標準 `BEGIN Game_Summary` / `END Game_Summary` の組み立ては
 
 ## 8. 終局メッセージ
 
+千日手は開始局面を含む全対局履歴で、盤面・双方の持駒・手番が同じ局面の4回目に
+裁定する。周期が16手を超える場合も対象。4回の出現を跨ぐ全区間で一方の着手が
+すべて王手なら王手側の反則負けとし、1/2循環目では終局しない。途中で王手が途切れた
+場合は通常千日手となる。成立条件は[日本将棋連盟の対局規則 第8条・第10条第10項](https://www.shogi.or.jp/match/taikyoku_rules/)に合わせる。
+
+本サーバーは通常千日手を指し直しではなく既存仕様の `#DRAW` で終了する。
+cold startでは開始SFENと全指し手の再生で履歴を復元するため、最終SFENだけの復元では
+同じ裁定にならない。過去の「連続王手1循環で終局」および「探索用16手窓の流用」は使用しない。
+
 [`crates/rshogi-csa-server/src/game/result.rs`](../../crates/rshogi-csa-server/src/game/result.rs) で生成。送信順は **「(a) 終局理由コード →
 (b) 勝敗コード」** を厳守する。マッピングは `result.rs::GameResult::server_messages`
 で定義:

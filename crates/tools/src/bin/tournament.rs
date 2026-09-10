@@ -145,7 +145,7 @@ struct Cli {
     #[arg(long, value_parser = clap::value_parser!(DrawRule))]
     adjudicate_draw: Option<DrawRule>,
 
-    /// Output directory (required)
+    /// 出力ディレクトリ。既存の対局出力がある場合は拒否する。
     #[arg(long)]
     out_dir: PathBuf,
 
@@ -368,6 +368,20 @@ struct TournamentMeta {
     output_dir: String,
     #[serde(flatten)]
     retry: RetrySummary,
+    run_status: RunStatus,
+    /// 発行した通常ペアのうち、有効な 2 局が揃っていない数。
+    incomplete_pairs: u32,
+    /// 送信済みだが worker から結果を回収できなかったチケット数。
+    unreturned_games: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RunStatus {
+    Running,
+    Completed,
+    Interrupted,
+    WorkerFailed,
 }
 
 #[derive(Clone, Copy, Default, Serialize)]
@@ -642,8 +656,8 @@ impl PairWriter {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let file =
-            File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+        let file = File::create_new(path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
         Ok(Self {
             writer: BufWriter::new(file),
         })
@@ -689,6 +703,7 @@ fn worker_main(
     rx: chan::Receiver<Option<MatchTicket>>,
     tx: chan::Sender<MatchResult>,
     shutdown: Arc<AtomicBool>,
+    worker_failed: Arc<AtomicBool>,
 ) {
     let WorkerConfig {
         engine_paths,
@@ -729,6 +744,7 @@ fn worker_main(
             }
             Err(e) => {
                 eprintln!("worker: failed to spawn engine {i} ({}): {e}", path.display());
+                worker_failed.store(true, Ordering::Relaxed);
                 shutdown.store(true, Ordering::Relaxed);
                 return;
             }
@@ -877,6 +893,7 @@ fn spawn_worker(
     ticket_rx: &chan::Receiver<Option<MatchTicket>>,
     result_tx: &chan::Sender<MatchResult>,
     shutdown: &Arc<AtomicBool>,
+    worker_failed: &Arc<AtomicBool>,
     handles: &mut Vec<thread::JoinHandle<()>>,
 ) {
     let cfg = WorkerConfig {
@@ -908,12 +925,58 @@ fn spawn_worker(
     let rx = ticket_rx.clone();
     let tx = result_tx.clone();
     let sd = shutdown.clone();
-    handles.push(thread::spawn(move || worker_main(cfg, rx, tx, sd)));
+    let failed = worker_failed.clone();
+    handles.push(thread::spawn(move || {
+        // panic で結果送信元だけが消えても、main が channel 待ちを続けないよう通知する。
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker_main(cfg, rx, tx, sd.clone(), failed.clone());
+        }))
+        .is_err()
+        {
+            failed.store(true, Ordering::Relaxed);
+            sd.store(true, Ordering::Relaxed);
+        }
+    }));
 }
 
 // ---------------------------------------------------------------------------
 // メイン
 // ---------------------------------------------------------------------------
+
+fn check_output_directory(path: &Path) -> Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_str(), Some("meta.json" | "control.json" | "control_history.jsonl"))
+            || entry.path().extension().is_some_and(|ext| ext == "jsonl")
+        {
+            bail!(
+                "既存出力 {} を保護します。別の --out-dir を指定してください",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn reserve_output_directory(path: &Path) -> Result<File> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        bail!("出力先ディレクトリの symlink は使用できません: {}", path.display());
+    }
+    fs::create_dir_all(path)?;
+    check_output_directory(path)?;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.join(".tournament.lock"))?;
+    lock.try_lock()
+        .with_context(|| format!("別の tournament が出力先 {} を使用しています", path.display()))?;
+    // 検査と lock 取得の間に先行 run が出力して終了した場合も上書きしない。
+    check_output_directory(path)?;
+    Ok(lock)
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -999,10 +1062,6 @@ fn main() -> Result<()> {
     // 開始局面のロード
     let (start_defs, start_commands) =
         load_start_positions(cli.startpos_file.as_deref(), None, None, None)?;
-
-    // 出力ディレクトリの作成
-    fs::create_dir_all(&cli.out_dir)
-        .with_context(|| format!("failed to create {}", cli.out_dir.display()))?;
 
     let common_usi_options = cli.usi_options.clone().unwrap_or_default();
 
@@ -1101,8 +1160,11 @@ fn main() -> Result<()> {
             opts
         })
         .collect();
+    // run 全体の出力先を排他的に確保する。既存成果物や同時起動 run を上書きしない。
+    let output_guard = reserve_output_directory(&cli.out_dir)?;
     let timestamp = Local::now();
     let shutdown = Arc::new(AtomicBool::new(false));
+    let worker_failed = Arc::new(AtomicBool::new(false));
 
     // Ctrl-C ハンドラ
     {
@@ -1143,10 +1205,13 @@ fn main() -> Result<()> {
         start_positions: start_commands.clone(),
         output_dir: cli.out_dir.display().to_string(),
         retry: RetrySummary::default(),
+        run_status: RunStatus::Running,
+        incomplete_pairs: 0,
+        unreturned_games: 0,
     };
     // meta.json 書き出し
     {
-        let meta_file = File::create(cli.out_dir.join("meta.json"))?;
+        let meta_file = File::create_new(cli.out_dir.join("meta.json"))?;
         serde_json::to_writer_pretty(BufWriter::new(meta_file), &tournament_meta)?;
     }
 
@@ -1235,7 +1300,7 @@ fn main() -> Result<()> {
 
     for &(i, j) in &pair_indices {
         {
-            let filename = format!("{}-vs-{}.jsonl", engine_labels[i], engine_labels[j]);
+            let filename = format!("pair-{i}-{j}.jsonl");
             let path = cli.out_dir.join(&filename);
             let mut pw = PairWriter::new(&path)?;
 
@@ -1327,7 +1392,7 @@ fn main() -> Result<()> {
     // ワーカースレッドの起動
     let mut handles = Vec::new();
     for _ in 0..cli.concurrency {
-        spawn_worker(&spawn_ctx, &ticket_rx, &result_tx, &shutdown, &mut handles);
+        spawn_worker(&spawn_ctx, &ticket_rx, &result_tx, &shutdown, &worker_failed, &mut handles);
     }
 
     // 勝敗カウンターと出力をまとめる集計器。
@@ -1395,7 +1460,14 @@ fn main() -> Result<()> {
 
         // 増員（即時 spawn）。
         while live_workers < desired_workers {
-            spawn_worker(&spawn_ctx, &ticket_rx, &result_tx, &shutdown, &mut handles);
+            spawn_worker(
+                &spawn_ctx,
+                &ticket_rx,
+                &result_tx,
+                &shutdown,
+                &worker_failed,
+                &mut handles,
+            );
             live_workers += 1;
         }
 
@@ -1444,6 +1516,8 @@ fn main() -> Result<()> {
                             }
                         }
                     }
+                    // 全 worker の初期化失敗でも送信待ちへ残らず shutdown を再確認する。
+                    default(Duration::from_millis(100)) => {}
                 }
             }
             None => {
@@ -1467,7 +1541,7 @@ fn main() -> Result<()> {
                     break;
                 }
                 // in-flight を drain。
-                match result_rx.recv() {
+                match result_rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(result) => {
                         agg.on_result(&result, tickets_sent, target_total)?;
                         source.observe_result(&result);
@@ -1475,7 +1549,8 @@ fn main() -> Result<()> {
                             live_workers = live_workers.saturating_sub(1);
                         }
                     }
-                    Err(_) => break,
+                    Err(chan::RecvTimeoutError::Timeout) => continue,
+                    Err(chan::RecvTimeoutError::Disconnected) => break,
                 }
             }
         }
@@ -1488,10 +1563,22 @@ fn main() -> Result<()> {
     // 手放したら join する。
     drop(ticket_tx);
     drop(result_tx);
-    while result_rx.recv().is_ok() {}
-    for h in handles {
-        let _ = h.join();
+    while let Ok(result) = result_rx.recv() {
+        agg.on_result(&result, tickets_sent, source.current_target_total())?;
+        source.observe_result(&result);
     }
+    for h in handles {
+        if h.join().is_err() {
+            worker_failed.store(true, Ordering::Relaxed);
+        }
+    }
+    let run_status = if worker_failed.load(Ordering::Relaxed) {
+        RunStatus::WorkerFailed
+    } else if shutdown.load(Ordering::Relaxed) {
+        RunStatus::Interrupted
+    } else {
+        RunStatus::Completed
+    };
 
     // 集計器を分解して以降の表示に使う。
     let Aggregator {
@@ -1520,13 +1607,30 @@ fn main() -> Result<()> {
         );
     }
 
-    let retry_summary = source.retry_summary();
+    let mut retry_summary = source.retry_summary();
+    retry_summary.invalid |= run_status != RunStatus::Completed;
     tournament_meta.retry = retry_summary;
+    tournament_meta.run_status = run_status;
+    tournament_meta.incomplete_pairs = source
+        .emitted
+        .iter()
+        .sum::<u32>()
+        .div_ceil(2)
+        .saturating_sub(valid_completed / 2);
+    tournament_meta.unreturned_games = tickets_sent.saturating_sub(completed);
     let meta_file = File::create(cli.out_dir.join("meta.json"))?;
     serde_json::to_writer_pretty(BufWriter::new(meta_file), &tournament_meta)?;
 
     println!();
-    println!("=== Tournament Complete ===");
+    println!(
+        "{}",
+        match run_status {
+            RunStatus::Completed => "=== Tournament Complete ===",
+            RunStatus::Interrupted => "=== Tournament Interrupted ===",
+            RunStatus::WorkerFailed => "=== Tournament Worker Failed ===",
+            RunStatus::Running => unreachable!(),
+        }
+    );
     println!("Total: {} games in {:.1}s", completed, start_time.elapsed().as_secs_f64());
     print_final_table(&pair_stats, &engine_labels);
     println!(
@@ -1539,10 +1643,16 @@ fn main() -> Result<()> {
     println!("Output: {}", cli.out_dir.display());
     println!("===========================");
 
-    if let Some(state) = sprt_state.as_ref() {
-        print_sprt_final(state, retry_summary);
+    if run_status == RunStatus::Completed {
+        if let Some(state) = sprt_state.as_ref() {
+            print_sprt_final(state, retry_summary);
+        }
+    } else {
+        println!("SPRT decision withheld: run did not complete.");
+        bail!("tournament did not complete; recovered results and run status were saved");
     }
 
+    drop(output_guard);
     Ok(())
 }
 
@@ -1782,7 +1892,13 @@ impl TicketSource {
             return Some(ticket);
         }
         let target = self.target_per_pair();
-        let pair_pos = self.emitted.iter().position(|&e| Self::pair_needs_more(e, target))?;
+        // 目標増加で前のカードが未達に戻っても、発行中の先後交換ペアを先に閉じる。
+        // 通常発行数由来の pair_index とカード内 slot を同じ 2 局へ対応させるため。
+        let pair_pos = self
+            .emitted
+            .iter()
+            .position(|&e| !e.is_multiple_of(2))
+            .or_else(|| self.emitted.iter().position(|&e| Self::pair_needs_more(e, target)))?;
         let (i, j) = self.pair_indices[pair_pos];
         let game_idx = self.emitted[pair_pos];
 
@@ -2480,6 +2596,64 @@ mod tests {
     }
 
     #[test]
+    fn output_directory_lock_excludes_another_run_and_releases_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = super::reserve_output_directory(dir.path()).unwrap();
+        assert!(super::reserve_output_directory(dir.path()).is_err());
+        drop(first);
+        assert!(super::reserve_output_directory(dir.path()).is_ok());
+        std::fs::write(dir.path().join("pair-0-1.jsonl"), b"saved").unwrap();
+        assert!(super::reserve_output_directory(dir.path()).is_err());
+        assert_eq!(std::fs::read(dir.path().join("pair-0-1.jsonl")).unwrap(), b"saved");
+    }
+
+    #[test]
+    fn worker_panic_notifies_shutdown_before_main_join() {
+        let ctx = super::SpawnCtx {
+            engine_paths: &[],
+            engine_labels: &[],
+            engine_usi_options: &[],
+            threads: 1,
+            hash_mb: 1,
+            max_moves: 1,
+            adjudicate_resign: None,
+            adjudicate_draw: None,
+            timeout_margin_ms: 1,
+            byoyomi: 0,
+            btime: 0,
+            binc: 0,
+            go_depth: None,
+            go_nodes: &[],
+            start_defs: &[],
+        };
+        let (ticket_tx, ticket_rx) = super::chan::bounded(1);
+        let (result_tx, _result_rx) = super::chan::bounded(1);
+        let shutdown = Arc::new(super::AtomicBool::new(false));
+        let failed = Arc::new(super::AtomicBool::new(false));
+        let mut handles = Vec::new();
+        super::spawn_worker(&ctx, &ticket_rx, &result_tx, &shutdown, &failed, &mut handles);
+        // 内部の不正 fixture で安全な slice 境界 panic を起こし、外側の監督経路を検証する。
+        ticket_tx
+            .send(Some(super::MatchTicket {
+                id: 0,
+                black_idx: 0,
+                white_idx: 1,
+                startpos_idx: 0,
+                pair_index: 0,
+                pair_slot: 0,
+                attempt: 0,
+            }))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !shutdown.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert!(failed.load(Ordering::Relaxed));
+        handles.pop().unwrap().join().unwrap();
+    }
+
+    #[test]
     fn ticket_source_single_pair_emits_expected_pairs() {
         let target = Arc::new(AtomicU32::new(2)); // 各方向 2 局 = 1 ペアあたり 4 局
         let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone(), 0);
@@ -2517,6 +2691,103 @@ mod tests {
         let ids: Vec<u64> = all.iter().map(|t| t.id).collect();
         assert_eq!(ids, (0..6).collect::<Vec<_>>());
         assert_pentanomial_integrity(&all);
+    }
+
+    #[test]
+    fn target_increase_mid_card_keeps_all_completed_pairs() {
+        let target = Arc::new(AtomicU32::new(1));
+        let mut source = TicketSource::new(vec![(0, 1), (0, 2)], 1000, target.clone(), 42);
+        let mut tickets = (0..3).map(|_| pull(&mut source).unwrap()).collect::<Vec<_>>();
+        target.store(2, Ordering::Relaxed);
+        tickets.extend(drain_source(&mut source));
+        assert_eq!(tickets.len(), 8);
+        assert_pentanomial_integrity(&tickets);
+        assert_eq!(tickets.iter().map(|t| t.id).collect::<Vec<_>>(), (0..8).collect::<Vec<_>>());
+
+        let labels = strings(&["base", "other", "test"]);
+        let mut aggregate = super::Aggregator {
+            engine_labels: &labels,
+            pair_writers: Default::default(),
+            pair_stats: [((0, 1), (0, 0, 0)), ((0, 2), (0, 0, 0))].into(),
+            pair_game_count: Default::default(),
+            direct_buffer: Default::default(),
+            direct_completed_pairs: Default::default(),
+            completed: 0,
+            valid_completed: 0,
+            sprt_state: None,
+            stop_feeding: false,
+            report_interval: 10,
+            start_time: std::time::Instant::now(),
+        };
+        let mut sprt = SprtState::new(
+            super::SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap(),
+            0,
+            2,
+            10,
+            "base".into(),
+            "test".into(),
+        );
+        let mut completed_pairs = 0;
+        // 到着順が発行順と違っても、対象カードの勝敗だけを集計する。
+        for ticket in tickets.into_iter().rev() {
+            let outcome = if ticket.black_idx == 2 {
+                super::GameOutcome::BlackWin
+            } else if ticket.white_idx == 2 {
+                super::GameOutcome::WhiteWin
+            } else {
+                super::GameOutcome::Draw
+            };
+            let game = result(ticket, outcome, false);
+            source.observe_result(&game);
+            completed_pairs += u32::from(aggregate.observe_direct_result(&game));
+            sprt.observe(&game);
+        }
+        assert_eq!(completed_pairs, 4);
+        assert!(aggregate.direct_buffer.is_empty());
+        assert_eq!(aggregate.pair_stats[&(0, 1)], (0, 0, 4));
+        assert_eq!(aggregate.pair_stats[&(0, 2)], (0, 4, 0));
+        assert!(source.retry_observations.is_empty());
+        assert_eq!(
+            sprt.penta,
+            super::Penta {
+                ww: 2,
+                ..super::Penta::ZERO
+            }
+        );
+    }
+
+    #[test]
+    fn target_increase_mid_card_still_retries_failed_pair() {
+        let target = Arc::new(AtomicU32::new(1));
+        let mut source = TicketSource::new(vec![(0, 1), (0, 2)], 1000, target.clone(), 42);
+        let first = pull(&mut source).unwrap();
+        let second = pull(&mut source).unwrap();
+        let open = pull(&mut source).unwrap();
+        target.store(2, Ordering::Relaxed);
+        let close = pull(&mut source).unwrap();
+        assert_pentanomial_integrity(&[open.clone(), close.clone()]);
+        source.observe_result(&result(open.clone(), super::GameOutcome::Draw, true));
+        source.observe_result(&result(close.clone(), super::GameOutcome::Draw, false));
+        let retries = [pull(&mut source).unwrap(), pull(&mut source).unwrap()];
+        assert_pentanomial_integrity(&retries);
+        for (retry, original) in retries.iter().zip([&open, &close]) {
+            assert_eq!(retry.attempt, 1);
+            assert_eq!(retry.pair_index, original.pair_index);
+            assert_eq!(retry.startpos_idx, original.startpos_idx);
+            assert_eq!(
+                (retry.black_idx, retry.white_idx),
+                (original.black_idx, original.white_idx)
+            );
+            assert!(retry.id > close.id);
+            source.observe_result(&result(retry.clone(), super::GameOutcome::Draw, false));
+        }
+        let mut normal = vec![first, second, open, close];
+        normal.extend(drain_source(&mut source));
+        assert_eq!(normal.len(), 8);
+        assert_pentanomial_integrity(&normal);
+        assert_eq!(source.retry_summary().retried_pairs, 1);
+        assert!(!source.retry_summary().invalid);
+        assert!(source.retry_observations.is_empty());
     }
 
     #[test]
