@@ -67,7 +67,7 @@ fn observe_completed_node(
         let check = child.gives_check(mv);
         child.do_move(mv, check);
         let score = -(alpha.raw() + if mv == best { 100 } else { -100 });
-        worker.tt.probe(child.key(), &child).write(
+        let _ = worker.tt.probe(child.key(), &child).write(
             child.key(),
             Value::new(score),
             false,
@@ -78,7 +78,7 @@ fn observe_completed_node(
             worker.tt.generation(),
         );
     }
-    worker.tt.probe(pos.key(), &pos).write(
+    let _ = worker.tt.probe(pos.key(), &pos).write(
         pos.key(),
         Value::NONE,
         false,
