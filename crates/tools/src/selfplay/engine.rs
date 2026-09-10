@@ -11,6 +11,18 @@ use anyhow::{Result, anyhow, bail};
 
 use super::types::{InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest, duration_to_millis};
 
+/// queue に行が残っていても、期限到達後は読み続けない。
+pub(crate) fn receive_before_deadline(
+    receiver: &Receiver<String>,
+    deadline: Instant,
+) -> std::result::Result<String, RecvTimeoutError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(RecvTimeoutError::Timeout);
+    }
+    receiver.recv_timeout(remaining)
+}
+
 pub const ENGINE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const ENGINE_QUIT_TIMEOUT: Duration = Duration::from_millis(300);
 pub const ENGINE_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -416,11 +428,30 @@ impl EngineProcess {
     ///
     /// `position_tail` は `position sfen ...` の `sfen` 以降にそのまま渡す。
     /// 例: `lnsg... b - 1 moves 7g7f`。
+    /// 受信期限は info 行で延長せず、期限後は stop を送り最大 10 秒応答を回収する。
+    /// 回収できても `timed_out=true` は探索成功ではないため、呼出側で判定する。
     pub fn search_raw_go(
         &mut self,
         position_tail: &str,
         go_args: &str,
         timeout: Duration,
+        info_callback: Option<&mut dyn FnMut(&str)>,
+    ) -> Result<SearchOutcome> {
+        self.search_raw_go_with_stop_grace(
+            position_tail,
+            go_args,
+            timeout,
+            Duration::from_secs(10),
+            info_callback,
+        )
+    }
+
+    fn search_raw_go_with_stop_grace(
+        &mut self,
+        position_tail: &str,
+        go_args: &str,
+        timeout: Duration,
+        stop_grace: Duration,
         mut info_callback: Option<&mut dyn FnMut(&str)>,
     ) -> Result<SearchOutcome> {
         self.write_line(&format!("position sfen {position_tail}"))?;
@@ -432,9 +463,11 @@ impl EngineProcess {
         self.write_line(&go_cmd)?;
 
         let start = Instant::now();
+        let deadline =
+            start.checked_add(timeout).ok_or_else(|| anyhow!("search deadline overflow"))?;
         let mut snapshot = InfoSnapshot::default();
         loop {
-            match self.rx.recv_timeout(timeout) {
+            match receive_before_deadline(&self.rx, deadline) {
                 Ok(line) => {
                     if line.starts_with("info") {
                         snapshot.update_from_line(&line);
@@ -457,9 +490,11 @@ impl EngineProcess {
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     self.write_line("stop")?;
-                    let stop_deadline = Duration::from_secs(10);
+                    let stop_deadline = Instant::now()
+                        .checked_add(stop_grace)
+                        .ok_or_else(|| anyhow!("stop deadline overflow"))?;
                     loop {
-                        match self.rx.recv_timeout(stop_deadline) {
+                        match receive_before_deadline(&self.rx, stop_deadline) {
                             Ok(line) if line.starts_with("info") => {
                                 snapshot.update_from_line(&line);
                             }
@@ -678,5 +713,96 @@ mod stderr_tests {
         assert_eq!(read_stderr_line(&mut reader).unwrap().unwrap().len(), 4096);
         assert_eq!(read_stderr_line(&mut reader).unwrap().unwrap(), "next");
         assert_eq!(read_stderr_line(&mut reader).unwrap(), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod deadline_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn expired_deadline_does_not_consume_queued_info() {
+        let (tx, rx) = mpsc::channel();
+        tx.send("info depth 1".into()).unwrap();
+        assert!(matches!(
+            receive_before_deadline(&rx, Instant::now()),
+            Err(RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(rx.try_recv().unwrap(), "info depth 1");
+    }
+
+    #[test]
+    fn raw_go_bounds_both_phases_with_chatty_engine_and_handles_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mock.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+flood=
+trap 'if [ -n "$flood" ]; then kill "$flood" 2>/dev/null; wait "$flood" 2>/dev/null; fi' 0
+while IFS= read -r line; do
+  printf '%s
+' "$line" >> "$1"
+  case "$line" in
+    usi) printf 'usiok
+' ;;
+    isready) printf 'readyok
+' ;;
+    go*)
+      case "$2" in
+        normal) printf 'bestmove resign
+' ;;
+        exit) exit 0 ;;
+        *) (while :; do printf 'info depth 1 nodes 1
+'; sleep 0.005; done) & flood=$! ;;
+      esac ;;
+    stop) if [ "$2" = "stop" ]; then printf 'bestmove resign
+'; fi ;;
+    quit) break ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for mode in ["normal", "stop", "flood", "exit"] {
+            let log = dir.path().join(mode);
+            let cfg = EngineConfig {
+                path: path.clone(),
+                args: vec![log.display().to_string(), mode.into()],
+                threads: 1,
+                hash_mb: 1,
+                network_delay: None,
+                network_delay2: None,
+                minimum_thinking_time: None,
+                slowmover: None,
+                ponder: false,
+                usi_options: vec![],
+            };
+            let mut engine = EngineProcess::spawn(&cfg, mode.into()).unwrap();
+            let start = Instant::now();
+            let result = engine.search_raw_go_with_stop_grace(
+                "fixture b - 1",
+                "depth 1",
+                Duration::from_millis(30),
+                Duration::from_millis(40),
+                None,
+            );
+            assert!(start.elapsed() < Duration::from_secs(2), "{mode}");
+            if mode == "exit" {
+                assert!(result.is_err());
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result.timed_out, mode != "normal");
+                assert_eq!(result.bestmove.is_some(), mode != "flood");
+            }
+            drop(engine);
+            let commands = std::fs::read_to_string(log).unwrap();
+            assert_eq!(
+                commands.lines().filter(|line| *line == "stop").count(),
+                usize::from(matches!(mode, "stop" | "flood"))
+            );
+        }
     }
 }

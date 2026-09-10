@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use tools::output_path::ensure_safe_output_path;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -64,6 +66,7 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from(format!("{}.plot.csv", cli.input_csv.display())));
 
+    ensure_safe_output_path(&output_csv, &cli.input_csv)?;
     let src = File::open(&cli.input_csv)
         .with_context(|| format!("failed to open {}", cli.input_csv.display()))?;
     let mut reader = BufReader::new(src);
@@ -85,9 +88,15 @@ fn main() -> Result<()> {
     let mode = detect_mode(&headers)?;
     let index = build_index(&headers);
 
-    let dst = File::create(&output_csv)
-        .with_context(|| format!("failed to create {}", output_csv.display()))?;
-    let mut writer = BufWriter::new(dst);
+    let parent = output_csv
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut staged = tempfile::Builder::new()
+        .prefix(".spsa_plot_")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to stage {}", output_csv.display()))?;
+    let mut writer = BufWriter::new(staged.as_file_mut());
     let output_headers = [
         "iteration",
         "mode",
@@ -188,6 +197,11 @@ fn main() -> Result<()> {
     }
 
     writer.flush()?;
+    drop(writer);
+    ensure_safe_output_path(&output_csv, &cli.input_csv)?;
+    staged
+        .persist(&output_csv)
+        .with_context(|| format!("failed to publish {}", output_csv.display()))?;
     Ok(())
 }
 
@@ -364,7 +378,7 @@ fn row_values_aggregate(row: &CsvRow<'_>) -> Result<RowValues> {
     })
 }
 
-fn write_csv_row(writer: &mut BufWriter<File>, row: &[impl AsRef<str>]) -> Result<()> {
+fn write_csv_row(writer: &mut impl Write, row: &[impl AsRef<str>]) -> Result<()> {
     for (idx, value) in row.iter().enumerate() {
         if idx > 0 {
             writer.write_all(b",")?;
@@ -375,7 +389,7 @@ fn write_csv_row(writer: &mut BufWriter<File>, row: &[impl AsRef<str>]) -> Resul
     Ok(())
 }
 
-fn write_csv_value(writer: &mut BufWriter<File>, value: &str) -> Result<()> {
+fn write_csv_value(writer: &mut impl Write, value: &str) -> Result<()> {
     let needs_quote = value.contains(',') || value.contains('"') || value.contains('\n');
     if !needs_quote {
         writer.write_all(value.as_bytes())?;
