@@ -195,20 +195,35 @@ impl WsAttachment {
             .filter(|(target, _)| *target == audience || *target == Audience::All)
             .flat_map(|(_, lines)| lines)
         {
-            let sent = match self {
-                Self::Player { terminal_sent, .. } | Self::Spectator { terminal_sent, .. } => {
-                    terminal_sent
-                }
-                Self::Pending => return Ok(()),
+            let Some(sent) = self.terminal_sent_mut() else {
+                return Ok(());
             };
             if sent.contains(&line) {
                 continue;
             }
-            send(&line)?;
-            sent.push(line);
+            // 送信前に記録し、記録の保存失敗で既送信行を再送しないようにする。
+            // 送信失敗時は記録を戻す。戻せなかった場合も、送信に失敗した接続へは
+            // 以後も届かないため再送より欠落を選ぶ。
+            sent.push(line.clone());
             persist(self)?;
+            if let Err(error) = send(&line) {
+                if let Some(sent) = self.terminal_sent_mut() {
+                    sent.pop();
+                }
+                let _ = persist(self);
+                return Err(error);
+            }
         }
         Ok(())
+    }
+
+    fn terminal_sent_mut(&mut self) -> Option<&mut Vec<String>> {
+        match self {
+            Self::Player { terminal_sent, .. } | Self::Spectator { terminal_sent, .. } => {
+                Some(terminal_sent)
+            }
+            Self::Pending => None,
+        }
     }
 
     /// プレイヤ attachment を構築する補助関数。`is_admin` は `false` で初期化
@@ -387,6 +402,45 @@ mod tests {
                 };
                 assert_eq!(received, expected);
             }
+        }
+    }
+
+    #[test]
+    fn terminal_delivery_does_not_resend_when_progress_save_fails() {
+        use rshogi_csa_server::game::result::GameResult;
+        for fail_at in 0..2 {
+            let mut att = WsAttachment::player(Role::Black, "black", "game");
+            let mut saved = serde_json::to_string(&att).unwrap();
+            let mut received = Vec::new();
+            let mut persist_calls = 0;
+            let delivered = att.deliver_terminal(
+                &GameResult::Sennichite,
+                |line| {
+                    received.push(line.to_owned());
+                    Ok(())
+                },
+                |att| {
+                    persist_calls += 1;
+                    if persist_calls == fail_at + 1 {
+                        return Err("persist failed");
+                    }
+                    saved = serde_json::to_string(att).unwrap();
+                    Ok(())
+                },
+            );
+            assert!(delivered.is_err());
+            let mut restored: WsAttachment = serde_json::from_str(&saved).unwrap();
+            restored
+                .deliver_terminal(
+                    &GameResult::Sennichite,
+                    |line| {
+                        received.push(line.to_owned());
+                        Ok::<_, &str>(())
+                    },
+                    |_| Ok(()),
+                )
+                .unwrap();
+            assert_eq!(received, ["#SENNICHITE", "#DRAW"], "fail_at={fail_at}");
         }
     }
 

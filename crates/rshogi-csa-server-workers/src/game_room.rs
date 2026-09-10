@@ -1244,6 +1244,10 @@ impl GameRoom {
                         // (code 1000) で終了通知するだけで十分。
                         if finished.is_some() {
                             let _ = ws.close(Some(1000), Some("spectate finished".to_owned()));
+                        } else {
+                            // snapshot 用の復元で終局済みと分かった場合、結果通知を
+                            // snapshot の後に送るためここで終局確定を再開する。
+                            self.ensure_core_loaded().await?;
                         }
                     }
                     MonitorDecision::NotFound { requested } => {
@@ -1325,7 +1329,9 @@ impl GameRoom {
     ) -> Result<()> {
         // CoreRoom を確保し、clock / current_turn から `SpectatorClocks` を組む。
         // borrow scope は最小化し、await を伴う `load_moves` は borrow 外で呼ぶ。
-        self.ensure_core_loaded().await?;
+        // 終局確定は snapshot 完了後に再開する。ここで確定すると結果通知と
+        // close が snapshot 本体より先に届く。
+        self.restore_core().await?;
         let clocks = {
             let borrow = self.core.borrow();
             borrow
@@ -2877,16 +2883,60 @@ impl GameRoom {
     /// - 復元中の `handle_line` 失敗（`AgreeReplayFailed` / `MoveReplayFailed` 等）
     ///   ではコアを生成せず、以降の着手受理を拒絶する。
     async fn ensure_core_loaded(&self) -> Result<()> {
+        self.restore_core().await?;
+        self.resume_pending_finalization().await?;
         // core が既に組み立て済の場合でも、live-games-index 未 put のまま
         // hibernation を跨いで再 attach した場合に retry が必要なので、
-        // 早期 return ではなく `live_index_put_done` の照合を先に行う。
+        // `live_index_put_done` の照合を行う。
         if self.core.borrow().is_some() {
-            let pending = self.core.borrow().as_ref().and_then(pending_finalization);
-            if let Some(result) = pending {
-                self.finalize_if_ended(&result).await?;
-                return Ok(());
-            }
             self.retry_live_games_index_if_needed().await?;
+        }
+        Ok(())
+    }
+
+    /// コアが終局済みで終局確定が未完了なら再開する。
+    ///
+    /// 棋譜 export は `moves` テーブルから組むため、終局手の保存に失敗した
+    /// in-memory の裁定をそのまま確定すると欠けた棋譜が残る。その場合は
+    /// in-memory のコアを捨てて保存済み履歴から復元し直し、保存済み履歴で
+    /// 終局しているときだけ確定する。
+    async fn resume_pending_finalization(&self) -> Result<()> {
+        let Some(moves_played) = self
+            .core
+            .borrow()
+            .as_ref()
+            .filter(|core| pending_finalization(core).is_some())
+            .map(|core| core.moves_played())
+        else {
+            return Ok(());
+        };
+        if self.load_finished().await?.is_some() {
+            self.core.borrow_mut().take();
+            return Ok(());
+        }
+        let persisted = self.count_moves()?;
+        if persisted != i64::from(moves_played) {
+            crate::structured_log!(
+                event: "pending_finalization_moves_mismatch",
+                component: "game_room",
+                level: "error",
+                moves_played: moves_played,
+                persisted_moves: persisted,
+            );
+            self.core.borrow_mut().take();
+            self.restore_core().await?;
+        }
+        let pending = self.core.borrow().as_ref().and_then(pending_finalization);
+        if let Some(result) = pending {
+            self.finalize_if_ended(&result).await?;
+        }
+        Ok(())
+    }
+
+    /// CoreRoom を in-memory に確保するだけで、未完了の終局確定は再開しない。
+    /// 観戦 snapshot のように送信順序を自前で管理する経路が使う。
+    async fn restore_core(&self) -> Result<()> {
+        if self.core.borrow().is_some() {
             return Ok(());
         }
         if self.load_finished().await?.is_some() {
@@ -2921,17 +2971,6 @@ impl GameRoom {
                 // (`ReplaySummary` の variant 間サイズ差対策、persistence.rs 参照)。
                 *self.core.borrow_mut() = Some(*core);
                 *self.config.borrow_mut() = Some(cfg);
-
-                // 終局手の保存と終局確定の間で中断しても、復元した裁定を永続化する。
-                let pending = self.core.borrow().as_ref().and_then(pending_finalization);
-                if let Some(result) = pending {
-                    self.finalize_if_ended(&result).await?;
-                    return Ok(());
-                }
-
-                // live-games-index put が抜けたまま hibernation で isolate が落ちた
-                // ケースを救済する (https://github.com/SH11235/rshogi/issues/549 §5)。
-                self.retry_live_games_index_if_needed().await?;
 
                 // 計時起点は「直前の指し手の at_ms（初手前は play_started_at_ms）」で
                 // 統一し、live / replay / alarm すべてで同じ規則を使う
@@ -3324,6 +3363,16 @@ impl GameRoom {
                 err: format!("{e:?}"),
             );
         }
+    }
+
+    fn count_moves(&self) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct CountRow {
+            n: i64,
+        }
+        let cursor = self.state.storage().sql().exec("SELECT COUNT(*) AS n FROM moves", None)?;
+        let rows: Vec<CountRow> = cursor.to_array()?;
+        Ok(rows.first().map_or(0, |row| row.n))
     }
 
     async fn load_slots(&self) -> Result<Vec<Slot>> {

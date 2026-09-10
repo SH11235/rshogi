@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolve } from 'node:path';
 import type { Miniflare } from 'miniflare';
 import { CsaClient, createMiniflare, makeTempPersistRoot, getKifuBucket } from './harness.ts';
+import { readLineFromWebSocket } from './ws_test_helpers';
 
 interface RecoveryState {
   finished: { result_code: string; exported_at_ms: number | null } | null;
@@ -16,13 +17,14 @@ describe('終局保存の復旧', () => {
   let cleanup: () => Promise<void>;
   let black: CsaClient;
   let white: CsaClient;
+  let gameId: string;
   let control: (command: object) => Promise<RecoveryState>;
   const cycle = ['+5958OU', '-5152OU', '+5859OU', '-5251OU'] as const;
 
   beforeEach(async () => {
     const persist = await makeTempPersistRoot();
     cleanup = persist.cleanup;
-    mf = await createMiniflare({ persistRoot: persist.path,
+    mf = await createMiniflare({ persistRoot: persist.path, allowViewerApi: true,
       scriptPath: resolve(import.meta.dirname, 'finalization-worker.mjs') });
     const ns = await mf.getDurableObjectNamespace('GAME_ROOM') as unknown as {
       idFromName(name: string): unknown;
@@ -43,7 +45,7 @@ describe('終局保存の復旧', () => {
     await black.drainGameSummary();
     await white.drainGameSummary();
     black.send('AGREE'); white.send('AGREE');
-    await black.recvUntil(l => l.startsWith('START:'));
+    gameId = (await black.recvUntil(l => l.startsWith('START:'))).at(-1)!.slice('START:'.length);
     await white.recvUntil(l => l.startsWith('START:'));
     for (let i = 0; i < 11; i++) {
       const line = cycle[i % 4]!;
@@ -105,6 +107,68 @@ describe('終局保存の復旧', () => {
     expect(await failed.recvLine()).toBe('#DRAW');
     await expect(black.recvLine()).rejects.toThrow('connection closed');
     await expect(white.recvLine()).rejects.toThrow('connection closed');
+  });
+
+  it.each(['#SENNICHITE', '#DRAW'])('進捗保存の失敗後も通知済みの行を再送しない (%s)', async (line) => {
+    await control({ faults: { persistRole: 'White', persistLine: line } });
+    white.send(cycle[3]);
+    await black.recvUntil(l => l.startsWith(cycle[3]));
+    await white.recvUntil(l => l.startsWith(cycle[3]));
+    expect(await black.recvLine()).toBe('#SENNICHITE');
+    expect(await black.recvLine()).toBe('#DRAW');
+    if (line === '#DRAW') expect(await white.recvLine()).toBe('#SENNICHITE');
+    expect((await control({})).finished).toBeNull();
+    await control({ alarm: true });
+    if (line === '#SENNICHITE') expect(await white.recvLine()).toBe('#SENNICHITE');
+    expect(await white.recvLine()).toBe('#DRAW');
+    await expect(white.recvLine()).rejects.toThrow('connection closed');
+  });
+
+  it.each([false, true])('終局手を保存できなければ終局を確定せず保存済み局面へ戻す (cold=%s)', async (cold) => {
+    await control({ faults: { beforeMove: true } });
+    white.send(cycle[3]);
+    for (let i = 0; i < 100 && (await control({})).beforeMoveArmed; i++) {
+      await new Promise(r => setTimeout(r, 10));
+    }
+    const reverted = await control({ reset: cold, alarm: true });
+    expect(reverted.finished).toBeNull();
+    expect(reverted.moves).toBe(11);
+    white.send(cycle[3]);
+    for (const client of [black, white]) {
+      expect(await client.recvLine()).toMatch(new RegExp(`^\\${cycle[3]},T`));
+      expect(await client.recvLine()).toBe('#SENNICHITE');
+      expect(await client.recvLine()).toBe('#DRAW');
+    }
+    expect((await control({})).finished?.result_code).toBe('#SENNICHITE');
+    const bucket = await getKifuBucket(mf);
+    const key = (await bucket.list()).objects.find(o => o.key.endsWith('.csa'))!.key;
+    const moves = (await (await bucket.get(key))!.text()).split('\n').filter(l => /^[+-]\d{4}/.test(l));
+    expect(moves).toHaveLength(12);
+  });
+
+  it('観戦 snapshot の後に終局通知を送る', async () => {
+    await control({ faults: { afterMove: true } });
+    white.send(cycle[3]);
+    await waitForMove();
+    await control({ faults: {}, reset: true });
+    const res = await mf.dispatchFetch(`https://example.com/ws/${encodeURIComponent(gameId)}/spectate`, {
+      headers: { Upgrade: 'websocket', Origin: 'https://example.com', 'CF-Connecting-IP': '127.0.0.1' },
+    });
+    const ws = res.webSocket!;
+    const buf = readLineFromWebSocket(ws);
+    ws.accept();
+    ws.send(`%%MONITOR2ON ${gameId}\n`);
+    const lines: string[] = [];
+    while (lines.at(-1) !== '#DRAW') lines.push(await buf.takeLine(5000));
+    const end = lines.indexOf('##[MONITOR2] END');
+    expect(lines[0]).toBe(`##[MONITOR2] BEGIN ${gameId}`);
+    expect(lines.slice(0, end).some(l => l.startsWith(cycle[3]))).toBe(true);
+    expect(lines.slice(end + 1)).toEqual(['#SENNICHITE', '#DRAW']);
+    await expect(buf.takeLine(5000)).rejects.toThrow('connection closed');
+    for (const client of [black, white]) {
+      expect(await client.recvLine()).toBe('#SENNICHITE');
+      expect(await client.recvLine()).toBe('#DRAW');
+    }
   });
 
   it('終局手保存直後の中断から両接続へ結果通知を回復する', async () => {

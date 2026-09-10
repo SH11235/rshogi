@@ -25,11 +25,22 @@ export class GameRoom {
           }
           return ws.send(line);
         },
+        serializeAttachment: (att) => {
+          if (this.faults.persistRole === att?.role && att?.terminal_sent?.includes(this.faults.persistLine)) {
+            this.faults.persistRole = undefined;
+            throw new Error('injected attachment persistence failure');
+          }
+          return ws.serializeAttachment(att);
+        },
       }));
       return this.sockets.get(ws);
     };
     const sql = wrap(state.storage.sql, {
       exec: (query, ...args) => {
+        if (this.faults.beforeMove && query.startsWith('INSERT INTO moves')) {
+          this.faults.beforeMove = false;
+          throw new Error('injected failure before move persistence');
+        }
         const result = state.storage.sql.exec(query, ...args);
         if (this.faults.afterMove && query.startsWith('INSERT INTO moves')) {
           this.faults.afterMove = false;
@@ -73,6 +84,7 @@ export class GameRoom {
         pending: await this.state.storage.get('export_pending') ?? null,
         alarm: await this.state.storage.getAlarm(),
         moves: this.state.storage.sql.exec('SELECT COUNT(*) AS n FROM moves').one().n,
+        beforeMoveArmed: Boolean(this.faults.beforeMove),
       });
     }
     return this.inner.fetch(request);
