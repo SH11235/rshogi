@@ -547,7 +547,7 @@ where
             time_manager,
         );
 
-        if value >= prob_beta && probcut_depth > 0 {
+        if !st.abort && value >= prob_beta && probcut_depth > 0 {
             st.set_child_follow_pv(ply, mv);
             value = -search_node(
                 st,
@@ -564,6 +564,11 @@ where
         }
         nnue_pop(st);
         pos.undo_move(mv);
+
+        // 未完了の子の番兵値を cutoff 判定や TT 保存に使わない。
+        if st.abort {
+            return Some(Value::ZERO);
+        }
 
         if value >= prob_beta {
             inc_stat!(st, probcut_cutoff);
