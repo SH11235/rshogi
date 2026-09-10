@@ -533,7 +533,13 @@ impl DurableObject for GameRoom {
                 .await?
                 .is_some();
         if matches!(kind, Some(PendingAlarmKind::ExportRetry)) || orphaned_export {
-            self.handle_export_retry_alarm().await?;
+            if let Err(error) = self.handle_export_retry_alarm().await {
+                if self.state.storage().get_alarm().await?.is_none() {
+                    return Err(error);
+                }
+                crate::structured_log!(event: "export_retry_scheduled_after_error",
+                    component: "game_room", err: format!("{error:?}"));
+            }
             return Response::ok("export_retry handled");
         }
 
@@ -560,8 +566,19 @@ impl DurableObject for GameRoom {
         }
 
         if matches!(kind, Some(PendingAlarmKind::GraceExpired)) {
-            self.handle_grace_expired_alarm().await?;
-            return Response::ok("grace_expired handled");
+            if self
+                .state
+                .storage()
+                .get::<PendingReconnect>(KEY_GRACE_REGISTRY)
+                .await?
+                .is_some()
+            {
+                self.handle_grace_expired_alarm().await?;
+                return Response::ok("grace_expired handled");
+            }
+            // 種別保存と registry 保存の間で中断した場合、残っていた turn alarm を
+            // 消費するだけで終わらせず、通常の時計判定へ戻す。
+            self.delete_grace_alarm_state().await?;
         }
         if matches!(kind, Some(PendingAlarmKind::AgreeTimeout)) {
             self.handle_agree_timeout_alarm().await?;
@@ -1126,7 +1143,7 @@ impl GameRoom {
                     handle: handle,
                 );
                 let _ =
-                    ws.close(Some(1000), Some("game finished (unrecoverable state)".to_owned()));
+                    ws.close(Some(1011), Some("game finished (unrecoverable state)".to_owned()));
                 return Ok(());
             };
             match core.handle_line(color, &csa, now) {
@@ -1328,7 +1345,8 @@ impl GameRoom {
         let Some(cfg) = cfg_opt else {
             // 対局未開始 (LOGIN 前) の DO に観戦者が入ったケース。snapshot は
             // 出さずそのまま終了する (Game_Summary に必要な game_id すら無いため)。
-            // flag はまだ立てていないのでリセット不要。
+            // 未開始の空 snapshot も完了として通常配信へ移す。
+            self.set_spectator_snapshot_state(ws, false, 0, Vec::new())?;
             return Ok(());
         };
 
@@ -1339,8 +1357,13 @@ impl GameRoom {
         // ここから先の失敗は flag=true を残さない。中断したら reset + close する。
         if let Err(e) = self.send_spectator_snapshot_body(ws, cfg, finished).await {
             if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
-                let reset = att.reset_spectator_snapshot();
-                let _ = ws.serialize_attachment(&reset);
+                let mut reset = att.reset_spectator_snapshot();
+                let _ = reset.abort_terminal(
+                    &mut |att| ws.serialize_attachment(att),
+                    &mut |code, reason| {
+                        let _ = ws.close(Some(code), Some(reason.to_owned()));
+                    },
+                );
             }
             let _ = ws.close(Some(1011), Some("snapshot failed".to_owned()));
             crate::structured_log!(
@@ -1388,7 +1411,8 @@ impl GameRoom {
             config: cfg,
             moves: &moves,
             clocks: &clocks,
-            finalized: finished.as_ref(),
+            // 結果行は下で attachment の配信記録を通す。
+            finalized: None,
         });
         for line in &lines {
             send_line(ws, line)?;
@@ -1399,6 +1423,27 @@ impl GameRoom {
         // 含まれた手と重複しない broadcast のみ)。flush は flag を false へ戻す。
         self.set_spectator_snapshot_last_ply(ws, last_ply_in_snapshot)?;
         self.flush_spectator_snapshot_queue(ws).await?;
+        if let Some(finished) = finished {
+            let entries = [crate::attachment::FinalizingBroadcast {
+                target: BroadcastTarget::Spectators,
+                line: finished.result_code.clone(),
+                ply: None,
+            }];
+            let mut att = ws
+                .deserialize_attachment::<WsAttachment>()?
+                .ok_or_else(|| Error::RustError("snapshot attachment missing".into()))?;
+            att.deliver_terminal(
+                &entries,
+                |line| send_line(ws, line),
+                |att| ws.serialize_attachment(att),
+                |code, reason| {
+                    let _ = ws.close(Some(code), Some(reason.to_owned()));
+                },
+            )?;
+            if att.terminal_aborted() || !att.terminal_complete(&entries) {
+                return Err(Error::RustError("snapshot terminal delivery failed".into()));
+            }
+        }
         Ok(())
     }
 
@@ -1479,9 +1524,9 @@ impl GameRoom {
             let (line, ply) = pending_queue.remove(0);
             let included = ply.is_some_and(|ply| ply <= *last_ply_in_snapshot);
             ws.serialize_attachment(&att)?;
-            if !included && let Err(error) = send_line(ws, &line) {
-                crate::structured_log!(event: "spectator_queue_flush_failed", component: "game_room",
-                    err: format!("{error:?}"));
+            if !included {
+                // 欠落した snapshot を正常完了扱いにしない。
+                send_line(ws, &line)?;
             }
         }
     }
@@ -2105,9 +2150,13 @@ impl GameRoom {
         let advance = alarm_driven || verdict.attempt == 0;
         if advance {
             verdict.attempt = verdict.attempt.saturating_add(1);
+        }
+        // alarm の予約失敗を runtime が再試行しても、猶予を消費しない。
+        // 予約後の保存失敗なら、前の attempt と予約済み alarm から再開できる。
+        self.ensure_finalization_alarm(verdict.attempt, advance).await?;
+        if advance {
             self.state.storage().put(KEY_FINALIZING, &verdict).await?;
         }
-        self.ensure_finalization_alarm(verdict.attempt, advance).await?;
         if self.config.borrow().is_none() {
             let cfg = self.state.storage().get(KEY_CONFIG).await?;
             *self.config.borrow_mut() = cfg;
@@ -2133,6 +2182,13 @@ impl GameRoom {
             verdict.attempt,
             "floodgate_history",
         )?;
+        // 外部 I/O の待機中に snapshot が完了した接続にも送る。送信済みの行は
+        // attachment で除外されるので、既存接続へは再送しない。
+        self.finalization_step(
+            self.dispatch_terminal(&verdict.broadcasts),
+            verdict.attempt,
+            "terminal_delivery_after_export",
+        )?;
 
         // export 全成功なら `exported_at_ms` を埋め、retry 経路は不要。
         // 一部失敗なら `exported_at_ms = None` で書き、後述の pending 経路で
@@ -2148,6 +2204,10 @@ impl GameRoom {
         // 確定後に落ちると KEY_FINISHED が再開を止め、再試行の手掛かりが失われる。
         if let Some(pending) = &export_pending {
             self.state.storage().put(KEY_EXPORT_PENDING, pending).await?;
+        } else if exported_at_ms.is_some() {
+            // 前回 pending 保存後に KEY_FINISHED 保存が失敗していた場合の残骸。
+            // 今回は全 PUT 成功済みなので、alarm を止める前に片付ける。
+            self.state.storage().delete(KEY_EXPORT_PENDING).await?;
         }
         // export も再試行予約も無い場合は、棋譜の唯一の原本として moves を残す。
         let keep_moves = exported_at_ms.is_none() && export_pending.is_none();
@@ -2170,7 +2230,7 @@ impl GameRoom {
         // が ExportRetry タグを巻き込んで消す race がある。
         self.delete_grace_alarm_state().await?;
 
-        // export 一部失敗なら pending 永続化 + retry alarm を貼る。pending put /
+        // pending は確定前に保存済み。種別タグと retry alarm を貼る。
         // alarm 書き込みは best-effort で失敗ログのみ残し、`finalize_if_ended` の
         // 残り処理 (live-games-index 削除 / WS close) を必ず進める (R2 export retry 主契約)。
         if let Some(pending) = export_pending {
@@ -2234,7 +2294,10 @@ impl GameRoom {
 
         for ws in self.state.get_websockets() {
             match ws.deserialize_attachment::<WsAttachment>() {
-                Ok(Some(att)) if att.terminal_aborted() => continue,
+                Ok(Some(att)) if att.terminal_aborted() => {
+                    // abort 時の close 自体が失敗していても、行を再送せず切断を再試行する。
+                    let _ = ws.close(Some(1011), Some("terminal delivery failed".to_owned()));
+                }
                 // 試行上限で配信を諦めた接続を正常終了に見せない。
                 Ok(Some(att)) if !att.terminal_complete(&verdict.broadcasts) => {
                     let _ = ws.close(Some(1011), Some("terminal delivery failed".to_owned()));
@@ -2279,22 +2342,9 @@ impl GameRoom {
 
     /// 終局時 export PUT 失敗の retry を予約する。
     ///
-    /// `KEY_EXPORT_PENDING` (本文 + 失敗 key 一覧) と `KEY_PENDING_ALARM_KIND =
-    /// ExportRetry` を put し、`RETRY_DELAYS_SEC[0]` 後に `state.alarm()` を貼る。
-    /// 各 storage 操作の失敗は logfmt で記録した上で吸収する (`finalize_if_ended`
-    /// の残り処理を止めないため)。pending payload が永続化できなければ retry
-    /// 経路は走らないが、その場合でも `exported_at_ms = None` のまま `KEY_FINISHED`
-    /// は確定しているので運用上 export 欠損として観測できる。
+    /// 本文は確定前に保存済み。タグと予約の失敗時は既存の finalization alarm が
+    /// orphaned_export 分岐から再開するため、ここではログを残して処理を続ける。
     async fn schedule_export_retry(&self, pending: ExportPendingState) {
-        if let Err(e) = self.state.storage().put(KEY_EXPORT_PENDING, &pending).await {
-            crate::structured_log!(
-                event: "export_pending_put_failed",
-                component: "game_room",
-                game_id: pending.game_id,
-                err: format!("{e:?}"),
-            );
-            return;
-        }
         if let Err(e) = self
             .state
             .storage()
@@ -2348,7 +2398,7 @@ impl GameRoom {
     /// 消し、pending entry のみ残置する (運用観測用)。
     async fn handle_export_retry_alarm(&self) -> Result<()> {
         let pending: Option<ExportPendingState> =
-            self.state.storage().get(KEY_EXPORT_PENDING).await.ok().flatten();
+            self.state.storage().get(KEY_EXPORT_PENDING).await?;
         let Some(mut pending) = pending else {
             // pending が無い (race / 旧 deploy 状態の cleanup) は alarm タグだけ
             // 片付けて終了する。`KEY_FINISHED` 経路は既に確定済の前提。
@@ -2360,6 +2410,14 @@ impl GameRoom {
             let _ = self.state.storage().delete_alarm().await;
             return Ok(());
         };
+
+        // 打ち切り後に古い alarm が再配信されても R2 PUT を再開しない。
+        // pending 本文は原本として残す。
+        if is_exhausted(pending.attempt) {
+            self.state.storage().delete(KEY_PENDING_ALARM_KIND).await?;
+            self.state.storage().delete_alarm().await?;
+            return Ok(());
+        }
 
         let bucket = match self.env.bucket(ConfigKeys::KIFU_BUCKET_BINDING) {
             Ok(b) => b,
@@ -2379,6 +2437,13 @@ impl GameRoom {
                 return Ok(());
             }
         };
+
+        // R2 / 進捗保存 / 完了印のどこで中断しても再開できるよう先に予約する。
+        // 最終試行でも完了処理の storage 障害に備え、同じ遅延で予約を残す。
+        let delay_ms = next_retry_delay_ms(pending.attempt.saturating_add(1))
+            .or_else(|| next_retry_delay_ms(pending.attempt))
+            .ok_or_else(|| Error::RustError("export retry delay missing".into()))?;
+        self.state.storage().set_alarm(Duration::from_millis(delay_ms)).await?;
 
         // 失敗 key を順に再 PUT。成功した key は `still_failed` に積まない。
         let mut still_failed: Vec<FailedExportObject> =
@@ -2414,7 +2479,7 @@ impl GameRoom {
 
         if still_failed.is_empty() {
             // 全成功: pending を消し、`exported_at_ms` を埋め、alarm/タグを片付ける。
-            self.complete_export_retry(&pending).await;
+            self.complete_export_retry(&pending).await?;
             return Ok(());
         }
 
@@ -2433,107 +2498,36 @@ impl GameRoom {
             );
             // pending を最新 attempt で書き直して観測性を保ち、alarm/タグだけ
             // 停止する。
-            if let Err(e) = self.state.storage().put(KEY_EXPORT_PENDING, &pending).await {
-                crate::structured_log!(
-                    event: "export_pending_put_failed",
-                    component: "game_room",
-                    game_id: pending.game_id,
-                    err: format!("{e:?}"),
-                );
-            }
-            let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
-            let _ = self.state.storage().delete_alarm().await;
+            self.state.storage().put(KEY_EXPORT_PENDING, &pending).await?;
+            self.state.storage().delete(KEY_PENDING_ALARM_KIND).await?;
+            self.state.storage().delete_alarm().await?;
             return Ok(());
         }
 
-        if let Err(e) = self.state.storage().put(KEY_EXPORT_PENDING, &pending).await {
-            crate::structured_log!(
-                event: "export_pending_put_failed",
-                component: "game_room",
-                game_id: pending.game_id,
-                err: format!("{e:?}"),
-            );
-            return Ok(());
-        }
-        let Some(delay_ms) = next_retry_delay_ms(next_attempt) else {
-            // is_exhausted で先に return しているので到達しない。
-            return Ok(());
-        };
-        if let Err(e) = self.state.storage().set_alarm(Duration::from_millis(delay_ms)).await {
-            crate::structured_log!(
-                event: "export_retry_alarm_set_failed",
-                component: "game_room",
-                game_id: pending.game_id,
-                delay_ms: delay_ms,
-                err: format!("{e:?}"),
-            );
-        } else {
-            crate::structured_log!(
-                event: "export_retry_rescheduled",
-                component: "game_room",
-                game_id: pending.game_id,
-                attempt: next_attempt,
-                delay_ms: delay_ms,
-                failed_count: pending.failed_keys.len(),
-            );
-        }
+        self.state.storage().put(KEY_EXPORT_PENDING, &pending).await?;
+        crate::structured_log!(event: "export_retry_rescheduled", component: "game_room",
+            game_id: pending.game_id, attempt: next_attempt, delay_ms: delay_ms,
+            failed_count: pending.failed_keys.len());
         Ok(())
     }
 
-    /// retry 全成功後の cleanup。pending を消し、`exported_at_ms` を埋め、alarm
-    /// 関連タグを停止する。各失敗は logfmt で吸収する (alarm 経路を Err で抜けて
-    /// retry 自体を破壊しないため)。
-    async fn complete_export_retry(&self, pending: &ExportPendingState) {
-        if let Err(e) = self.state.storage().delete(KEY_EXPORT_PENDING).await {
-            crate::structured_log!(
-                event: "export_pending_delete_failed",
-                component: "game_room",
-                game_id: pending.game_id,
-                err: format!("{e:?}"),
-            );
-        }
-        let _ = self.state.storage().delete(KEY_PENDING_ALARM_KIND).await;
-        let _ = self.state.storage().delete_alarm().await;
-
-        // `KEY_FINISHED` の `exported_at_ms` を埋め直す。失敗してもログのみ
-        // (運用観測上、`exported_at_ms = None` のまま retry 完了になるが、
-        // pending 削除済なので二重 export はない)。
-        let now_ms = self.now_ms();
-        match self.state.storage().get::<FinishedState>(KEY_FINISHED).await {
-            Ok(Some(mut finished)) => {
-                finished.exported_at_ms = Some(now_ms);
-                if let Err(e) = self.state.storage().put(KEY_FINISHED, &finished).await {
-                    crate::structured_log!(
-                        event: "export_retry_finished_update_failed",
-                        component: "game_room",
-                        game_id: pending.game_id,
-                        err: format!("{e:?}"),
-                    );
-                } else {
-                    crate::structured_log!(
-                        event: "export_retry_completed",
-                        component: "game_room",
-                        game_id: pending.game_id,
-                        attempt: pending.attempt,
-                    );
-                }
-            }
-            Ok(None) => {
-                crate::structured_log!(
-                    event: "export_retry_finished_missing",
-                    component: "game_room",
-                    game_id: pending.game_id,
-                );
-            }
-            Err(e) => {
-                crate::structured_log!(
-                    event: "export_retry_finished_load_failed",
-                    component: "game_room",
-                    game_id: pending.game_id,
-                    err: format!("{e:?}"),
-                );
-            }
-        }
+    /// 完了印を保存してから pending と alarm を消す。途中の失敗では予約済み
+    /// alarm と本文を残して再開する。完了印の保存後は同じ R2 PUT を再実行しても安全。
+    async fn complete_export_retry(&self, pending: &ExportPendingState) -> Result<()> {
+        let mut finished = self
+            .state
+            .storage()
+            .get::<FinishedState>(KEY_FINISHED)
+            .await?
+            .ok_or_else(|| Error::RustError("export retry: finished state missing".into()))?;
+        finished.exported_at_ms = Some(pending.ended_at_ms);
+        self.state.storage().put(KEY_FINISHED, &finished).await?;
+        self.state.storage().delete(KEY_EXPORT_PENDING).await?;
+        self.state.storage().delete(KEY_PENDING_ALARM_KIND).await?;
+        self.state.storage().delete_alarm().await?;
+        crate::structured_log!(event: "export_retry_completed", component: "game_room",
+            game_id: pending.game_id, attempt: pending.attempt);
+        Ok(())
     }
 
     /// 本文を組めない履歴読込障害は終局処理で再試行し、R2 PUT 障害は本文ごと別途再試行する。
@@ -3152,7 +3146,7 @@ impl GameRoom {
     ///    で確定させ、以後の着手を終局済み扱いにする
     /// 2. grace / alarm 系タグを片付ける
     /// 3. live-games-index entry を削除する (play_started 済みで put 済みのケース)
-    /// 4. 復元できなかった moves を破棄する (再 replay しても同じ失敗になるため)
+    /// 4. 復元できなかった moves を原本として保存する
     /// 5. error レベルの構造化ログを出す (root fix 後は稀な経路なので alert 対象)
     /// 6. 両 WS を閉じて「終局として応答」する (無言破棄をやめる)
     ///
@@ -3194,9 +3188,8 @@ impl GameRoom {
             self.try_delete_live_games_index(cfg, started_at_ms).await;
         }
 
-        // 復元できなかった moves は破棄する (KEY_FINISHED ガードで再 replay は
-        // 走らないが、storage を残す意味がないため cleanup する)。
-        self.clear_moves().await;
+        // export していないため moves は唯一の原本。復元不能でも破棄しない。
+        // KEY_FINISHED ガードにより再 replay は走らない。
 
         // core は生成できていない (= None) が、防御的に take しておく。
         self.core.borrow_mut().take();
@@ -3210,9 +3203,9 @@ impl GameRoom {
             result_code: result_code,
         );
 
-        // 両 WS を穏やかに閉じる (無言破棄をやめ、終局として応答する)。
+        // 結果を配信していないため、正常完了として閉じない。
         for ws in self.state.get_websockets() {
-            let _ = ws.close(Some(1000), Some("game finished (unrecoverable state)".to_owned()));
+            let _ = ws.close(Some(1011), Some("game finished (unrecoverable state)".to_owned()));
         }
         Ok(())
     }
@@ -3662,7 +3655,7 @@ impl GameRoom {
     /// 何もしない。
     async fn handle_grace_expired_alarm(&self) -> Result<()> {
         let pending: Option<PendingReconnect> =
-            self.state.storage().get(KEY_GRACE_REGISTRY).await.ok().flatten();
+            self.state.storage().get(KEY_GRACE_REGISTRY).await?;
         let Some(pending) = pending else {
             // 再接続が成立して registry が片付けられた直後の race 等。alarm kind
             // も並行で TimeUp に戻されているはずだが、念のため tag を片付けておく。
@@ -4001,7 +3994,7 @@ impl GameRoom {
     }
 
     async fn load_pending_alarm_kind(&self) -> Result<Option<PendingAlarmKind>> {
-        Ok(self.state.storage().get(KEY_PENDING_ALARM_KIND).await.ok().flatten())
+        self.state.storage().get(KEY_PENDING_ALARM_KIND).await
     }
 
     async fn delete_grace_alarm_state(&self) -> Result<()> {

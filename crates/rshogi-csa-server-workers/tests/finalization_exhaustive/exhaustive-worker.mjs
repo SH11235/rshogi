@@ -2,7 +2,7 @@ import worker, { GameRoom as RustGameRoom, Lobby, RateLimiter } from '../../buil
 export { Lobby, RateLimiter };
 export default worker;
 
-const STORAGE_EFFECTS = ['get', 'put', 'delete', 'getAlarm', 'setAlarm', 'deleteAlarm'];
+const STORAGE_EFFECTS = ['get', 'put', 'delete', 'deleteMultiple', 'getAlarm', 'setAlarm', 'deleteAlarm'];
 const SOCKET_EFFECTS = ['send', 'serializeAttachment', 'close'];
 const MAX_ALARM_RETRIES = 6;
 

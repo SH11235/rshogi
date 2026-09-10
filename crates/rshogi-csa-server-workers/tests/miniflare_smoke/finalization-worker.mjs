@@ -31,6 +31,10 @@ export class GameRoom {
         },
         close: (code, reason) => {
           this.closes.push({ role: ws.deserializeAttachment()?.role, code, reason });
+          if (this.faults.closeRole && this.faults.closeRole === ws.deserializeAttachment()?.role) {
+            this.faults.closeRole = undefined;
+            throw new Error('injected WS close failure');
+          }
           return ws.close(code, reason);
         },
         serializeAttachment: (att) => {
@@ -60,12 +64,33 @@ export class GameRoom {
         return result;
       },
     });
-    const storage = wrap(state.storage, { sql });
+    const storageMethods = {};
+    for (const method of ['get', 'put', 'delete', 'setAlarm', 'deleteAlarm', 'deleteMultiple']) {
+      storageMethods[method] = async (...args) => {
+        const fault = this.faults.storage;
+        const hit = fault?.method === method && (fault.key === undefined || fault.key === args[0]);
+        if (hit && !fault.after) {
+          this.faults.storage = undefined;
+          throw new Error(`injected storage ${method} failure`);
+        }
+        const result = await state.storage[method](...args);
+        if (hit && fault.after) {
+          this.faults.storage = undefined;
+          throw new Error(`injected interruption after storage ${method}`);
+        }
+        return result;
+      };
+    }
+    const storage = wrap(state.storage, { sql, ...storageMethods });
     this.context = wrap(state, {
       storage,
       getWebSockets: (...args) => state.getWebSockets(...args).map(socket),
     });
     this.env = { ...env, KIFU_BUCKET: wrap(env.KIFU_BUCKET, {
+      delete: async (...args) => {
+        if (this.faults.holdDelete) await this.r2Released;
+        return env.KIFU_BUCKET.delete(...args);
+      },
       put: async (...args) => {
         if (this.faults.r2) throw new Error('injected R2 failure');
         this.puts[args[0]] = (this.puts[args[0]] ?? 0) + 1;
@@ -86,6 +111,11 @@ export class GameRoom {
       if (command.faults) this.faults = command.faults;
       if (command.releaseR2) this.releaseR2();
       if (command.agreeTimeout) await this.state.storage.put('pending_alarm_kind', 'AgreeTimeout');
+      if (command.orphanGrace) {
+        await this.state.storage.put('pending_alarm_kind', 'GraceExpired');
+        await this.state.storage.delete('grace_registry');
+      }
+      if (command.corruptReplay) this.state.storage.sql.exec("UPDATE moves SET color = 'invalid' WHERE ply = 1");
       if (command.grace) {
         await this.state.storage.put('pending_alarm_kind', 'GraceExpired');
         await this.state.storage.put('grace_registry', {
@@ -98,6 +128,9 @@ export class GameRoom {
       // 接続と永続状態を保持して Rust インスタンスを再構築し、メモリ上のコアを破棄する。
       if (command.reset) this.inner = new RustGameRoom(this.context, this.env);
       if (command.alarm) {
+        // 実際の alarm 実行中は、貼り直さない限り getAlarm() は null。
+        // 前回が throw した場合の command.alarm は runtime の再配信も模す。
+        await this.state.storage.deleteAlarm();
         try {
           await this.inner.alarm();
         } catch (error) {

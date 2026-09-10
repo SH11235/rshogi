@@ -409,14 +409,12 @@ impl WsAttachment {
 
     /// 観戦者 attachment を構築する補助関数。
     ///
-    /// `snapshot_in_progress` / `last_ply_in_snapshot` / `pending_queue` は
-    /// すべて default 値で初期化する。snapshot 送信経路に入る際に DO 側で
-    /// `snapshot_in_progress = true` に切り替え、`##[MONITOR2] END` 送出後に
-    /// `false` に戻す契約。
+    /// 接続直後から最初の snapshot 完了まで配信を保留する。
+    /// MONITOR2ON を待っている間にも終局し得るため flag は true で始める。
     pub fn spectator(room_id: impl Into<String>) -> Self {
         Self::Spectator {
             room_id: room_id.into(),
-            snapshot_in_progress: false,
+            snapshot_in_progress: true,
             last_ply_in_snapshot: 0,
             pending_queue: Vec::new(),
             terminal_sent: Vec::new(),
@@ -697,7 +695,7 @@ mod tests {
         for (mut att, expected) in [
             (WsAttachment::player(Role::Black, "b", "g"), vec![0, 2, 4]),
             (WsAttachment::player(Role::White, "w", "g"), vec![1, 2, 4]),
-            (WsAttachment::spectator("g"), vec![3, 4]),
+            (WsAttachment::spectator("g").reset_spectator_snapshot(), vec![3, 4]),
             (WsAttachment::Pending, vec![]),
         ] {
             let mut received = Vec::new();
@@ -717,13 +715,8 @@ mod tests {
             );
         }
         let mut att = WsAttachment::spectator("g");
-        if let WsAttachment::Spectator {
-            snapshot_in_progress,
-            ..
-        } = &mut att
-        {
-            *snapshot_in_progress = true;
-        }
+        // MONITOR2ON 前も snapshot 送信中と同じく保留し、cold start でも維持する。
+        att = serde_json::from_str(&serde_json::to_string(&att).unwrap()).unwrap();
         for _ in 0..2 {
             att.deliver_terminal(
                 &entries,
@@ -742,7 +735,7 @@ mod tests {
 
     #[test]
     fn terminal_move_already_in_snapshot_is_not_sent_again() {
-        let mut att = WsAttachment::spectator("game");
+        let mut att = WsAttachment::spectator("game").reset_spectator_snapshot();
         if let WsAttachment::Spectator {
             last_ply_in_snapshot,
             ..

@@ -87,6 +87,7 @@ const SCENARIOS: Scenario[] = [
   { name: 'sennichite', trigger: async (g) => g.white.send(CYCLE[3]) },
   { name: 'sennichite-spectator', spectator: true, trigger: async (g) => g.white.send(CYCLE[3]) },
   { name: 'sennichite-r2-retry', preFaults: { kifuPutFailures: 1 }, trigger: async (g) => g.white.send(CYCLE[3]) },
+  { name: 'sennichite-r2-retry-twice', preFaults: { kifuPutFailures: 8 }, trigger: async (g) => g.white.send(CYCLE[3]) },
   { name: 'toryo', trigger: async (g) => g.white.send('%TORYO') },
   { name: 'disconnect', trigger: async (g) => { await g.white.close(); } },
   {
@@ -317,9 +318,9 @@ describe('終局処理の網羅障害注入', () => {
       const want = baseline.lines[watcher] ?? [];
       if (!isSubsequence(got, want)) {
         problems.push(`${watcher} が重複・余計・順序違いの行を受信: ${JSON.stringify(got)}`);
-      } else if (got.length < want.length && observed.closed[watcher] === 1000) {
+      } else if (got.length < want.length && observed.closed[watcher] !== 1011) {
         // 送信に失敗した接続は 1011 で閉じる契約なので、欠落を許すのはその場合だけ。
-        problems.push(`${watcher} が正常 close なのに行が欠けた: ${JSON.stringify(got)}`);
+        problems.push(`${watcher} が 1011 で閉じられていないのに行が欠けた (close=${observed.closed[watcher]}): ${JSON.stringify(got)}`);
       }
     }
     return problems;
