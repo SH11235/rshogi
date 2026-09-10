@@ -21,7 +21,7 @@ use super::tt_sanity::{
     maybe_log_invalid_tt_data, maybe_trace_tt_cutoff, maybe_trace_tt_probe, maybe_trace_tt_write,
 };
 use super::tt_sanity::{is_valid_tt_eval, is_valid_tt_stored_value};
-use super::types::{ContHistKey, NodeType, value_from_tt};
+use super::types::{ContHistKey, NodeType, value_from_tt, value_to_tt};
 
 // =============================================================================
 // 補正履歴
@@ -347,6 +347,7 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
         let mate_move = pos.mate_1ply();
         if mate_move.is_some() {
             let value = Value::mate_in(ply + 1);
+            let stored_value = value_to_tt(value, ply);
             let mate1_depth_boost = {
                 use std::sync::LazyLock;
                 static BOOST: LazyLock<i32> = LazyLock::new(|| {
@@ -366,7 +367,7 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
             if allow_write
                 && tt_result.write(
                     key,
-                    value,
+                    stored_value,
                     st.stack[ply as usize].tt_pv,
                     Bound::Exact,
                     stored_depth,
@@ -385,7 +386,7 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
                     bound: Bound::Exact,
                     is_pv: st.stack[ply as usize].tt_pv,
                     tt_move: mate_move,
-                    stored_value: value,
+                    stored_value,
                     eval: Value::NONE,
                     root_move: if ply >= 1 {
                         st.stack[0].current_move
