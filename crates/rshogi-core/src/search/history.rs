@@ -69,45 +69,6 @@ const PIECE_TYPE_NUM: usize = PieceType::NUM + 1; // None含む
 const PIECE_NUM: usize = Piece::NUM; // NONE含む
 
 // =============================================================================
-// 定数
-// =============================================================================
-
-/// 互換用の旧 TTMoveHistory ボーナス定数。
-/// 実探索の更新は `SearchTuneParams::tt_move_history_bonus` を使う。
-pub const TT_MOVE_HISTORY_BONUS: i32 = 811;
-
-/// 互換用の旧 TTMoveHistory ペナルティ定数。
-/// 実探索の更新は `SearchTuneParams::tt_move_history_malus` を使う。
-pub const TT_MOVE_HISTORY_MALUS: i32 = -848;
-
-/// ContinuationHistory更新の重み [(ply_back, weight)]
-///
-/// 1,2,3,4,5,6手前の指し手と現在の指し手のペアを更新。
-/// 王手中は1,2手前のみ更新。
-pub const CONTINUATION_HISTORY_WEIGHTS: [(usize, i32); 6] =
-    [(1, 1157), (2, 648), (3, 288), (4, 576), (5, 140), (6, 441)];
-
-/// update_quiet_histories用のlowPlyHistory倍率
-pub const LOW_PLY_HISTORY_MULTIPLIER: i32 = 761;
-pub const LOW_PLY_HISTORY_OFFSET: i32 = 0;
-
-/// update_quiet_histories用のcontinuationHistory倍率（正負共通）
-pub const CONTINUATION_HISTORY_MULTIPLIER: i32 = 955;
-
-/// update_quiet_histories用のpawnHistory倍率（正のボーナス時）
-pub const PAWN_HISTORY_POS_MULTIPLIER: i32 = 850;
-/// update_quiet_histories用のpawnHistory倍率（負のボーナス時）
-pub const PAWN_HISTORY_NEG_MULTIPLIER: i32 = 550;
-
-/// ContinuationHistory近接ply（1,2手前）へのオフセット
-/// update_continuation_histories で (bonus * weight / 1024) + 88 * (i < 2)
-pub const CONTINUATION_HISTORY_NEAR_PLY_OFFSET: i32 = 88;
-
-/// Prior Capture Countermove Bonus（fail low時の前の捕獲手へのボーナス）
-///
-pub const PRIOR_CAPTURE_COUNTERMOVE_BONUS: i32 = 964;
-
-// =============================================================================
 // StatsEntry
 // =============================================================================
 
