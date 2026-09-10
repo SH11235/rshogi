@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolve } from 'node:path';
 import type { Miniflare } from 'miniflare';
-import { CsaClient, createMiniflare, makeTempPersistRoot, getKifuBucket } from './harness.ts';
+import { CsaClient, createMiniflare, makeTempPersistRoot, getKifuBucket, getFloodgateHistoryBucket } from './harness.ts';
 import { readLineFromWebSocket } from './ws_test_helpers';
 
 interface RecoveryState {
+  activeMessages: number;
+  finalizing: { attempt: number; broadcasts: { line: string; ply: number | null }[] } | null;
+  closes: { role: string; code: number; reason: string }[];
   finished: { result_code: string; exported_at_ms: number | null } | null;
   kind: string | null;
   pending: unknown;
@@ -26,7 +29,7 @@ describe('終局保存の復旧', () => {
   beforeEach(async () => {
     const persist = await makeTempPersistRoot();
     cleanup = persist.cleanup;
-    mf = await createMiniflare({ persistRoot: persist.path, allowViewerApi: true,
+    mf = await createMiniflare({ persistRoot: persist.path, allowViewerApi: true, allowFloodgateFeatures: true,
       scriptPath: resolve(import.meta.dirname, 'finalization-worker.mjs') });
     const ns = await mf.getDurableObjectNamespace('GAME_ROOM') as unknown as {
       idFromName(name: string): unknown;
@@ -66,6 +69,15 @@ describe('終局保存の復旧', () => {
     throw new Error('終局手が保存されなかった');
   }
 
+  async function waitForFinished() {
+    for (let i = 0; i < 100; i++) {
+      const state = await control({});
+      if (state.finished) return state;
+      await new Promise(r => setTimeout(r, 10));
+    }
+    throw new Error('終局が確定しなかった');
+  }
+
   it('grace 復元中の R2 失敗後も export alarm が棋譜保存を再試行する', async () => {
     await control({ faults: { afterMove: true, r2: true }, grace: true });
     white.send(cycle[3]);
@@ -92,7 +104,7 @@ describe('終局保存の復旧', () => {
     { cold: true, role: 'Black', line: '#DRAW' },
     { cold: true, role: 'White', line: '#SENNICHITE' },
     { cold: true, role: 'White', line: '#DRAW' },
-  ])('送信失敗後に未配信分だけを送る ($role / $line / cold=$cold)', async ({ cold, role, line }) => {
+  ])('送信失敗した接続は再送せず 1011 で閉じる ($role / $line / cold=$cold)', async ({ cold, role, line }) => {
     await control({ faults: { sendRole: role, sendLine: line } });
     white.send(cycle[3]);
     await black.recvUntil(l => l.startsWith(cycle[3]));
@@ -102,11 +114,10 @@ describe('終局保存の復旧', () => {
     expect(await successful.recvLine()).toBe('#SENNICHITE');
     expect(await successful.recvLine()).toBe('#DRAW');
     if (line === '#DRAW') expect(await failed.recvLine()).toBe('#SENNICHITE');
-    const pending = await control({});
-    expect(pending.finished).toBeNull();
+    const finished = await waitForFinished();
+    expect(finished.finished?.result_code).toBe('#SENNICHITE');
+    expect(finished.closes).toContainEqual({ role, code: 1011, reason: 'terminal delivery failed' });
     await control({ faults: {}, reset: cold, alarm: true });
-    if (line === '#SENNICHITE') expect(await failed.recvLine()).toBe('#SENNICHITE');
-    expect(await failed.recvLine()).toBe('#DRAW');
     await expect(black.recvLine()).rejects.toThrow('connection closed');
     await expect(white.recvLine()).rejects.toThrow('connection closed');
   });
@@ -118,11 +129,11 @@ describe('終局保存の復旧', () => {
     await white.recvUntil(l => l.startsWith(cycle[3]));
     expect(await black.recvLine()).toBe('#SENNICHITE');
     expect(await black.recvLine()).toBe('#DRAW');
-    if (line === '#DRAW') expect(await white.recvLine()).toBe('#SENNICHITE');
+    expect(await white.recvLine()).toBe('#SENNICHITE');
+    if (line === '#DRAW') expect(await white.recvLine()).toBe('#DRAW');
     expect((await control({})).finished).toBeNull();
-    await control({ alarm: true });
-    if (line === '#SENNICHITE') expect(await white.recvLine()).toBe('#SENNICHITE');
-    expect(await white.recvLine()).toBe('#DRAW');
+    const recovered = await control({ alarm: true });
+    expect(recovered.closes).toContainEqual({ role: 'White', code: 1011, reason: 'terminal delivery failed' });
     await expect(white.recvLine()).rejects.toThrow('connection closed');
   });
 
@@ -157,6 +168,9 @@ describe('終局保存の復旧', () => {
     for (let i = 0; i < 100 && Object.keys((await control({})).puts).length === 0; i++) {
       await new Promise(r => setTimeout(r, 10));
     }
+    const reentered = await control({ alarm: true });
+    expect(reentered.finished).toBeNull();
+    expect(reentered.alarm).not.toBeNull();
     await black.close();
     await new Promise(r => setTimeout(r, 100));
     await control({ releaseR2: true });
@@ -170,14 +184,80 @@ describe('終局保存の復旧', () => {
   });
 
   it('盤面を進めない終局は isolate 破棄後も保存した裁定で確定する', async () => {
-    await control({ faults: { sendRole: 'Black', sendLine: '#RESIGN' } });
+    await control({ faults: { persistRole: 'Black', persistLine: '#RESIGN' } });
     white.send('%TORYO');
     await white.recvUntil(l => l === '#LOSE');
     expect((await control({})).finished).toBeNull();
     const state = await control({ faults: {}, reset: true, alarm: true });
     expect(state.finished?.result_code).toBe('#RESIGN');
     expect(await black.recvLine()).toBe('#RESIGN');
-    expect(await black.recvLine()).toBe('#WIN');
+    expect(state.closes).toContainEqual({ role: 'Black', code: 1011, reason: 'terminal delivery failed' });
+    await expect(black.recvLine()).rejects.toThrow('connection closed');
+  });
+
+  it('保存済み裁定を AgreeTimeout より優先し、履歴読込失敗でも上書きしない', async () => {
+    await control({ faults: { persistRole: 'White', persistLine: '#DRAW' } });
+    white.send(cycle[3]);
+    await black.recvUntil(l => l === '#DRAW');
+    await white.recvUntil(l => l === '#SENNICHITE');
+    await control({ faults: { loadMoves: true }, agreeTimeout: true });
+    await control({ reset: true, alarm: true });
+    const pending = await control({});
+    expect(pending.finished).toBeNull();
+    expect(pending.finalizing?.attempt).toBe(2);
+    const broadcasts = pending.finalizing!.broadcasts;
+    const moveIndex = broadcasts.findIndex(entry => /^-5251OU,T\d+$/.test(entry.line));
+    expect(moveIndex).toBeGreaterThanOrEqual(0);
+    expect(broadcasts[moveIndex + 1]!.line).toMatch(/^##\[CLOCK\]/);
+    expect(broadcasts[moveIndex + 1]!.ply ?? null).toBeNull();
+    expect(pending.alarm).not.toBeNull();
+    const finished = await control({ faults: {}, reset: true, alarm: true });
+    expect(finished.finished?.result_code).toBe('#SENNICHITE');
+    expect(await white.recvLine()).toBe('#DRAW');
+    expect(finished.closes).toContainEqual({ role: 'White', code: 1011, reason: 'terminal delivery failed' });
+    await expect(white.recvLine()).rejects.toThrow('connection closed');
+  });
+
+  it('floodgate 履歴保存失敗では確定を保留し、同じキーで再試行する', async () => {
+    await control({ faults: { history: true } });
+    white.send(cycle[3]);
+    await black.recvUntil(l => l === '#DRAW');
+    await white.recvUntil(l => l === '#DRAW');
+    let pending = await control({});
+    for (let i = 0; i < 100 && pending.activeMessages > 0; i++) {
+      await new Promise(r => setTimeout(r, 10));
+      pending = await control({});
+    }
+    expect(pending.activeMessages).toBe(0);
+    expect(pending.finished).toBeNull();
+    expect(pending.finalizing?.attempt).toBe(1);
+    expect(pending.alarm).not.toBeNull();
+    const retried = await control({ reset: true, alarm: true });
+    expect(retried.finished).toBeNull();
+    expect(retried.alarm).not.toBeNull();
+    const finished = await control({ faults: {}, reset: true, alarm: true });
+    expect(finished.finished?.result_code).toBe('#SENNICHITE');
+    const history = await getFloodgateHistoryBucket(mf);
+    expect((await history.list()).objects).toHaveLength(1);
+    await expect(white.recvLine()).rejects.toThrow('connection closed');
+  });
+
+  it('履歴保存が失敗し続けても初回と 5 回の alarm 試行で確定する', async () => {
+    const faults = { history: true };
+    await control({ faults });
+    white.send(cycle[3]);
+    await black.recvUntil(l => l === '#DRAW');
+    await white.recvUntil(l => l === '#DRAW');
+    for (let attempt = 2; attempt <= 5; attempt++) {
+      await control({ faults, reset: true, alarm: true });
+      const state = await control({});
+      expect(state.finalizing?.attempt).toBe(attempt);
+      expect(state.finished).toBeNull();
+      expect(state.alarm).not.toBeNull();
+    }
+    const state = await control({ faults, reset: true, alarm: true });
+    expect(state.finished?.result_code).toBe('#SENNICHITE');
+    await expect(white.recvLine()).rejects.toThrow('connection closed');
   });
 
   it('観戦 snapshot の後に終局通知を送る', async () => {
@@ -197,9 +277,11 @@ describe('終局保存の復旧', () => {
     const end = lines.indexOf('##[MONITOR2] END');
     expect(lines[0]).toBe(`##[MONITOR2] BEGIN ${gameId}`);
     expect(lines.slice(0, end).some(l => l.startsWith(cycle[3]))).toBe(true);
-    expect(lines.slice(end + 1)).toEqual(['#SENNICHITE', '#DRAW']);
+    expect(lines[end + 1]).toMatch(/^##\[CLOCK\]/);
+    expect(lines.slice(end + 2)).toEqual(['#SENNICHITE', '#DRAW']);
     await expect(buf.takeLine(5000)).rejects.toThrow('connection closed');
     for (const client of [black, white]) {
+      expect(await client.recvLine()).toMatch(/^-5251OU,T\d+$/);
       expect(await client.recvLine()).toBe('#SENNICHITE');
       expect(await client.recvLine()).toBe('#DRAW');
     }
@@ -211,6 +293,7 @@ describe('終局保存の復旧', () => {
     await waitForMove();
     await control({ faults: {}, reset: true, alarm: true });
     for (const client of [black, white]) {
+      expect(await client.recvLine()).toMatch(/^-5251OU,T\d+$/);
       expect(await client.recvLine()).toBe('#SENNICHITE');
       expect(await client.recvLine()).toBe('#DRAW');
       await expect(client.recvLine()).rejects.toThrow('connection closed');

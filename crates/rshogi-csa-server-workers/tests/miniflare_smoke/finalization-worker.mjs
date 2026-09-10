@@ -8,6 +8,8 @@ export class GameRoom {
     this.state = state;
     this.faults = {};
     this.puts = {};
+    this.closes = [];
+    this.activeMessages = 0;
     this.r2Released = new Promise(resolve => { this.releaseR2 = resolve; });
     this.sockets = new WeakMap();
     const wrap = (object, overrides) => new Proxy(object, {
@@ -27,6 +29,10 @@ export class GameRoom {
           }
           return ws.send(line);
         },
+        close: (code, reason) => {
+          this.closes.push({ role: ws.deserializeAttachment()?.role, code, reason });
+          return ws.close(code, reason);
+        },
         serializeAttachment: (att) => {
           if (this.faults.persistRole === att?.role && att?.terminal_sent?.includes(this.faults.persistLine)) {
             this.faults.persistRole = undefined;
@@ -39,6 +45,9 @@ export class GameRoom {
     };
     const sql = wrap(state.storage.sql, {
       exec: (query, ...args) => {
+        if (this.faults.loadMoves && query.includes('FROM moves') && !query.includes('COUNT(*)')) {
+          throw new Error('injected move load failure');
+        }
         if (this.faults.beforeMove && query.startsWith('INSERT INTO moves')) {
           this.faults.beforeMove = false;
           throw new Error('injected failure before move persistence');
@@ -63,6 +72,11 @@ export class GameRoom {
         if (this.faults.holdR2) await this.r2Released;
         return env.KIFU_BUCKET.put(...args);
       },
+    }), FLOODGATE_HISTORY_BUCKET: wrap(env.FLOODGATE_HISTORY_BUCKET, {
+      put: async (...args) => {
+        if (this.faults.history) throw new Error('injected floodgate history failure');
+        return env.FLOODGATE_HISTORY_BUCKET.put(...args);
+      },
     }) };
     this.inner = new RustGameRoom(this.context, this.env);
   }
@@ -71,6 +85,7 @@ export class GameRoom {
       const command = await request.json();
       if (command.faults) this.faults = command.faults;
       if (command.releaseR2) this.releaseR2();
+      if (command.agreeTimeout) await this.state.storage.put('pending_alarm_kind', 'AgreeTimeout');
       if (command.grace) {
         await this.state.storage.put('pending_alarm_kind', 'GraceExpired');
         await this.state.storage.put('grace_registry', {
@@ -82,8 +97,17 @@ export class GameRoom {
       }
       // 接続と永続状態を保持して Rust インスタンスを再構築し、メモリ上のコアを破棄する。
       if (command.reset) this.inner = new RustGameRoom(this.context, this.env);
-      if (command.alarm) await this.inner.alarm();
+      if (command.alarm) {
+        try {
+          await this.inner.alarm();
+        } catch (error) {
+          return new Response(String(error), { status: 500 });
+        }
+      }
       return Response.json({
+        finalizing: await this.state.storage.get('finalizing') ?? null,
+        closes: this.closes,
+        activeMessages: this.activeMessages,
         finished: await this.state.storage.get('finished') ?? null,
         kind: await this.state.storage.get('pending_alarm_kind') ?? null,
         pending: await this.state.storage.get('export_pending') ?? null,
@@ -97,11 +121,14 @@ export class GameRoom {
   }
   alarm() { return this.inner.alarm(); }
   async webSocketMessage(ws, message) {
+    this.activeMessages++;
     try {
       await this.inner.webSocketMessage(ws, message);
     } catch (error) {
       // 注入した中断では接続を保持し、次のイベントで再入させる。
       if (!String(error).includes('injected')) throw error;
+    } finally {
+      this.activeMessages--;
     }
   }
   webSocketClose(ws, code, reason, clean) { return this.inner.webSocketClose(ws, code, reason, clean); }

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { Miniflare } from 'miniflare';
@@ -8,10 +8,15 @@ import {
   getFloodgateHistoryBucket,
   getKifuBucket,
   makeTempPersistRoot,
+  type HarnessOptions,
 } from '../miniflare_smoke/harness.ts';
 
 // 終局処理の副作用操作 N 番目ごとに障害を注入し、実際に予約された alarm だけで
 // 再開させたうえで、終局処理の不変条件を検査する。
+//
+// 10 分以上かかるため CI では走らせない。終局処理 (game_room.rs の終局確定・再開・
+// alarm 経路、attachment.rs の終局行の配信、persistence.rs の裁定保存と replay) を
+// 変更したら `pnpm run test:finalization-exhaustive` を手動で実行する。
 
 type Mode = 'fail' | 'crash';
 
@@ -36,6 +41,9 @@ interface Game {
 
 interface Scenario {
   name: string;
+  options?: Partial<HarnessOptions>;
+  /** AGREE 前で止め、対局を開始しない。 */
+  beforeAgree?: boolean;
   trigger: (game: Game) => Promise<void>;
 }
 
@@ -48,7 +56,7 @@ interface Observation {
   liveEntries: number;
 }
 
-interface Violation {
+interface Finding {
   scenario: string;
   mode: Mode;
   at: number;
@@ -57,40 +65,73 @@ interface Violation {
 }
 
 const CYCLE = ['+5958OU', '-5152OU', '+5859OU', '-5251OU'] as const;
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// 持ち時間 1 秒 + 秒読み 1 秒。着手から 2 秒強で手番側の時間が尽きる。
+const SHORT_CLOCK: Partial<HarnessOptions> = { clockKind: 'countdown_msec', totalTimeMs: 1000, byoyomiMs: 1000 };
 
 const SCENARIOS: Scenario[] = [
   { name: 'sennichite', trigger: async (g) => g.white.send(CYCLE[3]) },
   { name: 'toryo', trigger: async (g) => g.white.send('%TORYO') },
   { name: 'disconnect', trigger: async (g) => { await g.white.close(); } },
+  {
+    name: 'time-up',
+    options: SHORT_CLOCK,
+    trigger: async (g) => {
+      await sleep(2500);
+      await g.control({ fireAlarm: true });
+    },
+  },
+  {
+    name: 'disconnect-before-agree',
+    options: { agreeTimeoutSeconds: 60 },
+    beforeAgree: true,
+    trigger: async (g) => { await g.black.close(); },
+  },
 ];
 
 const MODES: Mode[] = ['fail', 'crash'];
 
-describe('終局処理の網羅障害注入', () => {
-  let mf: Miniflare;
-  let cleanup: () => Promise<void>;
-  let roomSeq = 0;
-  const violations: Violation[] = [];
-  const inputLost: Array<Omit<Violation, 'problem'>> = [];
+// KEY_FINISHED 確定後の live-games-index 削除漏れは cron sweep が回収する契約。
+const CRON_RECOVERED = 'live 一覧に残っている';
+const INPUT_LOST_OTHER_RESULT = '入力が失われ別の裁定で確定した';
 
-  beforeAll(async () => {
-    const persist = await makeTempPersistRoot();
-    cleanup = persist.cleanup;
-    mf = await createMiniflare({
-      persistRoot: persist.path,
-      allowFloodgateFeatures: true,
-      scriptPath: resolve(import.meta.dirname, 'exhaustive-worker.mjs'),
-    });
-  });
+// `scenario/mode/at` を指定すると、その 1 ケースだけを実行して状態を出力する。
+const ONLY_CASE = process.env.FINALIZATION_EXHAUSTIVE_CASE;
+
+describe('終局処理の網羅障害注入', () => {
+  const servers = new Map<string, { mf: Miniflare; cleanup: () => Promise<void> }>();
+  let roomSeq = 0;
+  const violations: Finding[] = [];
+  const inputLost: Finding[] = [];
+  const cronRecovered: Finding[] = [];
 
   afterAll(async () => {
     const report = process.env.FINALIZATION_EXHAUSTIVE_REPORT;
-    if (report) await writeFile(report, JSON.stringify({ violations, inputLost }, null, 2));
-    await mf?.dispose();
-    await cleanup?.();
+    if (report) {
+      await writeFile(report, JSON.stringify({ violations, inputLost, cronRecovered }, null, 2));
+    }
+    for (const { mf, cleanup } of servers.values()) {
+      await mf.dispose();
+      await cleanup();
+    }
   });
 
-  async function startGame(): Promise<Game> {
+  async function server(scenario: Scenario): Promise<Miniflare> {
+    const existing = servers.get(scenario.name);
+    if (existing) return existing.mf;
+    const persist = await makeTempPersistRoot();
+    const mf = await createMiniflare({
+      persistRoot: persist.path,
+      allowFloodgateFeatures: true,
+      scriptPath: resolve(import.meta.dirname, 'exhaustive-worker.mjs'),
+      ...scenario.options,
+    });
+    servers.set(scenario.name, { mf, cleanup: persist.cleanup });
+    return mf;
+  }
+
+  async function startGame(mf: Miniflare, scenario: Scenario): Promise<Game> {
     const roomId = `exhaustive-${roomSeq++}`;
     const ns = await mf.getDurableObjectNamespace('GAME_ROOM') as unknown as {
       idFromName(name: string): unknown;
@@ -108,11 +149,13 @@ describe('終局処理の網羅障害注入', () => {
     const white = await CsaClient.connect(mf, roomId);
     white.send(`LOGIN white+${roomId}+white pw`);
     await white.recvLine();
-    await black.drainGameSummary();
+    const summary = await black.drainGameSummary();
     await white.drainGameSummary();
+    const gameId = summary.find(l => l.startsWith('Game_ID:'))!.slice('Game_ID:'.length);
+    if (scenario.beforeAgree) return { gameId, black, white, control };
     black.send('AGREE');
     white.send('AGREE');
-    const gameId = (await black.recvUntil(l => l.startsWith('START:'))).at(-1)!.slice('START:'.length);
+    await black.recvUntil(l => l.startsWith('START:'));
     await white.recvUntil(l => l.startsWith('START:'));
     for (let i = 0; i < 11; i++) {
       const line = CYCLE[i % 4]!;
@@ -126,7 +169,7 @@ describe('終局処理の網羅障害注入', () => {
   async function settle(game: Game): Promise<RoomState> {
     let idle = 0;
     for (let i = 0; i < 400; i++) {
-      await new Promise(r => setTimeout(r, 5));
+      await sleep(5);
       const state = await game.control({});
       idle = state.active === 0 ? idle + 1 : 0;
       if (idle >= 3) return state;
@@ -158,8 +201,8 @@ describe('終局処理の網羅障害注入', () => {
     }
   }
 
-  async function observe(game: Game, state: RoomState): Promise<Observation> {
-    await new Promise(r => setTimeout(r, 30));
+  async function observe(mf: Miniflare, game: Game, state: RoomState): Promise<Observation> {
+    await sleep(30);
     const kifu = await getKifuBucket(mf);
     const kifuKey = (await kifu.list()).objects.find(o => o.key.endsWith('.csa') && o.key.includes(game.gameId))?.key;
     const kifuText = kifuKey ? await (await kifu.get(kifuKey))!.text() : null;
@@ -176,11 +219,12 @@ describe('終局処理の網羅障害注入', () => {
   }
 
   async function runCase(scenario: Scenario, plan: { at: number; mode: Mode }): Promise<Observation> {
-    const game = await startGame();
+    const mf = await server(scenario);
+    const game = await startGame(mf, scenario);
     await game.control({ plan });
     await scenario.trigger(game);
     const state = await drive(game);
-    const observation = await observe(game, state);
+    const observation = await observe(mf, game, state);
     await game.black.close();
     await game.white.close();
     return observation;
@@ -205,19 +249,30 @@ describe('終局処理の網羅障害注入', () => {
         : `確定していない (alarm=${observed.state.alarm}, finalizing=${observed.state.finalizing !== null})`);
       return problems;
     }
-    if (observed.state.finished.result_code !== baseline.state.finished!.result_code) {
-      problems.push(`裁定が違う: ${observed.state.finished.result_code}`);
+    const base = baseline.state.finished!;
+    if (observed.state.finished.result_code !== base.result_code) {
+      // 裁定の保存前に入力が失われ、別の経路で確定しただけなら許容する。
+      // 元の裁定を誰かに告知していた場合だけが違反。
+      const baseResultLines = new Set([...baseline.lines.black, ...baseline.lines.white].filter(l => l.startsWith('#')));
+      const toldBase = [...observed.lines.black, ...observed.lines.white].some(l => baseResultLines.has(l));
+      problems.push(toldBase
+        ? `告知と異なる裁定で確定した: ${observed.state.finished.result_code}`
+        : `${INPUT_LOST_OTHER_RESULT}: ${observed.state.finished.result_code}`);
+      return problems;
     }
-    if (observed.state.finished.exported_at_ms === null) problems.push('棋譜が export されていない');
+    if (base.exported_at_ms !== null && observed.state.finished.exported_at_ms === null) {
+      problems.push('棋譜が export されていない');
+    }
     if (observed.kifuMoves !== baseline.kifuMoves) problems.push(`棋譜の手数が違う: ${observed.kifuMoves}`);
     if (observed.historyObjects !== baseline.historyObjects) problems.push(`floodgate 履歴が ${observed.historyObjects} 件`);
-    if (observed.liveEntries !== 0) problems.push('live 一覧に残っている');
+    if (observed.liveEntries !== 0) problems.push(CRON_RECOVERED);
     for (const color of ['black', 'white'] as const) {
       const got = observed.lines[color];
       const want = baseline.lines[color];
       if (!isSubsequence(got, want)) {
         problems.push(`${color} が重複・余計・順序違いの行を受信: ${JSON.stringify(got)}`);
       } else if (got.length < want.length && observed.closed[color] === 1000) {
+        // 送信に失敗した接続は 1011 で閉じる契約なので、欠落を許すのはその場合だけ。
         problems.push(`${color} が正常 close なのに行が欠けた: ${JSON.stringify(got)}`);
       }
     }
@@ -231,20 +286,24 @@ describe('終局処理の網羅障害注入', () => {
         expect(baseline.state.finished).not.toBeNull();
         const total = baseline.state.ops.length;
         for (let at = 1; at <= total; at++) {
+          if (ONLY_CASE && ONLY_CASE !== `${scenario.name}/${mode}/${at}`) continue;
           const observed = await runCase(scenario, { at, mode });
           const op = observed.state.injectedAt?.name ?? `(未到達) ${baseline.state.ops[at - 1]}`;
           const problems = check(baseline, observed);
-          const lost = problems.length === 1 && problems[0]!.startsWith('確定していない (')
-            && !observed.state.finalizing;
-          if (lost) {
-            inputLost.push({ scenario: scenario.name, mode, at, op });
+          if (ONLY_CASE) console.log(JSON.stringify({ baseline: baseline.lines, observed, problems }, null, 2));
+          const finding = { scenario: scenario.name, mode, at, op };
+          const unannounced = (problems.length === 1 && problems[0]!.startsWith('確定していない (') && !observed.state.finalizing)
+            || (problems.length === 1 && problems[0]!.startsWith(INPUT_LOST_OTHER_RESULT));
+          if (unannounced) {
+            inputLost.push({ ...finding, problem: problems[0]! });
             continue;
           }
-          for (const problem of problems) violations.push({ scenario: scenario.name, mode, at, op, problem });
+          for (const problem of problems) {
+            (problem === CRON_RECOVERED ? cronRecovered : violations).push({ ...finding, problem });
+          }
         }
         const mine = violations.filter(v => v.scenario === scenario.name && v.mode === mode);
-        console.log(`${scenario.name}/${mode}: ${total} 地点, 違反 ${mine.length}, 入力消失 ${
-          inputLost.filter(v => v.scenario === scenario.name && v.mode === mode).length}`);
+        console.log(`${scenario.name}/${mode}: ${total} 地点, 違反 ${mine.length}`);
         for (const v of mine) console.log(`  #${v.at} ${v.op}: ${v.problem}`);
         expect(mine).toEqual([]);
       });

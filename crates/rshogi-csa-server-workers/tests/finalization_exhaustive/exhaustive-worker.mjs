@@ -67,13 +67,14 @@ export class GameRoom {
     this.inner = new RustGameRoom(this.context, this.env);
   }
 
+  // Rust 側の Err は Error インスタンスとは限らないため、成否を値で返す。
   async run(handler) {
     this.active += 1;
     try {
-      return await handler();
+      return { value: await handler() };
     } catch (error) {
       if (!String(error).includes('injected')) throw error;
-      return error;
+      return { error };
     } finally {
       this.active -= 1;
       if (this.dead && this.active === 0) {
@@ -89,7 +90,7 @@ export class GameRoom {
     if (at === null) return { fired: false };
     await this.state.storage.deleteAlarm();
     const outcome = await this.run(() => this.inner.alarm());
-    const failed = outcome instanceof Error;
+    const failed = 'error' in outcome;
     if (failed) {
       this.alarmFailures += 1;
       if (this.alarmFailures <= MAX_ALARM_RETRIES && (await this.state.storage.getAlarm()) === null) {
@@ -103,7 +104,8 @@ export class GameRoom {
 
   async fetch(request) {
     if (new URL(request.url).pathname !== '/__test') {
-      return this.run(() => this.inner.fetch(request));
+      const outcome = await this.run(() => this.inner.fetch(request));
+      return 'error' in outcome ? new Response(String(outcome.error), { status: 500 }) : outcome.value;
     }
     const command = await request.json();
     if (command.plan) {
@@ -125,7 +127,11 @@ export class GameRoom {
     });
   }
 
-  alarm() { return this.run(() => this.inner.alarm()); }
+  // miniflare 自身が発火させた alarm も、失敗は throw して runtime の再試行に任せる。
+  async alarm() {
+    const outcome = await this.run(() => this.inner.alarm());
+    if ('error' in outcome) throw outcome.error;
+  }
   webSocketMessage(ws, message) { return this.run(() => this.inner.webSocketMessage(ws, message)); }
   webSocketClose(ws, code, reason, clean) { return this.run(() => this.inner.webSocketClose(ws, code, reason, clean)); }
   webSocketError(ws, error) { return this.run(() => this.inner.webSocketError(ws, error)); }

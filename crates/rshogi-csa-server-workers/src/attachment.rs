@@ -114,6 +114,12 @@ pub enum WsAttachment {
         /// この接続へ送信済みの終局通知行。休眠後の再送を抑止する。
         #[serde(default)]
         terminal_sent: Vec<String>,
+        /// 送信結果が不明なまま再送することを防ぐ。
+        #[serde(default)]
+        terminal_in_flight: Option<String>,
+        /// 配信を打ち切った接続を再利用しないために残す。
+        #[serde(default)]
+        terminal_aborted: bool,
     },
     /// 観戦者。`/ws/<room_id>/spectate` から接続したセッションに付与する。
     ///
@@ -167,54 +173,192 @@ pub enum WsAttachment {
         /// この接続へ送信済みの終局通知行。
         #[serde(default)]
         terminal_sent: Vec<String>,
+        /// 送信結果が不明なまま再送することを防ぐ。
+        #[serde(default)]
+        terminal_in_flight: Option<String>,
+        /// 配信を打ち切った接続を再利用しないために残す。
+        #[serde(default)]
+        terminal_aborted: bool,
     },
 }
 
+/// 再開時に裁定から告知を作り直すと、終局手や REJECT が欠けるため保存する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizingBroadcast {
+    /// 復帰後も元の宛先を維持する。
+    pub target: rshogi_csa_server::BroadcastTarget,
+    /// 裁定だけでは復元できない終局手も保持する。
+    pub line: String,
+    /// snapshot に含まれる指し手の重複を除くために使う。
+    pub ply: Option<u32>,
+}
+
+impl From<&rshogi_csa_server::BroadcastEntry> for FinalizingBroadcast {
+    fn from(entry: &rshogi_csa_server::BroadcastEntry) -> Self {
+        Self {
+            target: entry.target,
+            line: entry.line.as_str().to_owned(),
+            ply: entry.ply,
+        }
+    }
+}
+
 impl WsAttachment {
-    /// 未送信の終局行を送り、各行の成功直後に接続の進捗を保存する。
-    /// 両コールバックは同期処理とし、送信と進捗更新の間で休眠させない。
+    /// 送信結果が不明でも再送しないよう、行ごとの配信権を先に永続化する。
     pub fn deliver_terminal<E>(
         &mut self,
-        result: &rshogi_csa_server::game::result::GameResult,
+        entries: &[FinalizingBroadcast],
         mut send: impl FnMut(&str) -> Result<(), E>,
         mut persist: impl FnMut(&Self) -> Result<(), E>,
+        mut close: impl FnMut(u16, &str),
     ) -> Result<(), E> {
-        use rshogi_csa_server::game::result::Audience;
-        let audience = match self {
-            Self::Player { role, .. } if Some(role.to_core()) == result.winner() => {
-                Audience::Winner
-            }
-            Self::Player { .. } => Audience::Loser,
-            Self::Spectator { .. } => Audience::Spectator,
-            Self::Pending => return Ok(()),
-        };
-        for line in result
-            .server_messages()
-            .sends
-            .into_iter()
-            .filter(|(target, _)| *target == audience || *target == Audience::All)
-            .flat_map(|(_, lines)| lines)
-        {
-            let Some(sent) = self.terminal_sent_mut() else {
-                return Ok(());
-            };
-            if sent.contains(&line) {
+        if self.terminal_aborted() {
+            return Ok(());
+        }
+        if self.terminal_in_flight_mut().is_some_and(|line| line.is_some()) {
+            return self.abort_terminal(&mut persist, &mut close);
+        }
+        for entry in entries {
+            if !self.addresses(entry.target) {
                 continue;
             }
-            // 送信前に記録し、記録の保存失敗で既送信行を再送しないようにする。
-            // 送信失敗時は記録を戻す。戻せなかった場合も、送信に失敗した接続へは
-            // 以後も届かないため再送より欠落を選ぶ。
-            sent.push(line.clone());
-            persist(self)?;
-            if let Err(error) = send(&line) {
-                if let Some(sent) = self.terminal_sent_mut() {
-                    sent.pop();
+            let before = self.clone();
+            let Some(sent) = self.terminal_sent_mut() else {
+                continue;
+            };
+            if sent.contains(&entry.line) {
+                continue;
+            }
+            let queued = if let Self::Spectator {
+                snapshot_in_progress: true,
+                pending_queue,
+                ..
+            } = self
+            {
+                if pending_queue.len() >= MAX_SPECTATOR_QUEUE_ITEMS
+                    || pending_queue.iter().map(|(line, _)| line.len()).sum::<usize>()
+                        + entry.line.len()
+                        > MAX_SPECTATOR_QUEUE_BYTES
+                {
+                    *self = before;
+                    close(1009, "spectator queue overflow");
+                    return Ok(());
                 }
-                let _ = persist(self);
+                pending_queue.push((entry.line.clone(), entry.ply));
+                true
+            } else {
+                false
+            };
+            let in_snapshot = matches!(self, Self::Spectator { last_ply_in_snapshot, .. }
+                if entry.ply.is_some_and(|ply| ply <= *last_ply_in_snapshot));
+            if queued || in_snapshot {
+                self.terminal_sent_mut().unwrap().push(entry.line.clone());
+                if let Err(error) = persist(self) {
+                    *self = before;
+                    return Err(error);
+                }
+                continue;
+            }
+            *self.terminal_in_flight_mut().unwrap() = Some(entry.line.clone());
+            if let Err(error) = persist(self) {
+                *self = before;
+                return Err(error);
+            }
+            if send(&entry.line).is_err() {
+                return self.abort_terminal(&mut persist, &mut close);
+            }
+            let in_flight = self.clone();
+            self.terminal_sent_mut().unwrap().push(entry.line.clone());
+            *self.terminal_in_flight_mut().unwrap() = None;
+            if let Err(error) = persist(self) {
+                // 保存前に送信済みなので、再開時も結果不明として扱う。
+                *self = in_flight;
                 return Err(error);
             }
         }
         Ok(())
+    }
+
+    /// 正常終了の close で配信失敗を覆い隠さないために使う。
+    pub fn terminal_aborted(&self) -> bool {
+        matches!(
+            self,
+            Self::Player {
+                terminal_aborted: true,
+                ..
+            } | Self::Spectator {
+                terminal_aborted: true,
+                ..
+            }
+        )
+    }
+
+    fn terminal_in_flight_mut(&mut self) -> Option<&mut Option<String>> {
+        match self {
+            Self::Player {
+                terminal_in_flight, ..
+            }
+            | Self::Spectator {
+                terminal_in_flight, ..
+            } => Some(terminal_in_flight),
+            Self::Pending => None,
+        }
+    }
+
+    fn addresses(&self, target: rshogi_csa_server::BroadcastTarget) -> bool {
+        use rshogi_csa_server::BroadcastTarget;
+        match self {
+            Self::Player { role, .. } => {
+                matches!(target, BroadcastTarget::All | BroadcastTarget::Players)
+                    || matches!(
+                        (role, target),
+                        (Role::Black, BroadcastTarget::Black)
+                            | (Role::White, BroadcastTarget::White)
+                    )
+            }
+            Self::Spectator { .. } => {
+                matches!(target, BroadcastTarget::All | BroadcastTarget::Spectators)
+            }
+            Self::Pending => false,
+        }
+    }
+
+    /// 自分宛ての終局行をすべて配信済みか。確定時の close を正常終了にしてよいかの判定に使う。
+    pub fn terminal_complete(&self, entries: &[FinalizingBroadcast]) -> bool {
+        let sent = match self {
+            Self::Player { terminal_sent, .. } | Self::Spectator { terminal_sent, .. } => {
+                terminal_sent
+            }
+            Self::Pending => return true,
+        };
+        entries
+            .iter()
+            .filter(|entry| self.addresses(entry.target))
+            .all(|entry| sent.contains(&entry.line))
+    }
+
+    /// 配信を打ち切った印を保存して 1011 で閉じる。以後の試行はこの接続を飛ばす。
+    pub(crate) fn abort_terminal<E>(
+        &mut self,
+        persist: &mut impl FnMut(&Self) -> Result<(), E>,
+        close: &mut impl FnMut(u16, &str),
+    ) -> Result<(), E> {
+        let before = self.clone();
+        match self {
+            Self::Player {
+                terminal_aborted, ..
+            }
+            | Self::Spectator {
+                terminal_aborted, ..
+            } => *terminal_aborted = true,
+            Self::Pending => return Ok(()),
+        }
+        let saved = persist(self);
+        if saved.is_err() {
+            *self = before;
+        }
+        close(1011, "terminal delivery failed");
+        saved
     }
 
     fn terminal_sent_mut(&mut self) -> Option<&mut Vec<String>> {
@@ -236,6 +380,8 @@ impl WsAttachment {
             game_name: game_name.into(),
             is_admin: false,
             terminal_sent: Vec::new(),
+            terminal_in_flight: None,
+            terminal_aborted: false,
         }
     }
 
@@ -250,12 +396,16 @@ impl WsAttachment {
                 game_name,
                 is_admin: _,
                 terminal_sent,
+                terminal_in_flight,
+                terminal_aborted,
             } => Self::Player {
                 role,
                 handle,
                 game_name,
                 is_admin: true,
                 terminal_sent,
+                terminal_in_flight,
+                terminal_aborted,
             },
             other => other,
         }
@@ -279,6 +429,8 @@ impl WsAttachment {
             last_ply_in_snapshot: 0,
             pending_queue: Vec::new(),
             terminal_sent: Vec::new(),
+            terminal_in_flight: None,
+            terminal_aborted: false,
         }
     }
 
@@ -295,6 +447,8 @@ impl WsAttachment {
             Self::Spectator {
                 room_id,
                 terminal_sent,
+                terminal_in_flight,
+                terminal_aborted,
                 ..
             } => Self::Spectator {
                 room_id,
@@ -302,6 +456,8 @@ impl WsAttachment {
                 last_ply_in_snapshot: 0,
                 pending_queue: Vec::new(),
                 terminal_sent,
+                terminal_in_flight,
+                terminal_aborted,
             },
             other => other,
         }
@@ -340,108 +496,287 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminal_delivery_resumes_after_partial_send_without_duplicates() {
-        use rshogi_csa_server::game::result::GameResult;
-        use rshogi_csa_server::types::Color;
-        for result in [
-            GameResult::Sennichite,
-            GameResult::OuteSennichite {
-                loser: Color::Black,
-            },
-        ] {
-            for fail_at in [0, 1] {
-                let mut connections = [
-                    WsAttachment::player(Role::Black, "black", "game"),
-                    WsAttachment::player(Role::White, "white", "game"),
-                ];
-                let mut saved =
-                    connections.each_ref().map(|att| serde_json::to_string(att).unwrap());
-                let mut received: [Vec<String>; 2] = Default::default();
-                for index in 0..2 {
-                    let delivered = connections[index].deliver_terminal(
-                        &result,
-                        |line| {
-                            if index == 1 && received[index].len() == fail_at {
-                                return Err("send failed");
-                            }
-                            received[index].push(line.to_owned());
-                            Ok(())
-                        },
-                        |att| {
-                            saved[index] = serde_json::to_string(att).unwrap();
-                            Ok(())
-                        },
-                    );
-                    assert_eq!(delivered.is_err(), index == 1);
-                }
-                for index in 0..2 {
-                    let mut restored: WsAttachment = serde_json::from_str(&saved[index]).unwrap();
-                    for _ in 0..2 {
-                        restored
-                            .deliver_terminal(
-                                &result,
-                                |line| {
-                                    received[index].push(line.to_owned());
-                                    Ok::<_, &str>(())
-                                },
-                                |att| {
-                                    saved[index] = serde_json::to_string(att).unwrap();
-                                    Ok(())
-                                },
-                            )
-                            .unwrap();
+    fn terminal_delivery_failure_matrix_is_at_most_once() {
+        use crate::attachment::FinalizingBroadcast;
+        use rshogi_csa_server::BroadcastTarget;
+        let entries: Vec<_> = ["-5251OU,T3", "#SENNICHITE", "#DRAW"]
+            .into_iter()
+            .map(|line| FinalizingBroadcast {
+                target: BroadcastTarget::All,
+                line: line.into(),
+                ply: None,
+            })
+            .collect();
+        for (persist_failure, send_failure) in (0..6)
+            .map(|i| (Some(i), None))
+            .chain((0..3).map(|i| (None, Some(i))))
+            .chain([(None, None)])
+        {
+            for cold in [false, true] {
+                let mut att = WsAttachment::player(Role::Black, "black", "game");
+                let mut saved = att.clone();
+                let mut attempted = Vec::new();
+                let mut received = Vec::new();
+                let mut closed = Vec::new();
+                let mut saves = 0;
+                let first = att.deliver_terminal(
+                    &entries,
+                    |line| {
+                        let index = attempted.len();
+                        attempted.push(line.to_owned());
+                        if send_failure == Some(index) {
+                            return Err("send");
+                        }
+                        received.push(line.to_owned());
+                        Ok(())
+                    },
+                    |value| {
+                        let index = saves;
+                        saves += 1;
+                        if persist_failure == Some(index) {
+                            return Err("persist");
+                        }
+                        saved = value.clone();
+                        Ok(())
+                    },
+                    |code, _| closed.push(code),
+                );
+                let expected_sends = persist_failure
+                    .map(|i: usize| i.div_ceil(2))
+                    .or_else(|| send_failure.map(|i| i + 1))
+                    .unwrap_or(3);
+                let expected_received = send_failure.unwrap_or(expected_sends);
+                assert_eq!(
+                    first,
+                    if persist_failure.is_some() {
+                        Err("persist")
+                    } else {
+                        Ok(())
                     }
+                );
+                assert_eq!(attempted.len(), expected_sends);
+                assert_eq!(received.len(), expected_received);
+                assert_eq!(
+                    closed,
+                    if send_failure.is_some() {
+                        vec![1011]
+                    } else {
+                        vec![]
+                    }
+                );
+                if cold {
+                    att = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
                 }
-                let expected = if result == GameResult::Sennichite {
-                    [vec!["#SENNICHITE", "#DRAW"], vec!["#SENNICHITE", "#DRAW"]]
+                let ambiguous = persist_failure.is_some_and(|i| i % 2 == 1);
+                for _ in 0..2 {
+                    att.deliver_terminal(
+                        &entries,
+                        |line| {
+                            attempted.push(line.to_owned());
+                            Ok::<_, &str>(())
+                        },
+                        |_| Ok(()),
+                        |code, _| closed.push(code),
+                    )
+                    .unwrap();
+                }
+                let total_sends = if ambiguous || send_failure.is_some() {
+                    expected_sends
                 } else {
-                    [
-                        vec!["#OUTE_SENNICHITE", "#LOSE"],
-                        vec!["#OUTE_SENNICHITE", "#WIN"],
-                    ]
+                    3
                 };
-                assert_eq!(received, expected);
+                assert_eq!(attempted.len(), total_sends);
+                for entry in &entries {
+                    assert_eq!(
+                        attempted.iter().filter(|line| **line == entry.line).count(),
+                        usize::from(entries.iter().take(total_sends).any(|e| e.line == entry.line))
+                    );
+                }
+                assert_eq!(
+                    closed,
+                    if ambiguous || send_failure.is_some() {
+                        vec![1011]
+                    } else {
+                        vec![]
+                    }
+                );
             }
         }
     }
 
     #[test]
-    fn terminal_delivery_does_not_resend_when_progress_save_fails() {
-        use rshogi_csa_server::game::result::GameResult;
-        for fail_at in 0..2 {
-            let mut att = WsAttachment::player(Role::Black, "black", "game");
-            let mut saved = serde_json::to_string(&att).unwrap();
-            let mut received = Vec::new();
-            let mut persist_calls = 0;
-            let delivered = att.deliver_terminal(
-                &GameResult::Sennichite,
-                |line| {
-                    received.push(line.to_owned());
-                    Ok(())
+    fn terminal_in_flight_resumes_without_resending_and_then_skips_connection() {
+        for mut att in [
+            WsAttachment::player(Role::Black, "b", "g"),
+            WsAttachment::spectator("g"),
+        ] {
+            *att.terminal_in_flight_mut().unwrap() = Some("#DRAW".into());
+            let mut att: WsAttachment =
+                serde_json::from_str(&serde_json::to_string(&att).unwrap()).unwrap();
+            let entries = [FinalizingBroadcast {
+                target: rshogi_csa_server::BroadcastTarget::All,
+                line: "#DRAW".into(),
+                ply: None,
+            }];
+            let mut closed = Vec::new();
+            let mut saved = None;
+            att.deliver_terminal(
+                &entries,
+                |_| panic!("再送"),
+                |value| {
+                    saved = Some(value.clone());
+                    Ok::<_, ()>(())
                 },
-                |att| {
-                    persist_calls += 1;
-                    if persist_calls == fail_at + 1 {
-                        return Err("persist failed");
-                    }
-                    saved = serde_json::to_string(att).unwrap();
-                    Ok(())
-                },
-            );
-            assert!(delivered.is_err());
-            let mut restored: WsAttachment = serde_json::from_str(&saved).unwrap();
+                |code, reason| closed.push((code, reason.to_owned())),
+            )
+            .unwrap();
+            assert_eq!(closed, [(1011, "terminal delivery failed".into())]);
+            assert!(att.terminal_aborted());
+            let mut restored: WsAttachment =
+                serde_json::from_str(&serde_json::to_string(&saved.unwrap()).unwrap()).unwrap();
+            for value in [&mut att, &mut restored] {
+                value
+                    .deliver_terminal::<()>(
+                        &entries,
+                        |_| panic!("再送"),
+                        |_| panic!("保存"),
+                        |_, _| panic!("再切断"),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_abort_persistence_failure_remains_retryable_without_resending() {
+        let mut att = WsAttachment::player(Role::Black, "b", "g");
+        let entries = [FinalizingBroadcast {
+            target: rshogi_csa_server::BroadcastTarget::All,
+            line: "#DRAW".into(),
+            ply: None,
+        }];
+        let mut saved = att.clone();
+        let mut closed = Vec::new();
+        let first = att.deliver_terminal(
+            &entries,
+            |_| Err("send"),
+            |value| {
+                if value.terminal_aborted() {
+                    return Err("persist");
+                }
+                saved = value.clone();
+                Ok(())
+            },
+            |code, _| closed.push(code),
+        );
+        assert_eq!(first, Err("persist"));
+        assert_eq!(closed, [1011]);
+        for mut restored in [att, saved] {
             restored
                 .deliver_terminal(
-                    &GameResult::Sennichite,
-                    |line| {
-                        received.push(line.to_owned());
-                        Ok::<_, &str>(())
-                    },
-                    |_| Ok(()),
+                    &entries,
+                    |_| panic!("再送"),
+                    |_| Ok::<_, ()>(()),
+                    |code, reason| assert_eq!((code, reason), (1011, "terminal delivery failed")),
                 )
                 .unwrap();
-            assert_eq!(received, ["#SENNICHITE", "#DRAW"], "fail_at={fail_at}");
+            assert!(restored.terminal_aborted());
         }
+    }
+
+    #[test]
+    fn terminal_delivery_respects_targets_and_snapshot_queue() {
+        use crate::attachment::FinalizingBroadcast;
+        use rshogi_csa_server::BroadcastTarget;
+        let entries: Vec<_> = [
+            BroadcastTarget::Black,
+            BroadcastTarget::White,
+            BroadcastTarget::Players,
+            BroadcastTarget::Spectators,
+            BroadcastTarget::All,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, target)| FinalizingBroadcast {
+            target,
+            line: format!("REJECT:{i}"),
+            ply: Some(i as u32),
+        })
+        .collect();
+        for (mut att, expected) in [
+            (WsAttachment::player(Role::Black, "b", "g"), vec![0, 2, 4]),
+            (WsAttachment::player(Role::White, "w", "g"), vec![1, 2, 4]),
+            (WsAttachment::spectator("g"), vec![3, 4]),
+            (WsAttachment::Pending, vec![]),
+        ] {
+            let mut received = Vec::new();
+            att.deliver_terminal(
+                &entries,
+                |line| {
+                    received.push(line.to_owned());
+                    Ok::<_, ()>(())
+                },
+                |_| Ok(()),
+                |_, _| panic!("close"),
+            )
+            .unwrap();
+            assert_eq!(
+                received,
+                expected.iter().map(|i| format!("REJECT:{i}")).collect::<Vec<_>>()
+            );
+        }
+        let mut att = WsAttachment::spectator("g");
+        if let WsAttachment::Spectator {
+            snapshot_in_progress,
+            ..
+        } = &mut att
+        {
+            *snapshot_in_progress = true;
+        }
+        for _ in 0..2 {
+            att.deliver_terminal(
+                &entries,
+                |_| panic!("snapshot 中の送信"),
+                |_| Ok::<_, ()>(()),
+                |_, _| panic!("close"),
+            )
+            .unwrap();
+        }
+        let WsAttachment::Spectator { pending_queue, .. } = att else {
+            unreachable!()
+        };
+        assert_eq!(pending_queue, vec![("REJECT:3".into(), Some(3)), ("REJECT:4".into(), Some(4))]);
+    }
+
+    #[test]
+    fn terminal_move_already_in_snapshot_is_not_sent_again() {
+        let mut att = WsAttachment::spectator("game");
+        if let WsAttachment::Spectator {
+            last_ply_in_snapshot,
+            ..
+        } = &mut att
+        {
+            *last_ply_in_snapshot = 12;
+        }
+        let entries = [FinalizingBroadcast {
+            target: rshogi_csa_server::BroadcastTarget::All,
+            line: "-5251OU,T3".into(),
+            ply: Some(12),
+        }];
+        let mut saves = 0;
+        for _ in 0..2 {
+            att.deliver_terminal(
+                &entries,
+                |_| panic!("snapshot と重複"),
+                |_| {
+                    saves += 1;
+                    Ok::<_, ()>(())
+                },
+                |_, _| panic!("close"),
+            )
+            .unwrap();
+        }
+        assert_eq!(saves, 1);
     }
 
     #[test]
@@ -576,6 +911,8 @@ mod tests {
             snapshot_in_progress: true,
             last_ply_in_snapshot: 7,
             terminal_sent: Vec::new(),
+            terminal_in_flight: None,
+            terminal_aborted: false,
             pending_queue: vec![
                 ("+5756FU,T2".to_owned(), Some(8)),
                 ("##[CHAT] alice: hi".to_owned(), None),
@@ -595,6 +932,8 @@ mod tests {
             snapshot_in_progress: true,
             last_ply_in_snapshot: 7,
             terminal_sent: Vec::new(),
+            terminal_in_flight: None,
+            terminal_aborted: false,
             pending_queue: vec![
                 ("+5756FU,T2".to_owned(), Some(8)),
                 ("##[CHAT] alice: hi".to_owned(), None),
@@ -608,6 +947,8 @@ mod tests {
                 last_ply_in_snapshot: 0,
                 pending_queue: Vec::new(),
                 terminal_sent: Vec::new(),
+                terminal_in_flight: None,
+                terminal_aborted: false,
             }
         );
     }
