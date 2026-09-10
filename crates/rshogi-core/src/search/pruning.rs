@@ -573,7 +573,18 @@ where
                 && helper_tt_write_enabled_for_depth(ctx.thread_id, Bound::Lower, stored_depth);
             #[cfg(not(feature = "tt-trace"))]
             let allow_write = ctx.allow_tt_write;
-            if allow_write {
+            if allow_write
+                && tt_ctx.result.write(
+                    tt_ctx.key,
+                    value_to_tt(value, ply),
+                    st.stack[ply as usize].tt_pv,
+                    Bound::Lower,
+                    stored_depth,
+                    mv,
+                    unadjusted_static_eval,
+                    ctx.tt.generation(),
+                )
+            {
                 #[cfg(feature = "tt-trace")]
                 maybe_trace_tt_write(TtWriteTrace {
                     stage: "probcut_store",
@@ -592,16 +603,6 @@ where
                         Move::NONE
                     },
                 });
-                tt_ctx.result.write(
-                    tt_ctx.key,
-                    value_to_tt(value, ply),
-                    st.stack[ply as usize].tt_pv,
-                    Bound::Lower,
-                    stored_depth,
-                    mv,
-                    unadjusted_static_eval,
-                    ctx.tt.generation(),
-                );
                 inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
             }
 
