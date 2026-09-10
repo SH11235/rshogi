@@ -633,7 +633,7 @@ mod tests {
                 for mv in [Move::PASS, Move::WIN] {
                     let tt = TranspositionTable::new(1);
                     let key = pos.key();
-                    tt.probe(key, &pos).write(
+                    let _ = tt.probe(key, &pos).write(
                         key,
                         Value::new(50),
                         false,
