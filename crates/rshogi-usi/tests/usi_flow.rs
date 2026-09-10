@@ -247,7 +247,7 @@ fn ponder_time_budgets_wait_for_hit_or_stop() {
         ("rtime 300", true),
         ("btime 10000 wtime 10000 byoyomi 100", false),
     ] {
-        for hit in [true, false] {
+        for (threads, hit) in [(1, true), (1, false), (4, true), (4, false)] {
             let mut child = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"))
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
@@ -262,7 +262,7 @@ fn ponder_time_budgets_wait_for_hit_or_stop() {
                     }
                 }
             });
-            write!(child.stdin.as_mut().unwrap(), "{USI_INIT}setoption name Threads value 1\nsetoption name Stochastic_Ponder value false\nsetoption name MinimumThinkingTime value 1000\nsetoption name NetworkDelay value 0\nsetoption name NetworkDelay2 value 0\nposition startpos\ngo ponder {budget}\n").unwrap();
+            write!(child.stdin.as_mut().unwrap(), "{USI_INIT}setoption name Threads value {threads}\nsetoption name Stochastic_Ponder value false\nsetoption name MinimumThinkingTime value 1000\nsetoption name NetworkDelay value 0\nsetoption name NetworkDelay2 value 0\nposition startpos\ngo ponder {budget}\n").unwrap();
             let result = (|| -> Result<Duration, String> {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 loop {
@@ -276,7 +276,7 @@ fn ponder_time_budgets_wait_for_hit_or_stop() {
                         break;
                     }
                 }
-                // main初期化後に、movetime/rtime上限より長く待つ（F01と分離）。
+                // main初期化後に、movetime/rtime上限より長く待つ（初期化時の通知競合と分離）。
                 let deadline = Instant::now() + Duration::from_millis(650);
                 loop {
                     match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -313,7 +313,8 @@ fn ponder_time_budgets_wait_for_hit_or_stop() {
             }
             let status = child.wait().unwrap();
             reader.join().unwrap();
-            let elapsed = result.unwrap_or_else(|err| panic!("{budget} hit={hit}: {err}"));
+            let elapsed =
+                result.unwrap_or_else(|err| panic!("{budget} threads={threads} hit={hit}: {err}"));
             eprintln!("ponder budget={budget} hit={hit} response_ms={}", elapsed.as_millis());
             assert!(status.success());
             if hit && fixed {

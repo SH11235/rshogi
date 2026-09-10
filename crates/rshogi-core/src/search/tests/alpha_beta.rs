@@ -548,7 +548,7 @@ fn test_both_node_abort_paths_wait_for_ponderhit_or_stop() {
                 }
             };
             assert!(!check(&mut tm), "ponder中は期限切れでもabortしない");
-            // init後に通知することでF01の初期化競合を混ぜない。
+            // init後に通知することで初期化時の通知競合を混ぜない。
             hit.store(true, Ordering::Relaxed);
             assert!(!check(&mut tm), "hit直後は新しい予算で継続する");
             assert!(!tm.is_pondering());
