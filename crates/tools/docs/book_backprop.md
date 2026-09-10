@@ -43,6 +43,8 @@ cargo run -p tools --release --bin book_backprop -- \
 | book 外 | 既存 `value` を維持 |
 | 非合法手 | stderr に警告し、既存 `value` を維持 |
 
+歩・香の最終段、桂の最終二段への打ち・不成も非合法手として除外します。子局面がbook内に存在していても、その手の既存 `value` を維持します。合法な不成は通常の手と同様に逆伝播します。
+
 `best(N)` は局面 `N` の候補手 `value` の最大値です。book 内子局面が見つかった手の最終値は `--merge` で決まります。
 
 | mode | 更新 |
