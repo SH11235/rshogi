@@ -7,6 +7,8 @@ export class GameRoom {
   constructor(state, env) {
     this.state = state;
     this.faults = {};
+    this.puts = {};
+    this.r2Released = new Promise(resolve => { this.releaseR2 = resolve; });
     this.sockets = new WeakMap();
     const wrap = (object, overrides) => new Proxy(object, {
       get(target, key) {
@@ -55,8 +57,10 @@ export class GameRoom {
       getWebSockets: (...args) => state.getWebSockets(...args).map(socket),
     });
     this.env = { ...env, KIFU_BUCKET: wrap(env.KIFU_BUCKET, {
-      put: (...args) => {
+      put: async (...args) => {
         if (this.faults.r2) throw new Error('injected R2 failure');
+        this.puts[args[0]] = (this.puts[args[0]] ?? 0) + 1;
+        if (this.faults.holdR2) await this.r2Released;
         return env.KIFU_BUCKET.put(...args);
       },
     }) };
@@ -66,6 +70,7 @@ export class GameRoom {
     if (new URL(request.url).pathname === '/__test') {
       const command = await request.json();
       if (command.faults) this.faults = command.faults;
+      if (command.releaseR2) this.releaseR2();
       if (command.grace) {
         await this.state.storage.put('pending_alarm_kind', 'GraceExpired');
         await this.state.storage.put('grace_registry', {
@@ -85,6 +90,7 @@ export class GameRoom {
         alarm: await this.state.storage.getAlarm(),
         moves: this.state.storage.sql.exec('SELECT COUNT(*) AS n FROM moves').one().n,
         beforeMoveArmed: Boolean(this.faults.beforeMove),
+        puts: this.puts,
       });
     }
     return this.inner.fetch(request);

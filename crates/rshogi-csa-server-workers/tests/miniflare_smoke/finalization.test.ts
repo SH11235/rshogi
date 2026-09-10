@@ -10,6 +10,8 @@ interface RecoveryState {
   pending: unknown;
   alarm: number | null;
   moves: number;
+  beforeMoveArmed: boolean;
+  puts: Record<string, number>;
 }
 
 describe('終局保存の復旧', () => {
@@ -144,6 +146,27 @@ describe('終局保存の復旧', () => {
     const key = (await bucket.list()).objects.find(o => o.key.endsWith('.csa'))!.key;
     const moves = (await (await bucket.get(key))!.text()).split('\n').filter(l => /^[+-]\d{4}/.test(l));
     expect(moves).toHaveLength(12);
+  });
+
+  it('棋譜保存の待機中に切断が届いても終局確定を二重に実行しない', async () => {
+    await control({ faults: { holdR2: true } });
+    white.send(cycle[3]);
+    for (const client of [black, white]) {
+      await client.recvUntil(l => l === '#DRAW');
+    }
+    for (let i = 0; i < 100 && Object.keys((await control({})).puts).length === 0; i++) {
+      await new Promise(r => setTimeout(r, 10));
+    }
+    await black.close();
+    await new Promise(r => setTimeout(r, 100));
+    await control({ releaseR2: true });
+    let state = await control({});
+    for (let i = 0; i < 100 && !state.finished; i++) {
+      await new Promise(r => setTimeout(r, 10));
+      state = await control({});
+    }
+    expect(state.finished?.result_code).toBe('#SENNICHITE');
+    expect(Object.values(state.puts).every(n => n === 1)).toBe(true);
   });
 
   it('観戦 snapshot の後に終局通知を送る', async () => {

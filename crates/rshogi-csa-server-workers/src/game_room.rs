@@ -294,6 +294,9 @@ pub struct GameRoom {
     /// retry させる)。R2 put は同一キーで上書きしても idempotent なので
     /// 重複 put は安全。
     live_index_put_done: Cell<bool>,
+    /// 終局確定中。R2 PUT の await 中は他イベントが割り込めるため、
+    /// `KEY_FINISHED` 確定前の再入で export や履歴追記が二重に走るのを防ぐ。
+    finalizing: Cell<bool>,
 }
 
 impl DurableObject for GameRoom {
@@ -306,6 +309,7 @@ impl DurableObject for GameRoom {
             core: RefCell::new(None),
             config: RefCell::new(None),
             live_index_put_done: Cell::new(false),
+            finalizing: Cell::new(false),
         }
     }
 
@@ -2001,6 +2005,19 @@ impl GameRoom {
         let HandleOutcome::GameEnded(ref game_result) = result.outcome else {
             return Ok(());
         };
+        if self.finalizing.replace(true) {
+            return Ok(());
+        }
+        let finalized = self.finalize_game(result, game_result).await;
+        self.finalizing.set(false);
+        finalized
+    }
+
+    async fn finalize_game(
+        &self,
+        result: &HandleResult,
+        game_result: &rshogi_csa_server::game::result::GameResult,
+    ) -> Result<()> {
         // 対局不成立の REJECT は勝敗通知を伴わない。
         let play_started = self
             .config
