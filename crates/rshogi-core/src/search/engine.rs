@@ -576,6 +576,7 @@ struct BestThreadResult {
 
 fn collect_best_thread_result(
     worker: &SearchWorker,
+    pos: &Position,
     limits: &LimitsType,
     skill_enabled: bool,
     skill: &mut Skill,
@@ -595,7 +596,12 @@ fn collect_best_thread_result(
         return BestThreadResult {
             best_move: Move::NONE,
             ponder_move: Move::NONE,
-            score: Value::ZERO,
+            // searchmoves による候補ゼロは、実際の合法手ゼロと区別する。
+            score: if super::RootMoves::from_legal_moves(pos, &[]).is_empty() {
+                Value::mated_in(0)
+            } else {
+                Value::ZERO
+            },
             completed_depth,
             sel_depth: worker.state.sel_depth,
             nodes,
@@ -1116,7 +1122,7 @@ impl Search {
                 .worker
                 .as_ref()
                 .expect("worker should be initialized by search_with_callback");
-            collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
+            collect_best_thread_result(worker, pos, &limits, skill_enabled, &mut skill)
         } else {
             // Native: Use helper_threads() to access Thread objects directly
             #[cfg(not(target_arch = "wasm32"))]
@@ -1125,7 +1131,13 @@ impl Search {
                 for thread in self.thread_pool.helper_threads() {
                     if thread.id() == best_thread_id {
                         result = Some(thread.with_worker(|worker: &mut SearchWorker| {
-                            collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
+                            collect_best_thread_result(
+                                worker,
+                                pos,
+                                &limits,
+                                skill_enabled,
+                                &mut skill,
+                            )
                         }));
                         break;
                     }
@@ -1182,7 +1194,7 @@ impl Search {
                     .worker
                     .as_ref()
                     .expect("worker should be initialized by search_with_callback");
-                collect_best_thread_result(worker, &limits, skill_enabled, &mut skill)
+                collect_best_thread_result(worker, pos, &limits, skill_enabled, &mut skill)
             })
         };
 
@@ -1457,10 +1469,8 @@ where
     }
     effective_multi_pv = effective_multi_pv.min(worker.state.root_moves.len());
 
-    // 中断時にPVを巻き戻すための保持
-    let mut last_best_pv = vec![Move::NONE];
-    let mut last_best_score = Value::new(-Value::INFINITE.raw());
-    let mut last_best_move_depth = 0;
+    // MultiPV・skill・helper の結果も完了した反復の score/PV/順位で返す。
+    let mut completed_root_moves = super::RootMoves::new();
 
     // ヘルパー用のローカル search_again_counter
     let mut local_search_again_counter: i32 = 0;
@@ -1701,6 +1711,8 @@ where
                 rm.previous_score = rm.score;
             }
 
+            completed_root_moves.clone_from(&worker.state.root_moves);
+
             let best_move_changes = worker.state.best_move_changes;
             worker.state.best_move_changes = 0.0;
 
@@ -1801,15 +1813,6 @@ where
                 on_progress(worker.state.nodes, best_move_changes);
             }
 
-            // PVが変わったときのみ last_best_* を更新
-            if !worker.state.root_moves[0].pv.is_empty()
-                && worker.state.root_moves[0].pv[0] != last_best_pv[0]
-            {
-                last_best_pv = worker.state.root_moves[0].pv.clone();
-                last_best_score = worker.state.root_moves[0].score;
-                last_best_move_depth = depth;
-            }
-
             // 詰みスコアが見つかっていたら早期終了
             // ponder中は stop/ponderhit を待つ必要があるためスキップ（USI仕様準拠）
             if effective_multi_pv == 1
@@ -1841,20 +1844,9 @@ where
     // 反復深化が自然終了した場合も、終局分岐と同じ通知待機を通る。
     wait_for_search_release(worker.state.abort, limits, time_manager, main_state.as_deref());
 
-    // 中断した探索で信頼できないPVになった場合のフォールバック
-    if worker.state.abort
-        && !worker.state.root_moves.is_empty()
-        && worker.state.root_moves[0].score.is_loss()
-    {
-        let head = last_best_pv.first().copied().unwrap_or(Move::NONE);
-        if head != Move::NONE
-            && let Some(idx) = worker.state.root_moves.find(head)
-        {
-            worker.state.root_moves.move_to_front(idx);
-            worker.state.root_moves[0].pv = last_best_pv;
-            worker.state.root_moves[0].score = last_best_score;
-            worker.state.completed_depth = last_best_move_depth;
-        }
+    // 中断した反復の番兵や bound を、完了深さの結果と混ぜない。
+    if worker.state.abort && !completed_root_moves.is_empty() {
+        worker.state.root_moves = completed_root_moves;
     }
 
     effective_multi_pv
