@@ -7,7 +7,8 @@
 //! YaneuraOu（CLUSTER_SIZE=3）準拠で16bitキーを使用。
 //! クラスターインデックスは64bitキーの上位ビットで決定し、
 //! クラスター内マッチングに下位16bitを使用する。
-//! 衝突確率は 3/65536 ≈ 0.005% と十分低く、Move合法性検証が二重チェックとして機能する。
+//! 独立一様な短縮キーの偶然一致は最大3/65536程度。並行更新による混在の確率とは異なる。
+//! 手の検証は不正な着手を防ぐが、短縮キーと探索値の対応は保証しない。
 
 use super::{GENERATION_CYCLE, GENERATION_MASK};
 use crate::types::{Bound, DEPTH_ENTRY_OFFSET, Move, Value};
@@ -45,6 +46,28 @@ impl TTEntry {
             move16: 0,
             value16: 0,
             eval16: 0,
+        }
+    }
+
+    // payloadを単一wordにまとめ、探索値とbound/depthを同時に読み書きする。
+    #[inline]
+    pub(super) fn payload(self) -> u64 {
+        self.depth8 as u64
+            | ((self.gen_bound8 as u64) << 8)
+            | ((self.move16 as u64) << 16)
+            | ((self.value16 as u16 as u64) << 32)
+            | ((self.eval16 as u16 as u64) << 48)
+    }
+
+    #[inline]
+    pub(super) fn from_payload(key16: u16, payload: u64) -> Self {
+        Self {
+            key16,
+            depth8: payload as u8,
+            gen_bound8: (payload >> 8) as u8,
+            move16: (payload >> 16) as u16,
+            value16: (payload >> 32) as i16,
+            eval16: (payload >> 48) as i16,
         }
     }
 
@@ -181,6 +204,31 @@ impl Default for TTData {
 mod tests {
     use super::*;
     use crate::types::{File, Rank, Square};
+
+    #[test]
+    fn test_payload_roundtrip() {
+        for depth8 in [0, 1, 127, 255] {
+            for gen_bound8 in 0..=255 {
+                for bits in [0, 1, 0x7fff, 0x8000, 0xffff] {
+                    let entry = TTEntry {
+                        key16: 0xabcd,
+                        depth8,
+                        gen_bound8,
+                        move16: bits,
+                        value16: bits as i16,
+                        eval16: !bits as i16,
+                    };
+                    let decoded = TTEntry::from_payload(entry.key16(), entry.payload());
+                    assert_eq!(decoded.key16, entry.key16);
+                    assert_eq!(decoded.depth8, entry.depth8);
+                    assert_eq!(decoded.gen_bound8, entry.gen_bound8);
+                    assert_eq!(decoded.move16, entry.move16);
+                    assert_eq!(decoded.value16, entry.value16);
+                    assert_eq!(decoded.eval16, entry.eval16);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_tt_entry_new() {

@@ -1788,6 +1788,31 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    #[test]
+    #[serial]
+    fn explicit_spsa_defaults_preserve_unconfigured_search() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut engine = UsiEngine::new();
+                let defaults = engine.search.as_ref().unwrap().search_tune_params();
+                assert_eq!(SearchTuneParams::option_specs().len(), 170);
+                for spec in SearchTuneParams::option_specs() {
+                    let value = spec.default.to_string();
+                    engine.cmd_setoption(&["setoption", "name", spec.usi_name, "value", &value]);
+                    assert_eq!(
+                        engine.search.as_ref().unwrap().search_tune_params(),
+                        defaults,
+                        "{}",
+                        spec.usi_name
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     // 履歴統計の初期化がスタックを大量に消費するため、別スレッドで実行
     // UsiEngine::new() が NNUE グローバル状態に依存するため、全テストを #[serial] で逐次実行
     const STACK_SIZE: usize = 64 * 1024 * 1024;
