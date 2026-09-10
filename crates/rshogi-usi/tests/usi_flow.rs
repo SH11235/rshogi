@@ -234,3 +234,98 @@ fn searchmoves_pass_returns_pass_without_stop() {
     assert_eq!(bestmove.split_whitespace().nth(1), Some("pass"));
     assert!(status.success());
 }
+
+/// 通常ponderの固定期限・hit後予算・明示stopを、初期化後のinfoを同期点にして検証する。
+#[test]
+fn ponder_time_budgets_wait_for_hit_or_stop() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    for (budget, fixed) in [
+        ("movetime 300", true),
+        ("rtime 300", true),
+        ("btime 10000 wtime 10000 byoyomi 100", false),
+    ] {
+        for (threads, hit) in [(1, true), (1, false), (4, true), (4, false)] {
+            let mut child = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn engine");
+            let stdout = child.stdout.take().unwrap();
+            let (sender, receiver) = mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    if sender.send(line.expect("read stdout")).is_err() {
+                        break;
+                    }
+                }
+            });
+            write!(child.stdin.as_mut().unwrap(), "{USI_INIT}setoption name Threads value {threads}\nsetoption name Stochastic_Ponder value false\nsetoption name MinimumThinkingTime value 1000\nsetoption name NetworkDelay value 0\nsetoption name NetworkDelay2 value 0\nposition startpos\ngo ponder {budget}\n").unwrap();
+            let result = (|| -> Result<Duration, String> {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let line = receiver
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .map_err(|err| err.to_string())?;
+                    if line.starts_with("bestmove ") {
+                        return Err(format!("early {line}"));
+                    }
+                    if line.starts_with("info depth ") {
+                        break;
+                    }
+                }
+                // main初期化後に、movetime/rtime上限より長く待つ（初期化時の通知競合と分離）。
+                let deadline = Instant::now() + Duration::from_millis(650);
+                loop {
+                    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(line) if line.starts_with("bestmove ") => {
+                            return Err(format!("before signal: {line}"));
+                        }
+                        Ok(_) => {}
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(err) => return Err(err.to_string()),
+                    }
+                }
+                let start = Instant::now();
+                writeln!(
+                    child.stdin.as_mut().unwrap(),
+                    "{}",
+                    if hit { "ponderhit" } else { "stop" }
+                )
+                .map_err(|err| err.to_string())?;
+                let deadline = start + Duration::from_secs(4);
+                loop {
+                    let line = receiver
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .map_err(|err| err.to_string())?;
+                    if line.starts_with("bestmove ") {
+                        return Ok(start.elapsed());
+                    }
+                }
+            })();
+            if result.is_ok() {
+                writeln!(child.stdin.as_mut().unwrap(), "quit").unwrap();
+            } else {
+                let _ = child.kill();
+            }
+            let status = child.wait().unwrap();
+            reader.join().unwrap();
+            let elapsed =
+                result.unwrap_or_else(|err| panic!("{budget} threads={threads} hit={hit}: {err}"));
+            eprintln!("ponder budget={budget} hit={hit} response_ms={}", elapsed.as_millis());
+            assert!(status.success());
+            if hit && fixed {
+                assert!(
+                    elapsed >= Duration::from_millis(200),
+                    "hit後の固定予算を使う: {budget} {elapsed:?}"
+                );
+            }
+            if !hit {
+                assert!(elapsed < Duration::from_secs(2), "stopは予算を待たない: {elapsed:?}");
+            }
+        }
+    }
+}
