@@ -6,11 +6,11 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `tournament` | 複数エンジンの round-robin 並列トーナメント。error ペアを同条件で再対局し、`--seed` による matchup ごとの決定的な開始局面選択、seed 付き meta、JSONL 出力、千日手の自動終局・エンジンへの対局履歴送信に対応（[詳細](tournament.md)） |
+| `tournament` | 複数エンジンの round-robin 並列トーナメント。動的目標変更時の先後交換ペア維持、error ペアを同条件で再対局し、`--seed` による matchup ごとの決定的な開始局面選択、seed 付き meta、JSONL 出力、千日手の自動終局・エンジンへの対局履歴送信に対応（[詳細](tournament.md)） |
 | `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、engine vs engine／NativeBackend、native LS progress 係数、`--keep-tt` による native TT・EvalHash・履歴の対局間保持、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)。[詳細](gensfen.md)） |
 | `nyugyoku_gensfen` | CSA manifest から入玉アンカー局面を disk-partition exact dedup で抽出し、checkpoint/resume 付きで gensfen 用 `startpos.txt` と provenance を生成（[詳細](nyugyoku_gensfen.md)） |
 | `csa_client` | USI エンジンを floodgate 等の CSA サーバーに接続して連続対局 |
-| `analyze_selfplay` | 不完全入力を invalid とし、部分集計と採否を区別。自己対局の JSONL ログを attempt 世代別に集計。勝率・Elo 差・NPS・error 件数等を表示（[詳細](analyze_selfplay.md)） |
+| `analyze_selfplay` | 不完全入力を invalid とし、部分集計と採否を区別。自己対局の JSONL ログを attempt 世代別に集計。勝率・Elo 差・NPS・error 件数等を表示（[詳細](analyze_selfplay.md)、[LLR 計算・再計算時の注意](tournament.md#llr-の計算と保存ログの再計算)） |
 | `floodgate_record` | csa_client の per-game JSONL から 1 エンジンの戦績を集計（先後別勝率・相手別・後手勝ち/負け/引分・実戦 NPS、`--config` で csa_client 設定から入力導出、`--fetch-ratings` で wdoor 現在レート併記・履歴記録。floodgate 連続対局向け、[詳細](floodgate_record.md)） |
 | `jsonl_to_kif` | tournament 等の JSONL 対局ログから KIF 棋譜を生成（id/skip/limit でフィルタ可） |
 | `kifu_player` | PSV / tournament JSONL / CSA を同じ TUI で再生・閲覧（評価値グラフ・検索/絞り込み（SFEN 局面検索含む）・`--live` 追記監視 (live-mirror と組で wdoor 観戦、csa_client の `live_jsonl` と組で自局の手単位リアルタイム観戦)・`--ratings` レート併記付き。[詳細](kifu_player.md)） |
@@ -21,14 +21,14 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `benchmark` | YaneuraOu bench 互換の標準ベンチマーク。マルチスレッド対応 |
-| `bench_nnue_eval` | NNUE 推論単体の性能測定（cycles/eval, instructions/eval）。LayerStacks は progresskpabs / kingrank9 の bucket 分布を計測可能 |
-| `search_only_ab` | search-only A/B ベンチマーク。起動・ロード時間を除外して cycles/node, instructions/node を正確計測。Linux は `perf stat --control`、Windows は ETW NT Kernel Logger の PMC counting（要管理者権限、Hyper-V/VBS 共存可）。CLI 差異は `--perf-events`(Linux) ↔ `--pmc-sources`(Windows) の置き換えと、Windows での `--cpus` shard 並列未対応の 2 点。JSON レポートは `samples` / `summary` が両 OS でスキーマ互換（`cli` ブロックのみ `perf_events` / `pmc_sources` のフィールド名差があり非互換） |
+| `benchmark` | YaneuraOu bench 互換の標準ベンチマーク。マルチスレッド対応。USI の評価ハッシュ設定と受信期限に対応 |
+| `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval の ns/op。LayerStacks 専用モードは bucket 分布も出力（[詳細](bench_nnue_eval.md)） |
+| `search_only_ab` | search-only A/B ベンチマーク。起動・ロード時間を除外して cycles/node, instructions/node を正確計測。Linux は `perf stat --control`、Windows は ETW NT Kernel Logger の PMC counting（要管理者権限、Hyper-V/VBS 共存可）。CLI 差異は `--perf-events`(Linux) ↔ `--pmc-sources`(Windows) の置き換えと、Windows での `--cpus` shard 並列未対応の 2 点。JSON レポートは `samples` / `summary` が両 OS でスキーマ互換（`cli` ブロックのみ `perf_events` / `pmc_sources` のフィールド名差があり非互換）。Windows backend は run ごとに ETW セッションを STOP→drain して末尾のスライスまで回収し、欠落を検出した run は破棄する（[詳細](search_only_ab.md)） |
 | `eval_sfens` | SFEN 局面を LayerStacks NNUE で静的評価（`score` は歩=90 の内部スケール、`score_cp` は cp） |
 | `nnue_saturation` | LayerStacks NNUE の活性飽和率（u8 127 張り付き）を実局面で計測（[詳細](nnue_saturation.md)） |
 | `ek_testset` | held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点（[詳細](ek_testset.md)） |
 | `nyugyoku_metrics` | 終局 CSA から宣言ルール距離ペア（`%KACHI`）と探索読み切り詰み距離（`%TORYO` + oracle 探索）を抽出し、native NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を対局クラスタ bootstrap CI 付きで採点（[詳細](nyugyoku_metrics.md)） |
-| `compare_eval_nnue` | 教師 NNUE と生徒 NNUE の評価値一致度を検証（MAE・相関係数・スコア帯別誤差） |
+| `compare_eval_nnue` | 静的評価と探索スコアを区別して NNUE を比較（期限・EOF 検査、型付き mate 保存、[詳細](compare_eval_nnue.md)） |
 | `dump_effect_bucket_golden` | 形式一致 golden 用に effect bucket active index を config 別に dump（[詳細](dump_effect_bucket_golden.md)） |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能。alignment 調査用（[詳細](compare_nodes.md)） |
 | `verify_nnue_accumulator` | NNUE accumulator の refresh vs differential update 一致テスト。PSQT・Threat・LayerStacks 対応 |
@@ -87,12 +87,12 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `spsa` | [SPSA チューナー](spsa_runbook.md#14-engine-プール再試行停止)。永続 engine プール、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
-| `generate_spsa_params` | SearchTuneParams から SPSA 用 .params ファイルを生成 |
+| `spsa` | [SPSA チューナー](spsa_runbook.md#14-engine-プール再試行停止)。永続 engine プール、`--engine-retries` / `--nodes-timeout-ms`。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証対象外。対局履歴をエンジンに送信し、千日手を自動終局。paired antithetic + stochastic rounding + 1 batch = 1 update のスケジュールで対局を回す。開始前に schedule の有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用する。複数 seed の探索は `--seed` を変えた独立 run dir を別プロセスで並列実行する |
+| `generate_spsa_params` | 実エンジンと共通の既定値から SPSA 用 .params ファイルを生成 |
 | `generate_net_spsa_params` | LayerStacks `.bin` を走査し、net 重み delta 用 SPSA `.params` を生成（[詳細](generate_net_spsa_params.md)） |
-| `apply_net_spsa_params` | SPSA の net 重み delta を LayerStacks `.bin` へ焼き込み、feature 非依存の読み戻し検証と SHA-256 report を行う（[詳細](apply_net_spsa_params.md)） |
+| `apply_net_spsa_params` | 重複係数を拒否し、SPSA の net 重み delta を LayerStacks `.bin` へ焼き込み、feature 非依存の読み戻し検証と SHA-256 report を行う（[詳細](apply_net_spsa_params.md)） |
 | `spsa_param_diff` | SPSA .params の最終差分と履歴差分を集計 |
-| `spsa_stats_to_plot_csv` | SPSA 統計を可視化用 CSV に整形（移動平均計算） |
+| `spsa_stats_to_plot_csv` | SPSA 統計を可視化用 CSV に整形。入力 alias を拒否し成功時だけ置換（[詳細](spsa_stats_to_plot_csv.md)） |
 | `params_to_shogitest_options` | SPSA .params を shogitest 互換オプション文字列に変換 |
 
 ## 外部連携・ログ解析

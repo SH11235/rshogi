@@ -252,9 +252,9 @@ use super::stats::{inc_stat, inc_stat_by_depth};
 /// 置換表プローブの結果をまとめたコンテキスト
 ///
 /// TTプローブ後の即時カットオフ判定や、後続の枝刈りロジックで使用される。
-pub(super) struct TTContext {
+pub(super) struct TTContext<'a> {
     pub(super) key: u64,
-    pub(super) result: ProbeResult,
+    pub(super) result: ProbeResult<'a>,
     pub(super) data: TTData,
     pub(super) hit: bool,
     pub(super) mv: Move,
@@ -263,9 +263,9 @@ pub(super) struct TTContext {
 }
 
 /// 置換表プローブの結果（続行 or カットオフ）
-pub(super) enum ProbeOutcome {
+pub(super) enum ProbeOutcome<'a> {
     /// 探索続行（TTContext付き）
-    Continue(TTContext),
+    Continue(TTContext<'a>),
     /// 即時カットオフ値（ヒストリ更新用情報付き）
     Cutoff {
         value: Value,
@@ -1076,8 +1076,8 @@ impl SearchWorker {
             return true;
         }
 
-        // ノード数制限チェック
-        if limits.nodes > 0 && self.state.nodes >= limits.nodes {
+        // ponder 中は予算を使い切っても、GUI の通知まで探索を継続する。
+        if limits.nodes > 0 && !time_manager.is_pondering() && self.state.nodes >= limits.nodes {
             #[cfg(debug_assertions)]
             eprintln!(
                 "check_abort: node limit reached nodes={} limit={}",
@@ -1099,7 +1099,10 @@ impl SearchWorker {
             let elapsed_effective = time_manager.elapsed_from_ponderhit();
 
             // フェーズ1: search_end 設定済み → 即座に停止
-            if time_manager.search_end() > 0 && elapsed >= time_manager.search_end() {
+            if !time_manager.is_pondering()
+                && time_manager.search_end() > 0
+                && elapsed >= time_manager.search_end()
+            {
                 #[cfg(debug_assertions)]
                 eprintln!(
                     "check_abort: search_end reached elapsed={} search_end={}",
@@ -1197,7 +1200,8 @@ impl SearchWorker {
 
         // ルートでもTTプローブを行う
         let key = pos.key();
-        let tt_result = self.tt.probe(key, pos);
+        let tt = Arc::clone(&self.tt);
+        let tt_result = tt.probe(key, pos);
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
         // rootNode では ttMove = rootMoves[0]
@@ -1818,7 +1822,8 @@ impl SearchWorker {
             } else {
                 (depth + 6).min(MAX_PLY - 1)
             };
-            tt_ctx_root.result.write(
+            // root 保存は統計・トレースを伴わないため、格納可否を見ない。
+            let _ = tt_ctx_root.result.write(
                 key,
                 value_to_tt(best_value, 0),
                 true, // PvNode
@@ -1923,7 +1928,8 @@ impl SearchWorker {
 
         // rootでもTT probeを行い、ttHit/ttPvを更新
         let key = pos.key();
-        let tt_result = self.tt.probe(key, pos);
+        let tt = Arc::clone(&self.tt);
+        let tt_result = tt.probe(key, pos);
         let tt_hit = tt_result.found;
         let tt_data = tt_result.data;
         // rootNode && pvIdx 経路では rootMoves[pv_idx] を ttMove 相当として扱う。
@@ -3941,7 +3947,18 @@ impl SearchWorker {
                 && helper_tt_write_enabled_for_depth(ctx.thread_id, bound, stored_depth);
             #[cfg(not(feature = "tt-trace"))]
             let allow_write = ctx.allow_tt_write;
-            if allow_write {
+            if allow_write
+                && tt_ctx.result.write(
+                    tt_ctx.key,
+                    value_to_tt(best_value, ply),
+                    st.stack[ply as usize].tt_pv,
+                    bound,
+                    stored_depth,
+                    best_move,
+                    eval_ctx.unadjusted_static_eval,
+                    ctx.tt.generation(),
+                )
+            {
                 #[cfg(feature = "tt-trace")]
                 maybe_trace_tt_write(TtWriteTrace {
                     stage: "ab_store",
@@ -3960,16 +3977,6 @@ impl SearchWorker {
                         Move::NONE
                     },
                 });
-                tt_ctx.result.write(
-                    tt_ctx.key,
-                    value_to_tt(best_value, ply),
-                    st.stack[ply as usize].tt_pv,
-                    bound,
-                    stored_depth,
-                    best_move,
-                    eval_ctx.unadjusted_static_eval,
-                    ctx.tt.generation(),
-                );
                 inc_stat_by_depth!(st, tt_write_by_depth, stored_depth);
             }
         }

@@ -54,6 +54,13 @@ Wald パラメータは `--sprt-nelo0` / `--sprt-nelo1` / `--sprt-alpha` /
 `sennichite` / `adjudication_draw` / `max_moves` は通常の引分として、
 `sennichite_perpetual_check` / `adjudication_resign` は勝者の勝ちとして集計する。
 
+### LLR の版差を調べる場合
+
+SPRT はゼロの pentanomial カテゴリに0.001件を補って正規化する。
+確率自体に下限を置く版とは LLR や採否が変わる場合がある。
+[計算と保存ログの再計算](tournament.md#llr-の計算と保存ログの再計算)の注意に従い、
+同じ仮説・観測ペア・停止時点で比較する。算術の修正と逐次検定の較正は別である。
+
 ## 不完全入力と部分集計
 
 指定ファイルの欠落・破損・有効データなし、片側しかない未完了ペア、SPRT 集計失敗、隣接する tournament の
