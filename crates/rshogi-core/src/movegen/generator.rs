@@ -1470,7 +1470,11 @@ impl Position {
         false
     }
 
-    /// pseudo-legal手が本当に合法かどうかをチェック
+    /// pseudo-legal手が自玉の安全・打ち歩詰めなどの条件を満たすかをチェック。
+    ///
+    /// 指し手生成器が返した手、または pseudo_legal() を通過した手が前提。
+    /// 任意入力には先に pseudo_legal() を適用すること。移動規則・段制約・
+    /// 持駒の有無などの入力検査はここでは繰り返さない。
     pub fn is_legal(&self, mv: Move) -> bool {
         // PASS の場合は can_pass() で判定
         if mv.is_pass() {
