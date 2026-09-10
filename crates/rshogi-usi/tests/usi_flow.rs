@@ -114,3 +114,41 @@ fn stochastic_ponderhit_restarts_search() {
     assert!(stdout.contains("bestmove"), "stdout:\n{stdout}");
     assert!(output.status.success());
 }
+
+/// パス探索を有効にしたビルドで、searchmovesの制限が実際のbestmoveに届く。
+#[cfg(not(feature = "search-no-pass-rules"))]
+#[test]
+fn searchmoves_pass_returns_pass_without_stop() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn engine");
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.expect("read stdout");
+            if line.starts_with("bestmove ") {
+                let _ = sender.send(line);
+                break;
+            }
+        }
+    });
+    write!(child.stdin.as_mut().unwrap(), "{USI_INIT}setoption name PassRights value true\nsetoption name InitialPassCount value 1\nposition startpos\ngo depth 1 searchmoves pass\n").unwrap();
+    let result = receiver.recv_timeout(Duration::from_secs(15));
+    if result.is_ok() {
+        writeln!(child.stdin.as_mut().unwrap(), "quit").unwrap();
+    } else {
+        let _ = child.kill();
+    }
+    let status = child.wait().unwrap();
+    reader.join().unwrap();
+    let bestmove = result.expect("bestmove should arrive before stop/quit");
+    assert_eq!(bestmove.split_whitespace().nth(1), Some("pass"));
+    assert!(status.success());
+}
