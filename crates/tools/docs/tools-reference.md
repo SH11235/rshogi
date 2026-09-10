@@ -6,14 +6,14 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 | ツール | 説明 |
 |--------|------|
-| `tournament` | 中断時も回収結果を保存し run 状態を明示。複数エンジンの round-robin 並列トーナメント。動的目標変更時の先後交換ペア維持、error ペアを同条件で再対局し、`--seed` による matchup ごとの決定的な開始局面選択、seed 付き meta、JSONL 出力、千日手の自動終局・エンジンへの対局履歴送信に対応（[詳細](tournament.md)） |
+| `tournament` | 既存対局出力を保護し、カード index ごとに保存。中断時も回収結果を保存し run 状態を明示。複数エンジンの round-robin 並列トーナメント。動的目標変更時の先後交換ペア維持、error ペアを同条件で再対局し、`--seed` による matchup ごとの決定的な開始局面選択、seed 付き meta、JSONL 出力、千日手の自動終局・エンジンへの対局履歴送信に対応（[詳細](tournament.md)） |
 | `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、engine vs engine／NativeBackend、native LS progress 係数、`--keep-tt` による native TT・EvalHash・履歴の対局間保持、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)。[詳細](gensfen.md)） |
 | `nyugyoku_gensfen` | CSA manifest から入玉アンカー局面を disk-partition exact dedup で抽出し、checkpoint/resume 付きで gensfen 用 `startpos.txt` と provenance を生成（[詳細](nyugyoku_gensfen.md)） |
 | `csa_client` | USI エンジンを floodgate 等の CSA サーバーに接続して連続対局 |
 | `analyze_selfplay` | 不完全入力を invalid とし、部分集計と採否を区別。自己対局の JSONL ログを attempt 世代別に集計。勝率・Elo 差・NPS・error 件数等を表示（[詳細](analyze_selfplay.md)、[LLR 計算・再計算時の注意](tournament.md#llr-の計算と保存ログの再計算)） |
 | `floodgate_record` | csa_client の per-game JSONL から 1 エンジンの戦績を集計（先後別勝率・相手別・後手勝ち/負け/引分・実戦 NPS、`--config` で csa_client 設定から入力導出、`--fetch-ratings` で wdoor 現在レート併記・履歴記録。floodgate 連続対局向け、[詳細](floodgate_record.md)） |
 | `jsonl_to_kif` | tournament 等の JSONL 対局ログから KIF 棋譜を生成（id/skip/limit でフィルタ可） |
-| `kifu_player` | PSV / tournament JSONL / CSA を同じ TUI で再生・閲覧（評価値グラフ・検索/絞り込み（SFEN 局面検索含む）・`--live` 追記監視 (live-mirror と組で wdoor 観戦、csa_client の `live_jsonl` と組で自局の手単位リアルタイム観戦)・`--ratings` レート併記付き。[詳細](kifu_player.md)） |
+| `kifu_player` | tournament の index 形式・旧形式に対応。PSV / tournament JSONL / CSA を同じ TUI で再生・閲覧（評価値グラフ・検索/絞り込み（SFEN 局面検索含む）・`--live` 追記監視 (live-mirror と組で wdoor 観戦、csa_client の `live_jsonl` と組で自局の手単位リアルタイム観戦)・`--ratings` レート併記付き。[詳細](kifu_player.md)） |
 | `book_from_csa` | CSA 棋譜群から YANEURAOU-DB2016 テキスト定跡 `.db` を生成。消費時間による定跡手判定（手番側ごとの即指しプレフィックス）・レート/勝敗/手数フィルタ・最小 ply 集約・ponder 集計。決定的（[詳細](book_from_csa.md)） |
 | `book_kachi_label` | YANEURAOU-DB2016 テキスト定跡のノード×候補手ごとに CSA corpus から `%KACHI` 決着率を集計し、sidecar JSONL と report を出力（flip 合流対応、[詳細](book_kachi_label.md)） |
 

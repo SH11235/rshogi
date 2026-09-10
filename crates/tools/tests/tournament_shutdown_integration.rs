@@ -106,7 +106,7 @@ done
 #[test]
 fn interrupt_saves_both_inflight_results_and_marks_run_invalid() {
     let (dir, meta, output) = run_case("interrupt", 2);
-    let rows = fs::read_to_string(dir.path().join("out/a-vs-b.jsonl")).unwrap();
+    let rows = fs::read_to_string(dir.path().join("out/pair-0-1.jsonl")).unwrap();
     let results = rows
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
@@ -126,7 +126,7 @@ fn interrupt_saves_both_inflight_results_and_marks_run_invalid() {
 #[test]
 fn interrupt_records_unfinished_pair() {
     let (dir, meta, _) = run_case("interrupt", 1);
-    let rows = fs::read_to_string(dir.path().join("out/a-vs-b.jsonl")).unwrap();
+    let rows = fs::read_to_string(dir.path().join("out/pair-0-1.jsonl")).unwrap();
     assert_eq!(
         rows.lines()
             .filter(
@@ -164,7 +164,7 @@ fn recovered_complete_pair_is_rejected_by_analyzer_after_interruption() {
     assert_eq!(meta["unreturned_games"], 0);
     for partial in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"));
-        command.arg(dir.path().join("out/a-vs-b.jsonl")).args([
+        command.arg(dir.path().join("out/pair-0-1.jsonl")).args([
             "--json",
             "--sprt",
             "--sprt-base-label",

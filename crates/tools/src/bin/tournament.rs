@@ -145,7 +145,7 @@ struct Cli {
     #[arg(long, value_parser = clap::value_parser!(DrawRule))]
     adjudicate_draw: Option<DrawRule>,
 
-    /// Output directory (required)
+    /// 出力ディレクトリ。既存の対局出力がある場合は拒否する。
     #[arg(long)]
     out_dir: PathBuf,
 
@@ -656,8 +656,8 @@ impl PairWriter {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let file =
-            File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+        let file = File::create_new(path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
         Ok(Self {
             writer: BufWriter::new(file),
         })
@@ -943,6 +943,41 @@ fn spawn_worker(
 // メイン
 // ---------------------------------------------------------------------------
 
+fn check_output_directory(path: &Path) -> Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_str(), Some("meta.json" | "control.json" | "control_history.jsonl"))
+            || entry.path().extension().is_some_and(|ext| ext == "jsonl")
+        {
+            bail!(
+                "既存出力 {} を保護します。別の --out-dir を指定してください",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn reserve_output_directory(path: &Path) -> Result<File> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        bail!("出力先ディレクトリの symlink は使用できません: {}", path.display());
+    }
+    fs::create_dir_all(path)?;
+    check_output_directory(path)?;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.join(".tournament.lock"))?;
+    lock.try_lock()
+        .with_context(|| format!("別の tournament が出力先 {} を使用しています", path.display()))?;
+    // 検査と lock 取得の間に先行 run が出力して終了した場合も上書きしない。
+    check_output_directory(path)?;
+    Ok(lock)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let seed = cli.seed.unwrap_or_else(|| rand::rng().random());
@@ -1027,10 +1062,6 @@ fn main() -> Result<()> {
     // 開始局面のロード
     let (start_defs, start_commands) =
         load_start_positions(cli.startpos_file.as_deref(), None, None, None)?;
-
-    // 出力ディレクトリの作成
-    fs::create_dir_all(&cli.out_dir)
-        .with_context(|| format!("failed to create {}", cli.out_dir.display()))?;
 
     let common_usi_options = cli.usi_options.clone().unwrap_or_default();
 
@@ -1129,6 +1160,8 @@ fn main() -> Result<()> {
             opts
         })
         .collect();
+    // run 全体の出力先を排他的に確保する。既存成果物や同時起動 run を上書きしない。
+    let output_guard = reserve_output_directory(&cli.out_dir)?;
     let timestamp = Local::now();
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_failed = Arc::new(AtomicBool::new(false));
@@ -1178,7 +1211,7 @@ fn main() -> Result<()> {
     };
     // meta.json 書き出し
     {
-        let meta_file = File::create(cli.out_dir.join("meta.json"))?;
+        let meta_file = File::create_new(cli.out_dir.join("meta.json"))?;
         serde_json::to_writer_pretty(BufWriter::new(meta_file), &tournament_meta)?;
     }
 
@@ -1267,7 +1300,7 @@ fn main() -> Result<()> {
 
     for &(i, j) in &pair_indices {
         {
-            let filename = format!("{}-vs-{}.jsonl", engine_labels[i], engine_labels[j]);
+            let filename = format!("pair-{i}-{j}.jsonl");
             let path = cli.out_dir.join(&filename);
             let mut pw = PairWriter::new(&path)?;
 
@@ -1619,6 +1652,7 @@ fn main() -> Result<()> {
         bail!("tournament did not complete; recovered results and run status were saved");
     }
 
+    drop(output_guard);
     Ok(())
 }
 
@@ -2559,6 +2593,18 @@ mod tests {
     fn splitmix64_matches_reference_vectors() {
         assert_eq!(splitmix64(0), 0xE220_A839_7B1D_CDAF);
         assert_eq!(splitmix64(0x9E37_79B9_7F4A_7C15), 0x6E78_9E6A_A1B9_65F4);
+    }
+
+    #[test]
+    fn output_directory_lock_excludes_another_run_and_releases_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = super::reserve_output_directory(dir.path()).unwrap();
+        assert!(super::reserve_output_directory(dir.path()).is_err());
+        drop(first);
+        assert!(super::reserve_output_directory(dir.path()).is_ok());
+        std::fs::write(dir.path().join("pair-0-1.jsonl"), b"saved").unwrap();
+        assert!(super::reserve_output_directory(dir.path()).is_err());
+        assert_eq!(std::fs::read(dir.path().join("pair-0-1.jsonl")).unwrap(), b"saved");
     }
 
     #[test]

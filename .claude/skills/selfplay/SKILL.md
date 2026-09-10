@@ -199,6 +199,7 @@ mkdir -p "$OUT"
 
 - `{PURPOSE}` はユーザーの実験目的を短く要約したもの（例: `tt-16bit`, `lmr-tuning`）
 - 検証済みの絶対パス `$OUT` を以降の `--out-dir` オプションで使用する
+- 起動前の wrapper 準備は許容するが、既存の対局 JSONL / meta.json / control.json がある OUT は tournament が拒否する。再開・上書きは未対応。
 
 #### Linux / WSL2: rshogi engine stderr の永続化
 
@@ -290,7 +291,7 @@ cargo run -p tools --release --bin tournament -- \
   ラベル指定なしで実行しても base/test の役割が自動推定される。`--engine` の指定順に
   役割の意味は無い（ファイル名・meta の label_black/white は指定順のまま）。
 - 出力は以下の2種類が `{out-dir}` に自動生成される:
-  - `{label_i}-vs-{label_j}.jsonl`: ペア別の棋譜ログ（各対局の指し手・評価値・結果）
+  - `pair-{i}-{j}.jsonl`（--engine 指定順の 0 始まり index）: ペア別の棋譜ログ（各対局の指し手・評価値・結果）
   - `meta.json`: 対局設定・エンジン情報をまとめたファイル。対局条件の確認・再現に利用可能。
 
 **注意:** `run_in_background: true` で起動し、`TaskOutput` で完了を監視すること。
