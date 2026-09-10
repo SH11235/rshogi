@@ -77,6 +77,9 @@ meta.json が存在しない旧ログは許容する。存在するのに読め�
 JSONL だけを別ディレクトリへコピーすると run 状態を確認できないため、解析時は
 対応する meta.json も保持する。
 
+完成ペアだけが残った中断も run_status で区別する。SPRT の境界到達や実行中の目標変更で
+正常終了する場合があるため、起動時の settings.games 未満という理由だけでは無効にしない。
+
 winner のない旧形式では slot 0 を meta の先後、slot 1 をその逆として、
 通常 WLD と pentanomial の勝者を共通の規則で解決する。winner があれば優先する。
 通常 tournament が winner を記録した結果の再解釈を目的とする変更ではない。

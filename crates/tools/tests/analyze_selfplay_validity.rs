@@ -125,6 +125,50 @@ fn tournament_run_status_and_metadata_read_errors_are_not_legacy_absence() {
 }
 
 #[test]
+fn pair_boundary_interruption_cannot_become_formal_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("games.jsonl");
+    write_log(&log, true, &vec![("white_win", "black_win"); 1000]);
+    let text = fs::read_to_string(&log).unwrap();
+    let (_, results) = text.split_once('\n').unwrap();
+    let mut header: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    header["settings"]["games"] = json!(10_000);
+    fs::write(&log, format!("{header}\n{results}")).unwrap();
+    let meta = dir.path().join("meta.json");
+    for status in ["running", "interrupted", "worker_failed"] {
+        fs::write(
+            &meta,
+            json!({
+                "run_status": status, "invalid": false,
+                "incomplete_pairs": 0, "unreturned_games": 0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for partial in [false, true] {
+            let (success, output) = analyze(&[&log], partial);
+            assert_eq!(success, partial, "{status}");
+            assert_eq!(output["sprt"]["pairs"], 1000);
+            assert_eq!(output["sprt"]["decision"], "invalid");
+            assert_eq!(output["extra"]["invalid"], true);
+        }
+    }
+    // SPRT や動的目標変更による正常な早期終了は、起動時の予定局数未満でも有効。
+    fs::write(
+        &meta,
+        json!({
+            "run_status": "completed", "invalid": false,
+            "incomplete_pairs": 0, "unreturned_games": 0
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (success, output) = analyze(&[&log], false);
+    assert!(success);
+    assert_eq!(output["sprt"]["decision"], "accept_h1");
+}
+
+#[test]
 fn explicit_and_legacy_winners_agree_for_both_slots_and_draws() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("games.jsonl");
