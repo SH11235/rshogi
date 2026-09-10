@@ -11,7 +11,8 @@
     "tail:staging": "wrangler tail --config wrangler.staging.toml",
     "tail:prod": "wrangler tail --config wrangler.production.toml",
     "dev": "wrangler dev",
-    "test:smoke": "vitest run --config tests/miniflare_smoke/vitest.config.ts"
+    "test:smoke": "vitest run --config tests/miniflare_smoke/vitest.config.ts",
+    "test:finalization-exhaustive": "vitest run --config tests/finalization_exhaustive/vitest.config.ts"
   },
   "devDependencies": {
     "@types/node": "^24.12.2",
