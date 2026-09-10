@@ -169,17 +169,21 @@ impl UsiEngine {
         let deadline = Instant::now() + timeout;
         let mut process =
             EngineProcess::spawn_with_timeout(&cfg, eval_file.display().to_string(), timeout)?;
-        // オプション広告が欠けるエンジンでも、モデル指定を黙って省略しない。
-        process.write_line(&format!("setoption name EvalFile value {}", eval_file.display()))?;
-        process.write_line("isready")?;
-        loop {
-            let line = process.recv_line_until(deadline)?;
-            anyhow::ensure!(
-                !line.starts_with("info string Error"),
-                "engine initialization: {line}"
-            );
-            if line == "readyok" {
-                break;
+        // EvalFile を広告しないエンジンには初期化時の setoption が届かないため補う。
+        // 届いている場合に再送すると、setoption を受けた時点でロードするエンジンでは
+        // net を二重に読み込む。
+        if !process.is_option_available("EvalFile") {
+            process.write_line(&format!("setoption name EvalFile value {}", eval_file.display()))?;
+            process.write_line("isready")?;
+            loop {
+                let line = process.recv_line_until(deadline)?;
+                anyhow::ensure!(
+                    !line.starts_with("info string Error"),
+                    "engine initialization: {line}"
+                );
+                if line == "readyok" {
+                    break;
+                }
             }
         }
         Ok(Self { process, timeout })
@@ -667,6 +671,56 @@ done
             let error = format!("{:#}", outcome.expect_err("EOF must fail"));
             assert!(error.contains("exited unexpectedly"), "{error}");
         }
+    }
+
+    /// EvalFile を送った回数を log file に記録する mock。`advertise` が空なら EvalFile を広告しない。
+    fn logging_mock(dir: &std::path::Path, advertise: &str) -> (PathBuf, PathBuf) {
+        let log = dir.join("setoption.log");
+        let path = dir.join("mock.sh");
+        std::fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    'setoption name EvalFile'*) echo "$line" >> '{log}' ;;
+    usi) {advertise} echo 'option name USI_Hash type spin default 16'; echo usiok ;;
+    isready) echo readyok ;;
+    eval) echo 'info string Static eval: -123'; echo 'info string SFEN: test' ;;
+    quit) exit 0 ;;
+  esac
+done
+"#,
+                log = log.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (path, log)
+    }
+
+    fn eval_file_sends(log: &std::path::Path) -> usize {
+        std::fs::read_to_string(log).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    #[test]
+    fn eval_file_is_sent_exactly_once_whether_advertised_or_not() {
+        // 広告あり: 初期化で届くので補完しない (再送すると net を二重ロードする)
+        let dir = tempfile::tempdir().unwrap();
+        let (path, log) = logging_mock(
+            dir.path(),
+            "echo 'option name EvalFile type string default none';",
+        );
+        let mut advertised = engine(&path).expect("advertised engine must initialize");
+        advertised.evaluate("test", ComparisonMode::Static, 1).expect("static eval");
+        assert_eq!(eval_file_sends(&log), 1);
+
+        // 広告なし: 初期化で落ちるので補完が要る
+        let dir = tempfile::tempdir().unwrap();
+        let (path, log) = logging_mock(dir.path(), "");
+        let mut unadvertised = engine(&path).expect("unadvertised engine must initialize");
+        unadvertised.evaluate("test", ComparisonMode::Static, 1).expect("static eval");
+        assert_eq!(eval_file_sends(&log), 1);
     }
 
     #[test]

@@ -571,8 +571,17 @@ impl EngineProcess {
         }
     }
 
+    /// `set_option_if_available` が実際に送信するかどうか。
+    ///
+    /// `usi` に対して 1 つもオプションを広告しないエンジンでは広告名の集合が空になるため、
+    /// 判別できず全て送信対象として扱う。呼び出し側が「初期化で送られなかった必須オプション」
+    /// を補う際は、送信済みの再送を避けるためにこの述語で判定する。
+    pub fn is_option_available(&self, name: &str) -> bool {
+        self.opt_names.is_empty() || self.opt_names.contains(name)
+    }
+
     pub fn set_option_if_available(&mut self, name: &str, value: &str) -> Result<()> {
-        if self.opt_names.is_empty() || self.opt_names.contains(name) {
+        if self.is_option_available(name) {
             self.write_line(&format!("setoption name {} value {}", name, value))?;
         }
         Ok(())
