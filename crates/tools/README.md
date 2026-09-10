@@ -60,7 +60,7 @@
 | `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval を分けて計測（[詳細](docs/bench_nnue_eval.md)） |
 | `search_only_ab` | search-only A/B ベンチマーク。cycles/node・instructions/node を Linux は perf、Windows は ETW PMC で計測（[詳細](docs/search_only_ab.md)） |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能（[詳細](docs/compare_nodes.md)） |
-| `compare_eval_nnue` | NNUE評価値の比較 |
+| `compare_eval_nnue` | 静的評価と探索スコアを区別して NNUE を比較（期限・EOF 検査、型付き mate 保存、[詳細](docs/compare_eval_nnue.md)） |
 | `dump_effect_bucket_golden` | 形式一致 golden 用に effect bucket active index を config 別に dump（[詳細](docs/dump_effect_bucket_golden.md)） |
 | `extract_bench_positions` | floodgate CSA / selfplay JSONL から教師ラベル品質測定用のベンチ局面を抽出 |
 | `label_bench_positions` | ベンチ局面 jsonl を深い探索でラベル付けし `eval_deep` を追記（ground truth） |
