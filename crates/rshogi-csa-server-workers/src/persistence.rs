@@ -328,10 +328,52 @@ pub fn pending_finalization(core: &CoreRoom) -> Option<HandleResult> {
     })
 }
 
+/// 告知前に保存する終局の裁定と終局時刻。isolate 破棄後の再開と再試行で
+/// 同じ裁定・同じ終局時刻 (R2 のキーと本文) を使うために残す。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizingState {
+    /// 確定させる裁定。
+    pub result: rshogi_csa_server::game::result::GameResult,
+    /// 棋譜・履歴に記録する終局時刻 (epoch ms)。
+    pub ended_at_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rshogi_csa_server::game::result::GameResult;
+    use rshogi_csa_server::game::result::{GameResult, IllegalReason};
+
+    #[test]
+    fn finalizing_state_roundtrips_every_result() {
+        for result in [
+            GameResult::Toryo {
+                winner: Color::Black,
+            },
+            GameResult::TimeUp {
+                loser: Color::White,
+            },
+            GameResult::IllegalMove {
+                loser: Color::Black,
+                reason: IllegalReason::IllegalKachi,
+            },
+            GameResult::Kachi {
+                winner: Color::White,
+            },
+            GameResult::OuteSennichite {
+                loser: Color::Black,
+            },
+            GameResult::Sennichite,
+            GameResult::MaxMoves,
+            GameResult::Abnormal { winner: None },
+        ] {
+            let state = FinalizingState {
+                result,
+                ended_at_ms: 1_700_000_000_000,
+            };
+            let json = serde_json::to_string(&state).unwrap();
+            assert_eq!(serde_json::from_str::<FinalizingState>(&json).unwrap(), state);
+        }
+    }
     use rshogi_csa_server::record::kifu::primary_result_code;
 
     /// `play_started_at_ms` の代表値（適当な epoch ms）。テスト全体で共有。

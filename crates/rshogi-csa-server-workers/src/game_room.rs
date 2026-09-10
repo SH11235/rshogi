@@ -79,8 +79,8 @@ use crate::games_index::{
 use crate::handle_auth::{HandleAuthError, load_handle_auth_registry};
 use crate::live_games_index::{LiveGamesIndexEntry, live_games_index_key};
 use crate::persistence::{
-    ExportBodyKind, ExportPendingState, FailedExportObject, FinishedState, MoveRow,
-    PersistedConfig, ReplaySummary, pending_finalization, replay_core_room,
+    ExportBodyKind, ExportPendingState, FailedExportObject, FinalizingState, FinishedState,
+    MoveRow, PersistedConfig, ReplaySummary, pending_finalization, replay_core_room,
 };
 use crate::player_identity::{derive_player_identity, legacy_player_id};
 use crate::reconnect::{
@@ -159,6 +159,7 @@ const KEY_ROOM_ID: &str = "room_id";
 const KEY_SLOTS: &str = "slots";
 const KEY_CONFIG: &str = "config";
 const KEY_FINISHED: &str = "finished";
+const KEY_FINALIZING: &str = "finalizing";
 /// 切断 → 再接続待ちエントリの DO storage key (1 対局 = 0..=1 件)。
 const KEY_GRACE_REGISTRY: &str = "grace_registry";
 /// 次に発火する `state.alarm()` の種別タグ。`None` は alarm 未予約 / 既存 alarm
@@ -489,6 +490,7 @@ impl DurableObject for GameRoom {
         let result_opt =
             self.core.borrow_mut().as_mut().map(|core| core.force_abnormal(role.to_core()));
         if let Some(result) = result_opt {
+            self.record_verdict(&result).await?;
             self.dispatch_broadcasts(&result.broadcasts).await?;
             self.finalize_if_ended(&result).await?;
         }
@@ -578,6 +580,7 @@ impl DurableObject for GameRoom {
             Some(core.force_time_up(loser))
         };
         if let Some(result) = outcome {
+            self.record_verdict(&result).await?;
             self.dispatch_broadcasts(&result.broadcasts).await?;
             self.finalize_if_ended(&result).await?;
         }
@@ -1142,6 +1145,7 @@ impl GameRoom {
                 if result.broadcasts.iter().any(is_move_broadcast) {
                     self.append_move(color, line, now).await?;
                 }
+                self.record_verdict(&result).await?;
                 self.dispatch_broadcasts(&result.broadcasts).await?;
             }
             HandleOutcome::Continue => {
@@ -2008,16 +2012,37 @@ impl GameRoom {
         if self.finalizing.replace(true) {
             return Ok(());
         }
-        let finalized = self.finalize_game(result, game_result).await;
+        let finalized = self.finalize_game(result).await;
         self.finalizing.set(false);
         finalized
     }
 
-    async fn finalize_game(
-        &self,
-        result: &HandleResult,
-        game_result: &rshogi_csa_server::game::result::GameResult,
-    ) -> Result<()> {
+    /// 終局の裁定と終局時刻を告知前に保存する。保存済みならそれを返し、
+    /// 再試行でも最初に決めた裁定と終局時刻を使う。
+    async fn record_verdict(&self, result: &HandleResult) -> Result<Option<FinalizingState>> {
+        let HandleOutcome::GameEnded(game_result) = &result.outcome else {
+            return Ok(None);
+        };
+        if let Some(saved) = self.load_finalizing().await? {
+            return Ok(Some(saved));
+        }
+        let state = FinalizingState {
+            result: game_result.clone(),
+            ended_at_ms: self.now_ms(),
+        };
+        self.state.storage().put(KEY_FINALIZING, &state).await?;
+        Ok(Some(state))
+    }
+
+    async fn load_finalizing(&self) -> Result<Option<FinalizingState>> {
+        self.state.storage().get(KEY_FINALIZING).await
+    }
+
+    async fn finalize_game(&self, result: &HandleResult) -> Result<()> {
+        let Some(verdict) = self.record_verdict(result).await? else {
+            return Ok(());
+        };
+        let game_result = &verdict.result;
         // 対局不成立の REJECT は勝敗通知を伴わない。
         let play_started = self
             .config
@@ -2031,7 +2056,7 @@ impl GameRoom {
         }
         use rshogi_csa_server::record::kifu::primary_result_code;
         let code = primary_result_code(game_result).to_owned();
-        let ended_at_ms = self.now_ms();
+        let ended_at_ms = verdict.ended_at_ms;
 
         // R2 export を試行し、失敗 PUT 一覧を集約する。bucket binding 不在 /
         // serialize 失敗等の「retry しても解決しない致命的失敗」は内部で console_log
@@ -2062,6 +2087,8 @@ impl GameRoom {
             exported_at_ms,
         };
         self.state.storage().put(KEY_FINISHED, &finished).await?;
+        // KEY_FINISHED が以後の再開を止めるため、削除失敗は無害。
+        let _ = self.state.storage().delete(KEY_FINALIZING).await;
         // 終局保存に失敗しても alarm から再試行できるよう、解除は保存後に行う。
         let _ = self.state.storage().delete_alarm().await;
         // grace / agree-timeout / time-up 系の alarm/registry を片付けてから
@@ -2916,8 +2943,20 @@ impl GameRoom {
     /// 棋譜 export は `moves` テーブルから組むため、終局手の保存に失敗した
     /// in-memory の裁定をそのまま確定すると欠けた棋譜が残る。その場合は
     /// in-memory のコアを捨てて保存済み履歴から復元し直し、保存済み履歴で
-    /// 終局しているときだけ確定する。
+    /// 終局しているときだけ確定する。盤面を進めない終局 (投了・宣言・反則) は
+    /// 履歴から復元できないため、告知前に保存した裁定を優先して再開する。
     async fn resume_pending_finalization(&self) -> Result<()> {
+        if let Some(saved) = self.load_finalizing().await? {
+            if self.load_finished().await?.is_some() {
+                self.core.borrow_mut().take();
+                return Ok(());
+            }
+            let result = HandleResult {
+                outcome: HandleOutcome::GameEnded(saved.result),
+                broadcasts: Vec::new(),
+            };
+            return self.finalize_if_ended(&result).await;
+        }
         let Some(moves_played) = self
             .core
             .borrow()
@@ -3595,6 +3634,7 @@ impl GameRoom {
         let result_opt =
             self.core.borrow_mut().as_mut().map(|core| core.force_abnormal(role.to_core()));
         if let Some(result) = result_opt {
+            self.record_verdict(&result).await?;
             self.dispatch_broadcasts(&result.broadcasts).await?;
             // `finalize_if_ended` は内部で `delete_grace_alarm_state` を呼んだ後に
             // ExportRetry alarm を貼り直す可能性がある (R2 export retry)。ここで重ねて

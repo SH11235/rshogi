@@ -169,6 +169,17 @@ describe('終局保存の復旧', () => {
     expect(Object.values(state.puts).every(n => n === 1)).toBe(true);
   });
 
+  it('盤面を進めない終局は isolate 破棄後も保存した裁定で確定する', async () => {
+    await control({ faults: { sendRole: 'Black', sendLine: '#RESIGN' } });
+    white.send('%TORYO');
+    await white.recvUntil(l => l === '#LOSE');
+    expect((await control({})).finished).toBeNull();
+    const state = await control({ faults: {}, reset: true, alarm: true });
+    expect(state.finished?.result_code).toBe('#RESIGN');
+    expect(await black.recvLine()).toBe('#RESIGN');
+    expect(await black.recvLine()).toBe('#WIN');
+  });
+
   it('観戦 snapshot の後に終局通知を送る', async () => {
     await control({ faults: { afterMove: true } });
     white.send(cycle[3]);
