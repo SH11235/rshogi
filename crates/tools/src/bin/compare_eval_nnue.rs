@@ -173,7 +173,8 @@ impl UsiEngine {
         // 届いている場合に再送すると、setoption を受けた時点でロードするエンジンでは
         // net を二重に読み込む。
         if !process.is_option_available("EvalFile") {
-            process.write_line(&format!("setoption name EvalFile value {}", eval_file.display()))?;
+            process
+                .write_line(&format!("setoption name EvalFile value {}", eval_file.display()))?;
             process.write_line("isready")?;
             loop {
                 let line = process.recv_line_until(deadline)?;
@@ -615,12 +616,33 @@ fn save_results(results: &[(Sample, EvalResult)], cli: &Cli) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    /// script の書き込みと fork を直列化する。並列テストでは、あるテストが script の
+    /// write fd を開いている間に別テストが fork すると、子が write fd を継承したまま
+    /// exec 前の窓に入り、その script の exec が ETXTBSY で落ちる (`O_CLOEXEC` は fork では
+    /// 閉じず exec 時にしか閉じない)。書き込みと spawn の両方が同じ lock を取る。
+    static FORK_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// tmp へ書き込み → close → chmod → atomic rename で、自スレッドの write fd が
+    /// exec と重なる経路も塞ぐ。
+    fn write_script(path: &std::path::Path, body: &str) {
+        let _guard = FORK_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = path.with_extension("sh.tmp");
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            f.write_all(body.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
 
     fn mock(dir: &std::path::Path, special: &str) -> PathBuf {
         let path = dir.join("mock.sh");
-        std::fs::write(
+        write_script(
             &path,
-            format!(
+            &format!(
                 r#"#!/bin/sh
 while IFS= read -r line; do
   case "$line" in
@@ -634,14 +656,20 @@ while IFS= read -r line; do
 done
 "#
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         path
     }
 
+    /// engine を起動する処理を [`FORK_WRITE_LOCK`] 下で行う。
+    fn with_fork_lock<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = FORK_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        f()
+    }
+
     fn engine(path: &std::path::Path) -> Result<UsiEngine> {
-        UsiEngine::new(path, std::path::Path::new("model.bin"), Duration::from_millis(300))
+        with_fork_lock(|| {
+            UsiEngine::new(path, std::path::Path::new("model.bin"), Duration::from_millis(300))
+        })
     }
 
     #[test]
@@ -677,9 +705,9 @@ done
     fn logging_mock(dir: &std::path::Path, advertise: &str) -> (PathBuf, PathBuf) {
         let log = dir.join("setoption.log");
         let path = dir.join("mock.sh");
-        std::fs::write(
+        write_script(
             &path,
-            format!(
+            &format!(
                 r#"#!/bin/sh
 while IFS= read -r line; do
   case "$line" in
@@ -693,9 +721,7 @@ done
 "#,
                 log = log.display(),
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         (path, log)
     }
 
@@ -707,10 +733,8 @@ done
     fn eval_file_is_sent_exactly_once_whether_advertised_or_not() {
         // 広告あり: 初期化で届くので補完しない (再送すると net を二重ロードする)
         let dir = tempfile::tempdir().unwrap();
-        let (path, log) = logging_mock(
-            dir.path(),
-            "echo 'option name EvalFile type string default none';",
-        );
+        let (path, log) =
+            logging_mock(dir.path(), "echo 'option name EvalFile type string default none';");
         let mut advertised = engine(&path).expect("advertised engine must initialize");
         advertised.evaluate("test", ComparisonMode::Static, 1).expect("static eval");
         assert_eq!(eval_file_sends(&log), 1);
@@ -792,18 +816,20 @@ done
         std::fs::write(&input, record.to_bytes())?;
         for mode in [ComparisonMode::Static, ComparisonMode::Search] {
             let output = dir.path().join(format!("{}.tsv", mode.label()));
-            run(Cli {
-                input: vec![input.clone()],
-                teacher_nnue: "teacher.bin".into(),
-                student_nnue: "student.bin".into(),
-                engine: path.clone(),
-                samples: 1,
-                depth: 1,
-                mode,
-                timeout_ms: 1000,
-                threads: 1,
-                seed: 42,
-                output: Some(output.clone()),
+            with_fork_lock(|| {
+                run(Cli {
+                    input: vec![input.clone()],
+                    teacher_nnue: "teacher.bin".into(),
+                    student_nnue: "student.bin".into(),
+                    engine: path.clone(),
+                    samples: 1,
+                    depth: 1,
+                    mode,
+                    timeout_ms: 1000,
+                    threads: 1,
+                    seed: 42,
+                    output: Some(output.clone()),
+                })
             })?;
             let text = std::fs::read_to_string(output)?;
             let value = if mode == ComparisonMode::Static {
