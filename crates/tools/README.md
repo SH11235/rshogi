@@ -58,6 +58,7 @@
 |--------|------|
 | `benchmark` | USI の評価ハッシュ設定・受信期限に対応。 エンジン性能ベンチマーク |
 | `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval を分けて計測（[詳細](docs/bench_nnue_eval.md)） |
+| `search_only_ab` | search-only A/B ベンチマーク。cycles/node・instructions/node を Linux は perf、Windows は ETW PMC で計測（[詳細](docs/search_only_ab.md)） |
 | `compare_nodes` | 2つの USI エンジン間で探索ノード数を深度別に比較。エンジン別の任意ノード上限を併用可能（[詳細](docs/compare_nodes.md)） |
 | `compare_eval_nnue` | NNUE評価値の比較 |
 | `dump_effect_bucket_golden` | 形式一致 golden 用に effect bucket active index を config 別に dump（[詳細](docs/dump_effect_bucket_golden.md)） |
@@ -106,6 +107,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [gensfen](docs/gensfen.md) - 教師局面生成ツールの詳細
 - [nyugyoku_gensfen](docs/nyugyoku_gensfen.md) - 入玉アンカー局面から gensfen 用開始局面を生成
 - [benchmark](docs/benchmark.md) - ベンチマークツールの詳細
+- [search_only_ab](docs/search_only_ab.md) - search-only A/B ベンチマーク（perf / ETW PMC）の詳細
 - [dump_effect_bucket_golden](docs/dump_effect_bucket_golden.md) - 形式一致 golden 用 effect bucket active index dump
 - [pack_tools](docs/pack_tools.md) - 学習データ処理ツール群
 - [shuffle_psv](docs/shuffle_psv.md) - PSV の再現可能なシャッフルと大規模ファイル向け段階削除

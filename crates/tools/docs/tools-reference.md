@@ -23,7 +23,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 |--------|------|
 | `benchmark` | USI の評価ハッシュ設定・受信期限に対応。 YaneuraOu bench 互換の標準ベンチマーク。マルチスレッド対応 |
 | `bench_nnue_eval` | NNUE の固定局面 eval-only と巡回局面 refresh + eval の ns/op。LayerStacks 専用モードは bucket 分布も出力（[詳細](bench_nnue_eval.md)） |
-| `search_only_ab` | search-only A/B ベンチマーク。起動・ロード時間を除外して cycles/node, instructions/node を正確計測。Linux は `perf stat --control`、Windows は ETW NT Kernel Logger の PMC counting（要管理者権限、Hyper-V/VBS 共存可）。CLI 差異は `--perf-events`(Linux) ↔ `--pmc-sources`(Windows) の置き換えと、Windows での `--cpus` shard 並列未対応の 2 点。JSON レポートは `samples` / `summary` が両 OS でスキーマ互換（`cli` ブロックのみ `perf_events` / `pmc_sources` のフィールド名差があり非互換） |
+| `search_only_ab` | search-only A/B ベンチマーク。起動・ロード時間を除外して cycles/node, instructions/node を正確計測。Linux は `perf stat --control`、Windows は ETW NT Kernel Logger の PMC counting（要管理者権限、Hyper-V/VBS 共存可）。CLI 差異は `--perf-events`(Linux) ↔ `--pmc-sources`(Windows) の置き換えと、Windows での `--cpus` shard 並列未対応の 2 点。JSON レポートは `samples` / `summary` が両 OS でスキーマ互換（`cli` ブロックのみ `perf_events` / `pmc_sources` のフィールド名差があり非互換）。Windows backend は run ごとに ETW セッションを STOP→drain して末尾のスライスまで回収し、欠落を検出した run は破棄する（[詳細](search_only_ab.md)） |
 | `eval_sfens` | SFEN 局面を LayerStacks NNUE で静的評価（`score` は歩=90 の内部スケール、`score_cp` は cp） |
 | `nnue_saturation` | LayerStacks NNUE の活性飽和率（u8 127 張り付き）を実局面で計測（[詳細](nnue_saturation.md)） |
 | `ek_testset` | held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点（[詳細](ek_testset.md)） |
