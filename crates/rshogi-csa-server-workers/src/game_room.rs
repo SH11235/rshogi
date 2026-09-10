@@ -2951,6 +2951,9 @@ impl GameRoom {
                 self.core.borrow_mut().take();
                 return Ok(());
             }
+            // 復元したコアは Playing に戻り得る。確定の R2 待機中に割り込んだ
+            // 着手を受理しないよう、コアを捨ててから確定する。
+            self.core.borrow_mut().take();
             let result = HandleResult {
                 outcome: HandleOutcome::GameEnded(saved.result),
                 broadcasts: Vec::new(),
