@@ -1,6 +1,6 @@
-//! tournament JSONL (`{label}-vs-{label}.jsonl`) を対象にした `GameSource` 実装。
+//! tournament JSONL (`pair-{i}-{j}.jsonl`、旧ラベル形式も対応) の `GameSource` 実装。
 //!
-//! out-dir 配下の `*-vs-*.jsonl` を横断して、対局単位の索引を1つのリストに
+//! out-dir 配下のカードファイルを横断して、対局単位の索引を1つのリストに
 //! フラット化する。`game_id` はペアファイルごとのローカル連番（out-dir 全体での
 //! 一意性は無い）なので、一意キーは `(file_idx, game_id)` にする。
 
@@ -134,13 +134,24 @@ impl GameSource for JsonlSource {
     }
 }
 
-/// tournament のペアファイル(`{A}-vs-{B}.jsonl`)と csa_client の per-game 記録
+/// tournament の index 形式・旧ラベル形式のペアファイルと csa_client の per-game 記録
 /// (`{datetime}_{sente}_vs_{gote}.jsonl`)の両方を対局ファイルとして扱う
 /// (スキーマは共通で、meta 行の検証は `index_one_file` が行う)。
 fn is_pair_jsonl_name(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.ends_with(".jsonl") && (n.contains("-vs-") || n.contains("_vs_")))
+    let Some(stem) =
+        path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".jsonl"))
+    else {
+        return false;
+    };
+    if stem.contains("-vs-") || stem.contains("_vs_") {
+        return true;
+    }
+    let Some((first, second)) = stem.strip_prefix("pair-").and_then(|s| s.split_once('-')) else {
+        return false;
+    };
+    [first, second]
+        .iter()
+        .all(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[derive(Deserialize)]
@@ -483,6 +494,66 @@ mod tests {
         format!(
             r#"{{"type":"result","game_id":{game_id},"outcome":"{outcome}","reason":"r","plies":{plies},"error":{error}}}"#
         )
+    }
+
+    #[test]
+    fn recognizes_indexed_and_legacy_game_filenames() {
+        for name in [
+            "pair-0-1.jsonl",
+            "pair-10-23.jsonl",
+            "a-vs-b.jsonl",
+            "20260707_A_vs_B.jsonl",
+        ] {
+            assert!(is_pair_jsonl_name(Path::new(name)), "{name}");
+        }
+        for name in [
+            "pair-.jsonl",
+            "pair-0-.jsonl",
+            "pair--1.jsonl",
+            "pair-a-b.jsonl",
+            "pair-0-1-2.jsonl",
+            "pair-0-1.jsonl.bak",
+            "control_history.jsonl",
+            "meta.json",
+        ] {
+            assert!(!is_pair_jsonl_name(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn indexes_and_loads_indexed_and_legacy_cards_together() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "pair-0-1.jsonl",
+            "legacy-vs-card.jsonl",
+            "20260707_A_vs_B.jsonl",
+        ] {
+            write_file(
+                dir.path(),
+                name,
+                &[
+                    meta_line("from-meta-black", "from-meta-white"),
+                    move_line(1, 1, "7g7f"),
+                    result_line(1, "black_win", 1, false),
+                ],
+            );
+        }
+        write_file(dir.path(), "control_history.jsonl", &["not a game".to_string()]);
+        let source = JsonlSource::new(dir.path());
+        let index = source.build_index().unwrap();
+        assert_eq!(index.pair_files.len(), 3);
+        assert_eq!(index.entries.len(), 3);
+        assert!(index.warnings.is_empty());
+        for meta in &index.pair_files {
+            assert_eq!(meta.black_label, "from-meta-black");
+            assert_eq!(meta.white_label, "from-meta-white");
+        }
+        for entry in &index.entries {
+            assert_eq!(entry.outcome, Some(GameOutcomeView::Win(Color::Black)));
+            let game = source.load_game(&index, entry).unwrap();
+            assert_eq!(game.moves.len(), 1);
+            assert!(game.moves[0].kif_label.contains('▲'));
+        }
     }
 
     #[test]

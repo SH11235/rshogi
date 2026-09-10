@@ -64,6 +64,18 @@ fn colliding_labels_produce_six_distinct_complete_card_files() {
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
         .count();
     assert_eq!(jsonls, 6);
+    #[cfg(feature = "csa-replay")]
+    {
+        use tools::replay::{GameSource, JsonlSource};
+        let source = JsonlSource::new(&output);
+        let index = source.build_index().unwrap();
+        assert_eq!(index.pair_files.len(), 6);
+        assert_eq!(index.entries.len(), 12);
+        assert!(index.warnings.is_empty());
+        for entry in &index.entries {
+            source.load_game(&index, entry).unwrap();
+        }
+    }
     for i in 0..4 {
         for j in i + 1..4 {
             let rows = fs::read_to_string(output.join(format!("pair-{i}-{j}.jsonl"))).unwrap();

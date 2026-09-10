@@ -41,10 +41,11 @@ cargo run -p tools --release --bin kifu_player -- \
   --tournament-dir runs/selfplay/<out-dir>
 ```
 
-out-dir 配下の `*-vs-*.jsonl`（`tournament` が出力するペアファイル）と
+out-dir 配下の `pair-{i}-{j}.jsonl`（`tournament` のカードファイル）、旧形式の `*-vs-*.jsonl` と
 `*_vs_*.jsonl`（`csa_client` の per-game 記録。スキーマは共通）を横断して 1 つの
 対局リストにまとめる。対局データを含まない付随ファイルは自動的に除外する。
 `csa_client` の JSONL dir（`[record].dir/jsonl/`）をそのまま渡せる。
+`i` / `j` は engine 指定順の index。表示するエンジン名はファイル名ではなく各 JSONL の meta から取得する。
 
 ### CSA を開く
 
