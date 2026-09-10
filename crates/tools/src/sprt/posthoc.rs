@@ -59,6 +59,30 @@ fn extract_engine_id(path: &str) -> String {
     filename.to_string()
 }
 
+/// outcome と先後交換 slot から勝者ラベルを解決する。
+///
+/// 明示 winner を優先する。省略時は slot 0 が meta の先後、slot 1 が逆順。
+/// 引分・未完了・不明な outcome / slot は None。
+pub fn result_winner_label<'a>(
+    outcome: &str,
+    winner: Option<&'a str>,
+    slot: usize,
+    label_black_meta: &'a str,
+    label_white_meta: &'a str,
+) -> Option<&'a str> {
+    if !matches!(outcome, "black_win" | "white_win") {
+        return None;
+    }
+    if let Some(winner) = winner {
+        return Some(winner);
+    }
+    match (outcome, slot) {
+        ("black_win", 0) | ("white_win", 1) => Some(label_black_meta),
+        ("white_win", 0) | ("black_win", 1) => Some(label_white_meta),
+        _ => None,
+    }
+}
+
 fn result_test_side(
     result: &ResultLog,
     slot: usize,
@@ -67,26 +91,18 @@ fn result_test_side(
     base: &str,
     test: &str,
 ) -> Option<GameSide> {
-    if let Some(winner) = result.winner.as_deref() {
-        return match result.outcome.as_str() {
-            "black_win" | "white_win" if winner == test => Some(GameSide::Win),
-            "black_win" | "white_win" if winner == base => Some(GameSide::Loss),
-            "draw" => Some(GameSide::Draw),
-            _ => None,
-        };
+    if result.outcome == "draw" {
+        return Some(GameSide::Draw);
     }
-    let actual_black = if slot == 0 {
-        label_black_meta
-    } else {
-        label_white_meta
-    };
-    let test_is_black = actual_black == test;
-    match result.outcome.as_str() {
-        "black_win" if test_is_black => Some(GameSide::Win),
-        "black_win" => Some(GameSide::Loss),
-        "white_win" if test_is_black => Some(GameSide::Loss),
-        "white_win" => Some(GameSide::Win),
-        "draw" => Some(GameSide::Draw),
+    match result_winner_label(
+        &result.outcome,
+        result.winner.as_deref(),
+        slot,
+        label_black_meta,
+        label_white_meta,
+    ) {
+        Some(winner) if winner == test => Some(GameSide::Win),
+        Some(winner) if winner == base => Some(GameSide::Loss),
         _ => None,
     }
 }
@@ -112,8 +128,10 @@ pub fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
         if trimmed.is_empty() {
             continue;
         }
-        if meta_labels.is_none() && trimmed.contains("\"type\":\"meta\"") {
-            let meta: MetaLog = serde_json::from_str(trimmed)
+        let value: serde_json::Value =
+            serde_json::from_str(trimmed).with_context(|| format!("JSONパースエラー: {path}"))?;
+        if meta_labels.is_none() && value["type"] == "meta" {
+            let meta: MetaLog = serde_json::from_value(value)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
             let black = meta
                 .engine_cmd
@@ -127,11 +145,11 @@ pub fn collect_sprt_penta(path: &str, base: &str, test: &str) -> Result<Penta> {
                 return Ok(Penta::ZERO);
             }
             meta_labels = Some((black, white));
-        } else if trimmed.contains("\"type\":\"result\"") {
+        } else if value["type"] == "result" {
             let Some((label_black_meta, label_white_meta)) = meta_labels.as_ref() else {
                 continue;
             };
-            let result: ResultLog = serde_json::from_str(trimmed)
+            let result: ResultLog = serde_json::from_value(value)
                 .with_context(|| format!("resultパースエラー: {path}"))?;
             if result.pair_index.is_none() && !warned_missing_pair_index {
                 eprintln!(

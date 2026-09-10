@@ -29,6 +29,10 @@ use super::constants::WEIGHT_SCALE_BITS;
 /// 各活性化関数は出力次元の変換比率（`OUTPUT_DIM_DIVISOR`）を定義し、
 /// L1層の入力次元を決定する。
 pub trait FtActivation: Clone + Copy + Default + Send + Sync + 'static {
+    /// FT 出力は qa <= 127 のとき、中間層出力は qa に関係なく 0..=127 に収まるか。
+    /// 独自実装は既定で全 u8 範囲の積和を使用する。
+    const SEVEN_BIT_WHEN_QA127: bool = false;
+
     /// 出力次元の除数
     ///
     /// L1層入力次元 = FT出力次元 * 2 / OUTPUT_DIM_DIVISOR
@@ -76,6 +80,8 @@ pub trait FtActivation: Clone + Copy + Default + Send + Sync + 'static {
 pub struct CReLU;
 
 impl FtActivation for CReLU {
+    const SEVEN_BIT_WHEN_QA127: bool = true;
+
     const OUTPUT_DIM_DIVISOR: usize = 1;
 
     #[inline]
@@ -385,6 +391,8 @@ fn crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
 pub struct PairwiseCReLU;
 
 impl FtActivation for PairwiseCReLU {
+    const SEVEN_BIT_WHEN_QA127: bool = true;
+
     const OUTPUT_DIM_DIVISOR: usize = 2;
 
     #[inline]
@@ -1101,6 +1109,8 @@ fn pairwise_crelu_i32_to_u8(input: &[i32], output: &mut [u8]) {
 pub struct SCReLU;
 
 impl FtActivation for SCReLU {
+    const SEVEN_BIT_WHEN_QA127: bool = true;
+
     const OUTPUT_DIM_DIVISOR: usize = 1;
 
     #[inline]

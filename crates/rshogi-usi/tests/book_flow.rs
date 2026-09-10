@@ -4,9 +4,11 @@
 //! - BookFile=no_book（既定）では定跡関連の出力が一切無く従来挙動が不変であること
 //! - 片側正規化定跡に FlippedBook でヒットすること
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 /// Material 評価で動作させる共通初期化（NNUE ファイル不要）。
 const MATERIAL_INIT: &str = "usi\nsetoption name MaterialLevel value 9\n";
@@ -28,7 +30,7 @@ fn write_temp_db(tag: &str, contents: &str) -> PathBuf {
     path
 }
 
-/// エンジンに一連のコマンドを流し込み stdout をまとめて返す。
+/// bestmove を受信してから quit し、探索の自然終了までの stdout を返す。
 fn run_engine(input: &str) -> String {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
     let mut child = cmd
@@ -37,14 +39,46 @@ fn run_engine(input: &str) -> String {
         .spawn()
         .expect("spawn engine");
 
-    {
-        let stdin = child.stdin.as_mut().expect("stdin");
-        stdin.write_all(input.as_bytes()).expect("write");
-    }
+    let stdout = child.stdout.take().expect("stdout");
+    let (sender, receiver) = mpsc::channel();
+    let reader = std::thread::spawn(move || -> std::io::Result<String> {
+        let mut output = String::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = line?;
+            output.push_str(&line);
+            output.push('\n');
+            if line.starts_with("bestmove ") {
+                let _ = sender.send(());
+            }
+        }
+        Ok(output)
+    });
 
-    let output = child.wait_with_output().expect("wait output");
-    assert!(output.status.success(), "engine exited with failure");
-    String::from_utf8_lossy(&output.stdout).into_owned()
+    let result = (|| -> std::io::Result<std::process::ExitStatus> {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin.write_all(input.as_bytes())?;
+        receiver.recv_timeout(Duration::from_secs(15)).map_err(std::io::Error::other)?;
+        writeln!(stdin, "quit")?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "quit timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    // 応答待ち・終了待ちの失敗時にも子プロセスと stdout reader を残さない。
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let stdout = reader.join().expect("join stdout reader").expect("read stdout");
+    let status = result.unwrap_or_else(|error| panic!("engine session failed: {error}\n{stdout}"));
+    assert!(status.success(), "engine exited with failure:\n{stdout}");
+    stdout
 }
 
 /// `bestmove` 行（最初のもの）を取り出す。
@@ -66,8 +100,7 @@ fn book_hit_returns_bestmove_from_db() {
          setoption name BookFile value {path_str}\n\
          isready\n\
          position startpos\n\
-         go depth 10\n\
-         quit\n"
+         go depth 10\n"
     );
     let stdout = run_engine(&input);
     let _ = std::fs::remove_file(&path);
@@ -102,8 +135,7 @@ fn flipped_book_hit_on_one_sided_db() {
          setoption name BookFile value {path_str}\n\
          isready\n\
          position startpos moves 7g7f\n\
-         go depth 10\n\
-         quit\n"
+         go depth 10\n"
     );
     let stdout = run_engine(&input);
     let _ = std::fs::remove_file(&path);
@@ -123,8 +155,7 @@ fn no_book_default_is_unchanged() {
         "{MATERIAL_INIT}\
          isready\n\
          position startpos\n\
-         go depth 6\n\
-         quit\n"
+         go depth 6\n"
     );
     let stdout = run_engine(&input);
 
@@ -133,8 +164,8 @@ fn no_book_default_is_unchanged() {
     // 通常探索の bestmove が返ること。
     let bm = first_bestmove(&stdout).expect("bestmove present");
     assert!(bm.starts_with("bestmove"), "no bestmove:\n{stdout}");
-    // 探索由来なので info depth 行が出ているはず（book hit ならスキップされる）。
-    assert!(stdout.contains("info "), "expected search info lines:\n{stdout}");
+    // 要求した深さまでの完了を確認し、quit による途中停止を成功扱いしない。
+    assert!(stdout.lines().any(|line| line.starts_with("info depth 6 ")), "{stdout}");
 }
 
 #[test]
@@ -152,14 +183,13 @@ fn own_book_false_falls_back_to_search() {
          setoption name USI_OwnBook value false\n\
          isready\n\
          position startpos\n\
-         go depth 6\n\
-         quit\n"
+         go depth 6\n"
     );
     let stdout = run_engine(&input);
     let _ = std::fs::remove_file(&path);
 
-    // book はロードされるが probe されないので、通常探索の info 行が出る。
+    // book のロード通知だけでなく、通常探索が要求した深さまで完了する。
     assert!(stdout.contains("book loaded"), "book should still load:\n{stdout}");
-    assert!(stdout.contains("info "), "expected search info lines:\n{stdout}");
+    assert!(stdout.lines().any(|line| line.starts_with("info depth 6 ")), "{stdout}");
     assert!(first_bestmove(&stdout).is_some(), "bestmove present:\n{stdout}");
 }
