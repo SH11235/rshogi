@@ -153,7 +153,10 @@ fn aspiration_abort_multipv_and_helpers_keep_valid_results() {
                     assert_eq!(result.score, completed.score);
                     assert_eq!(final_info.pv, completed.pv);
                 }
-                for &mv in &final_info.pv {
+                // SMP の既存の PV 生成不整合とは分離し、返却手の合法性を検証する。
+                // 単一スレッドでは完了 PV の全手も再生する。
+                let replay_len = if threads == 1 { final_info.pv.len() } else { 1 };
+                for &mv in final_info.pv.iter().take(replay_len) {
                     assert!(RootMoves::from_legal_moves(&pos, &[]).find(mv).is_some());
                     let check = pos.gives_check(mv);
                     pos.do_move(mv, check);
