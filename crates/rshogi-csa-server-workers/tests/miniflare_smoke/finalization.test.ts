@@ -7,8 +7,10 @@ import { readLineFromWebSocket } from './ws_test_helpers';
 interface RecoveryState {
   activeMessages: number;
   finalizing: { attempt: number; broadcasts: { line: string; ply: number | null }[] } | null;
-  closes: { role: string; code: number; reason: string }[];
-  finished: { result_code: string; exported_at_ms: number | null } | null;
+  closes: { role?: string; type?: string; code: number; reason: string }[];
+  sockets: { type: string; readyState: number }[];
+  socketCloses: { type: string; code: number }[];
+  finished: { result_code: string; exported_at_ms?: number | null } | null;
   kind: string | null;
   pending: { attempt: number; csa_text: string; failed_keys: unknown[] } | null;
   alarm: number | null;
@@ -139,7 +141,8 @@ describe('終局保存の復旧', () => {
     const stale = await control({ faults: {}, reset: true, alarm: true });
     expect(stale.pending).toEqual(state.pending);
     expect(stale.puts).toEqual(state.puts);
-    expect(stale.finished?.exported_at_ms).toBeNull();
+    expect(stale.finished?.result_code).toBe('#SENNICHITE');
+    expect(stale.finished!.exported_at_ms ?? null).toBeNull();
     expect(stale.alarm).toBeNull();
   });
 
@@ -195,7 +198,7 @@ describe('終局保存の復旧', () => {
   it('replay 不能でも export していない原本を削除しない', async () => {
     const state = await control({ corruptReplay: true, reset: true, alarm: true });
     expect(state.finished?.result_code).toBe('#ABNORMAL');
-    expect(state.finished?.exported_at_ms).toBeNull();
+    expect(state.finished!.exported_at_ms ?? null).toBeNull();
     expect(state.pending).toBeNull();
     expect(state.moves).toBe(11);
     expect(state.closes.every(close => close.code === 1011)).toBe(true);
@@ -212,6 +215,10 @@ describe('終局保存の復旧', () => {
     ws.accept();
     white.send(cycle[3]);
     await waitForFinished();
+    const state = await waitForIdle();
+    expect({ closes: state.socketCloses, sockets: state.sockets }).toMatchObject({
+      closes: expect.arrayContaining([{ type: 'Spectator', code: 1011 }]),
+    });
     await expect(buf.takeLine(5000)).rejects.toThrow('connection closed');
     expect(closeCode).toBe(1011);
   });

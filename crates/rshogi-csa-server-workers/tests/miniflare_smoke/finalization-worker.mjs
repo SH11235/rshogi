@@ -9,6 +9,7 @@ export class GameRoom {
     this.faults = {};
     this.puts = {};
     this.closes = [];
+    this.socketCloses = [];
     this.activeMessages = 0;
     this.r2Released = new Promise(resolve => { this.releaseR2 = resolve; });
     this.sockets = new WeakMap();
@@ -30,7 +31,9 @@ export class GameRoom {
           return ws.send(line);
         },
         close: (code, reason) => {
-          this.closes.push({ role: ws.deserializeAttachment()?.role, code, reason });
+          const att = ws.deserializeAttachment();
+          this.closes.push({ role: att?.role, code, reason });
+          this.socketCloses.push({ type: att?.type, code });
           if (this.faults.closeRole && this.faults.closeRole === ws.deserializeAttachment()?.role) {
             this.faults.closeRole = undefined;
             throw new Error('injected WS close failure');
@@ -49,7 +52,7 @@ export class GameRoom {
     };
     const sql = wrap(state.storage.sql, {
       exec: (query, ...args) => {
-        if (this.faults.loadMoves && query.includes('FROM moves') && !query.includes('COUNT(*)')) {
+        if (this.faults.loadMoves && query.includes('FROM moves AS m')) {
           throw new Error('injected move load failure');
         }
         if (this.faults.beforeMove && query.startsWith('INSERT INTO moves')) {
@@ -140,7 +143,9 @@ export class GameRoom {
       return Response.json({
         finalizing: await this.state.storage.get('finalizing') ?? null,
         closes: this.closes,
+        socketCloses: this.socketCloses,
         activeMessages: this.activeMessages,
+        sockets: this.state.getWebSockets().map(ws => ({ type: ws.deserializeAttachment()?.type, readyState: ws.readyState })),
         finished: await this.state.storage.get('finished') ?? null,
         kind: await this.state.storage.get('pending_alarm_kind') ?? null,
         pending: await this.state.storage.get('export_pending') ?? null,
