@@ -44,7 +44,9 @@ use super::constants::{LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN};
 #[cfg(feature = "layerstacks-1536x32x32")]
 use super::constants::{LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
-use super::layer_stacks::{LayerStacks, LsSaturationCounts, sqr_clipped_relu_transform};
+use super::layer_stacks::{
+    LayerStacks, LsSaturationCounts, sqr_clipped_relu_new, sqr_clipped_relu_transform,
+};
 #[cfg(feature = "layerstack-arch")]
 use super::layers::AffineTransform;
 #[cfg(feature = "ft-halfka_hm_merged")]
@@ -663,9 +665,8 @@ impl<
     ) -> Value {
         let side_to_move = pos.side_to_move();
 
-        let mut transformed = Aligned([0u8; L1]);
-        self.with_combined_accumulators(acc, side_to_move, |us, them| {
-            sqr_clipped_relu_transform(us, them, &mut transformed.0);
+        let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
+            sqr_clipped_relu_new(us, them)
         });
 
         // LayerStacks で評価
@@ -2373,6 +2374,50 @@ mod tests {
                     network.feature_transformer.has_psqt = false;
                 }
             }
+        }
+    }
+
+    #[test]
+    fn initialized_layerstack_forward_matches_explicit_buffer() {
+        use super::super::ls_feature_spec::HalfKpSpec;
+        use super::*;
+        let mut network = NetworkLayerStacks::<64, 16, 30, 32, HalfKpSpec> {
+            feature_transformer: FeatureTransformerLayerStacks::read(&mut std::io::repeat(0))
+                .unwrap(),
+            layer_stacks: LayerStacks::with_num_buckets(1),
+            fv_scale: 16,
+            num_buckets: 1,
+            _ft: PhantomData,
+        };
+        let bucket = &mut network.layer_stacks.buckets[0];
+        bucket.l1.weights.fill(1);
+        bucket.l1.biases.fill(1024);
+        bucket.l2.weights.fill(1);
+        bucket.l2.biases.fill(1024);
+        bucket.output.weights.fill(1);
+        let mut acc = AccumulatorLayerStacks::<64>::new();
+        for i in 0..64 {
+            acc.accumulation[0][i] = (i * 7) as i16;
+            acc.accumulation[1][i] = (255 - i * 3) as i16;
+        }
+        for side in [Color::Black, Color::White] {
+            let mut pos = Position::new();
+            pos.set_sfen(if side == Color::Black {
+                "4k4/9/9/9/9/9/9/9/4K4 b - 1"
+            } else {
+                "4k4/9/9/9/9/9/9/9/4K4 w - 1"
+            })
+            .unwrap();
+            let mut transformed = Aligned([0u8; 64]);
+            sqr_clipped_relu_transform(
+                acc.get(side as usize),
+                acc.get(1 - side as usize),
+                &mut transformed.0,
+            );
+            assert!(transformed.0.iter().any(|&v| v != 0));
+            let expected = network.layer_stacks.evaluate_raw(0, &transformed.0)
+                / get_fv_scale_override().unwrap_or(16);
+            assert_eq!(network.evaluate_with_bucket(&pos, &acc, 0), Value::new(expected));
         }
     }
 

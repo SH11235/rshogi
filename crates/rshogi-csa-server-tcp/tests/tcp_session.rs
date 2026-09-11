@@ -1683,16 +1683,18 @@ fn oute_sennichite_from_initial_sfen_ends_as_perpetual_check_loss_e2e() {
         let _ = read_line_raw(&mut rb).await.unwrap();
         let _ = read_line_raw(&mut rw).await.unwrap();
 
-        send_line(&mut ww, "-3242OU").await;
-        let _ = read_until(&mut rb, "-3242OU,T0").await;
-        let _ = read_until(&mut rw, "-3242OU,T0").await;
-        send_line(&mut wb, "+3848HI").await;
-        let _ = read_until(&mut rb, "+3848HI,T0").await;
-        let _ = read_until(&mut rw, "+3848HI,T0").await;
-        send_line(&mut ww, "-4232OU").await;
-        let _ = read_until(&mut rb, "-4232OU,T0").await;
-        let _ = read_until(&mut rw, "-4232OU,T0").await;
-        send_line(&mut wb, "+4838HI").await;
+        for ply in 0..12 {
+            let tok = ["-3242OU", "+3848HI", "-4232OU", "+4838HI"][ply % 4];
+            if tok.starts_with('+') {
+                send_line(&mut wb, tok).await;
+            } else {
+                send_line(&mut ww, tok).await;
+            }
+            if ply < 11 {
+                assert_eq!(read_line_raw(&mut rb).await.unwrap(), format!("{tok},T0"));
+                assert_eq!(read_line_raw(&mut rw).await.unwrap(), format!("{tok},T0"));
+            }
+        }
 
         let black_end = read_until(&mut rb, "#LOSE").await;
         let white_end = read_until(&mut rw, "#WIN").await;

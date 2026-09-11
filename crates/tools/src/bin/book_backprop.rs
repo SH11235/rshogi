@@ -761,6 +761,67 @@ mod tests {
     type FixtureEntry<'a> = (&'a str, &'a [FixtureMove<'a>]);
 
     #[test]
+    fn dead_piece_edges_are_excluded_even_when_child_exists() {
+        // 不正着手の結果に相当する子SFENも配置し、辺を除外しないと値が変わる条件にする。
+        for (parent, usi, child) in [
+            ("4k4/9/9/9/9/9/9/9/4K4 b P 1", "P*4a", "4kP3/9/9/9/9/9/9/9/4K4 w - 2"),
+            ("4k4/9/9/9/9/9/9/9/4K4 b L 1", "L*4a", "4kL3/9/9/9/9/9/9/9/4K4 w - 2"),
+            ("4k4/9/9/9/9/9/9/9/4K4 b N 1", "N*4a", "4kN3/9/9/9/9/9/9/9/4K4 w - 2"),
+            ("4k4/9/9/9/9/9/9/9/4K4 b N 1", "N*4b", "4k4/5N3/9/9/9/9/9/9/4K4 w - 2"),
+            ("4k4/5P3/9/9/9/9/9/9/4K4 b - 1", "4b4a", "4kP3/9/9/9/9/9/9/9/4K4 w - 2"),
+            ("4k4/5L3/9/9/9/9/9/9/4K4 b - 1", "4b4a", "4kL3/9/9/9/9/9/9/9/4K4 w - 2"),
+            ("4k4/9/4N4/9/9/9/9/9/4K4 b - 1", "5c4a", "4kN3/9/9/9/9/9/9/9/4K4 w - 2"),
+            ("4k4/9/9/4N4/9/9/9/9/4K4 b - 1", "5d4b", "4k4/5N3/9/9/9/9/9/9/4K4 w - 2"),
+        ] {
+            for flip in [false, true] {
+                let (parent, usi, child) = if flip {
+                    (
+                        rshogi_book::flipped_key(parent).unwrap(),
+                        rshogi_book::flip_usi_move(usi).unwrap(),
+                        rshogi_book::flipped_key(child).unwrap(),
+                    )
+                } else {
+                    (parent.into(), usi.into(), child.into())
+                };
+                let input = line_book(&[
+                    (&parent, &[(&usi, 123, 9, 7)]),
+                    (&child, &[("none", 500, 1, 1)]),
+                ]);
+                let dir = tempdir().unwrap();
+                let input_path = write_input(dir.path(), "in.db", &input);
+                let book = read_book_db(&input_path).unwrap();
+                for merge in [MergeMode::Min, MergeMode::Replace] {
+                    let mut graph = build_graph(&book).unwrap();
+                    assert_eq!(graph.illegal_moves, 1, "{parent}: {usi}");
+                    let parent_idx =
+                        graph.keys.iter().position(|key| key == strip_ply(&parent)).unwrap();
+                    assert!(graph.moves[parent_idx][0].edge.is_none());
+                    assert!(graph.adjacency[parent_idx].is_empty());
+                    propagate_values(&book, &mut graph, 0, 1000, merge).unwrap();
+                    assert_eq!(graph.moves[parent_idx][0].new, 123);
+                    let out = dir.path().join("out.db");
+                    write_backprop_book(&book, &graph, &out).unwrap();
+                    assert!(
+                        std::fs::read_to_string(out)
+                            .unwrap()
+                            .contains(&format!("{usi} none 123 9 7\n"))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legal_non_promotion_still_propagates() {
+        let parent = "4k4/9/9/5P3/9/9/9/9/4K4 b - 1";
+        let child = after(parent, &["4d4c"]);
+        let input = line_book(&[
+            (parent, &[("4d4c", 123, 9, 7)]),
+            (&child, &[("none", 500, 1, 1)]),
+        ]);
+        assert!(backprop_text(&input).contains("4d4c none -500 9 7\n"));
+    }
+    #[test]
     fn output_is_deterministic_byte_for_byte() {
         let input = line_book(&[
             (START, &[("7g7f", 0, 1, 10), ("2g2f", 0, 1, 10)]),

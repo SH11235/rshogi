@@ -12,6 +12,23 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+/// 同じエンジン係数を指す重複行を拒否する。net 名は ID の表記ゆれを正規化する。
+/// `seen` は 1 入力（または翻訳先集合）ごとに空の map から使う。
+pub fn register_unique_parameter(
+    seen: &mut HashMap<String, usize>,
+    name: &str,
+    line_no: usize,
+) -> Result<()> {
+    let canonical = rshogi_core::nnue::NetCoefficientId::parse_usi_name(name)
+        .map_or_else(|| name.to_string(), |id| id.usi_name());
+    if let Some(previous) = seen.insert(canonical.clone(), line_no) {
+        bail!(
+            "line {line_no}: duplicate parameter {name} (canonical {canonical}, first at line {previous})"
+        );
+    }
+    Ok(())
+}
+
 pub const NOT_USED_MARKER: &str = "[[NOT USED]]";
 
 /// `.params` ファイルの 1 行を文字列のまま保持する低レベル表現。
