@@ -21,6 +21,7 @@
 //!
 //! `LS_BUCKET_MODE` で `progresskpabs` または両玉の相対段に基づく `kingrank9` を選ぶ。
 
+#[cfg(any(test, feature = "diagnostics", feature = "nnue-threat"))]
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 #[cfg(feature = "nnue-effect-bucket")]
@@ -44,7 +45,9 @@ use super::constants::{LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN};
 #[cfg(feature = "layerstacks-1536x32x32")]
 use super::constants::{LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
-use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
+#[cfg(any(test, feature = "diagnostics"))]
+use super::layer_stacks::sqr_clipped_relu_transform;
+use super::layer_stacks::{LayerStacks, sqr_clipped_relu_new};
 #[cfg(feature = "layerstack-arch")]
 use super::layers::AffineTransform;
 #[cfg(feature = "ft-halfka_hm_merged")]
@@ -634,7 +637,7 @@ impl<
             (acc.get(Color::White as usize), acc.get(Color::Black as usize))
         };
 
-        let mut transformed = Aligned([0u8; L1]);
+        let transformed;
 
         // Threat の寄与を含めて combined accumulator を構築する。
         // 無効なら piece_acc を直接 SCReLU に渡す。
@@ -658,14 +661,14 @@ impl<
                 us_combined = tmp_us;
                 them_combined = tmp_them;
 
-                sqr_clipped_relu_transform(&us_combined.0, &them_combined.0, &mut transformed.0);
+                transformed = sqr_clipped_relu_new(&us_combined.0, &them_combined.0);
             } else {
-                sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+                transformed = sqr_clipped_relu_new(us_acc, them_acc);
             }
         }
         #[cfg(not(feature = "nnue-threat"))]
         {
-            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+            transformed = sqr_clipped_relu_new(us_acc, them_acc);
         }
 
         // LayerStacks で評価

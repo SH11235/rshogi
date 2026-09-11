@@ -522,6 +522,36 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
     them_acc: &[i16; L1],
     output: &mut [u8; L1],
 ) {
+    // SAFETY: output は L1 バイトの書き込み可能な領域で、入力とは重ならない。
+    unsafe { sqr_clipped_relu_write(us_acc, them_acc, output.as_mut_ptr()) };
+}
+
+/// SIMD の書き込み完了後に、有効な配列として出力を返す。
+///
+/// 64 の倍数なら全 backend が両視点の全要素を書き込むため、先行ゼロ埋めは不要。
+pub(crate) fn sqr_clipped_relu_new<const L1: usize>(
+    us_acc: &[i16; L1],
+    them_acc: &[i16; L1],
+) -> Aligned<[u8; L1]> {
+    const { assert!(L1.is_multiple_of(64)) };
+    let mut output = std::mem::MaybeUninit::<Aligned<[u8; L1]>>::uninit();
+    // SAFETY: raw pointer への書き込みだけを行い、未初期化の配列への参照は作らない。
+    // 各 backend は half=L1/2 の両領域を余りなく書き込む。
+    // 書き込み完了後は全 u8 が有効な値を持ち、Aligned は追加フィールドを持たない。
+    unsafe {
+        sqr_clipped_relu_write(us_acc, them_acc, output.as_mut_ptr().cast::<u8>());
+        output.assume_init()
+    }
+}
+
+/// # Safety
+/// output は L1 バイトを書き込める領域で、入力領域と重ならないこと。
+/// 入力のアライメントは要求せず、出力の既存値は読み取らない。
+unsafe fn sqr_clipped_relu_write<const L1: usize>(
+    us_acc: &[i16; L1],
+    them_acc: &[i16; L1],
+    output: *mut u8,
+) {
     let half = L1 / 2;
 
     // AVX512BW: 512bit = 32 x i16、2セット同時処理で 64 i16 → 64 u8
@@ -532,9 +562,9 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
     ))]
     {
         // SAFETY:
-        // - us_acc, them_acc: AccumulatorLayerStacks 内 Aligned<[i16; L1]> で 64 バイトアライン
-        // - output: Aligned<[u8; L1]> で 64 バイトアライン
-        // - half=L1/2, half/32 → 各ループで全要素カバー
+        // - us_acc, them_acc は各 L1 要素。unaligned load のためアライメント不要。
+        // - output は呼び出し側が保証する L1 バイトの書き込み可能領域。
+        // - 各視点で half/32 個の 32 要素ブロックを処理し、領域外へアクセスしない。
         // - 乗算結果: max 127*127=16129 < i16::MAX(32767)、>>7 後は [0, 126] → packus で u8 に収まる
         unsafe {
             use std::arch::x86_64::*;
@@ -545,12 +575,12 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
             for (acc, out_offset) in [(us_acc.as_ptr(), 0usize), (them_acc.as_ptr(), half)] {
                 let acc_a = acc;
                 let acc_b = acc.add(half);
-                let out_ptr = output.as_mut_ptr().add(out_offset);
+                let out_ptr = output.add(out_offset);
 
                 for i in 0..(half / 32) {
                     let offset = i * 32;
-                    let va = _mm512_load_si512(acc_a.add(offset) as *const __m512i);
-                    let vb = _mm512_load_si512(acc_b.add(offset) as *const __m512i);
+                    let va = _mm512_loadu_si512(acc_a.add(offset) as *const __m512i);
+                    let vb = _mm512_loadu_si512(acc_b.add(offset) as *const __m512i);
 
                     let a = _mm512_min_epi16(_mm512_max_epi16(va, zero), max127);
                     let b = _mm512_min_epi16(_mm512_max_epi16(vb, zero), max127);
@@ -581,9 +611,9 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
     ))]
     {
         // SAFETY:
-        // - us_acc, them_acc: AccumulatorLayerStacks 内 Aligned<[i16; L1]> で 64 バイトアライン
-        // - output: Aligned<[u8; L1]> で 64 バイトアライン
-        // - half=L1/2, half/32 → 各ループで全要素カバー
+        // - us_acc, them_acc は各 L1 要素。unaligned load のためアライメント不要。
+        // - output は呼び出し側が保証する L1 バイトの書き込み可能領域。
+        // - 各視点で half/32 個の 32 要素ブロックを処理し、領域外へアクセスしない。
         // - 乗算結果: max 127*127=16129 < i16::MAX(32767)、>>7 後は [0, 126] → packus で u8 に収まる
         unsafe {
             use std::arch::x86_64::*;
@@ -593,20 +623,20 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
             for (acc, out_offset) in [(us_acc.as_ptr(), 0usize), (them_acc.as_ptr(), half)] {
                 let acc_a = acc;
                 let acc_b = acc.add(half);
-                let out_ptr = output.as_mut_ptr().add(out_offset);
+                let out_ptr = output.add(out_offset);
 
                 // 32要素ずつ処理（2 × 16 i16 → 32 u8）
                 for i in 0..(half / 32) {
                     let offset = i * 32;
 
-                    let va0 = _mm256_load_si256(acc_a.add(offset) as *const __m256i);
-                    let vb0 = _mm256_load_si256(acc_b.add(offset) as *const __m256i);
+                    let va0 = _mm256_loadu_si256(acc_a.add(offset) as *const __m256i);
+                    let vb0 = _mm256_loadu_si256(acc_b.add(offset) as *const __m256i);
                     let a0 = _mm256_min_epi16(_mm256_max_epi16(va0, zero), max127);
                     let b0 = _mm256_min_epi16(_mm256_max_epi16(vb0, zero), max127);
                     let shifted0 = _mm256_srli_epi16(_mm256_mullo_epi16(a0, b0), 7);
 
-                    let va1 = _mm256_load_si256(acc_a.add(offset + 16) as *const __m256i);
-                    let vb1 = _mm256_load_si256(acc_b.add(offset + 16) as *const __m256i);
+                    let va1 = _mm256_loadu_si256(acc_a.add(offset + 16) as *const __m256i);
+                    let vb1 = _mm256_loadu_si256(acc_b.add(offset + 16) as *const __m256i);
                     let a1 = _mm256_min_epi16(_mm256_max_epi16(va1, zero), max127);
                     let b1 = _mm256_min_epi16(_mm256_max_epi16(vb1, zero), max127);
                     let shifted1 = _mm256_srli_epi16(_mm256_mullo_epi16(a1, b1), 7);
@@ -630,7 +660,7 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
         not(target_feature = "avx2")
     ))]
     {
-        // SAFETY: 同上（16バイトアライン）
+        // SAFETY: 各入力は L1 要素。half/16 個のブロックは入力・出力範囲内。
         unsafe {
             use std::arch::x86_64::*;
             let zero = _mm_setzero_si128();
@@ -639,20 +669,20 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
             for (acc, out_offset) in [(us_acc.as_ptr(), 0usize), (them_acc.as_ptr(), half)] {
                 let acc_a = acc;
                 let acc_b = acc.add(half);
-                let out_ptr = output.as_mut_ptr().add(out_offset);
+                let out_ptr = output.add(out_offset);
 
                 // 16要素ずつ処理（2 × 8 i16 → 16 u8）
                 for i in 0..(half / 16) {
                     let offset = i * 16;
 
-                    let va0 = _mm_load_si128(acc_a.add(offset) as *const __m128i);
-                    let vb0 = _mm_load_si128(acc_b.add(offset) as *const __m128i);
+                    let va0 = _mm_loadu_si128(acc_a.add(offset) as *const __m128i);
+                    let vb0 = _mm_loadu_si128(acc_b.add(offset) as *const __m128i);
                     let a0 = _mm_min_epi16(_mm_max_epi16(va0, zero), max127);
                     let b0 = _mm_min_epi16(_mm_max_epi16(vb0, zero), max127);
                     let shifted0 = _mm_srli_epi16(_mm_mullo_epi16(a0, b0), 7);
 
-                    let va1 = _mm_load_si128(acc_a.add(offset + 8) as *const __m128i);
-                    let vb1 = _mm_load_si128(acc_b.add(offset + 8) as *const __m128i);
+                    let va1 = _mm_loadu_si128(acc_a.add(offset + 8) as *const __m128i);
+                    let vb1 = _mm_loadu_si128(acc_b.add(offset + 8) as *const __m128i);
                     let a1 = _mm_min_epi16(_mm_max_epi16(va1, zero), max127);
                     let b1 = _mm_min_epi16(_mm_max_epi16(vb1, zero), max127);
                     let shifted1 = _mm_srli_epi16(_mm_mullo_epi16(a1, b1), 7);
@@ -677,7 +707,7 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
             for (acc, out_offset) in [(us_acc.as_ptr(), 0usize), (them_acc.as_ptr(), half)] {
                 let acc_a = acc;
                 let acc_b = acc.add(half);
-                let out_ptr = output.as_mut_ptr().add(out_offset);
+                let out_ptr = output.add(out_offset);
 
                 for i in 0..(half / 16) {
                     let offset = i * 16;
@@ -715,13 +745,15 @@ pub fn sqr_clipped_relu_transform<const L1: usize>(
             let us_a = (us_acc[i] as i32).clamp(0, 127) as u32;
             let us_b = (us_acc[half + i] as i32).clamp(0, 127) as u32;
             let us_prod = ((us_a * us_b) >> 7).min(127);
-            output[i] = us_prod as u8;
+            // SAFETY: i < half で、呼び出し側が L1 バイトの出力領域を保証する。
+            unsafe { output.add(i).write(us_prod as u8) };
 
             // them側
             let them_a = (them_acc[i] as i32).clamp(0, 127) as u32;
             let them_b = (them_acc[half + i] as i32).clamp(0, 127) as u32;
             let them_prod = ((them_a * them_b) >> 7).min(127);
-            output[half + i] = them_prod as u8;
+            // SAFETY: half+i < L1。前半とは異なる要素への書き込み。
+            unsafe { output.add(half + i).write(them_prod as u8) };
         }
     }
 }
@@ -789,6 +821,32 @@ mod tests {
         LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN, NNUE_PYTORCH_L1,
     };
     use crate::nnue::layers::ClippedReLU;
+
+    #[test]
+    fn initialized_output_matches_scalar_reference() {
+        fn check<const N: usize>() {
+            let values = [i16::MIN, -1, 0, 1, 63, 126, 127, 128, 255, i16::MAX, 97];
+            let us = std::array::from_fn(|i| values[i % values.len()]);
+            let them = std::array::from_fn(|i| values[(i * 3 + 5) % values.len()]);
+            for (first, second) in [(&us, &them), (&them, &us)] {
+                let actual = sqr_clipped_relu_new::<N>(first, second);
+                let half = N / 2;
+                for (offset, input) in [(0, first), (half, second)] {
+                    for i in 0..half {
+                        let a = i32::from(input[i]).clamp(0, 127);
+                        let b = i32::from(input[half + i]).clamp(0, 127);
+                        assert_eq!(actual.0[offset + i], ((a * b) >> 7) as u8);
+                    }
+                }
+            }
+        }
+        check::<64>();
+        check::<512>();
+        check::<768>();
+        check::<1024>();
+        check::<1536>();
+        check::<3072>();
+    }
 
     /// テスト用の具体的な L1 サイズ
     const TEST_L1: usize = NNUE_PYTORCH_L1; // 1536
