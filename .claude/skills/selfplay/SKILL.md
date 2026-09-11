@@ -1,4 +1,5 @@
 ---
+name: selfplay
 description: NNUE モデルの棋力評価と SPRT 検定。tournament ツールでエンジン間の総当たり対局、base-vs-N 対局、あるいは SPRT (逐次確率比検定) による有意差の早期判定を実行し、analyze_selfplay で集計・post-hoc 解析する。「評価して」「対局させて」「SPRT で検定して」「有意差を見て」「Elo 差を測って」等の棋力比較リクエストに使用する。
 user-invocable: true
 ---
@@ -263,6 +264,20 @@ side 名は `base` / `test` に限らず engine label と対応する一意な�
 
 ### 3. tournament バイナリで総当たり自己対局を実行
 
+全エンジンに `--engine-label` を明示し、同一 run 内で重複しない短いラベルを付ける。
+比較する差分に応じて選ぶ:
+
+- NNUE 比較: モデルの basename（拡張子なし）を基本に、`step100000` / `step200000` など。
+- 探索変更: `baseline` / `pass-root-bonus` など変更内容を表す名前。
+- 設定比較: `threads1` / `threads8` など設定差を表す名前。
+
+同名モデル・同名バイナリや wrapper を使う場合も、実験上の役割・変更名で区別する。
+ファイル名でも読みやすい ASCII 英数字・`_`・`-` の48文字以内を推奨する。
+`--base-label` / `--sprt-base-label` / `--sprt-test-label` は選んだ元ラベルに揃える。
+実 binary のパス・SHA・NNUE・USI 設定は上記の実験 doc に記録し、ファイル名に詰め込まない。
+tournament の meta には指定したコマンドパス・ラベル・USI 設定が保存されるが、wrapper 内の
+実 binary や SHA は推定されない。出力名の整形規則は `crates/tools/docs/tournament.md` を参照する。
+
 `tournament` バイナリ1コマンドで、全ペアの総当たり対局を並列実行する。
 `--engine` を複数指定すると自動で C(N,2) ペアの対局を生成する。
 Linux / WSL2 で複数の rshogi process を使う場合、`{ENGINE_A}` 等には上で生成した
@@ -291,7 +306,7 @@ cargo run -p tools --release --bin tournament -- \
   ラベル指定なしで実行しても base/test の役割が自動推定される。`--engine` の指定順に
   役割の意味は無い（ファイル名・meta の label_black/white は指定順のまま）。
 - 出力は以下の2種類が `{out-dir}` に自動生成される:
-  - `pair-{i}-{j}.jsonl`（--engine 指定順の 0 始まり index）: ペア別の棋譜ログ（各対局の指し手・評価値・結果）
+  - `pair-{i}-{j}__{label_i}-vs-{label_j}.jsonl`（--engine 指定順の 0 始まり index + 整形した表示ラベル）: ペア別の棋譜ログ（各対局の指し手・評価値・結果）。例: `pair-0-1__baseline-vs-pass-root-bonus.jsonl`
   - `meta.json`: 対局設定・エンジン情報をまとめたファイル。対局条件の確認・再現に利用可能。
 
 **注意:** `run_in_background: true` で起動し、`TaskOutput` で完了を監視すること。

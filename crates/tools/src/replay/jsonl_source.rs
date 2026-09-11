@@ -1,4 +1,4 @@
-//! tournament JSONL (`pair-{i}-{j}.jsonl`、旧ラベル形式も対応) の `GameSource` 実装。
+//! tournament JSONL (`pair-{i}-{j}__{label_i}-vs-{label_j}.jsonl`、旧形式も対応) の `GameSource` 実装。
 //!
 //! out-dir 配下のカードファイルを横断して、対局単位の索引を1つのリストに
 //! フラット化する。`game_id` はペアファイルごとのローカル連番（out-dir 全体での
@@ -499,6 +499,7 @@ mod tests {
     #[test]
     fn recognizes_indexed_and_legacy_game_filenames() {
         for name in [
+            "pair-0-1__display-black-vs-display-white.jsonl",
             "pair-0-1.jsonl",
             "pair-10-23.jsonl",
             "a-vs-b.jsonl",
@@ -524,6 +525,7 @@ mod tests {
     fn indexes_and_loads_indexed_and_legacy_cards_together() {
         let dir = tempfile::tempdir().unwrap();
         for name in [
+            "pair-0-1__display-black-vs-display-white.jsonl",
             "pair-0-1.jsonl",
             "legacy-vs-card.jsonl",
             "20260707_A_vs_B.jsonl",
@@ -541,8 +543,8 @@ mod tests {
         write_file(dir.path(), "control_history.jsonl", &["not a game".to_string()]);
         let source = JsonlSource::new(dir.path());
         let index = source.build_index().unwrap();
-        assert_eq!(index.pair_files.len(), 3);
-        assert_eq!(index.entries.len(), 3);
+        assert_eq!(index.pair_files.len(), 4);
+        assert_eq!(index.entries.len(), 4);
         assert!(index.warnings.is_empty());
         for meta in &index.pair_files {
             assert_eq!(meta.black_label, "from-meta-black");
