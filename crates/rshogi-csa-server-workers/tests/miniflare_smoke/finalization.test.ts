@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resolve } from 'node:path';
 import type { Miniflare } from 'miniflare';
+import NodeWebSocket from 'ws';
 import { CsaClient, createMiniflare, makeTempPersistRoot, getKifuBucket, getFloodgateHistoryBucket } from './harness.ts';
 import { readLineFromWebSocket } from './ws_test_helpers';
 
@@ -99,6 +100,25 @@ describe('終局保存の復旧', () => {
     expect(state.pending?.attempt).toBe(0);
     expect(state.alarm).not.toBeNull();
     return state;
+  }
+
+  async function connectSpectator() {
+    const url = new URL(`/ws/${encodeURIComponent(gameId)}/spectate`, await mf.ready);
+    url.protocol = 'ws:';
+    const ws = new NodeWebSocket(url, {
+      headers: { Origin: 'https://example.com', 'CF-Connecting-IP': '127.0.0.1' },
+      handshakeTimeout: 5000,
+    });
+    // ws の DOM event API と Miniflare の event API は、この buffer が使う
+    // message.data / close に関して同形。accept() は Node client には不要。
+    const buf = readLineFromWebSocket(ws as unknown as Parameters<typeof readLineFromWebSocket>[0]);
+    let closeCode: number | undefined;
+    ws.addEventListener('close', event => { closeCode = event.code; });
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+    });
+    return { ws, buf, closeCode: () => closeCode };
   }
 
   it('export pending の読込障害を不在と扱わず runtime の再試行へ返す', async () => {
@@ -205,14 +225,7 @@ describe('終局保存の復旧', () => {
   });
 
   it.each([false, true])('MONITOR2ON 前には結果を配信せず未配信の接続を 1011 で閉じる (keepalive=%s)', async (keepalive) => {
-    const res = await mf.dispatchFetch(`https://example.com/ws/${encodeURIComponent(gameId)}/spectate`, {
-      headers: { Upgrade: 'websocket', Origin: 'https://example.com', 'CF-Connecting-IP': '127.0.0.1' },
-    });
-    const ws = res.webSocket!;
-    const buf = readLineFromWebSocket(ws);
-    let closeCode: number | undefined;
-    ws.addEventListener('close', event => { closeCode = event.code; });
-    ws.accept();
+    const { ws, buf, closeCode } = await connectSpectator();
     if (keepalive) ws.send('\n');
     white.send(cycle[3]);
     await waitForFinished();
@@ -221,7 +234,7 @@ describe('終局保存の復旧', () => {
       closes: expect.arrayContaining([{ type: 'Spectator', code: 1011 }]),
     });
     await expect(buf.takeLine(5000), JSON.stringify(state)).rejects.toThrow('connection closed');
-    expect(closeCode).toBe(1011);
+    expect(closeCode()).toBe(1011);
   });
 
   it.each(['error', 'missing'])('確定済み棋譜を読めない snapshot を正常完了にしない (%s)', async (kifuGet) => {
@@ -231,17 +244,10 @@ describe('終局保存の復旧', () => {
     await waitForFinished();
     expect((await waitForIdle()).moves).toBe(0);
     await control({ faults: { kifuGet } });
-    const res = await mf.dispatchFetch(`https://example.com/ws/${encodeURIComponent(gameId)}/spectate`, {
-      headers: { Upgrade: 'websocket', Origin: 'https://example.com', 'CF-Connecting-IP': '127.0.0.1' },
-    });
-    const ws = res.webSocket!;
-    const buf = readLineFromWebSocket(ws);
-    let code: number | undefined;
-    ws.addEventListener('close', event => { code = event.code; });
-    ws.accept();
+    const { buf, closeCode } = await connectSpectator();
     expect(await buf.takeLine(5000)).toBe(`##[MONITOR2] BEGIN ${gameId}`);
     await expect(buf.takeLine(5000)).rejects.toThrow('connection closed');
-    expect(code).toBe(1011);
+    expect(closeCode()).toBe(1011);
   });
 
   it('R2 待機中に snapshot が完了した観戦者にも結果を一度だけ送る', async () => {
