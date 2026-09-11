@@ -1728,14 +1728,14 @@ impl<
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKP<L1>) -> Value {
-        self.evaluate_with_scale(pos, acc, get_fv_scale_override())
+        self.evaluate_with_scale(pos, acc, get_fv_scale_override)
     }
 
     fn evaluate_with_scale(
         &self,
         pos: &Position,
         acc: &AccumulatorHalfKP<L1>,
-        scale_override: Option<i32>,
+        scale_override: impl FnOnce() -> Option<i32>,
     ) -> Value {
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
         // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
@@ -1807,7 +1807,7 @@ impl<
         }
 
         // スケーリング
-        let fv_scale = scale_override.unwrap_or(self.fv_scale);
+        let fv_scale = scale_override().unwrap_or(self.fv_scale);
         let eval = output[0] / fv_scale;
 
         // デバッグ: 最終評価値の範囲チェック
@@ -2224,8 +2224,8 @@ mod tests {
             assert!(acc.accumulation[0].0.iter().all(|v| *v == 102));
             // 64*102 -> CReLU /64 -> 32*102 -> /64 -> 32*51 +128 =1760。
             assert_eq!(net.evaluate(&pos, &acc).raw(), 1760 / expected_scale, "{metadata}");
-            assert_eq!(net.evaluate_with_scale(&pos, &acc, Some(4)).raw(), 440);
-            assert_eq!(net.evaluate_with_scale(&pos, &acc, None).raw(), 1760 / expected_scale);
+            assert_eq!(net.evaluate_with_scale(&pos, &acc, || Some(4)).raw(), 440);
+            assert_eq!(net.evaluate_with_scale(&pos, &acc, || None).raw(), 1760 / expected_scale);
         }
     }
 
