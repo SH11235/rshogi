@@ -21,6 +21,7 @@
 //!
 //! `LS_BUCKET_MODE` で `progresskpabs` または両玉の相対段に基づく `kingrank9` を選ぶ。
 
+#[cfg(any(test, feature = "diagnostics", feature = "nnue-threat"))]
 use super::accumulator::Aligned;
 use super::accumulator_layer_stacks::{AccumulatorLayerStacks, AccumulatorStackLayerStacks};
 #[cfg(feature = "nnue-effect-bucket")]
@@ -44,7 +45,9 @@ use super::constants::{LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN};
 #[cfg(feature = "layerstacks-1536x32x32")]
 use super::constants::{LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
-use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
+#[cfg(any(test, feature = "diagnostics"))]
+use super::layer_stacks::sqr_clipped_relu_transform;
+use super::layer_stacks::{LayerStacks, sqr_clipped_relu_new};
 #[cfg(feature = "layerstack-arch")]
 use super::layers::AffineTransform;
 #[cfg(feature = "ft-halfka_hm_merged")]
@@ -612,7 +615,6 @@ impl<
 
     /// 評価値を計算
     ///
-    /// 配列はMaybeUninitで確保し、直後のsqr_clipped_relu_transformで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks<L1>) -> Value {
         let side_to_move = pos.side_to_move();
         let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move, self.num_buckets);
@@ -635,8 +637,7 @@ impl<
             (acc.get(Color::White as usize), acc.get(Color::Black as usize))
         };
 
-        // SAFETY: 直後のsqr_clipped_relu_transformで全要素が上書きされる
-        let mut transformed: Aligned<[u8; L1]> = unsafe { Aligned::new_uninit() };
+        let transformed;
 
         // Threat の寄与を含めて combined accumulator を構築する。
         // 無効なら piece_acc を直接 SCReLU に渡す。
@@ -660,14 +661,14 @@ impl<
                 us_combined = tmp_us;
                 them_combined = tmp_them;
 
-                sqr_clipped_relu_transform(&us_combined.0, &them_combined.0, &mut transformed.0);
+                transformed = sqr_clipped_relu_new(&us_combined.0, &them_combined.0);
             } else {
-                sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+                transformed = sqr_clipped_relu_new(us_acc, them_acc);
             }
         }
         #[cfg(not(feature = "nnue-threat"))]
         {
-            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
+            transformed = sqr_clipped_relu_new(us_acc, them_acc);
         }
 
         // LayerStacks で評価
@@ -2251,6 +2252,50 @@ mod tests {
         assert!(validate("Threat=abc,").is_err());
         assert!(validate("Threat=0,").is_err());
         assert!(validate("Factorizer").is_err());
+    }
+
+    #[test]
+    fn initialized_layerstack_forward_matches_explicit_buffer() {
+        use super::super::ls_feature_spec::HalfKpSpec;
+        use super::*;
+        let mut network = NetworkLayerStacks::<64, 16, 30, 32, HalfKpSpec> {
+            feature_transformer: FeatureTransformerLayerStacks::read(&mut std::io::repeat(0))
+                .unwrap(),
+            layer_stacks: LayerStacks::with_num_buckets(1),
+            fv_scale: 16,
+            num_buckets: 1,
+            _ft: PhantomData,
+        };
+        let bucket = &mut network.layer_stacks.buckets[0];
+        bucket.l1.weights.fill(1);
+        bucket.l1.biases.fill(1024);
+        bucket.l2.weights.fill(1);
+        bucket.l2.biases.fill(1024);
+        bucket.output.weights.fill(1);
+        let mut acc = AccumulatorLayerStacks::<64>::new();
+        for i in 0..64 {
+            acc.accumulation[0][i] = (i * 7) as i16;
+            acc.accumulation[1][i] = (255 - i * 3) as i16;
+        }
+        for side in [Color::Black, Color::White] {
+            let mut pos = Position::new();
+            pos.set_sfen(if side == Color::Black {
+                "4k4/9/9/9/9/9/9/9/4K4 b - 1"
+            } else {
+                "4k4/9/9/9/9/9/9/9/4K4 w - 1"
+            })
+            .unwrap();
+            let mut transformed = Aligned([0u8; 64]);
+            sqr_clipped_relu_transform(
+                acc.get(side as usize),
+                acc.get(1 - side as usize),
+                &mut transformed.0,
+            );
+            assert!(transformed.0.iter().any(|&v| v != 0));
+            let expected = network.layer_stacks.evaluate_raw(0, &transformed.0)
+                / get_fv_scale_override().unwrap_or(16);
+            assert_eq!(network.evaluate_with_bucket(&pos, &acc, 0), Value::new(expected));
+        }
     }
 
     #[test]
