@@ -1,5 +1,4 @@
-use crate::eval::material::compute_material_value;
-use crate::movegen::{MoveList, generate_legal_with_pass};
+use crate::movegen::{MoveList, generate_legal_all_with_pass};
 use crate::types::json::{
     BoardStateJson, CellJson, HandJson, HandsJson, PieceJson, ReplayResultJson,
 };
@@ -60,7 +59,7 @@ impl Position {
             }
 
             for cell in row {
-                let square = Square::from_usi(&cell.square)
+                let square = Square::from_usi_strict(&cell.square)
                     .ok_or_else(|| format!("invalid square: {}", cell.square))?;
 
                 if let Some(piece_json) = &cell.piece {
@@ -87,15 +86,7 @@ impl Position {
         position.hand[Color::Black.index()] = hand_from_json(&json.hands.sente)?;
         position.hand[Color::White.index()] = hand_from_json(&json.hands.gote)?;
 
-        position.compute_hash();
-        position.update_blockers_and_pinners();
-        position.update_check_squares();
-        position.recompute_board_effects();
-
-        let them = !position.side_to_move;
-        position.state_mut().checkers =
-            position.attackers_to_c(position.king_square[position.side_to_move.index()], them);
-        position.state_mut().material_value = compute_material_value(&position);
+        position.finalize_after_population().map_err(|e| e.to_string())?;
 
         Ok(position)
     }
@@ -111,7 +102,7 @@ impl Position {
         Ok(pos.to_board_state_json())
     }
 
-    /// 棋譜を厳密に適用し、不正手で停止する。
+    /// 棋譜を厳密に適用し、不正手で停止する。合法な不成も省略せず受理する。
     ///
     /// # Arguments
     /// * `sfen` - 開始局面のSFEN
@@ -138,11 +129,12 @@ impl Position {
         let mut error: Option<String> = None;
 
         for mv in moves {
-            let parsed = Move::from_usi(mv).ok_or_else(|| format!("failed to parse move: {mv}"))?;
+            let parsed =
+                Move::from_usi_strict(mv).ok_or_else(|| format!("failed to parse move: {mv}"))?;
             let parsed_raw = parsed.raw();
 
             let mut list = MoveList::new();
-            generate_legal_with_pass(&position, &mut list);
+            generate_legal_all_with_pass(&position, &mut list);
             let is_legal = list.iter().any(|candidate| candidate.raw() == parsed_raw);
             if !is_legal {
                 error = Some(format!("illegal move: {mv}"));
@@ -311,6 +303,110 @@ const fn hand_max(pt: PieceType) -> u32 {
 mod tests {
     use super::*;
 
+    fn assert_same_position(actual: &Position, expected: &Position) {
+        assert_eq!(actual.to_sfen(), expected.to_sfen());
+        assert_eq!(actual.key(), expected.key());
+        assert_eq!(actual.state().pawn_key, expected.state().pawn_key);
+        assert_eq!(actual.state().minor_piece_key, expected.state().minor_piece_key);
+        assert_eq!(actual.state().non_pawn_key, expected.state().non_pawn_key);
+        assert_eq!(actual.state().checkers, expected.state().checkers);
+        assert_eq!(actual.state().blockers_for_king, expected.state().blockers_for_king);
+        assert_eq!(actual.state().pinners, expected.state().pinners);
+        assert_eq!(actual.state().check_squares, expected.state().check_squares);
+        assert_eq!(actual.state().material_value, expected.state().material_value);
+        assert_eq!(actual.piece_list().piece_list_fb(), expected.piece_list().piece_list_fb());
+        assert_eq!(actual.piece_list().piece_list_fw(), expected.piece_list().piece_list_fw());
+        for i in 0..Square::NUM {
+            let sq = Square::from_u8(i as u8).unwrap();
+            if actual.piece_on(sq).is_some() {
+                assert_eq!(
+                    actual.piece_list().piece_no_of_board(sq),
+                    expected.piece_list().piece_no_of_board(sq)
+                );
+            }
+            for color in [Color::Black, Color::White] {
+                assert_eq!(actual.board_effect(color, sq), expected.board_effect(color, sq));
+            }
+        }
+        for color in [Color::Black, Color::White] {
+            for pt in PieceType::HAND_PIECES {
+                for n in 1..=actual.hand(color).count(pt) {
+                    let bp = crate::nnue::ExtBonaPiece::from_hand(color, pt, n as u8);
+                    assert_eq!(
+                        actual.piece_list().piece_no_of_hand(bp.fb),
+                        expected.piece_list().piece_no_of_hand(bp.fb)
+                    );
+                }
+            }
+        }
+        assert_eq!(legal_moves(actual), legal_moves(expected));
+    }
+
+    fn legal_moves(pos: &Position) -> Vec<String> {
+        let mut list = MoveList::new();
+        crate::movegen::generate_legal_all(pos, &mut list);
+        let mut moves: Vec<_> = list.iter().map(|mv| mv.to_usi()).collect();
+        moves.sort();
+        moves
+    }
+
+    #[test]
+    fn test_json_restores_complete_position() {
+        for sfen in [
+            SFEN_HIRATE,
+            "8l/1l+R2P3/p2pBG1pp/kps1p4/Nn1P2G2/P1P1P2PP/1PS6/1KSG3+r1/LN2+p3L w Sbgn3p 124",
+            "4k4/9/9/9/9/9/9/9/4K4 b 2R2B4G4S4N4L18P 37",
+            "4r4/9/9/9/4K4/9/9/9/4k4 b - 1",
+        ] {
+            let mut expected = Position::new();
+            expected.set_sfen(sfen).unwrap();
+            let mut actual =
+                Position::from_board_state_json(&expected.to_board_state_json()).unwrap();
+            assert_same_position(&actual, &expected);
+
+            let board =
+                std::array::from_fn(|i| expected.piece_on(Square::from_u8(i as u8).unwrap()));
+            let mut parts = Position::new();
+            parts.set_from_parts(&board, &expected.hand, expected.side_to_move()).unwrap();
+            parts.game_ply = expected.game_ply();
+            assert_same_position(&actual, &parts);
+
+            for usi in legal_moves(&expected) {
+                let mv = expected.to_move(Move::from_usi(&usi).unwrap()).unwrap();
+                actual.do_move(mv, actual.gives_check(mv));
+                expected.do_move(mv, expected.gives_check(mv));
+                assert_same_position(&actual, &expected);
+                actual.undo_move(mv);
+                expected.undo_move(mv);
+                assert_same_position(&actual, &parts);
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_rejects_total_piece_inventory_overflow() {
+        for (sfen, extra) in [
+            (SFEN_HIRATE, PieceType::Pawn),
+            ("4k4/9/9/9/4+b4/9/9/9/4K4 b B 1", PieceType::Bishop),
+            ("4k4/9/9/9/9/9/9/9/4K4 b Rr 1", PieceType::Rook),
+        ] {
+            let mut source = Position::new();
+            source.set_sfen(sfen).unwrap();
+            source.hand[Color::Black.index()] = source.hand(Color::Black).add(extra);
+            let json_error =
+                Position::from_board_state_json(&source.to_board_state_json()).err().unwrap();
+            let mut restored = Position::new();
+            let sfen_error = restored.set_sfen(&source.to_sfen()).unwrap_err();
+            let board = std::array::from_fn(|i| source.piece_on(Square::from_u8(i as u8).unwrap()));
+            let parts_error = restored
+                .set_from_parts(&board, &source.hand, source.side_to_move())
+                .unwrap_err();
+            assert_eq!(json_error, sfen_error.to_string());
+            assert_eq!(sfen_error, parts_error);
+            assert!(json_error.contains("Too many"));
+        }
+    }
+
     #[test]
     fn test_initial_board_json() {
         let board = Position::initial_board_json();
@@ -333,6 +429,40 @@ mod tests {
     }
 
     #[test]
+    fn test_strict_replay_rejects_trailing_characters() {
+        for token in [
+            "7g7fgarbage",
+            "7g7f+garbage",
+            "7g7fx",
+            "7g7f++",
+            "P*5e+",
+            "P*5egarbage",
+            "7g7f ",
+            "7g7f歩",
+        ] {
+            let error =
+                Position::replay_moves_strict("startpos", &[token.into()], None).unwrap_err();
+            assert_eq!(error, format!("failed to parse move: {token}"));
+        }
+        let moves = ["7g7f".into(), "3c3dgarbage".into()];
+        assert_eq!(
+            Position::replay_moves_strict("startpos", &moves, None).unwrap_err(),
+            "failed to parse move: 3c3dgarbage"
+        );
+    }
+
+    #[test]
+    fn test_json_board_rejects_trailing_square_characters() {
+        for square in ["1aextra", "1a+", "1a ", "1a歩"] {
+            let mut board = Position::initial_board_json();
+            board.cells[0][0].square = square.into();
+            assert_eq!(
+                Position::from_board_state_json(&board).err(),
+                Some(format!("invalid square: {square}"))
+            );
+        }
+    }
+    #[test]
     fn test_sfen_roundtrip() {
         let sfen = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
         let json = Position::parse_sfen_to_json(sfen).unwrap();
@@ -341,6 +471,80 @@ mod tests {
         assert_eq!(pos.to_sfen(), sfen);
     }
 
+    #[test]
+    fn test_strict_replay_accepts_non_promotions_for_both_sides() {
+        for (sfen, usi, piece) in [
+            ("k8/9/9/4P4/9/9/9/9/8K b - 1", "5d5c", "P"),
+            ("k8/9/9/4L4/9/9/9/9/8K b - 1", "5d5b", "L"),
+            ("k8/9/9/4B4/9/9/9/9/8K b - 1", "5d4c", "B"),
+            ("k8/9/9/4R4/9/9/9/9/8K b - 1", "5d5c", "R"),
+            ("k8/9/9/9/9/4p4/9/9/8K w - 1", "5f5g", "P"),
+            ("k8/9/9/9/9/4l4/9/9/8K w - 1", "5f5h", "L"),
+            ("k8/9/9/9/9/4b4/9/9/8K w - 1", "5f6g", "B"),
+            ("k8/9/9/9/9/4r4/9/9/8K w - 1", "5f5g", "R"),
+        ] {
+            for rights in [None, Some((1, 1))] {
+                let result = Position::replay_moves_strict(sfen, &[usi.into()], rights).unwrap();
+                assert_eq!(result.error, None, "{sfen}: {usi}");
+                assert_eq!(result.applied, [usi]);
+                assert_eq!(result.last_ply, 0);
+                let cell = result
+                    .board
+                    .cells
+                    .iter()
+                    .flatten()
+                    .find(|cell| cell.square == usi[2..4])
+                    .unwrap();
+                let actual = cell.piece.as_ref().unwrap();
+                assert_eq!(actual.piece_type, piece);
+                assert_ne!(actual.promoted, Some(true));
+            }
+        }
+    }
+
+    #[test]
+    fn test_strict_replay_rejects_dead_piece_non_promotions() {
+        for (sfen, usi) in [
+            ("k8/4P4/9/9/9/9/9/9/8K b - 1", "5b5a"),
+            ("k8/4L4/9/9/9/9/9/9/8K b - 1", "5b5a"),
+            ("k8/9/4N4/9/9/9/9/9/8K b - 1", "5c4a"),
+            ("k8/9/9/4N4/9/9/9/9/8K b - 1", "5d4b"),
+            ("k8/9/9/9/9/9/9/4p4/8K w - 1", "5h5i"),
+            ("k8/9/9/9/9/9/9/4l4/8K w - 1", "5h5i"),
+            ("k8/9/9/9/9/9/4n4/9/8K w - 1", "5g6i"),
+            ("k8/9/9/9/9/4n4/9/9/8K w - 1", "5f6h"),
+        ] {
+            for rights in [None, Some((1, 1))] {
+                let result = Position::replay_moves_strict(sfen, &[usi.into()], rights).unwrap();
+                assert_eq!(result.error, Some(format!("illegal move: {usi}")));
+                assert!(result.applied.is_empty());
+                assert_eq!(result.last_ply, -1);
+                assert_eq!(result.board, Position::parse_sfen_to_json(sfen).unwrap());
+                let promotion = format!("{usi}+");
+                let promoted =
+                    Position::replay_moves_strict(sfen, std::slice::from_ref(&promotion), rights)
+                        .unwrap();
+                assert_eq!(promoted.error, None, "{sfen}: {promotion}");
+                assert_eq!(promoted.applied, [promotion]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_strict_replay_in_check_rejects_pass_and_accepts_non_promoting_evasion() {
+        // 角で王手している飛車を取る不成は合法。王手放置やパスは不可。
+        let sfen = "k8/9/4r4/3B5/9/9/9/9/4K4 b - 1";
+        for rights in [None, Some((1, 1))] {
+            for usi in ["pass", "6d7c"] {
+                let result = Position::replay_moves_strict(sfen, &[usi.into()], rights).unwrap();
+                assert_eq!(result.error, Some(format!("illegal move: {usi}")));
+                assert!(result.applied.is_empty());
+            }
+            let result = Position::replay_moves_strict(sfen, &["6d5c".into()], rights).unwrap();
+            assert_eq!(result.error, None);
+            assert_eq!(result.applied, ["6d5c"]);
+        }
+    }
     #[test]
     fn test_replay_moves_strict_accepts_usi_without_piece_info() {
         let moves = vec!["7g7f".to_string()];

@@ -149,6 +149,27 @@ impl AccumulatorStackVariant {
     /// do_move時にスタックをプッシュ
     #[inline]
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
+        #[cfg(all(feature = "mode-specific", feature = "layerstack-arch"))]
+        if let Self::LayerStacks(stack) = self {
+            stack.push();
+            stack.set_current_dirty_piece(dirty_piece);
+            return;
+        }
+        self.push_dispatch(dirty_piece);
+    }
+
+    // 固定LS構成では通常のpushを他アーキテクチャの分岐配置から分離する。
+    // デフォルトスタックなどの非LSバリアントも有効なのでフォールバックを保持する。
+    #[cfg_attr(all(feature = "mode-specific", feature = "layerstack-arch"), cold)]
+    #[cfg_attr(
+        all(feature = "mode-specific", feature = "layerstack-arch"),
+        inline(never)
+    )]
+    #[cfg_attr(
+        not(all(feature = "mode-specific", feature = "layerstack-arch")),
+        inline
+    )]
+    fn push_dispatch(&mut self, dirty_piece: DirtyPiece) {
         match self {
             #[cfg(feature = "nnue-runtime-dimensions")]
             Self::DynamicHalfKx(stack) => stack.get_mut().push(dirty_piece),

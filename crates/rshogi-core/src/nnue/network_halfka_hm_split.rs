@@ -65,20 +65,7 @@ fn nnue_debug_enabled() -> bool {
 // =============================================================================
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-#[inline]
-unsafe fn m256_add_dpbusd_epi32(
-    acc: &mut std::arch::x86_64::__m256i,
-    a: std::arch::x86_64::__m256i,
-    b: std::arch::x86_64::__m256i,
-) {
-    // SAFETY: 呼び出し側が avx2 フィーチャを保証する
-    unsafe {
-        use std::arch::x86_64::*;
-        let product = _mm256_maddubs_epi16(a, b);
-        let product32 = _mm256_madd_epi16(product, _mm256_set1_epi16(1));
-        *acc = _mm256_add_epi32(*acc, product32);
-    }
-}
+use super::layers::m256_add_dpbusd_epi32;
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
@@ -121,20 +108,7 @@ unsafe fn hsum_i32_sse2(v: std::arch::x86_64::__m128i) -> i32 {
     target_feature = "ssse3",
     not(target_feature = "avx2")
 ))]
-#[inline]
-unsafe fn m128_add_dpbusd_epi32(
-    acc: &mut std::arch::x86_64::__m128i,
-    a: std::arch::x86_64::__m128i,
-    b: std::arch::x86_64::__m128i,
-) {
-    // SAFETY: 呼び出し側が ssse3 フィーチャを保証する
-    unsafe {
-        use std::arch::x86_64::*;
-        let product = _mm_maddubs_epi16(a, b);
-        let product32 = _mm_madd_epi16(product, _mm_set1_epi16(1));
-        *acc = _mm_add_epi32(*acc, product32);
-    }
-}
+use super::layers::m128_add_dpbusd_epi32;
 
 // =============================================================================
 // AccumulatorHalfKaHmSplit - const generics 版アキュムレータ
@@ -1152,11 +1126,23 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
 
     /// 順伝播（SIMD最適化版 - ループ逆転）
     pub fn propagate(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
+        self.propagate_impl::<true>(input, output);
+    }
+
+    // 活性化関数の出力契約が 0..=127 を保証する呼び出し専用。
+    #[inline]
+    fn propagate_7bit(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
+        debug_assert!(input.iter().all(|&x| x <= 127));
+        self.propagate_impl::<false>(input, output);
+    }
+
+    #[inline]
+    fn propagate_impl<const FULL_RANGE: bool>(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
         // AVX2: ループ逆転最適化版
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
             unsafe {
-                self.propagate_avx2_loop_inverted(input, output);
+                self.propagate_avx2_loop_inverted::<FULL_RANGE>(input, output);
             }
         }
 
@@ -1168,7 +1154,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
         ))]
         {
             unsafe {
-                self.propagate_ssse3_loop_inverted(input, output);
+                self.propagate_ssse3_loop_inverted::<FULL_RANGE>(input, output);
             }
         }
 
@@ -1307,7 +1293,11 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     #[allow(clippy::needless_range_loop)]
-    unsafe fn propagate_avx2_loop_inverted(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
+    unsafe fn propagate_avx2_loop_inverted<const FULL_RANGE: bool>(
+        &self,
+        input: &[u8],
+        output: &mut [i32; OUTPUT],
+    ) {
         // SAFETY: 呼び出し側が avx2 フィーチャを保証する
         unsafe {
             use std::arch::x86_64::*;
@@ -1339,7 +1329,11 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
 
                     // 内側ループ: 全出力レジスタに積和演算
                     for k in 0..num_regs {
-                        m256_add_dpbusd_epi32(&mut acc[k], in_val, _mm256_load_si256(col.add(k)));
+                        m256_add_dpbusd_epi32::<FULL_RANGE>(
+                            &mut acc[k],
+                            in_val,
+                            _mm256_load_si256(col.add(k)),
+                        );
                     }
                 }
 
@@ -1365,7 +1359,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
                         let w_vec = _mm256_load_si256(
                             weight_ptr.add(row_offset + chunk * 32) as *const __m256i
                         );
-                        m256_add_dpbusd_epi32(&mut acc_simd, in_vec, w_vec);
+                        m256_add_dpbusd_epi32::<FULL_RANGE>(&mut acc_simd, in_vec, w_vec);
                     }
 
                     *out += hsum_i32_avx2(acc_simd);
@@ -1385,7 +1379,11 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
     // iterator 化すると raw pointer 側のオフセットを別途 track する必要があり、
     // SIMD intrinsic の autovectorization を阻害し得る。range ループのまま保つ。
     #[allow(clippy::needless_range_loop)]
-    unsafe fn propagate_ssse3_loop_inverted(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
+    unsafe fn propagate_ssse3_loop_inverted<const FULL_RANGE: bool>(
+        &self,
+        input: &[u8],
+        output: &mut [i32; OUTPUT],
+    ) {
         // SAFETY: 呼び出し側が ssse3 フィーチャを保証する
         unsafe {
             use std::arch::x86_64::*;
@@ -1412,7 +1410,11 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
                     let col = weights_ptr.add(i * OUTPUT * Self::CHUNK_SIZE) as *const __m128i;
 
                     for k in 0..num_regs {
-                        m128_add_dpbusd_epi32(&mut acc[k], in_val, _mm_load_si128(col.add(k)));
+                        m128_add_dpbusd_epi32::<FULL_RANGE>(
+                            &mut acc[k],
+                            in_val,
+                            _mm_load_si128(col.add(k)),
+                        );
                     }
                 }
 
@@ -1436,7 +1438,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmSplit<INPUT
                         let w_vec = _mm_load_si128(
                             weight_ptr.add(row_offset + chunk * 16) as *const __m128i
                         );
-                        m128_add_dpbusd_epi32(&mut acc_simd, in_vec, w_vec);
+                        m128_add_dpbusd_epi32::<FULL_RANGE>(&mut acc_simd, in_vec, w_vec);
                     }
 
                     *out += hsum_i32_sse2(acc_simd);
@@ -1651,14 +1653,12 @@ impl<
     /// 評価値を計算
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
-    /// 各配列はMaybeUninitで確保し、直後のtransform/propagateで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKaHmSplit<L1>) -> Value {
         let debug = nnue_debug_enabled();
 
-        // SAFETY: 各配列は直後のtransform_raw/activate/propagateで全要素が上書きされる
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
         // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
-        let mut ft_out_i16: Aligned<[i16; FT_OUT]> = unsafe { Aligned::new_uninit() };
+        let mut ft_out_i16 = Aligned([0i16; FT_OUT]);
         self.feature_transformer
             .transform_raw(acc, pos.side_to_move(), &mut ft_out_i16.0);
 
@@ -1675,7 +1675,7 @@ impl<
 
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
         // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
-        let mut transformed: Aligned<[u8; L1_INPUT]> = unsafe { Aligned::new_uninit() };
+        let mut transformed = Aligned([0u8; L1_INPUT]);
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
 
         if debug {
@@ -1691,8 +1691,12 @@ impl<
         }
 
         // l1 層 - 64バイトアライン
-        let mut l1_out: Aligned<[i32; L2]> = unsafe { Aligned::new_uninit() };
-        self.l1.propagate(&transformed.0, &mut l1_out.0);
+        let mut l1_out = Aligned([0i32; L2]);
+        if A::SEVEN_BIT_WHEN_QA127 && self.qa <= 127 {
+            self.l1.propagate_7bit(&transformed.0, &mut l1_out.0);
+        } else {
+            self.l1.propagate(&transformed.0, &mut l1_out.0);
+        }
 
         if debug {
             eprintln!("[DEBUG] L1 output: {:?}", &l1_out.0);
@@ -1716,12 +1720,16 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l1_relu: Aligned<[u8; L2]> = unsafe { Aligned::new_uninit() };
+        let mut l1_relu = Aligned([0u8; L2]);
         A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
 
         // l2 層 - 64バイトアライン
-        let mut l2_out: Aligned<[i32; L3]> = unsafe { Aligned::new_uninit() };
-        self.l2.propagate(&l1_relu.0, &mut l2_out.0);
+        let mut l2_out = Aligned([0i32; L3]);
+        if A::SEVEN_BIT_WHEN_QA127 {
+            self.l2.propagate_7bit(&l1_relu.0, &mut l2_out.0);
+        } else {
+            self.l2.propagate(&l1_relu.0, &mut l2_out.0);
+        }
 
         // デバッグ: L2出力の範囲チェック
         #[cfg(debug_assertions)]
@@ -1737,12 +1745,16 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l2_relu: Aligned<[u8; L3]> = unsafe { Aligned::new_uninit() };
+        let mut l2_relu = Aligned([0u8; L3]);
         A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
 
         // output 層（4バイトなのでゼロ初期化のコストは無視可能）
         let mut output = [0i32; 1];
-        self.output.propagate(&l2_relu.0, &mut output);
+        if A::SEVEN_BIT_WHEN_QA127 {
+            self.output.propagate_7bit(&l2_relu.0, &mut output);
+        } else {
+            self.output.propagate(&l2_relu.0, &mut output);
+        }
 
         // スケーリング
         let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
@@ -1880,6 +1892,115 @@ pub type HalfKaHmSplit768Pairwise = NetworkHalfKaHmSplit<768, 1536, 768, 16, 64,
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn valid_init_forward<A: FtActivation, const INPUT: usize>() {
+        let dense_bytes = |input: usize, output: usize| {
+            let mut bytes = Vec::new();
+            for _ in 0..output {
+                bytes.extend_from_slice(&1024i32.to_le_bytes());
+            }
+            bytes.extend(std::iter::repeat_n(1u8, input * output));
+            bytes
+        };
+        let network = NetworkHalfKaHmSplit::<32, 64, INPUT, 32, 32, A> {
+            feature_transformer: FeatureTransformerHalfKaHmSplit {
+                biases: vec![0; 32],
+                weights: AlignedBox::new_zeroed(1),
+            },
+            l1: AffineTransformHalfKaHmSplit::read(&mut &dense_bytes(INPUT, 32)[..]).unwrap(),
+            l2: AffineTransformHalfKaHmSplit::read(&mut &dense_bytes(32, 32)[..]).unwrap(),
+            output: AffineTransformHalfKaHmSplit::read(&mut &dense_bytes(32, 1)[..]).unwrap(),
+            fv_scale: 16,
+            qa: 127,
+            _activation: PhantomData,
+        };
+        let mut acc = AccumulatorHalfKaHmSplit::<32>::new();
+        for i in 0..32 {
+            acc.accumulation[0].0[i] = (i * 3) as i16;
+            acc.accumulation[1].0[i] = (127 - i * 2) as i16;
+        }
+        for side in [Color::Black, Color::White] {
+            let mut pos = Position::new();
+            pos.set_sfen(if side == Color::Black {
+                "4k4/9/9/9/9/9/9/9/4K4 b - 1"
+            } else {
+                "4k4/9/9/9/9/9/9/9/4K4 w - 1"
+            })
+            .unwrap();
+            // 参照側の全バッファは Vec の有効な初期値で構築する。
+            let raw: Vec<i16> = acc.accumulation[side as usize]
+                .0
+                .iter()
+                .chain(acc.accumulation[1 - side as usize].0.iter())
+                .copied()
+                .collect();
+            let mut input = vec![0u8; INPUT];
+            A::activate_i16_to_u8(&raw, &mut input, 127);
+            let l1 = vec![1024 + input.iter().map(|&x| i32::from(x)).sum::<i32>(); 32];
+            let mut hidden = vec![0u8; 32];
+            A::activate_i32_to_u8(&l1, &mut hidden);
+            let l2 = vec![1024 + hidden.iter().map(|&x| i32::from(x)).sum::<i32>(); 32];
+            A::activate_i32_to_u8(&l2, &mut hidden);
+            let expected = (1024 + hidden.iter().map(|&x| i32::from(x)).sum::<i32>())
+                / get_fv_scale_override().unwrap_or(16);
+            assert_eq!(network.evaluate(&pos, &acc), Value::new(expected));
+        }
+    }
+
+    #[test]
+    fn valid_init_forward_matches_initialized_reference() {
+        valid_init_forward::<super::super::activation::CReLU, 64>();
+        valid_init_forward::<super::super::activation::SCReLU, 64>();
+        valid_init_forward::<super::super::activation::PairwiseCReLU, 32>();
+    }
+
+    #[test]
+    fn qa255_affine_reference_matches_integer() {
+        super::super::layers::check_qa255_affine::<32, 32>(|bytes, input, output| {
+            let transform = AffineTransformHalfKaHmSplit::<32, 32>::read(&mut &bytes[..]).unwrap();
+            transform.propagate(input, output);
+            if input.iter().all(|&x| x <= 127) {
+                let expected = *output;
+                transform.propagate_7bit(input, output);
+                assert_eq!(*output, expected);
+            }
+        });
+        super::super::layers::check_qa255_affine::<512, 8>(|bytes, input, output| {
+            let transform = AffineTransformHalfKaHmSplit::<512, 8>::read(&mut &bytes[..]).unwrap();
+            transform.propagate(input, output);
+            if input.iter().all(|&x| x <= 127) {
+                let expected = *output;
+                transform.propagate_7bit(input, output);
+                assert_eq!(*output, expected);
+            }
+        });
+        super::super::layers::check_qa255_affine::<32, 4>(|bytes, input, output| {
+            let transform = AffineTransformHalfKaHmSplit::<32, 4>::read(&mut &bytes[..]).unwrap();
+            transform.propagate(input, output);
+            if input.iter().all(|&x| x <= 127) {
+                let expected = *output;
+                transform.propagate_7bit(input, output);
+                assert_eq!(*output, expected);
+            }
+        });
+        super::super::layers::check_qa255_affine::<32, 1>(|bytes, input, output| {
+            let transform = AffineTransformHalfKaHmSplit::<32, 1>::read(&mut &bytes[..]).unwrap();
+            transform.propagate(input, output);
+            if input.iter().all(|&x| x <= 127) {
+                let expected = *output;
+                transform.propagate_7bit(input, output);
+                assert_eq!(*output, expected);
+            }
+        });
+        super::super::layers::check_qa255_affine::<760, 8>(|bytes, input, output| {
+            let transform = AffineTransformHalfKaHmSplit::<760, 8>::read(&mut &bytes[..]).unwrap();
+            transform.propagate(input, output);
+            if input.iter().all(|&x| x <= 127) {
+                let expected = *output;
+                transform.propagate_7bit(input, output);
+                assert_eq!(*output, expected);
+            }
+        });
+    }
 
     /// read→propagate を、SIMD レイアウト（スクランブル形式
     /// `weights[input_chunk][output][4]`）に依存しない行優先スカラー参照と bit 一致で

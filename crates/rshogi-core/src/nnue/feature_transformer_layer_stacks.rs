@@ -257,6 +257,27 @@ fn psqt_add_or_sub<const ADD: bool>(
 }
 
 impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
+    #[cfg(test)]
+    pub(crate) fn for_accumulator_tests() -> Self {
+        Self {
+            biases: Aligned([0; L1]),
+            weights: AlignedBox::new_zeroed(FT::DIMENSIONS * L1),
+            #[cfg(feature = "nnue-psqt")]
+            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "nnue-psqt")]
+            psqt_num_buckets: 1,
+            #[cfg(feature = "nnue-psqt")]
+            psqt_weights: AlignedBox::new_zeroed(FT::DIMENSIONS),
+            #[cfg(feature = "nnue-psqt")]
+            has_psqt: false,
+            #[cfg(feature = "nnue-threat")]
+            threat_weights: AlignedBox::new_zeroed(THREAT_DIMENSIONS * L1),
+            #[cfg(feature = "nnue-threat")]
+            has_threat: false,
+            _ft: PhantomData,
+        }
+    }
+
     /// 重み配列をプロセス間共有メモリへ移行する（成功時のみ）。
     ///
     /// 多プロセス実行時のメモリ常駐・L3 競合を削減する。ネットワーク構築が完全に

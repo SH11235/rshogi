@@ -18,7 +18,8 @@ use super::features::{
 use super::layers::padded_input;
 use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use super::spec::{
-    Activation, ArchitectureSpec, FeatureSet, parse_architecture, parse_feature_input_dimensions,
+    Activation, ArchitectureSpec, FeatureSet, parse_arch_dimensions, parse_architecture,
+    parse_feature_input_dimensions, parse_halfkp_l1,
 };
 use crate::position::Position;
 use crate::types::{Color, Value};
@@ -286,7 +287,10 @@ pub struct DynamicHalfKxNetwork {
 }
 
 impl DynamicHalfKxNetwork {
-    pub(crate) fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+    pub(crate) fn read<R: Read + Seek>(
+        reader: &mut R,
+        feature_override: Option<FeatureSet>,
+    ) -> io::Result<Self> {
         let file_size = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;
 
@@ -312,27 +316,43 @@ impl DynamicHalfKxNetwork {
             ));
         }
 
-        let parsed = parse_architecture(arch).map_err(invalid_data)?;
-        let feature_set = RuntimeFeatureSet::from_spec(parsed.feature_set)?;
+        let (effective_feature_set, header_l1, header_l2, header_l3) =
+            if let Some(feature_set) = feature_override {
+                let (mut l1, l2, l3) = parse_arch_dimensions(arch);
+                if feature_set == FeatureSet::HalfKP {
+                    let halfkp_l1 = parse_halfkp_l1(arch);
+                    if halfkp_l1 != 0 {
+                        l1 = halfkp_l1;
+                    }
+                }
+                (feature_set, l1, l2, l3)
+            } else {
+                let parsed = parse_architecture(arch).map_err(invalid_data)?;
+                (parsed.feature_set, parsed.l1, parsed.l2, parsed.l3)
+            };
+        let feature_set = RuntimeFeatureSet::from_spec(effective_feature_set)?;
         let detected = super::spec::detect_architecture_from_size(
             file_size,
             arch_len,
-            Some(parsed.feature_set),
+            Some(effective_feature_set),
         );
         let (l1_dim, l2_dim, l3_dim) = detected
             .map(|d| (d.spec.l1, d.spec.l2, d.spec.l3))
-            .unwrap_or((parsed.l1, parsed.l2, parsed.l3));
+            .unwrap_or((header_l1, header_l2, header_l3));
         validate_dimension("l1", l1_dim)?;
         validate_dimension("l2", l2_dim)?;
         validate_dimension("l3", l3_dim)?;
-        let input_dimensions = parse_feature_input_dimensions(arch)
-            .ok_or_else(|| invalid_data("HalfKX architecture is missing FT input dimensions"))?;
-        if input_dimensions != feature_set.dimensions() {
-            return Err(invalid_data(format!(
-                "FT input dimension mismatch: header={input_dimensions}, feature_set={} expects {}",
-                parsed.feature_set,
-                feature_set.dimensions()
-            )));
+        let input_dimensions = feature_set.dimensions();
+        // 明示 override は誤記ヘッダーを補正する。payload 自体のサイズ検証は維持する。
+        if feature_override.is_none() {
+            let header_dimensions = parse_feature_input_dimensions(arch).ok_or_else(|| {
+                invalid_data("HalfKX architecture is missing FT input dimensions")
+            })?;
+            if header_dimensions != input_dimensions {
+                return Err(invalid_data(format!(
+                    "FT input dimension mismatch: header={header_dimensions}, feature_set={effective_feature_set} expects {input_dimensions}"
+                )));
+            }
         }
         let activation = if arch.contains("PairwiseCReLU") || arch.contains("-Pairwise") {
             Activation::PairwiseCReLU
@@ -381,15 +401,16 @@ impl DynamicHalfKxNetwork {
             }
         }
 
-        let fv_scale =
-            parse_fv_scale_from_arch(arch).unwrap_or(if parsed.feature_set == FeatureSet::HalfKP {
+        let fv_scale = parse_fv_scale_from_arch(arch).unwrap_or(
+            if effective_feature_set == FeatureSet::HalfKP {
                 FV_SCALE
             } else {
                 FV_SCALE_HALFKA
-            });
+            },
+        );
         let qa = parse_qa(arch).unwrap_or_else(|| default_qa_for_arch(arch));
         Ok(Self {
-            spec: ArchitectureSpec::new(parsed.feature_set, l1_dim, l2_dim, l3_dim, activation),
+            spec: ArchitectureSpec::new(effective_feature_set, l1_dim, l2_dim, l3_dim, activation),
             feature_set,
             input_dimensions,
             activation,
@@ -775,7 +796,7 @@ mod tests {
             .expect("set NNUE_DYNAMIC_COMPARE_FILE to a HalfKP NNUE file");
 
         let mut dynamic_reader = BufReader::new(File::open(&path).unwrap());
-        let dynamic = DynamicHalfKxNetwork::read(&mut dynamic_reader).unwrap();
+        let dynamic = DynamicHalfKxNetwork::read(&mut dynamic_reader, None).unwrap();
         assert_eq!(dynamic.spec.feature_set, FeatureSet::HalfKP);
 
         let mut static_reader = BufReader::new(File::open(&path).unwrap());
@@ -788,15 +809,23 @@ mod tests {
         )
         .unwrap();
 
-        let mut pos = Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-        let mut dynamic_stack = DynamicHalfKxStack::new(&dynamic);
-        dynamic.refresh(&pos, &mut dynamic_stack);
-        let dynamic_value = dynamic.evaluate(&pos, &mut dynamic_stack);
+        for sfen in [
+            SFEN_HIRATE,
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2",
+            "lnsgkgsnl/1r5b1/pppppp1pp/6p2/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL b - 3",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            // 各局面で双方を fresh に構築し、他局面の accumulator を流用しない。
+            let mut dynamic_stack = DynamicHalfKxStack::new(&dynamic);
+            dynamic.refresh(&pos, &mut dynamic_stack);
+            let dynamic_value = dynamic.evaluate(&pos, &mut dynamic_stack);
 
-        let mut static_stack = HalfKPStack::from_network(&static_net);
-        static_net.refresh_accumulator(&pos, &mut static_stack);
-        let static_value = static_net.evaluate(&pos, &static_stack);
-        assert_eq!(dynamic_value, static_value);
+            let mut static_stack = HalfKPStack::from_network(&static_net);
+            static_net.refresh_accumulator(&pos, &mut static_stack);
+            let static_value = static_net.evaluate(&pos, &static_stack);
+            assert_eq!(dynamic_value, static_value, "{sfen}");
+            println!("fresh HalfKP: {sfen}: {static_value:?}");
+        }
     }
 }
