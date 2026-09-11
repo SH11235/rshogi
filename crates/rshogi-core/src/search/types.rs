@@ -590,6 +590,19 @@ pub struct RootMoves {
     moves: Vec<RootMove>,
 }
 
+impl Clone for RootMoves {
+    fn clone(&self) -> Self {
+        Self {
+            moves: self.moves.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        // 反復ごとの退避では既存バッファを再利用する。
+        self.moves.clone_from(&source.moves);
+    }
+}
+
 impl RootMoves {
     /// 空のRootMovesを作成
     pub fn new() -> Self {

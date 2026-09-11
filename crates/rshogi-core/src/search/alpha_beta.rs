@@ -3440,7 +3440,7 @@ impl SearchWorker {
         }
 
         // =================================================================
-        // 詰み/ステイルメイト判定 + History更新
+        // 合法手なしの敗北判定 + History更新
         // =================================================================
         // if-else チェイン
         // moveCount == 0: bestValue を設定して関数末尾までフォールスルー
@@ -3449,14 +3449,11 @@ impl SearchWorker {
         // else if: prior countermove bonus
         if move_count == 0 {
             // excludedMoveがある場合は単にalphaを返す（詰みとは判定しない）
-            // 合法手なし（将棋では in_check == true なら詰み）
+            // 将棋では王手の有無にかかわらず合法手なしは負け。
             best_value = if excluded_move.is_some() {
                 alpha
-            } else if in_check {
-                Value::mated_in(ply)
             } else {
-                // ステイルメイト（将棋では通常発生しないがパスがない場合）
-                Value::ZERO
+                Value::mated_in(ply)
             };
         } else if best_move.is_some() && !best_move.is_pass() {
             // =================================================================
