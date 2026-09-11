@@ -233,38 +233,19 @@ pub(super) fn cont_history_ptr(
     }
 }
 
-/// ContinuationHistory 参照を取得
+/// 1〜6 手前の continuation キー。未設定・探索根より前は sentinel を使う。
 #[inline]
-pub(super) fn cont_history_ref<'a>(
-    st: &'a SearchState,
-    ctx: &SearchContext<'_>,
-    ply: i32,
-    back: i32,
-) -> &'a PieceToHistory {
-    let ptr = cont_history_ptr(st, ctx, ply, back);
-    // SAFETY: cont_history_ptrは常に有効なNonNullポインタを返す
-    // - ply >= back の場合: st.stack[(ply-back)].cont_history_ptr から取得
-    //   スタックエントリは SearchState のライフタイム 'a で有効
-    // - ply < back の場合: ctx.cont_history_sentinel（静的に確保されたsentinel）
-    // いずれの場合もポインタは 'a の間有効であり、参照への変換は安全
-    unsafe { ptr.as_ref() }
-}
-
-/// ContinuationHistory テーブル配列を取得
-#[inline]
-pub(super) fn cont_history_tables<'a>(
-    st: &'a SearchState,
-    ctx: &SearchContext<'_>,
-    ply: i32,
-) -> [&'a PieceToHistory; 6] {
-    [
-        cont_history_ref(st, ctx, ply, 1),
-        cont_history_ref(st, ctx, ply, 2),
-        cont_history_ref(st, ctx, ply, 3),
-        cont_history_ref(st, ctx, ply, 4),
-        cont_history_ref(st, ctx, ply, 5),
-        cont_history_ref(st, ctx, ply, 6),
-    ]
+pub(super) fn cont_history_keys(st: &SearchState, ply: i32) -> [ContHistKey; 6] {
+    std::array::from_fn(|i| {
+        let back = i as i32 + 1;
+        if ply >= back {
+            st.stack[(ply - back) as usize]
+                .cont_hist_key
+                .unwrap_or_else(ContHistKey::null_sentinel)
+        } else {
+            ContHistKey::null_sentinel()
+        }
+    })
 }
 
 /// ContinuationHistory を設定

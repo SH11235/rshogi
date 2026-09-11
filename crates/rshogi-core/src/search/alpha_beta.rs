@@ -44,7 +44,7 @@ use super::pruning::{
 };
 use super::qsearch::qsearch;
 use super::search_helpers::{
-    check_abort, clear_cont_history_for_null, cont_history_ptr, cont_history_tables,
+    check_abort, clear_cont_history_for_null, cont_history_keys, cont_history_ptr,
     do_move_and_push, nnue_evaluate, nnue_pop, set_cont_history_for_move, take_prior_reduction,
 };
 #[cfg(feature = "tt-trace")]
@@ -1289,8 +1289,7 @@ impl SearchWorker {
         let mut captures_tried = SearchedMoveList::new();
         // MovePicker でムーブ反復順序を決定
         // ply=0 では全 continuation history が sentinel
-        let sentinel_ref: &PieceToHistory = unsafe { self.cont_history_sentinel.as_ref() };
-        let cont_tables = [sentinel_ref; 6];
+        let cont_tables = [ContHistKey::null_sentinel(); 6];
         let mut mp = MovePicker::new(
             pos,
             tt_move_root,
@@ -2761,7 +2760,7 @@ impl SearchWorker {
         };
 
         // MovePickerを作成（lazy generation）
-        let cont_tables = cont_history_tables(st, ctx, ply);
+        let cont_tables = cont_history_keys(st, ply);
         // contHist[0], contHist[1] の参照元はノード先頭で固定する。
         let cont_hist_ptr_1 = cont_history_ptr(st, ctx, ply, 1);
         let cont_hist_ptr_2 = cont_history_ptr(st, ctx, ply, 2);

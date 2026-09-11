@@ -11,7 +11,7 @@ use super::alpha_beta::{SearchContext, SearchState, draw_jitter, to_corrected_st
 use super::eval_helpers::correction_value;
 use super::movepicker::piece_value;
 use super::search_helpers::{
-    check_abort, clear_cont_history_for_null, cont_history_tables, do_move_and_push, nnue_evaluate,
+    check_abort, clear_cont_history_for_null, cont_history_keys, do_move_and_push, nnue_evaluate,
     nnue_evaluate_cached, nnue_pop, set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
@@ -354,7 +354,7 @@ pub(super) fn qsearch<const NT: u8>(
     };
 
     let ordered_moves = {
-        let cont_tables = cont_history_tables(st, ctx, ply);
+        let cont_tables = cont_history_keys(st, ply);
         let mut buf_moves = OrderedMovesBuffer::new();
 
         {
