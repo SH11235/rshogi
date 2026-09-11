@@ -1,0 +1,45 @@
+{
+  "baseline_commit": "c6a89c5ed1d6429904ac1b5b6f1fcb7ec901b517",
+  "fixed_commit": "849e0358fa9870597ecccbb2f121d07ef057f5e7",
+  "profile": "production",
+  "features": [
+    "search-no-pass-rules",
+    "edition-layerstacks-halfka_hm_merged-1536x16x32-none"
+  ],
+  "model": "ls-1536x16x32-halfka-hm-merged-wrm-n2s1200-gated50b-1200.bin",
+  "model_sha256": "e6dc33fb26ad3d698d828cff9d7fd4e3016f51c54b409f0053d997429269c1cd",
+  "progress": "progress_hao_full_cuda.e1.bin",
+  "progress_sha256": "8d0058b899768c00e71be5508c5c4544d8c8ce24b30c32024c2a0a4452dbdb53",
+  "usi_options": {
+    "Hash": 256,
+    "FV_SCALE": 14,
+    "LS_BUCKET_MODE": "progresskpabs",
+    "LS_PROGRESS_BUCKETS": 9
+  },
+  "threads": [
+    1,
+    4
+  ],
+  "multipv": [
+    1,
+    8
+  ],
+  "movetime_ms": 1000,
+  "stop_after_ms": 250,
+  "blocks": 6,
+  "order": [
+    "baseline",
+    "fixed",
+    "fixed",
+    "baseline"
+  ],
+  "cpus_1t": "2",
+  "cpus_4t": "2,3,4,5",
+  "cpu": "AMD Ryzen 9 5950X",
+  "rustc": "1.95.0 (59807616e 2026-04-14)",
+  "material_enabled": false,
+  "material_source": "crates/rshogi-core/src/eval/material.rs: MATERIAL_ENABLED default false",
+  "selfplay_fixture": "baseline, Threads=1, 3000 nodes/move, 88 plies; full history saved; not a strength test",
+  "baseline_binary_sha256": "27b5647d850f5874651916f047ca092fa321b2cbe154656b61bf737b847a1707",
+  "fixed_binary_sha256": "af56097838046b053bfb114db697ef603cdb3e44696ebb909d89b5b5cac3f6ed"
+}

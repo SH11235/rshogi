@@ -1,0 +1,17 @@
+[
+  {
+    "label": "complex-middle",
+    "position": "position sfen l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1",
+    "sfen": "l4S2l/4g1gs1/5p1p1/pr2N1pkp/4Gn3/PP3PPPP/2GPP4/1K7/L3r+s2L w BS2N5Pb 1"
+  },
+  {
+    "label": "movegen-heavy",
+    "position": "position sfen l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1",
+    "sfen": "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1"
+  },
+  {
+    "label": "selfplay-88",
+    "position": "position startpos moves 2g2f 3c3d 7g7f 9c9d 2f2e 8c8d 6i7h 8d8e 2e2d 2c2d 2h2d 4a3b 2d3d 2b3c 3d3f 3a2b 1g1f 5a4b 3i3h 8e8f 8g8f 3c8h+ 7i8h 8b8f 5i6h 8f8b 8i7g P*2h 2i1g 2h2i+ B*6f 2i1i 6f2b+ 3b2b P*8c 8b6b S*3a 4b4a 3a2b 6b2b P*2c 2b5b G*2b L*3c 3f4f B*4d 1g2e B*3d 2b1a 3d2e 1a2a 4d3e 4f4e N*8f 7h8g S*5d 4e8e 2e1f N*4f P*8d 8e8f 3e1g+ 4f5d 5c5d 7g6e 3c3g S*5c 5b9b 8f8d 3g3h+ 4i3h 1f3h+ 8c8b+ S*8i 8b9b G*7h 6h5h 1g5c 6e5c 4a4b B*3a 4b3c R*3f 3c2d 3f3h P*3g L*2h P*2g",
+    "sfen": "lnsg2BG1/+P8/2ppNp1Pp/pR2p2k1/9/2P6/PG1PPPpp1/1Sg1K1RL1/Ls6+p b BNL2Psn 89"
+  }
+]

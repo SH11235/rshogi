@@ -16,6 +16,9 @@ ponder_move は検証後の PV の2手目（WINを除く）から選ぶ。
 固定時間の処理量に明確な悪化は観測しなかった。Material Lv1 の測定に限定した判断で、
 NNUEモデルを使う実対局の Elo や、あらゆる局面・時間制御での無劣化を保証するものではない。
 
+本番NNUE・Threads 1/4・MultiPV 1/8 の追加測定は
+[public-pv-nnue-validation.md](public-pv-nnue-validation.md) を参照。
+
 ## 測定条件
 
 - AMD Ryzen 9 5950X、Linux x86_64、rustc 1.95.0 (59807616e)。
