@@ -47,7 +47,7 @@ LOGIN_LOBBY / CHALLENGE_LOBBY / `/ws/<room_id>` upgrade / room create に対す�
 - **wire format**: 拒否時は `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`
   / `CHALLENGE_LOBBY:incorrect rate_limited retry_after=<sec>` /
   `/ws/<room_id>` upgrade では HTTP 503 + `Retry-After: <sec>` ヘッダ
-  (design doc Q4-A 採択)。WS は close せず client が retry 可能な状態を保つ。
+  ([設計 §3 Q4](rate_limit_design.md#q4-拒否応答))。WS は close せず client が retry 可能な状態を保つ。
 
 ## 2. 環境変数 reference
 
@@ -87,7 +87,7 @@ LOGIN_LOBBY / CHALLENGE_LOBBY / `/ws/<room_id>` upgrade / room create に対す�
 1. Cloudflare Logs / `wrangler tail` で `rate_limit_denied` ログを観測し、
    どの kind / IP / handle が当たっているか特定する (§4 参照)
 2. `wrangler.<env>.toml` の該当 env を 1.5〜2x 程度に増やす (e.g. `10` → `15`)
-3. 通常の PR レビュー経路で merge (本 PR 同様 Codex review を回す)
+3. 通常の PR レビュー経路で merge
 4. CI deploy 完了後、`wrangler tail` で `rate_limit_denied` 件数の減少を観測
 
 ### 3.2 厳格化 (cap を下げる)

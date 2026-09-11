@@ -371,15 +371,3 @@ LobbyDO は `Hibernation` 中に対局終了後の再 LOGIN_LOBBY を受ける�
 | `[GameRoom] handle_line error: State(InvalidForState ...)` がログに出る | 終局後の cleanup line (`%TORYO` 等) が届いた | 害なし。GameRoom DO は終局状態を保持しており保護的にエラーを返している |
 | R2 棋譜 list が空 | 終局していない / 終局でも `KIFU_BUCKET` binding が間違っている | `wrangler.staging.toml` の `[[r2_buckets]] binding = "KIFU_BUCKET" / bucket_name = "rshogi-csa-kifu-staging"` を確認 |
 | `floodgate-history` バケットが空 | `ALLOW_FLOODGATE_FEATURES = "false"` (production 既定) | staging では既に `"true"` 設定。production で history を有効化する場合は `[vars]` を更新 |
-
-## 10. 実機セッション例 (記録)
-
-実際に 2026-04-28 の staging 実機で取得した値の参考:
-
-- 1 局完走: `--simple-engine` で 30〜45 秒 (Cloudflare cold-start + 100ms byoyomi)
-- 連続 3 局: client 側合計 約 110 秒 (1 局 38 秒 × 3 + handoff 数秒 × 2)
-- 全局 `%TIME_UP` 終局 (短時間設定の想定範囲)
-- R2 棋譜 + Floodgate history JSON 両方に書き出し確認
-
-ログ・棋譜サンプルは `/tmp/csa-lobby-runs*/` 配下に残るので、必要に応じて
-`.claude/skills/csa-e2e-staging/SKILL.md` の手順例と組み合わせて参照する。

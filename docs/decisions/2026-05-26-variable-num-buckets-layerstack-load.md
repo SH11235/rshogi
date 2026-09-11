@@ -304,7 +304,7 @@ slice 参照のみ取る。`ln()` の評価は **N ごとに最大 N-1 回 / 1 �
 #### 2.4.3 `num_buckets` を global state ではなく net instance に持つ
 
 `get_layer_stack_progress_kpabs_weights()` (`network.rs:208`) の global pointer
-pattern と統一性を持たせる選択肢もあるが、Codex レビューで指摘された通り **複数
+pattern と統一性を持たせる選択肢もあるが、**複数
 net load / thread safety / load 順序** の事故面が増える。
 
 本 ADR では **`num_buckets` を net instance のフィールドとして保持**する方針を採る:
