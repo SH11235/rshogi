@@ -621,17 +621,25 @@ impl<
         side_to_move: Color,
         f: impl FnOnce(&[i16; L1], &[i16; L1]) -> R,
     ) -> R {
-        let us = side_to_move as usize;
-        let them = (!side_to_move) as usize;
+        let (us, them) = if side_to_move == Color::Black {
+            (acc.get(0), acc.get(1))
+        } else {
+            (acc.get(1), acc.get(0))
+        };
         #[cfg(feature = "nnue-threat")]
         if self.feature_transformer.has_threat {
+            let (us_threat, them_threat) = if side_to_move == Color::Black {
+                (acc.get_threat(0), acc.get_threat(1))
+            } else {
+                (acc.get_threat(1), acc.get_threat(0))
+            };
             let mut us_combined = Aligned([0i16; L1]);
             let mut them_combined = Aligned([0i16; L1]);
-            add_i16_arrays(&mut us_combined.0, acc.get(us), acc.get_threat(us));
-            add_i16_arrays(&mut them_combined.0, acc.get(them), acc.get_threat(them));
+            add_i16_arrays(&mut us_combined.0, us, us_threat);
+            add_i16_arrays(&mut them_combined.0, them, them_threat);
             return f(&us_combined.0, &them_combined.0);
         }
-        f(acc.get(us), acc.get(them))
+        f(us, them)
     }
 
     /// forward と同じ因子・入力から活性飽和数を計測する。
