@@ -32,7 +32,7 @@ done
 fn run(engine: &Path, output: &Path, labels: &[&str], launches: &Path) -> std::process::Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tournament"));
     for label in labels {
-        cmd.arg("--engine").arg(engine).arg("--engine-label").arg(label);
+        cmd.arg("--engine").arg(engine).arg(format!("--engine-label={label}"));
     }
     cmd.args([
         "--games",
