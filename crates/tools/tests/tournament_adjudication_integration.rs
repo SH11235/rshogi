@@ -109,7 +109,7 @@ done
             .output()
             .unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let jsonl = fs::read_to_string(out.join("pair-0-1.jsonl")).unwrap();
+        let jsonl = fs::read_to_string(out.join("pair-0-1__a-vs-b.jsonl")).unwrap();
         let rows: Vec<Value> = jsonl.lines().map(|s| serde_json::from_str(s).unwrap()).collect();
         let results: Vec<_> = rows.iter().filter(|row| row["type"] == "result").collect();
         assert_eq!(results.len(), 2);
