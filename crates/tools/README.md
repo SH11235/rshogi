@@ -118,7 +118,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [yardstick_score](docs/yardstick_score.md) - labeler の WDL logloss / 参照天井 / リファレンス一致を採点（物差し stage 2）
 - [ek_testset](docs/ek_testset.md) - held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点
 - [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
-- [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（u8 127 張り付き）を実局面で計測
+- [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（推論と同じ piece + Threat 入力）を実局面で計測
 - [generate_spsa_params](docs/spsa_runbook.md) - 無指定の探索・USI 宣言と共通の既定値から SPSA 用 `.params` を生成
 - [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - 永続 engine プールで batch チューニング。開始前に schedule の有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
 - [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から net 重み delta 用 SPSA `.params` を生成

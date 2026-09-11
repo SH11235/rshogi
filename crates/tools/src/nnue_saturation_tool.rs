@@ -2,7 +2,8 @@
 //!
 //! ClippedReLU / SqrClippedReLU 系の活性は u8 [0,127] に clamp されるため、
 //! 127 到達率が高いほど量子化天井で情報が落ちている（評価値インフレの副作用の計器）。
-//! FT accumulator / L1→L2 / L2→output の 3 段を bucket 別に集計する。
+//! 推論と同じ piece + Threat 因子 / L1→L2 / L2→output の 3 段を bucket 別に集計する。
+//! Threat 無効時は piece のみ。PSQT は別経路のため含めない。
 //! FT 段は SqrClippedReLU の pairing 前の因子 clamp(acc, 0, 127) が 127 に到達した割合
 //! （出力は `(a*b) >> 7` で最大 126 のため、出力側では飽和を観測できない）。
 //!
@@ -21,10 +22,9 @@ use rshogi_core::nnue::{
     NetworkLayerStacks, compute_layer_stack_progresskpabs_bucket_index,
     configure_layer_stack_routing, get_layer_stack_progress_kpabs_weights,
     layer_stack_progress_coeff_required, load_progress_coeff_kpabs, ls_dispatch_ft_size,
-    set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
+    set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
-use rshogi_core::types::Color;
 
 #[derive(Parser)]
 #[command(
@@ -131,11 +131,6 @@ fn merge(acc: &mut BucketCounts, c: &BucketCounts) {
     acc.act.l2_act_total += c.act.l2_act_total;
 }
 
-/// SqrClippedReLU の因子 clamp(acc, 0, 127) が 127 に到達した数を数える。
-fn count_ft_factor_saturation(acc: &[i16]) -> u64 {
-    acc.iter().filter(|&&v| v >= 127).count() as u64
-}
-
 fn run_for_network<
     const L1: usize,
     const LS_L1_OUT: usize,
@@ -166,14 +161,6 @@ fn run_for_network<
         network.refresh_accumulator(&pos, &mut acc);
 
         let side_to_move = pos.side_to_move();
-        let (us_acc, them_acc) = if side_to_move == Color::Black {
-            (acc.get(Color::Black as usize), acc.get(Color::White as usize))
-        } else {
-            (acc.get(Color::White as usize), acc.get(Color::Black as usize))
-        };
-        let mut transformed = [0u8; L1];
-        sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed);
-
         let bucket_index = compute_layer_stack_progresskpabs_bucket_index(
             &pos,
             side_to_move,
@@ -181,10 +168,9 @@ fn run_for_network<
             cli.progress_buckets,
         );
         let bc = &mut bucket_counts[bucket_index];
-        bc.ft_sat += count_ft_factor_saturation(us_acc) + count_ft_factor_saturation(them_acc);
+        bc.ft_sat +=
+            network.accumulate_saturation_counts(&acc, side_to_move, bucket_index, &mut bc.act);
         bc.ft_total += 2 * L1 as u64;
-        network.layer_stacks.buckets[bucket_index]
-            .propagate_counting_saturation(&transformed, &mut bc.act);
         bucket_positions[bucket_index] += 1;
     }
 
