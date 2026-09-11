@@ -59,8 +59,8 @@ pub(super) fn check_abort(
         return true;
     }
 
-    // ノード数制限チェック
-    if limits.nodes > 0 && st.nodes >= limits.nodes {
+    // ponder 中は予算を使い切っても、GUI の通知まで探索を継続する。
+    if limits.nodes > 0 && !time_manager.is_pondering() && st.nodes >= limits.nodes {
         #[cfg(debug_assertions)]
         eprintln!("check_abort: node limit reached nodes={} limit={}", st.nodes, limits.nodes);
         st.abort = true;
@@ -79,7 +79,10 @@ pub(super) fn check_abort(
         let elapsed_effective = time_manager.elapsed_from_ponderhit();
 
         // フェーズ1: search_end 設定済み → 即座に停止
-        if time_manager.search_end() > 0 && elapsed >= time_manager.search_end() {
+        if !time_manager.is_pondering()
+            && time_manager.search_end() > 0
+            && elapsed >= time_manager.search_end()
+        {
             #[cfg(debug_assertions)]
             eprintln!(
                 "check_abort: search_end reached elapsed={} search_end={}",

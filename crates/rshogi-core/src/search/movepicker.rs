@@ -969,6 +969,39 @@ mod tests {
     }
 
     #[test]
+    fn test_tt_stage_rejects_dead_pieces_but_keeps_legal_non_promotions() {
+        let keys = [ContHistKey::null_sentinel(); 6];
+        for (sfen, usi, accepted) in [
+            ("4k4/9/9/9/9/9/9/9/4K4 b P 1", "P*4a", false),
+            ("4k4/5P3/9/9/9/9/9/9/4K4 b - 1", "4b4a", false),
+            ("4k4/9/9/5P3/9/9/9/9/4K4 b - 1", "4d4c", true),
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let tt_move = pos.to_move(Move::from_usi(usi).unwrap()).unwrap();
+            for all in [false, true] {
+                let main = MovePicker::new(&pos, tt_move, 1, 0, keys, all);
+                assert_eq!(
+                    main.stage,
+                    if accepted {
+                        Stage::MainTT
+                    } else {
+                        Stage::CaptureInit
+                    }
+                );
+                let qsearch = MovePicker::new(&pos, tt_move, DEPTH_QS, 0, keys, all);
+                assert_eq!(
+                    qsearch.stage,
+                    if accepted {
+                        Stage::QSearchTT
+                    } else {
+                        Stage::QCaptureInit
+                    }
+                );
+            }
+        }
+    }
+    #[test]
     fn test_stage_next() {
         assert_eq!(Stage::MainTT.next(), Stage::CaptureInit);
         assert_eq!(Stage::CaptureInit.next(), Stage::GoodCapture);

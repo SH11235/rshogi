@@ -208,3 +208,12 @@ FT hash = 0x5F134CB8 ^ (L1 * 2)
 
 - [AobaNNUE](https://github.com/yssaya/AobaNNUE) - HalfKP 768x2-16-64 の出典
 - [bullet-shogi](https://github.com/SH11235/bullet-shogi) - 正しいヘッダーを出力する学習器
+
+
+## HalfKX の明示補正と評価 scale
+
+`NNUE_ARCHITECTURE` の明示指定は、universal の runtime reader と固定 edition の両方で選択した特徴集合を使います。誤記された feature 名や FT input 次元を補正する用途でも、payload の形状・長さが選択した特徴集合に適合する必要があります。別レイアウトや切れた payload を受理する指定ではありません。Auto では従来どおり header の特徴集合・input 次元を検査します。活性化・層次元など他の metadata を任意に置換する指定ではありません。
+
+HalfKP の `fv_scale` metadata は他の reader と同じ parser を使い、1〜128 の整数のみ採用します。0・負数・128超・不正表記・metadata なしは既定24へ fallback します（読込拒否ではありません）。従来の HalfKP ローカル parser が受理した0・過大値・数値の後に文字が続く表記は採用しなくなります。通常の正しい metadata は変わりません。
+
+USI `FV_SCALE=0` は引き続き auto（model metadata / fallback）を意味し、正の明示 override は metadata より優先します。モデル metadata の許容範囲と USI override の契約は別です。scale 変更時の探索 cache 無効化はこの loader 修正の対象ではありません。

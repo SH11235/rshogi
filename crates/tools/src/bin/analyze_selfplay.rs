@@ -34,6 +34,10 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
+    /// 不完全入力の部分集計でも終了コードを成功にする。SPRT 採否は常に invalid。
+    #[arg(long)]
+    allow_partial: bool,
+
     /// SPRT post-hoc 判定表示を有効化。
     /// ラベルは CLI → meta の SPRT 情報 → meta のラベル情報（base_label 記録 /
     /// "base" を含むラベル名等）の順で自動推定し、推定時は根拠を表示する。
@@ -244,6 +248,7 @@ struct HeadToHeadStats {
 
 #[derive(Default)]
 struct FileExtraStats {
+    incomplete_pairs: usize,
     reasons: BTreeMap<String, u32>,
     total_plies: u64,
     completed_games: u32,
@@ -270,13 +275,25 @@ fn record_valid_result(
     black: &str,
     white: &str,
     meta_parsed: bool,
+    slot: usize,
     stats: &mut ParsedGameStats,
 ) {
     stats.extra.completed_games += 1;
     stats.extra.total_plies += result.plies as u64;
-    if let Some(winner) = result.winner.as_ref() {
+    if result.outcome == "draw" {
+        stats.draws += 1;
+        stats.extra.draws += 1;
+        return;
+    }
+    if let Some(winner) = tools::sprt::posthoc::result_winner_label(
+        &result.outcome,
+        result.winner.as_deref(),
+        slot,
+        black,
+        white,
+    ) {
         let winner_id = if meta_parsed && (black == winner || white == winner) {
-            winner.clone()
+            winner.to_owned()
         } else {
             extract_engine_id(winner)
         };
@@ -305,22 +322,6 @@ fn record_valid_result(
                 }
             }
             "draw" => stats.extra.draws += 1,
-            _ => {}
-        }
-    } else {
-        match result.outcome.as_str() {
-            "black_win" => {
-                stats.black_wins += 1;
-                stats.extra.black_wins += 1;
-            }
-            "white_win" => {
-                stats.white_wins += 1;
-                stats.extra.white_wins += 1;
-            }
-            "draw" => {
-                stats.draws += 1;
-                stats.extra.draws += 1;
-            }
             _ => {}
         }
     }
@@ -352,6 +353,7 @@ struct MoveBucketStats {
 
 #[derive(Default)]
 struct AggregatedExtraStats {
+    input_issues: Vec<String>,
     reasons: BTreeMap<String, u32>,
     total_plies: u64,
     completed_games: u32,
@@ -430,6 +432,7 @@ struct JsonExtra {
     retried_pairs: u32,
     exhausted_pairs: u32,
     invalid: bool,
+    input_issues: Vec<String>,
     engine_timing: Vec<JsonEngineTiming>,
 }
 
@@ -592,9 +595,10 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
             continue;
         }
 
-        // 高速フィルタ: type フィールドで判別
-        if !meta_parsed && trimmed.contains("\"type\":\"meta\"") {
-            let meta: MetaLog = serde_json::from_str(trimmed)
+        let value: serde_json::Value =
+            serde_json::from_str(trimmed).with_context(|| format!("JSONパースエラー: {path}"))?;
+        if !meta_parsed && value["type"] == "meta" {
+            let meta: MetaLog = serde_json::from_value(value)
                 .with_context(|| format!("metaパースエラー: {path}"))?;
             games = meta.settings.games;
             black = meta
@@ -606,8 +610,8 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
                 .label_white
                 .unwrap_or_else(|| extract_engine_id(&meta.engine_cmd.path_white));
             meta_parsed = true;
-        } else if trimmed.contains("\"type\":\"move\"") {
-            let mv: MoveLog = serde_json::from_str(trimmed)
+        } else if value["type"] == "move" {
+            let mv: MoveLog = serde_json::from_value(value)
                 .with_context(|| format!("moveパースエラー: {path}"))?;
             let _ = mv.game_id;
             let engine_name = normalize_engine_name(&mv.engine, &black, &white, meta_parsed);
@@ -644,8 +648,8 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
                 engine_stats.by_ply_band.entry(ply_band_label(mv.ply).to_string()).or_default(),
                 mv.elapsed_ms,
             );
-        } else if trimmed.contains("\"type\":\"result\"") {
-            let result: ResultLog = serde_json::from_str(trimmed)
+        } else if value["type"] == "result" {
+            let result: ResultLog = serde_json::from_value(value)
                 .with_context(|| format!("resultパースエラー: {path}"))?;
             let reason = match result.reason.as_deref() {
                 Some(reason) if reason.starts_with("error") => "error",
@@ -690,8 +694,15 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
                         exhausted_pairs.insert(pair_index);
                     }
                 } else {
-                    for game in completed.iter().flatten() {
-                        record_valid_result(game, &black, &white, meta_parsed, &mut stats);
+                    for (slot, game) in completed.iter().enumerate() {
+                        record_valid_result(
+                            game.as_ref().unwrap(),
+                            &black,
+                            &white,
+                            meta_parsed,
+                            slot,
+                            &mut stats,
+                        );
                     }
                 }
                 completed_pairs.insert(key);
@@ -700,6 +711,7 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
         // move行・metrics行等はスキップ
     }
 
+    stats.extra.incomplete_pairs = pair_buffer.len();
     if !pair_buffer.is_empty() {
         eprintln!(
             "情報: {path} — {} ペアが未完了（片スロット欠け）のため直接対決集計から除外されました",
@@ -728,6 +740,42 @@ fn parse_normal_file(path: &str) -> Result<FileResult> {
         },
         extra: stats.extra,
     })
+}
+
+fn format_decisive_rate(label: &str, wins: u32, decisive: u32, total_games: u32) -> String {
+    if decisive > 0 {
+        format!(
+            "{label}決着局勝率:{:.1}%({wins}/{decisive}決着局、全{total_games}局)",
+            wins as f64 / decisive as f64 * 100.0
+        )
+    } else {
+        format!("{label}決着局勝率:-（0決着局、全{total_games}局）")
+    }
+}
+
+fn run_meta_issue(path: &std::path::Path) -> Result<Option<String>> {
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    #[derive(Deserialize)]
+    struct RunValidity {
+        run_status: Option<String>,
+        invalid: Option<bool>,
+        incomplete_pairs: Option<u64>,
+        unreturned_games: Option<u64>,
+    }
+    let meta: RunValidity = serde_json::from_reader(std::fs::File::open(path)?)?;
+    let invalid = meta.invalid.unwrap_or(false)
+        || meta.run_status.as_deref().is_some_and(|status| status != "completed")
+        || meta.incomplete_pairs.unwrap_or(0) > 0
+        || meta.unreturned_games.unwrap_or(0) > 0;
+    Ok(invalid.then(|| {
+        format!(
+            "{}: 非完了または invalid の tournament run ({})",
+            path.display(),
+            meta.run_status.as_deref().unwrap_or("legacy")
+        )
+    }))
 }
 
 fn parse_file(path: &str) -> Result<FileResult> {
@@ -1070,18 +1118,18 @@ fn print_sprt_text_report(penta: Penta, output: &SprtJsonOutput) {
     println!("bounds:     LLR ∈ [{:+.3}, {:+.3}]", output.lower, output.upper);
     println!("pairs:      {}", output.pairs);
     println!("LLR:        {:+.3}", output.llr);
-    // accept_h0/h1 はラベル役割の取り違えに弱いため、どちらが強い判定なのかを
-    // ラベル実名で言語化して併記する。
+    // 採択した仮説と到達した境界を、ラベルの視点とともに示す。
     let decision_note = match output.decision.as_str() {
         "accept_h1" => format!(
-            "H1 採択: {} は {} より強い (nelo {:+.1} 以上)",
+            "H1 採択: {} (test) 対 {} (base) の LLR が上界へ到達 (H1: nelo {:+.1})",
             output.test, output.base, output.nelo1
         ),
         "accept_h0" => format!(
-            "H0 採択: {} が {} より nelo {:+.1} 以上強いとは言えない",
-            output.test, output.base, output.nelo1
+            "H0 採択: {} (test) 対 {} (base) の LLR が下界へ到達 (H0: nelo {:+.1})",
+            output.test, output.base, output.nelo0
         ),
         "running" => "境界未到達 (判定保留)".to_string(),
+        "invalid" => "不完全入力の部分集計（採否なし）".to_string(),
         other => format!("不明な decision: {other}"),
     };
     println!("decision:   {} — {}", output.decision, decision_note);
@@ -1221,11 +1269,30 @@ fn main() -> Result<()> {
     let mut valid_files = 0u32;
     let mut extra = AggregatedExtraStats::default();
 
+    let mut accepted_files = Vec::new();
+    let mut checked_run_meta = BTreeSet::new();
     for path in &files {
+        let meta_path = std::path::Path::new(path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("meta.json");
+        if checked_run_meta.insert(meta_path.clone()) {
+            match run_meta_issue(&meta_path) {
+                Ok(Some(issue)) => extra.input_issues.push(issue),
+                Ok(None) => {}
+                Err(error) => extra.input_issues.push(format!("{}: {error}", meta_path.display())),
+            }
+        }
         match parse_file(path) {
             Ok(result) => {
+                if result.extra.incomplete_pairs > 0 {
+                    extra
+                        .input_issues
+                        .push(format!("{path}: {} 未完了ペア", result.extra.incomplete_pairs));
+                }
                 if result.black.is_empty() || result.white.is_empty() || result.games == 0 {
                     eprintln!("警告: 有効なデータなし: {path}");
+                    extra.input_issues.push(format!("有効なデータなし: {path}"));
                     continue;
                 }
                 let key = (result.black.clone(), result.white.clone());
@@ -1261,9 +1328,11 @@ fn main() -> Result<()> {
                     );
                 }
                 valid_files += 1;
+                accepted_files.push(*path);
             }
             Err(e) => {
                 eprintln!("警告: {path}: {e}");
+                extra.input_issues.push(format!("{path}: {e}"));
             }
         }
     }
@@ -1347,7 +1416,7 @@ fn main() -> Result<()> {
     }
 
     // SPRT post-hoc 集計（JSON モードでは最終 JSON にフィールドとして埋め込むため事前に計算する）
-    let sprt_payload: Option<(Penta, SprtJsonOutput)> = if cli.sprt {
+    let mut sprt_payload: Option<(Penta, SprtJsonOutput)> = if cli.sprt {
         // CLI が全項目（ラベル+パラメータ）を明示している場合は meta 参照を完全スキップ。
         // 部分明示の場合は未解決項目の補完のため meta を収集するが、CLI でラベルが明示されて
         // いる場合はそれを `collect_sprt_meta` に渡して別 run の meta を無視させる。
@@ -1359,7 +1428,7 @@ fn main() -> Result<()> {
             || cli.sprt_beta.is_none();
         let meta_sprt = if needs_meta {
             collect_sprt_meta(
-                &files,
+                &accepted_files,
                 cli.sprt_base_label.as_deref(),
                 cli.sprt_test_label.as_deref(),
             )?
@@ -1373,7 +1442,7 @@ fn main() -> Result<()> {
             && (cli.sprt_base_label.is_none() || cli.sprt_test_label.is_none())
         {
             infer_labels_from_meta(
-                &files,
+                &accepted_files,
                 cli.sprt_base_label.as_deref(),
                 cli.sprt_test_label.as_deref(),
             )?
@@ -1420,13 +1489,13 @@ fn main() -> Result<()> {
         let beta = cli.sprt_beta.or_else(|| meta_sprt.as_ref().map(|m| m.beta)).unwrap_or(0.05);
 
         let mut total = Penta::ZERO;
-        for path in &files {
+        for path in &accepted_files {
             if path.contains(".summary.") {
                 continue;
             }
             match collect_sprt_penta(path, &base_label, &test_label) {
                 Ok(p) => total += p,
-                Err(e) => eprintln!("警告: SPRT 集計失敗 {path}: {e}"),
+                Err(e) => extra.input_issues.push(format!("SPRT 集計失敗 {path}: {e}")),
             }
         }
         let params =
@@ -1456,14 +1525,16 @@ fn main() -> Result<()> {
                 penta
             } else {
                 let mut penta = Penta::ZERO;
-                for path in &files {
+                for path in &accepted_files {
                     if path.contains(".summary.") {
                         continue;
                     }
                     // left=base, right=test で集計 → normalized_elo() は right 視点
                     match collect_sprt_penta(path, left, right) {
                         Ok(p) => penta += p,
-                        Err(e) => eprintln!("警告: h2h penta 集計失敗 {path}: {e}"),
+                        Err(e) => {
+                            extra.input_issues.push(format!("h2h penta 集計失敗 {path}: {e}"))
+                        }
                     }
                 }
                 penta
@@ -1475,6 +1546,18 @@ fn main() -> Result<()> {
         BTreeMap::new()
     };
 
+    let invalid = extra.retry.exhausted_pairs > 0 || !extra.input_issues.is_empty();
+    if invalid {
+        if let Some((_, output)) = sprt_payload.as_mut() {
+            output.decision = "invalid".into();
+        }
+        if !cli.json {
+            println!("解析状態: invalid（部分集計・採否は確定しません）");
+            for issue in &extra.input_issues {
+                println!("  {issue}");
+            }
+        }
+    }
     if cli.json {
         print_json(
             valid_files,
@@ -1502,6 +1585,10 @@ fn main() -> Result<()> {
         if let Some((penta, json)) = sprt_payload.as_ref() {
             print_sprt_text_report(*penta, json);
         }
+    }
+
+    if invalid && !cli.allow_partial {
+        bail!("不完全な入力です。部分集計だけを利用する場合は --allow-partial を指定してください");
     }
 
     Ok(())
@@ -1673,31 +1760,33 @@ fn print_text(
 
         // 先手/後手別勝率
         if primary_sente_games > 0 || primary_gote_games > 0 {
-            let fmt_wr = |label: &str, wins: u32, decisive: u32, total_games: u32| -> String {
-                if decisive > 0 {
-                    format!(
-                        "{}:{:.1}%({}/{}局)",
-                        label,
-                        wins as f64 / decisive as f64 * 100.0,
-                        wins,
-                        total_games
-                    )
-                } else {
-                    format!("{}:-", label)
-                }
-            };
-
-            let primary_sente =
-                fmt_wr("先手", primary_sente_wins, primary_sente_games, primary_sente_total);
-            let primary_gote =
-                fmt_wr("後手", primary_gote_wins, primary_gote_games, primary_gote_total);
+            let primary_sente = format_decisive_rate(
+                "先手",
+                primary_sente_wins,
+                primary_sente_games,
+                primary_sente_total,
+            );
+            let primary_gote = format_decisive_rate(
+                "後手",
+                primary_gote_wins,
+                primary_gote_games,
+                primary_gote_total,
+            );
             // secondary の先手 = primary の後手局、secondary の後手 = primary の先手局
             let secondary_sente_wins = primary_gote_games - primary_gote_wins;
             let secondary_gote_wins = primary_sente_games - primary_sente_wins;
-            let secondary_sente =
-                fmt_wr("先手", secondary_sente_wins, primary_gote_games, primary_gote_total);
-            let secondary_gote =
-                fmt_wr("後手", secondary_gote_wins, primary_sente_games, primary_sente_total);
+            let secondary_sente = format_decisive_rate(
+                "先手",
+                secondary_sente_wins,
+                primary_gote_games,
+                primary_gote_total,
+            );
+            let secondary_gote = format_decisive_rate(
+                "後手",
+                secondary_gote_wins,
+                primary_sente_games,
+                primary_sente_total,
+            );
             println!("    {primary_name} {primary_sente} {primary_gote}");
             println!("    {secondary_name} {secondary_sente} {secondary_gote}");
         }
@@ -2028,7 +2117,8 @@ fn print_json(
             error_pairs: extra.retry.error_pairs,
             retried_pairs: extra.retry.retried_pairs,
             exhausted_pairs: extra.retry.exhausted_pairs,
-            invalid: extra.retry.exhausted_pairs > 0,
+            invalid: extra.retry.exhausted_pairs > 0 || !extra.input_issues.is_empty(),
+            input_issues: extra.input_issues.clone(),
             engine_timing: json_engine_timing,
         },
         sprt,
@@ -2040,6 +2130,22 @@ fn print_json(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn decisive_rate_labels_use_the_same_denominator() {
+        assert_eq!(
+            super::format_decisive_rate("先手", 1, 1, 2),
+            "先手決着局勝率:100.0%(1/1決着局、全2局)"
+        );
+        assert_eq!(
+            super::format_decisive_rate("後手", 0, 0, 2),
+            "後手決着局勝率:-（0決着局、全2局）"
+        );
+        assert_eq!(
+            super::format_decisive_rate("先手", 0, 0, 0),
+            "先手決着局勝率:-（0決着局、全0局）"
+        );
+    }
+
     use super::*;
     use std::io::Write as _;
 
