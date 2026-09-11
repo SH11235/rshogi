@@ -580,6 +580,13 @@ impl NNUENetwork {
     /// ファイルサイズからアーキテクチャを一意に検出し、適切なバリアントに委譲する。
     /// ヘッダーの description 文字列は活性化関数の検出にのみ使用する。
     pub fn read<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+        Self::read_with_architecture_override(reader, get_nnue_architecture_override())
+    }
+
+    fn read_with_architecture_override<R: Read + Seek>(
+        reader: &mut R,
+        arch_override: NNUEArchitectureOverride,
+    ) -> io::Result<Self> {
         // 1. ファイルサイズを取得
         let file_size = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;
@@ -622,7 +629,6 @@ impl NNUENetwork {
                 // 等が 4 byte ずれる) するか、悪ければ別 arch として誤読する。誤読を
                 // 確実に防ぐため、当該 version + 非-LayerStack override の組合せをここで明示
                 // reject する。
-                let arch_override = get_nnue_architecture_override();
                 if version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS
                     && !matches!(
                         arch_override,
@@ -731,6 +737,8 @@ impl NNUENetwork {
                         reader.seek(SeekFrom::Start(0))?;
                         return Ok(Self::DynamicHalfKx(Box::new(DynamicHalfKxNetwork::read(
                             reader,
+                            (!matches!(arch_override, NNUEArchitectureOverride::Auto))
+                                .then_some(effective_feature_set),
                         )?)));
                     }
                 }
@@ -2611,6 +2619,62 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("Unknown NNUE version"),
             "Error message should mention unknown version"
+        );
+    }
+
+    #[test]
+    fn halfkp_loader_override_respects_payload() {
+        use super::super::network_halfkp::{HalfKP256CReLU, halfkp_loader_fixture};
+        use std::io::Cursor;
+        let arch = "Features=HalfKA(Friend)[125388->256x2],l2=32,l3=32";
+        let bytes = halfkp_loader_fixture(256, arch);
+        let network = NNUENetwork::read_with_architecture_override(
+            &mut Cursor::new(&bytes),
+            NNUEArchitectureOverride::HalfKP,
+        )
+        .expect("compatible HalfKP payload with wrong feature header");
+        #[cfg(feature = "nnue-runtime-dimensions")]
+        assert!(matches!(network, NNUENetwork::DynamicHalfKx(_)));
+        let correct =
+            halfkp_loader_fixture(256, "Features=HalfKP(Friend)[125388->256x2],l2=32,l3=32");
+        assert!(
+            NNUENetwork::read_with_architecture_override(
+                &mut Cursor::new(&correct),
+                NNUEArchitectureOverride::Auto
+            )
+            .is_ok()
+        );
+
+        let mut pos = crate::position::Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .unwrap();
+        let fixed = HalfKP256CReLU::read(&mut Cursor::new(&bytes)).unwrap();
+        let mut fixed_acc = crate::nnue::network_halfkp::AccumulatorHalfKP::<256>::new();
+        fixed.refresh_accumulator(&pos, &mut fixed_acc);
+        let mut evaluator =
+            crate::nnue::NNUEEvaluator::new_with_position(std::sync::Arc::new(network), &pos);
+        assert_eq!(evaluator.evaluate(&pos), fixed.evaluate(&pos, &fixed_acc));
+        assert!(fixed.evaluate(&pos, &fixed_acc).raw() != 0);
+        assert!(
+            NNUENetwork::read_with_architecture_override(
+                &mut Cursor::new(&bytes),
+                NNUEArchitectureOverride::Auto
+            )
+            .is_err()
+        );
+        assert!(
+            NNUENetwork::read_with_architecture_override(
+                &mut Cursor::new(&bytes[..bytes.len() - 1]),
+                NNUEArchitectureOverride::HalfKP
+            )
+            .is_err()
+        );
+        assert!(
+            NNUENetwork::read_with_architecture_override(
+                &mut Cursor::new(&bytes),
+                NNUEArchitectureOverride::HalfKaSplit
+            )
+            .is_err()
         );
     }
 
