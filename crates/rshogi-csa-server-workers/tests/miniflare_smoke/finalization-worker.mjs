@@ -33,12 +33,18 @@ export class GameRoom {
         close: (code, reason) => {
           const att = ws.deserializeAttachment();
           this.closes.push({ role: att?.role, code, reason });
-          this.socketCloses.push({ type: att?.type, code });
+          const observed = { type: att?.type, code };
+          this.socketCloses.push(observed);
           if (this.faults.closeRole && this.faults.closeRole === ws.deserializeAttachment()?.role) {
             this.faults.closeRole = undefined;
             throw new Error('injected WS close failure');
           }
-          return ws.close(code, reason);
+          try {
+            return ws.close(code, reason);
+          } catch (error) {
+            observed.error = String(error);
+            throw error;
+          }
         },
         serializeAttachment: (att) => {
           if (this.faults.persistRole === att?.role && att?.terminal_sent?.includes(this.faults.persistLine)) {
@@ -90,6 +96,11 @@ export class GameRoom {
       getWebSockets: (...args) => state.getWebSockets(...args).map(socket),
     });
     this.env = { ...env, KIFU_BUCKET: wrap(env.KIFU_BUCKET, {
+      get: async (...args) => {
+        if (this.faults.kifuGet === 'error') throw new Error('injected kifu read failure');
+        if (this.faults.kifuGet === 'missing') return null;
+        return env.KIFU_BUCKET.get(...args);
+      },
       delete: async (...args) => {
         if (this.faults.holdDelete) await this.r2Released;
         return env.KIFU_BUCKET.delete(...args);

@@ -27,7 +27,7 @@ interface RoomState {
   active: number;
   ops: string[];
   injectedAt: { index: number; name: string } | null;
-  finished: { result_code: string; exported_at_ms: number | null } | null;
+  finished: { result_code: string; exported_at_ms?: number | null } | null;
   finalizing: unknown;
   kind: string | null;
   alarm: number | null;
@@ -214,7 +214,9 @@ describe('終局処理の網羅障害注入', () => {
   async function drive(game: Game): Promise<RoomState> {
     let state = await settle(game);
     for (let fires = 0; fires < 30; fires++) {
-      if (state.finished && state.finished.exported_at_ms !== null) break;
+      // serde-wasm-bindgen の None は JSON 上では field 自体が省略される。
+      // undefined を完了扱いすると ExportRetry の操作列を一度も検査しない。
+      if (state.finished && state.finished.exported_at_ms != null) break;
       if (state.alarm === null) break;
       if (!state.finished && !state.finalizing && fires >= 2) break;
       await game.control({ fireAlarm: true });
@@ -307,7 +309,7 @@ describe('終局処理の網羅障害注入', () => {
         : `${INPUT_LOST_OTHER_RESULT}: ${observed.state.finished.result_code}`);
       return problems;
     }
-    if (base.exported_at_ms !== null && observed.state.finished.exported_at_ms === null) {
+    if (base.exported_at_ms != null && observed.state.finished.exported_at_ms == null) {
       problems.push('棋譜が export されていない');
     }
     if (observed.kifuMoves !== baseline.kifuMoves) problems.push(`棋譜の手数が違う: ${observed.kifuMoves}`);

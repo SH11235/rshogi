@@ -1459,14 +1459,12 @@ impl GameRoom {
 
         let first_prev_ms = cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms);
         let pending: Option<ExportPendingState> =
-            self.state.storage().get(KEY_EXPORT_PENDING).await.ok().flatten();
+            self.state.storage().get(KEY_EXPORT_PENDING).await?;
         if let Some(pending) = pending
             && pending.game_id == cfg.game_id
         {
-            let rows = move_rows_from_exported_csa(&pending.csa_text, first_prev_ms);
-            if !rows.is_empty() {
-                return Ok(rows);
-            }
+            // 初手前の終局も、保存済み本文が完全な原本である。
+            return Ok(move_rows_from_exported_csa(&pending.csa_text, first_prev_ms));
         }
 
         match self.load_kifu_by_game_id(&GameId::new(cfg.game_id.clone())).await {
@@ -1487,7 +1485,7 @@ impl GameRoom {
                     component: "game_room",
                     game_id: cfg.game_id,
                 );
-                Ok(moves)
+                Err(Error::RustError("finished snapshot kifu missing".into()))
             }
             Err(e) => {
                 crate::structured_log!(
@@ -1496,7 +1494,7 @@ impl GameRoom {
                     game_id: cfg.game_id,
                     err: format!("{e:?}"),
                 );
-                Ok(moves)
+                Err(e)
             }
         }
     }

@@ -204,7 +204,7 @@ describe('終局保存の復旧', () => {
     expect(state.closes.every(close => close.code === 1011)).toBe(true);
   });
 
-  it('MONITOR2ON 前には結果を配信せず未配信の接続を 1011 で閉じる', async () => {
+  it.each([false, true])('MONITOR2ON 前には結果を配信せず未配信の接続を 1011 で閉じる (keepalive=%s)', async (keepalive) => {
     const res = await mf.dispatchFetch(`https://example.com/ws/${encodeURIComponent(gameId)}/spectate`, {
       headers: { Upgrade: 'websocket', Origin: 'https://example.com', 'CF-Connecting-IP': '127.0.0.1' },
     });
@@ -213,14 +213,35 @@ describe('終局保存の復旧', () => {
     let closeCode: number | undefined;
     ws.addEventListener('close', event => { closeCode = event.code; });
     ws.accept();
+    if (keepalive) ws.send('\n');
     white.send(cycle[3]);
     await waitForFinished();
     const state = await waitForIdle();
     expect({ closes: state.socketCloses, sockets: state.sockets }).toMatchObject({
       closes: expect.arrayContaining([{ type: 'Spectator', code: 1011 }]),
     });
-    await expect(buf.takeLine(5000)).rejects.toThrow('connection closed');
+    await expect(buf.takeLine(5000), JSON.stringify(state)).rejects.toThrow('connection closed');
     expect(closeCode).toBe(1011);
+  });
+
+  it.each(['error', 'missing'])('確定済み棋譜を読めない snapshot を正常完了にしない (%s)', async (kifuGet) => {
+    white.send(cycle[3]);
+    await black.recvUntil(l => l === '#DRAW');
+    await white.recvUntil(l => l === '#DRAW');
+    await waitForFinished();
+    expect((await waitForIdle()).moves).toBe(0);
+    await control({ faults: { kifuGet } });
+    const res = await mf.dispatchFetch(`https://example.com/ws/${encodeURIComponent(gameId)}/spectate`, {
+      headers: { Upgrade: 'websocket', Origin: 'https://example.com', 'CF-Connecting-IP': '127.0.0.1' },
+    });
+    const ws = res.webSocket!;
+    const buf = readLineFromWebSocket(ws);
+    let code: number | undefined;
+    ws.addEventListener('close', event => { code = event.code; });
+    ws.accept();
+    expect(await buf.takeLine(5000)).toBe(`##[MONITOR2] BEGIN ${gameId}`);
+    await expect(buf.takeLine(5000)).rejects.toThrow('connection closed');
+    expect(code).toBe(1011);
   });
 
   it('R2 待機中に snapshot が完了した観戦者にも結果を一度だけ送る', async () => {
