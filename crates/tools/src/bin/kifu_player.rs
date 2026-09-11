@@ -23,7 +23,7 @@ struct Cli {
     #[arg(long)]
     psv: Option<PathBuf>,
 
-    /// tournament の out-dir を開く（配下の `*-vs-*.jsonl` を横断して索引する）。
+    /// tournament の out-dir を開く（pair-{i}-{j}.jsonl、旧 -vs- / _vs_ 形式に対応）。
     #[arg(long)]
     tournament_dir: Option<PathBuf>,
 
