@@ -357,6 +357,9 @@ impl DurableObject for GameRoom {
             } else if let Err(e) =
                 self.send_finished_spectator_snapshot_if_needed(&server, &room_id).await
             {
+                // finished/config 読込や BEGIN/END の送信失敗も、本体内の失敗と
+                // 同じく中断する。確定済み対局には再開用 alarm が無い場合がある。
+                self.abort_spectator_snapshot(&server);
                 crate::structured_log!(
                     event: "finished_spectator_initial_push_failed",
                     component: "game_room",
@@ -1356,16 +1359,7 @@ impl GameRoom {
 
         // ここから先の失敗は flag=true を残さない。中断したら reset + close する。
         if let Err(e) = self.send_spectator_snapshot_body(ws, cfg, finished).await {
-            if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
-                let mut reset = att.reset_spectator_snapshot();
-                let _ = reset.abort_terminal(
-                    &mut |att| ws.serialize_attachment(att),
-                    &mut |code, reason| {
-                        let _ = ws.close(Some(code), Some(reason.to_owned()));
-                    },
-                );
-            }
-            let _ = ws.close(Some(1011), Some("snapshot failed".to_owned()));
+            self.abort_spectator_snapshot(ws);
             crate::structured_log!(
                 event: "spectator_snapshot_failed",
                 component: "game_room",
@@ -1375,6 +1369,19 @@ impl GameRoom {
             return Err(e);
         }
         Ok(())
+    }
+
+    fn abort_spectator_snapshot(&self, ws: &WebSocket) {
+        if let Ok(Some(att)) = ws.deserialize_attachment::<WsAttachment>() {
+            let mut reset = att.reset_spectator_snapshot();
+            let _ = reset.abort_terminal(
+                &mut |att| ws.serialize_attachment(att),
+                &mut |code, reason| {
+                    let _ = ws.close(Some(code), Some(reason.to_owned()));
+                },
+            );
+        }
+        let _ = ws.close(Some(1011), Some("snapshot failed".to_owned()));
     }
 
     /// `send_spectator_snapshot` の本体。`snapshot_in_progress = true` 前提で

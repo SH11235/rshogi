@@ -118,7 +118,20 @@ describe('終局保存の復旧', () => {
       ws.once('open', resolve);
       ws.once('error', reject);
     });
-    return { ws, buf, closeCode: () => closeCode };
+    return { ws, buf: {
+      async takeLine(timeoutMs: number) {
+        try {
+          return await buf.takeLine(timeoutMs);
+        } catch (error) {
+          // close frame と TCP 切断完了のどちらを待っているかを失敗時に記録する。
+          const observed = ws as unknown as { _closeFrameReceived: boolean; _closeFrameSent: boolean; _closeCode: number };
+          throw new Error(`${String(error)}; socket=${JSON.stringify({
+            readyState: ws.readyState, received: observed._closeFrameReceived,
+            sent: observed._closeFrameSent, code: observed._closeCode,
+          })}`);
+        }
+      },
+    }, closeCode: () => closeCode };
   }
 
   it('export pending の読込障害を不在と扱わず runtime の再試行へ返す', async () => {
@@ -237,15 +250,17 @@ describe('終局保存の復旧', () => {
     expect(closeCode()).toBe(1011);
   });
 
-  it.each(['error', 'missing'])('確定済み棋譜を読めない snapshot を正常完了にしない (%s)', async (kifuGet) => {
+  it.each(['error', 'missing', 'pending', 'config'])('確定済み棋譜を読めない snapshot を正常完了にしない (%s)', async (failure) => {
     white.send(cycle[3]);
     await black.recvUntil(l => l === '#DRAW');
     await white.recvUntil(l => l === '#DRAW');
     await waitForFinished();
     expect((await waitForIdle()).moves).toBe(0);
-    await control({ faults: { kifuGet } });
+    await control({ faults: failure === 'config' || failure === 'pending'
+      ? { storage: { method: 'get', key: failure === 'config' ? 'config' : 'export_pending' } }
+      : { kifuGet: failure } });
     const { buf, closeCode } = await connectSpectator();
-    expect(await buf.takeLine(5000)).toBe(`##[MONITOR2] BEGIN ${gameId}`);
+    if (failure !== 'config') expect(await buf.takeLine(5000)).toBe(`##[MONITOR2] BEGIN ${gameId}`);
     await expect(buf.takeLine(5000)).rejects.toThrow('connection closed');
     expect(closeCode()).toBe(1011);
   });
