@@ -13,13 +13,23 @@ fn line(root: &Position, moves: &[&str]) -> Vec<Move> {
         .iter()
         .map(|usi| {
             let mut legal = MoveList::new();
-            generate_legal_with_pass(&pos, &mut legal);
+            generate_legal_all_with_pass(&pos, &mut legal);
             let mv = *legal.as_slice().iter().find(|m| m.to_usi() == *usi).unwrap();
             let check = pos.gives_check(mv);
             pos.do_move(mv, check);
             mv
         })
         .collect()
+}
+
+#[test]
+fn public_pv_preserves_legal_nonpromotion() {
+    let mut root = Position::new();
+    root.set_sfen("4k4/9/9/4P4/9/9/9/9/4K4 b - 1").unwrap();
+    let mv = root.to_move(Move::from_usi("5d5c").unwrap()).unwrap();
+    assert!(root.pseudo_legal(mv));
+    assert!(root.is_legal(mv));
+    assert_eq!(legal_pv_prefix_len(&root, &[mv], EnteringKingRule::None), 1);
 }
 
 #[test]

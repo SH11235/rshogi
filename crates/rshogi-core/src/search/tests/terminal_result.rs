@@ -157,7 +157,9 @@ fn aspiration_abort_multipv_and_helpers_keep_valid_results() {
                 for info in &infos {
                     let mut replay = pos.clone();
                     for &mv in &info.pv {
-                        assert!(RootMoves::from_legal_moves(&replay, &[]).find(mv).is_some());
+                        let mut legal = crate::movegen::MoveList::new();
+                        crate::movegen::generate_legal_all_with_pass(&replay, &mut legal);
+                        assert!(legal.as_slice().contains(&mv));
                         let check = replay.gives_check(mv);
                         replay.do_move(mv, check);
                     }

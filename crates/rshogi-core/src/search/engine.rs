@@ -22,7 +22,7 @@ use super::{
     DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, RootMove, SearchTuneParams,
     SearchWorker, Skill, SkillOptions, ThreadPool, TimeManagement,
 };
-use crate::movegen::{MoveList, generate_legal_with_pass};
+use crate::movegen::{MoveList, generate_legal_all_with_pass};
 use crate::position::Position;
 use crate::tt::TranspositionTable;
 use crate::types::{Depth, EnteringKingRule, MAX_PLY, Move, Value};
@@ -1880,7 +1880,7 @@ fn legal_pv_prefix_len(root: &Position, pv: &[Move], rule: EnteringKingRule) -> 
         }
         // is_legal 単独には pseudo-legal 入力の前提があるため、全合法手と照合する。
         let mut legal = MoveList::new();
-        generate_legal_with_pass(&pos, &mut legal);
+        generate_legal_all_with_pass(&pos, &mut legal);
         if !legal.as_slice().contains(&mv) {
             return idx;
         }
