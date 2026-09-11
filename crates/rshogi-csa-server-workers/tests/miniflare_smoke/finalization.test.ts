@@ -105,10 +105,15 @@ describe('終局保存の復旧', () => {
   async function connectSpectator() {
     const url = new URL(`/ws/${encodeURIComponent(gameId)}/spectate`, await mf.ready);
     url.protocol = 'ws:';
-    const ws = new NodeWebSocket(url, {
+    const socketOptions = {
       headers: { Origin: 'https://example.com', 'CF-Connecting-IP': '127.0.0.1' },
       handshakeTimeout: 5000,
-    });
+      // 未送信接続では close frame 交換後も workerd の TCP FIN が遅れる。
+      // ws の既定 30 秒を短縮する。server frame が無ければこの timer は
+      // 開始されず、takeLine は timeout するので、1011 未受信を隠さない。
+      closeTimeout: 1000,
+    };
+    const ws = new NodeWebSocket(url, socketOptions);
     // ws の DOM event API と Miniflare の event API は、この buffer が使う
     // message.data / close に関して同形。accept() は Node client には不要。
     const buf = readLineFromWebSocket(ws as unknown as Parameters<typeof readLineFromWebSocket>[0]);
