@@ -1,495 +1,146 @@
-# Rate limit / abuse protection 設計メモ ([#622](https://github.com/SH11235/rshogi/issues/622))
+# Rate limit / abuse protection の設計
 
-Floodgate audit (2026-05-08) で起票された P0 [#622](https://github.com/SH11235/rshogi/issues/622)
-の実装着手前 design doc。既存の audit 結論と Codex 相談 (2026-05-09) の決定事項
-を反映し、実装フェーズに入る前に user 確認すべき open question を集約する。
-
-本 doc は **設計合意の前段** として draft で merge する。実装 PR を切る時に
-本 doc も最終版に書き換える契約。
+Workers 版 CSA サーバーの接続・コマンド頻度制限について、実装上の責務と
+採用理由をまとめる。環境変数の変更・観測・障害時の運用は
+[rate limit 運用 Runbook](rate_limit.md) を参照。
 
 ## 1. スコープ
 
-| 含む | 含まない (別 issue / 別 PR) |
+対象は LOGIN_LOBBY、CHALLENGE_LOBBY、player / spectator の room upgrade、
+および player の room upgrade を使った room 作成頻度の抑制。
+WAF の契約・設定、viewer API の制限、管理コマンドの制限は別の責務とする。
+
+## 2. 攻撃モデルと防御
+
+### 2.1 抑制する負荷
+
+- 同一 IP からの大量 upgrade による接続・Durable Object の負荷。
+- 同一 IP / handle からの LOGIN_LOBBY の連続試行。
+- 同一 IP / inviter からの CHALLENGE_LOBBY の連続発行。
+
+対局開始前の滞留時間制限、WebSocket のメッセージ長制限、orphan の回収は
+頻度制限だけでは抑えられない負荷を扱うため、併用する。
+
+### 2.2 防御層
+
+- 外部の WAF 等は追加の防御層であり、Worker 内の制限はそれに依存しない。
+- Worker では専用 RateLimiter DO の token bucket で制限する。
+- room 作成負荷は player route に別の厳しい上限を設けて抑える。
+  これは実際の DO 新規作成数ではなく、player upgrade 回数を代理指標とする制限。
+
+### 2.3 共通実装ガード
+
+- IP の取得元は `CF-Connecting-IP` のみとし、クライアント入力の
+  `X-Forwarded-For` を鍵に使わない。
+- IP が欠落した場合は fail-closed。room upgrade では HTTP 503 と
+  `Retry-After: 10`、Lobby の対象コマンドでは rate_limited 応答を返す。
+- DO の取得・RPC・応答解析のエラーは成功判定に変換せず伝播する。
+- 不正な route や Origin、Upgrade の検査を通過してから bucket を消費する。
+
+## 3. 設計判断
+
+### Q1. 外部 WAF との関係
+
+WAF の利用可否・ルール・権限は配備先の運用に属する。アカウントの契約変更を
+前提にせず、Worker code-only の制限を基礎とする。
+
+### Q2. 専用 RateLimiter DO
+
+同じ `(kind, identifier)` は `{kind}:{identifier}` を名前とした同一の DO へ送る。
+制限の種類と識別子で分散することで、異なる IP / handle の bucket を分離する。
+各 room 内だけの counter では room を跨ぐ同一 IP を集約できないため、
+GameRoom / Lobby とは別の DO にする。
+
+token bucket は capacity を1分あたりの上限とし、capacity / 60 token/sec で
+連続的に補充する。満タン時の burst は許容するが、固定窓の境界で一括リセットはしない。
+状態は storage に保存し、メモリ上の cache が失われても復元する。
+共有 counter の更新を取りこぼさないため、単純な分散 KV の read-modify-write では代替しない。
+
+実装: [rate_limit.rs](../../crates/rshogi-csa-server-workers/src/rate_limit.rs)。
+
+### Q3. 閾値と対象
+
+| 環境変数 | 対象 | 既定値 / 分 |
+|---|---|---:|
+| `LOBBY_LOGIN_RATE_PER_IP_PER_MIN` | LOGIN_LOBBY / IP | 10 |
+| `LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN` | LOGIN_LOBBY / handle | 5 |
+| `LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN` | CHALLENGE_LOBBY / IP | 5 |
+| `LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN` | CHALLENGE_LOBBY / inviter | 3 |
+| `ROOM_CREATE_RATE_PER_IP_PER_MIN` | player room upgrade / IP | 20 |
+| `WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN` | player + spectator room upgrade / IP | 60 |
+
+閾値は `RateLimitThresholds::DEFAULTS` と環境別 wrangler 設定で定義する。
+空・非数値・0・範囲外の値は安全側の既定値に戻す。0 は無効化を意味しない。
+
+### Q4. 拒否応答
+
+- room upgrade: HTTP 503 と `Retry-After: <sec>`。
+- LOGIN_LOBBY: `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`。
+- CHALLENGE_LOBBY: `CHALLENGE_LOBBY:incorrect rate_limited retry_after=<sec>`。
+
+Lobby の頻度超過では接続を維持し、クライアントが待機して再試行できるようにする。
+拒否応答の生成は [rate_limit.rs](../../crates/rshogi-csa-server-workers/src/rate_limit.rs) に集約する。
+
+### Q5. クライアントの待機
+
+csa-client はサーバーが示す retry-after を再接続待機へ反映する。
+外部クライアントの実装は保証できないため、待機の実施に関係なくサーバー側で制限する。
+クライアントの仕様は [csa-client](../csa-client.md) を参照。
+
+## 4. 組込み箇所
+
+### 4.1 他の防御との分離
+
+メッセージサイズ制限、AGREE の期限、観戦者数制限、認証は頻度制限とは独立に維持する。
+
+### 4.2 観測
+
+`rate_limit_denied` と `rate_limit_missing_cf_ip` を構造化ログに出す。
+監視の集計・通知方法は [observability](observability.md) に従う。
+
+### 4.3 bucket の独立性
+
+IP と handle / inviter の制限を順に適用する。先の bucket を消費した後で
+後の bucket が拒否しても、先の消費を取り消す複数 DO 間の transaction は行わない。
+
+### 4.4 Implementation hook points
+
+| 経路 | 検査順序 |
 |---|---|
-| `/ws/<room_id>` / `/ws/lobby` の WS upgrade 直前の rate limit | viewer 配信 API (`/api/v1/games*`) の rate limit (将来 [#560](https://github.com/SH11235/rshogi/issues/560) 系で扱う) |
-| LOGIN_LOBBY / CHALLENGE_LOBBY の 1 IP / 1 handle あたり頻度制限 | LOGIN handle 自称強化 (`#621` follow-up [#664](https://github.com/SH11235/rshogi/issues/664) 側のスコープ) |
-| GameRoom DO の連続生成上限 (1 IP あたり 1 分の room 作成数) | DO 内 admin command の rate limit (#663 で session 制限済) |
-| Cloudflare WAF / Rate Limiting Rules の運用手順 (runbook) | DDoS 攻撃検知の SIEM 連携 (Session B [#625](https://github.com/SH11235/rshogi/issues/625) 側) |
+| room の player / spectator upgrade | route・Origin・Upgrade 検査 → IP 取得 → WsRoomUpgradePerIp → player のみ RoomCreatePerIp → GameRoom DO 解決・fetch |
+| LOGIN_LOBBY | attachment の IP を取得 → LobbyLoginPerIp → LobbyLoginPerHandle → 認証・queue 登録 |
+| CHALLENGE_LOBBY | attachment の IP を取得 → LobbyChallengePerIp → LobbyChallengePerInviter → 招待発行 |
 
-## 2. 攻撃モデル / 緩和ターゲット
+room 作成 cap は Lobby の MATCHED 送出時ではなく、その後の player upgrade で消費する。
+spectator は RoomCreatePerIp を消費しないが、WsRoomUpgradePerIp は player と共有する。
 
-### 2.1 想定攻撃ケース
+実装: [router.rs](../../crates/rshogi-csa-server-workers/src/router.rs)、
+[lobby.rs](../../crates/rshogi-csa-server-workers/src/lobby.rs)。
 
-| 攻撃 | 対象 | 影響 | 緩和層 |
-|---|---|---|---|
-| 大量 room_id への WS upgrade flood | `/ws/<room_id>`、GameRoom DO | DO instance 量産 → memory / storage / class A request 浪費 | 層 1 (WAF) + 層 2 (atomic rate limiter) + 層 3 (room 作成 counter) |
-| LOGIN_LOBBY flood | `/ws/lobby`、LobbyDO | LobbyDO WS 上限 32,768 接続/DO → 全マッチング停止 | 層 1 (WAF) + 層 2 (atomic rate limiter) |
-| AGREE 不到達による DO 占有 | GameRoom DO | AGREE_TIMEOUT_SECONDS 経過まで slot 占有 (現状 60 sec、PR [#616](https://github.com/SH11235/rshogi/pull/616) で対処済) + その間に新規流入で複数 DO 占有 | 既存 AGREE_TIMEOUT_SECONDS + 本 issue の per-IP cap |
-| handle 自称による queue 浪費 | LobbyDO in-memory queue | LOBBY_QUEUE_SIZE_LIMIT (= 100 既定) を埋めて正規ユーザを締め出す | 層 2 (per-handle atomic counter) + #664 (handle whitelist) |
+## 5. 検証条件
 
-### 2.2 緩和ターゲット (Codex review 反映 2026-05-09)
+### 5.1 設定
 
-3 層構成、層 2 は **atomic な counter 機構** が baseline、WAF = production 防御層 として併用前提。
+既定値、不正値の fallback、環境別 wrangler 設定のキー整合性を検査する。
 
-- **層 1: Cloudflare WAF / Rate Limiting Rules** (production 防御)
-  - `/ws/lobby` / `/ws/<room_id>` への 1 IP あたり N 接続/分の上限
-  - Cloudflare ダッシュボード or API で設定 (運用層、コード変更不要)
-  - production 既設の Cloudflare Free plan で WAF Rate Limiting が利用可能か要確認 (Free plan は基本制限機能のみ、Pro 以上で柔軟な rule 定義)
-- **層 2: Worker code 内 atomic rate limiter** (baseline)
-  - `accept_web_socket` 直前に 1 IP / 1 handle ごとの bucket / counter を参照、超過すれば 429 / 503 で拒否
-  - **atomic 操作が必須** (Cloudflare KV は eventual consistency のため race で抜ける、Codex review P1)。
-    Cloudflare Workers Rate Limiting binding か専用 DO を baseline、KV は metrics / 観測補助のみ — open question §3
-- **層 3: room 作成上限**
-  - 1 IP あたり 1 分間の **新規 GameRoom DO 起動回数** に上限
-  - LobbyDO `MATCHED` 経由 (#582 `CHALLENGE_LOBBY` も含む) と `/ws/<room_id>` 直行の両経路で発火
-  - 状態保管は層 2 と同じ atomic counter (KV は不可)
-  - 発火ポイント (claude review) — 詳細は §4.4 Implementation hook points 参照
+### 5.2 Token bucket
 
-### 2.3 共通実装ガード (Cloudflare Workers 固有)
+消費、経過時間に応じた補充、飽和、retry-after の算出、storage エラー時の
+挙動を host unit test と DO の統合テストで検査する。
 
-- **クライアント IP の取得元**: `request.headers().get("CF-Connecting-IP")` のみを使う。
-  `X-Forwarded-For` は Cloudflare 通過後も client が偽装可能なヘッダを含むため、本 PR の rate limit 鍵には使わない (claude review)
-- **`CF-Connecting-IP` 未取得時の挙動**: **fail-closed (拒否)**。Cloudflare Workers
-  では正規経路で常に存在するため、欠落は anomalous (内部 fetch / mock / 攻撃いずれも
-  通常運用では出ない)。本 PR では `CF-Connecting-IP` が空 / 取得失敗の request を
-  503 + `Retry-After` 短時間 (10 秒程度) で reject する設計に固定する (§5.3 で
-  fail-closed テストを必須化)
+### 5.3 Miniflare E2E
 
-## 3. Open questions (user 確認必須)
+[rate_limit.test.ts](../../crates/rshogi-csa-server-workers/tests/miniflare_smoke/rate_limit.test.ts)
+を中心に以下を検査する。5 の時間経過による補充は Miniflare では実行せず、
+host の pure logic test で補う。
 
-実装着手前に user に確認したい設計判断を 5 件集約する。本 doc 更新 PR の review
-段階で確定 → 実装 PR で値を埋める契約。
+1. 同一 IP からの LOGIN_LOBBY burst の拒否。
+2. 異なる IP でも同一 handle の LOGIN_LOBBY 制限。
+3. CHALLENGE_LOBBY の IP / inviter ごとの制限。
+4. room upgrade の HTTP 503 と Retry-After。
+5. 時間経過による token の補充 (host test)。
+6. CF-Connecting-IP 欠落時の fail-closed。
+7. 不正な room_id が bucket を消費しないこと。
 
-### Q1. Cloudflare WAF API access の有無
-
-- 質問: production 運用 Cloudflare アカウントで WAF / Rate Limiting Rules の **API token + zone access** が
-  自動化 (CI / Terraform) で扱える状態か?
-- 選択肢:
-  - **Q1-A**: 現時点で API token 整備済 → 実装 PR で WAF rule を IaC (Cloudflare Terraform Provider 等) で
-    管理し、`docs/csa-server/rate_limit.md` に rule 定義を載せる
-  - **Q1-B**: API token 未整備 → 本 PR では runbook (`docs/csa-server/rate_limit.md`) でダッシュボード手順
-    のみ提示し、API/IaC 管理は別 follow-up issue
-  - **Q1-C**: Cloudflare Free plan で Rate Limiting Rules が制限的 → 層 1 を **Worker code 側で代替** (層 2 に
-    集約)、production 昇格時に Pro 以上へ移行を検討
-- recommendation: **Q1-B (runbook only)** をまず取って実装 PR を軽くし、Cloudflare 側の plan / API token
-  の整備が固まってから IaC 化を別 follow-up で扱う
-
-### Q2. 層 2 の atomic rate limiter 実装 (Codex review P1 反映)
-
-- 質問: 1 IP / 1 handle ごとの counter / bucket をどの atomic 機構で実装するか?
-- **前提 (Codex P1 確定)**: Cloudflare KV は eventual consistency で
-  `read → modify → write` の atomic op 保証がなく、同一 IP の同時 burst で
-  race して上書きが起きる ([Cloudflare 公式: How KV works](https://developers.cloudflare.com/kv/concepts/how-kv-works/))。
-  したがって **KV は層 2 の baseline には使わない**。
-- 選択肢:
-  - **Q2-A: Cloudflare Workers Rate Limiting binding** (Workers 標準 API、atomic)
-    - メリット: native atomic、運用コスト極小、設定は wrangler binding のみ。
-      [公式 docs](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) 参照
-    - デメリット: Cloudflare 提供アルゴリズム (sliding window) しか選べない、custom
-      semantics (例: token bucket の refill rate を IP/handle で変える) は不可
-  - **Q2-B: 専用 RateLimitDO (singleton or sharded)**
-    - メリット: strong consistency、token bucket の atomic 操作、custom logic
-      (handle prefix / multi-window 等) 自由
-    - デメリット: 1 instance だと SPOF / scaling 限界 ([#632](https://github.com/SH11235/rshogi/issues/632)
-      LobbyDO sharding と同テーマ)。sharding 必須なら追加実装コスト大
-  - **Q2-C: GameRoom / Lobby DO 内 in-memory** (既存 DO 局所 bucket、補助のみ)
-    - メリット: 配線最小、追加 DO 不要
-    - デメリット: per-IP 集約には DO 横断ができないので、room ごとの burst しか
-      防げない。LOBBY 経路 (1 instance) では機能するが GameRoom (per-room instance)
-      では集約不能
-  - **Q2-D: KV (補助のみ、baseline 不可)**
-    - 用途: 観測 metrics / soft cap (1 分単位 best-effort) としてのみ使用、
-      hard rate limit には使わない
-    - デメリット: race による counter 抜けあり、強制 fail-closed が困難
-- recommendation: **Q2-A (Workers Rate Limiting binding) を baseline**。custom
-  semantics が必要になった時点で Q2-B (専用 DO) に拡張。Q2-C は LobbyDO 内の
-  per-handle prefix 集約用に併用検討、Q2-D は metrics 観測 only
-- 採択判定材料:
-  - production Cloudflare 契約で Rate Limiting binding が利用可能か (要 user 確認)
-  - 利用不可なら Q2-B (専用 DO) に降格、初期は singleton で実装し負荷測定後に sharding 検討
-
-### Q3. Rate limit の閾値 (各層、初期値)
-
-- 質問: production 既定値をいくつにするか?
-- 選択肢のテーブル (Codex P2 反映: `CHALLENGE_LOBBY` も対象に追加):
-  | 層 | 単位 | 提案値 (recommendation) | 緩和したい場合 |
-  |---|---|---|---|
-  | 層 1 (WAF) | 1 IP あたり `/ws/lobby` 接続 | 30 接続/分 | (Pro 以上に依存) |
-  | 層 1 (WAF) | 1 IP あたり `/ws/<room_id>` 接続 | 60 接続/分 | (同上) |
-  | 層 2 (atomic limiter) | 1 IP / LOGIN_LOBBY | 10 trial/分 | env で `LOBBY_LOGIN_RATE_PER_IP_PER_MIN` |
-  | 層 2 (atomic limiter) | 1 handle / LOGIN_LOBBY | 5 trial/分 | env で `LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN` |
-  | 層 2 (atomic limiter) | 1 IP / CHALLENGE_LOBBY (private 招待発行) | 5 trial/分 | env で `LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN` |
-  | 層 2 (atomic limiter) | 1 inviter handle / CHALLENGE_LOBBY | 3 trial/分 | env で `LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN` |
-  | 層 3 (atomic counter) | 1 IP / GameRoom 起動 | 20 room/分 | env で `ROOM_CREATE_RATE_PER_IP_PER_MIN` |
-- `CHALLENGE_LOBBY` の閾値根拠: 1 inviter が短時間に多数の private 招待を発行
-  する正規ユースケースは想定しないため、LOGIN_LOBBY より低めに設定。token registry
-  ([`lobby.rs::handle_challenge_lobby`](../../crates/rshogi-csa-server-workers/src/lobby.rs)) を
-  flood で埋めることを防ぐ
-- recommendation: 初期値は保守的 (推奨表) で staging E2E + 実トラフィック観測後に調整
-- env 経由で動的調整可能にする (config.rs 経由、`LOCAL_DEV_ONLY_VARS_KEYS` 範囲外で
-  `SHARED_PUBLIC_VARS_KEYS` 入り)
-
-### Q4. 拒否時のレスポンス / UX
-
-- 質問: 上限超過時にクライアントに何を返すか?
-- 選択肢:
-  - **Q4-A**: WS upgrade を 503 で拒否 + `Retry-After` ヘッダ (LOGIN_LOBBY なら `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`)
-  - **Q4-B**: 静かに切断 (1009 Message Too Big 経路と同じ pattern)
-  - **Q4-C**: 専用 close code (例: 4000-4999 範囲のカスタムコード)
-- recommendation: **Q4-A** + 既存 `LOGIN_LOBBY:incorrect rate_limited` パターン (memory 由来、`server.rs::handle_connection`
-  で実装済) を再利用。HTTP path は 429 で `Retry-After` を返す
-- 注意: Q4-A 採択時、**Q5 で Floodgate client の `LOGIN_LOBBY:incorrect rate_limited` 解釈確認** が pre-PR3a
-  blocker になる
-
-### Q5. Floodgate / 既存 client の `rate_limited` 互換性 (claude review 追加)
-
-- 質問: `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>` を返したとき、既存
-  client が wire format をパースして reasonable な UX (例: 自動 retry を
-  抑える / エラーメッセージ表示) を取れるか?
-- 選択肢:
-  - **Q5-A**: pre-PR3a で `crates/rshogi-csa-client` (本リポ同梱) と
-    `crates/rshogi-csa-server-tcp` の `LOGIN_LOBBY:incorrect` パーサ実装を grep して
-    `rate_limited` トークンが既知 reason 一覧 (`unknown_game_name` /
-    `already_logged_in` 等) に追加されているか / 未知トークンの fallback 経路が
-    安全か (= 自動 retry loop を発生させないか) を確認する。Floodgate 互換 native
-    client (本リポ外) については protocol-reference.md 経由でのみ告知できる
-  - **Q5-B**: pre-PR3a checklist を省略し、PR3a 実装と同時に
-    `lobby_protocol.rs::build_login_incorrect_line` の format を確認・整合
-- recommendation: **Q5-A**。実装着手前に 30 分程度で grep + 対象 client の手動
-  シナリオ確認を済ませ、互換性問題があれば閾値レスポンスを `Q4-B` (silent close) や
-  `Q4-C` (専用 close code) に変える設計分岐ポイントとする
-
-## 4. 実装計画 (Q1-Q5 確定後の素案)
-
-### 4.1 PR 構成案
-
-1 PR にすると差分が大きいので 2 PR に分割提案。**`rate_limit.rs` の中身は Q2 採択
-結果で大きく変わる**ため、Q2 確定前に着手しない:
-
-- **PR3a: 層 2 + 層 3 + runbook** (Worker code-only)
-  - `crates/rshogi-csa-server-workers/src/rate_limit.rs` (新規 module): Q2 採択次第:
-    - **Q2-A 採択時**: Cloudflare Workers Rate Limiting binding (`env.RATE_LIMITER`) の
-      薄い adapter のみ。`check_login_lobby(env, ip)` 等の呼び出し helper と env→threshold
-      マッピング、`Retry-After` 値計算が中心。token consume / refill は Cloudflare 側
-      実装に委譲し、本 crate には pure な token bucket logic は書かない
-    - **Q2-B 採択時 (Q2-A 不可の fallback)**: 専用 RateLimitDO の class 実装 +
-      薄い adapter。pure な token bucket logic (consume / refill / window 切替) は
-      DO 内 storage を読み書きする atomic 操作として書く必要があり、host テストで
-      pure helper として切り出す
-  - `router.rs` / `lobby.rs` / `game_room.rs` の WS upgrade 経路で `rate_limit::check_*` 呼び出し
-  - `ConfigKeys` に閾値 env 追加 (Q3 表参照)
-  - `docs/csa-server/rate_limit.md` (runbook、WAF ダッシュボード手順 + 環境変数 reference)
-- **PR3b: WAF / IaC** (Cloudflare 側、Q1-A 採択時のみ)
-  - Terraform / wrangler API 経由の WAF rule 定義
-  - production / staging の rule 差分 doc
-
-Q1-B / Q1-C 採択時は PR3b は doc 更新のみ。
-
-### 4.2 既存 audit 領域との統合
-
-- [#627](https://github.com/SH11235/rshogi/issues/627) で導入した `MAX_WS_LINE_BYTES` (4 KiB) は
-  per-message DoS 防御。本 PR とは別軸で併存
-- [#600](https://github.com/SH11235/rshogi/issues/600) `AGREE_TIMEOUT_SECONDS` は対局成立前 DO 占有
-  の自動解放。本 PR の per-IP cap と独立に動く
-- [#629](https://github.com/SH11235/rshogi/issues/629) orphan sweep は cron 駆動の DO 後始末。
-  本 PR で room 作成 cap を入れることで sweep 対象の orphan 量も減らせる
-
-### 4.3 LobbyDO sharding ([#632](https://github.com/SH11235/rshogi/issues/632)) との関係
-
-Q2-B (専用 RateLimitDO) を採用すると DO 1 instance の SPOF / scaling 限界が
-[#632](https://github.com/SH11235/rshogi/issues/632) と同じテーマになる。本 PR で
-RateLimitDO を新設する場合、Session C [#632](https://github.com/SH11235/rshogi/issues/632)
-の sharding 戦略と整合する設計を一度で固める方が手戻り少。
-
-→ Q2-A (Cloudflare Rate Limiting binding) 採択ならこの懸念は浮かない (Cloudflare 側で sharding 済)。
-
-### 4.4 Implementation hook points (claude review #1 反映)
-
-層 3 の room 作成カウンタ発火点は **DO 起動経路 2 つ** で挙動が分かれるため、
-PR3a 実装前に確定しておく。両経路で **DO の `id_from_name` を解決した直後 +
-当該 DO への最初の fetch / WS upgrade を発出する直前** にカウンタを増やす設計。
-
-| 経路 | 発火ファイル / 関数 | カウンタ更新タイミング |
-|---|---|---|
-| `/ws/<room_id>` 直行 | [`router.rs::forward_ws_to_room`](../../crates/rshogi-csa-server-workers/src/router.rs) | Origin 検査 → `parse_ws_route` 直後、`stub.fetch_with_request` 直前 |
-| LobbyDO `MATCHED` 経由 | [`lobby.rs::handle_login_lobby` の `try_pair` 後](../../crates/rshogi-csa-server-workers/src/lobby.rs)、`build_matched_line` 送出経路 | 両者 client に `MATCHED <room_id>` を送る前 (送出後だと client 側再 LOGIN 経路で 2 重カウントになるため) |
-| CHALLENGE_LOBBY private 経由 (#582) | LobbyDO で private LOGIN ペアが揃った瞬間 (上記同等の MATCHED 経路、follow-up issue #582 の実装時に確認) | 同上 |
-
-注意点 (claude review):
-- DO 存在確認前にカウンタを増やすと、`%%room_id` が空 / 不正な値の場合でも
-  カウントされる。`parse_ws_route` でフォーマット検証 → 通過 → カウント、の順序を守る
-- カウンタ自体の更新は層 2 と同じ atomic 機構 (Q2 採択結果に従う)。KV を使った
-  best-effort 設計は採用しない (Codex P1)
-
-### 4.5 KV を補助用途に限定した場合の運用 (Q2-D 採択時のみ)
-
-KV は metrics 観測 (1 分単位 best-effort、aggregate ダッシュボード等) や
-soft cap warning にのみ使う。以下を明示する:
-
-- **Window kind**: タンブリングウィンドウ (`key = ip:202605081234` の分単位、
-  KV TTL=60s と整合)。スライディングは read-modify-write 回数が増えて KV 経路では
-  実用的でない
-- **Fail mode**: KV が一時的に利用不能なら **fail-open (rate limit 観測のみスキップ)**。
-  hard cap は層 2 の atomic 機構が保証するため、KV 障害で全拒否 (fail-closed) する
-  必要はない
-- **整合性ノイズの許容**: KV の最終整合 (~60s) で counter が 1〜2 件抜けても、
-  hard cap は層 2 で保証されるため運用影響は無視可能
-
-## 5. Test plan (実装 PR 用 checklist)
-
-### 5.1 Pre-PR3a checklist
-
-- [x] **Q5 互換性確認** (2026-05-10 完了、Codex review 反映で修正): csa-client は
-  `bail!` 後に **main loop で exponential backoff retry** する (`main.rs:282-294` /
-  `342-353`) ため、初回 PR の「fatal exit / retry なし」結論は誤りだった。
-  実際の挙動は §6.1 を参照。**Q4-A は採択可能だが client 側 follow-up が必要**:
-  - csa-client は `<reason>` トークンを評価せず `bail!` → main loop で
-    `retry_delay` (初期値の倍々、`max_delay_sec` 上限) sleep 後 `continue`
-  - 結果: 同一 IP / handle が rate limit 後も `log2(max_delay/initial_delay)` 回
-    程度の retry storm を起こす
-  - ただし bounded (kill-server には至らない、`max_delay_sec` で頻度上限が固定)。
-    server 側 penalty 自体は block 中の再試行で延長されない (TCP 実装
-    `crates/rshogi-csa-server-tcp/src/rate_limit.rs:92-97` は `blocked_until`
-    を更新せずそのまま Deny、Q2-A の Cloudflare Rate Limiting binding も同様)
-  - **follow-up issue として csa-client に `retry_after=<sec>` honoring を起票**
-    (本 PR では doc 訂正のみ、コード変更は別 PR で扱う)
-- [ ] **Q1 確定**: IaC ロードマップ [#675](https://github.com/SH11235/rshogi/issues/675) Phase 3
-  との合流で **Q1-A (IaC for WAF)** に確定見込み。production Cloudflare 契約で
-  Rate Limiting Rules が利用可能か user 確認
-- [ ] **Q2 確定**: Workers Rate Limiting binding が使えなければ Q2-B (専用 DO) に
-  降格する判断
-
-### 5.2 Host unit tests (Q2 採択結果に応じた pure logic 範囲)
-
-- [ ] `crates/rshogi-csa-server-workers/src/rate_limit.rs` の pure helper を host テストでカバー
-  - **Q2-A 採択時**: env→threshold マッピング解決 / `Retry-After` 秒数算出 /
-    Cloudflare binding error の error mapping (atomic op 自体は Cloudflare 側保証)
-  - **Q2-B 採択時**: token consume / refill / window 切替 / 多 IP 並列 (DO storage
-    に対する atomic 操作の pure logic を切り出してテスト)
-- [ ] CHALLENGE_LOBBY ハンドラの per-IP / per-handle counter 増減 logic
-- [ ] `cargo test -p rshogi-csa-server-workers --lib rate_limit` 全 pass
-
-### 5.3 Miniflare E2E (`tests/miniflare_smoke/rate_limit.test.ts` 新規)
-
-- [ ] **LOGIN_LOBBY flood** (per-IP): 同一 IP から N+1 回 LOGIN_LOBBY を投げ、
-  N+1 回目に `LOGIN_LOBBY:incorrect rate_limited` で拒否
-- [ ] **LOGIN_LOBBY flood** (per-handle): 同一 handle で異なる IP から M+1 回
-  LOGIN_LOBBY を投げ、M+1 回目に拒否
-- [ ] **CHALLENGE_LOBBY flood** (per-IP / per-inviter): 同様の per-IP /
-  per-inviter limit 動作 (Codex P2)
-- [ ] **/ws/<room_id> upgrade flood**: 同一 IP から M+1 回 `/ws/<room_id>` upgrade
-  で 503 + `Retry-After` レスポンス
-- [ ] **窓リセット**: 1 分後に counter がリセットされて受理される
-- [ ] **CF-Connecting-IP 欠落時の挙動** (claude review #3): `CF-Connecting-IP`
-  ヘッダなしの request で fail-closed (拒否) されること
-- [ ] **`%%room_id` 不正値**: `parse_ws_route` で reject される room_id では
-  カウンタ増加しないこと (claude review #1)
-
-### 5.4 並行 / 障害シナリオ (claude review #5)
-
-- [ ] **並行 burst テスト**: 同一 IP から複数の Worker インスタンスが並行して
-  layer 2 counter を increment するとき、atomic 機構 (Q2 結果) で **race による
-  counter 抜けが発生しないこと**。Q2-A (Workers Rate Limiting binding) 採択時は
-  Cloudflare 側保証だがテストで実証する
-- [ ] **KV (Q2-D 採択時のみ): KV 障害時 fail-open テスト**: KV binding が `throw`
-  しても layer 2 の hard cap は層 2 atomic 機構で機能し、観測 metrics のみ欠落
-  すること
-
-### 5.5 ビルド / 統合
-
-- [ ] `cargo build --target wasm32-unknown-unknown --lib --release` green
-- [ ] staging E2E: 大量 LOGIN flood 試験で全マッチング停止が回避されることを観測
-- [ ] runbook (`docs/csa-server/rate_limit.md`) で WAF dashboard 手順 + env tuning gradient を doc 化
-
-## 6. 補足調査結果
-
-### 6.1 Q5 client 互換性 grep (2026-05-10 実施)
-
-`Q4-A` (`LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`) を本リポ内 client 群に
-送信したときの挙動を grep で確認した結果。
-
-#### TCP server (`rshogi-csa-server-tcp`)
-
-`LOGIN:incorrect rate_limited retry_after=<sec>` を **既に実装済み**:
-
-- [`src/rate_limit.rs::IpLoginRateLimiter`](../../crates/rshogi-csa-server-tcp/src/rate_limit.rs):
-  per-IP 1 分窓カウンタ、超過時 `RateDecision::Deny { retry_after_sec }`
-- [`src/server.rs::handle_connection`](../../crates/rshogi-csa-server-tcp/src/server.rs)
-  (line 1088-1100 付近): 既定 10 trial/分、超過時に `LOGIN:incorrect rate_limited
-  retry_after={retry_after_sec}` 行を送って `return`
-- [`tests/tcp_session.rs::login_rate_limit_denies_burst`](../../crates/rshogi-csa-server-tcp/tests/tcp_session.rs):
-  12 連続 LOGIN で 11 回目以降に `LOGIN:incorrect rate_limited` が返ることを assert
-
-→ Workers 側で同 format を採用すれば TCP との挙動整合が取れる。precedent が確立済。
-
-#### csa-client (`rshogi-csa-client`)
-
-> **修正履歴**: 初回 PR push (2026-05-10) では「fatal exit、retry なし」と
-> 誤った結論を載せていた。Codex review (P1) で `bail!` は上位 main loop に
-> `Err` を返すだけでプロセス終了ではないと指摘され、実装を再確認して訂正した。
-
-##### LOGIN (game room / TCP 経路)
-
-[`src/protocol.rs::login`](../../crates/rshogi-csa-client/src/protocol.rs) line 125-141:
-
-```rust
-if is_login_ok(&response) {
-    log::info!("[CSA] ログイン成功: {id}");
-    Ok(())
-} else {
-    bail!("ログイン失敗: {response}");
-}
-```
-
-- `is_login_ok` は `LOGIN:` prefix + ` OK` suffix のセット判定 ([line 594])
-- 不一致なら `<reason>` を文字列に含めて `Err` を返す (`bail!` は anyhow の
-  early return マクロ、プロセス終了ではない)
-- 上位 [`run_one_game`](../../crates/rshogi-csa-client/src/main.rs) を経由して
-  `main.rs:342-353` で catch (match arm の末尾から自然に上位 loop の次周へ進む):
-  ```rust
-  Err(e) => {
-      log::error!("対局エラー: {e}");
-      // ... engine 再起動 + retry_delay sleep + retry_delay *= 2
-      // (arm の終わりまで到達した後、`loop {}` の次イテレーションで再試行)
-  }
-  ```
-
-##### LOGIN_LOBBY (Workers lobby 経路)
-
-[`src/main.rs:577-631`](../../crates/rshogi-csa-client/src/main.rs):
-
-```rust
-if let Some(rest) = line.strip_prefix("LOGIN_LOBBY:") {
-    if rest.ends_with(" OK") { continue; }  // MATCHED 待機
-    if rest.starts_with("incorrect") {
-        bail!("[Lobby] LOGIN_LOBBY 拒否: {rest}");
-    }
-}
-```
-
-`bail!` は `acquire_lobby_match` の戻り値経由で `main.rs:285-295` で catch:
-
-```rust
-Err(e) => {
-    log::error!("ロビー接続エラー: {e}");
-    std::thread::sleep(retry_delay);
-    retry_delay = (retry_delay * 2).min(Duration::from_secs(max_delay_sec));
-    continue;  // 上位 loop で再 `acquire_lobby_match`
-}
-```
-
-##### 実際の retry 挙動 (Q4-A 採択時)
-
-server が `LOGIN_LOBBY:incorrect rate_limited retry_after=10` を返したとき:
-
-1. csa-client: `bail!` → main loop catch
-2. `retry_delay` 秒 sleep (初期値 `config.retry.initial_delay_sec`、struct
-   default は 10、`csa_client.toml.example` も 10)
-3. `continue` で再 LOGIN_LOBBY 試行 → server で再度 rate_limited
-4. `retry_delay *= 2` で次回はより長く sleep
-5. `retry_delay > retry_after_sec` になれば server-side penalty が解けて成功
-
-**csa-client は `retry_after=<sec>` を honoring しない**ため、`retry_delay` が
-`retry_after_sec` を上回るまで penalty 中の retry が繰り返される。
-
-##### 影響量の評価
-
-- 試行回数: `log2(max_delay_sec / initial_delay_sec)` 程度
-  (struct default `10s → 900s` なら ≒ 7 回、example `10s → 60s` なら ≒ 3 回)
-- 頻度上限: `max_delay_sec` で固定 (struct default 900s、example 60s)、いずれも
-  kill-server には至らない
-- server 側 penalty: block 中の再試行では延長されない (TCP `rate_limit.rs:92-97`、
-  Cloudflare Rate Limiting binding の sliding window 仕様)。よって retry が
-  自分で penalty を延ばす悪循環は起きない
-- production への実害: bounded だが運用観測上 **suboptimal** (Floodgate grade
-  には不適切、Sentry / 観測ダッシュボードに retry エラーが量産される)
-
-#### 結論
-
-**Q4-A は採択可能だが、csa-client 側で `retry_after=<sec>` honoring を行う
-follow-up が必要**。
-
-- 即座の breakage / kill-server リスクはなし → PR3a 着手 blocker ではない
-- ただし production 投入前に follow-up issue で csa-client の retry 戦略を改善
-  しておく方が望ましい (rate_limit error メッセージから `retry_after_sec` を
-  parse → `retry_delay = max(retry_after_sec, retry_delay)` を設定)
-- Q4-B (silent close) や Q4-C (専用 close code) に切り替えても、csa-client は
-  接続エラーで同様の retry loop を起こすため緩和にならない (= Q4 切替で
-  解決しない問題)
-- 外部 Floodgate 互換 native client (本リポ外) は実装ごとに retry 戦略が
-  異なるため挙動を保証できないが、`LOGIN:incorrect rate_limited retry_after=`
-  format は TCP server で既に運用中で実害報告なし
-
-#### follow-up 起票済
-
-[#682](https://github.com/SH11235/rshogi/issues/682):
-`feat(csa-client): rate_limit error の retry_after=<sec> を honoring して retry storm を抑える`
-
-- main.rs:282-294 / 342-353 の Err arm で error メッセージを parse し、
-  `retry_after_sec` 秒以上 sleep するよう `retry_delay` を上書き
-- mock server による integration test で sleep 時間 assert
-- PR3a の merge blocker ではない (= #622 着工は本 issue 完了を待たない) が、
-  Floodgate grade production 投入前には完了推奨
-
-## 7. 関連
-
-- 親 issue: [#622](https://github.com/SH11235/rshogi/issues/622)
-- 並走 (Session A 同パッケージ):
-  - PR [#662](https://github.com/SH11235/rshogi/pull/662) (#560、admin auth foundation) — merged
-  - PR [#663](https://github.com/SH11235/rshogi/pull/663) (#621、admin command) — merged
-  - [#664](https://github.com/SH11235/rshogi/issues/664) (#621 follow-up、LOGIN handle 自称強化)
-- Session C (capacity) との依存: [#632](https://github.com/SH11235/rshogi/issues/632) (LobbyDO sharding)
-  と RateLimitDO 設計の重複に注意
-- Session B (ops) との依存: [#625](https://github.com/SH11235/rshogi/issues/625) (alerting / metrics)
-  で本 PR の rate limit 拒否カウントを観測する経路を別途整備
-
-## 8. 実装後ステータス (2026-05-12 更新)
-
-設計段階の本 doc に対し、実装フェーズで確定した内容を以下に集約する。
-
-### 8.1 PR3a (層 2 + 層 3): 実装・production 投入済
-
-- PR [#699](https://github.com/SH11235/rshogi/pull/699) (squash `6070db5f`) で merge。Q2-B (専用 `RateLimiter`
-  Durable Object、per-(kind, identifier) sharded token bucket) を採択 (Cloudflare Workers Rate Limiting
-  binding が本アカウントで利用不可確認のため)。
-- production deploy 済: `deployed_sha=5f44a15b` (PR #699 follow-up commit、2026-05-11 dispatch deploy)。
-  6 個の閾値 env (Q3 表) は `wrangler.production.toml` / `wrangler.staging.toml` の `[vars]` に投入済
-  (`LOBBY_LOGIN_RATE_PER_IP_PER_MIN=10` / `LOBBY_LOGIN_RATE_PER_HANDLE_PER_MIN=5` /
-  `LOBBY_CHALLENGE_RATE_PER_IP_PER_MIN=5` / `LOBBY_CHALLENGE_RATE_PER_HANDLE_PER_MIN=3` /
-  `ROOM_CREATE_RATE_PER_IP_PER_MIN=20` / `WS_ROOM_UPGRADE_RATE_PER_IP_PER_MIN=60`)。
-- **拒否レスポンスの実装結果** (Q4-A の最終形): `/ws/<room_id>(/spectate)` upgrade flood は
-  **HTTP 503 Service Unavailable + `Retry-After: <sec>` ヘッダ** + body `rate_limited; retry after <sec> seconds (issue #622, ...)`
-  (`rate_limit.rs::build_ws_upgrade_rate_limited_response`)。`LOGIN_LOBBY` / `CHALLENGE_LOBBY` flood は
-  WS 確立後の in-band 1 行 `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>` /
-  `CHALLENGE_LOBBY:incorrect rate_limited retry_after=<sec>`。CF-Connecting-IP 欠落時は fail-closed で
-  503 + `Retry-After: 10`。csa-client は PR [#683](https://github.com/SH11235/rshogi/pull/683) (#682) で
-  `retry_after=<sec>` honoring 対応済。
-- **動作確認 (2026-05-12)**: staging (`rshogi-csa-server-workers-staging.sh11235.workers.dev`) で
-  `/ws/<room_id>/spectate` に並列 WS upgrade を 90 件投げ、token bucket capacity=60 を超えた分が
-  503 + `Retry-After: 1` で拒否されることを確認。1 件ずつ逐次 (≈2s 間隔) では refill rate (1 token/sec)
-  が消費に追いつき発火しないため、smoke test は **並列バースト** で行うこと。
-
-### 8.2 PR3b (層 1: Cloudflare WAF / Rate Limiting Rules): Pro plan 移行待ちで保留
-
-- sh11235.com zone は **Cloudflare Free plan** (2026-05-12 user 確認)。Free plan では WAF Custom Rules /
-  advanced Rate Limiting Rules が使えず (basic DDoS protection のみ)、層 1 の declarative rule は実装不可。
-  → §3 Q1 の **Q1-C** が確定。層 1 の役割は当面 PR3a の Worker code 側 token bucket (層 2) が代替する。
-- **再着手トリガ**: user が sh11235.com zone を Pro plan ($25/mo) 以上にアップグレードした時点。その際は
-  rshogi [#675](https://github.com/SH11235/rshogi/issues/675) Phase 3 (Cloudflare IaC) と統合し、`iac` private
-  repo の Pulumi で `cloudflare.RulesetRule` (or `cloudflare.RateLimit`) を declare する
-  (`/ws/lobby` 30 接続/分・per-IP / `/ws/<room_id>` 60 接続/分・per-IP の Q3 表 §117-118 が出発点)。
-  `pulumi-iac` token に WAF / Rate Limiting scope の追加が必要 (`iac/docs/cloudflare-api-tokens.md`)。
-
-### 8.3 alert / metrics 連携 (Session B 合流): 案 B 採択、follow-up issue 起票済
-
-- §7 で「Session B [#625](https://github.com/SH11235/rshogi/issues/625) 側で rate limit 拒否カウントを
-  観測する経路を別途整備」としていた件 (§4.2 の既存 audit 領域との統合方針とも関係)。2026-05-12 に
-  **案 B** (rshogi に readonly endpoint を生やし、
-  iac repo の `csa-monitor-workers` cron が 5 分間隔で fetch して Slack alert) を採択。
-- Workers Observability のログ検索は dashboard のみ (Free plan で programmatic query 不可、Logpush /
-  Analytics Engine は Paid)、`RateLimiter` DO は多数 instance に sharding されていて横断集計できないため、
-  別途 singleton 集計 DO (`RateLimitStats`、案 B-1) + `GET /admin/rate_limit_stats` endpoint を新設する。
-- Slack alert 閾値: **任意の kind が 5 分間に 30 件以上 denied** (2026-05-12 user 確定、徹底的設定。env で
-  可変、運用中チューニング)。
-- follow-up issue: rshogi [#711](https://github.com/SH11235/rshogi/issues/711) (RateLimitStats DO + endpoint)
-  / iac [#12](https://github.com/SH11235/iac/issues/12) (csa-monitor probe 追加)。実装は別セッション。
+実機で burst を確認する場合、補充が消費に追いつく逐次送信だけで判断しない。
+実行時の閾値・送信間隔・応答を合わせて記録する。

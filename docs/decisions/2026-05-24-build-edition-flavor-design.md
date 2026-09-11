@@ -2,7 +2,6 @@
 
 - **Status**: Accepted (Edition 軸) / Universal 実装は 2026-07-19 supplement で更新
 - **Date**: 2026-05-24 (本体) / 2026-05-25 (Flavor 軸 retire) / 2026-07-19 (dynamic universal)
-- **設計レビュー**: local Codex (REQUEST CHANGES → 反映済) / local Claude (APPROVE WITH SUGGESTIONS → 反映済) / GitHub Codex bot + Claude bot (PR #733 で auto-review、Critical 1 + Major 2 + Minor 2 + 事実誤り 1 を全て反映)
 
 ## Supplement (2026-07-19): Universal を runtime-dimension 実装へ変更
 

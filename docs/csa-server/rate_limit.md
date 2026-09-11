@@ -87,7 +87,7 @@ LOGIN_LOBBY / CHALLENGE_LOBBY / `/ws/<room_id>` upgrade / room create に対す�
 1. Cloudflare Logs / `wrangler tail` で `rate_limit_denied` ログを観測し、
    どの kind / IP / handle が当たっているか特定する (§4 参照)
 2. `wrangler.<env>.toml` の該当 env を 1.5〜2x 程度に増やす (e.g. `10` → `15`)
-3. 通常の PR レビュー経路で merge (本 PR 同様 Codex review を回す)
+3. 通常の PR レビュー経路で merge
 4. CI deploy 完了後、`wrangler tail` で `rate_limit_denied` 件数の減少を観測
 
 ### 3.2 厳格化 (cap を下げる)

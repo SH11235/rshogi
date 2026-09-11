@@ -1363,7 +1363,7 @@ DO storage を喪失したシナリオでの運用方針を本節で確定する
 
 ### 13.2 採用方針: 喪失時は未完局を一律 abort
 
-**2026-05-10 user 確認確定方針: snapshot / PITR (Point-in-Time Restore) は
+**snapshot / PITR (Point-in-Time Restore) は
 実装しない。DO storage を喪失した場合、未完局は一律 abort 扱い**。
 
 | 対象 | 喪失時の扱い |
