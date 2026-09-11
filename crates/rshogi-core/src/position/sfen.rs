@@ -120,8 +120,8 @@ impl Position {
     }
 
     /// 盤面・手駒・手番を投入済みの状態から、PieceList・ハッシュ・利き・pin・王手・material を
-    /// 再計算し、駒在庫を検証して局面を確定する（`set_sfen` / `set_from_parts` 共通の後処理）。
-    fn finalize_after_population(&mut self) -> Result<(), SfenError> {
+    /// 再計算し、駒在庫を検証して局面を確定する（SFEN / parts / JSON 共通の後処理）。
+    pub(super) fn finalize_after_population(&mut self) -> Result<(), SfenError> {
         self.validate_piece_inventory()?;
 
         // PieceList の初期化

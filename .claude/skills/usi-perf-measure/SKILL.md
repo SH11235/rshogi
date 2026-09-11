@@ -67,8 +67,11 @@ Precise と同じ帰属規則）。**Hyper-V / VBS 有効のままで動く**（
   - `--cpus`（shard 並列）は未対応（指定するとエラー）。`--cpu N` は
     `SetProcessAffinityMask` で論理 CPU 1 個に pin + `HIGH_PRIORITY_CLASS`
 - 計測区間は `position`+`go` 送信直前〜`bestmove` 受信直後の QPC 区間で gating する。
-  区間 close 後に ETW バッファを flush して 500ms 待ち、遅延到着した区間内イベントを
-  取り込んでから集計を確定する
+  ETW セッションは run ごとに作り、エンジン終了後に STOP → consumer の `ProcessTrace`
+  が自然終了するまで待ってから集計する (pin した idle コアでは最終 switch-out 1 件だけが
+  未満杯バッファに残り、FLUSH + 固定待ちでは配送されないことがある)。最終スライス未到着 /
+  CSwitch 連鎖の不一致 / PMC 欠落 / 対象 TID の再利用を検出した run はエラーで破棄される
+  (詳細は `crates/tools/docs/search_only_ab.md`)
 - JSON レポートは Linux 版と `samples` / `summary` がスキーマ互換（`cli` ブロックのみ
   `perf_events` / `pmc_sources` のフィールド名差あり）。source 名は
   `TotalCycles→cycles` / `InstructionRetired→instructions` /
@@ -347,8 +350,3 @@ jq -r '.samples[] | "\(.position_name)\t\(.variant)\t\(.info.nodes)\t\(.perf.ins
   | sort
 ```
 
-## 今までの計測（参照）
-
-- `docs/performance/nps_benchmark_layerstack.md` — L0 別の NPS 退行調査
-- `docs/performance/accumulator_cache_benchmark_20260326.md` — Accumulator cache の効果
-- `docs/performance/propagate_yo_comparison.md` — YO 比較

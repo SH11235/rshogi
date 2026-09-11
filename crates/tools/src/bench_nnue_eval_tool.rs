@@ -32,7 +32,7 @@ use rshogi_core::nnue::{
     set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
-use rshogi_core::types::{Color, PieceType};
+use rshogi_core::types::{Color, PieceType, Value};
 
 /// NNUE評価ベンチマーク
 #[derive(Parser, Debug)]
@@ -186,10 +186,34 @@ impl BenchResult {
     fn print(&self) {
         println!("=== {} ===", self.arch_name);
         println!("  refresh_accumulator: {:.1} ns/op", self.refresh_ns_per_op);
-        println!("  evaluate:            {:.1} ns/op", self.eval_ns_per_op);
+        println!("  evaluate (fixed position 0): {:.1} ns/op", self.eval_ns_per_op);
+        println!("  eval-only SFEN:      {}", TEST_POSITIONS[0]);
         println!("  total (refresh+eval):{:.1} ns/op", self.total_ns_per_op);
         println!("  throughput:          {:.0} evals/sec", self.evals_per_sec);
         println!();
+    }
+}
+
+/// 計測中に局面だけを切り替えないよう、準備済み accumulator と局面を組にする。
+struct FixedEvalCase<'a> {
+    evaluator: &'a NNUEEvaluator,
+    pos: &'a Position,
+}
+
+impl<'a> FixedEvalCase<'a> {
+    fn prepare(evaluator: &'a mut NNUEEvaluator, pos: &'a Position) -> Result<Self> {
+        evaluator.refresh(pos);
+        // 独立した fresh 評価器との照合と割り当ては、すべて計測外で行う。
+        let fresh = NNUEEvaluator::new_with_position(Arc::clone(evaluator.network()), pos);
+        anyhow::ensure!(
+            evaluator.evaluate_only(pos) == fresh.evaluate_only(pos),
+            "prepared eval-only result differs from fresh evaluation"
+        );
+        Ok(Self { evaluator, pos })
+    }
+
+    fn evaluate(&self) -> Value {
+        self.evaluator.evaluate_only(black_box(self.pos))
     }
 }
 
@@ -200,7 +224,9 @@ fn bench_evaluator(
     warmup: u64,
     iterations: u64,
     arch_name: &str,
-) -> BenchResult {
+) -> Result<BenchResult> {
+    anyhow::ensure!(!positions.is_empty(), "benchmark positions must not be empty");
+    anyhow::ensure!(iterations > 0, "iterations must be positive");
     // ウォームアップ
     for i in 0..warmup {
         let pos = &positions[i as usize % positions.len()];
@@ -216,12 +242,14 @@ fn bench_evaluator(
     }
     let refresh_duration = start.elapsed();
 
-    // evaluate ベンチマーク
-    evaluator.refresh(&positions[0]);
+    // eval-only は局面0固定。refresh と結合ベンチは引き続き全局面を巡回する。
+    let case = FixedEvalCase::prepare(evaluator, &positions[0])?;
+    for _ in 0..warmup {
+        black_box(case.evaluate());
+    }
     let start = Instant::now();
-    for i in 0..iterations {
-        let pos = &positions[i as usize % positions.len()];
-        black_box(evaluator.evaluate_only(pos));
+    for _ in 0..iterations {
+        black_box(case.evaluate());
     }
     let eval_duration = start.elapsed();
 
@@ -238,13 +266,13 @@ fn bench_evaluator(
     let eval_ns = eval_duration.as_nanos() as f64 / iterations as f64;
     let total_ns = total_duration.as_nanos() as f64 / iterations as f64;
 
-    BenchResult {
+    Ok(BenchResult {
         arch_name: arch_name.to_string(),
         refresh_ns_per_op: refresh_ns,
         eval_ns_per_op: eval_ns,
         total_ns_per_op: total_ns,
         evals_per_sec: 1_000_000_000.0 / total_ns,
-    }
+    })
 }
 
 /// progress.bin を読み込み f64 → f32 に変換
@@ -753,17 +781,23 @@ pub fn run() -> Result<()> {
         BenchMode::Full => {
             let mut evaluator =
                 NNUEEvaluator::new_with_position(Arc::clone(&network), &positions[0]);
-            let result =
-                bench_evaluator(&mut evaluator, &positions, cli.warmup, cli.iterations, &arch_name);
+            let result = bench_evaluator(
+                &mut evaluator,
+                &positions,
+                cli.warmup,
+                cli.iterations,
+                &arch_name,
+            )?;
 
             result.print();
 
             println!("--- JSON ---");
             println!(
-                r#"{{"mode":"full","arch":"{}","refresh_ns":{:.1},"eval_ns":{:.1},"total_ns":{:.1},"evals_per_sec":{:.0}}}"#,
+                r#"{{"mode":"full","arch":"{}","refresh_ns":{:.1},"eval_ns":{:.1},"eval_scope":"fixed-position","eval_position_index":0,"eval_sfen":"{}","total_ns":{:.1},"evals_per_sec":{:.0}}}"#,
                 result.arch_name,
                 result.refresh_ns_per_op,
                 result.eval_ns_per_op,
+                TEST_POSITIONS[0],
                 result.total_ns_per_op,
                 result.evals_per_sec
             );
@@ -801,6 +835,37 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 外部モデルを明示して実行する数値回帰。固定局面以外の状態を先に作る。
+    #[test]
+    #[ignore = "requires RSHOGI_BENCH_TEST_MODEL"]
+    fn fixed_eval_matches_fresh_after_other_positions() -> Result<()> {
+        let model = std::env::var("RSHOGI_BENCH_TEST_MODEL")?;
+        let network = Arc::new(NNUENetwork::load(model)?);
+        let positions: Vec<_> = TEST_POSITIONS
+            .iter()
+            .map(|sfen| {
+                let mut pos = Position::new();
+                pos.set_sfen(sfen).unwrap();
+                pos
+            })
+            .collect();
+        let mut evaluator = NNUEEvaluator::new_with_position(Arc::clone(&network), &positions[0]);
+        let mut saw_mismatch = false;
+        for (index, pos) in positions.iter().enumerate() {
+            let other = &positions[(index + 1) % positions.len()];
+            evaluator.refresh(other);
+            let fresh = NNUEEvaluator::new_with_position(Arc::clone(&network), pos);
+            let expected = fresh.evaluate_only(pos);
+            saw_mismatch |= evaluator.evaluate_only(pos) != expected;
+            let case = FixedEvalCase::prepare(&mut evaluator, pos)?;
+            for _ in 0..3 {
+                assert_eq!(case.evaluate(), expected);
+            }
+        }
+        assert!(saw_mismatch, "fixture model must expose stale-accumulator mismatch");
+        Ok(())
+    }
 
     #[test]
     fn run_entry_is_reachable_in_tests() {
