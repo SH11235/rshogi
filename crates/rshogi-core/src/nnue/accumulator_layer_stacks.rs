@@ -435,13 +435,20 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
     /// 現在のエントリを取得。
     #[inline]
     pub fn current(&self) -> &StackEntryLayerStacks<L1> {
-        &self.entries[self.current]
+        debug_assert!(self.current < self.entries.len());
+        // SAFETY: entries と current は非公開で、entries の長さは構築後に変わらない。
+        // new/reset は有効な 0 を設定し、push/pop は境界検査の成功後だけ current を更新する。
+        unsafe { self.entries.get_unchecked(self.current) }
     }
 
     /// 現在のエントリを取得（可変）。
     #[inline]
     pub fn current_mut(&mut self) -> &mut StackEntryLayerStacks<L1> {
-        &mut self.entries[self.current]
+        debug_assert!(self.current < self.entries.len());
+        // SAFETY: entries と current は非公開で、entries の長さは構築後に変わらない。
+        // new/reset と検査済みの push/pop が current < entries.len() を維持する。
+        // &mut self により、このエントリへの可変参照は排他的である。
+        unsafe { self.entries.get_unchecked_mut(self.current) }
     }
 
     /// 現在のインデックスを取得
