@@ -4,8 +4,8 @@
 //! CHALLENGE_LOBBY flood、`/ws/<room_id>` upgrade flood、room 起動 flood を
 //! Worker code 側の **atomic token bucket** で抑制する。Cloudflare Workers
 //! Rate Limiting binding は本アカウントで利用不可確認のため、専用 Durable
-//! Object (`RateLimiterDO`) を per-key sharding で実装する (Q2-B 採択、
-//! `docs/csa-server/rate_limit_design.md` §3 Q2)。
+//! Object (`RateLimiterDO`) を per-key sharding で実装する
+//! (`docs/csa-server/rate_limit_design.md` §3 Q2)。
 //!
 //! # 設計の前提
 //!

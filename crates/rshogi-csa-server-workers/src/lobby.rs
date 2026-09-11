@@ -523,7 +523,7 @@ impl Lobby {
         // 2. per-IP 拒否 → reject
         // 3. per-handle 拒否 → reject
         // いずれの順で reject されても WS は close せず、client が retry できる
-        // 経路を保つ (`Q4-A` design: csa-client は retry_after honoring)。
+        // 経路を保つ (設計 §3 Q4: csa-client は retry_after honoring)。
         if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &req.handle).await? {
             return self.send_rate_limited_login_lobby(ws, decision).await;
         }
@@ -852,7 +852,7 @@ impl Lobby {
         Ok(None)
     }
 
-    /// rate limit 拒否時の LOGIN_LOBBY 応答。design doc Q4-A の wire format
+    /// rate limit 拒否時の LOGIN_LOBBY 応答。設計 §3 Q4 の wire format
     /// (`LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`) を採用する。
     /// **WS は close しない**: csa-client 側で `retry_after` を honoring
     /// しつつ retry する経路を踏むため、close すると client が
@@ -1036,7 +1036,7 @@ impl Lobby {
         // 同じ IP / handle カウンタを共有する (どちらも `LOGIN_LOBBY` 系コマンドで、
         // 同 IP / handle からの flood 攻撃面が同等)。
         // private LOGIN_LOBBY ではエラー応答に `1003 close` が伴うのが既存仕様だが、
-        // rate limit reject 時は **WS を close せず** retry を許す (Q4-A 設計と
+        // rate limit reject 時は **WS を close せず** retry を許す (設計 §3 Q4 と
         // 揃え、`send_rate_limited_login_lobby` は close しない)。
         if let Some(decision) = self.check_login_lobby_rate_limit(client_ip, &handle).await? {
             return self.send_rate_limited_login_lobby(ws, decision).await;

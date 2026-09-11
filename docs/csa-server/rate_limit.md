@@ -47,7 +47,7 @@ LOGIN_LOBBY / CHALLENGE_LOBBY / `/ws/<room_id>` upgrade / room create に対す�
 - **wire format**: 拒否時は `LOGIN_LOBBY:incorrect rate_limited retry_after=<sec>`
   / `CHALLENGE_LOBBY:incorrect rate_limited retry_after=<sec>` /
   `/ws/<room_id>` upgrade では HTTP 503 + `Retry-After: <sec>` ヘッダ
-  (design doc Q4-A 採択)。WS は close せず client が retry 可能な状態を保つ。
+  ([設計 §3 Q4](rate_limit_design.md#q4-拒否応答))。WS は close せず client が retry 可能な状態を保つ。
 
 ## 2. 環境変数 reference
 

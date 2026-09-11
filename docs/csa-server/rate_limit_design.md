@@ -131,16 +131,22 @@ spectator は RoomCreatePerIp を消費しないが、WsRoomUpgradePerIp は pla
 ### 5.3 Miniflare E2E
 
 [rate_limit.test.ts](../../crates/rshogi-csa-server-workers/tests/miniflare_smoke/rate_limit.test.ts)
-を中心に以下を検査する。5 の時間経過による補充は Miniflare では実行せず、
-host の pure logic test で補う。
+を中心に以下を検査する。5 と 6 は Miniflare では実行していない。
 
 1. 同一 IP からの LOGIN_LOBBY burst の拒否。
 2. 異なる IP でも同一 handle の LOGIN_LOBBY 制限。
 3. CHALLENGE_LOBBY の IP / inviter ごとの制限。
 4. room upgrade の HTTP 503 と Retry-After。
 5. 時間経過による token の補充 (host test)。
-6. CF-Connecting-IP 欠落時の fail-closed。
+6. CF-Connecting-IP 欠落時の fail-closed (ヘルパの host test とハンドラの静的確認のみ)。
 7. 不正な room_id が bucket を消費しないこと。
+
+5 の時間経過による補充は host の pure logic test で検査する。
+6 は Miniflare が CF-Connecting-IP を自動注入するため、この smoke では再現できない。
+host test は拒否行の生成と待機定数の範囲を検査するが、wasm32 専用の
+`extract_client_ip` や router / lobby の欠落 IP 分岐を実行しない。
+欠落・空ヘッダから HTTP 503 / in-band 拒否応答までの確認は静的確認に留まり、
+E2E で検証済みではない。
 
 実機で burst を確認する場合、補充が消費に追いつく逐次送信だけで判断しない。
 実行時の閾値・送信間隔・応答を合わせて記録する。
