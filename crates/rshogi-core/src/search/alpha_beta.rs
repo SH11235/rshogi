@@ -2360,6 +2360,14 @@ impl SearchWorker {
             };
         }
 
+        // 親の PvTable::update はこの ply の行をそのままコピーする。千日手・中断・
+        // Mate Distance Pruning 等の早期 return でも兄弟ノードの行を渡さないよう、
+        // それらより前に空にする (YaneuraOu / Stockfish が親側で (ss+1)->pv を clear するのと同等)。
+        if pv_node {
+            st.pv_table.clear(ply as usize);
+            st.pv_table.clear((ply + 1) as usize);
+        }
+
         let liveness_nodes = st.nodes;
         if let Some(liveness) = st.depth_liveness.as_mut() {
             let excluded_search = st.stack[ply as usize].excluded_move.is_some();
@@ -2438,14 +2446,6 @@ impl SearchWorker {
         // (ss+2)->cutoffCnt = 0（祖父ノードがリセット）
         // 兄弟ノード間で cutoff_cnt が蓄積されるように ply+2 を初期化する
         unsafe { st.stack.get_unchecked_mut((ply + 2) as usize) }.cutoff_cnt = 0;
-
-        // PVノードの場合、PVをクリアして前回探索の残留を防ぐ
-        // NOTE: YaneuraOuでは (ss+1)->pv = pv でポインタを新配列に向け、ss->pv[0] = Move::none() でクリア
-        //       Vecベースの実装では明示的なclear()で同等の効果を得る
-        if pv_node {
-            st.pv_table.clear(ply as usize);
-            st.pv_table.clear((ply + 1) as usize);
-        }
 
         let prior_reduction = take_prior_reduction(st, ply);
         // SAFETY: ply < MAX_PLY < STACK_SIZE。
@@ -2800,6 +2800,11 @@ impl SearchWorker {
 
             move_count += 1;
             st.stack[ply as usize].move_count = move_count;
+            // NonPV で探索した手が同点昇格等で best_move になったときに、前の兄弟の行を
+            // 子の続きとしてコピーしないよう、手ごとに子の行を空にしておく。
+            if pv_node {
+                st.pv_table.clear((ply + 1) as usize);
+            }
 
             let is_capture = pos.is_capture(mv);
             let gives_check = pos.gives_check(mv);

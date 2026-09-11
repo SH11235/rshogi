@@ -13,3 +13,4 @@ mod mate1_tt;
 mod probcut_abort;
 
 mod terminal_result;
+mod pv_legality;
