@@ -99,7 +99,9 @@ pub fn evaluate_pass_rights(pos: &Position, ply: u16) -> Value {
 ///
 /// 正の値を設定するとパス手が選ばれやすくなる。
 /// USI オプション PassMoveBonus で調整可能。
-/// 手数によるスケーリングは行わず、常に設定値の100%が適用される。
+/// root・内部探索・MultiPV で、手数によるスケーリングなしに適用する。
+/// 詰みスコアと中断値には適用せず、通常スコアは詰み領域の手前で飽和する。
+/// 非ゼロ設定の PASS は子を full PV window で探索するため、探索ノード数が増える場合がある。
 const DEFAULT_PASS_MOVE_BONUS: i32 = 0;
 
 /// ランタイムで切り替え可能なパス手ボーナス
