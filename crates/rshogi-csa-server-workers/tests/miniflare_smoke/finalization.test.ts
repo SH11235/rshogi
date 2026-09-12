@@ -139,6 +139,28 @@ describe('終局保存の復旧', () => {
     }, closeCode: () => closeCode };
   }
 
+  it.each([128, 3000, 4080])('review regression: valid terminal comment length=%s reaches spectator', async (length) => {
+    const { ws, buf, closeCode } = await connectSpectator();
+    ws.send(`%%MONITOR2ON ${gameId}\n`);
+    while ((await buf.takeLine(5000)) !== '##[MONITOR2] END');
+    const input = `${cycle[3]},'** 0 ${'x'.repeat(length)}`;
+    expect(Buffer.byteLength(input)).toBeLessThan(4096);
+    white.send(input);
+    await black.recvUntil(l => l === '#DRAW');
+    await white.recvUntil(l => l === '#DRAW');
+    const received: string[] = [];
+    let failure = '';
+    try {
+      while (received.at(-1) !== '#DRAW') received.push(await buf.takeLine(5000));
+    } catch (error) {
+      failure = String(error);
+    }
+    const state = await waitForFinished();
+    console.log(JSON.stringify({ length, inputBytes: Buffer.byteLength(input), receivedLengths: received.map(line => Buffer.byteLength(line)), resultLines: received.filter(line => line.startsWith('#')), closeCode: closeCode(), failure, finished: state.finished }));
+    expect(received, failure).toContain('#SENNICHITE');
+    expect(received, failure).toContain('#DRAW');
+  });
+
   it('export pending の読込障害を不在と扱わず runtime の再試行へ返す', async () => {
     await enterExportRetry();
     await expect(control({ faults: { storage: { method: 'get', key: 'export_pending' } }, alarm: true }))

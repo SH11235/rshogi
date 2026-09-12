@@ -333,6 +333,10 @@ describe('終局処理の網羅障害注入', () => {
       it(`${scenario.name} / ${mode}`, async () => {
         const baseline = await runCase(scenario, { at: 0, mode });
         expect(baseline.state.finished).not.toBeNull();
+        expect(baseline.state.finished!.exported_at_ms).not.toBeNull();
+        expect(baseline.state.finished!.exported_at_ms).not.toBeUndefined();
+        expect(baseline.kifuMoves).toBe(scenario.beforeAgree ? 0 : scenario.name.startsWith('sennichite') ? 12 : 11);
+        expect(baseline.historyObjects).toBe(1);
         const total = baseline.state.ops.length;
         for (let at = 1; at <= total; at++) {
           if (ONLY_CASE && ONLY_CASE !== `${scenario.name}/${mode}/${at}`) continue;

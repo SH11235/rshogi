@@ -34,7 +34,7 @@ export class GameRoom {
       return null;
     };
     const wrap = (object, prefix, names, overrides = {}) => new Proxy(object, {
-      get(target, key) {
+      get: (target, key) => {
         if (Object.hasOwn(overrides, key)) return overrides[key];
         const value = Reflect.get(target, key, target);
         if (typeof value !== 'function' || key === 'constructor') return value;
