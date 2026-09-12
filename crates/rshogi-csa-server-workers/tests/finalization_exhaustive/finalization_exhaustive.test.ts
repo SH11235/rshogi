@@ -69,6 +69,8 @@ interface Observation {
   kifuMoves: number | null;
   historyObjects: number;
   liveEntries: number;
+  /** 残存を観測した後、実 scheduled ハンドラによる回収を確認できた件数。 */
+  cronRecoveredEntries: number;
 }
 
 interface Finding {
@@ -111,12 +113,13 @@ const SCENARIOS: Scenario[] = [
 
 const MODES: Mode[] = ['fail', 'crash'];
 
-// KEY_FINISHED 確定後の live-games-index 削除漏れは cron sweep が回収する契約。
-const CRON_RECOVERED = 'live 一覧に残っている';
+// KEY_FINISHED 確定後の削除漏れは、実際に cron sweep で消えた場合だけ許容する。
+const CRON_RECOVERED = 'cron 実行で live 一覧から回収できた';
 const INPUT_LOST_OTHER_RESULT = '入力が失われ別の裁定で確定した';
 
-// `scenario/mode/at` を指定すると、その 1 ケースだけを実行して状態を出力する。
+// `scenario/mode/at` (複数ならカンマ区切り) を指定すると、対象だけを実行して状態を出力する。
 const ONLY_CASE = process.env.FINALIZATION_EXHAUSTIVE_CASE;
+const SELECTED_CASES = ONLY_CASE ? new Set(ONLY_CASE.split(',')) : null;
 
 describe('終局処理の網羅障害注入', () => {
   const servers = new Map<string, { mf: Miniflare; cleanup: () => Promise<void> }>();
@@ -134,6 +137,9 @@ describe('終局処理の網羅障害注入', () => {
     for (const { mf, cleanup } of servers.values()) {
       await mf.dispose();
       await cleanup();
+    }
+    if (SELECTED_CASES) {
+      expect(coverage.map(c => `${c.scenario}/${c.mode}/${c.at}`).sort()).toEqual([...SELECTED_CASES].sort());
     }
   });
 
@@ -266,6 +272,7 @@ describe('終局処理の網羅障害注入', () => {
       kifuMoves: kifuText === null ? null : kifuText.split('\n').filter(l => /^[+-]\d{4}/.test(l)).length,
       historyObjects: history.length,
       liveEntries: live.length,
+      cronRecoveredEntries: 0,
     };
   }
 
@@ -276,6 +283,36 @@ describe('終局処理の網羅障害注入', () => {
     await scenario.trigger(game);
     const state = await drive(game);
     const observation = await observe(mf, game, state);
+    if (observation.liveEntries > 0 && state.finished?.exported_at_ms != null) {
+      const kifu = await getKifuBucket(mf);
+      const history = await getFloodgateHistoryBucket(mf);
+      const savedObjects = async (bucket: typeof kifu, prefix: string) => {
+        const values: Record<string, string> = {};
+        let cursor: string | undefined;
+        do {
+          const page = await bucket.list({ prefix, cursor });
+          for (const { key } of page.objects) {
+            if (key.includes(game.gameId)) values[key] = await (await bucket.get(key))!.text();
+          }
+          cursor = page.truncated ? page.cursor : undefined;
+          if (page.truncated && !cursor) throw new Error('R2 list の cursor がない');
+        } while (cursor);
+        return values;
+      };
+      const beforeKifu = await savedObjects(kifu, 'kifu-by-id/');
+      const beforeHistory = await savedObjects(history, '');
+      expect(Object.keys(beforeKifu).some(key => key.endsWith('.csa'))).toBe(true);
+      expect(Object.keys(beforeKifu).some(key => key.endsWith('.meta.json'))).toBe(true);
+      // 2 回目も走らせ、回収後に再実行しても棋譜・履歴を壊さないことを確認する。
+      for (let sweep = 0; sweep < 2; sweep++) {
+        const response = await mf.dispatchFetch('https://example.com/__test/cron', { method: 'POST' });
+        expect(response.status).toBe(200);
+        expect(await savedObjects(kifu, 'live-games-index/')).toEqual({});
+        expect(await savedObjects(kifu, 'kifu-by-id/')).toEqual(beforeKifu);
+        expect(await savedObjects(history, '')).toEqual(beforeHistory);
+      }
+      observation.cronRecoveredEntries = observation.liveEntries;
+    }
     await game.black.close();
     await game.white.close();
     game.spectator?.close();
@@ -318,7 +355,10 @@ describe('終局処理の網羅障害注入', () => {
     }
     if (observed.kifuMoves !== baseline.kifuMoves) problems.push(`棋譜の手数が違う: ${observed.kifuMoves}`);
     if (observed.historyObjects !== baseline.historyObjects) problems.push(`floodgate 履歴が ${observed.historyObjects} 件`);
-    if (observed.liveEntries !== 0) problems.push(CRON_RECOVERED);
+    if (observed.liveEntries !== 0) {
+      problems.push(observed.cronRecoveredEntries === observed.liveEntries
+        ? CRON_RECOVERED : 'cron 実行後も live 一覧に残っている');
+    }
     for (const watcher of Object.keys(baseline.lines) as Watcher[]) {
       const got = observed.lines[watcher] ?? [];
       const want = baseline.lines[watcher] ?? [];
@@ -344,7 +384,7 @@ describe('終局処理の網羅障害注入', () => {
         expect(baseline.historyObjects).toBe(1);
         const total = baseline.state.ops.length;
         for (let at = 1; at <= total; at++) {
-          if (ONLY_CASE && ONLY_CASE !== `${scenario.name}/${mode}/${at}`) continue;
+          if (SELECTED_CASES && !SELECTED_CASES.has(`${scenario.name}/${mode}/${at}`)) continue;
           const observed = await runCase(scenario, { at, mode });
           const op = observed.state.injectedAt?.name ?? `(未到達) ${baseline.state.ops[at - 1]}`;
           const problems = check(baseline, observed, scenario.disconnectedWatcher);
