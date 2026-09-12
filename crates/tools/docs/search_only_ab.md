@@ -12,7 +12,7 @@ cargo build --release -p tools --bin search_only_ab
 ./target/release/search_only_ab \
   --baseline engines/before.exe --candidate engines/after.exe \
   --positions positions.txt \
-  --movetime-ms 10000 --pattern abba --rounds 3 \
+  --movetime-ms 10000 --pattern abba --alternate-rounds --rounds 8 \
   --threads 1 --hash-mb 256 --cpu 2 \
   --eval-file /path/to/net.bin --usi-option FV_SCALE=14 \
   --json-out result.json
@@ -65,13 +65,14 @@ cargo build --release -p tools --bin search_only_ab
 | `--positions` | 局面ファイル |
 | `--movetime-ms` | 1 探索の思考時間 (ms) |
 | `--pattern` | 実行順。`abba` は baseline→candidate→candidate→baseline |
-| `--rounds` | pattern の繰り返し回数 |
+| `--alternate-rounds` | 偶数 round で A/B ラベルを交換する。既定は無効（従来の固定順序を維持） |
+| `--rounds` | pattern の繰り返し回数。順序交互では偶数を推奨 |
 | `--threads` / `--hash-mb` | エンジンの Threads / USI_Hash |
 | `--cpu N` | 論理 CPU N に pin (両 OS)。`--cpus` による shard 並列は Linux のみ |
 | `--eval-file` / `--material-level` | EvalFile / MaterialLevel |
 | `--usi-option KEY=VALUE` | 両エンジン共通の setoption。`--baseline-usi-option` / `--candidate-usi-option` で片側だけにも渡せる |
 | `--perf-events` (Linux) / `--pmc-sources` (Windows) | 計測するカウンタ |
-| `--json-out` | `samples` (run ごと) と `summary` (variant ごとの合計と差分 %) を JSON 出力。両 OS でスキーマ互換 (`cli` ブロックのフィールド名だけ異なる) |
+| `--json-out` | `samples` (run ごと)、`blocks` (局面×round の順序と比)、`summary` (variant ごとの合計と差分 %) を JSON 出力。両 OS でスキーマ互換 (`cli` ブロックのフィールド名だけ異なる) |
 
 ## 結果の読み方
 
@@ -80,3 +81,41 @@ cargo build --release -p tools --bin search_only_ab
 - 同一バイナリ同士の A/A を先に 1 本取り、cycles/node の差が ±0.1 % 程度、局面ごとの
   per-sample の幅が 1 % 以内であることを確認してから A/B を読む。幅が数 % に広がる run は
   背景負荷 (Defender の実時間保護、検索インデクサ、他のビルド等) の汚染を疑う。
+
+## round ごとの順序交互と block JSON
+
+固定の `abba` では candidate が常に中央の 2 枠に入り、ブースト減衰などの非線形な
+時間ドリフトが A/B 差に混ざる。`--alternate-rounds` を指定すると、各局面について
+round 1 は `abba`、round 2 は `baab`、round 3 は `abba`…と交互になる。
+ラベル交換なので `ab` は `ba`、`aab` は `bba` になる（文字列の逆順ではない）。
+Linux の shard 間でも同じ round は同じ順序を使う。既定は固定順序のままなので、
+旧計測との比較にはフラグを付けずに実行する。round が奇数だと開始側の順序が 1 回多くなる。
+
+`cli.alternate_rounds` にモードを記録する。`blocks[]` は実測 samples から集計し、
+round → position_index 順に出力する。1 block は **1 局面 × 1 round**。
+threads / MultiPV などの条件は run 全体の `cli` を参照する。
+
+| フィールド | 意味 |
+|---|---|
+| `round` / `position_index` / `position_name` | round と局面を識別。index はコメント・空行を除いた入力順で 1 始まり。同名局面も別 block に保つ。index は `positions` / `samples` にも記録 |
+| `order` | `sequence_index` 順に実行した A/B（例: `abba` / `baab`） |
+| `baseline_runs` / `candidate_runs` | block 内の各側の実行数 |
+| `nodes_ratio` | 各側の 1 探索あたり平均 nodes の candidate / baseline 比 |
+| `nps_ratio` | 各側の合計 nodes / 合計 info time による candidate / baseline 比（整数 NPS への丸めなし） |
+| `cycles_per_node_ratio` / `instructions_per_node_ratio` | 各側の合計 counter / 合計 nodes による candidate / baseline 比 |
+
+比 1 が差なし、`100 * (ratio - 1)` が差分 %。分母が 0、片側の sample がない、
+必要な counter が欠測など、比が定義できない場合は `null`。
+既存の `summary` は従来と同じ pooled 集計であり、信頼区間ではない。
+block の比を使って信頼区間を外部集計する場合、同じ round の局面を独立な反復として
+水増ししない。例えば局面間の log 比を round 内で平均し、その round 平均を標本とする。
+
+測定前に同一バイナリ・同一オプションの A vs A を、順序交互と固定順序の両方で実施する。
+条件・round 数・集計法を先に固定し、順序交互の各条件の 95% 区間が 0 を含むか確認する。
+0 を含むまでの再実行や、有意な条件だけの除外は行わない。交互化は系統誤差を軽減するが、
+有限標本で全区間が必ず 0 を含む保証ではない。受け入れ未達の run も残す。
+
+CPU pin を使い、開始時に加えて計測中も cargo / rustc と背景負荷を外部記録する。
+並走ビルドを検出した結果は採用しない。Linux で複数スレッドを複数コアに pin する場合は、
+`taskset -c 2-5 search_only_ab ... --threads 4` のように親から affinity を継承させ、
+単一 CPU に制限する `--cpu` と局面を並列化する `--cpus` は指定しない。
