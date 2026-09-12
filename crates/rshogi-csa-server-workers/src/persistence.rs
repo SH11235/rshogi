@@ -15,10 +15,13 @@
 //!
 //! cold start 復元の手順は [`replay_core_room`] のドキュメントを参照。
 
+use crate::attachment::FinalizingBroadcast;
 use serde::{Deserialize, Serialize};
 
 use rshogi_csa_server::ClockSpec;
-use rshogi_csa_server::game::room::{GameRoom as CoreRoom, GameRoomConfig};
+use rshogi_csa_server::game::room::{
+    GameRoom as CoreRoom, GameRoomConfig, HandleOutcome, HandleResult,
+};
 use rshogi_csa_server::types::{Color, CsaLine, GameId, PlayerName};
 
 /// マッチ成立時に永続化する対局設定。`CoreRoom` の再構築に必要な最小情報。
@@ -200,9 +203,11 @@ pub enum ReplaySummary {
     /// 失敗系の小さい variant とのサイズ差を抑える目的で `Box` でくるんで持つ
     /// (clippy::large_enum_variant)。
     Restored {
-        /// 復元済み `CoreRoom`。`AgreeWaiting`（`play_started_at_ms = None`）または
-        /// `Playing`（AGREE 再送後）のどちらかの状態にある。
+        /// 復元済み `CoreRoom`。終局手まで保存済みなら `Finished` となるため、
+        /// 呼び出し側は未完了の終局永続化を再開する。
         core: Box<CoreRoom>,
+        /// 再開時にも終局手の告知を失わないよう保持する。
+        last_result: Option<HandleResult>,
     },
     /// 開始局面 SFEN が `CoreRoom::new` で拒否された。`reason` は console_log 用。
     InvalidSfen {
@@ -271,6 +276,7 @@ pub fn replay_core_room(cfg: &PersistedConfig, moves: &[MoveRow]) -> ReplaySumma
         // AGREE 前のスナップショットからの cold start。CoreRoom は AgreeWaiting で返す。
         return ReplaySummary::Restored {
             core: Box::new(core),
+            last_result: None,
         };
     };
 
@@ -284,6 +290,7 @@ pub fn replay_core_room(cfg: &PersistedConfig, moves: &[MoveRow]) -> ReplaySumma
             .expect("CoreRoom::new returns AgreeWaiting; AGREE from there must succeed");
     }
 
+    let mut last_result = None;
     for m in moves {
         let color = match m.color.as_str() {
             "black" => Color::Black,
@@ -300,25 +307,86 @@ pub fn replay_core_room(cfg: &PersistedConfig, moves: &[MoveRow]) -> ReplaySumma
             cfg.clock.reconnect_compensation_limit_ms(),
         );
         let ts = (m.at_ms.max(0) as u64).max(play_started_at_ms);
-        if let Err(e) = core.handle_line(color, &CsaLine::new(&m.line), ts) {
-            return ReplaySummary::MoveReplayFailed {
-                ply: m.ply,
-                line: m.line.clone(),
-                reason: format!("{e:?}"),
-            };
+        match core.handle_line(color, &CsaLine::new(&m.line), ts) {
+            Ok(result) => last_result = Some(result),
+            Err(e) => {
+                return ReplaySummary::MoveReplayFailed {
+                    ply: m.ply,
+                    line: m.line.clone(),
+                    reason: format!("{e:?}"),
+                };
+            }
         }
     }
 
     ReplaySummary::Restored {
         core: Box::new(core),
+        last_result,
     }
+}
+
+/// replay が返した告知を保ち、履歴にない裁定を生成しない。
+pub fn pending_finalization(result: Option<HandleResult>) -> Option<HandleResult> {
+    result.filter(|result| matches!(result.outcome, HandleOutcome::GameEnded(_)))
+}
+
+/// 告知前に保存する終局の裁定と終局時刻。isolate 破棄後の再開と再試行で
+/// 同じ裁定・同じ終局時刻 (R2 のキーと本文) を使うために残す。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalizingState {
+    /// 確定させる裁定。
+    pub result: rshogi_csa_server::game::result::GameResult,
+    /// 棋譜・履歴に記録する終局時刻 (epoch ms)。
+    pub ended_at_ms: u64,
+    /// 復帰後も終局手と時計を元の順序で告知するために残す。
+    pub broadcasts: Vec<FinalizingBroadcast>,
+    /// 外部イベントの頻度で再試行の猶予を消費しないため、初回と alarm のみ数える。
+    pub attempt: u32,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rshogi_csa_server::game::result::GameResult;
-    use rshogi_csa_server::game::room::{GameStatus, HandleOutcome};
+    use rshogi_csa_server::GameStatus;
+    use rshogi_csa_server::game::result::{GameResult, IllegalReason};
+
+    #[test]
+    fn finalizing_state_roundtrips_every_result() {
+        for result in [
+            GameResult::Toryo {
+                winner: Color::Black,
+            },
+            GameResult::TimeUp {
+                loser: Color::White,
+            },
+            GameResult::IllegalMove {
+                loser: Color::Black,
+                reason: IllegalReason::IllegalKachi,
+            },
+            GameResult::Kachi {
+                winner: Color::White,
+            },
+            GameResult::OuteSennichite {
+                loser: Color::Black,
+            },
+            GameResult::Sennichite,
+            GameResult::MaxMoves,
+            GameResult::Abnormal { winner: None },
+        ] {
+            let state = FinalizingState {
+                broadcasts: vec![FinalizingBroadcast {
+                    target: rshogi_csa_server::BroadcastTarget::All,
+                    line: "-5251OU,T3".into(),
+                    ply: Some(12),
+                }],
+                attempt: 3,
+                result,
+                ended_at_ms: 1_700_000_000_000,
+            };
+            let json = serde_json::to_string(&state).unwrap();
+            assert_eq!(serde_json::from_str::<FinalizingState>(&json).unwrap(), state);
+        }
+    }
     use rshogi_csa_server::record::kifu::primary_result_code;
 
     /// `play_started_at_ms` の代表値（適当な epoch ms）。テスト全体で共有。
@@ -482,10 +550,11 @@ mod tests {
                     .unwrap();
                 assert!(matches!(result.outcome, HandleOutcome::MoveAccepted { .. }));
             }
-            let ReplaySummary::Restored { mut core } = replay_core_room(&cfg, &rows[..split])
+            let ReplaySummary::Restored { mut core, .. } = replay_core_room(&cfg, &rows[..split])
             else {
                 panic!("restore failed");
             };
+            assert!(!matches!(core.status(), GameStatus::Finished(_)));
             let last = &rows[split];
             let side = if last.color == "black" {
                 Color::Black
@@ -523,19 +592,47 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             assert_eq!(messages(&actual), messages(&expected));
-            let ReplaySummary::Restored { core: finished } = replay_core_room(&cfg, &rows) else {
+            let ReplaySummary::Restored {
+                core: finished,
+                last_result,
+            } = replay_core_room(&cfg, &rows)
+            else {
                 panic!("terminal move restore failed");
             };
             assert_eq!(finished.status(), core.status());
             assert_eq!(finished.moves_played(), rows.len() as u32);
+            let pending = pending_finalization(last_result).expect("終局の永続化が必要");
+            assert_eq!(pending.outcome, expected.outcome);
+            assert_eq!(pending.broadcasts, expected.broadcasts);
         }
+    }
+
+    #[test]
+    fn pending_finalization_preserves_max_moves_after_terminal_move_replay() {
+        let mut cfg = baseline_config();
+        assert!(pending_finalization(None).is_none());
+        cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
+        cfg.max_moves = 1;
+        let rows = [move_row(1, "black", "+7776FU", 0)];
+        let ReplaySummary::Restored {
+            mut core,
+            last_result,
+        } = replay_core_room(&cfg, &rows)
+        else {
+            panic!("terminal move restore failed");
+        };
+        assert_eq!(core.force_time_up(Color::White).outcome, HandleOutcome::Continue);
+        let pending = pending_finalization(last_result).expect("終局の永続化が必要");
+        assert_eq!(pending.outcome, HandleOutcome::GameEnded(GameResult::MaxMoves));
+        assert!(pending.broadcasts.iter().any(|entry| entry.ply == Some(1)));
+        assert_eq!(core.moves_played(), 1);
     }
 
     #[test]
     fn replay_without_play_started_returns_agree_waiting_room() {
         let cfg = baseline_config();
         let summary = replay_core_room(&cfg, &[]);
-        let ReplaySummary::Restored { core } = summary else {
+        let ReplaySummary::Restored { core, .. } = summary else {
             panic!("expected Restored, got {summary:?}");
         };
         assert!(matches!(core.status(), GameStatus::AgreeWaiting));
@@ -547,7 +644,7 @@ mod tests {
         let mut cfg = baseline_config();
         cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
         let summary = replay_core_room(&cfg, &[]);
-        let ReplaySummary::Restored { core } = summary else {
+        let ReplaySummary::Restored { core, .. } = summary else {
             panic!("expected Restored, got {summary:?}");
         };
         assert!(matches!(core.status(), GameStatus::Playing));
@@ -567,6 +664,7 @@ mod tests {
 
         let ReplaySummary::Restored {
             core: replayed_core,
+            ..
         } = replay_core_room(&cfg, &moves)
         else {
             panic!("expected Restored");
@@ -611,7 +709,7 @@ mod tests {
         let second = move_row(2, "white", "-3334FU,T0", 4_000);
         let moves = vec![first.clone(), second.clone()];
 
-        let ReplaySummary::Restored { core } = replay_core_room(&cfg, &moves) else {
+        let ReplaySummary::Restored { core, .. } = replay_core_room(&cfg, &moves) else {
             panic!("credit を含む過去手は replay できる必要がある");
         };
         assert_eq!(core.moves_played(), 2);
@@ -658,6 +756,7 @@ mod tests {
             cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
             let ReplaySummary::Restored {
                 core: replayed_core,
+                ..
             } = replay_core_room(&cfg, &moves)
             else {
                 panic!("expected Restored for {clock:?}");
@@ -693,6 +792,7 @@ mod tests {
 
         let ReplaySummary::Restored {
             core: replayed_core,
+            ..
         } = replay_core_room(&cfg, &moves)
         else {
             panic!("expected Restored");
@@ -741,6 +841,7 @@ mod tests {
 
         let ReplaySummary::Restored {
             core: mut replayed_core,
+            ..
         } = replay_core_room(&cfg, &played_moves)
         else {
             panic!("expected Restored");
@@ -779,6 +880,7 @@ mod tests {
         cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
         let ReplaySummary::Restored {
             core: mut replayed_core,
+            ..
         } = replay_core_room(&cfg, &[])
         else {
             panic!("expected Restored");
@@ -814,7 +916,7 @@ mod tests {
         let mut cfg = baseline_config();
         cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
         let moves = vec![move_row(1, "black", "+7776FU,T3", 3_000)];
-        let ReplaySummary::Restored { mut core } = replay_core_room(&cfg, &moves) else {
+        let ReplaySummary::Restored { mut core, .. } = replay_core_room(&cfg, &moves) else {
             panic!("expected Restored");
         };
         // 黒の手 (at_ms = PLAY_STARTED + 3s) の 30 分後に白が指す（白番の長考中に DO
@@ -855,7 +957,7 @@ mod tests {
             move_row(1, "black", "+7776FU,T40", 40_000),
             move_row(2, "white", "-3334FU,T40", 80_000),
         ];
-        let ReplaySummary::Restored { core } = replay_core_room(&cfg, &moves) else {
+        let ReplaySummary::Restored { core, .. } = replay_core_room(&cfg, &moves) else {
             panic!("予算内の長考なら Restored のはず (MoveReplayFailed になってはいけない)");
         };
         assert_eq!(core.moves_played(), 2);
@@ -873,7 +975,7 @@ mod tests {
         let mut cfg = baseline_config();
         cfg.play_started_at_ms = Some(PLAY_STARTED_AT_MS);
         let moves = vec![move_row(1, "black", "+7776FU,T3", 3_000)];
-        let ReplaySummary::Restored { mut core } = replay_core_room(&cfg, &moves) else {
+        let ReplaySummary::Restored { mut core, .. } = replay_core_room(&cfg, &moves) else {
             panic!("expected Restored");
         };
         // 次手番は白。計時起点は黒の手の at_ms (= PLAY_STARTED + 3s) のまま。
@@ -925,6 +1027,7 @@ mod tests {
         ];
         let ReplaySummary::Restored {
             core: replayed_core,
+            ..
         } = replay_core_room(&cfg, &moves)
         else {
             panic!("expected Restored");
@@ -1048,7 +1151,7 @@ mod tests {
         let buoy_sfen = "lnsg1gsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL w - 1";
         cfg.initial_sfen = Some(buoy_sfen.to_owned());
         let summary = replay_core_room(&cfg, &[]);
-        let ReplaySummary::Restored { core } = summary else {
+        let ReplaySummary::Restored { core, .. } = summary else {
             panic!("expected Restored, got {summary:?}");
         };
         // SFEN ラウンドトリップで開始局面が保たれること。`current_turn` も白で一致する。

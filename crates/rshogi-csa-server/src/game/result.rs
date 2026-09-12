@@ -5,7 +5,7 @@
 use crate::types::Color;
 
 /// `#ILLEGAL_MOVE` が通知される際の補足事由。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum IllegalReason {
     /// 非合法手（移動先・駒種の不整合）。
     Generic,
@@ -16,7 +16,7 @@ pub enum IllegalReason {
 }
 
 /// 終局理由のモデル。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GameResult {
     /// `%TORYO` → `#RESIGN`。
     Toryo {
