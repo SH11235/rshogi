@@ -2182,15 +2182,12 @@ fn detect_layer_stacks_feature_set(arch_str: &str) -> Result<super::spec::Featur
 mod tests {
     #[cfg(feature = "layerstack-arch")]
     use super::*;
-    use crate::nnue::constants::NNUE_PYTORCH_L1;
     #[cfg(all(
         feature = "layerstack-arch",
         feature = "layerstacks-1536x16x32",
         feature = "ft-halfka_hm_merged"
     ))]
     use crate::position::{Position, SFEN_HIRATE};
-
-    const TEST_L1: usize = NNUE_PYTORCH_L1;
 
     #[cfg(feature = "layerstack-arch")]
     #[test]
@@ -2447,6 +2444,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_load_layer_stacks_file() {
+        const TEST_L1: usize = crate::nnue::constants::NNUE_PYTORCH_L1;
         let routing_guard = crate::nnue::network::layer_stack_routing_test_guard();
         use crate::nnue::layer_stacks::{compute_bucket_index, sqr_clipped_relu_transform};
 
