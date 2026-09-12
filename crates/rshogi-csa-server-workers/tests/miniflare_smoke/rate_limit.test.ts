@@ -1,26 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Miniflare, WebSocket } from "miniflare";
 import {
-  DEFAULT_TEST_CF_CONNECTING_IP,
   createMiniflare,
   makeTempPersistRoot,
 } from "./harness";
 import { readLineFromWebSocket } from "./ws_test_helpers";
 
 /**
- * Issue #622 PR3a: rate limit / abuse protection の Miniflare 経由 E2E。
+ * rate limit / abuse protection の Miniflare 経由 E2E。
  *
- * 設計 doc `docs/csa-server/rate_limit_design.md` §5.3 で要求される 7 シナリオを
- * すべてカバーする:
+ * 設計 doc `docs/csa-server/rate_limit_design.md` §5.3 の 7 シナリオのうち、
+ * 5 と 6 を除く wire 挙動をカバーする:
  *
  * 1. LOGIN_LOBBY flood (per-IP)        — 同 IP × N+1 回 → reject
  * 2. LOGIN_LOBBY flood (per-handle)    — 同 handle × 別 IP × M+1 回 → reject
  * 3. CHALLENGE_LOBBY flood (per-IP / per-inviter) — 同様の挙動
  * 4. /ws/<room_id> upgrade flood       — 同 IP × M+1 回 → 503 + Retry-After
- * 5. 窓リセット                        — TODO: Miniflare で 1 分待機が現実的でない
- *                                          ため pure logic test (rate_limit.rs) で
- *                                          補い、本 smoke ではスキップする
- * 6. CF-Connecting-IP 欠落 → fail-closed
+ * 5. 時間経過による token の補充       — pure logic test (rate_limit.rs) で検査し、
+ *                                          本 smoke では実行しない
+ * 6. CF-Connecting-IP 欠落 → fail-closed — 自動注入により smoke 未実行 (末尾参照)
  * 7. `%%room_id` 不正値 → parse_ws_route が reject (counter は増えない)
  *
  * 各シナリオで使う IP / handle は test ごとに固有値を割り振り、bucket 隔離する。
@@ -356,16 +354,15 @@ describe("/ws/<room_id> upgrade rate limit (per-IP)", () => {
 // fetch API レベルで空値ヘッダは silent drop され、Miniflare の default 注入が
 // 残る経路となる (= 503 fail-closed が再現できない)。
 //
-// 代わりに以下 2 経路でカバー済:
+// 実行テストと静的確認の範囲:
 // 1. **host pure unit test** (`crates/rshogi-csa-server-workers/src/rate_limit.rs::tests`):
-//    `extract_client_ip(req)` が空 / None ヘッダで `None` を返すこと、
-//    `RateLimitDecision::deny(FAIL_CLOSED_MISSING_IP_RETRY_AFTER_SEC)` が
-//    `Retry-After: 10` を返すことを assert
-// 2. **router/lobby ハンドラのコードパス**: `router::forward_ws_to_room` の
+//    拒否行の生成と `FAIL_CLOSED_MISSING_IP_RETRY_AFTER_SEC` の範囲を検査する。
+//    wasm32 専用の `extract_client_ip` や HTTP 応答・ハンドラは実行しない。
+// 2. **router/lobby ハンドラの静的確認**: `router::forward_ws_to_room` の
 //    `let Some(ip) = extract_client_ip(&req) else { return build_missing_ip_response(); }`
 //    と `lobby::check_login_lobby_rate_limit` 内の同等パターンが、`None` 返却で
 //    確実に 503 / `LOGIN_LOBBY:incorrect rate_limited retry_after=10` を返す
-//    1 行分岐になっている (本 smoke のレビュー時に Codex 等で目視検証する)
+//    1 行分岐になっている。欠落・空ヘッダからの応答を E2E で検証済みとはしない。
 //
 // production deploy 時に Cloudflare edge を経由すれば本ヘッダは確実に存在する
 // (Cloudflare 公式仕様)。意図的にヘッダを抜く攻撃経路は CF 側で防御される。
@@ -416,19 +413,4 @@ describe("rate limit counter is not incremented on invalid room_id", () => {
     resValid.webSocket?.close();
   });
 
-  test("既存 smoke 互換: harness default IP では rate limit に当たらない", async () => {
-    // 緩和済 default 閾値 (本 describe は意図的に 1 に絞っているが、test 内の
-    // `connect` 呼び出しが harness 経由の DEFAULT_TEST_CF_CONNECTING_IP と異なる
-    // IP を使えば bucket 衝突しない、という設計の確認)。
-    const res = await mf.dispatchFetch("https://example.com/ws/another-room", {
-      headers: {
-        Upgrade: "websocket",
-        // 本 test 専用 IP (他 test と衝突しない)
-        "CF-Connecting-IP": "198.51.100.200",
-      },
-    });
-    expect(res.status).toBe(101);
-    res.webSocket?.accept();
-    res.webSocket?.close();
-  });
 });

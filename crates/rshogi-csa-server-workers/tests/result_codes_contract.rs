@@ -26,6 +26,25 @@ fn result_codes_contract_matches_committed_manifest() {
     let committed = include_str!("../contracts/result-codes.json");
 
     assert_eq!(generated, committed);
+    for reason in [
+        IllegalReason::Generic,
+        IllegalReason::Uchifuzume,
+        IllegalReason::IllegalKachi,
+    ] {
+        assert_eq!(
+            primary_result_code(&GameResult::IllegalMove {
+                loser: Color::Black,
+                reason
+            }),
+            "#ILLEGAL_MOVE"
+        );
+    }
+    assert_eq!(
+        primary_result_code(&GameResult::Abnormal {
+            winner: Some(Color::Black)
+        }),
+        "#ABNORMAL"
+    );
 }
 
 fn build_contract_json() -> String {

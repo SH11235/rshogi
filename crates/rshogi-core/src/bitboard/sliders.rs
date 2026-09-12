@@ -683,98 +683,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lance_effect_black() {
-        let sq55 = Square::new(File::File5, Rank::Rank5);
-        let bb = lance_effect(Color::Black, sq55, Bitboard::EMPTY);
-        assert_eq!(bb.count(), 4);
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank4)));
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank3)));
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank2)));
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank1)));
-    }
-
-    #[test]
-    fn test_lance_effect_black_blocked() {
-        let sq55 = Square::new(File::File5, Rank::Rank5);
-        let sq53 = Square::new(File::File5, Rank::Rank3);
-        let occupied = Bitboard::from_square(sq53);
-        let bb = lance_effect(Color::Black, sq55, occupied);
-        assert_eq!(bb.count(), 2);
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank4)));
-        assert!(bb.contains(sq53));
-    }
-
-    #[test]
-    fn test_lance_effect_white() {
-        let sq55 = Square::new(File::File5, Rank::Rank5);
-        let bb = lance_effect(Color::White, sq55, Bitboard::EMPTY);
-        assert_eq!(bb.count(), 4);
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank6)));
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank7)));
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank8)));
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank9)));
-    }
-
-    #[test]
-    fn test_bishop_effect() {
-        let sq55 = Square::new(File::File5, Rank::Rank5);
-        let bb = bishop_effect(sq55, Bitboard::EMPTY);
-        assert_eq!(bb.count(), 16);
-
-        assert!(bb.contains(Square::new(File::File6, Rank::Rank4)));
-        assert!(bb.contains(Square::new(File::File7, Rank::Rank3)));
-        assert!(bb.contains(Square::new(File::File4, Rank::Rank4)));
-        assert!(bb.contains(Square::new(File::File3, Rank::Rank3)));
-        assert!(bb.contains(Square::new(File::File6, Rank::Rank6)));
-        assert!(bb.contains(Square::new(File::File4, Rank::Rank6)));
-    }
-
-    #[test]
-    fn test_bishop_effect_blocked() {
-        let sq55 = Square::new(File::File5, Rank::Rank5);
-        let sq64 = Square::new(File::File6, Rank::Rank4);
-        let occupied = Bitboard::from_square(sq64);
-        let bb = bishop_effect(sq55, occupied);
-
-        assert!(bb.contains(sq64));
-        assert!(!bb.contains(Square::new(File::File7, Rank::Rank3)));
-    }
-
-    #[test]
-    fn test_bishop_effect_corner() {
-        let sq11 = Square::new(File::File1, Rank::Rank1);
-        let bb = bishop_effect(sq11, Bitboard::EMPTY);
-        assert_eq!(bb.count(), 8);
-        assert!(bb.contains(Square::new(File::File2, Rank::Rank2)));
-        assert!(bb.contains(Square::new(File::File9, Rank::Rank9)));
-        assert!(!bb.contains(sq11));
-    }
-
-    #[test]
-    fn test_rook_effect() {
-        let sq55 = Square::new(File::File5, Rank::Rank5);
-        let bb = rook_effect(sq55, Bitboard::EMPTY);
-        assert_eq!(bb.count(), 16);
-
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank4)));
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank1)));
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank6)));
-        assert!(bb.contains(Square::new(File::File5, Rank::Rank9)));
-        assert!(bb.contains(Square::new(File::File6, Rank::Rank5)));
-        assert!(bb.contains(Square::new(File::File4, Rank::Rank5)));
-    }
-
-    #[test]
-    fn test_rook_effect_corner() {
-        let sq11 = Square::new(File::File1, Rank::Rank1);
-        let bb = rook_effect(sq11, Bitboard::EMPTY);
-        assert_eq!(bb.count(), 16);
-        assert!(bb.contains(Square::new(File::File1, Rank::Rank9)));
-        assert!(bb.contains(Square::new(File::File9, Rank::Rank1)));
-        assert!(!bb.contains(sq11));
-    }
-
-    #[test]
     fn test_horse_effect() {
         let sq55 = Square::new(File::File5, Rank::Rank5);
         let bb = horse_effect(sq55, Bitboard::EMPTY);
@@ -887,5 +795,22 @@ mod tests {
         let up = ray_effect(Direct::U, sq55, Bitboard::EMPTY);
         let lance_up = lance_effect(Color::Black, sq55, Bitboard::EMPTY);
         assert_eq!(up, lance_up);
+    }
+
+    #[test]
+    fn slider_boundaries_match_naive() {
+        for sq in Square::all() {
+            for occupied in [
+                Bitboard::EMPTY,
+                Bitboard::ALL,
+                Bitboard::from_square(Square::new(File::File5, Rank::Rank3)),
+            ] {
+                assert_eq!(rook_effect(sq, occupied), rook_naive(sq, occupied));
+                assert_eq!(bishop_effect(sq, occupied), bishop_naive(sq, occupied));
+                for color in [Color::Black, Color::White] {
+                    assert_eq!(lance_effect(color, sq, occupied), lance_naive(color, sq, occupied));
+                }
+            }
+        }
     }
 }

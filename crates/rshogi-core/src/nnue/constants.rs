@@ -214,16 +214,3 @@ pub const NNUE_PYTORCH_QUANTIZED_ONE: i32 = 127;
 /// - 出力: i32 (最大 QA² = 16,129)
 /// - オーバーフロー検証: 16,129 × 127 × 512 < i32_MAX ✓
 pub const SCRELU_QA: i16 = 127;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_constants() {
-        assert_eq!(TRANSFORMED_FEATURE_DIMENSIONS, 256);
-        assert_eq!(HIDDEN1_DIMENSIONS, 32);
-        assert_eq!(HIDDEN2_DIMENSIONS, 32);
-        assert_eq!(OUTPUT_DIMENSIONS, 1);
-    }
-}

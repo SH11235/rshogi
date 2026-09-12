@@ -107,51 +107,26 @@ impl<'a> IntoIterator for &'a MoveList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{File, PieceType, Rank, Square};
 
     #[test]
-    fn test_movelist_new() {
-        let list = MoveList::new();
-        assert_eq!(list.len(), 0);
+    fn test_movelist_lifecycle() {
+        let mut list = MoveList::new();
         assert!(list.is_empty());
-    }
-
-    #[test]
-    fn test_movelist_push() {
-        let mut list = MoveList::new();
-        let sq1 = Square::new(File::File7, Rank::Rank7);
-        let sq2 = Square::new(File::File7, Rank::Rank6);
-        let mv = Move::new_move(sq1, sq2, false);
-
-        list.push(mv);
-        assert_eq!(list.len(), 1);
+        let moves = [
+            Move::from_usi("7g7f").unwrap(),
+            Move::from_usi("P*5e").unwrap(),
+        ];
+        for mv in moves {
+            list.push(mv);
+        }
         assert!(!list.is_empty());
-        assert_eq!(list.at(0), mv);
-        assert!(list.contains(mv));
-    }
-
-    #[test]
-    fn test_movelist_iter() {
-        let mut list = MoveList::new();
-        let sq1 = Square::new(File::File7, Rank::Rank7);
-        let sq2 = Square::new(File::File7, Rank::Rank6);
-        let sq3 = Square::new(File::File5, Rank::Rank5);
-
-        list.push(Move::new_move(sq1, sq2, false));
-        list.push(Move::new_drop(PieceType::Pawn, sq3));
-
-        let moves: Vec<_> = list.iter().collect();
-        assert_eq!(moves.len(), 2);
-    }
-
-    #[test]
-    fn test_movelist_index() {
-        let mut list = MoveList::new();
-        let sq = Square::new(File::File5, Rank::Rank5);
-        let mv = Move::new_drop(PieceType::Gold, sq);
-        list.push(mv);
-
-        assert_eq!(list[0], mv);
+        assert_eq!(list.len(), moves.len());
+        assert_eq!(list.iter().copied().collect::<Vec<_>>(), moves);
+        for (i, mv) in moves.into_iter().enumerate() {
+            assert_eq!(list.at(i), mv);
+            assert_eq!(list[i], mv);
+            assert!(list.contains(mv));
+        }
     }
 
     #[test]

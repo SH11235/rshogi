@@ -410,13 +410,3 @@ pub fn run() -> Result<()> {
         _ => anyhow::bail!("有効な LayerStacks (FT × L1) バリアントがありません"),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn run_entry_is_reachable_in_tests() {
-        let _ = run as fn() -> Result<()>;
-    }
-}

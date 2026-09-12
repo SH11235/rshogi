@@ -391,23 +391,6 @@ mod tests {
         assert!(pairs.is_empty());
     }
 
-    #[test]
-    fn strategy_name_is_stable() {
-        assert_eq!(DirectMatchStrategy::new().name(), "direct");
-    }
-
-    /// 戦略は trait オブジェクトとしても扱える（差し替え可能性の確認）。
-    #[test]
-    fn strategy_is_usable_via_trait_object() {
-        let s: Box<dyn PairingLogic> = Box::new(DirectMatchStrategy::new());
-        assert_eq!(s.name(), "direct");
-        let pairs = s.try_pair(&[
-            cand("alice", Some(Color::Black)),
-            cand("bob", Some(Color::White)),
-        ]);
-        assert_eq!(pairs.len(), 1);
-    }
-
     fn rated_cand(
         name: &str,
         color: Option<Color>,
@@ -520,16 +503,28 @@ mod tests {
     /// LeastDiff: rate 未指定（`None`）は既定 1500 として扱う。
     #[test]
     fn least_diff_treats_missing_rate_as_default_1500() {
-        // alice rate=None (defaults to 1500), bob rate=Some(2000) →
-        // diff² = 500² = 250000
-        let candidates = vec![rated_cand("alice", None, 1500, vec![]), {
-            let mut c = rated_cand("bob", None, 2000, vec![]);
-            c.rate = Some(2000);
-            c
-        }];
-        let s = LeastDiffPairingStrategy::new().with_seed(0).with_max_trials(10);
-        let pairs = s.try_pair(&candidates);
-        assert_eq!(pairs.len(), 1);
+        let mut missing = rated_cand("a", None, 1500, vec![]);
+        missing.rate = None;
+        let candidates = [
+            missing,
+            rated_cand("b", None, 1501, vec![]),
+            rated_cand("c", None, 1000, vec![]),
+            rated_cand("d", None, 1001, vec![]),
+        ];
+        let pairs = LeastDiffPairingStrategy::new()
+            .with_seed(7)
+            .with_max_trials(300)
+            .try_pair(&candidates);
+        let mut actual: Vec<_> = pairs
+            .iter()
+            .map(|pair| {
+                let mut names = [pair.black.as_str(), pair.white.as_str()];
+                names.sort_unstable();
+                names
+            })
+            .collect();
+        actual.sort_unstable();
+        assert_eq!(actual, [["a", "b"], ["c", "d"]]);
     }
 
     /// LeastDiff: 色希望が同一の 2 名しかいない場合（trial discard 累積）→
@@ -562,13 +557,6 @@ mod tests {
         assert_eq!(pairs.len(), 1, "color 偏りでも成立可能な 1 ペアは返る");
         assert_eq!(pairs[0].black.as_str(), "alice");
         assert_eq!(pairs[0].white.as_str(), "dave");
-    }
-
-    /// LeastDiff: 戦略名が `"least_diff"` で安定している契約を固定。
-    /// `build_strategy` 経由の dispatch が依存する。
-    #[test]
-    fn least_diff_strategy_name_is_stable() {
-        assert_eq!(LeastDiffPairingStrategy::new().name(), "least_diff");
     }
 
     /// League → waiting_candidates → PairingLogic → confirm_match の一連の経路。

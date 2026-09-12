@@ -444,11 +444,6 @@ mod tests {
     use crate::position::Position;
 
     #[test]
-    fn test_move_mate_compile() {
-        let _ = std::mem::size_of::<Option<crate::types::Move>>();
-    }
-
-    #[test]
     fn test_lance_promo_mate_6f6g() {
         // 後手番: 6fの後手香が6g成で詰み (成金が7gの先手玉に王手)
         // RS の mate_1ply がこの詰みを検出できないバグの再現テスト

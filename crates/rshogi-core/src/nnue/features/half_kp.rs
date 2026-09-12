@@ -121,11 +121,6 @@ mod tests {
     }
 
     #[test]
-    fn test_halfkp_refresh_trigger() {
-        assert_eq!(HalfKP::REFRESH_TRIGGER, TriggerEvent::FriendKingMoved);
-    }
-
-    #[test]
     fn test_append_active_indices_startpos() {
         let mut pos = Position::new();
         pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
@@ -352,81 +347,6 @@ mod tests {
         // 手駒が1→2: removed=1（1枚目のBonaPiece）, added=1（2枚目のBonaPiece）
         assert_eq!(removed.len(), 1);
         assert_eq!(added.len(), 1);
-    }
-
-    #[test]
-    fn test_debug_feature_indices() {
-        use crate::nnue::accumulator::{IndexList, MAX_ACTIVE_FEATURES};
-        use crate::nnue::bona_piece::{E_PAWN, F_PAWN};
-
-        let mut pos = Position::new();
-        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
-            .unwrap();
-
-        // 先手玉と後手玉の位置
-        let king_sq_b = pos.king_square(Color::Black);
-        let king_sq_w = pos.king_square(Color::White);
-        let king_sq_w_inv = king_sq_w.inverse();
-
-        eprintln!("Black King: {:?} (index={})", king_sq_b, king_sq_b.index());
-        eprintln!(
-            "White King: {:?} (index={}), inverted: {:?} (index={})",
-            king_sq_w,
-            king_sq_w.index(),
-            king_sq_w_inv,
-            king_sq_w_inv.index()
-        );
-
-        // 7七の歩（先手）のBonaPiece
-        let sq_77 = Square::new(File::File7, Rank::Rank7);
-        let bp_77_black = crate::nnue::bona_piece::BonaPiece::from_piece_square(
-            Piece::B_PAWN,
-            sq_77,
-            Color::Black,
-        );
-        let bp_77_white = crate::nnue::bona_piece::BonaPiece::from_piece_square(
-            Piece::B_PAWN,
-            sq_77,
-            Color::White,
-        );
-        eprintln!(
-            "7七先手歩: sq_index={}, Black view BP={}, White view BP={}",
-            sq_77.index(),
-            bp_77_black.value(),
-            bp_77_white.value()
-        );
-        eprintln!(
-            "  Expected Black: F_PAWN({}) + {} = {}",
-            F_PAWN,
-            sq_77.index(),
-            F_PAWN as usize + sq_77.index()
-        );
-        eprintln!(
-            "  Expected White: E_PAWN({}) + {} = {}",
-            E_PAWN,
-            sq_77.inverse().index(),
-            E_PAWN as usize + sq_77.inverse().index()
-        );
-
-        // 先手視点の特徴量
-        let mut active_b: IndexList<MAX_ACTIVE_FEATURES> = IndexList::new();
-        HalfKP::append_active_indices(&pos, Color::Black, &mut active_b);
-        let mut active_w: IndexList<MAX_ACTIVE_FEATURES> = IndexList::new();
-        HalfKP::append_active_indices(&pos, Color::White, &mut active_w);
-
-        eprintln!("Black perspective: {} features", active_b.len());
-        eprintln!("White perspective: {} features", active_w.len());
-
-        // インデックスの範囲確認
-        let max_b = active_b.iter().max().unwrap_or(0);
-        let max_w = active_w.iter().max().unwrap_or(0);
-        let max_valid = 81 * FE_END - 1;
-        eprintln!("Max index (Black): {}", max_b);
-        eprintln!("Max index (White): {}", max_w);
-        eprintln!("Max valid index: {}", max_valid);
-
-        assert!(max_b <= max_valid, "Black max index out of range");
-        assert!(max_w <= max_valid, "White max index out of range");
     }
 
     /// 駒成り + 駒台手駒ありの ply32 局面でも `append_active_indices` が玉スロット

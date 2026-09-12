@@ -8,7 +8,7 @@
 
 | ツール | 説明 |
 |--------|------|
-| `tournament` | 既存対局出力を保護し、カード index ごとに保存。中断時も回収結果を保存し run 状態を明示。複数エンジンの round-robin 並列トーナメント、動的目標変更時の先後交換ペア維持、error ペア再対局、SPRT 検定。`--seed` による matchup ごとの決定的な開始局面選択と seed 付き meta 出力、千日手の自動終局・エンジンへの対局履歴送信に対応（[詳細](docs/tournament.md)） |
+| `tournament` | 既存対局出力を保護し、カード index と表示ラベルを含むファイル名で保存。中断時も回収結果を保存し run 状態を明示。複数エンジンの round-robin 並列トーナメント、動的目標変更時の先後交換ペア維持、error ペア再対局、SPRT 検定。`--seed` による matchup ごとの決定的な開始局面選択と seed 付き meta 出力、千日手の自動終局・エンジンへの対局履歴送信に対応（[詳細](docs/tournament.md)） |
 | `analyze_selfplay` | 不完全入力を invalid とし、部分集計と採否を区別。tournament 出力の世代別ペア集計・Elo/nElo 算出・SPRT post-hoc 判定（[詳細](docs/analyze_selfplay.md)、[LLR 計算・再計算時の注意](docs/tournament.md#llr-の計算と保存ログの再計算)） |
 | `floodgate_record` | csa_client の per-game JSONL から 1 エンジンの戦績を集計（先後別勝率・相手別・後手勝ち/負け/引分・実戦 NPS、`--config` で csa_client 設定から入力導出、`--fetch-ratings` で wdoor 現在レート併記・履歴記録。floodgate 連続対局向け、[詳細](docs/floodgate_record.md)） |
 | `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、USI engine vs engine／NativeBackend、native LS progress 係数、`--keep-tt` による native TT・EvalHash・履歴の対局間保持、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)） |
@@ -118,7 +118,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [yardstick_score](docs/yardstick_score.md) - labeler の WDL logloss / 参照天井 / リファレンス一致を採点（物差し stage 2）
 - [ek_testset](docs/ek_testset.md) - held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点
 - [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
-- [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（u8 127 張り付き）を実局面で計測
+- [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（推論と同じ piece + Threat 入力）を実局面で計測
 - [generate_spsa_params](docs/spsa_runbook.md) - 無指定の探索・USI 宣言と共通の既定値から SPSA 用 `.params` を生成
 - [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - 永続 engine プールで batch チューニング。開始前に schedule の有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
 - [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から net 重み delta 用 SPSA `.params` を生成

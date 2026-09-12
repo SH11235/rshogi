@@ -45,7 +45,7 @@ use super::accumulator::{
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION};
 use super::features::{Feature, FeatureSet, HalfKP, HalfKPFeatureSet};
-use super::network::get_fv_scale_override;
+use super::network::{get_fv_scale_override, parse_fv_scale_from_arch};
 use crate::position::Position;
 use crate::types::{Color, Value};
 
@@ -127,26 +127,13 @@ impl<const L1: usize> AccumulatorHalfKP<L1> {
         }
     }
 
-    /// 未初期化で作成（ゼロ初期化をスキップ）
+    /// アキュムレータ用の未初期化ストレージを作成する。
     ///
-    /// # Safety
-    ///
-    /// 呼び出し側が使用前にaccumulationを初期化する責任を持つ。
-    /// AccumulatorStackHalfKP::push()で使用され、直後にrefresh_accumulatorか
-    /// update_accumulatorで全要素が上書きされる。
-    ///
-    /// Clippy警告(uninit_assumed_init)を許可しているが、これは呼び出し直後に
-    /// 全要素が上書きされることが保証されているため安全である。
+    /// 戻り値は `MaybeUninit<Self>`。`write(Self::new())` などで構造体全体を
+    /// 初期化してから利用する。即座に使える値が必要なら `new()` を呼ぶ。
     #[inline]
-    #[allow(clippy::uninit_assumed_init)]
-    pub unsafe fn new_uninit() -> Self {
-        // SAFETY: 呼び出し直後に全要素が上書きされることを呼び出し側が保証する
-        unsafe {
-            Self {
-                accumulation: std::mem::MaybeUninit::uninit().assume_init(),
-                computed_accumulation: false,
-            }
-        }
+    pub fn new_uninit() -> std::mem::MaybeUninit<Self> {
+        std::mem::MaybeUninit::uninit()
     }
 
     /// クリア
@@ -259,15 +246,13 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
 
     /// プッシュ
     ///
-    /// アキュムレータは未初期化で作成される。呼び出し側が直後に
-    /// refresh_accumulatorかupdate_accumulatorを呼ぶ責任を持つ。
+    /// アキュムレータの保存領域はゼロで初期化し、局面の計算済みフラグは落とす。
+    /// 評価前に refresh_accumulator か update_accumulator で局面を反映する。
     pub fn push(&mut self, dirty_piece: DirtyPiece) {
         let prev_idx = self.current_idx;
         self.current_idx = self.entries.len();
-        // SAFETY: push後は必ずrefresh_accumulatorかupdate_accumulatorが呼ばれ、
-        // accumulationの全要素が上書きされる
         self.entries.push(AccumulatorEntryHalfKP {
-            accumulator: unsafe { AccumulatorHalfKP::new_uninit() },
+            accumulator: AccumulatorHalfKP::new(),
             dirty_piece,
             previous: Some(prev_idx),
         });
@@ -1742,23 +1727,29 @@ impl<
     /// 評価値を計算
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
-    /// 各配列はMaybeUninitで確保し、直後のtransform/propagateで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKP<L1>) -> Value {
-        // SAFETY: 各配列は直後のtransform_raw/activate/propagateで全要素が上書きされる
+        self.evaluate_with_scale(pos, acc, get_fv_scale_override)
+    }
+
+    fn evaluate_with_scale(
+        &self,
+        pos: &Position,
+        acc: &AccumulatorHalfKP<L1>,
+        scale_override: impl FnOnce() -> Option<i32>,
+    ) -> Value {
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
         // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
-        let mut ft_out_i16: AlignedGeneric<[i16; FT_OUT]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut ft_out_i16 = AlignedGeneric([0i16; FT_OUT]);
         self.feature_transformer
             .transform_raw(acc, pos.side_to_move(), &mut ft_out_i16.0);
 
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
         // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
-        let mut transformed: AlignedGeneric<[u8; L1_INPUT]> =
-            unsafe { AlignedGeneric::new_uninit() };
+        let mut transformed = AlignedGeneric([0u8; L1_INPUT]);
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
 
         // l1 層 - 64バイトアライン
-        let mut l1_out: AlignedGeneric<[i32; L2]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut l1_out = AlignedGeneric([0i32; L2]);
         if A::SEVEN_BIT_WHEN_QA127 && self.qa <= 127 {
             self.l1.propagate_7bit(&transformed.0, &mut l1_out.0);
         } else {
@@ -1779,11 +1770,11 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l1_relu: AlignedGeneric<[u8; L2]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut l1_relu = AlignedGeneric([0u8; L2]);
         A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
 
         // l2 層 - 64バイトアライン
-        let mut l2_out: AlignedGeneric<[i32; L3]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut l2_out = AlignedGeneric([0i32; L3]);
         if A::SEVEN_BIT_WHEN_QA127 {
             self.l2.propagate_7bit(&l1_relu.0, &mut l2_out.0);
         } else {
@@ -1804,7 +1795,7 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l2_relu: AlignedGeneric<[u8; L3]> = unsafe { AlignedGeneric::new_uninit() };
+        let mut l2_relu = AlignedGeneric([0u8; L3]);
         A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
 
         // output 層（4バイトなのでゼロ初期化のコストは無視可能）
@@ -1816,7 +1807,7 @@ impl<
         }
 
         // スケーリング
-        let fv_scale = get_fv_scale_override().unwrap_or(self.fv_scale);
+        let fv_scale = scale_override().unwrap_or(self.fv_scale);
         let eval = output[0] / fv_scale;
 
         // デバッグ: 最終評価値の範囲チェック
@@ -1863,17 +1854,6 @@ impl<
 fn parse_qa_from_arch(arch_str: &str) -> Option<i16> {
     if let Some(start) = arch_str.find("qa=") {
         let rest = &arch_str[start + 3..];
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-        rest[..end].parse().ok()
-    } else {
-        None
-    }
-}
-
-/// アーキテクチャ文字列から FV_SCALE をパース
-fn parse_fv_scale_from_arch(arch_str: &str) -> Option<i32> {
-    if let Some(start) = arch_str.find("fv_scale=") {
-        let rest = &arch_str[start + 9..];
         let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
         rest[..end].parse().ok()
     } else {
@@ -1950,9 +1930,107 @@ pub type HalfKP768Pairwise = NetworkHalfKP<768, 1536, 768, 16, 64, PairwiseCReLU
 // テスト
 // =============================================================================
 
+/// loader 回帰用の、両視点と全 dense 層に非ゼロ重みを持つ HalfKP payload。
+#[cfg(test)]
+pub(crate) fn halfkp_loader_fixture(l1: usize, arch: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for value in [NNUE_VERSION, 0, arch.len() as u32] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend_from_slice(arch.as_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    for _ in 0..l1 {
+        bytes.extend_from_slice(&64i16.to_le_bytes());
+    }
+    for _ in 0..HALFKP_DIMENSIONS * l1 {
+        bytes.extend_from_slice(&1i16.to_le_bytes());
+    }
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    for (input, output, bias) in [(2 * l1, 32, 0i32), (32, 32, 0), (32, 1, 128)] {
+        for _ in 0..output {
+            bytes.extend_from_slice(&bias.to_le_bytes());
+        }
+        bytes.extend(std::iter::repeat_n(1u8, super::layers::padded_input(input) * output));
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn valid_init_forward<A: FtActivation, const INPUT: usize>() {
+        let dense_bytes = |input: usize, output: usize| {
+            let mut bytes = Vec::new();
+            for _ in 0..output {
+                bytes.extend_from_slice(&1024i32.to_le_bytes());
+            }
+            bytes.extend(std::iter::repeat_n(1u8, input * output));
+            bytes
+        };
+        let network = NetworkHalfKP::<32, 64, INPUT, 32, 32, A> {
+            feature_transformer: FeatureTransformerHalfKP {
+                biases: AlignedI16::default(),
+                weights: AlignedBox::new_zeroed(1),
+            },
+            l1: AffineTransformHalfKP::read(&mut &dense_bytes(INPUT, 32)[..]).unwrap(),
+            l2: AffineTransformHalfKP::read(&mut &dense_bytes(32, 32)[..]).unwrap(),
+            output: AffineTransformHalfKP::read(&mut &dense_bytes(32, 1)[..]).unwrap(),
+            fv_scale: 16,
+            qa: 127,
+            _activation: PhantomData,
+        };
+        let mut acc = AccumulatorHalfKP::<32>::new();
+        for i in 0..32 {
+            acc.accumulation[0].0[i] = (i * 3) as i16;
+            acc.accumulation[1].0[i] = (127 - i * 2) as i16;
+        }
+        for side in [Color::Black, Color::White] {
+            let mut pos = Position::new();
+            pos.set_sfen(if side == Color::Black {
+                "4k4/9/9/9/9/9/9/9/4K4 b - 1"
+            } else {
+                "4k4/9/9/9/9/9/9/9/4K4 w - 1"
+            })
+            .unwrap();
+            // 参照側の全バッファは Vec の有効な初期値で構築する。
+            let raw: Vec<i16> = acc.accumulation[side as usize]
+                .0
+                .iter()
+                .chain(acc.accumulation[1 - side as usize].0.iter())
+                .copied()
+                .collect();
+            let mut input = vec![0u8; INPUT];
+            A::activate_i16_to_u8(&raw, &mut input, 127);
+            let l1 = vec![1024 + input.iter().map(|&x| i32::from(x)).sum::<i32>(); 32];
+            let mut hidden = vec![0u8; 32];
+            A::activate_i32_to_u8(&l1, &mut hidden);
+            let l2 = vec![1024 + hidden.iter().map(|&x| i32::from(x)).sum::<i32>(); 32];
+            A::activate_i32_to_u8(&l2, &mut hidden);
+            let expected = (1024 + hidden.iter().map(|&x| i32::from(x)).sum::<i32>())
+                / get_fv_scale_override().unwrap_or(16);
+            assert_eq!(network.evaluate(&pos, &acc), Value::new(expected));
+        }
+    }
+
+    #[test]
+    fn valid_init_forward_matches_initialized_reference() {
+        valid_init_forward::<super::super::activation::CReLU, 64>();
+        valid_init_forward::<super::super::activation::SCReLU, 64>();
+        valid_init_forward::<super::super::activation::PairwiseCReLU, 32>();
+    }
+
+    #[test]
+    fn valid_init_halfkp_storage_and_pushed_entry() {
+        let mut storage = AccumulatorHalfKP::<32>::new_uninit();
+        let initialized = storage.write(AccumulatorHalfKP::new());
+        assert!(!initialized.computed_accumulation);
+        assert!(initialized.accumulation.iter().all(|a| a.0.iter().all(|&v| v == 0)));
+        let mut stack = AccumulatorStackHalfKP::<32>::new();
+        stack.push(DirtyPiece::new());
+        let entry = &stack.entries[stack.current_idx];
+        assert!(!entry.accumulator.computed_accumulation);
+        assert!(entry.accumulator.accumulation.iter().all(|a| a.0.iter().all(|&v| v == 0)));
+    }
 
     #[test]
     fn qa255_affine_reference_matches_integer() {
@@ -2082,12 +2160,6 @@ mod tests {
     }
 
     #[test]
-    fn test_accumulator_halfkp_512() {
-        let acc = AccumulatorHalfKP::<512>::new();
-        assert_eq!(acc.accumulation[0].0.len(), 512);
-    }
-
-    #[test]
     fn test_padded_input() {
         assert_eq!(AffineTransformHalfKP::<512, 32>::PADDED_INPUT, 512);
         assert_eq!(AffineTransformHalfKP::<32, 32>::PADDED_INPUT, 32);
@@ -2120,6 +2192,38 @@ mod tests {
     }
 
     #[test]
+    fn halfkp_scale_metadata_read_and_evaluate() {
+        use std::io::Cursor;
+        type Net = NetworkHalfKP<32, 64, 64, 32, 32, CReLU>;
+        let mut pos = Position::new();
+        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
+            .unwrap();
+        // グローバル値は変更せず、auto/明示上書きの同じ評価経路へ引数で渡す。
+        assert_eq!(get_fv_scale_override(), None);
+        for (metadata, expected_scale) in [
+            ("", FV_SCALE),
+            (",fv_scale=0", FV_SCALE),
+            (",fv_scale=-1", FV_SCALE),
+            (",fv_scale=129", FV_SCALE),
+            (",fv_scale=2147483647", FV_SCALE),
+            (",fv_scale=1", 1),
+            (",fv_scale=16", 16),
+            (",fv_scale=128", 128),
+        ] {
+            let arch = format!("Features=HalfKP(Friend)[125388->32x2],l2=32,l3=32{metadata}");
+            let net = Net::read(&mut Cursor::new(halfkp_loader_fixture(32, &arch))).unwrap();
+            assert_eq!(net.fv_scale, expected_scale, "{metadata}");
+            let mut acc = AccumulatorHalfKP::<32>::new();
+            net.refresh_accumulator(&pos, &mut acc);
+            assert!(acc.accumulation[0].0.iter().all(|v| *v == 102));
+            // 64*102 -> CReLU /64 -> 32*102 -> /64 -> 32*51 +128 =1760。
+            assert_eq!(net.evaluate(&pos, &acc).raw(), 1760 / expected_scale, "{metadata}");
+            assert_eq!(net.evaluate_with_scale(&pos, &acc, || Some(4)).raw(), 440);
+            assert_eq!(net.evaluate_with_scale(&pos, &acc, || None).raw(), 1760 / expected_scale);
+        }
+    }
+
+    #[test]
     fn test_parse_fv_scale_from_arch() {
         // bullet-shogi 形式（fv_scale= を含む）の仮定ケース
         assert_eq!(
@@ -2141,12 +2245,5 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn test_type_aliases() {
-        // 型エイリアスがコンパイルできることを確認
-        fn _check_halfkp_256_crelu(_: HalfKP256CReLU) {}
-        fn _check_halfkp_512_crelu(_: HalfKP512CReLU) {}
     }
 }

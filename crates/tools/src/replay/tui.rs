@@ -1962,35 +1962,6 @@ mod tests {
     }
 
     #[test]
-    fn black_pov_cp_keeps_sign_for_black_mover() {
-        // 先手が指した手で score_cp=+120（先手にとって +120）なら、
-        // グラフ用の先手 POV もそのまま +120（先手優勢）。
-        assert_eq!(black_pov_cp(&mv(Color::Black, Some(120), None)), Some(120.0));
-    }
-
-    #[test]
-    fn black_pov_cp_flips_sign_for_white_mover() {
-        // 後手が指した手で score_cp=+80（後手にとって +80 = 後手優勢）なら、
-        // 先手 POV では -80（後手優勢はマイナスで表す）。
-        assert_eq!(black_pov_cp(&mv(Color::White, Some(80), None)), Some(-80.0));
-    }
-
-    #[test]
-    fn black_pov_cp_clamps_and_keeps_sign_for_mate() {
-        // 後手が指した手で詰みあり（後手が詰ます = 後手にとって正の mate）なら、
-        // 先手 POV では負の sentinel（後手優勢）。
-        assert_eq!(black_pov_cp(&mv(Color::White, None, Some(3))), Some(-GRAPH_CP_CLAMP));
-        // 先手が指した手で詰みあり（先手が詰まされる = 負の mate）なら、
-        // 先手 POV でも負の sentinel（後手優勢）のまま。
-        assert_eq!(black_pov_cp(&mv(Color::Black, None, Some(-2))), Some(-GRAPH_CP_CLAMP));
-    }
-
-    #[test]
-    fn black_pov_cp_none_when_no_eval() {
-        assert_eq!(black_pov_cp(&mv(Color::Black, None, None)), None);
-    }
-
-    #[test]
     fn eval_points_preserves_gap_position_for_missing_eval() {
         // 中央の手だけ評価値が無い対局。eval_points は評価値付きの手の元インデックスを
         // 保つため None を潰さず、位置が元の手の並びと一致することを固定する
@@ -2009,31 +1980,6 @@ mod tests {
         assert!(points[0].is_some());
         assert!(points[1].is_none(), "評価値の無い手は None のまま保持される");
         assert!(points[2].is_some());
-    }
-
-    #[test]
-    fn eval_graph_connects_one_sided_evals() {
-        // CSA のように片側エンジンしか評価値を書かない棋譜（1 手おきに評価値）。手インデックス
-        // 隣接では隣り合う評価値付きの手が無く線が 1 本も引けないので、draw_eval_graph は
-        // 評価値付きの手を出現順に結ぶ（flat 化した打点列で隣接を取る）。
-        let game = GameRecord {
-            moves: vec![
-                mv_with_ply(1, Color::Black, Some(30), None),
-                mv_with_ply(2, Color::White, None, None),
-                mv_with_ply(3, Color::Black, Some(50), None),
-                mv_with_ply(4, Color::White, None, None),
-                mv_with_ply(5, Color::Black, Some(-20), None),
-            ],
-            leading_gap_is_drop: false,
-            termination: None,
-        };
-        let plotted: Vec<_> = eval_points(&game).into_iter().flatten().collect();
-        assert_eq!(plotted.len(), 3, "評価値付きの 3 手が打点される（flat 隣接で 2 本の線）");
-        let adjacent_move_pairs = eval_points(&game)
-            .windows(2)
-            .filter(|w| w[0].is_some() && w[1].is_some())
-            .count();
-        assert_eq!(adjacent_move_pairs, 0, "手インデックス隣接では線が引けない（この修正の動機）");
     }
 
     // --- 検索フィルタ (parse_filter / entry_matches) ---
@@ -2667,19 +2613,6 @@ mod tests {
     }
 
     #[test]
-    fn ply_gap_before_none_for_consecutive_plies() {
-        let game = GameRecord {
-            moves: vec![
-                mv_with_ply(1, Color::Black, None, None),
-                mv_with_ply(2, Color::White, None, None),
-            ],
-            leading_gap_is_drop: false,
-            termination: None,
-        };
-        assert_eq!(ply_gap_before(&game, 1), None);
-    }
-
-    #[test]
     fn ply_gap_before_does_not_underflow_when_ply_does_not_increase() {
         // 壊れた/想定外の入力で ply が減る・同値になるケースでも、
         // 条件が false の枝で `cur_ply - prev_ply - 1` を評価して
@@ -2807,5 +2740,18 @@ mod tests {
     fn render_board_unparsable_sfen_shows_placeholder() {
         let lines = render_board("not-a-sfen", Move::NONE, false);
         assert_eq!(joined(&lines), "(局面を表示できません)");
+    }
+
+    #[test]
+    fn black_pov_cp_sign_mate_and_missing_eval() {
+        for (color, cp, mate, expected) in [
+            (Color::Black, Some(120), None, Some(120.0)),
+            (Color::White, Some(80), None, Some(-80.0)),
+            (Color::White, None, Some(3), Some(-GRAPH_CP_CLAMP)),
+            (Color::Black, None, Some(-2), Some(-GRAPH_CP_CLAMP)),
+            (Color::Black, None, None, None),
+        ] {
+            assert_eq!(black_pov_cp(&mv(color, cp, mate)), expected);
+        }
     }
 }

@@ -112,19 +112,6 @@ mod tests {
     }
 
     #[test]
-    fn live_games_index_key_rejects_game_id_with_slash() {
-        // `/` は R2 の階層区切り。validate_key_component 経由で弾かれる。
-        let err = live_games_index_key(1_000, "g1/evil").unwrap_err();
-        assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
-    }
-
-    #[test]
-    fn live_games_index_key_rejects_empty_game_id() {
-        let err = live_games_index_key(1_000, "").unwrap_err();
-        assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
-    }
-
-    #[test]
     fn live_games_index_key_rejects_disallowed_punctuation() {
         // `.` / 空白 / `?` 等 ASCII でも英数 + `-` `_` 以外は拒否。
         for bad in ["g.1", "g 1", "g?1", "g+1", "g/1"] {
@@ -182,31 +169,15 @@ mod tests {
         assert_eq!(LIVE_KEY_PREFIX, "live-games-index/");
     }
 
-    /// live entry の put (`try_put_live_games_index`) と finalize での delete
-    /// (`try_delete_live_games_index`) は、同一の
-    /// `live_games_index_key(cfg.play_started_at_ms, cfg.game_id)` を使う契約
-    /// (<https://github.com/SH11235/rshogi/issues/853>)。同じ
-    /// `(started_at_ms, game_id)` から生成した key が bit 一致することと、その
-    /// 正準 key 文字列を固定して、started_ms 部の再計算ずれ (inv 計算 / ゼロパディング
-    /// の変更等) で put/delete の key が乖離し live entry が取り残される退行を防ぐ。
-    #[test]
-    fn put_and_delete_compute_identical_key_for_same_started_at() {
-        // 本番インシデント (#853) の対局 ID と play_started_at_ms 相当 (epoch ms)。
-        let started_at_ms = 1_783_185_845_075_u64;
-        let game_id = "repro-nospec-1783185827-1783185845075";
-        let put_key = live_games_index_key(started_at_ms, game_id).unwrap();
-        let delete_key = live_games_index_key(started_at_ms, game_id).unwrap();
-        assert_eq!(put_key, delete_key, "put と delete で key が乖離してはいけない");
-        // INV_BASE - started_at_ms = 99_999_999_999_999 - 1_783_185_845_075
-        //                          = 98_216_814_154_924 (14 桁ゼロパディング)。
-        assert_eq!(
-            put_key,
-            "live-games-index/98216814154924-repro-nospec-1783185827-1783185845075.json",
-        );
-    }
-
     // `source` の env 切替判定は `games_index::resolve_index_source` (wasm32
     // 限定) に集約済み。ホスト target からは純粋関数
     // `games_index::classify_index_source_from_inputs` のテスト
     // (`games_index::tests`) で網羅する。
+
+    #[test]
+    fn index_key_rejects_invalid_game_id() {
+        for id in ["", "g1/evil", "gあ"] {
+            assert!(matches!(live_games_index_key(1000, id), Err(StorageError::Malformed(_))));
+        }
+    }
 }

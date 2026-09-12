@@ -28,8 +28,8 @@ use rshogi_csa_client::engine::SpawnOptions;
 mod common;
 use rshogi_csa::{Color, Position, initial_position};
 use rshogi_csa_client::events::{
-    DisconnectReason, MovePlayer, ReconnectState, SearchInfoEmitPolicy, SessionError,
-    SessionEventSink, SessionProgress, SinkError,
+    DisconnectReason, MovePlayer, SearchInfoEmitPolicy, SessionError, SessionEventSink,
+    SessionProgress, SinkError,
 };
 use rshogi_csa_client::jsonl::LiveJsonlWriter;
 use rshogi_csa_client::protocol::{CsaConnection, GameSummary, TimeConfig};
@@ -234,6 +234,7 @@ type CapturingHandles = (Arc<Mutex<Vec<&'static str>>>, Arc<Mutex<u32>>);
 
 /// Sink 集計用ヘルパー
 struct CapturingSink {
+    resumed_sfen: Option<String>,
     events: Arc<Mutex<Vec<&'static str>>>,
     fatal_after: Option<&'static str>,
     error_calls: Arc<Mutex<u32>>,
@@ -244,6 +245,7 @@ impl CapturingSink {
         let events = Arc::new(Mutex::new(Vec::new()));
         let error_calls = Arc::new(Mutex::new(0u32));
         let me = CapturingSink {
+            resumed_sfen: None,
             events: Arc::clone(&events),
             fatal_after: None,
             error_calls: Arc::clone(&error_calls),
@@ -258,6 +260,10 @@ impl CapturingSink {
 
 impl SessionEventSink for CapturingSink {
     fn on_event(&mut self, event: SessionProgress) -> Result<(), SinkError> {
+        if let SessionProgress::Resumed { state, .. } = &event {
+            self.resumed_sfen = Some(state.last_sfen.clone());
+        }
+
         let label = label_for(&event);
         self.events.lock().unwrap().push(label);
         if Some(label) == self.fatal_after {
@@ -515,6 +521,7 @@ fn resumed_session_emits_resumed_event_and_no_history_replay() {
         &mut sink,
     );
     engine.quit();
+    assert_eq!(sink.resumed_sfen, Some(initial_position().to_sfen()));
     let _outcome = outcome.expect("session ok");
 
     let events = events.lock().unwrap().clone();
@@ -744,107 +751,6 @@ fn resumed_session_mismatch_keeps_start_time_and_removes_stale_live_jsonl() {
         "filename={filename}"
     );
     let _ = std::fs::remove_dir_all(&jsonl_dir);
-}
-
-#[test]
-fn resumed_state_last_sfen_matches_summary_position_section() {
-    use rshogi_csa::parse_csa_full;
-    let port = spawn_mock_tcp_server(|reader, writer| {
-        let _ = read_line(reader);
-        write_lines(writer, &["LOGIN:alice OK"]);
-        let lines = game_summary_lines("g-resume-sfen");
-        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-        write_lines(writer, &line_refs);
-        write_lines(
-            writer,
-            &[
-                "BEGIN Reconnect_State",
-                "Current_Turn:+",
-                "Black_Time_Remaining_Ms:599500",
-                "White_Time_Remaining_Ms:600000",
-                "END Reconnect_State",
-            ],
-        );
-        let mv = read_line(reader);
-        assert!(mv.starts_with("+7776FU"));
-        write_lines(writer, &["+7776FU,T1", "#WIN"]);
-        let _ = read_line(reader);
-    });
-
-    let engine_path = mock_usi_engine_script();
-    let config = mock_config(engine_path, SearchInfoEmitPolicy::Disabled);
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
-    conn.login_reconnect("alice", "pw", "g-resume-sfen", "tok-xyz")
-        .expect("login_reconnect");
-    let mut engine = common::spawn_engine(
-        &config.engine.path,
-        &config.engine.options,
-        SpawnOptions {
-            ponder: config.game.ponder,
-            startup_timeout: Duration::from_secs(5),
-            stderr_passthrough: false,
-        },
-    )
-    .expect("spawn engine");
-
-    // 期待する SFEN は Game_Summary の Position section から導出する。
-    // mock のレイアウトは平手のため `parse_csa_full` 結果は initial_position と等しい。
-    let pos_text = lines_position_section();
-    let (parsed_pos, _, _) = parse_csa_full(&pos_text).expect("parse csa");
-    let expected_sfen = parsed_pos.to_sfen();
-
-    // sink 内で Resumed payload を捕捉
-    let captured_sfen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let captured_clone = Arc::clone(&captured_sfen);
-    struct CaptureResumedSink {
-        out: Arc<Mutex<Option<String>>>,
-    }
-    impl SessionEventSink for CaptureResumedSink {
-        fn on_event(&mut self, event: SessionProgress) -> Result<(), SinkError> {
-            if let SessionProgress::Resumed { state, .. } = &event {
-                let _: &ReconnectState = state;
-                *self.out.lock().unwrap() = Some(state.last_sfen.clone());
-            }
-            Ok(())
-        }
-    }
-    let mut sink = CaptureResumedSink {
-        out: captured_clone,
-    };
-    let outcome = run_resumed_session_with_events(
-        &config,
-        &mut conn,
-        &mut engine,
-        Arc::clone(&shutdown),
-        &mut sink,
-    );
-    engine.quit();
-    let _ = outcome.expect("session ok");
-
-    let captured = captured_sfen.lock().unwrap().clone();
-    assert_eq!(
-        captured.as_deref(),
-        Some(expected_sfen.as_str()),
-        "Resumed.state.last_sfen が GameSummary.position_section の SFEN 変換と一致すべき"
-    );
-}
-
-/// Game_Summary の Position section を string で返す (テスト用)。
-fn lines_position_section() -> String {
-    [
-        "P1-KY-KE-GI-KI-OU-KI-GI-KE-KY",
-        "P2 * -HI *  *  *  *  * -KA *",
-        "P3-FU-FU-FU-FU-FU-FU-FU-FU-FU",
-        "P4 *  *  *  *  *  *  *  *  *",
-        "P5 *  *  *  *  *  *  *  *  *",
-        "P6 *  *  *  *  *  *  *  *  *",
-        "P7+FU+FU+FU+FU+FU+FU+FU+FU+FU",
-        "P8 * +KA *  *  *  *  * +HI *",
-        "P9+KY+KE+GI+KI+OU+KI+GI+KE+KY",
-        "+",
-    ]
-    .join("\n")
 }
 
 // ────────────────────────────────────────────

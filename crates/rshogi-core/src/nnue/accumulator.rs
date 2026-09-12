@@ -161,21 +161,13 @@ impl<const N: usize> Default for IndexList<N> {
 pub struct Aligned<T: Copy>(pub T);
 
 impl<T: Copy> Aligned<T> {
-    /// 未初期化のAlignedを作成（ゼロ初期化をスキップ）
+    /// 値をまだ持たない、64バイトアラインされたストレージを作成する。
     ///
-    /// # Safety
-    ///
-    /// 呼び出し側が使用前に全要素を初期化する責任を持つ。
-    /// evaluate関数内で使用され、直後にtransform/propagateで全要素が上書きされる。
-    ///
-    /// この関数はパフォーマンス最適化のため、整数配列の初期化をスキップする。
-    /// Clippy警告(uninit_assumed_init)を許可しているが、これは呼び出し直後に
-    /// 全要素が上書きされることが保証されているため安全である。
+    /// 戻り値は `MaybeUninit<Self>`。`write(Aligned(value))` で有効な値を
+    /// 書き込んでから利用する。旧来の型付き未初期化値は返さない。
     #[inline]
-    #[allow(clippy::uninit_assumed_init)]
-    pub unsafe fn new_uninit() -> Self {
-        // SAFETY: 呼び出し直後に全要素が上書きされることを呼び出し側が保証する
-        unsafe { std::mem::MaybeUninit::uninit().assume_init() }
+    pub fn new_uninit() -> std::mem::MaybeUninit<Self> {
+        std::mem::MaybeUninit::uninit()
     }
 }
 
@@ -915,11 +907,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_accumulator_new() {
-        let acc = Accumulator::new();
-        assert!(!acc.computed_accumulation);
-        assert!(!acc.computed_score);
-        assert_eq!(acc.score, Value::ZERO);
+    fn valid_init_aligned_storage_supports_nonzero_values() {
+        use std::num::NonZeroU32;
+        let mut storage = Aligned::<NonZeroU32>::new_uninit();
+        assert_eq!(storage.as_ptr() as usize % 64, 0);
+        let initialized = storage.write(Aligned(NonZeroU32::new(17).unwrap()));
+        assert_eq!(initialized.0.get(), 17);
+        // SAFETY: write が構造体全体を有効な値で初期化した。
+        assert_eq!(unsafe { storage.assume_init() }.0.get(), 17);
     }
 
     #[test]
@@ -954,17 +949,12 @@ mod tests {
     }
 
     #[test]
-    fn test_dirty_piece_new() {
-        let dp = DirtyPiece::new();
-        assert_eq!(dp.dirty_num, 0);
-        assert!(!dp.king_moved[0]);
-        assert!(!dp.king_moved[1]);
-    }
-
-    #[test]
     fn test_accumulator_stack_push_pop() {
         let mut stack = AccumulatorStack::new();
         assert_eq!(stack.current_index(), 0);
+        assert!(!stack.current().accumulator.computed_accumulation);
+        assert!(!stack.current().accumulator.computed_score);
+        assert_eq!(stack.current().accumulator.score, Value::ZERO);
 
         stack.push(DirtyPiece::new());
         assert_eq!(stack.current_index(), 1);

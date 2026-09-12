@@ -307,8 +307,8 @@ pulumi up
 | 公式 changelog (〜 2026-05-07) に Workers Observability alert announcement | ❌ なし |
 | `/available_alerts` API での返却 | ✅ あり (実機検証済) |
 | `filters.status: ["FIRING_FAILED", "NORMAL"]` 公式仕様 | ⚠️ `/available_alerts` 由来のみ、公式 doc は `health_check_status_notification` 専用 spec として記述 |
-| Dashboard UI に alert rule 作成画面 | ❌ user 確認で無し (Worker > Observability tab はクエリ UI のみ、Save as alert ボタン等なし) |
-| Pulumi `@pulumi/cloudflare` v6.15.0 alertType enum 収録 | ❌ 未収録 ([PR #704](https://github.com/SH11235/rshogi/pull/704) Codex review で確認) |
+| Dashboard UI に alert rule 作成画面 | ❌ 2026-05-11 調査時点では無し (Worker > Observability tab はクエリ UI のみ、Save as alert ボタン等なし) |
+| Pulumi `@pulumi/cloudflare` v6.15.0 alertType enum 収録 | ❌ 未収録 |
 
 = Cloudflare 内部で alertType は予約済だが alert rule 定義経路 (UI / API 共) が **public release 前**。我々が作った NotificationPolicy 2 件は **永久に silent** (rule 定義経路がない状態では発火しない)。
 

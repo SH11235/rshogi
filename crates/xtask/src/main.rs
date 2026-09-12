@@ -669,33 +669,19 @@ mod tests {
             binary: "rshogi-usi-universal".into(),
         };
         write_manifest(&m, &good).unwrap();
-        assert!(matches!(read_manifest_status(&good), ManifestStatus::Loaded(_)));
+        let ManifestStatus::Loaded(loaded) = read_manifest_status(&good) else {
+            panic!("valid manifest was not loaded");
+        };
+        assert_eq!(loaded.schema_version, m.schema_version);
+        assert_eq!(loaded.edition, m.edition);
+        assert_eq!(loaded.profile, m.profile);
+        assert_eq!(loaded.commit, m.commit);
+        assert_eq!(loaded.commit_dirty, m.commit_dirty);
+        assert_eq!(loaded.built_at, m.built_at);
+        assert_eq!(loaded.rustc, m.rustc);
+        assert_eq!(loaded.binary, m.binary);
 
         std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    #[test]
-    fn manifest_round_trip_preserves_fields() {
-        let manifest = Manifest {
-            schema_version: MANIFEST_SCHEMA_VERSION,
-            edition: "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt".into(),
-            profile: "production".into(),
-            commit: "5616ea7c056ff21b6705c0ef00ca7266b7b2849f".into(),
-            commit_dirty: false,
-            built_at: "2026-05-24T22:30:00+09:00".into(),
-            rustc: "rustc 1.85.0 (abc 2026-01-01)".into(),
-            binary: "rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt".into(),
-        };
-        let text = toml::to_string_pretty(&manifest).unwrap();
-        let parsed: Manifest = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.schema_version, manifest.schema_version);
-        assert_eq!(parsed.edition, manifest.edition);
-        assert_eq!(parsed.profile, manifest.profile);
-        assert_eq!(parsed.commit, manifest.commit);
-        assert_eq!(parsed.commit_dirty, manifest.commit_dirty);
-        assert_eq!(parsed.built_at, manifest.built_at);
-        assert_eq!(parsed.rustc, manifest.rustc);
-        assert_eq!(parsed.binary, manifest.binary);
     }
 
     #[test]

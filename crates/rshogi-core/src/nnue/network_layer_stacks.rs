@@ -44,7 +44,9 @@ use super::constants::{LAYER_STACK_16X32_L1_OUT, LAYER_STACK_16X32_L2_IN};
 #[cfg(feature = "layerstacks-1536x32x32")]
 use super::constants::{LAYER_STACK_32X32_L1_OUT, LAYER_STACK_32X32_L2_IN};
 use super::feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
-use super::layer_stacks::{LayerStacks, sqr_clipped_relu_transform};
+use super::layer_stacks::{
+    LayerStacks, LsSaturationCounts, sqr_clipped_relu_new, sqr_clipped_relu_transform,
+};
 #[cfg(feature = "layerstack-arch")]
 use super::layers::AffineTransform;
 #[cfg(feature = "ft-halfka_hm_merged")]
@@ -150,17 +152,10 @@ fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16;
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
         // SAFETY:
-        // - `a_ptr` / `b_ptr`: 唯一の呼び出し元は `NetworkLayerStacks::evaluate`
-        //   であり、そこから渡される `us_t` / `them_t` は
-        //   `AccumulatorLayerStacks::get_threat()` が返す
-        //   `&[i16; L1]` (親構造体 `AccumulatorLayerStacks` が
-        //   `#[repr(C, align(64))]` で 64 バイトアライン）。
-        //   → `_mm256_load_si256` の 32 バイトアライン要件を満たす
-        // - `dst_ptr`: 呼び出し元の `sum_t: &mut Aligned<[i16; L1]>`
-        //   （`#[repr(C, align(64))]`、64 バイトアライン）→ store 要件を満たす
-        // - ループ回数 `L1 / 16` は const generics 由来。`add_i16_arrays` は
-        //   `AccumulatorLayerStacks<L1>` で `L1 ∈ {512, 768, 1024, 1536, 3072}`（全て 16 の倍数）
-        //   からのみ呼ばれるため末端要素が取り残されない
+        // - 入力は 64 バイトアラインの AccumulatorLayerStacks 内の piece/Threat 配列。
+        //   L1 は 16 の倍数なので視点ごとの開始位置も 32 バイトアライン。
+        // - 出力は呼び出し元の Aligned<[i16; L1]>。store の 32 バイト要件を満たす。
+        // - L1 / 16 回の load/store は各配列の範囲内に収まる。
         unsafe {
             use std::arch::x86_64::*;
             let dst_ptr = dst.as_mut_ptr();
@@ -612,11 +607,61 @@ impl<
 
     /// 評価値を計算
     ///
-    /// 配列はMaybeUninitで確保し、直後のsqr_clipped_relu_transformで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks<L1>) -> Value {
         let side_to_move = pos.side_to_move();
         let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move, self.num_buckets);
         self.evaluate_with_bucket(pos, acc, bucket_index)
+    }
+
+    // forward と診断で同じ piece + Threat 因子を使用する。PSQT は別経路。
+    #[inline]
+    fn with_combined_accumulators<R>(
+        &self,
+        acc: &AccumulatorLayerStacks<L1>,
+        side_to_move: Color,
+        f: impl FnOnce(&[i16; L1], &[i16; L1]) -> R,
+    ) -> R {
+        let (us, them) = if side_to_move == Color::Black {
+            (acc.get(0), acc.get(1))
+        } else {
+            (acc.get(1), acc.get(0))
+        };
+        #[cfg(feature = "nnue-threat")]
+        if self.feature_transformer.has_threat {
+            let (us_threat, them_threat) = if side_to_move == Color::Black {
+                (acc.get_threat(0), acc.get_threat(1))
+            } else {
+                (acc.get_threat(1), acc.get_threat(0))
+            };
+            let mut us_combined = Aligned([0i16; L1]);
+            let mut them_combined = Aligned([0i16; L1]);
+            add_i16_arrays(&mut us_combined.0, us, us_threat);
+            add_i16_arrays(&mut them_combined.0, them, them_threat);
+            return f(&us_combined.0, &them_combined.0);
+        }
+        f(us, them)
+    }
+
+    /// forward と同じ因子・入力から活性飽和数を計測する。
+    ///
+    /// 戻り値は両視点の FT 因子が 127 以上となる数（総数は 2 * L1）。
+    /// `counts` には指定 bucket の dense 活性飽和数を加算する。
+    /// Threat 有効時は i16 の wrapping 和を使い、PSQT は含めない。
+    pub fn accumulate_saturation_counts(
+        &self,
+        acc: &AccumulatorLayerStacks<L1>,
+        side_to_move: Color,
+        bucket_index: usize,
+        counts: &mut LsSaturationCounts,
+    ) -> u64 {
+        self.with_combined_accumulators(acc, side_to_move, |us, them| {
+            let ft_saturated = us.iter().chain(them.iter()).filter(|&&x| x >= 127).count() as u64;
+            let mut transformed = Aligned([0u8; L1]);
+            sqr_clipped_relu_transform(us, them, &mut transformed.0);
+            self.layer_stacks.buckets[bucket_index]
+                .propagate_counting_saturation(&transformed.0, counts);
+            ft_saturated
+        })
     }
 
     /// 評価値を計算（事前計算済み bucket index を使用）
@@ -628,47 +673,9 @@ impl<
     ) -> Value {
         let side_to_move = pos.side_to_move();
 
-        // SqrClippedReLU変換
-        let (us_acc, them_acc) = if side_to_move == Color::Black {
-            (acc.get(Color::Black as usize), acc.get(Color::White as usize))
-        } else {
-            (acc.get(Color::White as usize), acc.get(Color::Black as usize))
-        };
-
-        // SAFETY: 直後のsqr_clipped_relu_transformで全要素が上書きされる
-        let mut transformed: Aligned<[u8; L1]> = unsafe { Aligned::new_uninit() };
-
-        // Threat の寄与を含めて combined accumulator を構築する。
-        // 無効なら piece_acc を直接 SCReLU に渡す。
-        #[cfg(feature = "nnue-threat")]
-        {
-            if self.feature_transformer.has_threat {
-                let mut us_combined = Aligned([0i16; L1]);
-                let mut them_combined = Aligned([0i16; L1]);
-                us_combined.0.copy_from_slice(us_acc);
-                them_combined.0.copy_from_slice(them_acc);
-
-                let (us_t, them_t) = if side_to_move == Color::Black {
-                    (acc.get_threat(Color::Black as usize), acc.get_threat(Color::White as usize))
-                } else {
-                    (acc.get_threat(Color::White as usize), acc.get_threat(Color::Black as usize))
-                };
-                let mut tmp_us = Aligned([0i16; L1]);
-                let mut tmp_them = Aligned([0i16; L1]);
-                add_i16_arrays::<L1>(&mut tmp_us.0, &us_combined.0, us_t);
-                add_i16_arrays::<L1>(&mut tmp_them.0, &them_combined.0, them_t);
-                us_combined = tmp_us;
-                them_combined = tmp_them;
-
-                sqr_clipped_relu_transform(&us_combined.0, &them_combined.0, &mut transformed.0);
-            } else {
-                sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
-            }
-        }
-        #[cfg(not(feature = "nnue-threat"))]
-        {
-            sqr_clipped_relu_transform(us_acc, them_acc, &mut transformed.0);
-        }
+        let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
+            sqr_clipped_relu_new(us, them)
+        });
 
         // LayerStacks で評価
         let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
@@ -2175,7 +2182,7 @@ fn detect_layer_stacks_feature_set(arch_str: &str) -> Result<super::spec::Featur
 mod tests {
     #[cfg(feature = "layerstack-arch")]
     use super::*;
-    use crate::nnue::constants::{FV_SCALE_HALFKA, NNUE_PYTORCH_L1};
+    use crate::nnue::constants::NNUE_PYTORCH_L1;
     #[cfg(all(
         feature = "layerstack-arch",
         feature = "layerstacks-1536x16x32",
@@ -2254,9 +2261,172 @@ mod tests {
     }
 
     #[test]
-    fn test_network_dimensions() {
-        assert_eq!(TEST_L1, 1536);
-        assert_eq!(FV_SCALE_HALFKA, 16);
+    fn saturation_uses_forward_accumulators() {
+        use super::super::ls_feature_spec::HalfKpSpec;
+        use super::*;
+        let mut network = NetworkLayerStacks::<64, 16, 30, 32, HalfKpSpec> {
+            feature_transformer: FeatureTransformerLayerStacks::for_accumulator_tests(),
+            layer_stacks: LayerStacks::with_num_buckets(1),
+            fv_scale: 1,
+            num_buckets: 1,
+            _ft: PhantomData,
+        };
+        let bucket = &mut network.layer_stacks.buckets[0];
+        bucket.l1.weights.fill(4);
+        bucket.l2.weights.fill(4);
+        bucket.output.weights.fill(1);
+        let mut acc = AccumulatorLayerStacks::<64>::new();
+        acc.accumulation[0].fill(50);
+        acc.accumulation[1].fill(30);
+        #[cfg(feature = "nnue-threat")]
+        {
+            acc.threat_accumulation[0].fill(100);
+            acc.threat_accumulation[1].fill(110);
+            // 飽和加算ではなく i16 wrapping で合成される境界も固定する。
+            acc.accumulation[0][0] = i16::MAX;
+            acc.threat_accumulation[0][0] = 1;
+        }
+        for use_threat in [false, true] {
+            #[cfg(not(feature = "nnue-threat"))]
+            if use_threat {
+                continue;
+            }
+            #[cfg(feature = "nnue-threat")]
+            {
+                network.feature_transformer.has_threat = use_threat;
+            }
+            for side in [Color::Black, Color::White] {
+                let us = side as usize;
+                let them = (!side) as usize;
+                let expected = |perspective: usize| {
+                    std::array::from_fn::<i16, 64, _>(|i| {
+                        let piece = acc.accumulation[perspective][i];
+                        #[cfg(feature = "nnue-threat")]
+                        if use_threat {
+                            return piece.wrapping_add(acc.threat_accumulation[perspective][i]);
+                        }
+                        piece
+                    })
+                };
+                let us_expected = Aligned(expected(us));
+                let them_expected = Aligned(expected(them));
+                network.with_combined_accumulators(&acc, side, |us_actual, them_actual| {
+                    assert_eq!(*us_actual, us_expected.0);
+                    assert_eq!(*them_actual, them_expected.0);
+                });
+                let mut transformed = Aligned([0u8; 64]);
+                sqr_clipped_relu_transform(&us_expected.0, &them_expected.0, &mut transformed.0);
+                let mut expected_counts = LsSaturationCounts::default();
+                let raw = network.layer_stacks.buckets[0]
+                    .propagate_counting_saturation(&transformed.0, &mut expected_counts);
+                let expected_ft = us_expected
+                    .0
+                    .iter()
+                    .chain(them_expected.0.iter())
+                    .filter(|&&x| x >= 127)
+                    .count() as u64;
+                let mut counts = LsSaturationCounts::default();
+                assert_eq!(
+                    network.accumulate_saturation_counts(&acc, side, 0, &mut counts),
+                    expected_ft
+                );
+                assert_eq!(
+                    (
+                        counts.l1_act_sat,
+                        counts.l1_act_total,
+                        counts.l2_act_sat,
+                        counts.l2_act_total
+                    ),
+                    (
+                        expected_counts.l1_act_sat,
+                        expected_counts.l1_act_total,
+                        expected_counts.l2_act_sat,
+                        expected_counts.l2_act_total
+                    )
+                );
+                if use_threat {
+                    assert_eq!(expected_ft, 127);
+                    assert_eq!((counts.l1_act_sat, counts.l2_act_sat), (30, 32));
+                } else {
+                    assert_eq!((counts.l1_act_sat, counts.l2_act_sat), (0, 0));
+                }
+                let mut pos = Position::new();
+                pos.set_sfen(if side == Color::Black {
+                    "4k4/9/9/9/9/9/9/9/4K4 b - 1"
+                } else {
+                    "4k4/9/9/9/9/9/9/9/4K4 w - 1"
+                })
+                .unwrap();
+                assert_eq!(
+                    network.evaluate_with_bucket(&pos, &acc, 0),
+                    Value::new(raw / get_fv_scale_override().unwrap_or(1))
+                );
+                #[cfg(feature = "nnue-psqt")]
+                {
+                    network.feature_transformer.has_psqt = true;
+                    acc.psqt_accumulation[us][0] = 300;
+                    acc.psqt_accumulation[them][0] = 100;
+                    let mut psqt_counts = LsSaturationCounts::default();
+                    assert_eq!(
+                        network.accumulate_saturation_counts(&acc, side, 0, &mut psqt_counts),
+                        expected_ft
+                    );
+                    assert_eq!(
+                        (psqt_counts.l1_act_sat, psqt_counts.l2_act_sat),
+                        (counts.l1_act_sat, counts.l2_act_sat)
+                    );
+                    assert_eq!(
+                        network.evaluate_with_bucket(&pos, &acc, 0),
+                        Value::new(raw.saturating_add(100) / get_fv_scale_override().unwrap_or(1))
+                    );
+                    network.feature_transformer.has_psqt = false;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn initialized_layerstack_forward_matches_explicit_buffer() {
+        use super::super::ls_feature_spec::HalfKpSpec;
+        use super::*;
+        let mut network = NetworkLayerStacks::<64, 16, 30, 32, HalfKpSpec> {
+            feature_transformer: FeatureTransformerLayerStacks::read(&mut std::io::repeat(0))
+                .unwrap(),
+            layer_stacks: LayerStacks::with_num_buckets(1),
+            fv_scale: 16,
+            num_buckets: 1,
+            _ft: PhantomData,
+        };
+        let bucket = &mut network.layer_stacks.buckets[0];
+        bucket.l1.weights.fill(1);
+        bucket.l1.biases.fill(1024);
+        bucket.l2.weights.fill(1);
+        bucket.l2.biases.fill(1024);
+        bucket.output.weights.fill(1);
+        let mut acc = AccumulatorLayerStacks::<64>::new();
+        for i in 0..64 {
+            acc.accumulation[0][i] = (i * 7) as i16;
+            acc.accumulation[1][i] = (255 - i * 3) as i16;
+        }
+        for side in [Color::Black, Color::White] {
+            let mut pos = Position::new();
+            pos.set_sfen(if side == Color::Black {
+                "4k4/9/9/9/9/9/9/9/4K4 b - 1"
+            } else {
+                "4k4/9/9/9/9/9/9/9/4K4 w - 1"
+            })
+            .unwrap();
+            let mut transformed = Aligned([0u8; 64]);
+            sqr_clipped_relu_transform(
+                acc.get(side as usize),
+                acc.get(1 - side as usize),
+                &mut transformed.0,
+            );
+            assert!(transformed.0.iter().any(|&v| v != 0));
+            let expected = network.layer_stacks.evaluate_raw(0, &transformed.0)
+                / get_fv_scale_override().unwrap_or(16);
+            assert_eq!(network.evaluate_with_bucket(&pos, &acc, 0), Value::new(expected));
+        }
     }
 
     /// LayerStacks NNUEファイルの読み込みと評価テスト

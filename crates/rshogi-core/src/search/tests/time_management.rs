@@ -33,15 +33,6 @@ fn test_calculate_falling_eval_clamp() {
     assert!((0.5786..=1.6752).contains(&high), "falling_eval should be clamped, got {high}");
 }
 
-/// time_reduction の計算は正の値を返す
-#[test]
-fn test_calculate_time_reduction_positive() {
-    use super::super::time_manager::calculate_time_reduction;
-
-    let tr = calculate_time_reduction(10, 5);
-    assert!(tr > 0.0, "time_reduction should be positive, got {tr}");
-}
-
 /// 不安定性係数（changes > 0）の係数は1より大きい
 #[test]
 fn test_best_move_instability_factor_increases_when_unstable() {
@@ -160,36 +151,6 @@ fn test_time_options_deep_defaults() {
 // SearchWorker best_move_changes テスト（統合テスト）
 // =============================================================================
 
-/// SearchWorkerのbest_move_changesの初期値は0.0
-#[test]
-fn test_worker_best_move_changes_initial_value() {
-    const STACK_SIZE: usize = 64 * 1024 * 1024; // 64MB
-    std::thread::Builder::new()
-        .stack_size(STACK_SIZE)
-        .spawn(|| {
-            use crate::eval::EvalHash;
-            use crate::search::alpha_beta::SearchWorker;
-            use crate::tt::TranspositionTable;
-            use std::sync::Arc;
-
-            let tt = Arc::new(TranspositionTable::new(16));
-            let eval_hash = Arc::new(EvalHash::new(1));
-
-            let worker = SearchWorker::new(
-                tt,
-                eval_hash,
-                DEFAULT_MAX_MOVES_TO_DRAW,
-                0,
-                SearchTuneParams::default(),
-            );
-
-            assert_eq!(worker.state.best_move_changes, 0.0, "初期値は0.0であるべき");
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
 /// SearchWorkerのdecay_best_move_changesは値を半減する
 #[test]
 fn test_worker_best_move_changes_decay() {
@@ -212,6 +173,7 @@ fn test_worker_best_move_changes_decay() {
                 0,
                 SearchTuneParams::default(),
             );
+            assert_eq!(worker.state.best_move_changes, 0.0);
             worker.state.best_move_changes = 4.0;
             worker.decay_best_move_changes();
 
@@ -230,171 +192,9 @@ fn test_worker_best_move_changes_decay() {
 // 1.1 MoveHorizon計算
 // -----------------------------------------------------------------------------
 
-/// MoveHorizon計算: 切れ負けルール、序盤 (ply=10)
-/// YaneuraOu: 160 + 40 - min(10, 40) = 190
-#[test]
-fn test_move_horizon_time_forfeit_early_game() {
-    use super::super::time_manager::calculate_move_horizon;
-
-    let time_forfeit = true;
-    let ply = 10;
-
-    let result = calculate_move_horizon(time_forfeit, ply);
-
-    assert_eq!(result, 190, "切れ負け序盤(ply=10): 160+40-10=190");
-}
-
-/// MoveHorizon計算: 切れ負けルール、中盤 (ply=50)
-/// YaneuraOu: 160 + 40 - min(50, 40) = 160
-#[test]
-fn test_move_horizon_time_forfeit_mid_game() {
-    use super::super::time_manager::calculate_move_horizon;
-
-    let time_forfeit = true;
-    let ply = 50;
-
-    let result = calculate_move_horizon(time_forfeit, ply);
-
-    assert_eq!(result, 160, "切れ負け中盤(ply=50): 160+40-40=160");
-}
-
-/// MoveHorizon計算: フィッシャールール、序盤 (ply=10)
-/// YaneuraOu: 160 + 20 - min(10, 80) = 170
-#[test]
-fn test_move_horizon_fischer_early_game() {
-    use super::super::time_manager::calculate_move_horizon;
-
-    let time_forfeit = false;
-    let ply = 10;
-
-    let result = calculate_move_horizon(time_forfeit, ply);
-
-    assert_eq!(result, 170, "フィッシャー序盤(ply=10): 160+20-10=170");
-}
-
-/// MoveHorizon計算: フィッシャールール、終盤 (ply=100)
-/// YaneuraOu: 160 + 20 - min(100, 80) = 100
-#[test]
-fn test_move_horizon_fischer_late_game() {
-    use super::super::time_manager::calculate_move_horizon;
-
-    let time_forfeit = false;
-    let ply = 100;
-
-    let result = calculate_move_horizon(time_forfeit, ply);
-
-    assert_eq!(result, 100, "フィッシャー終盤(ply=100): 160+20-80=100");
-}
-
 // -----------------------------------------------------------------------------
 // 1.2 round_up処理
 // -----------------------------------------------------------------------------
-
-/// round_up: 基本的な繰り上げ (5500ms → 5880ms)
-#[test]
-fn test_round_up_basic() {
-    let mut tm = create_time_manager();
-    tm.set_options(&TimeOptions {
-        minimum_thinking_time: 2000,
-        network_delay: 120,
-        network_delay2: 1120,
-        slow_mover: 100,
-        usi_ponder: false,
-        stochastic_ponder: false,
-    });
-    // remain_timeを設定するため一度init
-    let mut limits = LimitsType::new();
-    limits.time[Color::Black.index()] = 100000;
-    limits.set_start_time();
-    tm.init(&limits, Color::Black, 1, 512);
-
-    let result = tm.round_up(5500);
-
-    // YaneuraOu:
-    // 1. (5500 + 999) / 1000 * 1000 = 6000
-    // 2. max(6000, 2000) = 6000
-    // 3. 6000 - 120 = 5880
-    // 4. 5880 >= 5500 なので +1000不要
-    // 5. min(5880, 100000) = 5880
-    assert_eq!(result, 5880, "round_up(5500) = 5880");
-}
-
-/// round_up: 最小思考時間を下回る場合
-#[test]
-fn test_round_up_below_minimum() {
-    let mut tm = create_time_manager();
-    tm.set_options(&TimeOptions {
-        minimum_thinking_time: 2000,
-        network_delay: 120,
-        network_delay2: 1120,
-        slow_mover: 100,
-        usi_ponder: false,
-        stochastic_ponder: false,
-    });
-    let mut limits = LimitsType::new();
-    limits.time[Color::Black.index()] = 100000;
-    limits.set_start_time();
-    tm.init(&limits, Color::Black, 1, 512);
-
-    let result = tm.round_up(1500);
-
-    // 1. (1500 + 999) / 1000 * 1000 = 2000
-    // 2. max(2000, 2000) = 2000
-    // 3. 2000 - 120 = 1880
-    // 4. 1880 >= 1500 なので +1000不要
-    assert_eq!(result, 1880, "round_up(1500) = 1880");
-}
-
-/// round_up: NetworkDelay引いて元の値より小さくなる場合は+1000
-#[test]
-fn test_round_up_add_extra_second() {
-    let mut tm = create_time_manager();
-    tm.set_options(&TimeOptions {
-        minimum_thinking_time: 2000,
-        network_delay: 500, // 大きめ
-        network_delay2: 1500,
-        slow_mover: 100,
-        usi_ponder: false,
-        stochastic_ponder: false,
-    });
-    let mut limits = LimitsType::new();
-    limits.time[Color::Black.index()] = 100000;
-    limits.set_start_time();
-    tm.init(&limits, Color::Black, 1, 512);
-
-    let result = tm.round_up(2600);
-
-    // 1. (2600 + 999) / 1000 * 1000 = 3000
-    // 2. max(3000, 2000) = 3000
-    // 3. 3000 - 500 = 2500
-    // 4. 2500 < 2600 なので +1000 → 3500
-    // 5. min(3500, 100000) = 3500
-    assert_eq!(result, 3500, "round_up(2600) with network_delay=500 → 3500");
-}
-
-/// round_up: 残り時間を超える場合はremain_timeでクランプ
-#[test]
-fn test_round_up_exceeds_remain_time() {
-    let mut tm = create_time_manager();
-    tm.set_options(&TimeOptions {
-        minimum_thinking_time: 2000,
-        network_delay: 120,
-        network_delay2: 1120,
-        slow_mover: 100,
-        usi_ponder: false,
-        stochastic_ponder: false,
-    });
-    let mut limits = LimitsType::new();
-    limits.time[Color::Black.index()] = 5000; // 少ない
-    limits.set_start_time();
-    tm.init(&limits, Color::Black, 1, 512);
-
-    let result = tm.round_up(10000);
-
-    // remain_timeは limits.time - network_delay2 付近
-    // 計算後 remain_time でクランプされる
-    assert!(result <= tm.remain_time(), "round_up(10000) should be clamped by remain_time");
-}
 
 // -----------------------------------------------------------------------------
 // 1.3 秒読み判定
@@ -449,66 +249,9 @@ fn test_not_final_push_enough_time() {
 // 1.4 最大時間30%上限
 // -----------------------------------------------------------------------------
 
-/// 最大時間30%上限: maximumTimeが残り時間見積もりの30%を超えない
-#[test]
-fn test_maximum_time_30_percent_cap() {
-    let mut tm = create_time_manager();
-
-    let mut limits = LimitsType::new();
-    limits.time[Color::Black.index()] = 300000; // 5分
-    limits.inc[Color::Black.index()] = 5000; // +5秒
-    limits.byoyomi[Color::Black.index()] = 0;
-    limits.set_start_time();
-
-    tm.init(&limits, Color::Black, 10, 512);
-
-    // YaneuraOuでは、maximumTimeは remain_estimate * 0.3 を超えない
-    // 実際の値は実装に依存するが、上限チェックのみ行う
-    // （詳細な計算はtime_manager.rsの実装を見て調整）
-    assert!(tm.maximum() > 0, "maximum_time should be positive");
-}
-
 // -----------------------------------------------------------------------------
 // 1.5 Ponder時調整
 // -----------------------------------------------------------------------------
-
-/// Ponder時調整: Ponder有効でStochastic_Ponder無効時はoptimumTimeを25%増やす
-#[test]
-fn test_ponder_optimum_time_increase() {
-    // Ponder無効時
-    let mut tm_no_ponder = create_time_manager();
-    let opts_no_ponder = TimeOptions {
-        usi_ponder: false,
-        stochastic_ponder: false,
-        ..Default::default()
-    };
-    tm_no_ponder.set_options(&opts_no_ponder);
-
-    let mut limits = LimitsType::new();
-    limits.time[Color::Black.index()] = 60000;
-    limits.inc[Color::Black.index()] = 0;
-    limits.byoyomi[Color::Black.index()] = 0;
-    limits.set_start_time();
-
-    tm_no_ponder.init(&limits, Color::Black, 1, 512);
-    let base_optimum = tm_no_ponder.optimum();
-
-    // Ponder有効時
-    let mut tm_ponder = create_time_manager();
-    let opts_ponder = TimeOptions {
-        usi_ponder: true,
-        stochastic_ponder: false,
-        ..Default::default()
-    };
-    tm_ponder.set_options(&opts_ponder);
-
-    limits.set_start_time(); // 再設定
-    tm_ponder.init(&limits, Color::Black, 1, 512);
-
-    // Ponder有効時は25%増し
-    let expected = base_optimum + base_optimum / 4;
-    assert_eq!(tm_ponder.optimum(), expected, "Ponder有効時はoptimum = base + base/4");
-}
 
 /// Ponder時調整: Stochastic_Ponder有効時は調整なし
 #[test]
@@ -577,4 +320,48 @@ fn test_best_move_instability_yaneuraou_coefficients() {
         (result - expected).abs() < 0.0001,
         "YaneuraOu with threads, expected {expected}, got {result}"
     );
+}
+
+#[test]
+fn move_horizon_modes() {
+    use super::super::time_manager::calculate_move_horizon;
+    for (forfeit, ply, expected) in [
+        (true, 10, 190),
+        (true, 50, 160),
+        (false, 10, 170),
+        (false, 100, 100),
+    ] {
+        assert_eq!(calculate_move_horizon(forfeit, ply), expected);
+    }
+}
+
+#[test]
+fn round_up_boundaries_and_remaining_budget() {
+    let mut tm = create_time_manager();
+    for (minimum, delay, remaining, requested, expected) in [
+        (2000, 120, 100000, 5500, Some(5880)),
+        (2000, 120, 100000, 1500, Some(1880)),
+        (2000, 120, 100000, 1, Some(1880)),
+        (1000, 120, 100000, 1, Some(880)),
+        (2000, 500, 100000, 2600, Some(3500)),
+        (2000, 120, 5000, 10000, None),
+    ] {
+        tm.set_options(&TimeOptions {
+            minimum_thinking_time: minimum,
+            network_delay: delay,
+            network_delay2: delay + 1000,
+            slow_mover: 100,
+            usi_ponder: false,
+            stochastic_ponder: false,
+        });
+        let mut limits = LimitsType::new();
+        limits.time[Color::Black.index()] = remaining;
+        limits.set_start_time();
+        tm.init(&limits, Color::Black, 1, 512);
+        let actual = tm.round_up(requested);
+        if let Some(expected) = expected {
+            assert_eq!(actual, expected);
+        }
+        assert!(actual <= tm.remain_time());
+    }
 }

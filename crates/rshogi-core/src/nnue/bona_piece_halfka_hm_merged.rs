@@ -275,13 +275,8 @@ mod tests {
 
     #[test]
     fn test_halfka_index() {
-        // kb=0, bp=0 → index=0
-        assert_eq!(halfka_index(0, 0), 0);
-
-        // kb=1, bp=0 → index=1629
-        assert_eq!(halfka_index(1, 0), PIECE_INPUTS);
-
-        // kb=44, bp=0 → index=44*1629=71676
-        assert_eq!(halfka_index(44, 0), 44 * PIECE_INPUTS);
+        for (king, piece, expected) in [(0, 0, 0), (1, 17, 1646), (44, 89, 71765)] {
+            assert_eq!(halfka_index(king, piece), expected);
+        }
     }
 }

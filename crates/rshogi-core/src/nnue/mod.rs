@@ -175,3 +175,58 @@ pub use network::clear_nnue;
 
 // 統計カウンタ（デバッグ・チューニング用）
 pub use stats::{NnueStatsSnapshot, get_nnue_stats, print_nnue_stats, reset_nnue_stats};
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use spec::{Activation, ArchitectureSpec, FeatureSet};
+    use std::collections::HashSet;
+
+    #[test]
+    fn supported_architectures_match_registry() {
+        let registries = [
+            (FeatureSet::HalfKP, halfkp::HalfKPNetwork::supported_specs()),
+            (FeatureSet::HalfKaSplit, halfka_split::HalfKaSplitNetwork::supported_specs()),
+            (FeatureSet::HalfKaMerged, halfka_merged::HalfKaMergedNetwork::supported_specs()),
+            (
+                FeatureSet::HalfKaHmSplit,
+                halfka_hm_split::HalfKaHmSplitNetwork::supported_specs(),
+            ),
+            (
+                FeatureSet::HalfKaHmMerged,
+                halfka_hm_merged::HalfKaHmMergedNetwork::supported_specs(),
+            ),
+        ];
+        for (feature_set, actual) in registries {
+            let dimensions = [
+                (256, 32, 32),
+                (512, 8, 64),
+                (512, 8, 96),
+                (512, 32, 32),
+                (768, 16, 64),
+                (1024, 8, 32),
+                (1024, 8, 64),
+                (1024, 8, 96),
+            ];
+            let expected: HashSet<_> = dimensions
+                .into_iter()
+                .filter(|&(l1, _, l3)| {
+                    !(feature_set == FeatureSet::HalfKP && l1 == 1024 && l3 == 96)
+                })
+                .flat_map(|(l1, l2, l3)| {
+                    [
+                        Activation::CReLU,
+                        Activation::SCReLU,
+                        Activation::PairwiseCReLU,
+                    ]
+                    .map(move |activation| {
+                        ArchitectureSpec::new(feature_set, l1, l2, l3, activation)
+                    })
+                })
+                .collect();
+            let unique: HashSet<_> = actual.iter().copied().collect();
+            assert_eq!(unique.len(), actual.len(), "duplicate: {feature_set:?}");
+            assert_eq!(unique, expected, "{feature_set:?}");
+        }
+    }
+}

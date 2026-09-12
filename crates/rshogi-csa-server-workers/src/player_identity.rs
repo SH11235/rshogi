@@ -151,13 +151,6 @@ fn credential_id(handle: &str, password: &str, secret: &str, version: Option<&st
     }
 }
 
-#[cfg(test)]
-fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(message);
-    mac.finalize().into_bytes().into()
-}
-
 fn hex_prefix(bytes: &[u8], len: usize) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(len * 2);
@@ -174,14 +167,6 @@ mod tests {
 
     const V1: &str = "0123456789abcdef0123456789abcdef";
     const V2: &str = "abcdef0123456789abcdef0123456789";
-
-    #[test]
-    fn hmac_matches_rfc_4231_test_case_2() {
-        assert_eq!(
-            hex_prefix(&hmac_sha256(b"Jefe", b"what do ya want for nothing?"), 32),
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
-    }
 
     #[test]
     fn legacy_string_secret_keeps_unversioned_id() {

@@ -129,66 +129,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hand_empty() {
-        let hand = Hand::EMPTY;
-        assert!(hand.is_empty());
-        assert_eq!(hand.count(PieceType::Pawn), 0);
-        assert!(!hand.has(PieceType::Pawn));
-    }
-
-    #[test]
-    fn test_hand_add() {
-        let hand = Hand::EMPTY;
-        let hand = hand.add(PieceType::Pawn);
-        assert_eq!(hand.count(PieceType::Pawn), 1);
-        assert!(hand.has(PieceType::Pawn));
-
-        let hand = hand.add(PieceType::Pawn);
-        assert_eq!(hand.count(PieceType::Pawn), 2);
-    }
-
-    #[test]
-    fn test_hand_sub() {
-        let hand = Hand::EMPTY.add(PieceType::Rook).add(PieceType::Rook);
-        assert_eq!(hand.count(PieceType::Rook), 2);
-
-        let hand = hand.sub(PieceType::Rook);
-        assert_eq!(hand.count(PieceType::Rook), 1);
-
-        let hand = hand.sub(PieceType::Rook);
-        assert_eq!(hand.count(PieceType::Rook), 0);
-        assert!(!hand.has(PieceType::Rook));
-    }
-
-    #[test]
-    fn test_hand_set() {
-        let hand = Hand::EMPTY.set(PieceType::Pawn, 5);
-        assert_eq!(hand.count(PieceType::Pawn), 5);
-
-        let hand = hand.set(PieceType::Gold, 3);
-        assert_eq!(hand.count(PieceType::Pawn), 5);
-        assert_eq!(hand.count(PieceType::Gold), 3);
-    }
-
-    #[test]
-    fn test_hand_multiple_pieces() {
-        let hand = Hand::EMPTY
-            .add(PieceType::Pawn)
-            .add(PieceType::Pawn)
-            .add(PieceType::Lance)
-            .add(PieceType::Bishop)
-            .add(PieceType::Rook);
-
-        assert_eq!(hand.count(PieceType::Pawn), 2);
-        assert_eq!(hand.count(PieceType::Lance), 1);
-        assert_eq!(hand.count(PieceType::Knight), 0);
-        assert_eq!(hand.count(PieceType::Silver), 0);
-        assert_eq!(hand.count(PieceType::Gold), 0);
-        assert_eq!(hand.count(PieceType::Bishop), 1);
-        assert_eq!(hand.count(PieceType::Rook), 1);
-    }
-
-    #[test]
     fn test_hand_is_superior_or_equal() {
         let hand1 = Hand::EMPTY.add(PieceType::Pawn).add(PieceType::Pawn);
         let hand2 = Hand::EMPTY.add(PieceType::Pawn);
@@ -217,5 +157,21 @@ mod tests {
         // 飛車の最大値（2枚）
         let hand = Hand::EMPTY.add(PieceType::Rook).add(PieceType::Rook);
         assert_eq!(hand.count(PieceType::Rook), 2);
+    }
+
+    #[test]
+    fn hand_updates_preserve_other_piece_counts() {
+        let mut hand = Hand::EMPTY;
+        assert!(hand.is_empty());
+        assert!(!hand.has(PieceType::Pawn));
+        hand = hand.set(PieceType::Pawn, 5).add(PieceType::Rook).add(PieceType::Rook);
+        hand = hand.sub(PieceType::Rook).add(PieceType::Pawn).set(PieceType::Gold, 3);
+        assert_eq!(hand.count(PieceType::Pawn), 6);
+        assert_eq!(hand.count(PieceType::Rook), 1);
+        assert_eq!(hand.count(PieceType::Gold), 3);
+        assert_eq!(hand.count(PieceType::Bishop), 0);
+        hand = hand.sub(PieceType::Rook).set(PieceType::Pawn, 0).set(PieceType::Gold, 0);
+        assert!(!hand.has(PieceType::Rook));
+        assert!(hand.is_empty());
     }
 }

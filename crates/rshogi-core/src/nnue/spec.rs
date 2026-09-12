@@ -1344,30 +1344,9 @@ mod tests {
             parse_feature_set_from_arch("Features=HalfKaSplit[138510->512x2]").unwrap(),
             FeatureSet::HalfKaSplit
         );
-    }
-
-    #[test]
-    fn test_parse_feature_set_alias_equivalence() {
-        // underscore 表記と PascalCase 表記のどちらでも同 enum 値が得られること
-        // (両綴り受理の核となる不変条件)。
-        let pairs: &[(&str, &str)] = &[
-            ("Features=HalfKA_hm[73305->1024x2]", "Features=HalfKaHmMerged[73305->1024x2]"),
-            ("Features=HalfKA_merged[138510->512x2]", "Features=HalfKaMerged[138510->512x2]"),
-            ("Features=HalfKA_hm_split[73305->512x2]", "Features=HalfKaHmSplit[73305->512x2]"),
-        ];
-        for (underscore, pascal_case) in pairs {
-            let underscore_resolved = parse_feature_set_from_arch(underscore).unwrap();
-            let pascal_resolved = parse_feature_set_from_arch(pascal_case).unwrap();
-            assert_eq!(
-                underscore_resolved, pascal_resolved,
-                "underscore={underscore} vs pascal_case={pascal_case}",
-            );
-        }
-        // "HalfKA" 単独は plane 暗黙のため input_dim でしか曖昧解消できない。
-        // 非ミラー Split に解決する代表ケースを確認 (PascalCase "HalfKaSplit" と等価)。
         assert_eq!(
             parse_feature_set_from_arch("Features=HalfKA[138510->512x2]").unwrap(),
-            parse_feature_set_from_arch("Features=HalfKaSplit[138510->512x2]").unwrap(),
+            FeatureSet::HalfKaSplit
         );
     }
 

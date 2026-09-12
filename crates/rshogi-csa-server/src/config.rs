@@ -120,34 +120,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_truthy_bool_env_defaults_to_false() {
-        assert!(!parse_truthy_bool_env(None).unwrap());
-    }
-
-    #[test]
-    fn parse_truthy_bool_env_accepts_truthy_variants() {
-        for raw in ["true", "TRUE", "yes", "YES", "on", "ON", "1", " true\n"] {
-            assert!(parse_truthy_bool_env(Some(raw)).unwrap(), "expected truthy: {raw:?}");
-        }
-    }
-
-    #[test]
-    fn parse_truthy_bool_env_accepts_falsy_variants() {
-        for raw in ["false", "FALSE", "no", "NO", "off", "OFF", "0", " false\t"] {
-            assert!(!parse_truthy_bool_env(Some(raw)).unwrap(), "expected falsy: {raw:?}");
-        }
-    }
-
-    #[test]
-    fn parse_truthy_bool_env_rejects_unknown_value_with_generic_prefix() {
-        // 汎用パーサ単独の Err は wrapper 側で prefix を付ける契約。本関数自身は
-        // 特定 frontend 名（"allow_floodgate_features" 等）を含めない。
-        let err = parse_truthy_bool_env(Some("weird")).unwrap_err();
-        assert!(err.contains("expected true|false"), "unexpected err: {err}");
-        assert!(!err.contains("allow_floodgate_features"), "unexpected prefix leaked: {err}");
-    }
-
-    #[test]
     fn parse_allow_floodgate_features_defaults_to_false() {
         assert!(!parse_allow_floodgate_features(None).unwrap());
     }
@@ -276,5 +248,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("persistent_player_rates"));
+    }
+
+    #[test]
+    fn truthy_bool_env_spellings_and_error_context() {
+        assert!(!parse_truthy_bool_env(None).unwrap());
+        for (raw, expected) in [
+            ("true", true),
+            ("TrUe", true),
+            (" yes\n", true),
+            ("on", true),
+            ("1", true),
+            ("false", false),
+            ("FaLsE", false),
+            ("no", false),
+            ("off", false),
+            ("0", false),
+        ] {
+            assert_eq!(parse_truthy_bool_env(Some(raw)).unwrap(), expected, "{raw:?}");
+        }
+        let err = parse_truthy_bool_env(Some("weird")).unwrap_err();
+        assert!(err.contains("expected true|false"));
+        assert!(!err.contains("allow_floodgate_features"));
     }
 }

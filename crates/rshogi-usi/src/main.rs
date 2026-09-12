@@ -1928,50 +1928,20 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
     }
     #[test]
     #[serial]
-    fn parse_go_mate_sets_limits() {
+    fn parse_go_mate_limits() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
             .spawn(|| {
                 let engine = UsiEngine::new();
-                let tokens = vec!["go", "mate", "5"];
-
-                let limits = engine.parse_go_options(&tokens);
-                assert_eq!(limits.mate, 5);
-                assert!(!limits.use_time_management(), "mate search disables time management");
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
-    #[serial]
-    fn parse_go_mate_without_value_defaults_to_infinite() {
-        std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(|| {
-                let engine = UsiEngine::new();
-                let tokens = vec!["go", "mate"];
-
-                let limits = engine.parse_go_options(&tokens);
-                assert_eq!(limits.mate, i32::MAX);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
-    #[serial]
-    fn parse_go_mate_infinite_defaults_to_max() {
-        std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(|| {
-                let engine = UsiEngine::new();
-                let tokens = vec!["go", "mate", "infinite"];
-
-                let limits = engine.parse_go_options(&tokens);
-                assert_eq!(limits.mate, i32::MAX);
+                for (tokens, mate) in [
+                    (&["go", "mate", "5"][..], 5),
+                    (&["go", "mate"][..], i32::MAX),
+                    (&["go", "mate", "infinite"][..], i32::MAX),
+                ] {
+                    let limits = engine.parse_go_options(tokens);
+                    assert_eq!(limits.mate, mate);
+                    assert!(!limits.use_time_management());
+                }
             })
             .unwrap()
             .join()

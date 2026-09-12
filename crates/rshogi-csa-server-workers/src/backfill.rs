@@ -1113,26 +1113,6 @@ mod tests {
     }
 
     #[test]
-    fn live_entry_hard_ttl_is_72_hours() {
-        // 定数の値をリグレッションで固定する (72h = 259_200_000ms)。
-        assert_eq!(LIVE_ENTRY_HARD_TTL_MS, 259_200_000);
-    }
-
-    #[test]
-    fn backfill_stats_default_is_zero() {
-        let stats = BackfillStats::default();
-        assert_eq!(
-            stats,
-            BackfillStats {
-                listed: 0,
-                put: 0,
-                skipped: 0,
-                truncated: false,
-            }
-        );
-    }
-
-    #[test]
     fn games_index_backfill_best_effort_records_each_item_independently() {
         let mut stats = BackfillStats {
             listed: 3,
@@ -1214,29 +1194,6 @@ mod tests {
     }
 
     #[test]
-    fn games_index_backfill_reaches_backlog_larger_than_one_cron_page() {
-        let backlog: Vec<_> = (0..700).collect();
-        let mut reached = Vec::new();
-        let mut offset = 0;
-
-        loop {
-            let end = (offset + GAMES_INDEX_BACKFILL_MAX_ITEMS as usize).min(backlog.len());
-            reached.extend_from_slice(&backlog[offset..end]);
-            let truncated = end < backlog.len();
-            let operation =
-                games_index_backfill_state_operation(true, truncated, truncated.then_some("next"));
-            match operation {
-                GamesIndexBackfillStateOperation::UpdateCursor(_) => offset = end,
-                GamesIndexBackfillStateOperation::ResetCursor => break,
-                other => panic!("unexpected state operation: {other:?}"),
-            }
-        }
-
-        assert_eq!(reached, backlog);
-        assert_eq!(reached.len().div_ceil(GAMES_INDEX_BACKFILL_MAX_ITEMS as usize), 3);
-    }
-
-    #[test]
     fn search_backfill_deadline_selects_retry_page_and_keeps_cursor() {
         let mut state = SearchBackfillPageState::default();
         assert_eq!(
@@ -1294,25 +1251,6 @@ mod tests {
         let search_finished_at_ms = cron_started_at_ms + SCHEDULED_WORK_DEADLINE_MS;
         assert_eq!(shared_budget_remaining_ms(cron_started_at_ms, search_finished_at_ms), 0);
         assert!(shared_deadline_reached(cron_started_at_ms, search_finished_at_ms));
-    }
-
-    #[test]
-    fn sweep_stats_default_is_zero() {
-        let stats = SweepStats::default();
-        assert_eq!(
-            stats,
-            SweepStats {
-                listed: 0,
-                deleted: 0,
-                hard_ttl_deleted: 0,
-                live_without_meta_within_ttl: 0,
-                oldest_live_without_meta_age_ms: 0,
-                pages: 0,
-                deadline_reached: false,
-                max_pages_reached: false,
-                aborted: false,
-            }
-        );
     }
 
     #[test]

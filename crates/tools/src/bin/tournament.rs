@@ -1300,7 +1300,11 @@ fn main() -> Result<()> {
 
     for &(i, j) in &pair_indices {
         {
-            let filename = format!("pair-{i}-{j}.jsonl");
+            let filename = format!(
+                "pair-{i}-{j}__{}-vs-{}.jsonl",
+                filename_label(&engine_labels[i]),
+                filename_label(&engine_labels[j])
+            );
             let path = cli.out_dir.join(&filename);
             let mut pw = PairWriter::new(&path)?;
 
@@ -2295,6 +2299,27 @@ fn print_final_table(
             wr * 100.0,
             elo_str
         );
+    }
+}
+
+/// 表示用の短い ASCII 名を作る。一意性はカード index が担い、元ラベルは meta に残す。
+fn filename_label(label: &str) -> String {
+    let sanitized: String = label
+        .chars()
+        .take(48)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "engine".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 

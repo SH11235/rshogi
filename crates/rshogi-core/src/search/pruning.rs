@@ -15,7 +15,7 @@ use super::alpha_beta::{
 };
 use super::qsearch::qsearch;
 use super::search_helpers::{
-    clear_cont_history_for_null, cont_history_tables, do_move_and_push, nnue_pop, nnue_push,
+    clear_cont_history_for_null, cont_history_keys, do_move_and_push, nnue_pop, nnue_push,
     set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
@@ -491,7 +491,7 @@ where
 
     inc_stat!(st, probcut_attempted);
 
-    let cont_tables = cont_history_tables(st, ctx, ply);
+    let cont_tables = cont_history_keys(st, ply);
     let mut mp = MovePicker::new_probcut(
         pos,
         tt_ctx.mv,

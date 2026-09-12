@@ -600,19 +600,6 @@ mod tests {
         );
     }
 
-    /// 親ディレクトリは存在するがファイル本体が無いケースは初回起動の正常経路
-    /// なので、空マップで起動できる。`load_from_file_returns_empty_when_file_missing`
-    /// と等価だが、parent 検証経路を踏むことで P2 修正の正常系副作用が無いこと
-    /// を明示する。
-    #[tokio::test(flavor = "current_thread")]
-    async fn load_from_file_accepts_missing_file_when_parent_dir_exists() {
-        let dir = tempdir();
-        let path = dir.path().join("players.yaml");
-        // 親 (`dir`) は tempdir で生成済み、ファイル自体は無い状態。
-        let storage = PlayersYamlRateStorage::load_from_file(path).await.unwrap();
-        assert!(storage.list_all().await.unwrap().is_empty());
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn save_writes_atomic_yaml_and_round_trips() {
         let dir = tempdir();

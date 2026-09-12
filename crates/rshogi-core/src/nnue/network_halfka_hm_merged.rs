@@ -1651,14 +1651,12 @@ impl<
     /// 評価値を計算
     ///
     /// 最適化: スタック配列 + 64バイトアラインメントで SIMD 効率を最大化
-    /// 各配列はMaybeUninitで確保し、直後のtransform/propagateで全要素が上書きされる。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorHalfKaHmMerged<L1>) -> Value {
         let debug = nnue_debug_enabled();
 
-        // SAFETY: 各配列は直後のtransform_raw/activate/propagateで全要素が上書きされる
         // Feature Transformer 出力（生のi16値）- 64バイトアライン
         // FT出力は常に FT_OUT（= L1 * 2、両視点の連結）
-        let mut ft_out_i16: Aligned<[i16; FT_OUT]> = unsafe { Aligned::new_uninit() };
+        let mut ft_out_i16 = Aligned([0i16; FT_OUT]);
         self.feature_transformer
             .transform_raw(acc, pos.side_to_move(), &mut ft_out_i16.0);
 
@@ -1675,7 +1673,7 @@ impl<
 
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
         // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
-        let mut transformed: Aligned<[u8; L1_INPUT]> = unsafe { Aligned::new_uninit() };
+        let mut transformed = Aligned([0u8; L1_INPUT]);
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
 
         if debug {
@@ -1691,7 +1689,7 @@ impl<
         }
 
         // l1 層 - 64バイトアライン
-        let mut l1_out: Aligned<[i32; L2]> = unsafe { Aligned::new_uninit() };
+        let mut l1_out = Aligned([0i32; L2]);
         if A::SEVEN_BIT_WHEN_QA127 && self.qa <= 127 {
             self.l1.propagate_7bit(&transformed.0, &mut l1_out.0);
         } else {
@@ -1720,11 +1718,11 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l1_relu: Aligned<[u8; L2]> = unsafe { Aligned::new_uninit() };
+        let mut l1_relu = Aligned([0u8; L2]);
         A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
 
         // l2 層 - 64バイトアライン
-        let mut l2_out: Aligned<[i32; L3]> = unsafe { Aligned::new_uninit() };
+        let mut l2_out = Aligned([0i32; L3]);
         if A::SEVEN_BIT_WHEN_QA127 {
             self.l2.propagate_7bit(&l1_relu.0, &mut l2_out.0);
         } else {
@@ -1745,7 +1743,7 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l2_relu: Aligned<[u8; L3]> = unsafe { Aligned::new_uninit() };
+        let mut l2_relu = Aligned([0u8; L3]);
         A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
 
         // output 層（4バイトなのでゼロ初期化のコストは無視可能）
@@ -1893,6 +1891,67 @@ pub type HalfKaHmMerged768Pairwise = NetworkHalfKaHmMerged<768, 1536, 768, 16, 6
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn valid_init_forward<A: FtActivation, const INPUT: usize>() {
+        let dense_bytes = |input: usize, output: usize| {
+            let mut bytes = Vec::new();
+            for _ in 0..output {
+                bytes.extend_from_slice(&1024i32.to_le_bytes());
+            }
+            bytes.extend(std::iter::repeat_n(1u8, input * output));
+            bytes
+        };
+        let network = NetworkHalfKaHmMerged::<32, 64, INPUT, 32, 32, A> {
+            feature_transformer: FeatureTransformerHalfKaHmMerged {
+                biases: vec![0; 32],
+                weights: AlignedBox::new_zeroed(1),
+            },
+            l1: AffineTransformHalfKaHmMerged::read(&mut &dense_bytes(INPUT, 32)[..]).unwrap(),
+            l2: AffineTransformHalfKaHmMerged::read(&mut &dense_bytes(32, 32)[..]).unwrap(),
+            output: AffineTransformHalfKaHmMerged::read(&mut &dense_bytes(32, 1)[..]).unwrap(),
+            fv_scale: 16,
+            qa: 127,
+            _activation: PhantomData,
+        };
+        let mut acc = AccumulatorHalfKaHmMerged::<32>::new();
+        for i in 0..32 {
+            acc.accumulation[0].0[i] = (i * 3) as i16;
+            acc.accumulation[1].0[i] = (127 - i * 2) as i16;
+        }
+        for side in [Color::Black, Color::White] {
+            let mut pos = Position::new();
+            pos.set_sfen(if side == Color::Black {
+                "4k4/9/9/9/9/9/9/9/4K4 b - 1"
+            } else {
+                "4k4/9/9/9/9/9/9/9/4K4 w - 1"
+            })
+            .unwrap();
+            // 参照側の全バッファは Vec の有効な初期値で構築する。
+            let raw: Vec<i16> = acc.accumulation[side as usize]
+                .0
+                .iter()
+                .chain(acc.accumulation[1 - side as usize].0.iter())
+                .copied()
+                .collect();
+            let mut input = vec![0u8; INPUT];
+            A::activate_i16_to_u8(&raw, &mut input, 127);
+            let l1 = vec![1024 + input.iter().map(|&x| i32::from(x)).sum::<i32>(); 32];
+            let mut hidden = vec![0u8; 32];
+            A::activate_i32_to_u8(&l1, &mut hidden);
+            let l2 = vec![1024 + hidden.iter().map(|&x| i32::from(x)).sum::<i32>(); 32];
+            A::activate_i32_to_u8(&l2, &mut hidden);
+            let expected = (1024 + hidden.iter().map(|&x| i32::from(x)).sum::<i32>())
+                / get_fv_scale_override().unwrap_or(16);
+            assert_eq!(network.evaluate(&pos, &acc), Value::new(expected));
+        }
+    }
+
+    #[test]
+    fn valid_init_forward_matches_initialized_reference() {
+        valid_init_forward::<super::super::activation::CReLU, 64>();
+        valid_init_forward::<super::super::activation::SCReLU, 64>();
+        valid_init_forward::<super::super::activation::PairwiseCReLU, 32>();
+    }
+
     #[test]
     fn qa255_affine_reference_matches_integer() {
         super::super::layers::check_qa255_affine::<32, 32>(|bytes, input, output| {
@@ -2022,18 +2081,6 @@ mod tests {
     }
 
     #[test]
-    fn test_accumulator_halfka_512() {
-        let acc = AccumulatorHalfKaHmMerged::<512>::new();
-        assert_eq!(acc.accumulation[0].0.len(), 512);
-    }
-
-    #[test]
-    fn test_accumulator_halfka_1024() {
-        let acc = AccumulatorHalfKaHmMerged::<1024>::new();
-        assert_eq!(acc.accumulation[0].0.len(), 1024);
-    }
-
-    #[test]
     fn test_padded_input() {
         assert_eq!(AffineTransformHalfKaHmMerged::<8, 96>::PADDED_INPUT, 32);
         assert_eq!(AffineTransformHalfKaHmMerged::<32, 96>::PADDED_INPUT, 32);
@@ -2065,13 +2112,5 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn test_type_aliases() {
-        // 型エイリアスがコンパイルできることを確認
-        fn _check_halfka_256_crelu(_: HalfKaHmMerged256CReLU) {}
-        fn _check_halfka_512_crelu(_: HalfKaHmMerged512CReLU) {}
-        fn _check_halfka_1024_crelu(_: HalfKaHmMerged1024CReLU) {}
     }
 }

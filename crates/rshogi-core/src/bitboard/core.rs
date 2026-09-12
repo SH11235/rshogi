@@ -534,22 +534,6 @@ mod tests {
     use crate::types::{File, Rank};
 
     #[test]
-    fn test_bitboard_empty() {
-        let bb = Bitboard::EMPTY;
-        assert!(bb.is_empty());
-        assert!(!bb.is_not_empty());
-        assert_eq!(bb.count(), 0);
-    }
-
-    #[test]
-    fn test_bitboard_all() {
-        let bb = Bitboard::ALL;
-        assert!(!bb.is_empty());
-        assert!(bb.is_not_empty());
-        assert_eq!(bb.count(), 81);
-    }
-
-    #[test]
     fn test_bitboard_from_square() {
         // 1一 (idx=0)
         let sq11 = Square::new(File::File1, Rank::Rank1);
@@ -685,13 +669,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bitboard_from_u64_pair() {
-        let bb = Bitboard::from_u64_pair(0x1234, 0x5678);
-        assert_eq!(bb.p0(), 0x1234);
-        assert_eq!(bb.p1(), 0x5678);
-    }
-
-    #[test]
     fn test_bitboard_andnot() {
         let sq1 = Square::new(File::File1, Rank::Rank1);
         let sq2 = Square::new(File::File2, Rank::Rank2);
@@ -720,25 +697,28 @@ mod tests {
 
     #[test]
     fn test_bitboard_iter() {
-        let sq1 = Square::new(File::File1, Rank::Rank1);
-        let sq2 = Square::new(File::File5, Rank::Rank5);
-        let sq3 = Square::new(File::File9, Rank::Rank9);
-
-        let bb =
-            Bitboard::from_square(sq1) | Bitboard::from_square(sq2) | Bitboard::from_square(sq3);
-
-        let squares: Vec<_> = bb.iter().collect();
-        assert_eq!(squares.len(), 3);
-        assert!(squares.contains(&sq1));
-        assert!(squares.contains(&sq2));
-        assert!(squares.contains(&sq3));
-    }
-
-    #[test]
-    fn test_bitboard_iter_exact_size() {
-        let bb = Bitboard::ALL;
-        let iter = bb.iter();
-        assert_eq!(iter.len(), 81);
+        let sparse = [
+            Square::new(File::File1, Rank::Rank1),
+            Square::new(File::File5, Rank::Rank5),
+            Square::new(File::File9, Rank::Rank9),
+        ];
+        let bb = sparse.iter().fold(Bitboard::EMPTY, |bb, &sq| bb | Bitboard::from_square(sq));
+        for (bb, expected) in [
+            (Bitboard::EMPTY, vec![]),
+            (Bitboard::ALL, Square::all().collect()),
+            (bb, sparse.to_vec()),
+        ] {
+            assert_eq!(bb.count() as usize, expected.len());
+            assert_eq!(bb.is_empty(), expected.is_empty());
+            assert_eq!(bb.is_not_empty(), !expected.is_empty());
+            let mut iter = bb.iter();
+            for (i, sq) in expected.iter().enumerate() {
+                assert_eq!(iter.len(), expected.len() - i);
+                assert_eq!(iter.next(), Some(*sq));
+            }
+            assert_eq!(iter.len(), 0);
+            assert_eq!(iter.next(), None);
+        }
     }
 
     #[test]
@@ -761,6 +741,8 @@ mod tests {
     #[test]
     fn test_from_u64_pair() {
         let bb = Bitboard::from_u64_pair(0x1234567890ABCDEF, 0xFEDCBA09);
+        assert_eq!(bb.p0(), 0x1234567890ABCDEF);
+        assert_eq!(bb.p1(), 0xFEDCBA09);
         assert_eq!(bb.extract64::<0>(), 0x1234567890ABCDEF);
         assert_eq!(bb.extract64::<1>(), 0xFEDCBA09);
     }

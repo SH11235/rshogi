@@ -146,29 +146,3 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
 
     None
 }
-
-/// queen_step_effectをテストで使用するので公開
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bitboard::king_effect;
-    use crate::mate::queen_step_effect;
-    use crate::types::{File, Rank, Square};
-
-    #[test]
-    fn test_step_effects_exist() {
-        let sq = Square::new(File::File5, Rank::Rank5);
-        assert!(rook_step_effect(sq).is_not_empty());
-        assert!(bishop_step_effect(sq).is_not_empty());
-        assert!(queen_step_effect(sq).is_not_empty());
-    }
-
-    #[test]
-    fn test_cross45() {
-        let sq = Square::new(File::File5, Rank::Rank5);
-        let bb = cross45_step_effect(sq);
-        assert!(bb.is_not_empty());
-        // 斜め1ステップのみ
-        assert!(bb & king_effect(sq) == bb);
-    }
-}

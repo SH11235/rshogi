@@ -48,8 +48,9 @@ production に繋ぎたい場合は `--target production` に差し替えるだ�
 接続する）。本リポ以外の Cloudflare アカウントに deploy した Worker に繋ぎたい場合は
 `--target` を使わず TOML / `--host` で URL を直接指定する。
 
-エンジンビルドの feature 選定は `bullet-shogi/docs/experiments/` の各モデル仕様 +
-`.claude/skills/selfplay/SKILL.md` の features 対応表を参照。
+エンジンビルドの feature 選定は [ビルドガイド](../../../docs/build.md) と
+[対応 NNUE アーキテクチャ](../../../docs/nnue-supported-architectures.md) を参照。
+使用するモデルのアーキテクチャと必要な USI options は、モデルの配布元の仕様を確認する。
 
 ## マッチングモード (`--lobby`)
 

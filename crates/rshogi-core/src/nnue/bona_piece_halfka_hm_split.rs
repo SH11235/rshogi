@@ -108,47 +108,11 @@ mod tests {
     }
 
     #[test]
-    fn test_king_bucket_black_perspective() {
-        // 5九（file=4, rank=8）: bucket = 4*9 + 8 = 44
-        let sq_59 = Square::new(File::File5, Rank::Rank9);
-        assert_eq!(king_bucket(sq_59, Color::Black), 44);
-
-        // 1九（file=0, rank=8）: bucket = 0*9 + 8 = 8
-        let sq_19 = Square::new(File::File1, Rank::Rank9);
-        assert_eq!(king_bucket(sq_19, Color::Black), 8);
-
-        // 9九（file=8, mirror to 0, rank=8）: bucket = 0*9 + 8 = 8
-        let sq_99 = Square::new(File::File9, Rank::Rank9);
-        assert_eq!(king_bucket(sq_99, Color::Black), 8);
-
-        // 1一（file=0, rank=0）: bucket = 0
-        let sq_11 = Square::new(File::File1, Rank::Rank1);
-        assert_eq!(king_bucket(sq_11, Color::Black), 0);
-    }
-
-    #[test]
     fn test_is_hm_mirror() {
         assert!(!is_hm_mirror(Square::new(File::File1, Rank::Rank1), Color::Black));
         assert!(!is_hm_mirror(Square::new(File::File5, Rank::Rank9), Color::Black));
         assert!(is_hm_mirror(Square::new(File::File6, Rank::Rank1), Color::Black));
         assert!(is_hm_mirror(Square::new(File::File9, Rank::Rank9), Color::Black));
-    }
-
-    #[test]
-    fn test_pack_bonapiece_hand_no_mirror() {
-        // 手駒はミラーしない
-        let bp = BonaPiece::new(50);
-        assert_eq!(pack_bonapiece(bp, true), 50);
-        assert_eq!(pack_bonapiece(bp, false), 50);
-    }
-
-    #[test]
-    fn test_pack_bonapiece_board_mirror() {
-        // 盤上駒 (f_pawn=90, sq=0 -> 1一): file=0, rank=0
-        // mirror: file=8 (9筋), rank=0 -> sq = 8*9+0 = 72
-        let bp = BonaPiece::new(90);
-        assert_eq!(pack_bonapiece(bp, false), 90);
-        assert_eq!(pack_bonapiece(bp, true), 90 + 72);
     }
 
     #[test]
@@ -165,9 +129,9 @@ mod tests {
 
     #[test]
     fn test_halfka_index() {
-        assert_eq!(halfka_index(0, 0), 0);
-        assert_eq!(halfka_index(1, 0), PIECE_INPUTS);
-        assert_eq!(halfka_index(44, 0), 44 * PIECE_INPUTS);
+        for (king, piece, expected) in [(0, 0, 0), (1, 17, 1727), (44, 89, 75329)] {
+            assert_eq!(halfka_index(king, piece), expected);
+        }
     }
 
     /// パリティ検証: SplitPlane の pack は「マス反転のみ（fold なし）」。

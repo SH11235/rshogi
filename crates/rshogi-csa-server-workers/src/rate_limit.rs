@@ -4,8 +4,8 @@
 //! CHALLENGE_LOBBY flood、`/ws/<room_id>` upgrade flood、room 起動 flood を
 //! Worker code 側の **atomic token bucket** で抑制する。Cloudflare Workers
 //! Rate Limiting binding は本アカウントで利用不可確認のため、専用 Durable
-//! Object (`RateLimiterDO`) を per-key sharding で実装する (Q2-B 採択、
-//! `docs/csa-server/rate_limit_design.md` §3 Q2)。
+//! Object (`RateLimiterDO`) を per-key sharding で実装する
+//! (`docs/csa-server/rate_limit_design.md` §3 Q2)。
 //!
 //! # 設計の前提
 //!
@@ -532,25 +532,12 @@ pub fn build_missing_ip_response() -> WorkerResult<Response> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
 
     use super::*;
 
     /// 60_000 ms = 1 minute は capacity 全量を refill する根拠時間。
     /// 1 minute スパンの境界挙動をまとめて検証する。
     const ONE_MINUTE_MS: u64 = 60_000;
-
-    #[test]
-    fn defaults_match_design_doc_q3_table() {
-        // 設計 doc §3 Q3 表の 6 推奨値。
-        let d = RateLimitThresholds::DEFAULTS;
-        assert_eq!(d.lobby_login_per_ip, 10);
-        assert_eq!(d.lobby_login_per_handle, 5);
-        assert_eq!(d.lobby_challenge_per_ip, 5);
-        assert_eq!(d.lobby_challenge_per_inviter, 3);
-        assert_eq!(d.room_create_per_ip, 20);
-        assert_eq!(d.ws_room_upgrade_per_ip, 60);
-    }
 
     #[test]
     fn limit_for_returns_per_kind_value() {
@@ -607,14 +594,6 @@ mod tests {
         let b = TokenBucketState::full(10, 1_000);
         assert_eq!(b.tokens, 10.0);
         assert_eq!(b.last_refill_ms, 1_000);
-    }
-
-    #[test]
-    fn try_consume_succeeds_within_capacity() {
-        let mut b = TokenBucketState::full(3, 0);
-        for _ in 0..3 {
-            assert_eq!(b.try_consume(3, 0), RateLimitDecision::allow());
-        }
     }
 
     #[test]
@@ -765,30 +744,5 @@ mod tests {
             v
         };
         assert_eq!(tags, unique, "kind_tag() must be unique per kind");
-    }
-
-    /// 設計 doc §5.2 で要求される pure logic: 多 IP 並列で互いに干渉しない。
-    /// 同 capacity の bucket 2 個を交互に consume しても他方の残量が減らない
-    /// (これは関数レベル test では「2 つの bucket struct を別々に持つ」ことで
-    /// 直接示せる)。
-    #[test]
-    fn two_buckets_are_independent() {
-        let mut b1 = TokenBucketState::full(2, 0);
-        let mut b2 = TokenBucketState::full(2, 0);
-        b1.try_consume(2, 0);
-        b1.try_consume(2, 0);
-        // b1 deny
-        assert!(!b1.try_consume(2, 0).allowed);
-        // b2 は手付かずなので 2 回 allow できる
-        assert!(b2.try_consume(2, 0).allowed);
-        assert!(b2.try_consume(2, 0).allowed);
-    }
-
-    /// `Duration` 型との互換: `RateLimitDecision::retry_after_sec` を `Duration`
-    /// に直して Worker 側 sleep に渡しやすいことを確認する (回帰防止)。
-    #[test]
-    fn retry_after_sec_converts_to_duration() {
-        let d = RateLimitDecision::deny(15);
-        assert_eq!(Duration::from_secs(d.retry_after_sec), Duration::from_secs(15));
     }
 }

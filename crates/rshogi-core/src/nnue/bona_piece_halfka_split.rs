@@ -71,8 +71,8 @@ mod tests {
 
     #[test]
     fn test_halfka_index() {
-        assert_eq!(halfka_index(0, 0), 0);
-        assert_eq!(halfka_index(1, 0), PIECE_INPUTS);
-        assert_eq!(halfka_index(80, 0), 80 * PIECE_INPUTS);
+        for (king, piece, expected) in [(0, 0, 0), (1, 17, 1727), (80, 89, 136889)] {
+            assert_eq!(halfka_index(king, piece), expected);
+        }
     }
 }

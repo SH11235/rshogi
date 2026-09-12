@@ -338,14 +338,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parse_usi_option_name_handles_multiword_name() {
-        assert_eq!(
-            parse_usi_option_name("option name USI_Hash type spin default 16"),
-            Some("USI_Hash")
-        );
-    }
-
     /// `/bin/true` は `usi` を受け取っても何も出力せず即終了する。
     /// この場合は option 0 件 + `usiok` 未受領で bail することを確認する。
     #[test]

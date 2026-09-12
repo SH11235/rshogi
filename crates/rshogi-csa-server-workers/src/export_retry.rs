@@ -47,32 +47,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retry_delays_have_expected_sequence() {
-        // Codex 設計レビュー (v2 COMMENT) で承認された 30/60/120/300/600 秒列。
-        // 値を変更すると wall-clock 上の retry 挙動が変わるため、契約として固定する。
-        assert_eq!(RETRY_DELAYS_SEC, [30, 60, 120, 300, 600]);
-    }
-
-    #[test]
-    fn next_retry_delay_ms_returns_some_for_in_range_attempts() {
-        assert_eq!(next_retry_delay_ms(0), Some(30_000));
-        assert_eq!(next_retry_delay_ms(1), Some(60_000));
-        assert_eq!(next_retry_delay_ms(2), Some(120_000));
-        assert_eq!(next_retry_delay_ms(3), Some(300_000));
-        assert_eq!(next_retry_delay_ms(4), Some(600_000));
-    }
-
-    #[test]
-    fn next_retry_delay_ms_returns_none_when_exhausted() {
-        assert_eq!(next_retry_delay_ms(5), None);
-        assert_eq!(next_retry_delay_ms(u32::MAX), None);
-    }
-
-    #[test]
-    fn is_exhausted_matches_next_retry_delay_ms_none() {
-        assert!(!is_exhausted(0));
-        assert!(!is_exhausted(4));
-        assert!(is_exhausted(5));
-        assert!(is_exhausted(u32::MAX));
+    fn retry_schedule_in_milliseconds_and_exhaustion() {
+        for (attempt, delay) in [
+            (0, Some(30000)),
+            (1, Some(60000)),
+            (2, Some(120000)),
+            (3, Some(300000)),
+            (4, Some(600000)),
+            (5, None),
+            (u32::MAX, None),
+        ] {
+            assert_eq!(next_retry_delay_ms(attempt), delay);
+            assert_eq!(is_exhausted(attempt), delay.is_none());
+        }
     }
 }
