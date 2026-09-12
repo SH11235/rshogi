@@ -22,6 +22,7 @@ use super::{
     DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, RootMove, SearchTuneParams,
     SearchWorker, Skill, SkillOptions, ThreadPool, TimeManagement,
 };
+use crate::movegen::{MoveList, generate_legal_all_with_pass};
 use crate::position::Position;
 use crate::tt::TranspositionTable;
 use crate::types::{Depth, EnteringKingRule, MAX_PLY, Move, Value};
@@ -47,7 +48,7 @@ pub struct SearchInfo {
     pub nps: u64,
     /// 置換表使用率（千分率）
     pub hashfull: u32,
-    /// Principal Variation
+    /// Principal Variation（Search::go が公開する値は合法な接頭列。不正な続きは省略）
     pub pv: Vec<Move>,
     /// MultiPV番号（1-indexed）
     pub multi_pv: usize,
@@ -170,7 +171,7 @@ pub struct SearchResult {
     pub depth: Depth,
     /// 探索ノード数
     pub nodes: u64,
-    /// Principal Variation（読み筋）
+    /// Principal Variation（読み筋）。不正な続きは省略し、合法な接頭列だけを返す。
     pub pv: Vec<Move>,
     /// 探索統計レポート（search-stats feature有効時のみ内容あり）
     pub stats_report: String,
@@ -293,6 +294,9 @@ pub struct Search {
     search_tune_params: SearchTuneParams,
     /// 入玉宣言勝ちルール
     entering_king_rule: EnteringKingRule,
+    /// 公開直前の PV を差し替える列。公開経路の検証が働いていることを確かめる。
+    #[cfg(test)]
+    corrupt_public_pv: Option<Vec<Move>>,
 }
 
 /// best_move_changes を集約する（並列探索対応のためのヘルパー）
@@ -564,7 +568,6 @@ fn get_best_thread_id(
 
 struct BestThreadResult {
     best_move: Move,
-    ponder_move: Move,
     score: Value,
     completed_depth: Depth,
     sel_depth: i32,
@@ -595,7 +598,6 @@ fn collect_best_thread_result(
     if worker.state.root_moves.is_empty() {
         return BestThreadResult {
             best_move: Move::NONE,
-            ponder_move: Move::NONE,
             // searchmoves による候補ゼロは、実際の合法手ゼロと区別する。
             score: if super::RootMoves::from_legal_moves(pos, &[]).is_empty() {
                 Value::mated_in(0)
@@ -628,16 +630,6 @@ fn collect_best_thread_result(
 
     let best_rm = worker.state.root_moves.iter().find(|rm| rm.mv() == best_move);
 
-    let ponder_move = best_rm
-        .and_then(|rm| {
-            if rm.pv.len() > 1 {
-                Some(rm.pv[1])
-            } else {
-                None
-            }
-        })
-        .unwrap_or(Move::NONE);
-
     let score = best_rm
         .map(|rm| rm.score)
         .unwrap_or(worker.state.root_moves.get(0).map(|rm| rm.score).unwrap_or(Value::ZERO));
@@ -647,7 +639,6 @@ fn collect_best_thread_result(
 
     BestThreadResult {
         best_move,
-        ponder_move,
         score,
         completed_depth,
         sel_depth,
@@ -757,6 +748,8 @@ impl Search {
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             search_tune_params,
             entering_king_rule: EnteringKingRule::default(),
+            #[cfg(test)]
+            corrupt_public_pv: None,
         }
     }
 
@@ -1079,14 +1072,33 @@ impl Search {
 
         // 探索実行（コールバックなしの場合はダミーを渡す）
         let _effective_multi_pv = match on_info.as_mut() {
-            Some(callback) => self.search_with_callback(
-                pos,
-                &limits,
-                &mut time_manager,
-                max_depth,
-                callback,
-                skill_enabled,
-            ),
+            Some(callback) => {
+                // 検証は公開用コピーに限定し、内部 RootMoves/previous_pv を変えない。
+                let root_pos = pos.clone();
+                let rule = self.entering_king_rule;
+                #[cfg(test)]
+                let corrupt = self.corrupt_public_pv.clone();
+                self.search_with_callback(
+                    pos,
+                    &limits,
+                    &mut time_manager,
+                    max_depth,
+                    &mut |info: &SearchInfo| {
+                        let mut public_info = info.clone();
+                        #[cfg(test)]
+                        if let Some(pv) = corrupt.as_ref() {
+                            public_info.pv = pv.clone();
+                        }
+                        public_info.pv.truncate(legal_pv_prefix_len(
+                            &root_pos,
+                            &public_info.pv,
+                            rule,
+                        ));
+                        callback(&public_info);
+                    },
+                    skill_enabled,
+                )
+            }
             None => {
                 let mut noop = |_info: &SearchInfo| {};
                 self.search_with_callback(
@@ -1171,7 +1183,6 @@ impl Search {
                     };
                     BestThreadResult {
                         best_move,
-                        ponder_move: Move::NONE, // Cannot get ponder from helper in Wasm
                         score,
                         completed_depth: r.completed_depth,
                         sel_depth: self.worker.as_ref().map(|w| w.state.sel_depth).unwrap_or(0),
@@ -1200,15 +1211,24 @@ impl Search {
 
         let BestThreadResult {
             best_move,
-            ponder_move,
             score,
             completed_depth,
             sel_depth,
             nodes: _best_nodes,
             best_previous_score,
             best_previous_average_score,
-            pv,
+            mut pv,
         } = best_result;
+        // helper 採択と skill 選択で公開する手が変わるため、確定した後に検証する。
+        if pv.is_empty() && best_move != Move::NONE {
+            pv.push(best_move);
+        }
+        #[cfg(test)]
+        if let Some(corrupt) = self.corrupt_public_pv.as_ref() {
+            pv = corrupt.clone();
+        }
+        pv.truncate(legal_pv_prefix_len(pos, &pv, self.entering_king_rule));
+        let ponder_move = pv.get(1).copied().filter(|mv| !mv.is_win()).unwrap_or(Move::NONE);
         let total_nodes = {
             let main_nodes = self.worker.as_ref().map(|w| w.state.nodes).unwrap_or(0);
 
@@ -1242,11 +1262,7 @@ impl Search {
             && best_move != Move::NONE
             && root_score_is_initialized(score)
         {
-            let final_pv = if pv.is_empty() {
-                vec![best_move]
-            } else {
-                pv.clone()
-            };
+            let final_pv = pv.clone();
             let time_ms = time_manager.elapsed() as u64;
             let nps = total_nodes.saturating_mul(1000) / time_ms.max(1);
             let info = SearchInfo {
@@ -1871,6 +1887,30 @@ fn wait_for_search_release(
         }
     }
 }
+/// 公開用 PV の合法な接頭列の長さ。元の局面と探索用 PV は変更しない。
+fn legal_pv_prefix_len(root: &Position, pv: &[Move], rule: EnteringKingRule) -> usize {
+    if pv.is_empty() {
+        return 0;
+    }
+    let mut pos = root.clone();
+    for (idx, &mv) in pv.iter().enumerate() {
+        if mv.is_win() {
+            return idx + usize::from(pos.declaration_win(rule) == Move::WIN);
+        }
+        // is_legal 単独には pseudo-legal 入力の前提があるため、全合法手と照合する。
+        let mut legal = MoveList::new();
+        generate_legal_all_with_pass(&pos, &mut legal);
+        if !legal.as_slice().contains(&mv) {
+            return idx;
+        }
+        if idx + 1 < pv.len() {
+            let check = pos.gives_check(mv);
+            pos.do_move(mv, check);
+        }
+    }
+    pv.len()
+}
+
 fn root_score_is_initialized(score: Value) -> bool {
     let raw = score.raw();
     -Value::INFINITE.raw() < raw && raw < Value::INFINITE.raw()
@@ -2555,3 +2595,7 @@ mod tests {
         assert!(!search.ponderhit_flag_for_test());
     }
 }
+
+#[cfg(test)]
+#[path = "tests/public_pv.rs"]
+mod public_pv_tests;
