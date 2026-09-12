@@ -1,4 +1,9 @@
 //! 公開 PV 検証の変更前後を比較する手動ベンチ（通常の cargo test では実行しない）。
+//!
+//! ここで測れるのは Material Lv1・MultiPV 1/4・単一局面群の内部比較に限る。
+//! 本番 NNUE・MultiPV 8・候補手が多い局面・固定時間 100/1000 ms での比較は、
+//! 同一 profile の 2 つの USI エンジンを外部から abba 順に駆動し、
+//! info 公開回数と固定時間あたりの処理ノード数を比べる必要がある。
 use rshogi_core::eval::{MaterialLevel, set_material_level};
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};

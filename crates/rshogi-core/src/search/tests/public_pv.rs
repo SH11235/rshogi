@@ -39,7 +39,8 @@ fn public_pv_truncates_stale_and_malformed_moves() {
     let original_key = root.key();
     let mut pv = line(&root, &["7g7f", "2c2d", "1g1f", "1a1b", "2g2f"]);
     assert_eq!(legal_pv_prefix_len(&root, &pv, EnteringKingRule::None), 5);
-    pv.push(pv[3]); // 同じ香を再度動かす、再現済みの不正な続き。
+    // 移動済みの香を再び動かす列。最初の不正手より前が保持されることを確認する。
+    pv.push(pv[3]);
     let original_pv = pv.clone();
     assert_eq!(legal_pv_prefix_len(&root, &pv, EnteringKingRule::None), 5);
     assert_eq!(root.to_sfen(), original_sfen);
@@ -174,6 +175,85 @@ fn public_pv_validation_cost() {
             }
         }
     }
+}
+
+/// 公開直前に不正手を差し込んでも外へ出ないこと。検証呼び出しを外すと失敗する。
+#[test]
+fn public_pv_validation_applies_on_callback_and_result() {
+    let _guard = crate::eval::material::test_support::lock_material();
+    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let root = startpos();
+            // 後手の手なので、先手番の公開 PV では常に不正。
+            let corrupt = Move::from_usi("3a2b").unwrap();
+            for with_callback in [false, true] {
+                let mut search = Search::new(1);
+                search.corrupt_public_pv = Some(corrupt);
+                let limits = LimitsType {
+                    nodes: 8000,
+                    ..Default::default()
+                };
+                let mut infos = Vec::new();
+                let result = if with_callback {
+                    search.go(
+                        &mut root.clone(),
+                        limits,
+                        Some(|info: &SearchInfo| infos.push(info.clone())),
+                    )
+                } else {
+                    search.go(&mut root.clone(), limits, None::<fn(&SearchInfo)>)
+                };
+                assert!(!result.pv.contains(&corrupt));
+                assert_ne!(result.ponder_move, corrupt);
+                assert_eq!(
+                    legal_pv_prefix_len(&root, &result.pv, EnteringKingRule::None),
+                    result.pv.len()
+                );
+                assert_eq!(with_callback, !infos.is_empty());
+                for info in &infos {
+                    assert!(!info.pv.contains(&corrupt));
+                    assert_eq!(
+                        legal_pv_prefix_len(&root, &info.pv, EnteringKingRule::None),
+                        info.pv.len()
+                    );
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// 宣言可能でも WIN は ponder に選ばない。
+#[test]
+fn public_pv_never_ponders_declaration() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let mut root = Position::new();
+            root.set_sfen("KGG6/SS7/PPPPPP3/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1")
+                .unwrap();
+            let mut search = Search::new(1);
+            search.set_entering_king_rule(EnteringKingRule::Point27);
+            search.corrupt_public_pv = Some(Move::WIN);
+            let result = search.go(
+                &mut root,
+                LimitsType {
+                    depth: 1,
+                    ..Default::default()
+                },
+                None::<fn(&SearchInfo)>,
+            );
+            assert_ne!(result.ponder_move, Move::WIN);
+            if result.pv.last() == Some(&Move::WIN) {
+                assert_eq!(result.ponder_move, Move::NONE);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

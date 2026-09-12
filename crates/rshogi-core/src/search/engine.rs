@@ -294,6 +294,9 @@ pub struct Search {
     search_tune_params: SearchTuneParams,
     /// 入玉宣言勝ちルール
     entering_king_rule: EnteringKingRule,
+    /// 公開直前の PV 末尾に差し込む手。公開経路の検証が働いていることを確かめる。
+    #[cfg(test)]
+    corrupt_public_pv: Option<Move>,
 }
 
 /// best_move_changes を集約する（並列探索対応のためのヘルパー）
@@ -745,6 +748,8 @@ impl Search {
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             search_tune_params,
             entering_king_rule: EnteringKingRule::default(),
+            #[cfg(test)]
+            corrupt_public_pv: None,
         }
     }
 
@@ -1071,6 +1076,8 @@ impl Search {
                 // 検証は公開用コピーに限定し、内部 RootMoves/previous_pv を変えない。
                 let root_pos = pos.clone();
                 let rule = self.entering_king_rule;
+                #[cfg(test)]
+                let corrupt = self.corrupt_public_pv;
                 self.search_with_callback(
                     pos,
                     &limits,
@@ -1078,7 +1085,15 @@ impl Search {
                     max_depth,
                     &mut |info: &SearchInfo| {
                         let mut public_info = info.clone();
-                        public_info.pv.truncate(legal_pv_prefix_len(&root_pos, &info.pv, rule));
+                        #[cfg(test)]
+                        if let Some(mv) = corrupt {
+                            public_info.pv.push(mv);
+                        }
+                        public_info.pv.truncate(legal_pv_prefix_len(
+                            &root_pos,
+                            &public_info.pv,
+                            rule,
+                        ));
                         callback(&public_info);
                     },
                     skill_enabled,
@@ -1204,9 +1219,13 @@ impl Search {
             best_previous_average_score,
             mut pv,
         } = best_result;
-        // helper の採択・skill 選択後に、公開する結果だけを検証する。
+        // helper 採択と skill 選択で公開する手が変わるため、確定した後に検証する。
         if pv.is_empty() && best_move != Move::NONE {
             pv.push(best_move);
+        }
+        #[cfg(test)]
+        if let Some(mv) = self.corrupt_public_pv {
+            pv.push(mv);
         }
         pv.truncate(legal_pv_prefix_len(pos, &pv, self.entering_king_rule));
         let ponder_move = pv.get(1).copied().filter(|mv| !mv.is_win()).unwrap_or(Move::NONE);
