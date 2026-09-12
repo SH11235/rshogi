@@ -224,6 +224,8 @@ fn public_pv_validation_applies_on_callback_and_result() {
 /// 2 手目に宣言が残る公開 PV でも、WIN は ponder に選ばない。
 #[test]
 fn public_pv_never_ponders_declaration() {
+    let _guard = crate::eval::material::test_support::lock_material();
+    crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
