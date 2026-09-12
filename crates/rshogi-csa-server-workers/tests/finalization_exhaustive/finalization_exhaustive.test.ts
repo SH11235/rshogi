@@ -124,11 +124,12 @@ describe('終局処理の網羅障害注入', () => {
   const violations: Finding[] = [];
   const inputLost: Finding[] = [];
   const cronRecovered: Finding[] = [];
+  const coverage: { scenario: string; mode: Mode; at: number; op: string; reached: boolean }[] = [];
 
   afterAll(async () => {
     const report = process.env.FINALIZATION_EXHAUSTIVE_REPORT;
     if (report) {
-      await writeFile(report, JSON.stringify({ violations, inputLost, cronRecovered }, null, 2));
+      await writeFile(report, JSON.stringify({ violations, inputLost, cronRecovered, coverage }, null, 2));
     }
     for (const { mf, cleanup } of servers.values()) {
       await mf.dispose();
@@ -347,6 +348,9 @@ describe('終局処理の網羅障害注入', () => {
           const observed = await runCase(scenario, { at, mode });
           const op = observed.state.injectedAt?.name ?? `(未到達) ${baseline.state.ops[at - 1]}`;
           const problems = check(baseline, observed, scenario.disconnectedWatcher);
+          const reached = observed.state.injectedAt !== null;
+          coverage.push({ scenario: scenario.name, mode, at, op, reached });
+          if (!reached) problems.push('指定した障害注入点に到達しなかった');
           if (ONLY_CASE) console.log(JSON.stringify({ baseline: baseline.lines, observed, problems }, null, 2));
           const finding = { scenario: scenario.name, mode, at, op };
           const unannounced = (problems.length === 1 && problems[0]!.startsWith('確定していない (') && !observed.state.finalizing)
