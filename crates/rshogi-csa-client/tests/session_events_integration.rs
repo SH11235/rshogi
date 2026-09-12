@@ -28,8 +28,8 @@ use rshogi_csa_client::engine::SpawnOptions;
 mod common;
 use rshogi_csa::{Color, Position, initial_position};
 use rshogi_csa_client::events::{
-    DisconnectReason, MovePlayer, ReconnectState, SearchInfoEmitPolicy, SessionError,
-    SessionEventSink, SessionProgress, SinkError,
+    DisconnectReason, MovePlayer, SearchInfoEmitPolicy, SessionError, SessionEventSink,
+    SessionProgress, SinkError,
 };
 use rshogi_csa_client::jsonl::LiveJsonlWriter;
 use rshogi_csa_client::protocol::{CsaConnection, GameSummary, TimeConfig};
@@ -751,23 +751,6 @@ fn resumed_session_mismatch_keeps_start_time_and_removes_stale_live_jsonl() {
         "filename={filename}"
     );
     let _ = std::fs::remove_dir_all(&jsonl_dir);
-}
-
-/// Game_Summary の Position section を string で返す (テスト用)。
-fn lines_position_section() -> String {
-    [
-        "P1-KY-KE-GI-KI-OU-KI-GI-KE-KY",
-        "P2 * -HI *  *  *  *  * -KA *",
-        "P3-FU-FU-FU-FU-FU-FU-FU-FU-FU",
-        "P4 *  *  *  *  *  *  *  *  *",
-        "P5 *  *  *  *  *  *  *  *  *",
-        "P6 *  *  *  *  *  *  *  *  *",
-        "P7+FU+FU+FU+FU+FU+FU+FU+FU+FU",
-        "P8 * +KA *  *  *  *  * +HI *",
-        "P9+KY+KE+GI+KI+OU+KI+GI+KE+KY",
-        "+",
-    ]
-    .join("\n")
 }
 
 // ────────────────────────────────────────────
