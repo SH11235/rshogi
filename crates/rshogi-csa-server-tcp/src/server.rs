@@ -4325,66 +4325,6 @@ mod tests {
         assert_eq!(panic_payload_to_string(payload.as_ref()), "intentional test panic");
     }
 
-    /// 既定構成は Floodgate 系機能を要求していないため、`allow_floodgate_features=false`
-    /// のままでも `prepare_runtime` が成功する。これが崩れると通常起動経路が
-    /// 全停止するため、契約として固定する。
-    #[test]
-    fn prepare_runtime_passes_for_default_config_without_floodgate_optin() {
-        let cfg = ServerConfig::sensible_defaults();
-        assert!(!cfg.allow_floodgate_features);
-        prepare_runtime(&cfg).expect("default config must start without floodgate opt-in");
-    }
-
-    /// 将来 Floodgate 機能が `floodgate_intent_from_config` に配線された後、
-    /// `allow_floodgate_features=false` のままで起動を試みると fail-fast する
-    /// 契約を直接検証する。
-    #[test]
-    fn floodgate_gate_rejects_intent_when_optin_is_off() {
-        let intent = FloodgateFeatureIntent {
-            enable_scheduler: true,
-            ..FloodgateFeatureIntent::default()
-        };
-        let err = validate_floodgate_feature_gate(false, intent).unwrap_err();
-        assert!(err.contains("scheduler"), "error must list requested feature: {err}");
-    }
-
-    /// `players_yaml_path` を設定した状態で `--allow-floodgate-features` が
-    /// 立っていない場合、`prepare_runtime` が起動を fail-fast させる契約を固定。
-    /// レート永続化は Floodgate 互換運用機能なので opt-in が必要。
-    #[test]
-    fn prepare_runtime_rejects_players_yaml_when_floodgate_optin_off() {
-        let mut cfg = ServerConfig::sensible_defaults();
-        cfg.players_yaml_path = Some(std::path::PathBuf::from("/tmp/players.yaml"));
-        cfg.allow_floodgate_features = false;
-        let err = prepare_runtime(&cfg)
-            .expect_err("must fail when persistent rates requested without opt-in");
-        assert!(
-            err.contains("persistent_player_rates"),
-            "error must list the requested feature: {err}",
-        );
-    }
-
-    /// `players_yaml_path` + `--allow-floodgate-features` の組み合わせで通過する
-    /// 契約を固定。レート永続化を本番で有効化する標準起動経路。
-    #[test]
-    fn prepare_runtime_accepts_players_yaml_with_floodgate_optin() {
-        let mut cfg = ServerConfig::sensible_defaults();
-        cfg.players_yaml_path = Some(std::path::PathBuf::from("/tmp/players.yaml"));
-        cfg.allow_floodgate_features = true;
-        prepare_runtime(&cfg).expect("opt-in must allow persistent rate storage");
-    }
-
-    /// `floodgate_intent_from_config` が `players_yaml_path` の有無で
-    /// `enable_persistent_player_rates` を切り替えることを直接固定する。
-    /// 将来 ServerConfig フィールドを増やす際の回帰検出用。
-    #[test]
-    fn floodgate_intent_reflects_players_yaml_path() {
-        let mut cfg = ServerConfig::sensible_defaults();
-        assert!(!floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
-        cfg.players_yaml_path = Some(std::path::PathBuf::from("/tmp/players.yaml"));
-        assert!(floodgate_intent_from_config(&cfg).enable_persistent_player_rates);
-    }
-
     /// `WaitingPool::drain_for_game_name` が:
     /// - 同 `game_name` 配下の slot を挿入順で全件返す
     /// - 戻ったあと当該 `HashMap` entry は `remove` されている（空 `VecDeque`
@@ -4445,22 +4385,6 @@ mod tests {
         assert!(again.is_empty(), "drain on missing entry returns empty vec");
     }
 
-    /// `floodgate_intent_from_config` が `floodgate_schedules` の非空で
-    /// `enable_scheduler` を立てることを直接固定。
-    #[test]
-    fn floodgate_intent_reflects_floodgate_schedules() {
-        let mut cfg = ServerConfig::sensible_defaults();
-        assert!(!floodgate_intent_from_config(&cfg).enable_scheduler);
-        cfg.floodgate_schedules.push(rshogi_csa_server::FloodgateSchedule {
-            game_name: "floodgate-600-10".to_owned(),
-            weekday: rshogi_csa_server::FloodgateWeekday::Mon,
-            hour: 9,
-            minute: 0,
-            pairing_strategy: "direct".to_owned(),
-        });
-        assert!(floodgate_intent_from_config(&cfg).enable_scheduler);
-    }
-
     /// `prepare_runtime` が `floodgate_schedules` の `pairing_strategy` を
     /// 起動時点で検証する契約を固定。未知 strategy 名は run_schedules 経路に
     /// 持ち込まれず、起動時点で fail-fast する（gate 通過後の後段失敗ではなく）。
@@ -4495,24 +4419,28 @@ mod tests {
         prepare_runtime(&cfg).expect("direct strategy must pass prepare_runtime");
     }
 
-    /// `floodgate_intent_from_config` が `floodgate_history_path` の有無で
-    /// `enable_floodgate_history` を切り替えることを直接固定。
     #[test]
-    fn floodgate_intent_reflects_floodgate_history_path() {
-        let mut cfg = ServerConfig::sensible_defaults();
-        assert!(!floodgate_intent_from_config(&cfg).enable_floodgate_history);
-        cfg.floodgate_history_path = Some(std::path::PathBuf::from("/tmp/history.jsonl"));
-        assert!(floodgate_intent_from_config(&cfg).enable_floodgate_history);
-    }
-
-    /// `--allow-floodgate-features` opt-in なしで `floodgate_history_path` を
-    /// 設定すると `prepare_runtime` が fail-fast する契約を固定。
-    #[test]
-    fn prepare_runtime_rejects_floodgate_history_when_optin_off() {
-        let mut cfg = ServerConfig::sensible_defaults();
-        cfg.floodgate_history_path = Some(std::path::PathBuf::from("/tmp/history.jsonl"));
-        cfg.allow_floodgate_features = false;
-        let err = prepare_runtime(&cfg).expect_err("must fail without opt-in");
-        assert!(err.contains("floodgate_history"), "error must list feature: {err}");
+    fn runtime_requires_optin_for_each_floodgate_feature() {
+        let defaults = ServerConfig::sensible_defaults();
+        assert!(!defaults.allow_floodgate_features);
+        prepare_runtime(&defaults).unwrap();
+        for feature in ["persistent_player_rates", "scheduler", "floodgate_history"] {
+            let mut cfg = ServerConfig::sensible_defaults();
+            match feature {
+                "persistent_player_rates" => cfg.players_yaml_path = Some("players.yaml".into()),
+                "floodgate_history" => cfg.floodgate_history_path = Some("history.jsonl".into()),
+                "scheduler" => cfg.floodgate_schedules.push(rshogi_csa_server::FloodgateSchedule {
+                    game_name: "floodgate-600-10".into(),
+                    weekday: rshogi_csa_server::FloodgateWeekday::Mon,
+                    hour: 9,
+                    minute: 0,
+                    pairing_strategy: "direct".into(),
+                }),
+                _ => unreachable!(),
+            }
+            assert!(prepare_runtime(&cfg).unwrap_err().contains(feature));
+            cfg.allow_floodgate_features = true;
+            prepare_runtime(&cfg).unwrap();
+        }
     }
 }

@@ -6,8 +6,7 @@ use crate::nnue::{
 };
 use crate::position::Position;
 use crate::search::{
-    ContHistKey, LimitsType, NodeType, RootMoves, SearchTuneParams, SearchWorker, Stack,
-    TimeManagement,
+    ContHistKey, LimitsType, NodeType, RootMoves, SearchTuneParams, SearchWorker, TimeManagement,
     history::{ContinuationHistory, PawnHistory},
 };
 use crate::tt::TranspositionTable;
@@ -276,38 +275,6 @@ fn continuation_history_basic_update() {
 // =============================================================================
 // ContHistKey TDDテスト
 // =============================================================================
-
-/// ContHistKeyが正しく構築されることを確認
-#[test]
-fn cont_hist_key_construction() {
-    let key = ContHistKey::new(true, false, Piece::B_GOLD, Square::SQ_55);
-
-    assert!(key.in_check);
-    assert!(!key.capture);
-    assert_eq!(key.piece, Piece::B_GOLD);
-    assert_eq!(key.to, Square::SQ_55);
-}
-
-/// Stack.cont_hist_keyがOption<ContHistKey>として正しく動作することを確認
-#[test]
-fn stack_cont_hist_key_option() {
-    let mut stack = Stack::default();
-
-    // 初期値はNone
-    assert!(stack.cont_hist_key.is_none());
-
-    // 設定
-    // SAFETY: 22は有効なSquareインデックス
-    let sq = unsafe { Square::from_u8_unchecked(22) };
-    stack.cont_hist_key = Some(ContHistKey::new(false, true, Piece::W_SILVER, sq));
-
-    // 取得
-    let key = stack.cont_hist_key.unwrap();
-    assert!(!key.in_check);
-    assert!(key.capture);
-    assert_eq!(key.piece, Piece::W_SILVER);
-    assert_eq!(key.to, sq);
-}
 
 // =============================================================================
 // PawnHistory TDDテスト

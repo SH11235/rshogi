@@ -230,13 +230,3 @@ pub fn run() -> Result<()> {
     println!("ALL PASSED");
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn run_entry_is_reachable_in_tests() {
-        let _ = run as fn() -> Result<()>;
-    }
-}

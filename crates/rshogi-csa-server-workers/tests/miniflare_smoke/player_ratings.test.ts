@@ -101,70 +101,20 @@ describe("miniflare smoke: materialized player ratings API", () => {
     expect(second.games[0]?.game_id).toBe("g2");
   });
 
-  it("discards a page loaded before a same-game data revision change", async () => {
+  it("honors an existing lease and does not replay games on a second warmup", async () => {
     const db = await mf.getD1Database("GAMES_SEARCH_DB");
-    await db
-      .prepare(
-        "UPDATE player_rating_state SET rebuild_required = 0, building_generation = 1 WHERE singleton = 1",
-      )
-      .run();
-    const loaded = await db
-      .prepare("SELECT data_revision FROM player_rating_state WHERE singleton = 1")
-      .first<{ data_revision: number }>();
-    expect(loaded?.data_revision).toBe(0);
-
-    // This is the invariant used by every real changed game UPSERT: revision
-    // advancement and the row mutation commit atomically.
-    await db.batch([
-      db.prepare(
-        "UPDATE player_rating_state SET data_revision = data_revision + 1 WHERE singleton = 1",
-      ),
-      db.prepare("UPDATE games_search_index SET moves_count = moves_count + 1 WHERE game_id = ?").bind("g1"),
-    ]);
-
-    const expectedRevision = loaded!.data_revision;
-    await db.batch([
-      db
-        .prepare(
-          `INSERT INTO player_rating_generations
-           (generation, player_id, display_name, rating, wins, losses, draws, games,
-            last_played_at_ms, legacy)
-           SELECT 1, 'must_not_commit', 'stale', 1500, 0, 0, 0, 0, 20, 0
-           WHERE (SELECT data_revision FROM player_rating_state WHERE singleton = 1) = ?`,
-        )
-        .bind(expectedRevision),
-      db
-        .prepare(
-          "UPDATE player_rating_state SET cursor_ended_at_ms = 20, cursor_game_id = 'g1' WHERE singleton = 1 AND data_revision = ?",
-        )
-        .bind(expectedRevision),
-      db
-        .prepare(
-          "UPDATE player_rating_state SET rebuild_required = 1 WHERE singleton = 1 AND data_revision <> ?",
-        )
-        .bind(expectedRevision),
-    ]);
-
-    const stale = await db
-      .prepare("SELECT player_id FROM player_rating_generations WHERE player_id = 'must_not_commit'")
-      .first();
-    const state = await db
-      .prepare(
-        "SELECT cursor_ended_at_ms, cursor_game_id, rebuild_required, data_revision FROM player_rating_state WHERE singleton = 1",
-      )
-      .first<{
-        cursor_ended_at_ms: number;
-        cursor_game_id: string;
-        rebuild_required: number;
-        data_revision: number;
-      }>();
-    expect(stale).toBeNull();
-    expect(state).toEqual({
-      cursor_ended_at_ms: -1,
-      cursor_game_id: "",
-      rebuild_required: 1,
-      data_revision: 1,
-    });
+    await db.prepare("UPDATE player_rating_state SET lease_until_ms = ? WHERE singleton = 1")
+      .bind(Date.now() + 60_000).run();
+    const blocked = await warmup("ratings-admin-token");
+    expect(blocked.status).toBe(200);
+    expect(await blocked.json()).toMatchObject({ lease_acquired: false, processed_games: 0 });
+    await db.prepare("UPDATE player_rating_state SET lease_until_ms = 0 WHERE singleton = 1").run();
+    const first = await warmup("ratings-admin-token");
+    expect(await first.json()).toMatchObject({ lease_acquired: true, processed_games: 3, ready: true });
+    const before = await (await viewerFetch("/api/v1/players?page=1&pageSize=10")).json();
+    const second = await warmup("ratings-admin-token");
+    expect(await second.json()).toMatchObject({ processed_games: 0, ready: true });
+    expect(await (await viewerFetch("/api/v1/players?page=1&pageSize=10")).json()).toEqual(before);
   });
 
   async function warmup(token: string): Promise<Response> {

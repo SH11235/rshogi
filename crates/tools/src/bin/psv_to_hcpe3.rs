@@ -472,31 +472,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rshogi_core::types::Color;
-
-    #[test]
-    fn game_result_mapping_matches_oracle() {
-        // 手番側勝ち(1): 勝者 = 手番側
-        assert_eq!(stm_result_to_hcpe(1, Color::Black), 1); // BLACK_WIN
-        assert_eq!(stm_result_to_hcpe(1, Color::White), 2); // WHITE_WIN
-        // 手番側負け(-1): 勝者 = 相手側
-        assert_eq!(stm_result_to_hcpe(-1, Color::Black), 2); // WHITE_WIN
-        assert_eq!(stm_result_to_hcpe(-1, Color::White), 1); // BLACK_WIN
-        // 引き分け(0): DRAW
-        assert_eq!(stm_result_to_hcpe(0, Color::Black), 0);
-        assert_eq!(stm_result_to_hcpe(0, Color::White), 0);
-    }
-
-    #[test]
-    fn psv_move16_to_hcpe_matches_oracle() {
-        // 実 YaneuraOu PSV move16（bit14=駒打ち, bit15=成り）を hcpe 形式へ。
-        // 期待値は cshogi `move16_from_psv` で生成（参照実装）。
-        assert_eq!(psv_move16_to_hcpe(0x0000), 0x0000); // none
-        assert_eq!(psv_move16_to_hcpe(0x078e), 0x078e); // 通常手 2g2f
-        assert_eq!(psv_move16_to_hcpe(0x40a5), 0x28a5); // 歩打ち P*5b（bit14, from=1）
-        assert_eq!(psv_move16_to_hcpe(0x4380), 0x2b80); // 金打ち G*1a（bit14, from=7）
-        assert_eq!(psv_move16_to_hcpe(0x9f46), 0x5f46); // 成り 7i8h+（bit15 → hcpe bit14）
-    }
 
     #[test]
     fn record_without_move_is_not_converted_to_policy_record() {

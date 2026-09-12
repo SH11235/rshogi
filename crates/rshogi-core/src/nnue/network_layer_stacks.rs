@@ -2182,7 +2182,7 @@ fn detect_layer_stacks_feature_set(arch_str: &str) -> Result<super::spec::Featur
 mod tests {
     #[cfg(feature = "layerstack-arch")]
     use super::*;
-    use crate::nnue::constants::{FV_SCALE_HALFKA, NNUE_PYTORCH_L1};
+    use crate::nnue::constants::NNUE_PYTORCH_L1;
     #[cfg(all(
         feature = "layerstack-arch",
         feature = "layerstacks-1536x16x32",
@@ -2427,12 +2427,6 @@ mod tests {
                 / get_fv_scale_override().unwrap_or(16);
             assert_eq!(network.evaluate_with_bucket(&pos, &acc, 0), Value::new(expected));
         }
-    }
-
-    #[test]
-    fn test_network_dimensions() {
-        assert_eq!(TEST_L1, 1536);
-        assert_eq!(FV_SCALE_HALFKA, 16);
     }
 
     /// LayerStacks NNUEファイルの読み込みと評価テスト

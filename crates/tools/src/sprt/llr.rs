@@ -290,7 +290,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sprt::penta::{GameSide, Penta};
+    use crate::sprt::penta::Penta;
 
     fn approx(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
@@ -510,12 +510,5 @@ mod tests {
         // 相対誤差 5% 以内で反対符号
         let rel = (l1 + l2).abs() / l1.abs().max(l2.abs());
         assert!(rel < 0.05, "l1={}, l2={}, rel={}", l1, l2, rel);
-    }
-
-    #[test]
-    fn pair_from_pair_all_wins() {
-        let p = Penta::from_pair(GameSide::Win, GameSide::Win);
-        assert_eq!(p.pair_count(), 1);
-        assert_eq!(p.ww, 1);
     }
 }

@@ -317,22 +317,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ext_move_new() {
-        let mv = Move::NONE;
-        let ext = ExtMove::new(mv, 100);
-        assert_eq!(ext.mv, mv);
-        assert_eq!(ext.value, 100);
-    }
-
-    #[test]
-    fn test_ext_move_from_move() {
-        let mv = Move::NONE;
-        let ext: ExtMove = mv.into();
-        assert_eq!(ext.mv, mv);
-        assert_eq!(ext.value, 0);
-    }
-
-    #[test]
     fn test_ext_move_ordering() {
         let ext1 = ExtMove::new(Move::NONE, 100);
         let ext2 = ExtMove::new(Move::NONE, 200);

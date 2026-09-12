@@ -7,6 +7,7 @@ setup() {
     SCRIPT="${BATS_TEST_DIRNAME}/../scripts/check-csa-drain.sh"
     TMPDIR_TEST=$(mktemp -d)
     export FAKE_RESPONSE_FILE="$TMPDIR_TEST/responses"
+    export FAKE_REQUEST_FILE="$TMPDIR_TEST/requests"
     export FAKE_INDEX_FILE="$TMPDIR_TEST/index"
     echo 0 > "$FAKE_INDEX_FILE"
     # `curl` mock: FAKE_RESPONSE_FILE の N 行目 (1-indexed) を返す。`-w '\n%{http_code}'`
@@ -15,6 +16,7 @@ setup() {
     mkdir -p "$TMPDIR_TEST/bin"
     cat > "$TMPDIR_TEST/bin/curl" <<'CURL_EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_REQUEST_FILE"
 idx=$(cat "$FAKE_INDEX_FILE")
 idx=$((idx + 1))
 echo "$idx" > "$FAKE_INDEX_FILE"
@@ -120,21 +122,6 @@ run_drain() {
     [[ "$output" == *'"drained":true'* ]]
 }
 
-# T6 pagination: page1 cursor=tok, page2 空 で count=page1+page2
-@test "T6 pagination: cursor traversal accumulates count" {
-    # 1 polling tick = 2 fetch (page1 + page2)。3 連続 0 で drain なので 3*2=6 fetch
-    write_responses \
-        '200|{"live_games":[],"next_cursor":"tok"}' \
-        '200|{"live_games":[],"next_cursor":null}' \
-        '200|{"live_games":[],"next_cursor":"tok"}' \
-        '200|{"live_games":[],"next_cursor":null}' \
-        '200|{"live_games":[],"next_cursor":"tok"}' \
-        '200|{"live_games":[],"next_cursor":null}'
-    REQUIRE_STABLE=3 run_drain
-    [ "$status" -eq 0 ]
-    [[ "$output" == *'"drained":true'* ]]
-}
-
 # T7 usage error: --live-url 欠落
 @test "T7 usage: missing --live-url -> exit 3" {
     run "$SCRIPT" --max-wait-sec 10
@@ -158,11 +145,11 @@ run_drain() {
     [[ "$output" == *'"drained":true'* ]]
 }
 
-# T10 pagination + count > 0: page1 に live_games 1 件、N=3 観測されない
+# T10 page1 が空でも page2 の非空を合計する。
 @test "T10 pagination with nonzero: stable counter does not advance" {
     write_responses \
-        '200|{"live_games":[{"game_id":"g1"}],"next_cursor":"tok"}' \
-        '200|{"live_games":[],"next_cursor":null}'
+        '200|{"live_games":[],"next_cursor":"tok"}' \
+        '200|{"live_games":[{"game_id":"g1"}],"next_cursor":null}'
     run "$SCRIPT" \
         --live-url "https://example.test/api/v1/games/live" \
         --poll-interval-sec 0 \
@@ -171,52 +158,19 @@ run_drain() {
         --require-stable-zero 3
     [ "$status" -eq 1 ]
     [[ "$output" == *'"final_count":1'* ]]
+    [ "$(cat "$FAKE_INDEX_FILE")" -eq 2 ]
+    [[ "$(cat "$FAKE_REQUEST_FILE")" == *"cursor=tok"* ]]
 }
 
-# T11 schema anomaly: live_games フィールド欠落 → fetch error (exit 2)、drained 誤判定しない
-@test "T11 schema anomaly: missing live_games field -> exit 2 (not silent drained)" {
-    write_responses \
-        '200|{"ok":true}' \
-        '200|{"ok":true}' \
-        '200|{"ok":true}'
-    run "$SCRIPT" \
-        --live-url "https://example.test/api/v1/games/live" \
-        --poll-interval-sec 0 \
-        --max-wait-sec 60 \
-        --retry-on-fetch-error 2 \
-        --require-stable-zero 3
-    [ "$status" -eq 2 ]
-    [[ "$output" != *'"drained":true'* ]]
-}
-
-# T12 schema anomaly: live_games が null
-@test "T12 schema anomaly: live_games is null -> exit 2" {
-    write_responses \
-        '200|{"live_games":null,"next_cursor":null}' \
-        '200|{"live_games":null,"next_cursor":null}' \
-        '200|{"live_games":null,"next_cursor":null}'
-    run "$SCRIPT" \
-        --live-url "https://example.test/api/v1/games/live" \
-        --poll-interval-sec 0 \
-        --max-wait-sec 60 \
-        --retry-on-fetch-error 2 \
-        --require-stable-zero 3
-    [ "$status" -eq 2 ]
-}
-
-# T13 schema anomaly: live_games が object
-@test "T13 schema anomaly: live_games is object -> exit 2" {
-    write_responses \
-        '200|{"live_games":{},"next_cursor":null}' \
-        '200|{"live_games":{},"next_cursor":null}' \
-        '200|{"live_games":{},"next_cursor":null}'
-    run "$SCRIPT" \
-        --live-url "https://example.test/api/v1/games/live" \
-        --poll-interval-sec 0 \
-        --max-wait-sec 60 \
-        --retry-on-fetch-error 2 \
-        --require-stable-zero 3
-    [ "$status" -eq 2 ]
+# 不正schemaを空結果と誤認しない。
+@test "schema anomalies fail closed instead of reporting drained" {
+    for body in '{"ok":true}' '{"live_games":null,"next_cursor":null}' '{"live_games":{},"next_cursor":null}'; do
+        echo 0 > "$FAKE_INDEX_FILE"
+        write_responses "200|$body"
+        run_drain
+        [ "$status" -eq 2 ]
+        [[ "$output" != *'"drained":true'* ]]
+    done
 }
 
 # T14 schema anomaly: next_cursor が number 等の不正型

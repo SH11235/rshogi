@@ -1102,64 +1102,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_stats_entry_default() {
-        let entry = StatsEntry::<1000>::default();
+    fn test_stats_entry_update_lifecycle() {
+        let mut entry = StatsEntry::<1000>::default();
         assert_eq!(entry.get(), 0);
-    }
-
-    #[test]
-    fn test_stats_entry_update_positive() {
-        let mut entry = StatsEntry::<1000>::default();
-
-        // ボーナスを加算
         entry.update(100);
-        assert!(entry.get() > 0);
-        assert!(entry.get() <= 1000);
-    }
-
-    #[test]
-    fn test_stats_entry_update_convergence() {
-        let mut entry = StatsEntry::<1000>::default();
-
-        // 繰り返し更新してもDを超えない
-        for _ in 0..100 {
-            entry.update(1000);
-        }
-        assert!(entry.get() <= 1000);
-        assert!(entry.get() > 900); // 収束に近づく
-    }
-
-    #[test]
-    fn test_stats_entry_update_negative() {
-        let mut entry = StatsEntry::<1000>::default();
-
-        // マイナス方向
-        for _ in 0..100 {
-            entry.update(-1000);
-        }
-        assert!(entry.get() >= -1000);
-        assert!(entry.get() < -900); // 収束に近づく
-    }
-
-    #[test]
-    fn test_stats_entry_decay() {
-        let mut entry = StatsEntry::<1000>::default();
-
-        // 大きなボーナスで値を上げる
-        for _ in 0..50 {
-            entry.update(1000);
-        }
-        let high_value = entry.get();
-        assert!(high_value > 0, "値が上がっているべき");
-
-        // マイナスボーナスで徐々に減衰
-        for _ in 0..5 {
-            entry.update(-100);
-        }
-        let decayed_value = entry.get();
-
-        // 減衰していることを確認（完全に0になる可能性もある）
-        assert!(decayed_value < high_value, "減衰しているべき");
+        assert_eq!(entry.get(), 100);
+        entry.update(1000);
+        assert_eq!(entry.get(), 1000);
+        entry.update(-100);
+        assert!(entry.get() < 1000);
+        entry.update(-1000);
+        assert_eq!(entry.get(), -1000);
     }
 
     #[test]
@@ -1204,28 +1157,24 @@ mod tests {
     }
 
     #[test]
-    fn test_stat_bonus() {
-        let tune = SearchTuneParams::default();
-        // min(121*depth-77, 1633) + 375*(is_tt_move)
-        // depth=1, is_tt_move=false: 121*1-77 = 44
-        assert_eq!(stat_bonus(1, false, &tune), 44);
-        // depth=1, is_tt_move=true: 44 + 375 = 419
-        assert_eq!(stat_bonus(1, true, &tune), 419);
-        // depth=20: min(121*20-77, 1633) = min(2343, 1633) = 1633
-        assert_eq!(stat_bonus(20, false, &tune), 1633);
-        assert_eq!(stat_bonus(20, true, &tune), 1633 + 375);
-    }
-
-    #[test]
-    fn test_stat_malus() {
-        let tune = SearchTuneParams::default();
-        // min(825*depth-196, 2159) - 16*moveCount
-        // depth=1, moveCount=0: 825*1-196 = 629
-        assert_eq!(stat_malus(1, 0, &tune), 629);
-        // depth=1, moveCount=10: 629 - 16*10 = 469
-        assert_eq!(stat_malus(1, 10, &tune), 469);
-        // depth=10, moveCount=0: min(825*10-196, 2159) = min(8054, 2159) = 2159
-        assert_eq!(stat_malus(10, 0, &tune), 2159);
+    fn test_stat_bonus_and_malus_use_tuning_parameters() {
+        let tune = SearchTuneParams {
+            stat_bonus_depth_mult: 10,
+            stat_bonus_offset: -2,
+            stat_bonus_max: 25,
+            stat_bonus_tt_bonus: 7,
+            stat_malus_depth_mult: 20,
+            stat_malus_offset: -3,
+            stat_malus_max: 35,
+            stat_malus_move_count_mult: 4,
+            ..SearchTuneParams::default()
+        };
+        for (depth, bonus, malus) in [(1, 8, 17), (2, 18, 35), (3, 25, 35)] {
+            assert_eq!(stat_bonus(depth, false, &tune), bonus);
+            assert_eq!(stat_bonus(depth, true, &tune), bonus + 7);
+            assert_eq!(stat_malus(depth, 0, &tune), malus);
+            assert_eq!(stat_malus(depth, 2, &tune), malus - 8);
+        }
     }
 
     #[test]
@@ -1251,37 +1200,26 @@ mod tests {
     }
 
     #[test]
-    fn test_history_cell_read() {
-        // HistoryTablesは大きいのでnew_boxedを使用
-        let cell = HistoryCell::new_boxed();
-
-        let value = unsafe { cell.as_ref_unchecked() }
-            .main_history
-            .get(Color::Black, Move::from_usi("7g7f").unwrap());
-        assert_eq!(value, MAIN_HISTORY_INIT);
-    }
-
-    #[test]
-    fn test_history_cell_write() {
-        // HistoryTablesは大きいのでnew_boxedを使用
-        let cell = HistoryCell::new_boxed();
-        let mv = Move::from_usi("7g7f").unwrap();
-
-        unsafe { cell.as_mut_unchecked() }.main_history.update(Color::Black, mv, 100);
-
-        // 更新が反映されていることを確認
-        let value = unsafe { cell.as_ref_unchecked() }.main_history.get(Color::Black, mv);
-        assert!(value > 0);
-    }
-
-    #[test]
     fn test_history_cell_clear() {
         // HistoryTablesは大きいのでnew_boxedを使用
         let mut cell = HistoryCell::new_boxed();
         let mv = Move::from_usi("7g7f").unwrap();
 
+        // このテストだけが所有する cell であり、参照を update/clear 間で保持しない。
+        // SAFETY: cell の排他的所有があり、同時に可変参照を作らない。
+        assert_eq!(
+            unsafe { cell.as_ref_unchecked() }.main_history.get(Color::Black, mv),
+            MAIN_HISTORY_INIT
+        );
+
         // 更新
         unsafe { cell.as_mut_unchecked() }.main_history.update(Color::Black, mv, 100);
+
+        // SAFETY: 上と同じ排他的所有。更新後の値を読み、参照を保持しない。
+        assert_ne!(
+            unsafe { cell.as_ref_unchecked() }.main_history.get(Color::Black, mv),
+            MAIN_HISTORY_INIT
+        );
 
         // クリア
         cell.clear();

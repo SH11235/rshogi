@@ -586,12 +586,6 @@ mod linux {
         }
 
         #[test]
-        fn fnv1a_128_is_deterministic() {
-            let data = b"rshogi nnue shared weights";
-            assert_eq!(fnv1a_128(data), fnv1a_128(data));
-        }
-
-        #[test]
         fn fnv1a_128_distinguishes_inputs() {
             assert_ne!(fnv1a_128(b"abc"), fnv1a_128(b"abd"));
             assert_ne!(fnv1a_128(b"abc"), fnv1a_128(b"ab"));

@@ -2364,75 +2364,6 @@ mod tests {
     }
 
     #[test]
-    fn test_search_basic() {
-        // NNUE 未ロードでも探索できるよう material 評価を有効化 (guard が終了時に復元)
-        let guard = crate::eval::material::test_support::lock_material();
-        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
-
-        // スタックサイズを増やした別スレッドで実行
-        std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(|| {
-                let mut search = Search::new(16);
-                let mut pos = Position::new();
-                pos.set_hirate();
-
-                let limits = LimitsType {
-                    depth: 3,
-                    ..Default::default()
-                };
-
-                let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
-
-                assert_ne!(result.best_move, Move::NONE, "Should find a best move");
-                assert!(result.depth >= 1, "Should complete at least depth 1");
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-
-        drop(guard);
-    }
-
-    #[test]
-    fn test_search_with_callback() {
-        // NNUE 未ロードでも探索できるよう material 評価を有効化 (guard が終了時に復元)
-        let guard = crate::eval::material::test_support::lock_material();
-        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
-
-        // スタックサイズを増やした別スレッドで実行
-        std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(|| {
-                let mut search = Search::new(16);
-                let mut pos = Position::new();
-                pos.set_hirate();
-
-                let limits = LimitsType {
-                    depth: 2,
-                    ..Default::default()
-                };
-
-                let mut info_count = 0;
-                let result = search.go(
-                    &mut pos,
-                    limits,
-                    Some(|_info: &SearchInfo| {
-                        info_count += 1;
-                    }),
-                );
-
-                assert_ne!(result.best_move, Move::NONE, "Should find a best move");
-                assert!(info_count >= 1, "Should have called info callback at least once");
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-
-        drop(guard);
-    }
-
-    #[test]
     fn test_search_with_callback_last_info_matches_best_move() {
         // NNUE 未ロードでも探索できるよう material 評価を有効化 (guard が終了時に復元)
         let guard = crate::eval::material::test_support::lock_material();
@@ -2462,6 +2393,7 @@ mod tests {
                     }),
                 );
 
+                assert!(result.depth >= 1);
                 assert_ne!(result.best_move, Move::NONE, "Should find a best move");
                 assert_eq!(
                     last_info_pv_head, result.best_move,

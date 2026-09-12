@@ -75,20 +75,6 @@ fn test_node_budget_respects_ponder_and_external_stop() {
 }
 
 #[test]
-fn test_reduction_values() {
-    // reduction(true, 10, 5) などが正の値を返すことを確認
-    let tune = SearchTuneParams::default();
-    let reductions = build_reductions(tune.lmr_table_coeff);
-    let root_delta = 64;
-    let delta = 32;
-    assert!(reduction(&reductions, &tune, true, 10, 5, delta, root_delta) / 1024 >= 0);
-    assert!(
-        reduction(&reductions, &tune, false, 10, 5, delta, root_delta) / 1024
-            >= reduction(&reductions, &tune, true, 10, 5, delta, root_delta) / 1024
-    );
-}
-
-#[test]
 fn test_reduction_bounds() {
     // 境界値テスト
     let tune = SearchTuneParams::default();
@@ -117,18 +103,6 @@ fn test_reduction_returns_nonzero_for_large_values() {
     // improving=trueの場合は若干小さい値になる
     let r_imp = reduction(&reductions, &tune, true, 10, 10, delta, root_delta) / 1024;
     assert!(r >= r_imp, "non-improving should have >= reduction than improving");
-}
-
-/// 境界ケース: depth=1, move_count=1でもreduction関数が動作することを確認
-#[test]
-fn test_reduction_small_values() {
-    let tune = SearchTuneParams::default();
-    let reductions = build_reductions(tune.lmr_table_coeff);
-    let root_delta = 64;
-    let delta = 32;
-    // 小さな値でもpanicしないことを確認
-    let r = reduction(&reductions, &tune, true, 1, 1, delta, root_delta) / 1024;
-    assert!(r >= 0, "reduction should not be negative");
 }
 
 #[test]

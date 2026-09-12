@@ -117,9 +117,4 @@ mod tests {
     fn test_halfka_max_active() {
         assert_eq!(HalfKaSplit::MAX_ACTIVE, 40);
     }
-
-    #[test]
-    fn test_halfka_refresh_trigger() {
-        assert_eq!(HalfKaSplit::REFRESH_TRIGGER, TriggerEvent::FriendKingMoved);
-    }
 }

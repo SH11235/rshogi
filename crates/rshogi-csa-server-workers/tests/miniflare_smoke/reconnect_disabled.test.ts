@@ -41,153 +41,36 @@ describe("miniflare smoke: 再接続プロトコル無効構成 (Issue #591 hotf
       await cleanupPersist();
     });
 
-    /// assert 1: 黒/白の両 `Game_Summary` に `Reconnect_Token:` 行が含まれない。
-    /// 修正の本丸 — server が grace=0 のとき token 配布をスキップしている。
-    it("assert 1: Game_Summary に Reconnect_Token 行が含まれない", async () => {
-      const roomId = "reconnect-disabled-room-1";
-      const gameName = "fg-60-1";
-      const blackName = `alice+${gameName}+black`;
-      const whiteName = `bob+${gameName}+white`;
-
+    it.each(["black", "white"])("%s disconnect ends the game without advertising or accepting reconnect", async (disconnected) => {
+      const roomId = `reconnect-disabled-${disconnected}`;
+      const blackName = "alice+fg-60-1+black";
+      const whiteName = "bob+fg-60-1+white";
       const black = await CsaClient.connect(mf, roomId);
       black.send(`LOGIN ${blackName} pw`);
       expect(await black.recvLine()).toBe(`LOGIN:${blackName} OK`);
       const white = await CsaClient.connect(mf, roomId);
       white.send(`LOGIN ${whiteName} pw`);
       expect(await white.recvLine()).toBe(`LOGIN:${whiteName} OK`);
-
-      const blackSummary = await black.drainGameSummary();
-      const whiteSummary = await white.drainGameSummary();
-      expect(
-        blackSummary.some((l) => l.startsWith("Reconnect_Token:")),
-        "黒 Game_Summary に Reconnect_Token 行があってはならない",
-      ).toBe(false);
-      expect(
-        whiteSummary.some((l) => l.startsWith("Reconnect_Token:")),
-        "白 Game_Summary に Reconnect_Token 行があってはならない",
-      ).toBe(false);
-
-      await black.close();
-      await white.close();
+      for (const summary of [await black.drainGameSummary(), await white.drainGameSummary()]) {
+        expect(summary.some((line) => line.startsWith("Reconnect_Token:"))).toBe(false);
+      }
+      black.send("AGREE"); white.send("AGREE");
+      const start = await black.recvLine();
+      expect(start).toMatch(/^START:.+/);
+      expect(await white.recvLine()).toBe(start);
+      const leaving = disconnected === "black" ? black : white;
+      const remaining = disconnected === "black" ? white : black;
+      await leaving.close();
+      const end = await remaining.recvUntil((line) => line === "#WIN");
+      expect(end).toContain("#ABNORMAL");
+      expect(end.indexOf("#ABNORMAL")).toBeLessThan(end.indexOf("#WIN"));
+      const retry = await CsaClient.connect(mf, roomId);
+      const name = disconnected === "black" ? blackName : whiteName;
+      retry.send(`LOGIN ${name} pw reconnect:${start.slice("START:".length)}+${ANY_RECONNECT_TOKEN_HEX}`);
+      expect(["LOGIN:incorrect", "LOGIN:incorrect reconnect_rejected"]).toContain(await retry.recvLine());
+      await retry.close(); await remaining.close();
     });
 
-    /// assert 2: 黒切断 → 残存 white の WS で `#ABNORMAL`+`#WIN` を順序確認。
-    /// grace=0 のとき `force_abnormal` 経路に直接落ちる挙動を pin する。
-    it("assert 2: 黒切断 → 残存 white は #ABNORMAL → #WIN で終局", async () => {
-      const roomId = "reconnect-disabled-room-2";
-      const gameName = "fg-60-1";
-      const blackName = `alice+${gameName}+black`;
-      const whiteName = `bob+${gameName}+white`;
-
-      const black = await CsaClient.connect(mf, roomId);
-      black.send(`LOGIN ${blackName} pw`);
-      await black.recvLine();
-      const white = await CsaClient.connect(mf, roomId);
-      white.send(`LOGIN ${whiteName} pw`);
-      await white.recvLine();
-      await black.drainGameSummary();
-      await white.drainGameSummary();
-      black.send("AGREE");
-      white.send("AGREE");
-      await black.recvLine(); // START:<game_id>
-      await white.recvLine();
-
-      await black.close();
-
-      const whiteEnd = await white.recvUntil((l) => l === "#WIN");
-      expect(whiteEnd.includes("#ABNORMAL"), `白 stream に #ABNORMAL が含まれるべき: ${JSON.stringify(whiteEnd)}`).toBe(
-        true,
-      );
-      const abnormalIdx = whiteEnd.indexOf("#ABNORMAL");
-      const winIdx = whiteEnd.indexOf("#WIN");
-      expect(abnormalIdx).toBeLessThan(winIdx);
-
-      await white.close();
-    });
-
-    /// assert 3: 白切断 → 残存 black の WS で `#ABNORMAL`+`#WIN` を順序確認。
-    it("assert 3: 白切断 → 残存 black は #ABNORMAL → #WIN で終局", async () => {
-      const roomId = "reconnect-disabled-room-3";
-      const gameName = "fg-60-1";
-      const blackName = `alice+${gameName}+black`;
-      const whiteName = `bob+${gameName}+white`;
-
-      const black = await CsaClient.connect(mf, roomId);
-      black.send(`LOGIN ${blackName} pw`);
-      await black.recvLine();
-      const white = await CsaClient.connect(mf, roomId);
-      white.send(`LOGIN ${whiteName} pw`);
-      await white.recvLine();
-      await black.drainGameSummary();
-      await white.drainGameSummary();
-      black.send("AGREE");
-      white.send("AGREE");
-      await black.recvLine();
-      await white.recvLine();
-
-      await white.close();
-
-      const blackEnd = await black.recvUntil((l) => l === "#WIN");
-      expect(blackEnd.includes("#ABNORMAL"), `黒 stream に #ABNORMAL が含まれるべき: ${JSON.stringify(blackEnd)}`).toBe(
-        true,
-      );
-      const abnormalIdx = blackEnd.indexOf("#ABNORMAL");
-      const winIdx = blackEnd.indexOf("#WIN");
-      expect(abnormalIdx).toBeLessThan(winIdx);
-
-      await black.close();
-    });
-
-    /// assert 4: 黒切断後、新 WS で 32 文字 hex const token を入れた `reconnect:`
-    /// LOGIN を投げても server は LOGIN を受理しない。
-    ///
-    /// grace=0 では black0 切断 → 即時 `force_abnormal` で対局が終局 → DO の
-    /// `KEY_FINISHED` がセットされ、`handle_login` の冒頭で「既に終局済みの DO」
-    /// 経路に入るため、reconnect ブランチに到達する前に `LOGIN:incorrect` で
-    /// 弾かれる (`game_room.rs::handle_login` の `load_finished().is_some()` ガード)。
-    ///
-    /// grace>0 構成での「reconnect 経路まで到達するが registry が空 → reconnect_rejected」
-    /// は `reconnect.test.ts` の "不正 token" シナリオ側で pin する。
-    it("assert 4: 任意 token の reconnect: は LOGIN:incorrect で拒否される (終局後の DO)", async () => {
-      const roomId = "reconnect-disabled-room-4";
-      const gameName = "fg-60-1";
-      const blackName = `alice+${gameName}+black`;
-      const whiteName = `bob+${gameName}+white`;
-
-      const black0 = await CsaClient.connect(mf, roomId);
-      black0.send(`LOGIN ${blackName} pw`);
-      await black0.recvLine();
-      const white = await CsaClient.connect(mf, roomId);
-      white.send(`LOGIN ${whiteName} pw`);
-      await white.recvLine();
-      await black0.drainGameSummary();
-      await white.drainGameSummary();
-      black0.send("AGREE");
-      white.send("AGREE");
-      const startBlack = await black0.recvLine();
-      await white.recvLine();
-      const gameId = startBlack.slice("START:".length);
-
-      await black0.close();
-      // 残存 white 側で `#WIN` まで読み切って DO の `finalize_if_ended` が
-      // 完了したことを確認してから reconnect 試行を行う。これにより
-      // `KEY_FINISHED` が確実にセットされ、`handle_login` の終局済みガードに
-      // 到達することを保証する。
-      await white.recvUntil((l) => l === "#WIN");
-
-      const black1 = await CsaClient.connect(mf, roomId);
-      black1.send(`LOGIN ${blackName} pw reconnect:${gameId}+${ANY_RECONNECT_TOKEN_HEX}`);
-      const reply = await black1.recvLine();
-      // `LOGIN:incorrect` (終局済み DO ガード) もしくは `LOGIN:incorrect reconnect_rejected`
-      // (registry 空ガード) のいずれかで弾かれる。グレース 0 構成ではどちらの経路にも
-      // 入りうる (timing 依存) が、reconnect が成功する経路は存在しない点が pin される。
-      expect(
-        ["LOGIN:incorrect", "LOGIN:incorrect reconnect_rejected"].includes(reply),
-        `予期しない reply: ${reply}`,
-      ).toBe(true);
-
-      await white.close();
-    });
   });
 
   /// assert 5: misconfig (`grace=30 + allow=false`) は `resolve_reconnect_grace`

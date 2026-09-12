@@ -866,9 +866,4 @@ mod tests {
         assert!(saw_mismatch, "fixture model must expose stale-accumulator mismatch");
         Ok(())
     }
-
-    #[test]
-    fn run_entry_is_reachable_in_tests() {
-        let _ = run as fn() -> Result<()>;
-    }
 }

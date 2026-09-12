@@ -2082,18 +2082,6 @@ mod tests {
     }
 
     #[test]
-    fn test_accumulator_halfka_512() {
-        let acc = AccumulatorHalfKaHmSplit::<512>::new();
-        assert_eq!(acc.accumulation[0].0.len(), 512);
-    }
-
-    #[test]
-    fn test_accumulator_halfka_1024() {
-        let acc = AccumulatorHalfKaHmSplit::<1024>::new();
-        assert_eq!(acc.accumulation[0].0.len(), 1024);
-    }
-
-    #[test]
     fn test_padded_input() {
         assert_eq!(AffineTransformHalfKaHmSplit::<8, 96>::PADDED_INPUT, 32);
         assert_eq!(AffineTransformHalfKaHmSplit::<32, 96>::PADDED_INPUT, 32);
@@ -2125,13 +2113,5 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn test_type_aliases() {
-        // 型エイリアスがコンパイルできることを確認
-        fn _check_halfka_256_crelu(_: HalfKaHmSplit256CReLU) {}
-        fn _check_halfka_512_crelu(_: HalfKaHmSplit512CReLU) {}
-        fn _check_halfka_1024_crelu(_: HalfKaHmSplit1024CReLU) {}
     }
 }

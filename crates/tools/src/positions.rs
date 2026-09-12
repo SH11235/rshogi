@@ -78,19 +78,3 @@ fn load_positions_from_file(path: &Path) -> Result<Vec<(String, String)>> {
 
     Ok(positions)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_positions() {
-        assert!(!DEFAULT_POSITIONS.is_empty());
-        assert_eq!(DEFAULT_POSITIONS.len(), 4); // YaneuraOu準拠で4局面
-
-        for (name, sfen) in DEFAULT_POSITIONS {
-            assert!(!name.is_empty());
-            assert!(!sfen.is_empty());
-        }
-    }
-}

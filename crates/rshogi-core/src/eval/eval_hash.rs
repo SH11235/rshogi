@@ -290,12 +290,6 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_hash_size_power_of_two() {
-        let hash = EvalHash::new(3);
-        assert!(hash.table.len().is_power_of_two() || hash.table.is_empty());
-    }
-
-    #[test]
     fn test_eval_hash_enabled_default() {
         // デフォルトで無効
         assert!(!eval_hash_enabled());

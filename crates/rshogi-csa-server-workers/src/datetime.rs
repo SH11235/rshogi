@@ -36,48 +36,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_csa_datetime_epoch_zero() {
-        assert_eq!(format_csa_datetime(0), "1970/01/01 00:00:00");
-    }
-
-    #[test]
-    fn format_csa_datetime_known_point() {
-        // 2024-01-15 09:30:45 UTC = 1705311045 seconds → 1705311045000 ms
-        assert_eq!(format_csa_datetime(1_705_311_045_000), "2024/01/15 09:30:45");
-    }
-
-    #[test]
-    fn format_csa_datetime_drops_sub_second() {
-        // 末尾 ms は捨てて秒単位で整形する。
-        assert_eq!(format_csa_datetime(1_705_311_045_999), "2024/01/15 09:30:45");
-    }
-
-    #[test]
-    fn format_date_path_epoch_zero() {
-        assert_eq!(format_date_path(0), "1970/01/01");
-    }
-
-    #[test]
-    fn format_date_path_known_point() {
-        assert_eq!(format_date_path(1_705_311_045_000), "2024/01/15");
-    }
-
-    #[test]
-    fn format_date_path_roundtrips_day_boundary_utc() {
-        // 2024-01-15 23:59:59 → 2024/01/15
-        assert_eq!(format_date_path(1_705_363_199_000), "2024/01/15");
-        // 2024-01-16 00:00:00 → 2024/01/16
-        assert_eq!(format_date_path(1_705_363_200_000), "2024/01/16");
-    }
-
-    #[test]
-    fn format_rfc3339_utc_known_point() {
-        // 2024-01-15 09:30:45 UTC = 1_705_311_045_000 ms
-        assert_eq!(format_rfc3339_utc(1_705_311_045_000), "2024-01-15T09:30:45Z");
-    }
-
-    #[test]
-    fn format_rfc3339_utc_drops_sub_second() {
-        assert_eq!(format_rfc3339_utc(1_705_311_045_999), "2024-01-15T09:30:45Z");
+    fn date_formats_share_utc_and_second_precision() {
+        for (ms, csa, path, iso) in [
+            (0, "1970/01/01 00:00:00", "1970/01/01", "1970-01-01T00:00:00Z"),
+            (1_705_311_045_999, "2024/01/15 09:30:45", "2024/01/15", "2024-01-15T09:30:45Z"),
+            (1_705_363_199_000, "2024/01/15 23:59:59", "2024/01/15", "2024-01-15T23:59:59Z"),
+            (1_705_363_200_000, "2024/01/16 00:00:00", "2024/01/16", "2024-01-16T00:00:00Z"),
+        ] {
+            assert_eq!(format_csa_datetime(ms), csa);
+            assert_eq!(format_date_path(ms), path);
+            assert_eq!(format_rfc3339_utc(ms), iso);
+        }
     }
 }

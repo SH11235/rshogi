@@ -2160,12 +2160,6 @@ mod tests {
     }
 
     #[test]
-    fn test_accumulator_halfkp_512() {
-        let acc = AccumulatorHalfKP::<512>::new();
-        assert_eq!(acc.accumulation[0].0.len(), 512);
-    }
-
-    #[test]
     fn test_padded_input() {
         assert_eq!(AffineTransformHalfKP::<512, 32>::PADDED_INPUT, 512);
         assert_eq!(AffineTransformHalfKP::<32, 32>::PADDED_INPUT, 32);
@@ -2251,12 +2245,5 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn test_type_aliases() {
-        // 型エイリアスがコンパイルできることを確認
-        fn _check_halfkp_256_crelu(_: HalfKP256CReLU) {}
-        fn _check_halfkp_512_crelu(_: HalfKP512CReLU) {}
     }
 }

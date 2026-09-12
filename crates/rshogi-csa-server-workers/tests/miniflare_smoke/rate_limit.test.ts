@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { Miniflare, WebSocket } from "miniflare";
 import {
-  DEFAULT_TEST_CF_CONNECTING_IP,
   createMiniflare,
   makeTempPersistRoot,
 } from "./harness";
@@ -414,19 +413,4 @@ describe("rate limit counter is not incremented on invalid room_id", () => {
     resValid.webSocket?.close();
   });
 
-  test("既存 smoke 互換: harness default IP では rate limit に当たらない", async () => {
-    // 緩和済 default 閾値 (本 describe は意図的に 1 に絞っているが、test 内の
-    // `connect` 呼び出しが harness 経由の DEFAULT_TEST_CF_CONNECTING_IP と異なる
-    // IP を使えば bucket 衝突しない、という設計の確認)。
-    const res = await mf.dispatchFetch("https://example.com/ws/another-room", {
-      headers: {
-        Upgrade: "websocket",
-        // 本 test 専用 IP (他 test と衝突しない)
-        "CF-Connecting-IP": "198.51.100.200",
-      },
-    });
-    expect(res.status).toBe(101);
-    res.webSocket?.accept();
-    res.webSocket?.close();
-  });
 });

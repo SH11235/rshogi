@@ -30,16 +30,6 @@ mod tests {
     }
 
     #[test]
-    fn test_msb64_single_bit() {
-        assert_eq!(msb64(1), 0);
-        assert_eq!(msb64(2), 1);
-        assert_eq!(msb64(4), 2);
-        assert_eq!(msb64(8), 3);
-        assert_eq!(msb64(0x80), 7);
-        assert_eq!(msb64(0x8000_0000_0000_0000), 63);
-    }
-
-    #[test]
     fn test_msb64_multiple_bits() {
         assert_eq!(msb64(0b1111), 3);
         assert_eq!(msb64(0xFF), 7);

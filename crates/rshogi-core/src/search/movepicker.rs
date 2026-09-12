@@ -191,14 +191,6 @@ impl MovePicker {
     /// 単独の `PieceToHistory` を渡す代わりに、選択したキーに対応する
     /// `HistoryTables::continuation_history` 内のテーブルへ値を設定する。
     ///
-    /// ```compile_fail
-    /// use rshogi_core::{position::Position, search::{MovePicker, PieceToHistory}, types::Move};
-    /// let pos = Position::new();
-    /// let picker = {
-    ///     let table = Box::new(PieceToHistory::new());
-    ///     MovePicker::new(&pos, Move::NONE, 1, 0, [&*table; 6], false)
-    /// };
-    /// ```
     pub fn new(
         pos: &Position,
         tt_move: Move,
@@ -1001,194 +993,29 @@ mod tests {
             }
         }
     }
-    #[test]
-    fn test_stage_next() {
-        assert_eq!(Stage::MainTT.next(), Stage::CaptureInit);
-        assert_eq!(Stage::CaptureInit.next(), Stage::GoodCapture);
-        assert_eq!(Stage::GoodCapture.next(), Stage::QuietInit);
-        assert_eq!(Stage::QuietInit.next(), Stage::GoodQuiet);
-        assert_eq!(Stage::GoodQuiet.next(), Stage::BadCapture);
-        assert_eq!(Stage::BadCapture.next(), Stage::BadQuiet);
-        assert_eq!(Stage::BadQuiet.next(), Stage::BadQuiet);
-
-        assert_eq!(Stage::EvasionTT.next(), Stage::EvasionInit);
-        assert_eq!(Stage::EvasionInit.next(), Stage::Evasion);
-        assert_eq!(Stage::Evasion.next(), Stage::Evasion);
-
-        assert_eq!(Stage::QSearchTT.next(), Stage::QCaptureInit);
-        assert_eq!(Stage::QCaptureInit.next(), Stage::QCapture);
-        assert_eq!(Stage::QCapture.next(), Stage::QCapture);
-    }
 
     #[test]
-    fn test_partial_insertion_sort() {
-        // YaneuraOu準拠: index 0 を初期 sorted 領域とし、index 1 から走査
-        let mut moves = vec![
-            ExtMove::new(Move::NONE, 100),
-            ExtMove::new(Move::NONE, 50),
-            ExtMove::new(Move::NONE, 200),
-            ExtMove::new(Move::NONE, 10),
-            ExtMove::new(Move::NONE, 150),
+    fn partial_sort_partition_and_permutation() {
+        let cases: &[(&[i32], i32, &[i32])] = &[
+            (&[], 100, &[]),
+            (&[50], 100, &[50]),
+            (&[100, 50, 200, 10, 150], 100, &[200, 150, 100]),
+            (&[99, 100, 101], 100, &[101, 100, 99]),
+            (&[10, 20, 30], 100, &[10]),
+            (&[50, -100, 200, 0], i32::MIN, &[200, 50, 0, -100]),
         ];
-
-        let len = moves.len();
-        let sorted_end = partial_insertion_sort(&mut moves, len, 100);
-
-        // index 1 以降で >= 100 の手は 200, 150 の2つ → sorted_end=2
-        assert_eq!(sorted_end, 2);
-        // sorted 領域 [0..=2] が降順
-        assert_eq!(moves[0].value, 200);
-        assert_eq!(moves[1].value, 150);
-        assert_eq!(moves[2].value, 100);
-    }
-
-    #[test]
-    fn test_partial_insertion_sort_boundary_value() {
-        // 境界値テスト: value == limit の手は閾値以上として扱われる
-        let mut moves = vec![
-            ExtMove::new(Move::NONE, 99),
-            ExtMove::new(Move::NONE, 100), // ちょうど閾値
-            ExtMove::new(Move::NONE, 101),
-        ];
-
-        let len = moves.len();
-        let sorted_end = partial_insertion_sort(&mut moves, len, 100);
-
-        // index 1 以降で >= 100: 100, 101 の2つ → sorted_end=2
-        assert_eq!(sorted_end, 2);
-        assert_eq!(moves[0].value, 101);
-        assert_eq!(moves[1].value, 100);
-        assert_eq!(moves[2].value, 99);
-    }
-
-    #[test]
-    fn test_partial_insertion_sort_large_array() {
-        // 20要素の配列
-        let mut moves: Vec<ExtMove> = (0..20).map(|i| ExtMove::new(Move::NONE, i * 10)).collect();
-
-        let len = moves.len();
-        // limit=100: index 1 以降で >= 100 の手は 100, 110, ..., 190 の10個
-        let sorted_end = partial_insertion_sort(&mut moves, len, 100);
-
-        assert_eq!(sorted_end, 10);
-        // sorted 領域先頭に降順配置
-        assert_eq!(moves[0].value, 190);
-        assert_eq!(moves[1].value, 180);
-        assert_eq!(moves[9].value, 100);
-    }
-
-    #[test]
-    fn test_partial_insertion_sort_no_good_moves() {
-        // 閾値を満たす手が0個の場合
-        let mut moves = vec![
-            ExtMove::new(Move::NONE, 10),
-            ExtMove::new(Move::NONE, 20),
-            ExtMove::new(Move::NONE, 30),
-        ];
-
-        let len = moves.len();
-        let sorted_end = partial_insertion_sort(&mut moves, len, 100);
-
-        assert_eq!(sorted_end, 0);
-        // 順序は変わらない（swapは発生しない）
-    }
-
-    #[test]
-    fn test_partial_insertion_sort_all_good_moves() {
-        // 全ての手が閾値以上の場合
-        let mut moves = vec![
-            ExtMove::new(Move::NONE, 100),
-            ExtMove::new(Move::NONE, 200),
-            ExtMove::new(Move::NONE, 150),
-        ];
-
-        let len = moves.len();
-        let sorted_end = partial_insertion_sort(&mut moves, len, 50);
-
-        // index 1 以降で >= 50: 200, 150 の2つ → sorted_end=2
-        assert_eq!(sorted_end, 2);
-        // 全てソートされる（降順）
-        assert_eq!(moves[0].value, 200);
-        assert_eq!(moves[1].value, 150);
-        assert_eq!(moves[2].value, 100);
-    }
-
-    #[test]
-    fn test_partial_insertion_sort_full_sort() {
-        // limit = i32::MIN の場合は全要素ソート
-        let mut moves = vec![
-            ExtMove::new(Move::NONE, 50),
-            ExtMove::new(Move::NONE, -100),
-            ExtMove::new(Move::NONE, 200),
-            ExtMove::new(Move::NONE, 0),
-        ];
-
-        let len = moves.len();
-        let sorted_end = partial_insertion_sort(&mut moves, len, i32::MIN);
-
-        // index 1 以降の全3要素が >= i32::MIN → sorted_end=3
-        assert_eq!(sorted_end, 3);
-        // 全体がソートされる（降順）
-        assert_eq!(moves[0].value, 200);
-        assert_eq!(moves[1].value, 50);
-        assert_eq!(moves[2].value, 0);
-        assert_eq!(moves[3].value, -100);
-    }
-
-    #[test]
-    fn test_partial_insertion_sort_empty() {
-        // 空配列
-        let mut moves: Vec<ExtMove> = vec![];
-        let sorted_end = partial_insertion_sort(&mut moves, 0, 100);
-        assert_eq!(sorted_end, 0);
-    }
-
-    #[test]
-    fn test_partial_insertion_sort_single_element() {
-        // 1要素の配列: ループ 1..1 は実行されない → sorted_end=0
-        let mut moves = vec![ExtMove::new(Move::NONE, 150)];
-        let sorted_end = partial_insertion_sort(&mut moves, 1, 100);
-        assert_eq!(sorted_end, 0);
-        assert_eq!(moves[0].value, 150);
-
-        let mut moves2 = vec![ExtMove::new(Move::NONE, 50)];
-        let sorted_end2 = partial_insertion_sort(&mut moves2, 1, 100);
-        assert_eq!(sorted_end2, 0);
-    }
-
-    #[test]
-    fn test_piece_value() {
-        assert_eq!(piece_value(Piece::B_PAWN), 90);
-        assert_eq!(piece_value(Piece::W_GOLD), 540);
-        assert_eq!(piece_value(Piece::B_ROOK), 990);
-        assert_eq!(piece_value(Piece::W_HORSE), 945);
-        assert_eq!(piece_value(Piece::W_DRAGON), 1395);
-    }
-
-    /// partial_insertion_sort のソート順が YO と同型であることを検証
-    #[test]
-    fn test_partial_insertion_sort_order() {
-        // YaneuraOu準拠: index 0 は初期 sorted 領域、index 1 以降を走査
-        let mut moves = vec![
-            ExtMove::new(Move::NONE, 100),  // index 0: 初期 sorted 領域
-            ExtMove::new(Move::NONE, -200), // index 1: < 0, skip
-            ExtMove::new(Move::NONE, 50),   // index 2: >= 0, sorted_end=1
-            ExtMove::new(Move::NONE, 200),  // index 3: >= 0, sorted_end=2
-            ExtMove::new(Move::NONE, -100), // index 4: < 0, skip
-        ];
-
-        let len = moves.len();
-        let sorted_end = partial_insertion_sort(&mut moves, len, 0);
-
-        // index 1 以降で >= 0 の手は 50, 200 の2つ
-        assert_eq!(sorted_end, 2);
-
-        // sorted 領域 [0..=2] は降順
-        assert_eq!(moves[0].value, 200);
-        assert_eq!(moves[1].value, 100);
-        assert_eq!(moves[2].value, 50);
-        // 残りは閾値未満
-        assert!(moves[3].value < 0);
-        assert!(moves[4].value < 0);
+        for &(values, limit, prefix) in cases {
+            let mut moves: Vec<_> = values.iter().map(|&v| ExtMove::new(Move::NONE, v)).collect();
+            let len = moves.len();
+            let end = partial_insertion_sort(&mut moves, len, limit);
+            assert_eq!(end, prefix.len().saturating_sub(1));
+            let mut actual: Vec<_> = moves.iter().map(|m| m.value).collect();
+            assert_eq!(&actual[..prefix.len()], prefix);
+            assert!(actual[prefix.len()..].iter().all(|&v| v < limit));
+            let mut expected = values.to_vec();
+            expected.sort_unstable();
+            actual.sort_unstable();
+            assert_eq!(actual, expected);
+        }
     }
 }

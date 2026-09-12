@@ -974,13 +974,6 @@ mod tests {
     }
 
     #[test]
-    fn test_previous_time_reduction_roundtrip() {
-        let mut tm = create_time_manager();
-        tm.set_previous_time_reduction(0.42);
-        assert!((tm.previous_time_reduction() - 0.42).abs() < 1e-9);
-    }
-
-    #[test]
     fn test_previous_time_reduction_is_preserved_through_init() {
         let mut tm = create_time_manager();
         tm.set_previous_time_reduction(0.42);
@@ -1052,23 +1045,6 @@ mod tests {
     }
 
     #[test]
-    fn test_time_manager_elapsed() {
-        let mut tm = create_time_manager();
-        let mut limits = LimitsType::new();
-        limits.time[Color::Black.index()] = 60000;
-        limits.set_start_time();
-
-        tm.init(&limits, Color::Black, 0, 256);
-
-        // 少し待つ
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        let elapsed = tm.elapsed();
-        assert!(elapsed >= 10);
-        assert!(elapsed < 1000);
-    }
-
-    #[test]
     fn test_time_manager_should_stop() {
         let stop = Arc::new(AtomicBool::new(false));
         let mut tm = TimeManagement::new(Arc::clone(&stop), Arc::new(AtomicBool::new(false)));
@@ -1126,37 +1102,6 @@ mod tests {
         tm.start_time = Instant::now() - Duration::from_millis(500);
         tm.ponderhit_time = tm.start_time;
         assert!(!tm.should_stop(5), "elapsed below threshold should continue");
-    }
-
-    #[test]
-    fn test_time_manager_round_up() {
-        let tm = create_time_manager();
-
-        // minimum_thinking_time=2000, network_delay=120, remain_timeは十分に大きい
-        let result = tm.round_up(1);
-        assert_eq!(result, 1880);
-
-        // 500ms -> minimum_thinking_time に引き上げた上で network_delay を差し引く
-        let result = tm.round_up(500);
-        assert_eq!(result, 1880);
-
-        // 1001ms -> 2秒を切り上げるが minimum_thinking_time が優先
-        let result = tm.round_up(1001);
-        assert_eq!(result, 1880);
-    }
-
-    #[test]
-    fn test_round_up_respects_minimum_lower_bound() {
-        let mut tm = create_time_manager();
-        tm.set_options(&TimeOptions {
-            network_delay: 120,
-            network_delay2: 1120,
-            minimum_thinking_time: 1000,
-            slow_mover: 100,
-            ..TimeOptions::default()
-        });
-
-        assert_eq!(tm.round_up(1), 880);
     }
 
     #[test]

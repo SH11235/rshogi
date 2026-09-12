@@ -16,107 +16,28 @@ function closeAcceptedSocket(ws: WebSocket | null | undefined): void {
   ws?.close();
 }
 
-describe("Origin allowlist route behavior", () => {
+describe.each(["https://example.com", ""])("Origin allowlist %j", (allowlist) => {
   let mf: Miniflare;
   let cleanup: () => Promise<void>;
-
   beforeEach(async () => {
     const persist = await makeTempPersistRoot();
     cleanup = persist.cleanup;
-    mf = await createMiniflare({
-      persistRoot: persist.path,
-      wsAllowedOrigins: "https://example.com",
-    });
+    mf = await createMiniflare({ persistRoot: persist.path, wsAllowedOrigins: allowlist });
   });
+  afterEach(async () => { await mf.dispose(); await cleanup(); });
 
-  afterEach(async () => {
-    await mf.dispose();
-    await cleanup();
-  });
-
-  test("Origin ヘッダ欠落 → 素通しで 101 Upgrade を返す（ネイティブクライアント経路）", async () => {
-    const res = await mf.dispatchFetch("https://example.com/ws/origin-missing-room", {
-      headers: {
-        Upgrade: "websocket",
-        // CF-Connecting-IP は issue #622 PR3a で必須化された (欠落で 503)。
-        // 本テストは Origin 検査の挙動を見るのが目的なので、rate limit は
-        // 緩和済 default (`DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN`) で素通し。
-        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
-      },
-    });
-    expect(res.status).toBe(101);
-    expect(res.webSocket).toBeTruthy();
-    closeAcceptedSocket(res.webSocket);
-  });
-
-  test("Origin が allowlist に完全一致 → 101 Upgrade", async () => {
-    const res = await mf.dispatchFetch("https://example.com/ws/origin-match-room", {
-      headers: {
-        Upgrade: "websocket",
-        Origin: "https://example.com",
-        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
-      },
-    });
-    expect(res.status).toBe(101);
-    expect(res.webSocket).toBeTruthy();
-    closeAcceptedSocket(res.webSocket);
-  });
-
-  test("Origin が allowlist に含まれない → 403 Forbidden Origin", async () => {
-    // Origin 検査は CF-Connecting-IP より先に走るので、本テストは IP なしでも
-    // 403 が返る (ただし将来 hook 順序が変わると 503 になりうるので念のため
-    // IP も付けて検査の独立性を確保する)。
-    const res = await mf.dispatchFetch("https://example.com/ws/origin-mismatch-room", {
-      headers: {
-        Upgrade: "websocket",
-        Origin: "https://evil.example",
-        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
-      },
-    });
-    expect(res.status).toBe(403);
-    expect(await res.text()).toContain("Forbidden Origin");
-  });
-});
-
-describe("Origin allowlist route behavior (空 allowlist)", () => {
-  let mf: Miniflare;
-  let cleanup: () => Promise<void>;
-
-  beforeEach(async () => {
-    const persist = await makeTempPersistRoot();
-    cleanup = persist.cleanup;
-    mf = await createMiniflare({
-      persistRoot: persist.path,
-      wsAllowedOrigins: "",
-    });
-  });
-
-  afterEach(async () => {
-    await mf.dispose();
-    await cleanup();
-  });
-
-  test("空 allowlist + Origin 欠落 → 101 Upgrade（production 既定でネイティブが通る）", async () => {
-    const res = await mf.dispatchFetch("https://example.com/ws/empty-allow-missing-room", {
-      headers: {
-        Upgrade: "websocket",
-        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
-      },
-    });
-    expect(res.status).toBe(101);
-    expect(res.webSocket).toBeTruthy();
-    closeAcceptedSocket(res.webSocket);
-  });
-
-  test("空 allowlist + Origin 付き → 403（ブラウザ経由は CSRF 防御で全拒否）", async () => {
-    const res = await mf.dispatchFetch("https://example.com/ws/empty-allow-origin-room", {
-      headers: {
-        Upgrade: "websocket",
-        Origin: "https://example.com",
-        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
-      },
-    });
-    expect(res.status).toBe(403);
-    expect(await res.text()).toContain("Forbidden Origin");
+  test("native access and browser allow/deny use the configured policy", async () => {
+    for (const [index, origin] of [undefined, "https://example.com", "https://evil.example"].entries()) {
+      const headers: Record<string, string> = {
+        Upgrade: "websocket", "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
+      };
+      if (origin) headers.Origin = origin;
+      const res = await mf.dispatchFetch(`https://example.com/ws/origin-${index}`, { headers });
+      const allowed = origin === undefined || origin === allowlist;
+      expect(res.status).toBe(allowed ? 101 : 403);
+      if (allowed) {
+        expect(res.webSocket).toBeTruthy(); closeAcceptedSocket(res.webSocket);
+      } else { expect(await res.text()).toContain("Forbidden Origin"); }
+    }
   });
 });

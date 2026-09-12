@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   CsaClient,
   createMiniflare,
   getFloodgateHistoryBucket,
+  getKifuBucket,
+  pollR2ForGameId,
   makeTempPersistRoot,
   pollFloodgateHistoryForGameId,
 } from "./harness.ts";
@@ -42,13 +44,19 @@ describe("miniflare smoke: Floodgate 履歴 R2 永続化 E2E", () => {
     white.send(`LOGIN ${whiteName} pw`);
     expect(await white.recvLine()).toBe(`LOGIN:${whiteName} OK`);
 
-    await black.drainGameSummary();
-    await white.drainGameSummary();
+    const blackSummary = await black.drainGameSummary();
+    const whiteSummary = await white.drainGameSummary();
+    expect(blackSummary).toContain("Your_Turn:+");
+    expect(whiteSummary).toContain("Your_Turn:-");
+    expect(blackSummary).toContain("Declaration:Jishogi 1.1");
+    expect(blackSummary).toContain("Entering_King_Rule:CSARule27");
+    expect(whiteSummary).toContain("Entering_King_Rule:CSARule27");
 
     black.send("AGREE");
     white.send("AGREE");
     const startBlack = await black.recvLine();
-    await white.recvLine();
+    expect(await white.recvLine()).toBe(startBlack);
+    expect(startBlack).toMatch(/^START:.+/);
     const gameId = startBlack.slice("START:".length);
     expect(gameId.length).toBeGreaterThan(0);
 
@@ -61,7 +69,14 @@ describe("miniflare smoke: Floodgate 履歴 R2 永続化 E2E", () => {
     await white.recvUntil((l) => l.startsWith("-3334FU"));
 
     black.send("%TORYO");
-    await black.recvUntil((l) => l === "#LOSE");
+    const end = await black.recvUntil((l) => l === "#LOSE");
+    expect(end).toContain("#RESIGN");
+    const kifu = await getKifuBucket(mf);
+    const objects = await pollR2ForGameId(kifu, gameId);
+    expect(objects.length).toBeGreaterThan(0);
+    const text = await (await kifu.get(objects[0]!.key))!.text();
+    expect(text).toContain("V2.2");
+    expect(text).toContain(gameId);
 
     const r2 = await getFloodgateHistoryBucket(mf);
     const matched = await pollFloodgateHistoryForGameId(r2, gameId);

@@ -238,40 +238,10 @@ mod tests {
     }
 
     #[test]
-    fn test_value_neg() {
-        assert_eq!(-Value::new(100), Value::new(-100));
-        assert_eq!(-Value::ZERO, Value::ZERO);
-    }
-
-    #[test]
-    fn test_value_add_sub() {
-        let a = Value::new(100);
-        let b = Value::new(50);
-        assert_eq!(a + b, Value::new(150));
-        assert_eq!(a - b, Value::new(50));
-    }
-
-    #[test]
-    fn test_value_mul_div() {
-        let v = Value::new(100);
-        assert_eq!(v * 3, Value::new(300));
-        assert_eq!(v / 2, Value::new(50));
-    }
-
-    #[test]
     fn test_value_ordering() {
         assert!(Value::MATE > Value::ZERO);
         assert!(Value::ZERO > Value::mated_in(1));
         assert!(Value::mate_in(1) > Value::mate_in(10));
         assert!(Value::mated_in(10) > Value::mated_in(1));
-    }
-
-    #[test]
-    fn test_value_from() {
-        let v: Value = 100.into();
-        assert_eq!(v.raw(), 100);
-
-        let i: i32 = v.into();
-        assert_eq!(i, 100);
     }
 }

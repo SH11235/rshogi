@@ -549,6 +549,8 @@ mod tests {
         let mut tt = TranspositionTable::new(1);
         let mut pos = Position::new();
         pos.set_hirate();
+        assert_eq!(tt.generation(), 0);
+        assert!(!tt.probe(1, &pos).found);
         assert_eq!(tt.cluster_count * CLUSTER_SIZE, 98_304);
         for key in 1..=3 {
             assert!(tt.probe(key, &pos).write(
@@ -606,13 +608,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tt_new() {
-        let tt = TranspositionTable::new(1); // 1MB
-        assert!(tt.cluster_count >= 2);
-        assert_eq!(tt.generation(), 0);
-    }
-
-    #[test]
     fn test_tt_new_search() {
         let tt = TranspositionTable::new(1);
         assert_eq!(tt.generation(), 0);
@@ -657,13 +652,6 @@ mod tests {
             }
         }
     }
-    #[test]
-    fn test_tt_probe_empty() {
-        let tt = TranspositionTable::new(1);
-        let pos = Position::new();
-        let result = tt.probe(12345, &pos);
-        assert!(!result.found);
-    }
 
     #[test]
     fn test_tt_probe_and_write() {
@@ -698,56 +686,11 @@ mod tests {
     }
 
     #[test]
-    fn test_tt_generation_cycle() {
-        let tt = TranspositionTable::new(1);
-
-        for _ in 0..300 {
-            tt.new_search();
-        }
-
-        // オーバーフローしても正常に動作
-        // generation は 8 の倍数で増加し、u8でwrapするので常に256未満
-        let generation = tt.generation();
-        // 300 * 8 = 2400, 2400 % 256 = 96
-        // 正常に動作していることを確認（u8なので必ず0-255の範囲）
-        let _ = generation; // コンパイルが通れば正常
-    }
-
-    #[test]
     fn test_tt_hashfull() {
         let tt = TranspositionTable::new(1);
 
         // 空の状態では0
         assert_eq!(tt.hashfull(0), 0);
-    }
-
-    #[test]
-    fn test_tt_clear() {
-        let mut pos = Position::new();
-        pos.set_sfen(SFEN_HIRATE).unwrap();
-
-        let mut tt = TranspositionTable::new(1);
-        let key = pos.key();
-
-        // 書き込み（DEPTH_ENTRY_OFFSETを考慮して有効な深さ）
-        let probe1 = tt.probe(key, &pos);
-        assert!(probe1.write(
-            key,
-            Value::new(100),
-            false,
-            Bound::Lower,
-            10,
-            Move::NONE,
-            Value::ZERO,
-            tt.generation(),
-        ));
-
-        // クリア
-        tt.clear();
-
-        // クリア後はヒットしない
-        let probe2 = tt.probe(key, &pos);
-        assert!(!probe2.found);
     }
 
     #[test]

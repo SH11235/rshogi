@@ -803,61 +803,6 @@ mod tests {
         assert!(err.contains("countdown|countdown_msec|fischer|stopwatch"));
     }
 
-    #[test]
-    fn parse_agree_timeout_duration_defaults_when_unset_or_blank_or_zero() {
-        let default = std::time::Duration::from_secs(DEFAULT_AGREE_TIMEOUT_SEC);
-        assert_eq!(parse_agree_timeout_duration(None), default);
-        assert_eq!(parse_agree_timeout_duration(Some("")), default);
-        assert_eq!(parse_agree_timeout_duration(Some(" \t ")), default);
-        // `0` は「無効化」を意図した運用ミスと解釈し、stuck DO の長期占有を避ける
-        // ため安全側既定にフォールバックする (TTL 0 = 無効化は許容しない)。
-        assert_eq!(parse_agree_timeout_duration(Some("0")), default);
-    }
-
-    #[test]
-    fn parse_agree_timeout_duration_accepts_positive_seconds() {
-        assert_eq!(parse_agree_timeout_duration(Some("30")), std::time::Duration::from_secs(30),);
-        assert_eq!(
-            parse_agree_timeout_duration(Some(" 120\n")),
-            std::time::Duration::from_secs(120),
-        );
-    }
-
-    #[test]
-    fn parse_agree_timeout_duration_falls_back_on_non_numeric() {
-        let default = std::time::Duration::from_secs(DEFAULT_AGREE_TIMEOUT_SEC);
-        assert_eq!(parse_agree_timeout_duration(Some("forever")), default);
-        assert_eq!(parse_agree_timeout_duration(Some("-5")), default);
-    }
-
-    #[test]
-    fn parse_reconnect_grace_duration_defaults_to_zero() {
-        assert_eq!(parse_reconnect_grace_duration(None).unwrap(), std::time::Duration::ZERO);
-        assert_eq!(parse_reconnect_grace_duration(Some("")).unwrap(), std::time::Duration::ZERO);
-        assert_eq!(
-            parse_reconnect_grace_duration(Some(" \t ")).unwrap(),
-            std::time::Duration::ZERO,
-        );
-    }
-
-    #[test]
-    fn parse_reconnect_grace_duration_accepts_positive_seconds() {
-        assert_eq!(
-            parse_reconnect_grace_duration(Some("60")).unwrap(),
-            std::time::Duration::from_secs(60),
-        );
-        assert_eq!(
-            parse_reconnect_grace_duration(Some(" 30\n")).unwrap(),
-            std::time::Duration::from_secs(30),
-        );
-    }
-
-    #[test]
-    fn parse_reconnect_grace_duration_rejects_non_numeric() {
-        let err = parse_reconnect_grace_duration(Some("forever")).unwrap_err();
-        assert!(err.contains("RECONNECT_GRACE_SECONDS"));
-    }
-
     /// production の保守的既定 (`grace=0` + `allow=false`) は `Ok(Duration::ZERO)`
     /// を返し、新規対局では Reconnect_Token を配布せず再接続経路に立ち入らない。
     #[test]
@@ -921,70 +866,6 @@ mod tests {
         let err = resolve_entering_king_rule_from_string(Some("Bogus"), EnteringKingRule::Point27)
             .unwrap_err();
         assert_eq!(err, "Bogus");
-    }
-
-    /// `CHALLENGE_TTL_SEC` が未設定 / 空文字なら既定 3600 秒。
-    #[test]
-    fn parse_challenge_ttl_duration_defaults_when_unset() {
-        assert_eq!(
-            parse_challenge_ttl_duration(None),
-            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
-        );
-        assert_eq!(
-            parse_challenge_ttl_duration(Some("")),
-            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
-        );
-        assert_eq!(
-            parse_challenge_ttl_duration(Some("  ")),
-            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
-        );
-    }
-
-    /// 数値はそのまま秒として採用する。`= 0` も許容 (purge 即時で全 token 短命)。
-    #[test]
-    fn parse_challenge_ttl_duration_accepts_seconds() {
-        assert_eq!(parse_challenge_ttl_duration(Some("60")), std::time::Duration::from_secs(60));
-        assert_eq!(parse_challenge_ttl_duration(Some("0")), std::time::Duration::ZERO);
-    }
-
-    /// `LOBBY_QUEUE_ENTRY_TTL_SEC` 未設定 / 空文字 / `0` / 非数値は安全側既定 (300 秒)。
-    #[test]
-    fn parse_lobby_queue_entry_ttl_duration_defaults_when_unset_or_zero_or_invalid() {
-        let default = std::time::Duration::from_secs(DEFAULT_LOBBY_QUEUE_ENTRY_TTL_SEC);
-        assert_eq!(parse_lobby_queue_entry_ttl_duration(None), default);
-        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("")), default);
-        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("  ")), default);
-        // `0` は「無効化」を意図した運用ミスと解釈し、queue 全切断を避けるため
-        // 安全側既定にフォールバックする (TTL 0 = 即時 purge は許容しない)。
-        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("0")), default);
-        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("forever")), default);
-        assert_eq!(parse_lobby_queue_entry_ttl_duration(Some("-1")), default);
-    }
-
-    /// 数値はそのまま秒として採用する。
-    #[test]
-    fn parse_lobby_queue_entry_ttl_duration_accepts_seconds() {
-        assert_eq!(
-            parse_lobby_queue_entry_ttl_duration(Some("60")),
-            std::time::Duration::from_secs(60)
-        );
-        assert_eq!(
-            parse_lobby_queue_entry_ttl_duration(Some(" 600\n")),
-            std::time::Duration::from_secs(600)
-        );
-    }
-
-    /// 非数値はパース失敗時のフォールバック (= 既定値) で扱う。
-    #[test]
-    fn parse_challenge_ttl_duration_falls_back_on_invalid() {
-        assert_eq!(
-            parse_challenge_ttl_duration(Some("forever")),
-            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
-        );
-        assert_eq!(
-            parse_challenge_ttl_duration(Some("-1")),
-            std::time::Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
-        );
     }
 
     #[test]
@@ -1147,6 +1028,48 @@ mod tests {
         assert_eq!(
             resolve_game_preset_from_presets_map(&presets, "unregistered"),
             PresetResolution::Unknown
+        );
+    }
+
+    #[test]
+    fn duration_settings_handle_defaults_and_explicit_values() {
+        for raw in [None, Some(""), Some(" \t "), Some("forever"), Some("-1")] {
+            assert_eq!(
+                parse_agree_timeout_duration(raw),
+                Duration::from_secs(DEFAULT_AGREE_TIMEOUT_SEC)
+            );
+            assert_eq!(
+                parse_challenge_ttl_duration(raw),
+                Duration::from_secs(DEFAULT_CHALLENGE_TTL_SEC)
+            );
+            assert_eq!(
+                parse_lobby_queue_entry_ttl_duration(raw),
+                Duration::from_secs(DEFAULT_LOBBY_QUEUE_ENTRY_TTL_SEC)
+            );
+        }
+        for (raw, seconds) in [("60", 60), (" 120\n", 120)] {
+            let expected = Duration::from_secs(seconds);
+            assert_eq!(parse_agree_timeout_duration(Some(raw)), expected);
+            assert_eq!(parse_challenge_ttl_duration(Some(raw)), expected);
+            assert_eq!(parse_lobby_queue_entry_ttl_duration(Some(raw)), expected);
+            assert_eq!(parse_reconnect_grace_duration(Some(raw)).unwrap(), expected);
+        }
+        assert_eq!(
+            parse_agree_timeout_duration(Some("0")),
+            Duration::from_secs(DEFAULT_AGREE_TIMEOUT_SEC)
+        );
+        assert_eq!(
+            parse_lobby_queue_entry_ttl_duration(Some("0")),
+            Duration::from_secs(DEFAULT_LOBBY_QUEUE_ENTRY_TTL_SEC)
+        );
+        assert_eq!(parse_challenge_ttl_duration(Some("0")), Duration::ZERO);
+        for raw in [None, Some(""), Some(" \t ")] {
+            assert_eq!(parse_reconnect_grace_duration(raw).unwrap(), Duration::ZERO);
+        }
+        assert!(
+            parse_reconnect_grace_duration(Some("forever"))
+                .unwrap_err()
+                .contains("RECONNECT_GRACE_SECONDS")
         );
     }
 }

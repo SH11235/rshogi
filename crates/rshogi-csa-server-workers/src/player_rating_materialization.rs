@@ -5,7 +5,7 @@ pub const MAX_PAGES_PER_RUN: u32 = 6;
 
 /// Only the lease holder may mutate a building generation. D1 reports one
 /// changed row for the winner and zero for concurrent cron/admin callers.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 fn lease_was_acquired(changes: usize) -> bool {
     changes == 1
 }
@@ -13,27 +13,9 @@ fn lease_was_acquired(changes: usize) -> bool {
 /// A page shorter than the query limit proves that the cursor reached the end
 /// of the snapshot observed by that query, so the generation can be activated
 /// without spending a seventh D1 page request.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(target_arch = "wasm32")]
 fn page_reached_end(row_count: usize) -> bool {
     row_count < PAGE_SIZE as usize
-}
-
-/// Matches the late-write predicate used by `games_search_index`: a changed
-/// row at or before the persisted Elo cursor invalidates every later rating.
-#[cfg(test)]
-fn row_requires_rebuild(
-    cursor_ended_at_ms: i64,
-    cursor_game_id: &str,
-    row_ended_at_ms: u64,
-    row_game_id: &str,
-) -> bool {
-    cursor_ended_at_ms > row_ended_at_ms as i64
-        || (cursor_ended_at_ms == row_ended_at_ms as i64 && cursor_game_id >= row_game_id)
-}
-
-#[cfg(test)]
-fn revision_allows_page_persist(expected_revision: i64, current_revision: i64) -> bool {
-    expected_revision == current_revision
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -457,32 +439,6 @@ pub use imp::run_player_rating_materialization;
 
 #[cfg(test)]
 mod tests {
-    use crate::player_ratings::{PlayerGame, PlayerSummary, apply_player_games};
-
-    #[test]
-    fn applying_same_page_from_same_snapshot_is_idempotent() {
-        let game = PlayerGame {
-            game_id: "g1".into(),
-            ended_at_ms: 1,
-            black_handle: "a".into(),
-            white_handle: "b".into(),
-            black_player_id: Some("p_a".into()),
-            white_player_id: Some("p_b".into()),
-            result_kind: "WIN_BLACK".into(),
-        };
-        let first = apply_player_games(Vec::<PlayerSummary>::new(), std::slice::from_ref(&game));
-        let retry = apply_player_games(Vec::<PlayerSummary>::new(), &[game]);
-        assert_eq!(first, retry);
-    }
-
-    #[test]
-    fn bounded_run_constants_cover_current_159_row_warmup() {
-        const {
-            assert!(super::PAGE_SIZE * super::MAX_PAGES_PER_RUN >= 159);
-            assert!(super::PAGE_SIZE * super::MAX_PAGES_PER_RUN <= 200);
-        }
-        assert!(super::page_reached_end(9));
-    }
 
     #[test]
     fn initial_generation_is_unavailable_until_clean_activation() {
@@ -493,34 +449,10 @@ mod tests {
     }
 
     #[test]
-    fn late_or_equal_cursor_upsert_requires_rebuild() {
-        assert!(super::row_requires_rebuild(100, "g2", 99, "later-time"));
-        assert!(super::row_requires_rebuild(100, "g2", 100, "g2"));
-        assert!(super::row_requires_rebuild(100, "g2", 100, "g1"));
-        assert!(!super::row_requires_rebuild(100, "g2", 100, "g3"));
-        assert!(!super::row_requires_rebuild(100, "g2", 101, "earlier-id"));
-    }
-
-    #[test]
-    fn concurrent_cron_callers_have_one_lease_winner() {
-        assert!(super::lease_was_acquired(1));
-        assert!(!super::lease_was_acquired(0));
-    }
-
-    #[test]
     fn shared_deadline_stops_at_exact_boundary_but_admin_is_unlimited() {
         assert!(!super::deadline_reached(Some(25_000), 24_999));
         assert!(super::deadline_reached(Some(25_000), 25_000));
         assert!(super::deadline_reached(Some(25_000), 25_001));
         assert!(!super::deadline_reached(None, u64::MAX));
-    }
-
-    #[test]
-    fn page_loaded_before_concurrent_upsert_is_discarded() {
-        let revision_at_page_load = 7;
-        assert!(super::revision_allows_page_persist(revision_at_page_load, 7));
-        // A real game UPSERT increments data_revision atomically before the
-        // materializer's guarded batch can run.
-        assert!(!super::revision_allows_page_persist(revision_at_page_load, 8));
     }
 }

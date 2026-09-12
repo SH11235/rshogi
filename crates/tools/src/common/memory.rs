@@ -25,11 +25,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn available_memory_detection_does_not_fail() {
-        let _ = available_memory_bytes();
-    }
-
-    #[test]
     fn cgroup_available_memory_limits_host_memory() {
         assert_eq!(effective_available_memory(1_000, Some(400)), Some(400));
         assert_eq!(effective_available_memory(1_000, Some(2_000)), Some(1_000));
