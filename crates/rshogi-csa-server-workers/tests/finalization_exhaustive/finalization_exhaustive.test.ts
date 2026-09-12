@@ -55,6 +55,8 @@ interface Scenario {
   beforeAgree?: boolean;
   /** snapshot を受け取り終えた観戦者を 1 人つなぐ。 */
   spectator?: boolean;
+  /** シナリオ自身が切断する接続。切断後の行の到達保証は要求しない。 */
+  disconnectedWatcher?: Watcher;
   /** 計画した障害とは別に仕込む事前障害 (再試行経路へ入れるため)。 */
   preFaults?: { kifuPutFailures?: number };
   trigger: (game: Game) => Promise<void>;
@@ -89,7 +91,7 @@ const SCENARIOS: Scenario[] = [
   { name: 'sennichite-r2-retry', preFaults: { kifuPutFailures: 1 }, trigger: async (g) => g.white.send(CYCLE[3]) },
   { name: 'sennichite-r2-retry-twice', preFaults: { kifuPutFailures: 8 }, trigger: async (g) => g.white.send(CYCLE[3]) },
   { name: 'toryo', trigger: async (g) => g.white.send('%TORYO') },
-  { name: 'disconnect', trigger: async (g) => { await g.white.close(); } },
+  { name: 'disconnect', disconnectedWatcher: 'white', trigger: async (g) => { await g.white.close(); } },
   {
     name: 'time-up',
     options: SHORT_CLOCK,
@@ -102,6 +104,7 @@ const SCENARIOS: Scenario[] = [
     name: 'disconnect-before-agree',
     options: { agreeTimeoutSeconds: 60 },
     beforeAgree: true,
+    disconnectedWatcher: 'black',
     trigger: async (g) => { await g.black.close(); },
   },
 ];
@@ -288,7 +291,7 @@ describe('終局処理の網羅障害注入', () => {
     return true;
   }
 
-  function check(baseline: Observation, observed: Observation): string[] {
+  function check(baseline: Observation, observed: Observation, disconnectedWatcher?: Watcher): string[] {
     const problems: string[] = [];
     const allLines = (o: Observation) => Object.values(o.lines).flat();
     const told = allLines(observed).some(l => l.startsWith('#'));
@@ -320,8 +323,9 @@ describe('終局処理の網羅障害注入', () => {
       const want = baseline.lines[watcher] ?? [];
       if (!isSubsequence(got, want)) {
         problems.push(`${watcher} が重複・余計・順序違いの行を受信: ${JSON.stringify(got)}`);
-      } else if (got.length < want.length && observed.closed[watcher] !== 1011) {
+      } else if (watcher !== disconnectedWatcher && got.length < want.length && observed.closed[watcher] !== 1011) {
         // 送信に失敗した接続は 1011 で閉じる契約なので、欠落を許すのはその場合だけ。
+        // 自ら切断した接続は到達保証の対象外。受信済み行の重複・順序違反は上で検査する。
         problems.push(`${watcher} が 1011 で閉じられていないのに行が欠けた (close=${observed.closed[watcher]}): ${JSON.stringify(got)}`);
       }
     }
@@ -342,7 +346,7 @@ describe('終局処理の網羅障害注入', () => {
           if (ONLY_CASE && ONLY_CASE !== `${scenario.name}/${mode}/${at}`) continue;
           const observed = await runCase(scenario, { at, mode });
           const op = observed.state.injectedAt?.name ?? `(未到達) ${baseline.state.ops[at - 1]}`;
-          const problems = check(baseline, observed);
+          const problems = check(baseline, observed, scenario.disconnectedWatcher);
           if (ONLY_CASE) console.log(JSON.stringify({ baseline: baseline.lines, observed, problems }, null, 2));
           const finding = { scenario: scenario.name, mode, at, op };
           const unannounced = (problems.length === 1 && problems[0]!.startsWith('確定していない (') && !observed.state.finalizing)
