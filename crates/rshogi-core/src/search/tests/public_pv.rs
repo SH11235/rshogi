@@ -186,11 +186,14 @@ fn public_pv_validation_applies_on_callback_and_result() {
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let root = startpos();
-            // 後手の手なので、先手番の公開 PV では常に不正。
+            let mut legal = MoveList::new();
+            generate_legal_all_with_pass(&root, &mut legal);
+            let first = legal.as_slice()[0];
+            // from_usi は駒情報を持たない Move を作るため、生成された合法手と一致しない。
             let corrupt = Move::from_usi("3a2b").unwrap();
             for with_callback in [false, true] {
                 let mut search = Search::new(1);
-                search.corrupt_public_pv = Some(corrupt);
+                search.corrupt_public_pv = Some(vec![first, corrupt]);
                 let limits = LimitsType {
                     nodes: 8000,
                     ..Default::default()
@@ -205,19 +208,11 @@ fn public_pv_validation_applies_on_callback_and_result() {
                 } else {
                     search.go(&mut root.clone(), limits, None::<fn(&SearchInfo)>)
                 };
-                assert!(!result.pv.contains(&corrupt));
-                assert_ne!(result.ponder_move, corrupt);
-                assert_eq!(
-                    legal_pv_prefix_len(&root, &result.pv, EnteringKingRule::None),
-                    result.pv.len()
-                );
+                assert_eq!(result.pv, vec![first]);
+                assert_eq!(result.ponder_move, Move::NONE);
                 assert_eq!(with_callback, !infos.is_empty());
                 for info in &infos {
-                    assert!(!info.pv.contains(&corrupt));
-                    assert_eq!(
-                        legal_pv_prefix_len(&root, &info.pv, EnteringKingRule::None),
-                        info.pv.len()
-                    );
+                    assert_eq!(info.pv, vec![first]);
                 }
             }
         })
@@ -226,18 +221,31 @@ fn public_pv_validation_applies_on_callback_and_result() {
         .unwrap();
 }
 
-/// 宣言可能でも WIN は ponder に選ばない。
+/// 2 手目に宣言が残る公開 PV でも、WIN は ponder に選ばない。
 #[test]
 fn public_pv_never_ponders_declaration() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
+            // 相手が入玉済みで、こちらが 1 手指すと相手が宣言可能になる局面。
             let mut root = Position::new();
-            root.set_sfen("KGG6/SS7/PPPPPP3/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1")
+            root.set_sfen("LN2K4/LN1GG1SS1/1PPPPPP2/9/9/9/3pppppp/7ss/6ggk b 3P2r2b 1")
                 .unwrap();
+            let mut legal = MoveList::new();
+            generate_legal_all_with_pass(&root, &mut legal);
+            let first = *legal
+                .as_slice()
+                .iter()
+                .find(|&&mv| {
+                    let mut after = root.clone();
+                    let check = after.gives_check(mv);
+                    after.do_move(mv, check);
+                    after.declaration_win(EnteringKingRule::Point27) == Move::WIN
+                })
+                .expect("指した後に相手が宣言可能になる手");
             let mut search = Search::new(1);
             search.set_entering_king_rule(EnteringKingRule::Point27);
-            search.corrupt_public_pv = Some(Move::WIN);
+            search.corrupt_public_pv = Some(vec![first, Move::WIN]);
             let result = search.go(
                 &mut root,
                 LimitsType {
@@ -246,10 +254,8 @@ fn public_pv_never_ponders_declaration() {
                 },
                 None::<fn(&SearchInfo)>,
             );
-            assert_ne!(result.ponder_move, Move::WIN);
-            if result.pv.last() == Some(&Move::WIN) {
-                assert_eq!(result.ponder_move, Move::NONE);
-            }
+            assert_eq!(result.pv, vec![first, Move::WIN]);
+            assert_eq!(result.ponder_move, Move::NONE);
         })
         .unwrap()
         .join()

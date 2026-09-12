@@ -294,9 +294,9 @@ pub struct Search {
     search_tune_params: SearchTuneParams,
     /// 入玉宣言勝ちルール
     entering_king_rule: EnteringKingRule,
-    /// 公開直前の PV 末尾に差し込む手。公開経路の検証が働いていることを確かめる。
+    /// 公開直前の PV を差し替える列。公開経路の検証が働いていることを確かめる。
     #[cfg(test)]
-    corrupt_public_pv: Option<Move>,
+    corrupt_public_pv: Option<Vec<Move>>,
 }
 
 /// best_move_changes を集約する（並列探索対応のためのヘルパー）
@@ -1077,7 +1077,7 @@ impl Search {
                 let root_pos = pos.clone();
                 let rule = self.entering_king_rule;
                 #[cfg(test)]
-                let corrupt = self.corrupt_public_pv;
+                let corrupt = self.corrupt_public_pv.clone();
                 self.search_with_callback(
                     pos,
                     &limits,
@@ -1086,8 +1086,8 @@ impl Search {
                     &mut |info: &SearchInfo| {
                         let mut public_info = info.clone();
                         #[cfg(test)]
-                        if let Some(mv) = corrupt {
-                            public_info.pv.push(mv);
+                        if let Some(pv) = corrupt.as_ref() {
+                            public_info.pv = pv.clone();
                         }
                         public_info.pv.truncate(legal_pv_prefix_len(
                             &root_pos,
@@ -1224,8 +1224,8 @@ impl Search {
             pv.push(best_move);
         }
         #[cfg(test)]
-        if let Some(mv) = self.corrupt_public_pv {
-            pv.push(mv);
+        if let Some(corrupt) = self.corrupt_public_pv.as_ref() {
+            pv = corrupt.clone();
         }
         pv.truncate(legal_pv_prefix_len(pos, &pv, self.entering_king_rule));
         let ponder_move = pv.get(1).copied().filter(|mv| !mv.is_win()).unwrap_or(Move::NONE);
