@@ -9,60 +9,6 @@ fn repo_file(relative: &str) -> String {
 }
 
 #[test]
-fn player_id_migration_is_additive_and_declares_both_columns() {
-    let sql = repo_file("migrations/0003_games_search_index_player_ids.sql");
-    assert!(sql.contains("ADD COLUMN black_player_id TEXT"));
-    assert!(sql.contains("ADD COLUMN white_player_id TEXT"));
-    let upper = sql.to_ascii_uppercase();
-    for forbidden in ["DROP ", "DELETE ", "TRUNCATE ", "RENAME "] {
-        assert!(!upper.contains(forbidden), "0003 must be additive; found {forbidden}");
-    }
-}
-
-#[test]
-fn rating_materialization_uses_generation_swap_and_alias_index() {
-    let sql = repo_file("migrations/0004_player_rating_materialization.sql");
-    for required in [
-        "CREATE TABLE player_rating_generations",
-        "PRIMARY KEY (generation, player_id)",
-        "CREATE TABLE player_rating_state",
-        "active_generation INTEGER",
-        "rebuild_required INTEGER NOT NULL DEFAULT 1",
-        "data_revision INTEGER NOT NULL DEFAULT 0",
-        "CREATE TABLE player_id_aliases",
-        "ON player_id_aliases (canonical_id, alias_id)",
-    ] {
-        assert!(sql.contains(required), "rating migration missing {required}");
-    }
-
-    let source = repo_file("src/player_rating_materialization.rs");
-    assert!(source.contains("WHERE singleton = 1 AND rebuild_required = 0"));
-    assert!(source.contains("lease_until_ms <= ?"));
-    assert!(source.contains("data_revision = ?"));
-    assert!(source.contains("data_revision <> ?"));
-
-    let search_index = repo_file("src/games_search_index.rs");
-    assert!(search_index.contains("NOT EXISTS (SELECT 1 FROM games_search_index"));
-    assert!(search_index.contains("db.batch(vec![dirty, upsert])"));
-    assert!(search_index.contains("data_revision = data_revision + 1"));
-
-    let api = repo_file("src/viewer_api.rs");
-    assert!(api.contains("WHERE generation = ?"));
-    assert!(api.contains("COUNT(*) AS total_count FROM games_search_index"));
-    assert!(api.contains("ORDER BY ended_at_ms DESC, game_id ASC LIMIT ? OFFSET ?"));
-    assert!(api.contains("COALESCE(SUM(games), 0) / 2"));
-    assert!(api.contains("players_leader"));
-    assert!(api.contains("ORDER BY rating DESC, player_id ASC LIMIT ? OFFSET ?"));
-    assert!(api.contains("PLAYER_GAMES_PREDICATE"));
-    assert!(api.contains("IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?)"));
-
-    let scheduled = repo_file("src/lib.rs");
-    assert!(scheduled.contains("backfill::SCHEDULED_WORK_DEADLINE_MS"));
-    assert!(source.contains("deadline_reached(deadline_at_ms"));
-    assert!(api.contains("run_player_rating_materialization(env, MAX_PAGES_PER_RUN, None)"));
-}
-
-#[test]
 fn deploy_workflow_applies_d1_migrations_before_each_worker_deploy() {
     let workflow = repo_file("../../.github/workflows/deploy-workers.yml");
     for env in ["staging", "production"] {

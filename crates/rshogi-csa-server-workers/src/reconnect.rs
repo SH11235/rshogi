@@ -431,14 +431,6 @@ mod tests {
         assert!(white.is_none(), "white token must be None when grace=0");
     }
 
-    /// `grace > 0` の構成では両対局者向けに token を発行する。
-    #[test]
-    fn issue_tokens_if_enabled_returns_some_when_grace_is_positive() {
-        let (black, white) = issue_tokens_if_enabled(Duration::from_secs(30));
-        assert!(black.is_some(), "black token must be Some when grace>0");
-        assert!(white.is_some(), "white token must be Some when grace>0");
-    }
-
     /// `grace > 0` で発行した 2 つの token は一意でなければならない (相手色の
     /// token を盗用すれば対局を奪える脆弱性を防ぐため、`ReconnectToken::generate`
     /// は 32 文字 hex の十分なエントロピを持つ実装を契約する)。
@@ -471,77 +463,36 @@ mod tests {
         assert!(should_set_grace);
     }
 
-    /// `start_match` 入口の三段ガード仕様を pin する (https://github.com/SH11235/rshogi/issues/626)。
-    ///
-    /// `proceeds_when_no_state`: 何も永続化されていない初回 LOGIN マッチ成立直後の
-    /// 経路で副作用なしの続行を許可する。
     #[test]
-    fn classify_start_match_guard_proceeds_when_no_state() {
-        assert_eq!(classify_start_match_guard(false, false, None), StartMatchGuard::Proceed);
-    }
-
-    /// `KEY_FINISHED` 既存。defensive な fallback 経路 (通常は `handle_login` /
-    /// `handle_game_line` 入口の `load_finished` ガードで弾かれる)。
-    #[test]
-    fn classify_start_match_guard_rejects_when_finished() {
-        assert_eq!(classify_start_match_guard(true, false, None), StartMatchGuard::AlreadyFinished);
-    }
-
-    /// `KEY_CONFIG` 既存。`active_game_id` ガードを cold start race ですり抜けた
-    /// 経路を想定し、`AgreeTimeout` で `set_alarm` を上書きしないように reject する。
-    #[test]
-    fn classify_start_match_guard_rejects_when_config_present() {
-        assert_eq!(classify_start_match_guard(false, true, None), StartMatchGuard::AlreadyMatched);
-    }
-
-    /// https://github.com/SH11235/rshogi/issues/626 の主要シナリオ。`enter_grace_window` で `GraceExpired` alarm が
-    /// 予約済の状態で `start_match` を踏むと、`AgreeTimeout` で上書きしてしまう
-    /// ため reject する。
-    #[test]
-    fn classify_start_match_guard_rejects_when_grace_expired_pending() {
-        assert_eq!(
-            classify_start_match_guard(false, false, Some(PendingAlarmKind::GraceExpired)),
-            StartMatchGuard::AlarmPending(PendingAlarmKind::GraceExpired)
-        );
-    }
-
-    /// `TimeUp` 残留 (理論上の race) も reject する。`KEY_CONFIG` が無い限り
-    /// `TimeUp` がここに残ること自体は通常起きないが、防御的に弾く。
-    #[test]
-    fn classify_start_match_guard_rejects_when_time_up_pending() {
-        assert_eq!(
-            classify_start_match_guard(false, false, Some(PendingAlarmKind::TimeUp)),
-            StartMatchGuard::AlarmPending(PendingAlarmKind::TimeUp)
-        );
-    }
-
-    /// 前回 `start_match` の `AgreeTimeout` 残留も reject する。続行扱いにすると
-    /// 古い alarm 本体が新 match を巻き込む race を防ぐため (Codex review round 2
-    /// → round 3 の合意点)。
-    #[test]
-    fn classify_start_match_guard_rejects_when_agree_timeout_pending() {
-        assert_eq!(
-            classify_start_match_guard(false, false, Some(PendingAlarmKind::AgreeTimeout)),
-            StartMatchGuard::AlarmPending(PendingAlarmKind::AgreeTimeout)
-        );
-    }
-
-    /// 判定優先度の固定: `finished_present=true` なら cfg / alarm に関わらず
-    /// `AlreadyFinished`。
-    #[test]
-    fn classify_start_match_guard_finished_takes_precedence() {
-        assert_eq!(
-            classify_start_match_guard(true, true, Some(PendingAlarmKind::GraceExpired)),
-            StartMatchGuard::AlreadyFinished
-        );
-    }
-
-    /// 判定優先度の固定: cfg があれば alarm_kind に関わらず `AlreadyMatched`。
-    #[test]
-    fn classify_start_match_guard_config_takes_precedence_over_alarm_kind() {
-        assert_eq!(
-            classify_start_match_guard(false, true, Some(PendingAlarmKind::GraceExpired)),
-            StartMatchGuard::AlreadyMatched
-        );
+    fn start_match_guard_priority() {
+        for (finished, config, alarm, expected) in [
+            (false, false, None, StartMatchGuard::Proceed),
+            (true, false, None, StartMatchGuard::AlreadyFinished),
+            (false, true, None, StartMatchGuard::AlreadyMatched),
+            (
+                true,
+                true,
+                Some(PendingAlarmKind::GraceExpired),
+                StartMatchGuard::AlreadyFinished,
+            ),
+            (
+                false,
+                true,
+                Some(PendingAlarmKind::GraceExpired),
+                StartMatchGuard::AlreadyMatched,
+            ),
+        ] {
+            assert_eq!(classify_start_match_guard(finished, config, alarm), expected);
+        }
+        for alarm in [
+            PendingAlarmKind::GraceExpired,
+            PendingAlarmKind::TimeUp,
+            PendingAlarmKind::AgreeTimeout,
+        ] {
+            assert_eq!(
+                classify_start_match_guard(false, false, Some(alarm)),
+                StartMatchGuard::AlarmPending(alarm)
+            );
+        }
     }
 }

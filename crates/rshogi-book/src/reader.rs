@@ -192,6 +192,9 @@ mod tests {
 
     #[test]
     fn parse_omitted_fields_uses_defaults() {
+        let bm = parse_move_line("7g7f").unwrap();
+        assert_eq!(bm.move_usi.as_deref(), Some("7g7f"));
+        assert!(bm.ponder_usi.is_none());
         // value/depth/move_count 省略 → 0/0/1。
         let bm = parse_move_line("7g7f 3c3d").unwrap();
         assert_eq!(bm.value, 0);
@@ -224,13 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_ponder_omitted_is_none() {
-        let bm = parse_move_line("7g7f").unwrap();
-        assert_eq!(bm.move_usi.as_deref(), Some("7g7f"));
-        assert!(bm.ponder_usi.is_none());
-    }
-
-    #[test]
     fn read_book_skips_comments_and_headers() {
         let data = format!(
             "{HEADER}\n\
@@ -260,21 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn ignore_ply_strips_trailing_ply_key() {
-        let data = format!(
-            "{HEADER}\n\
-             sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 99\n\
-             7g7f 3c3d 30 16 100\n"
-        );
-        let book = Book::from_reader(data.as_bytes(), true).unwrap();
-        // 別の手数で検索してもヒットする(ply を無視)。
-        let entry = book
-            .find_raw("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
-            .expect("ignore_ply hit");
-        assert_eq!(entry.moves.len(), 1);
-    }
-
-    #[test]
     fn ignore_ply_merges_duplicate_boards() {
         // 同一盤面・手数違いの 2 エントリが 1 キーにマージされる。
         let data = format!(
@@ -284,21 +265,12 @@ mod tests {
              sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 3\n\
              2g2f 8c8d 25 16 40\n"
         );
-        let book = Book::from_reader(data.as_bytes(), true).unwrap();
+        let book = Book::from_bytes(data.as_bytes(), true).unwrap();
         assert_eq!(book.len(), 1);
         let entry = book
             .find_raw("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 5")
             .unwrap();
         assert_eq!(entry.moves.len(), 2);
-    }
-
-    #[test]
-    fn from_bytes_matches_from_reader() {
-        let data = format!(
-            "{HEADER}\nsfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1\n7g7f 3c3d 0 0 1\n"
-        );
-        let book = Book::from_bytes(data.as_bytes(), false).unwrap();
-        assert_eq!(book.len(), 1);
     }
 
     #[test]

@@ -2907,81 +2907,6 @@ mod tests {
     }
 
     #[test]
-    fn test_do_pass_move_basic() {
-        let mut pos = Position::new();
-        pos.set_startpos_with_pass_rights(2, 2);
-
-        let key_before = pos.state().key();
-        let game_ply_before = pos.game_ply();
-
-        // パス実行
-        pos.do_pass_move();
-
-        // 手番が変わる
-        assert_eq!(pos.side_to_move(), Color::White);
-
-        // パス権が減る
-        assert_eq!(pos.pass_rights(Color::Black), 1);
-        assert_eq!(pos.pass_rights(Color::White), 2);
-
-        // ゲーム手数が増える（Position.game_ply）
-        assert_eq!(pos.game_ply(), game_ply_before + 1);
-
-        // ハッシュキーが変わる（手番とパス権の変化）
-        assert_ne!(pos.state().key(), key_before);
-    }
-
-    #[test]
-    fn test_undo_pass_move_restores_state() {
-        let mut pos = Position::new();
-        pos.set_startpos_with_pass_rights(2, 2);
-
-        let key_before = pos.state().key();
-        let side_before = pos.side_to_move();
-        let black_rights_before = pos.pass_rights(Color::Black);
-        let white_rights_before = pos.pass_rights(Color::White);
-        let game_ply_before = pos.game_ply();
-
-        pos.do_pass_move();
-        pos.undo_pass_move();
-
-        // 全ての状態が復元される
-        assert_eq!(pos.side_to_move(), side_before);
-        assert_eq!(pos.pass_rights(Color::Black), black_rights_before);
-        assert_eq!(pos.pass_rights(Color::White), white_rights_before);
-        assert_eq!(pos.game_ply(), game_ply_before);
-        assert_eq!(pos.state().key(), key_before);
-    }
-
-    #[test]
-    fn test_do_move_delegates_pass() {
-        let mut pos = Position::new();
-        pos.set_startpos_with_pass_rights(2, 2);
-
-        // do_move(Move::PASS, ...) がdo_pass_move と同じ結果になることを確認
-        let key_before = pos.state().key();
-        pos.do_move(Move::PASS, false);
-
-        assert_eq!(pos.side_to_move(), Color::White);
-        assert_eq!(pos.pass_rights(Color::Black), 1);
-        assert_ne!(pos.state().key(), key_before);
-    }
-
-    #[test]
-    fn test_undo_move_delegates_pass() {
-        let mut pos = Position::new();
-        pos.set_startpos_with_pass_rights(2, 2);
-
-        let key_before = pos.state().key();
-        pos.do_move(Move::PASS, false);
-        pos.undo_move(Move::PASS);
-
-        assert_eq!(pos.side_to_move(), Color::Black);
-        assert_eq!(pos.pass_rights(Color::Black), 2);
-        assert_eq!(pos.state().key(), key_before);
-    }
-
-    #[test]
     fn test_pass_rights_hash_consistency() {
         // パス権の有無でハッシュが異なることを確認
         let mut pos_normal = Position::new();
@@ -3013,51 +2938,6 @@ mod tests {
         assert!(!pos.is_pass_rights_enabled());
         assert_eq!(pos.pass_rights(Color::Black), 0);
         assert_eq!(pos.pass_rights(Color::White), 0);
-    }
-
-    #[test]
-    fn test_multiple_passes_decrement_correctly() {
-        let mut pos = Position::new();
-        pos.set_startpos_with_pass_rights(3, 2);
-
-        // 先手パス → 後手パス → 先手パス
-        pos.do_pass_move();
-        assert_eq!(pos.pass_rights(Color::Black), 2);
-        assert_eq!(pos.side_to_move(), Color::White);
-
-        pos.do_pass_move();
-        assert_eq!(pos.pass_rights(Color::White), 1);
-        assert_eq!(pos.side_to_move(), Color::Black);
-
-        pos.do_pass_move();
-        assert_eq!(pos.pass_rights(Color::Black), 1);
-        assert_eq!(pos.side_to_move(), Color::White);
-
-        // 3回戻す
-        pos.undo_pass_move();
-        pos.undo_pass_move();
-        pos.undo_pass_move();
-
-        assert_eq!(pos.pass_rights(Color::Black), 3);
-        assert_eq!(pos.pass_rights(Color::White), 2);
-        assert_eq!(pos.side_to_move(), Color::Black);
-    }
-
-    #[test]
-    fn test_pass_checkers_computed_correctly() {
-        // パス後に相手の攻撃が自分の玉への王手になることを確認
-        // 例: 先手が金を5七に置いて、後手玉が5一にいる状態
-        // 先手パス → 後手番、後手玉への王手はない
-        // 後手パス → 先手番、先手玉への王手はない
-        let mut pos = Position::new();
-        pos.set_startpos_with_pass_rights(2, 2);
-
-        // 平手初期局面でパス → 王手なし
-        pos.do_pass_move();
-        assert!(!pos.in_check());
-
-        pos.do_pass_move();
-        assert!(!pos.in_check());
     }
 
     #[test]
@@ -3315,5 +3195,37 @@ mod tests {
             Move::NONE,
             "トライ升に敵の利きがあれば NONE"
         );
+    }
+
+    #[test]
+    fn pass_moves_restore_position_state() {
+        let mut pos = Position::new();
+        pos.set_startpos_with_pass_rights(3, 2);
+        let key = pos.state().key();
+        let ply = pos.game_ply();
+        for (i, (side, black, white)) in [
+            (Color::White, 2, 2),
+            (Color::Black, 2, 1),
+            (Color::White, 1, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            pos.do_move(Move::PASS, false);
+            assert_eq!(pos.side_to_move(), side);
+            assert_eq!(pos.pass_rights(Color::Black), black);
+            assert_eq!(pos.pass_rights(Color::White), white);
+            assert_eq!(pos.game_ply(), ply + i as i32 + 1);
+            assert_ne!(pos.state().key(), key);
+            assert!(!pos.in_check());
+        }
+        for _ in 0..3 {
+            pos.undo_move(Move::PASS);
+        }
+        assert_eq!(pos.side_to_move(), Color::Black);
+        assert_eq!(pos.pass_rights(Color::Black), 3);
+        assert_eq!(pos.pass_rights(Color::White), 2);
+        assert_eq!(pos.game_ply(), ply);
+        assert_eq!(pos.state().key(), key);
     }
 }

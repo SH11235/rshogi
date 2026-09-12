@@ -425,15 +425,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_rule_survives_serde_round_trip() {
-        let mut cfg = baseline_config();
-        cfg.entering_king_rule = Some("CSARule24".to_owned());
-        let round: PersistedConfig =
-            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
-        assert_eq!(round.entering_king_rule(), rshogi_core::types::EnteringKingRule::Point24);
-    }
-
-    #[test]
     fn replay_preserves_full_repetition_history_and_terminal_broadcasts() {
         let long_cycle = [
             "+5949OU", "-5141OU", "+4939OU", "-4131OU", "+3938OU", "-3132OU", "+3837OU", "-3233OU",
@@ -1123,12 +1114,14 @@ mod tests {
     #[test]
     fn persisted_config_round_trips_with_reconnect_token_values() {
         let mut original = baseline_config();
+        original.entering_king_rule = Some("CSARule24".into());
         original.reconnect_grace_ms = Some(30_000);
         original.black_reconnect_token = Some("a".repeat(32));
         original.white_reconnect_token = Some("b".repeat(32));
         let json = serde_json::to_string(&original).expect("serialize cfg");
         let restored: PersistedConfig =
             serde_json::from_str(&json).expect("deserialize cfg with token values");
+        assert_eq!(restored.entering_king_rule(), rshogi_core::types::EnteringKingRule::Point24);
         assert_eq!(restored.reconnect_grace_ms, original.reconnect_grace_ms);
         assert_eq!(restored.black_reconnect_token, original.black_reconnect_token);
         assert_eq!(restored.white_reconnect_token, original.white_reconnect_token);

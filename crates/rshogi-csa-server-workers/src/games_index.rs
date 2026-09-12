@@ -324,25 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn games_index_key_rejects_game_id_with_slash() {
-        // `/` は R2 の階層区切り。validate_key_component 経由で弾かれる。
-        let err = games_index_key(1_000, "g1/evil").unwrap_err();
-        assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
-    }
-
-    #[test]
-    fn games_index_key_rejects_empty_game_id() {
-        let err = games_index_key(1_000, "").unwrap_err();
-        assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
-    }
-
-    #[test]
-    fn games_index_key_rejects_non_ascii_game_id() {
-        let err = games_index_key(1_000, "g\u{3042}").unwrap_err();
-        assert!(matches!(err, StorageError::Malformed(_)), "got: {err:?}");
-    }
-
-    #[test]
     fn games_index_key_rejects_disallowed_punctuation() {
         // `.` / 空白 / `?` 等 ASCII でも英数 + `-` `_` 以外は拒否。
         for bad in ["g.1", "g 1", "g?1", "g+1", "g/1"] {
@@ -550,5 +531,12 @@ mod tests {
         // 未使用 clock field は省略される。
         assert!(!json.contains("byoyomi_sec"), "json={json}");
         assert!(!json.contains("total_ms"), "json={json}");
+    }
+
+    #[test]
+    fn index_key_rejects_invalid_game_id() {
+        for id in ["", "g1/evil", "gあ"] {
+            assert!(matches!(games_index_key(1000, id), Err(StorageError::Malformed(_))));
+        }
     }
 }

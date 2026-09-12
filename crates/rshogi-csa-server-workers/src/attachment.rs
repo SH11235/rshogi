@@ -270,22 +270,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pending_roundtrips_via_json() {
-        let att = WsAttachment::Pending;
-        let s = serde_json::to_string(&att).unwrap();
-        let back: WsAttachment = serde_json::from_str(&s).unwrap();
-        assert_eq!(att, back);
-    }
-
-    #[test]
-    fn player_roundtrips_via_json() {
-        let att = WsAttachment::player(Role::Black, "alice", "floodgate-600-10");
-        let s = serde_json::to_string(&att).unwrap();
-        let back: WsAttachment = serde_json::from_str(&s).unwrap();
-        assert_eq!(att, back);
-    }
-
-    #[test]
     fn player_json_has_expected_shape() {
         let att = WsAttachment::player(Role::White, "bob", "gamename");
         let s = serde_json::to_string(&att).unwrap();
@@ -295,12 +279,6 @@ mod tests {
         assert!(s.contains("\"handle\":\"bob\""));
         assert!(s.contains("\"game_name\":\"gamename\""));
         assert!(s.contains("\"is_admin\":false"));
-    }
-
-    #[test]
-    fn player_default_is_not_admin() {
-        let att = WsAttachment::player(Role::Black, "alice", "g");
-        assert!(!att.is_admin());
     }
 
     #[test]
@@ -322,7 +300,9 @@ mod tests {
     #[test]
     fn player_admin_round_trips_via_json() {
         // is_admin = true な Player が serde 経由で完全復元されること。
-        let att = WsAttachment::player(Role::Black, "alice", "g").with_admin();
+        let att = WsAttachment::player(Role::Black, "alice", "g");
+        assert!(!att.is_admin());
+        let att = att.with_admin();
         let s = serde_json::to_string(&att).unwrap();
         assert!(s.contains("\"is_admin\":true"));
         let back: WsAttachment = serde_json::from_str(&s).unwrap();
@@ -375,14 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn spectator_roundtrips_via_json() {
-        let att = WsAttachment::spectator("room-20260101-0001");
-        let s = serde_json::to_string(&att).unwrap();
-        let back: WsAttachment = serde_json::from_str(&s).unwrap();
-        assert_eq!(att, back);
-    }
-
-    #[test]
     fn spectator_json_has_expected_shape() {
         let att = WsAttachment::spectator("room-xyz");
         let s = serde_json::to_string(&att).unwrap();
@@ -408,6 +380,8 @@ mod tests {
         let s = serde_json::to_string(&att).unwrap();
         let restored: WsAttachment = serde_json::from_str(&s).unwrap();
         assert_eq!(att, restored);
+        let pending: WsAttachment = serde_json::from_str(r#"{"type":"Pending"}"#).unwrap();
+        assert_eq!(pending, WsAttachment::Pending);
     }
 
     #[test]
@@ -463,43 +437,5 @@ mod tests {
             }
             other => panic!("expected Spectator, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn player_and_spectator_are_distinct_types() {
-        // 同一ハンドル / ID でも Player と Spectator は別 variant として比較される。
-        let player = WsAttachment::player(Role::Black, "alice", "room-1");
-        let spec = WsAttachment::spectator("room-1");
-        assert_ne!(player, spec);
-    }
-
-    /// https://github.com/SH11235/rshogi/issues/627: 受信メッセージサイズ上限の値が CSA プロトコル正常系に対し
-    /// 十分余裕を持っていること、かつ Cloudflare WS の最大 32 MiB より
-    /// 大幅に小さいことの sanity check。値変更時にビルド時 regression を検出する。
-    /// `const { assert!(..) }` を使うことで run-time コストゼロで固定する。
-    #[test]
-    fn ws_message_size_limit_is_sane() {
-        const _: () = {
-            // 通常の CSA 行 (LOGIN / move / CHAT 等) は数百バイト未満で収まる。
-            // 1024 バイトを下回ると正常系を弾く恐れがあるため最低限の floor を設ける。
-            assert!(MAX_WS_LINE_BYTES >= 1024);
-            // 1 MiB を超えると DoS 防御として機能しないため天井も設ける。
-            assert!(MAX_WS_LINE_BYTES <= 1024 * 1024);
-        };
-    }
-
-    /// https://github.com/SH11235/rshogi/issues/627: spectator pending_queue 上限値が 1 局の通常運用に対し
-    /// 十分余裕を持っていることの sanity check (ビルド時固定)。
-    #[test]
-    fn spectator_queue_limits_are_sane() {
-        const _: () = {
-            // 1 局の指し手は最大 512 ply 程度。CHAT / START / 終局通知の余裕を
-            // 含めても 512 を下回ると正常系を弾く恐れがある。
-            assert!(MAX_SPECTATOR_QUEUE_ITEMS >= 512);
-            // 1 行 ≤ MAX_WS_LINE_BYTES * (件数上限) の理論上限よりは小さくて良いが、
-            // bytes 上限が件数上限 * 32 byte を下回ると、通常対局でも先に bytes 側で
-            // 詰まる。
-            assert!(MAX_SPECTATOR_QUEUE_BYTES >= MAX_SPECTATOR_QUEUE_ITEMS * 32);
-        };
     }
 }

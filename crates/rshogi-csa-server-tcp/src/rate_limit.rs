@@ -133,24 +133,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn allows_under_limit() {
-        let rl =
-            IpLoginRateLimiter::with_limits(3, Duration::from_secs(60), Duration::from_secs(300));
-        let a = ip("10.0.0.1");
-        let now = Instant::now();
-        for _ in 0..3 {
-            assert_eq!(rl.record_at(&a, now).await, RateDecision::Allow);
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn denies_after_limit_exceeded() {
         let rl =
             IpLoginRateLimiter::with_limits(3, Duration::from_secs(60), Duration::from_secs(300));
         let a = ip("10.0.0.2");
         let now = Instant::now();
         for _ in 0..3 {
-            rl.record_at(&a, now).await;
+            assert_eq!(rl.record_at(&a, now).await, RateDecision::Allow);
         }
         // 4 回目で Deny。
         match rl.record_at(&a, now).await {

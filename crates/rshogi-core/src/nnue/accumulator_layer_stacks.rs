@@ -984,6 +984,7 @@ mod tests {
     #[test]
     fn safe_boundary_previous_links_and_valid_path() {
         let mut stack = AccumulatorStackLayerStacks::<4>::new();
+        assert!(!stack.current().accumulator.computed_accumulation);
         stack.current_mut().accumulator.computed_accumulation = true;
         stack.push();
         stack.push();
@@ -1007,26 +1008,6 @@ mod tests {
         stack.reset();
         assert_eq!(stack.current_index(), 0);
         assert!(stack.current().previous.is_none());
-    }
-
-    #[test]
-    fn test_accumulator_new() {
-        let acc = AccumulatorLayerStacks::<TEST_L1>::new();
-        assert!(!acc.computed_accumulation);
-        assert_eq!(acc.accumulation[0].len(), TEST_L1);
-    }
-
-    #[test]
-    fn test_stack_push_pop() {
-        let mut stack = AccumulatorStackLayerStacks::<TEST_L1>::new();
-        assert_eq!(stack.current_index(), 0);
-
-        stack.push();
-        assert_eq!(stack.current_index(), 1);
-        assert_eq!(stack.current().previous, Some(0));
-
-        stack.pop();
-        assert_eq!(stack.current_index(), 0);
     }
 
     #[test]

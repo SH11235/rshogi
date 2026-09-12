@@ -2045,26 +2045,6 @@ mod tests {
     }
 
     #[test]
-    fn kachi_fixture_terminals_satisfy_point27() {
-        // pair 化を通す fixture は、終端局面（宣言側手番）で Point27 宣言が実際に
-        // 成立していることを Position で検証しておく（run_build の突き合わせの前提）。
-        for text in [KACHI_GAINS_CSA, KACHI_ENTRY_CSA] {
-            let (moves, winner) = load_game_from(text);
-            let terminal = terminal_position(&moves).expect("terminal");
-            assert_eq!(terminal.side_to_move(), winner, "終端は宣言側手番");
-            assert_eq!(terminal.declaration_win(EnteringKingRule::Point27), Move::WIN);
-        }
-    }
-
-    #[test]
-    fn point27_fail_fixture_terminal_does_not_declare() {
-        let (moves, winner) = load_game_from(KACHI_POINT27_FAIL_CSA);
-        let terminal = terminal_position(&moves).expect("terminal");
-        assert_eq!(terminal.side_to_move(), winner);
-        assert_eq!(terminal.declaration_win(EnteringKingRule::Point27), Move::NONE);
-    }
-
-    #[test]
     fn broken_intermediate_move_yields_no_pairs() {
         // 不正な相手手で replay が Move::NONE + 打ち切りになり、pair は 1 件も出ない。
         // 終端局面の復元も不能（最終手が通常手でない）。

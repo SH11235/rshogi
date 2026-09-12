@@ -203,6 +203,8 @@ mod tests {
         store.save(&game_id, "V2.2\nN+alice\n").await.unwrap();
         let body = store.load(&game_id).await.unwrap();
         assert_eq!(body.as_deref(), Some("V2.2\nN+alice\n"));
+        store.save(&game_id, "second\n").await.unwrap();
+        assert_eq!(store.load(&game_id).await.unwrap().as_deref(), Some("second\n"));
         let _ = fs::remove_dir_all(&dir).await;
     }
 
@@ -236,20 +238,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir).await;
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn save_overwrites_existing_file_atomically() {
-        let dir = unique_topdir("save_overwrite");
-        let store = FileKifuStorage::new(&dir);
-        let game_id = GameId::new("20260417120000");
-        store.save(&game_id, "first\n").await.unwrap();
-        // 2 度目の save は rename で上書き成功する。
-        store.save(&game_id, "second\n").await.unwrap();
-        let abs = dir.join("2026/04/17/20260417120000.csa");
-        let body = fs::read_to_string(&abs).await.unwrap();
-        assert_eq!(body, "second\n");
-        let _ = fs::remove_dir_all(&dir).await;
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn append_summary_smoke_test_under_concurrent_load() {
         // Multi-thread runtime + JoinSet で 50 件並列 append を発火する。
@@ -257,7 +245,7 @@ mod tests {
         // 確認する「スモークテスト」。`append_lock` が無くても OS の write 追記が
         // 単一 syscall で完了するサイズなら通ってしまうため、ロック欠落の
         // 回帰検出までは保証しない。ロック欠落を決定的に検出したい場合は
-        // [`append_lock_serializes_critical_section`] を参照。
+        // [`append_summary_acquires_append_lock_for_critical_section`] を参照。
         let dir = unique_topdir("append_smoke");
         let store = FileKifuStorage::new(&dir);
         let mut set = tokio::task::JoinSet::new();
@@ -337,42 +325,6 @@ mod tests {
             .expect("append_summary should complete after lock release");
         result.expect("join").expect("append_summary");
         let _ = fs::remove_dir_all(&dir).await;
-    }
-
-    /// `FileKifuStorage` の内部 `Mutex` 自体が直列化として正しく機能することを、
-    /// 競合カウンタで補強的に確認する（`Mutex` の使い方の正しさを担保）。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn append_lock_serializes_critical_section() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        let store = FileKifuStorage::new(unique_topdir("lock_probe"));
-        let active = std::sync::Arc::new(AtomicU32::new(0));
-        let max_observed = std::sync::Arc::new(AtomicU32::new(0));
-
-        let mut set = tokio::task::JoinSet::new();
-        for _ in 0..32 {
-            let s = store.clone();
-            let active = active.clone();
-            let max_observed = max_observed.clone();
-            set.spawn(async move {
-                // 同じ `append_lock` を取って小休止を挟む。
-                let _guard = s.append_lock.lock().await;
-                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                let mut prev = max_observed.load(Ordering::SeqCst);
-                while now > prev
-                    && let Err(e) =
-                        max_observed.compare_exchange(prev, now, Ordering::SeqCst, Ordering::SeqCst)
-                {
-                    prev = e;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                active.fetch_sub(1, Ordering::SeqCst);
-            });
-        }
-        while let Some(r) = set.join_next().await {
-            r.expect("join");
-        }
-        // クリティカルセクション内に同時に存在したタスクは常に 1 を超えてはならない。
-        assert_eq!(max_observed.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

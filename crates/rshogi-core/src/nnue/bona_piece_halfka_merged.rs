@@ -86,19 +86,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pack_bonapiece_hand() {
-        // 手駒はそのまま
-        assert_eq!(pack_bonapiece(BonaPiece::new(50)), 50);
-    }
-
-    #[test]
-    fn test_pack_bonapiece_board() {
-        // 盤上駒（< E_KING）はマス反転無しでそのまま
-        let bp = BonaPiece::new(100);
-        assert_eq!(pack_bonapiece(bp), 100);
-    }
-
-    #[test]
     fn test_pack_bonapiece_enemy_king_fold() {
         // 敵玉は -81 で自玉 plane に重ねる
         assert_eq!(pack_bonapiece(BonaPiece::new(E_KING as u16)), E_KING - 81);
@@ -107,9 +94,9 @@ mod tests {
 
     #[test]
     fn test_halfka_index() {
-        assert_eq!(halfka_index(0, 0), 0);
-        assert_eq!(halfka_index(1, 0), PIECE_INPUTS);
-        assert_eq!(halfka_index(80, 0), 80 * PIECE_INPUTS);
+        for (king, piece, expected) in [(0, 0, 0), (1, 17, 1646), (80, 89, 130409)] {
+            assert_eq!(halfka_index(king, piece), expected);
+        }
     }
 
     /// パリティ検証: MergedPlane の pack は「マス反転なし + 敵玉 fold」であり、

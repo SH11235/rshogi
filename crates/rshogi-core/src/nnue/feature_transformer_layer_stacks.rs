@@ -2204,8 +2204,7 @@ mod tests {
     use crate::nnue::bona_piece::ExtBonaPiece;
     #[cfg(feature = "nnue-psqt")]
     use crate::nnue::constants::DEFAULT_NUM_BUCKETS;
-    #[cfg(not(feature = "nnue-effect-bucket"))]
-    use crate::nnue::constants::HALFKA_HM_DIMENSIONS;
+
     use crate::nnue::constants::NNUE_PYTORCH_L1;
     use crate::nnue::ls_feature_spec::HalfKaHmMergedSpec;
     use crate::nnue::piece_list::PieceNumber;
@@ -2408,16 +2407,6 @@ mod tests {
         ft.apply_weight_changes_tiled(&mut tiled.0, &removed, &added);
 
         assert_eq!(sequential.0, tiled.0);
-    }
-
-    // effect bucket build は `EffectBucket=` token 付き arch を要求するため、非 EffectBucket
-    // feature transformer の寸法 test は対象外。
-    #[cfg(not(feature = "nnue-effect-bucket"))]
-    #[test]
-    fn test_feature_transformer_dimensions() {
-        assert_eq!(TEST_L1, 1536);
-        assert_eq!(TestSpec::DIMENSIONS, HALFKA_HM_DIMENSIONS);
-        assert_eq!(TestSpec::DIMENSIONS, 73305);
     }
 
     // effect bucket build は `EffectBucket=` token 付き arch を要求するため、非 EffectBucket
@@ -2794,10 +2783,10 @@ mod tests {
     };
     use crate::position::{Position, SFEN_HIRATE};
 
-    fn smoke_refresh_for_spec<FT: LsFeatureSpec>() {
+    fn refresh_biases_for_spec<FT: LsFeatureSpec>() {
         let weights = AlignedBox::<i16>::new_zeroed(FT::DIMENSIONS * TEST_L1);
         let ft = FeatureTransformerLayerStacks::<TEST_L1, FT> {
-            biases: Aligned([0; TEST_L1]),
+            biases: Aligned([7; TEST_L1]),
             weights,
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
@@ -2818,105 +2807,46 @@ mod tests {
         let mut acc = AccumulatorLayerStacks::<TEST_L1>::new();
         ft.refresh_accumulator(&pos, &mut acc);
         assert!(acc.computed_accumulation);
-        // weights/biases が全て 0 のため accumulator も全 0。FT が変わっても
-        // 構造が壊れていないことを smoke レベルで保証する。
         for v in acc.get(0).iter().chain(acc.get(1).iter()) {
-            assert_eq!(*v, 0, "zero-weights refresh should keep accumulation at 0");
+            assert_eq!(*v, 7);
         }
     }
 
     #[test]
-    fn smoke_refresh_halfka_hm_merged() {
-        smoke_refresh_for_spec::<HalfKaHmMergedSpec>();
+    fn refresh_biases_halfka_hm_merged() {
+        refresh_biases_for_spec::<HalfKaHmMergedSpec>();
     }
 
     // effect bucket build は `EffectBucket=` token 付き arch を要求するため、非 EffectBucket
     // refresh smoke test は対象外。
     #[cfg(not(feature = "nnue-effect-bucket"))]
     #[test]
-    fn smoke_refresh_halfka_hm_split() {
-        smoke_refresh_for_spec::<HalfKaHmSplitSpec>();
+    fn refresh_biases_halfka_hm_split() {
+        refresh_biases_for_spec::<HalfKaHmSplitSpec>();
     }
 
     // effect bucket build は `EffectBucket=` token 付き arch を要求するため、非 EffectBucket
     // refresh smoke test は対象外。
     #[cfg(not(feature = "nnue-effect-bucket"))]
     #[test]
-    fn smoke_refresh_halfka_merged() {
-        smoke_refresh_for_spec::<HalfKaMergedSpec>();
+    fn refresh_biases_halfka_merged() {
+        refresh_biases_for_spec::<HalfKaMergedSpec>();
     }
 
     // effect bucket build は `EffectBucket=` token 付き arch を要求するため、非 EffectBucket
     // refresh smoke test は対象外。
     #[cfg(not(feature = "nnue-effect-bucket"))]
     #[test]
-    fn smoke_refresh_halfka_split() {
-        smoke_refresh_for_spec::<HalfKaSplitSpec>();
+    fn refresh_biases_halfka_split() {
+        refresh_biases_for_spec::<HalfKaSplitSpec>();
     }
 
     // effect bucket build は `EffectBucket=` token 付き arch を要求するため、非 EffectBucket
     // refresh smoke test は対象外。
     #[cfg(not(feature = "nnue-effect-bucket"))]
     #[test]
-    fn smoke_refresh_halfkp() {
-        smoke_refresh_for_spec::<HalfKpSpec>();
-    }
-
-    /// HalfKp + cache 経由 refresh で玉 BonaPiece (`>= FE_END`) を `idx_fn` に渡さない
-    /// ことを ply32 局面 (駒成り + 駒台手駒あり) と相手玉位置違い派生局面で保証する。
-    // effect bucket build は `EffectBucket=` token 付き arch を要求するため、非 EffectBucket
-    // cache refresh test は対象外。
-    #[cfg(not(feature = "nnue-effect-bucket"))]
-    #[test]
-    fn refresh_with_cache_halfkp_complex_position() {
-        let weights = AlignedBox::<i16>::new_zeroed(HalfKpSpec::DIMENSIONS * TEST_L1);
-        let ft = FeatureTransformerLayerStacks::<TEST_L1, HalfKpSpec> {
-            biases: Aligned([0; TEST_L1]),
-            weights,
-            #[cfg(feature = "nnue-psqt")]
-            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
-            #[cfg(feature = "nnue-psqt")]
-            psqt_num_buckets: 0,
-            #[cfg(feature = "nnue-psqt")]
-            psqt_weights: AlignedBox::new_zeroed(0),
-            #[cfg(feature = "nnue-psqt")]
-            has_psqt: false,
-            #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(0),
-            #[cfg(feature = "nnue-threat")]
-            has_threat: false,
-            _ft: PhantomData,
-        };
-
-        let mut pos = Position::new();
-        pos.set_sfen(
-            "+B1sg1gsnl/2+N2k1b1/pP2pp2p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
-        )
-        .unwrap();
-
-        let mut acc = AccumulatorLayerStacks::<TEST_L1>::new();
-        let mut cache = AccumulatorCacheLayerStacks::<TEST_L1>::new();
-
-        ft.refresh_accumulator_with_cache(&pos, &mut acc, &mut cache);
-        assert!(acc.computed_accumulation);
-        for v in acc.get(0).iter().chain(acc.get(1).iter()) {
-            assert_eq!(*v, 0, "zero-weights refresh should keep accumulation at 0");
-        }
-
-        ft.refresh_accumulator_with_cache(&pos, &mut acc, &mut cache);
-        for v in acc.get(0).iter().chain(acc.get(1).iter()) {
-            assert_eq!(*v, 0);
-        }
-
-        let mut pos2 = Position::new();
-        pos2.set_sfen(
-            "+B1sg1gsnl/2+N4b1/pP2ppk1p/2p3p2/9/2PpP4/P1+p2PP1P/7R1/LN1GKGSNL w RLs3p 32",
-        )
-        .unwrap();
-        ft.refresh_accumulator_with_cache(&pos2, &mut acc, &mut cache);
-        for v in acc.get(0).iter().chain(acc.get(1).iter()) {
-            assert_eq!(*v, 0);
-        }
+    fn refresh_biases_halfkp() {
+        refresh_biases_for_spec::<HalfKpSpec>();
     }
 
     /// HalfKp で `refresh_accumulator` (slow path) と `refresh_accumulator_with_cache`

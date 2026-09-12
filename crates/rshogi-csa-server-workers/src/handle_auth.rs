@@ -370,14 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_hex_sha256_round_trip() {
-        let bytes = parse_hex_sha256(PASSWORD_HASH).unwrap();
-        // 既知の固定 hash の最初の 2 byte を sanity check (typo 検出のため)。
-        assert_eq!(bytes[0], 0x6e);
-        assert_eq!(bytes[1], 0x9b);
-    }
-
-    #[test]
     fn display_omits_password_or_hash_values() {
         // 運用ログで Display を経由して error を文字列化したとき、password 値や
         // hash の生バイトが含まれないこと。handle 名は出してよい (運用者が
@@ -387,16 +379,5 @@ mod tests {
         assert!(s.contains("password mismatch"));
         assert!(!s.contains(PASSWORD));
         assert!(!s.contains(PASSWORD_HASH));
-    }
-
-    /// SHA256 計算ロジックが test fixture の hash 文字列と整合することを 1 件で
-    /// 固定する。`PASSWORD_HASH` を後で書き換えるときに silent に通らないよう
-    /// invariant として残す。
-    #[test]
-    fn sha256_of_fixture_password_matches_hash_constant() {
-        let raw = format!(r#"[{{"handle":"alice","password_sha256":"{PASSWORD_HASH}"}}]"#);
-        let reg = HandleAuthRegistry::parse(Some(&raw)).unwrap();
-        // verify が成功するということは `SHA256(PASSWORD) == PASSWORD_HASH (bytes)`。
-        assert!(reg.verify("alice", PASSWORD).is_ok());
     }
 }

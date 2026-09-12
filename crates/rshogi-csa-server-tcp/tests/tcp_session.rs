@@ -420,28 +420,6 @@ fn login_rejected_when_game_name_is_not_in_clock_presets() {
     });
 }
 
-/// 登録済 `game_name` の LOGIN は通常成立する（strict mode は registered preset
-/// だけは透過させる契約）。
-#[test]
-fn login_succeeds_when_game_name_is_in_clock_presets() {
-    run_local(|| async {
-        let mut presets = std::collections::HashMap::new();
-        presets.insert(
-            rshogi_csa_server::types::GameName::new("byoyomi-60-5"),
-            ClockSpec::Countdown {
-                total_time_sec: 60,
-                byoyomi_sec: 5,
-            },
-        );
-        let (addr, topdir) = spawn_server_with_clock_presets("preset_ok", presets).await;
-        let (mut r, mut w) = connect(addr).await;
-        send_line(&mut w, "LOGIN alice+byoyomi-60-5+black pw").await;
-        let resp = read_line_raw(&mut r).await.unwrap();
-        assert_eq!(resp, "LOGIN:alice OK");
-        let _ = tokio::fs::remove_dir_all(&topdir).await;
-    });
-}
-
 /// 登録済 `game_name` のマッチ成立時、Game_Summary の `Total_Time` / `Byoyomi`
 /// が global clock ではなく preset 由来の値になることを確認する。
 /// （preset = byoyomi-600-10、global clock fallback = 60s/10s なので差異が出る）

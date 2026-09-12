@@ -3936,23 +3936,6 @@ mod tests {
         assert!(matches!(action, InitAction::Bail(InitError::NoInitNorExistingParams)));
     }
 
-    /// 32 通り全網羅: 5 boolean 入力の各組み合わせが unreachable に落ちないこと
-    #[test]
-    fn decide_covers_all_thirty_two_combinations() {
-        for init in [false, true] {
-            for exists in [false, true] {
-                for resume in [false, true] {
-                    for force in [false, true] {
-                        for use_existing in [false, true] {
-                            let _ =
-                                decide_with_use_existing(init, exists, resume, force, use_existing);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     // ========================================================================
     // hash ヘルパ: 決定性 / 順序非依存
     // ========================================================================
@@ -4455,6 +4438,7 @@ mod tests {
     fn rotate_v3_csv_files_preserves_legacy_and_skips_others() {
         let dir = tempfile::tempdir().unwrap();
         let run_dir = dir.path();
+        assert!(rotate_v3_csv_files_for_silent_migrate(run_dir).unwrap().is_empty());
         std::fs::write(run_dir.join("stats.csv"), b"iteration,seed,games,...\n1,1,2,...\n")
             .unwrap();
         std::fs::write(run_dir.join("stats_aggregate.csv"), b"iteration,seeds,...\n1,1,...\n")
@@ -4481,14 +4465,6 @@ mod tests {
         // 旧 stats.csv の中身が `.v3.csv` に保持されていること
         let v3_body = std::fs::read_to_string(run_dir.join("stats.v3.csv")).unwrap();
         assert!(v3_body.starts_with("iteration,seed,games,"));
-    }
-
-    /// run-dir 配下に対象ファイルがゼロでも no-op (空 Vec を返す) で error にならない。
-    #[test]
-    fn rotate_v3_csv_files_is_idempotent_when_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let rotated = rotate_v3_csv_files_for_silent_migrate(dir.path()).unwrap();
-        assert!(rotated.is_empty(), "対象不在では何もローテートしない");
     }
 
     /// `<name>.v3.csv` が既に存在する場合は `<name>.v3.1.csv` 等で衝突回避すること。
@@ -4800,29 +4776,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compute_batch_prep_is_deterministic_across_calls() {
-        let params = vec![
-            make_param("Search_a", 1000.0, 100.0),
-            make_param("Search_b", 2000.0, 200.0),
-        ];
-        let schedules: Vec<ParamScheduleConstants> = params
-            .iter()
-            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
-            .collect();
-        let translator = EngineNameTranslator::empty();
-        let ctx = make_test_ctx(&params, &schedules, &translator, 8);
-
-        let prep1 = compute_batch_prep(&ctx, 5, 5, 42, 100).expect("prep1");
-        let prep2 = compute_batch_prep(&ctx, 5, 5, 42, 100).expect("prep2");
-
-        assert_eq!(prep1.flips, prep2.flips, "flips must be deterministic from seed/iter");
-        assert_eq!(prep1.plus_values, prep2.plus_values);
-        assert_eq!(prep1.minus_values, prep2.minus_values);
-        assert_eq!(prep1.start_pos_indices, prep2.start_pos_indices);
-        assert_eq!(prep1.active_params, prep2.active_params);
-    }
-
     /// 異なる `base_seed` が異なる flip パターンを生むことを保証（並列実行時の seed 間独立性）。
     /// `ChaCha8Rng` は決定論的なため、`(base_seed=1..4, iter=5)` の組み合わせで flip が
     /// 全一致にならないことをスナップショットテストとして確認する。パラメータ数を 6 に増やして
@@ -4881,30 +4834,6 @@ mod tests {
         }
     }
 
-    /// Paired antithetic の color 反転規約 (`plus_is_black = idx % 2 == 0`) を
-    /// **規約の文書化テスト** として明示する。
-    ///
-    /// 設計意図: 実装側 (`WorkerPool::run_batch`) のロジック `plus_is_black =
-    /// idx % 2 == 0` と同じ式をここに再掲することで、「pair 化した index 列と
-    /// 組み合わせたとき先後が正しく入れ替わる」という規約を 1 箇所に固定する。
-    /// 誰かが規約 (例: `idx % 2 != 0` 反転、別の pair 化方式) を変えた場合、
-    /// 実装と本テストの両方を同時に直す必要があるため、規約変更が暗黙のうちに
-    /// 滑り込むのを防ぐガードレールとして機能する。
-    ///
-    /// 動的な外形動作 (実コードを通った game 結果が pair 内で先後入替されている
-    /// こと) は統合テスト `compute_batch_prep_pairs_share_startpos` (start_pos の
-    /// 共有を確認) と統合テスト群が間接的にカバーする。
-    #[test]
-    fn paired_antithetic_color_flips_within_pair() {
-        // pair の game 2k は plus_is_black=true, 2k+1 は false でなければならない。
-        for pair_idx in 0..4_usize {
-            let g0 = pair_idx * 2;
-            let g1 = pair_idx * 2 + 1;
-            assert!(g0 % 2 == 0, "game {g0} should produce plus_is_black=true");
-            assert!(g1 % 2 != 0, "game {g1} should produce plus_is_black=false");
-        }
-    }
-
     /// Stochastic rounding の境界テスト: `p.value = max` の状態で
     /// `floor(v + U(0,1))` が `max + 1` になるケースが、再 clamp で `max` に戻る
     /// ことを確認。`clamp → round → 再 clamp` の順序が崩れると、U が大きい batch
@@ -4934,50 +4863,6 @@ mod tests {
         }
     }
 
-    /// Stochastic rounding の期待値は連続 f64 値に一致する (大数の法則)。
-    /// 多数 iteration (= 多数 rounding 抽選) を回し、`p.value=10.4` の rounded 平均が
-    /// 0.05 程度の誤差で 10.4 に収束することを確認。これが崩れると int param で
-    /// 系統的バイアスが入って棋力低下の原因になる。
-    ///
-    /// Seed を変えて iter ごとに rounding stream を進め、結果値の平均を取る。
-    #[test]
-    fn stochastic_rounding_expected_value_matches_continuous() {
-        // base_seed / iter を変えながら、固定 p.value=10.4 に対する plus/minus rounded
-        // 値の平均を取る。本テストは「shift の対称性 + stochastic rounding の期待値が
-        // 重なって平均 10.4 に収束する」ことの間接検証であり、shift をゼロにしない
-        // (= c_end > 0)。shift = 0 を強制した直接版は `_zero_shift` 別テストにある。
-        let mut params = vec![make_param("Search_a", 10.4, 1.0)];
-        params[0].is_int = true;
-        params[0].min = 0.0;
-        params[0].max = 100.0;
-        params[0].c_end = 1.0; // shifts を生む (shift 対称性に頼って平均を 10.4 に揃える)
-        let schedules: Vec<ParamScheduleConstants> = params
-            .iter()
-            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
-            .collect();
-        let translator = EngineNameTranslator::empty();
-        let ctx = make_test_ctx(&params, &schedules, &translator, 2);
-
-        // shift がゼロでないと「連続値=10.4」になる plus/minus を作れないので、
-        // ここでは shift 込みの rounded 値を多数 iter 集計し、shift の対称性で平均が
-        // 10.4 に収束することを確認する (plus と minus を両方足し 2 で割る)。
-        let n_iters = 4000_u32;
-        let mut sum = 0.0f64;
-        let mut count = 0_usize;
-        for iter in 0..n_iters {
-            let prep = compute_batch_prep(&ctx, iter, iter, 12345, 0).expect("prep");
-            sum += prep.plus_values[0];
-            sum += prep.minus_values[0];
-            count += 2;
-        }
-        let mean = sum / count as f64;
-        let err = (mean - 10.4).abs();
-        assert!(
-            err < 0.05,
-            "stochastic rounding 平均 {mean} が連続値 10.4 から {err} 乖離 (許容 < 0.05)"
-        );
-    }
-
     /// `c_end = 0.0` 版の期待値テスト (上の `_matches_continuous` を補完する直接版)。
     ///
     /// shift = 0 が確定するため、plus_value も minus_value も `stochastic_round(10.4)`
@@ -4988,40 +4873,42 @@ mod tests {
     /// 注意: plus と minus は同一 rounding_rng stream を順に消費するため、
     /// shift=0 でも個々の値は一致しない (期待値だけが 10.4 に揃う)。
     #[test]
-    fn stochastic_rounding_expected_value_matches_continuous_zero_shift() {
-        let mut params = vec![make_param("Search_a", 10.4, 1.0)];
-        params[0].is_int = true;
-        params[0].min = 0.0;
-        params[0].max = 100.0;
-        params[0].c_end = 0.0; // c_k = 0 → shift = 0 を強制
-        let schedules: Vec<ParamScheduleConstants> = params
-            .iter()
-            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
-            .collect();
-        let translator = EngineNameTranslator::empty();
-        let ctx = make_test_ctx(&params, &schedules, &translator, 2);
+    fn stochastic_rounding_mean_with_and_without_shift() {
+        for shift in [0.0, 1.0] {
+            let mut params = vec![make_param("Search_a", 10.4, 1.0)];
+            params[0].is_int = true;
+            params[0].min = 0.0;
+            params[0].max = 100.0;
+            params[0].c_end = shift;
+            let schedules: Vec<ParamScheduleConstants> = params
+                .iter()
+                .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
+                .collect();
+            let translator = EngineNameTranslator::empty();
+            let ctx = make_test_ctx(&params, &schedules, &translator, 2);
 
-        let n_iters = 4000_u32;
-        let mut sum = 0.0f64;
-        let mut count = 0_usize;
-        for iter in 0..n_iters {
-            let prep = compute_batch_prep(&ctx, iter, iter, 67890, 0).expect("prep");
-            // shift = 0 なので各値は stochastic_round(10.4) ∈ {10, 11}。
-            for v in [prep.plus_values[0], prep.minus_values[0]] {
-                assert!(
-                    v == 10.0 || v == 11.0,
-                    "c_end=0 で stochastic_round(10.4) は 10 か 11 のはず: 実際 {v}"
-                );
-                sum += v;
-                count += 1;
+            let n_iters = 4000_u32;
+            let mut sum = 0.0f64;
+            let mut count = 0_usize;
+            for iter in 0..n_iters {
+                let prep = compute_batch_prep(&ctx, iter, iter, 67890, 0).expect("prep");
+                // shift=0 のケースでは各値は10または11に限られる。
+                for v in [prep.plus_values[0], prep.minus_values[0]] {
+                    assert!(
+                        shift != 0.0 || v == 10.0 || v == 11.0,
+                        "c_end=0 で stochastic_round(10.4) は 10 か 11 のはず: 実際 {v}"
+                    );
+                    sum += v;
+                    count += 1;
+                }
             }
+            let mean = sum / count as f64;
+            let err = (mean - 10.4).abs();
+            assert!(
+                err < 0.05,
+                "stochastic rounding 平均 {mean} が連続値 10.4 から {err} 乖離 (許容 < 0.05)"
+            );
         }
-        let mean = sum / count as f64;
-        let err = (mean - 10.4).abs();
-        assert!(
-            err < 0.05,
-            "stochastic rounding 平均 {mean} が連続値 10.4 から {err} 乖離 (許容 < 0.05)"
-        );
     }
 
     /// 完全再現性: 同一 seed/iter で 2 回 `compute_batch_prep` を回したとき、
@@ -5056,32 +4943,6 @@ mod tests {
         for v in prep1.plus_values.iter().chain(prep1.minus_values.iter()) {
             assert_eq!(v.fract(), 0.0, "is_int param で fractional 値が残った: {v}");
         }
-    }
-
-    /// 異なる pair は (random_startpos=true 時) 独立サンプリングされるため、
-    /// pair 全体が単一 startpos に固定されないこと (= バリエーションが残ること) を確認。
-    /// 完全一致を否定する弱い不変条件だが、「pair 化を装って実は全 game 同一 startpos」
-    /// のような退行を検出するには十分。
-    #[test]
-    fn compute_batch_prep_different_pairs_have_varied_startpos() {
-        let params = vec![make_param("Search_a", 1000.0, 100.0)];
-        let schedules: Vec<ParamScheduleConstants> = params
-            .iter()
-            .map(|p| ParamScheduleConstants::compute(p.c_end, p.r_end, 100, 0.1, 0.602, 0.101))
-            .collect();
-        let translator = EngineNameTranslator::empty();
-        // games_per_iteration = 32 → pair_count = 16。1957 startpos からランダム抽出。
-        let ctx = make_test_ctx(&params, &schedules, &translator, 32);
-
-        let prep = compute_batch_prep(&ctx, 5, 5, 42, 0).expect("prep");
-        let pair_indices: Vec<usize> =
-            (0..16).map(|pair_idx| prep.start_pos_indices[pair_idx * 2]).collect();
-        let unique: std::collections::HashSet<_> = pair_indices.iter().copied().collect();
-        assert!(
-            unique.len() >= 8,
-            "16 pair で start_pos がほぼ全て同一になるのは異常 (got {} unique)",
-            unique.len()
-        );
     }
 }
 

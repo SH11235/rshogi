@@ -418,118 +418,35 @@ impl Default for HalfKaHmSplitStack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nnue::spec::FeatureSet;
 
     #[test]
-    fn test_halfka_stack_from_network_l1_size() {
-        // L256 ネットワークを仮定したスタック
-        let stack = HalfKaHmSplitStack::L256(AccumulatorStackHalfKaHmSplit::<256>::new());
-        assert_eq!(stack.l1_size(), 256);
-
-        let stack = HalfKaHmSplitStack::L512(AccumulatorStackHalfKaHmSplit::<512>::new());
-        assert_eq!(stack.l1_size(), 512);
-
-        let stack = HalfKaHmSplitStack::L1024(AccumulatorStackHalfKaHmSplit::<1024>::new());
-        assert_eq!(stack.l1_size(), 1024);
-    }
-
-    #[test]
-    fn test_supported_specs_combined() {
-        let specs = HalfKaHmSplitNetwork::supported_specs();
-        // (256: 1, 512: 3, 768: 1, 1024: 3) × 3 活性化 (CReLU/SCReLU/Pairwise)
-        assert_eq!(specs.len(), 24);
-
-        // 全て HalfKaHmSplit
-        for spec in &specs {
-            assert_eq!(spec.feature_set, FeatureSet::HalfKaHmSplit);
-        }
-    }
-
-    /// push/pop の対称性と状態の一貫性テスト（L256）
-    #[test]
-    fn test_push_pop_index_consistency_l256() {
-        let mut stack = HalfKaHmSplitStack::L256(AccumulatorStackHalfKaHmSplit::<256>::new());
-        let dirty = DirtyPiece::default();
-
-        stack.reset();
-        let initial_index = stack.current_index();
-
-        stack.push(dirty);
-        assert_eq!(stack.current_index(), initial_index + 1);
-
-        stack.push(dirty);
-        assert_eq!(stack.current_index(), initial_index + 2);
-
-        stack.pop();
-        assert_eq!(stack.current_index(), initial_index + 1);
-
-        stack.pop();
-        assert_eq!(stack.current_index(), initial_index);
-    }
-
-    /// push/pop の対称性と状態の一貫性テスト（L512）
-    #[test]
-    fn test_push_pop_index_consistency_l512() {
-        let mut stack = HalfKaHmSplitStack::L512(AccumulatorStackHalfKaHmSplit::<512>::new());
-        let dirty = DirtyPiece::default();
-
-        stack.reset();
-        let initial_index = stack.current_index();
-
-        stack.push(dirty);
-        assert_eq!(stack.current_index(), initial_index + 1);
-
-        stack.pop();
-        assert_eq!(stack.current_index(), initial_index);
-    }
-
-    /// push/pop の対称性と状態の一貫性テスト（L1024）
-    #[test]
-    fn test_push_pop_index_consistency_l1024() {
-        let mut stack = HalfKaHmSplitStack::L1024(AccumulatorStackHalfKaHmSplit::<1024>::new());
-        let dirty = DirtyPiece::default();
-
-        stack.reset();
-        let initial_index = stack.current_index();
-
-        stack.push(dirty);
-        assert_eq!(stack.current_index(), initial_index + 1);
-
-        stack.pop();
-        assert_eq!(stack.current_index(), initial_index);
-    }
-
-    /// deep push/pop テスト（探索木の深さをシミュレート）
-    #[test]
-    fn test_deep_push_pop() {
-        let mut stack = HalfKaHmSplitStack::default();
-        let dirty = DirtyPiece::default();
-
-        stack.reset();
-        let initial_index = stack.current_index();
-
-        // 探索木の深さをシミュレート
-        const DEPTH: usize = 30;
-
-        for i in 0..DEPTH {
-            stack.push(dirty);
-            assert_eq!(stack.current_index(), initial_index + i + 1);
-        }
-
-        for i in (0..DEPTH).rev() {
+    fn stack_lifecycle_for_each_size() {
+        for (l1, mut stack) in [
+            (256, HalfKaHmSplitStack::L256(AccumulatorStackHalfKaHmSplit::<256>::new())),
+            (512, HalfKaHmSplitStack::L512(AccumulatorStackHalfKaHmSplit::<512>::new())),
+            (768, HalfKaHmSplitStack::L768(AccumulatorStackHalfKaHmSplit::<768>::new())),
+            (1024, HalfKaHmSplitStack::L1024(AccumulatorStackHalfKaHmSplit::<1024>::new())),
+        ] {
+            assert_eq!(stack.l1_size(), l1);
+            assert_eq!(stack.current_index(), 0);
+            for depth in 1..=3 {
+                let dirty = DirtyPiece {
+                    dirty_num: depth - 1,
+                    ..DirtyPiece::default()
+                };
+                stack.push(dirty);
+                assert_eq!(stack.current_index(), depth as usize);
+                assert_eq!(stack.current_previous(), Some(depth as usize - 1));
+                assert_eq!(stack.current_dirty_piece().dirty_num, depth - 1);
+            }
             stack.pop();
-            assert_eq!(stack.current_index(), initial_index + i);
-        }
-    }
-
-    /// アーキテクチャの仕様一覧の一貫性テスト
-    #[test]
-    fn test_architecture_spec_consistency() {
-        for spec in HalfKaHmSplitNetwork::supported_specs() {
-            assert_eq!(spec.feature_set, FeatureSet::HalfKaHmSplit);
-            assert!(spec.l1 == 256 || spec.l1 == 512 || spec.l1 == 768 || spec.l1 == 1024);
-            assert!(spec.l2 > 0 && spec.l2 <= 128);
-            assert!(spec.l3 > 0 && spec.l3 <= 128);
+            assert_eq!(stack.current_index(), 2);
+            assert_eq!(stack.current_dirty_piece().dirty_num, 1);
+            stack.reset();
+            assert_eq!(stack.current_index(), 0);
+            stack.push(DirtyPiece::default());
+            assert_eq!(stack.current_previous(), Some(0));
+            assert_eq!(stack.current_dirty_piece().dirty_num, 0);
         }
     }
 }

@@ -606,25 +606,22 @@ mod tests {
     // =========================================
 
     #[test]
-    fn test_move_pass_encoding() {
-        // PASS は bit14=1, bit15=1 (0xC000)
-        assert_eq!(Move::PASS.0, 0xC000);
-        assert!(Move::PASS.is_pass());
-        assert!(!Move::NONE.is_pass());
-        assert!(!Move::NULL.is_pass());
-        assert!(!Move::WIN.is_pass());
-    }
-
-    #[test]
-    fn test_move_pass_not_drop() {
-        // PASSは bit14=1 だが is_drop() は false
-        assert!(!Move::PASS.is_drop());
-    }
-
-    #[test]
-    fn test_move_pass_not_promote() {
-        // PASSは bit15=1 だが is_promote() は false
-        assert!(!Move::PASS.is_promote());
+    fn test_special_move_encodings() {
+        for (mv, raw, usi, parsed) in [
+            (Move::PASS, 0xC000, "pass", Some(Move::PASS)),
+            (Move::WIN, 0xC001, "win", None),
+        ] {
+            assert_eq!(mv.to_u16(), raw);
+            assert_eq!(Move::from_u16_checked(raw), Some(mv));
+            assert_eq!(mv.to_usi(), usi);
+            assert_eq!(Move::from_usi(usi), parsed);
+            assert!(!mv.is_drop());
+            assert!(!mv.is_promote());
+        }
+        for mv in [Move::NONE, Move::NULL, Move::PASS, Move::WIN] {
+            assert_eq!(mv.is_pass(), mv == Move::PASS);
+            assert_eq!(mv.is_win(), mv == Move::WIN);
+        }
     }
 
     #[test]
@@ -663,12 +660,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_move_usi_pass() {
-        assert_eq!(Move::PASS.to_usi(), "pass");
-        assert_eq!(Move::from_usi("pass"), Some(Move::PASS));
-    }
-
     // 【注意】以下のテストは debug_assert! なので debug ビルドでのみ動作
     // cargo test で実行（release ビルドでは panic しない）
 
@@ -689,37 +680,6 @@ mod tests {
     // =========================================
     // 入玉宣言勝ち（WIN）関連のテスト
     // =========================================
-
-    #[test]
-    fn test_move_win_encoding() {
-        assert_eq!(Move::WIN.0, 0xC001);
-        assert!(Move::WIN.is_win());
-        assert!(!Move::NONE.is_win());
-        assert!(!Move::NULL.is_win());
-        assert!(!Move::PASS.is_win());
-    }
-
-    #[test]
-    fn test_move_win_not_drop_not_promote() {
-        assert!(!Move::WIN.is_drop());
-        assert!(!Move::WIN.is_promote());
-    }
-
-    #[test]
-    fn test_move_win_usi() {
-        assert_eq!(Move::WIN.to_usi(), "win");
-        // from_usi("win") は受理しない（position moves 経路での誤用防止）
-        assert_eq!(Move::from_usi("win"), None);
-    }
-
-    #[test]
-    fn test_move_win_from_u16_checked() {
-        let win_u16 = Move::WIN.to_u16();
-        assert_eq!(win_u16, 0xC001);
-        let restored = Move::from_u16_checked(win_u16);
-        assert_eq!(restored, Some(Move::WIN));
-        assert!(restored.unwrap().is_win());
-    }
 
     #[test]
     #[cfg(debug_assertions)]

@@ -472,20 +472,6 @@ mod tests {
     use crate::types::{File, Rank};
 
     #[test]
-    fn test_bona_piece_zero() {
-        assert_eq!(BonaPiece::ZERO.value(), 0);
-    }
-
-    #[test]
-    fn test_bona_piece_from_piece_square() {
-        let sq = Square::new(File::File7, Rank::Rank7);
-        let piece = Piece::new(Color::Black, PieceType::Pawn);
-
-        let bp = BonaPiece::from_piece_square(piece, sq, Color::Black);
-        assert_ne!(bp, BonaPiece::ZERO);
-    }
-
-    #[test]
     fn test_bona_piece_king_returns_zero() {
         let sq = Square::new(File::File5, Rank::Rank9);
         let piece = Piece::new(Color::Black, PieceType::King);
@@ -496,11 +482,14 @@ mod tests {
 
     #[test]
     fn test_halfkp_index() {
-        let king_sq = Square::new(File::File5, Rank::Rank9);
-        let bp = BonaPiece::new(100);
-
-        let index = halfkp_index(king_sq, bp);
-        assert_eq!(index, king_sq.index() * FE_END + 100);
+        let king = Square::new(File::File5, Rank::Rank9);
+        assert_eq!(halfkp_index(king, BonaPiece::new(100)), 68_212);
+        let pawn = BonaPiece::from_piece_square(
+            Piece::B_PAWN,
+            Square::new(File::File7, Rank::Rank7),
+            Color::Black,
+        );
+        assert_eq!(pawn.value(), 150);
     }
 
     #[test]

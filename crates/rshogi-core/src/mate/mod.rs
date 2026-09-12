@@ -109,12 +109,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_module_structure() {
-        // モジュールが正しく構成されているかの基本テスト
-        init();
-    }
-
-    #[test]
     fn test_aligned() {
         let s1 = Square::SQ_55;
         let s2 = Square::new(crate::types::File::File5, crate::types::Rank::Rank1);

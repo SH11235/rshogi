@@ -458,7 +458,8 @@ mod tests {
 
     #[test]
     fn test_benchmark_with_default_positions() {
-        let config = test_config(LimitType::Depth, 5);
+        let mut config = test_config(LimitType::Depth, 3);
+        config.iterations = 2;
         let result = run_internal_benchmark(&config);
         assert!(result.is_ok(), "Benchmark failed: {:?}", result.err());
 
@@ -466,7 +467,11 @@ mod tests {
 
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].threads, 1);
-        assert_eq!(report.results[0].results.len(), 4, "Should have 4 default positions");
+        assert_eq!(
+            report.results[0].results.len(),
+            8,
+            "two iterations of the four default positions"
+        );
 
         for (i, bench_result) in report.results[0].results.iter().enumerate() {
             assert!(!bench_result.sfen.is_empty(), "Position {i}: SFEN should not be empty");
@@ -474,19 +479,6 @@ mod tests {
             assert!(bench_result.nodes > 0, "Position {i}: Nodes should be positive");
             assert_ne!(bench_result.bestmove, "none", "Position {i}: Bestmove should be valid");
         }
-    }
-
-    #[test]
-    fn test_benchmark_multiple_iterations() {
-        let mut config = test_config(LimitType::Depth, 3);
-        config.iterations = 2;
-
-        let result = run_internal_benchmark(&config);
-        assert!(result.is_ok());
-
-        let report = result.unwrap();
-        // 2 iterations × 4 positions = 8 results
-        assert_eq!(report.results[0].results.len(), 8);
     }
 
     #[test]

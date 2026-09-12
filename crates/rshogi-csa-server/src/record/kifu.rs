@@ -283,41 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn build_v2_starts_with_version_and_includes_player_names() {
-        let txt = rec_skeleton().build_v2();
-        assert!(txt.starts_with("V2.2\n"));
-        assert!(txt.contains("\nN+alice\n"));
-        assert!(txt.contains("\nN-bob\n"));
-    }
-
-    #[test]
-    fn build_v2_emits_event_and_game_id_and_times() {
-        let txt = rec_skeleton().build_v2();
-        assert!(txt.contains("\n$EVENT:rshogi-csa-server-test\n"));
-        assert!(txt.contains("\n$GAME_ID:20140101120000\n"));
-        assert!(txt.contains("\n$START_TIME:2026/04/17 12:00:00\n"));
-        assert!(txt.contains("\n$END_TIME:2026/04/17 12:05:00\n"));
-    }
-
-    #[test]
-    fn build_v2_includes_time_section_verbatim() {
-        let txt = rec_skeleton().build_v2();
-        assert!(txt.contains("BEGIN Time\n"));
-        assert!(txt.contains("Time_Unit:1sec\n"));
-        assert!(txt.contains("Total_Time:600\n"));
-        assert!(txt.contains("END Time\n"));
-    }
-
-    #[test]
-    fn build_v2_emits_moves_with_t_field_and_comment_lines() {
-        let txt = rec_skeleton().build_v2();
-        assert!(txt.contains("\n+7776FU,T3\n"));
-        assert!(txt.contains("\n-3334FU,T4\n"));
-        // Floodgate 拡張のコメント行（先頭 `'`）。
-        assert!(txt.contains("\n'eval=12 pv 3c3d\n"));
-    }
-
-    #[test]
     fn build_v2_normalizes_post_move_eval_comment_to_double_star() {
         let mut rec = rec_skeleton();
         rec.moves[1].comment = Some("* 12 +7776FU".to_owned());
@@ -332,18 +297,6 @@ mod tests {
 
         rec.moves[1].comment = Some("*engine note".to_owned());
         assert!(rec.build_v2().contains("\n'*engine note\n"));
-    }
-
-    #[test]
-    fn build_v2_ends_with_special_move_only() {
-        let txt = rec_skeleton().build_v2();
-        // 棋譜末尾は %TORYO のみ。`#RESIGN` などの protocol 通知コードは入れない。
-        assert!(txt.contains("\n%TORYO\n"));
-        assert!(!txt.contains("#RESIGN"));
-        assert!(!txt.contains("#WIN"));
-        assert!(!txt.contains("#LOSE"));
-        // 末尾は改行で終わる。
-        assert!(txt.ends_with('\n'));
     }
 
     #[test]
@@ -418,40 +371,6 @@ mod tests {
         );
     }
 
-    /// rshogi-csa パーサで round-trip できることを確認する回帰テスト。
-    #[test]
-    fn build_v2_is_parseable_by_rshogi_csa() {
-        let mut rec = rec_skeleton();
-        // 平手初期局面ヘッダを入れて parse_csa が局面を再構成できるようにする。
-        rec.initial_position = "PI\n+\n".to_owned();
-        let txt = rec.build_v2();
-        let (_pos, moves, info) = rshogi_csa::parse_csa(&txt).expect("CSA parser should accept");
-        assert_eq!(moves.len(), 2);
-        assert_eq!(moves[0], "+7776FU");
-        assert_eq!(moves[1], "-3334FU");
-        assert_eq!(info.black_name.as_deref(), Some("alice"));
-        assert_eq!(info.white_name.as_deref(), Some("bob"));
-    }
-
-    #[test]
-    fn zerozero_list_line_format() {
-        // 00LIST の時刻列は `split(' ')` で単一トークンに収まる必要があるため、
-        // 実呼び出し側 (`storage/file.rs::append_summary`) は ISO 8601 形式
-        // `YYYY-MM-DDTHH:MM:SSZ` を渡す（CSA V2 棋譜の `$START_TIME` /
-        // `$END_TIME` は `YYYY/MM/DD HH:MM:SS` で空白入り、こちらは別経路）。
-        let line = format_zerozero_list_line(
-            &GameId::new("g1"),
-            &PlayerName::new("alice"),
-            &PlayerName::new("bob"),
-            "2026-04-17T12:00:00Z",
-            "2026-04-17T12:10:00Z",
-            &GameResult::Toryo {
-                winner: Color::Black,
-            },
-        );
-        assert_eq!(line, "g1 alice bob 2026-04-17T12:00:00Z 2026-04-17T12:10:00Z #RESIGN");
-    }
-
     #[test]
     fn initial_sfen_from_csa_moves_applies_moves_on_hirate() {
         let sfen = initial_sfen_from_csa_moves(&[
@@ -512,6 +431,10 @@ PI
 %TORYO
 ";
         assert_eq!(txt, expected, "CSA V2 棋譜のゴールデン形式が変更されました");
+        let (_, moves, info) = rshogi_csa::parse_csa(&txt).expect("CSA parser should accept");
+        assert_eq!(moves, ["+7776FU", "-3334FU"]);
+        assert_eq!(info.black_name.as_deref(), Some("alice"));
+        assert_eq!(info.white_name.as_deref(), Some("bob"));
     }
 
     /// 00LIST の 1 行を全 `GameResult` variant について完全一致で固定するゴールデン。

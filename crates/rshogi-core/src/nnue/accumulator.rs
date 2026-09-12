@@ -918,14 +918,6 @@ mod tests {
     }
 
     #[test]
-    fn test_accumulator_new() {
-        let acc = Accumulator::new();
-        assert!(!acc.computed_accumulation);
-        assert!(!acc.computed_score);
-        assert_eq!(acc.score, Value::ZERO);
-    }
-
-    #[test]
     fn test_accumulator_reset() {
         let mut acc = Accumulator::new();
         acc.computed_accumulation = true;
@@ -957,17 +949,12 @@ mod tests {
     }
 
     #[test]
-    fn test_dirty_piece_new() {
-        let dp = DirtyPiece::new();
-        assert_eq!(dp.dirty_num, 0);
-        assert!(!dp.king_moved[0]);
-        assert!(!dp.king_moved[1]);
-    }
-
-    #[test]
     fn test_accumulator_stack_push_pop() {
         let mut stack = AccumulatorStack::new();
         assert_eq!(stack.current_index(), 0);
+        assert!(!stack.current().accumulator.computed_accumulation);
+        assert!(!stack.current().accumulator.computed_score);
+        assert_eq!(stack.current().accumulator.score, Value::ZERO);
 
         stack.push(DirtyPiece::new());
         assert_eq!(stack.current_index(), 1);

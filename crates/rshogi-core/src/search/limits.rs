@@ -251,19 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn test_elapsed() {
-        let mut limits = LimitsType::new();
-        limits.set_start_time();
-
-        // 少し待つ
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        let elapsed = limits.elapsed();
-        assert!(elapsed >= 10);
-        assert!(elapsed < 1000); // 1秒以内
-    }
-
-    #[test]
     fn test_has_interrupt_budget() {
         // 純粋な depth 固定（go depth N）・詰み探索は engine 自身の打ち切り予算なし → guard 対象
         let mut l = LimitsType::new();

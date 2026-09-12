@@ -1253,56 +1253,6 @@ P-00KA
     }
 
     #[test]
-    fn test_csa_to_usi_normal() {
-        let pos = initial_position();
-        assert_eq!(csa_move_to_usi("+7776FU", &pos).unwrap(), "7g7f");
-        assert_eq!(csa_move_to_usi("-3334FU", &pos).unwrap(), "3c3d");
-    }
-
-    #[test]
-    fn test_csa_to_usi_promote() {
-        let pos = initial_position();
-        // 8八角 → 2二角成
-        assert_eq!(csa_move_to_usi("+8822UM", &pos).unwrap(), "8h2b+");
-    }
-
-    #[test]
-    fn test_csa_to_usi_drop() {
-        let pos = initial_position();
-        assert_eq!(csa_move_to_usi("+0055FU", &pos).unwrap(), "P*5e");
-    }
-
-    #[test]
-    fn test_usi_to_csa_normal() {
-        let pos = initial_position();
-        assert_eq!(usi_move_to_csa("7g7f", &pos).unwrap(), "+7776FU");
-    }
-
-    #[test]
-    fn test_usi_to_csa_promote() {
-        let pos = initial_position();
-        assert_eq!(usi_move_to_csa("8h2b+", &pos).unwrap(), "+8822UM");
-    }
-
-    #[test]
-    fn test_usi_to_csa_drop() {
-        // 先手持ち駒ありの局面を作る
-        let text = "P+55OU\nP-51OU\nP+00FU\n+\n";
-        let (pos, _, _) = parse_csa(text).unwrap();
-        assert_eq!(usi_move_to_csa("P*7f", &pos).unwrap(), "+0076FU");
-    }
-
-    #[test]
-    fn test_csa_usi_roundtrip() {
-        let pos = initial_position();
-        // 通常手のラウンドトリップ
-        let csa = "+7776FU";
-        let usi = csa_move_to_usi(csa, &pos).unwrap();
-        let back = usi_move_to_csa(&usi, &pos).unwrap();
-        assert_eq!(back, csa);
-    }
-
-    #[test]
     fn test_parse_hand_setup_board_placement() {
         // P+ で盤上に駒を配置
         let text = "\
@@ -1314,5 +1264,18 @@ P-51OU
         let x5 = csa_file_to_x(5).unwrap();
         assert_eq!(pos.board[5][x5], Some(Piece::new(PieceType::King, Color::Black, false)));
         assert_eq!(pos.board[1][x5], Some(Piece::new(PieceType::King, Color::White, false)));
+    }
+
+    #[test]
+    fn move_notations_match_fixed_vectors() {
+        let pos = initial_position();
+        for (csa, usi) in [("+7776FU", "7g7f"), ("+8822UM", "8h2b+")] {
+            assert_eq!(csa_move_to_usi(csa, &pos).unwrap(), usi);
+            assert_eq!(usi_move_to_csa(usi, &pos).unwrap(), csa);
+        }
+        assert_eq!(csa_move_to_usi("-3334FU", &pos).unwrap(), "3c3d");
+        let (pos, _, _) = parse_csa("P+55OU\nP-51OU\nP+00FU\n+\n").unwrap();
+        assert_eq!(csa_move_to_usi("+0076FU", &pos).unwrap(), "P*7f");
+        assert_eq!(usi_move_to_csa("P*7f", &pos).unwrap(), "+0076FU");
     }
 }

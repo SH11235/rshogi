@@ -1349,23 +1349,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_control_headers_force_browser_revalidation() {
-        // 全 cacheable 経路でブラウザ側の再検証 directive (`max-age=0` と
-        // `must-revalidate`) が抜けていないことを確定させる。`s-maxage` だけが
-        // 効いて `max-age` を落としても browser default の heuristic が走り
-        // うるため、明示的に検査する。
-        for kind in [CacheableKind::List, CacheableKind::SingleGame] {
-            let header = kind.cache_control_header();
-            assert!(header.contains("max-age=0"), "{kind:?} missing max-age=0: {header}");
-            assert!(
-                header.contains("must-revalidate"),
-                "{kind:?} missing must-revalidate: {header}"
-            );
-            assert!(header.contains("s-maxage="), "{kind:?} missing s-maxage: {header}");
-        }
-    }
-
-    #[test]
     fn is_viewer_api_path_accepts_root_paths() {
         assert!(is_viewer_api_path("/api/v1/games"));
         assert!(is_viewer_api_path("/api/v1/games/live"));

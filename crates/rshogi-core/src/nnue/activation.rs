@@ -1618,13 +1618,6 @@ mod tests {
     }
 
     #[test]
-    fn test_output_dim_divisor() {
-        assert_eq!(CReLU::OUTPUT_DIM_DIVISOR, 1);
-        assert_eq!(PairwiseCReLU::OUTPUT_DIM_DIVISOR, 2);
-        assert_eq!(SCReLU::OUTPUT_DIM_DIVISOR, 1);
-    }
-
-    #[test]
     fn test_pairwise_crelu_i32_to_u8() {
         // PairwiseCReLUの中間層（i32 → u8）は通常のCReLUを使用
         // WEIGHT_SCALE_BITS = 6

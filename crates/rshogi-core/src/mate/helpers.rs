@@ -368,11 +368,3 @@ fn attacks_around_king_non_slider_in_avoiding(
 
     sum
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_helper_functions_compile() {
-        // ヘルパー関数がコンパイルされることを確認
-    }
-}

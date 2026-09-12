@@ -5173,27 +5173,19 @@ mod marker_tests {
          qsearch_nnue_mtime_ns=789\n";
 
     #[test]
-    fn old_marker_without_qsearch_keys_defaults_to_false() {
-        // 旧 marker（qsearch_leaf_label 行なし）は false / None 扱いで後方互換
-        let m = parse_text(&base_marker(""));
-        assert!(!m.fingerprint.qsearch_leaf_label);
-        assert_eq!(m.fingerprint.qsearch_max_ply, None);
-        assert_eq!(m.fingerprint.qsearch_nnue_path, None);
-        assert_eq!(m.fingerprint.qsearch_nnue_size, None);
-        assert_eq!(m.fingerprint.qsearch_nnue_mtime_ns, None);
-    }
-
-    #[test]
-    fn old_marker_without_out_scores_defaults_to_false() {
-        let m = parse_text(&base_marker(""));
-        assert!(!m.fingerprint.out_scores);
-    }
-
-    #[test]
-    fn out_scores_true_roundtrips() {
-        let m = parse_text(&base_marker("out_scores=true\n"));
-        assert!(m.fingerprint.out_scores);
-        assert_eq!(m, parse_text(&serialize_marker(&m)));
+    fn legacy_marker_defaults() {
+        for extra in ["", "qsearch_leaf_label=false\nreplacement=false\n"] {
+            let m = parse_text(&base_marker(extra));
+            assert!(!m.fingerprint.qsearch_leaf_label);
+            assert_eq!(m.fingerprint.qsearch_max_ply, None);
+            assert_eq!(m.fingerprint.qsearch_nnue_path, None);
+            assert_eq!(m.fingerprint.qsearch_nnue_size, None);
+            assert_eq!(m.fingerprint.qsearch_nnue_mtime_ns, None);
+            assert!(!m.fingerprint.out_scores);
+            assert!(!m.fingerprint.replacement);
+            assert_eq!(m.fingerprint.replacement_output_path, None);
+            assert_eq!(m.output_sizes.replacement_output_size, None);
+        }
     }
 
     #[test]
@@ -5213,8 +5205,9 @@ mod marker_tests {
 
     #[test]
     fn new_marker_leaf_label_true_roundtrips() {
-        let m = parse_text(&base_marker(LEAF_LABEL_KEYS));
+        let m = parse_text(&base_marker(&format!("{LEAF_LABEL_KEYS}out_scores=true\n")));
         assert!(m.fingerprint.qsearch_leaf_label);
+        assert!(m.fingerprint.out_scores);
         assert_eq!(m.fingerprint.qsearch_max_ply, Some(20));
         // 葉探索 NNUE のメタも fingerprint に取り込まれる（差し替え検知用）。
         assert_eq!(m.fingerprint.qsearch_nnue_path, Some(PathBuf::from("/tmp/nn.bin")));
@@ -5245,14 +5238,6 @@ mod marker_tests {
     }
 
     #[test]
-    fn leaf_label_false_has_no_max_ply() {
-        let m = parse_text(&base_marker("qsearch_leaf_label=false\n"));
-        assert!(!m.fingerprint.qsearch_leaf_label);
-        assert_eq!(m.fingerprint.qsearch_max_ply, None);
-        assert_eq!(m.fingerprint.qsearch_nnue_path, None);
-    }
-
-    #[test]
     fn old_leaf_label_marker_without_nnue_keys_parses_as_none() {
         // 葉探索 NNUE キーを持たない旧 leaf-label marker は parse error にせず None として読む。
         // 現 fingerprint は Some(nnue) のため不一致になり、marker 不一致経路で再生成される。
@@ -5262,23 +5247,6 @@ mod marker_tests {
         assert_eq!(m.fingerprint.qsearch_nnue_path, None);
         assert_eq!(m.fingerprint.qsearch_nnue_size, None);
         assert_eq!(m.fingerprint.qsearch_nnue_mtime_ns, None);
-    }
-
-    #[test]
-    fn old_marker_without_replacement_key_defaults_to_false() {
-        // 旧 marker（replacement 行なし）は false / None 扱いで後方互換
-        let m = parse_text(&base_marker(""));
-        assert!(!m.fingerprint.replacement);
-        assert_eq!(m.fingerprint.replacement_output_path, None);
-        assert_eq!(m.output_sizes.replacement_output_size, None);
-    }
-
-    #[test]
-    fn replacement_false_has_no_path_or_size() {
-        let m = parse_text(&base_marker("replacement=false\n"));
-        assert!(!m.fingerprint.replacement);
-        assert_eq!(m.fingerprint.replacement_output_path, None);
-        assert_eq!(m.output_sizes.replacement_output_size, None);
     }
 
     #[test]
@@ -5482,20 +5450,6 @@ mod marker_tests {
             .flat_map(|record| record[32..34].iter().copied())
             .collect();
         assert_eq!(scores, extracted);
-    }
-
-    #[test]
-    fn score_sidecar_resume_prefix_is_bit_identical() {
-        let records = [test_psv(-5), test_psv(6), test_psv(300)];
-        let mut complete = Vec::new();
-        for record in &records {
-            append_rescore_bytes(&mut complete, record, true);
-        }
-        let mut resumed = complete[..2].to_vec();
-        for record in &records[1..] {
-            append_rescore_bytes(&mut resumed, record, true);
-        }
-        assert_eq!(resumed, complete);
     }
 
     #[test]

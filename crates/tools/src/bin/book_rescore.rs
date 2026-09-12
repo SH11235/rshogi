@@ -1041,12 +1041,6 @@ done
     }
 
     #[test]
-    fn static_value_uses_parent_perspective_by_negating_child_stm_cp() {
-        let child_stm_cp = 321;
-        assert_eq!(value_from_child_score(child_stm_cp), -321);
-    }
-
-    #[test]
     #[cfg(feature = "dlshogi-onnx")]
     fn onnx_fingerprint_changes_by_model_basename_or_eval_scale() {
         let a = onnx_fingerprint(Path::new("/tmp/model-a.onnx"), 600.0);

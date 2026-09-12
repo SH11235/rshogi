@@ -342,14 +342,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tables_initialization() {
-        // テーブルが初期化されることを確認
-        let _ = &*CHECK_CAND_BB;
-        let _ = &*CHECK_AROUND_BB;
-        let _ = &*NEXT_SQUARE;
-    }
-
-    #[test]
     fn test_check_around_bb_matches_yaneuraou_formula() {
         for sq_king in Square::all() {
             let around8 = king_effect(sq_king);

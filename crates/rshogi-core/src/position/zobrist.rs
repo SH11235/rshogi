@@ -195,18 +195,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_zobrist_xor_property() {
-        // XOR性質: A ^ B ^ B = A
-        let sq = Square::new(File::File5, Rank::Rank5);
-        let h1 = zobrist_psq(Piece::B_PAWN, sq);
-        let h2 = zobrist_psq(Piece::B_GOLD, sq);
-
-        let combined = h1 ^ h2;
-        assert_eq!(combined ^ h2, h1);
-        assert_eq!(combined ^ h1, h2);
-    }
-
     // =========================================
     // パス権用Zobristキーのテスト
     // =========================================
@@ -241,16 +229,5 @@ mod tests {
         let key15 = zobrist_pass_rights(15, 15);
         let key20 = zobrist_pass_rights(20, 20);
         assert_eq!(key15, key20);
-    }
-
-    #[test]
-    fn test_zobrist_pass_rights_xor_property() {
-        // XOR性質: A ^ B ^ B = A
-        let key1 = zobrist_pass_rights(2, 2);
-        let key2 = zobrist_pass_rights(3, 3);
-
-        let combined = key1 ^ key2;
-        assert_eq!(combined ^ key2, key1);
-        assert_eq!(combined ^ key1, key2);
     }
 }
