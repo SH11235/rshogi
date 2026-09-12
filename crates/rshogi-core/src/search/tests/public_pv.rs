@@ -221,7 +221,7 @@ fn public_pv_validation_applies_on_callback_and_result() {
         .unwrap();
 }
 
-/// 2 手目に宣言が残る公開 PV でも、WIN は ponder に選ばない。
+/// 宣言勝ちは通常の着手ではないため、合法な PV に含まれても ponder 候補から除く。
 #[test]
 fn public_pv_never_ponders_declaration() {
     let _guard = crate::eval::material::test_support::lock_material();
