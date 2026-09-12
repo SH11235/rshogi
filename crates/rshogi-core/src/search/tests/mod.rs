@@ -12,4 +12,5 @@ mod time_management;
 mod mate1_tt;
 mod probcut_abort;
 
+mod pv_legality;
 mod terminal_result;

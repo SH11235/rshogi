@@ -56,6 +56,13 @@ pub(super) fn qsearch<const NT: u8>(
         };
     }
 
+    // 親の PvTable::update はこの ply の行をそのままコピーするため、早期 return でも
+    // 兄弟ノードが残した行を渡さないよう、PV ノードでは最初に空にしてから自前で維持する。
+    if pv_node {
+        st.pv_table.clear(ply as usize);
+        st.pv_table.clear((ply + 1) as usize);
+    }
+
     if pv_node && st.sel_depth < ply + 1 {
         st.sel_depth = ply + 1;
     }
@@ -493,6 +500,9 @@ pub(super) fn qsearch<const NT: u8>(
             if value > alpha {
                 // value > alpha のときのみ bestMove を更新
                 best_move = mv;
+                if pv_node {
+                    st.pv_table.update(ply as usize, mv);
+                }
 
                 if value >= beta {
                     break;
