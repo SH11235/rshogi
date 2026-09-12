@@ -60,7 +60,7 @@ fn run_root(
     let mut tm =
         TimeManagement::new(Arc::new(AtomicBool::new(stop)), Arc::new(AtomicBool::new(false)));
     let value = if mode == 3 {
-        worker.tt.probe(pos.key(), &pos).write(
+        assert!(worker.tt.probe(pos.key(), &pos).write(
             pos.key(),
             Value::NONE,
             false,
@@ -69,7 +69,7 @@ fn run_root(
             Move::PASS,
             Value::NONE,
             worker.tt.generation(),
-        );
+        ));
         worker.search_node_wrapper::<{ crate::search::NodeType::PV as u8 }>(
             &mut pos, 1, window.0, window.1, 1, false, &limits, &mut tm,
         )
