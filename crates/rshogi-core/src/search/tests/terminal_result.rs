@@ -153,13 +153,16 @@ fn aspiration_abort_multipv_and_helpers_keep_valid_results() {
                     assert_eq!(result.score, completed.score);
                     assert_eq!(final_info.pv, completed.pv);
                 }
-                // SMP の既存の PV 生成不整合とは分離し、返却手の合法性を検証する。
-                // 単一スレッドでは完了 PV の全手も再生する。
-                let replay_len = if threads == 1 { final_info.pv.len() } else { 1 };
-                for &mv in final_info.pv.iter().take(replay_len) {
-                    assert!(RootMoves::from_legal_moves(&pos, &[]).find(mv).is_some());
-                    let check = pos.gives_check(mv);
-                    pos.do_move(mv, check);
+                assert_eq!(result.pv, final_info.pv);
+                for info in &infos {
+                    let mut replay = pos.clone();
+                    for &mv in &info.pv {
+                        let mut legal = crate::movegen::MoveList::new();
+                        crate::movegen::generate_legal_all_with_pass(&replay, &mut legal);
+                        assert!(legal.as_slice().contains(&mv));
+                        let check = replay.gives_check(mv);
+                        replay.do_move(mv, check);
+                    }
                 }
             }
         }
