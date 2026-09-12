@@ -42,7 +42,7 @@ pub enum GameStatus {
 /// 各受信者は自分が属するカテゴリ宛のエントリだけを 1 回受け取る前提で
 /// フロントエンドがフィルタする（受信者ごとに 1 回ずつ「理由→勝敗」が届くよう
 /// 宛先は重複しない区分にしている）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BroadcastTarget {
     /// 先手対局者だけに送る。
     Black,

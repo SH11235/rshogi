@@ -175,7 +175,7 @@ impl From<String> for Secret {
 ///
 /// コア crate とフロントエンドを疎結合に保つため、サーバー側では独自に再定義する。
 /// rshogi-core 側の値との相互変換は `From` / `Into` で提供する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Color {
     /// 先手。
     Black,
