@@ -6,7 +6,7 @@ use rshogi_core::types::Move;
 use std::time::Instant;
 
 #[test]
-#[ignore = "release ビルドを scripts/bench_public_pv.py から ABBA 順に実行"]
+#[ignore = "release ビルドで ABBA 順に手動実行する計測用ベンチ"]
 fn public_pv_bench() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
