@@ -76,6 +76,10 @@ mod unix_main {
         #[arg(long, default_value = "abba")]
         pattern: String,
 
+        /// 偶数 round で A/B を交換する（abba → baab）。未指定なら固定順序
+        #[arg(long)]
+        alternate_rounds: bool,
+
         /// パターン反復回数
         #[arg(long, default_value = "1")]
         rounds: u32,
@@ -146,6 +150,17 @@ mod unix_main {
             }
         }
 
+        fn for_round(self, round_idx: u32, alternate: bool) -> Self {
+            if alternate && round_idx % 2 == 1 {
+                match self {
+                    Self::Baseline => Self::Candidate,
+                    Self::Candidate => Self::Baseline,
+                }
+            } else {
+                self
+            }
+        }
+
         fn name(self) -> &'static str {
             match self {
                 Self::Baseline => "baseline",
@@ -156,6 +171,7 @@ mod unix_main {
 
     #[derive(Debug, Clone, Serialize)]
     struct PositionCase {
+        position_index: usize,
         name: String,
         position_cmd: String,
     }
@@ -283,6 +299,7 @@ mod unix_main {
         variant: Variant,
         round: u32,
         sequence_index: usize,
+        position_index: usize,
         position_name: String,
         position_cmd: String,
         bestmove: String,
@@ -317,6 +334,7 @@ mod unix_main {
         system_info: SystemInfo,
         positions: Vec<PositionCase>,
         samples: Vec<RunSample>,
+        blocks: Vec<BlockSummary>,
         summary: ComparisonSummary,
     }
 
@@ -327,6 +345,7 @@ mod unix_main {
         positions: String,
         movetime_ms: u64,
         pattern: String,
+        alternate_rounds: bool,
         rounds: u32,
         threads: usize,
         hash_mb: u32,
@@ -556,6 +575,7 @@ mod unix_main {
                 variant: self.variant,
                 round,
                 sequence_index,
+                position_index: position.position_index,
                 position_name: position.name.clone(),
                 position_cmd: position.position_cmd.clone(),
                 bestmove,
@@ -739,6 +759,7 @@ mod unix_main {
                     positions: cli.positions.display().to_string(),
                     movetime_ms: cli.movetime_ms,
                     pattern: cli.pattern.clone(),
+                    alternate_rounds: cli.alternate_rounds,
                     rounds: cli.rounds,
                     threads: cli.threads,
                     hash_mb: cli.hash_mb,
@@ -753,6 +774,7 @@ mod unix_main {
                 },
                 system_info: collect_system_info(),
                 positions,
+                blocks: build_blocks(&samples),
                 samples,
                 summary,
             };
@@ -786,6 +808,7 @@ mod unix_main {
             };
 
             positions.push(PositionCase {
+                position_index: positions.len() + 1,
                 name,
                 position_cmd: normalize_position_command(&payload),
             });
@@ -825,6 +848,7 @@ mod unix_main {
         for round_idx in 0..cli.rounds {
             for position in &positions {
                 for (sequence_index, variant) in pattern.iter().copied().enumerate() {
+                    let variant = variant.for_round(round_idx, cli.alternate_rounds);
                     let run_no = samples.len() + 1;
                     println!(
                         "[shard {shard_index}][{run_no}] round={} position={} order={} variant={} cpu={}",
@@ -874,6 +898,81 @@ mod unix_main {
         } else {
             format!("position sfen {trimmed}")
         }
+    }
+
+    /// 1 局面 × 1 round を 1 block として、実際の順序と candidate / baseline 比を残す。
+    #[derive(Debug, Clone, Serialize)]
+    struct BlockSummary {
+        round: u32,
+        position_index: usize,
+        position_name: String,
+        order: String,
+        baseline_runs: usize,
+        candidate_runs: usize,
+        nodes_ratio: Option<f64>,
+        nps_ratio: Option<f64>,
+        cycles_per_node_ratio: Option<f64>,
+        instructions_per_node_ratio: Option<f64>,
+    }
+
+    fn build_blocks(samples: &[RunSample]) -> Vec<BlockSummary> {
+        let mut grouped = std::collections::BTreeMap::<_, Vec<&RunSample>>::new();
+        for sample in samples {
+            grouped.entry((sample.round, sample.position_index)).or_default().push(sample);
+        }
+        grouped
+            .into_iter()
+            .map(|((round, position_index), mut block)| {
+                block.sort_by_key(|sample| sample.sequence_index);
+                let totals = |variant| {
+                    let selected: Vec<_> =
+                        block.iter().filter(|sample| sample.variant == variant).collect();
+                    let nodes: f64 = selected.iter().map(|sample| sample.info.nodes as f64).sum();
+                    let time: f64 = selected.iter().map(|sample| sample.info.time_ms as f64).sum();
+                    let cycles: Option<f64> =
+                        selected.iter().map(|sample| sample.perf.cycles.map(|v| v as f64)).sum();
+                    let instructions: Option<f64> = selected
+                        .iter()
+                        .map(|sample| sample.perf.instructions.map(|v| v as f64))
+                        .sum();
+                    (selected.len(), nodes, time, cycles, instructions)
+                };
+                let (a_runs, a_nodes, a_time, a_cycles, a_instructions) = totals(Variant::Baseline);
+                let (b_runs, b_nodes, b_time, b_cycles, b_instructions) =
+                    totals(Variant::Candidate);
+                BlockSummary {
+                    round,
+                    position_index,
+                    position_name: block[0].position_name.clone(),
+                    order: block
+                        .iter()
+                        .map(|sample| match sample.variant {
+                            Variant::Baseline => 'a',
+                            Variant::Candidate => 'b',
+                        })
+                        .collect(),
+                    baseline_runs: a_runs,
+                    candidate_runs: b_runs,
+                    // abba 以外の不均衡な pattern でも、1 探索あたりの平均 nodes を比較する。
+                    nodes_ratio: finite_ratio(b_nodes / b_runs as f64, a_nodes / a_runs as f64),
+                    nps_ratio: finite_ratio(b_nodes / b_time, a_nodes / a_time),
+                    cycles_per_node_ratio: a_cycles
+                        .zip(b_cycles)
+                        .and_then(|(a, b)| finite_ratio(b / b_nodes, a / a_nodes)),
+                    instructions_per_node_ratio: a_instructions
+                        .zip(b_instructions)
+                        .and_then(|(a, b)| finite_ratio(b / b_nodes, a / a_nodes)),
+                }
+            })
+            .collect()
+    }
+
+    fn finite_ratio(current: f64, base: f64) -> Option<f64> {
+        if !current.is_finite() || !base.is_finite() || base <= 0.0 {
+            return None;
+        }
+        let value = current / base;
+        value.is_finite().then_some(value)
     }
 
     fn parse_pattern(pattern: &str) -> Result<Vec<Variant>> {
@@ -1070,6 +1169,146 @@ mod unix_main {
         }
 
         #[test]
+        fn round_order_swaps_labels_instead_of_reversing_slots() {
+            for (pattern, swapped) in [
+                ("abba", "baab"),
+                ("baab", "abba"),
+                ("aab", "bba"),
+                ("AB", "ba"),
+            ] {
+                let parsed = parse_pattern(pattern).unwrap();
+                for round_idx in 0..4 {
+                    let expected = if round_idx % 2 == 0 {
+                        pattern.to_lowercase()
+                    } else {
+                        swapped.to_string()
+                    };
+                    assert_eq!(
+                        parsed.iter().map(|v| v.for_round(round_idx, true)).collect::<Vec<_>>(),
+                        parse_pattern(&expected).unwrap()
+                    );
+                    assert_eq!(
+                        parsed.iter().map(|v| v.for_round(round_idx, false)).collect::<Vec<_>>(),
+                        parsed
+                    );
+                }
+            }
+            let cli = Cli::try_parse_from([
+                "search_only_ab",
+                "--baseline",
+                "a",
+                "--candidate",
+                "b",
+                "--positions",
+                "p",
+            ])
+            .unwrap();
+            assert!(!cli.alternate_rounds);
+            let cli = Cli::try_parse_from([
+                "search_only_ab",
+                "--baseline",
+                "a",
+                "--candidate",
+                "b",
+                "--positions",
+                "p",
+                "--alternate-rounds",
+            ])
+            .unwrap();
+            assert!(cli.alternate_rounds);
+        }
+
+        fn block_sample(
+            position_index: usize,
+            round: u32,
+            sequence_index: usize,
+            variant: Variant,
+            nodes: u64,
+        ) -> RunSample {
+            RunSample {
+                variant,
+                round,
+                sequence_index,
+                position_index,
+                position_name: "same-name".to_string(),
+                position_cmd: "position startpos".to_string(),
+                bestmove: "7g7f".to_string(),
+                info: InfoSnapshot {
+                    nodes,
+                    time_ms: 1000,
+                    ..Default::default()
+                },
+                perf: PerfCounters {
+                    cycles: Some(nodes * 10),
+                    instructions: Some(nodes * 5),
+                    ..Default::default()
+                },
+            }
+        }
+
+        #[test]
+        fn blocks_preserve_identity_order_and_unrounded_ratios() {
+            let mut samples = Vec::new();
+            for position_index in 1..=2 {
+                for round in 1..=2 {
+                    for (i, v) in parse_pattern("abba").unwrap().iter().enumerate() {
+                        // 中央 slot だけ低速な同一エンジンを模擬する。
+                        let nodes = if i == 1 || i == 2 { 800 } else { 1000 };
+                        samples.push(block_sample(
+                            position_index,
+                            round,
+                            i + 1,
+                            v.for_round(round - 1, true),
+                            nodes,
+                        ));
+                    }
+                }
+            }
+            samples.reverse(); // shard 回収順・同名局面に依存しない。
+            let blocks = build_blocks(&samples);
+            assert_eq!(blocks.len(), 4);
+            for block in &blocks {
+                assert_eq!(block.baseline_runs, 2);
+                assert_eq!(block.candidate_runs, 2);
+                let (order, ratio) = if block.round == 1 {
+                    ("abba", 0.8)
+                } else {
+                    ("baab", 1.25)
+                };
+                assert_eq!(block.order, order);
+                assert_eq!(block.nodes_ratio, Some(ratio));
+                assert_eq!(block.nps_ratio, Some(ratio));
+                assert_eq!(block.cycles_per_node_ratio, Some(1.0));
+                assert_eq!(block.instructions_per_node_ratio, Some(1.0));
+            }
+            assert_eq!(blocks[0].position_index, 1);
+            assert_eq!(blocks[1].position_index, 2);
+            let json = serde_json::to_value(&blocks).unwrap();
+            assert_eq!(json[2]["order"], "baab");
+        }
+
+        #[test]
+        fn block_ratios_handle_unequal_counts_missing_counters_and_zero_nodes() {
+            let mut samples = vec![
+                block_sample(1, 1, 1, Variant::Baseline, 1000),
+                block_sample(1, 1, 2, Variant::Baseline, 1000),
+                block_sample(1, 1, 3, Variant::Candidate, 1000),
+            ];
+            samples[2].perf.cycles = None;
+            let blocks = build_blocks(&samples);
+            assert_eq!(blocks[0].nodes_ratio, Some(1.0));
+            assert_eq!(blocks[0].nps_ratio, Some(1.0));
+            assert_eq!(blocks[0].cycles_per_node_ratio, None);
+            samples[0].info.nodes = 0;
+            samples[1].info.nodes = 0;
+            let json = serde_json::to_value(build_blocks(&samples)).unwrap();
+            assert!(json[0]["nodes_ratio"].is_null());
+            assert!(json[0]["instructions_per_node_ratio"].is_null());
+            assert!(build_blocks(&samples[..2])[0].nodes_ratio.is_none());
+            assert!(build_blocks(&[]).is_empty());
+        }
+
+        #[test]
         fn parse_pattern_supports_abba() {
             let pattern = parse_pattern("abba").expect("pattern should parse");
             assert_eq!(
@@ -1193,6 +1432,10 @@ mod windows_main {
         #[arg(long, default_value = "abba")]
         pattern: String,
 
+        /// 偶数 round で A/B を交換する（abba → baab）。未指定なら固定順序
+        #[arg(long)]
+        alternate_rounds: bool,
+
         /// パターン反復回数
         #[arg(long, default_value = "1")]
         rounds: u32,
@@ -1264,6 +1507,17 @@ mod windows_main {
             }
         }
 
+        fn for_round(self, round_idx: u32, alternate: bool) -> Self {
+            if alternate && round_idx % 2 == 1 {
+                match self {
+                    Self::Baseline => Self::Candidate,
+                    Self::Candidate => Self::Baseline,
+                }
+            } else {
+                self
+            }
+        }
+
         fn name(self) -> &'static str {
             match self {
                 Self::Baseline => "baseline",
@@ -1274,6 +1528,7 @@ mod windows_main {
 
     #[derive(Debug, Clone, Serialize)]
     struct PositionCase {
+        position_index: usize,
         name: String,
         position_cmd: String,
     }
@@ -1386,6 +1641,7 @@ mod windows_main {
         variant: Variant,
         round: u32,
         sequence_index: usize,
+        position_index: usize,
         position_name: String,
         position_cmd: String,
         bestmove: String,
@@ -1420,6 +1676,7 @@ mod windows_main {
         system_info: SystemInfo,
         positions: Vec<PositionCase>,
         samples: Vec<RunSample>,
+        blocks: Vec<BlockSummary>,
         summary: ComparisonSummary,
     }
 
@@ -1430,6 +1687,7 @@ mod windows_main {
         positions: String,
         movetime_ms: u64,
         pattern: String,
+        alternate_rounds: bool,
         rounds: u32,
         threads: usize,
         hash_mb: u32,
@@ -3256,6 +3514,7 @@ mod windows_main {
             variant,
             round,
             sequence_index,
+            position_index: position.position_index,
             position_name: position.name.clone(),
             position_cmd: position.position_cmd.clone(),
             bestmove,
@@ -3292,6 +3551,7 @@ mod windows_main {
         for round_idx in 0..cli.rounds {
             for position in &positions {
                 for (sequence_index, variant) in pattern.iter().copied().enumerate() {
+                    let variant = variant.for_round(round_idx, cli.alternate_rounds);
                     let run_no = samples.len() + 1;
                     println!(
                         "[shard 1][{run_no}] round={} position={} order={} variant={} cpu={}",
@@ -3346,6 +3606,7 @@ mod windows_main {
                     positions: cli.positions.display().to_string(),
                     movetime_ms: cli.movetime_ms,
                     pattern: cli.pattern.clone(),
+                    alternate_rounds: cli.alternate_rounds,
                     rounds: cli.rounds,
                     threads: cli.threads,
                     hash_mb: cli.hash_mb,
@@ -3360,6 +3621,7 @@ mod windows_main {
                 },
                 system_info: collect_system_info(),
                 positions,
+                blocks: build_blocks(&samples),
                 samples,
                 summary,
             };
@@ -3445,6 +3707,7 @@ mod windows_main {
             };
 
             positions.push(PositionCase {
+                position_index: positions.len() + 1,
                 name,
                 position_cmd: normalize_position_command(&payload),
             });
@@ -3464,6 +3727,81 @@ mod windows_main {
         } else {
             format!("position sfen {trimmed}")
         }
+    }
+
+    /// 1 局面 × 1 round を 1 block として、実際の順序と candidate / baseline 比を残す。
+    #[derive(Debug, Clone, Serialize)]
+    struct BlockSummary {
+        round: u32,
+        position_index: usize,
+        position_name: String,
+        order: String,
+        baseline_runs: usize,
+        candidate_runs: usize,
+        nodes_ratio: Option<f64>,
+        nps_ratio: Option<f64>,
+        cycles_per_node_ratio: Option<f64>,
+        instructions_per_node_ratio: Option<f64>,
+    }
+
+    fn build_blocks(samples: &[RunSample]) -> Vec<BlockSummary> {
+        let mut grouped = std::collections::BTreeMap::<_, Vec<&RunSample>>::new();
+        for sample in samples {
+            grouped.entry((sample.round, sample.position_index)).or_default().push(sample);
+        }
+        grouped
+            .into_iter()
+            .map(|((round, position_index), mut block)| {
+                block.sort_by_key(|sample| sample.sequence_index);
+                let totals = |variant| {
+                    let selected: Vec<_> =
+                        block.iter().filter(|sample| sample.variant == variant).collect();
+                    let nodes: f64 = selected.iter().map(|sample| sample.info.nodes as f64).sum();
+                    let time: f64 = selected.iter().map(|sample| sample.info.time_ms as f64).sum();
+                    let cycles: Option<f64> =
+                        selected.iter().map(|sample| sample.perf.cycles.map(|v| v as f64)).sum();
+                    let instructions: Option<f64> = selected
+                        .iter()
+                        .map(|sample| sample.perf.instructions.map(|v| v as f64))
+                        .sum();
+                    (selected.len(), nodes, time, cycles, instructions)
+                };
+                let (a_runs, a_nodes, a_time, a_cycles, a_instructions) = totals(Variant::Baseline);
+                let (b_runs, b_nodes, b_time, b_cycles, b_instructions) =
+                    totals(Variant::Candidate);
+                BlockSummary {
+                    round,
+                    position_index,
+                    position_name: block[0].position_name.clone(),
+                    order: block
+                        .iter()
+                        .map(|sample| match sample.variant {
+                            Variant::Baseline => 'a',
+                            Variant::Candidate => 'b',
+                        })
+                        .collect(),
+                    baseline_runs: a_runs,
+                    candidate_runs: b_runs,
+                    // abba 以外の不均衡な pattern でも、1 探索あたりの平均 nodes を比較する。
+                    nodes_ratio: finite_ratio(b_nodes / b_runs as f64, a_nodes / a_runs as f64),
+                    nps_ratio: finite_ratio(b_nodes / b_time, a_nodes / a_time),
+                    cycles_per_node_ratio: a_cycles
+                        .zip(b_cycles)
+                        .and_then(|(a, b)| finite_ratio(b / b_nodes, a / a_nodes)),
+                    instructions_per_node_ratio: a_instructions
+                        .zip(b_instructions)
+                        .and_then(|(a, b)| finite_ratio(b / b_nodes, a / a_nodes)),
+                }
+            })
+            .collect()
+    }
+
+    fn finite_ratio(current: f64, base: f64) -> Option<f64> {
+        if !current.is_finite() || !base.is_finite() || base <= 0.0 {
+            return None;
+        }
+        let value = current / base;
+        value.is_finite().then_some(value)
     }
 
     fn parse_pattern(pattern: &str) -> Result<Vec<Variant>> {
@@ -3618,6 +3956,146 @@ mod windows_main {
         fn normalize_position_command_accepts_raw_sfen() {
             let raw = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
             assert_eq!(normalize_position_command(raw), format!("position sfen {raw}"));
+        }
+
+        #[test]
+        fn round_order_swaps_labels_instead_of_reversing_slots() {
+            for (pattern, swapped) in [
+                ("abba", "baab"),
+                ("baab", "abba"),
+                ("aab", "bba"),
+                ("AB", "ba"),
+            ] {
+                let parsed = parse_pattern(pattern).unwrap();
+                for round_idx in 0..4 {
+                    let expected = if round_idx % 2 == 0 {
+                        pattern.to_lowercase()
+                    } else {
+                        swapped.to_string()
+                    };
+                    assert_eq!(
+                        parsed.iter().map(|v| v.for_round(round_idx, true)).collect::<Vec<_>>(),
+                        parse_pattern(&expected).unwrap()
+                    );
+                    assert_eq!(
+                        parsed.iter().map(|v| v.for_round(round_idx, false)).collect::<Vec<_>>(),
+                        parsed
+                    );
+                }
+            }
+            let cli = Cli::try_parse_from([
+                "search_only_ab",
+                "--baseline",
+                "a",
+                "--candidate",
+                "b",
+                "--positions",
+                "p",
+            ])
+            .unwrap();
+            assert!(!cli.alternate_rounds);
+            let cli = Cli::try_parse_from([
+                "search_only_ab",
+                "--baseline",
+                "a",
+                "--candidate",
+                "b",
+                "--positions",
+                "p",
+                "--alternate-rounds",
+            ])
+            .unwrap();
+            assert!(cli.alternate_rounds);
+        }
+
+        fn block_sample(
+            position_index: usize,
+            round: u32,
+            sequence_index: usize,
+            variant: Variant,
+            nodes: u64,
+        ) -> RunSample {
+            RunSample {
+                variant,
+                round,
+                sequence_index,
+                position_index,
+                position_name: "same-name".to_string(),
+                position_cmd: "position startpos".to_string(),
+                bestmove: "7g7f".to_string(),
+                info: InfoSnapshot {
+                    nodes,
+                    time_ms: 1000,
+                    ..Default::default()
+                },
+                perf: PerfCounters {
+                    cycles: Some(nodes * 10),
+                    instructions: Some(nodes * 5),
+                    ..Default::default()
+                },
+            }
+        }
+
+        #[test]
+        fn blocks_preserve_identity_order_and_unrounded_ratios() {
+            let mut samples = Vec::new();
+            for position_index in 1..=2 {
+                for round in 1..=2 {
+                    for (i, v) in parse_pattern("abba").unwrap().iter().enumerate() {
+                        // 中央 slot だけ低速な同一エンジンを模擬する。
+                        let nodes = if i == 1 || i == 2 { 800 } else { 1000 };
+                        samples.push(block_sample(
+                            position_index,
+                            round,
+                            i + 1,
+                            v.for_round(round - 1, true),
+                            nodes,
+                        ));
+                    }
+                }
+            }
+            samples.reverse(); // shard 回収順・同名局面に依存しない。
+            let blocks = build_blocks(&samples);
+            assert_eq!(blocks.len(), 4);
+            for block in &blocks {
+                assert_eq!(block.baseline_runs, 2);
+                assert_eq!(block.candidate_runs, 2);
+                let (order, ratio) = if block.round == 1 {
+                    ("abba", 0.8)
+                } else {
+                    ("baab", 1.25)
+                };
+                assert_eq!(block.order, order);
+                assert_eq!(block.nodes_ratio, Some(ratio));
+                assert_eq!(block.nps_ratio, Some(ratio));
+                assert_eq!(block.cycles_per_node_ratio, Some(1.0));
+                assert_eq!(block.instructions_per_node_ratio, Some(1.0));
+            }
+            assert_eq!(blocks[0].position_index, 1);
+            assert_eq!(blocks[1].position_index, 2);
+            let json = serde_json::to_value(&blocks).unwrap();
+            assert_eq!(json[2]["order"], "baab");
+        }
+
+        #[test]
+        fn block_ratios_handle_unequal_counts_missing_counters_and_zero_nodes() {
+            let mut samples = vec![
+                block_sample(1, 1, 1, Variant::Baseline, 1000),
+                block_sample(1, 1, 2, Variant::Baseline, 1000),
+                block_sample(1, 1, 3, Variant::Candidate, 1000),
+            ];
+            samples[2].perf.cycles = None;
+            let blocks = build_blocks(&samples);
+            assert_eq!(blocks[0].nodes_ratio, Some(1.0));
+            assert_eq!(blocks[0].nps_ratio, Some(1.0));
+            assert_eq!(blocks[0].cycles_per_node_ratio, None);
+            samples[0].info.nodes = 0;
+            samples[1].info.nodes = 0;
+            let json = serde_json::to_value(build_blocks(&samples)).unwrap();
+            assert!(json[0]["nodes_ratio"].is_null());
+            assert!(json[0]["instructions_per_node_ratio"].is_null());
+            assert!(build_blocks(&samples[..2])[0].nodes_ratio.is_none());
+            assert!(build_blocks(&[]).is_empty());
         }
 
         #[test]
