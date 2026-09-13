@@ -1,6 +1,15 @@
 import worker, { GameRoom as RustGameRoom, Lobby, RateLimiter } from '../../build/worker/shim.mjs';
 export { Lobby, RateLimiter };
-export default worker;
+// テスト専用入口から本物の scheduled ハンドラを実行する。
+// :15 を指定し、毎正時の backfill と切り離して sweep を検証する。
+export default class extends worker {
+  async fetch(request) {
+    if (new URL(request.url).pathname !== '/__test/cron') return super.fetch(request);
+    const scheduledTime = Math.floor(Date.now() / 3_600_000) * 3_600_000 + 15 * 60_000;
+    await this.scheduled({ cron: '*/15 * * * *', scheduledTime, noRetry() {} });
+    return new Response('ok');
+  }
+}
 
 const STORAGE_EFFECTS = ['get', 'put', 'delete', 'deleteMultiple', 'getAlarm', 'setAlarm', 'deleteAlarm'];
 const SOCKET_EFFECTS = ['send', 'serializeAttachment', 'close'];
