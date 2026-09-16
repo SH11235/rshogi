@@ -202,8 +202,7 @@ struct Cli {
     #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     sprt_nelo0: f64,
 
-    /// H1 仮説の正規化 Elo（default: 5.0）。負値もスペース区切りで受け付ける
-    /// （例: `--sprt-nelo0 -20 --sprt-nelo1 -5`。nelo0 < nelo1 必須）。
+    /// H1 仮説の正規化 Elo（default: 5.0）。負値もスペース区切りで受け付ける（例: `--sprt-nelo0 -20 --sprt-nelo1 -5`。nelo0 < nelo1 必須）。
     #[arg(long, default_value_t = 5.0, allow_negative_numbers = true)]
     sprt_nelo1: f64,
 
