@@ -4,13 +4,23 @@
 
 use std::process::Command;
 
-fn assert_not_clap_usage_error(output: &std::process::Output, context: &str) {
+/// clap の usage error でなく、引数解析後の実行時エラー (`expected_runtime_error`) で
+/// 落ちていることを確認する。後者が出ていれば nelo 引数はパースを通過している。
+fn assert_failed_after_parsing(
+    output: &std::process::Output,
+    context: &str,
+    expected_runtime_error: &str,
+) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("unexpected argument"),
         "{context}: clap rejected negative nelo value: {stderr}"
     );
     assert!(!stderr.contains("Usage:"), "{context}: clap usage error emitted: {stderr}");
+    assert!(
+        stderr.contains(expected_runtime_error),
+        "{context}: expected post-parse error `{expected_runtime_error}`, got: {stderr}"
+    );
 }
 
 #[test]
@@ -43,7 +53,7 @@ fn tournament_accepts_negative_nelo_bounds() {
         .arg(dir.path().join("out"))
         .output()
         .unwrap();
-    assert_not_clap_usage_error(&output, "tournament");
+    assert_failed_after_parsing(&output, "tournament", "engine binary not found");
 }
 
 #[test]
@@ -65,5 +75,5 @@ fn analyze_selfplay_accepts_negative_nelo_bounds() {
         ])
         .output()
         .unwrap();
-    assert_not_clap_usage_error(&output, "analyze_selfplay");
+    assert_failed_after_parsing(&output, "analyze_selfplay", "有効な対局データがありません");
 }

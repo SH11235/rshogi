@@ -60,7 +60,7 @@ struct Cli {
     sprt_nelo0: Option<f64>,
 
     /// H1 仮説の正規化 Elo。未指定時は meta → ハードコード fallback (5.0) の順で解決。
-    /// 負値も `--sprt-nelo1 -5` の形で受け付ける。
+    /// 負値もスペース区切りで受け付ける（例: `--sprt-nelo0 -20 --sprt-nelo1 -5`。nelo0 < nelo1 必須）。
     #[arg(long, allow_negative_numbers = true)]
     sprt_nelo1: Option<f64>,
 
@@ -2132,6 +2132,23 @@ fn print_json(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sprt_nelo_bounds_accept_space_separated_negative_values() {
+        use clap::Parser;
+
+        let cli = super::Cli::try_parse_from([
+            "analyze_selfplay",
+            "log.jsonl",
+            "--sprt-nelo0",
+            "-10",
+            "--sprt-nelo1",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(cli.sprt_nelo0, Some(-10.0));
+        assert_eq!(cli.sprt_nelo1, Some(0.0));
+    }
+
     #[test]
     fn decisive_rate_labels_use_the_same_denominator() {
         assert_eq!(

@@ -202,7 +202,8 @@ struct Cli {
     #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     sprt_nelo0: f64,
 
-    /// H1 仮説の正規化 Elo（default: 5.0）。負値も `--sprt-nelo1 -5` の形で受け付ける。
+    /// H1 仮説の正規化 Elo（default: 5.0）。負値もスペース区切りで受け付ける
+    /// （例: `--sprt-nelo0 -20 --sprt-nelo1 -5`。nelo0 < nelo1 必須）。
     #[arg(long, default_value_t = 5.0, allow_negative_numbers = true)]
     sprt_nelo1: f64,
 
@@ -2422,6 +2423,26 @@ fn ensure_node_coverage(
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    #[test]
+    fn sprt_nelo_bounds_accept_space_separated_negative_values() {
+        let cli = super::Cli::try_parse_from([
+            "tournament",
+            "--engine",
+            "base",
+            "--engine",
+            "test",
+            "--out-dir",
+            "out",
+            "--sprt-nelo0",
+            "-10",
+            "--sprt-nelo1",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(cli.sprt_nelo0, -10.0);
+        assert_eq!(cli.sprt_nelo1, 0.0);
+    }
 
     #[test]
     fn adjudication_flags_parse_and_default_off() {

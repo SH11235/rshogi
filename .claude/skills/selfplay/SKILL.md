@@ -70,8 +70,8 @@ search / FS / arch / 速度が変わる対局を固定ノードでやると、�
 - 標準 bounds は用途別 2 種 (α=β=0.05):
   - **gainer (強くする変更)**: `--sprt-nelo0 0 --sprt-nelo1 10`
   - **simplification / non-regression**: `--sprt-nelo0 -10 --sprt-nelo1 0`
-  - 負値は現行バイナリならそのまま通る。`error: unexpected argument '-1' found` が出る古い
-    tournament (負値対応前) では `--sprt-nelo0=-10` の `=` 形式で渡す。
+  - 負値はスペース区切りのまま渡せる。負値対応前にビルドした tournament
+    (`error: unexpected argument '-1' found` が出る) では `--sprt-nelo0=-10` の `=` 形式で渡す。
 - simplification の `<-10, 0>` は -5 nElo 級の退行を検出せず通し得る。簡略化 SPRT を
   乱発せず、保守性が必要なら期待局数を見積もり、より狭い bounds を事前登録する。
 - **4 パラメータ (`--sprt-nelo0 / --sprt-nelo1 / --sprt-alpha / --sprt-beta`) は常に明示する**。
@@ -444,8 +444,7 @@ cargo run -p tools --release --bin tournament -- \
   --out-dir "$OUT"
 ```
 
-simplification / non-regression の検定は `--sprt-nelo0 -10 --sprt-nelo1 0` に差し替える
-(負値対応前の古い tournament で `unexpected argument '-1'` になる場合は `--sprt-nelo0=-10`)。
+simplification / non-regression の検定は `--sprt-nelo0 -10 --sprt-nelo1 0` に差し替える。
 
 ポイント:
 
