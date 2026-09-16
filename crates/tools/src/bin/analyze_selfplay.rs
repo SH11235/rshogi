@@ -55,11 +55,13 @@ struct Cli {
     sprt_base_label: Option<String>,
 
     /// H0 仮説の正規化 Elo。未指定時は meta → ハードコード fallback (0.0) の順で解決。
-    #[arg(long)]
+    /// 負値も `--sprt-nelo0 -10` の形で受け付ける。
+    #[arg(long, allow_negative_numbers = true)]
     sprt_nelo0: Option<f64>,
 
     /// H1 仮説の正規化 Elo。未指定時は meta → ハードコード fallback (5.0) の順で解決。
-    #[arg(long)]
+    /// 負値も `--sprt-nelo1 -5` の形で受け付ける。
+    #[arg(long, allow_negative_numbers = true)]
     sprt_nelo1: Option<f64>,
 
     /// 第一種過誤率 α。未指定時は meta → ハードコード fallback (0.05) の順で解決。

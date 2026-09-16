@@ -198,12 +198,12 @@ struct Cli {
     #[arg(long)]
     sprt_base_label: Option<String>,
 
-    /// H0 仮説の正規化 Elo（default: 0.0）
-    #[arg(long, default_value_t = 0.0)]
+    /// H0 仮説の正規化 Elo（default: 0.0）。負値も `--sprt-nelo0 -10` の形で受け付ける。
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     sprt_nelo0: f64,
 
-    /// H1 仮説の正規化 Elo（default: 5.0）
-    #[arg(long, default_value_t = 5.0)]
+    /// H1 仮説の正規化 Elo（default: 5.0）。負値も `--sprt-nelo1 -5` の形で受け付ける。
+    #[arg(long, default_value_t = 5.0, allow_negative_numbers = true)]
     sprt_nelo1: f64,
 
     /// 第一種過誤率 α（default: 0.05）
