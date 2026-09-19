@@ -332,8 +332,3 @@ echo "コールグラフレポートの生成中..."
 sudo perf report -i perf_nnue.data --stdio -g caller --percent-limit 0.5 \
     > perf_results/nnue_callers.txt
 echo "  -> perf_results/nnue_callers.txt"
-
-
-echo "ドキュメント更新:"
-echo "  Rust native: Claude Codeで /update-rust-perf-docs を実行してください"
-echo "  WASM:        Claude Codeで /update-wasm-perf-docs を実行してください"

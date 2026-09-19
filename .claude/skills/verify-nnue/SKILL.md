@@ -1,5 +1,6 @@
 ---
-description: NNUE モデルの正当性検証。refresh vs update 一致テスト + bullet-shogi とのクロス実装検証を実行する。「モデルを検証して」「Golden Forward テストして」等のリクエストに使用する。
+name: verify-nnue
+description: "NNUE モデルの正当性検証。refresh vs update 一致テスト + bullet-shogi とのクロス実装検証を実行する。「モデルを検証して」「Golden Forward テストして」等のリクエストに使用する。"
 user-invocable: true
 ---
 

@@ -1,3 +1,8 @@
+---
+name: usi-perf-measure
+description: "USI エンジンの探索区間を search_only_ab で A/B 計測する。Linux perf と Windows ETW の条件、結果の読み方、ノイズの確認に使う。"
+---
+
 # USI エンジンの search-only perf 計測
 
 rshogi USI バイナリの **探索区間のみ** の HW カウンタを計測し、cycles/node, cache-miss 率等を A/B 比較する手順。初期化（モデルロード、allocator 初期化、`isready`）のノイズを排除する。
@@ -243,18 +248,10 @@ nps_delta_pct=+12.3% cycles_per_node_delta_pct=-11.0% instructions_per_node_delt
 
 ### 有意性の目安（ノイズ床）
 
-Windows ETW backend の A/A 実測（Zen 5 / 9950X3D 機、movetime 3s × abba ×
-rounds 3、threads=1・単一 CPU pin、境界スライス線形按分実装後）で pooled の
-cycles/node 残差は **±0.13%** だった。この構成でのノイズ床として:
-
-- **pooled 差が ±0.2% 未満なら有意と主張しない**（ABBA + rounds ≥ 3 を揃えた上で）
-- ±0.2% はあくまで pooled A/A 残差由来のノイズ床であって A/B の最終判定基準では
-  ない。pooled 値には position-mix バイアスが乗る（ハマりどころ 8 参照）ので、
-  **ノイズ床を越えた場合の最終判定は per-position で行う**
-- 上記数値はこの構成（Windows ETW・3s・pin）での実測。movetime を伸ばせば締まり、
-  構成が違えばノイズ床も変わるので、疑わしければその構成で A/A を取り直す
-- 本文のレシピ例は `--rounds 2`（探索的な比較向け）。このノイズ床を適用して
-  有意性を主張する判定では `--rounds 3` 以上に上げる
+同じ binary を baseline / candidate に指定する A/A 計測で、使用する機体・OS・
+探索時間・thread 数・pin 条件でのばらつきを確認する。別環境のノイズ床を流用しない。
+A/B の差がそのばらつきを超えた場合も、pooled 値だけで判定せず局面別の差を確認する。
+pooled 値には position-mix バイアスが乗る（ハマりどころ 8 参照）。
 
 ### cycles/node vs instructions/node の差分
 
