@@ -137,6 +137,8 @@ pub enum LayerStackBucketMode {
     KingRank9 = 0,
     /// 進行度方式 (KP-absolute)。bucket 数は推論設定で明示する。
     ProgressKPAbs = 4,
+    /// YaneuraOu / BulletOu SFNN 互換の Q16 整数進行度方式。
+    ProgressKPAbsQ16 = 5,
 }
 
 impl LayerStackBucketMode {
@@ -144,6 +146,7 @@ impl LayerStackBucketMode {
         match self {
             Self::KingRank9 => "kingrank9",
             Self::ProgressKPAbs => "progresskpabs",
+            Self::ProgressKPAbsQ16 => "progresskpabsq16",
         }
     }
 }
@@ -260,6 +263,7 @@ pub fn set_fv_scale_override(value: i32) {
 pub fn get_layer_stack_bucket_mode() -> LayerStackBucketMode {
     match LAYER_STACK_BUCKET_MODE.load(Ordering::Relaxed) {
         0 => LayerStackBucketMode::KingRank9,
+        5 => LayerStackBucketMode::ProgressKPAbsQ16,
         _ => LayerStackBucketMode::ProgressKPAbs,
     }
 }
@@ -298,7 +302,7 @@ pub fn validate_layer_stack_routing_configuration(
     progress_bucket_count: Option<usize>,
 ) -> Result<(), String> {
     match mode {
-        LayerStackBucketMode::ProgressKPAbs => {
+        LayerStackBucketMode::ProgressKPAbs | LayerStackBucketMode::ProgressKPAbsQ16 => {
             let routing_bucket_count = progress_bucket_count.ok_or_else(|| {
                 "progresskpabs requires an explicit progress bucket count".to_string()
             })?;
@@ -1214,6 +1218,7 @@ pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode
     match value.trim().to_ascii_lowercase().as_str() {
         "kingrank9" => Some(LayerStackBucketMode::KingRank9),
         "progresskpabs" => Some(LayerStackBucketMode::ProgressKPAbs),
+        "progresskpabsq16" => Some(LayerStackBucketMode::ProgressKPAbsQ16),
         _ => None,
     }
 }

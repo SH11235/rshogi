@@ -19,10 +19,10 @@ use rshogi_core::nnue::{
     AccumulatorStackVariant, LayerStackBucketMode, MAX_LAYER_STACK_BUCKETS,
     NET_DELTA_OPTION_PREFIX, NetCoefficientId, NetDelta, NetDeltaReport, clear_nnue,
     configure_layer_stack_routing, evaluate_dispatch, get_network, init_nnue_with_deltas,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, parse_layer_stack_bucket_mode,
-    parse_nnue_architecture, print_nnue_stats, reset_layer_stack_progress_buckets,
-    reset_layer_stack_progress_kpabs_weights, set_fv_scale_override,
-    set_layer_stack_progress_kpabs_weights, set_nnue_architecture_override,
+    layer_stack_progress_coeff_required, load_progress_coeff_kpabs_from_bytes,
+    parse_layer_stack_bucket_mode, parse_nnue_architecture, print_nnue_stats,
+    reset_layer_stack_progress_buckets, reset_layer_stack_progress_kpabs_weights,
+    set_fv_scale_override, set_layer_stack_progress_kpabs_weights, set_nnue_architecture_override,
     validate_layer_stack_routing_configuration,
 };
 use rshogi_core::position::Position;
@@ -281,7 +281,7 @@ impl UsiEngine {
         // 水匠5等は24、YaneuraOuデフォルトは16
         println!("option name FV_SCALE type spin default 0 min 0 max 100");
         println!(
-            "option name LS_BUCKET_MODE type combo default unset var unset var progresskpabs var kingrank9"
+            "option name LS_BUCKET_MODE type combo default unset var unset var progresskpabs var progresskpabsq16 var kingrank9"
         );
         println!(
             "option name LS_PROGRESS_BUCKETS type spin default 0 min 0 max {MAX_LAYER_STACK_BUCKETS}"
@@ -401,7 +401,7 @@ impl UsiEngine {
                 });
             let routing_bucket_count = match mode {
                 LayerStackBucketMode::KingRank9 => 9,
-                LayerStackBucketMode::ProgressKPAbs => {
+                LayerStackBucketMode::ProgressKPAbs | LayerStackBucketMode::ProgressKPAbsQ16 => {
                     self.ls_progress_buckets.expect("validated above")
                 }
                 _ => unreachable!("validated above"),
@@ -991,7 +991,7 @@ impl UsiEngine {
                             // 設定済みの正しい mode を typo や旧名 (progress8kpabs) で
                             // 上書き消去しない。isready の「未設定」エラーは誤診を招く。
                             eprintln!(
-                                "info string Warning: invalid LS_BUCKET_MODE '{}' ignored, expected progresskpabs or kingrank9",
+                                "info string Warning: invalid LS_BUCKET_MODE '{}' ignored, expected progresskpabs, progresskpabsq16 or kingrank9",
                                 value
                             );
                         }
@@ -1018,12 +1018,20 @@ impl UsiEngine {
             "LS_PROGRESS_COEFF" => {
                 if value.is_empty() || value == "<empty>" {
                     reset_layer_stack_progress_kpabs_weights();
+                    rshogi_core::nnue::reset_layer_stack_progress_kpabs_q16_weights();
                     self.ls_progress_coeff_loaded = false;
                     eprintln!("info string LS_PROGRESS_COEFF: unset");
                 } else {
                     self.ls_progress_coeff_loaded = false;
                     reset_layer_stack_progress_kpabs_weights();
-                    match load_progress_coeff_kpabs(&value) {
+                    rshogi_core::nnue::reset_layer_stack_progress_kpabs_q16_weights();
+                    match std::fs::read(&value).map_err(|e| e.to_string()).and_then(|bytes| {
+                        let weights = load_progress_coeff_kpabs_from_bytes(&bytes)?;
+                        let q16 =
+                            rshogi_core::nnue::load_progress_coeff_kpabs_q16_from_bytes(&bytes)?;
+                        rshogi_core::nnue::set_layer_stack_progress_kpabs_q16_weights(q16)?;
+                        Ok(weights)
+                    }) {
                         Ok(weights) => match set_layer_stack_progress_kpabs_weights(weights) {
                             Ok(()) => {
                                 self.ls_progress_coeff_loaded = true;
@@ -1676,18 +1684,17 @@ fn validate_layer_stack_routing(
 ) -> std::result::Result<(), String> {
     match mode {
         None => Err(
-            "LS_BUCKET_MODE must be explicitly set to progresskpabs or kingrank9 before isready"
+            "LS_BUCKET_MODE must be explicitly set to progresskpabs, progresskpabsq16 or kingrank9 before isready"
                 .to_string(),
         ),
-        Some(LayerStackBucketMode::ProgressKPAbs) => {
+        Some(mode @ (LayerStackBucketMode::ProgressKPAbs | LayerStackBucketMode::ProgressKPAbsQ16)) => {
             validate_layer_stack_routing_configuration(
-                LayerStackBucketMode::ProgressKPAbs,
+                mode,
                 stored_bucket_count,
                 progress_buckets,
             )?;
             if !progress_coeff_loaded && layer_stack_progress_coeff_required(progress_buckets) {
-                return Err("LS_BUCKET_MODE=progresskpabs requires LS_PROGRESS_COEFF to be loaded"
-                    .to_string());
+                return Err(format!("LS_BUCKET_MODE={} requires LS_PROGRESS_COEFF to be loaded", mode.as_str()));
             }
             Ok(())
         }
@@ -2001,6 +2008,7 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
 
                 // テスト開始時に既定値へ戻す
                 reset_layer_stack_progress_kpabs_weights();
+                rshogi_core::nnue::reset_layer_stack_progress_kpabs_q16_weights();
 
                 let mut engine = UsiEngine::new();
                 engine.cmd_setoption(&[
@@ -2058,6 +2066,7 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                 // 他テストへの影響を避けるため復元
                 reset_layer_stack_progress_buckets();
                 reset_layer_stack_progress_kpabs_weights();
+                rshogi_core::nnue::reset_layer_stack_progress_kpabs_q16_weights();
             })
             .unwrap()
             .join()

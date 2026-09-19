@@ -92,6 +92,9 @@ fn compute_layer_stacks_bucket_index(
         LayerStackBucketMode::KingRank9 => {
             compute_layer_stack_kingrank9_bucket_index(pos, side_to_move, num_buckets)
         }
+        LayerStackBucketMode::ProgressKPAbsQ16 => {
+            super::progress_q16::configured_progress_q16_bucket(pos, num_buckets)
+        }
         LayerStackBucketMode::ProgressKPAbs => {
             let weights = get_layer_stack_progress_kpabs_weights();
             let routing_buckets = get_layer_stack_progress_buckets()

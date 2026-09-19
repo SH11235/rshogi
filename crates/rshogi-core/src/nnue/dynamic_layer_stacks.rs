@@ -921,6 +921,9 @@ impl DynamicLayerStacksNetwork {
                 pos.side_to_move(),
                 self.num_buckets,
             ),
+            LayerStackBucketMode::ProgressKPAbsQ16 => {
+                super::progress_q16::configured_progress_q16_bucket(pos, self.num_buckets)
+            }
             LayerStackBucketMode::ProgressKPAbs => {
                 let routing_buckets = get_layer_stack_progress_buckets()
                     .expect("LayerStacks progress routing is not configured");

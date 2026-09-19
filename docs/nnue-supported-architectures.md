@@ -109,3 +109,17 @@ rshogi はファイルサイズからアーキテクチャを自動検出しま�
 2. `crates/rshogi-core/src/nnue/spec.rs` の `KNOWN_PAYLOADS` にエントリを追加
 
 詳細: [nnue-architecture-detection.md](./nnue-architecture-detection.md)
+
+## YaneuraOu SFNN の進行度 routing
+
+`LS_BUCKET_MODE=progresskpabsq16` は YaneuraOu / BulletOu SFNN 用の整数方式です。
+`LS_PROGRESS_COEFF` は raw little-endian f64 × (81 × 1548) を読み込み、
+各係数を `round(w * 65536)` で i32 に丸めて飽和させ、両視点を i64 で合算します。
+`LS_PROGRESS_BUCKETS` にはモデルの routing 数を明示してください。
+YaneuraOu の直接 N 分割と BulletOu の 0..255 から N 分割は N=2/4/8/16 で一致します。
+合成 K3K3 × progress routing はこの mode の対象外です。
+
+既存の `progresskpabs` は tatara の f32 方式のままです。同一の係数ファイルでも
+量子化により境界付近の bucket が異なるため、生成元と同じ mode を選択します。
+`kingrank9` は SFNN K3K3 に対応します。Q16 mode は float 差分キャッシュを使わず
+全駒スキャンで評価し、`nnue-progress-diff` の有無で routing が変化しません。
