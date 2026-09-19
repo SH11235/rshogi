@@ -1,5 +1,6 @@
 ---
-description: rshogi の指定モジュールを YaneuraOu の対応実装と比較し、差分をレビューする
+name: yo-compare
+description: "rshogi の指定モジュールを YaneuraOu の対応実装と比較し、差分をレビューする"
 user-invocable: true
 ---
 

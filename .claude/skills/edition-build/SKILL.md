@@ -1,5 +1,6 @@
 ---
-description: rshogi engine の preset edition build と NNUE format 互換性管理。xtask で多数の architecture variant (HalfKP / HalfKA / HalfKA_HM、LayerStack 1536x16x32 / 1536x32x32 / 768x16x32 / 768x8x32 / 512x16x32 / 1024x16x32、PSQT / Threat / progress-diff) を build し engines/ 配下に配置する。古い engine binary が新 NNUE ckpt format (`Unknown NNUE version: 0x...`) を load できない場合の rebuild 手順、preset から外れた手動 cargo build 時の feature 表、build profile (release / production) 選択基準を扱う。「engine build」「edition build」「format 互換性」「Unknown NNUE version」「preset 一覧」等のリクエストに使用する。
+name: edition-build
+description: "rshogi engine の preset edition build と NNUE format 互換性管理。xtask で多数の architecture variant (HalfKP / HalfKA / HalfKA_HM、LayerStack 1536x16x32 / 1536x32x32 / 768x16x32 / 768x8x32 / 512x16x32 / 1024x16x32、PSQT / Threat / progress-diff) を build し engines/ 配下に配置する。古い engine binary が新 NNUE ckpt format (`Unknown NNUE version: 0x...`) を load できない場合の rebuild 手順、preset から外れた手動 cargo build 時の feature 表、build profile (release / production) 選択基準を扱う。「engine build」「edition build」「format 互換性」「Unknown NNUE version」「preset 一覧」等のリクエストに使用する。"
 user-invocable: true
 ---
 
