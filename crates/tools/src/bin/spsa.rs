@@ -2434,12 +2434,18 @@ fn discover_numa_cpu_affinities(threads: usize, worker_count: usize) -> Result<V
         .lines()
         .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
         .context("Cpus_allowed_list is missing from /proc/self/status")?;
-    let allowed: BTreeSet<_> = parse_cpu_list(allowed_text)?.into_iter().collect();
+    let node_cpus = read_numa_node_cpus(Path::new("/sys/devices/system/node"), allowed_text)?;
+    plan_numa_cpu_affinities(&node_cpus, threads, worker_count)
+}
 
-    let node_root = Path::new("/sys/devices/system/node");
+#[cfg(any(target_os = "linux", test))]
+fn read_numa_node_cpus(node_root: &Path, allowed_text: &str) -> Result<Vec<Vec<usize>>> {
+    let allowed: BTreeSet<_> = parse_cpu_list(allowed_text)?.into_iter().collect();
     let mut node_dirs: Vec<_> = std::fs::read_dir(node_root)
         .with_context(|| format!("failed to read {}", node_root.display()))?
-        .filter_map(|entry| entry.ok())
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("failed to enumerate {}", node_root.display()))?
+        .into_iter()
         .filter(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -2453,22 +2459,28 @@ fn discover_numa_cpu_affinities(threads: usize, worker_count: usize) -> Result<V
     let mut node_cpus = Vec::new();
     for entry in node_dirs {
         let path = entry.path().join("cpulist");
-        let cpus: Vec<_> = parse_cpu_list(
-            &std::fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?,
-        )?
-        .into_iter()
-        .filter(|cpu| allowed.contains(cpu))
-        .collect();
+        let cpu_list = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        // メモリのみの NUMA node は CPU 割り当ての候補にしない。
+        if cpu_list.trim().is_empty() {
+            continue;
+        }
+        let cpus: Vec<_> = parse_cpu_list(&cpu_list)?
+            .into_iter()
+            .filter(|cpu| allowed.contains(cpu))
+            .collect();
         if !cpus.is_empty() {
             node_cpus.push(cpus);
         }
     }
     if node_cpus.is_empty() {
-        // NUMA 情報を公開しない単一 node 環境でも、container の許可 CPU 内で固定できる。
-        node_cpus.push(allowed.into_iter().collect());
+        bail!(
+            "no NUMA node with allowed CPUs found in {}; \
+             expose NUMA topology or explicitly use --cpu-affinity off",
+            node_root.display()
+        );
     }
-    plan_numa_cpu_affinities(&node_cpus, threads, worker_count)
+    Ok(node_cpus)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -3815,6 +3827,50 @@ mod tests {
         assert_eq!(super::parse_cpu_list("0-3,2,8,10-11").unwrap(), vec![0, 1, 2, 3, 8, 10, 11]);
         assert!(super::parse_cpu_list("3-1").is_err());
         assert!(super::parse_cpu_list("").is_err());
+    }
+
+    #[test]
+    fn numa_discovery_respects_cpuset_and_skips_memory_only_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        for (node, cpus) in [("node0", "0-3\n"), ("node1", "4-7\n"), ("node2", "\n")] {
+            let path = dir.path().join(node);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("cpulist"), cpus).unwrap();
+        }
+        let nodes = super::read_numa_node_cpus(dir.path(), "1-2,5-6").unwrap();
+        assert_eq!(nodes, vec![vec![1, 2], vec![5, 6]]);
+        assert_eq!(super::plan_numa_cpu_affinities(&nodes, 2, 2).unwrap(), nodes);
+    }
+
+    #[test]
+    fn numa_discovery_rejects_hidden_or_missing_topology() {
+        let dir = tempfile::tempdir().unwrap();
+        // node ディレクトリが見えない場合、許可 CPU を単一 node とみなせない。
+        let error = super::read_numa_node_cpus(dir.path(), "0-3").unwrap_err().to_string();
+        assert!(error.contains("no NUMA node"), "{error}");
+        assert!(super::read_numa_node_cpus(&dir.path().join("missing"), "0-3").is_err());
+    }
+
+    #[test]
+    fn numa_discovery_rejects_unreadable_or_invalid_cpu_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node0");
+        std::fs::create_dir(&node).unwrap();
+        assert!(super::read_numa_node_cpus(dir.path(), "0-3").is_err());
+        std::fs::write(node.join("cpulist"), "invalid\n").unwrap();
+        assert!(super::read_numa_node_cpus(dir.path(), "0-3").is_err());
+    }
+
+    #[test]
+    fn numa_discovery_rejects_topology_without_allowed_cpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node0");
+        std::fs::create_dir(&node).unwrap();
+        for cpus in ["\n", "4-7\n"] {
+            std::fs::write(node.join("cpulist"), cpus).unwrap();
+            let error = super::read_numa_node_cpus(dir.path(), "0-3").unwrap_err().to_string();
+            assert!(error.contains("no NUMA node"), "{error}");
+        }
     }
 
     #[test]

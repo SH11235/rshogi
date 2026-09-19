@@ -195,6 +195,9 @@ spsa ... \
 - CPU 集合は一つの NUMA node 内だけから作り、worker は node 間へ round-robin 配置する。
 - container の cpuset 制限を尊重する。必要数の node-local group を作れない場合は、
   node を跨ぐ配置へ暗黙 fallback せず起動エラーにする。
+- topology が非公開・読み取り不能の場合や、許可 CPU を持つ node がない場合も起動エラーにする。
+  topology を公開するか、配置保証が不要なら `--cpu-affinity off` を明示する。
+  CPU を持たないメモリ専用 node は割り当て対象から除外する。
 - Linuxでは未指定時も`numa`。特殊なcloud quota、意図的なoversubscription、比較診断で
   OSのschedulerに任せる場合だけ`--cpu-affinity off`を明示する。非Linuxの既定は`off`。
 - 起動ログにworkerごとの論理CPU番号を出すため、Offer・`lscpu -e=CPU,NODE,SOCKET,CORE`
