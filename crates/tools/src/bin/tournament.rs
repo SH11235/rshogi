@@ -2425,22 +2425,28 @@ mod tests {
 
     #[test]
     fn sprt_nelo_bounds_accept_space_separated_negative_values() {
-        let cli = super::Cli::try_parse_from([
-            "tournament",
-            "--engine",
-            "base",
-            "--engine",
-            "test",
-            "--out-dir",
-            "out",
-            "--sprt-nelo0",
-            "-10",
-            "--sprt-nelo1",
-            "0",
-        ])
-        .unwrap();
-        assert_eq!(cli.sprt_nelo0, -10.0);
-        assert_eq!(cli.sprt_nelo1, 0.0);
+        for (nelo0, nelo1, expected0, expected1) in [
+            ("-10", "0", -10.0, 0.0),
+            ("-20", "-5", -20.0, -5.0),
+            ("-10.5", "-0.5", -10.5, -0.5),
+        ] {
+            let cli = super::Cli::try_parse_from([
+                "tournament",
+                "--engine",
+                "base",
+                "--engine",
+                "test",
+                "--out-dir",
+                "out",
+                "--sprt-nelo0",
+                nelo0,
+                "--sprt-nelo1",
+                nelo1,
+            ])
+            .unwrap();
+            assert_eq!(cli.sprt_nelo0, expected0);
+            assert_eq!(cli.sprt_nelo1, expected1);
+        }
     }
 
     #[test]

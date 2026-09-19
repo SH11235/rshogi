@@ -2136,17 +2136,23 @@ mod tests {
     fn sprt_nelo_bounds_accept_space_separated_negative_values() {
         use clap::Parser;
 
-        let cli = super::Cli::try_parse_from([
-            "analyze_selfplay",
-            "log.jsonl",
-            "--sprt-nelo0",
-            "-10",
-            "--sprt-nelo1",
-            "0",
-        ])
-        .unwrap();
-        assert_eq!(cli.sprt_nelo0, Some(-10.0));
-        assert_eq!(cli.sprt_nelo1, Some(0.0));
+        for (nelo0, nelo1, expected0, expected1) in [
+            ("-10", "0", -10.0, 0.0),
+            ("-20", "-5", -20.0, -5.0),
+            ("-10.5", "-0.5", -10.5, -0.5),
+        ] {
+            let cli = super::Cli::try_parse_from([
+                "analyze_selfplay",
+                "log.jsonl",
+                "--sprt-nelo0",
+                nelo0,
+                "--sprt-nelo1",
+                nelo1,
+            ])
+            .unwrap();
+            assert_eq!(cli.sprt_nelo0, Some(expected0));
+            assert_eq!(cli.sprt_nelo1, Some(expected1));
+        }
     }
 
     #[test]
