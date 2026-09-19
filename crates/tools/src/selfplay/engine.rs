@@ -101,6 +101,27 @@ impl EngineProcess {
 
     /// プロセスと reader thread のみを起動する。利用前に `initialize` を呼ぶこと。
     pub fn spawn_uninitialized(cfg: &EngineConfig, label: String) -> Result<Self> {
+        Self::spawn_uninitialized_with_cpu_affinity(cfg, label, None)
+    }
+
+    /// 指定した論理 CPU 集合へ固定してプロセスと reader thread のみを起動する。
+    ///
+    /// Linux の子プロセスにのみ適用される。エンジンが後から生成する探索スレッドも
+    /// affinity mask を継承するため、SPSA の各 worker を一つの NUMA node 内へ
+    /// 閉じ込められる。利用前に `initialize` を呼ぶこと。
+    pub fn spawn_uninitialized_with_cpu_affinity(
+        cfg: &EngineConfig,
+        label: String,
+        cpu_affinity: Option<&[usize]>,
+    ) -> Result<Self> {
+        if cpu_affinity.is_some_and(<[usize]>::is_empty) {
+            bail!("CPU affinity must contain at least one CPU");
+        }
+        #[cfg(not(target_os = "linux"))]
+        if cpu_affinity.is_some() {
+            bail!("CPU affinity is supported only on Linux");
+        }
+
         let mut cmd = Command::new(&cfg.path);
         if !cfg.args.is_empty() {
             cmd.args(&cfg.args);
@@ -110,10 +131,35 @@ impl EngineProcess {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            // SAFETY: setpgid は async-signal-safe。fork 直後に呼ばれる。
+            #[cfg(target_os = "linux")]
+            let cpu_affinity = cpu_affinity.map(<[usize]>::to_vec);
+            #[cfg(target_os = "linux")]
+            if let Some(cpus) = &cpu_affinity
+                && let Some(&cpu) = cpus.iter().find(|&&cpu| cpu >= libc::CPU_SETSIZE as usize)
+            {
+                bail!("CPU {cpu} exceeds CPU_SETSIZE ({})", libc::CPU_SETSIZE);
+            }
+            // SAFETY: setpgid と sched_setaffinity は async-signal-safe な syscall wrapper。
+            // cpu_set_t は fork 前に検証済みの CPU 番号だけで初期化し、closure 内では
+            // allocation や共有状態へのアクセスを行わない。
             unsafe {
-                cmd.pre_exec(|| {
-                    libc::setpgid(0, 0);
+                cmd.pre_exec(move || {
+                    if libc::setpgid(0, 0) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    #[cfg(target_os = "linux")]
+                    if let Some(cpus) = &cpu_affinity {
+                        let mut set: libc::cpu_set_t = std::mem::zeroed();
+                        libc::CPU_ZERO(&mut set);
+                        for &cpu in cpus {
+                            libc::CPU_SET(cpu, &mut set);
+                        }
+                        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set)
+                            != 0
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
                     Ok(())
                 });
             }
@@ -804,5 +850,68 @@ done
                 usize::from(matches!(mode, "stop" | "flood"))
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_process_inherits_requested_cpu_affinity() {
+        let allowed_list = std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let first_cpu = allowed_list
+            .split(',')
+            .next()
+            .unwrap()
+            .split('-')
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("affinity-mock.sh");
+        let log = dir.path().join("affinity.log");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    usi)
+      awk '/Cpus_allowed_list/ {print $2}' /proc/self/status > "$1"
+      printf 'usiok\n'
+      ;;
+    isready) printf 'readyok\n' ;;
+    quit) break ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = EngineConfig {
+            path,
+            args: vec![log.display().to_string()],
+            threads: 1,
+            hash_mb: 1,
+            network_delay: None,
+            network_delay2: None,
+            minimum_thinking_time: None,
+            slowmover: None,
+            ponder: false,
+            usi_options: vec![],
+        };
+
+        let mut engine = EngineProcess::spawn_uninitialized_with_cpu_affinity(
+            &cfg,
+            "affinity".into(),
+            Some(&[first_cpu]),
+        )
+        .unwrap();
+        engine.initialize(&cfg).unwrap();
+        assert_eq!(std::fs::read_to_string(log).unwrap().trim(), first_cpu.to_string());
     }
 }
