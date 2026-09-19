@@ -179,7 +179,7 @@ wait
 
 2 socket CPU や NUMA node が複数ある Linux マシンでは、OS 任せの配置にすると
 1 engine の探索 thread が複数 node に跨ったり、遠い node のメモリへアクセスしたりして
-NPS と局ごとのばらつきが悪化し得る。`--cpu-affinity numa` を指定すると、SPSA は
+NPS と局ごとのばらつきが悪化し得る。Linuxでは既定でNUMA affinityが有効になり、SPSAは
 `/proc/self/status` の container 許可 CPU と `/sys/devices/system/node/node*/cpulist`
 を読み、各 worker を `--threads` 個の論理 CPU へ固定する。
 
@@ -195,7 +195,8 @@ spsa ... \
 - CPU 集合は一つの NUMA node 内だけから作り、worker は node 間へ round-robin 配置する。
 - container の cpuset 制限を尊重する。必要数の node-local group を作れない場合は、
   node を跨ぐ配置へ暗黙 fallback せず起動エラーにする。
-- Linux 専用。未指定時 (`--cpu-affinity off`) は従来どおりOSのschedulerに任せる。
+- Linuxでは未指定時も`numa`。特殊なcloud quota、意図的なoversubscription、比較診断で
+  OSのschedulerに任せる場合だけ`--cpu-affinity off`を明示する。非Linuxの既定は`off`。
 - 起動ログにworkerごとの論理CPU番号を出すため、Offer・`lscpu -e=CPU,NODE,SOCKET,CORE`
   と一緒に保存する。
 - この指定が保証するのは探索threadのnode-local配置であり、共有NNUE重みの物理page配置

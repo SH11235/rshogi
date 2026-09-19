@@ -45,13 +45,20 @@ use tools::spsa_param_mapping::{
 /// 新規 run dir で `--init-from <canonical>` から fresh start する。
 const META_FORMAT_VERSION: u32 = 4;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum CpuAffinityMode {
     /// CPU affinity を設定しない。
-    #[default]
     Off,
     /// 各 worker の engine を一つの Linux NUMA node 内の論理 CPU 群へ固定する。
     Numa,
+}
+
+const fn default_cpu_affinity_mode() -> CpuAffinityMode {
+    if cfg!(target_os = "linux") {
+        CpuAffinityMode::Numa
+    } else {
+        CpuAffinityMode::Off
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -100,8 +107,8 @@ struct Cli {
     concurrency: usize,
 
     /// engine の CPU affinity。numa は worker ごとに Threads 個の論理 CPU を
-    /// 同一 NUMA node 内から割り当てる（Linux のみ）。
-    #[arg(long, value_enum, default_value_t = CpuAffinityMode::Off)]
+    /// 同一 NUMA node 内から割り当てる（Linux既定、非Linuxはoff）。
+    #[arg(long, value_enum, default_value_t = default_cpu_affinity_mode())]
     cpu_affinity: CpuAffinityMode,
 
     /// 更新移動量スケール
@@ -3579,18 +3586,22 @@ fn main() -> Result<()> {
 
     let remaining_pairs = total_pairs - completed_pairs;
     let worker_count = cli.concurrency.min(2 * batch_pairs.min(remaining_pairs) as usize);
-    let cpu_affinities = match cli.cpu_affinity {
-        CpuAffinityMode::Off => None,
-        CpuAffinityMode::Numa => {
-            let sets = discover_numa_cpu_affinities(cli.threads, worker_count)?;
-            eprintln!(
-                "CPU affinity: {worker_count} worker(s), {} CPU(s)/worker, NUMA-local",
-                cli.threads
-            );
-            for (index, cpus) in sets.iter().enumerate() {
-                eprintln!("  worker{}: {cpus:?}", index + 1);
+    let cpu_affinities = if worker_count == 0 {
+        None
+    } else {
+        match cli.cpu_affinity {
+            CpuAffinityMode::Off => None,
+            CpuAffinityMode::Numa => {
+                let sets = discover_numa_cpu_affinities(cli.threads, worker_count)?;
+                eprintln!(
+                    "CPU affinity: {worker_count} worker(s), {} CPU(s)/worker, NUMA-local",
+                    cli.threads
+                );
+                for (index, cpus) in sets.iter().enumerate() {
+                    eprintln!("  worker{}: {cpus:?}", index + 1);
+                }
+                Some(sets)
             }
-            Some(sets)
         }
     };
 
@@ -3791,6 +3802,14 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cpu_affinity_default_matches_platform() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(super::default_cpu_affinity_mode(), super::CpuAffinityMode::Numa);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(super::default_cpu_affinity_mode(), super::CpuAffinityMode::Off);
+    }
+
     #[test]
     fn cpu_list_parser_handles_ranges_and_deduplicates() {
         assert_eq!(super::parse_cpu_list("0-3,2,8,10-11").unwrap(), vec![0, 1, 2, 3, 8, 10, 11]);
