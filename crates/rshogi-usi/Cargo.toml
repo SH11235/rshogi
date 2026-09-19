@@ -23,7 +23,7 @@ env_logger.workspace = true
 # Local dependencies
 # rshogi-core の default features は本 crate の default で明示的に再構築する
 # (preset edition specific build 時に複数 edition が unify されるのを防ぐため)。
-rshogi-core = { version = "0.6", path = "../rshogi-core", default-features = false }
+rshogi-core = { version = "0.7", path = "../rshogi-core", default-features = false }
 # 定跡(opening book)リーダ + probe。edition を持ち込まないよう default-features=false。
 rshogi-book = { version = "0.1", path = "../rshogi-book", default-features = false }
 
