@@ -175,6 +175,33 @@ wait
 複数 run の比較は `runs/spsa/*seed*/stats.csv` を pandas/awk で concat して
 集計する。
 
+### 3.4 NUMA マシンでの CPU affinity
+
+2 socket CPU や NUMA node が複数ある Linux マシンでは、OS 任せの配置にすると
+1 engine の探索 thread が複数 node に跨ったり、遠い node のメモリへアクセスしたりして
+NPS と局ごとのばらつきが悪化し得る。`--cpu-affinity numa` を指定すると、SPSA は
+`/proc/self/status` の container 許可 CPU と `/sys/devices/system/node/node*/cpulist`
+を読み、各 worker を `--threads` 個の論理 CPU へ固定する。
+
+```bash
+spsa ... \
+  --threads 8 \
+  --concurrency 48 \
+  --cpu-affinity numa
+```
+
+- 一つの worker に属する plus/minus engine は同じ CPU 集合を使う。対局中に探索するのは
+  手番側だけなので、同じ集合を共有してよい。
+- CPU 集合は一つの NUMA node 内だけから作り、worker は node 間へ round-robin 配置する。
+- container の cpuset 制限を尊重する。必要数の node-local group を作れない場合は、
+  node を跨ぐ配置へ暗黙 fallback せず起動エラーにする。
+- Linux 専用。未指定時 (`--cpu-affinity off`) は従来どおりOSのschedulerに任せる。
+- 起動ログにworkerごとの論理CPU番号を出すため、Offer・`lscpu -e=CPU,NODE,SOCKET,CORE`
+  と一緒に保存する。
+- この指定が保証するのは探索threadのnode-local配置であり、共有NNUE重みの物理page配置
+  までは変更しない。複数node間で共有するNNUE領域にはremote memory accessが残り得るため、
+  実機ではnode別NPSとばらつきを確認する。
+
 ## 4. 再開実行（resume）
 
 ```bash

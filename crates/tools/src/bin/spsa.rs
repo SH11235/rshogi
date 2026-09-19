@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "linux", test))]
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -9,7 +11,7 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use crossbeam_channel::unbounded;
 use rand::Rng;
 use rand::SeedableRng;
@@ -42,6 +44,15 @@ use tools::spsa_param_mapping::{
 /// 互換性: vN は v(N-1) を読まない (hard bail)。古い run dir で resume したい場合は
 /// 新規 run dir で `--init-from <canonical>` から fresh start する。
 const META_FORMAT_VERSION: u32 = 4;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum CpuAffinityMode {
+    /// CPU affinity を設定しない。
+    #[default]
+    Off,
+    /// 各 worker の engine を一つの Linux NUMA node 内の論理 CPU 群へ固定する。
+    Numa,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SPSA tuner for USI engines")]
@@ -87,6 +98,11 @@ struct Cli {
     /// 対局並列数（worker数）
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
+
+    /// engine の CPU affinity。numa は worker ごとに Threads 個の論理 CPU を
+    /// 同一 NUMA node 内から割り当てる（Linux のみ）。
+    #[arg(long, value_enum, default_value_t = CpuAffinityMode::Off)]
+    cpu_affinity: CpuAffinityMode,
 
     /// 更新移動量スケール
     #[arg(long, default_value_t = 1.0)]
@@ -2340,6 +2356,119 @@ struct BatchValues {
     minus: Vec<f64>,
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn parse_cpu_list(value: &str) -> Result<Vec<usize>> {
+    let mut cpus = BTreeSet::new();
+    for part in value.trim().split(',').filter(|part| !part.is_empty()) {
+        if let Some((start, end)) = part.split_once('-') {
+            let start = start
+                .parse::<usize>()
+                .with_context(|| format!("invalid CPU range start: {part}"))?;
+            let end =
+                end.parse::<usize>().with_context(|| format!("invalid CPU range end: {part}"))?;
+            if start > end {
+                bail!("invalid descending CPU range: {part}");
+            }
+            cpus.extend(start..=end);
+        } else {
+            cpus.insert(part.parse::<usize>().with_context(|| format!("invalid CPU: {part}"))?);
+        }
+    }
+    if cpus.is_empty() {
+        bail!("CPU list is empty");
+    }
+    Ok(cpus.into_iter().collect())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn plan_numa_cpu_affinities(
+    node_cpus: &[Vec<usize>],
+    threads: usize,
+    worker_count: usize,
+) -> Result<Vec<Vec<usize>>> {
+    if threads == 0 {
+        bail!("Threads must be >= 1 for CPU affinity");
+    }
+    let groups_by_node: Vec<Vec<Vec<usize>>> = node_cpus
+        .iter()
+        .map(|cpus| cpus.chunks_exact(threads).map(<[usize]>::to_vec).collect())
+        .collect();
+    let available_groups: usize = groups_by_node.iter().map(Vec::len).sum();
+    if available_groups < worker_count {
+        bail!(
+            "NUMA-local CPU groups are insufficient: need {worker_count} groups × {threads} CPUs, \
+             but only {available_groups} complete groups are available"
+        );
+    }
+
+    // node 0 を使い切ってから node 1 へ進むと、worker 数が少ない場合に片側 socket へ
+    // 偏る。各 node から 1 group ずつ round-robin で取り、負荷とメモリ帯域を均等化する。
+    let mut result = Vec::with_capacity(worker_count);
+    let mut group_index = 0;
+    while result.len() < worker_count {
+        for groups in &groups_by_node {
+            if let Some(group) = groups.get(group_index) {
+                result.push(group.clone());
+                if result.len() == worker_count {
+                    break;
+                }
+            }
+        }
+        group_index += 1;
+    }
+    Ok(result)
+}
+
+#[cfg(target_os = "linux")]
+fn discover_numa_cpu_affinities(threads: usize, worker_count: usize) -> Result<Vec<Vec<usize>>> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .context("failed to read /proc/self/status for CPU affinity")?;
+    let allowed_text = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .context("Cpus_allowed_list is missing from /proc/self/status")?;
+    let allowed: BTreeSet<_> = parse_cpu_list(allowed_text)?.into_iter().collect();
+
+    let node_root = Path::new("/sys/devices/system/node");
+    let mut node_dirs: Vec<_> = std::fs::read_dir(node_root)
+        .with_context(|| format!("failed to read {}", node_root.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.strip_prefix("node").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        })
+        .collect();
+    node_dirs.sort_by_key(|entry| entry.file_name());
+
+    let mut node_cpus = Vec::new();
+    for entry in node_dirs {
+        let path = entry.path().join("cpulist");
+        let cpus: Vec<_> = parse_cpu_list(
+            &std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?,
+        )?
+        .into_iter()
+        .filter(|cpu| allowed.contains(cpu))
+        .collect();
+        if !cpus.is_empty() {
+            node_cpus.push(cpus);
+        }
+    }
+    if node_cpus.is_empty() {
+        // NUMA 情報を公開しない単一 node 環境でも、container の許可 CPU 内で固定できる。
+        node_cpus.push(allowed.into_iter().collect());
+    }
+    plan_numa_cpu_affinities(&node_cpus, threads, worker_count)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn discover_numa_cpu_affinities(_threads: usize, _worker_count: usize) -> Result<Vec<Vec<usize>>> {
+    bail!("--cpu-affinity numa is supported only on Linux")
+}
+
 #[derive(Clone, Copy)]
 struct WorkerContext<'a> {
     base_cfg: &'a EngineConfig,
@@ -2349,6 +2478,7 @@ struct WorkerContext<'a> {
     tc: TimeControl,
     translator: &'a EngineNameTranslator,
     application_mask: &'a [bool],
+    cpu_affinities: Option<&'a [Vec<usize>]>,
 }
 
 struct PoolTask {
@@ -2543,18 +2673,25 @@ fn spawn_worker_engines(
         }
         error
     };
-    let mut plus =
-        EngineProcess::spawn_uninitialized(ctx.base_cfg, format!("plus_worker{}", idx + 1))
-            .context(EngineFailure)
-            .map_err(notify_failure)?;
+    let cpu_affinity = ctx.cpu_affinities.map(|sets| sets[idx].as_slice());
+    let mut plus = EngineProcess::spawn_uninitialized_with_cpu_affinity(
+        ctx.base_cfg,
+        format!("plus_worker{}", idx + 1),
+        cpu_affinity,
+    )
+    .context(EngineFailure)
+    .map_err(notify_failure)?;
     plus.initialize(ctx.base_cfg).context(EngineFailure).map_err(notify_failure)?;
     if cancel.load(Ordering::Acquire) {
         return Err(WorkerCancelled.into());
     }
-    let mut minus =
-        EngineProcess::spawn_uninitialized(ctx.base_cfg, format!("minus_worker{}", idx + 1))
-            .context(EngineFailure)
-            .map_err(notify_failure)?;
+    let mut minus = EngineProcess::spawn_uninitialized_with_cpu_affinity(
+        ctx.base_cfg,
+        format!("minus_worker{}", idx + 1),
+        cpu_affinity,
+    )
+    .context(EngineFailure)
+    .map_err(notify_failure)?;
     minus.initialize(ctx.base_cfg).context(EngineFailure).map_err(notify_failure)?;
     Ok((plus, minus))
 }
@@ -2860,6 +2997,9 @@ fn main() -> Result<()> {
     }
     if cli.concurrency == 0 {
         bail!("--concurrency must be >= 1");
+    }
+    if cli.threads == 0 {
+        bail!("--threads must be >= 1");
     }
     if cli.alpha <= 0.0 || cli.gamma <= 0.0 {
         bail!("--alpha and --gamma must be > 0");
@@ -3437,15 +3577,31 @@ fn main() -> Result<()> {
         save_meta(&meta_path, &meta)?;
     }
 
+    let remaining_pairs = total_pairs - completed_pairs;
+    let worker_count = cli.concurrency.min(2 * batch_pairs.min(remaining_pairs) as usize);
+    let cpu_affinities = match cli.cpu_affinity {
+        CpuAffinityMode::Off => None,
+        CpuAffinityMode::Numa => {
+            let sets = discover_numa_cpu_affinities(cli.threads, worker_count)?;
+            eprintln!(
+                "CPU affinity: {worker_count} worker(s), {} CPU(s)/worker, NUMA-local",
+                cli.threads
+            );
+            for (index, cpus) in sets.iter().enumerate() {
+                eprintln!("  worker{}: {cpus:?}", index + 1);
+            }
+            Some(sets)
+        }
+    };
+
     let worker_params = params.clone();
     std::thread::scope(|scope| -> Result<()> {
-        let remaining_pairs = total_pairs - completed_pairs;
         if remaining_pairs == 0 {
             return Ok(());
         }
         let pool = WorkerPool::new(
             scope,
-            cli.concurrency.min(2 * batch_pairs.min(remaining_pairs) as usize),
+            worker_count,
             WorkerContext {
                 base_cfg: &base_cfg,
                 params: &worker_params,
@@ -3454,6 +3610,7 @@ fn main() -> Result<()> {
                 tc,
                 translator: &translator,
                 application_mask: &application_mask,
+                cpu_affinities: cpu_affinities.as_deref(),
             },
             cli.engine_retries,
         )?;
@@ -3634,6 +3791,43 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cpu_list_parser_handles_ranges_and_deduplicates() {
+        assert_eq!(super::parse_cpu_list("0-3,2,8,10-11").unwrap(), vec![0, 1, 2, 3, 8, 10, 11]);
+        assert!(super::parse_cpu_list("3-1").is_err());
+        assert!(super::parse_cpu_list("").is_err());
+    }
+
+    #[test]
+    fn numa_affinity_groups_never_cross_nodes_and_balance_round_robin() {
+        let sets = super::plan_numa_cpu_affinities(
+            &[
+                vec![0, 1, 2, 3, 8, 9, 10, 11],
+                vec![4, 5, 6, 7, 12, 13, 14, 15],
+            ],
+            4,
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            sets,
+            vec![
+                vec![0, 1, 2, 3],
+                vec![4, 5, 6, 7],
+                vec![8, 9, 10, 11],
+                vec![12, 13, 14, 15]
+            ]
+        );
+    }
+
+    #[test]
+    fn numa_affinity_rejects_cross_node_remainder_as_insufficient() {
+        let error = super::plan_numa_cpu_affinities(&[vec![0, 1, 2], vec![3, 4, 5]], 4, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("insufficient"), "{error}");
+    }
+
     #[test]
     fn duplicate_parameter_rows_and_translated_aliases_are_rejected() {
         let dir = tempfile::tempdir().unwrap();

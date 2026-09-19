@@ -120,7 +120,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [nyugyoku_metrics](docs/nyugyoku_metrics.md) - 終局 CSA から宣言ルール距離ペアと探索読み切り詰み距離を抽出し、NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点
 - [nnue_saturation](docs/nnue_saturation.md) - LayerStacks NNUE の活性飽和率（推論と同じ piece + Threat 入力）を実局面で計測
 - [generate_spsa_params](docs/spsa_runbook.md) - 無指定の探索・USI 宣言と共通の既定値から SPSA 用 `.params` を生成
-- [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - 永続 engine プールで batch チューニング。開始前に schedule の有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
+- [spsa](docs/spsa_runbook.md#14-engine-プール再試行停止) - 永続 engine プールで batch チューニング。Linux NUMAマシンでは`--cpu-affinity numa`でworkerごとのengineをnode-localな論理CPU群へ固定可能。開始前に schedule の有限性を検査し、regex 対象外の項目も基準値を両 engine へ適用。`--engine-retries` / `--nodes-timeout-ms` による障害再試行と探索期限。初期化の最終失敗・panic は engine 破棄前に停止通知。watchdog は勝敗に使わず、stdin write 停滞は停止保証の対象外。
 - [generate_net_spsa_params](docs/generate_net_spsa_params.md) - LayerStacks `.bin` から net 重み delta 用 SPSA `.params` を生成
 - [apply_net_spsa_params](docs/apply_net_spsa_params.md) - net 重み SPSA の確定 delta を LayerStacks `.bin` へ焼き込み、feature 非依存で読み戻し検証する。重複行は拒否する
 - [rescore_psv](docs/rescore_psv.md) - PSV 評価値の再スコアリング（推奨: dlshogi ONNX + TensorRT FP16。qsearch-leaf ラベル / policy 展開 / レジューム / score sidecar（`--out-scores`、dlshogi ONNX と NNUE 静的評価）対応。LayerStacks routing は格納 bucket 数との不一致を拒否し、旧世代 net のみ `--allow-routing-buckets-mismatch` で明示許可）
