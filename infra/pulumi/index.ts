@@ -1,7 +1,7 @@
 // rshogi-csa-server-workers の Cloudflare resources を Pulumi で IaC 管理する。
 //
 // Phase 1 (issue #676) スコープ:
-// - R2 buckets のみ宣言する。
+// - 永続データを持つ R2 buckets と対局検索 D1 を宣言し、protect で誤 destroy を防ぐ。
 // - Worker script (rshogi-csa-server-workers / -staging) と DO bindings /
 //   migrations / vars / secrets / cron triggers は **wrangler.{staging,production}.toml
 //   による管理を継続** する。Pulumi @pulumi/cloudflare v6 では WASM Worker
@@ -107,6 +107,37 @@ export const buckets = stackSpecs.map(
             },
             { protect: true },
         ),
+);
+
+// 対局検索 index 用 D1 (binding `GAMES_SEARCH_DB`)。Worker binding と migrations
+// は wrangler.{staging,production}.toml が所有し、Pulumi は database 本体の
+// lifecycle のみ持つ。replace はデータ全消失なので protect で誤 destroy を防ぐ。
+interface D1DatabaseSpec {
+    pulumiName: string;
+    databaseName: string;
+}
+
+const gamesSearchDbSpecs: Record<SupportedStack, D1DatabaseSpec> = {
+    staging: {
+        pulumiName: "gamesSearchDbStaging",
+        databaseName: "rshogi-csa-games-search-staging",
+    },
+    production: {
+        pulumiName: "gamesSearchDbProduction",
+        databaseName: "rshogi-csa-games-search-prod",
+    },
+};
+const gamesSearchDbSpec = gamesSearchDbSpecs[stack];
+export const gamesSearchDb = new cloudflare.D1Database(
+    gamesSearchDbSpec.pulumiName,
+    {
+        accountId,
+        name: gamesSearchDbSpec.databaseName,
+        readReplication: {
+            mode: "disabled",
+        },
+    },
+    { protect: true },
 );
 
 // ---------------------------------------------------------------------------
