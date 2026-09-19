@@ -12,54 +12,230 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 その PR の merge commit から publish する。`vX.Y.Z` タグは engine 全体の release marker
 専用であり、core 単独 publish のためのタグは打たない。
 
-## Unreleased
+## v1.5.0 — 2026-09-20
 
-### tournament / spsa: 対局履歴の送信
+v1.4.0 以降の探索・対局運用の不具合修正と、教師データ・SPSA ツールの拡張をまとめた
+リリース。`ponder`（相手の手番中に先に考える機能）の時間管理、読み筋と中断結果の
+整合性、CSA サーバーの終局復旧、対局ログの保存と統計判定を修正した。LayerStacks の
+設定変更と `rshogi-core` 0.7.0 の API 移行が必要になるため、更新前に以下の互換性情報を
+確認すること。
 
-- 共有対局 driver は毎手の現在 SFEN の代わりに、対局開始局面と全指し手を
-  `position sfen ... moves ...` で送信する。エンジンが反復・連続王手の履歴を探索で
-  利用できるようにした。履歴の基点は開始局面ファイルの手順適用後。
-- 履歴は毎局・再試行でリセットし、pass 権は基点の値から手順再生で消費する。
-  旧 driver と探索条件が異なるため、評価実験・SPSA の結果は更新前後を混在させない。
-- エンジン応答と開始局面ファイルの手順は、完全合法手集合で検査する。疑似合法手を
-  前提とする検査で不正手を通し、空き升からの移動などで異常終了する経路も修正した。
+詳細は各 PR を参照。
 
-### tournament: ルールによる自動終局
+### USI エンジン / 探索
 
-- 千日手を 4 回同一局面で自動終局し、連続王手の千日手は王手側の反則負けとする。
-  共有 driver を使う SPSA にも適用する。
-- `--adjudicate-resign` / `--adjudicate-draw` に評価値裁定を追加（既定 off）。
-  千日手と引分裁定は通常の引分として WLD / pentanomial に算入する。
-- `analyze_selfplay` に全 result 行の終局理由分布と `max_moves` 到達率を追加した。
+- **ponder の通知と時間管理** (#1043, #1049, #1050, #1080): 探索初期化前の
+  `ponderhit` が失われて応答を待ち続ける不具合と、`ponder` 中に時間・ノード上限で
+  `bestmove` を返してしまう不具合を修正。`movetime` / `rtime` で指定した探索時間は
+  `ponderhit` の時点から計測する。ノード予算には `ponder` 中のノードも含む。
+  合法手がない局面でも、`ponder` は `ponderhit` または `stop`、`infinite` は `stop` を待つ。
+- **読み筋と中断結果の整合性** (#1081, #1082, #1086): 別の候補手の読み筋が混ざり、
+  移動済みの駒を再び動かすなどの不正手を報告する不具合を修正。出力する読み筋（PV）は
+  全合法手で検査し、不正な続きがあれば直前で打ち切る。`ponder` の手も検査済みの読み筋から選ぶ。
+- **探索中断時と合法手がない局面の結果** (#1081): 探索中断時は、最後に完了した深さの
+  指し手・評価値・読み筋を揃えて返す。
+  王手されていなくても合法手がない局面は敗北として評価する。
+- **探索結果のキャッシュ（置換表）の修正** (#1044, #1060, #1061): 複数スレッドからの
+  読み書きによる未定義動作を除去。1 手詰めを異なる深さで再利用した際に詰みまでの距離が
+  ずれる不具合と、枝刈りのための子探索を中断した際に仮の値を保存する不具合を修正した。
+- **手番を放棄するパスを扱うルール向けのビルド** (#1048, #1063):
+  パスを通常の座標として読み、異常終了したり別の手に
+  変換したりする不具合を修正。`PassMoveBonus` が最初の手の選択や複数候補表示（MultiPV）に
+  反映されない不具合も修正した。非ゼロのボーナスではパスの探索ノード数が増える場合がある。
+- **更新前後の比較**: 内部の読み筋生成 (#1086)、詰み距離・中断処理 (#1060, #1061, #1081)、
+  パスの評価 (#1063) の修正で、該当条件の探索結果が変わる。評価実験ではエンジンの版を
+  記録し、更新前後を同じ条件の結果として混在させない。
 
-### rescore_psv: routing bucket 数の防御と NNUE score sidecar
+### NNUE / 評価処理
 
-- `--ls-progress-buckets` が NNUE ファイルの格納 bucket 数と不一致の場合はエラーに
-  なる（合法設定として素通りし全行を無警告で誤評価にしていた）。格納数より少ない
-  routing で学習された旧世代 net の評価は新フラグ
-  `--allow-routing-buckets-mismatch` で警告付きに許可する。
-- `--out-scores`（i16 score sidecar）を NNUE 静的評価モードに開放した。dlshogi
-  ONNX 経路と同じ `.in-progress` / `.done` marker による中断再開・fail-closed
-  （エラーを含むチャンクは 1 byte も書かない）で、fingerprint は NNUE の
-  path/size/mtime と routing 設定（progress 係数は sha256）・FV_SCALE 変換を追跡する。
+- **CPU による評価値の不一致を修正** (#1053): qa255 活性化を使うモデルで、積和の途中の
+  飽和により SSSE3 / AVX2 などの評価値が SSE2 と異なる不具合を修正した。
+  該当モデルの過去の評価値・探索結果を比較する際は、エンジンの版と CPU 経路を確認すること。
+- **NNUE と履歴参照の安全性** (#1054, #1059, #1062): NNUE 計算時に未初期化の整数値を
+  作る処理と、指し手の並べ替えで破棄済みの履歴を参照できる問題を修正。
+  公開 API の範囲外添字や不正な過去状態へのリンクも検査するようにした。
+- **モデル読み込み** (#1033, #1058): EffectBucket 対応の固定構成で、ヘッダーの `E4=` 表記を
+  読み込めない不具合を修正。可変構成でも `NNUE_ARCHITECTURE` の明示指定を反映し、
+  誤記された特徴量ヘッダーを補正できるようにした。HalfKP のモデル内 `FV_SCALE` は
+  1〜128 を有効範囲とし、不正値は 24 として扱う。正の USI 上書き値は引き続き優先する。
+- **評価の再利用とメモリ配置** (#1035, #1037): 確保されるだけで探索に使われていなかった
+  `EvalHash` を有効にし、同一局面の NNUE 再計算を省く。`UseEvalHash=false` で無効化できる。
+  Linux では NNUE 重みのメモリに Huge Page（大きなメモリページ）の利用を要求するようにした。
+  共有重みへの効果は OS の共有メモリ向け Huge Page 設定に依存する。
 
-### 破壊的変更: LayerStacks routing の明示化
+### 互換性変更: LayerStacks の評価器選択を明示
 
-- bucket mode 名 `progress8kpabs` を `progresskpabs` へ変更した。旧名の alias はなく、指定するとエラーになる。
-- LayerStacks 推論では mode と構造を明示する。USI の progresskpabs は
-  `LS_BUCKET_MODE=progresskpabs`、`LS_PROGRESS_BUCKETS=<学習時の bucket 数>`、
-  `LS_PROGRESS_COEFF=<progress.bin>` が必須。KingRank9 は `LS_BUCKET_MODE=kingrank9` のみを指定する。
-- NNUE version は binary layout の判別専用で、routing semantics の推測には使わない。
-  特に旧 F20 の格納9 bucket モデルを `floor(p×8)` で学習した場合は
-  `LS_PROGRESS_BUCKETS=8` を指定する。未指定、格納数超過、KingRank9 と格納数9以外の組合せは
-  `isready` / native tool 初期化時にエラーになる。
-- `LS_PROGRESS_BUCKETS=1` は常に bucket 0 を選ぶ no-op routing として許可する
-  (格納 1 bucket net の設定経路)。この場合のみ `LS_PROGRESS_COEFF` は不要。
-- 公開 API の破壊的 rename (`Progress8KPAbs` → `ProgressKPAbs` 等) に伴い
-  `rshogi-core` を 0.6.0 へ bump。
-- gensfen: native LayerStacks run の generation fingerprint に `bucket_mode` /
-  `progress_buckets` が加わるため、本変更前に開始した native LayerStacks run は
-  resume できない (fingerprint 不一致で fail)。新規 run として作り直すこと。
+LayerStacks は局面に応じてモデル内の評価器（bucket）を選び分ける。
+格納数はモデルが持つ評価器の数、選択数は局面に応じて使う評価器の数を指す。
+
+- **設定名と必須指定** (#1013): 局面に応じた評価器の選択方法（routing）の名前を
+  `progress8kpabs` から `progresskpabs` へ変更。旧名はエラーになる。
+  USI では `LS_BUCKET_MODE=progresskpabs`、`LS_PROGRESS_BUCKETS=<学習時の bucket 数>`、
+  `LS_PROGRESS_COEFF=<progress.bin>` を指定する。KingRank9 は `LS_BUCKET_MODE=kingrank9`
+  のみを指定する。
+- **モデル形式と評価器の数** (#1013): NNUE の version はファイル構造の判別専用で、選択方法の推測には使わない。
+  旧 F20 の格納 9 bucket モデルを `floor(p×8)` で学習した場合は `LS_PROGRESS_BUCKETS=8`
+  を指定する。未指定、格納数超過、KingRank9 と格納数 9 以外の組み合わせは
+  `isready` / native ツール初期化時にエラーになる。
+- **評価器を 1 個だけ使う場合** (#1013): `LS_PROGRESS_BUCKETS=1` は常に bucket 0 を使う。
+  この場合のみ `LS_PROGRESS_COEFF` は不要。
+- **既存 run の再開** (#1013): gensfen の native LayerStacks 生成条件の記録に
+  `bucket_mode` / `progress_buckets` が加わった。変更前の run は条件の照合に失敗するため
+  再開できない。新規 run として作り直すこと。
+  この設定変更に伴う `Progress8KPAbs` → `ProgressKPAbs` などの API 改名については、
+  core 0.6.0 を利用していれば追加対応は不要。
+
+### rshogi-core 0.7.0 / ライブラリ利用者の移行
+
+`rshogi-core` 0.7.0 を crates.io に公開した。engine の v1.5.0 と core は別系列であり、
+以下は core 0.6.0 を利用するコードの移行点である。
+
+- **履歴調整用の公開定数を削除** (#1076): `search::history` で定義され、`search` から
+  再公開されていた以下の 10 個を削除した。実探索では未使用だったため、削除自体で探索は変わらない。
+  参照するコードは `search::SearchTuneParams` の対応フィールドへ移行すること。
+  既定値は `SearchTuneParams::default()` で取得できる。
+
+  `TT_MOVE_HISTORY_BONUS`, `TT_MOVE_HISTORY_MALUS`, `CONTINUATION_HISTORY_WEIGHTS`,
+  `LOW_PLY_HISTORY_MULTIPLIER`, `LOW_PLY_HISTORY_OFFSET`, `CONTINUATION_HISTORY_MULTIPLIER`,
+  `PAWN_HISTORY_POS_MULTIPLIER`, `PAWN_HISTORY_NEG_MULTIPLIER`,
+  `CONTINUATION_HISTORY_NEAR_PLY_OFFSET`, `PRIOR_CAPTURE_COUNTERMOVE_BONUS`。
+
+  対応フィールドは小文字の同名。ただし `CONTINUATION_HISTORY_WEIGHTS` は
+  `continuation_history_weight_1`〜`continuation_history_weight_6` に分かれる。
+  削除した TT 用の 2 定数は実探索の既定値と異なっていたため、旧値のコピーには注意すること。
+- **`tt::ProbeResult<'a>`** (#1044): ライフタイム引数が 1 個必要になり、取得元の置換表を
+  借用する。型を明記するコードは `ProbeResult<'_>`、保持する構造体などは
+  `ProbeResult<'a>` として表の生存期間に結び付ける。結果を使い終える前に表を破棄・resize
+  するコードはコンパイルできないため、書き込みを終えてから表を変更すること。
+- **`MovePicker` の履歴引数** (#1062): `new` / `new_evasions` / `new_probcut` の
+  `[&PieceToHistory; 6]` は `[ContHistKey; 6]` に変更。履歴がない位置は
+  `ContHistKey::null_sentinel()` を渡す。
+- **HalfKP の未初期化領域の作成** (#1054): 公開されている
+  `nnue::prelude::AccumulatorHalfKP::new_uninit()` の戻り値は `MaybeUninit<Self>` に変更。
+  すぐに使える値が必要なら `new()` を使うこと。未初期化領域を使う場合は、構造体全体を
+  初期化してから値を取り出す必要がある。
+- **局面入力の検査** (#1042, #1046, #1047, #1051): JSON 復元後に合法手を実行すると
+  内部状態の未初期化で異常終了する不具合を修正し、盤上と持駒の総数超過を拒否する。
+  JSON の盤面座標と strict replay は、指し手・座標の末尾に余分な文字がある入力をエラーにする。
+  自前の字句検査には新しい `Move::from_usi_strict` / `Square::from_usi_strict` を使える。
+  既存の `from_usi` の末尾許容動作は維持する。
+- 歩・香の最終段、桂の最終 2 段への打ち・不成を入力手の検査で拒否するようにした (#1047)。
+  該当する棋譜・定跡は修正すること。`book_backprop` でもこれらの不正手を逆伝播から除外する。
+  一方、strict replay が合法な歩・香・角・飛の不成まで拒否していた不具合は修正した (#1046)。
+
+### CSA サーバー
+
+- **千日手の裁定** (#1045): 短い探索用の履歴だけを使い、長い周期の千日手を見落としたり、
+  連続王手を早く終局させたりする不具合を修正。開始局面からの全履歴で同一局面の 4 回目を
+  判定し、その間ずっと王手を続けた側を反則負けとする。
+- **Workers 版の終局復旧** (#1078): 終局処理中の障害で、棋譜保存・結果通知が行われないまま
+  対局が残る不具合を修正。裁定・終局時刻を通知前に保存し、中断後は保存済みの内容で
+  再開する。棋譜出力の再試行情報を保持し、出力できない場合も指し手の原本を残す。
+  観戦者への送信失敗で終局確定が止まる問題も修正した。
+- **運用上の注意** (#1078): 配信の成否が不明な接続は、重複送信を避けるためコード 1011 で閉じる。
+  裁定保存前に失われた入力の復元と、旧版の進行中データの移行は対象外。
+  更新は進行中の対局がない状態で行うこと。
+
+### 対局評価とログ集計 (tournament / analyze_selfplay)
+
+- **対局履歴をエンジンへ送信** (#1039): 毎手の現在局面だけでなく、開始局面と全指し手を
+  `position sfen ... moves ...` で送る。エンジンが反復・連続王手を探索で参照できるようになった。
+  履歴の基点は開始局面ファイルの手順適用後で、毎局・再試行でリセットする。
+  パス権は基点の値から手順再生で消費する。開始手順・応答手は全合法手で検査し、不正手による
+  異常終了も防ぐ。共有対局処理を使う SPSA にも適用される。
+  **旧版と探索条件が異なるため、評価実験・SPSA の結果は更新前後を混在させないこと。**
+- **ルールによる自動終局** (#1036): 同一局面の 4 回目で千日手、連続王手なら王手側の
+  反則負けとする。SPSA にも適用される。`--adjudicate-resign` / `--adjudicate-draw` で
+  評価値による裁定も選べる（既定は無効）。千日手・引分裁定は通常の引分として集計する。
+  `analyze_selfplay` は全 result 行の終局理由分布と `max_moves` 到達率を表示する。
+- **開始局面の再現性** (#1022): `--seed` を追加。同じ seed・開始局面列・ペア番号なら、
+  並列数や完了順によらず同じ開始局面を割り当てる。seed は `meta.json` に記録する。
+- **ペアの欠落と中断時の保存を修正** (#1066, #1068): 実行中に対局目標を増やすと先後交換の
+  ペアが分断される不具合と、Ctrl-C・worker 失敗後に回収した結果を捨てる不具合を修正。
+  中断・失敗は `run_status` と非ゼロ終了コードで示し、正式な SPRT 採否を表示しない。
+- **不完全なログの集計** (#1069): 欠落・破損を除外した残りだけで正式な SPRT 判定を出す
+  不具合を修正。既定ではエラー終了し、`--allow-partial` で部分集計だけを許可する。
+  この場合も判定は `invalid`。勝者省略時の先後交換と、決着局勝率の表示も修正した。
+- **SPRT の計算と引数** (#1065, #1090): 件数ゼロのカテゴリがあると確率の総和が 1 を
+  超える計算を修正。過去ログの LLR（採否を決める統計量）と判定が変わる場合があるため、
+  再解析時は使用版を記録すること。
+  `--sprt-nelo0 -10 --sprt-nelo1 0` のようなスペース区切りの負値も受け付ける。
+- **出力の保護とファイル名** (#1070, #1083): ラベルの衝突で別カードが同じファイルに
+  書き込む不具合と、既存結果を上書きする不具合を修正。新規 run には新しい出力先を使うこと。
+  JSONL 名は `pair-0-1__baseline-vs-candidate.jsonl` のように index と表示ラベルを含む。
+  旧名を固定したスクリプトは新形式か meta による選択へ更新すること。旧ログは引き続き読める。
+
+### SPSA / NNUE 重みの調整
+
+- **LayerStacks の重み調整** (#1027, #1028, #1029): `generate_net_spsa_params` で
+  調整対象の `.params` を作り、`--spsa-net-spec` 付きエンジンで整数差分を試し、
+  `apply_net_spsa_params` で結果を新しい `.bin` へ反映できる。
+  対象は出力層の重み・バイアス、特徴変換層のバイアス、第 2 全結合層の重み。
+  反映元モデルの SHA256 を metadata または `--expected-net-sha256` で照合する。
+  エンジンの未知の起動引数は、従来の無視からエラーへ変更した。
+- **エンジンの再利用と再試行** (#1040): batch ごとの再起動をやめ、run 全体でエンジンを
+  再利用する。通信切断などは `--engine-retries` で再試行でき、ノード制限探索にも
+  `--nodes-timeout-ms`（既定 10 分）を設ける。期限超過の結果は勝敗に採用しない。
+  プロセス内の乱数状態などが変わり得るため、実エンジンの結果が旧版と同一とは限らない。
+- **Linux の CPU 配置** (#1093): 既定で各 worker のエンジンを同一 NUMA node 内の CPU に
+  固定する。必要な CPU 集合が確保できない場合や構成を読めない場合はエラーになる。
+  従来の OS 任せの配置には `--cpu-affinity off` を指定する。非 Linux の既定は `off`。
+  実験の比較時は配置条件も揃えること。
+- **調整対象外の値と既定値** (#1067, #1072): `--active-only-regex` の対象外の有効項目が
+  エンジンに送られず、保存した baseline と異なる設定で対局する不具合を修正。
+  USI で宣言する SPSA 既定値も実探索の値に揃えた。旧 `.params` は自動変更しないため、
+  旧 run を比較する際は使用ファイルとエンジンの実設定を確認すること。
+- **入力・再開時の注意** (#1032, #1073, #1075): コメント付き `[[NOT USED]]` 行を
+  再読込すると有効に戻る不具合を修正。旧 `state.params` / `final.params` は再開前に
+  `[[NOT USED]]` を `//` コメントの手前へ移すこと。同名項目、同一係数の別表記、翻訳先の
+  衝突は拒否するため、意図を確認して 1 行にまとめる。NaN・無限大や計算が非有限になる
+  schedule も拒否する。早期停止指標の範囲の説明を 0〜2 に訂正した。
+- **CSV 出力の保護** (#1074): `spsa_stats_to_plot_csv` が入力と同じファイルを出力先に
+  指定すると入力を壊す不具合を修正。途中で不正行を検出した場合も既存出力を保持する。
+
+### 教師データ / 評価・計測ツール
+
+- **必要な行だけ再評価** (#1001, #1004, #1017): `psv_select_by_mask` で bitmap が示す
+  PSV 行を抽出し、`psv_scatter_by_mask` で再評価した score だけを元の行へ書き戻せる。
+  `preprocess_psv --moved-mask` は葉局面への置換で局面が変わった出力行を記録する。
+  全行を再評価せず、変更行だけを処理できる。
+- **ラベル退避とテストセット出力** (#1006, #1014): `psv_dual_label dump-scores` で通常 PSV の
+  score 列を別ファイルへ退避できる。`ek_testset export-hcpe` で入玉テストセットを
+  yardstick 用 hcpe に変換できる。評価値欠損は既定でエラーとし、
+  `--allow-missing-eval true` を指定した場合だけ欠損行を除外する。
+- **重複除去時のシャッフルとバッファ** (#1009, #1010): `psv_dedup_partition --shuffle-seed`
+  で重複除去後に partition 内の順序を入れ替えられる。同じ入力・partition 数・seed で再現可能。
+  `shuffle_psv` と順列の分布は同一ではない。出力バッファは省略時に合計予算 1 GiB を基準に
+  自動設定するため、従来のメモリ使用量に揃えたい場合は `--partition-buffer-kb 64` を指定する。
+- **rescore_psv の評価器設定検査** (#1034): `--ls-progress-buckets` とモデルの格納数が
+  不一致でも無警告で評価でき、誤った評価値を出していた問題を修正。
+  格納数より少ない選択数で学習した旧モデルには `--allow-routing-buckets-mismatch` を指定する。
+- **NNUE score の別ファイル出力** (#1034): `rescore_psv --out-scores` を NNUE 静的評価でも
+  利用できる。i16 の score ファイルを出力し、`.in-progress` / `.done` による中断再開に対応。
+  エラーを含むチャンクは書き込まない。再開条件には NNUE の path・size・mtime、評価器の選択設定、
+  progress 係数の SHA256、FV_SCALE 変換を含む。
+- **飽和率の計測を修正** (#1055): Threat モデルの飽和率が駒配置の
+  成分だけで計算されていたため、実際に評価へ入力する Threat 合成後の値を測るようにした。
+  Threat 合成前だけを測った旧版の飽和率は、修正後と同条件として比較しないこと。
+- **固定局面の評価時間を計測** (#1056): `bench_nnue_eval` の `full` モードで評価計算のみの
+  時間を測る際に、準備済みの内部状態と異なる局面を渡す不具合を修正。
+  準備した状態に対応する固定局面を測るようにした。該当する旧版の測定値は、修正後と
+  同条件として比較しないこと。
+- **静的評価と探索値を区別** (#1057): `compare_eval_nnue` は既定の探索比較に加えて `static` モードを追加し、静的評価と USI cp を
+  区別する。詰みは通常の cp 統計から除外し、蒸留成立性の閾値判定は削除した。
+- **USI 待機と設定反映** (#1057, #1071): エンジン終了や `info` の連続送信で待ち続ける
+  不具合を修正。benchmark は期限超過を測定成功に含めず、`book_extend` / `book_rescore` は
+  途中評価を保存しない。benchmark で無視されていた `--eval-hash-mb` / `--use-eval-hash` も
+  反映するため、過去測定と比較する際は実際の設定を確認すること。
+- **A/B 性能計測 (search_only_ab)** (#1041, #1089): Windows ETW 計測で末尾イベントが欠け、CPU cycles を
+  過少集計する不具合を修正。欠落を検出した run は正常値として返さない。
+  `--alternate-rounds` で ABBA / BAAB の順序を交互にでき、JSON の `blocks` に局面・round ごとの
+  実行順と比を記録する。既定の順序は維持する。
+
+### 依存ライブラリの安全性修正
+
+- `lru`、`h2`、`rustls` の既知の問題に対応した依存更新を含む (#1005, #1007, #1092)。
+  対象は RUSTSEC-2026-0253、RUSTSEC-2026-0258、RUSTSEC-2026-0285。
 
 ## v1.4.0 — 2026-08-13
 
