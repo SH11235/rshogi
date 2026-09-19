@@ -1,6 +1,6 @@
 ---
 name: selfplay
-description: NNUE モデルの棋力評価と SPRT 検定。tournament ツールでエンジン間の総当たり対局、base-vs-N 対局、あるいは SPRT (逐次確率比検定) による有意差の早期判定を実行し、analyze_selfplay で集計・post-hoc 解析する。「評価して」「対局させて」「SPRT で検定して」「有意差を見て」「Elo 差を測って」等の棋力比較リクエストに使用する。
+description: "NNUE モデルの棋力評価と SPRT 検定。tournament ツールでエンジン間の総当たり対局、base-vs-N 対局、あるいは SPRT (逐次確率比検定) による有意差の早期判定を実行し、analyze_selfplay で集計・post-hoc 解析する。「評価して」「対局させて」「SPRT で検定して」「有意差を見て」「Elo 差を測って」等の棋力比較リクエストに使用する。"
 user-invocable: true
 ---
 

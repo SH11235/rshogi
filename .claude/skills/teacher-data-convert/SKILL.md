@@ -1,5 +1,6 @@
 ---
-description: 教師データ（PSV: PackedSfenValue, 40B 固定長）を数千万〜数十億局面規模で一括変換・再評価するときの運用スキル。psv_to_hcpe3（PSV→dlshogi 学習用 hcpe/hcpe3、任意で eval 焼き込み）と rescore_psv（PSV を内部 NNUE / qsearch / 外部 USI エンジン / ONNX で再評価）を、スレッド設定・進捗確認・出力検証の落とし穴を避けて正しく回す。「PSV を hcpe に変換」「教師データを大量変換」「rescore で再評価」「大規模に局面をスコア付け」「hcpe3 を作る」等で使用。
+name: teacher-data-convert
+description: "教師データ（PSV: PackedSfenValue, 40B 固定長）を数千万〜数十億局面規模で一括変換・再評価するときの運用スキル。psv_to_hcpe3（PSV→dlshogi 学習用 hcpe/hcpe3、任意で eval 焼き込み）と rescore_psv（PSV を内部 NNUE / qsearch / 外部 USI エンジン / ONNX で再評価）を、スレッド設定・進捗確認・出力検証の落とし穴を避けて正しく回す。「PSV を hcpe に変換」「教師データを大量変換」「rescore で再評価」「大規模に局面をスコア付け」「hcpe3 を作る」等で使用。"
 user-invocable: true
 ---
 

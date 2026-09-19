@@ -4,16 +4,14 @@
 
 ## クイックスタート
 
-全計測をまとめて実行し、ドキュメントを更新する場合:
+全計測をまとめて実行する場合:
 
 ```bash
-# 1. 全計測を実行（sudo権限が必要）
+# 全計測を実行（sudo権限が必要）
 ./scripts/perf_all.sh
-
-# 2. ドキュメントを更新（Claude Code）
-# slash commandsの定義がrootにあるのでrepository rootでClaude Codeを起動していること
-/update-rust-perf-docs
 ```
+
+結果は `perf_results/` と `benchmark_results/` に保存されます。
 
 ## 前提条件
 

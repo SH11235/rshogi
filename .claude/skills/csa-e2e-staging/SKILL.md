@@ -1,5 +1,6 @@
 ---
-description: Workers (`rshogi-csa-server-workers`) deploy 環境に対する `csa_client` 実機 E2E 手順。平手 1 局完走 / 連続対局 / 切断再接続 / 観戦 / Buoy 対局 / 異常終局 / 時計違いペアの 7 シナリオを通電させる。「staging で smoke 流して」「reconnect 検証して」「観戦テスト」「buoy 動かして」「異常終局再現」「時計 kind 切替確認」等のリクエストで起動する。
+name: csa-e2e-staging
+description: "Workers (`rshogi-csa-server-workers`) deploy 環境に対する `csa_client` 実機 E2E 手順。平手 1 局完走 / 連続対局 / 切断再接続 / 観戦 / Buoy 対局 / 異常終局 / 時計違いペアの 7 シナリオを通電させる。「staging で smoke 流して」「reconnect 検証して」「観戦テスト」「buoy 動かして」「異常終局再現」「時計 kind 切替確認」等のリクエストで起動する。"
 user-invocable: true
 ---
 
