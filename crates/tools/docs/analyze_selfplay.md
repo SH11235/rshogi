@@ -19,7 +19,8 @@ SPRT の post-hoc 判定も表示する場合:
 `base_label` 記録、ラベル名などから推定し、推定根拠を標準エラー出力に表示する。
 
 Wald パラメータは `--sprt-nelo0` / `--sprt-nelo1` / `--sprt-alpha` /
-`--sprt-beta` で上書きできる。
+`--sprt-beta` で上書きできる。nelo は `--sprt-nelo0 -10` のようにスペース区切りの
+負値をそのまま渡せる。
 
 ## 表示の視点
 

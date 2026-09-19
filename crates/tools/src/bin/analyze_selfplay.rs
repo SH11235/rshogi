@@ -55,11 +55,13 @@ struct Cli {
     sprt_base_label: Option<String>,
 
     /// H0 仮説の正規化 Elo。未指定時は meta → ハードコード fallback (0.0) の順で解決。
-    #[arg(long)]
+    /// 負値も `--sprt-nelo0 -10` の形で受け付ける。
+    #[arg(long, allow_negative_numbers = true)]
     sprt_nelo0: Option<f64>,
 
     /// H1 仮説の正規化 Elo。未指定時は meta → ハードコード fallback (5.0) の順で解決。
-    #[arg(long)]
+    /// 負値もスペース区切りで受け付ける（例: `--sprt-nelo0 -20 --sprt-nelo1 -5`。nelo0 < nelo1 必須）。
+    #[arg(long, allow_negative_numbers = true)]
     sprt_nelo1: Option<f64>,
 
     /// 第一種過誤率 α。未指定時は meta → ハードコード fallback (0.05) の順で解決。
@@ -2130,6 +2132,29 @@ fn print_json(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sprt_nelo_bounds_accept_space_separated_negative_values() {
+        use clap::Parser;
+
+        for (nelo0, nelo1, expected0, expected1) in [
+            ("-10", "0", -10.0, 0.0),
+            ("-20", "-5", -20.0, -5.0),
+            ("-10.5", "-0.5", -10.5, -0.5),
+        ] {
+            let cli = super::Cli::try_parse_from([
+                "analyze_selfplay",
+                "log.jsonl",
+                "--sprt-nelo0",
+                nelo0,
+                "--sprt-nelo1",
+                nelo1,
+            ])
+            .unwrap();
+            assert_eq!(cli.sprt_nelo0, Some(expected0));
+            assert_eq!(cli.sprt_nelo1, Some(expected1));
+        }
+    }
+
     #[test]
     fn decisive_rate_labels_use_the_same_denominator() {
         assert_eq!(

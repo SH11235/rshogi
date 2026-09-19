@@ -186,8 +186,8 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
 | `--sprt` | — | SPRT を有効化。境界到達で新規対局の供給を停止し、進行中ゲームを完了待ちで drain |
 | `--sprt-test-label LABEL` | (必須) | H1 側（challenger）のエンジンラベル。正の nelo = このエンジンが強い |
 | `--sprt-base-label LABEL` | `--base-label` | H0 側（base）のエンジンラベル。省略時は `--base-label` を流用 |
-| `--sprt-nelo0 F` | 0.0 | H0 仮説の正規化 Elo（通常 0 = 差なし） |
-| `--sprt-nelo1 F` | 5.0 | H1 仮説の正規化 Elo（検出したい最小効果量） |
+| `--sprt-nelo0 F` | 0.0 | H0 仮説の正規化 Elo（通常 0 = 差なし）。負値は `--sprt-nelo0 -10` のまま渡せる |
+| `--sprt-nelo1 F` | 5.0 | H1 仮説の正規化 Elo（検出したい最小効果量）。負値可、ただし nelo0 < nelo1 必須 |
 | `--sprt-alpha F` | 0.05 | 第一種過誤率 α（H0 が真なのに H1 を採択する確率の上限） |
 | `--sprt-beta F` | 0.05 | 第二種過誤率 β（H1 が真なのに H0 を採択する確率の上限） |
 | `--sprt-report-interval N` | 10 | ペア何単位ごとに SPRT レポートを出力 |
