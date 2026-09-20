@@ -42,12 +42,13 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
 
 use std::cell::RefCell;
 
 use rshogi_core::nnue::{
     LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, parse_layer_stack_bucket_mode,
+    layer_stack_progress_coeff_required, load_progress_coeff_kpabs,
     set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
@@ -263,7 +264,7 @@ fn main() -> Result<()> {
                     .ls_bucket_mode
                     .as_deref()
                     .context("LayerStacks requires --ls-bucket-mode")?;
-                let mode = parse_layer_stack_bucket_mode(mode_str)
+                let mode = parse_native_layer_stack_bucket_mode(mode_str)
                     .context("--ls-bucket-mode must be progresskpabs or kingrank9")?;
                 match (mode, cli.ls_progress_coeff.as_deref()) {
                     (LayerStackBucketMode::ProgressKPAbs, Some(path)) => {

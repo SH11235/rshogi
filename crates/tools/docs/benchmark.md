@@ -1,5 +1,7 @@
 ## 将棋エンジンベンチマークツール
 
+LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+
 YaneuraOu の `bench` コマンド相当の標準ベンチマーク機能を提供します。
 
 ### 機能

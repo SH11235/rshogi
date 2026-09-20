@@ -66,6 +66,7 @@ pub(crate) mod network_halfkp;
 mod network_layer_stacks;
 pub mod piece_list;
 pub mod prelude;
+mod progress_q16;
 mod shared_weights;
 pub mod spec;
 pub mod stats;
@@ -73,6 +74,12 @@ pub mod stats;
 pub(crate) mod threat_exclusion;
 #[cfg(feature = "nnue-threat")]
 pub(crate) mod threat_features;
+
+pub use progress_q16::{
+    compute_progresskpabs_q16_sum, load_progress_coeff_kpabs_q16_from_bytes,
+    progress_q16_sum_to_bucket, reset_layer_stack_progress_kpabs_q16_weights,
+    set_layer_stack_progress_kpabs_q16_weights,
+};
 
 pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};
 pub use accumulator_layer_stacks::{

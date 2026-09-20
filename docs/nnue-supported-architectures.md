@@ -1,111 +1,61 @@
 # サポートされている NNUE アーキテクチャ
 
-## 概要
+モデルの形式・形状に合うエンジンを使ってください。複数の形式を使う場合は既定の
+`edition-universal`、固定 edition を使う場合はモデルと一致する構成を選びます。
+ビルド方法と edition 一覧は [ビルドガイド](./build.md) を参照してください。
 
-rshogi は以下の NNUE アーキテクチャをサポートしています。
+モデルは `EvalFile` で指定し、`FV_SCALE` は配布元の推奨値に合わせます。
+LayerStacks では、下記の振り分け方式も `isready` の前に設定してください。
 
-## Feature Set 一覧
+## HalfKP / HalfKA 系
 
-| Feature Set | 入力次元 | 説明 |
-|-------------|---------|------|
-| HalfKP | 125,388 | 水匠/tanuki 互換（classic NNUE） |
-| HalfKA_hm | 73,305 | Half-Mirror + Factorization |
-| HalfKA | 138,510 | Non-mirror |
-| LayerStacks | 可変 | 実験的（LayerStacks + 9バケット） |
+以下は対応する L1 と L2×L3 の組み合わせです。
+モデルの配布元が示す特徴量・形状・活性化関数を確認してください。
 
-## HalfKP
+| L1 | HalfKP | HalfKA_hm | HalfKA |
+|----|--------|-----------|--------|
+| 256 | 32×32 | 32×32 | 32×32 |
+| 512 | 8×64、8×96、32×32 | 8×64、8×96、32×32 | 8×64、8×96、32×32 |
+| 768 | 16×64 | 16×64 | 16×64 |
+| 1024 | 8×32、8×64 | 8×32、8×64、8×96 | 8×32、8×64、8×96 |
 
-水匠、tanuki、AobaNNUE などで使用される classic NNUE 形式。
+HalfKP は水匠・tanuki・AobaNNUE などで使われる classic NNUE 形式です。
+HalfKA_hm は Half-Mirror、HalfKA は Non-mirror 形式です。
+bullet-shogi や nnue-pytorch のモデルも、生成ソフト名だけでなく形式と形状を確認してください。
 
-| L1 | L2 | L3 | ファイルサイズ |
-|----|----|----|---------------|
-| 256 | 32 | 32 | 64,217,066 B (61.2 MB) |
-| 512 | 8 | 64 | 128,409,164 B (122.5 MB) |
-| 512 | 8 | 96 | 128,410,336 B (122.5 MB) |
-| 512 | 32 | 32 | 128,432,640 B (122.5 MB) |
-| 768 | 16 | 64 | 192,624,724 B (183.7 MB) |
-| 1024 | 8 | 32 | 256,814,496 B (244.9 MB) |
-| 1024 | 8 | 64 | 256,815,692 B (244.9 MB) |
-
-※ ファイルサイズは hash 有り形式（nnue-pytorch 標準）、arch_len=200 で計算
-
-## HalfKA_hm
-
-bullet-shogi / nnue-pytorch で学習可能な Half-Mirror 形式。
-
-| L1 | L2 | L3 | ファイルサイズ |
-|----|----|----|---------------|
-| 256 | 32 | 32 | 37,550,580 B (35.8 MB) |
-| 512 | 8 | 64 | 75,076,160 B (71.6 MB) |
-| 512 | 8 | 96 | 75,077,332 B (71.6 MB) |
-| 512 | 32 | 32 | 75,099,636 B (71.6 MB) |
-| 768 | 16 | 64 | 112,625,248 B (107.4 MB) |
-| 1024 | 8 | 32 | 150,148,500 B (143.2 MB) |
-| 1024 | 8 | 64 | 150,149,696 B (143.2 MB) |
-| 1024 | 8 | 96 | 150,150,868 B (143.2 MB) |
-
-## HalfKA
-
-Non-mirror 形式。
-
-| L1 | L2 | L3 | ファイルサイズ |
-|----|----|----|---------------|
-| 256 | 32 | 32 | 70,934,900 B (67.6 MB) |
-| 512 | 8 | 64 | 141,845,904 B (135.3 MB) |
-| 512 | 8 | 96 | 141,847,076 B (135.3 MB) |
-| 512 | 32 | 32 | 141,869,380 B (135.3 MB) |
-| 768 | 16 | 64 | 212,769,360 B (202.9 MB) |
-| 1024 | 8 | 32 | 283,688,340 B (270.5 MB) |
-| 1024 | 8 | 64 | 283,689,536 B (270.5 MB) |
-| 1024 | 8 | 96 | 283,690,708 B (270.5 MB) |
-
-## 活性化関数
-
-| 名前 | 説明 | 備考 |
-|------|------|------|
-| CReLU | Clipped ReLU: `clamp(x, 0, QA)` | **推奨** |
-| SCReLU | Squared Clipped ReLU: `clamp(x, 0, QA)²` | 実験的 |
-| PairwiseCReLU | Pairwise 乗算: `clamp(a) × clamp(b)` | 実験的 |
-
-※ CReLU と SCReLU はファイルサイズが同じ。PairwiseCReLU は L1 入力次元が半分になるためサイズが異なる。
-
-## 自動検出
-
-nnue-pytorch で生成したファイルはヘッダーが不正確なことがあります。
-rshogi はファイルサイズからアーキテクチャを自動検出します。
-
-詳細: [nnue-architecture-detection.md](./nnue-architecture-detection.md)
-
-## 互換性のある評価関数
-
-| ソフト | Feature Set | アーキテクチャ |
-|--------|-------------|---------------|
-| 水匠 (suisho) | HalfKP | 256x2-32-32 |
-| tanuki | HalfKP | 256x2-32-32 |
-| AobaNNUE | HalfKP | 768x2-16-64 |
-| bullet-shogi | HalfKA_hm | 全 L1 サイズ |
-| nnue-pytorch (shogi) | HalfKP | 自動検出対応 |
+活性化関数は CReLU、SCReLU、PairwiseCReLU に対応します。
+読み込み時に検出されるため、使用するモデルに合わせてください。
+検出の詳細は [アーキテクチャ自動検出](./nnue-architecture-detection.md) を参照してください。
 
 ## LayerStacks
 
-現在の LayerStacks サポートは以下。
+`edition-universal` はモデルから形状を読み取ります。
+固定構成の例は以下です。対応する edition は [ビルドガイド](./build.md) で確認してください。
 
-| L1 | LayerStack L1出力 | LayerStack L2出力 | 備考 |
-|----|-------------------|-------------------|------|
-| 1536 | 16 | 32 | 従来バリアント (`layerstacks-1536x16x32`) |
-| 1536 | 32 | 32 | 32x32 バリアント (`layerstacks-1536x32x32`) |
-| 768 | 16 | 32 | 16x32 バリアント (`layerstacks-768x16x32`) |
-| 768 | 8 | 32 | 8x32 バリアント (`layerstacks-768x8x32`) |
-| 512 | 16 | 32 | 16x32 バリアント (`layerstacks-512x16x32`) |
-| 1024 | 16 | 32 | 16x32 バリアント (`layerstacks-1024x16x32`) |
+| L1 | LayerStack の出力サイズ（L1×L2） |
+|----|--------------------------------|
+| 512 | 16×32 |
+| 768 | 8×32、16×32 |
+| 1024 | 16×32 |
+| 1536 | 16×32、32×32 |
 
-大会向けビルドでは、dispatch overhead を避けるため exact architecture feature を 1 つだけ有効化することを推奨する。
+### 振り分け方式の設定
 
-## 新しいアーキテクチャの追加
+学習時と同じ `LS_BUCKET_MODE` を指定します。
 
-新しい L1/L2/L3 の組み合わせを追加する場合:
+| モデルの方式 | `LS_BUCKET_MODE` | 追加設定 |
+|--------------|-----------------|----------|
+| KingRank9 / SFNN k3k3 | `kingrank9` | なし。9バケットのモデルを使用 |
+| tatara の進行度方式 | `progresskpabs` | `LS_PROGRESS_BUCKETS` と `LS_PROGRESS_COEFF` |
+| YaneuraOu / BulletOu SFNN の進行度方式 | `progresskpabsq16` | `LS_PROGRESS_BUCKETS` と `LS_PROGRESS_COEFF` |
 
-1. `crates/rshogi-core/src/nnue/{feature_set}/l{L1}.rs` にバリアントを追加
-2. `crates/rshogi-core/src/nnue/spec.rs` の `KNOWN_PAYLOADS` にエントリを追加
+- `LS_PROGRESS_BUCKETS` は学習時のバケット数を指定します。範囲は1〜16で、モデルの格納数以下です。
+- `LS_PROGRESS_COEFF` には、そのモデルの学習に使った進行度係数ファイルを指定します。バケット数1では不要です。
+- `kingrank9` では `LS_PROGRESS_BUCKETS` を0（未指定）、`LS_PROGRESS_COEFF` を未指定にします。
+- tatara と YaneuraOu 系の進行度方式は計算結果が異なるため、同じ係数ファイルでも置き換えて使わないでください。
+- YaneuraOu と BulletOu の進行度方式が一致するバケット数は2・4・8・16です。k3k3 と進行度を組み合わせた方式は未対応です。
 
-詳細: [nnue-architecture-detection.md](./nnue-architecture-detection.md)
+SFNN の振り分け方式への対応と、ファイル形式の互換性は別です。
+YaneuraOu SFNN 形式のファイルは、rshogi で読み込める形式への変換が必要です。
+tools の native 評価経路には Q16 未対応のものがあります。
+対象と利用方法は [tools の LayerStacks routing 対応](../crates/tools/docs/nnue-routing.md) を参照してください。

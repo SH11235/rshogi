@@ -1,5 +1,7 @@
 # rescore_psv — PSV 評価値の再スコアリング + ポリシー展開
 
+LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+
 PSV（PackedSfenValue）ファイルの評価値（score）を付け替えるツール。全モードが
 ストリーミングで動作し、**ピークメモリは入力件数に依存しない**ため、数十億局面の
 ファイルもそのまま処理できる。

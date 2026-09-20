@@ -1,5 +1,7 @@
 # rescore_hcpe — hcpe 教師の eval を NNUE 固定 depth 探索で付け替え
 
+LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+
 hcpe（cshogi HuffmanCodedPosAndEval, 38B/レコード）教師プールの各局面を **NNUE 固定 depth
 探索**で再評価し、**eval だけを差し替えた hcpe** を出力する教師生成ツール（局面・bestMove16・
 gameResult は保持）。`yardstick_label`（ラベル品質の物差し）と**共有コア `teacher_labeler` を

@@ -12,6 +12,7 @@
 //!   使い回すとラベルが処理順に依存してしまう。それを避けるための fresh-per-position。）
 //! - 符号規約は手番側視点（side-to-move view）cp で統一（hcpe 保存 eval・dlshogi value 目標と同じ）。
 
+use crate::nnue_routing::parse_native_layer_stack_bucket_mode;
 use std::fs;
 use std::path::Path;
 
@@ -19,8 +20,8 @@ use anyhow::{Context, Result, bail};
 
 use rshogi_core::nnue::{
     LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, parse_layer_stack_bucket_mode,
-    set_fv_scale_override, set_layer_stack_progress_kpabs_weights,
+    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, set_fv_scale_override,
+    set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
@@ -68,7 +69,7 @@ pub fn configure_eval(cfg: &LabelerEvalConfig) -> Result<()> {
     let mode =
         cfg.ls_bucket_mode
             .map(|mode_str| {
-                parse_layer_stack_bucket_mode(mode_str).with_context(|| {
+                parse_native_layer_stack_bucket_mode(mode_str).with_context(|| {
             format!("invalid --ls-bucket-mode '{mode_str}' (expected progresskpabs or kingrank9)")
             })
             })
@@ -276,6 +277,24 @@ pub fn label_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labeler_rejects_native_q16_before_loading_coefficients_or_model() {
+        let existing_file = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        for count in [1, 8] {
+            for coeff in [None, Some(Path::new("missing-progress.bin"))] {
+                let cfg = LabelerEvalConfig {
+                    nnue: &existing_file,
+                    fv_scale: 0,
+                    ls_bucket_mode: Some("progresskpabsq16"),
+                    ls_progress_buckets: Some(count),
+                    ls_progress_coeff: coeff,
+                };
+                let error = configure_eval(&cfg).unwrap_err();
+                assert!(format!("{error:#}").contains("not supported by tools native evaluation"));
+            }
+        }
+    }
 
     #[test]
     fn parse_spsa_params_content_parses_rounds_and_skips() {

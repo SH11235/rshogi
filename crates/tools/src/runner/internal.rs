@@ -1,5 +1,6 @@
 //! 内部API直接呼び出しモードでのベンチマーク実行
 
+use crate::nnue_routing::parse_native_layer_stack_bucket_mode;
 use std::sync::mpsc;
 use std::thread;
 
@@ -10,7 +11,7 @@ use rshogi_core::eval::{MaterialLevel, set_eval_hash_enabled, set_material_level
 use rshogi_core::eval::{eval_hash_stats, reset_eval_hash_stats};
 use rshogi_core::nnue::{
     LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, parse_layer_stack_bucket_mode,
+    layer_stack_progress_coeff_required, load_progress_coeff_kpabs,
     set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
@@ -83,7 +84,7 @@ fn setup_eval(config: &BenchmarkConfig) -> Result<()> {
         };
         let mode = option_value("LS_BUCKET_MODE")
             .map(|value| {
-                parse_layer_stack_bucket_mode(value)
+                parse_native_layer_stack_bucket_mode(value)
                     .with_context(|| format!("invalid LS_BUCKET_MODE={value}"))
             })
             .transpose()?;

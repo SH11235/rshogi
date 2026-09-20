@@ -52,6 +52,7 @@ pub mod eval_sfens_tool;
 pub mod kif;
 pub mod king_zone;
 pub mod mask_io;
+pub mod nnue_routing;
 pub mod nnue_saturation_tool;
 // nyugyoku_metrics は CSA replay (`replay` モジュール) に依存するため csa-replay に gate する。
 #[cfg(feature = "csa-replay")]
