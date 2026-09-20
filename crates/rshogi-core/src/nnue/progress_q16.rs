@@ -5,10 +5,47 @@ use super::constants::MAX_LAYER_STACK_BUCKETS;
 use super::network::{SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, get_layer_stack_progress_buckets};
 use crate::position::Position;
 use crate::types::{Color, PieceType};
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 static WEIGHTS: RwLock<Option<Box<[i32]>>> = RwLock::new(None);
-static THRESHOLDS: [OnceLock<Box<[i64]>>; MAX_LAYER_STACK_BUCKETS + 1] =
-    [const { OnceLock::new() }; MAX_LAYER_STACK_BUCKETS + 1];
+// 添字 N ごとの round(ln((i/N) / (1-i/N)) * 65536), i=1..N。
+// 初回評価も含めて、閾値の計算・ヒープ確保を評価経路へ持ち込まない。
+const THRESHOLDS: [&[i64]; MAX_LAYER_STACK_BUCKETS + 1] = [
+    &[], // N=0 は使用しない。
+    &[],
+    &[0],
+    &[-45426, 45426],
+    &[-71999, 0, 71999],
+    &[-90852, -26573, 26573, 90852],
+    &[-105476, -45426, 0, 45426, 105476],
+    &[-117425, -60050, -18854, 18854, 60050, 117425],
+    &[-127527, -71999, -33477, 0, 33477, 71999, 127527],
+    &[-136278, -82101, -45426, -14624, 14624, 45426, 82101, 136278],
+    &[
+        -143997, -90852, -55529, -26573, 0, 26573, 55529, 90852, 143997,
+    ],
+    &[
+        -150902, -98571, -64280, -36675, -11949, 11949, 36675, 64280, 98571, 150902,
+    ],
+    &[
+        -157148, -105476, -71999, -45426, -22051, 0, 22051, 45426, 71999, 105476, 157148,
+    ],
+    &[
+        -162851, -111722, -78904, -53145, -30802, -10102, 10102, 30802, 53145, 78904, 111722,
+        162851,
+    ],
+    &[
+        -168097, -117425, -85150, -60050, -38521, -18854, 0, 18854, 38521, 60050, 85150, 117425,
+        168097,
+    ],
+    &[
+        -172953, -122670, -90852, -66296, -45426, -26573, -8751, 8751, 26573, 45426, 66296, 90852,
+        122670, 172953,
+    ],
+    &[
+        -177475, -127527, -96098, -71999, -51672, -33477, -16470, 0, 16470, 33477, 51672, 71999,
+        96098, 127527, 177475,
+    ],
+];
 /// raw f64 LE 係数を YaneuraOu と同じ round(w * 65536) / i32 clamp で量子化する。
 pub fn load_progress_coeff_kpabs_q16_from_bytes(bytes: &[u8]) -> Result<Box<[i32]>, String> {
     if bytes.len() != SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * 8 {
@@ -41,15 +78,7 @@ pub fn reset_layer_stack_progress_kpabs_q16_weights() {
 /// Q16 logit 和を bucket へ変換する。閾値と等しい値は上側の bucket に属する。
 pub fn progress_q16_sum_to_bucket(sum: i64, num_buckets: usize) -> usize {
     assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
-    let thresholds = THRESHOLDS[num_buckets].get_or_init(|| {
-        (1..num_buckets)
-            .map(|i| {
-                let p = i as f64 / num_buckets as f64;
-                ((p / (1.0 - p)).ln() * 65536.0).round() as i64
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
-    });
+    let thresholds = THRESHOLDS[num_buckets];
     thresholds.partition_point(|&threshold| threshold <= sum)
 }
 pub(crate) fn configured_progress_q16_bucket(pos: &Position, stored_buckets: usize) -> usize {
@@ -121,6 +150,23 @@ pub fn compute_progresskpabs_q16_sum(pos: &Position, weights: &[i32]) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_thresholds_match_yo_for_every_supported_bucket_count() {
+        for (n, thresholds) in THRESHOLDS.iter().enumerate().skip(1) {
+            assert_eq!(thresholds.len(), n - 1);
+            assert_eq!(progress_q16_sum_to_bucket(i64::MIN, n), 0);
+            assert_eq!(progress_q16_sum_to_bucket(i64::MAX, n), n - 1);
+            for i in 1..n {
+                let p = i as f64 / n as f64;
+                let expected = ((p / (1.0 - p)).ln() * 65536.0).round() as i64;
+                assert_eq!(thresholds[i - 1], expected, "N={n} i={i}");
+                assert_eq!(progress_q16_sum_to_bucket(expected - 1, n), i - 1);
+                assert_eq!(progress_q16_sum_to_bucket(expected, n), i);
+                assert_eq!(progress_q16_sum_to_bucket(expected + 1, n), i);
+            }
+        }
+    }
 
     #[test]
     fn configured_routing_uses_integer_coefficients() {

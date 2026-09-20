@@ -55,6 +55,7 @@ use std::io::{Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
 // mpsc/Arc/Mutex/Instant は ONNX 直推論パイプライン専用（バッチ供給の Receiver 共有・
 // フェーズ計時）。ONNX 無効ビルドでの unused import を避けるため cfg で囲う。
 use sha2::{Digest, Sha256};
@@ -69,7 +70,7 @@ use std::time::Instant;
 use rshogi_core::nnue::{
     LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
     layer_stack_progress_coeff_required, load_progress_coeff_kpabs_from_bytes,
-    parse_layer_stack_bucket_mode, set_layer_stack_progress_kpabs_weights,
+    set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search};
@@ -902,7 +903,7 @@ fn main() -> Result<()> {
                     .ls_bucket_mode
                     .as_deref()
                     .context("LayerStacks requires --ls-bucket-mode")?;
-                let mode = parse_layer_stack_bucket_mode(mode_str)
+                let mode = parse_native_layer_stack_bucket_mode(mode_str)
                     .context("--ls-bucket-mode must be progresskpabs or kingrank9")?;
                 match (mode, cli.ls_progress_coeff.as_deref()) {
                     (LayerStackBucketMode::ProgressKPAbs, Some(path)) => {

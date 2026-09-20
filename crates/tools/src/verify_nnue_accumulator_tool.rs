@@ -16,6 +16,7 @@
 //!   --ls-progress-coeff path/to/nodchip_progress_e1_f1_cuda.bin
 //! ```
 
+use crate::nnue_routing::parse_native_layer_stack_bucket_mode;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::mem::size_of;
@@ -25,7 +26,7 @@ use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::nnue::{
     AccumulatorLayerStacks, LayerStackBucketMode, LayerStacksNetwork, LsFeatureSpec, NNUENetwork,
     NetworkLayerStacks, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, configure_layer_stack_routing,
-    layer_stack_progress_coeff_required, ls_dispatch_ft_size, parse_layer_stack_bucket_mode,
+    layer_stack_progress_coeff_required, ls_dispatch_ft_size,
     set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
@@ -182,7 +183,7 @@ fn ls_verify_dispatch(net: &LayerStacksNetwork, cli: &Cli) -> Result<(usize, usi
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    let mode = parse_layer_stack_bucket_mode(&cli.ls_bucket_mode).with_context(|| {
+    let mode = parse_native_layer_stack_bucket_mode(&cli.ls_bucket_mode).with_context(|| {
         format!(
             "invalid --ls-bucket-mode '{}' (expected progresskpabs or kingrank9)",
             cli.ls_bucket_mode

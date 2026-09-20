@@ -1,5 +1,7 @@
 # rshogi tools リファレンス
 
+LayerStacks の [native / USI routing 対応と Q16 制限](nnue-routing.md)。
+
 crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 
 ## 対局・トーナメント

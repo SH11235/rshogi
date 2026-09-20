@@ -12,6 +12,7 @@
 //!   --ls-progress-coeff <progress.bin>
 //! ```
 
+use crate::nnue_routing::parse_native_layer_stack_bucket_mode;
 use std::hint::black_box;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -28,7 +29,7 @@ use rshogi_core::nnue::{
     SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, compute_layer_stack_kingrank9_bucket_index,
     compute_layer_stack_progresskpabs_bucket_index, configure_layer_stack_routing,
     get_layer_stack_progress_buckets, get_layer_stack_progress_kpabs_weights,
-    layer_stack_progress_coeff_required, ls_dispatch_ft_size, parse_layer_stack_bucket_mode,
+    layer_stack_progress_coeff_required, ls_dispatch_ft_size,
     set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
@@ -391,9 +392,7 @@ fn configure_layer_stack_bucket(
 ) -> Result<LayerStackBucketMode> {
     let mode_str =
         cli.ls_bucket_mode.as_deref().context("LayerStacks requires --ls-bucket-mode")?;
-    let mode = parse_layer_stack_bucket_mode(mode_str).ok_or_else(|| {
-        anyhow!("invalid --ls-bucket-mode '{}'. expected: progresskpabs or kingrank9", mode_str)
-    })?;
+    let mode = parse_native_layer_stack_bucket_mode(mode_str)?;
 
     if mode == LayerStackBucketMode::ProgressKPAbs {
         match progress_weights {
@@ -835,6 +834,26 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_q16_is_rejected_before_weights_or_routing_are_applied() {
+        for count in [1, 8] {
+            let cli = Cli::try_parse_from([
+                "bench_nnue_eval",
+                "--nnue-file",
+                "unused.nnue",
+                "--ls-bucket-mode",
+                "progresskpabsq16",
+                "--ls-progress-buckets",
+                &count.to_string(),
+            ])
+            .unwrap();
+            for weights in [None, Some([0.0_f32].as_slice())] {
+                let error = configure_layer_stack_bucket(&cli, weights, count).unwrap_err();
+                assert!(format!("{error:#}").contains("not supported by tools native evaluation"));
+            }
+        }
+    }
 
     /// 外部モデルを明示して実行する数値回帰。固定局面以外の状態を先に作る。
     #[test]

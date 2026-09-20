@@ -1,5 +1,7 @@
 # bench_nnue_eval
 
+LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+
 NNUE の推論処理を ns/op で計測します。探索 NPS や棋力の測定ではありません。
 
 ```bash

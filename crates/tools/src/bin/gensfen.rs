@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Local;
@@ -20,7 +21,7 @@ use rshogi_core::nnue::{
     LayerStackBucketMode, compute_layer_stack_progresskpabs_bucket_index,
     configure_layer_stack_routing, get_layer_stack_progress_kpabs_weights, get_network,
     init_nnue_from_bytes, layer_stack_progress_coeff_required,
-    load_progress_coeff_kpabs_from_bytes, parse_layer_stack_bucket_mode, set_fv_scale_override,
+    load_progress_coeff_kpabs_from_bytes, set_fv_scale_override,
     set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::{EnteringKingPointInfo, Position};
@@ -5954,7 +5955,7 @@ fn initialize_native_backend(
         Some(stored_buckets) => {
             let mode_str =
                 bucket_mode.context("--native LayerStacks NNUE requires --bucket-mode")?;
-            let mode = parse_layer_stack_bucket_mode(mode_str).with_context(|| {
+            let mode = parse_native_layer_stack_bucket_mode(mode_str).with_context(|| {
                 format!("invalid --bucket-mode '{mode_str}' (expected progresskpabs or kingrank9)")
             })?;
             match (mode, progress) {

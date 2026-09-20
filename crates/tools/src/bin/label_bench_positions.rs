@@ -21,6 +21,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use tools::nnue_routing::parse_native_layer_stack_bucket_mode;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -30,8 +31,8 @@ use serde_json::{Value as JsonValue, json};
 
 use rshogi_core::nnue::{
     LayerStackBucketMode, configure_layer_stack_routing, get_network, init_nnue,
-    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, parse_layer_stack_bucket_mode,
-    set_fv_scale_override, set_layer_stack_progress_kpabs_weights,
+    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, set_fv_scale_override,
+    set_layer_stack_progress_kpabs_weights,
 };
 use rshogi_core::position::Position;
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
@@ -410,7 +411,7 @@ fn configure_eval(cli: &Cli) -> Result<()> {
         cli.ls_bucket_mode
             .as_deref()
             .map(|mode_str| {
-                parse_layer_stack_bucket_mode(mode_str).with_context(|| {
+                parse_native_layer_stack_bucket_mode(mode_str).with_context(|| {
             format!("invalid --ls-bucket-mode '{mode_str}' (expected progresskpabs or kingrank9)")
             })
             })

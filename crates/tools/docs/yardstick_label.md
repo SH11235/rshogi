@@ -1,5 +1,7 @@
 # yardstick_label
 
+LayerStacks の native Q16 対応制限は [routing 対応表](nnue-routing.md) を参照してください。
+
 `yardstick_label` は、ラベル品質「物差し」のステージ 1 です。固定 held-out（棋譜由来の
 hcpe。各局面に保存 eval＝教師ラベルと gameResult＝実対局結果を持つ）の各局面を、与えた
 labeler（NNUE 評価器 + 固定 depth）の**決定的探索**で評価し、採点に必要な値だけを 1 行 1
