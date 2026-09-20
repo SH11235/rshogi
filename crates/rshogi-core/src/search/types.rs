@@ -478,7 +478,6 @@ impl Default for OrderedMovesBuffer {
 // =============================================================================
 
 /// ルートでの指し手情報
-#[derive(Clone)]
 pub struct RootMove {
     /// 探索スコア
     pub score: Value,
@@ -499,6 +498,46 @@ pub struct RootMove {
     /// PV（Principal Variation）
     /// pv[0]が指し手自体
     pub pv: Vec<Move>,
+}
+
+impl Clone for RootMove {
+    fn clone(&self) -> Self {
+        Self {
+            score: self.score,
+            previous_score: self.previous_score,
+            average_score: self.average_score,
+            mean_squared_score: self.mean_squared_score,
+            score_lower_bound: self.score_lower_bound,
+            score_upper_bound: self.score_upper_bound,
+            sel_depth: self.sel_depth,
+            effort: self.effort,
+            pv: self.pv.clone(),
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        // 完了iterationの退避で、各ルート手のPV容量も再利用する。
+        let Self {
+            score,
+            previous_score,
+            average_score,
+            mean_squared_score,
+            score_lower_bound,
+            score_upper_bound,
+            sel_depth,
+            effort,
+            pv,
+        } = source;
+        self.score = *score;
+        self.previous_score = *previous_score;
+        self.average_score = *average_score;
+        self.mean_squared_score = *mean_squared_score;
+        self.score_lower_bound = *score_lower_bound;
+        self.score_upper_bound = *score_upper_bound;
+        self.sel_depth = *sel_depth;
+        self.effort = *effort;
+        self.pv.clone_from(pv);
+    }
 }
 
 impl RootMove {
@@ -926,6 +965,47 @@ mod tests {
         assert_eq!(rm.mv(), mv);
         assert_eq!(rm.pv.len(), 1);
         assert!(rm.score.raw() < 0);
+    }
+
+    #[test]
+    fn root_moves_snapshot_reuses_pv_and_copies_metadata() {
+        let mv = Move::from_usi("7g7f").unwrap();
+        let reply = Move::from_usi("3c3d").unwrap();
+        let mut source = RootMoves::from_vec(vec![RootMove::new(mv)]);
+        let mut target = source.clone();
+        target.moves[0].pv.reserve(32);
+        let capacity = target.moves[0].pv.capacity();
+        let pointer = target.moves[0].pv.as_ptr();
+        let rm = &mut source.moves[0];
+        rm.score = Value::new(123);
+        rm.previous_score = Value::new(-42);
+        rm.average_score = Value::new(17);
+        rm.mean_squared_score = Some(-12345);
+        rm.score_lower_bound = true;
+        rm.score_upper_bound = true;
+        rm.sel_depth = 31;
+        rm.effort = 0.75;
+        rm.pv.push(reply);
+
+        for length in [2, 1] {
+            source.moves[0].pv.truncate(length);
+            target.clone_from(&source);
+            let actual = &target.moves[0];
+            let expected = &source.moves[0];
+            assert_eq!(actual.pv.as_ptr(), pointer);
+            assert_eq!(actual.pv.capacity(), capacity);
+            assert_eq!(actual.pv, expected.pv);
+            assert_eq!(actual.score, expected.score);
+            assert_eq!(actual.previous_score, expected.previous_score);
+            assert_eq!(actual.average_score, expected.average_score);
+            assert_eq!(actual.mean_squared_score, expected.mean_squared_score);
+            assert_eq!(actual.score_lower_bound, expected.score_lower_bound);
+            assert_eq!(actual.score_upper_bound, expected.score_upper_bound);
+            assert_eq!(actual.sel_depth, expected.sel_depth);
+            assert_eq!(actual.effort, expected.effort);
+        }
+        source.moves[0].pv[0] = reply;
+        assert_eq!(target.moves[0].pv, vec![mv]);
     }
 
     #[test]
