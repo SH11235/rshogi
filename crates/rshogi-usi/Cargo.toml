@@ -38,6 +38,7 @@ nnue-stats = ["rshogi-core/nnue-stats"]
 tt-trace = ["rshogi-core/tt-trace"]
 # NNUE 詳細診断ログ（Golden Forward テスト用）
 diagnostics = ["rshogi-core/diagnostics"]
+allocation-stats = ["rshogi-core/allocation-stats"]
 # Threat exclusion profiles
 threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]

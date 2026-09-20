@@ -16,6 +16,9 @@
 
 pub mod types;
 
+#[cfg(feature = "allocation-stats")]
+pub mod allocation_stats;
+
 // 盤面表現
 pub mod bitboard;
 pub mod eval;

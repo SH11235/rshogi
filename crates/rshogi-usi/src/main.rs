@@ -33,6 +33,9 @@ use rshogi_core::search::{
 use rshogi_core::types::{EnteringKingRule, Move};
 use serde_json::json;
 
+#[cfg(feature = "allocation-stats")]
+mod allocation_stats;
+
 /// エンジン名
 const ENGINE_NAME: &str = "Shogi Engine";
 /// エンジンバージョン
@@ -1329,6 +1332,8 @@ impl UsiEngine {
         self.search_thread = Some(
             builder
                 .spawn(move || {
+                    #[cfg(feature = "allocation-stats")]
+                    let allocation_before = rshogi_core::allocation_stats::snapshot();
                     let result = search.go(
                         &mut pos,
                         limits,
@@ -1337,6 +1342,9 @@ impl UsiEngine {
                             std::io::stdout().flush().ok();
                         }),
                     );
+
+                    #[cfg(feature = "allocation-stats")]
+                    allocation_stats::report(allocation_before);
 
                     // 探索統計レポートを出力（search-stats feature有効時のみ内容あり）
                     if !result.stats_report.is_empty() {

@@ -1159,6 +1159,9 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
+        #[cfg(feature = "allocation-stats")]
+        let _allocation_scope =
+            crate::allocation_stats::Scope::enter(crate::allocation_stats::Phase::Tree);
         if let Some(liveness) = self.state.depth_liveness.as_mut() {
             liveness.search_entry_depth[0] = depth;
             liveness.nondecreasing_depth_run[0] = 0;
@@ -1912,6 +1915,9 @@ impl SearchWorker {
         limits: &LimitsType,
         time_manager: &mut TimeManagement,
     ) -> Value {
+        #[cfg(feature = "allocation-stats")]
+        let _allocation_scope =
+            crate::allocation_stats::Scope::enter(crate::allocation_stats::Phase::Tree);
         // rootNode && pvIdx の経路のみこの関数が担当する。
         // pv_idx == 0 は search_root() を使い、root TT save はそちらでのみ実行する。
         debug_assert!(pv_idx > 0);
