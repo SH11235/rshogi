@@ -12,8 +12,39 @@ pub enum ScoreBound {
     Upperbound,
 }
 
+/// 同一info行で報告された評価値。距離不明のmateを通常cpへ変換しない。
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryScore {
+    /// centipawn値。
+    Cp(i32),
+    /// 符号付き詰み手数。
+    Mate(i32),
+    /// 勝ちの詰み報告。手数不明。
+    MateWin,
+    /// 負けの詰み報告。手数不明。
+    MateLoss,
+}
+
+/// depth・評価値・PVが同一行に揃った、boundなしの主PV報告。
+/// USIにはiteration完了通知がないため、iteration完了や最終bestmoveとの一致は保証しない。
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ExactPrimaryInfo {
+    /// 採用行で報告された深さ。
+    pub depth: u32,
+    /// 採用行の評価値。上下界付きの行は採用しない。
+    pub score: PrimaryScore,
+    /// 採用行の非空PV。字句検証済みだが盤面上の合法性は保証しない。
+    pub pv: Vec<String>,
+    /// 他の行からfieldを補わず採用した原文。
+    pub raw_line: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct EvalLog {
+    /// fieldごとの進捗値と区別した、最後の同一行exact primary報告。旧ログには存在しない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exact_primary: Option<ExactPrimaryInfo>,
     /// 評価値の上下界。旧ログには存在しない。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_bound: Option<ScoreBound>,
@@ -50,6 +81,8 @@ pub struct UsiMultiPvCandidate {
 
 #[derive(Default, Clone)]
 pub struct InfoSnapshot {
+    /// 不完全な行、bound付き報告、secondary PVでは上書きしない。
+    pub last_exact_primary: Option<ExactPrimaryInfo>,
     /// 最後の主 PV 評価値に付随する上下界。
     pub score_bound: Option<ScoreBound>,
     pub score_cp: Option<i32>,
@@ -78,10 +111,13 @@ impl InfoSnapshot {
 
         // multipv 番号を抽出
         let mut multipv = 1u32;
+        let mut valid_multipv = true;
         let mut idx = 1;
         while idx + 1 < tokens.len() {
             if tokens[idx] == "multipv" {
-                multipv = tokens[idx + 1].parse::<u32>().unwrap_or(1);
+                let parsed = tokens[idx + 1].parse::<u32>();
+                valid_multipv = parsed.is_ok();
+                multipv = parsed.unwrap_or(1);
                 break;
             }
             idx += 1;
@@ -89,6 +125,7 @@ impl InfoSnapshot {
 
         // score と pv を抽出（全 multipv 共通のパース）
         let mut score_seen = false;
+        let mut primary_score = None;
         let mut score_bound = None;
         let mut score_cp: Option<i32> = None;
         let mut score_mate: Option<i32> = None;
@@ -128,12 +165,18 @@ impl InfoSnapshot {
                     "cp" => {
                         score_seen = true;
                         score_cp = tokens[i + 2].parse::<i32>().ok();
+                        primary_score = score_cp.map(PrimaryScore::Cp);
                         score_mate = None;
                         i += 2;
                     }
                     "mate" => {
                         score_seen = true;
                         score_mate = tokens[i + 2].parse::<i32>().ok();
+                        primary_score = match tokens[i + 2] {
+                            "+" => Some(PrimaryScore::MateWin),
+                            "-" => Some(PrimaryScore::MateLoss),
+                            _ => score_mate.map(PrimaryScore::Mate),
+                        };
                         score_cp = None;
                         i += 2;
                     }
@@ -150,6 +193,39 @@ impl InfoSnapshot {
                 _ => {}
             }
             i += 1;
+        }
+
+        // 分割行を結合して架空のdepth/score/PV組を作らない。
+        let header_count = |key: &str| {
+            tokens
+                .iter()
+                .take_while(|token| **token != "pv")
+                .filter(|token| **token == key)
+                .count()
+        };
+        if multipv == 1
+            && valid_multipv
+            && header_count("depth") == 1
+            && header_count("score") == 1
+            && header_count("multipv") <= 1
+            // 不正な数値fieldの値としてparserに消費されたbound語も拒否する。
+            && header_count("lowerbound") == 0
+            && header_count("upperbound") == 0
+            && score_bound.is_none()
+            && !pv.is_empty()
+            && pv.iter().all(|mv| {
+                mv == "win"
+                    || rshogi_core::types::Move::from_usi_strict(mv)
+                        .is_some_and(|parsed| parsed != rshogi_core::types::Move::NONE)
+            })
+            && let (Some(depth), Some(score)) = (depth, primary_score)
+        {
+            self.last_exact_primary = Some(ExactPrimaryInfo {
+                depth,
+                score,
+                pv: pv.clone(),
+                raw_line: line.to_owned(),
+            });
         }
 
         // multipv=1 はメインフィールドも更新
@@ -210,6 +286,7 @@ impl InfoSnapshot {
             return None;
         }
         Some(EvalLog {
+            last_exact_primary: self.last_exact_primary,
             score_bound: self.score_bound,
             score_cp: self.score_cp,
             score_mate: self.score_mate,
@@ -300,6 +377,67 @@ pub type InfoCallback<'a> = dyn FnMut(&str, &SearchRequest<'_>) + 'a;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coherent_primary_is_not_assembled_from_progress_lines() {
+        let mut snap = InfoSnapshot::default();
+        let raw = "info depth 8 score cp 30 nodes 100 pv 7g7f 3c3d";
+        snap.update_from_line(raw);
+        let expected = snap.last_exact_primary.clone().unwrap();
+        assert_eq!(expected.depth, 8);
+        assert_eq!(expected.score, PrimaryScore::Cp(30));
+        assert_eq!(expected.raw_line, raw);
+        for line in [
+            "info depth 9 nodes 200",
+            "info depth 9 score cp 50 lowerbound pv 2g2f",
+            "info depth 9 score cp -50 upperbound pv 2g2f",
+            "info depth 9 score cp 50 nodes lowerbound pv 2g2f",
+            "info depth 9 score cp 50 time upperbound pv 2g2f",
+            "info depth 9 score cp 50 nps lowerbound pv 2g2f",
+            "info depth 9 score cp 50 seldepth upperbound pv 2g2f",
+            "info multipv 2 depth 10 score cp 90 pv 2g2f",
+            "info score cp 17",
+            "info pv 2g2f",
+            "info string depth 99 score cp 100 pv 2g2f",
+            "info multipv bad depth 99 score cp 100 pv 2g2f",
+            "info multipv 1 multipv 2 depth 99 score cp 100 pv 2g2f",
+            "info depth 99 score cp bad pv 2g2f",
+            "info depth 99 score cp 100 pv 2g2fx",
+            "info depth 99 score cp 100 pv",
+            "info depth 99 depth 100 score cp 100 pv 2g2f",
+            "bestmove 7g7f",
+            "stop",
+        ] {
+            snap.update_from_line(line);
+            assert_eq!(snap.last_exact_primary.as_ref(), Some(&expected), "{line}");
+        }
+        assert_eq!(snap.nodes, Some(200));
+        let log = snap.into_eval_log().unwrap();
+        let json = serde_json::to_string(&log).unwrap();
+        let restored: EvalLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.last_exact_primary, Some(expected));
+    }
+
+    #[test]
+    fn missing_and_mate_primary_records_remain_explicit() {
+        let mut snap = InfoSnapshot::default();
+        for line in ["info depth 8", "info score cp 30", "info pv 7g7f"] {
+            snap.update_from_line(line);
+        }
+        assert!(snap.clone().into_eval_log().unwrap().last_exact_primary.is_none());
+        let old: EvalLog = serde_json::from_str(r#"{"depth":8,"score_cp":30}"#).unwrap();
+        assert!(old.last_exact_primary.is_none());
+        assert!(serde_json::to_value(old).unwrap().get("last_exact_primary").is_none());
+        for (token, expected) in [
+            ("+3", PrimaryScore::Mate(3)),
+            ("-3", PrimaryScore::Mate(-3)),
+            ("+", PrimaryScore::MateWin),
+            ("-", PrimaryScore::MateLoss),
+        ] {
+            snap.update_from_line(&format!("info depth 10 score mate {token} pv 7g7f"));
+            assert_eq!(snap.last_exact_primary.as_ref().unwrap().score, expected);
+        }
+    }
 
     #[test]
     fn score_bounds_follow_primary_score_and_survive_log_roundtrip() {
