@@ -71,6 +71,7 @@ LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md
 | `ek_testset` | held-out CSA から入玉評価テストセットを構築し、native NNUE 評価または hcpe export → yardstick で採点（[詳細](docs/ek_testset.md)） |
 | `nyugyoku_metrics` | 終局 CSA から宣言ルール距離ペア（`%KACHI`）と探索読み切り詰み距離（`%TORYO` + oracle 探索）を抽出し、native NNUE 静的評価の順序一致率 / concordance / 詰み手 top-1 率を採点（[詳細](docs/nyugyoku_metrics.md)） |
 | `nnue_saturation` | LayerStacks NNUE の活性飽和率（ClippedReLU 127 張り付き）を実局面で計測（[詳細](docs/nnue_saturation.md)） |
+| `prepack_nnue` | LayerStacks の FT を事前展開し、共有読み込み用コンテナを作成（[詳細](docs/prepack_nnue.md)） |
 
 ### NNUE 学習
 

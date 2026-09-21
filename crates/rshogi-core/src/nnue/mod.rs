@@ -53,6 +53,8 @@ mod layer_stacks;
 mod layers;
 mod leb128;
 mod ls_feature_spec;
+#[cfg(all(windows, feature = "prepacked-nnue"))]
+mod mapped_weights;
 pub mod net_bin_layout;
 #[macro_use]
 pub mod macros;
@@ -66,6 +68,8 @@ pub(crate) mod network_halfkp;
 mod network_layer_stacks;
 pub mod piece_list;
 pub mod prelude;
+#[cfg(feature = "prepacked-nnue")]
+pub mod prepacked;
 mod progress_q16;
 mod shared_weights;
 pub mod spec;

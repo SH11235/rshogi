@@ -155,9 +155,34 @@ impl DynamicAffine {
     }
 
     pub(crate) fn apply_file_weight_delta(&mut self, index: usize, delta: i32) -> bool {
+        #[cfg(all(windows, feature = "prepacked-nnue"))]
+        self.weights.make_owned();
         let (value, clamped) = super::net_delta::add_i8_delta(self.weights[index], delta);
         self.weights[index] = value;
         clamped
+    }
+
+    #[cfg(feature = "prepacked-nnue")]
+    pub(super) fn read_packed<R: Read + Seek>(
+        reader: &mut R,
+        input_dim: usize,
+        output_dim: usize,
+        packed: &super::prepacked::PackedModel,
+    ) -> io::Result<Self> {
+        let mut biases = AlignedBox::new_zeroed(output_dim);
+        for bias in biases.iter_mut() {
+            let mut bytes = [0; 4];
+            reader.read_exact(&mut bytes)?;
+            *bias = i32::from_le_bytes(bytes);
+        }
+        let weights = packed.fc(reader, input_dim, output_dim, false)?;
+        Ok(Self {
+            input_dim,
+            padded_input: padded_input(input_dim),
+            output_dim,
+            biases,
+            weights,
+        })
     }
 
     pub(crate) fn bias(&self, index: usize) -> i32 {

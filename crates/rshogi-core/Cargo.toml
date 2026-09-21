@@ -18,6 +18,7 @@ log.workspace = true
 rand.workspace = true
 rand_xoshiro.workspace = true
 serde.workspace = true
+sha2 = { version = "0.10.9", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.186"
@@ -51,6 +52,7 @@ default = ["search-no-pass-rules", "edition-universal"]
 
 # === 開発・診断・横断系 (Edition 軸非対象) ===
 debug = []
+prepacked-nnue = ["dep:sha2"]
 # 探索統計収集（枝刈り発生回数等のカウント）
 search-stats = []
 # NNUE統計収集（refresh/update比率等のカウント）

@@ -236,6 +236,17 @@ impl LayerStacksBinLayout {
     /// FT の圧縮 weights payload は読み込まず seek で飛ばす。常駐メモリは decode 済み
     /// FT bias と全 bucket の FC block に限られ、FT weights のサイズには依存しない。
     pub fn from_reader<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+        Self::read_layout(reader, true)
+    }
+
+    /// 変換用に byte 範囲だけを走査し、FC 係数を保持しない。
+    /// 返り値の coefficient API は FC データを利用できないため使わないこと。
+    #[cfg(feature = "prepacked-nnue")]
+    pub(crate) fn scan_for_conversion<R: Read + Seek>(reader: &mut R) -> io::Result<Self> {
+        Self::read_layout(reader, false)
+    }
+
+    fn read_layout<R: Read + Seek>(reader: &mut R, retain_fc: bool) -> io::Result<Self> {
         let mut cursor = StreamCursor::new(reader)?;
         let version = cursor.read_u32("version")?;
         if version != NNUE_VERSION_HALFKA && version != NNUE_VERSION_LAYERSTACK_NUM_BUCKETS {
@@ -336,7 +347,11 @@ impl LayerStacksBinLayout {
             .map(|(first, last)| first.fc_hash.start..last.output.weights.end)
             .ok_or_else(|| invalid("LayerStacks has no FC buckets"))?;
         let fc_data = StoredBinBlock {
-            bytes: cursor.read_range(fc_range.clone(), "FC blocks")?,
+            bytes: if retain_fc {
+                cursor.read_range(fc_range.clone(), "FC blocks")?
+            } else {
+                Vec::new()
+            },
             source: fc_range,
         };
         Ok(Self {
@@ -809,6 +824,47 @@ fn invalid_binary(message: impl Into<String>) -> NetDeltaError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "prepacked-nnue")]
+    #[test]
+    fn conversion_scan_never_reads_fc_payload() {
+        struct RejectFcRead {
+            inner: Cursor<Vec<u8>>,
+            fc_start: u64,
+        }
+        impl Read for RejectFcRead {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if !buffer.is_empty() && self.inner.position() >= self.fc_start {
+                    return Err(io::Error::other("FC payload must not be read by conversion scan"));
+                }
+                self.inner.read(buffer)
+            }
+        }
+        impl Seek for RejectFcRead {
+            fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+                self.inner.seek(from)
+            }
+        }
+        let model = build_synthetic_layer_stacks_with_ft_encoding(
+            "HalfKP",
+            <HalfKPFeatureSet as FeatureSetTrait>::DIMENSIONS,
+            32,
+            8,
+            32,
+            2,
+            SyntheticFtEncoding::Leb128Split,
+        );
+        let reference = LayerStacksBinLayout::from_bytes(&model.bytes).unwrap();
+        let mut reader = RejectFcRead {
+            inner: Cursor::new(model.bytes),
+            fc_start: reference.buckets[0].fc_hash.start as u64,
+        };
+        let scanned = LayerStacksBinLayout::scan_for_conversion(&mut reader).unwrap();
+        assert_eq!(scanned.buckets, reference.buckets);
+        assert_eq!(scanned.feature_transformer, reference.feature_transformer);
+        assert!(scanned.fc_data.bytes.is_empty());
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        assert!(LayerStacksBinLayout::from_reader(&mut reader).is_err());
+    }
     #[cfg(feature = "nnue-runtime-dimensions")]
     use std::sync::Arc;
 

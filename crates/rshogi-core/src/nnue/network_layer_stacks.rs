@@ -214,8 +214,15 @@ impl<
 {
     /// ファイルから読み込み
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = File::open(path)?;
+        let file = File::open(path.as_ref())?;
         let mut reader = BufReader::new(file);
+        #[cfg(feature = "prepacked-nnue")]
+        if super::prepacked::PackedModel::is_packed(&mut reader)? {
+            let packed = super::prepacked::PackedModel::open(path.as_ref())?;
+            let net = Self::read_with_source(&mut packed.metadata()?, None, Some(&packed))?;
+            packed.finish()?;
+            return Ok(net);
+        }
         Self::read(&mut reader)
     }
 
@@ -233,6 +240,18 @@ impl<
     pub fn read_with_options<R: Read + Seek>(
         reader: &mut R,
         psqt_override: Option<bool>,
+    ) -> io::Result<Self> {
+        Self::read_with_source(
+            reader,
+            psqt_override,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+    }
+    pub(super) fn read_with_source<R: Read + Seek>(
+        reader: &mut R,
+        psqt_override: Option<bool>,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<Self> {
         let mut buf4 = [0u8; 4];
 
@@ -377,7 +396,11 @@ impl<
 
         // Feature Transformer を読み込み（圧縮形式を自動検出）
         // read_psqt/read_threat_weights と末尾の share_weights() で変更するため mut
-        let mut feature_transformer = FeatureTransformerLayerStacks::read_leb128(reader)?;
+        let mut feature_transformer = FeatureTransformerLayerStacks::read_with_source(
+            reader,
+            #[cfg(feature = "prepacked-nnue")]
+            packed,
+        )?;
 
         // PSQT 読み込み:
         // - psqt_override == Some(true): USI オプションで PSQT 強制 ON（arch_str を無視）
@@ -387,7 +410,12 @@ impl<
         {
             let has_psqt = psqt_override.unwrap_or_else(|| arch_str.contains("PSQT="));
             if has_psqt {
-                feature_transformer.read_psqt(reader, num_buckets)?;
+                feature_transformer.read_psqt_with_source(
+                    reader,
+                    num_buckets,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
             }
         }
         #[cfg(not(feature = "nnue-psqt"))]
@@ -445,7 +473,11 @@ impl<
                         ));
                     }
                 }
-                feature_transformer.read_threat_weights(reader)?;
+                feature_transformer.read_threat_with_source(
+                    reader,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
             }
         }
         #[cfg(not(feature = "nnue-threat"))]
@@ -457,6 +489,13 @@ impl<
         }
 
         // LayerStacks を読み込み（FC 層は常に非圧縮、num_buckets 個分）
+        #[cfg(feature = "prepacked-nnue")]
+        let layer_stacks = if let Some(packed) = packed {
+            LayerStacks::read_packed(reader, num_buckets, packed)?
+        } else {
+            LayerStacks::read(reader, num_buckets)?
+        };
+        #[cfg(not(feature = "prepacked-nnue"))]
         let layer_stacks = LayerStacks::read(reader, num_buckets)?;
 
         // EOF検証: 余りデータがないことを確認
@@ -1135,6 +1174,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         l2: usize,
         l3: usize,
         psqt_override: Option<bool>,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<Self> {
         match (l1, l2, l3) {
             #[cfg(feature = "layerstacks-1536x16x32")]
@@ -1145,7 +1185,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     LAYER_STACK_16X32_L2_IN,
                     32,
                     FT,
-                >::read_with_options(reader, psqt_override)?;
+                >::read_with_source(
+                    reader,
+                    psqt_override,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
                 Ok(Self::L1536x16x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-1536x32x32")]
@@ -1156,7 +1201,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     LAYER_STACK_32X32_L2_IN,
                     64,
                     FT,
-                >::read_with_options(reader, psqt_override)?;
+                >::read_with_source(
+                    reader,
+                    psqt_override,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
                 Ok(Self::L1536x32x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-768x16x32")]
@@ -1167,7 +1217,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     LAYER_STACK_16X32_L2_IN,
                     32,
                     FT,
-                >::read_with_options(reader, psqt_override)?;
+                >::read_with_source(
+                    reader,
+                    psqt_override,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
                 Ok(Self::L768x16x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-768x8x32")]
@@ -1178,7 +1233,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     LAYER_STACK_8X32_L2_IN,
                     32,
                     FT,
-                >::read_with_options(reader, psqt_override)?;
+                >::read_with_source(
+                    reader,
+                    psqt_override,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
                 Ok(Self::L768x8x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-512x16x32")]
@@ -1189,7 +1249,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     LAYER_STACK_16X32_L2_IN,
                     32,
                     FT,
-                >::read_with_options(reader, psqt_override)?;
+                >::read_with_source(
+                    reader,
+                    psqt_override,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
                 Ok(Self::L512x16x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-1024x16x32")]
@@ -1200,7 +1265,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     LAYER_STACK_16X32_L2_IN,
                     32,
                     FT,
-                >::read_with_options(reader, psqt_override)?;
+                >::read_with_source(
+                    reader,
+                    psqt_override,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
                 Ok(Self::L1024x16x32(Box::new(net)))
             }
             #[cfg(feature = "layerstacks-3072x16x32")]
@@ -1211,7 +1281,12 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                     LAYER_STACK_16X32_L2_IN,
                     32,
                     FT,
-                >::read_with_options(reader, psqt_override)?;
+                >::read_with_source(
+                    reader,
+                    psqt_override,
+                    #[cfg(feature = "prepacked-nnue")]
+                    packed,
+                )?;
                 Ok(Self::L3072x16x32(Box::new(net)))
             }
             _ => Err(io::Error::new(
@@ -2000,8 +2075,36 @@ impl LayerStacksNetwork {
         l3: usize,
         psqt_override: Option<bool>,
     ) -> io::Result<Self> {
+        Self::read_with_source(
+            reader,
+            l1,
+            l2,
+            l3,
+            psqt_override,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+    }
+    #[cfg(feature = "layerstack-arch")]
+    pub(super) fn read_with_source<R: Read + Seek>(
+        reader: &mut R,
+        l1: usize,
+        l2: usize,
+        l3: usize,
+        psqt_override: Option<bool>,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
+    ) -> io::Result<Self> {
         let ft_set = peek_layer_stacks_feature_set(reader)?;
-        Self::read_with_feature_set(reader, ft_set, l1, l2, l3, psqt_override)
+        Self::read_feature_with_source(
+            reader,
+            ft_set,
+            l1,
+            l2,
+            l3,
+            psqt_override,
+            #[cfg(feature = "prepacked-nnue")]
+            packed,
+        )
     }
 
     /// ファイルから読み込み (FT 明示)。テスト・診断ツールから FT を強制したい場合に使う。
@@ -2013,6 +2116,27 @@ impl LayerStacksNetwork {
         l2: usize,
         l3: usize,
         psqt_override: Option<bool>,
+    ) -> io::Result<Self> {
+        Self::read_feature_with_source(
+            reader,
+            feature_set,
+            l1,
+            l2,
+            l3,
+            psqt_override,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+    }
+    #[cfg(feature = "layerstack-arch")]
+    fn read_feature_with_source<R: Read + Seek>(
+        reader: &mut R,
+        feature_set: super::spec::FeatureSet,
+        l1: usize,
+        l2: usize,
+        l3: usize,
+        psqt_override: Option<bool>,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<Self> {
         // FT 軸を `match feature_set` で dispatch する。各 FT について該当 `ft-*` feature が
         // 有効なら `LsNetByFt::<spec>` に読み込み、無効なら Unsupported エラーを返す。
@@ -2028,6 +2152,8 @@ impl LayerStacksNetwork {
                         l2,
                         l3,
                         psqt_override,
+                        #[cfg(feature = "prepacked-nnue")]
+                        packed,
                     )?;
                     Ok(Self::$self_variant(inner))
                 }

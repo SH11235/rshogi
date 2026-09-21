@@ -201,9 +201,10 @@ pub struct DynamicLayerStacksNetwork {
 }
 
 impl DynamicLayerStacksNetwork {
-    pub(crate) fn read<R: Read + Seek>(
+    pub(super) fn read_with_source<R: Read + Seek>(
         reader: &mut R,
         psqt_override: Option<bool>,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<Self> {
         let file_size = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;
@@ -277,20 +278,45 @@ impl DynamicLayerStacksNetwork {
             .checked_mul(l1)
             .ok_or_else(|| invalid("FT dimensions overflow"))?;
         let mut ft_biases = AlignedBox::new_zeroed(l1);
+        #[cfg(feature = "prepacked-nnue")]
+        let ft_weights = if let Some(packed) = packed {
+            for bias in ft_biases.iter_mut() {
+                let mut bytes = [0; 2];
+                reader.read_exact(&mut bytes)?;
+                *bias = i16::from_le_bytes(bytes);
+            }
+            packed.ft(weight_len)?
+        } else {
+            read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_zeroed)?
+        };
+        #[cfg(not(feature = "prepacked-nnue"))]
         let ft_weights =
             read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_zeroed)?;
 
         let has_psqt = psqt_override.unwrap_or_else(|| arch.contains("PSQT="));
         let mut psqt_biases = AlignedBox::new_zeroed(if has_psqt { num_buckets } else { 0 });
-        let mut psqt_weights = AlignedBox::new_zeroed(if has_psqt {
+        let psqt_count = if has_psqt {
             input_dimensions * num_buckets
         } else {
             0
-        });
+        };
         if has_psqt {
             read_i32s(reader, &mut psqt_biases)?;
-            read_i32s(reader, &mut psqt_weights)?;
         }
+        #[cfg(feature = "prepacked-nnue")]
+        let psqt_weights = if let Some(packed) = packed.filter(|_| has_psqt) {
+            packed.psqt(psqt_count)?
+        } else {
+            let mut weights = AlignedBox::new_zeroed(psqt_count);
+            read_i32s(reader, &mut weights)?;
+            weights
+        };
+        #[cfg(not(feature = "prepacked-nnue"))]
+        let psqt_weights = {
+            let mut weights = AlignedBox::new_zeroed(psqt_count);
+            read_i32s(reader, &mut weights)?;
+            weights
+        };
 
         if arch.contains("ThreatProfile=") {
             reader.read_exact(&mut buf4)?;
@@ -300,12 +326,21 @@ impl DynamicLayerStacksNetwork {
                 ));
             }
         }
-        let mut threat_weights: AlignedBox<i8> = AlignedBox::new_zeroed(
-            threat_dimensions
-                .checked_mul(l1)
-                .ok_or_else(|| invalid("Threat dimensions overflow"))?,
-        );
-        if !threat_weights.is_empty() {
+        let threat_count = threat_dimensions
+            .checked_mul(l1)
+            .ok_or_else(|| invalid("Threat dimensions overflow"))?;
+        #[cfg(feature = "prepacked-nnue")]
+        let mut threat_weights = if let Some(packed) = packed.filter(|_| threat_count != 0) {
+            packed.threat(threat_count)?
+        } else {
+            AlignedBox::<i8>::new_zeroed(threat_count)
+        };
+        #[cfg(not(feature = "prepacked-nnue"))]
+        let mut threat_weights: AlignedBox<i8> = AlignedBox::new_zeroed(threat_count);
+        let read_threat = !threat_weights.is_empty();
+        #[cfg(feature = "prepacked-nnue")]
+        let read_threat = read_threat && packed.is_none();
+        if read_threat {
             // SAFETY: `i8` and `u8` have identical size/alignment, and the slice retains the
             // exact allocation length while only its byte signedness changes for `Read`.
             let bytes = unsafe {
@@ -320,6 +355,15 @@ impl DynamicLayerStacksNetwork {
         let mut buckets = Vec::with_capacity(num_buckets);
         for _ in 0..num_buckets {
             reader.read_exact(&mut buf4)?; // per-bucket FC hash
+            #[cfg(feature = "prepacked-nnue")]
+            if let Some(packed) = packed {
+                buckets.push(DynamicLsBucket {
+                    l1: DynamicAffine::read_packed(reader, l1, l2, packed)?,
+                    l2: DynamicAffine::read_packed(reader, 2 * (l2 - 1), l3, packed)?,
+                    output: DynamicAffine::read_packed(reader, l3, 1, packed)?,
+                });
+                continue;
+            }
             buckets.push(DynamicLsBucket {
                 l1: DynamicAffine::read(reader, l1, l2)?,
                 l2: DynamicAffine::read(reader, 2 * (l2 - 1), l3)?,
@@ -1839,7 +1883,13 @@ mod tests {
         let path = std::env::var("NNUE_DYNAMIC_LS_COMPARE_FILE")
             .expect("set NNUE_DYNAMIC_LS_COMPARE_FILE to a LayerStacks NNUE file");
         let mut dynamic_reader = BufReader::new(File::open(&path).unwrap());
-        let dynamic = DynamicLayerStacksNetwork::read(&mut dynamic_reader, None).unwrap();
+        let dynamic = DynamicLayerStacksNetwork::read_with_source(
+            &mut dynamic_reader,
+            None,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+        .unwrap();
 
         let mut static_reader = BufReader::new(File::open(&path).unwrap());
         let static_net = LayerStacksNetwork::read_with_options(

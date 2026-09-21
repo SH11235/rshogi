@@ -574,8 +574,19 @@ impl NNUENetwork {
 
     /// ファイルから読み込み（バージョン自動判別）
     pub fn load<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = File::open(path)?;
+        let file = File::open(path.as_ref())?;
         let mut reader = BufReader::new(file);
+        #[cfg(feature = "prepacked-nnue")]
+        if super::prepacked::PackedModel::is_packed(&mut reader)? {
+            let packed = super::prepacked::PackedModel::open(path.as_ref())?;
+            let net = Self::read_with_source(
+                &mut packed.metadata()?,
+                get_nnue_architecture_override(),
+                Some(&packed),
+            )?;
+            packed.finish()?;
+            return Ok(net);
+        }
         Self::read(&mut reader)
     }
 
@@ -590,6 +601,18 @@ impl NNUENetwork {
     fn read_with_architecture_override<R: Read + Seek>(
         reader: &mut R,
         arch_override: NNUEArchitectureOverride,
+    ) -> io::Result<Self> {
+        Self::read_with_source(
+            reader,
+            arch_override,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+    }
+    fn read_with_source<R: Read + Seek>(
+        reader: &mut R,
+        arch_override: NNUEArchitectureOverride,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<Self> {
         // 1. ファイルサイズを取得
         let file_size = reader.seek(SeekFrom::End(0))?;
@@ -687,7 +710,12 @@ impl NNUENetwork {
                             };
                             reader.seek(SeekFrom::Start(0))?;
                             return Ok(Self::DynamicLayerStacks(Box::new(
-                                DynamicLayerStacksNetwork::read(reader, psqt_override)?,
+                                DynamicLayerStacksNetwork::read_with_source(
+                                    reader,
+                                    psqt_override,
+                                    #[cfg(feature = "prepacked-nnue")]
+                                    packed,
+                                )?,
                             )));
                         }
                     }
@@ -714,12 +742,14 @@ impl NNUENetwork {
                             (0, 0) => (16, 32),
                             dims => dims,
                         };
-                        let network = LayerStacksNetwork::read_with_options(
+                        let network = LayerStacksNetwork::read_with_source(
                             reader,
                             l1,
                             l2,
                             l3,
                             psqt_override,
+                            #[cfg(feature = "prepacked-nnue")]
+                            packed,
                         )?;
                         return Ok(Self::LayerStacks(network));
                     }
