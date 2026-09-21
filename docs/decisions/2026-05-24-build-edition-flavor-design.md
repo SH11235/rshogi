@@ -477,7 +477,8 @@ preset edition に重ねる `cargo xtask build --features <name>[,<name>...]` �
 これは Flavor 軸の復活ではなく、既存の直交 feature を xtask 経由で指定できるようにする
 だけのもの。binary 名は `engines/rshogi-usi-{edition}[+{feature}...]` (feature は名前順)
 とし、slot 区切り `-` / slot 内複合語 `_` と衝突しない `+` で区切る。preset edition が
-bundle する atomic feature は `--features` では受け付けない。
+bundle する atomic feature と、NNUE 構造を選ぶ family (`threat-profile-*` /
+`effect-bucket-*`、preset に未収録の member も含む) は `--features` では受け付けない。
 
 実装手段 (xtask crate / justfile / Makefile) はどれでも実用上同等。プロジェクト
 既存ツーリングに合わせて Phase 2 で決定。

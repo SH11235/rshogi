@@ -36,7 +36,13 @@ const EDITION_PREFIX: &str = "edition-";
 /// `+` を使う。
 const EXTRA_FEATURE_SEPARATOR: char = '+';
 /// rshogi-usi の feature 定義が rshogi-core の feature を参照するときの接頭辞。
-const CORE_FEATURE_REF_PREFIX: &str = "rshogi-core/";
+/// `rshogi-core?/x` は optional dependency 向けの書式で、参照先 feature は同じ。
+const CORE_FEATURE_REF_PREFIXES: [&str; 2] = ["rshogi-core/", "rshogi-core?/"];
+/// NNUE の構造 (Threat 次元 / EffectBucket の形) を選ぶ feature family の接頭辞。
+/// どの preset edition にも束ねられていない member も含め、`--features` では family ごと
+/// 拒否する。edition 名と network 構造が食い違う binary を作らないためと、preset の追加で
+/// 受理される名前が黙って変わらないようにするため。
+const STRUCTURAL_FEATURE_FAMILY_PREFIXES: [&str; 2] = ["threat-profile-", "effect-bucket-"];
 const MANIFEST_SUFFIX: &str = ".meta.toml";
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
@@ -67,7 +73,9 @@ enum SubCmd {
         /// `search-stats` 等、Edition 軸と直交するもの)。build 対象の全 edition に付く。
         /// カンマ区切り (`a,b`) または `--features` 複数回いずれも受け付ける。
         /// 指定時は binary 名が `rshogi-usi-<edition>+<feature>[+<feature>...]` になる。
-        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        /// 拒否するもの: `default` / `edition-*` / edition の構成部品 / NNUE 構造の family
+        /// (`threat-profile-*` / `effect-bucket-*`)。
+        #[arg(long, value_delimiter = ',')]
         features: Vec<String>,
     },
     /// rshogi-core の Cargo.toml に定義された preset edition (`edition-*`) を列挙する。
@@ -470,6 +478,8 @@ fn feature_closure<'a>(
 /// - rshogi-usi に存在しない名前
 /// - `default` (xtask は `--no-default-features` で edition を 1 つに固定する)
 /// - `edition-*` (edition は `--edition` で指定する)
+/// - NNUE 構造の family: `STRUCTURAL_FEATURE_FAMILY_PREFIXES` で始まる名前
+///   (preset に束ねられているかによらず family ごと)
 /// - edition の構成部品: rshogi-core のいずれかの preset edition が bundle する feature
 ///   (`mode-*` / `layerstack-arch` / `nnue-psqt` / `nnue-progress-diff` 等) を有効化する
 ///   もの。edition 名と実際の構成が食い違う binary を作らないため。
@@ -509,9 +519,17 @@ fn resolve_extra_features(
                 "unknown {USI_PACKAGE} feature: `{name}` (指定できる feature は crates/rshogi-usi/Cargo.toml の [features] で確認できます)"
             );
         }
+        if let Some(family) = STRUCTURAL_FEATURE_FAMILY_PREFIXES
+            .iter()
+            .find(|prefix| name.starts_with(**prefix))
+        {
+            bail!(
+                "`{name}` selects NNUE structure and must come from an edition (`{family}*` は NNUE の構造を選ぶ feature family です。`--edition` で該当 preset を選んでください)"
+            );
+        }
         let bundled = feature_closure(&usi, [name])
             .into_iter()
-            .filter_map(|item| item.strip_prefix(CORE_FEATURE_REF_PREFIX))
+            .filter_map(core_feature_ref)
             .find(|core_feature| edition_parts.contains(core_feature));
         if let Some(core_feature) = bundled {
             bail!(
@@ -521,6 +539,12 @@ fn resolve_extra_features(
         out.insert(name.to_string());
     }
     Ok(out.into_iter().collect())
+}
+
+/// feature 定義の項目が rshogi-core の feature 参照 (`rshogi-core/x` / `rshogi-core?/x`)
+/// なら参照先の feature 名を返す。
+fn core_feature_ref(item: &str) -> Option<&str> {
+    CORE_FEATURE_REF_PREFIXES.iter().find_map(|prefix| item.strip_prefix(prefix))
 }
 
 /// cargo の `--features` に渡す値 (`<edition>[,<extra>...]`) を組み立てる。
@@ -841,7 +865,13 @@ mod tests {
             ("ft-halfka_hm_merged", "building block"),
             ("nnue-psqt", "building block"),
             ("nnue-progress-diff", "building block"),
-            ("threat-profile-same-class", "building block"),
+            ("nnue-effect-bucket", "building block"),
+            // NNUE 構造の family は preset に束ねられているかによらず拒否する。
+            ("threat-profile-same-class", "selects NNUE structure"),
+            ("threat-profile-cross-side", "selects NNUE structure"),
+            ("effect-bucket-2x2-kingfixed", "selects NNUE structure"),
+            ("effect-bucket-2x2-kingbucketed", "selects NNUE structure"),
+            ("effect-bucket-3x3-kingbucketed", "selects NNUE structure"),
         ];
         for (name, expected) in cases {
             let err = resolve(&[name]).expect_err(name).to_string();
@@ -872,6 +902,64 @@ some-arch = []
             let err = run(name).expect_err(name).to_string();
             assert!(err.contains("building block"), "feature `{name}`: {err}");
         }
+    }
+
+    #[test]
+    fn resolve_extra_features_handles_optional_dependency_references() {
+        // `rshogi-core?/x` (optional dependency 向け書式) 経由の構成部品も拒否する。
+        let usi = r#"
+[features]
+weak-arch = ["rshogi-core?/some-arch"]
+weak-other = ["rshogi-core?/unrelated"]
+"#;
+        let core = r#"
+[features]
+edition-x = ["some-arch"]
+some-arch = []
+unrelated = []
+"#;
+        let run = |name: &str| resolve_extra_features(&[name.to_string()], usi, core);
+        let err = run("weak-arch").expect_err("weak-arch").to_string();
+        assert!(err.contains("building block"), "{err}");
+        assert_eq!(run("weak-other").unwrap(), vec!["weak-other"]);
+    }
+
+    #[test]
+    fn resolve_extra_features_rejects_structural_families_even_if_unbundled() {
+        // どの preset にも束ねられていない member でも family 接頭辞で拒否する。
+        let usi = r#"
+[features]
+threat-profile-new = ["rshogi-core/threat-profile-new"]
+effect-bucket-new = []
+"#;
+        let core = r#"
+[features]
+edition-x = []
+threat-profile-new = []
+"#;
+        for name in ["threat-profile-new", "effect-bucket-new"] {
+            let err = resolve_extra_features(&[name.to_string()], usi, core)
+                .expect_err(name)
+                .to_string();
+            assert!(err.contains("selects NNUE structure"), "feature `{name}`: {err}");
+        }
+    }
+
+    #[test]
+    fn cli_features_accepts_comma_and_repeated_forms() {
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["xtask", "build", "--edition", "universal"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).map(|cli| match cli.command {
+                SubCmd::Build { features, .. } => features,
+                other => panic!("unexpected subcommand: {other:?}"),
+            })
+        };
+        assert_eq!(parse(&[]).unwrap(), Vec::<String>::new());
+        assert_eq!(parse(&["--features", "a,b"]).unwrap(), vec!["a", "b"]);
+        assert_eq!(parse(&["--features", "a", "--features", "b,c"]).unwrap(), vec!["a", "b", "c"]);
+        // 1 回の `--features` が取る引数は 1 つ。空白区切りの 2 つ目は受け付けない。
+        assert!(parse(&["--features", "a", "b"]).is_err());
     }
 
     #[test]

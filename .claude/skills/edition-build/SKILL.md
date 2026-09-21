@@ -76,7 +76,9 @@ cargo run --release -p xtask -- build \
 `features = [...]` が記録される。追加なしの build とは別ファイルになるので上書きしない。
 指定できるのは rshogi-usi の `[features]` にある opt-in feature だけで、`default` /
 `edition-*` / edition の構成部品 (`layerstack-arch` / `nnue-psqt` / `nnue-progress-diff`
-等、preset が bundle する feature) は拒否される。詳細は `docs/build.md`。
+等、preset が bundle する feature) / NNUE 構造の family (`threat-profile-*` /
+`effect-bucket-*`、preset に束ねられていない member も含む) は拒否される。
+詳細は `docs/build.md`。
 
 `engines/` は gitignored なので長期保持される (`target/production/` は `cargo clean`
 で消える、`/tmp/` は再起動で揮発するため使わない)。

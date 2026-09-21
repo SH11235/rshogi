@@ -167,8 +167,11 @@ preset edition に重ねて build する。指定できる名前は `crates/rsho
 - `edition-*` (edition は `--edition` で指定する)
 - edition の構成部品: rshogi-core のいずれかの preset edition が bundle する feature
   (`mode-*` / `layerstack-arch` / `ft-*` / `layerstacks-<dims>` / `nnue-psqt` /
-  `nnue-threat` / `nnue-progress-diff` / preset に束ねられた `threat-profile-*` 等)。
+  `nnue-threat` / `nnue-effect-bucket` / `nnue-progress-diff` 等)。
   edition 名と実際の構成が食い違う binary を作らないため、該当 preset を `--edition` で選ぶ
+- NNUE 構造の family: `threat-profile-*` / `effect-bucket-*` で始まる名前は、preset に
+  束ねられているかによらず family ごと拒否する (Threat 次元や EffectBucket の形を変える
+  ため edition 経由でだけ選ぶ。preset の追加で受理される名前が変わることも防ぐ)
 
 feature 同士の排他 (`mimalloc` と `allocation-stats` 等) は xtask では検査せず、
 cargo build のエラーで検出される。
