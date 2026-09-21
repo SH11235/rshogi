@@ -138,6 +138,37 @@ fn root_sort_preserves_stable_order_and_range_boundaries() {
     }
 }
 
+#[test]
+fn root_sort_handles_reversed_and_nearly_sorted_ranges() {
+    for len in [32, 128, 600] {
+        for reverse in [false, true] {
+            let mut source: Vec<_> = (0..len)
+                .map(|i| {
+                    let mut root = RootMove::new(Move::from_usi("7g7f").unwrap());
+                    root.score = Value::new(len - i / 3);
+                    root.sel_depth = i;
+                    root
+                })
+                .collect();
+            if reverse {
+                source.reverse();
+            } else {
+                source.last_mut().unwrap().score = Value::new(1000);
+            }
+            let mut expected = source.clone();
+            expected.sort_by_key(|root| {
+                std::cmp::Reverse((root.score.raw(), root.previous_score.raw()))
+            });
+            let mut roots = RootMoves::from_vec(source);
+            roots.sort();
+            assert_eq!(
+                roots.as_slice().iter().map(|root| root.sel_depth).collect::<Vec<_>>(),
+                expected.iter().map(|root| root.sel_depth).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
 // =============================================================================
 // Phase 3: 統合テスト（MultiPVループの実動作確認）
 // =============================================================================
