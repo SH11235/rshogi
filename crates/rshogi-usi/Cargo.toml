@@ -20,6 +20,7 @@ serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true
 tracking-allocator = { version = "=0.4.0", optional = true, default-features = false }
+mimalloc = { version = "0.1.52", optional = true, default-features = false }
 
 # Local dependencies
 # rshogi-core の default features は本 crate の default で明示的に再構築する
@@ -42,6 +43,8 @@ tt-trace = ["rshogi-core/tt-trace"]
 diagnostics = ["rshogi-core/diagnostics"]
 allocation-stats = ["rshogi-core/allocation-stats", "dep:tracking-allocator"]
 tt-write-stats = ["rshogi-core/tt-write-stats"]
+# global allocator を mimalloc に置き換える。allocation-stats とは同時に指定できない。
+mimalloc = ["dep:mimalloc"]
 # Threat exclusion profiles
 threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
