@@ -844,7 +844,7 @@ mod tests {
             "diagnostics",
             "allocation-stats",
             "tt-write-stats",
-            "search-no-pass-rules",
+            "search-pass-rules",
         ] {
             assert_eq!(resolve(&[name]).unwrap(), vec![name], "feature {name} should be accepted");
         }
