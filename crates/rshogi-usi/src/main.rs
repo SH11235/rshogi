@@ -636,6 +636,7 @@ impl UsiEngine {
             search.clear_tt();
             search.resize_eval_hash(self.eval_hash_size_mb);
         }
+        self.maybe_report_page_status();
         Ok(())
     }
 
@@ -1200,6 +1201,7 @@ impl UsiEngine {
             search.clear_eval_hash();
             search.clear_histories(); // YaneuraOu準拠：履歴統計もクリア
         }
+        self.maybe_report_page_status();
         self.position = Position::new();
         Ok(())
     }

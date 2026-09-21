@@ -92,7 +92,8 @@ Windows で `MEM_LARGE_PAGES` による確保に成功した場合は `Large Pag
 ヒント要求は実際の huge-page backing を保証しません。要求失敗時や通常 page への
 フォールバック時は、large-page 使用を示す行を表示しません。
 
-表示は `isready` と `USI_Hash` の変更時に確認し、直前に表示した配置から変わったときだけ出します。
+表示は TT を取り直す操作（`isready`、`usinewgame`、`USI_Hash` の変更、`SPSA_NET_*` の再読み込み）の
+後に確認し、直前に表示した配置から変わったときだけ出します。
 TT を取り直した結果 large pages やヒントが使えなくなった場合は
 `The TT now uses regular pages.` を表示します。
 
