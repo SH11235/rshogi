@@ -155,6 +155,25 @@ impl TTEntry {
         }
     }
 
+    /// 現在のentryに対するpayload採用条件。move更新の有無には依存しない。
+    /// 診断専用。`save` の上書き条件との一致を境界テストで検証する。
+    #[cfg(feature = "tt-write-stats")]
+    #[inline]
+    pub(super) fn accepts_payload(
+        &self,
+        key: u64,
+        is_pv: bool,
+        bound: Bound,
+        depth: i32,
+        generation: u8,
+    ) -> bool {
+        let d8 = depth - DEPTH_ENTRY_OFFSET;
+        bound == Bound::Exact
+            || key as u16 != self.key16
+            || d8 + 2 * (is_pv as i32) > self.depth8 as i32 - 4
+            || self.relative_age(generation) != 0
+    }
+
     /// 相対的な世代（0 = 最新）
     #[inline]
     pub fn relative_age(&self, generation8: u8) -> u8 {
@@ -263,6 +282,41 @@ mod tests {
         assert_eq!(data.depth, 10);
         assert_eq!(data.bound, Bound::Exact);
         assert!(data.is_pv);
+    }
+
+    #[cfg(feature = "tt-write-stats")]
+    #[test]
+    fn write_diagnostic_predicate_matches_save_boundaries() {
+        let mut occupied = TTEntry::new();
+        occupied.save(8, Value::ZERO, false, Bound::Lower, 10, Move::NONE, Value::ZERO, 8);
+        for initial in [TTEntry::new(), occupied] {
+            for key in [8, 9, 0x10008] {
+                for depth in 4..=14 {
+                    for bound in [Bound::None, Bound::Upper, Bound::Lower, Bound::Exact] {
+                        for is_pv in [false, true] {
+                            for generation in [0, 8, 248] {
+                                for mv in [Move::NONE, Move::from_usi("7g7f").unwrap()] {
+                                    let accepted = initial
+                                        .accepts_payload(key, is_pv, bound, depth, generation);
+                                    let mut after = initial;
+                                    after.save(
+                                        key,
+                                        Value::new(123),
+                                        is_pv,
+                                        bound,
+                                        depth,
+                                        mv,
+                                        Value::ZERO,
+                                        generation,
+                                    );
+                                    assert_eq!(accepted, after.read().value == Value::new(123));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

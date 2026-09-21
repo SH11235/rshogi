@@ -19,6 +19,10 @@
 mod alloc;
 mod entry;
 mod table;
+#[cfg(feature = "tt-write-stats")]
+mod write_stats;
+#[cfg(feature = "tt-write-stats")]
+pub use write_stats::TTWriteStats;
 
 pub use entry::{TTData, TTEntry};
 pub use table::{ProbeResult, TranspositionTable};

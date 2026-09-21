@@ -685,6 +685,12 @@ impl Search {
         self.search_again_counter = 0;
     }
 
+    /// このSearchが共有するTTの書込診断。探索前後の差分で全workerを集計する。
+    #[cfg(feature = "tt-write-stats")]
+    pub fn tt_write_stats(&self) -> crate::tt::TTWriteStats {
+        self.tt.write_stats()
+    }
+
     /// 新しいSearchを作成
     ///
     /// # Arguments

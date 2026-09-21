@@ -1334,6 +1334,8 @@ impl UsiEngine {
                 .spawn(move || {
                     #[cfg(feature = "allocation-stats")]
                     let allocation_before = rshogi_core::allocation_stats::snapshot();
+                    #[cfg(feature = "tt-write-stats")]
+                    let tt_write_before = search.tt_write_stats();
                     let result = search.go(
                         &mut pos,
                         limits,
@@ -1345,6 +1347,12 @@ impl UsiEngine {
 
                     #[cfg(feature = "allocation-stats")]
                     allocation_stats::report(allocation_before);
+
+                    #[cfg(feature = "tt-write-stats")]
+                    println!(
+                        "info string tt_write_events {}",
+                        search.tt_write_stats().since(tt_write_before)
+                    );
 
                     // 探索統計レポートを出力（search-stats feature有効時のみ内容あり）
                     if !result.stats_report.is_empty() {
