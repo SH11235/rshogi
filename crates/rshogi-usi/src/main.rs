@@ -36,6 +36,15 @@ use serde_json::json;
 #[cfg(feature = "allocation-stats")]
 mod allocation_stats;
 
+#[cfg(all(feature = "mimalloc", feature = "allocation-stats"))]
+compile_error!(
+    "feature `mimalloc` と `allocation-stats` はどちらも global allocator を設定するため同時に指定できません"
+);
+
+#[cfg(all(feature = "mimalloc", not(feature = "allocation-stats")))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// エンジン名
 const ENGINE_NAME: &str = "Shogi Engine";
 /// エンジンバージョン
