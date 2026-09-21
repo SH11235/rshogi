@@ -741,7 +741,9 @@ impl RootMoves {
 
     /// スコアでソート（降順）
     pub fn sort(&mut self) {
-        self.moves.sort();
+        if !self.moves.is_sorted() {
+            self.moves.sort();
+        }
     }
 
     /// 指定範囲をスコア降順で安定ソート
@@ -754,6 +756,11 @@ impl RootMoves {
     /// * `end` - ソート終了インデックス（この要素は含まない）
     pub fn stable_sort_range(&mut self, start: usize, end: usize) {
         if start >= end || end > self.moves.len() {
+            return;
+        }
+
+        // 整列済みなら、一時バッファ確保を伴うsortを呼ばない。
+        if self.moves[start..end].is_sorted() {
             return;
         }
 
