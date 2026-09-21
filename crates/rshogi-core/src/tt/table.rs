@@ -106,6 +106,8 @@ pub struct TranspositionTable {
     cluster_count: usize,
     /// 世代カウンター（下位3bitは使用しない）
     generation8: AtomicU8,
+    #[cfg(feature = "tt-write-stats")]
+    write_counters: super::write_stats::WriteCounters,
 }
 
 impl TranspositionTable {
@@ -120,7 +122,16 @@ impl TranspositionTable {
             table,
             cluster_count,
             generation8: AtomicU8::new(0),
+            #[cfg(feature = "tt-write-stats")]
+            write_counters: super::write_stats::WriteCounters::new(),
         }
+    }
+
+    /// このTTの累積書込診断。全writer停止後に読むと項目間の整合性が保たれる。
+    /// clear/resizeではリセットしない。探索前後の差分で区間を測る。
+    #[cfg(feature = "tt-write-stats")]
+    pub fn write_stats(&self) -> super::TTWriteStats {
+        self.write_counters.snapshot()
     }
 
     /// サイズを変更
@@ -196,6 +207,8 @@ impl TranspositionTable {
                     found: entry.is_occupied(),
                     data,
                     writer: (cluster, index),
+                    #[cfg(feature = "tt-write-stats")]
+                    write_counters: &self.write_counters,
                 };
             }
             let value = entry.depth8() as i32 - entry.relative_age(gen8) as i32;
@@ -208,6 +221,8 @@ impl TranspositionTable {
             found: false,
             data: TTData::EMPTY,
             writer: (cluster, replace),
+            #[cfg(feature = "tt-write-stats")]
+            write_counters: &self.write_counters,
         }
     }
 
@@ -306,6 +321,8 @@ pub struct ProbeResult<'a> {
     pub data: TTData,
     /// 書き込み用エントリ
     writer: (&'a Cluster, usize),
+    #[cfg(feature = "tt-write-stats")]
+    write_counters: &'a super::write_stats::WriteCounters,
 }
 
 impl ProbeResult<'_> {
@@ -331,8 +348,14 @@ impl ProbeResult<'_> {
     ) -> bool {
         let (cluster, index) = self.writer;
         let mut entry = cluster.load(index);
+        #[cfg(feature = "tt-write-stats")]
+        let before = entry;
+        #[cfg(feature = "tt-write-stats")]
+        let accepted = entry.accepts_payload(key, is_pv, bound, depth, generation8);
         entry.save(key, value, is_pv, bound, depth, mv, eval, generation8);
         cluster.store(index, entry);
+        #[cfg(feature = "tt-write-stats")]
+        self.write_counters.record(before, entry, key, depth, accepted);
         true
     }
 }
@@ -348,6 +371,144 @@ impl TtPrefetch for TranspositionTable {
 mod tests {
     use super::*;
     use crate::position::{Position, SFEN_HIRATE};
+
+    #[cfg(feature = "tt-write-stats")]
+    #[test]
+    fn write_stats_use_reloaded_slot_and_separate_move_only_updates() {
+        let mut tt = TranspositionTable::new(0);
+        let mut pos = Position::new();
+        pos.set_hirate();
+        {
+            let writer = tt.probe(7, &pos);
+            assert!(!writer.found);
+            assert!(writer.write(
+                7,
+                Value::new(10),
+                false,
+                Bound::Lower,
+                20,
+                Move::NONE,
+                Value::ZERO,
+                0
+            ));
+            assert_eq!(tt.write_stats().empty, 1);
+            // 同じwriterを使っても、probe時のemptyではなく直前の格納内容と比較する。
+            assert!(writer.write(
+                7,
+                Value::new(11),
+                false,
+                Bound::Lower,
+                20,
+                Move::NONE,
+                Value::ZERO,
+                0
+            ));
+            assert_eq!(tt.write_stats().same_key16_same_depth_accepted, 1);
+            let mv = Move::from_usi("7g7f").unwrap();
+            assert!(writer.write(7, Value::new(12), false, Bound::Lower, 1, mv, Value::ZERO, 0));
+            assert_eq!(tt.write_stats().move_only_changed, 1);
+            assert_eq!(tt.probe(7, &pos).data.value, Value::new(11));
+            assert!(writer.write(
+                7,
+                Value::new(12),
+                false,
+                Bound::Lower,
+                1,
+                Move::NONE,
+                Value::ZERO,
+                0
+            ));
+            assert_eq!(tt.write_stats().unchanged, 1);
+            assert!(writer.write(
+                8,
+                Value::new(13),
+                false,
+                Bound::Lower,
+                20,
+                Move::NONE,
+                Value::ZERO,
+                0
+            ));
+            assert_eq!(tt.write_stats().different_key16, 1);
+            // full keyは異なるが、診断が観測する短縮キーは一致する。
+            assert!(writer.write(
+                0x10008,
+                Value::new(14),
+                false,
+                Bound::Lower,
+                20,
+                Move::NONE,
+                Value::ZERO,
+                0
+            ));
+            assert_eq!(tt.write_stats().same_key16_same_depth_accepted, 2);
+            // 浅い保存でも古い世代・Exact条件では採用される。
+            assert!(writer.write(
+                8,
+                Value::new(15),
+                false,
+                Bound::Lower,
+                1,
+                Move::NONE,
+                Value::ZERO,
+                8
+            ));
+            assert!(writer.write(
+                8,
+                Value::new(16),
+                false,
+                Bound::Exact,
+                0,
+                Move::NONE,
+                Value::ZERO,
+                8
+            ));
+        }
+        let stats = tt.write_stats();
+        assert_eq!(stats.attempts, 8);
+        assert_eq!(stats.empty + stats.same_key16 + stats.different_key16, stats.attempts);
+        assert_eq!(stats.payload_accepted, 6);
+        assert_eq!(stats.payload_retained, 2);
+        assert_eq!(stats.payload_retained, stats.move_only_changed + stats.unchanged);
+        assert_eq!(stats.since(stats), super::super::TTWriteStats::default());
+        tt.clear();
+        tt.resize(1);
+        assert_eq!(tt.write_stats(), stats);
+        assert_eq!(TranspositionTable::new(0).write_stats(), super::super::TTWriteStats::default());
+    }
+
+    #[cfg(feature = "tt-write-stats")]
+    #[test]
+    fn write_stats_aggregate_concurrent_writers_after_join() {
+        let tt = std::sync::Arc::new(TranspositionTable::new(0));
+        std::thread::scope(|scope| {
+            for id in 0..4u64 {
+                let tt = &tt;
+                scope.spawn(move || {
+                    let mut pos = Position::new();
+                    pos.set_hirate();
+                    for i in 0..100u64 {
+                        let key = (id << 32) | i;
+                        assert!(tt.probe(key, &pos).write(
+                            key,
+                            Value::ZERO,
+                            false,
+                            Bound::Exact,
+                            1,
+                            Move::NONE,
+                            Value::ZERO,
+                            0
+                        ));
+                    }
+                });
+            }
+        });
+        let stats = tt.write_stats();
+        assert_eq!(stats.attempts, 400);
+        assert_eq!(stats.payload_accepted, 400);
+        assert_eq!(stats.payload_retained, 0);
+        assert_eq!(stats.empty + stats.same_key16 + stats.different_key16, 400);
+    }
 
     #[test]
     fn test_key_can_mix_with_complete_payload() {

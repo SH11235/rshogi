@@ -92,3 +92,26 @@ GPL-3.0-or-later License
 
 本プロジェクトは将棋エンジン [YaneuraOu](https://github.com/yaneurao/YaneuraOu) およびチェスエンジン [Stockfish](https://github.com/official-stockfish/Stockfish) を参考にしています。
 アルゴリズムや評価のアイデアに影響を受けていますが、実装と構成は独自です。
+
+### TT書き込み診断 (`tt-write-stats`)
+
+`--features tt-write-stats` を付けた診断ビルドは、実際に探索した `go` の終了時に1行の
+`info string tt_write_events` を出力します。定跡ヒットで探索を省略した場合は出力しません。
+通常ビルドでは無効です。
+共有TTを使う全workerの `ProbeResult::write` の探索前後差分を報告します。
+
+- `attempts`: 格納操作数。書き込み直前に再loadしたslotを分類します。
+- `empty` / `same_key16` / `different_key16`: 空、使用中で短縮キー一致、不一致。合計はattemptsです。
+- `payload_accepted` / `payload_retained`: move以外のkey/depth/gen/bound/value/evalの採用・保持。
+  合計はattemptsです。同じ値を再採用した場合もacceptedに含みます。
+- `same_key16_same_depth_accepted`: 使用中slotで短縮キーと深さが同じ採用。
+- `move_only_changed` / `unchanged`: payload保持時にmoveが変わった・変わらなかった数。
+  合計はpayload_retainedです。
+
+短縮キーは16bitのためfull key一致や衝突は判別できません。snapshotは複数項目を同時には
+読みません。core APIではwriter停止後に読み、同じTTのsnapshot同士を `since` で比較してください。
+`clear` / `resize` は診断の累積値をリセットしません。別のTTの値とは差分を取れません。
+並行writerに上書きされたか、実際に最後まで保持されたentry数は分かりません。
+浅い保存でも世代・Exact・PV条件で採用されるため、retainedを単純な「浅いentry棄却」とは扱いません。
+計数はTTごとの固定サイズatomic配列を使い、共有書き込み時の競合・追加コストがあります。
+速度比較にはこのfeatureを無効にした通常ビルドを使ってください。
