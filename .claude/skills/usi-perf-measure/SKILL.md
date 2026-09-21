@@ -255,6 +255,10 @@ nps_delta_pct=+12.3% cycles_per_node_delta_pct=-11.0% instructions_per_node_delt
 A/B の差がそのばらつきを超えた場合も、pooled 値だけで判定せず局面別の差を確認する。
 pooled 値には position-mix バイアスが乗る（ハマりどころ 8 参照）。
 
+A/A が測るのは計測の再現性だけで、**ビルドごとのコード配置差は含まない**。baseline と
+candidate が別ビルドである限り、A/A のノイズ床より大きい差でも配置差の可能性が残る
+（ハマりどころ 9 参照）。
+
 ### cycles/node vs instructions/node の差分
 
 - **cycles/node が下がり、instructions/node は変わらない** → 同じ計算量で cache miss が減った = cache 最適化が効いている
@@ -352,3 +356,28 @@ jq -r '.samples[] | "\(.position_name)\t\(.variant)\t\(.info.nodes)\t\(.perf.ins
   | sort
 ```
 
+### 9. 同じ binary ペアの反復では、ビルドごとのコード配置差を消せない
+
+LTO を含む最適化ビルドは、source の小さな差で関数の配置・整列・inline 判断が変わり、
+hot path と無関係な変更でも cycles/node が動く。同一 source を関数整列だけ変えて
+ビルドし直して NPS が 0.5% 以上、同じ変更を別の base へ載せてビルドし直して
++1% 超が −1% 超へ反転した例がある。この差は baseline / candidate の binary が同じである限り
+何度測っても同じ向きに出るので、**同一ペアの反復で符号が再現しても実効果の証拠にならない**。
+cycles/node は周波数揺れを相殺するが、配置差は相殺しない。
+
+instructions/node が横ばいで cycles/node だけが 1% 前後動く結果は、次のどちらかで裏を取ってから採否を決める。
+
+- **同一 binary 内で経路だけを切り替える**: 比較したい経路を実行時に選べる計測専用ビルドを作り
+  （USI option、環境変数、exe 名など）、同じ binary を baseline / candidate の両方に指定する。
+  コードが同一なので、残る差はデータ配置や経路そのものの効果になる。レポートの `binaries` で
+  SHA-256 が一致していることを確認する。計測専用の切替コードは製品の変更に含めない。
+- **配置を変えた複数ビルドで符号の一致を見る**: baseline と candidate の両方を、同じ摂動を加えた
+  2〜3 通りでビルドして各組を A/B する。例:
+  `RUSTFLAGS="-C target-cpu=native -C llvm-args=-align-all-functions=6"`
+  （環境変数の `RUSTFLAGS` は `.cargo/config.toml` の rustflags を置き換えるので、`target-cpu` も明示する）。
+  `llvm-args` は LLVM へそのまま渡す指定で、toolchain の更新で名前が変わりうる。ビルドが通ることと、
+  摂動なしの build と binary の SHA-256 が変わることを確認する。
+  摂動ごとに符号が割れるなら、その大きさの差は配置差と区別できていない。
+
+複数の変更を同じ baseline binary と比べた結果は、baseline の配置が不利な場合に全部が同じだけ
+良く見える。変更ごとの効果を足し合わせる前に、まとめて適用した build を同じ方法で測り直す。
