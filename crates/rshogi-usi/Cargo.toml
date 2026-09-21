@@ -30,8 +30,8 @@ rshogi-core = { version = "0.7", path = "../rshogi-core", default-features = fal
 rshogi-book = { version = "0.1", path = "../rshogi-book", default-features = false }
 
 [features]
-# default は rshogi-core 側 default (search-no-pass-rules + edition-universal) と一致させる。
-default = ["search-no-pass-rules", "edition-universal"]
+# default は rshogi-core 側 default (edition-universal) と一致させる。
+default = ["edition-universal"]
 # 探索統計収集（枝刈り発生回数等のカウント）
 search-stats = ["rshogi-core/search-stats"]
 # NNUE統計収集（refresh/update比率等のカウント）
@@ -53,7 +53,9 @@ threat-profile-full-symdedup = ["rshogi-core/threat-profile-full-symdedup"]
 threat-profile-cross-side = ["rshogi-core/threat-profile-cross-side"]
 # NNUE progresskpabs 差分更新最適化（L0=1536 系 / L0=3072 で有効、L0=768/512 で退行）
 nnue-progress-diff = ["rshogi-core/nnue-progress-diff"]
-# 探索経路限定で pass_rights を無効化
+# 探索経路で有限パス権を扱う。USI の PassRights 系 option を探索へ反映するにはこれが必要。
+search-pass-rules = ["rshogi-core/search-pass-rules"]
+# 廃止予定の互換用。現在は何もしない。
 search-no-pass-rules = ["rshogi-core/search-no-pass-rules"]
 
 # === Edition 軸 atomic feature 群 ===

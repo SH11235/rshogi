@@ -2,7 +2,7 @@
 //!
 //! 補正履歴、静的評価コンテキスト、置換表プローブ等。
 
-#[cfg(not(feature = "search-no-pass-rules"))]
+#[cfg(feature = "search-pass-rules")]
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
 use crate::types::{Bound, Color, DEPTH_UNSEARCHED, Depth, MAX_PLY, Move, Piece, Square, Value};
@@ -500,11 +500,11 @@ pub(super) fn compute_eval_context(
         static_eval = to_corrected_static_eval(unadjusted_static_eval, corr_value);
         // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
         let pass_rights_eval = {
-            #[cfg(feature = "search-no-pass-rules")]
+            #[cfg(not(feature = "search-pass-rules"))]
             {
                 Value::ZERO
             }
-            #[cfg(not(feature = "search-no-pass-rules"))]
+            #[cfg(feature = "search-pass-rules")]
             {
                 evaluate_pass_rights(pos, pos.game_ply() as u16)
             }

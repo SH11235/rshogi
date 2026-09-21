@@ -47,9 +47,8 @@ web-time = "1"
 
 [features]
 # default は universal edition (NNUE の次元と variant をモデル header から runtime 構成)。
-# 探索経路では pass_rights / PASS NMP を無効化。
-# Web/WASM で pass ルールを使う場合は default-features=false で個別指定する。
-default = ["search-no-pass-rules", "edition-universal"]
+# 探索経路の pass_rights / PASS NMP は既定で無効。使う場合は `search-pass-rules` を明示する。
+default = ["edition-universal"]
 
 # === 開発・診断・横断系 (Edition 軸非対象) ===
 debug = []
@@ -77,7 +76,12 @@ tt-trace = []
 use-lazy-evaluate = []
 # YaneuraOu DEEP相当のデフォルト遅延設定 (GPU/ネットワーク待ち向け遅延マージン 400/1400ms)。
 deep = []
-# 探索経路限定で pass_rights を無効化（Position/MoveGen の pass 機能は保持）。
+# 探索経路で有限パス権を扱う（静的評価へのパス権の加算、NMP で null move の代わりに PASS を使う処理）。
+# 無効でも Position / MoveGen の pass 機能と探索中の pass 手の扱いは残るが、探索はパス権を評価しない。
+# 指定し忘れで有効になることがないよう、否定形ではなく明示指定で有効にする。
+search-pass-rules = []
+# 廃止予定の互換用。以前は既定で有効な否定形 feature だった。現在は何もしない。
+# 既存の `features = ["search-no-pass-rules", ...]` 指定をビルドエラーにしないために残す。
 search-no-pass-rules = []
 # Threat exclusion profiles (mutually exclusive)。除外 pair で Threat 次元を削減し NPS を改善。
 # 詳細は crates/rshogi-core/src/nnue/threat_exclusion.rs の module doc 参照。

@@ -1092,6 +1092,12 @@ impl UsiEngine {
                 let v = value == "true" || value == "1";
                 self.pass_rights_enabled = v;
                 eprintln!("info string PassRights: {}", if v { "enabled" } else { "disabled" });
+                #[cfg(not(feature = "search-pass-rules"))]
+                if v {
+                    eprintln!(
+                        "info string PassRights: this build does not evaluate pass rights in search (feature `search-pass-rules` is disabled)"
+                    );
+                }
             }
             "InitialPassCount" => {
                 if let Ok(v) = value.parse::<u8>() {
