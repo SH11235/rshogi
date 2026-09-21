@@ -79,6 +79,7 @@ cargo build --release -p tools --bin search_only_ab
 パスだけでは後から「どのビルドの結果か」を証明できないため、計測を始める前に
 baseline / candidate の実行ファイルを 1 回ずつ streaming で読み、SHA-256 とバイト数を
 記録する。読めない場合は計測に入らずエラーで終了する。
+このため `--baseline` / `--candidate` には、PATH から探すコマンド名ではなく開けるファイルのパスを渡す。
 
 stdout の先頭に次のヘッダを出すので、ログだけでも対象バイナリを特定できる:
 
