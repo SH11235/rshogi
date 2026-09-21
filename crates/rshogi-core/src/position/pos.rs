@@ -3245,11 +3245,6 @@ mod tests {
         assert_eq!(pos.state().key(), key);
     }
 
-    /// hand_snapshot は手駒から決まるが、SFEN から作ったルート局面の StateInfo には
-    /// 記録されない（do_move 後の StateInfo にだけ入る）ので、今は比較から外している。
-    /// ルート局面でも記録されるようになったら true にする。
-    const COMPARE_HAND_SNAPSHOT: bool = false;
-
     /// 盤面・手駒・手番・手数（= SFEN に載る情報）だけから決まる状態。
     ///
     /// do_move の差分更新結果と、SFEN から組み立て直した局面とで一致しなければならない。
@@ -3258,7 +3253,7 @@ mod tests {
     /// パス権はキーに混ざるが、このテストでは無効（両者 0）なので差は出ない。
     #[derive(Debug, PartialEq)]
     struct DerivedState {
-        hand_snapshot: Option<[Hand; Color::NUM]>,
+        hand_snapshot: [Hand; Color::NUM],
         sfen: String,
         key: u64,
         board_key: u64,
@@ -3284,7 +3279,7 @@ mod tests {
         fn of(pos: &Position) -> Self {
             let st = pos.cur_state();
             Self {
-                hand_snapshot: COMPARE_HAND_SNAPSHOT.then_some(st.hand_snapshot),
+                hand_snapshot: st.hand_snapshot,
                 sfen: pos.to_sfen(),
                 key: pos.key(),
                 board_key: st.board_key,
