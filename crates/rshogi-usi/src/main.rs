@@ -611,15 +611,17 @@ impl UsiEngine {
         let Some(search) = self.search.as_ref() else {
             return;
         };
-        if !search.tt_uses_large_pages() {
+        let message = if search.tt_uses_large_pages() {
+            "Large Pages are used."
+        } else if search.tt_huge_page_hint_requested() {
+            "Huge-page hint requested; actual page backing is managed by the OS."
+        } else {
             return;
-        }
+        };
 
-        // Windows: VirtualAlloc with MEM_LARGE_PAGES
-        // Linux: madvise(MADV_HUGEPAGE) によるhugepageヒント
         let payload = json!({
             "type": "info",
-            "message": "Large Pages are used.",
+            "message": message,
         });
         println!("info string {}", payload);
         self.large_pages_reported = true;

@@ -84,6 +84,18 @@ The core feature only supplies scopes/counters: a library consumer must install
 its own recording allocator. Compare fixed-depth searches with the same model,
 options and thread count, and retain cold and warm searches separately.
 
+## TT の page 配置表示
+
+Windows で `MEM_LARGE_PAGES` による確保に成功した場合は `Large Pages are used.` を
+表示します。Linux/Android では `MADV_HUGEPAGE` 要求に成功した場合だけ
+`Huge-page hint requested; actual page backing is managed by the OS.` を表示します。
+ヒント要求は実際の huge-page backing を保証しません。要求失敗時や通常 page への
+フォールバック時は、large-page 使用を示す行を表示しません。
+
+core の `uses_large_pages()` / `Search::tt_uses_large_pages()` は Windows の明示確保だけを
+表します。Linux/Android のヒント要求の成否は `huge_page_hint_requested()` /
+`Search::tt_huge_page_hint_requested()` で確認できます。
+
 ## License
 
 GPL-3.0-or-later License

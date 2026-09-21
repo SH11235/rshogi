@@ -25,10 +25,14 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AllocKind {
+    /// Windows の MEM_LARGE_PAGES による確保に成功
+    #[cfg(windows)]
     LargePages,
-    /// Windows で Large Pages 確保失敗時のフォールバック、
-    /// または macOS 等の Large Pages 未対応環境で使用
-    #[allow(dead_code)]
+    /// Linux/Android で MADV_HUGEPAGE の要求に成功。実際の backing は OS が決める
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    HugePageHint,
+    /// Large Pages 確保や hint 要求に失敗した場合のフォールバック、
+    /// または macOS 等の未対応環境で使用
     Regular,
 }
 
@@ -169,9 +173,9 @@ fn alloc_windows(size: usize, alignment: usize) -> Allocation {
 #[cfg(not(windows))]
 fn alloc_unix(size: usize, alignment: usize) -> Allocation {
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    let (page_align, kind) = (2 * 1024 * 1024, AllocKind::LargePages);
+    let page_align = 2 * 1024 * 1024;
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let (page_align, kind) = (4096, AllocKind::Regular);
+    let page_align = 4096;
 
     let alignment = max(alignment, page_align);
     let layout = Layout::from_size_align(size, alignment)
@@ -183,17 +187,24 @@ fn alloc_unix(size: usize, alignment: usize) -> Allocation {
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    unsafe {
-        let result = libc::madvise(ptr as *mut _, layout.size(), libc::MADV_HUGEPAGE);
+    let kind = {
+        // SAFETY: ptr は直前に layout で確保した領域の先頭で、layout.size() はその全長。
+        // MADV_HUGEPAGE は配置のヒントであり、領域の内容や有効性を変えない。
+        let result = unsafe { libc::madvise(ptr as *mut _, layout.size(), libc::MADV_HUGEPAGE) };
         // madvise失敗は動作に影響しないが、パフォーマンスに影響する可能性があるため
         // デバッグビルドでは警告を出力
         #[cfg(debug_assertions)]
         if result != 0 {
             eprintln!("Warning: madvise MADV_HUGEPAGE failed");
         }
-        #[cfg(not(debug_assertions))]
-        let _ = result;
-    }
+        if result == 0 {
+            AllocKind::HugePageHint
+        } else {
+            AllocKind::Regular
+        }
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let kind = AllocKind::Regular;
 
     Allocation {
         ptr: NonNull::new(ptr).expect("TT allocation returned null"),

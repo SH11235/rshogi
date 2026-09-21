@@ -76,7 +76,23 @@ impl ClusterTable {
     }
 
     fn uses_large_pages(&self) -> bool {
-        self.alloc.kind() == AllocKind::LargePages
+        match self.alloc.kind() {
+            #[cfg(windows)]
+            AllocKind::LargePages => true,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            AllocKind::HugePageHint => false,
+            AllocKind::Regular => false,
+        }
+    }
+
+    fn huge_page_hint_requested(&self) -> bool {
+        match self.alloc.kind() {
+            #[cfg(windows)]
+            AllocKind::LargePages => false,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            AllocKind::HugePageHint => true,
+            AllocKind::Regular => false,
+        }
     }
 }
 
@@ -245,9 +261,16 @@ impl TranspositionTable {
         count / CLUSTER_SIZE as i32
     }
 
-    /// Large Pagesを使って確保されたかを返す
+    /// Windowsで明示的なLarge Pages確保に成功したかを返す。
+    /// Linuxのhuge-page hintは実際のbackingを保証しないため含めない。
     pub fn uses_large_pages(&self) -> bool {
         self.table.uses_large_pages()
+    }
+
+    /// Linux/AndroidでMADV_HUGEPAGE要求が成功したかを返す。
+    /// 実際にhuge pagesへ昇格したかは示さない。
+    pub fn huge_page_hint_requested(&self) -> bool {
+        self.table.huge_page_hint_requested()
     }
 
     /// クラスターインデックスを計算
@@ -371,6 +394,16 @@ impl TtPrefetch for TranspositionTable {
 mod tests {
     use super::*;
     use crate::position::{Position, SFEN_HIRATE};
+
+    #[test]
+    fn page_status_separates_explicit_large_pages_from_hint() {
+        let tt = TranspositionTable::new(1);
+        assert!(!(tt.uses_large_pages() && tt.huge_page_hint_requested()));
+        #[cfg(not(windows))]
+        assert!(!tt.uses_large_pages());
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        assert!(!tt.huge_page_hint_requested());
+    }
 
     #[cfg(feature = "tt-write-stats")]
     #[test]
