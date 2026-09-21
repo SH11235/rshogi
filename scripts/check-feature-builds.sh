@@ -67,6 +67,9 @@ run -p rshogi-usi --all-targets --no-default-features \
 run -p tools --all-targets --features prepacked-nnue
 run -p tools --all-targets --features diagnostics
 
+# rshogi-usi にだけある opt-in feature。
+run -p rshogi-usi --all-targets --features mimalloc
+
 if [ ${#failed[@]} -ne 0 ]; then
   echo
   echo "失敗した構成 (${#failed[@]}):"
