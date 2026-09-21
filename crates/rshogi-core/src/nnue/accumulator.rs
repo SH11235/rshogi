@@ -233,9 +233,16 @@ enum AlignedBoxBacking {
 /// - `Shared`: `from_shared` によるプロセス間共有メモリの借用（read-only、`DerefMut` 不可）。
 /// - `Mapped`: fileの読み取り専用mappingを共有所有（read-only、`DerefMut` 不可）。
 ///
-/// read-only backing になり得る重み配列は `WeightBox` で包んで保持する。`WeightBox` は
-/// `DerefMut` を持たず、書き換えは `make_mut`（read-only backing なら私有ヒープへ複製）
-/// だけなので、`DerefMut` の panic 経路には到達しない。
+/// LayerStacks の重み配列は `WeightBox` で包んで保持する。`WeightBox` は `DerefMut` を
+/// 持たず、書き換えは `make_mut`（read-only backing なら私有ヒープへ複製）だけ。
+///
+/// 2 つの read-only backing で保証の強さが違うことに注意:
+/// - `Mapped` を作れるのは `WeightBox::from_mapped` だけなので、`Mapped` が `DerefMut` へ
+///   届く経路は型として存在しない（構造的に到達不能）。
+/// - `Shared` は `from_shared` が `pub(crate)` で、HalfKx の FeatureTransformer
+///   (`feature_transformer.rs` / `network_halfk*.rs`) は素の `AlignedBox` のまま
+///   `shared_weights::try_share` を呼ぶ。こちらは「共有化はロード完了後・以後書き込まない」
+///   という規約で守られており、型では保証されない。
 ///
 /// # 安全性契約
 ///
@@ -482,8 +489,17 @@ unsafe impl<T: Sync> Sync for AlignedBox<T> {}
 /// **実装しない**。書き換えたい場合は `make_mut` を使い、read-only backing なら私有ヒープ
 /// への複製（copy-on-write）を経てから可変スライスを得る。
 ///
-/// これにより「read-only backing の重みを誤って書き換えて実行時 panic する」経路が
-/// 型レベルで存在しなくなる。推論経路は `Deref` による共有読み取りだけで足りる。
+/// これにより、この型が保持する重みについては「read-only backing を誤って書き換えて
+/// 実行時 panic する」経路が型として無くなる。`Mapped` backing を作れるのは
+/// `WeightBox::from_mapped` だけなので、LayerStacks の prepacked 重みはこれで構造的に
+/// 保護される。一方 HalfKx の FeatureTransformer は素の `AlignedBox` のまま
+/// `shared_weights::try_share` を使っており、そちらの `Shared` backing は従来どおり
+/// 「共有化後は書き込まない」という規約で守られている（型では保証されない）。
+///
+/// 推論経路は `Deref` による共有読み取りだけで足りる。
+///
+/// `#[repr(transparent)]` はネットワーク構造体のレイアウトを導入前と同一に保つためで、
+/// この型を別の型へキャストする箇所は無い。
 #[repr(transparent)]
 pub struct WeightBox<T>(AlignedBox<T>);
 
@@ -521,6 +537,9 @@ impl<T: Copy + Default> WeightBox<T> {
     /// backing が read-only（共有メモリ / file mapping）のときは、先に私有ヒープへ
     /// 複製する（copy-on-write）。複製後は元の共有領域・mapping を参照しないため、
     /// 他プロセスや mapping 元 file のバイト列は変化しない。
+    ///
+    /// コスト: read-only backing に対する最初の 1 回だけ tensor 全体を確保してコピーする
+    /// （FT 重みなら数百 MB になり得る）。2 回目以降は既に Heap なのでコピーしない。
     ///
     /// 重みを書き換えるのは net delta (`SPSA_NET_*`) だけなので、それを持つ構成に
     /// 限ってコンパイルする。
