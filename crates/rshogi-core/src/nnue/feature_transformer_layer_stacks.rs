@@ -5,7 +5,7 @@
 //! FT 軸は `LsFeatureSpec` trait + `PhantomData<FT>` で type level に表現し、
 //! monomorphization で既存 HalfKaHmMerged 専用実装と bit-identical な機械語を得る。
 
-use super::accumulator::{Aligned, AlignedBox};
+use super::accumulator::{Aligned, AlignedBox, WeightBox};
 use super::accumulator::{DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES};
 use super::accumulator_layer_stacks::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, AccumulatorStackLayerStacks,
@@ -88,7 +88,7 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
 
     /// 重み [FT::DIMENSIONS][L1]
     /// 64バイトアラインメントで確保
-    pub weights: AlignedBox<i16>,
+    pub weights: WeightBox<i16>,
 
     /// PSQT バイアス（先頭 `num_buckets` 個のみ有効、それ以降はゼロ）
     ///
@@ -101,7 +101,7 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
     /// PSQT 重み (長さ = `FT::DIMENSIONS × num_buckets`、layout
     /// `psqt_weights[feature_idx * num_buckets + bucket]`)
     #[cfg(feature = "nnue-psqt")]
-    pub(crate) psqt_weights: AlignedBox<i32>,
+    pub(crate) psqt_weights: WeightBox<i32>,
 
     /// PSQT 重みの bucket 数 (= net file の `num_buckets`)。
     ///
@@ -117,7 +117,7 @@ pub struct FeatureTransformerLayerStacks<const L1: usize, FT: LsFeatureSpec> {
 
     /// Threat 重み [THREAT_DIMENSIONS × L1]
     #[cfg(feature = "nnue-threat")]
-    pub(crate) threat_weights: AlignedBox<i8>,
+    pub(crate) threat_weights: WeightBox<i8>,
 
     /// Threat が有効か（アーキテクチャ文字列で判定）
     #[cfg(feature = "nnue-threat")]
@@ -261,17 +261,17 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     pub(crate) fn for_accumulator_tests() -> Self {
         Self {
             biases: Aligned([0; L1]),
-            weights: AlignedBox::new_zeroed(FT::DIMENSIONS * L1),
+            weights: AlignedBox::new_zeroed(FT::DIMENSIONS * L1).into(),
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 1,
             #[cfg(feature = "nnue-psqt")]
-            psqt_weights: AlignedBox::new_zeroed(FT::DIMENSIONS),
+            psqt_weights: AlignedBox::new_zeroed(FT::DIMENSIONS).into(),
             #[cfg(feature = "nnue-psqt")]
             has_psqt: false,
             #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(THREAT_DIMENSIONS * L1),
+            threat_weights: AlignedBox::new_zeroed(THREAT_DIMENSIONS * L1).into(),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
@@ -284,11 +284,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// 終わった後（重みへの全書込が済んだ後）に 1 回だけ呼ぶこと。共有後の重み box は
     /// read-only になる。空 box（PSQT/Threat 無効モデル）は内部でスキップされる。
     pub(crate) fn share_weights(&mut self) {
-        super::shared_weights::try_share(&mut self.weights, "FT weights");
+        self.weights.share("FT weights");
         #[cfg(feature = "nnue-psqt")]
-        super::shared_weights::try_share(&mut self.psqt_weights, "FT psqt");
+        self.psqt_weights.share("FT psqt");
         #[cfg(feature = "nnue-threat")]
-        super::shared_weights::try_share(&mut self.threat_weights, "FT threat");
+        self.threat_weights.share("FT threat");
     }
 
     /// ファイルから読み込み（非圧縮形式）
@@ -311,17 +311,17 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         Ok(Self {
             biases: Aligned(biases),
-            weights,
+            weights: weights.into(),
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
-            psqt_weights: AlignedBox::new_zeroed(0),
+            psqt_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-psqt")]
             has_psqt: false,
             #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(0),
+            threat_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
@@ -357,10 +357,12 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             packed.ft(weight_size)?
         } else {
             read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_zeroed)?
+                .into()
         };
         #[cfg(not(feature = "prepacked-nnue"))]
-        let weights =
-            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_zeroed)?;
+        let weights: WeightBox<i16> =
+            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_zeroed)?
+                .into();
         Ok(Self {
             biases: Aligned(biases),
             weights,
@@ -369,11 +371,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
-            psqt_weights: AlignedBox::new_zeroed(0),
+            psqt_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-psqt")]
             has_psqt: false,
             #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(0),
+            threat_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
@@ -440,11 +442,12 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             self.has_psqt = true;
             return Ok(());
         }
-        self.psqt_weights = AlignedBox::new_zeroed(weight_count);
-        for w in self.psqt_weights.iter_mut() {
+        let mut psqt_weights = AlignedBox::new_zeroed(weight_count);
+        for w in psqt_weights.iter_mut() {
             reader.read_exact(&mut buf4)?;
             *w = i32::from_le_bytes(buf4);
         }
+        self.psqt_weights = psqt_weights.into();
 
         self.psqt_num_buckets = num_buckets;
         // 注意: 読み込みが途中で失敗した場合、psqt_biases だけが更新された
@@ -500,7 +503,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             self.has_threat = true;
             return Ok(());
         }
-        self.threat_weights = AlignedBox::new_zeroed(weight_count);
+        let mut threat_weights: AlignedBox<i8> = AlignedBox::new_zeroed(weight_count);
         // SAFETY:
         // - `AlignedBox::new_zeroed(weight_count)` は `weight_count` 個の `i8`
         //   を保持する領域をゼロ初期化で確保している。
@@ -509,17 +512,15 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         //   よって `*mut i8 → *mut u8` のキャストは valid で、同じメモリ領域を
         //   バイト列として参照するスライスを作るのは安全。
         // - 作ったスライスは `read_exact` 呼び出しの内側でしか使わず、
-        //   関数リターン前にドロップされる。`self.threat_weights` への排他可変
-        //   参照は関数シグネチャで保証されており、重複参照は発生しない。
+        //   関数リターン前にドロップされる。ローカル変数 `threat_weights` への
+        //   排他可変参照はこのスコープだけが持ち、重複参照は発生しない。
         // - `weight_count == THREAT_DIMENSIONS * L1` は `AlignedBox` の長さと
         //   一致するため、`from_raw_parts_mut` の length 要件を満たす。
         let slice = unsafe {
-            std::slice::from_raw_parts_mut(
-                self.threat_weights.as_mut_ptr() as *mut u8,
-                weight_count,
-            )
+            std::slice::from_raw_parts_mut(threat_weights.as_mut_ptr() as *mut u8, weight_count)
         };
         reader.read_exact(slice)?;
+        self.threat_weights = threat_weights.into();
         self.has_threat = true;
         Ok(())
     }
@@ -2282,17 +2283,17 @@ mod tests {
     fn make_test_transformer() -> TestFt {
         FeatureTransformerLayerStacks::<TEST_L1, TestSpec> {
             biases: Aligned([0; TEST_L1]),
-            weights: AlignedBox::new_zeroed(TestSpec::DIMENSIONS * TEST_L1),
+            weights: AlignedBox::new_zeroed(TestSpec::DIMENSIONS * TEST_L1).into(),
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
-            psqt_weights: AlignedBox::new_zeroed(0),
+            psqt_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-psqt")]
             has_psqt: false,
             #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(0),
+            threat_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
@@ -2302,7 +2303,7 @@ mod tests {
     #[cfg(not(feature = "nnue-effect-bucket"))]
     fn fill_weight_row(ft: &mut TestFt, index: usize, seed: i16) {
         let start = index * TEST_L1;
-        for (i, slot) in ft.weights[start..start + TEST_L1].iter_mut().enumerate() {
+        for (i, slot) in ft.weights.make_mut()[start..start + TEST_L1].iter_mut().enumerate() {
             *slot = seed.wrapping_add((i % 29) as i16);
         }
     }
@@ -2758,13 +2759,13 @@ mod tests {
 
         FeatureTransformerLayerStacks::<TEST_L1, TestSpec> {
             biases: Aligned([0; TEST_L1]),
-            weights: AlignedBox::new_zeroed(TestSpec::DIMENSIONS * TEST_L1),
+            weights: AlignedBox::new_zeroed(TestSpec::DIMENSIONS * TEST_L1).into(),
             psqt_biases,
             psqt_num_buckets: n,
-            psqt_weights,
+            psqt_weights: psqt_weights.into(),
             has_psqt: true,
             #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(0),
+            threat_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
@@ -2849,17 +2850,17 @@ mod tests {
         let weights = AlignedBox::<i16>::new_zeroed(FT::DIMENSIONS * TEST_L1);
         let ft = FeatureTransformerLayerStacks::<TEST_L1, FT> {
             biases: Aligned([7; TEST_L1]),
-            weights,
+            weights: weights.into(),
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
-            psqt_weights: AlignedBox::new_zeroed(0),
+            psqt_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-psqt")]
             has_psqt: false,
             #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(0),
+            threat_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
@@ -2930,17 +2931,17 @@ mod tests {
 
         let make_ft = || FeatureTransformerLayerStacks::<TEST_L1, HalfKpSpec> {
             biases,
-            weights: weights.clone(),
+            weights: weights.clone().into(),
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
-            psqt_weights: AlignedBox::new_zeroed(0),
+            psqt_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-psqt")]
             has_psqt: false,
             #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(0),
+            threat_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,
@@ -2986,17 +2987,17 @@ mod tests {
         let weights = AlignedBox::<i16>::new_zeroed(HalfKpSpec::DIMENSIONS * TEST_L1);
         let ft = FeatureTransformerLayerStacks::<TEST_L1, HalfKpSpec> {
             biases: Aligned([0; TEST_L1]),
-            weights,
+            weights: weights.into(),
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
             psqt_num_buckets: 0,
             #[cfg(feature = "nnue-psqt")]
-            psqt_weights: AlignedBox::new_zeroed(0),
+            psqt_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-psqt")]
             has_psqt: false,
             #[cfg(feature = "nnue-threat")]
-            threat_weights: AlignedBox::new_zeroed(0),
+            threat_weights: AlignedBox::new_zeroed(0).into(),
             #[cfg(feature = "nnue-threat")]
             has_threat: false,
             _ft: PhantomData,

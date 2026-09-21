@@ -5,7 +5,7 @@
 use std::io::{self, Read, Seek, SeekFrom};
 
 use super::accumulator::{
-    AlignedBox, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES,
+    AlignedBox, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, WeightBox,
 };
 use super::activation::{CReLU, FtActivation, PairwiseCReLU, SCReLU, default_qa_for_arch};
 use super::constants::{
@@ -112,7 +112,7 @@ pub(crate) struct DynamicAffine {
     padded_input: usize,
     output_dim: usize,
     biases: AlignedBox<i32>,
-    weights: AlignedBox<i8>,
+    weights: WeightBox<i8>,
 }
 
 impl DynamicAffine {
@@ -142,7 +142,7 @@ impl DynamicAffine {
             padded_input,
             output_dim,
             biases,
-            weights,
+            weights: weights.into(),
         })
     }
 
@@ -155,10 +155,8 @@ impl DynamicAffine {
     }
 
     pub(crate) fn apply_file_weight_delta(&mut self, index: usize, delta: i32) -> bool {
-        #[cfg(all(windows, feature = "prepacked-nnue"))]
-        self.weights.make_owned();
         let (value, clamped) = super::net_delta::add_i8_delta(self.weights[index], delta);
-        self.weights[index] = value;
+        self.weights.make_mut()[index] = value;
         clamped
     }
 
@@ -718,7 +716,7 @@ mod tests {
             padded_input: padded_input(input_dim),
             output_dim,
             biases: AlignedBox::new_zeroed(output_dim),
-            weights: AlignedBox::new_zeroed(output_dim * padded_input(input_dim)),
+            weights: AlignedBox::new_zeroed(output_dim * padded_input(input_dim)).into(),
         }
     }
 
@@ -746,7 +744,7 @@ mod tests {
             assert_eq!(&*delta.biases, &*edited.biases);
             assert_eq!(&*delta.weights, &*edited.weights);
 
-            delta.weights[file_index] = i8::MAX;
+            delta.weights.make_mut()[file_index] = i8::MAX;
             assert!(delta.apply_file_weight_delta(file_index, 1));
             assert_eq!(delta.file_weight(file_index), i8::MAX);
         }

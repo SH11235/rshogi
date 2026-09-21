@@ -4,7 +4,7 @@
 //! - `ClippedReLU`: 整数スケーリング付きのクリップ付き ReLU 層
 //! - `SCReLU`: Squared Clipped ReLU 層（bullet-shogi SCReLUモデル用）
 
-use super::accumulator::AlignedBox;
+use super::accumulator::{AlignedBox, WeightBox};
 use super::constants::WEIGHT_SCALE_BITS;
 use std::io::{self, Read};
 
@@ -292,7 +292,7 @@ pub struct AffineTransform<const INPUT_DIM: usize, const OUTPUT_DIM: usize> {
     /// バイアス
     pub biases: [i32; OUTPUT_DIM],
     /// 重み（格納レイアウトは should_use_scrambled_weights() に従う、64バイトアライン）
-    pub weights: AlignedBox<i8>,
+    pub weights: WeightBox<i8>,
 }
 
 impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> Default
@@ -363,11 +363,9 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
     #[cfg(any(test, feature = "layerstack-arch"))]
     pub(crate) fn apply_file_weight_delta(&mut self, index: usize, delta: i32) -> bool {
-        #[cfg(all(windows, feature = "prepacked-nnue"))]
-        self.weights.make_owned();
         let memory_index = Self::file_weight_index(index);
         let (value, clamped) = super::net_delta::add_i8_delta(self.weights[memory_index], delta);
-        self.weights[memory_index] = value;
+        self.weights.make_mut()[memory_index] = value;
         clamped
     }
 
@@ -375,7 +373,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     pub fn new() -> Self {
         Self {
             biases: [0i32; OUTPUT_DIM],
-            weights: AlignedBox::new_zeroed(OUTPUT_DIM * Self::PADDED_INPUT),
+            weights: AlignedBox::new_zeroed(OUTPUT_DIM * Self::PADDED_INPUT).into(),
         }
     }
 
@@ -401,7 +399,10 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             weights[idx] = buf1[0] as i8;
         }
 
-        Ok(Self { biases, weights })
+        Ok(Self {
+            biases,
+            weights: weights.into(),
+        })
     }
 
     #[cfg(feature = "prepacked-nnue")]
@@ -442,7 +443,10 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             weights[idx] = val as i8;
         }
 
-        Ok(Self { biases, weights })
+        Ok(Self {
+            biases,
+            weights: weights.into(),
+        })
     }
 
     /// 順伝播
@@ -1331,7 +1335,7 @@ mod tests {
 
         let transform: AffineTransform<4, 2> = AffineTransform {
             biases: [10, 20],
-            weights,
+            weights: weights.into(),
         };
 
         // 入力はPADDED_INPUT（32バイト）にパディングする必要がある
@@ -1384,7 +1388,7 @@ mod tests {
 
         let transform: AffineTransform<512, 32> = AffineTransform {
             biases: [10; 32],
-            weights,
+            weights: weights.into(),
         };
 
         // 入力は64バイトアライン必須

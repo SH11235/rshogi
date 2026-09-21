@@ -4,7 +4,9 @@
 //! version 2 は metadata stream / i16 FT / i32 PSQT / i8 Threat の4区画。
 //! metadata stream は通常ヘッダー、raw FT biases、PSQT biases、Threat profile、FC。
 //! 重みの shape と extension は既存のモデルローダーが検証する。
+#[cfg(not(windows))]
 use super::accumulator::AlignedBox;
+use super::accumulator::WeightBox;
 use super::net_bin_layout::LayerStacksBinLayout;
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
@@ -295,7 +297,7 @@ impl PackedModel {
         input: usize,
         output: usize,
         scramble: bool,
-    ) -> io::Result<AlignedBox<i8>> {
+    ) -> io::Result<WeightBox<i8>> {
         let expected = output
             .checked_mul(super::layers::padded_input(input))
             .ok_or_else(|| invalid("FC dimensions overflow"))?;
@@ -330,7 +332,7 @@ impl PackedModel {
             return Err(invalid("nonzero FC padding"));
         }
         #[cfg(windows)]
-        let weights = AlignedBox::from_mapped(self.owner.clone(), start, expected)?;
+        let weights = WeightBox::from_mapped(self.owner.clone(), start, expected)?;
         #[cfg(not(windows))]
         let weights = {
             let mut weights = AlignedBox::new_zeroed(expected);
@@ -339,7 +341,7 @@ impl PackedModel {
                 reader.read_exact(&mut b)?;
                 *value = b[0] as i8;
             }
-            weights
+            WeightBox::from(weights)
         };
         reader.seek(SeekFrom::Start((end - self.ranges[0].start) as u64))?;
         Ok(weights)
@@ -427,11 +429,11 @@ impl PackedModel {
 macro_rules! read_tensor {
     ($name:ident, $ty:ty, $section:expr) => {
         impl PackedModel {
-            pub(super) fn $name(&self, count: usize) -> io::Result<AlignedBox<$ty>> {
+            pub(super) fn $name(&self, count: usize) -> io::Result<WeightBox<$ty>> {
                 let range = self.span($section, std::mem::size_of::<$ty>(), count)?;
                 #[cfg(windows)]
                 {
-                    AlignedBox::from_mapped(self.owner.clone(), range.start, count)
+                    WeightBox::from_mapped(self.owner.clone(), range.start, count)
                 }
                 #[cfg(not(windows))]
                 {
@@ -444,7 +446,7 @@ macro_rules! read_tensor {
                         reader.read_exact(&mut bytes)?;
                         *value = <$ty>::from_le_bytes(bytes);
                     }
-                    Ok(result)
+                    Ok(WeightBox::from(result))
                 }
             }
         }
@@ -581,6 +583,62 @@ mod tests {
             assert!(OpenOptions::new().write(true).open(&fixture.packed).is_ok());
         }
     }
+
+    /// mapping 上の重みへ delta を当てても copy-on-write で私有ヒープへ移るだけで、
+    /// コンテナ file のバイト列も同じコンテナを読む別 net も変化せず、
+    /// 推論が読む重み配列（と raw score）だけが変わる。
+    #[test]
+    fn net_delta_copies_on_write_and_leaves_the_container_untouched() {
+        use crate::nnue::ls_feature_spec::HalfKpSpec;
+        use crate::nnue::network_layer_stacks::NetworkLayerStacks;
+        type Net = NetworkLayerStacks<32, 8, 14, 32, HalfKpSpec>;
+        let fixture = Fixture::with_layout(SyntheticFtEncoding::Leb128Split, FcLayout::Native);
+        let container = std::fs::read(&fixture.packed).unwrap();
+        let mut packed = Net::load(&fixture.packed).unwrap();
+        let peer = Net::load(&fixture.packed).unwrap();
+        let input = [17u8; 32];
+        let before_score = packed.layer_stacks.evaluate_raw(0, &input);
+        assert_eq!(peer.layer_stacks.evaluate_raw(0, &input), before_score);
+
+        // l2 の全 weight を +1 する。推論が読む配列が実際に書き換わることを見る。
+        let l2_weight_len = packed.layer_stacks.buckets[0].l2.weights.len();
+        for index in 0..l2_weight_len {
+            packed.layer_stacks.buckets[0].l2.apply_file_weight_delta(index, 1);
+        }
+        assert_ne!(
+            &*packed.layer_stacks.buckets[0].l2.weights,
+            &*peer.layer_stacks.buckets[0].l2.weights
+        );
+        assert_ne!(packed.layer_stacks.evaluate_raw(0, &input), before_score);
+
+        // 同じコンテナを読む別 net は元の値のまま。
+        assert_eq!(peer.layer_stacks.evaluate_raw(0, &input), before_score);
+        // コンテナ file のバイト列も変化しない。
+        assert_eq!(std::fs::read(&fixture.packed).unwrap(), container);
+    }
+
+    /// 稼働中でもモデル file の差し替え（新 file を書いて rename で被せる）が通り、
+    /// 読み込み済み net の評価値は変わらない。
+    #[test]
+    fn loaded_container_can_be_replaced_by_rename_without_disturbing_the_net() {
+        use crate::nnue::ls_feature_spec::HalfKpSpec;
+        use crate::nnue::network_layer_stacks::NetworkLayerStacks;
+        type Net = NetworkLayerStacks<32, 8, 14, 32, HalfKpSpec>;
+        let fixture = Fixture::with_layout(SyntheticFtEncoding::Leb128Split, FcLayout::Native);
+        let net = Net::load(&fixture.packed).unwrap();
+        let input = [23u8; 32];
+        let before = net.layer_stacks.evaluate_raw(0, &input);
+
+        let replacement = fixture.packed.with_extension("replacement");
+        let mut bytes = std::fs::read(&fixture.packed).unwrap();
+        bytes.extend_from_slice(b"different");
+        std::fs::write(&replacement, &bytes).unwrap();
+        std::fs::rename(&replacement, &fixture.packed).unwrap();
+
+        assert_eq!(net.layer_stacks.evaluate_raw(0, &input), before);
+        assert_eq!(std::fs::read(&fixture.packed).unwrap(), bytes);
+    }
+
     #[cfg(feature = "nnue-runtime-dimensions")]
     #[test]
     fn full_loader_preserves_dynamic_evaluation_and_deltas() {
