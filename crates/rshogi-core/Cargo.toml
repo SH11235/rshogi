@@ -58,6 +58,7 @@ nnue-stats = []
 # SIMD最適化（AVX2）
 simd_avx2 = []
 diagnostics = []
+allocation-stats = []
 # WebAssembly スレッドビルド (wasm-bindgen-rayon + rayon で LazySMP)。
 # 詳細は docs/wasm-multithreading-investigation.md を参照。
 wasm-threads = ["rayon"]

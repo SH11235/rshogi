@@ -999,6 +999,9 @@ impl Search {
         F: FnMut(&SearchInfo),
     {
         let ply = pos.game_ply();
+        #[cfg(feature = "allocation-stats")]
+        let _allocation_scope =
+            crate::allocation_stats::Scope::enter(crate::allocation_stats::Phase::Setup);
         self.prepare_time_metrics(ply);
         // 注意: stop/ponderhitフラグのリセットは go() の呼び出し元
         // (USI層の cmd_go) でスレッド生成前に行うこと。
@@ -1084,6 +1087,10 @@ impl Search {
                     &mut time_manager,
                     max_depth,
                     &mut |info: &SearchInfo| {
+                        #[cfg(feature = "allocation-stats")]
+                        let _allocation_scope = crate::allocation_stats::Scope::enter(
+                            crate::allocation_stats::Phase::Output,
+                        );
                         let mut public_info = info.clone();
                         #[cfg(test)]
                         if let Some(pv) = corrupt.as_ref() {
@@ -1262,6 +1269,9 @@ impl Search {
             && best_move != Move::NONE
             && root_score_is_initialized(score)
         {
+            #[cfg(feature = "allocation-stats")]
+            let _allocation_scope =
+                crate::allocation_stats::Scope::enter(crate::allocation_stats::Phase::Output);
             let final_pv = pv.clone();
             let time_ms = time_manager.elapsed() as u64;
             let nps = total_nodes.saturating_mul(1000) / time_ms.max(1);
@@ -1434,6 +1444,9 @@ where
     FProgress: FnMut(u64, f64),
 {
     let is_main = main_state.is_some();
+    #[cfg(feature = "allocation-stats")]
+    let _allocation_scope =
+        crate::allocation_stats::Scope::enter(crate::allocation_stats::Phase::Iteration);
 
     // 毎 go の開始時に全スロットの cutoff_cnt をクリアする。孫スロット方式のクリア経路に
     // 穴があっても go をまたぐ寿命比例の蓄積と i32 overflow を起こさないための防御で、
