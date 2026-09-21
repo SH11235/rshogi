@@ -211,4 +211,68 @@ mod tests {
         let mv = mate_by_new(sfen);
         assert!(mv.is_some(), "成香では玉に逃げられるが不成り串刺しで1手詰み: {:?}", mv);
     }
+
+    /// 定義どおりの 1 手詰め: 指した後に相手玉へ王手がかかり、相手に合法手が無い手を列挙する。
+    ///
+    /// 打ち歩詰めは合法手生成の時点で除かれているので、ここには現れない。
+    fn brute_force_mate_moves(pos: &mut Position) -> Vec<Move> {
+        use crate::movegen::{MoveList, generate_legal_all};
+
+        let mut list = MoveList::new();
+        generate_legal_all(pos, &mut list);
+        let mut mates = Vec::new();
+        for &mv in list.iter() {
+            let gives_check = pos.gives_check(mv);
+            pos.do_move(mv, gives_check);
+            if pos.in_check() {
+                let mut replies = MoveList::new();
+                generate_legal_all(pos, &mut replies);
+                if replies.is_empty() {
+                    mates.push(mv);
+                }
+            }
+            pos.undo_move(mv);
+        }
+        mates
+    }
+
+    /// ランダムプレイアウトの各局面で、`mate_1ply` の結果を 1 手読みの総当たりと突き合わせる。
+    ///
+    /// `mate_1ply` は YaneuraOu の簡易版の移植で、近接王手しか調べない（玉から離れた
+    /// 飛車・龍の王手による詰みなどは見逃してよい）。そのため保証するのは健全性だけ:
+    /// 手を返したなら、その手は合法で実際に詰んでいなければならない。
+    /// 見逃しの数はここでは assert しない。
+    #[test]
+    fn mate_1ply_agrees_with_one_ply_search() {
+        use crate::position::playout_test_support::RandomPlayout;
+
+        const SEED: u64 = 0x4D41_5445_2026;
+        const PLAYOUTS: u64 = 40;
+        const MAX_PLIES: usize = 300;
+
+        let mut fast_found = 0u64;
+        for index in 0..PLAYOUTS {
+            let mut playout = RandomPlayout::new(SEED, index);
+            for _ in 0..MAX_PLIES {
+                if !playout.pos.in_check() {
+                    let mates = brute_force_mate_moves(&mut playout.pos);
+                    if let Some(mv) = mate_1ply(&mut playout.pos) {
+                        fast_found += 1;
+                        assert!(
+                            mates.iter().any(|mate| mate.to_u16() == mv.to_u16()),
+                            "mate_1ply の {} は合法な詰み手ではない（総当たりの詰み手: {:?}）: {}",
+                            mv.to_usi(),
+                            mates.iter().map(|mate| mate.to_usi()).collect::<Vec<_>>(),
+                            playout.describe()
+                        );
+                    }
+                }
+                if playout.step().is_none() {
+                    break;
+                }
+            }
+        }
+        // 標本に 1 手詰めが無ければ何も検証していないことになる。
+        assert!(fast_found > 0, "標本に mate_1ply が詰みを返す局面が無い");
+    }
 }

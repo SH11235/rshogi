@@ -17,6 +17,8 @@ pub mod json_conversion;
 #[cfg(feature = "move-features")]
 mod move_features;
 mod movepicker_support;
+#[cfg(test)]
+pub(crate) mod playout_test_support;
 mod pos;
 mod sfen;
 mod state;
