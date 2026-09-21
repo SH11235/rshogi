@@ -54,6 +54,33 @@ const ENGINE_AUTHOR: &str = "sh11235";
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
 
+/// USI へ表示する TT の page 配置。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TtPageStatus {
+    /// Windows の明示的な Large Pages 確保に成功
+    LargePages,
+    /// Linux/Android の huge-page hint 要求に成功
+    HugePageHint,
+    /// 通常 page
+    Regular,
+}
+
+/// 直前に表示した配置から変わったときだけ、表示する文言を返す。
+/// 起動直後の通常 page は表示しない。TT を取り直して通常 page へ戻った場合は、
+/// 以前の表示が残らないよう戻ったことを知らせる。
+fn page_status_message(reported: TtPageStatus, current: TtPageStatus) -> Option<&'static str> {
+    if reported == current {
+        return None;
+    }
+    Some(match current {
+        TtPageStatus::LargePages => "Large Pages are used.",
+        TtPageStatus::HugePageHint => {
+            "Huge-page hint requested; actual page backing is managed by the OS."
+        }
+        TtPageStatus::Regular => "The TT now uses regular pages.",
+    })
+}
+
 /// USIエンジンの状態
 struct UsiEngine {
     /// 探索エンジン
@@ -107,8 +134,8 @@ struct UsiEngine {
     net_deltas: BTreeMap<NetCoefficientId, i32>,
     /// ロード済み net へ未反映の delta があるか。
     net_deltas_dirty: bool,
-    /// TT の page 配置メッセージの出力済みフラグ
-    page_status_reported: bool,
+    /// 最後に表示した TT の page 配置。未表示のときは表示が不要な Regular。
+    reported_page_status: TtPageStatus,
     // --- 有限パス権（Finite Pass Rights）関連 ---
     /// パス権ルール有効化フラグ
     pass_rights_enabled: bool,
@@ -180,7 +207,7 @@ impl UsiEngine {
             spsa_net_spec_names,
             net_deltas: BTreeMap::new(),
             net_deltas_dirty: false,
-            page_status_reported: false,
+            reported_page_status: TtPageStatus::Regular,
             pass_rights_enabled: false,
             initial_pass_count: 2,
             pass_right_value_early: DEFAULT_PASS_RIGHT_VALUE_EARLY,
@@ -613,18 +640,17 @@ impl UsiEngine {
     }
 
     fn maybe_report_page_status(&mut self) {
-        if self.page_status_reported {
-            return;
-        }
-
         let Some(search) = self.search.as_ref() else {
             return;
         };
-        let message = if search.tt_uses_large_pages() {
-            "Large Pages are used."
+        let current = if search.tt_uses_large_pages() {
+            TtPageStatus::LargePages
         } else if search.tt_huge_page_hint_requested() {
-            "Huge-page hint requested; actual page backing is managed by the OS."
+            TtPageStatus::HugePageHint
         } else {
+            TtPageStatus::Regular
+        };
+        let Some(message) = page_status_message(self.reported_page_status, current) else {
             return;
         };
 
@@ -633,7 +659,7 @@ impl UsiEngine {
             "message": message,
         });
         println!("info string {}", payload);
-        self.page_status_reported = true;
+        self.reported_page_status = current;
     }
 
     /// setoptionコマンド: オプション設定
@@ -1824,6 +1850,22 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn page_status_is_reported_only_when_it_changes() {
+        use TtPageStatus::{HugePageHint, LargePages, Regular};
+
+        assert_eq!(page_status_message(Regular, Regular), None);
+        assert_eq!(page_status_message(LargePages, LargePages), None);
+        assert_eq!(page_status_message(Regular, LargePages), Some("Large Pages are used."));
+        assert!(page_status_message(Regular, HugePageHint).is_some_and(|m| m.contains("hint")));
+        assert!(
+            page_status_message(LargePages, Regular).is_some_and(|m| m.contains("regular pages"))
+        );
+        assert!(
+            page_status_message(HugePageHint, Regular).is_some_and(|m| m.contains("regular pages"))
+        );
+    }
 
     #[test]
     #[serial]

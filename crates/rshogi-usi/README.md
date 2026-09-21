@@ -92,6 +92,10 @@ Windows で `MEM_LARGE_PAGES` による確保に成功した場合は `Large Pag
 ヒント要求は実際の huge-page backing を保証しません。要求失敗時や通常 page への
 フォールバック時は、large-page 使用を示す行を表示しません。
 
+表示は `isready` と `USI_Hash` の変更時に確認し、直前に表示した配置から変わったときだけ出します。
+TT を取り直した結果 large pages やヒントが使えなくなった場合は
+`The TT now uses regular pages.` を表示します。
+
 core の `uses_large_pages()` / `Search::tt_uses_large_pages()` は Windows の明示確保だけを
 表します。Linux/Android のヒント要求の成否は `huge_page_hint_requested()` /
 `Search::tt_huge_page_hint_requested()` で確認できます。
