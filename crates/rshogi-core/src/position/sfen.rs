@@ -509,7 +509,10 @@ impl Position {
             }
         }
 
+        // 開始局面へ戻る千日手で持ち駒を比較できるよう、ルートの状態にも手駒を記録する。
+        let hand_snapshot = self.hand;
         let st = self.state_mut();
+        st.hand_snapshot = hand_snapshot;
         st.board_key = board_key;
         st.hand_key = hand_key;
         st.pawn_key = pawn_key;
