@@ -8,7 +8,7 @@
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-#[cfg(not(feature = "search-no-pass-rules"))]
+#[cfg(feature = "search-pass-rules")]
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
 #[cfg(feature = "layerstack-arch")]
@@ -828,9 +828,9 @@ impl SearchWorker {
         let static_eval = if root_in_check || unadjusted_static_eval == Value::NONE {
             Value::NONE
         } else {
-            #[cfg(feature = "search-no-pass-rules")]
+            #[cfg(not(feature = "search-pass-rules"))]
             let pass_rights_eval = Value::ZERO;
-            #[cfg(not(feature = "search-no-pass-rules"))]
+            #[cfg(feature = "search-pass-rules")]
             let pass_rights_eval = evaluate_pass_rights(pos, pos.game_ply() as u16);
 
             to_corrected_static_eval(unadjusted_static_eval, corr) + pass_rights_eval

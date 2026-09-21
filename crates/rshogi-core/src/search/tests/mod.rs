@@ -12,7 +12,7 @@ mod time_management;
 mod mate1_tt;
 mod probcut_abort;
 
-#[cfg(all(not(feature = "search-no-pass-rules"), not(target_arch = "wasm32")))]
+#[cfg(all(feature = "search-pass-rules", not(target_arch = "wasm32")))]
 mod pass_bonus;
 mod pv_legality;
 mod terminal_result;

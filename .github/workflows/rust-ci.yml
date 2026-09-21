@@ -210,6 +210,13 @@ jobs:
           cargo test -p rshogi-usi --features allocation-stats,tt-write-stats
           --test allocation_stats --test allocation_tracker --test tt_write_stats
           -- --test-threads=2
+      - name: Test search with pass rules
+        # 探索のパス権処理は opt-in なので、既定構成のテストでは一度もコンパイルされない。
+        if: matrix.shard == 2
+        run: cargo test -p rshogi-core --lib --features search-pass-rules -- --test-threads=2
+      - name: Test USI flow with pass rules
+        if: matrix.shard == 3
+        run: cargo test -p rshogi-usi --features search-pass-rules --test usi_flow -- --test-threads=2
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true

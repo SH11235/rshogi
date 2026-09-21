@@ -198,7 +198,7 @@ fn stochastic_ponderhit_restarts_search() {
 }
 
 /// パス探索を有効にしたビルドで、searchmovesの制限が実際のbestmoveに届く。
-#[cfg(not(feature = "search-no-pass-rules"))]
+#[cfg(feature = "search-pass-rules")]
 #[test]
 fn searchmoves_pass_returns_pass_without_stop() {
     use std::io::{BufRead, BufReader};

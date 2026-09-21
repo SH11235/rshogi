@@ -43,6 +43,13 @@ The engine will start in USI mode, waiting for commands from stdin.
 | `SPSAParamsFile` | Search/net SPSA parameter file | `<auto>` |
 | `SPSA_NET_*` | LayerStacks net coefficient delta advertised by `--spsa-net-spec` | 0 |
 
+`PassRights` / `InitialPassCount` / `PassMoveBonus` / `PassRightValueEarly` / `PassRightValueLate`
+configure the optional finite pass-rights rule. The position and move generation support it in
+every build, and `PassMoveBonus` always applies. The search adds the pass-rights term
+(`PassRightValueEarly` / `PassRightValueLate`) and uses PASS in null-move pruning only when the
+engine is built with the `search-pass-rules` feature (off by default, also in `cargo xtask build`
+presets). Without it the engine prints a notice when `PassRights` is turned on.
+
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 

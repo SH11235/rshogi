@@ -205,7 +205,7 @@ cargo run --release --no-default-features --features cpu,threat-profile-same-cla
 
 # Step 2b (rshogi): diagnostics + profile 付きでビルド
 cargo build --release -p rshogi-usi --no-default-features \
-  --features rshogi-core/layerstack-arch,rshogi-core/layerstacks-768x16x32,rshogi-core/nnue-threat,rshogi-core/threat-profile-same-class,rshogi-core/search-no-pass-rules,rshogi-usi/layerstack-arch,rshogi-usi/nnue-threat,rshogi-usi/threat-profile-same-class,rshogi-usi/diagnostics
+  --features rshogi-core/layerstack-arch,rshogi-core/layerstacks-768x16x32,rshogi-core/nnue-threat,rshogi-core/threat-profile-same-class,rshogi-usi/layerstack-arch,rshogi-usi/nnue-threat,rshogi-usi/threat-profile-same-class,rshogi-usi/diagnostics
 
 # 以降は Case B と同様に eval diag で比較
 ```

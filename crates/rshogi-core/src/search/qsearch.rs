@@ -2,7 +2,7 @@
 //!
 //! 王手や駒取りなど、局面が安定するまで探索を続ける。
 
-#[cfg(not(feature = "search-no-pass-rules"))]
+#[cfg(feature = "search-pass-rules")]
 use crate::eval::evaluate_pass_rights;
 use crate::position::Position;
 use crate::types::{Bound, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY, Move, Value};
@@ -261,7 +261,7 @@ pub(super) fn qsearch<const NT: u8>(
     if !in_check && unadjusted_static_eval != Value::NONE {
         static_eval = to_corrected_static_eval(unadjusted_static_eval, corr_value);
         // パス権評価を動的に追加（TTには保存されないので手数依存でもOK）
-        #[cfg(not(feature = "search-no-pass-rules"))]
+        #[cfg(feature = "search-pass-rules")]
         {
             static_eval += evaluate_pass_rights(pos, pos.game_ply() as u16);
         }

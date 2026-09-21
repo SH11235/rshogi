@@ -12,6 +12,17 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 その PR の merge commit から publish する。`vX.Y.Z` タグは engine 全体の release marker
 専用であり、core 単独 publish のためのタグは打たない。
 
+## Unreleased
+
+### 互換性のない変更と移行手順
+
+- **探索のパス権処理を opt-in の `search-pass-rules` に変更**: 既定で有効な否定形 feature
+  `search-no-pass-rules` をやめ、探索でパス権を評価する build だけ `search-pass-rules` を明示する形にした。
+  既定 build の探索は変わらない。`--no-default-features` で `search-no-pass-rules` を指定していなかった
+  構成（`cargo xtask build` の preset edition を含む）は、探索のパス権評価が有効から無効に変わる。
+  パス権つきの探索が必要な場合は `search-pass-rules` を指定すること。`search-no-pass-rules` は
+  何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
+
 ## v1.5.0 — 2026-09-20
 
 v1.4.0 以降の探索・対局運用の不具合修正と、教師データ・SPSA ツールの拡張をまとめた

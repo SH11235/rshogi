@@ -20,4 +20,4 @@ rshogi-core = { version = "0.7", path = "../rshogi-core", default-features = fal
 [features]
 # standalone(`cargo test -p rshogi-book`)時に rshogi-core を既定 edition で解決するための default。
 # rshogi-usi 経由の依存では default-features=false で無効化され、core の edition は usi 側が決める。
-default = ["rshogi-core/edition-universal", "rshogi-core/search-no-pass-rules"]
+default = ["rshogi-core/edition-universal"]

@@ -72,7 +72,7 @@ fn public_pv_preserves_declaration_and_stops_after_it() {
 }
 
 #[test]
-#[cfg(not(feature = "search-no-pass-rules"))]
+#[cfg(feature = "search-pass-rules")]
 fn public_pv_checks_pass_rights() {
     let mut root = startpos();
     root.enable_pass_rights(1, 1);
