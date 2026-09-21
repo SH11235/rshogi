@@ -2216,6 +2216,7 @@ mod tests {
             let gives_check = pos.gives_check(mv);
             pos.do_move(mv, gives_check);
         }
+        // repetition_state は rep < ply の反復だけを返すので、4 手前の反復を含む十分大きな ply を渡す。
         assert_eq!(pos.repetition_state(16), RepetitionState::Draw);
     }
 

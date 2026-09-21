@@ -119,8 +119,8 @@ impl Position {
         self.finalize_after_population()
     }
 
-    /// 盤面・手駒・手番を投入済みの状態から、PieceList・ハッシュ・利き・pin・王手・material を
-    /// 再計算し、駒在庫を検証して局面を確定する（SFEN / parts / JSON 共通の後処理）。
+    /// 盤面・手駒・手番を投入済みの状態から、PieceList・ハッシュ・利き・pin・王手・material・
+    /// 千日手判定用の手駒スナップショットを再計算し、駒在庫を検証して局面を確定する（SFEN / parts / JSON 共通の後処理）。
     pub(super) fn finalize_after_population(&mut self) -> Result<(), SfenError> {
         self.validate_piece_inventory()?;
 
@@ -144,6 +144,10 @@ impl Position {
 
         // material_value を再計算
         self.state_mut().material_value = compute_material_value(self);
+
+        // 千日手判定に使う手駒スナップショットを保存（開始局面へ戻る千日手でも手駒を比較できるようにする）
+        let hand_snapshot = self.hand;
+        self.state_mut().hand_snapshot = hand_snapshot;
 
         Ok(())
     }
@@ -509,10 +513,7 @@ impl Position {
             }
         }
 
-        // 開始局面へ戻る千日手で持ち駒を比較できるよう、ルートの状態にも手駒を記録する。
-        let hand_snapshot = self.hand;
         let st = self.state_mut();
-        st.hand_snapshot = hand_snapshot;
         st.board_key = board_key;
         st.hand_key = hand_key;
         st.pawn_key = pawn_key;
