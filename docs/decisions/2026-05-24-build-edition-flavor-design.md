@@ -472,6 +472,14 @@ cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt
 本 ADR Supplement (2026-05-25) で非採用として retire したため命名 slot からも
 除去済。最新の命名規則と xtask 仕様は `docs/build.md` を参照。
 
+注 (2026-09-22): Edition 軸と直交する opt-in feature (`mimalloc` / `search-stats` 等) を
+preset edition に重ねる `cargo xtask build --features <name>[,<name>...]` を追加した。
+これは Flavor 軸の復活ではなく、既存の直交 feature を xtask 経由で指定できるようにする
+だけのもの。binary 名は `engines/rshogi-usi-{edition}[+{feature}...]` (feature は名前順)
+とし、slot 区切り `-` / slot 内複合語 `_` と衝突しない `+` で区切る。preset edition が
+bundle する atomic feature と、NNUE 構造を選ぶ family (`threat-profile-*` /
+`effect-bucket-*`、preset に未収録の member も含む) は `--features` では受け付けない。
+
 実装手段 (xtask crate / justfile / Makefile) はどれでも実用上同等。プロジェクト
 既存ツーリングに合わせて Phase 2 で決定。
 

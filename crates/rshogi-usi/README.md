@@ -116,6 +116,15 @@ core の `uses_large_pages()` / `Search::tt_uses_large_pages()` は Windows の�
 `mimalloc` 0.1.52 / `libmimalloc-sys` 0.1.49 は既定で mimalloc v3 系 (3.3.2) をビルドします。
 
 ```bash
+# preset edition に mimalloc を追加して build
+# → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none+mimalloc に配置
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-none --features mimalloc
+```
+
+`--features` の仕様と binary の命名規則は [`docs/build.md`](../../docs/build.md) を参照してください。
+xtask を使わない場合は cargo に直接指定します。
+
+```bash
 cargo build --profile production -p rshogi-usi --no-default-features \
   --features edition-layerstacks-halfka_hm_merged-1536x16x32-none,mimalloc
 ```
