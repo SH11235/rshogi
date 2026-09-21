@@ -12,6 +12,7 @@ on:
       - 'Cargo.lock'
       - '.cargo/**'
       - '.github/workflows/rust-ci.yml'
+      - 'scripts/check-feature-builds.sh'
   pull_request:
   workflow_dispatch:
 
@@ -51,6 +52,7 @@ jobs:
               - 'crates/**'
               - '.cargo/**'
               - '.github/workflows/rust-ci.yml'
+              - 'scripts/check-feature-builds.sh'
               - '!docs/**'
               - '!runs/**'
               - '!logs/**'
@@ -152,6 +154,54 @@ jobs:
         # `production` プロファイル (fat LTO) の別 codegen であり、本 job の目的は
         # ロジック検証なので LTO の有無はカバレッジに影響しない。
         run: cargo test --release --workspace -- --test-threads=2
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
+  feature-builds:
+    # workspace の clippy / test は既定 feature (edition-universal) しかコンパイルしない。
+    # 配布に使う固定 edition と opt-in feature でだけ生きる cfg 経路の破損を検出するため、
+    # 各構成を `cargo check` し、opt-in feature の単体テストも実行する
+    # (構成の一覧は scripts/check-feature-builds.sh を参照)。
+    # 構成ごとに rshogi-core を check し直すため、shard に分けて並列に実行する。
+    name: Feature Builds (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.rust_code == 'true'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      # 既定構成では到達しない cfg 経路の dead code / unused も破損として扱う。
+      RUSTFLAGS: "-C target-cpu=x86-64-v2 -D warnings"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - name: Enable sccache
+        run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
+        with:
+          cache-on-failure: true
+          shared-key: feature-builds-${{ matrix.shard }}
+          # 構成の数だけ rshogi-core の成果物が並ぶ。PR ごとに保存すると共有の cache 枠を
+          # 圧迫するため、保存は main だけにする。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check editions and opt-in features
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 4
+        run: bash scripts/check-feature-builds.sh
+      - name: Test rshogi-core with opt-in features
+        if: matrix.shard == 0
+        run: cargo test -p rshogi-core --lib --features prepacked-nnue,allocation-stats,tt-write-stats -- --test-threads=2
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
