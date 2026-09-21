@@ -3,6 +3,34 @@
 複数エンジン間の総当たり (round-robin) 対局、base-vs-N 対局、または SPRT（逐次確率比検定）を並列実行するツール。
 対局ログは analyze_selfplay 互換の JSONL 形式で出力される。
 
+## USI評価の進捗値と同一行の主PV記録
+
+move行の `eval.depth` / `score_cp` / `pv` などは、従来どおり存在するfieldだけを
+更新した進捗値である。例えばdepth8/score30/PVの後に `info depth 9 nodes 200`
+だけが届くと、進捗値のdepthは9、scoreとPVは前の報告のままになる。
+
+USI backendはこれとは別に `eval.last_exact_primary` を保存する。
+採用条件は、**同じ1行に有効なdepth・score・非空PVがあり、multipvが省略または1で、
+lowerbound/upperboundがないこと**。depth/score/multipvの重複や不正なPVトークンは採用しない。
+部分行を結合してこの記録を作ることはなく、secondary PVや不完全な行では前の記録を維持する。
+
+```json
+{"depth":8,"score":{"cp":30},"pv":["7g7f","3c3d"],"raw_line":"info depth 8 score cp 30 pv 7g7f 3c3d"}
+```
+
+`score` は `{"cp":整数}` / `{"mate":符号付き手数}` / `"mate_win"` / `"mate_loss"`。
+後二者はUSIの `score mate +` / `score mate -` に対応し、手数やcpを補作しない。
+`raw_line` は採用したinfo行そのもの。PVの字句は検証するが、盤面上の合法性はこのparserでは検証しない。
+
+USIには汎用的なiteration完了通知がないため、この記録は**最後のboundなし主PV報告**であり、
+反復の完了・指定深さへの到達・最終bestmoveとの一致を証明するものではない。
+教師や診断への採用時には探索の成否、停止理由、必要深さ、PV先頭とbestmoveの一致を別に確認する。
+進捗側のnodes/timeをこの記録のdepthに対応する値として扱わない。
+
+該当行がなければfield自体を省略する。旧ログの読込みでも欠落のままとし、既存fieldから復元しない。
+Native backendはUSI原文を持たず単一SearchResultからevalを作るため、この追加fieldは出力しない。
+既存の投了・引分け裁定や分析は従来fieldを使い、追加記録だけでは挙動を変更しない。
+
 ## ビルド
 
 ```bash

@@ -762,6 +762,94 @@ mod stderr_tests {
     }
 }
 
+#[cfg(all(test, windows))]
+mod primary_process_tests {
+    use super::*;
+    use crate::selfplay::types::PrimaryScore;
+
+    #[test]
+    fn primary_record_survives_stop_and_eof_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("primary.ps1");
+        std::fs::write(
+            &script,
+            r#"
+param([string]$mode)
+while ($null -ne ($line = [Console]::ReadLine())) {
+    switch -Wildcard ($line) {
+        'usi' { [Console]::WriteLine('usiok') }
+        'isready' { [Console]::WriteLine('readyok') }
+        'go*' {
+            if ($mode -ne 'empty') {
+                [Console]::WriteLine('info depth 8 score cp 42 pv 7g7f 3c3d')
+                [Console]::WriteLine('info depth 9 nodes 123')
+            }
+            if ($mode -eq 'normal') { [Console]::WriteLine('bestmove 7g7f') }
+            if ($mode -eq 'exit') { exit 0 }
+        }
+        'stop' {
+            [Console]::WriteLine('info depth 10 nodes 999')
+            [Console]::WriteLine('bestmove 7g7f')
+        }
+        'quit' { exit 0 }
+    }
+}
+"#,
+        )
+        .unwrap();
+        for mode in ["normal", "stop", "empty", "exit"] {
+            let cfg = EngineConfig {
+                path: PathBuf::from("powershell.exe"),
+                args: vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-ExecutionPolicy".into(),
+                    "Bypass".into(),
+                    "-File".into(),
+                    script.display().to_string(),
+                    mode.into(),
+                ],
+                threads: 1,
+                hash_mb: 1,
+                network_delay: None,
+                network_delay2: None,
+                minimum_thinking_time: None,
+                slowmover: None,
+                ponder: false,
+                usi_options: vec![],
+            };
+            let mut engine =
+                EngineProcess::spawn_with_timeout(&cfg, mode.into(), Duration::from_secs(10))
+                    .unwrap();
+            let result = engine.search_raw_go_with_stop_grace(
+                "fixture b - 1",
+                "depth 12",
+                Duration::from_millis(500),
+                Duration::from_secs(2),
+                None,
+            );
+            if mode == "exit" {
+                assert!(result.is_err(), "EOF must not fabricate a completed search");
+                continue;
+            }
+            let result = result.unwrap();
+            assert_eq!(result.bestmove.as_deref(), Some("7g7f"));
+            assert_eq!(result.timed_out, mode != "normal");
+            let eval = result.eval.unwrap();
+            assert_eq!(eval.nodes, Some(if mode == "normal" { 123 } else { 999 }));
+            if mode == "empty" {
+                assert!(eval.last_exact_primary.is_none());
+            } else {
+                let primary = eval.last_exact_primary.unwrap();
+                assert_eq!(primary.depth, 8);
+                assert_eq!(primary.score, PrimaryScore::Cp(42));
+                assert_eq!(primary.pv, ["7g7f", "3c3d"]);
+                assert_eq!(primary.raw_line, "info depth 8 score cp 42 pv 7g7f 3c3d");
+            }
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod deadline_tests {
     use super::*;
@@ -796,6 +884,7 @@ while IFS= read -r line; do
     isready) printf 'readyok
 ' ;;
     go*)
+      printf 'info depth 8 score cp 42 pv 7g7f 3c3d\ninfo depth 9 nodes 123\n'
       case "$2" in
         normal) printf 'bestmove resign
 ' ;;
@@ -842,6 +931,11 @@ done
                 let result = result.unwrap();
                 assert_eq!(result.timed_out, mode != "normal");
                 assert_eq!(result.bestmove.is_some(), mode != "flood");
+                let primary = result.eval.unwrap().last_exact_primary.unwrap();
+                assert_eq!(primary.depth, 8);
+                assert_eq!(primary.score, crate::selfplay::types::PrimaryScore::Cp(42));
+                assert_eq!(primary.pv, ["7g7f", "3c3d"]);
+                assert_eq!(primary.raw_line, "info depth 8 score cp 42 pv 7g7f 3c3d");
             }
             drop(engine);
             let commands = std::fs::read_to_string(log).unwrap();
