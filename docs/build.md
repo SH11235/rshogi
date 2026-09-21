@@ -143,7 +143,8 @@ cargo xtask build [--edition <preset>[,<preset>...]] [--all-presets]
 - `--all-presets`    : `list-editions` の全 preset を順次 build。`--edition` と排他。
 - `--profile <name>` : cargo profile。デフォルト `production` (LTO=fat、Full LTO、
   単一 codegen unit)。`release` は dev iteration 向け (thin LTO)、`profiling` は
-  perf 計測用 (release + debug info)、`dev` は cargo の default debug build。
+  releaseの詳細debug情報付き、`production-profiling` はproductionの最適化条件に
+  行情報を加えた解析用profile。`dev` はcargoのdefault debug build。
 
 build 後、`engines/rshogi-usi-<edition slug>` と `<binary>.meta.toml` がペアで
 生成される。
@@ -245,6 +246,23 @@ build じゃないか？」) で使う。
 | `release` | 開発 iteration、軽い perf 比較 | `opt-level=3`、thin LTO、`target/release/` |
 | `profiling` | perf 計測 (release + debug info) | release + debug info 保持 |
 | `production` | 本番デプロイ / 公平 NPS 比較 | Full LTO、codegen_units=1、`panic=abort`、`target/production/` |
+| `production-profiling` | production条件でのソース行対応付け | production継承、`debug="line-tables-only"`、`strip="none"` |
+
+本番条件のホットスポットをソース行へ対応付ける場合は、例えば次のようにビルドする。
+
+```bash
+cargo run --release -p xtask -- build \
+  --edition layerstacks-halfka_hm_merged-1536x16x32-none \
+  --profile production-profiling
+```
+
+行情報だけを保持し、詳細な変数・型のデバッグ情報は目的としない。
+Windows MSVCでは対応するPDBを `target/production-profiling/` に保持する。
+xtaskが `engines/` へコピーするのは実行ファイルとmanifestのみで、PDBは含まれない。
+再ビルドで上書きされる前に、解析対象の実行ファイルと対応するPDBを一緒に退避する。
+バイナリを別の場所で解析するときも同じビルドのPDBを用意する。
+debug情報によってコード配置が変わる可能性があるため、productionとバイナリや速度が
+完全に同じとは限らない。速度のA/B比較では両側のprofileを揃え、解析用buildと混在させない。
 
 xtask の `--profile` デフォルトは `production`。SPRT 等の棋力比較は profile を揃える
 必要があるため固定 (memory `feedback_build_profile_consistency`)。
