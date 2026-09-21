@@ -72,7 +72,39 @@ cargo build --release -p tools --bin search_only_ab
 | `--eval-file` / `--material-level` | EvalFile / MaterialLevel |
 | `--usi-option KEY=VALUE` | 両エンジン共通の setoption。`--baseline-usi-option` / `--candidate-usi-option` で片側だけにも渡せる |
 | `--perf-events` (Linux) / `--pmc-sources` (Windows) | 計測するカウンタ |
-| `--json-out` | `samples` (run ごと)、`blocks` (局面×round の順序と比)、`summary` (variant ごとの合計と差分 %) を JSON 出力。両 OS でスキーマ互換 (`cli` ブロックのフィールド名だけ異なる) |
+| `--json-out` | `samples` (run ごと)、`blocks` (局面×round の順序と比)、`summary` (variant ごとの合計と差分 %)、`binaries` (両エンジンの SHA-256 とサイズ) を JSON 出力。両 OS でスキーマ互換 (`cli` ブロックのフィールド名だけ異なる) |
+
+## 計測対象バイナリの同定 (`binaries`)
+
+パスだけでは後から「どのビルドの結果か」を証明できないため、計測を始める前に
+baseline / candidate の実行ファイルを 1 回ずつ streaming で読み、SHA-256 とバイト数を
+記録する。読めない場合は計測に入らずエラーで終了する。
+
+stdout の先頭に次のヘッダを出すので、ログだけでも対象バイナリを特定できる:
+
+```text
+[binary] baseline: sha256=<64 桁の 16 進> size_bytes=<バイト数> path=<--baseline の値>
+[binary] candidate: sha256=<64 桁の 16 進> size_bytes=<バイト数> path=<--candidate の値>
+```
+
+両者の SHA-256 が一致する場合 (A/A 計測や、USI option で経路を切り替える同一バイナリ内
+実験) は `[binary] info: ...` を 1 行追加するだけで、エラーにはしない。
+
+JSON レポートには `binaries` ブロックとして保存する。既存フィールド (`cli` / `samples` /
+`blocks` / `summary` など) は変更していない。
+
+```json
+"binaries": {
+  "baseline":  {"path": "engines/before.exe", "sha256": "<64 桁の 16 進>", "size_bytes": 1234567},
+  "candidate": {"path": "engines/after.exe",  "sha256": "<64 桁の 16 進>", "size_bytes": 1234567}
+}
+```
+
+| フィールド | 意味 |
+|---|---|
+| `path` | `--baseline` / `--candidate` に渡した表記そのまま (`cli.baseline` / `cli.candidate` と同じ) |
+| `sha256` | ファイル内容の SHA-256 (小文字 16 進)。`sha256sum` / `Get-FileHash` の結果と照合できる |
+| `size_bytes` | ハッシュ対象として読んだバイト数 |
 
 ## 結果の読み方
 

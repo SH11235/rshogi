@@ -271,6 +271,7 @@ cycles/node 差 = cache pressure 差 + 計算量差。instructions/node も見�
 ```json
 {
   "cli": {...},
+  "binaries": {...},
   "system_info": {...},
   "positions": [...],
   "samples": [
@@ -286,6 +287,8 @@ cycles/node 差 = cache pressure 差 + 計算量差。instructions/node も見�
   }
 }
 ```
+
+`binaries` ブロックには baseline / candidate の `path` / `sha256` / `size_bytes` が入る（stdout 先頭の `[binary]` 行と同じ値）。結果を報告するときは、この SHA-256 で対象バイナリを特定する。
 
 複数ペアの JSON を横並びで集計するには `jq` で summary を抜き出す:
 
