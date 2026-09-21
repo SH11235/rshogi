@@ -1950,6 +1950,7 @@ impl Default for Position {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::position::state::CHECK_SQUARES_SIZE;
     use crate::types::{EnteringKingRule, File, Rank};
 
     #[test]
@@ -3242,5 +3243,212 @@ mod tests {
         assert_eq!(pos.pass_rights(Color::White), 2);
         assert_eq!(pos.game_ply(), ply);
         assert_eq!(pos.state().key(), key);
+    }
+
+    /// 盤面・手駒・手番・手数（= SFEN に載る情報）だけから決まる状態。
+    ///
+    /// do_move の差分更新結果と、SFEN から組み立て直した局面とで一致しなければならない。
+    /// 千日手情報・連続王手カウンタ・plies_from_null・直前の指し手・取った駒は
+    /// 手順に依存して SFEN に載らないので、ここには含めない。
+    /// パス権はキーに混ざるが、このテストでは無効（両者 0）なので差は出ない。
+    #[derive(Debug, PartialEq)]
+    struct DerivedState {
+        hand_snapshot: [Hand; Color::NUM],
+        sfen: String,
+        key: u64,
+        board_key: u64,
+        hand_key: u64,
+        pawn_key: u64,
+        minor_piece_key: u64,
+        non_pawn_key: [u64; Color::NUM],
+        by_type: [Bitboard; PieceType::NUM + 1],
+        by_color: [Bitboard; Color::NUM],
+        golds: Bitboard,
+        bishop_horse: Bitboard,
+        rook_dragon: Bitboard,
+        hdk: Bitboard,
+        king_square: [Square; Color::NUM],
+        checkers: Bitboard,
+        blockers_for_king: [Bitboard; Color::NUM],
+        pinners: [Bitboard; Color::NUM],
+        check_squares: [Bitboard; CHECK_SQUARES_SIZE],
+        material_value: Value,
+    }
+
+    impl DerivedState {
+        fn of(pos: &Position) -> Self {
+            let st = pos.cur_state();
+            Self {
+                hand_snapshot: st.hand_snapshot,
+                sfen: pos.to_sfen(),
+                key: pos.key(),
+                board_key: st.board_key,
+                hand_key: st.hand_key,
+                pawn_key: st.pawn_key,
+                minor_piece_key: st.minor_piece_key,
+                non_pawn_key: st.non_pawn_key,
+                by_type: pos.by_type,
+                by_color: pos.by_color,
+                golds: pos.golds_bb,
+                bishop_horse: pos.bishop_horse_bb,
+                rook_dragon: pos.rook_dragon_bb,
+                hdk: pos.hdk_bb,
+                king_square: pos.king_square,
+                checkers: st.checkers,
+                blockers_for_king: st.blockers_for_king,
+                pinners: st.pinners,
+                check_squares: st.check_squares,
+                material_value: st.material_value,
+            }
+        }
+    }
+
+    /// undo_move で元に戻るべき状態。`DerivedState` に加えて、手順に依存する
+    /// StateInfo の項目とスタック位置も含める。
+    #[derive(Debug, PartialEq)]
+    struct RestoredState {
+        derived: DerivedState,
+        state_idx: usize,
+        plies_from_null: i32,
+        continuous_check: [i32; Color::NUM],
+        pass_rights: u8,
+        repetition: i32,
+        repetition_times: i32,
+        repetition_type: RepetitionState,
+        captured_piece: Piece,
+        last_move: Move,
+    }
+
+    impl RestoredState {
+        fn of(pos: &Position) -> Self {
+            let st = pos.cur_state();
+            Self {
+                derived: DerivedState::of(pos),
+                state_idx: pos.state_idx,
+                plies_from_null: st.plies_from_null,
+                continuous_check: st.continuous_check,
+                pass_rights: st.pass_rights,
+                repetition: st.repetition,
+                repetition_times: st.repetition_times,
+                repetition_type: st.repetition_type,
+                captured_piece: st.captured_piece,
+                last_move: st.last_move,
+            }
+        }
+    }
+
+    /// 1 局面ぶんの不変条件: 差分更新した状態が SFEN からの再計算と一致し、
+    /// 生成した合法手が判定関数と矛盾しないこと。
+    fn assert_playout_position_invariants(
+        playout: &crate::position::playout_test_support::RandomPlayout,
+    ) {
+        use crate::movegen::{MoveList, generate_legal, generate_legal_all};
+
+        let pos = &playout.pos;
+        let us = pos.side_to_move();
+
+        // (i)(ii) 差分更新したキー・bitboard・王手情報が、SFEN からの再計算と一致する。
+        // DerivedState は SFEN 文字列も含むので、SFEN の往復が安定していることも同時に確認できる。
+        let sfen = pos.to_sfen();
+        let mut fresh = Position::new();
+        fresh.set_sfen(&sfen).unwrap_or_else(|e| {
+            panic!(
+                "to_sfen の出力を set_sfen で読めない: {e:?} sfen={sfen}: {}",
+                playout.describe()
+            )
+        });
+        assert_eq!(
+            DerivedState::of(pos),
+            DerivedState::of(&fresh),
+            "差分更新と再計算が不一致: {}",
+            playout.describe()
+        );
+        // 利き数は feature 構成によっては差分更新されず dirty のままになるので、
+        // 維持されているときだけ再計算と比べる（既定の feature では常に維持される）。
+        if !pos.board_effects_dirty {
+            assert!(
+                pos.board_effects == fresh.board_effects && pos.long_effects == fresh.long_effects,
+                "利き数の差分更新と再計算が不一致: {}",
+                playout.describe()
+            );
+        }
+
+        // (iii) 生成した合法手は pseudo_legal / is_legal の両方を満たす
+        let mut legal_all = MoveList::new();
+        generate_legal_all(pos, &mut legal_all);
+        for &mv in legal_all.iter() {
+            assert!(
+                pos.pseudo_legal(mv) && pos.is_legal(mv),
+                "生成手 {} が pseudo_legal={} is_legal={}: {}",
+                mv.to_usi(),
+                pos.pseudo_legal(mv),
+                pos.is_legal(mv),
+                playout.describe()
+            );
+        }
+        // 探索用の生成（一部の不成を省く）は全合法手の部分集合
+        let mut legal = MoveList::new();
+        generate_legal(pos, &mut legal);
+        for &mv in legal.iter() {
+            assert!(
+                legal_all.contains(mv),
+                "generate_legal の {} が generate_legal_all に無い: {}",
+                mv.to_usi(),
+                playout.describe()
+            );
+        }
+
+        // (iv) 手番でない側の玉に王手がかかったままの局面へは到達しない
+        assert!(
+            pos.attackers_to_c(pos.king_square(!us), us).is_empty(),
+            "手番でない側の玉に王手がかかっている: {}",
+            playout.describe()
+        );
+    }
+
+    /// ランダムプレイアウトで到達した全局面（最終手の後も含む）で不変条件を確認し、
+    /// 最後に全手を undo すると初期局面へ戻ることを確認する。
+    ///
+    /// 失敗時のメッセージにある `position startpos moves ...` で手順を再現できる。
+    #[test]
+    fn random_playouts_preserve_state_and_keys() {
+        use crate::position::playout_test_support::RandomPlayout;
+
+        const SEED: u64 = 0x5EED_2026_0922;
+        const PLAYOUTS: u64 = 60;
+        const MAX_PLIES: usize = 300;
+
+        for index in 0..PLAYOUTS {
+            let mut playout = RandomPlayout::new(SEED, index);
+            let initial_pos = playout.pos.clone();
+            let initial = RestoredState::of(&initial_pos);
+
+            assert_playout_position_invariants(&playout);
+            for _ in 0..MAX_PLIES {
+                if playout.step().is_none() {
+                    break;
+                }
+                assert_playout_position_invariants(&playout);
+            }
+
+            let moves = playout.moves().to_vec();
+            for &mv in moves.iter().rev() {
+                playout.pos.undo_move(mv);
+            }
+            assert_eq!(
+                RestoredState::of(&playout.pos),
+                initial,
+                "全手 undo 後に初期局面へ戻らない: {}",
+                playout.describe()
+            );
+            if !playout.pos.board_effects_dirty {
+                assert!(
+                    playout.pos.board_effects == initial_pos.board_effects
+                        && playout.pos.long_effects == initial_pos.long_effects,
+                    "全手 undo 後に利き数が初期局面へ戻らない: {}",
+                    playout.describe()
+                );
+            }
+        }
     }
 }

@@ -211,4 +211,58 @@ mod tests {
         let mv = mate_by_new(sfen);
         assert!(mv.is_some(), "成香では玉に逃げられるが不成り串刺しで1手詰み: {:?}", mv);
     }
+
+    /// `mv` が合法手で、指すと相手玉が詰む（王手がかかり、相手に合法手が無い）ことを確認する。
+    ///
+    /// 打ち歩詰めは合法手生成の時点で除かれるので、合法手の一覧に無ければ詰み手ではない。
+    fn assert_legal_mating_move(pos: &mut Position, mv: Move, context: &str) {
+        use crate::movegen::{MoveList, generate_legal_all};
+
+        let mut list = MoveList::new();
+        generate_legal_all(pos, &mut list);
+        let legal = list.iter().copied().find(|legal| legal.to_u16() == mv.to_u16());
+        let Some(legal) = legal else {
+            panic!("mate_1ply の {} は合法手ではない: {context}", mv.to_usi());
+        };
+
+        let gives_check = pos.gives_check(legal);
+        pos.do_move(legal, gives_check);
+        let mut replies = MoveList::new();
+        generate_legal_all(pos, &mut replies);
+        let mated = pos.in_check() && replies.is_empty();
+        pos.undo_move(legal);
+        assert!(mated, "mate_1ply の {} では詰まない: {context}", mv.to_usi());
+    }
+
+    /// ランダムプレイアウトの各局面で、`mate_1ply` が返した手を 1 手読みで検証する。
+    ///
+    /// `mate_1ply` は YaneuraOu の簡易版の移植で、近接王手しか調べない（玉から離れた
+    /// 飛車・龍の王手による詰みなどは見逃してよい）。そのため保証するのは健全性だけ:
+    /// 手を返したなら、その手は合法で実際に詰んでいなければならない。
+    /// 見逃しは仕様なので、総当たりでの 1 手詰め列挙はここでは行わない。
+    #[test]
+    fn mate_1ply_agrees_with_one_ply_search() {
+        use crate::position::playout_test_support::RandomPlayout;
+
+        const SEED: u64 = 0x4D41_5445_2026;
+        const PLAYOUTS: u64 = 40;
+        const MAX_PLIES: usize = 300;
+
+        let mut fast_found = 0u64;
+        for index in 0..PLAYOUTS {
+            let mut playout = RandomPlayout::new(SEED, index);
+            for _ in 0..MAX_PLIES {
+                if let Some(mv) = mate_1ply(&mut playout.pos) {
+                    fast_found += 1;
+                    let context = playout.describe();
+                    assert_legal_mating_move(&mut playout.pos, mv, &context);
+                }
+                if playout.step().is_none() {
+                    break;
+                }
+            }
+        }
+        // 標本に 1 手詰めが無ければ何も検証していないことになる。
+        assert!(fast_found > 0, "標本に mate_1ply が詰みを返す局面が無い");
+    }
 }

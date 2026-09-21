@@ -2111,4 +2111,85 @@ mod tests {
             assert_eq!(actual, expected);
         }
     }
+
+    /// 全合法手（不成を含む）で数える perft。
+    ///
+    /// YaneuraOu の perft と同じく、末端では手を進めずに合法手数だけを数える。
+    fn perft(pos: &mut Position, depth: u32) -> u64 {
+        let mut list = MoveList::new();
+        generate_legal_all(pos, &mut list);
+        if depth <= 1 {
+            return list.len() as u64;
+        }
+        let mut nodes = 0;
+        for &mv in list.iter() {
+            let gives_check = pos.gives_check(mv);
+            pos.do_move(mv, gives_check);
+            nodes += perft(pos, depth - 1);
+            pos.undo_move(mv);
+        }
+        nodes
+    }
+
+    fn assert_perft(name: &str, sfen: &str, expected: &[u64]) {
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+        for (i, &nodes) in expected.iter().enumerate() {
+            let depth = i as u32 + 1;
+            assert_eq!(perft(&mut pos, depth), nodes, "{name} depth={depth} sfen={sfen}");
+        }
+        assert_eq!(pos.to_sfen(), sfen, "{name}: perft 後に局面が元へ戻っていない");
+    }
+
+    fn legal_all_usi(sfen: &str) -> std::collections::HashSet<String> {
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+        let mut list = MoveList::new();
+        generate_legal_all(&pos, &mut list);
+        list.iter().map(|mv| mv.to_usi()).collect()
+    }
+
+    /// 平手
+    const PERFT_HIRATE: &str = crate::position::SFEN_HIRATE;
+    /// 合法手の多い「指し手生成祭り」の局面（打つ手・成る手が多い）。
+    /// YaneuraOu の unit test の `matsuri_sfen` と同じ局面で、SFEN の持ち駒の並び順だけが違う。
+    const PERFT_MATSURI: &str =
+        "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1";
+    /// 後手玉に飛車で王手がかかっている局面（移動合い・合駒打ち・玉の移動）
+    const PERFT_EVASION: &str = "lnsgkgsnl/1r5b1/pppp1pppp/9/4R4/9/PPPP1PPPP/1B7/LNSGKGSNL w Pp 1";
+    /// 1二歩打が打ち歩詰めになる局面。歩を取れる 2一銀は 9一飛に pin されている。
+    const PERFT_PAWN_DROP_MATE: &str = "R6sk/9/7G1/9/9/9/9/9/4K4 b P 1";
+    /// 5三歩打が 7五角の利きを遮り、玉が 4二へ逃げられるので打ち歩詰めにならない局面
+    const PERFT_PAWN_DROP_BLOCKS_BISHOP: &str = "R8/2G1k4/9/2S6/2BN2N2/9/9/9/4K4 b P 1";
+    /// 双方に持ち駒と成駒がある中盤の実戦形
+    const PERFT_MIDGAME: &str =
+        "l2+R3nl/3s1kg2/3pppsp1/p1p3p1p/2lS3P1/P4PP1P/1PNPP1N2/2K1g1SR1/+b4G2L w BGN2p 46";
+
+    /// 既知の perft 値と一致することを確認する。
+    ///
+    /// 期待値の出典（rshogi 自身の出力は期待値にしていない）:
+    /// - hirate depth 1-4 と matsuri depth 1-2: YaneuraOu の unit test（`source/position.cpp` の
+    ///   Perft 節）にある表の値。matsuri はこの SFEN 表記でも下記の `go perft` で同じ値を確認した。
+    /// - それ以外の局面: YaneuraOu 公式 repository の master（commit c1b80eaa）を
+    ///   MATERIAL edition でビルドし、`position sfen ...` → `go perft N` で得た値。
+    ///   YaneuraOu の perft も不成を含む全合法手（LEGAL_ALL）で数える。
+    ///
+    /// 末端は合法手数を数えるだけなので、平手 depth 4（719,731）と中盤 depth 3（210,823）を
+    /// 含めても dev profile の実測で 0.1 秒未満。エミュレータ上の CI でも常時実行できる。
+    #[test]
+    fn perft_matches_known_counts() {
+        assert_perft("hirate", PERFT_HIRATE, &[30, 900, 25_470, 719_731]);
+        assert_perft("matsuri", PERFT_MATSURI, &[207, 28_684]);
+        assert_perft("evasion", PERFT_EVASION, &[8, 352, 9_724]);
+        assert_perft("pawn_drop_mate", PERFT_PAWN_DROP_MATE, &[110, 56, 5_666]);
+        assert_perft("pawn_drop_blocks_bishop", PERFT_PAWN_DROP_BLOCKS_BISHOP, &[139, 68, 8_424]);
+        assert_perft("midgame", PERFT_MIDGAME, &[40, 5_599, 210_823]);
+
+        // 打ち歩詰めの合否を指し手単位でも確認する（上記 `go perft 1` の指し手別内訳と同じ）。
+        assert!(!legal_all_usi(PERFT_PAWN_DROP_MATE).contains("P*1b"), "1二歩打は打ち歩詰め");
+        assert!(
+            legal_all_usi(PERFT_PAWN_DROP_BLOCKS_BISHOP).contains("P*5c"),
+            "5三歩打は角筋を遮って玉に逃げ道ができるので合法"
+        );
+    }
 }
