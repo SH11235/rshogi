@@ -73,3 +73,9 @@ overflow-checks = false   # 本番では無効化（速度優先）
 lto = "fat"               # 最大LTO
 codegen-units = 1         # 最適化優先
 panic = "abort"           # 小さいバイナリ
+
+# Productionと同じ最適化条件で、ソース行へ対応付けるための情報を残す。
+[profile.production-profiling]
+inherits = "production"
+debug = "line-tables-only"
+strip = "none"
