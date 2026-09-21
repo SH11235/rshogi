@@ -299,6 +299,25 @@ impl<
         Ok(stacks)
     }
 
+    #[cfg(feature = "prepacked-nnue")]
+    pub(super) fn read_packed<R: Read + std::io::Seek>(
+        reader: &mut R,
+        num_buckets: usize,
+        packed: &super::prepacked::PackedModel,
+    ) -> io::Result<Self> {
+        let mut buckets = Vec::with_capacity(num_buckets);
+        for _ in 0..num_buckets {
+            let mut hash = [0; 4];
+            reader.read_exact(&mut hash)?;
+            buckets.push(LayerStackBucket {
+                l1: AffineTransform::read_packed(reader, packed)?,
+                l2: AffineTransform::read_packed(reader, packed)?,
+                output: AffineTransform::read_packed(reader, packed)?,
+            });
+        }
+        Ok(Self { buckets })
+    }
+
     /// 生スコアを計算（スケーリング前）
     pub fn evaluate_raw(&self, bucket_index: usize, input: &[u8; L1]) -> i32 {
         self.buckets[bucket_index].propagate(input)

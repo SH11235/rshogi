@@ -35,6 +35,7 @@ default = ["search-no-pass-rules", "edition-universal"]
 search-stats = ["rshogi-core/search-stats"]
 # NNUE統計収集（refresh/update比率等のカウント）
 nnue-stats = ["rshogi-core/nnue-stats"]
+prepacked-nnue = ["rshogi-core/prepacked-nnue"]
 # TT書き込みトレースおよびhelper bound/depthフィルタ
 tt-trace = ["rshogi-core/tt-trace"]
 # NNUE 詳細診断ログ（Golden Forward テスト用）

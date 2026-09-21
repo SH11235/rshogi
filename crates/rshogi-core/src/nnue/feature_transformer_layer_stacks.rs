@@ -334,8 +334,31 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// - 要素数 == biases のみ → YO形式（2ブロック）: 続けて weights ブロックを読む
     /// - 要素数 == biases + weights → 旧bullet-shogi形式（1ブロック）
     pub fn read_leb128<R: Read>(reader: &mut R) -> io::Result<Self> {
+        Self::read_with_source(
+            reader,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+    }
+
+    pub(super) fn read_with_source<R: Read>(
+        reader: &mut R,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
+    ) -> io::Result<Self> {
         let weight_size = FT::DIMENSIONS * L1;
         let mut biases = [0i16; L1];
+        #[cfg(feature = "prepacked-nnue")]
+        let weights = if let Some(packed) = packed {
+            for bias in &mut biases {
+                let mut bytes = [0; 2];
+                reader.read_exact(&mut bytes)?;
+                *bias = i16::from_le_bytes(bytes);
+            }
+            packed.ft(weight_size)?
+        } else {
+            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_zeroed)?
+        };
+        #[cfg(not(feature = "prepacked-nnue"))]
         let weights =
             read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_zeroed)?;
         Ok(Self {
@@ -380,6 +403,20 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// 上記により評価時に `[N..MAX]` 要素が undefined / non-zero 値で読まれることが無い。
     #[cfg(feature = "nnue-psqt")]
     pub fn read_psqt<R: Read>(&mut self, reader: &mut R, num_buckets: usize) -> io::Result<()> {
+        self.read_psqt_with_source(
+            reader,
+            num_buckets,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+    }
+    #[cfg(feature = "nnue-psqt")]
+    pub(super) fn read_psqt_with_source<R: Read>(
+        &mut self,
+        reader: &mut R,
+        num_buckets: usize,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
+    ) -> io::Result<()> {
         debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
         let mut buf4 = [0u8; 4];
 
@@ -396,6 +433,13 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         // 各 feature 内で bucket 連番)。tatara `save_quantised` (`crates/nnue-format/
         // src/layerstack_weights.rs:518-541`) の write 順と対称。
         let weight_count = FT::DIMENSIONS * num_buckets;
+        #[cfg(feature = "prepacked-nnue")]
+        if let Some(packed) = packed {
+            self.psqt_weights = packed.psqt(weight_count)?;
+            self.psqt_num_buckets = num_buckets;
+            self.has_psqt = true;
+            return Ok(());
+        }
         self.psqt_weights = AlignedBox::new_zeroed(weight_count);
         for w in self.psqt_weights.iter_mut() {
             reader.read_exact(&mut buf4)?;
@@ -437,7 +481,25 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     /// Threat 重みをファイルから読み込み (i8, raw)
     #[cfg(feature = "nnue-threat")]
     pub fn read_threat_weights<R: Read>(&mut self, reader: &mut R) -> io::Result<()> {
+        self.read_threat_with_source(
+            reader,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+    }
+    #[cfg(feature = "nnue-threat")]
+    pub(super) fn read_threat_with_source<R: Read>(
+        &mut self,
+        reader: &mut R,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
+    ) -> io::Result<()> {
         let weight_count = THREAT_DIMENSIONS * L1;
+        #[cfg(feature = "prepacked-nnue")]
+        if let Some(packed) = packed {
+            self.threat_weights = packed.threat(weight_count)?;
+            self.has_threat = true;
+            return Ok(());
+        }
         self.threat_weights = AlignedBox::new_zeroed(weight_count);
         // SAFETY:
         // - `AlignedBox::new_zeroed(weight_count)` は `weight_count` 個の `i8`

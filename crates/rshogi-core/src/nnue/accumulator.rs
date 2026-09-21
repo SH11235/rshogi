@@ -206,6 +206,10 @@ const HUGEPAGE_SIZE: usize = 2 * 1024 * 1024;
 enum AlignedBoxBacking {
     /// `new_zeroed` がグローバルアロケータで確保した通常ヒープ。Drop で `dealloc`。
     Heap(Layout),
+    #[cfg(all(windows, feature = "prepacked-nnue"))]
+    Mapped {
+        owner: std::sync::Arc<super::mapped_weights::ReadOnlyMapping>,
+    },
     /// プロセス間共有メモリ（`mmap`）のマッピングを借用。Drop で `munmap`。
     /// ロード後は read-only として扱う（`DerefMut` は panic する）。
     #[cfg(target_os = "linux")]
@@ -222,9 +226,10 @@ enum AlignedBoxBacking {
 /// FeatureTransformerのweightsなど、大きな配列をアラインして確保するために使用。
 /// aligned load/store命令を使うためにはデータが64バイト境界に配置されている必要がある。
 ///
-/// backing は 2 種:
+/// backing の種別:
 /// - `Heap`: `new_zeroed` による通常ヒープ確保（`T: Copy + Default`）。
 /// - `Shared`: `from_shared` によるプロセス間共有メモリの借用（read-only、`DerefMut` 不可）。
+/// - `Mapped`: fileの読み取り専用mappingを共有所有（read-only、`DerefMut` 不可）。
 ///
 /// # 安全性契約
 ///
@@ -332,6 +337,50 @@ impl<T> AlignedBox<T> {
     }
 }
 
+// 任意の T を許さず、全 bit pattern が有効な重みの整数型だけを受け付ける。
+#[cfg(all(windows, feature = "prepacked-nnue"))]
+mod mapped_element {
+    pub trait Element: Copy {}
+    impl Element for i8 {}
+    impl Element for i16 {}
+    impl Element for i32 {}
+}
+
+#[cfg(all(windows, feature = "prepacked-nnue"))]
+impl<T: mapped_element::Element> AlignedBox<T> {
+    pub(super) fn from_mapped(
+        owner: std::sync::Arc<super::mapped_weights::ReadOnlyMapping>,
+        offset: usize,
+        len: usize,
+    ) -> std::io::Result<Self> {
+        let invalid =
+            || std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid weight span");
+        let end = len
+            .checked_mul(std::mem::size_of::<T>())
+            .and_then(|bytes| offset.checked_add(bytes))
+            .ok_or_else(invalid)?;
+        if !cfg!(target_endian = "little")
+            || len == 0
+            || end > owner.bytes().len()
+            || !offset.is_multiple_of(CACHE_LINE_SIZE)
+        {
+            return Err(invalid());
+        }
+        // SAFETY: offset/endはmapping内。Windowsのmapping先頭とoffsetは64B整列。
+        // private traitの実装型(i8/i16/i32)は全bit patternが有効で、LE target限定。
+        // 各型の整列要求は64B以下。ownerがmapping全寿命を保持する。
+        let ptr = unsafe { owner.bytes().as_ptr().add(offset).cast::<T>().cast_mut() };
+        if !(ptr as usize).is_multiple_of(CACHE_LINE_SIZE) {
+            return Err(invalid());
+        }
+        Ok(Self {
+            ptr,
+            len,
+            backing: AlignedBoxBacking::Mapped { owner },
+        })
+    }
+}
+
 impl<T> Deref for AlignedBox<T> {
     type Target = [T];
 
@@ -344,6 +393,10 @@ impl<T> Deref for AlignedBox<T> {
 impl<T> DerefMut for AlignedBox<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match &self.backing {
+            #[cfg(all(windows, feature = "prepacked-nnue"))]
+            AlignedBoxBacking::Mapped { .. } => {
+                panic!("AlignedBox: mapped backing is read-only");
+            }
             AlignedBoxBacking::Heap(_) => {
                 // SAFETY: backing が Heap であることを確認済み。ptr は new_zeroed が
                 // 確保した有効ポインタで、len 要素分を排他的に所有する。
@@ -363,6 +416,16 @@ impl<T> DerefMut for AlignedBox<T> {
 impl<T> Drop for AlignedBox<T> {
     fn drop(&mut self) {
         match &self.backing {
+            #[cfg(all(windows, feature = "prepacked-nnue"))]
+            AlignedBoxBacking::Mapped { owner } => {
+                // fieldのArcはこのDrop後に解放する。sliceがmapping内である不変条件を点検。
+                let start = owner.bytes().as_ptr() as usize;
+                debug_assert!(self.ptr as usize >= start);
+                debug_assert!(
+                    self.ptr as usize + self.len * std::mem::size_of::<T>()
+                        <= start + owner.bytes().len()
+                );
+            }
             AlignedBoxBacking::Heap(layout) => {
                 // SAFETY:
                 // - ptr は new_zeroed が確保したポインタ、layout は確保時と同じもの
@@ -392,6 +455,16 @@ impl<T: Copy + Default> Clone for AlignedBox<T> {
         let mut new_box = Self::new_zeroed(self.len);
         new_box.copy_from_slice(self);
         new_box
+    }
+}
+
+#[cfg(all(windows, feature = "prepacked-nnue"))]
+impl<T: Copy + Default> AlignedBox<T> {
+    /// 読み取り専用の重みを編集する直前に、対象 tensor だけを私有化する。
+    pub(super) fn make_owned(&mut self) {
+        if matches!(self.backing, AlignedBoxBacking::Mapped { .. }) {
+            *self = self.clone();
+        }
     }
 }
 

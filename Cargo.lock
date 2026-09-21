@@ -2474,6 +2474,7 @@ dependencies = [
  "rand_xoshiro",
  "rayon",
  "serde",
+ "sha2",
  "web-time",
  "windows-sys 0.60.2",
 ]

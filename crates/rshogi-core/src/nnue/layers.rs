@@ -13,6 +13,21 @@ pub(crate) const fn padded_input(input_dim: usize) -> usize {
     input_dim.div_ceil(32) * 32
 }
 
+/// static affine kernel が入力4byte chunk単位の配置を使うか。
+pub(crate) const fn uses_scrambled_weights(output: usize) -> bool {
+    if cfg!(all(target_arch = "x86_64", target_feature = "avx2")) {
+        output.is_multiple_of(8) && output > 0
+    } else if cfg!(all(
+        target_arch = "x86_64",
+        target_feature = "ssse3",
+        not(target_feature = "avx2")
+    )) {
+        output.is_multiple_of(4) && output > 0
+    } else {
+        false
+    }
+}
+
 /// AVX2での水平加算（i32×8 → i32）
 ///
 /// AVX-512 ビルドでも propagate の AVX2 フォールスルー経路から参照されるため
@@ -304,17 +319,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
     /// スクランブル経路を持たない target（wasm SIMD / SSE2 / スカラー）では常に false。
     #[inline]
     const fn should_use_scrambled_weights() -> bool {
-        if cfg!(all(target_arch = "x86_64", target_feature = "avx2")) {
-            OUTPUT_DIM.is_multiple_of(8) && OUTPUT_DIM > 0
-        } else if cfg!(all(
-            target_arch = "x86_64",
-            target_feature = "ssse3",
-            not(target_feature = "avx2")
-        )) {
-            OUTPUT_DIM.is_multiple_of(4) && OUTPUT_DIM > 0
-        } else {
-            false
-        }
+        uses_scrambled_weights(OUTPUT_DIM)
     }
 
     /// 重みインデックスのスクランブル変換
@@ -358,6 +363,8 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
 
     #[cfg(any(test, feature = "layerstack-arch"))]
     pub(crate) fn apply_file_weight_delta(&mut self, index: usize, delta: i32) -> bool {
+        #[cfg(all(windows, feature = "prepacked-nnue"))]
+        self.weights.make_owned();
         let memory_index = Self::file_weight_index(index);
         let (value, clamped) = super::net_delta::add_i8_delta(self.weights[memory_index], delta);
         self.weights[memory_index] = value;
@@ -394,6 +401,22 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             weights[idx] = buf1[0] as i8;
         }
 
+        Ok(Self { biases, weights })
+    }
+
+    #[cfg(feature = "prepacked-nnue")]
+    pub(super) fn read_packed<R: Read + std::io::Seek>(
+        reader: &mut R,
+        packed: &super::prepacked::PackedModel,
+    ) -> io::Result<Self> {
+        let mut biases = [0i32; OUTPUT_DIM];
+        for bias in &mut biases {
+            let mut bytes = [0; 4];
+            reader.read_exact(&mut bytes)?;
+            *bias = i32::from_le_bytes(bytes);
+        }
+        let weights =
+            packed.fc(reader, INPUT_DIM, OUTPUT_DIM, Self::should_use_scrambled_weights())?;
         Ok(Self { biases, weights })
     }
 

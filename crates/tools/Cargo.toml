@@ -27,6 +27,7 @@ nnue-arch = [
 ]
 # 診断ログ（EvalHashヒット率など）
 diagnostics = ["rshogi-core/diagnostics"]
+prepacked-nnue = ["nnue-arch", "rshogi-core/prepacked-nnue"]
 # Threat exclusion profiles
 threat-profile-same-class = ["rshogi-core/threat-profile-same-class"]
 threat-profile-same-class-major-pawn = ["rshogi-core/threat-profile-same-class-major-pawn"]
@@ -82,6 +83,11 @@ kifu-player = ["csa-replay", "dep:ratatui", "dep:crossterm"]
 name = "kifu_player"
 path = "src/bin/kifu_player.rs"
 required-features = ["kifu-player"]
+
+[[bin]]
+name = "prepack_nnue"
+path = "src/bin/prepack_nnue.rs"
+required-features = ["prepacked-nnue"]
 
 # eval_sfens は LayerStacks NNUE 前提のため nnue-arch に gate する。
 [[bin]]
