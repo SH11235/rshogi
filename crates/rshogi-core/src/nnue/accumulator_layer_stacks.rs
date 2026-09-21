@@ -124,10 +124,10 @@ struct AccCacheEntry<const L1: usize> {
     /// main acc と同一の差分タイミングで更新される。
     ///
     /// メモリフットプリント: `nnue-psqt` 有効時、各エントリは
-    /// `accumulation (2 × L1 bytes)` + `psqt_accumulation (36 bytes)` +
+    /// `accumulation (2 × L1 bytes)` + `psqt_accumulation (4 × MAX_LAYER_STACK_BUCKETS bytes)` +
     /// `piece_list (40 × 2 bytes)` + `valid (1 byte)` で構成され、64-byte
-    /// 境界にアライメントされる。L1=1536 で約 3,188 bytes + パディング。
-    /// `Square::NUM = 81` × 2 perspective = 162 エントリ ≈ 520 KB。
+    /// 境界にアライメントされる。L1=1536、16 bucketでは3,264 bytes（パディング込み）。
+    /// `Square::NUM = 81` × 2 perspective = 162 エントリで528,768 bytes。
     #[cfg(feature = "nnue-psqt")]
     psqt_accumulation: [i32; MAX_LAYER_STACK_BUCKETS],
     /// キャッシュ時点の `PieceList`（perspective 固有の fb または fw 配列）
@@ -895,6 +895,36 @@ mod tests {
 
     /// テスト用の具体的な L1 サイズ
     const TEST_L1: usize = NNUE_PYTORCH_L1; // 1536
+
+    #[test]
+    fn accumulator_and_cache_rows_are_simd_aligned() {
+        #[cfg(feature = "nnue-psqt")]
+        assert_eq!(std::mem::size_of::<AccCacheEntry<1536>>(), 3264);
+        #[cfg(not(feature = "nnue-psqt"))]
+        assert_eq!(std::mem::size_of::<AccCacheEntry<1536>>(), 3200);
+        fn verify<const L1: usize>() {
+            assert_eq!(std::mem::align_of::<AccumulatorLayerStacks<L1>>(), 64);
+            assert_eq!(std::mem::align_of::<AccCacheEntry<L1>>(), 64);
+            assert_eq!(std::mem::offset_of!(AccCacheEntry<L1>, accumulation), 0);
+            let cache = AccumulatorCacheLayerStacks::<L1>::new();
+            for pair in cache.entries.iter() {
+                for entry in pair {
+                    assert_eq!(entry.accumulation.as_ptr() as usize % 64, 0);
+                }
+            }
+            let stack = AccumulatorStackLayerStacks::<L1>::new();
+            for entry in stack.entries.iter() {
+                for row in &entry.accumulator.accumulation {
+                    assert_eq!(row.as_ptr() as usize % 64, 0);
+                }
+            }
+        }
+        verify::<512>();
+        verify::<768>();
+        verify::<1024>();
+        verify::<1536>();
+        verify::<3072>();
+    }
 
     fn apply_test_changes(
         acc: &mut [i16; TEST_L1],
