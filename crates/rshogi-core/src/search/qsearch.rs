@@ -9,6 +9,8 @@ use crate::types::{Bound, DEPTH_QS, DEPTH_UNSEARCHED, MAX_PLY, Move, Value};
 
 use super::alpha_beta::{SearchContext, SearchState, draw_jitter, to_corrected_static_eval};
 use super::eval_helpers::correction_value;
+#[cfg(feature = "search-stats")]
+use super::movepicker::Stage;
 use super::movepicker::piece_value;
 use super::search_helpers::{
     check_abort, clear_cont_history_for_null, cont_history_keys, do_move_and_push, nnue_evaluate,
@@ -21,7 +23,7 @@ use super::tt_sanity::{
     maybe_log_invalid_tt_data, maybe_trace_tt_cutoff, maybe_trace_tt_probe, maybe_trace_tt_write,
 };
 use super::tt_sanity::{is_valid_tt_eval, is_valid_tt_stored_value};
-use super::types::{NodeType, OrderedMovesBuffer, draw_value, value_from_tt, value_to_tt};
+use super::types::{NodeType, draw_value, value_from_tt, value_to_tt};
 use super::{LimitsType, MovePicker, TimeManagement};
 
 /// 静止探索
@@ -360,59 +362,35 @@ pub(super) fn qsearch<const NT: u8>(
         Move::NONE
     };
 
-    let ordered_moves = {
-        let cont_tables = cont_history_keys(st, ply);
-        let mut buf_moves = OrderedMovesBuffer::new();
-
-        {
-            let mut mp = if in_check {
-                MovePicker::new_evasions(
-                    pos,
-                    tt_move,
-                    ply,
-                    cont_tables,
-                    ctx.generate_all_legal_moves,
-                )
-            } else {
-                MovePicker::new(
-                    pos,
-                    tt_move,
-                    DEPTH_QS,
-                    ply,
-                    cont_tables,
-                    ctx.generate_all_legal_moves,
-                )
-            };
-
-            loop {
-                // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
-                let mv = {
-                    let h = unsafe { ctx.history.as_ref_unchecked() };
-                    mp.next_move(pos, h)
-                };
-                if mv == Move::NONE {
-                    break;
-                }
-                buf_moves.push(mv);
-            }
-        }
-
-        // qsearchではquiet checksを生成しない
-        // YOのMovePicker qsearchステージは QSEARCH_TT → QCAPTURE_INIT → QCAPTURE のみ
-        // (movepick.cpp line 69)
-
-        buf_moves
+    let cont_tables = cont_history_keys(st, ply);
+    // qsearchではquiet checksを生成しない
+    // YOのMovePicker qsearchステージは QSEARCH_TT → QCAPTURE_INIT → QCAPTURE のみ
+    // (movepick.cpp line 69)
+    let mut mp = if in_check {
+        MovePicker::new_evasions(pos, tt_move, ply, cont_tables, ctx.generate_all_legal_moves)
+    } else {
+        MovePicker::new(pos, tt_move, DEPTH_QS, ply, cont_tables, ctx.generate_all_legal_moves)
     };
-
-    // 生成された手の数を記録
-    #[cfg(feature = "search-stats")]
-    {
-        st.stats.qs_moves_generated += ordered_moves.len() as u64;
-    }
 
     let mut move_count = 0;
 
-    for mv in ordered_moves.iter() {
+    // 逐次 next_move 方式（YO qsearch と同じ。バッファへの事前 collect はしない）。
+    // qsearch の子ノードも qsearch なので、この部分木では MovePicker が読む history
+    // （capture/main/continuation）は一切更新されない。よって手順は事前 collect と同一で、
+    // beta カット時に残りステージの生成・スコアリング・ソートを丸ごと省ける。
+    loop {
+        // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+        let mv = {
+            let h = unsafe { ctx.history.as_ref_unchecked() };
+            mp.next_move(pos, h)
+        };
+        if mv == Move::NONE {
+            break;
+        }
+
+        // MovePicker が返した手の数を記録
+        inc_stat!(st, qs_moves_picked);
+
         // 静止探索では PASS は対象外（TT手として来る可能性があるため明示的にスキップ）
         if mv.is_pass() {
             continue;
@@ -510,6 +488,15 @@ pub(super) fn qsearch<const NT: u8>(
                 // fail-high しなかった場合のみ alpha を更新する。
                 alpha = value;
             }
+        }
+    }
+
+    // 打ち切りにより capture/evasion の生成ステージへ到達しなかったノードを数える。
+    // 逐次化で省けた指し手生成・スコアリング・ソートの発生率を示す。
+    #[cfg(feature = "search-stats")]
+    {
+        if matches!(mp.stage(), Stage::QCaptureInit | Stage::EvasionInit) {
+            st.stats.qs_movegen_skipped += 1;
         }
     }
 

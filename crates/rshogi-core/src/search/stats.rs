@@ -99,8 +99,10 @@ pub struct SearchStats {
     pub qs_tt_cutoff: u64,
     /// stand pat（静的評価で即時 beta カット）回数
     pub qs_stand_pat_cutoff: u64,
-    /// 生成された手の総数
-    pub qs_moves_generated: u64,
+    /// MovePicker が返した手の総数（beta カットで打ち切った分は含まない）
+    pub qs_moves_picked: u64,
+    /// 指し手生成ステージへ到達せずに打ち切ったノード数
+    pub qs_movegen_skipped: u64,
     /// 実際に探索された手の数
     pub qs_moves_searched: u64,
     /// SEE による枝刈り数（capture && !see_ge(0)）
@@ -173,7 +175,8 @@ impl Default for SearchStats {
             qs_tt_hit: 0,
             qs_tt_cutoff: 0,
             qs_stand_pat_cutoff: 0,
-            qs_moves_generated: 0,
+            qs_moves_picked: 0,
+            qs_movegen_skipped: 0,
             qs_moves_searched: 0,
             qs_see_pruned: 0,
             qs_futility_pruned: 0,
@@ -384,9 +387,14 @@ impl SearchStats {
                 self.qs_stand_pat_cutoff as f64 / qs_nodes * 100.0
             ));
             report.push_str(&format!(
-                "  Moves generated:   {:>12} ({:.1} avg/node)\n",
-                self.qs_moves_generated,
-                self.qs_moves_generated as f64 / qs_nodes
+                "  Moves picked:      {:>12} ({:.1} avg/node)\n",
+                self.qs_moves_picked,
+                self.qs_moves_picked as f64 / qs_nodes
+            ));
+            report.push_str(&format!(
+                "  Movegen skipped:   {:>12} ({:.1}%)\n",
+                self.qs_movegen_skipped,
+                self.qs_movegen_skipped as f64 / qs_nodes * 100.0
             ));
             report.push_str(&format!(
                 "  Moves searched:    {:>12} ({:.1} avg/node)\n",
