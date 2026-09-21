@@ -11,6 +11,8 @@
 #   SHARD_INDEX=0 SHARD_TOTAL=4 bash scripts/check-feature-builds.sh
 #                                                 # 構成を 4 分割した 0 番目だけ (CI の並列化用)
 # 失敗した構成は、表示された `cargo check ...` をそのまま実行すれば再現できる。
+# CI は RUSTFLAGS に `-D warnings` を足して実行するため、warning による失敗を
+# 再現するときは同じ指定を付ける。
 set -u
 
 cd "$(dirname "$0")/.." || exit 1
