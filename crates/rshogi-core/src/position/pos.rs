@@ -2206,6 +2206,21 @@ mod tests {
     }
 
     #[test]
+    fn repetition_back_to_sfen_root_with_pieces_in_hand_is_a_draw() {
+        // 手番側が持ち駒を持つ SFEN から始め、開始局面へ戻る。持ち駒は変わっていないので、
+        // 優等局面 (Superior) ではなく通常の千日手 (Draw) になる。
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b P 1").unwrap();
+        for mv_str in ["5i5h", "5a5b", "5h5i", "5b5a"] {
+            let mv = Move::from_usi(mv_str).unwrap();
+            let gives_check = pos.gives_check(mv);
+            pos.do_move(mv, gives_check);
+        }
+        // repetition_state は rep < ply の反復だけを返すので、4 手前の反復を含む十分大きな ply を渡す。
+        assert_eq!(pos.repetition_state(16), RepetitionState::Draw);
+    }
+
+    #[test]
     fn test_repetition_info_survives_state_slot_reuse() {
         let mut pos = Position::new();
         pos.set_hirate();
