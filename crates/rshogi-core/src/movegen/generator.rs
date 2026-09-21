@@ -2149,9 +2149,10 @@ mod tests {
         list.iter().map(|mv| mv.to_usi()).collect()
     }
 
-    /// 平手（YaneuraOu の unit test と同じ公開値）
+    /// 平手
     const PERFT_HIRATE: &str = crate::position::SFEN_HIRATE;
-    /// YaneuraOu の unit test が使う、合法手の多い指し手生成祭りの局面（打つ手・成る手が多い）
+    /// 合法手の多い「指し手生成祭り」の局面（打つ手・成る手が多い）。
+    /// YaneuraOu の unit test の `matsuri_sfen` と同じ局面で、SFEN の持ち駒の並び順だけが違う。
     const PERFT_MATSURI: &str =
         "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1";
     /// 後手玉に飛車で王手がかかっている局面（移動合い・合駒打ち・玉の移動）
@@ -2166,8 +2167,13 @@ mod tests {
 
     /// 既知の perft 値と一致することを確認する。
     ///
-    /// 平手と指し手生成祭りの期待値は YaneuraOu の unit test（`position.cpp` の Perft 節）、
-    /// それ以外は YaneuraOu の `go perft` の出力。rshogi 自身の出力を期待値にしていない。
+    /// 期待値の出典（rshogi 自身の出力は期待値にしていない）:
+    /// - hirate depth 1-4 と matsuri depth 1-2: YaneuraOu の unit test（`source/position.cpp` の
+    ///   Perft 節）にある表の値。matsuri はこの SFEN 表記でも下記の `go perft` で同じ値を確認した。
+    /// - それ以外の局面: YaneuraOu 公式 repository の master（commit c1b80eaa）を
+    ///   MATERIAL edition でビルドし、`position sfen ...` → `go perft N` で得た値。
+    ///   YaneuraOu の perft も不成を含む全合法手（LEGAL_ALL）で数える。
+    ///
     /// 末端は合法手数を数えるだけなので、平手 depth 4（719,731）と中盤 depth 3（210,823）を
     /// 含めても dev profile の実測で 0.1 秒未満。エミュレータ上の CI でも常時実行できる。
     #[test]
@@ -2179,7 +2185,7 @@ mod tests {
         assert_perft("pawn_drop_blocks_bishop", PERFT_PAWN_DROP_BLOCKS_BISHOP, &[139, 68, 8_424]);
         assert_perft("midgame", PERFT_MIDGAME, &[40, 5_599, 210_823]);
 
-        // 打ち歩詰めの合否を指し手単位でも確認する（YaneuraOu の perft 内訳と同じ）。
+        // 打ち歩詰めの合否を指し手単位でも確認する（上記 `go perft 1` の指し手別内訳と同じ）。
         assert!(!legal_all_usi(PERFT_PAWN_DROP_MATE).contains("P*1b"), "1二歩打は打ち歩詰め");
         assert!(
             legal_all_usi(PERFT_PAWN_DROP_BLOCKS_BISHOP).contains("P*5c"),

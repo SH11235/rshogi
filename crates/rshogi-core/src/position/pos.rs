@@ -3245,14 +3245,20 @@ mod tests {
         assert_eq!(pos.state().key(), key);
     }
 
+    /// hand_snapshot は手駒から決まるが、SFEN から作ったルート局面の StateInfo には
+    /// 記録されない（do_move 後の StateInfo にだけ入る）ので、今は比較から外している。
+    /// ルート局面でも記録されるようになったら true にする。
+    const COMPARE_HAND_SNAPSHOT: bool = false;
+
     /// 盤面・手駒・手番・手数（= SFEN に載る情報）だけから決まる状態。
     ///
     /// do_move の差分更新結果と、SFEN から組み立て直した局面とで一致しなければならない。
-    /// 千日手情報・連続王手カウンタ・plies_from_null・直前の指し手・取った駒・
-    /// hand_snapshot は手順に依存して SFEN に載らないので、ここには含めない。
+    /// 千日手情報・連続王手カウンタ・plies_from_null・直前の指し手・取った駒は
+    /// 手順に依存して SFEN に載らないので、ここには含めない。
     /// パス権はキーに混ざるが、このテストでは無効（両者 0）なので差は出ない。
     #[derive(Debug, PartialEq)]
     struct DerivedState {
+        hand_snapshot: Option<[Hand; Color::NUM]>,
         sfen: String,
         key: u64,
         board_key: u64,
@@ -3278,6 +3284,7 @@ mod tests {
         fn of(pos: &Position) -> Self {
             let st = pos.cur_state();
             Self {
+                hand_snapshot: COMPARE_HAND_SNAPSHOT.then_some(st.hand_snapshot),
                 sfen: pos.to_sfen(),
                 key: pos.key(),
                 board_key: st.board_key,
@@ -3335,13 +3342,81 @@ mod tests {
         }
     }
 
-    /// ランダムプレイアウトの全局面で、差分更新した状態が SFEN から組み立て直した局面と
-    /// 一致し、最後に全手を undo すると初期局面へ戻ることを確認する。
+    /// 1 局面ぶんの不変条件: 差分更新した状態が SFEN からの再計算と一致し、
+    /// 生成した合法手が判定関数と矛盾しないこと。
+    fn assert_playout_position_invariants(
+        playout: &crate::position::playout_test_support::RandomPlayout,
+    ) {
+        use crate::movegen::{MoveList, generate_legal, generate_legal_all};
+
+        let pos = &playout.pos;
+        let us = pos.side_to_move();
+
+        // (i)(ii) 差分更新したキー・bitboard・王手情報が、SFEN からの再計算と一致する。
+        // DerivedState は SFEN 文字列も含むので、SFEN の往復が安定していることも同時に確認できる。
+        let sfen = pos.to_sfen();
+        let mut fresh = Position::new();
+        fresh.set_sfen(&sfen).unwrap_or_else(|e| {
+            panic!(
+                "to_sfen の出力を set_sfen で読めない: {e:?} sfen={sfen}: {}",
+                playout.describe()
+            )
+        });
+        assert_eq!(
+            DerivedState::of(pos),
+            DerivedState::of(&fresh),
+            "差分更新と再計算が不一致: {}",
+            playout.describe()
+        );
+        // 利き数は feature 構成によっては差分更新されず dirty のままになるので、
+        // 維持されているときだけ再計算と比べる（既定の feature では常に維持される）。
+        if !pos.board_effects_dirty {
+            assert!(
+                pos.board_effects == fresh.board_effects && pos.long_effects == fresh.long_effects,
+                "利き数の差分更新と再計算が不一致: {}",
+                playout.describe()
+            );
+        }
+
+        // (iii) 生成した合法手は pseudo_legal / is_legal の両方を満たす
+        let mut legal_all = MoveList::new();
+        generate_legal_all(pos, &mut legal_all);
+        for &mv in legal_all.iter() {
+            assert!(
+                pos.pseudo_legal(mv) && pos.is_legal(mv),
+                "生成手 {} が pseudo_legal={} is_legal={}: {}",
+                mv.to_usi(),
+                pos.pseudo_legal(mv),
+                pos.is_legal(mv),
+                playout.describe()
+            );
+        }
+        // 探索用の生成（一部の不成を省く）は全合法手の部分集合
+        let mut legal = MoveList::new();
+        generate_legal(pos, &mut legal);
+        for &mv in legal.iter() {
+            assert!(
+                legal_all.contains(mv),
+                "generate_legal の {} が generate_legal_all に無い: {}",
+                mv.to_usi(),
+                playout.describe()
+            );
+        }
+
+        // (iv) 手番でない側の玉に王手がかかったままの局面へは到達しない
+        assert!(
+            pos.attackers_to_c(pos.king_square(!us), us).is_empty(),
+            "手番でない側の玉に王手がかかっている: {}",
+            playout.describe()
+        );
+    }
+
+    /// ランダムプレイアウトで到達した全局面（最終手の後も含む）で不変条件を確認し、
+    /// 最後に全手を undo すると初期局面へ戻ることを確認する。
     ///
     /// 失敗時のメッセージにある `position startpos moves ...` で手順を再現できる。
     #[test]
     fn random_playouts_preserve_state_and_keys() {
-        use crate::movegen::{MoveList, generate_legal, generate_legal_all};
         use crate::position::playout_test_support::RandomPlayout;
 
         const SEED: u64 = 0x5EED_2026_0922;
@@ -3350,60 +3425,15 @@ mod tests {
 
         for index in 0..PLAYOUTS {
             let mut playout = RandomPlayout::new(SEED, index);
-            let initial = RestoredState::of(&playout.pos);
+            let initial_pos = playout.pos.clone();
+            let initial = RestoredState::of(&initial_pos);
 
+            assert_playout_position_invariants(&playout);
             for _ in 0..MAX_PLIES {
-                let pos = &playout.pos;
-                let us = pos.side_to_move();
-
-                // (i) 差分更新したキー・bitboard・王手情報が、SFEN からの再計算と一致する
-                let sfen = pos.to_sfen();
-                let mut fresh = Position::new();
-                fresh.set_sfen(&sfen).unwrap();
-                assert_eq!(
-                    DerivedState::of(pos),
-                    DerivedState::of(&fresh),
-                    "差分更新と再計算が不一致: {}",
-                    playout.describe()
-                );
-                // (ii) SFEN の往復が安定している
-                assert_eq!(fresh.to_sfen(), sfen, "{}", playout.describe());
-
-                // (iii) 生成した合法手は pseudo_legal / is_legal の両方を満たす
-                let mut legal_all = MoveList::new();
-                generate_legal_all(pos, &mut legal_all);
-                for &mv in legal_all.iter() {
-                    assert!(
-                        pos.pseudo_legal(mv) && pos.is_legal(mv),
-                        "生成手 {} が pseudo_legal={} is_legal={}: {}",
-                        mv.to_usi(),
-                        pos.pseudo_legal(mv),
-                        pos.is_legal(mv),
-                        playout.describe()
-                    );
-                }
-                // 探索用の生成（一部の不成を省く）は全合法手の部分集合
-                let mut legal = MoveList::new();
-                generate_legal(pos, &mut legal);
-                for &mv in legal.iter() {
-                    assert!(
-                        legal_all.contains(mv),
-                        "generate_legal の {} が generate_legal_all に無い: {}",
-                        mv.to_usi(),
-                        playout.describe()
-                    );
-                }
-
-                // (iv) 手番でない側の玉に王手がかかったままの局面へは到達しない
-                assert!(
-                    pos.attackers_to_c(pos.king_square(!us), us).is_empty(),
-                    "手番でない側の玉に王手がかかっている: {}",
-                    playout.describe()
-                );
-
                 if playout.step().is_none() {
                     break;
                 }
+                assert_playout_position_invariants(&playout);
             }
 
             let moves = playout.moves().to_vec();
@@ -3416,6 +3446,14 @@ mod tests {
                 "全手 undo 後に初期局面へ戻らない: {}",
                 playout.describe()
             );
+            if !playout.pos.board_effects_dirty {
+                assert!(
+                    playout.pos.board_effects == initial_pos.board_effects
+                        && playout.pos.long_effects == initial_pos.long_effects,
+                    "全手 undo 後に利き数が初期局面へ戻らない: {}",
+                    playout.describe()
+                );
+            }
         }
     }
 }
