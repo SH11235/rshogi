@@ -435,7 +435,7 @@ impl Default for PieceToHistory {
 /// 連続する2手の組み合わせ履歴。
 /// 1手前の駒と移動先から、現在の駒と移動先へのスコア。
 ///
-/// SearchWorkerでは[in_check][capture]の組ごとに4つ保持する。
+/// HistoryTablesでは[in_check][capture]の組ごとに4つ保持する。
 /// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct ContinuationHistory {
     table: [[PieceToHistory; Square::NUM]; PIECE_NUM],
