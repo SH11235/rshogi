@@ -2398,9 +2398,9 @@ mod tests {
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
-        bucket.l1.weights.fill(4);
-        bucket.l2.weights.fill(4);
-        bucket.output.weights.fill(1);
+        bucket.l1.weights.make_mut().fill(4);
+        bucket.l2.weights.make_mut().fill(4);
+        bucket.output.weights.make_mut().fill(1);
         let mut acc = AccumulatorLayerStacks::<64>::new();
         acc.accumulation[0].fill(50);
         acc.accumulation[1].fill(30);
@@ -2524,11 +2524,11 @@ mod tests {
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
-        bucket.l1.weights.fill(1);
+        bucket.l1.weights.make_mut().fill(1);
         bucket.l1.biases.fill(1024);
-        bucket.l2.weights.fill(1);
+        bucket.l2.weights.make_mut().fill(1);
         bucket.l2.biases.fill(1024);
-        bucket.output.weights.fill(1);
+        bucket.output.weights.make_mut().fill(1);
         let mut acc = AccumulatorLayerStacks::<64>::new();
         for i in 0..64 {
             acc.accumulation[0][i] = (i * 7) as i16;

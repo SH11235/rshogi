@@ -3,7 +3,7 @@
 use std::io::{self, Read, Seek, SeekFrom};
 
 use super::accumulator::{
-    AlignedBox, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES,
+    AlignedBox, DirtyPiece, IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, WeightBox,
 };
 use super::bona_piece::{BonaPiece, FE_END};
 use super::bona_piece_effect_bucket::EffectBucketConfig;
@@ -191,11 +191,11 @@ pub struct DynamicLayerStacksNetwork {
     input_dimensions: usize,
     num_buckets: usize,
     ft_biases: AlignedBox<i16>,
-    ft_weights: AlignedBox<i16>,
+    ft_weights: WeightBox<i16>,
     psqt_biases: AlignedBox<i32>,
-    psqt_weights: AlignedBox<i32>,
+    psqt_weights: WeightBox<i32>,
     threat_dimensions: usize,
-    threat_weights: AlignedBox<i8>,
+    threat_weights: WeightBox<i8>,
     buckets: Vec<DynamicLsBucket>,
     fv_scale: i32,
 }
@@ -288,10 +288,12 @@ impl DynamicLayerStacksNetwork {
             packed.ft(weight_len)?
         } else {
             read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_zeroed)?
+                .into()
         };
         #[cfg(not(feature = "prepacked-nnue"))]
-        let ft_weights =
-            read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_zeroed)?;
+        let ft_weights: WeightBox<i16> =
+            read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_zeroed)?
+                .into();
 
         let has_psqt = psqt_override.unwrap_or_else(|| arch.contains("PSQT="));
         let mut psqt_biases = AlignedBox::new_zeroed(if has_psqt { num_buckets } else { 0 });
@@ -309,13 +311,13 @@ impl DynamicLayerStacksNetwork {
         } else {
             let mut weights = AlignedBox::new_zeroed(psqt_count);
             read_i32s(reader, &mut weights)?;
-            weights
+            weights.into()
         };
         #[cfg(not(feature = "prepacked-nnue"))]
-        let psqt_weights = {
+        let psqt_weights: WeightBox<i32> = {
             let mut weights = AlignedBox::new_zeroed(psqt_count);
             read_i32s(reader, &mut weights)?;
-            weights
+            weights.into()
         };
 
         if arch.contains("ThreatProfile=") {
@@ -329,28 +331,27 @@ impl DynamicLayerStacksNetwork {
         let threat_count = threat_dimensions
             .checked_mul(l1)
             .ok_or_else(|| invalid("Threat dimensions overflow"))?;
+        // packed 経路は mapping 上の span をそのまま借用し、非 packed 経路だけが
+        // reader からバイト列を読み込む。
+        let mut read_threat_weights = || -> io::Result<WeightBox<i8>> {
+            let mut weights: AlignedBox<i8> = AlignedBox::new_zeroed(threat_count);
+            if !weights.is_empty() {
+                // SAFETY: `i8` and `u8` have identical size/alignment, and the slice retains the
+                // exact allocation length while only its byte signedness changes for `Read`.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts_mut(weights.as_mut_ptr().cast::<u8>(), weights.len())
+                };
+                reader.read_exact(bytes)?;
+            }
+            Ok(weights.into())
+        };
         #[cfg(feature = "prepacked-nnue")]
-        let mut threat_weights = if let Some(packed) = packed.filter(|_| threat_count != 0) {
-            packed.threat(threat_count)?
-        } else {
-            AlignedBox::<i8>::new_zeroed(threat_count)
+        let threat_weights = match packed.filter(|_| threat_count != 0) {
+            Some(packed) => packed.threat(threat_count)?,
+            None => read_threat_weights()?,
         };
         #[cfg(not(feature = "prepacked-nnue"))]
-        let mut threat_weights: AlignedBox<i8> = AlignedBox::new_zeroed(threat_count);
-        let read_threat = !threat_weights.is_empty();
-        #[cfg(feature = "prepacked-nnue")]
-        let read_threat = read_threat && packed.is_none();
-        if read_threat {
-            // SAFETY: `i8` and `u8` have identical size/alignment, and the slice retains the
-            // exact allocation length while only its byte signedness changes for `Read`.
-            let bytes = unsafe {
-                std::slice::from_raw_parts_mut(
-                    threat_weights.as_mut_ptr().cast::<u8>(),
-                    threat_weights.len(),
-                )
-            };
-            reader.read_exact(bytes)?;
-        }
+        let threat_weights = read_threat_weights()?;
 
         let mut buckets = Vec::with_capacity(num_buckets);
         for _ in 0..num_buckets {
@@ -1654,11 +1655,11 @@ mod tests {
             input_dimensions: feature.dimensions(),
             num_buckets,
             ft_biases: AlignedBox::new_zeroed(l1),
-            ft_weights: AlignedBox::new_zeroed(0),
+            ft_weights: AlignedBox::new_zeroed(0).into(),
             psqt_biases: AlignedBox::new_zeroed(usize::from(has_psqt)),
-            psqt_weights: AlignedBox::new_zeroed(usize::from(has_psqt)),
+            psqt_weights: AlignedBox::new_zeroed(usize::from(has_psqt)).into(),
             threat_dimensions,
-            threat_weights: AlignedBox::new_zeroed(0),
+            threat_weights: AlignedBox::new_zeroed(0).into(),
             buckets: Vec::new(),
             fv_scale: FV_SCALE_HALFKA,
         }
@@ -1670,8 +1671,8 @@ mod tests {
         for (i, bias) in net.ft_biases.iter_mut().enumerate() {
             *bias = i as i16 - 4;
         }
-        net.ft_weights = AlignedBox::new_zeroed(net.input_dimensions * net.spec.l1);
-        for (i, weight) in net.ft_weights.iter_mut().enumerate() {
+        net.ft_weights = AlignedBox::new_zeroed(net.input_dimensions * net.spec.l1).into();
+        for (i, weight) in net.ft_weights.make_mut().iter_mut().enumerate() {
             *weight = (i % 251) as i16 - 125;
         }
         net
@@ -1723,7 +1724,7 @@ mod tests {
         for bias in second.ft_biases.iter_mut() {
             *bias = bias.wrapping_add(37);
         }
-        for weight in second.ft_weights.iter_mut() {
+        for weight in second.ft_weights.make_mut().iter_mut() {
             *weight = weight.wrapping_mul(3).wrapping_add(11);
         }
 
@@ -1848,7 +1849,7 @@ mod tests {
         )
         .unwrap();
         let mut net = test_network(feature, l1, l2, l3, num_buckets, false, 0);
-        net.ft_weights = AlignedBox::new_zeroed(feature.dimensions() * l1);
+        net.ft_weights = AlignedBox::new_zeroed(feature.dimensions() * l1).into();
         net.buckets = (0..num_buckets)
             .map(|_| DynamicLsBucket {
                 l1: zero_affine(l1, l2),

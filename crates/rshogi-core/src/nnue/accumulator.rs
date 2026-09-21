@@ -206,6 +206,8 @@ const HUGEPAGE_SIZE: usize = 2 * 1024 * 1024;
 enum AlignedBoxBacking {
     /// `new_zeroed` がグローバルアロケータで確保した通常ヒープ。Drop で `dealloc`。
     Heap(Layout),
+    /// file の読み取り専用 mapping を共有所有。Drop では `owner` の解放のみ。
+    /// read-only 専用で、可変参照は `WeightBox` 経由の複製後にしか得られない。
     #[cfg(all(windows, feature = "prepacked-nnue"))]
     Mapped {
         owner: std::sync::Arc<super::mapped_weights::ReadOnlyMapping>,
@@ -230,6 +232,17 @@ enum AlignedBoxBacking {
 /// - `Heap`: `new_zeroed` による通常ヒープ確保（`T: Copy + Default`）。
 /// - `Shared`: `from_shared` によるプロセス間共有メモリの借用（read-only、`DerefMut` 不可）。
 /// - `Mapped`: fileの読み取り専用mappingを共有所有（read-only、`DerefMut` 不可）。
+///
+/// LayerStacks の重み配列は `WeightBox` で包んで保持する。`WeightBox` は `DerefMut` を
+/// 持たず、書き換えは `make_mut`（read-only backing なら私有ヒープへ複製）だけ。
+///
+/// 2 つの read-only backing で保証の強さが違うことに注意:
+/// - `Mapped` を作れるのは `WeightBox::from_mapped` だけなので、`Mapped` が `DerefMut` へ
+///   届く経路は型として存在しない（構造的に到達不能）。
+/// - `Shared` は `from_shared` が `pub(crate)` で、HalfKx の FeatureTransformer
+///   (`feature_transformer.rs` / `network_halfk*.rs`) は素の `AlignedBox` のまま
+///   `shared_weights::try_share` を呼ぶ。こちらは「共有化はロード完了後・以後書き込まない」
+///   という規約で守られており、型では保証されない。
 ///
 /// # 安全性契約
 ///
@@ -348,7 +361,9 @@ mod mapped_element {
 
 #[cfg(all(windows, feature = "prepacked-nnue"))]
 impl<T: mapped_element::Element> AlignedBox<T> {
-    pub(super) fn from_mapped(
+    /// mapping 上の span を借用する。可変参照が漏れないよう、呼び出しは同一モジュール内の
+    /// `WeightBox::from_mapped` だけに限定する（`Mapped` backing の唯一の生成口）。
+    fn from_mapped(
         owner: std::sync::Arc<super::mapped_weights::ReadOnlyMapping>,
         offset: usize,
         len: usize,
@@ -395,7 +410,11 @@ impl<T> DerefMut for AlignedBox<T> {
         match &self.backing {
             #[cfg(all(windows, feature = "prepacked-nnue"))]
             AlignedBoxBacking::Mapped { .. } => {
-                panic!("AlignedBox: mapped backing is read-only");
+                // file の read-only mapping。可変参照を発行しないことで Rust の排他参照
+                // 不変条件を守る。`Mapped` を作れるのは `WeightBox::from_mapped` だけで、
+                // `WeightBox` は `DerefMut` を持たず `make_mut` が先に私有ヒープへ
+                // 複製するため、ここには到達しない。
+                panic!("AlignedBox: mapped backing は read-only。可変参照は取得できない");
             }
             AlignedBoxBacking::Heap(_) => {
                 // SAFETY: backing が Heap であることを確認済み。ptr は new_zeroed が
@@ -458,20 +477,88 @@ impl<T: Copy + Default> Clone for AlignedBox<T> {
     }
 }
 
-#[cfg(all(windows, feature = "prepacked-nnue"))]
-impl<T: Copy + Default> AlignedBox<T> {
-    /// 読み取り専用の重みを編集する直前に、対象 tensor だけを私有化する。
-    pub(super) fn make_owned(&mut self) {
-        if matches!(self.backing, AlignedBoxBacking::Mapped { .. }) {
-            *self = self.clone();
-        }
-    }
-}
-
 // SAFETY: T が Send なら AlignedBox<T> も Send
 unsafe impl<T: Send> Send for AlignedBox<T> {}
 // SAFETY: T が Sync なら AlignedBox<T> も Sync
 unsafe impl<T: Sync> Sync for AlignedBox<T> {}
+
+/// ロード後は書き換えない NNUE 重み配列の格納先
+///
+/// backing は通常ヒープ・プロセス間共有メモリ・file の読み取り専用 mapping のいずれか。
+/// 後ろ 2 つへ可変参照を配ると Rust の排他参照不変条件を破るため、この型は `DerefMut` を
+/// **実装しない**。書き換えたい場合は `make_mut` を使い、read-only backing なら私有ヒープ
+/// への複製（copy-on-write）を経てから可変スライスを得る。
+///
+/// これにより、この型が保持する重みについては「read-only backing を誤って書き換えて
+/// 実行時 panic する」経路が型として無くなる。`Mapped` backing を作れるのは
+/// `WeightBox::from_mapped` だけなので、LayerStacks の prepacked 重みはこれで構造的に
+/// 保護される。一方 HalfKx の FeatureTransformer は素の `AlignedBox` のまま
+/// `shared_weights::try_share` を使っており、そちらの `Shared` backing は従来どおり
+/// 「共有化後は書き込まない」という規約で守られている（型では保証されない）。
+///
+/// 推論経路は `Deref` による共有読み取りだけで足りる。
+///
+/// `#[repr(transparent)]` はネットワーク構造体のレイアウトを導入前と同一に保つためで、
+/// この型を別の型へキャストする箇所は無い。
+#[repr(transparent)]
+pub struct WeightBox<T>(AlignedBox<T>);
+
+impl<T> From<AlignedBox<T>> for WeightBox<T> {
+    #[inline]
+    fn from(inner: AlignedBox<T>) -> Self {
+        Self(inner)
+    }
+}
+
+#[cfg(all(windows, feature = "prepacked-nnue"))]
+impl<T: mapped_element::Element> WeightBox<T> {
+    /// 事前展開コンテナの読み取り専用 mapping 上にある重み span を借用する。
+    pub(super) fn from_mapped(
+        owner: std::sync::Arc<super::mapped_weights::ReadOnlyMapping>,
+        offset: usize,
+        len: usize,
+    ) -> std::io::Result<Self> {
+        AlignedBox::from_mapped(owner, offset, len).map(Self)
+    }
+}
+
+impl<T> Deref for WeightBox<T> {
+    type Target = [T];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Copy + Default> WeightBox<T> {
+    /// 書き換え用の可変スライスを返す。
+    ///
+    /// backing が read-only（共有メモリ / file mapping）のときは、先に私有ヒープへ
+    /// 複製する（copy-on-write）。複製後は元の共有領域・mapping を参照しないため、
+    /// 他プロセスや mapping 元 file のバイト列は変化しない。
+    ///
+    /// コスト: read-only backing に対する最初の 1 回だけ tensor 全体を確保してコピーする
+    /// （FT 重みなら数百 MB になり得る）。2 回目以降は既に Heap なのでコピーしない。
+    ///
+    /// 重みを書き換えるのは net delta (`SPSA_NET_*`) だけなので、それを持つ構成に
+    /// 限ってコンパイルする。
+    #[cfg(any(test, feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
+    pub(crate) fn make_mut(&mut self) -> &mut [T] {
+        if !matches!(self.0.backing, AlignedBoxBacking::Heap(_)) {
+            self.0 = self.0.clone();
+        }
+        &mut self.0
+    }
+
+    /// 重み配列をプロセス間共有メモリへ移行する（Linux のみ実効、失敗時は現状維持）。
+    ///
+    /// `Mapped` backing は Windows 限定、`Shared` backing は Linux 限定で互いに排他のため、
+    /// mapping 済みの box がここで共有メモリへ差し替わることはない。
+    pub(crate) fn share(&mut self, label: &str) {
+        super::shared_weights::try_share(&mut self.0, label);
+    }
+}
 
 /// Accumulatorの構造
 /// 入力特徴量をアフィン変換した結果を保持
