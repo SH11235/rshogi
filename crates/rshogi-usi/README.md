@@ -99,18 +99,23 @@ core の `uses_large_pages()` / `Search::tt_uses_large_pages()` は Windows の�
 ## mimalloc (`mimalloc`)
 
 既定で無効の `mimalloc` は、エンジン binary の global allocator を
-[mimalloc](https://github.com/microsoft/mimalloc) に置き換えます。探索結果は変わりません。
+[mimalloc](https://github.com/microsoft/mimalloc) に置き換えます。
 `libmimalloc-sys` が C のソースをビルドするため、有効にするには C コンパイラが必要です。
+`mimalloc` 0.1.52 / `libmimalloc-sys` 0.1.49 は既定で mimalloc v3 系 (3.3.2) をビルドします。
 
 ```bash
-cargo build --profile production -p rshogi-usi --no-default-features   --features edition-layerstacks-halfka_hm_merged-1536x16x32-none,mimalloc
+cargo build --profile production -p rshogi-usi --no-default-features \
+  --features edition-layerstacks-halfka_hm_merged-1536x16x32-none,mimalloc
 ```
+
+固定 depth の探索（MultiPV 1 と 3）では、既定 build と nodes / score / bestmove / PV が
+一致することを確認しています。時間制限つきの探索は、速度差の分だけ到達 depth が変わりえます。
 
 `allocation-stats` も global allocator を設定するため、同時には指定できません。
 library (`rshogi-core`) の allocator は変えません。
 
 Windows / Ryzen 9 9950X3D2 で、同一 binary のまま allocator だけを切り替えた 1 thread の
-探索区間の比較（4 局面 × 5 秒 × 64 探索を 4 回）では、NPS が +0.20〜+0.42%、
+探索区間の比較（上記の版、4 局面 × 5 秒 × 64 探索を 4 回）では、NPS が +0.20〜+0.42%、
 cycles/node が −0.19〜−0.36% でした。複数 thread と他の OS では計測していません。
 
 ## License
