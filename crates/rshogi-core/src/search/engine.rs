@@ -783,9 +783,15 @@ impl Search {
         self.thread_pool.update_tt(Arc::clone(&self.tt));
     }
 
-    /// Large Pagesで確保されているかを返す
+    /// TTの明示的Large Pages確保に成功したかを返す（Windows）。
     pub fn tt_uses_large_pages(&self) -> bool {
         self.tt.uses_large_pages()
+    }
+
+    /// TTのhuge-page hint要求が成功したかを返す（Linux/Android）。
+    /// 実backingの確認ではない。
+    pub fn tt_huge_page_hint_requested(&self) -> bool {
+        self.tt.huge_page_hint_requested()
     }
 
     /// EvalHashのサイズを変更

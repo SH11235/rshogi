@@ -4,7 +4,7 @@
 //! - TranspositionTable: テーブル本体
 //! - probe/write操作
 
-use super::alloc::{AllocKind, Allocation};
+use super::alloc::Allocation;
 use super::entry::{TTData, TTEntry};
 use super::{CLUSTER_SIZE, GENERATION_DELTA};
 use crate::position::Position;
@@ -76,7 +76,11 @@ impl ClusterTable {
     }
 
     fn uses_large_pages(&self) -> bool {
-        self.alloc.kind() == AllocKind::LargePages
+        self.alloc.kind().is_explicit_large_pages()
+    }
+
+    fn huge_page_hint_requested(&self) -> bool {
+        self.alloc.kind().is_huge_page_hint()
     }
 }
 
@@ -245,9 +249,16 @@ impl TranspositionTable {
         count / CLUSTER_SIZE as i32
     }
 
-    /// Large Pagesを使って確保されたかを返す
+    /// Windowsで明示的なLarge Pages確保に成功したかを返す。
+    /// Linuxのhuge-page hintは実際のbackingを保証しないため含めない。
     pub fn uses_large_pages(&self) -> bool {
         self.table.uses_large_pages()
+    }
+
+    /// Linux/AndroidでMADV_HUGEPAGE要求が成功したかを返す。
+    /// 実際にhuge pagesへ昇格したかは示さない。
+    pub fn huge_page_hint_requested(&self) -> bool {
+        self.table.huge_page_hint_requested()
     }
 
     /// クラスターインデックスを計算
