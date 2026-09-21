@@ -161,7 +161,7 @@ jobs:
   feature-builds:
     # workspace の clippy / test は既定 feature (edition-universal) しかコンパイルしない。
     # 配布に使う固定 edition と opt-in feature でだけ生きる cfg 経路の破損を検出するため、
-    # 各構成を `cargo check` し、opt-in feature の単体テストも実行する
+    # 各構成を `cargo check` し、opt-in feature の単体テストと結合テストも実行する
     # (構成の一覧は scripts/check-feature-builds.sh を参照)。
     # 構成ごとに rshogi-core を check し直すため、shard に分けて並列に実行する。
     name: Feature Builds (${{ matrix.shard }})
@@ -202,6 +202,14 @@ jobs:
       - name: Test rshogi-core with opt-in features
         if: matrix.shard == 0
         run: cargo test -p rshogi-core --lib --features prepacked-nnue,allocation-stats,tt-write-stats -- --test-threads=2
+      - name: Test rshogi-usi with opt-in features
+        # feature 付きでだけコンパイルされる結合テスト。ビルドしたエンジンを起動して診断出力を検証する。
+        # core の単体テストと別の shard に置いて所要時間を分散する。
+        if: matrix.shard == 1
+        run: >-
+          cargo test -p rshogi-usi --features allocation-stats,tt-write-stats
+          --test allocation_stats --test allocation_tracker --test tt_write_stats
+          -- --test-threads=2
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
