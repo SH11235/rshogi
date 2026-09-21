@@ -623,10 +623,17 @@ impl SearchState {
         self.depth_liveness.as_ref().is_some_and(|liveness| liveness.active)
     }
 
+    /// 前回PVを更新し、確保済みの領域を再利用する。
     #[inline]
     pub fn set_previous_pv(&mut self, pv: &[Move]) {
         self.previous_pv.clear();
         self.previous_pv.extend_from_slice(pv);
+    }
+
+    /// 指定したroot候補のPVを、前回PVの確保領域を再利用して保存する。
+    #[inline]
+    fn set_previous_pv_from_root(&mut self, pv_idx: usize) {
+        self.previous_pv.clone_from(&self.root_moves[pv_idx].pv);
     }
 
     #[inline]
@@ -1174,7 +1181,7 @@ impl SearchWorker {
         let root_in_check = pos.in_check();
 
         self.state.stack[0].in_check = root_in_check;
-        self.state.set_previous_pv(&self.state.root_moves[0].pv.clone());
+        self.state.set_previous_pv_from_root(0);
         self.state.set_root_follow_pv();
         self.state.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.state.stack[0].cont_correction_ptr = self.cont_correction_sentinel;
@@ -1931,8 +1938,7 @@ impl SearchWorker {
         let root_in_check = pos.in_check();
 
         self.state.stack[0].in_check = root_in_check;
-        let previous_pv = self.state.root_moves[pv_idx].pv.clone();
-        self.state.set_previous_pv(&previous_pv);
+        self.state.set_previous_pv_from_root(pv_idx);
         self.state.set_root_follow_pv();
         self.state.stack[0].cont_history_ptr = self.cont_history_sentinel;
         self.state.stack[0].cont_correction_ptr = self.cont_correction_sentinel;
