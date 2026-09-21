@@ -32,13 +32,14 @@ Threat テーブルだけでなく、以下のデータ構造が L3 キャッシ
 | データ構造 | サイズ | アクセスパターン |
 |---|---:|---|
 | TT | 256〜1024 MB（設定値） | ランダム、1ノード1回 probe |
-| ContinuationHistory | ~51 MB | move pair でインデックス、頻繁 |
+| ContinuationHistory | ~50 MB | move pair でインデックス、頻繁 |
 | PawnHistory | ~41 MB | pawn hash + piece/sq、頻繁 |
+| CorrectionHistory | ~14 MB | 各種 hash key / 直前の手でインデックス、静的評価の補正時 |
 | HalfKA_hm FT weights | 72〜215 MB（L0依存） | 差分更新で1手2-4行、局所的 |
 | Threat テーブル | 0〜317 MB（profile/L0依存） | 20-40個の散在アクセス/局面 |
 | その他 History | ~1 MB | 小さい |
 
-History 群だけで ~92 MB あり、L3=64 MB を既に超えている。
+History 群だけで ~106 MB あり、L3=64 MB を既に超えている。
 したがって **「Threat テーブルが L3 に収まるか」だけでは判断できない**。
 
 ### なぜ Threat テーブルのサイズ削減が有効か

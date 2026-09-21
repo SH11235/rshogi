@@ -263,7 +263,7 @@ impl Default for LowPlyHistory {
 ///
 /// 捕獲する手の履歴。
 ///
-/// PERF: 約3.5MB。HistoryTables内の連続領域に配置するため配列で保持する。
+/// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct CapturePieceToHistory {
     table: [[[StatsEntry<10692>; PIECE_TYPE_NUM]; Square::NUM]; PIECE_NUM],
 }
@@ -435,7 +435,7 @@ impl Default for PieceToHistory {
 /// 連続する2手の組み合わせ履歴。
 /// 1手前の駒と移動先から、現在の駒と移動先へのスコア。
 ///
-/// PERF: 約1.3MBのサイズがあり、SearchWorkerでは[2][2]で4つ保持（計約5.2MB）。
+/// HistoryTablesでは[in_check][capture]の組ごとに4つ保持する。
 /// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct ContinuationHistory {
     table: [[PieceToHistory; Square::NUM]; PIECE_NUM],
@@ -526,7 +526,7 @@ impl Default for ContinuationHistory {
 ///
 /// 歩の陣形に対する履歴。
 ///
-/// PERF: 約39MB。HistoryTables内の連続領域に配置するため配列で保持する。
+/// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct PawnHistory {
     table: [[[StatsEntry<8192>; Square::NUM]; PIECE_NUM]; PAWN_HISTORY_SIZE],
 }
@@ -667,7 +667,7 @@ pub type CorrectionPieceToHistory =
 /// - NonPawn: [key_index][side_to_move][piece_color] -> correction
 /// - Continuation: [prev_pc][prev_to][pc][to] -> correction
 ///
-/// PERF: 約4.5MB。HistoryTables内の連続領域に配置するため配列で保持する。
+/// HistoryTables内の連続領域に配置するため配列で保持する。
 pub struct CorrectionHistory {
     pawn: [[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE],
     minor: [[StatsEntry<CORRECTION_HISTORY_LIMIT>; Color::NUM]; CORRECTION_HISTORY_SIZE],
