@@ -4,7 +4,7 @@
 //! - TranspositionTable: テーブル本体
 //! - probe/write操作
 
-use super::alloc::{AllocKind, Allocation};
+use super::alloc::Allocation;
 use super::entry::{TTData, TTEntry};
 use super::{CLUSTER_SIZE, GENERATION_DELTA};
 use crate::position::Position;
@@ -76,23 +76,11 @@ impl ClusterTable {
     }
 
     fn uses_large_pages(&self) -> bool {
-        match self.alloc.kind() {
-            #[cfg(windows)]
-            AllocKind::LargePages => true,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            AllocKind::HugePageHint => false,
-            AllocKind::Regular => false,
-        }
+        self.alloc.kind().is_explicit_large_pages()
     }
 
     fn huge_page_hint_requested(&self) -> bool {
-        match self.alloc.kind() {
-            #[cfg(windows)]
-            AllocKind::LargePages => false,
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            AllocKind::HugePageHint => true,
-            AllocKind::Regular => false,
-        }
+        self.alloc.kind().is_huge_page_hint()
     }
 }
 
@@ -394,16 +382,6 @@ impl TtPrefetch for TranspositionTable {
 mod tests {
     use super::*;
     use crate::position::{Position, SFEN_HIRATE};
-
-    #[test]
-    fn page_status_separates_explicit_large_pages_from_hint() {
-        let tt = TranspositionTable::new(1);
-        assert!(!(tt.uses_large_pages() && tt.huge_page_hint_requested()));
-        #[cfg(not(windows))]
-        assert!(!tt.uses_large_pages());
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        assert!(!tt.huge_page_hint_requested());
-    }
 
     #[cfg(feature = "tt-write-stats")]
     #[test]

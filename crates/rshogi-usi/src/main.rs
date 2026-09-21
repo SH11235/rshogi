@@ -98,8 +98,8 @@ struct UsiEngine {
     net_deltas: BTreeMap<NetCoefficientId, i32>,
     /// ロード済み net へ未反映の delta があるか。
     net_deltas_dirty: bool,
-    /// Large Pages使用メッセージの出力済みフラグ
-    large_pages_reported: bool,
+    /// TT の page 配置メッセージの出力済みフラグ
+    page_status_reported: bool,
     // --- 有限パス権（Finite Pass Rights）関連 ---
     /// パス権ルール有効化フラグ
     pass_rights_enabled: bool,
@@ -171,7 +171,7 @@ impl UsiEngine {
             spsa_net_spec_names,
             net_deltas: BTreeMap::new(),
             net_deltas_dirty: false,
-            large_pages_reported: false,
+            page_status_reported: false,
             pass_rights_enabled: false,
             initial_pass_count: 2,
             pass_right_value_early: DEFAULT_PASS_RIGHT_VALUE_EARLY,
@@ -416,7 +416,7 @@ impl UsiEngine {
                 routing_bucket_count
             );
         }
-        self.maybe_report_large_pages();
+        self.maybe_report_page_status();
         self.maybe_load_book();
         println!("readyok");
         Ok(())
@@ -603,8 +603,8 @@ impl UsiEngine {
         Ok(())
     }
 
-    fn maybe_report_large_pages(&mut self) {
-        if self.large_pages_reported {
+    fn maybe_report_page_status(&mut self) {
+        if self.page_status_reported {
             return;
         }
 
@@ -624,7 +624,7 @@ impl UsiEngine {
             "message": message,
         });
         println!("info string {}", payload);
-        self.large_pages_reported = true;
+        self.page_status_reported = true;
     }
 
     /// setoptionコマンド: オプション設定
@@ -714,7 +714,7 @@ impl UsiEngine {
                         search.resize_tt(size);
                         self.tt_size_mb = size;
                     }
-                    self.maybe_report_large_pages();
+                    self.maybe_report_page_status();
                 }
             }
             "Threads" => {

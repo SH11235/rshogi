@@ -23,7 +23,7 @@ use windows_sys::Win32::System::Memory::{
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum AllocKind {
     /// Windows の MEM_LARGE_PAGES による確保に成功
     #[cfg(windows)]
@@ -34,6 +34,31 @@ pub(super) enum AllocKind {
     /// Large Pages 確保や hint 要求に失敗した場合のフォールバック、
     /// または macOS 等の未対応環境で使用
     Regular,
+}
+
+impl AllocKind {
+    /// Windows の明示的な Large Pages 確保に成功した種別か。
+    /// Linux/Android の hint 要求は実際の backing を保証しないため含めない。
+    pub(super) fn is_explicit_large_pages(self) -> bool {
+        match self {
+            #[cfg(windows)]
+            AllocKind::LargePages => true,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            AllocKind::HugePageHint => false,
+            AllocKind::Regular => false,
+        }
+    }
+
+    /// Linux/Android で huge-page hint の要求に成功した種別か。
+    pub(super) fn is_huge_page_hint(self) -> bool {
+        match self {
+            #[cfg(windows)]
+            AllocKind::LargePages => false,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            AllocKind::HugePageHint => true,
+            AllocKind::Regular => false,
+        }
+    }
 }
 
 pub(super) struct Allocation {
@@ -181,6 +206,8 @@ fn alloc_unix(size: usize, alignment: usize) -> Allocation {
     let layout = Layout::from_size_align(size, alignment)
         .expect("Invalid TT allocation layout")
         .pad_to_align();
+    // SAFETY: layout は from_size_align が検証済み。TT は最小 2 cluster を確保するため size は 0 にならない。
+    // 返った領域は Allocation が単独所有し、Drop で同じ layout を使って解放する。
     let ptr = unsafe { alloc(layout) };
     if ptr.is_null() {
         handle_alloc_error(layout);
@@ -235,3 +262,39 @@ impl Drop for Allocation {
 
 // SAFETY: 割当を単独所有し、所有権の移動後も同じレイアウトで解放する。共有の安全性は格納型側で保証する。
 unsafe impl Send for Allocation {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regular_pages_report_neither_status() {
+        assert!(!AllocKind::Regular.is_explicit_large_pages());
+        assert!(!AllocKind::Regular.is_huge_page_hint());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_large_pages_are_not_a_hint() {
+        assert!(AllocKind::LargePages.is_explicit_large_pages());
+        assert!(!AllocKind::LargePages.is_huge_page_hint());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn huge_page_hint_is_not_reported_as_large_pages() {
+        assert!(AllocKind::HugePageHint.is_huge_page_hint());
+        assert!(!AllocKind::HugePageHint.is_explicit_large_pages());
+    }
+
+    #[test]
+    fn allocation_kind_matches_the_platform() {
+        let allocation = Allocation::allocate(1 << 20, 64);
+        let kind = allocation.kind();
+        assert!(!(kind.is_explicit_large_pages() && kind.is_huge_page_hint()));
+        #[cfg(not(windows))]
+        assert!(!kind.is_explicit_large_pages());
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        assert!(!kind.is_huge_page_hint());
+    }
+}
