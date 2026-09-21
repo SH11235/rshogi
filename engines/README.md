@@ -28,6 +28,9 @@ cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt
 # 複数 preset を順次 build
 cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt,layerstacks-halfka_hm_merged-1536x16x32-none
 
+# Edition 軸と直交する opt-in feature を追加 (binary 名に +<feature> が付く)
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-none --features mimalloc
+
 # engines/ 配下の binary 一覧 + manifest を整形表示
 cargo xtask list-binaries
 ```
@@ -35,10 +38,11 @@ cargo xtask list-binaries
 ### 命名規則
 
 ```
-engines/rshogi-usi-<edition slug>[.exe]
+engines/rshogi-usi-<edition slug>[+<feature>...][.exe]
 ```
 
 - `<edition slug>` = preset edition 名から `edition-` 接頭辞を除いたもの
+- `+<feature>` = `--features` で追加した feature (名前順、重複なし)。追加なしなら付かない
 - Windows host では `.exe` 拡張子付与
 
 例:
@@ -47,11 +51,16 @@ engines/rshogi-usi-<edition slug>[.exe]
 edition=edition-layerstacks-halfka_hm_merged-1536x16x32-psqt
   → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt
   → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt.meta.toml
+
+edition=edition-layerstacks-halfka_hm_merged-1536x16x32-none, features=mimalloc
+  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none+mimalloc
+  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none+mimalloc.meta.toml
 ```
 
 ### manifest
 
-`engines/<binary>.meta.toml` には commit hash / profile / built_at / rustc 等を記録する。
+`engines/<binary>.meta.toml` には commit hash / profile / built_at / rustc 等を記録する
+(`--features` 付き build では追加 feature の一覧 `features` も入る)。
 selfplay/SPRT の事後検証 (「この binary はどの commit / profile か」) で使う。
 schema とフィールド説明は [`docs/build.md` の build manifest 節](../docs/build.md#build-manifest)
 を参照。

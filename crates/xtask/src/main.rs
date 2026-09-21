@@ -4,9 +4,12 @@
 //! feature を有効化した `rshogi-usi` バイナリを build し、`engines/rshogi-usi-<edition>`
 //! という命名規則で `engines/` 下に配置する。各 binary には同階層に `<binary>.meta.toml`
 //! を書き出し、後から commit / profile / built_at を追跡できるようにする。
+//! `--features <name>[,<name>...]` で Edition 軸と直交する rshogi-usi の opt-in feature
+//! (`mimalloc` 等) を全 edition に追加でき、その場合は binary 名に `+<feature>` が付く。
 //! 設計と命名規則の根拠は ADR `docs/decisions/2026-05-24-build-edition-flavor-design.md`
 //! を参照。
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,10 +24,19 @@ use serde::{Deserialize, Serialize};
 /// 実行時の current_dir に依存せず list / 検証どちらも安定して動かす目的。
 const CORE_CARGO_TOML: &str = include_str!("../../rshogi-core/Cargo.toml");
 
+/// rshogi-usi の Cargo.toml。`--features` で追加できる feature 名の真値とする。
+const USI_CARGO_TOML: &str = include_str!("../../rshogi-usi/Cargo.toml");
+
 const USI_PACKAGE: &str = "rshogi-usi";
 const USI_BINARY: &str = "rshogi-usi";
 const DEFAULT_PROFILE: &str = "production";
 const EDITION_PREFIX: &str = "edition-";
+/// binary 名で edition slug と追加 feature を区切る文字。Edition 命名は slot 区切りに `-`、
+/// slot 内の複合語に `_` を使い、feature 名自体も `-` を含むため、どれとも衝突しない
+/// `+` を使う。
+const EXTRA_FEATURE_SEPARATOR: char = '+';
+/// rshogi-usi の feature 定義が rshogi-core の feature を参照するときの接頭辞。
+const CORE_FEATURE_REF_PREFIX: &str = "rshogi-core/";
 const MANIFEST_SUFFIX: &str = ".meta.toml";
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
@@ -51,6 +63,12 @@ enum SubCmd {
         /// cargo profile (`production` / `release` / `dev` / 任意 custom profile)。
         #[arg(long, default_value = DEFAULT_PROFILE)]
         profile: String,
+        /// edition に追加で有効化する rshogi-usi の opt-in feature (`mimalloc` /
+        /// `search-stats` 等、Edition 軸と直交するもの)。build 対象の全 edition に付く。
+        /// カンマ区切り (`a,b`) または `--features` 複数回いずれも受け付ける。
+        /// 指定時は binary 名が `rshogi-usi-<edition>+<feature>[+<feature>...]` になる。
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        features: Vec<String>,
     },
     /// rshogi-core の Cargo.toml に定義された preset edition (`edition-*`) を列挙する。
     ListEditions,
@@ -66,7 +84,8 @@ fn main() -> Result<()> {
             edition,
             all_presets,
             profile,
-        } => run_build(edition, all_presets, &profile),
+            features,
+        } => run_build(edition, all_presets, &profile, &features),
         SubCmd::ListEditions => run_list_editions(),
         SubCmd::ListBinaries => run_list_binaries(),
     }
@@ -79,8 +98,14 @@ fn run_list_editions() -> Result<()> {
     Ok(())
 }
 
-fn run_build(edition_args: Vec<String>, all_presets: bool, profile: &str) -> Result<()> {
+fn run_build(
+    edition_args: Vec<String>,
+    all_presets: bool,
+    profile: &str,
+    feature_args: &[String],
+) -> Result<()> {
     let available = preset_editions(CORE_CARGO_TOML)?;
+    let extra_features = resolve_extra_features(feature_args, USI_CARGO_TOML, CORE_CARGO_TOML)?;
     let editions: Vec<String> = if all_presets {
         if !edition_args.is_empty() {
             bail!("`--edition` and `--all-presets` are mutually exclusive");
@@ -118,6 +143,7 @@ fn run_build(edition_args: Vec<String>, all_presets: bool, profile: &str) -> Res
         workspace_root: &workspace_root,
         target_dir: &target_dir,
         profile,
+        extra_features: &extra_features,
         commit: commit.as_deref(),
         commit_dirty,
         rustc_version: rustc_version.as_deref(),
@@ -146,13 +172,16 @@ struct BuildContext<'a> {
     workspace_root: &'a Path,
     target_dir: &'a Path,
     profile: &'a str,
+    /// 検証・ソート・重複除去済みの追加 feature (`resolve_extra_features` の結果)。
+    extra_features: &'a [String],
     commit: Option<&'a str>,
     commit_dirty: bool,
     rustc_version: Option<&'a str>,
 }
 
 fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
-    println!("==> Building {edition_feature} (profile={})", ctx.profile);
+    let cargo_features = cargo_features_arg(edition_feature, ctx.extra_features);
+    println!("==> Building {cargo_features} (profile={})", ctx.profile);
     let status = Command::new(ctx.cargo)
         .current_dir(ctx.workspace_root)
         .args([
@@ -165,12 +194,12 @@ fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
             ctx.profile,
             "--no-default-features",
             "--features",
-            edition_feature,
+            &cargo_features,
         ])
         .status()
         .with_context(|| format!("failed to spawn cargo build (cargo={})", ctx.cargo))?;
     if !status.success() {
-        bail!("cargo build exited with {status} for edition `{edition_feature}`");
+        bail!("cargo build exited with {status} for features `{cargo_features}`");
     }
 
     let binary_filename = format!("{USI_BINARY}{}", std::env::consts::EXE_SUFFIX);
@@ -184,7 +213,7 @@ fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
         );
     }
 
-    let dst = engines_path(ctx.workspace_root, edition_feature)?;
+    let dst = engines_path(ctx.workspace_root, edition_feature, ctx.extra_features)?;
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create engines dir: {}", parent.display()))?;
@@ -195,6 +224,7 @@ fn build_one(ctx: &BuildContext, edition_feature: &str) -> Result<()> {
     let manifest = Manifest {
         schema_version: MANIFEST_SCHEMA_VERSION,
         edition: edition_feature.to_string(),
+        features: ctx.extra_features.to_vec(),
         profile: ctx.profile.to_string(),
         commit: ctx.commit.unwrap_or("unknown").to_string(),
         commit_dirty: ctx.commit_dirty,
@@ -275,7 +305,7 @@ fn run_list_binaries() -> Result<()> {
                 } else {
                     "-"
                 };
-                (m.edition.clone(), m.profile.clone(), short_commit, status.to_string())
+                (edition_label(m), m.profile.clone(), short_commit, status.to_string())
             }
             ManifestStatus::Missing => ("-".into(), "-".into(), "-".into(), "(no manifest)".into()),
             ManifestStatus::Broken => {
@@ -331,12 +361,24 @@ fn read_manifest_status(path: &Path) -> ManifestStatus {
 struct Manifest {
     schema_version: u32,
     edition: String,
+    /// `--features` で追加した feature (ソート・重複除去済み)。追加なしの build では
+    /// field ごと省略し、manifest を追加 feature 導入前と同一の内容に保つ。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    features: Vec<String>,
     profile: String,
     commit: String,
     commit_dirty: bool,
     built_at: String,
     rustc: String,
     binary: String,
+}
+
+/// `list-binaries` の EDITION 列に出す文字列。追加 feature があれば binary 名と同じ
+/// `+<feature>` 形式で後置する。
+fn edition_label(manifest: &Manifest) -> String {
+    let mut label = manifest.edition.clone();
+    push_extra_features(&mut label, &manifest.features);
+    label
 }
 
 fn write_manifest(manifest: &Manifest, path: &Path) -> Result<()> {
@@ -366,11 +408,7 @@ fn normalize_edition(input: &str) -> String {
 
 /// rshogi-core の Cargo.toml `[features]` から `edition-*` 名を抽出してソート返却。
 fn preset_editions(cargo_toml: &str) -> Result<Vec<String>> {
-    let parsed: toml::Value = toml::from_str(cargo_toml).context("parse rshogi-core Cargo.toml")?;
-    let features = parsed
-        .get("features")
-        .and_then(|v| v.as_table())
-        .context("rshogi-core Cargo.toml has no [features] section")?;
+    let features = feature_table(cargo_toml, "rshogi-core")?;
     let mut out: Vec<String> = features
         .keys()
         .filter(|name| name.starts_with(EDITION_PREFIX))
@@ -380,12 +418,142 @@ fn preset_editions(cargo_toml: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// `engines/rshogi-usi-<edition slug><EXE_SUFFIX>` を組み立てる。
-fn engines_path(workspace_root: &Path, edition_feature: &str) -> Result<PathBuf> {
+/// Cargo.toml の `[features]` を「feature 名 → その feature が有効化する項目」の表で返す。
+/// `crate_name` はエラーメッセージ用。
+fn feature_table(cargo_toml: &str, crate_name: &str) -> Result<BTreeMap<String, Vec<String>>> {
+    let parsed: toml::Value =
+        toml::from_str(cargo_toml).with_context(|| format!("parse {crate_name} Cargo.toml"))?;
+    let features = parsed
+        .get("features")
+        .and_then(|v| v.as_table())
+        .with_context(|| format!("{crate_name} Cargo.toml has no [features] section"))?;
+    let mut out = BTreeMap::new();
+    for (name, entries) in features {
+        let entries = entries
+            .as_array()
+            .with_context(|| format!("{crate_name} feature `{name}` is not an array"))?
+            .iter()
+            .map(|e| {
+                e.as_str().map(str::to_string).with_context(|| {
+                    format!("{crate_name} feature `{name}` has a non-string entry")
+                })
+            })
+            .collect::<Result<Vec<String>>>()?;
+        out.insert(name.clone(), entries);
+    }
+    Ok(out)
+}
+
+/// `roots` から同一 crate 内の feature 参照を辿って到達できる項目を全て集める。
+/// 返り値には `dep:x` / `<crate>/<feature>` 形式の項目もそのまま含まれる。
+fn feature_closure<'a>(
+    table: &'a BTreeMap<String, Vec<String>>,
+    roots: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<&'a str> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut stack: Vec<&str> = roots.into_iter().collect();
+    while let Some(item) = stack.pop() {
+        if !seen.insert(item) {
+            continue;
+        }
+        if let Some(entries) = table.get(item) {
+            stack.extend(entries.iter().map(String::as_str));
+        }
+    }
+    seen
+}
+
+/// `--features` の値を検証し、ソート・重複除去した追加 feature の一覧を返す。
+///
+/// 追加できるのは rshogi-usi の `[features]` に定義された、Edition 軸と直交する opt-in
+/// feature だけ。次は拒否する:
+/// - rshogi-usi に存在しない名前
+/// - `default` (xtask は `--no-default-features` で edition を 1 つに固定する)
+/// - `edition-*` (edition は `--edition` で指定する)
+/// - edition の構成部品: rshogi-core のいずれかの preset edition が bundle する feature
+///   (`mode-*` / `layerstack-arch` / `nnue-psqt` / `nnue-progress-diff` 等) を有効化する
+///   もの。edition 名と実際の構成が食い違う binary を作らないため。
+fn resolve_extra_features(
+    raw: &[String],
+    usi_cargo_toml: &str,
+    core_cargo_toml: &str,
+) -> Result<Vec<String>> {
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let usi = feature_table(usi_cargo_toml, USI_PACKAGE)?;
+    let core = feature_table(core_cargo_toml, "rshogi-core")?;
+    let edition_parts = feature_closure(
+        &core,
+        core.keys().map(String::as_str).filter(|name| name.starts_with(EDITION_PREFIX)),
+    );
+
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for name in raw {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("empty feature name in `--features` (空の feature 名は指定できません)");
+        }
+        if name == "default" {
+            bail!(
+                "`default` cannot be passed to `--features` (xtask は `--no-default-features` で edition を 1 つに固定します)"
+            );
+        }
+        if name.starts_with(EDITION_PREFIX) {
+            bail!(
+                "`{name}` is a preset edition, not an extra feature (edition は `--edition` で指定してください)"
+            );
+        }
+        if !usi.contains_key(name) {
+            bail!(
+                "unknown {USI_PACKAGE} feature: `{name}` (指定できる feature は crates/rshogi-usi/Cargo.toml の [features] で確認できます)"
+            );
+        }
+        let bundled = feature_closure(&usi, [name])
+            .into_iter()
+            .filter_map(|item| item.strip_prefix(CORE_FEATURE_REF_PREFIX))
+            .find(|core_feature| edition_parts.contains(core_feature));
+        if let Some(core_feature) = bundled {
+            bail!(
+                "`{name}` is a building block of preset editions (rshogi-core `{core_feature}` は preset edition が bundle する feature です。`--edition` で該当 preset を選んでください)"
+            );
+        }
+        out.insert(name.to_string());
+    }
+    Ok(out.into_iter().collect())
+}
+
+/// cargo の `--features` に渡す値 (`<edition>[,<extra>...]`) を組み立てる。
+fn cargo_features_arg(edition_feature: &str, extra_features: &[String]) -> String {
+    let mut arg = edition_feature.to_string();
+    for feature in extra_features {
+        arg.push(',');
+        arg.push_str(feature);
+    }
+    arg
+}
+
+/// `+<feature>` を追加 feature の数だけ後置する。binary 名と `list-binaries` の表示で共用。
+fn push_extra_features(target: &mut String, extra_features: &[String]) {
+    for feature in extra_features {
+        target.push(EXTRA_FEATURE_SEPARATOR);
+        target.push_str(feature);
+    }
+}
+
+/// `engines/rshogi-usi-<edition slug>[+<feature>...]<EXE_SUFFIX>` を組み立てる。
+/// `extra_features` は `resolve_extra_features` でソート・重複除去済みのものを渡す
+/// (同じ構成が指定順によらず同じ binary 名になる)。
+fn engines_path(
+    workspace_root: &Path,
+    edition_feature: &str,
+    extra_features: &[String],
+) -> Result<PathBuf> {
     let slug = edition_feature
         .strip_prefix(EDITION_PREFIX)
         .with_context(|| format!("edition feature `{edition_feature}` missing prefix"))?;
     let mut name = format!("{USI_BINARY}-{slug}");
+    push_extra_features(&mut name, extra_features);
     name.push_str(std::env::consts::EXE_SUFFIX);
     Ok(workspace_root.join("engines").join(name))
 }
@@ -595,13 +763,163 @@ mod tests {
     #[test]
     fn engines_path_strips_edition_prefix() {
         let root = PathBuf::from("/tmp/rshogi");
-        let p =
-            engines_path(&root, "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt").unwrap();
+        let p = engines_path(&root, "edition-layerstacks-halfka_hm_merged-1536x16x32-psqt", &[])
+            .unwrap();
         let expected = format!(
             "/tmp/rshogi/engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt{}",
             std::env::consts::EXE_SUFFIX
         );
         assert_eq!(p, PathBuf::from(expected));
+    }
+
+    #[test]
+    fn engines_path_appends_extra_features() {
+        let root = PathBuf::from("/tmp/rshogi");
+        let extras = vec!["mimalloc".to_string(), "search-stats".to_string()];
+        let p = engines_path(&root, "edition-universal", &extras).unwrap();
+        let expected = format!(
+            "/tmp/rshogi/engines/rshogi-usi-universal+mimalloc+search-stats{}",
+            std::env::consts::EXE_SUFFIX
+        );
+        assert_eq!(p, PathBuf::from(expected));
+    }
+
+    #[test]
+    fn cargo_features_arg_joins_edition_and_extras() {
+        assert_eq!(cargo_features_arg("edition-universal", &[]), "edition-universal");
+        let extras = vec!["mimalloc".to_string(), "search-stats".to_string()];
+        assert_eq!(
+            cargo_features_arg("edition-universal", &extras),
+            "edition-universal,mimalloc,search-stats"
+        );
+    }
+
+    fn resolve(raw: &[&str]) -> Result<Vec<String>> {
+        let raw: Vec<String> = raw.iter().map(|s| s.to_string()).collect();
+        resolve_extra_features(&raw, USI_CARGO_TOML, CORE_CARGO_TOML)
+    }
+
+    #[test]
+    fn resolve_extra_features_sorts_and_dedups() {
+        assert_eq!(resolve(&[]).unwrap(), Vec::<String>::new());
+        assert_eq!(resolve(&["mimalloc"]).unwrap(), vec!["mimalloc"]);
+        assert_eq!(
+            resolve(&["search-stats", " mimalloc", "search-stats"]).unwrap(),
+            vec!["mimalloc", "search-stats"]
+        );
+    }
+
+    #[test]
+    fn resolve_extra_features_accepts_orthogonal_opt_in_features() {
+        for name in [
+            "mimalloc",
+            "prepacked-nnue",
+            "search-stats",
+            "nnue-stats",
+            "tt-trace",
+            "diagnostics",
+            "allocation-stats",
+            "tt-write-stats",
+            "search-no-pass-rules",
+        ] {
+            assert_eq!(resolve(&[name]).unwrap(), vec![name], "feature {name} should be accepted");
+        }
+    }
+
+    #[test]
+    fn resolve_extra_features_rejects_invalid_names() {
+        let cases = [
+            ("no-such-feature", "unknown rshogi-usi feature"),
+            ("", "empty feature name"),
+            ("default", "`default` cannot be passed"),
+            ("edition-universal", "is a preset edition"),
+            // rshogi-usi に無い edition 名も unknown ではなく edition として案内する。
+            ("edition-no-such", "is a preset edition"),
+            ("mode-specific", "building block"),
+            ("layerstack-arch", "building block"),
+            ("layerstacks-1536x16x32", "building block"),
+            ("ft-halfka_hm_merged", "building block"),
+            ("nnue-psqt", "building block"),
+            ("nnue-progress-diff", "building block"),
+            ("threat-profile-same-class", "building block"),
+        ];
+        for (name, expected) in cases {
+            let err = resolve(&[name]).expect_err(name).to_string();
+            assert!(err.contains(expected), "feature `{name}`: unexpected error: {err}");
+        }
+        // 正しい名前と混ぜても全体を拒否する。
+        assert!(resolve(&["mimalloc", "no-such-feature"]).is_err());
+    }
+
+    #[test]
+    fn resolve_extra_features_follows_local_feature_references() {
+        // rshogi-usi 内の別 feature 経由で edition の構成部品を有効化するものも拒否する。
+        let usi = r#"
+[features]
+plain = []
+indirect = ["plain", "wrapped-arch"]
+wrapped-arch = ["rshogi-core/some-arch"]
+"#;
+        let core = r#"
+[features]
+edition-x = ["edition-x-any"]
+edition-x-any = ["some-arch"]
+some-arch = []
+"#;
+        let run = |name: &str| resolve_extra_features(&[name.to_string()], usi, core);
+        assert_eq!(run("plain").unwrap(), vec!["plain"]);
+        for name in ["wrapped-arch", "indirect"] {
+            let err = run(name).expect_err(name).to_string();
+            assert!(err.contains("building block"), "feature `{name}`: {err}");
+        }
+    }
+
+    #[test]
+    fn usi_feature_names_do_not_contain_separator() {
+        // binary 名の `+` 区切りが一意に読めるよう、feature 名側に `+` が無いことを保証する。
+        let usi = feature_table(USI_CARGO_TOML, USI_PACKAGE).unwrap();
+        for name in usi.keys() {
+            assert!(!name.contains(EXTRA_FEATURE_SEPARATOR), "feature `{name}` contains `+`");
+        }
+    }
+
+    fn sample_manifest(features: Vec<String>) -> Manifest {
+        Manifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            edition: "edition-universal".into(),
+            features,
+            profile: "production".into(),
+            commit: "deadbeef".into(),
+            commit_dirty: false,
+            built_at: "2026-05-24T22:30:00+09:00".into(),
+            rustc: "rustc 1.85.0".into(),
+            binary: "rshogi-usi-universal".into(),
+        }
+    }
+
+    #[test]
+    fn manifest_omits_features_field_without_extras() {
+        let text = toml::to_string_pretty(&sample_manifest(Vec::new())).unwrap();
+        let expected = r#"schema_version = 1
+edition = "edition-universal"
+profile = "production"
+commit = "deadbeef"
+commit_dirty = false
+built_at = "2026-05-24T22:30:00+09:00"
+rustc = "rustc 1.85.0"
+binary = "rshogi-usi-universal"
+"#;
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn manifest_round_trips_extra_features() {
+        let m = sample_manifest(vec!["mimalloc".into(), "search-stats".into()]);
+        let text = toml::to_string_pretty(&m).unwrap();
+        let parsed: Manifest = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.features, m.features);
+        assert_eq!(edition_label(&parsed), "edition-universal+mimalloc+search-stats");
+        assert_eq!(edition_label(&sample_manifest(Vec::new())), "edition-universal");
     }
 
     #[test]
@@ -658,22 +976,14 @@ mod tests {
         assert!(matches!(read_manifest_status(&broken), ManifestStatus::Broken));
 
         let good = tmp.join("good.meta.toml");
-        let m = Manifest {
-            schema_version: MANIFEST_SCHEMA_VERSION,
-            edition: "edition-universal".into(),
-            profile: "production".into(),
-            commit: "deadbeef".into(),
-            commit_dirty: false,
-            built_at: "2026-05-24T22:30:00+09:00".into(),
-            rustc: "rustc 1.85.0".into(),
-            binary: "rshogi-usi-universal".into(),
-        };
+        let m = sample_manifest(Vec::new());
         write_manifest(&m, &good).unwrap();
         let ManifestStatus::Loaded(loaded) = read_manifest_status(&good) else {
             panic!("valid manifest was not loaded");
         };
         assert_eq!(loaded.schema_version, m.schema_version);
         assert_eq!(loaded.edition, m.edition);
+        assert_eq!(loaded.features, m.features);
         assert_eq!(loaded.profile, m.profile);
         assert_eq!(loaded.commit, m.commit);
         assert_eq!(loaded.commit_dirty, m.commit_dirty);
@@ -705,6 +1015,8 @@ binary = "rshogi-usi-universal"
         });
         assert_eq!(parsed.schema_version, 1);
         assert_eq!(parsed.edition, "edition-universal");
+        // `features` field を持たない manifest (追加 feature 導入前 / 追加なし build) は空で読む。
+        assert!(parsed.features.is_empty());
         assert_eq!(parsed.profile, "production");
         assert_eq!(parsed.binary, "rshogi-usi-universal");
     }

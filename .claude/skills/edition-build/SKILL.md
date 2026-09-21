@@ -59,12 +59,24 @@ cargo run --release -p xtask -- build \
 
 # 全 preset
 cargo run --release -p xtask -- build --all-presets --profile production
+
+# Edition 軸と直交する opt-in feature (mimalloc / search-stats 等) を追加
+cargo run --release -p xtask -- build \
+  --edition layerstacks-halfka_hm_merged-1536x16x32-none \
+  --features mimalloc --profile production
 ```
 
 出力:
 
 - `engines/rshogi-usi-<edition>` (binary)
 - `engines/rshogi-usi-<edition>.meta.toml` (build trace: edition / profile / commit / built_at / rustc)
+
+`--features <name>[,<name>...]` を付けた場合は binary 名が
+`rshogi-usi-<edition>+<feature>[+<feature>...]` (feature は名前順) になり、meta.toml に
+`features = [...]` が記録される。追加なしの build とは別ファイルになるので上書きしない。
+指定できるのは rshogi-usi の `[features]` にある opt-in feature だけで、`default` /
+`edition-*` / edition の構成部品 (`layerstack-arch` / `nnue-psqt` / `nnue-progress-diff`
+等、preset が bundle する feature) は拒否される。詳細は `docs/build.md`。
 
 `engines/` は gitignored なので長期保持される (`target/production/` は `cargo clean`
 で消える、`/tmp/` は再起動で揮発するため使わない)。
@@ -167,7 +179,8 @@ grep -E '^[a-z][a-z0-9-]+ =' crates/rshogi-core/Cargo.toml
 ### モデル → feature 対応表
 
 preset 名から逆引きできる。preset と等価な features は下表、または rshogi-core
-Cargo.toml の `edition-*` feature 定義で確認する (meta.toml には features は載らない)。
+Cargo.toml の `edition-*` feature 定義で確認する (meta.toml の `features` は `--features` の追加分だけで、
+edition を構成する feature は載らない)。
 
 | アーキ | preset 名 (`xtask build --edition`) | 手動 build features |
 |---|---|---|

@@ -89,6 +89,9 @@ cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-psqt
 cargo xtask build --edition X,Y
 cargo xtask build --all-presets
 
+# Edition 軸と直交する opt-in feature を追加 (engines/rshogi-usi-<edition>+mimalloc に配置)
+cargo xtask build --edition X --features mimalloc
+
 # engines/ 配下の binary 一覧 (preset / commit / age / status を表示)
 cargo xtask list-binaries
 ```

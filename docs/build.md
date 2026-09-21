@@ -71,6 +71,9 @@ cargo xtask build --edition X --edition Y
 # 全 preset を build (現状 24 件)
 cargo xtask build --all-presets
 
+# Edition 軸と直交する opt-in feature を追加 (engines/rshogi-usi-<preset>+mimalloc に配置)
+cargo xtask build --edition layerstacks-halfka_hm_merged-1536x16x32-none --features mimalloc
+
 # engines/ 配下の binary 一覧 + manifest を表表示
 cargo xtask list-binaries
 ```
@@ -135,7 +138,7 @@ preset edition を build して `engines/` 下に配置する。
 
 ```
 cargo xtask build [--edition <preset>[,<preset>...]] [--all-presets]
-                  [--profile <name>]
+                  [--profile <name>] [--features <name>[,<name>...]]
 ```
 
 - `--edition <name>` : preset edition (`edition-` 接頭辞省略可)。複数指定可
@@ -145,21 +148,49 @@ cargo xtask build [--edition <preset>[,<preset>...]] [--all-presets]
   単一 codegen unit)。`release` は dev iteration 向け (thin LTO)、`profiling` は
   releaseの詳細debug情報付き、`production-profiling` はproductionの最適化条件に
   行情報を加えた解析用profile。`dev` はcargoのdefault debug build。
+- `--features <name>` : edition に追加で有効化する rshogi-usi の opt-in feature。
+  複数指定可 (カンマ区切り or `--features` 複数回)。build 対象の全 edition に付く
+  (`--all-presets` とも併用可)。詳細は下の「追加 feature」参照。
 
 build 後、`engines/rshogi-usi-<edition slug>` と `<binary>.meta.toml` がペアで
 生成される。
 
+#### 追加 feature (`--features`)
+
+Edition 軸と直交する opt-in feature (`mimalloc` / `prepacked-nnue` / `search-stats` /
+`nnue-stats` / `tt-trace` / `diagnostics` / `allocation-stats` / `tt-write-stats` 等) を
+preset edition に重ねて build する。指定できる名前は `crates/rshogi-usi/Cargo.toml` の
+`[features]` に定義されたもので、次は拒否する:
+
+- rshogi-usi に存在しない名前
+- `default` (xtask は `--no-default-features` で edition を 1 つに固定する)
+- `edition-*` (edition は `--edition` で指定する)
+- edition の構成部品: rshogi-core のいずれかの preset edition が bundle する feature
+  (`mode-*` / `layerstack-arch` / `ft-*` / `layerstacks-<dims>` / `nnue-psqt` /
+  `nnue-threat` / `nnue-progress-diff` / preset に束ねられた `threat-profile-*` 等)。
+  edition 名と実際の構成が食い違う binary を作らないため、該当 preset を `--edition` で選ぶ
+
+feature 同士の排他 (`mimalloc` と `allocation-stats` 等) は xtask では検査せず、
+cargo build のエラーで検出される。
+
 #### 命名規則
 
-`engines/rshogi-usi-<edition slug>[.exe]`
+`engines/rshogi-usi-<edition slug>[+<feature>...][.exe]`
 
 - `<edition slug>` = preset edition から `edition-` 接頭辞を除いたもの
+- `+<feature>` = `--features` で追加した feature。名前順にソートし重複を除いて並べるため、
+  指定順によらず同じ構成は同じ名前になる。追加なしなら何も付かない。Edition 名は
+  slot 区切りに `-`、slot 内の複合語に `_` を使い、feature 名も `-` を含むため、
+  区切りにはどれとも衝突しない `+` を使う
 - Windows host では `.exe` 拡張子付与 (Linux/macOS は空)
 
 例:
 ```
 edition=edition-layerstacks-halfka_hm_merged-1536x16x32-psqt
   → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt
+
+edition=edition-layerstacks-halfka_hm_merged-1536x16x32-none, features=search-stats,mimalloc
+  → engines/rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-none+mimalloc+search-stats
 ```
 
 ### `cargo xtask list-editions`
@@ -219,6 +250,17 @@ rustc = "rustc 1.85.0 (abc 2026-01-01)"
 binary = "rshogi-usi-layerstacks-halfka_hm_merged-1536x16x32-psqt"
 ```
 
+`--features` 付きで build した場合だけ、`edition` の次に `features` が入る
+(追加なしの build では field ごと省略され、上の例と同じ内容になる):
+
+```toml
+edition = "edition-layerstacks-halfka_hm_merged-1536x16x32-none"
+features = ["mimalloc"]
+```
+
+`cargo xtask list-binaries` の EDITION 列も、追加 feature があれば binary 名と同じ
+`<edition>+<feature>` 形式で表示する。
+
 旧 v1 manifest (`flavor` field を含む) も `cargo xtask list-binaries` で
 parse 失敗せず読める (serde 既定の未知フィールド silently ignore)。
 
@@ -226,6 +268,7 @@ parse 失敗せず読める (serde 既定の未知フィールド silently ignor
 |---|---|
 | `schema_version` | manifest schema version (現在 1) |
 | `edition` | build に使った preset edition の正式名 |
+| `features` | `--features` で追加した feature (ソート・重複除去済み)。追加なしなら field 自体を省略 |
 | `profile` | cargo profile 名 |
 | `commit` | `git rev-parse HEAD` の結果。取得失敗時は `"unknown"` + stderr warning |
 | `commit_dirty` | build 時に `git status --porcelain` が非空だったか |
