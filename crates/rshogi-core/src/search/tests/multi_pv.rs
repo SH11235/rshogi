@@ -100,6 +100,44 @@ fn test_stable_sort_range_partial() {
     assert_eq!(root_moves[3].pv[0], Move::from_usi("2g2f").unwrap());
 }
 
+#[test]
+fn root_sort_preserves_stable_order_and_range_boundaries() {
+    for len in [0, 1, 2, 32, 256, 600, 1024] {
+        let source: Vec<_> = (0..len)
+            .map(|i| {
+                let mut root = RootMove::new(Move::from_usi("7g7f").unwrap());
+                root.score = Value::new((i * 37 % 11) as i32 - 5);
+                root.previous_score = Value::new((i * 13 % 3) as i32 - 1);
+                // 同じscore/previous_scoreの候補も区別するための識別値。
+                root.sel_depth = i as i32;
+                root
+            })
+            .collect();
+        for (start, end) in [(0, len), (len / 2, len), (0, 0), (len, len + 1)] {
+            let mut expected = source.clone();
+            if start < end && end <= len {
+                expected[start..end].sort_by_key(|root| {
+                    std::cmp::Reverse((root.score.raw(), root.previous_score.raw()))
+                });
+            }
+            let ids =
+                |roots: &[RootMove]| roots.iter().map(|root| root.sel_depth).collect::<Vec<_>>();
+            let mut roots = RootMoves::from_vec(source.clone());
+            roots.stable_sort_range(start, end);
+            assert_eq!(ids(roots.as_slice()), ids(&expected), "len={len} range={start}..{end}");
+            // 整列済みで再度呼んでも同点順序と範囲外が変わらない。
+            roots.stable_sort_range(start, end);
+            assert_eq!(ids(roots.as_slice()), ids(&expected));
+            if start == 0 && end == len {
+                let mut roots = RootMoves::from_vec(source.clone());
+                roots.sort();
+                roots.sort();
+                assert_eq!(ids(roots.as_slice()), ids(&expected));
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Phase 3: 統合テスト（MultiPVループの実動作確認）
 // =============================================================================
