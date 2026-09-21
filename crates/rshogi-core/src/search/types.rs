@@ -741,9 +741,7 @@ impl RootMoves {
 
     /// スコアでソート（降順）
     pub fn sort(&mut self) {
-        if !self.moves.is_sorted() {
-            self.moves.sort();
-        }
+        Self::sort_slice(&mut self.moves);
     }
 
     /// 指定範囲をスコア降順で安定ソート
@@ -759,17 +757,27 @@ impl RootMoves {
             return;
         }
 
-        // 整列済みなら、一時バッファ確保を伴うsortを呼ばない。
-        if self.moves[start..end].is_sorted() {
-            return;
-        }
+        Self::sort_slice(&mut self.moves[start..end]);
+    }
 
-        // std::stable_sort相当: score降順、同点はprevious_score降順
-        // Rustのslice::sort_byは安定ソートなので同値時は元順序を保持する
-        self.moves[start..end].sort_by(|a, b| match b.score.cmp(&a.score) {
-            std::cmp::Ordering::Equal => b.previous_score.cmp(&a.previous_score),
-            ord => ord,
-        });
+    fn sort_slice(moves: &mut [RootMove]) {
+        // 少数候補の順位変更は確保せず直し、移動量が線形の上限を超えれば安定sortへ戻す。
+        let mut remaining_shifts = moves.len().saturating_mul(2);
+        for index in 1..moves.len() {
+            if !moves[index - 1].cmp(&moves[index]).is_gt() {
+                continue;
+            }
+            // prefixは整列済み。同点候補の後ろへ挿入し、元の相対順序を保持する。
+            let destination =
+                moves[..index].partition_point(|root| !root.cmp(&moves[index]).is_gt());
+            let shifts = index - destination;
+            if shifts > remaining_shifts {
+                moves.sort();
+                return;
+            }
+            moves[destination..=index].rotate_right(1);
+            remaining_shifts -= shifts;
+        }
     }
 
     /// RootMoveを末尾に追加
