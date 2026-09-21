@@ -16,6 +16,200 @@ fn main() {
     std::process::exit(1);
 }
 
+/// 計測対象バイナリの同一性 (SHA-256 / サイズ) を記録する、両 backend 共通の処理。
+///
+/// パスだけでは後から「どのビルドの結果か」を証明できないため、計測開始前に
+/// baseline / candidate の実行ファイルを 1 回だけハッシュし、stdout ヘッダと
+/// JSON レポートの `binaries` ブロックへ残す。
+#[cfg(any(unix, windows))]
+mod binary_identity {
+    use std::fs::File;
+    use std::io::Read;
+    use std::path::Path;
+
+    use anyhow::{Context, Result};
+    use serde::Serialize;
+    use sha2::{Digest, Sha256};
+
+    /// 実行ファイル 1 本分の同一性情報。
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+    pub struct BinaryIdentity {
+        /// CLI に渡されたパス (`cli.baseline` / `cli.candidate` と同じ表記)
+        pub path: String,
+        /// ファイル内容の SHA-256 (小文字 16 進 64 桁)
+        pub sha256: String,
+        /// ハッシュ対象として読んだバイト数
+        pub size_bytes: u64,
+    }
+
+    /// JSON レポートの `binaries` ブロック。
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+    pub struct BinaryIdentities {
+        pub baseline: BinaryIdentity,
+        pub candidate: BinaryIdentity,
+    }
+
+    impl BinaryIdentities {
+        /// baseline / candidate が同一内容か (A/A 計測や同一バイナリ内切替実験)。
+        pub fn is_same_binary(&self) -> bool {
+            self.baseline.sha256 == self.candidate.sha256
+        }
+    }
+
+    /// ファイルを固定長バッファで streaming 読みし、SHA-256 とバイト数を返す。
+    pub fn hash_binary(path: &Path) -> Result<BinaryIdentity> {
+        let mut file = File::open(path)
+            .with_context(|| format!("failed to open engine binary {}", path.display()))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut size_bytes = 0u64;
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .with_context(|| format!("failed to read engine binary {}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            size_bytes += read as u64;
+        }
+        Ok(BinaryIdentity {
+            path: path.display().to_string(),
+            sha256: format!("{:x}", hasher.finalize()),
+            size_bytes,
+        })
+    }
+
+    /// baseline / candidate をハッシュし、stdout ヘッダとして出力する。
+    ///
+    /// 計測を始める前に 1 回だけ呼ぶ。ハッシュできない場合は結果の帰属を
+    /// 証明できないため、計測に入らずエラーで終了させる。
+    pub fn collect_and_print(baseline: &Path, candidate: &Path) -> Result<BinaryIdentities> {
+        let identities = BinaryIdentities {
+            baseline: hash_binary(baseline)?,
+            candidate: hash_binary(candidate)?,
+        };
+        for line in header_lines(&identities) {
+            println!("{line}");
+        }
+        Ok(identities)
+    }
+
+    /// stdout ヘッダの各行を組み立てる。
+    fn header_lines(identities: &BinaryIdentities) -> Vec<String> {
+        let mut lines = vec![
+            format_header_line("baseline", &identities.baseline),
+            format_header_line("candidate", &identities.candidate),
+        ];
+        if identities.is_same_binary() {
+            lines.push(
+                "[binary] info: baseline と candidate は同一 SHA-256 です \
+                 (A/A 計測または同一バイナリ内切替)"
+                    .to_string(),
+            );
+        }
+        lines
+    }
+
+    fn format_header_line(label: &str, identity: &BinaryIdentity) -> String {
+        format!(
+            "[binary] {label}: sha256={} size_bytes={} path={}",
+            identity.sha256, identity.size_bytes, identity.path
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        use std::io::Write;
+
+        #[test]
+        fn hash_binary_returns_known_sha256_and_size() {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(b"abc").unwrap();
+            file.flush().unwrap();
+
+            let identity = hash_binary(file.path()).unwrap();
+            assert_eq!(
+                identity.sha256,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
+            assert_eq!(identity.size_bytes, 3);
+            assert_eq!(identity.path, file.path().display().to_string());
+        }
+
+        #[test]
+        fn hash_binary_streams_files_larger_than_buffer() {
+            // バッファ (64 KiB) を跨ぐ入力でも全体が 1 つのハッシュになることを確認する。
+            let content = vec![0x5au8; 64 * 1024 * 2 + 17];
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(&content).unwrap();
+            file.flush().unwrap();
+
+            let identity = hash_binary(file.path()).unwrap();
+            assert_eq!(identity.sha256, format!("{:x}", Sha256::digest(&content)));
+            assert_eq!(identity.size_bytes, content.len() as u64);
+        }
+
+        #[test]
+        fn hash_binary_reports_missing_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = hash_binary(&dir.path().join("missing-engine")).unwrap_err();
+            assert!(err.to_string().contains("failed to open engine binary"));
+        }
+
+        #[test]
+        fn header_notes_same_binary_without_failing() {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(b"same").unwrap();
+            file.flush().unwrap();
+            let mut other = tempfile::NamedTempFile::new().unwrap();
+            other.write_all(b"other").unwrap();
+            other.flush().unwrap();
+
+            let same = BinaryIdentities {
+                baseline: hash_binary(file.path()).unwrap(),
+                candidate: hash_binary(file.path()).unwrap(),
+            };
+            assert!(same.is_same_binary());
+            let lines = header_lines(&same);
+            assert_eq!(lines.len(), 3);
+            assert!(lines[2].contains("同一 SHA-256"));
+
+            let different = BinaryIdentities {
+                baseline: hash_binary(file.path()).unwrap(),
+                candidate: hash_binary(other.path()).unwrap(),
+            };
+            assert!(!different.is_same_binary());
+            assert_eq!(header_lines(&different).len(), 2);
+        }
+
+        #[test]
+        fn binaries_block_serializes_expected_shape() {
+            let identities = BinaryIdentities {
+                baseline: BinaryIdentity {
+                    path: "engines/before".to_string(),
+                    sha256: "aa".to_string(),
+                    size_bytes: 1,
+                },
+                candidate: BinaryIdentity {
+                    path: "engines/after".to_string(),
+                    sha256: "bb".to_string(),
+                    size_bytes: 2,
+                },
+            };
+            assert_eq!(
+                serde_json::to_value(&identities).unwrap(),
+                serde_json::json!({
+                    "baseline": {"path": "engines/before", "sha256": "aa", "size_bytes": 1},
+                    "candidate": {"path": "engines/after", "sha256": "bb", "size_bytes": 2},
+                })
+            );
+        }
+    }
+}
+
 #[cfg(unix)]
 mod unix_main {
 
@@ -34,6 +228,8 @@ mod unix_main {
     use serde::Serialize;
 
     use tools::{SystemInfo, collect_system_info};
+
+    use crate::binary_identity::{self, BinaryIdentities};
 
     const PERF_CTL_FD: RawFd = 20;
     const PERF_ACK_FD: RawFd = 21;
@@ -331,6 +527,7 @@ mod unix_main {
     #[derive(Debug, Clone, Serialize)]
     struct JsonReport {
         cli: JsonCli,
+        binaries: BinaryIdentities,
         system_info: SystemInfo,
         positions: Vec<PositionCase>,
         samples: Vec<RunSample>,
@@ -720,6 +917,8 @@ mod unix_main {
         }
 
         let shard_cpus = resolve_shard_cpus(&cli)?;
+        // 計測開始前に 1 回だけ対象バイナリを同定し、ログと JSON の両方へ残す。
+        let binaries = binary_identity::collect_and_print(&cli.baseline, &cli.candidate)?;
         let shards = shard_positions(&positions, shard_cpus.len());
         let mut handles = Vec::new();
 
@@ -772,6 +971,7 @@ mod unix_main {
                     baseline_usi_options: cli.baseline_usi_options.clone(),
                     candidate_usi_options: cli.candidate_usi_options.clone(),
                 },
+                binaries,
                 system_info: collect_system_info(),
                 positions,
                 blocks: build_blocks(&samples),
@@ -1390,6 +1590,8 @@ mod windows_main {
 
     use tools::{SystemInfo, collect_system_info};
 
+    use crate::binary_identity::{self, BinaryIdentities};
+
     use pmc::{MAX_PMC_SOURCES, PmcEngineState};
 
     const DEFAULT_PMC_SOURCES: &str = "TotalCycles,InstructionRetired";
@@ -1673,6 +1875,7 @@ mod windows_main {
     #[derive(Debug, Clone, Serialize)]
     struct JsonReport {
         cli: JsonCli,
+        binaries: BinaryIdentities,
         system_info: SystemInfo,
         positions: Vec<PositionCase>,
         samples: Vec<RunSample>,
@@ -3544,6 +3747,8 @@ mod windows_main {
         let pattern = parse_pattern(&cli.pattern)?;
         let source_names = parse_pmc_source_names(&cli.pmc_sources)?;
         let source_indices = resolve_profile_sources(&source_names)?;
+        // 計測開始前に 1 回だけ対象バイナリを同定し、ログと JSON の両方へ残す。
+        let binaries = binary_identity::collect_and_print(&cli.baseline, &cli.candidate)?;
 
         let shared = Arc::new(Mutex::new(PmcEngineState::default()));
 
@@ -3619,6 +3824,7 @@ mod windows_main {
                     baseline_usi_options: cli.baseline_usi_options.clone(),
                     candidate_usi_options: cli.candidate_usi_options.clone(),
                 },
+                binaries,
                 system_info: collect_system_info(),
                 positions,
                 blocks: build_blocks(&samples),
