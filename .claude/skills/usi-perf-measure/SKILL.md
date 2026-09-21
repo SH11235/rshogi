@@ -375,6 +375,8 @@ instructions/node が横ばいで cycles/node だけが 1% 前後動く結果は
   2〜3 通りでビルドして各組を A/B する。例:
   `RUSTFLAGS="-C target-cpu=native -C llvm-args=-align-all-functions=6"`
   （環境変数の `RUSTFLAGS` は `.cargo/config.toml` の rustflags を置き換えるので、`target-cpu` も明示する）。
+  `llvm-args` は LLVM へそのまま渡す指定で、toolchain の更新で名前が変わりうる。ビルドが通ることと、
+  摂動なしの build と binary の SHA-256 が変わることを確認する。
   摂動ごとに符号が割れるなら、その大きさの差は配置差と区別できていない。
 
 複数の変更を同じ baseline binary と比べた結果は、baseline の配置が不利な場合に全部が同じだけ
