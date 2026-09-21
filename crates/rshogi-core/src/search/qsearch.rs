@@ -378,8 +378,10 @@ pub(super) fn qsearch<const NT: u8>(
     // qsearch の子ノードも qsearch なので、この部分木では MovePicker が読む history
     // （capture/main/continuation）は一切更新されない。よって手順は事前 collect と同一で、
     // beta カット時に残りステージの生成・スコアリング・ソートを丸ごと省ける。
+    // qsearch の部分木へ history の更新を足す場合は、手順が変わるのでこの前提を見直すこと。
     loop {
-        // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
+        // SAFETY: history は worker 単位で、単一スレッドからしか触らない。共有参照 h は
+        // next_move の呼び出しを囲むブロックの終わりで破棄され、下の再帰呼び出しの間は生存しない。
         let mv = {
             let h = unsafe { ctx.history.as_ref_unchecked() };
             mp.next_move(pos, h)
