@@ -69,7 +69,7 @@ pub static CHECK_AROUND_BB: LazyLock<[[[Bitboard; 2]; PieceType::NUM + 1]; 81]> 
     LazyLock::new(init_check_around_bb);
 
 /// sq1に対してsq2の延長上にある次の升
-/// [sq1][sq2] -> 次の升（盤外ならNone）
+/// [sq1][sq2] -> 次の升（同一升・非直線・盤外ならNone）
 pub static NEXT_SQUARE: LazyLock<[[Option<Square>; 81]; 81]> = LazyLock::new(init_next_square);
 
 /// テーブルのラッパー（Color/enum指定で取りやすくする）
@@ -271,8 +271,8 @@ fn init_next_square() -> [[Option<Square>; 81]; 81] {
             let f2 = s2.file().index() as i32;
             let r2 = s2.rank().index() as i32;
 
-            let df = (f2 - f1).signum();
-            let dr = (r2 - r1).signum();
+            let df = f2 - f1;
+            let dr = r2 - r1;
 
             // 同一マスや非直線の場合はNone
             if (df == 0 && dr == 0) || !(df == 0 || dr == 0 || df.abs() == dr.abs()) {
@@ -280,8 +280,8 @@ fn init_next_square() -> [[Option<Square>; 81]; 81] {
                 continue;
             }
 
-            let nf = f2 + df;
-            let nr = r2 + dr;
+            let nf = f2 + df.signum();
+            let nr = r2 + dr.signum();
             if (0..=8).contains(&nf)
                 && (0..=8).contains(&nr)
                 && let (Some(file), Some(rank)) =
@@ -298,6 +298,49 @@ fn init_next_square() -> [[Option<Square>; 81]; 81] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn next_square_matches_eight_direction_rays() {
+        let directions = [
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ];
+        for from in Square::all() {
+            for through in Square::all() {
+                let mut expected = None;
+                for (df, dr) in directions {
+                    // 8方向を1升ずつ辿り、throughの次の升を求める独立oracle。
+                    let mut file = from.file().index() as i32 + df;
+                    let mut rank = from.rank().index() as i32 + dr;
+                    while (0..9).contains(&file) && (0..9).contains(&rank) {
+                        if file == through.file().index() as i32
+                            && rank == through.rank().index() as i32
+                        {
+                            if let (Some(next_file), Some(next_rank)) =
+                                (File::from_u8((file + df) as u8), Rank::from_u8((rank + dr) as u8))
+                            {
+                                expected = Some(Square::new(next_file, next_rank));
+                            }
+                            break;
+                        }
+                        file += df;
+                        rank += dr;
+                    }
+                }
+                assert_eq!(
+                    NEXT_SQUARE[from.index()][through.index()],
+                    expected,
+                    "from={from:?}, through={through:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_piece_type_check_enum() {
