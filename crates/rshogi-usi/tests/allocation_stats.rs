@@ -48,7 +48,7 @@ fn repeated_searches_report_all_phases_before_bestmove() {
             let lines = receive_until("bestmove ")?;
             let reports: Vec<_> = lines
                 .iter()
-                .filter(|line| line.starts_with("info string allocations "))
+                .filter(|line| line.starts_with("info string allocation_events "))
                 .collect();
             if reports.len() != 5 {
                 return Err(format!("expected five phases: {lines:?}"));
@@ -59,7 +59,7 @@ fn repeated_searches_report_all_phases_before_bestmove() {
                 if !line.contains(&format!("phase={phase} ")) {
                     return Err(format!("wrong phase: {line}"));
                 }
-                for field in ["alloc", "zeroed", "realloc", "dealloc", "requested_bytes"] {
+                for field in ["allocated", "deallocated", "object_bytes"] {
                     let value = line
                         .split_whitespace()
                         .find_map(|word| word.strip_prefix(&format!("{field}=")))

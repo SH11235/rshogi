@@ -1765,6 +1765,9 @@ fn parse_spsa_net_spec(content: &str) -> Result<Vec<String>> {
 }
 
 fn main() -> Result<()> {
+    #[cfg(feature = "allocation-stats")]
+    allocation_stats::init()?;
+
     // ロガー初期化（標準エラー出力）
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .target(env_logger::Target::Stderr)

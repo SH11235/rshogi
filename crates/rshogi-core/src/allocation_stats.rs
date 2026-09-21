@@ -54,36 +54,32 @@ impl Drop for Scope {
     }
 }
 
-/// Successful allocator operation (deallocation always succeeds).
+/// 計測用 allocator が通知した確保・解放イベント。
 #[derive(Clone, Copy)]
 pub enum Operation {
     Alloc,
-    AllocZeroed,
-    Realloc,
     Dealloc,
 }
 
-static COUNTERS: [[AtomicU64; 5]; 5] = [const { [const { AtomicU64::new(0) }; 5] }; 5];
+static COUNTERS: [[AtomicU64; 3]; 5] = [const { [const { AtomicU64::new(0) }; 3] }; 5];
 
 /// Records a successful operation without allocation, locks, or formatting.
-/// `bytes` is the requested size, or the new size for realloc; frees add no bytes.
+/// `bytes` は確保イベントの要求サイズ。解放はサイズの合計に加えない。
 pub fn record(operation: Operation, bytes: usize) {
     let phase = PHASE.try_with(Cell::get).unwrap_or(Phase::Other) as usize;
     let index = match operation {
         Operation::Alloc => 0,
-        Operation::AllocZeroed => 1,
-        Operation::Realloc => 2,
-        Operation::Dealloc => 3,
+        Operation::Dealloc => 1,
     };
     COUNTERS[phase][index].fetch_add(1, Ordering::Relaxed);
     if !matches!(operation, Operation::Dealloc) {
-        COUNTERS[phase][4].fetch_add(bytes as u64, Ordering::Relaxed);
+        COUNTERS[phase][2].fetch_add(bytes as u64, Ordering::Relaxed);
     }
 }
 
-/// Rows follow [`PHASES`]; columns: alloc, zeroed, realloc, dealloc, requested bytes.
+/// Rows follow [`PHASES`]; columns: allocation events, deallocation events, object bytes.
 /// Snapshots are not atomic across counters. Read after search workers have joined.
-pub fn snapshot() -> [[u64; 5]; 5] {
+pub fn snapshot() -> [[u64; 3]; 5] {
     std::array::from_fn(|p| std::array::from_fn(|c| COUNTERS[p][c].load(Ordering::Relaxed)))
 }
 
