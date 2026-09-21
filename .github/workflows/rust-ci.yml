@@ -96,6 +96,9 @@ jobs:
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # rust-cacheの既定RUST prefixでvirtual workspaceのroot profile設定もhashする。
+        env:
+          RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
       - name: Run Clippy
@@ -115,6 +118,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
     timeout-minutes: 30
+    # cache actionとcargoが同じprofile overrideを見るようjob全体へ適用する。
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install mold linker
@@ -131,9 +138,12 @@ jobs:
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
       - name: Run tests
+        # profile overrideはcacheにも見せるためjob envで指定する。
         # `[profile.release]` の `lto = "thin"` はテストバイナリ (~90 個) 各々の
         # リンクに適用され、Test job のビルド時間の大半を占める。テスト実行自体は
         # 全 workspace で ~20 秒なので、CI のテストビルドでは LTO を無効化し
@@ -141,9 +151,6 @@ jobs:
         # overflow-checks 等の release 設定は維持される。本番配備物はそもそも
         # `production` プロファイル (fat LTO) の別 codegen であり、本 job の目的は
         # ロジック検証なので LTO の有無はカバレッジに影響しない。
-        env:
-          CARGO_PROFILE_RELEASE_LTO: "off"
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
         run: cargo test --release --workspace -- --test-threads=2
       - name: sccache stats
         if: always()
@@ -220,6 +227,8 @@ jobs:
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
           # host target キャッシュ (`lint` / `test` job) と完全分離する。
@@ -253,6 +262,9 @@ jobs:
     #   だと `CARGO_TARGET_<triple>_RUSTFLAGS` が無視されるため、step 内で `RUSTFLAGS` を
     #   unset してから cargo を呼ぶ。
     name: SIMD runtime (${{ matrix.label }})
+    env:
+      # cache actionにも実際のtarget-cpuを渡す。build時は下記stepでRUSTFLAGSをunsetする。
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C target-cpu=${{ matrix.cpu }}"
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
@@ -287,6 +299,8 @@ jobs:
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
           # host baseline (`lint` / `test`) や wasm32 とキャッシュ namespace を分離する。
@@ -299,7 +313,6 @@ jobs:
           test -x "$SDE_PATH/sde64" || { echo "sde64 not found under SDE_PATH=$SDE_PATH"; ls -la "$SDE_PATH" || true; exit 1; }
           # RUSTFLAGS が set だと CARGO_TARGET_<triple>_RUSTFLAGS が無視されるため unset。
           unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
-          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=${{ matrix.cpu }}"
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$SDE_PATH/sde64 -${{ matrix.chip }} --"
           cargo test -p rshogi-core --lib --target x86_64-unknown-linux-gnu -- --test-threads=2
       - name: sccache stats
@@ -346,6 +359,8 @@ jobs:
       - name: Enable sccache
         run: echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        env:
+          RUST_CACHE_WORKSPACE_MANIFEST: ${{ hashFiles('Cargo.toml') }}
         with:
           cache-on-failure: true
           # host / wasm32-unknown キャッシュと混在させないため専用 namespace を確保する。
