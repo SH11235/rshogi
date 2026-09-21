@@ -220,12 +220,20 @@ impl InfoSnapshot {
             })
             && let (Some(depth), Some(score)) = (depth, primary_score)
         {
-            self.last_exact_primary = Some(ExactPrimaryInfo {
-                depth,
-                score,
-                pv: pv.clone(),
-                raw_line: line.to_owned(),
-            });
+            if let Some(record) = self.last_exact_primary.as_mut() {
+                record.depth = depth;
+                record.score = score;
+                record.pv.clone_from(&pv);
+                record.raw_line.clear();
+                record.raw_line.push_str(line);
+            } else {
+                self.last_exact_primary = Some(ExactPrimaryInfo {
+                    depth,
+                    score,
+                    pv: pv.clone(),
+                    raw_line: line.to_owned(),
+                });
+            }
         }
 
         // multipv=1 はメインフィールドも更新
@@ -416,6 +424,28 @@ mod tests {
         let json = serde_json::to_string(&log).unwrap();
         let restored: EvalLog = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.last_exact_primary, Some(expected));
+    }
+
+    #[test]
+    fn coherent_primary_reuses_owned_buffers() {
+        let mut snap = InfoSnapshot::default();
+        snap.update_from_line("info depth 10 score cp 100 nodes 1000 pv 7g7f 3c3d");
+        let record = snap.last_exact_primary.as_ref().unwrap();
+        let pv_ptr = record.pv.as_ptr();
+        let move_ptrs: Vec<_> = record.pv.iter().map(|mv| mv.as_ptr()).collect();
+        let raw_ptr = record.raw_line.as_ptr();
+        let next = "info depth 11 score mate + pv 2g2f 8c8d";
+        snap.update_from_line(next);
+        let record = snap.last_exact_primary.as_ref().unwrap();
+        assert_eq!(record.depth, 11);
+        assert_eq!(record.score, PrimaryScore::MateWin);
+        assert_eq!(record.pv, ["2g2f", "8c8d"]);
+        assert_eq!(record.raw_line, next);
+        assert_eq!(record.pv.as_ptr(), pv_ptr);
+        assert_eq!(record.raw_line.as_ptr(), raw_ptr);
+        for (mv, expected_ptr) in record.pv.iter().zip(move_ptrs) {
+            assert_eq!(mv.as_ptr(), expected_ptr);
+        }
     }
 
     #[test]
