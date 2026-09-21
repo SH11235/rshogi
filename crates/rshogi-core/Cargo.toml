@@ -24,7 +24,8 @@ sha2 = { version = "0.10.9", optional = true }
 libc = "0.2.186"
 
 [target.'cfg(windows)'.dependencies]
-# clap 系や tools と同じ windows-sys に揃え、Windows で複数 version をビルドしない。
+# clap 系の推移依存や tools と同じ windows-sys に揃え、0.60 系の併存を避ける。
+# 0.52 系は rustix 0.38 と quinn-udp (windows-sys <=0.60 を要求) が使うため lockfile に残る。
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
