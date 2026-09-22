@@ -8,7 +8,9 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/SH11235/rshogi"
 
 [dependencies]
-rshogi-core = { path = "../rshogi-core" }
+# rshogi-core は types (EnteringKingRule) のみ利用し、NNUE / 探索には触れない。
+# edition(NNUE)軸を持ち込まないよう default-features=false とする。
+rshogi-core = { path = "../rshogi-core", default-features = false }
 rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false, features = ["tokio-transport"] }
 anyhow.workspace = true
 thiserror.workspace = true

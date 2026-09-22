@@ -23,7 +23,9 @@ anyhow      = "1.0"
 log         = "0.4"
 clap = { version = "4.5.47", features = ["derive"] }
 env_logger = "0.11"
-tracing = "0.1"
+# `#[instrument]` 属性マクロは使わない (span 付与は `Instrument` trait で行う) ため、
+# default の attributes (tracing-attributes proc-macro) を外し std のみ有効化する。
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 # subscriber / log bridge / metrics 系は subscriber / recorder 初期化を担う
 # binary crate（`rshogi-csa-server-tcp` 等）でのみ依存する。library crate は
 # `xxx.workspace = true` を書かないことで自動的にこれらが pull されないようにし、

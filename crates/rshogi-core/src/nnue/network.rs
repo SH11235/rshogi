@@ -2164,6 +2164,13 @@ pub fn evaluate_dispatch(
              Use 'setoption name EvalFile' or 'setoption name MaterialLevel'."
         );
     };
+    // architecture feature を 1 つも持たないビルドでは、下の match に network を参照する arm が無い。
+    #[cfg(not(any(
+        feature = "layerstack-arch",
+        feature = "halfkx-arch",
+        feature = "nnue-runtime-dimensions"
+    )))]
+    let _ = &network;
 
     // バリアントに応じて適切な評価関数を呼び出し
     match stack {
@@ -2237,6 +2244,13 @@ pub fn ensure_accumulator_computed(
     let Some(network) = get_network() else {
         return;
     };
+    // architecture feature を 1 つも持たないビルドでは、下の match に network / pos を参照する arm が無い。
+    #[cfg(not(any(
+        feature = "layerstack-arch",
+        feature = "halfkx-arch",
+        feature = "nnue-runtime-dimensions"
+    )))]
+    let _ = (&network, pos);
 
     // バリアントに応じてアキュムレータを更新（評価はしない）
     match stack {

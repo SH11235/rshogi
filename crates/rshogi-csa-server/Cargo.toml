@@ -8,7 +8,9 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/SH11235/rshogi"
 
 [dependencies]
-rshogi-core = { path = "../rshogi-core" }
+# rshogi-core は types / position / movegen / bitboard のみ利用し、NNUE / 探索には触れない。
+# default (edition-universal) を依存元へ漏らさないよう default-features=false とする。
+rshogi-core = { path = "../rshogi-core", default-features = false }
 rshogi-csa = { path = "../rshogi-csa" }
 thiserror.workspace = true
 chrono.workspace = true

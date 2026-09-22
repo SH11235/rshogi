@@ -16,7 +16,11 @@ repository = "https://github.com/SH11235/rshogi"
 default = ["nnue-arch", "dlshogi-onnx", "kifu-player"]
 
 # 解析対象 NNUE アーキテクチャ (LayerStack L1 サイズ + FT variant 5 種) の既定集合。
+# gensfen / rescore_psv / teacher_labeler 等は任意の net を `NNUENetwork::load` で読んで評価する
+# ため、header 駆動の汎用経路 (edition-universal) も明示的に含める。静的 LS の内部を解析する
+# 診断ツールは下の size / FT slot の静的実装を使う。
 nnue-arch = [
+    "rshogi-core/edition-universal",
     "rshogi-core/layerstack-arch",
     "layerstacks-1536x16x32",
     "ft-halfkp",
@@ -38,7 +42,8 @@ threat-profile-cross-side = ["rshogi-core/threat-profile-cross-side"]
 # === Edition 軸 atomic feature 群 (本 crate で必要なものだけ forward) ===
 # 設計は docs/decisions/2026-05-24-build-edition-flavor-design.md を参照。
 # tools は静的 LS network の内部を解析するため、nnue-arch から layerstack-arch と
-# size / FT slot を明示的に forward する。rshogi-core の default universal には依存しない。
+# size / FT slot を明示的に forward する。汎用評価用の edition-universal も nnue-arch で
+# 明示指定し、rshogi-core の default や他 crate 経由の feature 統合には頼らない。
 # LS L1 サイズ slot
 layerstacks-1536x16x32 = ["rshogi-core/layerstacks-1536x16x32"]
 layerstacks-1536x32x32 = ["rshogi-core/layerstacks-1536x32x32"]
@@ -63,9 +68,9 @@ ft-halfka_hm_split  = ["rshogi-core/ft-halfka_hm_split"]
 ft-halfka_hm_merged = ["rshogi-core/ft-halfka_hm_merged"]
 
 # AobaZero ONNX直接推論（ONNX Runtime + CUDA が必要）
-aobazero-onnx = ["dep:ort", "dep:ndarray"]
+aobazero-onnx = ["dep:ort"]
 # 標準dlshogi ONNX直接推論（DL水匠等、ONNX Runtime + CUDA が必要）
-dlshogi-onnx = ["dep:ort", "dep:ndarray"]
+dlshogi-onnx = ["dep:ort"]
 
 # 棋譜 replay（CSA/PSV/JSONL の parse・盤面再生・勝敗導出。`replay` モジュールの
 # TUI を除く部分）。教師・評価系ツールが TUI 依存 (ratatui/crossterm) なしで
@@ -137,7 +142,9 @@ rshogi-book = { path = "../rshogi-book", default-features = false }
 rshogi-csa-client = { path = "../rshogi-csa-client", default-features = false }
 
 # Additional dependencies
-sysinfo = "0.37"
+# 使うのは Disks (disk) と System のメモリ / プロセス情報 (system) のみ。default の
+# component / network / user (Windows では WMI 等の windows crate feature) は引かない。
+sysinfo = { version = "0.37", default-features = false, features = ["disk", "system"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "system-proxy"] }
 walkdir = "2.5"
 same-file = "1.0"
@@ -151,7 +158,6 @@ indicatif = "0.18"
 rand = "0.9.3"
 rand_chacha = "0.9"
 rand_distr = "0.5"
-byteorder = "1.5"
 tempfile = "3.20"
 glob = "0.3"
 regex.workspace = true
@@ -160,10 +166,11 @@ sha2 = "0.10"
 
 # AobaZero ONNX direct inference (optional, behind "aobazero-onnx" feature)
 ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic", "api-24"] }
-ndarray = { version = "0.16", optional = true }
 
 # 棋譜プレイヤー TUI (optional, behind "kifu-player" feature)
-ratatui = { version = "0.30", optional = true }
+# default の all-widgets (Calendar widget + time crate) と macros (ratatui-macros) は
+# kifu_player で使わないため外し、残りの default (crossterm / layout-cache / underline-color) は維持する。
+ratatui = { version = "0.30", optional = true, default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
 crossterm = { version = "0.28", optional = true }
 
 # search_only_ab の Windows 実装 (ETW NT Kernel Logger の PMC counting) 用。

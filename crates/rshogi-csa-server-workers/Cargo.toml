@@ -19,7 +19,10 @@ crate-type = ["cdylib", "rlib"]
 # `[target.'cfg(target_arch = "wasm32")'.dependencies]` に分離して
 # ホスト側 `cargo check --workspace` を壊さない。
 rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false, features = ["workers"] }
-rshogi-core = { path = "../rshogi-core" }
+# rshogi-core は types (EnteringKingRule) のみ利用し、NNUE / 探索には触れない。
+# NNUE の edition 軸をコンパイルしない (ビルド時間削減・他 crate への feature 漏れ防止) よう
+# default-features=false とする。未参照コードはリンク時に除去されるため bundle サイズへの効果は小さい。
+rshogi-core = { path = "../rshogi-core", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 # chrono はホスト／wasm32 で挙動を揃えるため `clock` 既定を切り、

@@ -50,7 +50,10 @@ thiserror.workspace = true
 # 一部になっているため、feature gate 不可 (consumer から見える型のため常時必須)。
 toml.workspace = true
 
-rshogi-core = { path = "../rshogi-core" }
+# rshogi-core は types (EnteringKingRule) のみ利用し、NNUE / 探索には触れない。
+# default (edition-universal) を持ち込むと rshogi-usi の specific edition build と
+# 同じ cargo 呼び出しで build.rs の edition 排他チェックに落ちるため、default-features=false とする。
+rshogi-core = { path = "../rshogi-core", default-features = false }
 rshogi-csa = { path = "../rshogi-csa" }
 # CSA プロトコル送信側 serialize / 受信側 parse の単一ソース。
 # `default-features=false` で `tokio-transport` (tokio + serde_yaml) を切り、
