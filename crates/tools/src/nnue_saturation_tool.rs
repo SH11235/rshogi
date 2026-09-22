@@ -226,12 +226,11 @@ pub fn run() -> Result<()> {
     } else if layer_stack_progress_coeff_required(Some(cli.progress_buckets)) {
         anyhow::bail!("--progress-buckets が 2 以上のときは --progress-coeff が必須です");
     }
-    let network = NNUENetwork::load(&cli.nnue)
-        .with_context(|| format!("NNUE を読み込めません: {:?}", cli.nnue))?;
-    let ls_net = match &network {
-        NNUENetwork::LayerStacks(net) => net,
-        _ => anyhow::bail!("nnue_saturation は LayerStacks NNUE のみ対応"),
-    };
+    // 静的 LayerStacks network を直接読む。`NNUENetwork::load` は feature 統合で
+    // `nnue-runtime-dimensions` が有効になったビルドでは dynamic 版を返すため、
+    // 静的 net の内部を解析する本ツールでは使えない。
+    let ls_net = NNUENetwork::load_static_layer_stacks(&cli.nnue)
+        .with_context(|| format!("静的 LayerStacks NNUE を読み込めません: {:?}", cli.nnue))?;
     configure_layer_stack_routing(
         LayerStackBucketMode::ProgressKPAbs,
         ls_net.num_buckets(),
@@ -240,7 +239,7 @@ pub fn run() -> Result<()> {
     .map_err(anyhow::Error::msg)?;
 
     ls_dispatch_ft_size!(
-        ls_net,
+        &ls_net,
         |concrete_net| run_for_network(&cli, concrete_net),
         _ => anyhow::bail!("有効な LayerStacks (FT × L1) バリアントがありません"),
     )

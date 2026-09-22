@@ -2107,6 +2107,31 @@ impl LayerStacksNetwork {
         )
     }
 
+    /// header の arch 文字列から L1/L2/L3 を決めて読み込む。
+    ///
+    /// `NNUENetwork::read_with_source` の静的 LayerStacks 分岐と、静的 net を必要とする
+    /// 診断ツール向けの `NNUENetwork::load_static_layer_stacks` が共通で使う。
+    /// 旧 header 向けの default 規則 (`l1 == 0 → 1536`、`(l2, l3) == (0, 0) → (16, 32)`)
+    /// をここへ一本化し、呼び出し側で重複させない。
+    #[cfg(feature = "layerstack-arch")]
+    pub(super) fn read_auto_dims_with_source<R: Read + Seek>(
+        reader: &mut R,
+        psqt_override: Option<bool>,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
+    ) -> io::Result<Self> {
+        reader.seek(SeekFrom::Start(0))?;
+        let (l1, l2, l3) = peek_layer_stacks_dimensions(reader)?;
+        Self::read_with_source(
+            reader,
+            l1,
+            l2,
+            l3,
+            psqt_override,
+            #[cfg(feature = "prepacked-nnue")]
+            packed,
+        )
+    }
+
     /// ファイルから読み込み (FT 明示)。テスト・診断ツールから FT を強制したい場合に使う。
     #[cfg(feature = "layerstack-arch")]
     pub fn read_with_feature_set<R: Read + Seek>(
@@ -2255,26 +2280,23 @@ impl LayerStacksNetwork {
     }
 }
 
-/// reader の現在位置から LayerStacks ヘッダの arch_str を peek し、FT を判別する。
+/// reader の現在位置から LayerStacks ヘッダ (version / hash / arch_len / arch) を peek する。
 ///
-/// tatara emit 形式の arch_str は `Features=<FT>(Friend)[<dim>->1536x2],...` で、
-/// 共有 helper が EffectBucket alias、`Features=` keyword、旧 header の substring を
-/// dynamic reader と同じ規則で判定する。明示された未知 keyword はエラーとし、
-/// keyword が無く FT を特定できない旧 header だけ `FeatureSet::LayerStacks` へ fallback
-/// して、上位の `read_with_feature_set` で HalfKaHmMerged 互換扱いにする。
+/// 戻り値は `(version, arch_str)`。arch_len は `MAX_ARCH_LEN` で検証する。
 ///
 /// 読み取り後は `Seek::seek(SeekFrom::Start(original))` で reader 位置を巻き戻す。
 /// `BufReader<File>` 等の seekable reader では seek 時に内部 buffer が破棄・再同期される
 /// ため、後続の本読み込みに影響しない。peek 自体が失敗しても巻き戻しは試みる。
 #[cfg(feature = "layerstack-arch")]
-fn peek_layer_stacks_feature_set<R: Read + Seek>(
+pub(super) fn peek_layer_stacks_header<R: Read + Seek>(
     reader: &mut R,
-) -> io::Result<super::spec::FeatureSet> {
+) -> io::Result<(u32, String)> {
     let original = reader.stream_position()?;
-    let result = (|| -> io::Result<super::spec::FeatureSet> {
+    let result = (|| -> io::Result<(u32, String)> {
         let mut buf4 = [0u8; 4];
         reader.read_exact(&mut buf4)?;
-        reader.read_exact(&mut buf4)?;
+        let version = u32::from_le_bytes(buf4);
+        reader.read_exact(&mut buf4)?; // ネットワークハッシュ
         reader.read_exact(&mut buf4)?;
         let arch_len = u32::from_le_bytes(buf4) as usize;
         if arch_len == 0 || arch_len > MAX_ARCH_LEN {
@@ -2285,12 +2307,53 @@ fn peek_layer_stacks_feature_set<R: Read + Seek>(
         }
         let mut arch = vec![0u8; arch_len];
         reader.read_exact(&mut arch)?;
-        let arch_str = String::from_utf8_lossy(&arch);
-        detect_layer_stacks_feature_set(&arch_str)
-            .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))
+        Ok((version, String::from_utf8_lossy(&arch).into_owned()))
     })();
     reader.seek(SeekFrom::Start(original))?;
     result
+}
+
+/// reader の現在位置から LayerStacks ヘッダの arch_str を peek し、FT を判別する。
+///
+/// tatara emit 形式の arch_str は `Features=<FT>(Friend)[<dim>->1536x2],...` で、
+/// 共有 helper が EffectBucket alias、`Features=` keyword、旧 header の substring を
+/// dynamic reader と同じ規則で判定する。明示された未知 keyword はエラーとし、
+/// keyword が無く FT を特定できない旧 header だけ `FeatureSet::LayerStacks` へ fallback
+/// して、上位の `read_with_feature_set` で HalfKaHmMerged 互換扱いにする。
+///
+/// 読み取り後の reader 位置は `peek_layer_stacks_header` が元の位置へ巻き戻す
+/// (`read_with_source` はこの巻き戻しに依存する)。
+#[cfg(feature = "layerstack-arch")]
+fn peek_layer_stacks_feature_set<R: Read + Seek>(
+    reader: &mut R,
+) -> io::Result<super::spec::FeatureSet> {
+    let (_, arch_str) = peek_layer_stacks_header(reader)?;
+    detect_layer_stacks_feature_set(&arch_str)
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))
+}
+
+/// header の arch 文字列から LayerStacks の (L1, L2, L3) を決める。
+///
+/// 次元が arch 文字列に現れない旧 header 向けに `l1 == 0 → 1536`、
+/// `(l2, l3) == (0, 0) → (16, 32)` の default を当てる。
+///
+/// 読み取り後の reader 位置は `peek_layer_stacks_header` が元の位置へ巻き戻す。
+#[cfg(feature = "layerstack-arch")]
+fn peek_layer_stacks_dimensions<R: Read + Seek>(
+    reader: &mut R,
+) -> io::Result<(usize, usize, usize)> {
+    let (_, arch_str) = peek_layer_stacks_header(reader)?;
+    let (l1_from_arch, l2_from_arch, l3_from_arch) = super::spec::parse_arch_dimensions(&arch_str);
+    let l1 = if l1_from_arch == 0 {
+        1536
+    } else {
+        l1_from_arch
+    };
+    let (l2, l3) = match (l2_from_arch, l3_from_arch) {
+        (0, 0) => (16, 32),
+        dims => dims,
+    };
+    Ok((l1, l2, l3))
 }
 
 /// arch_str から LS の FT を判別する pure helper (peek の純粋ロジック部分)。

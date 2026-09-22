@@ -773,11 +773,11 @@ pub fn run() -> Result<()> {
             .context("progresskpabs requires --ls-progress-buckets")?;
         bench_progress_bucket(&positions, weights, num_buckets, cli.warmup, cli.iterations);
     }
-    println!("Architecture: {arch_name}");
-    println!();
 
     match mode {
         BenchMode::Full => {
+            println!("Architecture: {arch_name}");
+            println!();
             let mut evaluator =
                 NNUEEvaluator::new_with_position(Arc::clone(&network), &positions[0]);
             let result = bench_evaluator(
@@ -805,13 +805,24 @@ pub fn run() -> Result<()> {
         | BenchMode::LayerStackEval
         | BenchMode::LayerStackRefreshCache
         | BenchMode::LayerStackUpdateCache => {
-            let NNUENetwork::LayerStacks(ref ls_net) = *network else {
-                bail!("LayerStack 専用モードは LayerStacks NNUE のみ対応");
-            };
+            // LS 専用モードは静的 net の内部構造 (layer stack / accumulator cache) を
+            // 直接叩くため、feature 統合で `nnue-runtime-dimensions` が有効なビルドでも
+            // 静的 reader で読み直す。Full モードは `network` (dynamic 可) のままで良い。
+            // 読み直す前に `network` を解放してピーク常駐を二重にしない。
+            drop(network);
+            let ls_net =
+                NNUENetwork::load_static_layer_stacks(&cli.nnue_file).with_context(|| {
+                    format!("静的 LayerStacks NNUE を読み込めません: {}", cli.nnue_file.display())
+                })?;
+            // arch ラベルは静的 net の spec から取る。dynamic 側の `architecture_name()` は
+            // build 構成 (`nnue-runtime-dimensions` の有無) で文字列が変わるため。
+            let static_arch_name = ls_net.architecture_spec().name();
+            println!("Architecture: {static_arch_name}");
+            println!();
             let bucket_mode = bucket_mode.expect("LayerStacks net was configured above");
 
             ls_dispatch_ft_size!(
-                ls_net,
+                &ls_net,
                 |net| {
                     run_layer_stack_bench(
                         net,
@@ -820,7 +831,7 @@ pub fn run() -> Result<()> {
                         bucket_mode,
                         cli.warmup,
                         cli.iterations,
-                        &arch_name,
+                        &static_arch_name,
                     )?;
                 },
                 _ => bail!("有効な LayerStacks (FT × L1) バリアントがありません"),

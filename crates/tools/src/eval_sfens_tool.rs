@@ -391,12 +391,11 @@ pub fn run() -> Result<()> {
     }
 
     eprintln!("Loading NNUE: {:?}", cli.nnue);
-    let network = NNUENetwork::load(&cli.nnue)
-        .with_context(|| format!("Failed to load NNUE: {:?}", cli.nnue))?;
-    let ls_net = match &network {
-        NNUENetwork::LayerStacks(net) => net,
-        _ => anyhow::bail!("eval_sfens は LayerStacks NNUE のみ対応"),
-    };
+    // 静的 LayerStacks network を直接読む。`NNUENetwork::load` は feature 統合で
+    // `nnue-runtime-dimensions` が有効になったビルドでは dynamic 版を返すため、
+    // 静的 net の中間層を dump する本ツールでは使えない。
+    let ls_net = NNUENetwork::load_static_layer_stacks(&cli.nnue)
+        .with_context(|| format!("静的 LayerStacks NNUE を読み込めません: {:?}", cli.nnue))?;
     configure_layer_stack_routing(
         LayerStackBucketMode::ProgressKPAbs,
         ls_net.num_buckets(),
@@ -405,7 +404,7 @@ pub fn run() -> Result<()> {
     .map_err(anyhow::Error::msg)?;
 
     ls_dispatch_ft_size!(
-        ls_net,
+        &ls_net,
         |concrete_net| run_eval_for_network(&cli, concrete_net),
         _ => anyhow::bail!("有効な LayerStacks (FT × L1) バリアントがありません"),
     )

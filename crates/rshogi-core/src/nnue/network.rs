@@ -42,7 +42,7 @@ use super::net_delta::{
     NetCoefficientId, NetDelta, NetDeltaError, NetDeltaReport, NetTensorKind, NetTensorShape,
 };
 #[cfg(feature = "layerstack-arch")]
-use super::network_layer_stacks::LayerStacksNetwork;
+use super::network_layer_stacks::{LayerStacksNetwork, peek_layer_stacks_header};
 use super::spec::{Activation, FeatureSet};
 #[cfg(feature = "halfkx-arch")]
 use super::stats::{count_already_computed, count_refresh, count_update};
@@ -590,6 +590,114 @@ impl NNUENetwork {
         Self::read(&mut reader)
     }
 
+    /// 静的 (const-generic) LayerStacks network を直接読み込む。
+    ///
+    /// `load` は `nnue-runtime-dimensions` が有効なビルドでは LayerStacks net を
+    /// `Self::DynamicLayerStacks` として返す。cargo の feature 統合で
+    /// `nnue-runtime-dimensions` が有効になるビルドでも静的 `LayerStacksNetwork` を
+    /// 必要とする呼び出し元 (静的 net の内部構造を直接参照する診断・解析系) はこの API を
+    /// 使う。engine の評価経路 (`load` / `read`) の挙動は変えない。
+    ///
+    /// 非 LayerStacks net を渡した場合は `InvalidData` エラーを返す。
+    #[cfg(feature = "layerstack-arch")]
+    pub fn load_static_layer_stacks<P: AsRef<Path>>(path: P) -> io::Result<LayerStacksNetwork> {
+        let arch_override = get_nnue_architecture_override();
+        let file = File::open(path.as_ref())?;
+        let mut reader = BufReader::new(file);
+        #[cfg(feature = "prepacked-nnue")]
+        if super::prepacked::PackedModel::is_packed(&mut reader)? {
+            let packed = super::prepacked::PackedModel::open(path.as_ref())?;
+            let net = Self::read_static_layer_stacks_with_source(
+                &mut packed.metadata()?,
+                arch_override,
+                Some(&packed),
+            )?;
+            packed.finish()?;
+            return Ok(net);
+        }
+        Self::read_static_layer_stacks_with_source(
+            &mut reader,
+            arch_override,
+            #[cfg(feature = "prepacked-nnue")]
+            None,
+        )
+    }
+
+    /// `load_static_layer_stacks` の reader 版。
+    ///
+    /// header の読み方と FeatureSet 判定は `read_with_source` と同じ規則にそろえ、
+    /// LayerStacks 以外の net は静的 reader に渡す前に明示エラーへ落とす。
+    #[cfg(feature = "layerstack-arch")]
+    fn read_static_layer_stacks_with_source<R: Read + Seek>(
+        reader: &mut R,
+        arch_override: NNUEArchitectureOverride,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
+    ) -> io::Result<LayerStacksNetwork> {
+        reader.seek(SeekFrom::Start(0))?;
+        let (version, arch_str) = peek_layer_stacks_header(reader)?;
+
+        if !matches!(
+            version,
+            NNUE_VERSION | NNUE_VERSION_HALFKA | NNUE_VERSION_LAYERSTACK_NUM_BUCKETS
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Unknown NNUE version: {version:#x}. Expected {NNUE_VERSION:#x} (HalfKP), \
+                     {NNUE_VERSION_HALFKA:#x} (HalfKaHmMerged^ / legacy LayerStack), or \
+                     {NNUE_VERSION_LAYERSTACK_NUM_BUCKETS:#x} (LayerStack with num_buckets header)"
+                ),
+            ));
+        }
+        if !matches!(
+            arch_override,
+            NNUEArchitectureOverride::Auto
+                | NNUEArchitectureOverride::LayerStacks
+                | NNUEArchitectureOverride::LayerStacksPSQT
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "NNUE_ARCHITECTURE override が LayerStacks 系以外に設定されている。\
+                 静的 LayerStacks network を要求する呼び出し元では \
+                 `Auto` / `LayerStacks` / `LayerStacksPSQT` のいずれかにすること。",
+            ));
+        }
+
+        // LayerStack 専用 layout の version、override による LayerStacks 強制、または
+        // arch 文字列が LayerStacks 系 FeatureSet を示す場合のみ受け付ける
+        // (`read_with_source` の effective_feature_set 判定と同じ規則)。
+        let is_layer_stacks = version == NNUE_VERSION_LAYERSTACK_NUM_BUCKETS
+            || matches!(
+                arch_override,
+                NNUEArchitectureOverride::LayerStacks | NNUEArchitectureOverride::LayerStacksPSQT
+            )
+            || matches!(
+                super::spec::parse_feature_set_from_arch(&arch_str),
+                Ok(FeatureSet::LayerStacks | FeatureSet::HalfKaHmMergedEffectBucket)
+            );
+        if !is_layer_stacks {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "LayerStacks NNUE ではない (version {version:#x}, arch: {arch_str})。\
+                     静的 LayerStacks network を要求する呼び出し元では読み込めない。"
+                ),
+            ));
+        }
+        // PSQT オーバーライド: `read_with_source` の LayerStacks 分岐と同じ規則。
+        let psqt_override = match arch_override {
+            NNUEArchitectureOverride::LayerStacks => Some(false),
+            NNUEArchitectureOverride::LayerStacksPSQT => Some(true),
+            _ => None,
+        };
+        LayerStacksNetwork::read_auto_dims_with_source(
+            reader,
+            psqt_override,
+            #[cfg(feature = "prepacked-nnue")]
+            packed,
+        )
+    }
+
     /// リーダーから読み込み（ファイルサイズ優先の自動判別）
     ///
     /// ファイルサイズからアーキテクチャを一意に検出し、適切なバリアントに委譲する。
@@ -730,23 +838,8 @@ impl NNUENetwork {
                             NNUEArchitectureOverride::LayerStacksPSQT => Some(true),
                             _ => None,
                         };
-                        reader.seek(SeekFrom::Start(0))?;
-                        let (l1_from_arch, l2_from_arch, l3_from_arch) =
-                            super::spec::parse_arch_dimensions(&arch_str);
-                        let l1 = if l1_from_arch == 0 {
-                            1536
-                        } else {
-                            l1_from_arch
-                        };
-                        let (l2, l3) = match (l2_from_arch, l3_from_arch) {
-                            (0, 0) => (16, 32),
-                            dims => dims,
-                        };
-                        let network = LayerStacksNetwork::read_with_source(
+                        let network = LayerStacksNetwork::read_auto_dims_with_source(
                             reader,
-                            l1,
-                            l2,
-                            l3,
                             psqt_override,
                             #[cfg(feature = "prepacked-nnue")]
                             packed,
