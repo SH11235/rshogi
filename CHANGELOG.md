@@ -23,6 +23,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   パス権つきの探索が必要な場合は `search-pass-rules` を指定すること。`search-no-pass-rules` は
   何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
 
+### USI エンジン / 探索
+
+- **`use-lazy-evaluate` を rshogi-usi の opt-in feature として選択可能に**:
+  `cargo xtask build --edition <preset> --features use-lazy-evaluate` で、TT hit 時の非 PV ノードで
+  TT の eval を再利用する (YaneuraOu の `USE_LAZY_EVALUATE` 相当) engine を build できる。
+  置換表の衝突時に探索木が変わりうるため計測・実験用。既定 build の挙動は変わらない。
+
 ## v1.5.0 — 2026-09-20
 
 v1.4.0 以降の探索・対局運用の不具合修正と、教師データ・SPSA ツールの拡張をまとめた

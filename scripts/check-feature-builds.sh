@@ -56,14 +56,18 @@ done
 # それを含む edition の check に任せる。threat-profile-* のうち edition に含まれるものも同様で、
 # どの edition にも含まれない threat-profile-cross-side だけをここで検査する。
 for feature in prepacked-nnue search-stats nnue-stats diagnostics allocation-stats tt-write-stats tt-trace \
-  threat-profile-cross-side search-pass-rules; do
+  threat-profile-cross-side search-pass-rules use-lazy-evaluate; do
   run -p rshogi-usi --all-targets --features "${feature}"
   run -p rshogi-core --all-targets --features "${feature}"
 done
 
 # 固定 edition と opt-in feature の組み合わせ、および tools 経由の有効化。
+# use-lazy-evaluate の layerstack-arch 経路は既定 edition (edition-universal) では有効にならないため、
+# layerstack-arch を含む固定 edition と組み合わせて検査する。
 run -p rshogi-usi --all-targets --no-default-features \
   --features edition-layerstacks-halfka_hm_merged-1536x16x32-none,prepacked-nnue
+run -p rshogi-usi --all-targets --no-default-features \
+  --features edition-layerstacks-halfka_hm_merged-1536x16x32-none,use-lazy-evaluate
 run -p tools --all-targets --features prepacked-nnue
 run -p tools --all-targets --features diagnostics
 

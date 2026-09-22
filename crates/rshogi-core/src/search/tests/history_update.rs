@@ -84,7 +84,7 @@ fn observe_completed_node(
         Bound::None,
         0,
         tt_move,
-        Value::ZERO,
+        Value::NONE,
         worker.tt.generation(),
     );
     let pc = best.moved_piece_after();

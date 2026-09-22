@@ -158,9 +158,9 @@ build 後、`engines/rshogi-usi-<edition slug>` と `<binary>.meta.toml` がペ�
 #### 追加 feature (`--features`)
 
 Edition 軸と直交する opt-in feature (`mimalloc` / `prepacked-nnue` / `search-stats` /
-`nnue-stats` / `tt-trace` / `diagnostics` / `allocation-stats` / `tt-write-stats` 等) を
-preset edition に重ねて build する。指定できる名前は `crates/rshogi-usi/Cargo.toml` の
-`[features]` に定義されたもので、次は拒否する:
+`nnue-stats` / `tt-trace` / `diagnostics` / `allocation-stats` / `tt-write-stats` /
+`use-lazy-evaluate` 等) を preset edition に重ねて build する。指定できる名前は
+`crates/rshogi-usi/Cargo.toml` の `[features]` に定義されたもので、次は拒否する:
 
 - rshogi-usi に存在しない名前
 - `default` (xtask は `--no-default-features` で edition を 1 つに固定する)
@@ -175,6 +175,10 @@ preset edition に重ねて build する。指定できる名前は `crates/rsho
 
 feature 同士の排他 (`mimalloc` と `allocation-stats` 等) は xtask では検査せず、
 cargo build のエラーで検出される。
+
+`use-lazy-evaluate` は TT hit 時の非 PV ノードで NNUE を再評価せず TT の eval を再利用する
+(YaneuraOu の `USE_LAZY_EVALUATE` 相当)。置換表の衝突で別局面の eval を使うと探索木が変わるため、
+探索ノード数や指し手は既定 build とのビット一致を保証しない。計測・実験用で、既定は off のまま。
 
 #### 命名規則
 

@@ -36,6 +36,8 @@ nnue-stats = ["rshogi-core/nnue-stats"]
 prepacked-nnue = ["rshogi-core/prepacked-nnue"]
 # TT書き込みトレースおよびhelper bound/depthフィルタ
 tt-trace = ["rshogi-core/tt-trace"]
+# TT hit 時の非 PV ノードで TT の eval を再利用する (YaneuraOu の USE_LAZY_EVALUATE 相当)。既定は off
+use-lazy-evaluate = ["rshogi-core/use-lazy-evaluate"]
 # NNUE 詳細診断ログ（Golden Forward テスト用）
 diagnostics = ["rshogi-core/diagnostics"]
 allocation-stats = ["rshogi-core/allocation-stats", "dep:tracking-allocator"]
