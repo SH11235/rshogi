@@ -756,9 +756,12 @@ impl NNUENetwork {
                     #[cfg(not(feature = "layerstack-arch"))]
                     {
                         return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "LayerStacks NNUE model requires the `layerstack-arch` feature; \
-                             rebuild rshogi-core with an Edition that enables it.",
+                            io::ErrorKind::Unsupported,
+                            format!(
+                                "LayerStacks NNUE model ({effective_feature_set}) requires the \
+                                 `layerstack-arch` feature; rebuild rshogi-core with an Edition \
+                                 that enables it."
+                            ),
                         ));
                     }
                 }
@@ -775,6 +778,19 @@ impl NNUENetwork {
                                 .then_some(effective_feature_set),
                         )?)));
                     }
+                }
+
+                // 以降は固定次元の HalfKX 経路。halfkx-arch 無効ビルドには HalfKX の評価経路
+                // (`evaluate_dispatch` 等) が存在しないため、読み込みを成功させると評価時に
+                // 初めて panic する。override で FeatureSet を強制した場合や prepacked 経由でも
+                // 必ずここを通るので、FeatureSet 確定直後のこの位置で拒否する。
+                if !cfg!(feature = "halfkx-arch") {
+                    return Err(halfkx_arch_disabled_error(
+                        effective_feature_set,
+                        &arch_str,
+                        file_size,
+                        arch_len,
+                    ));
                 }
 
                 // 4. ファイルサイズからアーキテクチャを検出
@@ -1450,6 +1466,43 @@ pub fn init_nnue_from_bytes_with_deltas(
 
 fn net_delta_io_error(error: NetDeltaError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, error)
+}
+
+/// halfkx-arch 無効ビルドで HalfKX 系モデルを読もうとしたときのエラーを作る。
+///
+/// 次元はファイルサイズから一意に決まればその値を、決まらなければ arch 文字列の
+/// 解析結果を使う。どちらからも得られない次元はメッセージに含めない。
+fn halfkx_arch_disabled_error(
+    feature_set: FeatureSet,
+    arch_str: &str,
+    file_size: u64,
+    arch_len: usize,
+) -> io::Error {
+    let (l1, l2, l3) =
+        super::spec::detect_architecture_from_size(file_size, arch_len, Some(feature_set))
+            .map(|detection| (detection.spec.l1, detection.spec.l2, detection.spec.l3))
+            .or_else(|| {
+                super::spec::parse_architecture(arch_str)
+                    .ok()
+                    .map(|parsed| (parsed.l1, parsed.l2, parsed.l3))
+            })
+            .unwrap_or((0, 0, 0));
+    let dims = if l1 == 0 {
+        String::new()
+    } else if l2 == 0 || l3 == 0 {
+        format!(", L1={l1}")
+    } else {
+        format!(", {l1}x{l2}x{l3}")
+    };
+    let activation = detect_activation_from_arch(arch_str);
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "HalfKX NNUE model ({feature_set}{dims}, {activation}) requires the `halfkx-arch` \
+             feature; rebuild rshogi-core with an Edition that enables it \
+             (e.g. edition-universal / edition-halfkx)."
+        ),
+    )
 }
 
 /// グローバル NNUE をクリアする
@@ -2657,6 +2710,9 @@ mod tests {
         );
     }
 
+    // halfkx-arch 無効ビルドでは HalfKX モデルの load 自体が拒否される
+    // (`halfkx_model_rejected_without_halfkx_arch` で検証)。
+    #[cfg(any(feature = "halfkx-arch", feature = "nnue-runtime-dimensions"))]
     #[test]
     fn halfkp_loader_override_respects_payload() {
         use super::super::network_halfkp::{HalfKP256CReLU, halfkp_loader_fixture};
@@ -3108,6 +3164,78 @@ mod tests {
             );
         }
         set_nnue_architecture_override(previous_override);
+    }
+
+    /// HalfKP 256x32x32 (suisho5 系) のヘッダだけを持つ buffer を返す。
+    ///
+    /// FeatureSet 確定直後の reject 経路を検証するためのもので、本体 block は含まない。
+    #[cfg(not(any(
+        feature = "nnue-runtime-dimensions",
+        all(feature = "halfkx-arch", feature = "layerstack-arch")
+    )))]
+    fn build_halfkp_header() -> Vec<u8> {
+        let arch = b"Features=HalfKP(Friend)[125388->256x2],Network=AffineTransform[1<-32](ClippedReLU[32](AffineTransform[32<-32](ClippedReLU[32](AffineTransform[32<-512](InputSlice[512(0:512)])))))";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // network_hash (dummy)
+        bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(arch);
+        bytes
+    }
+
+    /// halfkx-arch 無効ビルドでは HalfKX モデルを load 時に `Unsupported` で拒否し、
+    /// 評価時の panic に到達させない (override で HalfKX FeatureSet を強制した場合も同様)。
+    #[cfg(not(any(feature = "halfkx-arch", feature = "nnue-runtime-dimensions")))]
+    #[test]
+    fn halfkx_model_rejected_without_halfkx_arch() {
+        let bytes = build_halfkp_header();
+        for (override_mode, feature_set) in [
+            (NNUEArchitectureOverride::Auto, FeatureSet::HalfKP),
+            (NNUEArchitectureOverride::HalfKP, FeatureSet::HalfKP),
+            (NNUEArchitectureOverride::HalfKaHmMerged, FeatureSet::HalfKaHmMerged),
+            (NNUEArchitectureOverride::HalfKaSplit, FeatureSet::HalfKaSplit),
+        ] {
+            let err = match NNUENetwork::read_with_architecture_override(
+                &mut Cursor::new(&bytes),
+                override_mode,
+            ) {
+                Ok(_) => panic!("{override_mode:?}: HalfKX model must be rejected"),
+                Err(err) => err,
+            };
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{override_mode:?}: {err}");
+            let msg = err.to_string();
+            assert!(msg.contains("halfkx-arch"), "{override_mode:?}: {msg}");
+            assert!(msg.contains(feature_set.as_str()), "{override_mode:?}: {msg}");
+            assert!(msg.contains("256x32x32"), "{override_mode:?}: {msg}");
+        }
+    }
+
+    /// layerstack-arch 無効ビルドでは LayerStacks モデルを load 時に `Unsupported` で拒否する。
+    #[cfg(not(any(feature = "layerstack-arch", feature = "nnue-runtime-dimensions")))]
+    #[test]
+    fn layer_stacks_model_rejected_without_layerstack_arch() {
+        let mut num_buckets_header = Vec::new();
+        num_buckets_header.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
+        num_buckets_header.extend_from_slice(&0u32.to_le_bytes());
+        let arch = b"Features=HalfKaHmMerged^(40),LayerStacks,FV_SCALE=28";
+        num_buckets_header.extend_from_slice(&(arch.len() as u32).to_le_bytes());
+        num_buckets_header.extend_from_slice(arch);
+        num_buckets_header.extend_from_slice(&9u32.to_le_bytes());
+
+        for (bytes, override_mode) in [
+            (num_buckets_header, NNUEArchitectureOverride::Auto),
+            (build_halfkp_header(), NNUEArchitectureOverride::LayerStacks),
+        ] {
+            let err = match NNUENetwork::read_with_architecture_override(
+                &mut Cursor::new(&bytes),
+                override_mode,
+            ) {
+                Ok(_) => panic!("{override_mode:?}: LayerStacks model must be rejected"),
+                Err(err) => err,
+            };
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{override_mode:?}: {err}");
+            assert!(err.to_string().contains("layerstack-arch"), "{override_mode:?}: {err}");
+        }
     }
 
     #[cfg(feature = "nnue-progress-diff")]
