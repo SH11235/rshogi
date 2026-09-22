@@ -217,6 +217,10 @@ jobs:
       - name: Test USI flow with pass rules
         if: matrix.shard == 3
         run: cargo test -p rshogi-usi --features search-pass-rules --test usi_flow -- --test-threads=2
+      - name: Test search with lazy evaluate
+        # TT eval を再利用する use-lazy-evaluate は opt-in なので、既定構成のテストでは一度もコンパイルされない。
+        if: matrix.shard == 3
+        run: cargo test -p rshogi-core --lib --features use-lazy-evaluate -- --test-threads=2
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
