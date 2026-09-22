@@ -206,21 +206,20 @@ pub fn run() -> Result<()> {
         _ => unreachable!(),
     }
 
-    // NNUE モデル読み込み
-    let network = NNUENetwork::load(&cli.nnue_file)
-        .with_context(|| format!("Failed to load NNUE: {}", cli.nnue_file.display()))?;
-
-    let net = match &network {
-        NNUENetwork::LayerStacks(n) => n,
-        _ => anyhow::bail!("Expected LayerStacks network"),
-    };
+    // NNUE モデル読み込み。
+    // 静的 LayerStacks network を直接読む。`NNUENetwork::load` は feature 統合で
+    // `nnue-runtime-dimensions` が有効になったビルドでは dynamic 版を返すため、
+    // 静的 net の accumulator 実装を検証する本ツールでは使えない。
+    let net = NNUENetwork::load_static_layer_stacks(&cli.nnue_file).with_context(|| {
+        format!("静的 LayerStacks NNUE を読み込めません: {}", cli.nnue_file.display())
+    })?;
     configure_layer_stack_routing(mode, net.num_buckets(), cli.ls_progress_buckets)
         .map_err(anyhow::Error::msg)?;
     println!("Bucket mode: {}", mode.as_str());
 
     println!("Model loaded successfully (L1={}).", net.l1_size());
 
-    let (total_tests, fail): (usize, usize) = ls_verify_dispatch(net, &cli)?;
+    let (total_tests, fail): (usize, usize) = ls_verify_dispatch(&net, &cli)?;
 
     println!("\n=== Golden Forward Test Results ===");
     println!("Total: {total_tests}, Pass: {}, Fail: {fail}", total_tests - fail);

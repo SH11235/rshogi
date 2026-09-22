@@ -36,6 +36,10 @@ Threat モデルには `--features nnue-threat` を追加し、モデルと同�
 feature を選んでビルドしてください。PSQT 併用モデルには `nnue-psqt` も必要です。
 対応する L1 サイズ・FT 種類の静的ビルド設定もモデルに合わせます。
 
+モデルの読み込みには静的 LayerStacks 専用の reader を使います。同じビルドの他 crate
+経由で universal edition の `nnue-runtime-dimensions` が feature 統合されていても、
+LayerStacks net を静的構造のまま読み込めます（CLI は変わりません）。
+
 `--progress-buckets` は学習時の routing bucket 数を指定します。`--progress-buckets 1` は
 常に bucket 0 を選ぶ no-op routing のため、その場合のみ `--progress-coeff` は省略できます。
 
