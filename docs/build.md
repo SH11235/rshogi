@@ -180,7 +180,8 @@ cargo build のエラーで検出される。
 (YaneuraOu の `USE_LAZY_EVALUATE` 相当)。置換表の衝突で別局面の eval を使うと探索木が変わるため、
 探索ノード数や指し手は既定 build とのビット一致を保証しない。計測・実験用で、既定は off のまま。
 TT eval を再利用したノードでは EvalHash hit と同じく NNUE アキュムレータを更新せず、後で評価する子孫ノードが
-計算済みの祖先から差分適用するか refresh する。threat / effect-bucket / HalfKX 系の net ではその分 refresh が増える。
+計算済みの祖先から差分適用するか refresh する。祖先をたどれる範囲が親だけの threat / HalfKX 系の net では
+その分 refresh が増える。progresskpabs の bucket もその子孫で全駒から計算し直す。
 
 #### 命名規則
 

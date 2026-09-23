@@ -30,7 +30,7 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   TT の eval を再利用する (YaneuraOu の `USE_LAZY_EVALUATE` 相当) engine を build できる。
   置換表の衝突時に探索木が変わりうるため計測・実験用。既定 build の挙動は変わらない。
 - **`use-lazy-evaluate` の TT eval 再利用ノードで NNUE アキュムレータを更新しないように**:
-  ノードごとの network ロック取得をなくした。探索結果 (ノード数) は変わらない。
+  ノードごとの network ロック取得をなくした。この feature を有効にした build 同士では探索結果 (ノード数) は変わらない。
 
 ## v1.5.0 — 2026-09-20
 
