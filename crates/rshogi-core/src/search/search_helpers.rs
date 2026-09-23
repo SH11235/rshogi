@@ -5,8 +5,6 @@
 use std::ptr::NonNull;
 
 use crate::eval::{EvalHash, eval_hash_enabled};
-#[cfg(feature = "use-lazy-evaluate")]
-use crate::nnue::ensure_accumulator_computed;
 #[cfg(feature = "layerstack-arch")]
 use crate::nnue::{AccumulatorStackVariant, update_and_evaluate_layer_stacks_cached};
 use crate::nnue::{DirtyPiece, evaluate_dispatch};
@@ -163,20 +161,6 @@ pub(super) fn nnue_evaluate_cached(
     let value = nnue_evaluate(st, pos);
     ctx.eval_hash.store(key, value.raw());
     value
-}
-
-/// NNUE アキュムレータを計算済みにする（評価値の計算はしない）
-///
-/// `use-lazy-evaluate` 有効時のみ使用する。
-/// TT eval を再利用する経路で、後続の差分更新の整合を保つために必要。
-#[cfg(feature = "use-lazy-evaluate")]
-#[inline]
-pub(super) fn ensure_nnue_accumulator(st: &mut SearchState, pos: &Position) {
-    #[cfg(feature = "layerstack-arch")]
-    let acc_cache = &mut st.acc_cache;
-    #[cfg(not(feature = "layerstack-arch"))]
-    let acc_cache = &mut None;
-    ensure_accumulator_computed(pos, &mut st.nnue_stack, acc_cache)
 }
 
 /// do_move + nodes++ + nnue_push をまとめたラッパー
