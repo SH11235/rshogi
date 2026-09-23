@@ -179,9 +179,8 @@ cargo build のエラーで検出される。
 `use-lazy-evaluate` は TT hit 時の非 PV ノードで NNUE を再評価せず TT の eval を再利用する
 (YaneuraOu の `USE_LAZY_EVALUATE` 相当)。置換表の衝突で別局面の eval を使うと探索木が変わるため、
 探索ノード数や指し手は既定 build とのビット一致を保証しない。計測・実験用で、既定は off のまま。
-現状の実装は TT eval を再利用するノードでも NNUE アキュムレータの更新を `get_network()` 経由で行うため、
-既定 build の `network_ptr` 直接参照経路より 1 ノードあたりの固定費が大きく、progresskpabs の差分 bucket 計算も
-次ノードで全駒スキャンに落ちる。この build の NPS は lazy evaluate 本来の効果を表さないので、性能比較の根拠にはしないこと。
+TT eval を再利用したノードでは EvalHash hit と同じく NNUE アキュムレータを更新せず、後で評価する子孫ノードが
+計算済みの祖先から差分適用するか refresh する。threat / effect-bucket / HalfKX 系の net ではその分 refresh が増える。
 
 #### 命名規則
 

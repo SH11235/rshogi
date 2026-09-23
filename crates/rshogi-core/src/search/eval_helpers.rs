@@ -11,8 +11,6 @@ use super::alpha_beta::{
     EvalContext, ProbeOutcome, SearchContext, SearchState, TTContext, to_corrected_static_eval,
 };
 use super::history::{CORRECTION_HISTORY_SIZE, CorrectionHistory};
-#[cfg(feature = "use-lazy-evaluate")]
-use super::search_helpers::ensure_nnue_accumulator;
 use super::search_helpers::nnue_evaluate_cached;
 use super::stats::inc_stat_by_depth;
 #[cfg(feature = "tt-trace")]
@@ -480,8 +478,8 @@ pub(super) fn compute_eval_context(
         #[cfg(feature = "use-lazy-evaluate")]
         {
             // USE_LAZY_EVALUATE相当: TT eval を再利用する。
-            // 後続の差分更新に備え、アキュムレータだけは計算済みにしておく。
-            ensure_nnue_accumulator(st, pos);
+            // EvalHash hit と同じくアキュムレータは更新しない。後で評価する子孫ノードが
+            // 計算済みの祖先から差分適用 / refresh して追いつく。
             unadjusted_static_eval = tt_ctx.data.eval;
         }
         #[cfg(not(feature = "use-lazy-evaluate"))]
