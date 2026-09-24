@@ -15,7 +15,7 @@ categories = ["games", "game-engines"]
 # default-features=false とし、standalone ビルド用の既定 edition のみ本 crate の default で足す。
 # rshogi-usi は本 crate を default-features=false で依存し、preset edition specific build 時に
 # edition-universal が unify されるのを防ぐ(rshogi-usi/Cargo.toml と同じ方針)。
-rshogi-core = { version = "0.7", path = "../rshogi-core", default-features = false }
+rshogi-core = { version = "0.8", path = "../rshogi-core", default-features = false }
 
 [features]
 # standalone(`cargo test -p rshogi-book`)時に rshogi-core を既定 edition で解決するための default。
