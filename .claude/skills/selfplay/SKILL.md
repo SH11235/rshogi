@@ -58,7 +58,7 @@ side 別 wrapper で rshogi の stderr を保存する。終了後の marker 確
 |---|---|---|
 | **固定ノード 300k** | `--nodes 300000` | 同 FS 同 arch のモデル比較 (recipe / 量子化 / SPSA 差等)。NPS 差と CPU 競合の影響を排除して重み差だけを測る |
 | **秒読み 1000ms (short time)** | `--byoyomi 1000` | search / 異 FS / 異 arch / 速度が変わる変更。実戦強度 = eval 品質 × NPS なので NPS 差を含めて測る |
-| **フィッシャー 60s + 0.6s** | `--btime 60000 --binc 600` (両手番共通、`--wtime` は無い) | 持ち時間配分 (時間管理) まで含めて測りたい比較。byoyomi 時は `MinimumThinkingTime=byoyomi` が注入されて時間管理が効かないので、時間管理の変更はフィッシャーでしか差が出ない |
+| **フィッシャー 60s + 0.6s** | `--btime 60000 --binc 600` (両手番共通、`--wtime` は無い) | 持ち時間配分 (時間管理) まで含めて測りたい比較。byoyomi (持ち時間 0) では engine が秒読みモードに入り毎手 byoyomi を使い切る (tournament も `MinimumThinkingTime=byoyomi` を注入) ので、時間管理の変更はフィッシャーでしか差が出ない |
 
 - 異 FS で eval 品質と実戦強度を切り分けたいときは、固定ノードと時間制の両方を回す。
 - 詳細な比較 (長時間 TC やマルチスレッド `--threads` > 1 が必要な評価。例: SMP・スレッド数に
