@@ -17,7 +17,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rshogi-core = "0.7"
+rshogi-core = "0.8"
 ```
 
 ## Usage

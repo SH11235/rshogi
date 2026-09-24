@@ -12,25 +12,134 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 その PR の merge commit から publish する。`vX.Y.Z` タグは engine 全体の release marker
 専用であり、core 単独 publish のためのタグは打たない。
 
-## Unreleased
+## v1.6.0 — 2026-09-26
+
+v1.5.0 以降の、ビルド構成の整理と opt-in 機能の追加を中心としたリリース。探索でパス権を
+評価する処理を、明示的に指定したビルドだけで有効にする形に改めた。あわせて、YaneuraOu /
+BulletOu 形式の進行度で学習した LayerStacks モデルへの対応、複数プロセスで NNUE の重みを
+共有する形式、ビルド時に選べる追加機能 (mimalloc、use-lazy-evaluate、診断用の計数) を加えた。
+`rshogi-core` は 0.8.0 になり、ライブラリ利用者向けの変更がある。
+
+詳細は各 PR を参照。
 
 ### 互換性のない変更と移行手順
 
-- **探索のパス権処理を opt-in の `search-pass-rules` に変更**: 既定で有効な否定形 feature
-  `search-no-pass-rules` をやめ、探索でパス権を評価する build だけ `search-pass-rules` を明示する形にした。
-  既定 build の探索は変わらない。`--no-default-features` で `search-no-pass-rules` を指定していなかった
-  構成（`cargo xtask build` の preset edition を含む）は、探索のパス権評価が有効から無効に変わる。
-  パス権つきの探索が必要な場合は `search-pass-rules` を指定すること。`search-no-pass-rules` は
-  何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
+- **探索のパス権評価は `search-pass-rules` を指定したビルドだけで有効** (#1118):
+  パス権を扱う探索処理 (静的評価への残りパス権の価値の加算と、null move の代わりに PASS を
+  使う枝刈り) を、既定で有効な否定形 feature `search-no-pass-rules` で外す方式から、肯定形の
+  `search-pass-rules` を指定したときだけ入れる方式に変更した。
+  - 既定ビルドと crates.io の既定構成の探索は変わらない。
+  - `cargo xtask build` の preset edition と、`default-features = false` で
+    `search-no-pass-rules` を指定していなかった構成は、探索のパス権評価が有効から無効に変わる。
+    パス権を評価する探索が必要な場合は `search-pass-rules` を指定すること
+    (xtask では `--features search-pass-rules`)。
+  - 局面側のパス機能 (パス権の設定、PASS の合法性判定と生成、PASS を含む棋譜の再生) と、
+    探索の root で PASS を候補手に含める処理は feature に関係なく残る。
+  - `search-no-pass-rules` は何もしない互換用 feature として残しており、既存の指定はそのまま
+    ビルドできる。
+  - 探索がパス権を評価しないビルドで USI の `PassRights` を有効にすると、その旨を
+    `info string` で表示する。
+- **評価できない NNUE は読み込み時にエラー** (#1126): HalfKP / HalfKA 系のモデルを評価する
+  処理を含まないビルドでも読み込みが成功し、評価の時点で異常終了していた。読み込み時に
+  必要な feature / edition を示すエラーを返すようにした。ライブラリから使う場合、
+  LayerStacks 非対応ビルドで LayerStacks モデルを読んだときのエラー種別も
+  `InvalidData` から `Unsupported` に変わる。
+- **`search_only_ab` はエンジンを実行ファイルのパスで指定** (#1113): 計測前に実行ファイルの
+  SHA-256 を計算するため、`--baseline` / `--candidate` に PATH から解決されるコマンド名や
+  Windows の拡張子なしの名前を渡すとエラーになる。開けるファイルのパスを指定すること。
+- **Linux で `Large Pages are used.` を表示しない** (#1110): Linux / Android では、置換表への
+  huge page の要求 (`madvise`) の成否にかかわらず Large Pages 確保として表示していた。
+  要求が通った場合は `Huge-page hint requested; actual page backing is managed by the OS.` と
+  表示する。実際に huge page が使われるかは OS が決めるため。Windows の表示は変わらない。
+  この文字列を解析しているスクリプトは更新すること。
+
+### rshogi-core 0.8.0 / ライブラリ利用者の移行
+
+- **`search::OrderedMovesBuffer` と `search::ORDERED_MOVES_CAPACITY` を削除** (#1122):
+  qsearch が指し手を先にまとめて取り出すためのバッファで、qsearch 自身が唯一の利用者だった。
+  qsearch は通常探索と同じく 1 手ずつ取り出す方式になった。代わりの型はない。
+  `search-stats` の計数名 `qs_moves_generated` は `qs_moves_picked` に変わった。
+- **既定 feature から `search-no-pass-rules` を削除** (#1118): 上記の移行手順を参照。
+- **`TranspositionTable::uses_large_pages()` は Windows の Large Pages 確保だけを表す** (#1110):
+  Linux / Android では false を返す。huge page を要求したかどうかは新しい
+  `huge_page_hint_requested()` で確認できる (`Search` の `tt_uses_large_pages()` /
+  `tt_huge_page_hint_requested()` も同じ)。
+- **静的な LayerStacks モデルを直接読む `NNUENetwork::load_static_layer_stacks` を追加** (#1124):
+  feature の組み合わせで runtime 次元の実装が有効になるビルドでも、中間値を調べられる
+  静的実装として読み込める。
+- **既定 feature 以外で追加した feature**: `search-pass-rules` (#1118)、`prepacked-nnue` (#1108)、
+  `allocation-stats` (#1097)、`tt-write-stats` (#1105)。いずれも既定では無効。
+
+### NNUE / 評価処理
+
+- **YaneuraOu / BulletOu 形式の進行度による評価器の選択** (#1096): YaneuraOu / BulletOu の
+  progress で学習した LayerStacks モデルを、学習時と同じ整数の閾値で評価器に振り分ける
+  `LS_BUCKET_MODE=progresskpabsq16` を追加した。tatara で学習したモデル向けの
+  `progresskpabs` はそのまま使える。教師データ作成などの native ツールはこの方式に
+  対応しておらず、指定すると読み込み時にエラーになる。
+- **展開済みの重みを複数プロセスで共有** (#1108, #1119): `prepack_nnue` で LayerStacks モデルを
+  展開済みの形式に変換し、`prepacked-nnue` feature 付きのエンジンの `EvalFile` に指定できる。
+  Windows では読み取り専用で共有するため、同じモデルを複数プロセスで読むと私有メモリが減る
+  (4 プロセスで約 1.99 GB → 約 1.09 GB、Windows 11 での実測)。稼働中でもファイルの rename と
+  削除による差し替えができ、次の読み込みから新しいモデルが使われる。Windows 以外では
+  各プロセスが読み込む。展開済みのファイルは元の `.bin` より大きい。
+- **診断ツールで LayerStacks モデルを読めない不具合を修正** (#1124): `nnue_saturation`、
+  `eval_sfens`、`verify_nnue_accumulator` と、`bench_nnue_eval` の LayerStacks 専用モードが、
+  ビルド時の feature の組み合わせによって LayerStacks モデルを読めずにエラーになっていた。
+  `bench_nnue_eval` の LayerStacks 専用モードの arch 表示は、`LayerStacks-1536-16-32-CReLU` の
+  ようにモデルの構成を含む形になった。
 
 ### USI エンジン / 探索
 
-- **`use-lazy-evaluate` を rshogi-usi の opt-in feature として選択可能に**:
-  `cargo xtask build --edition <preset> --features use-lazy-evaluate` で、TT hit 時の非 PV ノードで
-  TT の eval を再利用する (YaneuraOu の `USE_LAZY_EVALUATE` 相当) engine を build できる。
-  置換表の衝突時に探索木が変わりうるため計測・実験用。既定 build の挙動は変わらない。
-- **`use-lazy-evaluate` の TT eval 再利用ノードで NNUE アキュムレータを更新しないように**:
-  ノードごとの network ロック取得をなくした。この feature を有効にした build 同士では探索結果 (ノード数) は変わらない。
+- **千日手判定の修正** (#1121): 手番側が持ち駒を持つ局面を SFEN で与えて開始し、その局面に
+  戻ったとき、通常の千日手ではなく優等局面と判定していた。このためエンジン自身の千日手の
+  検出が 1 周期 (4 手) 遅れていた。平手や持ち駒のない開始局面には影響しない。
+- **置換表のメモリページ表示の更新** (#1114): `USI_Hash` の変更などで置換表を確保し直し、
+  Large Pages / huge page の利用状況が変わったときにも表示を更新する。通常のページに
+  戻った場合は `The TT now uses regular pages.` を表示する。
+- **探索の処理の軽量化** (#1098, #1100, #1102, #1104, #1122): 読み筋の保存や root の候補手の
+  並べ替えで、毎回のメモリ確保や不要な並べ替えを減らした。qsearch は指し手を 1 手ずつ
+  取り出す方式にした。いずれも探索結果 (ノード数・評価値・指し手・読み筋) は変わらない。
+- **mimalloc を使うビルド** (#1112): rshogi-usi に、メモリ確保に mimalloc を使う
+  `mimalloc` feature を追加した。既定では無効。
+- **`use-lazy-evaluate` をビルド時に選択可能** (#1127, #1128): 置換表にある評価値を
+  PV 以外のノードで再利用する (YaneuraOu の `USE_LAZY_EVALUATE` 相当) エンジンを、
+  `--features use-lazy-evaluate` でビルドできる。置換表の衝突によって探索木が変わりうるため、
+  計測・実験用とする。既定では無効。再利用するノードで NNUE の差分計算をしないように
+  改め、多スレッドでの速度低下を解消した。
+- **1 手詰め用の表の修正** (#1106): `mate` の公開表 `NEXT_SQUARE` が、縦・横・斜めのどれにも
+  並ばない 2 升にも値を返していた。現在の探索はこの表を使っていない。
+
+### ビルド
+
+- **xtask で追加 feature を指定** (#1120): `cargo xtask build --edition <preset> --features <名前>`
+  で、`mimalloc`、`prepacked-nnue`、`search-pass-rules`、`use-lazy-evaluate`、診断用の
+  feature を preset に追加してビルドできる。出力名は
+  `rshogi-usi-<edition>+<feature>` の形になる。追加しない場合の出力名は従来どおり。
+- **行情報付きの本番相当プロファイル** (#1103): 本番と同じ最適化設定でソースの行情報を残す
+  `production-profiling` プロファイルを追加した。性能解析用で、速度比較には通常の
+  `production` を使うこと。
+- **依存 feature の整理** (#1125): CSA クライアント / サーバー系の crate が、使わない NNUE の
+  実装を既定 feature 経由で取り込んでいた。このため、特定の edition の rshogi-usi と
+  CSA クライアントを 1 回の cargo 呼び出しでビルドするとエラーになっていた。
+  あわせて未使用の依存を削除した。
+
+### 計測・診断ツール
+
+- **`search_only_ab` のレポートに実行ファイルの SHA-256 を記録** (#1113): JSON レポートの
+  `binaries` に、baseline / candidate の SHA-256 とサイズを記録する。
+- **探索中のメモリ確保の計数** (#1097): `allocation-stats` feature 付きのビルドで、探索の
+  段階ごとのメモリ確保回数を `info string allocation_events` として表示する。
+- **置換表への書き込み結果の計数** (#1105): `tt-write-stats` feature 付きのビルドで、
+  置換表への書き込みがどう扱われたかを 9 種類に分けて `info string tt_write_events` として
+  表示する。
+- **tournament の評価値の記録** (#1099): USI の `info` 行を項目ごとに更新すると、深さと
+  評価値・読み筋が別の反復のものになることがあった。深さ・評価値・読み筋が 1 行に揃った
+  主 PV を `eval.last_exact_primary` として別に記録する。
+
+### 依存ライブラリ
+
+- `windows-sys` を 0.61.2 に更新した (#1115)。
 
 ## v1.5.0 — 2026-09-20
 
