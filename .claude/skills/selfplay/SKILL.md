@@ -26,16 +26,17 @@ user-invocable: true
 
 ### デフォルト値（指定がなければ以下を使用）
 - **開始局面**: `--startpos-file data/startpos/start_sfens_ply32.txt`（**必須**。平手からの対局は序盤の偏りで正確な棋力を測れないため、必ず開始局面集を使用すること。他の候補: `data/startpos/start_sfens_ply24.txt`, `data/startpos/taya36.sfen`。これらは local 専用 (gitignored `data/` 配下) で、他の contributor の環境には存在しないので skill 側で必要なら個別に配置する）
-- 秒読み: 1000ms
+- time control: 下記 (b) の 3 択から比較軸で選ぶ
 - スレッド: 1
 - ハッシュ: 256MB
 - 各方向の対局数: 100（双方向で200局/カード）
 - NNUE: エンジンごとに `--engine-usi-option` で個別指定
 
-### 対局条件は必ずユーザーに相談して決める (デフォルト値を勝手に採用しない)
+### 対局条件の決め方
 
-以下の条件は **起動前に必ずユーザー確認**。推奨値とトレードオフを示した上で尋ね、
-ユーザーが明示した場合のみその値を使う。前回の SPRT で使った値を**暗黙に踏襲しない**。
+(a) 並列数と (c) SPRT 仮説・上限局数は **起動前にユーザー確認**する。推奨値とトレードオフを
+示した上で尋ね、ユーザーが明示した値を使う。(b) time control は既定の 3 択から比較軸に合う
+ものを選び、選んだ理由を起動前の提示に含める。どの項目も前回の run の値を**暗黙に踏襲しない**。
 
 #### (a) 並列数 (`--concurrency`)
 
@@ -51,19 +52,21 @@ engine stderr は `tournament` が内部 buffer に取り込むだけで永続�
 side 別 wrapper で rshogi の stderr を保存する。終了後の marker 確認は
 「完了待ち・結果集計」の必須チェックに含める。
 
-#### (b) time control: `--byoyomi` vs `--nodes`
+#### (b) time control: 既定の 3 択
 
-**比較するエンジン構成によって選択則が異なる**:
-
-| 比較軸 | 推奨 time control | 理由 |
+| 既定 | flag | 使う場面 |
 |---|---|---|
-| **同 FS 同 arch、重み差のみ (recipe / 量子化 / SPSA 差等)** | **`--nodes <N>`** (固定ノード) | NPS 差なし、CPU 競合の影響も排除して clean に重み差を抽出 |
-| **search / 異 FS / 異 arch / 速度が変わる変更** (探索変更、feature-set 差、dim 差、PSQT 有無差等) | **`--byoyomi <ms>`** (固定時間) | 実戦強度 = eval 品質 × NPS。NPS 差を含めた total strength を測る |
-| (補助) 異 FS で eval 品質を切り分けて測りたい | 両方 (固定時間 + 固定ノード) | featureset-sweep 実験ログ (rshogi-nnue docs/experiments) §10-F / §10-E pattern |
+| **固定ノード 300k** | `--nodes 300000` | 同 FS 同 arch のモデル比較 (recipe / 量子化 / SPSA 差等)。NPS 差と CPU 競合の影響を排除して重み差だけを測る |
+| **秒読み 1000ms (short time)** | `--byoyomi 1000` | search / 異 FS / 異 arch / 速度が変わる変更。実戦強度 = eval 品質 × NPS なので NPS 差を含めて測る |
+| **フィッシャー 60s + 0.6s** | `--btime 60000 --binc 600` | 持ち時間配分 (時間管理) まで含めて測りたい比較 |
+
+- 異 FS で eval 品質と実戦強度を切り分けたいときは、固定ノードと時間制の両方を回す。
+- 詳細な比較には長時間・マルチスレッド (`--threads` > 1) の評価も必要になる。その TC・
+  スレッド数・並列数・局数は既定 3 択から選ばず、ユーザーとすり合わせて決める。
 
 search / FS / arch / 速度が変わる対局を固定ノードでやると、本来実戦強度に効く NPS 差 (例: HalfKP の avg_nodes
 は HalfKA_HM_merged より +6-14% 多い) を切り捨ててしまい、デプロイ実態と乖離する。
-**「前回固定ノードだったから今回も」と暗黙踏襲は禁止**、比較軸ごとに毎回相談する。
+**「前回固定ノードだったから今回も」と暗黙踏襲しない**。比較軸ごとに毎回選び直す。
 
 #### (c) SPRT 仮説と上限局数
 
@@ -103,7 +106,7 @@ search / FS / arch / 速度が変わる対局を固定ノードでやると、�
 #### (e) 実験 doc の事前登録
 
 正式な棋力評価は、起動前に以下を実験 doc へ記録する: engine SHA、NNUE (ファイルと
-FV_SCALE)、USI options、startpos ファイルと hash、seed、TC (nodes / byoyomi)、threads、
+FV_SCALE)、USI options、startpos ファイルと hash、seed、TC (nodes / byoyomi / btime+binc)、threads、
 hash、SPRT bounds と上限局数。加えて実行機・backend・raw log の所在も記録する。
 
 #### (f) startpos / engine USI option
@@ -290,7 +293,7 @@ cargo run -p tools --release --bin tournament -- \
   --engine {ENGINE_A} --engine-label {SIDE_A} \
   --engine {ENGINE_B} --engine-label {SIDE_B} \
   [--engine {ENGINE_C} --engine-label {SIDE_C} ...] \
-  --games {GAMES} --byoyomi {BYOYOMI} --hash-mb {HASH} --threads {THREADS} \
+  --games {GAMES} {--nodes N | --byoyomi MS | --btime MS --binc MS} --hash-mb {HASH} --threads {THREADS} \
   --concurrency {CONCURRENCY} \
   --seed {SEED} \
   --startpos-file data/startpos/start_sfens_ply32.txt \
@@ -311,7 +314,7 @@ cargo run -p tools --release --bin tournament -- \
   - `pair-{i}-{j}__{label_i}-vs-{label_j}.jsonl`（--engine 指定順の 0 始まり index + 整形した表示ラベル）: ペア別の棋譜ログ（各対局の指し手・評価値・結果）。例: `pair-0-1__baseline-vs-pass-root-bonus.jsonl`
   - `meta.json`: 対局設定・エンジン情報をまとめたファイル。対局条件の確認・再現に利用可能。
 
-**注意:** `run_in_background: true` で起動し、`TaskOutput` で完了を監視すること。
+`run_in_background: true` で起動する。終了時にハーネスが完了を通知する。
 
 #### 実行中の動的制御（再起動不要）
 
@@ -362,8 +365,7 @@ cargo run -p tools --release --bin tournament -- \
 
 ### 4. 完了待ち・結果集計
 
-Background task の完了を `TaskOutput` で検知する。
-完了後、`analyze_selfplay` ツールで対局ログを集計しサマリを生成する:
+Background task の完了通知を受けたら、`analyze_selfplay` ツールで対局ログを集計しサマリを生成する:
 
 ```
 cargo run -p tools --release --bin analyze_selfplay -- "$OUT"/*.jsonl
@@ -428,14 +430,13 @@ drain する。ライブで判定が走るので、従来の固定 `--games` よ
 ケースが多い（一方で、差が微妙な場合は `--games` 上限まで走る）。
 
 典型例 (gainer 標準): `base` エンジンと `test` エンジンで、H0=0 / H1=+10 nelo、
-α=β=0.05、上限 `--games 5000` (総 10,000 局)。TC は比較軸選択則 (上記 (b)) に従い
-固定ノードか固定時間を選ぶ。
+α=β=0.05、上限 `--games 5000` (総 10,000 局)。TC は上記 (b) の 3 択から比較軸で選ぶ。
 
 ```
 cargo run -p tools --release --bin tournament -- \
   --engine "$BASE_ENGINE" --engine-label base \
   --engine "$TEST_ENGINE" --engine-label test \
-  --games 5000 {--nodes N | --byoyomi MS} --concurrency 8 \
+  --games 5000 {--nodes N | --byoyomi MS | --btime MS --binc MS} --concurrency 8 \
   --startpos-file data/startpos/start_sfens_ply32.txt \
   --seed {SEED} \
   --base-label base \
