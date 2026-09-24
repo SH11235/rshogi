@@ -54,15 +54,16 @@ side 別 wrapper で rshogi の stderr を保存する。終了後の marker 確
 
 #### (b) time control: 既定の 3 択
 
-| 既定 | flag | 使う場面 |
+| 選択肢 | flag | 使う場面 |
 |---|---|---|
 | **固定ノード 300k** | `--nodes 300000` | 同 FS 同 arch のモデル比較 (recipe / 量子化 / SPSA 差等)。NPS 差と CPU 競合の影響を排除して重み差だけを測る |
 | **秒読み 1000ms (short time)** | `--byoyomi 1000` | search / 異 FS / 異 arch / 速度が変わる変更。実戦強度 = eval 品質 × NPS なので NPS 差を含めて測る |
-| **フィッシャー 60s + 0.6s** | `--btime 60000 --binc 600` | 持ち時間配分 (時間管理) まで含めて測りたい比較 |
+| **フィッシャー 60s + 0.6s** | `--btime 60000 --binc 600` (両手番共通、`--wtime` は無い) | 持ち時間配分 (時間管理) まで含めて測りたい比較。byoyomi 時は `MinimumThinkingTime=byoyomi` が注入されて時間管理が効かないので、時間管理の変更はフィッシャーでしか差が出ない |
 
 - 異 FS で eval 品質と実戦強度を切り分けたいときは、固定ノードと時間制の両方を回す。
-- 詳細な比較には長時間・マルチスレッド (`--threads` > 1) の評価も必要になる。その TC・
-  スレッド数・並列数・局数は既定 3 択から選ばず、ユーザーとすり合わせて決める。
+- 詳細な比較 (長時間 TC やマルチスレッド `--threads` > 1 が必要な評価。例: SMP・スレッド数に
+  依存する探索変更) では、TC とスレッド数を既定 3 択によらず、並列数・局数と併せてユーザーと
+  すり合わせて決める。
 
 search / FS / arch / 速度が変わる対局を固定ノードでやると、本来実戦強度に効く NPS 差 (例: HalfKP の avg_nodes
 は HalfKA_HM_merged より +6-14% 多い) を切り捨ててしまい、デプロイ実態と乖離する。
@@ -356,7 +357,7 @@ cargo run -p tools --release --bin tournament -- \
   --engine-usi-option "0:EvalFile=eval/halfkp_256x2-32-32_crelu/suisho5.bin" \
   --engine-usi-option "1:EvalDir=/path/to/eval" \
   --engine-usi-option "1:BookFile=no_book" \
-  --games 100 --byoyomi 3000 --hash-mb 256 --threads 1 \
+  --games 100 {TC: (b) の 3 択から} --hash-mb 256 --threads 1 \
   --concurrency 5 --seed {SEED} \
   --startpos-file data/startpos/start_sfens_ply32.txt \
   --base-label base \
@@ -382,7 +383,7 @@ nElo はペア単位 (同一開始局面・先後入替) で集計し、開始�
 
 この出力を元に、以下の内容をマークダウンファイル（`docs/performance/` 配下）に出力する:
 
-1. **対局条件**: 秒読み・スレッド・ハッシュ・対局数・NNUE
+1. **対局条件**: time control (nodes / byoyomi / btime+binc)・スレッド・ハッシュ・対局数・NNUE
 2. **総合結果表**: 各カードの勝敗・勝率・Elo差
 3. **確認ポイントの評価**: ユーザーが指定した比較ポイントについての分析
 4. **総括**: 全体的な傾向と推奨事項
