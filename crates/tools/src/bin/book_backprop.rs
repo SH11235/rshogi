@@ -23,12 +23,26 @@ struct Cli {
     max_iters: usize,
     #[arg(long, value_enum, default_value_t = MergeMode::Min)]
     merge: MergeMode,
+    /// 非合法手と `none` 行を局面の best から除く (行は値を変えずに書き出す)
+    #[arg(long, default_value_t = false)]
+    skip_unusable_moves: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let report: Option<&Path> = cli.report.as_deref();
-    backprop_file(&cli.book, &cli.out, report, cli.draw_value, cli.max_iters, cli.merge)?;
+    let options = BackpropOptions {
+        skip_unusable_moves: cli.skip_unusable_moves,
+    };
+    backprop_file_with(
+        &cli.book,
+        &cli.out,
+        report,
+        cli.draw_value,
+        cli.max_iters,
+        cli.merge,
+        options,
+    )?;
     Ok(())
 }
 

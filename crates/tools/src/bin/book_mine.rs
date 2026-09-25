@@ -21,7 +21,7 @@ use rshogi_core::position::Position;
 use rshogi_core::types::Color;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tools::book_backprop::{MergeMode, backprop_file};
+use tools::book_backprop::{BackpropOptions, MergeMode, backprop_file_with};
 use tools::book_db::{
     BookDb, BookMove, PositionEntry, apply_usi_move, canonical_key, child_position_after_move,
     parse_position_line, position_from_sfen, strip_ply,
@@ -852,11 +852,17 @@ fn search_single_move(
         bail!("探索がタイムアウトしました: {} searchmoves {move_usi}", task.key);
     }
     let bestmove = outcome.bestmove.unwrap_or_default();
-    let line = collector.into_lines().into_iter().find(|l| l.move_usi == move_usi);
-    let Some(line) = line.filter(|_| bestmove == move_usi || bestmove == "resign") else {
+    if bestmove != move_usi && bestmove != "resign" {
         bail!(
             "searchmoves {move_usi} を指定した探索で別の手 (bestmove {bestmove}) が返りました。\
              エンジンが searchmoves に対応していない可能性があります: {}",
+            task.key
+        );
+    }
+    let line = collector.into_lines().into_iter().find(|l| l.move_usi == move_usi);
+    let Some(line) = line else {
+        bail!(
+            "searchmoves {move_usi} の探索結果に読み筋が無い (探索量が小さすぎる / 合法手が無い等): {}",
             task.key
         );
     };
@@ -1307,6 +1313,7 @@ fn uncovered_existing_moves(
     let mut moves = BTreeSet::new();
     for book_move in &entry.moves {
         let Some(move_usi) = book_move.move_usi.as_deref() else {
+            stats.unlabeled_illegal_moves += 1;
             continue;
         };
         let actual = if hit.flipped {
@@ -1795,13 +1802,17 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
         write_atomic(&dir.join("expand.md"), &expand_report(&stats, &settings)?)?;
 
         let book_path = dir.join("book.db");
-        backprop_file(
+        // 非合法手や none 行 (ラベル付けできず 0/0 のまま残った手を含む) を best に入れない。
+        backprop_file_with(
             &expanded_path,
             &book_path,
             Some(&dir.join("backprop.md")),
             BACKPROP_DRAW_VALUE,
             BACKPROP_MAX_ITERS,
             args.merge,
+            BackpropOptions {
+                skip_unusable_moves: true,
+            },
         )?;
 
         let summary = IterationSummary {
@@ -2550,6 +2561,28 @@ done
         }
 
         #[test]
+        fn expand_reports_searchmoves_result_without_pv_separately() {
+            let (leaf, db, lines) = unexplored_fixture();
+            // 9c9d の行が無いため、searchmoves 9c9d には info 無しの bestmove resign が返る。
+            let engine = MockEngine::new(&[(&leaf, "3c3d", &lines[..3])]);
+            let dir = tempfile::tempdir().unwrap();
+
+            let err = match run_expand(
+                dir.path(),
+                &db,
+                &[&leaf],
+                engine_opts(&engine),
+                false,
+                "out.db",
+            ) {
+                Ok(_) => panic!("読み筋の無い searchmoves 結果が採用された"),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(err.contains("読み筋が無い"), "{err}");
+            assert!(!err.contains("対応していない"), "{err}");
+        }
+
+        #[test]
         fn expand_extend_ply_ignores_bestmove_without_collected_line() {
             let leaf = after(START, &["7g7f"]);
             let next = after(START, &["7g7f", "3c3d"]);
@@ -2933,6 +2966,33 @@ done
                 format!("{:#}", cmd_run(&run_args(dir.path(), &engine, 2, true)).unwrap_err());
             assert!(err.contains("旧形式"), "{err}");
             assert!(engine.log().is_empty());
+        }
+
+        #[test]
+        fn run_backprop_ignores_illegal_zero_rows_for_node_best() {
+            let c1 = after(START, &["7g7f"]);
+            let l2 = after(START, &["7g7f", "3c3d"]);
+            let engine = MockEngine::new(&[(&l2, "2g2f", &["score cp 20 pv 2g2f"])]);
+            let dir = tempfile::tempdir().unwrap();
+            // c1 の非合法手 5e5d (0/0) が best に入ると START の 7g7f が 0 に潰れる。
+            std::fs::write(
+                dir.path().join("book.db"),
+                book_text(&[
+                    (START, &[("7g7f", 50, 10, 1)]),
+                    (&c1, &[("3c3d", -50, 10, 3), ("5e5d", 0, 0, 1)]),
+                ]),
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("roots.txt"), "startpos\n").unwrap();
+
+            cmd_run(&run_args(dir.path(), &engine, 1, false)).unwrap();
+
+            let book = std::fs::read_to_string(dir.path().join("work/iter-001/book.db")).unwrap();
+            // l2 の best 20 → c1 の 3c3d は -20 → START の 7g7f は 20。
+            assert!(book.contains("3c3d none -20 10 3\n"), "{book}");
+            assert!(book.contains("7g7f none 20 10 1\n"), "{book}");
+            // 非合法行は値を変えずに残す。
+            assert!(book.contains("5e5d none 0 0 1\n"), "{book}");
         }
 
         #[test]

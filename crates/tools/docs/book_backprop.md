@@ -29,6 +29,7 @@ cargo run -p tools --release --bin book_backprop -- \
 | `--merge <MODE>` | `min` | book 内子局面からの伝播値と既存ラベル値の合成。`min` または `replace` |
 | `--report <PATH>` | なし | Markdown レポートの出力先 |
 | `--max-iters <N>` | `1000` | 非自明 SCC の値反復ガード。到達時はエラー終了 |
+| `--skip-unusable-moves` | off | 非合法手と `none` 行を局面の best (と best 変化の集計) から除く。行自体は値を変えずに書き出す |
 
 ## 伝播規則
 
@@ -45,7 +46,7 @@ cargo run -p tools --release --bin book_backprop -- \
 
 歩・香の最終段、桂の最終二段への打ち・不成も非合法手として除外します。子局面がbook内に存在していても、その手の既存 `value` を維持します。合法な不成は通常の手と同様に逆伝播します。
 
-`best(N)` は局面 `N` の候補手 `value` の最大値です。book 内子局面が見つかった手の最終値は `--merge` で決まります。
+`best(N)` は局面 `N` の候補手 `value` の最大値です。既定では非合法手と `none` 行の既存 `value` も含みます。`--skip-unusable-moves` を指定するとこれらを除き、合法手だけの最大値にします (合法手が無い局面は `--draw-value`)。book 内子局面が見つかった手の最終値は `--merge` で決まります。
 
 | mode | 更新 |
 |---|---|

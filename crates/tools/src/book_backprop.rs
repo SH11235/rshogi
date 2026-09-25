@@ -76,6 +76,30 @@ pub struct MoveValue {
     pub old: i32,
     pub new: i32,
     pub edge: Option<Edge>,
+    /// 合法な指し手を持つ行か。非合法手と `none` 行は `false`。
+    pub usable: bool,
+}
+
+/// 逆伝播の追加オプション。既定値は `book_backprop` の従来挙動。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackpropOptions {
+    /// 非合法手と `none` 行を局面の best (伝播値と best の変化集計) から除く。
+    /// 行自体は値を変えずに書き出す。
+    pub skip_unusable_moves: bool,
+}
+
+/// 局面の best 計算に共通の設定。
+#[derive(Debug, Clone, Copy)]
+struct BestParams {
+    draw_value: i32,
+    merge: MergeMode,
+    skip_unusable_moves: bool,
+}
+
+impl BestParams {
+    fn counts(self, mv: &MoveValue) -> bool {
+        !self.skip_unusable_moves || mv.usable
+    }
 }
 
 /// 局面を頂点、book 内子局面への候補手を辺とするグラフ。
@@ -127,6 +151,19 @@ pub fn backprop_file(
     max_iters: usize,
     merge: MergeMode,
 ) -> Result<PropagationStats> {
+    backprop_file_with(book, out, report, draw_value, max_iters, merge, BackpropOptions::default())
+}
+
+/// [`backprop_file`] に追加オプションを指定する版。
+pub fn backprop_file_with(
+    book: &Path,
+    out: &Path,
+    report: Option<&Path>,
+    draw_value: i32,
+    max_iters: usize,
+    merge: MergeMode,
+    options: BackpropOptions,
+) -> Result<PropagationStats> {
     if max_iters == 0 {
         bail!("--max-iters は 1 以上を指定してください");
     }
@@ -135,7 +172,7 @@ pub fn backprop_file(
         .with_context(|| format!("定跡を rshogi-book で読めません: {}", book.display()))?;
     let db = read_book_db(book)?;
     let mut graph = build_graph(&db)?;
-    let stats = propagate_values(&db, &mut graph, draw_value, max_iters, merge)?;
+    let stats = propagate_values_with(&db, &mut graph, draw_value, max_iters, merge, options)?;
     write_backprop_book(&db, &graph, out)?;
     if let Some(path) = report {
         write_report(&db, &graph, &stats, path, merge)?;
@@ -242,9 +279,11 @@ pub fn build_graph(book: &BookDb) -> Result<Graph> {
             .ok_or_else(|| anyhow!("内部エラー: entry がありません: {key}"))?;
         let mut move_values = Vec::with_capacity(entry.moves.len());
         for book_move in &entry.moves {
+            let mut legal = false;
             let edge = if let Some(move_usi) = &book_move.move_usi {
                 match child_position_after_move(&entry.sfen, move_usi) {
                     Ok(child) => {
+                        legal = true;
                         let child_sfen = child.to_sfen();
                         let child_key = strip_ply(&child_sfen);
                         if let Some(&to) = node_index.get(child_key) {
@@ -283,6 +322,7 @@ pub fn build_graph(book: &BookDb) -> Result<Graph> {
                 old: book_move.value,
                 new: book_move.value,
                 edge,
+                usable: legal,
             });
         }
         moves.push(move_values);
@@ -324,6 +364,23 @@ pub fn propagate_values(
     max_iters: usize,
     merge: MergeMode,
 ) -> Result<PropagationStats> {
+    propagate_values_with(book, graph, draw_value, max_iters, merge, BackpropOptions::default())
+}
+
+/// [`propagate_values`] に追加オプションを指定する版。
+pub fn propagate_values_with(
+    book: &BookDb,
+    graph: &mut Graph,
+    draw_value: i32,
+    max_iters: usize,
+    merge: MergeMode,
+    options: BackpropOptions,
+) -> Result<PropagationStats> {
+    let params = BestParams {
+        draw_value,
+        merge,
+        skip_unusable_moves: options.skip_unusable_moves,
+    };
     let scc = build_scc_graph(&graph.adjacency);
     let mut node_best = vec![draw_value; graph.keys.len()];
     let mut stats = PropagationStats {
@@ -338,20 +395,12 @@ pub fn propagate_values(
         scc_depth[comp] = depth;
 
         if scc.nontrivial[comp] {
-            let iters = iterate_nontrivial_scc(
-                graph,
-                &scc,
-                comp,
-                &mut node_best,
-                draw_value,
-                max_iters,
-                merge,
-            )?;
+            let iters =
+                iterate_nontrivial_scc(graph, &scc, comp, &mut node_best, max_iters, params)?;
             stats.scc_iters.push(iters);
         } else {
             let node = scc.comps[comp][0];
-            node_best[node] =
-                compute_node_best(graph, &scc, comp, node, &node_best, draw_value, merge);
+            node_best[node] = compute_node_best(graph, &scc, comp, node, &node_best, params);
         }
     }
 
@@ -373,8 +422,9 @@ pub fn propagate_values(
     }
 
     for (node_idx, key) in graph.keys.iter().enumerate() {
-        let old_best = graph.moves[node_idx].iter().map(|mv| mv.old).max().unwrap_or(draw_value);
-        let new_best = graph.moves[node_idx].iter().map(|mv| mv.new).max().unwrap_or(draw_value);
+        let counted = || graph.moves[node_idx].iter().filter(|mv| params.counts(mv));
+        let old_best = counted().map(|mv| mv.old).max().unwrap_or(draw_value);
+        let new_best = counted().map(|mv| mv.new).max().unwrap_or(draw_value);
         if old_best != new_best {
             let entry = book
                 .entries
@@ -409,19 +459,18 @@ fn iterate_nontrivial_scc(
     scc: &SccGraph,
     comp: usize,
     node_best: &mut [i32],
-    draw_value: i32,
     max_iters: usize,
-    merge: MergeMode,
+    params: BestParams,
 ) -> Result<usize> {
     for &node in &scc.comps[comp] {
-        node_best[node] = draw_value;
+        node_best[node] = params.draw_value;
     }
 
     for iter in 1..=max_iters {
         let prev = node_best.to_vec();
         let mut changed = false;
         for &node in &scc.comps[comp] {
-            let best = compute_node_best(graph, scc, comp, node, &prev, draw_value, merge);
+            let best = compute_node_best(graph, scc, comp, node, &prev, params);
             if best != node_best[node] {
                 changed = true;
                 node_best[node] = best;
@@ -441,11 +490,14 @@ fn compute_node_best(
     comp: usize,
     node: usize,
     best_values: &[i32],
-    draw_value: i32,
-    merge: MergeMode,
+    params: BestParams,
 ) -> i32 {
+    let BestParams {
+        draw_value, merge, ..
+    } = params;
     graph.moves[node]
         .iter()
+        .filter(|mv| params.counts(mv))
         .map(|mv| match mv.edge {
             Some(edge) if scc.nontrivial[comp] && scc.comp_of[edge.to] == comp => {
                 merge.apply(mv.old, draw_value.max(-best_values[edge.to]))
@@ -758,4 +810,44 @@ fn write_top_changes(writer: &mut dyn Write, changes: &[NodeChange]) -> Result<(
     }
     writeln!(writer)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const START: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+
+    fn backprop_text(input: &str, options: BackpropOptions) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let in_path = dir.path().join("in.db");
+        let out_path = dir.path().join("out.db");
+        std::fs::write(&in_path, input).unwrap();
+        backprop_file_with(&in_path, &out_path, None, 0, 1000, MergeMode::Replace, options)
+            .unwrap();
+        std::fs::read_to_string(out_path).unwrap()
+    }
+
+    #[test]
+    fn skip_unusable_moves_excludes_illegal_and_none_rows_from_best() {
+        let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        // 子局面の非合法手 5e5d と none 行は value 0。best に入ると 7g7f が 0 になる。
+        let input = format!(
+            "{BOOK_HEADER}\nsfen {START}\n7g7f none 0 1 1\nsfen {child}\n3c3d none -50 10 3\n5e5d none 0 0 1\nnone none 0 0 1\n"
+        );
+
+        let default = backprop_text(&input, BackpropOptions::default());
+        assert!(default.contains("7g7f none 0 1 1\n"));
+
+        let skipped = backprop_text(
+            &input,
+            BackpropOptions {
+                skip_unusable_moves: true,
+            },
+        );
+        assert!(skipped.contains("7g7f none 50 1 1\n"));
+        // 除外した行も値を変えずに書き出す。
+        assert!(skipped.contains("5e5d none 0 0 1\n"));
+        assert!(skipped.contains("none none 0 0 1\n"));
+    }
 }

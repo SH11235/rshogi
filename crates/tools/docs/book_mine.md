@@ -127,8 +127,9 @@ cargo run -p tools --release --bin book_mine -- expand \
 - book 外の局面は新しい局面として追加します。`sfen` 行は末端局面の ply 付き SFEN です
 - book 内の局面 (反転キー一致を含む) は、既存の手の `value` / `depth` / `count` / `ponder` を**変更せず** (既存ラベルの由来を混ぜない)、まだ無い手だけを追加します。反転キーでヒットした局面には反転座標系の手として書きます
 - 例外として、未探索局面 (全候補手が `value=0 depth=0`) の既存手はラベルを持たないため、**全ての**既存手に `value` / `depth` を埋めます (`count` / `ponder` は保持)。MultiPV 行にある手はその行の値を使い、MultiPV 行に無い既存手は `go <--go の引数> searchmoves <手>` でその手に限った探索を 1 手ずつ行って値を得ます (値の規約は MultiPV 行と同じ)。0/0 の手が一部だけ残ると、探索済み局面の中の値 0 の手として `frontier` や逆伝播の best になりうるためです。これにより、MultiPV の手が全て既存の未ラベル手と重なる局面も次の `frontier` で未探索局面として再列挙されません
-- searchmoves 探索で PV 初手が指定手でない、または `bestmove` が指定手 (か `resign`) でない場合は、エンジンが searchmoves に対応していないとみなしてエラーにします。未探索局面を含む book を展開するには searchmoves 対応のエンジンが必要です
-- 未探索局面の既存手のうち非合法な手はラベル付けできず、`value=0 depth=0` のまま残ります (件数を report に出します)
+- searchmoves 探索で `bestmove` が指定手 (か `resign`) でない場合は、エンジンが searchmoves に対応していないとみなしてエラーにします。未探索局面を含む book を展開するには searchmoves 対応のエンジンが必要です
+- `bestmove` は指定手 (か `resign`) でも、指定手を PV 初手とする確定行が得られない場合 (探索量が小さすぎる、合法手が無い等) は、別のエラーにします
+- 未探索局面の既存手のうち非合法な手と `none` 行はラベル付けできず、`value=0 depth=0` のまま残ります (件数を report に出します)。`run` の逆伝播はこれらを局面の best から除きます
 - 合法手が無い局面は探索せず、report に記録します
 - エンジンが `bestmove win` を返した宣言勝ち可能局面は、book に `win` 相当を入れず候補手も追加しません。report に mate 1 相当の値 (`29999`) で記録します。probe 側は root の宣言判定で処理されます
 - エンジンが返した非合法手は追加せず、件数を report に記録します
@@ -186,7 +187,7 @@ cargo run -p tools --release --bin book_mine -- run \
 | `book.db`, `backprop.md` | `expanded.db` を逆伝播した book。次の周の入力になる |
 | `summary.json` | 周の集計 (末端数・追加局面数・追加手数・値を埋めた手数) と実行設定。周の完了印として最後に書く |
 
-逆伝播は `book_backprop` と同じ処理をライブラリとして呼びます (`--draw-value 0`、`--max-iters 1000` 相当)。journal は `<work-dir>/journal.jsonl` に全周分を追記し、周をまたいで再利用します。エンジンは周をまたいで起動したままにします。
+逆伝播は `book_backprop` と同じ処理をライブラリとして呼びます (`--draw-value 0`、`--max-iters 1000`、`--skip-unusable-moves` 相当)。非合法手や `none` 行の値 (ラベル付けできず 0/0 のまま残った行を含む) が局面の best になって伝播しないよう、これらを best から除きます。journal は `<work-dir>/journal.jsonl` に全周分を追記し、周をまたいで再利用します。エンジンは周をまたいで起動したままにします。
 
 周回は次のいずれかで終わります。
 
