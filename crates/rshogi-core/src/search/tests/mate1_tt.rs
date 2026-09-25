@@ -44,6 +44,7 @@ fn run_writer(qsearch_writer: bool, write_ply: i32) {
         tune_params: &worker.search_tune_params,
         reductions: &worker.reductions,
         draw_value_table: worker.draw_value_table,
+        entering_king_rule: worker.entering_king_rule,
     };
     let mut tm =
         TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));

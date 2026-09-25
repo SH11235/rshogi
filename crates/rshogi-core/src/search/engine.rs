@@ -1470,7 +1470,8 @@ where
     // ルート手を初期化
     worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
 
-    // 入玉宣言勝ちチェック（YO準拠: root のみ）
+    // root の入玉宣言勝ちチェック（YO準拠）
+    // 探索内の宣言勝ち判定は probe_transposition で行う（YO の search() と同じ位置）。
     let decl_move = pos.declaration_win(worker.entering_king_rule);
     if decl_move != Move::NONE {
         // 宣言勝ち可能: root_moves に追加してスコア MATE を設定

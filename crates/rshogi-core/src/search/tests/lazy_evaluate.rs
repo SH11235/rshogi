@@ -71,6 +71,7 @@ fn unadjusted_static_eval(pv_node: bool, tt_eval: Value) -> (Value, Value) {
         tune_params: &worker.search_tune_params,
         reductions: &worker.reductions,
         draw_value_table: worker.draw_value_table,
+        entering_king_rule: worker.entering_king_rule,
     };
     let eval_ctx = super::super::eval_helpers::compute_eval_context(
         &mut worker.state,
