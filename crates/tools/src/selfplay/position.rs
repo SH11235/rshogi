@@ -191,7 +191,7 @@ pub fn build_position(
 
 /// 開始局面までに指された手数。SFEN の手数欄は次に指す手の番号なので 1 を引く。
 pub fn plies_before_start(pos: &Position) -> u32 {
-    u32::try_from(pos.game_ply() - 1).unwrap_or(0)
+    u32::try_from(pos.game_ply().saturating_sub(1)).unwrap_or(0)
 }
 
 /// 総手数で数えた `max_moves` に対し、対局で 1 手も指せない開始局面を拒否する。
@@ -206,7 +206,7 @@ pub fn ensure_start_positions_within_max_moves(
             let origin =
                 parsed.source_line.map_or_else(String::new, |line| format!(" (line {line})"));
             bail!(
-                "start position{origin} is already at ply {before}, not below --max-moves {max_moves}: {}",
+                "start position{origin} has {before} plies played before it, not below --max-moves {max_moves}: {}",
                 describe_position(parsed)
             );
         }

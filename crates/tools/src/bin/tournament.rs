@@ -142,7 +142,7 @@ struct Cli {
     /// 評価値による投了裁定 (movecount=3,score=600)。既定 off。
     #[arg(long, value_parser = clap::value_parser!(ResignRule))]
     adjudicate_resign: Option<ResignRule>,
-    /// 評価値による引分裁定 (movenumber=34,movecount=8,score=20)。手数は ply。
+    /// 評価値による引分裁定 (movenumber=34,movecount=8,score=20)。手数は開始局面からの対局内 ply。
     #[arg(long, value_parser = clap::value_parser!(DrawRule))]
     adjudicate_draw: Option<DrawRule>,
 
