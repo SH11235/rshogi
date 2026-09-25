@@ -138,7 +138,7 @@ jobs:
           # 過去の deploy-trigger commit が見えず、新規 PR を merge しても
           # `DEPLOYED_SHA` が空文字で落ちるため full history を取る。
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         if: steps.check.outputs.can_deploy == 'true'
         with:
           toolchain: stable
@@ -238,7 +238,7 @@ jobs:
         run: pnpm exec wrangler d1 migrations apply GAMES_SEARCH_DB --remote --config wrangler.staging.toml
       - name: Deploy via wrangler-action
         if: steps.check.outputs.can_deploy == 'true'
-        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        uses: cloudflare/wrangler-action@4e88846969242f7752bcfdaf5511bfbb3985ca47 # v4.1.1
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -369,7 +369,7 @@ jobs:
             --max-wait-sec "$MAX_WAIT" \
             --poll-interval-sec 30 \
             --require-stable-zero 3
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         if: steps.check.outputs.can_deploy == 'true'
         with:
           toolchain: stable
@@ -459,7 +459,7 @@ jobs:
         run: pnpm exec wrangler d1 migrations apply GAMES_SEARCH_DB --remote --config wrangler.production.toml
       - name: Deploy via wrangler-action
         if: steps.check.outputs.can_deploy == 'true'
-        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        uses: cloudflare/wrangler-action@4e88846969242f7752bcfdaf5511bfbb3985ca47 # v4.1.1
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
