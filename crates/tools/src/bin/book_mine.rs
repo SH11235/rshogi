@@ -625,6 +625,18 @@ struct JournalRecord {
     /// MultiPV 数を増やして再探索した回数。
     #[serde(default)]
     extensions: u32,
+    /// `go ... searchmoves <手>` で 1 手に限った探索の対象手 (未探索局面の既存手のラベル付け)。
+    /// `None` は通常の MultiPV 探索。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    searchmove: Option<String>,
+}
+
+/// journal レコードの再利用 key。searchmoves 探索は局面 key と対象手の組。
+fn journal_key(position_key: &str, searchmove: Option<&str>) -> String {
+    match searchmove {
+        Some(move_usi) => format!("{position_key} searchmoves {move_usi}"),
+        None => position_key.to_string(),
+    }
 }
 
 /// 探索設定。journal の再利用条件 (`go` / `multipv` / `engine_fingerprint`) を含む。
@@ -704,7 +716,7 @@ fn load_journal(path: &Path, settings: &SearchSettings) -> Result<HashMap<String
             format!("journal JSON が不正です: {}:{}", path.display(), line_no + 1)
         })?;
         if settings.matches(&rec) {
-            loaded.insert(rec.key.clone(), rec);
+            loaded.insert(journal_key(&rec.key, rec.searchmove.as_deref()), rec);
         }
     }
     Ok(loaded)
@@ -797,12 +809,70 @@ struct SearchTask {
     key: String,
     sfen: String,
     legal_moves: usize,
+    /// `Some` なら `searchmoves` でこの手に限って探索する。
+    searchmove: Option<String>,
 }
 
 #[derive(Debug)]
 enum WorkerMessage {
     Task(Result<JournalRecord>),
     Fatal(anyhow::Error),
+}
+
+fn search_task(
+    engine: &mut EngineProcess,
+    task: &SearchTask,
+    settings: &SearchSettings,
+) -> Result<JournalRecord> {
+    match task.searchmove.as_deref() {
+        Some(move_usi) => search_single_move(engine, task, settings, move_usi),
+        None => search_multipv(engine, task, settings),
+    }
+}
+
+/// `go <go 引数> searchmoves <手>` で 1 手に限って探索し、その手の value/depth を得る。
+///
+/// searchmoves を解釈しないエンジンは通常の最善手を返すため、PV 初手が対象手でない場合や
+/// bestmove が対象手 (または `resign`) でない場合はエラーにする。
+fn search_single_move(
+    engine: &mut EngineProcess,
+    task: &SearchTask,
+    settings: &SearchSettings,
+    move_usi: &str,
+) -> Result<JournalRecord> {
+    engine.set_option_if_available("MultiPV", "1")?;
+    let go = format!("{} searchmoves {move_usi}", settings.go.trim());
+    let mut collector = MultiPvCollector::default();
+    let outcome = {
+        let mut on_info = |line: &str| collector.update(line);
+        let callback: &mut dyn FnMut(&str) = &mut on_info;
+        engine.search_raw_go(&task.sfen, &go, SEARCH_TIMEOUT, Some(callback))?
+    };
+    if outcome.timed_out {
+        bail!("探索がタイムアウトしました: {} searchmoves {move_usi}", task.key);
+    }
+    let bestmove = outcome.bestmove.unwrap_or_default();
+    let line = collector.into_lines().into_iter().find(|l| l.move_usi == move_usi);
+    let Some(line) = line.filter(|_| bestmove == move_usi || bestmove == "resign") else {
+        bail!(
+            "searchmoves {move_usi} を指定した探索で別の手 (bestmove {bestmove}) が返りました。\
+             エンジンが searchmoves に対応していない可能性があります: {}",
+            task.key
+        );
+    };
+    Ok(JournalRecord {
+        key: task.key.clone(),
+        sfen: task.sfen.clone(),
+        go: settings.go.clone(),
+        multipv: settings.multipv_spec.clone(),
+        engine_fingerprint: settings.fingerprint.clone(),
+        bestmove: Some(bestmove),
+        declaration_win: false,
+        lines: vec![line],
+        multipv_used: 1,
+        extensions: 0,
+        searchmove: Some(move_usi.to_string()),
+    })
 }
 
 fn search_multipv(
@@ -838,6 +908,7 @@ fn search_multipv(
             lines: Vec::new(),
             multipv_used: k,
             extensions,
+            searchmove: None,
         };
         if record.declaration_win {
             return Ok(record);
@@ -900,7 +971,7 @@ fn worker_loop(
         return;
     }
     for task in task_rx {
-        let result = search_multipv(&mut engine, &task, settings)
+        let result = search_task(&mut engine, &task, settings)
             .with_context(|| format!("worker {worker_id}: 探索に失敗しました: {}", task.sfen));
         // 失敗後は応答の対応関係を保証できないため、この engine を再利用しない。
         let failed = result.is_err();
@@ -974,7 +1045,8 @@ impl EnginePool {
                         serde_json::to_writer(&mut writer, &record)?;
                         writer.write_all(b"\n")?;
                         writer.flush()?;
-                        journal.insert(record.key.clone(), record);
+                        journal
+                            .insert(journal_key(&record.key, record.searchmove.as_deref()), record);
                         None
                     }
                     WorkerMessage::Task(Err(err)) => {
@@ -1032,6 +1104,8 @@ impl Drop for EnginePool {
 struct Expanded {
     sfen: String,
     record: JournalRecord,
+    /// 未探索局面の既存手を searchmoves で探索した行。
+    extra_lines: Vec<PvLine>,
     /// `--extend-ply` で辿った局面。
     from_extend_ply: bool,
 }
@@ -1049,6 +1123,11 @@ struct ExpandStats {
     /// 未探索局面の既存手へ value/depth を埋めた手数と局面数。
     filled_moves: usize,
     positions_with_filled_moves: usize,
+    /// 未探索局面の既存手を searchmoves で探索した数と journal 再利用数。
+    searchmove_searched: usize,
+    searchmove_reused: usize,
+    /// 未探索局面の既存手のうち非合法でラベル付けできなかった手数。
+    unlabeled_illegal_moves: usize,
     multipv_extended_positions: usize,
     multipv_extensions: u64,
     mate_lines: usize,
@@ -1070,6 +1149,23 @@ struct Expander<'a> {
 }
 
 impl Expander<'_> {
+    /// journal に無いタスクを engine pool で探索し、結果を journal に加える。
+    fn run_tasks(&mut self, tasks: Vec<SearchTask>) -> Result<()> {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        let parallel = self.parallel;
+        let settings = &self.settings;
+        let pool = self.pool.get_or_insert_with(|| EnginePool::spawn(parallel, settings));
+        pool.run(tasks, self.journal_path, &mut self.journal)
+    }
+
+    fn record(&self, position_key: &str, searchmove: Option<&str>) -> Result<&JournalRecord> {
+        self.journal.get(&journal_key(position_key, searchmove)).ok_or_else(|| {
+            anyhow!("内部エラー: journal に探索結果がありません: {position_key} {searchmove:?}")
+        })
+    }
+
     fn expand(&mut self, book: &BookDb, leaves: &[String]) -> Result<(BookDb, ExpandStats)> {
         let mut stats = ExpandStats {
             leaves: leaves.len(),
@@ -1100,26 +1196,52 @@ impl Expander<'_> {
                         key,
                         sfen: sfen.clone(),
                         legal_moves,
+                        searchmove: None,
                     });
                 }
                 items.push((canonical, sfen.clone()));
             }
-            if !tasks.is_empty() {
-                let parallel = self.parallel;
-                let settings = &self.settings;
-                let pool = self.pool.get_or_insert_with(|| EnginePool::spawn(parallel, settings));
-                pool.run(tasks, self.journal_path, &mut self.journal)?;
+            self.run_tasks(tasks)?;
+
+            // 未探索局面は既存手を全てラベル付けする。MultiPV 行に無い既存手は
+            // searchmoves で 1 手ずつ探索する (0/0 の手を残すと値 0 の手として best になりうる)。
+            let mut uncovered = Vec::with_capacity(items.len());
+            let mut move_tasks = Vec::new();
+            for (_, sfen) in &items {
+                let key = strip_ply(sfen);
+                let record = self.record(key, None)?;
+                let moves = if record.declaration_win {
+                    Vec::new()
+                } else {
+                    uncovered_existing_moves(book, sfen, record, &mut stats)
+                };
+                for move_usi in &moves {
+                    if self.journal.contains_key(&journal_key(key, Some(move_usi))) {
+                        stats.searchmove_reused += 1;
+                    } else {
+                        stats.searchmove_searched += 1;
+                        move_tasks.push(SearchTask {
+                            key: key.to_string(),
+                            sfen: sfen.clone(),
+                            legal_moves: 1,
+                            searchmove: Some(move_usi.clone()),
+                        });
+                    }
+                }
+                uncovered.push(moves);
             }
+            self.run_tasks(move_tasks)?;
 
             let mut next = Vec::new();
-            for (canonical, sfen) in items {
-                let record =
-                    self.journal.get(strip_ply(&sfen)).cloned().ok_or_else(|| {
-                        anyhow!("内部エラー: journal に探索結果がありません: {sfen}")
-                    })?;
+            for ((canonical, sfen), moves) in items.into_iter().zip(uncovered) {
+                let key = strip_ply(&sfen);
+                let record = self.record(key, None)?.clone();
+                let mut extra_lines = Vec::with_capacity(moves.len());
+                for move_usi in &moves {
+                    extra_lines.extend(self.record(key, Some(move_usi))?.lines.iter().cloned());
+                }
                 if ply < self.extend_ply
-                    && let Some(best) = extend_move(&record)
-                    && let Ok(child) = child_position_after_move(&sfen, best)
+                    && let Some(child) = extend_child(&sfen, &record)
                 {
                     let child_sfen = child.to_sfen();
                     if book.find(&child_sfen).is_none() {
@@ -1131,6 +1253,7 @@ impl Expander<'_> {
                     Expanded {
                         sfen,
                         record,
+                        extra_lines,
                         from_extend_ply: ply > 0,
                     },
                 );
@@ -1145,13 +1268,61 @@ impl Expander<'_> {
     }
 }
 
-/// `--extend-ply` で辿る手。エンジンの bestmove を優先し、無ければ value 最大の行の手。
-fn extend_move(record: &JournalRecord) -> Option<&str> {
-    match record.bestmove.as_deref() {
-        Some("win" | "resign" | "none") => None,
-        Some(bestmove) => Some(bestmove),
-        None => record.lines.iter().max_by_key(|l| l.value).map(|l| l.move_usi.as_str()),
+/// `--extend-ply` で辿る子局面。
+///
+/// エンジンの bestmove が採取した MultiPV 行にあり合法ならそれを、無ければ合法な行のうち
+/// value 最大 (同値は USI 昇順) の手を辿る。行の無い手を辿ると book に親の手が無い孤立局面になる。
+fn extend_child(sfen: &str, record: &JournalRecord) -> Option<Position> {
+    if record.declaration_win {
+        return None;
     }
+    if let Some(bestmove) = record.bestmove.as_deref()
+        && record.lines.iter().any(|l| l.move_usi == bestmove)
+        && let Ok(child) = child_position_after_move(sfen, bestmove)
+    {
+        return Some(child);
+    }
+    let mut lines: Vec<&PvLine> = record.lines.iter().collect();
+    lines.sort_by(|a, b| b.value.cmp(&a.value).then_with(|| a.move_usi.cmp(&b.move_usi)));
+    lines
+        .into_iter()
+        .find_map(|l| child_position_after_move(sfen, &l.move_usi).ok())
+}
+
+/// 入力 book の未探索局面について、MultiPV 行に無い合法な既存手を実局面の座標で返す。
+fn uncovered_existing_moves(
+    book: &BookDb,
+    sfen: &str,
+    record: &JournalRecord,
+    stats: &mut ExpandStats,
+) -> Vec<String> {
+    let Some(hit) = book.find(sfen) else {
+        return Vec::new();
+    };
+    let entry = &book.entries[&hit.key];
+    if !entry.is_unexplored() {
+        return Vec::new();
+    }
+    let covered: HashSet<&str> = record.lines.iter().map(|l| l.move_usi.as_str()).collect();
+    let mut moves = BTreeSet::new();
+    for book_move in &entry.moves {
+        let Some(move_usi) = book_move.move_usi.as_deref() else {
+            continue;
+        };
+        let actual = if hit.flipped {
+            flip_usi_move(move_usi)
+        } else {
+            Some(move_usi.to_string())
+        };
+        match actual.filter(|m| child_position_after_move(sfen, m).is_ok()) {
+            Some(actual) if !covered.contains(actual.as_str()) => {
+                moves.insert(actual);
+            }
+            Some(_) => {}
+            None => stats.unlabeled_illegal_moves += 1,
+        }
+    }
+    moves.into_iter().collect()
 }
 
 /// bestmove の行が value 最大の行でないか。
@@ -1215,7 +1386,7 @@ fn apply_expansions(
                 let fill = entry.is_unexplored();
                 let mut added = 0;
                 let mut filled = 0;
-                for line in &record.lines {
+                for line in record.lines.iter().chain(&item.extra_lines) {
                     // 反転 key でヒットしたエントリへは反転座標系で書く。
                     let (move_usi, ponder) = if hit.flipped {
                         match flip_usi_move(&line.move_usi) {
@@ -1332,6 +1503,13 @@ fn expand_report(stats: &ExpandStats, settings: &SearchSettings) -> Result<Strin
         "| unexplored positions with filled moves | {} |",
         stats.positions_with_filled_moves
     )?;
+    writeln!(out, "| searchmoves searches | {} |", stats.searchmove_searched)?;
+    writeln!(out, "| searchmoves journal reused | {} |", stats.searchmove_reused)?;
+    writeln!(
+        out,
+        "| illegal existing moves left unlabeled | {} |",
+        stats.unlabeled_illegal_moves
+    )?;
     writeln!(out, "| multipv extended positions | {} |", stats.multipv_extended_positions)?;
     writeln!(out, "| multipv extensions | {} |", stats.multipv_extensions)?;
     writeln!(out, "| mate lines | {} |", stats.mate_lines)?;
@@ -1424,6 +1602,16 @@ struct RunConfig {
 }
 
 impl RunConfig {
+    /// 再開可能か。パスは記録用で、同じ内容のファイルを別パスに置いても再開できるよう比較しない。
+    fn same_run(&self, other: &Self) -> bool {
+        let without_paths = |config: &Self| Self {
+            book: String::new(),
+            roots: String::new(),
+            ..config.clone()
+        };
+        without_paths(self) == without_paths(other)
+    }
+
     fn new(args: &RunArgs) -> Result<Self> {
         let (book, book_sha256) = path_and_sha256(&args.book)?;
         let (roots, roots_sha256) = path_and_sha256(&args.frontier.roots)?;
@@ -1458,8 +1646,11 @@ struct IterationSummary {
     leaves: usize,
     new_positions: usize,
     added_moves: usize,
+    #[serde(default)]
     filled_moves: usize,
-    config: RunConfig,
+    /// 旧形式 (設定の記録が無い) の summary.json では `None`。
+    #[serde(default)]
+    config: Option<RunConfig>,
 }
 
 impl IterationSummary {
@@ -1531,13 +1722,17 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
     read_book_checked(&args.book)?;
     let config = RunConfig::new(args)?;
     for summary in &completed {
-        if summary.config != config {
+        let Some(recorded) = &summary.config else {
             bail!(
-                "--work-dir の iter-{:03} は異なる設定で実行されています。同じ --book / --roots / frontier 設定 / --merge で再開するか、別の --work-dir を指定してください
-  記録: {}
-  今回: {}",
+                "--work-dir の iter-{:03}/summary.json は旧形式 (実行設定の記録なし) のため再開できません。新しい --work-dir で開始してください",
+                summary.iteration
+            );
+        };
+        if !recorded.same_run(&config) {
+            bail!(
+                "--work-dir の iter-{:03} は異なる設定で実行されています。同じ内容の --book / --roots と同じ frontier 設定・--merge で再開するか、別の --work-dir を指定してください\n  記録: {}\n  今回: {}",
                 summary.iteration,
-                serde_json::to_string(&summary.config)?,
+                serde_json::to_string(recorded)?,
                 serde_json::to_string(&config)?
             );
         }
@@ -1615,7 +1810,7 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             new_positions: stats.new_positions,
             added_moves: stats.added_moves,
             filled_moves: stats.filled_moves,
-            config: config.clone(),
+            config: Some(config.clone()),
         };
         // summary.json は周の完了印なので最後に書く。
         write_atomic(&dir.join("summary.json"), &(serde_json::to_string_pretty(&summary)? + "\n"))?;
@@ -2033,6 +2228,8 @@ mod tests {
         /// `table.tsv` の行は `<sfen>\t<bestmove>\t<info 本体>|<info 本体>|...`。
         /// `setoption name MultiPV` の値までの行を返し、go ごとに `<multipv> <sfen>` を `log.txt` へ追記する。
         /// `info ` で始まる行はそのまま出力する (深さの揃わない最終ブロックの再現用)。
+        /// `go ... searchmoves <手>` には、その手を PV 初手に持つ table の行を返す
+        /// (log には `<multipv> <sfen> searchmoves <手>` を書く)。
         pub(super) struct MockEngine {
             pub(super) dir: tempfile::TempDir,
             pub(super) path: PathBuf,
@@ -2040,15 +2237,24 @@ mod tests {
 
         impl MockEngine {
             pub(super) fn new(responses: &[Response<'_>]) -> Self {
-                Self::build(responses, true)
+                Self::build(responses, true, true)
             }
 
             /// `MultiPV` オプションを広告しない mock。
             pub(super) fn without_multipv(responses: &[Response<'_>]) -> Self {
-                Self::build(responses, false)
+                Self::build(responses, false, true)
             }
 
-            fn build(responses: &[Response<'_>], advertise_multipv: bool) -> Self {
+            /// `searchmoves` を無視して通常の最善手を返す mock。
+            pub(super) fn without_searchmoves(responses: &[Response<'_>]) -> Self {
+                Self::build(responses, true, false)
+            }
+
+            fn build(
+                responses: &[Response<'_>],
+                advertise_multipv: bool,
+                searchmoves: bool,
+            ) -> Self {
                 let dir = tempfile::tempdir().unwrap();
                 let mut table = String::new();
                 for (sfen, bestmove, lines) in responses {
@@ -2071,6 +2277,28 @@ while IFS= read -r line; do
     isready) printf 'readyok\n' ;;
     "setoption name MultiPV value "*) mpv=${line##* } ;;
     "position sfen "*) pos=${line#position sfen } ;;
+    *" searchmoves "*)
+      sm=${line##* searchmoves }
+      printf '%s %s searchmoves %s\n' "$mpv" "$pos" "$sm" >> "$dir/log.txt"
+      if [ "__SEARCHMOVES__" = yes ]; then
+        awk -F '\t' -v p="$pos" -v m="$sm" '
+          $1 == p {
+            n = split($3, a, "|")
+            for (i = 1; i <= n; i++) if (index(a[i] " ", " pv " m " ") > 0) {
+              if (a[i] ~ /^info /) print a[i]
+              else printf "info depth 10 multipv 1 %s\n", a[i]
+              printf "bestmove %s\n", m
+              found = 1
+              exit
+            }
+          }
+          END { if (!found) print "bestmove resign" }' "$dir/table.tsv"
+      else
+        awk -F '\t' -v p="$pos" '
+          $1 == p { split($3, a, "|"); printf "info depth 10 multipv 1 %s\nbestmove %s\n", a[1], $2; found = 1; exit }
+          END { if (!found) print "bestmove resign" }' "$dir/table.tsv"
+      fi
+      ;;
     go*)
       printf '%s %s\n' "$mpv" "$pos" >> "$dir/log.txt"
       awk -F '\t' -v p="$pos" -v k="$mpv" '
@@ -2090,7 +2318,10 @@ while IFS= read -r line; do
   esac
 done
 "#;
-                std::fs::write(&path, script.replace("__OPTION__", option)).unwrap();
+                let script = script
+                    .replace("__OPTION__", option)
+                    .replace("__SEARCHMOVES__", if searchmoves { "yes" } else { "no" });
+                std::fs::write(&path, script).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
                 Self { dir, path }
             }
@@ -2241,6 +2472,104 @@ done
             let out = BookDb::from_reader(run.out.as_bytes()).unwrap();
             let result = frontier(&out, &[&leaf], &opts(SideArg::Both));
             assert_eq!(result.stats.unexplored_before_limit, 0);
+        }
+
+        /// 既存手 3 手が全て未ラベルの局面。MultiPV 2 行は 3c3d と新手 4a3b。
+        fn unexplored_fixture() -> (String, String, [&'static str; 4]) {
+            let leaf = after(START, &["7g7f"]);
+            let db =
+                book_text(&[(&leaf, &[("3c3d", 0, 0, 5), ("8c8d", 0, 0, 2), ("9c9d", 0, 0, 1)])]);
+            let lines = [
+                "score cp -10 pv 3c3d",
+                "score cp -20 pv 4a3b",
+                "score cp -40 pv 8c8d",
+                "score cp -300 pv 9c9d",
+            ];
+            (leaf, db, lines)
+        }
+
+        #[test]
+        fn expand_labels_every_existing_move_of_unexplored_position_via_searchmoves() {
+            let (leaf, db, lines) = unexplored_fixture();
+            let engine = MockEngine::new(&[(&leaf, "3c3d", &lines)]);
+            let dir = tempfile::tempdir().unwrap();
+
+            let run = run_expand(dir.path(), &db, &[&leaf], engine_opts(&engine), false, "out.db")
+                .unwrap();
+
+            // MultiPV に入らなかった既存手 8c8d / 9c9d は searchmoves で 1 手ずつ探索する。
+            assert_eq!(
+                engine.log(),
+                vec![
+                    format!("2 {leaf}"),
+                    format!("1 {leaf} searchmoves 8c8d"),
+                    format!("1 {leaf} searchmoves 9c9d"),
+                ]
+            );
+            let block = entry_block(&run.out, &leaf).unwrap();
+            assert_eq!(
+                block,
+                "3c3d none -10 10 5\n4a3b none -20 10 0\n8c8d none -40 10 2\n9c9d none -300 10 1\n"
+            );
+            assert!(!block.contains(" 0 0 "));
+            assert!(run.report.contains("| searchmoves searches | 2 |"));
+
+            // 0/0 の手が残らないので、frontier の best は実ラベル (-10) から決まる。
+            let out = BookDb::from_reader(run.out.as_bytes()).unwrap();
+            let result = frontier(&out, &[&leaf], &opts(SideArg::White));
+            assert_eq!(leaf_set(&result), set([after(&leaf, &["3c3d"])]));
+
+            // searchmoves の結果も journal から再利用する。
+            let again =
+                run_expand(dir.path(), &db, &[&leaf], engine_opts(&engine), true, "again.db")
+                    .unwrap();
+            assert_eq!(engine.log().len(), 3);
+            assert_eq!(again.out, run.out);
+            assert!(again.report.contains("| searchmoves journal reused | 2 |"));
+        }
+
+        #[test]
+        fn expand_fails_when_engine_ignores_searchmoves() {
+            let (leaf, db, lines) = unexplored_fixture();
+            let engine = MockEngine::without_searchmoves(&[(&leaf, "3c3d", &lines)]);
+            let dir = tempfile::tempdir().unwrap();
+
+            let err = match run_expand(
+                dir.path(),
+                &db,
+                &[&leaf],
+                engine_opts(&engine),
+                false,
+                "out.db",
+            ) {
+                Ok(_) => panic!("searchmoves を無視したエンジンの結果が採用された"),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(err.contains("searchmoves"), "{err}");
+            assert!(!dir.path().join("out.db").exists());
+        }
+
+        #[test]
+        fn expand_extend_ply_ignores_bestmove_without_collected_line() {
+            let leaf = after(START, &["7g7f"]);
+            let next = after(START, &["7g7f", "3c3d"]);
+            // bestmove 9c9d の行が無い。value 最大の 3c3d を辿る。
+            let engine = MockEngine::new(&[
+                (&leaf, "9c9d", &["score cp 30 pv 3c3d", "score cp 10 pv 8c8d"]),
+                (&next, "2g2f", &["score cp 40 pv 2g2f"]),
+            ]);
+            let dir = tempfile::tempdir().unwrap();
+            let db = book_text(&[(START, &[("7g7f", 50, 10, 3)])]);
+            let opts = EngineOpts {
+                extend_ply: 1,
+                ..engine_opts(&engine)
+            };
+
+            let run = run_expand(dir.path(), &db, &[&leaf], opts, false, "out.db").unwrap();
+
+            assert_eq!(engine.log(), vec![format!("2 {leaf}"), format!("2 {next}")]);
+            assert!(entry_block(&run.out, &next).is_some());
+            assert!(entry_block(&run.out, &after(START, &["7g7f", "9c9d"])).is_none());
         }
 
         #[test]
@@ -2530,7 +2859,7 @@ done
             assert_eq!(summary.filled_moves, 0);
             assert_eq!(
                 summary.config,
-                RunConfig::new(&run_args(dir.path(), &engine, 2, true)).unwrap()
+                Some(RunConfig::new(&run_args(dir.path(), &engine, 2, true)).unwrap())
             );
             let final_db = std::fs::read(dir.path().join("final.db")).unwrap();
             assert_eq!(final_db, std::fs::read(iter2.join("book.db")).unwrap());
@@ -2569,10 +2898,41 @@ done
             };
             assert!(cmd_run(&changed_merge).is_err());
 
+            // 同じ内容の book を別パスに置いても再開できる (パスは比較しない)。
+            let copied = dir.path().join("book_copy.db");
+            std::fs::copy(&book_path, &copied).unwrap();
+            let moved = RunArgs {
+                book: copied,
+                ..run_args(dir.path(), &engine, 1, true)
+            };
+            cmd_run(&moved).unwrap();
+
             std::fs::write(&book_path, book_text(&[(START, &[("7g7f", 40, 10, 1)])])).unwrap();
             assert!(cmd_run(&run_args(dir.path(), &engine, 2, true)).is_err());
             assert_eq!(engine.log().len(), 1);
             assert!(!dir.path().join("work/iter-002").exists());
+        }
+
+        #[test]
+        fn run_resume_rejects_old_format_summary() {
+            let engine = MockEngine::new(&[]);
+            let dir = tempfile::tempdir().unwrap();
+            let book = book_text(&[(START, &[("7g7f", 50, 10, 1)])]);
+            std::fs::write(dir.path().join("book.db"), &book).unwrap();
+            std::fs::write(dir.path().join("roots.txt"), "startpos\n").unwrap();
+            let iter1 = dir.path().join("work/iter-001");
+            std::fs::create_dir_all(&iter1).unwrap();
+            std::fs::write(iter1.join("book.db"), &book).unwrap();
+            std::fs::write(
+                iter1.join("summary.json"),
+                r#"{"iteration":1,"leaves":1,"new_positions":1,"added_moves":2}"#,
+            )
+            .unwrap();
+
+            let err =
+                format!("{:#}", cmd_run(&run_args(dir.path(), &engine, 2, true)).unwrap_err());
+            assert!(err.contains("旧形式"), "{err}");
+            assert!(engine.log().is_empty());
         }
 
         #[test]
