@@ -21,6 +21,7 @@ LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md
 | `book_rescore` | YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与、実行中は進捗/ETA を stderr 表示（[詳細](docs/book_rescore.md)） |
 | `book_extend` | YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加（[詳細](docs/book_extend.md)） |
 | `book_backprop` | YANEURAOU-DB2016 テキスト定跡 `.db` の候補手評価値を book 内の子局面から negamax 逆伝播（[詳細](docs/book_backprop.md)） |
+| `book_mine` | YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する BookMiner 相当ツール（[詳細](docs/book_mine.md)） |
 
 ### 棋譜閲覧
 
@@ -139,6 +140,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [book_kachi_label](docs/book_kachi_label.md) - YANEURAOU-DB2016 テキスト定跡の候補手に `%KACHI` 決着率を付与する sidecar JSONL を生成
 - [book_extend](docs/book_extend.md) - YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加
 - [book_backprop](docs/book_backprop.md) - YANEURAOU-DB2016 テキスト定跡 `.db` の候補手評価値を book 内の子局面から negamax 逆伝播
+- [book_mine](docs/book_mine.md) - YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する
 
 各ツールのオプション一覧は `--help` で確認できます。
 
