@@ -40,21 +40,23 @@ cargo run -p tools --release --bin book_mine -- frontier \
 
 roots から BFS で辿ります。訪問済みの局面 (反転キーも同一視) は再訪しないため、千日手などの循環でも停止します。`--side both` の場合は先手用と後手用の BFS を別々に行い、末端の和集合を取ります。
 
-book 内局面では、候補手の `value` の最大値を `best` として次の手を辿ります。
+book 内局面では、合法な候補手の `value` の最大値を `best` として次の手を辿ります。
 
 | 局面の手番 | 辿る手 |
 |---|---|
-| 採掘側 | ラベル付きの手のうち `value >= best - own_eps` |
-| 相手側 | ラベル付きの手のうち `value >= best - window`、または `--opp-min-count` 以上の `count` を持つ手 |
+| 採掘側 | `value >= best - own_eps` |
+| 相手側 | `value >= best - window`、または `--opp-min-count` 以上の `count` を持つ手 |
 
-`value=0 depth=0` の手は探索ラベルが未設定 (`book_from_csa` の出力形式) とみなします。未設定の手は `best` の計算に含めず、value による選択の対象にもしません。
+非合法な手 (book の破損) は `best` を決める前に除き、stderr に警告します。非合法手の value が大きくても、合法手の中の best を辿ります。
+
+局面の全候補手が `value=0 depth=0` (`book_from_csa` のラベル無し出力) の局面は未探索局面とみなします。この判定は局面単位だけで行います。1 手単位の `value=0 depth=0` は `book_rescore` の静的評価 (depth 0) や評価値ちょうど 0 と区別できないため、探索済み局面の中の value 0 の手も通常の値として `best` / window / own-eps の計算に使います。
 
 末端は次の 2 種類です。
 
 - 辿った手を指した先の局面が book 内に無い
-- book 内局面だが、候補手の value が全て未設定 (未探索局面)
+- book 内の未探索局面
 
-roots が book 外なら root 自身が深さ 0 の末端になります。book の手が非合法 (book の破損) な場合は stderr に警告して飛ばします。
+roots が book 外なら root 自身が深さ 0 の末端になります。
 
 ### 出力
 
@@ -62,7 +64,7 @@ roots が book 外なら root 自身が深さ 0 の末端になります。book 
 
 どちらかの玉が敵陣 3 段内にある末端には入玉フラグを付け、`<out>.entered` に同じ形式で書き出します (`--out` にも含まれます)。入玉局面の探索ラベルは過大評価しやすいため、後段でプレイアウト評価などに回す用途を想定しています。
 
-`--report` には roots 数、辿った book 局面数、末端数 (`--max-leaves` 適用前後)、末端の種類別件数、入玉フラグ件数、非合法手数、`--max-ply` / `--max-depth` で打ち切った手数、深さ分布を出力します。
+`--report` には roots 数、辿った book 局面数、末端数 (`--max-leaves` 適用前後)、末端の種類別件数、未探索局面の末端数 (`--max-leaves` 適用前)、入玉フラグ件数、非合法手数、`--max-ply` / `--max-depth` で打ち切った手数、深さ分布を出力します。
 
 ## expand
 
@@ -98,14 +100,14 @@ cargo run -p tools --release --bin book_mine -- expand \
 | `--resume` | | `--journal` 内の現設定一致レコードを再利用する |
 | `--report <path>` | なし | Markdown レポート |
 
-エンジンは各 worker で `Threads=1` / `Hash=256` を既定に起動し、`--engine-option` で上書きできます。`MultiPV` は探索ごとに `setoption` で設定します。
+エンジンは各 worker で `Threads=1` / `Hash=256` を既定に起動し、`--engine-option` で上書きできます。`MultiPV` は探索ごとに `setoption` で設定します。MultiPV を 2 以上にしうる設定 (`--multipv` が 2 以上、または `--multipv-delta` が正で `--multipv-max` が `--multipv` より大きい) で、エンジンが `usi` 応答で `MultiPV` オプションを広告しない場合はエラーにします。MultiPV 非対応エンジンでは `--multipv 1 --multipv-delta 0` (または `--multipv-max 1`) を指定してください。
 
 ### 探索
 
 各末端局面をその局面のまま MultiPV 探索します (子局面の探索はしません)。MultiPV 値は同一探索内の比較なので、ノード内でスケールが揃います。
 
 1. `MultiPV = min(--multipv, 上限)` で探索する。上限は `--multipv-max` と合法手数の小さい方
-2. `--multipv-delta` が正で、K 行揃い、1 位と K 位の value 差が `--multipv-delta` 以内なら、K を `--multipv` 分増やして (上限まで) 再探索する
+2. `--multipv-delta` が正で、K 行揃い、K 行の value の最大と最小の差が `--multipv-delta` 以内なら、K を `--multipv` 分増やして (上限まで) 再探索する
 3. 最後の探索の各 MultiPV 行を候補手にする
 
 各行の値は次のとおりです。
@@ -114,23 +116,22 @@ cargo run -p tools --release --bin book_mine -- expand \
 |---|---|
 | 指し手 | その行の PV 初手 |
 | `value` | その行の `score` (探索局面の手番側視点)。`score mate N` は `±(30000 - \|N\|)`、cp は `[-30000, 30000]` にクリップ |
-| `depth` | その行の `depth` |
+| `depth` | その行の `depth`。欠落または 0 の場合は 1 (未探索の印 `value=0 depth=0` と取り違えないため) |
 | `ponder` | その行の PV 2 手目 (子局面で合法な場合のみ。無ければ `none`) |
 | `count` | `0` |
 
-`lowerbound` / `upperbound` 付きの info 行は使わず、MultiPV 番号ごとに最後の確定行を採ります。
+`lowerbound` / `upperbound` 付きの info 行は使わず、MultiPV 番号ごとに最後の確定行を採ります。`go nodes` などで反復の途中に打ち切られると、最終ブロックの行ごとに深さが揃わず、MultiPV 1 行目や value 最大の行がエンジンの `bestmove` と一致しないことがあります。そのため MultiPV の拡張判定は番号順でなく value の最大・最小で行い、`bestmove` は journal に別に記録します。`bestmove` の行が value 最大の行でなかった局面数は report に出します。
 
 ### book への反映
 
 - book 外の局面は新しい局面として追加します。`sfen` 行は末端局面の ply 付き SFEN です
-- book 内の局面 (反転キー一致を含む) は、既存の手の `value` / `depth` / `count` / `ponder` を**変更せず**、まだ無い手だけを追加します。反転キーでヒットした局面には反転座標系の手として書きます
+- book 内の局面 (反転キー一致を含む) は、既存の手の `value` / `depth` / `count` / `ponder` を**変更せず** (既存ラベルの由来を混ぜない)、まだ無い手だけを追加します。反転キーでヒットした局面には反転座標系の手として書きます
+- 例外として、未探索局面 (全候補手が `value=0 depth=0`) の既存手はラベルを持たないため、探索結果の手と一致すれば `value` / `depth` を埋めます (`count` / `ponder` は保持)。これにより、MultiPV の手が全て既存の未ラベル手と重なる局面も次の `frontier` で未探索局面として再列挙されません
 - 合法手が無い局面は探索せず、report に記録します
 - エンジンが `bestmove win` を返した宣言勝ち可能局面は、book に `win` 相当を入れず候補手も追加しません。report に mate 1 相当の値 (`29999`) で記録します。probe 側は root の宣言判定で処理されます
 - エンジンが返した非合法手は追加せず、件数を report に記録します
 
-`--extend-ply N` を指定すると、展開した局面の最善手 (MultiPV 1 行目) を指した先の局面が book 外なら、それも同様に展開します。これを N 手分繰り返します。
-
-既存の手が未ラベル (`value=0 depth=0`) のままの局面は、探索結果の手が全て既存手と重なると何も追加されず、次の `frontier` でも未探索局面として再度列挙されます。未ラベルの手へのラベル付けは `book_rescore` で行ってください。
+`--extend-ply N` を指定すると、展開した局面のエンジンの `bestmove` (journal に無い場合は value 最大の行の手) を指した先の局面が book 外なら、それも同様に展開します。これを N 手分繰り返します。
 
 ### journal と決定性
 
@@ -142,7 +143,7 @@ cargo run -p tools --release --bin book_mine -- expand \
 
 ### report
 
-追加局面数 (うち `--extend-ply` 由来)、手を追加した既存局面数、新しい手が無かった既存局面数、追加手数、MultiPV を拡張した局面数と拡張回数、mate 行数、非合法手数、宣言勝ち可能局面 (一覧付き)、合法手の無い局面、探索数と journal 再利用数を出力します。
+追加局面数 (うち `--extend-ply` 由来)、手を追加した既存局面数、手の追加も値の埋め込みも無かった既存局面数、追加手数、未探索局面で値を埋めた手数と局面数、MultiPV を拡張した局面数と拡張回数、mate 行数、`bestmove` の行が value 最大でなかった局面数、非合法手数、宣言勝ち可能局面 (一覧付き)、合法手の無い局面、探索数と journal 再利用数を出力します。
 
 ## run
 
@@ -181,7 +182,7 @@ cargo run -p tools --release --bin book_mine -- run \
 | `leaves.txt`, `leaves.txt.entered`, `frontier.md` | その周の入力 book に対する `frontier` の出力 |
 | `expanded.db`, `expand.md` | `expand` の出力 |
 | `book.db`, `backprop.md` | `expanded.db` を逆伝播した book。次の周の入力になる |
-| `summary.json` | 周の集計 (末端数・追加局面数・追加手数)。周の完了印として最後に書く |
+| `summary.json` | 周の集計 (末端数・追加局面数・追加手数・値を埋めた手数) と実行設定。周の完了印として最後に書く |
 
 逆伝播は `book_backprop` と同じ処理をライブラリとして呼びます (`--draw-value 0`、`--max-iters 1000` 相当)。journal は `<work-dir>/journal.jsonl` に全周分を追記し、周をまたいで再利用します。エンジンは周をまたいで起動したままにします。
 
@@ -189,11 +190,17 @@ cargo run -p tools --release --bin book_mine -- run \
 
 - `--iterations` 周に達した
 - 累計追加局面数が `--max-new-positions` に達した。各周の末端数は残り予算で打ち切ります (`--extend-ply` で辿った局面の分は超過しえます)
-- 末端が無くなった、または局面も手も追加されなかった
+- 末端が無くなった、または局面・手の追加も値の埋め込みも無かった
 
 終了時に最終周の `book.db` を `--out` に書き出します。
 
 `--resume` を付けると、`iter-001` から連続する完了済み (`summary.json` と `book.db` がある) の周を飛ばし、最後の完了周の `book.db` から続けます。中断した周は最初からやり直しますが、探索結果は journal から再利用します。`--resume` 無しで前回の周や journal が残っている `--work-dir` を指定するとエラーにします。
+
+`summary.json` には `--book` / `--roots` の正準パスと SHA-256、frontier 設定 (`--side` / `--window` / `--opp-min-count` / `--own-eps` / `--max-ply` / `--max-depth` / `--max-leaves`)、`--merge` を記録します。`--resume` 時にこれらが完了済みの周の記録と異なる場合はエラーにします。探索設定 (`--go` / MultiPV 設定 / エンジン) は journal の再利用条件で照合され、異なる場合は journal を再利用せず探索し直します。
+
+中断した周のディレクトリには、書きかけの `book.db` などが残ることがあります (逆伝播の `book.db` は atomic 書き込みではありません)。周の完了は `summary.json` の有無で判定し、`--resume` はその周を最初からやり直して上書きするため、`summary.json` の無い周の成果物は使わないでください。
+
+探索エラーで worker を止めるとき、他の worker で実行中の探索には `stop` を送らず、その探索の完了を待って結果を journal に回収してからエラー終了します。長い `--go` では終了までその分の時間がかかります。
 
 ## パス検証
 

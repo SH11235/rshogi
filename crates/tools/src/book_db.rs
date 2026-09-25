@@ -33,15 +33,6 @@ pub struct BookMove {
     pub count: u64,
 }
 
-impl BookMove {
-    /// 探索ラベルが付いているか。
-    ///
-    /// `book_from_csa` はラベル無しの手を `value=0 depth=0` で書き出すため、その組を未設定とみなす。
-    pub fn is_labeled(&self) -> bool {
-        self.value != 0 || self.depth != 0
-    }
-}
-
 /// 1 局面分の定跡エントリ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PositionEntry {
@@ -49,6 +40,17 @@ pub struct PositionEntry {
     pub sfen: String,
     /// 候補手。
     pub moves: Vec<BookMove>,
+}
+
+impl PositionEntry {
+    /// 未探索局面か (全候補手が `value=0 depth=0`)。
+    ///
+    /// `book_from_csa` はラベル無しの手を `value=0 depth=0` で書き出す。1 手単位では
+    /// `book_rescore` の静的評価 (depth 0) や評価値ちょうど 0 と区別できないため、
+    /// 局面内の全候補手がこの組の場合だけ未探索とみなす。
+    pub fn is_unexplored(&self) -> bool {
+        self.moves.iter().all(|m| m.value == 0 && m.depth == 0)
+    }
 }
 
 /// ply 抜き key で集約した定跡。
@@ -310,11 +312,15 @@ mod tests {
     }
 
     #[test]
-    fn unlabeled_moves_are_value_zero_depth_zero() {
-        let line = parse_move_line("7g7f none 0 0 3").unwrap();
-        assert!(!line.is_labeled());
-        let line = parse_move_line("7g7f none 0 12 3").unwrap();
-        assert!(line.is_labeled());
+    fn unexplored_is_decided_per_position_not_per_move() {
+        let entry = |lines: &[&str]| PositionEntry {
+            sfen: START.to_string(),
+            moves: lines.iter().map(|l| parse_move_line(l).unwrap()).collect(),
+        };
+        assert!(entry(&["7g7f none 0 0 3", "2g2f none 0 0 1"]).is_unexplored());
+        // 静的評価 (depth 0) や評価値 0 の手が混ざる局面は探索済みとみなす。
+        assert!(!entry(&["7g7f none 0 0 3", "2g2f none 35 0 1"]).is_unexplored());
+        assert!(!entry(&["7g7f none 0 12 3"]).is_unexplored());
     }
 
     #[test]

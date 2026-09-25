@@ -300,7 +300,7 @@ fn mate_to_cp(mate: i32) -> i32 {
 enum LeafKind {
     /// 辿った手の先が book 外。
     OutOfBook,
-    /// book 内だが候補手の value が全て未設定。
+    /// book 内だが全候補手が `value=0 depth=0` (未探索局面)。
     Unexplored,
 }
 
@@ -320,6 +320,8 @@ struct FrontierStats {
     pruned_ply: usize,
     pruned_depth: usize,
     leaves_before_limit: usize,
+    /// `--max-leaves` 適用前の未探索局面 (全候補手 `value=0 depth=0`) の末端数。
+    unexplored_before_limit: usize,
 }
 
 #[derive(Debug)]
@@ -351,6 +353,7 @@ fn compute_frontier(
         a.depth.cmp(&b.depth).then_with(|| strip_ply(&a.sfen).cmp(strip_ply(&b.sfen)))
     });
     stats.leaves_before_limit = list.len();
+    stats.unexplored_before_limit = list.iter().filter(|l| l.kind == LeafKind::Unexplored).count();
     if let Some(max) = opts.max_leaves {
         list.truncate(max);
     }
@@ -383,56 +386,50 @@ fn traverse_side(
             continue;
         };
         let entry = &book.entries[&hit.key];
-        let best = entry
-            .moves
-            .iter()
-            .filter(|m| m.move_usi.is_some() && m.is_labeled())
-            .map(|m| m.value)
-            .max();
-        let Some(best) = best else {
+        if entry.is_unexplored() {
             add_leaf(leaves, &sfen, depth, LeafKind::Unexplored)?;
             continue;
-        };
-        stats.visited_nodes += 1;
+        }
 
-        let own = side_to_move(&sfen)? == side;
-        let mut selected = BTreeSet::<String>::new();
+        // 合法手だけで best を決める。非合法手 (book の破損) が best を押さえて
+        // 合法な手を辿れなくなるのを防ぐ。
+        let mut candidates = Vec::<(String, &BookMove, Position)>::new();
         for book_move in &entry.moves {
             let Some(move_usi) = book_move.move_usi.as_deref() else {
                 continue;
             };
-            if !should_follow(book_move, best, own, opts) {
-                continue;
-            }
             // 反転 key でヒットした局面の手は反転座標系なので、実局面の座標へ戻す。
             let actual = if hit.flipped {
                 flip_usi_move(move_usi)
             } else {
                 Some(move_usi.to_string())
             };
-            match actual {
-                Some(actual) => {
-                    selected.insert(actual);
-                }
+            match actual.and_then(|m| child_position_after_move(&sfen, &m).ok().map(|c| (m, c))) {
+                Some((actual, child)) => candidates.push((actual, book_move, child)),
                 None => {
                     stats.illegal_moves.insert((sfen.clone(), move_usi.to_string()));
                 }
             }
         }
+        let Some(best) = candidates.iter().map(|(_, m, _)| m.value).max() else {
+            continue;
+        };
+        stats.visited_nodes += 1;
+
+        let own = side_to_move(&sfen)? == side;
+        let mut selected = BTreeMap::<String, Position>::new();
+        for (actual, book_move, child) in candidates {
+            if should_follow(book_move, best, own, opts) {
+                selected.entry(actual).or_insert(child);
+            }
+        }
 
         let next_depth = depth + 1;
-        for move_usi in selected {
+        for child in selected.into_values() {
             if opts.max_depth.is_some_and(|max| next_depth > max) {
                 stats.pruned_depth += 1;
                 continue;
             }
-            let child = match child_position_after_move(&sfen, &move_usi) {
-                Ok(child) => child,
-                Err(_) => {
-                    stats.illegal_moves.insert((sfen.clone(), move_usi));
-                    continue;
-                }
-            };
             if i64::from(child.game_ply()) > i64::from(opts.max_ply) {
                 stats.pruned_ply += 1;
                 continue;
@@ -451,12 +448,12 @@ fn traverse_side(
     Ok(())
 }
 
+/// 候補手を辿るか。value は 0 でも通常の値として扱う (未探索判定は局面単位)。
 fn should_follow(book_move: &BookMove, best: i32, own: bool, opts: &FrontierOpts) -> bool {
-    let labeled = book_move.is_labeled();
     if own {
-        labeled && book_move.value >= best.saturating_sub(opts.own_eps)
+        book_move.value >= best.saturating_sub(opts.own_eps)
     } else {
-        (labeled && book_move.value >= best.saturating_sub(opts.window))
+        book_move.value >= best.saturating_sub(opts.window)
             || (opts.opp_min_count > 0 && book_move.count >= opts.opp_min_count)
     }
 }
@@ -530,6 +527,11 @@ fn frontier_report(
     writeln!(out, "| leaves | {} |", leaves.len())?;
     writeln!(out, "| out-of-book leaves | {} |", count_kind(LeafKind::OutOfBook))?;
     writeln!(out, "| unexplored book leaves | {} |", count_kind(LeafKind::Unexplored))?;
+    writeln!(
+        out,
+        "| unexplored book nodes (before max-leaves) | {} |",
+        stats.unexplored_before_limit
+    )?;
     let entered = leaves.iter().filter(|l| l.entered).count();
     writeln!(out, "| entered-king leaves | {entered} |")?;
     writeln!(out, "| illegal book moves skipped | {} |", stats.illegal_moves.len())?;
@@ -608,6 +610,10 @@ struct JournalRecord {
     go: String,
     multipv: String,
     engine_fingerprint: String,
+    /// エンジンの bestmove。`go nodes` などで打ち切られた最終ブロックは MultiPV 行の深さが
+    /// 揃わず、1 行目や value 最大の行が bestmove と一致しないことがあるため別に保持する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bestmove: Option<String>,
     /// エンジンが `bestmove win` を返した (宣言勝ち可能局面)。
     #[serde(default)]
     declaration_win: bool,
@@ -649,6 +655,11 @@ impl SearchSettings {
             ),
             fingerprint: engine_fingerprint(&opts.engine, &opts.engine_options)?,
         })
+    }
+
+    /// MultiPV を 2 以上にする可能性があるか。
+    fn requires_multipv(&self) -> bool {
+        self.multipv > 1 || (self.multipv_delta > 0 && self.multipv_max > self.multipv)
     }
 
     fn matches(&self, rec: &JournalRecord) -> bool {
@@ -750,7 +761,9 @@ fn parse_multipv_info(line: &str) -> Option<(u32, PvLine)> {
             move_usi: first.to_string(),
             ponder: pv.get(1).map(|s| s.to_string()),
             value,
-            depth,
+            // depth 欠落・0 は 1 にする。`value=0 depth=0` は未探索の印なので、
+            // expand が書く手をそれと取り違えないようにする。
+            depth: depth.max(1),
             mate,
         },
     ))
@@ -820,24 +833,28 @@ fn search_multipv(
             go: settings.go.clone(),
             multipv: settings.multipv_spec.clone(),
             engine_fingerprint: settings.fingerprint.clone(),
-            declaration_win: false,
+            declaration_win: bestmove == "win",
+            bestmove: Some(bestmove),
             lines: Vec::new(),
             multipv_used: k,
             extensions,
         };
-        if bestmove == "win" {
-            record.declaration_win = true;
+        if record.declaration_win {
             return Ok(record);
         }
         let lines = collector.into_lines();
         if lines.is_empty() {
             bail!("MultiPV の info score/pv が得られませんでした: {}", task.key);
         }
-        // BookMiner 準拠: K 位まで 1 位と僅差なら、まだ良い手が漏れている可能性があるので K を増やす。
+        // BookMiner 準拠: K 行が最大値から delta 以内に収まるなら、まだ良い手が漏れている
+        // 可能性があるので K を増やす。打ち切られた最終ブロックは行ごとに深さが揃わず
+        // 番号順が value 順と一致しないため、番号でなく value の最大・最小で判定する。
+        let max_value = lines.iter().map(|l| l.value).max().unwrap_or(0);
+        let min_value = lines.iter().map(|l| l.value).min().unwrap_or(0);
         if settings.multipv_delta > 0
             && k < cap
             && lines.len() >= k
-            && lines[0].value - lines[k - 1].value <= settings.multipv_delta
+            && max_value - min_value <= settings.multipv_delta
         {
             k = (k + settings.multipv).min(cap);
             extensions += 1;
@@ -875,6 +892,13 @@ fn worker_loop(
             return;
         }
     };
+    if settings.requires_multipv() && !engine.advertises_option("MultiPV") {
+        let _ = result_tx.send(WorkerMessage::Fatal(anyhow!(
+            "worker {worker_id}: エンジンが USI option `MultiPV` を持っていません。\
+             MultiPV 非対応エンジンでは `--multipv 1 --multipv-delta 0` (または `--multipv-max 1`) を指定してください"
+        )));
+        return;
+    }
     for task in task_rx {
         let result = search_multipv(&mut engine, &task, settings)
             .with_context(|| format!("worker {worker_id}: 探索に失敗しました: {}", task.sfen));
@@ -1022,10 +1046,15 @@ struct ExpandStats {
     positions_with_added_moves: usize,
     positions_without_new_moves: usize,
     added_moves: usize,
+    /// 未探索局面の既存手へ value/depth を埋めた手数と局面数。
+    filled_moves: usize,
+    positions_with_filled_moves: usize,
     multipv_extended_positions: usize,
     multipv_extensions: u64,
     mate_lines: usize,
     illegal_lines: usize,
+    /// bestmove の行が value 最大の行でなかった局面数 (打ち切りで深さの揃わない最終ブロック)。
+    bestmove_not_top: usize,
     declarations: Vec<String>,
     no_legal_moves: Vec<String>,
 }
@@ -1089,8 +1118,8 @@ impl Expander<'_> {
                         anyhow!("内部エラー: journal に探索結果がありません: {sfen}")
                     })?;
                 if ply < self.extend_ply
-                    && let Some(best) = record.lines.first()
-                    && let Ok(child) = child_position_after_move(&sfen, &best.move_usi)
+                    && let Some(best) = extend_move(&record)
+                    && let Ok(child) = child_position_after_move(&sfen, best)
                 {
                     let child_sfen = child.to_sfen();
                     if book.find(&child_sfen).is_none() {
@@ -1116,6 +1145,29 @@ impl Expander<'_> {
     }
 }
 
+/// `--extend-ply` で辿る手。エンジンの bestmove を優先し、無ければ value 最大の行の手。
+fn extend_move(record: &JournalRecord) -> Option<&str> {
+    match record.bestmove.as_deref() {
+        Some("win" | "resign" | "none") => None,
+        Some(bestmove) => Some(bestmove),
+        None => record.lines.iter().max_by_key(|l| l.value).map(|l| l.move_usi.as_str()),
+    }
+}
+
+/// bestmove の行が value 最大の行でないか。
+fn bestmove_is_not_top(record: &JournalRecord) -> bool {
+    let (Some(bestmove), Some(max)) =
+        (record.bestmove.as_deref(), record.lines.iter().map(|l| l.value).max())
+    else {
+        return false;
+    };
+    record
+        .lines
+        .iter()
+        .find(|l| l.move_usi == bestmove)
+        .is_none_or(|l| l.value < max)
+}
+
 /// 合法な指し手と、子局面で合法な場合だけの ponder を返す。
 fn validated_move(
     parent_sfen: &str,
@@ -1130,7 +1182,11 @@ fn validated_move(
     Some((move_usi.to_string(), ponder))
 }
 
-/// 探索結果を book に反映する。既存局面の既存手は変更せず、新しい手だけを `count=0` で追加する。
+/// 探索結果を book に反映する。
+///
+/// 新しい手は `count=0` で追加する。既存局面の既存手は value/depth を変更しない (既存ラベルの由来を
+/// 混ぜない)。ただし未探索局面 (全候補手が `value=0 depth=0`) の既存手はラベルを持たないため、
+/// 探索で得た手と一致すれば value/depth を埋める (count/ponder は保持)。
 fn apply_expansions(
     book: &BookDb,
     expanded: &BTreeMap<String, Expanded>,
@@ -1148,12 +1204,17 @@ fn apply_expansions(
             stats.declarations.push(item.sfen.clone());
             continue;
         }
+        if bestmove_is_not_top(record) {
+            stats.bestmove_not_top += 1;
+        }
         match out.find(&item.sfen) {
             Some(hit) => {
                 let Some(entry) = out.entries.get_mut(&hit.key) else {
                     continue;
                 };
+                let fill = entry.is_unexplored();
                 let mut added = 0;
+                let mut filled = 0;
                 for line in &record.lines {
                     // 反転 key でヒットしたエントリへは反転座標系で書く。
                     let (move_usi, ponder) = if hit.flipped {
@@ -1167,8 +1228,16 @@ fn apply_expansions(
                     } else {
                         (line.move_usi.clone(), line.ponder.clone())
                     };
-                    if entry.moves.iter().any(|m| m.move_usi.as_deref() == Some(move_usi.as_str()))
+                    if let Some(existing) = entry
+                        .moves
+                        .iter_mut()
+                        .find(|m| m.move_usi.as_deref() == Some(move_usi.as_str()))
                     {
+                        if fill {
+                            existing.value = line.value;
+                            existing.depth = line.depth;
+                            filled += 1;
+                        }
                         continue;
                     }
                     let Some((move_usi, ponder)) =
@@ -1187,9 +1256,14 @@ fn apply_expansions(
                     added += 1;
                 }
                 stats.added_moves += added;
+                stats.filled_moves += filled;
                 if added > 0 {
                     stats.positions_with_added_moves += 1;
-                } else {
+                }
+                if filled > 0 {
+                    stats.positions_with_filled_moves += 1;
+                }
+                if added == 0 && filled == 0 {
                     stats.positions_without_new_moves += 1;
                 }
             }
@@ -1248,13 +1322,20 @@ fn expand_report(stats: &ExpandStats, settings: &SearchSettings) -> Result<Strin
     )?;
     writeln!(
         out,
-        "| existing positions without new moves | {} |",
+        "| existing positions without new or filled moves | {} |",
         stats.positions_without_new_moves
     )?;
     writeln!(out, "| added moves | {} |", stats.added_moves)?;
+    writeln!(out, "| filled unlabeled moves | {} |", stats.filled_moves)?;
+    writeln!(
+        out,
+        "| unexplored positions with filled moves | {} |",
+        stats.positions_with_filled_moves
+    )?;
     writeln!(out, "| multipv extended positions | {} |", stats.multipv_extended_positions)?;
     writeln!(out, "| multipv extensions | {} |", stats.multipv_extensions)?;
     writeln!(out, "| mate lines | {} |", stats.mate_lines)?;
+    writeln!(out, "| bestmove not max-value line | {} |", stats.bestmove_not_top)?;
     writeln!(out, "| illegal engine moves skipped | {} |", stats.illegal_lines)?;
     writeln!(out, "| declaration-win positions | {} |", stats.declarations.len())?;
     writeln!(out, "| no-legal-move positions | {} |", stats.no_legal_moves.len())?;
@@ -1310,9 +1391,10 @@ fn cmd_expand(args: &ExpandArgs) -> Result<()> {
             .with_context(|| format!("report を書けません: {}", report.display()))?;
     }
     eprintln!(
-        "book_mine expand: new_positions={} added_moves={} declarations={}",
+        "book_mine expand: new_positions={} added_moves={} filled_moves={} declarations={}",
         stats.new_positions,
         stats.added_moves,
+        stats.filled_moves,
         stats.declarations.len()
     );
     Ok(())
@@ -1322,18 +1404,69 @@ fn cmd_expand(args: &ExpandArgs) -> Result<()> {
 // run
 // ---------------------------------------------------------------------------
 
+/// 周回結果を左右する設定。各周の `summary.json` に記録し、`--resume` 時に一致を検査する。
+///
+/// 探索設定 (`--go` / MultiPV / エンジン) は journal の再利用条件で別途検査される。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RunConfig {
+    book: String,
+    book_sha256: String,
+    roots: String,
+    roots_sha256: String,
+    side: String,
+    window: i32,
+    opp_min_count: u64,
+    own_eps: i32,
+    max_ply: u32,
+    max_depth: Option<u32>,
+    max_leaves: Option<usize>,
+    merge: String,
+}
+
+impl RunConfig {
+    fn new(args: &RunArgs) -> Result<Self> {
+        let (book, book_sha256) = path_and_sha256(&args.book)?;
+        let (roots, roots_sha256) = path_and_sha256(&args.frontier.roots)?;
+        let opts = &args.frontier;
+        Ok(Self {
+            book,
+            book_sha256,
+            roots,
+            roots_sha256,
+            side: format!("{:?}", opts.side),
+            window: opts.window,
+            opp_min_count: opts.opp_min_count,
+            own_eps: opts.own_eps,
+            max_ply: opts.max_ply,
+            max_depth: opts.max_depth,
+            max_leaves: opts.max_leaves,
+            merge: format!("{:?}", args.merge),
+        })
+    }
+}
+
+fn path_and_sha256(path: &Path) -> Result<(String, String)> {
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("正準化できません: {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("読めません: {}", path.display()))?;
+    Ok((canonical.display().to_string(), format!("{:x}", Sha256::digest(&bytes))))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct IterationSummary {
     iteration: usize,
     leaves: usize,
     new_positions: usize,
     added_moves: usize,
+    filled_moves: usize,
+    config: RunConfig,
 }
 
 impl IterationSummary {
-    /// 次の周が同じ結果になる (掘る末端が無い、または何も追加されなかった)。
+    /// 次の周が同じ結果になる (掘る末端が無い、または何も追加・更新されなかった)。
     fn converged(&self) -> bool {
-        self.leaves == 0 || (self.new_positions == 0 && self.added_moves == 0)
+        self.leaves == 0
+            || (self.new_positions == 0 && self.added_moves == 0 && self.filled_moves == 0)
     }
 }
 
@@ -1396,6 +1529,19 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
 
     let completed = completed_iterations(&args.work_dir)?;
     read_book_checked(&args.book)?;
+    let config = RunConfig::new(args)?;
+    for summary in &completed {
+        if summary.config != config {
+            bail!(
+                "--work-dir の iter-{:03} は異なる設定で実行されています。同じ --book / --roots / frontier 設定 / --merge で再開するか、別の --work-dir を指定してください
+  記録: {}
+  今回: {}",
+                summary.iteration,
+                serde_json::to_string(&summary.config)?,
+                serde_json::to_string(&config)?
+            );
+        }
+    }
     let roots = read_position_list(&args.frontier.roots)?;
     let settings = Arc::new(SearchSettings::new(&args.engine)?);
     let mut expander = Expander {
@@ -1468,6 +1614,8 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             leaves: frontier.leaves.len(),
             new_positions: stats.new_positions,
             added_moves: stats.added_moves,
+            filled_moves: stats.filled_moves,
+            config: config.clone(),
         };
         // summary.json は周の完了印なので最後に書く。
         write_atomic(&dir.join("summary.json"), &(serde_json::to_string_pretty(&summary)? + "\n"))?;
@@ -1475,8 +1623,8 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
         converged = summary.converged();
         current_book = book_path;
         eprintln!(
-            "book_mine run: iter {iteration}: leaves={} new_positions={} added_moves={} (累計追加局面 {cumulative})",
-            summary.leaves, summary.new_positions, summary.added_moves
+            "book_mine run: iter {iteration}: leaves={} new_positions={} added_moves={} filled_moves={} (累計追加局面 {cumulative})",
+            summary.leaves, summary.new_positions, summary.added_moves, summary.filled_moves
         );
     }
 
@@ -1773,13 +1921,24 @@ mod tests {
         assert_eq!(result.leaves[0].sfen, START);
         assert_eq!(result.leaves[0].depth, 0);
         assert_eq!(result.leaves[0].kind, LeafKind::Unexplored);
+        assert_eq!(result.stats.unexplored_before_limit, 1);
     }
 
     #[test]
-    fn frontier_skips_illegal_book_moves() {
+    fn frontier_treats_value_zero_moves_normally_in_explored_position() {
+        // 静的評価 (depth 0) の手や評価値 0 の手が混ざる局面は探索済みで、value 0 の手も best 候補。
+        let db = book(&[(START, &[("7g7f", 0, 0, 1), ("2g2f", -30, 0, 1)])]);
+        let result = frontier(&db, &[START], &opts(SideArg::Black));
+        assert_eq!(leaf_set(&result), set([after(START, &["7g7f"])]));
+        assert_eq!(result.stats.unexplored_before_limit, 0);
+    }
+
+    #[test]
+    fn frontier_skips_illegal_book_moves_before_choosing_best() {
+        // 非合法手の value が best を押さえても、合法手の中の best を辿る。
         let db = book(&[(START, &[("9a9b", 100, 10, 1), ("7g7f", 50, 10, 1)])]);
         let result = frontier(&db, &[START], &opts(SideArg::Black));
-        assert!(result.leaves.is_empty());
+        assert_eq!(leaf_set(&result), set([after(START, &["7g7f"])]));
         assert_eq!(result.stats.illegal_moves.len(), 1);
     }
 
@@ -1836,6 +1995,12 @@ mod tests {
         assert!(parse_multipv_info("info string multipv 1 score cp 1 pv 2g2f").is_none());
         let (_, line) = parse_multipv_info("info depth 3 score cp 99999 pv 2g2f").unwrap();
         assert_eq!(line.value, MATE_CAP);
+
+        // depth 欠落・0 は 1 として記録し、未探索の印 `value=0 depth=0` と区別する。
+        let (idx, line) = parse_multipv_info("info multipv 2 score cp 0 pv 2g2f").unwrap();
+        assert_eq!((idx, line.value, line.depth), (2, 0, 1));
+        let (_, line) = parse_multipv_info("info depth 0 score cp 0 pv 2g2f").unwrap();
+        assert_eq!(line.depth, 1);
     }
 
     #[test]
@@ -1867,6 +2032,7 @@ mod tests {
         ///
         /// `table.tsv` の行は `<sfen>\t<bestmove>\t<info 本体>|<info 本体>|...`。
         /// `setoption name MultiPV` の値までの行を返し、go ごとに `<multipv> <sfen>` を `log.txt` へ追記する。
+        /// `info ` で始まる行はそのまま出力する (深さの揃わない最終ブロックの再現用)。
         pub(super) struct MockEngine {
             pub(super) dir: tempfile::TempDir,
             pub(super) path: PathBuf,
@@ -1874,6 +2040,15 @@ mod tests {
 
         impl MockEngine {
             pub(super) fn new(responses: &[Response<'_>]) -> Self {
+                Self::build(responses, true)
+            }
+
+            /// `MultiPV` オプションを広告しない mock。
+            pub(super) fn without_multipv(responses: &[Response<'_>]) -> Self {
+                Self::build(responses, false)
+            }
+
+            fn build(responses: &[Response<'_>], advertise_multipv: bool) -> Self {
                 let dir = tempfile::tempdir().unwrap();
                 let mut table = String::new();
                 for (sfen, bestmove, lines) in responses {
@@ -1881,15 +2056,18 @@ mod tests {
                 }
                 std::fs::write(dir.path().join("table.tsv"), table).unwrap();
                 let path = dir.path().join("engine.sh");
-                std::fs::write(
-                    &path,
-                    r#"#!/bin/sh
+                let option = if advertise_multipv {
+                    "option name MultiPV type spin default 1 min 1 max 800"
+                } else {
+                    "option name USI_Hash type spin default 256 min 1 max 1024"
+                };
+                let script = r#"#!/bin/sh
 dir=$(dirname "$0")
 mpv=1
 pos=
 while IFS= read -r line; do
   case "$line" in
-    usi) printf 'id name mock\noption name MultiPV type spin default 1 min 1 max 800\nusiok\n' ;;
+    usi) printf 'id name mock\n__OPTION__\nusiok\n' ;;
     isready) printf 'readyok\n' ;;
     "setoption name MultiPV value "*) mpv=${line##* } ;;
     "position sfen "*) pos=${line#position sfen } ;;
@@ -1898,7 +2076,10 @@ while IFS= read -r line; do
       awk -F '\t' -v p="$pos" -v k="$mpv" '
         $1 == p {
           n = split($3, a, "|")
-          for (i = 1; i <= n && i <= k; i++) if (a[i] != "") printf "info depth 10 multipv %d %s\n", i, a[i]
+          for (i = 1; i <= n && i <= k; i++) {
+            if (a[i] ~ /^info /) print a[i]
+            else if (a[i] != "") printf "info depth 10 multipv %d %s\n", i, a[i]
+          }
           printf "bestmove %s\n", $2
           found = 1
           exit
@@ -1908,9 +2089,8 @@ while IFS= read -r line; do
     quit) exit 0 ;;
   esac
 done
-"#,
-                )
-                .unwrap();
+"#;
+                std::fs::write(&path, script.replace("__OPTION__", option)).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
                 Self { dir, path }
             }
@@ -2007,24 +2187,60 @@ done
         }
 
         #[test]
-        fn expand_keeps_existing_moves_of_book_position_unchanged() {
+        fn expand_keeps_existing_moves_of_explored_book_position_unchanged() {
             let leaf = after(START, &["7g7f"]);
             let engine = MockEngine::new(&[(
                 &leaf,
                 "3c3d",
-                &["score cp 30 pv 3c3d", "score cp 10 pv 8c8d"],
+                &[
+                    "score cp 30 pv 3c3d",
+                    "score cp 20 pv 4a3b",
+                    "score cp 10 pv 8c8d",
+                ],
             )]);
             let dir = tempfile::tempdir().unwrap();
-            let db = book_text(&[(&leaf, &[("3c3d", 0, 0, 5)])]);
+            // 探索済み局面の手は value 0 / depth 0 でも更新しない。
+            let db = book_text(&[(&leaf, &[("3c3d", 12, 7, 5), ("4a3b", 0, 0, 2)])]);
+            let opts = EngineOpts {
+                multipv: 3,
+                ..engine_opts(&engine)
+            };
+
+            let run = run_expand(dir.path(), &db, &[&leaf], opts, false, "out.db").unwrap();
+
+            assert_eq!(
+                entry_block(&run.out, &leaf).unwrap(),
+                "3c3d none 12 7 5\n8c8d none 10 10 0\n4a3b none 0 0 2\n"
+            );
+            assert!(run.report.contains("| existing positions with added moves | 1 |"));
+            assert!(run.report.contains("| filled unlabeled moves | 0 |"));
+        }
+
+        #[test]
+        fn expand_fills_unlabeled_moves_of_unexplored_book_position() {
+            let leaf = after(START, &["7g7f"]);
+            let engine = MockEngine::new(&[(
+                &leaf,
+                "3c3d",
+                &["score cp 30 pv 3c3d 2g2f", "score cp 10 pv 8c8d"],
+            )]);
+            let dir = tempfile::tempdir().unwrap();
+            // MultiPV の手が全て既存の未ラベル手と重なっても、次の frontier で再び未探索にならない。
+            let db = book_text(&[(&leaf, &[("3c3d", 0, 0, 5), ("8c8d", 0, 0, 2)])]);
 
             let run = run_expand(dir.path(), &db, &[&leaf], engine_opts(&engine), false, "out.db")
                 .unwrap();
 
+            // count と ponder は保持し、value/depth だけ埋める。
             assert_eq!(
                 entry_block(&run.out, &leaf).unwrap(),
-                "8c8d none 10 10 0\n3c3d none 0 0 5\n"
+                "3c3d none 30 10 5\n8c8d none 10 10 2\n"
             );
-            assert!(run.report.contains("| existing positions with added moves | 1 |"));
+            assert!(run.report.contains("| filled unlabeled moves | 2 |"));
+            assert!(run.report.contains("| added moves | 0 |"));
+            let out = BookDb::from_reader(run.out.as_bytes()).unwrap();
+            let result = frontier(&out, &[&leaf], &opts(SideArg::Both));
+            assert_eq!(result.stats.unexplored_before_limit, 0);
         }
 
         #[test]
@@ -2044,7 +2260,7 @@ done
 
             assert_eq!(
                 entry_block(&run.out, &flipped_leaf).unwrap(),
-                "2g2f none 10 10 0\n7g7f none 0 0 5\n"
+                "7g7f none 30 10 5\n2g2f none 10 10 0\n"
             );
             assert!(entry_block(&run.out, &leaf).is_none());
         }
@@ -2071,6 +2287,76 @@ done
             assert_eq!(engine.log(), vec![format!("2 {leaf}"), format!("4 {leaf}")]);
             assert_eq!(entry_block(&run.out, &leaf).unwrap().lines().count(), 4);
             assert!(run.report.contains("| multipv extensions | 1 |"));
+        }
+
+        #[test]
+        fn expand_handles_mixed_depth_final_multipv_block() {
+            // go nodes で打ち切られ、1 行目だけ次の深さで更新された最終ブロック。
+            // 番号順の 1 行目は bestmove だが value 最大ではない。
+            let leaf = after(START, &["7g7f"]);
+            let next = after(START, &["7g7f", "8c8d"]);
+            let engine = MockEngine::new(&[
+                (
+                    &leaf,
+                    "8c8d",
+                    &[
+                        "info depth 11 multipv 1 score cp -200 pv 8c8d",
+                        "info depth 10 multipv 2 score cp 30 pv 3c3d",
+                    ],
+                ),
+                (&next, "2g2f", &["score cp 5 pv 2g2f"]),
+            ]);
+            let dir = tempfile::tempdir().unwrap();
+            let db = book_text(&[(START, &[("7g7f", 50, 10, 3)])]);
+            let opts = EngineOpts {
+                multipv_delta: 100,
+                extend_ply: 1,
+                ..engine_opts(&engine)
+            };
+
+            let run = run_expand(dir.path(), &db, &[&leaf], opts, false, "out.db").unwrap();
+
+            // 最大 30 と最小 -200 の差は delta を超えるので MultiPV を増やさない。
+            assert_eq!(engine.log(), vec![format!("2 {leaf}"), format!("2 {next}")]);
+            assert_eq!(
+                entry_block(&run.out, &leaf).unwrap(),
+                "3c3d none 30 10 0\n8c8d none -200 11 0\n"
+            );
+            // --extend-ply は value 最大の 3c3d ではなく bestmove の 8c8d を辿る。
+            assert_eq!(entry_block(&run.out, &next).unwrap(), "2g2f none 5 10 0\n");
+            assert!(run.report.contains("| bestmove not max-value line | 1 |"));
+            let journal = std::fs::read_to_string(dir.path().join("journal.jsonl")).unwrap();
+            assert!(journal.contains("\"bestmove\":\"8c8d\""));
+        }
+
+        #[test]
+        fn expand_requires_multipv_option_unless_single_pv() {
+            let leaf = after(START, &["7g7f"]);
+            let engine = MockEngine::without_multipv(&[(&leaf, "3c3d", &["score cp 30 pv 3c3d"])]);
+            let dir = tempfile::tempdir().unwrap();
+            let db = book_text(&[(START, &[("7g7f", 50, 10, 3)])]);
+
+            let err = match run_expand(
+                dir.path(),
+                &db,
+                &[&leaf],
+                engine_opts(&engine),
+                false,
+                "out.db",
+            ) {
+                Ok(_) => panic!("MultiPV 非対応エンジンで --multipv 2 が通ってしまった"),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(err.contains("MultiPV"), "{err}");
+            assert!(engine.log().is_empty());
+
+            let single = EngineOpts {
+                multipv: 1,
+                multipv_max: 1,
+                ..engine_opts(&engine)
+            };
+            let run = run_expand(dir.path(), &db, &[&leaf], single, false, "single.db").unwrap();
+            assert_eq!(entry_block(&run.out, &leaf).unwrap(), "3c3d none 30 10 0\n");
         }
 
         #[test]
@@ -2238,13 +2524,13 @@ done
                 serde_json::from_str(&std::fs::read_to_string(iter2.join("summary.json")).unwrap())
                     .unwrap();
             assert_eq!(
-                summary,
-                IterationSummary {
-                    iteration: 2,
-                    leaves: 2,
-                    new_positions: 2,
-                    added_moves: 2,
-                }
+                (summary.iteration, summary.leaves, summary.new_positions, summary.added_moves),
+                (2, 2, 2, 2)
+            );
+            assert_eq!(summary.filled_moves, 0);
+            assert_eq!(
+                summary.config,
+                RunConfig::new(&run_args(dir.path(), &engine, 2, true)).unwrap()
             );
             let final_db = std::fs::read(dir.path().join("final.db")).unwrap();
             assert_eq!(final_db, std::fs::read(iter2.join("book.db")).unwrap());
@@ -2254,6 +2540,39 @@ done
             cmd_run(&run_args(dir.path(), &engine, 2, true)).unwrap();
             assert_eq!(engine.log().len(), 3);
             assert_eq!(std::fs::read(dir.path().join("final.db")).unwrap(), final_db);
+        }
+
+        #[test]
+        fn run_resume_rejects_changed_settings_or_input_book() {
+            let l1 = after(START, &["7g7f"]);
+            let engine =
+                MockEngine::new(&[(&l1, "3c3d", &["score cp 20 pv 3c3d", "score cp -10 pv 8c8d"])]);
+            let dir = tempfile::tempdir().unwrap();
+            let book_path = dir.path().join("book.db");
+            std::fs::write(&book_path, book_text(&[(START, &[("7g7f", 50, 10, 1)])])).unwrap();
+            std::fs::write(dir.path().join("roots.txt"), "startpos\n").unwrap();
+            cmd_run(&run_args(dir.path(), &engine, 1, false)).unwrap();
+
+            let changed_window = RunArgs {
+                frontier: FrontierOpts {
+                    window: 50,
+                    ..run_args(dir.path(), &engine, 2, true).frontier
+                },
+                ..run_args(dir.path(), &engine, 2, true)
+            };
+            let err = format!("{:#}", cmd_run(&changed_window).unwrap_err());
+            assert!(err.contains("異なる設定"), "{err}");
+
+            let changed_merge = RunArgs {
+                merge: MergeMode::Min,
+                ..run_args(dir.path(), &engine, 2, true)
+            };
+            assert!(cmd_run(&changed_merge).is_err());
+
+            std::fs::write(&book_path, book_text(&[(START, &[("7g7f", 40, 10, 1)])])).unwrap();
+            assert!(cmd_run(&run_args(dir.path(), &engine, 2, true)).is_err());
+            assert_eq!(engine.log().len(), 1);
+            assert!(!dir.path().join("work/iter-002").exists());
         }
 
         #[test]
