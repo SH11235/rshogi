@@ -23,6 +23,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   パス権つきの探索が必要な場合は `search-pass-rules` を指定すること。`search-no-pass-rules` は
   何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
 
+- **tournament / spsa の `--max-moves` を開始局面までの手数を含む総手数で判定**: これまでは開始局面から
+  対局内で指した手数だけを数えていたため、手数付きの開始局面集では本番の手数制限より長く対局していた
+  (例: 32 手目からの局面集と `--max-moves 512` で総 543 手まで)。開始局面の SFEN の手数欄と `moves` の手順を
+  含めて数えるように変え、本番の手数制限と同じ値を指定すればよくなった。開始局面が既に `--max-moves` 以上の
+  手数なら起動時にエラーになる。「512 − 開始局面までの手数」のように補正した値を渡していた運用は、補正を外すこと。
+  JSONL の `ply` と `--adjudicate-draw` の `movenumber` は従来どおり対局内の手数。
+
 ### USI エンジン / 探索
 
 - **`use-lazy-evaluate` を rshogi-usi の opt-in feature として選択可能に**:

@@ -6,7 +6,7 @@ use std::path::Path;
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, RepetitionState};
 use tools::selfplay::game::{GameConfig, run_game};
-use tools::selfplay::position::{build_position, parse_position_line};
+use tools::selfplay::position::{build_position, parse_position_line, plies_before_start};
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::{EngineConfig, EngineProcess};
 
@@ -44,6 +44,17 @@ fn replay(command: &str) -> Position {
 }
 
 fn run_case(start: &str, rights: Option<(u8, u8)>, replies: &[&str], reason: &str) {
+    run_case_with_limit(start, rights, replies, replies.len() as u32, reason);
+}
+
+// max_moves は開始局面までの手数を含む総手数。
+fn run_case_with_limit(
+    start: &str,
+    rights: Option<(u8, u8)>,
+    replies: &[&str],
+    game_moves: u32,
+    reason: &str,
+) {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("engine.sh");
     let log = dir.path().join("commands.log");
@@ -83,7 +94,7 @@ done
     let config = GameConfig {
         resign_rule: None,
         draw_rule: None,
-        max_moves: replies.len() as u32,
+        max_moves: plies_before_start(&initial) + game_moves,
         timeout_margin_ms: 1000,
         limit_only_timeout_ms: None,
         cancel: None,
@@ -116,7 +127,7 @@ done
         )
         .unwrap();
         assert_eq!(result.reason, reason);
-        assert_eq!(result.plies, replies.len() as u32);
+        assert_eq!(result.plies, game_moves);
         let commands = fs::read_to_string(&log).unwrap();
         let commands: Vec<_> = commands.lines().collect();
         assert_eq!(commands.len(), events.len());
@@ -184,6 +195,19 @@ fn opening_moves_are_applied_once_before_history_starts() {
         None,
         &["R*5e", "4a3a", "5e5c+", "resign"],
         "resign",
+    );
+}
+
+#[test]
+fn max_moves_counts_plies_before_start_position() {
+    let replies = ["3c3d", "2g2f", "4c4d", "2f2e", "resign"];
+    run_case_with_limit("startpos moves 7g7f", None, &replies, 3, "max_moves");
+    run_case_with_limit(
+        "sfen 4k4/9/9/9/9/9/9/9/4K4 w R 37 moves 5a4a",
+        None,
+        &["R*5e", "4a3a", "5e5c+", "resign"],
+        2,
+        "max_moves",
     );
 }
 

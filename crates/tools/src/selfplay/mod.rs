@@ -13,8 +13,8 @@ pub use backend::{
 pub use engine::{EngineConfig, EngineProcess};
 pub use game::{GameConfig, GameResult, MoveEvent, run_game};
 pub use position::{
-    ParsedPosition, build_position, describe_position, load_start_positions, parse_position_line,
-    parse_sfen_only,
+    ParsedPosition, build_position, describe_position, ensure_start_positions_within_max_moves,
+    load_start_positions, parse_position_line, parse_sfen_only, plies_before_start,
 };
 pub use time_control::TimeControl;
 pub use types::{

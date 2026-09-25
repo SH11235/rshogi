@@ -22,7 +22,8 @@ use sha2::{Digest, Sha256};
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::{
-    EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
+    EngineConfig, EngineProcess, GameOutcome, ParsedPosition,
+    ensure_start_positions_within_max_moves, load_start_positions,
 };
 use tools::spsa_param_mapping::{
     MappingTable, NOT_USED_MARKER as PARAM_NOT_USED_MARKER, RawParamRow, parse_param_line,
@@ -215,7 +216,7 @@ struct Cli {
     #[arg(long, default_value_t = 600_000, value_parser = clap::value_parser!(u64).range(1..))]
     nodes_timeout_ms: u64,
 
-    /// 1局あたり最大手数
+    /// 引分とする総手数。開始局面までの手数 (SFEN の手数欄と開始手順) も含めて数える。
     #[arg(long, default_value_t = 320)]
     max_moves: u32,
 
@@ -3425,6 +3426,7 @@ fn main() -> Result<()> {
 
     let (start_positions, _) =
         load_start_positions(cli.startpos_file.as_deref(), cli.sfen.as_deref(), None, None)?;
+    ensure_start_positions_within_max_moves(&start_positions, cli.max_moves)?;
     // active mask は iteration 中に変化しない（params の値だけが更新され、name/not_used
     // /regex マッチ性は不変）ため、適用用と摂動・更新用を分けて 1 度だけ計算する。
     let active_mask: Vec<bool> = params

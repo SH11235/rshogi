@@ -80,7 +80,7 @@ cargo run --release -p tools --bin spsa -- \
 | `--batch-pairs B` | 8〜32 (既定 8) | 1 batch あたりの game pair 数。1 batch で `2B` 局を消化し θ を 1 回更新、k は `+= B`。大→低分散・低更新頻度、小→高分散・高更新頻度 |
 | `--byoyomi <ms>` | 100〜1000 ms | 1 手秒読み (既定 1000)。NPS が安定する程度に。短すぎるとエンジンが thinking time を使い切れず評価ノイズが増える |
 | `--seed S` | 任意 | base seed (省略時はランダム)。SPSA の乱数列は seed と batch index から決定論的に生成される |
-| `--max-moves` / `--timeout-margin-ms` | 既定 320 / 1000 ms | 対局打ち切り上限と timeout 検出マージン。慣習値で十分なケースが多い |
+| `--max-moves` / `--timeout-margin-ms` | 既定 320 / 1000 ms | 対局打ち切り上限 (開始局面までの手数を含む総手数) と timeout 検出マージン。慣習値で十分なケースが多い |
 | `--early-stop-*` 三点 | 初回 run では **指定しない** | 閾値の運用実績がまだ無く、特に `--early-stop-result-variance-threshold` は `\|raw_result\| / batch_pairs` (0..2 の値) との比較なので、よく考えずに小さい値を入れるとほぼ全 batch で誤発火する。挙動を観測してから設定する (§9.3) |
 
 `<run-dir>` には以下が自動生成される:

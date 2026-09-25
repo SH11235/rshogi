@@ -3,7 +3,7 @@ use rshogi_core::types::{Color, Move};
 
 use super::adjudication::{DrawRule, ResignRule, RuleAdjudicator, ScoreAdjudicator};
 use super::engine::EngineProcess;
-use super::position::{ParsedPosition, build_position, is_legal_game_move};
+use super::position::{ParsedPosition, build_position, is_legal_game_move, plies_before_start};
 use super::time_control::TimeControl;
 use super::types::{EvalLog, GameOutcome, InfoCallback, SearchRequest};
 
@@ -25,6 +25,7 @@ pub struct GameConfig {
     pub resign_rule: Option<ResignRule>,
     /// 評価値による引分裁定。既定は無効。
     pub draw_rule: Option<DrawRule>,
+    /// 引分とする総手数。開始局面までの手数 (SFEN の手数欄と開始手順) を含めて数える。
     pub max_moves: u32,
     pub timeout_margin_ms: u64,
     /// 時間制御なしの nodes/depth 探索の期限（1 手、正のミリ秒）。
@@ -103,7 +104,8 @@ pub fn run_game(
     let mut outcome_reason = "max_moves".to_string();
     let mut plies_played = 0u32;
 
-    for ply_idx in 0..config.max_moves {
+    let game_moves_limit = config.max_moves.saturating_sub(plies_before_start(&pos));
+    for ply_idx in 0..game_moves_limit {
         if config
             .cancel
             .as_ref()

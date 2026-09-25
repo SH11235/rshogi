@@ -68,7 +68,8 @@ use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::types::{EvalLog, side_label};
 use tools::selfplay::{DrawRule, ResignRule};
 use tools::selfplay::{
-    EngineConfig, EngineProcess, GameOutcome, ParsedPosition, load_start_positions,
+    EngineConfig, EngineProcess, GameOutcome, ParsedPosition,
+    ensure_start_positions_within_max_moves, load_start_positions,
 };
 use tools::sprt::{Decision, GameSide, Penta, SprtMetaLog, SprtParameters, judge};
 
@@ -135,7 +136,7 @@ struct Cli {
     #[arg(long = "engine-params-file", num_args = 1..)]
     engine_params_files: Option<Vec<String>>,
 
-    /// Maximum plies per game
+    /// 引分とする総手数。開始局面までの手数 (SFEN の手数欄と開始手順) も含めて数える。
     #[arg(long, default_value_t = 512)]
     max_moves: u32,
     /// 評価値による投了裁定 (movecount=3,score=600)。既定 off。
@@ -1062,6 +1063,7 @@ fn main() -> Result<()> {
     // 開始局面のロード
     let (start_defs, start_commands) =
         load_start_positions(cli.startpos_file.as_deref(), None, None, None)?;
+    ensure_start_positions_within_max_moves(&start_defs, cli.max_moves)?;
 
     let common_usi_options = cli.usi_options.clone().unwrap_or_default();
 
