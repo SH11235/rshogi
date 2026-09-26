@@ -6,6 +6,7 @@
 //! 2. `game_ply > BookMoves` なら不使用
 //! 3. find(ply 込みキー / IgnoreBookPly)。miss かつ FlippedBook なら反転局面で再検索し指し手反転
 //! 4. `to_move` + pseudo-legal + legal で合法性検証、非合法は info string 警告して除去
+//!    explore 登録局面はここで合法な定跡手との積集合から等確率で選び、ponder 解決へ進む。
 //! 5. `BookDepthLimit`(0 で無効): 筆頭手 depth 不足なら局面ごと不採用
 //! 6. `BookEvalDiff` / `BookEvalBlackLimit` / `BookEvalWhiteLimit`: 下限未満を除去
 //! 7. `BookSelectValue`: true なら value 最大手を決定的に選ぶ(同値は count 降順 → USI 昇順)
@@ -17,8 +18,8 @@
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move};
 
-use crate::flip;
 use crate::reader::Book;
+use crate::{BookExploreList, flip};
 
 /// 定跡選択に用いる乱数源。テストで固定できるよう抽象化する。
 pub trait BookRng {
@@ -146,7 +147,7 @@ fn find_candidates(
     book: &Book,
     position: &Position,
     flipped_book: bool,
-    info: &mut dyn FnMut(&str),
+    info: &mut dyn FnMut(&str, &str),
 ) -> Option<Vec<Candidate>> {
     let sfen = position.to_sfen();
 
@@ -171,7 +172,10 @@ fn find_candidates(
             match flip::flip_usi_move(move_usi) {
                 Some(s) => s,
                 None => {
-                    info(&format!("Illegal Move In Book DB (unparsable flipped move): {move_usi}"));
+                    info(
+                        move_usi,
+                        &format!("Illegal Move In Book DB (unparsable flipped move): {move_usi}"),
+                    );
                     continue;
                 }
             }
@@ -180,17 +184,17 @@ fn find_candidates(
         };
 
         let Some(decoded) = Move::from_usi(&move_str) else {
-            info(&format!("Illegal Move In Book DB (unparsable move): {move_str}"));
+            info(&move_str, &format!("Illegal Move In Book DB (unparsable move): {move_str}"));
             continue;
         };
         // to_move で 16bit → 32bit 化 + 手番/符号化検証。さらに pseudo-legal + legal で
         // 完全合法性を確認する(探索の movegen を経ずに bestmove として直接返すため)。
         let Some(mv) = position.to_move(decoded) else {
-            info(&format!("Illegal Move In Book DB: {move_str}"));
+            info(&move_str, &format!("Illegal Move In Book DB: {move_str}"));
             continue;
         };
         if mv == Move::NONE || !position.pseudo_legal(mv) || !position.is_legal(mv) {
-            info(&format!("Illegal Move In Book DB: {move_str}"));
+            info(&move_str, &format!("Illegal Move In Book DB: {move_str}"));
             continue;
         }
 
@@ -210,10 +214,6 @@ fn find_candidates(
             depth: raw.depth,
             move_count: raw.move_count,
         });
-    }
-
-    if candidates.is_empty() {
-        return None;
     }
 
     // move_count 降順 → value 降順(安定ソートでファイル内順序を保つ)。
@@ -290,7 +290,7 @@ fn resolve_ponder(
     }
 
     // ponder 補完: 子局面を再 find し筆頭候補を ponder に。
-    let child_candidates = find_candidates(book, &child, options.flipped_book, &mut |_| {})?;
+    let child_candidates = find_candidates(book, &child, options.flipped_book, &mut |_, _| {})?;
     child_candidates.first().map(|c| c.mv)
 }
 
@@ -302,6 +302,19 @@ pub fn probe(
     position: &Position,
     options: &BookOptions,
     rng: &mut dyn BookRng,
+    info: impl FnMut(&str),
+) -> Option<BookProbeResult> {
+    probe_with_explore(book, position, options, rng, None, info)
+}
+
+/// 局面指定の乱択候補を優先して定跡を probe する。
+/// `info` は `probe` と同じく info string 本文を受け取る。
+pub fn probe_with_explore(
+    book: &Book,
+    position: &Position,
+    options: &BookOptions,
+    rng: &mut dyn BookRng,
+    explore: Option<&mut BookExploreList>,
     mut info: impl FnMut(&str),
 ) -> Option<BookProbeResult> {
     // 1. 総合スイッチ。
@@ -314,7 +327,39 @@ pub fn probe(
     }
 
     // 3-4. find + flip + 合法性検証 + 並び替え。
-    let mut candidates = find_candidates(book, position, options.flipped_book, &mut info)?;
+    let sfen = position.to_sfen();
+    let explore_moves = explore.as_ref().and_then(|list| list.moves(&sfen, options.flipped_book));
+    let mut candidates =
+        find_candidates(book, position, options.flipped_book, &mut |mv, message| {
+            // リスト指定手の警告は、下の warn_skipped に集約して重複を防ぐ。
+            if !explore_moves.as_ref().is_some_and(|moves| moves.iter().any(|m| m == mv)) {
+                info(message);
+            }
+        })?;
+
+    // explore は合法な定跡手との積集合から等確率で選ぶ。通常の絞り込みより優先。
+    if let (Some(explore), Some(moves)) = (explore, explore_moves) {
+        let mut eligible = Vec::new();
+        for mv in moves {
+            if let Some(candidate) = candidates.iter().find(|c| c.move_usi == mv) {
+                eligible.push(candidate);
+            } else {
+                explore.warn_skipped(&sfen, &mv, &mut info);
+            }
+        }
+        if !eligible.is_empty() {
+            let chosen = eligible[rng.rand_below(eligible.len() as u64) as usize];
+            let names: Vec<_> = eligible.iter().map(|c| c.move_usi.as_str()).collect();
+            info(&format!("book explore: {} from [{}]", chosen.move_usi, names.join(", ")));
+            return Some(BookProbeResult {
+                best_move: chosen.mv,
+                ponder_move: resolve_ponder(book, position, options, chosen.mv, &chosen.ponder_usi),
+            });
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
 
     // 5. BookDepthLimit(0 で無効): 筆頭手の depth 不足なら局面ごと不採用。
     if options.depth_limit != 0 && candidates[0].depth < options.depth_limit {
@@ -427,6 +472,284 @@ mod tests {
     }
 
     fn no_info(_: &str) {}
+
+    fn explore_book() -> Book {
+        Book::from_reader(format!("{HEADER}\nsfen {HIRATE}\n7g7f 3c3d 100 16 100\n2g2f 8c8d 0 1 1\n5e5f none 200 16 10\n").as_bytes(), false).unwrap()
+    }
+
+    #[test]
+    fn explore_overrides_select_value_and_preserves_ponder() {
+        let book = explore_book();
+        let options = BookOptions {
+            select_value: true,
+            eval_diff: 300,
+            ..Default::default()
+        };
+        let normal =
+            probe(&book, &pos(HIRATE), &options, &mut SeqRng::new(vec![1]), no_info).unwrap();
+        assert_eq!(normal.best_move.to_usi(), "7g7f");
+        let mut explore = BookExploreList::parse(&format!("sfen {HIRATE} 7g7f 2g2f 7g7f"), no_info);
+        for (index, expected, ponder) in [(0, "7g7f", "3c3d"), (1, "2g2f", "8c8d")] {
+            let mut messages = Vec::new();
+            let result = probe_with_explore(
+                &book,
+                &pos(HIRATE),
+                &options,
+                &mut SeqRng::new(vec![index]),
+                Some(&mut explore),
+                |m| messages.push(m.to_string()),
+            )
+            .unwrap();
+            assert_eq!(result.best_move.to_usi(), expected);
+            assert_eq!(result.ponder_move.unwrap().to_usi(), ponder);
+            assert!(messages.contains(&format!("book explore: {expected} from [7g7f, 2g2f]")));
+        }
+    }
+
+    #[test]
+    fn explore_bypasses_eval_diff_limits_depth_narrow_and_count() {
+        let book = explore_book();
+        let mut explore = BookExploreList::parse(&format!("sfen {HIRATE} 7g7f 2g2f"), no_info);
+        let options = BookOptions {
+            eval_diff: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            probe(&book, &pos(HIRATE), &options, &mut SeqRng::new(vec![1]), no_info)
+                .unwrap()
+                .best_move
+                .to_usi(),
+            "7g7f"
+        );
+        for options in [
+            options,
+            BookOptions {
+                eval_black_limit: 999,
+                depth_limit: 999,
+                narrow_book: true,
+                consider_move_count: true,
+                select_value: true,
+                ..Default::default()
+            },
+        ] {
+            let result = probe_with_explore(
+                &book,
+                &pos(HIRATE),
+                &options,
+                &mut SeqRng::new(vec![1]),
+                Some(&mut explore),
+                no_info,
+            )
+            .unwrap();
+            assert_eq!(result.best_move.to_usi(), "2g2f");
+        }
+    }
+
+    #[test]
+    fn explore_skips_invalid_once_and_falls_back() {
+        let book = explore_book();
+        for moves in ["6g6f 5e5f 2g2f", "6g6f 5e5f"] {
+            let mut explore = BookExploreList::parse(&format!("sfen {HIRATE} {moves}"), no_info);
+            let mut warnings = Vec::new();
+            for _ in 0..2 {
+                let result = probe_with_explore(
+                    &book,
+                    &pos(HIRATE),
+                    &BookOptions::default(),
+                    &mut SeqRng::new(vec![0]),
+                    Some(&mut explore),
+                    |m| warnings.push(m.to_string()),
+                )
+                .unwrap();
+                assert_eq!(
+                    result.best_move.to_usi(),
+                    if moves.ends_with("2g2f") {
+                        "2g2f"
+                    } else {
+                        "7g7f"
+                    }
+                );
+            }
+            assert_eq!(
+                warnings
+                    .iter()
+                    .filter(|m| m.starts_with("book explore: skipped")
+                        || m.starts_with("Illegal Move In Book DB"))
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn explore_normalizes_noncanonical_hands() {
+        let canonical = "4k4/9/9/9/9/9/9/9/4K4 b RP 1";
+        let book = Book::from_reader(
+            format!("{HEADER}\nsfen {canonical}\nP*5e none 0 16 1\n").as_bytes(),
+            false,
+        )
+        .unwrap();
+        let mut explore =
+            BookExploreList::parse("sfen 4k4/9/9/9/9/9/9/9/4K4 b PR 99 P*5e", no_info);
+        assert_eq!(explore.moves(canonical, false).unwrap(), ["P*5e"]);
+        let mut messages = Vec::new();
+        let result = probe_with_explore(
+            &book,
+            &pos(canonical),
+            &BookOptions::default(),
+            &mut SeqRng::new(vec![0]),
+            Some(&mut explore),
+            |m| messages.push(m.to_string()),
+        )
+        .unwrap();
+        assert_eq!(result.best_move.to_usi(), "P*5e");
+        assert_eq!(messages, ["book explore: P*5e from [P*5e]"]);
+    }
+
+    #[test]
+    fn explore_preserves_unlisted_illegal_move_warnings() {
+        let book = explore_book();
+        for text in ["".to_string(), format!("sfen {HIRATE} 2g2f")] {
+            let mut explore = BookExploreList::parse(&text, no_info);
+            let mut warnings = Vec::new();
+            for _ in 0..2 {
+                probe_with_explore(
+                    &book,
+                    &pos(HIRATE),
+                    &BookOptions::default(),
+                    &mut SeqRng::new(vec![0]),
+                    Some(&mut explore),
+                    |m| warnings.push(m.to_string()),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                warnings.iter().filter(|m| *m == "Illegal Move In Book DB: 5e5f").count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn explore_flipped_key_and_direct_key_priority() {
+        let book = explore_book();
+        let flipped = flip::flipped_key(HIRATE).unwrap();
+        let mut explore = BookExploreList::parse(&format!("sfen {flipped} 8c8d"), no_info);
+        for (flipped_book, expected) in [(true, "2g2f"), (false, "7g7f")] {
+            let options = BookOptions {
+                flipped_book,
+                ..Default::default()
+            };
+            let result = probe_with_explore(
+                &book,
+                &pos(HIRATE),
+                &options,
+                &mut SeqRng::new(vec![0]),
+                Some(&mut explore),
+                no_info,
+            )
+            .unwrap();
+            assert_eq!(result.best_move.to_usi(), expected);
+        }
+        let mut explore =
+            BookExploreList::parse(&format!("sfen {flipped} 8c8d\nsfen {HIRATE} 7g7f"), no_info);
+        let result = probe_with_explore(
+            &book,
+            &pos(HIRATE),
+            &BookOptions::default(),
+            &mut SeqRng::new(vec![0]),
+            Some(&mut explore),
+            no_info,
+        )
+        .unwrap();
+        assert_eq!(result.best_move.to_usi(), "7g7f");
+        // 定跡自体も反転検索した場合、ponder も元局面の座標に戻る。
+        let result = probe_with_explore(
+            &book,
+            &pos(&flipped),
+            &BookOptions::default(),
+            &mut SeqRng::new(vec![0]),
+            Some(&mut explore),
+            no_info,
+        )
+        .unwrap();
+        assert_eq!(result.best_move.to_usi(), "8c8d");
+        assert_eq!(result.ponder_move.unwrap().to_usi(), "2g2f");
+    }
+
+    #[test]
+    fn explore_respects_book_preconditions_and_unlisted_positions() {
+        let book = explore_book();
+        let mut explore = BookExploreList::parse(&format!("sfen {HIRATE} 2g2f"), no_info);
+        for options in [
+            BookOptions {
+                own_book: false,
+                ..Default::default()
+            },
+            BookOptions {
+                book_moves: 0,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                probe_with_explore(
+                    &book,
+                    &pos(HIRATE),
+                    &options,
+                    &mut SeqRng::new(vec![0]),
+                    Some(&mut explore),
+                    no_info
+                )
+                .is_none()
+            );
+        }
+        let empty_book = Book::from_reader(format!("{HEADER}\n").as_bytes(), false).unwrap();
+        assert!(
+            probe_with_explore(
+                &empty_book,
+                &pos(HIRATE),
+                &BookOptions::default(),
+                &mut SeqRng::new(vec![0]),
+                Some(&mut explore),
+                no_info
+            )
+            .is_none()
+        );
+        let mut empty = BookExploreList::default();
+        assert_eq!(
+            probe_with_explore(
+                &book,
+                &pos(HIRATE),
+                &BookOptions::default(),
+                &mut SeqRng::new(vec![1]),
+                Some(&mut empty),
+                no_info
+            )
+            .unwrap()
+            .best_move
+            .to_usi(),
+            "7g7f"
+        );
+    }
+
+    #[test]
+    fn explore_parser_comments_optional_ply_and_bad_lines() {
+        let key = crate::reader::normalize_key(HIRATE, true);
+        let flipped = flip::flipped_key(HIRATE).unwrap();
+        let text = format!(
+            "# comment\n\n  # indented\nsfen {key} 7g7f\nsfen {flipped} 8c8d\nwrong\nsfen bad b - 7g7f\nsfen {HIRATE}\nsfen {HIRATE} 7g7f garbage\nsfen {HIRATE} éé\n"
+        );
+        let mut messages = Vec::new();
+        let explore = BookExploreList::parse(&text, |m| messages.push(m.to_string()));
+        assert_eq!(explore.len(), 2);
+        assert_eq!(explore.moves(&format!("{key} 99"), false).unwrap(), ["7g7f"]);
+        for line in 6..=10 {
+            assert!(
+                messages.iter().any(|m| m.starts_with(&format!("BookExploreFile line {line}:")))
+            );
+        }
+        assert_eq!(messages.last().unwrap(), "book explore loaded: 2 entries");
+    }
 
     #[test]
     fn probe_hits_and_returns_bestmove() {

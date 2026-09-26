@@ -150,6 +150,9 @@ struct UsiEngine {
     book_options: rshogi_book::BookOptions,
     /// BookFile（定跡ファイル名。`no_book` で無効）
     book_file: String,
+    /// BookExploreFile（空なら無効。変更後の isready でロード）
+    book_explore_file: String,
+    book_explore: Option<rshogi_book::BookExploreList>,
     /// BookDir（定跡ファイルのディレクトリ）
     book_dir: String,
     /// IgnoreBookPly（末尾手数を無視して検索するか。定跡ロード時のキー正規化に使う）
@@ -215,6 +218,8 @@ impl UsiEngine {
             book_options: rshogi_book::BookOptions::default(),
             // BookFile 既定は no_book(定跡オフ)。既存 SPRT/tournament の挙動を変えない。
             book_file: "no_book".to_string(),
+            book_explore_file: String::new(),
+            book_explore: None,
             book_dir: "book".to_string(),
             ignore_book_ply: false,
             book: None,
@@ -344,6 +349,7 @@ impl UsiEngine {
         // BookDepthLimit=0(無効)。
         println!("option name USI_OwnBook type check default true");
         println!("option name BookFile type string default no_book");
+        println!("option name BookExploreFile type string default ");
         println!("option name BookDir type string default book");
         println!("option name BookMoves type spin default 16 min 0 max 10000");
         println!("option name BookEvalDiff type spin default 30 min 0 max 30000");
@@ -454,8 +460,31 @@ impl UsiEngine {
         }
         self.maybe_report_page_status();
         self.maybe_load_book();
+        self.maybe_load_book_explore();
         println!("readyok");
         Ok(())
+    }
+
+    /// explore リストを設定変更後の isready で読み込む。読み込み失敗時は未ロードのままとし、次の isready で再試行する。
+    fn maybe_load_book_explore(&mut self) {
+        if self.book_explore_file.is_empty() || self.book_explore.is_some() {
+            return;
+        }
+        match std::fs::read_to_string(&self.book_explore_file) {
+            Ok(text) => {
+                self.book_explore = Some(rshogi_book::BookExploreList::parse(&text, |msg| {
+                    println!("info string {msg}");
+                }));
+            }
+            Err(e) => {
+                println!(
+                    "info string BookExploreFile {}: {e}; will retry on next isready",
+                    self.book_explore_file
+                );
+                println!("info string book explore loaded: 0 entries");
+                self.book_explore = None;
+            }
+        }
     }
 
     /// 定跡ファイルのロード（isready 時に実施）。
@@ -1136,6 +1165,10 @@ impl UsiEngine {
             "USI_OwnBook" => {
                 self.book_options.own_book = value == "true" || value == "1";
             }
+            "BookExploreFile" if self.book_explore_file != value => {
+                self.book_explore_file = value;
+                self.book_explore = None;
+            }
             "BookFile" => {
                 // 実ロードは isready 時。ここでは名前を保持するだけ。
                 self.book_file = if value.is_empty() {
@@ -1445,11 +1478,12 @@ impl UsiEngine {
 
         // probe 中の info string 本文を集めてから出力する（borrow 競合回避）。
         let mut infos: Vec<String> = Vec::new();
-        let result = rshogi_book::probe(
+        let result = rshogi_book::probe_with_explore(
             book,
             &self.position,
             &self.book_options,
             &mut self.book_rng,
+            self.book_explore.as_mut(),
             |msg| infos.push(msg.to_string()),
         );
 
@@ -1858,6 +1892,51 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn book_explore_option_load_reload_disable_and_read_failure() {
+        let mut engine = UsiEngine::new();
+        assert!(engine.book_explore_file.is_empty());
+        assert!(engine.book_explore.is_none());
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/book-explore-option-test.txt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1 7g7f\n",
+        )
+        .unwrap();
+        engine.cmd_setoption(&[
+            "setoption",
+            "name",
+            "BookExploreFile",
+            "value",
+            path.to_str().unwrap(),
+        ]);
+        assert!(engine.book_explore.is_none());
+        engine.maybe_load_book_explore();
+        assert_eq!(engine.book_explore.as_ref().unwrap().len(), 1);
+        std::fs::remove_file(&path).unwrap();
+        engine.maybe_load_book_explore();
+        assert_eq!(engine.book_explore.as_ref().unwrap().len(), 1);
+        engine.cmd_setoption(&["setoption", "name", "BookExploreFile", "value", ""]);
+        engine.maybe_load_book_explore();
+        assert!(engine.book_explore.is_none());
+        engine.cmd_setoption(&[
+            "setoption",
+            "name",
+            "BookExploreFile",
+            "value",
+            path.to_str().unwrap(),
+        ]);
+        engine.maybe_load_book_explore();
+        assert!(engine.book_explore.is_none());
+        std::fs::write(&path, "# empty\n").unwrap();
+        engine.maybe_load_book_explore();
+        assert!(engine.book_explore.as_ref().unwrap().is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn page_status_is_reported_only_when_it_changes() {
