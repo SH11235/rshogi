@@ -94,9 +94,9 @@ H0=0、H1=+5 nElo、名目 α=β=0.05 の SPRT を行う例:
 | `--engine PATH` | (必須、2 つ以上) | エンジンバイナリパス。`--engine` の数だけエンジン登録される |
 | `--engine-label LABEL` | パスから自動生成 | エンジンラベル（`--engine` と同数・同順で指定）。同一パスを複数回指定する場合は区別のため必須 |
 | `--games N` | 100 | 各方向の対局数（双方向で 2×N 局/ペア） |
-| `--max-moves N` | 512 | 1 局の最大手数（到達で引分）。真の長手数局のみ（千日手は自動終局） |
+| `--max-moves N` | 512 | 引分とする総手数。開始局面までの手数（SFEN の手数欄と `moves` の手順）を含めて数えるため、平手から始まる本番対局 (floodgate 等) の手数制限と同じ値を指定する。開始局面が既にこの手数以上ならエラー |
 | `--adjudicate-resign "movecount=3,score=600"` | off | 同一側の劣勢評価の連続による投了裁定 |
-| `--adjudicate-draw "movenumber=34,movecount=8,score=20"` | off | 両側を通じた均衡評価の連続による引分裁定。手数は ply |
+| `--adjudicate-draw "movenumber=34,movecount=8,score=20"` | off | 両側を通じた均衡評価の連続による引分裁定。手数は開始局面からの対局内 ply（`--max-moves` と異なり開始局面までの手数は含まない） |
 | `--concurrency N` | 1 | 並列対局数。1 対局は手番制で約 1 CPU スレッド消費 |
 | `--report-interval N` | 10 | N 局ごとに進捗を表示 |
 

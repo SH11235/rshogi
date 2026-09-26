@@ -189,6 +189,31 @@ pub fn build_position(
     Ok(pos)
 }
 
+/// 開始局面までに指された手数。SFEN の手数欄は次に指す手の番号なので 1 を引く。
+pub fn plies_before_start(pos: &Position) -> u32 {
+    u32::try_from(pos.game_ply().saturating_sub(1)).unwrap_or(0)
+}
+
+/// 総手数で数えた `max_moves` に対し、対局で 1 手も指せない開始局面を拒否する。
+pub fn ensure_start_positions_within_max_moves(
+    positions: &[ParsedPosition],
+    max_moves: u32,
+) -> Result<()> {
+    for parsed in positions {
+        let pos = build_position(parsed, None, None)?;
+        let before = plies_before_start(&pos);
+        if before >= max_moves {
+            let origin =
+                parsed.source_line.map_or_else(String::new, |line| format!(" (line {line})"));
+            bail!(
+                "start position{origin} has {before} plies played before it, not below --max-moves {max_moves}: {}",
+                describe_position(parsed)
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn describe_position(parsed: &ParsedPosition) -> String {
     let mut buf = OsString::from("position ");
     if parsed.startpos {
@@ -238,6 +263,26 @@ mod tests {
             let parsed = parse_position_line(line).unwrap();
             assert!(build_position(&parsed, None, None).is_err(), "{line}");
         }
+    }
+
+    #[test]
+    fn plies_before_start_counts_sfen_ply_and_opening_moves() {
+        let plies = |line: &str| {
+            plies_before_start(
+                &build_position(&parse_position_line(line).unwrap(), None, None).unwrap(),
+            )
+        };
+        assert_eq!(plies("startpos"), 0);
+        assert_eq!(plies("startpos moves 7g7f 3c3d"), 2);
+        assert_eq!(plies("sfen 4k4/9/9/9/9/9/9/9/4K4 w R 37 moves 5a4a"), 37);
+        assert_eq!(plies("sfen 4k4/9/9/9/9/9/9/9/4K4 b R 0"), 0);
+    }
+
+    #[test]
+    fn start_positions_at_or_beyond_max_moves_are_rejected() {
+        let positions = [parse_position_line("startpos moves 7g7f 3c3d").unwrap()];
+        assert!(ensure_start_positions_within_max_moves(&positions, 3).is_ok());
+        assert!(ensure_start_positions_within_max_moves(&positions, 2).is_err());
     }
 
     #[test]
