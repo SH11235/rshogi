@@ -147,7 +147,7 @@ fn find_candidates(
     book: &Book,
     position: &Position,
     flipped_book: bool,
-    info: &mut dyn FnMut(&str),
+    info: &mut dyn FnMut(&str, &str),
 ) -> Option<Vec<Candidate>> {
     let sfen = position.to_sfen();
 
@@ -172,7 +172,10 @@ fn find_candidates(
             match flip::flip_usi_move(move_usi) {
                 Some(s) => s,
                 None => {
-                    info(&format!("Illegal Move In Book DB (unparsable flipped move): {move_usi}"));
+                    info(
+                        move_usi,
+                        &format!("Illegal Move In Book DB (unparsable flipped move): {move_usi}"),
+                    );
                     continue;
                 }
             }
@@ -181,17 +184,17 @@ fn find_candidates(
         };
 
         let Some(decoded) = Move::from_usi(&move_str) else {
-            info(&format!("Illegal Move In Book DB (unparsable move): {move_str}"));
+            info(&move_str, &format!("Illegal Move In Book DB (unparsable move): {move_str}"));
             continue;
         };
         // to_move で 16bit → 32bit 化 + 手番/符号化検証。さらに pseudo-legal + legal で
         // 完全合法性を確認する(探索の movegen を経ずに bestmove として直接返すため)。
         let Some(mv) = position.to_move(decoded) else {
-            info(&format!("Illegal Move In Book DB: {move_str}"));
+            info(&move_str, &format!("Illegal Move In Book DB: {move_str}"));
             continue;
         };
         if mv == Move::NONE || !position.pseudo_legal(mv) || !position.is_legal(mv) {
-            info(&format!("Illegal Move In Book DB: {move_str}"));
+            info(&move_str, &format!("Illegal Move In Book DB: {move_str}"));
             continue;
         }
 
@@ -287,7 +290,7 @@ fn resolve_ponder(
     }
 
     // ponder 補完: 子局面を再 find し筆頭候補を ponder に。
-    let child_candidates = find_candidates(book, &child, options.flipped_book, &mut |_| {})?;
+    let child_candidates = find_candidates(book, &child, options.flipped_book, &mut |_, _| {})?;
     child_candidates.first().map(|c| c.mv)
 }
 
@@ -324,35 +327,34 @@ pub fn probe_with_explore(
     }
 
     // 3-4. find + flip + 合法性検証 + 並び替え。
-    let mut candidates = find_candidates(book, position, options.flipped_book, &mut info)?;
+    let sfen = position.to_sfen();
+    let explore_moves = explore.as_ref().and_then(|list| list.moves(&sfen, options.flipped_book));
+    let mut candidates =
+        find_candidates(book, position, options.flipped_book, &mut |mv, message| {
+            // リスト指定手の警告は、下の warn_skipped に集約して重複を防ぐ。
+            if !explore_moves.as_ref().is_some_and(|moves| moves.iter().any(|m| m == mv)) {
+                info(message);
+            }
+        })?;
 
     // explore は合法な定跡手との積集合から等確率で選ぶ。通常の絞り込みより優先。
-    if let Some(explore) = explore {
-        let sfen = position.to_sfen();
-        if let Some(moves) = explore.moves(&sfen, options.flipped_book) {
-            let mut eligible = Vec::new();
-            for mv in moves {
-                if let Some(candidate) = candidates.iter().find(|c| c.move_usi == mv) {
-                    eligible.push(candidate);
-                } else {
-                    explore.warn_skipped(&sfen, &mv, &mut info);
-                }
+    if let (Some(explore), Some(moves)) = (explore, explore_moves) {
+        let mut eligible = Vec::new();
+        for mv in moves {
+            if let Some(candidate) = candidates.iter().find(|c| c.move_usi == mv) {
+                eligible.push(candidate);
+            } else {
+                explore.warn_skipped(&sfen, &mv, &mut info);
             }
-            if !eligible.is_empty() {
-                let chosen = eligible[rng.rand_below(eligible.len() as u64) as usize];
-                let names: Vec<_> = eligible.iter().map(|c| c.move_usi.as_str()).collect();
-                info(&format!("book explore: {} from [{}]", chosen.move_usi, names.join(", ")));
-                return Some(BookProbeResult {
-                    best_move: chosen.mv,
-                    ponder_move: resolve_ponder(
-                        book,
-                        position,
-                        options,
-                        chosen.mv,
-                        &chosen.ponder_usi,
-                    ),
-                });
-            }
+        }
+        if !eligible.is_empty() {
+            let chosen = eligible[rng.rand_below(eligible.len() as u64) as usize];
+            let names: Vec<_> = eligible.iter().map(|c| c.move_usi.as_str()).collect();
+            info(&format!("book explore: {} from [{}]", chosen.move_usi, names.join(", ")));
+            return Some(BookProbeResult {
+                best_move: chosen.mv,
+                ponder_move: resolve_ponder(book, position, options, chosen.mv, &chosen.ponder_usi),
+            });
         }
     }
     if candidates.is_empty() {
@@ -569,7 +571,60 @@ mod tests {
                 );
             }
             assert_eq!(
-                warnings.iter().filter(|m| m.starts_with("book explore: skipped")).count(),
+                warnings
+                    .iter()
+                    .filter(|m| m.starts_with("book explore: skipped")
+                        || m.starts_with("Illegal Move In Book DB"))
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn explore_normalizes_noncanonical_hands() {
+        let canonical = "4k4/9/9/9/9/9/9/9/4K4 b RP 1";
+        let book = Book::from_reader(
+            format!("{HEADER}\nsfen {canonical}\nP*5e none 0 16 1\n").as_bytes(),
+            false,
+        )
+        .unwrap();
+        let mut explore =
+            BookExploreList::parse("sfen 4k4/9/9/9/9/9/9/9/4K4 b PR 99 P*5e", no_info);
+        assert_eq!(explore.moves(canonical, false).unwrap(), ["P*5e"]);
+        let mut messages = Vec::new();
+        let result = probe_with_explore(
+            &book,
+            &pos(canonical),
+            &BookOptions::default(),
+            &mut SeqRng::new(vec![0]),
+            Some(&mut explore),
+            |m| messages.push(m.to_string()),
+        )
+        .unwrap();
+        assert_eq!(result.best_move.to_usi(), "P*5e");
+        assert_eq!(messages, ["book explore: P*5e from [P*5e]"]);
+    }
+
+    #[test]
+    fn explore_preserves_unlisted_illegal_move_warnings() {
+        let book = explore_book();
+        for text in ["".to_string(), format!("sfen {HIRATE} 2g2f")] {
+            let mut explore = BookExploreList::parse(&text, no_info);
+            let mut warnings = Vec::new();
+            for _ in 0..2 {
+                probe_with_explore(
+                    &book,
+                    &pos(HIRATE),
+                    &BookOptions::default(),
+                    &mut SeqRng::new(vec![0]),
+                    Some(&mut explore),
+                    |m| warnings.push(m.to_string()),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                warnings.iter().filter(|m| *m == "Illegal Move In Book DB: 5e5f").count(),
                 2
             );
         }

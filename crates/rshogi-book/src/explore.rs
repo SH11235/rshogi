@@ -74,7 +74,8 @@ fn parse_entry(line: &str) -> Result<(String, Vec<String>), String> {
         return Err("missing moves".into());
     }
     let sfen = fields[1..moves_start].join(" ");
-    Position::new().set_sfen(&sfen).map_err(|e| format!("invalid SFEN: {e}"))?;
+    let mut position = Position::new();
+    position.set_sfen(&sfen).map_err(|e| format!("invalid SFEN: {e}"))?;
     let mut moves = Vec::new();
     for token in &fields[moves_start..] {
         if !token.is_ascii()
@@ -86,5 +87,5 @@ fn parse_entry(line: &str) -> Result<(String, Vec<String>), String> {
             moves.push(token.to_string());
         }
     }
-    Ok((normalize_key(&fields[1..4].join(" "), true), moves))
+    Ok((normalize_key(&position.to_sfen(), true), moves))
 }

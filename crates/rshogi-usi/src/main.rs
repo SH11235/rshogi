@@ -465,7 +465,7 @@ impl UsiEngine {
         Ok(())
     }
 
-    /// explore リストを設定変更後の isready で読み込む。読み込み失敗時は無効化する。
+    /// explore リストを設定変更後の isready で読み込む。読み込み失敗時は未ロードのままとし、次の isready で再試行する。
     fn maybe_load_book_explore(&mut self) {
         if self.book_explore_file.is_empty() || self.book_explore.is_some() {
             return;
@@ -477,7 +477,10 @@ impl UsiEngine {
                 }));
             }
             Err(e) => {
-                println!("info string BookExploreFile {}: {e}; disabled", self.book_explore_file);
+                println!(
+                    "info string BookExploreFile {}: {e}; will retry on next isready",
+                    self.book_explore_file
+                );
                 println!("info string book explore loaded: 0 entries");
                 self.book_explore = None;
             }
