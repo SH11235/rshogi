@@ -262,5 +262,9 @@ fn in_tree_declaration_finds_own_declaration_in_two() {
         // 宣言勝ちは 3 手目（ply 2）で成立するので、それより遠い詰みにはならない。
         assert!(result.score >= Value::mate_in(3), "score={}", result.score.raw());
         assert_pv_legal(&root, &result);
+
+        // ルールなしでは宣言勝ちが存在しないので、勝ちとは評価しない。
+        let (_, result) = search(sfen, EnteringKingRule::None, 5);
+        assert!(!result.score.is_win(), "score={}", result.score.raw());
     });
 }
