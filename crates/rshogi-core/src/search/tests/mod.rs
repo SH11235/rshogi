@@ -5,6 +5,7 @@ mod alpha_beta;
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 mod cutoff_cnt;
 mod history_update;
+mod in_tree_declaration;
 #[cfg(feature = "use-lazy-evaluate")]
 mod lazy_evaluate;
 mod multi_pv;

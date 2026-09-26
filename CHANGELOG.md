@@ -33,6 +33,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **探索内で入玉宣言勝ちを判定するように (YaneuraOu 準拠)**: これまでは root 局面でしか宣言勝ちを
+  判定しておらず、数手先で宣言できる局面を勝ちとして読めなかった。1 手詰め判定の直後に、非 root の
+  置換表に手が無いノードと PV ノードで宣言勝ちを判定し、成立すれば 1 手勝ちとして返す (置換表には書かない)。
+  `EnteringKingRule` が `NoEnteringKing` の場合は従来どおり。既定 build の探索結果 (ノード数) が変わる。
 - **`use-lazy-evaluate` を rshogi-usi の opt-in feature として選択可能に**:
   `cargo xtask build --edition <preset> --features use-lazy-evaluate` で、TT hit 時の非 PV ノードで
   TT の eval を再利用する (YaneuraOu の `USE_LAZY_EVALUATE` 相当) engine を build できる。

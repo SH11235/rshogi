@@ -366,6 +366,8 @@ pub struct SearchContext<'a> {
     /// 千日手評価値テーブル (YaneuraOu DrawValueBlack/DrawValueWhite 準拠)
     /// drawValueTable[REPETITION_DRAW][Color] に相当
     pub draw_value_table: [Value; 2],
+    /// 入玉宣言勝ちルール（探索内の宣言勝ち判定に使う）
+    pub entering_king_rule: EnteringKingRule,
 }
 
 /// Path tracking used only when the dynamic depth-liveness guard is enabled.
@@ -804,6 +806,7 @@ impl SearchWorker {
             tune_params: &self.search_tune_params,
             reductions: &self.reductions,
             draw_value_table: self.draw_value_table,
+            entering_king_rule: self.entering_king_rule,
         }
     }
 
@@ -1252,6 +1255,7 @@ impl SearchWorker {
                 tune_params: &self.search_tune_params,
                 reductions: &self.reductions,
                 draw_value_table: self.draw_value_table,
+                entering_king_rule: self.entering_king_rule,
             };
             if let Some(v) = try_probcut(
                 &mut self.state,
@@ -1891,6 +1895,7 @@ impl SearchWorker {
                     tune_params: &self.search_tune_params,
                     reductions: &self.reductions,
                     draw_value_table: self.draw_value_table,
+                    entering_king_rule: self.entering_king_rule,
                 };
                 update_correction_history(&self.state, &ctx, pos, 0, bonus);
             }
@@ -2366,6 +2371,7 @@ impl SearchWorker {
             tune_params: &self.search_tune_params,
             reductions: &self.reductions,
             draw_value_table: self.draw_value_table,
+            entering_king_rule: self.entering_king_rule,
         };
         Self::search_node::<NT>(
             &mut self.state,

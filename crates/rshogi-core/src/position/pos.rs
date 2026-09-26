@@ -1799,6 +1799,11 @@ impl Position {
 
         // --- 24/27 点法の宣言勝ち判定 ---
 
+        // 探索の各ノードから呼ばれるため、大半を占める未入玉局面は点数計算の前に弾く。
+        if !Self::enemy_field(us).contains(self.king_square(us)) {
+            return Move::NONE;
+        }
+
         let info = self.entering_king_point_info(us);
 
         // (b) 宣言側の玉が敵陣三段目以内に入っている
