@@ -653,12 +653,23 @@ impl Position {
     }
 
     /// 指定マスに利いている駒（占有指定）
+    #[inline(always)]
+    pub fn attackers_to_occ(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+        self.attackers_to_occ_parts(occupied.p0(), occupied.p1(), sq)
+    }
+
+    /// 指定マスに利いている駒（占有を下位・上位の u64 で指定）
+    ///
+    /// 占有を先に渡し、Win64 でも両半分を汎用レジスタで受け取る。
+    /// 利き計算本体は呼び出し元のコードサイズを抑えるためインライン化しない。
     ///
     /// Apery/YaneuraOu式: silverEffect で HDK の斜め近接利き、
     /// goldEffect で HDK の直線近接利きを捕捉し、
     /// 個別の king_effect / horse近接 / dragon近接 を不要にする。
     /// また rook_effect を再利用して lance_effect の個別スライド計算を省略。
-    pub fn attackers_to_occ(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+    #[inline(never)]
+    pub fn attackers_to_occ_parts(&self, lo: u64, hi: u64, sq: Square) -> Bitboard {
+        let occupied = Bitboard::from_u64_pair(lo, hi);
         let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
         let golds_hdk = self.golds_bb | self.hdk_bb;
 
@@ -689,6 +700,32 @@ impl Position {
                     & self.pieces(Color::White, PieceType::Lance)));
 
         black_attackers | white_attackers | bishop | rook_lance
+    }
+
+    /// 指定マスに利いている指定手番の駒（占有指定）
+    #[inline(always)]
+    pub fn attackers_to_color_occ(&self, us: Color, sq: Square, occupied: Bitboard) -> Bitboard {
+        self.attackers_to_color_occ_parts(occupied.p0(), occupied.p1(), us, sq)
+    }
+
+    // 占有を先に渡し、Win64 でも両半分を汎用レジスタで受け取る。
+    // 色は実行時に参照し、色ごとの利き計算本体を生成しない。
+    #[inline(never)]
+    fn attackers_to_color_occ_parts(&self, lo: u64, hi: u64, us: Color, sq: Square) -> Bitboard {
+        let occupied = Bitboard::from_u64_pair(lo, hi);
+        let them = !us;
+        let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
+        let golds_hdk = self.golds_bb | self.hdk_bb;
+
+        ((pawn_effect(them, sq) & self.pieces_pt(PieceType::Pawn))
+            | (knight_effect(them, sq) & self.pieces_pt(PieceType::Knight))
+            | (silver_effect(them, sq) & silver_hdk)
+            | (gold_effect(them, sq) & golds_hdk)
+            | (bishop_effect(sq, occupied) & self.bishop_horse_bb)
+            | (rook_effect(sq, occupied)
+                & (self.rook_dragon_bb
+                    | (lance_step_effect(them, sq) & self.pieces_pt(PieceType::Lance)))))
+            & self.pieces_c(us)
     }
 
     /// 指定マスに利いている指定手番の駒
@@ -2050,6 +2087,92 @@ mod tests {
         }
 
         (blockers, pinners)
+    }
+
+    // 実際の駒配置と異なる占有も渡し、仮想的な移動・駒打ちでの利きを確認する。
+    fn for_each_attackers_occ_case(mut check: impl FnMut(&Position, Square, Bitboard)) {
+        use crate::position::playout_test_support::RandomPlayout;
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        const SEED: u64 = 0xA77A_CCE2_50CC;
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(SEED);
+        for index in 0..8 {
+            let mut playout = RandomPlayout::new(SEED, index);
+            for ply in 0..=128 {
+                if ply % 16 == 0 {
+                    for sq_index in 0..Square::NUM {
+                        let sq = Square::from_u8(sq_index as u8).unwrap();
+                        let occupied = playout.pos.occupied();
+                        let random = Bitboard::new(rng.random(), rng.random()) & Bitboard::ALL;
+                        let from = Square::from_u8(rng.random_range(0..81)).unwrap();
+                        for occ in [
+                            Bitboard::EMPTY,
+                            Bitboard::ALL,
+                            occupied,
+                            occupied ^ Bitboard::from_square(from),
+                            occupied | Bitboard::from_square(sq),
+                            random,
+                            random & !Bitboard::from_square(sq),
+                            random | Bitboard::from_square(sq),
+                        ] {
+                            check(&playout.pos, sq, occ);
+                        }
+                    }
+                }
+                if ply < 128 && playout.step().is_none() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // 合成 Bitboard に依存せず、各駒の移動元から利きを列挙する参照実装。
+    fn attackers_to_occ_reference(pos: &Position, sq: Square, occupied: Bitboard) -> Bitboard {
+        let mut attackers = Bitboard::EMPTY;
+        for from in pos.occupied().iter() {
+            let pc = pos.piece_on(from);
+            let effect = match pc.piece_type() {
+                PieceType::Lance => lance_effect(pc.color(), from, occupied),
+                PieceType::Bishop => bishop_effect(from, occupied),
+                PieceType::Rook => rook_effect(from, occupied),
+                PieceType::Horse => horse_effect(from, occupied),
+                PieceType::Dragon => dragon_effect(from, occupied),
+                pt => crate::bitboard::piece_effect(pt, pc.color(), from),
+            };
+            if effect.contains(sq) {
+                attackers |= Bitboard::from_square(from);
+            }
+        }
+        attackers
+    }
+
+    #[test]
+    fn attackers_to_occ_parts_matches_reference_randomized() {
+        for_each_attackers_occ_case(|pos, sq, occ| {
+            let expected = attackers_to_occ_reference(pos, sq, occ);
+            assert_eq!(
+                pos.attackers_to_occ_parts(occ.p0(), occ.p1(), sq),
+                expected,
+                "sq={sq:?} occ={occ:?} sfen={}",
+                pos.to_sfen()
+            );
+            assert_eq!(pos.attackers_to_occ(sq, occ), expected);
+        });
+    }
+
+    #[test]
+    fn attackers_to_color_occ_matches_two_colors_randomized() {
+        for_each_attackers_occ_case(|pos, sq, occ| {
+            for us in [Color::Black, Color::White] {
+                assert_eq!(
+                    pos.attackers_to_color_occ(us, sq, occ),
+                    pos.attackers_to_occ(sq, occ) & pos.pieces_c(us),
+                    "us={us:?} sq={sq:?} occ={occ:?} sfen={}",
+                    pos.to_sfen()
+                );
+            }
+        });
     }
 
     #[test]

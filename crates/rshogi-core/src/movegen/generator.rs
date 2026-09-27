@@ -1442,7 +1442,7 @@ impl Position {
 
         // 自玉側の利きが一切なければ詰みには遠い
         let occ_with_pawn = self.occupied() | Bitboard::from_square(to);
-        if (self.attackers_to_occ(to, occ_with_pawn) & self.pieces_c(us)).is_empty() {
+        if self.attackers_to_color_occ(us, to, occ_with_pawn).is_empty() {
             return true;
         }
 
@@ -1461,7 +1461,7 @@ impl Position {
         escape_bb ^= Bitboard::from_square(to);
 
         for king_to in escape_bb.iter() {
-            if (self.attackers_to_occ(king_to, occ_with_pawn) & self.pieces_c(us)).is_empty() {
+            if self.attackers_to_color_occ(us, king_to, occ_with_pawn).is_empty() {
                 return true; // 退路があるので打ち歩詰めではない
             }
         }
@@ -1547,8 +1547,8 @@ impl Position {
 
     /// 指定マスに指定手番の利きがあるか
     fn is_attacked_by(&self, c: Color, sq: Square, occupied: Bitboard) -> bool {
-        let attackers = self.attackers_to_occ(sq, occupied);
-        !(attackers & self.pieces_c(c)).is_empty()
+        let attackers = self.attackers_to_color_occ(c, sq, occupied);
+        !attackers.is_empty()
     }
 }
 

@@ -197,8 +197,8 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             } else {
                 // toに味方の利きがfrom以外にない場合はスキップ
                 // （toの駒が取られると王手が残らない）
-                let attackers_to_us = (pos.attackers_to_occ(to, slide) & pos.pieces_c(us))
-                    ^ Bitboard::from_square(from);
+                let attackers_to_us =
+                    pos.attackers_to_color_occ(us, to, slide) ^ Bitboard::from_square(from);
                 if attackers_to_us.is_empty() {
                     // toが味方利きで守られていない → LANCE_NO_PRO へ
                 } else if pos.discovered(from, to, our_king, our_pinned) {
@@ -224,8 +224,8 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                 if !bb_skewer.contains(sq_king) {
                     continue;
                 }
-                let attackers_to_us = (pos.attackers_to_occ(to, slide) & pos.pieces_c(us))
-                    ^ Bitboard::from_square(from);
+                let attackers_to_us =
+                    pos.attackers_to_color_occ(us, to, slide) ^ Bitboard::from_square(from);
                 if attackers_to_us.is_empty() {
                     continue;
                 }
@@ -434,7 +434,7 @@ fn has_other_attacker(
     to: Square,
     slide: Bitboard,
 ) -> bool {
-    let attackers = pos.attackers_to_occ(to, slide) & pos.pieces_c(us);
+    let attackers = pos.attackers_to_color_occ(us, to, slide);
     let attackers_wo_from = attackers & !Bitboard::from_square(from);
     attackers_wo_from.is_not_empty()
 }
