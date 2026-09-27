@@ -87,6 +87,36 @@ fn first_bestmove(stdout: &str) -> Option<&str> {
 }
 
 #[test]
+fn book_explore_empty_default_is_advertised_and_disabled() {
+    let mut cmd = assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"));
+    let output = cmd
+        .write_stdin(format!(
+            "{MATERIAL_INIT}\
+             setoption name BookExploreFile value <empty>\n\
+             isready\n\
+             isready\n\
+             quit\n"
+        ))
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "option name BookExploreFile type string default <empty>"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.lines().filter(|line| *line == "readyok").count(), 2, "{stdout}");
+    for output in [&stdout, &stderr] {
+        assert!(!output.contains("info string BookExploreFile"), "{output}");
+        assert!(!output.contains("book explore loaded"), "{output}");
+    }
+}
+
+#[test]
 fn book_hit_returns_bestmove_from_db() {
     // YANEURAOU-DB2016 形式の実 .db。平手初期局面に 7g7f(ponder 3c3d) を 1 手だけ登録。
     let db = "#YANEURAOU-DB2016 1.00\n\

@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `USI_OwnBook` | `true` | 定跡使用の総合スイッチ。`false` なら probe しない。 |
 | `BookFile` | `no_book` | 定跡ファイル名。`no_book` または空なら定跡をロードしない。 |
-| `BookExploreFile` | 空文字列（無効） | 指定局面の定跡手を等確率で選ぶ UTF-8 ファイル。 |
+| `BookExploreFile` | `<empty>`（空文字列・無効） | 指定局面の定跡手を等確率で選ぶ UTF-8 ファイル。 |
 | `BookDir` | `book` | 相対 `BookFile` を解決するディレクトリ。 |
 | `BookMoves` | `16` | この手数まで定跡を使う。 |
 | `BookEvalDiff` | `30` | 候補中の最大 value からこの差分以内の手だけ残す。 |
@@ -30,6 +30,7 @@
 ## 局面を指定した定跡手の乱択
 
 `setoption name BookExploreFile value book/explore.txt` で指定し、`isready` で読み込みます。
+空文字列または `setoption name BookExploreFile value <empty>` で無効に戻せます。
 相対パスは実行時の作業ディレクトリ基準です（`BookDir` は使いません）。パスが変わると
 次の `isready` で再読み込みします。読み込み成功後に同じパスを再読み込みするには、一度空に戻して再指定します。
 

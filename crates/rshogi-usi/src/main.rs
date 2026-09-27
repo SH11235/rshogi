@@ -349,7 +349,7 @@ impl UsiEngine {
         // BookDepthLimit=0(無効)。
         println!("option name USI_OwnBook type check default true");
         println!("option name BookFile type string default no_book");
-        println!("option name BookExploreFile type string default ");
+        println!("option name BookExploreFile type string default <empty>");
         println!("option name BookDir type string default book");
         println!("option name BookMoves type spin default 16 min 0 max 10000");
         println!("option name BookEvalDiff type spin default 30 min 0 max 30000");
@@ -1165,9 +1165,16 @@ impl UsiEngine {
             "USI_OwnBook" => {
                 self.book_options.own_book = value == "true" || value == "1";
             }
-            "BookExploreFile" if self.book_explore_file != value => {
-                self.book_explore_file = value;
-                self.book_explore = None;
+            "BookExploreFile" => {
+                let value = if value.is_empty() || value == "<empty>" {
+                    String::new()
+                } else {
+                    value
+                };
+                if self.book_explore_file != value {
+                    self.book_explore_file = value;
+                    self.book_explore = None;
+                }
             }
             "BookFile" => {
                 // 実ロードは isready 時。ここでは名前を保持するだけ。
@@ -1936,6 +1943,11 @@ mod tests {
         engine.maybe_load_book_explore();
         assert!(engine.book_explore.as_ref().unwrap().is_empty());
         std::fs::remove_file(path).unwrap();
+        engine.cmd_setoption(&["setoption", "name", "BookExploreFile", "value", "<empty>"]);
+        assert!(engine.book_explore_file.is_empty());
+        assert!(engine.book_explore.is_none());
+        engine.maybe_load_book_explore();
+        assert!(engine.book_explore.is_none());
     }
 
     #[test]
