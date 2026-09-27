@@ -239,6 +239,8 @@ pub struct Search {
     tt_size_mb: usize,
     /// EvalHashのサイズ（MB）
     eval_hash_size_mb: usize,
+    /// EvalHash の確保時に Large Pages を試みるか。
+    eval_hash_large_pages: bool,
     /// 停止フラグ
     stop: Arc<AtomicBool>,
     /// ponderhit通知フラグ
@@ -705,8 +707,17 @@ impl Search {
     /// * `tt_size_mb` - 置換表のサイズ（MB）
     /// * `eval_hash_size_mb` - EvalHash のサイズ（MB）
     pub fn new_with_eval_hash(tt_size_mb: usize, eval_hash_size_mb: usize) -> Self {
+        Self::new_with_eval_hash_large_pages(tt_size_mb, eval_hash_size_mb, true)
+    }
+
+    /// EvalHash のサイズと Large Pages の使用設定を指定して作成する。
+    pub fn new_with_eval_hash_large_pages(
+        tt_size_mb: usize,
+        eval_hash_size_mb: usize,
+        large_pages: bool,
+    ) -> Self {
         let tt = Arc::new(TranspositionTable::new(tt_size_mb));
-        let eval_hash = Arc::new(EvalHash::new(eval_hash_size_mb));
+        let eval_hash = Arc::new(EvalHash::new_with_large_pages(eval_hash_size_mb, large_pages));
         let stop = Arc::new(AtomicBool::new(false));
         let ponderhit_flag = Arc::new(AtomicBool::new(false));
         let increase_depth_shared = Arc::new(AtomicBool::new(true));
@@ -728,6 +739,7 @@ impl Search {
             eval_hash,
             tt_size_mb,
             eval_hash_size_mb,
+            eval_hash_large_pages: large_pages,
             stop,
             ponderhit_flag,
             start_time: None,
@@ -802,13 +814,22 @@ impl Search {
     /// USIプロトコルでは `setoption` は探索中に送られないため、
     /// 通常の使用では問題ない。
     pub fn resize_eval_hash(&mut self, size_mb: usize) {
-        self.eval_hash = Arc::new(EvalHash::new(size_mb));
+        self.eval_hash =
+            Arc::new(EvalHash::new_with_large_pages(size_mb, self.eval_hash_large_pages));
         self.eval_hash_size_mb = size_mb;
         // workerが存在する場合、EvalHash参照を更新
         if let Some(worker) = &mut self.worker {
             worker.eval_hash = Arc::clone(&self.eval_hash);
         }
         self.thread_pool.update_eval_hash(Arc::clone(&self.eval_hash));
+    }
+
+    /// Large Pages の使用設定を変更し、現在のサイズで EvalHash を再確保する。
+    pub fn set_eval_hash_large_pages(&mut self, large_pages: bool) {
+        if self.eval_hash_large_pages != large_pages {
+            self.eval_hash_large_pages = large_pages;
+            self.resize_eval_hash(self.eval_hash_size_mb);
+        }
     }
 
     /// EvalHash を in-place でクリアする（worker と共有する Arc をそのまま使う）

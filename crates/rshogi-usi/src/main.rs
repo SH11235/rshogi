@@ -93,6 +93,8 @@ struct UsiEngine {
     eval_hash_size_mb: usize,
     /// EvalHash使用フラグ（UseEvalHashで変更）
     use_eval_hash: bool,
+    /// EvalHash の確保時に Large Pages を試みるか。
+    eval_hash_large_pages: bool,
     /// MultiPV値
     multi_pv: usize,
     /// Skill Level オプション
@@ -136,6 +138,8 @@ struct UsiEngine {
     net_deltas_dirty: bool,
     /// 最後に表示した TT の page 配置。未表示のときは表示が不要な Regular。
     reported_page_status: TtPageStatus,
+    /// 最後に表示した EvalHash の page 配置。
+    reported_eval_hash_page_status: TtPageStatus,
     // --- 有限パス権（Finite Pass Rights）関連 ---
     /// パス権ルール有効化フラグ
     pass_rights_enabled: bool,
@@ -191,6 +195,7 @@ impl UsiEngine {
             tt_size_mb,
             eval_hash_size_mb,
             use_eval_hash,
+            eval_hash_large_pages: true,
             multi_pv: 1,
             skill_options: rshogi_core::search::SkillOptions::default(),
             search_thread: None,
@@ -211,6 +216,7 @@ impl UsiEngine {
             net_deltas: BTreeMap::new(),
             net_deltas_dirty: false,
             reported_page_status: TtPageStatus::Regular,
+            reported_eval_hash_page_status: TtPageStatus::Regular,
             pass_rights_enabled: false,
             initial_pass_count: 2,
             pass_right_value_early: DEFAULT_PASS_RIGHT_VALUE_EARLY,
@@ -311,6 +317,7 @@ impl UsiEngine {
         );
         println!("option name EvalHash type spin default 256 min 0 max 4096");
         println!("option name UseEvalHash type check default true");
+        println!("option name EvalHashLargePages type check default true");
         println!("option name Skill Level type spin default 20 min 0 max 20");
         println!("option name UCI_LimitStrength type check default false");
         println!("option name UCI_Elo type spin default 0 min 0 max 4000");
@@ -680,6 +687,8 @@ impl UsiEngine {
         } else {
             TtPageStatus::Regular
         };
+        let eval_hash = search.eval_hash();
+        self.report_eval_hash_page_status(&eval_hash);
         let Some(message) = page_status_message(self.reported_page_status, current) else {
             return;
         };
@@ -690,6 +699,26 @@ impl UsiEngine {
         });
         println!("info string {}", payload);
         self.reported_page_status = current;
+    }
+
+    fn report_eval_hash_page_status(&mut self, hash: &rshogi_core::eval::EvalHash) {
+        let current = if hash.uses_large_pages() {
+            TtPageStatus::LargePages
+        } else if hash.huge_page_hint_requested() {
+            TtPageStatus::HugePageHint
+        } else {
+            TtPageStatus::Regular
+        };
+        if let Some(message) = page_status_message(self.reported_eval_hash_page_status, current) {
+            let message = if current == TtPageStatus::Regular {
+                "Regular pages are used."
+            } else {
+                message
+            };
+            let payload = json!({"type": "info", "message": format!("EvalHash: {message}")});
+            println!("info string {}", payload);
+            self.reported_eval_hash_page_status = current;
+        }
     }
 
     /// setoptionコマンド: オプション設定
@@ -881,6 +910,15 @@ impl UsiEngine {
                     search.resize_eval_hash(size);
                     self.eval_hash_size_mb = size;
                 }
+                self.maybe_report_page_status();
+            }
+            "EvalHashLargePages" => {
+                let large_pages = value == "true" || value == "1";
+                self.eval_hash_large_pages = large_pages;
+                if let Some(search) = self.search.as_mut() {
+                    search.set_eval_hash_large_pages(large_pages);
+                }
+                self.maybe_report_page_status();
             }
             "UseEvalHash" => {
                 let v = value == "true" || value == "1";
@@ -1398,13 +1436,17 @@ impl UsiEngine {
             self.position.clone()
         };
 
-        let mut search = self
-            .search
-            .take()
-            .unwrap_or_else(|| Search::new_with_eval_hash(self.tt_size_mb, self.eval_hash_size_mb));
+        let mut search = self.search.take().unwrap_or_else(|| {
+            Search::new_with_eval_hash_large_pages(
+                self.tt_size_mb,
+                self.eval_hash_size_mb,
+                self.eval_hash_large_pages,
+            )
+        });
         if search.eval_hash_size_mb() != self.eval_hash_size_mb {
             search.resize_eval_hash(self.eval_hash_size_mb);
         }
+        self.report_eval_hash_page_status(&search.eval_hash());
         search.set_skill_options(self.skill_options);
         // stop/ponderhitフラグをリセット（スレッド生成前に行い、go()内での競合を防ぐ）
         search.reset_flags();
@@ -1713,8 +1755,11 @@ impl UsiEngine {
                 }
                 Err(_) => {
                     eprintln!("info string search thread panicked, resetting Search");
-                    let mut search =
-                        Search::new_with_eval_hash(self.tt_size_mb, self.eval_hash_size_mb);
+                    let mut search = Search::new_with_eval_hash_large_pages(
+                        self.tt_size_mb,
+                        self.eval_hash_size_mb,
+                        self.eval_hash_large_pages,
+                    );
                     search.set_skill_options(self.skill_options);
                     self.search = Some(search);
                 }
@@ -1964,6 +2009,52 @@ mod tests {
         assert!(
             page_status_message(HugePageHint, Regular).is_some_and(|m| m.contains("regular pages"))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn eval_hash_large_pages_option_survives_resize() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut engine = UsiEngine::new();
+                assert!(engine.eval_hash_large_pages);
+                assert_eq!(engine.eval_hash_size_mb, 256);
+                engine.cmd_setoption(&[
+                    "setoption",
+                    "name",
+                    "EvalHashLargePages",
+                    "value",
+                    "false",
+                ]);
+                assert_eq!(engine.search.as_ref().unwrap().eval_hash_size_mb(), 0);
+                engine.cmd_setoption(&["setoption", "name", "EvalHash", "value", "1"]);
+                let regular = engine.search.as_ref().unwrap().eval_hash();
+                assert!(!regular.uses_large_pages());
+                assert!(!regular.huge_page_hint_requested());
+                regular.store(1, 42);
+                engine.cmd_setoption(&["setoption", "name", "EvalHashLargePages", "value", "true"]);
+                let allocated = engine.search.as_ref().unwrap().eval_hash();
+                assert!(!Arc::ptr_eq(&regular, &allocated));
+                assert_eq!(allocated.probe(1), None);
+                engine.cmd_setoption(&[
+                    "setoption",
+                    "name",
+                    "EvalHashLargePages",
+                    "value",
+                    "false",
+                ]);
+                engine.cmd_setoption(&["setoption", "name", "EvalHash", "value", "3"]);
+                assert!(!engine.eval_hash_large_pages);
+                let resized = engine.search.as_ref().unwrap().eval_hash();
+                assert!(!resized.uses_large_pages());
+                assert!(!resized.huge_page_hint_requested());
+                resized.store(1, -42);
+                assert_eq!(resized.probe(1), Some(-42));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

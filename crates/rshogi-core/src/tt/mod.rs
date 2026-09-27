@@ -16,7 +16,7 @@
 //! = 32バイト/クラスター。排他は取らず、payload 内のフィールド対応だけを不可分に保つ。
 //! 短縮キーと payload は別ワードなので、異なる書込みの組が観測されうる。
 
-mod alloc;
+pub(crate) mod alloc;
 mod entry;
 mod table;
 #[cfg(feature = "tt-write-stats")]

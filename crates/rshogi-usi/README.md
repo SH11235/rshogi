@@ -37,6 +37,9 @@ The engine will start in USI mode, waiting for commands from stdin.
 |--------|-------------|---------|
 | `Threads` | Number of search threads | 1 |
 | `USI_Hash` | Hash table size in MB | 256 |
+| `EvalHash` | 評価ハッシュのサイズ（MiB、0 で空） | 256 |
+| `UseEvalHash` | 評価ハッシュを使用する | true |
+| `EvalHashLargePages` | 評価ハッシュの Large Pages 確保を試みる（false は Vec による通常確保） | true |
 | `NetworkDelay` | Network delay compensation (ms) | 0 |
 | `NetworkDelay2` | Additional delay for uncertain situations | 0 |
 | `EvalFile` | NNUE model path | `eval/nn.bin` |
@@ -107,6 +110,18 @@ TT を取り直した結果 large pages やヒントが使えなくなった場�
 core の `uses_large_pages()` / `Search::tt_uses_large_pages()` は Windows の明示確保だけを
 表します。Linux/Android のヒント要求の成否は `huge_page_hint_requested()` /
 `Search::tt_huge_page_hint_requested()` で確認できます。
+
+EvalHash も同じ確保処理を使い、Windows で成功すると `EvalHash: Large Pages are used.` を
+TT と同じ `info string` 内の JSON メッセージ形式で表示します。Linux/Android は
+`EvalHash: Huge-page hint requested; actual page backing is managed by the OS.` です。
+確保に失敗すると通常ページへフォールバックします。配置が通常ページに戻ったときは
+`EvalHash: Regular pages are used.` と表示します。
+
+`EvalHashLargePages=false` と `true` は同じバイナリで切り替えられます。
+変更時は現在確保済みのサイズでキャッシュを再確保し、サイズ変更後も設定を保持します。
+初期状態の EvalHash は最初の `go` 直前まで遅延確保され、配置表示も確保後に行います。
+Windows の Large Pages は非ページングメモリを使います。既定サイズでは、各プロセスにつき
+TT 256 MiB と EvalHash 256 MiB の確保を試みるため、複数プロセスではその合計容量が必要です。
 
 ## mimalloc (`mimalloc`)
 
