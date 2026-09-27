@@ -11,8 +11,9 @@ use super::state::{
 };
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
-    Bitboard, RANK_BB, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect,
-    knight_effect, lance_effect, lance_step_effect, pawn_effect, rook_effect, silver_effect,
+    BISHOP_STEP, Bitboard, RANK_BB, ROOK_STEP, SQUARE_BB, bishop_effect, dragon_effect,
+    gold_effect, horse_effect, king_effect, knight_effect, lance_step_effect, pawn_effect,
+    rook_effect, silver_effect,
 };
 #[cfg(feature = "halfkx-arch")]
 use crate::eval::material::material_needs_board_effects;
@@ -745,9 +746,9 @@ impl Position {
         let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & avoid_not;
         let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & avoid_not;
 
-        let pinners = (lance_effect(them, ksq, Bitboard::EMPTY) & lance_bb)
-            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
-            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+        let pinners = (lance_step_effect(them, ksq) & lance_bb)
+            | (BISHOP_STEP[ksq.index()] & bishop_bb)
+            | (ROOK_STEP[ksq.index()] & rook_bb);
 
         let pieces_without_avoid = self.occupied() & avoid_not;
         let mut result = Bitboard::EMPTY;
@@ -844,21 +845,19 @@ impl Position {
     /// pin駒とpinしている駒を更新
     pub(super) fn update_blockers_and_pinners(&mut self) {
         for c in [Color::Black, Color::White] {
-            let (blockers, pinners) =
-                self.compute_blockers_and_pinners(c, self.occupied(), Bitboard::EMPTY);
-            let st = self.cur_state_mut();
-            st.blockers_for_king[c.index()] = blockers;
-            st.pinners[c.index()] = pinners;
+            self.compute_blockers_and_pinners(c, self.occupied(), Bitboard::EMPTY);
         }
     }
 
-    /// 占有を指定してpin候補とpinnerを再計算
+    /// 占有を指定してpin候補とpinnerを現在のStateInfoへ書き込む。
+    // 呼び出し元のレジスタ退避を増やさず、結果の一時領域も介さない。
+    #[inline(never)]
     fn compute_blockers_and_pinners(
-        &self,
+        &mut self,
         king_color: Color,
         occupied: Bitboard,
         enemy_removed: Bitboard,
-    ) -> (Bitboard, Bitboard) {
+    ) {
         let ksq = self.king_square[king_color.index()];
         let enemy = !king_color;
 
@@ -867,9 +866,9 @@ impl Position {
         let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & !enemy_removed;
         let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & !enemy_removed;
 
-        let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
-            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
-            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+        let snipers = (lance_step_effect(king_color, ksq) & lance_bb)
+            | (BISHOP_STEP[ksq.index()] & bishop_bb)
+            | (ROOK_STEP[ksq.index()] & rook_bb);
 
         let mut blockers = Bitboard::EMPTY;
         let mut pinners = Bitboard::EMPTY;
@@ -885,13 +884,15 @@ impl Position {
             // blockerが自駒のときのみpin対象
             if (between & self.pieces_c(enemy)).is_empty() {
                 blockers |= between;
-                pinners.set(sniper_sq);
+                pinners |= SQUARE_BB[sniper_sq.index()];
             } else {
                 blockers |= between;
             }
         }
 
-        (blockers, pinners)
+        let st = self.cur_state_mut();
+        st.blockers_for_king[king_color.index()] = blockers;
+        st.pinners[king_color.index()] = pinners;
     }
 
     /// 王手マスを更新
@@ -904,6 +905,7 @@ impl Position {
         // gold_effect は Gold + 成小駒4種（ProPawn, ProLance, ProKnight, ProSilver）で共通。
         // 圧縮配列ではインデックス 6 に統合済み。
         let gold_bb = gold_effect(them, ksq);
+        let rook_bb = rook_effect(ksq, occupied);
 
         // 各駒種で王手となるマス（圧縮インデックス 0..8）
         // SAFETY: インデックス 0..8 は CHECK_SQUARES_SIZE(=9) の範囲内。
@@ -911,11 +913,12 @@ impl Position {
         // 定数と CHECK_SQ_INDEX テーブルは state.rs で一元管理。
         unsafe {
             *st.check_squares.get_unchecked_mut(CS_IDX_PAWN) = pawn_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(CS_IDX_LANCE) = lance_effect(them, ksq, occupied);
+            *st.check_squares.get_unchecked_mut(CS_IDX_LANCE) =
+                rook_bb & lance_step_effect(them, ksq);
             *st.check_squares.get_unchecked_mut(CS_IDX_KNIGHT) = knight_effect(them, ksq);
             *st.check_squares.get_unchecked_mut(CS_IDX_SILVER) = silver_effect(them, ksq);
             *st.check_squares.get_unchecked_mut(CS_IDX_BISHOP) = bishop_effect(ksq, occupied);
-            *st.check_squares.get_unchecked_mut(CS_IDX_ROOK) = rook_effect(ksq, occupied);
+            *st.check_squares.get_unchecked_mut(CS_IDX_ROOK) = rook_bb;
             *st.check_squares.get_unchecked_mut(CS_IDX_GOLD) = gold_bb;
             *st.check_squares.get_unchecked_mut(CS_IDX_HORSE) = horse_effect(ksq, occupied);
             *st.check_squares.get_unchecked_mut(CS_IDX_DRAGON) = dragon_effect(ksq, occupied);
@@ -1384,11 +1387,7 @@ impl Position {
                     continue;
                 }
 
-                let (blockers, pinners) =
-                    self.compute_blockers_and_pinners(c, occ_after, Bitboard::EMPTY);
-                let st = self.cur_state_mut();
-                st.blockers_for_king[c.index()] = blockers;
-                st.pinners[c.index()] = pinners;
+                self.compute_blockers_and_pinners(c, occ_after, Bitboard::EMPTY);
             }
         }
 
@@ -2006,8 +2005,50 @@ impl Default for Position {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bitboard::lance_effect;
     use crate::position::state::CHECK_SQUARES_SIZE;
     use crate::types::{EnteringKingRule, File, Rank};
+
+    fn reference_blockers_and_pinners(
+        pos: &Position,
+        king_color: Color,
+        occupied: Bitboard,
+        enemy_removed: Bitboard,
+    ) -> (Bitboard, Bitboard) {
+        let ksq = pos.king_square[king_color.index()];
+        let enemy = !king_color;
+
+        let lance_bb = pos.pieces(enemy, PieceType::Lance) & !enemy_removed;
+        // 事前計算済みのbishop_horse_bb/rook_dragon_bbを使用
+        let bishop_bb = (pos.bishop_horse_bb & pos.by_color[enemy.index()]) & !enemy_removed;
+        let rook_bb = (pos.rook_dragon_bb & pos.by_color[enemy.index()]) & !enemy_removed;
+
+        let snipers = (lance_effect(king_color, ksq, Bitboard::EMPTY) & lance_bb)
+            | (bishop_effect(ksq, Bitboard::EMPTY) & bishop_bb)
+            | (rook_effect(ksq, Bitboard::EMPTY) & rook_bb);
+
+        let mut blockers = Bitboard::EMPTY;
+        let mut pinners = Bitboard::EMPTY;
+        // sniper自身をoccupiedから除外して、一直線上に複数sniperがある場合
+        // （例: 王-歩-飛-飛）でも遠い方のsniperのblocker/pinnerを正しく認識する
+        let occ_without_snipers = occupied & !snipers;
+        for sniper_sq in snipers.iter() {
+            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occ_without_snipers;
+            if between.is_empty() || between.more_than_one() {
+                continue;
+            }
+
+            // blockerが自駒のときのみpin対象
+            if (between & pos.pieces_c(enemy)).is_empty() {
+                blockers |= between;
+                pinners.set(sniper_sq);
+            } else {
+                blockers |= between;
+            }
+        }
+
+        (blockers, pinners)
+    }
 
     #[test]
     fn test_position_new() {
@@ -2054,7 +2095,7 @@ mod tests {
         pos.update_check_squares();
 
         let prev_blockers = pos.blockers_for_king(Color::Black);
-        let prev_pinners = pos.cur_state().pinners[Color::White.index()];
+        let prev_pinners = pos.cur_state().pinners[Color::Black.index()];
 
         // 玉筋とは無関係の桂を動かしてもblockers/pinnersは変わらない
         // 先手番で先手の桂を動かす（後手玉1一には王手にならない）
@@ -2062,7 +2103,7 @@ mod tests {
         let gives_check = pos.gives_check(mv_offline);
         pos.do_move(mv_offline, gives_check);
         assert_eq!(pos.blockers_for_king(Color::Black), prev_blockers);
-        assert_eq!(pos.cur_state().pinners[Color::White.index()], prev_pinners);
+        assert_eq!(pos.cur_state().pinners[Color::Black.index()], prev_pinners);
 
         // 金を筋から外すとblockers/pinnersが更新される（再計算と一致）
         // 手番を戻して先手が金を動かす（王手ではない）
@@ -2072,9 +2113,9 @@ mod tests {
         let gives_check = pos.gives_check(mv_unblock);
         pos.do_move(mv_unblock, gives_check);
         let (blockers_full, pinners_full) =
-            pos.compute_blockers_and_pinners(Color::Black, pos.occupied(), Bitboard::EMPTY);
+            reference_blockers_and_pinners(&pos, Color::Black, pos.occupied(), Bitboard::EMPTY);
         assert_eq!(pos.blockers_for_king(Color::Black), blockers_full);
-        assert_eq!(pos.cur_state().pinners[Color::White.index()], pinners_full);
+        assert_eq!(pos.cur_state().pinners[Color::Black.index()], pinners_full);
 
         // 捕獲で遮断駒を除去した場合の開き王手も検出される
         // 先手の飛車 1一, 後手玉 1九, 先手金 1七（遮断駒）, 後手歩 2七 を1七の金で取って開き王手になるケース
@@ -2134,9 +2175,9 @@ mod tests {
         assert!(!gives_check, "King move should not give check");
         pos.do_move(king_move, gives_check);
         let (blockers_full, pinners_full) =
-            pos.compute_blockers_and_pinners(Color::Black, pos.occupied(), Bitboard::EMPTY);
+            reference_blockers_and_pinners(&pos, Color::Black, pos.occupied(), Bitboard::EMPTY);
         assert_eq!(pos.blockers_for_king(Color::Black), blockers_full);
-        assert_eq!(pos.cur_state().pinners[Color::White.index()], pinners_full);
+        assert_eq!(pos.cur_state().pinners[Color::Black.index()], pinners_full);
     }
 
     #[test]
@@ -3637,6 +3678,52 @@ mod tests {
             "手番でない側の玉に王手がかかっている: {}",
             playout.describe()
         );
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_reference_check_info(pos: &Position) {
+        for color in [Color::Black, Color::White] {
+            let (blockers, pinners) =
+                reference_blockers_and_pinners(pos, color, pos.occupied(), Bitboard::EMPTY);
+            debug_assert_eq!(pos.cur_state().blockers_for_king[color.index()], blockers);
+            debug_assert_eq!(pos.cur_state().pinners[color.index()], pinners);
+        }
+        let them = !pos.side_to_move();
+        debug_assert_eq!(
+            pos.cur_state().check_squares[CS_IDX_LANCE],
+            lance_effect(them, pos.king_square(them), pos.occupied())
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn random_playouts_check_info_matches_reference() {
+        use crate::position::playout_test_support::RandomPlayout;
+
+        for index in 0..60 {
+            let mut playout = RandomPlayout::new(0xC4EC_1F00, index);
+            assert_reference_check_info(&playout.pos);
+            for _ in 0..300 {
+                if playout.step().is_none() {
+                    break;
+                }
+                assert_reference_check_info(&playout.pos);
+                let mut fresh = Position::new();
+                fresh.set_sfen(&playout.pos.to_sfen()).unwrap();
+                assert_reference_check_info(&fresh);
+                if !playout.pos.in_check() {
+                    playout.pos.do_null_move();
+                    assert_reference_check_info(&playout.pos);
+                    playout.pos.undo_null_move();
+                    assert_reference_check_info(&playout.pos);
+                }
+            }
+            let moves = playout.moves().to_vec();
+            for &mv in moves.iter().rev() {
+                playout.pos.undo_move(mv);
+                assert_reference_check_info(&playout.pos);
+            }
+        }
     }
 
     /// ランダムプレイアウトで到達した全局面（最終手の後も含む）で不変条件を確認し、

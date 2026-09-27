@@ -6,9 +6,7 @@ pub mod helpers;
 pub mod move_mate;
 pub mod tables;
 
-use crate::bitboard::{
-    Bitboard, RANK_BB, bishop_effect, king_effect, lance_effect, line_bb, rook_effect,
-};
+use crate::bitboard::{BISHOP_STEP, Bitboard, RANK_BB, ROOK_STEP, king_effect, line_bb};
 use crate::position::Position;
 use crate::types::{Color, Move, Square};
 
@@ -35,19 +33,19 @@ pub fn aligned(s1: Square, s2: Square, s3: Square) -> bool {
 /// 盤上の駒を考慮しない飛車の利き
 #[inline]
 pub fn rook_step_effect(sq: Square) -> Bitboard {
-    rook_effect(sq, Bitboard::EMPTY)
+    ROOK_STEP[sq.index()]
 }
 
 /// 盤上の駒を考慮しない角の利き
 #[inline]
 pub fn bishop_step_effect(sq: Square) -> Bitboard {
-    bishop_effect(sq, Bitboard::EMPTY)
+    BISHOP_STEP[sq.index()]
 }
 
 /// 盤上の駒を考慮しない香の利き
 #[inline]
 pub fn lance_step_effect(us: Color, sq: Square) -> Bitboard {
-    lance_effect(us, sq, Bitboard::EMPTY)
+    crate::bitboard::lance_step_effect(us, sq)
 }
 
 /// 斜め1ステップの利き

@@ -11,6 +11,7 @@ mod bitboard256;
 mod check_candidate;
 mod core;
 mod sliders;
+mod step_effects;
 mod tables;
 mod utils;
 
@@ -19,6 +20,7 @@ pub use check_candidate::check_candidate_bb;
 pub use core::Bitboard;
 pub use core::BitboardIter;
 pub use sliders::*;
+pub use step_effects::{BISHOP_STEP, ROOK_STEP};
 pub use tables::*;
 pub use utils::*;
 
