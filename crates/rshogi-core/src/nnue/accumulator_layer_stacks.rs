@@ -11,6 +11,114 @@ use super::constants::MAX_LAYER_STACK_BUCKETS;
 use super::piece_list::PieceNumber;
 use crate::types::{Color, MAX_PLY, Square};
 
+/// 異なる駒スロットを下位から順に表すビットマスク。
+#[inline]
+fn piece_list_diff_mask(
+    cached: &[BonaPiece; PieceNumber::NB],
+    current: &[BonaPiece; PieceNumber::NB],
+) -> u64 {
+    const { assert!(PieceNumber::NB == 40) };
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512bw"))]
+    {
+        // SAFETY: BonaPiece は repr(transparent) の u16 で、両配列は40要素ある。
+        // 先頭32要素と末尾8要素だけを非整列loadで読み、配列外にはアクセスしない。
+        // 命令に必要なAVX-512BW/VLは各cfgで保証する。
+        unsafe {
+            use std::arch::x86_64::*;
+            let lo = _mm512_cmpneq_epi16_mask(
+                _mm512_loadu_si512(cached.as_ptr().cast()),
+                _mm512_loadu_si512(current.as_ptr().cast()),
+            );
+            let cached_hi = _mm_loadu_si128(cached.as_ptr().add(32).cast());
+            let current_hi = _mm_loadu_si128(current.as_ptr().add(32).cast());
+            #[cfg(target_feature = "avx512vl")]
+            let hi = _mm_cmpneq_epi16_mask(cached_hi, current_hi);
+            #[cfg(not(target_feature = "avx512vl"))]
+            let hi = {
+                let equal = _mm_cmpeq_epi16(cached_hi, current_hi);
+                !(_mm_movemask_epi8(_mm_packs_epi16(equal, equal)) as u8)
+            };
+            u64::from(lo) | (u64::from(hi) << 32)
+        }
+    }
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        not(target_feature = "avx512bw")
+    ))]
+    {
+        // SAFETY: cfg が AVX2 を保証し、repr(transparent) の u16 配列を
+        // 16 + 16 + 8 要素ずつ非整列loadする。全loadが40要素の範囲内に収まる。
+        unsafe {
+            use std::arch::x86_64::*;
+            let lo = _mm256_cmpeq_epi16(
+                _mm256_loadu_si256(cached.as_ptr().cast()),
+                _mm256_loadu_si256(current.as_ptr().cast()),
+            );
+            let mid = _mm256_cmpeq_epi16(
+                _mm256_loadu_si256(cached.as_ptr().add(16).cast()),
+                _mm256_loadu_si256(current.as_ptr().add(16).cast()),
+            );
+            // pack後の128-bit lane順を戻し、1スロットにつき1bitにする。
+            let packed = _mm256_permute4x64_epi64::<0xd8>(_mm256_packs_epi16(lo, mid));
+            let lo_mask = !(_mm256_movemask_epi8(packed) as u32);
+            let hi = _mm_cmpeq_epi16(
+                _mm_loadu_si128(cached.as_ptr().add(32).cast()),
+                _mm_loadu_si128(current.as_ptr().add(32).cast()),
+            );
+            let hi = _mm_movemask_epi8(_mm_packs_epi16(hi, hi)) as u8;
+            u64::from(lo_mask) | (u64::from(!hi) << 32)
+        }
+    }
+    #[cfg(not(all(
+        target_arch = "x86_64",
+        any(target_feature = "avx2", target_feature = "avx512bw")
+    )))]
+    {
+        cached
+            .iter()
+            .zip(current)
+            .enumerate()
+            .fold(0, |mask, (slot, (old, new))| mask | (u64::from(old != new) << slot))
+    }
+}
+
+/// 差分スロットを昇順に列挙し、ZEROを除いた特徴量indexを集める。
+#[inline]
+fn collect_piece_list_diff<FI: Fn(BonaPiece) -> usize>(
+    cached: &[BonaPiece; PieceNumber::NB],
+    current: &[BonaPiece; PieceNumber::NB],
+    idx_fn: FI,
+) -> (IndexList<{ PieceNumber::NB }>, IndexList<{ PieceNumber::NB }>) {
+    let mut removed = [0; PieceNumber::NB];
+    let mut added = [0; PieceNumber::NB];
+    let mut removed_len = 0;
+    let mut added_len = 0;
+    let mut mask = piece_list_diff_mask(cached, current);
+    while mask != 0 {
+        let slot = mask.trailing_zeros() as usize;
+        mask &= mask - 1;
+        let cached_bp = cached[slot];
+        let current_bp = current[slot];
+        if cached_bp != BonaPiece::ZERO {
+            let index = idx_fn(cached_bp);
+            debug_assert!(u32::try_from(index).is_ok());
+            removed[removed_len] = index as u32;
+            removed_len += 1;
+        }
+        if current_bp != BonaPiece::ZERO {
+            let index = idx_fn(current_bp);
+            debug_assert!(u32::try_from(index).is_ok());
+            added[added_len] = index as u32;
+            added_len += 1;
+        }
+    }
+    (
+        IndexList::from_array(removed, removed_len),
+        IndexList::from_array(added, added_len),
+    )
+}
+
 /// LayerStacks用アキュムレータ（L1次元）
 #[repr(C, align(64))]
 #[derive(Clone)]
@@ -224,19 +332,7 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
             // entry を作業領域にすることで、cache hit 時の L1 要素全量コピーを
             // 最後の entry→accumulation 1回だけにする。差分indexはlistへ集めて
             // 後段の apply_fn でtile一括適用する。
-            for (cached_bp, &current_bp) in entry.piece_list.iter().copied().zip(piece_list.iter())
-            {
-                if cached_bp != current_bp {
-                    if cached_bp != BonaPiece::ZERO {
-                        let pushed = removed.push(idx_fn(cached_bp));
-                        debug_assert!(pushed);
-                    }
-                    if current_bp != BonaPiece::ZERO {
-                        let pushed = added.push(idx_fn(current_bp));
-                        debug_assert!(pushed);
-                    }
-                }
-            }
+            (removed, added) = collect_piece_list_diff(&entry.piece_list, piece_list, &idx_fn);
             crate::nnue::stats::count_refresh_diff!(removed.len() + added.len());
         } else {
             crate::nnue::stats::count_cache_miss!();
@@ -316,21 +412,23 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
             *psqt_acc = entry.psqt_accumulation;
 
             let mut diff_count = 0usize;
-            for (cached_bp, &current_bp) in entry.piece_list.iter().copied().zip(piece_list.iter())
-            {
-                if cached_bp != current_bp {
-                    if cached_bp != BonaPiece::ZERO {
-                        let idx = idx_fn(cached_bp);
-                        sub_fn(accumulation, idx);
-                        sub_psqt_fn(psqt_acc, idx);
-                        diff_count += 1;
-                    }
-                    if current_bp != BonaPiece::ZERO {
-                        let idx = idx_fn(current_bp);
-                        add_fn(accumulation, idx);
-                        add_psqt_fn(psqt_acc, idx);
-                        diff_count += 1;
-                    }
+            let mut mask = piece_list_diff_mask(&entry.piece_list, piece_list);
+            while mask != 0 {
+                let slot = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                let cached_bp = entry.piece_list[slot];
+                let current_bp = piece_list[slot];
+                if cached_bp != BonaPiece::ZERO {
+                    let idx = idx_fn(cached_bp);
+                    sub_fn(accumulation, idx);
+                    sub_psqt_fn(psqt_acc, idx);
+                    diff_count += 1;
+                }
+                if current_bp != BonaPiece::ZERO {
+                    let idx = idx_fn(current_bp);
+                    add_fn(accumulation, idx);
+                    add_psqt_fn(psqt_acc, idx);
+                    diff_count += 1;
                 }
             }
             crate::nnue::stats::count_refresh_diff!(diff_count);
@@ -892,6 +990,186 @@ impl LayerStacksAccCache {
 mod tests {
     use super::*;
     use crate::nnue::constants::NNUE_PYTORCH_L1;
+    use rand::{RngCore, SeedableRng};
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    fn assert_diff_matches_scalar(
+        cached: &[BonaPiece; PieceNumber::NB],
+        current: &[BonaPiece; PieceNumber::NB],
+        idx_fn: impl Fn(BonaPiece) -> usize,
+    ) {
+        let mut expected_mask = 0;
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+        for (slot, (&old, &new)) in cached.iter().zip(current).enumerate() {
+            if old != new {
+                expected_mask |= 1 << slot;
+                if old != BonaPiece::ZERO {
+                    removed.push(idx_fn(old));
+                }
+                if new != BonaPiece::ZERO {
+                    added.push(idx_fn(new));
+                }
+            }
+        }
+        assert_eq!(piece_list_diff_mask(cached, current), expected_mask);
+        let (actual_removed, actual_added) = collect_piece_list_diff(cached, current, idx_fn);
+        assert_eq!(actual_removed.iter().collect::<Vec<_>>(), removed);
+        assert_eq!(actual_added.iter().collect::<Vec<_>>(), added);
+    }
+
+    #[test]
+    fn finny_diff_matches_scalar_all_slots_and_random_states() {
+        let empty = [BonaPiece::ZERO; PieceNumber::NB];
+        let index = |bp: BonaPiece| usize::from(bp.0) * 17 + 3;
+        assert_diff_matches_scalar(&empty, &empty, index);
+        for slot in 0..PieceNumber::NB {
+            // u16の上位byteだけが異なる場合も比較対象にする。
+            for value in [1, 256, u16::MAX] {
+                let mut changed = empty;
+                changed[slot] = BonaPiece(value);
+                assert_diff_matches_scalar(&empty, &changed, index);
+                assert_diff_matches_scalar(&changed, &empty, index);
+            }
+        }
+        let full = [BonaPiece(u16::MAX); PieceNumber::NB];
+        assert_diff_matches_scalar(&empty, &full, index);
+        assert_diff_matches_scalar(&full, &empty, index);
+        assert_diff_matches_scalar(&full, &full, index);
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x91f1_0040);
+        for _ in 0..4096 {
+            let cached = std::array::from_fn(|_| BonaPiece(rng.next_u32() as u16));
+            let current = std::array::from_fn(|slot| match rng.next_u32() % 4 {
+                0 => BonaPiece::ZERO,
+                1 => BonaPiece(rng.next_u32() as u16),
+                _ => cached[slot],
+            });
+            assert_diff_matches_scalar(&cached, &current, index);
+        }
+    }
+
+    #[test]
+    fn finny_diff_matches_scalar_after_position_changes() {
+        use crate::movegen::{MoveList, generate_legal};
+        use crate::nnue::ls_feature_spec::{HalfKaHmMergedSpec, HalfKpSpec, LsFeatureSpec};
+        use crate::position::{Position, SFEN_HIRATE};
+
+        fn check<FT: LsFeatureSpec>() {
+            let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xf177_0040);
+            let mut cache = AccumulatorCacheLayerStacks::<32>::new();
+            #[cfg(feature = "nnue-psqt")]
+            let mut psqt_cache = AccumulatorCacheLayerStacks::<32>::new();
+            let mut pos = Position::new();
+            // キャッシュは残したまま、平手と駒の少ない局面を交互に設定する。
+            for sfen in [SFEN_HIRATE, "4k4/9/9/9/9/9/9/9/4K4 b R2Pbr 1", SFEN_HIRATE] {
+                pos.set_sfen(sfen).unwrap();
+                for _ in 0..128 {
+                    for perspective in [Color::Black, Color::White] {
+                        let king = pos.king_square(perspective);
+                        let mut current = if perspective == Color::Black {
+                            *pos.piece_list().piece_list_fb()
+                        } else {
+                            *pos.piece_list().piece_list_fw()
+                        };
+                        if !FT::INCLUDE_KING_IN_PIECE_LIST {
+                            current[PieceNumber::KING as usize..].fill(BonaPiece::ZERO);
+                        }
+                        let idx_fn = |bp| FT::feature_index(bp, perspective, king);
+                        let entry = &cache.entries[king.raw() as usize][perspective as usize];
+                        assert_diff_matches_scalar(&entry.piece_list, &current, idx_fn);
+                        let biases = [i16::MAX - 7; 32];
+                        let weight = |idx: usize, lane: usize| {
+                            (idx.wrapping_mul(977).wrapping_add(lane * 719)) as i16
+                        };
+                        let mut expected = biases;
+                        for bp in current.iter().copied().filter(|bp| *bp != BonaPiece::ZERO) {
+                            for (lane, value) in expected.iter_mut().enumerate() {
+                                *value = value.wrapping_add(weight(idx_fn(bp), lane));
+                            }
+                        }
+                        // 同じ局面を再度公開し、空差分でも出力が更新されることを確認する。
+                        for _ in 0..2 {
+                            let mut actual = [0; 32];
+                            cache.refresh_or_cache(
+                                king,
+                                perspective,
+                                &current,
+                                &biases,
+                                &mut actual,
+                                idx_fn,
+                                |acc, removed, added| {
+                                    for (lane, value) in acc.iter_mut().enumerate() {
+                                        for idx in removed.iter() {
+                                            *value = value.wrapping_sub(weight(idx, lane));
+                                        }
+                                        for idx in added.iter() {
+                                            *value = value.wrapping_add(weight(idx, lane));
+                                        }
+                                    }
+                                },
+                            );
+                            assert_eq!(actual, expected);
+                            #[cfg(feature = "nnue-psqt")]
+                            {
+                                let psqt_biases = [i32::MAX - 11; MAX_LAYER_STACK_BUCKETS];
+                                let mut psqt = [0; MAX_LAYER_STACK_BUCKETS];
+                                psqt_cache.refresh_or_cache_with_psqt(
+                                    king,
+                                    perspective,
+                                    &current,
+                                    &biases,
+                                    &psqt_biases,
+                                    &mut actual,
+                                    &mut psqt,
+                                    idx_fn,
+                                    |acc, idx| {
+                                        for (lane, value) in acc.iter_mut().enumerate() {
+                                            *value = value.wrapping_add(weight(idx, lane));
+                                        }
+                                    },
+                                    |acc, idx| {
+                                        for (lane, value) in acc.iter_mut().enumerate() {
+                                            *value = value.wrapping_sub(weight(idx, lane));
+                                        }
+                                    },
+                                    |acc, idx| {
+                                        for value in acc {
+                                            *value = value.wrapping_add(idx as i32);
+                                        }
+                                    },
+                                    |acc, idx| {
+                                        for value in acc {
+                                            *value = value.wrapping_sub(idx as i32);
+                                        }
+                                    },
+                                );
+                                let mut expected_psqt = psqt_biases;
+                                for bp in
+                                    current.iter().copied().filter(|bp| *bp != BonaPiece::ZERO)
+                                {
+                                    for value in &mut expected_psqt {
+                                        *value = value.wrapping_add(idx_fn(bp) as i32);
+                                    }
+                                }
+                                assert_eq!(actual, expected);
+                                assert_eq!(psqt, expected_psqt);
+                            }
+                        }
+                    }
+                    let mut moves = MoveList::new();
+                    generate_legal(&pos, &mut moves);
+                    if moves.is_empty() {
+                        break;
+                    }
+                    let mv = *moves.iter().nth(rng.next_u32() as usize % moves.len()).unwrap();
+                    let gives_check = pos.gives_check(mv);
+                    pos.do_move(mv, gives_check);
+                }
+            }
+        }
+        check::<HalfKpSpec>();
+        check::<HalfKaHmMergedSpec>();
+    }
 
     /// テスト用の具体的な L1 サイズ
     const TEST_L1: usize = NNUE_PYTORCH_L1; // 1536
