@@ -13,11 +13,13 @@
 //! - [`BookOptions`]: USI オプションのミラー。
 //! - [`BookRng`] / [`DefaultBookRng`]: 抽選用乱数源(テストで固定注入可能)。
 
+mod explore;
 mod flip;
 mod probe;
 mod reader;
 
-pub use probe::{BookOptions, BookProbeResult, BookRng, DefaultBookRng, probe};
+pub use explore::BookExploreList;
+pub use probe::{BookOptions, BookProbeResult, BookRng, DefaultBookRng, probe, probe_with_explore};
 pub use reader::Book;
 
 pub use flip::{flip_usi_move, flipped_key};
