@@ -668,7 +668,7 @@ impl Position {
     /// 個別の king_effect / horse近接 / dragon近接 を不要にする。
     /// また rook_effect を再利用して lance_effect の個別スライド計算を省略。
     #[inline(never)]
-    pub fn attackers_to_occ_parts(&self, lo: u64, hi: u64, sq: Square) -> Bitboard {
+    fn attackers_to_occ_parts(&self, lo: u64, hi: u64, sq: Square) -> Bitboard {
         let occupied = Bitboard::from_u64_pair(lo, hi);
         let silver_hdk = self.pieces_pt(PieceType::Silver) | self.hdk_bb;
         let golds_hdk = self.golds_bb | self.hdk_bb;
@@ -2091,39 +2091,49 @@ mod tests {
 
     // 実際の駒配置と異なる占有も渡し、仮想的な移動・駒打ちでの利きを確認する。
     fn for_each_attackers_occ_case(mut check: impl FnMut(&Position, Square, Bitboard)) {
-        use crate::position::playout_test_support::RandomPlayout;
+        use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME, RandomPlayout};
         use rand::{Rng, SeedableRng};
         use rand_xoshiro::Xoshiro256PlusPlus;
 
         const SEED: u64 = 0xA77A_CCE2_50CC;
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(SEED);
+        let mut check_position = |pos: &Position| {
+            for sq_index in 0..Square::NUM {
+                let sq = Square::from_u8(sq_index as u8).unwrap();
+                let occupied = pos.occupied();
+                let random = Bitboard::new(rng.random(), rng.random()) & Bitboard::ALL;
+                let from = Square::from_u8(rng.random_range(0..81)).unwrap();
+                for occ in [
+                    Bitboard::EMPTY,
+                    Bitboard::ALL,
+                    occupied,
+                    occupied ^ Bitboard::from_square(from),
+                    occupied | Bitboard::from_square(sq),
+                    random,
+                    random & !Bitboard::from_square(sq),
+                    random | Bitboard::from_square(sq),
+                ] {
+                    check(pos, sq, occ);
+                }
+            }
+        };
         for index in 0..8 {
             let mut playout = RandomPlayout::new(SEED, index);
             for ply in 0..=128 {
                 if ply % 16 == 0 {
-                    for sq_index in 0..Square::NUM {
-                        let sq = Square::from_u8(sq_index as u8).unwrap();
-                        let occupied = playout.pos.occupied();
-                        let random = Bitboard::new(rng.random(), rng.random()) & Bitboard::ALL;
-                        let from = Square::from_u8(rng.random_range(0..81)).unwrap();
-                        for occ in [
-                            Bitboard::EMPTY,
-                            Bitboard::ALL,
-                            occupied,
-                            occupied ^ Bitboard::from_square(from),
-                            occupied | Bitboard::from_square(sq),
-                            random,
-                            random & !Bitboard::from_square(sq),
-                            random | Bitboard::from_square(sq),
-                        ] {
-                            check(&playout.pos, sq, occ);
-                        }
-                    }
+                    check_position(&playout.pos);
                 }
                 if ply < 128 && playout.step().is_none() {
                     break;
                 }
             }
+        }
+
+        // と金・馬・龍の利きはランダムプレイアウトでの出現に依存せず検証する。
+        for sfen in [PERFT_MATSURI, PERFT_MIDGAME] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            check_position(&pos);
         }
     }
 
