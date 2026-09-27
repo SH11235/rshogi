@@ -5,6 +5,8 @@ use crate::types::{Color, Square};
 use super::utils::msb64;
 use super::{Bitboard, Bitboard256, FILE_BB, RANK_BB};
 
+const _: () = assert!(std::mem::align_of::<SliderTable>() >= 32);
+
 /// 8方向の単一レイ（やねうら王のEffect8::Directに対応）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direct {
