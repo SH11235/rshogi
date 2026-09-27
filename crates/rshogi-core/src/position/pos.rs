@@ -41,6 +41,43 @@ pub(super) fn is_minor_piece(pc: Piece) -> bool {
     )
 }
 
+/// 各合成Bitboardに属する駒種では全ビット1、それ以外では0となるマスク。
+#[derive(Clone, Copy)]
+struct CompositeMasks {
+    golds: Bitboard,
+    bishop_horse: Bitboard,
+    rook_dragon: Bitboard,
+    hdk: Bitboard,
+}
+
+const COMPOSITE_MASKS: [CompositeMasks; 16] = {
+    const ZERO: CompositeMasks = CompositeMasks {
+        golds: Bitboard::EMPTY,
+        bishop_horse: Bitboard::EMPTY,
+        rook_dragon: Bitboard::EMPTY,
+        hdk: Bitboard::EMPTY,
+    };
+    const ONES: Bitboard = Bitboard::new(u64::MAX, u64::MAX);
+    let mut masks = [ZERO; 16];
+    let mut i = 1;
+    while i <= PieceType::NUM {
+        if let Some(pt) = PieceType::from_u8(i as u8) {
+            if Position::is_gold_like(pt) {
+                masks[i].golds = ONES;
+            } else if Position::is_bishop_like(pt) {
+                masks[i].bishop_horse = ONES;
+            } else if Position::is_rook_like(pt) {
+                masks[i].rook_dragon = ONES;
+            }
+            if Position::is_hdk(pt) {
+                masks[i].hdk = ONES;
+            }
+        }
+        i += 1;
+    }
+    masks
+};
+
 /// 将棋の局面
 #[derive(Clone)]
 pub struct Position {
@@ -736,58 +773,67 @@ impl Position {
         self.board_effects_dirty = true;
     }
 
-    fn put_piece_internal(&mut self, pc: Piece, sq: Square) {
-        debug_assert!(self.board[sq].is_none());
+    /// 差分を128bitまとめて反映し、片側のu64だけを書き換えない。
+    #[inline(always)]
+    fn xor_bb(dst: &mut Bitboard, mask: Bitboard) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::{_mm_load_si128, _mm_store_si128, _mm_xor_si128};
+
+            // SAFETY: x86_64ではSSE2が必須。Bitboardはrepr(C, align(16))の16バイトで、
+            // 両ポインタは16バイト境界にあり、全域が初期化済み。dstは排他的に借用されている。
+            unsafe {
+                let ptr = std::ptr::from_mut(dst).cast();
+                let value = _mm_load_si128(ptr);
+                let delta = _mm_load_si128(std::ptr::from_ref(&mask).cast());
+                _mm_store_si128(ptr, _mm_xor_si128(value, delta));
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            *dst ^= mask;
+        }
+    }
+
+    /// 配置・除去で共通の差分。対象升のビットは配置前に0、除去前に1であること。
+    #[inline(always)]
+    fn toggle_piece_bitboards(&mut self, pc: Piece, sq: Square) {
         let pt = pc.piece_type();
-
-        self.board[sq] = pc;
+        let mask = crate::bitboard::SQUARE_BB[sq];
         debug_assert!((pt as usize) < self.by_type.len());
-        // SAFETY: PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
-        unsafe { self.by_type.get_unchecked_mut(pt as usize) }.set(sq);
-        self.by_color[pc.color()].set(sq);
+        // SAFETY: PieceTypeは1..=14、by_typeの長さは15なので範囲内。
+        Self::xor_bb(unsafe { self.by_type.get_unchecked_mut(pt as usize) }, mask);
+        Self::xor_bb(&mut self.by_color[pc.color()], mask);
 
-        // 合成Bitboardの差分更新
-        if Self::is_gold_like(pt) {
-            self.golds_bb.set(sq);
-        } else if Self::is_bishop_like(pt) {
-            self.bishop_horse_bb.set(sq);
-        } else if Self::is_rook_like(pt) {
-            self.rook_dragon_bb.set(sq);
-        }
-        if Self::is_hdk(pt) {
-            self.hdk_bb.set(sq);
-        }
+        let masks = &COMPOSITE_MASKS[pt as usize];
+        Self::xor_bb(&mut self.golds_bb, mask & masks.golds);
+        Self::xor_bb(&mut self.bishop_horse_bb, mask & masks.bishop_horse);
+        Self::xor_bb(&mut self.rook_dragon_bb, mask & masks.rook_dragon);
+        Self::xor_bb(&mut self.hdk_bb, mask & masks.hdk);
+    }
+
+    #[inline(always)]
+    fn put_piece_internal(&mut self, pc: Piece, sq: Square) {
+        debug_assert!(pc.is_some());
+        debug_assert!(self.board[sq].is_none());
+        self.board[sq] = pc;
+        self.toggle_piece_bitboards(pc, sq);
     }
 
     /// 盤面から駒を取り除く
     #[cfg(test)]
     fn remove_piece(&mut self, sq: Square) {
-        self.remove_piece_internal(sq);
+        self.remove_piece_internal(self.board[sq], sq);
         self.board_effects_dirty = true;
     }
 
-    fn remove_piece_internal(&mut self, sq: Square) {
-        let pc = self.board[sq];
+    #[inline(always)]
+    fn remove_piece_internal(&mut self, pc: Piece, sq: Square) {
         debug_assert!(pc.is_some());
-        let pt = pc.piece_type();
+        debug_assert_eq!(self.board[sq], pc);
 
         self.board[sq] = Piece::NONE;
-        debug_assert!((pt as usize) < self.by_type.len());
-        // SAFETY: PieceType は 0..=14、by_type の長さは PieceType::NUM+1=15。
-        unsafe { self.by_type.get_unchecked_mut(pt as usize) }.clear(sq);
-        self.by_color[pc.color()].clear(sq);
-
-        // 合成Bitboardの差分更新
-        if Self::is_gold_like(pt) {
-            self.golds_bb.clear(sq);
-        } else if Self::is_bishop_like(pt) {
-            self.bishop_horse_bb.clear(sq);
-        } else if Self::is_rook_like(pt) {
-            self.rook_dragon_bb.clear(sq);
-        }
-        if Self::is_hdk(pt) {
-            self.hdk_bb.clear(sq);
-        }
+        self.toggle_piece_bitboards(pc, sq);
     }
 
     /// pin駒とpinしている駒を更新
@@ -1153,7 +1199,7 @@ impl Position {
                 let piece_no_cap = self.piece_list.piece_no_of_board(to);
                 let old_bp_cap = self.piece_list.bona_piece(piece_no_cap);
 
-                self.remove_piece_internal(to);
+                self.remove_piece_internal(captured, to);
                 let st = self.cur_state_mut();
                 st.board_key ^= zobrist_psq(captured, to);
                 Self::xor_partial_keys(st, captured, to);
@@ -1196,7 +1242,7 @@ impl Position {
             self.cur_state_mut().captured_piece = captured;
 
             // 駒を移動
-            self.remove_piece_internal(from);
+            self.remove_piece_internal(pc, from);
             let st = self.cur_state_mut();
             st.board_key ^= zobrist_psq(pc, from);
             Self::xor_partial_keys(st, pc, from);
@@ -1292,7 +1338,7 @@ impl Position {
         self.cur_state_mut().checkers = checkers;
 
         // 7. 千日手判定に使う手駒スナップショットを保存
-        let hand_snapshot = self.hand;
+        let hand_snapshot = self.hand[them.index()];
         let st = self.cur_state_mut();
         st.hand_snapshot = hand_snapshot;
         st.material_value = Value::new(material_value);
@@ -1384,7 +1430,7 @@ impl Position {
             let piece_no = self.piece_list.piece_no_of_board(to);
 
             // 盤上から除去
-            self.remove_piece_internal(to);
+            self.remove_piece_internal(moved_pc, to);
             // 手駒に戻す
             self.hand[us] = self.hand[us].add(pt);
 
@@ -1427,7 +1473,7 @@ impl Position {
                 let cap_board_bp = ExtBonaPiece::from_board(captured, to);
 
                 // 駒を元の位置に戻す
-                self.remove_piece_internal(to);
+                self.remove_piece_internal(moved_pc, to);
                 self.put_piece_internal(captured, to);
                 // 手駒から除去
                 self.hand[us] = self.hand[us].sub(cap_pt);
@@ -1458,7 +1504,7 @@ impl Position {
                 }
             } else {
                 // 駒を元の位置に戻す
-                self.remove_piece_internal(to);
+                self.remove_piece_internal(moved_pc, to);
                 self.put_piece_internal(original_pc, from);
 
                 // PieceList 更新
@@ -1508,7 +1554,7 @@ impl Position {
         new_state.plies_from_null = 0;
         new_state.captured_piece = Piece::NONE;
         new_state.last_move = Move::NULL;
-        new_state.hand_snapshot = self.hand;
+        new_state.hand_snapshot = self.hand[(!self.side_to_move).index()];
 
         let next_side = !self.side_to_move;
         prefetcher.prefetch(new_state.key(), next_side);
@@ -1574,7 +1620,7 @@ impl Position {
         // 5. その他の StateInfo 更新
         new_state.captured_piece = Piece::NONE;
         new_state.last_move = Move::PASS;
-        new_state.hand_snapshot = self.hand;
+        new_state.hand_snapshot = self.hand[them.index()];
         // パスは合法手なので通常の手と同様にカウントを進める（千日手検出のため）
         // ※ do_null_move（探索用）とは異なり、0リセットしない
         new_state.plies_from_null += 1;
@@ -1658,8 +1704,8 @@ impl Position {
                 //         current_idx < state_stack.len() なので範囲内。
                 let stp = unsafe { self.state_stack.get_unchecked(st_idx) };
                 if stp.board_key == board_key {
-                    let prev_hand = stp.hand_snapshot[side.index()];
-                    let cur_hand = hand_snapshot[side.index()];
+                    let prev_hand = stp.hand_snapshot;
+                    let cur_hand = hand_snapshot;
 
                     if cur_hand == prev_hand {
                         let times = stp.repetition_times + 1;
@@ -2615,6 +2661,53 @@ mod tests {
         );
     }
 
+    /// 全駒種・全升で、他の升を保ったまま配置と除去ができることを確認。
+    #[test]
+    fn piece_bitboard_updates_match_scalar_for_all_pieces_and_squares() {
+        for color in [Color::Black, Color::White] {
+            for id in 1..=PieceType::NUM {
+                let pt = PieceType::from_u8(id as u8).unwrap();
+                let pc = Piece::new(color, pt);
+                let mut pos = Position::new();
+                for sq in Square::all() {
+                    pos.put_piece(pc, sq);
+                }
+                for sq in Square::all() {
+                    let mut expected = Bitboard::ALL;
+                    expected.clear(sq);
+                    pos.remove_piece(sq);
+                    assert_eq!(pos.pieces_pt(pt), expected);
+                    assert_eq!(pos.pieces_c(color), expected);
+                    assert_eq!(pos.pieces_c(!color), Bitboard::EMPTY);
+                    for (actual, included) in [
+                        (
+                            pos.golds_bb,
+                            matches!(
+                                pt,
+                                PieceType::Gold
+                                    | PieceType::ProPawn
+                                    | PieceType::ProLance
+                                    | PieceType::ProKnight
+                                    | PieceType::ProSilver
+                            ),
+                        ),
+                        (pos.bishop_horse_bb, matches!(pt, PieceType::Bishop | PieceType::Horse)),
+                        (pos.rook_dragon_bb, matches!(pt, PieceType::Rook | PieceType::Dragon)),
+                        (
+                            pos.hdk_bb,
+                            matches!(pt, PieceType::Horse | PieceType::Dragon | PieceType::King),
+                        ),
+                    ] {
+                        assert_eq!(actual, if included { expected } else { Bitboard::EMPTY });
+                    }
+                    pos.put_piece(pc, sq);
+                    assert_eq!(pos.pieces_pt(pt), Bitboard::ALL);
+                    assert_eq!(pos.pieces_c(color), Bitboard::ALL);
+                }
+            }
+        }
+    }
+
     /// 合成Bitboard（golds_bb, bishop_horse_bb, rook_dragon_bb）の整合性を確認
     #[test]
     fn test_composite_bitboard_consistency() {
@@ -3258,7 +3351,7 @@ mod tests {
     /// パス権はキーに混ざるが、このテストでは無効（両者 0）なので差は出ない。
     #[derive(Debug, PartialEq)]
     struct DerivedState {
-        hand_snapshot: [Hand; Color::NUM],
+        hand_snapshot: Hand,
         sfen: String,
         key: u64,
         board_key: u64,
@@ -3278,6 +3371,62 @@ mod tests {
         pinners: [Bitboard; Color::NUM],
         check_squares: [Bitboard; CHECK_SQUARES_SIZE],
         material_value: Value,
+    }
+
+    #[test]
+    fn hand_snapshot_tracks_side_to_move_across_all_move_paths() {
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/4p4/4P4/9/9/9/9/4K4 b S2s 1").unwrap();
+        pos.set_pass_rights_enabled(true);
+        pos.set_pass_rights_pair(2, 2);
+        let initial = RestoredState::of(&pos);
+        for text in ["5d5c+", "S*4d", "P*4e", "5a6a"] {
+            assert_eq!(pos.state().hand_snapshot, pos.hand(pos.side_to_move()));
+            let before = RestoredState::of(&pos);
+            pos.do_null_move();
+            assert_eq!(pos.state().hand_snapshot, pos.hand(pos.side_to_move()));
+            pos.undo_null_move();
+            assert_eq!(RestoredState::of(&pos), before);
+            pos.do_pass_move();
+            assert_eq!(pos.state().hand_snapshot, pos.hand(pos.side_to_move()));
+            pos.undo_pass_move();
+            assert_eq!(RestoredState::of(&pos), before);
+
+            let mv = Move::from_usi(text).unwrap();
+            assert!(pos.pseudo_legal(mv) && pos.is_legal(mv));
+            pos.do_move(mv, pos.gives_check(mv));
+            assert_eq!(pos.state().hand_snapshot, pos.hand(pos.side_to_move()));
+
+            let mut fresh = Position::new();
+            fresh.set_sfen(&pos.to_sfen()).unwrap();
+            assert_eq!(fresh.state().hand_snapshot, pos.state().hand_snapshot);
+            let json = Position::from_board_state_json(&pos.to_board_state_json()).unwrap();
+            assert_eq!(json.state().hand_snapshot, pos.state().hand_snapshot);
+        }
+        for text in ["5a6a", "P*4e", "S*4d", "5d5c+"] {
+            pos.undo_move(Move::from_usi(text).unwrap());
+            assert_eq!(pos.state().hand_snapshot, pos.hand(pos.side_to_move()));
+        }
+        assert_eq!(RestoredState::of(&pos), initial);
+    }
+
+    #[test]
+    fn repetition_with_asymmetric_hands_for_both_sides() {
+        for (side, cycle) in [
+            ("b", ["5i5h", "5a5b", "5h5i", "5b5a"]),
+            ("w", ["5a5b", "5i5h", "5b5a", "5h5i"]),
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(&format!("4k4/9/9/9/9/9/9/9/4K4 {side} P2p 1")).unwrap();
+            for _ in 0..3 {
+                for text in cycle {
+                    let mv = Move::from_usi(text).unwrap();
+                    pos.do_move(mv, pos.gives_check(mv));
+                }
+                assert_eq!(pos.repetition_state(16), RepetitionState::Draw);
+            }
+            assert_eq!(pos.repetition_state(0), RepetitionState::Draw);
+        }
     }
 
     impl DerivedState {
