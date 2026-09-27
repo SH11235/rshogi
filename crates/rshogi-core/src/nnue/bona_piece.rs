@@ -275,6 +275,7 @@ impl ExtBonaPiece {
         let b = HAND_BASE[owner as usize][pt as usize];
         let packed = u32::from(b.fb.0) | (u32::from(b.fw.0) << 16);
         if packed == 0 {
+            // 玉・成駒・未使用要素では ZERO を返す。
             return Self::ZERO;
         }
         // 各基点は FE_HAND_END 未満、count は u8 なので半語間の桁上がりはない。
@@ -283,8 +284,18 @@ impl ExtBonaPiece {
             fb: BonaPiece::new(packed as u16),
             fw: BonaPiece::new((packed >> 16) as u16),
         };
-        debug_assert!((bp.fb.0 as usize) < FE_HAND_END);
-        debug_assert!((bp.fw.0 as usize) < FE_HAND_END);
+        debug_assert!(
+            (bp.fb.0 as usize) < FE_HAND_END,
+            "Hand piece BonaPiece {} exceeds FE_HAND_END {}",
+            bp.fb.0,
+            FE_HAND_END
+        );
+        debug_assert!(
+            (bp.fw.0 as usize) < FE_HAND_END,
+            "Hand piece BonaPiece {} exceeds FE_HAND_END {}",
+            bp.fw.0,
+            FE_HAND_END
+        );
         bp
     }
 }
@@ -458,63 +469,6 @@ mod tests {
     use super::*;
     use crate::types::{File, Rank};
 
-    #[test]
-    fn test_hand_base_matches_reference() {
-        for owner in [Color::Black, Color::White] {
-            for pt_index in 1..=PieceType::NUM {
-                let pt = PieceType::from_u8(pt_index as u8).unwrap();
-                let max_count = match pt {
-                    PieceType::Pawn => 18,
-                    PieceType::Lance | PieceType::Knight | PieceType::Silver | PieceType::Gold => 4,
-                    PieceType::Bishop | PieceType::Rook => 2,
-                    // 手駒にならない駒種は、枚数に関係なくゼロを返す。
-                    _ => u8::MAX,
-                };
-                for count in 1..=max_count {
-                    let pair = ExtBonaPiece::from_hand(owner, pt, count);
-                    for perspective in [Color::Black, Color::White] {
-                        let expected = from_hand_piece_match(perspective, owner, pt, count);
-                        let actual = if perspective == Color::Black {
-                            pair.fb
-                        } else {
-                            pair.fw
-                        };
-                        assert_eq!(actual, expected, "{owner:?} {perspective:?} {pt:?} {count}");
-                        assert_eq!(
-                            BonaPiece::from_hand_piece(perspective, owner, pt, count),
-                            expected,
-                            "{owner:?} {perspective:?} {pt:?} {count}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_hand_zero_count() {
-        for owner in [Color::Black, Color::White] {
-            for pt_index in 1..=PieceType::NUM {
-                let pt = PieceType::from_u8(pt_index as u8).unwrap();
-                assert_eq!(ExtBonaPiece::from_hand(owner, pt, 0), ExtBonaPiece::ZERO);
-                for perspective in [Color::Black, Color::White] {
-                    assert_eq!(
-                        BonaPiece::from_hand_piece(perspective, owner, pt, 0),
-                        from_hand_piece_match(perspective, owner, pt, 0)
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_hand_base_padding() {
-        for row in HAND_BASE {
-            assert_eq!(row[0], ExtBonaPiece::ZERO);
-            assert_eq!(row[15], ExtBonaPiece::ZERO);
-        }
-    }
-
     fn from_hand_piece_match(
         perspective: Color,
         owner: Color,
@@ -595,6 +549,63 @@ mod tests {
         );
 
         bp
+    }
+
+    #[test]
+    fn test_hand_base_matches_reference() {
+        for owner in [Color::Black, Color::White] {
+            for pt_index in 1..=PieceType::NUM {
+                let pt = PieceType::from_u8(pt_index as u8).unwrap();
+                let max_count = match pt {
+                    PieceType::Pawn => 18,
+                    PieceType::Lance | PieceType::Knight | PieceType::Silver | PieceType::Gold => 4,
+                    PieceType::Bishop | PieceType::Rook => 2,
+                    // 手駒にならない駒種は、枚数に関係なくゼロを返す。
+                    _ => u8::MAX,
+                };
+                for count in 1..=max_count {
+                    let pair = ExtBonaPiece::from_hand(owner, pt, count);
+                    for perspective in [Color::Black, Color::White] {
+                        let expected = from_hand_piece_match(perspective, owner, pt, count);
+                        let actual = if perspective == Color::Black {
+                            pair.fb
+                        } else {
+                            pair.fw
+                        };
+                        assert_eq!(actual, expected, "{owner:?} {perspective:?} {pt:?} {count}");
+                        assert_eq!(
+                            BonaPiece::from_hand_piece(perspective, owner, pt, count),
+                            expected,
+                            "{owner:?} {perspective:?} {pt:?} {count}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_hand_zero_count() {
+        for owner in [Color::Black, Color::White] {
+            for pt_index in 1..=PieceType::NUM {
+                let pt = PieceType::from_u8(pt_index as u8).unwrap();
+                assert_eq!(ExtBonaPiece::from_hand(owner, pt, 0), ExtBonaPiece::ZERO);
+                for perspective in [Color::Black, Color::White] {
+                    assert_eq!(
+                        BonaPiece::from_hand_piece(perspective, owner, pt, 0),
+                        from_hand_piece_match(perspective, owner, pt, 0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_hand_base_padding() {
+        for row in HAND_BASE {
+            assert_eq!(row[0], ExtBonaPiece::ZERO);
+            assert_eq!(row[15], ExtBonaPiece::ZERO);
+        }
     }
 
     #[test]
