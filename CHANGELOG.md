@@ -31,6 +31,12 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   パス権つきの探索が必要な場合は `search-pass-rules` を指定すること。`search-no-pass-rules` は
   何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
 
+- **Bitboard256 の AVX2 経路を `target_feature` に応じた自動選択に変更**: `x86_64` で
+  `target_feature = "avx2"` が有効なら、`simd_avx2` の指定なしで AVX2 経路を使用する。
+  AVX2 対応 CPU 向けの build では `-C target-cpu=native` または `-C target-feature=+avx2` を指定すること。
+  AVX2 経路を無効にする場合は feature の指定を外すだけではなく、`-C target-feature=-avx2` を指定する。
+  `simd_avx2` は何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
+
 - **tournament / spsa の `--max-moves` を開始局面までの手数を含む総手数で判定**: これまでは開始局面から
   対局内で指した手数だけを数えていたため、手数付きの開始局面集では本番の手数制限より長く対局していた
   (例: 32 手目からの局面集と `--max-moves 512` で総 543 手まで)。開始局面の SFEN の手数欄と `moves` の
