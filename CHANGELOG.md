@@ -49,6 +49,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 - **駒の配置更新の 128bit 分岐なし化**: 配置・除去時の Bitboard 更新を、128bit 幅の XOR と
   駒種別マスクで行うようにした。探索結果は変わらない。
+- **EvalHashLargePages**: EvalHash の Large Pages 確保を要求する USI オプションを追加（既定 true）。
+  USI エンジンでは既定で TT に加えて EvalHash も Large Pages で確保を試み、権限や容量が足りない場合は
+  通常ページへフォールバックする。既定サイズの Large Pages 使用量は定常時 256 MiB から 512 MiB に増え、
+  TT の取り直し時は瞬間最大 768 MiB となる。`EvalHashLargePages=false` で EvalHash を通常ページに戻せる。
+  ライブラリとツールの EvalHash は従来どおり通常ページが既定。
 
 - **BookExploreFile**: 指定局面で、ファイルに列挙した合法な定跡手から評価値や採択回数によらず等確率で選ぶ USI オプションを追加（既定は無効）。
 

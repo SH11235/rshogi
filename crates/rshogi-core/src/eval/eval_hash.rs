@@ -21,10 +21,11 @@ pub struct EvalHash {
 
 enum EvalHashStorage {
     Allocated(Allocation),
-    Regular(Box<[EvalHashEntryAtomic]>),
+    Regular(Vec<EvalHashEntryAtomic>),
 }
 
-// SAFETY: storage が領域を単独所有し、移動後も ptr と len の指す領域は生存する。
+// SAFETY: storage が領域を単独所有する。Vec は再確保せず、as_mut_ptr 由来の ptr は
+// Vec 自体の移動後も有効。領域は EvalHash の破棄まで生存する。
 unsafe impl Send for EvalHash {}
 // SAFETY: 公開後のエントリ操作はすべて AtomicU64 を通す。共有中は領域を再確保・解放しない。
 unsafe impl Sync for EvalHash {}
@@ -185,9 +186,9 @@ impl EvalHashEntryAtomic {
 }
 
 impl EvalHash {
-    /// Large Pages を試みて評価ハッシュを作成する。
+    /// 通常ページで評価ハッシュを作成する。
     pub fn new(size_mb: usize) -> Self {
-        Self::new_with_large_pages(size_mb, true)
+        Self::new_with_large_pages(size_mb, false)
     }
 
     /// 評価ハッシュを作成する。false では通常の Vec による確保を使う。
@@ -195,9 +196,9 @@ impl EvalHash {
         let bytes = size_mb.saturating_mul(1024 * 1024);
         let entries = bytes / mem::size_of::<EvalHashEntryAtomic>();
         let size = normalize_size(entries);
-        let storage = if large_pages && size != 0 {
+        let mut storage = if large_pages && size != 0 {
             let bytes = size * mem::size_of::<EvalHashEntryAtomic>();
-            let allocation = Allocation::allocate(bytes, 2 << 20);
+            let allocation = Allocation::allocate(bytes, mem::align_of::<EvalHashEntryAtomic>());
             // SAFETY: allocation は bytes バイト以上の領域を単独所有し、まだ共有していない。
             // 全ビット 0 は AtomicU64 の有効な初期値であり、各エントリを未書込状態にする。
             // Unix の通常確保は未初期化なので、ページ種別によらずここで初期化する。
@@ -206,11 +207,11 @@ impl EvalHash {
         } else {
             let mut table = Vec::with_capacity(size);
             table.resize_with(size, EvalHashEntryAtomic::new);
-            EvalHashStorage::Regular(table.into_boxed_slice())
+            EvalHashStorage::Regular(table)
         };
-        let ptr = match &storage {
+        let ptr = match &mut storage {
             EvalHashStorage::Allocated(allocation) => allocation.ptr().cast(),
-            EvalHashStorage::Regular(table) => NonNull::from(table.as_ref()).cast(),
+            EvalHashStorage::Regular(table) => NonNull::new(table.as_mut_ptr()).unwrap(),
         };
 
         Self {
@@ -225,6 +226,7 @@ impl EvalHash {
     fn table(&self) -> &[EvalHashEntryAtomic] {
         // SAFETY: ptr は型のアラインメントを満たし、len 個の初期化済みエントリを指す。
         // 空の場合も非 null で整列済み。storage が領域を所有し、返す参照は self より長生きしない。
+        // storage 内の Vec から要素を借用・再確保しないため、保持した生ポインタは有効。
         // 共有参照からの変更はエントリ内の atomic 操作に限る。
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
@@ -342,6 +344,21 @@ fn normalize_size(entries: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_eval_hash_regular_storage_survives_move() {
+        let hash = EvalHash::new(1);
+        assert!(matches!(hash.storage, EvalHashStorage::Regular(_)));
+        hash.store(1, -42);
+        let moved = std::sync::Arc::new(hash);
+        moved.prefetch(1);
+        assert_eq!(moved.probe(1), Some(-42));
+        moved.store(2, 123);
+        assert_eq!(moved.probe(2), Some(123));
+        moved.clear();
+        assert_eq!(moved.probe(1), None);
+        assert_eq!(moved.probe(2), None);
+    }
 
     #[test]
     fn test_eval_hash_backends_fresh_random_roundtrip_clear() {

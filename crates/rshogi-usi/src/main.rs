@@ -54,7 +54,7 @@ const ENGINE_AUTHOR: &str = "sh11235";
 /// 探索スレッド用のスタックサイズ（SearchWorkerが大きいため増やす）
 const SEARCH_STACK_SIZE: usize = 64 * 1024 * 1024;
 
-/// USI へ表示する TT の page 配置。
+/// USI へ表示するハッシュ表の page 配置。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TtPageStatus {
     /// Windows の明示的な Large Pages 確保に成功
@@ -66,7 +66,7 @@ enum TtPageStatus {
 }
 
 /// 直前に表示した配置から変わったときだけ、表示する文言を返す。
-/// 起動直後の通常 page は表示しない。TT を取り直して通常 page へ戻った場合は、
+/// 起動直後の通常 page は表示しない。表を取り直して通常 page へ戻った場合は、
 /// 以前の表示が残らないよう戻ったことを知らせる。
 fn page_status_message(reported: TtPageStatus, current: TtPageStatus) -> Option<&'static str> {
     if reported == current {
@@ -190,7 +190,7 @@ impl UsiEngine {
             // EvalHash は最初の `go` 直前まで遅延確保する。
             // selfplay のように起動直後に setoption でサイズを下げるケースで、
             // 先に既定 256MB を確保してしまう無駄を避ける。
-            search: Some(Search::new_with_eval_hash(tt_size_mb, 0)),
+            search: Some(Search::new_with_eval_hash_large_pages(tt_size_mb, 0, true)),
             position: Position::new(),
             tt_size_mb,
             eval_hash_size_mb,
@@ -702,6 +702,10 @@ impl UsiEngine {
     }
 
     fn report_eval_hash_page_status(&mut self, hash: &rshogi_core::eval::EvalHash) {
+        if self.eval_hash_size_mb == 0 {
+            self.reported_eval_hash_page_status = TtPageStatus::Regular;
+            return;
+        }
         let current = if hash.uses_large_pages() {
             TtPageStatus::LargePages
         } else if hash.huge_page_hint_requested() {
@@ -2020,6 +2024,11 @@ mod tests {
                 let mut engine = UsiEngine::new();
                 assert!(engine.eval_hash_large_pages);
                 assert_eq!(engine.eval_hash_size_mb, 256);
+                engine.eval_hash_size_mb = 0;
+                engine.reported_eval_hash_page_status = TtPageStatus::LargePages;
+                engine.report_eval_hash_page_status(&rshogi_core::eval::EvalHash::new(0));
+                assert_eq!(engine.reported_eval_hash_page_status, TtPageStatus::Regular);
+                engine.eval_hash_size_mb = 256;
                 engine.cmd_setoption(&[
                     "setoption",
                     "name",

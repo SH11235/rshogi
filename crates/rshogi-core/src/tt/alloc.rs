@@ -71,6 +71,7 @@ pub(crate) struct Allocation {
 impl Allocation {
     /// 非ゼロサイズの領域を確保する。内容の初期化は呼び出し側が行う。
     pub(crate) fn allocate(size: usize, alignment: usize) -> Self {
+        assert!(size != 0, "allocation size must be nonzero");
         #[cfg(windows)]
         {
             debug_assert!(alignment.is_power_of_two(), "alignment must be power of two");
@@ -205,7 +206,7 @@ fn alloc_unix(size: usize, alignment: usize) -> Allocation {
 
     let alignment = max(alignment, page_align);
     let layout = Layout::from_size_align(size, alignment)
-        .expect("Invalid TT allocation layout")
+        .expect("Invalid allocation layout")
         .pad_to_align();
     // SAFETY: layout は from_size_align が検証済み。呼び出し側は非ゼロの size を渡す。
     // 返った領域は Allocation が単独所有し、Drop で同じ layout を使って解放する。
@@ -235,7 +236,7 @@ fn alloc_unix(size: usize, alignment: usize) -> Allocation {
     let kind = AllocKind::Regular;
 
     Allocation {
-        ptr: NonNull::new(ptr).expect("TT allocation returned null"),
+        ptr: NonNull::new(ptr).expect("Allocation returned null"),
         kind,
         layout,
     }
@@ -267,6 +268,12 @@ unsafe impl Send for Allocation {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "allocation size must be nonzero")]
+    fn zero_size_is_rejected() {
+        Allocation::allocate(0, 64);
+    }
 
     #[test]
     fn regular_pages_report_neither_status() {
