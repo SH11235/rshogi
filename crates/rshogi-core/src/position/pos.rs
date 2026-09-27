@@ -50,7 +50,7 @@ struct CompositeMasks {
     hdk: Bitboard,
 }
 
-const COMPOSITE_MASKS: [CompositeMasks; 16] = {
+static COMPOSITE_MASKS: [CompositeMasks; 16] = {
     const ZERO: CompositeMasks = CompositeMasks {
         golds: Bitboard::EMPTY,
         bishop_horse: Bitboard::EMPTY,
@@ -767,13 +767,15 @@ impl Position {
 
     // ========== 内部操作 ==========
 
-    /// 盤面に駒を置く
+    /// 盤面に駒を置く。対象升は空升であること。
     pub(super) fn put_piece(&mut self, pc: Piece, sq: Square) {
         self.put_piece_internal(pc, sq);
         self.board_effects_dirty = true;
     }
 
     /// 差分を128bitまとめて反映し、片側のu64だけを書き換えない。
+    /// 直後の128bit読み出しでstore-to-load forwardingを可能にするため、
+    /// 64bit半分ずつの更新に簡略化すると性能が退行する。
     #[inline(always)]
     fn xor_bb(dst: &mut Bitboard, mask: Bitboard) {
         #[cfg(target_arch = "x86_64")]
@@ -816,6 +818,7 @@ impl Position {
     fn put_piece_internal(&mut self, pc: Piece, sq: Square) {
         debug_assert!(pc.is_some());
         debug_assert!(self.board[sq].is_none());
+        debug_assert!(!self.occupied().contains(sq));
         self.board[sq] = pc;
         self.toggle_piece_bitboards(pc, sq);
     }
@@ -831,6 +834,8 @@ impl Position {
     fn remove_piece_internal(&mut self, pc: Piece, sq: Square) {
         debug_assert!(pc.is_some());
         debug_assert_eq!(self.board[sq], pc);
+        debug_assert!(self.by_type[pc.piece_type() as usize].contains(sq));
+        debug_assert!(self.by_color[pc.color()].contains(sq));
 
         self.board[sq] = Piece::NONE;
         self.toggle_piece_bitboards(pc, sq);
@@ -2272,6 +2277,80 @@ mod tests {
         assert_eq!(pos.repetition_state(16), RepetitionState::Draw);
     }
 
+    fn assert_repetition_after_pawn_transfer(
+        sfen: &str,
+        moves: &[&str],
+        pawns_in_hand: u32,
+        expected: RepetitionState,
+    ) {
+        let mut pos = Position::new();
+        pos.set_sfen(sfen).unwrap();
+        let side = pos.side_to_move();
+        let board = pos.board;
+        let board_key = pos.state().board_key;
+        assert_eq!(pos.hand(side).count(PieceType::Pawn), 1 - pawns_in_hand);
+        assert_eq!(pos.repetition_state(16), RepetitionState::None);
+
+        for mv_str in moves {
+            let mv = Move::from_usi(mv_str).unwrap();
+            assert!(pos.is_legal(mv), "{sfen}: {mv_str}");
+            pos.do_move(mv, pos.gives_check(mv));
+        }
+
+        // 盤面と手番は開始局面に戻り、歩1枚の所有者だけが変わる。
+        assert_eq!(pos.board, board);
+        assert_eq!(pos.state().board_key, board_key);
+        assert_eq!(pos.side_to_move(), side);
+        assert_eq!(pos.hand(side).count(PieceType::Pawn), pawns_in_hand);
+        assert_eq!(pos.hand(!side).count(PieceType::Pawn), 1 - pawns_in_hand);
+        // 優劣は現在の手番側から見た持ち駒の増減で決まる。
+        assert_eq!(pos.repetition_state(16), expected);
+    }
+
+    #[test]
+    fn repetition_detects_inferior_for_black() {
+        assert_repetition_after_pawn_transfer(
+            "4k4/9/9/9/9/9/9/9/4K4 b P 1",
+            &["P*5b", "5a5b", "5i5h", "5b4a", "5h5i", "4a5a"],
+            0,
+            RepetitionState::Inferior,
+        );
+    }
+
+    #[test]
+    fn repetition_detects_inferior_for_white() {
+        assert_repetition_after_pawn_transfer(
+            "4k4/9/9/9/9/9/9/9/4K4 w p 1",
+            &["P*5h", "5i5h", "5a5b", "5h6i", "5b5a", "6i5i"],
+            0,
+            RepetitionState::Inferior,
+        );
+    }
+
+    #[test]
+    fn repetition_detects_superior_for_black() {
+        assert_repetition_after_pawn_transfer(
+            "4k4/9/9/9/9/9/9/9/4K4 b p 1",
+            &[
+                "5i5h", "P*5g", "5h5g", "5a5b", "5g5h", "5b4a", "5h5i", "4a5a",
+            ],
+            1,
+            RepetitionState::Superior,
+        );
+    }
+
+    #[test]
+    fn repetition_detects_superior_for_white() {
+        assert_repetition_after_pawn_transfer(
+            "4k4/9/9/9/9/9/9/9/4K4 w P 1",
+            &[
+                "5a5b", "P*5c", "5b5c", "5i5h", "5c5b", "5h6i", "5b5a", "6i5i",
+            ],
+            1,
+            RepetitionState::Superior,
+        );
+    }
+
     #[test]
     fn test_repetition_info_survives_state_slot_reuse() {
         let mut pos = Position::new();
@@ -2663,7 +2742,7 @@ mod tests {
 
     /// 全駒種・全升で、他の升を保ったまま配置と除去ができることを確認。
     #[test]
-    fn piece_bitboard_updates_match_scalar_for_all_pieces_and_squares() {
+    fn piece_bitboard_put_remove_preserves_other_squares_for_all_pieces() {
         for color in [Color::Black, Color::White] {
             for id in 1..=PieceType::NUM {
                 let pt = PieceType::from_u8(id as u8).unwrap();

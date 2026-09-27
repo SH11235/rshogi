@@ -16,6 +16,14 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### 互換性のない変更と移行手順
 
+- **ライブラリ利用者の移行: `position::StateInfo::hand_snapshot` の型と意味を変更**:
+  公開フィールドの型を `[Hand; 2]` から `Hand` に変更し、その局面の手番側の持ち駒だけを保存する。
+  `Position::state()` / `state_mut()` 経由での参照・更新も対象となる。
+  `state.hand_snapshot[side.index()]` でその局面の手番側を参照していたコードは、添字を外すこと。
+  フィールドを初期化・更新するコードも、その局面の手番側の `Hand` を渡す形に変更する。
+  現在局面の任意の色の持ち駒は `Position::hand(color)` で取得できる。
+  過去局面の両者の持ち駒が必要な場合は、各局面で別途保存すること。
+
 - **探索のパス権処理を opt-in の `search-pass-rules` に変更**: 既定で有効な否定形 feature
   `search-no-pass-rules` をやめ、探索でパス権を評価する build だけ `search-pass-rules` を明示する形にした。
   既定 build の探索は変わらない。`--no-default-features` で `search-no-pass-rules` を指定していなかった
@@ -32,6 +40,9 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `movenumber` は従来どおり対局内の手数。
 
 ### USI エンジン / 探索
+
+- **駒の配置更新の 128bit 分岐なし化**: 配置・除去時の Bitboard 更新を、128bit 幅の XOR と
+  駒種別マスクで行うようにした。探索結果は変わらない。
 
 - **BookExploreFile**: 指定局面で、ファイルに列挙した合法な定跡手から評価値や採択回数によらず等確率で選ぶ USI オプションを追加（既定は無効）。
 
