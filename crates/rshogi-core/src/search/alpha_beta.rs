@@ -1323,6 +1323,7 @@ impl SearchWorker {
             if mv == Move::NONE {
                 break;
             }
+            // MovePicker::next_move の契約により、返された手は現局面で pseudo-legal である。
             debug_assert!(
                 pos.pseudo_legal(mv),
                 "MovePicker yielded non-pseudo-legal move {}",
@@ -2858,6 +2859,7 @@ impl SearchWorker {
             if mv == excluded_move {
                 continue;
             }
+            // MovePicker::next_move の契約により、返された手は現局面で pseudo-legal である。
             debug_assert!(
                 pos.pseudo_legal(mv),
                 "MovePicker yielded non-pseudo-legal move {}",

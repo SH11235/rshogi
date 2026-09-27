@@ -348,6 +348,12 @@ impl MovePicker {
     ///
     /// 指し手が尽きたら `Move::NONE` を返す。
     ///
+    /// `Move::NONE` を除き、返す手は常に現局面で pseudo-legal である。
+    /// TT 手はコンストラクタで `pseudo_legal_with_all` による検査済みであり、
+    /// それ以外の手は指し手生成器の出力である。
+    /// 通常探索・root・qsearch・probcut の各ループはこの契約に依存し、`is_legal` だけを検査する。
+    /// 将来 killer 段など生成器以外から手を返す段を追加する場合は、TT 手と同じ検査が必要である。
+    ///
     /// ## 引数
     /// - `pos`: 現在の局面への参照（各呼び出しで一時的に借用）
     /// - `history`: HistoryTablesへの参照（スコアリング時に使用）
