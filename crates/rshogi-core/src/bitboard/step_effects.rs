@@ -75,25 +75,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn mate_step_helpers_match_empty_occupancy_effects() {
-        for sq in Square::all() {
-            let rook = rook_effect(sq, Bitboard::EMPTY);
-            let bishop = bishop_effect(sq, Bitboard::EMPTY);
-            assert_eq!(crate::mate::rook_step_effect(sq), rook);
-            assert_eq!(crate::mate::bishop_step_effect(sq), bishop);
-            assert_eq!(crate::mate::queen_step_effect(sq), rook | bishop);
-            assert_eq!(
-                crate::mate::cross45_step_effect(sq),
-                bishop & crate::bitboard::king_effect(sq)
-            );
-            for color in [Color::Black, Color::White] {
-                assert_eq!(
-                    crate::mate::lance_step_effect(color, sq),
-                    lance_effect(color, sq, Bitboard::EMPTY)
-                );
-            }
-        }
-    }
 }

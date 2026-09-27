@@ -913,6 +913,8 @@ impl Position {
         // 定数と CHECK_SQ_INDEX テーブルは state.rs で一元管理。
         unsafe {
             *st.check_squares.get_unchecked_mut(CS_IDX_PAWN) = pawn_effect(them, ksq);
+            // 飛車の縦利きは両向きの香の利きの OR で、横利きは玉の筋と交わらない。
+            // 相手側の香の step 利きとの AND は、香の王手升に一致する。
             *st.check_squares.get_unchecked_mut(CS_IDX_LANCE) =
                 rook_bb & lance_step_effect(them, ksq);
             *st.check_squares.get_unchecked_mut(CS_IDX_KNIGHT) = knight_effect(them, ksq);
@@ -3681,17 +3683,26 @@ mod tests {
     }
 
     #[cfg(debug_assertions)]
-    fn assert_reference_check_info(pos: &Position) {
+    fn assert_reference_check_info(pos: &Position, context: &str) {
         for color in [Color::Black, Color::White] {
             let (blockers, pinners) =
                 reference_blockers_and_pinners(pos, color, pos.occupied(), Bitboard::EMPTY);
-            debug_assert_eq!(pos.cur_state().blockers_for_king[color.index()], blockers);
-            debug_assert_eq!(pos.cur_state().pinners[color.index()], pinners);
+            debug_assert_eq!(
+                pos.cur_state().blockers_for_king[color.index()],
+                blockers,
+                "blockers が不一致: color={color:?}: {context}"
+            );
+            debug_assert_eq!(
+                pos.cur_state().pinners[color.index()],
+                pinners,
+                "pinners が不一致: color={color:?}: {context}"
+            );
         }
         let them = !pos.side_to_move();
         debug_assert_eq!(
             pos.cur_state().check_squares[CS_IDX_LANCE],
-            lance_effect(them, pos.king_square(them), pos.occupied())
+            lance_effect(them, pos.king_square(them), pos.occupied()),
+            "香の王手升が不一致: {context}"
         );
     }
 
@@ -3702,26 +3713,36 @@ mod tests {
 
         for index in 0..60 {
             let mut playout = RandomPlayout::new(0xC4EC_1F00, index);
-            assert_reference_check_info(&playout.pos);
+            assert_reference_check_info(&playout.pos, &playout.describe());
             for _ in 0..300 {
                 if playout.step().is_none() {
                     break;
                 }
-                assert_reference_check_info(&playout.pos);
+                let context = playout.describe();
+                assert_reference_check_info(&playout.pos, &context);
                 let mut fresh = Position::new();
-                fresh.set_sfen(&playout.pos.to_sfen()).unwrap();
-                assert_reference_check_info(&fresh);
+                let sfen = playout.pos.to_sfen();
+                fresh.set_sfen(&sfen).unwrap_or_else(|e| {
+                    panic!("to_sfen の出力を set_sfen で読めない: {e:?} sfen={sfen}: {context}")
+                });
+                assert_reference_check_info(&fresh, &format!("SFEN から再計算: {context}"));
                 if !playout.pos.in_check() {
                     playout.pos.do_null_move();
-                    assert_reference_check_info(&playout.pos);
+                    assert_reference_check_info(&playout.pos, &format!("null move 後: {context}"));
                     playout.pos.undo_null_move();
-                    assert_reference_check_info(&playout.pos);
+                    assert_reference_check_info(
+                        &playout.pos,
+                        &format!("null move undo 後: {context}"),
+                    );
                 }
             }
             let moves = playout.moves().to_vec();
-            for &mv in moves.iter().rev() {
+            for (undone, &mv) in moves.iter().rev().enumerate() {
                 playout.pos.undo_move(mv);
-                assert_reference_check_info(&playout.pos);
+                assert_reference_check_info(
+                    &playout.pos,
+                    &format!("末尾から {} 手 undo 後: {}", undone + 1, playout.describe()),
+                );
             }
         }
     }

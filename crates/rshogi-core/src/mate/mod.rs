@@ -105,6 +105,22 @@ pub fn init() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bitboard::{bishop_effect, lance_effect, rook_effect};
+
+    #[test]
+    fn mate_step_helpers_match_empty_occupancy_effects() {
+        for sq in Square::all() {
+            let rook = rook_effect(sq, Bitboard::EMPTY);
+            let bishop = bishop_effect(sq, Bitboard::EMPTY);
+            assert_eq!(rook_step_effect(sq), rook);
+            assert_eq!(bishop_step_effect(sq), bishop);
+            assert_eq!(queen_step_effect(sq), rook | bishop);
+            assert_eq!(cross45_step_effect(sq), bishop & king_effect(sq));
+            for color in [Color::Black, Color::White] {
+                assert_eq!(lance_step_effect(color, sq), lance_effect(color, sq, Bitboard::EMPTY));
+            }
+        }
+    }
 
     #[test]
     fn test_aligned() {
