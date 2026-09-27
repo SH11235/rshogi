@@ -56,7 +56,7 @@ prepacked-nnue = ["dep:sha2"]
 search-stats = []
 # NNUE統計収集（refresh/update比率等のカウント）
 nnue-stats = []
-# SIMD最適化（AVX2）
+# 非推奨の互換用 feature（何もしない）。AVX2 は target_feature に応じて自動選択する。
 simd_avx2 = []
 diagnostics = []
 allocation-stats = []

@@ -3,8 +3,9 @@
 use super::Bitboard;
 
 /// byte_reverse用シャッフルマスク（各128bitレーン内でバイト順反転）
-#[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 const BYTE_REVERSE_SHUFFLE: std::arch::x86_64::__m256i = unsafe {
+    // SAFETY: [u8; 32] と __m256i は同じサイズで、全ビットパターンが有効。値として変換する。
     std::mem::transmute::<[u8; 32], std::arch::x86_64::__m256i>([
         15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, // 下位128bitレーン
         15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, // 上位128bitレーン
@@ -16,9 +17,7 @@ const BYTE_REVERSE_SHUFFLE: std::arch::x86_64::__m256i = unsafe {
 /// 角の利き計算で4方向（左上・左下・右上・右下）を同時に計算するために使用。
 /// 内部的には2つのBitboardまたは4つのu64で表現される。
 ///
-/// # Memory Layout
-/// - AVX2: `__m256i`（256bit SIMD）
-/// - Scalar: `[u64; 4]`（4 × 64bit）
+/// 格納形式は `[u64; 4]`。x86_64 で AVX2 が有効な場合、演算には `__m256i` を使う。
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(C, align(32))]
 pub struct Bitboard256 {
@@ -40,8 +39,10 @@ impl Bitboard256 {
     /// 結果: `[bb.p[0], bb.p[1], bb.p[0], bb.p[1]]`
     #[inline]
     pub fn new(bb: Bitboard) -> Bitboard256 {
-        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
             // _mm_set_epi64xでアライメント問題を回避（引数順序: 上位, 下位）
             let bb_m = _mm_set_epi64x(bb.extract64::<1>() as i64, bb.extract64::<0>() as i64);
@@ -50,7 +51,7 @@ impl Bitboard256 {
             Bitboard256 { p: result_p }
         }
 
-        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         {
             Bitboard256 {
                 p: [
@@ -72,8 +73,10 @@ impl Bitboard256 {
     /// 結果: `[bb0.p[0], bb0.p[1], bb1.p[0], bb1.p[1]]`
     #[inline]
     pub fn from_bitboards(bb0: Bitboard, bb1: Bitboard) -> Bitboard256 {
-        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
             // _mm_set_epi64xでアライメント問題を回避（引数順序: 上位, 下位）
             let bb0_m = _mm_set_epi64x(bb0.extract64::<1>() as i64, bb0.extract64::<0>() as i64);
@@ -84,7 +87,7 @@ impl Bitboard256 {
             Bitboard256 { p: result_p }
         }
 
-        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         {
             Bitboard256 {
                 p: [
@@ -114,10 +117,11 @@ impl Bitboard256 {
     /// 角の利き計算の最終段階で使用。
     #[inline]
     pub fn merge(self) -> Bitboard {
-        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
-            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
             let m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
             // 上位128bitを抽出
             let hi = _mm256_extracti128_si256::<1>(m);
@@ -129,7 +133,7 @@ impl Bitboard256 {
             Bitboard::from_u64_pair(result_p[0], result_p[1])
         }
 
-        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         {
             Bitboard::from_u64_pair(self.p[0] | self.p[2], self.p[1] | self.p[3])
         }
@@ -140,17 +144,18 @@ impl Bitboard256 {
     /// 2つのBitboardを個別に反転。
     #[inline]
     pub fn byte_reverse(self) -> Bitboard256 {
-        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
-            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
             let m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
             let result_m = _mm256_shuffle_epi8(m, BYTE_REVERSE_SHUFFLE);
             let result_p: [u64; 4] = std::mem::transmute(result_m);
             Bitboard256 { p: result_p }
         }
 
-        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         {
             let bb0 = Bitboard::from_u64_pair(self.p[0], self.p[1]);
             let bb1 = Bitboard::from_u64_pair(self.p[2], self.p[3]);
@@ -169,8 +174,10 @@ impl Bitboard256 {
     /// - Scalar: 各u64を個別に処理
     #[inline]
     pub fn decrement_pair(hi_in: Bitboard256, lo_in: Bitboard256) -> (Bitboard256, Bitboard256) {
-        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
             let hi_m = std::mem::transmute::<[u64; 4], __m256i>(hi_in.p);
             let lo_m = std::mem::transmute::<[u64; 4], __m256i>(lo_in.p);
@@ -181,7 +188,7 @@ impl Bitboard256 {
             (Bitboard256 { p: hi_out_p }, Bitboard256 { p: lo_out_p })
         }
 
-        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         {
             let mut hi_out_p = [0u64; 4];
             let mut lo_out_p = [0u64; 4];
@@ -208,8 +215,10 @@ impl Bitboard256 {
     /// - Scalar: 手動シャッフル
     #[inline]
     pub fn unpack(hi_in: Bitboard256, lo_in: Bitboard256) -> (Bitboard256, Bitboard256) {
-        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
             let hi_m = std::mem::transmute::<[u64; 4], __m256i>(hi_in.p);
             let lo_m = std::mem::transmute::<[u64; 4], __m256i>(lo_in.p);
@@ -223,9 +232,11 @@ impl Bitboard256 {
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "sse2",
-            not(all(feature = "simd_avx2", target_feature = "avx2"))
+            not(target_feature = "avx2")
         ))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
 
             // 下位128bit
@@ -288,10 +299,11 @@ impl std::ops::BitAnd for Bitboard256 {
 
     #[inline]
     fn bitand(self, rhs: Bitboard256) -> Bitboard256 {
-        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
-            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
             let lhs_m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
             let rhs_m = std::mem::transmute::<[u64; 4], __m256i>(rhs.p);
             let result_m = _mm256_and_si256(lhs_m, rhs_m);
@@ -299,7 +311,7 @@ impl std::ops::BitAnd for Bitboard256 {
             Bitboard256 { p: result_p }
         }
 
-        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         {
             Bitboard256 {
                 p: [
@@ -318,10 +330,11 @@ impl std::ops::BitOr for Bitboard256 {
 
     #[inline]
     fn bitor(self, rhs: Bitboard256) -> Bitboard256 {
-        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
-            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
             let lhs_m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
             let rhs_m = std::mem::transmute::<[u64; 4], __m256i>(rhs.p);
             let result_m = _mm256_or_si256(lhs_m, rhs_m);
@@ -329,7 +342,7 @@ impl std::ops::BitOr for Bitboard256 {
             Bitboard256 { p: result_p }
         }
 
-        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         {
             Bitboard256 {
                 p: [
@@ -348,10 +361,11 @@ impl std::ops::BitXor for Bitboard256 {
 
     #[inline]
     fn bitxor(self, rhs: Bitboard256) -> Bitboard256 {
-        #[cfg(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         unsafe {
+            // SAFETY: cfg が必要な SIMD 命令の利用を保証する。整数配列と SIMD 型は
+            // 同じサイズで全ビットパターンが有効。全レーンを初期化して値として変換する。
             use std::arch::x86_64::*;
-            // SAFETY: Bitboard256は32バイトアライン、[u64; 4]と__m256iは同一メモリレイアウト
             let lhs_m = std::mem::transmute::<[u64; 4], __m256i>(self.p);
             let rhs_m = std::mem::transmute::<[u64; 4], __m256i>(rhs.p);
             let result_m = _mm256_xor_si256(lhs_m, rhs_m);
@@ -359,7 +373,7 @@ impl std::ops::BitXor for Bitboard256 {
             Bitboard256 { p: result_p }
         }
 
-        #[cfg(not(all(feature = "simd_avx2", target_arch = "x86_64", target_feature = "avx2")))]
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         {
             Bitboard256 {
                 p: [
@@ -444,6 +458,33 @@ mod tests {
         assert_eq!(hi_out.p[1], 20); // p[1]: lo != 0なので変化なし
         assert_eq!(hi_out.p[2], 29); // p[2]: lo == 0なので桁借り
         assert_eq!(hi_out.p[3], 40); // p[3]: lo != 0なので変化なし
+    }
+
+    #[test]
+    fn test_bitboard256_decrement_pair_lane_boundaries() {
+        for hi_word in [0, 1, 1 << 63, u64::MAX] {
+            for nonzero_lo in [1, 1 << 63, u64::MAX] {
+                for borrow_mask in 0..16 {
+                    let hi = Bitboard256::from_u64_array([hi_word; 4]);
+                    let lo = Bitboard256::from_u64_array(std::array::from_fn(|lane| {
+                        if borrow_mask & (1 << lane) != 0 {
+                            0
+                        } else {
+                            nonzero_lo
+                        }
+                    }));
+                    let (hi_out, lo_out) = Bitboard256::decrement_pair(hi, lo);
+
+                    // 各レーンを独立した128bit整数として減算し、桁借りと折り返しを照合する。
+                    for lane in 0..4 {
+                        let input = ((hi.p[lane] as u128) << 64) | lo.p[lane] as u128;
+                        let expected = input.wrapping_sub(1);
+                        assert_eq!(hi_out.p[lane], (expected >> 64) as u64);
+                        assert_eq!(lo_out.p[lane], expected as u64);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
