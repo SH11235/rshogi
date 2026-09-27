@@ -86,7 +86,7 @@ impl<const N: usize> IndexList<N> {
     /// 長さをローカル変数で集計する一括生成用。`len` は容量以下であること。
     #[inline]
     pub(crate) fn from_array(indices: [u32; N], len: usize) -> Self {
-        const { assert!(N <= u8::MAX as usize) };
+        const { Self::_ASSERT_N_FITS_U8 };
         assert!(len <= N);
         Self {
             indices: indices.map(MaybeUninit::new),
