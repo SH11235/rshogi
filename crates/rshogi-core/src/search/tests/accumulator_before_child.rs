@@ -1,15 +1,57 @@
-//! 親の事前計算と、事前計算しない参照探索との一致。
+//! HalfKX の親準備、および全方式を準備する参照探索・遅延評価との一致。
 
 use std::cell::Cell;
 
 thread_local! {
     // テスト内の参照探索だけ、子へ進む前の事前計算を省く。
     static SKIP_PREPARATION: Cell<bool> = const { Cell::new(false) };
+    static PREPARE_ALL: Cell<bool> = const { Cell::new(false) };
     static SKIP_HALFKX_CACHE: Cell<bool> = const { Cell::new(false) };
 }
 
-pub(in crate::search) fn skip_preparation() -> bool {
-    SKIP_PREPARATION.get()
+pub(in crate::search) fn preparation_override(
+    st: &mut super::super::alpha_beta::SearchState,
+    pos: &crate::position::Position,
+) -> bool {
+    if SKIP_PREPARATION.get() {
+        return true;
+    }
+    if PREPARE_ALL.get() {
+        prepare_all(st, pos);
+        return true;
+    }
+    false
+}
+
+// 全方式で親を準備する参照処理。progress と bucket は評価時だけ更新する。
+fn prepare_all(st: &mut super::super::alpha_beta::SearchState, pos: &crate::position::Position) {
+    if st.nnue_stack.is_current_computed() || crate::eval::material::is_material_enabled() {
+        return;
+    }
+    #[cfg(feature = "layerstack-arch")]
+    {
+        let ptr = st.network_ptr;
+        if !ptr.is_null()
+            && let crate::nnue::AccumulatorStackVariant::LayerStacks(ref mut stack) = st.nnue_stack
+        {
+            // SAFETY: prepare_search() が NETWORK 内の Arc と stack の型を対応付ける。
+            // 探索中は network が解放されず、ポインタと stack の対応が維持される。
+            let network = unsafe { &*ptr };
+            network.as_layer_stacks().update_accumulator(pos, stack, &mut st.acc_cache);
+            return;
+        }
+    }
+    #[cfg(feature = "layerstack-arch")]
+    let acc_cache = &mut st.acc_cache;
+    #[cfg(not(feature = "layerstack-arch"))]
+    let acc_cache = &mut None;
+    crate::nnue::ensure_accumulator_computed_with_caches(
+        pos,
+        &mut st.nnue_stack,
+        acc_cache,
+        #[cfg(feature = "halfkx-arch")]
+        &mut st.halfkx_cache,
+    );
 }
 
 #[cfg(feature = "halfkx-arch")]
@@ -27,7 +69,13 @@ pub(in crate::search) fn skip_halfkx_cache() -> bool {
     feature = "nnue-runtime-dimensions"
 ))]
 mod checks {
-    use super::{SKIP_HALFKX_CACHE, SKIP_PREPARATION};
+    #[cfg(all(
+        feature = "nnue-progress-diff",
+        feature = "layerstack-arch",
+        feature = "layerstacks-1536x16x32"
+    ))]
+    use super::prepare_all;
+    use super::{PREPARE_ALL, SKIP_HALFKX_CACHE, SKIP_PREPARATION};
     use std::cell::Cell;
     use std::sync::{Arc, atomic::AtomicBool};
 
@@ -82,8 +130,8 @@ mod checks {
         value
     }
 
-    fn paths() {
-        // EvalHash hit で静的評価を省略しても、通常探索・qsearch の親は準備される。
+    fn paths(prepare_parent: bool) {
+        // EvalHash hit で静的評価を省略した通常探索・qsearch の親準備を確認する。
         for sfen in [CAPTURE, IN_CHECK] {
             for depth in [0, 2] {
                 let mut worker = worker();
@@ -100,7 +148,7 @@ mod checks {
                     &mut time_manager(),
                 );
                 assert!(worker.state.nodes > 0, "sfen={sfen}, depth={depth}");
-                assert!(worker.state.nnue_stack.is_current_computed());
+                assert_eq!(worker.state.nnue_stack.is_current_computed(), prepare_parent);
                 assert_eq!(pos.to_sfen(), sfen);
             }
         }
@@ -156,7 +204,7 @@ mod checks {
                     called.set(true);
                     assert!(!state.nnue_stack.is_current_computed());
                     state.nnue_stack.pop();
-                    assert!(state.nnue_stack.is_current_computed());
+                    assert_eq!(state.nnue_stack.is_current_computed(), prepare_parent);
                     state.nnue_stack.push(DirtyPiece::new());
                     Value::new(-1)
                 },
@@ -167,11 +215,14 @@ mod checks {
         }
     }
 
-    fn incremental_matches_refresh() {
+    fn incremental_matches_refresh(prepare_parent: bool) {
         let mut worker = worker();
         let mut pos = position(SFEN_HIRATE);
         let network = nnue::get_network().unwrap();
-        for usi in ["7g7f", "3c3d", "8h2b+", "3a2b", "B*4e", "B*6e", "5i6h"] {
+        for (ply, usi) in ["7g7f", "3c3d", "8h2b+", "3a2b", "B*4e", "B*6e", "5i6h"]
+            .into_iter()
+            .enumerate()
+        {
             let mv = pos.to_move(Move::from_usi(usi).unwrap()).unwrap();
             assert!(pos.is_legal(mv));
             let gives_check = pos.gives_check(mv);
@@ -185,10 +236,15 @@ mod checks {
                 &worker.eval_hash,
             );
             worker.state.nnue_stack.pop();
-            assert!(worker.state.nnue_stack.is_current_computed());
+            assert_eq!(worker.state.nnue_stack.is_current_computed(), prepare_parent || ply > 0);
             worker.state.nnue_stack.push(dirty);
+            let before = accumulation(&worker.state.nnue_stack);
             nnue_prepare_parent(&mut worker.state, &pos);
+            assert_eq!(worker.state.nnue_stack.is_current_computed(), prepare_parent);
             let prepared = accumulation(&worker.state.nnue_stack);
+            if !prepare_parent {
+                assert_eq!(prepared, before, "準備対象外の accumulator は変更しない: {usi}");
+            }
             #[cfg(all(feature = "layerstack-arch", feature = "layerstacks-1536x16x32"))]
             if let AccumulatorStackVariant::LayerStacks(nnue::LayerStacksAccStack::L1536x16x32(s)) =
                 &worker.state.nnue_stack
@@ -203,7 +259,10 @@ mod checks {
             let actual = nnue_evaluate(&mut worker.state, &pos);
             let mut fresh = AccumulatorStackVariant::from_network(&network);
             assert_eq!(actual, nnue::evaluate_dispatch(&pos, &mut fresh, &mut None), "{usi}");
-            assert_eq!(prepared, accumulation(&fresh), "accumulator: {usi}");
+            assert_eq!(accumulation(&worker.state.nnue_stack), accumulation(&fresh), "{usi}");
+            if prepare_parent {
+                assert_eq!(prepared, accumulation(&fresh), "accumulator: {usi}");
+            }
             // 同じ親を再利用しても探索側のカウンタと評価値は変わらない。
             let nodes = worker.state.nodes;
             nnue_prepare_parent(&mut worker.state, &pos);
@@ -290,7 +349,12 @@ mod checks {
                 .into_iter()
                 .enumerate()
                 {
-                    nnue_prepare_parent(&mut prepared.state, &pos);
+                    prepare_all(&mut prepared.state, &pos);
+                    let lazy_computed = lazy.state.nnue_stack.is_current_computed();
+                    let lazy_before = accumulation(&lazy.state.nnue_stack);
+                    nnue_prepare_parent(&mut lazy.state, &pos);
+                    assert_eq!(lazy.state.nnue_stack.is_current_computed(), lazy_computed);
+                    assert_eq!(accumulation(&lazy.state.nnue_stack), lazy_before);
                     let AccumulatorStackVariant::LayerStacks(
                         nnue::LayerStacksAccStack::L1536x16x32(s),
                     ) = &prepared.state.nnue_stack
@@ -335,7 +399,7 @@ mod checks {
         }
     }
 
-    fn probcut_parent() {
+    fn probcut_parent(prepare_parent: bool) {
         let mut worker = worker();
         let mut pos = position(CAPTURE);
         let capture = pos.to_move(Move::from_usi("5e5d").unwrap()).unwrap();
@@ -385,7 +449,7 @@ mod checks {
             |state, _, _, _, _, _, _, _, _, _| {
                 called.set(true);
                 state.nnue_stack.pop();
-                assert!(state.nnue_stack.is_current_computed());
+                assert_eq!(state.nnue_stack.is_current_computed(), prepare_parent);
                 state.nnue_stack.push(dirty);
                 Value::new(-prob_beta - 50)
             },
@@ -435,9 +499,10 @@ mod checks {
         ] {
             for hash_enabled in [false, true] {
                 crate::eval::set_eval_hash_enabled(hash_enabled);
-                let run = |skip, skip_cache| {
+                let run = |skip, skip_cache, prepare_all| {
                     SKIP_PREPARATION.set(skip);
                     SKIP_HALFKX_CACHE.set(skip_cache);
+                    PREPARE_ALL.set(prepare_all);
                     let mut search = Search::new(4);
                     let result = search.go(
                         &mut position(sfen),
@@ -449,13 +514,19 @@ mod checks {
                     );
                     SKIP_PREPARATION.set(false);
                     SKIP_HALFKX_CACHE.set(false);
+                    PREPARE_ALL.set(false);
                     assert_eq!(result.depth, 5);
                     (result.nodes, result.score, result.pv, result.best_move)
                 };
-                let reference = run(true, true);
-                let actual = run(false, false);
+                let reference = run(true, true, false);
+                let actual = run(false, false, false);
                 assert_eq!(reference, actual, "sfen={sfen}, EvalHash={hash_enabled}");
-                assert_eq!(run(true, false), actual, "sfen={sfen}, EvalHash={hash_enabled}");
+                assert_eq!(run(true, false, false), actual, "sfen={sfen}, EvalHash={hash_enabled}");
+                assert_eq!(
+                    run(false, false, true),
+                    actual,
+                    "全方式の親準備: {sfen}, EvalHash={hash_enabled}"
+                );
                 println!(
                     "SEARCH {} {:?} {hash_enabled} {sfen} => {actual:?}",
                     nnue::get_network().unwrap().architecture_name(),
@@ -466,10 +537,19 @@ mod checks {
         crate::eval::set_eval_hash_enabled(true);
     }
 
-    fn check_loaded_network() {
-        paths();
-        probcut_parent();
-        incremental_matches_refresh();
+    fn check_loaded_network(prepare_parent: bool) {
+        let mut worker = worker();
+        let pos = position(SFEN_HIRATE);
+        assert!(!worker.state.nnue_stack.is_current_computed());
+        let before = accumulation(&worker.state.nnue_stack);
+        nnue_prepare_parent(&mut worker.state, &pos);
+        assert_eq!(worker.state.nnue_stack.is_current_computed(), prepare_parent);
+        if !prepare_parent {
+            assert_eq!(accumulation(&worker.state.nnue_stack), before);
+        }
+        paths(prepare_parent);
+        probcut_parent(prepare_parent);
+        incremental_matches_refresh(prepare_parent);
         fixed_depth_matches_reference();
     }
 
@@ -508,15 +588,27 @@ mod checks {
                 #[cfg(feature = "halfkx-arch")]
                 {
                     let fixtures: &[(&str, usize)] = &[
-                        #[cfg(feature = "ft-halfkp")]
+                        #[cfg(any(feature = "ft-halfkp", feature = "nnue-runtime-dimensions"))]
                         ("HalfKP(Friend)", nnue::HALFKP_DIMENSIONS),
-                        #[cfg(feature = "ft-halfka_split")]
+                        #[cfg(any(
+                            feature = "ft-halfka_split",
+                            feature = "nnue-runtime-dimensions"
+                        ))]
                         ("HalfKaSplit", nnue::HALFKA_DIMENSIONS),
-                        #[cfg(feature = "ft-halfka_merged")]
+                        #[cfg(any(
+                            feature = "ft-halfka_merged",
+                            feature = "nnue-runtime-dimensions"
+                        ))]
                         ("HalfKaMerged", nnue::HALFKA_MERGED_DIMENSIONS),
-                        #[cfg(feature = "ft-halfka_hm_split")]
+                        #[cfg(any(
+                            feature = "ft-halfka_hm_split",
+                            feature = "nnue-runtime-dimensions"
+                        ))]
                         ("HalfKaHmSplit", nnue::HALFKA_HM_SPLIT_DIMENSIONS),
-                        #[cfg(feature = "ft-halfka_hm_merged")]
+                        #[cfg(any(
+                            feature = "ft-halfka_hm_merged",
+                            feature = "nnue-runtime-dimensions"
+                        ))]
                         ("HalfKaHmMerged", nnue::HALFKA_HM_DIMENSIONS),
                     ];
                     for &(feature, dimensions) in fixtures {
@@ -536,7 +628,7 @@ mod checks {
                         }
                         bytes.extend_from_slice(&dense);
                         nnue::init_nnue_from_bytes(&bytes).unwrap();
-                        check_loaded_network();
+                        check_loaded_network(!cfg!(feature = "nnue-runtime-dimensions"));
                         #[cfg(not(feature = "nnue-runtime-dimensions"))]
                         preparation_uses_finny_cache();
                     }
@@ -576,7 +668,7 @@ mod checks {
                         None,
                     )
                     .unwrap();
-                    check_loaded_network();
+                    check_loaded_network(false);
                     #[cfg(feature = "nnue-progress-diff")]
                     {
                         nnue::set_layer_stack_progress_kpabs_weights(
@@ -592,7 +684,7 @@ mod checks {
                             Some(9),
                         )
                         .unwrap();
-                        check_loaded_network();
+                        check_loaded_network(false);
                         #[cfg(all(
                             feature = "layerstack-arch",
                             feature = "layerstacks-1536x16x32"

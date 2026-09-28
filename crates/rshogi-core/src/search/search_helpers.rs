@@ -5,11 +5,13 @@
 use std::ptr::NonNull;
 
 use crate::eval::{EvalHash, eval_hash_enabled};
+#[cfg(any(feature = "halfkx-arch", feature = "layerstack-arch"))]
+use crate::nnue::AccumulatorStackVariant;
+#[cfg(feature = "halfkx-arch")]
+use crate::nnue::ensure_accumulator_computed_with_caches;
 #[cfg(feature = "layerstack-arch")]
-use crate::nnue::{AccumulatorStackVariant, update_and_evaluate_layer_stacks_cached};
-use crate::nnue::{
-    DirtyPiece, ensure_accumulator_computed_with_caches, evaluate_dispatch_with_caches,
-};
+use crate::nnue::update_and_evaluate_layer_stacks_cached;
+use crate::nnue::{DirtyPiece, evaluate_dispatch_with_caches};
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
@@ -112,42 +114,49 @@ pub(super) fn check_abort(
 // NNUE操作
 // =============================================================================
 
-/// 子へ進む直前に親の accumulator を準備する。評価値・探索統計は更新しない。
+/// 子へ進む直前に const generics 版 HalfKX の親 accumulator を準備する。
+/// 評価値・探索統計は更新しない。
+/// LayerStacks は Finny cache で作り直しが安く、使われない親の計算コストが上回る。
+#[cfg(any(feature = "halfkx-arch", test))]
 #[inline]
 pub(super) fn nnue_prepare_parent(st: &mut SearchState, pos: &Position) {
-    #[cfg(test)]
-    if super::tests::accumulator_before_child::skip_preparation() {
-        return;
-    }
-    if st.nnue_stack.is_current_computed() || crate::eval::material::is_material_enabled() {
-        return;
-    }
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(test, not(feature = "halfkx-arch")))]
+    super::tests::accumulator_before_child::preparation_override(st, pos);
+    #[cfg(feature = "halfkx-arch")]
     {
-        let ptr = st.network_ptr;
-        if !ptr.is_null()
-            && let AccumulatorStackVariant::LayerStacks(ref mut stack) = st.nnue_stack
-        {
-            // SAFETY: prepare_search() が NETWORK 内の Arc と stack の型を対応付ける。
-            // 探索中は network が解放されず、ポインタと stack の対応が維持される。
-            let network = unsafe { &*ptr };
-            // progress sum と評価用 bucket は評価時だけ更新し、浮動小数点の加算順序を保つ。
-            network.as_layer_stacks().update_accumulator(pos, stack, &mut st.acc_cache);
+        #[cfg(test)]
+        if super::tests::accumulator_before_child::preparation_override(st, pos) {
             return;
         }
+        if !matches!(
+            st.nnue_stack,
+            AccumulatorStackVariant::HalfKP(_)
+                | AccumulatorStackVariant::HalfKaSplit(_)
+                | AccumulatorStackVariant::HalfKaMerged(_)
+                | AccumulatorStackVariant::HalfKaHmSplit(_)
+                | AccumulatorStackVariant::HalfKaHmMerged(_)
+        ) || st.nnue_stack.is_current_computed()
+            || crate::eval::material::is_material_enabled()
+        {
+            return;
+        }
+        #[cfg(feature = "layerstack-arch")]
+        let acc_cache = &mut st.acc_cache;
+        #[cfg(not(feature = "layerstack-arch"))]
+        let acc_cache = &mut None;
+        ensure_accumulator_computed_with_caches(
+            pos,
+            &mut st.nnue_stack,
+            acc_cache,
+            &mut st.halfkx_cache,
+        );
     }
-    #[cfg(feature = "layerstack-arch")]
-    let acc_cache = &mut st.acc_cache;
-    #[cfg(not(feature = "layerstack-arch"))]
-    let acc_cache = &mut None;
-    ensure_accumulator_computed_with_caches(
-        pos,
-        &mut st.nnue_stack,
-        acc_cache,
-        #[cfg(feature = "halfkx-arch")]
-        &mut st.halfkx_cache,
-    );
 }
+
+/// HalfKX を含まない edition では親の準備を行わない。
+#[cfg(not(any(feature = "halfkx-arch", test)))]
+#[inline]
+pub(super) fn nnue_prepare_parent(_: &mut SearchState, _: &Position) {}
 
 /// NNUE 評価
 ///

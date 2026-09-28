@@ -54,6 +54,7 @@ pub enum AccumulatorStackVariant {
 
 impl AccumulatorStackVariant {
     /// 現局面の両視点のアキュムレータが計算済みかを返す。
+    #[cfg(any(feature = "halfkx-arch", test))]
     #[inline]
     pub(crate) fn is_current_computed(&self) -> bool {
         match self {

@@ -47,12 +47,15 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
-- **評価を省いたノードでも、最初の子へ進む前に NNUE accumulator を計算する (YaneuraOu の `evaluate_with_no_return` 相当)**:
+- **HalfKX で評価を省いたノードでも、最初の子へ進む前に NNUE accumulator を計算する (YaneuraOu の `evaluate_with_no_return` 相当)**:
   EvalHash の hit・王手中・TT eval の再利用で静的評価を省いたノードでは accumulator を計算しておらず、その子は
   計算済みの親が無いため全再計算 (refresh) に落ちていた。子へ進む直前に親の accumulator だけを計算し、子を差分更新にする。
-  評価値は計算しないので探索結果 (ノード数) は変わらない。子へ進まないノードでは追加の計算をしない。HalfKX / LayerStacks とも対象。
+  評価値は計算しないので探索結果 (ノード数) は変わらない。子へ進まないノードでは追加の計算をしない。
+  対象は const generics 版 HalfKX 5 系統で、`edition-universal` の `DynamicHalfKx` は対象外。
   HalfKX の親準備にも評価時と同じ worker の Finny cache を使い、玉移動時や計算済みの祖先が無い場合の全再計算を抑える。
-  LayerStacks の progress と bucket は評価時だけ更新し、評価値・探索結果を維持する。
+
+- **LayerStacks の子へ進む前の accumulator 計算を無効化**: 固定版・Dynamic 版とも評価時に必要な計算だけを行う。
+  Finny cache による作り直しが安いため、使われない親の計算を省く。progress・評価値・探索結果は変わらない。
 
 - **非 LayerStacks の HalfKX 5 系統 (HalfKP / HalfKA / HalfKA_hm) の探索で Finny cache (AccumulatorCaches) を使う**:
   これまで探索の評価経路は LayerStacks にだけ Finny cache を渡しており、HalfKX は玉移動時と祖先が無いときに

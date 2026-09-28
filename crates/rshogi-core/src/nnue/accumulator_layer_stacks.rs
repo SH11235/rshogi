@@ -679,7 +679,7 @@ macro_rules! ls_match {
 
 impl LayerStacksAccStack {
     /// 現局面の両視点のアキュムレータが計算済みかを返す。
-    #[cfg(feature = "layerstack-arch")]
+    #[cfg(all(feature = "layerstack-arch", any(feature = "halfkx-arch", test)))]
     #[inline]
     pub(crate) fn is_current_computed(&self) -> bool {
         ls_match!(self, s => s.current().accumulator.computed_accumulation)
