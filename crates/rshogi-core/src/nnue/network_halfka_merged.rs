@@ -43,7 +43,7 @@ use std::sync::OnceLock;
 
 use super::accumulator::{
     AccumulatorCacheGeneric, Aligned, AlignedBox, AlignedI16, DirtyPiece, IndexList,
-    MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
+    MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
 };
 use super::activation::FtActivation;
 use super::constants::{
@@ -457,6 +457,10 @@ impl<const L1: usize> FeatureTransformerHalfKaMerged<L1> {
         prev_acc: &AccumulatorHalfKaMerged<L1>,
         cache: &mut AccumulatorCacheGeneric,
     ) {
+        if !super::finny::halfkx_finny_enabled(L1) {
+            self.update_accumulator(pos, dirty_piece, acc, prev_acc);
+            return;
+        }
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
             let reset = HalfKaMergedFeatureSet::needs_refresh(dirty_piece, perspective);
@@ -495,6 +499,10 @@ impl<const L1: usize> FeatureTransformerHalfKaMerged<L1> {
         acc: &mut AccumulatorHalfKaMerged<L1>,
         cache: &mut AccumulatorCacheGeneric,
     ) {
+        if !super::finny::halfkx_finny_enabled(L1) {
+            self.refresh_accumulator(pos, acc);
+            return;
+        }
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
             self.refresh_perspective_with_cache(
@@ -516,25 +524,12 @@ impl<const L1: usize> FeatureTransformerHalfKaMerged<L1> {
         accumulation: &mut [i16],
         cache: &mut AccumulatorCacheGeneric,
     ) {
-        let king_sq = pos.king_square(perspective);
-        let active_indices = HalfKaMergedFeatureSet::collect_active_indices(pos, perspective);
-
-        let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
-        let len = active_indices.len();
-        for (i, idx) in active_indices.iter().enumerate() {
-            sorted_buf[i] = idx as u32;
-        }
-        let sorted = &mut sorted_buf[..len];
-        sorted.sort_unstable();
-
-        cache.refresh_or_cache(
-            king_sq,
+        cache.refresh_or_cache::<L1, super::ls_feature_spec::HalfKaMergedSpec>(
+            pos,
             perspective,
-            sorted,
             &self.biases,
             accumulation,
-            |acc, idx| self.add_weights(acc, idx),
-            |acc, idx| self.sub_weights(acc, idx),
+            &self.weights,
         );
     }
 
@@ -604,8 +599,8 @@ impl<const L1: usize> FeatureTransformerHalfKaMerged<L1> {
         {
             // SAFETY:
             // - accumulation / weight 行はいずれも 64 バイト境界（accumulation は
-            //   AlignedI16<L1> 由来、weight 行は AlignedBox 先頭 64 バイト + 各行
-            //   L1×2 バイトで L1 は 32 の倍数）。aligned load/store が安全。
+            //   AlignedI16<L1> または AlignedBox の cache entry 由来、weight 行は
+            //   AlignedBox 先頭 + 行番号×L1×2 バイト。L1 は 32 の倍数）。
             // - L1 要素を 32 要素ずつ L1/32 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
@@ -685,8 +680,8 @@ impl<const L1: usize> FeatureTransformerHalfKaMerged<L1> {
         {
             // SAFETY:
             // - accumulation / weight 行はいずれも 64 バイト境界（accumulation は
-            //   AlignedI16<L1> 由来、weight 行は AlignedBox 先頭 64 バイト + 各行
-            //   L1×2 バイトで L1 は 32 の倍数）。aligned load/store が安全。
+            //   AlignedI16<L1> または AlignedBox の cache entry 由来、weight 行は
+            //   AlignedBox 先頭 + 行番号×L1×2 バイト。L1 は 32 の倍数）。
             // - L1 要素を 32 要素ずつ L1/32 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;

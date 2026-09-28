@@ -7,7 +7,7 @@ use std::ptr::NonNull;
 use crate::eval::{EvalHash, eval_hash_enabled};
 #[cfg(feature = "layerstack-arch")]
 use crate::nnue::{AccumulatorStackVariant, update_and_evaluate_layer_stacks_cached};
-use crate::nnue::{DirtyPiece, evaluate_dispatch};
+use crate::nnue::{DirtyPiece, evaluate_dispatch_with_caches};
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
@@ -138,7 +138,13 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
     let acc_cache = &mut st.acc_cache;
     #[cfg(not(feature = "layerstack-arch"))]
     let acc_cache = &mut None;
-    evaluate_dispatch(pos, &mut st.nnue_stack, acc_cache)
+    evaluate_dispatch_with_caches(
+        pos,
+        &mut st.nnue_stack,
+        acc_cache,
+        #[cfg(feature = "halfkx-arch")]
+        &mut st.halfkx_cache,
+    )
 }
 
 /// EvalHash を介した NNUE 静的評価（YaneuraOu の `Eval::evaluate` 相当）

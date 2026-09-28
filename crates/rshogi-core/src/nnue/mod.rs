@@ -44,6 +44,9 @@ mod evaluator;
 mod feature_transformer;
 mod feature_transformer_layer_stacks;
 pub mod features;
+mod finny;
+#[cfg(test)]
+mod finny_tests;
 pub(crate) mod halfka_hm_merged;
 pub(crate) mod halfka_hm_split;
 pub(crate) mod halfka_merged;
@@ -85,6 +88,8 @@ pub use progress_q16::{
     set_layer_stack_progress_kpabs_q16_weights,
 };
 
+#[cfg(feature = "halfkx-arch")]
+pub(crate) use accumulator::AccumulatorCacheGeneric;
 pub use accumulator::{Accumulator, AccumulatorStack, ChangedBonaPiece, DirtyPiece, StackEntry};
 pub use accumulator_layer_stacks::{
     AccumulatorCacheLayerStacks, AccumulatorLayerStacks, AccumulatorStackLayerStacks,
@@ -115,6 +120,8 @@ pub use features::{
     Feature, FeatureSet, HalfKP, HalfKPFeatureSet, HalfKaHmMerged, HalfKaHmMergedFeatureSet,
     HalfKaSplit, HalfKaSplitFeatureSet, TriggerEvent,
 };
+#[cfg(feature = "halfkx-arch")]
+pub(crate) use finny::halfkx_finny_enabled;
 pub use layer_stacks::{
     LayerStackBucket, LayerStacks, LsSaturationCounts, compute_bucket_index, compute_king_ranks,
     sqr_clipped_relu_transform,
@@ -130,7 +137,6 @@ pub use net_delta::{
 };
 #[cfg(feature = "layerstack-arch")]
 pub use network::evaluate_layer_stacks;
-pub(crate) use network::nnue_requires_board_effects;
 #[cfg(feature = "layerstack-arch")]
 pub(crate) use network::update_and_evaluate_layer_stacks_cached;
 pub use network::{
@@ -149,6 +155,7 @@ pub use network::{
     set_layer_stack_progress_kpabs_weights, set_nnue_architecture_override,
     validate_layer_stack_routing_configuration,
 };
+pub(crate) use network::{evaluate_dispatch_with_caches, nnue_requires_board_effects};
 #[cfg(all(feature = "layerstacks-512x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks512x16x32;
 #[cfg(all(feature = "layerstacks-768x8x32", feature = "ft-halfka_hm_merged"))]

@@ -40,7 +40,7 @@ use std::marker::PhantomData;
 
 use super::accumulator::{
     AccumulatorCacheGeneric, Aligned as AlignedGeneric, AlignedBox, AlignedI16, DirtyPiece,
-    IndexList, MAX_ACTIVE_FEATURES, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
+    IndexList, MAX_CHANGED_FEATURES, MAX_PATH_LENGTH,
 };
 use super::activation::FtActivation;
 use super::constants::{FV_SCALE, HALFKP_DIMENSIONS, MAX_ARCH_LEN, NNUE_VERSION};
@@ -521,6 +521,10 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         prev_acc: &AccumulatorHalfKP<L1>,
         cache: &mut AccumulatorCacheGeneric,
     ) {
+        if !super::finny::halfkx_finny_enabled(L1) {
+            self.update_accumulator(pos, dirty_piece, acc, prev_acc);
+            return;
+        }
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
             let reset = HalfKPFeatureSet::needs_refresh(dirty_piece, perspective);
@@ -561,6 +565,10 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         acc: &mut AccumulatorHalfKP<L1>,
         cache: &mut AccumulatorCacheGeneric,
     ) {
+        if !super::finny::halfkx_finny_enabled(L1) {
+            self.refresh_accumulator(pos, acc);
+            return;
+        }
         for perspective in [Color::Black, Color::White] {
             let p = perspective as usize;
             self.refresh_perspective_with_cache(
@@ -582,38 +590,12 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         accumulation: &mut [i16; L1],
         cache: &mut AccumulatorCacheGeneric,
     ) {
-        let king_sq = pos.king_square(perspective);
-        let active_indices = HalfKPFeatureSet::collect_active_indices(pos, perspective);
-
-        // IndexList を u32 のソート済み配列に変換
-        let mut sorted_buf = [0u32; MAX_ACTIVE_FEATURES];
-        let len = active_indices.len();
-        for (i, idx) in active_indices.iter().enumerate() {
-            sorted_buf[i] = idx as u32;
-        }
-        let sorted = &mut sorted_buf[..len];
-        sorted.sort_unstable();
-
-        cache.refresh_or_cache(
-            king_sq,
+        cache.refresh_or_cache::<L1, super::ls_feature_spec::HalfKpSpec>(
+            pos,
             perspective,
-            sorted,
             &self.biases.0,
             accumulation,
-            |acc, idx| {
-                debug_assert_eq!(acc.len(), L1);
-                // SAFETY: acc は呼び出し元で &mut [i16; L1] から作られたスライス。
-                // キャッシュ生成時も同じ L1 サイズで初期化されており、長さは常に一致する。
-                // 固定サイズ配列への変換により SIMD ループの L1/16 がコンパイル時定数になる。
-                let arr: &mut [i16; L1] = unsafe { &mut *(acc.as_mut_ptr() as *mut [i16; L1]) };
-                self.add_weights(arr, idx);
-            },
-            |acc, idx| {
-                debug_assert_eq!(acc.len(), L1);
-                // SAFETY: 上記と同じ理由で安全
-                let arr: &mut [i16; L1] = unsafe { &mut *(acc.as_mut_ptr() as *mut [i16; L1]) };
-                self.sub_weights(arr, idx);
-            },
+            &self.weights,
         );
     }
 
@@ -687,8 +669,8 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         {
             // SAFETY:
             // - accumulation / weight 行はいずれも 64 バイト境界（accumulation は
-            //   AlignedI16<L1> 由来、weight 行は AlignedBox 先頭 64 バイト + 各行
-            //   L1×2 バイトで L1 は 32 の倍数）。aligned load/store が安全。
+            //   AlignedI16<L1> または AlignedBox の cache entry 由来、weight 行は
+            //   AlignedBox 先頭 + 行番号×L1×2 バイト。L1 は 32 の倍数）。
             // - L1 要素を 32 要素ずつ L1/32 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
@@ -771,8 +753,8 @@ impl<const L1: usize> FeatureTransformerHalfKP<L1> {
         {
             // SAFETY:
             // - accumulation / weight 行はいずれも 64 バイト境界（accumulation は
-            //   AlignedI16<L1> 由来、weight 行は AlignedBox 先頭 64 バイト + 各行
-            //   L1×2 バイトで L1 は 32 の倍数）。aligned load/store が安全。
+            //   AlignedI16<L1> または AlignedBox の cache entry 由来、weight 行は
+            //   AlignedBox 先頭 + 行番号×L1×2 バイト。L1 は 32 の倍数）。
             // - L1 要素を 32 要素ずつ L1/32 回で完全に走査する。
             unsafe {
                 use std::arch::x86_64::*;
