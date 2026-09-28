@@ -26,6 +26,11 @@ use super::{
 use crate::eval::material::{self, MaterialLevel};
 use crate::position::Position;
 use crate::types::Value;
+#[cfg(any(
+    feature = "halfkx-arch",
+    feature = "layerstack-arch",
+    feature = "nnue-runtime-dimensions"
+))]
 use std::sync::Arc;
 
 /// ロードと探索開始で共有する、探索可能な重みへの型付き参照。
@@ -332,6 +337,14 @@ impl SearchEvaluator {
     }
 
     #[inline]
+    #[cfg_attr(
+        not(any(
+            feature = "halfkx-arch",
+            feature = "layerstack-arch",
+            feature = "nnue-runtime-dimensions"
+        )),
+        allow(unused_variables)
+    )]
     pub(crate) fn push(&mut self, dirty: DirtyPiece) {
         match self {
             Self::Uninitialized | Self::Material { .. } => {}
