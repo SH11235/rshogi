@@ -11,6 +11,8 @@ use std::sync::Arc;
 #[cfg(feature = "search-pass-rules")]
 use crate::eval::evaluate_pass_rights;
 use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
+#[cfg(feature = "halfkx-arch")]
+use crate::nnue::AccumulatorCacheGeneric;
 #[cfg(feature = "layerstack-arch")]
 use crate::nnue::LayerStacksAccCache;
 #[cfg(feature = "layerstack-arch")]
@@ -525,6 +527,9 @@ pub struct SearchState {
     /// LayerStacks アーキテクチャ以外では None
     #[cfg(feature = "layerstack-arch")]
     pub acc_cache: Option<LayerStacksAccCache>,
+    /// 非 LayerStacks の HalfKX 用 Finny cache。worker ごとに保持する。
+    #[cfg(feature = "halfkx-arch")]
+    pub halfkx_cache: Option<AccumulatorCacheGeneric>,
     /// check_abort呼び出しカウンター
     pub calls_cnt: i32,
     /// 探索統計（search-stats feature有効時のみ）
@@ -555,6 +560,8 @@ impl SearchState {
             nnue_stack: AccumulatorStackVariant::new_default(),
             #[cfg(feature = "layerstack-arch")]
             acc_cache: None,
+            #[cfg(feature = "halfkx-arch")]
+            halfkx_cache: None,
             calls_cnt: 0,
             #[cfg(feature = "search-stats")]
             stats: SearchStats::default(),
@@ -987,6 +994,8 @@ impl SearchWorker {
             } else {
                 self.state.nnue_stack.reset();
             }
+            #[cfg(feature = "halfkx-arch")]
+            self.prepare_halfkx_cache(Some(&network));
             // LayerStacks 用 AccumulatorCaches を初期化
             #[cfg(feature = "layerstack-arch")]
             if let crate::nnue::NNUENetwork::LayerStacks(ls_net) = &*network {
@@ -1016,6 +1025,8 @@ impl SearchWorker {
                 self.state.acc_cache = None;
             }
         } else {
+            #[cfg(feature = "halfkx-arch")]
+            self.prepare_halfkx_cache(None);
             // NNUE未初期化の場合はデフォルト（HalfKP）でリセット
             self.state.nnue_stack.reset();
             #[cfg(feature = "layerstack-arch")]
@@ -1026,6 +1037,34 @@ impl SearchWorker {
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
         self.state.calls_cnt = 0;
+    }
+
+    /// net の値を再利用しないよう、探索開始ごとに cache を無効化する。
+    #[cfg(feature = "halfkx-arch")]
+    fn prepare_halfkx_cache(&mut self, network: Option<&crate::nnue::NNUENetwork>) {
+        use crate::nnue::NNUENetwork;
+        let Some(network) = network.filter(|net| {
+            matches!(
+                net,
+                NNUENetwork::HalfKP(_)
+                    | NNUENetwork::HalfKaSplit(_)
+                    | NNUENetwork::HalfKaHmMerged(_)
+                    | NNUENetwork::HalfKaMerged(_)
+                    | NNUENetwork::HalfKaHmSplit(_)
+            )
+        }) else {
+            self.state.halfkx_cache = None;
+            return;
+        };
+        let l1 = network.l1_size();
+        if !crate::nnue::halfkx_finny_enabled(l1) {
+            self.state.halfkx_cache = None;
+            return;
+        }
+        match &mut self.state.halfkx_cache {
+            Some(cache) if cache.l1_size() == l1 => cache.invalidate(),
+            cache => *cache = Some(AccumulatorCacheGeneric::new(l1)),
+        }
     }
 
     /// best_move_changes を半減（世代減衰）
@@ -4114,3 +4153,81 @@ pub(super) fn apply_pass_move_bonus(value: Value, bonus: i32) -> Value {
     let limit = Value::MATE_IN_MAX_PLY.raw() - 1;
     Value::new(value.raw().saturating_add(bonus).clamp(-limit, limit))
 }
+
+#[cfg(all(test, feature = "halfkx-arch"))]
+mod finny_tests {
+    use super::*;
+    use crate::nnue::NNUENetwork;
+    use crate::nnue::halfkp::{HalfKPL256, HalfKPNetwork};
+    use crate::nnue::network_halfkp::{HalfKP256CReLU, halfkp_loader_fixture};
+
+    #[test]
+    fn halfkx_worker_cache_resets_and_replaces_incompatible_size() {
+        let bytes =
+            halfkp_loader_fixture(256, "Features=HalfKP(Friend)[125388->256x2],l2=32,l3=32");
+        let net = HalfKP256CReLU::read(&mut std::io::Cursor::new(&bytes)).unwrap();
+        let network =
+            NNUENetwork::HalfKP(HalfKPNetwork::L256(HalfKPL256::CReLU32x32(Box::new(net))));
+        let mut worker = SearchWorker::new(
+            Arc::new(TranspositionTable::new(1)),
+            Arc::new(EvalHash::new(1)),
+            0,
+            0,
+            SearchTuneParams::default(),
+        );
+        assert!(worker.state.halfkx_cache.is_none());
+        worker.prepare_halfkx_cache(Some(&network));
+        if !crate::nnue::halfkx_finny_enabled(256) {
+            assert!(worker.state.halfkx_cache.is_none());
+            worker.state.halfkx_cache = Some(AccumulatorCacheGeneric::new(256));
+            worker.prepare_halfkx_cache(Some(&network));
+            assert!(worker.state.halfkx_cache.is_none());
+            return;
+        }
+        let mut actual = [0; 256];
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b - 1").unwrap();
+        worker
+            .state
+            .halfkx_cache
+            .as_mut()
+            .unwrap()
+            .refresh_or_cache::<256, crate::nnue::HalfKpSpec>(
+                &pos,
+                Color::Black,
+                &[123; 256],
+                &mut actual,
+                &[],
+            );
+        assert_eq!(actual, [123; 256]);
+        // 同一形状でも net の値を保持しない。次の探索は新しい bias から始める。
+        worker.prepare_halfkx_cache(Some(&network));
+        worker
+            .state
+            .halfkx_cache
+            .as_mut()
+            .unwrap()
+            .refresh_or_cache::<256, crate::nnue::HalfKpSpec>(
+                &pos,
+                Color::Black,
+                &[-456; 256],
+                &mut actual,
+                &[],
+            );
+        assert_eq!(actual, [-456; 256]);
+
+        worker.state.halfkx_cache = Some(AccumulatorCacheGeneric::new(512));
+        worker.prepare_halfkx_cache(Some(&network));
+        assert_eq!(worker.state.halfkx_cache.as_ref().unwrap().l1_size(), 256);
+        worker.prepare_halfkx_cache(None);
+        assert!(worker.state.halfkx_cache.is_none());
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "halfkx-arch",
+    not(feature = "nnue-runtime-dimensions")
+))]
+#[path = "finny_search_tests.rs"]
+mod finny_search_tests;

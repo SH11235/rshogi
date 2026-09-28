@@ -8,9 +8,12 @@
 //! AccumulatorStack は探索時の Accumulator と DirtyPiece を管理するスタック。
 //! StateInfo から Accumulator を分離し、do_move での初期化コストを削減する。
 
-use super::bona_piece::ExtBonaPiece;
+use super::bona_piece::{BonaPiece, ExtBonaPiece};
 use super::constants::{NUM_REFRESH_TRIGGERS, TRANSFORMED_FEATURE_DIMENSIONS};
+use super::finny::{apply_weight_changes_to_two, collect_piece_list_diff};
+use super::ls_feature_spec::LsFeatureSpec;
 use super::piece_list::PieceNumber;
+use crate::position::Position;
 use crate::types::{Color, MAX_PLY, Square, Value};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::alloc::alloc;
@@ -1001,7 +1004,7 @@ impl Default for AccumulatorStack {
 /// 玉位置×視点ごとのアキュムレータキャッシュ（Finny Tables、汎用版）
 ///
 /// 81マス × 2視点 = 162 エントリ。
-/// 非LayerStacks（HalfKP/HalfKaSplit/HalfKaHmMerged）で使用する。
+/// 非LayerStacks の HalfKX 5 系統で使用する。
 /// L1サイズは実行時に決定される。
 ///
 /// アキュムレータ値は1つの連続した AlignedBox に格納し、
@@ -1009,10 +1012,8 @@ impl Default for AccumulatorStack {
 pub struct AccumulatorCacheGeneric {
     /// 全エントリのアキュムレータ値を連続格納 [NUM_ENTRIES * l1]
     accumulations: AlignedBox<i16>,
-    /// 各エントリのアクティブ特徴インデックス（ソート済み）
-    active_indices: Box<[[u32; MAX_ACTIVE_FEATURES]]>,
-    /// 各エントリの有効特徴数
-    num_active: Box<[u16]>,
+    /// 各 PieceNumber に対応する視点固有の BonaPiece。
+    piece_lists: Box<[[BonaPiece; PieceNumber::NB]]>,
     /// 各エントリの有効フラグ
     valid: Box<[bool]>,
     /// L1 サイズ
@@ -1027,8 +1028,8 @@ impl AccumulatorCacheGeneric {
     pub fn new(l1: usize) -> Self {
         Self {
             accumulations: AlignedBox::new_zeroed(NUM_CACHE_ENTRIES * l1),
-            active_indices: vec![[0u32; MAX_ACTIVE_FEATURES]; NUM_CACHE_ENTRIES].into_boxed_slice(),
-            num_active: vec![0u16; NUM_CACHE_ENTRIES].into_boxed_slice(),
+            piece_lists: vec![[BonaPiece::ZERO; PieceNumber::NB]; NUM_CACHE_ENTRIES]
+                .into_boxed_slice(),
             valid: vec![false; NUM_CACHE_ENTRIES].into_boxed_slice(),
             l1,
         }
@@ -1041,107 +1042,109 @@ impl AccumulatorCacheGeneric {
         }
     }
 
-    /// エントリのアキュムレータスライスを取得
-    #[inline]
-    fn acc_slice(&self, entry_idx: usize) -> &[i16] {
-        let start = entry_idx * self.l1;
-        &self.accumulations[start..start + self.l1]
+    /// キャッシュが保持する L1 サイズ
+    #[cfg(feature = "halfkx-arch")]
+    pub(crate) fn l1_size(&self) -> usize {
+        self.l1
     }
 
-    /// エントリのアキュムレータスライスを取得（可変）
-    #[inline]
-    fn acc_slice_mut(&mut self, entry_idx: usize) -> &mut [i16] {
-        let start = entry_idx * self.l1;
-        &mut self.accumulations[start..start + self.l1]
-    }
-
-    /// キャッシュからの差分で refresh を実行
-    ///
-    /// キャッシュが有効な場合、現在のアクティブ特徴量との差分を計算し、
-    /// add/sub のみでアキュムレータを更新する。
-    /// キャッシュが無効な場合は通常の full refresh を行い、キャッシュを更新する。
-    pub(crate) fn refresh_or_cache<FA, FS>(
-        &mut self,
+    /// テスト用に有効な cache entry の accumulator を参照する。
+    #[cfg(all(
+        test,
+        feature = "halfkx-arch",
+        not(feature = "nnue-runtime-dimensions")
+    ))]
+    pub(crate) fn cached_accumulation(
+        &self,
         king_sq: Square,
         perspective: Color,
-        active: &[u32],
-        biases: &[i16],
-        accumulation: &mut [i16],
-        add_fn: FA,
-        sub_fn: FS,
-    ) where
-        FA: Fn(&mut [i16], usize),
-        FS: Fn(&mut [i16], usize),
-    {
+    ) -> Option<&[i16]> {
         let entry_idx = king_sq.raw() as usize * 2 + perspective as usize;
-
-        if self.valid[entry_idx] {
-            // キャッシュが有効 → 差分更新
-            accumulation.copy_from_slice(self.acc_slice(entry_idx));
-
-            // ソート済み配列のマージベース差分（O(n)）
-            let cached = &self.active_indices[entry_idx][..self.num_active[entry_idx] as usize];
-            Self::apply_diff(cached, active, accumulation, &add_fn, &sub_fn);
-        } else {
-            // キャッシュ無効 → バイアスから full refresh
-            accumulation.copy_from_slice(biases);
-            for &idx in active {
-                add_fn(accumulation, idx as usize);
-            }
-        }
-
-        // キャッシュを更新
-        self.acc_slice_mut(entry_idx).copy_from_slice(accumulation);
-        debug_assert!(
-            active.len() <= MAX_ACTIVE_FEATURES,
-            "active features overflow: {}",
-            active.len()
-        );
-        let n = active.len().min(MAX_ACTIVE_FEATURES);
-        self.active_indices[entry_idx][..n].copy_from_slice(&active[..n]);
-        self.num_active[entry_idx] = n as u16;
-        self.valid[entry_idx] = true;
+        let start = entry_idx * self.l1;
+        self.valid[entry_idx].then(|| &self.accumulations[start..start + self.l1])
     }
 
-    /// ソート済み配列のマージベース差分を適用
-    #[inline]
-    fn apply_diff<FA, FS>(
-        cached: &[u32],
-        current: &[u32],
+    /// 視点側の玉升を key に、駒スロット差分だけを更新する。
+    ///
+    /// 全 FT で index の玉側の依存は king_sq と perspective で決まる。
+    /// HM の mirror / bucket も同じ key から決まる。相手玉は key に含めず、
+    /// HalfKA の駒リスト内の BonaPiece として比較する。
+    pub(crate) fn refresh_or_cache<const L1: usize, FT: LsFeatureSpec>(
+        &mut self,
+        pos: &Position,
+        perspective: Color,
+        biases: &[i16],
         accumulation: &mut [i16],
-        add_fn: &FA,
-        sub_fn: &FS,
-    ) where
-        FA: Fn(&mut [i16], usize),
-        FS: Fn(&mut [i16], usize),
-    {
-        let mut ci = 0;
-        let mut ni = 0;
+        weights: &[i16],
+    ) {
+        let king_sq = pos.king_square(perspective);
+        let raw = if perspective == Color::Black {
+            pos.piece_list().piece_list_fb()
+        } else {
+            pos.piece_list().piece_list_fw()
+        };
+        let owned;
+        let pieces = if FT::INCLUDE_KING_IN_PIECE_LIST {
+            raw
+        } else {
+            owned = {
+                let mut pieces = *raw;
+                pieces[PieceNumber::KING as usize] = BonaPiece::ZERO;
+                pieces[PieceNumber::KING as usize + 1] = BonaPiece::ZERO;
+                pieces
+            };
+            &owned
+        };
+        self.refresh_piece_list::<L1, _>(
+            (king_sq, perspective),
+            pieces,
+            biases,
+            accumulation,
+            weights,
+            |bp| FT::feature_index(bp, perspective, king_sq),
+        );
+    }
 
-        while ci < cached.len() && ni < current.len() {
-            let c = cached[ci];
-            let n = current[ni];
-            if c < n {
-                sub_fn(accumulation, c as usize);
-                ci += 1;
-            } else if c > n {
-                add_fn(accumulation, n as usize);
-                ni += 1;
-            } else {
-                ci += 1;
-                ni += 1;
+    /// 各スロットから最大 1 件ずつ差分を集め、cache と出力を同時に更新する。
+    pub(super) fn refresh_piece_list<const L1: usize, FI: Fn(BonaPiece) -> usize>(
+        &mut self,
+        key: (Square, Color),
+        pieces: &[BonaPiece; PieceNumber::NB],
+        biases: &[i16],
+        accumulation: &mut [i16],
+        weights: &[i16],
+        idx_fn: FI,
+    ) {
+        assert_eq!(L1, self.l1);
+        assert_eq!(accumulation.len(), L1);
+        assert_eq!(biases.len(), L1);
+        let entry = key.0.raw() as usize * 2 + key.1 as usize;
+        let was_valid = self.valid[entry];
+        // 重みの境界検証などで unwind しても半更新の entry を再利用しない。
+        self.valid[entry] = false;
+        let (removed, added) = if was_valid {
+            collect_piece_list_diff(&self.piece_lists[entry], pieces, idx_fn)
+        } else {
+            let mut added = IndexList::new();
+            for &bp in pieces {
+                if bp != BonaPiece::ZERO {
+                    let pushed = added.push(idx_fn(bp));
+                    debug_assert!(pushed);
+                }
             }
-        }
-
-        while ci < cached.len() {
-            sub_fn(accumulation, cached[ci] as usize);
-            ci += 1;
-        }
-
-        while ni < current.len() {
-            add_fn(accumulation, current[ni] as usize);
-            ni += 1;
-        }
+            (IndexList::new(), added)
+        };
+        let start = entry * L1;
+        apply_weight_changes_to_two::<L1>(
+            &mut self.accumulations[start..start + L1],
+            (!was_valid).then_some(biases),
+            accumulation,
+            weights,
+            &removed,
+            &added,
+        );
+        self.piece_lists[entry] = *pieces;
+        self.valid[entry] = true;
     }
 }
 
@@ -1227,6 +1230,68 @@ mod tests {
         let actual_result = catch_unwind(AssertUnwindSafe(|| actual.extend(indices)));
         assert_eq!(actual_result.is_err(), expected_result.is_err());
         assert_eq!(actual.iter().collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>());
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn finny_generic_checks_dimensions_before_simd_callback() {
+        let mut cache = AccumulatorCacheGeneric::new(32);
+        cache.refresh_piece_list::<64, _>(
+            (Square::SQ_55, Color::Black),
+            &[BonaPiece::ZERO; PieceNumber::NB],
+            &[0; 64],
+            &mut [0; 64],
+            &[],
+            |_| panic!("寸法不一致の index 計算"),
+        );
+    }
+
+    #[test]
+    fn finny_generic_updates_only_changed_features_and_invalidates() {
+        use std::cell::RefCell;
+        let mut cache = AccumulatorCacheGeneric::new(32);
+        let mut actual = [0; 32];
+        let changes = RefCell::new(Vec::new());
+        let weights: Vec<_> = (0..4).flat_map(|i| [(i as i16).wrapping_mul(12000); 32]).collect();
+        for (values, expected_changes) in [
+            ([1, 3, 3], vec![1, 3, 3]),
+            ([1, 3, 3], vec![]),
+            ([2, 3, 0], vec![1, 2, 3]),
+            ([3, 2, 0], vec![2, 3, 3, 2]),
+            ([0, 0, 0], vec![3, 2]),
+        ] {
+            let mut pieces = [BonaPiece::ZERO; PieceNumber::NB];
+            for (slot, value) in values.into_iter().enumerate() {
+                pieces[slot] = BonaPiece::new(value);
+            }
+            changes.borrow_mut().clear();
+            cache.refresh_piece_list::<32, _>(
+                (Square::SQ_55, Color::Black),
+                &pieces,
+                &[123; 32],
+                &mut actual,
+                &weights,
+                |bp| {
+                    changes.borrow_mut().push(bp.value());
+                    bp.value() as usize
+                },
+            );
+            let expected = values
+                .iter()
+                .fold(123i16, |sum, &i| sum.wrapping_add((i as i16).wrapping_mul(12000)));
+            assert_eq!(actual, [expected; 32]);
+            assert_eq!(*changes.borrow(), expected_changes);
+        }
+        cache.invalidate();
+        cache.refresh_piece_list::<32, _>(
+            (Square::SQ_55, Color::Black),
+            &[BonaPiece::ZERO; PieceNumber::NB],
+            &[-456; 32],
+            &mut actual,
+            &weights,
+            |bp| bp.value() as usize,
+        );
+        assert_eq!(actual, [-456; 32]);
     }
 
     #[test]

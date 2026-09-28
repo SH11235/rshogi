@@ -47,6 +47,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **非 LayerStacks の HalfKX 5 系統 (HalfKP / HalfKA / HalfKA_hm) の探索で Finny cache (AccumulatorCaches) を使う**:
+  これまで探索の評価経路は LayerStacks にだけ Finny cache を渡しており、HalfKX は玉移動時と祖先が無いときに
+  bias から全駒を加算し直していた。worker ごとに cache を持ち、cache entry の駒リストと現局面の駒リストを
+  位置ごとに SIMD 比較して変わった駒だけを加減算し、tile ごとに cache と accumulator の両方へ書く
+  (差分抽出は LayerStacks と共通化)。評価値・探索結果 (ノード数) は変わらない。対象は const generics 版の
+  HalfKX edition (`edition-halfkp-crelu`、`edition-halfkx` など) で、`edition-universal` の `DynamicHalfKx` 経路には適用されない。
+
 - **非 LayerStacks の HalfKX 5 系統 (HalfKP / HalfKA / HalfKA_hm) で affine 層に AVX-512 BW / VNNI 経路を追加**:
   これまで AVX-512 機でも AVX2 経路 (出力レジスタごとに積和を直列に累積) を使っていた。出力 8 / 16 / 32 の層は
   積和を複数の独立なアキュムレータに分割する (出力 8 は 2 入力 chunk を 1 本の zmm で処理する)。
