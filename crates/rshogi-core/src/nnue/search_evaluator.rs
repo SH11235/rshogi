@@ -337,17 +337,12 @@ impl SearchEvaluator {
     }
 
     #[inline]
-    #[cfg_attr(
-        not(any(
-            feature = "halfkx-arch",
-            feature = "layerstack-arch",
-            feature = "nnue-runtime-dimensions"
-        )),
-        allow(unused_variables)
-    )]
     pub(crate) fn push(&mut self, dirty: DirtyPiece) {
         match self {
-            Self::Uninitialized | Self::Material { .. } => {}
+            // NNUE を使わない評価では差分情報は不要なので捨てる。
+            Self::Uninitialized | Self::Material { .. } => {
+                let _ = dirty;
+            }
             #[cfg(feature = "halfkx-arch")]
             Self::HalfKP { stack, .. } => stack.push(dirty),
             #[cfg(feature = "halfkx-arch")]
