@@ -1,7 +1,10 @@
 //! Eval hash (evaluation cache) for NNUE.
 
 use std::mem;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use crate::tt::alloc::{AllocKind, Allocation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvalHashEntry {
@@ -10,9 +13,22 @@ pub struct EvalHashEntry {
 }
 
 pub struct EvalHash {
-    table: Box<[EvalHashEntryAtomic]>,
+    ptr: NonNull<EvalHashEntryAtomic>,
+    len: usize,
     mask: usize,
+    storage: EvalHashStorage,
 }
+
+enum EvalHashStorage {
+    Allocated(Allocation),
+    Regular(Vec<EvalHashEntryAtomic>),
+}
+
+// SAFETY: storage が領域を単独所有する。Vec は再確保せず、as_mut_ptr 由来の ptr は
+// Vec 自体の移動後も有効。領域は EvalHash の破棄まで生存する。
+unsafe impl Send for EvalHash {}
+// SAFETY: 公開後のエントリ操作はすべて AtomicU64 を通す。共有中は領域を再確保・解放しない。
+unsafe impl Sync for EvalHash {}
 
 /// EvalHashの有効/無効フラグ（グローバル）
 ///
@@ -170,27 +186,76 @@ impl EvalHashEntryAtomic {
 }
 
 impl EvalHash {
+    /// 通常ページで評価ハッシュを作成する。
     pub fn new(size_mb: usize) -> Self {
+        Self::new_with_large_pages(size_mb, false)
+    }
+
+    /// 評価ハッシュを作成する。false では通常の Vec による確保を使う。
+    pub fn new_with_large_pages(size_mb: usize, large_pages: bool) -> Self {
         let bytes = size_mb.saturating_mul(1024 * 1024);
         let entries = bytes / mem::size_of::<EvalHashEntryAtomic>();
         let size = normalize_size(entries);
-        let mut table = Vec::with_capacity(size);
-        table.resize_with(size, EvalHashEntryAtomic::new);
+        let mut storage = if large_pages && size != 0 {
+            let bytes = size * mem::size_of::<EvalHashEntryAtomic>();
+            let allocation = Allocation::allocate(bytes, mem::align_of::<EvalHashEntryAtomic>());
+            // SAFETY: allocation は bytes バイト以上の領域を単独所有し、まだ共有していない。
+            // 全ビット 0 は AtomicU64 の有効な初期値であり、各エントリを未書込状態にする。
+            // Unix の通常確保は未初期化なので、ページ種別によらずここで初期化する。
+            unsafe { allocation.ptr().as_ptr().write_bytes(0, bytes) };
+            EvalHashStorage::Allocated(allocation)
+        } else {
+            let mut table = Vec::with_capacity(size);
+            table.resize_with(size, EvalHashEntryAtomic::new);
+            EvalHashStorage::Regular(table)
+        };
+        let ptr = match &mut storage {
+            EvalHashStorage::Allocated(allocation) => allocation.ptr().cast(),
+            EvalHashStorage::Regular(table) => NonNull::new(table.as_mut_ptr()).unwrap(),
+        };
 
         Self {
-            table: table.into_boxed_slice(),
+            ptr,
+            len: size,
             mask: size.saturating_sub(1),
+            storage,
         }
+    }
+
+    #[inline]
+    fn table(&self) -> &[EvalHashEntryAtomic] {
+        // SAFETY: ptr は型のアラインメントを満たし、len 個の初期化済みエントリを指す。
+        // 空の場合も非 null で整列済み。storage が領域を所有し、返す参照は self より長生きしない。
+        // storage 内の Vec から要素を借用・再確保しないため、保持した生ポインタは有効。
+        // 共有参照からの変更はエントリ内の atomic 操作に限る。
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    fn allocation_kind(&self) -> AllocKind {
+        match &self.storage {
+            EvalHashStorage::Allocated(allocation) => allocation.kind(),
+            EvalHashStorage::Regular(_) => AllocKind::Regular,
+        }
+    }
+
+    /// Windows の明示的な Large Pages 確保に成功したかを返す。
+    pub fn uses_large_pages(&self) -> bool {
+        self.allocation_kind().is_explicit_large_pages()
+    }
+
+    /// Linux/Android の huge-page hint 要求に成功したかを返す。実際の配置は OS が決める。
+    pub fn huge_page_hint_requested(&self) -> bool {
+        self.allocation_kind().is_huge_page_hint()
     }
 
     pub fn probe(&self, key: u64) -> Option<i32> {
         // key 0 は未書込 entry (0, 0) と区別できないため常に miss とする
-        if self.table.is_empty() || key == 0 {
+        if self.len == 0 || key == 0 {
             return None;
         }
         #[cfg(feature = "diagnostics")]
         stats::record_probe();
-        let entry = &self.table[self.index(key)];
+        let entry = &self.table()[self.index(key)];
         let (stored_key, stored_score) = entry.load_pair();
         if stored_key != key {
             return None;
@@ -203,11 +268,11 @@ impl EvalHash {
     }
 
     pub fn store(&self, key: u64, score: i32) {
-        if self.table.is_empty() || key == 0 {
+        if self.len == 0 || key == 0 {
             return;
         }
         let idx = self.index(key);
-        let entry = &self.table[idx];
+        let entry = &self.table()[idx];
         // i32 → u32 → u64: 符号付き整数をビットパターンを保持したまま拡張
         // probe時に逆変換で元の値を復元する
         entry.store_pair(key, score as u32 as u64);
@@ -218,26 +283,30 @@ impl EvalHash {
     /// 評価設定 (EvalFile / FV_SCALE / bucket routing / MaterialLevel 等) の変更後に
     /// 旧設定の評価値が key 一致で hit するのを防ぐため、TT クリアと同じ箇所で呼ぶ。
     pub fn clear(&self) {
-        for entry in self.table.iter() {
+        for entry in self.table() {
             entry.store_pair(0, 0);
         }
     }
 
     pub fn prefetch(&self, key: u64) {
-        if self.table.is_empty() {
+        if self.len == 0 {
             return;
         }
 
         let idx = self.index(key);
-        let entry_ptr = unsafe { self.table.as_ptr().add(idx) } as *const u8;
+        // SAFETY: len は 2 のべき乗で mask == len - 1 のため idx < len。
+        // ptr は storage が所有する生存中の領域を指す。
+        let entry_ptr = unsafe { self.ptr.as_ptr().add(idx) } as *const u8;
 
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: entry_ptr は生存中のエントリを指し、prefetch は内容を変更しない。
         unsafe {
             use std::arch::x86_64::_mm_prefetch;
             _mm_prefetch(entry_ptr as *const i8, 3);
         }
 
         #[cfg(target_arch = "aarch64")]
+        // SAFETY: entry_ptr は生存中のエントリを指し、prefetch は内容を変更しない。
         unsafe {
             use std::arch::aarch64::_prefetch;
             _prefetch(entry_ptr as *const i8, 0, 3);
@@ -277,6 +346,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_eval_hash_regular_storage_survives_move() {
+        let hash = EvalHash::new(1);
+        assert!(matches!(hash.storage, EvalHashStorage::Regular(_)));
+        hash.store(1, -42);
+        let moved = std::sync::Arc::new(hash);
+        moved.prefetch(1);
+        assert_eq!(moved.probe(1), Some(-42));
+        moved.store(2, 123);
+        assert_eq!(moved.probe(2), Some(123));
+        moved.clear();
+        assert_eq!(moved.probe(1), None);
+        assert_eq!(moved.probe(2), None);
+    }
+
+    #[test]
+    fn test_eval_hash_backends_fresh_random_roundtrip_clear() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<EvalHash>();
+        for large_pages in [false, true] {
+            let hash = EvalHash::new_with_large_pages(3, large_pages);
+            assert_eq!(hash.len, (2 << 20) / mem::size_of::<EvalHashEntryAtomic>());
+            assert_eq!(hash.mask, hash.len - 1);
+            assert_eq!(matches!(hash.storage, EvalHashStorage::Allocated(_)), large_pages);
+            if !large_pages {
+                assert!(!hash.uses_large_pages());
+                assert!(!hash.huge_page_hint_requested());
+            }
+            assert!(hash.table().iter().all(|entry| entry.load_pair() == (0, 0)));
+            let mut key = 0x1234_5678_9abc_def0u64;
+            let mut keys = Vec::new();
+            for _ in 0..4096 {
+                key ^= key << 13;
+                key ^= key >> 7;
+                key ^= key << 17;
+                assert_eq!(hash.probe(key), None);
+                keys.push(key);
+            }
+            for &key in &keys {
+                let score = (key >> 32) as i32;
+                hash.prefetch(key);
+                hash.store(key, score);
+                assert_eq!(hash.probe(key), Some(score));
+            }
+            for score in [i32::MIN, -1, 0, 1, i32::MAX] {
+                hash.store(1, score);
+                assert_eq!(hash.probe(1), Some(score));
+            }
+            let collision = 1 + hash.len as u64;
+            hash.store(collision, 42);
+            assert_eq!(hash.probe(1), None);
+            assert_eq!(hash.probe(collision), Some(42));
+            hash.store(0, 42);
+            assert_eq!(hash.probe(0), None);
+            hash.clear();
+            assert!(hash.table().iter().all(|entry| entry.load_pair() == (0, 0)));
+            assert!(keys.iter().all(|&key| hash.probe(key).is_none()));
+        }
+    }
+
+    #[test]
+    fn test_eval_hash_backends_zero_size() {
+        for large_pages in [false, true] {
+            let hash = EvalHash::new_with_large_pages(0, large_pages);
+            assert!(hash.table().is_empty());
+            assert!(!hash.uses_large_pages());
+            assert!(!hash.huge_page_hint_requested());
+            hash.store(1, 42);
+            hash.prefetch(1);
+            hash.clear();
+            assert_eq!(hash.probe(1), None);
+        }
+    }
+
+    #[test]
     fn test_eval_hash_store_probe() {
         let hash = EvalHash::new(1);
         let key = 0x1234_5678_9ABC_DEF0;
@@ -310,7 +453,7 @@ mod tests {
     fn test_eval_hash_size_zero() {
         // サイズ0でも安全に動作すること
         let hash = EvalHash::new(0);
-        assert!(hash.table.is_empty());
+        assert!(hash.table().is_empty());
         assert_eq!(hash.probe(0x1234), None);
         hash.store(0x1234, 100); // パニックしないこと
         hash.prefetch(0x1234); // パニックしないこと

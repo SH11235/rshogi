@@ -239,6 +239,8 @@ pub struct Search {
     tt_size_mb: usize,
     /// EvalHashのサイズ（MB）
     eval_hash_size_mb: usize,
+    /// EvalHash の確保時に Large Pages を試みるか。
+    eval_hash_large_pages: bool,
     /// 停止フラグ
     stop: Arc<AtomicBool>,
     /// ponderhit通知フラグ
@@ -691,7 +693,7 @@ impl Search {
         self.tt.write_stats()
     }
 
-    /// 新しいSearchを作成
+    /// 通常ページの EvalHash を持つ新しいSearchを作成
     ///
     /// # Arguments
     /// * `tt_size_mb` - 置換表のサイズ（MB）
@@ -699,14 +701,23 @@ impl Search {
         Self::new_with_eval_hash(tt_size_mb, DEFAULT_EVAL_HASH_SIZE_MB)
     }
 
-    /// 新しいSearchを作成し、EvalHashサイズも同時に指定する。
+    /// 新しいSearchを作成し、通常ページの EvalHash サイズも同時に指定する。
     ///
     /// # Arguments
     /// * `tt_size_mb` - 置換表のサイズ（MB）
     /// * `eval_hash_size_mb` - EvalHash のサイズ（MB）
     pub fn new_with_eval_hash(tt_size_mb: usize, eval_hash_size_mb: usize) -> Self {
+        Self::new_with_eval_hash_large_pages(tt_size_mb, eval_hash_size_mb, false)
+    }
+
+    /// EvalHash のサイズと Large Pages の使用設定を指定して作成する。
+    pub fn new_with_eval_hash_large_pages(
+        tt_size_mb: usize,
+        eval_hash_size_mb: usize,
+        large_pages: bool,
+    ) -> Self {
         let tt = Arc::new(TranspositionTable::new(tt_size_mb));
-        let eval_hash = Arc::new(EvalHash::new(eval_hash_size_mb));
+        let eval_hash = Arc::new(EvalHash::new_with_large_pages(eval_hash_size_mb, large_pages));
         let stop = Arc::new(AtomicBool::new(false));
         let ponderhit_flag = Arc::new(AtomicBool::new(false));
         let increase_depth_shared = Arc::new(AtomicBool::new(true));
@@ -728,6 +739,7 @@ impl Search {
             eval_hash,
             tt_size_mb,
             eval_hash_size_mb,
+            eval_hash_large_pages: large_pages,
             stop,
             ponderhit_flag,
             start_time: None,
@@ -802,13 +814,31 @@ impl Search {
     /// USIプロトコルでは `setoption` は探索中に送られないため、
     /// 通常の使用では問題ない。
     pub fn resize_eval_hash(&mut self, size_mb: usize) {
-        self.eval_hash = Arc::new(EvalHash::new(size_mb));
+        // 全 worker の参照を空の表へ差し替え、新しい領域の確保前に旧表を手放す。
+        // 呼び出し側が eval_hash() の Arc を保持している場合、その参照の寿命までは残る。
+        self.replace_eval_hash(Arc::new(EvalHash::new(0)));
+        self.replace_eval_hash(Arc::new(EvalHash::new_with_large_pages(
+            size_mb,
+            self.eval_hash_large_pages,
+        )));
         self.eval_hash_size_mb = size_mb;
+    }
+
+    fn replace_eval_hash(&mut self, eval_hash: Arc<EvalHash>) {
+        self.eval_hash = eval_hash;
         // workerが存在する場合、EvalHash参照を更新
         if let Some(worker) = &mut self.worker {
             worker.eval_hash = Arc::clone(&self.eval_hash);
         }
         self.thread_pool.update_eval_hash(Arc::clone(&self.eval_hash));
+    }
+
+    /// Large Pages の使用設定を変更し、現在のサイズで EvalHash を再確保する。
+    pub fn set_eval_hash_large_pages(&mut self, large_pages: bool) {
+        if self.eval_hash_large_pages != large_pages {
+            self.eval_hash_large_pages = large_pages;
+            self.resize_eval_hash(self.eval_hash_size_mb);
+        }
     }
 
     /// EvalHash を in-place でクリアする（worker と共有する Arc をそのまま使う）
@@ -2590,6 +2620,33 @@ mod tests {
         let handle = search.ponderhit_handle();
         handle.signal();
         assert!(search.ponderhit_flag_for_test());
+    }
+
+    #[test]
+    fn eval_hash_defaults_and_replacement_release_old_tables() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                for mut search in [Search::new(1), Search::new_with_eval_hash(1, 1)] {
+                    assert!(!search.eval_hash_large_pages);
+                    assert!(!search.eval_hash.uses_large_pages());
+                    assert!(!search.eval_hash.huge_page_hint_requested());
+                    search.set_num_threads(2);
+                    for large_pages in [true, false] {
+                        let old = Arc::downgrade(&search.eval_hash);
+                        search.set_eval_hash_large_pages(large_pages);
+                        assert!(old.upgrade().is_none());
+                        let old = Arc::downgrade(&search.eval_hash);
+                        search.resize_eval_hash(1);
+                        assert!(old.upgrade().is_none());
+                        search.eval_hash.store(1, 42);
+                        assert_eq!(search.eval_hash.probe(1), Some(42));
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

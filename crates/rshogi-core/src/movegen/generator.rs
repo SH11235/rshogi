@@ -1442,7 +1442,7 @@ impl Position {
 
         // 自玉側の利きが一切なければ詰みには遠い
         let occ_with_pawn = self.occupied() | Bitboard::from_square(to);
-        if (self.attackers_to_occ(to, occ_with_pawn) & self.pieces_c(us)).is_empty() {
+        if self.attackers_to_color_occ(us, to, occ_with_pawn).is_empty() {
             return true;
         }
 
@@ -1461,7 +1461,7 @@ impl Position {
         escape_bb ^= Bitboard::from_square(to);
 
         for king_to in escape_bb.iter() {
-            if (self.attackers_to_occ(king_to, occ_with_pawn) & self.pieces_c(us)).is_empty() {
+            if self.attackers_to_color_occ(us, king_to, occ_with_pawn).is_empty() {
                 return true; // 退路があるので打ち歩詰めではない
             }
         }
@@ -1547,14 +1547,15 @@ impl Position {
 
     /// 指定マスに指定手番の利きがあるか
     fn is_attacked_by(&self, c: Color, sq: Square, occupied: Bitboard) -> bool {
-        let attackers = self.attackers_to_occ(sq, occupied);
-        !(attackers & self.pieces_c(c)).is_empty()
+        let attackers = self.attackers_to_color_occ(c, sq, occupied);
+        !attackers.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME};
     use crate::types::{File, PieceType, Rank, Square};
 
     #[test]
@@ -2151,19 +2152,12 @@ mod tests {
 
     /// 平手
     const PERFT_HIRATE: &str = crate::position::SFEN_HIRATE;
-    /// 合法手の多い「指し手生成祭り」の局面（打つ手・成る手が多い）。
-    /// YaneuraOu の unit test の `matsuri_sfen` と同じ局面で、SFEN の持ち駒の並び順だけが違う。
-    const PERFT_MATSURI: &str =
-        "l6nl/5+P1gk/2np1S3/p1p4Pp/3P2Sp1/1PPb2P1P/P5GS1/R8/LN4bKL w RGgsn5p 1";
     /// 後手玉に飛車で王手がかかっている局面（移動合い・合駒打ち・玉の移動）
     const PERFT_EVASION: &str = "lnsgkgsnl/1r5b1/pppp1pppp/9/4R4/9/PPPP1PPPP/1B7/LNSGKGSNL w Pp 1";
     /// 1二歩打が打ち歩詰めになる局面。歩を取れる 2一銀は 9一飛に pin されている。
     const PERFT_PAWN_DROP_MATE: &str = "R6sk/9/7G1/9/9/9/9/9/4K4 b P 1";
     /// 5三歩打が 7五角の利きを遮り、玉が 4二へ逃げられるので打ち歩詰めにならない局面
     const PERFT_PAWN_DROP_BLOCKS_BISHOP: &str = "R8/2G1k4/9/2S6/2BN2N2/9/9/9/4K4 b P 1";
-    /// 双方に持ち駒と成駒がある中盤の実戦形
-    const PERFT_MIDGAME: &str =
-        "l2+R3nl/3s1kg2/3pppsp1/p1p3p1p/2lS3P1/P4PP1P/1PNPP1N2/2K1g1SR1/+b4G2L w BGN2p 46";
 
     /// 既知の perft 値と一致することを確認する。
     ///

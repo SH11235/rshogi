@@ -16,12 +16,26 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### 互換性のない変更と移行手順
 
+- **ライブラリ利用者の移行: `position::StateInfo::hand_snapshot` の型と意味を変更**:
+  公開フィールドの型を `[Hand; 2]` から `Hand` に変更し、その局面の手番側の持ち駒だけを保存する。
+  `Position::state()` / `state_mut()` 経由での参照・更新も対象となる。
+  `state.hand_snapshot[side.index()]` でその局面の手番側を参照していたコードは、添字を外すこと。
+  フィールドを初期化・更新するコードも、その局面の手番側の `Hand` を渡す形に変更する。
+  現在局面の任意の色の持ち駒は `Position::hand(color)` で取得できる。
+  過去局面の両者の持ち駒が必要な場合は、各局面で別途保存すること。
+
 - **探索のパス権処理を opt-in の `search-pass-rules` に変更**: 既定で有効な否定形 feature
   `search-no-pass-rules` をやめ、探索でパス権を評価する build だけ `search-pass-rules` を明示する形にした。
   既定 build の探索は変わらない。`--no-default-features` で `search-no-pass-rules` を指定していなかった
   構成（`cargo xtask build` の preset edition を含む）は、探索のパス権評価が有効から無効に変わる。
   パス権つきの探索が必要な場合は `search-pass-rules` を指定すること。`search-no-pass-rules` は
   何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
+
+- **Bitboard256 の AVX2 経路を `target_feature` に応じた自動選択に変更**: `x86_64` で
+  `target_feature = "avx2"` が有効なら、`simd_avx2` の指定なしで AVX2 経路を使用する。
+  AVX2 対応 CPU 向けの build では `-C target-cpu=native` または `-C target-feature=+avx2` を指定すること。
+  AVX2 経路を無効にする場合は feature の指定を外すだけではなく、`-C target-feature=-avx2` を指定する。
+  `simd_avx2` は何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
 
 - **tournament / spsa の `--max-moves` を開始局面までの手数を含む総手数で判定**: これまでは開始局面から
   対局内で指した手数だけを数えていたため、手数付きの開始局面集では本番の手数制限より長く対局していた
@@ -45,6 +59,40 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   置換表の衝突時に探索木が変わりうるため計測・実験用。既定 build の挙動は変わらない。
 - **`use-lazy-evaluate` の TT eval 再利用ノードで NNUE アキュムレータを更新しないように**:
   ノードごとの network ロック取得をなくした。この feature を有効にした build 同士では探索結果 (ノード数) は変わらない。
+
+- **AVX-512 の affine 変換で出力が少ない層の積和を複数アキュムレータに分割**: LayerStacks L1 (1536→16) のように
+  出力レジスタが 1〜3 本になる層で、入力 chunk ごとの積和を独立した複数のチェーンに分けて最後に合算する。
+  出力は bit 一致し、探索結果 (ノード数) は変わらない。
+
+- **通常探索と root の指し手ループで `pseudo_legal` の再検査を省略**:
+  `MovePicker::next_move` が返す手の pseudo-legal 契約に依存し、`is_legal` だけを検査する。
+  探索結果 (ノード数) は変わらない。
+
+- **駒の配置更新の 128bit 分岐なし化**: 配置・除去時の Bitboard 更新を、128bit 幅の XOR と
+  駒種別マスクで行うようにした。探索結果 (ノード数) は変わらない。
+
+- **王手情報の更新で遠方駒の step 利きと飛車の利きを再利用**:
+  ピン候補の絞り込みに占有非依存の利きを使い、香の王手升を飛車の利きから求める。探索結果 (ノード数) は変わらない。
+
+- **EvalHashLargePages**: EvalHash の Large Pages 確保を要求する USI オプションを追加（既定 true）。
+  USI エンジンでは既定で TT に加えて EvalHash も Large Pages で確保を試み、権限や容量が足りない場合は
+  通常ページへフォールバックする。既定サイズの Large Pages 使用量は定常時 256 MiB から 512 MiB に増え、
+  TT の取り直し時は瞬間最大 768 MiB となる。`EvalHashLargePages=false` で EvalHash を通常ページに戻せる。
+  ライブラリとツールの EvalHash は従来どおり通常ページが既定。
+
+- **LayerStacks の Finny 差分収集を SIMD 化**: 駒リストの差分をビットマスクで抽出し、
+  特徴量インデックスを一括生成する。AVX-512BW (VL なしを含む) / AVX2 に対応し、
+  その他の構成ではスカラー処理を使う。探索結果 (ノード数) は変わらない。
+
+- **利き判定の占有 Bitboard の受け渡しと単色判定を効率化**:
+  占有の上下半分を汎用レジスタで渡し、片方の色だけが必要な詰み判定・合法性判定では単色版を使う。
+  探索結果 (ノード数) は変わらない。
+
+- **遠方駒の利きテーブルをコンパイル時に生成**: 実行時の初期化と参照時の初期化確認を不要にし、
+  32 バイト以上のアラインメントをコンパイル時に保証する。探索結果 (ノード数) は変わらない。
+
+- **手駒の BonaPiece 生成をテーブル参照に変更**: 駒種ごとの分岐を基点テーブルの参照に置き換え、
+  先手・後手視点のペアをまとめて計算する。探索結果 (ノード数) は変わらない。
 
 ## v1.5.0 — 2026-09-20
 

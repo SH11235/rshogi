@@ -146,7 +146,7 @@ impl Position {
         self.state_mut().material_value = compute_material_value(self);
 
         // 千日手判定に使う手駒スナップショットを保存（開始局面へ戻る千日手でも手駒を比較できるようにする）
-        let hand_snapshot = self.hand;
+        let hand_snapshot = self.hand[self.side_to_move.index()];
         self.state_mut().hand_snapshot = hand_snapshot;
 
         Ok(())

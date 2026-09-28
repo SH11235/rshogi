@@ -180,6 +180,35 @@ pub struct ExtBonaPiece {
     pub fw: BonaPiece,
 }
 
+/// 所有者・駒種ごとの手駒1枚目の両視点インデックス。
+/// 玉・成駒と未使用の要素はゼロ。各ペアは隙間なく4バイトに収まる。
+const HAND_BASE: [[ExtBonaPiece; 16]; 2] = make_hand_base();
+
+const fn make_hand_base() -> [[ExtBonaPiece; 16]; 2] {
+    let pieces = [
+        (PieceType::Pawn, F_HAND_PAWN, E_HAND_PAWN),
+        (PieceType::Lance, F_HAND_LANCE, E_HAND_LANCE),
+        (PieceType::Knight, F_HAND_KNIGHT, E_HAND_KNIGHT),
+        (PieceType::Silver, F_HAND_SILVER, E_HAND_SILVER),
+        (PieceType::Gold, F_HAND_GOLD, E_HAND_GOLD),
+        (PieceType::Bishop, F_HAND_BISHOP, E_HAND_BISHOP),
+        (PieceType::Rook, F_HAND_ROOK, E_HAND_ROOK),
+    ];
+    let mut table = [[ExtBonaPiece::ZERO; 16]; 2];
+    let mut i = 0;
+    while i < pieces.len() {
+        let (pt, friend, enemy) = pieces[i];
+        table[Color::Black as usize][pt as usize] =
+            ExtBonaPiece::new(BonaPiece::new(friend), BonaPiece::new(enemy));
+        table[Color::White as usize][pt as usize] =
+            ExtBonaPiece::new(BonaPiece::new(enemy), BonaPiece::new(friend));
+        i += 1;
+    }
+    table
+}
+
+const _: () = assert!(std::mem::size_of::<ExtBonaPiece>() == std::mem::size_of::<u32>());
+
 impl ExtBonaPiece {
     /// ゼロ値（無効）
     pub const ZERO: ExtBonaPiece = ExtBonaPiece {
@@ -243,9 +272,31 @@ impl ExtBonaPiece {
         if count == 0 {
             return Self::ZERO;
         }
-        let fb = BonaPiece::from_hand_piece(Color::Black, owner, pt, count);
-        let fw = BonaPiece::from_hand_piece(Color::White, owner, pt, count);
-        Self { fb, fw }
+        let b = HAND_BASE[owner as usize][pt as usize];
+        let packed = u32::from(b.fb.0) | (u32::from(b.fw.0) << 16);
+        if packed == 0 {
+            // 玉・成駒・未使用要素では ZERO を返す。
+            return Self::ZERO;
+        }
+        // 各基点は FE_HAND_END 未満、count は u8 なので半語間の桁上がりはない。
+        let packed = packed + (u32::from(count) - 1) * 0x0001_0001;
+        let bp = Self {
+            fb: BonaPiece::new(packed as u16),
+            fw: BonaPiece::new((packed >> 16) as u16),
+        };
+        debug_assert!(
+            (bp.fb.0 as usize) < FE_HAND_END,
+            "Hand piece BonaPiece {} exceeds FE_HAND_END {}",
+            bp.fb.0,
+            FE_HAND_END
+        );
+        debug_assert!(
+            (bp.fw.0 as usize) < FE_HAND_END,
+            "Hand piece BonaPiece {} exceeds FE_HAND_END {}",
+            bp.fw.0,
+            FE_HAND_END
+        );
+        bp
     }
 }
 
@@ -377,7 +428,48 @@ impl BonaPiece {
     ///
     /// 注意: countは「現在の枚数」であり、「追加する枚数」ではない。
     /// count=1 のとき base が返る（1枚目のBonaPiece）。
+    #[inline]
     pub fn from_hand_piece(
+        perspective: Color,
+        owner: Color,
+        pt: PieceType,
+        count: u8,
+    ) -> BonaPiece {
+        if count == 0 {
+            return BonaPiece::ZERO;
+        }
+        let b = HAND_BASE[owner as usize][pt as usize];
+        let base = if perspective == Color::Black {
+            b.fb
+        } else {
+            b.fw
+        };
+        if base == BonaPiece::ZERO {
+            return BonaPiece::ZERO;
+        }
+        let bp = BonaPiece::new(base.0 + count as u16 - 1);
+        debug_assert!(
+            (bp.0 as usize) < FE_HAND_END,
+            "Hand piece BonaPiece {} exceeds FE_HAND_END {}",
+            bp.0,
+            FE_HAND_END
+        );
+        bp
+    }
+}
+
+/// HalfKP特徴量のインデックスを計算
+#[inline]
+pub fn halfkp_index(king_sq: Square, bona_piece: BonaPiece) -> usize {
+    king_sq.index() * FE_END + bona_piece.0 as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{File, Rank};
+
+    fn from_hand_piece_match(
         perspective: Color,
         owner: Color,
         pt: PieceType,
@@ -458,18 +550,63 @@ impl BonaPiece {
 
         bp
     }
-}
 
-/// HalfKP特徴量のインデックスを計算
-#[inline]
-pub fn halfkp_index(king_sq: Square, bona_piece: BonaPiece) -> usize {
-    king_sq.index() * FE_END + bona_piece.0 as usize
-}
+    #[test]
+    fn test_hand_base_matches_reference() {
+        for owner in [Color::Black, Color::White] {
+            for pt_index in 1..=PieceType::NUM {
+                let pt = PieceType::from_u8(pt_index as u8).unwrap();
+                let max_count = match pt {
+                    PieceType::Pawn => 18,
+                    PieceType::Lance | PieceType::Knight | PieceType::Silver | PieceType::Gold => 4,
+                    PieceType::Bishop | PieceType::Rook => 2,
+                    // 手駒にならない駒種は、枚数に関係なくゼロを返す。
+                    _ => u8::MAX,
+                };
+                for count in 1..=max_count {
+                    let pair = ExtBonaPiece::from_hand(owner, pt, count);
+                    for perspective in [Color::Black, Color::White] {
+                        let expected = from_hand_piece_match(perspective, owner, pt, count);
+                        let actual = if perspective == Color::Black {
+                            pair.fb
+                        } else {
+                            pair.fw
+                        };
+                        assert_eq!(actual, expected, "{owner:?} {perspective:?} {pt:?} {count}");
+                        assert_eq!(
+                            BonaPiece::from_hand_piece(perspective, owner, pt, count),
+                            expected,
+                            "{owner:?} {perspective:?} {pt:?} {count}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{File, Rank};
+    #[test]
+    fn test_hand_zero_count() {
+        for owner in [Color::Black, Color::White] {
+            for pt_index in 1..=PieceType::NUM {
+                let pt = PieceType::from_u8(pt_index as u8).unwrap();
+                assert_eq!(ExtBonaPiece::from_hand(owner, pt, 0), ExtBonaPiece::ZERO);
+                for perspective in [Color::Black, Color::White] {
+                    assert_eq!(
+                        BonaPiece::from_hand_piece(perspective, owner, pt, 0),
+                        from_hand_piece_match(perspective, owner, pt, 0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_hand_base_padding() {
+        for row in HAND_BASE {
+            assert_eq!(row[0], ExtBonaPiece::ZERO);
+            assert_eq!(row[15], ExtBonaPiece::ZERO);
+        }
+    }
 
     #[test]
     fn test_bona_piece_king_returns_zero() {

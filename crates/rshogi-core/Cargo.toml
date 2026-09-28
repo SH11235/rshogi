@@ -56,7 +56,8 @@ prepacked-nnue = ["dep:sha2"]
 search-stats = []
 # NNUE統計収集（refresh/update比率等のカウント）
 nnue-stats = []
-# SIMD最適化（AVX2）
+# Bitboard256 の AVX2 経路は target_feature に応じて自動選択する。
+# この feature は非推奨の互換用として残しており、何もしない。
 simd_avx2 = []
 diagnostics = []
 allocation-stats = []

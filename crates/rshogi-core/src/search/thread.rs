@@ -23,7 +23,6 @@ mod imp {
         stop: Arc<AtomicBool>,
         ponderhit: Arc<AtomicBool>,
         increase_depth_shared: Arc<AtomicBool>,
-        eval_hash: Arc<EvalHash>,
         search_tune_params: SearchTuneParams,
     }
 
@@ -43,7 +42,6 @@ mod imp {
                 stop,
                 ponderhit,
                 increase_depth_shared,
-                eval_hash: Arc::clone(&eval_hash),
                 search_tune_params,
             };
             pool.set_num_threads(num_threads, tt, eval_hash, max_moves_to_draw, search_tune_params);
@@ -60,14 +58,12 @@ mod imp {
         ) {
             let helper_count = num_threads.saturating_sub(1);
             if helper_count == self.threads.len() {
-                self.eval_hash = eval_hash;
                 self.search_tune_params = search_tune_params;
                 return;
             }
 
             self.wait_for_search_finished();
             self.threads.clear();
-            self.eval_hash = Arc::clone(&eval_hash);
             self.search_tune_params = search_tune_params;
 
             for id in 1..=helper_count {

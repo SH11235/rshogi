@@ -30,7 +30,7 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
         let mut bb = rook_step_effect(sq_king) & king_effect(sq_king) & bb_drop;
         while bb.is_not_empty() {
             let to = bb.pop();
-            if (pos.attackers_to(to) & pos.pieces_c(us)).is_empty() {
+            if pos.attackers_to_color_occ(us, to, occupied).is_empty() {
                 continue;
             }
             let bb_attacks = rook_step_effect(to);
@@ -49,7 +49,7 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
         let mut bb = pawn_effect(them, sq_king) & bb_drop;
         if bb.is_not_empty() {
             let to = bb.pop();
-            if !(pos.attackers_to(to) & pos.pieces_c(us)).is_empty() {
+            if !pos.attackers_to_color_occ(us, to, occupied).is_empty() {
                 let bb_attacks = lance_effect(us, to, Bitboard::EMPTY);
                 if !can_king_escape(pos, them, to, bb_attacks, occupied)
                     && !can_piece_capture(pos, them, to, pinned, occupied)
@@ -65,7 +65,7 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
         let mut bb = cross45_step_effect(sq_king) & bb_drop;
         while bb.is_not_empty() {
             let to = bb.pop();
-            if (pos.attackers_to(to) & pos.pieces_c(us)).is_empty() {
+            if pos.attackers_to_color_occ(us, to, occupied).is_empty() {
                 continue;
             }
             let bb_attacks = bishop_step_effect(to);
@@ -87,7 +87,7 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
         }
         while bb.is_not_empty() {
             let to = bb.pop();
-            if (pos.attackers_to(to) & pos.pieces_c(us)).is_empty() {
+            if pos.attackers_to_color_occ(us, to, occupied).is_empty() {
                 continue;
             }
             let bb_attacks = gold_effect(us, to);
@@ -115,7 +115,7 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
 
         while bb.is_not_empty() {
             let to = bb.pop();
-            if (pos.attackers_to(to) & pos.pieces_c(us)).is_empty() {
+            if pos.attackers_to_color_occ(us, to, occupied).is_empty() {
                 continue;
             }
             let bb_attacks = silver_effect(us, to);

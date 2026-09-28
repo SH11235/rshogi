@@ -348,6 +348,12 @@ impl MovePicker {
     ///
     /// 指し手が尽きたら `Move::NONE` を返す。
     ///
+    /// `Move::NONE` を除き、返す手は常に現局面で pseudo-legal である。
+    /// TT 手はコンストラクタで `pseudo_legal_with_all` による検査済みであり、
+    /// それ以外の手は指し手生成器の出力である。
+    /// 通常探索・root・qsearch・probcut の各ループはこの契約に依存し、`is_legal` だけを検査する。
+    /// 将来 killer 段など生成器以外から手を返す段を追加する場合は、TT 手と同じ検査が必要である。
+    ///
     /// ## 引数
     /// - `pos`: 現在の局面への参照（各呼び出しで一時的に借用）
     /// - `history`: HistoryTablesへの参照（スコアリング時に使用）
@@ -990,6 +996,98 @@ mod tests {
                         Stage::QCaptureInit
                     }
                 );
+            }
+        }
+    }
+
+    fn assert_picker_moves_pseudo_legal(
+        mut picker: MovePicker,
+        pos: &Position,
+        history: &HistoryTables,
+    ) {
+        let initial_stage = picker.stage;
+        loop {
+            let mv = picker.next_move(pos, history);
+            if mv.is_none() {
+                break;
+            }
+            assert!(
+                pos.pseudo_legal(mv),
+                "pseudo-legal でない手 {}: stage={initial_stage:?} tt={} all={} sfen={}",
+                mv.to_usi(),
+                picker.tt_move.to_usi(),
+                picker.generate_all_legal_moves,
+                pos.to_sfen()
+            );
+        }
+    }
+
+    #[test]
+    fn random_playouts_only_yield_pseudo_legal_moves() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let history = HistoryTables::new_boxed();
+        let keys = [ContHistKey::null_sentinel(); 6];
+        // 平手、合駒可能な王手、両王手、不成、後手番の駒打ちから手順を広げる。
+        for sfen in [
+            None,
+            Some("k8/9/9/9/4r4/9/9/9/4K4 b RBGSNLP 1"),
+            Some("k8/9/9/9/4r4/9/2b6/9/4K4 b GSNLP 1"),
+            Some("k8/5P3/3NL4/9/9/9/9/9/4K4 b RBGSNLP 1"),
+            Some("4k4/9/9/4p4/4P4/9/9/9/4K4 w RBGSNLPrbgsnlp 1"),
+        ] {
+            for seed in [0x5EED_u64, 0xCAFE] {
+                let mut rng = Xoshiro256PlusPlus::seed_from_u64(seed);
+                let mut pos = Position::new();
+                if let Some(sfen) = sfen {
+                    pos.set_sfen(sfen).unwrap();
+                } else {
+                    pos.set_hirate();
+                }
+
+                for ply in 0..128 {
+                    let mut legal = MoveList::new();
+                    generate_legal_all(&pos, &mut legal);
+                    let next = if legal.is_empty() {
+                        Move::NONE
+                    } else {
+                        legal.at(rng.random_range(0..legal.len()))
+                    };
+                    // 捕獲がある局面では ProbCut の TT 段階も通す。
+                    let valid_tt =
+                        legal.iter().copied().find(|&mv| pos.capture_stage(mv)).unwrap_or(next);
+                    // 自玉の同一升への移動は、升と駒情報が有効でも必ず不正になる。
+                    let king = pos.king_square(pos.side_to_move());
+                    let garbage_tt =
+                        Move::new_move_with_piece(king, king, false, pos.piece_on(king));
+                    assert!(!pos.pseudo_legal(garbage_tt));
+
+                    for all in [false, true] {
+                        for tt in [Move::NONE, valid_tt, garbage_tt] {
+                            for depth in [6, DEPTH_QS] {
+                                assert_picker_moves_pseudo_legal(
+                                    MovePicker::new(&pos, tt, depth, ply, keys, all),
+                                    &pos,
+                                    &history,
+                                );
+                            }
+                            let picker = if pos.in_check() {
+                                MovePicker::new_evasions(&pos, tt, ply, keys, all)
+                            } else {
+                                MovePicker::new_probcut(&pos, tt, Value::ZERO, ply, keys, all)
+                            };
+                            assert_picker_moves_pseudo_legal(picker, &pos, &history);
+                        }
+                    }
+
+                    if next.is_none() {
+                        break;
+                    }
+                    let gives_check = pos.gives_check(next);
+                    pos.do_move(next, gives_check);
+                }
             }
         }
     }

@@ -88,8 +88,8 @@ pub struct StateInfo {
     pub board_key: u64,
     /// 手駒ハッシュ
     pub hand_key: u64,
-    /// 手駒スナップショット（千日手判定用）
-    pub hand_snapshot: [Hand; Color::NUM],
+    /// この局面の手番側の手駒スナップショット（千日手判定用）
+    pub hand_snapshot: Hand,
     /// 前の局面のインデックス（StateInfoプール内）
     pub previous: usize,
     /// 王手している駒
@@ -133,7 +133,7 @@ impl StateInfo {
             pass_rights: 0, // パス権なし＝通常将棋
             board_key: 0,
             hand_key: 0,
-            hand_snapshot: [Hand::EMPTY; Color::NUM],
+            hand_snapshot: Hand::EMPTY,
             previous: Self::NO_PREVIOUS,
             checkers: Bitboard::EMPTY,
             blockers_for_king: [Bitboard::EMPTY; Color::NUM],

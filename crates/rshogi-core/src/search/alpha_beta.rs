@@ -1323,9 +1323,12 @@ impl SearchWorker {
             if mv == Move::NONE {
                 break;
             }
-            if !pos.pseudo_legal(mv) {
-                continue;
-            }
+            // MovePicker::next_move の契約により、返された手は現局面で pseudo-legal である。
+            debug_assert!(
+                pos.pseudo_legal(mv),
+                "MovePicker yielded non-pseudo-legal move {}",
+                mv.to_usi()
+            );
             if !pos.is_legal(mv) {
                 continue;
             }
@@ -2856,9 +2859,12 @@ impl SearchWorker {
             if mv == excluded_move {
                 continue;
             }
-            if !pos.pseudo_legal(mv) {
-                continue;
-            }
+            // MovePicker::next_move の契約により、返された手は現局面で pseudo-legal である。
+            debug_assert!(
+                pos.pseudo_legal(mv),
+                "MovePicker yielded non-pseudo-legal move {}",
+                mv.to_usi()
+            );
             if !pos.is_legal(mv) {
                 continue;
             }

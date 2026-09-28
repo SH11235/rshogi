@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Memory::{
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum AllocKind {
+pub(crate) enum AllocKind {
     /// Windows の MEM_LARGE_PAGES による確保に成功
     #[cfg(windows)]
     LargePages,
@@ -39,7 +39,7 @@ pub(super) enum AllocKind {
 impl AllocKind {
     /// Windows の明示的な Large Pages 確保に成功した種別か。
     /// Linux/Android の hint 要求は実際の backing を保証しないため含めない。
-    pub(super) fn is_explicit_large_pages(self) -> bool {
+    pub(crate) fn is_explicit_large_pages(self) -> bool {
         match self {
             #[cfg(windows)]
             AllocKind::LargePages => true,
@@ -50,7 +50,7 @@ impl AllocKind {
     }
 
     /// Linux/Android で huge-page hint の要求に成功した種別か。
-    pub(super) fn is_huge_page_hint(self) -> bool {
+    pub(crate) fn is_huge_page_hint(self) -> bool {
         match self {
             #[cfg(windows)]
             AllocKind::LargePages => false,
@@ -61,7 +61,7 @@ impl AllocKind {
     }
 }
 
-pub(super) struct Allocation {
+pub(crate) struct Allocation {
     ptr: NonNull<u8>,
     kind: AllocKind,
     #[cfg(not(windows))]
@@ -69,7 +69,9 @@ pub(super) struct Allocation {
 }
 
 impl Allocation {
-    pub(super) fn allocate(size: usize, alignment: usize) -> Self {
+    /// 非ゼロサイズの領域を確保する。内容の初期化は呼び出し側が行う。
+    pub(crate) fn allocate(size: usize, alignment: usize) -> Self {
+        assert!(size != 0, "allocation size must be nonzero");
         #[cfg(windows)]
         {
             debug_assert!(alignment.is_power_of_two(), "alignment must be power of two");
@@ -85,11 +87,11 @@ impl Allocation {
         }
     }
 
-    pub(super) fn ptr(&self) -> NonNull<u8> {
+    pub(crate) fn ptr(&self) -> NonNull<u8> {
         self.ptr
     }
 
-    pub(super) fn kind(&self) -> AllocKind {
+    pub(crate) fn kind(&self) -> AllocKind {
         self.kind
     }
 }
@@ -204,9 +206,9 @@ fn alloc_unix(size: usize, alignment: usize) -> Allocation {
 
     let alignment = max(alignment, page_align);
     let layout = Layout::from_size_align(size, alignment)
-        .expect("Invalid TT allocation layout")
+        .expect("Invalid allocation layout")
         .pad_to_align();
-    // SAFETY: layout は from_size_align が検証済み。TT は最小 2 cluster を確保するため size は 0 にならない。
+    // SAFETY: layout は from_size_align が検証済み。呼び出し側は非ゼロの size を渡す。
     // 返った領域は Allocation が単独所有し、Drop で同じ layout を使って解放する。
     let ptr = unsafe { alloc(layout) };
     if ptr.is_null() {
@@ -234,7 +236,7 @@ fn alloc_unix(size: usize, alignment: usize) -> Allocation {
     let kind = AllocKind::Regular;
 
     Allocation {
-        ptr: NonNull::new(ptr).expect("TT allocation returned null"),
+        ptr: NonNull::new(ptr).expect("Allocation returned null"),
         kind,
         layout,
     }
@@ -266,6 +268,12 @@ unsafe impl Send for Allocation {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "allocation size must be nonzero")]
+    fn zero_size_is_rejected() {
+        Allocation::allocate(0, 64);
+    }
 
     #[test]
     fn regular_pages_report_neither_status() {

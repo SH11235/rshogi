@@ -1,12 +1,11 @@
 //! 遠方駒（香・角・飛）の利きをYaneuraOu互換のQugiyアルゴリズムで計算する
 
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicPtr, Ordering};
-
 use crate::types::{Color, Square};
 
 use super::utils::msb64;
 use super::{Bitboard, Bitboard256, FILE_BB, RANK_BB};
+
+const _: () = assert!(std::mem::align_of::<SliderTable>() >= 32);
 
 /// 8方向の単一レイ（やねうら王のEffect8::Directに対応）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,60 +44,114 @@ struct SliderTable {
     qugiy_step_effect: [[Bitboard; Square::NUM]; 6],
 }
 
-/// OnceLock はテスト・初回アクセスのフォールバック用に保持
-static SLIDER_ATTACKS_LOCK: OnceLock<SliderTable> = OnceLock::new();
+static SLIDER_TABLE: SliderTable = SliderTable::build();
 
-/// ホットパス用のキャッシュポインタ。初期化後は non-null。
-static SLIDER_ATTACKS_PTR: AtomicPtr<SliderTable> = AtomicPtr::new(std::ptr::null_mut());
+/// API 互換用。テーブルはコンパイル時に生成されるため、何もしない。
+pub fn ensure_slider_initialized() {}
 
-/// テーブルの初期化を保証する。起動時に 1 回呼ぶこと。
-pub fn ensure_slider_initialized() {
-    let table = SLIDER_ATTACKS_LOCK.get_or_init(SliderTable::new);
-    // AtomicPtr は *mut を要求するが、このポインタを経由した書き込みは行わない
-    SLIDER_ATTACKS_PTR.store(table as *const SliderTable as *mut SliderTable, Ordering::Release);
-}
-
-/// ホットパス用: 単純なポインタ load でテーブル参照を返す。
-/// `ensure_slider_initialized()` が先に呼ばれていれば atomic load 1 回 + 予測ヒット分岐のみ。
-/// 未初期化（テスト等）の場合は OnceLock にフォールバック。
+/// コンパイル時に生成した利きテーブルを参照する。
 #[inline(always)]
 fn slider_attacks() -> &'static SliderTable {
-    let ptr = SLIDER_ATTACKS_PTR.load(Ordering::Acquire);
-    if !ptr.is_null() {
-        // SAFETY: ensure_slider_initialized() が ptr を有効なアドレスに設定済み。
-        // SliderTable は 'static で解放されない。
-        unsafe { &*ptr }
-    } else {
-        SLIDER_ATTACKS_LOCK.get_or_init(SliderTable::new)
-    }
+    &SLIDER_TABLE
 }
 
 impl SliderTable {
-    fn new() -> Self {
-        let lance_step_effect = init_lance_step_effect();
-        let qugiy_rook_mask = init_qugiy_rook_mask();
-        let qugiy_bishop_mask = init_qugiy_bishop_mask();
-        let qugiy_step_effect = init_qugiy_step_effect();
-
-        SliderTable {
-            lance_step_effect,
-            qugiy_rook_mask,
-            qugiy_bishop_mask,
-            qugiy_step_effect,
+    const fn build() -> Self {
+        // 盤面の下位レーンは 63 マス、上位レーンは残りの 18 マスを持つ。
+        const fn ray(file: i32, rank: i32, df: i32, dr: i32) -> Bitboard {
+            let mut lo = 0u64;
+            let mut hi = 0u64;
+            let mut f = file + df;
+            let mut r = rank + dr;
+            while f >= 0 && f < 9 && r >= 0 && r < 9 {
+                let sq = (f * 9 + r) as usize;
+                if sq < 63 {
+                    lo |= 1u64 << sq;
+                } else {
+                    hi |= 1u64 << (sq - 63);
+                }
+                f += df;
+                r += dr;
+            }
+            Bitboard::from_u64_pair(lo, hi)
         }
+
+        // 128 bit 全体のバイト反転には、各レーンの反転とレーン交換が必要。
+        const fn byte_reverse(bb: Bitboard) -> Bitboard {
+            Bitboard::from_u64_pair(bb.p1().swap_bytes(), bb.p0().swap_bytes())
+        }
+
+        const STEP_DIRS: [(i32, i32); 6] = [
+            (-1, -1), // 右上
+            (-1, 0),  // 右
+            (-1, 1),  // 右下
+            (1, -1),  // 左上
+            (1, 0),   // 左
+            (1, 1),   // 左下
+        ];
+        let mut table = Self {
+            lance_step_effect: [[Bitboard::EMPTY; Square::NUM]; Color::NUM],
+            qugiy_rook_mask: [[Bitboard::EMPTY; 2]; Square::NUM],
+            qugiy_bishop_mask: [[Bitboard256::ZERO; 2]; Square::NUM],
+            qugiy_step_effect: [[Bitboard::EMPTY; Square::NUM]; 6],
+        };
+        let mut sq = 0;
+        while sq < Square::NUM {
+            let file = (sq / 9) as i32;
+            let rank = (sq % 9) as i32;
+            table.lance_step_effect[Color::Black.index()][sq] = ray(file, rank, 0, -1);
+            table.lance_step_effect[Color::White.index()][sq] = ray(file, rank, 0, 1);
+
+            let mut dir = 0;
+            while dir < STEP_DIRS.len() {
+                let (df, dr) = STEP_DIRS[dir];
+                let bb = ray(file, rank, df, dr);
+                table.qugiy_step_effect[dir][sq] = if df < 0 { byte_reverse(bb) } else { bb };
+                dir += 1;
+            }
+
+            let right_rev = table.qugiy_step_effect[1][sq];
+            let left = table.qugiy_step_effect[4][sq];
+            // unpack(right_rev, left) の下位・上位レーンをそれぞれ並べる。
+            table.qugiy_rook_mask[sq][0] = Bitboard::from_u64_pair(left.p0(), right_rev.p0());
+            table.qugiy_rook_mask[sq][1] = Bitboard::from_u64_pair(left.p1(), right_rev.p1());
+
+            let right_up_rev = table.qugiy_step_effect[0][sq];
+            let right_down_rev = table.qugiy_step_effect[2][sq];
+            let left_up = table.qugiy_step_effect[3][sq];
+            let left_down = table.qugiy_step_effect[5][sq];
+            // 各 128 bit レーンに左方向と反転済み右方向を組にして格納する。
+            table.qugiy_bishop_mask[sq][0] = Bitboard256::from_u64_array([
+                left_up.p0(),
+                right_up_rev.p0(),
+                left_down.p0(),
+                right_down_rev.p0(),
+            ]);
+            table.qugiy_bishop_mask[sq][1] = Bitboard256::from_u64_array([
+                left_up.p1(),
+                right_up_rev.p1(),
+                left_down.p1(),
+                right_down_rev.p1(),
+            ]);
+            sq += 1;
+        }
+        table
     }
 }
 
+#[cfg(test)]
 fn in_bounds(file: i32, rank: i32) -> bool {
     (0..=8).contains(&file) && (0..=8).contains(&rank)
 }
 
+#[cfg(test)]
 fn square_from_coords(file: i32, rank: i32) -> Square {
     debug_assert!(in_bounds(file, rank), "coordinates out of bounds");
     // SAFETY: 呼び出し元/上のassertで盤内を保証
     unsafe { Square::from_u8_unchecked((file * 9 + rank) as u8) }
 }
 
+#[cfg(test)]
 fn init_lance_step_effect() -> [[Bitboard; Square::NUM]; Color::NUM] {
     let mut table = [[Bitboard::EMPTY; Square::NUM]; Color::NUM];
 
@@ -128,6 +181,7 @@ fn init_lance_step_effect() -> [[Bitboard; Square::NUM]; Color::NUM] {
     table
 }
 
+#[cfg(test)]
 fn init_qugiy_rook_mask() -> [[Bitboard; 2]; Square::NUM] {
     let mut mask = [[Bitboard::EMPTY; 2]; Square::NUM];
 
@@ -161,6 +215,7 @@ fn init_qugiy_rook_mask() -> [[Bitboard; 2]; Square::NUM] {
     mask
 }
 
+#[cfg(test)]
 fn init_qugiy_bishop_mask() -> [[Bitboard256; 2]; Square::NUM] {
     // 左上, 左下, 右上, 右下（rooksと同じくfile増加方向を「左」とみなす）
     const DIRS: [(i32, i32); 4] = [(1, -1), (1, 1), (-1, -1), (-1, 1)];
@@ -211,6 +266,7 @@ fn init_qugiy_bishop_mask() -> [[Bitboard256; 2]; Square::NUM] {
     mask
 }
 
+#[cfg(test)]
 fn init_qugiy_step_effect() -> [[Bitboard; Square::NUM]; 6] {
     // DIRECT_U/DIRECT_Dは持たない6方向。byte_reverse前提の方向はreverse=true。
     const STEP_DIRS: [(i32, i32); 6] = [
@@ -625,6 +681,39 @@ pub fn direct_of(sq1: Square, sq2: Square) -> Option<Direct> {
 mod tests {
     use super::*;
     use crate::types::{Color, File, Rank};
+
+    #[test]
+    fn test_const_slider_table_matches_runtime_bytes() {
+        fn bytes(table: &SliderTable) -> Vec<u8> {
+            // 構造体のパディングを読まず、全フィールドの全レーンをバイト列にする。
+            table
+                .lance_step_effect
+                .iter()
+                .flatten()
+                .copied()
+                .chain(table.qugiy_rook_mask.iter().flatten().copied())
+                .chain(table.qugiy_bishop_mask.iter().flatten().flat_map(|bb| {
+                    let (lo, hi) = bb.to_bitboards();
+                    [lo, hi]
+                }))
+                .chain(table.qugiy_step_effect.iter().flatten().copied())
+                .flat_map(|bb| [bb.p0(), bb.p1()])
+                .flat_map(u64::to_ne_bytes)
+                .collect()
+        }
+
+        let runtime = SliderTable {
+            lance_step_effect: init_lance_step_effect(),
+            qugiy_rook_mask: init_qugiy_rook_mask(),
+            qugiy_bishop_mask: init_qugiy_bishop_mask(),
+            qugiy_step_effect: init_qugiy_step_effect(),
+        };
+        let actual = bytes(slider_attacks());
+        let expected = bytes(&runtime);
+        assert_eq!(actual.len(), 81 * (2 * 16 + 2 * 16 + 2 * 32 + 6 * 16));
+        assert_eq!(actual, expected);
+        assert!(std::mem::align_of::<SliderTable>() >= 32);
+    }
 
     fn slider_naive(sq: Square, occupied: Bitboard, dirs: &[(i32, i32)]) -> Bitboard {
         let mut result = Bitboard::EMPTY;

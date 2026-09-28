@@ -392,7 +392,10 @@ YaneuraOuの`movepick.cpp`より:
 ### Bitboard256 AVX2 SIMD化 (調査完了)
 
 **調査日**: 2025-12-19
-**結論**: **AMD Zen 3環境では効果なし** - フィーチャーフラグで将来の検証用に残す
+**当時の結論**: **AMD Zen 3環境では効果なし** - 当時はフィーチャーフラグで将来の検証用に残した
+
+以下の実装内容・計測結果・分析・結論は調査当時の記録。現在の選択条件とビルド手順は
+[現在の AVX2 経路の選択](#現在の-avx2-経路の選択)を参照。
 
 #### 背景
 
@@ -418,8 +421,8 @@ YaneuraOuではBitboard256（角の利き計算用256bit構造体）にAVX2 SIMD
 
 | 構成 | 平均NPS | 変化 |
 |-----|--------|-----|
-| スカラー版（デフォルト） | 446,587 | ベースライン |
-| AVX2版（`--features simd_avx2`） | 442,411 | **-0.9%** |
+| スカラー版（当時のデフォルト） | 446,587 | ベースライン |
+| AVX2版（当時は `--features simd_avx2` で選択） | 442,411 | **-0.9%** |
 
 #### アセンブリ分析
 
@@ -446,43 +449,52 @@ YaneuraOuでは効果があるとされているが、以下の違いが考え�
 
 #### 結論
 
-AMD Zen 3環境では効果なし。ただし、以下の理由でフィーチャーフラグ（`simd_avx2`）として残す:
+当時の計測ではAMD Zen 3環境で効果なし。ただし、以下の理由でフィーチャーフラグ（`simd_avx2`）として残した:
 
 - Intel環境での将来の検証
 - マルチスレッド対応時にメモリ帯域幅がボトルネックになった場合の検証
 
-#### フィーチャーフラグについて
+#### 現在の AVX2 経路の選択
 
-**デフォルトでは `simd_avx2` は無効**です。有効にするには明示的に指定が必要です。
+Bitboard256 の AVX2 経路は、`x86_64` でコンパイル時の `target_feature = "avx2"` が有効なら
+自動選択される。`simd_avx2` は互換のため残した何もしない feature であり、指定の有無で経路は変わらない。
+AVX2 が無効な場合は非 AVX2 経路を使う（一部の処理は SSE2 を使用）。
+既定の経路はビルド設定に依存し、このリポジトリの `.cargo/config.toml` は `target-cpu=native` を指定している。
+実行時の CPU 検出ではないため、AVX2 を有効にしたバイナリは AVX2 対応 CPU で実行する。
 
 ```bash
-# デフォルト: スカラー版（simd_avx2 無効）
-cargo build --release
+# ビルドするマシンの CPU に応じて自動選択
+RUSTFLAGS="-C target-cpu=native" cargo build --release
 
-# AVX2版を有効化
-cargo build --release --features simd_avx2
+# x86_64 向けに AVX2 を明示的に有効化
+RUSTFLAGS="-C target-feature=+avx2" cargo build --release
+
+# AVX2 経路を無効化
+RUSTFLAGS="-C target-cpu=native -C target-feature=-avx2" cargo build --release
 
 # ベンチマーク実行時
 RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release \
-  --features simd_avx2 -- --internal --threads 1 ...
+  -- --internal --threads 1 ...
 ```
 
-#### 並列探索実装時の検証方法
+#### 並列探索での検証方法
 
 マルチスレッド環境ではメモリ帯域幅がボトルネックになる可能性があり、SIMD版の効果が出る可能性がある。以下の手順で検証を推奨:
 
 **1. スレッド数を変えた比較**
 
+現在は `target_feature` を切り替えて比較する。以下は AVX2 対応の x86_64 環境向けの手順。
+この切り替えは Bitboard256 以外のコード生成にも影響するため、差を Bitboard256 単独の効果とは解釈できない。
+
 ```bash
-# スカラー版とAVX2版を各スレッド数で比較
+# 非 AVX2 ビルドと AVX2 ビルドを各スレッド数で比較
 for threads in 1 2 4 8 16; do
-  echo "=== Threads: $threads (scalar) ==="
-  RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release -- \
+  echo "=== Threads: $threads (non-AVX2) ==="
+  RUSTFLAGS="-C target-cpu=native -C target-feature=-avx2" cargo run -p tools --bin benchmark --release -- \
     --internal --threads $threads --limit-type movetime --limit 20000
 
   echo "=== Threads: $threads (AVX2) ==="
-  RUSTFLAGS="-C target-cpu=native" cargo run -p tools --bin benchmark --release \
-    --features simd_avx2 -- \
+  RUSTFLAGS="-C target-cpu=native -C target-feature=+avx2" cargo run -p tools --bin benchmark --release -- \
     --internal --threads $threads --limit-type movetime --limit 20000
 done
 ```
@@ -509,7 +521,7 @@ go movetime 10000
 quit"
 ```
 
-**4. 期待される結果**
+**4. 当時の検証計画で期待されていた結果（未検証）**
 
 - スレッド数が少ない場合: スカラー版とAVX2版でほぼ同等
 - スレッド数が多い場合: メモリ帯域幅がボトルネックになればAVX2版が有利になる可能性
@@ -652,8 +664,8 @@ PGOビルドの処理フロー:
 | 2025-12-18 | ドキュメント作成 |
 | 2025-12-18 | Material評価時の計測をrelease buildに更新、シンボル解決修正 |
 | 2025-12-18 | 計測結果を再計測値で更新（NNUE: MovePicker 6.55%, refresh 6.40%, Material: eval_lv7_like 24.48%） |
-| 2025-12-19 | Bitboard256 AVX2 SIMD化調査完了（AMD Zen 3環境では効果なし、フィーチャーフラグで残す） |
-| 2025-12-19 | simd_avx2フィーチャーフラグの説明と並列探索時の検証方法を追加 |
+| 2025-12-19 | Bitboard256 AVX2 SIMD化調査完了（AMD Zen 3環境では効果なし、当時はフィーチャーフラグで残した） |
+| 2025-12-19 | 当時のsimd_avx2フィーチャーフラグの説明と並列探索時の検証方法を追加 |
 | 2025-12-20 | 計測結果更新（NNUE: MovePicker 8.11%, Network::evaluate 5.86%, refresh 5.70%、Material: eval_lv7_like 25.84%, direction_of 16.12%） |
 | 2025-12-21 | 計測結果更新（NNUE: MovePicker 8.83%, AffineTransform 5.93%, refresh 2.27%、Material: eval_lv7_like 26.38%, direction_of 15.88%）。refresh_accumulatorが5.70%→2.27%に大幅改善（AccumulatorとFeatureTransformerへのAlignedBox導入によるメモリアラインメント最適化の効果） |
 | 2025-12-21 | 計測結果更新（NNUE: MovePicker 9.07%, Network::evaluate 5.93%, refresh 2.38%、Material: eval_lv7_like 25.51%, direction_of 15.85%）。フラットレポート（nnue_flat.txt）を使用した正確な自己時間計測に基づく更新 |

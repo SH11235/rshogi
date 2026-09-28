@@ -13,6 +13,22 @@ pub(crate) const fn padded_input(input_dim: usize) -> usize {
     input_dim.div_ceil(32) * 32
 }
 
+/// 入力チャンクを分ける組数を返す（組数 × 出力レジスタ数が独立な積和チェーン数になる）。
+/// 値を変えるときは `SMALL_REGS` の const assert を満たすこと。
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx512f",
+    any(target_feature = "avx512vnni", target_feature = "avx512bw")
+))]
+const fn avx512_accumulator_groups(num_regs: usize) -> usize {
+    match num_regs {
+        1 => 8,
+        2 => 4,
+        3 => 3,
+        _ => 1,
+    }
+}
+
 /// static affine kernel が入力4byte chunk単位の配置を使うか。
 pub(crate) const fn uses_scrambled_weights(output: usize) -> bool {
     if cfg!(all(target_arch = "x86_64", target_feature = "avx2")) {
@@ -522,9 +538,10 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             // SAFETY:
             // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
             // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
-            // - input は Aligned<[u8; N]> で64バイトアライン
+            // - 入力の4バイト読み出しは read_unaligned を使い、アラインを要求しない
             // - weights は AlignedBox<i8> で64バイトアライン（スクランブル形式）
-            // - PADDED_INPUT は32の倍数なのでオフセットは常に64バイト境界
+            // - OUTPUT_DIM は16の倍数なので、重みの各チャンクは64バイト境界
+            // - チャンク番号は NUM_INPUT_CHUNKS 未満、出力レジスタ番号は num_regs 未満
             // - biases/output はアライン未保証だが、unaligned load/store を使用
             unsafe {
                 use std::arch::x86_64::*;
@@ -540,6 +557,82 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                     let num_regs = OUTPUT_DIM / 16;
                     debug_assert!(num_regs <= MAX_REGS);
 
+                    let groups = const { avx512_accumulator_groups(OUTPUT_DIM / 16) };
+                    if groups > 1 {
+                        // 小さい出力専用。acc[s * num_regs + k] は i % groups == s を担当する。
+                        const SMALL_REGS: usize = 9;
+                        const {
+                            assert!(
+                                avx512_accumulator_groups(OUTPUT_DIM / 16) == 1
+                                    || avx512_accumulator_groups(OUTPUT_DIM / 16)
+                                        * (OUTPUT_DIM / 16)
+                                        <= SMALL_REGS
+                            );
+                        }
+                        let mut acc = [_mm512_setzero_si512(); SMALL_REGS];
+                        let bias_ptr = self.biases.as_ptr() as *const __m512i;
+                        // バイアスは組0だけに含める。
+                        for k in 0..num_regs {
+                            acc[k] = _mm512_loadu_si512(bias_ptr.add(k));
+                        }
+
+                        let input32 = input.as_ptr() as *const i32;
+                        let weights_ptr = self.weights.as_ptr();
+                        let full_chunks = Self::NUM_INPUT_CHUNKS / groups * groups;
+                        for base in (0..full_chunks).step_by(groups) {
+                            for s in 0..groups {
+                                let i = base + s;
+                                let in_val = _mm512_set1_epi32(input32.add(i).read_unaligned());
+                                let col = weights_ptr.add(i * OUTPUT_DIM * Self::CHUNK_SIZE)
+                                    as *const __m512i;
+                                for k in 0..num_regs {
+                                    m512_add_dpbusd_epi32::<FULL_RANGE>(
+                                        &mut acc[s * num_regs + k],
+                                        in_val,
+                                        _mm512_load_si512(col.add(k)),
+                                    );
+                                }
+                            }
+                        }
+                        // NUM_INPUT_CHUNKS は padded_input により常に8の倍数なので、
+                        // 端数が生じるのは組数が8の約数でない場合（現状は3組）だけ。
+                        // 端数は先頭の組から1チャンクずつ割り当てる。
+                        for s in 0..Self::NUM_INPUT_CHUNKS - full_chunks {
+                            let i = full_chunks + s;
+                            let in_val = _mm512_set1_epi32(input32.add(i).read_unaligned());
+                            let col = weights_ptr.add(i * OUTPUT_DIM * Self::CHUNK_SIZE)
+                                as *const __m512i;
+                            for k in 0..num_regs {
+                                m512_add_dpbusd_epi32::<FULL_RANGE>(
+                                    &mut acc[s * num_regs + k],
+                                    in_val,
+                                    _mm512_load_si512(col.add(k)),
+                                );
+                            }
+                        }
+
+                        // 各チャンクの寄与はアキュムレータの値に依存せず、飽和はチャンク内の積和で完結する。
+                        // i32加算は2^32を法として結合的かつ可換なので、組をまたいで並べ替える加算木でもbit一致する。
+                        // 組数が2の冪でない場合、相手のない組は次の段へ持ち越す。
+                        let mut stride = 1;
+                        while stride < groups {
+                            for s in (0..groups - stride).step_by(2 * stride) {
+                                for k in 0..num_regs {
+                                    acc[s * num_regs + k] = _mm512_add_epi32(
+                                        acc[s * num_regs + k],
+                                        acc[(s + stride) * num_regs + k],
+                                    );
+                                }
+                            }
+                            stride *= 2;
+                        }
+                        let out_ptr = output.as_mut_ptr() as *mut __m512i;
+                        for k in 0..num_regs {
+                            _mm512_storeu_si512(out_ptr.add(k), acc[k]);
+                        }
+                        return;
+                    }
+
                     // アキュムレータをバイアスで初期化
                     let mut acc = [_mm512_setzero_si512(); MAX_REGS];
                     let bias_ptr = self.biases.as_ptr() as *const __m512i;
@@ -553,7 +646,7 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
                     // 外側: 入力チャンク（入力4バイト = 1 i32）
                     for i in 0..Self::NUM_INPUT_CHUNKS {
                         // 入力4バイトを全レーンにブロードキャスト
-                        let in_val = _mm512_set1_epi32(*input32.add(i));
+                        let in_val = _mm512_set1_epi32(input32.add(i).read_unaligned());
 
                         // この入力チャンクに対応する重みの開始位置
                         // スクランブル形式: weights[input_chunk][output][4]
@@ -1406,7 +1499,7 @@ mod tests {
         }
     }
 
-    /// propagate の出力を、SIMD レイアウト（スクランブル形式）に依存しない
+    /// propagate / propagate_7bit の出力を、SIMD レイアウト（スクランブル形式）に依存しない
     /// 行優先スカラー参照と bit 一致で照合する。
     ///
     /// OUTPUT_DIM が 16 の倍数でない L1（例 768x8）は AVX-512 経路では
@@ -1417,52 +1510,64 @@ mod tests {
         ($name:ident, $in:literal, $out:literal) => {
             #[test]
             fn $name() {
+                use rand::{Rng, SeedableRng};
+                use rand_xoshiro::Xoshiro256PlusPlus;
+
                 const INPUT_DIM: usize = $in;
                 const OUTPUT_DIM: usize = $out;
                 const PADDED: usize = padded_input(INPUT_DIM);
 
-                let mut biases = [0i32; OUTPUT_DIM];
-                let mut logical = vec![0i8; OUTPUT_DIM * PADDED];
-                let mut bytes: Vec<u8> = Vec::new();
-                for o in 0..OUTPUT_DIM {
-                    let b = (o as i32) * 1000 - 3000;
-                    biases[o] = b;
-                    bytes.extend_from_slice(&b.to_le_bytes());
-                }
-                for o in 0..OUTPUT_DIM {
-                    for inp in 0..PADDED {
-                        // padding（inp >= INPUT_DIM）は 0、実重みは ±25 程度に散らす
-                        let w = if inp < INPUT_DIM {
-                            (((o * 31 + inp * 7) % 51) as i32 - 25) as i8
-                        } else {
-                            0
-                        };
-                        logical[o * PADDED + inp] = w;
-                        bytes.push(w as u8);
+                let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xaff1_5120);
+                for trial in 0..8 {
+                    let mut biases = [0i32; OUTPUT_DIM];
+                    let mut logical = vec![0i8; OUTPUT_DIM * PADDED];
+                    let mut bytes: Vec<u8> = Vec::new();
+                    for bias in &mut biases {
+                        *bias = rng.random_range(-1_000_000..=1_000_000);
+                        bytes.extend_from_slice(&bias.to_le_bytes());
+                    }
+                    for o in 0..OUTPUT_DIM {
+                        for inp in 0..PADDED {
+                            // パディング重みは0、実重みはi8全域から生成する。
+                            let w = if inp < INPUT_DIM {
+                                rng.random::<i8>()
+                            } else {
+                                0
+                            };
+                            logical[o * PADDED + inp] = w;
+                            bytes.push(w as u8);
+                        }
+                    }
+
+                    let transform =
+                        AffineTransform::<INPUT_DIM, OUTPUT_DIM>::read(&mut &bytes[..]).unwrap();
+
+                    for max_input in [127u8, 255] {
+                        let mut input = Aligned([0u8; PADDED]);
+                        for value in &mut input.0[..INPUT_DIM] {
+                            *value = rng.random_range(0..=max_input);
+                        }
+
+                        let mut expected = biases;
+                        for o in 0..OUTPUT_DIM {
+                            for inp in 0..INPUT_DIM {
+                                expected[o] = expected[o].wrapping_add(
+                                    i32::from(logical[o * PADDED + inp]) * i32::from(input.0[inp]),
+                                );
+                            }
+                        }
+
+                        let mut output = [0i32; OUTPUT_DIM];
+                        transform.propagate(&input.0, &mut output);
+                        assert_eq!(output, expected, "trial={trial}, max_input={max_input}");
+
+                        if max_input == 127 {
+                            let mut seven_bit_output = [0i32; OUTPUT_DIM];
+                            transform.propagate_7bit(&input.0, &mut seven_bit_output);
+                            assert_eq!(seven_bit_output, expected, "7bit trial={trial}");
+                        }
                     }
                 }
-
-                let transform =
-                    AffineTransform::<INPUT_DIM, OUTPUT_DIM>::read(&mut &bytes[..]).unwrap();
-
-                let mut input = Aligned([0u8; PADDED]);
-                for inp in 0..INPUT_DIM {
-                    input.0[inp] = ((inp * 13 + 5) % 128) as u8;
-                }
-
-                let mut expected = [0i32; OUTPUT_DIM];
-                for o in 0..OUTPUT_DIM {
-                    let mut acc = biases[o];
-                    for inp in 0..INPUT_DIM {
-                        acc += logical[o * PADDED + inp] as i32 * input.0[inp] as i32;
-                    }
-                    expected[o] = acc;
-                }
-
-                let mut output = [0i32; OUTPUT_DIM];
-                transform.propagate(&input.0, &mut output);
-
-                assert_eq!(output, expected);
             }
         };
     }
@@ -1470,6 +1575,13 @@ mod tests {
     affine_reference_test!(test_affine_reference_256x8, 256, 8);
     affine_reference_test!(test_affine_reference_768x8, 768, 8);
     affine_reference_test!(test_affine_reference_1536x16, 1536, 16);
+    affine_reference_test!(test_affine_reference_32x32, 32, 32);
+    // AVX-512 経路では8チャンクを3組に分割するため、端数2チャンクと奇数組の加算木を通る。
+    affine_reference_test!(test_affine_reference_32x48, 32, 48);
+    // AVX-512 経路では16チャンクを3組に分割するため、端数1チャンクと入力パディングを照合する。
+    affine_reference_test!(test_affine_reference_60x48, 60, 48);
+    // AVX-512 経路では出力レジスタが4本以上の場合の単一組も照合する。
+    affine_reference_test!(test_affine_reference_32x64, 32, 64);
     // INPUT_DIM が 32 の倍数でなく PADDED に padding 列が生じる境界も照合する
     affine_reference_test!(test_affine_reference_760x8, 760, 8);
 }
