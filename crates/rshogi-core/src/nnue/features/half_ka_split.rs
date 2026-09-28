@@ -61,11 +61,12 @@ impl Feature for HalfKaSplit {
             pos.piece_list().piece_list_fw()
         };
 
-        for bp in &pieces[..PieceNumber::NB] {
-            if *bp != BonaPiece::ZERO {
-                let _ = active.push(halfka_index(k_index, bp.value() as usize));
-            }
-        }
+        active.extend(
+            pieces[..PieceNumber::NB]
+                .iter()
+                .filter(|bp| **bp != BonaPiece::ZERO)
+                .map(|bp| halfka_index(k_index, bp.value() as usize)),
+        );
     }
 
     /// 変化した特徴量インデックスを追記
@@ -81,26 +82,21 @@ impl Feature for HalfKaSplit {
     ) {
         let k_index = king_index(king_sq, perspective);
 
-        for i in 0..dirty_piece.dirty_num as usize {
-            let cp = &dirty_piece.changed_piece[i];
-            let old_bp = if perspective == Color::Black {
-                cp.old_piece.fb
-            } else {
-                cp.old_piece.fw
-            };
-            let new_bp = if perspective == Color::Black {
-                cp.new_piece.fb
-            } else {
-                cp.new_piece.fw
-            };
-
-            if old_bp != BonaPiece::ZERO {
-                let _ = removed.push(halfka_index(k_index, old_bp.value() as usize));
-            }
-            if new_bp != BonaPiece::ZERO {
-                let _ = added.push(halfka_index(k_index, new_bp.value() as usize));
-            }
-        }
+        removed.extend_pairs(
+            added,
+            (0..dirty_piece.dirty_num as usize).map(|i| {
+                let cp = &dirty_piece.changed_piece[i];
+                let (old_bp, new_bp) = if perspective == Color::Black {
+                    (cp.old_piece.fb, cp.new_piece.fb)
+                } else {
+                    (cp.old_piece.fw, cp.new_piece.fw)
+                };
+                let index = |bp: BonaPiece| {
+                    (bp != BonaPiece::ZERO).then(|| halfka_index(k_index, bp.value() as usize))
+                };
+                (index(old_bp), index(new_bp))
+            }),
+        );
     }
 }
 
