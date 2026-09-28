@@ -1069,17 +1069,7 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmMerged<INPU
     /// （wasm SIMD / スカラー）では常に false。
     #[inline]
     const fn should_use_scrambled_weights() -> bool {
-        if cfg!(all(target_arch = "x86_64", target_feature = "avx2")) {
-            OUTPUT.is_multiple_of(8) && OUTPUT > 0
-        } else if cfg!(all(
-            target_arch = "x86_64",
-            target_feature = "ssse3",
-            not(target_feature = "avx2")
-        )) {
-            OUTPUT.is_multiple_of(4) && OUTPUT > 0
-        } else {
-            false
-        }
+        super::layers::uses_scrambled_weights(OUTPUT)
     }
 
     /// 重みインデックスのスクランブル変換
@@ -1136,6 +1126,26 @@ impl<const INPUT: usize, const OUTPUT: usize> AffineTransformHalfKaHmMerged<INPU
 
     #[inline]
     fn propagate_impl<const FULL_RANGE: bool>(&self, input: &[u8], output: &mut [i32; OUTPUT]) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            any(target_feature = "avx512vnni", target_feature = "avx512bw")
+        ))]
+        if Self::should_use_scrambled_weights() && (OUTPUT == 8 || OUTPUT.is_multiple_of(16)) {
+            // SAFETY: readが64バイトアラインのinput_chunk-major配置を構築する。
+            // 入力はPADDED_INPUT以上、重みはOUTPUT * PADDED_INPUT要素を持ち、
+            // cfgが命令セットを保証する。FULL_RANGE=falseの入力は7bitに制限される。
+            unsafe {
+                super::layers::propagate_affine_avx512::<INPUT, OUTPUT, FULL_RANGE>(
+                    input,
+                    &self.weights,
+                    &self.biases,
+                    output,
+                );
+            }
+            return;
+        }
+
         // AVX2: ループ逆転最適化版
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
@@ -1673,7 +1683,7 @@ impl<
 
         // 活性化関数適用 (i16 → u8) - 64バイトアライン
         // 活性化後のサイズは L1_INPUT（CReLU: L1*2、Pairwise: L1）
-        let mut transformed = Aligned([0u8; L1_INPUT]);
+        let mut transformed = super::layers::PaddedAffineInput::<L1_INPUT>::new();
         A::activate_i16_to_u8(&ft_out_i16.0, &mut transformed.0, self.qa);
 
         if debug {
@@ -1691,9 +1701,9 @@ impl<
         // l1 層 - 64バイトアライン
         let mut l1_out = Aligned([0i32; L2]);
         if A::SEVEN_BIT_WHEN_QA127 && self.qa <= 127 {
-            self.l1.propagate_7bit(&transformed.0, &mut l1_out.0);
+            self.l1.propagate_7bit(transformed.as_padded(), &mut l1_out.0);
         } else {
-            self.l1.propagate(&transformed.0, &mut l1_out.0);
+            self.l1.propagate(transformed.as_padded(), &mut l1_out.0);
         }
 
         if debug {
@@ -1718,15 +1728,15 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l1_relu = Aligned([0u8; L2]);
+        let mut l1_relu = super::layers::PaddedAffineInput::<L2>::new();
         A::activate_i32_to_u8(&l1_out.0, &mut l1_relu.0);
 
         // l2 層 - 64バイトアライン
         let mut l2_out = Aligned([0i32; L3]);
         if A::SEVEN_BIT_WHEN_QA127 {
-            self.l2.propagate_7bit(&l1_relu.0, &mut l2_out.0);
+            self.l2.propagate_7bit(l1_relu.as_padded(), &mut l2_out.0);
         } else {
-            self.l2.propagate(&l1_relu.0, &mut l2_out.0);
+            self.l2.propagate(l1_relu.as_padded(), &mut l2_out.0);
         }
 
         // デバッグ: L2出力の範囲チェック
@@ -1743,15 +1753,15 @@ impl<
         }
 
         // 活性化関数適用 (i32 → u8) - 64バイトアライン
-        let mut l2_relu = Aligned([0u8; L3]);
+        let mut l2_relu = super::layers::PaddedAffineInput::<L3>::new();
         A::activate_i32_to_u8(&l2_out.0, &mut l2_relu.0);
 
         // output 層（4バイトなのでゼロ初期化のコストは無視可能）
         let mut output = [0i32; 1];
         if A::SEVEN_BIT_WHEN_QA127 {
-            self.output.propagate_7bit(&l2_relu.0, &mut output);
+            self.output.propagate_7bit(l2_relu.as_padded(), &mut output);
         } else {
-            self.output.propagate(&l2_relu.0, &mut output);
+            self.output.propagate(l2_relu.as_padded(), &mut output);
         }
 
         // スケーリング
@@ -1890,32 +1900,35 @@ pub type HalfKaHmMerged768Pairwise = NetworkHalfKaHmMerged<768, 1536, 768, 16, 6
 
 #[cfg(test)]
 mod tests {
+    crate::nnue::layers::halfkx_affine_tests::halfkx_affine_tests!(AffineTransformHalfKaHmMerged);
     use super::*;
-    fn valid_init_forward<A: FtActivation, const INPUT: usize>() {
-        let dense_bytes = |input: usize, output: usize| {
-            let mut bytes = Vec::new();
-            for _ in 0..output {
-                bytes.extend_from_slice(&1024i32.to_le_bytes());
-            }
-            bytes.extend(std::iter::repeat_n(1u8, input * output));
-            bytes
-        };
-        let network = NetworkHalfKaHmMerged::<32, 64, INPUT, 32, 32, A> {
+    fn valid_init_forward<
+        A: FtActivation,
+        const L1: usize,
+        const FT: usize,
+        const INPUT: usize,
+        const L2: usize,
+        const L3: usize,
+    >(
+        qa: i16,
+    ) {
+        use crate::nnue::layers::halfkx_affine_tests::{dense_fixture, dense_reference};
+        let network = NetworkHalfKaHmMerged::<L1, FT, INPUT, L2, L3, A> {
             feature_transformer: FeatureTransformerHalfKaHmMerged {
-                biases: vec![0; 32],
+                biases: vec![0; L1],
                 weights: AlignedBox::new_zeroed(1),
             },
-            l1: AffineTransformHalfKaHmMerged::read(&mut &dense_bytes(INPUT, 32)[..]).unwrap(),
-            l2: AffineTransformHalfKaHmMerged::read(&mut &dense_bytes(32, 32)[..]).unwrap(),
-            output: AffineTransformHalfKaHmMerged::read(&mut &dense_bytes(32, 1)[..]).unwrap(),
+            l1: AffineTransformHalfKaHmMerged::read(&mut &dense_fixture(INPUT, L2)[..]).unwrap(),
+            l2: AffineTransformHalfKaHmMerged::read(&mut &dense_fixture(L2, L3)[..]).unwrap(),
+            output: AffineTransformHalfKaHmMerged::read(&mut &dense_fixture(L3, 1)[..]).unwrap(),
             fv_scale: 16,
-            qa: 127,
+            qa,
             _activation: PhantomData,
         };
-        let mut acc = AccumulatorHalfKaHmMerged::<32>::new();
-        for i in 0..32 {
-            acc.accumulation[0].0[i] = (i * 3) as i16;
-            acc.accumulation[1].0[i] = (127 - i * 2) as i16;
+        let mut acc = AccumulatorHalfKaHmMerged::<L1>::new();
+        for i in 0..L1 {
+            acc.accumulation[0].0[i] = ((i * 3) % 300) as i16 - 20;
+            acc.accumulation[1].0[i] = ((i * 7) % 280) as i16 - 10;
         }
         for side in [Color::Black, Color::White] {
             let mut pos = Position::new();
@@ -1933,23 +1946,35 @@ mod tests {
                 .copied()
                 .collect();
             let mut input = vec![0u8; INPUT];
-            A::activate_i16_to_u8(&raw, &mut input, 127);
-            let l1 = vec![1024 + input.iter().map(|&x| i32::from(x)).sum::<i32>(); 32];
-            let mut hidden = vec![0u8; 32];
+            A::activate_i16_to_u8(&raw, &mut input, qa);
+            let l1 = dense_reference(&input, L2);
+            let mut hidden = vec![0u8; L2];
             A::activate_i32_to_u8(&l1, &mut hidden);
-            let l2 = vec![1024 + hidden.iter().map(|&x| i32::from(x)).sum::<i32>(); 32];
-            A::activate_i32_to_u8(&l2, &mut hidden);
-            let expected = (1024 + hidden.iter().map(|&x| i32::from(x)).sum::<i32>())
-                / get_fv_scale_override().unwrap_or(16);
+            let l2 = dense_reference(&hidden, L3);
+            let mut last = vec![0u8; L3];
+            A::activate_i32_to_u8(&l2, &mut last);
+            let expected = dense_reference(&last, 1)[0] / get_fv_scale_override().unwrap_or(16);
             assert_eq!(network.evaluate(&pos, &acc), Value::new(expected));
         }
     }
 
     #[test]
     fn valid_init_forward_matches_initialized_reference() {
-        valid_init_forward::<super::super::activation::CReLU, 64>();
-        valid_init_forward::<super::super::activation::SCReLU, 64>();
-        valid_init_forward::<super::super::activation::PairwiseCReLU, 32>();
+        for qa in [127, 255] {
+            valid_init_forward::<CReLU, 32, 64, 64, 32, 32>(qa);
+            valid_init_forward::<SCReLU, 32, 64, 64, 32, 32>(qa);
+            valid_init_forward::<PairwiseCReLU, 32, 64, 32, 32, 32>(qa);
+            // 実forward自身がpaddingを構築し、参照側は論理長だけを扱う。
+            valid_init_forward::<CReLU, 512, 1024, 1024, 8, 96>(qa);
+            valid_init_forward::<SCReLU, 512, 1024, 1024, 8, 64>(qa);
+            valid_init_forward::<PairwiseCReLU, 512, 1024, 512, 8, 64>(qa);
+            valid_init_forward::<CReLU, 1024, 2048, 2048, 8, 64>(qa);
+            valid_init_forward::<SCReLU, 1024, 2048, 2048, 8, 64>(qa);
+            valid_init_forward::<PairwiseCReLU, 1024, 2048, 1024, 8, 64>(qa);
+            valid_init_forward::<CReLU, 768, 1536, 1536, 16, 64>(qa);
+            valid_init_forward::<SCReLU, 768, 1536, 1536, 16, 64>(qa);
+            valid_init_forward::<PairwiseCReLU, 768, 1536, 768, 16, 64>(qa);
+        }
     }
 
     #[test]

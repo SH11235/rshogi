@@ -13,8 +13,26 @@ pub(crate) const fn padded_input(input_dim: usize) -> usize {
     input_dim.div_ceil(32) * 32
 }
 
+/// 論理入力に最大31バイトのゼロ埋めを付けた、64バイト境界のスタックバッファ。
+/// 活性化関数には論理領域だけを渡し、affineにはパディング込みの領域を渡す。
+#[repr(C, align(64))]
+pub(crate) struct PaddedAffineInput<const N: usize>(pub [u8; N], [u8; 31]);
+
+impl<const N: usize> PaddedAffineInput<N> {
+    pub(crate) fn new() -> Self {
+        Self([0; N], [0; 31])
+    }
+
+    pub(crate) fn as_padded(&self) -> &[u8] {
+        // SAFETY: repr(C)のu8配列は隙間なく並び、先頭は64バイト境界にある。
+        // padded_input(N) <= N + 31なので、末尾の構造体paddingには触れない。
+        // 両配列は初期化済みで、非公開の第2フィールドは常にゼロを保つ。
+        unsafe { std::slice::from_raw_parts(std::ptr::from_ref(self).cast(), padded_input(N)) }
+    }
+}
+
 /// 入力チャンクを分ける組数を返す（組数 × 出力レジスタ数が独立な積和チェーン数になる）。
-/// 値を変えるときは `SMALL_REGS` の const assert を満たすこと。
+/// 値を変えるときは小出力用カーネルの容量に関するconst検査を満たすこと。
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx512f",
@@ -26,6 +44,155 @@ const fn avx512_accumulator_groups(num_regs: usize) -> usize {
         2 => 4,
         3 => 3,
         _ => 1,
+    }
+}
+
+/// input_chunk-major配置のaffine積和。小出力では入力を独立な組に分ける。
+///
+/// # Safety
+/// 入力は`padded_input(INPUT)`以上、重みは`OUTPUT * padded_input(INPUT)`以上。
+/// 重みは64バイトアラインで、`weights[input_chunk][output][4]`の配置とする。
+/// OUTPUTは8または16の正の倍数かつ1024以下。FULL_RANGE=falseでは入力は0..=127。
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx512f",
+    any(target_feature = "avx512vnni", target_feature = "avx512bw")
+))]
+#[inline]
+pub(crate) unsafe fn propagate_affine_avx512<
+    const INPUT: usize,
+    const OUTPUT: usize,
+    const FULL_RANGE: bool,
+>(
+    input: &[u8],
+    weights: &[i8],
+    biases: &[i32; OUTPUT],
+    output: &mut [i32; OUTPUT],
+) {
+    // 出力ごとのレジスタ数と組数は単相化時に確定する。小出力用の配列を
+    // 分けることで、大出力用の最大容量を小出力のスタックに持ち込まない。
+    #[inline]
+    unsafe fn kernel<
+        const INPUT: usize,
+        const OUTPUT: usize,
+        const FULL_RANGE: bool,
+        const CAPACITY: usize,
+    >(
+        input: &[u8],
+        weights: &[i8],
+        biases: &[i32; OUTPUT],
+        output: &mut [i32; OUTPUT],
+    ) {
+        let num_regs = OUTPUT / 16;
+        let groups = const { avx512_accumulator_groups(OUTPUT / 16) };
+        const {
+            assert!(
+                avx512_accumulator_groups(OUTPUT / 16) == 1
+                    || OUTPUT / 16 * avx512_accumulator_groups(OUTPUT / 16) <= CAPACITY
+            );
+        }
+        debug_assert!(OUTPUT > 0 && OUTPUT.is_multiple_of(16));
+        debug_assert!(num_regs * groups <= CAPACITY);
+        // SAFETY: 外側の関数の契約により全ポインタは有効範囲内にある。
+        // 重みの各チャンクはOUTPUT * 4バイトなので64バイト境界を保つ。
+        // 入力・bias・出力はunaligned操作を使う。cfgが必要な命令セットを保証し、
+        // 小出力の組数はconst検査済みで、大出力は契約のOUTPUT<=1024により収容できる。
+        unsafe {
+            use std::arch::x86_64::*;
+            let mut acc = [_mm512_setzero_si512(); CAPACITY];
+            // バイアスは組0だけに含める。
+            for (k, a) in acc.iter_mut().take(num_regs).enumerate() {
+                *a = _mm512_loadu_si512(biases.as_ptr().add(k * 16).cast());
+            }
+            let chunks = padded_input(INPUT) / 4;
+            let full_chunks = chunks / groups * groups;
+            for base in (0..full_chunks).step_by(groups) {
+                for (s, group) in acc.chunks_exact_mut(num_regs).take(groups).enumerate() {
+                    let i = base + s;
+                    let in_val =
+                        _mm512_set1_epi32(input.as_ptr().add(i * 4).cast::<i32>().read_unaligned());
+                    let col = weights.as_ptr().add(i * OUTPUT * 4).cast::<__m512i>();
+                    for (k, a) in group.iter_mut().enumerate() {
+                        m512_add_dpbusd_epi32::<FULL_RANGE>(
+                            a,
+                            in_val,
+                            _mm512_load_si512(col.add(k)),
+                        );
+                    }
+                }
+            }
+            // 3組など、入力チャンク数を割り切れない組数の端数を先頭から配分する。
+            for (s, group) in acc.chunks_exact_mut(num_regs).take(chunks - full_chunks).enumerate()
+            {
+                let i = full_chunks + s;
+                let in_val =
+                    _mm512_set1_epi32(input.as_ptr().add(i * 4).cast::<i32>().read_unaligned());
+                let col = weights.as_ptr().add(i * OUTPUT * 4).cast::<__m512i>();
+                for (k, a) in group.iter_mut().enumerate() {
+                    m512_add_dpbusd_epi32::<FULL_RANGE>(a, in_val, _mm512_load_si512(col.add(k)));
+                }
+            }
+            // i32加算は2^32を法として結合的・可換なので加算木でもbit一致する。
+            // 組数が2の冪でない場合、相手のない組は次の段へ持ち越す。
+            let mut stride = 1;
+            while stride < groups {
+                for s in (0..groups - stride).step_by(2 * stride) {
+                    let (left, right) = acc.split_at_mut((s + stride) * num_regs);
+                    for (a, b) in left[s * num_regs..].iter_mut().zip(&right[..num_regs]) {
+                        *a = _mm512_add_epi32(*a, *b);
+                    }
+                }
+                stride *= 2;
+            }
+            for (k, a) in acc.iter().take(num_regs).enumerate() {
+                _mm512_storeu_si512(output.as_mut_ptr().add(k * 16).cast(), *a);
+            }
+        }
+    }
+    debug_assert!(input.len() >= padded_input(INPUT));
+    debug_assert!(weights.len() >= OUTPUT * padded_input(INPUT));
+    debug_assert!(OUTPUT == 8 || (OUTPUT > 0 && OUTPUT.is_multiple_of(16) && OUTPUT <= 1024));
+    // SAFETY: 呼び出し側が入力範囲・重み配置・7bit契約を満たす。
+    // 小出力の組数×レジスタ数はconst検査済み。単一組は最大64レジスタを使う。
+    unsafe {
+        if OUTPUT == 8 {
+            use std::arch::x86_64::*;
+            // 連続する2チャンクは64バイト境界にあり、下位/上位8出力へ対応する。
+            // padded_input(INPUT)は32の倍数なので、8バイトずつの読み込みに端数はない。
+            let mut acc = [_mm512_setzero_si512(); 8];
+            let pairs = padded_input(INPUT) / 8;
+            for base in (0..pairs).step_by(8) {
+                for (s, a) in acc.iter_mut().take((pairs - base).min(8)).enumerate() {
+                    let offset = (base + s) * 8;
+                    let lo = input.as_ptr().add(offset).cast::<i32>().read_unaligned();
+                    let hi = input.as_ptr().add(offset + 4).cast::<i32>().read_unaligned();
+                    let values = _mm512_mask_blend_epi32(
+                        0xff00,
+                        _mm512_set1_epi32(lo),
+                        _mm512_set1_epi32(hi),
+                    );
+                    m512_add_dpbusd_epi32::<FULL_RANGE>(
+                        a,
+                        values,
+                        _mm512_load_si512(weights.as_ptr().add(offset * 8).cast()),
+                    );
+                }
+            }
+            // i32の周回加算は結合的。バイアスは上下のレーンを合算した後に一度足す。
+            for stride in [1, 2, 4] {
+                for s in (0..8).step_by(stride * 2) {
+                    acc[s] = _mm512_add_epi32(acc[s], acc[s + stride]);
+                }
+            }
+            // shuffle_i32x4はAVX-512Fだけで使え、DQ/VLを追加で要求しない。
+            let sum = _mm512_add_epi32(acc[0], _mm512_shuffle_i32x4::<0x4e>(acc[0], acc[0]));
+            let bias = _mm512_maskz_loadu_epi32(0x00ff, biases.as_ptr());
+            _mm512_mask_storeu_epi32(output.as_mut_ptr(), 0x00ff, _mm512_add_epi32(sum, bias));
+        } else if const { avx512_accumulator_groups(OUTPUT / 16) > 1 } {
+            kernel::<INPUT, OUTPUT, FULL_RANGE, 9>(input, weights, biases, output);
+        } else {
+            kernel::<INPUT, OUTPUT, FULL_RANGE, 64>(input, weights, biases, output);
+        }
     }
 }
 
@@ -528,151 +695,24 @@ impl<const INPUT_DIM: usize, const OUTPUT_DIM: usize> AffineTransform<INPUT_DIM,
             Self::PADDED_INPUT
         );
 
-        // AVX-512: 512bit = 64 x u8/i8 または 16 x i32
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
             any(target_feature = "avx512vnni", target_feature = "avx512bw")
         ))]
-        {
-            // SAFETY:
-            // - input.len() >= PADDED_INPUT (debug_assert で検証済み)
-            // - weights.len() >= OUTPUT_DIM * PADDED_INPUT (構造上保証)
-            // - 入力の4バイト読み出しは read_unaligned を使い、アラインを要求しない
-            // - weights は AlignedBox<i8> で64バイトアライン（スクランブル形式）
-            // - OUTPUT_DIM は16の倍数なので、重みの各チャンクは64バイト境界
-            // - チャンク番号は NUM_INPUT_CHUNKS 未満、出力レジスタ番号は num_regs 未満
-            // - biases/output はアライン未保証だが、unaligned load/store を使用
+        if Self::should_use_scrambled_weights() && OUTPUT_DIM.is_multiple_of(16) {
+            // SAFETY: 重みは64バイト境界のinput_chunk-major配置で、入力は
+            // PADDED_INPUT以上、重みはOUTPUT_DIM * PADDED_INPUT要素を持つ。
+            // cfgが命令セットを保証し、FULL_RANGE=falseの入力は7bitに制限される。
             unsafe {
-                use std::arch::x86_64::*;
-
-                // スクランブル格納かつ OUTPUT_DIM % 16 == 0 の場合のみループ逆転最適化版（AVX-512）。
-                // should_use_scrambled_weights() を && 条件にすることで、行優先格納時に
-                // スクランブル前提の本経路へ落ちないことを単一判定で保証する（%16 ⊂ %8 なので
-                // スクランブル成立時は本条件 == %16）。
-                #[allow(clippy::needless_range_loop)]
-                if Self::should_use_scrambled_weights() && OUTPUT_DIM.is_multiple_of(16) {
-                    // 出力レジスタ数（16出力/レジスタ）
-                    const MAX_REGS: usize = 64; // 最大1024出力まで対応
-                    let num_regs = OUTPUT_DIM / 16;
-                    debug_assert!(num_regs <= MAX_REGS);
-
-                    let groups = const { avx512_accumulator_groups(OUTPUT_DIM / 16) };
-                    if groups > 1 {
-                        // 小さい出力専用。acc[s * num_regs + k] は i % groups == s を担当する。
-                        const SMALL_REGS: usize = 9;
-                        const {
-                            assert!(
-                                avx512_accumulator_groups(OUTPUT_DIM / 16) == 1
-                                    || avx512_accumulator_groups(OUTPUT_DIM / 16)
-                                        * (OUTPUT_DIM / 16)
-                                        <= SMALL_REGS
-                            );
-                        }
-                        let mut acc = [_mm512_setzero_si512(); SMALL_REGS];
-                        let bias_ptr = self.biases.as_ptr() as *const __m512i;
-                        // バイアスは組0だけに含める。
-                        for k in 0..num_regs {
-                            acc[k] = _mm512_loadu_si512(bias_ptr.add(k));
-                        }
-
-                        let input32 = input.as_ptr() as *const i32;
-                        let weights_ptr = self.weights.as_ptr();
-                        let full_chunks = Self::NUM_INPUT_CHUNKS / groups * groups;
-                        for base in (0..full_chunks).step_by(groups) {
-                            for s in 0..groups {
-                                let i = base + s;
-                                let in_val = _mm512_set1_epi32(input32.add(i).read_unaligned());
-                                let col = weights_ptr.add(i * OUTPUT_DIM * Self::CHUNK_SIZE)
-                                    as *const __m512i;
-                                for k in 0..num_regs {
-                                    m512_add_dpbusd_epi32::<FULL_RANGE>(
-                                        &mut acc[s * num_regs + k],
-                                        in_val,
-                                        _mm512_load_si512(col.add(k)),
-                                    );
-                                }
-                            }
-                        }
-                        // NUM_INPUT_CHUNKS は padded_input により常に8の倍数なので、
-                        // 端数が生じるのは組数が8の約数でない場合（現状は3組）だけ。
-                        // 端数は先頭の組から1チャンクずつ割り当てる。
-                        for s in 0..Self::NUM_INPUT_CHUNKS - full_chunks {
-                            let i = full_chunks + s;
-                            let in_val = _mm512_set1_epi32(input32.add(i).read_unaligned());
-                            let col = weights_ptr.add(i * OUTPUT_DIM * Self::CHUNK_SIZE)
-                                as *const __m512i;
-                            for k in 0..num_regs {
-                                m512_add_dpbusd_epi32::<FULL_RANGE>(
-                                    &mut acc[s * num_regs + k],
-                                    in_val,
-                                    _mm512_load_si512(col.add(k)),
-                                );
-                            }
-                        }
-
-                        // 各チャンクの寄与はアキュムレータの値に依存せず、飽和はチャンク内の積和で完結する。
-                        // i32加算は2^32を法として結合的かつ可換なので、組をまたいで並べ替える加算木でもbit一致する。
-                        // 組数が2の冪でない場合、相手のない組は次の段へ持ち越す。
-                        let mut stride = 1;
-                        while stride < groups {
-                            for s in (0..groups - stride).step_by(2 * stride) {
-                                for k in 0..num_regs {
-                                    acc[s * num_regs + k] = _mm512_add_epi32(
-                                        acc[s * num_regs + k],
-                                        acc[(s + stride) * num_regs + k],
-                                    );
-                                }
-                            }
-                            stride *= 2;
-                        }
-                        let out_ptr = output.as_mut_ptr() as *mut __m512i;
-                        for k in 0..num_regs {
-                            _mm512_storeu_si512(out_ptr.add(k), acc[k]);
-                        }
-                        return;
-                    }
-
-                    // アキュムレータをバイアスで初期化
-                    let mut acc = [_mm512_setzero_si512(); MAX_REGS];
-                    let bias_ptr = self.biases.as_ptr() as *const __m512i;
-                    for k in 0..num_regs {
-                        acc[k] = _mm512_loadu_si512(bias_ptr.add(k));
-                    }
-
-                    let input32 = input.as_ptr() as *const i32;
-                    let weights_ptr = self.weights.as_ptr();
-
-                    // 外側: 入力チャンク（入力4バイト = 1 i32）
-                    for i in 0..Self::NUM_INPUT_CHUNKS {
-                        // 入力4バイトを全レーンにブロードキャスト
-                        let in_val = _mm512_set1_epi32(input32.add(i).read_unaligned());
-
-                        // この入力チャンクに対応する重みの開始位置
-                        // スクランブル形式: weights[input_chunk][output][4]
-                        let col =
-                            weights_ptr.add(i * OUTPUT_DIM * Self::CHUNK_SIZE) as *const __m512i;
-
-                        // 内側: 全出力レジスタに積和演算
-                        for k in 0..num_regs {
-                            m512_add_dpbusd_epi32::<FULL_RANGE>(
-                                &mut acc[k],
-                                in_val,
-                                _mm512_load_si512(col.add(k)),
-                            );
-                        }
-                    }
-
-                    // 結果を出力
-                    let out_ptr = output.as_mut_ptr() as *mut __m512i;
-                    for k in 0..num_regs {
-                        _mm512_storeu_si512(out_ptr.add(k), acc[k]);
-                    }
-                    return;
-                }
-
-                // OUTPUT_DIM % 16 != 0 だが % 8 == 0 の場合: AVX2 にフォールスルー
+                propagate_affine_avx512::<INPUT_DIM, OUTPUT_DIM, FULL_RANGE>(
+                    input,
+                    &self.weights,
+                    &self.biases,
+                    output,
+                );
             }
+            return;
         }
 
         // AVX2: 256bit = 32 x u8/i8
@@ -1585,3 +1625,7 @@ mod tests {
     // INPUT_DIM が 32 の倍数でなく PADDED に padding 列が生じる境界も照合する
     affine_reference_test!(test_affine_reference_760x8, 760, 8);
 }
+
+#[cfg(test)]
+#[path = "halfkx_affine_tests.rs"]
+pub(crate) mod halfkx_affine_tests;
