@@ -9,6 +9,9 @@ mod half_ka_merged;
 mod half_ka_split;
 mod half_kp;
 
+#[cfg(test)]
+mod index_tests;
+
 pub use half_ka_hm_merged::HalfKaHmMerged;
 pub use half_ka_hm_split::HalfKaHmSplit;
 pub use half_ka_merged::HalfKaMerged;

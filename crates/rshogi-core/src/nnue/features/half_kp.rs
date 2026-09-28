@@ -50,11 +50,12 @@ impl Feature for HalfKP {
             pos.piece_list().piece_list_fw()
         };
 
-        for bp in &pieces[..PieceNumber::KING as usize] {
-            if *bp != BonaPiece::ZERO {
-                let _ = active.push(halfkp_index(king_sq, *bp));
-            }
-        }
+        active.extend(
+            pieces[..PieceNumber::KING as usize]
+                .iter()
+                .filter(|bp| **bp != BonaPiece::ZERO)
+                .map(|bp| halfkp_index(king_sq, *bp)),
+        );
     }
 
     /// 変化した特徴量インデックスを追記
@@ -75,27 +76,22 @@ impl Feature for HalfKP {
             king_sq.inverse()
         };
 
-        for i in 0..dirty_piece.dirty_num as usize {
-            let cp = &dirty_piece.changed_piece[i];
-            let old_bp = if perspective == Color::Black {
-                cp.old_piece.fb
-            } else {
-                cp.old_piece.fw
-            };
-            let new_bp = if perspective == Color::Black {
-                cp.new_piece.fb
-            } else {
-                cp.new_piece.fw
-            };
-
-            // HalfKP: King の BonaPiece (>= FE_END) は除外
-            if old_bp != BonaPiece::ZERO && (old_bp.value() as usize) < FE_END {
-                let _ = removed.push(halfkp_index(king_sq, old_bp));
-            }
-            if new_bp != BonaPiece::ZERO && (new_bp.value() as usize) < FE_END {
-                let _ = added.push(halfkp_index(king_sq, new_bp));
-            }
-        }
+        removed.extend_pairs(
+            added,
+            (0..dirty_piece.dirty_num as usize).map(|i| {
+                let cp = &dirty_piece.changed_piece[i];
+                let (old_bp, new_bp) = if perspective == Color::Black {
+                    (cp.old_piece.fb, cp.new_piece.fb)
+                } else {
+                    (cp.old_piece.fw, cp.new_piece.fw)
+                };
+                let index = |bp: BonaPiece| {
+                    (bp != BonaPiece::ZERO && (bp.value() as usize) < FE_END)
+                        .then(|| halfkp_index(king_sq, bp))
+                };
+                (index(old_bp), index(new_bp))
+            }),
+        );
     }
 }
 

@@ -117,6 +117,77 @@ impl<const N: usize> IndexList<N> {
         true
     }
 
+    /// インデックス列を順序を保って追記する。
+    ///
+    /// 長さは配列と独立したローカル変数で数え、末尾で一度だけ反映する。
+    /// 容量超過は `push` と同じく debug 時にパニックし、release 時には無視する。
+    #[inline]
+    pub(crate) fn extend(&mut self, indices: impl IntoIterator<Item = usize>) {
+        let mut len = self.len as usize;
+        // filter/map の内部反復で、抽出と追記を同じ走査にまとめる。
+        indices.into_iter().for_each(|index| {
+            if len >= N {
+                #[cfg(debug_assertions)]
+                {
+                    self.len = len as u8;
+                    debug_assert!(false, "IndexList overflow: capacity={N}, len={len}");
+                }
+                return;
+            }
+            #[cfg(debug_assertions)]
+            if index > u32::MAX as usize {
+                self.len = len as u8;
+                debug_assert!(false, "IndexList::push: index {index} exceeds u32::MAX");
+            }
+            self.indices[len].write(index as u32);
+            len += 1;
+        });
+        self.len = len as u8;
+    }
+
+    /// 各組の第1要素、第2要素の順で、それぞれのリストへ追記する。
+    ///
+    /// 長さは二つのローカル変数で数え、末尾で一度ずつ反映する。
+    /// debug 時の不正な追記では、パニック前に両リストの有効な要素数を反映する。
+    #[inline]
+    pub(crate) fn extend_pairs(
+        &mut self,
+        other: &mut Self,
+        indices: impl IntoIterator<Item = (Option<usize>, Option<usize>)>,
+    ) {
+        let mut len = self.len as usize;
+        let mut other_len = other.len as usize;
+        indices.into_iter().for_each(|(first, second)| {
+            if let Some(index) = first {
+                #[cfg(debug_assertions)]
+                if len >= N || index > u32::MAX as usize {
+                    self.len = len as u8;
+                    other.len = other_len as u8;
+                    // push と同じ検査順序・メッセージでパニックする。
+                    let _ = self.push(index);
+                }
+                if len < N {
+                    self.indices[len].write(index as u32);
+                    len += 1;
+                }
+            }
+            if let Some(index) = second {
+                #[cfg(debug_assertions)]
+                if other_len >= N || index > u32::MAX as usize {
+                    self.len = len as u8;
+                    other.len = other_len as u8;
+                    let _ = other.push(index);
+                }
+                if other_len < N {
+                    other.indices[other_len].write(index as u32);
+                    other_len += 1;
+                }
+            }
+        });
+        self.len = len as u8;
+        other.len = other_len as u8;
+    }
+
     /// イテレータを返す（usize に変換して返す）
     #[inline]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
@@ -1077,6 +1148,86 @@ impl AccumulatorCacheGeneric {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_index_list_extend<const N: usize>() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        for prefix in [0, N / 2, N] {
+            for count in [0, N.saturating_sub(prefix), N + 2] {
+                let mut expected = IndexList::<N>::new();
+                for i in 0..prefix {
+                    assert!(expected.push(100 + i));
+                }
+                let mut actual = expected;
+                let expected_result = catch_unwind(AssertUnwindSafe(|| {
+                    for i in 0..count {
+                        let _ = expected.push(i);
+                    }
+                }));
+                let actual_result = catch_unwind(AssertUnwindSafe(|| actual.extend(0..count)));
+                assert_eq!(actual_result.is_err(), expected_result.is_err());
+                assert_eq!(actual.iter().collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>());
+            }
+        }
+    }
+
+    #[test]
+    fn index_list_extend_matches_push_at_capacity_boundaries() {
+        check_index_list_extend::<0>();
+        check_index_list_extend::<4>();
+        check_index_list_extend::<255>();
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn index_list_extend_pairs_matches_push_for_large_index() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        for invalid_first in [false, true] {
+            let invalid = Some(u32::MAX as usize + 1);
+            let pair = if invalid_first {
+                (invalid, Some(23))
+            } else {
+                (Some(23), invalid)
+            };
+            let pairs = [(Some(12), Some(34)), pair];
+            let mut expected = (IndexList::<4>::new(), IndexList::<4>::new());
+            let mut actual = expected;
+            let expected_result = catch_unwind(AssertUnwindSafe(|| {
+                for (first, second) in pairs {
+                    if let Some(index) = first {
+                        let _ = expected.0.push(index);
+                    }
+                    if let Some(index) = second {
+                        let _ = expected.1.push(index);
+                    }
+                }
+            }));
+            let actual_result =
+                catch_unwind(AssertUnwindSafe(|| actual.0.extend_pairs(&mut actual.1, pairs)));
+            assert_eq!(actual_result.is_err(), expected_result.is_err());
+            assert_eq!(actual.0.iter().collect::<Vec<_>>(), expected.0.iter().collect::<Vec<_>>());
+            assert_eq!(actual.1.iter().collect::<Vec<_>>(), expected.1.iter().collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn index_list_extend_matches_push_for_large_index() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let mut expected = IndexList::<4>::new();
+        let mut actual = expected;
+        let indices = [12, u32::MAX as usize, u32::MAX as usize + 1];
+        let expected_result = catch_unwind(AssertUnwindSafe(|| {
+            for index in indices {
+                let _ = expected.push(index);
+            }
+        }));
+        let actual_result = catch_unwind(AssertUnwindSafe(|| actual.extend(indices)));
+        assert_eq!(actual_result.is_err(), expected_result.is_err());
+        assert_eq!(actual.iter().collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>());
+    }
 
     #[test]
     fn valid_init_aligned_storage_supports_nonzero_values() {
