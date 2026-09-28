@@ -352,6 +352,11 @@ mod tests {
 
     #[test]
     fn test_json_restores_complete_position() {
+        // 利きの比較中は評価設定をロックし、NNUE の初期化状態によらず
+        // do_move/undo_move で利きが差分更新されるよう material Lv9 を有効にする。
+        let guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv9);
+
         for sfen in [
             SFEN_HIRATE,
             "8l/1l+R2P3/p2pBG1pp/kps1p4/Nn1P2G2/P1P1P2PP/1PS6/1KSG3+r1/LN2+p3L w Sbgn3p 124",
@@ -381,6 +386,7 @@ mod tests {
                 assert_same_position(&actual, &parts);
             }
         }
+        drop(guard);
     }
 
     #[test]
