@@ -4,21 +4,8 @@ use super::core;
 use core::nnue::*;
 
 pub fn for_each_model(mut check: impl FnMut(&str, Vec<u8>)) {
-    #[cfg(feature = "halfkx-arch")]
-    for (name, dimensions, enabled) in [
-        ("HalfKP", HALFKP_DIMENSIONS, cfg!(feature = "ft-halfkp")),
-        ("HalfKaSplit", HALFKA_DIMENSIONS, cfg!(feature = "ft-halfka_split")),
-        ("HalfKaMerged", HALFKA_MERGED_DIMENSIONS, cfg!(feature = "ft-halfka_merged")),
-        (
-            "HalfKaHmSplit",
-            HALFKA_HM_SPLIT_DIMENSIONS,
-            cfg!(feature = "ft-halfka_hm_split"),
-        ),
-        ("HalfKaHmMerged", HALFKA_HM_DIMENSIONS, cfg!(feature = "ft-halfka_hm_merged")),
-    ] {
-        if enabled || cfg!(feature = "nnue-runtime-dimensions") {
-            check(name, halfkx(name, dimensions));
-        }
+    if cfg!(any(feature = "halfkx-arch", feature = "nnue-runtime-dimensions")) {
+        for_each_halfkx_model(&mut check);
     }
     if cfg!(any(
         feature = "nnue-runtime-dimensions",
@@ -36,7 +23,18 @@ pub fn for_each_model(mut check: impl FnMut(&str, Vec<u8>)) {
     }
 }
 
-#[cfg(feature = "halfkx-arch")]
+pub fn for_each_halfkx_model(mut check: impl FnMut(&str, Vec<u8>)) {
+    for (name, dimensions) in [
+        ("HalfKP", HALFKP_DIMENSIONS),
+        ("HalfKaSplit", HALFKA_DIMENSIONS),
+        ("HalfKaMerged", HALFKA_MERGED_DIMENSIONS),
+        ("HalfKaHmSplit", HALFKA_HM_SPLIT_DIMENSIONS),
+        ("HalfKaHmMerged", HALFKA_HM_DIMENSIONS),
+    ] {
+        check(name, halfkx(name, dimensions));
+    }
+}
+
 fn halfkx(name: &str, dimensions: usize) -> Vec<u8> {
     let l1 = 256;
     let arch = format!("Features={name}[{dimensions}->{l1}x2],l2=32,l3=32");

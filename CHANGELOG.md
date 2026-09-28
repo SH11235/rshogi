@@ -61,6 +61,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **NNUE のロードと探索の互換性、および連続探索の準備コストを修正**:
+  固定 HalfKX edition でも従来ロードできた他の FT を引き続き探索できるようにし、
+  ロード時と探索開始時の対応判定を統一した。同じ評価関数での連続探索では
+  accumulator と Finny cache の領域を再利用し、評価関数を差し替えた場合は再構築する。
+
 - **非 LayerStacks の HalfKX 5 系統 (HalfKP / HalfKA / HalfKA_hm) の探索で Finny cache (AccumulatorCaches) を使う**:
   これまで探索の評価経路は LayerStacks にだけ Finny cache を渡しており、HalfKX は玉移動時と祖先が無いときに
   bias から全駒を加算し直していた。worker ごとに cache を持ち、cache entry の駒リストと現局面の駒リストを

@@ -1046,6 +1046,21 @@ impl DynamicLayerStacksStack {
         &self.accumulations[start..start + 2 * self.signature.l1]
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_psqt(&self) -> &[i32] {
+        let start = self.current * 2 * self.signature.num_buckets;
+        &self.psqt[start..start + 2 * self.signature.num_buckets]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_threat(&self) -> &[i16] {
+        if self.threat_accumulations.is_empty() {
+            return &[];
+        }
+        let start = self.current * 2 * self.signature.l1;
+        &self.threat_accumulations[start..start + 2 * self.signature.l1]
+    }
+
     fn new(net: &DynamicLayerStacksNetwork) -> Self {
         Self {
             signature: net.stack_signature(),

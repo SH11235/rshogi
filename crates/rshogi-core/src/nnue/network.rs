@@ -729,6 +729,21 @@ impl NNUENetwork {
         arch_override: NNUEArchitectureOverride,
         #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<Self> {
+        let network = Self::read_search_network(
+            reader,
+            arch_override,
+            #[cfg(feature = "prepacked-nnue")]
+            packed,
+        )?;
+        super::search_evaluator::SearchNetwork::try_from(&network)?;
+        Ok(network)
+    }
+
+    fn read_search_network<R: Read + Seek>(
+        reader: &mut R,
+        arch_override: NNUEArchitectureOverride,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
+    ) -> io::Result<Self> {
         // 1. ファイルサイズを取得
         let file_size = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;

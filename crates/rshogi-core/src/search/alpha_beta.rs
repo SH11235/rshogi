@@ -951,7 +951,7 @@ impl SearchWorker {
         unsafe { self.history.as_mut_unchecked() }
             .low_ply_history
             .clear_with_init(self.search_tune_params.low_ply_history_init as i16);
-        self.state.evaluator = SearchEvaluator::prepare();
+        self.state.evaluator.prepare();
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
         self.state.calls_cnt = 0;

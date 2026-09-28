@@ -5,30 +5,15 @@
 
 #[cfg(feature = "halfkx-arch")]
 use super::AccumulatorCacheGeneric;
-#[cfg(all(
-    feature = "halfkx-arch",
-    any(not(feature = "mode-specific"), feature = "ft-halfka_hm_merged")
-))]
+#[cfg(feature = "halfkx-arch")]
 use super::halfka_hm_merged::{HalfKaHmMergedNetwork, HalfKaHmMergedStack};
-#[cfg(all(
-    feature = "halfkx-arch",
-    any(not(feature = "mode-specific"), feature = "ft-halfka_hm_split")
-))]
+#[cfg(feature = "halfkx-arch")]
 use super::halfka_hm_split::{HalfKaHmSplitNetwork, HalfKaHmSplitStack};
-#[cfg(all(
-    feature = "halfkx-arch",
-    any(not(feature = "mode-specific"), feature = "ft-halfka_merged")
-))]
+#[cfg(feature = "halfkx-arch")]
 use super::halfka_merged::{HalfKaMergedNetwork, HalfKaMergedStack};
-#[cfg(all(
-    feature = "halfkx-arch",
-    any(not(feature = "mode-specific"), feature = "ft-halfka_split")
-))]
+#[cfg(feature = "halfkx-arch")]
 use super::halfka_split::{HalfKaSplitNetwork, HalfKaSplitStack};
-#[cfg(all(
-    feature = "halfkx-arch",
-    any(not(feature = "mode-specific"), feature = "ft-halfkp")
-))]
+#[cfg(feature = "halfkx-arch")]
 use super::halfkp::{HalfKPNetwork, HalfKPStack};
 use super::{DirtyPiece, NNUENetwork, get_network};
 #[cfg(feature = "layerstack-arch")]
@@ -43,51 +28,89 @@ use crate::position::Position;
 use crate::types::Value;
 use std::sync::Arc;
 
+/// ロードと探索開始で共有する、探索可能な重みへの型付き参照。
+pub(crate) enum SearchNetwork {
+    #[cfg(feature = "halfkx-arch")]
+    HalfKP(Arc<HalfKPNetwork>),
+    #[cfg(feature = "halfkx-arch")]
+    HalfKaSplit(Arc<HalfKaSplitNetwork>),
+    #[cfg(feature = "halfkx-arch")]
+    HalfKaHmMerged(Arc<HalfKaHmMergedNetwork>),
+    #[cfg(feature = "halfkx-arch")]
+    HalfKaMerged(Arc<HalfKaMergedNetwork>),
+    #[cfg(feature = "halfkx-arch")]
+    HalfKaHmSplit(Arc<HalfKaHmSplitNetwork>),
+    #[cfg(feature = "layerstack-arch")]
+    LayerStacks(Arc<LayerStacksNetwork>),
+    #[cfg(feature = "nnue-runtime-dimensions")]
+    DynamicHalfKx(Arc<DynamicHalfKxNetwork>),
+    #[cfg(feature = "nnue-runtime-dimensions")]
+    DynamicLayerStacks(Arc<DynamicLayerStacksNetwork>),
+}
+
+impl TryFrom<&NNUENetwork> for SearchNetwork {
+    type Error = std::io::Error;
+
+    fn try_from(network: &NNUENetwork) -> Result<Self, Self::Error> {
+        match network {
+            #[cfg(feature = "halfkx-arch")]
+            NNUENetwork::HalfKP(net) => Ok(Self::HalfKP(Arc::clone(net))),
+            #[cfg(feature = "halfkx-arch")]
+            NNUENetwork::HalfKaSplit(net) => Ok(Self::HalfKaSplit(Arc::clone(net))),
+            #[cfg(feature = "halfkx-arch")]
+            NNUENetwork::HalfKaHmMerged(net) => Ok(Self::HalfKaHmMerged(Arc::clone(net))),
+            #[cfg(feature = "halfkx-arch")]
+            NNUENetwork::HalfKaMerged(net) => Ok(Self::HalfKaMerged(Arc::clone(net))),
+            #[cfg(feature = "halfkx-arch")]
+            NNUENetwork::HalfKaHmSplit(net) => Ok(Self::HalfKaHmSplit(Arc::clone(net))),
+            #[cfg(feature = "layerstack-arch")]
+            NNUENetwork::LayerStacks(net) => Ok(Self::LayerStacks(Arc::clone(net))),
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            NNUENetwork::DynamicHalfKx(net) => Ok(Self::DynamicHalfKx(Arc::clone(net))),
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            NNUENetwork::DynamicLayerStacks(net) => Ok(Self::DynamicLayerStacks(Arc::clone(net))),
+            #[cfg(not(feature = "halfkx-arch"))]
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!(
+                    "NNUE model {} requires the `halfkx-arch` feature for search; use edition-halfkx or edition-universal",
+                    network.architecture_name()
+                ),
+            )),
+        }
+    }
+}
+
 pub(crate) enum SearchEvaluator {
     Uninitialized,
     Material {
         level: MaterialLevel,
     },
-    #[cfg(all(
-        feature = "halfkx-arch",
-        any(not(feature = "mode-specific"), feature = "ft-halfkp")
-    ))]
+    #[cfg(feature = "halfkx-arch")]
     HalfKP {
         net: Arc<HalfKPNetwork>,
         stack: HalfKPStack,
         cache: Option<AccumulatorCacheGeneric>,
     },
-    #[cfg(all(
-        feature = "halfkx-arch",
-        any(not(feature = "mode-specific"), feature = "ft-halfka_split")
-    ))]
+    #[cfg(feature = "halfkx-arch")]
     HalfKaSplit {
         net: Arc<HalfKaSplitNetwork>,
         stack: HalfKaSplitStack,
         cache: Option<AccumulatorCacheGeneric>,
     },
-    #[cfg(all(
-        feature = "halfkx-arch",
-        any(not(feature = "mode-specific"), feature = "ft-halfka_hm_merged")
-    ))]
+    #[cfg(feature = "halfkx-arch")]
     HalfKaHmMerged {
         net: Arc<HalfKaHmMergedNetwork>,
         stack: HalfKaHmMergedStack,
         cache: Option<AccumulatorCacheGeneric>,
     },
-    #[cfg(all(
-        feature = "halfkx-arch",
-        any(not(feature = "mode-specific"), feature = "ft-halfka_merged")
-    ))]
+    #[cfg(feature = "halfkx-arch")]
     HalfKaMerged {
         net: Arc<HalfKaMergedNetwork>,
         stack: HalfKaMergedStack,
         cache: Option<AccumulatorCacheGeneric>,
     },
-    #[cfg(all(
-        feature = "halfkx-arch",
-        any(not(feature = "mode-specific"), feature = "ft-halfka_hm_split")
-    ))]
+    #[cfg(feature = "halfkx-arch")]
     HalfKaHmSplit {
         net: Arc<HalfKaHmSplitNetwork>,
         stack: HalfKaHmSplitStack,
@@ -112,93 +135,155 @@ pub(crate) enum SearchEvaluator {
 }
 
 impl SearchEvaluator {
-    pub(crate) fn prepare() -> Self {
+    pub(crate) fn prepare(&mut self) {
         let network = get_network();
         // 静的 LayerStacks の探索はロード済み net を MaterialLevel より優先する。
         #[cfg(feature = "layerstack-arch")]
         if let Some(net) = &network
             && matches!(&**net, NNUENetwork::LayerStacks(_))
         {
-            return Self::from_network(net);
+            self.prepare_network(net);
+            return;
         }
         if material::is_material_enabled() {
-            return Self::Material {
+            *self = Self::Material {
                 level: material::get_material_level(),
             };
+        } else if let Some(net) = network {
+            self.prepare_network(&net);
+        } else {
+            *self = Self::Uninitialized;
         }
-        network.map_or(Self::Uninitialized, |net| Self::from_network(&net))
+    }
+
+    fn prepare_network(&mut self, network: &NNUENetwork) {
+        // 同じ重みの探索では領域を再利用し、計算済みフラグだけを無効化する。
+        // Arc が変わった場合は形状が同じでも cache ごと作り直す。
+        match (&mut *self, network) {
+            #[cfg(feature = "halfkx-arch")]
+            (Self::HalfKP { net, stack, cache }, NNUENetwork::HalfKP(next))
+                if Arc::ptr_eq(net, next) =>
+            {
+                stack.reset();
+                if let Some(cache) = cache {
+                    cache.invalidate();
+                }
+            }
+            #[cfg(feature = "halfkx-arch")]
+            (Self::HalfKaSplit { net, stack, cache }, NNUENetwork::HalfKaSplit(next))
+                if Arc::ptr_eq(net, next) =>
+            {
+                stack.reset();
+                if let Some(cache) = cache {
+                    cache.invalidate();
+                }
+            }
+            #[cfg(feature = "halfkx-arch")]
+            (Self::HalfKaHmMerged { net, stack, cache }, NNUENetwork::HalfKaHmMerged(next))
+                if Arc::ptr_eq(net, next) =>
+            {
+                stack.reset();
+                if let Some(cache) = cache {
+                    cache.invalidate();
+                }
+            }
+            #[cfg(feature = "halfkx-arch")]
+            (Self::HalfKaMerged { net, stack, cache }, NNUENetwork::HalfKaMerged(next))
+                if Arc::ptr_eq(net, next) =>
+            {
+                stack.reset();
+                if let Some(cache) = cache {
+                    cache.invalidate();
+                }
+            }
+            #[cfg(feature = "halfkx-arch")]
+            (Self::HalfKaHmSplit { net, stack, cache }, NNUENetwork::HalfKaHmSplit(next))
+                if Arc::ptr_eq(net, next) =>
+            {
+                stack.reset();
+                if let Some(cache) = cache {
+                    cache.invalidate();
+                }
+            }
+            #[cfg(feature = "layerstack-arch")]
+            (Self::LayerStacks { net, stack, cache }, NNUENetwork::LayerStacks(next))
+                if Arc::ptr_eq(net, next) =>
+            {
+                stack.reset();
+                if let Some(cache) = cache {
+                    cache.invalidate();
+                }
+            }
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            (Self::DynamicHalfKx { net, stack }, NNUENetwork::DynamicHalfKx(next))
+                if Arc::ptr_eq(net, next) =>
+            {
+                stack.reset();
+            }
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            (Self::DynamicLayerStacks { net, stack }, NNUENetwork::DynamicLayerStacks(next))
+                if Arc::ptr_eq(net, next) =>
+            {
+                stack.reset();
+            }
+            _ => *self = Self::from_network(network),
+        }
     }
 
     pub(crate) fn from_network(network: &NNUENetwork) -> Self {
-        match network {
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfkp")
-            ))]
-            NNUENetwork::HalfKP(net) => Self::HalfKP {
-                net: Arc::clone(net),
-                stack: HalfKPStack::from_network(net),
+        match SearchNetwork::try_from(network) {
+            #[cfg(feature = "halfkx-arch")]
+            Ok(SearchNetwork::HalfKP(net)) => Self::HalfKP {
+                stack: HalfKPStack::from_network(&net),
                 cache: super::halfkx_finny_enabled(net.l1_size())
                     .then(|| AccumulatorCacheGeneric::new(net.l1_size())),
+                net,
             },
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_split")
-            ))]
-            NNUENetwork::HalfKaSplit(net) => Self::HalfKaSplit {
-                net: Arc::clone(net),
-                stack: HalfKaSplitStack::from_network(net),
+            #[cfg(feature = "halfkx-arch")]
+            Ok(SearchNetwork::HalfKaSplit(net)) => Self::HalfKaSplit {
+                stack: HalfKaSplitStack::from_network(&net),
                 cache: super::halfkx_finny_enabled(net.l1_size())
                     .then(|| AccumulatorCacheGeneric::new(net.l1_size())),
+                net,
             },
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_hm_merged")
-            ))]
-            NNUENetwork::HalfKaHmMerged(net) => Self::HalfKaHmMerged {
-                net: Arc::clone(net),
-                stack: HalfKaHmMergedStack::from_network(net),
+            #[cfg(feature = "halfkx-arch")]
+            Ok(SearchNetwork::HalfKaHmMerged(net)) => Self::HalfKaHmMerged {
+                stack: HalfKaHmMergedStack::from_network(&net),
                 cache: super::halfkx_finny_enabled(net.l1_size())
                     .then(|| AccumulatorCacheGeneric::new(net.l1_size())),
+                net,
             },
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_merged")
-            ))]
-            NNUENetwork::HalfKaMerged(net) => Self::HalfKaMerged {
-                net: Arc::clone(net),
-                stack: HalfKaMergedStack::from_network(net),
+            #[cfg(feature = "halfkx-arch")]
+            Ok(SearchNetwork::HalfKaMerged(net)) => Self::HalfKaMerged {
+                stack: HalfKaMergedStack::from_network(&net),
                 cache: super::halfkx_finny_enabled(net.l1_size())
                     .then(|| AccumulatorCacheGeneric::new(net.l1_size())),
+                net,
             },
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_hm_split")
-            ))]
-            NNUENetwork::HalfKaHmSplit(net) => Self::HalfKaHmSplit {
-                net: Arc::clone(net),
-                stack: HalfKaHmSplitStack::from_network(net),
+            #[cfg(feature = "halfkx-arch")]
+            Ok(SearchNetwork::HalfKaHmSplit(net)) => Self::HalfKaHmSplit {
+                stack: HalfKaHmSplitStack::from_network(&net),
                 cache: super::halfkx_finny_enabled(net.l1_size())
                     .then(|| AccumulatorCacheGeneric::new(net.l1_size())),
+                net,
             },
             #[cfg(feature = "layerstack-arch")]
-            NNUENetwork::LayerStacks(net) => Self::LayerStacks {
-                net: Arc::clone(net),
+            Ok(SearchNetwork::LayerStacks(net)) => Self::LayerStacks {
                 stack: net.new_acc_stack(),
                 cache: Some(net.new_acc_cache()),
+                net,
             },
             #[cfg(feature = "nnue-runtime-dimensions")]
-            NNUENetwork::DynamicHalfKx(net) => Self::DynamicHalfKx {
-                net: Arc::clone(net),
-                stack: Box::new(DynamicHalfKxStack::new(net)),
+            Ok(SearchNetwork::DynamicHalfKx(net)) => Self::DynamicHalfKx {
+                stack: Box::new(DynamicHalfKxStack::new(&net)),
+                net,
             },
             #[cfg(feature = "nnue-runtime-dimensions")]
-            NNUENetwork::DynamicLayerStacks(net) => Self::DynamicLayerStacks {
-                net: Arc::clone(net),
+            Ok(SearchNetwork::DynamicLayerStacks(net)) => Self::DynamicLayerStacks {
                 stack: Box::new(net.new_stack()),
+                net,
             },
-            #[cfg(any(not(feature = "halfkx-arch"), feature = "mode-specific"))]
-            _ => panic!("NNUE architecture is not enabled for search in this build"),
+            Err(error) => panic!("loader must validate search support: {error}"),
         }
     }
 
@@ -209,38 +294,23 @@ impl SearchEvaluator {
                 "NNUE network not loaded and MaterialLevel not set. Use 'setoption name EvalFile' or 'setoption name MaterialLevel'."
             ),
             Self::Material { level } => material::evaluate_material_at_level(pos, *level),
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfkp")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKP { net, stack, cache } => {
                 super::network::update_and_evaluate_halfkp(net, pos, stack, cache)
             }
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_split")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaSplit { net, stack, cache } => {
                 super::network::update_and_evaluate_halfka(net, pos, stack, cache)
             }
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_hm_merged")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaHmMerged { net, stack, cache } => {
                 super::network::update_and_evaluate_halfka_hm(net, pos, stack, cache)
             }
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_merged")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaMerged { net, stack, cache } => {
                 super::network::update_and_evaluate_halfka_merged(net, pos, stack, cache)
             }
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_hm_split")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaHmSplit { net, stack, cache } => {
                 super::network::update_and_evaluate_halfka_hm_split(net, pos, stack, cache)
             }
@@ -265,30 +335,15 @@ impl SearchEvaluator {
     pub(crate) fn push(&mut self, dirty: DirtyPiece) {
         match self {
             Self::Uninitialized | Self::Material { .. } => {}
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfkp")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKP { stack, .. } => stack.push(dirty),
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_split")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaSplit { stack, .. } => stack.push(dirty),
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_hm_merged")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaHmMerged { stack, .. } => stack.push(dirty),
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_merged")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaMerged { stack, .. } => stack.push(dirty),
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_hm_split")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaHmSplit { stack, .. } => stack.push(dirty),
             #[cfg(feature = "nnue-runtime-dimensions")]
             Self::DynamicHalfKx { stack, .. } => stack.push(dirty),
@@ -306,30 +361,15 @@ impl SearchEvaluator {
     pub(crate) fn pop(&mut self) {
         match self {
             Self::Uninitialized | Self::Material { .. } => {}
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfkp")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKP { stack, .. } => stack.pop(),
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_split")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaSplit { stack, .. } => stack.pop(),
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_hm_merged")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaHmMerged { stack, .. } => stack.pop(),
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_merged")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaMerged { stack, .. } => stack.pop(),
-            #[cfg(all(
-                feature = "halfkx-arch",
-                any(not(feature = "mode-specific"), feature = "ft-halfka_hm_split")
-            ))]
+            #[cfg(feature = "halfkx-arch")]
             Self::HalfKaHmSplit { stack, .. } => stack.pop(),
             #[cfg(feature = "nnue-runtime-dimensions")]
             Self::DynamicHalfKx { stack, .. } => stack.pop(),
