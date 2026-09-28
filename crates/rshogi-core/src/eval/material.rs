@@ -611,7 +611,11 @@ fn eval_lv7_like(
 /// - Level 3-4: 利きの計算を含む（中速）
 /// - Level 7-9: より複雑な評価（低速だがNNUEより高速）
 pub fn evaluate_material(pos: &Position) -> Value {
-    let level = get_material_level();
+    evaluate_material_at_level(pos, get_material_level())
+}
+
+/// 指定したレベルの駒得評価を返す。
+pub(crate) fn evaluate_material_at_level(pos: &Position, level: MaterialLevel) -> Value {
     let raw = match level {
         MaterialLevel::Lv1 => eval_lv1(pos),
         MaterialLevel::Lv2 => eval_lv2(pos),

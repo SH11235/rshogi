@@ -3,11 +3,8 @@ use std::cell::Cell;
 use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::eval::EvalHash;
-use crate::nnue::AccumulatorStackVariant;
-use crate::nnue::halfka_split::HalfKaSplitStack;
-use crate::nnue::network_halfka_split::AccumulatorStackHalfKaSplit;
 use crate::position::Position;
-use crate::search::alpha_beta::{SearchContext, SearchState, SearchWorker, TTContext};
+use crate::search::alpha_beta::{SearchContext, SearchWorker, TTContext};
 use crate::search::pruning::try_probcut;
 use crate::search::{LimitsType, SearchTuneParams, TimeManagement};
 use crate::tt::TranspositionTable;
@@ -20,10 +17,34 @@ enum ChildOutcome {
     Complete,
 }
 
-fn stack_index(state: &SearchState) -> usize {
-    match &state.nnue_stack {
-        AccumulatorStackVariant::HalfKaSplit(stack) => stack.current_index(),
-        _ => panic!("fixture uses an initialized HalfKaSplit stack"),
+#[cfg(all(
+    feature = "halfkx-arch",
+    any(not(feature = "mode-specific"), feature = "ft-halfkp")
+))]
+fn install_stack(worker: &mut SearchWorker) {
+    use crate::nnue::halfkp::{HalfKPL256, HalfKPNetwork};
+    use crate::nnue::network_halfkp::{HalfKP256CReLU, halfkp_loader_fixture};
+    use crate::nnue::search_evaluator::SearchEvaluator;
+    static NET: std::sync::OnceLock<Arc<HalfKPNetwork>> = std::sync::OnceLock::new();
+    let net = NET.get_or_init(|| {
+        let bytes = halfkp_loader_fixture(256, "Features=HalfKP[125388->256x2],l2=32,l3=32");
+        let net = HalfKP256CReLU::read(&mut std::io::Cursor::new(bytes)).unwrap();
+        Arc::new(HalfKPNetwork::L256(HalfKPL256::CReLU32x32(Box::new(net))))
+    });
+    worker.state.evaluator =
+        SearchEvaluator::from_network(&crate::nnue::NNUENetwork::HalfKP(Arc::clone(net)));
+}
+
+#[cfg(all(
+    feature = "halfkx-arch",
+    any(not(feature = "mode-specific"), feature = "ft-halfkp")
+))]
+fn stack_index(state: &crate::search::alpha_beta::SearchState) -> usize {
+    match &state.evaluator {
+        crate::nnue::search_evaluator::SearchEvaluator::HalfKP { stack, .. } => {
+            stack.current_index()
+        }
+        _ => panic!("fixture uses a typed HalfKP evaluator"),
     }
 }
 
@@ -36,11 +57,12 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
         ..Default::default()
     };
     worker.prepare_search(&limits);
-    // HalfKP の旧 typed-uninit push とは独立に、有効値で構築する stack を使う。
+    #[cfg(all(
+        feature = "halfkx-arch",
+        any(not(feature = "mode-specific"), feature = "ft-halfkp")
+    ))]
+    install_stack(&mut worker);
     // qsearch は TT hit または入口の stop で返るため NNUE forward は実行しない。
-    worker.state.nnue_stack = AccumulatorStackVariant::HalfKaSplit(HalfKaSplitStack::L256(
-        AccumulatorStackHalfKaSplit::new(),
-    ));
     worker.state.calls_cnt = 1;
     let mut pos = Position::new();
     pos.set_sfen("K8/9/9/4r4/4R4/9/9/9/8k b - 1").unwrap();
@@ -48,7 +70,6 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
     assert!(pos.is_legal(capture) && pos.is_capture(capture) && !pos.in_check());
     let before_sfen = pos.to_sfen();
     let before_key = pos.key();
-    let before_stack = stack_index(&worker.state);
     let prob_beta = beta + worker.search_tune_params.probcut_beta_margin_base;
     assert_eq!(prob_beta > 0, beta == 0);
 
@@ -130,7 +151,11 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
             assert!(depth > 0);
             assert_eq!(ply, 2);
             assert_ne!(child_pos.key(), before_key);
-            assert_eq!(stack_index(state), before_stack + 1);
+            #[cfg(all(
+                feature = "halfkx-arch",
+                any(not(feature = "mode-specific"), feature = "ft-halfkp")
+            ))]
+            assert_eq!(stack_index(state), 1);
             if outcome == ChildOutcome::SearchAbort {
                 state.abort = true;
                 Value::ZERO
@@ -141,7 +166,11 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
     );
     assert_eq!(pos.to_sfen(), before_sfen);
     assert_eq!(pos.key(), before_key);
-    assert_eq!(stack_index(&worker.state), before_stack);
+    #[cfg(all(
+        feature = "halfkx-arch",
+        any(not(feature = "mode-specific"), feature = "ft-halfkp")
+    ))]
+    assert_eq!(stack_index(&worker.state), 0);
     assert_eq!(worker.state.nodes, 1, "actual child was entered exactly once");
     assert_eq!(calls.get(), usize::from(outcome != ChildOutcome::QsearchStop));
     let after = worker.tt.probe(pos.key(), &pos);

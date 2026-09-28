@@ -1042,12 +1042,6 @@ impl AccumulatorCacheGeneric {
         }
     }
 
-    /// キャッシュが保持する L1 サイズ
-    #[cfg(feature = "halfkx-arch")]
-    pub(crate) fn l1_size(&self) -> usize {
-        self.l1
-    }
-
     /// テスト用に有効な cache entry の accumulator を参照する。
     #[cfg(all(
         test,

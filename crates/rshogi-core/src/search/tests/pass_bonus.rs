@@ -1,9 +1,5 @@
 //! グローバル設定を別プロセスに隔離した PASS ボーナスの実探索テスト。
 use crate::eval::{EvalHash, set_pass_move_bonus};
-use crate::nnue::{
-    AccumulatorStackVariant, halfka_split::HalfKaSplitStack,
-    network_halfka_split::AccumulatorStackHalfKaSplit,
-};
 use crate::position::Position;
 use crate::search::{
     LimitsType, RootMove, RootMoves, SearchTuneParams, SearchWorker, TimeManagement,
@@ -36,10 +32,6 @@ fn run_root(
         SearchTuneParams::default(),
     );
     worker.prepare_search(&limits);
-    // 未初期化 HalfKP push の別課題に依存しない有効な storage。
-    worker.state.nnue_stack = AccumulatorStackVariant::HalfKaSplit(HalfKaSplitStack::L256(
-        AccumulatorStackHalfKaSplit::new(),
-    ));
     worker.state.calls_cnt = 2;
     worker.state.root_depth = 1;
     worker.state.root_moves = if mode == 1 || mode == 2 || mode == 4 {
@@ -79,10 +71,10 @@ fn run_root(
         worker.search_root(&mut pos, 1, window.0, window.1, &limits, &mut tm)
     };
     assert_eq!((pos.to_sfen(), pos.key()), before);
-    match &worker.state.nnue_stack {
-        AccumulatorStackVariant::HalfKaSplit(stack) => assert_eq!(stack.current_index(), 0),
-        _ => unreachable!(),
-    }
+    assert!(matches!(
+        worker.state.evaluator,
+        crate::nnue::search_evaluator::SearchEvaluator::Material { .. }
+    ));
     assert_eq!(worker.state.abort, stop);
     let rm = worker.state.root_moves.iter().find(|rm| rm.pv[0].is_pass()).unwrap();
     (value, rm.score)

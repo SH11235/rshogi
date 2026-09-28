@@ -7,6 +7,7 @@ use crate::nnue::init_nnue_from_bytes;
 use crate::nnue::network_halfkp::{
     AccumulatorHalfKP, AccumulatorStackHalfKP, HalfKP256CReLU, halfkp_loader_fixture,
 };
+use crate::nnue::search_evaluator::SearchEvaluator;
 use crate::position::SFEN_HIRATE;
 
 const L1: usize = 256;
@@ -51,10 +52,21 @@ fn worker() -> Box<SearchWorker> {
 }
 
 fn stack(worker: &SearchWorker) -> &AccumulatorStackHalfKP<L1> {
-    let AccumulatorStackVariant::HalfKP(HalfKPStack::L256(stack)) = &worker.state.nnue_stack else {
+    let SearchEvaluator::HalfKP {
+        stack: HalfKPStack::L256(stack),
+        ..
+    } = &worker.state.evaluator
+    else {
         panic!("const generics HalfKP L1=256 が必要");
     };
     stack
+}
+
+fn cache(worker: &SearchWorker) -> &Option<crate::nnue::AccumulatorCacheGeneric> {
+    let SearchEvaluator::HalfKP { cache, .. } = &worker.state.evaluator else {
+        panic!("HalfKP evaluator が必要");
+    };
+    cache
 }
 
 fn assert_evaluation(
@@ -77,10 +89,10 @@ fn assert_evaluation(
     }
     // 評価値だけでは cache を通らない実装も通るため、実際の cache 書き込みも確認する。
     if !crate::nnue::halfkx_finny_enabled(L1) {
-        assert!(worker.state.halfkx_cache.is_none());
+        assert!(cache(worker).is_none());
         return expected_value;
     }
-    let cache = worker.state.halfkx_cache.as_ref().expect("prepare_search の cache 初期化");
+    let cache = cache(worker).as_ref().expect("prepare_search の cache 初期化");
     for &perspective in refreshed {
         assert_eq!(
             cache.cached_accumulation(pos.king_square(perspective), perspective),
@@ -129,7 +141,7 @@ fn check_search_entry() {
         for worker in [&mut eager, &mut lazy] {
             worker.prepare_search(&LimitsType::default());
             if crate::nnue::halfkx_finny_enabled(L1) {
-                let cache = worker.state.halfkx_cache.as_ref().expect("探索開始時の cache");
+                let cache = cache(worker).as_ref().expect("探索開始時の cache");
                 for perspective in [Color::Black, Color::White] {
                     assert!(
                         cache
@@ -138,7 +150,7 @@ fn check_search_entry() {
                     );
                 }
             } else {
-                assert!(worker.state.halfkx_cache.is_none());
+                assert!(cache(worker).is_none());
             }
             assert_evaluation(worker, &pos, &reference, &[Color::Black, Color::White]);
         }
@@ -154,8 +166,8 @@ fn check_search_entry() {
                 .find(|candidate| candidate.to_usi() == *usi)
                 .unwrap_or_else(|| panic!("合法手が必要: {usi}"));
             let dirty = pos.do_move(mv, pos.gives_check(mv));
-            eager.state.nnue_stack.push(dirty);
-            lazy.state.nnue_stack.push(dirty);
+            eager.state.evaluator.push(dirty);
+            lazy.state.evaluator.push(dirty);
             let refreshed: Vec<_> = [Color::Black, Color::White]
                 .into_iter()
                 .filter(|color| dirty.king_moved[color.index()])

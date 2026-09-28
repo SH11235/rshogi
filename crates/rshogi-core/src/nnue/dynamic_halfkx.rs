@@ -570,6 +570,12 @@ pub struct DynamicHalfKxStack {
 }
 
 impl DynamicHalfKxStack {
+    #[cfg(test)]
+    pub(crate) fn test_accumulation(&self) -> &[i16] {
+        let start = self.current * 2 * self.l1;
+        &self.accumulations[start..start + 2 * self.l1]
+    }
+
     pub(crate) fn new(net: &DynamicHalfKxNetwork) -> Self {
         Self {
             spec: net.spec,
@@ -771,7 +777,7 @@ mod tests {
     #[test]
     fn net_delta_rejects_dynamic_halfkx() {
         let spec = ArchitectureSpec::new(FeatureSet::HalfKP, 32, 4, 2, Activation::CReLU);
-        let mut network = NNUENetwork::DynamicHalfKx(Box::new(test_network(spec)));
+        let mut network = NNUENetwork::DynamicHalfKx(std::sync::Arc::new(test_network(spec)));
         let error = network
             .apply_net_deltas(&[NetDelta {
                 id: NetCoefficientId {
@@ -788,7 +794,7 @@ mod tests {
     #[test]
     fn stack_is_rebuilt_for_every_runtime_architecture_identity_change() {
         let base_spec = ArchitectureSpec::new(FeatureSet::HalfKP, 8, 4, 3, Activation::CReLU);
-        let base = NNUENetwork::DynamicHalfKx(Box::new(test_network(base_spec)));
+        let base = NNUENetwork::DynamicHalfKx(std::sync::Arc::new(test_network(base_spec)));
         let stack = AccumulatorStackVariant::from_network(&base);
         assert!(stack.matches_network(&base));
 
@@ -800,7 +806,8 @@ mod tests {
             ArchitectureSpec::new(FeatureSet::HalfKP, 8, 4, 3, Activation::PairwiseCReLU),
             ArchitectureSpec::new(FeatureSet::HalfKaHmMerged, 8, 4, 3, Activation::CReLU),
         ] {
-            let switched = NNUENetwork::DynamicHalfKx(Box::new(test_network(switched_spec)));
+            let switched =
+                NNUENetwork::DynamicHalfKx(std::sync::Arc::new(test_network(switched_spec)));
             assert!(!stack.matches_network(&switched), "switch to {switched_spec:?}");
             assert!(
                 AccumulatorStackVariant::from_network(&switched).matches_network(&switched),

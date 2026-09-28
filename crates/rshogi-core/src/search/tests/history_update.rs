@@ -1,9 +1,5 @@
 //! alpha_beta の完了処理が実際の履歴 entry を更新することを観測する。
 use crate::eval::EvalHash;
-use crate::nnue::{
-    AccumulatorStackVariant, halfka_split::HalfKaSplitStack,
-    network_halfka_split::AccumulatorStackHalfKaSplit,
-};
 use crate::position::Position;
 use crate::search::{
     ContHistKey, LimitsType, NodeType, RootMoves, SearchTuneParams, SearchWorker, TimeManagement,
@@ -43,9 +39,6 @@ fn observe_completed_node(
     };
     worker.prepare_search(&limits);
     worker.state.root_depth = 8;
-    worker.state.nnue_stack = AccumulatorStackVariant::HalfKaSplit(HalfKaSplitStack::L256(
-        AccumulatorStackHalfKaSplit::new(),
-    ));
     let ply = 6;
     let keys: [ContHistKey; 6] = std::array::from_fn(|i| {
         ContHistKey::new(i % 2 == 0, i % 3 == 0, Piece::W_PAWN, Square::from_u8(i as u8).unwrap())
