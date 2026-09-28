@@ -155,7 +155,10 @@ pub use network::{
     set_layer_stack_progress_kpabs_weights, set_nnue_architecture_override,
     validate_layer_stack_routing_configuration,
 };
-pub(crate) use network::{evaluate_dispatch_with_caches, nnue_requires_board_effects};
+pub(crate) use network::{
+    ensure_accumulator_computed_with_caches, evaluate_dispatch_with_caches,
+    nnue_requires_board_effects,
+};
 #[cfg(all(feature = "layerstacks-512x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks512x16x32;
 #[cfg(all(feature = "layerstacks-768x8x32", feature = "ft-halfka_hm_merged"))]

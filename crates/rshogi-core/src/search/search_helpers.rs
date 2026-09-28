@@ -7,7 +7,9 @@ use std::ptr::NonNull;
 use crate::eval::{EvalHash, eval_hash_enabled};
 #[cfg(feature = "layerstack-arch")]
 use crate::nnue::{AccumulatorStackVariant, update_and_evaluate_layer_stacks_cached};
-use crate::nnue::{DirtyPiece, ensure_accumulator_computed, evaluate_dispatch_with_caches};
+use crate::nnue::{
+    DirtyPiece, ensure_accumulator_computed_with_caches, evaluate_dispatch_with_caches,
+};
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
@@ -138,7 +140,13 @@ pub(super) fn nnue_prepare_parent(st: &mut SearchState, pos: &Position) {
     let acc_cache = &mut st.acc_cache;
     #[cfg(not(feature = "layerstack-arch"))]
     let acc_cache = &mut None;
-    ensure_accumulator_computed(pos, &mut st.nnue_stack, acc_cache);
+    ensure_accumulator_computed_with_caches(
+        pos,
+        &mut st.nnue_stack,
+        acc_cache,
+        #[cfg(feature = "halfkx-arch")]
+        &mut st.halfkx_cache,
+    );
 }
 
 /// NNUE 評価
@@ -169,6 +177,10 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
     let acc_cache = &mut st.acc_cache;
     #[cfg(not(feature = "layerstack-arch"))]
     let acc_cache = &mut None;
+    #[cfg(all(test, feature = "halfkx-arch"))]
+    if super::tests::accumulator_before_child::skip_halfkx_cache() {
+        return crate::nnue::evaluate_dispatch(pos, &mut st.nnue_stack, acc_cache);
+    }
     evaluate_dispatch_with_caches(
         pos,
         &mut st.nnue_stack,

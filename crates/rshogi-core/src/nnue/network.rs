@@ -1925,6 +1925,21 @@ fn update_and_evaluate_halfka_hm(
     let NNUENetwork::HalfKaHmMerged(net) = network else {
         unreachable!("Network/Stack type mismatch")
     };
+    update_accumulator_only_halfka_hm(network, pos, stack, cache);
+    net.evaluate(pos, stack)
+}
+
+#[cfg(feature = "halfkx-arch")]
+#[inline]
+fn update_accumulator_only_halfka_hm(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKaHmMergedStack,
+    cache: &mut Option<AccumulatorCacheGeneric>,
+) {
+    let NNUENetwork::HalfKaHmMerged(net) = network else {
+        unreachable!("Network/Stack type mismatch")
+    };
     // アキュムレータの更新
     if !stack.is_current_computed() {
         let mut updated = false;
@@ -1939,12 +1954,17 @@ fn update_and_evaluate_halfka_hm(
             } else {
                 net.update_accumulator(pos, &dirty, stack, prev_idx);
             }
+            count_update!();
             updated = true;
         }
 
         // 2. 失敗なら祖先探索 + 複数手差分更新を試行
         if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
             updated = net.forward_update_incremental(pos, stack, source_idx);
+            #[cfg(feature = "nnue-stats")]
+            if updated {
+                super::stats::NNUE_STATS.count_forward_update();
+            }
         }
 
         // 3. それでも失敗なら全計算
@@ -1954,11 +1974,11 @@ fn update_and_evaluate_halfka_hm(
             } else {
                 net.refresh_accumulator(pos, stack);
             }
+            count_refresh!();
         }
+    } else {
+        count_already_computed!();
     }
-
-    // 評価
-    net.evaluate(pos, stack)
 }
 
 /// HalfKaSplit アキュムレータを更新して評価（内部実装）
@@ -1970,6 +1990,21 @@ fn update_and_evaluate_halfka(
     stack: &mut HalfKaSplitStack,
     cache: &mut Option<AccumulatorCacheGeneric>,
 ) -> Value {
+    let NNUENetwork::HalfKaSplit(net) = network else {
+        unreachable!("Network/Stack type mismatch")
+    };
+    update_accumulator_only_halfka(network, pos, stack, cache);
+    net.evaluate(pos, stack)
+}
+
+#[cfg(feature = "halfkx-arch")]
+#[inline]
+fn update_accumulator_only_halfka(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKaSplitStack,
+    cache: &mut Option<AccumulatorCacheGeneric>,
+) {
     let NNUENetwork::HalfKaSplit(net) = network else {
         unreachable!("Network/Stack type mismatch")
     };
@@ -1987,12 +2022,17 @@ fn update_and_evaluate_halfka(
             } else {
                 net.update_accumulator(pos, &dirty, stack, prev_idx);
             }
+            count_update!();
             updated = true;
         }
 
         // 2. 失敗なら祖先探索 + 複数手差分更新を試行
         if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
             updated = net.forward_update_incremental(pos, stack, source_idx);
+            #[cfg(feature = "nnue-stats")]
+            if updated {
+                super::stats::NNUE_STATS.count_forward_update();
+            }
         }
 
         // 3. それでも失敗なら全計算
@@ -2002,11 +2042,11 @@ fn update_and_evaluate_halfka(
             } else {
                 net.refresh_accumulator(pos, stack);
             }
+            count_refresh!();
         }
+    } else {
+        count_already_computed!();
     }
-
-    // 評価
-    net.evaluate(pos, stack)
 }
 
 #[cfg(feature = "halfkx-arch")]
@@ -2016,6 +2056,21 @@ fn update_and_evaluate_halfka_merged(
     stack: &mut HalfKaMergedStack,
     cache: &mut Option<AccumulatorCacheGeneric>,
 ) -> Value {
+    let NNUENetwork::HalfKaMerged(net) = network else {
+        unreachable!("Network/Stack type mismatch")
+    };
+    update_accumulator_only_halfka_merged(network, pos, stack, cache);
+    net.evaluate(pos, stack)
+}
+
+#[cfg(feature = "halfkx-arch")]
+#[inline]
+fn update_accumulator_only_halfka_merged(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKaMergedStack,
+    cache: &mut Option<AccumulatorCacheGeneric>,
+) {
     let NNUENetwork::HalfKaMerged(net) = network else {
         unreachable!("Network/Stack type mismatch")
     };
@@ -2031,11 +2086,16 @@ fn update_and_evaluate_halfka_merged(
             } else {
                 net.update_accumulator(pos, &dirty, stack, prev_idx);
             }
+            count_update!();
             updated = true;
         }
 
         if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
             updated = net.forward_update_incremental(pos, stack, source_idx);
+            #[cfg(feature = "nnue-stats")]
+            if updated {
+                super::stats::NNUE_STATS.count_forward_update();
+            }
         }
 
         if !updated {
@@ -2044,10 +2104,11 @@ fn update_and_evaluate_halfka_merged(
             } else {
                 net.refresh_accumulator(pos, stack);
             }
+            count_refresh!();
         }
+    } else {
+        count_already_computed!();
     }
-
-    net.evaluate(pos, stack)
 }
 
 #[cfg(feature = "halfkx-arch")]
@@ -2057,6 +2118,21 @@ fn update_and_evaluate_halfka_hm_split(
     stack: &mut HalfKaHmSplitStack,
     cache: &mut Option<AccumulatorCacheGeneric>,
 ) -> Value {
+    let NNUENetwork::HalfKaHmSplit(net) = network else {
+        unreachable!("Network/Stack type mismatch")
+    };
+    update_accumulator_only_halfka_hm_split(network, pos, stack, cache);
+    net.evaluate(pos, stack)
+}
+
+#[cfg(feature = "halfkx-arch")]
+#[inline]
+fn update_accumulator_only_halfka_hm_split(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKaHmSplitStack,
+    cache: &mut Option<AccumulatorCacheGeneric>,
+) {
     let NNUENetwork::HalfKaHmSplit(net) = network else {
         unreachable!("Network/Stack type mismatch")
     };
@@ -2072,11 +2148,16 @@ fn update_and_evaluate_halfka_hm_split(
             } else {
                 net.update_accumulator(pos, &dirty, stack, prev_idx);
             }
+            count_update!();
             updated = true;
         }
 
         if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
             updated = net.forward_update_incremental(pos, stack, source_idx);
+            #[cfg(feature = "nnue-stats")]
+            if updated {
+                super::stats::NNUE_STATS.count_forward_update();
+            }
         }
 
         if !updated {
@@ -2085,10 +2166,11 @@ fn update_and_evaluate_halfka_hm_split(
             } else {
                 net.refresh_accumulator(pos, stack);
             }
+            count_refresh!();
         }
+    } else {
+        count_already_computed!();
     }
-
-    net.evaluate(pos, stack)
 }
 
 /// HalfKP アキュムレータを更新して評価（内部実装）
@@ -2100,6 +2182,21 @@ fn update_and_evaluate_halfkp(
     stack: &mut HalfKPStack,
     cache: &mut Option<AccumulatorCacheGeneric>,
 ) -> Value {
+    let NNUENetwork::HalfKP(net) = network else {
+        unreachable!("Network/Stack type mismatch")
+    };
+    update_accumulator_only_halfkp(network, pos, stack, cache);
+    net.evaluate(pos, stack)
+}
+
+#[cfg(feature = "halfkx-arch")]
+#[inline]
+fn update_accumulator_only_halfkp(
+    network: &NNUENetwork,
+    pos: &Position,
+    stack: &mut HalfKPStack,
+    cache: &mut Option<AccumulatorCacheGeneric>,
+) {
     let NNUENetwork::HalfKP(net) = network else {
         unreachable!("Network/Stack type mismatch")
     };
@@ -2117,12 +2214,17 @@ fn update_and_evaluate_halfkp(
             } else {
                 net.update_accumulator(pos, &dirty, stack, prev_idx);
             }
+            count_update!();
             updated = true;
         }
 
         // 2. 失敗なら祖先探索 + 複数手差分更新を試行
         if !updated && let Some((source_idx, _depth)) = stack.find_usable_accumulator() {
             updated = net.forward_update_incremental(pos, stack, source_idx);
+            #[cfg(feature = "nnue-stats")]
+            if updated {
+                super::stats::NNUE_STATS.count_forward_update();
+            }
         }
 
         // 3. それでも失敗なら全計算
@@ -2132,11 +2234,11 @@ fn update_and_evaluate_halfkp(
             } else {
                 net.refresh_accumulator(pos, stack);
             }
+            count_refresh!();
         }
+    } else {
+        count_already_computed!();
     }
-
-    // 評価
-    net.evaluate(pos, stack)
 }
 
 /// ロードされたNNUEがLayerStacksアーキテクチャかどうか
@@ -2318,6 +2420,23 @@ pub fn ensure_accumulator_computed(
     stack: &mut AccumulatorStackVariant,
     acc_cache: &mut Option<LayerStacksAccCache>,
 ) {
+    ensure_accumulator_computed_with_caches(
+        pos,
+        stack,
+        acc_cache,
+        #[cfg(feature = "halfkx-arch")]
+        &mut None,
+    );
+}
+
+/// worker の Finny cache を使って accumulator だけを更新する。
+/// progress と評価用 bucket は更新せず、評価時の加算順序を保つ。
+pub(crate) fn ensure_accumulator_computed_with_caches(
+    pos: &Position,
+    stack: &mut AccumulatorStackVariant,
+    acc_cache: &mut Option<LayerStacksAccCache>,
+    #[cfg(feature = "halfkx-arch")] halfkx_cache: &mut Option<AccumulatorCacheGeneric>,
+) {
     // layerstack-arch 無効ビルドでは LayerStacks variant が存在せず acc_cache は使われない。
     #[cfg(not(feature = "layerstack-arch"))]
     let _ = acc_cache;
@@ -2357,23 +2476,23 @@ pub fn ensure_accumulator_computed(
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaSplit(s) => {
-            update_accumulator_only_halfka(&network, pos, s);
+            update_accumulator_only_halfka(&network, pos, s, halfkx_cache);
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaHmMerged(s) => {
-            update_accumulator_only_halfka_hm(&network, pos, s);
+            update_accumulator_only_halfka_hm(&network, pos, s, halfkx_cache);
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaMerged(s) => {
-            update_accumulator_only_halfka_merged(&network, pos, s);
+            update_accumulator_only_halfka_merged(&network, pos, s, halfkx_cache);
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaHmSplit(s) => {
-            update_accumulator_only_halfka_hm_split(&network, pos, s);
+            update_accumulator_only_halfka_hm_split(&network, pos, s, halfkx_cache);
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKP(s) => {
-            update_accumulator_only_halfkp(&network, pos, s);
+            update_accumulator_only_halfkp(&network, pos, s, halfkx_cache);
         }
         #[cfg(not(feature = "halfkx-arch"))]
         AccumulatorStackVariant::HalfKaSplit(_)
@@ -2383,154 +2502,6 @@ pub fn ensure_accumulator_computed(
         | AccumulatorStackVariant::HalfKP(_) => {
             unreachable!("halfkx-arch disabled: HalfKX variant cannot exist in this build")
         }
-    }
-}
-
-/// HalfKaHmMerged アキュムレータを更新のみ（評価なし）
-#[cfg(feature = "halfkx-arch")]
-#[inline]
-fn update_accumulator_only_halfka_hm(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut HalfKaHmMergedStack,
-) {
-    if stack.is_current_computed() {
-        count_already_computed!();
-        return;
-    }
-
-    let mut updated = false;
-
-    // 直前局面で差分更新を試行
-    if let Some(prev_idx) = stack.current_previous()
-        && stack.is_entry_computed(prev_idx)
-    {
-        let dirty = stack.current_dirty_piece();
-        network.update_accumulator_halfka_hm(pos, &dirty, stack, prev_idx);
-        count_update!();
-        updated = true;
-    }
-
-    // 失敗なら全計算
-    if !updated {
-        network.refresh_accumulator_halfka_hm(pos, stack);
-        count_refresh!();
-    }
-}
-
-/// HalfKaSplit アキュムレータを更新のみ（評価なし）
-#[cfg(feature = "halfkx-arch")]
-#[inline]
-fn update_accumulator_only_halfka(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut HalfKaSplitStack,
-) {
-    if stack.is_current_computed() {
-        count_already_computed!();
-        return;
-    }
-
-    let mut updated = false;
-
-    // 直前局面で差分更新を試行
-    if let Some(prev_idx) = stack.current_previous()
-        && stack.is_entry_computed(prev_idx)
-    {
-        let dirty = stack.current_dirty_piece();
-        network.update_accumulator_halfka(pos, &dirty, stack, prev_idx);
-        count_update!();
-        updated = true;
-    }
-
-    // 失敗なら全計算
-    if !updated {
-        network.refresh_accumulator_halfka(pos, stack);
-        count_refresh!();
-    }
-}
-
-#[cfg(feature = "halfkx-arch")]
-fn update_accumulator_only_halfka_merged(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut HalfKaMergedStack,
-) {
-    if stack.is_current_computed() {
-        count_already_computed!();
-        return;
-    }
-
-    let mut updated = false;
-
-    if let Some(prev_idx) = stack.current_previous()
-        && stack.is_entry_computed(prev_idx)
-    {
-        let dirty = stack.current_dirty_piece();
-        network.update_accumulator_halfka_merged(pos, &dirty, stack, prev_idx);
-        count_update!();
-        updated = true;
-    }
-
-    if !updated {
-        network.refresh_accumulator_halfka_merged(pos, stack);
-        count_refresh!();
-    }
-}
-
-#[cfg(feature = "halfkx-arch")]
-fn update_accumulator_only_halfka_hm_split(
-    network: &NNUENetwork,
-    pos: &Position,
-    stack: &mut HalfKaHmSplitStack,
-) {
-    if stack.is_current_computed() {
-        count_already_computed!();
-        return;
-    }
-
-    let mut updated = false;
-
-    if let Some(prev_idx) = stack.current_previous()
-        && stack.is_entry_computed(prev_idx)
-    {
-        let dirty = stack.current_dirty_piece();
-        network.update_accumulator_halfka_hm_split(pos, &dirty, stack, prev_idx);
-        count_update!();
-        updated = true;
-    }
-
-    if !updated {
-        network.refresh_accumulator_halfka_hm_split(pos, stack);
-        count_refresh!();
-    }
-}
-
-/// HalfKP アキュムレータを更新のみ（評価なし）
-#[cfg(feature = "halfkx-arch")]
-#[inline]
-fn update_accumulator_only_halfkp(network: &NNUENetwork, pos: &Position, stack: &mut HalfKPStack) {
-    if stack.is_current_computed() {
-        count_already_computed!();
-        return;
-    }
-
-    let mut updated = false;
-
-    // 直前局面で差分更新を試行
-    if let Some(prev_idx) = stack.current_previous()
-        && stack.is_entry_computed(prev_idx)
-    {
-        let dirty = stack.current_dirty_piece();
-        network.update_accumulator_halfkp(pos, &dirty, stack, prev_idx);
-        count_update!();
-        updated = true;
-    }
-
-    // 失敗なら全計算
-    if !updated {
-        network.refresh_accumulator_halfkp(pos, stack);
-        count_refresh!();
     }
 }
 
