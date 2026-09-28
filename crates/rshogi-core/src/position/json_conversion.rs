@@ -303,7 +303,7 @@ const fn hand_max(pt: PieceType) -> u32 {
 mod tests {
     use super::*;
 
-    fn assert_same_position(actual: &Position, expected: &Position) {
+    fn assert_same_position(actual: &Position, expected: &Position, compare_board_effects: bool) {
         assert_eq!(actual.to_sfen(), expected.to_sfen());
         assert_eq!(actual.key(), expected.key());
         assert_eq!(actual.state().pawn_key, expected.state().pawn_key);
@@ -324,8 +324,10 @@ mod tests {
                     expected.piece_list().piece_no_of_board(sq)
                 );
             }
-            for color in [Color::Black, Color::White] {
-                assert_eq!(actual.board_effect(color, sq), expected.board_effect(color, sq));
+            if compare_board_effects {
+                for color in [Color::Black, Color::White] {
+                    assert_eq!(actual.board_effect(color, sq), expected.board_effect(color, sq));
+                }
             }
         }
         for color in [Color::Black, Color::White] {
@@ -352,10 +354,17 @@ mod tests {
 
     #[test]
     fn test_json_restores_complete_position() {
-        // 利きの比較中は評価設定をロックし、NNUE の初期化状態によらず
+        // 評価設定をロックし、halfkx-arch では NNUE の初期化状態によらず
         // do_move/undo_move で利きが差分更新されるよう material Lv9 を有効にする。
         let guard = crate::eval::material::test_support::lock_material();
         crate::eval::set_material_level(crate::eval::MaterialLevel::Lv9);
+        let update_board_effects = Position::should_update_board_effects();
+        #[cfg(any(
+            feature = "halfkx-arch",
+            feature = "nnue-effect-bucket",
+            feature = "nnue-runtime-dimensions"
+        ))]
+        assert!(update_board_effects);
 
         for sfen in [
             SFEN_HIRATE,
@@ -367,23 +376,24 @@ mod tests {
             expected.set_sfen(sfen).unwrap();
             let mut actual =
                 Position::from_board_state_json(&expected.to_board_state_json()).unwrap();
-            assert_same_position(&actual, &expected);
+            // 構築直後の利きは全構成で再計算済み。
+            assert_same_position(&actual, &expected, true);
 
             let board =
                 std::array::from_fn(|i| expected.piece_on(Square::from_u8(i as u8).unwrap()));
             let mut parts = Position::new();
             parts.set_from_parts(&board, &expected.hand, expected.side_to_move()).unwrap();
             parts.game_ply = expected.game_ply();
-            assert_same_position(&actual, &parts);
+            assert_same_position(&actual, &parts, true);
 
             for usi in legal_moves(&expected) {
                 let mv = expected.to_move(Move::from_usi(&usi).unwrap()).unwrap();
                 actual.do_move(mv, actual.gives_check(mv));
                 expected.do_move(mv, expected.gives_check(mv));
-                assert_same_position(&actual, &expected);
+                assert_same_position(&actual, &expected, update_board_effects);
                 actual.undo_move(mv);
                 expected.undo_move(mv);
-                assert_same_position(&actual, &parts);
+                assert_same_position(&actual, &parts, update_board_effects);
             }
         }
         drop(guard);

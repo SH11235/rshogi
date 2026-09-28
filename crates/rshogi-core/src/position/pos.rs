@@ -552,7 +552,7 @@ impl Position {
     }
 
     #[inline]
-    fn should_update_board_effects() -> bool {
+    pub(super) fn should_update_board_effects() -> bool {
         // Runtime editions can receive an EffectBucket network through a local NNUEEvaluator or
         // after the Position has already advanced, without touching the global NNUE state.
         // Maintaining effects unconditionally makes both paths safe and keeps model reload atomic.
