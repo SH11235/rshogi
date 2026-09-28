@@ -7,7 +7,7 @@ use std::ptr::NonNull;
 use crate::eval::{EvalHash, eval_hash_enabled};
 #[cfg(feature = "layerstack-arch")]
 use crate::nnue::{AccumulatorStackVariant, update_and_evaluate_layer_stacks_cached};
-use crate::nnue::{DirtyPiece, evaluate_dispatch_with_caches};
+use crate::nnue::{DirtyPiece, ensure_accumulator_computed, evaluate_dispatch_with_caches};
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
@@ -110,6 +110,37 @@ pub(super) fn check_abort(
 // NNUE操作
 // =============================================================================
 
+/// 子へ進む直前に親の accumulator を準備する。評価値・探索統計は更新しない。
+#[inline]
+pub(super) fn nnue_prepare_parent(st: &mut SearchState, pos: &Position) {
+    #[cfg(test)]
+    if super::tests::accumulator_before_child::skip_preparation() {
+        return;
+    }
+    if st.nnue_stack.is_current_computed() || crate::eval::material::is_material_enabled() {
+        return;
+    }
+    #[cfg(feature = "layerstack-arch")]
+    {
+        let ptr = st.network_ptr;
+        if !ptr.is_null()
+            && let AccumulatorStackVariant::LayerStacks(ref mut stack) = st.nnue_stack
+        {
+            // SAFETY: prepare_search() が NETWORK 内の Arc と stack の型を対応付ける。
+            // 探索中は network が解放されず、ポインタと stack の対応が維持される。
+            let network = unsafe { &*ptr };
+            // progress sum と評価用 bucket は評価時だけ更新し、浮動小数点の加算順序を保つ。
+            network.as_layer_stacks().update_accumulator(pos, stack, &mut st.acc_cache);
+            return;
+        }
+    }
+    #[cfg(feature = "layerstack-arch")]
+    let acc_cache = &mut st.acc_cache;
+    #[cfg(not(feature = "layerstack-arch"))]
+    let acc_cache = &mut None;
+    ensure_accumulator_computed(pos, &mut st.nnue_stack, acc_cache);
+}
+
 /// NNUE 評価
 ///
 /// `layerstack-arch` feature かつ実行中ネットワークが LayerStacks のときは
@@ -182,6 +213,7 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
     prefetcher: &P,
     eval_hash: &EvalHash,
 ) {
+    nnue_prepare_parent(st, pos);
     let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, prefetcher);
     if eval_hash_enabled() {
         eval_hash.prefetch(pos.key());

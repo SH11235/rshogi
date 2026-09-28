@@ -594,6 +594,13 @@ impl DynamicHalfKxStack {
     pub(crate) fn is_halfkp(&self) -> bool {
         self.halfkp
     }
+    pub(crate) fn is_current_computed(&self) -> bool {
+        self.computed[self.current]
+    }
+    #[cfg(test)]
+    pub(crate) fn current_accumulation(&self) -> &[i16] {
+        &self.accumulations[self.current * 2 * self.l1..(self.current + 1) * 2 * self.l1]
+    }
     pub(crate) fn reset(&mut self) {
         self.current = 0;
         self.computed[0] = false;

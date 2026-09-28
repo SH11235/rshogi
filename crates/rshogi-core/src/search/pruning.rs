@@ -15,8 +15,8 @@ use super::alpha_beta::{
 };
 use super::qsearch::qsearch;
 use super::search_helpers::{
-    clear_cont_history_for_null, cont_history_keys, do_move_and_push, nnue_pop, nnue_push,
-    set_cont_history_for_move,
+    clear_cont_history_for_null, cont_history_keys, do_move_and_push, nnue_pop,
+    nnue_prepare_parent, nnue_push, set_cont_history_for_move,
 };
 use super::stats::{inc_stat, inc_stat_by_depth};
 #[cfg(feature = "tt-trace")]
@@ -344,6 +344,7 @@ where
         }
         clear_cont_history_for_null(st, ctx, ply);
 
+        nnue_prepare_parent(st, pos);
         if use_pass {
             pos.do_pass_move();
         } else {

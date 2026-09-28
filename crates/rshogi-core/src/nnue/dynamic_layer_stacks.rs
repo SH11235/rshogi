@@ -1066,6 +1066,14 @@ impl DynamicLayerStacksStack {
     pub(crate) fn matches_network(&self, net: &DynamicLayerStacksNetwork) -> bool {
         self.signature == net.stack_signature()
     }
+    pub(crate) fn is_current_computed(&self) -> bool {
+        self.computed[self.current]
+    }
+    #[cfg(test)]
+    pub(crate) fn current_accumulation(&self) -> &[i16] {
+        let width = 2 * self.signature.l1;
+        &self.accumulations[self.current * width..(self.current + 1) * width]
+    }
     pub(crate) fn reset(&mut self) {
         self.current = 0;
         self.computed[0] = false;

@@ -2308,9 +2308,9 @@ pub(crate) fn evaluate_dispatch_with_caches(
 
 /// アキュムレータを計算済みにする（評価値の計算はしない）
 ///
-/// 探索は評価値を計算しないノードでもこの関数を呼ばない。アキュムレータは評価時に
-/// 計算済みの祖先から差分適用するか refresh するので、未計算のまま残してよい。
-/// ライブラリ利用者が評価前にアキュムレータだけを用意したい場合に使う。
+/// 子局面へ進む前に親を準備し、子が計算済みの親から差分更新できるようにする。
+/// LayerStacks の progress は浮動小数点の加算順序を保つため評価時だけ更新する。
+/// 評価用の bucket キャッシュにも書き込まない。
 ///
 /// `acc_cache` は LayerStacks 用 AccumulatorCaches（Finny Tables）。
 pub fn ensure_accumulator_computed(

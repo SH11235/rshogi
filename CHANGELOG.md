@@ -47,6 +47,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **評価を省いたノードでも、最初の子へ進む前に NNUE accumulator を計算する (YaneuraOu の `evaluate_with_no_return` 相当)**:
+  EvalHash の hit・王手中・TT eval の再利用で静的評価を省いたノードでは accumulator を計算しておらず、その子は
+  計算済みの親が無いため全再計算 (refresh) に落ちていた。子へ進む直前に親の accumulator だけを計算し、子を差分更新にする。
+  評価値は計算しないので探索結果 (ノード数) は変わらない。子へ進まないノードでは追加の計算をしない。HalfKX / LayerStacks とも対象。
+
 - **非 LayerStacks の HalfKX 5 系統 (HalfKP / HalfKA / HalfKA_hm) の探索で Finny cache (AccumulatorCaches) を使う**:
   これまで探索の評価経路は LayerStacks にだけ Finny cache を渡しており、HalfKX は玉移動時と祖先が無いときに
   bias から全駒を加算し直していた。worker ごとに cache を持ち、cache entry の駒リストと現局面の駒リストを

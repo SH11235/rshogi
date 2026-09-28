@@ -53,6 +53,24 @@ pub enum AccumulatorStackVariant {
 }
 
 impl AccumulatorStackVariant {
+    /// 現局面の両視点のアキュムレータが計算済みかを返す。
+    #[inline]
+    pub(crate) fn is_current_computed(&self) -> bool {
+        match self {
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            Self::DynamicHalfKx(stack) => stack.borrow().is_current_computed(),
+            #[cfg(feature = "nnue-runtime-dimensions")]
+            Self::DynamicLayerStacks(stack) => stack.borrow().is_current_computed(),
+            Self::HalfKaSplit(stack) => stack.is_current_computed(),
+            Self::HalfKaHmMerged(stack) => stack.is_current_computed(),
+            Self::HalfKaMerged(stack) => stack.is_current_computed(),
+            Self::HalfKaHmSplit(stack) => stack.is_current_computed(),
+            Self::HalfKP(stack) => stack.is_current_computed(),
+            #[cfg(feature = "layerstack-arch")]
+            Self::LayerStacks(stack) => stack.is_current_computed(),
+        }
+    }
+
     /// NNUEネットワークに応じたスタックを作成
     ///
     /// 指定されたネットワークのアーキテクチャに対応するスタックバリアントを生成する。
