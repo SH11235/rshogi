@@ -81,9 +81,9 @@ fn test_reduction_bounds() {
     let reductions = build_reductions(tune.lmr_table_coeff);
     let root_delta = 64;
     let delta = 32;
-    assert_eq!(reduction(&reductions, &tune, true, 0, 0, delta, root_delta), 0); // depth=0, mc=0 は計算外
-    assert!(reduction(&reductions, &tune, true, 63, 63, delta, root_delta) / 1024 < 64);
-    assert!(reduction(&reductions, &tune, false, 63, 63, delta, root_delta) / 1024 < 64);
+    assert_eq!(reduction::<false>(&reductions, &tune, true, 0, 0, delta, root_delta), 0); // depth=0, mc=0 は計算外
+    assert!(reduction::<false>(&reductions, &tune, true, 63, 63, delta, root_delta) / 1024 < 64);
+    assert!(reduction::<false>(&reductions, &tune, false, 63, 63, delta, root_delta) / 1024 < 64);
 }
 
 /// depth/move_countが大きい場合にreductionが正の値を返すことを確認
@@ -94,14 +94,14 @@ fn test_reduction_returns_nonzero_for_large_values() {
     let root_delta = 64;
     let delta = 32;
     // 深い探索で多くの手を試した場合、reductionは正の値であるべき
-    let r = reduction(&reductions, &tune, false, 10, 10, delta, root_delta) / 1024;
+    let r = reduction::<false>(&reductions, &tune, false, 10, 10, delta, root_delta) / 1024;
     assert!(
         r > 0,
         "reduction should return positive value for depth=10, move_count=10, got {r}"
     );
 
     // improving=trueの場合は若干小さい値になる
-    let r_imp = reduction(&reductions, &tune, true, 10, 10, delta, root_delta) / 1024;
+    let r_imp = reduction::<false>(&reductions, &tune, true, 10, 10, delta, root_delta) / 1024;
     assert!(r >= r_imp, "non-improving should have >= reduction than improving");
 }
 
@@ -112,7 +112,7 @@ fn test_reduction_extremes_no_overflow() {
     // 最大depth/mcでもオーバーフローせずに値が得られることを確認
     let delta = 0;
     let root_delta = 1;
-    let r = reduction(&reductions, &tune, false, 63, 63, delta, root_delta);
+    let r = reduction::<false>(&reductions, &tune, false, 63, 63, delta, root_delta);
     assert!(
         (0..i32::MAX / 2).contains(&r),
         "reduction extreme should be in safe range, got {r}"
@@ -124,7 +124,7 @@ fn test_reduction_zero_root_delta_clamped() {
     let tune = SearchTuneParams::default();
     let reductions = build_reductions(tune.lmr_table_coeff);
     // root_delta=0 を渡しても内部で1にクランプされることを確認
-    let r = reduction(&reductions, &tune, false, 10, 10, 0, 0) / 1024;
+    let r = reduction::<false>(&reductions, &tune, false, 10, 10, 0, 0) / 1024;
     assert!(r >= 0, "reduction should clamp root_delta to >=1 even when 0 is passed");
 }
 

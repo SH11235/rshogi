@@ -1,6 +1,7 @@
 //! 探索モジュールのテスト
 
 mod alpha_beta;
+mod helper_specialization;
 // search_helper が wasm32 (wasm-threads なし) では configured out されるため合わせて gate する
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 mod cutoff_cnt;

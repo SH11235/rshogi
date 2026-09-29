@@ -1483,8 +1483,15 @@ impl Default for SearchTuneParams {
 }
 
 impl SearchTuneParams {
+    /// 定数除算に特殊化する分母がすべて既定値かを調べる。
+    pub(super) fn has_default_divisors(&self) -> bool {
+        self.main_hist_pruning_add_den == Self::DEFAULT.main_hist_pruning_add_den
+            && self.lmr_depth_history_div == Self::DEFAULT.lmr_depth_history_div
+            && self.lmr_reduction_non_improving_div == Self::DEFAULT.lmr_reduction_non_improving_div
+    }
+
     /// 探索・USI 宣言・SPSA 生成で共有する既定値の正本。
-    const DEFAULT: Self = Self {
+    pub(super) const DEFAULT: Self = Self {
         iir_prior_reduction_threshold_shallow: 3,
         iir_prior_reduction_threshold_deep: 3,
         iir_depth_boundary: 10,

@@ -213,7 +213,7 @@ pub(crate) fn build_reductions(coeff: i32) -> Box<Reductions> {
 
 /// Reductionを取得
 #[inline]
-pub(crate) fn reduction(
+pub(crate) fn reduction<const DEFAULT_DIVISORS: bool>(
     reductions: &Reductions,
     tune_params: &SearchTuneParams,
     imp: bool,
@@ -233,10 +233,15 @@ pub(crate) fn reduction(
     let root_delta = root_delta.max(1);
     let delta = delta.max(0);
 
+    let non_improving_div = if DEFAULT_DIVISORS {
+        SearchTuneParams::DEFAULT.lmr_reduction_non_improving_div
+    } else {
+        tune_params.lmr_reduction_non_improving_div
+    };
     // 1024倍スケールで返す。ttPv加算は呼び出し側で行う。
     reduction_scale - delta * tune_params.lmr_reduction_delta_scale / root_delta
         + (!imp as i32) * reduction_scale * tune_params.lmr_reduction_non_improving_mult
-            / tune_params.lmr_reduction_non_improving_div.max(1)
+            / non_improving_div.max(1)
         + tune_params.lmr_reduction_base_offset
 }
 
@@ -299,13 +304,52 @@ pub(super) struct FutilityParams {
     pub(super) beta: Value,
     pub(super) static_eval: Value,
     pub(super) correction_value: i32,
-    pub(super) improving: bool,
-    pub(super) opponent_worsening: bool,
-    pub(super) tt_hit: bool,
-    pub(super) tt_move_exists: bool, // TT に手が保存されているか
-    pub(super) tt_capture: bool,     // TT の手が駒取りか
-    pub(super) tt_pv: bool,
-    pub(super) in_check: bool,
+    pub(super) flags: FutilityFlags,
+}
+
+/// bool の個別 store と、引数受け渡し時の広幅 load の重なりを避ける。
+#[derive(Clone, Copy)]
+pub(super) struct FutilityFlags(u32);
+
+impl FutilityFlags {
+    pub(super) const IMPROVING: u32 = 1 << 0;
+    pub(super) const OPPONENT_WORSENING: u32 = 1 << 1;
+    pub(super) const TT_HIT: u32 = 1 << 2;
+    pub(super) const TT_MOVE_EXISTS: u32 = 1 << 3;
+    pub(super) const TT_CAPTURE: u32 = 1 << 4;
+    pub(super) const TT_PV: u32 = 1 << 5;
+    pub(super) const IN_CHECK: u32 = 1 << 6;
+
+    pub(super) const fn new(
+        improving: bool,
+        opponent_worsening: bool,
+        tt_hit: bool,
+        tt_move_exists: bool,
+        tt_capture: bool,
+        tt_pv: bool,
+        in_check: bool,
+    ) -> Self {
+        Self(
+            (improving as u32 * Self::IMPROVING)
+                | (opponent_worsening as u32 * Self::OPPONENT_WORSENING)
+                | (tt_hit as u32 * Self::TT_HIT)
+                | (tt_move_exists as u32 * Self::TT_MOVE_EXISTS)
+                | (tt_capture as u32 * Self::TT_CAPTURE)
+                | (tt_pv as u32 * Self::TT_PV)
+                | (in_check as u32 * Self::IN_CHECK),
+        )
+    }
+
+    pub(super) const fn contains(self, flag: u32) -> bool {
+        self.0 & flag != 0
+    }
+}
+
+/// LMP の分母は improving に応じて 1 または 2 になる。
+#[inline]
+pub(super) fn late_move_pruning_limit(depth: Depth, improving: bool) -> i32 {
+    let limit = 3 + depth * depth;
+    if improving { limit } else { limit / 2 }
 }
 
 /// Step14 の枝刈りに必要な文脈
@@ -512,6 +556,9 @@ pub struct SearchState {
     /// 探索中に使う重みと差分評価状態。
     pub(crate) evaluator: SearchEvaluator,
 
+    /// 探索開始時の SPSA 係数から決まる、定数除算の適用可否。
+    default_divisors: bool,
+
     /// check_abort呼び出しカウンター
     pub calls_cnt: i32,
     /// 探索統計（search-stats feature有効時のみ）
@@ -524,6 +571,7 @@ impl SearchState {
     pub fn new() -> Self {
         Self {
             nodes: 0,
+            default_divisors: false,
             stack: init_stack_array(),
             root_delta: 1,
             abort: false,
@@ -930,6 +978,7 @@ impl SearchWorker {
 
     /// goで呼び出し：探索状態のリセット（履歴はクリアしない）
     pub fn prepare_search(&mut self, limits: &LimitsType) {
+        self.state.default_divisors = self.search_tune_params.has_default_divisors();
         self.state.nodes = 0;
         self.state.sel_depth = 0;
         self.state.root_depth = 0;
@@ -1387,7 +1436,7 @@ impl SearchWorker {
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
                     let root_delta = self.state.root_delta.max(1);
                     // improving を使用
-                    let mut r = reduction(
+                    let mut r = reduction::<false>(
                         &self.reductions,
                         tune,
                         root_improving,
@@ -1507,7 +1556,7 @@ impl SearchWorker {
                     let tune = &self.search_tune_params;
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
                     let root_delta = self.state.root_delta.max(1);
-                    let mut r = reduction(
+                    let mut r = reduction::<false>(
                         &self.reductions,
                         tune,
                         root_improving,
@@ -2035,7 +2084,7 @@ impl SearchWorker {
                     let delta = (beta.raw() - alpha.raw()).abs().max(1);
                     let root_delta = self.state.root_delta.max(1);
                     // improving を使用
-                    let mut r = reduction(
+                    let mut r = reduction::<false>(
                         &self.reductions,
                         tune,
                         root_improving,
@@ -2148,7 +2197,7 @@ impl SearchWorker {
                 let tune = &self.search_tune_params;
                 let delta = (beta.raw() - alpha.raw()).abs().max(1);
                 let root_delta = self.state.root_delta.max(1);
-                let mut r = reduction(
+                let mut r = reduction::<false>(
                     &self.reductions,
                     tune,
                     root_improving,
@@ -2325,6 +2374,48 @@ impl SearchWorker {
     /// cut_node は「βカットが期待される（ゼロウィンドウの非PVなど）」ときに true を渡す。
     /// 再探索やPV探索では all_node 扱いにするため false を渡す（YaneuraOuのcutNode引き渡しと対応）。
     pub(super) fn search_node<const NT: u8>(
+        st: &mut SearchState,
+        ctx: &SearchContext<'_>,
+        pos: &mut Position,
+        depth: Depth,
+        alpha: Value,
+        beta: Value,
+        ply: i32,
+        cut_node: bool,
+        limits: &LimitsType,
+        time_manager: &mut TimeManagement,
+    ) -> Value {
+        // ルート側の入口でのみ特殊化を選び、再帰は search_node_impl を直接呼ぶ。
+        if st.default_divisors {
+            Self::search_node_impl::<NT, true>(
+                st,
+                ctx,
+                pos,
+                depth,
+                alpha,
+                beta,
+                ply,
+                cut_node,
+                limits,
+                time_manager,
+            )
+        } else {
+            Self::search_node_impl::<NT, false>(
+                st,
+                ctx,
+                pos,
+                depth,
+                alpha,
+                beta,
+                ply,
+                cut_node,
+                limits,
+                time_manager,
+            )
+        }
+    }
+
+    fn search_node_impl<const NT: u8, const DEFAULT_DIVISORS: bool>(
         st: &mut SearchState,
         ctx: &SearchContext<'_>,
         pos: &mut Position,
@@ -2649,13 +2740,15 @@ impl SearchWorker {
                 beta,
                 static_eval: eval_ctx.eval,
                 correction_value: eval_ctx.correction_value,
-                improving,
-                opponent_worsening,
-                tt_hit,
-                tt_move_exists: tt_move.is_some(),
-                tt_capture,
-                tt_pv: st.stack[ply as usize].tt_pv,
-                in_check,
+                flags: FutilityFlags::new(
+                    improving,
+                    opponent_worsening,
+                    tt_hit,
+                    tt_move.is_some(),
+                    tt_capture,
+                    st.stack[ply as usize].tt_pv,
+                    in_check,
+                ),
             },
             ctx.tune_params,
         ) {
@@ -2678,7 +2771,7 @@ impl SearchWorker {
             excluded_move,
             limits,
             time_manager,
-            Self::search_node::<{ NodeType::NonPV as u8 }>,
+            Self::search_node_impl::<{ NodeType::NonPV as u8 }, DEFAULT_DIVISORS>,
         );
         if let Some(v) = null_value {
             return v;
@@ -2716,7 +2809,7 @@ impl SearchWorker {
             excluded_move,
             limits,
             time_manager,
-            Self::search_node::<{ NodeType::NonPV as u8 }>,
+            Self::search_node_impl::<{ NodeType::NonPV as u8 }, DEFAULT_DIVISORS>,
         ) {
             return v;
         }
@@ -2821,7 +2914,7 @@ impl SearchWorker {
             // Reduction計算（SE前に計算。SE内でtt_pvが上書きされる前の値を使う）
             // =============================================================
             let delta = (beta.raw() - alpha.raw()).max(0);
-            let mut r = reduction(
+            let mut r = reduction::<DEFAULT_DIVISORS>(
                 ctx.reductions,
                 ctx.tune_params,
                 improving,
@@ -2846,7 +2939,7 @@ impl SearchWorker {
 
             // LMP: moveCount >= limitのとき、quiet手の生成をスキップ
             if !root_node && !best_value.is_loss() {
-                let lmp_limit = (3 + original_depth * original_depth) / (2 - improving as i32);
+                let lmp_limit = late_move_pruning_limit(original_depth, improving);
                 if move_count >= lmp_limit && !lmp_triggered {
                     mp.skip_quiets();
                     lmp_triggered = true;
@@ -2879,7 +2972,7 @@ impl SearchWorker {
                 pv_node,
             };
 
-            match step14_pruning(ctx, step14_ctx) {
+            match step14_pruning::<DEFAULT_DIVISORS>(ctx, step14_ctx) {
                 Step14Outcome::Skip {
                     best_value: updated,
                 } => {
@@ -2928,18 +3021,19 @@ impl SearchWorker {
 
                 let outer_depth_liveness = st.depth_liveness_snapshot(ply);
                 st.stack[ply as usize].excluded_move = mv;
-                let singular_value = Self::search_node::<{ NodeType::NonPV as u8 }>(
-                    st,
-                    ctx,
-                    pos,
-                    singular_depth,
-                    singular_beta - Value::new(1),
-                    singular_beta,
-                    ply,
-                    cut_node,
-                    limits,
-                    time_manager,
-                );
+                let singular_value =
+                    Self::search_node_impl::<{ NodeType::NonPV as u8 }, DEFAULT_DIVISORS>(
+                        st,
+                        ctx,
+                        pos,
+                        singular_depth,
+                        singular_beta - Value::new(1),
+                        singular_beta,
+                        ply,
+                        cut_node,
+                        limits,
+                        time_manager,
+                    );
                 st.stack[ply as usize].excluded_move = Move::NONE;
                 st.depth_liveness_restore(ply, outer_depth_liveness);
 
@@ -3120,7 +3214,7 @@ impl SearchWorker {
                 }
                 st.stack[ply as usize].reduction = 0;
                 st.set_child_follow_pv(ply, mv);
-                -Self::search_node::<{ NodeType::PV as u8 }>(
+                -Self::search_node_impl::<{ NodeType::PV as u8 }, DEFAULT_DIVISORS>(
                     st,
                     ctx,
                     pos,
@@ -3177,18 +3271,19 @@ impl SearchWorker {
                 let reduction_from_parent = new_depth - d;
                 st.stack[ply as usize].reduction = reduction_from_parent;
                 st.set_child_follow_pv(ply, mv);
-                let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
-                    st,
-                    ctx,
-                    pos,
-                    d,
-                    -alpha - Value::new(1),
-                    -alpha,
-                    ply + 1,
-                    true,
-                    limits,
-                    time_manager,
-                );
+                let mut value =
+                    -Self::search_node_impl::<{ NodeType::NonPV as u8 }, DEFAULT_DIVISORS>(
+                        st,
+                        ctx,
+                        pos,
+                        d,
+                        -alpha - Value::new(1),
+                        -alpha,
+                        ply + 1,
+                        true,
+                        limits,
+                        time_manager,
+                    );
                 st.stack[ply as usize].reduction = 0;
 
                 if value > alpha {
@@ -3204,18 +3299,19 @@ impl SearchWorker {
                     if new_depth > d {
                         inc_stat!(st, lmr_research);
                         st.set_child_follow_pv(ply, mv);
-                        value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
-                            st,
-                            ctx,
-                            pos,
-                            new_depth,
-                            -alpha - Value::new(1),
-                            -alpha,
-                            ply + 1,
-                            !cut_node,
-                            limits,
-                            time_manager,
-                        );
+                        value =
+                            -Self::search_node_impl::<{ NodeType::NonPV as u8 }, DEFAULT_DIVISORS>(
+                                st,
+                                ctx,
+                                pos,
+                                new_depth,
+                                -alpha - Value::new(1),
+                                -alpha,
+                                ply + 1,
+                                !cut_node,
+                                limits,
+                                time_manager,
+                            );
                     }
 
                     // fail high後にcontHistを更新
@@ -3288,7 +3384,7 @@ impl SearchWorker {
                     }
                     st.stack[ply as usize].reduction = 0;
                     st.set_child_follow_pv(ply, mv);
-                    -Self::search_node::<{ NodeType::PV as u8 }>(
+                    -Self::search_node_impl::<{ NodeType::PV as u8 }, DEFAULT_DIVISORS>(
                         st,
                         ctx,
                         pos,
@@ -3315,18 +3411,19 @@ impl SearchWorker {
 
                 st.stack[ply as usize].reduction = 0;
                 st.set_child_follow_pv(ply, mv);
-                let mut value = -Self::search_node::<{ NodeType::NonPV as u8 }>(
-                    st,
-                    ctx,
-                    pos,
-                    non_lmr_depth,
-                    -alpha - Value::new(1),
-                    -alpha,
-                    ply + 1,
-                    !cut_node,
-                    limits,
-                    time_manager,
-                );
+                let mut value =
+                    -Self::search_node_impl::<{ NodeType::NonPV as u8 }, DEFAULT_DIVISORS>(
+                        st,
+                        ctx,
+                        pos,
+                        non_lmr_depth,
+                        -alpha - Value::new(1),
+                        -alpha,
+                        ply + 1,
+                        !cut_node,
+                        limits,
+                        time_manager,
+                    );
                 st.stack[ply as usize].reduction = 0;
 
                 // YaneuraOu Step18準拠:
@@ -3343,7 +3440,7 @@ impl SearchWorker {
                     }
                     st.stack[ply as usize].reduction = 0;
                     st.set_child_follow_pv(ply, mv);
-                    value = -Self::search_node::<{ NodeType::PV as u8 }>(
+                    value = -Self::search_node_impl::<{ NodeType::PV as u8 }, DEFAULT_DIVISORS>(
                         st,
                         ctx,
                         pos,
@@ -3371,7 +3468,7 @@ impl SearchWorker {
 
                 st.stack[ply as usize].reduction = 0;
                 st.set_child_follow_pv(ply, mv);
-                -Self::search_node::<{ NodeType::PV as u8 }>(
+                -Self::search_node_impl::<{ NodeType::PV as u8 }, DEFAULT_DIVISORS>(
                     st,
                     ctx,
                     pos,

@@ -11,7 +11,8 @@ use crate::position::Position;
 use crate::types::{Bound, DEPTH_QS, Depth, Move, Value};
 
 use super::alpha_beta::{
-    FutilityParams, SearchContext, SearchState, Step14Context, Step14Outcome, TTContext,
+    FutilityFlags, FutilityParams, SearchContext, SearchState, Step14Context, Step14Outcome,
+    TTContext,
 };
 use super::qsearch::qsearch;
 use super::search_helpers::{
@@ -30,22 +31,26 @@ pub(super) fn try_futility_pruning(
     params: FutilityParams,
     tune_params: &super::SearchTuneParams,
 ) -> Option<Value> {
-    if !params.tt_pv
-        && !params.in_check
+    let flags = params.flags;
+    if !flags.contains(FutilityFlags::TT_PV | FutilityFlags::IN_CHECK)
         && params.depth < 14
         && params.static_eval != Value::NONE
         && params.static_eval >= params.beta
         && !params.beta.is_loss()
         && !params.static_eval.is_win()
-        && (!params.tt_move_exists || params.tt_capture)
+        && (!flags.contains(FutilityFlags::TT_MOVE_EXISTS)
+            || flags.contains(FutilityFlags::TT_CAPTURE))
     {
         let futility_mult = tune_params.futility_margin_base
-            - tune_params.futility_margin_tt_bonus * (!params.tt_hit) as i32;
+            - tune_params.futility_margin_tt_bonus
+                * (!flags.contains(FutilityFlags::TT_HIT)) as i32;
         let futility_margin = Value::new(
             futility_mult * params.depth
-                - (params.improving as i32) * futility_mult * tune_params.futility_improving_scale
+                - (flags.contains(FutilityFlags::IMPROVING) as i32)
+                    * futility_mult
+                    * tune_params.futility_improving_scale
                     / 1024
-                - (params.opponent_worsening as i32)
+                - (flags.contains(FutilityFlags::OPPONENT_WORSENING) as i32)
                     * futility_mult
                     * tune_params.futility_opponent_worsening_scale
                     / 4096
@@ -66,7 +71,7 @@ pub(super) fn try_futility_pruning(
 
 /// Step14 の枝刈り
 #[inline]
-pub(super) fn step14_pruning(
+pub(super) fn step14_pruning<const DEFAULT_DIVISORS: bool>(
     ctx: &SearchContext<'_>,
     step_ctx: Step14Context<'_>,
 ) -> Step14Outcome {
@@ -151,12 +156,8 @@ pub(super) fn step14_pruning(
             }
 
             // mainHistoryは pruning判定後に追加
-            let hist_score = cont_history
-                + tune.main_hist_pruning_add_num * main_hist
-                    / tune.main_hist_pruning_add_den.max(1);
-
-            // lmrDepth調整 (枝刈りされなかった場合のみ実行)
-            let lmr_depth = lmr_depth + hist_score / tune.lmr_depth_history_div.max(1);
+            let lmr_depth = lmr_depth
+                + quiet_history_reduction::<DEFAULT_DIVISORS>(tune, cont_history, main_hist);
 
             // Futility pruning for quiet moves (親ノードでの枝刈り)
             let no_best_move = step_ctx.best_move.is_none();
@@ -196,6 +197,25 @@ pub(super) fn step14_pruning(
     }
 
     Step14Outcome::Continue
+}
+
+/// 符号付き除算のゼロ方向丸めと、分母の下限を両経路で維持する。
+#[inline]
+pub(super) fn quiet_history_reduction<const DEFAULT_DIVISORS: bool>(
+    tune: &super::SearchTuneParams,
+    cont_history: i32,
+    main_hist: i32,
+) -> i32 {
+    let (main_div, history_div) = if DEFAULT_DIVISORS {
+        (
+            super::SearchTuneParams::DEFAULT.main_hist_pruning_add_den,
+            super::SearchTuneParams::DEFAULT.lmr_depth_history_div,
+        )
+    } else {
+        (tune.main_hist_pruning_add_den, tune.lmr_depth_history_div)
+    };
+    let hist_score = cont_history + tune.main_hist_pruning_add_num * main_hist / main_div.max(1);
+    hist_score / history_div.max(1)
 }
 
 // =============================================================================
