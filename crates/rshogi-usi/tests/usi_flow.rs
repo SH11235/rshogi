@@ -4,7 +4,7 @@ use std::process::Command;
 /// テスト用の共通USI初期化コマンド（Material評価で動作させる）
 const USI_INIT: &str = "usi\nsetoption name MaterialLevel value 9\nisready\n";
 
-/// 同じプロセスで隠し option を off/on/off と切り替え、短い固定深さ探索を比較する。
+/// 同じプロセスで隠し option と閾値を切り替え、短い固定深さ探索を比較する。
 #[test]
 fn mp_lazy_quiet_preserves_fixed_depth_search() {
     use std::io::{BufRead, BufReader};
@@ -29,7 +29,7 @@ fn mp_lazy_quiet_preserves_fixed_depth_search() {
         writeln!(child.stdin.as_mut().unwrap(), "usi").map_err(|err| err.to_string())?;
         loop {
             let line = receiver.recv_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
-            if line.contains("option name MpLazyQuiet") {
+            if line.contains("option name MpLazyQuiet") || line.contains("option name MpLazyMinK") {
                 return Err("screening option must remain hidden".into());
             }
             if line == "usiok" {
@@ -52,9 +52,16 @@ fn mp_lazy_quiet_preserves_fixed_depth_search() {
             "sfen 4k4/9/4p4/3p1p3/4P4/3P1P3/9/9/4K4 b RBGPrbgp 1",
         ] {
             let mut baseline = None;
-            for enabled in [false, true, false] {
+            for (enabled, min_k) in [
+                (false, 9),
+                (true, 9),
+                (true, 16),
+                (true, 24),
+                (true, 32),
+                (false, 32),
+            ] {
                 writeln!(child.stdin.as_mut().unwrap(),
-                    "setoption name MpLazyQuiet value {enabled}\nusinewgame\nposition {position}\ngo depth 3")
+                    "setoption name MpLazyQuiet value {enabled}\nsetoption name MpLazyMinK value {min_k}\nusinewgame\nposition {position}\ngo depth 3")
                     .map_err(|err| err.to_string())?;
                 let mut search_info = Vec::new();
                 loop {
@@ -89,7 +96,7 @@ fn mp_lazy_quiet_preserves_fixed_depth_search() {
                 if let Some(expected) = &baseline {
                     if &search_info != expected {
                         return Err(format!(
-                            "MpLazyQuiet={enabled}, {position}: {search_info:?} != {expected:?}"
+                            "MpLazyQuiet={enabled}, MpLazyMinK={min_k}, {position}: {search_info:?} != {expected:?}"
                         ));
                     }
                 } else {

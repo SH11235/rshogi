@@ -62,8 +62,13 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `setoption name MpLazyQuiet value true` で quiet の安定な遅延選択を有効にし、
 `false` で従来の部分挿入ソートへ戻します。設定は次の `go` の前に static へ反映し、
 各ノードでは QuietInit で一度だけ参照します。捕獲手・王手回避手のソートは共通です。
-高値域（先頭の 1 手を含む）が 8 手以下なら即座に挿入ソートし、それより多い場合は
+隠し整数 option `MpLazyMinK`（既定 `9`、1 以上）で遅延選択を使う高値域の最小手数を
+指定できます（例: `setoption name MpLazyMinK value 24`）。不正な値は無視します。
+高値域の手数 `k` は先頭の 1 手と、それ以降のスコアが `-3560 * depth` 以上の手の数です。
+`k < MpLazyMinK` なら partition せず従来の部分挿入ソートを使い、通常の Stage で走査します。
+`k >= MpLazyMinK` なら専用の Stage で遅延選択し、
 `T = clamp(k / 4, 6, 8)` 回の安定選択後に残りを挿入ソートします。
+`MpLazyQuiet=false` では閾値によらず従来経路を使い、手ごとの遅延境界判定を行いません。
 閾値と速度改善は未検証の screening 用です。同じ binary で設定を切り替えて比較できます。
 
 ## Allocation diagnostics

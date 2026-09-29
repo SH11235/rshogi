@@ -28,7 +28,7 @@ use rshogi_core::nnue::{
 use rshogi_core::position::Position;
 use rshogi_core::search::{
     DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, PonderhitHandle, Search,
-    SearchInfo, SearchResult, SearchTuneParams, set_mp_lazy_quiet,
+    SearchInfo, SearchResult, SearchTuneParams, set_mp_lazy_min_k, set_mp_lazy_quiet,
 };
 use rshogi_core::types::{EnteringKingRule, Move};
 use serde_json::json;
@@ -99,6 +99,8 @@ struct UsiEngine {
     multi_pv: usize,
     /// screening 用の隠し設定。探索開始前にだけ static へ反映する。
     mp_lazy_quiet: bool,
+    /// 遅延選択を使う高値域の最小手数（隠し option）。
+    mp_lazy_min_k: usize,
     /// Skill Level オプション
     skill_options: rshogi_core::search::SkillOptions,
     /// 探索スレッドのハンドル
@@ -200,6 +202,7 @@ impl UsiEngine {
             eval_hash_large_pages: true,
             multi_pv: 1,
             mp_lazy_quiet: false,
+            mp_lazy_min_k: 9,
             skill_options: rshogi_core::search::SkillOptions::default(),
             search_thread: None,
             stop_flag: None,
@@ -803,6 +806,13 @@ impl UsiEngine {
             "MpLazyQuiet" => {
                 if let Ok(enabled) = value.parse::<bool>() {
                     self.mp_lazy_quiet = enabled;
+                }
+            }
+            "MpLazyMinK" => {
+                if let Ok(min_k) = value.parse::<usize>()
+                    && min_k > 0
+                {
+                    self.mp_lazy_min_k = min_k;
                 }
             }
             "SPSAParamsFile" => {
@@ -1431,6 +1441,7 @@ impl UsiEngine {
         self.stop_search_silently();
         self.reload_net_deltas_if_dirty()?;
         set_mp_lazy_quiet(self.mp_lazy_quiet);
+        set_mp_lazy_min_k(self.mp_lazy_min_k);
 
         // 制限を解析
         let limits = self.parse_go_options(tokens);
@@ -1967,6 +1978,30 @@ mod tests {
             engine.cmd_setoption(&["setoption", "name", "MpLazyQuiet", "value", value]);
             assert_eq!(engine.mp_lazy_quiet, expected);
         }
+    }
+
+    #[test]
+    #[serial]
+    fn mp_lazy_min_k_option_defaults_to_nine_and_accepts_positive_integers() {
+        let mut engine = UsiEngine::new();
+        assert_eq!(engine.mp_lazy_min_k, 9);
+        for (value, expected) in [
+            ("16", 16),
+            ("24", 24),
+            ("32", 32),
+            ("invalid", 32),
+            ("0", 32),
+            ("-1", 32),
+            ("1.5", 32),
+            ("18446744073709551616", 32),
+            ("1", 1),
+            ("601", 601),
+            ("9", 9),
+        ] {
+            engine.cmd_setoption(&["setoption", "name", "MpLazyMinK", "value", value]);
+            assert_eq!(engine.mp_lazy_min_k, expected);
+        }
+        assert!(!engine.mp_lazy_quiet);
     }
 
     #[test]

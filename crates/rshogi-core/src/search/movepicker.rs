@@ -42,9 +42,10 @@ use super::{ContHistKey, HistoryTables, LOW_PLY_HISTORY_SIZE};
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
 use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 static MP_LAZY_QUIET: AtomicBool = AtomicBool::new(false);
+static MP_LAZY_MIN_K: AtomicUsize = AtomicUsize::new(9);
 
 /// quiet の遅延ソートを切り替える（既定 false）。
 ///
@@ -52,6 +53,13 @@ static MP_LAZY_QUIET: AtomicBool = AtomicBool::new(false);
 /// 各ノードでは QuietInit で一度だけ読み、その後は picker の境界で管理する。
 pub fn set_mp_lazy_quiet(enabled: bool) {
     MP_LAZY_QUIET.store(enabled, Ordering::Relaxed);
+}
+
+/// quiet の遅延選択を使う高値域の最小手数を設定する（既定 9、0 は 1 に補正）。
+///
+/// 全探索を停止した状態で設定し、探索中は変更しないこと。
+pub fn set_mp_lazy_min_k(min_k: usize) {
+    MP_LAZY_MIN_K.store(min_k.max(1), Ordering::Relaxed);
 }
 
 // =============================================================================
@@ -83,6 +91,10 @@ pub enum Stage {
     BadCapture,
     /// 悪い静かな手
     BadQuiet,
+    /// 遅延選択で良い静かな手を返す
+    LazyGoodQuiet,
+    /// 遅延選択で悪い静かな手を返す
+    LazyBadQuiet,
 
     // 王手回避
     /// 置換表の指し手（回避）
@@ -115,6 +127,8 @@ impl Stage {
             Stage::GoodQuiet => Stage::BadCapture,
             Stage::BadCapture => Stage::BadQuiet,
             Stage::BadQuiet => Stage::BadQuiet, // 終端
+            Stage::LazyGoodQuiet => Stage::BadCapture,
+            Stage::LazyBadQuiet => Stage::LazyBadQuiet, // 終端
 
             Stage::EvasionTT => Stage::EvasionInit,
             Stage::EvasionInit => Stage::Evasion,
@@ -187,7 +201,7 @@ pub struct MovePicker {
     end_captures: usize,
     end_generated: usize,
     /// 遅延経路のソート対象領域の末尾（exclusive）。先頭手は limit 未満でも含む。
-    /// 旧経路では end_captures とし、GoodQuiet の全走査を維持する。
+    /// 通常経路では end_captures とし、BadCapture 後の遷移先の識別に使う。
     end_good_quiets: usize,
     /// 降順が確定した接頭辞の末尾。遅延選択なしなら usize::MAX。
     lazy_quiet_upto: usize,
@@ -353,11 +367,18 @@ impl MovePicker {
 
     /// 現在のステージがquiet段階かどうかを返す
     ///
-    /// LMP発火条件の判定に使用する。quiet段階（QuietInit, GoodQuiet, BadQuiet）で
-    /// のみLMPを発火させ、captureは残す。
+    /// LMP発火条件の判定に使用する。quiet段階（QuietInit, GoodQuiet, BadQuiet）
+    /// および遅延選択の quiet 段階でのみLMPを発火させ、captureは残す。
     #[inline]
     pub fn is_quiet_stage(&self) -> bool {
-        matches!(self.stage, Stage::QuietInit | Stage::GoodQuiet | Stage::BadQuiet)
+        matches!(
+            self.stage,
+            Stage::QuietInit
+                | Stage::GoodQuiet
+                | Stage::BadQuiet
+                | Stage::LazyGoodQuiet
+                | Stage::LazyBadQuiet
+        )
     }
 
     /// 現在のステージを取得（デバッグ用）
@@ -471,11 +492,14 @@ impl MovePicker {
                         // YaneuraOu準拠: 深さベースの閾値で部分ソート
                         // -3560 * depth で depth が浅いほど閾値が高く、多くの手がソート対象
                         let limit = -3560 * self.depth;
-                        self.init_quiet_order(limit, MP_LAZY_QUIET.load(Ordering::Relaxed));
+                        let min_k = MP_LAZY_QUIET
+                            .load(Ordering::Relaxed)
+                            .then(|| MP_LAZY_MIN_K.load(Ordering::Relaxed));
+                        self.stage = self.init_quiet_order(limit, min_k);
                     } else {
                         self.end_good_quiets = self.end_captures;
+                        self.stage = Stage::GoodQuiet;
                     }
-                    self.stage = Stage::GoodQuiet;
                 }
 
                 // ==============================
@@ -484,17 +508,14 @@ impl MovePicker {
                 // YaneuraOu同様に全quiet手を走査してthreshold超の手を返す
                 // ==============================
                 Stage::GoodQuiet => {
-                    if !self.skip_quiets {
-                        self.end_cur = self.end_generated;
-                        if let Some(m) = self.select_good_quiet() {
-                            return m;
-                        }
+                    if let Some(m) = self.next_good_quiet::<false>() {
+                        return m;
                     }
-
-                    // 悪い捕獲手の準備
-                    self.cur = 0;
-                    self.end_cur = self.end_bad_captures;
-                    self.stage = Stage::BadCapture;
+                }
+                Stage::LazyGoodQuiet => {
+                    if let Some(m) = self.next_good_quiet::<true>() {
+                        return m;
+                    }
                 }
 
                 // ==============================
@@ -508,7 +529,11 @@ impl MovePicker {
                     // YaneuraOu準拠: endCapturesからquiet手全体を再走査
                     self.cur = self.end_captures;
                     self.end_cur = self.end_generated;
-                    self.stage = Stage::BadQuiet;
+                    self.stage = if self.end_good_quiets > self.end_captures {
+                        Stage::LazyBadQuiet
+                    } else {
+                        Stage::BadQuiet
+                    };
                 }
 
                 // ==============================
@@ -518,9 +543,17 @@ impl MovePicker {
                     if !self.skip_quiets {
                         // YaneuraOu準拠: endCaptures から全quiet手を再走査し、
                         // value <= GOOD_QUIET_THRESHOLD の手のみ返す
-                        if let Some(m) = self.select_bad_quiet() {
+                        if let Some(m) = self.select_bad_quiet::<false>() {
                             return m;
                         }
+                    }
+                    return Move::NONE;
+                }
+                Stage::LazyBadQuiet => {
+                    if !self.skip_quiets
+                        && let Some(m) = self.select_bad_quiet::<true>()
+                    {
+                        return m;
                     }
                     return Move::NONE;
                 }
@@ -580,25 +613,27 @@ impl MovePicker {
     }
 
     /// 先頭の手と limit 以上の手をソート対象にし、低値域の swap 順序を維持する。
-    fn init_quiet_order(&mut self, limit: i32, lazy: bool) {
+    fn init_quiet_order(&mut self, limit: i32, min_k: Option<usize>) -> Stage {
         let moves = &mut self.moves.as_mut_slice()[self.end_captures..self.end_generated];
         let count = moves.len();
         self.lazy_quiet_upto = usize::MAX;
         self.lazy_quiet_budget = 0;
-        if !lazy {
+        // 先頭手は limit 未満でもソート対象。partition 前に数え、閾値未満なら
+        // 入力バッファを変更せず、通常経路と同じ部分挿入ソートへ渡す。
+        let use_lazy = min_k.is_some_and(|min_k| {
+            count > 0 && 1 + moves.iter().skip(1).filter(|m| m.value >= limit).count() >= min_k
+        });
+        if !use_lazy {
             partial_insertion_sort(moves, count, limit);
             self.end_good_quiets = self.end_captures;
-            return;
+            return Stage::GoodQuiet;
         }
         let high_count = partition_quiets(moves, limit);
         self.end_good_quiets = self.end_captures + high_count;
-        if high_count <= 8 {
-            partial_insertion_sort(moves, high_count, i32::MIN);
-        } else {
-            self.lazy_quiet_upto = self.end_captures;
-            // screening 用の初期値。小さい領域ほど早く挿入ソートに戻す。
-            self.lazy_quiet_budget = (high_count / 4).clamp(6, 8);
-        }
+        self.lazy_quiet_upto = self.end_captures;
+        // 小さい領域ほど早く挿入ソートに戻す。
+        self.lazy_quiet_budget = (high_count / 4).clamp(6, 8);
+        Stage::LazyGoodQuiet
     }
 
     /// 未確定の高値域から 1 手だけ確定する。BadQuiet の再走査では確定済みを触らない。
@@ -777,15 +812,32 @@ impl MovePicker {
         None
     }
 
+    /// quiet の選択方法は Stage で決め、通常経路には遅延境界の判定を生成しない。
+    #[inline]
+    fn next_good_quiet<const LAZY: bool>(&mut self) -> Option<Move> {
+        if !self.skip_quiets {
+            self.end_cur = self.end_generated;
+            if let Some(m) = self.select_good_quiet::<LAZY>() {
+                return Some(m);
+            }
+        }
+        self.cur = 0;
+        self.end_cur = self.end_bad_captures;
+        self.stage = Stage::BadCapture;
+        None
+    }
+
     /// GoodQuiet用: value > GOOD_QUIET_THRESHOLD の手のみ返す（YaneuraOu準拠）
-    fn select_good_quiet(&mut self) -> Option<Move> {
+    fn select_good_quiet<const LAZY: bool>(&mut self) -> Option<Move> {
         const GOOD_QUIET_THRESHOLD: i32 = -14000;
         while self.cur < self.end_cur {
-            self.ensure_quiet_order();
+            if LAZY {
+                self.ensure_quiet_order();
+            }
             let ext = self.moves.get(self.cur);
             self.cur += 1;
 
-            if self.cur <= self.end_good_quiets && ext.value <= GOOD_QUIET_THRESHOLD {
+            if LAZY && self.cur <= self.end_good_quiets && ext.value <= GOOD_QUIET_THRESHOLD {
                 // 残りの高値域にも good quiet はない。未確定分は BadQuiet で再開する。
                 self.cur = self.end_good_quiets;
                 continue;
@@ -803,10 +855,12 @@ impl MovePicker {
     }
 
     /// BadQuiet用: value <= GOOD_QUIET_THRESHOLD の手のみ返す（YaneuraOu準拠）
-    fn select_bad_quiet(&mut self) -> Option<Move> {
+    fn select_bad_quiet<const LAZY: bool>(&mut self) -> Option<Move> {
         const GOOD_QUIET_THRESHOLD: i32 = -14000;
         while self.cur < self.end_cur {
-            self.ensure_quiet_order();
+            if LAZY {
+                self.ensure_quiet_order();
+            }
             let ext = self.moves.get(self.cur);
             self.cur += 1;
 
@@ -977,7 +1031,7 @@ mod tests {
         scores: &[i32],
         limit: i32,
         tt_move: Move,
-        lazy: bool,
+        min_k: Option<usize>,
     ) -> MovePicker {
         let mut picker =
             MovePicker::new(pos, Move::NONE, 1, 0, [ContHistKey::null_sentinel(); 6], false);
@@ -994,8 +1048,7 @@ mod tests {
         picker.end_cur = picker.end_generated;
         picker.cur = picker.end_captures;
         picker.tt_move = tt_move;
-        picker.stage = Stage::GoodQuiet;
-        picker.init_quiet_order(limit, lazy);
+        picker.stage = picker.init_quiet_order(limit, min_k);
         picker
     }
 
@@ -1005,7 +1058,25 @@ mod tests {
         let mut pos = Position::new();
         pos.set_hirate();
         let history = HistoryTables::new_boxed();
-        let lengths = [0, 1, 2, 8, 9, 24, 32, 65, crate::movegen::MAX_MOVES - 3];
+        let lengths = [
+            0,
+            1,
+            2,
+            8,
+            9,
+            10,
+            15,
+            16,
+            17,
+            23,
+            24,
+            25,
+            31,
+            32,
+            33,
+            65,
+            crate::movegen::MAX_MOVES - 3,
+        ];
         for case in 0..1500 {
             let n = if case < lengths.len() * 10 {
                 lengths[case % lengths.len()]
@@ -1093,28 +1164,72 @@ mod tests {
                     reference.push((raw, stage));
                 }
                 reference.push((Move::NONE.raw32(), Stage::BadQuiet));
-                let mut old = scored_quiet_picker(&pos, &scores, limit, tt, false);
-                let mut new = scored_quiet_picker(&pos, &scores, limit, tt, true);
-                let mut finished = false;
-                for (consumed, &reference_move) in reference.iter().enumerate() {
-                    if consumed == skip_after {
-                        old.skip_quiets();
-                        new.skip_quiets();
+                for min_k in [1, 9, 16, 24, 32, crate::movegen::MAX_MOVES + 1] {
+                    let mut old = scored_quiet_picker(&pos, &scores, limit, tt, None);
+                    let mut new = scored_quiet_picker(&pos, &scores, limit, tt, Some(min_k));
+                    let mut finished = false;
+                    for (consumed, &reference_move) in reference.iter().enumerate() {
+                        if consumed == skip_after {
+                            old.skip_quiets();
+                            new.skip_quiets();
+                        }
+                        let expected = old.next_move(&pos, &history);
+                        let actual = new.next_move(&pos, &history);
+                        assert_eq!(new.is_quiet_stage(), old.is_quiet_stage());
+                        let stage = match new.stage() {
+                            Stage::LazyGoodQuiet => Stage::GoodQuiet,
+                            Stage::LazyBadQuiet => Stage::BadQuiet,
+                            stage => stage,
+                        };
+                        assert_eq!((expected.raw32(), old.stage()), reference_move);
+                        assert_eq!(
+                            (actual.raw32(), stage),
+                            (expected.raw32(), old.stage()),
+                            "min_k={min_k}, case={case}, n={n}, limit={limit}, skip={skip_after}, consumed={consumed}"
+                        );
+                        if actual.is_none() {
+                            finished = true;
+                            break;
+                        }
                     }
-                    let expected = old.next_move(&pos, &history);
-                    let actual = new.next_move(&pos, &history);
-                    assert_eq!((expected.raw32(), old.stage()), reference_move);
-                    assert_eq!(
-                        (actual.raw32(), new.stage()),
-                        (expected.raw32(), old.stage()),
-                        "case={case}, n={n}, limit={limit}, skip={skip_after}, consumed={consumed}"
-                    );
-                    if actual.is_none() {
-                        finished = true;
-                        break;
+                    assert!(finished);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_quiets_screen_by_high_count_before_partition() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        for min_k in [1, 9, 16, 24, 32] {
+            for k in [min_k - 1, min_k, min_k + 1] {
+                // 先頭手は低値でも k に含む。低値域と同値を混在させる。
+                let mut scores = Vec::new();
+                if k > 0 {
+                    scores.push(-20000);
+                    for i in 1..k {
+                        scores.extend([-30000, (i % 3) as i32]);
                     }
                 }
-                assert!(finished);
+                let old = scored_quiet_picker(&pos, &scores, -10000, Move::NONE, None);
+                let new = scored_quiet_picker(&pos, &scores, -10000, Move::NONE, Some(min_k));
+                if k > 0 && k >= min_k {
+                    assert_eq!(new.stage(), Stage::LazyGoodQuiet);
+                    assert_eq!(new.end_good_quiets - new.end_captures, k);
+                    assert_eq!(new.lazy_quiet_upto, new.end_captures);
+                } else {
+                    assert_eq!(new.stage(), Stage::GoodQuiet);
+                    assert_eq!(new.end_good_quiets, new.end_captures);
+                    assert_eq!(new.lazy_quiet_upto, usize::MAX);
+                    for (actual, expected) in new.moves.as_slice().iter().zip(old.moves.as_slice())
+                    {
+                        assert_eq!(
+                            (actual.mv.raw32(), actual.value),
+                            (expected.mv.raw32(), expected.value)
+                        );
+                    }
+                }
             }
         }
     }
@@ -1125,7 +1240,7 @@ mod tests {
         pos.set_hirate();
         let history = HistoryTables::new_boxed();
         let scores = vec![-14000; 40];
-        let mut picker = scored_quiet_picker(&pos, &scores, -20000, Move::from_u16(100), true);
+        let mut picker = scored_quiet_picker(&pos, &scores, -20000, Move::from_u16(100), Some(9));
         // 最大値が threshold 以下で、かつ TT 手でも、未確定の残りは保存する。
         assert_eq!(picker.next_move(&pos, &history).raw32(), 1);
         assert_eq!(picker.lazy_quiet_upto, picker.end_captures + 1);
