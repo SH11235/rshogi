@@ -4,14 +4,14 @@
 
 use std::ptr::NonNull;
 
-use crate::eval::{EvalHash, eval_hash_enabled};
+use crate::eval::eval_hash_enabled;
 use crate::nnue::DirtyPiece;
 use crate::position::Position;
-use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
 use crate::types::{Move, Piece, Square, Value};
 
 use super::alpha_beta::{SearchContext, SearchState};
+use super::corr_prefetch::prefetch_correction;
 use super::history::CorrectionPieceToHistory;
 use super::types::{ContHistKey, STACK_SIZE};
 use super::{LimitsType, TimeManagement};
@@ -157,17 +157,18 @@ pub(super) fn nnue_evaluate_cached(
 /// YO では Worker::do_move() 内部で nodes++ と nnue push を行う。
 /// rshogi でも同等の一括処理を提供する。
 #[inline]
-pub(super) fn do_move_and_push<P: TtPrefetch>(
+pub(super) fn do_move_and_push(
     st: &mut SearchState,
+    ctx: &SearchContext<'_>,
     pos: &mut Position,
     mv: Move,
     gives_check: bool,
-    prefetcher: &P,
-    eval_hash: &EvalHash,
+    child_ply: i32,
 ) {
-    let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, prefetcher);
+    let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, ctx.tt);
+    prefetch_correction(st, ctx.history, pos, child_ply, mv);
     if eval_hash_enabled() {
-        eval_hash.prefetch(pos.key());
+        ctx.eval_hash.prefetch(pos.key());
     }
     st.nodes += 1;
     st.evaluator.push(dirty_piece);

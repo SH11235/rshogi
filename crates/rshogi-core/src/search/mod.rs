@@ -11,6 +11,7 @@
 mod stats;
 
 mod alpha_beta;
+mod corr_prefetch;
 mod engine;
 mod eval_helpers;
 mod history;
@@ -32,6 +33,7 @@ mod types;
 mod tests;
 
 pub use alpha_beta::*;
+pub use corr_prefetch::set_corr_prefetch;
 pub use engine::*;
 pub use history::*;
 pub use limits::*;

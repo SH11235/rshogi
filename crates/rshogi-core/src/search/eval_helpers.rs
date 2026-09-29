@@ -35,12 +35,6 @@ pub(super) fn correction_value(
     pos: &Position,
     ply: i32,
 ) -> i32 {
-    let us = pos.side_to_move();
-    let pawn_idx = (pos.pawn_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-    let minor_idx = (pos.minor_piece_key() as usize) & (CORRECTION_HISTORY_SIZE - 1);
-    let non_pawn_idx_w = (pos.non_pawn_key(Color::White) as usize) & (CORRECTION_HISTORY_SIZE - 1);
-    let non_pawn_idx_b = (pos.non_pawn_key(Color::Black) as usize) & (CORRECTION_HISTORY_SIZE - 1);
-
     // (ss-1)->currentMove を使って continuation correction を参照
     let prev_move = if ply >= 1 {
         debug_assert!(((ply - 1) as usize) < st.stack.len());
@@ -53,10 +47,11 @@ pub(super) fn correction_value(
 
     // SAFETY: 単一スレッド内で使用、可変参照と同時保持しない
     let h = unsafe { ctx.history.as_ref_unchecked() };
-    let pcv = h.correction_history.pawn_value(pawn_idx, us) as i32;
-    let micv = h.correction_history.minor_value(minor_idx, us) as i32;
-    let wnpcv = h.correction_history.non_pawn_value(non_pawn_idx_w, Color::White, us) as i32;
-    let bnpcv = h.correction_history.non_pawn_value(non_pawn_idx_b, Color::Black, us) as i32;
+    let [pawn, minor, white_non_pawn, black_non_pawn] = h.correction_history.position_entries(pos);
+    let pcv = pawn.get() as i32;
+    let micv = minor.get() as i32;
+    let wnpcv = white_non_pawn.get() as i32;
+    let bnpcv = black_non_pawn.get() as i32;
 
     // move無効の場合はcntcv全体が8（個別デフォルトの合計ではない）
     let cntcv = if move_ok {

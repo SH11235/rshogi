@@ -17,6 +17,7 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::position::Position;
 use crate::types::{Color, Move, Piece, PieceType, Square};
 
 use super::tt_history::TTMoveHistory;
@@ -664,7 +665,7 @@ pub type CorrectionPieceToHistory =
 /// CorrectionHistory ()
 ///
 /// - Pawn/Minor: [key_index][color] -> correction
-/// - NonPawn: [key_index][side_to_move][piece_color] -> correction
+/// - NonPawn: [key_index][piece_color][side_to_move] -> correction
 /// - Continuation: [prev_pc][prev_to][pc][to] -> correction
 ///
 /// HistoryTables内の連続領域に配置するため配列で保持する。
@@ -726,10 +727,15 @@ impl CorrectionHistory {
 
     #[inline]
     pub fn pawn_value(&self, idx: usize, color: Color) -> i16 {
+        self.pawn_entry(idx, color).get()
+    }
+
+    #[inline]
+    fn pawn_entry(&self, idx: usize, color: Color) -> &StatsEntry<CORRECTION_HISTORY_LIMIT> {
         let masked = idx % CORRECTION_HISTORY_SIZE;
         // SAFETY: masked < CORRECTION_HISTORY_SIZE（剰余演算で保証）。
         //         Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
-        unsafe { self.pawn.get_unchecked(masked).get_unchecked(color.index()).get() }
+        unsafe { self.pawn.get_unchecked(masked).get_unchecked(color.index()) }
     }
 
     #[inline]
@@ -746,10 +752,15 @@ impl CorrectionHistory {
 
     #[inline]
     pub fn minor_value(&self, idx: usize, color: Color) -> i16 {
+        self.minor_entry(idx, color).get()
+    }
+
+    #[inline]
+    fn minor_entry(&self, idx: usize, color: Color) -> &StatsEntry<CORRECTION_HISTORY_LIMIT> {
         let masked = idx % CORRECTION_HISTORY_SIZE;
         // SAFETY: masked < CORRECTION_HISTORY_SIZE（剰余演算で保証）。
         //         Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
-        unsafe { self.minor.get_unchecked(masked).get_unchecked(color.index()).get() }
+        unsafe { self.minor.get_unchecked(masked).get_unchecked(color.index()) }
     }
 
     #[inline]
@@ -766,6 +777,16 @@ impl CorrectionHistory {
 
     #[inline]
     pub fn non_pawn_value(&self, idx: usize, board_color: Color, stm: Color) -> i16 {
+        self.non_pawn_entry(idx, board_color, stm).get()
+    }
+
+    #[inline]
+    fn non_pawn_entry(
+        &self,
+        idx: usize,
+        board_color: Color,
+        stm: Color,
+    ) -> &StatsEntry<CORRECTION_HISTORY_LIMIT> {
         let masked = idx % CORRECTION_HISTORY_SIZE;
         // SAFETY: masked < CORRECTION_HISTORY_SIZE（剰余演算で保証）。
         //         Color::index() は 0 or 1 で Color::NUM=2 の範囲内。
@@ -774,8 +795,23 @@ impl CorrectionHistory {
                 .get_unchecked(masked)
                 .get_unchecked(board_color.index())
                 .get_unchecked(stm.index())
-                .get()
         }
+    }
+
+    /// 補正値の読み取りと prefetch が共有する、子局面の手番側の4エントリ。
+    #[inline]
+    pub(super) fn position_entries(
+        &self,
+        pos: &Position,
+    ) -> [&StatsEntry<CORRECTION_HISTORY_LIMIT>; 4] {
+        let us = pos.side_to_move();
+        let index = |key: u64| key as usize & (CORRECTION_HISTORY_SIZE - 1);
+        [
+            self.pawn_entry(index(pos.pawn_key()), us),
+            self.minor_entry(index(pos.minor_piece_key()), us),
+            self.non_pawn_entry(index(pos.non_pawn_key(Color::White)), Color::White, us),
+            self.non_pawn_entry(index(pos.non_pawn_key(Color::Black)), Color::Black, us),
+        ]
     }
 
     #[inline]
@@ -829,7 +865,21 @@ impl CorrectionHistory {
         to: Square,
     ) -> i16 {
         // SAFETY: 呼出側がtableの生存期間を保証し、Piece/Square indexは各NUM未満。
-        unsafe { table.as_ref().get_unchecked(pc.index()).get_unchecked(to.index()).get() }
+        unsafe { (*Self::continuation_entry_ptr(table, pc, to)).get() }
+    }
+
+    /// 補正値の読み取りと prefetch が共有する continuation エントリのアドレス。
+    ///
+    /// # Safety
+    /// `table` は生存中の `continuation_table()` を指し、可変参照と併用しないこと。
+    #[inline]
+    pub(super) unsafe fn continuation_entry_ptr(
+        table: NonNull<CorrectionPieceToHistory>,
+        pc: Piece,
+        to: Square,
+    ) -> *const StatsEntry<CORRECTION_HISTORY_LIMIT> {
+        // SAFETY: 呼出側が table の生存期間と排他性を保証し、Piece/Square index は各 NUM 未満。
+        unsafe { table.as_ref().get_unchecked(pc.index()).get_unchecked(to.index()) }
     }
 
     #[inline]
@@ -1099,6 +1149,57 @@ pub fn pawn_history_bonus(bonus: i32, tune_params: &SearchTuneParams) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn correction_position_entry_addresses_match_tables_and_mask() {
+        use super::*;
+
+        let history = CorrectionHistory::new_boxed();
+        for us in [Color::Black, Color::White] {
+            for idx in [
+                0,
+                CORRECTION_HISTORY_SIZE - 1,
+                CORRECTION_HISTORY_SIZE,
+                usize::MAX,
+            ] {
+                let masked = idx & (CORRECTION_HISTORY_SIZE - 1);
+                assert!(std::ptr::eq(
+                    history.pawn_entry(idx, us),
+                    &history.pawn[masked][us.index()]
+                ));
+                assert!(std::ptr::eq(
+                    history.minor_entry(idx, us),
+                    &history.minor[masked][us.index()]
+                ));
+                for board in [Color::Black, Color::White] {
+                    assert!(std::ptr::eq(
+                        history.non_pawn_entry(idx, board, us),
+                        &history.non_pawn[masked][board.index()][us.index()],
+                    ));
+                }
+            }
+        }
+
+        let mut pos = Position::new();
+        pos.set_hirate();
+        for usi in ["7g7f", "3c3d", "8h2b+", "3a2b", "B*5e"] {
+            let mv = pos.to_move(Move::from_usi(usi).unwrap()).unwrap();
+            assert!(pos.is_legal(mv));
+            let check = pos.gives_check(mv);
+            pos.do_move(mv, check);
+            let mask = |key: u64| key as usize & (CORRECTION_HISTORY_SIZE - 1);
+            let us = pos.side_to_move().index();
+            let expected = [
+                &history.pawn[mask(pos.pawn_key())][us],
+                &history.minor[mask(pos.minor_piece_key())][us],
+                &history.non_pawn[mask(pos.non_pawn_key(Color::White))][Color::White.index()][us],
+                &history.non_pawn[mask(pos.non_pawn_key(Color::Black))][Color::Black.index()][us],
+            ];
+            for (actual, expected) in history.position_entries(&pos).into_iter().zip(expected) {
+                assert!(std::ptr::eq(actual, expected));
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

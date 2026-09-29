@@ -351,6 +351,13 @@ where
         } else {
             pos.do_null_move_with_prefetch(ctx.tt);
         }
+        super::corr_prefetch::prefetch_correction(
+            st,
+            ctx.history,
+            pos,
+            ply + 1,
+            st.stack[ply as usize].current_move,
+        );
         nnue_push(st, DirtyPiece::new());
         let null_move = st.stack[ply as usize].current_move;
         st.set_child_follow_pv(ply, null_move);
@@ -528,7 +535,7 @@ where
         let cont_hist_to = mv.to();
 
         st.stack[ply as usize].current_move = mv;
-        do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
+        do_move_and_push(st, ctx, pos, mv, gives_check, ply + 1);
         set_cont_history_for_move(
             st,
             ctx,

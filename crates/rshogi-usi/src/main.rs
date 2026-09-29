@@ -763,6 +763,13 @@ impl UsiEngine {
         }
 
         // オプションを適用
+        // 比較測定専用。usi の option 一覧には登録しない。
+        if name == "CorrPrefetch" {
+            if !value.parse::<u8>().is_ok_and(rshogi_core::search::set_corr_prefetch) {
+                eprintln!("info string Warning: CorrPrefetch must be 0, 1 or 2");
+            }
+            return;
+        }
         if name.starts_with(NET_DELTA_OPTION_PREFIX) {
             let parsed = match value.parse::<i32>() {
                 Ok(v) => v,

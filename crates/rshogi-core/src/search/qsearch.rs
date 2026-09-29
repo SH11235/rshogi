@@ -454,7 +454,7 @@ pub(super) fn qsearch<const NT: u8>(
         // 実際に探索された手をカウント
         inc_stat!(st, qs_moves_searched);
 
-        do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
+        do_move_and_push(st, ctx, pos, mv, gives_check, ply + 1);
 
         // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
         if mv.is_pass() {
