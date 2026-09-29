@@ -7,7 +7,6 @@
 
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "search-pass-rules")]
 use crate::eval::evaluate_pass_rights;
@@ -55,15 +54,6 @@ use super::tt_sanity::{TtWriteTrace, helper_tt_write_enabled_for_depth, maybe_tr
 pub const DEFAULT_DRAW_VALUE_BLACK: i32 = -2;
 /// YaneuraOuオプション `DrawValueWhite` のデフォルト値。
 pub const DEFAULT_DRAW_VALUE_WHITE: i32 = -2;
-
-static TT_SIBLING_PREFETCH: AtomicBool = AtomicBool::new(false);
-
-/// 兄弟局面の先読みを設定する。各 worker が次の探索開始時に取り込む。
-///
-/// プロセス内の全 Search に適用される、計測用の設定。
-pub fn set_tt_sibling_prefetch(enabled: bool) {
-    TT_SIBLING_PREFETCH.store(enabled, Ordering::Relaxed);
-}
 
 #[inline]
 pub(super) fn draw_jitter(nodes: u64, tune_params: &SearchTuneParams) -> i32 {
@@ -491,8 +481,6 @@ impl DepthLivenessState {
 ///
 /// 各探索スレッドが持つ可変状態。
 pub struct SearchState {
-    /// 探索開始時に取り込んだ兄弟局面の先読み設定。
-    pub(crate) tt_sibling_prefetch: bool,
     /// 探索ノード数
     pub nodes: u64,
     /// 探索スタック
@@ -535,7 +523,6 @@ impl SearchState {
     /// 新しい SearchState を作成
     pub fn new() -> Self {
         Self {
-            tt_sibling_prefetch: false,
             nodes: 0,
             stack: init_stack_array(),
             root_delta: 1,
@@ -943,7 +930,6 @@ impl SearchWorker {
 
     /// goで呼び出し：探索状態のリセット（履歴はクリアしない）
     pub fn prepare_search(&mut self, limits: &LimitsType) {
-        self.state.tt_sibling_prefetch = TT_SIBLING_PREFETCH.load(Ordering::Relaxed);
         self.state.nodes = 0;
         self.state.sel_depth = 0;
         self.state.root_depth = 0;
@@ -3015,9 +3001,7 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-            if st.tt_sibling_prefetch
-                && let Some(next) = mp.peek_next()
-            {
+            if let Some(next) = mp.peek_next() {
                 let key = pos.key_after(next);
                 ctx.tt.prefetch(key, !pos.side_to_move());
                 if eval_hash_enabled() {

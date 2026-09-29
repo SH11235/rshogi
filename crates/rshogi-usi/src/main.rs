@@ -929,10 +929,6 @@ impl UsiEngine {
                 self.use_eval_hash = v;
                 set_eval_hash_enabled(v);
             }
-            // 計測用。usi の option 一覧には表示しない。
-            "TtSiblingPrefetch" => {
-                rshogi_core::search::set_tt_sibling_prefetch(value == "true" || value == "1");
-            }
             "MaxMovesToDraw" => {
                 if let Ok(v) = value.parse::<i32>()
                     && let Some(search) = self.search.as_mut()
