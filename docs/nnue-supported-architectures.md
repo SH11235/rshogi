@@ -29,6 +29,9 @@ bullet-shogi や nnue-pytorch のモデルも、生成ソフト名だけでな�
 
 ## LayerStacks
 
+静的な 1536×16 の L1 では、性能比較用の
+[隠しカーネル切替](./performance/ls-l1-kernels.md)も利用できます。
+
 `edition-universal` はモデルから形状を読み取ります。
 固定構成の例は以下です。対応する edition は [ビルドガイド](./build.md) で確認してください。
 

@@ -567,7 +567,7 @@ impl<
         );
 
         // LayerStacks bucket0 の l1_biases
-        let l1_biases = &ls.buckets[0].l1.biases;
+        let l1_biases = &ls.buckets[0].l1().biases;
         info!("[NNUE Load] LayerStacks bucket0 l1_biases: {l1_biases:?}");
     }
 
@@ -706,6 +706,19 @@ impl<
         })
     }
 
+    #[inline(always)]
+    fn evaluate_legacy_raw(
+        &self,
+        acc: &AccumulatorLayerStacks<L1>,
+        side_to_move: Color,
+        bucket_index: usize,
+    ) -> i32 {
+        let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
+            sqr_clipped_relu_new(us, them)
+        });
+        self.layer_stacks.evaluate_raw(bucket_index, &transformed.0)
+    }
+
     /// 評価値を計算（事前計算済み bucket index を使用）
     pub fn evaluate_with_bucket(
         &self,
@@ -715,12 +728,39 @@ impl<
     ) -> Value {
         let side_to_move = pos.side_to_move();
 
-        let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
-            sqr_clipped_relu_new(us, them)
-        });
-
-        // LayerStacks で評価
-        let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512vnni"
+        ))]
+        let kernel = if L1 == 1536 && LS_L1_OUT == 16 {
+            super::ls_l1_kernel::selected()
+        } else {
+            super::ls_l1_kernel::LsL1Kernel::Legacy
+        };
+        let raw_score = {
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw",
+                target_feature = "avx512vnni"
+            ))]
+            if kernel != super::ls_l1_kernel::LsL1Kernel::Legacy {
+                self.with_combined_accumulators(acc, side_to_move, |us, them| {
+                    self.layer_stacks.buckets[bucket_index].propagate_accumulators(us, them, kernel)
+                })
+            } else {
+                self.evaluate_legacy_raw(acc, side_to_move, bucket_index)
+            }
+            #[cfg(not(all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw",
+                target_feature = "avx512vnni"
+            )))]
+            self.evaluate_legacy_raw(acc, side_to_move, bucket_index)
+        };
 
         // PSQT ショートカット (Stockfish 準拠: (stm - nstm) / 2)
         // 各駒は両視点に逆符号で寄与するため、stm - nstm は正味の配置価値を
@@ -2461,7 +2501,7 @@ mod tests {
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
-        bucket.l1.weights.make_mut().fill(4);
+        bucket.edit_l1(|l1| l1.weights.make_mut().fill(4));
         bucket.l2.weights.make_mut().fill(4);
         bucket.output.weights.make_mut().fill(1);
         let mut acc = AccumulatorLayerStacks::<64>::new();
@@ -2587,8 +2627,10 @@ mod tests {
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
-        bucket.l1.weights.make_mut().fill(1);
-        bucket.l1.biases.fill(1024);
+        bucket.edit_l1(|l1| {
+            l1.weights.make_mut().fill(1);
+            l1.biases.fill(1024);
+        });
         bucket.l2.weights.make_mut().fill(1);
         bucket.l2.biases.fill(1024);
         bucket.output.weights.make_mut().fill(1);
@@ -2694,7 +2736,7 @@ mod tests {
         }
 
         // LayerStacks の重みの一部を確認
-        let l1_bias_sample: Vec<i32> = network.layer_stacks.buckets[0].l1.biases.to_vec();
+        let l1_bias_sample: Vec<i32> = network.layer_stacks.buckets[0].l1().biases.to_vec();
         eprintln!("L1 bias (bucket 0): {l1_bias_sample:?}");
 
         // 初期局面を評価
@@ -2722,6 +2764,41 @@ mod tests {
 
         let mut acc = AccumulatorLayerStacks::<TEST_L1>::new();
         network.refresh_accumulator(&pos, &mut acc);
+
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512vnni"
+        ))]
+        {
+            use crate::nnue::{LsL1Kernel, set_ls_l1_kernel};
+            struct ResetKernel;
+            impl Drop for ResetKernel {
+                fn drop(&mut self) {
+                    set_ls_l1_kernel(LsL1Kernel::Legacy);
+                }
+            }
+            let _reset_kernel = ResetKernel;
+            for bucket in 0..network.num_buckets {
+                super::super::layer_stacks::assert_l1_kernels_match(
+                    &network.layer_stacks.buckets[bucket],
+                    acc.get(0),
+                    acc.get(1),
+                );
+                super::super::layer_stacks::assert_l1_kernels_match(
+                    &network.layer_stacks.buckets[bucket],
+                    acc.get(1),
+                    acc.get(0),
+                );
+                set_ls_l1_kernel(LsL1Kernel::Legacy);
+                let expected = network.evaluate_with_bucket(&pos, &acc, bucket);
+                for kernel in [LsL1Kernel::Xf64, LsL1Kernel::Fused] {
+                    set_ls_l1_kernel(kernel);
+                    assert_eq!(expected, network.evaluate_with_bucket(&pos, &acc, bucket));
+                }
+            }
+        }
 
         // Accumulatorの値を確認
         let black_acc = acc.get(0);
