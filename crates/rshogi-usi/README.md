@@ -56,6 +56,16 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 
+### quiet ソートの screening
+
+隠し bool option `MpLazyQuiet`（既定 `false`）は `usi` の一覧には表示しません。
+`setoption name MpLazyQuiet value true` で quiet の安定な遅延選択を有効にし、
+`false` で従来の部分挿入ソートへ戻します。設定は次の `go` の前に static へ反映し、
+各ノードでは QuietInit で一度だけ参照します。捕獲手・王手回避手のソートは共通です。
+高値域（先頭の 1 手を含む）が 8 手以下なら即座に挿入ソートし、それより多い場合は
+`T = clamp(k / 4, 6, 8)` 回の安定選択後に残りを挿入ソートします。
+閾値と速度改善は未検証の screening 用です。同じ binary で設定を切り替えて比較できます。
+
 ## Allocation diagnostics
 
 Build with `cargo build --profile production -p rshogi-usi --features allocation-stats`

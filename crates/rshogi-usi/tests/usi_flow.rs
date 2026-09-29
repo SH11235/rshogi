@@ -4,6 +4,112 @@ use std::process::Command;
 /// テスト用の共通USI初期化コマンド（Material評価で動作させる）
 const USI_INIT: &str = "usi\nsetoption name MaterialLevel value 9\nisready\n";
 
+/// 同じプロセスで隠し option を off/on/off と切り替え、短い固定深さ探索を比較する。
+#[test]
+fn mp_lazy_quiet_preserves_fixed_depth_search() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn engine");
+    let (sender, receiver) = mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if sender.send(line.expect("read stdout")).is_err() {
+                break;
+            }
+        }
+    });
+    let result = (|| -> Result<(), String> {
+        writeln!(child.stdin.as_mut().unwrap(), "usi").map_err(|err| err.to_string())?;
+        loop {
+            let line = receiver.recv_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
+            if line.contains("option name MpLazyQuiet") {
+                return Err("screening option must remain hidden".into());
+            }
+            if line == "usiok" {
+                break;
+            }
+        }
+        // LayerStacks 専用 build でも使える、利き情報に依存しない評価にする。
+        writeln!(child.stdin.as_mut().unwrap(),
+            "setoption name MaterialLevel value 1\nsetoption name USI_Hash value 1\nsetoption name EvalHash value 0\nsetoption name Threads value 1\nisready")
+            .map_err(|err| err.to_string())?;
+        loop {
+            let line = receiver.recv_timeout(Duration::from_secs(10)).map_err(|e| e.to_string())?;
+            if line == "readyok" {
+                break;
+            }
+        }
+        for position in [
+            "startpos",
+            "startpos moves 7g7f 3c3d 2g2f 8c8d 2f2e 8d8e 6i7h 4a3b",
+            "sfen 4k4/9/4p4/3p1p3/4P4/3P1P3/9/9/4K4 b RBGPrbgp 1",
+        ] {
+            let mut baseline = None;
+            for enabled in [false, true, false] {
+                writeln!(child.stdin.as_mut().unwrap(),
+                    "setoption name MpLazyQuiet value {enabled}\nusinewgame\nposition {position}\ngo depth 3")
+                    .map_err(|err| err.to_string())?;
+                let mut search_info = Vec::new();
+                loop {
+                    let line = receiver
+                        .recv_timeout(Duration::from_secs(15))
+                        .map_err(|e| e.to_string())?;
+                    let tokens: Vec<_> = line.split_whitespace().collect();
+                    if line.starts_with("info depth ") && tokens.contains(&"pv") {
+                        let mut normalized = Vec::new();
+                        for key in ["depth", "seldepth", "nodes", "score", "pv"] {
+                            let i = tokens
+                                .iter()
+                                .position(|&token| token == key)
+                                .ok_or_else(|| format!("missing {key}: {line}"))?;
+                            let end = match key {
+                                "pv" => tokens.len(),
+                                "score" => i + 3,
+                                _ => i + 2,
+                            };
+                            normalized.extend_from_slice(&tokens[i..end]);
+                        }
+                        search_info.push(normalized.join(" "));
+                    }
+                    if line.starts_with("bestmove ") {
+                        if search_info.is_empty() {
+                            return Err(format!("missing search info: {position}"));
+                        }
+                        search_info.push(line);
+                        break;
+                    }
+                }
+                if let Some(expected) = &baseline {
+                    if &search_info != expected {
+                        return Err(format!(
+                            "MpLazyQuiet={enabled}, {position}: {search_info:?} != {expected:?}"
+                        ));
+                    }
+                } else {
+                    baseline = Some(search_info);
+                }
+            }
+        }
+        Ok(())
+    })();
+    if result.is_ok() {
+        writeln!(child.stdin.as_mut().unwrap(), "quit").unwrap();
+    } else {
+        let _ = child.kill();
+    }
+    let status = child.wait().unwrap();
+    reader.join().unwrap();
+    result.unwrap();
+    assert!(status.success());
+}
+
 /// `go`→`stop`→`quit` で bestmove が返って終了することを確認
 #[test]
 fn stop_then_quit_outputs_bestmove() {

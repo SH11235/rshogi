@@ -28,7 +28,7 @@ use rshogi_core::nnue::{
 use rshogi_core::position::Position;
 use rshogi_core::search::{
     DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, PonderhitHandle, Search,
-    SearchInfo, SearchResult, SearchTuneParams,
+    SearchInfo, SearchResult, SearchTuneParams, set_mp_lazy_quiet,
 };
 use rshogi_core::types::{EnteringKingRule, Move};
 use serde_json::json;
@@ -97,6 +97,8 @@ struct UsiEngine {
     eval_hash_large_pages: bool,
     /// MultiPV値
     multi_pv: usize,
+    /// screening 用の隠し設定。探索開始前にだけ static へ反映する。
+    mp_lazy_quiet: bool,
     /// Skill Level オプション
     skill_options: rshogi_core::search::SkillOptions,
     /// 探索スレッドのハンドル
@@ -197,6 +199,7 @@ impl UsiEngine {
             use_eval_hash,
             eval_hash_large_pages: true,
             multi_pv: 1,
+            mp_lazy_quiet: false,
             skill_options: rshogi_core::search::SkillOptions::default(),
             search_thread: None,
             stop_flag: None,
@@ -797,6 +800,11 @@ impl UsiEngine {
         }
 
         match name.as_str() {
+            "MpLazyQuiet" => {
+                if let Ok(enabled) = value.parse::<bool>() {
+                    self.mp_lazy_quiet = enabled;
+                }
+            }
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;
@@ -1422,6 +1430,7 @@ impl UsiEngine {
         // bestmoveがstdoutに出力されるとGUIが混乱する（YaneuraOu準拠）
         self.stop_search_silently();
         self.reload_net_deltas_if_dirty()?;
+        set_mp_lazy_quiet(self.mp_lazy_quiet);
 
         // 制限を解析
         let limits = self.parse_go_options(tokens);
@@ -1948,6 +1957,17 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn mp_lazy_quiet_option_defaults_off_and_accepts_only_bool() {
+        let mut engine = UsiEngine::new();
+        assert!(!engine.mp_lazy_quiet);
+        for (value, expected) in [("true", true), ("invalid", true), ("false", false)] {
+            engine.cmd_setoption(&["setoption", "name", "MpLazyQuiet", "value", value]);
+            assert_eq!(engine.mp_lazy_quiet, expected);
+        }
+    }
 
     #[test]
     #[serial]
