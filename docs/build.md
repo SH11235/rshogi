@@ -322,6 +322,21 @@ xtask の `--profile` デフォルトは `production`。SPRT 等の棋力比較�
 
 PGO build は `scripts/build_pgo.sh` 参照 (NPS +6-7% を狙う、本番計測前の追い込み用)。
 
+## LayerStacks Finny の screening
+
+隠し USI option `LsFinnyV2`（bool、既定 `false`）で同一 binary 内の経路を比較できる。
+`usi` の option 一覧には表示しない。`setoption name LsFinnyV2 value true` で有効にし、
+`false` で旧経路へ戻す。設定は前の探索を停止した後、次の `go` 開始時に反映する。
+
+有効時は HalfKaHmMerged の特徴 index を玉位置・視点で選ぶ pack 表から求め、
+Finny 差分、1 手更新、差分 index の追記で共用する。PSQT なしの Finny refresh は
+tile ごとに cache と accumulator へ同時に書く。PSQT 付きモデルの専用 refresh と
+EffectBucket の全再計算は従来の更新方式を保つ。差分 IndexList の直接書込みは
+両設定および HalfKX 共通で有効なため、切替による比較にはこの変更の効果を含まない。
+
+この option は性能評価用で、既定経路を変更するものではない。速度の採否は、
+同じモデル・探索条件での bit 一致確認と、他の計測が競合しない環境での A/B による。
+
 ## 既存 build scripts との関係
 
 - `scripts/build_pgo.sh`: profile-generate → benchmark → profile-use → build を集約。

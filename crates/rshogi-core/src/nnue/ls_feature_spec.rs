@@ -52,6 +52,15 @@ pub trait LsFeatureSpec: 'static {
     /// `refresh_perspective_with_cache` (cache idx_fn) の両方から呼ばれる。
     /// 呼び出し元は `BonaPiece::ZERO` を除外済みを前提とする。
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize;
+
+    /// 玉位置と視点を固定した indexer。V2 では対応 FT の表引きを選択する。
+    #[inline]
+    fn feature_indexer<const V2: bool>(
+        perspective: Color,
+        king_sq: Square,
+    ) -> impl Fn(BonaPiece) -> usize {
+        move |bp| Self::feature_index(bp, perspective, king_sq)
+    }
 }
 
 /// HalfKP (classic NNUE) 用の LS FT 仕様。
@@ -144,6 +153,21 @@ impl LsFeatureSpec for HalfKaHmMergedSpec {
     #[cfg(feature = "nnue-effect-bucket")]
     const DIMENSIONS: usize = HALFKA_EFFECT_BUCKET_DIMENSIONS;
     const INCLUDE_KING_IN_PIECE_LIST: bool = true;
+
+    #[inline]
+    fn feature_indexer<const V2: bool>(
+        perspective: Color,
+        king_sq: Square,
+    ) -> impl Fn(BonaPiece) -> usize {
+        let packed = super::bona_piece_halfka_hm_merged::feature_indexer(perspective, king_sq);
+        move |bp| {
+            if V2 {
+                packed(bp)
+            } else {
+                Self::feature_index(bp, perspective, king_sq)
+            }
+        }
+    }
 
     #[inline]
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize {

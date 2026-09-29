@@ -93,6 +93,8 @@ struct UsiEngine {
     eval_hash_size_mb: usize,
     /// EvalHash使用フラグ（UseEvalHashで変更）
     use_eval_hash: bool,
+    /// 同一 binary 内で LayerStacks の Finny 経路を比較する隠し option。
+    ls_finny_v2: bool,
     /// EvalHash の確保時に Large Pages を試みるか。
     eval_hash_large_pages: bool,
     /// MultiPV値
@@ -195,6 +197,7 @@ impl UsiEngine {
             tt_size_mb,
             eval_hash_size_mb,
             use_eval_hash,
+            ls_finny_v2: false,
             eval_hash_large_pages: true,
             multi_pv: 1,
             skill_options: rshogi_core::search::SkillOptions::default(),
@@ -797,6 +800,10 @@ impl UsiEngine {
         }
 
         match name.as_str() {
+            "LsFinnyV2" => match value.parse::<bool>() {
+                Ok(enabled) => self.ls_finny_v2 = enabled,
+                Err(_) => eprintln!("info string Warning: invalid LsFinnyV2 value '{value}'"),
+            },
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;
@@ -1422,6 +1429,7 @@ impl UsiEngine {
         // bestmoveがstdoutに出力されるとGUIが混乱する（YaneuraOu準拠）
         self.stop_search_silently();
         self.reload_net_deltas_if_dirty()?;
+        rshogi_core::nnue::set_ls_finny_v2(self.ls_finny_v2);
 
         // 制限を解析
         let limits = self.parse_go_options(tokens);
@@ -1948,6 +1956,19 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn ls_finny_v2_option_defaults_to_false_and_rejects_invalid_values() {
+        let mut engine = UsiEngine::new();
+        assert!(!engine.ls_finny_v2);
+        engine.cmd_setoption(&["setoption", "name", "LsFinnyV2", "value", "true"]);
+        assert!(engine.ls_finny_v2);
+        engine.cmd_setoption(&["setoption", "name", "LsFinnyV2", "value", "invalid"]);
+        assert!(engine.ls_finny_v2);
+        engine.cmd_setoption(&["setoption", "name", "LsFinnyV2", "value", "false"]);
+        assert!(!engine.ls_finny_v2);
+    }
 
     #[test]
     #[serial]

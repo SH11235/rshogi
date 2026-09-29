@@ -28,6 +28,19 @@ use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(all(test, not(feature = "nnue-effect-bucket")))]
+#[path = "ls_finny_v2_tests.rs"]
+mod ls_finny_v2_tests;
+
+static LS_FINNY_V2: AtomicBool = AtomicBool::new(false);
+
+/// LayerStacks の Finny screening 経路を選択する（既定 false）。
+/// 探索 worker の停止後、次の探索開始前に設定する。
+pub fn set_ls_finny_v2(enabled: bool) {
+    LS_FINNY_V2.store(enabled, Ordering::Relaxed);
+}
 
 /// 特徴インデックスの範囲外アクセス時のパニック
 #[cold]
@@ -44,12 +57,44 @@ fn append_changed_indices<FT: LsFeatureSpec>(
     removed: &mut IndexList<MAX_CHANGED_FEATURES>,
     added: &mut IndexList<MAX_CHANGED_FEATURES>,
 ) {
+    if LS_FINNY_V2.load(Ordering::Relaxed) {
+        append_changed_indices_v2::<FT>(dirty_piece, perspective, king_sq, removed, added);
+        return;
+    }
     <FT::Feature as Feature>::append_changed_indices(
         dirty_piece,
         perspective,
         king_sq,
         removed,
         added,
+    );
+}
+
+#[inline]
+fn append_changed_indices_v2<FT: LsFeatureSpec>(
+    dirty_piece: &DirtyPiece,
+    perspective: Color,
+    king_sq: crate::types::Square,
+    removed: &mut IndexList<MAX_CHANGED_FEATURES>,
+    added: &mut IndexList<MAX_CHANGED_FEATURES>,
+) {
+    let indexer = FT::feature_indexer::<true>(perspective, king_sq);
+    let index = |bp: BonaPiece| {
+        (bp != BonaPiece::ZERO
+            && (FT::INCLUDE_KING_IN_PIECE_LIST
+                || (bp.value() as usize) < super::bona_piece::FE_END))
+            .then(|| indexer(bp))
+    };
+    removed.extend_pairs(
+        added,
+        (0..dirty_piece.dirty_num as usize).map(|i| {
+            let cp = &dirty_piece.changed_piece[i];
+            if perspective == Color::Black {
+                (index(cp.old_piece.fb), index(cp.new_piece.fb))
+            } else {
+                (index(cp.old_piece.fw), index(cp.new_piece.fw))
+            }
+        }),
     );
 }
 
@@ -70,6 +115,7 @@ fn append_active_indices<FT: LsFeatureSpec>(
 }
 
 #[inline]
+#[cfg(test)]
 fn feature_index_from_bona_piece<FT: LsFeatureSpec>(
     bp: BonaPiece,
     perspective: Color,
@@ -1121,6 +1167,36 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         #[cfg(feature = "nnue-psqt")] psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
         cache: &mut AccumulatorCacheLayerStacks<L1>,
     ) {
+        // screening の選択は refresh ごとに一度だけ。内部は const generic で単相化する。
+        if LS_FINNY_V2.load(Ordering::Relaxed) {
+            self.refresh_perspective_with_cache_impl::<true>(
+                pos,
+                perspective,
+                accumulation,
+                #[cfg(feature = "nnue-psqt")]
+                psqt_acc,
+                cache,
+            );
+        } else {
+            self.refresh_perspective_with_cache_impl::<false>(
+                pos,
+                perspective,
+                accumulation,
+                #[cfg(feature = "nnue-psqt")]
+                psqt_acc,
+                cache,
+            );
+        }
+    }
+
+    fn refresh_perspective_with_cache_impl<const V2: bool>(
+        &self,
+        pos: &Position,
+        perspective: Color,
+        accumulation: &mut [i16; L1],
+        #[cfg(feature = "nnue-psqt")] psqt_acc: &mut [i32; MAX_LAYER_STACK_BUCKETS],
+        cache: &mut AccumulatorCacheLayerStacks<L1>,
+    ) {
         if cfg!(feature = "nnue-effect-bucket") {
             accumulation.copy_from_slice(&self.biases.0);
             let mut active_indices = IndexList::new();
@@ -1160,7 +1236,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             &piece_list_owned
         };
 
-        let idx_fn = move |bp: BonaPiece| FT::feature_index(bp, perspective, king_sq);
+        let idx_fn = FT::feature_indexer::<V2>(perspective, king_sq);
 
         #[cfg(feature = "nnue-psqt")]
         if self.has_psqt {
@@ -1181,6 +1257,17 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             return;
         }
 
+        if V2 {
+            cache.refresh_or_cache_v2(
+                (king_sq, perspective),
+                piece_list,
+                &self.biases.0,
+                accumulation,
+                &self.weights,
+                idx_fn,
+            );
+            return;
+        }
         cache.refresh_or_cache(
             king_sq,
             perspective,
@@ -1657,10 +1744,39 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         perspective: Color,
         king_sq: crate::types::Square,
     ) -> bool {
+        if LS_FINNY_V2.load(Ordering::Relaxed) {
+            self.try_apply_dirty_piece_indexed::<FROM_SOURCE, true>(
+                source,
+                accumulation,
+                dirty_piece,
+                perspective,
+                king_sq,
+            )
+        } else {
+            self.try_apply_dirty_piece_indexed::<FROM_SOURCE, false>(
+                source,
+                accumulation,
+                dirty_piece,
+                perspective,
+                king_sq,
+            )
+        }
+    }
+
+    #[inline]
+    fn try_apply_dirty_piece_indexed<const FROM_SOURCE: bool, const V2: bool>(
+        &self,
+        source: Option<&[i16; L1]>,
+        accumulation: &mut [i16; L1],
+        dirty_piece: &DirtyPiece,
+        perspective: Color,
+        king_sq: crate::types::Square,
+    ) -> bool {
         if cfg!(feature = "nnue-effect-bucket") {
             return false;
         }
 
+        let indexer = FT::feature_indexer::<V2>(perspective, king_sq);
         let changed = &dirty_piece.changed_piece;
         let old_new = |idx: usize| {
             let entry = &changed[idx];
@@ -1703,10 +1819,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             1 => {
                 let (old_bp, new_bp) = old_new(0);
                 if old_bp != BonaPiece::ZERO && new_bp != BonaPiece::ZERO {
-                    let sub_index =
-                        feature_index_from_bona_piece::<FT>(old_bp, perspective, king_sq);
-                    let add_index =
-                        feature_index_from_bona_piece::<FT>(new_bp, perspective, king_sq);
+                    let sub_index = indexer(old_bp);
+                    let add_index = indexer(new_bp);
                     if FROM_SOURCE {
                         self.apply_sub_add_fused_from_source(
                             source.expect("source is present when FROM_SOURCE is true"),
@@ -1730,14 +1844,10 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     && old_bp1 != BonaPiece::ZERO
                     && new_bp1 != BonaPiece::ZERO
                 {
-                    let sub_index0 =
-                        feature_index_from_bona_piece::<FT>(old_bp0, perspective, king_sq);
-                    let add_index0 =
-                        feature_index_from_bona_piece::<FT>(new_bp0, perspective, king_sq);
-                    let sub_index1 =
-                        feature_index_from_bona_piece::<FT>(old_bp1, perspective, king_sq);
-                    let add_index1 =
-                        feature_index_from_bona_piece::<FT>(new_bp1, perspective, king_sq);
+                    let sub_index0 = indexer(old_bp0);
+                    let add_index0 = indexer(new_bp0);
+                    let sub_index1 = indexer(old_bp1);
+                    let add_index1 = indexer(new_bp1);
                     if FROM_SOURCE {
                         self.apply_double_sub_add_fused_from_source(
                             source.expect("source is present when FROM_SOURCE is true"),

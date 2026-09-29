@@ -91,9 +91,11 @@ pub(super) fn collect_piece_list_diff<FI: Fn(BonaPiece) -> usize>(
     cached: &[BonaPiece; PieceNumber::NB],
     current: &[BonaPiece; PieceNumber::NB],
     idx_fn: FI,
-) -> (IndexList<{ PieceNumber::NB }>, IndexList<{ PieceNumber::NB }>) {
-    let mut removed = [0; PieceNumber::NB];
-    let mut added = [0; PieceNumber::NB];
+    removed: &mut IndexList<{ PieceNumber::NB }>,
+    added: &mut IndexList<{ PieceNumber::NB }>,
+) {
+    let removed_ptr = removed.as_mut_ptr();
+    let added_ptr = added.as_mut_ptr();
     let mut removed_len = 0;
     let mut added_len = 0;
     let mut mask = piece_list_diff_mask(cached, current);
@@ -105,20 +107,24 @@ pub(super) fn collect_piece_list_diff<FI: Fn(BonaPiece) -> usize>(
         if cached_bp != BonaPiece::ZERO {
             let index = idx_fn(cached_bp);
             debug_assert!(u32::try_from(index).is_ok());
-            removed[removed_len] = index as u32;
+            // SAFETY: mask は40スロットだけを含み、各スロットから最大1件を書く。
+            // removed_len < PieceNumber::NB を保ち、最終リストの領域内だけへ書く。
+            unsafe { removed_ptr.add(removed_len).write(index as u32) };
             removed_len += 1;
         }
         if current_bp != BonaPiece::ZERO {
             let index = idx_fn(current_bp);
             debug_assert!(u32::try_from(index).is_ok());
-            added[added_len] = index as u32;
+            // SAFETY: removed と同様、各スロットから最大1件、容量40の範囲内へ書く。
+            unsafe { added_ptr.add(added_len).write(index as u32) };
             added_len += 1;
         }
     }
-    (
-        IndexList::from_array(removed, removed_len),
-        IndexList::from_array(added, added_len),
-    )
+    // SAFETY: 両リストの先頭 len 要素は上の走査で初期化済みで、len <= 40。
+    unsafe {
+        removed.set_len(removed_len);
+        added.set_len(added_len);
+    }
 }
 
 /// bias または cache を読み、全差分を tile 内で適用して両出力へ書く。

@@ -115,7 +115,7 @@ pub use effect_bucket_features::{
     effect_bucket_active_indices_for_sfen,
 };
 pub use feature_transformer::FeatureTransformer;
-pub use feature_transformer_layer_stacks::FeatureTransformerLayerStacks;
+pub use feature_transformer_layer_stacks::{FeatureTransformerLayerStacks, set_ls_finny_v2};
 pub use features::{
     Feature, FeatureSet, HalfKP, HalfKPFeatureSet, HalfKaHmMerged, HalfKaHmMergedFeatureSet,
     HalfKaSplit, HalfKaSplitFeatureSet, TriggerEvent,
