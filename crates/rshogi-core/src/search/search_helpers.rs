@@ -21,6 +21,7 @@ use super::{LimitsType, TimeManagement};
 // =============================================================================
 
 /// 中断チェック
+/// 実判定は通常 512 回に 1 回、`nodes` 指定時は `min(512, nodes/1024).max(1)` 回に 1 回行う。
 #[inline(always)]
 pub(super) fn check_abort(
     st: &mut SearchState,
@@ -39,6 +40,7 @@ pub(super) fn check_abort(
     check_abort_slow(st, ctx, limits, time_manager)
 }
 
+/// abort 済みのとき、または間引きカウンタが尽きたときだけ呼ばれる。
 #[cold]
 #[inline(never)]
 fn check_abort_slow(

@@ -82,8 +82,9 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 - **探索 helper の呼び出し固定費を削減**:
   停止判定 `check_abort` を inline の fast path と cold の slow path に分け、小さい helper を
-  inline にし、`pawn_history_index` の取得を指し手ループの前に移した。計測した Windows target では
-  shrink-wrap されず、従来は fast path でも callee-saved レジスタの退避を払っていた。
+  inline にし（`try_futility_pruning` も `#[inline(always)]` に変更）、`pawn_history_index` の取得を
+  指し手ループの前に移した。計測した Windows target では shrink-wrap されず、従来は fast path でも
+  callee-saved レジスタの退避を払っていた。
   探索結果は不変 (main `fd1387fe` と固定 depth 1〜18 × 5 局面で一致)。同 main 比の
   ETW search-only (LayerStacks qat1200、5 局面 × 5 秒 × ABBA) では、既定配置で NPS +1.35%
   (cycles/node −1.3%、instructions/node −1.6%、branches/node −19)、`-align-all-functions=6` で

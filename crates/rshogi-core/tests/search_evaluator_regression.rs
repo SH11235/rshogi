@@ -1,4 +1,4 @@
-//! 固定 depth の nodes / score / PV / bestmove を検証する。
+//! 固定 depth とノード上限の探索結果 (nodes / score / PV / bestmove) を検証する。
 
 use rshogi_core as core;
 
@@ -67,6 +67,7 @@ fn fixed_depth_search_regression() {
         fixed_depth(&format!("Material{}", level.value()));
     }
     material::disable_material();
+    // material と NNUE のグローバル状態を並列テストで共有しないため、同じ #[test] 内で呼ぶ。
     node_budget();
 }
 
