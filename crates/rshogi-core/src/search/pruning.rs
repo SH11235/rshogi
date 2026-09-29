@@ -347,7 +347,11 @@ where
         if use_pass {
             pos.do_pass_move();
         } else {
-            pos.do_null_move_with_prefetch(ctx.tt);
+            if st.check_info_inline {
+                pos.do_null_move_with_prefetch::<true, _>(ctx.tt);
+            } else {
+                pos.do_null_move_with_prefetch::<false, _>(ctx.tt);
+            }
         }
         nnue_push(st, DirtyPiece::new());
         let null_move = st.stack[ply as usize].current_move;

@@ -18,26 +18,29 @@ fn fixed_depth(name: &str) {
     .iter()
     .enumerate()
     {
-        let mut pos = Position::new();
-        pos.set_sfen(sfen).unwrap();
-        let mut search = Search::new_with_eval_hash(1, 1);
-        let mut limits = LimitsType::default();
-        limits.depth = 4;
-        let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
-        assert_eq!(result.depth, 4);
-        let pv = result.pv.iter().map(|mv| mv.to_usi()).collect::<Vec<_>>().join(" ");
-        let actual = format!(
-            "SEARCH_RESULT {name} {index} {} {} {} {pv}",
-            result.nodes,
-            result.score.raw(),
-            result.best_move.to_usi()
-        );
-        let prefix = format!("SEARCH_RESULT {name} {index} ");
-        let expected = include_str!("common/search-results.txt")
-            .lines()
-            .find(|line| line.starts_with(&prefix))
-            .expect("比較対象の探索結果が必要");
-        assert_eq!(actual, expected);
+        for check_info_inline in [false, true] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let mut search = Search::new_with_eval_hash(1, 1);
+            let mut limits = LimitsType::default();
+            limits.depth = 4;
+            limits.check_info_inline = check_info_inline;
+            let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+            assert_eq!(result.depth, 4);
+            let pv = result.pv.iter().map(|mv| mv.to_usi()).collect::<Vec<_>>().join(" ");
+            let actual = format!(
+                "SEARCH_RESULT {name} {index} {} {} {} {pv}",
+                result.nodes,
+                result.score.raw(),
+                result.best_move.to_usi()
+            );
+            let prefix = format!("SEARCH_RESULT {name} {index} ");
+            let expected = include_str!("common/search-results.txt")
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .expect("比較対象の探索結果が必要");
+            assert_eq!(actual, expected, "CheckInfoInline={check_info_inline}");
+        }
     }
 }
 

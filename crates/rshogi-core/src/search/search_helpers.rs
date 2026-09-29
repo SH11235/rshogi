@@ -149,7 +149,12 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
     prefetcher: &P,
     eval_hash: &EvalHash,
 ) {
-    let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, prefetcher);
+    // 設定は探索中不変。ノードごとの切替分岐はここだけで、各実体の中には残らない。
+    let dirty_piece = if st.check_info_inline {
+        pos.do_move_with_prefetch::<true, _>(mv, gives_check, prefetcher)
+    } else {
+        pos.do_move_with_prefetch::<false, _>(mv, gives_check, prefetcher)
+    };
     if eval_hash_enabled() {
         eval_hash.prefetch(pos.key());
     }

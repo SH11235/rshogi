@@ -964,6 +964,71 @@ impl Position {
         }
     }
 
+    /// 占有・玉位置・香のstep利きを共有してpinと王手升を一体更新する。
+    /// null moveでは盤面が変わらないため、親のpin情報を引き継ぐ。
+    #[inline(always)]
+    fn set_check_info_inline<const NULL_MOVE: bool>(&mut self) {
+        let occupied = self.occupied();
+        let kings = self.king_square;
+        let them = !self.side_to_move;
+        let lance_steps = [
+            lance_step_effect(Color::Black, kings[Color::Black.index()]),
+            lance_step_effect(Color::White, kings[Color::White.index()]),
+        ];
+        let by_color = self.by_color;
+        let lances = self.by_type[PieceType::Lance as usize];
+        let bishops = self.bishop_horse_bb;
+        let rooks = self.rook_dragon_bb;
+        let previous = self.cur_state().previous;
+        // 同じStateInfo slotへまとめて書く。null moveだけ親のpin情報を読む。
+        let (parent, current) = self.state_stack.split_at_mut(self.state_idx);
+        let st = &mut current[0];
+        if NULL_MOVE {
+            st.blockers_for_king = parent[previous].blockers_for_king;
+            st.pinners = parent[previous].pinners;
+        } else {
+            for c in [Color::Black, Color::White] {
+                let ksq = kings[c.index()];
+                let enemy = by_color[(!c).index()];
+                let snipers = ((lance_steps[c.index()] & lances)
+                    | (BISHOP_STEP[ksq.index()] & bishops)
+                    | (ROOK_STEP[ksq.index()] & rooks))
+                    & enemy;
+                let occ_without_snipers = occupied & !snipers;
+                let mut blockers = Bitboard::EMPTY;
+                let mut pinners = Bitboard::EMPTY;
+                for sniper_sq in snipers.iter() {
+                    let between =
+                        crate::bitboard::between_bb_aligned(ksq, sniper_sq) & occ_without_snipers;
+                    let bits = between.as_u128();
+                    if bits != 0 && bits & bits.wrapping_sub(1) == 0 {
+                        blockers |= between;
+                        if (between & enemy).is_empty() {
+                            pinners |= SQUARE_BB[sniper_sq.index()];
+                        }
+                    }
+                }
+                // rsではpinされる玉の色で格納する。
+                st.blockers_for_king[c.index()] = blockers;
+                st.pinners[c.index()] = pinners;
+            }
+        }
+
+        let ksq = kings[them.index()];
+        let rook = rook_effect(ksq, occupied);
+        let bishop = bishop_effect(ksq, occupied);
+        let king = king_effect(ksq);
+        st.check_squares[CS_IDX_PAWN] = pawn_effect(them, ksq);
+        st.check_squares[CS_IDX_LANCE] = rook & lance_steps[them.index()];
+        st.check_squares[CS_IDX_KNIGHT] = knight_effect(them, ksq);
+        st.check_squares[CS_IDX_SILVER] = silver_effect(them, ksq);
+        st.check_squares[CS_IDX_BISHOP] = bishop;
+        st.check_squares[CS_IDX_ROOK] = rook;
+        st.check_squares[CS_IDX_GOLD] = gold_effect(them, ksq);
+        st.check_squares[CS_IDX_HORSE] = bishop | king;
+        st.check_squares[CS_IDX_DRAGON] = rook | king;
+    }
+
     // ========== パス権 ==========
 
     /// 指定した手番のパス権残数を取得
@@ -1068,10 +1133,10 @@ impl Position {
             return self.do_pass_move();
         }
         let noop = NoPrefetch;
-        self.do_move_with_prefetch(m, gives_check, &noop)
+        self.do_move_with_prefetch::<false, _>(m, gives_check, &noop)
     }
 
-    pub(crate) fn do_move_with_prefetch<P: TtPrefetch>(
+    pub(crate) fn do_move_with_prefetch<const CHECK_INFO_INLINE: bool, P: TtPrefetch>(
         &mut self,
         m: Move,
         gives_check: bool,
@@ -1088,9 +1153,11 @@ impl Position {
         let update_board_effects = Self::should_update_board_effects();
 
         // 現在の占有とblockers/pinners、玉位置を退避（差分更新で利用）
-        let prev_blockers = self.cur_state().blockers_for_king;
-        let prev_pinners = self.cur_state().pinners;
-        let prev_king_sq = self.king_square;
+        let (prev_blockers, prev_pinners, prev_king_sq) = if CHECK_INFO_INLINE {
+            ([Bitboard::EMPTY; 2], [Bitboard::EMPTY; 2], [Square::SQ_11; 2])
+        } else {
+            (self.cur_state().blockers_for_king, self.cur_state().pinners, self.king_square)
+        };
         let prev_check_square = if gives_check {
             let moved_pt = if m.is_drop() {
                 m.drop_piece_type()
@@ -1338,7 +1405,11 @@ impl Position {
             // - fromがblockersに含まれている
             // - from, to, ksq が同一直線上にない（aligned でない）場合のみ開き王手
             if let Some(from_sq) = moved_from {
-                let their_prev_blockers = prev_blockers[them.index()];
+                let their_prev_blockers = if CHECK_INFO_INLINE {
+                    self.state_stack[self.cur_state().previous].blockers_for_king[them.index()]
+                } else {
+                    prev_blockers[them.index()]
+                };
                 if their_prev_blockers.contains(from_sq)
                     && !crate::mate::aligned(from_sq, moved_to, ksq)
                     && let Some(dir) = crate::bitboard::direct_of(ksq, from_sq)
@@ -1396,8 +1467,11 @@ impl Position {
         // 9. 繰り返し情報の更新
         self.update_repetition_info();
 
-        // 10. pin情報を差分更新（王との直線/斜め上の駒が動いた場合のみ再計算）
-        {
+        // 10. 探索開始時に選んだconst実体でpinと王手升を更新する。
+        if CHECK_INFO_INLINE {
+            self.set_check_info_inline::<false>();
+        } else {
+            // 王との直線/斜め上の駒が動いた場合のみ再計算する。
             let occ_after = self.occupied();
             let changed_sqs: [Option<Square>; 2] = [moved_from, Some(moved_to)];
 
@@ -1428,10 +1502,8 @@ impl Position {
 
                 self.compute_blockers_and_pinners(c, occ_after, Bitboard::EMPTY);
             }
+            self.update_check_squares();
         }
-
-        // 11. 王手マスの更新
-        self.update_check_squares();
 
         #[cfg(debug_assertions)]
         if update_board_effects {
@@ -1585,10 +1657,13 @@ impl Position {
     /// null moveを実行
     pub fn do_null_move(&mut self) {
         let noop = NoPrefetch;
-        self.do_null_move_with_prefetch(&noop);
+        self.do_null_move_with_prefetch::<false, _>(&noop);
     }
 
-    pub(crate) fn do_null_move_with_prefetch<P: TtPrefetch>(&mut self, prefetcher: &P) {
+    pub(crate) fn do_null_move_with_prefetch<const CHECK_INFO_INLINE: bool, P: TtPrefetch>(
+        &mut self,
+        prefetcher: &P,
+    ) {
         // update_repetition_info を呼ばないため、repetition 系フィールドの初期化は
         // partial_clone の zero クリアに依存している。in-place 化する場合は要注意。
         let mut new_state = self.cur_state().partial_clone();
@@ -1609,8 +1684,12 @@ impl Position {
         // null move後は王手されていないはず
         self.cur_state_mut().checkers = Bitboard::EMPTY;
 
-        self.update_blockers_and_pinners();
-        self.update_check_squares();
+        if CHECK_INFO_INLINE {
+            self.set_check_info_inline::<true>();
+        } else {
+            self.update_blockers_and_pinners();
+            self.update_check_squares();
+        }
     }
 
     /// null moveを戻す
@@ -3878,6 +3957,116 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn check_info_inline_handles_collinear_snipers() {
+        // 63bit境界の両側で、複数sniper・両色blocker・両手番を必ず通す。
+        for file in ["1", "8"] {
+            for blocker in ["P", "p"] {
+                for side in ["b", "w"] {
+                    let rank = |piece: &str| {
+                        if file == "1" {
+                            format!("8{piece}")
+                        } else {
+                            format!("1{piece}7")
+                        }
+                    };
+                    let sfen = format!(
+                        "{}/9/{}/9/{}/9/{}/9/{} {side} - 1",
+                        rank("k"),
+                        rank("r"),
+                        rank("r"),
+                        rank(blocker),
+                        rank("K")
+                    );
+                    let mut legacy = Position::new();
+                    legacy.set_sfen(&sfen).unwrap();
+                    let mut inline = legacy.clone();
+                    inline.set_check_info_inline::<false>();
+                    assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline), "{sfen}");
+                    assert_eq!(inline.state().blockers_for_king[Color::Black.index()].count(), 1);
+                    assert_eq!(
+                        inline.state().pinners[Color::Black.index()].count(),
+                        if blocker == "P" { 2 } else { 0 }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn check_info_inline_matches_legacy_playouts() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME};
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        const SEED: u64 = 0x00C1_1C12;
+        let mut counts = [0usize; 5]; // 通常手・駒打ち・成り・王手・null move
+        for game in 0..120 {
+            let mut rng = Xoshiro256PlusPlus::seed_from_u64(SEED + game);
+            let mut legacy = Position::new();
+            match game % 3 {
+                0 => legacy.set_hirate(),
+                1 => legacy.set_sfen(PERFT_MATSURI).unwrap(),
+                _ => legacy.set_sfen(PERFT_MIDGAME).unwrap(),
+            }
+            let mut inline = legacy.clone();
+            let mut moves = Vec::new();
+            for ply in 0..400 {
+                let mut legal = MoveList::new();
+                generate_legal_all(&legacy, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                let mv = legal.at(rng.random_range(0..legal.len()));
+                let gives_check = legacy.gives_check(mv);
+                assert_eq!(gives_check, inline.gives_check(mv));
+                counts[0] += 1;
+                counts[1] += usize::from(mv.is_drop());
+                counts[2] += usize::from(mv.is_promote());
+                counts[3] += usize::from(gives_check);
+                legacy.do_move_with_prefetch::<false, _>(mv, gives_check, &NoPrefetch);
+                inline.do_move_with_prefetch::<true, _>(mv, gives_check, &NoPrefetch);
+                moves.push(mv);
+                assert_eq!(
+                    RestoredState::of(&legacy),
+                    RestoredState::of(&inline),
+                    "seed={SEED:#x} game={game} ply={ply} mv={mv:?}"
+                );
+
+                if !legacy.in_check() && ply % 7 == 0 {
+                    counts[4] += 1;
+                    legacy.do_null_move_with_prefetch::<false, _>(&NoPrefetch);
+                    inline.do_null_move_with_prefetch::<true, _>(&NoPrefetch);
+                    assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline));
+                    // null move後の実手とslot再利用も比較する。
+                    let mut replies = MoveList::new();
+                    generate_legal_all(&legacy, &mut replies);
+                    if !replies.is_empty() {
+                        let reply = replies.at(rng.random_range(0..replies.len()));
+                        let check = legacy.gives_check(reply);
+                        legacy.do_move_with_prefetch::<false, _>(reply, check, &NoPrefetch);
+                        inline.do_move_with_prefetch::<true, _>(reply, check, &NoPrefetch);
+                        assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline));
+                        legacy.undo_move(reply);
+                        inline.undo_move(reply);
+                    }
+                    legacy.undo_null_move();
+                    inline.undo_null_move();
+                    assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline));
+                }
+            }
+            for mv in moves.into_iter().rev() {
+                legacy.undo_move(mv);
+                inline.undo_move(mv);
+                assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline));
+            }
+        }
+        assert!(counts[0] >= 30_000, "比較した通常手が不足: {counts:?}");
+        assert!(counts[1..].iter().all(|&count| count > 100), "網羅不足: {counts:?}");
+        eprintln!("check info比較 [通常手, 駒打ち, 成り, 王手, null]: {counts:?}");
     }
 
     /// ランダムプレイアウトで到達した全局面（最終手の後も含む）で不変条件を確認し、

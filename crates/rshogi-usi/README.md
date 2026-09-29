@@ -56,6 +56,19 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 
+### pin・王手升更新の比較用オプション
+
+隠し bool オプション `CheckInfoInline`（既定 `false`）は `usi` の一覧には出ないが、
+`setoption name CheckInfoInline value true` で有効にできる。次の `go` 開始時に
+全探索スレッドへ設定を渡し、探索中は固定する。
+
+- `false`: 色ごとの差分判定と別関数によるpin・王手升の更新。
+- `true`: 両色のpinを無条件に計算し、王手升と一体化する。null moveは親のpinをコピーする。
+
+`between_bb` の算術計算は両経路共通。この切替は算術化後の差分更新と一体更新を比較する。
+通常の `position` による棋譜再生やPASS手は従来の更新経路を使う。
+速度の採否は同一バイナリ・同一局面・同一探索条件で別途計測する。
+
 ## Allocation diagnostics
 
 Build with `cargo build --profile production -p rshogi-usi --features allocation-stats`

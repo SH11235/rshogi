@@ -516,7 +516,44 @@ pub fn dragon_effect(sq: Square, occupied: Bitboard) -> Bitboard {
 }
 
 /// 2マス間のBitboard（両端を含まない）
+#[inline]
 pub fn between_bb(sq1: Square, sq2: Square) -> Bitboard {
+    let file_diff = sq1.index() as i32 / 9 - sq2.index() as i32 / 9;
+    let rank_diff = sq1.index() as i32 % 9 - sq2.index() as i32 % 9;
+    if file_diff != 0 && rank_diff != 0 && file_diff.abs() != rank_diff.abs() {
+        return Bitboard::EMPTY;
+    }
+    between_bb_aligned(sq1, sq2)
+}
+
+/// 同じ筋・段・斜線上にある2升の間。呼び出し側で整列を保証する。
+#[inline(always)]
+pub(crate) fn between_bb_aligned(sq1: Square, sq2: Square) -> Bitboard {
+    let lo = sq1.index().min(sq2.index());
+    let hi = sq1.index().max(sq2.index());
+    let file_lo = lo / 9;
+    let file_hi = hi / 9;
+    let rank_lo = lo % 9;
+    let rank_hi = hi % 9;
+
+    // bit 0 から一定間隔で立つ定数を選ぶ。升対の表や実行時の除算は不要。
+    // u128::MAX / (2^delta - 1) を、最下位bitが1になるように揃えている。
+    let (pattern, delta) = if file_lo == file_hi {
+        (u128::MAX, 1)
+    } else if rank_lo == rank_hi {
+        ((u128::MAX / ((1 << 9) - 1)) >> (128 % 9), 9)
+    } else if rank_hi > rank_lo {
+        ((u128::MAX / ((1 << 10) - 1)) >> (128 % 10), 10)
+    } else {
+        (u128::MAX / ((1 << 8) - 1), 8)
+    };
+    // lo + delta <= 90、hi <= 80。同一升も上限マスクによって空になる。
+    let dense = (pattern << (lo + delta)) & ((1u128 << hi) - 1);
+    Bitboard::new(dense as u64 & 0x7fff_ffff_ffff_ffff, (dense >> 63) as u64)
+}
+
+#[cfg(test)]
+fn between_bb_reference(sq1: Square, sq2: Square) -> Bitboard {
     let idx1 = sq1.index() as i32;
     let idx2 = sq2.index() as i32;
 
@@ -783,6 +820,15 @@ mod tests {
         let sq55 = Square::new(File::File5, Rank::Rank5);
         let bb = dragon_effect(sq55, Bitboard::EMPTY);
         assert_eq!(bb.count(), 20);
+    }
+
+    #[test]
+    fn between_arithmetic_matches_all_square_pairs() {
+        for a in Square::all() {
+            for b in Square::all() {
+                assert_eq!(between_bb(a, b), between_bb_reference(a, b), "{a:?} {b:?}");
+            }
+        }
     }
 
     #[test]
