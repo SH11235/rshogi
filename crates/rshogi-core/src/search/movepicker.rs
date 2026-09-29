@@ -846,7 +846,7 @@ fn partial_insertion_sort(moves: &mut [ExtMove], end: usize, limit: i32) -> usiz
 }
 
 /// 駒の価値（MVV用）
-#[inline]
+#[inline(always)]
 pub(crate) fn piece_value(pc: Piece) -> i32 {
     if pc.is_none() {
         return 0;

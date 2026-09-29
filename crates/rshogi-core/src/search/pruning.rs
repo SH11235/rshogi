@@ -25,7 +25,9 @@ use super::types::{NodeType, value_to_tt};
 use super::{LimitsType, MovePicker, TimeManagement};
 
 /// Futility pruning
-#[inline]
+///
+/// bool 群をレジスタ上で扱えるよう、呼び出し元に展開する。
+#[inline(always)]
 pub(super) fn try_futility_pruning(
     params: FutilityParams,
     tune_params: &super::SearchTuneParams,

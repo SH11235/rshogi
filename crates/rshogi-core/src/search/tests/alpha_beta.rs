@@ -11,6 +11,35 @@ use crate::search::{LimitsType, SearchTuneParams};
 use crate::tt::TranspositionTable;
 
 #[test]
+fn test_abort_countdown_and_sticky_stop() {
+    use crate::search::TimeManagement;
+    use crate::search::alpha_beta::SearchState;
+    use crate::search::search_helpers::check_abort;
+    use std::sync::atomic::AtomicBool;
+
+    let worker = SearchWorker::new(
+        Arc::new(TranspositionTable::new(1)),
+        Arc::new(EvalHash::new(1)),
+        0,
+        0,
+        SearchTuneParams::default(),
+    );
+    let ctx = worker.create_context();
+    let mut state = SearchState::new();
+    let mut tm =
+        TimeManagement::new(Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(false)));
+    let limits = LimitsType::new();
+    state.calls_cnt = 2;
+    assert!(!check_abort(&mut state, &ctx, &limits, &mut tm));
+    assert_eq!(state.calls_cnt, 1);
+    assert!(check_abort(&mut state, &ctx, &limits, &mut tm));
+    assert_eq!(state.calls_cnt, 512);
+    assert!(state.abort);
+    assert!(check_abort(&mut state, &ctx, &limits, &mut tm));
+    assert_eq!(state.calls_cnt, 512);
+}
+
+#[test]
 fn test_node_budget_respects_ponder_and_external_stop() {
     use crate::search::{TimeManagement, alpha_beta::SearchState};
     use crate::types::Color;
