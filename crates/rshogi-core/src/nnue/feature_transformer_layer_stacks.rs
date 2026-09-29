@@ -257,6 +257,28 @@ fn psqt_add_or_sub<const ADD: bool>(
 }
 
 impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
+    /// 入力済み accumulator の出力変換テスト用。refresh / update 用の重みは持たない。
+    #[cfg(test)]
+    pub(crate) fn for_output_transform_tests() -> Self {
+        Self {
+            biases: Aligned([0; L1]),
+            weights: AlignedBox::new_zeroed(0).into(),
+            #[cfg(feature = "nnue-psqt")]
+            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "nnue-psqt")]
+            psqt_num_buckets: 0,
+            #[cfg(feature = "nnue-psqt")]
+            psqt_weights: AlignedBox::new_zeroed(0).into(),
+            #[cfg(feature = "nnue-psqt")]
+            has_psqt: false,
+            #[cfg(feature = "nnue-threat")]
+            threat_weights: AlignedBox::new_zeroed(0).into(),
+            #[cfg(feature = "nnue-threat")]
+            has_threat: false,
+            _ft: PhantomData,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_accumulator_tests() -> Self {
         Self {

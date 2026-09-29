@@ -16,6 +16,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### 互換性のない変更と移行手順
 
+- **`LayerStackBucket::l1` を非公開化**: 融合カーネル用の重みコピーを編集後も同期するため、
+  読み取りは `bucket.l1` から `bucket.l1()` に、書き換えは `bucket.edit_l1(|l1| ...)` に変更すること。
+  構造体リテラルでの構築は `LayerStackBucket::from_layers(l1, l2, output)` に置き換える。
+
 - **探索開始時に NNUE の重み・accumulator・Finny cache を型付き評価器へ束ねる**:
   評価ごとのグローバル network の読み取りロック・`Arc` clone と、net / stack の
   アーキテクチャ照合を探索経路から除去し、LayerStacks の生ポインタも廃止した。
@@ -60,6 +64,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `movenumber` は従来どおり対局内の手数。
 
 ### USI エンジン / 探索
+
+- **LayerStacks 1536×16 の FT 出力変換と L1 を VNNI カーネルに融合**:
+  AVX-512 VNNI build の静的 LayerStacks で中間バッファを介さず計算する。探索結果は不変
+  （固定 depth 1〜18 × 5 局面で nodes / score / PV / bestmove が main `9de40f85` と一致）。
+  同 base 比の ETW search-only（5 局面 × 5 秒 × ABBA）は、既定配置で NPS +3.93%
+  （cycles/node −3.4%）、`-align-all-functions=6` で +4.03%（−3.4%）、`=5` で +1.39%（−0.8%）。
+  詳細は [計測・設計記録](docs/performance/ls-l1-kernels.md) を参照。
 
 - **pin と王手升を `do_move` の末尾で両色まとめて計算する**:
   色ごとの差分判定と out-of-line 呼び出しをやめ、pin 計算で使う `between_bb` を表参照もループも
