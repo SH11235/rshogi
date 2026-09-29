@@ -72,6 +72,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   （cycles/node −3.4%）、`-align-all-functions=6` で +4.03%（−3.4%）、`=5` で +1.39%（−0.8%）。
   詳細は [計測・設計記録](docs/performance/ls-l1-kernels.md) を参照。
 
+- **pin と王手升を `do_move` の末尾で両色まとめて計算する**:
+  色ごとの差分判定と out-of-line 呼び出しをやめ、pin 計算で使う `between_bb` を表参照もループも
+  使わない算術で求める。null move と PASS は親の pin 情報を引き継ぐ。
+  探索結果は変わらず、固定 depth 1〜18 × 5 局面で base (`9de40f85`) との一致を確認した。
+  ETW search-only 計測で base 比の NPS は既定配置で +3.98%、`-align-all-functions=6` で +3.05%、
+  `-align-all-functions=5` で +0.94% 改善した。
+
 - **NNUE のロードと探索の互換性、および連続探索の準備コストを修正**:
   固定 HalfKX edition でも従来ロードできた他の FT を引き続き探索できるようにし、
   ロード時と探索開始時の対応判定を統一した。同じ評価関数での連続探索では
