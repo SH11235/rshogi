@@ -88,13 +88,24 @@ fn compute_layer_stacks_bucket_index(
     side_to_move: Color,
     num_buckets: usize,
 ) -> usize {
+    compute_layer_stacks_bucket_index_with_q16(pos, side_to_move, num_buckets, || {
+        super::progress_q16::configured_progress_q16_bucket(pos, num_buckets)
+    })
+}
+
+/// bucket mode を一度だけ読み、Q16 の場合だけ指定した計算経路を使う。
+#[inline]
+pub(crate) fn compute_layer_stacks_bucket_index_with_q16(
+    pos: &Position,
+    side_to_move: Color,
+    num_buckets: usize,
+    q16_bucket: impl FnOnce() -> usize,
+) -> usize {
     match get_layer_stack_bucket_mode() {
         LayerStackBucketMode::KingRank9 => {
             compute_layer_stack_kingrank9_bucket_index(pos, side_to_move, num_buckets)
         }
-        LayerStackBucketMode::ProgressKPAbsQ16 => {
-            super::progress_q16::configured_progress_q16_bucket(pos, num_buckets)
-        }
+        LayerStackBucketMode::ProgressKPAbsQ16 => q16_bucket(),
         LayerStackBucketMode::ProgressKPAbs => {
             let weights = get_layer_stack_progress_kpabs_weights();
             let routing_buckets = get_layer_stack_progress_buckets()
@@ -1318,12 +1329,33 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         }
     }
 
-    /// 評価値を計算 (stack の L1 と一致する variant 上で実行)。
+    /// 評価値を計算。
     #[cfg(feature = "layerstack-arch")]
     pub fn evaluate(
         &self,
         pos: &Position,
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+    ) -> Value {
+        self.evaluate_impl(pos, stack, None)
+    }
+
+    #[cfg(feature = "layerstack-arch")]
+    fn evaluate_with_bucket(
+        &self,
+        pos: &Position,
+        stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+        bucket: usize,
+    ) -> Value {
+        self.evaluate_impl(pos, stack, Some(bucket))
+    }
+
+    /// 評価値を計算 (stack の L1 と一致する variant 上で実行)。
+    #[cfg(feature = "layerstack-arch")]
+    fn evaluate_impl(
+        &self,
+        pos: &Position,
+        stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+        bucket: Option<usize>,
     ) -> Value {
         // (self, stack) tuple match で同じ L1 variant の組のみ matched arm を持つ。
         // 2 サイズ以上 enable のときだけ cross-pair の不一致 arm が到達可能で、
@@ -1338,37 +1370,58 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             (
                 Self::L1536x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-1536x32x32")]
             (
                 Self::L1536x32x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-768x16x32")]
             (
                 Self::L768x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-768x8x32")]
             (
                 Self::L768x8x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x8x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-512x16x32")]
             (
                 Self::L512x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-1024x16x32")]
             (
                 Self::L1024x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-3072x16x32")]
             (
                 Self::L3072x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(any(
                 all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x32x32"),
                 all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x16x32"),
@@ -2270,6 +2323,17 @@ impl LayerStacksNetwork {
         ls_match_ft!(self, by_ft => by_ft.evaluate(pos, stack))
     }
 
+    /// 計算済みの routing bucket を直接使って評価する。
+    #[cfg(feature = "layerstack-arch")]
+    pub(crate) fn evaluate_with_bucket(
+        &self,
+        pos: &Position,
+        stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+        bucket: usize,
+    ) -> Value {
+        ls_match_ft!(self, by_ft => by_ft.evaluate_with_bucket(pos, stack, bucket))
+    }
+
     /// アキュムレータを更新 (キャッシュ対応)
     #[cfg(feature = "layerstack-arch")]
     pub fn update_accumulator(
@@ -2402,6 +2466,48 @@ mod tests {
         feature = "ft-halfka_hm_merged"
     ))]
     use crate::position::{Position, SFEN_HIRATE};
+
+    #[cfg(feature = "layerstack-arch")]
+    #[test]
+    fn test_bucket_routing_only_calls_q16_for_q16_mode() {
+        use super::super::network::{
+            configure_layer_stack_routing, layer_stack_routing_test_guard,
+            reset_layer_stack_progress_buckets, reset_layer_stack_progress_kpabs_weights,
+        };
+
+        let routing_guard = layer_stack_routing_test_guard();
+        let mut pos = Position::new();
+        pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
+        reset_layer_stack_progress_kpabs_weights();
+
+        for (mode, count, expected) in [
+            (LayerStackBucketMode::KingRank9, None, 8),
+            (LayerStackBucketMode::ProgressKPAbs, Some(4), 2),
+            (LayerStackBucketMode::ProgressKPAbs, Some(1), 0),
+        ] {
+            configure_layer_stack_routing(mode, 9, count).unwrap();
+            assert_eq!(
+                compute_layer_stacks_bucket_index_with_q16(&pos, pos.side_to_move(), 9, || {
+                    panic!("Q16 routing must not run for {mode:?}")
+                }),
+                expected
+            );
+            assert_eq!(compute_layer_stacks_bucket_index(&pos, pos.side_to_move(), 9), expected);
+        }
+
+        configure_layer_stack_routing(LayerStackBucketMode::ProgressKPAbsQ16, 9, Some(4)).unwrap();
+        let mut calls = 0;
+        assert_eq!(
+            compute_layer_stacks_bucket_index_with_q16(&pos, pos.side_to_move(), 9, || {
+                calls += 1;
+                3
+            }),
+            3
+        );
+        assert_eq!(calls, 1);
+        reset_layer_stack_progress_buckets();
+        drop(routing_guard);
+    }
 
     #[cfg(feature = "layerstack-arch")]
     #[test]

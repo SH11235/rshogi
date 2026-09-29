@@ -351,6 +351,12 @@ pub struct StackEntryLayerStacks<const L1: usize> {
     pub dirty_piece: DirtyPiece,
     /// 直前のエントリインデックス（差分計算用）
     pub previous: Option<usize>,
+    /// Q16 の視点別部分和。f32 の差分キャッシュとは独立。
+    #[cfg(feature = "layerstack-arch")]
+    pub progress_q16: [i64; Color::NUM],
+    /// 計算済み視点のビットマスク（bit 0: 先手、bit 1: 後手）。
+    #[cfg(feature = "layerstack-arch")]
+    pub progress_q16_valid: u8,
     /// progresskpabs の重み付き和（差分更新用）
     #[cfg(feature = "nnue-progress-diff")]
     pub progress_sum: f32,
@@ -365,6 +371,10 @@ impl<const L1: usize> StackEntryLayerStacks<L1> {
             accumulator: AccumulatorLayerStacks::new(),
             dirty_piece: DirtyPiece::default(),
             previous: None,
+            #[cfg(feature = "layerstack-arch")]
+            progress_q16: [0; Color::NUM],
+            #[cfg(feature = "layerstack-arch")]
+            progress_q16_valid: 0,
             #[cfg(feature = "nnue-progress-diff")]
             progress_sum: 0.0,
             #[cfg(feature = "nnue-progress-diff")]
@@ -389,6 +399,9 @@ pub struct AccumulatorStackLayerStacks<const L1: usize> {
     entries: Box<[StackEntryLayerStacks<L1>]>,
     /// 現在のインデックス
     current: usize,
+    /// 探索開始時の係数を所有し、評価中のロック取得と Arc clone を避ける。
+    #[cfg(feature = "layerstack-arch")]
+    progress_q16_weights: Option<std::sync::Arc<[i32]>>,
 }
 
 impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
@@ -402,6 +415,8 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         Self {
             entries: entries.into_boxed_slice(),
             current: 0,
+            #[cfg(feature = "layerstack-arch")]
+            progress_q16_weights: super::progress_q16::snapshot_weights(),
         }
     }
 
@@ -449,6 +464,10 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         entry.accumulator.computed_accumulation = false;
         entry.accumulator.computed_score = false;
         entry.dirty_piece = DirtyPiece::default();
+        #[cfg(feature = "layerstack-arch")]
+        {
+            entry.progress_q16_valid = 0;
+        }
         #[cfg(feature = "nnue-progress-diff")]
         {
             entry.computed_progress = false;
@@ -490,10 +509,79 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         self.entries[0].accumulator.computed_accumulation = false;
         self.entries[0].accumulator.computed_score = false;
         self.entries[0].previous = None;
+        #[cfg(feature = "layerstack-arch")]
+        {
+            self.entries[0].progress_q16_valid = 0;
+            self.progress_q16_weights = super::progress_q16::snapshot_weights();
+        }
         #[cfg(feature = "nnue-progress-diff")]
         {
             self.entries[0].computed_progress = false;
         }
+    }
+
+    /// Q16 の部分和を視点別に遅延更新し、同じ整数閾値で bucket を選ぶ。
+    #[cfg(feature = "layerstack-arch")]
+    pub(crate) fn ensure_progress_q16_bucket(
+        &mut self,
+        pos: &crate::position::Position,
+        stored_buckets: usize,
+    ) -> usize {
+        use super::progress_q16::{
+            compute_half, half_delta, progress_q16_sum_to_bucket, routing_bucket_count, weight_row,
+        };
+        const MAX_Q16_PATH: usize = 8;
+        let count = routing_bucket_count(stored_buckets);
+        if count == 1 {
+            return 0;
+        }
+        let weights = self
+            .progress_q16_weights
+            .as_deref()
+            .expect("LayerStacks Q16 coefficients are not configured");
+        for perspective in [Color::Black, Color::White] {
+            let p = perspective.index();
+            let mask = 1 << p;
+            if self.entries[self.current].progress_q16_valid & mask != 0 {
+                continue;
+            }
+            let row = weight_row(pos, perspective, weights);
+            let mut path = [0; MAX_Q16_PATH];
+            let mut length = 0;
+            let mut index = self.current;
+            let base = loop {
+                let entry = &self.entries[index];
+                if entry.progress_q16_valid & mask != 0 {
+                    break Some(entry.progress_q16[p]);
+                }
+                if length == MAX_Q16_PATH || entry.dirty_piece.king_moved[p] {
+                    break None;
+                }
+                let Some(previous) = entry.previous else {
+                    break None;
+                };
+                if previous >= index {
+                    break None;
+                }
+                path[length] = index;
+                length += 1;
+                index = previous;
+            };
+            if let Some(mut sum) = base {
+                // この視点の玉位置は経路全体で同じ。途中の局面も再利用可能にする。
+                for &index in path[..length].iter().rev() {
+                    let entry = &mut self.entries[index];
+                    sum += half_delta(&entry.dirty_piece, perspective, row);
+                    entry.progress_q16[p] = sum;
+                    entry.progress_q16_valid |= mask;
+                }
+            } else {
+                let entry = &mut self.entries[self.current];
+                entry.progress_q16[p] = compute_half(pos, perspective, row);
+                entry.progress_q16_valid |= mask;
+            }
+        }
+        progress_q16_sum_to_bucket(self.entries[self.current].progress_q16.iter().sum(), count)
     }
 
     /// 祖先を辿って使用可能なアキュムレータを探す
@@ -657,6 +745,15 @@ macro_rules! ls_match {
 }
 
 impl LayerStacksAccStack {
+    #[cfg(feature = "layerstack-arch")]
+    pub(crate) fn ensure_progress_q16_bucket(
+        &mut self,
+        pos: &crate::position::Position,
+        stored_buckets: usize,
+    ) -> usize {
+        ls_match!(self, s => s.ensure_progress_q16_bucket(pos, stored_buckets))
+    }
+
     /// L1 サイズを取得
     pub fn l1_size(&self) -> usize {
         match self {
