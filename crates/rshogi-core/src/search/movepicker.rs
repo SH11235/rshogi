@@ -175,7 +175,7 @@ pub struct MovePicker {
     end_bad_captures: usize,
     end_captures: usize,
     end_generated: usize,
-    /// partial_insertion_sort の sorted 領域末尾位置（未使用だが YO 構造保持用）
+    /// partial_insertion_sort の sorted 領域の排他的終端
     end_good_quiets: usize,
 }
 
@@ -344,6 +344,36 @@ impl MovePicker {
         self.stage
     }
 
+    /// 同じ段階のソート済み範囲から、次に返す手を副作用なしで覗く。
+    ///
+    /// 段階の遷移や指し手生成は行わない。GoodCapture / ProbCut は SEE による
+    /// 選別が未確定なので None とし、SEE の二重計算を避ける。
+    #[inline]
+    pub fn peek_next(&self) -> Option<Move> {
+        let end = match self.stage {
+            Stage::GoodQuiet | Stage::BadQuiet if !self.skip_quiets => {
+                self.end_cur.min(self.end_good_quiets)
+            }
+            Stage::BadCapture | Stage::Evasion | Stage::QCapture => self.end_cur,
+            _ => return None,
+        };
+        for index in self.cur..end {
+            let ext = self.moves.get(index);
+            if ext.mv == self.tt_move {
+                continue;
+            }
+            let selected = match self.stage {
+                Stage::GoodQuiet => ext.value > -14000,
+                Stage::BadQuiet => ext.value <= -14000,
+                _ => true,
+            };
+            if selected {
+                return Some(ext.mv);
+            }
+        }
+        None
+    }
+
     /// 次の指し手を返す
     ///
     /// 指し手が尽きたら `Move::NONE` を返す。
@@ -459,8 +489,9 @@ impl MovePicker {
                             quiet_count,
                             limit,
                         );
-                        // sorted 領域末尾位置（現在は実運用で未参照）
-                        self.end_good_quiets = self.end_captures + sorted_end;
+                        // peek は順序が確定した sorted 領域に限定する。
+                        self.end_good_quiets =
+                            self.end_captures + if quiet_count == 0 { 0 } else { sorted_end + 1 };
                     } else {
                         self.end_good_quiets = self.end_captures;
                     }
@@ -882,6 +913,90 @@ mod tests {
             mv.is_some().then_some(mv)
         })
         .collect()
+    }
+
+    #[test]
+    fn peek_preserves_order_and_stage() {
+        use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME};
+        let history = HistoryTables::new_boxed();
+        let keys = [ContHistKey::null_sentinel(); 6];
+        let mut peeked = 0;
+        for sfen in [
+            crate::position::SFEN_HIRATE,
+            PERFT_MATSURI,
+            PERFT_MIDGAME,
+            "k8/9/9/9/9/9/9/4r4/4K4 b - 1",
+        ] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let tt = MovePicker::new(&pos, Move::NONE, 4, 0, keys, true).next_move(&pos, &history);
+            for depth in [0, 1, 4] {
+                for skip_after in [None, Some(2)] {
+                    let mut picker = MovePicker::new(&pos, tt, depth, 0, keys, true);
+                    let mut control = MovePicker::new(&pos, tt, depth, 0, keys, true);
+                    assert_eq!(picker.peek_next(), None);
+                    for index in 0.. {
+                        if skip_after == Some(index) {
+                            picker.skip_quiets();
+                            control.skip_quiets();
+                        }
+                        let stage = picker.stage();
+                        let next = picker.peek_next();
+                        assert_eq!(picker.peek_next(), next);
+                        assert_eq!(picker.stage(), stage);
+                        let actual = picker.next_move(&pos, &history);
+                        assert_eq!(actual, control.next_move(&pos, &history));
+                        if let Some(next) = next {
+                            peeked += 1;
+                            assert_eq!(next, actual);
+                            assert_eq!(picker.stage(), stage);
+                        }
+                        if actual.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(peeked > 0);
+    }
+
+    #[test]
+    fn peek_stops_at_unsorted_quiets_and_skips_tt() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let history = HistoryTables::new_boxed();
+        let mut picker =
+            MovePicker::new(&pos, Move::NONE, 1, 0, [ContHistKey::null_sentinel(); 6], false);
+        picker.next_move(&pos, &history);
+        assert_eq!(picker.stage(), Stage::GoodQuiet);
+        let next = picker.moves.get(picker.cur).mv;
+        picker.tt_move = next;
+        assert_ne!(picker.peek_next(), Some(next));
+        picker.end_good_quiets = picker.cur;
+        assert_eq!(picker.peek_next(), None);
+        picker.stage = Stage::BadQuiet;
+        assert_eq!(picker.peek_next(), None);
+        picker.stage = Stage::GoodCapture;
+        assert_eq!(picker.peek_next(), None);
+    }
+
+    #[test]
+    fn peek_includes_last_sorted_quiet() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let history = HistoryTables::new_boxed();
+        let mut picker =
+            MovePicker::new(&pos, Move::NONE, 4, 0, [ContHistKey::null_sentinel(); 6], false);
+        picker.next_move(&pos, &history);
+        assert_eq!(picker.stage(), Stage::GoodQuiet);
+        assert_eq!(picker.end_good_quiets, picker.end_cur);
+        while picker.cur < picker.end_cur {
+            let next = picker.peek_next().expect("ソート済み quiet は末尾まで先読みできる");
+            assert_eq!(picker.next_move(&pos, &history), next);
+        }
+        assert_eq!(picker.peek_next(), None);
+        assert_eq!(picker.next_move(&pos, &history), Move::NONE);
     }
 
     #[test]

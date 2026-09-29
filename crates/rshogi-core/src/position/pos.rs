@@ -537,6 +537,46 @@ impl Position {
         self.cur_state().key()
     }
 
+    /// 盤面を変更せず、指し手の後に TT が使う局面キーを求める。
+    ///
+    /// `m` は現局面の擬似合法手、または実行可能な PASS であること。
+    /// NONE・NULL・宣言勝ちの手は受け付けない。
+    #[inline]
+    pub fn key_after(&self, m: Move) -> u64 {
+        let us = self.side_to_move;
+        let st = self.cur_state();
+        let mut board = st.board_key ^ zobrist_side();
+        let mut hand = st.hand_key;
+        if m.is_pass() {
+            debug_assert!(self.can_pass());
+            let black = st.get_pass_rights(Color::Black);
+            let white = st.get_pass_rights(Color::White);
+            board ^= zobrist_pass_rights(black, white)
+                ^ zobrist_pass_rights(
+                    black - u8::from(us == Color::Black),
+                    white - u8::from(us == Color::White),
+                );
+        } else if m.is_drop() {
+            let pt = m.drop_piece_type();
+            board ^= zobrist_psq(Piece::new(us, pt), m.to());
+            hand = hand.wrapping_sub(zobrist_hand(us, pt));
+        } else {
+            let pc = self.piece_on(m.from());
+            let after = if m.is_promote() {
+                pc.promote().expect("成れない駒の成り手")
+            } else {
+                pc
+            };
+            board ^= zobrist_psq(pc, m.from()) ^ zobrist_psq(after, m.to());
+            let captured = self.piece_on(m.to());
+            if captured.is_some() {
+                board ^= zobrist_psq(captured, m.to());
+                hand = hand.wrapping_add(zobrist_hand(us, captured.piece_type().unpromote()));
+            }
+        }
+        board ^ hand
+    }
+
     /// 盤面の利き数を取得
     #[inline]
     pub fn board_effect(&self, color: Color, sq: Square) -> u8 {
@@ -1064,9 +1104,6 @@ impl Position {
     ///
     /// PASSの場合は do_pass_move に委譲する。
     pub fn do_move(&mut self, m: Move, gives_check: bool) -> DirtyPiece {
-        if m.is_pass() {
-            return self.do_pass_move();
-        }
         let noop = NoPrefetch;
         self.do_move_with_prefetch(m, gives_check, &noop)
     }
@@ -1077,9 +1114,14 @@ impl Position {
         gives_check: bool,
         prefetcher: &P,
     ) -> DirtyPiece {
+        #[cfg(debug_assertions)]
+        let expected_key = self.key_after(m);
         // PASSの場合は do_pass_move に委譲
         if m.is_pass() {
-            return self.do_pass_move();
+            let dirty = self.do_pass_move();
+            #[cfg(debug_assertions)]
+            debug_assert_eq!(expected_key, self.key());
+            return dirty;
         }
 
         let us = self.side_to_move;
@@ -1323,6 +1365,8 @@ impl Position {
         }
 
         // do_move直後にTTをprefetch
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(expected_key, self.cur_state().key());
         prefetcher.prefetch(self.cur_state().key(), them);
 
         // 6. 王手情報の更新（diffベース）
@@ -3878,6 +3922,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn key_after_matches_all_moves_in_random_playouts() {
+        use crate::movegen::{MoveList, generate_legal_all_with_pass};
+        use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME};
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5EED_0929);
+        let mut coverage = [false; 5]; // 非捕獲・捕獲・成り・打ち・PASS
+        for sfen in [crate::position::SFEN_HIRATE, PERFT_MATSURI, PERFT_MIDGAME] {
+            let mut pos = Position::new();
+            pos.set_sfen_with_pass_rights(sfen, 2, 2).unwrap();
+            for _ in 0..100 {
+                let mut moves = MoveList::new();
+                generate_legal_all_with_pass(&pos, &mut moves);
+                if moves.is_empty() {
+                    break;
+                }
+                let parent_key = pos.key();
+                let parent_sfen = pos.to_sfen();
+                for index in 0..moves.len() {
+                    let mv = moves.at(index);
+                    let kind = if mv.is_pass() {
+                        4
+                    } else if mv.is_drop() {
+                        3
+                    } else if mv.is_promote() {
+                        2
+                    } else if pos.piece_on(mv.to()).is_some() {
+                        1
+                    } else {
+                        0
+                    };
+                    coverage[kind] = true;
+                    let expected = pos.key_after(mv);
+                    assert_eq!(pos.key(), parent_key);
+                    assert_eq!(pos.to_sfen(), parent_sfen);
+                    let check = pos.gives_check(mv);
+                    pos.do_move(mv, check);
+                    assert_eq!(pos.key(), expected, "{parent_sfen}: {}", mv.to_usi());
+                    pos.undo_move(mv);
+                    assert_eq!(pos.key(), parent_key);
+                }
+                let mv = moves.at(rng.random_range(0..moves.len()));
+                let check = pos.gives_check(mv);
+                pos.do_move(mv, check);
+            }
+        }
+        assert!(coverage.into_iter().all(|seen| seen));
     }
 
     /// ランダムプレイアウトで到達した全局面（最終手の後も含む）で不変条件を確認し、

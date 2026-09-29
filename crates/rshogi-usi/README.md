@@ -129,6 +129,16 @@ EvalHash の取り直しでは旧表を先に手放してから新表を確保�
 ライブラリの `EvalHash::new` / `Search::new` / `Search::new_with_eval_hash` は通常ページが既定で、
 Large Pages は明示指定時だけ要求します。`rescore_psv` などのツールの既定動作は変わりません。
 
+## 兄弟局面の先読み（計測用）
+
+`setoption name TtSiblingPrefetch value true` で、通常探索の次の兄弟局面の
+TT と、有効なら EvalHash を先読みします。既定は `false` で、`usi` の option
+一覧には表示しません。各 worker が探索開始時に設定を取り込みます。
+
+対象は MovePicker の同じ段階で順序が確定した範囲です。段階の遷移、未ソートの
+quiet、SEE による選別前の GoodCapture / ProbCut、qsearch は対象外です。
+先読みした手が枝刈りされる場合もあります。高速化の効果は別途計測が必要です。
+
 ## mimalloc (`mimalloc`)
 
 既定で無効の `mimalloc` は、エンジン binary の global allocator を

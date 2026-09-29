@@ -11,6 +11,18 @@ use rshogi_core::position::{Position, SFEN_HIRATE};
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
 
 fn fixed_depth(name: &str) {
+    for use_eval_hash in [false, true] {
+        core::eval::set_eval_hash_enabled(use_eval_hash);
+        for enabled in [false, true] {
+            core::search::set_tt_sibling_prefetch(enabled);
+            fixed_depth_with_current_options(name);
+        }
+    }
+    core::search::set_tt_sibling_prefetch(false);
+    core::eval::set_eval_hash_enabled(false);
+}
+
+fn fixed_depth_with_current_options(name: &str) {
     for (index, sfen) in [
         SFEN_HIRATE,
         "4k4/9/2p3p2/3p1p3/4P4/3P1P3/2P3P2/9/4K4 b RBrb 1",

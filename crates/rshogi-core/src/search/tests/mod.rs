@@ -9,6 +9,7 @@ mod in_tree_declaration;
 #[cfg(feature = "use-lazy-evaluate")]
 mod lazy_evaluate;
 mod multi_pv;
+mod sibling_prefetch;
 mod skill;
 mod time_management;
 

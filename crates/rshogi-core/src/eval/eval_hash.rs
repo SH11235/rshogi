@@ -434,12 +434,14 @@ mod tests {
 
     #[test]
     fn test_eval_hash_enabled_default() {
+        let _guard = crate::eval::material::test_support::lock_material();
         // デフォルトで無効
         assert!(!eval_hash_enabled());
     }
 
     #[test]
     fn test_eval_hash_enabled_toggle() {
+        let _guard = crate::eval::material::test_support::lock_material();
         let original = eval_hash_enabled();
         set_eval_hash_enabled(false);
         assert!(!eval_hash_enabled());
