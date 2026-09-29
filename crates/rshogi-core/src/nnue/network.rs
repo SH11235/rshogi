@@ -1850,6 +1850,11 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
     // アキュムレータの更新
     net.update_accumulator(pos, stack, acc_cache);
 
+    if matches!(get_layer_stack_bucket_mode(), LayerStackBucketMode::ProgressKPAbsQ16) {
+        let bucket = stack.ensure_progress_q16_bucket(pos, net.num_buckets());
+        return net.evaluate_with_bucket(pos, stack, bucket);
+    }
+
     // progresskpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
     #[cfg(feature = "nnue-progress-diff")]
     if matches!(get_layer_stack_bucket_mode(), LayerStackBucketMode::ProgressKPAbs) {

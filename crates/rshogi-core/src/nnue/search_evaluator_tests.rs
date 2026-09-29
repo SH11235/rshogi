@@ -12,6 +12,91 @@ fn prepared() -> SearchEvaluator {
     evaluator
 }
 
+#[cfg(all(feature = "layerstacks-1536x16x32", feature = "ft-halfka_hm_merged"))]
+#[test]
+fn q16_static_evaluation_matches_original_board_routing() {
+    use crate::movegen::{MoveList, generate_legal_all};
+    use nnue::progress_q16::reference_board_sums;
+    use rand::{Rng, SeedableRng};
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    let _guard = nnue::network::layer_stack_routing_test_guard();
+    nnue::configure_layer_stack_routing(nnue::LayerStackBucketMode::ProgressKPAbsQ16, 4, Some(4))
+        .unwrap();
+    let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0051_3136);
+    let weights: Vec<i32> = (0..nnue::SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS)
+        .map(|_| rng.random_range(-20000..=20000))
+        .collect();
+    nnue::set_layer_stack_progress_kpabs_q16_weights(weights.clone().into_boxed_slice()).unwrap();
+    let model = nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+        "HalfKaHmMerged",
+        nnue::HALFKA_HM_DIMENSIONS,
+        1536,
+        16,
+        32,
+        4,
+    );
+    let net = Arc::new(
+        LayerStacksNetwork::read_with_options(
+            &mut std::io::Cursor::new(model.bytes),
+            1536,
+            16,
+            32,
+            None,
+        )
+        .unwrap(),
+    );
+    let mut evaluator = SearchEvaluator::from_network(&NNUENetwork::LayerStacks(Arc::clone(&net)));
+    let mut fresh = net.new_acc_stack();
+    let mut pos = Position::new();
+    pos.set_hirate();
+    let mut played = Vec::new();
+    let mut buckets = std::collections::BTreeSet::new();
+    let mut values = std::collections::BTreeSet::new();
+    let mut compare = |pos: &Position, evaluator: &mut SearchEvaluator| {
+        let sum = reference_board_sums(pos, &weights).iter().sum();
+        let bucket = nnue::progress_q16_sum_to_bucket(sum, 4);
+        fresh.reset();
+        net.update_accumulator(pos, &mut fresh, &mut None);
+        let expected = net.evaluate_with_bucket(pos, &fresh, bucket);
+        assert_eq!(evaluator.evaluate(pos), expected, "{}", pos.to_sfen());
+        assert_eq!(net.evaluate(pos, &fresh), expected);
+        buckets.insert(bucket);
+        values.insert(expected.raw());
+    };
+    compare(&pos, &mut evaluator);
+    for ply in 0..180 {
+        if !pos.in_check() && ply % 13 == 0 {
+            pos.do_null_move();
+            evaluator.push(DirtyPiece::default());
+            compare(&pos, &mut evaluator);
+            pos.undo_null_move();
+            evaluator.pop();
+        }
+        let mut moves = MoveList::new();
+        generate_legal_all(&pos, &mut moves);
+        if moves.is_empty() {
+            break;
+        }
+        let mv = moves.at(rng.random_range(0..moves.len()));
+        evaluator.push(pos.do_move(mv, pos.gives_check(mv)));
+        played.push(mv);
+        // 中間ノードの静的評価が省略された探索も照合する。
+        if ply % 5 == 0 {
+            compare(&pos, &mut evaluator);
+        }
+    }
+    for mv in played.into_iter().rev() {
+        pos.undo_move(mv);
+        evaluator.pop();
+        compare(&pos, &mut evaluator);
+    }
+    assert!(buckets.len() > 1);
+    assert!(values.len() > 1);
+    nnue::reset_layer_stack_progress_kpabs_q16_weights();
+    nnue::reset_layer_stack_progress_buckets();
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Snapshot {
     accumulation: Vec<i16>,

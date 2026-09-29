@@ -966,9 +966,11 @@ impl DynamicLayerStacksNetwork {
                 pos.side_to_move(),
                 self.num_buckets,
             ),
-            LayerStackBucketMode::ProgressKPAbsQ16 => {
-                super::progress_q16::configured_progress_q16_bucket(pos, self.num_buckets)
-            }
+            LayerStackBucketMode::ProgressKPAbsQ16 => super::progress_q16::bucket_with_weights(
+                pos,
+                self.num_buckets,
+                stack.progress_q16_weights.as_deref(),
+            ),
             LayerStackBucketMode::ProgressKPAbs => {
                 let routing_buckets = get_layer_stack_progress_buckets()
                     .expect("LayerStacks progress routing is not configured");
@@ -1024,6 +1026,7 @@ impl DynamicLayerStacksNetwork {
 }
 
 pub struct DynamicLayerStacksStack {
+    progress_q16_weights: Option<std::sync::Arc<[i32]>>,
     signature: DynamicLayerStacksSignature,
     current: usize,
     accumulations: AlignedBox<i16>,
@@ -1063,6 +1066,7 @@ impl DynamicLayerStacksStack {
 
     fn new(net: &DynamicLayerStacksNetwork) -> Self {
         Self {
+            progress_q16_weights: super::progress_q16::snapshot_weights(),
             signature: net.stack_signature(),
             current: 0,
             accumulations: AlignedBox::new_zeroed(STACK_CAPACITY * 2 * net.spec.l1),
@@ -1088,6 +1092,7 @@ impl DynamicLayerStacksStack {
         self.signature == net.stack_signature()
     }
     pub(crate) fn reset(&mut self) {
+        self.progress_q16_weights = super::progress_q16::snapshot_weights();
         self.current = 0;
         self.computed[0] = false;
         self.dirty[0].clear();

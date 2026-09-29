@@ -1296,12 +1296,33 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         }
     }
 
-    /// 評価値を計算 (stack の L1 と一致する variant 上で実行)。
+    /// 評価値を計算。
     #[cfg(feature = "layerstack-arch")]
     pub fn evaluate(
         &self,
         pos: &Position,
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+    ) -> Value {
+        self.evaluate_impl(pos, stack, None)
+    }
+
+    #[cfg(feature = "layerstack-arch")]
+    fn evaluate_with_bucket(
+        &self,
+        pos: &Position,
+        stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+        bucket: usize,
+    ) -> Value {
+        self.evaluate_impl(pos, stack, Some(bucket))
+    }
+
+    /// 評価値を計算 (stack の L1 と一致する variant 上で実行)。
+    #[cfg(feature = "layerstack-arch")]
+    fn evaluate_impl(
+        &self,
+        pos: &Position,
+        stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+        bucket: Option<usize>,
     ) -> Value {
         // (self, stack) tuple match で同じ L1 variant の組のみ matched arm を持つ。
         // 2 サイズ以上 enable のときだけ cross-pair の不一致 arm が到達可能で、
@@ -1316,37 +1337,58 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
             (
                 Self::L1536x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-1536x32x32")]
             (
                 Self::L1536x32x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1536x32x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-768x16x32")]
             (
                 Self::L768x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-768x8x32")]
             (
                 Self::L768x8x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L768x8x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-512x16x32")]
             (
                 Self::L512x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L512x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-1024x16x32")]
             (
                 Self::L1024x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L1024x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(feature = "layerstacks-3072x16x32")]
             (
                 Self::L3072x16x32(net),
                 super::accumulator_layer_stacks::LayerStacksAccStack::L3072x16x32(st),
-            ) => net.evaluate(pos, &st.current().accumulator),
+            ) => match bucket {
+                Some(bucket) => net.evaluate_with_bucket(pos, &st.current().accumulator, bucket),
+                None => net.evaluate(pos, &st.current().accumulator),
+            },
             #[cfg(any(
                 all(feature = "layerstacks-1536x16x32", feature = "layerstacks-1536x32x32"),
                 all(feature = "layerstacks-1536x16x32", feature = "layerstacks-768x16x32"),
@@ -2246,6 +2288,17 @@ impl LayerStacksNetwork {
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
     ) -> Value {
         ls_match_ft!(self, by_ft => by_ft.evaluate(pos, stack))
+    }
+
+    /// 計算済みの routing bucket を直接使って評価する。
+    #[cfg(feature = "layerstack-arch")]
+    pub(crate) fn evaluate_with_bucket(
+        &self,
+        pos: &Position,
+        stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
+        bucket: usize,
+    ) -> Value {
+        ls_match_ft!(self, by_ft => by_ft.evaluate_with_bucket(pos, stack, bucket))
     }
 
     /// アキュムレータを更新 (キャッシュ対応)
