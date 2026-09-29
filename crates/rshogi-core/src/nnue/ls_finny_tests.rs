@@ -1,4 +1,4 @@
-//! static の切替で他の並列テストに干渉せず、両単相化経路を直接検証する。
+//! Finny refresh と差分更新を、特徴量の全列挙・逐次加算と比較する。
 
 use super::*;
 use crate::movegen::{MoveList, generate_legal_all};
@@ -13,7 +13,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 fn check_refresh<const L1: usize, FT: LsFeatureSpec>(
     ft: &FeatureTransformerLayerStacks<L1, FT>,
     pos: &Position,
-    caches: &mut [AccumulatorCacheLayerStacks<L1>; 2],
+    cache: &mut AccumulatorCacheLayerStacks<L1>,
 ) -> [[i16; L1]; 2] {
     std::array::from_fn(|p| {
         let perspective = [Color::Black, Color::White][p];
@@ -27,26 +27,16 @@ fn check_refresh<const L1: usize, FT: LsFeatureSpec>(
         }
         // miss/hit に続けて同じ局面を再度要求し、差分ゼロでも出力が書かれることを確認。
         for _ in 0..2 {
-            let mut old = Aligned([i16::MIN; L1]);
-            let mut new = Aligned([i16::MAX; L1]);
-            ft.refresh_perspective_with_cache_impl::<false>(
+            let mut actual = Aligned([i16::MAX; L1]);
+            ft.refresh_perspective_with_cache(
                 pos,
                 perspective,
-                &mut old.0,
+                &mut actual.0,
                 #[cfg(feature = "nnue-psqt")]
                 &mut [0; MAX_LAYER_STACK_BUCKETS],
-                &mut caches[0],
+                cache,
             );
-            ft.refresh_perspective_with_cache_impl::<true>(
-                pos,
-                perspective,
-                &mut new.0,
-                #[cfg(feature = "nnue-psqt")]
-                &mut [0; MAX_LAYER_STACK_BUCKETS],
-                &mut caches[1],
-            );
-            assert_eq!(old.0, expected, "old {perspective:?}");
-            assert_eq!(new.0, expected, "v2 {perspective:?}");
+            assert_eq!(actual.0, expected, "{perspective:?}");
         }
         expected
     })
@@ -61,7 +51,7 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
     for value in ft.weights.make_mut() {
         *value = rng.next_u32() as i16;
     }
-    let mut caches = std::array::from_fn(|_| AccumulatorCacheLayerStacks::new());
+    let mut cache = AccumulatorCacheLayerStacks::new();
     let mut pos = Position::new();
     let mut kings = [0; 2];
     let mut captures = 0;
@@ -70,7 +60,7 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
     let mut fast = 0;
     for sfen in [SFEN_HIRATE, "4k4/9/9/9/9/9/9/9/4K4 b R2Pbr 1", SFEN_HIRATE] {
         pos.set_sfen(sfen).unwrap();
-        let mut previous = check_refresh(&ft, &pos, &mut caches);
+        let mut previous = check_refresh(&ft, &pos, &mut cache);
         for ply in 0..192 {
             let mut moves = MoveList::new();
             generate_legal_all(&pos, &mut moves);
@@ -95,7 +85,7 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
             for (count, moved) in kings.iter_mut().zip(dirty.king_moved) {
                 *count += usize::from(moved);
             }
-            let expected = check_refresh(&ft, &pos, &mut caches);
+            let expected = check_refresh(&ft, &pos, &mut cache);
             for perspective in [Color::Black, Color::White] {
                 let p = perspective as usize;
                 let king = pos.king_square(perspective);
@@ -107,13 +97,7 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
                 for list in [&mut removed, &mut added, &mut old_removed, &mut old_added] {
                     assert!(list.push(17));
                 }
-                append_changed_indices_v2::<FT>(
-                    &dirty,
-                    perspective,
-                    king,
-                    &mut removed,
-                    &mut added,
-                );
+                append_changed_indices::<FT>(&dirty, perspective, king, &mut removed, &mut added);
                 FT::Feature::append_changed_indices(
                     &dirty,
                     perspective,
@@ -127,29 +111,19 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
                     continue;
                 }
                 let source = Aligned(previous[p]);
-                let mut old = Aligned(previous[p]);
                 let mut new = Aligned(previous[p]);
-                let old_ok = ft.try_apply_dirty_piece_indexed::<false, false>(
-                    None,
-                    &mut old.0,
-                    &dirty,
-                    perspective,
-                    king,
-                );
-                let new_ok = ft.try_apply_dirty_piece_indexed::<false, true>(
+                let new_ok = ft.try_apply_dirty_piece_fast_impl::<false>(
                     None,
                     &mut new.0,
                     &dirty,
                     perspective,
                     king,
                 );
-                assert_eq!(old_ok, new_ok);
-                assert_eq!(old.0, new.0);
                 if new_ok {
                     fast += 1;
                     assert_eq!(new.0, expected[p]);
                     new.0.fill(0);
-                    assert!(ft.try_apply_dirty_piece_indexed::<true, true>(
+                    assert!(ft.try_apply_dirty_piece_fast_impl::<true>(
                         Some(&source.0),
                         &mut new.0,
                         &dirty,
@@ -161,23 +135,18 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
             }
             if ply % 7 == 0 {
                 pos.undo_move(mv);
-                assert_eq!(check_refresh(&ft, &pos, &mut caches), previous);
+                assert_eq!(check_refresh(&ft, &pos, &mut cache), previous);
             } else {
                 previous = expected;
             }
             if ply % 11 == 0 && !pos.in_check() {
                 pos.do_null_move();
-                assert_eq!(check_refresh(&ft, &pos, &mut caches), previous);
+                assert_eq!(check_refresh(&ft, &pos, &mut cache), previous);
                 pos.undo_null_move();
                 nulls += 1;
             }
             if ply % 31 == 0 {
-                for cache in &mut caches {
-                    cache.invalidate();
-                }
-            } else if ply % 13 == 0 {
-                // 旧・新経路が同じ cache 内容を相互利用できることも検証。
-                caches.swap(0, 1);
+                cache.invalidate();
             }
         }
     }
@@ -186,7 +155,7 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
 }
 
 #[test]
-fn ls_finny_v2_random_games_match_old_and_full_refresh() {
+fn ls_finny_random_games_match_full_refresh() {
     check_random_game::<256, HalfKaHmMergedSpec>();
     check_random_game::<32, HalfKpSpec>();
     check_random_game::<32, HalfKaSplitSpec>();
@@ -195,12 +164,12 @@ fn ls_finny_v2_random_games_match_old_and_full_refresh() {
 }
 
 #[test]
-fn ls_finny_v2_indexer_matches_all_bona_pieces_and_kings() {
+fn ls_finny_indexer_matches_all_bona_pieces_and_kings() {
     use crate::nnue::bona_piece_halfka_hm_merged::E_KING;
     use crate::types::Square;
     for perspective in [Color::Black, Color::White] {
         for king in Square::all() {
-            let index = HalfKaHmMergedSpec::feature_indexer::<true>(perspective, king);
+            let index = HalfKaHmMergedSpec::feature_indexer(perspective, king);
             for bp in 0..E_KING + 81 {
                 let bp = BonaPiece::new(bp as u16);
                 assert_eq!(index(bp), HalfKaHmMergedSpec::feature_index(bp, perspective, king));

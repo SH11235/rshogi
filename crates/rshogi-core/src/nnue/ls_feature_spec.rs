@@ -48,17 +48,13 @@ pub trait LsFeatureSpec: 'static {
 
     /// 単一 `BonaPiece` を feature index に変換する。
     ///
-    /// `try_apply_dirty_piece_fast` (DirtyPiece の old/new BonaPiece → index 変換) と
-    /// `refresh_perspective_with_cache` (cache idx_fn) の両方から呼ばれる。
+    /// `feature_indexer` の既定実装と、pack 表の正しさを照合するテストで使う。
     /// 呼び出し元は `BonaPiece::ZERO` を除外済みを前提とする。
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize;
 
-    /// 玉位置と視点を固定した indexer。V2 では対応 FT の表引きを選択する。
+    /// 玉位置と視点を固定した indexer。対応する FT では pack 表を使う。
     #[inline]
-    fn feature_indexer<const V2: bool>(
-        perspective: Color,
-        king_sq: Square,
-    ) -> impl Fn(BonaPiece) -> usize {
+    fn feature_indexer(perspective: Color, king_sq: Square) -> impl Fn(BonaPiece) -> usize {
         move |bp| Self::feature_index(bp, perspective, king_sq)
     }
 }
@@ -155,18 +151,8 @@ impl LsFeatureSpec for HalfKaHmMergedSpec {
     const INCLUDE_KING_IN_PIECE_LIST: bool = true;
 
     #[inline]
-    fn feature_indexer<const V2: bool>(
-        perspective: Color,
-        king_sq: Square,
-    ) -> impl Fn(BonaPiece) -> usize {
-        let packed = super::bona_piece_halfka_hm_merged::feature_indexer(perspective, king_sq);
-        move |bp| {
-            if V2 {
-                packed(bp)
-            } else {
-                Self::feature_index(bp, perspective, king_sq)
-            }
-        }
+    fn feature_indexer(perspective: Color, king_sq: Square) -> impl Fn(BonaPiece) -> usize {
+        super::bona_piece_halfka_hm_merged::feature_indexer(perspective, king_sq)
     }
 
     #[inline]

@@ -117,10 +117,6 @@ impl<const L1: usize> Default for AccumulatorLayerStacks<L1> {
 #[repr(C, align(64))]
 struct AccCacheEntry<const L1: usize> {
     /// キャッシュされたアキュムレータ値
-    ///
-    /// `refresh_or_cache` がこの field を aligned SIMD load/store を使う
-    /// add/sub weight 関数へ直接渡すため、struct の `align(64)` と field 先頭
-    /// 配置 (offset 0) が 64-byte アライメントの前提として load-bearing。
     accumulation: [i16; L1],
     /// キャッシュされた PSQT アキュムレータ値
     ///
@@ -189,75 +185,8 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         }
     }
 
-    /// キャッシュ差分のfeature indexをまとめて適用するrefresh。
-    ///
-    /// add/subを1件ずつ呼ぶ代わりに、全indexを固定長listへ集めて`apply_fn`へ渡す。
-    /// Feature Transformer側はこのlistを使い、accumulatorをtileごとに1回だけ
-    /// load/storeできる。
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn refresh_or_cache<FI, FApply>(
-        &mut self,
-        king_sq: Square,
-        perspective: Color,
-        piece_list: &[BonaPiece; PieceNumber::NB],
-        biases: &[i16; L1],
-        accumulation: &mut [i16; L1],
-        idx_fn: FI,
-        apply_fn: FApply,
-    ) where
-        FI: Fn(BonaPiece) -> usize,
-        FApply:
-            Fn(&mut [i16; L1], &IndexList<{ PieceNumber::NB }>, &IndexList<{ PieceNumber::NB }>),
-    {
-        let entry = &mut self.entries[king_sq.raw() as usize][perspective as usize];
-        // apply_fn (tiled SIMD) は aligned load/store を使うため、entry.accumulation を
-        // 直接渡すには AccCacheEntry の align(64) + field 先頭配置が必須。
-        debug_assert_eq!(entry.accumulation.as_ptr() as usize % 64, 0);
-        // 各駒slotはremoved/addedへ最大1件ずつ入るため、容量40を超えない。
-        let mut removed = IndexList::<{ PieceNumber::NB }>::new();
-        let mut added = IndexList::<{ PieceNumber::NB }>::new();
-
-        let was_valid = entry.valid;
-        // entry.accumulation を作業領域として直接更新するため、差分適用の途中で
-        // unwind すると entry が不整合になる。valid を先に落とし、全 field の
-        // 書き戻し完了後に立て直すことで半更新 entry の再利用を防ぐ。
-        entry.valid = false;
-
-        if was_valid {
-            crate::nnue::stats::count_cache_hit!();
-            // entry を作業領域にすることで、cache hit 時の L1 要素全量コピーを
-            // 最後の entry→accumulation 1回だけにする。差分indexはlistへ集めて
-            // 後段の apply_fn でtile一括適用する。
-            collect_piece_list_diff(
-                &entry.piece_list,
-                piece_list,
-                &idx_fn,
-                &mut removed,
-                &mut added,
-            );
-            crate::nnue::stats::count_refresh_diff!(removed.len() + added.len());
-        } else {
-            crate::nnue::stats::count_cache_miss!();
-            // キャッシュ無効 → バイアスから full refresh
-            entry.accumulation.copy_from_slice(biases);
-            for &bp in piece_list.iter() {
-                if bp != BonaPiece::ZERO {
-                    let pushed = added.push(idx_fn(bp));
-                    debug_assert!(pushed);
-                }
-            }
-        }
-
-        apply_fn(&mut entry.accumulation, &removed, &added);
-
-        // 更新済みcache entryを探索stack側へ公開する。
-        accumulation.copy_from_slice(&entry.accumulation);
-        entry.piece_list.copy_from_slice(piece_list);
-        entry.valid = true;
-    }
-
     /// bias/cache の tile を差分更新し、cache と探索 stack へ同時に書く。
-    pub(crate) fn refresh_or_cache_v2<FI: Fn(BonaPiece) -> usize>(
+    pub(crate) fn refresh_or_cache<FI: Fn(BonaPiece) -> usize>(
         &mut self,
         key: (Square, Color),
         piece_list: &[BonaPiece; PieceNumber::NB],
@@ -1005,6 +934,10 @@ mod tests {
         fn check<FT: LsFeatureSpec>() {
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xf177_0040);
             let mut cache = AccumulatorCacheLayerStacks::<32>::new();
+            let weight =
+                |idx: usize, lane: usize| (idx.wrapping_mul(977).wrapping_add(lane * 719)) as i16;
+            let weights: Vec<_> =
+                (0..FT::DIMENSIONS * 32).map(|i| weight(i / 32, i % 32)).collect();
             #[cfg(feature = "nnue-psqt")]
             let mut psqt_cache = AccumulatorCacheLayerStacks::<32>::new();
             let mut pos = Position::new();
@@ -1026,9 +959,6 @@ mod tests {
                         let entry = &cache.entries[king.raw() as usize][perspective as usize];
                         assert_diff_matches_scalar(&entry.piece_list, &current, idx_fn);
                         let biases = [i16::MAX - 7; 32];
-                        let weight = |idx: usize, lane: usize| {
-                            (idx.wrapping_mul(977).wrapping_add(lane * 719)) as i16
-                        };
                         let mut expected = biases;
                         for bp in current.iter().copied().filter(|bp| *bp != BonaPiece::ZERO) {
                             for (lane, value) in expected.iter_mut().enumerate() {
@@ -1039,22 +969,12 @@ mod tests {
                         for _ in 0..2 {
                             let mut actual = [0; 32];
                             cache.refresh_or_cache(
-                                king,
-                                perspective,
+                                (king, perspective),
                                 &current,
                                 &biases,
                                 &mut actual,
+                                &weights,
                                 idx_fn,
-                                |acc, removed, added| {
-                                    for (lane, value) in acc.iter_mut().enumerate() {
-                                        for idx in removed.iter() {
-                                            *value = value.wrapping_sub(weight(idx, lane));
-                                        }
-                                        for idx in added.iter() {
-                                            *value = value.wrapping_add(weight(idx, lane));
-                                        }
-                                    }
-                                },
                             );
                             assert_eq!(actual, expected);
                             #[cfg(feature = "nnue-psqt")]
@@ -1152,17 +1072,12 @@ mod tests {
         verify::<3072>();
     }
 
-    fn apply_test_changes(
-        acc: &mut [i16; TEST_L1],
-        removed: &IndexList<{ PieceNumber::NB }>,
-        added: &IndexList<{ PieceNumber::NB }>,
-    ) {
-        for idx in removed.iter() {
-            acc[0] = acc[0].wrapping_sub(idx as i16);
+    fn test_weights() -> Vec<i16> {
+        let mut weights = vec![0; 21 * TEST_L1];
+        for idx in 0..21 {
+            weights[idx * TEST_L1] = idx as i16;
         }
-        for idx in added.iter() {
-            acc[0] = acc[0].wrapping_add(idx as i16);
-        }
+        weights
     }
 
     #[test]
@@ -1313,13 +1228,12 @@ mod tests {
 
         let mut accumulation = [0i16; TEST_L1];
         cache.refresh_or_cache(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             &piece_list,
             &biases,
             &mut accumulation,
+            &test_weights(),
             |bp| bp.0 as usize,
-            apply_test_changes,
         );
 
         // biases[0] + 5 + 10 + 15 = 130
@@ -1348,13 +1262,12 @@ mod tests {
         pl1[2] = BonaPiece(15);
         let mut acc1 = [0i16; TEST_L1];
         cache.refresh_or_cache(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             &pl1,
             &biases,
             &mut acc1,
+            &test_weights(),
             |bp| bp.0 as usize,
-            apply_test_changes,
         );
         assert_eq!(acc1[0], 30);
 
@@ -1363,13 +1276,12 @@ mod tests {
         pl2[2] = BonaPiece(20);
         let mut acc2 = [0i16; TEST_L1];
         cache.refresh_or_cache(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             &pl2,
             &biases,
             &mut acc2,
+            &test_weights(),
             |bp| bp.0 as usize,
-            apply_test_changes,
         );
         // hit: 30 - 15 + 20 = 35
         assert_eq!(acc2[0], 35);
@@ -1377,13 +1289,12 @@ mod tests {
         // 3回目: 同じpiece listなら、2回目に更新したcache entryをそのまま返す。
         let mut acc3 = [0i16; TEST_L1];
         cache.refresh_or_cache(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             &pl2,
             &biases,
             &mut acc3,
+            &test_weights(),
             |bp| bp.0 as usize,
-            apply_test_changes,
         );
         assert_eq!(acc3[0], 35);
 
@@ -1392,13 +1303,12 @@ mod tests {
         pl3[0] = BonaPiece(7);
         let mut acc4 = [0i16; TEST_L1];
         cache.refresh_or_cache(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             &pl3,
             &biases,
             &mut acc4,
+            &test_weights(),
             |bp| bp.0 as usize,
-            apply_test_changes,
         );
         // hit: 35 - 5 + 7 = 37
         assert_eq!(acc4[0], 37);
@@ -1406,13 +1316,12 @@ mod tests {
         // 5回目: pl3 のまま再読。piece_list の書き戻しが stale なら差分が重複適用される。
         let mut acc5 = [0i16; TEST_L1];
         cache.refresh_or_cache(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             &pl3,
             &biases,
             &mut acc5,
+            &test_weights(),
             |bp| bp.0 as usize,
-            apply_test_changes,
         );
         assert_eq!(acc5[0], 37);
     }
@@ -1430,13 +1339,12 @@ mod tests {
         pl1[1] = BonaPiece(10);
         let mut acc1 = [0i16; TEST_L1];
         cache.refresh_or_cache(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             &pl1,
             &biases,
             &mut acc1,
+            &test_weights(),
             |bp| bp.0 as usize,
-            apply_test_changes,
         );
         assert_eq!(acc1[0], 15);
 
@@ -1445,13 +1353,12 @@ mod tests {
         pl2[1] = BonaPiece::ZERO;
         let mut acc2 = [0i16; TEST_L1];
         cache.refresh_or_cache(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             &pl2,
             &biases,
             &mut acc2,
+            &test_weights(),
             |bp| bp.0 as usize,
-            apply_test_changes,
         );
         // hit: 15 - 10 = 5
         assert_eq!(acc2[0], 5);
