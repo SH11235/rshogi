@@ -797,12 +797,6 @@ impl UsiEngine {
         }
 
         match name.as_str() {
-            // 比較用の隠しオプション。usi の option 一覧には登録しない。
-            "MovegenV2" => match value.as_str() {
-                "0" => rshogi_core::movegen::set_movegen_v2(false),
-                "1" => rshogi_core::movegen::set_movegen_v2(true),
-                _ => eprintln!("info string Warning: MovegenV2 expects 0 or 1"),
-            },
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;
