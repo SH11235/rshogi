@@ -11,9 +11,8 @@ use super::state::{
 };
 use super::zobrist::{zobrist_hand, zobrist_pass_rights, zobrist_psq, zobrist_side};
 use crate::bitboard::{
-    BISHOP_STEP, Bitboard, RANK_BB, ROOK_STEP, SQUARE_BB, bishop_effect, dragon_effect,
-    gold_effect, horse_effect, king_effect, knight_effect, lance_step_effect, pawn_effect,
-    rook_effect, silver_effect,
+    BISHOP_STEP, Bitboard, RANK_BB, ROOK_STEP, SQUARE_BB, bishop_effect, gold_effect, king_effect,
+    knight_effect, lance_step_effect, pawn_effect, rook_effect, silver_effect,
 };
 #[cfg(feature = "halfkx-arch")]
 use crate::eval::material::material_needs_board_effects;
@@ -771,7 +770,7 @@ impl Position {
     /// fromを取り除いた占有でのpin駒（やねうら王のpinned_pieces<Them>(from)相当）
     ///
     /// avoid升の駒をoccupiedとpinner候補の両方から除外する。
-    /// update_slider_blockers相当のcompute_blockers_and_pinnersとは異なり、
+    /// set_check_infoでのpin情報の更新とは異なり、
     /// sniper同士の除外は行わない（YOのpinned_pieces<C>(avoid)に準拠）。
     pub fn pinned_pieces_excluding(&self, them: Color, avoid: Square) -> Bitboard {
         let avoid_bb = Bitboard::from_square(avoid);
@@ -879,95 +878,10 @@ impl Position {
         self.toggle_piece_bitboards(pc, sq);
     }
 
-    /// pin駒とpinしている駒を更新
-    pub(super) fn update_blockers_and_pinners(&mut self) {
-        for c in [Color::Black, Color::White] {
-            self.compute_blockers_and_pinners(c, self.occupied(), Bitboard::EMPTY);
-        }
-    }
-
-    /// 占有を指定してpin候補とpinnerを現在のStateInfoへ書き込む。
-    // 呼び出し元のレジスタ退避を増やさず、結果の一時領域も介さない。
-    #[inline(never)]
-    fn compute_blockers_and_pinners(
-        &mut self,
-        king_color: Color,
-        occupied: Bitboard,
-        enemy_removed: Bitboard,
-    ) {
-        let ksq = self.king_square[king_color.index()];
-        let enemy = !king_color;
-
-        let lance_bb = self.pieces(enemy, PieceType::Lance) & !enemy_removed;
-        // 事前計算済みのbishop_horse_bb/rook_dragon_bbを使用
-        let bishop_bb = (self.bishop_horse_bb & self.by_color[enemy.index()]) & !enemy_removed;
-        let rook_bb = (self.rook_dragon_bb & self.by_color[enemy.index()]) & !enemy_removed;
-
-        let snipers = (lance_step_effect(king_color, ksq) & lance_bb)
-            | (BISHOP_STEP[ksq.index()] & bishop_bb)
-            | (ROOK_STEP[ksq.index()] & rook_bb);
-
-        let mut blockers = Bitboard::EMPTY;
-        let mut pinners = Bitboard::EMPTY;
-        // sniper自身をoccupiedから除外して、一直線上に複数sniperがある場合
-        // （例: 王-歩-飛-飛）でも遠い方のsniperのblocker/pinnerを正しく認識する
-        let occ_without_snipers = occupied & !snipers;
-        for sniper_sq in snipers.iter() {
-            let between = crate::bitboard::between_bb(ksq, sniper_sq) & occ_without_snipers;
-            if between.is_empty() || between.more_than_one() {
-                continue;
-            }
-
-            // blockerが自駒のときのみpin対象
-            if (between & self.pieces_c(enemy)).is_empty() {
-                blockers |= between;
-                pinners |= SQUARE_BB[sniper_sq.index()];
-            } else {
-                blockers |= between;
-            }
-        }
-
-        let st = self.cur_state_mut();
-        st.blockers_for_king[king_color.index()] = blockers;
-        st.pinners[king_color.index()] = pinners;
-    }
-
-    /// 王手マスを更新
-    pub(super) fn update_check_squares(&mut self) {
-        let them = !self.side_to_move;
-        let ksq = self.king_square[them.index()];
-        let occupied = self.occupied();
-        let st = self.cur_state_mut();
-
-        // gold_effect は Gold + 成小駒4種（ProPawn, ProLance, ProKnight, ProSilver）で共通。
-        // 圧縮配列ではインデックス 6 に統合済み。
-        let gold_bb = gold_effect(them, ksq);
-        let rook_bb = rook_effect(ksq, occupied);
-
-        // 各駒種で王手となるマス（圧縮インデックス 0..8）
-        // SAFETY: インデックス 0..8 は CHECK_SQUARES_SIZE(=9) の範囲内。
-        // SAFETY: CS_IDX_* 定数は全て 0..CHECK_SQUARES_SIZE(=9) の範囲内。
-        // 定数と CHECK_SQ_INDEX テーブルは state.rs で一元管理。
-        unsafe {
-            *st.check_squares.get_unchecked_mut(CS_IDX_PAWN) = pawn_effect(them, ksq);
-            // 飛車の縦利きは両向きの香の利きの OR で、横利きは玉の筋と交わらない。
-            // 相手側の香の step 利きとの AND は、香の王手升に一致する。
-            *st.check_squares.get_unchecked_mut(CS_IDX_LANCE) =
-                rook_bb & lance_step_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(CS_IDX_KNIGHT) = knight_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(CS_IDX_SILVER) = silver_effect(them, ksq);
-            *st.check_squares.get_unchecked_mut(CS_IDX_BISHOP) = bishop_effect(ksq, occupied);
-            *st.check_squares.get_unchecked_mut(CS_IDX_ROOK) = rook_bb;
-            *st.check_squares.get_unchecked_mut(CS_IDX_GOLD) = gold_bb;
-            *st.check_squares.get_unchecked_mut(CS_IDX_HORSE) = horse_effect(ksq, occupied);
-            *st.check_squares.get_unchecked_mut(CS_IDX_DRAGON) = dragon_effect(ksq, occupied);
-        }
-    }
-
     /// 占有・玉位置・香のstep利きを共有してpinと王手升を一体更新する。
-    /// null moveでは盤面が変わらないため、親のpin情報を引き継ぐ。
+    /// null moveとPASSでは盤面が変わらないため、親のpin情報を引き継ぐ。
     #[inline(always)]
-    fn set_check_info_inline<const NULL_MOVE: bool>(&mut self) {
+    pub(super) fn set_check_info<const BOARD_UNCHANGED: bool>(&mut self) {
         let occupied = self.occupied();
         let kings = self.king_square;
         let them = !self.side_to_move;
@@ -980,10 +894,10 @@ impl Position {
         let bishops = self.bishop_horse_bb;
         let rooks = self.rook_dragon_bb;
         let previous = self.cur_state().previous;
-        // 同じStateInfo slotへまとめて書く。null moveだけ親のpin情報を読む。
+        // 同じStateInfo slotへまとめて書く。盤面が変わらないときだけ親のpin情報を読む。
         let (parent, current) = self.state_stack.split_at_mut(self.state_idx);
         let st = &mut current[0];
-        if NULL_MOVE {
+        if BOARD_UNCHANGED {
             st.blockers_for_king = parent[previous].blockers_for_king;
             st.pinners = parent[previous].pinners;
         } else {
@@ -1133,10 +1047,10 @@ impl Position {
             return self.do_pass_move();
         }
         let noop = NoPrefetch;
-        self.do_move_with_prefetch::<false, _>(m, gives_check, &noop)
+        self.do_move_with_prefetch(m, gives_check, &noop)
     }
 
-    pub(crate) fn do_move_with_prefetch<const CHECK_INFO_INLINE: bool, P: TtPrefetch>(
+    pub(crate) fn do_move_with_prefetch<P: TtPrefetch>(
         &mut self,
         m: Move,
         gives_check: bool,
@@ -1152,12 +1066,6 @@ impl Position {
         let prev_continuous = self.cur_state().continuous_check;
         let update_board_effects = Self::should_update_board_effects();
 
-        // 現在の占有とblockers/pinners、玉位置を退避（差分更新で利用）
-        let (prev_blockers, prev_pinners, prev_king_sq) = if CHECK_INFO_INLINE {
-            ([Bitboard::EMPTY; 2], [Bitboard::EMPTY; 2], [Square::SQ_11; 2])
-        } else {
-            (self.cur_state().blockers_for_king, self.cur_state().pinners, self.king_square)
-        };
         let prev_check_square = if gives_check {
             let moved_pt = if m.is_drop() {
                 m.drop_piece_type()
@@ -1405,11 +1313,8 @@ impl Position {
             // - fromがblockersに含まれている
             // - from, to, ksq が同一直線上にない（aligned でない）場合のみ開き王手
             if let Some(from_sq) = moved_from {
-                let their_prev_blockers = if CHECK_INFO_INLINE {
-                    self.state_stack[self.cur_state().previous].blockers_for_king[them.index()]
-                } else {
-                    prev_blockers[them.index()]
-                };
+                let their_prev_blockers =
+                    self.state_stack[self.cur_state().previous].blockers_for_king[them.index()];
                 if their_prev_blockers.contains(from_sq)
                     && !crate::mate::aligned(from_sq, moved_to, ksq)
                     && let Some(dir) = crate::bitboard::direct_of(ksq, from_sq)
@@ -1467,43 +1372,8 @@ impl Position {
         // 9. 繰り返し情報の更新
         self.update_repetition_info();
 
-        // 10. 探索開始時に選んだconst実体でpinと王手升を更新する。
-        if CHECK_INFO_INLINE {
-            self.set_check_info_inline::<false>();
-        } else {
-            // 王との直線/斜め上の駒が動いた場合のみ再計算する。
-            let occ_after = self.occupied();
-            let changed_sqs: [Option<Square>; 2] = [moved_from, Some(moved_to)];
-
-            for c in [Color::Black, Color::White] {
-                let king_sq_prev = prev_king_sq[c.index()];
-                let king_sq_now = self.king_square[c.index()];
-                let king_moved = king_sq_prev != king_sq_now;
-
-                let mut needs_recompute = king_moved;
-                if !needs_recompute {
-                    for sq in changed_sqs.iter().flatten().copied() {
-                        if prev_blockers[c.index()].contains(sq)
-                            || prev_pinners[c.index()].contains(sq)
-                            || crate::bitboard::direct_of(king_sq_now, sq).is_some()
-                        {
-                            needs_recompute = true;
-                            break;
-                        }
-                    }
-                }
-
-                if !needs_recompute {
-                    let st = self.cur_state_mut();
-                    st.blockers_for_king[c.index()] = prev_blockers[c.index()];
-                    st.pinners[c.index()] = prev_pinners[c.index()];
-                    continue;
-                }
-
-                self.compute_blockers_and_pinners(c, occ_after, Bitboard::EMPTY);
-            }
-            self.update_check_squares();
-        }
+        // 10. 両色のpinと王手升をまとめて更新する。
+        self.set_check_info::<false>();
 
         #[cfg(debug_assertions)]
         if update_board_effects {
@@ -1657,13 +1527,10 @@ impl Position {
     /// null moveを実行
     pub fn do_null_move(&mut self) {
         let noop = NoPrefetch;
-        self.do_null_move_with_prefetch::<false, _>(&noop);
+        self.do_null_move_with_prefetch(&noop);
     }
 
-    pub(crate) fn do_null_move_with_prefetch<const CHECK_INFO_INLINE: bool, P: TtPrefetch>(
-        &mut self,
-        prefetcher: &P,
-    ) {
+    pub(crate) fn do_null_move_with_prefetch<P: TtPrefetch>(&mut self, prefetcher: &P) {
         // update_repetition_info を呼ばないため、repetition 系フィールドの初期化は
         // partial_clone の zero クリアに依存している。in-place 化する場合は要注意。
         let mut new_state = self.cur_state().partial_clone();
@@ -1684,12 +1551,7 @@ impl Position {
         // null move後は王手されていないはず
         self.cur_state_mut().checkers = Bitboard::EMPTY;
 
-        if CHECK_INFO_INLINE {
-            self.set_check_info_inline::<true>();
-        } else {
-            self.update_blockers_and_pinners();
-            self.update_check_squares();
-        }
+        self.set_check_info::<true>();
     }
 
     /// null moveを戻す
@@ -1771,9 +1633,8 @@ impl Position {
         self.cur_state_mut().checkers =
             self.attackers_to_c(self.king_square(self.side_to_move), !self.side_to_move);
 
-        // 10. blockers/pinners/check_squares を更新
-        self.update_blockers_and_pinners();
-        self.update_check_squares();
+        // 10. pinは親から引き継ぎ、王手升を更新
+        self.set_check_info::<true>();
 
         // 11. 繰り返し情報を更新
         self.update_repetition_info();
@@ -2123,7 +1984,7 @@ impl Default for Position {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bitboard::lance_effect;
+    use crate::bitboard::{dragon_effect, horse_effect, lance_effect};
     use crate::position::state::CHECK_SQUARES_SIZE;
     use crate::types::{EnteringKingRule, File, Rank};
 
@@ -2166,6 +2027,30 @@ mod tests {
         }
 
         (blockers, pinners)
+    }
+
+    /// pinは参照実装、王手升は各駒種の利き関数で盤面から再計算する。
+    fn recompute_reference_check_info(pos: &mut Position) {
+        for color in [Color::Black, Color::White] {
+            let (blockers, pinners) =
+                reference_blockers_and_pinners(pos, color, pos.occupied(), Bitboard::EMPTY);
+            let st = pos.cur_state_mut();
+            st.blockers_for_king[color.index()] = blockers;
+            st.pinners[color.index()] = pinners;
+        }
+        let them = !pos.side_to_move;
+        let ksq = pos.king_square(them);
+        let occupied = pos.occupied();
+        let st = pos.cur_state_mut();
+        st.check_squares[CS_IDX_PAWN] = pawn_effect(them, ksq);
+        st.check_squares[CS_IDX_LANCE] = lance_effect(them, ksq, occupied);
+        st.check_squares[CS_IDX_KNIGHT] = knight_effect(them, ksq);
+        st.check_squares[CS_IDX_SILVER] = silver_effect(them, ksq);
+        st.check_squares[CS_IDX_BISHOP] = bishop_effect(ksq, occupied);
+        st.check_squares[CS_IDX_ROOK] = rook_effect(ksq, occupied);
+        st.check_squares[CS_IDX_GOLD] = gold_effect(them, ksq);
+        st.check_squares[CS_IDX_HORSE] = horse_effect(ksq, occupied);
+        st.check_squares[CS_IDX_DRAGON] = dragon_effect(ksq, occupied);
     }
 
     // 実際の駒配置と異なる占有も渡し、仮想的な移動・駒打ちでの利きを確認する。
@@ -2287,7 +2172,7 @@ mod tests {
     }
 
     #[test]
-    fn test_blockers_pinners_incremental_matches_full() {
+    fn test_blockers_pinners_after_moves_match_reference() {
         // 配置: 先手玉5九, 後手玉1一, 後手飛5六, 先手金5八（玉を遮る）, 先手桂1三（玉筋外）
         let mut pos = Position::new();
         let bk = Square::new(File::File5, Rank::Rank9);
@@ -2305,8 +2190,7 @@ mod tests {
         pos.put_piece(Piece::B_KNIGHT, knight);
         pos.init_piece_list();
 
-        pos.update_blockers_and_pinners();
-        pos.update_check_squares();
+        pos.set_check_info::<false>();
 
         let prev_blockers = pos.blockers_for_king(Color::Black);
         let prev_pinners = pos.cur_state().pinners[Color::Black.index()];
@@ -2322,7 +2206,7 @@ mod tests {
         // 金を筋から外すとblockers/pinnersが更新される（再計算と一致）
         // 手番を戻して先手が金を動かす（王手ではない）
         pos.side_to_move = Color::Black;
-        pos.update_check_squares();
+        pos.set_check_info::<false>();
         let mv_unblock = Move::new_move(blocker, Square::new(File::File6, Rank::Rank8), false);
         let gives_check = pos.gives_check(mv_unblock);
         pos.do_move(mv_unblock, gives_check);
@@ -2348,8 +2232,7 @@ mod tests {
         pos.put_piece(Piece::W_PAWN, w_target);
         pos.init_piece_list();
         pos.side_to_move = Color::Black;
-        pos.update_blockers_and_pinners();
-        pos.update_check_squares();
+        pos.set_check_info::<false>();
 
         // 金で歩を取る（開き王手）
         let mv_capture = Move::new_move(b_blocker, w_target, false);
@@ -2378,8 +2261,7 @@ mod tests {
         pos.put_piece(Piece::W_ROOK, wr);
         pos.init_piece_list();
         pos.side_to_move = Color::Black;
-        pos.update_blockers_and_pinners();
-        pos.update_check_squares();
+        pos.set_check_info::<false>();
 
         // 先手玉を横に動かす（後手玉への王手ではない）
         let king_from = bk;
@@ -2814,7 +2696,7 @@ mod tests {
         pos.hand[Color::Black.index()] = pos.hand[Color::Black.index()].add(PieceType::Gold);
         pos.init_piece_list();
         // check_squares の更新（gives_check() が正しく動作するために必要）
-        pos.update_check_squares();
+        pos.set_check_info::<false>();
 
         let drop_sq = Square::from_usi("4a").unwrap();
         let mv = Move::new_drop(PieceType::Gold, drop_sq);
@@ -2854,8 +2736,7 @@ mod tests {
         let king_to = Square::from_usi("3i").unwrap();
         pos_black.put_piece(Piece::B_KING, king_from);
         pos_black.king_square[Color::Black.index()] = king_from;
-        pos_black.update_blockers_and_pinners();
-        pos_black.update_check_squares();
+        pos_black.set_check_info::<false>();
         let king_move = Move::new_move(king_from, king_to, false);
         assert!(!pos_black.is_legal(king_move));
     }
@@ -3960,7 +3841,7 @@ mod tests {
     }
 
     #[test]
-    fn check_info_inline_handles_collinear_snipers() {
+    fn check_info_handles_collinear_snipers() {
         // 63bit境界の両側で、複数sniper・両色blocker・両手番を必ず通す。
         for file in ["1", "8"] {
             for blocker in ["P", "p"] {
@@ -3980,14 +3861,14 @@ mod tests {
                         rank(blocker),
                         rank("K")
                     );
-                    let mut legacy = Position::new();
-                    legacy.set_sfen(&sfen).unwrap();
-                    let mut inline = legacy.clone();
-                    inline.set_check_info_inline::<false>();
-                    assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline), "{sfen}");
-                    assert_eq!(inline.state().blockers_for_king[Color::Black.index()].count(), 1);
+                    let mut reference = Position::new();
+                    reference.set_sfen(&sfen).unwrap();
+                    let actual = reference.clone();
+                    recompute_reference_check_info(&mut reference);
+                    assert_eq!(RestoredState::of(&reference), RestoredState::of(&actual), "{sfen}");
+                    assert_eq!(actual.state().blockers_for_king[Color::Black.index()].count(), 1);
                     assert_eq!(
-                        inline.state().pinners[Color::Black.index()].count(),
+                        actual.state().pinners[Color::Black.index()].count(),
                         if blocker == "P" { 2 } else { 0 }
                     );
                 }
@@ -3996,7 +3877,7 @@ mod tests {
     }
 
     #[test]
-    fn check_info_inline_matches_legacy_playouts() {
+    fn check_info_matches_reference_playouts() {
         use crate::movegen::{MoveList, generate_legal_all};
         use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME};
         use rand::{Rng, SeedableRng};
@@ -4006,62 +3887,67 @@ mod tests {
         let mut counts = [0usize; 5]; // 通常手・駒打ち・成り・王手・null move
         for game in 0..120 {
             let mut rng = Xoshiro256PlusPlus::seed_from_u64(SEED + game);
-            let mut legacy = Position::new();
+            let mut reference = Position::new();
             match game % 3 {
-                0 => legacy.set_hirate(),
-                1 => legacy.set_sfen(PERFT_MATSURI).unwrap(),
-                _ => legacy.set_sfen(PERFT_MIDGAME).unwrap(),
+                0 => reference.set_hirate(),
+                1 => reference.set_sfen(PERFT_MATSURI).unwrap(),
+                _ => reference.set_sfen(PERFT_MIDGAME).unwrap(),
             }
-            let mut inline = legacy.clone();
+            let mut actual = reference.clone();
+            recompute_reference_check_info(&mut reference);
+            assert_eq!(RestoredState::of(&reference), RestoredState::of(&actual));
             let mut moves = Vec::new();
             for ply in 0..400 {
                 let mut legal = MoveList::new();
-                generate_legal_all(&legacy, &mut legal);
+                generate_legal_all(&reference, &mut legal);
                 if legal.is_empty() {
                     break;
                 }
                 let mv = legal.at(rng.random_range(0..legal.len()));
-                let gives_check = legacy.gives_check(mv);
-                assert_eq!(gives_check, inline.gives_check(mv));
+                let gives_check = reference.gives_check(mv);
+                assert_eq!(gives_check, actual.gives_check(mv));
                 counts[0] += 1;
                 counts[1] += usize::from(mv.is_drop());
                 counts[2] += usize::from(mv.is_promote());
                 counts[3] += usize::from(gives_check);
-                legacy.do_move_with_prefetch::<false, _>(mv, gives_check, &NoPrefetch);
-                inline.do_move_with_prefetch::<true, _>(mv, gives_check, &NoPrefetch);
+                reference.do_move(mv, gives_check);
+                recompute_reference_check_info(&mut reference);
+                actual.do_move(mv, gives_check);
                 moves.push(mv);
                 assert_eq!(
-                    RestoredState::of(&legacy),
-                    RestoredState::of(&inline),
+                    RestoredState::of(&reference),
+                    RestoredState::of(&actual),
                     "seed={SEED:#x} game={game} ply={ply} mv={mv:?}"
                 );
 
-                if !legacy.in_check() && ply % 7 == 0 {
+                if !reference.in_check() && ply % 7 == 0 {
                     counts[4] += 1;
-                    legacy.do_null_move_with_prefetch::<false, _>(&NoPrefetch);
-                    inline.do_null_move_with_prefetch::<true, _>(&NoPrefetch);
-                    assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline));
+                    reference.do_null_move();
+                    recompute_reference_check_info(&mut reference);
+                    actual.do_null_move();
+                    assert_eq!(RestoredState::of(&reference), RestoredState::of(&actual));
                     // null move後の実手とslot再利用も比較する。
                     let mut replies = MoveList::new();
-                    generate_legal_all(&legacy, &mut replies);
+                    generate_legal_all(&reference, &mut replies);
                     if !replies.is_empty() {
                         let reply = replies.at(rng.random_range(0..replies.len()));
-                        let check = legacy.gives_check(reply);
-                        legacy.do_move_with_prefetch::<false, _>(reply, check, &NoPrefetch);
-                        inline.do_move_with_prefetch::<true, _>(reply, check, &NoPrefetch);
-                        assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline));
-                        legacy.undo_move(reply);
-                        inline.undo_move(reply);
+                        let check = reference.gives_check(reply);
+                        reference.do_move(reply, check);
+                        recompute_reference_check_info(&mut reference);
+                        actual.do_move(reply, check);
+                        assert_eq!(RestoredState::of(&reference), RestoredState::of(&actual));
+                        reference.undo_move(reply);
+                        actual.undo_move(reply);
                     }
-                    legacy.undo_null_move();
-                    inline.undo_null_move();
-                    assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline));
+                    reference.undo_null_move();
+                    actual.undo_null_move();
+                    assert_eq!(RestoredState::of(&reference), RestoredState::of(&actual));
                 }
             }
             for mv in moves.into_iter().rev() {
-                legacy.undo_move(mv);
-                inline.undo_move(mv);
-                assert_eq!(RestoredState::of(&legacy), RestoredState::of(&inline));
+                reference.undo_move(mv);
+                actual.undo_move(mv);
+                assert_eq!(RestoredState::of(&reference), RestoredState::of(&actual));
             }
         }
         assert!(counts[0] >= 30_000, "比較した通常手が不足: {counts:?}");

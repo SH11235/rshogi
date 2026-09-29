@@ -93,8 +93,6 @@ struct UsiEngine {
     eval_hash_size_mb: usize,
     /// EvalHash使用フラグ（UseEvalHashで変更）
     use_eval_hash: bool,
-    /// pin・王手升の一体更新を比較する隠しUSI option（既定false）。
-    check_info_inline: bool,
     /// EvalHash の確保時に Large Pages を試みるか。
     eval_hash_large_pages: bool,
     /// MultiPV値
@@ -197,7 +195,6 @@ impl UsiEngine {
             tt_size_mb,
             eval_hash_size_mb,
             use_eval_hash,
-            check_info_inline: false,
             eval_hash_large_pages: true,
             multi_pv: 1,
             skill_options: rshogi_core::search::SkillOptions::default(),
@@ -931,9 +928,6 @@ impl UsiEngine {
                 let v = value == "true" || value == "1";
                 self.use_eval_hash = v;
                 set_eval_hash_enabled(v);
-            }
-            "CheckInfoInline" => {
-                self.check_info_inline = value == "true" || value == "1";
             }
             "MaxMovesToDraw" => {
                 if let Ok(v) = value.parse::<i32>()
@@ -1695,7 +1689,6 @@ impl UsiEngine {
 
         // MultiPVを設定
         limits.multi_pv = self.multi_pv;
-        limits.check_info_inline = self.check_info_inline;
 
         limits
     }
@@ -2154,26 +2147,6 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                 engine.net_deltas_dirty = false;
                 engine.cmd_setoption(&["setoption", "name", "SPSA_NET_out_w_3", "value", "1"]);
                 assert!(!engine.net_deltas_dirty);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
-    #[serial]
-    fn check_info_inline_option_is_snapshotted_per_go() {
-        std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(|| {
-                let mut engine = UsiEngine::new();
-                assert!(!engine.parse_go_options(&["go"]).check_info_inline);
-                engine.cmd_setoption(&["setoption", "name", "CheckInfoInline", "value", "true"]);
-                let limits = engine.parse_go_options(&["go", "depth", "4"]);
-                assert!(limits.check_info_inline);
-                engine.cmd_setoption(&["setoption", "name", "CheckInfoInline", "value", "false"]);
-                assert!(!engine.parse_go_options(&["go"]).check_info_inline);
-                assert!(limits.check_info_inline);
             })
             .unwrap()
             .join()

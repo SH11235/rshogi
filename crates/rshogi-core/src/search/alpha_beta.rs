@@ -481,8 +481,6 @@ impl DepthLivenessState {
 ///
 /// 各探索スレッドが持つ可変状態。
 pub struct SearchState {
-    /// 探索開始時に固定したpin・王手升の更新経路。
-    pub(crate) check_info_inline: bool,
     /// 探索ノード数
     pub nodes: u64,
     /// 探索スタック
@@ -525,7 +523,6 @@ impl SearchState {
     /// 新しい SearchState を作成
     pub fn new() -> Self {
         Self {
-            check_info_inline: false,
             nodes: 0,
             stack: init_stack_array(),
             root_delta: 1,
@@ -933,7 +930,6 @@ impl SearchWorker {
 
     /// goで呼び出し：探索状態のリセット（履歴はクリアしない）
     pub fn prepare_search(&mut self, limits: &LimitsType) {
-        self.state.check_info_inline = limits.check_info_inline;
         self.state.nodes = 0;
         self.state.sel_depth = 0;
         self.state.root_depth = 0;

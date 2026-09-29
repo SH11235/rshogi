@@ -60,9 +60,6 @@ pub struct LimitsType {
     /// YaneuraOu準拠: 複数の候補手を探索して表示する
     pub multi_pv: usize,
 
-    /// pin・王手升の一体更新を使う比較用設定。探索開始時に固定する（既定false）。
-    pub check_info_inline: bool,
-
     /// 探索対象の手のリスト
     /// 空なら全合法手を探索
     pub search_moves: Vec<crate::types::Move>,
@@ -86,7 +83,6 @@ impl Default for LimitsType {
             nodes: 0,
             ponder: false,
             multi_pv: 1, // デフォルトは1（通常探索）
-            check_info_inline: false,
             search_moves: Vec::new(),
             start_time: None,
         }
