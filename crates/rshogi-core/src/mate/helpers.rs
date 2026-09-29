@@ -8,7 +8,7 @@ use crate::mate::tables::check_around_bb;
 use crate::position::Position;
 use crate::types::{Color, PieceType, Square};
 
-use super::aligned;
+use super::{aligned, attack_query::AttackQuery};
 
 /// Sliderの利きを列挙する
 ///
@@ -182,14 +182,24 @@ pub fn can_king_escape(
     bb_avoid: Bitboard,
     slide: Bitboard,
 ) -> bool {
+    can_king_escape_with_query(&mut AttackQuery::<0>::new(), pos, us, to, bb_avoid, slide)
+}
+
+pub(super) fn can_king_escape_with_query<const MODE: u8>(
+    query: &mut AttackQuery<MODE>,
+    pos: &Position,
+    us: Color,
+    to: Square,
+    bb_avoid: Bitboard,
+    slide: Bitboard,
+) -> bool {
     let king_sq = pos.king_square(us);
     let slide = slide | Bitboard::from_square(to);
     // toも逃げ先から除外（駒打ちの場合、toに打った駒があるため王は行けない）
     let escape = king_effect(king_sq) & !(bb_avoid | Bitboard::from_square(to) | pos.pieces_c(us));
 
     for dest in escape.iter() {
-        let attacked = pos.attackers_to_color_occ(!us, dest, slide);
-        if attacked.is_empty() {
+        if !query.attacked(pos, !us, dest, slide, None) {
             return true;
         }
     }
@@ -216,6 +226,26 @@ pub fn can_king_escape_with_from(
     bb_avoid: Bitboard,
     slide: Bitboard,
 ) -> bool {
+    can_king_escape_with_from_query(
+        &mut AttackQuery::<0>::new(),
+        pos,
+        us,
+        from,
+        to,
+        bb_avoid,
+        slide,
+    )
+}
+
+pub(super) fn can_king_escape_with_from_query<const MODE: u8>(
+    query: &mut AttackQuery<MODE>,
+    pos: &Position,
+    us: Color,
+    from: Square,
+    to: Square,
+    bb_avoid: Bitboard,
+    slide: Bitboard,
+) -> bool {
     let king_sq = pos.king_square(us);
     let slide = (slide | Bitboard::from_square(to)) & !Bitboard::from_square(king_sq);
     // toには攻め駒が移動してきているので逃げ先から除外する。
@@ -223,9 +253,7 @@ pub fn can_king_escape_with_from(
     let escape = king_effect(king_sq) & !(bb_avoid | Bitboard::from_square(to) | pos.pieces_c(us));
 
     for dest in escape.iter() {
-        let attacked = pos.attackers_to_color_occ(!us, dest, slide);
-        let attacked_wo_from = attacked & !Bitboard::from_square(from);
-        if attacked_wo_from.is_empty() {
+        if !query.attacked(pos, !us, dest, slide, Some(from)) {
             return true;
         }
     }

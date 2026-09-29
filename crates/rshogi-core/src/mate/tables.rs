@@ -1,11 +1,16 @@
 // 1手詰め探索用の初期化テーブル
 
+use crate::bitboard::Bitboard;
+#[cfg(test)]
 use crate::bitboard::{
-    Bitboard, bishop_effect, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect,
-    rook_effect, silver_effect,
+    bishop_effect, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect, rook_effect,
+    silver_effect,
 };
+#[cfg(test)]
 use crate::mate::cross45_step_effect;
-use crate::types::{Color, File, PieceType, Rank, Square};
+use crate::types::{Color, PieceType, Square};
+#[cfg(test)]
+use crate::types::{File, Rank};
 use std::sync::LazyLock;
 
 /// 王手になる駒の種類（PieceTypeCheckの列挙）
@@ -60,30 +65,32 @@ impl PieceTypeCheck {
 
 /// 王手になる候補の駒の位置を示すBitboard
 /// [玉の位置][PieceTypeCheck][攻撃側の色]
-pub static CHECK_CAND_BB: LazyLock<[[[Bitboard; 2]; PieceTypeCheck::NUM]; 81]> =
-    LazyLock::new(init_check_cand_bb);
+pub static CHECK_CAND_BB: [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] =
+    super::const_tables::check_candidates();
 
 /// 玉周辺の利きを求めるときに使う、玉周辺に利きをつける候補の駒を表すBB
 /// [玉の位置][駒の種類(PAWN-KING)][攻撃側の色]
-pub static CHECK_AROUND_BB: LazyLock<[[[Bitboard; 2]; PieceType::NUM + 1]; 81]> =
-    LazyLock::new(init_check_around_bb);
+pub static CHECK_AROUND_BB: [[[Bitboard; 2]; PieceType::NUM + 1]; 81] =
+    super::const_tables::check_around();
 
 /// sq1に対してsq2の延長上にある次の升
 /// [sq1][sq2] -> 次の升（同一升・非直線・盤外ならNone）
 pub static NEXT_SQUARE: LazyLock<[[Option<Square>; 81]; 81]> = LazyLock::new(init_next_square);
 
 /// テーブルのラッパー（Color/enum指定で取りやすくする）
-#[inline]
+#[inline(always)]
 pub fn check_cand_bb(us: Color, pc: PieceTypeCheck, sq_king: Square) -> Bitboard {
     CHECK_CAND_BB[sq_king.index()][pc as usize][us.index()]
 }
 
-#[inline]
+#[inline(always)]
+/// 玉の 8 近傍に利きを持ちうる駒の移動元候補。
 pub fn check_around_bb(us: Color, pt: PieceType, sq_king: Square) -> Bitboard {
     CHECK_AROUND_BB[sq_king.index()][pt.index()][us.index()]
 }
 
 /// CHECK_CAND_BBの初期化
+#[cfg(test)]
 fn init_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
     let mut table = [[[Bitboard::EMPTY; 2]; PieceTypeCheck::NUM]; 81];
 
@@ -216,6 +223,7 @@ fn init_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
 }
 
 /// CHECK_AROUND_BBの初期化
+#[cfg(test)]
 fn init_check_around_bb() -> [[[Bitboard; 2]; PieceType::NUM + 1]; 81] {
     let mut table = [[[Bitboard::EMPTY; 2]; PieceType::NUM + 1]; 81];
 
@@ -298,6 +306,28 @@ fn init_next_square() -> [[Option<Square>; 81]; 81] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn const_tables_match_runtime_builders() {
+        let candidates = init_check_cand_bb();
+        let around = init_check_around_bb();
+        for sq in 0..81 {
+            for us in 0..2 {
+                for pt in 0..PieceTypeCheck::NUM {
+                    assert_eq!(
+                        CHECK_CAND_BB[sq][pt][us], candidates[sq][pt][us],
+                        "candidate sq={sq} pt={pt} us={us}"
+                    );
+                }
+                for pt in 0..=PieceType::NUM {
+                    assert_eq!(
+                        CHECK_AROUND_BB[sq][pt][us], around[sq][pt][us],
+                        "around sq={sq} pt={pt} us={us}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn next_square_matches_eight_direction_rays() {

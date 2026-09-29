@@ -56,6 +56,27 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 
+## 1 手詰めの screening
+
+隠し USI option `Mate1V2` は `usi` の option 一覧には表示しません。
+`setoption name Mate1V2 value 1` のように指定します。
+
+| 値 | 利きの問い合わせ |
+|---|---|
+| `0`（既定） | 従来の攻撃元集合を構築して判定 |
+| `1` | 近接利きで早期 return する bool API。遠方駒は疑似利きの候補がある場合だけ計算 |
+| `2` | `1` に加え、敵玉 8 近傍の近接利きを最初の問い合わせ時に構築し、同じ 1 手詰め判定内で再利用 |
+
+値は次の `go` で、前の探索が停止してから反映します。探索中の `setoption` は
+進行中の探索へ影響しません。範囲外・非整数の値は診断を表示し、設定を維持します。
+候補表の定数構築は全 mode 共通です。したがって `0` と `1` / `2` の比較は
+利き問い合わせの差を測り、候補表の定数化による差は含みません。
+
+3 mode の返す手と詰みの有無は同じです。速度の採否は未検証です。
+同一バイナリ・同一評価関数・同一設定で screening し、固定深さの
+nodes / score / PV / bestmove の一致も確認してください。
+差分テストは `cargo test -p rshogi-core mate::` で実行できます。
+
 ## Allocation diagnostics
 
 Build with `cargo build --profile production -p rshogi-usi --features allocation-stats`

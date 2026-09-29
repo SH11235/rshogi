@@ -1,9 +1,10 @@
 // 駒打ちによる1手詰め判定（YaneuraOu移植）
 
+use super::attack_query::AttackQuery;
 use crate::bitboard::{
     Bitboard, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect, silver_effect,
 };
-use crate::mate::helpers::{can_king_escape, can_piece_capture};
+use crate::mate::helpers::{can_king_escape_with_query, can_piece_capture};
 use crate::mate::{bishop_step_effect, cross45_step_effect, rook_step_effect};
 use crate::position::Position;
 use crate::types::{Color, Move, PieceType};
@@ -17,6 +18,14 @@ use crate::types::{Color, Move, PieceType};
 /// # Returns
 /// 1手詰めの手があれば`Some(Move)`、なければ`None`
 pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
+    check_drop_mate_with_query(pos, us, &mut AttackQuery::<0>::new())
+}
+
+pub(super) fn check_drop_mate_with_query<const MODE: u8>(
+    pos: &Position,
+    us: Color,
+    query: &mut AttackQuery<MODE>,
+) -> Option<Move> {
     let them = !us;
     let sq_king = pos.king_square(them);
 
@@ -30,11 +39,11 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
         let mut bb = rook_step_effect(sq_king) & king_effect(sq_king) & bb_drop;
         while bb.is_not_empty() {
             let to = bb.pop();
-            if pos.attackers_to_color_occ(us, to, occupied).is_empty() {
+            if !query.attacked(pos, us, to, occupied, None) {
                 continue;
             }
             let bb_attacks = rook_step_effect(to);
-            if can_king_escape(pos, them, to, bb_attacks, occupied) {
+            if can_king_escape_with_query(query, pos, them, to, bb_attacks, occupied) {
                 continue;
             }
             if can_piece_capture(pos, them, to, pinned, occupied) {
@@ -49,9 +58,9 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
         let mut bb = pawn_effect(them, sq_king) & bb_drop;
         if bb.is_not_empty() {
             let to = bb.pop();
-            if !pos.attackers_to_color_occ(us, to, occupied).is_empty() {
+            if query.attacked(pos, us, to, occupied, None) {
                 let bb_attacks = lance_effect(us, to, Bitboard::EMPTY);
-                if !can_king_escape(pos, them, to, bb_attacks, occupied)
+                if !can_king_escape_with_query(query, pos, them, to, bb_attacks, occupied)
                     && !can_piece_capture(pos, them, to, pinned, occupied)
                 {
                     return Some(Move::new_drop(PieceType::Lance, to));
@@ -65,11 +74,11 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
         let mut bb = cross45_step_effect(sq_king) & bb_drop;
         while bb.is_not_empty() {
             let to = bb.pop();
-            if pos.attackers_to_color_occ(us, to, occupied).is_empty() {
+            if !query.attacked(pos, us, to, occupied, None) {
                 continue;
             }
             let bb_attacks = bishop_step_effect(to);
-            if can_king_escape(pos, them, to, bb_attacks, occupied) {
+            if can_king_escape_with_query(query, pos, them, to, bb_attacks, occupied) {
                 continue;
             }
             if can_piece_capture(pos, them, to, pinned, occupied) {
@@ -87,11 +96,11 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
         }
         while bb.is_not_empty() {
             let to = bb.pop();
-            if pos.attackers_to_color_occ(us, to, occupied).is_empty() {
+            if !query.attacked(pos, us, to, occupied, None) {
                 continue;
             }
             let bb_attacks = gold_effect(us, to);
-            if can_king_escape(pos, them, to, bb_attacks, occupied) {
+            if can_king_escape_with_query(query, pos, them, to, bb_attacks, occupied) {
                 continue;
             }
             if can_piece_capture(pos, them, to, pinned, occupied) {
@@ -115,11 +124,11 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
 
         while bb.is_not_empty() {
             let to = bb.pop();
-            if pos.attackers_to_color_occ(us, to, occupied).is_empty() {
+            if !query.attacked(pos, us, to, occupied, None) {
                 continue;
             }
             let bb_attacks = silver_effect(us, to);
-            if can_king_escape(pos, them, to, bb_attacks, occupied) {
+            if can_king_escape_with_query(query, pos, them, to, bb_attacks, occupied) {
                 continue;
             }
             if can_piece_capture(pos, them, to, pinned, occupied) {
@@ -134,7 +143,7 @@ pub fn check_drop_mate(pos: &Position, us: Color) -> Option<Move> {
         let mut bb = knight_effect(them, sq_king) & bb_drop;
         while bb.is_not_empty() {
             let to = bb.pop();
-            if can_king_escape(pos, them, to, Bitboard::EMPTY, occupied) {
+            if can_king_escape_with_query(query, pos, them, to, Bitboard::EMPTY, occupied) {
                 continue;
             }
             if can_piece_capture(pos, them, to, pinned, occupied) {

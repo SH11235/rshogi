@@ -728,6 +728,50 @@ impl Position {
             & self.pieces_c(us)
     }
 
+    /// 指定した駒を除外して、占有指定の升に指定色の利きがあるか。
+    ///
+    /// `excluded` は攻撃元の集合からだけ除く。遮蔽物の変更は `occupied` で指定する。
+    /// ピンによる移動制限は考慮せず、`attackers_to_color_occ` と同じ利きを判定する。
+    #[inline(never)]
+    pub fn is_attacked_by_excluding(
+        &self,
+        us: Color,
+        sq: Square,
+        occupied: Bitboard,
+        excluded: Bitboard,
+    ) -> bool {
+        let ours = self.pieces_c(us) & !excluded;
+        let them = !us;
+        let step = (pawn_effect(them, sq) & self.pieces_pt(PieceType::Pawn))
+            | (knight_effect(them, sq) & self.pieces_pt(PieceType::Knight))
+            | (silver_effect(them, sq) & (self.pieces_pt(PieceType::Silver) | self.hdk_bb))
+            | (gold_effect(them, sq) & (self.golds_bb | self.hdk_bb));
+        if (step & ours).is_not_empty() {
+            return true;
+        }
+        self.is_attacked_by_sliders(us, sq, occupied, excluded)
+    }
+
+    /// 占有指定・攻撃元除外付きで、角馬・飛龍・香の遠方利きだけを判定する。
+    #[inline]
+    pub(crate) fn is_attacked_by_sliders(
+        &self,
+        us: Color,
+        sq: Square,
+        occupied: Bitboard,
+        excluded: Bitboard,
+    ) -> bool {
+        let ours = self.pieces_c(us) & !excluded;
+        let bishops = BISHOP_STEP[sq.index()] & self.bishop_horse_bb & ours;
+        if bishops.is_not_empty() && (bishop_effect(sq, occupied) & bishops).is_not_empty() {
+            return true;
+        }
+        let rooks = ((ROOK_STEP[sq.index()] & self.rook_dragon_bb)
+            | (lance_step_effect(!us, sq) & self.pieces_pt(PieceType::Lance)))
+            & ours;
+        rooks.is_not_empty() && (rook_effect(sq, occupied) & rooks).is_not_empty()
+    }
+
     /// 指定マスに利いている指定手番の駒
     pub fn attackers_to_c(&self, sq: Square, c: Color) -> Bitboard {
         self.attackers_to_occ(sq, self.occupied()) & self.pieces_c(c)

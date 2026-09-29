@@ -2,11 +2,12 @@
 //
 // YaneuraOu mate1ply_without_effect.cpp の移植（離し角・飛車は未対応）
 
+use super::attack_query::AttackQuery;
 use crate::bitboard::{
     Bitboard, bishop_effect, dragon_effect, gold_effect, horse_effect, king_effect, knight_effect,
     lance_effect, rook_effect, silver_effect,
 };
-use crate::mate::helpers::{can_king_escape_with_from, can_piece_capture};
+use crate::mate::helpers::{can_king_escape_with_from_query, can_piece_capture};
 use crate::mate::tables::{PieceTypeCheck, check_cand_bb};
 use crate::mate::{
     aligned, bishop_step_effect, can_promote, cross45_step_effect, lance_step_effect,
@@ -17,6 +18,14 @@ use crate::types::{Color, Move, PieceType, Rank, Square};
 
 /// 駒移動による1手詰めを判定（非打ち手のみ対象）
 pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
+    check_move_mate_with_query(pos, us, &mut AttackQuery::<0>::new())
+}
+
+pub(super) fn check_move_mate_with_query<const MODE: u8>(
+    pos: &Position,
+    us: Color,
+    query: &mut AttackQuery<MODE>,
+) -> Option<Move> {
     if pos.in_check() {
         return None;
     }
@@ -44,7 +53,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
-            if !has_other_attacker(pos, us, from, to, slide) {
+            if !has_other_attacker(query, pos, us, from, to, slide) {
                 continue;
             }
             if pos.discovered(from, to, our_king, our_pinned) {
@@ -56,7 +65,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             } else {
                 rook_step_effect(to) | king_effect(to)
             };
-            if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
+            if can_king_escape_with_from_query(query, pos, them, from, to, bb_attacks, slide) {
                 continue;
             }
             if can_piece_capture(pos, them, to, new_pin, slide) {
@@ -74,7 +83,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
-            if !has_other_attacker(pos, us, from, to, slide) {
+            if !has_other_attacker(query, pos, us, from, to, slide) {
                 continue;
             }
 
@@ -94,7 +103,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             if pos.discovered(from, to, our_king, our_pinned) {
                 continue;
             }
-            if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
+            if can_king_escape_with_from_query(query, pos, them, from, to, bb_attacks, slide) {
                 continue;
             }
             if dc_candidates.contains(from) {
@@ -115,7 +124,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
-            if !has_other_attacker(pos, us, from, to, slide) {
+            if !has_other_attacker(query, pos, us, from, to, slide) {
                 continue;
             }
             if pos.discovered(from, to, our_king, our_pinned) {
@@ -123,7 +132,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             }
 
             let bb_attacks = bishop_step_effect(to) | king_effect(to);
-            if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
+            if can_king_escape_with_from_query(query, pos, them, from, to, bb_attacks, slide) {
                 continue;
             }
             if dc_candidates.contains(from) && !aligned(from, to, sq_king) {
@@ -144,7 +153,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
-            if !has_other_attacker(pos, us, from, to, slide) {
+            if !has_other_attacker(query, pos, us, from, to, slide) {
                 continue;
             }
 
@@ -160,7 +169,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             if pos.discovered(from, to, our_king, our_pinned) {
                 continue;
             }
-            if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
+            if can_king_escape_with_from_query(query, pos, them, from, to, bb_attacks, slide) {
                 continue;
             }
             if dc_candidates.contains(from) {
@@ -197,13 +206,13 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             } else {
                 // toに味方の利きがfrom以外にない場合はスキップ
                 // （toの駒が取られると王手が残らない）
-                let attackers_to_us =
-                    pos.attackers_to_color_occ(us, to, slide) ^ Bitboard::from_square(from);
-                if attackers_to_us.is_empty() {
+                if !has_other_lance_attacker(query, pos, us, from, to, slide) {
                     // toが味方利きで守られていない → LANCE_NO_PRO へ
                 } else if pos.discovered(from, to, our_king, our_pinned) {
                     // 自玉が素抜かれる → LANCE_NO_PRO へ
-                } else if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
+                } else if can_king_escape_with_from_query(
+                    query, pos, them, from, to, bb_attacks, slide,
+                ) {
                     // 玉が逃げられる → LANCE_NO_PRO へ
                 } else if dc_candidates.contains(from) {
                     // 両王手なので合い利かず → 詰み
@@ -224,15 +233,13 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                 if !bb_skewer.contains(sq_king) {
                     continue;
                 }
-                let attackers_to_us =
-                    pos.attackers_to_color_occ(us, to, slide) ^ Bitboard::from_square(from);
-                if attackers_to_us.is_empty() {
+                if !has_other_lance_attacker(query, pos, us, from, to, slide) {
                     continue;
                 }
                 if pos.discovered(from, to, our_king, our_pinned) {
                     continue;
                 }
-                if can_king_escape_with_from(pos, them, from, to, bb_skewer, slide) {
+                if can_king_escape_with_from_query(query, pos, them, from, to, bb_skewer, slide) {
                     continue;
                 }
                 // 串刺しでの両王手はありえない
@@ -258,14 +265,14 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
-            if !has_other_attacker(pos, us, from, to, slide) {
+            if !has_other_attacker(query, pos, us, from, to, slide) {
                 continue;
             }
             if pos.discovered(from, to, our_king, our_pinned) {
                 continue;
             }
             let bb_attacks = gold_effect(us, to);
-            if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
+            if can_king_escape_with_from_query(query, pos, them, from, to, bb_attacks, slide) {
                 continue;
             }
             if dc_candidates.contains(from) && !aligned(from, to, sq_king) {
@@ -293,9 +300,9 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             let to = bb_check.pop();
             let bb_attacks_s = silver_effect(us, to);
             if bb_attacks_s.contains(sq_king)
-                && has_other_attacker(pos, us, from, to, slide)
+                && has_other_attacker(query, pos, us, from, to, slide)
                 && !pos.discovered(from, to, our_king, our_pinned)
-                && !can_king_escape_with_from(pos, them, from, to, bb_attacks_s, slide)
+                && !can_king_escape_with_from_query(query, pos, them, from, to, bb_attacks_s, slide)
                 && (dc_candidates.contains(from) && !aligned(from, to, sq_king)
                     || !can_piece_capture(pos, them, to, new_pin, slide))
             {
@@ -305,9 +312,17 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             if can_promote(us, from, to) {
                 let bb_attacks_g = gold_effect(us, to);
                 if bb_attacks_g.contains(sq_king)
-                    && has_other_attacker(pos, us, from, to, slide)
+                    && has_other_attacker(query, pos, us, from, to, slide)
                     && !pos.discovered(from, to, our_king, our_pinned)
-                    && !can_king_escape_with_from(pos, them, from, to, bb_attacks_g, slide)
+                    && !can_king_escape_with_from_query(
+                        query,
+                        pos,
+                        them,
+                        from,
+                        to,
+                        bb_attacks_g,
+                        slide,
+                    )
                     && (dc_candidates.contains(from) && !aligned(from, to, sq_king)
                         || !can_piece_capture(pos, them, to, new_pin, slide))
                 {
@@ -334,7 +349,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             let bb_attacks = knight_effect(us, to);
             if bb_attacks.contains(sq_king)
                 && !pos.discovered(from, to, our_king, our_pinned)
-                && !can_king_escape_with_from(pos, them, from, to, bb_attacks, slide)
+                && !can_king_escape_with_from_query(query, pos, them, from, to, bb_attacks, slide)
                 && (dc_candidates.contains(from)
                     || !can_piece_capture(pos, them, to, new_pin, slide))
             {
@@ -344,9 +359,17 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             if can_promote(us, from, to) {
                 let bb_attacks_g = gold_effect(us, to);
                 if bb_attacks_g.contains(sq_king)
-                    && has_other_attacker(pos, us, from, to, slide)
+                    && has_other_attacker(query, pos, us, from, to, slide)
                     && !pos.discovered(from, to, our_king, our_pinned)
-                    && !can_king_escape_with_from(pos, them, from, to, bb_attacks_g, slide)
+                    && !can_king_escape_with_from_query(
+                        query,
+                        pos,
+                        them,
+                        from,
+                        to,
+                        bb_attacks_g,
+                        slide,
+                    )
                     && (dc_candidates.contains(from)
                         || !can_piece_capture(pos, them, to, new_pin, slide))
                 {
@@ -375,9 +398,17 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                     // 成りでの判定に任せる
                 } else {
                     let slide = occupied ^ Bitboard::from_square(from);
-                    if has_other_attacker(pos, us, from, to, slide)
+                    if has_other_attacker(query, pos, us, from, to, slide)
                         && !pos.discovered(from, to, our_king, our_pinned)
-                        && !can_king_escape_with_from(pos, them, from, to, Bitboard::EMPTY, slide)
+                        && !can_king_escape_with_from_query(
+                            query,
+                            pos,
+                            them,
+                            from,
+                            to,
+                            Bitboard::EMPTY,
+                            slide,
+                        )
                         && !can_piece_capture(pos, them, to, pinned, slide)
                     {
                         return Some(Move::new_move(from, to, false));
@@ -407,13 +438,13 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                 continue;
             }
             let slide = occupied ^ Bitboard::from_square(from);
-            if !has_other_attacker(pos, us, from, to, slide) {
+            if !has_other_attacker(query, pos, us, from, to, slide) {
                 continue;
             }
             if pos.discovered(from, to, our_king, our_pinned) {
                 continue;
             }
-            if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
+            if can_king_escape_with_from_query(query, pos, them, from, to, bb_attacks, slide) {
                 continue;
             }
             if can_piece_capture(pos, them, to, pinned, slide) {
@@ -426,17 +457,33 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
     None
 }
 
-/// from以外にtoへ利いている自駒があるか
-fn has_other_attacker(
+// 香は候補 to に必ず利くため、旧経路の XOR と新経路の除外は同値。
+fn has_other_lance_attacker<const MODE: u8>(
+    query: &mut AttackQuery<MODE>,
     pos: &Position,
     us: Color,
     from: Square,
     to: Square,
     slide: Bitboard,
 ) -> bool {
-    let attackers = pos.attackers_to_color_occ(us, to, slide);
-    let attackers_wo_from = attackers & !Bitboard::from_square(from);
-    attackers_wo_from.is_not_empty()
+    if MODE == 0 {
+        return (pos.attackers_to_color_occ(us, to, slide) ^ Bitboard::from_square(from))
+            .is_not_empty();
+    }
+    debug_assert!(pos.attackers_to_color_occ(us, to, slide).contains(from));
+    query.attacked(pos, us, to, slide, Some(from))
+}
+
+/// from以外にtoへ利いている自駒があるか
+fn has_other_attacker<const MODE: u8>(
+    query: &mut AttackQuery<MODE>,
+    pos: &Position,
+    us: Color,
+    from: Square,
+    to: Square,
+    slide: Bitboard,
+) -> bool {
+    query.attacked(pos, us, to, slide, Some(from))
 }
 
 #[cfg(test)]

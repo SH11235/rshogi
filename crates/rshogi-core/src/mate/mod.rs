@@ -1,6 +1,10 @@
 // 1手詰め探索モジュール
 // YaneuraOuのmate1ply_without_effect.cppの移植
 
+mod attack_query;
+mod const_tables;
+#[cfg(test)]
+mod differential_tests;
 pub mod drop_mate;
 pub mod helpers;
 pub mod move_mate;
@@ -9,6 +13,39 @@ pub mod tables;
 use crate::bitboard::{BISHOP_STEP, Bitboard, RANK_BB, ROOK_STEP, king_effect, line_bb};
 use crate::position::Position;
 use crate::types::{Color, Move, Square};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// screening 用の 1 手詰め経路。既定では従来の利き集合を使う。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Mate1Mode {
+    /// 従来の利き集合による判定。
+    #[default]
+    Legacy = 0,
+    /// bool 問い合わせと遠方駒の候補ゲート。
+    Bool = 1,
+    /// bool 問い合わせに加え、敵玉近傍の近接利きを遅延構築する。
+    Context = 2,
+}
+
+impl Mate1Mode {
+    /// 隠し USI option `Mate1V2` の値を検証する。
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Legacy),
+            1 => Some(Self::Bool),
+            2 => Some(Self::Context),
+            _ => None,
+        }
+    }
+}
+
+static MATE1_MODE: AtomicU8 = AtomicU8::new(Mate1Mode::Legacy as u8);
+
+/// 全探索スレッドが停止している探索開始前に、1 手詰めの経路を設定する。
+pub fn set_mate1_mode(mode: Mate1Mode) {
+    MATE1_MODE.store(mode as u8, Ordering::Relaxed);
+}
 
 /// 成りが選択肢に入るか
 #[inline]
@@ -74,17 +111,30 @@ fn enemy_field(us: Color) -> Bitboard {
 /// 王手がかかっていない局面で1手詰めかどうかを判定する。
 /// 高速化のためのテーブルを利用し、やねうら王の簡易版ロジックに準拠する。
 pub fn mate_1ply(pos: &mut Position) -> Option<Move> {
+    // 入口の間接分岐 1 回だけで選択する。各経路内の MODE 分岐はコンパイル時に消える。
+    const IMPLEMENTATIONS: [fn(&Position) -> Option<Move>; 3] = [
+        mate_1ply_impl::<0>,
+        mate_1ply_impl::<1>,
+        mate_1ply_impl::<2>,
+    ];
+    // 保存される値は 0..=2。添字にも上限を与え、境界検査の分岐を不要にする。
+    let mode = MATE1_MODE.load(Ordering::Relaxed).min(2);
+    IMPLEMENTATIONS[usize::from(mode)](pos)
+}
+
+fn mate_1ply_impl<const MODE: u8>(pos: &Position) -> Option<Move> {
     // 王手がかかっている局面では判定しない
     if pos.in_check() {
         return None;
     }
 
     let us = pos.side_to_move();
-    if let Some(mv) = drop_mate::check_drop_mate(pos, us) {
+    let mut query = attack_query::AttackQuery::<MODE>::new();
+    if let Some(mv) = drop_mate::check_drop_mate_with_query(pos, us, &mut query) {
         return Some(mv);
     }
 
-    if let Some(mv) = move_mate::check_move_mate(pos, us) {
+    if let Some(mv) = move_mate::check_move_mate_with_query(pos, us, &mut query) {
         return Some(mv);
     }
 
@@ -93,12 +143,10 @@ pub fn mate_1ply(pos: &mut Position) -> Option<Move> {
 
 /// 1手詰め判定の初期化
 ///
-/// CHECK_CAND_BB、CHECK_AROUND_BB、NEXT_SQUAREテーブルを初期化する。
+/// 実行時に構築する NEXT_SQUARE テーブルを初期化する。
 /// この関数は起動時に一度だけ呼ばれる。
 pub fn init() {
     // LazyLockを使用するため、最初のアクセス時に自動的に初期化される
-    let _ = &*tables::CHECK_CAND_BB;
-    let _ = &*tables::CHECK_AROUND_BB;
     let _ = &*tables::NEXT_SQUARE;
 }
 
@@ -143,7 +191,10 @@ mod tests {
     fn mate_by_new(sfen: &str) -> Option<Move> {
         let mut pos = Position::new();
         pos.set_sfen(sfen).unwrap();
-        super::mate_1ply(&mut pos)
+        let expected = super::mate_1ply_impl::<0>(&pos);
+        assert_eq!(super::mate_1ply_impl::<1>(&pos), expected, "{sfen}");
+        assert_eq!(super::mate_1ply_impl::<2>(&pos), expected, "{sfen}");
+        expected
     }
 
     #[test]

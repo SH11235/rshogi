@@ -93,6 +93,8 @@ struct UsiEngine {
     eval_hash_size_mb: usize,
     /// EvalHash使用フラグ（UseEvalHashで変更）
     use_eval_hash: bool,
+    /// 隠し option Mate1V2。探索開始時にだけ適用する。
+    mate1_mode: rshogi_core::mate::Mate1Mode,
     /// EvalHash の確保時に Large Pages を試みるか。
     eval_hash_large_pages: bool,
     /// MultiPV値
@@ -195,6 +197,7 @@ impl UsiEngine {
             tt_size_mb,
             eval_hash_size_mb,
             use_eval_hash,
+            mate1_mode: rshogi_core::mate::Mate1Mode::default(),
             eval_hash_large_pages: true,
             multi_pv: 1,
             skill_options: rshogi_core::search::SkillOptions::default(),
@@ -929,6 +932,15 @@ impl UsiEngine {
                 self.use_eval_hash = v;
                 set_eval_hash_enabled(v);
             }
+            "Mate1V2" => {
+                if let Some(mode) =
+                    value.parse::<u8>().ok().and_then(rshogi_core::mate::Mate1Mode::from_u8)
+                {
+                    self.mate1_mode = mode;
+                } else {
+                    println!("info string Mate1V2 expects 0, 1 or 2");
+                }
+            }
             "MaxMovesToDraw" => {
                 if let Ok(v) = value.parse::<i32>()
                     && let Some(search) = self.search.as_mut()
@@ -1422,6 +1434,7 @@ impl UsiEngine {
         // bestmoveがstdoutに出力されるとGUIが混乱する（YaneuraOu準拠）
         self.stop_search_silently();
         self.reload_net_deltas_if_dirty()?;
+        rshogi_core::mate::set_mate1_mode(self.mate1_mode);
 
         // 制限を解析
         let limits = self.parse_go_options(tokens);
@@ -2259,6 +2272,33 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                 let search = engine.search.as_ref().expect("search exists");
                 assert_eq!(search.draw_value_black(), 123);
                 assert_eq!(search.draw_value_white(), -456);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn setoption_mate1_v2_validates_pending_mode() {
+        use rshogi_core::mate::Mate1Mode;
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut engine = UsiEngine::new();
+                assert_eq!(engine.mate1_mode, Mate1Mode::Legacy);
+                for (value, expected) in [
+                    ("1", Mate1Mode::Bool),
+                    ("2", Mate1Mode::Context),
+                    ("0", Mate1Mode::Legacy),
+                ] {
+                    engine.cmd_setoption(&["setoption", "name", "Mate1V2", "value", value]);
+                    assert_eq!(engine.mate1_mode, expected);
+                    for invalid in ["-1", "3", "256", "true", ""] {
+                        engine.cmd_setoption(&["setoption", "name", "Mate1V2", "value", invalid]);
+                        assert_eq!(engine.mate1_mode, expected);
+                    }
+                }
             })
             .unwrap()
             .join()

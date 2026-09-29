@@ -11,6 +11,15 @@ use rshogi_core::position::{Position, SFEN_HIRATE};
 use rshogi_core::search::{LimitsType, Search, SearchInfo};
 
 fn fixed_depth(name: &str) {
+    use rshogi_core::mate::{Mate1Mode, set_mate1_mode};
+    for mode in [Mate1Mode::Legacy, Mate1Mode::Bool, Mate1Mode::Context] {
+        set_mate1_mode(mode);
+        fixed_depth_in_mode(name, mode);
+    }
+    set_mate1_mode(Mate1Mode::Legacy);
+}
+
+fn fixed_depth_in_mode(name: &str, mode: rshogi_core::mate::Mate1Mode) {
     for (index, sfen) in [
         SFEN_HIRATE,
         "4k4/9/2p3p2/3p1p3/4P4/3P1P3/2P3P2/9/4K4 b RBrb 1",
@@ -37,7 +46,7 @@ fn fixed_depth(name: &str) {
             .lines()
             .find(|line| line.starts_with(&prefix))
             .expect("比較対象の探索結果が必要");
-        assert_eq!(actual, expected);
+        assert_eq!(actual, expected, "Mate1V2={mode:?}");
     }
 }
 
