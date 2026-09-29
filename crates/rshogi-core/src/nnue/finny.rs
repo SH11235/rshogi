@@ -86,6 +86,8 @@ pub(super) fn piece_list_diff_mask(
 }
 
 /// 差分スロットを昇順に列挙し、ZEROを除いた特徴量indexを集める。
+///
+/// 呼び出し元は `removed` と `added` を空にしておく必要がある。
 #[inline]
 pub(super) fn collect_piece_list_diff<FI: Fn(BonaPiece) -> usize>(
     cached: &[BonaPiece; PieceNumber::NB],
@@ -94,6 +96,7 @@ pub(super) fn collect_piece_list_diff<FI: Fn(BonaPiece) -> usize>(
     removed: &mut IndexList<{ PieceNumber::NB }>,
     added: &mut IndexList<{ PieceNumber::NB }>,
 ) {
+    debug_assert!(removed.is_empty() && added.is_empty());
     let removed_ptr = removed.as_mut_ptr();
     let added_ptr = added.as_mut_ptr();
     let mut removed_len = 0;

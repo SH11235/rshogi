@@ -13,7 +13,9 @@ use super::accumulator_layer_stacks::{
 use super::bona_piece::BonaPiece;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::MAX_LAYER_STACK_BUCKETS;
-use super::features::{Feature, FeatureSet};
+#[cfg(not(feature = "nnue-effect-bucket"))]
+use super::features::Feature;
+use super::features::FeatureSet;
 use super::leb128::read_layer_stacks_ft_i16;
 use super::ls_feature_spec::LsFeatureSpec;
 use super::piece_list::PieceNumber;
@@ -85,7 +87,7 @@ fn append_active_indices<FT: LsFeatureSpec>(
 }
 
 #[inline]
-#[cfg(test)]
+#[cfg(all(test, not(feature = "nnue-effect-bucket")))]
 fn feature_index_from_bona_piece<FT: LsFeatureSpec>(
     bp: BonaPiece,
     perspective: Color,
