@@ -131,8 +131,7 @@ impl Position {
         self.compute_hash();
 
         // pin情報と王手マスの更新
-        self.update_blockers_and_pinners();
-        self.update_check_squares();
+        self.set_check_info::<false>();
 
         // 盤面の利き数を再計算
         self.recompute_board_effects();
