@@ -797,6 +797,16 @@ impl UsiEngine {
         }
 
         match name.as_str() {
+            // screening 用。usi の option 一覧には載せない。
+            "ProgQ16Simd" => {
+                let result = value
+                    .parse::<u8>()
+                    .map_err(|_| "ProgQ16Simd must be 0, 1 or 2".to_string())
+                    .and_then(rshogi_core::nnue::set_progress_q16_simd_mode);
+                if let Err(err) = result {
+                    eprintln!("info string Warning: {err}");
+                }
+            }
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;

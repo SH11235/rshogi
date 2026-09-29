@@ -528,13 +528,16 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         stored_buckets: usize,
     ) -> usize {
         use super::progress_q16::{
-            compute_half, half_delta, progress_q16_sum_to_bucket, routing_bucket_count, weight_row,
+            compute_half, half_delta, progress_q16_simd_mode, progress_q16_sum_to_bucket,
+            routing_bucket_count, weight_row,
         };
-        const MAX_Q16_PATH: usize = 8;
+        const MAX_Q16_PATH: usize = 16;
         let count = routing_bucket_count(stored_buckets);
         if count == 1 {
             return 0;
         }
+        let mode = progress_q16_simd_mode();
+        let max_path = if mode == 2 { MAX_Q16_PATH } else { 8 };
         let weights = self
             .progress_q16_weights
             .as_deref()
@@ -554,7 +557,7 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
                 if entry.progress_q16_valid & mask != 0 {
                     break Some(entry.progress_q16[p]);
                 }
-                if length == MAX_Q16_PATH || entry.dirty_piece.king_moved[p] {
+                if length == max_path || entry.dirty_piece.king_moved[p] {
                     break None;
                 }
                 let Some(previous) = entry.previous else {
@@ -577,7 +580,7 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
                 }
             } else {
                 let entry = &mut self.entries[self.current];
-                entry.progress_q16[p] = compute_half(pos, perspective, row);
+                entry.progress_q16[p] = compute_half(pos, perspective, row, mode);
                 entry.progress_q16_valid |= mask;
             }
         }

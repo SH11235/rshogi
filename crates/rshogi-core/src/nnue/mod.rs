@@ -86,7 +86,7 @@ pub(crate) mod threat_features;
 pub use progress_q16::{
     compute_progresskpabs_q16_sum, load_progress_coeff_kpabs_q16_from_bytes,
     progress_q16_sum_to_bucket, reset_layer_stack_progress_kpabs_q16_weights,
-    set_layer_stack_progress_kpabs_q16_weights,
+    set_layer_stack_progress_kpabs_q16_weights, set_progress_q16_simd_mode,
 };
 
 #[cfg(feature = "halfkx-arch")]

@@ -11,8 +11,24 @@ use crate::position::Position;
 use crate::types::Color;
 #[cfg(test)]
 use crate::types::PieceType;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 static WEIGHTS: RwLock<Option<Arc<[i32]>>> = RwLock::new(None);
+static SIMD_MODE: AtomicU8 = AtomicU8::new(1);
+
+/// screening 用の全走査方式。0: scalar、1: SIMD、2: SIMD + 遡及上限16手。
+/// 探索停止中に設定する。整数の部分和・bucket はどの方式でも同じ。
+pub fn set_progress_q16_simd_mode(mode: u8) -> Result<(), String> {
+    if mode > 2 {
+        return Err("ProgQ16Simd must be 0, 1 or 2".to_string());
+    }
+    SIMD_MODE.store(mode, Ordering::Relaxed);
+    Ok(())
+}
+
+pub(crate) fn progress_q16_simd_mode() -> u8 {
+    SIMD_MODE.load(Ordering::Relaxed)
+}
 
 /// 探索開始時に取得する不変の係数。再設定後も既存の探索は同じ配列を参照する。
 pub(crate) fn snapshot_weights() -> Option<Arc<[i32]>> {
@@ -125,9 +141,12 @@ pub(crate) fn bucket_with_weights(
 /// 盤上・持駒の両視点の係数を i64 で合算する。float 差分キャッシュは使用しない。
 pub fn compute_progresskpabs_q16_sum(pos: &Position, weights: &[i32]) -> i64 {
     assert_eq!(weights.len(), SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS);
+    let mode = progress_q16_simd_mode();
     [Color::Black, Color::White]
         .into_iter()
-        .map(|perspective| compute_half(pos, perspective, weight_row(pos, perspective, weights)))
+        .map(|perspective| {
+            compute_half(pos, perspective, weight_row(pos, perspective, weights), mode)
+        })
         .sum()
 }
 
@@ -142,16 +161,124 @@ pub(crate) fn weight_row<'a>(pos: &Position, perspective: Color, weights: &'a [i
     &weights[square * FE_OLD_END..(square + 1) * FE_OLD_END]
 }
 
-pub(crate) fn compute_half(pos: &Position, perspective: Color, row: &[i32]) -> i64 {
+const HALF_PIECES: usize = super::piece_list::PieceNumber::KING as usize;
+// 玉を除いた BonaPiece の最大値は E_DRAGON + 80 = 1547。
+const _: () = assert!(super::bona_piece::E_DRAGON as usize + 81 == FE_OLD_END);
+
+pub(crate) fn compute_half(pos: &Position, perspective: Color, row: &[i32], mode: u8) -> i64 {
     let list = if perspective == Color::Black {
         pos.piece_list().piece_list_fb()
     } else {
         pos.piece_list().piece_list_fw()
     };
-    list[..super::piece_list::PieceNumber::KING as usize]
-        .iter()
-        .map(|&bp| coefficient(row, bp))
-        .sum()
+    let pieces: &[BonaPiece; HALF_PIECES] = list[..HALF_PIECES].try_into().unwrap();
+    assert_eq!(row.len(), FE_OLD_END);
+    if mode != 0 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx512f") {
+                // SAFETY: CPU 判定済み。固定長の入力と係数行を渡し、kernel 内で
+                // 非ZERO添字の範囲も確認してから gather する。
+                return unsafe { simd::avx512(pieces, row) };
+            }
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: CPU 判定済み。入力長・行長と添字範囲は上記と同じ。
+                return unsafe { simd::avx2(pieces, row) };
+            }
+        }
+    }
+    scalar_half(pieces, row)
+}
+
+fn scalar_half(pieces: &[BonaPiece; HALF_PIECES], row: &[i32]) -> i64 {
+    pieces.iter().map(|&bp| coefficient(row, bp)).sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+mod simd {
+    use super::{BonaPiece, FE_OLD_END, HALF_PIECES};
+    use std::arch::x86_64::*;
+
+    /// # Safety
+    /// CPU が AVX-512F に対応していること。
+    #[target_feature(enable = "avx512f")]
+    pub(super) unsafe fn avx512(pieces: &[BonaPiece; HALF_PIECES], row: &[i32]) -> i64 {
+        assert_eq!(row.len(), FE_OLD_END);
+        // SAFETY: BonaPiece は repr(transparent) の u16。完全な16要素ずつと、
+        // ZERO埋めした端数の配列だけを unaligned load する。gather 前に全添字が
+        // row 内であることを確認し、ZERO は mask で読み飛ばす。
+        // 最大38個の i32 は i64 に拡張してから足すため、どの加算も overflow しない。
+        unsafe {
+            let zero = _mm512_setzero_si512();
+            let mut sum = zero;
+            for offset in (0..HALF_PIECES).step_by(16) {
+                let mut tail = [BonaPiece::ZERO; 16];
+                let ptr = if offset + 16 <= HALF_PIECES {
+                    pieces.as_ptr().add(offset)
+                } else {
+                    tail[..HALF_PIECES - offset].copy_from_slice(&pieces[offset..]);
+                    tail.as_ptr()
+                };
+                let indices = _mm512_cvtepu16_epi32(_mm256_loadu_si256(ptr.cast()));
+                assert_eq!(
+                    _mm512_cmplt_epi32_mask(indices, _mm512_set1_epi32(FE_OLD_END as i32)),
+                    u16::MAX,
+                    "Q16 BonaPiece out of range"
+                );
+                let active = _mm512_cmpneq_epi32_mask(indices, zero);
+                let values =
+                    _mm512_mask_i32gather_epi32::<4>(zero, active, indices, row.as_ptr().cast());
+                sum = _mm512_add_epi64(sum, _mm512_cvtepi32_epi64(_mm512_castsi512_si256(values)));
+                sum = _mm512_add_epi64(
+                    sum,
+                    _mm512_cvtepi32_epi64(_mm512_extracti64x4_epi64::<1>(values)),
+                );
+            }
+            _mm512_reduce_add_epi64(sum)
+        }
+    }
+
+    /// # Safety
+    /// CPU が AVX2 に対応していること。
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn avx2(pieces: &[BonaPiece; HALF_PIECES], row: &[i32]) -> i64 {
+        assert_eq!(row.len(), FE_OLD_END);
+        // SAFETY: repr(transparent) の u16 を8要素ずつ読む。端数は8要素の配列に
+        // ZERO埋めし、gather 前に添字範囲を確認する。ZERO は mask で読まない。
+        // i32 係数は加算前に i64 へ拡張し、最大38要素の和は i64 内に収まる。
+        unsafe {
+            let zero = _mm256_setzero_si256();
+            let mut sum = zero;
+            for offset in (0..HALF_PIECES).step_by(8) {
+                let mut tail = [BonaPiece::ZERO; 8];
+                let ptr = if offset + 8 <= HALF_PIECES {
+                    pieces.as_ptr().add(offset)
+                } else {
+                    tail[..HALF_PIECES - offset].copy_from_slice(&pieces[offset..]);
+                    tail.as_ptr()
+                };
+                let indices = _mm256_cvtepu16_epi32(_mm_loadu_si128(ptr.cast()));
+                assert_eq!(
+                    _mm256_movemask_epi8(_mm256_cmpgt_epi32(
+                        _mm256_set1_epi32(FE_OLD_END as i32),
+                        indices,
+                    )),
+                    -1,
+                    "Q16 BonaPiece out of range"
+                );
+                let active = _mm256_cmpgt_epi32(indices, zero);
+                let values = _mm256_mask_i32gather_epi32::<4>(zero, row.as_ptr(), indices, active);
+                sum = _mm256_add_epi64(sum, _mm256_cvtepi32_epi64(_mm256_castsi256_si128(values)));
+                sum = _mm256_add_epi64(
+                    sum,
+                    _mm256_cvtepi32_epi64(_mm256_extracti128_si256::<1>(values)),
+                );
+            }
+            let mut lanes = [0i64; 4];
+            _mm256_storeu_si256(lanes.as_mut_ptr().cast(), sum);
+            lanes.iter().sum()
+        }
+    }
 }
 
 #[inline]
@@ -245,6 +372,137 @@ pub(super) fn reference_board_sums(pos: &Position, weights: &[i32]) -> [i64; 2] 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_half_kernels(pieces: &[BonaPiece; HALF_PIECES], row: &[i32]) {
+        let expected = scalar_half(pieces, row);
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx512f") {
+                // SAFETY: CPU 判定済み。kernel が入力長と添字範囲を検証する。
+                assert_eq!(unsafe { simd::avx512(pieces, row) }, expected);
+            }
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: CPU 判定済み。kernel が入力長と添字範囲を検証する。
+                assert_eq!(unsafe { simd::avx2(pieces, row) }, expected);
+            }
+        }
+        assert_eq!(
+            pieces
+                .iter()
+                .filter(|&&bp| bp != BonaPiece::ZERO)
+                .map(|bp| i64::from(row[bp.value() as usize]))
+                .sum::<i64>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn gather_extremes_zero_and_every_index_match_scalar() {
+        for value in [i32::MIN, i32::MAX] {
+            let mut row = vec![value; FE_OLD_END];
+            row[0] = !value;
+            check_half_kernels(&[BonaPiece::ZERO; HALF_PIECES], &row);
+            // すべての有効添字を全 lane（端数を含む）に置き、i32 和の範囲を超える。
+            for bp in 1..FE_OLD_END {
+                let mut pieces = [BonaPiece::new(bp as u16); HALF_PIECES];
+                check_half_kernels(&pieces, &row);
+                for index in (0..HALF_PIECES).step_by(3) {
+                    pieces[index] = BonaPiece::ZERO;
+                }
+                check_half_kernels(&pieces, &row);
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn gather_rejects_out_of_range_indices_before_loading() {
+        let row = [0; FE_OLD_END];
+        for value in [FE_OLD_END as u16, u16::MAX] {
+            for index in 0..HALF_PIECES {
+                let mut pieces = [BonaPiece::ZERO; HALF_PIECES];
+                pieces[index] = BonaPiece::new(value);
+                if is_x86_feature_detected!("avx512f") {
+                    // SAFETY: CPU 判定済み。不正添字は kernel の検査で panic する。
+                    assert!(
+                        std::panic::catch_unwind(|| unsafe { simd::avx512(&pieces, &row) })
+                            .is_err()
+                    );
+                }
+                if is_x86_feature_detected!("avx2") {
+                    // SAFETY: CPU 判定済み。不正添字は kernel の検査で panic する。
+                    assert!(
+                        std::panic::catch_unwind(|| unsafe { simd::avx2(&pieces, &row) }).is_err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn simd_mode_rejects_invalid_values_without_changing_setting() {
+        let _guard = super::super::network::layer_stack_routing_test_guard();
+        for mode in 0..=2 {
+            set_progress_q16_simd_mode(mode).unwrap();
+            assert_eq!(progress_q16_simd_mode(), mode);
+            for invalid in [3, u8::MAX] {
+                assert!(set_progress_q16_simd_mode(invalid).is_err());
+                assert_eq!(progress_q16_simd_mode(), mode);
+            }
+        }
+        set_progress_q16_simd_mode(1).unwrap();
+    }
+
+    #[test]
+    fn random_simd_halves_match_scalar_and_board_scan() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x5131_3653_494d_4400);
+        let weights: Vec<i32> =
+            (0..SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS).map(|_| rng.random()).collect();
+        for game in 0..24 {
+            let mut pos = Position::new();
+            pos.set_sfen(
+                [
+                    crate::position::SFEN_HIRATE,
+                    "4k4/9/6p2/9/9/9/2P6/9/4K4 b RBGSNLrbgsnl 1",
+                    "k8/9/9/9/9/9/9/9/8K b 2R2B4G4S4N4L18P 1",
+                    "8k/9/9/9/9/9/9/9/K8 w 2r2b4g4s4n4l18p 1",
+                ][game % 4],
+            )
+            .unwrap();
+            for _ in 0..100 {
+                let expected = reference_board_sums(&pos, &weights);
+                for perspective in [Color::Black, Color::White] {
+                    let row = weight_row(&pos, perspective, &weights);
+                    let list = if perspective == Color::Black {
+                        pos.piece_list().piece_list_fb()
+                    } else {
+                        pos.piece_list().piece_list_fw()
+                    };
+                    assert!(
+                        list[..HALF_PIECES].iter().all(|bp| (bp.value() as usize) < FE_OLD_END)
+                    );
+                    check_half_kernels(list[..HALF_PIECES].try_into().unwrap(), row);
+                    for mode in 0..=2 {
+                        assert_eq!(
+                            compute_half(&pos, perspective, row, mode),
+                            expected[perspective.index()]
+                        );
+                    }
+                }
+                let mut moves = MoveList::new();
+                generate_legal_all(&pos, &mut moves);
+                if moves.is_empty() {
+                    break;
+                }
+                let mv = moves.at(rng.random_range(0..moves.len()));
+                pos.do_move(mv, pos.gives_check(mv));
+            }
+        }
+    }
 
     #[test]
     fn fixed_thresholds_match_yo_for_every_supported_bucket_count() {
@@ -419,6 +677,14 @@ mod incremental_tests {
     #[test]
     fn random_incremental_halves_match_board_scan() {
         let _guard = layer_stack_routing_test_guard();
+        for mode in 0..=2 {
+            set_progress_q16_simd_mode(mode).unwrap();
+            random_incremental_halves_for_mode();
+        }
+        set_progress_q16_simd_mode(1).unwrap();
+    }
+
+    fn random_incremental_halves_for_mode() {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0051_3136_4c46);
         let weights: Vec<i32> = (0..SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS)
             .map(|i| match i % 97 {
@@ -436,11 +702,14 @@ mod incremental_tests {
         let mut nulls = 0;
         for game in 0..200 {
             let mut pos = Position::new();
-            pos.set_sfen(if game % 2 == 0 {
-                crate::position::SFEN_HIRATE
-            } else {
-                "4k4/9/6p2/9/9/9/2P6/9/4K4 b RBGSNLrbgsnl 1"
-            })
+            pos.set_sfen(
+                [
+                    crate::position::SFEN_HIRATE,
+                    "4k4/9/6p2/9/9/9/2P6/9/4K4 b RBGSNLrbgsnl 1",
+                    "k8/9/9/9/9/9/9/9/8K b 2R2B4G4S4N4L18P 1",
+                    "8k/9/9/9/9/9/9/9/K8 w 2r2b4g4s4n4l18p 1",
+                ][game % 4],
+            )
             .unwrap();
             eager.reset();
             lazy.reset();
@@ -479,8 +748,8 @@ mod incremental_tests {
                 lazy.current_mut().dirty_piece = dirty;
                 played.push(mv);
                 check(&pos, &mut eager, &weights);
-                // 8 手の上限内外と、未評価の祖先を経由する経路を交互に通す。
-                if ply % [1, 8, 9, 17][game % 4] == 0 {
+                // 8 / 16 手の上限内外と、未評価の祖先を経由する経路を通す。
+                if ply % [1, 8, 9, 16, 17][game % 5] == 0 {
                     check(&pos, &mut lazy, &weights);
                 }
                 if ply % 7 == 6 {
@@ -546,7 +815,8 @@ mod incremental_tests {
         let mut pos = Position::new();
         pos.set_hirate();
         let mut stack = AccumulatorStackLayerStacks::<32>::new();
-        for depth in [8, 9] {
+        for (mode, depth) in (0..=2).flat_map(|mode| [8, 9, 16, 17].map(|depth| (mode, depth))) {
+            set_progress_q16_simd_mode(mode).unwrap();
             stack.reset();
             check(&pos, &mut stack, &weights);
             for _ in 0..depth {
@@ -557,13 +827,18 @@ mod incremental_tests {
             for index in 1..depth {
                 assert_eq!(
                     stack.entry_at(index).progress_q16_valid,
-                    if depth == 8 { 3 } else { 0 }
+                    if depth <= if mode == 2 { 16 } else { 8 } {
+                        3
+                    } else {
+                        0
+                    }
                 );
             }
             for _ in 0..depth {
                 pos.undo_null_move();
             }
         }
+        set_progress_q16_simd_mode(1).unwrap();
         stack.reset();
         check(&pos, &mut stack, &weights);
         for usi in ["5i6h", "null", "6h5i", "null"] {

@@ -55,6 +55,14 @@ bullet-shogi や nnue-pytorch のモデルも、生成ソフト名だけでな�
 - tatara と YaneuraOu 系の進行度方式は計算結果が異なるため、同じ係数ファイルでも置き換えて使わないでください。
 - YaneuraOu と BulletOu の進行度方式が一致するバケット数は2・4・8・16です。k3k3 と進行度を組み合わせた方式は未対応です。
 
+Q16 全走査の比較用に、隠し USI option `ProgQ16Simd` を用意しています。
+`setoption name ProgQ16Simd value 0` でスカラー、`1`（既定）で SIMD、
+`2` で SIMD と静的 LayerStacks の差分遡及上限16手を選びます（0・1 は8手）。
+SIMD は実行時に AVX-512F、AVX2、スカラーの順に選びます。
+どの値でも整数の部分和と bucket は一致します。探索停止中に設定してください。
+この option は screening 用の一時的な切替で、`usi` の一覧には表示しません。
+速度改善の有無は対象マシンで別途計測が必要です。
+
 SFNN の振り分け方式への対応と、ファイル形式の互換性は別です。
 YaneuraOu SFNN 形式のファイルは、rshogi で読み込める形式への変換が必要です。
 tools の native 評価経路には Q16 未対応のものがあります。
