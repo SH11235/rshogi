@@ -56,6 +56,7 @@ mod layer_stacks;
 mod layers;
 mod leb128;
 mod ls_feature_spec;
+mod ls_l1_kernel;
 #[cfg(all(windows, feature = "prepacked-nnue"))]
 mod mapped_weights;
 pub mod net_bin_layout;

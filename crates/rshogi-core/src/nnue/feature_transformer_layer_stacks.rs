@@ -13,7 +13,9 @@ use super::accumulator_layer_stacks::{
 use super::bona_piece::BonaPiece;
 #[cfg(feature = "nnue-psqt")]
 use super::constants::MAX_LAYER_STACK_BUCKETS;
-use super::features::{Feature, FeatureSet};
+#[cfg(not(feature = "nnue-effect-bucket"))]
+use super::features::Feature;
+use super::features::FeatureSet;
 use super::leb128::read_layer_stacks_ft_i16;
 use super::ls_feature_spec::LsFeatureSpec;
 use super::piece_list::PieceNumber;
@@ -28,6 +30,10 @@ use crate::position::Position;
 use crate::types::Color;
 use std::io::{self, Read};
 use std::marker::PhantomData;
+
+#[cfg(all(test, not(feature = "nnue-effect-bucket")))]
+#[path = "ls_finny_tests.rs"]
+mod ls_finny_tests;
 
 /// 特徴インデックスの範囲外アクセス時のパニック
 #[cold]
@@ -44,12 +50,23 @@ fn append_changed_indices<FT: LsFeatureSpec>(
     removed: &mut IndexList<MAX_CHANGED_FEATURES>,
     added: &mut IndexList<MAX_CHANGED_FEATURES>,
 ) {
-    <FT::Feature as Feature>::append_changed_indices(
-        dirty_piece,
-        perspective,
-        king_sq,
-        removed,
+    let indexer = FT::feature_indexer(perspective, king_sq);
+    let index = |bp: BonaPiece| {
+        (bp != BonaPiece::ZERO
+            && (FT::INCLUDE_KING_IN_PIECE_LIST
+                || (bp.value() as usize) < super::bona_piece::FE_END))
+            .then(|| indexer(bp))
+    };
+    removed.extend_pairs(
         added,
+        (0..dirty_piece.dirty_num as usize).map(|i| {
+            let cp = &dirty_piece.changed_piece[i];
+            if perspective == Color::Black {
+                (index(cp.old_piece.fb), index(cp.new_piece.fb))
+            } else {
+                (index(cp.old_piece.fw), index(cp.new_piece.fw))
+            }
+        }),
     );
 }
 
@@ -70,6 +87,7 @@ fn append_active_indices<FT: LsFeatureSpec>(
 }
 
 #[inline]
+#[cfg(all(test, not(feature = "nnue-effect-bucket")))]
 fn feature_index_from_bona_piece<FT: LsFeatureSpec>(
     bp: BonaPiece,
     perspective: Color,
@@ -257,6 +275,28 @@ fn psqt_add_or_sub<const ADD: bool>(
 }
 
 impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
+    /// 入力済み accumulator の出力変換テスト用。refresh / update 用の重みは持たない。
+    #[cfg(test)]
+    pub(crate) fn for_output_transform_tests() -> Self {
+        Self {
+            biases: Aligned([0; L1]),
+            weights: AlignedBox::new_zeroed(0).into(),
+            #[cfg(feature = "nnue-psqt")]
+            psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
+            #[cfg(feature = "nnue-psqt")]
+            psqt_num_buckets: 0,
+            #[cfg(feature = "nnue-psqt")]
+            psqt_weights: AlignedBox::new_zeroed(0).into(),
+            #[cfg(feature = "nnue-psqt")]
+            has_psqt: false,
+            #[cfg(feature = "nnue-threat")]
+            threat_weights: AlignedBox::new_zeroed(0).into(),
+            #[cfg(feature = "nnue-threat")]
+            has_threat: false,
+            _ft: PhantomData,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_accumulator_tests() -> Self {
         Self {
@@ -1160,7 +1200,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             &piece_list_owned
         };
 
-        let idx_fn = move |bp: BonaPiece| FT::feature_index(bp, perspective, king_sq);
+        let idx_fn = FT::feature_indexer(perspective, king_sq);
 
         #[cfg(feature = "nnue-psqt")]
         if self.has_psqt {
@@ -1182,13 +1222,12 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         }
 
         cache.refresh_or_cache(
-            king_sq,
-            perspective,
+            (king_sq, perspective),
             piece_list,
             &self.biases.0,
             accumulation,
+            &self.weights,
             idx_fn,
-            |acc, removed, added| self.apply_weight_changes_tiled(acc, removed, added),
         );
     }
 
@@ -1343,150 +1382,6 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         stack.current_mut().accumulator.computed_accumulation = true;
         stack.current_mut().accumulator.computed_score = false;
         true
-    }
-
-    /// 複数featureの差分をaccumulatorのtile単位でまとめて適用する。
-    #[inline]
-    fn apply_weight_changes_tiled(
-        &self,
-        accumulation: &mut [i16; L1],
-        removed: &IndexList<{ PieceNumber::NB }>,
-        added: &IndexList<{ PieceNumber::NB }>,
-    ) {
-        if removed.is_empty() && added.is_empty() {
-            return;
-        }
-
-        // AVX-512 BW: zmm (32 x i16) × 8 本 = 256 要素 tile。
-        // zmm は 32 本あるため tile 8 本ではレジスタ圧力にならず、spill ゼロで
-        // 各 tile の acc load/store を 1 回に抑える (per-index 方式の 1/R)。
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "avx512bw"
-        ))]
-        {
-            const VALUES_PER_REG: usize = 32;
-            const TILE_REGS: usize = 8;
-            const TILE_VALUES: usize = VALUES_PER_REG * TILE_REGS;
-
-            if L1.is_multiple_of(TILE_VALUES) {
-                // SAFETY:
-                // - accumulationとweight rowは64-byte alignedで、tile offsetは512-byte単位
-                //   (256 要素 × 2 bytes)。よって各 zmm load/store は 64-byte aligned。
-                // - L1がTILE_VALUESの倍数のときだけ入るため、各load/storeは配列内に収まる。
-                // - weight_rowが各feature indexとrow長L1の境界を検証する。
-                unsafe {
-                    use std::arch::x86_64::*;
-
-                    let acc_ptr = accumulation.as_mut_ptr();
-                    for tile_offset in (0..L1).step_by(TILE_VALUES) {
-                        let mut tile = [_mm512_setzero_si512(); TILE_REGS];
-                        for (k, value) in tile.iter_mut().enumerate() {
-                            *value = _mm512_load_si512(
-                                acc_ptr.add(tile_offset + k * VALUES_PER_REG) as *const __m512i,
-                            );
-                        }
-
-                        for index in removed.iter() {
-                            let weights = self.weight_row(index);
-                            let weight_ptr = weights.as_ptr().add(tile_offset);
-                            for (k, value) in tile.iter_mut().enumerate() {
-                                let weight = _mm512_load_si512(
-                                    weight_ptr.add(k * VALUES_PER_REG) as *const __m512i
-                                );
-                                *value = _mm512_sub_epi16(*value, weight);
-                            }
-                        }
-                        for index in added.iter() {
-                            let weights = self.weight_row(index);
-                            let weight_ptr = weights.as_ptr().add(tile_offset);
-                            for (k, value) in tile.iter_mut().enumerate() {
-                                let weight = _mm512_load_si512(
-                                    weight_ptr.add(k * VALUES_PER_REG) as *const __m512i
-                                );
-                                *value = _mm512_add_epi16(*value, weight);
-                            }
-                        }
-
-                        for (k, &value) in tile.iter().enumerate() {
-                            _mm512_store_si512(
-                                acc_ptr.add(tile_offset + k * VALUES_PER_REG) as *mut __m512i,
-                                value,
-                            );
-                        }
-                    }
-                }
-                return;
-            }
-        }
-
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx2",
-            not(target_feature = "avx512bw")
-        ))]
-        {
-            const VALUES_PER_REG: usize = 16;
-            const TILE_REGS: usize = 16;
-            const TILE_VALUES: usize = VALUES_PER_REG * TILE_REGS;
-
-            if L1.is_multiple_of(TILE_VALUES) {
-                // SAFETY:
-                // - accumulationとweight rowは64-byte alignedで、tile offsetは512-byte単位。
-                // - L1がTILE_VALUESの倍数のときだけ入るため、各load/storeは配列内に収まる。
-                // - weight_rowが各feature indexとrow長L1の境界を検証する。
-                unsafe {
-                    use std::arch::x86_64::*;
-
-                    let acc_ptr = accumulation.as_mut_ptr();
-                    for tile_offset in (0..L1).step_by(TILE_VALUES) {
-                        let mut tile = [_mm256_setzero_si256(); TILE_REGS];
-                        for (k, value) in tile.iter_mut().enumerate() {
-                            *value = _mm256_load_si256(
-                                acc_ptr.add(tile_offset + k * VALUES_PER_REG) as *const __m256i,
-                            );
-                        }
-
-                        for index in removed.iter() {
-                            let weights = self.weight_row(index);
-                            let weight_ptr = weights.as_ptr().add(tile_offset);
-                            for (k, value) in tile.iter_mut().enumerate() {
-                                let weight = _mm256_load_si256(
-                                    weight_ptr.add(k * VALUES_PER_REG) as *const __m256i
-                                );
-                                *value = _mm256_sub_epi16(*value, weight);
-                            }
-                        }
-                        for index in added.iter() {
-                            let weights = self.weight_row(index);
-                            let weight_ptr = weights.as_ptr().add(tile_offset);
-                            for (k, value) in tile.iter_mut().enumerate() {
-                                let weight = _mm256_load_si256(
-                                    weight_ptr.add(k * VALUES_PER_REG) as *const __m256i
-                                );
-                                *value = _mm256_add_epi16(*value, weight);
-                            }
-                        }
-
-                        for (k, &value) in tile.iter().enumerate() {
-                            _mm256_store_si256(
-                                acc_ptr.add(tile_offset + k * VALUES_PER_REG) as *mut __m256i,
-                                value,
-                            );
-                        }
-                    }
-                }
-                return;
-            }
-        }
-
-        for index in removed.iter() {
-            self.sub_weights(accumulation, index);
-        }
-        for index in added.iter() {
-            self.add_weights(accumulation, index);
-        }
     }
 
     /// 重みを累積値に加算（SIMD最適化版）
@@ -1661,6 +1556,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             return false;
         }
 
+        let indexer = FT::feature_indexer(perspective, king_sq);
         let changed = &dirty_piece.changed_piece;
         let old_new = |idx: usize| {
             let entry = &changed[idx];
@@ -1703,10 +1599,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
             1 => {
                 let (old_bp, new_bp) = old_new(0);
                 if old_bp != BonaPiece::ZERO && new_bp != BonaPiece::ZERO {
-                    let sub_index =
-                        feature_index_from_bona_piece::<FT>(old_bp, perspective, king_sq);
-                    let add_index =
-                        feature_index_from_bona_piece::<FT>(new_bp, perspective, king_sq);
+                    let sub_index = indexer(old_bp);
+                    let add_index = indexer(new_bp);
                     if FROM_SOURCE {
                         self.apply_sub_add_fused_from_source(
                             source.expect("source is present when FROM_SOURCE is true"),
@@ -1730,14 +1624,10 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     && old_bp1 != BonaPiece::ZERO
                     && new_bp1 != BonaPiece::ZERO
                 {
-                    let sub_index0 =
-                        feature_index_from_bona_piece::<FT>(old_bp0, perspective, king_sq);
-                    let add_index0 =
-                        feature_index_from_bona_piece::<FT>(new_bp0, perspective, king_sq);
-                    let sub_index1 =
-                        feature_index_from_bona_piece::<FT>(old_bp1, perspective, king_sq);
-                    let add_index1 =
-                        feature_index_from_bona_piece::<FT>(new_bp1, perspective, king_sq);
+                    let sub_index0 = indexer(old_bp0);
+                    let add_index0 = indexer(new_bp0);
+                    let sub_index1 = indexer(old_bp1);
+                    let add_index1 = indexer(new_bp1);
                     if FROM_SOURCE {
                         self.apply_double_sub_add_fused_from_source(
                             source.expect("source is present when FROM_SOURCE is true"),
@@ -2334,8 +2224,29 @@ mod tests {
     }
 
     #[cfg(not(feature = "nnue-effect-bucket"))]
+    impl FeatureTransformerLayerStacks<TEST_L1, TestSpec> {
+        fn check_weight_changes_to_two(
+            &self,
+            cache: &mut [i16; TEST_L1],
+            removed: &IndexList<{ PieceNumber::NB }>,
+            added: &IndexList<{ PieceNumber::NB }>,
+        ) {
+            let mut output = [0; TEST_L1];
+            super::super::finny::apply_weight_changes_to_two::<TEST_L1>(
+                cache,
+                None,
+                &mut output,
+                &self.weights,
+                removed,
+                added,
+            );
+            assert_eq!(*cache, output);
+        }
+    }
+
+    #[cfg(not(feature = "nnue-effect-bucket"))]
     #[test]
-    fn test_apply_weight_changes_tiled_matches_sequential_with_wrapping() {
+    fn test_check_weight_changes_to_two_matches_sequential_with_wrapping() {
         let mut ft = make_test_transformer();
         for (index, seed) in [0usize, 1, 2, 3].into_iter().zip([31i16, -47, 83, -109]) {
             fill_weight_row(&mut ft, index, seed);
@@ -2364,7 +2275,7 @@ mod tests {
         for index in added.iter() {
             ft.add_weights(&mut sequential.0, index);
         }
-        ft.apply_weight_changes_tiled(&mut tiled.0, &removed, &added);
+        ft.check_weight_changes_to_two(&mut tiled.0, &removed, &added);
 
         assert_eq!(sequential.0, tiled.0);
     }
@@ -2372,7 +2283,7 @@ mod tests {
     /// removed/added が両方空のときは accumulator が bit 単位で不変であること。
     #[cfg(not(feature = "nnue-effect-bucket"))]
     #[test]
-    fn test_apply_weight_changes_tiled_empty_lists_is_noop() {
+    fn test_check_weight_changes_to_two_empty_lists_is_noop() {
         let mut ft = make_test_transformer();
         fill_weight_row(&mut ft, 0, 17);
 
@@ -2385,7 +2296,7 @@ mod tests {
         }
         let expected = acc.0;
 
-        ft.apply_weight_changes_tiled(&mut acc.0, &removed, &added);
+        ft.check_weight_changes_to_two(&mut acc.0, &removed, &added);
 
         assert_eq!(expected, acc.0);
     }
@@ -2393,7 +2304,7 @@ mod tests {
     /// removed のみ / added のみの片側ケースが per-index 適用と一致すること。
     #[cfg(not(feature = "nnue-effect-bucket"))]
     #[test]
-    fn test_apply_weight_changes_tiled_one_sided_matches_sequential() {
+    fn test_check_weight_changes_to_two_one_sided_matches_sequential() {
         let mut ft = make_test_transformer();
         for (index, seed) in [0usize, 1, 2].into_iter().zip([13i16, -71, 127]) {
             fill_weight_row(&mut ft, index, seed);
@@ -2416,7 +2327,7 @@ mod tests {
             for index in removed.iter() {
                 ft.sub_weights(&mut sequential.0, index);
             }
-            ft.apply_weight_changes_tiled(&mut tiled.0, &removed, &added);
+            ft.check_weight_changes_to_two(&mut tiled.0, &removed, &added);
             assert_eq!(sequential.0, tiled.0);
         }
 
@@ -2431,7 +2342,7 @@ mod tests {
             for index in added.iter() {
                 ft.add_weights(&mut sequential.0, index);
             }
-            ft.apply_weight_changes_tiled(&mut tiled.0, &removed, &added);
+            ft.check_weight_changes_to_two(&mut tiled.0, &removed, &added);
             assert_eq!(sequential.0, tiled.0);
         }
     }
@@ -2440,7 +2351,7 @@ mod tests {
     /// 最大ケースが per-index 適用と一致すること。
     #[cfg(not(feature = "nnue-effect-bucket"))]
     #[test]
-    fn test_apply_weight_changes_tiled_full_capacity_matches_sequential() {
+    fn test_check_weight_changes_to_two_full_capacity_matches_sequential() {
         let mut ft = make_test_transformer();
         for index in 0..(2 * PieceNumber::NB) {
             fill_weight_row(&mut ft, index, (index as i16).wrapping_mul(37).wrapping_sub(61));
@@ -2467,7 +2378,7 @@ mod tests {
         for index in added.iter() {
             ft.add_weights(&mut sequential.0, index);
         }
-        ft.apply_weight_changes_tiled(&mut tiled.0, &removed, &added);
+        ft.check_weight_changes_to_two(&mut tiled.0, &removed, &added);
 
         assert_eq!(sequential.0, tiled.0);
     }

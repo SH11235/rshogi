@@ -578,7 +578,7 @@ impl<
         );
 
         // LayerStacks bucket0 の l1_biases
-        let l1_biases = &ls.buckets[0].l1.biases;
+        let l1_biases = &ls.buckets[0].l1().biases;
         info!("[NNUE Load] LayerStacks bucket0 l1_biases: {l1_biases:?}");
     }
 
@@ -726,12 +726,34 @@ impl<
     ) -> Value {
         let side_to_move = pos.side_to_move();
 
-        let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
-            sqr_clipped_relu_new(us, them)
-        });
-
-        // LayerStacks で評価
-        let raw_score = self.layer_stacks.evaluate_raw(bucket_index, &transformed.0);
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512vnni"
+        ))]
+        let raw_score = if L1 == 1536 && LS_L1_OUT == 16 {
+            self.with_combined_accumulators(acc, side_to_move, |us, them| {
+                self.layer_stacks.buckets[bucket_index].propagate_accumulators(us, them)
+            })
+        } else {
+            let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
+                sqr_clipped_relu_new(us, them)
+            });
+            self.layer_stacks.evaluate_raw(bucket_index, &transformed.0)
+        };
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512vnni"
+        )))]
+        let raw_score = {
+            let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
+                sqr_clipped_relu_new(us, them)
+            });
+            self.layer_stacks.evaluate_raw(bucket_index, &transformed.0)
+        };
 
         // PSQT ショートカット (Stockfish 準拠: (stm - nstm) / 2)
         // 各駒は両視点に逆符号で寄与するため、stm - nstm は正味の配置価値を
@@ -2567,7 +2589,7 @@ mod tests {
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
-        bucket.l1.weights.make_mut().fill(4);
+        bucket.edit_l1(|l1| l1.weights.make_mut().fill(4));
         bucket.l2.weights.make_mut().fill(4);
         bucket.output.weights.make_mut().fill(1);
         let mut acc = AccumulatorLayerStacks::<64>::new();
@@ -2693,8 +2715,10 @@ mod tests {
             _ft: PhantomData,
         };
         let bucket = &mut network.layer_stacks.buckets[0];
-        bucket.l1.weights.make_mut().fill(1);
-        bucket.l1.biases.fill(1024);
+        bucket.edit_l1(|l1| {
+            l1.weights.make_mut().fill(1);
+            l1.biases.fill(1024);
+        });
         bucket.l2.weights.make_mut().fill(1);
         bucket.l2.biases.fill(1024);
         bucket.output.weights.make_mut().fill(1);
@@ -2721,6 +2745,69 @@ mod tests {
             let expected = network.layer_stacks.evaluate_raw(0, &transformed.0)
                 / get_fv_scale_override().unwrap_or(16);
             assert_eq!(network.evaluate_with_bucket(&pos, &acc, 0), Value::new(expected));
+        }
+    }
+
+    #[test]
+    fn synthetic_1536x16_evaluate_with_bucket_matches_legacy_both_sides() {
+        use super::super::ls_feature_spec::HalfKpSpec;
+        use super::*;
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1536_0016_0009);
+        let mut bytes = Vec::new();
+        for _ in 0..DEFAULT_NUM_BUCKETS {
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            for (input, output) in [(1536, 16), (32, 32), (32, 1)] {
+                for _ in 0..output {
+                    bytes.extend_from_slice(&rng.random_range(-1024i32..1024).to_le_bytes());
+                }
+                bytes.extend((0..input * output).map(|_| rng.random_range(-8i8..8) as u8));
+            }
+        }
+        let network = NetworkLayerStacks::<1536, 16, 30, 32, HalfKpSpec> {
+            feature_transformer: FeatureTransformerLayerStacks::for_output_transform_tests(),
+            layer_stacks: LayerStacks::read(&mut &bytes[..], DEFAULT_NUM_BUCKETS).unwrap(),
+            fv_scale: 16,
+            num_buckets: DEFAULT_NUM_BUCKETS,
+            _ft: PhantomData,
+        };
+        let mut acc = AccumulatorLayerStacks::<1536>::new();
+        for _ in 0..8 {
+            for perspective in 0..2 {
+                for i in 0..1536 {
+                    acc.accumulation[perspective][i] = rng.random_range(-32..160);
+                }
+            }
+            for side in [Color::Black, Color::White] {
+                let mut pos = Position::new();
+                pos.set_sfen(if side == Color::Black {
+                    "4k4/9/9/9/9/9/9/9/4K4 b - 1"
+                } else {
+                    "4k4/9/9/9/9/9/9/9/4K4 w - 1"
+                })
+                .unwrap();
+                // 自然順のスカラー変換と従来の密 L1 を参照にし、視点の順序も検証する。
+                let mut transformed = Aligned([0u8; 1536]);
+                for (perspective, base) in [(side, 0), (!side, 768)] {
+                    let values = acc.get(perspective as usize);
+                    for i in 0..768 {
+                        transformed.0[base + i] = ((i32::from(values[i]).clamp(0, 127)
+                            * i32::from(values[i + 768]).clamp(0, 127))
+                            >> 7) as u8;
+                    }
+                }
+                for bucket in 0..DEFAULT_NUM_BUCKETS {
+                    let expected = network.layer_stacks.evaluate_raw(bucket, &transformed.0)
+                        / get_fv_scale_override().unwrap_or(network.fv_scale);
+                    assert_eq!(
+                        network.evaluate_with_bucket(&pos, &acc, bucket),
+                        Value::new(expected),
+                        "side={side:?}, bucket={bucket}"
+                    );
+                }
+            }
         }
     }
 
@@ -2800,7 +2887,7 @@ mod tests {
         }
 
         // LayerStacks の重みの一部を確認
-        let l1_bias_sample: Vec<i32> = network.layer_stacks.buckets[0].l1.biases.to_vec();
+        let l1_bias_sample: Vec<i32> = network.layer_stacks.buckets[0].l1().biases.to_vec();
         eprintln!("L1 bias (bucket 0): {l1_bias_sample:?}");
 
         // 初期局面を評価

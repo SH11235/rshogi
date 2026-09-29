@@ -83,7 +83,7 @@ pub type BonaPieceHalfKaHmMerged = BonaPiece;
 /// 2. 盤上駒（>=90）: hm_mirrorが必要な場合はマス目を反転
 /// 3. 敵王（>=e_king）: -81してf_king平面に揃える
 #[inline]
-pub fn pack_bonapiece(bp: BonaPieceHalfKaHmMerged, hm_mirror: bool) -> usize {
+pub const fn pack_bonapiece(bp: BonaPieceHalfKaHmMerged, hm_mirror: bool) -> usize {
     let mut pp = bp.value() as usize;
 
     // 手駒はミラー不要
@@ -110,6 +110,30 @@ pub fn pack_bonapiece(bp: BonaPieceHalfKaHmMerged, hm_mirror: bool) -> usize {
     }
 
     pp // 0..(e_king-1) = 0..1628
+}
+
+const fn make_pack_table() -> [[u16; E_KING + 81]; 2] {
+    let mut table = [[0; E_KING + 81]; 2];
+    let mut mirror = 0;
+    while mirror < 2 {
+        let mut bp = 0;
+        while bp < E_KING + 81 {
+            table[mirror][bp] = pack_bonapiece(BonaPiece::new(bp as u16), mirror != 0) as u16;
+            bp += 1;
+        }
+        mirror += 1;
+    }
+    table
+}
+
+static PACK_TABLE: [[u16; E_KING + 81]; 2] = make_pack_table();
+
+/// 玉位置と視点で base と pack 表を一度選び、駒ごとの mirror 分岐を除く。
+#[inline]
+pub(crate) fn feature_indexer(perspective: Color, king_sq: Square) -> impl Fn(BonaPiece) -> usize {
+    let base = king_bucket(king_sq, perspective) * PIECE_INPUTS;
+    let table = &PACK_TABLE[usize::from(is_hm_mirror(king_sq, perspective))];
+    move |bp| base + usize::from(table[bp.value() as usize])
 }
 
 /// キングバケットを計算（Half-Mirror）

@@ -544,6 +544,81 @@ mod tests {
             std::fs::remove_file(&self.packed).unwrap();
         }
     }
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512vnni"
+    ))]
+    #[test]
+    fn packed_fused_l1_matches_after_copy_on_write() {
+        use crate::nnue::layer_stacks::{LayerStacks, assert_fused_l1_matches_reference};
+        use crate::nnue::net_bin_layout::TensorBinLayout;
+        // FC セクションだけを作り、FT の巨大な fixture を必要とせず read_packed を検証する。
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("rshogi-l1-packed-{}-{nonce}", std::process::id()));
+        let fixture = Fixture {
+            source: base.with_extension("bin"),
+            packed: base.with_extension("packed"),
+        };
+        let mut raw = io::Cursor::new(Vec::new());
+        let mut packed_bytes = io::Cursor::new(Vec::new());
+        for bucket in 0..9 {
+            raw.write_all(&[0; 4]).unwrap();
+            packed_bytes.write_all(&[0; 4]).unwrap();
+            for (input, output) in [(1536, 16), (30, 32), (32, 1)] {
+                let biases_start = raw.get_ref().len();
+                for out in 0..output {
+                    raw.write_all(&((out * 31 + bucket * 7) as i32).to_le_bytes()).unwrap();
+                }
+                let weights_start = raw.get_ref().len();
+                for i in 0..super::super::layers::padded_input(input) * output {
+                    raw.write_all(&[((i * 17 + i / 64 + bucket * 23) % 256) as u8]).unwrap();
+                }
+                let end = raw.get_ref().len();
+                let tensor = TensorBinLayout {
+                    biases: biases_start..weights_start,
+                    weights: weights_start..end,
+                };
+                write_fc(&mut raw, &mut packed_bytes, &tensor, input, output, FcLayout::Native)
+                    .unwrap();
+                raw.set_position(end as u64);
+            }
+        }
+        std::fs::write(&fixture.source, raw.get_ref()).unwrap();
+        std::fs::write(&fixture.packed, packed_bytes.get_ref()).unwrap();
+        let packed = PackedModel {
+            #[cfg(windows)]
+            owner: Arc::new(
+                super::super::mapped_weights::ReadOnlyMapping::open(&fixture.packed).unwrap(),
+            ),
+            #[cfg(not(windows))]
+            file: std::cell::RefCell::new(File::open(&fixture.packed).unwrap()),
+            ranges: [0..packed_bytes.get_ref().len(), 0..0, 0..0, 0..0],
+            used: Cell::new(0),
+        };
+        type Stacks = LayerStacks<1536, 16, 30, 32>;
+        raw.set_position(0);
+        let original = Stacks::read(&mut raw, 9).unwrap();
+        let mut stacks = Stacks::read_packed(&mut packed.metadata().unwrap(), 9, &packed).unwrap();
+        let us = std::array::from_fn(|i| ((i * 53) % 383) as i16 - 128);
+        let them = std::array::from_fn(|i| ((i * 71) % 383) as i16 - 128);
+        for (a, b) in original.buckets.iter().zip(&mut stacks.buckets) {
+            assert_eq!(&*a.l1().weights, &*b.l1().weights);
+            assert_fused_l1_matches_reference(b, &us, &them);
+            b.edit_l1(|l1| {
+                l1.apply_file_weight_delta(1536 * 3 + 973, 17);
+            });
+            assert_ne!(&*a.l1().weights, &*b.l1().weights);
+            assert_fused_l1_matches_reference(b, &us, &them);
+        }
+        assert_eq!(std::fs::read(&fixture.packed).unwrap(), packed_bytes.into_inner());
+    }
+
     #[test]
     fn both_encodings_preserve_all_static_tensors() {
         use crate::nnue::ls_feature_spec::HalfKpSpec;
@@ -564,8 +639,8 @@ mod tests {
                 &*packed.feature_transformer.weights
             );
             for (a, b) in original.layer_stacks.buckets.iter().zip(&packed.layer_stacks.buckets) {
-                assert_eq!(a.l1.biases, b.l1.biases);
-                assert_eq!(&*a.l1.weights, &*b.l1.weights);
+                assert_eq!(a.l1().biases, b.l1().biases);
+                assert_eq!(&*a.l1().weights, &*b.l1().weights);
                 assert_eq!(a.l2.biases, b.l2.biases);
                 assert_eq!(&*a.l2.weights, &*b.l2.weights);
                 assert_eq!(a.output.biases, b.output.biases);

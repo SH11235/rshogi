@@ -28,9 +28,9 @@ use crate::types::{Color, Square};
 /// / `NetworkLayerStacks` の type parameter として渡される。
 ///
 /// `Feature` / `FeatureSet` trait と切り離した独立 trait としているのは、
-/// `feature_index` だけは LS の cache idx_fn / fast diff path から呼ばれる
-/// per-call なホットメソッドで、FT 別 helper module を namespace 統一で参照する
-/// 用途に特化しているため。
+/// FT 別の特徴量 index 変換を共通の API で参照するため。
+/// LS FT の cache / fast diff path は、玉位置と視点を固定した `feature_indexer`
+/// を使う。単一駒の変換には `feature_index` を提供する。
 pub trait LsFeatureSpec: 'static {
     /// 対応する `FeatureSet` 型 (`needs_refresh` / `collect_*_indices` を提供)。
     type Set: FeatureSet;
@@ -48,10 +48,16 @@ pub trait LsFeatureSpec: 'static {
 
     /// 単一 `BonaPiece` を feature index に変換する。
     ///
-    /// `try_apply_dirty_piece_fast` (DirtyPiece の old/new BonaPiece → index 変換) と
-    /// `refresh_perspective_with_cache` (cache idx_fn) の両方から呼ばれる。
+    /// HalfKX・Dynamic LS、`feature_indexer` の既定実装、テストで使う。
+    /// LS FT のホットパスは `feature_indexer` を使う。
     /// 呼び出し元は `BonaPiece::ZERO` を除外済みを前提とする。
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize;
+
+    /// 玉位置と視点を固定した indexer。対応する FT では pack 表を使う。
+    #[inline]
+    fn feature_indexer(perspective: Color, king_sq: Square) -> impl Fn(BonaPiece) -> usize {
+        move |bp| Self::feature_index(bp, perspective, king_sq)
+    }
 }
 
 /// HalfKP (classic NNUE) 用の LS FT 仕様。
@@ -144,6 +150,11 @@ impl LsFeatureSpec for HalfKaHmMergedSpec {
     #[cfg(feature = "nnue-effect-bucket")]
     const DIMENSIONS: usize = HALFKA_EFFECT_BUCKET_DIMENSIONS;
     const INCLUDE_KING_IN_PIECE_LIST: bool = true;
+
+    #[inline]
+    fn feature_indexer(perspective: Color, king_sq: Square) -> impl Fn(BonaPiece) -> usize {
+        super::bona_piece_halfka_hm_merged::feature_indexer(perspective, king_sq)
+    }
 
     #[inline]
     fn feature_index(bp: BonaPiece, perspective: Color, king_sq: Square) -> usize {
