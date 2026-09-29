@@ -56,6 +56,14 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 
+### 指し手生成の比較用切替
+
+隠し option `MovegenV2` は `usi` の option 一覧には出ません。
+`setoption name MovegenV2 value 0` で従来版、`value 1`（既定）で bitboard 版を選びます。
+0 / 1 以外は警告を出し、設定を維持します。探索を停止してから設定してください。
+同一バイナリでの比較用で、成り・不成や生成順序の仕様は共通です。
+option 一覧から送信可否を判断する計測ツールでは、この option を明示送信する必要があります。
+
 ## Allocation diagnostics
 
 Build with `cargo build --profile production -p rshogi-usi --features allocation-stats`
