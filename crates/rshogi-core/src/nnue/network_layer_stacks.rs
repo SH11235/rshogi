@@ -2661,7 +2661,7 @@ mod tests {
             }
         }
         let network = NetworkLayerStacks::<1536, 16, 30, 32, HalfKpSpec> {
-            feature_transformer: FeatureTransformerLayerStacks::for_accumulator_tests(),
+            feature_transformer: FeatureTransformerLayerStacks::for_output_transform_tests(),
             layer_stacks: LayerStacks::read(&mut &bytes[..], DEFAULT_NUM_BUCKETS).unwrap(),
             fv_scale: 16,
             num_buckets: DEFAULT_NUM_BUCKETS,

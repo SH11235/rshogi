@@ -94,6 +94,10 @@ pub(super) mod avx512 {
     }
 
     /// 重みロードを積和のメモリオペランドへ畳み込ませず、register 形式を保つ。
+    /// intrinsic の最適化による load-op 化と spill を避けるため、inline asm の
+    /// `zmm_reg` でオペランドを固定する。融合カーネル全体の ETW search-only
+    /// （5 局面 × 5 秒 × ABBA、main 9de40f85 比）は、既定配置で NPS +3.93%、
+    /// cycles/node −3.4%。配置別の結果と検証条件は docs/performance/ls-l1-kernels.md を参照。
     #[inline]
     fn dpbusd_register(mut sum: __m512i, input: __m512i, weight: __m512i) -> __m512i {
         // SAFETY: モジュールの cfg が AVX512VNNI を保証する。すべて512bit registerで、

@@ -88,6 +88,15 @@ impl<
 
     /// 新規作成（ゼロ初期化）
     pub fn new() -> Self {
+        Self::from_layers(AffineTransform::new(), AffineTransform::new(), AffineTransform::new())
+    }
+
+    /// 層から bucket を構築し、対象形状では融合用重みも用意する。
+    pub fn from_layers(
+        l1: AffineTransform<L1, LS_L1_OUT>,
+        l2: AffineTransform<LS_L2_IN, NNUE_PYTORCH_L3>,
+        output: AffineTransform<NNUE_PYTORCH_L3, 1>,
+    ) -> Self {
         const {
             assert!(LS_L1_OUT >= 2, "LayerStacks L1 output must be at least 2");
             assert!(
@@ -99,15 +108,6 @@ impl<
                 "LayerStacks L2 padded input must match padded_input(L2_IN)"
             );
         }
-        Self::from_layers(AffineTransform::new(), AffineTransform::new(), AffineTransform::new())
-    }
-
-    /// 層から bucket を構築し、対象形状では融合用重みも用意する。
-    pub fn from_layers(
-        l1: AffineTransform<L1, LS_L1_OUT>,
-        l2: AffineTransform<LS_L2_IN, NNUE_PYTORCH_L3>,
-        output: AffineTransform<NNUE_PYTORCH_L3, 1>,
-    ) -> Self {
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
