@@ -16,6 +16,17 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### 互換性のない変更と移行手順
 
+- **LayerStacks の Q16 係数を stack の生成・reset 時に保持するように変更**:
+  `set_layer_stack_progress_kpabs_q16_weights` / `reset_layer_stack_progress_kpabs_q16_weights`
+  を呼んでも、既存の stack は reset まで取得済みの係数を保持する。
+  routing mode と bucket 数は引き続き評価時に読み取るが、係数の取得は生成・reset 時に
+  `progresskpabsq16` が選択されている場合だけ行う。係数の差し替えや Q16 routing への
+  切り替えは探索前に完了し、その後に `NNUEEvaluator::reset(&pos)`、または直接管理している
+  stack の `reset()` / 再生成を行うこと。通常の探索では `SearchWorker::prepare_search` が
+  この初期化を行う。`layerstack-arch` 有効時の `StackEntryLayerStacks` には公開フィールド
+  `progress_q16: [i64; 2]` と `progress_q16_valid: u8` を追加した。構造体リテラルで
+  初期化していた利用者は、それぞれ `[0; 2]` と `0` を指定するか `new()` / `Default` を使うこと。
+
 - **探索開始時に NNUE の重み・accumulator・Finny cache を型付き評価器へ束ねる**:
   評価ごとのグローバル network の読み取りロック・`Arc` clone と、net / stack の
   アーキテクチャ照合を探索経路から除去し、LayerStacks の生ポインタも廃止した。
@@ -60,6 +71,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `movenumber` は従来どおり対局内の手数。
 
 ### USI エンジン / 探索
+
+- **LayerStacks の `progresskpabsq16` routing を高速化**:
+  探索中の Q16 係数読み出しをロックなしにし、静的 LayerStacks では視点別の部分和を
+  駒の差分から増分計算するようにした。Q16 の全走査と bit 一致し、固定 depth 1〜18 × 5 局面でも
+  旧 Q16 実装と探索結果が一致した。`LS_BUCKET_MODE=progresskpabsq16` 同士の同じ探索木で、
+  main `9de40f85` 比 NPS +9.5%、cycles/node −8.8% を実測した。
+  既定の f32 routing (`progresskpabs`) は変更しない。
 
 - **NNUE のロードと探索の互換性、および連続探索の準備コストを修正**:
   固定 HalfKX edition でも従来ロードできた他の FT を引き続き探索できるようにし、
