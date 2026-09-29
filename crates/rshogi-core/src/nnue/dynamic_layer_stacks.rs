@@ -285,15 +285,19 @@ impl DynamicLayerStacksNetwork {
                 reader.read_exact(&mut bytes)?;
                 *bias = i16::from_le_bytes(bytes);
             }
-            packed.ft(weight_len)?
+            packed.ft(weight_len)?.into_probe_ft()
         } else {
-            read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_zeroed)?
+            read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_ft_zeroed)?
                 .into()
         };
         #[cfg(not(feature = "prepacked-nnue"))]
-        let ft_weights: WeightBox<i16> =
-            read_layer_stacks_ft_i16(reader, &mut ft_biases, weight_len, AlignedBox::new_zeroed)?
-                .into();
+        let ft_weights: WeightBox<i16> = read_layer_stacks_ft_i16(
+            reader,
+            &mut ft_biases,
+            weight_len,
+            AlignedBox::new_ft_zeroed,
+        )?
+        .into();
 
         let has_psqt = psqt_override.unwrap_or_else(|| arch.contains("PSQT="));
         let mut psqt_biases = AlignedBox::new_zeroed(if has_psqt { num_buckets } else { 0 });
@@ -551,7 +555,8 @@ impl DynamicLayerStacksNetwork {
 
         if cache.valid[entry] {
             super::stats::count_cache_hit!();
-            acc.copy_from_slice(
+            super::probe_copy::finny_entry_to_accumulator(
+                acc,
                 &cache.accumulations[cache_acc_start..cache_acc_start + self.spec.l1],
             );
             if !self.psqt_weights.is_empty() {
@@ -709,7 +714,11 @@ impl DynamicLayerStacksNetwork {
             let (before, after) = stack.accumulations.split_at_mut(curr_start);
             let prev = &before[prev_start..prev_start + l1];
             let curr = &mut after[..l1];
-            curr.copy_from_slice(prev);
+            if dirty.dirty_num == 0 {
+                super::probe_copy::null_move_child_copy(curr, prev);
+            } else {
+                super::probe_copy::one_move_prev_to_current(curr, prev);
+            }
             let fast_applied = self.try_apply_dirty_piece_fast(
                 curr,
                 &dirty,
@@ -757,7 +766,7 @@ impl DynamicLayerStacksNetwork {
             let (before, after) = stack.accumulations.split_at_mut(current_start);
             let source_acc = &before[source_start..source_start + l1];
             let current_acc = &mut after[..l1];
-            current_acc.copy_from_slice(source_acc);
+            super::probe_copy::forward_source_to_current(current_acc, source_acc);
 
             let source_psqt_start = (source * 2 + p) * self.num_buckets;
             let current_psqt_start = (current * 2 + p) * self.num_buckets;

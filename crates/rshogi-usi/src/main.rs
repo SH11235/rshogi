@@ -907,6 +907,14 @@ impl UsiEngine {
                     search.set_skill_options(opts);
                 }
             }
+            "ProbeFtLargePages" => {
+                rshogi_core::probe::set_ft_large_pages(value == "true" || value == "1");
+            }
+            "ProbeEvalHashPrefetch" => {
+                if let Ok(mode) = value.parse::<u8>() {
+                    rshogi_core::probe::set_eval_hash_prefetch(mode);
+                }
+            }
             "EvalHash" => {
                 if let Ok(size) = value.parse::<usize>()
                     && let Some(search) = self.search.as_mut()

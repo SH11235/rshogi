@@ -73,6 +73,7 @@ pub mod piece_list;
 pub mod prelude;
 #[cfg(feature = "prepacked-nnue")]
 pub mod prepacked;
+mod probe_copy;
 mod progress_q16;
 mod shared_weights;
 pub mod spec;

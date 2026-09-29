@@ -108,7 +108,9 @@ fn align_up(value: usize, align: usize) -> usize {
 }
 
 #[cfg(windows)]
-fn try_alloc_large_pages(size: usize) -> Option<Allocation> {
+pub(crate) fn try_alloc_large_pages(size: usize) -> Option<Allocation> {
+    // SAFETY: Win32 API には有効なローカル領域を渡す。取得した token は全経路で閉じ、
+    // 成功した割当は Allocation が単独所有して Drop で VirtualFree する。
     unsafe {
         let large_page_size = GetLargePageMinimum() as usize;
         if large_page_size == 0 {

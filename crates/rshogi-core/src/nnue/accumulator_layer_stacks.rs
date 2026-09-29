@@ -245,7 +245,7 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
         apply_fn(&mut entry.accumulation, &removed, &added);
 
         // 更新済みcache entryを探索stack側へ公開する。
-        accumulation.copy_from_slice(&entry.accumulation);
+        super::probe_copy::finny_entry_to_accumulator(accumulation, &entry.accumulation);
         entry.piece_list.copy_from_slice(piece_list);
         entry.valid = true;
     }
@@ -304,7 +304,7 @@ impl<const L1: usize> AccumulatorCacheLayerStacks<L1> {
 
         if entry.valid {
             crate::nnue::stats::count_cache_hit!();
-            accumulation.copy_from_slice(&entry.accumulation);
+            super::probe_copy::finny_entry_to_accumulator(accumulation, &entry.accumulation);
             *psqt_acc = entry.psqt_accumulation;
 
             let mut diff_count = 0usize;

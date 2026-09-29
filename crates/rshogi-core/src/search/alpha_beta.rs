@@ -1278,7 +1278,7 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
-            do_move_and_push(
+            do_move_and_push::<false, _>(
                 &mut self.state,
                 pos,
                 mv,
@@ -1931,7 +1931,7 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
-            do_move_and_push(
+            do_move_and_push::<false, _>(
                 &mut self.state,
                 pos,
                 mv,
@@ -3001,7 +3001,7 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-            do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
+            do_move_and_push::<false, _>(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う

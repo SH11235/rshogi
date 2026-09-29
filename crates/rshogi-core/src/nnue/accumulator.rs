@@ -292,6 +292,9 @@ const HUGEPAGE_SIZE: usize = 2 * 1024 * 1024;
 enum AlignedBoxBacking {
     /// `new_zeroed` がグローバルアロケータで確保した通常ヒープ。Drop で `dealloc`。
     Heap(Layout),
+    /// Windows の私有 Large Pages。Allocation の Drop が VirtualFree する。
+    #[cfg(windows)]
+    LargePages(crate::tt::alloc::Allocation),
     /// file の読み取り専用 mapping を共有所有。Drop では `owner` の解放のみ。
     /// read-only 専用で、可変参照は `WeightBox` 経由の複製後にしか得られない。
     #[cfg(all(windows, feature = "prepacked-nnue"))]
@@ -316,6 +319,7 @@ enum AlignedBoxBacking {
 ///
 /// backing の種別:
 /// - `Heap`: `new_zeroed` による通常ヒープ確保（`T: Copy + Default`）。
+/// - `LargePages`: Windows の FT probe 用私有領域（`i16` のみ、可変）。
 /// - `Shared`: `from_shared` によるプロセス間共有メモリの借用（read-only、`DerefMut` 不可）。
 /// - `Mapped`: fileの読み取り専用mappingを共有所有（read-only、`DerefMut` 不可）。
 ///
@@ -408,6 +412,19 @@ impl<T: Copy + Default> AlignedBox<T> {
 }
 
 impl<T> AlignedBox<T> {
+    #[cfg(any(test, feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
+    fn is_writable(&self) -> bool {
+        match self.backing {
+            AlignedBoxBacking::Heap(_) => true,
+            #[cfg(windows)]
+            AlignedBoxBacking::LargePages(_) => true,
+            #[cfg(all(windows, feature = "prepacked-nnue"))]
+            AlignedBoxBacking::Mapped { .. } => false,
+            #[cfg(target_os = "linux")]
+            AlignedBoxBacking::Shared { .. } => false,
+        }
+    }
+
     /// プロセス間共有メモリ上の領域を借用する `AlignedBox` を構築する。
     ///
     /// backing は `Shared` となり、Drop で `munmap` する。read-only 専用で
@@ -435,6 +452,54 @@ impl<T> AlignedBox<T> {
         }
     }
 }
+
+impl AlignedBox<i16> {
+    /// LayerStacks FT 専用の確保。Linux の THP は既存の new_zeroed に任せる。
+    pub(crate) fn new_ft_zeroed(len: usize) -> Self {
+        let enabled = crate::probe::ft_large_pages();
+        let bytes = len.checked_mul(std::mem::size_of::<i16>()).expect("FT size overflow");
+        #[cfg(windows)]
+        if enabled && let Some(allocation) = Self::allocate_ft_large_pages(bytes) {
+            let result = Self {
+                ptr: allocation.ptr().as_ptr().cast(),
+                len,
+                backing: AlignedBoxBacking::LargePages(allocation),
+            };
+            println!("info string ft_alloc=large_pages bytes={bytes}");
+            return result;
+        }
+        let result = Self::new_zeroed(len);
+        if enabled {
+            println!("info string ft_alloc=heap bytes={bytes}");
+        }
+        result
+    }
+
+    #[cfg(windows)]
+    fn allocate_ft_large_pages(bytes: usize) -> Option<crate::tt::alloc::Allocation> {
+        // VirtualAlloc のゼロ初期化は i16 に有効。Large Page 境界は SIMD の 64B を満たす。
+        // Layout の検査で isize::MAX 超過を避け、ページ切り上げにも十分な余裕を持たせる。
+        Layout::from_size_align(bytes, CACHE_LINE_SIZE).ok()?;
+        if bytes == 0 {
+            return None;
+        }
+        #[cfg(test)]
+        if crate::probe::FORCE_FT_HEAP.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        crate::tt::alloc::try_alloc_large_pages(bytes)
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "layerstacks-1536x16x32",
+        feature = "nnue-runtime-dimensions"
+    )
+))]
+#[path = "probe_tests.rs"]
+mod probe_tests;
 
 // 任意の T を許さず、全 bit pattern が有効な重みの整数型だけを受け付ける。
 #[cfg(all(windows, feature = "prepacked-nnue"))]
@@ -507,6 +572,12 @@ impl<T> DerefMut for AlignedBox<T> {
                 // 確保した有効ポインタで、len 要素分を排他的に所有する。
                 unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
             }
+            #[cfg(windows)]
+            AlignedBoxBacking::LargePages(_) => {
+                // SAFETY: VirtualAlloc の領域を単独所有し、len 個の初期化済み i16 がある。
+                // 可変借用中は他の参照を発行せず、Allocation は self と同じ寿命を持つ。
+                unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+            }
             #[cfg(target_os = "linux")]
             AlignedBoxBacking::Shared { .. } => {
                 // 共有メモリは複数プロセスから参照される read-only 領域。可変参照を
@@ -521,6 +592,11 @@ impl<T> DerefMut for AlignedBox<T> {
 impl<T> Drop for AlignedBox<T> {
     fn drop(&mut self) {
         match &self.backing {
+            #[cfg(windows)]
+            AlignedBoxBacking::LargePages(allocation) => {
+                debug_assert_eq!(self.ptr.cast::<u8>(), allocation.ptr().as_ptr());
+                // この Drop 後に Allocation が VirtualFree する。
+            }
             #[cfg(all(windows, feature = "prepacked-nnue"))]
             AlignedBoxBacking::Mapped { owner } => {
                 // fieldのArcはこのDrop後に解放する。sliceがmapping内である不変条件を点検。
@@ -570,8 +646,9 @@ unsafe impl<T: Sync> Sync for AlignedBox<T> {}
 
 /// ロード後は書き換えない NNUE 重み配列の格納先
 ///
-/// backing は通常ヒープ・プロセス間共有メモリ・file の読み取り専用 mapping のいずれか。
-/// 後ろ 2 つへ可変参照を配ると Rust の排他参照不変条件を破るため、この型は `DerefMut` を
+/// backing は私有領域（通常ヒープ / Windows Large Pages）、プロセス間共有メモリ、
+/// file の読み取り専用 mapping のいずれか。後ろ 2 つへ可変参照を配ると
+/// Rust の排他参照不変条件を破るため、この型は `DerefMut` を
 /// **実装しない**。書き換えたい場合は `make_mut` を使い、read-only backing なら私有ヒープ
 /// への複製（copy-on-write）を経てから可変スライスを得る。
 ///
@@ -588,6 +665,19 @@ unsafe impl<T: Sync> Sync for AlignedBox<T> {}
 /// この型を別の型へキャストする箇所は無い。
 #[repr(transparent)]
 pub struct WeightBox<T>(AlignedBox<T>);
+
+#[cfg(feature = "prepacked-nnue")]
+impl WeightBox<i16> {
+    pub(crate) fn into_probe_ft(self) -> Self {
+        #[cfg(windows)]
+        if crate::probe::ft_large_pages() {
+            let mut weights = AlignedBox::new_ft_zeroed(self.len());
+            weights.copy_from_slice(&self);
+            return weights.into();
+        }
+        self
+    }
+}
 
 impl<T> From<AlignedBox<T>> for WeightBox<T> {
     #[inline]
@@ -625,13 +715,13 @@ impl<T: Copy + Default> WeightBox<T> {
     /// 他プロセスや mapping 元 file のバイト列は変化しない。
     ///
     /// コスト: read-only backing に対する最初の 1 回だけ tensor 全体を確保してコピーする
-    /// （FT 重みなら数百 MB になり得る）。2 回目以降は既に Heap なのでコピーしない。
+    /// （FT 重みなら数百 MB になり得る）。私有領域（Heap / LargePages）はコピーしない。
     ///
     /// 重みを書き換えるのは net delta (`SPSA_NET_*`) だけなので、それを持つ構成に
     /// 限ってコンパイルする。
     #[cfg(any(test, feature = "layerstack-arch", feature = "nnue-runtime-dimensions"))]
     pub(crate) fn make_mut(&mut self) -> &mut [T] {
-        if !matches!(self.0.backing, AlignedBoxBacking::Heap(_)) {
+        if !self.0.is_writable() {
             self.0 = self.0.clone();
         }
         &mut self.0

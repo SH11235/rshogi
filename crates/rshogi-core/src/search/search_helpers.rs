@@ -141,7 +141,7 @@ pub(super) fn nnue_evaluate_cached(
 /// YO では Worker::do_move() 内部で nodes++ と nnue push を行う。
 /// rshogi でも同等の一括処理を提供する。
 #[inline]
-pub(super) fn do_move_and_push<P: TtPrefetch>(
+pub(super) fn do_move_and_push<const TACTICAL: bool, P: TtPrefetch>(
     st: &mut SearchState,
     pos: &mut Position,
     mv: Move,
@@ -150,7 +150,7 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
     eval_hash: &EvalHash,
 ) {
     let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, prefetcher);
-    if eval_hash_enabled() {
+    if eval_hash_enabled() && crate::probe::prefetch_child::<TACTICAL>() {
         eval_hash.prefetch(pos.key());
     }
     st.nodes += 1;

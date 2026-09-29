@@ -261,7 +261,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     pub(crate) fn for_accumulator_tests() -> Self {
         Self {
             biases: Aligned([0; L1]),
-            weights: AlignedBox::new_zeroed(FT::DIMENSIONS * L1).into(),
+            weights: AlignedBox::new_ft_zeroed(FT::DIMENSIONS * L1).into(),
             #[cfg(feature = "nnue-psqt")]
             psqt_biases: [0; MAX_LAYER_STACK_BUCKETS],
             #[cfg(feature = "nnue-psqt")]
@@ -303,7 +303,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         // 重みを読み込み
         let weight_size = FT::DIMENSIONS * L1;
-        let mut weights = AlignedBox::new_zeroed(weight_size);
+        let mut weights = AlignedBox::new_ft_zeroed(weight_size);
         for weight in weights.iter_mut() {
             reader.read_exact(&mut buf)?;
             *weight = i16::from_le_bytes(buf);
@@ -354,14 +354,14 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                 reader.read_exact(&mut bytes)?;
                 *bias = i16::from_le_bytes(bytes);
             }
-            packed.ft(weight_size)?
+            packed.ft(weight_size)?.into_probe_ft()
         } else {
-            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_zeroed)?
+            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_ft_zeroed)?
                 .into()
         };
         #[cfg(not(feature = "prepacked-nnue"))]
         let weights: WeightBox<i16> =
-            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_zeroed)?
+            read_layer_stacks_ft_i16(reader, &mut biases, weight_size, AlignedBox::new_ft_zeroed)?
                 .into();
         Ok(Self {
             biases: Aligned(biases),
@@ -803,7 +803,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     );
                 }
                 if !fast_applied {
-                    curr.copy_from_slice(prev);
+                    if dirty_piece.dirty_num == 0 {
+                        super::probe_copy::null_move_child_copy(curr, prev);
+                    } else {
+                        super::probe_copy::one_move_prev_to_current(curr, prev);
+                    }
                     for index in removed.iter() {
                         self.sub_weights(curr, index);
                     }
@@ -963,7 +967,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
                     );
                 }
                 if !fast_applied {
-                    curr.copy_from_slice(prev);
+                    if dirty_piece.dirty_num == 0 {
+                        super::probe_copy::null_move_child_copy(curr, prev);
+                    } else {
+                        super::probe_copy::one_move_prev_to_current(curr, prev);
+                    }
                     for index in removed.iter() {
                         self.sub_weights(curr, index);
                     }
@@ -1209,19 +1217,26 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         };
 
         // source_acc から main + psqt + threat をコピー。
-        let source_acc = stack.entry_at(source_idx).accumulator.clone();
+        let source_acc =
+            super::probe_copy::forward_source_clone(&stack.entry_at(source_idx).accumulator);
         {
             let current_acc = &mut stack.current_mut().accumulator;
             for perspective in [Color::Black, Color::White] {
                 let p = perspective as usize;
-                current_acc.get_mut(p).copy_from_slice(source_acc.get(p));
+                super::probe_copy::forward_source_to_current(
+                    current_acc.get_mut(p),
+                    source_acc.get(p),
+                );
                 #[cfg(feature = "nnue-psqt")]
                 {
                     current_acc.psqt_accumulation[p] = source_acc.psqt_accumulation[p];
                 }
                 #[cfg(feature = "nnue-threat")]
                 if self.has_threat {
-                    current_acc.get_threat_mut(p).copy_from_slice(source_acc.get_threat(p));
+                    super::probe_copy::forward_source_to_current(
+                        current_acc.get_threat_mut(p),
+                        source_acc.get_threat(p),
+                    );
                 }
             }
         }
@@ -1808,7 +1823,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         #[allow(unreachable_code)]
         {
-            accumulation.copy_from_slice(source);
+            super::probe_copy::one_move_prev_to_current(accumulation, source);
             self.apply_sub_add_fused(accumulation, sub_index, add_index);
         }
     }
@@ -1863,7 +1878,7 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
 
         #[allow(unreachable_code)]
         {
-            accumulation.copy_from_slice(source);
+            super::probe_copy::one_move_prev_to_current(accumulation, source);
             self.apply_double_sub_add_fused(
                 accumulation,
                 sub_index0,
