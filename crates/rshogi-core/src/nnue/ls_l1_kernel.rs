@@ -1,52 +1,4 @@
-//! LayerStacks L1 の screening 用切替。既定は既存カーネル。
-
-use std::sync::atomic::{AtomicU8, Ordering};
-
-/// 隠し USI option `LsL1Kernel` の選択値。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum LsL1Kernel {
-    /// 既存の変換と密 L1。
-    Legacy,
-    /// 64 出力単位の変換と既存の密 L1。
-    Xf64,
-    /// 変換と L1 積和を融合。
-    Fused,
-}
-
-static LS_L1_KERNEL: AtomicU8 = AtomicU8::new(LsL1Kernel::Legacy as u8);
-
-impl LsL1Kernel {
-    /// combo の文字列を解釈する。未知の値は受け付けない。
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "legacy" => Some(Self::Legacy),
-            "xf64" => Some(Self::Xf64),
-            "fused" => Some(Self::Fused),
-            _ => None,
-        }
-    }
-}
-
-/// screening 用カーネルを選択する。未対応の形状・build は legacy を使う。
-pub fn set_ls_l1_kernel(kernel: LsL1Kernel) {
-    LS_L1_KERNEL.store(kernel as u8, Ordering::Relaxed);
-}
-
-/// 評価の入口で一度だけ読み取る。重みの公開とは独立した設定値。
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512f",
-    target_feature = "avx512bw",
-    target_feature = "avx512vnni"
-))]
-pub(super) fn selected() -> LsL1Kernel {
-    match LS_L1_KERNEL.load(Ordering::Relaxed) {
-        1 => LsL1Kernel::Xf64,
-        2 => LsL1Kernel::Fused,
-        _ => LsL1Kernel::Legacy,
-    }
-}
+//! 1536×16 の LayerStacks L1 と FT 出力変換を融合する VNNI カーネル。
 
 #[cfg(all(
     target_arch = "x86_64",
@@ -55,13 +7,17 @@ pub(super) fn selected() -> LsL1Kernel {
     target_feature = "avx512vnni"
 ))]
 pub(super) mod avx512 {
-    use super::super::accumulator::{Aligned, AlignedBox};
+    use super::super::accumulator::AlignedBox;
     use super::super::layers::AffineTransform;
     use std::arch::x86_64::*;
 
+    /// reorder だけが構築する、64B 境界の [24][4][4][64] 融合用重み。
+    /// 内部バッファの長さ・配置は構築後に変更しない。
+    pub(crate) struct FusedWeights(AlignedBox<i8>);
+
     pub(crate) fn reorder<const INPUT: usize, const OUTPUT: usize>(
         l1: &AffineTransform<INPUT, OUTPUT>,
-    ) -> Option<AlignedBox<i8>> {
+    ) -> Option<FusedWeights> {
         if INPUT != 1536 || OUTPUT != 16 {
             return None;
         }
@@ -82,7 +38,26 @@ pub(super) mod avx512 {
                 }
             }
         }
-        Some(weights)
+        Some(FusedWeights(weights))
+    }
+
+    /// 正常終了と unwind のどちらでも、編集した L1 から融合用重みを再構築する。
+    pub(crate) fn edit_l1<const INPUT: usize, const OUTPUT: usize>(
+        l1: &mut AffineTransform<INPUT, OUTPUT>,
+        weights: &mut Option<FusedWeights>,
+        edit: impl FnOnce(&mut AffineTransform<INPUT, OUTPUT>),
+    ) {
+        struct Rebuild<'a, const INPUT: usize, const OUTPUT: usize> {
+            l1: &'a mut AffineTransform<INPUT, OUTPUT>,
+            weights: &'a mut Option<FusedWeights>,
+        }
+        impl<const INPUT: usize, const OUTPUT: usize> Drop for Rebuild<'_, INPUT, OUTPUT> {
+            fn drop(&mut self) {
+                *self.weights = reorder(self.l1);
+            }
+        }
+        let guard = Rebuild { l1, weights };
+        edit(guard.l1);
     }
 
     /// # Safety
@@ -118,40 +93,35 @@ pub(super) mod avx512 {
         }
     }
 
+    /// 重みロードを積和のメモリオペランドへ畳み込ませず、register 形式を保つ。
     #[inline]
-    pub(crate) fn transform<const N: usize>(us: &[i16; N], them: &[i16; N]) -> Aligned<[u8; N]> {
-        assert_eq!(N, 1536);
-        let mut output = std::mem::MaybeUninit::<Aligned<[u8; N]>>::uninit();
-        // SAFETY: cfg が命令セットを保証する。N=1536 を確認済み。
-        // 両視点で768Bずつ全出力を初期化し、入力とは重ならない。
+    fn dpbusd_register(mut sum: __m512i, input: __m512i, weight: __m512i) -> __m512i {
+        // SAFETY: モジュールの cfg が AVX512VNNI を保証する。すべて512bit registerで、
+        // unsigned input × signed weight の非飽和加算だけを行う。メモリ・flagsには触れない。
         unsafe {
-            let perm = _mm512_setr_epi64(0, 2, 4, 6, 1, 3, 5, 7);
-            for (acc, base) in [(us, 0), (them, 768)] {
-                for offset in (0..768).step_by(64) {
-                    let packed = pack64(acc.as_ptr(), offset);
-                    _mm512_store_si512(
-                        output.as_mut_ptr().cast::<u8>().add(base + offset).cast(),
-                        _mm512_permutexvar_epi64(perm, packed),
-                    );
-                }
-            }
-            output.assume_init()
+            std::arch::asm!(
+                "vpdpbusd {sum}, {input}, {weight}",
+                sum = inout(zmm_reg) sum,
+                input = in(zmm_reg) input,
+                weight = in(zmm_reg) weight,
+                options(pure, nomem, nostack, preserves_flags),
+            );
         }
+        sum
     }
 
     #[inline]
     pub(crate) fn fused<const N: usize, const OUT: usize>(
         us: &[i16; N],
         them: &[i16; N],
-        weights: &AlignedBox<i8>,
+        weights: &FusedWeights,
         biases: &[i32; OUT],
     ) -> [i32; OUT] {
         assert_eq!(N, 1536);
         assert_eq!(OUT, 16);
-        assert_eq!(weights.len(), 1536 * 16);
         let mut output = [0; OUT];
         // SAFETY: cfg が命令セットを保証する。入力・重み・出力の寸法は確認済み。
-        // weights は reorder の [24][4][4][64] 配置、各loadは64B境界。
+        // FusedWeights は reorder の [24][4][4][64] 配置と64B境界を保証する。
         // pack64 は各視点の範囲内だけを読み、store は4出力ずつ行う。
         unsafe {
             let mut sums = [[_mm512_setzero_si512(); 4]; 4];
@@ -164,10 +134,10 @@ pub(super) mod avx512 {
                         _mm512_shuffle_epi32::<0xaa>(x),
                         _mm512_shuffle_epi32::<0xff>(x),
                     ];
-                    let w = weights.as_ptr().add((base + block) * 1024).cast::<__m512i>();
+                    let w = weights.0.as_ptr().add((base + block) * 1024).cast::<__m512i>();
                     for (g, group) in sums.iter_mut().enumerate() {
                         for (j, sum) in group.iter_mut().enumerate() {
-                            *sum = _mm512_dpbusd_epi32(
+                            *sum = dpbusd_register(
                                 *sum,
                                 broadcasts[j],
                                 _mm512_load_si512(w.add(g * 4 + j)),
@@ -194,22 +164,5 @@ pub(super) mod avx512 {
             }
         }
         output
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn combo_values() {
-        for (text, value) in [
-            ("legacy", LsL1Kernel::Legacy),
-            ("xf64", LsL1Kernel::Xf64),
-            ("fused", LsL1Kernel::Fused),
-        ] {
-            assert_eq!(LsL1Kernel::parse(text), Some(value));
-        }
-        assert_eq!(LsL1Kernel::parse("unknown"), None);
     }
 }

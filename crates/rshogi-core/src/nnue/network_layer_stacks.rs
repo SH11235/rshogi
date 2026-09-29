@@ -706,19 +706,6 @@ impl<
         })
     }
 
-    #[inline(always)]
-    fn evaluate_legacy_raw(
-        &self,
-        acc: &AccumulatorLayerStacks<L1>,
-        side_to_move: Color,
-        bucket_index: usize,
-    ) -> i32 {
-        let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
-            sqr_clipped_relu_new(us, them)
-        });
-        self.layer_stacks.evaluate_raw(bucket_index, &transformed.0)
-    }
-
     /// 評価値を計算（事前計算済み bucket index を使用）
     pub fn evaluate_with_bucket(
         &self,
@@ -734,32 +721,27 @@ impl<
             target_feature = "avx512bw",
             target_feature = "avx512vnni"
         ))]
-        let kernel = if L1 == 1536 && LS_L1_OUT == 16 {
-            super::ls_l1_kernel::selected()
+        let raw_score = if L1 == 1536 && LS_L1_OUT == 16 {
+            self.with_combined_accumulators(acc, side_to_move, |us, them| {
+                self.layer_stacks.buckets[bucket_index].propagate_accumulators(us, them)
+            })
         } else {
-            super::ls_l1_kernel::LsL1Kernel::Legacy
+            let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
+                sqr_clipped_relu_new(us, them)
+            });
+            self.layer_stacks.evaluate_raw(bucket_index, &transformed.0)
         };
+        #[cfg(not(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw",
+            target_feature = "avx512vnni"
+        )))]
         let raw_score = {
-            #[cfg(all(
-                target_arch = "x86_64",
-                target_feature = "avx512f",
-                target_feature = "avx512bw",
-                target_feature = "avx512vnni"
-            ))]
-            if kernel != super::ls_l1_kernel::LsL1Kernel::Legacy {
-                self.with_combined_accumulators(acc, side_to_move, |us, them| {
-                    self.layer_stacks.buckets[bucket_index].propagate_accumulators(us, them, kernel)
-                })
-            } else {
-                self.evaluate_legacy_raw(acc, side_to_move, bucket_index)
-            }
-            #[cfg(not(all(
-                target_arch = "x86_64",
-                target_feature = "avx512f",
-                target_feature = "avx512bw",
-                target_feature = "avx512vnni"
-            )))]
-            self.evaluate_legacy_raw(acc, side_to_move, bucket_index)
+            let transformed = self.with_combined_accumulators(acc, side_to_move, |us, them| {
+                sqr_clipped_relu_new(us, them)
+            });
+            self.layer_stacks.evaluate_raw(bucket_index, &transformed.0)
         };
 
         // PSQT ショートカット (Stockfish 準拠: (stm - nstm) / 2)
@@ -2660,6 +2642,69 @@ mod tests {
         }
     }
 
+    #[test]
+    fn synthetic_1536x16_evaluate_with_bucket_matches_legacy_both_sides() {
+        use super::super::ls_feature_spec::HalfKpSpec;
+        use super::*;
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1536_0016_0009);
+        let mut bytes = Vec::new();
+        for _ in 0..DEFAULT_NUM_BUCKETS {
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            for (input, output) in [(1536, 16), (32, 32), (32, 1)] {
+                for _ in 0..output {
+                    bytes.extend_from_slice(&rng.random_range(-1024i32..1024).to_le_bytes());
+                }
+                bytes.extend((0..input * output).map(|_| rng.random_range(-8i8..8) as u8));
+            }
+        }
+        let network = NetworkLayerStacks::<1536, 16, 30, 32, HalfKpSpec> {
+            feature_transformer: FeatureTransformerLayerStacks::for_accumulator_tests(),
+            layer_stacks: LayerStacks::read(&mut &bytes[..], DEFAULT_NUM_BUCKETS).unwrap(),
+            fv_scale: 16,
+            num_buckets: DEFAULT_NUM_BUCKETS,
+            _ft: PhantomData,
+        };
+        let mut acc = AccumulatorLayerStacks::<1536>::new();
+        for _ in 0..8 {
+            for perspective in 0..2 {
+                for i in 0..1536 {
+                    acc.accumulation[perspective][i] = rng.random_range(-32..160);
+                }
+            }
+            for side in [Color::Black, Color::White] {
+                let mut pos = Position::new();
+                pos.set_sfen(if side == Color::Black {
+                    "4k4/9/9/9/9/9/9/9/4K4 b - 1"
+                } else {
+                    "4k4/9/9/9/9/9/9/9/4K4 w - 1"
+                })
+                .unwrap();
+                // 自然順のスカラー変換と従来の密 L1 を参照にし、視点の順序も検証する。
+                let mut transformed = Aligned([0u8; 1536]);
+                for (perspective, base) in [(side, 0), (!side, 768)] {
+                    let values = acc.get(perspective as usize);
+                    for i in 0..768 {
+                        transformed.0[base + i] = ((i32::from(values[i]).clamp(0, 127)
+                            * i32::from(values[i + 768]).clamp(0, 127))
+                            >> 7) as u8;
+                    }
+                }
+                for bucket in 0..DEFAULT_NUM_BUCKETS {
+                    let expected = network.layer_stacks.evaluate_raw(bucket, &transformed.0)
+                        / get_fv_scale_override().unwrap_or(network.fv_scale);
+                    assert_eq!(
+                        network.evaluate_with_bucket(&pos, &acc, bucket),
+                        Value::new(expected),
+                        "side={side:?}, bucket={bucket}"
+                    );
+                }
+            }
+        }
+    }
+
     /// LayerStacks NNUEファイルの読み込みと評価テスト
     ///
     /// このテストは外部NNUEファイルが必要なため通常はスキップ。
@@ -2764,41 +2809,6 @@ mod tests {
 
         let mut acc = AccumulatorLayerStacks::<TEST_L1>::new();
         network.refresh_accumulator(&pos, &mut acc);
-
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "avx512bw",
-            target_feature = "avx512vnni"
-        ))]
-        {
-            use crate::nnue::{LsL1Kernel, set_ls_l1_kernel};
-            struct ResetKernel;
-            impl Drop for ResetKernel {
-                fn drop(&mut self) {
-                    set_ls_l1_kernel(LsL1Kernel::Legacy);
-                }
-            }
-            let _reset_kernel = ResetKernel;
-            for bucket in 0..network.num_buckets {
-                super::super::layer_stacks::assert_l1_kernels_match(
-                    &network.layer_stacks.buckets[bucket],
-                    acc.get(0),
-                    acc.get(1),
-                );
-                super::super::layer_stacks::assert_l1_kernels_match(
-                    &network.layer_stacks.buckets[bucket],
-                    acc.get(1),
-                    acc.get(0),
-                );
-                set_ls_l1_kernel(LsL1Kernel::Legacy);
-                let expected = network.evaluate_with_bucket(&pos, &acc, bucket);
-                for kernel in [LsL1Kernel::Xf64, LsL1Kernel::Fused] {
-                    set_ls_l1_kernel(kernel);
-                    assert_eq!(expected, network.evaluate_with_bucket(&pos, &acc, bucket));
-                }
-            }
-        }
 
         // Accumulatorの値を確認
         let black_acc = acc.get(0);

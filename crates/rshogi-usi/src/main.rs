@@ -797,17 +797,6 @@ impl UsiEngine {
         }
 
         match name.as_str() {
-            // screening 用の隠し combo。usi の一覧には出さない。
-            "LsL1Kernel" => {
-                if let Some(kernel) = rshogi_core::nnue::LsL1Kernel::parse(&value) {
-                    rshogi_core::nnue::set_ls_l1_kernel(kernel);
-                } else {
-                    eprintln!(
-                        "info string Warning: invalid LsL1Kernel '{}': expected legacy|xf64|fused",
-                        value
-                    );
-                }
-            }
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;

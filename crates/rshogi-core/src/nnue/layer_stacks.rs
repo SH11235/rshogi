@@ -74,7 +74,7 @@ pub struct LayerStackBucket<
         target_feature = "avx512bw",
         target_feature = "avx512vnni"
     ))]
-    fused_weights: Option<super::accumulator::AlignedBox<i8>>,
+    fused_weights: Option<super::ls_l1_kernel::avx512::FusedWeights>,
 }
 
 impl<
@@ -135,7 +135,7 @@ impl<
     }
 
     /// L1 層を編集し、融合用重みを再構築する。
-    /// 編集中に unwind した場合はキャッシュを無効のまま保ち、legacy に戻る。
+    /// 編集中に unwind した場合も、変更済みの L1 に合わせて再構築する。
     pub fn edit_l1(&mut self, edit: impl FnOnce(&mut AffineTransform<L1, LS_L1_OUT>)) {
         #[cfg(all(
             target_arch = "x86_64",
@@ -143,19 +143,14 @@ impl<
             target_feature = "avx512bw",
             target_feature = "avx512vnni"
         ))]
-        {
-            self.fused_weights = None;
-        }
-        edit(&mut self.l1);
-        #[cfg(all(
+        super::ls_l1_kernel::avx512::edit_l1(&mut self.l1, &mut self.fused_weights, edit);
+        #[cfg(not(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
             target_feature = "avx512bw",
             target_feature = "avx512vnni"
-        ))]
-        {
-            self.fused_weights = super::ls_l1_kernel::avx512::reorder(&self.l1);
-        }
+        )))]
+        edit(&mut self.l1);
     }
 
     #[cfg(all(
@@ -165,26 +160,10 @@ impl<
         target_feature = "avx512vnni"
     ))]
     #[inline]
-    pub(super) fn propagate_accumulators(
-        &self,
-        us: &[i16; L1],
-        them: &[i16; L1],
-        kernel: super::ls_l1_kernel::LsL1Kernel,
-    ) -> i32 {
-        use super::ls_l1_kernel::{LsL1Kernel, avx512};
-        if L1 == 1536 && LS_L1_OUT == 16 {
-            match kernel {
-                LsL1Kernel::Fused => {
-                    if let Some(weights) = &self.fused_weights {
-                        let l1_out = avx512::fused(us, them, weights, &self.l1.biases);
-                        return self.propagate_from_l1(&l1_out);
-                    }
-                }
-                LsL1Kernel::Xf64 => return self.propagate(&avx512::transform(us, them).0),
-                LsL1Kernel::Legacy => {}
-            }
-        }
-        self.propagate(&sqr_clipped_relu_new(us, them).0)
+    pub(super) fn propagate_accumulators(&self, us: &[i16; L1], them: &[i16; L1]) -> i32 {
+        let weights = self.fused_weights.as_ref().expect("1536x16 bucket has fused weights");
+        let l1_out = super::ls_l1_kernel::avx512::fused(us, them, weights, &self.l1.biases);
+        self.propagate_from_l1(&l1_out)
     }
 
     /// ファイルから読み込み
@@ -199,15 +178,48 @@ impl<
     ///
     /// 入力: SqrClippedReLU後のL1次元 (u8)
     /// 出力: スケーリング前の生スコア (i32)
-    // screening の複数呼び出し元でも、変換と密 L1 の間に関数境界を作らない。
-    #[inline(always)]
     pub fn propagate(&self, input: &[u8; L1]) -> i32 {
         let mut l1_out = [0i32; LS_L1_OUT];
+        let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
+        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        let mut output_arr = [0i32; 1];
+
+        // L1: L1 → LS_L1_OUT
         self.l1.propagate_7bit(input, &mut l1_out);
-        self.propagate_from_l1(&l1_out)
+
+        // Split: [main_dim, 1]
+        // l1_skip は最後の 1 要素、残り main_dim 要素を L2 入力へ変換する。
+        let l1_skip = l1_out[Self::MAIN_DIM];
+
+        // main_dim 要素に SqrClippedReLU と ClippedReLU を適用して連結する。
+        // SqrClippedReLU: min(127, (input^2) >> 19)
+        // ClippedReLU:    clamp(input >> 6, 0, 127)
+        l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
+
+        // L2: LS_L2_IN → 32
+        self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        let output = clipped_relu_affine_32_to_1_avx2(&l2_out, &self.output);
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        let output = {
+            clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
+            self.output.propagate_7bit(&l2_relu.0, &mut output_arr);
+            output_arr[0]
+        };
+
+        // Skip connection
+        output + l1_skip
     }
 
-    #[inline(always)]
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx512f",
+        target_feature = "avx512bw",
+        target_feature = "avx512vnni"
+    ))]
     fn propagate_from_l1(&self, l1_out: &[i32; LS_L1_OUT]) -> i32 {
         let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
         let mut l2_out = [0i32; NNUE_PYTORCH_L3];
@@ -377,19 +389,20 @@ impl<
     /// `num_buckets` は net file header の `num_buckets` field (legacy `.bin` の
     /// 場合は `DEFAULT_NUM_BUCKETS = 9`)。
     pub fn read<R: Read>(reader: &mut R, num_buckets: usize) -> io::Result<Self> {
-        let mut stacks = Self::with_num_buckets(num_buckets);
+        debug_assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
+        let mut buckets = Vec::with_capacity(num_buckets);
 
         // fc_hash をスキップして bucket ごとに読み込み
         let mut buf4 = [0u8; 4];
-        for bucket in stacks.buckets.iter_mut() {
+        for _ in 0..num_buckets {
             // fc_hash を読み飛ばす
             reader.read_exact(&mut buf4)?;
             let _fc_hash = u32::from_le_bytes(buf4);
             // バケットを読み込み（常に非圧縮形式）
-            *bucket = LayerStackBucket::read(reader)?;
+            buckets.push(LayerStackBucket::read(reader)?);
         }
 
-        Ok(stacks)
+        Ok(Self { buckets })
     }
 
     #[cfg(feature = "prepacked-nnue")]
@@ -1468,15 +1481,13 @@ mod tests {
     target_feature = "avx512bw",
     target_feature = "avx512vnni"
 ))]
-pub(super) fn assert_l1_kernels_match(
+pub(super) fn assert_fused_l1_matches_reference(
     bucket: &LayerStackBucket<1536, 16, 30, 32>,
     us: &[i16; 1536],
     them: &[i16; 1536],
 ) {
-    use super::ls_l1_kernel::{LsL1Kernel, avx512};
+    use super::ls_l1_kernel::avx512;
     let legacy = sqr_clipped_relu_new(us, them);
-    let xf64 = avx512::transform(us, them);
-    assert_eq!(legacy.0, xf64.0);
     let mut expected = bucket.l1.biases;
     for (out, value) in expected.iter_mut().enumerate() {
         for (i, &input) in legacy.0.iter().enumerate() {
@@ -1487,14 +1498,10 @@ pub(super) fn assert_l1_kernels_match(
     let mut dense = [0; 16];
     bucket.l1.propagate_7bit(&legacy.0, &mut dense);
     assert_eq!(expected, dense);
-    bucket.l1.propagate_7bit(&xf64.0, &mut dense);
-    assert_eq!(expected, dense);
     let fused = avx512::fused(us, them, bucket.fused_weights.as_ref().unwrap(), &bucket.l1.biases);
     assert_eq!(expected, fused);
     let score = bucket.propagate(&legacy.0);
-    for kernel in [LsL1Kernel::Legacy, LsL1Kernel::Xf64, LsL1Kernel::Fused] {
-        assert_eq!(score, bucket.propagate_accumulators(us, them, kernel), "{kernel:?}");
-    }
+    assert_eq!(score, bucket.propagate_accumulators(us, them));
 }
 
 #[cfg(all(
@@ -1505,7 +1512,7 @@ pub(super) fn assert_l1_kernels_match(
     target_feature = "avx512vnni"
 ))]
 mod kernel_tests {
-    use super::super::ls_l1_kernel::{LsL1Kernel, avx512};
+    use super::super::ls_l1_kernel::avx512;
     use super::*;
     use rand::{Rng, SeedableRng};
     use rand_xoshiro::Xoshiro256PlusPlus;
@@ -1557,22 +1564,24 @@ mod kernel_tests {
                         rng.random()
                     };
                 }
-                assert_l1_kernels_match(&bucket, &us, &them);
+                assert_fused_l1_matches_reference(&bucket, &us, &them);
             }
             // .bin の論理index経由の delta と、層全体の差し替えを両方検証する。
             bucket.edit_l1(|l1| {
                 l1.apply_file_weight_delta(1536 * 7 + 991, 17);
                 l1.biases[15] += 123;
             });
-            assert_l1_kernels_match(&bucket, &us, &them);
+            assert_fused_l1_matches_reference(&bucket, &us, &them);
             let replacement = random_bucket(&mut rng);
             bucket.edit_l1(|l1| *l1 = replacement.l1);
-            assert_l1_kernels_match(&bucket, &us, &them);
+            assert_fused_l1_matches_reference(&bucket, &us, &them);
         }
     }
 
     #[test]
-    fn transform_covers_every_i16_value() {
+    fn fused_covers_every_i16_value() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(123);
+        let bucket = random_bucket(&mut rng);
         let mut us = [127; 1536];
         let mut them = [127; 1536];
         for start in (0..65536).step_by(768) {
@@ -1580,15 +1589,7 @@ mod kernel_tests {
                 us[i] = (start + i) as i16;
                 them[i + 768] = (start + i) as i16;
             }
-            let result = avx512::transform(&us, &them);
-            for i in 0..768 {
-                assert_eq!(result.0[i], ((i32::from(us[i]).clamp(0, 127) * 127) >> 7) as u8);
-                assert_eq!(
-                    result.0[i + 768],
-                    ((i32::from(them[i + 768]).clamp(0, 127) * 127) >> 7) as u8
-                );
-            }
-            assert_eq!(result.0, sqr_clipped_relu_new(&us, &them).0);
+            assert_fused_l1_matches_reference(&bucket, &us, &them);
         }
     }
 
@@ -1611,20 +1612,17 @@ mod kernel_tests {
     }
 
     #[test]
-    fn unsupported_shapes_and_interrupted_edit_use_legacy() {
+    fn unsupported_shapes_do_not_allocate_fused_weights() {
         fn check<const N: usize, const OUT: usize, const IN: usize, const PAD: usize>() {
             let bucket = LayerStackBucket::<N, OUT, IN, PAD>::new();
             assert!(bucket.fused_weights.is_none());
-            let us = [127; N];
-            for kernel in [LsL1Kernel::Legacy, LsL1Kernel::Xf64, LsL1Kernel::Fused] {
-                assert_eq!(
-                    bucket.propagate(&sqr_clipped_relu_new(&us, &us).0),
-                    bucket.propagate_accumulators(&us, &us, kernel)
-                );
-            }
         }
         check::<768, 16, 30, 32>();
         check::<1536, 32, 62, 64>();
+    }
+
+    #[test]
+    fn interrupted_edit_rebuilds_fused_weights() {
         let mut bucket = Bucket::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             bucket.edit_l1(|l1| {
@@ -1633,11 +1631,11 @@ mod kernel_tests {
             });
         }));
         assert!(result.is_err());
-        assert!(bucket.fused_weights.is_none());
+        assert!(bucket.fused_weights.is_some());
         let us = [127; 1536];
         assert_eq!(
             bucket.propagate(&sqr_clipped_relu_new(&us, &us).0),
-            bucket.propagate_accumulators(&us, &us, LsL1Kernel::Fused)
+            bucket.propagate_accumulators(&us, &us)
         );
     }
 }

@@ -551,8 +551,8 @@ mod tests {
         target_feature = "avx512vnni"
     ))]
     #[test]
-    fn packed_l1_kernels_match_after_copy_on_write() {
-        use crate::nnue::layer_stacks::{LayerStacks, assert_l1_kernels_match};
+    fn packed_fused_l1_matches_after_copy_on_write() {
+        use crate::nnue::layer_stacks::{LayerStacks, assert_fused_l1_matches_reference};
         use crate::nnue::net_bin_layout::TensorBinLayout;
         // FC セクションだけを作り、FT の巨大な fixture を必要とせず read_packed を検証する。
         let nonce = std::time::SystemTime::now()
@@ -609,12 +609,12 @@ mod tests {
         let them = std::array::from_fn(|i| ((i * 71) % 383) as i16 - 128);
         for (a, b) in original.buckets.iter().zip(&mut stacks.buckets) {
             assert_eq!(&*a.l1().weights, &*b.l1().weights);
-            assert_l1_kernels_match(b, &us, &them);
+            assert_fused_l1_matches_reference(b, &us, &them);
             b.edit_l1(|l1| {
                 l1.apply_file_weight_delta(1536 * 3 + 973, 17);
             });
             assert_ne!(&*a.l1().weights, &*b.l1().weights);
-            assert_l1_kernels_match(b, &us, &them);
+            assert_fused_l1_matches_reference(b, &us, &them);
         }
         assert_eq!(std::fs::read(&fixture.packed).unwrap(), packed_bytes.into_inner());
     }

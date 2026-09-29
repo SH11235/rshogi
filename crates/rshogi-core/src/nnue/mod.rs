@@ -132,7 +132,6 @@ pub use ls_feature_spec::{
     HalfKaHmMergedSpec, HalfKaHmSplitSpec, HalfKaMergedSpec, HalfKaSplitSpec, HalfKpSpec,
     LsFeatureSpec,
 };
-pub use ls_l1_kernel::{LsL1Kernel, set_ls_l1_kernel};
 pub use net_delta::{
     NET_DELTA_OPTION_PREFIX, NetCoefficientId, NetDelta, NetDeltaError, NetDeltaReport,
     NetTensorKind, NetTensorShape,

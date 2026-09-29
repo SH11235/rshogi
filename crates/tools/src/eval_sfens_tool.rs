@@ -254,8 +254,8 @@ fn dump_debug_first<
     let main_dim = LS_L1_OUT - 1;
     let mut l1_simd = [0i32; LS_L1_OUT];
     let mut l1_scalar = [0i32; LS_L1_OUT];
-    bucket.l1.propagate(&transformed, &mut l1_simd);
-    affine_scalar(&bucket.l1, &transformed, &mut l1_scalar);
+    bucket.l1().propagate(&transformed, &mut l1_simd);
+    affine_scalar(bucket.l1(), &transformed, &mut l1_scalar);
     compare_i32_slices("LayerStack L1(simd vs scalar)", &l1_simd, &l1_scalar);
     eprintln!("[debug] l1_out={l1_simd:?}");
 
