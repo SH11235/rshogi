@@ -85,16 +85,20 @@ impl<const N: usize> IndexList<N> {
         }
     }
 
-    /// 配列の先頭 `len` 要素からリストを構築する。
-    /// 長さをローカル変数で集計する一括生成用。`len` は容量以下であること。
+    /// 一括生成用の未初期化領域を返す。書込み後に `set_len` で公開する。
     #[inline]
-    pub(crate) fn from_array(indices: [u32; N], len: usize) -> Self {
-        const { Self::_ASSERT_N_FITS_U8 };
-        assert!(len <= N);
-        Self {
-            indices: indices.map(MaybeUninit::new),
-            len: len as u8,
-        }
+    pub(super) fn as_mut_ptr(&mut self) -> *mut u32 {
+        self.indices.as_mut_ptr().cast()
+    }
+
+    /// 一括生成した先頭要素を公開する。
+    ///
+    /// # Safety
+    /// `len <= N` かつ先頭 `len` 要素が初期化済みでなければならない。
+    #[inline]
+    pub(super) unsafe fn set_len(&mut self, len: usize) {
+        debug_assert!(len <= N);
+        self.len = len as u8;
     }
 
     /// 要素を追加
@@ -1116,18 +1120,24 @@ impl AccumulatorCacheGeneric {
         let was_valid = self.valid[entry];
         // 重みの境界検証などで unwind しても半更新の entry を再利用しない。
         self.valid[entry] = false;
-        let (removed, added) = if was_valid {
-            collect_piece_list_diff(&self.piece_lists[entry], pieces, idx_fn)
+        let mut removed = IndexList::new();
+        let mut added = IndexList::new();
+        if was_valid {
+            collect_piece_list_diff(
+                &self.piece_lists[entry],
+                pieces,
+                idx_fn,
+                &mut removed,
+                &mut added,
+            );
         } else {
-            let mut added = IndexList::new();
             for &bp in pieces {
                 if bp != BonaPiece::ZERO {
                     let pushed = added.push(idx_fn(bp));
                     debug_assert!(pushed);
                 }
             }
-            (IndexList::new(), added)
-        };
+        }
         let start = entry * L1;
         apply_weight_changes_to_two::<L1>(
             &mut self.accumulations[start..start + L1],

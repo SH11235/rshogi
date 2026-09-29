@@ -16,6 +16,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### 互換性のない変更と移行手順
 
+- **LayerStacks の Finny refresh に伴う公開 API の拡張 (移行不要)**:
+  `nnue::LsFeatureSpec` に既定実装付きの `feature_indexer(perspective, king_sq)` を追加し、
+  `nnue::pack_bonapiece` を `const fn` にした。既存の trait 実装と関数呼び出しはそのまま使える。
+
 - **`LayerStackBucket::l1` を非公開化**: 融合カーネル用の重みコピーを編集後も同期するため、
   読み取りは `bucket.l1` から `bucket.l1()` に、書き換えは `bucket.edit_l1(|l1| ...)` に変更すること。
   構造体リテラルでの構築は `LayerStackBucket::from_layers(l1, l2, output)` に置き換える。
@@ -64,6 +68,15 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `movenumber` は従来どおり対局内の手数。
 
 ### USI エンジン / 探索
+
+- **LayerStacks の Finny refresh の固定費を削減**:
+  差分 index を最終リストの領域へ直接書き、HalfKA_hm_merged の half-mirror を駒ごとの分岐がない
+  表引きに変更した。PSQT を使わない refresh 経路では cache entry と accumulator へ同時に書き、
+  L1 = 1536 で 3 KiB のコピーをなくした。探索結果は不変 (base `9de40f85` と固定 depth 1〜18 × 5 局面で一致)。
+  同 base 比の ETW search-only 計測で NPS +2.03% (既定の関数配置、cycles/node −2.0%)、
+  `-align-all-functions=6` では +0.36%。同一 binary 内の切替による screening では +1.44%
+  (各局面 +0.8〜2.0%)。
+  HalfKX も共有する `finny.rs` の差分 index 直接書き込みが適用され、差分の内容・順序は変わらない。
 
 - **LayerStacks 1536×16 の FT 出力変換と L1 を VNNI カーネルに融合**:
   AVX-512 VNNI build の静的 LayerStacks で中間バッファを介さず計算する。探索結果は不変
