@@ -373,8 +373,10 @@ pub struct StackEntryLayerStacks<const L1: usize> {
     /// 直前のエントリインデックス（差分計算用）
     pub previous: Option<usize>,
     /// Q16 の視点別部分和。f32 の差分キャッシュとは独立。
+    #[cfg(feature = "layerstack-arch")]
     pub progress_q16: [i64; Color::NUM],
     /// 計算済み視点のビットマスク（bit 0: 先手、bit 1: 後手）。
+    #[cfg(feature = "layerstack-arch")]
     pub progress_q16_valid: u8,
     /// progresskpabs の重み付き和（差分更新用）
     #[cfg(feature = "nnue-progress-diff")]
@@ -390,7 +392,9 @@ impl<const L1: usize> StackEntryLayerStacks<L1> {
             accumulator: AccumulatorLayerStacks::new(),
             dirty_piece: DirtyPiece::default(),
             previous: None,
+            #[cfg(feature = "layerstack-arch")]
             progress_q16: [0; Color::NUM],
+            #[cfg(feature = "layerstack-arch")]
             progress_q16_valid: 0,
             #[cfg(feature = "nnue-progress-diff")]
             progress_sum: 0.0,
@@ -417,6 +421,7 @@ pub struct AccumulatorStackLayerStacks<const L1: usize> {
     /// 現在のインデックス
     current: usize,
     /// 探索開始時の係数を所有し、評価中のロック取得と Arc clone を避ける。
+    #[cfg(feature = "layerstack-arch")]
     progress_q16_weights: Option<std::sync::Arc<[i32]>>,
 }
 
@@ -431,6 +436,7 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         Self {
             entries: entries.into_boxed_slice(),
             current: 0,
+            #[cfg(feature = "layerstack-arch")]
             progress_q16_weights: super::progress_q16::snapshot_weights(),
         }
     }
@@ -479,7 +485,10 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         entry.accumulator.computed_accumulation = false;
         entry.accumulator.computed_score = false;
         entry.dirty_piece = DirtyPiece::default();
-        entry.progress_q16_valid = 0;
+        #[cfg(feature = "layerstack-arch")]
+        {
+            entry.progress_q16_valid = 0;
+        }
         #[cfg(feature = "nnue-progress-diff")]
         {
             entry.computed_progress = false;
@@ -521,8 +530,11 @@ impl<const L1: usize> AccumulatorStackLayerStacks<L1> {
         self.entries[0].accumulator.computed_accumulation = false;
         self.entries[0].accumulator.computed_score = false;
         self.entries[0].previous = None;
-        self.entries[0].progress_q16_valid = 0;
-        self.progress_q16_weights = super::progress_q16::snapshot_weights();
+        #[cfg(feature = "layerstack-arch")]
+        {
+            self.entries[0].progress_q16_valid = 0;
+            self.progress_q16_weights = super::progress_q16::snapshot_weights();
+        }
         #[cfg(feature = "nnue-progress-diff")]
         {
             self.entries[0].computed_progress = false;

@@ -88,13 +88,24 @@ fn compute_layer_stacks_bucket_index(
     side_to_move: Color,
     num_buckets: usize,
 ) -> usize {
+    compute_layer_stacks_bucket_index_with_q16(pos, side_to_move, num_buckets, || {
+        super::progress_q16::configured_progress_q16_bucket(pos, num_buckets)
+    })
+}
+
+/// bucket mode を一度だけ読み、Q16 の場合だけ指定した計算経路を使う。
+#[inline]
+pub(crate) fn compute_layer_stacks_bucket_index_with_q16(
+    pos: &Position,
+    side_to_move: Color,
+    num_buckets: usize,
+    q16_bucket: impl FnOnce() -> usize,
+) -> usize {
     match get_layer_stack_bucket_mode() {
         LayerStackBucketMode::KingRank9 => {
             compute_layer_stack_kingrank9_bucket_index(pos, side_to_move, num_buckets)
         }
-        LayerStackBucketMode::ProgressKPAbsQ16 => {
-            super::progress_q16::configured_progress_q16_bucket(pos, num_buckets)
-        }
+        LayerStackBucketMode::ProgressKPAbsQ16 => q16_bucket(),
         LayerStackBucketMode::ProgressKPAbs => {
             let weights = get_layer_stack_progress_kpabs_weights();
             let routing_buckets = get_layer_stack_progress_buckets()
@@ -2433,6 +2444,48 @@ mod tests {
         feature = "ft-halfka_hm_merged"
     ))]
     use crate::position::{Position, SFEN_HIRATE};
+
+    #[cfg(feature = "layerstack-arch")]
+    #[test]
+    fn test_bucket_routing_only_calls_q16_for_q16_mode() {
+        use super::super::network::{
+            configure_layer_stack_routing, layer_stack_routing_test_guard,
+            reset_layer_stack_progress_buckets, reset_layer_stack_progress_kpabs_weights,
+        };
+
+        let routing_guard = layer_stack_routing_test_guard();
+        let mut pos = Position::new();
+        pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
+        reset_layer_stack_progress_kpabs_weights();
+
+        for (mode, count, expected) in [
+            (LayerStackBucketMode::KingRank9, None, 8),
+            (LayerStackBucketMode::ProgressKPAbs, Some(4), 2),
+            (LayerStackBucketMode::ProgressKPAbs, Some(1), 0),
+        ] {
+            configure_layer_stack_routing(mode, 9, count).unwrap();
+            assert_eq!(
+                compute_layer_stacks_bucket_index_with_q16(&pos, pos.side_to_move(), 9, || {
+                    panic!("Q16 routing must not run for {mode:?}")
+                }),
+                expected
+            );
+            assert_eq!(compute_layer_stacks_bucket_index(&pos, pos.side_to_move(), 9), expected);
+        }
+
+        configure_layer_stack_routing(LayerStackBucketMode::ProgressKPAbsQ16, 9, Some(4)).unwrap();
+        let mut calls = 0;
+        assert_eq!(
+            compute_layer_stacks_bucket_index_with_q16(&pos, pos.side_to_move(), 9, || {
+                calls += 1;
+                3
+            }),
+            3
+        );
+        assert_eq!(calls, 1);
+        reset_layer_stack_progress_buckets();
+        drop(routing_guard);
+    }
 
     #[cfg(feature = "layerstack-arch")]
     #[test]

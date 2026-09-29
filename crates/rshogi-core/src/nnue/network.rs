@@ -1832,11 +1832,11 @@ pub fn get_network() -> Option<Arc<NNUENetwork>> {
 
 /// LayerStacks アキュムレータを更新して評価（キャッシュ対応版）
 ///
-/// `LayerStacksNetwork::update_accumulator()` と `evaluate()` に委譲する。
+/// `LayerStacksNetwork::update_accumulator()` と `evaluate_with_bucket()` に委譲する。
 /// AccumulatorCaches（Finny Tables）を使用して refresh を高速化する。
 ///
 /// `nnue-progress-diff` feature 有効時は progresskpabs モードで差分更新を試み、
-/// 結果を `CACHED_PROGRESS_BUCKET` に格納して `evaluate()` 内の全駒スキャンを回避する。
+/// 結果を `CACHED_PROGRESS_BUCKET` に格納して bucket 選択時の全駒スキャンを回避する。
 /// Threat なし環境では +3〜4% NPS、Threat あり環境では cache 圧迫で退行するため
 /// 運用モデルに応じて明示指定する。
 #[cfg(feature = "layerstack-arch")]
@@ -1849,11 +1849,6 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
 ) -> Value {
     // アキュムレータの更新
     net.update_accumulator(pos, stack, acc_cache);
-
-    if matches!(get_layer_stack_bucket_mode(), LayerStackBucketMode::ProgressKPAbsQ16) {
-        let bucket = stack.ensure_progress_q16_bucket(pos, net.num_buckets());
-        return net.evaluate_with_bucket(pos, stack, bucket);
-    }
 
     // progresskpabs: 差分更新を試み、結果を CACHED_PROGRESS_BUCKET に格納
     #[cfg(feature = "nnue-progress-diff")]
@@ -1894,8 +1889,13 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
         CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
     }
 
-    // 評価
-    net.evaluate(pos, stack)
+    let bucket = super::network_layer_stacks::compute_layer_stacks_bucket_index_with_q16(
+        pos,
+        pos.side_to_move(),
+        net.num_buckets(),
+        || stack.ensure_progress_q16_bucket(pos, net.num_buckets()),
+    );
+    net.evaluate_with_bucket(pos, stack, bucket)
 }
 
 /// progresskpabs の progress_sum を計算済みにして bucket index を返す
