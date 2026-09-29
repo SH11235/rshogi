@@ -2748,6 +2748,7 @@ impl SearchWorker {
         let mut quiets_tried = SearchedMoveList::new();
         let mut captures_tried = SearchedMoveList::new();
         let mover = pos.side_to_move();
+        let pawn_history_index = pos.pawn_history_index();
 
         // qsearch/ProbCut互換: 捕獲フェーズではTT手もcapture_stageで制約
         let tt_move = if depth <= DEPTH_QS
@@ -2873,7 +2874,7 @@ impl SearchWorker {
                 static_eval: st.stack[ply as usize].static_eval,
                 alpha,
                 best_move,
-                pawn_history_index: pos.pawn_history_index(),
+                pawn_history_index,
                 // SE 前に取得（SE の再帰 search_node が同一 ply の stack を上書きするため）
                 follow_pv: st.stack[ply as usize].follow_pv,
                 pv_node,

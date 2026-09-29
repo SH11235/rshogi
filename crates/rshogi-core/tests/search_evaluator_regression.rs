@@ -67,4 +67,23 @@ fn fixed_depth_search_regression() {
         fixed_depth(&format!("Material{}", level.value()));
     }
     material::disable_material();
+    node_budget();
+}
+
+fn node_budget() {
+    material::set_material_level(MaterialLevel::Lv2);
+    let mut pos = Position::new();
+    pos.set_sfen(SFEN_HIRATE).unwrap();
+    let mut search = Search::new_with_eval_hash(1, 1);
+    let mut limits = LimitsType::default();
+    limits.depth = 64;
+    limits.nodes = 1000;
+    let result = search.go(&mut pos, limits, None::<fn(&SearchInfo)>);
+    assert_eq!(result.nodes, 1000);
+    assert_eq!(result.depth, 6);
+    assert_eq!(result.score.raw(), 2);
+    assert_eq!(result.best_move.to_usi(), "1g1f");
+    let pv = result.pv.iter().map(|mv| mv.to_usi()).collect::<Vec<_>>().join(" ");
+    assert_eq!(pv, "1g1f 2c2d 3g3f");
+    material::disable_material();
 }

@@ -21,8 +21,27 @@ use super::{LimitsType, TimeManagement};
 // =============================================================================
 
 /// 中断チェック
-#[inline]
+#[inline(always)]
 pub(super) fn check_abort(
+    st: &mut SearchState,
+    ctx: &SearchContext<'_>,
+    limits: &LimitsType,
+    time_manager: &mut TimeManagement,
+) -> bool {
+    if st.abort {
+        return check_abort_slow(st, ctx, limits, time_manager);
+    }
+    // 頻度制御の減算と判定は、停止済みの場合を除いて毎回行う。
+    st.calls_cnt -= 1;
+    if st.calls_cnt > 0 {
+        return false;
+    }
+    check_abort_slow(st, ctx, limits, time_manager)
+}
+
+#[cold]
+#[inline(never)]
+fn check_abort_slow(
     st: &mut SearchState,
     ctx: &SearchContext<'_>,
     limits: &LimitsType,
@@ -35,11 +54,6 @@ pub(super) fn check_abort(
         return true;
     }
 
-    // 頻度制御：512回に1回だけ実際のチェックを行う
-    st.calls_cnt -= 1;
-    if st.calls_cnt > 0 {
-        return false;
-    }
     // カウンターをリセット
     st.calls_cnt = if limits.nodes > 0 {
         std::cmp::min(512, (limits.nodes / 1024) as i32).max(1)
@@ -164,7 +178,7 @@ pub(super) fn nnue_push(st: &mut SearchState, dirty_piece: DirtyPiece) {
 }
 
 /// NNUE pop
-#[inline]
+#[inline(always)]
 pub(super) fn nnue_pop(st: &mut SearchState) {
     st.evaluator.pop();
 }
@@ -206,7 +220,7 @@ pub(super) fn cont_history_keys(st: &SearchState, ply: i32) -> [ContHistKey; 6] 
 }
 
 /// ContinuationHistory を設定
-#[inline]
+#[inline(always)]
 pub(super) fn set_cont_history_for_move(
     st: &mut SearchState,
     ctx: &SearchContext<'_>,
