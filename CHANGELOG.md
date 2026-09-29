@@ -20,6 +20,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `nnue::LsFeatureSpec` に既定実装付きの `feature_indexer(perspective, king_sq)` を追加し、
   `nnue::pack_bonapiece` を `const fn` にした。既存の trait 実装と関数呼び出しはそのまま使える。
 
+- **`LayerStackBucket::l1` を非公開化**: 融合カーネル用の重みコピーを編集後も同期するため、
+  読み取りは `bucket.l1` から `bucket.l1()` に、書き換えは `bucket.edit_l1(|l1| ...)` に変更すること。
+  構造体リテラルでの構築は `LayerStackBucket::from_layers(l1, l2, output)` に置き換える。
+
 - **探索開始時に NNUE の重み・accumulator・Finny cache を型付き評価器へ束ねる**:
   評価ごとのグローバル network の読み取りロック・`Arc` clone と、net / stack の
   アーキテクチャ照合を探索経路から除去し、LayerStacks の生ポインタも廃止した。
@@ -73,6 +77,20 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `-align-all-functions=6` では +0.36%。同一 binary 内の切替による screening では +1.44%
   (各局面 +0.8〜2.0%)。
   HalfKX も共有する `finny.rs` の差分 index 直接書き込みが適用され、差分の内容・順序は変わらない。
+
+- **LayerStacks 1536×16 の FT 出力変換と L1 を VNNI カーネルに融合**:
+  AVX-512 VNNI build の静的 LayerStacks で中間バッファを介さず計算する。探索結果は不変
+  （固定 depth 1〜18 × 5 局面で nodes / score / PV / bestmove が main `9de40f85` と一致）。
+  同 base 比の ETW search-only（5 局面 × 5 秒 × ABBA）は、既定配置で NPS +3.93%
+  （cycles/node −3.4%）、`-align-all-functions=6` で +4.03%（−3.4%）、`=5` で +1.39%（−0.8%）。
+  詳細は [計測・設計記録](docs/performance/ls-l1-kernels.md) を参照。
+
+- **pin と王手升を `do_move` の末尾で両色まとめて計算する**:
+  色ごとの差分判定と out-of-line 呼び出しをやめ、pin 計算で使う `between_bb` を表参照もループも
+  使わない算術で求める。null move と PASS は親の pin 情報を引き継ぐ。
+  探索結果は変わらず、固定 depth 1〜18 × 5 局面で base (`9de40f85`) との一致を確認した。
+  ETW search-only 計測で base 比の NPS は既定配置で +3.98%、`-align-all-functions=6` で +3.05%、
+  `-align-all-functions=5` で +0.94% 改善した。
 
 - **NNUE のロードと探索の互換性、および連続探索の準備コストを修正**:
   固定 HalfKX edition でも従来ロードできた他の FT を引き続き探索できるようにし、
