@@ -1040,6 +1040,27 @@ pub struct DynamicLayerStacksStack {
 }
 
 impl DynamicLayerStacksStack {
+    #[cfg(test)]
+    pub(crate) fn test_accumulation(&self) -> &[i16] {
+        let start = self.current * 2 * self.signature.l1;
+        &self.accumulations[start..start + 2 * self.signature.l1]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_psqt(&self) -> &[i32] {
+        let start = self.current * 2 * self.signature.num_buckets;
+        &self.psqt[start..start + 2 * self.signature.num_buckets]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_threat(&self) -> &[i16] {
+        if self.threat_accumulations.is_empty() {
+            return &[];
+        }
+        let start = self.current * 2 * self.signature.l1;
+        &self.threat_accumulations[start..start + 2 * self.signature.l1]
+    }
+
     fn new(net: &DynamicLayerStacksNetwork) -> Self {
         Self {
             signature: net.stack_signature(),
@@ -1806,7 +1827,7 @@ mod tests {
 
     #[test]
     fn stack_is_rebuilt_for_every_runtime_layer_stacks_identity_change() {
-        let base = NNUENetwork::DynamicLayerStacks(Box::new(test_network(
+        let base = NNUENetwork::DynamicLayerStacks(std::sync::Arc::new(test_network(
             RuntimeLsFeature::HalfKaHmMerged,
             8,
             4,
@@ -1828,7 +1849,7 @@ mod tests {
             test_network(RuntimeLsFeature::HalfKaHmMerged, 8, 4, 3, 9, false, 1),
         ];
         for switched_net in switches {
-            let switched = NNUENetwork::DynamicLayerStacks(Box::new(switched_net));
+            let switched = NNUENetwork::DynamicLayerStacks(std::sync::Arc::new(switched_net));
             assert!(!stack.matches_network(&switched));
             assert!(AccumulatorStackVariant::from_network(&switched).matches_network(&switched));
         }
@@ -1861,7 +1882,7 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
         let mut evaluator = NNUEEvaluator::new_with_position(
-            Arc::new(NNUENetwork::DynamicLayerStacks(Box::new(net))),
+            Arc::new(NNUENetwork::DynamicLayerStacks(std::sync::Arc::new(net))),
             &pos,
         );
         assert_eq!(evaluator.evaluate(&pos), Value::ZERO);

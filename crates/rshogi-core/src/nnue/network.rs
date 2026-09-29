@@ -427,23 +427,23 @@ pub fn reset_layer_stack_progress_kpabs_weights() {
 pub enum NNUENetwork {
     /// Runtime-dimension HalfKX（universal edition 専用）
     #[cfg(feature = "nnue-runtime-dimensions")]
-    DynamicHalfKx(Box<DynamicHalfKxNetwork>),
+    DynamicHalfKx(Arc<DynamicHalfKxNetwork>),
     /// Runtime-dimension LayerStacks（universal edition 専用）
     #[cfg(feature = "nnue-runtime-dimensions")]
-    DynamicLayerStacks(Box<DynamicLayerStacksNetwork>),
+    DynamicLayerStacks(Arc<DynamicLayerStacksNetwork>),
     /// HalfKaSplit 特徴量セット（L256/L512/L1024）
-    HalfKaSplit(HalfKaSplitNetwork),
+    HalfKaSplit(Arc<HalfKaSplitNetwork>),
     /// HalfKaHmMerged 特徴量セット（L256/L512/L1024）
-    HalfKaHmMerged(HalfKaHmMergedNetwork),
+    HalfKaHmMerged(Arc<HalfKaHmMergedNetwork>),
     /// HalfKaMerged 特徴量セット（L256/L512/L1024）
-    HalfKaMerged(HalfKaMergedNetwork),
+    HalfKaMerged(Arc<HalfKaMergedNetwork>),
     /// HalfKaHmSplit 特徴量セット（L256/L512/L1024）
-    HalfKaHmSplit(HalfKaHmSplitNetwork),
+    HalfKaHmSplit(Arc<HalfKaHmSplitNetwork>),
     /// HalfKP 特徴量セット（L256/L512）
-    HalfKP(HalfKPNetwork),
+    HalfKP(Arc<HalfKPNetwork>),
     /// LayerStacks（L1=1536/768、格納 bucket 数はファイル由来）
     #[cfg(feature = "layerstack-arch")]
-    LayerStacks(LayerStacksNetwork),
+    LayerStacks(Arc<LayerStacksNetwork>),
 }
 
 impl NNUENetwork {
@@ -515,6 +515,7 @@ impl NNUENetwork {
     /// LayerStacks net の係数へ整数 delta を 1 回適用する。
     ///
     /// すべての ID を先に検証するため、エラー時は net を変更しない。
+    /// 探索などが重みを共有中の場合は `NetDeltaError::SharedNetwork` を返す。
     #[cfg(any(feature = "nnue-runtime-dimensions", feature = "layerstack-arch"))]
     pub fn apply_net_deltas(
         &mut self,
@@ -534,9 +535,13 @@ impl NNUENetwork {
         for delta in deltas {
             let clamped = match self {
                 #[cfg(feature = "nnue-runtime-dimensions")]
-                Self::DynamicLayerStacks(net) => net.apply_net_delta(&delta.id, delta.delta),
+                Self::DynamicLayerStacks(net) => Arc::get_mut(net)
+                    .ok_or(NetDeltaError::SharedNetwork)?
+                    .apply_net_delta(&delta.id, delta.delta),
                 #[cfg(feature = "layerstack-arch")]
-                Self::LayerStacks(net) => net.apply_net_delta(&delta.id, delta.delta),
+                Self::LayerStacks(net) => Arc::get_mut(net)
+                    .ok_or(NetDeltaError::SharedNetwork)?
+                    .apply_net_delta(&delta.id, delta.delta),
                 _ => unreachable!("all deltas were validated against a LayerStacks network"),
             };
             report.clamped += usize::from(clamped);
@@ -724,6 +729,21 @@ impl NNUENetwork {
         arch_override: NNUEArchitectureOverride,
         #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
     ) -> io::Result<Self> {
+        let network = Self::read_search_network(
+            reader,
+            arch_override,
+            #[cfg(feature = "prepacked-nnue")]
+            packed,
+        )?;
+        super::search_evaluator::SearchNetwork::try_from(&network)?;
+        Ok(network)
+    }
+
+    fn read_search_network<R: Read + Seek>(
+        reader: &mut R,
+        arch_override: NNUEArchitectureOverride,
+        #[cfg(feature = "prepacked-nnue")] packed: Option<&super::prepacked::PackedModel>,
+    ) -> io::Result<Self> {
         // 1. ファイルサイズを取得
         let file_size = reader.seek(SeekFrom::End(0))?;
         reader.seek(SeekFrom::Start(0))?;
@@ -819,7 +839,7 @@ impl NNUENetwork {
                                 _ => None,
                             };
                             reader.seek(SeekFrom::Start(0))?;
-                            return Ok(Self::DynamicLayerStacks(Box::new(
+                            return Ok(Self::DynamicLayerStacks(Arc::new(
                                 DynamicLayerStacksNetwork::read_with_source(
                                     reader,
                                     psqt_override,
@@ -846,7 +866,7 @@ impl NNUENetwork {
                             #[cfg(feature = "prepacked-nnue")]
                             packed,
                         )?;
-                        return Ok(Self::LayerStacks(network));
+                        return Ok(Self::LayerStacks(Arc::new(network)));
                     }
                     #[cfg(not(feature = "layerstack-arch"))]
                     {
@@ -867,7 +887,7 @@ impl NNUENetwork {
                     #[cfg(feature = "nnue-runtime-dimensions")]
                     {
                         reader.seek(SeekFrom::Start(0))?;
-                        return Ok(Self::DynamicHalfKx(Box::new(DynamicHalfKxNetwork::read(
+                        return Ok(Self::DynamicHalfKx(Arc::new(DynamicHalfKxNetwork::read(
                             reader,
                             (!matches!(arch_override, NNUEArchitectureOverride::Auto))
                                 .then_some(effective_feature_set),
@@ -927,23 +947,23 @@ impl NNUENetwork {
                 match detection.spec.feature_set {
                     FeatureSet::HalfKaHmMerged => {
                         let network = HalfKaHmMergedNetwork::read(reader, l1, l2, l3, activation)?;
-                        Ok(Self::HalfKaHmMerged(network))
+                        Ok(Self::HalfKaHmMerged(Arc::new(network)))
                     }
                     FeatureSet::HalfKaSplit => {
                         let network = HalfKaSplitNetwork::read(reader, l1, l2, l3, activation)?;
-                        Ok(Self::HalfKaSplit(network))
+                        Ok(Self::HalfKaSplit(Arc::new(network)))
                     }
                     FeatureSet::HalfKaMerged => {
                         let network = HalfKaMergedNetwork::read(reader, l1, l2, l3, activation)?;
-                        Ok(Self::HalfKaMerged(network))
+                        Ok(Self::HalfKaMerged(Arc::new(network)))
                     }
                     FeatureSet::HalfKaHmSplit => {
                         let network = HalfKaHmSplitNetwork::read(reader, l1, l2, l3, activation)?;
-                        Ok(Self::HalfKaHmSplit(network))
+                        Ok(Self::HalfKaHmSplit(Arc::new(network)))
                     }
                     FeatureSet::HalfKP => {
                         let network = HalfKPNetwork::read(reader, l1, l2, l3, activation)?;
-                        Ok(Self::HalfKP(network))
+                        Ok(Self::HalfKP(Arc::new(network)))
                     }
                     FeatureSet::LayerStacks => {
                         // 上で処理済みなのでここには来ない
@@ -1916,15 +1936,12 @@ fn ensure_progress_bucket<const L1: usize>(
 /// HalfKaHmMerged アキュムレータを更新して評価（内部実装）
 #[cfg(feature = "halfkx-arch")]
 #[inline]
-fn update_and_evaluate_halfka_hm(
-    network: &NNUENetwork,
+pub(crate) fn update_and_evaluate_halfka_hm(
+    net: &HalfKaHmMergedNetwork,
     pos: &Position,
     stack: &mut HalfKaHmMergedStack,
     cache: &mut Option<AccumulatorCacheGeneric>,
 ) -> Value {
-    let NNUENetwork::HalfKaHmMerged(net) = network else {
-        unreachable!("Network/Stack type mismatch")
-    };
     // アキュムレータの更新
     if !stack.is_current_computed() {
         let mut updated = false;
@@ -1964,15 +1981,12 @@ fn update_and_evaluate_halfka_hm(
 /// HalfKaSplit アキュムレータを更新して評価（内部実装）
 #[cfg(feature = "halfkx-arch")]
 #[inline]
-fn update_and_evaluate_halfka(
-    network: &NNUENetwork,
+pub(crate) fn update_and_evaluate_halfka(
+    net: &HalfKaSplitNetwork,
     pos: &Position,
     stack: &mut HalfKaSplitStack,
     cache: &mut Option<AccumulatorCacheGeneric>,
 ) -> Value {
-    let NNUENetwork::HalfKaSplit(net) = network else {
-        unreachable!("Network/Stack type mismatch")
-    };
     // アキュムレータの更新
     if !stack.is_current_computed() {
         let mut updated = false;
@@ -2010,15 +2024,12 @@ fn update_and_evaluate_halfka(
 }
 
 #[cfg(feature = "halfkx-arch")]
-fn update_and_evaluate_halfka_merged(
-    network: &NNUENetwork,
+pub(crate) fn update_and_evaluate_halfka_merged(
+    net: &HalfKaMergedNetwork,
     pos: &Position,
     stack: &mut HalfKaMergedStack,
     cache: &mut Option<AccumulatorCacheGeneric>,
 ) -> Value {
-    let NNUENetwork::HalfKaMerged(net) = network else {
-        unreachable!("Network/Stack type mismatch")
-    };
     if !stack.is_current_computed() {
         let mut updated = false;
 
@@ -2051,15 +2062,12 @@ fn update_and_evaluate_halfka_merged(
 }
 
 #[cfg(feature = "halfkx-arch")]
-fn update_and_evaluate_halfka_hm_split(
-    network: &NNUENetwork,
+pub(crate) fn update_and_evaluate_halfka_hm_split(
+    net: &HalfKaHmSplitNetwork,
     pos: &Position,
     stack: &mut HalfKaHmSplitStack,
     cache: &mut Option<AccumulatorCacheGeneric>,
 ) -> Value {
-    let NNUENetwork::HalfKaHmSplit(net) = network else {
-        unreachable!("Network/Stack type mismatch")
-    };
     if !stack.is_current_computed() {
         let mut updated = false;
 
@@ -2094,15 +2102,12 @@ fn update_and_evaluate_halfka_hm_split(
 /// HalfKP アキュムレータを更新して評価（内部実装）
 #[cfg(feature = "halfkx-arch")]
 #[inline]
-fn update_and_evaluate_halfkp(
-    network: &NNUENetwork,
+pub(crate) fn update_and_evaluate_halfkp(
+    net: &HalfKPNetwork,
     pos: &Position,
     stack: &mut HalfKPStack,
     cache: &mut Option<AccumulatorCacheGeneric>,
 ) -> Value {
-    let NNUENetwork::HalfKP(net) = network else {
-        unreachable!("Network/Stack type mismatch")
-    };
     // アキュムレータの更新
     if !stack.is_current_computed() {
         let mut updated = false;
@@ -2277,23 +2282,38 @@ pub(crate) fn evaluate_dispatch_with_caches(
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaSplit(s) => {
-            update_and_evaluate_halfka(&network, pos, s, halfkx_cache)
+            let NNUENetwork::HalfKaSplit(net) = &*network else {
+                unreachable!("Network/Stack type mismatch")
+            };
+            update_and_evaluate_halfka(net, pos, s, halfkx_cache)
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaHmMerged(s) => {
-            update_and_evaluate_halfka_hm(&network, pos, s, halfkx_cache)
+            let NNUENetwork::HalfKaHmMerged(net) = &*network else {
+                unreachable!("Network/Stack type mismatch")
+            };
+            update_and_evaluate_halfka_hm(net, pos, s, halfkx_cache)
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaMerged(s) => {
-            update_and_evaluate_halfka_merged(&network, pos, s, halfkx_cache)
+            let NNUENetwork::HalfKaMerged(net) = &*network else {
+                unreachable!("Network/Stack type mismatch")
+            };
+            update_and_evaluate_halfka_merged(net, pos, s, halfkx_cache)
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKaHmSplit(s) => {
-            update_and_evaluate_halfka_hm_split(&network, pos, s, halfkx_cache)
+            let NNUENetwork::HalfKaHmSplit(net) = &*network else {
+                unreachable!("Network/Stack type mismatch")
+            };
+            update_and_evaluate_halfka_hm_split(net, pos, s, halfkx_cache)
         }
         #[cfg(feature = "halfkx-arch")]
         AccumulatorStackVariant::HalfKP(s) => {
-            update_and_evaluate_halfkp(&network, pos, s, halfkx_cache)
+            let NNUENetwork::HalfKP(net) = &*network else {
+                unreachable!("Network/Stack type mismatch")
+            };
+            update_and_evaluate_halfkp(net, pos, s, halfkx_cache)
         }
         #[cfg(not(feature = "halfkx-arch"))]
         AccumulatorStackVariant::HalfKaSplit(_)

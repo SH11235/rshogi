@@ -5,9 +5,7 @@
 use std::ptr::NonNull;
 
 use crate::eval::{EvalHash, eval_hash_enabled};
-#[cfg(feature = "layerstack-arch")]
-use crate::nnue::{AccumulatorStackVariant, update_and_evaluate_layer_stacks_cached};
-use crate::nnue::{DirtyPiece, evaluate_dispatch_with_caches};
+use crate::nnue::DirtyPiece;
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
@@ -110,41 +108,10 @@ pub(super) fn check_abort(
 // NNUE操作
 // =============================================================================
 
-/// NNUE 評価
-///
-/// `layerstack-arch` feature かつ実行中ネットワークが LayerStacks のときは
-/// `evaluate_dispatch` をバイパスし、`network_ptr` から直接 LayerStacks 評価を呼ぶ。
-/// これにより `get_network()` の RwLock::read + Arc::clone を完全回避する。
-/// HalfKX 系ネットワークがロードされている場合は通常の `evaluate_dispatch` を使う。
+/// 探索開始時に束ねた評価器で評価する。
 #[inline]
 pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
-    #[cfg(feature = "layerstack-arch")]
-    {
-        let ptr = st.network_ptr;
-        if !ptr.is_null()
-            && let AccumulatorStackVariant::LayerStacks(ref mut s) = st.nnue_stack
-        {
-            // SAFETY: network_ptr は reset() で Arc::as_ptr() から設定。
-            // Arc は NETWORK の RwLock 内に保持され、探索中に drop されない。
-            // nnue_stack が LayerStacks variant のとき network も LayerStacks
-            // (reset() で from_network により対応付けされる) と保証されているため、
-            // as_layer_stacks() は panic しない。
-            let network = unsafe { &*ptr };
-            let net = network.as_layer_stacks();
-            return update_and_evaluate_layer_stacks_cached(net, pos, s, &mut st.acc_cache);
-        }
-    }
-    #[cfg(feature = "layerstack-arch")]
-    let acc_cache = &mut st.acc_cache;
-    #[cfg(not(feature = "layerstack-arch"))]
-    let acc_cache = &mut None;
-    evaluate_dispatch_with_caches(
-        pos,
-        &mut st.nnue_stack,
-        acc_cache,
-        #[cfg(feature = "halfkx-arch")]
-        &mut st.halfkx_cache,
-    )
+    st.evaluator.evaluate(pos)
 }
 
 /// EvalHash を介した NNUE 静的評価（YaneuraOu の `Eval::evaluate` 相当）
@@ -187,19 +154,19 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
         eval_hash.prefetch(pos.key());
     }
     st.nodes += 1;
-    st.nnue_stack.push(dirty_piece);
+    st.evaluator.push(dirty_piece);
 }
 
 /// NNUE push
 #[inline]
 pub(super) fn nnue_push(st: &mut SearchState, dirty_piece: DirtyPiece) {
-    st.nnue_stack.push(dirty_piece);
+    st.evaluator.push(dirty_piece);
 }
 
 /// NNUE pop
 #[inline]
 pub(super) fn nnue_pop(st: &mut SearchState) {
-    st.nnue_stack.pop();
+    st.evaluator.pop();
 }
 
 // =============================================================================

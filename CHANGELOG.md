@@ -16,6 +16,20 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### 互換性のない変更と移行手順
 
+- **探索開始時に NNUE の重み・accumulator・Finny cache を型付き評価器へ束ねる**:
+  評価ごとのグローバル network の読み取りロック・`Arc` clone と、net / stack の
+  アーキテクチャ照合を探索経路から除去し、LayerStacks の生ポインタも廃止した。
+  次の探索では再読み込みした重みと新しい cache を使用する。
+  `NNUENetwork` の各 variant の値は `Arc<各Network>` に変更したため、直接構築する
+  利用者は `NNUENetwork::HalfKP(net)` などを `NNUENetwork::HalfKP(Arc::new(net))` に変更すること。
+  Dynamic variant の `Box::new(net)` も `Arc::new(net)` に置き換える。
+  重みを共有中の `apply_net_deltas` は `NetDeltaError::SharedNetwork` を返すので、
+  変更は共有前の net に適用するか `init_nnue_with_deltas` / `init_nnue_from_bytes_with_deltas`
+  で再読み込みすること。`SearchState` の `nnue_stack` / `acc_cache` / `halfkx_cache` /
+  `network_ptr` は非公開の評価器へ統合した。直接操作していた利用者は
+  `SearchWorker::prepare_search` を使い、単独の評価には既存の `NNUEEvaluator` または
+  `evaluate_dispatch` / `ensure_accumulator_computed` を使うこと。
+
 - **ライブラリ利用者の移行: `position::StateInfo::hand_snapshot` の型と意味を変更**:
   公開フィールドの型を `[Hand; 2]` から `Hand` に変更し、その局面の手番側の持ち駒だけを保存する。
   `Position::state()` / `state_mut()` 経由での参照・更新も対象となる。
@@ -46,6 +60,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   `movenumber` は従来どおり対局内の手数。
 
 ### USI エンジン / 探索
+
+- **NNUE のロードと探索の互換性、および連続探索の準備コストを修正**:
+  固定 HalfKX edition でも従来ロードできた他の FT を引き続き探索できるようにし、
+  ロード時と探索開始時の対応判定を統一した。同じ評価関数での連続探索では
+  accumulator と Finny cache の領域を再利用し、評価関数を差し替えた場合は再構築する。
 
 - **非 LayerStacks の HalfKX 5 系統 (HalfKP / HalfKA / HalfKA_hm) の探索で Finny cache (AccumulatorCaches) を使う**:
   これまで探索の評価経路は LayerStacks にだけ Finny cache を渡しており、HalfKX は玉移動時と祖先が無いときに

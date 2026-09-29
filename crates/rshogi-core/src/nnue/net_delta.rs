@@ -150,6 +150,8 @@ pub struct NetDeltaReport {
 /// net delta の検証・適用エラー。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetDeltaError {
+    /// 探索などがネットワークを共有中のため変更できない。
+    SharedNetwork,
     /// LayerStacks 以外の architecture が指定された。
     UnsupportedArchitecture {
         /// 読み込まれている architecture 名。
@@ -195,6 +197,9 @@ impl fmt::Display for NetDeltaError {
         match self {
             Self::UnsupportedArchitecture { architecture } => {
                 write!(formatter, "unsupported architecture \"{architecture}\"")
+            }
+            Self::SharedNetwork => {
+                write!(formatter, "NNUE network is shared; reload before applying deltas")
             }
             Self::InvalidBinary { message } => write!(formatter, "invalid NNUE binary: {message}"),
             Self::MissingBucket { name } => write!(formatter, "{name}: bucket is required"),
