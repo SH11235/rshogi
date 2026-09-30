@@ -36,7 +36,6 @@ pub use engine::*;
 pub use history::*;
 pub use limits::*;
 pub use movepicker::*;
-pub use search_helpers::set_eh_probe_on_tt_miss;
 pub use skill::*;
 #[cfg(feature = "search-stats")]
 pub use stats::SearchStats;

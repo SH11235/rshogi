@@ -8,17 +8,13 @@ use crate::search::{LimitsType, SearchTuneParams, TimeManagement};
 use crate::tt::TranspositionTable;
 use crate::types::{Bound, Move, Value};
 
-use super::super::search_helpers::{eh_probe_on_tt_miss, set_eh_probe_on_tt_miss};
-
 struct RestoreOptions {
     use_hash: bool,
-    probe_on_miss: bool,
 }
 
 impl Drop for RestoreOptions {
     fn drop(&mut self) {
         set_eval_hash_enabled(self.use_hash);
-        set_eh_probe_on_tt_miss(self.probe_on_miss);
     }
 }
 
@@ -27,7 +23,6 @@ fn eval_hash_probe_policy_preserves_stores_and_tt_eval_paths() {
     let _guard = crate::eval::material::test_support::lock_material();
     let _restore = RestoreOptions {
         use_hash: eval_hash_enabled(),
-        probe_on_miss: eh_probe_on_tt_miss(),
     };
     crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
     std::thread::Builder::new()
@@ -47,14 +42,11 @@ fn eval_hash_probe_policy_preserves_stores_and_tt_eval_paths() {
             assert!(pos.mate_1ply().is_none());
             for use_hash in [false, true] {
                 set_eval_hash_enabled(use_hash);
-                for probe_on_miss in [false, true] {
-                    set_eh_probe_on_tt_miss(probe_on_miss);
-                    for qs in [false, true] {
-                        for pv in [false, true] {
-                            for tt_eval in [None, Some(Value::NONE), Some(Value::new(2345))] {
-                                for warm in [false, true] {
-                                    check_case(&mut worker, &mut pos, qs, pv, tt_eval, warm);
-                                }
+                for qs in [false, true] {
+                    for pv in [false, true] {
+                        for tt_eval in [None, Some(Value::NONE), Some(Value::new(2345))] {
+                            for warm in [false, true] {
+                                check_case(&mut worker, &mut pos, qs, pv, tt_eval, warm);
                             }
                         }
                     }
@@ -79,7 +71,6 @@ fn check_case(
         ..Default::default()
     };
     worker.prepare_search(&limits);
-    assert_eq!(worker.eh_probe_on_tt_miss, eh_probe_on_tt_miss());
     Arc::get_mut(&mut worker.tt).unwrap().clear();
     worker.eval_hash.clear();
     let fresh = crate::eval::material::evaluate_material(pos);
@@ -115,7 +106,6 @@ fn check_case(
     let ctx = SearchContext {
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
-        eh_probe_on_tt_miss: worker.eh_probe_on_tt_miss,
         history: &worker.history,
         cont_history_sentinel: worker.cont_history_sentinel,
         generate_all_legal_moves: worker.generate_all_legal_moves,
@@ -169,7 +159,7 @@ fn check_case(
     };
     let use_tt = tt_eval.is_some_and(|v| v != Value::NONE)
         && (qs || (cfg!(feature = "use-lazy-evaluate") && !pv));
-    let probe = tt_ctx.hit || ctx.eh_probe_on_tt_miss;
+    let probe = tt_ctx.hit;
     let expected = if use_tt {
         tt_eval.unwrap()
     } else if eval_hash_enabled() && probe && warm {

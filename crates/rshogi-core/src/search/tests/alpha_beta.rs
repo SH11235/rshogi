@@ -319,7 +319,6 @@ fn test_nmp_verification_restores_depth_liveness_in_production_path() {
     let ctx = SearchContext {
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
-        eh_probe_on_tt_miss: worker.eh_probe_on_tt_miss,
         history: &worker.history,
         cont_history_sentinel: worker.cont_history_sentinel,
         generate_all_legal_moves: worker.generate_all_legal_moves,
@@ -430,7 +429,6 @@ fn test_nmp_qsearch_verification_leaves_no_stale_mark() {
     let ctx = SearchContext {
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
-        eh_probe_on_tt_miss: worker.eh_probe_on_tt_miss,
         history: &worker.history,
         cont_history_sentinel: worker.cont_history_sentinel,
         generate_all_legal_moves: worker.generate_all_legal_moves,

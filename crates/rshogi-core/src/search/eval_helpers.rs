@@ -525,7 +525,7 @@ pub(super) fn compute_eval_context(
             st,
             ctx,
             pos,
-            tt_ctx.hit || ctx.eh_probe_on_tt_miss,
+            tt_ctx.hit,
             #[cfg(feature = "search-stats")]
             super::stats::EvalHashProbeSite::Search,
             #[cfg(feature = "search-stats")]

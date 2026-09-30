@@ -343,8 +343,6 @@ pub struct SearchContext<'a> {
     pub tt: &'a TranspositionTable,
     /// 評価ハッシュへの参照
     pub eval_hash: &'a EvalHash,
-    /// TT miss でも EvalHash を probe する（探索開始時に固定）。
-    pub eh_probe_on_tt_miss: bool,
     /// 履歴テーブルへの参照（HistoryCell 経由でアクセス）
     pub history: &'a HistoryCell,
     /// ContinuationHistoryのsentinel
@@ -660,9 +658,6 @@ pub struct SearchWorker {
     /// 評価ハッシュへの共有参照（Arc）
     pub eval_hash: Arc<EvalHash>,
 
-    /// TT miss 時の EvalHash probe 設定（prepare_search で取り込む）。
-    pub eh_probe_on_tt_miss: bool,
-
     /// 履歴/統計テーブル群（HistoryCell 経由でアクセス）
     pub history: Box<HistoryCell>,
 
@@ -758,7 +753,6 @@ impl SearchWorker {
         let mut worker = Box::new(Self {
             tt,
             eval_hash,
-            eh_probe_on_tt_miss: false,
             history,
             cont_history_sentinel,
             cont_correction_sentinel,
@@ -786,7 +780,6 @@ impl SearchWorker {
         SearchContext {
             tt: &self.tt,
             eval_hash: &self.eval_hash,
-            eh_probe_on_tt_miss: self.eh_probe_on_tt_miss,
             history: &self.history,
             cont_history_sentinel: self.cont_history_sentinel,
             generate_all_legal_moves: self.generate_all_legal_moves,
@@ -937,7 +930,6 @@ impl SearchWorker {
 
     /// goで呼び出し：探索状態のリセット（履歴はクリアしない）
     pub fn prepare_search(&mut self, limits: &LimitsType) {
-        self.eh_probe_on_tt_miss = super::search_helpers::eh_probe_on_tt_miss();
         self.state.nodes = 0;
         self.state.sel_depth = 0;
         self.state.root_depth = 0;
@@ -1183,7 +1175,6 @@ impl SearchWorker {
             let ctx = SearchContext {
                 tt: &self.tt,
                 eval_hash: &self.eval_hash,
-                eh_probe_on_tt_miss: self.eh_probe_on_tt_miss,
                 history: &self.history,
                 cont_history_sentinel: self.cont_history_sentinel,
                 generate_all_legal_moves: self.generate_all_legal_moves,
@@ -1827,7 +1818,6 @@ impl SearchWorker {
                 let ctx = SearchContext {
                     tt: &self.tt,
                     eval_hash: &self.eval_hash,
-                    eh_probe_on_tt_miss: self.eh_probe_on_tt_miss,
                     history: &self.history,
                     cont_history_sentinel: self.cont_history_sentinel,
                     generate_all_legal_moves: self.generate_all_legal_moves,
@@ -2304,7 +2294,6 @@ impl SearchWorker {
         let ctx = SearchContext {
             tt: &self.tt,
             eval_hash: &self.eval_hash,
-            eh_probe_on_tt_miss: self.eh_probe_on_tt_miss,
             history: &self.history,
             cont_history_sentinel: self.cont_history_sentinel,
             generate_all_legal_moves: self.generate_all_legal_moves,

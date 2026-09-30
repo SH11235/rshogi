@@ -260,7 +260,7 @@ pub(super) fn qsearch<const NT: u8>(
             st,
             ctx,
             pos,
-            tt_hit || ctx.eh_probe_on_tt_miss,
+            tt_hit,
             #[cfg(feature = "search-stats")]
             super::stats::EvalHashProbeSite::Qsearch,
             #[cfg(feature = "search-stats")]

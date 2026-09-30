@@ -56,12 +56,7 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 
-## EvalHash probe の screening
-
-隠し option `setoption name EhProbeOnTtMiss value 0`（既定）は、TT miss の静的評価で
-EvalHash の probe を省き、評価後の store は維持する。`value 1` は従来どおり probe する。
-値は 0 / 1 のみ受け付け、`usi` の一覧には表示しない。探索停止中に設定し、次の探索から
-全ワーカーへ適用する。TT hit の probe、TT eval の再利用条件、lazy の既定は変えない。
+## EvalHash probe の統計
 
 `--features search-stats` を追加すると、既存の探索統計に
 `EvalHash search/qsearch tt_hit/tt_miss: probes=... hits=... skipped=...` の 4 行を出力する。

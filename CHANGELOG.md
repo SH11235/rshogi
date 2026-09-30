@@ -80,6 +80,8 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **TT miss のノードでは EvalHash を probe しない**: Zen 5・LayerStacks の 1T で NPS 約 +1%、探索結果は不変。
+
 - **指し手生成の固定費を削減**:
   歩の移動を bitboard の一括シフトで生成し、駒種が確定している移動では盤面参照を省く。
   生成順序と32bitの駒情報を維持し、探索結果は変わらない。

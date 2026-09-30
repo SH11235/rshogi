@@ -3,7 +3,6 @@
 //! NNUE操作、ContinuationHistory、中断チェック等の基本操作。
 
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::eval::{EvalHash, eval_hash_enabled};
 use crate::nnue::DirtyPiece;
@@ -16,19 +15,6 @@ use super::alpha_beta::{SearchContext, SearchState};
 use super::history::CorrectionPieceToHistory;
 use super::types::{ContHistKey, STACK_SIZE};
 use super::{LimitsType, TimeManagement};
-
-static EH_PROBE_ON_TT_MISS: AtomicBool = AtomicBool::new(false);
-
-/// screening 用の TT miss 時 EvalHash probe を設定する（プロセス全体に適用）。
-///
-/// 探索停止中に設定し、各ワーカーの次回 `prepare_search` で取り込む。
-pub fn set_eh_probe_on_tt_miss(enabled: bool) {
-    EH_PROBE_ON_TT_MISS.store(enabled, Ordering::Relaxed);
-}
-
-pub(super) fn eh_probe_on_tt_miss() -> bool {
-    EH_PROBE_ON_TT_MISS.load(Ordering::Relaxed)
-}
 
 // =============================================================================
 // 中断チェック
@@ -148,7 +134,8 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
 ///
 /// hit 時はアキュムレータを更新しない。後続ノードの `update_accumulator` は
 /// 未計算の祖先を遡って差分適用 / refresh するため、skip しても整合は保たれる。
-/// `probe` が false でも、評価後の store は行う。
+/// `probe` は EvalHash の参照有無を指定する。TT miss では EvalHash hit が稀で、
+/// probe の load 待ちが露出するため false にする。false でも評価後の store は行う。
 #[inline]
 pub(super) fn nnue_evaluate_cached(
     st: &mut SearchState,

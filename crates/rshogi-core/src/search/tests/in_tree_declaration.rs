@@ -56,7 +56,6 @@ fn probe<const NT: u8>(
     let ctx = SearchContext {
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
-        eh_probe_on_tt_miss: worker.eh_probe_on_tt_miss,
         history: &worker.history,
         cont_history_sentinel: worker.cont_history_sentinel,
         generate_all_legal_moves: worker.generate_all_legal_moves,
