@@ -7,7 +7,7 @@ use crate::bitboard::{
     lance_effect, rook_effect, silver_effect,
 };
 use crate::mate::helpers::{can_king_escape_with_from, can_piece_capture};
-use crate::mate::tables::{self, PieceTypeCheck};
+use crate::mate::tables::{PieceTypeCheck, check_cand_bb};
 use crate::mate::{
     aligned, bishop_step_effect, can_promote, cross45_step_effect, lance_step_effect,
     rook_step_effect,
@@ -15,18 +15,8 @@ use crate::mate::{
 use crate::position::Position;
 use crate::types::{Color, Move, PieceType, Rank, Square};
 
-#[inline(always)]
-fn check_cand_bb<const CONST_CAND: bool>(us: Color, pc: PieceTypeCheck, king: Square) -> Bitboard {
-    if CONST_CAND {
-        tables::check_cand_bb(us, pc, king)
-    } else {
-        tables::legacy_check_cand_bb(us, pc, king)
-    }
-}
-
 /// 駒移動による1手詰めを判定（非打ち手のみ対象）
-/// `CONST_CAND` が true なら const 表、false なら screening 用の旧経路を使う。
-pub fn check_move_mate<const CONST_CAND: bool>(pos: &Position, us: Color) -> Option<Move> {
+pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
     if pos.in_check() {
         return None;
     }
@@ -184,8 +174,8 @@ pub fn check_move_mate<const CONST_CAND: bool>(pos: &Position, us: Color) -> Opt
     }
 
     // LANCE（成りで詰まない場合、不成り串刺しも試す）
-    let mut bb = check_cand_bb::<CONST_CAND>(us, PieceTypeCheck::Lance, sq_king)
-        & pos.pieces(us, PieceType::Lance);
+    let mut bb =
+        check_cand_bb(us, PieceTypeCheck::Lance, sq_king) & pos.pieces(us, PieceType::Lance);
     while bb.is_not_empty() {
         let from = bb.pop();
         let slide = occupied ^ Bitboard::from_square(from);
@@ -256,7 +246,7 @@ pub fn check_move_mate<const CONST_CAND: bool>(pos: &Position, us: Color) -> Opt
 
     // GOLD相当（Gold/ProPawn/ProLance/ProKnight/ProSilver）
     let gold_like = pos.golds_c(us);
-    let mut bb = check_cand_bb::<CONST_CAND>(us, PieceTypeCheck::Gold, sq_king) & gold_like;
+    let mut bb = check_cand_bb(us, PieceTypeCheck::Gold, sq_king) & gold_like;
     while bb.is_not_empty() {
         let from = bb.pop();
         let mut bb_check = gold_effect(us, from) & gold_effect(them, sq_king) & bb_move; // 近接のみ
@@ -288,8 +278,8 @@ pub fn check_move_mate<const CONST_CAND: bool>(pos: &Position, us: Color) -> Opt
     }
 
     // SILVER
-    let mut bb = check_cand_bb::<CONST_CAND>(us, PieceTypeCheck::Silver, sq_king)
-        & pos.pieces(us, PieceType::Silver);
+    let mut bb =
+        check_cand_bb(us, PieceTypeCheck::Silver, sq_king) & pos.pieces(us, PieceType::Silver);
     while bb.is_not_empty() {
         let from = bb.pop();
         let mut bb_check = silver_effect(us, from) & bb_move & king_effect(sq_king); // 近接のみ
@@ -328,8 +318,8 @@ pub fn check_move_mate<const CONST_CAND: bool>(pos: &Position, us: Color) -> Opt
     }
 
     // KNIGHT
-    let mut bb = check_cand_bb::<CONST_CAND>(us, PieceTypeCheck::Knight, sq_king)
-        & pos.pieces(us, PieceType::Knight);
+    let mut bb =
+        check_cand_bb(us, PieceTypeCheck::Knight, sq_king) & pos.pieces(us, PieceType::Knight);
     while bb.is_not_empty() {
         let from = bb.pop();
         let mut bb_check = knight_effect(us, from) & bb_move; // 近接のみ
@@ -367,9 +357,8 @@ pub fn check_move_mate<const CONST_CAND: bool>(pos: &Position, us: Color) -> Opt
     }
 
     // PAWN（不成）
-    if (check_cand_bb::<CONST_CAND>(us, PieceTypeCheck::PawnWithNoPro, sq_king)
-        & pos.pieces(us, PieceType::Pawn))
-    .is_not_empty()
+    if (check_cand_bb(us, PieceTypeCheck::PawnWithNoPro, sq_king) & pos.pieces(us, PieceType::Pawn))
+        .is_not_empty()
     {
         let delta_to = if us == Color::Black {
             Square::DELTA_D
@@ -399,8 +388,8 @@ pub fn check_move_mate<const CONST_CAND: bool>(pos: &Position, us: Color) -> Opt
     }
 
     // PAWN（成り）
-    let mut bb = check_cand_bb::<CONST_CAND>(us, PieceTypeCheck::PawnWithPro, sq_king)
-        & pos.pieces(us, PieceType::Pawn);
+    let mut bb =
+        check_cand_bb(us, PieceTypeCheck::PawnWithPro, sq_king) & pos.pieces(us, PieceType::Pawn);
     while bb.is_not_empty() {
         let from = bb.pop();
         let delta_to = if us == Color::Black {
@@ -463,8 +452,7 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen(sfen).unwrap();
 
-        let mv = super::check_move_mate::<true>(&pos, crate::types::Color::White);
-        assert_eq!(mv, super::check_move_mate::<false>(&pos, crate::types::Color::White));
+        let mv = super::check_move_mate(&pos, crate::types::Color::White);
         assert!(mv.is_some(), "mate_1ply should find 6f6g+ (lance promotion to gold)");
         let mv = mv.unwrap();
         assert_eq!(mv.to_usi(), "6f6g+", "expected move 6f6g+");
@@ -479,8 +467,7 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen(sfen).unwrap();
 
-        let mv = super::check_move_mate::<true>(&pos, crate::types::Color::Black);
-        assert_eq!(mv, super::check_move_mate::<false>(&pos, crate::types::Color::Black));
+        let mv = super::check_move_mate(&pos, crate::types::Color::Black);
         assert!(mv.is_some(), "mate should be found");
     }
 }

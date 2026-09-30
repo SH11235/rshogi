@@ -364,8 +364,6 @@ pub struct SearchContext<'a> {
     pub draw_value_table: [Value; 2],
     /// 入玉宣言勝ちルール（探索内の宣言勝ち判定に使う）
     pub entering_king_rule: EnteringKingRule,
-    /// 探索中に固定する1手詰め候補表の screening 設定。
-    pub mate_const_cand: bool,
 }
 
 /// Path tracking used only when the dynamic depth-liveness guard is enabled.
@@ -700,8 +698,6 @@ pub struct SearchWorker {
 
     /// 入玉宣言勝ちルール
     pub entering_king_rule: EnteringKingRule,
-    /// 探索中に固定する1手詰め候補表の screening 設定。
-    pub mate_const_cand: bool,
 
     // =========================================================================
     // 探索状態（SearchState）
@@ -770,7 +766,6 @@ impl SearchWorker {
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             draw_value_table: [Value::ZERO; 2],
             entering_king_rule: EnteringKingRule::default(),
-            mate_const_cand: true,
             state: SearchState::new(),
         });
         worker.reset_cont_history_ptrs();
@@ -795,7 +790,6 @@ impl SearchWorker {
             reductions: &self.reductions,
             draw_value_table: self.draw_value_table,
             entering_king_rule: self.entering_king_rule,
-            mate_const_cand: self.mate_const_cand,
         }
     }
 
@@ -1191,7 +1185,6 @@ impl SearchWorker {
                 reductions: &self.reductions,
                 draw_value_table: self.draw_value_table,
                 entering_king_rule: self.entering_king_rule,
-                mate_const_cand: self.mate_const_cand,
             };
             if let Some(v) = try_probcut(
                 &mut self.state,
@@ -1835,7 +1828,6 @@ impl SearchWorker {
                     reductions: &self.reductions,
                     draw_value_table: self.draw_value_table,
                     entering_king_rule: self.entering_king_rule,
-                    mate_const_cand: self.mate_const_cand,
                 };
                 update_correction_history(&self.state, &ctx, pos, 0, bonus);
             }
@@ -2312,7 +2304,6 @@ impl SearchWorker {
             reductions: &self.reductions,
             draw_value_table: self.draw_value_table,
             entering_king_rule: self.entering_king_rule,
-            mate_const_cand: self.mate_const_cand,
         };
         Self::search_node::<NT>(
             &mut self.state,

@@ -296,8 +296,6 @@ pub struct Search {
     search_tune_params: SearchTuneParams,
     /// 入玉宣言勝ちルール
     entering_king_rule: EnteringKingRule,
-    /// 1手詰め候補表の const 経路を使う（screening 用）。
-    mate_const_cand: bool,
     /// 公開直前の PV を差し替える列。公開経路の検証が働いていることを確かめる。
     #[cfg(test)]
     corrupt_public_pv: Option<Vec<Move>>,
@@ -768,7 +766,6 @@ impl Search {
             draw_value_white: DEFAULT_DRAW_VALUE_WHITE,
             search_tune_params,
             entering_king_rule: EnteringKingRule::default(),
-            mate_const_cand: true,
             #[cfg(test)]
             corrupt_public_pv: None,
         }
@@ -974,17 +971,6 @@ impl Search {
         self.entering_king_rule
     }
 
-    /// 1手詰め候補表の const 経路を使うか設定する（screening 用）。
-    pub fn set_mate_const_cand(&mut self, enabled: bool) {
-        self.mate_const_cand = enabled;
-        self.thread_pool.set_mate_const_cand(enabled);
-    }
-
-    /// 1手詰め候補表の screening 設定を取得する。
-    pub fn mate_const_cand(&self) -> bool {
-        self.mate_const_cand
-    }
-
     /// 探索スレッド数を設定
     pub fn set_num_threads(&mut self, num: usize) {
         // WASM builds without wasm-threads feature use single-threaded search only.
@@ -1094,7 +1080,6 @@ impl Search {
         worker.draw_value_black = self.draw_value_black;
         worker.draw_value_white = self.draw_value_white;
         worker.entering_king_rule = self.entering_king_rule;
-        worker.mate_const_cand = self.mate_const_cand;
 
         // 探索状態のリセット（履歴はクリアしない）
         worker.prepare_search(&limits);

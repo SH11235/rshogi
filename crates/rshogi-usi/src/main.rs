@@ -797,20 +797,6 @@ impl UsiEngine {
         }
 
         match name.as_str() {
-            // screening 専用。usi の公開 option 一覧には含めない。
-            "MateConstCand" => {
-                let enabled = match value.as_str() {
-                    "0" => false,
-                    "1" => true,
-                    _ => {
-                        eprintln!("info string Warning: MateConstCand expects 0 or 1");
-                        return;
-                    }
-                };
-                if let Some(search) = self.search.as_mut() {
-                    search.set_mate_const_cand(enabled);
-                }
-            }
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;
@@ -2254,31 +2240,6 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                     pos.to_sfen(),
                     "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2"
                 );
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
-    #[serial]
-    fn setoption_mate_const_cand_accepts_only_zero_or_one() {
-        std::thread::Builder::new()
-            .stack_size(STACK_SIZE)
-            .spawn(|| {
-                let mut engine = UsiEngine::new();
-                assert!(engine.search.as_ref().unwrap().mate_const_cand());
-                for (value, expected) in [
-                    ("0", false),
-                    ("2", false),
-                    ("true", false),
-                    ("1", true),
-                    ("-1", true),
-                    ("", true),
-                ] {
-                    engine.cmd_setoption(&["setoption", "name", "MateConstCand", "value", value]);
-                    assert_eq!(engine.search.as_ref().unwrap().mate_const_cand(), expected);
-                }
             })
             .unwrap()
             .join()

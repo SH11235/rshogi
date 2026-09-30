@@ -5,6 +5,7 @@ use crate::bitboard::{
     ROOK_STEP, SILVER_EFFECT, SQUARE_BB, bishop_effect, gold_effect, king_effect, knight_effect,
     lance_effect, pawn_effect, rook_effect, silver_effect,
 };
+#[cfg(test)]
 use crate::mate::cross45_step_effect;
 use crate::types::{Color, File, PieceType, Rank, Square};
 use std::sync::LazyLock;
@@ -63,10 +64,6 @@ impl PieceTypeCheck {
 /// [玉の位置][PieceTypeCheck][攻撃側の色]
 pub static CHECK_CAND_BB: [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] = build_check_cand_bb();
 
-/// screening 用の実行時生成テーブル。
-pub(super) static LEGACY_CHECK_CAND_BB: LazyLock<[[[Bitboard; 2]; PieceTypeCheck::NUM]; 81]> =
-    LazyLock::new(init_check_cand_bb);
-
 /// 玉周辺の利きを求めるときに使う、玉周辺に利きをつける候補の駒を表すBB
 /// [玉の位置][駒の種類(PAWN-KING)][攻撃側の色]
 pub static CHECK_AROUND_BB: LazyLock<[[[Bitboard; 2]; PieceType::NUM + 1]; 81]> =
@@ -80,12 +77,6 @@ pub static NEXT_SQUARE: LazyLock<[[Option<Square>; 81]; 81]> = LazyLock::new(ini
 #[inline(always)]
 pub fn check_cand_bb(us: Color, pc: PieceTypeCheck, sq_king: Square) -> Bitboard {
     CHECK_CAND_BB[sq_king.index()][pc as usize][us.index()]
-}
-
-/// screening 用に LazyLock と関数呼び出しの固定費を残す。
-#[inline(never)]
-pub(super) fn legacy_check_cand_bb(us: Color, pc: PieceTypeCheck, sq_king: Square) -> Bitboard {
-    LEGACY_CHECK_CAND_BB[sq_king.index()][pc as usize][us.index()]
 }
 
 const fn build_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
@@ -200,7 +191,8 @@ pub fn check_around_bb(us: Color, pt: PieceType, sq_king: Square) -> Bitboard {
     CHECK_AROUND_BB[sq_king.index()][pt.index()][us.index()]
 }
 
-/// CHECK_CAND_BBの初期化
+/// const 表との全要素一致を検証するための実行時生成実装。
+#[cfg(test)]
 fn init_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
     let mut table = [[[Bitboard::EMPTY; 2]; PieceTypeCheck::NUM]; 81];
 
@@ -425,7 +417,6 @@ mod tests {
                 for us in [Color::Black, Color::White] {
                     let expected = colors[us.index()];
                     assert_eq!(check_cand_bb(us, pc, sq), expected, "{sq:?} {pc:?} {us:?}");
-                    assert_eq!(legacy_check_cand_bb(us, pc, sq), expected);
                 }
             }
         }

@@ -66,7 +66,6 @@ fn probe<const NT: u8>(
         reductions: &worker.reductions,
         draw_value_table: worker.draw_value_table,
         entering_king_rule: worker.entering_king_rule,
-        mate_const_cand: worker.mate_const_cand,
     };
     let in_check = pos.in_check();
     let outcome = super::super::eval_helpers::probe_transposition::<NT>(

@@ -125,7 +125,6 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
         reductions: &worker.reductions,
         draw_value_table: worker.draw_value_table,
         entering_king_rule: worker.entering_king_rule,
-        mate_const_cand: worker.mate_const_cand,
     };
     let stop = Arc::new(AtomicBool::new(outcome == ChildOutcome::QsearchStop));
     let mut tm = TimeManagement::new(stop, Arc::new(AtomicBool::new(false)));

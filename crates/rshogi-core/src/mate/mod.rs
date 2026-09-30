@@ -74,11 +74,6 @@ fn enemy_field(us: Color) -> Bitboard {
 /// 王手がかかっていない局面で1手詰めかどうかを判定する。
 /// 高速化のためのテーブルを利用し、やねうら王の簡易版ロジックに準拠する。
 pub fn mate_1ply(pos: &mut Position) -> Option<Move> {
-    mate_1ply_with_const_cand(pos, true)
-}
-
-/// 探索開始時に固定した screening 設定で1手詰めを判定する。
-pub fn mate_1ply_with_const_cand(pos: &mut Position, const_cand: bool) -> Option<Move> {
     // 王手がかかっている局面では判定しない
     if pos.in_check() {
         return None;
@@ -89,20 +84,19 @@ pub fn mate_1ply_with_const_cand(pos: &mut Position, const_cand: bool) -> Option
         return Some(mv);
     }
 
-    if const_cand {
-        move_mate::check_move_mate::<true>(pos, us)
-    } else {
-        move_mate::check_move_mate::<false>(pos, us)
+    if let Some(mv) = move_mate::check_move_mate(pos, us) {
+        return Some(mv);
     }
+
+    None
 }
 
 /// 1手詰め判定の初期化
 ///
-/// 旧経路の CHECK_CAND_BB、CHECK_AROUND_BB、NEXT_SQUARE を初期化する。
+/// CHECK_AROUND_BB、NEXT_SQUAREテーブルを初期化する。
 /// この関数は起動時に一度だけ呼ばれる。
 pub fn init() {
     // LazyLockを使用するため、最初のアクセス時に自動的に初期化される
-    let _ = &*tables::LEGACY_CHECK_CAND_BB;
     let _ = &*tables::CHECK_AROUND_BB;
     let _ = &*tables::NEXT_SQUARE;
 }
@@ -148,9 +142,7 @@ mod tests {
     fn mate_by_new(sfen: &str) -> Option<Move> {
         let mut pos = Position::new();
         pos.set_sfen(sfen).unwrap();
-        let candidate = super::mate_1ply(&mut pos);
-        assert_eq!(candidate, super::mate_1ply_with_const_cand(&mut pos, false), "{sfen}");
-        candidate
+        super::mate_1ply(&mut pos)
     }
 
     #[test]
@@ -273,14 +265,7 @@ mod tests {
         for index in 0..PLAYOUTS {
             let mut playout = RandomPlayout::new(SEED, index);
             for _ in 0..MAX_PLIES {
-                let candidate = mate_1ply(&mut playout.pos);
-                assert_eq!(
-                    candidate,
-                    mate_1ply_with_const_cand(&mut playout.pos, false),
-                    "{}",
-                    playout.describe()
-                );
-                if let Some(mv) = candidate {
+                if let Some(mv) = mate_1ply(&mut playout.pos) {
                     fast_found += 1;
                     let context = playout.describe();
                     assert_legal_mating_move(&mut playout.pos, mv, &context);

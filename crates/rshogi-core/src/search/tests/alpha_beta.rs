@@ -329,7 +329,6 @@ fn test_nmp_verification_restores_depth_liveness_in_production_path() {
         reductions: &worker.reductions,
         draw_value_table: worker.draw_value_table,
         entering_king_rule: worker.entering_king_rule,
-        mate_const_cand: worker.mate_const_cand,
     };
     let mut time_manager =
         TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
@@ -440,7 +439,6 @@ fn test_nmp_qsearch_verification_leaves_no_stale_mark() {
         reductions: &worker.reductions,
         draw_value_table: worker.draw_value_table,
         entering_king_rule: worker.entering_king_rule,
-        mate_const_cand: worker.mate_const_cand,
     };
     let mut time_manager =
         TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
