@@ -91,6 +91,14 @@ impl Move {
         Move(m)
     }
 
+    /// 移動先0の打ちに移動先を埋める。駒種・色を含む上位bitはそのまま保つ。
+    #[inline]
+    pub(crate) const fn drop_to(self, to: Square) -> Move {
+        debug_assert!(self.0 & Self::DROP_FLAG != 0);
+        debug_assert!(self.0 & Self::TO_MASK == 0);
+        Move(self.0 | to.raw() as u32)
+    }
+
     /// 移動先を取得
     ///
     /// # 注意

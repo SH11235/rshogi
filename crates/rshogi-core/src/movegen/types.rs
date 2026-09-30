@@ -174,6 +174,19 @@ impl ExtMoveBuffer {
         }
     }
 
+    /// 容量を検査せず Move を追加（value=0で初期化）。
+    ///
+    /// # Safety
+    /// 呼出し元は `self.len() < MAX_MOVES` を保証すること。
+    #[inline]
+    pub unsafe fn push_move_unchecked(&mut self, mv: Move) {
+        debug_assert!(self.len < MAX_MOVES);
+        // SAFETY: 呼出し元が len < MAX_MOVES を保証する。書き込み後にだけ
+        // len を進めるので、0..len が初期化済みという不変条件を保つ。
+        unsafe { self.buf.get_unchecked_mut(self.len) }.write(ExtMove { mv, value: 0 });
+        self.len += 1;
+    }
+
     /// 現在の要素数
     #[inline]
     pub fn len(&self) -> usize {
