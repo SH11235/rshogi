@@ -82,7 +82,7 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 - **指し手生成の固定費を削減**:
   歩の移動を bitboard の一括シフトで生成し、駒種が確定している移動では盤面参照を省く。
-  生成順序と32bitの駒情報を維持し、同一 binary の比較で NPS +0.6%。
+  生成順序と32bitの駒情報を維持し、探索結果は変わらない。
 
 - **探索 helper の呼び出し固定費を削減**:
   停止判定 `check_abort` を inline の fast path と cold の slow path に分け、小さい helper を

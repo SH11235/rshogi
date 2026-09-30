@@ -125,6 +125,8 @@ fn generate_pawn_moves(
     }
 }
 
+/// YaneuraOu の GPM_BR と生成順序を揃えるため、角・飛を統合した bitboard の
+/// pop 順（移動元の升の昇順）で生成し、駒種は角の bitboard への所属で判定する。
 fn generate_br_moves(
     pos: &Position,
     target: Bitboard,
@@ -194,7 +196,8 @@ fn generate_ghdk_moves(pos: &Position, target: Bitboard, buffer: &mut ExtMoveBuf
     generate_gold_major_moves::<true>(pos, target, buffer);
 }
 
-/// 金相当・馬・龍・玉を混ぜた移動元の昇順を保つ。
+/// YaneuraOu の GPM_GHDK / GPM_GHD と生成順序を揃えるため、金相当・馬・龍と
+/// KING が真なら玉を統合した bitboard の pop 順（移動元の升の昇順）で生成する。
 #[inline]
 fn generate_gold_major_moves<const KING: bool>(
     pos: &Position,

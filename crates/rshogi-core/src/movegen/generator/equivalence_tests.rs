@@ -215,9 +215,8 @@ fn random_playouts_preserve_move_order() {
     eprintln!("比較局面数={checked} 手番別[通常, 王手]={coverage:?} 成り手数={promotions:?}");
 }
 
-// 盤面参照で駒種を判定する参照実装。変更対象の生成器とその呼出し経路を独立に保つ。
-// 打ち・王手生成・合法性判定など、変更していない処理だけ本体と共有する。
-#[cfg(test)]
+// 盤面参照で駒種を判定する参照実装。
+// 駒種別の移動を組み立て、打ち・王手生成・合法性判定は本体と共有する。
 mod reference {
     use super::super::{
         Bitboard, ExtMoveBuffer, GenerateTargets, Move, MoveList, PieceType, Position,
