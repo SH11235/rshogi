@@ -6,6 +6,25 @@
 #[cfg(feature = "search-stats")]
 pub(super) const STATS_MAX_DEPTH: usize = 32;
 
+#[cfg(feature = "search-stats")]
+#[derive(Clone, Copy)]
+pub(super) enum EvalHashProbeSite {
+    Search,
+    Qsearch,
+}
+
+/// EvalHash が有効な静的評価呼び出しの統計。
+#[cfg(feature = "search-stats")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EvalHashProbeStats {
+    /// probe 回数。
+    pub probes: u64,
+    /// probe で hit した回数。
+    pub hits: u64,
+    /// probe 条件により省略した回数（UseEvalHash=false は含めない）。
+    pub skipped: u64,
+}
+
 /// 探索統計カウンタ
 ///
 /// 各枝刈りの発生回数を記録し、チューニングやデバッグに使用する。
@@ -13,6 +32,8 @@ pub(super) const STATS_MAX_DEPTH: usize = 32;
 #[cfg(feature = "search-stats")]
 #[derive(Debug, Clone)]
 pub struct SearchStats {
+    /// EvalHash 統計: [search / qsearch][TT miss / TT hit]。
+    pub eval_hash: [[EvalHashProbeStats; 2]; 2],
     /// 総ノード数（探索関数の呼び出し回数）
     pub nodes_searched: u64,
     /// LMR適用回数
@@ -133,6 +154,7 @@ pub struct SearchStats {
 impl Default for SearchStats {
     fn default() -> Self {
         Self {
+            eval_hash: [[EvalHashProbeStats::default(); 2]; 2],
             nodes_searched: 0,
             lmr_applied: 0,
             lmr_research: 0,
@@ -203,6 +225,15 @@ impl SearchStats {
     pub fn format_report(&self) -> String {
         let mut report = String::new();
         report.push_str("=== Search Statistics ===\n");
+        report.push_str("--- EvalHash Probes (UseEvalHash enabled) ---\n");
+        for (site, counters) in ["search", "qsearch"].into_iter().zip(&self.eval_hash) {
+            for (tt, counts) in ["miss", "hit"].into_iter().zip(counters) {
+                report.push_str(&format!(
+                    "EvalHash {site} tt_{tt}: probes={} hits={} skipped={}\n",
+                    counts.probes, counts.hits, counts.skipped,
+                ));
+            }
+        }
         report.push_str(&format!("Nodes searched:      {:>12}\n", self.nodes_searched));
         report.push_str(&format!("TT cutoffs:          {:>12}\n", self.tt_cutoff));
         report.push_str("--- Pre-Move Pruning ---\n");

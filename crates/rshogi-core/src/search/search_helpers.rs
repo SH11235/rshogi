@@ -3,6 +3,7 @@
 //! NNUE操作、ContinuationHistory、中断チェック等の基本操作。
 
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::eval::{EvalHash, eval_hash_enabled};
 use crate::nnue::DirtyPiece;
@@ -15,6 +16,19 @@ use super::alpha_beta::{SearchContext, SearchState};
 use super::history::CorrectionPieceToHistory;
 use super::types::{ContHistKey, STACK_SIZE};
 use super::{LimitsType, TimeManagement};
+
+static EH_PROBE_ON_TT_MISS: AtomicBool = AtomicBool::new(false);
+
+/// screening 用の TT miss 時 EvalHash probe を設定する（プロセス全体に適用）。
+///
+/// 探索停止中に設定し、各ワーカーの次回 `prepare_search` で取り込む。
+pub fn set_eh_probe_on_tt_miss(enabled: bool) {
+    EH_PROBE_ON_TT_MISS.store(enabled, Ordering::Relaxed);
+}
+
+pub(super) fn eh_probe_on_tt_miss() -> bool {
+    EH_PROBE_ON_TT_MISS.load(Ordering::Relaxed)
+}
 
 // =============================================================================
 // 中断チェック
@@ -134,18 +148,39 @@ pub(super) fn nnue_evaluate(st: &mut SearchState, pos: &Position) -> Value {
 ///
 /// hit 時はアキュムレータを更新しない。後続ノードの `update_accumulator` は
 /// 未計算の祖先を遡って差分適用 / refresh するため、skip しても整合は保たれる。
+/// `probe` が false でも、評価後の store は行う。
 #[inline]
 pub(super) fn nnue_evaluate_cached(
     st: &mut SearchState,
     ctx: &SearchContext<'_>,
     pos: &Position,
+    probe: bool,
+    #[cfg(feature = "search-stats")] site: super::stats::EvalHashProbeSite,
+    #[cfg(feature = "search-stats")] tt_hit: bool,
 ) -> Value {
     if !eval_hash_enabled() {
         return nnue_evaluate(st, pos);
     }
     let key = pos.key();
-    if let Some(raw) = ctx.eval_hash.probe(key) {
-        return Value::new(raw);
+    #[cfg(feature = "search-stats")]
+    let stats = &mut st.stats.eval_hash[site as usize][usize::from(tt_hit)];
+    if probe {
+        #[cfg(feature = "search-stats")]
+        {
+            stats.probes += 1;
+        }
+        if let Some(raw) = ctx.eval_hash.probe(key) {
+            #[cfg(feature = "search-stats")]
+            {
+                stats.hits += 1;
+            }
+            return Value::new(raw);
+        }
+    } else {
+        #[cfg(feature = "search-stats")]
+        {
+            stats.skipped += 1;
+        }
     }
     let value = nnue_evaluate(st, pos);
     ctx.eval_hash.store(key, value.raw());

@@ -28,7 +28,7 @@ use rshogi_core::nnue::{
 use rshogi_core::position::Position;
 use rshogi_core::search::{
     DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, PonderhitHandle, Search,
-    SearchInfo, SearchResult, SearchTuneParams,
+    SearchInfo, SearchResult, SearchTuneParams, set_eh_probe_on_tt_miss,
 };
 use rshogi_core::types::{EnteringKingRule, Move};
 use serde_json::json;
@@ -929,6 +929,12 @@ impl UsiEngine {
                 self.use_eval_hash = v;
                 set_eval_hash_enabled(v);
             }
+            // screening 用。usi の option 一覧には公開しない。
+            "EhProbeOnTtMiss" => match value.as_str() {
+                "0" => set_eh_probe_on_tt_miss(false),
+                "1" => set_eh_probe_on_tt_miss(true),
+                _ => eprintln!("info string Warning: EhProbeOnTtMiss expects 0 or 1"),
+            },
             "MaxMovesToDraw" => {
                 if let Ok(v) = value.parse::<i32>()
                     && let Some(search) = self.search.as_mut()

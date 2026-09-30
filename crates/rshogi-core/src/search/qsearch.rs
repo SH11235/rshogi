@@ -256,7 +256,16 @@ pub(super) fn qsearch<const NT: u8>(
                 return mate_value;
             }
         }
-        unadjusted_static_eval = nnue_evaluate_cached(st, ctx, pos);
+        unadjusted_static_eval = nnue_evaluate_cached(
+            st,
+            ctx,
+            pos,
+            tt_hit || ctx.eh_probe_on_tt_miss,
+            #[cfg(feature = "search-stats")]
+            super::stats::EvalHashProbeSite::Qsearch,
+            #[cfg(feature = "search-stats")]
+            tt_hit,
+        );
         unadjusted_static_eval
     };
 

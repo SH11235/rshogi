@@ -507,12 +507,30 @@ pub(super) fn compute_eval_context(
         #[cfg(not(feature = "use-lazy-evaluate"))]
         {
             // TT eval は type-1 collision が伝播しうるので再利用せず、EvalHash か NNUE から取る。
-            unadjusted_static_eval = nnue_evaluate_cached(st, ctx, pos);
+            unadjusted_static_eval = nnue_evaluate_cached(
+                st,
+                ctx,
+                pos,
+                true,
+                #[cfg(feature = "search-stats")]
+                super::stats::EvalHashProbeSite::Search,
+                #[cfg(feature = "search-stats")]
+                true,
+            );
         }
         unadjusted_static_eval
     } else {
         // PVノード または TTミス/eval無効 → EvalHash か NNUE から取る
-        unadjusted_static_eval = nnue_evaluate_cached(st, ctx, pos);
+        unadjusted_static_eval = nnue_evaluate_cached(
+            st,
+            ctx,
+            pos,
+            tt_ctx.hit || ctx.eh_probe_on_tt_miss,
+            #[cfg(feature = "search-stats")]
+            super::stats::EvalHashProbeSite::Search,
+            #[cfg(feature = "search-stats")]
+            tt_ctx.hit,
+        );
         unadjusted_static_eval
     };
 
