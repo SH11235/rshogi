@@ -1,8 +1,9 @@
 // 1手詰め探索用の初期化テーブル
 
 use crate::bitboard::{
-    Bitboard, bishop_effect, gold_effect, king_effect, knight_effect, lance_effect, pawn_effect,
-    rook_effect, silver_effect,
+    BISHOP_STEP, Bitboard, GOLD_EFFECT, KING_EFFECT, KNIGHT_EFFECT, PAWN_EFFECT, RANK_BB,
+    ROOK_STEP, SILVER_EFFECT, SQUARE_BB, bishop_effect, gold_effect, king_effect, knight_effect,
+    lance_effect, pawn_effect, rook_effect, silver_effect,
 };
 use crate::mate::cross45_step_effect;
 use crate::types::{Color, File, PieceType, Rank, Square};
@@ -60,7 +61,10 @@ impl PieceTypeCheck {
 
 /// 王手になる候補の駒の位置を示すBitboard
 /// [玉の位置][PieceTypeCheck][攻撃側の色]
-pub static CHECK_CAND_BB: LazyLock<[[[Bitboard; 2]; PieceTypeCheck::NUM]; 81]> =
+pub static CHECK_CAND_BB: [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] = build_check_cand_bb();
+
+/// screening 用の実行時生成テーブル。
+pub(super) static LEGACY_CHECK_CAND_BB: LazyLock<[[[Bitboard; 2]; PieceTypeCheck::NUM]; 81]> =
     LazyLock::new(init_check_cand_bb);
 
 /// 玉周辺の利きを求めるときに使う、玉周辺に利きをつける候補の駒を表すBB
@@ -73,9 +77,122 @@ pub static CHECK_AROUND_BB: LazyLock<[[[Bitboard; 2]; PieceType::NUM + 1]; 81]> 
 pub static NEXT_SQUARE: LazyLock<[[Option<Square>; 81]; 81]> = LazyLock::new(init_next_square);
 
 /// テーブルのラッパー（Color/enum指定で取りやすくする）
-#[inline]
+#[inline(always)]
 pub fn check_cand_bb(us: Color, pc: PieceTypeCheck, sq_king: Square) -> Bitboard {
     CHECK_CAND_BB[sq_king.index()][pc as usize][us.index()]
+}
+
+/// screening 用に LazyLock と関数呼び出しの固定費を残す。
+#[inline(never)]
+pub(super) fn legacy_check_cand_bb(us: Color, pc: PieceTypeCheck, sq_king: Square) -> Bitboard {
+    LEGACY_CHECK_CAND_BB[sq_king.index()][pc as usize][us.index()]
+}
+
+const fn build_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
+    // u128 は Bitboard のレーン間の空きビットも維持する。
+    const fn lance_ray(color: usize, square: usize) -> u128 {
+        let mut ray = 0;
+        let mut step = PAWN_EFFECT[color][square];
+        while step.is_not_empty() {
+            ray |= step.as_u128();
+            step = PAWN_EFFECT[color][step.lsb_unchecked().index()];
+        }
+        ray
+    }
+
+    let mut table = [[[Bitboard::EMPTY; 2]; PieceTypeCheck::NUM]; 81];
+    let mut king = 0;
+    while king < Square::NUM {
+        let sq_king = SQUARE_BB[king].lsb_unchecked();
+        let mut us = 0;
+        while us < Color::NUM {
+            let them = us ^ 1;
+            let first_rank = if us == Color::Black.index() { 0 } else { 6 };
+            let enemy = RANK_BB[first_rank].as_u128()
+                | RANK_BB[first_rank + 1].as_u128()
+                | RANK_BB[first_rank + 2].as_u128();
+            let promo = GOLD_EFFECT[them][king].as_u128() & enemy;
+            let pawn_no_pro = PAWN_EFFECT[them][king].as_u128() & !enemy;
+            let mut candidates = [0u128; PieceTypeCheck::NUM];
+            let mut to = 0;
+            while to < Square::NUM {
+                let target = SQUARE_BB[to].as_u128();
+                if pawn_no_pro & target != 0 {
+                    candidates[PieceTypeCheck::PawnWithNoPro as usize] |=
+                        PAWN_EFFECT[them][to].as_u128();
+                }
+                if promo & target != 0 {
+                    candidates[PieceTypeCheck::PawnWithPro as usize] |=
+                        PAWN_EFFECT[them][to].as_u128();
+                }
+                if (KNIGHT_EFFECT[them][king].as_u128() | promo) & target != 0 {
+                    candidates[PieceTypeCheck::Knight as usize] |=
+                        KNIGHT_EFFECT[them][to].as_u128();
+                }
+                if (SILVER_EFFECT[them][king].as_u128() | promo) & target != 0 {
+                    candidates[PieceTypeCheck::Silver as usize] |=
+                        SILVER_EFFECT[them][to].as_u128();
+                }
+                if GOLD_EFFECT[them][king].as_u128() & target != 0 {
+                    candidates[PieceTypeCheck::Gold as usize] |= GOLD_EFFECT[them][to].as_u128();
+                }
+                to += 1;
+            }
+            candidates[PieceTypeCheck::Gold as usize] &= !SQUARE_BB[king].as_u128();
+
+            let mut lance = lance_ray(them, king);
+            if enemy & SQUARE_BB[king].as_u128() != 0 {
+                if let Some(sq) = sq_king.offset(Square::DELTA_R) {
+                    lance |= lance_ray(them, sq.index());
+                }
+                if let Some(sq) = sq_king.offset(Square::DELTA_L) {
+                    lance |= lance_ray(them, sq.index());
+                }
+            }
+            candidates[PieceTypeCheck::Lance as usize] = lance;
+
+            let special_rank = if us == Color::Black.index() { 3 } else { 5 };
+            if sq_king.rank().index() == special_rank {
+                let promo_rank = if us == Color::Black.index() { 2 } else { 6 };
+                let file = sq_king.file().index();
+                let base = file * 9 + promo_rank;
+                let mut silver = SQUARE_BB[base].as_u128()
+                    | (BISHOP_STEP[base].as_u128() & KING_EFFECT[base].as_u128());
+                if file + 2 < File::NUM {
+                    silver |= SQUARE_BB[(file + 2) * 9 + promo_rank].as_u128();
+                }
+                if file >= 2 {
+                    silver |= SQUARE_BB[(file - 2) * 9 + promo_rank].as_u128();
+                }
+                candidates[PieceTypeCheck::Silver as usize] |= silver;
+            }
+            if sq_king.rank().index() == Rank::Rank5.index() {
+                candidates[PieceTypeCheck::Silver as usize] |= KNIGHT_EFFECT[us][king].as_u128();
+            }
+
+            candidates[PieceTypeCheck::Bishop as usize] = BISHOP_STEP[king].as_u128();
+            candidates[PieceTypeCheck::Rook as usize] = ROOK_STEP[king].as_u128();
+            candidates[PieceTypeCheck::ProBishop as usize] =
+                BISHOP_STEP[king].as_u128() | KING_EFFECT[king].as_u128();
+            candidates[PieceTypeCheck::ProRook as usize] =
+                ROOK_STEP[king].as_u128() | KING_EFFECT[king].as_u128();
+            candidates[PieceTypeCheck::NonSlider as usize] = candidates
+                [PieceTypeCheck::PawnWithNoPro as usize]
+                | candidates[PieceTypeCheck::PawnWithPro as usize]
+                | candidates[PieceTypeCheck::Knight as usize]
+                | candidates[PieceTypeCheck::Silver as usize]
+                | candidates[PieceTypeCheck::Gold as usize];
+            let mut pc = 0;
+            while pc < PieceTypeCheck::NUM {
+                table[king][pc][us] =
+                    Bitboard::new(candidates[pc] as u64, (candidates[pc] >> 64) as u64);
+                pc += 1;
+            }
+            us += 1;
+        }
+        king += 1;
+    }
+    table
 }
 
 #[inline]
@@ -298,6 +415,21 @@ fn init_next_square() -> [[Option<Square>; 81]; 81] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn const_check_cand_matches_runtime_table() {
+        let legacy = init_check_cand_bb();
+        for sq in Square::all() {
+            for (pc_idx, colors) in legacy[sq.index()].iter().enumerate() {
+                let pc = PieceTypeCheck::from_u8(pc_idx as u8).unwrap();
+                for us in [Color::Black, Color::White] {
+                    let expected = colors[us.index()];
+                    assert_eq!(check_cand_bb(us, pc, sq), expected, "{sq:?} {pc:?} {us:?}");
+                    assert_eq!(legacy_check_cand_bb(us, pc, sq), expected);
+                }
+            }
+        }
+    }
 
     #[test]
     fn next_square_matches_eight_direction_rays() {

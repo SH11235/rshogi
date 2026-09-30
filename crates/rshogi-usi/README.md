@@ -56,6 +56,15 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 
+### 1手詰め候補表の screening
+
+隠し option `MateConstCand` は `usi` の option 一覧には表示されない。
+`setoption name MateConstCand value 1`（既定）はコンパイル時生成の表を inline 参照し、
+`value 0` は実行時生成の LazyLock 表を非 inline 関数経由で参照する。
+0 / 1 以外は警告して無視する。設定は次の探索から補助スレッドにも反映され、
+1手詰め入口で経路を選ぶ（ノードごとの atomic 読み出しはない）。
+両経路の指し手・評価値・nodes の比較は同じ設定の単一スレッド・固定 depth で行う。
+
 ## Allocation diagnostics
 
 Build with `cargo build --profile production -p rshogi-usi --features allocation-stats`

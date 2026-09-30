@@ -17,7 +17,7 @@ fn fixture() -> Position {
     pos
 }
 
-fn run_writer(qsearch_writer: bool, write_ply: i32) {
+fn run_writer(qsearch_writer: bool, write_ply: i32, const_cand: bool) {
     let tt = Arc::new(TranspositionTable::new(1));
     let mut worker = SearchWorker::new(
         Arc::clone(&tt),
@@ -30,8 +30,11 @@ fn run_writer(qsearch_writer: bool, write_ply: i32) {
         depth: 1,
         ..Default::default()
     };
+    worker.mate_const_cand = const_cand;
     worker.prepare_search(&limits);
-    let mut pos = fixture();
+    // 持ち駒なしの局面で候補表を通る移動詰めを検証する。
+    let mut pos = Position::new();
+    pos.set_sfen("8k/6S2/7G1/7N1/9/9/9/9/4K4 b - 1").unwrap();
     let ctx = SearchContext {
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,
@@ -45,6 +48,7 @@ fn run_writer(qsearch_writer: bool, write_ply: i32) {
         reductions: &worker.reductions,
         draw_value_table: worker.draw_value_table,
         entering_king_rule: worker.entering_king_rule,
+        mate_const_cand: worker.mate_const_cand,
     };
     let mut tm =
         TimeManagement::new(Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
@@ -130,8 +134,10 @@ fn mate1_tt_qsearch_cold_warm_and_different_ply() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            for ply in [0, 5] {
-                run_writer(true, ply);
+            for const_cand in [false, true] {
+                for ply in [0, 5] {
+                    run_writer(true, ply, const_cand);
+                }
             }
         })
         .unwrap()
@@ -144,8 +150,10 @@ fn mate1_tt_alpha_beta_dedicated_nonroot_writer() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            for ply in [1, 5] {
-                run_writer(false, ply);
+            for const_cand in [false, true] {
+                for ply in [1, 5] {
+                    run_writer(false, ply, const_cand);
+                }
             }
         })
         .unwrap()

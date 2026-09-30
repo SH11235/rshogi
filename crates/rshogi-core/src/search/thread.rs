@@ -24,9 +24,15 @@ mod imp {
         ponderhit: Arc<AtomicBool>,
         increase_depth_shared: Arc<AtomicBool>,
         search_tune_params: SearchTuneParams,
+        mate_const_cand: bool,
     }
 
     impl ThreadPool {
+        /// 次の補助スレッド探索に使う1手詰め候補表の経路を設定する。
+        pub fn set_mate_const_cand(&mut self, enabled: bool) {
+            self.mate_const_cand = enabled;
+        }
+
         pub fn new(
             num_threads: usize,
             tt: Arc<TranspositionTable>,
@@ -43,6 +49,7 @@ mod imp {
                 ponderhit,
                 increase_depth_shared,
                 search_tune_params,
+                mate_const_cand: true,
             };
             pool.set_num_threads(num_threads, tt, eval_hash, max_moves_to_draw, search_tune_params);
             pool
@@ -106,6 +113,7 @@ mod imp {
                     draw_value_black,
                     draw_value_white,
                     entering_king_rule,
+                    mate_const_cand: self.mate_const_cand,
                     search_tune_params: self.search_tune_params,
                     skill_enabled,
                 });
@@ -195,6 +203,7 @@ mod imp {
         draw_value_black: i32,
         draw_value_white: i32,
         entering_king_rule: EnteringKingRule,
+        mate_const_cand: bool,
         search_tune_params: SearchTuneParams,
         skill_enabled: bool,
     }
@@ -335,6 +344,7 @@ mod imp {
                     worker.draw_value_black = task.draw_value_black;
                     worker.draw_value_white = task.draw_value_white;
                     worker.entering_king_rule = task.entering_king_rule;
+                    worker.mate_const_cand = task.mate_const_cand;
                     worker.prepare_search(&task.limits);
 
                     let mut pos = task.pos;
@@ -400,6 +410,11 @@ mod imp {
     }
 
     impl ThreadPool {
+        /// 次の補助スレッド探索に使う1手詰め候補表の経路を設定する。
+        pub fn set_mate_const_cand(&mut self, enabled: bool) {
+            let _ = enabled;
+        }
+
         pub fn new(
             _num_threads: usize,
             _tt: Arc<TranspositionTable>,
@@ -640,6 +655,7 @@ mod imp {
         increase_depth_shared: Arc<AtomicBool>,
         max_moves_to_draw: i32,
         search_tune_params: SearchTuneParams,
+        mate_const_cand: bool,
         /// Counter for pending helper thread tasks.
         /// Decremented when each helper thread completes its search.
         pending_tasks: Arc<AtomicUsize>,
@@ -652,6 +668,11 @@ mod imp {
     }
 
     impl ThreadPool {
+        /// 次の補助スレッド探索に使う1手詰め候補表の経路を設定する。
+        pub fn set_mate_const_cand(&mut self, enabled: bool) {
+            self.mate_const_cand = enabled;
+        }
+
         pub fn new(
             num_threads: usize,
             tt: Arc<TranspositionTable>,
@@ -675,6 +696,7 @@ mod imp {
                 increase_depth_shared,
                 max_moves_to_draw,
                 search_tune_params,
+                mate_const_cand: true,
                 pending_tasks: Arc::new(AtomicUsize::new(0)),
                 helper_results: Arc::new(Mutex::new(Vec::new())),
                 helper_progress,
@@ -744,6 +766,7 @@ mod imp {
                 return;
             }
             let search_tune_params = self.search_tune_params;
+            let mate_const_cand = self.mate_const_cand;
 
             // Release ordering ensures that all preceding writes (helper_results.clear(),
             // progress.reset(), etc.) are visible to helper threads before they start.
@@ -800,6 +823,7 @@ mod imp {
                         worker.draw_value_black = draw_value_black;
                         worker.draw_value_white = draw_value_white;
                         worker.entering_king_rule = entering_king_rule;
+                        worker.mate_const_cand = mate_const_cand;
                         worker.search_tune_params = search_tune_params;
                         worker.prepare_search(&limits_clone);
 

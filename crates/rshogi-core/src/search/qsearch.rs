@@ -209,7 +209,8 @@ pub(super) fn qsearch<const NT: u8>(
     } else {
         // 置換表に無いときだけ簡易1手詰め判定を行う
         if !tt_hit {
-            let mate_move = pos.mate_1ply();
+            let mate_move = crate::mate::mate_1ply_with_const_cand(pos, ctx.mate_const_cand)
+                .unwrap_or(Move::NONE);
             if mate_move.is_some() {
                 let mate_value = Value::mate_in(ply + 1);
                 let stored_value = value_to_tt(mate_value, ply);

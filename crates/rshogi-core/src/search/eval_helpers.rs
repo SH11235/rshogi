@@ -342,7 +342,8 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
     // 1手詰め判定（置換表未ヒット時のみ、Rootでは実施しない）
     // excludedMoveがある場合も実施しない（詰みがあればsingular前にbeta cutするため）
     if NT != NodeType::Root as u8 && !in_check && !tt_hit && excluded_move.is_none() {
-        let mate_move = pos.mate_1ply();
+        let mate_move =
+            crate::mate::mate_1ply_with_const_cand(pos, ctx.mate_const_cand).unwrap_or(Move::NONE);
         if mate_move.is_some() {
             let value = Value::mate_in(ply + 1);
             let stored_value = value_to_tt(value, ply);
