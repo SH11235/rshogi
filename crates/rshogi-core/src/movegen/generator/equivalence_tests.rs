@@ -30,27 +30,6 @@ fn entries(buffer: &ExtMoveBuffer) -> Vec<(u32, i32)> {
 }
 
 fn compare_type(pos: &Position, gen_type: GenType, recapture_sq: Option<Square>) {
-    for enabled in [false, true] {
-        let _guard = ModeGuard::new(enabled);
-        compare_type_mode(pos, gen_type, recapture_sq);
-    }
-}
-
-struct ModeGuard(Option<bool>);
-
-impl ModeGuard {
-    fn new(enabled: bool) -> Self {
-        Self(TEST_MOVEGEN_V3.replace(Some(enabled)))
-    }
-}
-
-impl Drop for ModeGuard {
-    fn drop(&mut self) {
-        TEST_MOVEGEN_V3.set(self.0);
-    }
-}
-
-fn compare_type_mode(pos: &Position, gen_type: GenType, recapture_sq: Option<Square>) {
     let mut old = ExtMoveBuffer::new();
     let mut new = ExtMoveBuffer::new();
     // 既存の要素を残して末尾に追加する契約も確認する。
@@ -68,13 +47,6 @@ fn compare_type_mode(pos: &Position, gen_type: GenType, recapture_sq: Option<Squ
 }
 
 fn compare_position(pos: &Position, recapture_sq: Square) {
-    for enabled in [false, true] {
-        let _guard = ModeGuard::new(enabled);
-        compare_position_mode(pos, recapture_sq);
-    }
-}
-
-fn compare_position_mode(pos: &Position, recapture_sq: Square) {
     use GenType::*;
     for gen_type in [
         Quiets,
@@ -105,7 +77,7 @@ fn compare_position_mode(pos: &Position, recapture_sq: Square) {
             _ if pos.in_check() => continue,
             _ => {}
         }
-        compare_type_mode(pos, gen_type, Some(recapture_sq));
+        compare_type(pos, gen_type, Some(recapture_sq));
     }
 
     type BufferGenerator = fn(&Position, &mut ExtMoveBuffer) -> usize;
@@ -306,32 +278,25 @@ fn capacity_boundaries_preserve_entries_and_overflow_behavior() {
                 MAX_MOVES - expected.len() + 1,
                 MAX_MOVES,
             ] {
-                for enabled in [false, true] {
-                    let _guard = ModeGuard::new(enabled);
-                    let mut old = ExtMoveBuffer::new();
-                    let mut new = ExtMoveBuffer::new();
-                    for i in 0..prefix {
-                        let entry = ExtMove::new(Move::NULL, i as i32);
-                        old.push(entry);
-                        new.push(entry);
-                    }
-                    let old_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        reference::generate_with_type(&pos, gen_type, &mut old, Some(Square::SQ_55))
-                    }));
-                    let new_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        generate_with_type(&pos, gen_type, &mut new, Some(Square::SQ_55))
-                    }));
-                    assert_eq!(
-                        old_result.is_err(),
-                        new_result.is_err(),
-                        "{gen_type:?} V3={enabled}"
-                    );
-                    assert_eq!(entries(&old), entries(&new), "{gen_type:?} V3={enabled}");
-                    assert_eq!(
-                        new_result.is_err(),
-                        cfg!(debug_assertions) && prefix + expected.len() > MAX_MOVES
-                    );
+                let mut old = ExtMoveBuffer::new();
+                let mut new = ExtMoveBuffer::new();
+                for i in 0..prefix {
+                    let entry = ExtMove::new(Move::NULL, i as i32);
+                    old.push(entry);
+                    new.push(entry);
                 }
+                let old_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    reference::generate_with_type(&pos, gen_type, &mut old, Some(Square::SQ_55))
+                }));
+                let new_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    generate_with_type(&pos, gen_type, &mut new, Some(Square::SQ_55))
+                }));
+                assert_eq!(old_result.is_err(), new_result.is_err(), "{gen_type:?}");
+                assert_eq!(entries(&old), entries(&new), "{gen_type:?}");
+                assert_eq!(
+                    new_result.is_err(),
+                    cfg!(debug_assertions) && prefix + expected.len() > MAX_MOVES
+                );
             }
         }
     }
