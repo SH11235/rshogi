@@ -523,7 +523,7 @@ fn l1_sqr_clipped_relu_activation<const LS_L1_OUT: usize, const LS_L2_IN: usize>
                 _mm256_extracti128_si256(clip_words, 1),
             );
 
-            // 下位128 bit: sqr[0..15], clip[0]。上位128 bit: clip[1..15], 0, 0。
+            // 下位128 bit: sqr[0..=14], clip[0]。上位128 bit: clip[1..=14], 0, 0。
             // clipのskip出力もshiftで除き、padding weightが非zeroでも寄与を0に保つ。
             let lo = _mm_alignr_epi8(clip_bytes, _mm_slli_si128(sq_bytes, 1), 1);
             let hi = _mm_srli_si128(_mm_slli_si128(clip_bytes, 1), 2);
@@ -1271,7 +1271,7 @@ mod tests {
                 l2_input_ref.0[TEST_MAIN_DIM + i] = (val >> 6).clamp(0, 127) as u8;
             }
 
-            // SIMDの32 byte storeと、短いsliceのscalar fallbackを同じ入力で確認する。
+            // AVX2 build の SIMD 経路 (32 byte store) と、短い slice の scalar fallback を同じ入力で確認する。
             for len in TEST_LS_L2_IN..=TEST_LS_L2_PADDED_INPUT {
                 let mut l2_input_opt = Aligned([0u8; TEST_LS_L2_PADDED_INPUT]);
                 l1_sqr_clipped_relu_activation::<TEST_LS_L1_OUT, TEST_LS_L2_IN>(
