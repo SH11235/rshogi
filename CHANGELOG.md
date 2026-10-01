@@ -80,6 +80,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **LayerStacks の 1 手差分更新を AVX-512 でも 1 パスで処理**:
+  source→dest 融合の差分更新は AVX2 経路だけにあり、AVX-512BW の build では source の 3KB コピー (memcpy) の後に
+  in-place で更新する 2 パスに落ちていた。AVX-512BW でも source と重み行を読んで結果を直接書く。値は変わらない
+  (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only
+  (5 局面 × 5 秒 × ABBA) で、同一 binary の新旧切替は NPS +0.37% (instructions/node −1.2%)、
+  最終版と main の比較は関数配置 3 通りで +0.40% / +0.59% / −0.70%。
+
 - **静的評価コンテキストのフラグ返却時の store/load 幅不一致を回避**:
   `EvalContext` の `improving` / `opponent_worsening` を 1 つの `u32` にまとめ、
   個別の bool store をまたぐ load による store-to-load forwarding の失敗を解消する。
