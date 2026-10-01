@@ -80,6 +80,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **LayerStacks の L2 入力生成時の重複 store を解消**:
+  AVX2 の 16→30 要素の活性化経路で、SqrClippedReLU / ClippedReLU の結果と
+  padding の 0 をレジスタ上で連結し、32 byte を一度に書き込む。
+  L2 の 4 byte load が複数の store をまたぐことを避け、入力の値・並びは変更しない。
+
 - **LayerStacks の 1 手差分更新を AVX-512 でも 1 パスで処理**:
   source→dest 融合の差分更新は AVX2 経路だけにあり、AVX-512BW の build では source の 3KB コピー (memcpy) の後に
   in-place で更新する 2 パスに落ちていた。AVX-512BW でも source と重み行を読んで結果を直接書く。値は変わらない

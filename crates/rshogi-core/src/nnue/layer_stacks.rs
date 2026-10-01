@@ -490,16 +490,18 @@ fn l1_sqr_clipped_relu_activation<const LS_L1_OUT: usize, const LS_L2_IN: usize>
     let main_dim = LS_L1_OUT - 1;
     debug_assert_eq!(LS_L2_IN, main_dim * 2);
 
-    // 16入力を一度だけpackし、sqr/clipの両方を生成するAVX2変換。16個目はskip出力なので、
-    // sqr側の余剰byteをclip側の先頭storeで上書きし、clip側の余剰byteはpadded inputに書く。
+    // 16入力を一度だけpackし、sqr/clipの両方を生成するAVX2変換。16個目のskip出力を
+    // 除いた30 byteとpaddingの0をレジスタ上で連結し、32 byteを一度にstoreする。
+    // L2の4 byte loadが重なったstoreをまたぐことによるSTLFの失敗を避ける。
     // i32 -> i16は32767超を32767、-32768未満を-32768へ飽和する。前者はsqr/clipとも
     // 127、後者はsqrが127、clipが0になるためscalarと一致する。
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    if LS_L1_OUT == 16 && LS_L2_IN == 30 && l2_input.len() >= 31 {
+    if LS_L1_OUT == 16 && LS_L2_IN == 30 && l2_input.len() >= 32 {
         // SAFETY:
         // - LS_L1_OUT == 16 なので l1_out から i32 を 16 個 load できる。
-        // - l2_input.len() >= 31 なので [0,16) と [15,31) の store は範囲内。
+        // - l2_input.len() >= 32 なので [0,32) の store は範囲内。
         // - load/store は unaligned 版を使うため追加の alignment 要件はない。
+        // - cfgによりAVX2が有効である。
         unsafe {
             use std::arch::x86_64::*;
 
@@ -521,12 +523,12 @@ fn l1_sqr_clipped_relu_activation<const LS_L1_OUT: usize, const LS_L2_IN: usize>
                 _mm256_extracti128_si256(clip_words, 1),
             );
 
-            let output = l2_input.as_mut_ptr();
-            _mm_storeu_si128(output as *mut __m128i, sq_bytes);
-            _mm_storeu_si128(output.add(main_dim) as *mut __m128i, clip_bytes);
-            // clip store の16個目は skip 出力であり、有効入力の直後へ書かれる。
-            // padding weight が非zeroのnetでも従来値を保つため0へ戻す。
-            *output.add(LS_L2_IN) = 0;
+            // 下位128 bit: sqr[0..15], clip[0]。上位128 bit: clip[1..15], 0, 0。
+            // clipのskip出力もshiftで除き、padding weightが非zeroでも寄与を0に保つ。
+            let lo = _mm_alignr_epi8(clip_bytes, _mm_slli_si128(sq_bytes, 1), 1);
+            let hi = _mm_srli_si128(_mm_slli_si128(clip_bytes, 1), 2);
+            let packed = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
+            _mm256_storeu_si256(l2_input.as_mut_ptr().cast(), packed);
         }
         return;
     }
@@ -1219,6 +1221,9 @@ mod tests {
 
     #[test]
     fn test_layer_stack_l2_input_matches_scalar_reference() {
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
         let cases = [
             [
                 -50000, -40000, -33000, -32768, -32000, -1000, 0, 64, 724, 8128, 8192, 8256, 20000,
@@ -1248,13 +1253,17 @@ mod tests {
             ],
         ];
 
-        for l1_out in cases {
-            let mut l2_input_opt = Aligned([0u8; TEST_LS_L2_PADDED_INPUT]);
-            l1_sqr_clipped_relu_activation::<TEST_LS_L1_OUT, TEST_LS_L2_IN>(
-                &l1_out,
-                &mut l2_input_opt.0,
-            );
-
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0016_3032);
+        let random_cases = (0..4096).map(|case| {
+            std::array::from_fn(|_| {
+                if case % 2 == 0 {
+                    rng.random_range(-10_000..=10_000)
+                } else {
+                    rng.random()
+                }
+            })
+        });
+        for l1_out in cases.into_iter().chain(random_cases) {
             let mut l2_input_ref = Aligned([0u8; TEST_LS_L2_PADDED_INPUT]);
             for (i, &val) in l1_out.iter().enumerate().take(TEST_MAIN_DIM) {
                 let input_val = i64::from(val);
@@ -1262,10 +1271,18 @@ mod tests {
                 l2_input_ref.0[TEST_MAIN_DIM + i] = (val >> 6).clamp(0, 127) as u8;
             }
 
-            assert_eq!(
-                l2_input_opt.0, l2_input_ref.0,
-                "optimized l2_input must match scalar reference for l1_out={l1_out:?}"
-            );
+            // SIMDの32 byte storeと、短いsliceのscalar fallbackを同じ入力で確認する。
+            for len in TEST_LS_L2_IN..=TEST_LS_L2_PADDED_INPUT {
+                let mut l2_input_opt = Aligned([0u8; TEST_LS_L2_PADDED_INPUT]);
+                l1_sqr_clipped_relu_activation::<TEST_LS_L1_OUT, TEST_LS_L2_IN>(
+                    &l1_out,
+                    &mut l2_input_opt.0[..len],
+                );
+                assert_eq!(
+                    l2_input_opt.0, l2_input_ref.0,
+                    "optimized l2_input must match scalar reference for len={len}, l1_out={l1_out:?}"
+                );
+            }
         }
     }
 
