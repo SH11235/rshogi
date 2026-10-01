@@ -105,8 +105,10 @@ fn run_case(outcome: ChildOutcome, beta: i32, existing_parent: bool) {
     let before_data = parent_probe.data;
     let tt_ctx = TTContext {
         key: pos.key(),
-        data: before_data,
-        result: parent_probe,
+        depth: before_data.depth,
+        bound: before_data.bound,
+        eval: before_data.eval,
+        writer: parent_probe.writer(),
         hit: existing_parent,
         mv: capture,
         value: Value::NONE,

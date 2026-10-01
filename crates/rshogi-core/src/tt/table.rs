@@ -336,7 +336,18 @@ pub struct ProbeResult<'a> {
     write_counters: &'a super::write_stats::WriteCounters,
 }
 
-impl ProbeResult<'_> {
+impl<'a> ProbeResult<'a> {
+    /// 読み取ったデータを複製せず、書き込み先だけを取り出す。
+    #[inline]
+    pub(crate) fn writer(&self) -> TTWriter<'a> {
+        TTWriter {
+            cluster: self.writer.0,
+            index: self.writer.1,
+            #[cfg(feature = "tt-write-stats")]
+            write_counters: self.write_counters,
+        }
+    }
+
     /// エントリに書き込む（内部で16bitに切り詰め）
     ///
     /// probe後のslotを再読込し、置換条件を適用して格納する。競合による省略はなく常にtrue。
@@ -357,7 +368,33 @@ impl ProbeResult<'_> {
         eval: Value,
         generation8: u8,
     ) -> bool {
-        let (cluster, index) = self.writer;
+        self.writer().write(key, value, is_pv, bound, depth, mv, eval, generation8)
+    }
+}
+
+/// probe で選んだ書き込み先。読み取ったデータと分離して探索中に保持する。
+pub(crate) struct TTWriter<'a> {
+    cluster: &'a Cluster,
+    index: usize,
+    #[cfg(feature = "tt-write-stats")]
+    write_counters: &'a super::write_stats::WriteCounters,
+}
+
+impl TTWriter<'_> {
+    /// 選択済みの slot を再読込し、`ProbeResult::write` と同じ条件で格納する。
+    #[must_use]
+    pub(crate) fn write(
+        &self,
+        key: u64,
+        value: Value,
+        is_pv: bool,
+        bound: Bound,
+        depth: i32,
+        mv: Move,
+        eval: Value,
+        generation8: u8,
+    ) -> bool {
+        let Self { cluster, index, .. } = *self;
         let mut entry = cluster.load(index);
         #[cfg(feature = "tt-write-stats")]
         let before = entry;
@@ -383,6 +420,42 @@ mod tests {
     use super::*;
     use crate::position::{Position, SFEN_HIRATE};
 
+    #[test]
+    fn detached_writer_keeps_slot_and_reloads_payload() {
+        let tt = TranspositionTable::new(0);
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let cluster = tt.first_entry(7, pos.side_to_move());
+        let mut entry = TTEntry::new();
+        entry.save(7, Value::new(10), false, Bound::Lower, 20, Move::NONE, Value::ZERO, 0);
+        cluster.store(2, entry);
+
+        let writer = tt.probe(7, &pos).writer();
+        assert!(std::ptr::eq(writer.cluster, cluster));
+        assert_eq!(writer.index, 2);
+
+        // probe 後の別 writer による更新を読み直し、浅い書き込みでは payload を維持する。
+        assert!(tt.probe(7, &pos).write(
+            7,
+            Value::new(99),
+            true,
+            Bound::Exact,
+            30,
+            Move::NONE,
+            Value::new(42),
+            0,
+        ));
+        let mv = Move::from_usi("7g7f").unwrap();
+        assert!(writer.write(7, Value::new(11), false, Bound::Lower, 1, mv, Value::ZERO, 0));
+        let data = tt.probe(7, &pos).data;
+        assert_eq!(data.value, Value::new(99));
+        assert_eq!(data.eval, Value::new(42));
+        assert_eq!(data.depth, 30);
+        assert_eq!(data.bound, Bound::Exact);
+        assert!(data.is_pv);
+        assert_eq!(data.mv, pos.to_move(mv).unwrap());
+    }
+
     #[cfg(feature = "tt-write-stats")]
     #[test]
     fn write_stats_use_reloaded_slot_and_separate_move_only_updates() {
@@ -390,8 +463,9 @@ mod tests {
         let mut pos = Position::new();
         pos.set_hirate();
         {
-            let writer = tt.probe(7, &pos);
-            assert!(!writer.found);
+            let probe = tt.probe(7, &pos);
+            assert!(!probe.found);
+            let writer = probe.writer();
             assert!(writer.write(
                 7,
                 Value::new(10),
