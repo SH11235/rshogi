@@ -1543,7 +1543,8 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         )
     }
 
-    // 小さい型の引数を先頭に置き、Windows x64 の stack 引数で store/load 幅がずれるのを避ける。
+    // 1 byte 型の引数を先頭に置き、register 渡し (Windows x64 は self を含む先頭 4 引数) にする。
+    // stack 渡しにすると、呼び出し側の 1 byte store を呼ばれた側が 4 byte で読み、store-to-load forwarding が効かない。
     #[inline]
     fn try_apply_dirty_piece_fast_impl<const FROM_SOURCE: bool>(
         &self,
