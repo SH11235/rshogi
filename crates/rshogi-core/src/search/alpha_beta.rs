@@ -282,10 +282,45 @@ pub(super) struct EvalContext {
     pub(super) static_eval: Value,
     pub(super) unadjusted_static_eval: Value,
     pub(super) correction_value: i32,
-    /// 2手前と比較して局面が改善しているか
-    pub(super) improving: bool,
-    /// 相手側の局面が悪化しているか
-    pub(super) opponent_worsening: bool,
+    // 個別の bool store をまたぐ load を避けるため、両フラグを同じ u32 に保持する。
+    flags: u32,
+}
+
+impl EvalContext {
+    const IMPROVING: u32 = 1;
+    const OPPONENT_WORSENING: u32 = 2;
+
+    /// 評価値と局面の改善・悪化の判定をまとめる。
+    #[inline]
+    pub(super) fn new(
+        eval: Value,
+        static_eval: Value,
+        unadjusted_static_eval: Value,
+        correction_value: i32,
+        improving: bool,
+        opponent_worsening: bool,
+    ) -> Self {
+        Self {
+            eval,
+            static_eval,
+            unadjusted_static_eval,
+            correction_value,
+            flags: (u32::from(improving) * Self::IMPROVING)
+                | (u32::from(opponent_worsening) * Self::OPPONENT_WORSENING),
+        }
+    }
+
+    /// 2手前と比較して局面が改善しているか。
+    #[inline]
+    pub(super) fn improving(&self) -> bool {
+        self.flags & Self::IMPROVING != 0
+    }
+
+    /// 相手側の局面が悪化しているか。
+    #[inline]
+    pub(super) fn opponent_worsening(&self) -> bool {
+        self.flags & Self::OPPONENT_WORSENING != 0
+    }
 }
 
 /// Step14の枝刈り判定結果
@@ -2548,8 +2583,8 @@ impl SearchWorker {
         // 静的評価
         let eval_ctx =
             compute_eval_context(st, ctx, pos, ply, in_check, pv_node, &tt_ctx, excluded_move);
-        let mut improving = eval_ctx.improving;
-        let opponent_worsening = eval_ctx.opponent_worsening;
+        let mut improving = eval_ctx.improving();
+        let opponent_worsening = eval_ctx.opponent_worsening();
 
         // evalDiff によるヒストリ更新
         // in_check時はこのブロック自体がスキップされる

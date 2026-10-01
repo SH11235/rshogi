@@ -80,6 +80,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **静的評価コンテキストのフラグ返却時の store/load 幅不一致を回避**:
+  `EvalContext` の `improving` / `opponent_worsening` を 1 つの `u32` にまとめ、
+  個別の bool store をまたぐ load による store-to-load forwarding の失敗を解消する。
+  評価値と各フラグの判定条件は変更しない (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。
+  Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only (5 局面 × 5 秒 × ABBA) で、
+  関数配置 3 通りで NPS +1.50% / +0.05% / +0.45% (instructions/node は不変)。
+
 - **TT probe 後の複数 store をまたぐ読み直しを除去**:
   `TTContext` に `ProbeResult` / `TTData` 全体をコピーせず、書き込み先と後続処理で使う
   値だけを保持する。TT の読み書きの意味・順序を維持し、probe を inline 化せずに解消した。
