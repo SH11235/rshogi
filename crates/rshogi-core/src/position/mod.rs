@@ -20,6 +20,8 @@ mod movepicker_support;
 #[cfg(test)]
 pub(crate) mod playout_test_support;
 mod pos;
+#[cfg(feature = "search-stats")]
+pub(crate) mod see_stats;
 mod sfen;
 mod state;
 mod zobrist;

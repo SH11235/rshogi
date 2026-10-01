@@ -797,6 +797,15 @@ impl UsiEngine {
         }
 
         match name.as_str() {
+            // 同一 binary 内での screening 用。usi の option 一覧には公開しない。
+            "SeeOppGate" => match value.as_str() {
+                "0" | "1" => {
+                    if let Some(search) = self.search.as_mut() {
+                        search.set_see_opp_gate(value == "1");
+                    }
+                }
+                _ => eprintln!("info string Warning: SeeOppGate expects 0 or 1"),
+            },
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;
@@ -2259,6 +2268,24 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                 let search = engine.search.as_ref().expect("search exists");
                 assert_eq!(search.draw_value_black(), 123);
                 assert_eq!(search.draw_value_white(), -456);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn setoption_see_opp_gate_accepts_only_zero_or_one() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut engine = UsiEngine::new();
+                assert!(engine.search.as_ref().unwrap().see_opp_gate());
+                for (value, expected) in [("0", false), ("2", false), ("1", true), ("true", true)] {
+                    engine.cmd_setoption(&["setoption", "name", "SeeOppGate", "value", value]);
+                    assert_eq!(engine.search.as_ref().unwrap().see_opp_gate(), expected);
+                }
             })
             .unwrap()
             .join()

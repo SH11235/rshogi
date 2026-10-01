@@ -408,6 +408,23 @@ impl Position {
             self.occupied() ^ Bitboard::from_square(m.from()) ^ Bitboard::from_square(to)
         };
         let mut stm = self.side_to_move();
+        let gate_empty = (self.see_opp_gate || cfg!(feature = "search-stats"))
+            && self.attackers_to_color_candidates(!stm, to).is_empty();
+
+        // 統計では gate の有無にかかわらず従来の最初の反復を観測する。
+        // 通常 build では、この追加の利き計算・カウンタ更新は存在しない。
+        #[cfg(feature = "search-stats")]
+        let mut attackers = {
+            let attackers = self.attackers_to_occ(to, occupied);
+            let first_empty = (attackers & occupied & self.pieces_c(!stm)).is_empty();
+            super::see_stats::record(gate_empty, first_empty);
+            attackers
+        };
+        if self.see_opp_gate && gate_empty {
+            // 候補が空なら最初の stm_attackers も空で、res = 1 のまま終わる。
+            return true;
+        }
+        #[cfg(not(feature = "search-stats"))]
         let mut attackers = self.attackers_to_occ(to, occupied);
         let mut res = 1i32;
 
@@ -615,6 +632,135 @@ fn see_piece_value(pt: PieceType) -> i32 {
 mod tests {
     use super::*;
     use crate::types::{File, Rank};
+
+    #[test]
+    fn see_opp_gate_matches_ungated_on_random_legal_positions() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use crate::position::playout_test_support::RandomPlayout;
+        use std::collections::HashSet;
+
+        let mut positions = HashSet::new();
+        let mut colors = [0usize; 2];
+        let mut drops = 0;
+        let mut promotions = 0;
+        let mut captures = 0;
+        let mut empty_gates = 0;
+        for index in 0..64 {
+            let mut playout = RandomPlayout::new(0x005e_e0aa_6a7e, index);
+            for ply in 0..160 {
+                // 序盤の同一局面は重複計数せず、異なる 4096 局面を検証する。
+                if ply >= 16 && positions.insert(playout.pos.to_sfen()) {
+                    let pos = &mut playout.pos;
+                    colors[pos.side_to_move().index()] += 1;
+                    let mut moves = MoveList::new();
+                    generate_legal_all(pos, &mut moves);
+                    for i in 0..moves.len() {
+                        let mv = moves.at(i);
+                        drops += usize::from(mv.is_drop());
+                        promotions += usize::from(mv.is_promote());
+                        captures += usize::from(pos.piece_on(mv.to()).is_some());
+                        let occupied = if mv.is_drop() {
+                            pos.occupied() ^ Bitboard::from_square(mv.to())
+                        } else {
+                            pos.occupied()
+                                ^ Bitboard::from_square(mv.from())
+                                ^ Bitboard::from_square(mv.to())
+                        };
+                        let candidates =
+                            pos.attackers_to_color_candidates(!pos.side_to_move(), mv.to());
+                        let actual = pos.attackers_to_occ(mv.to(), occupied)
+                            & occupied
+                            & pos.pieces_c(!pos.side_to_move());
+                        assert!((actual & !candidates).is_empty());
+                        empty_gates += usize::from(candidates.is_empty());
+                        let captured = pos.piece_on(mv.to());
+                        let capture_value = if captured.is_some() {
+                            see_piece_value(captured.piece_type())
+                        } else {
+                            0
+                        };
+                        // 固定閾値と捕獲価値の境界で、早期 return と交換ループを両方通す。
+                        for threshold in [
+                            -15000,
+                            -990,
+                            -78,
+                            -1,
+                            0,
+                            1,
+                            90,
+                            540,
+                            1395,
+                            15000,
+                            capture_value - 1,
+                            capture_value,
+                            capture_value + 1,
+                        ] {
+                            pos.set_see_opp_gate(false);
+                            let expected = pos.see_ge(mv, Value::new(threshold));
+                            pos.set_see_opp_gate(true);
+                            assert_eq!(
+                                pos.see_ge(mv, Value::new(threshold)),
+                                expected,
+                                "mv={mv:?} threshold={threshold} sfen={}",
+                                pos.to_sfen()
+                            );
+                        }
+                    }
+                    if positions.len() == 4096 {
+                        break;
+                    }
+                }
+                if playout.step().is_none() {
+                    break;
+                }
+            }
+            if positions.len() == 4096 {
+                break;
+            }
+        }
+        assert_eq!(positions.len(), 4096);
+        assert!(colors.iter().all(|&n| n > 1000));
+        assert!(drops > 0 && promotions > 0 && captures > 0 && empty_gates > 0);
+    }
+
+    #[cfg(feature = "search-stats")]
+    #[test]
+    fn see_opp_gate_stats_count_the_same_population_in_both_modes() {
+        let mut pos = Position::new();
+        pos.set_hirate();
+        let mv = Move::new_move(
+            Square::new(File::File7, Rank::Rank7),
+            Square::new(File::File7, Rank::Rank6),
+            false,
+        );
+        let mut counts = Vec::new();
+        for enabled in [false, true] {
+            pos.set_see_opp_gate(enabled);
+            super::super::see_stats::reset();
+            assert!(!pos.see_ge(mv, Value::new(1))); // 最初の早期 return
+            assert!(pos.see_ge(mv, Value::new(-90))); // 二つ目の早期 return
+            assert_eq!(super::super::see_stats::snapshot(), [0, 0, 0]);
+            assert!(pos.see_ge(mv, Value::ZERO));
+            // 飛車の疑似線はあるが、歩が遮っているので G < E。
+            pos.set_sfen("4k4/9/4r4/4p4/9/9/4P4/9/4K4 b - 1").unwrap();
+            pos.set_see_opp_gate(enabled);
+            let blocked = Move::new_move(
+                Square::new(File::File5, Rank::Rank7),
+                Square::new(File::File5, Rank::Rank6),
+                false,
+            );
+            assert!(pos.see_ge(blocked, Value::ZERO));
+            // 遮蔽物を外すと実際の攻め駒があり、E < R。
+            pos.set_sfen("4k4/9/4r4/9/9/9/4P4/9/4K4 b - 1").unwrap();
+            pos.set_see_opp_gate(enabled);
+            assert!(!pos.see_ge(blocked, Value::ZERO));
+            counts.push(super::super::see_stats::snapshot());
+            pos.set_hirate();
+        }
+        assert_eq!(counts, vec![[3, 1, 2]; 2]);
+        super::super::see_stats::reset();
+        assert_eq!(super::super::see_stats::snapshot(), [0, 0, 0]);
+    }
 
     #[test]
     fn test_input_drop_rank_constraints_match_all_legal_generation() {

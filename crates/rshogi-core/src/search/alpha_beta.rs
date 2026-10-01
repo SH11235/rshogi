@@ -859,6 +859,7 @@ impl SearchWorker {
     #[cfg(feature = "search-stats")]
     pub fn reset_stats(&mut self) {
         self.state.stats.reset();
+        crate::position::see_stats::reset();
     }
 
     /// 探索統計をリセット（search-stats feature無効時はno-op）
@@ -868,7 +869,9 @@ impl SearchWorker {
     /// 探索統計のレポートを取得（search-stats feature有効時のみ）
     #[cfg(feature = "search-stats")]
     pub fn get_stats_report(&self) -> String {
-        self.state.stats.format_report()
+        let mut report = self.state.stats.format_report();
+        report.push_str(&crate::position::see_stats::format_report());
+        report
     }
 
     /// 探索統計のレポートを取得（search-stats feature無効時は空文字列）

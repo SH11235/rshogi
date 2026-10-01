@@ -124,6 +124,9 @@ pub struct Position {
     pub(super) king_square: [Square; Color::NUM],
     /// パス権ルールが有効かどうか
     pass_rights_enabled: bool,
+    /// 探索開始時に固定する SEE screening 設定。局面のハッシュには含めない。
+    /// MovePicker 内を含む全 SEE 呼び出しで共有し、helper へは clone で引き継ぐ。
+    pub(super) see_opp_gate: bool,
 
     // === PieceList (NNUE 高速化) ===
     /// 全40駒の BonaPiece 管理テーブル
@@ -264,6 +267,7 @@ impl Position {
             side_to_move: Color::Black,
             king_square: [Square::SQ_11; Color::NUM],
             pass_rights_enabled: false,
+            see_opp_gate: true,
             piece_list: PieceList::new(),
         }
     }
@@ -645,6 +649,29 @@ impl Position {
     }
 
     // ========== 利き計算 ==========
+
+    /// SEE の相手攻め駒 gate を設定する。探索中には変更しない。
+    pub(crate) fn set_see_opp_gate(&mut self, enabled: bool) {
+        self.see_opp_gate = enabled;
+    }
+
+    /// 占有に依存しない、指定色の攻め駒の上位集合。
+    ///
+    /// `attackers_to_occ_parts` と同じ駒集合・逆向きの step 利きを使い、
+    /// 飛び利きだけを空盤の疑似線に置き換える。遮蔽物を除いても候補は漏れない。
+    /// 玉・馬・龍の近接利きは silver と gold の和で全方向を覆う。
+    #[inline]
+    pub(super) fn attackers_to_color_candidates(&self, color: Color, sq: Square) -> Bitboard {
+        let reverse = !color;
+        ((pawn_effect(reverse, sq) & self.pieces_pt(PieceType::Pawn))
+            | (knight_effect(reverse, sq) & self.pieces_pt(PieceType::Knight))
+            | (silver_effect(reverse, sq) & (self.pieces_pt(PieceType::Silver) | self.hdk_bb))
+            | (gold_effect(reverse, sq) & (self.golds_bb | self.hdk_bb))
+            | (BISHOP_STEP[sq.index()] & self.bishop_horse_bb)
+            | (ROOK_STEP[sq.index()] & self.rook_dragon_bb)
+            | (lance_step_effect(reverse, sq) & self.pieces_pt(PieceType::Lance)))
+            & self.pieces_c(color)
+    }
 
     /// 指定マスに利いている駒（全手番）
     pub fn attackers_to(&self, sq: Square) -> Bitboard {
@@ -2147,6 +2174,38 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn see_opp_candidates_cover_attackers_with_arbitrary_occupancy() {
+        for_each_attackers_occ_case(|pos, sq, occ| {
+            for color in [Color::Black, Color::White] {
+                let candidates = pos.attackers_to_color_candidates(color, sq);
+                let actual = pos.attackers_to_occ(sq, occ) & pos.pieces_c(color);
+                assert!((actual & !candidates).is_empty(), "sq={sq:?} color={color:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn see_opp_candidates_cover_every_piece_and_direction() {
+        // 全駒種・両色・全移動元/移動先を列挙し、HDK と成小駒も必ず通す。
+        for color in [Color::Black, Color::White] {
+            for pt_index in 1..=PieceType::NUM {
+                let pt = PieceType::from_u8(pt_index as u8).unwrap();
+                for from_index in 0..Square::NUM {
+                    let from = Square::from_u8(from_index as u8).unwrap();
+                    let mut pos = Position::new();
+                    pos.put_piece(Piece::new(color, pt), from);
+                    for to_index in 0..Square::NUM {
+                        let to = Square::from_u8(to_index as u8).unwrap();
+                        let expected = attackers_to_occ_reference(&pos, to, Bitboard::EMPTY);
+                        assert_eq!(pos.attackers_to_color_candidates(color, to), expected);
+                        assert!(pos.attackers_to_color_candidates(!color, to).is_empty());
+                    }
+                }
+            }
+        }
     }
 
     #[test]

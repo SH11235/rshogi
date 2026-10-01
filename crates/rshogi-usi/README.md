@@ -56,6 +56,31 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 
+## SEE screening
+
+隠し USI option `SeeOppGate` は `setoption name SeeOppGate value 0` / `1` で
+切り替える（既定 `1`）。`usi` の option 一覧には出さないため、screening 用の
+ハーネスからは `setoption` を明示的に送ること。`0` / `1` 以外は警告して無視する。
+次の探索開始時に設定を固定し、MovePicker を含む全 SEE 呼び出しと helper thread に適用する。
+
+設定は `Position` に保持する。MovePicker は `SearchContext` を受け取らず、SEE を
+複数のステージで呼ぶため、局面と一緒に設定を渡すことで経路ごとの反映漏れを避ける。
+局面 clone は設定も引き継ぎ、手の実行・巻き戻しや局面ハッシュには影響しない。
+同一 binary 内の共通の SEE 本体で gate 部分だけを切り替え、探索中の atomic 読み出しと
+二つの本体のコード配置差を避ける。
+
+`search-stats` feature を有効にすると、探索統計に
+`SEE opponent gate (current thread): R=... G=... E=...` を追加する。
+通常の探索結果に出るのは主探索スレッドの値で、helper の合計ではない。
+
+- `R`: 価値による二つの早期判定を通過し、従来の両色 attackers 計算の直前まで到達した回数。
+- `G`: R のうち、占有に依存しない相手攻め駒の候補集合が空だった回数。
+- `E`: R のうち、従来の最初の反復で、占有と相手色を適用した攻め駒が空だった回数（pin 除外前）。
+
+`G <= E <= R` を満たす。両モードで同じ母集団を数えるため、統計 build では gate による
+return の前にも従来の attackers を計算する。速度比較には統計 feature なしの build を使う。
+カウンタはスレッドローカルで探索準備時にリセットし、通常 build からは完全に除外する。
+
 ## Allocation diagnostics
 
 Build with `cargo build --profile production -p rshogi-usi --features allocation-stats`

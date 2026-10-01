@@ -254,6 +254,8 @@ pub struct Search {
 
     /// 探索スレッド数
     num_threads: usize,
+    /// 探索開始時に Position へ固定する SEE screening 設定。
+    see_opp_gate: bool,
     /// 探索スレッドプール（helper threads）
     thread_pool: ThreadPool,
 
@@ -746,6 +748,7 @@ impl Search {
             time_options: super::TimeOptions::default(),
             skill_options: SkillOptions::default(),
             num_threads: 1,
+            see_opp_gate: true,
             thread_pool,
             // workerは遅延初期化（最初のgoで作成）
             worker: None,
@@ -769,6 +772,16 @@ impl Search {
             #[cfg(test)]
             corrupt_public_pv: None,
         }
+    }
+
+    /// SEE の相手攻め駒 gate を切り替える（次の探索から適用）。
+    pub fn set_see_opp_gate(&mut self, enabled: bool) {
+        self.see_opp_gate = enabled;
+    }
+
+    /// SEE の相手攻め駒 gate の設定値を取得する。
+    pub fn see_opp_gate(&self) -> bool {
+        self.see_opp_gate
     }
 
     /// 置換表のサイズを変更
@@ -1040,6 +1053,9 @@ impl Search {
     where
         F: FnMut(&SearchInfo),
     {
+        // Position に保持することで MovePicker の SEE にも同じ設定が届く。
+        // helper 用 clone より前に固定し、全経路で atomic の読み出しを避ける。
+        pos.set_see_opp_gate(self.see_opp_gate);
         let ply = pos.game_ply();
         #[cfg(feature = "allocation-stats")]
         let _allocation_scope =
