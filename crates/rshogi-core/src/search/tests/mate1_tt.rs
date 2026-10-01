@@ -31,9 +31,7 @@ fn run_writer(qsearch_writer: bool, write_ply: i32) {
         ..Default::default()
     };
     worker.prepare_search(&limits);
-    // 持ち駒なしの局面で候補表を通る移動詰めを検証する。
-    let mut pos = Position::new();
-    pos.set_sfen("8k/6S2/7G1/7N1/9/9/9/9/4K4 b - 1").unwrap();
+    let mut pos = fixture();
     let ctx = SearchContext {
         tt: &worker.tt,
         eval_hash: &worker.eval_hash,

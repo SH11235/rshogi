@@ -80,7 +80,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
-- **1手詰め判定の王手候補表をコンパイル時に構築し、参照を inline 化**: Zen 5・LayerStacks の 1T で NPS 約 +0.7%、探索結果は不変。
+- **1 手詰め判定の王手候補表をコンパイル時に構築し、参照を inline 化**:
+  王手候補表 (`CHECK_CAND_BB`) をコンパイル時に構築し、参照を inline にすることで、
+  `LazyLock` の検査・call・戻り値の受け渡しを除去した。
+  探索結果は main と固定 depth 1〜18 × 5 局面で一致。
+  Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only (5 局面 × 5 秒 × ABBA) で、
+  同一 binary の新旧切替は NPS +0.69%、最終版と main の比較は関数配置 3 通りで
+  −0.10% / +0.90% / +0.71%。
 
 - **指し手生成の固定費を削減**:
   歩の移動を bitboard の一括シフトで生成し、駒種が確定している移動では盤面参照を省く。

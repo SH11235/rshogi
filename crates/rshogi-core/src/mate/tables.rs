@@ -80,7 +80,8 @@ pub fn check_cand_bb(us: Color, pc: PieceTypeCheck, sq_king: Square) -> Bitboard
 }
 
 const fn build_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
-    // u128 は Bitboard のレーン間の空きビットも維持する。
+    // Bitboard の | / & 演算子は const 文脈で使えないため、u128 で演算する。
+    // as_u128() は Bitboard のレーン間の空きビットも維持する。
     const fn lance_ray(color: usize, square: usize) -> u128 {
         let mut ray = 0;
         let mut step = PAWN_EFFECT[color][square];
@@ -94,7 +95,7 @@ const fn build_check_cand_bb() -> [[[Bitboard; 2]; PieceTypeCheck::NUM]; 81] {
     let mut table = [[[Bitboard::EMPTY; 2]; PieceTypeCheck::NUM]; 81];
     let mut king = 0;
     while king < Square::NUM {
-        let sq_king = SQUARE_BB[king].lsb_unchecked();
+        let sq_king = Square::from_u8(king as u8).expect("king は Square::NUM 未満");
         let mut us = 0;
         while us < Color::NUM {
             let them = us ^ 1;
