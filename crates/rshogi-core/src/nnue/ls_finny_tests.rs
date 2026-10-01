@@ -113,22 +113,22 @@ fn check_random_game<const L1: usize, FT: LsFeatureSpec>() {
                 let source = Aligned(previous[p]);
                 let mut new = Aligned(previous[p]);
                 let new_ok = ft.try_apply_dirty_piece_fast_impl::<false>(
+                    perspective,
+                    king,
                     None,
                     &mut new.0,
                     &dirty,
-                    perspective,
-                    king,
                 );
                 if new_ok {
                     fast += 1;
                     assert_eq!(new.0, expected[p]);
                     new.0.fill(0);
                     assert!(ft.try_apply_dirty_piece_fast_impl::<true>(
+                        perspective,
+                        king,
                         Some(&source.0),
                         &mut new.0,
                         &dirty,
-                        perspective,
-                        king,
                     ));
                     assert_eq!(new.0, expected[p]);
                 }
