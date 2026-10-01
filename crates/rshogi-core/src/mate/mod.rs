@@ -93,11 +93,10 @@ pub fn mate_1ply(pos: &mut Position) -> Option<Move> {
 
 /// 1手詰め判定の初期化
 ///
-/// CHECK_CAND_BB、CHECK_AROUND_BB、NEXT_SQUAREテーブルを初期化する。
+/// CHECK_AROUND_BB、NEXT_SQUAREテーブルを初期化する。
 /// この関数は起動時に一度だけ呼ばれる。
 pub fn init() {
     // LazyLockを使用するため、最初のアクセス時に自動的に初期化される
-    let _ = &*tables::CHECK_CAND_BB;
     let _ = &*tables::CHECK_AROUND_BB;
     let _ = &*tables::NEXT_SQUARE;
 }
