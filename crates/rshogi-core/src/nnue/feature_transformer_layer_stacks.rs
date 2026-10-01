@@ -1667,6 +1667,42 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
     ) {
         #[cfg(all(
             target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            const { assert!(L1.is_multiple_of(32)) };
+            let sub_weights = self.weight_row(sub_index);
+            let add_weights = self.weight_row(add_index);
+
+            // SAFETY:
+            // - source / accumulation は別の AccumulatorLayerStacks の先頭フィールド
+            //   accumulation の各視点（テストでは Aligned）由来。repr(C, align(64)) と
+            //   L1 が 32 の倍数であることから、両視点とも 64 バイトアライン。
+            // - WeightBox の AlignedBox は 64 バイト境界に確保される。共有重みも
+            //   Linux はページ先頭 + 64 バイト、Windows は 64 バイト整列を検証する。
+            //   行幅 L1 * 2 も 64 の倍数で、weight_row が L1 要素の範囲を検証する。
+            // - 32 要素ずつ L1/32 回で範囲内を走査し、読み取り元と書き込み先は重ならない。
+            unsafe {
+                use std::arch::x86_64::*;
+                let source_ptr = source.as_ptr();
+                let acc_ptr = accumulation.as_mut_ptr();
+                let sub_ptr = sub_weights.as_ptr();
+                let add_ptr = add_weights.as_ptr();
+
+                for i in 0..(L1 / 32) {
+                    let source_vec = _mm512_load_si512(source_ptr.add(i * 32) as *const __m512i);
+                    let sub_vec = _mm512_load_si512(sub_ptr.add(i * 32) as *const __m512i);
+                    let add_vec = _mm512_load_si512(add_ptr.add(i * 32) as *const __m512i);
+                    let result = _mm512_add_epi16(_mm512_sub_epi16(source_vec, sub_vec), add_vec);
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
+                }
+            }
+            return;
+        }
+
+        #[cfg(all(
+            target_arch = "x86_64",
             target_feature = "avx2",
             not(target_feature = "avx512bw")
         ))]
@@ -1715,6 +1751,49 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         sub_index1: usize,
         add_index1: usize,
     ) {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx512f",
+            target_feature = "avx512bw"
+        ))]
+        {
+            const { assert!(L1.is_multiple_of(32)) };
+            let sub_weights0 = self.weight_row(sub_index0);
+            let add_weights0 = self.weight_row(add_index0);
+            let sub_weights1 = self.weight_row(sub_index1);
+            let add_weights1 = self.weight_row(add_index1);
+
+            // SAFETY: apply_sub_add_fused_from_source の AVX-512 経路と同じく、
+            // source / accumulation は AccumulatorLayerStacks の先頭フィールドの各視点
+            // （テストでは Aligned）由来で 64 バイトアライン。WeightBox の確保元も
+            // ヒープ・共有 mapping ともに 64 バイトアラインで、L1 が 32 の倍数なので
+            // 4 本の weight row の先頭も整列する。weight_row が各行の L1 要素を検証し、
+            // 32 要素ずつ L1/32 回で範囲内を走査する。読み取り元と書き込み先は重ならない。
+            unsafe {
+                use std::arch::x86_64::*;
+                let source_ptr = source.as_ptr();
+                let acc_ptr = accumulation.as_mut_ptr();
+                let sub_ptr0 = sub_weights0.as_ptr();
+                let add_ptr0 = add_weights0.as_ptr();
+                let sub_ptr1 = sub_weights1.as_ptr();
+                let add_ptr1 = add_weights1.as_ptr();
+
+                for i in 0..(L1 / 32) {
+                    let source_vec = _mm512_load_si512(source_ptr.add(i * 32) as *const __m512i);
+                    let sub_vec0 = _mm512_load_si512(sub_ptr0.add(i * 32) as *const __m512i);
+                    let add_vec0 = _mm512_load_si512(add_ptr0.add(i * 32) as *const __m512i);
+                    let sub_vec1 = _mm512_load_si512(sub_ptr1.add(i * 32) as *const __m512i);
+                    let add_vec1 = _mm512_load_si512(add_ptr1.add(i * 32) as *const __m512i);
+                    let result = _mm512_add_epi16(
+                        _mm512_add_epi16(_mm512_sub_epi16(source_vec, sub_vec0), add_vec0),
+                        _mm512_sub_epi16(add_vec1, sub_vec1),
+                    );
+                    _mm512_store_si512(acc_ptr.add(i * 32) as *mut __m512i, result);
+                }
+            }
+            return;
+        }
+
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx2",
@@ -2190,6 +2269,68 @@ mod tests {
             has_threat: false,
             _ft: PhantomData,
         }
+    }
+
+    fn check_fused_from_source_wrapping_reference<const PAIRS: usize>() {
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x512f_7a16);
+        let mut ft = make_test_transformer();
+        for case in 0..16 {
+            for row in 0..(PAIRS * 2) {
+                let weights = &mut ft.weights.make_mut()[row * TEST_L1..(row + 1) * TEST_L1];
+                for weight in weights.iter_mut() {
+                    *weight = rng.random();
+                }
+                // 減算・加算の両方で MIN/MAX 境界を必ず跨ぐ。
+                weights[0] = 1;
+                weights[1] = -1;
+            }
+            let mut source = Aligned([0i16; TEST_L1]);
+            for value in &mut source.0 {
+                *value = rng.random();
+            }
+            source.0[0] = i16::MIN;
+            source.0[1] = i16::MAX;
+            let original = source;
+            let mut expected = Aligned([0i16; TEST_L1]);
+            expected.0.copy_from_slice(&source.0);
+            for pair in 0..PAIRS {
+                let sub = ft.weight_row(pair * 2);
+                let add = ft.weight_row(pair * 2 + 1);
+                let mut sub_wrapped = false;
+                let mut add_wrapped = false;
+                for (i, value) in expected.0.iter_mut().enumerate() {
+                    sub_wrapped |= value.checked_sub(sub[i]).is_none();
+                    *value = value.wrapping_sub(sub[i]);
+                    add_wrapped |= value.checked_add(add[i]).is_none();
+                    *value = value.wrapping_add(add[i]);
+                }
+                assert!(sub_wrapped && add_wrapped);
+            }
+
+            let mut actual = Aligned([0x5a5ai16; TEST_L1]);
+            match PAIRS {
+                1 => ft.apply_sub_add_fused_from_source(&source.0, &mut actual.0, 0, 1),
+                2 => {
+                    ft.apply_double_sub_add_fused_from_source(&source.0, &mut actual.0, 0, 1, 2, 3)
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(actual.0, expected.0, "case={case}, pairs={PAIRS}");
+            assert_eq!(source.0, original.0);
+        }
+    }
+
+    #[test]
+    fn test_apply_sub_add_fused_from_source_matches_wrapping_reference() {
+        check_fused_from_source_wrapping_reference::<1>();
+    }
+
+    #[test]
+    fn test_apply_double_sub_add_fused_from_source_matches_wrapping_reference() {
+        check_fused_from_source_wrapping_reference::<2>();
     }
 
     #[cfg(not(feature = "nnue-effect-bucket"))]
