@@ -430,6 +430,7 @@ mod tests {
         entry.save(7, Value::new(10), false, Bound::Lower, 20, Move::NONE, Value::ZERO, 0);
         cluster.store(2, entry);
 
+        // key16 (= 7) が一致する slot 2 に probe が hit し、writer はその slot を指す。
         let writer = tt.probe(7, &pos).writer();
         assert!(std::ptr::eq(writer.cluster, cluster));
         assert_eq!(writer.index, 2);
