@@ -80,6 +80,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **LayerStacks の 1 手差分更新で stack 引数の store/load 幅不一致を回避**:
+  内部関数の引数順を変更し、Windows x64 で視点と玉位置をレジスタ渡しにする。
+  accumulator の計算内容は変更しない。
+
 - **1 手詰め判定の王手候補表をコンパイル時に構築し、参照を inline 化**:
   王手候補表 (`CHECK_CAND_BB`) をコンパイル時に構築し、参照を inline にすることで、
   `LazyLock` の検査・call・戻り値の受け渡しを除去した。

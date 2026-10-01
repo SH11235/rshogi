@@ -1516,11 +1516,11 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         king_sq: crate::types::Square,
     ) -> bool {
         self.try_apply_dirty_piece_fast_impl::<false>(
+            perspective,
+            king_sq,
             None,
             accumulation,
             dirty_piece,
-            perspective,
-            king_sq,
         )
     }
 
@@ -1535,22 +1535,23 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         king_sq: crate::types::Square,
     ) -> bool {
         self.try_apply_dirty_piece_fast_impl::<true>(
+            perspective,
+            king_sq,
             Some(source),
             accumulation,
             dirty_piece,
-            perspective,
-            king_sq,
         )
     }
 
+    // 小さい型の引数を先頭に置き、Windows x64 の stack 引数で store/load 幅がずれるのを避ける。
     #[inline]
     fn try_apply_dirty_piece_fast_impl<const FROM_SOURCE: bool>(
         &self,
+        perspective: Color,
+        king_sq: crate::types::Square,
         source: Option<&[i16; L1]>,
         accumulation: &mut [i16; L1],
         dirty_piece: &DirtyPiece,
-        perspective: Color,
-        king_sq: crate::types::Square,
     ) -> bool {
         if cfg!(feature = "nnue-effect-bucket") {
             return false;
