@@ -83,8 +83,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 - **TT probe 後の複数 store をまたぐ読み直しを除去**:
   `TTContext` に `ProbeResult` / `TTData` 全体をコピーせず、書き込み先と後続処理で使う
   値だけを保持する。TT の読み書きの意味・順序を維持し、probe の inline 化を避けた。
-  LayerStacks の production-profiling build で、探索・静止探索・ルート探索の probe 戻り値を
-  複数の store にまたがって読む load がないことを確認した。性能の実測は未実施。
+  従来は probe が field ごとに書いた戻り値を、呼び出し側が 32 byte まとめて読み直しており、
+  store-to-load forwarding が効かなかった。探索結果は main と固定 depth 1〜18 × 5 局面で一致。
+  Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only (5 局面 × 5 秒 × ABBA) で、
+  関数配置 3 通りで NPS +0.59% / +0.54% / +0.78%。
 
 - **LayerStacks の 1 手差分更新で stack 引数の store/load 幅不一致を回避**:
   内部関数の引数順を変更し、Windows x64 で視点と玉位置をレジスタ渡しにする。
