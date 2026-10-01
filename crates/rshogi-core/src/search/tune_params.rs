@@ -2,6 +2,7 @@
 //!
 //! USI `setoption` で更新できる探索係数を集約する。
 
+use crate::mate::MatePinMode;
 use crate::types::MAX_PLY;
 
 /// depth-liveness の非減少 edge 連続数は ply が `MAX_PLY` で打ち切られるため
@@ -40,6 +41,8 @@ pub struct SearchTuneSetResult {
 /// デフォルト値は現行実装の固定定数と一致させている。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchTuneParams {
+    /// screening 用の pin 再計算方式。SPSA の列挙対象には含めず、各 worker にコピーする。
+    pub mate_pin_mode: MatePinMode,
     /// IIR: shallow 側の prior reduction しきい値
     pub iir_prior_reduction_threshold_shallow: i32,
     /// IIR: deep 側の prior reduction しきい値
@@ -1485,6 +1488,7 @@ impl Default for SearchTuneParams {
 impl SearchTuneParams {
     /// 探索・USI 宣言・SPSA 生成で共有する既定値の正本。
     const DEFAULT: Self = Self {
+        mate_pin_mode: MatePinMode::LazyInline,
         iir_prior_reduction_threshold_shallow: 3,
         iir_prior_reduction_threshold_deep: 3,
         iir_depth_boundary: 10,

@@ -15,8 +15,68 @@ use crate::mate::{
 use crate::position::Position;
 use crate::types::{Color, Move, PieceType, Rank, Square};
 
-/// 駒移動による1手詰めを判定（非打ち手のみ対象）
-pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
+/// 同じ駒の候補升・成り不成りで共有する pin 情報。
+struct PinCache<const MODE: u8> {
+    value: Bitboard,
+    ready: bool,
+}
+
+impl<const MODE: u8> PinCache<MODE> {
+    #[inline(always)]
+    fn new(pos: &Position, them: Color, from: Square) -> Self {
+        let value = match MODE {
+            0 => pos.pinned_pieces_excluding(them, from),
+            1 => pinned_pieces_excluding_inline(pos, them, from),
+            _ => Bitboard::EMPTY,
+        };
+        Self {
+            value,
+            ready: MODE != 2,
+        }
+    }
+
+    #[inline(always)]
+    fn get(&mut self, pos: &Position, them: Color, from: Square) -> Bitboard {
+        if MODE == 2 && !self.ready {
+            self.value = pinned_pieces_excluding_inline(pos, them, from);
+            self.ready = true;
+        }
+        self.value
+    }
+}
+
+/// `Position::pinned_pieces_excluding` と同じ計算を mate 内に展開する。
+/// 他の呼出し元の codegen を維持するため、元の関数には inline 属性を付けない。
+#[inline(always)]
+fn pinned_pieces_excluding_inline(pos: &Position, them: Color, avoid: Square) -> Bitboard {
+    let avoid_not = !Bitboard::from_square(avoid);
+    let ksq = pos.king_square(them);
+    let enemy = !them;
+
+    let lance_bb = pos.pieces(enemy, PieceType::Lance) & avoid_not;
+    let bishop_bb = (pos.bishop_horse() & pos.pieces_c(enemy)) & avoid_not;
+    let rook_bb = (pos.rook_dragon() & pos.pieces_c(enemy)) & avoid_not;
+    let pinners = (lance_step_effect(them, ksq) & lance_bb)
+        | (bishop_step_effect(ksq) & bishop_bb)
+        | (rook_step_effect(ksq) & rook_bb);
+
+    // avoid が pinner 自身の場合も、占有と pinner 候補の両方から除く。
+    let pieces_without_avoid = pos.occupied() & avoid_not;
+    let mut result = Bitboard::EMPTY;
+    for pinner_sq in pinners.iter() {
+        let between = crate::bitboard::between_bb(ksq, pinner_sq) & pieces_without_avoid;
+        if !between.more_than_one() {
+            result |= between & pos.pieces_c(them);
+        }
+    }
+    result
+}
+
+/// 駒移動による1手詰めを判定（非打ち手のみ対象）。
+///
+/// `PIN_MODE` は 0: 従来の関数呼出し、1: inline、2: inline + 必要時に計算。
+pub fn check_move_mate<const PIN_MODE: u8>(pos: &Position, us: Color) -> Option<Move> {
+    const { assert!(PIN_MODE <= 2) };
     if pos.in_check() {
         return None;
     }
@@ -40,7 +100,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
     for from in pos.pieces(us, PieceType::Dragon).iter() {
         let slide = occupied ^ Bitboard::from_square(from);
         let mut bb_check = dragon_effect(from, slide) & bb_move & king_effect(sq_king); // 近接のみ
-        let new_pin = pos.pinned_pieces_excluding(them, from);
+        let mut new_pin = PinCache::<PIN_MODE>::new(pos, them, from);
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
@@ -59,7 +119,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             if can_king_escape_with_from(pos, them, from, to, bb_attacks, slide) {
                 continue;
             }
-            if can_piece_capture(pos, them, to, new_pin, slide) {
+            if can_piece_capture(pos, them, to, new_pin.get(pos, them, from), slide) {
                 continue;
             }
             return Some(Move::new_move(from, to, false));
@@ -70,7 +130,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
     for from in pos.pieces(us, PieceType::Rook).iter() {
         let slide = occupied ^ Bitboard::from_square(from);
         let mut bb_check = rook_effect(from, slide) & bb_move & king_effect(sq_king); // 近接のみ
-        let new_pin = pos.pinned_pieces_excluding(them, from);
+        let mut new_pin = PinCache::<PIN_MODE>::new(pos, them, from);
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
@@ -99,7 +159,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             }
             if dc_candidates.contains(from) {
                 // 両王手なので合い利かず
-            } else if can_piece_capture(pos, them, to, new_pin, slide) {
+            } else if can_piece_capture(pos, them, to, new_pin.get(pos, them, from), slide) {
                 continue;
             }
 
@@ -111,7 +171,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
     for from in pos.pieces(us, PieceType::Horse).iter() {
         let slide = occupied ^ Bitboard::from_square(from);
         let mut bb_check = horse_effect(from, slide) & bb_move & king_effect(sq_king); // 近接のみ
-        let new_pin = pos.pinned_pieces_excluding(them, from);
+        let mut new_pin = PinCache::<PIN_MODE>::new(pos, them, from);
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
@@ -128,7 +188,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             }
             if dc_candidates.contains(from) && !aligned(from, to, sq_king) {
                 // 両王手なので合い利かず
-            } else if can_piece_capture(pos, them, to, new_pin, slide) {
+            } else if can_piece_capture(pos, them, to, new_pin.get(pos, them, from), slide) {
                 continue;
             }
 
@@ -140,7 +200,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
     for from in pos.pieces(us, PieceType::Bishop).iter() {
         let slide = occupied ^ Bitboard::from_square(from);
         let mut bb_check = bishop_effect(from, slide) & bb_move & king_effect(sq_king); // 近接のみ
-        let new_pin = pos.pinned_pieces_excluding(them, from);
+        let mut new_pin = PinCache::<PIN_MODE>::new(pos, them, from);
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
@@ -165,7 +225,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             }
             if dc_candidates.contains(from) {
                 // 両王手なので合い利かず
-            } else if can_piece_capture(pos, them, to, new_pin, slide) {
+            } else if can_piece_capture(pos, them, to, new_pin.get(pos, them, from), slide) {
                 continue;
             }
 
@@ -254,7 +314,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             continue;
         }
         let slide = occupied ^ Bitboard::from_square(from);
-        let new_pin = pos.pinned_pieces_excluding(them, from);
+        let mut new_pin = PinCache::<PIN_MODE>::new(pos, them, from);
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
@@ -270,7 +330,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             }
             if dc_candidates.contains(from) && !aligned(from, to, sq_king) {
                 // 両王手なので合い利かず
-            } else if can_piece_capture(pos, them, to, new_pin, slide) {
+            } else if can_piece_capture(pos, them, to, new_pin.get(pos, them, from), slide) {
                 continue;
             }
             return Some(Move::new_move(from, to, false));
@@ -287,7 +347,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             continue;
         }
         let slide = occupied ^ Bitboard::from_square(from);
-        let new_pin = pos.pinned_pieces_excluding(them, from);
+        let mut new_pin = PinCache::<PIN_MODE>::new(pos, them, from);
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
@@ -297,7 +357,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                 && !pos.discovered(from, to, our_king, our_pinned)
                 && !can_king_escape_with_from(pos, them, from, to, bb_attacks_s, slide)
                 && (dc_candidates.contains(from) && !aligned(from, to, sq_king)
-                    || !can_piece_capture(pos, them, to, new_pin, slide))
+                    || !can_piece_capture(pos, them, to, new_pin.get(pos, them, from), slide))
             {
                 return Some(Move::new_move(from, to, false));
             }
@@ -309,7 +369,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                     && !pos.discovered(from, to, our_king, our_pinned)
                     && !can_king_escape_with_from(pos, them, from, to, bb_attacks_g, slide)
                     && (dc_candidates.contains(from) && !aligned(from, to, sq_king)
-                        || !can_piece_capture(pos, them, to, new_pin, slide))
+                        || !can_piece_capture(pos, them, to, new_pin.get(pos, them, from), slide))
                 {
                     return Some(Move::new_move(from, to, true));
                 }
@@ -327,7 +387,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
             continue;
         }
         let slide = occupied ^ Bitboard::from_square(from);
-        let new_pin = pos.pinned_pieces_excluding(them, from);
+        let mut new_pin = PinCache::<PIN_MODE>::new(pos, them, from);
 
         while bb_check.is_not_empty() {
             let to = bb_check.pop();
@@ -336,7 +396,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                 && !pos.discovered(from, to, our_king, our_pinned)
                 && !can_king_escape_with_from(pos, them, from, to, bb_attacks, slide)
                 && (dc_candidates.contains(from)
-                    || !can_piece_capture(pos, them, to, new_pin, slide))
+                    || !can_piece_capture(pos, them, to, new_pin.get(pos, them, from), slide))
             {
                 return Some(Move::new_move(from, to, false));
             }
@@ -348,7 +408,7 @@ pub fn check_move_mate(pos: &Position, us: Color) -> Option<Move> {
                     && !pos.discovered(from, to, our_king, our_pinned)
                     && !can_king_escape_with_from(pos, them, from, to, bb_attacks_g, slide)
                     && (dc_candidates.contains(from)
-                        || !can_piece_capture(pos, them, to, new_pin, slide))
+                        || !can_piece_capture(pos, them, to, new_pin.get(pos, them, from), slide))
                 {
                     return Some(Move::new_move(from, to, true));
                 }
@@ -441,7 +501,77 @@ fn has_other_attacker(
 
 #[cfg(test)]
 mod tests {
+    use super::{PinCache, check_move_mate, pinned_pieces_excluding_inline};
     use crate::position::Position;
+    use crate::types::{Color, PieceType, Square};
+
+    #[test]
+    fn pin_modes_agree_on_random_legal_positions() {
+        use crate::position::playout_test_support::RandomPlayout;
+
+        let mut positions = 0;
+        let mut coverage = [[0; 2]; 2];
+        let mut found = [0; 2];
+        let mut piece_types = [false; 15];
+        for index in 0..40 {
+            let mut playout = RandomPlayout::new(0x4D41_5445_2026, index);
+            for _ in 0..300 {
+                let pos = &playout.pos;
+                let us = pos.side_to_move();
+                let baseline = check_move_mate::<0>(pos, us);
+                assert_eq!(baseline, check_move_mate::<1>(pos, us), "{}", playout.describe());
+                assert_eq!(baseline, check_move_mate::<2>(pos, us), "{}", playout.describe());
+                coverage[us.index()][usize::from(pos.in_check())] += 1;
+                found[us.index()] += usize::from(baseline.is_some());
+                for from in pos.pieces_c(us).iter() {
+                    piece_types[pos.piece_on(from).piece_type() as usize] = true;
+                    // mate が pin 計算に達しない局面でも、inline 版の同値性を検証する。
+                    assert_eq!(
+                        pos.pinned_pieces_excluding(!us, from),
+                        pinned_pieces_excluding_inline(pos, !us, from),
+                        "from={from:?} {}",
+                        playout.describe()
+                    );
+                }
+                positions += 1;
+                if playout.step().is_none() {
+                    break;
+                }
+            }
+        }
+        assert!(positions >= 5000, "局面数不足: {positions}");
+        assert!(coverage.iter().flatten().all(|&count| count > 0), "{coverage:?}");
+        assert!(found.iter().all(|&count| count > 0), "移動による詰みが不足: {found:?}");
+        for pt in [
+            PieceType::Rook,
+            PieceType::Bishop,
+            PieceType::Dragon,
+            PieceType::Horse,
+            PieceType::ProPawn,
+            PieceType::ProLance,
+            PieceType::ProKnight,
+            PieceType::ProSilver,
+        ] {
+            assert!(piece_types[pt as usize], "標本に {pt:?} が無い");
+        }
+    }
+
+    #[test]
+    fn lazy_pin_is_computed_on_first_use_and_cached() {
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/4g4/4+R1S2/9/9/9/9/9/K8 b - 1").unwrap();
+        let them = Color::White;
+        let from = Square::new(crate::types::File::File3, crate::types::Rank::Rank3);
+        let expected = pos.pinned_pieces_excluding(them, from);
+        assert!(expected.is_not_empty());
+        let mut cache = PinCache::<2>::new(&pos, them, from);
+        assert!(!cache.ready);
+        assert_eq!(cache.get(&pos, them, from), expected);
+        assert!(cache.ready);
+        // 計算済みの値（空の bitboard も含む）は次の候補で再計算しない。
+        cache.value = crate::bitboard::Bitboard::EMPTY;
+        assert!(cache.get(&pos, them, from).is_empty());
+    }
 
     #[test]
     fn test_lance_promo_mate_6f6g() {
@@ -452,7 +582,7 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen(sfen).unwrap();
 
-        let mv = super::check_move_mate(&pos, crate::types::Color::White);
+        let mv = super::check_move_mate::<2>(&pos, crate::types::Color::White);
         assert!(mv.is_some(), "mate_1ply should find 6f6g+ (lance promotion to gold)");
         let mv = mv.unwrap();
         assert_eq!(mv.to_usi(), "6f6g+", "expected move 6f6g+");
@@ -467,7 +597,7 @@ mod tests {
         let mut pos = Position::new();
         pos.set_sfen(sfen).unwrap();
 
-        let mv = super::check_move_mate(&pos, crate::types::Color::Black);
+        let mv = super::check_move_mate::<2>(&pos, crate::types::Color::Black);
         assert!(mv.is_some(), "mate should be found");
     }
 }

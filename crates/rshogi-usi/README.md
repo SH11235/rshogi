@@ -56,6 +56,21 @@ presets). Without it the engine prints a notice when `PassRights` is turned on.
 `SPSA_NET_*` options are loaded from the model again and applied at the next `isready`,
 `usinewgame`, or `go`; changing several options therefore causes one reload.
 
+### 1手詰めの pin 計算の比較
+
+screening 用の隠し設定 `setoption name MatePinMode value <0|1|2>` で、移動による
+1手詰め判定の pin 再計算方式を切り替えられます。`usi` の option 一覧には出ません。
+
+| 値 | pin 再計算方式 |
+|----|----------------|
+| 0 | 従来の関数を駒ごとに先に呼ぶ |
+| 1 | 同じ位置で inline 計算する |
+| 2（既定） | 駒を取れるかの判定で最初に必要になった時に inline 計算し、同じ駒では再利用する |
+
+範囲外・不正な値は警告して無視し、直前の設定を維持します。設定は全探索 worker に
+コピーされ、通常探索・静止探索で共通です。ノードごとに atomic は読みません。
+各モードで返す詰み手は同じです。速度差は同じ build・モデル・探索条件で測定してください。
+
 ## Allocation diagnostics
 
 Build with `cargo build --profile production -p rshogi-usi --features allocation-stats`

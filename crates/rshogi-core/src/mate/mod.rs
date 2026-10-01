@@ -10,6 +10,18 @@ use crate::bitboard::{BISHOP_STEP, Bitboard, RANK_BB, ROOK_STEP, king_effect, li
 use crate::position::Position;
 use crate::types::{Color, Move, Square};
 
+/// 1手詰めの pin 再計算方式（screening 用）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum MatePinMode {
+    /// 0: 従来の関数を駒ごとに先に呼ぶ。
+    OutOfLine,
+    /// 1: inline で駒ごとに先に計算する。
+    Inline,
+    /// 2: inline で最初に必要になった時だけ計算する。
+    #[default]
+    LazyInline,
+}
+
 /// 成りが選択肢に入るか
 #[inline]
 pub fn can_promote(c: Color, from: Square, to: Square) -> bool {
@@ -74,6 +86,13 @@ fn enemy_field(us: Color) -> Bitboard {
 /// 王手がかかっていない局面で1手詰めかどうかを判定する。
 /// 高速化のためのテーブルを利用し、やねうら王の簡易版ロジックに準拠する。
 pub fn mate_1ply(pos: &mut Position) -> Option<Move> {
+    mate_1ply_with_pin_mode(pos, MatePinMode::LazyInline)
+}
+
+/// pin 再計算方式を指定した1手詰め判定。
+///
+/// 探索中は worker が保持する設定を渡し、移動による判定の入口で一度だけ分岐する。
+pub fn mate_1ply_with_pin_mode(pos: &mut Position, mode: MatePinMode) -> Option<Move> {
     // 王手がかかっている局面では判定しない
     if pos.in_check() {
         return None;
@@ -84,11 +103,11 @@ pub fn mate_1ply(pos: &mut Position) -> Option<Move> {
         return Some(mv);
     }
 
-    if let Some(mv) = move_mate::check_move_mate(pos, us) {
-        return Some(mv);
+    match mode {
+        MatePinMode::OutOfLine => move_mate::check_move_mate::<0>(pos, us),
+        MatePinMode::Inline => move_mate::check_move_mate::<1>(pos, us),
+        MatePinMode::LazyInline => move_mate::check_move_mate::<2>(pos, us),
     }
-
-    None
 }
 
 /// 1手詰め判定の初期化
@@ -142,7 +161,15 @@ mod tests {
     fn mate_by_new(sfen: &str) -> Option<Move> {
         let mut pos = Position::new();
         pos.set_sfen(sfen).unwrap();
-        super::mate_1ply(&mut pos)
+        let expected = super::mate_1ply(&mut pos);
+        for mode in [
+            MatePinMode::OutOfLine,
+            MatePinMode::Inline,
+            MatePinMode::LazyInline,
+        ] {
+            assert_eq!(mate_1ply_with_pin_mode(&mut pos, mode), expected, "{mode:?}: {sfen}");
+        }
+        expected
     }
 
     #[test]

@@ -797,6 +797,26 @@ impl UsiEngine {
         }
 
         match name.as_str() {
+            // screening 専用。cmd_usi の option 一覧には公開しない。
+            "MatePinMode" => {
+                use rshogi_core::mate::MatePinMode;
+                let mode = match value.parse::<u8>() {
+                    Ok(0) => MatePinMode::OutOfLine,
+                    Ok(1) => MatePinMode::Inline,
+                    Ok(2) => MatePinMode::LazyInline,
+                    _ => {
+                        eprintln!(
+                            "info string Warning: Invalid MatePinMode '{value}' (0..2), ignored"
+                        );
+                        return;
+                    }
+                };
+                if let Some(search) = self.search.as_mut() {
+                    let mut params = search.search_tune_params();
+                    params.mate_pin_mode = mode;
+                    search.set_search_tune_params(params);
+                }
+            }
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;
@@ -2240,6 +2260,41 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
                     pos.to_sfen(),
                     "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2"
                 );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn setoption_mate_pin_mode_updates_search_and_rejects_invalid_values() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                use rshogi_core::mate::MatePinMode;
+                let mut engine = UsiEngine::new();
+                assert_eq!(
+                    engine.search.as_ref().unwrap().search_tune_params().mate_pin_mode,
+                    MatePinMode::LazyInline
+                );
+                for (value, expected) in [
+                    ("0", MatePinMode::OutOfLine),
+                    ("1", MatePinMode::Inline),
+                    ("2", MatePinMode::LazyInline),
+                    ("0", MatePinMode::OutOfLine),
+                    ("3", MatePinMode::OutOfLine),
+                    ("-1", MatePinMode::OutOfLine),
+                    ("256", MatePinMode::OutOfLine),
+                    ("invalid", MatePinMode::OutOfLine),
+                    ("", MatePinMode::OutOfLine),
+                ] {
+                    engine.cmd_setoption(&["setoption", "name", "MatePinMode", "value", value]);
+                    assert_eq!(
+                        engine.search.as_ref().unwrap().search_tune_params().mate_pin_mode,
+                        expected
+                    );
+                }
             })
             .unwrap()
             .join()
