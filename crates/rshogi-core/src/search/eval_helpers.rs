@@ -427,8 +427,10 @@ pub(super) fn probe_transposition<'a, const NT: u8>(
 
     ProbeOutcome::Continue(TTContext {
         key,
-        result: tt_result,
-        data: tt_data,
+        writer: tt_result.writer(),
+        depth: tt_data.depth,
+        bound: tt_data.bound,
+        eval: tt_data.eval,
         hit: tt_hit,
         mv: tt_move,
         value: tt_value,
@@ -495,14 +497,14 @@ pub(super) fn compute_eval_context(
         } else {
             Value::NONE
         }
-    } else if tt_ctx.hit && tt_ctx.data.eval != Value::NONE && !pv_node {
+    } else if tt_ctx.hit && tt_ctx.eval != Value::NONE && !pv_node {
         // TTヒット && eval有効 && 非PVノード
         #[cfg(feature = "use-lazy-evaluate")]
         {
             // USE_LAZY_EVALUATE相当: TT eval を再利用する。
             // EvalHash hit と同じくアキュムレータは更新しない。後で評価する子孫ノードが
             // 計算済みの祖先から差分適用 / refresh して追いつく。
-            unadjusted_static_eval = tt_ctx.data.eval;
+            unadjusted_static_eval = tt_ctx.eval;
         }
         #[cfg(not(feature = "use-lazy-evaluate"))]
         {
@@ -541,7 +543,7 @@ pub(super) fn compute_eval_context(
     #[cfg(not(feature = "tt-trace"))]
     let eval_allow_write = !in_check && !tt_ctx.hit && ctx.allow_tt_write;
     if eval_allow_write
-        && tt_ctx.result.write(
+        && tt_ctx.writer.write(
             tt_ctx.key,
             Value::NONE,
             st.stack[ply as usize].tt_pv,
@@ -577,9 +579,9 @@ pub(super) fn compute_eval_context(
     let mut eval = static_eval;
     if !in_check && tt_ctx.hit && tt_ctx.value != Value::NONE && {
         if tt_ctx.value > eval {
-            tt_ctx.data.bound.is_lower_or_exact()
+            tt_ctx.bound.is_lower_or_exact()
         } else {
-            matches!(tt_ctx.data.bound, Bound::Upper | Bound::Exact)
+            matches!(tt_ctx.bound, Bound::Upper | Bound::Exact)
         }
     } {
         eval = tt_ctx.value;

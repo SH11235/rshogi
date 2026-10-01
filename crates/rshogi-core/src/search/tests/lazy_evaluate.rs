@@ -51,12 +51,14 @@ fn unadjusted_static_eval(pv_node: bool, tt_eval: Value) -> (Value, Value) {
     assert_eq!(result.data.eval, tt_eval);
     let tt_ctx = TTContext {
         key,
-        data: result.data,
+        depth: result.data.depth,
+        bound: result.data.bound,
+        eval: result.data.eval,
         hit: true,
         mv: Move::NONE,
         value: Value::NONE,
         capture: false,
-        result,
+        writer: result.writer(),
     };
 
     let ctx = SearchContext {

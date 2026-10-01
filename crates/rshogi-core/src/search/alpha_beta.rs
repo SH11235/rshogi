@@ -14,7 +14,7 @@ use crate::eval::{EvalHash, get_scaled_pass_move_bonus};
 use crate::nnue::search_evaluator::SearchEvaluator;
 use crate::position::Position;
 use crate::search::PieceToHistory;
-use crate::tt::{ProbeResult, TTData, TranspositionTable};
+use crate::tt::{TTWriter, TranspositionTable};
 use crate::types::{
     Bound, Color, DEPTH_QS, Depth, EnteringKingRule, MAX_PLY, Move, Piece, PieceType,
     RepetitionState, Square, Value,
@@ -248,10 +248,14 @@ use super::stats::{inc_stat, inc_stat_by_depth};
 /// 置換表プローブの結果をまとめたコンテキスト
 ///
 /// TTプローブ後の即時カットオフ判定や、後続の枝刈りロジックで使用される。
+/// probe が個別に書いたフィールドを幅の広いコピーで読み直さないよう、
+/// 書き込み先と後続処理で使う値だけを保持する。
 pub(super) struct TTContext<'a> {
     pub(super) key: u64,
-    pub(super) result: ProbeResult<'a>,
-    pub(super) data: TTData,
+    pub(super) writer: TTWriter<'a>,
+    pub(super) depth: Depth,
+    pub(super) bound: Bound,
+    pub(super) eval: Value,
     pub(super) hit: bool,
     pub(super) mv: Move,
     pub(super) value: Value,
@@ -1164,8 +1168,10 @@ impl SearchWorker {
         let root_static_eval = self.state.stack[0].static_eval;
         let tt_ctx_root = TTContext {
             key,
-            result: tt_result,
-            data: tt_data,
+            writer: tt_result.writer(),
+            depth: tt_data.depth,
+            bound: tt_data.bound,
+            eval: tt_data.eval,
             hit: tt_hit,
             mv: tt_move_root,
             value: tt_value_root,
@@ -1793,7 +1799,7 @@ impl SearchWorker {
                 (depth + 6).min(MAX_PLY - 1)
             };
             // root 保存は統計・トレースを伴わないため、格納可否を見ない。
-            let _ = tt_ctx_root.result.write(
+            let _ = tt_ctx_root.writer.write(
                 key,
                 value_to_tt(best_value, 0),
                 true, // PvNode
@@ -2535,7 +2541,8 @@ impl SearchWorker {
         let tt_move = tt_ctx.mv;
         let tt_value = tt_ctx.value;
         let tt_hit = tt_ctx.hit;
-        let tt_data = tt_ctx.data;
+        let tt_depth = tt_ctx.depth;
+        let tt_bound = tt_ctx.bound;
         let _tt_capture = tt_ctx.capture;
 
         // 静的評価
@@ -2728,8 +2735,8 @@ impl SearchWorker {
         // in_check時もこのステップは実行される（YOではgoto moves_loopの先で実行）。
         {
             let small_probcut_beta = beta + Value::new(ctx.tune_params.small_probcut_beta_margin);
-            if tt_data.bound.is_lower_or_exact()
-                && tt_data.depth >= depth - 4
+            if tt_bound.is_lower_or_exact()
+                && tt_depth >= depth - 4
                 && tt_value != Value::NONE
                 && tt_value >= small_probcut_beta
                 && !beta.is_mate_score()
@@ -2908,8 +2915,8 @@ impl SearchWorker {
                         + ctx.tune_params.singular_min_depth_tt_pv_add * tt_pv as i32
                 && tt_value != Value::NONE
                 && !tt_value.is_mate_score()
-                && tt_data.bound.is_lower_or_exact()
-                && tt_data.depth >= depth - ctx.tune_params.singular_tt_depth_margin
+                && tt_bound.is_lower_or_exact()
+                && tt_depth >= depth - ctx.tune_params.singular_tt_depth_margin
             {
                 let singular_beta_margin = (ctx.tune_params.singular_beta_margin_base
                     + ctx.tune_params.singular_beta_margin_tt_pv_non_pv_add
@@ -3029,9 +3036,9 @@ impl SearchWorker {
             // Late Move Reduction (LMR)
             // =============================================================
             // ttPv大型補正
-            // !ttHit時はtt_value=VALUE_NONE(32002)でほぼtrue、tt_data.depthはスロット残値
+            // !ttHit時はtt_value=VALUE_NONE(32002)でほぼtrue、tt_depthはスロット残値
             let tt_value_higher = tt_value > alpha;
-            let tt_depth_ge = tt_data.depth >= depth;
+            let tt_depth_ge = tt_depth >= depth;
 
             if st.stack[ply as usize].tt_pv {
                 r -= ctx.tune_params.lmr_step16_ttpv_sub_base
@@ -3114,8 +3121,8 @@ impl SearchWorker {
             };
             let mut value = if pass_bonus != 0 {
                 if mv == tt_move
-                    && ((tt_value != Value::NONE && tt_value.is_mate_score() && tt_data.depth > 0)
-                        || (tt_data.depth > 1 && st.root_depth > 8))
+                    && ((tt_value != Value::NONE && tt_value.is_mate_score() && tt_depth > 0)
+                        || (tt_depth > 1 && st.root_depth > 8))
                 {
                     new_depth = new_depth.max(1);
                 }
@@ -3280,10 +3287,8 @@ impl SearchWorker {
                 if pv_node && (move_count == 1 || value > alpha) {
                     // ttMove由来のnewDepth下限補正
                     if mv == tt_move
-                        && ((tt_value != Value::NONE
-                            && tt_value.is_mate_score()
-                            && tt_data.depth > 0)
-                            || (tt_data.depth > 1 && st.root_depth > 8))
+                        && ((tt_value != Value::NONE && tt_value.is_mate_score() && tt_depth > 0)
+                            || (tt_depth > 1 && st.root_depth > 8))
                     {
                         new_depth = new_depth.max(1);
                     }
@@ -3335,10 +3340,8 @@ impl SearchWorker {
                 if pv_node && value > alpha {
                     // ttMove由来のnewDepth下限補正
                     if mv == tt_move
-                        && ((tt_value != Value::NONE
-                            && tt_value.is_mate_score()
-                            && tt_data.depth > 0)
-                            || (tt_data.depth > 1 && st.root_depth > 8))
+                        && ((tt_value != Value::NONE && tt_value.is_mate_score() && tt_depth > 0)
+                            || (tt_depth > 1 && st.root_depth > 8))
                     {
                         new_depth = new_depth.max(1);
                     }
@@ -3364,8 +3367,8 @@ impl SearchWorker {
                 // Full window search
                 // ttMove由来のnewDepth下限補正
                 if mv == tt_move
-                    && ((tt_value != Value::NONE && tt_value.is_mate_score() && tt_data.depth > 0)
-                        || (tt_data.depth > 1 && st.root_depth > 8))
+                    && ((tt_value != Value::NONE && tt_value.is_mate_score() && tt_depth > 0)
+                        || (tt_depth > 1 && st.root_depth > 8))
                 {
                     new_depth = new_depth.max(1);
                 }
@@ -3969,7 +3972,7 @@ impl SearchWorker {
             #[cfg(not(feature = "tt-trace"))]
             let allow_write = ctx.allow_tt_write;
             if allow_write
-                && tt_ctx.result.write(
+                && tt_ctx.writer.write(
                     tt_ctx.key,
                     value_to_tt(best_value, ply),
                     st.stack[ply as usize].tt_pv,

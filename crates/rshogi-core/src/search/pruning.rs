@@ -581,7 +581,7 @@ where
             #[cfg(not(feature = "tt-trace"))]
             let allow_write = ctx.allow_tt_write;
             if allow_write
-                && tt_ctx.result.write(
+                && tt_ctx.writer.write(
                     tt_ctx.key,
                     value_to_tt(value, ply),
                     st.stack[ply as usize].tt_pv,

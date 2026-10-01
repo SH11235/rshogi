@@ -25,6 +25,7 @@ mod write_stats;
 pub use write_stats::TTWriteStats;
 
 pub use entry::{TTData, TTEntry};
+pub(crate) use table::TTWriter;
 pub use table::{ProbeResult, TranspositionTable};
 
 /// クラスターサイズ（エントリ数）
