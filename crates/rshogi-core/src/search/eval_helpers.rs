@@ -475,14 +475,14 @@ pub(super) fn compute_eval_context(
         };
         let improving = static_eval > prev2_eval;
         let opponent_worsening = static_eval > -prev_eval;
-        return EvalContext {
-            eval: static_eval,
+        return EvalContext::new(
             static_eval,
-            unadjusted_static_eval: static_eval, // excludedMove時は未補正値も同じ
-            correction_value: corr_value,
+            static_eval,
+            static_eval, // excludedMove時は未補正値も同じ
+            corr_value,
             improving,
             opponent_worsening,
-        };
+        );
     }
 
     let mut unadjusted_static_eval = Value::NONE;
@@ -604,12 +604,12 @@ pub(super) fn compute_eval_context(
     let improving = static_eval > prev2_eval;
     let opponent_worsening = static_eval > -prev_eval;
 
-    EvalContext {
+    EvalContext::new(
         eval,
         static_eval,
         unadjusted_static_eval,
-        correction_value: corr_value,
+        corr_value,
         improving,
         opponent_worsening,
-    }
+    )
 }
