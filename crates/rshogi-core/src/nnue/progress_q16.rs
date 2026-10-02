@@ -67,6 +67,8 @@ const PADDED_THRESHOLDS: [[i64; MAX_LAYER_STACK_BUCKETS]; MAX_LAYER_STACK_BUCKET
     while n <= MAX_LAYER_STACK_BUCKETS {
         let mut i = 0;
         while i < THRESHOLDS[n].len() {
+            // padding (i64::MAX) を数えないための sum の丸めは、有効な閾値がこれ未満であることを前提にする。
+            assert!(THRESHOLDS[n][i] < i64::MAX - 1);
             table[n][i] = THRESHOLDS[n][i];
             i += 1;
         }

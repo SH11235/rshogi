@@ -95,7 +95,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 - **LayerStacks の Q16 bucket 選択を閾値の数え上げに変更**:
   二分探索を固定長の閾値比較へ置き換え、比較結果に依存する次の閾値 load の連鎖をなくす。
-  bucket 数 1〜16 の閾値境界・整数の端値・固定 seed の乱数で従来の選択結果との一致を検証する。
+  bucket 数 1〜16 の閾値境界・整数の端値・固定 seed の乱数で従来の選択結果との一致を検証する
+  (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。Zen 5 (9950X3D2)・LayerStacks・Q16 routing・1T の ETW search-only
+  (5 局面 × 5 秒 × ABBA) で、同一 binary の新旧切替は NPS +0.35% (instructions/node −0.13%)。関数配置 3 通りの比較は
+  main 上で −0.85% / +0.27% / +0.33%、TT prefetch 前倒しの上で +0.22% / +1.17% / +0.36%。
 
 - **LayerStacks の 1 手差分更新を AVX-512 でも 1 パスで処理**:
   source→dest 融合の差分更新は AVX2 経路だけにあり、AVX-512BW の build では source の 3KB コピー (memcpy) の後に
