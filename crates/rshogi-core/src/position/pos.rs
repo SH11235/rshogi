@@ -187,7 +187,7 @@ impl Position {
 
     /// 現局面から引き継ぐフィールドだけを次のStateInfoへ直接コピーし、現在位置を進める。
     ///
-    /// 通常手では残りのフィールドをdo_move_with_prefetch()内で必ず上書きする。
+    /// 通常手では残りのフィールドをdo_move()内で必ず上書きする。
     /// ローカルStateInfoを完成させてからstack slotへ丸ごとmoveする二重コピーを避ける。
     #[inline]
     fn push_partial_state_in_place(&mut self) {
@@ -538,7 +538,7 @@ impl Position {
 
     /// PASS 以外の合法手を指した後のキーを、局面を変更せずに計算する。
     #[inline]
-    fn key_after(&self, m: Move) -> u64 {
+    pub(crate) fn key_after(&self, m: Move) -> u64 {
         debug_assert!(!m.is_pass());
         let us = self.side_to_move;
         let mut board_key = self.cur_state().board_key ^ zobrist_side();
@@ -1072,6 +1072,22 @@ impl Position {
 
     // ========== 指し手実行 ==========
 
+    pub(crate) fn do_move_with_prefetch<P: TtPrefetch>(
+        &mut self,
+        m: Move,
+        gives_check: bool,
+        prefetcher: &P,
+    ) -> DirtyPiece {
+        if m.is_pass() {
+            return self.do_pass_move();
+        }
+        let next_key = self.key_after(m);
+        prefetcher.prefetch(next_key, !self.side_to_move);
+        let dirty_piece = self.do_move(m, gives_check);
+        debug_assert_eq!(self.key(), next_key);
+        dirty_piece
+    }
+
     /// 指し手を実行
     ///
     /// DirtyPieceを返す。探索時はAccumulatorStackと同期して使用する。
@@ -1079,19 +1095,6 @@ impl Position {
     ///
     /// PASSの場合は do_pass_move に委譲する。
     pub fn do_move(&mut self, m: Move, gives_check: bool) -> DirtyPiece {
-        if m.is_pass() {
-            return self.do_pass_move();
-        }
-        let noop = NoPrefetch;
-        self.do_move_with_prefetch(m, gives_check, &noop)
-    }
-
-    pub(crate) fn do_move_with_prefetch<P: TtPrefetch>(
-        &mut self,
-        m: Move,
-        gives_check: bool,
-        prefetcher: &P,
-    ) -> DirtyPiece {
         // PASSの場合は do_pass_move に委譲
         if m.is_pass() {
             return self.do_pass_move();
@@ -1099,8 +1102,6 @@ impl Position {
 
         let us = self.side_to_move;
         let them = !us;
-        let next_key = self.key_after(m);
-        prefetcher.prefetch(next_key, them);
         let prev_continuous = self.cur_state().continuous_check;
         let update_board_effects = Self::should_update_board_effects();
 
@@ -1415,7 +1416,6 @@ impl Position {
             self.debug_verify_board_effects();
         }
 
-        debug_assert_eq!(self.key(), next_key);
         dirty_piece
     }
 
