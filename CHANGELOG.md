@@ -82,7 +82,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 - **指し手実行時の TT prefetch を局面更新前へ移動**:
   手番・移動・成り・駒取り・持ち駒の差分から子局面のキーを事前計算し、
-  StateInfo のコピーや駒の移動より前に TT を prefetch する。局面更新の処理順序は維持する。
+  StateInfo のコピーや駒の移動より前に TT を prefetch する。局面更新の処理順序は維持する
+  (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only
+  (5 局面 × 5 秒 × ABBA) で、同一 binary の新旧切替は NPS +0.93% (5 局面すべて正、instructions/node +0.35%)、
+  最終版と main の比較は関数配置 3 通りで −0.06% / +0.27% / +0.93%。
 
 - **LayerStacks の 1 手差分更新を AVX-512 でも 1 パスで処理**:
   source→dest 融合の差分更新は AVX2 経路だけにあり、AVX-512BW の build では source の 3KB コピー (memcpy) の後に

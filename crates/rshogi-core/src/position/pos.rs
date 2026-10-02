@@ -561,9 +561,11 @@ impl Position {
             let captured = self.piece_on(to);
             if captured.is_some() {
                 let pt = captured.piece_type().unpromote();
-                debug_assert_ne!(pt, PieceType::King);
                 board_key ^= zobrist_psq(captured, to);
-                hand_key = hand_key.wrapping_add(zobrist_hand(us, pt));
+                // do_move と同じく玉は持ち駒にしない (不正な玉取りの手でも hand 表の範囲外を読まない)。
+                if pt != PieceType::King {
+                    hand_key = hand_key.wrapping_add(zobrist_hand(us, pt));
+                }
             }
         }
 
