@@ -80,6 +80,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **指し手実行直後に LayerStacks の FT 差分重み行をプリフェッチ**:
+  静的 HalfKA_hm merged の玉が動かない手で、両視点の削除・追加行の先頭 8 cache line を
+  先読みする。差分更新と同じ特徴 index・重み行参照を使い、探索結果と評価値は変更しない。
+
 - **指し手実行時の EvalHash prefetch を TT と同じ局面更新前へ移動**:
   子局面のキーを使い、StateInfo のコピーより前に TT と EvalHash を prefetch する。
   EvalHash の有効条件と対象経路は維持し、PASS は従来どおり局面更新後に prefetch する

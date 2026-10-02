@@ -443,6 +443,18 @@ fn check_models() {
             assert!(pos.is_legal(mv));
             let dirty = pos.do_move(mv, pos.gives_check(mv));
             moves.push(mv);
+            #[cfg(all(
+                target_arch = "x86_64",
+                feature = "layerstack-arch",
+                feature = "ft-halfka_hm_merged",
+                not(feature = "nnue-effect-bucket")
+            ))]
+            {
+                let before = snapshot(&eager);
+                eager.prefetch_ft_rows(&pos, &dirty);
+                lazy.prefetch_ft_rows(&pos, &dirty);
+                assert_eq!(snapshot(&eager), before, "prefetch must not change the accumulator");
+            }
             eager.push(dirty);
             lazy.push(dirty);
             legacy.push(dirty);

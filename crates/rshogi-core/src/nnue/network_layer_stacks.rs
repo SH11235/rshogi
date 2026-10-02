@@ -2101,6 +2101,28 @@ macro_rules! ls_match_ft {
 }
 
 impl LayerStacksNetwork {
+    /// HalfKA_hm merged の FT 差分重み行を先読みする。
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "layerstack-arch",
+        feature = "ft-halfka_hm_merged",
+        not(feature = "nnue-effect-bucket")
+    ))]
+    #[inline]
+    pub(crate) fn prefetch_ft_rows(
+        &self,
+        pos: &Position,
+        dirty: &super::accumulator::DirtyPiece,
+        cache_lines: usize,
+    ) {
+        if !matches!(self, Self::HalfKaHmMerged(_)) {
+            return;
+        }
+        ls_match_ft!(self, by_ft => ls_match_size!(by_ft, net =>
+            net.feature_transformer.prefetch_dirty_rows(pos, dirty, cache_lines)
+        ));
+    }
+
     /// アーキテクチャ寸法 (L1, L2, L3) を返す
     pub fn architecture_dims(&self) -> (usize, usize, usize) {
         ls_match_ft!(self, by_ft => by_ft.architecture_dims())

@@ -1507,6 +1507,46 @@ impl<const L1: usize, FT: LsFeatureSpec> FeatureTransformerLayerStacks<L1, FT> {
         &self.weights[offset..end]
     }
 
+    /// 両視点の削除・追加行を先頭から指定 cache line 数だけ先読みする。
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "layerstack-arch",
+        feature = "ft-halfka_hm_merged",
+        not(feature = "nnue-effect-bucket")
+    ))]
+    #[inline]
+    pub(crate) fn prefetch_dirty_rows(
+        &self,
+        pos: &Position,
+        dirty_piece: &DirtyPiece,
+        cache_lines: usize,
+    ) {
+        use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+
+        const ELEMENTS_PER_LINE: usize = 64 / size_of::<i16>();
+        for perspective in [Color::Black, Color::White] {
+            let mut removed = IndexList::<MAX_CHANGED_FEATURES>::new();
+            let mut added = IndexList::<MAX_CHANGED_FEATURES>::new();
+            append_changed_indices::<FT>(
+                dirty_piece,
+                perspective,
+                pos.king_square(perspective),
+                &mut removed,
+                &mut added,
+            );
+            for index in removed.iter().chain(added.iter()) {
+                let row = self.weight_row(index);
+                for offset in (0..row.len()).step_by(ELEMENTS_PER_LINE).take(cache_lines) {
+                    // SAFETY: weight_row が重み配列内の行スライスを返し、offset < row.len()
+                    // をループ範囲で保証する。add 後も同じ割り当て内を指し、重みは変更しない。
+                    unsafe {
+                        _mm_prefetch(row.as_ptr().add(offset).cast(), _MM_HINT_T0);
+                    }
+                }
+            }
+        }
+    }
+
     #[inline]
     fn try_apply_dirty_piece_fast(
         &self,

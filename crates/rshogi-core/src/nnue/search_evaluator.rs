@@ -336,6 +336,24 @@ impl SearchEvaluator {
         }
     }
 
+    /// 静的 LayerStacks の HalfKA_hm merged で次の差分更新に使う FT 行を先読みする。
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "layerstack-arch",
+        feature = "ft-halfka_hm_merged",
+        not(feature = "nnue-effect-bucket")
+    ))]
+    #[inline]
+    pub(crate) fn prefetch_ft_rows(&self, pos: &Position, dirty: &DirtyPiece) {
+        const CACHE_LINES: usize = 8;
+        if dirty.king_moved.iter().any(|&moved| moved) || dirty.dirty_num == 0 {
+            return;
+        }
+        if let Self::LayerStacks { net, .. } = self {
+            net.prefetch_ft_rows(pos, dirty, CACHE_LINES);
+        }
+    }
+
     #[inline]
     pub(crate) fn push(&mut self, dirty: DirtyPiece) {
         match self {

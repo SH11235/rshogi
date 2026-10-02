@@ -191,6 +191,13 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
         eval_hash.prefetch(pos.key());
     }
     st.nodes += 1;
+    #[cfg(all(
+        target_arch = "x86_64",
+        feature = "layerstack-arch",
+        feature = "ft-halfka_hm_merged",
+        not(feature = "nnue-effect-bucket")
+    ))]
+    st.evaluator.prefetch_ft_rows(pos, &dirty_piece);
     st.evaluator.push(dirty_piece);
 }
 
