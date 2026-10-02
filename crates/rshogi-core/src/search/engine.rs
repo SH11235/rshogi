@@ -227,7 +227,7 @@ const _: () = {
 /// 探索エンジン
 ///
 /// USIプロトコルから呼び出すための主要インターフェース。
-/// デフォルトのEvalHashサイズ（MB）
+/// デフォルトの EvalHash 容量指定（16 byte/entry 換算の MiB、実容量は半分）
 pub const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
 
 pub struct Search {
@@ -237,7 +237,7 @@ pub struct Search {
     eval_hash: Arc<EvalHash>,
     /// 置換表のサイズ（MB）
     tt_size_mb: usize,
-    /// EvalHashのサイズ（MB）
+    /// EvalHash の容量指定（16 byte/entry 換算の MiB）
     eval_hash_size_mb: usize,
     /// EvalHash の確保時に Large Pages を試みるか。
     eval_hash_large_pages: bool,
@@ -705,12 +705,13 @@ impl Search {
     ///
     /// # Arguments
     /// * `tt_size_mb` - 置換表のサイズ（MB）
-    /// * `eval_hash_size_mb` - EvalHash のサイズ（MB）
+    /// * `eval_hash_size_mb` - EvalHash の容量指定（16 byte/entry 換算の MiB、実容量は半分）
     pub fn new_with_eval_hash(tt_size_mb: usize, eval_hash_size_mb: usize) -> Self {
         Self::new_with_eval_hash_large_pages(tt_size_mb, eval_hash_size_mb, false)
     }
 
     /// EvalHash のサイズと Large Pages の使用設定を指定して作成する。
+    /// `eval_hash_size_mb` は 16 byte/entry 換算の MiB で、表の実容量は半分になる。
     pub fn new_with_eval_hash_large_pages(
         tt_size_mb: usize,
         eval_hash_size_mb: usize,
@@ -807,6 +808,7 @@ impl Search {
     }
 
     /// EvalHashのサイズを変更
+    /// `size_mb` は 16 byte/entry 換算の MiB で、表の実容量は半分になる。
     ///
     /// # 注意
     /// このメソッドは**探索停止中にのみ**呼び出すこと。
@@ -851,7 +853,7 @@ impl Search {
         Arc::clone(&self.eval_hash)
     }
 
-    /// EvalHashの現在サイズ（MB）を返す。
+    /// EvalHash の現在の容量指定（16 byte/entry 換算の MiB、実容量は半分）を返す。
     pub fn eval_hash_size_mb(&self) -> usize {
         self.eval_hash_size_mb
     }

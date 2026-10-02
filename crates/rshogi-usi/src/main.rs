@@ -189,7 +189,7 @@ impl UsiEngine {
         Self {
             // EvalHash は最初の `go` 直前まで遅延確保する。
             // selfplay のように起動直後に setoption でサイズを下げるケースで、
-            // 先に既定 256MB を確保してしまう無駄を避ける。
+            // 先に既定容量の表を確保してしまう無駄を避ける。
             search: Some(Search::new_with_eval_hash_large_pages(tt_size_mb, 0, true)),
             position: Position::new(),
             tt_size_mb,

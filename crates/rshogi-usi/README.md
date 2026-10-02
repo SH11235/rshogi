@@ -37,7 +37,7 @@ The engine will start in USI mode, waiting for commands from stdin.
 |--------|-------------|---------|
 | `Threads` | Number of search threads | 1 |
 | `USI_Hash` | Hash table size in MB | 256 |
-| `EvalHash` | Evaluation hash size (MiB, 0 for an empty table) | 256 |
+| `EvalHash` | Evaluation hash capacity (MiB at 16 bytes/entry; actual table uses half, 0 for an empty table) | 256 |
 | `UseEvalHash` | Use the evaluation hash | true |
 | `EvalHashLargePages` | Attempt Large Pages allocation for EvalHash (false uses a regular Vec allocation) | true |
 | `NetworkDelay` | Network delay compensation (ms) | 0 |
@@ -122,10 +122,15 @@ TT と同じ `info string` 内の JSON メッセージ形式で表示します�
 変更時は現在確保済みのサイズでキャッシュを再確保し、サイズ変更後も設定を保持します。
 初期状態の EvalHash は最初の `go` 直前まで遅延確保され、配置表示も確保後に行います。
 Windows の Large Pages は非ページングメモリを使います。既定サイズでは、各プロセスにつき
-TT 256 MiB と EvalHash 256 MiB、定常時は計 512 MiB の確保を試みます。
+TT 256 MiB と EvalHash 128 MiB、定常時は計 384 MiB の確保を試みます。
 TT の取り直しでは旧 TT の解放前に新 TT を確保するため、瞬間最大は旧 TT + 新 TT + EvalHash
-（既定サイズでは 768 MiB）です。複数プロセスではそれぞれの合計容量が必要です。
+（既定サイズでは 640 MiB）です。複数プロセスではそれぞれの合計容量が必要です。
 EvalHash の取り直しでは旧表を先に手放してから新表を確保します。
+`EvalHash` の指定値は 16 byte/entry 換算の MiB を維持し、entry 数を 2 のべき乗に
+切り下げます。entry は 8 byte なので表の実容量は換算容量の半分です。
+`EvalHash=1` ではキーの bit 16 が 1 の局面をキャッシュ対象外にして完全一致を保証します
+（一様なキーなら約半数）。`EvalHash>=2` では全キーを照合できます。
+i16 範囲外の評価値とキー 0 は格納せず、再評価します。
 ライブラリの `EvalHash::new` / `Search::new` / `Search::new_with_eval_hash` は通常ページが既定で、
 Large Pages は明示指定時だけ要求します。`rescore_psv` などのツールの既定動作は変わりません。
 

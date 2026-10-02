@@ -128,73 +128,40 @@ pub fn set_eval_hash_enabled(enabled: bool) {
     USE_EVAL_HASH.store(enabled, Ordering::Relaxed);
 }
 
-/// スレッドセーフなEvalHashエントリ
+// USI EvalHash の指定値は 16 byte/entry 換算の MiB として維持する。
+// 同じ指定値で entry 数と index を保ち、実際の表のバイト数だけを半分にする。
+const CAPACITY_ENTRY_BYTES: usize = 16;
+const VALID_BIT: u64 = 1 << 16;
+const KEY_MASK: u64 = !((1 << 17) - 1);
+
+/// 上位 47 bit のキー、valid 1 bit、下位 16 bit の符号付き評価値を持つ。
 ///
-/// AtomicU64×2 + XORエンコーディングによる実装（Stockfish/YaneuraOu準拠）。
-///
-/// ## 設計原理
-/// - `key_xor = key ^ score` として格納
-/// - 読み取り時に `key = key_xor ^ score` で復元
-/// - 競合状態で片方だけ更新された torn read は、XOR 結果が元の key と一致せず
-///   実質的に検出される（キー不一致 = キャッシュミス扱い）
-///
-/// ## Memory Ordering について
-/// Relaxed orderingを使用。これは以下の理由で許容できる：
-/// 1. torn read は XOR 照合でほぼ確実にキャッシュミスに落ちる
-/// 2. 競合時の「偽陰性」（キャッシュミス）は許容される
-/// 3. Stockfish/YaneuraOuも同様のアプローチを採用
-///
-/// Release/Acquireを使用しない理由：
-/// - x86_64では差がない（ハードウェアが強いメモリモデルを提供）
-/// - ARMでは追加コストが発生するが、XORエンコーディングで正確性は保証済み
+/// 1 本の atomic で全フィールドを同時に読み書きするため torn read は起きない。
+/// 他のメモリの公開には使わず、競合時は古い有効値または miss でよいので Relaxed とする。
 struct EvalHashEntryAtomic {
-    key_xor: AtomicU64,
-    score: AtomicU64,
+    packed: AtomicU64,
 }
 
 impl EvalHashEntryAtomic {
     fn new() -> Self {
         Self {
-            key_xor: AtomicU64::new(0),
-            score: AtomicU64::new(0),
+            packed: AtomicU64::new(0),
         }
-    }
-
-    /// エントリを読み取り、(key, score) を返す
-    ///
-    /// XORエンコーディングにより、競合状態での不整合は key 不一致として検出される。
-    /// 不一致の場合はキャッシュミスとして扱い、再計算を行う。
-    #[inline]
-    fn load_pair(&self) -> (u64, u64) {
-        // 読み取り順序: key_xor → score
-        let key_xor = self.key_xor.load(Ordering::Relaxed);
-        let score = self.score.load(Ordering::Relaxed);
-        // XORで元のkeyを復元。競合があれば不正なkeyになりキー検証で弾かれる
-        (key_xor ^ score, score)
-    }
-
-    /// エントリを書き込む
-    ///
-    /// 書き込み順序は score → key_xor。読み取り側は key_xor → score の順で読む。
-    /// 競合状態で片方だけ更新された場合、XOR結果が不整合になり検出可能。
-    #[inline]
-    fn store_pair(&self, key: u64, score: u64) {
-        let key_xor = key ^ score;
-        self.score.store(score, Ordering::Relaxed);
-        self.key_xor.store(key_xor, Ordering::Relaxed);
     }
 }
 
 impl EvalHash {
     /// 通常ページで評価ハッシュを作成する。
+    /// `size_mb` は 16 byte/entry 換算の容量指定で、表の実容量はその半分になる。
     pub fn new(size_mb: usize) -> Self {
         Self::new_with_large_pages(size_mb, false)
     }
 
     /// 評価ハッシュを作成する。false では通常の Vec による確保を使う。
+    /// `size_mb` は 16 byte/entry 換算の MiB。entry 数は 2 のべき乗に切り下げる。
     pub fn new_with_large_pages(size_mb: usize, large_pages: bool) -> Self {
         let bytes = size_mb.saturating_mul(1024 * 1024);
-        let entries = bytes / mem::size_of::<EvalHashEntryAtomic>();
+        let entries = bytes / CAPACITY_ENTRY_BYTES;
         let size = normalize_size(entries);
         let mut storage = if large_pages && size != 0 {
             let bytes = size * mem::size_of::<EvalHashEntryAtomic>();
@@ -248,34 +215,39 @@ impl EvalHash {
         self.allocation_kind().is_huge_page_hint()
     }
 
+    /// キーが完全一致する場合にキャッシュ済みの評価値を返す。
     pub fn probe(&self, key: u64) -> Option<i32> {
-        // key 0 は未書込 entry (0, 0) と区別できないため常に miss とする
         if self.len == 0 || key == 0 {
             return None;
         }
         #[cfg(feature = "diagnostics")]
         stats::record_probe();
+        if !self.is_cacheable_key(key) {
+            return None;
+        }
         let entry = &self.table()[self.index(key)];
-        let (stored_key, stored_score) = entry.load_pair();
-        if stored_key != key {
+        let packed = entry.packed.load(Ordering::Relaxed);
+        if packed & (KEY_MASK | VALID_BIT) != ((key & KEY_MASK) | VALID_BIT) {
             return None;
         }
         #[cfg(feature = "diagnostics")]
         stats::record_hit();
-        // u64 → u32 → i32: 下位32ビットを符号付き整数として解釈
-        // store時に i32 → u32 → u64 と変換しているため、逆変換で元の値を復元
-        Some(stored_score as u32 as i32)
+        Some(i32::from(packed as i16))
     }
 
+    /// i16 に収まり、全キーを照合できる評価値だけを格納する。
     pub fn store(&self, key: u64, score: i32) {
-        if self.len == 0 || key == 0 {
+        if self.len == 0 || !self.is_cacheable_key(key) {
             return;
         }
+        // NNUE の出力は i16 に clamp されていない。範囲外は再評価に任せる。
+        let Ok(score) = i16::try_from(score) else {
+            return;
+        };
         let idx = self.index(key);
         let entry = &self.table()[idx];
-        // i32 → u32 → u64: 符号付き整数をビットパターンを保持したまま拡張
-        // probe時に逆変換で元の値を復元する
-        entry.store_pair(key, score as u32 as u64);
+        let packed = (key & KEY_MASK) | VALID_BIT | u64::from(score as u16);
+        entry.packed.store(packed, Ordering::Relaxed);
     }
 
     /// 全 entry を未書込状態に戻す（in-place。再確保しない）
@@ -284,7 +256,7 @@ impl EvalHash {
     /// 旧設定の評価値が key 一致で hit するのを防ぐため、TT クリアと同じ箇所で呼ぶ。
     pub fn clear(&self) {
         for entry in self.table() {
-            entry.store_pair(0, 0);
+            entry.packed.store(0, Ordering::Relaxed);
         }
     }
 
@@ -319,6 +291,16 @@ impl EvalHash {
     #[inline]
     fn index(&self, key: u64) -> usize {
         (key as usize) & self.mask
+    }
+
+    #[inline]
+    fn is_cacheable_key(&self, key: u64) -> bool {
+        // index の下位 bit と格納する上位 47 bit で全キーを照合する。
+        // 2 MiB 指定以上なら index >= 17 bit なので任意の非ゼロキーを格納できる。
+        // 1 MiB 指定は index が 16 bit のため bit 16 が欠ける。この bit が 1 の
+        // キーは probe/store とも対象外にして誤ヒットを防ぐ（一様なキーの半数が対象）。
+        // key 0 は互換性のため引き続き miss とする。
+        key != 0 && key & !(KEY_MASK | self.mask as u64) == 0
     }
 }
 
@@ -366,14 +348,15 @@ mod tests {
         assert_send_sync::<EvalHash>();
         for large_pages in [false, true] {
             let hash = EvalHash::new_with_large_pages(3, large_pages);
-            assert_eq!(hash.len, (2 << 20) / mem::size_of::<EvalHashEntryAtomic>());
+            assert_eq!(hash.len, (2 << 20) / 16);
+            assert_eq!(mem::size_of_val(hash.table()), 1 << 20);
             assert_eq!(hash.mask, hash.len - 1);
             assert_eq!(matches!(hash.storage, EvalHashStorage::Allocated(_)), large_pages);
             if !large_pages {
                 assert!(!hash.uses_large_pages());
                 assert!(!hash.huge_page_hint_requested());
             }
-            assert!(hash.table().iter().all(|entry| entry.load_pair() == (0, 0)));
+            assert!(hash.table().iter().all(|entry| entry.packed.load(Ordering::Relaxed) == 0));
             let mut key = 0x1234_5678_9abc_def0u64;
             let mut keys = Vec::new();
             for _ in 0..4096 {
@@ -384,12 +367,12 @@ mod tests {
                 keys.push(key);
             }
             for &key in &keys {
-                let score = (key >> 32) as i32;
+                let score = i32::from((key >> 32) as i16);
                 hash.prefetch(key);
                 hash.store(key, score);
                 assert_eq!(hash.probe(key), Some(score));
             }
-            for score in [i32::MIN, -1, 0, 1, i32::MAX] {
+            for score in [i32::from(i16::MIN), -1, 0, 1, i32::from(i16::MAX)] {
                 hash.store(1, score);
                 assert_eq!(hash.probe(1), Some(score));
             }
@@ -400,7 +383,7 @@ mod tests {
             hash.store(0, 42);
             assert_eq!(hash.probe(0), None);
             hash.clear();
-            assert!(hash.table().iter().all(|entry| entry.load_pair() == (0, 0)));
+            assert!(hash.table().iter().all(|entry| entry.packed.load(Ordering::Relaxed) == 0));
             assert!(keys.iter().all(|&key| hash.probe(key).is_none()));
         }
     }
@@ -473,24 +456,23 @@ mod tests {
 
         // key2 は取得できる
         assert_eq!(hash.probe(key2), Some(200));
-        // key1 は上書きされてキー不一致でNone（または偶然一致する可能性もある）
-        // 同じインデックスで異なるキーの場合、キー検証で弾かれる
+        assert_eq!(hash.probe(key1), None);
     }
 
     #[test]
     fn test_eval_hash_boundary_scores() {
         // 境界値テスト
-        let hash = EvalHash::new(1);
+        let hash = EvalHash::new(2);
 
         // 最大値
         let key1 = 0x1111_1111_1111_1111;
-        hash.store(key1, i32::MAX);
-        assert_eq!(hash.probe(key1), Some(i32::MAX));
+        hash.store(key1, i32::from(i16::MAX));
+        assert_eq!(hash.probe(key1), Some(i32::from(i16::MAX)));
 
         // 最小値
         let key2 = 0x2222_2222_2222_2222;
-        hash.store(key2, i32::MIN);
-        assert_eq!(hash.probe(key2), Some(i32::MIN));
+        hash.store(key2, i32::from(i16::MIN));
+        assert_eq!(hash.probe(key2), Some(i32::from(i16::MIN)));
 
         // ゼロ
         let key3 = 0x3333_3333_3333_3333;
@@ -534,5 +516,85 @@ mod tests {
         assert_eq!(hash.probe(key), Some(77));
         hash.clear();
         assert_eq!(hash.probe(key), None);
+    }
+
+    #[test]
+    fn test_eval_hash_random_scores_and_same_index_misses() {
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x1234_5678_9abc_def0);
+        for large_pages in [false, true] {
+            let hash = EvalHash::new_with_large_pages(2, large_pages);
+            for _ in 0..4096 {
+                let key = rng.random::<u64>() | 1;
+                // 各 key の slot を別 key にして、範囲外の store が書き込まないことも確かめる。
+                let collision = key ^ (1 << 63);
+                assert_eq!(hash.index(key), hash.index(collision));
+                for score in [
+                    i32::from(rng.random::<i16>()),
+                    rng.random_range(i32::MIN..i32::from(i16::MIN)),
+                    rng.random_range(i32::from(i16::MAX) + 1..=i32::MAX),
+                    i32::from(i16::MIN) - 1,
+                    i32::from(i16::MAX) + 1,
+                    i32::MIN,
+                    i32::MAX,
+                ] {
+                    hash.store(collision, 42);
+                    assert_eq!(hash.probe(key), None);
+                    hash.store(key, score);
+                    if i16::try_from(score).is_ok() {
+                        assert_eq!(hash.probe(key), Some(score));
+                        assert_eq!(hash.probe(collision), None);
+                    } else {
+                        assert_eq!(hash.probe(key), None);
+                        assert_eq!(hash.probe(collision), Some(42));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_eval_hash_default_capacities_match_every_key_bit() {
+        use crate::search::DEFAULT_EVAL_HASH_SIZE_MB;
+
+        assert_eq!(mem::size_of::<EvalHashEntryAtomic>(), 8);
+        // core API の既定値と USI の既定値の両方で容量と全 64 bit の照合を確かめる。
+        for size_mb in [DEFAULT_EVAL_HASH_SIZE_MB, 256] {
+            let hash = EvalHash::new(size_mb);
+            assert_eq!(hash.len, size_mb * 1024 * 1024 / 16);
+            assert_eq!(mem::size_of_val(hash.table()), size_mb * 1024 * 1024 / 2);
+            assert_eq!(KEY_MASK | hash.mask as u64, u64::MAX);
+            for key in [1, 0x1234_5678_9abc_def0, u64::MAX] {
+                hash.store(key, -321);
+                assert_eq!(hash.probe(key), Some(-321));
+                for bit in 0..64 {
+                    let other = key ^ (1 << bit);
+                    assert_eq!(hash.probe(other), None);
+                }
+                hash.clear();
+            }
+        }
+    }
+
+    #[test]
+    fn test_eval_hash_small_table_skips_unverifiable_keys() {
+        for large_pages in [false, true] {
+            let hash = EvalHash::new_with_large_pages(1, large_pages);
+            assert_eq!(hash.len, 1 << 16);
+            let key = 1;
+            let collision = key | (1 << 16);
+            assert_eq!(hash.index(key), hash.index(collision));
+            assert_eq!(key & KEY_MASK, collision & KEY_MASK);
+            // 有効な key/score がゼロの bit 列でも未書込と区別できる。
+            assert_eq!(hash.probe(key), None);
+            hash.store(key, 0);
+            assert_eq!(hash.probe(key), Some(0));
+            assert_eq!(hash.probe(collision), None);
+            hash.store(collision, 123);
+            assert_eq!(hash.probe(collision), None);
+            assert_eq!(hash.probe(key), Some(0));
+        }
     }
 }

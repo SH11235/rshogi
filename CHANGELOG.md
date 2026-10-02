@@ -80,6 +80,13 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **EvalHash の entry を 16 byte から 8 byte に縮小**: キー・i16 評価値・valid bit を
+  1 本の `AtomicU64` にまとめ、probe/store をそれぞれ 1 回の atomic 操作にした。
+  `EvalHash` は 16 byte/entry 換算の容量指定を維持し、同じ entry 数で表の実容量を半減する
+  （USI 既定の 256 指定は 2²⁴ entry・128 MiB）。2 MiB 指定以上では全キーを照合し、
+  1 MiB 指定では照合できない bit 16 が 1 のキーを対象外にして誤ヒットを防ぐ。
+  i16 範囲外の評価値は格納せず再評価する。性能値は未計測。
+
 - **通常探索の子局面の TT / EvalHash prefetch を枝刈り前へ移動**:
   合法性確認後、王手判定と Step 14 の枝刈りより前に子局面のキーを計算して prefetch する。
   指し手実行時のキーの再計算と二重 prefetch を避け、枝刈りの条件・順序は維持する。
