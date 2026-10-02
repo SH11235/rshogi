@@ -11,6 +11,7 @@
 mod stats;
 
 mod alpha_beta;
+mod corr_prefetch;
 mod engine;
 mod eval_helpers;
 mod history;

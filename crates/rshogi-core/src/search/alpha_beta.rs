@@ -1013,6 +1013,26 @@ impl SearchWorker {
     // NNUE ヘルパーメソッド（LayerStacks / HalfKP・HalfKaHmMerged の分岐を隠蔽）
     // =========================================================================
 
+    /// ルートでも通常ノードと同じ着手直後の prefetch を使う。
+    #[inline]
+    fn do_root_move_and_push(&mut self, pos: &mut Position, mv: Move, gives_check: bool) {
+        let ctx = SearchContext {
+            tt: &self.tt,
+            eval_hash: &self.eval_hash,
+            history: &self.history,
+            cont_history_sentinel: self.cont_history_sentinel,
+            generate_all_legal_moves: self.generate_all_legal_moves,
+            max_moves_to_draw: self.max_moves_to_draw,
+            thread_id: self.thread_id,
+            allow_tt_write: self.allow_tt_write,
+            tune_params: &self.search_tune_params,
+            reductions: &self.reductions,
+            draw_value_table: self.draw_value_table,
+            entering_king_rule: self.entering_king_rule,
+        };
+        do_move_and_push(&mut self.state, &ctx, pos, mv, gives_check, 1);
+    }
+
     /// NNUE アキュムレータスタックを pop
     #[inline]
     pub(super) fn nnue_pop(&mut self) {
@@ -1319,14 +1339,7 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
-            do_move_and_push(
-                &mut self.state,
-                pos,
-                mv,
-                gives_check,
-                self.tt.as_ref(),
-                self.eval_hash.as_ref(),
-            );
+            self.do_root_move_and_push(pos, mv, gives_check);
             // nodes_before は do_move 後に取得
             // (root move 自身の do_move ノードを effort に含めない)
             let nodes_before = self.state.nodes;
@@ -1972,14 +1985,7 @@ impl SearchWorker {
             let is_capture = pos.is_capture(mv);
 
             // 探索
-            do_move_and_push(
-                &mut self.state,
-                pos,
-                mv,
-                gives_check,
-                self.tt.as_ref(),
-                self.eval_hash.as_ref(),
-            );
+            self.do_root_move_and_push(pos, mv, gives_check);
             // nodes_before は do_move 後に取得
             // (root move 自身の do_move ノードを effort に含めない)
             let nodes_before = self.state.nodes;
@@ -3044,7 +3050,7 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-            do_move_and_push(st, pos, mv, gives_check, ctx.tt, ctx.eval_hash);
+            do_move_and_push(st, ctx, pos, mv, gives_check, ply + 1);
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う

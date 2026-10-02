@@ -80,6 +80,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **着手直後に子局面の補正履歴を prefetch**:
+  pawn・minor・両色の non-pawn の4エントリと、2手前・4手前の continuation correction を
+  切替設定なしで先読みする。補正値の読み取りとエントリの添字計算を共有し、
+  TT / EvalHash の局面更新前 prefetch と探索の評価・履歴更新は維持する。
+
 - **指し手実行時の EvalHash prefetch を TT と同じ局面更新前へ移動**:
   子局面のキーを使い、StateInfo のコピーより前に TT と EvalHash を prefetch する。
   EvalHash の有効条件と対象経路は維持し、PASS は従来どおり局面更新後に prefetch する
