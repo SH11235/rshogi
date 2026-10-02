@@ -15,6 +15,12 @@ pub(super) const STATS_MAX_DEPTH: usize = 32;
 pub struct SearchStats {
     /// 総ノード数（探索関数の呼び出し回数）
     pub nodes_searched: u64,
+    /// Step14 の SEE 判定数（capture/check と quiet の合計、再利用分を含む）
+    pub step14_see_calls: u64,
+    /// GoodCapture の下限で結果を再利用できる Step14 SEE 判定数
+    pub step14_see_reusable: u64,
+    /// 再利用候補のうち、従来の SEE では attackers 計算に進む判定数
+    pub step14_see_reusable_attackers: u64,
     /// LMR適用回数
     pub lmr_applied: u64,
     /// LMRによる再探索回数
@@ -134,6 +140,9 @@ impl Default for SearchStats {
     fn default() -> Self {
         Self {
             nodes_searched: 0,
+            step14_see_calls: 0,
+            step14_see_reusable: 0,
+            step14_see_reusable_attackers: 0,
             lmr_applied: 0,
             lmr_research: 0,
             move_loop_pruned: 0,
@@ -204,6 +213,12 @@ impl SearchStats {
         let mut report = String::new();
         report.push_str("=== Search Statistics ===\n");
         report.push_str(&format!("Nodes searched:      {:>12}\n", self.nodes_searched));
+        report.push_str(&format!("Step14 SEE calls:    {:>12}\n", self.step14_see_calls));
+        report.push_str(&format!("Step14 SEE reusable: {:>12}\n", self.step14_see_reusable));
+        report.push_str(&format!(
+            "Step14 SEE attackers:{:>12}\n",
+            self.step14_see_reusable_attackers
+        ));
         report.push_str(&format!("TT cutoffs:          {:>12}\n", self.tt_cutoff));
         report.push_str("--- Pre-Move Pruning ---\n");
         report.push_str(&format!("NMP attempted:       {:>12}\n", self.nmp_attempted));

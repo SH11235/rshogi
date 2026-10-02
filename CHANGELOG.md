@@ -80,6 +80,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **GoodCapture の SEE 下限を再利用**: MovePicker が直前に返した手の成功閾値を
+  step14 に渡し、同じ手を同じ局面でより低い閾値と比較するときの SEE 再計算を省く。
+  `search-stats` では再利用可能な判定数と、そのうち従来の SEE が attackers 計算に
+  進む判定数を出力する。探索結果と指し手順序は維持する。
+
 - **通常探索の子局面の TT / EvalHash prefetch を枝刈り前へ移動**:
   合法性確認後、王手判定と Step 14 の枝刈りより前に子局面のキーを計算して prefetch する。
   指し手実行時のキーの再計算と二重 prefetch を避け、枝刈りの条件・順序は維持する。

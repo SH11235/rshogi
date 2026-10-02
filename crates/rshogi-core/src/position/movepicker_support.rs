@@ -358,6 +358,13 @@ impl Position {
     ///
     /// YaneuraOu/Stockfish と同じアルゴリズムで静的駒交換評価を判定する。
     /// 成りボーナスは考慮しない。
+    ///
+    /// 同じ局面・手では閾値を下げても true は false にならない。
+    /// 冒頭の false 判定は成立しにくく、true 判定は成立しやすくなる。
+    /// 交換列（LVA の選択・pin・X-ray）は閾値に依存しない。交換中は
+    /// `swap = attacker_value - swap` で閾値差の符号が交互に反転するため、
+    /// `res == 0` の false 終端は遅れ、`res == 1` の true 終端は早まる。
+    /// 攻撃駒なし・玉による終端も、同じ交換列に到達した場合の結果は変わらない。
     pub fn see_ge(&self, m: Move, threshold: Value) -> bool {
         // PASSは駒交換が発生しないので >= 0
         if m.is_pass() {
@@ -483,6 +490,27 @@ impl Position {
         }
 
         res != 0
+    }
+
+    /// SEE の二つの早期 return を通過するか（影の統計専用）。
+    #[cfg(feature = "search-stats")]
+    pub(crate) fn see_needs_attackers(&self, m: Move, threshold: Value) -> bool {
+        if m.is_pass() {
+            return false;
+        }
+        let captured = self.piece_on(m.to());
+        let captured_value = if m.is_drop() || captured.is_none() {
+            0
+        } else {
+            see_piece_value(captured.piece_type())
+        };
+        let swap = captured_value - threshold.raw();
+        let from_value = if m.is_drop() {
+            see_piece_value(m.drop_piece_type())
+        } else {
+            see_piece_value(self.piece_on(m.from()).piece_type())
+        };
+        swap >= 0 && from_value - swap > 0
     }
 
     /// 最も価値の低い攻撃駒を探す（成りは考慮しない）
@@ -615,6 +643,57 @@ fn see_piece_value(pt: PieceType) -> i32 {
 mod tests {
     use super::*;
     use crate::types::{File, Rank};
+
+    #[test]
+    fn see_ge_is_monotone_for_random_captures() {
+        use crate::movegen::{GenType, generate_with_type};
+        use crate::position::playout_test_support::RandomPlayout;
+
+        let mut checked = 0;
+        let mut promotions = 0;
+        let mut king_moves = 0;
+        for game in 0..8 {
+            let mut playout = RandomPlayout::new(0x5ee_b0ad, game);
+            for _ in 0..128 {
+                let pos = &playout.pos;
+                let mut moves = ExtMoveBuffer::new();
+                // GoodCapture と同じ生成対象。不成・非合法の pinned capture も含める。
+                generate_with_type(pos, GenType::CapturesAll, &mut moves, None);
+                for ext in moves.as_slice() {
+                    let mv = ext.mv;
+                    let captured = pos.piece_on(mv.to());
+                    let captured_value = if captured.is_none() {
+                        0
+                    } else {
+                        see_piece_value(captured.piece_type())
+                    };
+                    let from_pt = pos.piece_on(mv.from()).piece_type();
+                    let lower = captured_value - see_piece_value(from_pt);
+                    // 区間外は冒頭の早期判定で必ず true / false になる。
+                    // 閾値を 1 ずつ下げ、一度 true なら以後の全 t2 でも true を確認する。
+                    let mut passed = false;
+                    for threshold in (lower - 1..=captured_value + 1).rev() {
+                        let result = pos.see_ge(mv, Value::new(threshold));
+                        assert!(
+                            !passed || result,
+                            "{} move={} threshold={threshold}",
+                            playout.describe(),
+                            mv.to_usi()
+                        );
+                        passed |= result;
+                    }
+                    assert!(passed);
+                    checked += 1;
+                    promotions += usize::from(mv.is_promotion());
+                    king_moves += usize::from(from_pt == PieceType::King);
+                }
+                if playout.step().is_none() {
+                    break;
+                }
+            }
+        }
+        assert!(checked > 1000 && promotions > 0 && king_moves > 0);
+    }
 
     #[test]
     fn test_input_drop_rank_constraints_match_all_legal_generation() {

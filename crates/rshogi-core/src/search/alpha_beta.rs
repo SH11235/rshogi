@@ -352,6 +352,9 @@ pub(super) struct FutilityParams {
 pub(super) struct Step14Context<'a> {
     pub(super) pos: &'a Position,
     pub(super) mv: Move,
+    pub(super) good_capture_see_bound: Option<Value>,
+    #[cfg(feature = "search-stats")]
+    pub(super) stats: &'a mut super::stats::SearchStats,
     pub(super) depth: Depth,
     pub(super) ply: i32,
     pub(super) best_value: Value,
@@ -2901,6 +2904,9 @@ impl SearchWorker {
             let step14_ctx = Step14Context {
                 pos,
                 mv,
+                good_capture_see_bound: mp.good_capture_see_bound(mv),
+                #[cfg(feature = "search-stats")]
+                stats: &mut st.stats,
                 depth: original_depth,
                 ply,
                 best_value,

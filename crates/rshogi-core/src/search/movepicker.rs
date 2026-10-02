@@ -158,6 +158,8 @@ pub struct MovePicker {
     stage: Stage,
     tt_move: Move,
     probcut_threshold: Option<Value>,
+    // 最後に GoodCapture から返した手だけの SEE 下限。NONE は無効。
+    good_capture_see: (Move, Value),
     /// 探索の深さ（部分ソートの閾値計算に使用）
     depth: Depth,
     ply: i32,
@@ -227,6 +229,7 @@ impl MovePicker {
             stage,
             tt_move,
             probcut_threshold: None,
+            good_capture_see: (Move::NONE, Value::ZERO),
             depth,
             ply,
             skip_quiets: false,
@@ -265,6 +268,7 @@ impl MovePicker {
             stage,
             tt_move,
             probcut_threshold: None,
+            good_capture_see: (Move::NONE, Value::ZERO),
             depth: DEPTH_QS,
             ply,
             skip_quiets: false,
@@ -306,6 +310,7 @@ impl MovePicker {
             stage,
             tt_move,
             probcut_threshold: Some(threshold),
+            good_capture_see: (Move::NONE, Value::ZERO),
             depth: DEPTH_QS,
             ply,
             skip_quiets: false,
@@ -344,6 +349,13 @@ impl MovePicker {
         self.stage
     }
 
+    /// 直前に GoodCapture から返した同じ手の SEE 下限を返す。
+    /// `next_move` と同じ局面でのみ使用し、次の `next_move` で無効になる。
+    #[inline]
+    pub(super) fn good_capture_see_bound(&self, mv: Move) -> Option<Value> {
+        (mv.is_some() && self.good_capture_see.0 == mv).then_some(self.good_capture_see.1)
+    }
+
     /// 次の指し手を返す
     ///
     /// 指し手が尽きたら `Move::NONE` を返す。
@@ -364,6 +376,7 @@ impl MovePicker {
     /// let mv = ctx.history.with_read(|h| mp.next_move(pos, h));
     /// ```
     pub fn next_move(&mut self, pos: &Position, history: &HistoryTables) -> Move {
+        self.good_capture_see.0 = Move::NONE;
         loop {
             match self.stage {
                 // ==============================
@@ -702,6 +715,7 @@ impl MovePicker {
             // SEEで閾値以上の手のみ
             let threshold = Value::new(-ext.value / 18);
             if pos.see_ge(ext.mv, threshold) {
+                self.good_capture_see = (ext.mv, threshold);
                 return Some(ext.mv);
             } else {
                 // 悪い捕獲手は後回し
@@ -882,6 +896,73 @@ mod tests {
             mv.is_some().then_some(mv)
         })
         .collect()
+    }
+
+    #[test]
+    fn good_capture_see_bound_lifetime() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use crate::position::playout_test_support::RandomPlayout;
+
+        let history = HistoryTables::new_boxed();
+        let keys = [ContHistKey::null_sentinel(); 6];
+        let mut checked_bounds = 0;
+        let mut checked_evasions = 0;
+        let mut checked_bad_captures = 0;
+        for game in 0..4 {
+            let mut playout = RandomPlayout::new(0x5ee_b0ad, game);
+            for _ in 0..128 {
+                let pos = &playout.pos;
+                let mut legal = MoveList::new();
+                generate_legal_all(pos, &mut legal);
+                if legal.is_empty() {
+                    break;
+                }
+                let tt = legal.at(0);
+                let mut pickers = vec![
+                    MovePicker::new(pos, Move::NONE, 4, 0, keys, true),
+                    MovePicker::new(pos, tt, 4, 0, keys, true),
+                    MovePicker::new(pos, tt, DEPTH_QS, 0, keys, true),
+                ];
+                if pos.in_check() {
+                    checked_evasions += 1;
+                    pickers.push(MovePicker::new_evasions(pos, tt, 0, keys, true));
+                } else {
+                    pickers.push(MovePicker::new_probcut(pos, tt, Value::ZERO, 0, keys, true));
+                }
+                for mut picker in pickers {
+                    assert_eq!(picker.good_capture_see_bound(tt), None);
+                    let mut previous = Move::NONE;
+                    loop {
+                        let mv = picker.next_move(pos, &history);
+                        assert_eq!(picker.good_capture_see_bound(previous), None);
+                        let bound = picker.good_capture_see_bound(mv);
+                        if mv.is_none() {
+                            assert_eq!(bound, None);
+                            // 終端を再度呼んでも古い下限は復活しない。
+                            assert_eq!(picker.next_move(pos, &history), Move::NONE);
+                            assert_eq!(picker.good_capture_see_bound(previous), None);
+                            break;
+                        }
+                        if picker.stage() == Stage::GoodCapture {
+                            let bound = bound.expect("GoodCapture の下限");
+                            assert!(pos.see_ge(mv, bound));
+                            assert!(pos.see_ge(mv, Value::new(bound.raw() - 1)));
+                            checked_bounds += 1;
+                        } else {
+                            assert_eq!(bound, None);
+                            if picker.stage() == Stage::BadCapture {
+                                checked_bad_captures += 1;
+                            }
+                        }
+                        previous = mv;
+                    }
+                }
+                if playout.step().is_none() {
+                    break;
+                }
+            }
+        }
+        assert!(checked_bounds > 0 && checked_evasions > 0 && checked_bad_captures > 0);
     }
 
     #[test]
