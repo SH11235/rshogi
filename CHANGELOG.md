@@ -80,6 +80,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **通常探索で TT 手の子局面を静的評価前に prefetch**:
+  TT probe 後、MovePicker と同じ検証を通った TT 手の子局面の TT / EvalHash を先読みする。
+  root・静止探索・除外手探索・PASS は対象外とし、指し手ループの既存 prefetch と探索順序は維持する。
+
 - **通常探索の子局面の TT / EvalHash prefetch を枝刈り前へ移動**:
   合法性確認後、王手判定と Step 14 の枝刈りより前に子局面のキーを計算して prefetch する。
   指し手実行時のキーの再計算と二重 prefetch を避け、枝刈りの条件・順序は維持する。

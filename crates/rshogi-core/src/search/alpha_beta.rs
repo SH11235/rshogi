@@ -2575,6 +2575,15 @@ impl SearchWorker {
             }
         };
         let tt_move = tt_ctx.mv;
+        // TT 衝突による不正な成り手などを key_after に渡さないよう、MovePicker と同じ検証を行う。
+        if NT != NodeType::Root as u8
+            && excluded_move.is_none()
+            && tt_move.is_some()
+            && !tt_move.is_pass()
+            && pos.pseudo_legal_with_all(tt_move, ctx.generate_all_legal_moves)
+        {
+            prefetch_child(pos, tt_move, ctx.tt, ctx.eval_hash);
+        }
         let tt_value = tt_ctx.value;
         let tt_hit = tt_ctx.hit;
         let tt_depth = tt_ctx.depth;
