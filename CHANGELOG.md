@@ -80,6 +80,8 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- quiet 手の採点を 8 手単位の 2 段処理にし、main・pawn・continuation history の読み込みを王手判定・SEE より先にまとめる。スコアと部分ソート後の指し手順序は維持する（性能は計測待ち）。
+
 - **通常探索の子局面の TT / EvalHash prefetch を枝刈り前へ移動**:
   合法性確認後、王手判定と Step 14 の枝刈りより前に子局面のキーを計算して prefetch する。
   指し手実行時のキーの再計算と二重 prefetch を避け、枝刈りの条件・順序は維持する。

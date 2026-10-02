@@ -593,6 +593,91 @@ impl MovePicker {
 
     /// 静かな手のスコアを計算
     fn score_quiets(&mut self, pos: &Position, history: &HistoryTables) {
+        const BATCH: usize = 8;
+        self.score_quiets_batched::<BATCH>(pos, history);
+    }
+
+    /// 必須の history 読み込みをまとめ、王手判定・SEE より先に発行する。
+    fn score_quiets_batched<const BATCH: usize>(
+        &mut self,
+        pos: &Position,
+        history: &HistoryTables,
+    ) {
+        let us = self.side_to_move;
+        let pawn_idx = self.pawn_history_index;
+        debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
+        // SAFETY: cur <= end_cur <= moves.len() は MovePicker の不変条件。
+        let moves = unsafe { self.moves.as_mut_slice().get_unchecked_mut(self.cur..self.end_cur) };
+        let tables = self.continuation_history.map(|key| {
+            history.continuation_history[key.in_check as usize][key.capture as usize]
+                .get_table(key.piece, key.to)
+        });
+        let [ch0, ch1, ch2, ch3, _, ch5] = tables;
+
+        if self.ply < LOW_PLY_HISTORY_SIZE as i32 {
+            debug_assert!(self.ply >= 0, "ply must be non-negative: {}", self.ply);
+            let low_ply_idx = self.ply as usize;
+            let low_ply_div = 1 + self.ply;
+
+            for batch in moves.chunks_mut(BATCH) {
+                for ext in batch.iter_mut() {
+                    let m = ext.mv;
+                    let to = m.to();
+                    let pc = m.moved_piece_after();
+                    let mut value = 2 * history.main_history.get(us, m) as i32;
+                    value += 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
+                    value += ch0.get(pc, to) as i32;
+                    value += ch1.get(pc, to) as i32;
+                    value += ch2.get(pc, to) as i32;
+                    value += ch3.get(pc, to) as i32;
+                    value += ch5.get(pc, to) as i32;
+                    ext.value = value;
+                }
+
+                for ext in batch {
+                    let m = ext.mv;
+                    let to = m.to();
+                    let pt = m.moved_piece_after().piece_type();
+                    if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                        ext.value += 16384;
+                    }
+
+                    // 除算ゼロチェックを除去できるよう、分母が正であることを明示する。
+                    ext.value +=
+                        8 * history.low_ply_history.get(low_ply_idx, m) as i32 / low_ply_div.max(1);
+                }
+            }
+        } else {
+            for batch in moves.chunks_mut(BATCH) {
+                for ext in batch.iter_mut() {
+                    let m = ext.mv;
+                    let to = m.to();
+                    let pc = m.moved_piece_after();
+                    let mut value = 2 * history.main_history.get(us, m) as i32;
+                    value += 2 * history.pawn_history.get(pawn_idx, pc, to) as i32;
+                    value += ch0.get(pc, to) as i32;
+                    value += ch1.get(pc, to) as i32;
+                    value += ch2.get(pc, to) as i32;
+                    value += ch3.get(pc, to) as i32;
+                    value += ch5.get(pc, to) as i32;
+                    ext.value = value;
+                }
+
+                for ext in batch {
+                    let m = ext.mv;
+                    let to = m.to();
+                    let pt = m.moved_piece_after().piece_type();
+                    if pos.check_squares(pt).contains(to) && pos.see_ge(m, Value::new(-75)) {
+                        ext.value += 16384;
+                    }
+                }
+            }
+        }
+    }
+
+    /// 手ごとに完結する採点。バッチ版との一致検証に使う。
+    #[cfg(test)]
+    fn score_quiets_legacy(&mut self, pos: &Position, history: &HistoryTables) {
         let us = self.side_to_move;
         let pawn_idx = self.pawn_history_index;
         debug_assert!(self.cur <= self.end_cur && self.end_cur <= self.moves.len());
@@ -870,6 +955,9 @@ pub(crate) fn piece_value(pc: Piece) -> i32 {
 // =============================================================================
 // テスト
 // =============================================================================
+
+#[cfg(test)]
+mod quiet_score_tests;
 
 #[cfg(test)]
 mod tests {
