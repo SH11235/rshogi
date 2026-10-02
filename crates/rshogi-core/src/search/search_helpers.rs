@@ -9,7 +9,7 @@ use crate::nnue::DirtyPiece;
 use crate::position::Position;
 use crate::prefetch::TtPrefetch;
 use crate::search::PieceToHistory;
-use crate::types::{Move, Piece, Square, Value};
+use crate::types::{Color, Move, Piece, Square, Value};
 
 use super::alpha_beta::{SearchContext, SearchState};
 use super::history::CorrectionPieceToHistory;
@@ -152,6 +152,22 @@ pub(super) fn nnue_evaluate_cached(
     value
 }
 
+/// 子局面の TT と EvalHash を局面更新前にプリフェッチする。
+struct SearchPrefetch<'a, P> {
+    tt: &'a P,
+    eval_hash: &'a EvalHash,
+}
+
+impl<P: TtPrefetch> TtPrefetch for SearchPrefetch<'_, P> {
+    #[inline]
+    fn prefetch(&self, key: u64, side_to_move: Color) {
+        self.tt.prefetch(key, side_to_move);
+        if eval_hash_enabled() {
+            self.eval_hash.prefetch(key);
+        }
+    }
+}
+
 /// do_move + nodes++ + nnue_push をまとめたラッパー
 ///
 /// YO では Worker::do_move() 内部で nodes++ と nnue push を行う。
@@ -165,8 +181,13 @@ pub(super) fn do_move_and_push<P: TtPrefetch>(
     prefetcher: &P,
     eval_hash: &EvalHash,
 ) {
-    let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, prefetcher);
-    if eval_hash_enabled() {
+    let search_prefetch = SearchPrefetch {
+        tt: prefetcher,
+        eval_hash,
+    };
+    let dirty_piece = pos.do_move_with_prefetch(mv, gives_check, &search_prefetch);
+    // PASS は do_move_with_prefetch 内のプリフェッチを経由しない。
+    if mv.is_pass() && eval_hash_enabled() {
         eval_hash.prefetch(pos.key());
     }
     st.nodes += 1;

@@ -80,6 +80,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **指し手実行時の EvalHash prefetch を TT と同じ局面更新前へ移動**:
+  子局面のキーを使い、StateInfo のコピーより前に TT と EvalHash を prefetch する。
+  EvalHash の有効条件と対象経路は維持し、PASS は従来どおり局面更新後に prefetch する。
+
 - **指し手実行時の TT prefetch を局面更新前へ移動**:
   手番・移動・成り・駒取り・持ち駒の差分から子局面のキーを事前計算し、
   StateInfo のコピーや駒の移動より前に TT を prefetch する。局面更新の処理順序は維持する
