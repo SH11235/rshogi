@@ -184,18 +184,22 @@ fn quiet_score_batches_match_empty_short_and_tied_ranges() {
     let history = HistoryTables::new_boxed();
     let mut picker = quiet_picker(&pos, false, [ContHistKey::null_sentinel(); 6]);
     let end = picker.end_cur;
-    // 0 手・1 手・バッチ境界の前後と端数。同点のままの指し手順も比較する。
-    for len in 0..=17 {
-        picker.end_cur = picker.cur + len;
-        assert!(picker.end_cur <= end);
-        for ply in [
-            0,
-            LOW_PLY_HISTORY_SIZE as i32 - 1,
-            LOW_PLY_HISTORY_SIZE as i32,
-            127,
-        ] {
-            picker.ply = ply;
-            assert_scores_and_order(&picker, &pos, &history);
+    // 全方式で 0 手・1 手・バッチ境界の前後と端数、同点の順序を比較する。
+    // 他の並行テストも同じスコアを期待するため、この設定変更で結果は変わらない。
+    for batch in [0, 4, 8] {
+        set_quiet_score_batch(batch).unwrap();
+        for len in 0..=17 {
+            picker.end_cur = picker.cur + len;
+            assert!(picker.end_cur <= end);
+            for ply in [
+                0,
+                LOW_PLY_HISTORY_SIZE as i32 - 1,
+                LOW_PLY_HISTORY_SIZE as i32,
+                127,
+            ] {
+                picker.ply = ply;
+                assert_scores_and_order(&picker, &pos, &history);
+            }
         }
     }
 }

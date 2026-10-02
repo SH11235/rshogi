@@ -42,6 +42,25 @@ use super::{ContHistKey, HistoryTables, LOW_PLY_HISTORY_SIZE};
 use crate::movegen::{ExtMove, ExtMoveBuffer};
 use crate::position::Position;
 use crate::types::{Color, DEPTH_QS, Depth, Move, Piece, PieceType, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static QUIET_SCORE_BATCH: AtomicUsize = AtomicUsize::new(8);
+
+/// 計測用の quiet 採点方式を設定する。0 は従来方式、4 / 8 はバッチの手数。
+///
+/// 探索前に設定する。不正な値では設定を変更せずエラーを返す。
+pub fn set_quiet_score_batch(batch: usize) -> Result<(), &'static str> {
+    if !matches!(batch, 0 | 4 | 8) {
+        return Err("QuietScoreBatch accepts only 0, 4, or 8");
+    }
+    QUIET_SCORE_BATCH.store(batch, Ordering::Relaxed);
+    Ok(())
+}
+
+/// 計測用の quiet 採点方式を取得する。既定は 8 手単位。
+pub fn quiet_score_batch() -> usize {
+    QUIET_SCORE_BATCH.load(Ordering::Relaxed)
+}
 
 // =============================================================================
 // Stage（指し手生成の段階）
@@ -593,8 +612,12 @@ impl MovePicker {
 
     /// 静かな手のスコアを計算
     fn score_quiets(&mut self, pos: &Position, history: &HistoryTables) {
-        const BATCH: usize = 8;
-        self.score_quiets_batched::<BATCH>(pos, history);
+        // 大域設定は採点ループの外で一度だけ読み、各方式へ分岐する。
+        match quiet_score_batch() {
+            0 => self.score_quiets_legacy(pos, history),
+            4 => self.score_quiets_batched::<4>(pos, history),
+            _ => self.score_quiets_batched::<8>(pos, history),
+        }
     }
 
     /// 必須の history 読み込みをまとめ、王手判定・SEE より先に発行する。
@@ -675,8 +698,7 @@ impl MovePicker {
         }
     }
 
-    /// 手ごとに完結する採点。バッチ版との一致検証に使う。
-    #[cfg(test)]
+    /// 手ごとに完結する採点。バッチ版との計測・一致検証に使う。
     fn score_quiets_legacy(&mut self, pos: &Position, history: &HistoryTables) {
         let us = self.side_to_move;
         let pawn_idx = self.pawn_history_index;

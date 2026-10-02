@@ -797,6 +797,14 @@ impl UsiEngine {
         }
 
         match name.as_str() {
+            // 計測用の隠し option。usi の option 一覧には出さない。
+            "QuietScoreBatch" => match value.parse::<usize>() {
+                Ok(batch) => match rshogi_core::search::set_quiet_score_batch(batch) {
+                    Ok(()) => eprintln!("info string QuietScoreBatch: {batch}"),
+                    Err(message) => eprintln!("info string Warning: {message}"),
+                },
+                Err(_) => eprintln!("info string Warning: invalid QuietScoreBatch value '{value}'"),
+            },
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;
@@ -1948,6 +1956,22 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn quiet_score_batch_option_accepts_only_supported_sizes() {
+        let mut engine = UsiEngine::new();
+        assert_eq!(rshogi_core::search::quiet_score_batch(), 8);
+        for batch in ["0", "4", "8"] {
+            engine.cmd_setoption(&["setoption", "name", "QuietScoreBatch", "value", batch]);
+            let expected = batch.parse::<usize>().unwrap();
+            assert_eq!(rshogi_core::search::quiet_score_batch(), expected);
+            for invalid in ["1", "7", "16", "-1", "invalid", ""] {
+                engine.cmd_setoption(&["setoption", "name", "QuietScoreBatch", "value", invalid]);
+                assert_eq!(rshogi_core::search::quiet_score_batch(), expected);
+            }
+        }
+    }
 
     #[test]
     #[serial]
