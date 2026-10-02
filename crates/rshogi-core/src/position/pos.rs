@@ -537,7 +537,7 @@ impl Position {
     }
 
     /// PASS 以外の合法手を指した後のキーを、局面を変更せずに計算する。
-    #[inline]
+    #[inline(always)]
     fn key_after(&self, m: Move) -> u64 {
         debug_assert!(!m.is_pass());
         let us = self.side_to_move;
