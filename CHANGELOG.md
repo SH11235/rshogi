@@ -83,7 +83,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 - **通常探索の子局面の TT / EvalHash prefetch を枝刈り前へ移動**:
   合法性確認後、王手判定と Step 14 の枝刈りより前に子局面のキーを計算して prefetch する。
   指し手実行時のキーの再計算と二重 prefetch を避け、枝刈りの条件・順序は維持する。
-  静止探索と PASS の prefetch は従来どおり。
+  静止探索・root・ProbCut・PASS の prefetch は従来どおり (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。
+  Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only (5 局面 × 5 秒 × ABBA) で、同一 binary の新旧切替は NPS +1.16%
+  (5 局面すべて正、instructions/node +1.1%)。最終版と main の比較は関数配置 3 通りを 2 組で +0.29 / +1.65 / +0.01% と
+  −0.13 / +1.55 / −0.31% (平均 +0.51%、得は align=6 の配置に偏る)。npsbench は 1T ±0、16T +0.4%。
 
 - **指し手実行時の EvalHash prefetch を TT と同じ局面更新前へ移動**:
   子局面のキーを使い、StateInfo のコピーより前に TT と EvalHash を prefetch する。

@@ -181,7 +181,7 @@ pub(super) fn prefetch_child<P: TtPrefetch>(
     }
 }
 
-/// プリフェッチ済みの通常手を実行する。PASS の EvalHash は局面更新後に読む。
+/// 子局面を prefetch 済みの手を実行する。PASS は prefetch_child の対象外なので、局面更新後に EvalHash を prefetch する。
 #[inline]
 pub(super) fn do_move_and_push_prefetched(
     st: &mut SearchState,
