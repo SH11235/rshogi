@@ -93,6 +93,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
   (5 局面 × 5 秒 × ABBA) で、同一 binary の新旧切替は NPS +0.93% (5 局面すべて正、instructions/node +0.35%)、
   最終版と main の比較は関数配置 3 通りで −0.06% / +0.27% / +0.93%。
 
+- **LayerStacks の Q16 bucket 選択を閾値の数え上げに変更**:
+  二分探索を固定長の閾値比較へ置き換え、比較結果に依存する次の閾値 load の連鎖をなくす。
+  bucket 数 1〜16 の閾値境界・整数の端値・固定 seed の乱数で従来の選択結果との一致を検証する。
+
 - **LayerStacks の 1 手差分更新を AVX-512 でも 1 パスで処理**:
   source→dest 融合の差分更新は AVX2 経路だけにあり、AVX-512BW の build では source の 3KB コピー (memcpy) の後に
   in-place で更新する 2 パスに落ちていた。AVX-512BW でも source と重み行を読んで結果を直接書く。値は変わらない

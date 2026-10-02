@@ -61,6 +61,20 @@ const THRESHOLDS: [&[i64]; MAX_LAYER_STACK_BUCKETS + 1] = [
         96098, 127527, 177475,
     ],
 ];
+const PADDED_THRESHOLDS: [[i64; MAX_LAYER_STACK_BUCKETS]; MAX_LAYER_STACK_BUCKETS + 1] = {
+    let mut table = [[i64::MAX; MAX_LAYER_STACK_BUCKETS]; MAX_LAYER_STACK_BUCKETS + 1];
+    let mut n = 1;
+    while n <= MAX_LAYER_STACK_BUCKETS {
+        let mut i = 0;
+        while i < THRESHOLDS[n].len() {
+            table[n][i] = THRESHOLDS[n][i];
+            i += 1;
+        }
+        n += 1;
+    }
+    table
+};
+
 /// raw f64 LE 係数を YaneuraOu と同じ round(w * 65536) / i32 clamp で量子化する。
 pub fn load_progress_coeff_kpabs_q16_from_bytes(bytes: &[u8]) -> Result<Box<[i32]>, String> {
     if bytes.len() != SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS * 8 {
@@ -95,8 +109,26 @@ pub fn reset_layer_stack_progress_kpabs_q16_weights() {
 /// Q16 logit 和を bucket へ変換する。閾値と等しい値は上側の bucket に属する。
 pub fn progress_q16_sum_to_bucket(sum: i64, num_buckets: usize) -> usize {
     assert!((1..=MAX_LAYER_STACK_BUCKETS).contains(&num_buckets));
-    let thresholds = THRESHOLDS[num_buckets];
-    thresholds.partition_point(|&threshold| threshold <= sum)
+    // 有効な閾値はすべて i64::MAX - 1 未満なので、上端を丸めても bucket は変わらない。
+    // i64::MAX 入力でも padding を数えず、固定長の比較を使える。
+    let sum = sum.min(i64::MAX - 1);
+    let thresholds = &PADDED_THRESHOLDS[num_buckets];
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    {
+        use std::arch::x86_64::{_mm512_cmple_epi64_mask, _mm512_loadu_si512, _mm512_set1_epi64};
+        const { assert!(MAX_LAYER_STACK_BUCKETS == 16) };
+        // SAFETY: cfg で AVX-512F を保証し、16 要素の配列内から 8 要素ずつ読む。
+        // loadu はアラインメントを要求せず、配列は両 load が完了するまで有効。
+        unsafe {
+            let value = _mm512_set1_epi64(sum);
+            let low = _mm512_loadu_si512(thresholds.as_ptr().cast());
+            let high = _mm512_loadu_si512(thresholds.as_ptr().add(8).cast());
+            (_mm512_cmple_epi64_mask(low, value).count_ones()
+                + _mm512_cmple_epi64_mask(high, value).count_ones()) as usize
+        }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+    thresholds.iter().map(|&threshold| usize::from(threshold <= sum)).sum()
 }
 pub(crate) fn configured_progress_q16_bucket(pos: &Position, stored_buckets: usize) -> usize {
     let weights = snapshot_weights();
@@ -245,6 +277,45 @@ pub(super) fn reference_board_sums(pos: &Position, weights: &[i32]) -> [i64; 2] 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{Rng, SeedableRng};
+    use rand_xoshiro::Xoshiro256PlusPlus;
+
+    #[test]
+    fn bucket_count_matches_partition_point() {
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x0051_3136_434e_5400);
+        for (n, thresholds) in THRESHOLDS.iter().enumerate().skip(1) {
+            assert!(thresholds.iter().all(|&t| t < i64::MAX - 1));
+            let check = |sum| {
+                assert_eq!(
+                    progress_q16_sum_to_bucket(sum, n),
+                    thresholds.partition_point(|&threshold| threshold <= sum),
+                    "N={n} sum={sum}"
+                );
+            };
+            for sum in [
+                i64::MIN,
+                i64::MIN + 1,
+                -1_000_000_000_000,
+                -1,
+                0,
+                1,
+                1_000_000_000_000,
+                i64::MAX - 1,
+                i64::MAX,
+            ] {
+                check(sum);
+            }
+            for &threshold in *thresholds {
+                for sum in [threshold - 1, threshold, threshold + 1] {
+                    check(sum);
+                }
+            }
+            for _ in 0..4096 {
+                check(rng.random::<i64>());
+                check(rng.random_range(-200_000..=200_000));
+            }
+        }
+    }
 
     #[test]
     fn fixed_thresholds_match_yo_for_every_supported_bucket_count() {
