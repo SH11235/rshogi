@@ -168,20 +168,21 @@ impl<P: TtPrefetch> TtPrefetch for SearchPrefetch<'_, P> {
     }
 }
 
-/// 合法な通常手の子局面を、枝刈り判定より前にプリフェッチする。
+/// 合法な通常手の子局面の TT を、枝刈り判定より前にプリフェッチし、子局面のキーを返す (PASS は 0)。
+///
+/// EvalHash は枝刈りされずに指す手だけ、`do_move_and_push_prefetched` で同じキーを使ってプリフェッチする。
 #[inline]
-pub(super) fn prefetch_child<P: TtPrefetch>(
-    pos: &Position,
-    mv: Move,
-    tt: &P,
-    eval_hash: &EvalHash,
-) {
-    if !mv.is_pass() {
-        SearchPrefetch { tt, eval_hash }.prefetch(pos.key_after(mv), !pos.side_to_move());
+pub(super) fn prefetch_child<P: TtPrefetch>(pos: &Position, mv: Move, tt: &P) -> u64 {
+    if mv.is_pass() {
+        return 0;
     }
+    let key = pos.key_after(mv);
+    tt.prefetch(key, !pos.side_to_move());
+    key
 }
 
-/// 子局面を prefetch 済みの手を実行する。PASS は prefetch_child の対象外なので、局面更新後に EvalHash を prefetch する。
+/// TT を prefetch 済みの手を実行する。通常手は `prefetch_child` が返したキーで EvalHash を局面更新前に、
+/// PASS は局面更新後のキーで EvalHash をプリフェッチする。
 #[inline]
 pub(super) fn do_move_and_push_prefetched(
     st: &mut SearchState,
@@ -189,7 +190,11 @@ pub(super) fn do_move_and_push_prefetched(
     mv: Move,
     gives_check: bool,
     eval_hash: &EvalHash,
+    child_key: u64,
 ) {
+    if !mv.is_pass() && eval_hash_enabled() {
+        eval_hash.prefetch(child_key);
+    }
     let dirty_piece = pos.do_move(mv, gives_check);
     if mv.is_pass() && eval_hash_enabled() {
         eval_hash.prefetch(pos.key());

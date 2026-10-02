@@ -2854,7 +2854,7 @@ impl SearchWorker {
             }
 
             let is_capture = pos.is_capture(mv);
-            prefetch_child(pos, mv, ctx.tt, ctx.eval_hash);
+            let child_key = prefetch_child(pos, mv, ctx.tt);
             let gives_check = pos.gives_check(mv);
 
             let mut new_depth = depth - 1;
@@ -3046,7 +3046,7 @@ impl SearchWorker {
 
             // 指し手を実行
             st.stack[ply as usize].current_move = mv;
-            do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash);
+            do_move_and_push_prefetched(st, pos, mv, gives_check, ctx.eval_hash, child_key);
             // YaneuraOu方式: ContHistKey/ContinuationHistoryを設定
             // ⚠ in_checkは親ノードの王手状態を使用（gives_checkではない）
             // PASS は to()/moved_piece_after() が未定義のため、null move と同様に扱う
