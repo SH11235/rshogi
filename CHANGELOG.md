@@ -80,6 +80,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **通常探索の子局面の TT / EvalHash prefetch を枝刈り前へ移動**:
+  合法性確認後、王手判定と Step 14 の枝刈りより前に子局面のキーを計算して prefetch する。
+  指し手実行時のキーの再計算と二重 prefetch を避け、枝刈りの条件・順序は維持する。
+  静止探索と PASS の prefetch は従来どおり。
+
 - **指し手実行時の EvalHash prefetch を TT と同じ局面更新前へ移動**:
   子局面のキーを使い、StateInfo のコピーより前に TT と EvalHash を prefetch する。
   EvalHash の有効条件と対象経路は維持し、PASS は従来どおり局面更新後に prefetch する

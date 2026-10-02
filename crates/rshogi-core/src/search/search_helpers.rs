@@ -168,6 +168,36 @@ impl<P: TtPrefetch> TtPrefetch for SearchPrefetch<'_, P> {
     }
 }
 
+/// 合法な通常手の子局面を、枝刈り判定より前にプリフェッチする。
+#[inline]
+pub(super) fn prefetch_child<P: TtPrefetch>(
+    pos: &Position,
+    mv: Move,
+    tt: &P,
+    eval_hash: &EvalHash,
+) {
+    if !mv.is_pass() {
+        SearchPrefetch { tt, eval_hash }.prefetch(pos.key_after(mv), !pos.side_to_move());
+    }
+}
+
+/// プリフェッチ済みの通常手を実行する。PASS の EvalHash は局面更新後に読む。
+#[inline]
+pub(super) fn do_move_and_push_prefetched(
+    st: &mut SearchState,
+    pos: &mut Position,
+    mv: Move,
+    gives_check: bool,
+    eval_hash: &EvalHash,
+) {
+    let dirty_piece = pos.do_move(mv, gives_check);
+    if mv.is_pass() && eval_hash_enabled() {
+        eval_hash.prefetch(pos.key());
+    }
+    st.nodes += 1;
+    st.evaluator.push(dirty_piece);
+}
+
 /// do_move + nodes++ + nnue_push をまとめたラッパー
 ///
 /// YO では Worker::do_move() 内部で nodes++ と nnue push を行う。
