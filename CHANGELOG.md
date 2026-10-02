@@ -12,243 +12,217 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 その PR の merge commit から publish する。`vX.Y.Z` タグは engine 全体の release marker
 専用であり、core 単独 publish のためのタグは打たない。
 
-## Unreleased
+## v1.6.0 — 2026-10-03
+
+v1.5.0 以降の、探索と NNUE 評価の高速化を中心としたリリース。探索結果を変えない変更を
+積み重ね、AVX-512 機の LayerStacks で 1 スレッドの NPS を約 2 割、HalfKP / HalfKA 系の
+多スレッドの NPS を最大 1.7 倍に改善した。探索内での入玉宣言勝ちの判定を加えたため、既定
+ビルドの探索結果は変わる。あわせて、探索でパス権を評価する処理と AVX2 経路の選び方を
+ビルド設定に合わせて整理し、YaneuraOu / BulletOu 形式の進行度で学習した LayerStacks
+モデル、複数プロセスでの NNUE の重みの共有、局面を指定した定跡手の乱択に対応した。
+`rshogi-core` は 0.8.0 になり、ライブラリ利用者向けの変更がある。
+
+詳細は各 PR を参照。
 
 ### 互換性のない変更と移行手順
 
-- **LayerStacks の Q16 係数を stack の生成・reset 時に保持するように変更**:
+- **探索のパス権評価は `search-pass-rules` を指定したビルドだけで有効** (#1118):
+  パス権を扱う探索処理 (静的評価への残りパス権の価値の加算と、null move の代わりに PASS を
+  使う枝刈り) を、既定で有効な否定形 feature `search-no-pass-rules` で外す方式から、肯定形の
+  `search-pass-rules` を指定したときだけ入れる方式に変更した。
+  - 既定ビルドと crates.io の既定構成の探索は変わらない。
+  - `cargo xtask build` の preset edition と、`default-features = false` で
+    `search-no-pass-rules` を指定していなかった構成は、探索のパス権評価が有効から無効に変わる。
+    パス権を評価する探索が必要な場合は `search-pass-rules` を指定すること
+    (xtask では `--features search-pass-rules`)。
+  - 局面側のパス機能 (パス権の設定、PASS の合法性判定と生成、PASS を含む棋譜の再生) と、
+    探索の root で PASS を候補手に含める処理は feature に関係なく残る。
+  - `search-no-pass-rules` は何もしない互換用 feature として残しており、既存の指定はそのまま
+    ビルドできる。
+  - 探索がパス権を評価しないビルドで USI の `PassRights` を有効にすると、その旨を
+    `info string` で表示する。
+- **AVX2 経路はコンパイル時の target feature で自動選択** (#1134): `x86_64` で
+  `target_feature = "avx2"` が有効なら、`simd_avx2` feature を指定しなくても Bitboard の
+  AVX2 経路を使う。AVX2 対応 CPU 向けには `-C target-cpu=native` または
+  `-C target-feature=+avx2` を指定してビルドすること。AVX2 経路を無効にするには feature を
+  外すのではなく `-C target-feature=-avx2` を指定する。`simd_avx2` は何もしない互換用
+  feature として残しており、既存の指定はそのままビルドできる。
+- **tournament / spsa の `--max-moves` は開始局面までの手数を含む総手数で判定** (#1130):
+  これまでは対局内で指した手数だけを数えていたため、手数付きの開始局面集では本番の手数制限より
+  長く対局していた (例: 32 手目からの局面集と `--max-moves 512` で総 543 手まで)。開始局面の
+  SFEN の手数欄と `moves` の手順を含めて数えるので、平手から始まる本番対局 (floodgate など) と
+  同じ値を指定すればよい。「512 − 開始局面までの手数」のように補正した値を渡していた運用は、
+  補正を外すこと。開始局面が既に `--max-moves` 以上の手数なら起動時にエラーになる。
+  JSONL の `ply` と `--adjudicate-draw` の `movenumber` は従来どおり対局内の手数。
+- **EvalHash も既定で Large Pages を使う** (#1134): USI エンジンは、置換表に加えて EvalHash も
+  Large Pages での確保を試みる (新しい USI オプション `EvalHashLargePages`、既定 true)。
+  既定サイズでの Large Pages の使用量は 256 MiB から 512 MiB に増え、置換表を確保し直す間は
+  最大 768 MiB になる。確保できない場合は通常のページを使う。`EvalHashLargePages=false` で
+  従来どおり通常のページに戻せる。ライブラリとツールは従来どおり通常のページが既定。
+- **評価できない NNUE は読み込み時にエラー** (#1126): HalfKP / HalfKA 系のモデルを評価する
+  処理を含まないビルドでも読み込みが成功し、評価の時点で異常終了していた。読み込み時に
+  必要な feature / edition を示すエラーを返すようにした。
+- **`search_only_ab` はエンジンを実行ファイルのパスで指定** (#1113): 計測前に実行ファイルの
+  SHA-256 を計算するため、`--baseline` / `--candidate` に PATH から解決されるコマンド名や
+  Windows の拡張子なしの名前を渡すとエラーになる。開けるファイルのパスを指定すること。
+- **Linux で `Large Pages are used.` を表示しない** (#1110): Linux / Android では、置換表への
+  huge page の要求 (`madvise`) の成否にかかわらず Large Pages 確保として表示していた。
+  要求が通った場合は `Huge-page hint requested; actual page backing is managed by the OS.` と
+  表示する。実際に huge page が使われるかは OS が決めるため。Windows の表示は変わらない。
+  この文字列を解析しているスクリプトは更新すること。
+- **探索結果が変わる変更**: 探索内での入玉宣言勝ちの判定 (#1132) により、既定ビルドの探索の
+  ノード数・指し手が変わる。評価実験では更新前後の結果を同じ条件として混ぜないこと。
+  この節以外の高速化の変更では、探索結果 (ノード数・評価値・指し手・読み筋) は変わらない。
+
+### rshogi-core 0.8.0 / ライブラリ利用者の移行
+
+- **`NNUENetwork` の各 variant は `Arc` を保持** (#1140): 探索開始時に重み・accumulator・
+  Finny cache を型付きの評価器にまとめ、評価ごとの network の取得をなくした。
+  - `NNUENetwork::HalfKP(net)` などを直接構築するコードは `NNUENetwork::HalfKP(Arc::new(net))`
+    に、Dynamic variant の `Box::new(net)` は `Arc::new(net)` に変更すること。
+  - 重みを共有中の `apply_net_deltas` は新しい `NetDeltaError::SharedNetwork` を返す。変更は
+    共有前の net に適用するか、`init_nnue_with_deltas` / `init_nnue_from_bytes_with_deltas` で
+    読み込み直すこと。`NetDeltaError` を網羅的に match しているコードは新しい variant を扱うこと。
+  - `SearchState` の `nnue_stack` / `acc_cache` / `halfkx_cache` / `network_ptr` は非公開の評価器に
+    統合した。直接操作していたコードは `SearchWorker::prepare_search` を使い、単独の評価には
+    `NNUEEvaluator` または `evaluate_dispatch` / `ensure_accumulator_computed` を使うこと。
+- **`LayerStackBucket::l1` を非公開化** (#1147): L1 を融合カーネル用に並べ替えた重みと同期させるため。
+  読み取りは `bucket.l1()`、書き換えは `bucket.edit_l1(|l1| ...)`、構築は
+  `LayerStackBucket::from_layers(l1, l2, output)` を使うこと。
+- **`position::StateInfo::hand_snapshot` の型を `[Hand; 2]` から `Hand` に変更** (#1134):
+  その局面の手番側の持ち駒だけを保存する。`state.hand_snapshot[side.index()]` で手番側を
+  参照していたコードは添字を外すこと。現在局面の任意の色の持ち駒は `Position::hand(color)` で
+  取得できる。過去局面の両者の持ち駒が必要な場合は各局面で別途保存すること。
+- **Q16 係数は stack の生成・reset 時に取得** (#1146):
   `set_layer_stack_progress_kpabs_q16_weights` / `reset_layer_stack_progress_kpabs_q16_weights`
-  を呼んでも、既存の stack は reset まで取得済みの係数を保持する。
-  routing mode と bucket 数は引き続き評価時に読み取るが、係数の取得は生成・reset 時に
-  `progresskpabsq16` が選択されている場合だけ行う。係数の差し替えや Q16 routing への
-  切り替えは探索前に完了し、その後に `NNUEEvaluator::reset(&pos)`、または直接管理している
-  stack の `reset()` / 再生成を行うこと。通常の探索では `SearchWorker::prepare_search` が
-  この初期化を行う。`layerstack-arch` 有効時の `StackEntryLayerStacks` には公開フィールド
-  `progress_q16: [i64; 2]` と `progress_q16_valid: u8` を追加した。構造体リテラルで
-  初期化していた利用者は、それぞれ `[0; 2]` と `0` を指定するか `new()` / `Default` を使うこと。
+  を呼んでも、既存の stack は reset まで取得済みの係数を使う。係数の差し替えや
+  `progresskpabsq16` への切り替えは探索前に済ませ、その後に `NNUEEvaluator::reset(&pos)` か、
+  直接管理している stack の `reset()` / 再生成を行うこと (通常の探索では
+  `SearchWorker::prepare_search` が行う)。`layerstack-arch` 有効時の `StackEntryLayerStacks` に
+  公開フィールド `progress_q16: [i64; 2]` と `progress_q16_valid: u8` を追加した。構造体リテラルで
+  初期化していたコードは `[0; 2]` と `0` を指定するか、`new()` / `Default` を使うこと。
+- **`search::SearchContext` に `entering_king_rule` を追加** (#1132): 探索内の入玉宣言勝ちの判定に
+  使う。構造体リテラルで構築しているコードはこのフィールドを指定すること。
+- **`search::OrderedMovesBuffer` と `search::ORDERED_MOVES_CAPACITY` を削除** (#1122):
+  qsearch が指し手を先にまとめて取り出すためのバッファで、qsearch 自身が唯一の利用者だった。
+  代わりの型はない。`search-stats` の計数名 `qs_moves_generated` は `qs_moves_picked` に変わった。
+- **`TranspositionTable::uses_large_pages()` は Windows の Large Pages 確保だけを表す** (#1110):
+  Linux / Android では false を返す。huge page を要求したかどうかは新しい
+  `huge_page_hint_requested()` で確認できる (`Search` の `tt_uses_large_pages()` /
+  `tt_huge_page_hint_requested()` も同じ)。
+- **LayerStacks 非対応ビルドで LayerStacks モデルを読んだときのエラー種別** (#1126):
+  `InvalidData` から `Unsupported` に変わった。
+- **既定 feature から `search-no-pass-rules` を削除** (#1118): 上記の移行手順を参照。
+- **移行不要の追加**:
+  - 静的な LayerStacks モデルを直接読む `NNUENetwork::load_static_layer_stacks` (#1124)。
+  - `nnue::LsFeatureSpec` に既定実装付きの `feature_indexer(perspective, king_sq)` を追加し、
+    `nnue::pack_bonapiece` を `const fn` にした (#1148)。
+  - 既定では無効の feature: `search-pass-rules` (#1118)、`prepacked-nnue` (#1108)、
+    `allocation-stats` (#1097)、`tt-write-stats` (#1105)。
 
-- **LayerStacks の Finny refresh に伴う公開 API の拡張 (移行不要)**:
-  `nnue::LsFeatureSpec` に既定実装付きの `feature_indexer(perspective, king_sq)` を追加し、
-  `nnue::pack_bonapiece` を `const fn` にした。既存の trait 実装と関数呼び出しはそのまま使える。
+### 探索・NNUE 評価の高速化
 
-- **`LayerStackBucket::l1` を非公開化**: 融合カーネル用の重みコピーを編集後も同期するため、
-  読み取りは `bucket.l1` から `bucket.l1()` に、書き換えは `bucket.edit_l1(|l1| ...)` に変更すること。
-  構造体リテラルでの構築は `LayerStackBucket::from_layers(l1, l2, output)` に置き換える。
+数値は Zen 5 (Ryzen 9 9950X3D2、AVX-512 VNNI 対応)・Windows での各 PR の実測。
 
-- **探索開始時に NNUE の重み・accumulator・Finny cache を型付き評価器へ束ねる**:
-  評価ごとのグローバル network の読み取りロック・`Arc` clone と、net / stack の
-  アーキテクチャ照合を探索経路から除去し、LayerStacks の生ポインタも廃止した。
-  次の探索では再読み込みした重みと新しい cache を使用する。
-  `NNUENetwork` の各 variant の値は `Arc<各Network>` に変更したため、直接構築する
-  利用者は `NNUENetwork::HalfKP(net)` などを `NNUENetwork::HalfKP(Arc::new(net))` に変更すること。
-  Dynamic variant の `Box::new(net)` も `Arc::new(net)` に置き換える。
-  重みを共有中の `apply_net_deltas` は `NetDeltaError::SharedNetwork` を返すので、
-  変更は共有前の net に適用するか `init_nnue_with_deltas` / `init_nnue_from_bytes_with_deltas`
-  で再読み込みすること。`SearchState` の `nnue_stack` / `acc_cache` / `halfkx_cache` /
-  `network_ptr` は非公開の評価器へ統合した。直接操作していた利用者は
-  `SearchWorker::prepare_search` を使い、単独の評価には既存の `NNUEEvaluator` または
-  `evaluate_dispatch` / `ensure_accumulator_computed` を使うこと。
+- **LayerStacks** (#1134): 探索結果を変えない 10 の変更で、1 スレッドの探索区間の NPS が
+  +19.6〜22.9% になった。主な効果は、AVX-512 で L1 (1536→16) の積和が 1 本の依存チェーンに
+  なっていたのを複数に分けたこと (単独で +9%)。ほかに、指し手ごとの冗長な再検査の省略、
+  駒の配置更新と王手情報の更新の効率化、遠方駒の利きテーブルのコンパイル時生成など。
+  YaneuraOu (`USE_LAZY_EVALUATE` 有効) との movetime NPS の比は、1 スレッドで 0.74 → 0.90、
+  16 スレッドで 0.76 → 0.91 になった。
+- **LayerStacks の追加改善**: FT 出力の変換と L1 の積和を 1 つの VNNI カーネルに融合した (#1147)。
+  ほかに、Finny refresh の固定費 (#1148)、pin と王手升の計算 (#1145)、AVX-512 での 1 手差分更新の
+  コピー (#1162)、置換表と EvalHash の prefetch の位置 (#1164, #1166, #1170)、メモリの書き込みと
+  読み出しの幅の不一致 (#1159, #1160, #1161)、指し手生成 (#1153)、1 手詰め判定 (#1156)、
+  停止判定 (#1150) の固定費を減らした。
+- **HalfKP / HalfKA 系** (#1136, #1137, #1138, #1140):
+  - 探索で Finny cache を使い、玉が動いたときなどの accumulator の作り直しを軽くした (#1138)。
+    1 スレッドの NPS は HalfKP 256 で +11%、HalfKA_hm 1024 で +39%。固定 edition
+    (`edition-halfkp-crelu`、`edition-halfkx` など) が対象で、`edition-universal` には適用されない。
+  - affine 層に AVX-512 経路を追加した (#1136)。HalfKA_hm 1024 で +14%。
+  - 特徴量の列挙の固定費を減らした (#1137)。HalfKP で +4〜5%。
+  - 評価ごとに共有の network を取得していたのをやめた (#1140)。16 スレッドの NPS は
+    HalfKP 256 で 1.61 倍、HalfKA_hm 1024 で 1.69 倍。
+- **Q16 進行度による評価器の選択** (#1146): `LS_BUCKET_MODE=progresskpabsq16` の係数の読み出しを
+  ロックなしにし、進行度を駒の差分から増分計算する。NPS +9.5%。
+- **メモリ確保と並べ替えの削減** (#1098, #1100, #1102, #1104, #1122): 読み筋の保存や root の
+  候補手の並べ替えでの、毎回のメモリ確保や不要な並べ替えを減らした。qsearch は指し手を
+  1 手ずつ取り出す方式にした。
 
-- **ライブラリ利用者の移行: `position::StateInfo::hand_snapshot` の型と意味を変更**:
-  公開フィールドの型を `[Hand; 2]` から `Hand` に変更し、その局面の手番側の持ち駒だけを保存する。
-  `Position::state()` / `state_mut()` 経由での参照・更新も対象となる。
-  `state.hand_snapshot[side.index()]` でその局面の手番側を参照していたコードは、添字を外すこと。
-  フィールドを初期化・更新するコードも、その局面の手番側の `Hand` を渡す形に変更する。
-  現在局面の任意の色の持ち駒は `Position::hand(color)` で取得できる。
-  過去局面の両者の持ち駒が必要な場合は、各局面で別途保存すること。
+### NNUE / 評価処理
 
-- **探索のパス権処理を opt-in の `search-pass-rules` に変更**: 既定で有効な否定形 feature
-  `search-no-pass-rules` をやめ、探索でパス権を評価する build だけ `search-pass-rules` を明示する形にした。
-  既定 build の探索は変わらない。`--no-default-features` で `search-no-pass-rules` を指定していなかった
-  構成（`cargo xtask build` の preset edition を含む）は、探索のパス権評価が有効から無効に変わる。
-  パス権つきの探索が必要な場合は `search-pass-rules` を指定すること。`search-no-pass-rules` は
-  何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
-
-- **Bitboard256 の AVX2 経路を `target_feature` に応じた自動選択に変更**: `x86_64` で
-  `target_feature = "avx2"` が有効なら、`simd_avx2` の指定なしで AVX2 経路を使用する。
-  AVX2 対応 CPU 向けの build では `-C target-cpu=native` または `-C target-feature=+avx2` を指定すること。
-  AVX2 経路を無効にする場合は feature の指定を外すだけではなく、`-C target-feature=-avx2` を指定する。
-  `simd_avx2` は何もしない互換用 feature として残しており、既存の指定はそのまま build できる。
-
-- **tournament / spsa の `--max-moves` を開始局面までの手数を含む総手数で判定**: これまでは開始局面から
-  対局内で指した手数だけを数えていたため、手数付きの開始局面集では本番の手数制限より長く対局していた
-  (例: 32 手目からの局面集と `--max-moves 512` で総 543 手まで)。開始局面の SFEN の手数欄と `moves` の
-  手順を含めて数えるように変え、平手から始まる本番対局 (floodgate 等) の手数制限と同じ値を指定すれば
-  よくなった。開始局面が既に `--max-moves` 以上の手数なら起動時にエラーになる。「512 − 開始局面までの
-  手数」のように補正した値を渡していた運用は、補正を外すこと。JSONL の `ply` と `--adjudicate-draw` の
-  `movenumber` は従来どおり対局内の手数。
+- **YaneuraOu / BulletOu 形式の進行度による評価器の選択** (#1096): YaneuraOu / BulletOu の
+  progress で学習した LayerStacks モデルを、学習時と同じ整数の閾値で評価器に振り分ける
+  `LS_BUCKET_MODE=progresskpabsq16` を追加した。tatara で学習したモデル向けの
+  `progresskpabs` はそのまま使える。教師データ作成などの native ツールはこの方式に
+  対応しておらず、指定すると読み込み時にエラーになる。
+- **展開済みの重みを複数プロセスで共有** (#1108, #1119): `prepack_nnue` で LayerStacks モデルを
+  展開済みの形式に変換し、`prepacked-nnue` feature 付きのエンジンの `EvalFile` に指定できる。
+  Windows では読み取り専用で共有するため、同じモデルを複数プロセスで読むと私有メモリが減る
+  (4 プロセスで約 1.99 GB → 約 1.09 GB、Windows 11 での実測)。稼働中でもファイルの rename と
+  削除による差し替えができ、次の読み込みから新しいモデルが使われる。Windows 以外では
+  各プロセスが読み込む。展開済みのファイルは元の `.bin` より大きい。
+- **診断ツールで LayerStacks モデルを読めない不具合を修正** (#1124): `nnue_saturation`、
+  `eval_sfens`、`verify_nnue_accumulator` と、`bench_nnue_eval` の LayerStacks 専用モードが、
+  ビルド時の feature の組み合わせによって LayerStacks モデルを読めずにエラーになっていた。
+  `bench_nnue_eval` の LayerStacks 専用モードの arch 表示は、`LayerStacks-1536-16-32-CReLU` の
+  ようにモデルの構成を含む形になった。
 
 ### USI エンジン / 探索
 
-- **通常探索の子局面の TT / EvalHash prefetch を枝刈り前へ移動**:
-  合法性確認後、王手判定と Step 14 の枝刈りより前に子局面のキーを計算して prefetch する。
-  指し手実行時のキーの再計算と二重 prefetch を避け、枝刈りの条件・順序は維持する。
-  静止探索・root・ProbCut・PASS の prefetch は従来どおり (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。
-  Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only (5 局面 × 5 秒 × ABBA) で、同一 binary の新旧切替は NPS +1.16%
-  (5 局面すべて正、instructions/node +1.1%)。最終版と main の比較は関数配置 3 通りを 2 組で +0.29 / +1.65 / +0.01% と
-  −0.13 / +1.55 / −0.31% (平均 +0.51%、得は align=6 の配置に偏る)。npsbench は 1T ±0、16T +0.4%。
+- **探索内で入玉宣言勝ちを判定** (#1132): これまでは root 局面でしか宣言勝ちを判定しておらず、
+  数手先で宣言できる局面を勝ちとして読めなかった。入玉局面では宣言の条件をそろえられず、
+  最大手数の引分になる例があった。YaneuraOu と同じく、探索中のノードでも宣言勝ちを判定する。
+  `EnteringKingRule` が `NoEnteringKing` の場合は従来どおり。
+- **局面を指定して定跡手を乱択する `BookExploreFile`** (#1133): ファイルに局面と定跡手を
+  列挙すると、その局面だけ、列挙した手のうち合法で定跡にある手から等確率で選ぶ。評価値や
+  採択回数による絞り込みは、その局面では適用しない。既定は空 (無効)。
+- **千日手判定の修正** (#1121): 手番側が持ち駒を持つ局面を SFEN で与えて開始し、その局面に
+  戻ったとき、通常の千日手ではなく優等局面と判定していた。このためエンジン自身の千日手の
+  検出が 1 周期 (4 手) 遅れていた。平手や持ち駒のない開始局面には影響しない。
+- **置換表のメモリページ表示の更新** (#1114): `USI_Hash` の変更などで置換表を確保し直し、
+  Large Pages / huge page の利用状況が変わったときにも表示を更新する。通常のページに
+  戻った場合は `The TT now uses regular pages.` を表示する。
+- **mimalloc を使うビルド** (#1112): rshogi-usi に、メモリ確保に mimalloc を使う
+  `mimalloc` feature を追加した。既定では無効。
+- **`use-lazy-evaluate` をビルド時に選択可能** (#1127, #1128): 置換表にある評価値を
+  PV 以外のノードで再利用する (YaneuraOu の `USE_LAZY_EVALUATE` 相当) エンジンを、
+  `--features use-lazy-evaluate` でビルドできる。置換表の衝突によって探索木が変わりうるため、
+  計測・実験用とする。既定では無効。再利用するノードで NNUE の差分計算をしないように
+  改め、多スレッドでの速度低下を解消した。
+- **1 手詰め用の表の修正** (#1106): `mate` の公開表 `NEXT_SQUARE` が、縦・横・斜めのどれにも
+  並ばない 2 升にも値を返していた。現在の探索はこの表を使っていない。
 
-- **指し手実行時の EvalHash prefetch を TT と同じ局面更新前へ移動**:
-  子局面のキーを使い、StateInfo のコピーより前に TT と EvalHash を prefetch する。
-  EvalHash の有効条件と対象経路は維持し、PASS は従来どおり局面更新後に prefetch する
-  (探索結果は固定 depth 1〜18 × 5 局面で一致)。Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only
-  (5 局面 × 5 秒 × ABBA) で、TT prefetch 前倒しとの比較は関数配置 3 通りで +1.48% / +0.80% / +1.18% (15 組すべて正)。
+### ビルド
 
-- **指し手実行時の TT prefetch を局面更新前へ移動**:
-  手番・移動・成り・駒取り・持ち駒の差分から子局面のキーを事前計算し、
-  StateInfo のコピーや駒の移動より前に TT を prefetch する。局面更新の処理順序は維持する
-  (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only
-  (5 局面 × 5 秒 × ABBA) で、同一 binary の新旧切替は NPS +0.93% (5 局面すべて正、instructions/node +0.35%)、
-  最終版と main の比較は関数配置 3 通りで −0.06% / +0.27% / +0.93%。
+- **xtask で追加 feature を指定** (#1120): `cargo xtask build --edition <preset> --features <名前>`
+  で、`mimalloc`、`prepacked-nnue`、`search-pass-rules`、`use-lazy-evaluate`、診断用の
+  feature を preset に追加してビルドできる。出力名は
+  `rshogi-usi-<edition>+<feature>` の形になる。追加しない場合の出力名は従来どおり。
+- **行情報付きの本番相当プロファイル** (#1103): 本番と同じ最適化設定でソースの行情報を残す
+  `production-profiling` プロファイルを追加した。性能解析用で、速度比較には通常の
+  `production` を使うこと。
+- **依存 feature の整理** (#1125): CSA クライアント / サーバー系の crate が、使わない NNUE の
+  実装を既定 feature 経由で取り込んでいた。このため、特定の edition の rshogi-usi と
+  CSA クライアントを 1 回の cargo 呼び出しでビルドするとエラーになっていた。
+  あわせて未使用の依存を削除した。
 
-- **LayerStacks の 1 手差分更新を AVX-512 でも 1 パスで処理**:
-  source→dest 融合の差分更新は AVX2 経路だけにあり、AVX-512BW の build では source の 3KB コピー (memcpy) の後に
-  in-place で更新する 2 パスに落ちていた。AVX-512BW でも source と重み行を読んで結果を直接書く。値は変わらない
-  (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only
-  (5 局面 × 5 秒 × ABBA) で、同一 binary の新旧切替は NPS +0.37% (instructions/node −1.2%)、
-  最終版と main の比較は関数配置 3 通りで +0.40% / +0.59% / −0.70%。
+### 計測・診断ツール
 
-- **静的評価コンテキストのフラグ返却時の store/load 幅不一致を回避**:
-  `EvalContext` の `improving` / `opponent_worsening` を 1 つの `u32` にまとめ、
-  個別の bool store をまたぐ load による store-to-load forwarding の失敗を解消する。
-  評価値と各フラグの判定条件は変更しない (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。
-  Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only (5 局面 × 5 秒 × ABBA) で、
-  関数配置 3 通りで NPS +1.50% / +0.05% / +0.45% (instructions/node は不変)。
+- **`search_only_ab` のレポートに実行ファイルの SHA-256 を記録** (#1113): JSON レポートの
+  `binaries` に、baseline / candidate の SHA-256 とサイズを記録する。
+- **探索中のメモリ確保の計数** (#1097): `allocation-stats` feature 付きのビルドで、探索の
+  段階ごとのメモリ確保回数を `info string allocation_events` として表示する。
+- **置換表への書き込み結果の計数** (#1105): `tt-write-stats` feature 付きのビルドで、
+  置換表への書き込みがどう扱われたかを 9 種類に分けて `info string tt_write_events` として
+  表示する。
+- **tournament の評価値の記録** (#1099): USI の `info` 行を項目ごとに更新すると、深さと
+  評価値・読み筋が別の反復のものになることがあった。深さ・評価値・読み筋が 1 行に揃った
+  主 PV を `eval.last_exact_primary` として別に記録する。
 
-- **TT probe 後の複数 store をまたぐ読み直しを除去**:
-  `TTContext` に `ProbeResult` / `TTData` 全体をコピーせず、書き込み先と後続処理で使う
-  値だけを保持する。TT の読み書きの意味・順序を維持し、probe を inline 化せずに解消した。
-  従来は probe が field ごとに書いた戻り値を、呼び出し側が 32 byte まとめて読み直しており、
-  store-to-load forwarding が効かなかった。探索結果は main と固定 depth 1〜18 × 5 局面で一致。
-  Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only (5 局面 × 5 秒 × ABBA) で、
-  関数配置 3 通りで NPS +0.59% / +0.54% / +0.78%。
+### 依存ライブラリ
 
-- **LayerStacks の 1 手差分更新で stack 引数の store/load 幅不一致を回避**:
-  内部関数の引数順を変更し、Windows x64 で視点と玉位置をレジスタ渡しにする。
-  従来は玉位置を stack に 1 byte で書き、呼ばれた側が 4 byte で読んでいたため store-to-load forwarding が効かなかった。
-  accumulator の計算内容は変更しない (探索結果は main と固定 depth 1〜18 × 5 局面で一致)。
-  Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only (5 局面 × 5 秒 × ABBA) で、
-  関数配置 3 通りで NPS +0.11% / +0.47% / +0.75% (instructions/node は不変)。
-
-- **1 手詰め判定の王手候補表をコンパイル時に構築し、参照を inline 化**:
-  王手候補表 (`CHECK_CAND_BB`) をコンパイル時に構築し、参照を inline にすることで、
-  `LazyLock` の検査・call・戻り値の受け渡しを除去した。
-  探索結果は main と固定 depth 1〜18 × 5 局面で一致。
-  Zen 5 (9950X3D2)・LayerStacks・1T の ETW search-only (5 局面 × 5 秒 × ABBA) で、
-  同一 binary の新旧切替は NPS +0.69%、最終版と main の比較は関数配置 3 通りで
-  −0.10% / +0.90% / +0.71%。
-
-- **指し手生成の固定費を削減**:
-  歩の移動を bitboard の一括シフトで生成し、駒種が確定している移動では盤面参照を省く。
-  生成順序と32bitの駒情報を維持し、探索結果は変わらない。
-
-- **探索 helper の呼び出し固定費を削減**:
-  停止判定 `check_abort` を inline の fast path と cold の slow path に分け、小さい helper を
-  inline にし（`try_futility_pruning` も `#[inline(always)]` に変更）、`pawn_history_index` の取得を
-  指し手ループの前に移した。計測した Windows target では shrink-wrap されず、従来は fast path でも
-  callee-saved レジスタの退避を払っていた。
-  探索結果は不変 (main `fd1387fe` と固定 depth 1〜18 × 5 局面で一致)。同 main 比の
-  ETW search-only (LayerStacks qat1200、5 局面 × 5 秒 × ABBA) では、既定配置で NPS +1.35%
-  (cycles/node −1.3%、instructions/node −1.6%、branches/node −19)、`-align-all-functions=6` で
-  NPS +1.75% (cycles/node −1.7%)、`-align-all-functions=5` で +0.83% (−0.8%) を実測した。
-
-- **LayerStacks の `progresskpabsq16` routing を高速化**:
-  探索中の Q16 係数読み出しをロックなしにし、静的 LayerStacks では視点別の部分和を
-  駒の差分から増分計算するようにした。Q16 の全走査と bit 一致し、固定 depth 1〜18 × 5 局面でも
-  旧 Q16 実装と探索結果が一致した。`LS_BUCKET_MODE=progresskpabsq16` 同士の同じ探索木で、
-  main `9de40f85` 比 NPS +9.5%、cycles/node −8.8% を実測した。
-  既定の f32 routing (`progresskpabs`) は変更しない。
-
-- **LayerStacks の Finny refresh の固定費を削減**:
-  差分 index を最終リストの領域へ直接書き、HalfKA_hm_merged の half-mirror を駒ごとの分岐がない
-  表引きに変更した。PSQT を使わない refresh 経路では cache entry と accumulator へ同時に書き、
-  L1 = 1536 で 3 KiB のコピーをなくした。探索結果は不変 (base `9de40f85` と固定 depth 1〜18 × 5 局面で一致)。
-  同 base 比の ETW search-only 計測で NPS +2.03% (既定の関数配置、cycles/node −2.0%)、
-  `-align-all-functions=6` では +0.36%。同一 binary 内の切替による screening では +1.44%
-  (各局面 +0.8〜2.0%)。
-  HalfKX も共有する `finny.rs` の差分 index 直接書き込みが適用され、差分の内容・順序は変わらない。
-
-- **LayerStacks 1536×16 の FT 出力変換と L1 を VNNI カーネルに融合**:
-  AVX-512 VNNI build の静的 LayerStacks で中間バッファを介さず計算する。探索結果は不変
-  （固定 depth 1〜18 × 5 局面で nodes / score / PV / bestmove が main `9de40f85` と一致）。
-  同 base 比の ETW search-only（5 局面 × 5 秒 × ABBA）は、既定配置で NPS +3.93%
-  （cycles/node −3.4%）、`-align-all-functions=6` で +4.03%（−3.4%）、`=5` で +1.39%（−0.8%）。
-  詳細は [計測・設計記録](docs/performance/ls-l1-kernels.md) を参照。
-
-- **pin と王手升を `do_move` の末尾で両色まとめて計算する**:
-  色ごとの差分判定と out-of-line 呼び出しをやめ、pin 計算で使う `between_bb` を表参照もループも
-  使わない算術で求める。null move と PASS は親の pin 情報を引き継ぐ。
-  探索結果は変わらず、固定 depth 1〜18 × 5 局面で base (`9de40f85`) との一致を確認した。
-  ETW search-only 計測で base 比の NPS は既定配置で +3.98%、`-align-all-functions=6` で +3.05%、
-  `-align-all-functions=5` で +0.94% 改善した。
-
-- **NNUE のロードと探索の互換性、および連続探索の準備コストを修正**:
-  固定 HalfKX edition でも従来ロードできた他の FT を引き続き探索できるようにし、
-  ロード時と探索開始時の対応判定を統一した。同じ評価関数での連続探索では
-  accumulator と Finny cache の領域を再利用し、評価関数を差し替えた場合は再構築する。
-
-- **非 LayerStacks の HalfKX 5 系統 (HalfKP / HalfKA / HalfKA_hm) の探索で Finny cache (AccumulatorCaches) を使う**:
-  これまで探索の評価経路は LayerStacks にだけ Finny cache を渡しており、HalfKX は玉移動時と祖先が無いときに
-  bias から全駒を加算し直していた。worker ごとに cache を持ち、cache entry の駒リストと現局面の駒リストを
-  位置ごとに SIMD 比較して変わった駒だけを加減算し、tile ごとに cache と accumulator の両方へ書く
-  (差分抽出は LayerStacks と共通化)。評価値・探索結果 (ノード数) は変わらない。対象は const generics 版の
-  HalfKX edition (`edition-halfkp-crelu`、`edition-halfkx` など) で、`edition-universal` の `DynamicHalfKx` 経路には適用されない。
-
-- **非 LayerStacks の HalfKX 5 系統 (HalfKP / HalfKA / HalfKA_hm) で affine 層に AVX-512 BW / VNNI 経路を追加**:
-  これまで AVX-512 機でも AVX2 経路 (出力レジスタごとに積和を直列に累積) を使っていた。出力 8 / 16 / 32 の層は
-  積和を複数の独立なアキュムレータに分割する (出力 8 は 2 入力 chunk を 1 本の zmm で処理する)。
-  評価値・探索結果 (ノード数) は変わらず、既存モデルをそのまま利用できる。最終出力層は従来の経路を使う。
-
-- **HalfKX (HalfKP / HalfKA / HalfKA_hm) の特徴量 index 収集で、リストの長さを register に保持する**:
-  アクティブ特徴量・差分特徴量の列挙で長さをローカル変数で数え、最後に 1 回だけ書く。長さの読み書きが
-  駒ごとの store-to-load forwarding の連鎖になっていたのを解消する。特徴量の順序・評価値・探索結果 (ノード数) は変わらない。
-
-- **BookExploreFile**: 指定局面で、ファイルに列挙した合法な定跡手から評価値や採択回数によらず等確率で選ぶ USI オプションを追加（既定は無効）。
-
-- **探索内で入玉宣言勝ちを判定するように (YaneuraOu 準拠)**: これまでは root 局面でしか宣言勝ちを
-  判定しておらず、数手先で宣言できる局面を勝ちとして読めなかった。1 手詰め判定の直後に、非 root の
-  置換表に手が無いノードと PV ノードで宣言勝ちを判定し、成立すれば 1 手勝ちとして返す (置換表には書かない)。
-  `EnteringKingRule` が `NoEnteringKing` の場合は従来どおり。既定 build の探索結果 (ノード数) が変わる。
-- **`use-lazy-evaluate` を rshogi-usi の opt-in feature として選択可能に**:
-  `cargo xtask build --edition <preset> --features use-lazy-evaluate` で、TT hit 時の非 PV ノードで
-  TT の eval を再利用する (YaneuraOu の `USE_LAZY_EVALUATE` 相当) engine を build できる。
-  置換表の衝突時に探索木が変わりうるため計測・実験用。既定 build の挙動は変わらない。
-- **`use-lazy-evaluate` の TT eval 再利用ノードで NNUE アキュムレータを更新しないように**:
-  ノードごとの network ロック取得をなくした。この feature を有効にした build 同士では探索結果 (ノード数) は変わらない。
-
-- **AVX-512 の affine 変換で出力が少ない層の積和を複数アキュムレータに分割**: LayerStacks L1 (1536→16) のように
-  出力レジスタが 1〜3 本になる層で、入力 chunk ごとの積和を独立した複数のチェーンに分けて最後に合算する。
-  出力は bit 一致し、探索結果 (ノード数) は変わらない。
-
-- **通常探索と root の指し手ループで `pseudo_legal` の再検査を省略**:
-  `MovePicker::next_move` が返す手の pseudo-legal 契約に依存し、`is_legal` だけを検査する。
-  探索結果 (ノード数) は変わらない。
-
-- **駒の配置更新の 128bit 分岐なし化**: 配置・除去時の Bitboard 更新を、128bit 幅の XOR と
-  駒種別マスクで行うようにした。探索結果 (ノード数) は変わらない。
-
-- **王手情報の更新で遠方駒の step 利きと飛車の利きを再利用**:
-  ピン候補の絞り込みに占有非依存の利きを使い、香の王手升を飛車の利きから求める。探索結果 (ノード数) は変わらない。
-
-- **EvalHashLargePages**: EvalHash の Large Pages 確保を要求する USI オプションを追加（既定 true）。
-  USI エンジンでは既定で TT に加えて EvalHash も Large Pages で確保を試み、権限や容量が足りない場合は
-  通常ページへフォールバックする。既定サイズの Large Pages 使用量は定常時 256 MiB から 512 MiB に増え、
-  TT の取り直し時は瞬間最大 768 MiB となる。`EvalHashLargePages=false` で EvalHash を通常ページに戻せる。
-  ライブラリとツールの EvalHash は従来どおり通常ページが既定。
-
-- **LayerStacks の Finny 差分収集を SIMD 化**: 駒リストの差分をビットマスクで抽出し、
-  特徴量インデックスを一括生成する。AVX-512BW (VL なしを含む) / AVX2 に対応し、
-  その他の構成ではスカラー処理を使う。探索結果 (ノード数) は変わらない。
-
-- **利き判定の占有 Bitboard の受け渡しと単色判定を効率化**:
-  占有の上下半分を汎用レジスタで渡し、片方の色だけが必要な詰み判定・合法性判定では単色版を使う。
-  探索結果 (ノード数) は変わらない。
-
-- **遠方駒の利きテーブルをコンパイル時に生成**: 実行時の初期化と参照時の初期化確認を不要にし、
-  32 バイト以上のアラインメントをコンパイル時に保証する。探索結果 (ノード数) は変わらない。
-
-- **手駒の BonaPiece 生成をテーブル参照に変更**: 駒種ごとの分岐を基点テーブルの参照に置き換え、
-  先手・後手視点のペアをまとめて計算する。探索結果 (ノード数) は変わらない。
+- `windows-sys` を 0.61.2 に更新した (#1115)。
 
 ## v1.5.0 — 2026-09-20
 
