@@ -6,6 +6,24 @@ use crate::position::SFEN_HIRATE;
 use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME, RandomPlayout};
 
 #[test]
+fn destination_word_loops_preserve_square_order() {
+    let compare = |targets: Bitboard| {
+        let mut actual = Vec::new();
+        for_each_destination(targets, |sq| actual.push(sq));
+        assert_eq!(actual, targets.iter().collect::<Vec<_>>());
+    };
+    for targets in [Bitboard::EMPTY, Bitboard::ALL] {
+        compare(targets);
+    }
+    // 同じ語・語境界・片方の語だけの配置を全升で確認する。
+    for first in Square::all() {
+        for second in Square::all() {
+            compare(Bitboard::from_square(first) | Bitboard::from_square(second));
+        }
+    }
+}
+
+#[test]
 fn pawn_shift_matches_effect_on_every_square() {
     for us in [Color::Black, Color::White] {
         for from in Square::all() {

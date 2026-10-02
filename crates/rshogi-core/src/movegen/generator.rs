@@ -72,6 +72,24 @@ fn add_move(buffer: &mut ExtMoveBuffer, mv: Move) {
     buffer.push_move(mv);
 }
 
+/// 移動先を p0 の LSB 順、続いて p1 の LSB 順で列挙する。
+#[inline(always)]
+fn for_each_destination(targets: Bitboard, mut emit: impl FnMut(Square)) {
+    let mut p0 = targets.p0();
+    while p0 != 0 {
+        let to = Square::from_u8(p0.trailing_zeros() as u8).expect("p0 の升は盤内");
+        p0 &= p0 - 1;
+        emit(to);
+    }
+    // 有効 bit に制限し、升変換の範囲を最適化時にも明示する。
+    let mut p1 = targets.p1() & Bitboard::ALL.p1();
+    while p1 != 0 {
+        let to = Square::from_u8(63 + p1.trailing_zeros() as u8).expect("p1 の升は盤内");
+        p1 &= p1 - 1;
+        emit(to);
+    }
+}
+
 /// 成り生成モード
 #[derive(Clone, Copy)]
 enum PromotionMode {
@@ -163,27 +181,27 @@ fn generate_br_moves(
 
         if from_in_promo {
             // 移動元が敵陣なら全ての移動先で成れる (YO: canPromote(Us, from) 分岐)
-            for to in attacks.iter() {
+            for_each_destination(attacks, |to| {
                 add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                 if include_non_promotions {
                     add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
                 }
-            }
+            });
         } else {
             // 移動元が非敵陣: まず敵陣への移動(成り)、次に非敵陣への移動(不成り)
             // (YO: GPM_BR の target2/target 分割に準拠)
             let promo_targets = attacks & promo_ranks;
             let non_promo_targets = attacks & !promo_ranks;
 
-            for to in promo_targets.iter() {
+            for_each_destination(promo_targets, |to| {
                 add_move(buffer, Move::new_move_with_piece(from, to, true, promoted_pc));
                 if include_non_promotions {
                     add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
                 }
-            }
-            for to in non_promo_targets.iter() {
+            });
+            for_each_destination(non_promo_targets, |to| {
                 add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
-            }
+            });
         }
     }
 }
@@ -224,9 +242,9 @@ fn generate_gold_major_moves<const KING: bool>(
         } else {
             (king_effect(from), Piece::make(us, PieceType::King))
         };
-        for to in (attacks & target).iter() {
+        for_each_destination(attacks & target, |to| {
             add_move(buffer, Move::new_move_with_piece(from, to, false, pc));
-        }
+        });
     }
 }
 
