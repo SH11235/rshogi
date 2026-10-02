@@ -59,7 +59,7 @@ NNUE 学習には [bullet-shogi](https://github.com/SH11235/bullet-shogi/tree/sh
 
 ```toml
 [dependencies]
-rshogi-core = "0.7"
+rshogi-core = "0.8"
 ```
 
 ## ビルド
