@@ -550,11 +550,19 @@ impl Position {
             board_key ^= zobrist_psq(Piece::new(us, pt), to);
             hand_key = hand_key.wrapping_sub(zobrist_hand(us, pt));
         } else {
-            let pc = self.piece_on(m.from());
-            let moved_after_pc = if m.is_promote() {
-                pc.promote().unwrap()
+            let (pc, moved_after_pc) = if m.has_piece_info() {
+                let pc = m.moved_piece_before();
+                debug_assert_eq!(pc, self.piece_on(m.from()));
+                (pc, m.moved_piece_after())
             } else {
-                pc
+                // 駒情報なしの Move を受け取る経路では、従来どおり盤から補う。
+                let pc = self.piece_on(m.from());
+                let moved_after_pc = if m.is_promote() {
+                    pc.promote().unwrap()
+                } else {
+                    pc
+                };
+                (pc, moved_after_pc)
             };
             board_key ^= zobrist_psq(pc, m.from()) ^ zobrist_psq(moved_after_pc, to);
 
@@ -2035,7 +2043,15 @@ mod tests {
         }
 
         let before = RestoredState::of(pos);
+        assert!(mv.has_piece_info());
+        if !mv.is_drop() {
+            assert_eq!(mv.moved_piece_before(), pos.piece_on(mv.from()), "move={mv:?}");
+        }
+        // TT と同じ16bitからの復元と、駒情報なしのフォールバックも全手で検証する。
+        let move16 = Move::from_u16(mv.raw());
+        assert_eq!(pos.to_move(move16), Some(mv));
         let next_key = pos.key_after(mv);
+        assert_eq!(pos.key_after(move16), next_key, "move={mv:?}");
         assert_eq!(RestoredState::of(pos), before);
         let us = pos.side_to_move();
         let gives_check = pos.gives_check(mv);

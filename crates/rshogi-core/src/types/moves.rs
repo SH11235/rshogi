@@ -138,6 +138,19 @@ impl Move {
         unsafe { Piece::from_raw((self.0 >> Self::PIECE_SHIFT) as u8) }
     }
 
+    /// 駒情報付きの通常手から移動前の駒を復元する。
+    /// 成駒を動かすだけの手はそのまま、今回成る手だけ生駒に戻す。
+    #[inline]
+    pub(crate) const fn moved_piece_before(self) -> Piece {
+        debug_assert!(self.is_normal() && self.has_piece_info());
+        let pc = self.moved_piece_after();
+        if self.is_promote() {
+            pc.unpromote()
+        } else {
+            pc
+        }
+    }
+
     /// 駒情報が設定されているかどうか
     #[inline]
     pub const fn has_piece_info(self) -> bool {
