@@ -345,12 +345,16 @@ impl SearchEvaluator {
     ))]
     #[inline]
     pub(crate) fn prefetch_ft_rows(&self, pos: &Position, dirty: &DirtyPiece) {
-        const CACHE_LINES: usize = 8;
+        let cache_lines =
+            super::FT_ROW_PREFETCH_LINES.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        if cache_lines == 0 {
+            return;
+        }
         if dirty.king_moved.iter().any(|&moved| moved) || dirty.dirty_num == 0 {
             return;
         }
         if let Self::LayerStacks { net, .. } = self {
-            net.prefetch_ft_rows(pos, dirty, CACHE_LINES);
+            net.prefetch_ft_rows(pos, dirty, cache_lines);
         }
     }
 

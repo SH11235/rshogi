@@ -249,3 +249,7 @@ mod registry_tests {
 }
 
 pub(crate) mod search_evaluator;
+
+/// FT 行プリフェッチの計測用 cache line 数。0 は無効、行長を超える指定は行末まで。
+pub static FT_ROW_PREFETCH_LINES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(8);

@@ -929,6 +929,16 @@ impl UsiEngine {
                 self.use_eval_hash = v;
                 set_eval_hash_enabled(v);
             }
+            // 計測用の隠し option。usi の option 一覧には公開しない。
+            "FtRowPrefetch" => match value.parse::<u32>() {
+                Ok(lines) => {
+                    rshogi_core::nnue::FT_ROW_PREFETCH_LINES.store(lines, Ordering::Relaxed);
+                    eprintln!("info string FtRowPrefetch: {lines}");
+                }
+                Err(_) => {
+                    eprintln!("info string Warning: invalid FtRowPrefetch value '{value}'");
+                }
+            },
             "MaxMovesToDraw" => {
                 if let Ok(v) = value.parse::<i32>()
                     && let Some(search) = self.search.as_mut()
@@ -2013,6 +2023,38 @@ mod tests {
         assert!(
             page_status_message(HugePageHint, Regular).is_some_and(|m| m.contains("regular pages"))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn ft_row_prefetch_option_accepts_line_counts_and_rejects_invalid_values() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                use rshogi_core::nnue::FT_ROW_PREFETCH_LINES;
+
+                let mut engine = UsiEngine::new();
+                let original = FT_ROW_PREFETCH_LINES.load(Ordering::Relaxed);
+                assert_eq!(original, 8);
+                for lines in [0, 2, 8, 48, u32::MAX] {
+                    engine.cmd_setoption(&[
+                        "setoption",
+                        "name",
+                        "FtRowPrefetch",
+                        "value",
+                        &lines.to_string(),
+                    ]);
+                    assert_eq!(FT_ROW_PREFETCH_LINES.load(Ordering::Relaxed), lines);
+                }
+                for value in ["-1", "4294967296", "invalid", ""] {
+                    engine.cmd_setoption(&["setoption", "name", "FtRowPrefetch", "value", value]);
+                    assert_eq!(FT_ROW_PREFETCH_LINES.load(Ordering::Relaxed), u32::MAX);
+                }
+                FT_ROW_PREFETCH_LINES.store(original, Ordering::Relaxed);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
