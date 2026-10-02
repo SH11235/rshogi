@@ -536,6 +536,42 @@ impl Position {
         self.cur_state().key()
     }
 
+    /// PASS 以外の合法手を指した後のキーを、局面を変更せずに計算する。
+    #[inline]
+    fn key_after(&self, m: Move) -> u64 {
+        debug_assert!(!m.is_pass());
+        let us = self.side_to_move;
+        let mut board_key = self.cur_state().board_key ^ zobrist_side();
+        let mut hand_key = self.cur_state().hand_key;
+        let to = m.to();
+
+        if m.is_drop() {
+            let pt = m.drop_piece_type();
+            board_key ^= zobrist_psq(Piece::new(us, pt), to);
+            hand_key = hand_key.wrapping_sub(zobrist_hand(us, pt));
+        } else {
+            let pc = self.piece_on(m.from());
+            let moved_after_pc = if m.is_promote() {
+                pc.promote().unwrap()
+            } else {
+                pc
+            };
+            board_key ^= zobrist_psq(pc, m.from()) ^ zobrist_psq(moved_after_pc, to);
+
+            let captured = self.piece_on(to);
+            if captured.is_some() {
+                let pt = captured.piece_type().unpromote();
+                board_key ^= zobrist_psq(captured, to);
+                // do_move と同じく玉は持ち駒にしない (不正な玉取りの手でも hand 表の範囲外を読まない)。
+                if pt != PieceType::King {
+                    hand_key = hand_key.wrapping_add(zobrist_hand(us, pt));
+                }
+            }
+        }
+
+        board_key ^ hand_key
+    }
+
     /// 盤面の利き数を取得
     #[inline]
     pub fn board_effect(&self, color: Color, sq: Square) -> u8 {
@@ -1063,6 +1099,8 @@ impl Position {
 
         let us = self.side_to_move;
         let them = !us;
+        let next_key = self.key_after(m);
+        prefetcher.prefetch(next_key, them);
         let prev_continuous = self.cur_state().continuous_check;
         let update_board_effects = Self::should_update_board_effects();
 
@@ -1297,9 +1335,6 @@ impl Position {
             };
         }
 
-        // do_move直後にTTをprefetch
-        prefetcher.prefetch(self.cur_state().key(), them);
-
         // 6. 王手情報の更新（diffベース）
         let mut checkers = Bitboard::EMPTY;
         if gives_check {
@@ -1380,6 +1415,7 @@ impl Position {
             self.debug_verify_board_effects();
         }
 
+        debug_assert_eq!(self.key(), next_key);
         dirty_piece
     }
 
@@ -1987,6 +2023,94 @@ mod tests {
     use crate::bitboard::{dragon_effect, horse_effect, lance_effect};
     use crate::position::state::CHECK_SQUARES_SIZE;
     use crate::types::{EnteringKingRule, File, Rank};
+
+    fn assert_key_after_move(pos: &mut Position, mv: Move, counts: &mut [[usize; 6]; 2]) {
+        use std::cell::Cell;
+
+        struct RecordingPrefetch(Cell<Option<(u64, Color)>>);
+        impl TtPrefetch for RecordingPrefetch {
+            fn prefetch(&self, key: u64, side_to_move: Color) {
+                assert!(self.0.replace(Some((key, side_to_move))).is_none());
+            }
+        }
+
+        let before = RestoredState::of(pos);
+        let next_key = pos.key_after(mv);
+        assert_eq!(RestoredState::of(pos), before);
+        let us = pos.side_to_move();
+        let gives_check = pos.gives_check(mv);
+        let captured = pos.piece_on(mv.to());
+        let count = &mut counts[us.index()];
+        count[0] += 1;
+        count[1] += usize::from(mv.is_drop());
+        count[2] += usize::from(mv.is_promote());
+        count[3] += usize::from(captured.is_some());
+        count[4] += usize::from(gives_check);
+        count[5] += usize::from(
+            captured.is_some() && captured.piece_type() != captured.piece_type().unpromote(),
+        );
+
+        let prefetcher = RecordingPrefetch(Cell::new(None));
+        pos.do_move_with_prefetch(mv, gives_check, &prefetcher);
+        assert_eq!(pos.key(), next_key, "move={mv:?}");
+        assert_eq!(prefetcher.0.get(), Some((pos.key(), !us)));
+    }
+
+    #[test]
+    fn key_after_matches_all_legal_moves_in_fixed_positions() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use crate::position::SFEN_HIRATE;
+        use crate::position::playout_test_support::{PERFT_MATSURI, PERFT_MIDGAME};
+
+        let mut counts = [[0; 6]; 2];
+        for sfen in [SFEN_HIRATE, PERFT_MATSURI, PERFT_MIDGAME] {
+            let mut pos = Position::new();
+            pos.set_sfen(sfen).unwrap();
+            let initial = RestoredState::of(&pos);
+            let mut moves = MoveList::new();
+            generate_legal_all(&pos, &mut moves);
+            for mv in moves.iter().copied() {
+                assert_key_after_move(&mut pos, mv, &mut counts);
+                let mut replies = MoveList::new();
+                generate_legal_all(&pos, &mut replies);
+                for reply in replies.iter().copied() {
+                    assert_key_after_move(&mut pos, reply, &mut counts);
+                    pos.undo_move(reply);
+                }
+                pos.undo_move(mv);
+                assert_eq!(RestoredState::of(&pos), initial);
+            }
+        }
+        assert!(counts.iter().all(|c| c[..5].iter().all(|&n| n > 0)), "網羅不足: {counts:?}");
+        assert!(counts[0][5] + counts[1][5] > 0, "成駒の捕獲が不足: {counts:?}");
+    }
+
+    #[test]
+    fn key_after_matches_random_legal_playouts() {
+        use crate::movegen::{MoveList, generate_legal_all};
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+
+        const SEED: u64 = 0x77EF_E7C4;
+        let mut counts = [[0; 6]; 2];
+        for game in 0..40 {
+            let mut rng = Xoshiro256PlusPlus::seed_from_u64(SEED + game);
+            let mut pos = Position::new();
+            pos.set_hirate();
+            for _ in 0..256 {
+                let mut moves = MoveList::new();
+                generate_legal_all(&pos, &mut moves);
+                if moves.is_empty() {
+                    break;
+                }
+                let mv = moves.at(rng.random_range(0..moves.len()));
+                assert_key_after_move(&mut pos, mv, &mut counts);
+            }
+        }
+        assert!(counts[0][0] + counts[1][0] >= 6_000, "検証手数が不足: {counts:?}");
+        assert!(counts.iter().flatten().all(|&n| n > 0), "網羅不足: {counts:?}");
+        eprintln!("key_after比較 [全手, 打ち, 成り, 駒取り, 王手, 成駒取り]: {counts:?}");
+    }
 
     fn reference_blockers_and_pinners(
         pos: &Position,
