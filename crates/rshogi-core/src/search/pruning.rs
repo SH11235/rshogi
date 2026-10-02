@@ -114,7 +114,7 @@ pub(super) fn step14_pruning(
             // alpha >= VALUE_DRAW 条件を追加
             if step_ctx.alpha >= Value::DRAW {
                 let margin = (157 * step_ctx.depth + capt_hist / 29).max(0);
-                if !step14_see_ge(&mut step_ctx, Value::new(-margin)) {
+                if !step14_see_ge(&mut step_ctx, Value::new(-margin), ctx.tune_params.see_reuse) {
                     return Step14Outcome::Skip { best_value: None };
                 }
             }
@@ -191,7 +191,7 @@ pub(super) fn step14_pruning(
             let lmr_depth_clamped = lmr_depth.max(0);
             let see_thresh =
                 tune.see_pruning_threshold_mult * lmr_depth_clamped * lmr_depth_clamped;
-            if !step14_see_ge(&mut step_ctx, Value::new(see_thresh)) {
+            if !step14_see_ge(&mut step_ctx, Value::new(see_thresh), ctx.tune_params.see_reuse) {
                 return Step14Outcome::Skip { best_value: None };
             }
         }
@@ -201,7 +201,7 @@ pub(super) fn step14_pruning(
 }
 
 #[inline]
-fn step14_see_ge(step_ctx: &mut Step14Context<'_>, threshold: Value) -> bool {
+fn step14_see_ge(step_ctx: &mut Step14Context<'_>, threshold: Value, see_reuse: bool) -> bool {
     inc_stat!(step_ctx, step14_see_calls);
     if step_ctx.good_capture_see_bound.is_some_and(|bound| threshold <= bound) {
         inc_stat!(step_ctx, step14_see_reusable);
@@ -211,7 +211,9 @@ fn step14_see_ge(step_ctx: &mut Step14Context<'_>, threshold: Value) -> bool {
         }
         // next_move から局面は未変更。同じ手の SEE は閾値を下げても true のまま
         //（see_ge の swap/res の単調性）なので、保存した下限だけで判定できる。
-        return true;
+        if see_reuse {
+            return true;
+        }
     }
     step_ctx.pos.see_ge(step_ctx.mv, threshold)
 }

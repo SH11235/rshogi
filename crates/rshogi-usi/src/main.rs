@@ -797,6 +797,16 @@ impl UsiEngine {
         }
 
         match name.as_str() {
+            // 計測専用の隠し option。usi の一覧や SPSA 項目には登録しない。
+            "SeeReuse" => {
+                if let Ok(v @ 0..=1) = value.parse::<u8>()
+                    && let Some(search) = self.search.as_mut()
+                {
+                    let mut params = search.search_tune_params();
+                    params.see_reuse = v != 0;
+                    search.set_search_tune_params(params);
+                }
+            }
             "SPSAParamsFile" => {
                 if value == "<auto>" || value == "<empty>" || value.is_empty() {
                     self.spsa_params_file = None;
@@ -2060,6 +2070,31 @@ mod tests {
                 assert!(!resized.huge_page_hint_requested());
                 resized.store(1, -42);
                 assert_eq!(resized.probe(1), Some(-42));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn hidden_see_reuse_option() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut engine = UsiEngine::new();
+                let defaults = engine.search.as_ref().unwrap().search_tune_params();
+                assert!(defaults.see_reuse);
+                for (value, expected) in [("0", false), ("2", false), ("1", true), ("bad", true)] {
+                    engine.cmd_setoption(&["setoption", "name", "SeeReuse", "value", value]);
+                    assert_eq!(
+                        engine.search.as_ref().unwrap().search_tune_params(),
+                        SearchTuneParams {
+                            see_reuse: expected,
+                            ..defaults
+                        }
+                    );
+                }
             })
             .unwrap()
             .join()
