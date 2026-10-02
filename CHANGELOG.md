@@ -80,6 +80,10 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ### USI エンジン / 探索
 
+- **指し手実行時の TT prefetch を局面更新前へ移動**:
+  手番・移動・成り・駒取り・持ち駒の差分から子局面のキーを事前計算し、
+  StateInfo のコピーや駒の移動より前に TT を prefetch する。局面更新の処理順序は維持する。
+
 - **LayerStacks の 1 手差分更新を AVX-512 でも 1 パスで処理**:
   source→dest 融合の差分更新は AVX2 経路だけにあり、AVX-512BW の build では source の 3KB コピー (memcpy) の後に
   in-place で更新する 2 パスに落ちていた。AVX-512BW でも source と重み行を読んで結果を直接書く。値は変わらない

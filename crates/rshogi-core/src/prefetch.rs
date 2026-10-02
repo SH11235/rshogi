@@ -9,7 +9,7 @@ use crate::types::Color;
 ///
 /// 探索中に `do_move` 実行時に次の局面のTTエントリをプリフェッチすることで、
 /// 実際のTT参照時にはキャッシュにヒットしやすくなります。
-/// YaneuraOuのプリフェッチタイミングに準拠しています。
+/// 通常手では局面更新前に子局面のキーを計算してプリフェッチします。
 pub(crate) trait TtPrefetch {
     /// 指定されたキーと手番に対応する置換表エントリをプリフェッチする
     fn prefetch(&self, key: u64, side_to_move: Color);
