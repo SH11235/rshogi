@@ -1813,6 +1813,7 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             BackpropOptions {
                 skip_unusable_moves: true,
                 skip_unsearched_children: true,
+                ..BackpropOptions::default()
             },
         )?;
 

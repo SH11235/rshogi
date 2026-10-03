@@ -23,6 +23,9 @@ struct Cli {
     max_iters: usize,
     #[arg(long, value_enum, default_value_t = MergeMode::Min)]
     merge: MergeMode,
+    /// YaneuraOu peta_shock 互換の value/depth 伝播 (--merge replace 必須)
+    #[arg(long, default_value_t = false)]
+    yo_compat: bool,
     /// 非合法手と `none` 行を局面の best から除く (行は値を変えずに書き出す)
     #[arg(long, default_value_t = false)]
     skip_unusable_moves: bool,
@@ -35,6 +38,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let report: Option<&Path> = cli.report.as_deref();
     let options = BackpropOptions {
+        yo_compat: cli.yo_compat,
         skip_unusable_moves: cli.skip_unusable_moves,
         skip_unsearched_children: cli.skip_unsearched_children,
     };
@@ -60,6 +64,17 @@ mod tests {
 
     type FixtureMove<'a> = (&'a str, i32, i32, u64);
     type FixtureEntry<'a> = (&'a str, &'a [FixtureMove<'a>]);
+
+    #[test]
+    fn yo_compat_is_opt_in() {
+        let args = ["book_backprop", "--book", "in.db", "--out", "out.db"];
+        assert!(!Cli::try_parse_from(args).unwrap().yo_compat);
+        assert!(
+            Cli::try_parse_from(args.into_iter().chain(["--yo-compat", "--merge", "replace"]))
+                .unwrap()
+                .yo_compat
+        );
+    }
 
     #[test]
     fn skip_unsearched_children_is_opt_in() {

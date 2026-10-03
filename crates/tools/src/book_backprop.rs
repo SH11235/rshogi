@@ -12,6 +12,8 @@ use clap::ValueEnum;
 use rshogi_core::position::Position;
 use rshogi_core::types::Move;
 
+mod peta_shock;
+
 /// YANEURAOU-DB2016 テキスト定跡のヘッダ行。
 pub const BOOK_HEADER: &str = "#YANEURAOU-DB2016 1.00";
 
@@ -75,6 +77,8 @@ pub struct Edge {
 pub struct MoveValue {
     pub old: i32,
     pub new: i32,
+    /// YO 互換モードの出力 depth。通常モードは入力 depth を保持する。
+    pub new_depth: Option<i32>,
     pub edge: Option<Edge>,
     /// 合法な指し手を持つ行か。非合法手と `none` 行は `false`。
     pub usable: bool,
@@ -83,6 +87,8 @@ pub struct MoveValue {
 /// 逆伝播の追加オプション。既定値は `book_backprop` の従来挙動。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BackpropOptions {
+    /// YaneuraOu peta_shock の value/depth 伝播を使う。merge は replace のみ。
+    pub yo_compat: bool,
     /// 非合法手と `none` 行を局面の best (伝播値と best の変化集計) から除く。
     /// 行自体は値を変えずに書き出す。
     pub skip_unusable_moves: bool,
@@ -113,6 +119,8 @@ pub struct Graph {
     pub adjacency: Vec<Vec<usize>>,
     pub flip_edges: usize,
     pub illegal_moves: usize,
+    /// YO 互換モードで補完した合法な合流手。各局面の入力手の後ろに対応する。
+    pub converged_moves: BTreeMap<String, Vec<BookMove>>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +135,8 @@ struct SccGraph {
 /// 逆伝播の集計。
 #[derive(Debug, Default, Clone)]
 pub struct PropagationStats {
+    /// YO 互換モードの (check-loop ノード数, 非 const ノード数)。
+    pub yo_nodes: Option<(usize, usize)>,
     pub updated_moves: usize,
     pub abs_deltas: Vec<i32>,
     pub nontrivial_sccs: usize,
@@ -167,6 +177,9 @@ pub fn backprop_file_with(
     merge: MergeMode,
     options: BackpropOptions,
 ) -> Result<PropagationStats> {
+    if options.yo_compat && merge != MergeMode::Replace {
+        bail!("--yo-compat は --merge replace が必要です (--merge min は使用できません)");
+    }
     if max_iters == 0 {
         bail!("--max-iters は 1 以上を指定してください");
     }
@@ -271,6 +284,7 @@ pub fn build_graph(book: &BookDb) -> Result<Graph> {
 }
 
 /// [`build_graph`] に追加オプションを指定する版。未探索の判定は入力時の depth を使う。
+/// `yo_compat` では、入力にない合法な book 内合流手も補完する。
 pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph> {
     let keys: Vec<String> = book.entries.keys().cloned().collect();
     let skipped_children: Vec<bool> = book
@@ -339,6 +353,7 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
             move_values.push(MoveValue {
                 old: book_move.value,
                 new: book_move.value,
+                new_depth: None,
                 edge,
                 usable: legal,
             });
@@ -347,13 +362,18 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
     }
 
     let adjacency = adjacency_sets.into_iter().map(|set| set.into_iter().collect()).collect();
-    Ok(Graph {
+    let mut graph = Graph {
         keys,
         moves,
         adjacency,
         flip_edges,
         illegal_moves,
-    })
+        converged_moves: BTreeMap::new(),
+    };
+    if options.yo_compat {
+        peta_shock::add_convergences(book, &mut graph, &skipped_children)?;
+    }
+    Ok(graph)
 }
 
 /// 親局面に USI 指し手を合法性検査付きで適用した子局面を返す。
@@ -387,6 +407,7 @@ pub fn propagate_values(
 
 /// [`propagate_values`] に追加オプションを指定する版。
 /// `skip_unsearched_children` はグラフ構築時に [`build_graph_with`] へ渡すこと。
+/// `yo_compat` も同じくグラフ構築時に渡し、全合法手からの合流補完を有効にすること。
 pub fn propagate_values_with(
     book: &BookDb,
     graph: &mut Graph,
@@ -395,6 +416,12 @@ pub fn propagate_values_with(
     merge: MergeMode,
     options: BackpropOptions,
 ) -> Result<PropagationStats> {
+    if options.yo_compat {
+        if merge != MergeMode::Replace {
+            bail!("--yo-compat は --merge replace が必要です (--merge min は使用できません)");
+        }
+        return peta_shock::propagate(book, graph, options);
+    }
     let params = BestParams {
         draw_value,
         merge,
@@ -659,22 +686,30 @@ pub fn write_backprop_book(book: &BookDb, graph: &Graph, out: &Path) -> Result<(
         let values = value_by_key
             .get(key.as_str())
             .ok_or_else(|| anyhow!("内部エラー: move values がありません: {key}"))?;
-        let mut order: Vec<usize> = (0..entry.moves.len()).collect();
+        let added = graph.converged_moves.get(key).map_or(&[][..], Vec::as_slice);
+        let move_at = |idx: usize| {
+            if idx < entry.moves.len() {
+                &entry.moves[idx]
+            } else {
+                &added[idx - entry.moves.len()]
+            }
+        };
+        let mut order: Vec<usize> = (0..entry.moves.len() + added.len()).collect();
         order.sort_by(|&a, &b| {
-            entry.moves[b]
+            move_at(b)
                 .count
-                .cmp(&entry.moves[a].count)
-                .then_with(|| move_sort_key(&entry.moves[a]).cmp(move_sort_key(&entry.moves[b])))
+                .cmp(&move_at(a).count)
+                .then_with(|| move_sort_key(move_at(a)).cmp(move_sort_key(move_at(b))))
         });
         for idx in order {
-            let book_move = &entry.moves[idx];
+            let book_move = move_at(idx);
             writeln!(
                 writer,
                 "{} {} {} {} {}",
                 book_move.move_usi.as_deref().unwrap_or("none"),
                 book_move.ponder_usi.as_deref().unwrap_or("none"),
                 values[idx].new,
-                book_move.depth,
+                values[idx].new_depth.unwrap_or(book_move.depth),
                 book_move.count
             )?;
         }
@@ -707,6 +742,9 @@ pub fn write_report(
     writeln!(writer, "## Summary")?;
     writeln!(writer)?;
     writeln!(writer, "- merge mode: {}", merge.as_str())?;
+    if let Some((check_loops, cycles)) = stats.yo_nodes {
+        writeln!(writer, "- yo-compat: check-loop nodes: {check_loops}, cycle nodes: {cycles}")?;
+    }
     writeln!(writer, "- nodes: {}", book.entries.len())?;
     writeln!(writer, "- moves: {total_moves}")?;
     writeln!(writer, "- updated moves: {}", stats.updated_moves)?;
