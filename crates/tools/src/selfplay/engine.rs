@@ -661,6 +661,13 @@ impl EngineProcess {
         self.opt_names.is_empty() || self.opt_names.contains(name)
     }
 
+    /// `usi` への応答で `name` のオプションが広告されたか。
+    ///
+    /// `is_option_available` と違い、オプションを 1 つも広告しないエンジンでは `false` を返す。
+    pub fn advertises_option(&self, name: &str) -> bool {
+        self.opt_names.contains(name)
+    }
+
     pub fn set_option_if_available(&mut self, name: &str, value: &str) -> Result<()> {
         if self.is_option_available(name) {
             self.write_line(&format!("setoption name {} value {}", name, value))?;
