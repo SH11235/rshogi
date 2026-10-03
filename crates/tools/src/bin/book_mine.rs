@@ -1812,6 +1812,7 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             args.merge,
             BackpropOptions {
                 skip_unusable_moves: true,
+                skip_unsearched_children: true,
             },
         )?;
 

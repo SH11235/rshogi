@@ -26,6 +26,9 @@ struct Cli {
     /// 非合法手と `none` 行を局面の best から除く (行は値を変えずに書き出す)
     #[arg(long, default_value_t = false)]
     skip_unusable_moves: bool,
+    /// 全候補手の depth が 0 の子局面を book 外として扱い、親の手の値を保持する (候補手無しは除外しない)
+    #[arg(long, default_value_t = false)]
+    skip_unsearched_children: bool,
 }
 
 fn main() -> Result<()> {
@@ -33,6 +36,7 @@ fn main() -> Result<()> {
     let report: Option<&Path> = cli.report.as_deref();
     let options = BackpropOptions {
         skip_unusable_moves: cli.skip_unusable_moves,
+        skip_unsearched_children: cli.skip_unsearched_children,
     };
     backprop_file_with(
         &cli.book,
@@ -56,6 +60,17 @@ mod tests {
 
     type FixtureMove<'a> = (&'a str, i32, i32, u64);
     type FixtureEntry<'a> = (&'a str, &'a [FixtureMove<'a>]);
+
+    #[test]
+    fn skip_unsearched_children_is_opt_in() {
+        let args = ["book_backprop", "--book", "in.db", "--out", "out.db"];
+        assert!(!Cli::try_parse_from(args).unwrap().skip_unsearched_children);
+        assert!(
+            Cli::try_parse_from(args.into_iter().chain(["--skip-unsearched-children"]))
+                .unwrap()
+                .skip_unsearched_children
+        );
+    }
 
     #[test]
     fn dead_piece_edges_are_excluded_even_when_child_exists() {

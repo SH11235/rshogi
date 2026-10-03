@@ -30,6 +30,7 @@ cargo run -p tools --release --bin book_backprop -- \
 | `--report <PATH>` | なし | Markdown レポートの出力先 |
 | `--max-iters <N>` | `1000` | 非自明 SCC の値反復ガード。到達時はエラー終了 |
 | `--skip-unusable-moves` | off | 非合法手と `none` 行を局面の best (と best 変化の集計) から除く。行自体は値を変えずに書き出す |
+| `--skip-unsearched-children` | off | 候補手が 1 件以上あり全行の `depth=0` の子局面を、直接キー・反転キーとも book 外として扱う。親の手は `merge` によらず元の値を保持する。`value` は判定に使わず、候補手の無い局面は除外しない |
 
 ## 伝播規則
 

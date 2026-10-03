@@ -86,6 +86,9 @@ pub struct BackpropOptions {
     /// 非合法手と `none` 行を局面の best (伝播値と best の変化集計) から除く。
     /// 行自体は値を変えずに書き出す。
     pub skip_unusable_moves: bool,
+    /// 候補手が 1 件以上あり、全行の depth が 0 の子局面への辺を除く。
+    /// value は判定に使わず、候補手の無い局面は除外しない。親の手は元の値を保つ。
+    pub skip_unsearched_children: bool,
 }
 
 /// 局面の best 計算に共通の設定。
@@ -171,7 +174,7 @@ pub fn backprop_file_with(
     rshogi_book::Book::from_path(book, true)
         .with_context(|| format!("定跡を rshogi-book で読めません: {}", book.display()))?;
     let db = read_book_db(book)?;
-    let mut graph = build_graph(&db)?;
+    let mut graph = build_graph_with(&db, options)?;
     let stats = propagate_values_with(&db, &mut graph, draw_value, max_iters, merge, options)?;
     write_backprop_book(&db, &graph, out)?;
     if let Some(path) = report {
@@ -264,7 +267,21 @@ fn ply_of(sfen: &str) -> u32 {
 
 /// book 内子局面への辺 (反転 key 合流を含む) を張ったグラフを作る。
 pub fn build_graph(book: &BookDb) -> Result<Graph> {
+    build_graph_with(book, BackpropOptions::default())
+}
+
+/// [`build_graph`] に追加オプションを指定する版。未探索の判定は入力時の depth を使う。
+pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph> {
     let keys: Vec<String> = book.entries.keys().cloned().collect();
+    let skipped_children: Vec<bool> = book
+        .entries
+        .values()
+        .map(|entry| {
+            options.skip_unsearched_children
+                && !entry.moves.is_empty()
+                && entry.moves.iter().all(|mv| mv.depth == 0)
+        })
+        .collect();
     let node_index: BTreeMap<&str, usize> =
         keys.iter().enumerate().map(|(idx, key)| (key.as_str(), idx)).collect();
     let mut moves = Vec::with_capacity(keys.len());
@@ -297,10 +314,7 @@ pub fn build_graph(book: &BookDb) -> Result<Graph> {
                                 .as_deref()
                                 .map(strip_ply)
                                 .and_then(|key| node_index.get(key).copied());
-                            flipped_to.map(|to| {
-                                flip_edges += 1;
-                                Edge { to, via_flip: true }
-                            })
+                            flipped_to.map(|to| Edge { to, via_flip: true })
                         }
                     }
                     Err(err) => {
@@ -315,7 +329,11 @@ pub fn build_graph(book: &BookDb) -> Result<Graph> {
             } else {
                 None
             };
+            let edge = edge.filter(|edge| !skipped_children[edge.to]);
             if let Some(edge) = edge {
+                if edge.via_flip {
+                    flip_edges += 1;
+                }
                 adjacency_sets[node_idx].insert(edge.to);
             }
             move_values.push(MoveValue {
@@ -368,6 +386,7 @@ pub fn propagate_values(
 }
 
 /// [`propagate_values`] に追加オプションを指定する版。
+/// `skip_unsearched_children` はグラフ構築時に [`build_graph_with`] へ渡すこと。
 pub fn propagate_values_with(
     book: &BookDb,
     graph: &mut Graph,
@@ -818,6 +837,73 @@ mod tests {
 
     const START: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
 
+    fn check_child_propagation(child_rows: &str, flip: bool, unsearched: bool, best: i32) {
+        let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        let child = if flip {
+            rshogi_book::flipped_key(&child).unwrap()
+        } else {
+            child
+        };
+        let input =
+            format!("{BOOK_HEADER}\nsfen {START}\n7g7f none 123 9 7\nsfen {child}\n{child_rows}");
+        let dir = tempfile::tempdir().unwrap();
+        let in_path = dir.path().join("in.db");
+        let out_path = dir.path().join("out.db");
+        std::fs::write(&in_path, &input).unwrap();
+        let book = read_book_db(&in_path).unwrap();
+        for skip in [false, true] {
+            let options = BackpropOptions {
+                skip_unsearched_children: skip,
+                ..BackpropOptions::default()
+            };
+            let graph = build_graph_with(&book, options).unwrap();
+            let parent = graph.keys.iter().position(|key| key == strip_ply(START)).unwrap();
+            let excluded = skip && unsearched;
+            assert_eq!(graph.moves[parent][0].edge.is_none(), excluded);
+            assert_eq!(graph.adjacency[parent].is_empty(), excluded);
+            assert_eq!(graph.flip_edges, usize::from(flip && !excluded));
+            if let Some(edge) = graph.moves[parent][0].edge {
+                assert_eq!(edge.via_flip, flip);
+            }
+            for merge in [MergeMode::Replace, MergeMode::Min] {
+                backprop_file_with(&in_path, &out_path, None, 0, 1000, merge, options).unwrap();
+                let output = read_book_db(&out_path).unwrap();
+                let value = output.entries[strip_ply(START)].moves[0].value;
+                let expected = if excluded {
+                    123
+                } else {
+                    merge.apply(123, -best)
+                };
+                assert_eq!(value, expected, "skip={skip}, flip={flip}, merge={merge:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn skip_unsearched_children_preserves_parent_value() {
+        check_child_propagation("3c3d none 0 0 3\n8c8d none 0 0 2\n", false, true, 0);
+    }
+
+    #[test]
+    fn skip_unsearched_children_keeps_partly_searched_child() {
+        check_child_propagation("3c3d none 50 10 3\n8c8d none 0 0 2\n", false, false, 50);
+    }
+
+    #[test]
+    fn skip_unsearched_children_skips_flipped_child() {
+        check_child_propagation("7g7f none 0 0 3\n2g2f none 0 0 2\n", true, true, 0);
+    }
+
+    #[test]
+    fn skip_unsearched_children_keeps_empty_child() {
+        check_child_propagation("", false, false, 0);
+    }
+
+    #[test]
+    fn skip_unsearched_children_uses_depth_regardless_of_value() {
+        check_child_propagation("3c3d none 50 0 3\n", false, true, 50);
+    }
+
     fn backprop_text(input: &str, options: BackpropOptions) -> String {
         let dir = tempfile::tempdir().unwrap();
         let in_path = dir.path().join("in.db");
@@ -843,6 +929,7 @@ mod tests {
             &input,
             BackpropOptions {
                 skip_unusable_moves: true,
+                ..BackpropOptions::default()
             },
         );
         assert!(skipped.contains("7g7f none 50 1 1\n"));
