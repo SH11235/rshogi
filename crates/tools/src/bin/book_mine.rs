@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write as IoWrite};
+use std::io::{BufRead, BufReader, BufWriter, Seek, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -234,9 +234,7 @@ fn canonicalize_output_collision_path(path: &Path) -> Result<PathBuf> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let parent =
                 path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-            let parent = std::fs::canonicalize(parent).with_context(|| {
-                format!("親ディレクトリを正準化できません: {}", parent.display())
-            })?;
+            let parent = canonicalize_output_collision_path(parent)?;
             let file_name = path
                 .file_name()
                 .ok_or_else(|| anyhow!("ファイル名がありません: {}", path.display()))?;
@@ -250,6 +248,26 @@ fn read_book_checked(path: &Path) -> Result<BookDb> {
     rshogi_book::Book::from_path(path, true)
         .with_context(|| format!("定跡を rshogi-book で読めません: {}", path.display()))?;
     BookDb::read(path)
+}
+
+/// work-dir の journal と各周の名前空間は内部成果物専用とする。
+fn reject_internal_artifact(name: &str, path: &Path, work_dir: &Path) -> Result<()> {
+    let path = canonicalize_output_collision_path(path)?;
+    let work_dir = canonicalize_output_collision_path(work_dir)?;
+    // 未作成部分も Windows の大文字小文字を区別しない規則で比較する。
+    #[cfg(windows)]
+    let (path, work_dir) = (
+        PathBuf::from(path.as_os_str().to_string_lossy().to_lowercase()),
+        PathBuf::from(work_dir.as_os_str().to_string_lossy().to_lowercase()),
+    );
+    if let Ok(relative) = path.strip_prefix(&work_dir) {
+        let first = relative.components().next().map(|c| c.as_os_str().to_string_lossy());
+        if first.is_none() || first.is_some_and(|s| s == "journal.jsonl" || s.starts_with("iter-"))
+        {
+            bail!("{name} は --work-dir の内部成果物と衝突します: {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 /// 1 行 1 局面のファイルを読む。空行と `#` 行は無視する。
@@ -352,16 +370,12 @@ fn compute_frontier_excluding(
     let mut leaves = BTreeMap::<String, Leaf>::new();
     let mut stats = FrontierStats::default();
     for &side in sides {
-        traverse_side(book, roots, side, opts, &mut leaves, &mut stats)?;
+        traverse_side(book, roots, side, opts, terminals, &mut leaves, &mut stats)?;
     }
     for (sfen, move_usi) in &stats.illegal_moves {
         eprintln!("警告: 非合法な book 手を飛ばします: sfen={sfen} move={move_usi}");
     }
-    let mut list: Vec<Leaf> = leaves
-        .into_iter()
-        .filter(|(key, _)| !terminals.contains(key))
-        .map(|(_, leaf)| leaf)
-        .collect();
+    let mut list: Vec<Leaf> = leaves.into_values().collect();
     list.sort_by(|a, b| {
         a.depth.cmp(&b.depth).then_with(|| strip_ply(&a.sfen).cmp(strip_ply(&b.sfen)))
     });
@@ -382,18 +396,22 @@ fn traverse_side(
     roots: &[String],
     side: Color,
     opts: &FrontierOpts,
+    terminals: &BTreeSet<String>,
     leaves: &mut BTreeMap<String, Leaf>,
     stats: &mut FrontierStats,
 ) -> Result<()> {
-    let mut visited = HashSet::<(String, bool)>::new();
+    let mut visited = HashMap::<(String, bool), i32>::new();
     let mut queue = VecDeque::<(String, u32)>::new();
     for root in roots {
-        if visited.insert((canonical_key(root), side_to_move(root)? == side)) {
+        if visit_at_smaller_ply(&mut visited, root, side)? {
             queue.push_back((root.clone(), 0));
         }
     }
 
     while let Some((sfen, depth)) = queue.pop_front() {
+        if terminals.contains(strip_ply(&sfen)) {
+            continue;
+        }
         let Some(hit) = book.find(&sfen) else {
             add_leaf(leaves, &sfen, depth, LeafKind::OutOfBook)?;
             continue;
@@ -448,7 +466,9 @@ fn traverse_side(
                 continue;
             }
             let child_sfen = child.to_sfen();
-            if !visited.insert((canonical_key(&child_sfen), side_to_move(&child_sfen)? == side)) {
+            if terminals.contains(strip_ply(&child_sfen))
+                || !visit_at_smaller_ply(&mut visited, &child_sfen, side)?
+            {
                 continue;
             }
             if book.find(&child_sfen).is_some() {
@@ -459,6 +479,21 @@ fn traverse_side(
         }
     }
     Ok(())
+}
+
+/// BFS の深さ順を保ち、同じ役割でも残り ply 予算が増えた局面は再展開する。
+fn visit_at_smaller_ply(
+    visited: &mut HashMap<(String, bool), i32>,
+    sfen: &str,
+    side: Color,
+) -> Result<bool> {
+    let ply = position_from_sfen(sfen)?.game_ply();
+    let key = (canonical_key(sfen), side_to_move(sfen)? == side);
+    if visited.get(&key).is_some_and(|&min_ply| min_ply <= ply) {
+        return Ok(false);
+    }
+    visited.insert(key, ply);
+    Ok(true)
 }
 
 /// 候補手を辿るか。value は 0 でも通常の値として扱う (未探索判定は局面単位)。
@@ -692,6 +727,16 @@ impl SearchSettings {
             && rec.multipv == self.multipv_spec
             && rec.engine_fingerprint == self.fingerprint
     }
+
+    /// journal と同じ探索条件を、終端・収束キャッシュにも記録する。
+    fn cache_fingerprint(&self) -> String {
+        let mut hash = Sha256::new();
+        for part in [&self.go, &self.multipv_spec, &self.fingerprint] {
+            hash.update((part.len() as u64).to_le_bytes());
+            hash.update(part.as_bytes());
+        }
+        format!("{:x}", hash.finalize())
+    }
 }
 
 fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<String> {
@@ -713,13 +758,38 @@ fn engine_option_key(option: &str) -> &str {
     option.split_once('=').map_or(option, |(key, _)| key)
 }
 
-fn load_journal(path: &Path, settings: &SearchSettings) -> Result<HashMap<String, JournalRecord>> {
-    let mut loaded = HashMap::new();
-    if !path.exists() {
-        return Ok(loaded);
+/// ロックはこのハンドルと複製を閉じるまで保持され、プロセス終了時にも OS が解放する。
+struct LockedJournal {
+    file: File,
+}
+
+impl LockedJournal {
+    fn open(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("journal を開けません: {}", path.display()))?;
+        file.try_lock().map_err(|err| {
+            anyhow!(
+                "another book_mine process is using this journal (ロック取得失敗): {}: {err}",
+                path.display()
+            )
+        })?;
+        Ok(Self { file })
     }
-    let file =
-        File::open(path).with_context(|| format!("journal を開けません: {}", path.display()))?;
+}
+
+fn load_journal(
+    path: &Path,
+    settings: &SearchSettings,
+    locked: &LockedJournal,
+) -> Result<HashMap<String, JournalRecord>> {
+    let mut loaded = HashMap::new();
+    let mut file = locked.file.try_clone()?;
+    file.rewind()?;
     let mut reader = BufReader::new(file);
     let mut offset = 0u64;
     let mut line_no = 0;
@@ -740,7 +810,7 @@ fn load_journal(path: &Path, settings: &SearchSettings) -> Result<HashMap<String
         let parsed = serde_json::from_slice::<JournalRecord>(&line);
         if last && (parsed.is_err() || !line.ends_with(b"\n")) {
             eprintln!("警告: journal の未完了の最終行を破棄します: {}:{line_no}", path.display());
-            OpenOptions::new().write(true).open(path)?.set_len(start)?;
+            locked.file.set_len(start)?;
             break;
         }
         let rec = parsed
@@ -1052,6 +1122,7 @@ impl EnginePool {
         &self,
         tasks: Vec<SearchTask>,
         journal_path: &Path,
+        locked: &LockedJournal,
         journal: &mut HashMap<String, JournalRecord>,
     ) -> Result<()> {
         let task_count = tasks.len();
@@ -1063,10 +1134,8 @@ impl EnginePool {
         let progress = MultiFileProgress::new(task_count as u64, 1, "book_mine");
         let file_progress = progress.start_file("expand", 1, task_count as u64);
         let outcome = (|| -> Result<()> {
-            let file =
-                OpenOptions::new().create(true).append(true).open(journal_path).with_context(
-                    || format!("journal を追記オープンできません: {}", journal_path.display()),
-                )?;
+            let mut file = locked.file.try_clone()?;
+            file.seek(std::io::SeekFrom::End(0))?;
             let mut writer = BufWriter::new(file);
             let mut first_error: Option<anyhow::Error> = None;
             let mut outstanding = task_count;
@@ -1180,6 +1249,7 @@ struct Expander<'a> {
     parallel: usize,
     extend_ply: u32,
     journal_path: &'a Path,
+    locked: LockedJournal,
     journal: HashMap<String, JournalRecord>,
     pool: Option<EnginePool>,
 }
@@ -1193,7 +1263,7 @@ impl Expander<'_> {
         let parallel = self.parallel;
         let settings = &self.settings;
         let pool = self.pool.get_or_insert_with(|| EnginePool::spawn(parallel, settings));
-        pool.run(tasks, self.journal_path, &mut self.journal)
+        pool.run(tasks, self.journal_path, &self.locked, &mut self.journal)
     }
 
     fn record(&self, position_key: &str, searchmove: Option<&str>) -> Result<&JournalRecord> {
@@ -1590,8 +1660,9 @@ fn cmd_expand(args: &ExpandArgs) -> Result<()> {
     let book = read_book_checked(&args.book)?;
     let leaves = read_position_list(&args.leaves)?;
     let settings = Arc::new(SearchSettings::new(&args.engine)?);
+    let locked = LockedJournal::open(&args.journal)?;
     let journal = if args.resume {
-        load_journal(&args.journal, &settings)?
+        load_journal(&args.journal, &settings, &locked)?
     } else {
         HashMap::new()
     };
@@ -1600,6 +1671,7 @@ fn cmd_expand(args: &ExpandArgs) -> Result<()> {
         parallel: args.engine.parallel,
         extend_ply: args.engine.extend_ply,
         journal_path: &args.journal,
+        locked,
         journal,
         pool: None,
     };
@@ -1692,9 +1764,12 @@ struct IterationSummary {
     /// 全非終端末端を処理したか。旧 summary は安全側で未完了とみなす。
     #[serde(default)]
     all_leaves_processed: bool,
-    /// この周で判明した終端の正準キー。
+    /// この周で判明した終端の実局面キー (ply 除外、先後は保持)。
     #[serde(default)]
     terminal_keys: BTreeSet<String>,
+    /// terminal_keys と収束判定を生成した探索条件。旧形式には存在しない。
+    #[serde(default)]
+    search_settings_fingerprint: Option<String>,
     /// 旧形式 (設定の記録が無い) の summary.json では `None`。
     #[serde(default)]
     config: Option<RunConfig>,
@@ -1750,6 +1825,13 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
     if args.iterations == 0 {
         bail!("--iterations は 1 以上を指定してください");
     }
+    for (name, path) in [
+        ("--book", args.book.as_path()),
+        ("--out", args.out.as_path()),
+        ("--roots", args.frontier.roots.as_path()),
+    ] {
+        reject_internal_artifact(name, path, &args.work_dir)?;
+    }
     reject_path_collisions(&[
         ("--book", args.book.as_path()),
         ("--out", args.out.as_path()),
@@ -1758,14 +1840,16 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
     std::fs::create_dir_all(&args.work_dir)
         .with_context(|| format!("作成できません: {}", args.work_dir.display()))?;
     let journal_path = args.work_dir.join("journal.jsonl");
-    if !args.resume && has_previous_run(&args.work_dir, &journal_path)? {
+    let previous_run = has_previous_run(&args.work_dir, &journal_path)?;
+    let locked = LockedJournal::open(&journal_path)?;
+    if !args.resume && previous_run {
         bail!(
             "--work-dir に前回の実行結果があります。続きから再開するには --resume を付けてください: {}",
             args.work_dir.display()
         );
     }
 
-    let completed = completed_iterations(&args.work_dir)?;
+    let mut completed = completed_iterations(&args.work_dir)?;
     read_book_checked(&args.book)?;
     let config = RunConfig::new(args)?;
     for summary in &completed {
@@ -1786,8 +1870,24 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
     }
     let roots = read_position_list(&args.frontier.roots)?;
     let settings = Arc::new(SearchSettings::new(&args.engine)?);
+    let search_settings_fingerprint = settings.cache_fingerprint();
+    for summary in &mut completed {
+        let matches = match &summary.search_settings_fingerprint {
+            Some(recorded) => recorded == &search_settings_fingerprint,
+            None => summary.terminal_keys.is_empty(),
+        };
+        if !matches {
+            eprintln!(
+                "book_mine run: iter-{:03} の探索設定が不一致のため終端キーと収束判定を無視し、未完了の末端を再計算します",
+                summary.iteration
+            );
+            summary.terminal_keys.clear();
+            summary.all_leaves_processed = false;
+        }
+    }
     let mut expander = Expander {
-        journal: load_journal(&journal_path, &settings)?,
+        journal: load_journal(&journal_path, &settings, &locked)?,
+        locked,
         settings: Arc::clone(&settings),
         parallel: args.engine.parallel,
         extend_ply: args.engine.extend_ply,
@@ -1808,7 +1908,7 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             .journal
             .values()
             .filter(|r| r.declaration_win)
-            .map(|r| canonical_key(&r.sfen)),
+            .map(|r| strip_ply(&r.sfen).to_string()),
     );
     if !completed.is_empty() {
         eprintln!("book_mine run: 完了済みの {} 周から再開します", completed.len());
@@ -1866,14 +1966,15 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             },
         )?;
 
-        let summary = IterationSummary {
+        let mut summary = IterationSummary {
             all_leaves_processed: frontier.leaves.len() == frontier.stats.leaves_before_limit,
             terminal_keys: stats
                 .declarations
                 .iter()
                 .chain(&stats.no_legal_moves)
-                .map(|sfen| canonical_key(sfen))
+                .map(|sfen| strip_ply(sfen).to_string())
                 .collect(),
+            search_settings_fingerprint: Some(search_settings_fingerprint.clone()),
             iteration,
             leaves: frontier.leaves.len(),
             new_positions: stats.new_positions,
@@ -1881,10 +1982,20 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             filled_moves: stats.filled_moves,
             config: Some(config.clone()),
         };
+        terminals.extend(summary.terminal_keys.iter().cloned());
+        if summary.converged() && !summary.terminal_keys.is_empty() {
+            // 終端の除外により、反転重複排除で隠れていた非終端が次の周に現れうる。
+            let remaining = compute_frontier_excluding(
+                &BookDb::read(&book_path)?,
+                &roots,
+                &frontier_opts,
+                &terminals,
+            )?;
+            summary.all_leaves_processed = remaining.stats.leaves_before_limit == 0;
+        }
         // summary.json は周の完了印なので最後に書く。
         write_atomic(&dir.join("summary.json"), &(serde_json::to_string_pretty(&summary)? + "\n"))?;
         cumulative += summary.new_positions;
-        terminals.extend(summary.terminal_keys.iter().cloned());
         converged = summary.converged();
         current_book = book_path;
         eprintln!(
@@ -1920,6 +2031,22 @@ mod tests {
 
     fn flipped(sfen: &str) -> String {
         rshogi_book::flipped_key(sfen).unwrap()
+    }
+
+    #[test]
+    fn review2_frontier_revisits_smaller_ply() {
+        let db = book(&[(START, &[("7g7f", 50, 10, 1)])]);
+        let high = format!("{} 259", strip_ply(START));
+        let roots = vec![high, START.to_string()];
+        let options = FrontierOpts {
+            max_ply: 259,
+            ..opts(SideArg::Black)
+        };
+        let result = compute_frontier(&db, &roots, &options).unwrap();
+        assert_eq!(result.leaves.len(), 1);
+        assert_eq!(result.leaves[0].sfen, after(START, &["7g7f"]));
+        let again = compute_frontier(&db, &roots, &options).unwrap();
+        assert_eq!(result.leaves[0].sfen, again.leaves[0].sfen);
     }
 
     fn book_text(entries: &[FixtureEntry<'_>]) -> String {
@@ -2643,14 +2770,24 @@ done
                 let mut bytes = valid.clone();
                 bytes.extend_from_slice(tail);
                 std::fs::write(&path, bytes).unwrap();
-                assert_eq!(load_journal(&path, &settings).unwrap().len(), 1);
+                assert_eq!(
+                    load_journal(&path, &settings, &LockedJournal::open(&path).unwrap())
+                        .unwrap()
+                        .len(),
+                    1
+                );
                 assert_eq!(std::fs::read(&path).unwrap(), valid);
-                assert_eq!(load_journal(&path, &settings).unwrap().len(), 1);
+                assert_eq!(
+                    load_journal(&path, &settings, &LockedJournal::open(&path).unwrap())
+                        .unwrap()
+                        .len(),
+                    1
+                );
             }
             let mut corrupt = b"invalid\n".to_vec();
             corrupt.extend_from_slice(&valid);
             std::fs::write(&path, &corrupt).unwrap();
-            assert!(load_journal(&path, &settings).is_err());
+            assert!(load_journal(&path, &settings, &LockedJournal::open(&path).unwrap()).is_err());
             assert_eq!(std::fs::read(&path).unwrap(), corrupt);
         }
 
@@ -2979,6 +3116,185 @@ done
     mod run {
         use super::engine::{MockEngine, engine_opts};
         use super::*;
+
+        const WHITE_27: &str =
+            "K+P7/L+N+P3P2/8+P/B8/9/4s1g2/p+ns3g1+n/2l5+p/1+r2r1+b1k w 2GSNL9Psl3p 1";
+
+        #[test]
+        fn review2_declaration_does_not_exclude_colour_twin() {
+            use rshogi_core::types::{EnteringKingRule, Move};
+            let twin = flipped(WHITE_27);
+            assert_eq!(
+                position_from_sfen(WHITE_27).unwrap().declaration_win(EnteringKingRule::Point27),
+                Move::WIN
+            );
+            assert_eq!(
+                position_from_sfen(&twin).unwrap().declaration_win(EnteringKingRule::Point27),
+                Move::NONE
+            );
+            let engine = MockEngine::new(&[(WHITE_27, "win", &[])]);
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("book.db"), book_text(&[])).unwrap();
+            std::fs::write(dir.path().join("roots.txt"), format!("sfen {WHITE_27}\n")).unwrap();
+            let args = run_args(dir.path(), &engine, 1, false);
+            cmd_run(&args).unwrap();
+            let summaries = completed_iterations(&args.work_dir).unwrap();
+            let terminals = &summaries[0].terminal_keys;
+            let result = compute_frontier_excluding(
+                &book(&[]),
+                &[WHITE_27.into(), twin.clone()],
+                &opts(SideArg::Black),
+                terminals,
+            )
+            .unwrap();
+            assert_eq!(result.leaves.len(), 1);
+            assert_eq!(strip_ply(&result.leaves[0].sfen), strip_ply(&twin));
+            let mut legal = MoveList::new();
+            generate_legal(&position_from_sfen(&twin).unwrap(), &mut legal);
+            let mv = legal.iter().next().unwrap().to_usi();
+            let twin_engine = MockEngine::new(&[(&twin, &mv, &[&format!("score cp 12 pv {mv}")])]);
+            let leaves = dir.path().join("twin.txt");
+            write_leaves(&leaves, &result.leaves).unwrap();
+            let out = dir.path().join("twin.db");
+            cmd_expand(&ExpandArgs {
+                book: args.book,
+                out: out.clone(),
+                leaves,
+                engine: engine_opts(&twin_engine),
+                journal: args.work_dir.join("journal.jsonl"),
+                resume: true,
+                report: None,
+            })
+            .unwrap();
+            assert_eq!(twin_engine.log().len(), 1);
+            assert!(BookDb::read(&out).unwrap().find(&twin).is_some());
+
+            // 両方を roots に置いた場合も、最初の周の反転重複排除で隠れた側を
+            // 次の周で展開する。終端だけを処理した周の収束判定も検査する。
+            let engine = MockEngine::new(&[
+                (WHITE_27, "win", &[]),
+                (&twin, &mv, &[&format!("score cp 12 pv {mv}")]),
+            ]);
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("book.db"), book_text(&[])).unwrap();
+            std::fs::write(dir.path().join("roots.txt"), format!("sfen {WHITE_27}\nsfen {twin}\n"))
+                .unwrap();
+            let args = run_args(dir.path(), &engine, 2, false);
+            cmd_run(&args).unwrap();
+            assert_eq!(engine.log().len(), 2);
+            assert!(BookDb::read(&args.out).unwrap().find(&twin).is_some());
+        }
+
+        #[test]
+        fn review2_terminal_settings_change_researches_leaf() {
+            let engine = MockEngine::new(&[(WHITE_27, "win", &[])]);
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("book.db"), book_text(&[])).unwrap();
+            std::fs::write(dir.path().join("roots.txt"), format!("sfen {WHITE_27}\n")).unwrap();
+            let mut args = run_args(dir.path(), &engine, 1, false);
+            args.engine.engine_options.push("EnteringKingRule=CSARule27".into());
+            cmd_run(&args).unwrap();
+            assert_eq!(engine.log().len(), 1);
+            args.resume = true;
+            args.iterations = 2;
+            args.engine.engine_options = vec!["EnteringKingRule=NoEnteringKing".into()];
+            // 同じ mock binary が、宣言を無効にした次の探索では合法手を返す。
+            let mut legal = MoveList::new();
+            generate_legal(&position_from_sfen(WHITE_27).unwrap(), &mut legal);
+            let mv = legal.iter().next().unwrap().to_usi();
+            std::fs::write(
+                engine.path.parent().unwrap().join("table.tsv"),
+                format!("{WHITE_27}\t{mv}\tscore cp 12 pv {mv}\n"),
+            )
+            .unwrap();
+            cmd_run(&args).unwrap();
+            assert_eq!(engine.log().len(), 2, "旧設定の終端と収束を再利用しない");
+            assert!(BookDb::read(&args.out).unwrap().find(WHITE_27).is_some());
+        }
+
+        #[test]
+        fn review2_run_rejects_internal_output_before_search() {
+            for (name, existing_parent) in [
+                ("journal.jsonl", true),
+                ("iter-001/summary.json", true),
+                ("journal.jsonl", false),
+                ("iter-001/summary.json", false),
+                ("iter-001/nested/report.md", false),
+            ] {
+                let engine = MockEngine::new(&[]);
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::write(dir.path().join("book.db"), book_text(&[])).unwrap();
+                std::fs::write(dir.path().join("roots.txt"), "").unwrap();
+                let mut args = run_args(dir.path(), &engine, 1, false);
+                args.out = args.work_dir.join(name);
+                if existing_parent {
+                    std::fs::create_dir_all(args.out.parent().unwrap()).unwrap();
+                }
+                args.resume = true;
+                let err = cmd_run(&args).expect_err("内部成果物の上書きを拒否する");
+                assert!(format!("{err:#}").contains("内部成果物"), "{err:#}");
+                assert!(engine.log().is_empty());
+                assert!(!args.out.exists());
+                if !existing_parent {
+                    assert!(!args.work_dir.exists());
+                }
+            }
+        }
+
+        #[test]
+        fn review2_old_summary_invalidates_only_terminal_cache() {
+            for carries_terminal in [false, true] {
+                let engine = MockEngine::new(&[(WHITE_27, "win", &[])]);
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::write(dir.path().join("book.db"), book_text(&[])).unwrap();
+                std::fs::write(dir.path().join("roots.txt"), format!("sfen {WHITE_27}\n")).unwrap();
+                let mut args = run_args(dir.path(), &engine, 1, false);
+                cmd_run(&args).unwrap();
+                let path = args.work_dir.join("iter-001/summary.json");
+                let mut summary: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                summary.as_object_mut().unwrap().remove("search_settings_fingerprint");
+                summary["terminal_keys"] = serde_json::json!(if carries_terminal {
+                    vec![canonical_key(WHITE_27)]
+                } else {
+                    vec![]
+                });
+                std::fs::write(path, serde_json::to_vec(&summary).unwrap()).unwrap();
+                std::fs::write(args.work_dir.join("journal.jsonl"), "").unwrap();
+                args.resume = true;
+                args.iterations = 2;
+                cmd_run(&args).unwrap();
+                assert_eq!(engine.log().len(), if carries_terminal { 2 } else { 1 });
+            }
+        }
+
+        #[test]
+        fn review2_journal_live_writer_is_not_recovered() {
+            let engine = MockEngine::new(&[]);
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("book.db"), book_text(&[])).unwrap();
+            std::fs::write(dir.path().join("roots.txt"), "").unwrap();
+            let args = run_args(dir.path(), &engine, 1, true);
+            std::fs::create_dir_all(&args.work_dir).unwrap();
+            let path = args.work_dir.join("journal.jsonl");
+            std::fs::write(&path, b"{\"key\":\"partial").unwrap();
+            let held = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            held.try_lock().unwrap();
+            let err = cmd_run(&args).expect_err("稼働中の writer を排他する");
+            assert!(
+                format!("{err:#}").contains("another book_mine process is using this journal"),
+                "{err:#}"
+            );
+            assert_eq!(held.metadata().unwrap().len(), 15);
+            drop(held);
+            cmd_run(&args).unwrap();
+            assert!(std::fs::read(&path).unwrap().is_empty());
+            let locked = LockedJournal::open(&path).unwrap();
+            let second = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            assert!(second.try_lock().is_err(), "book_mine のロック中は別ハンドルも拒否する");
+            drop(locked);
+            second.try_lock().unwrap();
+        }
 
         fn run_args(dir: &Path, engine: &MockEngine, iterations: usize, resume: bool) -> RunArgs {
             RunArgs {

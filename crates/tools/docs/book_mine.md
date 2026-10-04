@@ -38,7 +38,7 @@ cargo run -p tools --release --bin book_mine -- frontier \
 
 ### 辿り方
 
-roots から BFS で辿ります。訪問済み判定には反転を同一視した局面キーと、「実際の局面の手番が採掘側か」の組を使います。同じ役割では再訪せず循環でも停止しますが、反転で採掘側と相手側が入れ替わる経路は両方辿ります。`--side both` の場合は先手用と後手用の BFS を別々に行い、末端の和集合を取ります。
+roots から BFS で辿ります。訪問済み判定には反転を同一視した局面キーと、「実際の局面の手番が採掘側か」の組を使います。各組で訪問した最小 ply を記録し、より小さい ply で到達した場合は `--max-ply` までの残り手数が増えるため子を再展開します。同じか大きい ply では再訪せず循環でも停止しますが、反転で採掘側と相手側が入れ替わる経路は両方辿ります。`--side both` の場合は先手用と後手用の BFS を別々に行い、末端の和集合を取ります。
 
 book 内局面では、合法な候補手の `value` の最大値を `best` として次の手を辿ります。
 
@@ -144,6 +144,8 @@ cargo run -p tools --release --bin book_mine -- expand \
 
 `--resume` は key・`go`・`multipv`・`engine_fingerprint` が一致するレコードだけを再利用します。探索途中でエラーになった場合も、完了した探索は journal に追記済みなので `--resume` で再開できます。
 
+`expand` と `run` は journal に標準ライブラリの排他ファイルロックを取得し、復旧・探索・追記からコマンド終了まで保持します。別プロセスが使用中なら `another book_mine process is using this journal` として失敗します。ロックはプロセス強制終了時にも OS が解放し、ロックファイルは残しません。
+
 最終行だけが不正 JSON（不完全な UTF-8 を含む）、または末尾改行を欠く場合は、stderr に警告してその行の先頭まで journal を切り詰めます。先行する正常レコードを再利用し、破棄した探索は再実行できます。最終行以外の不正 JSON はエラーとし、ファイルを変更しません。
 
 出力 `.db` は探索順や worker の完了順に依存しません。局面は key 昇順、手は `value` 降順 → USI 昇順で書き出し、同じ入力と journal からは bit 一致します。出力は一時ファイルへ書き切ってから rename する atomic 書き込みです。
@@ -199,13 +201,13 @@ cargo run -p tools --release --bin book_mine -- run \
 - 累計追加局面数が `--max-new-positions` に達した。各周の末端数は残り予算で打ち切ります (`--extend-ply` で辿った局面の分は超過しえます)
 - 全ての非終端末端を処理し、局面・手の追加も値の埋め込みも無かった（非終端末端がゼロの場合を含む）。`--max-leaves` や残り局面予算で打ち切った周は、追加ゼロでも収束としません
 
-宣言勝ち・合法手なしと判明した末端は終端として `summary.json` の `terminal_keys` に記録し、以後の frontier 出力と件数制限の対象から除きます。`all_leaves_processed` に打ち切りの有無も保存するので、`--resume` 後も後続の末端へ進めます。宣言勝ちは設定が一致する journal からも復元します。この2項目のない既存 summary は未収束として再開し、終端を再判定します。単独の `frontier` コマンドは run の終端記録を読みません。
+宣言勝ち・合法手なしと判明した末端は、ply を除き実際の先後を保持したキーで終端として `summary.json` の `terminal_keys` に記録し、探索設定が一致する間、以後の frontier 出力と件数制限の対象から除きます。Point27 は先手28点・後手27点なので宣言勝ちは反転局面に流用しません。合法手なしも記録形式を統一するため実局面キーを使います。`all_leaves_processed` に打ち切りの有無も保存するので、`--resume` 後も後続の末端へ進めます。宣言勝ちは設定が一致する journal からも復元します。この2項目のない既存 summary は未収束として再開し、終端を再判定します。単独の `frontier` コマンドは run の終端記録を読みません。
 
 終了時に最終周の `book.db` を `--out` に書き出します。
 
 `--resume` を付けると、`iter-001` から連続する完了済み (`summary.json` と `book.db` がある) の周を飛ばし、最後の完了周の `book.db` から続けます。中断した周は最初からやり直しますが、探索結果は journal から再利用します。`--resume` 無しで前回の周や journal が残っている `--work-dir` を指定するとエラーにします。
 
-`summary.json` には `--book` / `--roots` の正準パスと SHA-256、frontier 設定 (`--side` / `--window` / `--opp-min-count` / `--own-eps` / `--max-ply` / `--max-depth` / `--max-leaves`)、`--merge` を記録します。`--resume` 時にこれらが完了済みの周の記録と異なる場合はエラーにします。パスは記録用で比較せず、ファイルは SHA-256 で照合します (同じ内容の book を別パスに置いても再開できます)。実行設定を記録していない旧形式の `summary.json` を含む `--work-dir` は再開できないため、新しい `--work-dir` で開始してください。探索設定 (`--go` / MultiPV 設定 / エンジン) は journal の再利用条件で照合され、異なる場合は journal を再利用せず探索し直します。
+`summary.json` には `--book` / `--roots` の正準パスと SHA-256、frontier 設定 (`--side` / `--window` / `--opp-min-count` / `--own-eps` / `--max-ply` / `--max-depth` / `--max-leaves`)、`--merge` を記録します。`--resume` 時にこれらが完了済みの周の記録と異なる場合はエラーにします。パスは記録用で比較せず、ファイルは SHA-256 で照合します (同じ内容の book を別パスに置いても再開できます)。実行設定を記録していない旧形式の `summary.json` を含む `--work-dir` は再開できないため、新しい `--work-dir` で開始してください。探索設定 (`--go` / MultiPV 設定 / エンジンのバイナリ・オプション。`EnteringKingRule` を含む) は journal の再利用条件で照合します。同じ条件から作る `search_settings_fingerprint` を summary にも保存し、不一致ならその周の終端キーと収束判定を無視して stderr に通知します。完了済み book は保持し、残る末端を再計算して、不一致の journal を使わず探索し直します。新フィールドのない旧 summary は終端キーを持つ場合だけ不一致として扱います。再探索するには完了済み周数より大きい `--iterations` を指定してください。
 
 中断した周のディレクトリには、書きかけの `book.db` などが残ることがあります (逆伝播の `book.db` は atomic 書き込みではありません)。周の完了は `summary.json` の有無で判定し、`--resume` はその周を最初からやり直して上書きするため、`summary.json` の無い周の成果物は使わないでください。
 
@@ -213,7 +215,7 @@ cargo run -p tools --release --bin book_mine -- run \
 
 ## パス検証
 
-`frontier` は `--book` / `--roots` / `--out` / `<out>.entered` / `--report`、`expand` は `--book` / `--out` / `--leaves` / `--journal` / `--report`、`run` は `--book` / `--out` / `--roots` の全ペアで正準パスの一致を検査し、同じファイルを指す組があれば起動時にエラーにします (`book_extend` と同じ検査)。
+`frontier` は `--book` / `--roots` / `--out` / `<out>.entered` / `--report`、`expand` は `--book` / `--out` / `--leaves` / `--journal` / `--report`、`run` は `--book` / `--out` / `--roots` の全ペアで正準パスの一致を検査し、同じファイルを指す組があれば起動時にエラーにします (`book_extend` と同じ検査)。`run` ではさらに `--book` / `--roots` / `--out` が `<work-dir>/journal.jsonl` や `<work-dir>/iter-*/` 以下（`summary.json` を含む）の内部成果物を指す場合も、未作成の出力先を含め起動時に拒否します。
 
 ## 範囲外
 
