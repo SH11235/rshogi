@@ -140,13 +140,15 @@ cargo run -p tools --release --bin book_mine -- expand \
 
 同じ局面キーの入力行は連結して保持します。未探索局面に同じ指し手が複数行ある場合、全ての一致行の value/depth を更新し、それぞれの count/ponder は保持します。
 
-`--journal` は JSON Lines 形式で、探索局面ごとに 1 行 (`key` / `sfen` / `go` / `multipv` / `engine_fingerprint` / `declaration_win` / `lines` / `multipv_used` / `extensions`) を追記します。未探索局面の既存手の searchmoves 探索は `searchmove` に対象手を入れた別レコードで、局面 key と対象手の組で再利用します。`multipv` は `--multipv` / `--multipv-delta` / `--multipv-max` を並べた文字列、`engine_fingerprint` は `--engine` の basename、バイナリの SHA-256、`--engine-option` の正規化文字列から作ります。
+`--journal` は JSON Lines 形式で、探索局面ごとに 1 行 (`key` / `sfen` / `go` / `multipv` / `engine_fingerprint` / `declaration_win` / `lines` / `multipv_used` / `extensions`) を追記します。未探索局面の既存手の searchmoves 探索は `searchmove` に対象手を入れた別レコードで、局面 key と対象手の組で再利用します。`multipv` は `--multipv` / `--multipv-delta` / `--multipv-max` を並べた文字列、`engine_fingerprint` は形式識別子 `content-v1`、`--engine` の basename、バイナリの SHA-256、`--engine-option` の正規化文字列から作ります。
 
-既存の通常ファイルを指すオプション値（`EvalFile`、`LS_PROGRESS_COEFF` など）は、パス文字列の代わりに内容の `sha256:<hex>` で識別します。`EvalDir` が既存ディレクトリなら、その直下のファイルを名前順に並べた（ファイル名・サイズ・内容の SHA-256）のハッシュを使います。存在しないパスなどは従来どおり文字列で比較します。ファイルはストリーミングでハッシュ化し、起動時に計算した fingerprint を全 worker・周回で共有します。キー名は保持します。同じパスでも内容が変われば journal と summary の終端・収束キャッシュを再利用しません。同一のネット内容と他のオプションなら、配置パスが異なるマシン間でも journal を再利用できます。ただしエンジンの basename とバイナリの SHA-256 も引き続き一致が必要です。実行中のモデル差し替えには対応しません。
+キー名が大文字小文字を問わず `File` / `Dir` / `Path` / `COEFF` で終わるオプション（`EvalFile`、`EvalDir`、`LS_PROGRESS_COEFF` を含む）だけを内容識別の対象とします。それ以外（`Threads` など）は同名のファイルがあっても値を文字列のまま比較します。対象が既存の通常ファイルなら、パス文字列の代わりに内容の `sha256:<hex>` で識別します。対象が既存ディレクトリなら、その直下の通常ファイル（symlink のリンク先を含む）を名前順に並べた（ファイル名・サイズ・内容の SHA-256）のハッシュを使います。ディレクトリ内の壊れた symlink はエラーにします。存在しないオプション値のパスなどは従来どおり文字列で比較します。ファイルはストリーミングでハッシュ化し、起動時に計算した fingerprint を全 worker・周回で共有します。キー名は保持します。同じパスでも内容が変われば journal と summary の終端・収束キャッシュを再利用しません。同一のネット内容と他のオプションなら、配置パスが異なるマシン間でも journal を再利用できます。ただしエンジンの basename とバイナリの SHA-256 も引き続き一致が必要です。実行中のモデル差し替えには対応しません。
+
+内容ハッシュ導入前の journal は新しい fingerprint 形式と一致しないため再利用せず、再開時に対象局面を再探索します。モデル指定のない旧 journal も同様です。
 
 `--resume` は key・`go`・`multipv`・`engine_fingerprint` が一致するレコードだけを再利用します。探索途中でエラーになった場合も、完了した探索は journal に追記済みなので `--resume` で再開できます。
 
-`expand` と `run` は journal に標準ライブラリの排他ファイルロックを取得し、復旧・探索・追記からコマンド終了まで保持します。別プロセスが使用中なら `another book_mine process is using this journal` として失敗します。ロックはプロセス強制終了時にも OS が解放し、ロックファイルは残しません。
+`expand` と `run` は journal に標準ライブラリの排他ファイルロックを取得し、復旧・探索・追記からコマンド終了まで保持します。別プロセスが使用中なら `another book_mine process is using this journal` として失敗します。通常終了・エラー終了では worker 終了後に明示的に unlock し、Unix の別スレッドが生成した子の fork→exec 間の fd 複製にも解放を依存させません。ロックはプロセス強制終了時にも OS が解放し、ロックファイルは残しません。
 
 最終行だけが不正 JSON（不完全な UTF-8 を含む）、または末尾改行を欠く場合は、stderr に警告してその行の先頭まで journal を切り詰めます。先行する正常レコードを再利用し、破棄した探索は再実行できます。最終行以外の不正 JSON はエラーとし、ファイルを変更しません。
 
@@ -207,7 +209,7 @@ cargo run -p tools --release --bin book_mine -- run \
 
 終了時に最終周の `book.db` を `--out` に書き出します。
 
-`--resume` を付けると、`iter-001` から連続する完了済み (`summary.json` と `book.db` がある) の周を飛ばし、最後の完了周の `book.db` から続けます。中断した周は最初からやり直しますが、探索結果は journal から再利用します。`--resume` 無しで前回の周や journal が残っている `--work-dir` を指定するとエラーにします。
+`--resume` を付けると、`iter-001` から連続する完了済み (`summary.json` と `book.db` がある) の周を飛ばし、最後の完了周の `book.db` から続けます。保存済み summary が収束または全末端処理済みを示していても、その book の frontier を既知の終端を除いて再計算し、空の場合だけ周回を省略します。旧版で誤収束した循環の出口もこの再計算で探索を続けます。中断した周は最初からやり直しますが、探索結果は journal から再利用します。`--resume` 無しで前回の周や journal が残っている `--work-dir` を指定するとエラーにします。
 
 `summary.json` には `--book` / `--roots` の正準パスと SHA-256、frontier 設定 (`--side` / `--window` / `--opp-min-count` / `--own-eps` / `--max-ply` / `--max-depth` / `--max-leaves`)、`--merge` を記録します。`--resume` 時にこれらが完了済みの周の記録と異なる場合はエラーにします。パスは記録用で比較せず、ファイルは SHA-256 で照合します (同じ内容の book を別パスに置いても再開できます)。実行設定を記録していない旧形式の `summary.json` を含む `--work-dir` は再開できないため、新しい `--work-dir` で開始してください。探索設定 (`--go` / MultiPV 設定 / エンジンのバイナリ・オプション。`EnteringKingRule` を含む) は journal の再利用条件で照合します。同じ条件から作る `search_settings_fingerprint` を summary にも保存し、不一致ならその周の終端キーと収束判定を無視して stderr に通知します。完了済み book は保持し、残る末端を再計算して、不一致の journal を使わず探索し直します。新フィールドのない旧 summary は終端キーを持つ場合だけ不一致として扱います。再探索するには完了済み周数より大きい `--iterations` を指定してください。
 
@@ -217,7 +219,7 @@ cargo run -p tools --release --bin book_mine -- run \
 
 ## パス検証
 
-`frontier` は `--book` / `--roots` / `--out` / `<out>.entered` / `--report`、`expand` は `--book` / `--out` / `--leaves` / `--journal` / `--report`、`run` は `--book` / `--out` / `--roots` の全ペアで正準パスの一致を検査し、同じファイルを指す組があれば起動時にエラーにします（Windows では未作成部分も大小文字を区別せず、Unix では区別します）。`run` ではさらに `--book` / `--roots` / `--out` が `<work-dir>/journal.jsonl` や `<work-dir>/iter-*/` 以下（`summary.json` を含む）の内部成果物を指す場合も、未作成の出力先を含め起動時に拒否します。既存の内部成果物が symlink／junction の場合も解決先と比較し、リンク経由・解決先への直接指定のどちらも拒否します。
+`frontier` は `--book` / `--roots` / `--out` / `<out>.entered` / `--report`、`expand` は `--book` / `--out` / `--leaves` / `--journal` / `--report`、`run` は `--book` / `--out` / `--roots` の全ペアで正準パスの一致を検査し、同じファイルを指す組があれば起動時にエラーにします（Windows では未作成部分も大小文字を区別せず、Unix では区別します）。`run` ではさらに `--book` / `--roots` / `--engine` / `--out` が `<work-dir>/journal.jsonl` や `<work-dir>/iter-*/` 以下（`summary.json` を含む）の内部成果物を指す場合も、未作成の出力先を含め起動時に拒否します。起動時に既存の journal と iter-* 以下を検査し、内部成果物の symlink／junction はリンク先によらず拒否します。各周の開始時にも検査します。book.db、expanded.db、summary.json、leaves、各 report を含むため、内部ファイルリンクから入力や宣言済み出力への書き込みも拒否します。実行中に別プロセスが内部成果物を差し替える操作には対応しません。
 
 ## 範囲外
 

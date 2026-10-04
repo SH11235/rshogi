@@ -260,6 +260,24 @@ fn read_book_checked(path: &Path) -> Result<BookDb> {
     BookDb::read(path)
 }
 
+/// 内部成果物は通常ファイル・ディレクトリだけを許し、リンク先への書き込みを防ぐ。
+fn reject_internal_links(path: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        bail!("内部成果物への symlink / junction は使用できません: {}", path.display());
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            reject_internal_links(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// work-dir の journal と各周の名前空間は内部成果物専用とする。
 fn reject_internal_artifact(name: &str, path: &Path, work_dir: &Path) -> Result<()> {
     let path = canonicalize_output_collision_path(path)?;
@@ -272,6 +290,7 @@ fn reject_internal_artifact(name: &str, path: &Path, work_dir: &Path) -> Result<
             #[cfg(windows)]
             let name_text = name_text.to_lowercase();
             if name_text == "journal.jsonl" || name_text.starts_with("iter-") {
+                reject_internal_links(&entry.path())?;
                 let artifact = canonicalize_output_collision_path(&entry.path())?;
                 if path.starts_with(&artifact) {
                     bail!("{name} は --work-dir の内部成果物と衝突します: {}", path.display());
@@ -771,7 +790,11 @@ fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<S
     for option in engine_options {
         let normalized = if let Some((key, value)) = option.split_once('=') {
             let path = Path::new(value.trim());
-            if path.is_file() || (key.trim().eq_ignore_ascii_case("EvalDir") && path.is_dir()) {
+            let key_lower = key.trim().to_ascii_lowercase();
+            let file_option = ["file", "dir", "path", "coeff"]
+                .iter()
+                .any(|suffix| key_lower.ends_with(suffix));
+            if file_option && (path.is_file() || path.is_dir()) {
                 format!("{key}=sha256:{}", model_content_hash(path, &mut hashes)?)
             } else {
                 option.clone()
@@ -784,7 +807,7 @@ fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<S
     normalized_options
         .sort_by(|a, b| engine_option_key(a).cmp(engine_option_key(b)).then_with(|| a.cmp(b)));
     Ok(format!(
-        "{engine_name}\tsha256={engine_sha256:x}\t{}",
+        "content-v1\t{engine_name}\tsha256={engine_sha256:x}\t{}",
         normalized_options.join("\n")
     ))
 }
@@ -799,7 +822,8 @@ fn model_content_hash(path: &Path, cache: &mut HashMap<PathBuf, String>) -> Resu
         let mut entries = std::fs::read_dir(&path)?.collect::<std::io::Result<Vec<_>>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            let metadata = entry.metadata()?;
+            // リンクされたモデルも内容で識別し、壊れたリンクはエラーにする。
+            let metadata = std::fs::metadata(entry.path())?;
             if metadata.is_file() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
@@ -829,7 +853,7 @@ fn engine_option_key(option: &str) -> &str {
     option.split_once('=').map_or(option, |(key, _)| key).trim()
 }
 
-/// ロックはこのハンドルと複製を閉じるまで保持され、プロセス終了時にも OS が解放する。
+/// コマンド終了時は明示的に unlock し、fork 直後の子の複製に解放を依存させない。
 struct LockedJournal {
     file: File,
 }
@@ -850,6 +874,16 @@ impl LockedJournal {
             )
         })?;
         Ok(Self { file })
+    }
+}
+
+impl Drop for LockedJournal {
+    fn drop(&mut self) {
+        // CLOEXEC は exec 時にしか効かない。別スレッドの fork が同じ open file
+        // description を保持していても、unlock は共有されたロックを解放する。
+        if let Err(err) = self.file.unlock() {
+            eprintln!("journal のロック解放に失敗しました: {err}");
+        }
     }
 }
 
@@ -1320,9 +1354,10 @@ struct Expander<'a> {
     parallel: usize,
     extend_ply: u32,
     journal_path: &'a Path,
+    // フィールド順で drop されるため、worker の終了を待ってからロックを解放する。
+    pool: Option<EnginePool>,
     locked: LockedJournal,
     journal: HashMap<String, JournalRecord>,
-    pool: Option<EnginePool>,
 }
 
 impl Expander<'_> {
@@ -1900,6 +1935,7 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
         ("--book", args.book.as_path()),
         ("--out", args.out.as_path()),
         ("--roots", args.frontier.roots.as_path()),
+        ("--engine", args.engine.engine.as_path()),
     ] {
         reject_internal_artifact(name, path, &args.work_dir)?;
     }
@@ -1981,6 +2017,18 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             .filter(|r| r.declaration_win)
             .map(|r| strip_ply(&r.sfen).to_string()),
     );
+    if completed.last().is_some_and(|summary| summary.all_leaves_processed) {
+        // 旧版で誤収束した summary も、保存済み book に末端があれば続行する。
+        converged = compute_frontier_excluding(
+            &BookDb::read(&current_book)?,
+            &roots,
+            &args.frontier,
+            &terminals,
+        )?
+        .stats
+        .leaves_before_limit
+            == 0;
+    }
     if !completed.is_empty() {
         eprintln!("book_mine run: 完了済みの {} 周から再開します", completed.len());
     }
@@ -2005,6 +2053,7 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
         }
 
         let dir = iter_dir(&args.work_dir, iteration);
+        reject_internal_links(&dir)?;
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("作成できません: {}", dir.display()))?;
         let book = BookDb::read(&current_book)?;
@@ -3313,7 +3362,7 @@ done
         }
 
         #[test]
-        fn review2_old_summary_invalidates_only_terminal_cache() {
+        fn review2_old_summary_rechecks_terminal_cache_and_frontier() {
             for carries_terminal in [false, true] {
                 let engine = MockEngine::new(&[(WHITE_27, "win", &[])]);
                 let dir = tempfile::tempdir().unwrap();
@@ -3335,7 +3384,8 @@ done
                 args.resume = true;
                 args.iterations = 2;
                 cmd_run(&args).unwrap();
-                assert_eq!(engine.log().len(), if carries_terminal { 2 } else { 1 });
+                // 終端キーがなくても、journal を失った旧収束判定は frontier で再検査する。
+                assert_eq!(engine.log().len(), 2);
             }
         }
 
@@ -3357,6 +3407,7 @@ done
                 "{err:#}"
             );
             assert_eq!(held.metadata().unwrap().len(), 15);
+            held.unlock().unwrap();
             drop(held);
             cmd_run(&args).unwrap();
             assert!(std::fs::read(&path).unwrap().is_empty());
@@ -3382,6 +3433,191 @@ done
                 work_dir: dir.join("work"),
                 resume,
             }
+        }
+
+        #[test]
+        fn review4_internal_file_links_are_rejected() {
+            let engine = MockEngine::new(&[]);
+            for artifact in [
+                "iter-001/book.db",
+                "journal.jsonl",
+                "iter-001/expanded.db",
+                "iter-001/summary.json",
+                "iter-001/leaves.txt",
+                "iter-001/leaves.txt.entered",
+                "iter-001/frontier.md",
+                "iter-001/expand.md",
+                "iter-001/backprop.md",
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let args = run_args(dir.path(), &engine, 1, true);
+                let original = book_text(&[]);
+                std::fs::write(&args.book, &original).unwrap();
+                std::fs::write(&args.frontier.roots, "").unwrap();
+                let link = args.work_dir.join(artifact);
+                std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+                if !file_symlink(&args.book, &link) {
+                    return;
+                }
+                let result = cmd_run(&args);
+                assert_eq!(std::fs::read_to_string(&args.book).unwrap(), original, "{artifact}");
+                let err = result.expect_err(artifact);
+                assert!(format!("{err:#}").contains("内部成果物"), "{artifact}: {err:#}");
+            }
+        }
+
+        fn file_symlink(target: &Path, link: &Path) -> bool {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(target, link).unwrap();
+                true
+            }
+            #[cfg(windows)]
+            {
+                let output = std::process::Command::new("cmd")
+                    .args(["/c", "mklink"])
+                    .arg(link)
+                    .arg(target)
+                    .output()
+                    .unwrap();
+                if !output.status.success() {
+                    eprintln!(
+                        "SKIP: file symlink を作成できません: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                output.status.success()
+            }
+        }
+
+        #[test]
+        fn review4_eval_dir_symlink_content_and_broken_link() {
+            let engine = MockEngine::new(&[]);
+            let dir = tempfile::tempdir().unwrap();
+            let model = dir.path().join("model");
+            let eval = dir.path().join("eval");
+            std::fs::create_dir(&eval).unwrap();
+            std::fs::write(&model, "first").unwrap();
+            if !file_symlink(&model, &eval.join("nn.bin")) {
+                return;
+            }
+            let options = vec![format!("EvalDir={}", eval.display())];
+            let before = engine_fingerprint(&engine.path, &options).unwrap();
+            std::fs::write(&model, "other").unwrap();
+            assert_ne!(before, engine_fingerprint(&engine.path, &options).unwrap());
+            std::fs::remove_file(&model).unwrap();
+            assert!(engine_fingerprint(&engine.path, &options).is_err());
+        }
+
+        #[test]
+        fn review4_numeric_options_keep_text() {
+            const CHILD: &str = "BOOK_MINE_NUMERIC_OPTIONS_CHILD";
+            if std::env::var_os(CHILD).is_some() {
+                let engine = std::env::current_exe().unwrap();
+                assert_ne!(
+                    engine_fingerprint(&engine, &["Threads=1".into()]).unwrap(),
+                    engine_fingerprint(&engine, &["Threads=2".into()]).unwrap()
+                );
+                return;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            for name in ["1", "2"] {
+                std::fs::write(dir.path().join(name), "same").unwrap();
+            }
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::run::review4_numeric_options_keep_text",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[test]
+        fn review4_old_converged_summary_repairs_cycle_exit() {
+            let b = after(KINGS, &["5i6i"]);
+            let c = after(&b, &["5a6a"]);
+            let d = after(&c, &["6i5i"]);
+            let exit = after(KINGS, &["5i4i"]);
+            let engine = MockEngine::new(&[(&exit, "5a4a", &["score cp 20 pv 5a4a"])]);
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("book.db"),
+                book_text(&[
+                    (KINGS, &[("5i6i", 100, 10, 1), ("5i4i", 50, 10, 1)]),
+                    (&b, &[("5a6a", 100, 10, 1)]),
+                    (&c, &[("6i5i", 100, 10, 1)]),
+                    (&d, &[("6a5a", 100, 10, 1)]),
+                ]),
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("roots.txt"), format!("sfen {KINGS}\n")).unwrap();
+            let mut args = run_args(dir.path(), &engine, 1, false);
+            cmd_run(&args).unwrap();
+            let path = args.work_dir.join("iter-001/summary.json");
+            let mut summary: IterationSummary =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            summary.all_leaves_processed = true;
+            assert!(summary.converged());
+            std::fs::write(path, serde_json::to_vec(&summary).unwrap()).unwrap();
+            args.resume = true;
+            args.iterations = 2;
+            cmd_run(&args).unwrap();
+            assert!(BookDb::read(&args.out).unwrap().find(&exit).is_some());
+            assert_eq!(engine.log().len(), 1);
+        }
+
+        #[test]
+        fn review4_journal_drop_unlocks_shared_description() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal.jsonl");
+            let locked = LockedJournal::open(&path).unwrap();
+            // fork から exec まで子が持つ open file description の複製を再現する。
+            let inherited = locked.file.try_clone().unwrap();
+            assert!(LockedJournal::open(&path).is_err());
+            drop(locked);
+            let reopened = LockedJournal::open(&path).unwrap();
+            drop(inherited);
+            assert!(LockedJournal::open(&path).is_err());
+            drop(reopened);
+            LockedJournal::open(&path).unwrap();
+        }
+
+        #[test]
+        fn review4_resume_researches_pre_content_hash_journal() {
+            let engine = MockEngine::new(&[(WHITE_27, "win", &[])]);
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("book.db"), book_text(&[])).unwrap();
+            std::fs::write(dir.path().join("roots.txt"), format!("sfen {WHITE_27}\n")).unwrap();
+            let mut args = run_args(dir.path(), &engine, 1, false);
+            cmd_run(&args).unwrap();
+            let path = args.work_dir.join("journal.jsonl");
+            let mut record: JournalRecord =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            record.engine_fingerprint =
+                record.engine_fingerprint.strip_prefix("content-v1\t").unwrap().to_owned();
+            std::fs::write(&path, format!("{}\n", serde_json::to_string(&record).unwrap()))
+                .unwrap();
+            let summary_path = args.work_dir.join("iter-001/summary.json");
+            let mut summary: IterationSummary =
+                serde_json::from_slice(&std::fs::read(&summary_path).unwrap()).unwrap();
+            let mut old = SearchSettings::new(&args.engine).unwrap();
+            old.fingerprint = record.engine_fingerprint;
+            summary.search_settings_fingerprint = Some(old.cache_fingerprint());
+            std::fs::write(summary_path, serde_json::to_vec(&summary).unwrap()).unwrap();
+            args.resume = true;
+            args.iterations = 2;
+            cmd_run(&args).unwrap();
+            assert_eq!(engine.log().len(), 2);
         }
 
         #[test]
