@@ -105,8 +105,6 @@ jobs:
               echo "secret \`PULUMI_ACCESS_TOKEN\` が未設定です。"
               echo "https://app.pulumi.com/account/tokens で Personal Access Token を発行し、"
               echo "リポジトリ Settings → Secrets and variables → Actions に登録してください。"
-              echo
-              echo "See \`docs/csa-server/iac.md\` §6 for setup."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::Pulumi preview skipped (PULUMI_ACCESS_TOKEN not configured)."
           fi
