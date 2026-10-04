@@ -38,7 +38,7 @@ cargo run -p tools --release --bin book_mine -- frontier \
 
 ### 辿り方
 
-roots から BFS で辿ります。訪問済みの局面 (反転キーも同一視) は再訪しないため、千日手などの循環でも停止します。`--side both` の場合は先手用と後手用の BFS を別々に行い、末端の和集合を取ります。
+roots から BFS で辿ります。訪問済み判定には反転を同一視した局面キーと、「実際の局面の手番が採掘側か」の組を使います。同じ役割では再訪せず循環でも停止しますが、反転で採掘側と相手側が入れ替わる経路は両方辿ります。`--side both` の場合は先手用と後手用の BFS を別々に行い、末端の和集合を取ります。
 
 book 内局面では、合法な候補手の `value` の最大値を `best` として次の手を辿ります。
 
@@ -138,9 +138,13 @@ cargo run -p tools --release --bin book_mine -- expand \
 
 ### journal と決定性
 
+同じ局面キーの入力行は連結して保持します。未探索局面に同じ指し手が複数行ある場合、全ての一致行の value/depth を更新し、それぞれの count/ponder は保持します。
+
 `--journal` は JSON Lines 形式で、探索局面ごとに 1 行 (`key` / `sfen` / `go` / `multipv` / `engine_fingerprint` / `declaration_win` / `lines` / `multipv_used` / `extensions`) を追記します。未探索局面の既存手の searchmoves 探索は `searchmove` に対象手を入れた別レコードで、局面 key と対象手の組で再利用します。`multipv` は `--multipv` / `--multipv-delta` / `--multipv-max` を並べた文字列、`engine_fingerprint` は `book_extend` と同じく `--engine` の basename、バイナリの SHA-256、`--engine-option` の正規化文字列から作ります。
 
 `--resume` は key・`go`・`multipv`・`engine_fingerprint` が一致するレコードだけを再利用します。探索途中でエラーになった場合も、完了した探索は journal に追記済みなので `--resume` で再開できます。
+
+最終行だけが不正 JSON（不完全な UTF-8 を含む）、または末尾改行を欠く場合は、stderr に警告してその行の先頭まで journal を切り詰めます。先行する正常レコードを再利用し、破棄した探索は再実行できます。最終行以外の不正 JSON はエラーとし、ファイルを変更しません。
 
 出力 `.db` は探索順や worker の完了順に依存しません。局面は key 昇順、手は `value` 降順 → USI 昇順で書き出し、同じ入力と journal からは bit 一致します。出力は一時ファイルへ書き切ってから rename する atomic 書き込みです。
 
@@ -193,7 +197,9 @@ cargo run -p tools --release --bin book_mine -- run \
 
 - `--iterations` 周に達した
 - 累計追加局面数が `--max-new-positions` に達した。各周の末端数は残り予算で打ち切ります (`--extend-ply` で辿った局面の分は超過しえます)
-- 末端が無くなった、または局面・手の追加も値の埋め込みも無かった
+- 全ての非終端末端を処理し、局面・手の追加も値の埋め込みも無かった（非終端末端がゼロの場合を含む）。`--max-leaves` や残り局面予算で打ち切った周は、追加ゼロでも収束としません
+
+宣言勝ち・合法手なしと判明した末端は終端として `summary.json` の `terminal_keys` に記録し、以後の frontier 出力と件数制限の対象から除きます。`all_leaves_processed` に打ち切りの有無も保存するので、`--resume` 後も後続の末端へ進めます。宣言勝ちは設定が一致する journal からも復元します。この2項目のない既存 summary は未収束として再開し、終端を再判定します。単独の `frontier` コマンドは run の終端記録を読みません。
 
 終了時に最終周の `book.db` を `--out` に書き出します。
 

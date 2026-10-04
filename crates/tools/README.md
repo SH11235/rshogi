@@ -20,8 +20,8 @@ LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md
 | `book_kachi_label` | YANEURAOU-DB2016 テキスト定跡のノード×候補手ごとに CSA corpus から `%KACHI` 決着率を集計し sidecar JSONL を生成（flip 合流対応、[詳細](docs/book_kachi_label.md)） |
 | `book_rescore` | YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与、実行中は進捗/ETA を stderr 表示（[詳細](docs/book_rescore.md)） |
 | `book_extend` | YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加（[詳細](docs/book_extend.md)） |
-| `book_backprop` | 定跡の値を SCC negamax 逆伝播。既定出力を変更し、循環の引分下限撤去・連続王手・内部距離による同値補正に対応。探索 depth を保持し、未探索 0/0 を保護可能。`--add-transposition-moves` で手順間の合流手を補完（[詳細](docs/book_backprop.md)） |
-| `book_mine` | YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する BookMiner 相当ツール（[詳細](docs/book_mine.md)） |
+| `book_backprop` | 定跡の値を SCC negamax 逆伝播。既定出力を変更し、循環の引分下限撤去・連続する王手のみの DFS（全体 500 万訪問でエラー）・合法値下限を守る同値補正に対応。探索 depth を保持し、未探索 0/0 を保護可能。`--add-transposition-moves` で手順間の合流手を補完（[詳細](docs/book_backprop.md)） |
+| `book_mine` | 反転局面の採掘側役割を区別し、重複行を全件ラベル付け。run は終端記録・末端打ち切りを保存して再開し、journal の不完全な最終行は警告して切り詰める。YANEURAOU-DB2016 テキスト定跡を自エンジンの MultiPV 探索で book 外へ展開し、逆伝播と周回する BookMiner 相当ツール（[詳細](docs/book_mine.md)） |
 
 ### 棋譜閲覧
 

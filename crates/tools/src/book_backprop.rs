@@ -2,6 +2,7 @@
 //!
 //! `book_backprop` bin と `book_mine run` の双方から呼ぶ。
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -418,7 +419,11 @@ struct SccEvaluator<'a> {
     params: BestParams,
     check_loop: Vec<bool>,
     input_lengths: Vec<usize>,
+    check_visits: Cell<usize>,
 }
+
+// 全 SCC・反復・始点で共有する、1 回の逆伝播の訪問上限。
+const CHECK_VISIT_LIMIT: usize = 5_000_000;
 
 impl SccEvaluator<'_> {
     fn merged(&self, node: usize, idx: usize, mut value: ValueDistance) -> ValueDistance {
@@ -457,19 +462,23 @@ impl SccEvaluator<'_> {
     // ループ以外への離脱は、SCC 反復の前回値と通常の negamax / merge で比較する。
     // ループ内で min(入力ラベル, 勝ち値) を取ると反則負けまで 0 に消えるため、
     // 継続辺は純 negamax で規則評価を伝え、既存ラベルとの merge は出力時に行う。
-    fn check_best(&self, root: usize, values: &[ValueDistance]) -> ValueDistance {
+    fn check_best(&self, root: usize, values: &[ValueDistance]) -> Result<ValueDistance> {
         struct Frame {
             node: usize,
             next: usize,
             best: Option<ValueDistance>,
+            checking: bool,
         }
-        let mut trajectory = vec![false; values.len()];
+        self.visit_check_node()?;
+        let mut trajectory = vec![[false; 2]; values.len()];
+        let checking = !self.graph.checked[root];
         let mut stack = vec![Frame {
             node: root,
             next: 0,
             best: None,
+            checking,
         }];
-        trajectory[root] = true;
+        trajectory[root][usize::from(checking)] = true;
         while let Some(frame) = stack.last_mut() {
             let node = frame.node;
             if frame.next == self.graph.moves[node].len() {
@@ -477,10 +486,10 @@ impl SccEvaluator<'_> {
                     value: self.params.draw_value,
                     distance: 0,
                 });
-                trajectory[node] = false;
+                trajectory[node][usize::from(frame.checking)] = false;
                 stack.pop();
                 let Some(parent) = stack.last_mut() else {
-                    return result;
+                    return Ok(result);
                 };
                 let candidate = result.for_parent();
                 if parent.best.is_none_or(|best| candidate.better(best)) {
@@ -494,9 +503,14 @@ impl SccEvaluator<'_> {
             if !self.params.counts(mv) {
                 continue;
             }
-            let candidate = if let Some(edge) = mv.edge.filter(|e| self.check_loop[e.to]) {
-                if trajectory[edge.to] {
-                    if self.graph.checked[edge.to] {
+            // 王手側は王手をかける手のみ継続する。被王手側の応手では役割を交換しない。
+            let candidate = if let Some(edge) = mv
+                .edge
+                .filter(|e| self.check_loop[e.to] && (!frame.checking || self.graph.checked[e.to]))
+            {
+                let child_checking = !frame.checking;
+                if trajectory[edge.to][usize::from(child_checking)] {
+                    if frame.checking {
                         ValueDistance {
                             value: -Value::MATE.raw(),
                             distance: PERPETUAL_CHECK,
@@ -508,11 +522,13 @@ impl SccEvaluator<'_> {
                         }
                     }
                 } else {
-                    trajectory[edge.to] = true;
+                    self.visit_check_node()?;
+                    trajectory[edge.to][usize::from(child_checking)] = true;
                     stack.push(Frame {
                         node: edge.to,
                         next: 0,
                         best: None,
+                        checking: child_checking,
                     });
                     continue;
                 }
@@ -524,6 +540,17 @@ impl SccEvaluator<'_> {
             }
         }
         unreachable!("DFS は root の結果を返す")
+    }
+
+    fn visit_check_node(&self) -> Result<()> {
+        let visits = self.check_visits.get();
+        if visits == CHECK_VISIT_LIMIT {
+            bail!(
+                "check-loop structure is too complex: 連続王手 DFS の訪問上限 ({CHECK_VISIT_LIMIT}/backprop run) を超えました。book は出力しません"
+            );
+        }
+        self.check_visits.set(visits + 1);
+        Ok(())
     }
 }
 
@@ -684,6 +711,7 @@ pub fn propagate_values_with(
     };
     let scc = build_scc_graph(&graph.adjacency);
     let evaluator = SccEvaluator {
+        check_visits: Cell::new(0),
         graph,
         params,
         check_loop: extract_check_loop(graph),
@@ -723,7 +751,7 @@ pub fn propagate_values_with(
         } else {
             let node = scc.comps[comp][0];
             node_best[node] = if evaluator.check_loop[node] {
-                evaluator.check_best(node, &node_best)
+                evaluator.check_best(node, &node_best)?
             } else {
                 evaluator.best(node, &node_best)
             };
@@ -759,7 +787,8 @@ pub fn propagate_values_with(
                 } else if best
                     .is_some_and(|best| best.value == vd.value && best.distance != vd.distance)
                 {
-                    vd.value = vd.value.saturating_sub(1);
+                    // 最小の合法値 -MATE は据え置き、-INFINITE を生成しない。
+                    vd.value = vd.value.saturating_sub(1).max(-Value::MATE.raw());
                 }
             }
             output
@@ -828,7 +857,7 @@ fn iterate_nontrivial_scc(
         let mut changed = false;
         for &node in nodes {
             let best = if evaluator.check_loop[node] {
-                evaluator.check_best(node, &prev)
+                evaluator.check_best(node, &prev)?
             } else {
                 evaluator.best(node, &prev)
             };
@@ -1151,6 +1180,92 @@ fn write_top_changes(writer: &mut dyn Write, changes: &[NodeChange]) -> Result<(
 mod tests {
     use super::*;
 
+    #[test]
+    fn review_quiet_cycle_with_check_branches_stays_draw() {
+        let mut sfen = "5k3/9/6R2/9/9/9/6r2/9/5K3 b - 1".to_string();
+        let mut input = format!("{BOOK_HEADER}\n");
+        let mut quiet = Vec::new();
+        for (mv, branch) in [
+            ("3c5c", ["3c4c", "4a3a", "4c3c", "3a4a"]),
+            ("3g5g", ["3g4g", "4i3i", "4g3g", "3i4i"]),
+            ("5c3c", ["5c4c", "4a5a", "4c5c", "5a4a"]),
+            ("5g3g", ["5g4g", "4i5i", "4g5g", "5i4i"]),
+        ] {
+            quiet.push((strip_ply(&sfen).to_string(), mv));
+            input.push_str(&format!("sfen {sfen}\n{mv} none 0 10 1\n"));
+            let mut check = sfen.clone();
+            for checking_move in branch {
+                input.push_str(&format!("sfen {check}\n{checking_move} none 0 10 1\n"));
+                check = child_position_after_move(&check, checking_move).unwrap().to_sfen();
+            }
+            assert_eq!(strip_ply(&check), strip_ply(&sfen));
+            sfen = child_position_after_move(&sfen, mv).unwrap().to_sfen();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("in.db");
+        std::fs::write(&path, input).unwrap();
+        let book = read_book_db(&path).unwrap();
+        let mut graph = build_graph(&book).unwrap();
+        assert_eq!(graph.illegal_moves, 0);
+        propagate_values(&book, &mut graph, 0, 1000, MergeMode::Replace).unwrap();
+        for (key, mv) in quiet {
+            let node = graph.keys.iter().position(|k| k == &key).unwrap();
+            let index = book.entries[&key]
+                .moves
+                .iter()
+                .position(|m| m.move_usi.as_deref() == Some(mv))
+                .unwrap();
+            assert_eq!(graph.moves[node][index].new, 0, "{mv}: {key}");
+        }
+    }
+
+    #[test]
+    fn review_check_dfs_branch_merge_budget() {
+        let mut rows = vec![Vec::new(); 62];
+        for level in 0..20 {
+            let n = level * 3;
+            rows[n] = vec![(0, Some(n + 1)), (0, Some(n + 2))];
+            rows[n + 1] = vec![(0, Some(n + 3))];
+            rows[n + 2] = vec![(0, Some(n + 3))];
+        }
+        rows[60] = vec![(0, Some(61))];
+        rows[61] = vec![(0, Some(0))];
+        let refs: Vec<_> = rows.iter().map(Vec::as_slice).collect();
+        let mut graph = solve_rows(&refs, 1000).unwrap();
+        graph.checked = (0..62).map(|n| n % 3 != 0).collect();
+        let evaluator = SccEvaluator {
+            check_visits: Cell::new(0),
+            graph: &graph,
+            params: BestParams {
+                draw_value: 0,
+                merge: MergeMode::Replace,
+                skip_unusable_moves: false,
+            },
+            check_loop: extract_check_loop(&graph),
+            input_lengths: rows.iter().map(Vec::len).collect(),
+        };
+        assert!(evaluator.check_loop.iter().all(|&v| v));
+        let values = vec![
+            ValueDistance {
+                value: 0,
+                distance: DISTANCE_MAX
+            };
+            62
+        ];
+        let result = evaluator.check_best(0, &values);
+        assert!(
+            format!("{result:?}").contains("check-loop structure is too complex"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn review_tie_correction_stays_inside_mate_boundary() {
+        let graph = solve_rows(&[&[(-32000, None), (0, Some(1))], &[(32000, None)]], 1000).unwrap();
+        assert_eq!(graph.moves[0][0].new, -32000);
+        assert_eq!(graph.moves[0][1].new, -32000);
+    }
+
     fn solve_rows(rows: &[&[(i32, Option<usize>)]], max_iters: usize) -> Result<Graph> {
         let keys: Vec<_> = (0..rows.len()).map(|i| i.to_string()).collect();
         let book = BookDb {
@@ -1266,6 +1381,7 @@ mod tests {
         // 非ゼロの draw 初期値による周期 2 の振動も、成功扱いしない。
         let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0))]], 1).unwrap();
         let evaluator = SccEvaluator {
+            check_visits: Cell::new(0),
             graph: &graph,
             params: BestParams {
                 draw_value: 1,

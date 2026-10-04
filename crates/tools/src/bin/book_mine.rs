@@ -335,6 +335,15 @@ fn compute_frontier(
     roots: &[String],
     opts: &FrontierOpts,
 ) -> Result<FrontierResult> {
+    compute_frontier_excluding(book, roots, opts, &BTreeSet::new())
+}
+
+fn compute_frontier_excluding(
+    book: &BookDb,
+    roots: &[String],
+    opts: &FrontierOpts,
+    terminals: &BTreeSet<String>,
+) -> Result<FrontierResult> {
     let sides: &[Color] = match opts.side {
         SideArg::Black => &[Color::Black],
         SideArg::White => &[Color::White],
@@ -348,7 +357,11 @@ fn compute_frontier(
     for (sfen, move_usi) in &stats.illegal_moves {
         eprintln!("警告: 非合法な book 手を飛ばします: sfen={sfen} move={move_usi}");
     }
-    let mut list: Vec<Leaf> = leaves.into_values().collect();
+    let mut list: Vec<Leaf> = leaves
+        .into_iter()
+        .filter(|(key, _)| !terminals.contains(key))
+        .map(|(_, leaf)| leaf)
+        .collect();
     list.sort_by(|a, b| {
         a.depth.cmp(&b.depth).then_with(|| strip_ply(&a.sfen).cmp(strip_ply(&b.sfen)))
     });
@@ -372,10 +385,10 @@ fn traverse_side(
     leaves: &mut BTreeMap<String, Leaf>,
     stats: &mut FrontierStats,
 ) -> Result<()> {
-    let mut visited = HashSet::<String>::new();
+    let mut visited = HashSet::<(String, bool)>::new();
     let mut queue = VecDeque::<(String, u32)>::new();
     for root in roots {
-        if visited.insert(canonical_key(root)) {
+        if visited.insert((canonical_key(root), side_to_move(root)? == side)) {
             queue.push_back((root.clone(), 0));
         }
     }
@@ -435,7 +448,7 @@ fn traverse_side(
                 continue;
             }
             let child_sfen = child.to_sfen();
-            if !visited.insert(canonical_key(&child_sfen)) {
+            if !visited.insert((canonical_key(&child_sfen), side_to_move(&child_sfen)? == side)) {
                 continue;
             }
             if book.find(&child_sfen).is_some() {
@@ -707,14 +720,31 @@ fn load_journal(path: &Path, settings: &SearchSettings) -> Result<HashMap<String
     }
     let file =
         File::open(path).with_context(|| format!("journal を開けません: {}", path.display()))?;
-    for (line_no, line) in BufReader::new(file).lines().enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let mut reader = BufReader::new(file);
+    let mut offset = 0u64;
+    let mut line_no = 0;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_until(b'\n', &mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        line_no += 1;
+        let start = offset;
+        offset += bytes as u64;
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let rec: JournalRecord = serde_json::from_str(&line).with_context(|| {
-            format!("journal JSON が不正です: {}:{}", path.display(), line_no + 1)
-        })?;
+        let last = reader.fill_buf()?.is_empty();
+        let parsed = serde_json::from_slice::<JournalRecord>(&line);
+        if last && (parsed.is_err() || !line.ends_with(b"\n")) {
+            eprintln!("警告: journal の未完了の最終行を破棄します: {}:{line_no}", path.display());
+            OpenOptions::new().write(true).open(path)?.set_len(start)?;
+            break;
+        }
+        let rec = parsed
+            .with_context(|| format!("journal JSON が不正です: {}:{line_no}", path.display()))?;
         if settings.matches(&rec) {
             loaded.insert(journal_key(&rec.key, rec.searchmove.as_deref()), rec);
         }
@@ -1406,16 +1436,20 @@ fn apply_expansions(
                     } else {
                         (line.move_usi.clone(), line.ponder.clone())
                     };
-                    if let Some(existing) = entry
+                    let mut found = false;
+                    for existing in entry
                         .moves
                         .iter_mut()
-                        .find(|m| m.move_usi.as_deref() == Some(move_usi.as_str()))
+                        .filter(|m| m.move_usi.as_deref() == Some(move_usi.as_str()))
                     {
+                        found = true;
                         if fill {
                             existing.value = line.value;
                             existing.depth = line.depth;
                             filled += 1;
                         }
+                    }
+                    if found {
                         continue;
                     }
                     let Some((move_usi, ponder)) =
@@ -1655,6 +1689,12 @@ struct IterationSummary {
     added_moves: usize,
     #[serde(default)]
     filled_moves: usize,
+    /// 全非終端末端を処理したか。旧 summary は安全側で未完了とみなす。
+    #[serde(default)]
+    all_leaves_processed: bool,
+    /// この周で判明した終端の正準キー。
+    #[serde(default)]
+    terminal_keys: BTreeSet<String>,
     /// 旧形式 (設定の記録が無い) の summary.json では `None`。
     #[serde(default)]
     config: Option<RunConfig>,
@@ -1663,8 +1703,8 @@ struct IterationSummary {
 impl IterationSummary {
     /// 次の周が同じ結果になる (掘る末端が無い、または何も追加・更新されなかった)。
     fn converged(&self) -> bool {
-        self.leaves == 0
-            || (self.new_positions == 0 && self.added_moves == 0 && self.filled_moves == 0)
+        self.all_leaves_processed
+            && (self.new_positions == 0 && self.added_moves == 0 && self.filled_moves == 0)
     }
 }
 
@@ -1761,6 +1801,15 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
         None => args.book.clone(),
     };
     let mut converged = completed.last().is_some_and(IterationSummary::converged);
+    let mut terminals: BTreeSet<String> =
+        completed.iter().flat_map(|s| s.terminal_keys.iter().cloned()).collect();
+    terminals.extend(
+        expander
+            .journal
+            .values()
+            .filter(|r| r.declaration_win)
+            .map(|r| canonical_key(&r.sfen)),
+    );
     if !completed.is_empty() {
         eprintln!("book_mine run: 完了済みの {} 周から再開します", completed.len());
     }
@@ -1788,7 +1837,7 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("作成できません: {}", dir.display()))?;
         let book = BookDb::read(&current_book)?;
-        let frontier = compute_frontier(&book, &roots, &frontier_opts)?;
+        let frontier = compute_frontier_excluding(&book, &roots, &frontier_opts, &terminals)?;
         write_leaves(&dir.join("leaves.txt"), &frontier.leaves)?;
         write_atomic(
             &dir.join("frontier.md"),
@@ -1818,6 +1867,13 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
         )?;
 
         let summary = IterationSummary {
+            all_leaves_processed: frontier.leaves.len() == frontier.stats.leaves_before_limit,
+            terminal_keys: stats
+                .declarations
+                .iter()
+                .chain(&stats.no_legal_moves)
+                .map(|sfen| canonical_key(sfen))
+                .collect(),
             iteration,
             leaves: frontier.leaves.len(),
             new_positions: stats.new_positions,
@@ -1828,6 +1884,7 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
         // summary.json は周の完了印なので最後に書く。
         write_atomic(&dir.join("summary.json"), &(serde_json::to_string_pretty(&summary)? + "\n"))?;
         cumulative += summary.new_positions;
+        terminals.extend(summary.terminal_keys.iter().cloned());
         converged = summary.converged();
         current_book = book_path;
         eprintln!(
@@ -1901,6 +1958,24 @@ mod tests {
 
     fn leaf_set(result: &FrontierResult) -> BTreeSet<String> {
         result.leaves.iter().map(|l| l.sfen.clone()).collect()
+    }
+
+    #[test]
+    fn review_frontier_mirrored_roots_keep_mining_role() {
+        let book = book(&[(START, &[("7g7f", 100, 10, 1), ("2g2f", 50, 10, 1)])]);
+        let twin = flipped(START);
+        for roots in [[START, twin.as_str()], [twin.as_str(), START]] {
+            let result = frontier(&book, &roots, &opts(SideArg::Black));
+            let keys: BTreeSet<_> = result.leaves.iter().map(|l| canonical_key(&l.sfen)).collect();
+            assert_eq!(
+                keys,
+                [
+                    canonical_key(&after(START, &["7g7f"])),
+                    canonical_key(&after(START, &["2g2f"]))
+                ]
+                .into()
+            );
+        }
     }
 
     fn set<const N: usize>(items: [String; N]) -> BTreeSet<String> {
@@ -2527,6 +2602,58 @@ done
             assert_eq!(result.stats.unexplored_before_limit, 0);
         }
 
+        #[test]
+        fn review_duplicate_existing_rows_all_get_labels() {
+            let leaf = after(START, &["7g7f"]);
+            let engine = MockEngine::new(&[(&leaf, "3c3d", &["score cp -50 pv 3c3d"])]);
+            let dir = tempfile::tempdir().unwrap();
+            let db = book_text(&[(&leaf, &[("3c3d", 0, 0, 5)]), (&leaf, &[("3c3d", 0, 0, 2)])]);
+            let run = run_expand(dir.path(), &db, &[&leaf], engine_opts(&engine), false, "out.db")
+                .unwrap();
+            let output = BookDb::from_reader(run.out.as_bytes()).unwrap();
+            let rows = &output.entries[strip_ply(&leaf)].moves;
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().all(|m| m.value == -50 && m.depth == 10));
+            assert_eq!(rows.iter().map(|m| m.count).sum::<u64>(), 7);
+        }
+
+        #[test]
+        fn review_journal_recovers_only_invalid_last_line() {
+            let leaf = after(START, &["7g7f"]);
+            let engine = MockEngine::new(&[(&leaf, "3c3d", &["score cp -50 pv 3c3d"])]);
+            let dir = tempfile::tempdir().unwrap();
+            run_expand(
+                dir.path(),
+                &book_text(&[]),
+                &[&leaf],
+                engine_opts(&engine),
+                false,
+                "out.db",
+            )
+            .unwrap();
+            let path = dir.path().join("journal.jsonl");
+            let valid = std::fs::read(&path).unwrap();
+            let settings = SearchSettings::new(&engine_opts(&engine)).unwrap();
+            for tail in [
+                b"{\"key\":\"partial".as_slice(),
+                b"invalid\n",
+                b"\xff",
+                &valid[..valid.len() - 1],
+            ] {
+                let mut bytes = valid.clone();
+                bytes.extend_from_slice(tail);
+                std::fs::write(&path, bytes).unwrap();
+                assert_eq!(load_journal(&path, &settings).unwrap().len(), 1);
+                assert_eq!(std::fs::read(&path).unwrap(), valid);
+                assert_eq!(load_journal(&path, &settings).unwrap().len(), 1);
+            }
+            let mut corrupt = b"invalid\n".to_vec();
+            corrupt.extend_from_slice(&valid);
+            std::fs::write(&path, &corrupt).unwrap();
+            assert!(load_journal(&path, &settings).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        }
+
         /// 既存手 3 手が全て未ラベルの局面。MultiPV 2 行は 3c3d と新手 4a3b。
         fn unexplored_fixture() -> (String, String, [&'static str; 4]) {
             let leaf = after(START, &["7g7f"]);
@@ -2867,6 +2994,52 @@ done
                 merge: MergeMode::Replace,
                 work_dir: dir.join("work"),
                 resume,
+            }
+        }
+
+        #[test]
+        fn review_terminal_leaf_does_not_block_limited_run_or_resume() {
+            let mated = "4k4/4G4/4K4/9/9/9/9/9/9 w - 1";
+            assert_eq!(legal_move_count(&position_from_sfen(mated).unwrap()), 0);
+            for terminal in [KINGS, mated] {
+                for limit_new in [false, true] {
+                    for resume in [false, true] {
+                        let engine = MockEngine::new(&[
+                            (terminal, "win", &[]),
+                            (START, "7g7f", &["score cp 50 pv 7g7f"]),
+                        ]);
+                        let dir = tempfile::tempdir().unwrap();
+                        std::fs::write(dir.path().join("book.db"), book_text(&[])).unwrap();
+                        std::fs::write(
+                            dir.path().join("roots.txt"),
+                            format!("sfen {terminal}\nsfen {START}\n"),
+                        )
+                        .unwrap();
+                        let mut args =
+                            run_args(dir.path(), &engine, if resume { 1 } else { 2 }, false);
+                        if limit_new {
+                            args.max_new_positions = Some(1);
+                        } else {
+                            args.frontier.max_leaves = Some(1);
+                        }
+                        cmd_run(&args).unwrap();
+                        if resume {
+                            args.resume = true;
+                            args.iterations = 2;
+                            cmd_run(&args).unwrap();
+                        }
+                        let output = BookDb::read(&args.out).unwrap();
+                        assert!(
+                            output.find(START).is_some(),
+                            "limit_new={limit_new}, resume={resume}"
+                        );
+                        let leaves =
+                            std::fs::read_to_string(args.work_dir.join("iter-002/leaves.txt"))
+                                .unwrap();
+                        assert_eq!(leaves, format!("sfen {START}\n"));
+                        assert_eq!(engine.log().len(), if terminal == mated { 1 } else { 2 });
+                    }
+                }
             }
         }
 
