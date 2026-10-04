@@ -1,0 +1,14 @@
+#YANEURAOU-DB2016 1.00
+# NOE:4
+sfen 4k4/9/4R4/9/9/9/9/9/K8 w - 1
+5a4a none 80 3
+5a6a none -200 0
+sfen 5k3/9/4R4/9/9/9/9/9/K8 b - 2
+5c4c none -80 9997
+5c5d none -120 0
+sfen 5k3/9/5R3/9/9/9/9/9/K8 w - 3
+4a5a none 80 1
+4a3a none -200 0
+sfen 4k4/9/5R3/9/9/9/9/9/K8 b - 4
+4c4d none -80 0
+4c5c none -81 9997

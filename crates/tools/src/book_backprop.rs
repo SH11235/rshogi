@@ -9,10 +9,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
+use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
-use rshogi_core::types::Move;
-
-mod peta_shock;
+use rshogi_core::types::{Move, Value};
 
 /// YANEURAOU-DB2016 テキスト定跡のヘッダ行。
 pub const BOOK_HEADER: &str = "#YANEURAOU-DB2016 1.00";
@@ -55,6 +54,13 @@ pub struct PositionEntry {
     pub moves: Vec<BookMove>,
 }
 
+impl PositionEntry {
+    /// book_mine と同じく、全候補手が value=0 / depth=0 なら未探索。
+    pub fn is_unexplored(&self) -> bool {
+        self.moves.iter().all(|mv| mv.value == 0 && mv.depth == 0)
+    }
+}
+
 /// 定跡の 1 候補手。
 #[derive(Debug, Clone)]
 pub struct BookMove {
@@ -77,24 +83,24 @@ pub struct Edge {
 pub struct MoveValue {
     pub old: i32,
     pub new: i32,
-    /// YO 互換モードの出力 depth。通常モードは入力 depth を保持する。
-    pub new_depth: Option<i32>,
     pub edge: Option<Edge>,
     /// 合法な指し手を持つ行か。非合法手と `none` 行は `false`。
     pub usable: bool,
+    preserve: bool,
 }
 
 /// 逆伝播の追加オプション。既定値は `book_backprop` の従来挙動。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BackpropOptions {
-    /// YaneuraOu peta_shock の value/depth 伝播を使う。merge は replace のみ。
-    pub yo_compat: bool,
     /// 非合法手と `none` 行を局面の best (伝播値と best の変化集計) から除く。
     /// 行自体は値を変えずに書き出す。
     pub skip_unusable_moves: bool,
-    /// 候補手が 1 件以上あり、全行の depth が 0 の子局面への辺を除く。
-    /// value は判定に使わず、候補手の無い局面は除外しない。親の手は元の値を保つ。
+    /// 未探索の子を評価値 0 と扱って親の探索値を上書きしないよう、全行 depth=0 の子への辺を除く。
+    /// value は判定に使わず、候補手の無い局面は除外しない。
+    /// 入力時に全行 value=0 / depth=0 の局面は、未探索マーカーを保つため出力も保持する。
     pub skip_unsearched_children: bool,
+    /// 異なる手順で同一局面へ合流する合法手を補完し、手順間で候補手を共有する。
+    pub add_transposition_moves: bool,
 }
 
 /// 局面の best 計算に共通の設定。
@@ -119,8 +125,9 @@ pub struct Graph {
     pub adjacency: Vec<Vec<usize>>,
     pub flip_edges: usize,
     pub illegal_moves: usize,
-    /// YO 互換モードで補完した合法な合流手。各局面の入力手の後ろに対応する。
-    pub converged_moves: BTreeMap<String, Vec<BookMove>>,
+    checked: Vec<bool>,
+    preserved: Vec<bool>,
+    added_moves: Vec<Vec<BookMove>>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,8 +142,6 @@ struct SccGraph {
 /// 逆伝播の集計。
 #[derive(Debug, Default, Clone)]
 pub struct PropagationStats {
-    /// YO 互換モードの (check-loop ノード数, 非 const ノード数)。
-    pub yo_nodes: Option<(usize, usize)>,
     pub updated_moves: usize,
     pub abs_deltas: Vec<i32>,
     pub nontrivial_sccs: usize,
@@ -177,9 +182,6 @@ pub fn backprop_file_with(
     merge: MergeMode,
     options: BackpropOptions,
 ) -> Result<PropagationStats> {
-    if options.yo_compat && merge != MergeMode::Replace {
-        bail!("--yo-compat は --merge replace が必要です (--merge min は使用できません)");
-    }
     if max_iters == 0 {
         bail!("--max-iters は 1 以上を指定してください");
     }
@@ -278,13 +280,259 @@ fn ply_of(sfen: &str) -> u32 {
         .unwrap_or(u32::MAX)
 }
 
+fn add_transposition_moves(book: &BookDb, graph: &mut Graph, skipped: &[bool]) -> Result<()> {
+    let index: BTreeMap<_, _> =
+        graph.keys.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
+    for (node, key) in graph.keys.iter().enumerate() {
+        if graph.preserved[node] {
+            continue;
+        }
+        let entry = &book.entries[key];
+        let mut pos = Position::new();
+        pos.set_sfen(&entry.sfen)
+            .map_err(|e| anyhow!("不正な SFEN: {}: {e}", entry.sfen))?;
+        let mut legal = MoveList::new();
+        generate_legal_all(&pos, &mut legal);
+        let listed: BTreeSet<_> =
+            entry.moves.iter().filter_map(|m| m.move_usi.as_deref()).collect();
+        for &mv in legal.iter() {
+            let usi = mv.to_usi();
+            if listed.contains(usi.as_str()) {
+                continue;
+            }
+            let gives_check = pos.gives_check(mv);
+            pos.do_move(mv, gives_check);
+            let child = pos.to_sfen();
+            pos.undo_move(mv);
+            let edge = index
+                .get(strip_ply(&child))
+                .map(|&to| Edge {
+                    to,
+                    via_flip: false,
+                })
+                .or_else(|| {
+                    rshogi_book::flipped_key(&child).and_then(|flipped| {
+                        index.get(strip_ply(&flipped)).map(|&to| Edge { to, via_flip: true })
+                    })
+                });
+            let Some(edge) = edge.filter(|e| !skipped[e.to]) else {
+                continue;
+            };
+            graph.flip_edges += usize::from(edge.via_flip);
+            graph.adjacency[node].push(edge.to);
+            graph.moves[node].push(MoveValue {
+                old: 0,
+                new: 0,
+                edge: Some(edge),
+                usable: true,
+                preserve: false,
+            });
+            // 補完手には探索ラベルがない。depth=1 を出自の固定マーカーとして用い、
+            // 未探索の 0/0 と区別する（伝播距離や探索した深さを表すものではない）。
+            graph.added_moves[node].push(BookMove {
+                move_usi: Some(usi),
+                ponder_usi: None,
+                value: 0,
+                depth: 1,
+                count: 0,
+            });
+        }
+        graph.adjacency[node].sort_unstable();
+        graph.adjacency[node].dedup();
+    }
+    Ok(())
+}
+
+const DISTANCE_MAX: u16 = 9999;
+const PERPETUAL_CHECKED: u16 = 9998;
+const PERPETUAL_CHECK: u16 = 9997;
+
+/// 探索 depth とは独立した、手番側の評価値と葉までの距離。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValueDistance {
+    value: i32,
+    distance: u16,
+}
+
+impl ValueDistance {
+    fn better(self, other: Self) -> bool {
+        if self.value != other.value {
+            return self.value > other.value;
+        }
+        if self.distance == PERPETUAL_CHECK {
+            return false;
+        }
+        if other.distance == PERPETUAL_CHECK {
+            return true;
+        }
+        if self.value >= 0 {
+            self.distance < other.distance
+        } else {
+            self.distance > other.distance
+        }
+    }
+
+    fn for_parent(self) -> Self {
+        Self {
+            value: -self.value,
+            distance: (self.distance + 1).min(DISTANCE_MAX),
+        }
+    }
+}
+
+/// 王手されている候補から、2 手先に候補がないものを不動点まで除く。
+/// 残った候補同士の間の局面も含め、DFS する部分グラフを得る。
+fn extract_check_loop(graph: &Graph) -> Vec<bool> {
+    let mut candidates = graph.checked.clone();
+    loop {
+        let mut changed = false;
+        for node in 0..candidates.len() {
+            if candidates[node]
+                && !graph.adjacency[node]
+                    .iter()
+                    .any(|&child| graph.adjacency[child].iter().any(|&next| candidates[next]))
+            {
+                candidates[node] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut check_loop = candidates.clone();
+    for (node, &candidate) in candidates.iter().enumerate() {
+        if candidate {
+            for &child in &graph.adjacency[node] {
+                if graph.adjacency[child].iter().any(|&next| candidates[next]) {
+                    check_loop[child] = true;
+                }
+            }
+        }
+    }
+    check_loop
+}
+
+struct SccEvaluator<'a> {
+    graph: &'a Graph,
+    params: BestParams,
+    check_loop: Vec<bool>,
+    input_lengths: Vec<usize>,
+}
+
+impl SccEvaluator<'_> {
+    fn merged(&self, node: usize, idx: usize, mut value: ValueDistance) -> ValueDistance {
+        // 補完手には min の上界となる探索ラベルがない。
+        if idx < self.input_lengths[node] {
+            value.value = self.params.merge.apply(self.graph.moves[node][idx].old, value.value);
+        }
+        value
+    }
+
+    fn move_value(&self, node: usize, idx: usize, best: &[ValueDistance]) -> ValueDistance {
+        let mv = &self.graph.moves[node][idx];
+        match mv.edge {
+            Some(edge) => self.merged(node, idx, best[edge.to].for_parent()),
+            None => ValueDistance {
+                value: mv.old,
+                distance: 0,
+            },
+        }
+    }
+
+    fn best(&self, node: usize, values: &[ValueDistance]) -> ValueDistance {
+        self.graph.moves[node]
+            .iter()
+            .enumerate()
+            .filter(|(_, mv)| self.params.counts(mv))
+            .map(|(idx, _)| self.move_value(node, idx, values))
+            .reduce(|a, b| if b.better(a) { b } else { a })
+            .unwrap_or(ValueDistance {
+                value: self.params.draw_value,
+                distance: 0,
+            })
+    }
+
+    // 深い定跡でも Windows のスレッドスタックを消費しない明示 DFS。
+    // ループ以外への離脱は、SCC 反復の前回値と通常の negamax / merge で比較する。
+    // ループ内で min(入力ラベル, 勝ち値) を取ると反則負けまで 0 に消えるため、
+    // 継続辺は純 negamax で規則評価を伝え、既存ラベルとの merge は出力時に行う。
+    fn check_best(&self, root: usize, values: &[ValueDistance]) -> ValueDistance {
+        struct Frame {
+            node: usize,
+            next: usize,
+            best: Option<ValueDistance>,
+        }
+        let mut trajectory = vec![false; values.len()];
+        let mut stack = vec![Frame {
+            node: root,
+            next: 0,
+            best: None,
+        }];
+        trajectory[root] = true;
+        while let Some(frame) = stack.last_mut() {
+            let node = frame.node;
+            if frame.next == self.graph.moves[node].len() {
+                let result = frame.best.unwrap_or(ValueDistance {
+                    value: self.params.draw_value,
+                    distance: 0,
+                });
+                trajectory[node] = false;
+                stack.pop();
+                let Some(parent) = stack.last_mut() else {
+                    return result;
+                };
+                let candidate = result.for_parent();
+                if parent.best.is_none_or(|best| candidate.better(best)) {
+                    parent.best = Some(candidate);
+                }
+                continue;
+            }
+            let idx = frame.next;
+            frame.next += 1;
+            let mv = &self.graph.moves[node][idx];
+            if !self.params.counts(mv) {
+                continue;
+            }
+            let candidate = if let Some(edge) = mv.edge.filter(|e| self.check_loop[e.to]) {
+                if trajectory[edge.to] {
+                    if self.graph.checked[edge.to] {
+                        ValueDistance {
+                            value: -Value::MATE.raw(),
+                            distance: PERPETUAL_CHECK,
+                        }
+                    } else {
+                        ValueDistance {
+                            value: Value::MATE.raw(),
+                            distance: PERPETUAL_CHECKED,
+                        }
+                    }
+                } else {
+                    trajectory[edge.to] = true;
+                    stack.push(Frame {
+                        node: edge.to,
+                        next: 0,
+                        best: None,
+                    });
+                    continue;
+                }
+            } else {
+                self.move_value(node, idx, values)
+            };
+            if frame.best.is_none_or(|best| candidate.better(best)) {
+                frame.best = Some(candidate);
+            }
+        }
+        unreachable!("DFS は root の結果を返す")
+    }
+}
+
 /// book 内子局面への辺 (反転 key 合流を含む) を張ったグラフを作る。
 pub fn build_graph(book: &BookDb) -> Result<Graph> {
     build_graph_with(book, BackpropOptions::default())
 }
 
 /// [`build_graph`] に追加オプションを指定する版。未探索の判定は入力時の depth を使う。
-/// `yo_compat` では、入力にない合法な book 内合流手も補完する。
 pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph> {
     let keys: Vec<String> = book.entries.keys().cloned().collect();
     let skipped_children: Vec<bool> = book
@@ -298,6 +546,12 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
         .collect();
     let node_index: BTreeMap<&str, usize> =
         keys.iter().enumerate().map(|(idx, key)| (key.as_str(), idx)).collect();
+    let preserved: Vec<_> = book
+        .entries
+        .values()
+        .map(|entry| options.skip_unsearched_children && entry.is_unexplored())
+        .collect();
+    let mut checked = Vec::with_capacity(keys.len());
     let mut moves = Vec::with_capacity(keys.len());
     let mut adjacency_sets = vec![BTreeSet::new(); keys.len()];
     let mut flip_edges = 0;
@@ -308,6 +562,11 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
             .entries
             .get(key)
             .ok_or_else(|| anyhow!("内部エラー: entry がありません: {key}"))?;
+        let mut position = Position::new();
+        position
+            .set_sfen(&entry.sfen)
+            .map_err(|e| anyhow!("不正な SFEN: {}: {e}", entry.sfen))?;
+        checked.push(!position.checkers().is_empty());
         let mut move_values = Vec::with_capacity(entry.moves.len());
         for book_move in &entry.moves {
             let mut legal = false;
@@ -343,6 +602,7 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
             } else {
                 None
             };
+            let preserve = edge.is_some_and(|edge| skipped_children[edge.to]);
             let edge = edge.filter(|edge| !skipped_children[edge.to]);
             if let Some(edge) = edge {
                 if edge.via_flip {
@@ -353,9 +613,9 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
             move_values.push(MoveValue {
                 old: book_move.value,
                 new: book_move.value,
-                new_depth: None,
                 edge,
                 usable: legal,
+                preserve,
             });
         }
         moves.push(move_values);
@@ -363,15 +623,17 @@ pub fn build_graph_with(book: &BookDb, options: BackpropOptions) -> Result<Graph
 
     let adjacency = adjacency_sets.into_iter().map(|set| set.into_iter().collect()).collect();
     let mut graph = Graph {
+        added_moves: vec![Vec::new(); keys.len()],
+        checked,
+        preserved,
         keys,
         moves,
         adjacency,
         flip_edges,
         illegal_moves,
-        converged_moves: BTreeMap::new(),
     };
-    if options.yo_compat {
-        peta_shock::add_convergences(book, &mut graph, &skipped_children)?;
+    if options.add_transposition_moves {
+        add_transposition_moves(book, &mut graph, &skipped_children)?;
     }
     Ok(graph)
 }
@@ -407,7 +669,6 @@ pub fn propagate_values(
 
 /// [`propagate_values`] に追加オプションを指定する版。
 /// `skip_unsearched_children` はグラフ構築時に [`build_graph_with`] へ渡すこと。
-/// `yo_compat` も同じくグラフ構築時に渡し、全合法手からの合流補完を有効にすること。
 pub fn propagate_values_with(
     book: &BookDb,
     graph: &mut Graph,
@@ -416,19 +677,34 @@ pub fn propagate_values_with(
     merge: MergeMode,
     options: BackpropOptions,
 ) -> Result<PropagationStats> {
-    if options.yo_compat {
-        if merge != MergeMode::Replace {
-            bail!("--yo-compat は --merge replace が必要です (--merge min は使用できません)");
-        }
-        return peta_shock::propagate(book, graph, options);
-    }
     let params = BestParams {
         draw_value,
         merge,
         skip_unusable_moves: options.skip_unusable_moves,
     };
     let scc = build_scc_graph(&graph.adjacency);
-    let mut node_best = vec![draw_value; graph.keys.len()];
+    let evaluator = SccEvaluator {
+        graph,
+        params,
+        check_loop: extract_check_loop(graph),
+        input_lengths: graph
+            .keys
+            .iter()
+            .map(|key| {
+                book.entries
+                    .get(key)
+                    .map(|entry| entry.moves.len())
+                    .ok_or_else(|| anyhow!("局面がありません: {key}"))
+            })
+            .collect::<Result<_>>()?,
+    };
+    let mut node_best = vec![
+        ValueDistance {
+            value: draw_value,
+            distance: DISTANCE_MAX
+        };
+        graph.keys.len()
+    ];
     let mut stats = PropagationStats {
         nontrivial_sccs: scc.nontrivial.iter().filter(|&&v| v).count(),
         max_scc_size: scc.comps.iter().map(Vec::len).max().unwrap_or(0),
@@ -442,27 +718,61 @@ pub fn propagate_values_with(
 
         if scc.nontrivial[comp] {
             let iters =
-                iterate_nontrivial_scc(graph, &scc, comp, &mut node_best, max_iters, params)?;
+                iterate_nontrivial_scc(&evaluator, &scc.comps[comp], &mut node_best, max_iters)?;
             stats.scc_iters.push(iters);
         } else {
             let node = scc.comps[comp][0];
-            node_best[node] = compute_node_best(graph, &scc, comp, node, &node_best, params);
+            node_best[node] = if evaluator.check_loop[node] {
+                evaluator.check_best(node, &node_best)
+            } else {
+                evaluator.best(node, &node_best)
+            };
         }
     }
 
-    for (node_idx, move_values) in graph.moves.iter_mut().enumerate() {
-        let comp = scc.comp_of[node_idx];
-        for mv in move_values {
-            if let Some(edge) = mv.edge {
-                let value = if scc.nontrivial[comp] && scc.comp_of[edge.to] == comp {
-                    draw_value.max(-node_best[edge.to])
-                } else {
-                    -node_best[edge.to]
-                };
-                mv.new = merge.apply(mv.old, value);
-                if scc.nontrivial[comp] && scc.comp_of[edge.to] == comp && mv.new == draw_value {
-                    stats.draw_moves += 1;
+    // 補正は最終出力だけ。補正後の -1 をさらに親へ伝播させない。
+    let outputs: Vec<Vec<_>> = graph
+        .moves
+        .iter()
+        .enumerate()
+        .map(|(node, moves)| {
+            let mut output: Vec<_> = moves
+                .iter()
+                .enumerate()
+                .map(|(idx, mv)| {
+                    let mut vd = evaluator.move_value(node, idx, &node_best);
+                    if mv.edge.is_some_and(|e| evaluator.check_loop[e.to] && graph.checked[e.to]) {
+                        vd.distance = PERPETUAL_CHECK;
+                    }
+                    vd
+                })
+                .collect();
+            let best = output
+                .iter()
+                .zip(moves)
+                .filter(|(_, mv)| params.counts(mv))
+                .map(|(&vd, _)| vd)
+                .reduce(|a, b| if b.better(a) { b } else { a });
+            for (vd, mv) in output.iter_mut().zip(moves) {
+                if graph.preserved[node] || mv.preserve || !mv.usable {
+                    vd.value = mv.old;
+                } else if best
+                    .is_some_and(|best| best.value == vd.value && best.distance != vd.distance)
+                {
+                    vd.value = vd.value.saturating_sub(1);
                 }
+            }
+            output
+        })
+        .collect();
+    for (node, moves) in graph.moves.iter_mut().enumerate() {
+        let comp = scc.comp_of[node];
+        for (mv, vd) in moves.iter_mut().zip(&outputs[node]) {
+            mv.new = vd.value;
+            if mv.new == draw_value
+                && mv.edge.is_some_and(|e| scc.nontrivial[comp] && scc.comp_of[e.to] == comp)
+            {
+                stats.draw_moves += 1;
             }
         }
     }
@@ -501,58 +811,35 @@ pub fn propagate_values_with(
 }
 
 fn iterate_nontrivial_scc(
-    graph: &Graph,
-    scc: &SccGraph,
-    comp: usize,
-    node_best: &mut [i32],
+    evaluator: &SccEvaluator<'_>,
+    nodes: &[usize],
+    node_best: &mut [ValueDistance],
     max_iters: usize,
-    params: BestParams,
 ) -> Result<usize> {
-    for &node in &scc.comps[comp] {
-        node_best[node] = params.draw_value;
+    // 通常の循環は draw から始めるが、各辺の値を draw で clamp しない。
+    for &node in nodes {
+        node_best[node] = ValueDistance {
+            value: evaluator.params.draw_value,
+            distance: DISTANCE_MAX,
+        };
     }
-
     for iter in 1..=max_iters {
         let prev = node_best.to_vec();
         let mut changed = false;
-        for &node in &scc.comps[comp] {
-            let best = compute_node_best(graph, scc, comp, node, &prev, params);
-            if best != node_best[node] {
-                changed = true;
-                node_best[node] = best;
-            }
+        for &node in nodes {
+            let best = if evaluator.check_loop[node] {
+                evaluator.check_best(node, &prev)
+            } else {
+                evaluator.best(node, &prev)
+            };
+            changed |= best != node_best[node];
+            node_best[node] = best;
         }
         if !changed {
             return Ok(iter);
         }
     }
-
-    bail!("SCC 値反復が --max-iters ({max_iters}) に到達しました");
-}
-
-fn compute_node_best(
-    graph: &Graph,
-    scc: &SccGraph,
-    comp: usize,
-    node: usize,
-    best_values: &[i32],
-    params: BestParams,
-) -> i32 {
-    let BestParams {
-        draw_value, merge, ..
-    } = params;
-    graph.moves[node]
-        .iter()
-        .filter(|mv| params.counts(mv))
-        .map(|mv| match mv.edge {
-            Some(edge) if scc.nontrivial[comp] && scc.comp_of[edge.to] == comp => {
-                merge.apply(mv.old, draw_value.max(-best_values[edge.to]))
-            }
-            Some(edge) => merge.apply(mv.old, -best_values[edge.to]),
-            None => mv.old,
-        })
-        .max()
-        .unwrap_or(draw_value)
+    bail!("SCC 値・距離反復が --max-iters ({max_iters}) に到達しました（未収束）");
 }
 
 fn build_scc_graph(adjacency: &[Vec<usize>]) -> SccGraph {
@@ -686,30 +973,24 @@ pub fn write_backprop_book(book: &BookDb, graph: &Graph, out: &Path) -> Result<(
         let values = value_by_key
             .get(key.as_str())
             .ok_or_else(|| anyhow!("内部エラー: move values がありません: {key}"))?;
-        let added = graph.converged_moves.get(key).map_or(&[][..], Vec::as_slice);
-        let move_at = |idx: usize| {
-            if idx < entry.moves.len() {
-                &entry.moves[idx]
-            } else {
-                &added[idx - entry.moves.len()]
-            }
-        };
-        let mut order: Vec<usize> = (0..entry.moves.len() + added.len()).collect();
+        let node = graph.keys.binary_search(key).map_err(|_| anyhow!("局面がありません: {key}"))?;
+        let rows: Vec<_> = entry.moves.iter().chain(&graph.added_moves[node]).collect();
+        let mut order: Vec<usize> = (0..rows.len()).collect();
         order.sort_by(|&a, &b| {
-            move_at(b)
+            rows[b]
                 .count
-                .cmp(&move_at(a).count)
-                .then_with(|| move_sort_key(move_at(a)).cmp(move_sort_key(move_at(b))))
+                .cmp(&rows[a].count)
+                .then_with(|| move_sort_key(rows[a]).cmp(move_sort_key(rows[b])))
         });
         for idx in order {
-            let book_move = move_at(idx);
+            let book_move = rows[idx];
             writeln!(
                 writer,
                 "{} {} {} {} {}",
                 book_move.move_usi.as_deref().unwrap_or("none"),
                 book_move.ponder_usi.as_deref().unwrap_or("none"),
                 values[idx].new,
-                values[idx].new_depth.unwrap_or(book_move.depth),
+                book_move.depth,
                 book_move.count
             )?;
         }
@@ -742,9 +1023,6 @@ pub fn write_report(
     writeln!(writer, "## Summary")?;
     writeln!(writer)?;
     writeln!(writer, "- merge mode: {}", merge.as_str())?;
-    if let Some((check_loops, cycles)) = stats.yo_nodes {
-        writeln!(writer, "- yo-compat: check-loop nodes: {check_loops}, cycle nodes: {cycles}")?;
-    }
     writeln!(writer, "- nodes: {}", book.entries.len())?;
     writeln!(writer, "- moves: {total_moves}")?;
     writeln!(writer, "- updated moves: {}", stats.updated_moves)?;
@@ -872,6 +1150,267 @@ fn write_top_changes(writer: &mut dyn Write, changes: &[NodeChange]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn solve_rows(rows: &[&[(i32, Option<usize>)]], max_iters: usize) -> Result<Graph> {
+        let keys: Vec<_> = (0..rows.len()).map(|i| i.to_string()).collect();
+        let book = BookDb {
+            entries: keys
+                .iter()
+                .zip(rows)
+                .map(|(key, rows)| {
+                    (
+                        key.clone(),
+                        PositionEntry {
+                            sfen: key.clone(),
+                            moves: rows
+                                .iter()
+                                .map(|&(value, _)| BookMove {
+                                    move_usi: None,
+                                    ponder_usi: None,
+                                    value,
+                                    depth: 10,
+                                    count: 1,
+                                })
+                                .collect(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let mut graph = Graph {
+            keys,
+            moves: rows
+                .iter()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|&(value, child)| MoveValue {
+                            old: value,
+                            new: value,
+                            usable: true,
+                            preserve: false,
+                            edge: child.map(|to| Edge {
+                                to,
+                                via_flip: false,
+                            }),
+                        })
+                        .collect()
+                })
+                .collect(),
+            adjacency: rows
+                .iter()
+                .map(|rows| rows.iter().filter_map(|&(_, child)| child).collect())
+                .collect(),
+            flip_edges: 0,
+            illegal_moves: 0,
+            checked: vec![false; rows.len()],
+            preserved: vec![false; rows.len()],
+            added_moves: vec![vec![]; rows.len()],
+        };
+        propagate_values(&book, &mut graph, 0, max_iters, MergeMode::Replace)?;
+        Ok(graph)
+    }
+
+    #[test]
+    fn losing_side_cannot_claim_draw_when_winner_can_exit() {
+        let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0)), (100, None)]], 1000).unwrap();
+        assert_eq!(graph.moves[0][0].new, -100);
+        assert_eq!(graph.moves[1][0].new, 99); // 同値の遠回りを避ける。
+        assert_eq!(graph.moves[1][1].new, 100);
+    }
+
+    #[test]
+    fn distances_prefer_short_wins_and_long_losses_only_at_output() {
+        for value in [-50, 0, 50] {
+            let graph =
+                solve_rows(&[&[(value, None), (0, Some(1))], &[(-value, None)]], 1000).unwrap();
+            let expected = if value >= 0 {
+                [value, value - 1]
+            } else {
+                [value - 1, value]
+            };
+            assert_eq!([graph.moves[0][0].new, graph.moves[0][1].new], expected);
+        }
+        let marker = ValueDistance {
+            value: -50,
+            distance: PERPETUAL_CHECK,
+        };
+        assert!(!marker.better(ValueDistance {
+            value: -50,
+            distance: 0
+        }));
+        assert!(
+            ValueDistance {
+                value: -50,
+                distance: 0
+            }
+            .better(marker)
+        );
+        assert_eq!(
+            ValueDistance {
+                value: 1,
+                distance: DISTANCE_MAX
+            }
+            .for_parent()
+            .distance,
+            DISTANCE_MAX
+        );
+        let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0))]], 1).unwrap();
+        assert_eq!(graph.moves[0][0].new, 0);
+    }
+
+    #[test]
+    fn nonconvergence_is_an_error() {
+        let error = solve_rows(&[&[(0, Some(1))], &[(0, Some(0)), (100, None)]], 1).unwrap_err();
+        assert!(error.to_string().contains("未収束"));
+        assert!(solve_rows(&[&[(0, Some(0)), (100, None)]], 0).is_err());
+        // 非ゼロの draw 初期値による周期 2 の振動も、成功扱いしない。
+        let graph = solve_rows(&[&[(0, Some(1))], &[(0, Some(0))]], 1).unwrap();
+        let evaluator = SccEvaluator {
+            graph: &graph,
+            params: BestParams {
+                draw_value: 1,
+                merge: MergeMode::Replace,
+                skip_unusable_moves: false,
+            },
+            check_loop: vec![false; 2],
+            input_lengths: vec![1; 2],
+        };
+        let mut best = vec![
+            ValueDistance {
+                value: 1,
+                distance: DISTANCE_MAX
+            };
+            2
+        ];
+        let error = iterate_nontrivial_scc(&evaluator, &[0, 1], &mut best, 10).unwrap_err();
+        assert!(error.to_string().contains("未収束"));
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.db");
+        let out = dir.path().join("out.db");
+        std::fs::write(&input, include_str!("../tests/fixtures/book_backprop_check_in.db"))
+            .unwrap();
+        assert!(backprop_file(&input, &out, None, 0, 1, MergeMode::Replace).is_err());
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn perpetual_check_without_escape_is_loss_in_both_orientations() {
+        let fixture = include_str!("../tests/fixtures/book_backprop_check_in.db");
+        let pure: String = fixture
+            .lines()
+            .filter(|line| {
+                !line.contains(" -200 ") && !line.contains(" -120 ") && !line.contains(" -80 ")
+            })
+            .map(|line| format!("{line}\n"))
+            .collect();
+        for flip in [false, true] {
+            let input = if flip {
+                pure.lines()
+                    .map(|line| {
+                        if let Some(sfen) = line.strip_prefix("sfen ") {
+                            format!("sfen {}\n", rshogi_book::flipped_key(sfen).unwrap())
+                        } else if line.starts_with('#') {
+                            format!("{line}\n")
+                        } else {
+                            let (mv, rest) = line.split_once(' ').unwrap();
+                            format!("{} {rest}\n", rshogi_book::flip_usi_move(mv).unwrap())
+                        }
+                    })
+                    .collect()
+            } else {
+                pure.clone()
+            };
+            for merge in [MergeMode::Min, MergeMode::Replace] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("in.db");
+                let out = dir.path().join("result.db");
+                std::fs::write(&path, &input).unwrap();
+                backprop_file(&path, &out, None, 0, 1000, merge).unwrap();
+                for entry in read_book_db(&out).unwrap().entries.values() {
+                    let mut pos = Position::new();
+                    pos.set_sfen(&entry.sfen).unwrap();
+                    let rule_value = if pos.checkers().is_empty() {
+                        -Value::MATE.raw()
+                    } else {
+                        Value::MATE.raw()
+                    };
+                    assert_eq!(entry.moves[0].value, merge.apply(0, rule_value));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unexplored_position_keeps_all_rows_even_with_searched_children() {
+        let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        let input = format!(
+            "{BOOK_HEADER}\nsfen {START}\n7g7f 3c3d 0 0 7\nsfen {child}\n3c3d none 50 12 3\n"
+        );
+        let output = backprop_text(
+            &input,
+            BackpropOptions {
+                skip_unsearched_children: true,
+                add_transposition_moves: true,
+                ..BackpropOptions::default()
+            },
+        );
+        assert!(output.contains("7g7f 3c3d 0 0 7\n"));
+        assert!(!backprop_text(&input, BackpropOptions::default()).contains("7g7f 3c3d 0 0 7\n"));
+    }
+
+    #[test]
+    fn tie_correction_keeps_unusable_and_skipped_child_rows_unchanged() {
+        let searched = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        let unsearched = child_position_after_move(START, "2g2f").unwrap().to_sfen();
+        let input = format!(
+            "{BOOK_HEADER}\nsfen {START}\n7g7f none -50 9 7\n2g2f none -50 9 6\n5e5d none -50 9 5\nnone none -50 9 4\nsfen {searched}\n3c3d none 50 12 3\nsfen {unsearched}\n3c3d none 0 0 2\n"
+        );
+        for skip_unusable_moves in [false, true] {
+            let output = backprop_text(
+                &input,
+                BackpropOptions {
+                    skip_unsearched_children: true,
+                    skip_unusable_moves,
+                    ..BackpropOptions::default()
+                },
+            );
+            for row in [
+                "7g7f none -50 9 7",
+                "2g2f none -50 9 6",
+                "5e5d none -50 9 5",
+                "none none -50 9 4",
+            ] {
+                assert!(output.contains(row), "{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn transposition_completion_is_opt_in_and_new_moves_have_no_min_label() {
+        let child = child_position_after_move(START, "7g7f").unwrap().to_sfen();
+        for value in [-50, 50] {
+            let input = format!(
+                "{BOOK_HEADER}\nsfen {START}\n2g2f none -100 10 7\nsfen {child}\n3c3d none {value} 12 3\n"
+            );
+            assert!(!backprop_text(&input, BackpropOptions::default()).contains("7g7f none"));
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("in.db");
+            let out = dir.path().join("out.db");
+            std::fs::write(&path, &input).unwrap();
+            let options = BackpropOptions {
+                add_transposition_moves: true,
+                ..BackpropOptions::default()
+            };
+            for merge in [MergeMode::Min, MergeMode::Replace] {
+                backprop_file_with(&path, &out, None, 0, 1000, merge, options).unwrap();
+                assert!(
+                    std::fs::read_to_string(&out)
+                        .unwrap()
+                        .contains(&format!("7g7f none {} 1 0\n", -value))
+                );
+            }
+        }
+    }
 
     const START: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
 

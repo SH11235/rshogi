@@ -1,6 +1,8 @@
 # book_backprop
 
-`book_backprop` は YANEURAOU-DB2016 テキスト定跡 `.db` の候補手評価値を、book 内の子局面から negamax で親方向へ逆伝播するツールです。既定では `count` / `ponder` / `depth` / 局面構造を保持し、`value` だけを更新します。opt-in の `--yo-compat` では YaneuraOu peta_shock の規則で `value` と `depth` を更新します。
+`book_backprop` は YANEURAOU-DB2016 テキスト定跡 `.db` の候補手評価値を、book 内の子局面から negamax で親方向へ逆伝播するツールです。既存手の `count` / `ponder` / 探索 `depth` は保持し、`value` を更新します。手の補完は `--add-transposition-moves` を指定したときだけ行います。
+
+**既定の出力が変わりました。** 循環内の引分下限を撤去し、勝っている側が離脱できる循環を負け側の引分にしないよう修正しました。連続王手の千日手は王手側の負けとして扱い、同値手には内部距離による優先と `value-1` 補正を常時適用します。初回の全手ラベル付け済み book（2858 局面）での既定 `min` の既存計測では 89 手（2.5%）の値、13 局面の最善手が変わり、`replace` では 218 手（6.1%）の値、59 局面の最善手が変わりました。この値は対象 book と条件に依存し、未探索局面を含む別の book への予測ではありません。
 
 ## 使い方
 
@@ -27,11 +29,11 @@ cargo run -p tools --release --bin book_backprop -- \
 |---|---:|---|
 | `--draw-value <CP>` | `0` | 循環 SCC の千日手値。手番側視点 |
 | `--merge <MODE>` | `min` | book 内子局面からの伝播値と既存ラベル値の合成。`min` または `replace` |
-| `--yo-compat` | off | YaneuraOu peta_shock 互換の伝播。`--merge replace` 必須 |
 | `--report <PATH>` | なし | Markdown レポートの出力先 |
-| `--max-iters <N>` | `1000` | 非自明 SCC の値反復ガード。到達時はエラー終了 |
+| `--max-iters <N>` | `1000` | 非自明 SCC の値・内部距離の反復上限。未収束なら出力せずエラー終了 |
 | `--skip-unusable-moves` | off | 非合法手と `none` 行を局面の best (と best 変化の集計) から除く。行自体は値を変えずに書き出す |
-| `--skip-unsearched-children` | off | 候補手が 1 件以上あり全行の `depth=0` の子局面を、直接キー・反転キーとも book 外として扱う。親の手は `merge` によらず元の値を保持する。`value` は判定に使わず、候補手の無い局面は除外しない |
+| `--skip-unsearched-children` | off | 未探索の子を値 0 と扱って親の実探索値を上書きしないため、候補手があり全行 `depth=0` の子への辺を除く。直接・反転キーの両方に適用し、`value` は判定に使わない。候補手の無い子は除外しない。入力時に全行 `value=0 depth=0` の局面は出力行も保持する |
+| `--add-transposition-moves` | off | 異なる手順で同一局面へ到達するときに候補手を共有できるよう、book 内の既知局面へ進む未登録の合法手を補完する |
 
 ## 伝播規則
 
@@ -48,7 +50,7 @@ cargo run -p tools --release --bin book_backprop -- \
 
 歩・香の最終段、桂の最終二段への打ち・不成も非合法手として除外します。子局面がbook内に存在していても、その手の既存 `value` を維持します。合法な不成は通常の手と同様に逆伝播します。
 
-`best(N)` は局面 `N` の候補手 `value` の最大値です。既定では非合法手と `none` 行の既存 `value` も含みます。`--skip-unusable-moves` を指定するとこれらを除き、合法手だけの最大値にします (合法手が無い局面は `--draw-value`)。book 内子局面が見つかった手の最終値は `--merge` で決まります。
+`best(N)` は局面 `N` の候補手のうち、評価値を優先し、同値なら後述の内部距離で選ぶ手です。既定では非合法手と `none` 行の既存 `value` も含みます。`--skip-unusable-moves` を指定するとこれらを除き、合法手だけの最大値にします (合法手が無い局面は `--draw-value`)。book 内子局面が見つかった手の最終値は `--merge` で決まります。
 
 | mode | 更新 |
 |---|---|
@@ -57,68 +59,31 @@ cargo run -p tools --release --bin book_backprop -- \
 
 既定の `min` は値を下げる方向にだけ伝播します。probe 時の相手は自分の book 内候補に制限されないため、子局面での相手の取り分は、既存ラベル値が持つ制限なし探索の見積りと book 内 best の大きい方以上です。したがって親手の値は、既存ラベル値と `-best(子)` の小さい方を上界として扱います。
 
-出力は決定的で、局面は SFEN key 昇順、手は `count` 降順から USI 昇順で書き出します。
+以下の同値補正は book 外の合法な葉手にも適用します。非合法手・`none` 行と、`--skip-unsearched-children` で辺を除いた親の手は補正からも除外し、既存値を保持します。出力は決定的で、局面は SFEN key 昇順、手は `count` 降順から USI 昇順で書き出します。
 
 ## 循環 SCC
 
 ply を除いた局面グラフは千日手相当の循環を持つことがあります。`book_backprop` は SCC を縮約し、縮約 DAG を子側から処理します。
 
-非自明 SCC では、SCC 外への手は確定済みの `-best(子)` とし、SCC 内に留まる手は `--draw-value` を下界として値反復します。`--merge min` ではこの伝播値をさらに既存ラベル値との `min` で合成するため、book 内辺の値は単調非増加です。値集合は既存の葉値、SCC 外の確定値、`draw-value` とその negamax 合成に限られるため有限で、不動点に達すると停止します。`--max-iters` に達した場合は実装バグまたは入力条件の見直しが必要な状態としてエラー終了します。
+非自明 SCC のメンバーは `--draw-value` から開始し、内部辺も外部辺も `-best(子)` を伝え、`min` では既存ラベル値と合成します。**循環内の手を draw-value で下限 clamp しません。** 相手が有利な離脱を選べる場合、その損失を循環への手にも伝える必要があるためです。値と内部距離の両方が安定するまで同期反復し、連続王手 DFS の変化も収束判定に含めます。有限な値集合でも振動する入力はあり、収束を無条件には保証しません。`--max-iters` で未収束ならエラーとし、結果の book を書き出しません。
 
-## YaneuraOu peta_shock 互換モード
+### 連続王手の千日手
 
-```bash
-cargo run -p tools --release --bin book_backprop -- \
-  --book in.db --out peta.db --yo-compat --merge replace --report peta.md
-```
+常時有効です。手番側が王手されている局面を候補とし、2 手先に候補がないものを不動点まで除去します。残った候補の間の局面も含めて連続王手の部分グラフを抽出し、SCC の評価中に明示スタックと経路集合による DFS で評価します。経路が反復すれば被王手側に勝ち（+32000）、王手側に負け（-32000）を与えます。王手側の離脱手は通常の negamax と merge で比較するので、離脱できるループを一律に -32000 にするわけではありません。直接キー・反転キーとも同じグラフ上で処理します。
 
-`--yo-compat` は `source/book/makebook2025.cpp` の leaf depth 初期化、全合法手からの合流補完、`ValueDepth` 比較、const node の除去、通常循環の初期化、連続王手ループの抽出と DFS、順次更新による伝播、出力時の補正を移植したモードです。指定しなければ従来の SCC negamax の動作・出力を維持します。`--merge min` との併用はエラーです。
+連続王手ループの内部では純 negamax で規則評価を伝え、`min` は離脱手と最終出力に適用します。ループ内部の勝ち値を入力ラベル 0 で制限すると、相手の反則負けまで 0 に消えるためです。離脱のない全入力値 0 のループは、`replace` なら被王手側 +32000 / 王手側 -32000、`min` なら入力上限を保って被王手側 0 / 王手側 -32000 を出力します。
 
-`--yo-compat` は `book_mine run` の周回には使えません (`run` に同名の option は無く、使う予定もありません)。YO は入力の depth を捨てて「葉からの距離」を depth に書くため、探索済みで全候補が value 0 の局面が `value=0 depth=0` で出力され、`book_mine` の「未探索」の印と区別できなくなります。周回は従来の逆伝播 (`--skip-unsearched-children` 付き) で行い、最終の db を YO と同じ peta shock 化したいときだけ `book_backprop --yo-compat --merge replace` を単独で実行してください。
+### 内部距離と同値手の補正
 
-- 入力の探索 depth は無視し、全ての葉の depth を **0** から始めます。YO の `.db` / `.ybb` 両方の `read_book` と同じ規則です。book 外の葉は `(入力 value, 0)`、子局面が book 内なら `(-best.value, min(best.depth + 1, 9999))`。出力 depth は探索深さではなく、後退解析で選ばれた葉からの距離です。best 比較・同値補正にもこの距離を使います。
-- YO の `convergence_check()` と同じく全合法手を調べ、入力に登録されていなくても book 内の既知局面に至る手を補完します。補完した辺も best・循環判定・伝播に参加し、出力されます。
-- best は value の大きい手。同値なら非負は短い depth、負は長い depth を優先します。ただし depth が `PERPETUAL_CHECK=9997` の手は同値の他の depth より劣後します。`PERPETUAL_CHECKED=9998`、無限 depth は `BOOK_DEPTH_MAX=9999` です。
-- 全ての手が葉または const node に至る局面を const node として確定し、残りを両手番とも `(0, 9999)` で初期化します。残りには循環へ至る祖先も含まれます。
-- SFEN を `Position` で読み、手番側の `checkers()` が空でない局面を候補にします。2 手先に候補のない局面を反復除外し、候補間の中間局面を加えて check-loop 集合を作ります。この集合は通常パスで更新せず、経路上の再訪問を検知する DFS で評価します。
-- 内部の node 値は YO と同じ「親手番視点」です。check-loop の初期値は王手されていれば `(-MATE, 9999)`、そうでなければ `(MATE, 9999)`。DFS 再訪問時はそれぞれ `(-MATE, 9997)` / `(MATE, 9998)` を返します。王手している側が負けとなる符号です。
-- `BOOK_MAX_PLY=256` は参照実装と同値です。const 除去・候補除外は最大 256 回、伝播は最大 356 回。通常パスで更新後の depth が 256 を超えたら 9999 にします。YO と同じく通常パスの更新数が 0 なら、その回の DFS 後に停止します（DFS の更新数は停止判定に含めません）。上限到達時はその時点の値を書き出します。`--draw-value` と `--max-iters` はこのアルゴリズムには使いません（共通の `max-iters >= 1` 検査は残ります）。
+探索 `depth` とは別に、葉手を 0、親を子の best 距離 +1（上限 9999）、循環・無限を 9999 とする内部距離を持ちます。連続王手には 9997 / 9998 の内部特殊値を使います。評価値が同じとき、値が 0 以上なら短い手、負なら長い手を優先します。ただし連続王手マーカー 9997 は同値の通常手より優先しません。
 
-出力時には、王手されている check-loop node に入る手の depth を 9997 にします。ValueDepth 順の best と同値で depth が異なる非 best 手は、**書き出す value を 1 下げます**。葉もこの補正の対象です。補正値は親への伝播には戻しません。迂回や連続王手ループを同値候補として選び続けることを避けるため、出力 book の PV を辿ると値が 1 ずれる場合があります。
+最終出力時だけ、best と同値で距離の異なる非 best 手を `value-1` にします。同値の遠回りや延々と同じ循環を選ぶことを避けるためです。この補正は親へ再伝播しません。**内部距離・特殊値を book の depth へ書くことはありません。** `count` による出力順にも変更はありません。
 
-データモデル・出力形式の意図的な違い:
+### 合流手の補完と未探索保護
 
-- YO の `VALUE_MATE` には rshogi の既存エンジン定数 `Value::MATE`（32000）を対応させます。`book_mine` が探索結果をラベル化する上限 30000 とは別です。空の候補集合は YO の best 初期値 `-32767`（親視点では `32767`）を用います。
-- 全局面を先手化せず、従来の「直接キーを優先、miss なら反転キー」のグラフを使います。`via_flip` 辺も同じ node index を辿り、王手判定・循環・符号反転に追加の色変換は不要です。両向きのキーが入力に存在する場合に新たな統合はしません。局面の走査は key 順で決定的です。
-- `--skip-unusable-moves` は非合法手・`none` を best と出力補正から除き、入力の value/depth を含めて行を保持します。`--skip-unsearched-children` は **depth を 0 に初期化する前の入力 depth** で辺を除き、登録済みの手を葉 `(入力 value, 0)` として扱います（出力時の同値補正は適用）。未探索の子に至る未登録手は補完しません。YO 自体にはこの 2 オプションはなく、実機との parity は両方 off で検証します。
-- 入力手の `count` / `ponder` と SFEN を保持し、補完手は `count=0` / `ponder=none` で出力します。writer の既存規約である **count 降順→USI 昇順**を使います。ValueDepth 比較は best 選択と value 補正に使い、ファイル順には使いません。YO の shrink / fast / `.ybb` 出力は対象外です。
+`--add-transposition-moves` は全合法手を調べ、直接キーまたは反転キーで book 内に存在する子への未登録手を追加します。追加手の値は `-best(子)`（上記の同値補正も適用）、`count=0`、`ponder=none`、`depth=1` です。追加手に既存探索ラベルはないため、`min` でも仮の 0 を上界として使いません。depth 1 は未探索 0/0 と区別する固定値で、実探索した深さや伝播距離を表しません。
 
-### 実 YaneuraOu との差分検証
-
-`tests/book_backprop_yo.rs` の ignored test は外部の入力 DB と YO 出力を読み、Rust の出力を一時ファイルに生成して照合します。比較キーは `(SFEN の先頭 3 フィールド, USI 手)` で、行順・ply・count・ponder は比較しません。手集合の一致と value/depth の完全一致を検査し、総手数・value 一致数・depth 一致数・両方の一致数を表示します。大きい DB は repo に追加しません。
-
-PowerShell での再現例（worktree を作業ディレクトリにする）:
-
-```powershell
-# target/yo-diff/in.db に検証入力を置く。
-$yoBookDir = (Resolve-Path target/yo-diff).Path
-@"
-usi
-setoption name BookDir value $yoBookDir
-setoption name BookFile value no_book
-setoption name FlippedBook value true
-makebook peta_shock in.db out_yo.db
-quit
-"@ | & /path/to/YO-MATERIAL.exe
-# NNUE 版を使う場合は、そのモデルの EvalDir / FV_SCALE / isready 設定も前置する。
-$env:YO_BOOK_INPUT = Join-Path $yoBookDir in.db
-$env:YO_BOOK_REFERENCE = Join-Path $yoBookDir out_yo.db
-cargo test -p tools --release --test book_backprop_yo -j 8 -- --ignored --nocapture
-```
-
-BookDir は絶対パスにします（YO が起動時に作業ディレクトリを変更する場合にも対応）。比較の前提は YO が元の向きの SFEN を出力することです。別の出力設定で向きが変わる場合は、局面と手の両方を同じ向きに揃えてから比較してください。
-
-通常実行される `real_yaneuraou_leaf_distance_and_convergence` は、実エンジン `YaneuraOu NNUE 9.80git 64AVX512VNNI TOURNAMENT` の `makebook peta_shock` で生成した小さい参照ペア `tests/fixtures/book_backprop_yo_{in,expected}.db` を使います。3 局面・入力 4 手から 1 手が補完され、入力 depth の破棄と距離 0/1 の同値補正を検査します。この入力を上記の `in.db` として使えば参照を再生成できます。
+`--skip-unsearched-children` が有効な場合、全行 `value=0 depth=0` だった入力局面は値も含めて行を保持し、補完もしません。子が探索済みでも、親を探索済みへ偽装しないためです。`book_mine` の `PositionEntry::is_unexplored` が引き続き葉として列挙できることを保ちます。
 
 ## レポート
 
@@ -131,5 +96,3 @@ BookDir は絶対パスにします（YO が起動時に作業ディレクトリ
 | Propagation depth | 縮約 DAG で葉から何段伝播したかの分布 |
 | SCC | 非自明 SCC 数、最大サイズ、draw-value になった SCC 内手数、値反復回数 |
 | Top changed nodes | 旧 best と新 best の差が大きい上位 20 局面 |
-
-互換モードでは Summary に check-loop nodes と cycle nodes（const 除去後の非 const ノード数）を追加します。SCC の反復回数欄には全局面伝播の反復回数を 1 件記録し、draw 手数は値 0 の SCC 内手数です。他の集計は既存形式を保ち、値の変化は出力補正後で集計します。

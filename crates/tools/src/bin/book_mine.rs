@@ -2229,9 +2229,9 @@ mod tests {
         assert_eq!((lines[1].move_usi.as_str(), lines[1].value), ("7g7f", 15));
     }
 
-    #[cfg(unix)]
     mod engine {
         use super::*;
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt as _;
 
         type Response<'a> = (&'a str, &'a str, &'a [&'a str]);
@@ -2274,13 +2274,51 @@ mod tests {
                     table.push_str(&format!("{sfen}\t{bestmove}\t{}\n", lines.join("|")));
                 }
                 std::fs::write(dir.path().join("table.tsv"), table).unwrap();
-                let path = dir.path().join("engine.sh");
-                let option = if advertise_multipv {
-                    "option name MultiPV type spin default 1 min 1 max 800"
-                } else {
-                    "option name USI_Hash type spin default 256 min 1 max 1024"
+                #[cfg(windows)]
+                let path = {
+                    static MOCK: std::sync::OnceLock<tempfile::TempDir> =
+                        std::sync::OnceLock::new();
+                    let compiled = MOCK.get_or_init(|| {
+                        let dir = tempfile::tempdir().unwrap();
+                        let src = dir.path().join("mock.rs");
+                        std::fs::write(
+                            &src,
+                            include_str!("../../tests/fixtures/book_mine_mock.rs"),
+                        )
+                        .unwrap();
+                        let result = std::process::Command::new("rustc")
+                            .args(["--edition=2024", "--crate-name", "book_mine_mock"])
+                            .arg(&src)
+                            .arg("-o")
+                            .arg(dir.path().join("mock.exe"))
+                            .output()
+                            .unwrap();
+                        assert!(
+                            result.status.success(),
+                            "{}",
+                            String::from_utf8_lossy(&result.stderr)
+                        );
+                        dir
+                    });
+                    let path = dir.path().join("engine.exe");
+                    std::fs::copy(compiled.path().join("mock.exe"), &path).unwrap();
+                    std::fs::write(
+                        dir.path().join("config.txt"),
+                        format!("{advertise_multipv} {searchmoves}"),
+                    )
+                    .unwrap();
+                    path
                 };
-                let script = r#"#!/bin/sh
+                #[cfg(unix)]
+                let path = dir.path().join("engine.sh");
+                #[cfg(unix)]
+                {
+                    let option = if advertise_multipv {
+                        "option name MultiPV type spin default 1 min 1 max 800"
+                    } else {
+                        "option name USI_Hash type spin default 256 min 1 max 1024"
+                    };
+                    let script = r#"#!/bin/sh
 dir=$(dirname "$0")
 mpv=1
 pos=
@@ -2331,11 +2369,13 @@ while IFS= read -r line; do
   esac
 done
 "#;
-                let script = script
-                    .replace("__OPTION__", option)
-                    .replace("__SEARCHMOVES__", if searchmoves { "yes" } else { "no" });
-                std::fs::write(&path, script).unwrap();
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+                    let script = script
+                        .replace("__OPTION__", option)
+                        .replace("__SEARCHMOVES__", if searchmoves { "yes" } else { "no" });
+                    std::fs::write(&path, script).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
                 Self { dir, path }
             }
 
@@ -2809,7 +2849,6 @@ done
         }
     }
 
-    #[cfg(unix)]
     mod run {
         use super::engine::{MockEngine, engine_opts};
         use super::*;

@@ -42,7 +42,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `yardstick_score` | ラベル品質「物差し」ステージ 2。`yardstick_label` 出力を engine ごとに勝率スケール較正し per-class の WDL logloss / 参照天井（符号一致）/ リファレンス一致（win-prob MAE・Spearman）を出す |
 | `book_rescore` | YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与し、journal/resume と集計 report を出力（実行中は進捗/ETA を stderr 表示） |
 | `book_extend` | YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加し、parent-journal 再利用、journal/resume、Markdown report を出力（[詳細](book_extend.md)） |
-| `book_backprop` | opt-in の `--yo-compat --merge replace` で YaneuraOu peta_shock の葉からの距離・全合法手の合流補完・連続王手処理に対応。YANEURAOU-DB2016 テキスト定跡 `.db` の候補手評価値を book 内の子局面から negamax 逆伝播し、SCC 循環と flip 合流に対応。非合法手は除外して既存valueを維持、`--skip-unusable-moves` で非合法手・`none` 行を局面 best から除外、`--skip-unsearched-children` で全候補手の depth が 0 の子局面への伝播を除外（[詳細](book_backprop.md)） |
+| `book_backprop` | 定跡の値を SCC negamax 逆伝播。既定出力を変更し、循環の引分下限撤去・連続王手・内部距離による同値補正に対応。探索 depth を保持し、未探索 0/0 を保護可能。`--add-transposition-moves` で手順間の合流手を補完（[詳細](book_backprop.md)） |
 | `book_mine` | YANEURAOU-DB2016 テキスト定跡を自エンジンで book 外へ展開する BookMiner 相当ツール。`frontier`（採掘側 best／相手側 window で末端列挙、入玉フラグ別出力）、`expand`（末端の MultiPV 探索で局面・候補手を `count=0` 追加、MultiPV 拡張、journal/resume）、`run`（frontier → expand → 逆伝播の周回、未探索の子局面に向かう親の手の探索値を保持、`iter-XXX/` 保存・再開）（[詳細](book_mine.md)） |
 
 ## NNUE 学習
