@@ -787,6 +787,7 @@ fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<S
     // 同じファイルを複数オプションが参照しても内容は一度だけ読む。
     let mut hashes = HashMap::new();
     let mut normalized_options = Vec::new();
+    let mut has_model_option = false;
     for option in engine_options {
         let normalized = if let Some((key, value)) = option.split_once('=') {
             let path = Path::new(value.trim());
@@ -794,6 +795,7 @@ fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<S
             let file_option = ["file", "dir", "path", "coeff"]
                 .iter()
                 .any(|suffix| key_lower.ends_with(suffix));
+            has_model_option |= file_option;
             if file_option && (path.is_file() || path.is_dir()) {
                 format!("{key}=sha256:{}", model_content_hash(path, &mut hashes)?)
             } else {
@@ -803,6 +805,25 @@ fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<S
             option.clone()
         };
         normalized_options.push(normalized);
+    }
+    if !has_model_option {
+        // EngineProcess は cwd を変更しない。rshogi の自動ロード先は親と同じ
+        // 作業ディレクトリの eval/nn.bin で、実行ファイルの隣ではない。
+        let default_model = std::env::current_dir()
+            .context("engine の作業ディレクトリを取得できません")
+            .and_then(|cwd| model_content_hash(&cwd.join("eval/nn.bin"), &mut hashes));
+        match default_model {
+            Ok(hash) => normalized_options.push(format!("model=default:sha256:{hash}")),
+            Err(err) => {
+                static NONCE: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+                let nonce = NONCE.get_or_init(rand::random);
+                eprintln!(
+                    "警告: model=unidentified: 既定モデル eval/nn.bin を識別できません: \
+                     {err:#}; journal reuse across resumes is disabled for this configuration"
+                );
+                normalized_options.push(format!("model=unidentified;nonce={nonce:032x}"));
+            }
+        }
     }
     normalized_options
         .sort_by(|a, b| engine_option_key(a).cmp(engine_option_key(b)).then_with(|| a.cmp(b)));
@@ -3145,6 +3166,75 @@ done
             };
             let run = run_expand(dir.path(), &db, &[&leaf], single, false, "single.db").unwrap();
             assert_eq!(entry_block(&run.out, &leaf).unwrap(), "3c3d none 30 10 0\n");
+        }
+
+        fn check_default_model_resume(test_name: &str, identified: bool) {
+            const CHILD: &str = "BOOK_MINE_DEFAULT_MODEL_CHILD";
+            if let Some(engine_path) = std::env::var_os(CHILD) {
+                let opts = EngineOpts {
+                    engine: engine_path.into(),
+                    engine_options: Vec::new(),
+                    go: "depth 10".into(),
+                    parallel: 1,
+                    multipv: 2,
+                    multipv_delta: 0,
+                    multipv_max: 16,
+                    extend_ply: 0,
+                };
+                let cwd = std::env::current_dir().unwrap();
+                run_expand(&cwd, &book_text(&[]), &[START], opts, true, "out.db").unwrap();
+                return;
+            }
+            let engine = MockEngine::new(&[(START, "7g7f", &["score cp 30 pv 7g7f"])]);
+            let dir = tempfile::tempdir().unwrap();
+            // 親テストの cwd は変更せず、各子プロセスに同じ作業ディレクトリを指定する。
+            // engine の配置先は別ディレクトリなので、実行ファイル相対との混同も検出する。
+            if identified {
+                std::fs::create_dir(dir.path().join("eval")).unwrap();
+                std::fs::write(dir.path().join("eval/nn.bin"), "first").unwrap();
+            }
+            for run in 0..3 {
+                if identified && run == 2 {
+                    std::fs::write(dir.path().join("eval/nn.bin"), "other").unwrap();
+                }
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env(CHILD, &engine.path)
+                    .current_dir(dir.path())
+                    .output()
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    output.status.success(),
+                    "{}\n{stderr}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                assert_eq!(
+                    stderr.contains("journal reuse across resumes is disabled"),
+                    !identified,
+                    "{stderr}"
+                );
+                let expected = if identified { [1, 1, 2][run] } else { run + 1 };
+                assert_eq!(engine.log().len(), expected, "run={run}");
+                let journal = std::fs::read_to_string(dir.path().join("journal.jsonl")).unwrap();
+                assert_eq!(journal.contains("model=unidentified;nonce="), !identified);
+            }
+        }
+
+        #[test]
+        fn review5_default_model_content_controls_resume() {
+            check_default_model_resume(
+                "tests::engine::review5_default_model_content_controls_resume",
+                true,
+            );
+        }
+
+        #[test]
+        fn review5_unidentified_default_never_reuses_and_warns() {
+            check_default_model_resume(
+                "tests::engine::review5_unidentified_default_never_reuses_and_warns",
+                false,
+            );
         }
 
         #[test]
