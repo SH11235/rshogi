@@ -1496,9 +1496,8 @@ lex 順 = 時刻降順 を成立させる仕組み (`games_index.rs` / `live_gam
 
 ### 14.2 R2 lifecycle rule 設計 (Pulumi IaC で declarative 化)
 
-`rshogi-cloudflare-iac` repo (PR #677 で R2 buckets を IaC 化済) に lifecycle
-policy を declarative に追記する。本 repo 側は **wrangler.toml では設定せず**、
-IaC 側を single source of truth とする (drift detection で gate 済)。
+IaC (Pulumi 等) を使う場合は R2 bucket の lifecycle policy を declarative に追記する。
+wrangler.toml では設定せず、IaC 側を single source of truth とする。
 
 設計:
 
@@ -1518,7 +1517,7 @@ IaC 側を single source of truth とする (drift detection で gate 済)。
 - Cloudflare R2 lifecycle rule は現時点で「expire」「abort multipart」をサポート。
   S3 互換の `noncurrent` 系は未対応 (versioning 自体が R2 native では未提供)。
 - `delete` action のある rule を追加する場合は **必ず** 棋譜 prefix を含まない
-  ことを Pulumi 側 unit test (rshogi-cloudflare-iac) でガードする。
+  ことを IaC 側の unit test でガードする。
 
 ### 14.3 別 backup bucket への定期 cp cron (Phase 2)
 
@@ -1589,7 +1588,6 @@ Cloudflare 側機能に依存)。
 
 ### 14.5 follow-up
 
-- [ ] `rshogi-cloudflare-iac` で R2 lifecycle policy を Pulumi に追加 (Phase 1
-      doc 公開と同時に着手)
+- [ ] IaC で R2 lifecycle policy を追加
 - [ ] backup bucket への cp cron 実装 (#624 Phase 2)
 - [ ] viewer 経路で `games-index/` の bucket 整合性 doctor (Phase 2 と同時着手)
