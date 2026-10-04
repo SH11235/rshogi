@@ -89,7 +89,7 @@ cargo run -p tools --release --bin book_mine -- expand \
 | `--out <path>` | 必須 | 出力 `.db` |
 | `--leaves <path>` | 必須 | `frontier` の出力 (形式は `--roots` と同じ) |
 | `--engine <path>` | 必須 | USI エンジンの実行ファイル |
-| `--engine-option <k=v>` | | USI option。複数指定可 |
+| `--engine-option <k=v>` | | USI option。複数指定可。同名キー（大小文字・前後空白を無視）の重複は起動時に拒否 |
 | `--go "<args>"` | `nodes 100000` | `go` 引数 |
 | `--parallel <N>` | `1` | 並列エンジン数 |
 | `--multipv <K>` | `4` | 初回 MultiPV 数 |
@@ -140,7 +140,9 @@ cargo run -p tools --release --bin book_mine -- expand \
 
 同じ局面キーの入力行は連結して保持します。未探索局面に同じ指し手が複数行ある場合、全ての一致行の value/depth を更新し、それぞれの count/ponder は保持します。
 
-`--journal` は JSON Lines 形式で、探索局面ごとに 1 行 (`key` / `sfen` / `go` / `multipv` / `engine_fingerprint` / `declaration_win` / `lines` / `multipv_used` / `extensions`) を追記します。未探索局面の既存手の searchmoves 探索は `searchmove` に対象手を入れた別レコードで、局面 key と対象手の組で再利用します。`multipv` は `--multipv` / `--multipv-delta` / `--multipv-max` を並べた文字列、`engine_fingerprint` は `book_extend` と同じく `--engine` の basename、バイナリの SHA-256、`--engine-option` の正規化文字列から作ります。
+`--journal` は JSON Lines 形式で、探索局面ごとに 1 行 (`key` / `sfen` / `go` / `multipv` / `engine_fingerprint` / `declaration_win` / `lines` / `multipv_used` / `extensions`) を追記します。未探索局面の既存手の searchmoves 探索は `searchmove` に対象手を入れた別レコードで、局面 key と対象手の組で再利用します。`multipv` は `--multipv` / `--multipv-delta` / `--multipv-max` を並べた文字列、`engine_fingerprint` は `--engine` の basename、バイナリの SHA-256、`--engine-option` の正規化文字列から作ります。
+
+既存の通常ファイルを指すオプション値（`EvalFile`、`LS_PROGRESS_COEFF` など）は、パス文字列の代わりに内容の `sha256:<hex>` で識別します。`EvalDir` が既存ディレクトリなら、その直下のファイルを名前順に並べた（ファイル名・サイズ・内容の SHA-256）のハッシュを使います。存在しないパスなどは従来どおり文字列で比較します。ファイルはストリーミングでハッシュ化し、起動時に計算した fingerprint を全 worker・周回で共有します。キー名は保持します。同じパスでも内容が変われば journal と summary の終端・収束キャッシュを再利用しません。同一のネット内容と他のオプションなら、配置パスが異なるマシン間でも journal を再利用できます。ただしエンジンの basename とバイナリの SHA-256 も引き続き一致が必要です。実行中のモデル差し替えには対応しません。
 
 `--resume` は key・`go`・`multipv`・`engine_fingerprint` が一致するレコードだけを再利用します。探索途中でエラーになった場合も、完了した探索は journal に追記済みなので `--resume` で再開できます。
 
@@ -199,7 +201,7 @@ cargo run -p tools --release --bin book_mine -- run \
 
 - `--iterations` 周に達した
 - 累計追加局面数が `--max-new-positions` に達した。各周の末端数は残り予算で打ち切ります (`--extend-ply` で辿った局面の分は超過しえます)
-- 全ての非終端末端を処理し、局面・手の追加も値の埋め込みも無かった（非終端末端がゼロの場合を含む）。`--max-leaves` や残り局面予算で打ち切った周は、追加ゼロでも収束としません
+- 全ての非終端末端を処理し、局面・手の追加も値の埋め込みも無かったうえ、逆伝播後に再計算した frontier に既知の終端以外の末端が無い。`--max-leaves` や残り局面予算で打ち切った周は、追加ゼロでも収束としません
 
 宣言勝ち・合法手なしと判明した末端は、ply を除き実際の先後を保持したキーで終端として `summary.json` の `terminal_keys` に記録し、探索設定が一致する間、以後の frontier 出力と件数制限の対象から除きます。Point27 は先手28点・後手27点なので宣言勝ちは反転局面に流用しません。合法手なしも記録形式を統一するため実局面キーを使います。`all_leaves_processed` に打ち切りの有無も保存するので、`--resume` 後も後続の末端へ進めます。宣言勝ちは設定が一致する journal からも復元します。この2項目のない既存 summary は未収束として再開し、終端を再判定します。単独の `frontier` コマンドは run の終端記録を読みません。
 
@@ -215,7 +217,7 @@ cargo run -p tools --release --bin book_mine -- run \
 
 ## パス検証
 
-`frontier` は `--book` / `--roots` / `--out` / `<out>.entered` / `--report`、`expand` は `--book` / `--out` / `--leaves` / `--journal` / `--report`、`run` は `--book` / `--out` / `--roots` の全ペアで正準パスの一致を検査し、同じファイルを指す組があれば起動時にエラーにします (`book_extend` と同じ検査)。`run` ではさらに `--book` / `--roots` / `--out` が `<work-dir>/journal.jsonl` や `<work-dir>/iter-*/` 以下（`summary.json` を含む）の内部成果物を指す場合も、未作成の出力先を含め起動時に拒否します。
+`frontier` は `--book` / `--roots` / `--out` / `<out>.entered` / `--report`、`expand` は `--book` / `--out` / `--leaves` / `--journal` / `--report`、`run` は `--book` / `--out` / `--roots` の全ペアで正準パスの一致を検査し、同じファイルを指す組があれば起動時にエラーにします（Windows では未作成部分も大小文字を区別せず、Unix では区別します）。`run` ではさらに `--book` / `--roots` / `--out` が `<work-dir>/journal.jsonl` や `<work-dir>/iter-*/` 以下（`summary.json` を含む）の内部成果物を指す場合も、未作成の出力先を含め起動時に拒否します。既存の内部成果物が symlink／junction の場合も解決先と比較し、リンク経由・解決先への直接指定のどちらも拒否します。
 
 ## 範囲外
 

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Seek, Write as IoWrite};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -197,6 +197,13 @@ fn validate_frontier_opts(opts: &FrontierOpts) -> Result<()> {
 }
 
 fn validate_engine_opts(opts: &EngineOpts) -> Result<()> {
+    let mut names = HashSet::new();
+    for option in &opts.engine_options {
+        let key = engine_option_key(option);
+        if !names.insert(key.to_ascii_lowercase()) {
+            bail!("--engine-option のオプション名が重複しています: {key}");
+        }
+    }
     if opts.parallel == 0 {
         bail!("--parallel は 1 以上を指定してください");
     }
@@ -229,7 +236,7 @@ fn reject_path_collisions(paths: &[(&str, &Path)]) -> Result<()> {
 }
 
 fn canonicalize_output_collision_path(path: &Path) -> Result<PathBuf> {
-    match std::fs::canonicalize(path) {
+    let resolved = match std::fs::canonicalize(path) {
         Ok(path) => Ok(path),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let parent =
@@ -241,7 +248,10 @@ fn canonicalize_output_collision_path(path: &Path) -> Result<PathBuf> {
             Ok(parent.join(file_name))
         }
         Err(err) => Err(err).with_context(|| format!("正準化できません: {}", path.display())),
-    }
+    }?;
+    #[cfg(windows)]
+    let resolved = PathBuf::from(resolved.as_os_str().to_string_lossy().to_lowercase());
+    Ok(resolved)
 }
 
 fn read_book_checked(path: &Path) -> Result<BookDb> {
@@ -254,12 +264,21 @@ fn read_book_checked(path: &Path) -> Result<BookDb> {
 fn reject_internal_artifact(name: &str, path: &Path, work_dir: &Path) -> Result<()> {
     let path = canonicalize_output_collision_path(path)?;
     let work_dir = canonicalize_output_collision_path(work_dir)?;
-    // 未作成部分も Windows の大文字小文字を区別しない規則で比較する。
-    #[cfg(windows)]
-    let (path, work_dir) = (
-        PathBuf::from(path.as_os_str().to_string_lossy().to_lowercase()),
-        PathBuf::from(work_dir.as_os_str().to_string_lossy().to_lowercase()),
-    );
+    if work_dir.is_dir() {
+        for entry in std::fs::read_dir(&work_dir)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let name_text = file_name.to_string_lossy();
+            #[cfg(windows)]
+            let name_text = name_text.to_lowercase();
+            if name_text == "journal.jsonl" || name_text.starts_with("iter-") {
+                let artifact = canonicalize_output_collision_path(&entry.path())?;
+                if path.starts_with(&artifact) {
+                    bail!("{name} は --work-dir の内部成果物と衝突します: {}", path.display());
+                }
+            }
+        }
+    }
     if let Ok(relative) = path.strip_prefix(&work_dir) {
         let first = relative.components().next().map(|c| c.as_os_str().to_string_lossy());
         if first.is_none() || first.is_some_and(|s| s == "journal.jsonl" || s.starts_with("iter-"))
@@ -745,7 +764,23 @@ fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<S
     let engine_bytes = std::fs::read(engine_path)
         .with_context(|| format!("engine binary を読めません: {}", engine_path.display()))?;
     let engine_sha256 = Sha256::digest(&engine_bytes);
-    let mut normalized_options: Vec<&str> = engine_options.iter().map(String::as_str).collect();
+    // SearchSettings はコマンド開始時に一度だけ作り、全 worker・周回で共有する。
+    // 同じファイルを複数オプションが参照しても内容は一度だけ読む。
+    let mut hashes = HashMap::new();
+    let mut normalized_options = Vec::new();
+    for option in engine_options {
+        let normalized = if let Some((key, value)) = option.split_once('=') {
+            let path = Path::new(value.trim());
+            if path.is_file() || (key.trim().eq_ignore_ascii_case("EvalDir") && path.is_dir()) {
+                format!("{key}=sha256:{}", model_content_hash(path, &mut hashes)?)
+            } else {
+                option.clone()
+            }
+        } else {
+            option.clone()
+        };
+        normalized_options.push(normalized);
+    }
     normalized_options
         .sort_by(|a, b| engine_option_key(a).cmp(engine_option_key(b)).then_with(|| a.cmp(b)));
     Ok(format!(
@@ -754,8 +789,44 @@ fn engine_fingerprint(engine_path: &Path, engine_options: &[String]) -> Result<S
     ))
 }
 
+fn model_content_hash(path: &Path, cache: &mut HashMap<PathBuf, String>) -> Result<String> {
+    let path = std::fs::canonicalize(path)?;
+    if let Some(hash) = cache.get(&path) {
+        return Ok(hash.clone());
+    }
+    let mut hash = Sha256::new();
+    if path.is_dir() {
+        let mut entries = std::fs::read_dir(&path)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let metadata = entry.metadata()?;
+            if metadata.is_file() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                hash.update((name.len() as u64).to_le_bytes());
+                hash.update(name.as_bytes());
+                hash.update(metadata.len().to_le_bytes());
+                hash.update(model_content_hash(&entry.path(), cache)?.as_bytes());
+            }
+        }
+    } else {
+        let mut file = File::open(&path)?;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+    }
+    let digest = format!("{:x}", hash.finalize());
+    cache.insert(path, digest.clone());
+    Ok(digest)
+}
+
 fn engine_option_key(option: &str) -> &str {
-    option.split_once('=').map_or(option, |(key, _)| key)
+    option.split_once('=').map_or(option, |(key, _)| key).trim()
 }
 
 /// ロックはこのハンドルと複製を閉じるまで保持され、プロセス終了時にも OS が解放する。
@@ -1983,8 +2054,8 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
             config: Some(config.clone()),
         };
         terminals.extend(summary.terminal_keys.iter().cloned());
-        if summary.converged() && !summary.terminal_keys.is_empty() {
-            // 終端の除外により、反転重複排除で隠れていた非終端が次の周に現れうる。
+        if summary.converged() {
+            // 逆伝播による最善手の変更や終端の除外で、新たな末端が現れうる。
             let remaining = compute_frontier_excluding(
                 &BookDb::read(&book_path)?,
                 &roots,
@@ -3310,6 +3381,152 @@ done
                 merge: MergeMode::Replace,
                 work_dir: dir.join("work"),
                 resume,
+            }
+        }
+
+        #[test]
+        fn review3_cycle_exit_is_searched_in_run_and_resume() {
+            for resume in [false, true] {
+                let b = after(KINGS, &["5i6i"]);
+                let c = after(&b, &["5a6a"]);
+                let d = after(&c, &["6i5i"]);
+                let exit = after(KINGS, &["5i4i"]);
+                let engine = MockEngine::new(&[(&exit, "5a4a", &["score cp 20 pv 5a4a"])]);
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    dir.path().join("book.db"),
+                    book_text(&[
+                        (KINGS, &[("5i6i", 100, 10, 1), ("5i4i", 50, 10, 1)]),
+                        (&b, &[("5a6a", 100, 10, 1)]),
+                        (&c, &[("6i5i", 100, 10, 1)]),
+                        (&d, &[("6a5a", 100, 10, 1)]),
+                    ]),
+                )
+                .unwrap();
+                std::fs::write(dir.path().join("roots.txt"), format!("sfen {KINGS}\n")).unwrap();
+                let mut args = run_args(dir.path(), &engine, if resume { 1 } else { 2 }, false);
+                cmd_run(&args).unwrap();
+                if resume {
+                    args.resume = true;
+                    args.iterations = 2;
+                    cmd_run(&args).unwrap();
+                }
+                assert!(BookDb::read(&args.out).unwrap().find(&exit).is_some(), "resume={resume}");
+                assert_eq!(engine.log().len(), 1);
+            }
+        }
+
+        #[test]
+        fn review3_model_content_controls_resume() {
+            for key in ["EvalFile", "EvalDir", "LS_PROGRESS_COEFF"] {
+                let engine = MockEngine::new(&[(WHITE_27, "win", &[])]);
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::write(dir.path().join("book.db"), book_text(&[])).unwrap();
+                std::fs::write(dir.path().join("roots.txt"), format!("sfen {WHITE_27}\n")).unwrap();
+                let mut args = run_args(dir.path(), &engine, 1, false);
+                let mut paths = Vec::new();
+                for name in ["model-a", "model-b"] {
+                    let path = dir.path().join(name);
+                    std::fs::create_dir(&path).unwrap();
+                    std::fs::write(path.join("net"), b"first net").unwrap();
+                    paths.push(if key == "EvalDir" {
+                        path
+                    } else {
+                        path.join("net")
+                    });
+                }
+                args.engine.engine_options = vec![format!("{key}={}", paths[0].display())];
+                let original = SearchSettings::new(&args.engine).unwrap();
+                cmd_run(&args).unwrap();
+                args.engine.engine_options = vec![format!("{key}={}", paths[1].display())];
+                assert_eq!(
+                    original.fingerprint,
+                    SearchSettings::new(&args.engine).unwrap().fingerprint
+                );
+                args.resume = true;
+                args.iterations = 2;
+                cmd_run(&args).unwrap();
+                assert_eq!(engine.log().len(), 1);
+                let file = if key == "EvalDir" {
+                    paths[1].join("net")
+                } else {
+                    paths[1].clone()
+                };
+                std::fs::write(file, b"other net").unwrap();
+                assert_ne!(
+                    original.fingerprint,
+                    SearchSettings::new(&args.engine).unwrap().fingerprint
+                );
+                cmd_run(&args).unwrap();
+                assert_eq!(engine.log().len(), 2, "{key}: journal と収束キャッシュを無効化する");
+            }
+        }
+
+        #[test]
+        fn review3_duplicate_engine_options_are_rejected() {
+            let engine = MockEngine::new(&[]);
+            for values in [
+                ["NoEnteringKing", "CSARule27"],
+                ["CSARule27", "NoEnteringKing"],
+            ] {
+                for second_key in ["EnteringKingRule", "enteringkingrule"] {
+                    let mut options = engine_opts(&engine);
+                    options.engine_options = vec![
+                        format!("EnteringKingRule={}", values[0]),
+                        format!("{second_key}={}", values[1]),
+                    ];
+                    let err = validate_engine_opts(&options).expect_err("重複キーを拒否する");
+                    assert!(err.to_string().to_lowercase().contains("enteringkingrule"));
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn review3_output_collision_ignores_windows_case() {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(
+                reject_path_collisions(&[
+                    ("--out", &dir.path().join("result.db")),
+                    ("--report", &dir.path().join("RESULT.DB"))
+                ])
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn review3_internal_directory_link_is_rejected() {
+            let dir = tempfile::tempdir().unwrap();
+            let work = dir.path().join("work");
+            let external = dir.path().join("external");
+            std::fs::create_dir(&work).unwrap();
+            std::fs::create_dir(&external).unwrap();
+            let link = work.join("iter-001");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&external, &link).unwrap();
+            #[cfg(windows)]
+            {
+                let output = std::process::Command::new("cmd")
+                    .args(["/c", "mklink", "/J"])
+                    .arg(&link)
+                    .arg(&external)
+                    .output()
+                    .unwrap();
+                if !output.status.success() {
+                    eprintln!("SKIP: directory junction を作成できません: {output:?}");
+                    return;
+                }
+            }
+            for output in [
+                link.join("summary.json"),
+                external.join("summary.json"),
+                external.join("nested/report.md"),
+            ] {
+                assert!(
+                    reject_internal_artifact("--out", &output, &work).is_err(),
+                    "{}",
+                    output.display()
+                );
             }
         }
 

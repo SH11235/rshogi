@@ -43,7 +43,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | `book_rescore` | YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与し、journal/resume と集計 report を出力（実行中は進捗/ETA を stderr 表示） |
 | `book_extend` | YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加し、parent-journal 再利用、journal/resume、Markdown report を出力（[詳細](book_extend.md)） |
 | `book_backprop` | 定跡の値を SCC negamax 逆伝播。既定出力を変更し、循環の引分下限撤去・連続する王手のみの DFS（全体 500 万訪問でエラー）・合法値下限を守る同値補正に対応。探索 depth を保持し、未探索 0/0 を保護可能。`--add-transposition-moves` で手順間の合流手を補完（[詳細](book_backprop.md)） |
-| `book_mine` | 反転局面の採掘側役割と最小 ply を追跡し、重複行を全件ラベル付け。run は先後を保持した終端記録・収束を探索設定一致時だけ再利用し、内部成果物への出力を拒否。journal は排他ロック中に追記・不完全末尾を復旧する。YANEURAOU-DB2016 テキスト定跡を自エンジンで book 外へ展開する BookMiner 相当ツール。`frontier`（採掘側 best／相手側 window で末端列挙、入玉フラグ別出力）、`expand`（末端の MultiPV 探索で局面・候補手を `count=0` 追加、MultiPV 拡張、journal/resume）、`run`（frontier → expand → 逆伝播の周回、未探索の子局面に向かう親の手の探索値を保持、`iter-XXX/` 保存・再開）（[詳細](book_mine.md)） |
+| `book_mine` | 反転局面の採掘側役割と最小 ply を追跡し、重複行を全件ラベル付け。run は逆伝播後の末端を再確認して収束判定し、終端記録・収束をモデル内容を含む探索設定一致時だけ再利用。同名エンジンオプション、Windows の大小文字衝突、リンク先を含む内部成果物への出力を拒否。journal は排他ロック中に追記・不完全末尾を復旧する。YANEURAOU-DB2016 テキスト定跡を自エンジンで book 外へ展開する BookMiner 相当ツール。`frontier`（採掘側 best／相手側 window で末端列挙、入玉フラグ別出力）、`expand`（末端の MultiPV 探索で局面・候補手を `count=0` 追加、MultiPV 拡張、journal/resume）、`run`（frontier → expand → 逆伝播の周回、未探索の子局面に向かう親の手の探索値を保持、`iter-XXX/` 保存・再開）（[詳細](book_mine.md)） |
 
 ## NNUE 学習
 
