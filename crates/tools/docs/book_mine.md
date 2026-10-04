@@ -144,7 +144,7 @@ cargo run -p tools --release --bin book_mine -- expand \
 
 キー名が大文字小文字を問わず `File` / `Dir` / `Path` / `COEFF` で終わるオプション（`EvalFile`、`EvalDir`、`LS_PROGRESS_COEFF` を含む）だけを内容識別の対象とします。それ以外（`Threads` など）は同名のファイルがあっても値を文字列のまま比較します。対象が既存の通常ファイルなら、パス文字列の代わりに内容の `sha256:<hex>` で識別します。対象が既存ディレクトリなら、その直下の通常ファイル（symlink のリンク先を含む）を名前順に並べた（ファイル名・サイズ・内容の SHA-256）のハッシュを使います。ディレクトリ内の壊れた symlink はエラーにします。存在しないオプション値のパスなどは従来どおり文字列で比較します。ファイルはストリーミングでハッシュ化し、起動時に計算した fingerprint を全 worker・周回で共有します。キー名は保持します。同じパスでも内容が変われば journal と summary の終端・収束キャッシュを再利用しません。同一のネット内容と他のオプションなら、配置パスが異なるマシン間でも journal を再利用できます。ただしエンジンの basename とバイナリの SHA-256 も引き続き一致が必要です。実行中のモデル差し替えには対応しません。
 
-モデル型オプションが一つもない場合は、rshogi の既定ロード先 `eval/nn.bin` の内容も同じ方法で識別します。エンジンは `book_mine` の作業ディレクトリを引き継ぐため、このパスは `book_mine` 起動時の作業ディレクトリ相対です（実行ファイルや `--work-dir` 相対ではありません）。既定パスを特定・読み取りできない場合や存在しない場合は、fingerprint に `model=unidentified` とランダムなプロセス固有 nonce を含め、再開をまたぐ journal・終端・収束キャッシュの再利用を無効化します。この場合は stderr に警告します。同じプロセス内では fingerprint を共有します。
+再開をまたぐ journal・終端・収束キャッシュの再利用には、`--engine-option EvalFile=<path>` または `--engine-option EvalDir=<path>`（YaneuraOu）の明示指定が必要です。モデルを識別するオプション名は、大文字小文字を問わず `EvalFile` / `EvalDir` との完全一致だけです。`BookFile` や `LS_PROGRESS_COEFF` なども内容ハッシュの対象ですが、モデル指定には数えません。どちらも指定されていない場合は既定モデルの場所を推測せず、作業ディレクトリに `eval/nn.bin` があっても fingerprint に `model=unidentified` とランダムなプロセス固有 nonce を含め、再開をまたぐキャッシュ再利用を無効化します。stderr に明示指定を促す警告をプロセスごとに一度出します。同じプロセス内では fingerprint を共有します。
 
 内容ハッシュ導入前の journal は新しい fingerprint 形式と一致しないため再利用せず、再開時に対象局面を再探索します。モデル指定のない旧 journal も同様です。
 
