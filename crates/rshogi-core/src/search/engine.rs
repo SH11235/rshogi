@@ -230,6 +230,8 @@ const _: () = {
 /// デフォルトのEvalHashサイズ（MB）
 pub const DEFAULT_EVAL_HASH_SIZE_MB: usize = 64;
 
+/// 探索状態と補助探索スレッドを所有する。
+/// native build では破棄時に補助探索へ停止を要求し、終了を待つ。
 pub struct Search {
     /// 置換表
     tt: Arc<TranspositionTable>,
@@ -2100,6 +2102,128 @@ mod tests {
 
     /// SearchWorkerは大きなスタック領域を使うため、テストは別スレッドで実行
     const STACK_SIZE: usize = 64 * 1024 * 1024; // 64MB
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn changing_helper_count_does_not_signal_stop() {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new_with_eval_hash(1, 1);
+                let stop = search.stop_flag();
+                for count in [2, 3, 1] {
+                    search.set_num_threads(count);
+                    assert!(!stop.load(Ordering::SeqCst), "Threads={count} requested stop");
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// callback の panic で所有された Search が破棄されても helper を終了できる。
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn callback_panic_joins_search_helpers() {
+        use std::io::{BufRead, BufReader};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::process::{Command, Stdio};
+
+        const CHILD_ENV: &str = "RSHOGI_TEST_CALLBACK_PANIC_CHILD";
+        const CHILD_DONE: &str = "callback-panic-helpers-joined";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "search::engine::tests::callback_panic_joins_search_helpers",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .env_remove("RSHOGI_DISABLE_HELPER_SEARCH")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let output = std::thread::spawn(move || {
+                let mut completed = false;
+                for line in BufReader::new(stdout).lines() {
+                    completed |= line.unwrap().ends_with(CHILD_DONE);
+                }
+                completed
+            });
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    let completed = output.join().unwrap();
+                    assert!(status.success(), "callback panic child failed: {status}");
+                    assert!(completed, "child did not complete the helper shutdown assertions");
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    output.join().unwrap();
+                    panic!("callback panic left a helper running during Search destruction");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        let guard = crate::eval::material::test_support::lock_material();
+        crate::eval::set_material_level(crate::eval::MaterialLevel::Lv1);
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                let mut search = Search::new_with_eval_hash(1, 1);
+                search.set_num_threads(2);
+                search.reset_flags();
+                let stop = search.stop_flag();
+                let tt = Arc::downgrade(&search.tt);
+                let eval_hash = Arc::downgrade(&search.eval_hash);
+                let progress = search.thread_pool.helper_threads()[0].progress_for_test();
+                let helper_started = Arc::new(AtomicBool::new(false));
+                let started = Arc::clone(&helper_started);
+                let result = catch_unwind(AssertUnwindSafe(move || {
+                    // closure 内で所有し、panic の unwind 中に Search を破棄する。
+                    let mut search = search;
+                    let mut pos = Position::new();
+                    pos.set_hirate();
+                    search.go(
+                        &mut pos,
+                        LimitsType {
+                            infinite: true,
+                            ..LimitsType::default()
+                        },
+                        Some(|_info: &SearchInfo| {
+                            let deadline = Instant::now() + Duration::from_secs(5);
+                            while progress.nodes() == 0 {
+                                assert!(
+                                    Instant::now() < deadline,
+                                    "helper did not begin searching"
+                                );
+                                std::thread::yield_now();
+                            }
+                            started.store(true, Ordering::SeqCst);
+                            panic!("search info callback failure");
+                        }),
+                    );
+                }));
+                assert!(result.is_err(), "callback panic must propagate");
+                assert!(helper_started.load(Ordering::SeqCst));
+                assert!(stop.load(Ordering::SeqCst));
+                assert!(tt.upgrade().is_none(), "helper retained its TT after Search was dropped");
+                assert!(
+                    eval_hash.upgrade().is_none(),
+                    "helper retained its EvalHash after Search was dropped"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        drop(guard);
+        println!("{CHILD_DONE}");
+    }
 
     #[test]
     fn terminal_roots_wait_after_initialization() {

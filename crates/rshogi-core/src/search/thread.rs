@@ -3,7 +3,7 @@
 // Each helper thread runs in its own OS thread with a dedicated SearchWorker.
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread::JoinHandle;
 
@@ -165,6 +165,13 @@ mod imp {
         }
     }
 
+    impl Drop for ThreadPool {
+        fn drop(&mut self) {
+            // helper は探索中に exit を確認しないため、join の前に探索を止める。
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
     struct ThreadInner {
         worker: Mutex<Box<SearchWorker>>,
         state: Mutex<ThreadState>,
@@ -290,6 +297,11 @@ mod imp {
 
         pub fn best_move_changes(&self) -> f64 {
             self.inner.progress.best_move_changes()
+        }
+
+        #[cfg(test)]
+        pub(crate) fn progress_for_test(&self) -> Arc<SearchProgress> {
+            Arc::clone(&self.inner.progress)
         }
     }
 
