@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use tungstenite::client::IntoClientRequest;
+use tungstenite::error::CapacityError;
 use tungstenite::handshake::client::Request;
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::stream::MaybeTlsStream;
@@ -17,6 +18,26 @@ use super::line_reader::MAX_CSA_LINE_BYTES;
 use crate::event::Event;
 
 const MAX_WS_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// WebSocket 受信の失敗。
+///
+/// 原因を `source` に載せないのは、文言に原因を含めたまま載せると `{:#}` 表示で
+/// 同じ文言が 2 回並ぶため。
+#[derive(Debug, thiserror::Error)]
+#[error("WebSocket read error: {0}")]
+pub struct WsReadError(tungstenite::Error);
+
+impl WsReadError {
+    /// frame / message のサイズ上限超過で拒否された場合に `(size, max_size)` を返す。
+    pub fn exceeded_size(&self) -> Option<(usize, usize)> {
+        match &self.0 {
+            tungstenite::Error::Capacity(CapacityError::MessageTooLong { size, max_size }) => {
+                Some((*size, *max_size))
+            }
+            _ => None,
+        }
+    }
+}
 
 /// WebSocket 経路の transport。`websocket` feature 有効時のみ提供。
 pub struct WsTransport {
@@ -152,7 +173,7 @@ impl WsTransport {
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
                 bail!("サーバー切断");
             }
-            Err(e) => Err(anyhow!("WebSocket read error: {e}")),
+            Err(e) => Err(WsReadError(e).into()),
         }
     }
 
@@ -263,5 +284,33 @@ fn stream_of_ws(ws: &WebSocket<MaybeTlsStream<TcpStream>>) -> Option<&TcpStream>
         MaybeTlsStream::Plain(s) => Some(s),
         MaybeTlsStream::Rustls(s) => Some(s.get_ref()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ws_read_error_keeps_single_line_message_and_reports_exceeded_size() {
+        let cause = tungstenite::Error::Capacity(CapacityError::MessageTooLong {
+            size: MAX_WS_MESSAGE_BYTES + 1,
+            max_size: MAX_WS_MESSAGE_BYTES,
+        });
+        let expected = format!("WebSocket read error: {cause}");
+        let error = anyhow::Error::from(WsReadError(cause));
+
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(format!("{error:#}"), expected);
+        assert_eq!(
+            error.downcast_ref::<WsReadError>().and_then(WsReadError::exceeded_size),
+            Some((MAX_WS_MESSAGE_BYTES + 1, MAX_WS_MESSAGE_BYTES))
+        );
+    }
+
+    #[test]
+    fn ws_read_error_reports_no_exceeded_size_for_other_causes() {
+        let error = WsReadError(tungstenite::Error::Io(ErrorKind::ConnectionReset.into()));
+        assert_eq!(error.exceeded_size(), None);
     }
 }
