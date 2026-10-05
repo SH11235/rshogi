@@ -348,7 +348,7 @@ describe("/ws/<room_id> upgrade rate limit (per-IP)", () => {
 // ---------------------------------------------------------------------------
 //
 // **本シナリオは Miniflare 上で直接再現できないため smoke 化していない**:
-// Miniflare 4 は Cloudflare edge proxy をシミュレートするために
+// Miniflare は Cloudflare edge proxy をシミュレートするために
 // `CF-Connecting-IP` を **常に** request 元の IP (`127.0.0.1` 等) で
 // 自動注入する。`headers: { "CF-Connecting-IP": "" }` で空を明示的に渡しても
 // fetch API レベルで空値ヘッダは silent drop され、Miniflare の default 注入が

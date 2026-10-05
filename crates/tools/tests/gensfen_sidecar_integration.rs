@@ -128,8 +128,10 @@ fn real_native_gensfen_concatenates_psv_and_game_id_sidecar_in_lockstep() {
     let sidecar_bytes = std::fs::read(sidecar).unwrap();
     assert_eq!(sidecar_bytes.len() % 4, 0);
     let game_ids: Vec<u32> = sidecar_bytes
-        .chunks_exact(4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
         .collect();
     assert!(psv_records > 0);
     assert_eq!(psv_records, game_ids.len());

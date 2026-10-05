@@ -1860,14 +1860,13 @@ fn build_floodgate_comment(
             Color::Black => cp,
             Color::White => cp.checked_neg()?,
         }
-    } else if let Some(mate) = info.score_mate {
+    } else {
+        let mate = info.score_mate?;
         let base = if mate > 0 { 100000 } else { -100000 };
         match my_color {
             Color::Black => base,
             Color::White => -base,
         }
-    } else {
-        return None;
     };
     let mut comment = format!("* {score}");
     if !info.pv.is_empty() {

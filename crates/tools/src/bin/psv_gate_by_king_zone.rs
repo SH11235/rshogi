@@ -152,8 +152,10 @@ fn merge(base: &Path, override_path: &Path, out: &Path, config: GateConfig) -> R
         read_record_chunk(&mut override_reader, &mut override_chunk, chunk_records)?;
         let classifications = classify_chunk(&base_chunk, first_row);
         for (offset, ((base_record, override_record), classification)) in base_chunk
-            .chunks_exact(RECORD_SIZE)
-            .zip(override_chunk.chunks_exact_mut(RECORD_SIZE))
+            .as_chunks::<RECORD_SIZE>()
+            .0
+            .iter()
+            .zip(override_chunk.as_chunks_mut::<RECORD_SIZE>().0.iter_mut())
             .zip(classifications)
             .enumerate()
         {

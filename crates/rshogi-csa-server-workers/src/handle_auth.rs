@@ -202,9 +202,9 @@ fn parse_hex_sha256(s: &str) -> Option<[u8; PASSWORD_SHA256_BYTES]> {
     let mut out = [0u8; PASSWORD_SHA256_BYTES];
     let bytes = s.as_bytes();
     // 先頭 `len() == PASSWORD_SHA256_HEX_LEN` (64、偶数) チェックで remainder が
-    // 常に空になることを保証しているため、`chunks_exact(2)` の末尾切り捨て副作用は
+    // 常に空になることを保証しているため、`as_chunks::<2>()` の remainder の切り捨ては
     // 発生しない (奇数長は早期に `None` で reject)。
-    for (i, chunk) in bytes.chunks_exact(2).enumerate() {
+    for (i, chunk) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let high = hex_nibble(chunk[0])?;
         let low = hex_nibble(chunk[1])?;
         out[i] = (high << 4) | low;

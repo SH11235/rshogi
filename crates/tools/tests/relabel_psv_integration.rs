@@ -32,7 +32,9 @@ fn write_psv(path: &Path, records: &[PackedSfenValue]) {
 fn read_psv(path: &Path) -> Vec<PackedSfenValue> {
     std::fs::read(path)
         .unwrap()
-        .chunks_exact(PackedSfenValue::SIZE)
+        .as_chunks::<{ PackedSfenValue::SIZE }>()
+        .0
+        .iter()
         .map(|bytes| PackedSfenValue::from_bytes(bytes).unwrap())
         .collect()
 }
@@ -901,8 +903,10 @@ fn real_native_gensfen_midgame_diversion_reads_exact_absolute_ply_score() {
     let all_records = read_psv(&out_dir.join("gensfen.psv"));
     let all_ids: Vec<u32> = std::fs::read(&generated_sidecar)
         .unwrap()
-        .chunks_exact(4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
         .collect();
     let game_id = *all_ids.first().expect("NativeBackend run must produce PSV records");
     let mut records: Vec<PackedSfenValue> = all_records

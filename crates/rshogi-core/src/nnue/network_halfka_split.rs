@@ -329,10 +329,7 @@ impl<const L1: usize> AccumulatorStackHalfKaSplit<L1> {
             if !path.push(idx) {
                 return None;
             }
-            match self.entries[idx].previous {
-                Some(prev) => idx = prev,
-                None => return None,
-            }
+            idx = self.entries[idx].previous?;
         }
 
         path.reverse();
@@ -1704,7 +1701,7 @@ impl<
         }
 
         if debug {
-            eprintln!("[DEBUG] L1 output: {:?}", &l1_out.0);
+            eprintln!("[DEBUG] L1 output: {:?}", l1_out.0);
             eprintln!(
                 "[DEBUG] L1 biases[0..8]: {:?}",
                 &self.l1.biases[0..8.min(self.l1.biases.len())]

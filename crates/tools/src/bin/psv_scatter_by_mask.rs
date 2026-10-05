@@ -153,7 +153,7 @@ fn write_scattered(
         input_reader.read_exact(&mut input_chunk)?;
         mask_reader.read_exact(&mut mask_chunk)?;
 
-        for (offset, input_record) in input_chunk.chunks_exact(RECORD_SIZE).enumerate() {
+        for (offset, input_record) in input_chunk.as_chunks::<RECORD_SIZE>().0.iter().enumerate() {
             if mask_chunk[offset / 8] & (1 << (offset % 8)) == 0 {
                 writer.write_all(input_record)?;
                 continue;
@@ -226,7 +226,8 @@ mod tests {
         let out = dir.path().join("out.psv");
         let input_bytes = records(count);
         let mut compact_bytes = selected_records(&input_bytes, selected);
-        for (index, record) in compact_bytes.chunks_exact_mut(RECORD_SIZE).enumerate() {
+        for (index, record) in compact_bytes.as_chunks_mut::<RECORD_SIZE>().0.iter_mut().enumerate()
+        {
             record[SCORE_OFFSET..SCORE_OFFSET + SCORE_SIZE]
                 .copy_from_slice(&(-(index as i16) - 100).to_le_bytes());
             record[34..].fill(0xa5);

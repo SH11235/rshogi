@@ -44,7 +44,7 @@ fn chunked_output_is_independent_of_threads_and_batch_size() {
     let multi_output = dir.path().join("multi.psv");
 
     let mut records = vec![0u8; 3_000 * RECORD_SIZE];
-    for (index, record) in records.chunks_exact_mut(RECORD_SIZE).enumerate() {
+    for (index, record) in records.as_chunks_mut::<RECORD_SIZE>().0.iter_mut().enumerate() {
         record[..8].copy_from_slice(&(index as u64).to_le_bytes());
         for (offset, byte) in record[8..].iter_mut().enumerate() {
             *byte = (index.wrapping_mul(31).wrapping_add(offset) & 0xff) as u8;
@@ -67,7 +67,7 @@ fn chunked_output_is_independent_of_threads_and_batch_size() {
 fn staged_deletion_flags_preserve_output_sha256() {
     let dir = tempfile::tempdir().expect("一時ディレクトリを作成できること");
     let mut records = vec![0u8; 3_000 * RECORD_SIZE];
-    for (index, record) in records.chunks_exact_mut(RECORD_SIZE).enumerate() {
+    for (index, record) in records.as_chunks_mut::<RECORD_SIZE>().0.iter_mut().enumerate() {
         record[..8].copy_from_slice(&(index as u64).to_le_bytes());
         for (offset, byte) in record[8..].iter_mut().enumerate() {
             *byte = (index.wrapping_mul(31).wrapping_add(offset) & 0xff) as u8;

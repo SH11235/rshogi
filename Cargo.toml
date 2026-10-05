@@ -21,7 +21,7 @@ flate2 = "1.0"
 chrono = "0.4"
 anyhow      = "1.0"
 log         = "0.4"
-clap = { version = "4.5.47", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 env_logger = "0.11"
 # `#[instrument]` 属性マクロは使わない (span 付与は `Instrument` trait で行う) ため、
 # default の attributes (tracing-attributes proc-macro) を外し std のみ有効化する。
@@ -36,7 +36,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 rand = "0.9.3"
 rand_xoshiro = "0.7"
-regex = "1.11.2"
+regex = "1.13.1"
 toml = "0.8"
 smallvec = "1.15"
 thiserror = "2.0"

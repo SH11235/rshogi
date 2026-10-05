@@ -67,9 +67,11 @@ pub fn load_progress_coeff_kpabs_q16_from_bytes(bytes: &[u8]) -> Result<Box<[i32
         return Err("progress Q16 coefficient size mismatch".to_string());
     }
     bytes
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|chunk| {
-            let value = f64::from_le_bytes(chunk.try_into().expect("exact chunk size"));
+            let value = f64::from_le_bytes(*chunk);
             if !value.is_finite() {
                 return Err("progress Q16 coefficient must be finite".to_string());
             }
@@ -300,7 +302,7 @@ mod tests {
             f64::MAX,
             -f64::MAX,
         ];
-        for (chunk, value) in bytes.chunks_exact_mut(8).zip(values) {
+        for (chunk, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(values) {
             chunk.copy_from_slice(&value.to_le_bytes());
         }
         let weights = load_progress_coeff_kpabs_q16_from_bytes(&bytes).unwrap();

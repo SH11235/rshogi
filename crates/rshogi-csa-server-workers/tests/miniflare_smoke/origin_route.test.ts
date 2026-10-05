@@ -10,7 +10,7 @@ import { DEFAULT_TEST_CF_CONNECTING_IP, createMiniflare, makeTempPersistRoot } f
  * Miniflare 経由で 101 / 403 ステータスを直接確認する。
  */
 function closeAcceptedSocket(ws: WebSocket | null | undefined): void {
-  // Miniflare 4 は `accept()` を呼ばずに `close()` すると例外を投げる。Origin
+  // Miniflare は `accept()` を呼ばずに `close()` すると例外を投げる。Origin
   // 許可ケースで Upgrade を確認した後の cleanup を 1 行に揃えるためのヘルパ。
   ws?.accept();
   ws?.close();

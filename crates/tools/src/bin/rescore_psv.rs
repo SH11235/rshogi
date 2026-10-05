@@ -5447,7 +5447,9 @@ mod marker_tests {
             append_rescore_bytes(&mut scores, record, true);
         }
         let extracted: Vec<u8> = full
-            .chunks_exact(PackedSfenValue::SIZE)
+            .as_chunks::<{ PackedSfenValue::SIZE }>()
+            .0
+            .iter()
             .flat_map(|record| record[32..34].iter().copied())
             .collect();
         assert_eq!(scores, extracted);

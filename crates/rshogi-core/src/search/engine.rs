@@ -305,6 +305,7 @@ pub struct Search {
 ///
 /// - `changes`: 各スレッドのbest_move_changes
 /// - 戻り値: (合計, スレッド数)。スレッド数0の場合は(0.0, 1)を返しゼロ除算を避ける。
+#[cfg(any(test, not(target_arch = "wasm32"), feature = "wasm-threads"))]
 fn aggregate_best_move_changes(changes: &[f64]) -> (f64, usize) {
     if changes.is_empty() {
         return (0.0, 1);
@@ -1379,6 +1380,7 @@ impl Search {
             ponderhit_flag: &self.ponderhit_flag,
             start_time: self.start_time.unwrap(),
             tt: &self.tt,
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             thread_pool: &self.thread_pool,
             increase_depth: self.increase_depth,
             search_again_counter: self.search_again_counter,
@@ -1429,6 +1431,7 @@ struct MainThreadState<'a> {
     ponderhit_flag: &'a AtomicBool,
     start_time: Instant,
     tt: &'a TranspositionTable,
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     thread_pool: &'a ThreadPool,
     // owned (書き戻し対象)
     increase_depth: bool,

@@ -1,9 +1,9 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Miniflare, type WebSocket } from "miniflare";
+import { convertV4MiniflareOptions, Miniflare, type WebSocket } from "miniflare";
 
-/// `mf.getR2Bucket(...)` の戻り値は miniflare 4 が `ReplaceWorkersTypes<R2Bucket>`
+/// `mf.getR2Bucket(...)` の戻り値は miniflare が `ReplaceWorkersTypes<R2Bucket>`
 /// (大きな conditional type) として返し、tsc の構造的推論で `Request_2` などに
 /// 潰れる既知のエッジケースがある。`R2Bucket` 自体は miniflare の barrel export
 /// 対象外でもあり、`@cloudflare/workers-types` を別途 devDep に入れたくない
@@ -11,7 +11,7 @@ import { Miniflare, type WebSocket } from "miniflare";
 /// 使わないため、duck-type interface を 1 か所定義して `getKifuBucket` で
 /// キャストを隠蔽する。
 ///
-/// 引数 / 戻り値を最小だけ広げてあるのは、将来 miniflare 4 が `list()` の
+/// 引数 / 戻り値を最小だけ広げてあるのは、将来 miniflare が `list()` の
 /// 既定挙動を変えても (例: page size 規定値変更 / `truncated` 必須化) 局所
 /// 改修で追随できるようにするため。
 export interface R2ListOptions {
@@ -134,19 +134,23 @@ export const DEFAULT_TEST_CF_CONNECTING_IP = "127.0.0.1";
 
 export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> {
   const rl = opts.rateLimitOverrides ?? {};
-  const mf = new Miniflare({
-    scriptPath: opts.scriptPath ?? SHIM_PATH,
-    modules: true,
-    modulesRules: [
-      { type: "ESModule", include: ["**/*.js", "**/*.mjs"], fallthrough: true },
-      { type: "CompiledWasm", include: ["**/*.wasm"], fallthrough: true },
+  const modulePaths = new Set([
+    opts.scriptPath ?? SHIM_PATH,
+    SHIM_PATH,
+    resolve(WORKER_ROOT, "build/index.js"),
+  ]);
+  const mf = new Miniflare(convertV4MiniflareOptions({
+    modulesRoot: WORKER_ROOT,
+    modules: [
+      ...Array.from(modulePaths, path => ({ type: "ESModule" as const, path })),
+      { type: "CompiledWasm" as const, path: resolve(WORKER_ROOT, "build/index_bg.wasm") },
     ],
     compatibilityDate: "2026-04-21",
     durableObjects: {
       GAME_ROOM: { className: "GameRoom", useSQLite: true },
       LOBBY: { className: "Lobby", useSQLite: true },
       // RateLimiter (issue #622 PR3a): per-(kind, identifier) で sharding する
-      // atomic token bucket DO。Miniflare 4 の `useSQLite: true` は production
+      // atomic token bucket DO。`useSQLite: true` は production
       // wrangler.toml の `[[migrations]] new_sqlite_classes = ["RateLimiter"]`
       // (tag = "v3") と整合する。
       RATE_LIMITER: { className: "RateLimiter", useSQLite: true },
@@ -221,8 +225,8 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
         rl.wsRoomUpgradePerIpPerMin ?? DEFAULT_LOOSENED_RATE_LIMIT_PER_MIN,
       ),
     },
-    defaultPersistRoot: opts.persistRoot,
-  });
+    resourcePersistencePath: opts.persistRoot,
+  }));
   await mf.ready;
   await applyGamesSearchMigrations(mf);
   return mf;
@@ -412,7 +416,7 @@ export class CsaClient {
     // へ遷移しており、close event は再 dispatch されずに `Promise` が timeout
     // 一杯を空待ちすることがある。`readyState` で早期 return して 2000ms の
     // 浪費を防ぐ。`READY_STATE_CLOSING = 2` / `READY_STATE_CLOSED = 3` は
-    // miniflare 4 の static 定数。
+    // miniflare の static 定数。
     const state = this.ws.readyState;
     if (state === 2 /* CLOSING */ || state === 3 /* CLOSED */) {
       return;

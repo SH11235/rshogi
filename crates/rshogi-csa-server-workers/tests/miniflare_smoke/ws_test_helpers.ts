@@ -1,7 +1,7 @@
 import type { WebSocket } from "miniflare";
 
 /**
- * Miniflare 4 の `WebSocket` を行 (`\n` 区切り) 単位で読み取るためのバッファ。
+ * Miniflare の `WebSocket` を行 (`\n` 区切り) 単位で読み取るためのバッファ。
  *
  * `lobby.test.ts` (issue #631 / #582) と `rate_limit.test.ts` (issue #622 PR3a)
  * の inline 重複ヘルパを共有化したもの (PR #699 claude[bot] review P2 follow-up)。

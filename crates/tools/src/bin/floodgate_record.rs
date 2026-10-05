@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use reqwest::blocking::Client;
 use rshogi_csa_client::config::CsaClientConfig;
 use rshogi_csa_client::jsonl::sanitize_for_filename;
 use serde::Deserialize;
@@ -295,7 +294,7 @@ fn median(xs: &mut [f64]) -> f64 {
 /// 取得・解析は `tools::common::floodgate`(reqwest, in-repo)を再利用。キーは集計側と
 /// 同じ sanitize 名に正規化する(raw 表示名が `.` 等を含んでも引ける。衝突は後勝ち)。
 fn fetch_ratings_map() -> Result<(String, BTreeMap<String, f64>)> {
-    let client = Client::builder().build().context("reqwest client 生成失敗")?;
+    let client = fg::http_client_builder().build().context("reqwest client 生成失敗")?;
     let (url, date, html) = fg::fetch_latest_rating_page(&client)?;
     eprintln!("レート取得: {url}");
     let map = fg::parse_rating_page(&html)

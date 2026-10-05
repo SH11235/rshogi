@@ -280,7 +280,7 @@ fn start_position_for_game(game_id: u32, moves: &[MoveEntry]) -> Result<(Positio
         .ok_or_else(|| anyhow!("game {} has no moves; cannot infer start position", game_id))?;
     let mut pos = Position::new();
     pos.set_sfen(&first.sfen_before).map_err(|e| {
-        anyhow!("game {}: failed to parse sfen_before '{}': {}", game_id, &first.sfen_before, e)
+        anyhow!("game {}: failed to parse sfen_before '{}': {}", game_id, first.sfen_before, e)
     })?;
     let sfen = pos.to_sfen();
     Ok((pos, sfen))

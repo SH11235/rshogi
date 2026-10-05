@@ -27,10 +27,9 @@ pub fn mirror_horizontal(sfen: &str) -> Option<String> {
                 }
             } else if c == '+' {
                 // promoted piece like +P, +r
-                if let Some(pc) = chars.next() {
+                {
+                    let pc = chars.next()?;
                     cells.push(format!("+{pc}"));
-                } else {
-                    return None;
                 }
             } else {
                 cells.push(c.to_string());

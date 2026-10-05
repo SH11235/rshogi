@@ -1560,11 +1560,7 @@ mod tests {
             shuffle_seed,
         )
         .unwrap();
-        std::fs::read(output_path)
-            .unwrap()
-            .chunks_exact(PSV_SIZE)
-            .map(|chunk| chunk.try_into().unwrap())
-            .collect()
+        std::fs::read(output_path).unwrap().as_chunks::<{ PSV_SIZE }>().0.to_vec()
     }
 
     fn run_dedup(records: &[[u8; PSV_SIZE]], shuffle_seed: Option<u64>) -> Vec<[u8; PSV_SIZE]> {

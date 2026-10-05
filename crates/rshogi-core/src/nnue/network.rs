@@ -182,8 +182,10 @@ pub fn load_progress_coeff_kpabs_from_bytes(bytes: &[u8]) -> Result<Box<[f32]>, 
     }
 
     let weights: Vec<f32> = bytes
-        .chunks_exact(size_of::<f64>())
-        .map(|chunk| f64::from_le_bytes(chunk.try_into().expect("chunk size is checked")) as f32)
+        .as_chunks::<{ size_of::<f64>() }>()
+        .0
+        .iter()
+        .map(|chunk| f64::from_le_bytes(*chunk) as f32)
         .collect();
     Ok(weights.into_boxed_slice())
 }
