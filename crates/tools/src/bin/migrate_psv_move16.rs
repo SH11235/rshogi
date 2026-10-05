@@ -1,6 +1,6 @@
 //! 旧リポジトリ内部形式 (B) の PSV move16 を実 YaneuraOu 形式 (A) へ移行する。
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -9,6 +9,7 @@ use clap::Parser;
 use rshogi_core::position::Position;
 use rshogi_core::types::Move;
 use tools::common::io::partial_path;
+use tools::output_path::ensure_safe_output_path;
 use tools::packed_sfen::{
     PackedSfenValue, PsvMove16Class, classify_psv_move16, is_legal_psv_move, legacy_move16_to_move,
     move_to_psv_move16, unpack_sfen_to_parts,
@@ -118,18 +119,21 @@ fn main() -> Result<()> {
     let records = metadata.len() / PackedSfenValue::SIZE as u64;
     validate_input_format(&cli.input, records)?;
 
-    let input_canonical = cli.input.canonicalize()?;
-    if cli.output.exists() && cli.output.canonicalize()? == input_canonical {
-        anyhow::bail!("入力と出力が同一ファイルです: {}", cli.input.display());
-    }
     let tmp_output = partial_path(&cli.output);
-    if tmp_output.exists() && tmp_output.canonicalize()? == input_canonical {
-        anyhow::bail!("一時ファイルが入力と同一ファイルです: {}", tmp_output.display());
-    }
+    ensure_safe_output_path(&cli.output, &cli.input)?;
+    ensure_safe_output_path(&tmp_output, &cli.input)?;
 
     let input = File::open(&cli.input)?;
-    let output = File::create(&tmp_output)
-        .with_context(|| format!("{} を作成できません", tmp_output.display()))?;
+    let output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_output)
+        .with_context(|| {
+            format!(
+                "{} を新規作成できません。既存の .partial は内容と使用中でないことを確認してから移動または削除してください",
+                tmp_output.display()
+            )
+        })?;
     let mut reader = BufReader::with_capacity(IO_BUF_SIZE, input);
     let mut writer = BufWriter::with_capacity(IO_BUF_SIZE, output);
     let mut record = [0u8; PackedSfenValue::SIZE];

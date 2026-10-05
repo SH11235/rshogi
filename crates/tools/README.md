@@ -45,12 +45,13 @@ LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md
 | `rescore_hcpe` | hcpe 教師の eval を NNUE 固定 depth 探索で付け替え（分散ラベリング・チャンク単位 + 途中 resume 対応） |
 | `preprocess_psv` | PSV の qsearch leaf 置換と、任意の局面変更行 bitmap mask 生成（[詳細](docs/pack_tools.md#preprocess_psv)） |
 | `validate_psv` | PSV ファイルの不正局面検出・除去 |
-| `psv_to_jsonl` | PSV 形式 → JSONL 変換（デバッグ・確認用） |
+| `filter_teacher_data` | 王手除外・スコアフィルタ・クリップと統計集計。PSV / JSON 出力への入力 alias を拒否（[詳細](docs/filter_teacher_data.md)） |
+| `psv_to_jsonl` | PSV 形式 → JSONL 変換（デバッグ・確認用）。入力 alias を拒否（[詳細](docs/psv_to_jsonl.md)） |
 | `jsonl_to_psv` | 自己対局 JSONL → PSV 変換（破損行は破棄して継続、件数を Summary に計上。[詳細](docs/pack_tools.md#jsonl_to_psv)） |
-| `psv_to_hcpe3` | PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming、`move16=0` の有効な着手なしレコードを件数付きスキップ、`--evalfix-a` 対応） |
+| `psv_to_hcpe3` | PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming、`move16=0` を件数付きスキップ、`--evalfix-a` 対応）。入力への alias を拒否し、既存 `.partial` を保持（[詳細](docs/psv_to_hcpe3.md)） |
 | `migrate_psv_move16` | 旧リポジトリ形式 (B) の PSV move16 を実 YaneuraOu 形式 (A) へ移行（[詳細](docs/migrate_psv_move16.md)） |
-| `pack_to_psv` | GenSfen .pack → PSV 変換（move16 は実着手ラベルの実 YaneuraOu 形式） |
-| `fix_scores` | スコアの補正 |
+| `pack_to_psv` | GenSfen .pack → PSV 変換（move16 は実着手ラベルの実 YaneuraOu 形式）。全入力への出力 alias を拒否（[詳細](docs/pack_to_psv.md)） |
+| `fix_scores` | スコアの補正。前処理済みファイルのインプレース更新に対応し、元ファイルを保護（[詳細](docs/fix_scores.md)） |
 | `psv_dedup` / `psv_dedup_bloom` / `psv_dedup_partition` | PSV 局面の重複除去（3 方式。partition 方式は Phase 1 buffer 自動調整・fused shuffle 対応。使い分けは [pack_tools.md](docs/pack_tools.md#重複除去ツールの選び方)） |
 | `prep_hcpe` | hcpe 教師プールの汚染除去・重複除去・決定的 shuffle・分割（[詳細](docs/prep_hcpe.md)） |
 | `hcpe_to_psv` | hcpe → PSV 変換（Linux/macOS・Windows対応、hardlinkを含む入力と出力の同一実体を拒否。外部公開 hcpe プールの学習/検証投入用、[詳細](docs/hcpe_to_psv.md)） |
@@ -136,6 +137,10 @@ cargo run -p tools --release --bin benchmark -- --internal
 - [rescore_hcpe](docs/rescore_hcpe.md) - hcpe 教師の eval を NNUE 固定 depth 探索で付け替え（共有コアで yardstick とラベル bit 一致、分散ラベリング・チャンク単位 + 途中 resume 対応）
 - [psv_to_hcpe3](docs/psv_to_hcpe3.md) - PSV → dlshogi 学習用 hcpe3 / hcpe 変換（cshogi 互換、streaming、`move16=0` の有効な着手なしレコードを件数付きスキップ、`--evalfix-a` 対応）
 - [migrate_psv_move16](docs/migrate_psv_move16.md) - 旧 PSV move16 の実 YaneuraOu 形式への移行
+- [psv_to_jsonl](docs/psv_to_jsonl.md) - PSV の JSONL 変換と入力ファイルの保護
+- [pack_to_psv](docs/pack_to_psv.md) - GenSfen 棋譜から PSV への展開
+- [filter_teacher_data](docs/filter_teacher_data.md) - 教師データのフィルタと PSV / JSON 出力先の保護
+- [fix_scores](docs/fix_scores.md) - 元ファイルを保持したスコア訂正とインプレース更新
 - [book_rescore](docs/book_rescore.md) - YANEURAOU-DB2016 テキスト定跡の候補手に USI 探索または ONNX 静的評価値を付与（実行中は進捗/ETA を stderr 表示）
 - [book_kachi_label](docs/book_kachi_label.md) - YANEURAOU-DB2016 テキスト定跡の候補手に `%KACHI` 決着率を付与する sidecar JSONL を生成
 - [book_extend](docs/book_extend.md) - YANEURAOU-DB2016 テキスト定跡の候補集合へ USI エンジン bestmove を `count=0` で追加

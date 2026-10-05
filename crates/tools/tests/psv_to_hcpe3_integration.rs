@@ -35,7 +35,8 @@ fn run(input: &Path, output: &Path, format: &str, threads: &str, chunk: &str) {
 #[test]
 fn legacy_move16_fixture_is_rejected() {
     let input = fixture("psv_to_hcpe3_sample.psv");
-    let out = std::env::temp_dir().join("psv_to_hcpe3_it_legacy.bin");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("legacy.bin");
     let status = Command::new(BIN)
         .args([
             "--input",
@@ -48,13 +49,143 @@ fn legacy_move16_fixture_is_rejected() {
     assert!(!status.success(), "legacy move16 input must be rejected");
 }
 
+#[test]
+fn hardlinked_input_aliases_are_rejected_without_modifying_files() {
+    for staging_alias in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.psv");
+        let output = dir.path().join("output.hcpe3");
+        let original = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.psv")).unwrap();
+        std::fs::write(&input, &original).unwrap();
+        let alias = if staging_alias {
+            std::fs::write(&output, b"existing output").unwrap();
+            tools::common::io::partial_path(&output)
+        } else {
+            output.clone()
+        };
+        std::fs::hard_link(&input, &alias).unwrap();
+
+        let result = Command::new(BIN)
+            .args(["--input"])
+            .arg(&input)
+            .arg("--output")
+            .arg(&output)
+            .output()
+            .unwrap();
+
+        assert!(!result.status.success(), "input alias must be rejected");
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        assert_eq!(std::fs::read(&alias).unwrap(), original);
+        if staging_alias {
+            assert_eq!(std::fs::read(&output).unwrap(), b"existing output");
+        } else {
+            assert!(!tools::common::io::partial_path(&output).exists());
+        }
+    }
+}
+
+#[test]
+fn existing_partial_is_never_overwritten() {
+    for linked_output in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.psv");
+        let output = dir.path().join("output.hcpe3");
+        let partial = tools::common::io::partial_path(&output);
+        let original = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.psv")).unwrap();
+        std::fs::write(&input, &original).unwrap();
+        std::fs::write(&output, b"existing output").unwrap();
+        if linked_output {
+            std::fs::hard_link(&output, &partial).unwrap();
+        } else {
+            std::fs::write(&partial, b"another conversion").unwrap();
+        }
+        let partial_before = std::fs::read(&partial).unwrap();
+
+        let result = Command::new(BIN)
+            .arg("--input")
+            .arg(&input)
+            .arg("--output")
+            .arg(&output)
+            .arg("--threads")
+            .arg("1")
+            .output()
+            .unwrap();
+
+        assert!(!result.status.success(), "existing partial must be rejected");
+        assert!(String::from_utf8_lossy(&result.stderr).contains(".partial"));
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        assert_eq!(std::fs::read(&partial).unwrap(), partial_before);
+        assert_eq!(std::fs::read(&output).unwrap(), b"existing output");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_outputs_are_rejected_without_touching_targets() {
+    for staging_alias in [false, true] {
+        for dangling in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let input = dir.path().join("input.psv");
+            let output = dir.path().join("output.hcpe3");
+            let target = dir.path().join("target");
+            let original = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.psv")).unwrap();
+            std::fs::write(&input, &original).unwrap();
+            if !dangling {
+                std::fs::write(&target, b"unrelated data").unwrap();
+            }
+            let alias = if staging_alias {
+                std::fs::write(&output, b"existing output").unwrap();
+                tools::common::io::partial_path(&output)
+            } else {
+                output.clone()
+            };
+            std::os::unix::fs::symlink(&target, &alias).unwrap();
+
+            let result = Command::new(BIN)
+                .arg("--input")
+                .arg(&input)
+                .arg("--output")
+                .arg(&output)
+                .output()
+                .unwrap();
+
+            assert!(!result.status.success(), "symlink output must be rejected");
+            assert_eq!(std::fs::read(&input).unwrap(), original);
+            assert!(std::fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
+            if dangling {
+                assert!(!target.exists());
+            } else {
+                assert_eq!(std::fs::read(&target).unwrap(), b"unrelated data");
+            }
+            if staging_alias {
+                assert_eq!(std::fs::read(&output).unwrap(), b"existing output");
+            }
+        }
+    }
+}
+
+#[test]
+fn successful_conversion_replaces_existing_output_and_removes_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = fixture("psv_to_hcpe3_yaneuraou_sample.psv");
+    let output = dir.path().join("output.hcpe3");
+    std::fs::write(&output, b"existing output").unwrap();
+
+    run(&input, &output, "hcpe3", "1", "7");
+
+    let expected = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.hcpe3")).unwrap();
+    assert_eq!(std::fs::read(&output).unwrap(), expected);
+    assert!(!tools::common::io::partial_path(&output).exists());
+}
+
 // 実 YaneuraOu PSV 形式（成り=bit15 / 駒打ち=bit14+from=駒種）の move16 を含む fixture。
 // 旧 0x1800 減算方式は bit15 の成りを誤変換するため、この fixture は回帰ガードになる。
 #[test]
 fn hcpe3_matches_cshogi_oracle_yaneuraou_format() {
     let input = fixture("psv_to_hcpe3_yaneuraou_sample.psv");
     let expected = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.hcpe3")).unwrap();
-    let out = std::env::temp_dir().join("psv_to_hcpe3_it_yo_hcpe3.bin");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("yo.hcpe3");
     run(&input, &out, "hcpe3", "1", "200000");
     assert_eq!(
         std::fs::read(&out).unwrap(),
@@ -67,7 +198,8 @@ fn hcpe3_matches_cshogi_oracle_yaneuraou_format() {
 fn hcpe_matches_cshogi_oracle_yaneuraou_format() {
     let input = fixture("psv_to_hcpe3_yaneuraou_sample.psv");
     let expected = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.hcpe")).unwrap();
-    let out = std::env::temp_dir().join("psv_to_hcpe3_it_yo_hcpe.bin");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("yo.hcpe");
     run(&input, &out, "hcpe", "1", "200000");
     assert_eq!(
         std::fs::read(&out).unwrap(),
@@ -83,9 +215,10 @@ fn trailing_partial_bytes_are_ignored() {
     let expected = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.hcpe3")).unwrap();
     let mut psv = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.psv")).unwrap();
     psv.extend_from_slice(&[0u8; 7]); // 40 バイト境界に満たない末尾
-    let truncated_input = std::env::temp_dir().join("psv_to_hcpe3_it_trailing.psv");
+    let dir = tempfile::tempdir().unwrap();
+    let truncated_input = dir.path().join("trailing.psv");
     std::fs::write(&truncated_input, &psv).unwrap();
-    let out = std::env::temp_dir().join("psv_to_hcpe3_it_trailing.bin");
+    let out = dir.path().join("trailing.hcpe3");
     run(&truncated_input, &out, "hcpe3", "1", "200000");
     assert_eq!(
         std::fs::read(&out).unwrap(),
@@ -99,7 +232,8 @@ fn output_path_with_tmp_extension_is_not_truncated() {
     // `--output *.tmp` でも一時ファイル（.partial 付与）と最終パスが衝突せず正しく出力される。
     let input = fixture("psv_to_hcpe3_yaneuraou_sample.psv");
     let expected = std::fs::read(fixture("psv_to_hcpe3_yaneuraou_sample.hcpe3")).unwrap();
-    let out = std::env::temp_dir().join("psv_to_hcpe3_it_out.tmp");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("output.tmp");
     run(&input, &out, "hcpe3", "1", "200000");
     assert_eq!(std::fs::read(&out).unwrap(), expected, "output must be correct for *.tmp path");
 }
@@ -108,7 +242,8 @@ fn output_path_with_tmp_extension_is_not_truncated() {
 fn limit_restricts_output_record_count() {
     // --limit N は先頭 N レコードだけ変換する（出力 = N × 46 バイト）。
     let input = fixture("psv_to_hcpe3_yaneuraou_sample.psv");
-    let out = std::env::temp_dir().join("psv_to_hcpe3_it_limit.bin");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("limited.hcpe3");
     let status = Command::new(BIN)
         .args([
             "--input",
@@ -164,8 +299,9 @@ fn record_without_move_is_skipped_and_counted() {
 fn output_is_thread_count_independent() {
     // 出力はスレッド数・チャンク境界に依らず bit 一致でなければならない。
     let input = fixture("psv_to_hcpe3_yaneuraou_sample.psv");
-    let out1 = std::env::temp_dir().join("psv_to_hcpe3_it_t1.bin");
-    let out4 = std::env::temp_dir().join("psv_to_hcpe3_it_t4.bin");
+    let dir = tempfile::tempdir().unwrap();
+    let out1 = dir.path().join("thread1.hcpe3");
+    let out4 = dir.path().join("thread4.hcpe3");
     run(&input, &out1, "hcpe3", "1", "200000");
     run(&input, &out4, "hcpe3", "4", "7");
     assert_eq!(

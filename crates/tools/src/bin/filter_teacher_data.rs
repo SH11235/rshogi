@@ -44,6 +44,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rshogi_core::position::Position;
+use tools::output_path::{ensure_distinct_output_paths, ensure_safe_output_path};
 use tools::packed_sfen::{PackedSfenValue, unpack_sfen};
 
 /// 教師データのフィルタリングツール
@@ -309,6 +310,17 @@ fn main() -> Result<()> {
     if !cli.stats_only && cli.output.is_none() {
         anyhow::bail!("Output file is required (use --output or --stats-only)");
     }
+    if !cli.stats_only
+        && let Some(output) = &cli.output
+    {
+        ensure_safe_output_path(output, &cli.input)?;
+        if let Some(stats) = &cli.stats {
+            ensure_distinct_output_paths(output, stats)?;
+        }
+    }
+    if let Some(stats) = &cli.stats {
+        ensure_safe_output_path(stats, &cli.input)?;
+    }
 
     // --stats-only + フィルタ併用時は警告（出力なしでフィルタ適用統計を見たい場合に有用）
     if cli.stats_only
@@ -427,6 +439,11 @@ fn main() -> Result<()> {
 
     // 統計をJSONで保存
     if let Some(ref stats_path) = cli.stats {
+        if !cli.stats_only
+            && let Some(output) = &cli.output
+        {
+            ensure_distinct_output_paths(output, stats_path)?;
+        }
         let json = serde_json::to_string_pretty(&stats)?;
         std::fs::write(stats_path, json)?;
         eprintln!("\nStatistics saved to: {}", stats_path.display());
