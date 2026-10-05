@@ -25,7 +25,7 @@ mod websocket;
 
 pub use tcp::TcpTransport;
 #[cfg(feature = "websocket")]
-pub use websocket::WsTransport;
+pub use websocket::{WsReadError, WsTransport};
 
 /// 接続先のスキーム解析結果。`host` 設定文字列から `from_host_port` で生成する。
 ///

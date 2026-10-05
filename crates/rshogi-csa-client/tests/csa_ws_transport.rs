@@ -15,7 +15,9 @@ use std::thread;
 use std::time::Duration;
 
 use rshogi_csa_client::event::Event;
-use rshogi_csa_client::transport::{ConnectOpts, CsaTransport, TransportTarget};
+use rshogi_csa_client::transport::{ConnectOpts, CsaTransport, TransportTarget, WsReadError};
+use tungstenite::protocol::frame::Frame;
+use tungstenite::protocol::frame::coding::{Data, OpCode};
 use tungstenite::{Message, accept};
 
 /// 1 接続を受け取り、与えた `script` のスクリプトを順次実行する mock WebSocket
@@ -225,21 +227,48 @@ fn ws_transport_empty_text_frame_treated_as_keepalive() {
     join.join().expect("server thread");
 }
 
-#[test]
-fn ws_transport_rejects_oversized_frame() {
-    let (port, join) = spawn_mock_ws_server(|ws| {
-        let _ = ws.read();
-        let _ = ws.send(Message::Text("x".repeat(1024 * 1024 + 1).into()));
-    });
+const WS_SIZE_LIMIT: usize = 1024 * 1024;
+
+/// `handler` が送った内容を受信させ、サイズ上限超過として拒否されたことを確認して
+/// `(size, max_size)` を返す。接続断などの別の受信失敗と区別するため、文言ではなく
+/// エラーの種別で判定する。
+fn read_expecting_size_rejection<F>(handler: F) -> (usize, usize)
+where
+    F: FnOnce(&mut tungstenite::WebSocket<std::net::TcpStream>) + Send + 'static,
+{
+    let (port, join) = spawn_mock_ws_server(handler);
     let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0).unwrap();
     let mut transport = CsaTransport::connect(&target, &ConnectOpts::default()).unwrap();
     transport.write_line("READY").unwrap();
     let error = transport.read_line_blocking(Duration::from_secs(5)).unwrap_err();
-    // WebSocket 層で拒否されたことを確認する。上限が効かずに frame が届くと、
-    // 行長の検証側の別のエラーになる。
-    assert!(error.to_string().starts_with("WebSocket read error"), "{error}");
+    let exceeded = error.downcast_ref::<WsReadError>().and_then(WsReadError::exceeded_size);
     drop(transport);
     join.join().unwrap();
+    exceeded.unwrap_or_else(|| panic!("expected size limit rejection, got: {error:?}"))
+}
+
+#[test]
+fn ws_transport_rejects_oversized_frame() {
+    let exceeded = read_expecting_size_rejection(|ws| {
+        let _ = ws.read();
+        // client は frame header だけで拒否して payload を読まないため、送信が完了するかは
+        // socket バッファの大きさ次第になる。送信結果は検証に使わない。
+        let _ = ws.send(Message::Text("x".repeat(WS_SIZE_LIMIT + 1).into()));
+    });
+    assert_eq!(exceeded, (WS_SIZE_LIMIT + 1, WS_SIZE_LIMIT));
+}
+
+#[test]
+fn ws_transport_rejects_fragmented_message_exceeding_limit() {
+    // 各 frame は上限以内で、連結した message だけが上限を超える。
+    let exceeded = read_expecting_size_rejection(|ws| {
+        let _ = ws.read();
+        let head = Frame::message("x".repeat(WS_SIZE_LIMIT), OpCode::Data(Data::Text), false);
+        let tail = Frame::message("x", OpCode::Data(Data::Continue), true);
+        ws.send(Message::Frame(head)).expect("send first fragment");
+        ws.send(Message::Frame(tail)).expect("send final fragment");
+    });
+    assert_eq!(exceeded, (WS_SIZE_LIMIT + 1, WS_SIZE_LIMIT));
 }
 
 #[test]
