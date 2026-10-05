@@ -2,6 +2,7 @@
 name = "rshogi-core"
 version = "0.8.0"
 edition = "2024"
+rust-version = "1.92"
 authors = ["SH11235"]
 description = "A high-performance shogi engine core library with NNUE evaluation"
 license = "GPL-3.0-or-later"

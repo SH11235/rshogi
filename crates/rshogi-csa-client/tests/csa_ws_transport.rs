@@ -235,7 +235,9 @@ fn ws_transport_rejects_oversized_frame() {
     let mut transport = CsaTransport::connect(&target, &ConnectOpts::default()).unwrap();
     transport.write_line("READY").unwrap();
     let error = transport.read_line_blocking(Duration::from_secs(5)).unwrap_err();
-    assert!(error.to_string().contains("Space limit exceeded"));
+    // WebSocket 層で拒否されたことを確認する。上限が効かずに frame が届くと、
+    // 行長の検証側の別のエラーになる。
+    assert!(error.to_string().starts_with("WebSocket read error"), "{error}");
     drop(transport);
     join.join().unwrap();
 }

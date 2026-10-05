@@ -292,7 +292,7 @@ fn run_live_mirror(
     fs::create_dir_all(out_dir).with_context(|| format!("create dir {}", out_dir.display()))?;
     // 無人常駐が前提なので、応答しないピアで単一スレッドのループ全体が
     // 止まらないようリクエストにタイムアウトを付ける。
-    let client = Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
+    let client = fg::http_client_builder().timeout(std::time::Duration::from_secs(30)).build()?;
     let mut states: std::collections::HashMap<String, MirrorState> =
         std::collections::HashMap::new();
     let mut last_index_poll: Option<Instant> = None;
@@ -878,7 +878,7 @@ fn mirror_one(client: &Client, st: &mut MirrorState) -> Result<bool> {
 }
 
 fn run_fetch_ratings(url: Option<&str>, min_rating: u32, out: &str) -> Result<()> {
-    let client = Client::builder().build()?;
+    let client = fg::http_client_builder().build()?;
     let html = match url {
         Some(u) => {
             eprintln!("Fetching rating page from: {u}");
@@ -908,7 +908,7 @@ fn run_fetch_ratings(url: Option<&str>, min_rating: u32, out: &str) -> Result<()
 fn run_fetch_index(root: &str, out: &str) -> Result<()> {
     let url = fg::join_url(root, "00LIST.floodgate")?;
     eprintln!("Fetching index from: {url}");
-    let client = Client::builder().build()?;
+    let client = fg::http_client_builder().build()?;
     let text = fg::http_get_text(&client, &url)?;
     fs::write(out, text).with_context(|| format!("write index: {out}"))?;
     eprintln!("Wrote index to: {out}");
@@ -1013,7 +1013,7 @@ fn run_download(
     pool.install(|| {
         // thread_local! で Client を再利用し TCP コネクションプールの恩恵を得る
         thread_local! {
-            static CLIENT: Client = Client::builder().build().expect("reqwest client");
+            static CLIENT: Client = fg::http_client_builder().build().expect("reqwest client");
         }
 
         to_download.par_iter().for_each(|rel| {

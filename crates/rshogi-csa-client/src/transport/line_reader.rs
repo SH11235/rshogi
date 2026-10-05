@@ -7,6 +7,9 @@ pub(super) const MAX_CSA_LINE_BYTES: usize = 64 * 1024;
 pub(super) struct LineReader<R> {
     reader: R,
     pending: Vec<u8>,
+    /// 上限超過で行の途中を捨てると次の行境界が分からなくなる。残りを別の行として
+    /// 返さないよう、以降の読み取りはすべて同じエラーにする。
+    overflowed: bool,
 }
 
 impl<R: BufRead> LineReader<R> {
@@ -14,6 +17,7 @@ impl<R: BufRead> LineReader<R> {
         Self {
             reader,
             pending: Vec::new(),
+            overflowed: false,
         }
     }
 
@@ -22,6 +26,9 @@ impl<R: BufRead> LineReader<R> {
     }
 
     pub(super) fn read_line(&mut self) -> io::Result<Option<String>> {
+        if self.overflowed {
+            return Err(line_too_long());
+        }
         loop {
             let bytes = match self.reader.fill_buf() {
                 Ok(bytes) => bytes,
@@ -39,7 +46,8 @@ impl<R: BufRead> LineReader<R> {
             let content_len = newline.unwrap_or(bytes.len());
             if content_len > MAX_CSA_LINE_BYTES.saturating_sub(self.pending.len()) {
                 self.pending.clear();
-                return Err(io::Error::new(ErrorKind::InvalidData, "CSA line exceeds 64 KiB"));
+                self.overflowed = true;
+                return Err(line_too_long());
             }
             self.pending.extend_from_slice(&bytes[..content_len]);
             self.reader.consume(content_len + usize::from(newline.is_some()));
@@ -55,11 +63,15 @@ impl<R: BufRead> LineReader<R> {
     }
 }
 
+fn line_too_long() -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, "CSA line exceeds 64 KiB")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use std::io::{Cursor, Read};
+    use std::io::{BufReader, Cursor, Read};
 
     struct InterruptedInput {
         chunks: VecDeque<io::Result<Vec<u8>>>,
@@ -126,6 +138,17 @@ mod tests {
         let mut reader = LineReader::new(Cursor::new(vec![b'x'; MAX_CSA_LINE_BYTES + 1]));
         assert_eq!(reader.read_line().unwrap_err().kind(), ErrorKind::InvalidData);
         assert!(reader.pending.is_empty());
+    }
+
+    #[test]
+    fn oversized_line_tail_is_not_returned_as_a_line() {
+        let mut input = vec![b'x'; MAX_CSA_LINE_BYTES + 1];
+        input.extend_from_slice(b"tail\nNEXT\n");
+        // 上限超過の時点で残りがバッファに載り切らないよう、小さい容量で読む。
+        let mut reader = LineReader::new(BufReader::with_capacity(64, Cursor::new(input)));
+        for _ in 0..3 {
+            assert_eq!(reader.read_line().unwrap_err().kind(), ErrorKind::InvalidData);
+        }
     }
 
     #[test]

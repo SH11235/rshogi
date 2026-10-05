@@ -212,7 +212,7 @@ fresh start。これは別 PR スコープ。
 
 ### 5.3 Miniflare 上で `CF-Connecting-IP` 欠落の挙動を再現したい
 
-**できない**: Miniflare 4 は edge proxy をシミュレートするために
+**できない**: Miniflare は edge proxy をシミュレートするために
 `CF-Connecting-IP` を **常に** request 元の IP で自動注入する。本シナリオ
 (production で Cloudflare を bypass されるケース) は host pure unit test
 (`crates/rshogi-csa-server-workers/src/rate_limit.rs::tests`) と

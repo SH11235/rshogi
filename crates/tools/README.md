@@ -148,8 +148,8 @@ cargo run -p tools --release --bin benchmark -- --internal
 
 Floodgate の HTTPS 取得は reqwest 0.13 の rustls backend を使う。
 信頼する root 証明書は OS の証明書ストアから取得するため、最小 Linux
-コンテナには `ca-certificates` を用意する。AWS-LC のビルドには C toolchain が
-必要で、対象によって CMake や NASM も必要になる。
+コンテナには `ca-certificates` を用意する。暗号 provider は `ring` で、
+ビルドに必要なのは C コンパイラのみ (CMake / NASM は不要)。
 
 ## 使用例
 

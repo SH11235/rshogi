@@ -1,7 +1,7 @@
 //! Floodgate棋譜サーバーからのダウンロードユーティリティ
 
 use anyhow::{Context, Result};
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{ACCEPT_ENCODING, HeaderValue};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -15,6 +15,16 @@ pub const DEFAULT_ROOT: &str = "https://wdoor.c.u-tokyo.ac.jp/shogi/x/";
 /// レーティングページの相対パス接頭辞。実体は日次生成の日付スタンプ付き
 /// `rating/players-floodgate-YYYYMMDD.html`。
 const RATING_PAGE_REL_PREFIX: &str = "rating/players-floodgate-";
+
+/// HTTPS 用の `ClientBuilder` を返す。
+///
+/// reqwest を `rustls-no-provider` で使っているため、process-level の `CryptoProvider` が
+/// 未登録のまま `build()` すると panic する。登録漏れを作らないよう、`Client` は必ず
+/// この関数経由で作る。登録済みなら `install_default` は `Err` を返すだけなので無視する。
+pub fn http_client_builder() -> ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    Client::builder()
+}
 
 /// Download text from a URL (HTTP).
 pub fn http_get_text(client: &Client, url: &str) -> Result<String> {
@@ -258,6 +268,12 @@ pub fn player_matches(name: &str, patterns: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_client_builder_builds_a_client() {
+        http_client_builder().build().unwrap();
+    }
+
     #[test]
     fn test_parse_index_lines() {
         let sample = b"2010/01/01\t...\t/home/shogi-server/www/x/2010/01/01/wdoor+floodgate-900-0+Bonanza+gps_l+20100101000000.csa\t115\n2026/04/13\t...\t/home/shogi/work/x/2026/04/13/wdoor+floodgate-300-10F+910+foo_human+20260413203001.csa\t70\n# comment\nfoo.txt\n2025/01/floodgate-3600-20250101-0001.csa\n";

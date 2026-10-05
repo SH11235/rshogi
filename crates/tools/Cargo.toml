@@ -145,7 +145,11 @@ rshogi-csa-client = { path = "../rshogi-csa-client", default-features = false }
 # 使うのは Disks (disk) と System のメモリ / プロセス情報 (system) のみ。default の
 # component / network / user (Windows では WMI 等の windows crate feature) は引かない。
 sysinfo = { version = "0.39.6", default-features = false, features = ["disk", "system"] }
-reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls", "system-proxy"] }
+# reqwest の `rustls` feature は aws-lc-rs を引き、Windows MSVC のビルドに NASM を要求する。
+# `rustls-no-provider` にして、csa_client と同じ `ring` provider を
+# `common::floodgate::http_client_builder` で登録する。
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 walkdir = "2.5"
 same-file = "1.0"
 url = "2.5"

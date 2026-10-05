@@ -160,7 +160,8 @@ impl TcpTransport {
                     {
                         // タイムアウト: 正常、次のループへ
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        log::warn!("[CSA/TCP] 受信エラー: {e}");
                         let _ = tx.send(Event::ServerDisconnected);
                         break;
                     }
