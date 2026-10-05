@@ -1597,7 +1597,7 @@ fn main() -> Result<()> {
     } = agg;
 
     // ライターをフラッシュ
-    for (_, pw) in pair_writers.iter_mut() {
+    for pw in pair_writers.values_mut() {
         pw.flush()?;
     }
 

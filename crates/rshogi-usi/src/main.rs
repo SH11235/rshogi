@@ -1397,12 +1397,11 @@ impl UsiEngine {
             return None;
         }
 
-        if let Some(moves_idx) = owned.iter().position(|token| *token == "moves") {
+        {
+            let moves_idx = owned.iter().position(|token| *token == "moves")?;
             if owned.len() > moves_idx + 1 {
                 owned.pop();
             }
-        } else {
-            return None;
         }
 
         let mut position = Position::new();

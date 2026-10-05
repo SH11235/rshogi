@@ -1,5 +1,5 @@
 import { afterEach, expect, it } from 'vitest';
-import { Miniflare } from 'miniflare';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import NodeWebSocket from 'ws';
 
 // 終局処理を含まない最小ケース。最初の client frame より前でも close を受け取れるか。
@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 it.each([1000, 1011])('未送信の hibernatable WS の close フレームを受け取る (%s)', async code => {
-  mf = new Miniflare({
+  mf = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     compatibilityDate: '2026-04-21',
     durableObjects: { ROOM: { className: 'CloseRoom', useSQLite: true } },
@@ -35,7 +35,7 @@ it.each([1000, 1011])('未送信の hibernatable WS の close フレームを受
         fetch(request, env) { return env.ROOM.get(env.ROOM.idFromName('close')).fetch(request); }
       };
     `,
-  });
+  }));
   const url = new URL(await mf.ready);
   url.protocol = 'ws:';
   // close frame が到着した後の TCP FIN 待ちだけを短縮する。

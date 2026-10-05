@@ -81,7 +81,9 @@ fn assert_stats(output: &Output, expected: &[(&str, u64)]) {
 
 fn replace_scores(bytes: &mut [u8], scores: &[i16]) {
     assert_eq!(bytes.len(), scores.len() * PackedSfenValue::SIZE);
-    for (record, &score) in bytes.chunks_exact_mut(PackedSfenValue::SIZE).zip(scores) {
+    for (record, &score) in
+        bytes.as_chunks_mut::<{ PackedSfenValue::SIZE }>().0.iter_mut().zip(scores)
+    {
         let mut value = PackedSfenValue::from_bytes(record).unwrap();
         value.score = score;
         record.copy_from_slice(&value.to_bytes());

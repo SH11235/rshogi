@@ -5,7 +5,7 @@
 #   で通電する
 # - DO restart シナリオ: Miniflare instance を `dispose()` → 再起動して、R2 永続化
 #   が cross-instance で保持されることを確認する
-# - 本 workflow は wrangler dev を spawn しない。Miniflare 4 の API を直接利用し、
+# - 本 workflow は wrangler dev を spawn しない。Miniflare の API を直接利用し、
 #   テストプロセス内で worker を起動する経路で軽量化する
 #
 # `cargo check --target wasm32` の build 検査では wasm32 限定コードの論理バグを

@@ -342,9 +342,9 @@ impl<const L1: usize> AccumulatorStackHalfKP<L1> {
             if !path.push(idx) {
                 return None;
             }
-            match self.entries[idx].previous {
-                Some(prev) => idx = prev,
-                None => return None,
+            {
+                let prev = self.entries[idx].previous?;
+                idx = prev
             }
         }
 

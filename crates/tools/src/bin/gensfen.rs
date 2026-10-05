@@ -7685,7 +7685,9 @@ mod tests {
         }
         let bytes = std::fs::read(path).unwrap();
         let records: Vec<_> = bytes
-            .chunks_exact(PackedSfenValue::SIZE)
+            .as_chunks::<{ PackedSfenValue::SIZE }>()
+            .0
+            .iter()
             .map(|record| PackedSfenValue::from_bytes(record).unwrap())
             .collect();
         assert_eq!(records.len(), 2);
@@ -7911,8 +7913,10 @@ mod tests {
             std::fs::metadata(&psv_path).unwrap().len() as usize / PackedSfenValue::SIZE;
         let sidecar = std::fs::read(&sidecar_path).unwrap();
         let game_ids: Vec<u32> = sidecar
-            .chunks_exact(4)
-            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| u32::from_le_bytes(*bytes))
             .collect();
         assert_eq!(psv_records, game_ids.len());
         assert_eq!(game_ids, [7, 7, 9]);

@@ -92,7 +92,9 @@ mod unix {
 
         let bytes = std::fs::read(psv_path).unwrap();
         let records: Vec<_> = bytes
-            .chunks_exact(PackedSfenValue::SIZE)
+            .as_chunks::<{ PackedSfenValue::SIZE }>()
+            .0
+            .iter()
             .map(|record| PackedSfenValue::from_bytes(record).unwrap())
             .collect();
         assert_eq!(records.len(), 2);
@@ -209,7 +211,9 @@ mod unix {
 
         let bytes = std::fs::read(psv_path).unwrap();
         let records: Vec<_> = bytes
-            .chunks_exact(PackedSfenValue::SIZE)
+            .as_chunks::<{ PackedSfenValue::SIZE }>()
+            .0
+            .iter()
             .map(|record| PackedSfenValue::from_bytes(record).unwrap())
             .collect();
         assert_eq!(records.len(), played_moves.len());

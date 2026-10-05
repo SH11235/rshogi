@@ -107,7 +107,7 @@ fn write_selected(
         reader.read_exact(&mut input_chunk)?;
         mask_reader.read_exact(&mut mask_chunk)?;
 
-        for (offset, record) in input_chunk.chunks_exact(RECORD_SIZE).enumerate() {
+        for (offset, record) in input_chunk.as_chunks::<RECORD_SIZE>().0.iter().enumerate() {
             if mask_chunk[offset / 8] & (1 << (offset % 8)) != 0 {
                 writer.write_all(record)?;
                 selected += 1;

@@ -393,24 +393,21 @@ pub(crate) unsafe fn dot_i8x16_u8i8_preexpanded(
     in_hi: std::arch::wasm32::v128,
     w_vec: std::arch::wasm32::v128,
 ) -> std::arch::wasm32::v128 {
-    // SAFETY: 呼び出し側が wasm32 simd128 フィーチャを保証する
-    unsafe {
-        use std::arch::wasm32::*;
-        let w_lo = i16x8_extend_low_i8x16(w_vec);
-        let w_hi = i16x8_extend_high_i8x16(w_vec);
+    use std::arch::wasm32::*;
+    let w_lo = i16x8_extend_low_i8x16(w_vec);
+    let w_hi = i16x8_extend_high_i8x16(w_vec);
 
-        let prod_lo = i16x8_mul(in_lo, w_lo);
-        let prod_hi = i16x8_mul(in_hi, w_hi);
+    let prod_lo = i16x8_mul(in_lo, w_lo);
+    let prod_hi = i16x8_mul(in_hi, w_hi);
 
-        let sum32_lo_lo = i32x4_extend_low_i16x8(prod_lo);
-        let sum32_lo_hi = i32x4_extend_high_i16x8(prod_lo);
-        let sum32_hi_lo = i32x4_extend_low_i16x8(prod_hi);
-        let sum32_hi_hi = i32x4_extend_high_i16x8(prod_hi);
+    let sum32_lo_lo = i32x4_extend_low_i16x8(prod_lo);
+    let sum32_lo_hi = i32x4_extend_high_i16x8(prod_lo);
+    let sum32_hi_lo = i32x4_extend_low_i16x8(prod_hi);
+    let sum32_hi_hi = i32x4_extend_high_i16x8(prod_hi);
 
-        let mut acc = i32x4_add(sum32_lo_lo, sum32_lo_hi);
-        acc = i32x4_add(acc, sum32_hi_lo);
-        i32x4_add(acc, sum32_hi_hi)
-    }
+    let mut acc = i32x4_add(sum32_lo_lo, sum32_lo_hi);
+    acc = i32x4_add(acc, sum32_hi_lo);
+    i32x4_add(acc, sum32_hi_hi)
 }
 
 /// WASM SIMD128: 入力ベクトルをu16拡張して内積を計算
@@ -433,14 +430,11 @@ pub(crate) unsafe fn dot_i8x16_u8i8(
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 pub(crate) unsafe fn hsum_i32x4(v: std::arch::wasm32::v128) -> i32 {
-    // SAFETY: 呼び出し側が wasm32 simd128 フィーチャを保証する
-    unsafe {
-        use std::arch::wasm32::*;
-        i32x4_extract_lane::<0>(v)
-            + i32x4_extract_lane::<1>(v)
-            + i32x4_extract_lane::<2>(v)
-            + i32x4_extract_lane::<3>(v)
-    }
+    use std::arch::wasm32::*;
+    i32x4_extract_lane::<0>(v)
+        + i32x4_extract_lane::<1>(v)
+        + i32x4_extract_lane::<2>(v)
+        + i32x4_extract_lane::<3>(v)
 }
 
 /// WASM SIMD128: 2本のi32x4を水平加算（シャッフル + 加算）
@@ -450,11 +444,8 @@ pub(crate) unsafe fn hadd_i32x4(
     x0: std::arch::wasm32::v128,
     x1: std::arch::wasm32::v128,
 ) -> std::arch::wasm32::v128 {
-    // SAFETY: 呼び出し側が wasm32 simd128 フィーチャを保証する
-    unsafe {
-        use std::arch::wasm32::*;
-        i32x4_add(i32x4_shuffle::<0, 2, 4, 6>(x0, x1), i32x4_shuffle::<1, 3, 5, 7>(x0, x1))
-    }
+    use std::arch::wasm32::*;
+    i32x4_add(i32x4_shuffle::<0, 2, 4, 6>(x0, x1), i32x4_shuffle::<1, 3, 5, 7>(x0, x1))
 }
 
 /// WASM SIMD128: 4本のi32x4を水平加算して1本のi32x4に詰める
@@ -1109,7 +1100,22 @@ impl<const DIM: usize> ClippedReLU<DIM> {
     /// 3. 残りをSSE2で8要素ずつ処理（DIM=8対応）
     /// 4. 残りをスカラーで処理
     pub fn propagate(input: &[i32; DIM], output: &mut [u8; DIM]) {
+        #[cfg(any(
+            all(
+                target_arch = "x86_64",
+                any(target_feature = "avx2", target_feature = "sse2")
+            ),
+            all(target_arch = "wasm32", target_feature = "simd128")
+        ))]
         let mut processed: usize = 0;
+        #[cfg(not(any(
+            all(
+                target_arch = "x86_64",
+                any(target_feature = "avx2", target_feature = "sse2")
+            ),
+            all(target_arch = "wasm32", target_feature = "simd128")
+        )))]
+        let processed: usize = 0;
 
         // === AVX2: 32要素ずつ処理 ===
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]

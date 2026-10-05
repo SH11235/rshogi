@@ -128,7 +128,9 @@ mod unix {
         let bytes = std::fs::read(run.out_dir.join("gensfen.psv")).unwrap();
         assert_eq!(bytes.len() % PackedSfenValue::SIZE, 0);
         bytes
-            .chunks_exact(PackedSfenValue::SIZE)
+            .as_chunks::<{ PackedSfenValue::SIZE }>()
+            .0
+            .iter()
             .map(|record| PackedSfenValue::from_bytes(record).unwrap())
             .collect()
     }

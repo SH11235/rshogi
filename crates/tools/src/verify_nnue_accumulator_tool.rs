@@ -146,16 +146,20 @@ fn load_progress_coeff_weights(coeff_path: &PathBuf) -> Result<Box<[f32]>> {
 
     if data.len() == expected_f32_bytes {
         let weights: Vec<f32> = data
-            .chunks_exact(size_of::<f32>())
-            .map(|c| f32::from_le_bytes(c.try_into().expect("chunk size is checked")))
+            .as_chunks::<{ size_of::<f32>() }>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         return Ok(weights.into_boxed_slice());
     }
 
     if data.len() == expected_f64_bytes {
         let weights: Vec<f32> = data
-            .chunks_exact(size_of::<f64>())
-            .map(|c| f64::from_le_bytes(c.try_into().expect("chunk size is checked")) as f32)
+            .as_chunks::<{ size_of::<f64>() }>()
+            .0
+            .iter()
+            .map(|c| f64::from_le_bytes(*c) as f32)
             .collect();
         return Ok(weights.into_boxed_slice());
     }

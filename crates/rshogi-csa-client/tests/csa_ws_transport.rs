@@ -224,3 +224,46 @@ fn ws_transport_empty_text_frame_treated_as_keepalive() {
     drop(transport);
     join.join().expect("server thread");
 }
+
+#[test]
+fn ws_transport_rejects_oversized_frame() {
+    let (port, join) = spawn_mock_ws_server(|ws| {
+        let _ = ws.read();
+        let _ = ws.send(Message::Text("x".repeat(1024 * 1024 + 1).into()));
+    });
+    let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0).unwrap();
+    let mut transport = CsaTransport::connect(&target, &ConnectOpts::default()).unwrap();
+    transport.write_line("READY").unwrap();
+    let error = transport.read_line_blocking(Duration::from_secs(5)).unwrap_err();
+    assert!(error.to_string().contains("Space limit exceeded"));
+    drop(transport);
+    join.join().unwrap();
+}
+
+#[test]
+fn ws_transport_does_not_deliver_any_part_of_an_invalid_frame() {
+    for use_thread in [false, true] {
+        let (port, join) = spawn_mock_ws_server(|ws| {
+            let _ = ws.read();
+            let payload = format!("VALID\n{}\n", "x".repeat(64 * 1024 + 1));
+            ws.send(Message::Text(payload.into())).unwrap();
+        });
+        let target =
+            TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0).unwrap();
+        let mut transport = CsaTransport::connect(&target, &ConnectOpts::default()).unwrap();
+        transport.write_line("READY").unwrap();
+        if use_thread {
+            let (tx, rx) = mpsc::channel();
+            transport.start_reader_thread(tx).unwrap();
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+                Event::ServerDisconnected
+            ));
+        } else {
+            let error = transport.read_line_blocking(Duration::from_secs(5)).unwrap_err();
+            assert!(error.to_string().contains("64 KiB"));
+        }
+        drop(transport);
+        join.join().unwrap();
+    }
+}

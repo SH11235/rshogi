@@ -239,7 +239,7 @@ fn dump_scores_with_chunk_records(
             read_bytes(&mut reader, &mut base_chunk, current_records * RECORD_SIZE)?;
             score_chunk.clear();
             score_chunk.reserve(current_records * 2);
-            for record in base_chunk.chunks_exact(RECORD_SIZE) {
+            for record in base_chunk.as_chunks::<RECORD_SIZE>().0 {
                 score_chunk.extend_from_slice(&record[SCORE_OFFSET..SCORE_OFFSET + 2]);
             }
             writer.write_all(&score_chunk)?;
@@ -352,7 +352,9 @@ fn embed_with_chunk_records(
             read_bytes(&mut score_reader, &mut score_chunk, current_records * 2)?;
             read_bytes(&mut mask_reader, &mut mask_chunk, current_records.div_ceil(8))?;
 
-            for (offset, record) in base_chunk.chunks_exact_mut(RECORD_SIZE).enumerate() {
+            for (offset, record) in
+                base_chunk.as_chunks_mut::<RECORD_SIZE>().0.iter_mut().enumerate()
+            {
                 if record[DL_SCORE_OFFSET..DL_SCORE_OFFSET + 2] != [0, 0] {
                     stats.overwritten_nonzero_move16 += 1;
                 }
@@ -467,7 +469,7 @@ fn extract_with_chunk_records(
             let current_records = (records - stats.records).min(chunk_records as u64) as usize;
             read_bytes(&mut reader, &mut dual_chunk, current_records * RECORD_SIZE)?;
 
-            for (offset, record) in dual_chunk.chunks_exact(RECORD_SIZE).enumerate() {
+            for (offset, record) in dual_chunk.as_chunks::<RECORD_SIZE>().0.iter().enumerate() {
                 let row = stats.records + offset as u64;
                 anyhow::ensure!(
                     record[PADDING_OFFSET] & !1 == 0,
@@ -479,7 +481,7 @@ fn extract_with_chunk_records(
             if let Some(writer) = &mut score_writer {
                 score_chunk.clear();
                 score_chunk.reserve(current_records * 2);
-                for record in dual_chunk.chunks_exact(RECORD_SIZE) {
+                for record in dual_chunk.as_chunks::<RECORD_SIZE>().0 {
                     score_chunk.extend_from_slice(&record[DL_SCORE_OFFSET..DL_SCORE_OFFSET + 2]);
                 }
                 writer.write_all(&score_chunk)?;
@@ -487,7 +489,7 @@ fn extract_with_chunk_records(
             if let Some(writer) = &mut mask_writer {
                 mask_chunk.clear();
                 mask_chunk.resize(current_records.div_ceil(8), 0);
-                for (offset, record) in dual_chunk.chunks_exact(RECORD_SIZE).enumerate() {
+                for (offset, record) in dual_chunk.as_chunks::<RECORD_SIZE>().0.iter().enumerate() {
                     mask_chunk[offset / 8] |= (record[PADDING_OFFSET] & 1) << (offset % 8);
                 }
                 writer.write_all(&mask_chunk)?;
@@ -495,7 +497,7 @@ fn extract_with_chunk_records(
             // score / mask の gather 後なら dual_chunk を直接 base 化してよい
             // (chunk 全量の複製を避ける)。
             if let Some(writer) = &mut base_writer {
-                for record in dual_chunk.chunks_exact_mut(RECORD_SIZE) {
+                for record in dual_chunk.as_chunks_mut::<RECORD_SIZE>().0 {
                     record[DL_SCORE_OFFSET..DL_SCORE_OFFSET + 2].fill(0);
                     record[PADDING_OFFSET] = 0;
                 }

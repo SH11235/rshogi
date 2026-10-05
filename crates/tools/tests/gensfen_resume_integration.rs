@@ -119,8 +119,10 @@ fn sidecar_ids(path: &Path) -> Vec<u32> {
     let bytes = fs::read(path).unwrap();
     assert_eq!(bytes.len() % 4, 0);
     let mut ids: Vec<u32> = bytes
-        .chunks_exact(4)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
         .collect();
     ids.sort_unstable();
     ids

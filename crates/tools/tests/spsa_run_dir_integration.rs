@@ -947,7 +947,7 @@ fn active_parameters_are_resent_in_protocol_order_each_game() {
             games.push((int, float));
         }
         assert_eq!(games.len(), 8);
-        for batch in games.chunks_exact(4) {
+        for batch in games.as_chunks::<4>().0 {
             assert!(batch.iter().all(|v| *v == batch[0]));
         }
         vectors.push(games);
