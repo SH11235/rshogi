@@ -35,12 +35,14 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use rayon::prelude::*;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use tools::common::io::partial_path;
+use tools::output_path::ensure_safe_output_path;
 use tools::packed_sfen::{
     PackedSfenValue, PsvMove16Class, classify_psv_move16, pack_hcp_from_parts, psv_move16_to_hcpe,
     stm_result_to_hcpe, unpack_sfen_to_parts,
@@ -264,20 +266,10 @@ fn main() -> Result<()> {
         anyhow::bail!("--evalfix-a は有限の正数を指定してください（指定値: {a}）");
     }
 
-    // 入出力が同一パスならデータ消失を防ぐためエラーにする
-    let in_canonical = cli
-        .input
-        .canonicalize()
-        .with_context(|| format!("入力パスの正規化に失敗: {}", cli.input.display()))?;
-    if cli.output.exists() {
-        let out_canonical = cli
-            .output
-            .canonicalize()
-            .with_context(|| format!("出力パスの正規化に失敗: {}", cli.output.display()))?;
-        if in_canonical == out_canonical {
-            anyhow::bail!("入力と出力が同一ファイルです: {}", in_canonical.display());
-        }
-    }
+    // hardlink を含む入力実体への出力と、symlink 経由の書き込みを拒否する。
+    let tmp_output = partial_path(&cli.output);
+    ensure_safe_output_path(&cli.output, &cli.input)?;
+    ensure_safe_output_path(&tmp_output, &cli.input)?;
 
     if cli.threads > 0 {
         rayon::ThreadPoolBuilder::new()
@@ -331,24 +323,17 @@ fn main() -> Result<()> {
     let mut reader = BufReader::with_capacity(IO_BUF_SIZE, in_file);
 
     // 一時ファイルに書き、正常完了時のみ最終パスへ rename する（中断時の破損出力を防ぐ）。
-    // `--output foo.tmp` でも最終パスと衝突しないよう、拡張子置換ではなくサフィックス付与する。
-    let tmp_output = {
-        let mut s = cli.output.clone().into_os_string();
-        s.push(".partial");
-        PathBuf::from(s)
-    };
-    // 入力が偶然 `<output>.partial` と同一ファイルだと、書き込み開始で入力を truncate して
-    // しまうため拒否する（`tmp_output` が存在＝入力と同じ実体ならここで検出できる）。
-    if tmp_output.exists() {
-        let tmp_canonical = tmp_output
-            .canonicalize()
-            .with_context(|| format!("一時パスの正規化に失敗: {}", tmp_output.display()))?;
-        if tmp_canonical == in_canonical {
-            anyhow::bail!("一時ファイル {} が入力と同一です", tmp_output.display());
-        }
-    }
-    let out_file = File::create(&tmp_output)
-        .with_context(|| format!("{} を作成できません", tmp_output.display()))?;
+    // 排他的に新規作成し、残存ファイルや別プロセスの一時出力を上書きしない。
+    let out_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_output)
+        .with_context(|| {
+            format!(
+                "{} を新規作成できません。既存の .partial は内容と使用中でないことを確認してから移動または削除してください",
+                tmp_output.display()
+            )
+        })?;
     let mut writer = BufWriter::with_capacity(IO_BUF_SIZE, out_file);
     // 処理中は一時ファイルに書き、完了時に最終パスへ rename する。実行中に最終パスが
     // 存在しなくても異常ではない（途中経過は下記 .partial を見る）。

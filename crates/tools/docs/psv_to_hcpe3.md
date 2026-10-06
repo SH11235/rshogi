@@ -81,7 +81,7 @@ cargo run -p tools --release --bin psv_to_hcpe3 -- \
 | オプション | 既定 | 説明 |
 |---|---|---|
 | `--input` / `-i` | （必須） | 入力 PSV ファイル |
-| `--output` / `-o` | （必須） | 出力ファイル |
+| `--output` / `-o` | （必須） | 出力ファイル。入力と同じ実体（hardlink を含む）や symlink は拒否 |
 | `--format` | `hcpe3` | 出力形式（`hcpe3` / `hcpe`） |
 | `--limit` | `0` | 処理レコード数の上限（0 = 無制限） |
 | `--threads` | `0` | スレッド数（0 = 全コア） |
@@ -118,8 +118,14 @@ cargo run -p tools --release --bin psv_to_hcpe3 -- \
 - 変換できないレコード（壊れた PSV）や末尾の半端なバイト（レコード長未満）は
   スキップしてカウントし、正常レコードの出力バイト列には影響しません。出力は
   一時ファイル（`<output>.partial`）に書き、正常完了時のみ最終パスへ `rename`
-  します（中断時に壊れた出力を残さない）。**実行中は最終パスが存在しないのが正常**で、
-  途中経過は `<output>.partial` を見ます。
+  します（中断時も最終出力を部分データで置き換えません）。最終パスが未作成の場合は、
+  **実行中は最終パスが存在しないのが正常**で、途中経過は `<output>.partial` を見ます。
+- `<output>.partial` は排他的に新規作成します。既存の途中ファイルがある場合は変換を開始せず、
+  入力・既存出力・途中ファイルを保持してエラー終了します。再実行前に、そのファイルの内容と
+  他の変換が使用中でないことを確認し、移動または削除してください。
+  I/O エラーや強制終了では `.partial` が残ることがあります。この場合も次回実行時には拒否します。
+  出力と途中ファイルが入力と同じ実体（hardlink を含む）の場合や、symlink の場合も拒否します。
+  途中ファイルがない場合、既存の通常出力ファイルは正常完了時に置き換えます。
 - `move16=0` の有効な着手を持たないレコードもスキップしますが、入力破損ではないため変換エラー件数とは
   分けて集計します。ピークメモリと出力順の決定性には影響しません。
 - 進捗表示は TTY では progress bar、非 TTY（background / リダイレクト）では
@@ -129,6 +135,7 @@ cargo run -p tools --release --bin psv_to_hcpe3 -- \
 ## bit 一致の検証
 
 `tests/psv_to_hcpe3_integration.rs` が、通常の着手レコードについて cshogi 製オラクル（`psv_to_hcpe3.py` /
-dlshogi `psv_to_hcpe.py`）の出力と byte 完全一致することを検証します。fixture は
-rshogi 自前の gensfen 自己対局 PSV から、通常手・駒打ち・成り × 先後 × 勝敗を
-網羅するよう抽出した 56 局面です（`tests/fixtures/psv_to_hcpe3_sample.*`）。
+dlshogi `psv_to_hcpe.py`）の出力と byte 完全一致することを検証します。実 YaneuraOu の
+move16 形式で通常手・駒打ち・成りを含む 30 レコードの fixture
+（`tests/fixtures/psv_to_hcpe3_yaneuraou_sample.*`）を使います。
+旧 move16 形式の `psv_to_hcpe3_sample.psv` は、旧形式を拒否する回帰テストに使います。

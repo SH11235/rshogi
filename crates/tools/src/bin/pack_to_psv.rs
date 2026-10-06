@@ -37,6 +37,7 @@ use rshogi_core::movegen::{MoveList, generate_legal_all};
 use rshogi_core::position::Position;
 use rshogi_core::types::Color;
 use tools::common::dedup::collect_input_paths;
+use tools::output_path::ensure_safe_output_path;
 use tools::packed_sfen::{PackedSfenValue, hcpe_move16_to_move, hcpe_move16_to_psv, pack_position};
 
 #[derive(Parser, Debug)]
@@ -347,17 +348,9 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
-    // 入出力の衝突チェック
-    let output_canonical = args.output.canonicalize().ok();
     for p in &paths {
-        if let Ok(c) = p.canonicalize()
-            && Some(&c) == output_canonical.as_ref()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("出力ファイルが入力ファイルと同一です: {}", p.display()),
-            ));
-        }
+        ensure_safe_output_path(&args.output, p)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     }
 
     let start = std::time::Instant::now();
