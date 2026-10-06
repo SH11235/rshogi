@@ -4,6 +4,100 @@ use std::process::Command;
 /// テスト用の共通USI初期化コマンド（Material評価で動作させる）
 const USI_INIT: &str = "usi\nsetoption name MaterialLevel value 9\nisready\n";
 
+/// 探索中の isready は infinite / ponder を停止せず readyok を返す。
+#[test]
+fn isready_during_search_keeps_search_running() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    for threads in [1, 2] {
+        for mode in ["infinite", "ponder depth 1"] {
+            let mut child = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"))
+                .env_remove("RSHOGI_DISABLE_HELPER_SEARCH")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn engine");
+            let (sender, receiver) = mpsc::channel();
+            let stdout = child.stdout.take().unwrap();
+            let reader = std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    if sender.send(line.expect("read stdout")).is_err() {
+                        break;
+                    }
+                }
+            });
+            let result = (|| -> Result<(), String> {
+                let wait_for = |predicate: fn(&str) -> bool, reject_bestmove, timeout| {
+                    let deadline = Instant::now() + timeout;
+                    loop {
+                        let line = receiver
+                            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                            .map_err(|err| format!("waiting for engine output: {err}"))?;
+                        if reject_bestmove && line.starts_with("bestmove ") {
+                            return Err(format!("search ended before stop: {line}"));
+                        }
+                        if predicate(&line) {
+                            return Ok(());
+                        }
+                    }
+                };
+                writeln!(
+                    child.stdin.as_mut().unwrap(),
+                    "usi\nsetoption name MaterialLevel value 9\nsetoption name Threads value {threads}\nsetoption name USI_Hash value 1\nsetoption name EvalHash value 1\nisready"
+                )
+                .map_err(|err| err.to_string())?;
+                wait_for(|line| line == "readyok", false, Duration::from_secs(10))?;
+                writeln!(child.stdin.as_mut().unwrap(), "position startpos\ngo {mode}")
+                    .map_err(|err| err.to_string())?;
+                wait_for(|line| line.starts_with("info depth "), true, Duration::from_secs(10))?;
+                // 応答後も再度問い合わせでき、stop まで bestmove を保留する。
+                for _ in 0..2 {
+                    writeln!(child.stdin.as_mut().unwrap(), "isready")
+                        .map_err(|err| err.to_string())?;
+                    wait_for(|line| line == "readyok", true, Duration::from_secs(3))?;
+                }
+                let deadline = Instant::now() + Duration::from_millis(200);
+                loop {
+                    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(line) if line.starts_with("bestmove ") => {
+                            return Err(format!("isready stopped the search: {line}"));
+                        }
+                        Ok(_) => {}
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(err) => return Err(err.to_string()),
+                    }
+                }
+                writeln!(child.stdin.as_mut().unwrap(), "stop").map_err(|err| err.to_string())?;
+                wait_for(|line| line.starts_with("bestmove "), false, Duration::from_secs(3))?;
+                writeln!(child.stdin.as_mut().unwrap(), "quit").map_err(|err| err.to_string())?;
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
+                        return if status.success() {
+                            Ok(())
+                        } else {
+                            Err(format!("engine failed: {status}"))
+                        };
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("engine did not quit after stop".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })();
+            if result.is_err() {
+                let _ = child.kill();
+            }
+            child.wait().unwrap();
+            reader.join().unwrap();
+            result.unwrap_or_else(|err| panic!("Threads={threads}, go {mode}: {err}"));
+        }
+    }
+}
+
 /// `go`→`stop`→`quit` で bestmove が返って終了することを確認
 #[test]
 fn stop_then_quit_outputs_bestmove() {

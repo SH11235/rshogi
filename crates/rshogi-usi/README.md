@@ -31,6 +31,10 @@ rshogi-usi
 
 The engine will start in USI mode, waiting for commands from stdin.
 
+探索中の `isready` には、探索を停止せず `readyok` を返します。TT / EvalHash の
+クリアやモデル・定跡の準備は待機中の `isready` で行います。`setoption` は USI
+仕様に従って探索の停止後に送り、続けて `isready` で設定を反映してください。
+
 ### USI Options
 
 | Option | Description | Default |

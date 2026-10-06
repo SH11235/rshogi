@@ -81,6 +81,15 @@ fn page_status_message(reported: TtPageStatus, current: TtPageStatus) -> Option<
     })
 }
 
+/// 探索 thread が panic した場合も探索中状態を解除する。
+struct SearchRunningGuard(Arc<AtomicBool>);
+
+impl Drop for SearchRunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// USIエンジンの状態
 struct UsiEngine {
     /// 探索エンジン
@@ -101,6 +110,8 @@ struct UsiEngine {
     skill_options: rshogi_core::search::SkillOptions,
     /// 探索スレッドのハンドル
     search_thread: Option<thread::JoinHandle<(Search, SearchResult)>>,
+    /// bestmove 出力前までの探索中状態（thread の終了とは区別する）。
+    search_running: Arc<AtomicBool>,
     /// 探索停止用のフラグ（探索スレッドと共有）
     stop_flag: Option<Arc<AtomicBool>>,
     /// ponderhit通知ハンドル
@@ -199,6 +210,7 @@ impl UsiEngine {
             multi_pv: 1,
             skill_options: rshogi_core::search::SkillOptions::default(),
             search_thread: None,
+            search_running: Arc::new(AtomicBool::new(false)),
             stop_flag: None,
             ponderhit_handle: None,
             suppress_bestmove: Arc::new(AtomicBool::new(false)),
@@ -381,9 +393,13 @@ impl UsiEngine {
     }
 
     /// isreadyコマンド: 準備完了を通知
-    /// YaneuraOu準拠: isready 受信時にTTをクリアする。
+    /// 探索中は探索を止めず即座に応答し、待機中だけTTをクリアする。
     /// setoption 後は必ず isready が来るので、評価設定変更で陳腐化した EvalHash もここで捨てる。
     fn cmd_isready(&mut self) -> Result<()> {
+        if self.search_thread.is_some() && self.search_running.load(Ordering::SeqCst) {
+            println!("readyok");
+            return Ok(());
+        }
         self.wait_for_search();
         if let Some(search) = self.search.as_mut() {
             search.clear_tt();
@@ -1458,10 +1474,15 @@ impl UsiEngine {
         self.ponderhit_handle = Some(search.ponderhit_handle());
 
         let suppress_flag = Arc::clone(&self.suppress_bestmove);
+        let running_guard = SearchRunningGuard(Arc::clone(&self.search_running));
+        self.search_running.store(true, Ordering::SeqCst);
         let builder = thread::Builder::new().stack_size(SEARCH_STACK_SIZE);
         self.search_thread = Some(
             builder
                 .spawn(move || {
+                    let running_guard = running_guard;
+                    // panic 時は Search の helper 終了後に探索中状態を解除する。
+                    let mut search = search;
                     #[cfg(feature = "allocation-stats")]
                     let allocation_before = rshogi_core::allocation_stats::snapshot();
                     #[cfg(feature = "tt-write-stats")]
@@ -1492,6 +1513,8 @@ impl UsiEngine {
                         std::io::stdout().flush().ok();
                     }
 
+                    // bestmove を受信した側の isready は待機中の準備を行う。
+                    running_guard.0.store(false, Ordering::SeqCst);
                     // bestmove出力（suppress_bestmoveが立っていない場合のみ）
                     // cmd_goから内部的にstopされた場合は抑制される
                     if !suppress_flag.load(Ordering::SeqCst) {
