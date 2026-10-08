@@ -1179,7 +1179,7 @@ where
 /// 後処理を行う:
 /// 1. CSA `%CHUDAN` を best-effort で送信 (対局未終了時のみ、write/flush timeout 1s)
 /// 2. CSA `LOGOUT` を best-effort 送信 (write/flush timeout 1s)
-/// 3. transport close
+/// 3. transport の切断は呼び出し側での `CsaConnection` の drop 時に行う
 /// 4. sink.on_error を best-effort 呼び出し
 /// 5. SessionProgress::Disconnected を emit
 fn terminate_session<S>(
@@ -1203,9 +1203,9 @@ fn terminate_session<S>(
         log::warn!("[CSA] LOGOUT 送信失敗 (best-effort): {err:#}");
     }
 
-    // 3. transport close: CsaConnection を drop すれば close される。明示 close は
-    //    現状 API が無いので drop に任せる (本関数の return 時に conn は呼び出し側に
-    //    返るが、呼び出し側は本関数の後で値を捨てる責務を持つ)。
+    // 3. 呼び出し側が CsaConnection を drop すると transport が下層ソケットを
+    //    shutdown し、reader thread の受信待ちも解除する。本関数は conn を借用して
+    //    いるため、戻り後に値を破棄する責務は呼び出し側にある。
 
     // 4. sink.on_error
     if let Err(err) = sink.on_error(cause) {

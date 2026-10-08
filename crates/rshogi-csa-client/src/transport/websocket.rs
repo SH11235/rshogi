@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,8 @@ impl WsReadError {
 /// WebSocket 経路の transport。`websocket` feature 有効時のみ提供。
 pub struct WsTransport {
     ws: Arc<Mutex<WebSocket<MaybeTlsStream<TcpStream>>>>,
+    /// 受信中の WS mutex を待たずに下層ソケットを shutdown するための複製。
+    shutdown_stream: TcpStream,
     /// `start_reader_thread` 後は reader が thread 内で動作する。inline 操作禁止フラグ。
     reader_moved: bool,
     /// CSA サーバ実装は `Game_Summary` のように `\n` 区切りの複数行を 1 つの
@@ -49,6 +51,14 @@ pub struct WsTransport {
     /// inline モードではここに 1 frame 分を行ごとに分割して push し、
     /// `read_line_*` が 1 行ずつ pop する。空行 (CSA keep-alive) は捨てる。
     pending_lines: VecDeque<String>,
+}
+
+impl Drop for WsTransport {
+    fn drop(&mut self) {
+        // Close 応答を待たずに下層 TCP を切断し、Arc を保持する reader の受信待ちも解除する。
+        // 切断済みの場合のエラーは無視し、reader thread は読み取りエラーで終了する。
+        let _ = self.shutdown_stream.shutdown(Shutdown::Both);
+    }
 }
 
 impl WsTransport {
@@ -78,13 +88,14 @@ impl WsTransport {
 
         // 内部 TcpStream に短い read_timeout を設定し、reader thread でも main
         // thread でも read_message が long-block しないようにする。
-        if let Some(stream) = stream_of_ws(&ws) {
-            let _ = stream.set_nodelay(true);
-            stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-        }
+        let stream = stream_of_ws(&ws).ok_or_else(|| anyhow!("未対応の WebSocket stream"))?;
+        let _ = stream.set_nodelay(true);
+        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let shutdown_stream = stream.try_clone()?;
 
         Ok(Self {
             ws: Arc::new(Mutex::new(ws)),
+            shutdown_stream,
             reader_moved: false,
             pending_lines: VecDeque::new(),
         })

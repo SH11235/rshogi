@@ -4,7 +4,7 @@ use super::line_reader::LineReader;
 use crate::event::Event;
 use anyhow::{Context, Result, anyhow, bail};
 use std::io::{BufReader, BufWriter, ErrorKind, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,14 @@ pub struct TcpTransport {
     /// 対局開始前はブロッキング読み取りに使用。`start_reader_thread` 後は `None`。
     reader: Option<LineReader<BufReader<TcpStream>>>,
     writer: BufWriter<TcpStream>,
+}
+
+impl Drop for TcpTransport {
+    fn drop(&mut self) {
+        // reader の複製も同じソケットを参照するため、shutdown で受信待ちを解除する。
+        // 切断済みの場合のエラーは無視し、reader thread は EOF または読み取りエラーで終了する。
+        let _ = self.writer.get_ref().shutdown(Shutdown::Both);
+    }
 }
 
 impl TcpTransport {
