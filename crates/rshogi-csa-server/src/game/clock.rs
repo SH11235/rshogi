@@ -42,6 +42,9 @@ pub trait TimeClock {
     /// Game_Summary の `BEGIN Time` セクションを CSA 仕様の項目・順序・単位で出力する。
     fn format_summary(&self) -> String;
 
+    /// Game_Summary の Time_Unit と着手通知 T に使う単位（正のミリ秒）。
+    fn time_unit_ms(&self) -> u64;
+
     /// 指定対局者の **本体持ち時間** の残り（ミリ秒）。
     ///
     /// 秒読みは含めない。GUI 表示・ログ・`HandleOutcome::MoveAccepted` の通知など、
@@ -96,6 +99,15 @@ impl Default for ClockSpec {
 }
 
 impl ClockSpec {
+    /// Game_Summary / 着手通知で共通に使う消費時間の単位（ミリ秒）。
+    pub fn time_unit_ms(&self) -> u64 {
+        match self {
+            Self::CountdownMsec { .. } => 1,
+            Self::StopWatch { .. } => 60_000,
+            Self::Countdown { .. } | Self::Fischer { .. } => 1000,
+        }
+    }
+
     /// 指定設定に対応する時計インスタンスを生成する。
     pub fn build_clock(&self) -> Box<dyn TimeClock> {
         match self {
@@ -204,6 +216,10 @@ impl SecondsCountdownClock {
 }
 
 impl TimeClock for SecondsCountdownClock {
+    fn time_unit_ms(&self) -> u64 {
+        1000
+    }
+
     fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult {
         // 整数秒に切り捨て（CSA 2014 改訂）。
         let elapsed_sec = (elapsed_ms / 1000) as i64;
@@ -311,6 +327,10 @@ impl MillisecondsCountdownClock {
 }
 
 impl TimeClock for MillisecondsCountdownClock {
+    fn time_unit_ms(&self) -> u64 {
+        1
+    }
+
     fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult {
         // 秒読み (`byoyomi_ms`) は **毎手リセット型** で累積しない。本体時間
         // (`slot`) を使い切ったあとは、各手で独立に `byoyomi_ms` まで使えて、
@@ -424,6 +444,10 @@ impl FischerClock {
 }
 
 impl TimeClock for FischerClock {
+    fn time_unit_ms(&self) -> u64 {
+        1000
+    }
+
     fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult {
         // post-move-increment:
         //   new_slot = slot - elapsed + increment
@@ -523,6 +547,10 @@ impl StopWatchClock {
 }
 
 impl TimeClock for StopWatchClock {
+    fn time_unit_ms(&self) -> u64 {
+        60000
+    }
+
     fn consume(&mut self, color: Color, elapsed_ms: u64) -> ClockResult {
         // 分単位切り捨て。elapsed_min_ms = floor(elapsed_ms / 60000) * 60000。
         let elapsed_min = elapsed_ms / 60_000;
@@ -552,19 +580,7 @@ impl TimeClock for StopWatchClock {
         // StopWatch 方式は `consume` が elapsed_ms を **分単位に切り捨てる** ため、
         // Game_Summary も CSA 仕様の `Time_Unit:1min` で分単位を宣言する。
         //
-        // # 既知の client-server 乖離
-        //
-        // 本 server は `T<sec>` broadcast (秒単位の elapsed) を送り、client
-        // (`crates/rshogi-csa-client/src/session.rs`) はその値を literal ms として
-        // 残時間から減算する。一方 server 側の `consume` は分単位で切り捨てる
-        // ため、「client のローカル remaining」と「server の実 slot」は 1 手に
-        // 最大 59 秒ずれ得る（client 側実装の limitation）。engine の時間管理
-        // 精度を保つには、client 側も StopWatch 相当の分単位切り捨てを行うか、
-        // T<sec> を分単位で emit する必要がある。
-        //
-        // 現状の妥協: server は CSA 仕様に準拠して `Time_Unit:1min` を出し、
-        // client-side の取り違えは後続タスクで修正する (サーバ側を変えると
-        // `%%LIST` / 棋譜互換を広く破ってしまう)。
+        // 着手通知 T もこの分単位に揃え、サーバーの切り捨てと一致させる。
         let mut out = String::new();
         out.push_str("BEGIN Time\n");
         out.push_str("Time_Unit:1min\n");

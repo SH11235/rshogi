@@ -553,11 +553,13 @@ fn resumed_session_keeps_pre_disconnect_record_and_start_time() {
         position: initial.clone(),
         initial_moves: Vec::new(),
         black_time: TimeConfig {
+            time_unit_ms: 1000,
             total_time_ms: 600_000,
             byoyomi_ms: 10_000,
             increment_ms: 0,
         },
         white_time: TimeConfig {
+            time_unit_ms: 1000,
             total_time_ms: 600_000,
             byoyomi_ms: 10_000,
             increment_ms: 0,

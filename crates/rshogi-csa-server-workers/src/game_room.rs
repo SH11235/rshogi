@@ -96,6 +96,7 @@ use crate::spectator_snapshot::{
     SpectatorClocks, SpectatorSnapshotInput, build_spectator_clock_update,
     build_spectator_snapshot, initial_spectator_clocks, is_move_broadcast, move_elapsed_secs,
     move_rows_from_exported_csa, parse_move_row_line, spectator_clock_insert_after,
+    with_millisecond_timings,
 };
 use crate::ws_route::{WsRoute, parse_ws_route};
 use crate::x1_paths::{
@@ -2561,11 +2562,11 @@ impl GameRoom {
         // MoveRow は client が送ってきた raw CSA 行 (`+7776FU,T3` や Floodgate
         // 形式 `+7776FU,'* 123 pv...`) を保持している。snapshot と同じ共有ヘルパ
         // (`parse_move_row_line` / `move_elapsed_secs`) で token / コメントを抽出し、
-        // 消費時間は at_ms 差分から再接続時計補償を引いて秒に丸め、`KifuMove` に
+        // 消費時間は at_ms 差分から再接続時計補償を引き、時計単位で切り捨てて秒へ換算し、`KifuMove` に
         // 変換する。これでライブ `T` / snapshot / 終局棋譜が同じ実効経過時間に
         // なる。Floodgate の評価値 PV コメントは `KifuMove::comment` に残す。
         let first_prev_ms = cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms);
-        let elapsed = move_elapsed_secs(&moves_rows, first_prev_ms);
+        let elapsed = move_elapsed_secs(&moves_rows, first_prev_ms, cfg.clock.time_unit_ms());
         let mut kifu_moves: Vec<KifuMove> = Vec::with_capacity(moves_rows.len());
         for (m, sec) in moves_rows.iter().zip(elapsed) {
             let (token_str, comment) = parse_move_row_line(&m.line);
@@ -2619,6 +2620,11 @@ impl GameRoom {
             result: game_result.clone(),
         };
         let text = record.build_v2();
+        let text = if cfg.clock.time_unit_ms() == 1 {
+            with_millisecond_timings(&text, &moves_rows, first_prev_ms)
+        } else {
+            text
+        };
 
         let date_path = format_date_path(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
         let date_key = format!("{date_path}/{}.csa", cfg.game_id);

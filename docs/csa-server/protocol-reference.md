@@ -28,7 +28,7 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 ## 2. 外部仕様への参照
 
 本リポ実装は以下の公開仕様 / 互換実装を出発点にしている。標準コマンドの解釈で
-本リポ未記載の細部 (例えば `T<sec>` の表現や `Game_Summary` の必須キー順) は
+本リポ未記載の細部 (例えば `T<units>` の表現や `Game_Summary` の必須キー順) は
 これらの一次ソースを参照すること。
 
 | 種別 | 名称 | 主な用途 |
@@ -67,7 +67,7 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 | `LOGOUT` | ✅ | 余剰トークン拒否 |
 | `AGREE [<game_id>]` | ✅ | `<game_id>` 省略時は `None` |
 | `REJECT [<game_id>]` | ✅ | 同上 |
-| `<sign><from><to><PT>[,T<sec>][,'<comment>]` | ✅ | 指し手。先頭 `+`/`-` で先後判定。`'<comment>` は Floodgate 拡張コメント (PV 等)。**`T<sec>` は CSA 互換のため受理するがサーバー時計には反映されない**: 経過時間は `crates/rshogi-csa-server/src/game/room.rs::GameRoom::handle_move` がサーバ側 `now_ms - move_started_at` から計算する。`command.rs::parse_move` は `<token>` と `'<comment>` だけを抽出する |
+| `<sign><from><to><PT>[,T<units>][,'<comment>]` | ✅ | 指し手。先頭 `+`/`-` で先後判定。`'<comment>` は Floodgate 拡張コメント (PV 等)。**`T<units>` は CSA 互換のため受理するがサーバー時計には反映されない**: 経過時間は `crates/rshogi-csa-server/src/game/room.rs::GameRoom::handle_move` がサーバ側 `now_ms - move_started_at` から計算する。`command.rs::parse_move` は `<token>` と `'<comment>` だけを抽出する |
 | `%TORYO` / `%KACHI` / `%CHUDAN` | ✅ | 投了 / 入玉宣言 / 中断 |
 | 空行 | ✅ | keep-alive (`ClientCommand::KeepAlive`) |
 
@@ -79,9 +79,9 @@ CSA プロトコル一般仕様や本家 Floodgate 運用は §2 の外部参照
 | `LOGIN:incorrect [<reason>]` | 認証失敗。`<reason>` は本リポ拡張で `unknown_game_name` / `already_logged_in` / `rate_limited retry_after=<sec>` / `reconnect_rejected` / `reconnect_already_resumed` / `reconnect_aborted` / `handle_auth_failed` を返す `*` (`handle_auth_failed` は **Workers のみ**、`WORKERS_HANDLE_AUTH` whitelist [#664](https://github.com/SH11235/rshogi/issues/664) で登録 handle の password SHA256 が一致しないとき、または env JSON 不正で fail-closed 全 reject 時。TCP 側は本 reason を返さない) | TCP `server.rs::handle_connection` の各拒否経路 (handle 解析失敗 / `parse_handle` 失敗 / `clock_presets` 不一致) と再接続経路 `server.rs::handle_reconnect_request` ; Workers `game_room.rs::enforce_handle_auth` / `lobby.rs::enforce_lobby_handle_auth` (`handle_auth_failed`) |
 | `START:<game_id>` | 両者 AGREE 後の対局開始通知 | `crates/rshogi-csa-server/src/game/room.rs::GameRoom::handle_agree` |
 | `REJECT:<game_id>` | どちらかが REJECT した | TCP `server.rs::drive_game_inner` の AGREE 結果が false の経路 (`server.rs::wait_both_agree` の戻り値で分岐) |
-| `<token>,T<sec>` | 1 手分の broadcast (各 client / 観戦者へ送出)。`T<sec>` 値はサーバー側 `room.rs` で計算した経過秒 | `room.rs::GameRoom::handle_move` (broadcast 行作成)、TCP `server.rs::parse_move_broadcast` (受信側ヘルパ) |
-| `##[CLOCK] {"black_remaining_ms":<ms>,"white_remaining_ms":<ms>,"side_to_move":"sente"\|"gote","ply":<n>}` `*` | **Workers 観戦者専用**。盤面を進めた各 `<token>,T<sec>` に付随する `'<comment>` 行があればその直後、無ければ指し手直後に、サーバー時計の本体残時間 (ms) と次手番を送る。`ply` はその指し手と同じ値。viewer はローカル countdown の anchor を毎手この値で再同期し、`T<sec>` の秒丸めや通信遅延による累積誤差を防ぐ。既存 client は未知の `##[...]` 行として無視できる。対局者および TCP frontend には送らない | Workers `game_room.rs::GameRoom::dispatch_broadcasts` / `spectator_snapshot.rs::build_spectator_clock_update` |
-| `'<comment>` | **観戦者専用**の付随行。直前の `<token>,T<sec>` に付いた Floodgate 評価値コメント (`* <eval> <pv...>` 等) を、対局者を除く観戦者だけへ 1 行配信する (`BroadcastTarget::Spectators`)。対局者へ送らないのはエンジン解析が相手に漏れないようにするため。指し手行と同一 ply で送られ、既存 viewer client は `'` 始まり行を無視する互換性がある。指し手にコメントが無ければ本行は出ない | `room.rs::GameRoom::apply_move` (comment 付き手のとき追加)、Workers `game_room.rs::dispatch_broadcasts`→`send_to_spectators` / TCP `server.rs::dispatch` (いずれも Spectators 経路) |
+| `<token>,T<units>` | 1 手分の broadcast (各 client / 観戦者へ送出)。`T<units>` 値はサーバー側 `room.rs` で計算した経過時間を `Game_Summary` の `Time_Unit` 単位で切り捨てた値 | `room.rs::GameRoom::handle_move` (broadcast 行作成)、TCP `server.rs::parse_move_broadcast` (受信側ヘルパ) |
+| `##[CLOCK] {"black_remaining_ms":<ms>,"white_remaining_ms":<ms>,"side_to_move":"sente"\|"gote","ply":<n>}` `*` | **Workers 観戦者専用**。盤面を進めた各 `<token>,T<units>` に付随する `'<comment>` 行があればその直後、無ければ指し手直後に、サーバー時計の本体残時間 (ms) と次手番を送る。`ply` はその指し手と同じ値。viewer はローカル countdown の anchor を毎手この値で再同期し、`T<units>` の単位未満の切り捨てや通信遅延による累積誤差を防ぐ。既存 client は未知の `##[...]` 行として無視できる。対局者および TCP frontend には送らない | Workers `game_room.rs::GameRoom::dispatch_broadcasts` / `spectator_snapshot.rs::build_spectator_clock_update` |
+| `'<comment>` | **観戦者専用**の付随行。直前の `<token>,T<units>` に付いた Floodgate 評価値コメント (`* <eval> <pv...>` 等) を、対局者を除く観戦者だけへ 1 行配信する (`BroadcastTarget::Spectators`)。対局者へ送らないのはエンジン解析が相手に漏れないようにするため。指し手行と同一 ply で送られ、既存 viewer client は `'` 始まり行を無視する互換性がある。指し手にコメントが無ければ本行は出ない | `room.rs::GameRoom::apply_move` (comment 付き手のとき追加)、Workers `game_room.rs::dispatch_broadcasts`→`send_to_spectators` / TCP `server.rs::dispatch` (いずれも Spectators 経路) |
 
 ## 5. x1 拡張コマンド一覧
 
@@ -115,7 +115,7 @@ CSA 標準を超えた `%%` 系拡張コマンド。受理条件は frontend で
 | `%%WHO` | ログイン中プレイヤ一覧。`##[WHO] <name> <status>` を name 昇順、終端 `##[WHO] END` | ✅ | ❌ | `info.rs::who_lines` |
 | `%%LIST` | アクティブ対局一覧。`##[LIST] <game_id> <black> <white> <game_name> <started_at>` + END | ✅ | ❌ | `info.rs::list_lines` |
 | `%%SHOW <game_id>` | 1 対局のサマリ。未登録は `##[SHOW] NOT_FOUND <game_id>` 後 END | ✅ | ❌ | `info.rs::show_lines` |
-| `%%MONITOR2ON <game_id>` | 観戦購読 (broadcast 受信開始)。応答 `##[MONITOR2] BEGIN <id>` / 不在 `##[MONITOR2] NOT_FOUND <game_id>` / 多重 `##[MONITOR2] BUSY <game_id>`。`<id>` は **TCP では要求された `<game_id>`**、**Workers では `monitor_id` (active_game_id があればそれ、無ければ `room_id`)** が入る。**Workers の snapshot 本文** (`BEGIN`〜`END` 間) は Game_Summary ブロックに続けて各手を `<token>,T<sec>` (`T<sec>` は `at_ms` 差分から再計算) で流し、コメント付きの手は直後に `'<comment>` 行を 1 行足す (ライブ broadcast の観戦者専用コメント行と同一形式)。終局済 DO では末尾に結果コード行 (`#RESIGN` 等) が付く | ✅ | ✅ (spectator 経路) | TCP `server.rs` の `ClientCommand::Monitor2On` arm / Workers `game_room.rs::GameRoom::handle_spectator_line` の `Monitor2On` arm、snapshot 本文は `spectator_snapshot.rs::build_spectator_snapshot` |
+| `%%MONITOR2ON <game_id>` | 観戦購読 (broadcast 受信開始)。応答 `##[MONITOR2] BEGIN <id>` / 不在 `##[MONITOR2] NOT_FOUND <game_id>` / 多重 `##[MONITOR2] BUSY <game_id>`。`<id>` は **TCP では要求された `<game_id>`**、**Workers では `monitor_id` (active_game_id があればそれ、無ければ `room_id`)** が入る。**Workers の snapshot 本文** (`BEGIN`〜`END` 間) は Game_Summary ブロックに続けて各手を `<token>,T<units>` (`T<units>` は `at_ms` 差分から再計算) で流し、コメント付きの手は直後に `'<comment>` 行を 1 行足す (ライブ broadcast の観戦者専用コメント行と同一形式)。終局済 DO では末尾に結果コード行 (`#RESIGN` 等) が付く | ✅ | ✅ (spectator 経路) | TCP `server.rs` の `ClientCommand::Monitor2On` arm / Workers `game_room.rs::GameRoom::handle_spectator_line` の `Monitor2On` arm、snapshot 本文は `spectator_snapshot.rs::build_spectator_snapshot` |
 | `%%MONITOR2OFF <game_id>` | 観戦購読解除。応答 `##[MONITOR2OFF] <id>` + END (`<id>` は §MONITOR2ON と同じ規則。TCP は `<game_id>`、Workers は `monitor_id`)。Workers では未登録 `<game_id>` を渡された場合 `##[MONITOR2OFF] NOT_FOUND <requested>` + END で返す経路がある | ✅ | ✅ (spectator 経路) | TCP `server.rs` の `Monitor2Off` arm / Workers `game_room.rs::GameRoom::handle_spectator_line` の `Monitor2Off` arm |
 | `%%CHAT <message>` | room へ chat 配信。応答 `##[CHAT] OK <game_id>` / 未観戦時 `##[CHAT] NOT_MONITORING` (broadcast 形式は `##[CHAT] <handle>: <message>`) | ✅ | ✅ (player + spectator) | TCP `server.rs` の `Chat` arm / Workers `game_room.rs` の `Chat` arm (player + spectator 経路) |
 | `%%VERSION` | 実装名 + バージョン 1 行。`##[VERSION] rshogi-csa-server <CARGO_PKG_VERSION>`。**他の x1 応答と異なり END 終端行なし** (§6 の例外) | ✅ | ❌ | `info.rs::version_lines` |
@@ -362,6 +362,11 @@ production は本家 Floodgate 互換の `countdown` (`Time_Unit:1sec`) を既�
 実装位置: `crates/rshogi-csa-server/src/game/clock.rs::MillisecondsCountdownClock::format_summary`。
 詳細運用と環境別差分は [`clock_defaults.md`](clock_defaults.md) を参照。
 
+着手通知と観戦 snapshot の `T<units>` は `Time_Unit` に従う
+（`countdown` / `fischer` は秒、`countdown_msec` はミリ秒、`stopwatch` は分）。
+[CSA標準棋譜形式V2.2](https://www.computer-shogi.org/protocol/record_v22.html) の消費時間は固定で秒単位のため、保存する棋譜の `T` は秒に変換する。通信の `Time_Unit` は棋譜の単位を変更しない。例えばミリ秒時計の通知 `T1250` は
+棋譜では `T1`、分時計の通知 `T2` は棋譜では `T120` となる。
+
 ## 10. 関連 doc
 
 実装位置と運用情報は本 doc では扱わない。以下を参照:
@@ -373,3 +378,7 @@ production は本家 Floodgate 互換の `countdown` (`Time_Unit:1sec`) を既�
 - `.claude/skills/csa-e2e-staging/SKILL.md` - Workers deploy 環境での実機対局シナリオ集
 - [`viewer_access_control.md`](viewer_access_control.md) - viewer / spectate API の access control 運用
 - [`../csa-client.md`](../csa-client.md) - CSA client (`csa_client`) の利用方法
+
+Workers のミリ秒時計では、保存棋譜の各手に `'RSHOGI_TIME_MS:<ms>` コメントを付けて
+再接続補償後の消費時間を保持する。終局後の観戦 snapshot はこの値からミリ秒精度を
+復元する。標準の `T` 行は秒のままで、コメントのない既存棋譜は秒精度で復元する。
