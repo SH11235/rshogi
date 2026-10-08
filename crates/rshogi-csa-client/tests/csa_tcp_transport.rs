@@ -1,6 +1,6 @@
 //! TCP の部分行が timeout や reader thread への移動で欠落しないことを確認する。
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
@@ -8,6 +8,37 @@ use std::time::Duration;
 
 use rshogi_csa_client::event::Event;
 use rshogi_csa_client::transport::{ConnectOpts, CsaTransport, TransportTarget};
+
+#[test]
+fn drop_transport_closes_socket_and_reader() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let target =
+        TransportTarget::from_host_port("127.0.0.1", listener.local_addr().unwrap().port())
+            .unwrap();
+    let mut transport = CsaTransport::connect(&target, &ConnectOpts::default()).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    server.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let (tx, rx) = mpsc::channel();
+    transport.start_reader_thread(tx).unwrap();
+    // 受信イベントで起動を確認した後、サーバーは応答も切断もしない。
+    server.write_all(b"READY\n").unwrap();
+    assert!(
+        matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::ServerLine(line) if line == "READY")
+    );
+    drop(transport);
+    assert_eq!(server.read(&mut [0; 1]).unwrap(), 0, "サーバーが EOF を受信すること");
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Event::ServerDisconnected
+    ));
+    assert!(
+        matches!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ),
+        "reader が送信側を解放すること"
+    );
+}
 
 fn partial_line_server() -> (CsaTransport, mpsc::Sender<()>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

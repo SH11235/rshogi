@@ -9,6 +9,7 @@
 
 #![cfg(feature = "websocket")]
 
+use std::io::Read;
 use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
@@ -19,6 +20,43 @@ use rshogi_csa_client::transport::{ConnectOpts, CsaTransport, TransportTarget, W
 use tungstenite::protocol::frame::Frame;
 use tungstenite::protocol::frame::coding::{Data, OpCode};
 use tungstenite::{Message, accept};
+
+#[test]
+fn drop_transport_closes_socket_and_reader() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (accepted, server_rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        accepted.send(accept(stream).unwrap()).unwrap();
+    });
+    let target = TransportTarget::from_host_port(&format!("ws://127.0.0.1:{port}/"), 0).unwrap();
+    let mut transport = CsaTransport::connect(&target, &ConnectOpts::default()).unwrap();
+    let mut server = server_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    join.join().unwrap();
+    let (tx, rx) = mpsc::channel();
+    transport.start_reader_thread(tx).unwrap();
+    // 受信イベントで起動を確認した後、サーバーは応答も切断もしない。
+    server.send(Message::Text("READY".into())).unwrap();
+    assert!(
+        matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Event::ServerLine(line) if line == "READY")
+    );
+    drop(transport);
+    assert_eq!(server.get_mut().read(&mut [0; 1]).unwrap(), 0, "下層 TCP が EOF を受信すること");
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Event::ServerDisconnected
+    ));
+    assert!(
+        matches!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ),
+        "reader が送信側を解放すること"
+    );
+}
 
 /// 1 接続を受け取り、与えた `script` のスクリプトを順次実行する mock WebSocket
 /// サーバを別スレッドで起動して、選んだポートと join handle を返す。
