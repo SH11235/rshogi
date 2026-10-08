@@ -96,7 +96,7 @@ winner のない旧形式では slot 0 を meta の先後、slot 1 をその逆�
 
 ```bash
 ./target/release/analyze_selfplay --by-startpos /path/to/run-a /path/to/run-b
-./target/release/analyze_selfplay --by-startpos --json /path/to/run-a/*.jsonl
+./target/release/analyze_selfplay --by-startpos --json /path/to/run-a
 ```
 
 ファイルまたは run ディレクトリを複数指定できる。ディレクトリは直下の JSONL を
