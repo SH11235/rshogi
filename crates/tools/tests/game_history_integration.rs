@@ -93,6 +93,7 @@ done
     let mut white = engine(&script, &log, &reply_file, "white");
     let config = GameConfig {
         resign_rule: None,
+        win_rule: None,
         draw_rule: None,
         max_moves: plies_before_start(&initial) + game_moves,
         timeout_margin_ms: 1000,

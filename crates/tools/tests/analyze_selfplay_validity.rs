@@ -209,3 +209,68 @@ fn complete_json_line_with_missing_partner_is_still_partial_input() {
         assert_eq!(output["sprt"]["pairs"], 1000);
     }
 }
+
+#[test]
+fn by_startpos_cli_merges_directories_and_reports_legacy_exclusions() {
+    let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+    for dir in &dirs {
+        fs::write(
+            dir.path().join("control_history.jsonl"),
+            json!({"type":"control","target_games":2}).to_string(),
+        )
+        .unwrap();
+        let log = dir.path().join("games.jsonl");
+        write_log(&log, true, &[("black_win", "white_win"), ("draw", "draw")]);
+        let lines: Vec<String> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .enumerate()
+            .map(|(i, line)| {
+                let mut row: Value = serde_json::from_str(line).unwrap();
+                if i == 1 || i == 2 {
+                    row["startpos_idx"] = json!(0);
+                }
+                row.to_string()
+            })
+            .collect();
+        fs::write(&log, lines.join("\n")).unwrap();
+        fs::write(
+            dir.path().join("meta.json"),
+            json!({"start_positions":["position startpos moves 7g7f"]}).to_string(),
+        )
+        .unwrap();
+    }
+    for json_output in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"));
+        command.arg("--by-startpos").args(dirs.iter().map(|dir| dir.path()));
+        if json_output {
+            command.arg("--json");
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("開始局面別集計から 4 局を除外"), "{stderr}");
+        if json_output {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["by_startpos"]["excluded_games"], 4);
+            let rows = value["by_startpos"]["rows"].as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["games"], 4);
+            assert_eq!(rows[0]["black_wins"], 2);
+            assert_eq!(rows[0]["white_wins"], 2);
+        } else {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("1: position startpos moves 7g7f"));
+            assert!(stdout.contains("1 4 2 2 0 0.5000"));
+            assert!(stdout.contains("unknown=4"));
+        }
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_analyze_selfplay"))
+        .arg("--json")
+        .arg(dirs[0].path())
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(value.get("by_startpos").is_none());
+}

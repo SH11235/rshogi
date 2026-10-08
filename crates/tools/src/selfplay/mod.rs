@@ -23,3 +23,6 @@ pub use types::{
 };
 
 pub use adjudication::{DrawRule, ResignRule};
+
+/// tournament が出力する動的制御の変更履歴ファイル名。
+pub const CONTROL_HISTORY_FILE_NAME: &str = "control_history.jsonl";

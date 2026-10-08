@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 use tools::selfplay::game::{GameConfig, MoveEvent, run_game};
 use tools::selfplay::time_control::TimeControl;
 use tools::selfplay::types::{EvalLog, side_label};
-use tools::selfplay::{DrawRule, ResignRule};
+use tools::selfplay::{CONTROL_HISTORY_FILE_NAME, DrawRule, ResignRule};
 use tools::selfplay::{
     EngineConfig, EngineProcess, GameOutcome, ParsedPosition,
     ensure_start_positions_within_max_moves, load_start_positions,
@@ -142,6 +142,9 @@ struct Cli {
     /// 評価値による投了裁定 (movecount=3,score=600)。既定 off。
     #[arg(long, value_parser = clap::value_parser!(ResignRule))]
     adjudicate_resign: Option<ResignRule>,
+    /// 評価値による勝ち裁定 (movecount=3,score=600)。既定 off。
+    #[arg(long, value_parser = clap::value_parser!(ResignRule))]
+    adjudicate_win: Option<ResignRule>,
     /// 評価値による引分裁定 (movenumber=34,movecount=8,score=20)。手数は開始局面からの対局内 ply。
     #[arg(long, value_parser = clap::value_parser!(DrawRule))]
     adjudicate_draw: Option<DrawRule>,
@@ -153,6 +156,9 @@ struct Cli {
     /// Start position file (USI position lines, one per line)
     #[arg(long)]
     startpos_file: Option<PathBuf>,
+    /// 開始局面の割り当て順。sequential は seed を使わない。
+    #[arg(long, value_enum, default_value_t = StartposOrder::Random)]
+    startpos_order: StartposOrder,
 
     /// 開始局面選択用の乱数 seed。省略時は entropy から生成して起動ログに表示する。
     #[arg(long)]
@@ -317,13 +323,23 @@ struct MetaLogEntry {
     sprt: Option<SprtMetaLog>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StartposOrder {
+    Random,
+    Sequential,
+}
+
 #[derive(Serialize)]
 struct MetaSettings {
+    startpos_order: StartposOrder,
     games: u32,
     seed: u64,
     max_moves: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     adjudicate_resign: Option<ResignRule>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adjudicate_win: Option<ResignRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     adjudicate_draw: Option<DrawRule>,
     byoyomi: u64,
@@ -688,6 +704,7 @@ struct WorkerConfig {
     hash_mb: u32,
     max_moves: u32,
     adjudicate_resign: Option<ResignRule>,
+    adjudicate_win: Option<ResignRule>,
     adjudicate_draw: Option<DrawRule>,
     timeout_margin_ms: u64,
     byoyomi: u64,
@@ -714,6 +731,7 @@ fn worker_main(
         hash_mb,
         max_moves,
         adjudicate_resign,
+        adjudicate_win,
         adjudicate_draw,
         timeout_margin_ms,
         byoyomi,
@@ -789,6 +807,7 @@ fn worker_main(
             cancel: None,
             max_moves,
             resign_rule: adjudicate_resign,
+            win_rule: adjudicate_win,
             draw_rule: adjudicate_draw,
             timeout_margin_ms,
             pass_rights: None,
@@ -877,6 +896,7 @@ struct SpawnCtx<'a> {
     hash_mb: u32,
     max_moves: u32,
     adjudicate_resign: Option<ResignRule>,
+    adjudicate_win: Option<ResignRule>,
     adjudicate_draw: Option<DrawRule>,
     timeout_margin_ms: u64,
     byoyomi: u64,
@@ -905,6 +925,7 @@ fn spawn_worker(
         hash_mb: ctx.hash_mb,
         max_moves: ctx.max_moves,
         adjudicate_resign: ctx.adjudicate_resign,
+        adjudicate_win: ctx.adjudicate_win,
         adjudicate_draw: ctx.adjudicate_draw,
         timeout_margin_ms: ctx.timeout_margin_ms,
         byoyomi: ctx.byoyomi,
@@ -948,7 +969,7 @@ fn check_output_directory(path: &Path) -> Result<()> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let name = entry.file_name();
-        if matches!(name.to_str(), Some("meta.json" | "control.json" | "control_history.jsonl"))
+        if matches!(name.to_str(), Some("meta.json" | "control.json" | CONTROL_HISTORY_FILE_NAME))
             || entry.path().extension().is_some_and(|ext| ext == "jsonl")
         {
             bail!(
@@ -1181,10 +1202,12 @@ fn main() -> Result<()> {
     let mut tournament_meta = TournamentMeta {
         timestamp: timestamp.to_rfc3339(),
         settings: MetaSettings {
+            startpos_order: cli.startpos_order,
             games: cli.games * 2,
             seed,
             max_moves: cli.max_moves,
             adjudicate_resign: cli.adjudicate_resign,
+            adjudicate_win: cli.adjudicate_win,
             adjudicate_draw: cli.adjudicate_draw,
             byoyomi: cli.byoyomi,
             btime: cli.btime,
@@ -1276,8 +1299,13 @@ fn main() -> Result<()> {
     // これにより実行中に control.json で target_games を増減でき、対局境界で追従する。
     // cli.games は「各方向の対局数」。1 ペアあたり cli.games * 2 局。
     let target_per_dir = Arc::new(AtomicU32::new(cli.games));
-    let mut source =
-        TicketSource::new(pair_indices.clone(), start_defs.len(), target_per_dir.clone(), seed);
+    let mut source = TicketSource::new(
+        pair_indices.clone(),
+        start_defs.len(),
+        target_per_dir.clone(),
+        seed,
+        cli.startpos_order,
+    );
 
     let mode_label = if base_idx.is_some() {
         "base-vs-N"
@@ -1333,10 +1361,12 @@ fn main() -> Result<()> {
                 kind: "meta".to_string(),
                 timestamp: timestamp.to_rfc3339(),
                 settings: MetaSettings {
+                    startpos_order: cli.startpos_order,
                     games: cli.games * 2, // 各方向 cli.games 局、双方向で合計
                     seed,
                     max_moves: cli.max_moves,
                     adjudicate_resign: cli.adjudicate_resign,
+                    adjudicate_win: cli.adjudicate_win,
                     adjudicate_draw: cli.adjudicate_draw,
                     byoyomi: cli.byoyomi,
                     btime: cli.btime,
@@ -1385,6 +1415,7 @@ fn main() -> Result<()> {
         hash_mb: cli.hash_mb,
         max_moves: cli.max_moves,
         adjudicate_resign: cli.adjudicate_resign,
+        adjudicate_win: cli.adjudicate_win,
         adjudicate_draw: cli.adjudicate_draw,
         timeout_margin_ms: cli.timeout_margin_ms,
         byoyomi: cli.byoyomi,
@@ -1425,7 +1456,7 @@ fn main() -> Result<()> {
 
     // 制御プレーンの状態。
     let control_path = cli.out_dir.join("control.json");
-    let history_path = cli.out_dir.join("control_history.jsonl");
+    let history_path = cli.out_dir.join(CONTROL_HISTORY_FILE_NAME);
     let mut applied = ControlState {
         target_games: cli.games,
         concurrency: cli.concurrency,
@@ -1814,6 +1845,7 @@ fn append_control_history(path: &Path, entry: &ControlHistoryEntry) -> Result<()
 /// 再試行チケットは新しい `id` を得る一方、元の `pair_index` / `pair_slot` を引き継ぐ。
 /// 各ペアの通常発行数は常に偶数境界で次ペアへ移るため、2 局ペアが境界をまたがない。
 struct TicketSource {
+    startpos_order: StartposOrder,
     pair_indices: Vec<(usize, usize)>,
     start_defs_len: usize,
     target_per_dir: Arc<AtomicU32>,
@@ -1841,9 +1873,11 @@ impl TicketSource {
         start_defs_len: usize,
         target_per_dir: Arc<AtomicU32>,
         seed: u64,
+        startpos_order: StartposOrder,
     ) -> Self {
         let pair_count = pair_indices.len();
         TicketSource {
+            startpos_order,
             pair_indices,
             start_defs_len,
             target_per_dir,
@@ -1923,12 +1957,16 @@ impl TicketSource {
             id,
             black_idx,
             white_idx,
-            startpos_idx: deterministic_startpos_index(
-                self.seed,
-                (i, j),
-                local_pair_index,
-                self.start_defs_len,
-            ),
+            startpos_idx: if self.startpos_order == StartposOrder::Sequential {
+                local_pair_index as usize % self.start_defs_len
+            } else {
+                deterministic_startpos_index(
+                    self.seed,
+                    (i, j),
+                    local_pair_index,
+                    self.start_defs_len,
+                )
+            },
             pair_slot: game_idx % 2,
             pair_index,
             attempt: 0,
@@ -2464,12 +2502,16 @@ mod tests {
         ];
         let cli = super::Cli::try_parse_from(args).unwrap();
         assert_eq!(cli.adjudicate_resign, None);
+        assert_eq!(cli.adjudicate_win, None);
+        assert_eq!(cli.startpos_order, super::StartposOrder::Random);
         assert_eq!(cli.adjudicate_draw, None);
         for separator in [",", " "] {
             let resign = ["movecount=3", "score=600"].join(separator);
             let draw = ["movenumber=34", "movecount=8", "score=20"].join(separator);
             let cli = super::Cli::try_parse_from(args.into_iter().chain([
                 "--adjudicate-resign",
+                resign.as_str(),
+                "--adjudicate-win",
                 resign.as_str(),
                 "--adjudicate-draw",
                 draw.as_str(),
@@ -2482,6 +2524,7 @@ mod tests {
                     score: 600
                 })
             );
+            assert_eq!(cli.adjudicate_win, cli.adjudicate_resign);
             assert_eq!(
                 cli.adjudicate_draw,
                 Some(super::DrawRule {
@@ -2497,14 +2540,23 @@ mod tests {
     fn adjudication_flags_reject_invalid_fields() {
         for (flag, value) in [
             ("--adjudicate-resign", "movecount=3,score=600,unknown=1"),
+            ("--adjudicate-win", "movecount=3,score=600,unknown=1"),
             ("--adjudicate-resign", "movecount=3"),
+            ("--adjudicate-win", "movecount=3"),
             ("--adjudicate-resign", "score=600"),
+            ("--adjudicate-win", "score=600"),
             ("--adjudicate-resign", "movecount=3,score=600,score=20"),
+            ("--adjudicate-win", "movecount=3,score=600,score=20"),
             ("--adjudicate-resign", "movecount=0,score=600"),
+            ("--adjudicate-win", "movecount=0,score=600"),
             ("--adjudicate-resign", "movecount=3,score=-1"),
+            ("--adjudicate-win", "movecount=3,score=-1"),
             ("--adjudicate-resign", "movecount=3,score=2147483648"),
+            ("--adjudicate-win", "movecount=3,score=2147483648"),
             ("--adjudicate-resign", "movecount=x,score=600"),
+            ("--adjudicate-win", "movecount=x,score=600"),
             ("--adjudicate-resign", "movecount=3,score"),
+            ("--adjudicate-win", "movecount=3,score"),
             ("--adjudicate-draw", "movenumber=34,movecount=8,score=20,unknown=1"),
             ("--adjudicate-draw", "movecount=8,score=20"),
             ("--adjudicate-draw", "movenumber=34,score=20"),
@@ -2533,10 +2585,12 @@ mod tests {
     #[test]
     fn adjudication_meta_omits_disabled_rules() {
         let mut settings = super::MetaSettings {
+            startpos_order: super::StartposOrder::Random,
             games: 2,
             seed: 0,
             max_moves: 512,
             adjudicate_resign: None,
+            adjudicate_win: None,
             adjudicate_draw: None,
             byoyomi: 100,
             btime: 0,
@@ -2549,10 +2603,16 @@ mod tests {
         };
         let json = serde_json::to_value(&settings).unwrap();
         assert!(json.get("adjudicate_resign").is_none());
+        assert!(json.get("adjudicate_win").is_none());
+        assert_eq!(json["startpos_order"], "random");
+        settings.startpos_order = super::StartposOrder::Sequential;
+        settings.adjudicate_win = Some("movecount=1,score=300".parse().unwrap());
         assert!(json.get("adjudicate_draw").is_none());
         settings.adjudicate_resign = Some("movecount=3,score=600".parse().unwrap());
         settings.adjudicate_draw = Some("movenumber=34,movecount=8,score=20".parse().unwrap());
         let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["startpos_order"], "sequential");
+        assert_eq!(json["adjudicate_win"], serde_json::json!({"movecount":1,"score":300}));
         assert_eq!(json["adjudicate_resign"], serde_json::json!({"movecount":3,"score":600}));
         assert_eq!(
             json["adjudicate_draw"],
@@ -2561,8 +2621,9 @@ mod tests {
     }
 
     use super::{
-        ControlFile, MatchResult, SprtState, TicketSource, build_engine_usi_options,
-        deterministic_startpos_index, ensure_node_coverage, resolve_engine_nodes, splitmix64,
+        CONTROL_HISTORY_FILE_NAME, ControlFile, MatchResult, SprtState, TicketSource,
+        build_engine_usi_options, deterministic_startpos_index, ensure_node_coverage,
+        resolve_engine_nodes, splitmix64,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -2670,6 +2731,7 @@ mod tests {
             hash_mb: 1,
             max_moves: 1,
             adjudicate_resign: None,
+            adjudicate_win: None,
             adjudicate_draw: None,
             timeout_margin_ms: 1,
             byoyomi: 0,
@@ -2709,7 +2771,8 @@ mod tests {
     #[test]
     fn ticket_source_single_pair_emits_expected_pairs() {
         let target = Arc::new(AtomicU32::new(2)); // 各方向 2 局 = 1 ペアあたり 4 局
-        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone(), 0);
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 1, target.clone(), 0, super::StartposOrder::Random);
         assert_eq!(source.current_target_total(), 4);
 
         let tickets = drain_source(&mut source);
@@ -2727,7 +2790,8 @@ mod tests {
     #[test]
     fn ticket_source_target_increase_continues_consistently() {
         let target = Arc::new(AtomicU32::new(1)); // 1 ペアあたり 2 局
-        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone(), 0);
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 1, target.clone(), 0, super::StartposOrder::Random);
         let first = drain_source(&mut source);
         assert_eq!(first.len(), 2);
         assert!(!source.has_next());
@@ -2749,7 +2813,13 @@ mod tests {
     #[test]
     fn target_increase_mid_card_keeps_all_completed_pairs() {
         let target = Arc::new(AtomicU32::new(1));
-        let mut source = TicketSource::new(vec![(0, 1), (0, 2)], 1000, target.clone(), 42);
+        let mut source = TicketSource::new(
+            vec![(0, 1), (0, 2)],
+            1000,
+            target.clone(),
+            42,
+            super::StartposOrder::Random,
+        );
         let mut tickets = (0..3).map(|_| pull(&mut source).unwrap()).collect::<Vec<_>>();
         target.store(2, Ordering::Relaxed);
         tickets.extend(drain_source(&mut source));
@@ -2812,7 +2882,13 @@ mod tests {
     #[test]
     fn target_increase_mid_card_still_retries_failed_pair() {
         let target = Arc::new(AtomicU32::new(1));
-        let mut source = TicketSource::new(vec![(0, 1), (0, 2)], 1000, target.clone(), 42);
+        let mut source = TicketSource::new(
+            vec![(0, 1), (0, 2)],
+            1000,
+            target.clone(),
+            42,
+            super::StartposOrder::Random,
+        );
         let first = pull(&mut source).unwrap();
         let second = pull(&mut source).unwrap();
         let open = pull(&mut source).unwrap();
@@ -2846,7 +2922,8 @@ mod tests {
     #[test]
     fn ticket_source_target_decrease_stops_feeding() {
         let target = Arc::new(AtomicU32::new(3)); // 1 ペアあたり 6 局
-        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone(), 0);
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 1, target.clone(), 0, super::StartposOrder::Random);
         // 2 局だけ発行
         assert!(pull(&mut source).is_some());
         assert!(pull(&mut source).is_some());
@@ -2860,7 +2937,8 @@ mod tests {
     fn ticket_source_round_robin_keeps_pairs_within_engine_pair() {
         let target = Arc::new(AtomicU32::new(1)); // 各ペア 2 局
         let pairs = vec![(0, 1), (0, 2), (1, 2)];
-        let mut source = TicketSource::new(pairs.clone(), 1, target.clone(), 0);
+        let mut source =
+            TicketSource::new(pairs.clone(), 1, target.clone(), 0, super::StartposOrder::Random);
         assert_eq!(source.current_target_total(), 6);
         let tickets = drain_source(&mut source);
         assert_eq!(tickets.len(), 6);
@@ -2872,7 +2950,8 @@ mod tests {
         use std::collections::HashMap;
         let target = Arc::new(AtomicU32::new(1)); // 各ペア 2 局
         let pairs = vec![(0, 1), (0, 2), (1, 2)];
-        let mut source = TicketSource::new(pairs.clone(), 1, target.clone(), 0);
+        let mut source =
+            TicketSource::new(pairs.clone(), 1, target.clone(), 0, super::StartposOrder::Random);
         let first = drain_source(&mut source);
         assert_eq!(first.len(), 6);
 
@@ -2918,14 +2997,21 @@ mod tests {
 
         // まず各方向 1 局を発行し、その後 3 局へ増やす。
         let dynamic_target = Arc::new(AtomicU32::new(1));
-        let mut dynamic = TicketSource::new(pairs.clone(), 65_521, dynamic_target.clone(), 42);
+        let mut dynamic = TicketSource::new(
+            pairs.clone(),
+            65_521,
+            dynamic_target.clone(),
+            42,
+            super::StartposOrder::Random,
+        );
         let mut dynamic_tickets = drain_source(&mut dynamic);
         dynamic_target.store(3, Ordering::Relaxed);
         dynamic_tickets.extend(drain_source(&mut dynamic));
 
         // 最初から最終 target を指定した場合と、matchup ごとの局面列が一致する。
         let fixed_target = Arc::new(AtomicU32::new(3));
-        let mut fixed = TicketSource::new(pairs, 65_521, fixed_target, 42);
+        let mut fixed =
+            TicketSource::new(pairs, 65_521, fixed_target, 42, super::StartposOrder::Random);
         let fixed_tickets = drain_source(&mut fixed);
 
         assert_eq!(collect_startpos(dynamic_tickets), collect_startpos(fixed_tickets));
@@ -2935,7 +3021,8 @@ mod tests {
     fn ticket_source_decrease_mid_pair_completes_pair() {
         // ペアの 1 局目だけ発行した状態で target を下げても、2 局目を発行してペアを完結させる。
         let target = Arc::new(AtomicU32::new(3)); // 1 ペアあたり 6 局
-        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone(), 0);
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 1, target.clone(), 0, super::StartposOrder::Random);
         let slot0 = pull(&mut source).unwrap();
         assert_eq!(slot0.pair_slot, 0);
 
@@ -2955,7 +3042,8 @@ mod tests {
     #[test]
     fn ticket_source_peek_does_not_advance_state() {
         let target = Arc::new(AtomicU32::new(2));
-        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone(), 0);
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 1, target.clone(), 0, super::StartposOrder::Random);
         let a = source.peek_ticket().unwrap();
         let b = source.peek_ticket().unwrap();
         assert_eq!(a.id, b.id, "peek は状態を進めない");
@@ -2967,7 +3055,8 @@ mod tests {
     #[test]
     fn ticket_source_still_wanted_reflects_target_decrease() {
         let target = Arc::new(AtomicU32::new(2)); // 各ペア 4 局
-        let mut source = TicketSource::new(vec![(0, 1)], 1, target.clone(), 0);
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 1, target.clone(), 0, super::StartposOrder::Random);
 
         // 未コミットの 1 局目（偶数 slot）は、target を下げると不要になる。
         let fresh = source.peek_ticket().unwrap();
@@ -2991,7 +3080,7 @@ mod tests {
         use super::{ControlState, apply_control};
         let dir = tempfile::tempdir().unwrap();
         let control_path = dir.path().join("control.json");
-        let history_path = dir.path().join("control_history.jsonl");
+        let history_path = dir.path().join(CONTROL_HISTORY_FILE_NAME);
 
         let target = AtomicU32::new(100);
         let mut desired = 4usize;
@@ -3035,7 +3124,8 @@ mod tests {
     fn ticket_source_swap_game_reuses_start_position() {
         // 複数開始局面でも、ペアの 2 局目は 1 局目と同じ開始局面を使う。
         let target = Arc::new(AtomicU32::new(1));
-        let mut source = TicketSource::new(vec![(0, 1)], 8, target.clone(), 0);
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 8, target.clone(), 0, super::StartposOrder::Random);
         let tickets = drain_source(&mut source);
         assert_eq!(tickets.len(), 2);
         assert_eq!(
@@ -3047,7 +3137,8 @@ mod tests {
     #[test]
     fn error_pair_retries_twice_without_consuming_target() {
         let target = Arc::new(AtomicU32::new(1));
-        let mut source = TicketSource::new(vec![(0, 1)], 8, target, 42);
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 8, target, 42, super::StartposOrder::Random);
         let initial = drain_source(&mut source);
         assert_eq!(initial.len(), 2);
         let startpos_idx = initial[0].startpos_idx;
@@ -3087,7 +3178,8 @@ mod tests {
         let params = super::SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
         let mut state = SprtState::new(params, 0, 1, 10, "base".into(), "test".into());
         let target = Arc::new(AtomicU32::new(1));
-        let mut source = TicketSource::new(vec![(0, 1)], 1, target, 0);
+        let mut source =
+            TicketSource::new(vec![(0, 1)], 1, target, 0, super::StartposOrder::Random);
         let initial = drain_source(&mut source);
         state.observe(&result(initial[0].clone(), super::GameOutcome::WhiteWin, false));
         state.observe(&result(initial[1].clone(), super::GameOutcome::Draw, true));
@@ -3285,5 +3377,46 @@ mod tests {
         let merged = build_engine_usi_options(&common, Some(per_engine), false);
 
         assert_eq!(merged, strings(&["Threads=2", "EvalFile=last.bin"]));
+    }
+    #[test]
+    fn sequential_balances_and_survives_target_changes_and_retries() {
+        for seed in [0, 42, u64::MAX] {
+            let target = Arc::new(AtomicU32::new(3));
+            let mut source = TicketSource::new(
+                vec![(0, 1), (0, 2)],
+                3,
+                target.clone(),
+                seed,
+                super::StartposOrder::Sequential,
+            );
+            let first = pull(&mut source).unwrap();
+            target.store(0, Ordering::Relaxed);
+            let second = pull(&mut source).unwrap();
+            assert_eq!(first.startpos_idx, second.startpos_idx);
+            target.store(6, Ordering::Relaxed);
+            let mut tickets = vec![first.clone(), second.clone()];
+            tickets.extend(drain_source(&mut source));
+            for matchup in [(0, 1), (0, 2)] {
+                let indices: Vec<_> = tickets
+                    .iter()
+                    .filter(|t| {
+                        (t.black_idx.min(t.white_idx), t.black_idx.max(t.white_idx)) == matchup
+                    })
+                    .map(|t| t.startpos_idx)
+                    .collect();
+                assert_eq!(indices, vec![0, 0, 1, 1, 2, 2, 0, 0, 1, 1, 2, 2]);
+            }
+            source.observe_result(&result(first.clone(), super::GameOutcome::Draw, true));
+            source.observe_result(&result(second, super::GameOutcome::Draw, false));
+            let retries = drain_source(&mut source);
+            assert_eq!(retries.len(), 2);
+            assert!(retries.iter().all(|t| t.attempt == 1 && t.startpos_idx == first.startpos_idx));
+        }
+    }
+    #[test]
+    fn random_startpos_golden_values_are_unchanged() {
+        let actual: Vec<_> =
+            (0..8).map(|i| deterministic_startpos_index(42, (0, 1), i, 65521)).collect();
+        assert_eq!(actual, vec![28243, 37729, 28526, 3240, 12894, 28843, 53384, 8534]);
     }
 }

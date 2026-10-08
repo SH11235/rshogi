@@ -23,6 +23,8 @@ impl std::error::Error for EngineFailure {}
 pub struct GameConfig {
     /// 評価値による投了裁定。既定は無効。
     pub resign_rule: Option<ResignRule>,
+    /// 自己視点の優勢評価による勝ち裁定。None で無効。
+    pub win_rule: Option<ResignRule>,
     /// 評価値による引分裁定。既定は無効。
     pub draw_rule: Option<DrawRule>,
     /// 引分とする総手数。開始局面までの手数 (SFEN の手数欄と開始手順) を含めて数える。
@@ -98,7 +100,7 @@ pub fn run_game(
         .map(|_| (pos.pass_rights(Color::Black), pos.pass_rights(Color::White)));
     let mut moves = String::new();
     let mut rules = RuleAdjudicator::new(&pos);
-    let mut scores = ScoreAdjudicator::new(config.resign_rule, config.draw_rule);
+    let mut scores = ScoreAdjudicator::new(config.resign_rule, config.win_rule, config.draw_rule);
     let mut tc = tc;
     let mut outcome = GameOutcome::InProgress;
     let mut outcome_reason = "max_moves".to_string();

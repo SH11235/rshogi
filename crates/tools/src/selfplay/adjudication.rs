@@ -104,12 +104,12 @@ impl RuleAdjudicator {
     }
 }
 
-/// 自己視点の劣勢評価が同一側で連続した場合の投了裁定。
+/// 同一側の評価が連続した場合の投了・勝ち裁定の共通設定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ResignRule {
     /// 必要な同一側の連続着手数（1 以上）。
     pub movecount: u32,
-    /// 劣勢評価の絶対閾値（非負の cp）。
+    /// 評価値の絶対閾値（非負の cp）。
     pub score: i32,
 }
 
@@ -173,20 +173,28 @@ impl FromStr for DrawRule {
     }
 }
 
-/// オプトインの評価値裁定。投了、引分の順に判定する。
+/// オプトインの評価値裁定。投了、勝ち、引分の順に判定する。
 pub struct ScoreAdjudicator {
     resign: Option<ResignRule>,
     draw: Option<DrawRule>,
+    win: Option<ResignRule>,
+    win_streak: [u32; 2],
     resign_streak: [u32; 2],
     draw_streak: u32,
 }
 
 impl ScoreAdjudicator {
     /// None のルールは無効にする。
-    pub fn new(resign: Option<ResignRule>, draw: Option<DrawRule>) -> Self {
+    pub fn new(
+        resign: Option<ResignRule>,
+        win: Option<ResignRule>,
+        draw: Option<DrawRule>,
+    ) -> Self {
         Self {
             resign,
             draw,
+            win,
+            win_streak: [0; 2],
             resign_streak: [0; 2],
             draw_streak: 0,
         }
@@ -201,15 +209,24 @@ impl ScoreAdjudicator {
     ) -> Option<Verdict> {
         // bound は確定評価ではないため、欠落評価と同様に連続回数をリセットする。
         let eval = eval.filter(|e| e.score_bound.is_none());
-        if let Some(rule) = self.resign {
-            let losing = eval.is_some_and(|e| match e.score_mate {
-                Some(mate) => mate < 0,
-                None => e.score_cp.is_some_and(|cp| i64::from(cp) <= -i64::from(rule.score)),
+        for (rule, streaks, winning, reason) in [
+            (self.resign, &mut self.resign_streak, false, "adjudication_resign"),
+            (self.win, &mut self.win_streak, true, "adjudication_win"),
+        ] {
+            let Some(rule) = rule else {
+                continue;
+            };
+            let direction = if winning { 1_i64 } else { -1 };
+            let reached = eval.is_some_and(|e| match e.score_mate {
+                Some(mate) => i64::from(mate) * direction > 0,
+                None => {
+                    e.score_cp.is_some_and(|cp| i64::from(cp) * direction >= i64::from(rule.score))
+                }
             });
-            let streak = &mut self.resign_streak[mover as usize];
-            *streak = if losing { streak.saturating_add(1) } else { 0 };
+            let streak = &mut streaks[mover as usize];
+            *streak = if reached { streak.saturating_add(1) } else { 0 };
             if *streak >= rule.movecount {
-                return Some(loss(mover, "adjudication_resign"));
+                return Some(loss(if winning { !mover } else { mover }, reason));
             }
         }
         if let Some(rule) = self.draw {
@@ -408,6 +425,7 @@ mod tests {
                 score: 600,
             }),
             None,
+            None,
         )
     }
 
@@ -458,7 +476,7 @@ mod tests {
             movecount: 3,
             score: 20,
         };
-        let mut scores = ScoreAdjudicator::new(None, Some(rule));
+        let mut scores = ScoreAdjudicator::new(None, None, Some(rule));
         for ply in 1..6 {
             assert!(scores.after_move(Color::Black, Some(&cp(0)), ply).is_none());
         }
@@ -475,7 +493,7 @@ mod tests {
             None,
             Some(EvalLog::default()),
         ] {
-            let mut scores = ScoreAdjudicator::new(None, Some(rule));
+            let mut scores = ScoreAdjudicator::new(None, None, Some(rule));
             for ply in 6..8 {
                 assert!(scores.after_move(Color::Black, Some(&cp(20)), ply).is_none());
             }
@@ -502,6 +520,7 @@ mod tests {
                         movecount: 2,
                         score: 600,
                     }),
+                    None,
                     Some(DrawRule {
                         movenumber: 0,
                         movecount: 2,
@@ -519,7 +538,7 @@ mod tests {
 
     #[test]
     fn score_rules_default_off_and_resign_precedes_draw() {
-        let mut scores = ScoreAdjudicator::new(None, None);
+        let mut scores = ScoreAdjudicator::new(None, None, None);
         for ply in 1..=20 {
             assert!(scores.after_move(Color::Black, Some(&mate(-1)), ply).is_none());
         }
@@ -528,6 +547,7 @@ mod tests {
                 movecount: 1,
                 score: 0,
             }),
+            None,
             Some(DrawRule {
                 movenumber: 0,
                 movecount: 1,
@@ -539,5 +559,107 @@ mod tests {
             GameOutcome::WhiteWin,
             "adjudication_resign",
         );
+    }
+    #[test]
+    fn win_counts_sides_and_resets_inexact_or_missing_scores() {
+        for winner in [Color::Black, Color::White] {
+            let mut scores = ScoreAdjudicator::new(
+                None,
+                Some(ResignRule {
+                    movecount: 3,
+                    score: 300,
+                }),
+                None,
+            );
+            for ply in 1..=5 {
+                let mover = if ply % 2 == 1 { winner } else { !winner };
+                let verdict = scores.after_move(mover, Some(&cp(300)), ply);
+                if ply < 5 {
+                    assert!(verdict.is_none());
+                } else {
+                    assert_verdict(verdict, loss(!winner, "").outcome, "adjudication_win");
+                }
+            }
+        }
+        let mut resets = vec![
+            None,
+            Some(cp(299)),
+            Some(cp(i32::MIN)),
+            Some(mate(-1)),
+            Some(mate(0)),
+            Some(EvalLog::default()),
+        ];
+        for bound in ["lowerbound", "upperbound"] {
+            for score in ["cp 300", "mate 1"] {
+                let mut snap = super::super::InfoSnapshot::default();
+                snap.update_from_line(&format!("info score {score} {bound} pv 7g7f"));
+                resets.push(snap.into_eval_log());
+            }
+        }
+        for reset in resets {
+            let mut scores = ScoreAdjudicator::new(
+                None,
+                Some(ResignRule {
+                    movecount: 2,
+                    score: 300,
+                }),
+                None,
+            );
+            assert!(scores.after_move(Color::White, Some(&cp(300)), 1).is_none());
+            assert!(scores.after_move(Color::White, reset.as_ref(), 3).is_none());
+            assert!(scores.after_move(Color::White, Some(&mate(1)), 5).is_none());
+            assert_verdict(
+                scores.after_move(Color::White, Some(&mate(1)), 7),
+                GameOutcome::WhiteWin,
+                "adjudication_win",
+            );
+        }
+    }
+
+    #[test]
+    fn resign_precedes_win_and_win_precedes_draw() {
+        let rule = Some(ResignRule {
+            movecount: 1,
+            score: 0,
+        });
+        let draw = Some(DrawRule {
+            movenumber: 0,
+            movecount: 1,
+            score: 20,
+        });
+        for (resign, outcome, reason) in [
+            (rule, GameOutcome::WhiteWin, "adjudication_resign"),
+            (None, GameOutcome::BlackWin, "adjudication_win"),
+        ] {
+            let mut scores = ScoreAdjudicator::new(resign, rule, draw);
+            assert_verdict(scores.after_move(Color::Black, Some(&cp(0)), 1), outcome, reason);
+        }
+        let mut off = ScoreAdjudicator::new(None, None, None);
+        for eval in [cp(i32::MAX), mate(1)] {
+            assert!(off.after_move(Color::Black, Some(&eval), 1).is_none());
+        }
+    }
+    #[test]
+    fn combined_resign_and_win_end_at_either_threshold() {
+        let rule = Some(ResignRule {
+            movecount: 1,
+            score: 300,
+        });
+        for mover in [Color::Black, Color::White] {
+            for (score, loser, reason) in [
+                (-300, mover, "adjudication_resign"),
+                (300, !mover, "adjudication_win"),
+            ] {
+                let mut scores = ScoreAdjudicator::new(rule, rule, None);
+                for cp_score in [-299, 299] {
+                    assert!(scores.after_move(mover, Some(&cp(cp_score)), 1).is_none());
+                }
+                assert_verdict(
+                    scores.after_move(mover, Some(&cp(score)), 3),
+                    loss(loser, "").outcome,
+                    reason,
+                );
+            }
+        }
     }
 }
