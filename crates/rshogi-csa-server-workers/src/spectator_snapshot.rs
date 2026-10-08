@@ -226,14 +226,35 @@ fn move_elapsed_units(moves: &[MoveRow], first_prev_ms: u64, unit_ms: u64) -> Ve
         .collect()
 }
 
+/// ミリ秒時計の経過時間を CSA コメントとして保存する。
+/// V2 本文の T は秒を維持し、終局後の観戦履歴だけコメントから精度を復元する。
+pub(crate) fn with_millisecond_timings(csa: &str, moves: &[MoveRow], first_prev_ms: u64) -> String {
+    use std::fmt::Write as _;
+    let elapsed = move_elapsed_units(moves, first_prev_ms, 1);
+    let mut timings = elapsed.into_iter();
+    let mut out = String::with_capacity(csa.len());
+    for line in csa.lines() {
+        let _ = writeln!(out, "{line}");
+        if line.starts_with(['+', '-'])
+            && line.len() >= 7
+            && let Some(ms) = timings.next()
+        {
+            let _ = writeln!(out, "'RSHOGI_TIME_MS:{ms}");
+        }
+    }
+    out
+}
+
 /// export 済み CSA V2 本文から snapshot 用の指し手列を復元する。
 ///
 /// `KifuRecord::build_v2` が出す通常手 (`+7776FU,T3`) と直後のコメント行だけを
 /// `MoveRow` 互換に戻す。終局後は DO の `moves` テーブルを cleanup するため、
 /// late-joiner snapshot は R2 / export pending の CSA 本文を正とする。
+/// ミリ秒時計は `RSHOGI_TIME_MS` コメントから精度を復元し、旧棋譜は秒へフォールバックする。
 pub(crate) fn move_rows_from_exported_csa(csa_text: &str, first_prev_ms: u64) -> Vec<MoveRow> {
     let mut rows: Vec<MoveRow> = Vec::new();
     let mut cumulative_ms = 0_u64;
+    let mut has_ms_timing = false;
 
     for raw in csa_text.lines() {
         let line = raw.trim_end_matches('\r');
@@ -248,6 +269,7 @@ pub(crate) fn move_rows_from_exported_csa(csa_text: &str, first_prev_ms: u64) ->
                 .unwrap_or(0);
             cumulative_ms = cumulative_ms.saturating_add(u64::from(elapsed_sec) * 1000);
             let at_ms = first_prev_ms.saturating_add(cumulative_ms).min(i64::MAX as u64) as i64;
+            has_ms_timing = false;
             rows.push(MoveRow {
                 ply: i64::try_from(rows.len() + 1).unwrap_or(i64::MAX),
                 color: if token.starts_with('+') {
@@ -260,6 +282,20 @@ pub(crate) fn move_rows_from_exported_csa(csa_text: &str, first_prev_ms: u64) ->
                 at_ms,
                 reconnect_credit_ms: 0,
             });
+        } else if let Some(ms) = line.strip_prefix("'RSHOGI_TIME_MS:") {
+            if !has_ms_timing && let Ok(ms) = ms.parse::<u64>() {
+                // 直前の秒丸め時刻を、保存済みの実効経過 ms で置換する。
+                let prev_ms = if rows.len() >= 2 {
+                    rows[rows.len() - 2].at_ms.max(0) as u64
+                } else {
+                    first_prev_ms
+                };
+                if let Some(last) = rows.last_mut() {
+                    has_ms_timing = true;
+                    last.at_ms = prev_ms.saturating_add(ms).min(i64::MAX as u64) as i64;
+                    cumulative_ms = (last.at_ms as u64).saturating_sub(first_prev_ms);
+                }
+            }
         } else if let Some(comment) = line.strip_prefix('\'')
             && let Some(last) = rows.last_mut()
             && !last.line.contains('\'')
@@ -393,6 +429,41 @@ mod tests {
             assert!(lines.contains(&format!("+7776FU,T{wire_t}")));
             assert_eq!(move_elapsed_secs(&rows, 1_000_000, cfg.clock.time_unit_ms()), [seconds]);
         }
+    }
+
+    #[test]
+    fn finished_snapshot_retains_milliseconds_after_csa_roundtrip() {
+        let mut cfg = baseline_config();
+        cfg.clock = ClockSpec::CountdownMsec {
+            total_time_ms: 10000,
+            byoyomi_ms: 100,
+        };
+        let mut first = move_row_at(1, "black", "+7776FU", 1_000_500);
+        first.reconnect_credit_ms = 250;
+        let rows = [first, move_row_at(2, "white", "-3334FU", 1_001_750)];
+        let csa = with_millisecond_timings(
+            "V2.2\nPI\n+\n+7776FU,T0\n'** 50 -3334FU\n-3334FU,T1\n%TORYO\n",
+            &rows,
+            1_000_000,
+        );
+        assert!(csa.contains("+7776FU,T0\n'RSHOGI_TIME_MS:250"));
+        assert!(csa.contains("-3334FU,T1\n'RSHOGI_TIME_MS:1250"));
+        let restored = move_rows_from_exported_csa(&csa, 1_000_000);
+        assert_eq!(move_elapsed_units(&restored, 1_000_000, 1), [250, 1250]);
+        assert_eq!(parse_move_row_line(&restored[0].line).1, Some("** 50 -3334FU"));
+        let cl = clocks(9750, 8750, Color::Black);
+        let lines = build_spectator_snapshot(SpectatorSnapshotInput {
+            config: &cfg,
+            moves: &restored,
+            clocks: &cl,
+            finalized: None,
+        });
+        assert!(lines.contains(&"+7776FU,T250".into()));
+        assert!(lines.contains(&"-3334FU,T1250".into()));
+        assert!(!lines.iter().any(|line| line.contains("RSHOGI_TIME_MS")));
+        // コメントのない既存棋譜も従来どおり秒として読める。
+        let old = move_rows_from_exported_csa("+7776FU,T0\n-3334FU,T1\n", 1_000_000);
+        assert_eq!(move_elapsed_units(&old, 1_000_000, 1), [0, 1000]);
     }
 
     /// シナリオ 1: 初手前 (= moves 空、終局なし)。

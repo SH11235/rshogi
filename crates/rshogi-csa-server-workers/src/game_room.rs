@@ -96,6 +96,7 @@ use crate::spectator_snapshot::{
     SpectatorClocks, SpectatorSnapshotInput, build_spectator_clock_update,
     build_spectator_snapshot, initial_spectator_clocks, is_move_broadcast, move_elapsed_secs,
     move_rows_from_exported_csa, parse_move_row_line, spectator_clock_insert_after,
+    with_millisecond_timings,
 };
 use crate::ws_route::{WsRoute, parse_ws_route};
 use crate::x1_paths::{
@@ -2619,6 +2620,11 @@ impl GameRoom {
             result: game_result.clone(),
         };
         let text = record.build_v2();
+        let text = if cfg.clock.time_unit_ms() == 1 {
+            with_millisecond_timings(&text, &moves_rows, first_prev_ms)
+        } else {
+            text
+        };
 
         let date_path = format_date_path(cfg.play_started_at_ms.unwrap_or(cfg.matched_at_ms));
         let date_key = format!("{date_path}/{}.csa", cfg.game_id);

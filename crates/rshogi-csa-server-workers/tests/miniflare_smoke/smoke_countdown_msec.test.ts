@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CsaClient,
+  DEFAULT_TEST_CF_CONNECTING_IP,
   createMiniflare,
   getKifuBucket,
   makeTempPersistRoot,
   pollR2ForGameId,
 } from "./harness.ts";
 import type { Miniflare } from "miniflare";
+import { readLineFromWebSocket } from "./ws_test_helpers";
 
 // `CLOCK_KIND = "countdown_msec"` で MillisecondsCountdownClock 経路を通電させ、
 // Game_Summary が `Time_Unit:1msec`、棋譜が CSA V2 で R2 に書かれることを assert
@@ -22,6 +24,7 @@ describe("miniflare smoke: 1 対局 E2E (countdown_msec)", () => {
     mf = await createMiniflare({
       persistRoot: persist.path,
       clockKind: "countdown_msec",
+      allowViewerApi: true,
       totalTimeMs: 10_000,
       byoyomiMs: 100,
     });
@@ -65,11 +68,11 @@ describe("miniflare smoke: 1 対局 E2E (countdown_msec)", () => {
     const gameId = startBlack.slice("START:".length);
 
     black.send("+7776FU");
-    await black.recvUntil((l) => l.startsWith("+7776FU"));
+    const blackMove = (await black.recvUntil((l) => l.startsWith("+7776FU"))).at(-1)!;
     await white.recvUntil((l) => l.startsWith("+7776FU"));
 
     white.send("-3334FU");
-    await black.recvUntil((l) => l.startsWith("-3334FU"));
+    const whiteMove = (await black.recvUntil((l) => l.startsWith("-3334FU"))).at(-1)!;
     await white.recvUntil((l) => l.startsWith("-3334FU"));
 
     black.send("%TORYO");
@@ -87,8 +90,29 @@ describe("miniflare smoke: 1 対局 E2E (countdown_msec)", () => {
     expect(body).toContain("Time_Unit:1msec");
     expect(body).toContain("Total_Time:10000");
     expect(body).toContain("Byoyomi:100");
-
+    // moves 削除後も、CSA コメントからライブと同じ ms 精度を復元する。
+    expect(body).toContain(`'RSHOGI_TIME_MS:${blackMove.split(",T")[1]}`);
+    expect(body).toContain(`'RSHOGI_TIME_MS:${whiteMove.split(",T")[1]}`);
     await black.close();
     await white.close();
+    const res = await mf.dispatchFetch(`https://example.com/ws/${encodeURIComponent(gameId)}/spectate`, {
+      headers: {
+        Upgrade: "websocket",
+        Origin: "https://example.com",
+        "CF-Connecting-IP": DEFAULT_TEST_CF_CONNECTING_IP,
+      },
+    });
+    expect(res.status).toBe(101);
+    const ws = res.webSocket!;
+    const buf = readLineFromWebSocket(ws);
+    ws.accept();
+    const snapshot: string[] = [];
+    while (true) {
+      const line = await buf.takeLine(5000);
+      snapshot.push(line);
+      if (line === "##[MONITOR2] END") break;
+    }
+    expect(snapshot).toContain(blackMove);
+    expect(snapshot).toContain(whiteMove);
   });
 });

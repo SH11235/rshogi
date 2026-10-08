@@ -761,3 +761,38 @@ fn built_in_server_nonsecond_clocks_match_client_budgets() {
         handle.join().unwrap();
     }
 }
+
+#[test]
+fn stalled_summary_body_can_be_cancelled_without_waiting_for_end() {
+    use std::sync::{atomic::Ordering, mpsc};
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stopped_server = Arc::clone(&stopped);
+    let (consumed_tx, consumed_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (port, handle) = server(move |reader, writer| {
+        send(writer, &["BEGIN Game_Summary", "Game_ID:g"]);
+        ready_tx.send(()).unwrap();
+        consumed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stopped_server.store(true, Ordering::SeqCst);
+        // END は送らない。停止で受信を抜け、サーバーへの送信は LOGOUT のみ。
+        assert_eq!(read(reader), "LOGOUT");
+    });
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut polls = 0;
+    let start = std::time::Instant::now();
+    let result = conn
+        .recv_game_summary_while(60, || {
+            polls += 1;
+            // BEGIN 待ち → 本文先頭 → Game_ID を読んだ後の確認で同期する。
+            if polls == 3 {
+                consumed_tx.send(()).unwrap();
+            }
+            !stopped.load(Ordering::SeqCst)
+        })
+        .unwrap();
+    assert!(result.is_none());
+    assert!(start.elapsed() < Duration::from_secs(5));
+    conn.logout().unwrap();
+    handle.join().unwrap();
+}

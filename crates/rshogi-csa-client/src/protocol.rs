@@ -324,8 +324,19 @@ impl CsaConnection {
         // 現在パース中の Time ブロックの対象 (None=共通, Some(Black/White)=個別)
         let mut time_target: Option<Option<Color>> = None;
 
+        let mut last_summary_line = Instant::now();
         loop {
-            let line = self.recv_line_blocking(Duration::from_secs(30))?;
+            if !should_continue() {
+                return Ok(None);
+            }
+            let Some(line) = self.recv_line_nonblocking()? else {
+                if last_summary_line.elapsed() >= Duration::from_secs(30) {
+                    bail!("Game_Summary 本文の受信がタイムアウトしました");
+                }
+                self.maybe_send_keepalive(keepalive_interval_sec)?;
+                continue;
+            };
+            last_summary_line = Instant::now();
             if line == "END Game_Summary" {
                 break;
             }

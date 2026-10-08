@@ -378,3 +378,7 @@ production は本家 Floodgate 互換の `countdown` (`Time_Unit:1sec`) を既�
 - `.claude/skills/csa-e2e-staging/SKILL.md` - Workers deploy 環境での実機対局シナリオ集
 - [`viewer_access_control.md`](viewer_access_control.md) - viewer / spectate API の access control 運用
 - [`../csa-client.md`](../csa-client.md) - CSA client (`csa_client`) の利用方法
+
+Workers のミリ秒時計では、保存棋譜の各手に `'RSHOGI_TIME_MS:<ms>` コメントを付けて
+再接続補償後の消費時間を保持する。終局後の観戦 snapshot はこの値からミリ秒精度を
+復元する。標準の `T` 行は秒のままで、コメントのない既存棋譜は秒精度で復元する。
