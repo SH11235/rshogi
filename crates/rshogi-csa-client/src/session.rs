@@ -208,50 +208,68 @@ where
     }
 
     // Step 2: Game_Summary 受信
-    let summary = match conn.recv_game_summary(config.server.keepalive.ping_interval_sec) {
-        Ok(s) => s,
-        Err(err) => {
-            return Err(map_anyhow_to_session_error(err));
-        }
-    };
-    let summary_arc = Arc::new(summary.clone());
-
-    // resume の場合は Reconnect_State も受信する
-    let reconnect_state_protocol = if mode == SessionMode::Resumed {
-        match conn.recv_reconnect_state() {
-            Ok(state) => Some(state),
+    let (summary, reconnect_state_protocol) = loop {
+        let summary = match conn
+            .recv_game_summary_while(config.server.keepalive.ping_interval_sec, || {
+                !shutdown.load(Ordering::SeqCst) && sink.should_continue()
+            }) {
+            Ok(Some(s)) => s,
+            Ok(None) => return abort_before_start(conn, sink, shutdown),
             Err(err) => {
                 return Err(map_anyhow_to_session_error(err));
             }
-        }
-    } else {
-        None
-    };
+        };
+        let summary_arc = Arc::new(summary.clone());
 
-    // Step 3: Resumed / GameSummary を発火
-    let progress = match mode {
-        SessionMode::Fresh => SessionProgress::GameSummary(Arc::clone(&summary_arc)),
-        SessionMode::Resumed => {
-            let state = build_reconnect_state(&summary, reconnect_state_protocol.as_ref());
-            SessionProgress::Resumed {
-                summary: Arc::clone(&summary_arc),
-                state,
+        // resume の場合は Reconnect_State も受信する
+        let reconnect_state_protocol = if mode == SessionMode::Resumed {
+            match conn.recv_reconnect_state() {
+                Ok(state) => Some(state),
+                Err(err) => {
+                    return Err(map_anyhow_to_session_error(err));
+                }
+            }
+        } else {
+            None
+        };
+
+        // Step 3: Resumed / GameSummary を発火
+        let progress = match mode {
+            SessionMode::Fresh => SessionProgress::GameSummary(Arc::clone(&summary_arc)),
+            SessionMode::Resumed => {
+                let state = build_reconnect_state(&summary, reconnect_state_protocol.as_ref());
+                SessionProgress::Resumed {
+                    summary: Arc::clone(&summary_arc),
+                    state,
+                }
+            }
+        };
+        if let Some(action) = emit_with_nonfatal_warn(sink, progress) {
+            return handle_sink_error(action, conn, sink, Some(summary), false);
+        }
+        if !sink.should_continue() {
+            return abort_for_should_continue(conn, sink, Some(summary), false);
+        }
+
+        // 不成立はログアウトせず、同じ接続で次の Game_Summary を受信する。
+        if mode == SessionMode::Fresh {
+            let response = conn
+                .agree_and_wait_start(
+                    &summary.game_id,
+                    config.server.keepalive.ping_interval_sec,
+                    || !shutdown.load(Ordering::SeqCst) && sink.should_continue(),
+                )
+                .map_err(map_anyhow_to_session_error)?;
+            match response {
+                crate::protocol::StartResponse::Started => {}
+                crate::protocol::StartResponse::Rejected => continue,
+                crate::protocol::StartResponse::Cancelled => {
+                    return abort_before_start(conn, sink, shutdown);
+                }
             }
         }
+        break (summary, reconnect_state_protocol);
     };
-    if let Some(action) = emit_with_nonfatal_warn(sink, progress) {
-        return handle_sink_error(action, conn, sink, Some(summary), false);
-    }
-    if !sink.should_continue() {
-        return abort_for_should_continue(conn, sink, Some(summary), false);
-    }
-
-    // Step 4: AGREE / engine.new_game (Fresh のみ AGREE 必要)
-    if mode == SessionMode::Fresh
-        && let Err(err) = conn.agree_and_wait_start(&summary.game_id)
-    {
-        return Err(map_anyhow_to_session_error(err));
-    }
     apply_advertised_entering_king_rule(config, engine, &summary)?;
     if let Err(err) = engine.new_game() {
         return Err(SessionError::Engine(format!("{err}")));
@@ -532,12 +550,9 @@ where
             return LoopOutcome::Error(map_anyhow_to_session_error(err));
         }
         s.usi_moves.push(usi.clone());
-        if let Some(t) = cm.time_sec {
-            s.clock.consume(move_color, t);
-        }
-        let time_sec = cm.time_sec.unwrap_or(0);
+        let (time_sec, elapsed_ms) = s.clock.consume(move_color, cm.time_sec.unwrap_or(0));
         s.record.add_move(&cm.mv, time_sec, None, move_color);
-        push_opponent_jsonl(&mut s.record, initial_sfen_before, usi, move_color, time_sec);
+        push_opponent_jsonl(&mut s.record, initial_sfen_before, usi, move_color, elapsed_ms);
         move_color = opposite(move_color);
     }
 
@@ -916,7 +931,7 @@ where
             Ok(Event::ServerLine(line)) => {
                 if line.starts_with('+') || line.starts_with('-') {
                     let (_, time_sec) = parse_server_move(&line);
-                    s.clock.consume(s.my_color, time_sec);
+                    let (time_sec, _) = s.clock.consume(s.my_color, time_sec);
                     s.record.update_last_time(time_sec);
                     // MoveConfirmed 発火 (自エンジンの手、time_sec 確定)
                     let confirmed_event = MoveEvent {
@@ -1019,14 +1034,14 @@ where
             }
             let opponent_sfen_after = s.pos.to_sfen();
             s.usi_moves.push(opponent_usi.clone());
-            s.clock.consume(opposite(s.my_color), time_sec);
+            let (time_sec, elapsed_ms) = s.clock.consume(opposite(s.my_color), time_sec);
             s.record.add_move(&mv, time_sec, None, opposite(s.my_color));
             push_opponent_jsonl(
                 &mut s.record,
                 opponent_sfen_before.clone(),
                 opponent_usi.clone(),
                 opposite(s.my_color),
-                time_sec,
+                elapsed_ms,
             );
             live_append(&mut s.live_jsonl, &s.record);
 
@@ -1099,14 +1114,14 @@ where
             }
             let opponent_sfen_after = s.pos.to_sfen();
             s.usi_moves.push(opponent_usi.clone());
-            s.clock.consume(opposite(s.my_color), time_sec);
+            let (time_sec, elapsed_ms) = s.clock.consume(opposite(s.my_color), time_sec);
             s.record.add_move(&mv, time_sec, None, opposite(s.my_color));
             push_opponent_jsonl(
                 &mut s.record,
                 opponent_sfen_before.clone(),
                 opponent_usi.clone(),
                 opposite(s.my_color),
-                time_sec,
+                elapsed_ms,
             );
             live_append(&mut s.live_jsonl, &s.record);
             let opp_event = MoveEvent {
@@ -1140,14 +1155,14 @@ where
         }
         let opponent_sfen_after = s.pos.to_sfen();
         s.usi_moves.push(opponent_usi.clone());
-        s.clock.consume(opposite(s.my_color), time_sec);
+        let (time_sec, elapsed_ms) = s.clock.consume(opposite(s.my_color), time_sec);
         s.record.add_move(&mv, time_sec, None, opposite(s.my_color));
         push_opponent_jsonl(
             &mut s.record,
             opponent_sfen_before.clone(),
             opponent_usi.clone(),
             opposite(s.my_color),
-            time_sec,
+            elapsed_ms,
         );
         live_append(&mut s.live_jsonl, &s.record);
         let opp_event = MoveEvent {
@@ -1264,6 +1279,26 @@ where
 {
     let cause = SessionError::SinkAborted(err);
     terminate_session(conn, sink, &cause, DisconnectReason::SinkAborted, game_already_ended);
+    Err(cause)
+}
+
+// 対局成立前には %CHUDAN / %TORYO を送らずログアウトする。
+fn abort_before_start<S: SessionEventSink + ?Sized>(
+    conn: &mut CsaConnection,
+    sink: &mut S,
+    shutdown: &AtomicBool,
+) -> Result<SessionOutcome, SessionError> {
+    let (cause, reason) = if shutdown.load(Ordering::SeqCst) {
+        (SessionError::Shutdown, DisconnectReason::Shutdown)
+    } else {
+        (
+            SessionError::SinkAborted(SinkError::Fatal(Box::new(std::io::Error::other(
+                "sink.should_continue() == false",
+            )))),
+            DisconnectReason::SinkAborted,
+        )
+    };
+    terminate_session(conn, sink, &cause, reason, true);
     Err(cause)
 }
 
@@ -1500,6 +1535,8 @@ struct Clock {
     white_byoyomi_ms: i64,
     black_increment_ms: i64,
     white_increment_ms: i64,
+    black_time_unit_ms: i64,
+    white_time_unit_ms: i64,
 }
 
 impl Clock {
@@ -1509,6 +1546,8 @@ impl Clock {
             // 以前は init に increment を足し込んでいたため、go で別途送る binc/winc と
             // 合わせてエンジンが増分を二重計上した残時間で思考していた。consume 側で
             // 各手 post-increment (`slot - consumed + inc`) するので、ここは pre-increment。
+            black_time_unit_ms: summary.black_time.time_unit_ms,
+            white_time_unit_ms: summary.white_time.time_unit_ms,
             black_time_ms: summary.black_time.total_time_ms,
             white_time_ms: summary.white_time.total_time_ms,
             black_byoyomi_ms: summary.black_time.byoyomi_ms,
@@ -1539,17 +1578,24 @@ impl Clock {
         }
     }
 
-    fn consume(&mut self, color: Color, time_sec: u32) {
-        let consumed_ms = time_sec as i64 * 1000;
+    fn consume(&mut self, color: Color, time_units: u32) -> (u32, u64) {
+        let unit = match color {
+            Color::Black => self.black_time_unit_ms,
+            Color::White => self.white_time_unit_ms,
+        };
+        let consumed_ms = i64::from(time_units).saturating_mul(unit);
         let inc = self.increment_ms(color);
         match color {
             Color::Black => {
-                self.black_time_ms = (self.black_time_ms - consumed_ms + inc).max(0);
+                self.black_time_ms =
+                    (self.black_time_ms.saturating_sub(consumed_ms).saturating_add(inc)).max(0);
             }
             Color::White => {
-                self.white_time_ms = (self.white_time_ms - consumed_ms + inc).max(0);
+                self.white_time_ms =
+                    (self.white_time_ms.saturating_sub(consumed_ms).saturating_add(inc)).max(0);
             }
         }
+        ((consumed_ms / 1000).min(i64::from(u32::MAX)) as u32, consumed_ms as u64)
     }
 
     fn build_go_args(&self, margin_msec: u64, side_to_move: Color) -> String {
@@ -1768,14 +1814,14 @@ fn push_opponent_jsonl(
     sfen_before: String,
     move_usi: String,
     side: Color,
-    time_sec: u32,
+    elapsed_ms: u64,
 ) {
     let engine_label = label_for_color(record, side);
     record.add_jsonl_move(JsonlMoveExtra {
         sfen_before,
         move_usi,
         engine_label,
-        elapsed_ms: u64::from(time_sec) * 1000,
+        elapsed_ms,
         think_limit_ms: 0,
         seldepth: None,
         nodes: None,
@@ -2366,6 +2412,7 @@ mod tests {
     fn fischer_summary(total_ms: i64, inc_ms: i64) -> GameSummary {
         use rshogi_csa::{Color, initial_position};
         let time = crate::protocol::TimeConfig {
+            time_unit_ms: 1000,
             total_time_ms: total_ms,
             byoyomi_ms: 0,
             increment_ms: inc_ms,
@@ -2387,6 +2434,7 @@ mod tests {
     fn byoyomi_summary(total_ms: i64, byoyomi_ms: i64) -> GameSummary {
         use rshogi_csa::{Color, initial_position};
         let time = crate::protocol::TimeConfig {
+            time_unit_ms: 1000,
             total_time_ms: total_ms,
             byoyomi_ms,
             increment_ms: 0,

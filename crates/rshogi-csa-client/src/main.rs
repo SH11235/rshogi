@@ -304,7 +304,7 @@ fn main() -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
     ctrlc::set_handler(move || {
-        log::info!("終了シグナル受信。対局完了後に終了します...");
+        log::info!("終了シグナル受信。待機・対局を中止して終了します...");
         shutdown_clone.store(true, Ordering::SeqCst);
     })?;
 
@@ -1101,11 +1101,13 @@ mod tests {
             position: Position::default(),
             initial_moves: vec![],
             black_time: TimeConfig {
+                time_unit_ms: 1000,
                 total_time_ms: 60_000,
                 byoyomi_ms: 1_000,
                 increment_ms: 0,
             },
             white_time: TimeConfig {
+                time_unit_ms: 1000,
                 total_time_ms: 60_000,
                 byoyomi_ms: 1_000,
                 increment_ms: 0,

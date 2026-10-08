@@ -21,11 +21,13 @@ fn build_record(my_color: Color) -> GameRecord {
         sente_name: "alice".to_string(),
         gote_name: "bob".to_string(),
         black_time: ProtoTimeConfig {
+            time_unit_ms: 1000,
             total_time_ms: 60_000,
             byoyomi_ms: 5_000,
             increment_ms: 0,
         },
         white_time: ProtoTimeConfig {
+            time_unit_ms: 1000,
             total_time_ms: 60_000,
             byoyomi_ms: 5_000,
             increment_ms: 0,

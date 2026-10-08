@@ -17,14 +17,65 @@ use crate::event::Event;
 use crate::transport::{ConnectOpts, CsaTransport, TransportTarget};
 
 /// 先後共通または個別の時間設定
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TimeConfig {
+    /// サーバーが通知する消費時間 T の単位（ミリ秒）。省略時は1秒。
+    pub time_unit_ms: i64,
     /// 持ち時間（ミリ秒）
     pub total_time_ms: i64,
     /// 秒読み（ミリ秒）
     pub byoyomi_ms: i64,
     /// フィッシャー increment（ミリ秒）
     pub increment_ms: i64,
+}
+
+impl Default for TimeConfig {
+    fn default() -> Self {
+        Self {
+            time_unit_ms: 1000,
+            total_time_ms: 0,
+            byoyomi_ms: 0,
+            increment_ms: 0,
+        }
+    }
+}
+
+// 受信中の単位数と確定済みのミリ秒を混在させない。
+#[derive(Default)]
+struct RawTimeConfig {
+    unit_ms: Option<i64>,
+    total: Option<i64>,
+    byoyomi: Option<i64>,
+    increment: Option<i64>,
+}
+
+impl RawTimeConfig {
+    fn resolve(self, base: &TimeConfig) -> Result<TimeConfig> {
+        let unit = self.unit_ms.unwrap_or(base.time_unit_ms);
+        let convert = |value: Option<i64>, fallback| match value {
+            Some(value) => value
+                .checked_mul(unit)
+                .ok_or_else(|| anyhow::anyhow!("時間設定がミリ秒の上限を超えています")),
+            None => Ok(fallback),
+        };
+        Ok(TimeConfig {
+            time_unit_ms: unit,
+            total_time_ms: convert(self.total, base.total_time_ms)?,
+            byoyomi_ms: convert(self.byoyomi, base.byoyomi_ms)?,
+            increment_ms: convert(self.increment, base.increment_ms)?,
+        })
+    }
+}
+
+/// 対局成立の応答。拒否された場合は同じ接続で次の対局を待つ。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartResponse {
+    /// 対局開始。
+    Started,
+    /// 対局不成立。
+    Rejected,
+    /// 待機中に呼び出し元が停止を要求した。
+    Cancelled,
 }
 
 /// CSAサーバーから受信した対局情報
@@ -75,7 +126,7 @@ pub struct ReconnectState {
 pub struct ServerMove {
     /// CSA形式の指し手 (例: "+7776FU")
     pub mv: String,
-    /// 消費時間（秒）
+    /// 消費時間（Time_Unit 単位）。フィールド名は既存 API との互換用。
     pub time_sec: u32,
 }
 
@@ -227,9 +278,23 @@ impl CsaConnection {
 
     /// Game_Summary を受信して解析する
     pub fn recv_game_summary(&mut self, keepalive_interval_sec: u64) -> Result<GameSummary> {
+        self.recv_game_summary_while(keepalive_interval_sec, || true)?
+            .ok_or_else(|| anyhow::anyhow!("対局待機が停止されました"))
+    }
+
+    /// keep-alive と停止確認を行いながら次の対局情報を待つ。
+    /// `should_continue` が false を返すと `Ok(None)` で終了する。
+    pub fn recv_game_summary_while(
+        &mut self,
+        keepalive_interval_sec: u64,
+        mut should_continue: impl FnMut() -> bool,
+    ) -> Result<Option<GameSummary>> {
         log::info!("[CSA] 対局待機中...");
         // "BEGIN Game_Summary" を待つ（keep-alive 送信しながら）
         loop {
+            if !should_continue() {
+                return Ok(None);
+            }
             match self.recv_line_nonblocking() {
                 Ok(Some(line)) if line == "BEGIN Game_Summary" => break,
                 Ok(Some(_)) => {} // 他の行は無視
@@ -251,14 +316,11 @@ impl CsaConnection {
         let mut declaration_jishogi = false;
 
         // 時間設定: 共通 / 先手別 / 後手別の3レイヤー
-        // Time_Unit のデフォルトは秒 (1000ms)
-        // header_time_unit_ms: ヘッダレベルの Time_Unit（ブロック外・共通）
-        // block_time_unit_ms: 現在の Time ブロック内の Time_Unit
-        let mut header_time_unit_ms: i64 = 1000;
-        let mut block_time_unit_ms: i64 = 1000;
-        let mut common_time = TimeConfig::default();
-        let mut black_time: Option<TimeConfig> = None;
-        let mut white_time: Option<TimeConfig> = None;
+        // 数値は単位数のまま保持し、全項目を受信した後で換算する。
+        // Time_Unit が Total_Time より後でも同じ結果になる。
+        let mut common_time = RawTimeConfig::default();
+        let mut black_time: Option<RawTimeConfig> = None;
+        let mut white_time: Option<RawTimeConfig> = None;
         // 現在パース中の Time ブロックの対象 (None=共通, Some(Black/White)=個別)
         let mut time_target: Option<Option<Color>> = None;
 
@@ -276,19 +338,16 @@ impl CsaConnection {
                 continue;
             }
             if line == "BEGIN Time" {
-                block_time_unit_ms = header_time_unit_ms;
                 time_target = Some(None); // 共通
                 continue;
             }
             if line == "BEGIN Time+" {
-                block_time_unit_ms = header_time_unit_ms;
-                black_time = Some(common_time.clone());
+                black_time = Some(RawTimeConfig::default());
                 time_target = Some(Some(Color::Black));
                 continue;
             }
             if line == "BEGIN Time-" {
-                block_time_unit_ms = header_time_unit_ms;
-                white_time = Some(common_time.clone());
+                white_time = Some(RawTimeConfig::default());
                 time_target = Some(Some(Color::White));
                 continue;
             }
@@ -309,16 +368,13 @@ impl CsaConnection {
                     Some(Color::White) => white_time.as_mut().unwrap(),
                 };
                 if let Some(val) = line.strip_prefix("Time_Unit:") {
-                    block_time_unit_ms = parse_time_unit(val.trim());
+                    tc.unit_ms = Some(parse_time_unit(val.trim())?);
                 } else if let Some(val) = line.strip_prefix("Total_Time:") {
-                    let v: i64 = val.trim().parse().unwrap_or(0);
-                    tc.total_time_ms = v * block_time_unit_ms;
+                    tc.total = Some(parse_time_value(val)?);
                 } else if let Some(val) = line.strip_prefix("Byoyomi:") {
-                    let v: i64 = val.trim().parse().unwrap_or(0);
-                    tc.byoyomi_ms = v * block_time_unit_ms;
+                    tc.byoyomi = Some(parse_time_value(val)?);
                 } else if let Some(val) = line.strip_prefix("Increment:") {
-                    let v: i64 = val.trim().parse().unwrap_or(0);
-                    tc.increment_ms = v * block_time_unit_ms;
+                    tc.increment = Some(parse_time_value(val)?);
                 }
                 continue;
             }
@@ -337,16 +393,13 @@ impl CsaConnection {
                     Color::White
                 };
             } else if let Some(val) = line.strip_prefix("Time_Unit:") {
-                header_time_unit_ms = parse_time_unit(val.trim());
+                common_time.unit_ms = Some(parse_time_unit(val.trim())?);
             } else if let Some(val) = line.strip_prefix("Total_Time:") {
-                let v: i64 = val.trim().parse().unwrap_or(0);
-                common_time.total_time_ms = v * header_time_unit_ms;
+                common_time.total = Some(parse_time_value(val)?);
             } else if let Some(val) = line.strip_prefix("Byoyomi:") {
-                let v: i64 = val.trim().parse().unwrap_or(0);
-                common_time.byoyomi_ms = v * header_time_unit_ms;
+                common_time.byoyomi = Some(parse_time_value(val)?);
             } else if let Some(val) = line.strip_prefix("Increment:") {
-                let v: i64 = val.trim().parse().unwrap_or(0);
-                common_time.increment_ms = v * header_time_unit_ms;
+                common_time.increment = Some(parse_time_value(val)?);
             } else if let Some(val) = line.strip_prefix("Entering_King_Rule:") {
                 let val = val.trim();
                 entering_king_rule = rshogi_core::types::EnteringKingRule::from_usi(val);
@@ -362,9 +415,10 @@ impl CsaConnection {
             }
         }
 
-        // 先後別設定がなければ共通設定をコピー
-        let final_black_time = black_time.unwrap_or_else(|| common_time.clone());
-        let final_white_time = white_time.unwrap_or(common_time);
+        // 共通設定を確定してから、先後別の指定項目だけを上書きする。
+        let common_time = common_time.resolve(&TimeConfig::default())?;
+        let final_black_time = black_time.unwrap_or_default().resolve(&common_time)?;
+        let final_white_time = white_time.unwrap_or_default().resolve(&common_time)?;
 
         // Position ブロックをパース
         let pos_text = position_lines.join("\n");
@@ -408,24 +462,47 @@ impl CsaConnection {
             summary.white_time.byoyomi_ms,
             summary.white_time.increment_ms,
         );
-        Ok(summary)
+        Ok(Some(summary))
     }
 
-    /// AGREE を送信して START を待つ
-    pub fn agree_and_wait_start(&mut self, game_id: &str) -> Result<()> {
+    /// AGREE を送信して START / REJECT を待つ。待機時間に上限は設けない。
+    /// keep-alive と停止確認を継続し、REJECT は接続エラーと区別する。
+    pub fn agree_and_wait_start(
+        &mut self,
+        game_id: &str,
+        keepalive_interval_sec: u64,
+        mut should_continue: impl FnMut() -> bool,
+    ) -> Result<StartResponse> {
         let cmd = serialize_client_command(&ClientCommand::Agree {
-            game_id: Some(GameId::new(game_id)),
+            game_id: if game_id.is_empty() {
+                None
+            } else {
+                Some(GameId::new(game_id))
+            },
         });
         self.send_line(&cmd)?;
         loop {
-            let line = self.recv_line_blocking(Duration::from_secs(60))?;
-            if line.starts_with("START:") {
-                log::info!("[CSA] 対局開始: {}", line);
-                return Ok(());
+            if !should_continue() {
+                return Ok(StartResponse::Cancelled);
             }
-            if line.starts_with("REJECT:") {
-                bail!("対局が拒否されました: {line}");
+            if let Some(line) = self.recv_line_nonblocking()? {
+                if let Some(id) = line.strip_prefix("START:") {
+                    if !game_id.is_empty() && id.trim() != game_id {
+                        bail!("START の対局IDが一致しません: {line}");
+                    }
+                    log::info!("[CSA] 対局開始: {line}");
+                    return Ok(StartResponse::Started);
+                }
+                if let Some(id) = line.strip_prefix("REJECT:") {
+                    let id = id.split(" by ").next().unwrap_or_default().trim();
+                    if !game_id.is_empty() && id != game_id {
+                        bail!("REJECT の対局IDが一致しません: {line}");
+                    }
+                    log::info!("[CSA] 対局不成立: {line}");
+                    return Ok(StartResponse::Rejected);
+                }
             }
+            self.maybe_send_keepalive(keepalive_interval_sec)?;
         }
     }
 
@@ -582,14 +659,30 @@ pub(crate) fn parse_server_move(line: &str) -> (String, u32) {
     }
 }
 
-fn parse_time_unit(v: &str) -> i64 {
-    if v.contains("msec") || v.contains("ms") {
-        1
-    } else if v.contains("min") {
-        60000
-    } else {
-        1000
+fn parse_time_value(value: &str) -> Result<i64> {
+    let number = value.trim().parse::<i64>()?;
+    if number < 0 {
+        bail!("不正な時間値: {value}");
     }
+    Ok(number)
+}
+
+fn parse_time_unit(v: &str) -> Result<i64> {
+    let (number, scale) = if let Some(n) = v.strip_suffix("msec") {
+        (n, 1)
+    } else if let Some(n) = v.strip_suffix("sec") {
+        (n, 1000)
+    } else if let Some(n) = v.strip_suffix("min") {
+        (n, 60_000)
+    } else {
+        bail!("不正な Time_Unit: {v}");
+    };
+    let unit = number
+        .parse::<i64>()?
+        .checked_mul(scale)
+        .filter(|unit| *unit > 0)
+        .ok_or_else(|| anyhow::anyhow!("不正な Time_Unit: {v}"))?;
+    Ok(unit)
 }
 
 /// 最終結果行のみ Some を返す。中間行（#TIME_UP, #ILLEGAL_MOVE 等）は None。
@@ -664,6 +757,30 @@ pub fn compute_effective_retry_delay(err_msg: &str, retry_delay: Duration) -> Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_unit_requires_positive_supported_unit_and_preserves_multiplier() {
+        for (text, ms) in [
+            ("1sec", 1000),
+            ("2sec", 2000),
+            ("1min", 60000),
+            ("10msec", 10),
+        ] {
+            assert_eq!(parse_time_unit(text).unwrap(), ms);
+        }
+        for text in ["0sec", "-1min", "garbage", "1ms", "9223372036854775807min"] {
+            assert!(parse_time_unit(text).is_err(), "{text}");
+        }
+        assert!(parse_time_value("-1").is_err());
+        assert!(
+            RawTimeConfig {
+                total: Some(i64::MAX),
+                ..RawTimeConfig::default()
+            }
+            .resolve(&TimeConfig::default())
+            .is_err()
+        );
+    }
 
     // ───────────────────────────────────────────────
     // `compute_effective_retry_delay` の挙動を pin する。retry_after は
