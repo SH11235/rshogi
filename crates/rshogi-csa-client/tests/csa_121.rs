@@ -538,6 +538,29 @@ fn rejected_game_returns_to_cancellable_summary_wait() {
 
 #[test]
 fn server_generated_start_id_is_saved_in_summary_and_record() {
+    #[derive(Default)]
+    struct Sink {
+        ids: Vec<String>,
+        started_ids: Vec<String>,
+    }
+    impl rshogi_csa_client::events::SessionEventSink for Sink {
+        fn on_event(
+            &mut self,
+            event: rshogi_csa_client::events::SessionProgress,
+        ) -> std::result::Result<(), rshogi_csa_client::events::SinkError> {
+            match event {
+                rshogi_csa_client::events::SessionProgress::GameSummary(summary) => {
+                    self.ids.push(summary.game_id.clone())
+                }
+                rshogi_csa_client::events::SessionProgress::GameStarted => {
+                    self.started_ids.push(self.ids.last().unwrap().clone())
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+    let mut sink = Sink::default();
     let (port, handle) = server(|reader, writer| {
         send(
             writer,
@@ -571,11 +594,13 @@ fn server_generated_start_id_is_saved_in_summary_and_record() {
         &mut conn,
         &mut engine,
         Arc::new(AtomicBool::new(false)),
-        &mut rshogi_csa_client::events::NoopSessionEventSink,
+        &mut sink,
     )
     .unwrap();
     assert_eq!(outcome.summary.as_ref().unwrap().game_id, "server-generated-id");
     assert_eq!(outcome.record.game_id, "server-generated-id");
+    assert_eq!(sink.ids, ["", "server-generated-id"]);
+    assert_eq!(sink.started_ids, ["server-generated-id"]);
     assert_eq!(outcome.summary.as_ref().unwrap().reconnect_token.as_deref(), Some("token"));
     handle.join().unwrap();
 }

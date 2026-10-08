@@ -8,7 +8,7 @@ USIエンジンをCSAプロトコル対局サーバー（floodgate等）にCLI�
 - `REJECT:<game_id>` は対局不成立として扱い、投了やログアウトを送らず同じ接続で次の `Game_Summary` を待つ。不成立の対局は対局数に含めない。
 - `AGREE` 後の `START` 待ちは時間制限を設けず、設定した keep-alive と停止要求の確認を続ける。対局 ID が通知と一致しなければプロトコルエラーで終了する。停止済みなら AGREE を送らず終了し、Game_ID 省略時は START の確定 ID を棋譜と再接続用 summary に保存する。
 - Ctrl-C は待機・対局を中止する要求であり、対局完了まで待つ要求ではない。AGREE 後の停止はサーバー側の対局成立を取り消さない。
-- 進捗 API の `GameSummary` は対局候補ごとに発火する。REJECT 後は次候補で置き換え、`GameStarted` で成立を確定する。
+- 進捗 API の `GameSummary` は対局候補ごとに発火する。REJECT 後は次候補で置き換え、`GameStarted` で成立を確定する。サーバーが START で ID を確定した場合は、`GameStarted` の直前に確定 ID を含む `GameSummary` を再通知する。
 - 共通および先後別の `Time_Unit`（`sec` / `min` / `msec`、正の整数倍）を、開始手順・自手のエコー・相手手の時計更新に適用する。USI へはミリ秒で渡す。
 - CSA 棋譜と進捗通知の既存 `time_sec` は秒へ換算し、秒未満を切り捨てる。時計の計算と開始手順・相手手の JSONL `elapsed_ms` はミリ秒精度を保持する。
 - 入玉はサーバーの `Declaration:Jishogi 1.1` から `CSARule27` を設定する。ただし明示したエンジンオプションが優先されるため、大会用設定で別のルールを指定しないこと。

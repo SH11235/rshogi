@@ -34,7 +34,7 @@
 //! 通常対局:
 //!
 //! ```text
-//! Connected → GameSummary → (REJECT 後の GameSummary)* → GameStarted → 通常対局
+//! Connected → GameSummary → (REJECT 後の GameSummary)* → (START 確定 ID の GameSummary)? → GameStarted → 通常対局
 //! ```
 //!
 //! 再接続成立後の resume:
@@ -332,6 +332,7 @@ pub struct MoveEvent {
 /// ```text
 /// Connected
 ///   → GameSummary (REJECT のたびに次候補の GameSummary が届く)
+///   → GameSummary (START で ID が確定した場合のみ更新通知)
 ///   → GameStarted
 ///   → (BestMoveSelected → MoveSent → MoveConfirmed)*  // 自エンジンの手番
 ///   → (MoveConfirmed)*                                // 相手の手番
@@ -348,7 +349,8 @@ pub enum SessionProgress {
     /// CSA transport の物理接続 + LOGIN 成功直後の marker。Game_Summary 受信前。
     Connected,
     /// 対局候補の `END Game_Summary` を受信するたびに発火する。
-    /// REJECT 後は新しい候補で置き換える。成立は `GameStarted` で確定する。
+    /// REJECT 後は新しい候補で置き換える。START で ID が変わった場合も、
+    /// 確定 ID を持つサマリーを `GameStarted` の直前に再通知する。
     GameSummary(Arc<GameSummary>),
     /// 再接続成立後 (`run_resumed_session_with_events`) に 1 度発火し、resume 用
     /// の Game_Summary と Reconnect_State を同梱する。詳細は [`ReconnectState`]

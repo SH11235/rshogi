@@ -262,7 +262,15 @@ where
                 .map_err(map_anyhow_to_session_error)?;
             match response {
                 crate::protocol::StartResponse::Started(game_id) => {
+                    let id_changed = summary.game_id != game_id;
                     summary.game_id = game_id;
+                    if id_changed {
+                        // 候補時点では ID が未確定でも、GameStarted の前に確定値を通知する。
+                        let progress = SessionProgress::GameSummary(Arc::new(summary.clone()));
+                        if let Some(action) = emit_with_nonfatal_warn(sink, progress) {
+                            return handle_sink_error(action, conn, sink, Some(summary), false);
+                        }
+                    }
                 }
                 crate::protocol::StartResponse::Rejected => continue,
                 crate::protocol::StartResponse::Cancelled => {
