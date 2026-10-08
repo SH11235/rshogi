@@ -68,10 +68,10 @@ impl RawTimeConfig {
 }
 
 /// 対局成立の応答。拒否された場合は同じ接続で次の対局を待つ。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StartResponse {
-    /// 対局開始。
-    Started,
+    /// 対局開始。サーバーから通知された確定対局 ID。
+    Started(String),
     /// 対局不成立。
     Rejected,
     /// 待機中に呼び出し元が停止を要求した。
@@ -473,6 +473,9 @@ impl CsaConnection {
         keepalive_interval_sec: u64,
         mut should_continue: impl FnMut() -> bool,
     ) -> Result<StartResponse> {
+        if !should_continue() {
+            return Ok(StartResponse::Cancelled);
+        }
         let cmd = serialize_client_command(&ClientCommand::Agree {
             game_id: if game_id.is_empty() {
                 None
@@ -491,7 +494,7 @@ impl CsaConnection {
                         bail!("START の対局IDが一致しません: {line}");
                     }
                     log::info!("[CSA] 対局開始: {line}");
-                    return Ok(StartResponse::Started);
+                    return Ok(StartResponse::Started(id.trim().to_owned()));
                 }
                 if let Some(id) = line.strip_prefix("REJECT:") {
                     let id = id.split(" by ").next().unwrap_or_default().trim();

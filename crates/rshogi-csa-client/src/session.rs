@@ -209,7 +209,7 @@ where
 
     // Step 2: Game_Summary 受信
     let (summary, reconnect_state_protocol) = loop {
-        let summary = match conn
+        let mut summary = match conn
             .recv_game_summary_while(config.server.keepalive.ping_interval_sec, || {
                 !shutdown.load(Ordering::SeqCst) && sink.should_continue()
             }) {
@@ -261,7 +261,9 @@ where
                 )
                 .map_err(map_anyhow_to_session_error)?;
             match response {
-                crate::protocol::StartResponse::Started => {}
+                crate::protocol::StartResponse::Started(game_id) => {
+                    summary.game_id = game_id;
+                }
                 crate::protocol::StartResponse::Rejected => continue,
                 crate::protocol::StartResponse::Cancelled => {
                     return abort_before_start(conn, sink, shutdown);

@@ -267,13 +267,18 @@ fn start_wait_keeps_connection_alive_and_can_be_cancelled() {
         send(writer, &["START:g"]);
     });
     let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
-    assert_eq!(conn.agree_and_wait_start("g", 1, || true).unwrap(), StartResponse::Started);
+    assert_eq!(
+        conn.agree_and_wait_start("g", 1, || true).unwrap(),
+        StartResponse::Started("g".into())
+    );
     handle.join().unwrap();
     let (port, handle) = server(|reader, _| {
-        assert_eq!(read(reader), "AGREE");
+        let mut line = String::new();
+        assert_eq!(reader.read_line(&mut line).unwrap(), 0);
     });
     let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
     assert_eq!(conn.agree_and_wait_start("", 0, || false).unwrap(), StartResponse::Cancelled);
+    drop(conn);
     handle.join().unwrap();
 }
 
@@ -487,8 +492,12 @@ fn common_time_inheritance_retains_ms_when_individual_unit_changes() {
 #[test]
 fn start_and_reject_ids_are_normalized_or_fail_explicitly() {
     for (game_id, line, expected) in [
-        ("g", "START: g", Some(StartResponse::Started)),
-        ("", "START:server-generated-id", Some(StartResponse::Started)),
+        ("g", "START: g", Some(StartResponse::Started("g".into()))),
+        (
+            "",
+            "START:server-generated-id",
+            Some(StartResponse::Started("server-generated-id".into())),
+        ),
         ("", "REJECT:server-generated-id by opponent", Some(StartResponse::Rejected)),
         ("g", "START:other", None),
         ("g", "REJECT:other by opponent", None),
@@ -524,5 +533,105 @@ fn rejected_game_returns_to_cancellable_summary_wait() {
     assert_eq!(conn.agree_and_wait_start("g", 0, || true).unwrap(), StartResponse::Rejected);
     assert!(conn.recv_game_summary_while(0, || false).unwrap().is_none());
     conn.logout().unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn server_generated_start_id_is_saved_in_summary_and_record() {
+    let (port, handle) = server(|reader, writer| {
+        send(
+            writer,
+            &[
+                "BEGIN Game_Summary",
+                "Your_Turn:+",
+                "Name+:b",
+                "Name-:w",
+                "Total_Time:600",
+                "Reconnect_Token:token",
+                "BEGIN Position",
+                "PI",
+                "+",
+                "END Position",
+                "END Game_Summary",
+            ],
+        );
+        assert_eq!(read(reader), "AGREE");
+        send(writer, &["START:server-generated-id"]);
+        assert_eq!(read(reader), "%TORYO");
+        send(writer, &["#RESIGN", "#LOSE"]);
+        assert_eq!(read(reader), "LOGOUT");
+    });
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+    let mut config = CsaClientConfig::default();
+    config.game.ponder = false;
+    config.record.enabled = false;
+    let mut engine = Engine::default();
+    let outcome = run_game_session_with_events(
+        &config,
+        &mut conn,
+        &mut engine,
+        Arc::new(AtomicBool::new(false)),
+        &mut rshogi_csa_client::events::NoopSessionEventSink,
+    )
+    .unwrap();
+    assert_eq!(outcome.summary.as_ref().unwrap().game_id, "server-generated-id");
+    assert_eq!(outcome.record.game_id, "server-generated-id");
+    assert_eq!(outcome.summary.as_ref().unwrap().reconnect_token.as_deref(), Some("token"));
+    handle.join().unwrap();
+}
+
+#[test]
+fn shutdown_during_summary_does_not_send_agree() {
+    use std::cell::Cell;
+    use std::sync::{Barrier, atomic::Ordering};
+    struct Sink {
+        calls: Cell<usize>,
+        barrier: Arc<Barrier>,
+    }
+    impl rshogi_csa_client::events::SessionEventSink for Sink {
+        fn on_event(
+            &mut self,
+            _: rshogi_csa_client::events::SessionProgress,
+        ) -> std::result::Result<(), rshogi_csa_client::events::SinkError> {
+            Ok(())
+        }
+        fn should_continue(&self) -> bool {
+            let calls = self.calls.get() + 1;
+            self.calls.set(calls);
+            // Connected 後の確認が1回目、summary待機ループの確認が2回目。
+            // shutdown の load 後・summary受信前に停止を立て、AGREE前の再確認を検証。
+            if calls == 2 {
+                self.barrier.wait();
+                self.barrier.wait();
+            }
+            true
+        }
+    }
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_server = Arc::clone(&shutdown);
+    let barrier = Arc::new(Barrier::new(2));
+    let server_barrier = Arc::clone(&barrier);
+    let (port, handle) = server(move |reader, writer| {
+        server_barrier.wait();
+        shutdown_server.store(true, Ordering::SeqCst);
+        server_barrier.wait();
+        summary(writer, "+", "1sec", "180", "600", "2", &[]);
+        assert_eq!(read(reader), "LOGOUT");
+    });
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+    let mut engine = Engine::default();
+    let mut sink = Sink {
+        calls: Cell::new(0),
+        barrier,
+    };
+    let result = run_game_session_with_events(
+        &CsaClientConfig::default(),
+        &mut conn,
+        &mut engine,
+        shutdown,
+        &mut sink,
+    );
+    assert!(matches!(result, Err(rshogi_csa_client::events::SessionError::Shutdown)));
+    assert_eq!(engine.new_games, 0);
     handle.join().unwrap();
 }
