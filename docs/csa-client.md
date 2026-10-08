@@ -405,3 +405,7 @@ floodgate = true
 
 - `20260328_120030_rshogi_v1_vs_opponent.csa` — CSA形式（評価値コメント付き）
 - `20260328_120030_rshogi_v1_vs_opponent.sfen` — SFEN局面列（タブ区切り: SFEN, 指し手, 評価値）
+
+内蔵 CSA サーバーについても、ミリ秒・分時計の着手通知と `Time_Unit` の一致を
+実 `GameRoom` と TCP 接続による統合テストで検証する。対局者の残時間はサーバーの
+課金結果に一致し、保存する CSA V2 棋譜の消費時間は秒単位を維持する。

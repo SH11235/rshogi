@@ -635,3 +635,129 @@ fn shutdown_during_summary_does_not_send_agree() {
     assert_eq!(engine.new_games, 0);
     handle.join().unwrap();
 }
+
+/// 実際の GameRoom が生成する通知を TCP 経由で読み、双方の残時間を照合する。
+#[test]
+fn built_in_server_nonsecond_clocks_match_client_budgets() {
+    use rshogi_core::types::EnteringKingRule;
+    use rshogi_csa_server::Color;
+    use rshogi_csa_server::{
+        BroadcastTarget, ClockSpec, CsaLine, GameId, GameRoom, GameRoomConfig, PlayerName,
+    };
+    for (spec, elapsed_ms, initial_ms, remaining_ms, wire_t) in [
+        (
+            ClockSpec::CountdownMsec {
+                total_time_ms: 10000,
+                byoyomi_ms: 0,
+            },
+            1250,
+            10000,
+            8750,
+            1250,
+        ),
+        (
+            ClockSpec::StopWatch {
+                total_time_min: 3,
+                byoyomi_min: 0,
+            },
+            125000,
+            180000,
+            60000,
+            2,
+        ),
+    ] {
+        let (port, handle) = server(move |reader, writer| {
+            let mut room = GameRoom::new(
+                GameRoomConfig {
+                    game_id: GameId::new("g"),
+                    black: PlayerName::new("b"),
+                    white: PlayerName::new("w"),
+                    max_moves: 256,
+                    time_margin_ms: 0,
+                    entering_king_rule: EnteringKingRule::Point27,
+                    initial_sfen: None,
+                },
+                spec.build_clock(),
+            )
+            .unwrap();
+            send(
+                writer,
+                &[
+                    "BEGIN Game_Summary",
+                    "Protocol_Version:1.2.1",
+                    "Format:Shogi 1.0",
+                    "Game_ID:g",
+                    "Name+:b",
+                    "Name-:w",
+                    "Your_Turn:+",
+                ],
+            );
+            for line in spec.format_time_section().lines() {
+                send(writer, &[line]);
+            }
+            send(
+                writer,
+                &[
+                    "BEGIN Position",
+                    "PI",
+                    "+",
+                    "END Position",
+                    "END Game_Summary",
+                ],
+            );
+            assert_eq!(read(reader), "AGREE g");
+            room.handle_line(Color::Black, &CsaLine::new("AGREE g"), 0).unwrap();
+            let started = room.handle_line(Color::White, &CsaLine::new("AGREE g"), 0).unwrap();
+            send(writer, &[started.broadcasts[0].line.as_str()]);
+            for (color, token, now) in [
+                (Color::Black, "+7776FU", elapsed_ms),
+                (Color::White, "-3334FU", 2 * elapsed_ms),
+            ] {
+                if color == Color::Black {
+                    assert_eq!(read(reader), token);
+                }
+                let result = room.handle_line(color, &CsaLine::new(token), now).unwrap();
+                assert_eq!(result.broadcasts[0].line.as_str(), format!("{token},T{wire_t}"));
+                assert_eq!(room.clock_remaining_main_ms(color), remaining_ms);
+                send(writer, &[result.broadcasts[0].line.as_str()]);
+            }
+            assert_eq!(read(reader), "%TORYO");
+            let result =
+                room.handle_line(Color::Black, &CsaLine::new("%TORYO"), 2 * elapsed_ms).unwrap();
+            for entry in result.broadcasts {
+                if matches!(
+                    entry.target,
+                    BroadcastTarget::Black | BroadcastTarget::Players | BroadcastTarget::All
+                ) {
+                    send(writer, &[entry.line.as_str()]);
+                }
+            }
+            assert_eq!(read(reader), "LOGOUT");
+        });
+        let mut conn = CsaConnection::connect("127.0.0.1", port, false).unwrap();
+        let mut config = CsaClientConfig::default();
+        config.game.ponder = false;
+        config.time.margin_msec = 0;
+        config.record.enabled = false;
+        let mut engine = Engine {
+            first_move: Some("7g7f".into()),
+            ..Engine::default()
+        };
+        run_game_session_with_events(
+            &config,
+            &mut conn,
+            &mut engine,
+            Arc::new(AtomicBool::new(false)),
+            &mut rshogi_csa_client::events::NoopSessionEventSink,
+        )
+        .unwrap();
+        assert_eq!(
+            engine.go,
+            [
+                format!("go btime {initial_ms} wtime {initial_ms}"),
+                format!("go btime {remaining_ms} wtime {remaining_ms}")
+            ]
+        );
+        handle.join().unwrap();
+    }
+}

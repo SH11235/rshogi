@@ -116,3 +116,6 @@ LOGIN alice+floodgate-600-10+black password
   独自拡張の Game_Summary 表記定義。
 - 実装: `crates/rshogi-csa-server/src/game/clock.rs::ClockSpec`
 - 設定パーサ: `crates/rshogi-csa-server-workers/src/config.rs::parse_clock_presets`
+
+ライブ着手通知と観戦履歴の `T` も上表の `Time_Unit` 単位で送信する。
+CSA V2 棋譜の保存時は秒へ変換するため、時計方式によらず棋譜の単位は秒となる。

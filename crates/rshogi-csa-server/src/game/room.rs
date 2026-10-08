@@ -237,6 +237,11 @@ impl GameRoom {
         self.moves_played
     }
 
+    /// 着手通知の T をミリ秒へ換算する単位。時計の Time_Unit と一致する。
+    pub fn clock_time_unit_ms(&self) -> u64 {
+        self.clock.time_unit_ms()
+    }
+
     /// 現在手番色。`initial_sfen` の `side_to_move` を起点に指し手で交代するため、
     /// buoy / `%%FORK` 由来の非平手開始局面でも正しい手番を返す。時計アラームや
     /// replay 後の手番色を `moves_played` から再計算すると SFEN の `w` 開始に
@@ -576,15 +581,15 @@ impl GameRoom {
         let gives_check = self.pos.gives_check(mv);
         self.pos.do_move(mv, gives_check);
         self.moves_played += 1;
-        let elapsed_sec = elapsed_ms / 1000;
+        let elapsed_units = elapsed_ms / self.clock.time_unit_ms();
 
-        // 4. 関係者に `<token>,T<sec>` を配信。手数は 1 始まりで、本手の
+        // 4. 関係者に `<token>,T<units>` を Time_Unit 単位で配信。手数は 1 始まりで、本手の
         //    `do_move` 後 (= `moves_played` インクリメント後) の値をそのまま
         //    乗せる。観戦者 snapshot 送信中に到着した broadcast を「snapshot
         //    に含めた最終 ply より大きい行のみ」flush する判定で使う。
         let mut broadcasts = vec![BroadcastEntry {
             target: BroadcastTarget::All,
-            line: CsaLine::new(format!("{},T{}", token.as_str(), elapsed_sec)),
+            line: CsaLine::new(format!("{},T{}", token.as_str(), elapsed_units)),
             ply: Some(self.moves_played),
         }];
 

@@ -2844,9 +2844,11 @@ where
             }
         };
         let is_move_accepted = matches!(r.outcome, HandleOutcome::MoveAccepted { .. });
-        // 着手行 `<token>,T<sec>` を抽出（BroadcastTarget::All で配信される）。
+        // 着手行 `<token>,T<units>` を秒へ換算して抽出（BroadcastTarget::All で配信される）。
         for entry in &r.broadcasts {
-            if let Some((tok, tsec)) = parse_move_broadcast(entry.line.as_str()) {
+            if let Some((tok, tsec)) =
+                parse_move_broadcast(entry.line.as_str(), room.clock_time_unit_ms())
+            {
                 recorded_moves.push(KifuMove {
                     token: CsaMoveToken::new(tok),
                     elapsed_sec: tsec,
@@ -3877,15 +3879,16 @@ fn compute_timeup_deadline(room: &GameRoom) -> tokio::time::Instant {
     tokio::time::Instant::now() + Duration::from_millis(turn_budget + margin + 250)
 }
 
-/// `<token>,T<sec>` 形式の broadcast 行を `(token, elapsed_sec)` に分解する。
-fn parse_move_broadcast(line: &str) -> Option<(&str, u32)> {
+/// Time_Unit 単位の broadcast を CSA V2 棋譜用の秒へ換算する。
+fn parse_move_broadcast(line: &str, time_unit_ms: u64) -> Option<(&str, u32)> {
     let (tok, rest) = line.split_once(',')?;
     if !(tok.starts_with('+') || tok.starts_with('-')) {
         return None;
     }
     let t = rest.strip_prefix('T')?;
-    let sec: u32 = t.parse().ok()?;
-    Some((tok, sec))
+    let units: u64 = t.parse().ok()?;
+    let sec = units.checked_mul(time_unit_ms)? / 1000;
+    Some((tok, u32::try_from(sec).ok()?))
 }
 
 /// 棋譜 + 00LIST を永続化する。`game_name` は Floodgate 履歴 JSONL に記録する
@@ -4280,10 +4283,13 @@ mod tests {
 
     #[test]
     fn parse_move_broadcast_extracts_sec() {
-        assert_eq!(parse_move_broadcast("+7776FU,T3"), Some(("+7776FU", 3)));
-        assert_eq!(parse_move_broadcast("-3334FU,T10"), Some(("-3334FU", 10)));
-        assert_eq!(parse_move_broadcast("#RESIGN"), None);
-        assert_eq!(parse_move_broadcast("+7776FU,Tx"), None);
+        assert_eq!(parse_move_broadcast("+7776FU,T1250", 1), Some(("+7776FU", 1)));
+        assert_eq!(parse_move_broadcast("+7776FU,T2", 60_000), Some(("+7776FU", 120)));
+
+        assert_eq!(parse_move_broadcast("+7776FU,T3", 1000), Some(("+7776FU", 3)));
+        assert_eq!(parse_move_broadcast("-3334FU,T10", 1000), Some(("-3334FU", 10)));
+        assert_eq!(parse_move_broadcast("#RESIGN", 1000), None);
+        assert_eq!(parse_move_broadcast("+7776FU,Tx", 1000), None);
     }
 
     /// `panic_payload_to_string` は release ビルドでのみ参照されるため、
