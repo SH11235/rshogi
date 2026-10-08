@@ -217,10 +217,33 @@ struct RetryAnalysisStats {
 }
 
 /// 各対局の move 行を捨てながら保持する、集計に必要な情報。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct StartposMoves {
     elapsed_ms: u64,
-    prefix: Vec<String>,
+    // USI から生成した Move は上位16bitの駒情報を持たない。
+    prefix: [u16; 40],
+    prefix_len: usize,
+}
+
+impl Default for StartposMoves {
+    fn default() -> Self {
+        Self {
+            elapsed_ms: 0,
+            prefix: [0; 40],
+            prefix_len: 0,
+        }
+    }
+}
+
+impl StartposMoves {
+    fn record_prefix<const N: usize>(&self, plies: u32, prefixes: &mut BTreeSet<[u16; N]>) -> u64 {
+        if plies as usize >= N && self.prefix_len >= N {
+            prefixes.insert(std::array::from_fn(|i| self.prefix[i]));
+            1
+        } else {
+            0
+        }
+    }
 }
 
 #[derive(Default)]
@@ -232,8 +255,20 @@ struct StartposRow {
     reasons: BTreeMap<String, u64>,
     plies: u64,
     elapsed_ms: u64,
-    prefixes: [BTreeSet<Vec<String>>; 3],
+    prefixes10: BTreeSet<[u16; 10]>,
+    prefixes20: BTreeSet<[u16; 20]>,
+    prefixes40: BTreeSet<[u16; 40]>,
     prefix_games: [u64; 3],
+}
+
+impl StartposRow {
+    fn prefix_counts(&self) -> [usize; 3] {
+        [
+            self.prefixes10.len(),
+            self.prefixes20.len(),
+            self.prefixes40.len(),
+        ]
+    }
 }
 
 #[derive(Default)]
@@ -258,12 +293,9 @@ impl StartposStats {
             .or_default() += 1;
         row.plies += u64::from(result.plies);
         row.elapsed_ms += result.moves.elapsed_ms;
-        for (i, len) in [10, 20, 40].into_iter().enumerate() {
-            if result.plies as usize >= len && result.moves.prefix.len() >= len {
-                row.prefixes[i].insert(result.moves.prefix[..len].to_vec());
-                row.prefix_games[i] += 1;
-            }
-        }
+        row.prefix_games[0] += result.moves.record_prefix(result.plies, &mut row.prefixes10);
+        row.prefix_games[1] += result.moves.record_prefix(result.plies, &mut row.prefixes20);
+        row.prefix_games[2] += result.moves.record_prefix(result.plies, &mut row.prefixes40);
     }
 
     fn merge(&mut self, other: Self) {
@@ -279,9 +311,11 @@ impl StartposStats {
             for (reason, count) in src.reasons {
                 *dst.reasons.entry(reason).or_default() += count;
             }
-            for (i, prefixes) in src.prefixes.into_iter().enumerate() {
-                dst.prefixes[i].extend(prefixes);
-                dst.prefix_games[i] += src.prefix_games[i];
+            dst.prefixes10.extend(src.prefixes10);
+            dst.prefixes20.extend(src.prefixes20);
+            dst.prefixes40.extend(src.prefixes40);
+            for (dst_games, src_games) in dst.prefix_games.iter_mut().zip(src.prefix_games) {
+                *dst_games += src_games;
             }
         }
     }
@@ -289,7 +323,7 @@ impl StartposStats {
     fn json(&self) -> serde_json::Value {
         let rows: Vec<_> = self.rows.iter().map(|(position, row)| {
             let prefixes: Vec<_> = [10, 20, 40].into_iter().enumerate().map(|(i, plies)| {
-                serde_json::json!({"plies": plies, "unique": row.prefixes[i].len(), "games": row.prefix_games[i]})
+                serde_json::json!({"plies": plies, "unique": row.prefix_counts()[i], "games": row.prefix_games[i]})
             }).collect();
             serde_json::json!({"startpos": position, "games": row.games,
                 "black_wins": row.black_wins, "white_wins": row.white_wins, "draws": row.draws,
@@ -319,11 +353,11 @@ impl StartposStats {
                 (row.black_wins as f64 + 0.5 * row.draws as f64) / row.games as f64,
                 average(row.plies, row.games),
                 average(row.elapsed_ms, row.games) / 1000.0,
-                row.prefixes[0].len(),
+                row.prefixes10.len(),
                 row.prefix_games[0],
-                row.prefixes[1].len(),
+                row.prefixes20.len(),
                 row.prefix_games[1],
-                row.prefixes[2].len(),
+                row.prefixes40.len(),
                 row.prefix_games[2],
                 row.reasons
                     .iter()
@@ -772,13 +806,14 @@ fn parse_normal_file(path: &str, by_startpos: bool) -> Result<FileResult> {
                 moves.elapsed_ms += mv.elapsed_ms;
                 // 対局内 ply が連続した先頭40手だけを保持する。resign 等は手順に含めない。
                 if !mv.timed_out
-                    && moves.prefix.len() < 40
-                    && mv.ply as usize == moves.prefix.len() + 1
+                    && moves.prefix_len < 40
+                    && mv.ply as usize == moves.prefix_len + 1
                     && let Some(usi) = &mv.move_usi
-                    && rshogi_core::types::Move::from_usi(usi)
-                        .is_some_and(|mv| mv.is_normal() || mv.is_pass())
+                    && let Some(mv) = rshogi_core::types::Move::from_usi(usi)
+                    && (mv.is_normal() || mv.is_pass())
                 {
-                    moves.prefix.push(usi.clone());
+                    moves.prefix[moves.prefix_len] = mv.raw();
+                    moves.prefix_len += 1;
                 }
             }
             let engine_name = normalize_engine_name(&mv.engine, &black, &white, meta_parsed);
@@ -2946,7 +2981,7 @@ mod tests {
             assert_eq!(row.plies, 158);
             assert_eq!(row.elapsed_ms, 15800);
             assert_eq!(row.prefix_games, [6, 4, 2]);
-            assert_eq!(row.prefixes.each_ref().map(|p| p.len()), [1, 2, 2]);
+            assert_eq!(row.prefix_counts(), [1, 2, 2]);
         }
         let json = combined.json();
         assert_eq!(json["rows"][0]["black_score_rate"], 0.5);
@@ -2995,8 +3030,108 @@ mod tests {
                     u64::from(len == boundary)
                 };
                 assert_eq!(row.prefix_games[i], expected);
-                assert_eq!(row.prefixes[i].len(), usize::from(len <= boundary));
+                assert_eq!(row.prefix_counts()[i], usize::from(len <= boundary));
             }
+        }
+    }
+
+    #[test]
+    fn by_startpos_compact_prefixes_distinguish_moves_and_normalize_usi() {
+        // 各組は同じ盤上の手。組同士は成り・移動元・移動先・打つ駒・pass が異なる。
+        let variants = [
+            ["7c7b", "7c7bextra"],
+            ["7c7b+", "7c7b+extra"],
+            ["P*7b", "P*7bextra"],
+            ["S*7b", "S*7bextra"],
+            ["pass", "0000"],
+            ["6c7b", "6c7bextra"],
+            ["7c6b", "7c6bextra"],
+        ];
+        for changed_ply in [1, 10, 20, 40, 41] {
+            let mut lines = Vec::new();
+            for (game_id, usi) in variants.into_iter().flatten().enumerate() {
+                for ply in 1..=41 {
+                    lines.push(
+                        serde_json::json!({
+                            "type":"move", "game_id":game_id, "ply":ply,
+                            "side_to_move":"black", "engine":"base",
+                            "elapsed_ms":100, "think_limit_ms":100, "timed_out":false,
+                            "move_usi":if ply == changed_ply { usi } else { "7g7f" }
+                        })
+                        .to_string(),
+                    );
+                }
+                lines.push(
+                    serde_json::json!({
+                        "type":"result", "game_id":game_id, "pair_index":game_id / 2,
+                        "pair_slot":game_id % 2, "outcome":"draw", "plies":41,
+                        "startpos_idx":0, "reason":"max_moves"
+                    })
+                    .to_string(),
+                );
+            }
+            let (dir, path) =
+                write_retry_log(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+            std::fs::write(
+                dir.path().join("meta.json"),
+                serde_json::json!({"start_positions":["position startpos"]}).to_string(),
+            )
+            .unwrap();
+            let stats = parse_normal_file(&path, true).unwrap().extra.by_startpos.unwrap();
+            let row = &stats.rows["position startpos"];
+            assert_eq!(row.prefix_games, [14; 3]);
+            assert_eq!(row.elapsed_ms, 14 * 41 * 100);
+            assert_eq!(
+                row.prefix_counts(),
+                [10, 20, 40].map(|len| if changed_ply <= len {
+                    variants.len()
+                } else {
+                    1
+                })
+            );
+            assert_eq!(
+                stats.json(),
+                parse_normal_file(&path, true).unwrap().extra.by_startpos.unwrap().json()
+            );
+        }
+    }
+
+    #[test]
+    fn by_startpos_missing_move_stops_contiguous_prefix() {
+        for missing_ply in [1, 10, 20, 40] {
+            let mut lines = Vec::new();
+            for game_id in 0..2 {
+                for ply in (1..=41).filter(|&ply| ply != missing_ply) {
+                    lines.push(
+                        serde_json::json!({
+                            "type":"move", "game_id":game_id, "ply":ply,
+                            "side_to_move":"black", "engine":"base",
+                            "elapsed_ms":100, "think_limit_ms":100, "timed_out":false,
+                            "move_usi":"pass"
+                        })
+                        .to_string(),
+                    );
+                }
+                lines.push(
+                    serde_json::json!({
+                        "type":"result", "game_id":game_id, "pair_index":0,
+                        "pair_slot":game_id, "outcome":"draw", "plies":41,
+                        "startpos_idx":0, "reason":"max_moves"
+                    })
+                    .to_string(),
+                );
+            }
+            let (dir, path) =
+                write_retry_log(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+            std::fs::write(
+                dir.path().join("meta.json"),
+                serde_json::json!({"start_positions":["position startpos"]}).to_string(),
+            )
+            .unwrap();
+            let stats = parse_normal_file(&path, true).unwrap().extra.by_startpos.unwrap();
+            let row = &stats.rows["position startpos"];
+            assert_eq!(row.prefix_games, [10, 20, 40].map(|len| 2 * u64::from(len < missing_ply)));
+            assert_eq!(row.prefix_counts(), [10, 20, 40].map(|len| usize::from(len < missing_ply)));
         }
     }
 
