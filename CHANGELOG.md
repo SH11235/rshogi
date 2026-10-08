@@ -12,6 +12,12 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 その PR の merge commit から publish する。`vX.Y.Z` タグは engine 全体の release marker
 専用であり、core 単独 publish のためのタグは打たない。
 
+## Unreleased
+
+- `tournament` に勝ち裁定 `--adjudicate-win` と開始局面の循環割り当て
+  `--startpos-order sequential` を追加。`analyze_selfplay --by-startpos` で複数 run の
+  開始局面別の先後成績・平均所要時間・手順数を合算し、同一エンジンによる定跡候補比較に対応。
+
 ## v1.6.0 — 2026-10-03
 
 v1.5.0 以降の、探索と NNUE 評価の高速化を中心としたリリース。探索結果を変えない変更を

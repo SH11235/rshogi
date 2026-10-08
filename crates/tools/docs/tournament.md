@@ -96,6 +96,7 @@ H0=0、H1=+5 nElo、名目 α=β=0.05 の SPRT を行う例:
 | `--games N` | 100 | 各方向の対局数（双方向で 2×N 局/ペア） |
 | `--max-moves N` | 512 | 引分とする総手数。開始局面までの手数（SFEN の手数欄と `moves` の手順）を含めて数えるため、平手から始まる本番対局 (floodgate 等) の手数制限と同じ値を指定する。開始局面が既にこの手数以上ならエラー |
 | `--adjudicate-resign "movecount=3,score=600"` | off | 同一側の劣勢評価の連続による投了裁定 |
+| `--adjudicate-win "movecount=3,score=600"` | off | 同一側の優勢評価の連続による勝ち裁定 |
 | `--adjudicate-draw "movenumber=34,movecount=8,score=20"` | off | 両側を通じた均衡評価の連続による引分裁定。手数は開始局面からの対局内 ply（`--max-moves` と異なり開始局面までの手数は含まない） |
 | `--concurrency N` | 1 | 並列対局数。1 対局は手番制で約 1 CPU スレッド消費 |
 | `--report-interval N` | 10 | N 局ごとに進捗を表示 |
@@ -133,24 +134,29 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
 - `--adjudicate-resign "movecount=3,score=600"`: 着手側の自己視点評価が -600cp 以下の
   着手を、同一側で 3 回連続するとその側の負け。相手の着手はカウントに含めない。
   負の mate score は劣勢として数え、正の mate score・条件外の cp・評価値欠落でリセットする。
+- `--adjudicate-win "movecount=3,score=600"`: 着手側の自己視点の確定評価が +600cp 以上の
+  着手を、同一側で 3 回連続するとその側の勝ち。両側を独立に数え、正の mate score も
+  優勢として数える。負・ゼロの mate score、条件外の cp、評価値欠落でリセットする。
+  投了裁定と併用でき、両方を `movecount=1,score=300` にすれば自己評価が ±300cp に
+  達した合法手の直後に終局する。
 - `--adjudicate-draw "movenumber=34,movecount=8,score=20"`: 両側を通じて絶対値 20cp 以下が
   8 手連続し、対局内の手数が 34 手以上なら引分。`movenumber` と `movecount` はいずれも
   将棋の手数（ply）であり、chess の full move ではない（fastchess の `movecount=8` は
   16 ply 相当）。連続回数は 34 手未満でも数え、mate score・条件外の cp・
   評価値欠落でリセットする。
 
-`lowerbound` / `upperbound` 付きの score は確定評価ではないため、投了・引分裁定の
-両方で評価値欠落と同様に連続回数をリセットする。move 行の `eval.score_bound` に
+`lowerbound` / `upperbound` 付きの score は確定評価ではないため、投了・勝ち・引分裁定の
+すべてで評価値欠落と同様に連続回数をリセットする。move 行の `eval.score_bound` に
 `lowerbound` / `upperbound` を記録する（確定評価と旧ログでは省略）。
 
 各フラグの key はすべて必須で、`,` または空白区切りに対応する（値全体を引用符で囲む）。
 未知・重複 key はエラー。`movecount` は 1 以上、`score` は非負の i32、`movenumber` は
 非負の u32 とする。有効な設定は meta の `settings.adjudicate_resign` /
-`settings.adjudicate_draw` に記録し、無効な設定は省略する。
+`settings.adjudicate_win` / `settings.adjudicate_draw` に記録し、無効な設定は省略する。
 
-合法手の適用後に千日手 → 投了裁定 → 引分裁定の順に判定し、終局手も move 行に記録する。
+合法手の適用後に千日手 → 投了裁定 → 勝ち裁定 → 引分裁定の順に判定し、終局手も move 行に記録する。
 千日手・引分裁定・最大手数による引分は通常の引分として WLD / pentanomial に算入する。
-連続王手の千日手と投了裁定には勝者を記録する。
+連続王手の千日手と投了・勝ち裁定には勝者を記録する。
 
 結果 JSONL の `reason` は次のとおり。
 
@@ -161,6 +167,7 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
 | `sennichite` | 千日手による引分 |
 | `sennichite_perpetual_check` | 連続王手をかけた側の反則負け |
 | `adjudication_resign` | 評価値による投了裁定 |
+| `adjudication_win` | 評価値による勝ち裁定 |
 | `adjudication_draw` | 評価値による引分裁定 |
 | `max_moves` | 最大手数到達による引分 |
 | `timeout` | 時間切れ負け |
@@ -193,6 +200,7 @@ move 行の `sfen_before` は従来どおり着手直前の現在局面を表す
 | オプション | 説明 |
 |-----------|------|
 | `--startpos-file FILE` | 開始局面ファイル（1 行 1 局面、USI position 形式）。省略時は平手初期局面 1 局面のみ使用（全対局が同一局面になるため棋力評価には不向き）。**棋力評価では必須** |
+| `--startpos-order random\|sequential` | 既定は random。開始局面の割り当て順。sequential はカード内のペア通番で循環 |
 | `--seed N` | 開始局面選択の seed。同じ seed・エンジン構成（順序を含む）・開始局面ファイルでは、各 matchup の同じペア通番に同じ局面を割り当てる。`control.json` で対局数を途中変更しても局面列は変わらない。省略時は entropy から生成し、起動ログへ表示する |
 
 ### 出力
@@ -397,3 +405,39 @@ i/j は `--engine` の指定順の 0 始まり index（i < j）で、一意性�
 
 旧版で連結名が衝突するラベルを使った場合や出力先を再利用した場合は、元ファイルと
 run 記録を保持し、カード別局数と meta の対応を確認する。失われた記録の復元は保証しない。
+
+## 同じエンジン同士で候補手を比べる
+
+候補手を指した後の局面を、開始局面ファイルに1行ずつ書く。例えば平手の初手を比較する場合:
+
+```text
+position startpos moves 7g7f
+position startpos moves 2g2f
+```
+
+同じエンジンを異なるラベルで2つ登録する。以下は持ち時間300秒・1手10秒加算、
+候補2つを各20局（先後交換10ペア）ずつ比較する例。エンジン別成績ではなく、
+開始局面別の先手・後手の成績で候補を比較する。
+先手勝ち / 後手勝ちは盤上の手番（outcome の black/white）で数え、平手からの開始局面の手順が偶数手なら候補手（最後の1手）を指した側は後手。
+
+```bash
+./target/release/tournament \
+  --engine /path/to/rshogi --engine-label a \
+  --engine /path/to/rshogi --engine-label b \
+  --usi-option "EvalFile=$SHOGI_DATA/nnue/model.nnue" \
+  --startpos-file /path/to/candidates.txt --startpos-order sequential \
+  --games 20 --btime 300000 --binc 10000 \
+  --adjudicate-resign "movecount=1,score=300" \
+  --adjudicate-win "movecount=1,score=300" \
+  --out-dir runs/candidates
+./target/release/analyze_selfplay --by-startpos runs/candidates
+```
+
+`random` は従来と同じ seed による決定的な割り当て。
+`sequential` は各 matchup 内の `local_pair_index % 開始局面数` で選ぶため、seed を使わない。
+先後交換の2局と再試行は同じ局面を使い、`control.json` の `target_games` を増減しても
+同じカード・ペア通番の割り当ては変わらない。K行に対して `--games` がKの倍数なら、
+各局面は同数になる（`--games` は各方向の局数なので、各局面は `2 × games / K` 局）。
+局面の割り当てはペアごとに循環する。並列実行時の開始・完了時刻の順序は保証しない。
+meta の `settings.startpos_order` は既定も含めて常に記録する。
+集計の詳細は [analyze_selfplay](analyze_selfplay.md#開始局面別の集計) を参照。

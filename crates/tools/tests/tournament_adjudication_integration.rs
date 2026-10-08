@@ -9,6 +9,26 @@ use serde_json::Value;
 #[test]
 fn driver_adjudicates_repetition_and_only_exact_scores() {
     for (score, flag, rule, reason, plies) in [
+        // 後手の6回目の優勢評価と千日手が同時に成立すると、千日手が優先される。
+        ("white-winning", "--adjudicate-win", "movecount=6,score=600", "sennichite", 12),
+        ("cp 600", "--adjudicate-win", "movecount=2,score=600", "adjudication_win", 3),
+        ("mate 1", "--adjudicate-win", "movecount=2,score=600", "adjudication_win", 3),
+        (
+            "cp 600 lowerbound",
+            "--adjudicate-win",
+            "movecount=2,score=600",
+            "sennichite",
+            12,
+        ),
+        (
+            "mate 1 upperbound",
+            "--adjudicate-win",
+            "movecount=2,score=600",
+            "sennichite",
+            12,
+        ),
+        ("cp 600", "--adjudicate-win", "movecount=6,score=600", "adjudication_win", 11),
+        ("cp 600", "--adjudicate-win", "movecount=7,score=600", "sennichite", 12),
         (
             "cp 0 lowerbound",
             "--adjudicate-draw",
@@ -74,7 +94,11 @@ while IFS= read -r line; do
       case $((ply % 4)) in
         1) move=3i4h ;; 2) move=7a6b ;; 3) move=4h3i ;; 0) move=6b7a ;;
       esac
-      printf 'info score %s pv %s\nbestmove %s\n' "$TEST_SCORE" "$move" "$move"
+      score=$TEST_SCORE
+      if [ "$score" = white-winning ]; then
+        if [ $((ply % 2)) = 0 ]; then score='cp 600'; else score='cp 0'; fi
+      fi
+      printf 'info score %s pv %s\nbestmove %s\n' "$score" "$move" "$move"
       ;;
     quit) break ;;
   esac
@@ -120,6 +144,8 @@ done
                 result["outcome"],
                 if reason == "adjudication_resign" {
                     "white_win"
+                } else if reason == "adjudication_win" {
+                    "black_win"
                 } else {
                     "draw"
                 }

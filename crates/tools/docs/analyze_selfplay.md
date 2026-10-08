@@ -47,13 +47,13 @@ Wald パラメータは `--sprt-nelo0` / `--sprt-nelo1` / `--sprt-alpha` /
 `error` で始まる reason は `error` にまとめ、reason の無い旧ログは `unknown` とする。
 
 表示順は `resign`, `win`, `sennichite`, `sennichite_perpetual_check`,
-`adjudication_resign`, `adjudication_draw`, `max_moves`, `timeout`, `illegal_move`,
+`adjudication_resign`, `adjudication_win`, `adjudication_draw`, `max_moves`, `timeout`, `illegal_move`,
 `no_bestmove`, `error`、続いてその他の理由を辞書順とし、0 件は省略する。
 `max_moves 到達率` は 0 件でも別行で明示する。result 行の無い入力ではこのセクションは表示しない。
 `--json` では `extra.reasons` に `{ "理由": 件数 }` を出力する。
 
 `sennichite` / `adjudication_draw` / `max_moves` は通常の引分として、
-`sennichite_perpetual_check` / `adjudication_resign` は勝者の勝ちとして集計する。
+`sennichite_perpetual_check` / `adjudication_resign` / `adjudication_win` は勝者の勝ちとして集計する。
 
 ### LLR の版差を調べる場合
 
@@ -91,3 +91,39 @@ winner のない旧形式では slot 0 を meta の先後、slot 1 をその逆�
 
 旧版の警告付き解析を採否に使っていた場合は、元入力と警告・run 状態を確認する。
 過去結果を一括無効とせず、影響がある入力に限って再集計する。
+
+## 開始局面別の集計
+
+```bash
+./target/release/analyze_selfplay --by-startpos /path/to/run-a /path/to/run-b
+./target/release/analyze_selfplay --by-startpos --json /path/to/run-a/*.jsonl
+```
+
+ファイルまたは run ディレクトリを複数指定できる。ディレクトリは直下の JSONL を
+パス順に読む（制御履歴の `control_history.jsonl` は除外）。通常の集計の後に、各 JSONL と同じディレクトリの `meta.json` にある
+`start_positions[startpos_idx]` の文字列をキーとして集計する。別マシン・別 run の同一文字列も
+合算する。文字列の辞書順に番号と開始局面の対応を示し、次の表を出す。
+
+- 対局数、先手勝ち、後手勝ち、引き分け、先手得点率（先手勝ち + 0.5 × 引分）/ 対局数。
+- 終局理由別の件数、平均手数 (`plies`)、平均所要秒数（1局の move 行の `elapsed_ms` 合計の平均）。
+- 開始局面から10・20・40手までの相異なる手順数と、各長さの集計対象局数。
+  その長さに届かない局や、先頭から連続した指し手のログがない局はその列に数えない。
+
+先手勝ち / 後手勝ちは盤上の手番（outcome の black/white）で数える。
+平手からの開始局面の手順が偶数手なら、候補手（最後の1手）を指した側は後手。
+時間切れの move 行は経過時間に加算するが、適用されていない指し手は手順に含めない。
+
+通常の勝敗集計と同じく、error を含むペアの世代・重複スロット・未完了ペアを除外し、
+正常な再試行を採用する。この表の終局理由も採用した対局だけを数える（通常の終局理由欄は全 result 行）。
+meta が読めない・開始局面一覧がない・`startpos_idx` がないまたは範囲外の対局は、
+開始局面別集計からだけ除外し、件数を標準エラー出力の警告と表に示す。
+summary のみの入力も開始局面情報がないため除外件数に数える。
+
+`--json` ではトップレベルの `by_startpos` に `excluded_games` と `rows` を追加する。
+各行は `startpos`, `games`, `black_wins`, `white_wins`, `draws`, `black_score_rate`（0～1）,
+`reasons`, `average_plies`, `average_seconds`, `prefixes` を持つ。
+`prefixes` は `{ "plies": 10, "unique": 3, "games": 8 }` 形式で10・20・40手の順。
+フラグを省略した場合はこの欄を出力しない。
+
+move 行を全件保持せず、処理中の対局には先頭40手と経過時間合計だけを保持する。
+相異なる手順の正確な計数用集合は、開始局面ごとの異なる先頭手順数に応じて増える。
