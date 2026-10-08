@@ -3348,8 +3348,10 @@ mod windows_main {
                     padded.push(0);
                 }
                 padded
-                    .chunks_exact(size_of::<u64>())
-                    .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("8-byte chunk")))
+                    .as_chunks::<{ size_of::<u64>() }>()
+                    .0
+                    .iter()
+                    .map(|chunk| u64::from_le_bytes(*chunk))
                     .collect()
             }
 
