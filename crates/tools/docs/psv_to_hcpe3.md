@@ -134,7 +134,7 @@ cargo run -p tools --release --bin psv_to_hcpe3 -- \
 
 ## bit 一致の検証
 
-`tests/psv_to_hcpe3_integration.rs` が、通常の着手レコードについて cshogi 製オラクル（`psv_to_hcpe3.py` /
+`tests/integration/psv_to_hcpe3_integration.rs` が、通常の着手レコードについて cshogi 製オラクル（`psv_to_hcpe3.py` /
 dlshogi `psv_to_hcpe.py`）の出力と byte 完全一致することを検証します。実 YaneuraOu の
 move16 形式で通常手・駒打ち・成りを含む 30 レコードの fixture
 （`tests/fixtures/psv_to_hcpe3_yaneuraou_sample.*`）を使います。

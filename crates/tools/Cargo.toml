@@ -84,39 +84,144 @@ csa-replay = []
 # `--no-default-features` でオプトアウトする。
 kifu-player = ["csa-replay", "dep:ratatui", "dep:crossterm"]
 
+# `test = false` の bin は単体テストを持たない。`cargo test` がテスト用の実行ファイルを
+# ビルド・リンクしないようにしている。単体テストを追加するときは対象の `test = false` を
+# 外す (外し忘れは tests/integration/bin_test_targets.rs が検出する)。
+
 [[bin]]
 name = "kifu_player"
 path = "src/bin/kifu_player.rs"
+test = false
 required-features = ["kifu-player"]
 
 [[bin]]
 name = "prepack_nnue"
 path = "src/bin/prepack_nnue.rs"
+test = false
 required-features = ["prepacked-nnue"]
 
 # eval_sfens は LayerStacks NNUE 前提のため nnue-arch に gate する。
 [[bin]]
 name = "eval_sfens"
 path = "src/bin/eval_sfens.rs"
+test = false
 required-features = ["nnue-arch"]
 
 # nnue_saturation は LayerStacks NNUE 前提のため nnue-arch に gate する。
 [[bin]]
 name = "nnue_saturation"
 path = "src/bin/nnue_saturation.rs"
+test = false
 required-features = ["nnue-arch"]
 
 # ek_testset は CSA replay に依存する（TUI は不要）ため csa-replay に gate する。
 [[bin]]
 name = "ek_testset"
 path = "src/bin/ek_testset.rs"
+test = false
 required-features = ["csa-replay"]
 
 # nyugyoku_metrics は CSA replay に依存する（TUI は不要）ため csa-replay に gate する。
 [[bin]]
 name = "nyugyoku_metrics"
 path = "src/bin/nyugyoku_metrics.rs"
+test = false
 required-features = ["csa-replay"]
+
+[[bin]]
+name = "bench_nnue_eval"
+path = "src/bin/bench_nnue_eval.rs"
+test = false
+
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
+test = false
+
+[[bin]]
+name = "build_param_mapping"
+path = "src/bin/build_param_mapping.rs"
+test = false
+
+[[bin]]
+name = "dump_effect_bucket_golden"
+path = "src/bin/dump_effect_bucket_golden.rs"
+test = false
+
+[[bin]]
+name = "expand_psv_from_policy"
+path = "src/bin/expand_psv_from_policy.rs"
+test = false
+
+[[bin]]
+name = "filter_teacher_data"
+path = "src/bin/filter_teacher_data.rs"
+test = false
+
+[[bin]]
+name = "fix_scores"
+path = "src/bin/fix_scores.rs"
+test = false
+
+[[bin]]
+name = "jsonl_to_kif"
+path = "src/bin/jsonl_to_kif.rs"
+test = false
+
+[[bin]]
+name = "pack_to_psv"
+path = "src/bin/pack_to_psv.rs"
+test = false
+
+[[bin]]
+name = "psv_dedup"
+path = "src/bin/psv_dedup.rs"
+test = false
+
+[[bin]]
+name = "psv_dedup_bloom"
+path = "src/bin/psv_dedup_bloom.rs"
+test = false
+
+[[bin]]
+name = "psv_dedup_check"
+path = "src/bin/psv_dedup_check.rs"
+test = false
+
+[[bin]]
+name = "psv_to_jsonl"
+path = "src/bin/psv_to_jsonl.rs"
+test = false
+
+[[bin]]
+name = "relabel_psv"
+path = "src/bin/relabel_psv.rs"
+test = false
+
+[[bin]]
+name = "spsa_stats_to_plot_csv"
+path = "src/bin/spsa_stats_to_plot_csv.rs"
+test = false
+
+[[bin]]
+name = "validate_psv"
+path = "src/bin/validate_psv.rs"
+test = false
+
+[[bin]]
+name = "validate_sfens"
+path = "src/bin/validate_sfens.rs"
+test = false
+
+[[bin]]
+name = "verify_nnue_accumulator"
+path = "src/bin/verify_nnue_accumulator.rs"
+test = false
+
+[[bin]]
+name = "yo_to_rshogi_params"
+path = "src/bin/yo_to_rshogi_params.rs"
+test = false
 
 [dependencies]
 # Workspace dependencies

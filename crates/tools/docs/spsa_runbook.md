@@ -1517,7 +1517,7 @@ for mode in cyclic random; do
     cp "$run/values.csv" "$run/stats.csv" "$run/state.params" "$GOLDEN/$mode-$concurrency/"
   done
 done
-cargo test -p tools --test spsa_run_dir_integration value_driven_matches_fixed_sha_golden
+cargo test -p tools --test integration value_driven_matches_fixed_sha_golden
 ```
 
 2026-09-09 の生成時には SPSA 本体の改修前にも同じ条件で現行 HEAD を実行し、4条件×3成果物が基準と
