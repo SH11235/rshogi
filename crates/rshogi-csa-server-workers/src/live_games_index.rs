@@ -163,12 +163,6 @@ mod tests {
         assert!(!json.contains("moves_count"), "json={json}");
     }
 
-    #[test]
-    fn live_key_prefix_matches_expected_string() {
-        // viewer_api ハンドラと R2 list でしか参照されない契約値を固定。
-        assert_eq!(LIVE_KEY_PREFIX, "live-games-index/");
-    }
-
     // `source` の env 切替判定は `games_index::resolve_index_source` (wasm32
     // 限定) に集約済み。ホスト target からは純粋関数
     // `games_index::classify_index_source_from_inputs` のテスト

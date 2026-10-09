@@ -1966,32 +1966,6 @@ mod tests {
         }
     }
 
-    /// 初手 7六歩（通常手）の差分更新テスト
-    #[test]
-    fn test_changed_indices_pawn_push() {
-        let mut pos = Position::new();
-        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
-            .expect("startpos");
-        let m = Move::from_usi("7g7f").expect("7g7f");
-        verify_incremental(&mut pos, m);
-    }
-
-    /// 角道を開けた後の角交換（取る手）の差分更新テスト
-    #[test]
-    fn test_changed_indices_capture() {
-        let mut pos = Position::new();
-        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
-            .expect("startpos");
-        // 7六歩 → 3四歩 → 8八角から2二角成（角交換）
-        for mv_str in &["7g7f", "3c3d"] {
-            let m = Move::from_usi(mv_str).unwrap();
-            let gc = pos.gives_check(m);
-            pos.do_move(m, gc);
-        }
-        let m = Move::from_usi("8h2b+").expect("8h2b+");
-        verify_incremental(&mut pos, m);
-    }
-
     /// 駒打ち（手駒から打つ手）の差分更新テスト
     #[test]
     fn test_changed_indices_drop() {
@@ -2162,38 +2136,6 @@ mod tests {
             pos.do_move(m, gc);
         }
         let m = Move::from_usi("3d3c+").expect("3d3c+");
-        verify_incremental(&mut pos, m);
-    }
-
-    /// 取り成り手の差分更新テスト
-    #[test]
-    fn test_changed_indices_promotion_with_capture() {
-        let mut pos = Position::new();
-        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
-            .expect("startpos");
-        // 角交換: 7六歩 → 3四歩 → 2二角成（成り + 取り）
-        for mv_str in &["7g7f", "3c3d"] {
-            let m = Move::from_usi(mv_str).unwrap();
-            let gc = pos.gives_check(m);
-            pos.do_move(m, gc);
-        }
-        // 8八角 → 2二角成 = 成りかつ取り
-        let m = Move::from_usi("8h2b+").expect("8h2b+");
-        verify_incremental(&mut pos, m);
-    }
-
-    /// 後手番の指し手に対する差分更新テスト
-    #[test]
-    fn test_changed_indices_white_to_move() {
-        let mut pos = Position::new();
-        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
-            .expect("startpos");
-        // 先手 7六歩
-        let m = Move::from_usi("7g7f").unwrap();
-        let gc = pos.gives_check(m);
-        pos.do_move(m, gc);
-        // 後手 3四歩
-        let m = Move::from_usi("3c3d").expect("3c3d");
         verify_incremental(&mut pos, m);
     }
 

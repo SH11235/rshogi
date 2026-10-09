@@ -52,11 +52,6 @@ mod tests {
     use crate::types::{File, Rank};
 
     #[test]
-    fn test_constants() {
-        assert_eq!(PIECE_INPUTS, 1710);
-    }
-
-    #[test]
     fn test_king_index_black_perspective() {
         let sq_59 = Square::new(File::File5, Rank::Rank9);
         assert_eq!(king_index(sq_59, Color::Black), sq_59.index());

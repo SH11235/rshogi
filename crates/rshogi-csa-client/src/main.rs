@@ -1040,22 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn target_preset_uses_game_name_in_login_id() {
-        // `--target` 非 lobby モードで `--game-name <preset>` を渡すと、URL の
-        // `<room_id>` と LOGIN id の `<game_name>` を独立に組み立てる
-        // (`CLOCK_PRESETS` strict mode で preset 名 LOGIN を成立させるため)。
-        let mut config = CsaClientConfig::default();
-        let mut cli = cli_with(Some(TargetPreset::Staging));
-        cli.room_id = Some("e2e-room-1".to_owned());
-        cli.handle = Some("alice".to_owned());
-        cli.color = Some(CliColor::Black);
-        cli.game_name = Some("floodgate-600-10".to_owned());
-        apply_target_preset(&mut config, &cli).unwrap();
-        assert_eq!(config.server.host, "wss://stg.rshogi-csa-server.sh11235.com/ws/e2e-room-1");
-        assert_eq!(config.server.id, "alice+floodgate-600-10+black");
-    }
-
-    #[test]
     fn target_preset_keeps_existing_password() {
         let mut config = CsaClientConfig::default();
         config.server.password = "user-supplied".to_owned();

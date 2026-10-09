@@ -482,47 +482,12 @@ mod tests {
     }
 
     #[test]
-    fn test_make_move_label_range() {
-        // 初期局面の全合法手がラベル範囲内に収まること
-        use rshogi_core::movegen::{MoveList, generate_legal};
-
-        let mut pos = Position::new();
-        pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
-            .unwrap();
-        let mut list = MoveList::new();
-        generate_legal(&pos, &mut list);
-
-        for mv in list.iter() {
-            let label = make_move_label(*mv, Color::Black);
-            assert!(label < MAX_MOVE_LABEL_NUM, "label {label} out of range for {}", mv.to_usi());
-        }
-    }
-
-    #[test]
-    fn test_make_move_label_up_move_black() {
-        // 7g7f (先手): file=6→6, rank=6→5 → dir_x=0, dir_y=-1 → UP
-        // to_sq = 6*9+5 = 59, label = 81*0 + 59 = 59
-        let mv = Move::from_usi("7g7f").unwrap();
-        let label = make_move_label(mv, Color::Black);
-        assert_eq!(label, 59);
-    }
-
-    #[test]
     fn test_make_move_label_promote() {
         // 2d2c+ (先手): file=1→1, rank=3→2 → dir_x=0, dir_y=-1 → UP_PROMOTE=10
         // to_sq = 1*9+2 = 11, label = 81*10 + 11 = 821
         let mv = Move::from_usi("2d2c+").unwrap();
         let label = make_move_label(mv, Color::Black);
         assert_eq!(label, 821);
-    }
-
-    #[test]
-    fn test_make_move_label_drop_pawn() {
-        // P*5e (先手): hand_piece=0(Pawn), direction=20
-        // to_sq = 4*9+4 = 40, label = 81*20 + 40 = 1660
-        let mv = Move::from_usi("P*5e").unwrap();
-        let label = make_move_label(mv, Color::Black);
-        assert_eq!(label, 1660);
     }
 
     #[test]

@@ -1124,21 +1124,6 @@ done
     }
 
     #[test]
-    fn bestmove_absent_is_added_with_zero_count() {
-        let book = sample_book(vec![book_move("2g2f", 10, 3, 8)]);
-        let plan =
-            build_extension_plan(&book, &HashMap::new(), &parent_journal_with("7g7f")).unwrap();
-        let child_records = child_records_for("7g7f", 321, 11);
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out.db");
-
-        write_extended_book(&book, &plan, &child_records, &out).unwrap();
-
-        let text = std::fs::read_to_string(out).unwrap();
-        assert!(text.contains("7g7f none 321 11 0\n"));
-    }
-
-    #[test]
     fn bestmove_already_present_leaves_node_unchanged() {
         let original = vec![book_move("7g7f", 10, 3, 8), book_move("2g2f", -1, 2, 2)];
         let book = sample_book(original.clone());

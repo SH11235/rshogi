@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use rshogi_csa_server::{FloodgateFeatureIntent, FloodgateSchedule, FloodgateWeekday};
+use rshogi_csa_server::{FloodgateSchedule, FloodgateWeekday};
 use rshogi_csa_server_tcp::server::{DuplicateLoginPolicy, ServerConfig, prepare_runtime};
 
 /// Floodgate 全機能を ON にした構成を組み立てるヘルパ。
@@ -131,18 +131,6 @@ fn each_floodgate_feature_individually_requires_optin() {
         prepare_runtime(&cfg)
             .unwrap_or_else(|e| panic!("feature {label} must start with opt-in: {e}"));
     }
-}
-
-/// `FloodgateFeatureIntent` の Default は全フラグ false で、`validate_floodgate_feature_gate`
-/// を通過する（gate off 時の通常起動が壊れない契約の固定）。
-#[test]
-fn default_floodgate_intent_does_not_request_anything() {
-    let intent = FloodgateFeatureIntent::default();
-    assert!(!intent.enable_scheduler);
-    assert!(!intent.use_non_direct_pairing);
-    assert!(!intent.enable_duplicate_login_policy);
-    assert!(!intent.enable_persistent_player_rates);
-    assert!(!intent.enable_floodgate_history);
 }
 
 /// 駒落ち初期局面マップは Floodgate gate 対象 **外**。

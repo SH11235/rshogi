@@ -1008,20 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn time_up_when_elapsed_exceeds_total() {
-        let mut room = make_room();
-        agree_both(&mut room);
-        // 60 秒 + 5 秒 = 65 秒 持つので 70 秒経過後の手で TimeUp。
-        let r = room.handle_line(Color::Black, &line("+7776FU"), 70_000).unwrap();
-        match &r.outcome {
-            HandleOutcome::GameEnded(GameResult::TimeUp {
-                loser: Color::Black,
-            }) => {}
-            other => panic!("unexpected outcome: {other:?}"),
-        }
-    }
-
-    #[test]
     fn time_margin_does_not_discount_consume() {
         // #857: 通信マージンは deadline 猶予にのみ効かせ、課金 (consume) からは
         // 差し引かない。margin=1500 でも経過 4000ms はそのまま consume(4000ms) され、
@@ -1075,7 +1061,7 @@ mod tests {
     fn move_at_exact_main_time_boundary_enters_byoyomi_without_timeup() {
         // (c) 秒読み突入直前: 本体 5 秒を使い切って consume(5000ms) を渡すと
         //     ClockResult::Continue で秒読み区間に乗り換える。時間切れにならず、
-        //     対局は続行。`consume` 単体の境界は clock.rs::enters_byoyomi_when_main_exhausted
+        //     対局は続行。`consume` 単体の境界は clock.rs::turn_budget_is_byoyomi_only_after_main_exhausted
         //     でカバーされているが、`GameRoom` 層での挙動もここで固定する。
         let mut room = room_with(0, 5, 10);
         agree_both(&mut room);

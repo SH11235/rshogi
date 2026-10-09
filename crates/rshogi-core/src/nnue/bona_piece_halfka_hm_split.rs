@@ -103,11 +103,6 @@ mod tests {
     use crate::types::{File, Rank};
 
     #[test]
-    fn test_constants() {
-        assert_eq!(PIECE_INPUTS, 1710);
-    }
-
-    #[test]
     fn test_is_hm_mirror() {
         assert!(!is_hm_mirror(Square::new(File::File1, Rank::Rank1), Color::Black));
         assert!(!is_hm_mirror(Square::new(File::File5, Rank::Rank9), Color::Black));

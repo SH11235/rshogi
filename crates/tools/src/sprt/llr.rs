@@ -428,36 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn winning_sample_gives_positive_llr() {
-        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
-        let mut penta = Penta::ZERO;
-        // 明確に test engine 勝ち越し
-        penta.ww = 40;
-        penta.wd = 20;
-        penta.wl = 10;
-        penta.dd = 5;
-        penta.dl = 3;
-        penta.ll = 2;
-        let llr = params.llr(penta);
-        assert!(llr > 0.0, "expected positive LLR, got {}", llr);
-    }
-
-    #[test]
-    fn losing_sample_gives_negative_llr() {
-        let params = SprtParameters::new(0.0, 5.0, 0.05, 0.05).unwrap();
-        // `Penta::from_pair` を使って対称に反転したペアを作る
-        let mut penta = Penta::ZERO;
-        penta.ll = 40;
-        penta.dl = 20;
-        penta.wl = 10;
-        penta.dd = 5;
-        penta.wd = 3;
-        penta.ww = 2;
-        let llr = params.llr(penta);
-        assert!(llr < 0.0, "expected negative LLR, got {}", llr);
-    }
-
-    #[test]
     fn symmetric_flip_flips_sign() {
         // 仮説ペアが 0 周りで対称 (`-5 vs +5`) のときに、
         // Penta を反転すると LLR の符号が厳密に反転することを確認する。

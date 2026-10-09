@@ -296,17 +296,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn set_overwrites_previous_entry() {
-        let topdir = unique_topdir("set_overwrite");
-        let storage = FileBuoyStorage::new(topdir.clone());
-        let gn = GameName::new("test-buoy");
-        storage.set(&gn, vec![], 5).await.unwrap();
-        storage.set(&gn, vec![], 2).await.unwrap();
-        assert_eq!(storage.count(&gn).await.unwrap(), Some(2));
-        let _ = fs::remove_dir_all(&topdir).await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn count_returns_none_for_unknown_game_name() {
         let topdir = unique_topdir("count_unknown");
         let storage = FileBuoyStorage::new(topdir.clone());

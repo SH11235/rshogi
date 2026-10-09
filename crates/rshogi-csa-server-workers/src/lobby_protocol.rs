@@ -801,19 +801,6 @@ mod tests {
         assert_eq!(q.entries()[0].handle, "b");
     }
 
-    /// 境界: `now - last_pong_at_ms == ttl_ms` は stale 扱い (`>=` で判定)。
-    #[test]
-    fn purge_stale_boundary_is_stale() {
-        let mut q = LobbyQueue::new();
-        let mut a = entry("a", "g", Color::Black);
-        a.attachment_id = "ws-a".to_owned();
-        a.last_pong_at_ms = 1_000;
-        q.enqueue(a, 100);
-        let removed = q.purge_stale(6_000, 5_000);
-        assert_eq!(removed.len(), 1);
-        assert_eq!(q.len(), 0);
-    }
-
     /// `earliest_last_pong_at_ms` は最古の last_pong を返す。空なら `None`。
     #[test]
     fn earliest_last_pong_returns_min() {

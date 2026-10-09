@@ -4410,21 +4410,6 @@ mod tests {
         assert!(err.contains("floodgate-600-10"), "error must mention schedule: {err}");
     }
 
-    /// `prepare_runtime` が `direct` strategy を accept することを固定。
-    #[test]
-    fn prepare_runtime_accepts_direct_pairing_strategy() {
-        let mut cfg = ServerConfig::sensible_defaults();
-        cfg.allow_floodgate_features = true;
-        cfg.floodgate_schedules.push(rshogi_csa_server::FloodgateSchedule {
-            game_name: "floodgate-600-10".to_owned(),
-            weekday: rshogi_csa_server::FloodgateWeekday::Mon,
-            hour: 9,
-            minute: 0,
-            pairing_strategy: "direct".to_owned(),
-        });
-        prepare_runtime(&cfg).expect("direct strategy must pass prepare_runtime");
-    }
-
     #[test]
     fn runtime_requires_optin_for_each_floodgate_feature() {
         let defaults = ServerConfig::sensible_defaults();

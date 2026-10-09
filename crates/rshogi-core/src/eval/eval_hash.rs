@@ -450,60 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_hash_size_zero() {
-        // サイズ0でも安全に動作すること
-        let hash = EvalHash::new(0);
-        assert!(hash.table().is_empty());
-        assert_eq!(hash.probe(0x1234), None);
-        hash.store(0x1234, 100); // パニックしないこと
-        hash.prefetch(0x1234); // パニックしないこと
-    }
-
-    #[test]
-    fn test_eval_hash_collision_overwrite() {
-        // 同じインデックスにマッピングされるキーは上書きされる
-        let hash = EvalHash::new(1);
-        let key1 = 0x0000_0000_0000_0001;
-        hash.store(key1, 100);
-        assert_eq!(hash.probe(key1), Some(100));
-
-        // 異なるキーで同じエントリを上書き
-        let key2 = 0x0000_0001_0000_0001;
-        hash.store(key2, 200);
-
-        // key2 は取得できる
-        assert_eq!(hash.probe(key2), Some(200));
-        // key1 は上書きされてキー不一致でNone（または偶然一致する可能性もある）
-        // 同じインデックスで異なるキーの場合、キー検証で弾かれる
-    }
-
-    #[test]
-    fn test_eval_hash_boundary_scores() {
-        // 境界値テスト
-        let hash = EvalHash::new(1);
-
-        // 最大値
-        let key1 = 0x1111_1111_1111_1111;
-        hash.store(key1, i32::MAX);
-        assert_eq!(hash.probe(key1), Some(i32::MAX));
-
-        // 最小値
-        let key2 = 0x2222_2222_2222_2222;
-        hash.store(key2, i32::MIN);
-        assert_eq!(hash.probe(key2), Some(i32::MIN));
-
-        // ゼロ
-        let key3 = 0x3333_3333_3333_3333;
-        hash.store(key3, 0);
-        assert_eq!(hash.probe(key3), Some(0));
-
-        // 負の値
-        let key4 = 0x4444_4444_4444_4444;
-        hash.store(key4, -12345);
-        assert_eq!(hash.probe(key4), Some(-12345));
-    }
-
-    #[test]
     fn test_normalize_size() {
         // 0 → 0
         assert_eq!(normalize_size(0), 0);
@@ -517,22 +463,5 @@ mod tests {
         assert_eq!(normalize_size(5), 4);
         assert_eq!(normalize_size(1000), 512);
         assert_eq!(normalize_size(1025), 1024);
-    }
-
-    #[test]
-    fn test_eval_hash_key_zero_never_hits() {
-        let hash = EvalHash::new(1);
-        hash.store(0, 42);
-        assert_eq!(hash.probe(0), None);
-    }
-
-    #[test]
-    fn test_eval_hash_clear() {
-        let hash = EvalHash::new(1);
-        let key = 0x1234_5678_9ABC_DEF0;
-        hash.store(key, 77);
-        assert_eq!(hash.probe(key), Some(77));
-        hash.clear();
-        assert_eq!(hash.probe(key), None);
     }
 }

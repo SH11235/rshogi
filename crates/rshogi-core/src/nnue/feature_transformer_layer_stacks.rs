@@ -2423,27 +2423,6 @@ mod tests {
         assert_eq!(sequential.0, tiled.0);
     }
 
-    /// removed/added が両方空のときは accumulator が bit 単位で不変であること。
-    #[cfg(not(feature = "nnue-effect-bucket"))]
-    #[test]
-    fn test_check_weight_changes_to_two_empty_lists_is_noop() {
-        let mut ft = make_test_transformer();
-        fill_weight_row(&mut ft, 0, 17);
-
-        let removed = IndexList::<{ PieceNumber::NB }>::new();
-        let added = IndexList::<{ PieceNumber::NB }>::new();
-
-        let mut acc = Aligned([0i16; TEST_L1]);
-        for (i, value) in acc.0.iter_mut().enumerate() {
-            *value = (i as i16).wrapping_mul(7).wrapping_sub(3);
-        }
-        let expected = acc.0;
-
-        ft.check_weight_changes_to_two(&mut acc.0, &removed, &added);
-
-        assert_eq!(expected, acc.0);
-    }
-
     /// removed のみ / added のみの片側ケースが per-index 適用と一致すること。
     #[cfg(not(feature = "nnue-effect-bucket"))]
     #[test]

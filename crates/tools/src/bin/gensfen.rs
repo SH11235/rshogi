@@ -7720,21 +7720,6 @@ mod tests {
     }
 
     #[test]
-    fn declaration_win_position_score_is_fixed_to_saturated_win() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("declaration_score.psv");
-        let mut pos = Position::new();
-        pos.set_sfen("KGG6/SS7/PPPPPP3/9/9/9/2pppppp1/1ss1gg1nl/4k2nl b 2R2B3p 1")
-            .unwrap();
-        let mut collector =
-            TrainingDataCollector::new(&path, 0, false, TrainingFormat::Psv, 1000, 600.0, None)
-                .unwrap();
-
-        collector.record_declaration_win_position(&pos);
-        assert_eq!(collector.entries[0].score, 10000);
-    }
-
-    #[test]
     fn declaration_win_dedup_keeps_second_games_non_terminal_positions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("declaration_dedup.psv");

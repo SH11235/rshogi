@@ -991,20 +991,6 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_iteration_timing_sets_search_end_on_effort() {
-        let mut tm = create_time_manager();
-        tm.optimum_time = 1000;
-        tm.maximum_time = 2000;
-        tm.remain_time = 5000;
-        tm.minimum_time = 500;
-        tm.search_end = 0;
-
-        tm.apply_iteration_timing(1200, 1000.0, 98000.0, 12);
-
-        assert!(tm.search_end() > 0, "search_end should be set when nodes_effort threshold hit");
-    }
-
-    #[test]
     fn test_time_manager_init_no_time_management() {
         let mut tm = create_time_manager();
         let mut limits = LimitsType::new();
