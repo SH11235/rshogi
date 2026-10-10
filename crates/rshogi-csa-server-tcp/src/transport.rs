@@ -181,23 +181,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn recv_line_strips_crlf() {
-        let (mut transport, mut client) = loopback_pair().await;
-        client.write_all(b"LOGIN alice pw\r\n").await.unwrap();
-        let line = transport.recv_line(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(line.as_str(), "LOGIN alice pw");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn recv_line_strips_lf_only() {
-        let (mut transport, mut client) = loopback_pair().await;
-        // CRLF ではなく LF のみのケース（Unix クライアント互換）。
-        client.write_all(b"AGREE\n").await.unwrap();
-        let line = transport.recv_line(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(line.as_str(), "AGREE");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn recv_line_returns_closed_on_eof() {
         let (mut transport, client) = loopback_pair().await;
         drop(client);

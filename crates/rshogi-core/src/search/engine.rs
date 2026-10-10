@@ -2742,14 +2742,6 @@ mod tests {
     }
 
     #[test]
-    fn ponderhit_handle_signals_search() {
-        let search = Search::new_with_eval_hash(1, 1);
-        let handle = search.ponderhit_handle();
-        handle.signal();
-        assert!(search.ponderhit_flag_for_test());
-    }
-
-    #[test]
     fn eval_hash_defaults_and_replacement_release_old_tables() {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)

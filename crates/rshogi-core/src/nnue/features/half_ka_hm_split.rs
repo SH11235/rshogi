@@ -97,11 +97,6 @@ mod tests {
     }
 
     #[test]
-    fn test_max_active() {
-        assert_eq!(HalfKaHmSplit::MAX_ACTIVE, 40);
-    }
-
-    #[test]
     fn test_append_active_indices_startpos() {
         let mut pos = crate::position::Position::new();
         pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")

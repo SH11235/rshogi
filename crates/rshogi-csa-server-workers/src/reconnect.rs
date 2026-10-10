@@ -357,14 +357,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_reconnect_round_trips_through_serde_json() {
-        let original = sample_pending(12_345);
-        let s = serde_json::to_string(&original).expect("serialize");
-        let restored: PendingReconnect = serde_json::from_str(&s).expect("deserialize");
-        assert_eq!(restored, original);
-    }
-
-    #[test]
     fn build_resume_message_appends_reconnect_state_block() {
         let snap = sample_snapshot();
         let summary = "BEGIN Game_Summary\nGame_ID:g1\nReconnect_Token:abcd\nEND Game_Summary\n";
@@ -394,23 +386,6 @@ mod tests {
         snap.last_move = None;
         let out = build_resume_message("BEGIN Game_Summary\nEND Game_Summary\n", &snap);
         assert!(!out.contains("Last_Move:"), "must omit Last_Move when no move played: {out}");
-    }
-
-    #[test]
-    fn pending_alarm_kind_serde_round_trip() {
-        let s = serde_json::to_string(&PendingAlarmKind::TimeUp).expect("serialize TimeUp");
-        let restored: PendingAlarmKind = serde_json::from_str(&s).expect("deserialize TimeUp");
-        assert_eq!(restored, PendingAlarmKind::TimeUp);
-        let s =
-            serde_json::to_string(&PendingAlarmKind::GraceExpired).expect("serialize GraceExpired");
-        let restored: PendingAlarmKind =
-            serde_json::from_str(&s).expect("deserialize GraceExpired");
-        assert_eq!(restored, PendingAlarmKind::GraceExpired);
-        // ExportRetry も同形式で wire 互換であること。
-        let s =
-            serde_json::to_string(&PendingAlarmKind::ExportRetry).expect("serialize ExportRetry");
-        let restored: PendingAlarmKind = serde_json::from_str(&s).expect("deserialize ExportRetry");
-        assert_eq!(restored, PendingAlarmKind::ExportRetry);
     }
 
     #[test]

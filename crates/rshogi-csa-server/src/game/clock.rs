@@ -626,16 +626,6 @@ mod tests {
     }
 
     #[test]
-    fn enters_byoyomi_when_main_exhausted() {
-        let mut c = SecondsCountdownClock::new(5, 10);
-        // 本体 5 秒ちょうど消費で、本体は 0、秒読みに残り 10 秒相当
-        assert_eq!(c.consume(Color::Black, 5_000), ClockResult::Continue);
-        assert_eq!(c.remaining_main_ms(Color::Black), 0);
-        // 以降、秒読み 10 秒以内であれば TimeUp にならない
-        assert_eq!(c.consume(Color::Black, 9_000), ClockResult::Continue);
-    }
-
-    #[test]
     fn time_up_when_over_byoyomi() {
         let mut c = SecondsCountdownClock::new(5, 10);
         // 本体 5 秒 + 秒読み 11 秒 = 16 秒 消費

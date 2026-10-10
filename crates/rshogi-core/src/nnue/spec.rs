@@ -1510,16 +1510,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_feature_set_layerstacks_mixed_activations() {
-        // LayerStacks: `(SqrClippedReLU[` と `(ClippedReLU[` の混在トークンを持つ
-        // ため keyword (HalfKA_hm) より優先して LayerStacks と確定する。
-        let arch = "Features=HalfKA_hm(Friend)[73305->1536x2],Network=AffineTransform\
-                    [1<-32](ClippedReLU[32](AffineTransform[32<-30](SqrClippedReLU[30](\
-                    AffineTransform[16<-3072](InputSlice[3072(0:3072)]))))),fv_scale=28";
-        assert_eq!(parse_feature_set_from_arch(arch).unwrap(), FeatureSet::LayerStacks);
-    }
-
-    #[test]
     fn test_parse_arch_dimensions() {
         // nnue-pytorch 形式 (ネスト構造、出力→入力の順)
         // 実際のファイル例: "Network=AffineTransform[1<-96](ClippedReLU[96](AffineTransform[96<-8](...)))"

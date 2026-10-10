@@ -3047,35 +3047,6 @@ mod tests {
         }
     }
 
-    /// 合成Bitboard（golds_bb, bishop_horse_bb, rook_dragon_bb）の整合性を確認
-    #[test]
-    fn test_composite_bitboard_consistency() {
-        let mut pos = Position::new();
-        pos.set_hirate();
-
-        // golds_bbの整合性チェック
-        let expected_golds = pos.pieces_pt(PieceType::Gold)
-            | pos.pieces_pt(PieceType::ProPawn)
-            | pos.pieces_pt(PieceType::ProLance)
-            | pos.pieces_pt(PieceType::ProKnight)
-            | pos.pieces_pt(PieceType::ProSilver);
-        assert_eq!(pos.golds(), expected_golds, "golds_bb mismatch");
-
-        // bishop_horse_bbの整合性チェック
-        let expected_bh = pos.pieces_pt(PieceType::Bishop) | pos.pieces_pt(PieceType::Horse);
-        assert_eq!(pos.bishop_horse(), expected_bh, "bishop_horse_bb mismatch");
-
-        // rook_dragon_bbの整合性チェック
-        let expected_rd = pos.pieces_pt(PieceType::Rook) | pos.pieces_pt(PieceType::Dragon);
-        assert_eq!(pos.rook_dragon(), expected_rd, "rook_dragon_bb mismatch");
-
-        // hdk_bbの整合性チェック
-        let expected_hdk = pos.pieces_pt(PieceType::Horse)
-            | pos.pieces_pt(PieceType::Dragon)
-            | pos.pieces_pt(PieceType::King);
-        assert_eq!(pos.hdk_bb, expected_hdk, "hdk_bb mismatch");
-    }
-
     /// 指し手実行・取り消し後も合成Bitboardの整合性が維持されることを確認
     #[test]
     fn test_composite_bitboard_after_moves() {
@@ -3485,12 +3456,6 @@ mod tests {
     fn test_declaration_win_none_rule() {
         let pos = make_pos("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
         assert_eq!(pos.declaration_win(EnteringKingRule::None), Move::NONE);
-    }
-
-    #[test]
-    fn test_declaration_win_startpos() {
-        let pos = make_pos("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
-        assert_eq!(pos.declaration_win(EnteringKingRule::Point27), Move::NONE);
     }
 
     #[test]

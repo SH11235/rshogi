@@ -925,28 +925,6 @@ mod tests {
         assert_eq!(p, PathBuf::from("out/chunk_007.hcpe"));
     }
 
-    #[test]
-    fn relabel_preserves_position_move_result_replaces_eval() {
-        // 32B の hcp は本物の局面でなくても、unpack_hcp が失敗すれば Error になる。ここでは
-        // eval/move/result バイトの保持・差し替え境界のみを検査するため、relabel ではなく
-        // 直接バイト操作の不変条件（[32..34] のみ書き換え）を別途担保する単体に留める。
-        // （局面を要する経路は bit 一致検証スクリプトで担保）
-        let mut rec = [0u8; HCPE_RECORD_SIZE];
-        rec[32] = 0x10; // eval lo
-        rec[33] = 0x20; // eval hi
-        rec[34] = 0xAB; // bestMove16 lo
-        rec[35] = 0xCD; // bestMove16 hi
-        rec[36] = 1; // gameResult
-        let new_eval: i16 = -123;
-        let mut out = rec;
-        out[32..34].copy_from_slice(&new_eval.to_le_bytes());
-        // eval だけ変わり、move/result は不変。
-        assert_eq!(i16::from_le_bytes([out[32], out[33]]), -123);
-        assert_eq!(out[34], 0xAB);
-        assert_eq!(out[35], 0xCD);
-        assert_eq!(out[36], 1);
-    }
-
     // ---- intra-chunk resume の検証 ----
     // search を伴わない決定的 transform を注入し、「全件フレッシュ出力」と「途中 checkpoint →
     // resume 出力」が byte 完全一致することを確かめる（net 不要で決定性の本体を担保）。

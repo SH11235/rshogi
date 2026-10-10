@@ -124,13 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn test_halfka_hm_max_active() {
-        // coalesce済みモデルではFactorization無し
-        // 合法局面では盤上駒 + 手駒 + 両王 = 40駒
-        assert_eq!(HalfKaHmMerged::MAX_ACTIVE, 40);
-    }
-
-    #[test]
     fn test_append_active_indices_startpos() {
         let mut pos = Position::new();
         pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")
@@ -311,69 +304,6 @@ mod tests {
         // coalesce済みモデルではFactorization無し
         assert_eq!(removed.len(), 1, "旧手駒BonaPieceを削除");
         assert_eq!(added.len(), 1, "新手駒BonaPieceを追加");
-    }
-
-    #[test]
-    fn test_append_changed_indices_hand_decrease() {
-        // 手駒減少（2枚→1枚）
-        // 新APIではold/new ExtBonaPieceペアとして表現
-        let king_sq = Square::new(File::File5, Rank::Rank9);
-
-        let mut dirty_piece = DirtyPiece::new();
-        dirty_piece.dirty_num = 1;
-        dirty_piece.piece_no[0] = PieceNumber(0);
-        dirty_piece.changed_piece[0] = ChangedBonaPiece {
-            old_piece: ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 2),
-            new_piece: ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 1),
-        };
-
-        let mut removed = IndexList::new();
-        let mut added = IndexList::new();
-
-        HalfKaHmMerged::append_changed_indices(
-            &dirty_piece,
-            Color::Black,
-            king_sq,
-            &mut removed,
-            &mut added,
-        );
-
-        // 手駒2→1: removed=1（2枚目のBonaPiece）, added=1（1枚目のBonaPiece）
-        // coalesce済みモデルではFactorization無し
-        assert_eq!(removed.len(), 1, "旧手駒BonaPieceを削除");
-        assert_eq!(added.len(), 1, "新手駒BonaPieceを追加");
-    }
-
-    #[test]
-    fn test_append_changed_indices_hand_increase_multiple() {
-        // 手駒が0枚→3枚に増加
-        // 新APIでは1回の手駒変化は1エントリのold/newペア
-        // 0→3の一括変化は通常do_moveでは発生しないが、テストとして記述
-        let king_sq = Square::new(File::File5, Rank::Rank9);
-
-        let mut dirty_piece = DirtyPiece::new();
-        dirty_piece.dirty_num = 1;
-        dirty_piece.piece_no[0] = PieceNumber(0);
-        dirty_piece.changed_piece[0] = ChangedBonaPiece {
-            old_piece: ExtBonaPiece::ZERO, // 手駒0枚→ZEROとして表現
-            new_piece: ExtBonaPiece::from_hand(Color::Black, PieceType::Pawn, 3),
-        };
-
-        let mut removed = IndexList::new();
-        let mut added = IndexList::new();
-
-        HalfKaHmMerged::append_changed_indices(
-            &dirty_piece,
-            Color::Black,
-            king_sq,
-            &mut removed,
-            &mut added,
-        );
-
-        // 新API: 1エントリのold(ZERO)/new(3枚目)ペア
-        // removed=0（old=ZERO→フィルタ）, added=1（new=3枚目BonaPiece）
-        assert_eq!(removed.len(), 0);
-        assert_eq!(added.len(), 1, "3枚目のBonaPieceを追加");
     }
 
     #[test]

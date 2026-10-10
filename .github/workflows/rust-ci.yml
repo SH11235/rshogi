@@ -337,7 +337,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.rust_code == 'true'
-    # SDE エミュレーションは遅いが対象は rshogi-core の単体テストのみで短時間。余裕を見た上限。
+    # 対象は探索系 2 module を除いた rshogi-core の単体テストのみで短時間。余裕を見た上限。
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -383,7 +383,13 @@ jobs:
           # RUSTFLAGS が set だと CARGO_TARGET_<triple>_RUSTFLAGS が無視されるため unset。
           unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$SDE_PATH/sde64 -${{ matrix.chip }} --"
-          cargo test -p rshogi-core --lib --target x86_64-unknown-linux-gnu -- --test-threads=2
+          # `search::tests` / `search::engine` は module ごと除外する。実探索を回すテストが集まり、
+          # SDE 下では実行時間の大半を占める一方、検証対象は ISA に依存しない探索ロジックで、
+          # 既定の `test` job が実行する。SIMD 経路の数値は nnue / bitboard / position などの
+          # 単体テストが各 ISA で検証する。`--skip` は部分一致なので、名前が `search` で終わる
+          # module 直下の `tests` も除外される。
+          cargo test -p rshogi-core --lib --target x86_64-unknown-linux-gnu -- --test-threads=2 \
+            --skip search::tests:: --skip search::engine::
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true

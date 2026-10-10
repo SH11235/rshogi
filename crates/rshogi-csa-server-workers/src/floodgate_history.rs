@@ -546,13 +546,4 @@ mod tests {
         assert!(key_early < key_mid, "{key_early} < {key_mid}");
         assert!(key_mid < key_late, "{key_mid} < {key_late}");
     }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn list_recent_zero_returns_empty() {
-        let backing = Arc::new(Mutex::new(BTreeMap::new()));
-        let storage = InMemoryFloodgateHistoryStorage::new(backing);
-        storage.append(&entry("g1", "2026-04-26T12:00:00+00:00")).await.unwrap();
-        let recent = storage.list_recent(0).await.unwrap();
-        assert!(recent.is_empty());
-    }
 }

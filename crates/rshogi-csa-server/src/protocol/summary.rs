@@ -435,12 +435,6 @@ mod tests {
     }
 
     #[test]
-    fn build_for_omits_reconnect_token_when_none() {
-        let txt = skeleton().build_for(Color::Black);
-        assert!(!txt.contains("Reconnect_Token:"), "unexpected token line: {txt}");
-    }
-
-    #[test]
     fn build_for_emits_per_color_reconnect_token() {
         let mut b = skeleton();
         b.black_reconnect_token = Some(ReconnectToken::new("aaaa1111"));

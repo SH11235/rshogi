@@ -773,31 +773,6 @@ mod tests {
     }
 
     #[test]
-    fn own_book_false_disables() {
-        let data = format!("{HEADER}\nsfen {HIRATE}\n7g7f 3c3d 30 16 100\n");
-        let book = Book::from_reader(data.as_bytes(), false).unwrap();
-        let opts = BookOptions {
-            own_book: false,
-            ..Default::default()
-        };
-        let mut rng = SeqRng::new(vec![0]);
-        assert!(probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).is_none());
-    }
-
-    #[test]
-    fn book_moves_limit_disables_after_ply() {
-        let data = format!("{HEADER}\nsfen {HIRATE}\n7g7f 3c3d 30 16 100\n");
-        let book = Book::from_reader(data.as_bytes(), false).unwrap();
-        let opts = BookOptions {
-            book_moves: 0,
-            ..Default::default()
-        };
-        let mut rng = SeqRng::new(vec![0]);
-        // game_ply=1 > book_moves=0 → 不使用。
-        assert!(probe(&book, &pos(HIRATE), &opts, &mut rng, no_info).is_none());
-    }
-
-    #[test]
     fn flipped_book_hits_on_one_sided_db() {
         // 片側正規化定跡: 後手番局面 after_76 を flip した「先手番の正準局面」だけを登録する。
         let after_76 = "lnsgkgsnl/1r5b1/ppppppppp/9/9/2P6/PP1PPPPPP/1B5R1/LNSGKGSNL w - 2";

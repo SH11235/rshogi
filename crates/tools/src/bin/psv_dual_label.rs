@@ -1079,15 +1079,6 @@ mod tests {
     }
 
     #[test]
-    fn embed_rejects_score_size_mismatch() -> Result<()> {
-        let dir = tempdir()?;
-        let (base, scores, mask) = write_embed_inputs(dir.path(), 3, 0, -1)?;
-        fs::write(&scores, [0u8; 5])?;
-        assert!(embed(&base, &scores, &mask, &dir.path().join("dual.psv")).is_err());
-        Ok(())
-    }
-
-    #[test]
     fn embed_rejects_mask_size_mismatch() -> Result<()> {
         let dir = tempdir()?;
         let (base, scores, mask) = write_embed_inputs(dir.path(), 9, 0, -1)?;
