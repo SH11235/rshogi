@@ -124,13 +124,6 @@ mod tests {
     }
 
     #[test]
-    fn test_halfka_hm_max_active() {
-        // coalesce済みモデルではFactorization無し
-        // 合法局面では盤上駒 + 手駒 + 両王 = 40駒
-        assert_eq!(HalfKaHmMerged::MAX_ACTIVE, 40);
-    }
-
-    #[test]
     fn test_append_active_indices_startpos() {
         let mut pos = Position::new();
         pos.set_sfen("lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1")

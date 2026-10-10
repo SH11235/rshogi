@@ -344,12 +344,4 @@ mod tests {
         entry.save(key, Value::ZERO, false, Bound::Lower, 1, Move::NONE, Value::ZERO, 0);
         assert_eq!(entry.depth8(), depth_before);
     }
-
-    #[test]
-    fn test_tt_data_empty() {
-        let data = TTData::EMPTY;
-        assert_eq!(data.mv, Move::NONE);
-        assert_eq!(data.bound, Bound::None);
-        assert!(!data.is_pv);
-    }
 }

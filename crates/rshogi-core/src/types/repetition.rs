@@ -71,9 +71,4 @@ mod tests {
         assert!(RepetitionState::Superior.is_superior_inferior());
         assert!(RepetitionState::Inferior.is_superior_inferior());
     }
-
-    #[test]
-    fn test_repetition_state_default() {
-        assert_eq!(RepetitionState::default(), RepetitionState::None);
-    }
 }

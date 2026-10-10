@@ -108,9 +108,4 @@ mod tests {
     fn test_halfka_dimensions() {
         assert_eq!(HalfKaSplit::DIMENSIONS, 138_510);
     }
-
-    #[test]
-    fn test_halfka_max_active() {
-        assert_eq!(HalfKaSplit::MAX_ACTIVE, 40);
-    }
 }

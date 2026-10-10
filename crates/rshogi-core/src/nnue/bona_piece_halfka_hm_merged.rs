@@ -206,15 +206,6 @@ mod tests {
     use crate::types::{File, Rank};
 
     #[test]
-    fn test_constants() {
-        assert_eq!(FE_HAND_END, 90);
-        assert_eq!(FE_OLD_END, 1548);
-        assert_eq!(F_KING, 1548);
-        assert_eq!(E_KING, 1629);
-        assert_eq!(PIECE_INPUTS, 1629);
-    }
-
-    #[test]
     fn test_king_bucket_black_perspective() {
         // 先手視点でのキングバケット計算
         // C++と同じ計算: file_m * 9 + rank

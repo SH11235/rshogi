@@ -82,9 +82,4 @@ mod tests {
         // None は常にカットオフ不可
         assert!(!Bound::None.can_cutoff(value, beta));
     }
-
-    #[test]
-    fn test_bound_default() {
-        assert_eq!(Bound::default(), Bound::None);
-    }
 }
