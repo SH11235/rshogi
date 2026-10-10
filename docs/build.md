@@ -50,6 +50,15 @@ cargo build --release
 cargo test
 ```
 
+CI の `test` job は [cargo-nextest](https://nexte.st/) でテストを実行する (`--release` 付き)。手元でも
+同じ runner で実行できる。doctest は nextest の対象外なので別に実行する。
+
+```bash
+cargo install cargo-nextest --locked
+cargo nextest run --workspace
+cargo test --workspace --doc
+```
+
 `cargo build` は `target/release/rshogi-usi` を生成する。これは作業領域なので
 別 preset を rebuild すると上書きされる点に注意。
 
