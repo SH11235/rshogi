@@ -69,6 +69,7 @@
 //! trait の contract と method 一覧は [`UsiEngineDriver`] の doc を参照。
 
 pub mod config;
+pub mod csa_writer;
 pub mod engine;
 pub mod event;
 pub mod events;

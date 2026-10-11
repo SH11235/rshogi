@@ -24,7 +24,9 @@ use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use rshogi_core::position::Position as CorePosition;
 use rshogi_core::types::{Color as CoreColor, Move};
-use rshogi_csa::{ParsedMove, SpecialMove, csa_move_to_usi, parse_csa_full};
+use rshogi_csa::{
+    CsaSummary, ParsedMove, SpecialMove, SummaryResult, csa_move_to_usi, parse_csa_full,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufWriter, Write};
@@ -148,12 +150,27 @@ enum Outcome {
     DrawOrUnknown,
 }
 
-/// 通常手の手数と末尾の特殊手から勝敗を判定する。
+/// 棋譜の `'summary:` 行、無ければ通常手の手数と末尾の特殊手から勝敗を判定する。
 ///
-/// 平手前提(初手は先手)なので、通常手 `num_normal` 手後の手番側が特殊手を宣言した側になる。
-/// 投了・時間切れ・反則は手番側の負け、入玉宣言勝ちは手番側の勝ち、千日手・持将棋等は引き分け、
-/// 中断・特殊手なしは結果不明として扱う。
-fn game_outcome(num_normal: usize, special: Option<&SpecialMove>) -> Outcome {
+/// `'summary:` 行(wdoor / csa_client の棋譜)は勝敗を明示するので最優先する。wdoor の棋譜は
+/// 反則負け・連続王手の千日手を特殊手なしで終え、異常終了の末尾は手番と勝敗が対応しない
+/// ため、特殊手と手番からの推定では勝敗を誤る。
+///
+/// `'summary:` が無い棋譜は、平手前提(初手は先手)で通常手 `num_normal` 手後の手番側が特殊手を
+/// 宣言した側とみなす。投了・時間切れ・反則は手番側の負け、入玉宣言勝ちは手番側の勝ち、
+/// 千日手・持将棋等は引き分け、中断・特殊手なしは結果不明として扱う。
+fn game_outcome(
+    num_normal: usize,
+    special: Option<&SpecialMove>,
+    summary: Option<&CsaSummary>,
+) -> Outcome {
+    if let Some(summary) = summary {
+        return match summary.result {
+            SummaryResult::BlackWin => Outcome::Winner(Side::Black),
+            SummaryResult::WhiteWin => Outcome::Winner(Side::White),
+            SummaryResult::Draw => Outcome::DrawOrUnknown,
+        };
+    }
     // 通常手 num_normal 手後に手番が回っている側(= 特殊手を指した側)。
     let side_at_special = if num_normal.is_multiple_of(2) {
         Side::Black
@@ -367,7 +384,7 @@ fn process_game(path: &Path, opts: &BuildOptions, agg: &mut Aggregator) {
 
     // 勝敗を判定し、winner-only の場合は勝者を確定(引き分け・不明は棋譜ごと除外)。
     let winner = if opts.winner_only {
-        match game_outcome(normals.len(), special.as_ref()) {
+        match game_outcome(normals.len(), special.as_ref(), info.summary.as_ref()) {
             Outcome::Winner(w) => Some(w),
             Outcome::DrawOrUnknown => {
                 agg.stats.winner_skipped += 1;
@@ -897,13 +914,48 @@ mod tests {
     #[test]
     fn game_outcome_mapping() {
         // 3 通常手後は後手番。投了 → 先手勝ち。
-        assert_eq!(game_outcome(3, Some(&SpecialMove::Resign)), Outcome::Winner(Side::Black));
+        assert_eq!(game_outcome(3, Some(&SpecialMove::Resign), None), Outcome::Winner(Side::Black));
         // 0 通常手で先手番。投了 → 後手勝ち。
-        assert_eq!(game_outcome(0, Some(&SpecialMove::Resign)), Outcome::Winner(Side::White));
+        assert_eq!(game_outcome(0, Some(&SpecialMove::Resign), None), Outcome::Winner(Side::White));
         // 入玉宣言勝ちは手番側の勝ち。
-        assert_eq!(game_outcome(2, Some(&SpecialMove::Win)), Outcome::Winner(Side::Black));
+        assert_eq!(game_outcome(2, Some(&SpecialMove::Win), None), Outcome::Winner(Side::Black));
         // 千日手・特殊手なしは引き分け/不明。
-        assert_eq!(game_outcome(2, Some(&SpecialMove::Sennichite)), Outcome::DrawOrUnknown);
-        assert_eq!(game_outcome(2, None), Outcome::DrawOrUnknown);
+        assert_eq!(game_outcome(2, Some(&SpecialMove::Sennichite), None), Outcome::DrawOrUnknown);
+        assert_eq!(game_outcome(2, None, None), Outcome::DrawOrUnknown);
+    }
+
+    #[test]
+    fn game_outcome_prefers_summary_line() {
+        let summary = |rest: &str| CsaSummary::parse(rest).unwrap();
+        // 特殊手なし(wdoor の反則負け・連続王手の千日手)でも勝者が決まる。
+        let s = summary("oute_sennichite:A lose:B win");
+        assert_eq!(game_outcome(2, None, Some(&s)), Outcome::Winner(Side::White));
+        // 手番からの推定(2 手後の %TORYO は後手勝ち)と食い違うときは summary が勝つ。
+        let s = summary("abnormal:A win:B lose");
+        assert_eq!(
+            game_outcome(2, Some(&SpecialMove::Resign), Some(&s)),
+            Outcome::Winner(Side::Black)
+        );
+        let s = summary("abnormal:A win:B lose");
+        assert_eq!(
+            game_outcome(2, Some(&SpecialMove::Interrupt), Some(&s)),
+            Outcome::Winner(Side::Black)
+        );
+        let s = summary("sennichite:A draw:B draw");
+        assert_eq!(game_outcome(2, Some(&SpecialMove::Resign), Some(&s)), Outcome::DrawOrUnknown);
+    }
+
+    #[test]
+    fn winner_only_uses_summary_for_wdoor_style_endings() {
+        // 連続王手の千日手で後手勝ち。終局コマンドは無い。先手の手は集計されない。
+        let game = "V2\nN+A\nN-B\nPI\n+\n+7776FU\nT1\n-3334FU\nT1\n\
+'summary:oute_sennichite:A lose:B win\n";
+        let opts = BuildOptions {
+            winner_only: true,
+            ..opts_all()
+        };
+        let s = out_string(&[("g.csa", game)], &opts);
+        assert!(s.contains("3c3d "), "後手(勝者)の手が入っていない:\n{s}");
+        assert!(!s.contains("7g7f "), "先手(敗者)の手が入った:\n{s}");
     }
 }

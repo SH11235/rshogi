@@ -52,6 +52,7 @@ pub mod dlshogi_features;
 pub mod ek_testset;
 pub mod eval_sfens_tool;
 pub mod kif;
+pub mod kifu_publish;
 pub mod king_zone;
 pub mod mask_io;
 pub mod nnue_routing;

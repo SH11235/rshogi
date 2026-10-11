@@ -26,6 +26,7 @@ use anyhow::Result;
 use rshogi_csa::{Color, Position, csa_move_to_usi, usi_move_to_csa};
 
 use crate::config::CsaClientConfig;
+use crate::csa_writer::EndReason;
 use crate::engine::{BestMoveResult, SearchInfo, SearchOutcome, UsiEngine, UsiEngineDriver};
 use crate::event::Event;
 use crate::events::{
@@ -701,8 +702,10 @@ where
                                 return LoopOutcome::Error(map_anyhow_to_session_error(err));
                             }
                             let reason_line = s.conn.pending_end_reason.take();
-                            s.record
-                                .set_result(record_result_with_reason(&game_result, &reason_line));
+                            s.record.set_game_end(
+                                record_result_with_reason(&game_result, reason_line.as_deref()),
+                                &game_result,
+                            );
                             if let Err(err) = s.engine.gameover(gameover_str(&game_result)) {
                                 return LoopOutcome::Error(map_anyhow_to_session_error(err));
                             }
@@ -789,7 +792,10 @@ where
             let (game_result, reason_line, raw_result_line) =
                 parse_server_interrupt_lines_full(lines);
             log::info!("[CSA] サーバー終局割り込み: {:?}", game_result);
-            s.record.set_result(record_result_with_reason(&game_result, &reason_line));
+            s.record.set_game_end(
+                record_result_with_reason(&game_result, reason_line.as_deref()),
+                &game_result,
+            );
             if let Err(err) = s.engine.gameover(gameover_str(&game_result)) {
                 return MoveAction::sink_or_error(err);
             }
@@ -817,8 +823,13 @@ where
         if let Err(err) = s.conn.send_resign() {
             return MoveAction::sink_or_error(err);
         }
+        // サーバーの結果が届かないまま切断されても、自分が送った終局コマンドは残す。
         s.record.set_result("resign");
         let (game_result, reason_line, raw_result_line) = wait_game_end_full_from_rx(s.server_rx);
+        // サーバーが理由行を返したらそちらを正とする（宣言の却下は `#ILLEGAL_MOVE`）。
+        let reason = end_reason_from_line(&game_result, reason_line.as_deref())
+            .map_or("resign", EndReason::as_str);
+        s.record.set_game_end(reason, &game_result);
         if let Err(err) = s.engine.gameover(gameover_str(&game_result)) {
             return MoveAction::sink_or_error(err);
         }
@@ -830,8 +841,13 @@ where
         if let Err(err) = s.conn.send_win() {
             return MoveAction::sink_or_error(err);
         }
+        // サーバーの結果が届かないまま切断されても、自分が送った終局コマンドは残す。
         s.record.set_result("win_declaration");
         let (game_result, reason_line, raw_result_line) = wait_game_end_full_from_rx(s.server_rx);
+        // サーバーが理由行を返したらそちらを正とする（宣言の却下は `#ILLEGAL_MOVE`）。
+        let reason = end_reason_from_line(&game_result, reason_line.as_deref())
+            .map_or("win_declaration", EndReason::as_str);
+        s.record.set_game_end(reason, &game_result);
         if let Err(err) = s.engine.gameover(gameover_str(&game_result)) {
             return MoveAction::sink_or_error(err);
         }
@@ -971,7 +987,13 @@ where
                             return MoveAction::sink_or_error(err);
                         }
                         let reason = s.conn.pending_end_reason.take();
-                        s.record.set_result(record_result_with_reason(&game_result, &reason));
+                        // 送った手のエコーが返る前に終局した。その手はサーバーに受理されて
+                        // いない（反則手・時間切れ後に届いた手など）ので指し手列から外す。
+                        s.record.reject_unconfirmed_last_move();
+                        s.record.set_game_end(
+                            record_result_with_reason(&game_result, reason.as_deref()),
+                            &game_result,
+                        );
                         if let Err(err) = s.engine.gameover(gameover_str(&game_result)) {
                             return MoveAction::sink_or_error(err);
                         }
@@ -1849,30 +1871,56 @@ fn gameover_str(result: &GameResult) -> &'static str {
     }
 }
 
-fn record_result_with_reason(result: &GameResult, reason: &Option<String>) -> &'static str {
-    if let Some(r) = reason {
-        if r.contains("TIME_UP") {
-            return "time_up";
+/// サーバーの終局理由行（`#RESIGN` / `#TIME_UP` など）を棋譜の終局理由に直す。
+/// 理由行がなければ `None`。知らない理由行で勝敗が付いた場合は、投了とは断定できないので
+/// 異常終了（`abnormal`）とし、勝敗の付かない結果なら `None`。
+///
+/// shogi-server の内部分類にある王手放置（`oute_kaihimore`）などの細かい反則は、
+/// CSA プロトコル上は `#ILLEGAL_MOVE` として届くので区別しない。
+///
+/// `#JISHOGI` は入玉宣言の成立で送られ、`#WIN` / `#LOSE` が続く（shogi-server /
+/// rshogi-csa-server 共通）。`#DRAW` が続く場合だけ持将棋の引き分けとして扱う。
+fn end_reason_from_line(result: &GameResult, reason_line: Option<&str>) -> Option<EndReason> {
+    let line = reason_line?;
+    // `#OUTE_SENNICHITE` は `SENNICHITE` を含むので先に見る。
+    let reason = if line.contains("OUTE_SENNICHITE") {
+        EndReason::OuteSennichite
+    } else if line.contains("SENNICHITE") {
+        EndReason::Sennichite
+    } else if line.contains("RESIGN") {
+        EndReason::Resign
+    } else if line.contains("TIME_UP") {
+        EndReason::TimeUp
+    } else if line.contains("ILLEGAL") {
+        EndReason::IllegalMove
+    } else if line.contains("JISHOGI") {
+        match result {
+            GameResult::Win | GameResult::Lose => EndReason::WinDeclaration,
+            _ => EndReason::Jishogi,
         }
-        if r.contains("ILLEGAL") {
-            return "illegal_move";
-        }
-        if r.contains("MAX_MOVES") {
-            return "max_moves";
-        }
-        if r.contains("JISHOGI") {
-            return "jishogi";
-        }
-        if r.contains("SENNICHITE") {
-            return "sennichite";
-        }
+    } else if line.contains("MAX_MOVES") {
+        EndReason::MaxMoves
+    } else if line.contains("ABNORMAL") || matches!(result, GameResult::Win | GameResult::Lose) {
+        EndReason::Abnormal
+    } else {
+        return None;
+    };
+    Some(reason)
+}
+
+/// 棋譜（CSA の終局コマンドと JSONL の `reason`）に記録する終局理由。
+///
+/// 理由行がまったく無いときは最終結果だけから決める。その場合の勝敗は理由が分からないので
+/// `win` / `lose` のまま残す（CSA では投了扱い）。
+fn record_result_with_reason(result: &GameResult, reason_line: Option<&str>) -> &'static str {
+    if let Some(reason) = end_reason_from_line(result, reason_line) {
+        return reason.as_str();
     }
     match result {
         GameResult::Win => "win",
         GameResult::Lose => "lose",
-        GameResult::Draw => "sennichite",
-        GameResult::Interrupted => "interrupted",
-        GameResult::Censored => "interrupted",
+        GameResult::Draw => EndReason::Sennichite.as_str(),
+        GameResult::Interrupted | GameResult::Censored => EndReason::Interrupted.as_str(),
     }
 }
 
@@ -2079,6 +2127,45 @@ mod tests {
             nps: Some(20000),
             pv: vec!["7g7f".to_owned()],
         }
+    }
+
+    #[test]
+    fn record_result_keeps_every_server_reason_line() {
+        use GameResult::{Censored, Draw, Interrupted, Lose, Win};
+        let cases: [(GameResult, Option<&str>, &str); 20] = [
+            (Win, Some("#RESIGN"), "resign"),
+            (Lose, Some("#RESIGN"), "resign"),
+            (Win, Some("#TIME_UP"), "time_up"),
+            (Lose, Some("#TIME_UP"), "time_up"),
+            (Win, Some("#ILLEGAL_MOVE"), "illegal_move"),
+            (Lose, Some("#ILLEGAL_MOVE"), "illegal_move"),
+            (Draw, Some("#SENNICHITE"), "sennichite"),
+            // `SENNICHITE` を含むが千日手の引き分けではない。
+            (Win, Some("#OUTE_SENNICHITE"), "oute_sennichite"),
+            (Lose, Some("#OUTE_SENNICHITE"), "oute_sennichite"),
+            // 入玉宣言の成立は `#JISHOGI` + `#WIN` / `#LOSE`。
+            (Win, Some("#JISHOGI"), "win_declaration"),
+            (Lose, Some("#JISHOGI"), "win_declaration"),
+            (Draw, Some("#JISHOGI"), "jishogi"),
+            (Censored, Some("#MAX_MOVES"), "max_moves"),
+            (Draw, Some("#MAX_MOVES"), "max_moves"),
+            (Win, Some("#ABNORMAL"), "abnormal"),
+            (Lose, Some("#ABNORMAL"), "abnormal"),
+            // 理由行がないときは最終結果だけから決める。
+            (Win, None, "win"),
+            (Lose, None, "lose"),
+            (Draw, None, "sennichite"),
+            (Interrupted, None, "interrupted"),
+        ];
+        for (result, line, expected) in cases {
+            assert_eq!(record_result_with_reason(&result, line), expected, "{result:?} {line:?}");
+        }
+        // 知らない理由行で勝敗が付いたら、投了と断定せず異常終了として記録する。
+        assert_eq!(record_result_with_reason(&Win, Some("#UNKNOWN_FUTURE")), "abnormal");
+        assert_eq!(record_result_with_reason(&Lose, Some("#UNKNOWN_FUTURE")), "abnormal");
+        // 勝敗の付かない結果は最終結果から決める。
+        assert_eq!(record_result_with_reason(&Draw, Some("#UNKNOWN_FUTURE")), "sennichite");
+        assert_eq!(end_reason_from_line(&Interrupted, Some("#UNKNOWN_FUTURE")), None);
     }
 
     fn floodgate_info(pv: &[&str]) -> SearchInfo {
