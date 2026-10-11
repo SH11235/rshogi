@@ -15,6 +15,7 @@ LayerStacks の [native / USI routing 対応と Q16 制限](docs/nnue-routing.md
 | `floodgate_record` | csa_client の per-game JSONL から 1 エンジンの戦績を集計（先後別勝率・相手別・後手勝ち/負け/引分・実戦 NPS、`--config` で csa_client 設定から入力導出、`--fetch-ratings` で wdoor 現在レート併記・履歴記録。floodgate 連続対局向け、[詳細](docs/floodgate_record.md)） |
 | `gensfen` | NNUE 学習用 PSV/pack/hcpe3 教師局面の生成（PSV move16 は実 YaneuraOu 形式、hcpe3 policy は既定 65535 票・温度 100、`--hcpe3-eval-drop-threshold` による候補除外と終局理由/gameInfo 符号化、USI engine vs engine／NativeBackend、native LS progress 係数、`--keep-tt` による native TT・EvalHash・履歴の対局間保持、千日手裁定、異常終局の全局破棄、宣言勝ち PSV 終端局面、乱択来歴 JSONL 記録 (--omit-diversions で件数のみに省略可、deblunder 非互換)、FV_SCALE override、control.json 動的制御・drain、Windows でも動作可 (親 dir fsync はスキップされ電源断耐性が Unix より弱い)） |
 | `floodgate_pipeline` | Floodgate棋譜のダウンロード・変換・`live-mirror --push` MONITOR2 着手通知付きリアルタイムミラー（[詳細](docs/floodgate_pipeline.md)） |
+| `kifu_publish` | 棋譜を rshogi の棋譜サーバーへ公開（`wdoor`: csa_client の records から Floodgate 対局を ID で取り込み、wdoor に無い局はアーカイブからアップロード / `jsonl`: tournament・csa_client の JSONL を wdoor 形式の CSA に変換してアップロード / `csa`: CSA をそのままアップロード。[詳細](docs/kifu_publish.md)） |
 | `nyugyoku_gensfen` | CSA manifest から入玉アンカー局面を disk-partition exact dedup で抽出し、checkpoint/resume 付きで gensfen 用 `startpos.txt` と出典 TSV を生成（[詳細](docs/nyugyoku_gensfen.md)） |
 | `book_from_csa` | CSA 棋譜群から YANEURAOU-DB2016 テキスト定跡 `.db` を生成（消費時間による定跡手判定・レート/勝敗フィルタ、[詳細](docs/book_from_csa.md)） |
 | `book_kachi_label` | YANEURAOU-DB2016 テキスト定跡のノード×候補手ごとに CSA corpus から `%KACHI` 決着率を集計し sidecar JSONL を生成（flip 合流対応、[詳細](docs/book_kachi_label.md)） |
@@ -109,6 +110,7 @@ cargo run -p tools --release --bin benchmark -- --internal
 
 - [tournament](docs/tournament.md) - seed 指定で開始局面を再現できる並列トーナメント・SPRT 検定。`--wtime` / `--winc` による先後別フィッシャー時計に対応
 - [kifu_player](docs/kifu_player.md) - PSV / tournament JSONL / CSA 共通の棋譜プレイヤー TUI（評価値グラフ・検索/絞り込み（SFEN 局面検索含む）・`--live` 追記監視 (live-mirror と組で wdoor 観戦、csa_client の `live_jsonl` と組で自局の手単位リアルタイム観戦)・`--ratings` レート併記付き）
+- [kifu_publish](docs/kifu_publish.md) - 棋譜（Floodgate 対局 / tournament・csa_client の JSONL / CSA）を rshogi の棋譜サーバーへ公開
 - [gensfen](docs/gensfen.md) - 教師局面生成ツールの詳細
 - [nyugyoku_gensfen](docs/nyugyoku_gensfen.md) - 入玉アンカー局面から gensfen 用開始局面を生成
 - [benchmark](docs/benchmark.md) - ベンチマークツールの詳細

@@ -49,6 +49,22 @@ BOM なし UTF-8 の日本語コメントを化けさせるため対象外。Win
 `stats.sh`（= `floodgate_record`）が集計 dir・自分の名前・レートキャッシュのパスを
 config から自動導出する。
 
+## 終局後に棋譜を公開する
+
+対局が終わったら `kifu_publish wdoor`（[詳細](../../../crates/tools/docs/kifu_publish.md)）で、
+records にある Floodgate 対局を rshogi の棋譜サーバーへ取り込む。サーバーが wdoor から棋譜を
+1 局 1 回だけ取得して保存するので、両対局者の評価値・読み筋が入る。保存済みの局は何もせず
+飛ばすため、同じ records に対して手動でも定期実行でも繰り返し実行できる。
+
+```bash
+export RSHOGI_API_BASE=https://<host>/api/v1
+export RSHOGI_ADMIN_TOKEN=...   # 管理トークン。config やスクリプトに直接書かない
+kifu_publish wdoor --records-dir ~/floodgate/records
+```
+
+wdoor に棋譜が残っていない古い対局は、wdoor 版 CSA のアーカイブを `--archive-dir` に指定すると
+そこから本文をアップロードする。失敗した局があると終了コードが 1 になる。
+
 ## 環境変数での上書き
 
 標準配置でない場合は各スクリプトの env で差し替える:

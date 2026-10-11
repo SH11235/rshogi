@@ -406,6 +406,60 @@ floodgate = true
 - `20260328_120030_rshogi_v1_vs_opponent.csa` — CSA形式（評価値コメント付き）
 - `20260328_120030_rshogi_v1_vs_opponent.sfen` — SFEN局面列（タブ区切り: SFEN, 指し手, 評価値）
 
+CSA の書式は wdoor (Floodgate) の公開棋譜と同じ並びにしてある。指し手行 → `T<秒>` 行 →
+`'** <先手視点評価値> <読み筋>` 行（コメントは直前の指し手のもの）の順で、末尾に終局の行
+（終局コマンド、`'summary:<理由>:<先手名> <win|lose|draw>:<後手名> <win|lose|draw>`、
+`'$END_TIME:YYYY/MM/DD HH:MM:SS`）を書く。評価値と読み筋が入るのは自エンジンの手だけで、
+相手の手には `'**` 行がない（相手の評価値は対局中に届かない）。両対局者の評価値が入った棋譜を
+公開するには [kifu_publish](../crates/tools/docs/kifu_publish.md) の `wdoor` で wdoor 版を取り込む。
+
+- `$START_TIME` / `'$END_TIME:` は、実行マシンのタイムゾーンによらず JST で書く（CSA の時刻には
+  タイムゾーン表記がなく、棋譜サーバーは JST として読む）。ファイル名の `{datetime}` と JSONL の
+  `timestamp` はローカル時刻のまま。
+- 持ち時間は `$TIME_LIMIT:HH:MM+SS`（持ち時間の時:分 + 秒読みの秒）で書き、フィッシャーの加算は
+  wdoor と同じ `'Increment:<秒>` コメントに書く。持ち時間の 1 分未満の端数は切り捨てる。
+- 読み筋の先頭は実際の指し手そのもの（Floodgate へ送るコメントと同じ）。
+- 勝敗は `'summary:` 行が持つ。勝敗が決まった局には必ず書く。
+
+旧版の `csa_client` は評価値を `'* <評価値> <読み筋>` として指し手の**前**に書き、
+`'summary:` / `'$END_TIME:` は書かなかった。`kifu_player` などの読み取り側は両方の形式に対応している。
+
+#### 終局理由の記録
+
+サーバーが最終結果（`#WIN` / `#LOSE` / `#DRAW` / `#CENSORED` / `#CHUDAN`）の前に送る理由行を、
+JSONL の `result.reason` と CSA の終局の行に記録する。
+
+| サーバーの理由行 | JSONL `reason` | CSA の終局コマンド | `'summary:` の理由 |
+|---|---|---|---|
+| `#RESIGN` | `resign` | `%TORYO` | `toryo` |
+| `#TIME_UP` | `time_up` | `%TIME_UP` | `time up` |
+| `#ILLEGAL_MOVE` | `illegal_move` | なし | `illegal move` |
+| `#JISHOGI` + `#WIN` / `#LOSE`（入玉宣言の成立） | `win_declaration` | `%KACHI` | `kachi` |
+| `#JISHOGI` + `#DRAW` | `jishogi` | `%JISHOGI` | `jishogi` |
+| `#OUTE_SENNICHITE` | `oute_sennichite` | なし | `oute_sennichite` |
+| `#SENNICHITE` | `sennichite` | `%SENNICHITE` | `sennichite` |
+| `#MAX_MOVES` | `max_moves` | `%MAX_MOVES` | `max_moves` |
+| `#ABNORMAL`（相手の切断など） | `abnormal` | `%CHUDAN` | `abnormal` |
+| 知らない理由行 + `#WIN` / `#LOSE` | `abnormal` | `%CHUDAN` | `abnormal` |
+| `#CHUDAN` | `interrupted` | `%CHUDAN` | （書かない） |
+| 理由行なしの `#WIN` / `#LOSE` | `win` / `lose` | `%TORYO` | `toryo` |
+| 理由行なしの `#DRAW` | `sennichite` | `%SENNICHITE` | `sennichite` |
+
+- 反則負けと連続王手の千日手は、wdoor の実物と同じく `%` コマンドを書かずに `'summary:` で終える。
+- 自分の手のエコーが返る前に終局した場合（自分の反則手、時間切れ後に届いた手）、その手は
+  サーバーに受理されていないので、CSA / SFEN / JSONL の指し手には入れない。反則負けのときは
+  CSA に `'ILLEGAL_MOVE(<手>)` コメントとして残す。
+- 自分が `%TORYO` / `%KACHI` を送った後にサーバーの結果が届かず切断された場合、JSONL には送った
+  コマンド（`resign` / `win_declaration`）を記録するが、勝敗が確定していないので CSA は `%CHUDAN`
+  だけで終える（`%TORYO` / `%KACHI` も `'summary:` も書かない）。勝敗が決まっていない局は理由に
+  よらず同じ扱い。
+- 対局中にサーバーとの接続が切れた局は終局理由を記録せず、CSA は指し手までで終わる。
+- `'summary:` の理由は、wdoor の実棋譜（2026 年 6〜7 月の約 2.4 万局）に現れる 9 種（`toryo` /
+  `time up` / `sennichite` / `kachi` / `abnormal` / `illegal move` / `oute_sennichite` /
+  `max_moves` / `oute_kaihimore`）の表記に合わせている。`oute_kaihimore`（王手放置）は
+  プロトコル上 `#ILLEGAL_MOVE` として届き区別できないので `illegal move` と書く。`jishogi` は
+  wdoor にない独自のラベル。
+
 内蔵 CSA サーバーについても、ミリ秒・分時計の着手通知と `Time_Unit` の一致を
 実 `GameRoom` と TCP 接続による統合テストで検証する。対局者の残時間はサーバーの
 課金結果に一致し、保存する CSA V2 棋譜の消費時間は秒単位を維持する。

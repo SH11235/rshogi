@@ -198,6 +198,27 @@ fn sfen_piece_char(p: Piece) -> char {
     }
 }
 
+fn piece_from_sfen_char(c: char) -> Result<(PieceType, Color)> {
+    use PieceType::*;
+    let ty = match c.to_ascii_lowercase() {
+        'p' => Pawn,
+        'l' => Lance,
+        'n' => Knight,
+        's' => Silver,
+        'g' => Gold,
+        'b' => Bishop,
+        'r' => Rook,
+        'k' => King,
+        _ => bail!("unknown SFEN piece: {c}"),
+    };
+    let color = if c.is_ascii_uppercase() {
+        Color::Black
+    } else {
+        Color::White
+    };
+    Ok((ty, color))
+}
+
 fn piece_from_csa_token(token: &str) -> Result<Option<Piece>> {
     if token == "*" {
         return Ok(None);
@@ -253,6 +274,84 @@ fn parse_csa_rank_line(pos: &mut Position, line: &str) -> Result<()> {
 }
 
 impl Position {
+    /// SFEN 文字列（`<盤面> <手番> <持ち駒> [手数]`）から局面を作る。
+    ///
+    /// 手数は省略可能で、省略時は 1 とする。
+    pub fn from_sfen(sfen: &str) -> Result<Self> {
+        let mut fields = sfen.split_whitespace();
+        let board = fields.next().context("SFEN が空です")?;
+        let side = fields.next().with_context(|| format!("SFEN に手番がありません: {sfen}"))?;
+        let hands = fields.next().with_context(|| format!("SFEN に持ち駒がありません: {sfen}"))?;
+        let mut pos = Position::default();
+
+        let ranks: Vec<&str> = board.split('/').collect();
+        anyhow::ensure!(ranks.len() == 9, "SFEN の段数が 9 ではありません: {sfen}");
+        for (y, rank) in (1..=9).zip(ranks) {
+            let mut x = 1usize;
+            let mut promoted = false;
+            for c in rank.chars() {
+                if c == '+' {
+                    anyhow::ensure!(!promoted, "SFEN の成り指定が重複しています: {sfen}");
+                    promoted = true;
+                    continue;
+                }
+                if let Some(empty) = c.to_digit(10) {
+                    anyhow::ensure!(!promoted && empty >= 1, "SFEN の空マス指定が不正です: {sfen}");
+                    x += empty as usize;
+                    continue;
+                }
+                anyhow::ensure!(x <= 9, "SFEN の段が 9 マスを超えています: {sfen}");
+                let (ty, color) = piece_from_sfen_char(c)?;
+                anyhow::ensure!(
+                    !promoted || !matches!(ty, PieceType::Gold | PieceType::King),
+                    "成れない駒に成り指定があります: {sfen}"
+                );
+                pos.board[y][x] = Some(Piece::new(ty, color, promoted));
+                promoted = false;
+                x += 1;
+            }
+            anyhow::ensure!(x == 10 && !promoted, "SFEN の段が 9 マスではありません: {sfen}");
+        }
+
+        pos.side_to_move = match side {
+            "b" => Color::Black,
+            "w" => Color::White,
+            _ => bail!("SFEN の手番が不正です: {sfen}"),
+        };
+
+        if hands != "-" {
+            // 1 種類の持ち駒は最大でも歩の 18 枚。
+            const MAX_HAND_COUNT: u32 = 18;
+            let mut count: Option<u32> = None;
+            for c in hands.chars() {
+                if let Some(d) = c.to_digit(10) {
+                    let next = count.unwrap_or(0) * 10 + d;
+                    anyhow::ensure!(
+                        (1..=MAX_HAND_COUNT).contains(&next),
+                        "SFEN の持ち駒の枚数が不正です: {sfen}"
+                    );
+                    count = Some(next);
+                    continue;
+                }
+                let (ty, color) = piece_from_sfen_char(c)?;
+                anyhow::ensure!(ty != PieceType::King, "SFEN の持ち駒に玉があります: {sfen}");
+                let hand = match color {
+                    Color::Black => &mut pos.hand_b,
+                    Color::White => &mut pos.hand_w,
+                };
+                for _ in 0..count.take().unwrap_or(1) {
+                    hand.add_demoted(ty);
+                }
+            }
+            anyhow::ensure!(count.is_none(), "SFEN の持ち駒が枚数で終わっています: {sfen}");
+        }
+
+        if let Some(ply) = fields.next() {
+            pos.ply = ply.parse().with_context(|| format!("SFEN の手数が不正です: {sfen}"))?;
+        }
+        Ok(pos)
+    }
+
     pub fn to_sfen(&self) -> String {
         // board strings from rank 1 (top) to 9 (bottom)
         let mut out = String::new();
@@ -534,6 +633,71 @@ pub enum EvalCommentStyle {
     LegacyServerPost,
 }
 
+/// `'summary:` 行が示す勝敗。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SummaryResult {
+    /// 先手の勝ち。
+    BlackWin,
+    /// 後手の勝ち。
+    WhiteWin,
+    /// 引き分け。
+    Draw,
+}
+
+/// shogi-server (wdoor) 形式の `'summary:<理由>:<先手名> <結果>:<後手名> <結果>` 行。
+///
+/// 終局コマンド（`%TORYO` など）と違い、勝敗を手番に頼らず明示する。wdoor の棋譜は
+/// 反則負けや連続王手の千日手を `%` コマンドなしで終えるため、勝敗はこの行でしか
+/// 分からないことがある。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CsaSummary {
+    /// 終局理由（`toryo` / `time up` / `illegal move` など、wdoor の表記のまま）。
+    pub reason: String,
+    /// 勝敗。
+    pub result: SummaryResult,
+}
+
+impl CsaSummary {
+    /// `'summary:` より後ろの部分を解釈する。勝敗が読めなければ `None`。
+    ///
+    /// 対局者名は見ない（`<名前>+<hash>` 形式で書かれることがある）。先手・後手は
+    /// 並び順で決まる。
+    pub fn parse(rest: &str) -> Option<Self> {
+        let (reason, players) = rest.trim().split_once(':')?;
+        let (black, white) = players.rsplit_once(':')?;
+        let word = |part: &str| part.trim().rsplit(' ').next().map(str::to_owned);
+        let result = match (word(black)?.as_str(), word(white)?.as_str()) {
+            ("win", "lose") => SummaryResult::BlackWin,
+            ("lose", "win") => SummaryResult::WhiteWin,
+            ("draw", "draw") => SummaryResult::Draw,
+            _ => return None,
+        };
+        Some(Self {
+            reason: reason.trim().to_owned(),
+            result,
+        })
+    }
+
+    /// 終局理由を終局コマンド相当の [`SpecialMove`] に直す。未知の理由は `None`。
+    ///
+    /// 反則系（`illegal move` / `oute_kaihimore` / `oute_sennichite` など）は
+    /// [`SpecialMove::IllegalMove`]、`abnormal` は [`SpecialMove::Interrupt`] にまとめる。
+    pub fn special_move(&self) -> Option<SpecialMove> {
+        Some(match self.reason.as_str() {
+            "toryo" => SpecialMove::Resign,
+            "kachi" => SpecialMove::Win,
+            "time up" => SpecialMove::TimeUp,
+            "illegal move" | "uchifuzume" | "oute_kaihimore" | "outori" | "illegal kachi"
+            | "oute_sennichite" => SpecialMove::IllegalMove,
+            "sennichite" => SpecialMove::Sennichite,
+            "jishogi" => SpecialMove::Jishogi,
+            "max_moves" => SpecialMove::MaxMoves,
+            "abnormal" => SpecialMove::Interrupt,
+            _ => return None,
+        })
+    }
+}
+
 /// CSA棋譜から抽出した対局メタデータ
 #[derive(Clone, Debug, Default)]
 pub struct GameInfo {
@@ -541,6 +705,8 @@ pub struct GameInfo {
     pub white_name: Option<String>,
     pub black_rating: Option<f64>,
     pub white_rating: Option<f64>,
+    /// `'summary:` 行（あれば最後のもの）。勝敗の判定では終局コマンドより優先する。
+    pub summary: Option<CsaSummary>,
 }
 
 impl GameInfo {
@@ -574,7 +740,7 @@ pub fn parse_csa_full(text: &str) -> Result<(Position, Vec<ParsedMove>, GameInfo
 
 /// CSA棋譜を完全パースし、通常手と同じ順序の先手視点評価値も返す。
 ///
-/// csa_client の `'*` は直後の通常手、wdoor の `'**` は直前の通常手に対応する。
+/// 旧版 csa_client の `'*` は直後の通常手、wdoor と現行 csa_client の `'**` は直前の通常手に対応する。
 pub fn parse_csa_full_with_evals(text: &str) -> Result<ParsedCsaWithEvals> {
     parse_csa_full_with_evals_style(text, EvalCommentStyle::Standard)
 }
@@ -658,6 +824,12 @@ pub fn parse_csa_full_with_evals_style(
                 }
             } else {
                 pending_eval_cp_black = cp;
+            }
+            continue;
+        }
+        if let Some(rest) = s.strip_prefix("'summary:") {
+            if let Some(summary) = CsaSummary::parse(rest) {
+                info.summary = Some(summary);
             }
             continue;
         }
@@ -777,6 +949,12 @@ fn rank_to_usi(rank: u8) -> char {
     (b'a' + rank - 1) as char
 }
 
+/// USIの筋(1-9) → 数値
+fn usi_file_to_num(c: u8) -> Result<u8> {
+    anyhow::ensure!((b'1'..=b'9').contains(&c), "invalid USI file char: {}", c as char);
+    Ok(c - b'0')
+}
+
 /// USIアルファベット(a-i) → CSA段番号(1-9)
 fn usi_rank_to_num(c: u8) -> Result<u8> {
     anyhow::ensure!((b'a'..=b'i').contains(&c), "invalid USI rank char: {}", c as char);
@@ -877,14 +1055,14 @@ pub fn usi_move_to_csa(mv: &str, pos: &Position) -> Result<String> {
     if bytes.len() >= 4 && bytes[1] == b'*' {
         // 駒打ち: P*7f → +0076FU
         let csa_code = usi_drop_to_csa_code(bytes[0])?;
-        let to_file = bytes[2] - b'0';
+        let to_file = usi_file_to_num(bytes[2])?;
         let to_rank = usi_rank_to_num(bytes[3])?;
         write!(out, "00{}{}{}", to_file, to_rank, csa_code).unwrap();
     } else {
         // 通常手: 7g7f → +7776FU
-        let from_file = bytes[0] - b'0';
+        let from_file = usi_file_to_num(bytes[0])?;
         let from_rank = usi_rank_to_num(bytes[1])?;
-        let to_file = bytes[2] - b'0';
+        let to_file = usi_file_to_num(bytes[2])?;
         let to_rank = usi_rank_to_num(bytes[3])?;
         let promote = bytes.len() >= 5 && bytes[4] == b'+';
 
@@ -1216,6 +1394,97 @@ P-00KA
         let (pos, _, _) = parse_csa(text).unwrap();
         let sfen = pos.to_sfen();
         assert_eq!(sfen, "lnsgkgsnl/9/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+    }
+
+    #[test]
+    fn test_from_sfen_roundtrip() {
+        for sfen in [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "ln1g1g1nl/1ks2r3/1pppp1bpp/p3spp2/9/P1P1SP1PP/1P1PP1P2/1BK1GR3/LNSG3NL w - 20",
+            "4k4/9/9/9/9/9/9/9/4K4 w RB2G2S2N2L9Prb2g2s2n2l9p 101",
+            "+P+L+N+S3k1/9/9/9/9/9/9/9/+p+l+n+s+B+R1K1 b 12P 7",
+        ] {
+            assert_eq!(Position::from_sfen(sfen).unwrap().to_sfen(), sfen);
+        }
+        // 手数省略時は 1。
+        assert_eq!(Position::from_sfen("4k4/9/9/9/9/9/9/9/4K4 b -").unwrap().ply, 1);
+    }
+
+    #[test]
+    fn test_from_sfen_rejects_bad_hand_counts() {
+        for hands in [
+            "256P",
+            "19P",
+            "0P",
+            "4294967296P",
+            "99999999999999999999P",
+            "1",
+            "2",
+        ] {
+            let sfen = format!("4k4/9/9/9/9/9/9/9/4K4 b {hands} 1");
+            assert!(Position::from_sfen(&sfen).is_err(), "should reject: {sfen}");
+        }
+        let pos = Position::from_sfen("4k4/9/9/9/9/9/9/9/4K4 b 18P2r 1").unwrap();
+        assert_eq!(pos.to_sfen(), "4k4/9/9/9/9/9/9/9/4K4 b 18P2r 1");
+    }
+
+    #[test]
+    fn test_usi_move_to_csa_rejects_garbage_without_panicking() {
+        let pos = initial_position();
+        for mv in [
+            "(3c3d)", "/g7f", "7g/f", "P*/f", " g7f", "7g7", "", "resign", "abcd", "7x7f",
+        ] {
+            assert!(usi_move_to_csa(mv, &pos).is_err(), "should reject: {mv:?}");
+        }
+        assert_eq!(usi_move_to_csa("7g7f", &pos).unwrap(), "+7776FU");
+    }
+
+    #[test]
+    fn test_parse_summary_line() {
+        let parse = |tail: &str| {
+            let text = format!("V2\nN+A\nN-B\nPI\n+\n+7776FU\nT1\n{tail}");
+            parse_csa_full(&text).unwrap().2.summary
+        };
+        let s = parse("%TORYO\n'summary:toryo:A win:B lose\n").unwrap();
+        assert_eq!((s.reason.as_str(), s.result), ("toryo", SummaryResult::BlackWin));
+        assert_eq!(s.special_move(), Some(SpecialMove::Resign));
+        // 名前に `+hash` や空白が入っても、勝敗は並び順と末尾の語で決まる。
+        let s = parse("'summary:time up:A+0123 lose:B x win\n").unwrap();
+        assert_eq!((s.reason.as_str(), s.result), ("time up", SummaryResult::WhiteWin));
+        assert_eq!(s.special_move(), Some(SpecialMove::TimeUp));
+        let s = parse("'summary:sennichite:A draw:B draw\n").unwrap();
+        assert_eq!(s.result, SummaryResult::Draw);
+        for (reason, expected) in [
+            ("illegal move", Some(SpecialMove::IllegalMove)),
+            ("oute_kaihimore", Some(SpecialMove::IllegalMove)),
+            ("oute_sennichite", Some(SpecialMove::IllegalMove)),
+            ("kachi", Some(SpecialMove::Win)),
+            ("max_moves", Some(SpecialMove::MaxMoves)),
+            ("abnormal", Some(SpecialMove::Interrupt)),
+            ("something new", None),
+        ] {
+            let s = parse(&format!("'summary:{reason}:A win:B lose\n")).unwrap();
+            assert_eq!(s.special_move(), expected, "{reason}");
+        }
+        // 勝敗が読めない行・summary のない棋譜は None。
+        assert_eq!(parse("'summary:toryo:A win\n"), None);
+        assert_eq!(parse("'summary:abnormal:A win:B win\n"), None);
+        assert_eq!(parse("%TORYO\n"), None);
+    }
+
+    #[test]
+    fn test_from_sfen_rejects_malformed() {
+        for sfen in [
+            "",
+            "4k4/9/9/9/9/9/9/9 b - 1",
+            "4k5/9/9/9/9/9/9/9/4K4 b - 1",
+            "4k4/9/9/9/9/9/9/9/4K4 x - 1",
+            "4k4/9/9/9/9/9/9/9/4K4 b 2 1",
+            "4+k4/9/9/9/9/9/9/9/4K4 b - 1",
+            "4k4/9/9/9/9/9/9/9/4K4 b K 1",
+        ] {
+            assert!(Position::from_sfen(sfen).is_err(), "should reject: {sfen:?}");
+        }
     }
 
     #[test]

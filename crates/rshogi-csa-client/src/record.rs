@@ -5,11 +5,14 @@ use std::fmt::Write as _;
 use anyhow::Result;
 use chrono::Local;
 
-use rshogi_csa::{Color, Position, csa_move_to_usi, usi_move_to_csa};
+use rshogi_csa::{Color, Position, csa_move_to_usi};
 
 use crate::config::RecordConfig;
+use crate::csa_writer::{
+    CsaGameEnd, CsaGameHeader, CsaTimeLimit, EndReason, MoveEval, WdoorCsaWriter, jst_naive,
+};
 use crate::engine::SearchInfo;
-use crate::protocol::{GameSummary, TimeConfig};
+use crate::protocol::{GameResult, GameSummary, TimeConfig};
 
 /// 対局中に蓄積する棋譜データ
 #[derive(Clone, Debug)]
@@ -22,8 +25,18 @@ pub struct GameRecord {
     /// 対局開始時の局面
     pub initial_position: Position,
     pub moves: Vec<RecordedMove>,
+    /// 終局理由。[`EndReason::as_str`] の値か、サーバーが理由行を送らなかったときの
+    /// `win` / `lose`。未終局・切断は空文字。JSONL の `result.reason` にも同じ値が入る。
     pub result: String,
+    /// 勝者。引き分け・中断・未終局は `None`。CSA の `'summary:` 行に使う。
+    pub winner: Option<Color>,
     pub start_time: chrono::DateTime<Local>,
+    /// 終局を記録した時刻。CSA の `'$END_TIME:` 行に使う。
+    pub end_time: Option<chrono::DateTime<Local>>,
+    /// 送ったがサーバーに受理されなかった自分の最後の手（CSA 形式）。反則負けや
+    /// 時間切れでは手のエコーが返らず、その手は対局の指し手に含まれない。`moves` には
+    /// 入れず、反則負けのとき CSA に `'ILLEGAL_MOVE(<手>)` コメントとして残す。
+    pub rejected_move: Option<String>,
     /// 自エンジンの手番。JSONL 出力モードで `outcome` / `winner` の正規化に使う。
     pub my_color: Color,
     /// JSONL 出力モード用に蓄積する手単位の追加情報。CSA / SFEN 棋譜出力には影響しない。
@@ -127,7 +140,10 @@ impl GameRecord {
             initial_position: summary.position.clone(),
             moves: Vec::new(),
             result: String::new(),
+            winner: None,
             start_time: Local::now(),
+            end_time: None,
+            rejected_move: None,
             my_color: summary.my_color,
             jsonl_moves: Vec::new(),
         }
@@ -275,8 +291,38 @@ impl GameRecord {
         }
     }
 
+    /// 終局理由だけを記録する。サーバーの最終結果を待つ前（自分の `%TORYO` /
+    /// `%KACHI` 送信直後）に使い、結果が届いたら [`GameRecord::set_game_end`] で確定する。
     pub fn set_result(&mut self, result: &str) {
         self.result = result.to_string();
+    }
+
+    /// サーバーのエコーが返らないまま終局した自分の最後の手を、指し手列から外す。
+    ///
+    /// CSA サーバーは受理した手を消費時間つきでエコーしてから終局を通知する。エコーなしで
+    /// 終局した手（反則手、時間切れ後に届いた手など）は対局の指し手ではないので、棋譜に
+    /// 残すとサーバーの記録と食い違い、合法手として再生できなくなる。外した手は
+    /// `rejected_move` に残す。
+    pub fn reject_unconfirmed_last_move(&mut self) {
+        let Some(last) = self.moves.pop() else {
+            return;
+        };
+        // JSONL 用の追加情報は `moves` と同時に積まれる。対応が崩れないよう一緒に外す。
+        if self.jsonl_moves.len() > self.moves.len() {
+            self.jsonl_moves.truncate(self.moves.len());
+        }
+        self.rejected_move = Some(last.csa_move);
+    }
+
+    /// 終局理由とサーバーの最終結果を記録する。勝者と終局時刻もここで確定する。
+    pub fn set_game_end(&mut self, reason: &str, result: &GameResult) {
+        self.result = reason.to_string();
+        self.winner = match result {
+            GameResult::Win => Some(self.my_color),
+            GameResult::Lose => Some(opposite(self.my_color)),
+            GameResult::Draw | GameResult::Interrupted | GameResult::Censored => None,
+        };
+        self.end_time = Some(Local::now());
     }
 
     /// CSA形式の棋譜テキストを生成する
@@ -285,80 +331,49 @@ impl GameRecord {
     }
 
     /// record の種別を明示して CSA 形式の棋譜テキストを生成する。
+    ///
+    /// 書式は wdoor の公開棋譜と同じ（指し手 → `T<秒>` → `'** <先手視点評価値> <読み筋>`、
+    /// 末尾に `'summary:` と `'$END_TIME:`）。時刻は JST。詳細は [`crate::csa_writer`] を参照。
     pub fn to_csa_with_status(&self, status: &RecordStatus) -> String {
-        let mut out = String::new();
-        writeln!(out, "V2.2").unwrap();
-        if let RecordStatus::ReconnectFragment { reason } = status {
-            writeln!(out, "'RECONNECT_FRAGMENT: {reason}").unwrap();
-        }
-        writeln!(out, "N+{}", self.sente_name).unwrap();
-        writeln!(out, "N-{}", self.gote_name).unwrap();
-        writeln!(out, "$EVENT:{}", self.game_id).unwrap();
-        writeln!(out, "$START_TIME:{}", self.start_time.format("%Y/%m/%d %H:%M:%S")).unwrap();
-        // 先手の時間設定を $TIME_LIMIT に出力（CSA標準）
-        let total_sec = (self.black_time.total_time_ms / 1000) as u32;
-        let byoyomi_sec = (self.black_time.byoyomi_ms / 1000) as u32;
-        let inc_sec = (self.black_time.increment_ms / 1000) as u32;
-        if inc_sec > 0 {
-            writeln!(out, "$TIME_LIMIT:{}:{:02}+{:02}F", total_sec / 60, total_sec % 60, inc_sec)
-                .unwrap();
-        } else {
-            writeln!(
-                out,
-                "$TIME_LIMIT:{}:{:02}+{:02}",
-                total_sec / 60,
-                total_sec % 60,
-                byoyomi_sec
-            )
-            .unwrap();
-        }
-        // 初期局面出力
-        write!(out, "{}", self.initial_position.to_csa_board()).unwrap();
-        writeln!(out).unwrap();
-
-        // 盤面追跡（PV の USI→CSA 変換に使用）
-        let mut pos = self.initial_position.clone();
-
-        for m in &self.moves {
-            // floodgate 形式コメント（評価値 + PV）
-            if let Some(score) = m.effective_score() {
-                write!(out, "'* {score}").unwrap();
-                if !m.pv.is_empty() {
-                    let mut pv_pos = pos.clone();
-                    for usi_mv in &m.pv {
-                        if let Ok(csa) = usi_move_to_csa(usi_mv, &pv_pos) {
-                            write!(out, " {csa}").unwrap();
-                            if pv_pos.apply_csa_move(&csa).is_err() {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                writeln!(out).unwrap();
+        let leading_comment = match status {
+            RecordStatus::Complete => None,
+            RecordStatus::ReconnectFragment { reason } => {
+                Some(format!("RECONNECT_FRAGMENT: {reason}"))
             }
-            writeln!(out, "{}", m.csa_move).unwrap();
-            writeln!(out, "T{}", m.time_sec).unwrap();
-            let _ = pos.apply_csa_move(&m.csa_move);
+        };
+        // 先手の時間設定を $TIME_LIMIT に出力（CSA標準）
+        let header = CsaGameHeader {
+            sente_name: &self.sente_name,
+            gote_name: &self.gote_name,
+            event: &self.game_id,
+            // CSA の時刻にはタイムゾーン表記がなく、棋譜サーバーは JST として読む。
+            start_time: jst_naive(&self.start_time),
+            time_limit: Some(CsaTimeLimit {
+                total_sec: ms_to_sec(self.black_time.total_time_ms),
+                byoyomi_sec: ms_to_sec(self.black_time.byoyomi_ms),
+                increment_sec: ms_to_sec(self.black_time.increment_ms),
+            }),
+            leading_comment: leading_comment.as_deref(),
+        };
+        let mut writer = WdoorCsaWriter::new(&header, &self.initial_position);
+        for m in &self.moves {
+            let eval = m.effective_score().map(|score_black| MoveEval {
+                score_black,
+                pv_usi: &m.pv,
+            });
+            // 適用できない手が混じっても棋譜の行は残す。以降の読み筋は変換できず
+            // 評価値だけになる。
+            if let Err(err) = writer.push_move(&m.csa_move, u64::from(m.time_sec), eval) {
+                log::warn!("[REC] 棋譜の指し手を局面に適用できません: {} ({err:#})", m.csa_move);
+            }
         }
-
-        // 終局コマンド
-        match self.result.as_str() {
-            "resign" => writeln!(out, "%TORYO").unwrap(),
-            "win_declaration" => writeln!(out, "%KACHI").unwrap(),
-            "sennichite" => writeln!(out, "%SENNICHITE").unwrap(),
-            "time_up" => writeln!(out, "%TIME_UP").unwrap(),
-            "illegal_move" => writeln!(out, "%ILLEGAL_MOVE").unwrap(),
-            "jishogi" => writeln!(out, "%JISHOGI").unwrap(),
-            "max_moves" => writeln!(out, "%MAX_MOVES").unwrap(),
-            "interrupted" => writeln!(out, "%CHUDAN").unwrap(),
-            // サーバーからの #WIN/#LOSE/#DRAW（終局理由付きなら上書き済み）
-            "win" => writeln!(out, "%TORYO").unwrap(), // 相手が投了した（こちらの勝ち）
-            "lose" => writeln!(out, "%TORYO").unwrap(), // こちらが負けた
-            _ => {}
-        }
-        out
+        let end = EndReason::from_record_result(&self.result).map(|reason| CsaGameEnd {
+            reason,
+            winner: self.winner,
+            end_time: self.end_time.as_ref().map(jst_naive),
+            rejected_move: self.rejected_move.clone(),
+        });
+        writer.finish(end.as_ref())
     }
 
     /// SFEN局面列を生成する（学習データ用）。
@@ -437,6 +452,17 @@ impl RecordStatus {
             Self::ReconnectFragment { .. } => "_reconnect_fragment",
         }
     }
+}
+
+fn opposite(color: Color) -> Color {
+    match color {
+        Color::Black => Color::White,
+        Color::White => Color::Black,
+    }
+}
+
+fn ms_to_sec(ms: i64) -> u64 {
+    u64::try_from(ms).unwrap_or(0) / 1000
 }
 
 fn sanitize_filename(name: &str) -> String {
