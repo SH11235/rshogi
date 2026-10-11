@@ -14,6 +14,11 @@ core 変更を公開する PR では `crates/rshogi-core/Cargo.toml` のバー�
 
 ## Unreleased
 
+- `tournament` に後手専用のフィッシャー時計 `--wtime` / `--winc` を追加。
+  省略時は従来どおり先手の `--btime` / `--binc` と同値。時計はエンジンではなく先後に割り当てる。
+  先手の残り時間・加算が 0 でも後手の時計が残っていれば `go` に時計引数を送る (自己対局の共通ドライバの修正で、`gensfen` / `spsa` にも適用)。
+  `jsonl_to_kif` は旧ログの後手時計を先手値で補完し、加算時間も記載する。
+
 - `tournament` に勝ち裁定 `--adjudicate-win` と開始局面の循環割り当て
   `--startpos-order sequential` を追加。`analyze_selfplay --by-startpos` で複数 run の
   開始局面別の先後成績・平均所要時間・手順数を合算し、同一エンジンによる定跡候補比較に対応。

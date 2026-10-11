@@ -183,7 +183,21 @@ struct KifMetaSettings {
     #[serde(default)]
     btime: u64,
     #[serde(default)]
-    wtime: u64,
+    wtime: Option<u64>,
+    #[serde(default)]
+    binc: u64,
+    #[serde(default)]
+    winc: Option<u64>,
+}
+
+impl KifMetaSettings {
+    fn white_time(&self) -> u64 {
+        self.wtime.unwrap_or(self.btime)
+    }
+
+    fn white_increment(&self) -> u64 {
+        self.winc.unwrap_or(self.binc)
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -208,12 +222,23 @@ fn export_game_to_kif<W: Write>(
 
     let timestamp = meta.map(|m| m.timestamp.clone()).unwrap_or_else(|| "-".to_string());
     let (black_name, white_name) = engine_names_for(meta);
-    let (btime, wtime) = meta.map(|m| (m.settings.btime, m.settings.wtime)).unwrap_or((0, 0));
+    let (btime, wtime) =
+        meta.map(|m| (m.settings.btime, m.settings.white_time())).unwrap_or((0, 0));
     writeln!(writer, "開始日時：{}", timestamp)?;
     writeln!(writer, "手合割：平手")?;
     writeln!(writer, "先手：{}", black_name)?;
     writeln!(writer, "後手：{}", white_name)?;
     writeln!(writer, "持ち時間：先手{}ms / 後手{}ms", btime, wtime)?;
+    if let Some(settings) = meta.map(|m| &m.settings)
+        && (settings.binc > 0 || settings.white_increment() > 0)
+    {
+        writeln!(
+            writer,
+            "加算時間：先手{}ms / 後手{}ms",
+            settings.binc,
+            settings.white_increment()
+        )?;
+    }
     writeln!(writer, "開始局面：{}", start_sfen)?;
     writeln!(writer, "手数----指手---------消費時間--")?;
 
@@ -450,6 +475,42 @@ fn format_hh_mm_ss(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn white_clock_defaults_only_when_missing() {
+        for (json, expected_time, expected_inc) in [
+            (r#"{"btime":1000,"binc":200}"#, 1000, 200),
+            (r#"{"btime":1000,"binc":200,"wtime":0,"winc":0}"#, 0, 0),
+            (r#"{"btime":1000,"binc":200,"wtime":0}"#, 0, 200),
+            (r#"{"btime":1000,"binc":200,"winc":0}"#, 1000, 0),
+            (r#"{"btime":1000,"binc":200,"wtime":6000,"winc":300}"#, 6000, 300),
+        ] {
+            let settings: KifMetaSettings = serde_json::from_str(json).unwrap();
+            assert_eq!(settings.white_time(), expected_time);
+            assert_eq!(settings.white_increment(), expected_inc);
+            let meta = KifMeta {
+                settings,
+                ..Default::default()
+            };
+            let game = GameLog {
+                moves: vec![MoveEntry {
+                    game_id: 1,
+                    ply: 1,
+                    sfen_before: "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"
+                        .into(),
+                    move_usi: "resign".into(),
+                    elapsed_ms: None,
+                    eval: None,
+                }],
+                ..Default::default()
+            };
+            let mut output = Vec::new();
+            export_game_to_kif(&mut output, Some(&meta), 1, &game).unwrap();
+            let kif = String::from_utf8(output).unwrap();
+            assert!(kif.contains(&format!("持ち時間：先手1000ms / 後手{expected_time}ms")));
+            assert!(kif.contains(&format!("加算時間：先手200ms / 後手{expected_inc}ms")));
+        }
+    }
 
     #[test]
     fn filter_matches_all_when_empty() {

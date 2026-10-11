@@ -9,7 +9,39 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 
-use super::types::{InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest, duration_to_millis};
+use super::types::{
+    InfoCallback, InfoSnapshot, SearchOutcome, SearchRequest, TimeArgs, duration_to_millis,
+};
+
+/// 先後の時計から USI の時間制御コマンドを構築する。
+fn build_time_command(time_args: &TimeArgs) -> String {
+    // byoyomi のみの場合は "go byoyomi N" だけを送る（btime 0 等を付けると
+    // 一部エンジンが btime=0 を「持ち時間なし」と解釈して即指しする）
+    if time_args.byoyomi > 0
+        && time_args.btime == 0
+        && time_args.wtime == 0
+        && time_args.binc == 0
+        && time_args.winc == 0
+    {
+        // 純粋な秒読みモード
+        format!("go byoyomi {}", time_args.byoyomi)
+    } else if time_args.byoyomi > 0 {
+        // 持ち時間 + 秒読み
+        format!(
+            "go btime {} wtime {} byoyomi {}",
+            time_args.btime, time_args.wtime, time_args.byoyomi
+        )
+    } else if time_args.btime > 0 || time_args.wtime > 0 || time_args.binc > 0 || time_args.winc > 0
+    {
+        // フィッシャー（先後の持ち時間・加算時間、byoyomi なし）
+        format!(
+            "go btime {} wtime {} binc {} winc {}",
+            time_args.btime, time_args.wtime, time_args.binc, time_args.winc
+        )
+    } else {
+        String::from("go")
+    }
+}
 
 /// queue に行が残っていても、期限到達後は読み続けない。
 pub(crate) fn receive_before_deadline(
@@ -325,32 +357,7 @@ impl EngineProcess {
             || time_args.binc > 0
             || time_args.winc > 0;
 
-        // 時間制御コマンドを構築
-        // byoyomi のみの場合は "go byoyomi N" だけを送る（btime 0 等を付けると
-        // 一部エンジンが btime=0 を「持ち時間なし」と解釈して即指しする）
-        let time_cmd = if time_args.byoyomi > 0
-            && time_args.btime == 0
-            && time_args.wtime == 0
-            && time_args.binc == 0
-            && time_args.winc == 0
-        {
-            // 純粋な秒読みモード
-            format!("go byoyomi {}", time_args.byoyomi)
-        } else if time_args.byoyomi > 0 {
-            // 持ち時間 + 秒読み
-            format!(
-                "go btime {} wtime {} byoyomi {}",
-                time_args.btime, time_args.wtime, time_args.byoyomi
-            )
-        } else if time_args.btime > 0 || time_args.binc > 0 {
-            // フィッシャー（btime/binc のみ、byoyomi なし）
-            format!(
-                "go btime {} wtime {} binc {} winc {}",
-                time_args.btime, time_args.wtime, time_args.binc, time_args.winc
-            )
-        } else {
-            String::from("go")
-        };
+        let time_cmd = build_time_command(time_args);
 
         if has_limit && has_time {
             // 組み合わせモード: 時間制御 + depth/nodes 目標
@@ -1014,5 +1021,31 @@ done
         .unwrap();
         engine.initialize(&cfg).unwrap();
         assert_eq!(std::fs::read_to_string(log).unwrap().trim(), first_cpu.to_string());
+    }
+}
+
+#[cfg(test)]
+mod time_command_tests {
+    use super::*;
+    #[test]
+    fn time_command_preserves_clock_shapes() {
+        for (btime, wtime, binc, winc, byoyomi, expected) in [
+            (0, 6000, 0, 200, 0, "go btime 0 wtime 6000 binc 0 winc 200"),
+            (0, 6000, 0, 0, 0, "go btime 0 wtime 6000 binc 0 winc 0"),
+            (0, 0, 0, 200, 0, "go btime 0 wtime 0 binc 0 winc 200"),
+            (1000, 1000, 200, 200, 0, "go btime 1000 wtime 1000 binc 200 winc 200"),
+            (0, 0, 0, 0, 1000, "go byoyomi 1000"),
+            (1000, 2000, 0, 0, 500, "go btime 1000 wtime 2000 byoyomi 500"),
+            (0, 0, 0, 0, 0, "go"),
+        ] {
+            let args = TimeArgs {
+                btime,
+                wtime,
+                binc,
+                winc,
+                byoyomi,
+            };
+            assert_eq!(build_time_command(&args), expected);
+        }
     }
 }
