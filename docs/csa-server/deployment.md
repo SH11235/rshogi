@@ -485,6 +485,91 @@ requestのため共有deadlineを持たず、レスポンスの `deadline_reache
 初回公開後の key rotation / late insert rebuild 中は
 旧 `active_generation` を返し続け、clean な次世代が完成した時点で切り替える。
 
+### 3.2.2 外部棋譜を取り込む
+
+wdoor の Floodgate 対局や大会棋譜は、管理トークン付きの API で取り込む。取り込んだ
+対局は `source` が `wdoor` / `upload` になり、一覧・検索・単局 API にそのまま出る。
+player ID を持たず、内部レーティングの集計とプレイヤー詳細の対局一覧には入らない
+（取り込み後の warmup / 再集計は不要）。
+
+```bash
+# wdoor の対局 ID を渡すと、Worker が wdoor から CSA を 1 回だけ取得して保存する
+curl --fail-with-body -X POST \
+  -H "Authorization: Bearer ${ADMIN_API_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"wdoor_game_id":"wdoor+floodgate-300-10F+RAMU+Panda+20261009000001"}' \
+  "${WORKER_URL}/api/v1/admin/games/import-wdoor"
+
+# CSA 本文を直接送る（event は任意のタグ。source を "wdoor" にすると $EVENT の対局 ID から
+# 参照取り込みと同じ game_id を決める）
+jq -n --rawfile csa game.csa '{csa: $csa, event: "WCSC36"}' | curl --fail-with-body -X POST \
+  -H "Authorization: Bearer ${ADMIN_API_TOKEN}" -H "Content-Type: application/json" \
+  -d @- "${WORKER_URL}/api/v1/admin/games/upload"
+```
+
+- 応答は `{"game_id": "...", "created": true}`。保存済みの対局は本文を書き換えず
+  `created: false` を返す（wdoor への再取得もしない）。`"force": true` を付けたときだけ
+  上書きする。
+- 本文は 512KB まで（超過は 413）。`$START_TIME` / `$END_TIME` は JST として解釈する。
+- `upload` は `$START_TIME`（`YYYY/MM/DD HH:MM:SS` または `YYYY/MM/DD`）が必須で、無いと 422。
+  `source: "wdoor"` のときは `event` の指定を無視し、`$EVENT` の対局 ID に含まれる
+  ゲーム名（例 `floodgate-300-10F`）をタグにする。`$START_TIME` が無ければ対局 ID の時刻を使う。
+- `upload` の持ち時間は `$TIME_LIMIT:HH:MM+SS`（持ち時間 + 秒読み）から読む。`'Increment:<秒>`
+  が正の値ならフィッシャー（持ち時間 + 加算）として扱う。`$TIME_LIMIT` が無ければ持ち時間は
+  記録しない。`source: "wdoor"` はゲーム名（`<名前>-<持ち時間秒>-<秒読み秒>`、末尾 `F` で
+  フィッシャー）から読む。
+- `import-wdoor` は対局中（`'summary:` 行なし）なら 409。wdoor に棋譜が無ければ 404 で、
+  応答本文は固定文字列 `Not Found on wdoor`。手元アーカイブからの `upload` に切り替えて
+  よいのはこの本文の 404 だけ（経路が無いなどの 404 は本文が異なる）。
+- 指し手を初期局面から合法手として再生できない棋譜、`+` / `-` で始まる行が指し手の形に
+  なっていない棋譜は 422。
+- wdoor が 200 / 404 以外を返した、リダイレクトした、10 秒以内に応答しなかった、別の対局の
+  本文を返した場合と、R2 / D1 への書き込みに失敗した場合は 502。
+- **502 のあとは同じリクエストをそのまま再実行する。** 本文と meta まで書けていた対局は
+  保存済みとして扱い、meta から一覧 index と検索用 D1 を書き直す（`created: false`）。
+  検索用 D1 の cron backfill は全走査後は最新 100 件しか再訪しないので、過去日付の対局は
+  この再実行でしか直らない。
+- `force` の上書きが 502 で終わった場合は、`force` を付けたまま再実行する。途中で止まると
+  本文と meta の版がずれたり、一覧から一時的に消えたりしうるが、`force` の再実行は本文・
+  meta・一覧 index・D1 を必ず全部書き直す。
+- 保存済みの meta が壊れて読めない対局は、`force` なしだと 502（本文
+  `Stored meta is unreadable; retry with force`）になる。`force` を付けると、前回の終了時刻が
+  分からないので `games-index/` 全体を R2 list で走査して（終局済み対局 1000 件につき list
+  1 回、最大 30 回 = 3 万件）その対局の古い一覧 index を消してから書き直す。この経路に入ると
+  `kifu_import_stale_index_scan_started` が、30 回で走査しきれなかった場合は
+  `kifu_import_stale_index_scan_truncated` がログに出る（どちらも `level: "warn"`、`game_id` つき）。
+- 既知の制限: `force` で終了時刻が変わる上書きと、cron の games-index backfill が同じ対局の
+  古い meta を読んだ直後に重なると、古い一覧 index が書き戻されて同じ対局が一覧に 2 件出る
+  ことがある。`force` をやり直しても消えない（meta は新しい終了時刻を持つので、古い index の
+  key を計算できない）。上の走査が打ち切られた場合と合わせて、次の手順で手動で消す。
+  1. `GET /api/v1/games/<game_id>` の `meta.ended_at_ms` を正しい終了時刻として控える。
+  2. 一覧 API (`GET /api/v1/games`) を `next_cursor` でページ送りし、同じ `game_id` の entry が
+     2 つ出る箇所を探す。`ended_at_ms` が 1 と違う方が古い index なので、その値を控える。
+  3. 古い index の key は `games-index/<99999999999999 - 古い ended_at_ms を 14 桁ゼロ埋め>-<game_id>.json`。
+     例: `ended_at_ms = 1791472810000` なら `games-index/98208527189999-<game_id>.json`。
+  4. `wrangler r2 object delete <bucket>/<key> --remote` で消す（bucket は `wrangler.<env>.toml`
+     の `KIFU_BUCKET` の `bucket_name`）。一覧 API の edge cache が切れる 60 秒後に 1 件に戻る。
+- 上書きした対局の単局 API (`GET /api/v1/games/<id>`) は edge cache が切れる
+  最大 600 秒後まで古い内容を返すことがある。
+- **自前サーバー（この Worker）が出力した CSA の `upload` は非対応。** 自前サーバーの対局は
+  最初から同じ一覧に入っている。形式も合わず、時刻が UTC で書かれている（9 時間ずれる）うえ、
+  `%ILLEGAL_MOVE` の意味が CSA 規定と逆（手番側の負け）なので勝敗が反転する。
+
+タグの一覧は `GET /api/v1/games/events` で取れる（他の一覧 API と同じ Origin 検査と 60 秒
+キャッシュ）。`event` を持つ対局を `(event, source)` ごとに数え、件数の多い順に
+`{"events": [{"event": "WCSC36", "source": "upload", "games": 123}]}` を返す。検索は
+`GET /api/v1/games/search?source=wdoor,upload&event=WCSC36` のように `source` の複数指定と
+`event` の完全一致で絞り込める。
+
+ロールバックの注意: 外部棋譜を取り込んだ後で、この機能より前の Worker に戻すと、旧版の
+レーティング集計は `source` を見ないので外部棋譜の行も読む（集計カーソルより新しい終局時刻の
+行は次回の集計で、古い行は次の全履歴 rebuild で）。外部棋譜の対局者が名前由来の legacy ID で
+選手一覧に現れ、同じハンドル名の自前対局者とは Elo が合算される。旧版に戻すときは、先に
+`DELETE FROM games_search_index WHERE source IN ('wdoor','upload')` で D1 の行だけ消す。
+R2 の本文と meta は残るので、新版に戻した後に同じ取り込みを再実行すれば D1 は復元される。
+旧版が外部棋譜を集計してしまった場合は、新版に戻してから
+`UPDATE player_rating_state SET rebuild_required = 1, data_revision = data_revision + 1`
+で全履歴を再集計する。
+
 ### 3.3 DO migration 確認
 
 `wrangler deployments list` は migration tag を表示しない。確認手段は 2 つ:

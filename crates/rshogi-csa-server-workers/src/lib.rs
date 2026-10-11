@@ -44,6 +44,7 @@ pub mod export_retry;
 pub mod floodgate_history;
 pub mod games_index;
 pub mod games_search_index;
+pub mod kifu_import;
 pub mod player_identity;
 pub mod player_rating_materialization;
 pub mod player_ratings;
@@ -96,6 +97,8 @@ pub(crate) mod observability;
 
 #[cfg(target_arch = "wasm32")]
 mod game_room;
+#[cfg(target_arch = "wasm32")]
+mod kifu_import_api;
 #[cfg(target_arch = "wasm32")]
 mod lobby;
 #[cfg(target_arch = "wasm32")]

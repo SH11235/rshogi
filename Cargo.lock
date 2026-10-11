@@ -2668,6 +2668,7 @@ dependencies = [
  "futures-util",
  "hmac",
  "rshogi-core",
+ "rshogi-csa",
  "rshogi-csa-server",
  "serde",
  "serde_json",

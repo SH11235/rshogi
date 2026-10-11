@@ -2709,8 +2709,10 @@ impl GameRoom {
             // 整数手数を要求するため u32 に正規化する。`DEFAULT_MAX_MOVES = 256`
             // 上限のため通常は 0..=256 に収まる。
             moves_count: moves_count_for_index,
-            clock: IndexClockSpec::from_server(&cfg.clock),
+            clock: Some(IndexClockSpec::from_server(&cfg.clock)),
             source,
+            event: None,
+            origin_url: None,
         };
 
         // 1 度シリアライズして meta primary / games-index secondary の双方に

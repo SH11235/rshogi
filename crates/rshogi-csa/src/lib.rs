@@ -527,8 +527,9 @@ fn parse_hand_setup(pos: &mut Position, color: Color, payload: &str) -> Result<(
     );
     let mut i = 0;
     while i + 4 <= bytes.len() {
-        let file = bytes[i] - b'0';
-        let rank = bytes[i + 1] - b'0';
+        // 数字以外の byte でも underflow させず、後段の範囲チェックで弾く。
+        let file = bytes[i].wrapping_sub(b'0');
+        let rank = bytes[i + 1].wrapping_sub(b'0');
         let code = std::str::from_utf8(&bytes[i + 2..i + 4])
             .with_context(|| format!("invalid UTF-8 in P+/P- payload: {payload}"))?;
         let (pt, promoted) = piece_from_csa_code(code)?;
@@ -876,10 +877,12 @@ pub fn parse_csa_full_with_evals_style(
         }
         if is_csa_move_line(s) {
             let mv = s[..7].to_string();
-            // インライン消費時間: +7776FU,T30
+            // インライン消費時間: +7776FU,T30 / +7776FU,T30,'コメント
             let time_sec = s
                 .get(7..)
-                .and_then(|rest| rest.strip_prefix(",T").and_then(|t| t.parse::<u32>().ok()));
+                .and_then(|rest| rest.strip_prefix(",T"))
+                .and_then(|t| t.split(',').next())
+                .and_then(|t| t.parse::<u32>().ok());
             moves.push(ParsedMove::Normal(CsaMove { mv, time_sec }));
             evals.push(pending_eval_cp_black.take());
             follows_inline_timed_move = time_sec.is_some();
@@ -928,8 +931,9 @@ fn parse_pi_removal(pos: &mut Position, payload: &str) -> Result<()> {
     );
     let mut i = 0;
     while i + 4 <= bytes.len() {
-        let file = bytes[i] - b'0';
-        let rank = bytes[i + 1] - b'0';
+        // 数字以外の byte でも underflow させず、後段の範囲チェックで弾く。
+        let file = bytes[i].wrapping_sub(b'0');
+        let rank = bytes[i + 1].wrapping_sub(b'0');
         let x = csa_file_to_x(file)?;
         let y = csa_rank_to_y(rank)?;
         // 対象マスの駒を除去
@@ -1301,6 +1305,20 @@ P-00KA
     }
 
     #[test]
+    fn test_parse_time_inline_followed_by_comment() {
+        let text = "PI\n+7776FU,T5,'* 30 -3334FU, +2726FU\n-3334FU,'* -20\n";
+        let (_, moves, _, _evals) = parse_csa_full_with_evals(text).unwrap();
+        let times: Vec<Option<u32>> = moves
+            .iter()
+            .map(|m| match m {
+                ParsedMove::Normal(cm) => cm.time_sec,
+                ParsedMove::Special(_) => None,
+            })
+            .collect();
+        assert_eq!(times, vec![Some(5), None]);
+    }
+
+    #[test]
     fn test_parse_time_standalone_t_line() {
         let text = "PI\n+7776FU\nT5\n-3334FU\nT10\n";
         let (_, moves, _, _evals) = parse_csa_full_with_evals(text).unwrap();
@@ -1546,5 +1564,13 @@ P-51OU
         let (pos, _, _) = parse_csa("P+55OU\nP-51OU\nP+00FU\n+\n").unwrap();
         assert_eq!(csa_move_to_usi("+0076FU", &pos).unwrap(), "P*7f");
         assert_eq!(usi_move_to_csa("P*7f", &pos).unwrap(), "+0076FU");
+    }
+
+    #[test]
+    fn non_digit_square_in_setup_lines_is_an_error_not_a_panic() {
+        // b'0' 未満の byte (空白や `*`) を含んでも減算 underflow で panic しない。
+        for text in ["P+ *FU\n", "P-5 OU\n", "PI *HI\n", "PI8 HI\n"] {
+            assert!(parse_csa(text).is_err(), "text={text:?}");
+        }
     }
 }

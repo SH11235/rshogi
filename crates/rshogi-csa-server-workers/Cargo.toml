@@ -23,6 +23,8 @@ rshogi-csa-server = { path = "../rshogi-csa-server", default-features = false, f
 # NNUE の edition 軸をコンパイルしない (ビルド時間削減・他 crate への feature 漏れ防止) よう
 # default-features=false とする。未参照コードはリンク時に除去されるため bundle サイズへの効果は小さい。
 rshogi-core = { path = "../rshogi-core", default-features = false }
+# 外部棋譜取り込み (`kifu_import`) で CSA 本文の parse に使う。
+rshogi-csa = { path = "../rshogi-csa" }
 serde.workspace = true
 serde_json.workspace = true
 # chrono はホスト／wasm32 で挙動を揃えるため `clock` 既定を切り、

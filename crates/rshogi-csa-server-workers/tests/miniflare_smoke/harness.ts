@@ -1,7 +1,13 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { convertV4MiniflareOptions, Miniflare, type WebSocket } from "miniflare";
+import {
+  convertV4MiniflareOptions,
+  Miniflare,
+  type Request as MfRequest,
+  type Response as MfResponse,
+  type WebSocket,
+} from "miniflare";
 
 /// `mf.getR2Bucket(...)` の戻り値は miniflare が `ReplaceWorkersTypes<R2Bucket>`
 /// (大きな conditional type) として返し、tsc の構造的推論で `Request_2` などに
@@ -87,6 +93,10 @@ export interface HarnessOptions {
   byoyomiMin?: number;
   clockKind?: "countdown" | "countdown_msec" | "fischer" | "stopwatch";
   wsAllowedOrigins?: string;
+  /// Worker が発行する外向き `fetch()` の差し替え先。外部棋譜の参照取り込み
+  /// (`import-wdoor`) が wdoor へ出す 1 リクエストを、実ネットワークに出さずに
+  /// テスト内の handler で受ける。未指定時は miniflare 既定 (実ネットワーク)。
+  outboundService?: (request: MfRequest) => MfResponse | Promise<MfResponse>;
   adminApiToken?: string;
   playerIdSecret?: string;
   /// `WORKERS_HANDLE_AUTH` whitelist (issue #664) のオーバーライド。
@@ -146,6 +156,7 @@ export async function createMiniflare(opts: HarnessOptions): Promise<Miniflare> 
       { type: "CompiledWasm" as const, path: resolve(WORKER_ROOT, "build/index_bg.wasm") },
     ],
     compatibilityDate: "2026-04-21",
+    ...(opts.outboundService ? { outboundService: opts.outboundService } : {}),
     durableObjects: {
       GAME_ROOM: { className: "GameRoom", useSQLite: true },
       LOBBY: { className: "Lobby", useSQLite: true },
@@ -244,6 +255,7 @@ async function applyGamesSearchMigrations(mf: Miniflare): Promise<void> {
     "0002_games_index_backfill_state.sql",
     "0003_games_search_index_player_ids.sql",
     "0004_player_rating_materialization.sql",
+    "0005_games_search_index_event.sql",
   ]) {
     const sql = await readFile(resolve(WORKER_ROOT, "migrations", name), "utf8");
     for (const statement of sql.split(";").map((part) => part.trim()).filter(Boolean)) {

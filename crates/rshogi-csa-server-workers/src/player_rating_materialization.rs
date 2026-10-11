@@ -32,6 +32,20 @@ fn deadline_reached(deadline_at_ms: Option<u64>, now_ms: u64) -> bool {
     deadline_at_ms.is_some_and(|deadline| now_ms >= deadline)
 }
 
+/// レーティング集計が 1 page 分の対局を読む SQL。
+///
+/// 外部棋譜 (`wdoor` / `upload`) は内部 Elo の対象外なので読み飛ばす。cursor 条件
+/// (`ended_at_ms`, `game_id` の昇順) は括弧でまとめ、source 条件と AND する。
+/// bind は `cursor_ended_at_ms` ×2、`cursor_game_id`、`LIMIT` の 4 個。
+#[cfg(any(target_arch = "wasm32", test))]
+fn game_page_sql() -> String {
+    format!(
+        "SELECT {columns} FROM games_search_index WHERE {not_external} AND (ended_at_ms > ? OR (ended_at_ms = ? AND game_id > ?)) ORDER BY ended_at_ms ASC, game_id ASC LIMIT ?",
+        columns = crate::games_search_index::SEARCH_ROW_COLUMNS,
+        not_external = crate::games_index::NOT_EXTERNAL_SOURCE_SQL,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MaterializationOutcome {
     pub processed_games: u32,
@@ -50,8 +64,8 @@ mod imp {
     use worker::{Date, Env, Result};
 
     use super::{
-        MAX_PAGES_PER_RUN, MaterializationOutcome, PAGE_SIZE, deadline_reached, lease_was_acquired,
-        page_reached_end, snapshot_is_ready,
+        MAX_PAGES_PER_RUN, MaterializationOutcome, PAGE_SIZE, deadline_reached, game_page_sql,
+        lease_was_acquired, page_reached_end, snapshot_is_ready,
     };
     use crate::config::ConfigKeys;
     use crate::games_search_index::SearchRow;
@@ -285,11 +299,7 @@ mod imp {
             JsValue::from_str(&state.cursor_game_id),
             JsValue::from_f64(f64::from(PAGE_SIZE)),
         ];
-        db.prepare("SELECT game_id, started_at_ms, ended_at_ms, sente_name, gote_name, black_player_id, white_player_id, wire_result_kind, end_reason, moves_count, clock_json, source FROM games_search_index WHERE ended_at_ms > ? OR (ended_at_ms = ? AND game_id > ?) ORDER BY ended_at_ms ASC, game_id ASC LIMIT ?")
-            .bind(&values)?
-            .all()
-            .await?
-            .results::<SearchRow>()
+        db.prepare(game_page_sql()).bind(&values)?.all().await?.results::<SearchRow>()
     }
 
     async fn canonicalize_page(
@@ -446,6 +456,19 @@ mod tests {
         assert!(!super::snapshot_is_ready(Some(1), 2, false));
         assert!(!super::snapshot_is_ready(Some(2), 2, true));
         assert!(super::snapshot_is_ready(Some(2), 2, false));
+    }
+
+    #[test]
+    fn game_page_excludes_external_sources_without_breaking_cursor() {
+        let sql = super::game_page_sql();
+        assert!(
+            sql.contains(
+                "WHERE source NOT IN ('wdoor','upload') AND (ended_at_ms > ? OR (ended_at_ms = ? AND game_id > ?)) ORDER BY ended_at_ms ASC, game_id ASC LIMIT ?"
+            ),
+            "sql={sql}"
+        );
+        // bind 配列 (cursor ×2, game_id, limit) と placeholder 数が一致する。
+        assert_eq!(sql.matches('?').count(), 4);
     }
 
     #[test]
