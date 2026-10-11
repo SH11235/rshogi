@@ -55,7 +55,10 @@ use worker::{
 };
 
 use crate::config::ConfigKeys;
-use crate::games_index::{SOURCE_UPLOAD, SOURCE_WDOOR, games_index_key};
+use crate::games_index::{
+    KEY_PREFIX as GAMES_INDEX_PREFIX, SOURCE_UPLOAD, SOURCE_WDOOR, games_index_key,
+    is_games_index_key_of,
+};
 use crate::games_search_index::OwnedGamesIndexEntry;
 use crate::kifu_import::{
     ImportError, ImportedGame, MAX_CSA_BYTES, WDOOR_NOT_FOUND_BODY, WdoorGameId, import_upload,
@@ -70,6 +73,18 @@ const MAX_IMPORT_WDOOR_BODY_BYTES: usize = 4 * 1024;
 /// `upload` のリクエスト本文の上限。CSA 本文 (512KB) が JSON 文字列として
 /// エスケープされる分 (最悪 1 byte → `\uXXXX` の 6 byte) を見込む。
 const MAX_UPLOAD_BODY_BYTES: usize = 6 * MAX_CSA_BYTES + 4 * 1024;
+
+/// 壊れた meta を `force` で上書きするときに、古い games-index を探して走査する
+/// R2 list の最大ページ数 (1 ページ 1000 件)。
+///
+/// 走査は `games-index/` 全体で、list 回数は「終局済み対局数 / 1000」の切り上げ。
+/// 現状の数百局なら 1 回、1 万局で 10 回。壊れた meta への `force` という稀な経路でしか
+/// 走らないので、1 リクエストの list を 30 回 (3 万局ぶん) までに抑え、それを超えたら
+/// 走査を打ち切ってログに残し、手動整理 (`docs/csa-server/deployment.md` §3.2.2) に任せる。
+const STALE_INDEX_SCAN_MAX_PAGES: u32 = 30;
+
+/// R2 list の 1 ページの件数 (R2 の上限)。
+const STALE_INDEX_SCAN_PAGE_SIZE: u32 = 1000;
 
 /// wdoor への fetch (応答ヘッダ + 本文の読み切り) にかけてよい時間。
 const WDOOR_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -223,8 +238,9 @@ async fn load_existing(
 /// 保存済みの対局について、meta から派生する games-index と D1 を書き直す。
 ///
 /// 前回の取り込みが games-index / D1 の書き込みで失敗していても、同じリクエストの
-/// 再実行で直るようにする。games-index は無いときだけ put し、D1 は内容が違うとき
-/// だけ書き換わるので、欠けが無ければ R2 head 1 回 + D1 の空振り 1 回で終わる。
+/// 再実行で直るようにする。games-index は無いときだけ put する。D1 は保存時と同じ値
+/// (`clock_json` も `canonical_clock_json` で同じ文字列) を upsert するので、内容が
+/// 違うときだけ書き換わる。欠けが無ければ R2 head 1 回 + 1 行も変えない D1 文 1 回で終わる。
 async fn repair_and_respond(
     env: &Env,
     bucket: &Bucket,
@@ -372,14 +388,29 @@ async fn store_and_respond(
 
     // 上書きで終了時刻が変わると games-index の key も変わる。古い key を残すと一覧に
     // 同じ対局が 2 件出るので、何かを書き換える前に消す。消せなければ何も変えずに返す。
-    let previous_index_key = existing
-        .and_then(|existing| existing.entry.as_ref())
-        .and_then(|previous| games_index_key(previous.ended_at_ms, &previous.game_id).ok())
-        .filter(|previous_key| *previous_key != index_key);
-    if let Some(previous_key) = previous_index_key
-        && let Err(e) = bucket.delete(&previous_key).await
-    {
-        return storage_error("kifu_import_stale_index_delete", &game.game_id, &e.to_string());
+    let stale_index_keys = match existing {
+        None => Vec::new(),
+        Some(ExistingGame {
+            entry: Some(previous),
+            ..
+        }) => games_index_key(previous.ended_at_ms, &previous.game_id)
+            .ok()
+            .filter(|previous_key| *previous_key != index_key)
+            .into_iter()
+            .collect(),
+        // meta が壊れていて前回の終了時刻が分からない。games-index 全体から、この対局の
+        // key を探す。
+        Some(ExistingGame { entry: None, .. }) => {
+            match find_index_keys_of(bucket, &game.game_id, &index_key).await {
+                Ok(keys) => keys,
+                Err(e) => return storage_error("kifu_import_stale_index_scan", &game.game_id, &e),
+            }
+        }
+    };
+    for stale_key in &stale_index_keys {
+        if let Err(e) = bucket.delete(stale_key).await {
+            return storage_error("kifu_import_stale_index_delete", &game.game_id, &e.to_string());
+        }
     }
 
     let csa_key = kifu_by_id_object_key(&game.game_id);
@@ -404,6 +435,55 @@ async fn store_and_respond(
         source: game.source,
     );
     import_response(&game.game_id, true)
+}
+
+/// `games-index/` 全体を走査して、`game_id` の key のうち `keep_key` 以外を集める。
+///
+/// 保存済みの meta が読めず、前回の終了時刻から key を計算できないときだけ使う。
+/// [`STALE_INDEX_SCAN_MAX_PAGES`] に達しても続きがある場合は、見つかった分だけ返して
+/// warn ログを残す (残りがあれば一覧に重複が出るので、手動で整理する)。
+async fn find_index_keys_of(
+    bucket: &Bucket,
+    game_id: &str,
+    keep_key: &str,
+) -> std::result::Result<Vec<String>, String> {
+    crate::structured_log!(
+        event: "kifu_import_stale_index_scan_started",
+        component: "kifu_import",
+        level: "warn",
+        game_id: game_id,
+        detail: "stored meta is unreadable; scanning games-index for stale entries",
+    );
+    let mut found = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..STALE_INDEX_SCAN_MAX_PAGES {
+        let mut list = bucket.list().prefix(GAMES_INDEX_PREFIX).limit(STALE_INDEX_SCAN_PAGE_SIZE);
+        if let Some(cursor) = cursor.as_deref() {
+            list = list.cursor(cursor);
+        }
+        let page = list.execute().await.map_err(|e| e.to_string())?;
+        found.extend(
+            page.objects()
+                .into_iter()
+                .map(|object| object.key())
+                .filter(|key| key != keep_key && is_games_index_key_of(key, game_id)),
+        );
+        if !page.truncated() {
+            return Ok(found);
+        }
+        cursor = page.cursor();
+        if cursor.is_none() {
+            return Err("games-index list is truncated without a cursor".to_owned());
+        }
+    }
+    crate::structured_log!(
+        event: "kifu_import_stale_index_scan_truncated",
+        component: "kifu_import",
+        level: "warn",
+        game_id: game_id,
+        detail: "games-index scan stopped at the page limit; a stale entry may remain",
+    );
+    Ok(found)
 }
 
 fn import_response(game_id: &str, created: bool) -> Result<Response> {

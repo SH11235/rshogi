@@ -66,6 +66,23 @@ pub fn games_index_key(ended_at_ms: u64, game_id: &str) -> Result<String, Storag
     Ok(format!("{KEY_PREFIX}{inv:014}-{validated}.json"))
 }
 
+/// `key` が `game_id` の games-index key (`games-index/<inv 14 桁>-<game_id>.json`) か。
+///
+/// key の先頭は終了時刻由来なので、`game_id` から前方一致では引けない。終了時刻が
+/// 分からない対局の index を探すときに、list した key をこの関数でふるい分ける。
+/// `<game_id>` 部分は完全一致で比べる (別の対局の ID が同じ文字列で終わっていても拾わない)。
+pub fn is_games_index_key_of(key: &str, game_id: &str) -> bool {
+    const INV_DIGITS: usize = 14;
+    let Some(rest) = key.strip_prefix(KEY_PREFIX) else {
+        return false;
+    };
+    let bytes = rest.as_bytes();
+    bytes.len() > INV_DIGITS
+        && bytes[..INV_DIGITS].iter().all(u8::is_ascii_digit)
+        && bytes[INV_DIGITS] == b'-'
+        && rest[INV_DIGITS + 1..].strip_suffix(".json") == Some(game_id)
+}
+
 /// games-index に書き込む 1 entry の wire format。
 ///
 /// API contract A (https://github.com/SH11235/rshogi/issues/542 issuecomment-4338125621) に準拠し、`result_kind` /
@@ -601,6 +618,40 @@ mod tests {
         for source in [SOURCE_WDOOR, SOURCE_UPLOAD] {
             assert!(NOT_EXTERNAL_SOURCE_SQL.contains(&format!("'{source}'")));
         }
+    }
+
+    #[test]
+    fn games_index_key_ownership_matches_only_the_exact_game_id() {
+        let game_id = "wdoor-20261009000001-93ef4d36a6";
+        for ended_at_ms in [0, 1, 1_777_392_877_244, INV_BASE] {
+            let key = games_index_key(ended_at_ms, game_id).unwrap();
+            assert!(is_games_index_key_of(&key, game_id), "key={key}");
+        }
+        let key = games_index_key(1_777_392_877_244, game_id).unwrap();
+        for other in [
+            "20261009000001-93ef4d36a6",
+            "93ef4d36a6",
+            "x-wdoor-20261009000001-93ef4d36a6",
+            "wdoor-20261009000001-93ef4d36a",
+            "",
+        ] {
+            assert!(!is_games_index_key_of(&key, other), "other={other:?}");
+        }
+        // 別の対局の ID が同じ文字列で終わっていても拾わない。
+        let longer = games_index_key(1, "prefix-wdoor-20261009000001-93ef4d36a6").unwrap();
+        assert!(!is_games_index_key_of(&longer, game_id));
+        for malformed in [
+            "games-index/",
+            "games-index/123-g.json",
+            "games-index/1234567890123x-g.json",
+            "games-index/12345678901234_g.json",
+            "games-index/12345678901234-g",
+            "live-games-index/12345678901234-g.json",
+            "kifu-by-id/g.meta.json",
+        ] {
+            assert!(!is_games_index_key_of(malformed, "g"), "key={malformed}");
+        }
+        assert!(is_games_index_key_of("games-index/12345678901234-g.json", "g"));
     }
 
     #[test]

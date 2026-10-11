@@ -209,6 +209,16 @@ pub fn result_kind_for_search(end_reason: &str) -> &'static str {
     }
 }
 
+/// D1 の `clock_json` 列に保存する文字列を作る。
+///
+/// 終局時・取り込み時は構造体 ([`crate::games_index::ClockSpec`])、backfill や取り込みの
+/// 修復は R2 の meta を読み戻した JSON 値から作る。どちらも一度 `serde_json::Value` に
+/// 通してキーを昇順に揃えるので、同じ持ち時間なら同じ文字列になり、経路が変わっても
+/// upsert の「内容が違うときだけ書く」判定が空振りする。`None` は JSON の `null`。
+pub fn canonical_clock_json<T: Serialize>(clock: &T) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&serde_json::to_value(clock)?)
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct OwnedGamesIndexEntry {
     pub game_id: String,
@@ -319,7 +329,7 @@ impl SearchRow {
             wire_result_kind: entry.result_kind.clone(),
             end_reason: entry.end_reason.clone(),
             moves_count: entry.moves_count,
-            clock_json: serde_json::to_string(&entry.clock)?,
+            clock_json: canonical_clock_json(&entry.clock)?,
             source: entry.source.clone(),
             event: entry.event.clone(),
             origin_url: entry.origin_url.clone(),
@@ -354,7 +364,7 @@ impl SearchRow {
 
 #[cfg(target_arch = "wasm32")]
 pub async fn upsert_entry(env: &worker::Env, entry: &GamesIndexEntry<'_>) -> worker::Result<()> {
-    let clock_json = serde_json::to_string(&entry.clock)?;
+    let clock_json = canonical_clock_json(&entry.clock)?;
     upsert_fields(
         env,
         UpsertFields {
@@ -379,7 +389,7 @@ pub async fn upsert_entry(env: &worker::Env, entry: &GamesIndexEntry<'_>) -> wor
 
 #[cfg(target_arch = "wasm32")]
 pub async fn upsert_owned(env: &worker::Env, entry: &OwnedGamesIndexEntry) -> worker::Result<()> {
-    let clock_json = serde_json::to_string(&entry.clock)?;
+    let clock_json = canonical_clock_json(&entry.clock)?;
     upsert_fields(
         env,
         UpsertFields {
@@ -430,7 +440,9 @@ fn optional_text(value: Option<&str>) -> worker::wasm_bindgen::JsValue {
 /// player ID は付けず (`NULL`)、レーティング集計の対象外なので
 /// `player_rating_state` の revision / rebuild マーカーにも触れない。過去日時の
 /// 棋譜を大量に取り込んでも Elo の全履歴 rebuild を誘発しない。自前対局の upsert と
-/// 同じく、内容が変わらない行は書き換えない (保存済み対局の修復で毎回呼ばれるため)。
+/// 同じく、内容が変わらない行は書き換えない。保存済み対局への再リクエスト (修復) で
+/// 毎回呼ばれるが、`clock_json` は [`canonical_clock_json`] で保存時と同じ文字列に
+/// なるので、欠けが無ければ 1 行も書かない。
 #[cfg(target_arch = "wasm32")]
 async fn upsert_external_fields(
     db: &worker::D1Database,
@@ -777,6 +789,65 @@ mod tests {
         // 先手・後手の OR 全体を括弧で閉じてから source 条件を AND する。
         assert!(predicate.starts_with("(("));
         assert!(predicate.ends_with("))) AND source NOT IN ('wdoor','upload')"));
+    }
+
+    #[test]
+    fn clock_json_is_identical_from_struct_and_from_stored_meta() {
+        use crate::games_index::{ClockSpec, GamesIndexEntry};
+        let server_clocks = [
+            rshogi_csa_server::ClockSpec::Countdown {
+                total_time_sec: 600,
+                byoyomi_sec: 10,
+            },
+            rshogi_csa_server::ClockSpec::Fischer {
+                total_time_sec: 300,
+                increment_sec: 10,
+            },
+            rshogi_csa_server::ClockSpec::CountdownMsec {
+                total_time_ms: 60_000,
+                byoyomi_ms: 100,
+            },
+            rshogi_csa_server::ClockSpec::StopWatch {
+                total_time_min: 15,
+                byoyomi_min: 2,
+            },
+        ];
+        let clocks = server_clocks.iter().map(|clock| Some(ClockSpec::from_server(clock)));
+        for clock in clocks.chain(std::iter::once(None)) {
+            // 保存経路: 構造体から直接。
+            let from_struct = canonical_clock_json(&clock).unwrap();
+            // 修復 / backfill 経路: meta JSON を読み戻した値から。
+            let entry = GamesIndexEntry {
+                game_id: "g",
+                started_at_ms: 1,
+                ended_at_ms: 2,
+                black_handle: "a",
+                white_handle: "b",
+                black_player_id: None,
+                white_player_id: None,
+                result_kind: "DRAW",
+                end_reason: "SENNICHITE",
+                moves_count: 0,
+                clock,
+                source: "upload",
+                event: None,
+                origin_url: None,
+            };
+            let meta = serde_json::to_vec(&entry).unwrap();
+            let owned: OwnedGamesIndexEntry = serde_json::from_slice(&meta).unwrap();
+            assert_eq!(canonical_clock_json(&owned.clock).unwrap(), from_struct);
+            assert_eq!(SearchRow::from_owned(&owned).unwrap().clock_json, from_struct);
+        }
+        // キーは昇順。構造体の宣言順 (kind が先頭) には依存しない。
+        let fischer = ClockSpec::from_server(&rshogi_csa_server::ClockSpec::Fischer {
+            total_time_sec: 300,
+            increment_sec: 10,
+        });
+        assert_eq!(
+            canonical_clock_json(&Some(fischer)).unwrap(),
+            r#"{"increment_sec":10,"kind":"fischer","total_sec":300}"#
+        );
+        assert_eq!(canonical_clock_json(&None::<ClockSpec<'_>>).unwrap(), "null");
     }
 
     #[test]

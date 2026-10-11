@@ -155,7 +155,10 @@ describe("miniflare smoke: external kifu import API", () => {
   // 障害を作るテストに限ってここで広げる。
   async function kifuBucket() {
     const bucket = await getKifuBucket(mf);
-    return bucket as typeof bucket & { delete(key: string): Promise<void> };
+    return bucket as typeof bucket & {
+      delete(key: string): Promise<void>;
+      put(key: string, value: string): Promise<unknown>;
+    };
   }
 
   async function indexKeys(): Promise<string[]> {
@@ -461,6 +464,92 @@ describe("miniflare smoke: external kifu import API", () => {
     expect(((await list.json()) as { games: unknown[] }).games).toHaveLength(1);
   });
 
+  it("repeating a stored request does not rewrite the search index row", async () => {
+    // 保存経路と修復経路で D1 に渡す値 (clock_json の文字列を含む) が同じなら、再実行は
+    // 1 行も書かない。INSERT / UPDATE を trigger で数えて直接確かめる。
+    const requests = [
+      { csa: uploadCsa(), event: "WCSC36" }, // countdown の clock
+      { csa: uploadCsa("'no clock").replace("$TIME_LIMIT:00:15+05\n", "") }, // clock なし
+      { csa: WDOOR_CSA, source: "wdoor" }, // fischer の clock
+    ];
+    for (const request of requests) {
+      const res = await upload(request);
+      expect(((await res.json()) as { created: boolean }).created).toBe(true);
+    }
+    const db = await mf.getD1Database("GAMES_SEARCH_DB");
+    const rowsSql =
+      "SELECT game_id, sente_name, gote_name, black_player_id, white_player_id, started_at_ms, ended_at_ms, result_kind, source, moves_count, wire_result_kind, end_reason, clock_json, event, origin_url FROM games_search_index ORDER BY game_id";
+    const before = (await db.prepare(rowsSql).all()).results;
+    expect(before).toHaveLength(3);
+    // キー昇順の正規形で保存されている。
+    expect(before.map((row: Record<string, unknown>) => row.clock_json).sort()).toEqual([
+      "null",
+      '{"byoyomi_sec":5,"kind":"countdown","total_sec":900}',
+      '{"increment_sec":10,"kind":"fischer","total_sec":300}',
+    ]);
+
+    await db.prepare("CREATE TABLE search_index_writes (game_id TEXT NOT NULL, op TEXT NOT NULL)").run();
+    await db
+      .prepare(
+        "CREATE TRIGGER search_index_update_audit AFTER UPDATE ON games_search_index BEGIN INSERT INTO search_index_writes VALUES (NEW.game_id, 'update'); END",
+      )
+      .run();
+    await db
+      .prepare(
+        "CREATE TRIGGER search_index_insert_audit AFTER INSERT ON games_search_index BEGIN INSERT INTO search_index_writes VALUES (NEW.game_id, 'insert'); END",
+      )
+      .run();
+
+    for (const request of requests) {
+      const res = await upload(request);
+      expect(((await res.json()) as { created: boolean }).created).toBe(false);
+    }
+    expect((await db.prepare("SELECT * FROM search_index_writes").all()).results).toEqual([]);
+    expect((await db.prepare(rowsSql).all()).results).toEqual(before);
+
+    // trigger が効いていることの確認: 行を消してから再実行すると INSERT が 1 回記録される。
+    await db.prepare("DELETE FROM games_search_index WHERE game_id = ?").bind(WDOOR_GAME_ID).run();
+    await (await upload(requests[2])).arrayBuffer();
+    expect((await db.prepare("SELECT * FROM search_index_writes").all()).results).toEqual([
+      { game_id: WDOOR_GAME_ID, op: "insert" },
+    ]);
+    expect((await db.prepare(rowsSql).all()).results).toEqual(before);
+  });
+
+  it("force over an unreadable meta finds and removes the stale games-index entry", async () => {
+    const first = await upload({ csa: WDOOR_ARCHIVE_WITHOUT_END_TIME, source: "wdoor" });
+    expect(await first.json()).toEqual({ game_id: WDOOR_GAME_ID, created: true });
+    const staleKeys = await indexKeys();
+    expect(staleKeys).toHaveLength(1);
+    // 別の対局の index は走査で巻き込まれない。
+    const other = await upload({ csa: uploadCsa(), event: "WCSC36" });
+    const { game_id: otherGameId } = (await other.json()) as { game_id: string };
+    expect(await indexKeys()).toHaveLength(2);
+
+    // meta を壊す。前回の終了時刻が読めないので、旧 index の key は計算できない。
+    const bucket = await kifuBucket();
+    await bucket.put(`kifu-by-id/${WDOOR_GAME_ID}.meta.json`, "{broken");
+
+    // force なしでは直せない (修復の元になる meta が読めない)。
+    const stuck = await upload({ csa: WDOOR_CSA, source: "wdoor" });
+    expect(stuck.status).toBe(502);
+    expect(await stuck.text()).toBe("Stored meta is unreadable; retry with force");
+
+    // force は games-index を走査して旧 key を消してから書き直す。終了時刻が変わっても
+    // 一覧に同じ対局が 2 件残らない。
+    const forced = await upload({ csa: WDOOR_CSA, source: "wdoor", force: true });
+    expect(await forced.json()).toEqual({ game_id: WDOOR_GAME_ID, created: true });
+    const keys = await indexKeys();
+    expect(keys).toHaveLength(2);
+    expect(keys).not.toContain(staleKeys[0]);
+    expect(keys.filter((key) => key.endsWith(`-${WDOOR_GAME_ID}.json`))).toHaveLength(1);
+    expect(keys.filter((key) => key.endsWith(`-${otherGameId}.json`))).toHaveLength(1);
+    expect(await storedMeta(WDOOR_GAME_ID)).toEqual(WDOOR_META);
+    const list = await viewerGet("/api/v1/games");
+    const games = ((await list.json()) as { games: Array<{ game_id: string }> }).games;
+    expect(games.map((game) => game.game_id).sort()).toEqual([otherGameId, WDOOR_GAME_ID].sort());
+  });
+
   it("import-wdoor repairs a stored game without refetching", async () => {
     wdoorResponse = () => new MfResponse(WDOOR_CSA);
     await (await importWdoor()).arrayBuffer();
@@ -482,6 +571,9 @@ describe("miniflare smoke: external kifu import API", () => {
       ["short move line", { csa: uploadCsa().replace("-3334FU,T4", "-3334") }, 422],
       ["non-digit square", { csa: uploadCsa().replace("-3334FU,T4", "-33a4FU,T4") }, 422],
       ["unknown piece code", { csa: uploadCsa().replace("-3334FU,T4", "-3334XX,T4") }, 422],
+      // 1 行に連結した 2 手目は読まれないので、1 手の棋譜として受理しない。
+      ["chained moves", { csa: uploadCsa().replace("+7776FU,T3\n-3334FU,T4", "+7776FU,T3,-3334FU,T4") }, 422],
+      ["garbage after move", { csa: uploadCsa().replace("-3334FU,T4", "-3334FU,Tabc") }, 422],
       ["no start time", { csa: uploadCsa().replace("$START_TIME:2026/05/03 10:00:00\n", "") }, 422],
       ["empty csa", { csa: "" }, 422],
       ["wdoor source without wdoor event", { csa: uploadCsa(), source: "wdoor" }, 422],
@@ -501,7 +593,9 @@ describe("miniflare smoke: external kifu import API", () => {
     const streamed = await mf.dispatchFetch("http://localhost/api/v1/admin/games/upload", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${ADMIN_TOKEN}` },
-      body: oversizedStream(8 * MAX_CSA_BYTES),
+      // リクエスト本文の上限 (CSA 512KB の JSON エスケープ分を見込んだ 6 倍 + 4KB) を最後の
+      // chunk でちょうど超える量。送信の途中で応答が返って接続が切れるのを避ける。
+      body: oversizedStream(6 * MAX_CSA_BYTES + 4 * 1024 + 1),
       duplex: "half",
     });
     expect(streamed.status).toBe(413);

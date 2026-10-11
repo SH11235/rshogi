@@ -531,9 +531,23 @@ jq -n --rawfile csa game.csa '{csa: $csa, event: "WCSC36"}' | curl --fail-with-b
 - `force` の上書きが 502 で終わった場合は、`force` を付けたまま再実行する。途中で止まると
   本文と meta の版がずれたり、一覧から一時的に消えたりしうるが、`force` の再実行は本文・
   meta・一覧 index・D1 を必ず全部書き直す。
+- 保存済みの meta が壊れて読めない対局は、`force` なしだと 502（本文
+  `Stored meta is unreadable; retry with force`）になる。`force` を付けると、前回の終了時刻が
+  分からないので `games-index/` 全体を R2 list で走査して（終局済み対局 1000 件につき list
+  1 回、最大 30 回 = 3 万件）その対局の古い一覧 index を消してから書き直す。この経路に入ると
+  `kifu_import_stale_index_scan_started` が、30 回で走査しきれなかった場合は
+  `kifu_import_stale_index_scan_truncated` がログに出る（どちらも `level: "warn"`、`game_id` つき）。
 - 既知の制限: `force` で終了時刻が変わる上書きと、cron の games-index backfill が同じ対局の
   古い meta を読んだ直後に重なると、古い一覧 index が書き戻されて同じ対局が一覧に 2 件出る
-  ことがある。もう一度 `force` を実行すれば消える。
+  ことがある。`force` をやり直しても消えない（meta は新しい終了時刻を持つので、古い index の
+  key を計算できない）。上の走査が打ち切られた場合と合わせて、次の手順で手動で消す。
+  1. `GET /api/v1/games/<game_id>` の `meta.ended_at_ms` を正しい終了時刻として控える。
+  2. 一覧 API (`GET /api/v1/games`) を `next_cursor` でページ送りし、同じ `game_id` の entry が
+     2 つ出る箇所を探す。`ended_at_ms` が 1 と違う方が古い index なので、その値を控える。
+  3. 古い index の key は `games-index/<99999999999999 - 古い ended_at_ms を 14 桁ゼロ埋め>-<game_id>.json`。
+     例: `ended_at_ms = 1791472810000` なら `games-index/98208527189999-<game_id>.json`。
+  4. `wrangler r2 object delete <bucket>/<key> --remote` で消す（bucket は `wrangler.<env>.toml`
+     の `KIFU_BUCKET` の `bucket_name`）。一覧 API の edge cache が切れる 60 秒後に 1 件に戻る。
 - 上書きした対局の単局 API (`GET /api/v1/games/<id>`) は edge cache が切れる
   最大 600 秒後まで古い内容を返すことがある。
 - **自前サーバー（この Worker）が出力した CSA の `upload` は非対応。** 自前サーバーの対局は

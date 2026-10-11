@@ -423,12 +423,32 @@ fn is_csa_piece_code(code: &[u8]) -> bool {
     )
 }
 
+/// 指し手 7 文字の後ろに続いてよい形かどうか。
+///
+/// 許すのは「行末」「`,T<数字>`」「`,'` で始まるコメント」「`,T<数字>,'` で始まる
+/// コメント」だけ。[`parse_csa_full`] は 1 行から先頭の指し手 1 つしか読まないので、
+/// `+7776FU,T3,-3334FU,T4` のように指し手を連結した行を通すと 2 手目以降が黙って落ちる。
+fn is_allowed_move_suffix(suffix: &str) -> bool {
+    let Some(rest) = suffix.strip_prefix(',') else {
+        return suffix.is_empty();
+    };
+    if rest.starts_with('\'') {
+        return true;
+    }
+    let Some(time) = rest.strip_prefix('T') else {
+        return false;
+    };
+    let digits = time.bytes().take_while(u8::is_ascii_digit).count();
+    let after_time = &time[digits..];
+    digits > 0 && (after_time.is_empty() || after_time.starts_with(",'"))
+}
+
 /// `+` / `-` で始まる行が、手番指定 (`+` / `-` 単独) か正しい形の指し手であることを確かめる。
 ///
 /// [`parse_csa_full`] は指し手の形に合わない行を黙って読み飛ばすため、そのままだと
 /// `+7776F?` のような壊れた行を含む棋譜が「その手が無かった棋譜」として通ってしまう。
-/// 取り込みでは `<符号><移動元 2 桁><移動先 2 桁><駒種>` の 7 文字と、その後ろが行末か
-/// `,` (`,T<秒>` やコメントの連結) であることを要求する。
+/// 取り込みでは `<符号><移動元 2 桁><移動先 2 桁><駒種>` の 7 文字と、その後ろが
+/// [`is_allowed_move_suffix`] の形であることを要求する。
 fn validate_move_lines(csa: &str) -> Result<(), String> {
     for (index, line) in csa.lines().enumerate() {
         let s = line.trim();
@@ -439,7 +459,7 @@ fn validate_move_lines(csa: &str) -> Result<(), String> {
         let well_formed = bytes.len() >= 7
             && bytes[1..5].iter().all(u8::is_ascii_digit)
             && is_csa_piece_code(&bytes[5..7])
-            && (bytes.len() == 7 || bytes[7] == b',');
+            && is_allowed_move_suffix(&s[7..]);
         if !well_formed {
             return Err(format!("line {} is not a valid move line", index + 1));
         }
@@ -1564,6 +1584,71 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
         // 壊れた行が先頭の指し手でも、0 手の終局として受理しない。
         let csa = "V2.2\nN+a\nN-b\n$START_TIME:2026/05/03 10:00:00\nPI\n+\n+7776F?\n%TORYO\n";
         assert!(matches!(import_upload(csa, None), Err(ImportError::Unplayable(_))));
+    }
+
+    #[test]
+    fn move_suffix_allows_only_time_and_comment() {
+        for ok in [
+            "",
+            ",T0",
+            ",T14",
+            ",'* 12 -8384FU",
+            ",'",
+            ",T3,'* 12 -8384FU",
+            ",T3,'",
+            // コメントの中身は自由 (カンマや指し手らしき文字列を含んでよい)。
+            ",'* 12 +7776FU,T3,-3334FU",
+        ] {
+            assert!(is_allowed_move_suffix(ok), "suffix={ok:?}");
+        }
+        for bad in [
+            ",",
+            ",T",
+            ",Tabc",
+            ",T3x",
+            ",T3,",
+            ",T3,T4",
+            ",T3,-3334FU",
+            ",T3,-3334FU,T4",
+            ",-3334FU",
+            ",X",
+            ",t3",
+            ",T-3",
+            ",T3 ",
+            ", T3",
+            ",T3,%TORYO",
+            ",%TORYO",
+            "T3",
+            " ",
+            "'comment",
+        ] {
+            assert!(!is_allowed_move_suffix(bad), "suffix={bad:?}");
+        }
+    }
+
+    #[test]
+    fn chained_moves_on_one_line_are_rejected_instead_of_dropped() {
+        // 1 行に連結した 2 手目は parser が読まないので、受理すると 1 手の棋譜になってしまう。
+        for line in [
+            "+2726FU,T3,-8384FU,T4",
+            "+2726FU,-8384FU",
+            "+2726FU,T3,-8385FU,T4",
+            "+2726FU,Tabc",
+            "+2726FU,X",
+            "+2726FU,T3,%TORYO",
+        ] {
+            let csa = upload_csa(&format!("{line}\n%TORYO\n"));
+            let result = import_upload(&csa, None);
+            assert!(
+                matches!(&result, Err(ImportError::Unplayable(detail)) if detail.contains("line 11")),
+                "line={line:?} result={result:?}"
+            );
+        }
+        // 時間とコメントの連結は 1 手として通る。
+        let csa = upload_csa("+2726FU,T3,'* 12 -8384FU,T4\n-8384FU,'* -5\n%TORYO\n");
+        let game = import_upload(&csa, None).unwrap();
+        assert_eq!(game.moves_count, 4);
+        assert_eq!((game.result_kind, game.end_reason), ("WIN_WHITE", "RESIGN"));
     }
 
     #[test]
