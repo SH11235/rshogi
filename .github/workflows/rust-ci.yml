@@ -135,6 +135,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: nextest
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - name: Enable sccache
@@ -148,12 +152,20 @@ jobs:
         # profile overrideはcacheにも見せるためjob envで指定する。
         # `[profile.release]` の `lto = "thin"` はテストバイナリ (~90 個) 各々の
         # リンクに適用され、Test job のビルド時間の大半を占める。テスト実行自体は
-        # 全 workspace で ~20 秒なので、CI のテストビルドでは LTO を無効化し
+        # ビルドより短いので、CI のテストビルドでは LTO を無効化し
         # codegen-units を広げて並列コンパイルを優先する (フルビルド実測で 4.8 倍短縮)。
         # overflow-checks 等の release 設定は維持される。本番配備物はそもそも
         # `production` プロファイル (fat LTO) の別 codegen であり、本 job の目的は
         # ロジック検証なので LTO の有無はカバレッジに影響しない。
-        run: cargo test --release --workspace -- --test-threads=2
+        #
+        # cargo-nextest はテストを 1 件ずつ別プロセスで、テストバイナリをまたいで並列に実行する。
+        # `cargo test` はバイナリを 1 つずつ順に実行するため、バイナリ数の多いこの workspace では
+        # 実行時間に差が出る。失敗を 1 回の run で全件把握できるよう fail-fast は切る。
+        run: cargo nextest run --release --workspace --no-fail-fast
+      - name: Run doctests
+        # nextest は doctest を実行しない。テストが失敗した run でも doctest の結果を得る。
+        if: ${{ !cancelled() }}
+        run: cargo test --release --workspace --doc
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
