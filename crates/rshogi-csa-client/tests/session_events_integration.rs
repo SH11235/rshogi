@@ -303,6 +303,89 @@ fn label_for(event: &SessionProgress) -> &'static str {
 }
 
 // ────────────────────────────────────────────
+// 終局理由行が棋譜に残ること
+// ────────────────────────────────────────────
+
+/// 1 手指した直後にサーバーが `reason_line` + `result_line` を返す対局を走らせ、
+/// 記録された棋譜を返す。
+fn record_after_server_end(
+    reason_line: &'static str,
+    result_line: &'static str,
+) -> rshogi_csa_client::GameRecord {
+    let port = spawn_mock_tcp_server(move |reader, writer| {
+        let _ = read_line(reader);
+        write_lines(writer, &["LOGIN:alice OK"]);
+        let lines = game_summary_lines("g-end");
+        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        write_lines(writer, &line_refs);
+        let agree = read_line(reader);
+        assert!(agree.starts_with("AGREE"), "expected AGREE, got: {agree}");
+        write_lines(writer, &["START:g-end"]);
+        let mv = read_line(reader);
+        assert!(mv.starts_with("+7776FU"), "expected client move +7776FU, got: {mv}");
+        write_lines(writer, &["+7776FU,T2", reason_line, result_line]);
+        let _ = read_line(reader);
+    });
+
+    let config = mock_config(mock_usi_engine_script(), SearchInfoEmitPolicy::Disabled);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut conn = CsaConnection::connect("127.0.0.1", port, false).expect("connect");
+    conn.login("alice", "pw").expect("login");
+    let mut engine = common::spawn_engine(
+        &config.engine.path,
+        &config.engine.options,
+        SpawnOptions {
+            ponder: config.game.ponder,
+            startup_timeout: Duration::from_secs(5),
+            stderr_passthrough: false,
+        },
+    )
+    .expect("spawn engine");
+    let (mut sink, _captured) = CapturingSink::new();
+    let outcome = run_game_session_with_events(
+        &config,
+        &mut conn,
+        &mut engine,
+        Arc::clone(&shutdown),
+        &mut sink,
+    );
+    engine.quit();
+    outcome.expect("session ok").record
+}
+
+#[test]
+fn server_end_reason_lines_reach_the_saved_record() {
+    // (理由行, 結果行, record.result, 勝者, CSA の終局コマンド以降の先頭行)
+    let cases = [
+        ("#RESIGN", "#WIN", "resign", Some(Color::Black), "%TORYO"),
+        (
+            "#OUTE_SENNICHITE",
+            "#LOSE",
+            "oute_sennichite",
+            Some(Color::White),
+            "%ILLEGAL_MOVE",
+        ),
+        ("#JISHOGI", "#LOSE", "win_declaration", Some(Color::White), "%KACHI"),
+        ("#ABNORMAL", "#WIN", "abnormal", Some(Color::Black), "%CHUDAN"),
+        ("#SENNICHITE", "#DRAW", "sennichite", None, "%SENNICHITE"),
+        ("#MAX_MOVES", "#CENSORED", "max_moves", None, "%MAX_MOVES"),
+    ];
+    for (reason_line, result_line, expected, winner, csa_command) in cases {
+        let record = record_after_server_end(reason_line, result_line);
+        assert_eq!(record.result, expected, "{reason_line} {result_line}");
+        assert_eq!(record.winner, winner, "{reason_line} {result_line}");
+        assert!(record.end_time.is_some());
+        let csa = record.to_csa();
+        let after_moves = csa.split_once("+7776FU\nT2\n").expect("move lines").1;
+        let after_moves = after_moves
+            .lines()
+            .find(|line| !line.starts_with("'**"))
+            .expect("terminal command");
+        assert_eq!(after_moves, csa_command, "{reason_line} {result_line}\n{csa}");
+    }
+}
+
+// ────────────────────────────────────────────
 // 通常対局フローの event 順テスト
 // ────────────────────────────────────────────
 

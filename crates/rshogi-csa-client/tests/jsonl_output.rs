@@ -35,7 +35,9 @@ fn build_record(my_color: Color) -> GameRecord {
         initial_position: pos,
         moves: Vec::new(),
         result: String::new(),
+        winner: None,
         start_time: chrono::Local::now(),
+        end_time: None,
         my_color,
         jsonl_moves: Vec::new(),
     }
@@ -172,6 +174,97 @@ fn draws_when_interrupted_regardless_of_side() {
     let res: Value = serde_json::from_str(last).unwrap();
     assert_eq!(res["outcome"], "draw");
     assert!(res["winner"].is_null());
+}
+
+/// 終局理由ごとに、JSONL の `reason` と CSA の終局コマンド・`'summary:` が揃うこと。
+#[test]
+fn end_reason_is_written_to_jsonl_and_csa_consistently() {
+    // (記録する理由, サーバーの最終結果, CSA の終局行, summary 行)
+    let cases: [(&str, GameResult, &str, Option<&str>); 11] = [
+        ("resign", GameResult::Win, "%TORYO", Some("'summary:toryo:alice win:bob lose")),
+        (
+            "time_up",
+            GameResult::Lose,
+            "%TIME_UP",
+            Some("'summary:time up:alice lose:bob win"),
+        ),
+        (
+            "illegal_move",
+            GameResult::Win,
+            "%ILLEGAL_MOVE",
+            Some("'summary:illegal move:alice win:bob lose"),
+        ),
+        (
+            "win_declaration",
+            GameResult::Lose,
+            "%KACHI",
+            Some("'summary:kachi:alice lose:bob win"),
+        ),
+        (
+            "oute_sennichite",
+            GameResult::Win,
+            "%ILLEGAL_MOVE\n'OUTE_SENNICHITE",
+            Some("'summary:oute_sennichite:alice win:bob lose"),
+        ),
+        (
+            "sennichite",
+            GameResult::Draw,
+            "%SENNICHITE",
+            Some("'summary:sennichite:alice draw:bob draw"),
+        ),
+        (
+            "jishogi",
+            GameResult::Draw,
+            "%JISHOGI",
+            Some("'summary:jishogi:alice draw:bob draw"),
+        ),
+        (
+            "max_moves",
+            GameResult::Censored,
+            "%MAX_MOVES",
+            Some("'summary:max_moves:alice draw:bob draw"),
+        ),
+        (
+            "abnormal",
+            GameResult::Lose,
+            "%CHUDAN",
+            Some("'summary:abnormal:alice lose:bob win"),
+        ),
+        ("interrupted", GameResult::Interrupted, "%CHUDAN", None),
+        // サーバーが理由行を送らなかった勝ち。CSA は投了扱い、JSONL は `win` のまま。
+        ("win", GameResult::Win, "%TORYO", Some("'summary:toryo:alice win:bob lose")),
+    ];
+    let tmp = tempdir();
+    let config = build_config();
+    for (reason, result, csa_end, summary) in cases {
+        let mut record = build_record(Color::Black);
+        record.set_game_end(reason, &result);
+
+        let path = write_game_jsonl(&tmp, &record, &config, &result).expect("write jsonl");
+        let text = std::fs::read_to_string(&path).expect("read jsonl");
+        let res: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(res["reason"], reason);
+
+        let csa = record.to_csa();
+        let tail = csa.split_once("\n+\n").expect("board end").1;
+        let mut expected = format!("{csa_end}\n");
+        if let Some(summary) = summary {
+            expected.push_str(summary);
+            expected.push('\n');
+        }
+        let end_time = record.end_time.expect("end_time").format("%Y/%m/%d %H:%M:%S");
+        expected.push_str(&format!("'$END_TIME:{end_time}\n"));
+        assert_eq!(tail, expected, "reason={reason}");
+    }
+}
+
+/// 未終局（切断など結果を記録していない）の CSA には終局行を書かない。
+#[test]
+fn csa_without_result_has_no_terminal_lines() {
+    let mut record = build_record(Color::Black);
+    record.add_move("+7776FU", 3, None, Color::Black);
+    let csa = record.to_csa();
+    assert!(csa.ends_with("\n+\n+7776FU\nT3\n"), "{csa}");
 }
 
 #[test]

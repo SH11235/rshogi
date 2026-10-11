@@ -87,7 +87,8 @@ save_jsonl = true                   # false だと集計元が無くエラー(--
 - `--watch` 指定時: 注目相手との対戦一覧
 
 勝敗判定は `result.winner` を基準にする(`winner==me`→勝ち、他名→負け)。winner が無い局は
-`reason` で判別し、`sennichite` / `max_moves` / `jishogi` のみ引き分けに数える。中断・検閲・error
+`reason` で判別し、`sennichite` / `max_moves` / `jishogi` のみ引き分けに数える。`reason` の値は
+[csa_client の終局理由](../../../docs/csa-client.md#終局理由の記録)を参照。中断・検閲・error
 など未完了局(csa_client は `outcome="draw"` / `reason="interrupted"` で書く)は勝率を歪めないよう
 **集計対象外**。対象エンジンが参加していない局(別ハンドルのログ混在)も除外する。除外があれば
 ヘッダに件数(対象不参加 / 中断・未完了)を表示する。

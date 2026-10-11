@@ -406,6 +406,42 @@ floodgate = true
 - `20260328_120030_rshogi_v1_vs_opponent.csa` — CSA形式（評価値コメント付き）
 - `20260328_120030_rshogi_v1_vs_opponent.sfen` — SFEN局面列（タブ区切り: SFEN, 指し手, 評価値）
 
+CSA の書式は wdoor (Floodgate) の公開棋譜と同じ並びにしてある。指し手行 → `T<秒>` 行 →
+`'** <先手視点評価値> <読み筋>` 行（コメントは直前の指し手のもの）の順で、末尾に終局コマンド、
+`'summary:<理由>:<先手名> <win|lose|draw>:<後手名> <win|lose|draw>`、`'$END_TIME:YYYY/MM/DD HH:MM:SS`
+を書く。評価値と読み筋が入るのは自エンジンの手だけで、相手の手には `'**` 行がない
+（相手の評価値は対局中に届かない）。両対局者の評価値が入った棋譜を公開するには
+[kifu_publish](../crates/tools/docs/kifu_publish.md) の `wdoor` で wdoor 版を取り込む。
+
+旧版の `csa_client` は評価値を `'* <評価値> <読み筋>` として指し手の**前**に書き、
+`'summary:` / `'$END_TIME:` は書かなかった。`kifu_player` などの読み取り側は両方の形式に対応している。
+
+#### 終局理由の記録
+
+サーバーが最終結果（`#WIN` / `#LOSE` / `#DRAW` / `#CENSORED` / `#CHUDAN`）の前に送る理由行を、
+CSA の終局コマンドと JSONL の `result.reason` に記録する。
+
+| サーバーの理由行 | JSONL `reason` | CSA の終局コマンド | `'summary:` の理由 |
+|---|---|---|---|
+| `#RESIGN` | `resign` | `%TORYO` | `toryo` |
+| `#TIME_UP` | `time_up` | `%TIME_UP` | `time up` |
+| `#ILLEGAL_MOVE` | `illegal_move` | `%ILLEGAL_MOVE` | `illegal move` |
+| `#JISHOGI` + `#WIN` / `#LOSE`（入玉宣言の成立） | `win_declaration` | `%KACHI` | `kachi` |
+| `#JISHOGI` + `#DRAW` | `jishogi` | `%JISHOGI` | `jishogi` |
+| `#OUTE_SENNICHITE` | `oute_sennichite` | `%ILLEGAL_MOVE` + `'OUTE_SENNICHITE` | `oute_sennichite` |
+| `#SENNICHITE` | `sennichite` | `%SENNICHITE` | `sennichite` |
+| `#MAX_MOVES` | `max_moves` | `%MAX_MOVES` | `max_moves` |
+| `#ABNORMAL`（相手の切断など） | `abnormal` | `%CHUDAN` | `abnormal` |
+| `#CHUDAN` | `interrupted` | `%CHUDAN` | （書かない） |
+| 理由行なしの `#WIN` / `#LOSE` | `win` / `lose` | `%TORYO` | `toryo` |
+| 理由行なしの `#DRAW` | `sennichite` | `%SENNICHITE` | `sennichite` |
+
+- 自分が `%TORYO` / `%KACHI` を送った後にサーバーの結果が届かず切断された場合は、送ったコマンド
+  （`resign` / `win_declaration`）を記録し、勝敗が確定していないので `'summary:` は書かない。
+- 対局中にサーバーとの接続が切れた局は終局理由を記録せず、CSA は指し手までで終わる。
+- `'summary:` の理由のうち wdoor の実物で確認したのは `toryo` だけで、それ以外は shogi-server の
+  表記に合わせたもの。
+
 内蔵 CSA サーバーについても、ミリ秒・分時計の着手通知と `Time_Unit` の一致を
 実 `GameRoom` と TCP 接続による統合テストで検証する。対局者の残時間はサーバーの
 課金結果に一致し、保存する CSA V2 棋譜の消費時間は秒単位を維持する。

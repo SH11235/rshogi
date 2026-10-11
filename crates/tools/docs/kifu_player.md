@@ -67,8 +67,8 @@ cargo run -p tools --release --bin kifu_player -- \
 - **勝敗**は棋譜末尾の終局（投了・入玉宣言など）から判定する。終局が記録されていない
   （中断・未完の）ファイルは「勝敗不明」として扱う。
 - **評価値**は棋譜に埋め込まれたエンジンのコメントから読み取る。記録の系統で書式・位置が
-  異なる 2 形式に対応する: csa_client 自前記録の `'* <評価> [PV...]`（手の**直前**）と、
-  wdoor floodgate (shogi-server) 公開棋譜の `'** <評価> [PV...]`（手の**直後**）。評価値は
+  異なる 2 形式に対応する: 旧版 csa_client の記録の `'* <評価> [PV...]`（手の**直前**）と、
+  wdoor floodgate (shogi-server) 公開棋譜・現行 csa_client の記録の `'** <評価> [PV...]`（手の**直後**）。評価値は
   どちらも先手視点として解釈する。コメントの無い手・対局は評価値なし（グラフに打点しない）。
   旧形式のrshogi-csa-server棋譜では`--legacy-server-eval-comments`を併用する。1つのdirectoryに
   Standard形式と旧server形式を混在させず、形式ごとに分けて開く。

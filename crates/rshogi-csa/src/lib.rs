@@ -198,6 +198,27 @@ fn sfen_piece_char(p: Piece) -> char {
     }
 }
 
+fn piece_from_sfen_char(c: char) -> Result<(PieceType, Color)> {
+    use PieceType::*;
+    let ty = match c.to_ascii_lowercase() {
+        'p' => Pawn,
+        'l' => Lance,
+        'n' => Knight,
+        's' => Silver,
+        'g' => Gold,
+        'b' => Bishop,
+        'r' => Rook,
+        'k' => King,
+        _ => bail!("unknown SFEN piece: {c}"),
+    };
+    let color = if c.is_ascii_uppercase() {
+        Color::Black
+    } else {
+        Color::White
+    };
+    Ok((ty, color))
+}
+
 fn piece_from_csa_token(token: &str) -> Result<Option<Piece>> {
     if token == "*" {
         return Ok(None);
@@ -253,6 +274,78 @@ fn parse_csa_rank_line(pos: &mut Position, line: &str) -> Result<()> {
 }
 
 impl Position {
+    /// SFEN 文字列（`<盤面> <手番> <持ち駒> [手数]`）から局面を作る。
+    ///
+    /// 手数は省略可能で、省略時は 1 とする。
+    pub fn from_sfen(sfen: &str) -> Result<Self> {
+        let mut fields = sfen.split_whitespace();
+        let board = fields.next().context("SFEN が空です")?;
+        let side = fields.next().with_context(|| format!("SFEN に手番がありません: {sfen}"))?;
+        let hands = fields.next().with_context(|| format!("SFEN に持ち駒がありません: {sfen}"))?;
+        let mut pos = Position::default();
+
+        let ranks: Vec<&str> = board.split('/').collect();
+        anyhow::ensure!(ranks.len() == 9, "SFEN の段数が 9 ではありません: {sfen}");
+        for (y, rank) in (1..=9).zip(ranks) {
+            let mut x = 1usize;
+            let mut promoted = false;
+            for c in rank.chars() {
+                if c == '+' {
+                    anyhow::ensure!(!promoted, "SFEN の成り指定が重複しています: {sfen}");
+                    promoted = true;
+                    continue;
+                }
+                if let Some(empty) = c.to_digit(10) {
+                    anyhow::ensure!(!promoted && empty >= 1, "SFEN の空マス指定が不正です: {sfen}");
+                    x += empty as usize;
+                    continue;
+                }
+                anyhow::ensure!(x <= 9, "SFEN の段が 9 マスを超えています: {sfen}");
+                let (ty, color) = piece_from_sfen_char(c)?;
+                anyhow::ensure!(
+                    !promoted || !matches!(ty, PieceType::Gold | PieceType::King),
+                    "成れない駒に成り指定があります: {sfen}"
+                );
+                pos.board[y][x] = Some(Piece::new(ty, color, promoted));
+                promoted = false;
+                x += 1;
+            }
+            anyhow::ensure!(x == 10 && !promoted, "SFEN の段が 9 マスではありません: {sfen}");
+        }
+
+        pos.side_to_move = match side {
+            "b" => Color::Black,
+            "w" => Color::White,
+            _ => bail!("SFEN の手番が不正です: {sfen}"),
+        };
+
+        if hands != "-" {
+            let mut count = 0u32;
+            for c in hands.chars() {
+                if let Some(d) = c.to_digit(10) {
+                    count = count * 10 + d;
+                    continue;
+                }
+                let (ty, color) = piece_from_sfen_char(c)?;
+                anyhow::ensure!(ty != PieceType::King, "SFEN の持ち駒に玉があります: {sfen}");
+                let hand = match color {
+                    Color::Black => &mut pos.hand_b,
+                    Color::White => &mut pos.hand_w,
+                };
+                for _ in 0..count.max(1) {
+                    hand.add_demoted(ty);
+                }
+                count = 0;
+            }
+            anyhow::ensure!(count == 0, "SFEN の持ち駒が枚数で終わっています: {sfen}");
+        }
+
+        if let Some(ply) = fields.next() {
+            pos.ply = ply.parse().with_context(|| format!("SFEN の手数が不正です: {sfen}"))?;
+        }
+        Ok(pos)
+    }
+
     pub fn to_sfen(&self) -> String {
         // board strings from rank 1 (top) to 9 (bottom)
         let mut out = String::new();
@@ -574,7 +667,7 @@ pub fn parse_csa_full(text: &str) -> Result<(Position, Vec<ParsedMove>, GameInfo
 
 /// CSA棋譜を完全パースし、通常手と同じ順序の先手視点評価値も返す。
 ///
-/// csa_client の `'*` は直後の通常手、wdoor の `'**` は直前の通常手に対応する。
+/// 旧版 csa_client の `'*` は直後の通常手、wdoor と現行 csa_client の `'**` は直前の通常手に対応する。
 pub fn parse_csa_full_with_evals(text: &str) -> Result<ParsedCsaWithEvals> {
     parse_csa_full_with_evals_style(text, EvalCommentStyle::Standard)
 }
@@ -1216,6 +1309,35 @@ P-00KA
         let (pos, _, _) = parse_csa(text).unwrap();
         let sfen = pos.to_sfen();
         assert_eq!(sfen, "lnsgkgsnl/9/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1");
+    }
+
+    #[test]
+    fn test_from_sfen_roundtrip() {
+        for sfen in [
+            "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1",
+            "ln1g1g1nl/1ks2r3/1pppp1bpp/p3spp2/9/P1P1SP1PP/1P1PP1P2/1BK1GR3/LNSG3NL w - 20",
+            "4k4/9/9/9/9/9/9/9/4K4 w RB2G2S2N2L9Prb2g2s2n2l9p 101",
+            "+P+L+N+S3k1/9/9/9/9/9/9/9/+p+l+n+s+B+R1K1 b 12P 7",
+        ] {
+            assert_eq!(Position::from_sfen(sfen).unwrap().to_sfen(), sfen);
+        }
+        // 手数省略時は 1。
+        assert_eq!(Position::from_sfen("4k4/9/9/9/9/9/9/9/4K4 b -").unwrap().ply, 1);
+    }
+
+    #[test]
+    fn test_from_sfen_rejects_malformed() {
+        for sfen in [
+            "",
+            "4k4/9/9/9/9/9/9/9 b - 1",
+            "4k5/9/9/9/9/9/9/9/4K4 b - 1",
+            "4k4/9/9/9/9/9/9/9/4K4 x - 1",
+            "4k4/9/9/9/9/9/9/9/4K4 b 2 1",
+            "4+k4/9/9/9/9/9/9/9/4K4 b - 1",
+            "4k4/9/9/9/9/9/9/9/4K4 b K 1",
+        ] {
+            assert!(Position::from_sfen(sfen).is_err(), "should reject: {sfen:?}");
+        }
     }
 
     #[test]

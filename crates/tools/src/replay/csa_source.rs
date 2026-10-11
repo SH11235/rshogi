@@ -6,8 +6,9 @@
 //! 指し手・盤面の復元は `rshogi_csa::parse_csa_full`（独自の軽量 Position/Move 型）に
 //! 委譲し、`sfen_before` 経由で `rshogi_core` 側へ橋渡しして棋譜ラベルを組み立てる。
 //! 評価値は floodgate 形式コメントから拾う。2 系統の記録に対応する:
-//! - rshogi csa_client の自前記録: `'* <score> [pv...]` を**手の直前**に書く
-//! - wdoor (shogi-server) の公開棋譜: `'** <score> [pv...]` を**手の直後** (T 行の後) に書く
+//! - 旧版 rshogi csa_client の自前記録: `'* <score> [pv...]` を**手の直前**に書く
+//! - wdoor (shogi-server) の公開棋譜と現行 csa_client の記録: `'** <score> [pv...]` を
+//!   **手の直後** (T 行の後) に書く
 //!
 //! `<score>` はどちらも先手視点 (csa_client は送信時に正規化、floodgate 規約も先手視点)
 //! なので、手番相対へ戻して格納する。`T<秒>` 行は直前の手の消費時間として拾う。
