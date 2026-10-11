@@ -16,6 +16,15 @@
 //!
 //! CSA の `$START_TIME` / `$END_TIME` にはタイムゾーン表記がない。取り込み対象は
 //! 日本の対局サーバー・大会の棋譜なので JST として解釈する。
+//!
+//! # 非対応: 自前サーバーが出力した CSA
+//!
+//! 本 Worker (rshogi-csa-server) が終局時に書く CSA の upload は対象外。自前サーバーの
+//! 対局は最初から同じアーカイブに入っているので取り込む必要がなく、形式も合わない:
+//! 時刻が UTC で書かれている (JST 解釈だと 9 時間ずれる) うえ、`%ILLEGAL_MOVE` が
+//! 「手番側の反則負け (反則手は記録しない)」を意味し、CSA 規定の「直前の手が反則手で
+//! 手番側の勝ち」と逆になる。`'summary:` 行を持つ棋譜 (wdoor、`csa_client`、
+//! `kifu_publish` の出力) は summary を優先するので、この違いの影響を受けない。
 
 use chrono::NaiveDate;
 use rshogi_core::position::Position;
@@ -30,6 +39,12 @@ use crate::games_index::{ClockSpec, GamesIndexEntry, SOURCE_UPLOAD, SOURCE_WDOOR
 
 /// 取り込む CSA 本文のサイズ上限 (512KB)。
 pub const MAX_CSA_BYTES: usize = 512 * 1024;
+
+/// `import-wdoor` が「wdoor に棋譜が無い」ことを伝える 404 応答の本文。
+///
+/// クライアント (`kifu_publish`) はこの文字列との完全一致で「手元アーカイブからの
+/// アップロードに切り替えてよい 404」を判別する。経路が無い場合などの 404 は本文が異なる。
+pub const WDOOR_NOT_FOUND_BODY: &str = "Not Found on wdoor";
 
 /// `upload` の `event` に指定できる文字数の上限。
 pub const MAX_EVENT_CHARS: usize = 100;
@@ -329,7 +344,9 @@ fn result_from_summary(summary: &str) -> (&'static str, &'static str) {
         "toryo" => "RESIGN",
         "time up" => "TIME_UP",
         "illegal move" | "uchifuzume" | "oute_kaihimore" | "outori" | "illegal kachi" => "ILLEGAL",
-        "kachi" => "JISHOGI",
+        // `kachi` は入玉宣言勝ち (勝者あり)。`jishogi` は wdoor には無く、`csa_client` /
+        // `kifu_publish` が持将棋の引き分け (`#JISHOGI` + `#DRAW`) に付けるラベル。
+        "kachi" | "jishogi" => "JISHOGI",
         "oute_sennichite" => "OUTE_SENNICHITE",
         "sennichite" => "SENNICHITE",
         "max_moves" => "MAX_MOVES",
@@ -385,11 +402,57 @@ struct Replay {
     total_elapsed_sec: u64,
 }
 
+/// CSA の駒種コード (指し手の 6〜7 文字目) かどうか。
+fn is_csa_piece_code(code: &[u8]) -> bool {
+    matches!(
+        code,
+        b"FU"
+            | b"KY"
+            | b"KE"
+            | b"GI"
+            | b"KI"
+            | b"KA"
+            | b"HI"
+            | b"OU"
+            | b"TO"
+            | b"NY"
+            | b"NK"
+            | b"NG"
+            | b"UM"
+            | b"RY"
+    )
+}
+
+/// `+` / `-` で始まる行が、手番指定 (`+` / `-` 単独) か正しい形の指し手であることを確かめる。
+///
+/// [`parse_csa_full`] は指し手の形に合わない行を黙って読み飛ばすため、そのままだと
+/// `+7776F?` のような壊れた行を含む棋譜が「その手が無かった棋譜」として通ってしまう。
+/// 取り込みでは `<符号><移動元 2 桁><移動先 2 桁><駒種>` の 7 文字と、その後ろが行末か
+/// `,` (`,T<秒>` やコメントの連結) であることを要求する。
+fn validate_move_lines(csa: &str) -> Result<(), String> {
+    for (index, line) in csa.lines().enumerate() {
+        let s = line.trim();
+        if !s.starts_with(['+', '-']) || s.len() == 1 {
+            continue;
+        }
+        let bytes = s.as_bytes();
+        let well_formed = bytes.len() >= 7
+            && bytes[1..5].iter().all(u8::is_ascii_digit)
+            && is_csa_piece_code(&bytes[5..7])
+            && (bytes.len() == 7 || bytes[7] == b',');
+        if !well_formed {
+            return Err(format!("line {} is not a valid move line", index + 1));
+        }
+    }
+    Ok(())
+}
+
 /// CSA 本文を parse し、全指し手が合法であることを確かめる。
 ///
 /// 末尾が `%ILLEGAL_MOVE` の棋譜だけは、最後の 1 手が反則手であることを許す
 /// (CSA の「直前の手が反則手」の記録形式)。その手は局面に適用せず、手番だけ進める。
 fn replay(csa: &str, ends_with_illegal_move: bool) -> Result<Replay, String> {
+    validate_move_lines(csa)?;
     let (initial, parsed_moves, info) =
         parse_csa_full(csa).map_err(|e| format!("parse CSA: {e}"))?;
     let name = |value: Option<String>, label: &str| {
@@ -442,6 +505,9 @@ fn replay(csa: &str, ends_with_illegal_move: bool) -> Result<Replay, String> {
 pub enum ImportError {
     /// 終局していない (`'summary:` 行が無い)。wdoor の参照取り込みでのみ返す。
     Unfinished,
+    /// wdoor から取得した本文の `$EVENT` が要求した対局 ID と一致しない
+    /// (上流が別の内容を返した)。wdoor の参照取り込みでのみ返す。
+    EventMismatch,
     /// `source = wdoor` のアップロードで `$EVENT` が wdoor の対局 ID 形式でない。
     NotWdoorEvent,
     /// 対局者名・開始時刻が読めない、または指し手を初期局面から合法手として再生できない。
@@ -452,6 +518,9 @@ impl std::fmt::Display for ImportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unfinished => f.write_str("game is not finished (no summary line)"),
+            Self::EventMismatch => {
+                f.write_str("fetched kifu does not belong to the requested game id")
+            }
             Self::NotWdoorEvent => f.write_str("$EVENT is not a wdoor game id"),
             Self::Unplayable(detail) => write!(f, "kifu cannot be replayed: {detail}"),
         }
@@ -495,6 +564,17 @@ impl ImportedGame {
             origin_url: self.origin_url.as_deref(),
         }
     }
+
+    /// 上書き時に、保存済みメタの `origin_url` を引き継ぐ。
+    ///
+    /// wdoor から参照取り込みした対局を、後から手元アーカイブの本文で `force` 上書き
+    /// しても元棋譜へのリンクが消えないようにする。今回の取り込みが `origin_url` を
+    /// 持つ場合と、wdoor 以外の対局では何もしない。
+    pub fn inherit_origin_url(&mut self, existing: Option<&str>) {
+        if self.source == SOURCE_WDOOR && self.origin_url.is_none() {
+            self.origin_url = existing.map(str::to_owned);
+        }
+    }
 }
 
 /// CSA から読み取った、取り込み元に依らない部分。
@@ -534,22 +614,13 @@ fn resolve_ended_at_ms(started_at_ms: u64, derived: &Derived) -> u64 {
         .max(started_at_ms)
 }
 
-/// wdoor の対局 1 局をメタに変換する。
-///
-/// `require_summary` は参照取り込み (wdoor から今取得した本文) で `true` にし、
-/// 対局中の棋譜を [`ImportError::Unfinished`] として弾く。`origin_url` は wdoor から
-/// 実際に取得できたときだけ渡す。
-pub fn import_wdoor(
+fn build_wdoor_game(
     id: &WdoorGameId<'_>,
     csa: &str,
+    headers: &CsaHeaders<'_>,
     origin_url: Option<String>,
-    require_summary: bool,
 ) -> Result<ImportedGame, ImportError> {
-    let headers = scan_headers(csa);
-    if require_summary && headers.summary.is_none() {
-        return Err(ImportError::Unfinished);
-    }
-    let derived = derive(csa, &headers)?;
+    let derived = derive(csa, headers)?;
     // `$START_TIME` が読めなくても、対局 ID の時刻で代用できる。
     let started_at_ms = derived.started_at_ms.unwrap_or(id.started_at_ms);
     let ended_at_ms = resolve_ended_at_ms(started_at_ms, &derived);
@@ -569,16 +640,34 @@ pub fn import_wdoor(
     })
 }
 
+/// wdoor から今取得した本文 (参照取り込み) をメタに変換する。
+///
+/// 本文の `$EVENT` が要求した対局 ID と一致しなければ [`ImportError::EventMismatch`]
+/// (エラーページなど棋譜でない本文もここに落ちる)、`'summary:` 行が無ければ対局中と
+/// みなして [`ImportError::Unfinished`]。`origin_url` は取得に使った URL。
+pub fn import_wdoor_fetched(
+    id: &WdoorGameId<'_>,
+    csa: &str,
+    origin_url: String,
+) -> Result<ImportedGame, ImportError> {
+    let headers = scan_headers(csa);
+    if headers.event != Some(id.as_str()) {
+        return Err(ImportError::EventMismatch);
+    }
+    if headers.summary.is_none() {
+        return Err(ImportError::Unfinished);
+    }
+    build_wdoor_game(id, csa, &headers, Some(origin_url))
+}
+
 /// 手元アーカイブの wdoor 棋譜 (本文アップロード、`source = wdoor`) をメタに変換する。
 ///
 /// `$EVENT` の対局 ID から参照取り込みと同じ `game_id` を決める。wdoor から取得した
 /// わけではないので `origin_url` は付けず、`'summary:` 行も必須にしない。
 pub fn import_wdoor_archive(csa: &str) -> Result<ImportedGame, ImportError> {
-    let id = scan_headers(csa)
-        .event
-        .and_then(WdoorGameId::parse)
-        .ok_or(ImportError::NotWdoorEvent)?;
-    import_wdoor(&id, csa, None, false)
+    let headers = scan_headers(csa);
+    let id = headers.event.and_then(WdoorGameId::parse).ok_or(ImportError::NotWdoorEvent)?;
+    build_wdoor_game(&id, csa, &headers, None)
 }
 
 /// 管理者がアップロードした棋譜 (`source = upload`) をメタに変換する。
@@ -939,6 +1028,7 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
             ("outori:a win:b lose", ("WIN_BLACK", "ILLEGAL")),
             ("illegal kachi:a lose:b win", ("WIN_WHITE", "ILLEGAL")),
             ("kachi:a win:b lose", ("WIN_BLACK", "JISHOGI")),
+            ("jishogi:a draw:b draw", ("DRAW", "JISHOGI")),
             ("oute_sennichite:a lose:b win", ("WIN_WHITE", "OUTE_SENNICHITE")),
             ("sennichite:a draw:b draw", ("DRAW", "SENNICHITE")),
             ("max_moves:a draw:b draw", ("DRAW", "MAX_MOVES")),
@@ -1078,7 +1168,7 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
     fn import_wdoor_derives_full_meta() {
         let csa = wdoor_csa();
         let id = WdoorGameId::parse(WDOOR_ID).unwrap();
-        let game = import_wdoor(&id, &csa, Some(id.kifu_url()), true).unwrap();
+        let game = import_wdoor_fetched(&id, &csa, id.kifu_url()).unwrap();
         assert_eq!(
             game,
             ImportedGame {
@@ -1105,7 +1195,7 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
     fn imported_wdoor_entry_matches_wire_contract() {
         let csa = wdoor_csa();
         let id = WdoorGameId::parse(WDOOR_ID).unwrap();
-        let game = import_wdoor(&id, &csa, Some(id.kifu_url()), true).unwrap();
+        let game = import_wdoor_fetched(&id, &csa, id.kifu_url()).unwrap();
         assert_eq!(
             serde_json::to_value(game.entry()).unwrap(),
             serde_json::json!({
@@ -1130,10 +1220,14 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
         let csa = wdoor_csa();
         let in_progress = csa.split("%TORYO").next().unwrap();
         let id = WdoorGameId::parse(WDOOR_ID).unwrap();
-        assert_eq!(import_wdoor(&id, in_progress, None, true), Err(ImportError::Unfinished));
-        // 未終局判定は再生より先 (本文が HTML などでも 409 側に倒れる)。
         assert_eq!(
-            import_wdoor(&id, "<html>busy</html>", None, true),
+            import_wdoor_fetched(&id, in_progress, id.kifu_url()),
+            Err(ImportError::Unfinished)
+        );
+        // 未終局判定は再生より先 (指し手が途中で切れていても 409 側に倒れる)。
+        let truncated = format!("{in_progress}+77");
+        assert_eq!(
+            import_wdoor_fetched(&id, &truncated, id.kifu_url()),
             Err(ImportError::Unfinished)
         );
     }
@@ -1146,7 +1240,7 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
         // `%` だけ見ると後手勝ちだが、summary が先手勝ちならそちらを採る。
         let abnormal = base
             .replace("'summary:toryo:RAMU lose:Panda win", "'summary:abnormal:RAMU win:Panda lose");
-        let game = import_wdoor(&id, &abnormal, None, true).unwrap();
+        let game = import_wdoor_fetched(&id, &abnormal, id.kifu_url()).unwrap();
         assert_eq!((game.result_kind, game.end_reason), ("WIN_BLACK", "ABNORMAL"));
 
         // 末尾に `%` コマンドが無い棋譜 (oute_sennichite / illegal move / max_moves /
@@ -1158,17 +1252,63 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
             ("max_moves:RAMU draw:Panda draw", ("DRAW", "MAX_MOVES")),
             ("sennichite:RAMU draw:Panda draw", ("DRAW", "SENNICHITE")),
         ] {
-            let csa = base
-                .replace(
-                    "%TORYO
-", "",
-                )
-                .replace("toryo:RAMU lose:Panda win", summary);
+            let csa = base.replace("%TORYO\n", "").replace("toryo:RAMU lose:Panda win", summary);
             assert!(!csa.contains('%'), "fixture must not keep a special command");
-            let game = import_wdoor(&id, &csa, None, true).unwrap();
+            let game = import_wdoor_fetched(&id, &csa, id.kifu_url()).unwrap();
             assert_eq!((game.result_kind, game.end_reason), expected, "summary={summary}");
             assert_eq!(game.moves_count, 4);
         }
+    }
+
+    #[test]
+    fn wdoor_endings_observed_in_real_archives_resolve_from_summary() {
+        // wdoor の実棋譜で確認した末尾の形。`'ILLEGAL_MOVE(...)` の括弧内は反則とされた
+        // 入力そのもので指し手とは限らず、コメント行なので指し手にも `%` にも数えない。
+        let id = WdoorGameId::parse(WDOOR_ID).unwrap();
+        let base = wdoor_csa();
+        let head = base.split("%TORYO").next().unwrap();
+        for (tail, expected, last_special) in [
+            (
+                "'ILLEGAL_MOVE(%CHUDAN)\n'summary:illegal move:RAMU win:Panda lose\n",
+                ("WIN_BLACK", "ILLEGAL"),
+                None,
+            ),
+            (
+                "'ILLEGAL_MOVE(-8292HI)\n'summary:oute_kaihimore:RAMU win:Panda lose\n",
+                ("WIN_BLACK", "ILLEGAL"),
+                None,
+            ),
+            (
+                "'summary:oute_sennichite:RAMU lose:Panda win\n",
+                ("WIN_WHITE", "OUTE_SENNICHITE"),
+                None,
+            ),
+            (
+                "%TIME_UP\n'summary:time up:RAMU lose:Panda win\n",
+                ("WIN_WHITE", "TIME_UP"),
+                Some("TIME_UP"),
+            ),
+            (
+                "'Deferred %CHUDAN\n%TORYO\n'summary:abnormal:RAMU lose:Panda win\n",
+                ("WIN_WHITE", "ABNORMAL"),
+                Some("TORYO"),
+            ),
+            ("'summary:max_moves:RAMU draw:Panda draw\n", ("DRAW", "MAX_MOVES"), None),
+        ] {
+            let csa = format!("{head}{tail}'$END_TIME:2026/10/09 00:21:55\n");
+            assert_eq!(scan_headers(&csa).last_special, last_special, "tail={tail:?}");
+            let game = import_wdoor_fetched(&id, &csa, id.kifu_url()).unwrap();
+            assert_eq!((game.result_kind, game.end_reason), expected, "tail={tail:?}");
+            assert_eq!(game.moves_count, 4, "tail={tail:?}");
+        }
+    }
+
+    #[test]
+    fn client_written_jishogi_draw_summary_is_a_draw() {
+        // `csa_client` / `kifu_publish` は `#JISHOGI` + `#DRAW` の対局をこう書く。
+        let csa = upload_csa("%JISHOGI\n'summary:jishogi:alice draw:bob draw\n");
+        let game = import_upload(&csa, None).unwrap();
+        assert_eq!((game.result_kind, game.end_reason), ("DRAW", "JISHOGI"));
     }
 
     #[test]
@@ -1176,23 +1316,14 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
         // wdoor の入玉宣言は `%KACHI,'* 100000 ` のようにコメントが連結された行になる。
         let id = WdoorGameId::parse(WDOOR_ID).unwrap();
         let csa = wdoor_csa()
-            .replace(
-                "%TORYO
-",
-                "%KACHI,'* 100000 
-",
-            )
+            .replace("%TORYO\n", "%KACHI,'* 100000 \n")
             .replace("toryo:RAMU lose:Panda win", "kachi:RAMU win:Panda lose");
         assert_eq!(scan_headers(&csa).last_special, Some("KACHI"));
-        let game = import_wdoor(&id, &csa, None, true).unwrap();
+        let game = import_wdoor_fetched(&id, &csa, id.kifu_url()).unwrap();
         assert_eq!((game.result_kind, game.end_reason), ("WIN_BLACK", "JISHOGI"));
         assert_eq!(game.moves_count, 4);
         // summary の無いアーカイブでも `%KACHI` の手番側 (4 手後の先手) の勝ちになる。
-        let without_summary = csa.replace(
-            "'summary:kachi:RAMU win:Panda lose
-",
-            "",
-        );
+        let without_summary = csa.replace("'summary:kachi:RAMU win:Panda lose\n", "");
         let game = import_wdoor_archive(&without_summary).unwrap();
         assert_eq!((game.result_kind, game.end_reason), ("WIN_BLACK", "JISHOGI"));
     }
@@ -1203,7 +1334,7 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
             .replace("$START_TIME:2026/10/09 00:00:00\n", "")
             .replace("'$END_TIME:2026/10/09 00:21:55\n", "");
         let id = WdoorGameId::parse(WDOOR_ID).unwrap();
-        let game = import_wdoor(&id, &csa, None, true).unwrap();
+        let game = import_wdoor_fetched(&id, &csa, id.kifu_url()).unwrap();
         // 開始は ID の 00:00:01 JST、終了は開始 + (0 + 10 + 0 + 14) 秒。
         assert_eq!(game.started_at_ms, utc_ms(2026, 10, 8, 15, 0, 1));
         assert_eq!(game.ended_at_ms, utc_ms(2026, 10, 8, 15, 0, 25));
@@ -1362,6 +1493,89 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
         assert_eq!(game.moves_count, 2);
         // 後手番で投了 → 先手勝ち。
         assert_eq!((game.result_kind, game.end_reason), ("WIN_BLACK", "RESIGN"));
+    }
+
+    #[test]
+    fn fetched_kifu_must_carry_the_requested_event() {
+        let id = WdoorGameId::parse(WDOOR_ID).unwrap();
+        let other = "wdoor+floodgate-300-10F+Panda+RAMU+20261009000001";
+        // 別の対局の本文、`$EVENT` の無い本文、棋譜でない本文はどれも上流の内容不正。
+        for body in [
+            wdoor_csa().replace(WDOOR_ID, other),
+            wdoor_csa().replace(&format!("$EVENT:{WDOOR_ID}\n"), ""),
+            "<html>busy</html>".to_owned(),
+            String::new(),
+        ] {
+            assert_eq!(
+                import_wdoor_fetched(&id, &body, id.kifu_url()),
+                Err(ImportError::EventMismatch),
+                "body={body:?}"
+            );
+        }
+        // アーカイブ upload は本文の `$EVENT` 自体が ID の出どころなので照合しない。
+        let archived = import_wdoor_archive(&wdoor_csa().replace(WDOOR_ID, other)).unwrap();
+        assert_eq!(archived.game_id, WdoorGameId::parse(other).unwrap().game_id());
+    }
+
+    #[test]
+    fn inherit_origin_url_keeps_existing_link_only_for_wdoor_archive() {
+        let url = "https://example.com/original.csa";
+        let mut archived = import_wdoor_archive(&wdoor_csa()).unwrap();
+        archived.inherit_origin_url(None);
+        assert_eq!(archived.origin_url, None);
+        archived.inherit_origin_url(Some(url));
+        assert_eq!(archived.origin_url.as_deref(), Some(url));
+
+        // 今回取得した URL があればそちらを保つ。
+        let id = WdoorGameId::parse(WDOOR_ID).unwrap();
+        let mut fetched = import_wdoor_fetched(&id, &wdoor_csa(), id.kifu_url()).unwrap();
+        fetched.inherit_origin_url(Some(url));
+        assert_eq!(fetched.origin_url, Some(id.kifu_url()));
+
+        let mut uploaded = import_upload(&upload_csa("%TORYO\n"), None).unwrap();
+        uploaded.inherit_origin_url(Some(url));
+        assert_eq!(uploaded.origin_url, None);
+    }
+
+    #[test]
+    fn malformed_move_lines_are_rejected_instead_of_skipped() {
+        for bad in [
+            "+7776F?",
+            "+7776F",
+            "+7776",
+            "-3334fu",
+            "+77a6FU",
+            "+7 76FU",
+            "+7776XX",
+            "+7776FUX",
+            "+7776FU T3",
+            "+7776FUT3",
+            "+-",
+            "+0000",
+        ] {
+            let tail = format!("{bad} \n%TORYO\n");
+            let csa = upload_csa(&tail);
+            let result = import_upload(&csa, None);
+            assert!(
+                matches!(&result, Err(ImportError::Unplayable(detail)) if detail.contains("line 11")),
+                "bad={bad:?} result={result:?}"
+            );
+        }
+        // 壊れた行が先頭の指し手でも、0 手の終局として受理しない。
+        let csa = "V2.2\nN+a\nN-b\n$START_TIME:2026/05/03 10:00:00\nPI\n+\n+7776F?\n%TORYO\n";
+        assert!(matches!(import_upload(csa, None), Err(ImportError::Unplayable(_))));
+    }
+
+    #[test]
+    fn well_formed_lines_around_moves_still_pass() {
+        // CRLF、コメント行、独立した T 行、`,T` 連結、コメント連結、`%` 行は従来どおり通る。
+        let csa = "V2.2\r\nN+a\r\nN-b\r\n$START_TIME:2026/05/03 10:00:00\r\nPI\r\n+\r\n\
+'+7776F? はコメント\r\n+7776FU\r\nT3\r\n'** 30 -3334FU\r\n-3334FU,T4\r\n\
++2726FU,'* 12 -8384FU\r\n  -8384FU,T1  \r\n%KACHI,'* 100000 \r\n";
+        let game = import_upload(csa, None).unwrap();
+        assert_eq!(game.moves_count, 4);
+        assert_eq!((game.result_kind, game.end_reason), ("WIN_BLACK", "JISHOGI"));
+        assert_eq!(game.ended_at_ms, game.started_at_ms + 8_000);
     }
 
     #[test]

@@ -23,6 +23,18 @@ pub const MAX_SOURCE_FILTERS: usize = 8;
 /// レーティング集計で共有し、列追加時の取りこぼしを防ぐ。
 pub const SEARCH_ROW_COLUMNS: &str = "game_id, started_at_ms, ended_at_ms, sente_name, gote_name, black_player_id, white_player_id, wire_result_kind, end_reason, moves_count, clock_json, source, event, origin_url";
 
+/// プレイヤー詳細の対局一覧の絞り込み条件。
+///
+/// bind は canonical ID を 4 回 (先手・後手それぞれ本人と alias の subquery)。alias の
+/// 家族を D1 側で解決するので、rotation を重ねても bind 数は一定。外部棋譜
+/// (`wdoor` / `upload`) は内部レーティングの対象外なので除外する。
+pub fn player_games_predicate() -> String {
+    format!(
+        "((black_player_id = ? OR black_player_id IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?)) OR (white_player_id = ? OR white_player_id IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?))) AND {}",
+        crate::games_index::NOT_EXTERNAL_SOURCE_SQL
+    )
+}
+
 /// イベントタグ一覧 (`GET /api/v1/games/events`) の集計 SQL。
 ///
 /// `event` が空でない対局を `(event, source)` ごとに数え、件数の多い順 (同数は
@@ -417,7 +429,8 @@ fn optional_text(value: Option<&str>) -> worker::wasm_bindgen::JsValue {
 ///
 /// player ID は付けず (`NULL`)、レーティング集計の対象外なので
 /// `player_rating_state` の revision / rebuild マーカーにも触れない。過去日時の
-/// 棋譜を大量に取り込んでも Elo の全履歴 rebuild を誘発しない。
+/// 棋譜を大量に取り込んでも Elo の全履歴 rebuild を誘発しない。自前対局の upsert と
+/// 同じく、内容が変わらない行は書き換えない (保存済み対局の修復で毎回呼ばれるため)。
 #[cfg(target_arch = "wasm32")]
 async fn upsert_external_fields(
     db: &worker::D1Database,
@@ -439,7 +452,7 @@ async fn upsert_external_fields(
         optional_text(fields.event),
         optional_text(fields.origin_url),
     ];
-    db.prepare("INSERT INTO games_search_index (game_id, sente_name, gote_name, black_player_id, white_player_id, started_at_ms, ended_at_ms, result_kind, source, moves_count, wire_result_kind, end_reason, clock_json, event, origin_url) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(game_id) DO UPDATE SET sente_name=excluded.sente_name, gote_name=excluded.gote_name, black_player_id=NULL, white_player_id=NULL, started_at_ms=excluded.started_at_ms, ended_at_ms=excluded.ended_at_ms, result_kind=excluded.result_kind, source=excluded.source, moves_count=excluded.moves_count, wire_result_kind=excluded.wire_result_kind, end_reason=excluded.end_reason, clock_json=excluded.clock_json, event=excluded.event, origin_url=excluded.origin_url")
+    db.prepare("INSERT INTO games_search_index (game_id, sente_name, gote_name, black_player_id, white_player_id, started_at_ms, ended_at_ms, result_kind, source, moves_count, wire_result_kind, end_reason, clock_json, event, origin_url) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(game_id) DO UPDATE SET sente_name=excluded.sente_name, gote_name=excluded.gote_name, black_player_id=NULL, white_player_id=NULL, started_at_ms=excluded.started_at_ms, ended_at_ms=excluded.ended_at_ms, result_kind=excluded.result_kind, source=excluded.source, moves_count=excluded.moves_count, wire_result_kind=excluded.wire_result_kind, end_reason=excluded.end_reason, clock_json=excluded.clock_json, event=excluded.event, origin_url=excluded.origin_url WHERE sente_name IS NOT excluded.sente_name OR gote_name IS NOT excluded.gote_name OR black_player_id IS NOT NULL OR white_player_id IS NOT NULL OR started_at_ms IS NOT excluded.started_at_ms OR ended_at_ms IS NOT excluded.ended_at_ms OR result_kind IS NOT excluded.result_kind OR source IS NOT excluded.source OR moves_count IS NOT excluded.moves_count OR wire_result_kind IS NOT excluded.wire_result_kind OR end_reason IS NOT excluded.end_reason OR clock_json IS NOT excluded.clock_json OR event IS NOT excluded.event OR origin_url IS NOT excluded.origin_url")
         .bind(&values)?
         .run()
         .await?;
@@ -751,6 +764,19 @@ mod tests {
         assert_eq!(row, tag);
         assert!(EVENT_TAGS_SQL.contains("GROUP BY event, source"));
         assert!(EVENT_TAGS_SQL.ends_with("ORDER BY games DESC, event ASC, source ASC"));
+    }
+
+    #[test]
+    fn player_games_predicate_excludes_external_sources_with_constant_binds() {
+        let predicate = player_games_predicate();
+        assert_eq!(predicate.matches('?').count(), 4);
+        assert!(
+            predicate
+                .contains("IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?)")
+        );
+        // 先手・後手の OR 全体を括弧で閉じてから source 条件を AND する。
+        assert!(predicate.starts_with("(("));
+        assert!(predicate.ends_with("))) AND source NOT IN ('wdoor','upload')"));
     }
 
     #[test]

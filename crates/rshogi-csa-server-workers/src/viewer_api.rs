@@ -108,7 +108,7 @@ use crate::games_index::KEY_PREFIX as GAMES_INDEX_PREFIX;
 use crate::games_search_index::{
     DEFAULT_PAGE_SIZE, EVENT_TAGS_SQL, EventTag, MAX_PAGE_SIZE, QueryValue, SEARCH_ROW_COLUMNS,
     SearchGameSummary, SearchParams, SearchRow, build_search_query, parse_source_filter,
-    validate_pagination,
+    player_games_predicate, validate_pagination,
 };
 use crate::live_games_index::LIVE_KEY_PREFIX;
 use crate::origin::{OriginDecision, evaluate};
@@ -119,10 +119,6 @@ use crate::x1_paths::{kifu_by_id_meta_key, kifu_by_id_object_key};
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 100;
 const MIN_LIMIT: u32 = 1;
-/// プレイヤー詳細の対局一覧の絞り込み条件。外部棋譜 (`wdoor` / `upload`) は内部
-/// レーティングの対象外なので除外する
-/// ([`crate::games_index::NOT_EXTERNAL_SOURCE_SQL`] と同じ条件)。
-const PLAYER_GAMES_PREDICATE: &str = "((black_player_id = ? OR black_player_id IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?)) OR (white_player_id = ? OR white_player_id IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?))) AND source NOT IN ('wdoor','upload')";
 
 /// `/api/v1/games[/...]` / `/api/v1/players[/...]` を判定してハンドラに振り分ける。
 ///
@@ -522,7 +518,7 @@ async fn handle_player_detail(
     // Keep bind count constant even after many rotations. The canonical alias
     // index resolves the family inside D1 instead of loading every alias into
     // Worker memory and binding it twice.
-    let predicate = PLAYER_GAMES_PREDICATE;
+    let predicate = player_games_predicate();
     let family_values = [
         worker::wasm_bindgen::JsValue::from_str(&canonical),
         worker::wasm_bindgen::JsValue::from_str(&canonical),
@@ -656,7 +652,8 @@ fn parse_search_params(url: &Url) -> std::result::Result<SearchParams, String> {
             "name" => params.name = Some(value),
             "result" => params.result = Some(value),
             "source" => params.source = parse_source_filter(&value)?,
-            "event" => params.event = Some(value),
+            // `event=` (空文字) は絞り込みなしとして扱う。
+            "event" => params.event = Some(value).filter(|event| !event.is_empty()),
             "from" => {
                 params.from =
                     Some(value.parse().map_err(|_| "from must be an epoch millisecond integer")?)
@@ -1456,15 +1453,6 @@ mod tests {
         let url =
             Url::parse("https://example.com/api/v1/players/p_abc?page=2&pageSize=100").unwrap();
         assert_eq!(parse_page_params(&url), Ok((2, 100)));
-    }
-
-    #[test]
-    fn player_detail_alias_query_has_constant_bind_count() {
-        assert_eq!(PLAYER_GAMES_PREDICATE.matches('?').count(), 4);
-        assert!(
-            PLAYER_GAMES_PREDICATE
-                .contains("IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?)")
-        );
     }
 
     #[test]
