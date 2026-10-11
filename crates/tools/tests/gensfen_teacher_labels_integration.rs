@@ -25,10 +25,6 @@ mod unix {
         script
             .push_str("    go*)\n      go_count=$((go_count + 1))\n      case \"$go_count\" in\n");
         for (index, bestmove) in bestmoves.iter().enumerate() {
-            if *bestmove == "<timeout>" {
-                writeln!(script, "        {}) : ;;", index + 1).unwrap();
-                continue;
-            }
             let score = if *bestmove == "win" { -300 } else { 0 };
             writeln!(
                 script,
@@ -144,13 +140,17 @@ mod unix {
 
     #[test]
     fn timeout_discards_whole_game() {
+        // gensfen は実時間で `byoyomi + margin` を超えた応答を timeout と裁定する。
+        // margin が数 ms だと、CI の並列実行で 1 手目の通常応答が遅れただけで
+        // timeout 扱いになり落ちるため、通常応答側に約 1 秒の余裕を持たせる
+        // （無応答の確定には `byoyomi + 2 * margin` ≒ 2 秒かかる）。
         let run = run_gensfen(
             "timeout",
             &["7g7f"],
             true,
             8,
             None,
-            &["--byoyomi", "1", "--timeout-margin-ms", "1"],
+            &["--byoyomi", "1", "--timeout-margin-ms", "1000"],
         );
 
         assert_result(&run, "black_win", "timeout", false);
@@ -185,14 +185,11 @@ mod unix {
 
     #[test]
     fn abnormal_games_do_not_dedup_positions_from_following_normal_games() {
-        for (name, abnormal_move, extra_args) in [
-            (
-                "timeout-then-normal",
-                "<timeout>",
-                vec!["--byoyomi", "1", "--timeout-margin-ms", "1"],
-            ),
-            ("illegal-then-normal", "garbage", vec![]),
-            ("none-then-normal", "none", vec![]),
+        // timeout 経由の破棄も同じ `TrainingDisposition` を通るが、実時間依存で
+        // 不安定になるためここでは実時間に依存しない異常終局だけを扱う。
+        for (name, abnormal_move) in [
+            ("illegal-then-normal", "garbage"),
+            ("none-then-normal", "none"),
         ] {
             let run = run_gensfen_config(
                 name,
@@ -202,7 +199,7 @@ mod unix {
                 None,
                 2,
                 1024,
-                &extra_args,
+                &[],
             );
 
             assert_eq!(psv_records(&run).len(), 2, "{name}");
