@@ -705,10 +705,12 @@ pub fn parse_csa_full_with_evals_style(
         }
         if is_csa_move_line(s) {
             let mv = s[..7].to_string();
-            // インライン消費時間: +7776FU,T30
+            // インライン消費時間: +7776FU,T30 / +7776FU,T30,'コメント
             let time_sec = s
                 .get(7..)
-                .and_then(|rest| rest.strip_prefix(",T").and_then(|t| t.parse::<u32>().ok()));
+                .and_then(|rest| rest.strip_prefix(",T"))
+                .and_then(|t| t.split(',').next())
+                .and_then(|t| t.parse::<u32>().ok());
             moves.push(ParsedMove::Normal(CsaMove { mv, time_sec }));
             evals.push(pending_eval_cp_black.take());
             follows_inline_timed_move = time_sec.is_some();
@@ -1122,6 +1124,20 @@ P-00KA
             _ => panic!("expected normal move"),
         }
         assert_eq!(moves[2], ParsedMove::Special(SpecialMove::Resign));
+    }
+
+    #[test]
+    fn test_parse_time_inline_followed_by_comment() {
+        let text = "PI\n+7776FU,T5,'* 30 -3334FU, +2726FU\n-3334FU,'* -20\n";
+        let (_, moves, _, _evals) = parse_csa_full_with_evals(text).unwrap();
+        let times: Vec<Option<u32>> = moves
+            .iter()
+            .map(|m| match m {
+                ParsedMove::Normal(cm) => cm.time_sec,
+                ParsedMove::Special(_) => None,
+            })
+            .collect();
+        assert_eq!(times, vec![Some(5), None]);
     }
 
     #[test]
