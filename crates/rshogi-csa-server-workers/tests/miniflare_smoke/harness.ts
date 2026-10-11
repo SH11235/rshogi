@@ -244,6 +244,7 @@ async function applyGamesSearchMigrations(mf: Miniflare): Promise<void> {
     "0002_games_index_backfill_state.sql",
     "0003_games_search_index_player_ids.sql",
     "0004_player_rating_materialization.sql",
+    "0005_games_search_index_event.sql",
   ]) {
     const sql = await readFile(resolve(WORKER_ROOT, "migrations", name), "utf8");
     for (const statement of sql.split(";").map((part) => part.trim()).filter(Boolean)) {

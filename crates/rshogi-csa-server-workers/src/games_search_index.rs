@@ -11,9 +11,48 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(target_arch = "wasm32")]
 use crate::games_index::GamesIndexEntry;
+use crate::games_index::is_external_source;
 
 pub const DEFAULT_PAGE_SIZE: u32 = 20;
 pub const MAX_PAGE_SIZE: u32 = 100;
+
+/// 検索 API の `source` に一度に指定できる値の上限。bind 数を有界に保つ。
+pub const MAX_SOURCE_FILTERS: usize = 8;
+
+/// [`SearchRow`] を読み出す SELECT の列リスト。検索 / プレイヤー詳細 /
+/// レーティング集計で共有し、列追加時の取りこぼしを防ぐ。
+pub const SEARCH_ROW_COLUMNS: &str = "game_id, started_at_ms, ended_at_ms, sente_name, gote_name, black_player_id, white_player_id, wire_result_kind, end_reason, moves_count, clock_json, source, event, origin_url";
+
+/// イベントタグ一覧 (`GET /api/v1/games/events`) の集計 SQL。
+///
+/// `event` が空でない対局を `(event, source)` ごとに数え、件数の多い順 (同数は
+/// `event` 昇順、さらに `source` 昇順) に返す。`event IS NOT NULL` は部分 index
+/// `games_search_index_event_source` を使わせるための条件。
+pub const EVENT_TAGS_SQL: &str = "SELECT event, source, COUNT(*) AS games FROM games_search_index WHERE event IS NOT NULL AND event <> '' GROUP BY event, source ORDER BY games DESC, event ASC, source ASC";
+
+/// イベントタグ一覧の 1 件。
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EventTag {
+    pub event: String,
+    pub source: String,
+    pub games: u64,
+}
+
+/// 検索 API の `source` クエリ値 (カンマ区切り) を重複のない値の列に分解する。
+///
+/// 空要素は無視する。値が [`MAX_SOURCE_FILTERS`] を超える場合は `Err`。
+pub fn parse_source_filter(raw: &str) -> Result<Vec<String>, String> {
+    let mut sources: Vec<String> = Vec::new();
+    for value in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        if !sources.iter().any(|existing| existing == value) {
+            sources.push(value.to_owned());
+        }
+    }
+    if sources.len() > MAX_SOURCE_FILTERS {
+        return Err(format!("source accepts at most {MAX_SOURCE_FILTERS} values"));
+    }
+    Ok(sources)
+}
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +107,10 @@ pub fn validate_pagination(page: u32, page_size: u32) -> Result<(), String> {
 pub struct SearchParams {
     pub name: Option<String>,
     pub result: Option<String>,
-    pub source: Option<String>,
+    /// 空なら絞り込まない。複数あるときはいずれかに一致する対局を返す。
+    pub source: Vec<String>,
+    /// `event` 列の完全一致。
+    pub event: Option<String>,
     pub from: Option<u64>,
     pub to: Option<u64>,
     pub page: u32,
@@ -92,7 +134,9 @@ pub struct SearchQuery {
 
 /// 検索条件から placeholder 付き SQL と bind 値を組み立てる。
 pub fn build_search_query(params: &SearchParams) -> SearchQuery {
-    let mut clauses = Vec::new();
+    let source_clause = (!params.source.is_empty())
+        .then(|| format!("source IN ({})", vec!["?"; params.source.len()].join(", ")));
+    let mut clauses: Vec<&str> = Vec::new();
     let mut values = Vec::new();
     if let Some(name) = &params.name {
         clauses.push("(sente_name LIKE ? ESCAPE '\\' COLLATE NOCASE OR gote_name LIKE ? ESCAPE '\\' COLLATE NOCASE)");
@@ -105,9 +149,13 @@ pub fn build_search_query(params: &SearchParams) -> SearchQuery {
         clauses.push("result_kind = ?");
         values.push(QueryValue::Text(result.clone()));
     }
-    if let Some(source) = &params.source {
-        clauses.push("source = ?");
-        values.push(QueryValue::Text(source.clone()));
+    if let Some(clause) = &source_clause {
+        clauses.push(clause);
+        values.extend(params.source.iter().cloned().map(QueryValue::Text));
+    }
+    if let Some(event) = &params.event {
+        clauses.push("event = ?");
+        values.push(QueryValue::Text(event.clone()));
     }
     if let Some(from) = params.from {
         clauses.push("ended_at_ms >= ?");
@@ -122,7 +170,7 @@ pub fn build_search_query(params: &SearchParams) -> SearchQuery {
     } else {
         format!(" WHERE {}", clauses.join(" AND "))
     };
-    let columns = "game_id, started_at_ms, ended_at_ms, sente_name, gote_name, black_player_id, white_player_id, wire_result_kind, end_reason, moves_count, clock_json, source";
+    let columns = SEARCH_ROW_COLUMNS;
     SearchQuery {
         count_sql: format!("SELECT COUNT(*) AS total_count FROM games_search_index{where_sql}"),
         rows_sql: format!(
@@ -163,8 +211,14 @@ pub struct OwnedGamesIndexEntry {
     pub result_kind: String,
     pub end_reason: String,
     pub moves_count: u32,
-    pub clock: serde_json::Value,
+    /// 外部棋譜で持ち時間を判定できなかった entry では省略される。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock: Option<serde_json::Value>,
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,8 +233,13 @@ pub struct SearchRow {
     wire_result_kind: String,
     end_reason: String,
     moves_count: u32,
+    /// `clock` を持たない entry は JSON の `null` を保存する (列は NOT NULL)。
     clock_json: String,
     source: String,
+    #[serde(default)]
+    event: Option<String>,
+    #[serde(default)]
+    origin_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -190,13 +249,22 @@ pub struct SearchGameSummary {
     ended_at_ms: u64,
     black_handle: String,
     white_handle: String,
-    black_player_id: String,
-    white_player_id: String,
+    /// 外部棋譜 (`wdoor` / `upload`) では省略する。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    black_player_id: Option<String>,
+    /// 外部棋譜 (`wdoor` / `upload`) では省略する。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    white_player_id: Option<String>,
     result_kind: String,
     end_reason: String,
     moves_count: u32,
-    clock: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clock: Option<serde_json::Value>,
     source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_url: Option<String>,
 }
 
 impl SearchRow {
@@ -241,11 +309,18 @@ impl SearchRow {
             moves_count: entry.moves_count,
             clock_json: serde_json::to_string(&entry.clock)?,
             source: entry.source.clone(),
+            event: entry.event.clone(),
+            origin_url: entry.origin_url.clone(),
         })
     }
 
     pub fn into_summary(self) -> Result<SearchGameSummary, serde_json::Error> {
-        let (black_player_id, white_player_id) = self.resolved_player_ids();
+        let (black_player_id, white_player_id) = if is_external_source(&self.source) {
+            (None, None)
+        } else {
+            let (black, white) = self.resolved_player_ids();
+            (Some(black), Some(white))
+        };
         Ok(SearchGameSummary {
             game_id: self.game_id,
             started_at_ms: self.started_at_ms,
@@ -259,6 +334,8 @@ impl SearchRow {
             moves_count: self.moves_count,
             clock: serde_json::from_str(&self.clock_json)?,
             source: self.source,
+            event: self.event,
+            origin_url: self.origin_url,
         })
     }
 }
@@ -281,6 +358,8 @@ pub async fn upsert_entry(env: &worker::Env, entry: &GamesIndexEntry<'_>) -> wor
             moves_count: entry.moves_count,
             clock_json: &clock_json,
             source: entry.source,
+            event: entry.event,
+            origin_url: entry.origin_url,
         },
     )
     .await
@@ -304,6 +383,8 @@ pub async fn upsert_owned(env: &worker::Env, entry: &OwnedGamesIndexEntry) -> wo
             moves_count: entry.moves_count,
             clock_json: &clock_json,
             source: &entry.source,
+            event: entry.event.as_deref(),
+            origin_url: entry.origin_url.as_deref(),
         },
     )
     .await
@@ -323,12 +404,55 @@ struct UpsertFields<'a> {
     moves_count: u32,
     clock_json: &'a str,
     source: &'a str,
+    event: Option<&'a str>,
+    origin_url: Option<&'a str>,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn optional_text(value: Option<&str>) -> worker::wasm_bindgen::JsValue {
+    value.map_or(worker::wasm_bindgen::JsValue::NULL, worker::wasm_bindgen::JsValue::from_str)
+}
+
+/// 外部棋譜 (`wdoor` / `upload`) の 1 行を upsert する。
+///
+/// player ID は付けず (`NULL`)、レーティング集計の対象外なので
+/// `player_rating_state` の revision / rebuild マーカーにも触れない。過去日時の
+/// 棋譜を大量に取り込んでも Elo の全履歴 rebuild を誘発しない。
+#[cfg(target_arch = "wasm32")]
+async fn upsert_external_fields(
+    db: &worker::D1Database,
+    fields: UpsertFields<'_>,
+) -> worker::Result<()> {
+    use worker::wasm_bindgen::JsValue;
+    let values = [
+        JsValue::from_str(fields.game_id),
+        JsValue::from_str(fields.sente),
+        JsValue::from_str(fields.gote),
+        JsValue::from_f64(fields.started_at_ms as f64),
+        JsValue::from_f64(fields.ended_at_ms as f64),
+        JsValue::from_str(result_kind_for_search(fields.end_reason)),
+        JsValue::from_str(fields.source),
+        JsValue::from_f64(f64::from(fields.moves_count)),
+        JsValue::from_str(fields.wire_result_kind),
+        JsValue::from_str(fields.end_reason),
+        JsValue::from_str(fields.clock_json),
+        optional_text(fields.event),
+        optional_text(fields.origin_url),
+    ];
+    db.prepare("INSERT INTO games_search_index (game_id, sente_name, gote_name, black_player_id, white_player_id, started_at_ms, ended_at_ms, result_kind, source, moves_count, wire_result_kind, end_reason, clock_json, event, origin_url) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(game_id) DO UPDATE SET sente_name=excluded.sente_name, gote_name=excluded.gote_name, black_player_id=NULL, white_player_id=NULL, started_at_ms=excluded.started_at_ms, ended_at_ms=excluded.ended_at_ms, result_kind=excluded.result_kind, source=excluded.source, moves_count=excluded.moves_count, wire_result_kind=excluded.wire_result_kind, end_reason=excluded.end_reason, clock_json=excluded.clock_json, event=excluded.event, origin_url=excluded.origin_url")
+        .bind(&values)?
+        .run()
+        .await?;
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
 async fn upsert_fields(env: &worker::Env, fields: UpsertFields<'_>) -> worker::Result<()> {
     use worker::wasm_bindgen::JsValue;
     let db = env.d1(crate::config::ConfigKeys::GAMES_SEARCH_DB_BINDING)?;
+    if is_external_source(fields.source) {
+        return upsert_external_fields(&db, fields).await;
+    }
     let legacy_black;
     let black_player_id = match fields.black_player_id {
         Some(id) => id,
@@ -359,6 +483,8 @@ async fn upsert_fields(env: &worker::Env, fields: UpsertFields<'_>) -> worker::R
         JsValue::from_str(fields.wire_result_kind),
         JsValue::from_str(fields.end_reason),
         JsValue::from_str(fields.clock_json),
+        optional_text(fields.event),
+        optional_text(fields.origin_url),
     ];
     let dirty_values = vec![
         JsValue::from_f64(fields.ended_at_ms as f64),
@@ -385,7 +511,7 @@ async fn upsert_fields(env: &worker::Env, fields: UpsertFields<'_>) -> worker::R
     let dirty = db
         .prepare("UPDATE player_rating_state SET data_revision = data_revision + 1, rebuild_required = CASE WHEN cursor_ended_at_ms > ? OR (cursor_ended_at_ms = ? AND cursor_game_id >= ?) THEN 1 ELSE rebuild_required END WHERE singleton = 1 AND (NOT EXISTS (SELECT 1 FROM games_search_index WHERE game_id = ?) OR EXISTS (SELECT 1 FROM games_search_index WHERE game_id = ? AND (sente_name IS NOT ? OR gote_name IS NOT ? OR black_player_id IS NOT ? OR white_player_id IS NOT ? OR started_at_ms IS NOT ? OR ended_at_ms IS NOT ? OR wire_result_kind IS NOT ? OR end_reason IS NOT ? OR source IS NOT ? OR moves_count IS NOT ? OR clock_json IS NOT ?)))")
         .bind(&dirty_values)?;
-    let upsert = db.prepare("INSERT INTO games_search_index (game_id, sente_name, gote_name, black_player_id, white_player_id, started_at_ms, ended_at_ms, result_kind, source, moves_count, wire_result_kind, end_reason, clock_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(game_id) DO UPDATE SET sente_name=excluded.sente_name, gote_name=excluded.gote_name, black_player_id=excluded.black_player_id, white_player_id=excluded.white_player_id, started_at_ms=excluded.started_at_ms, ended_at_ms=excluded.ended_at_ms, result_kind=excluded.result_kind, source=excluded.source, moves_count=excluded.moves_count, wire_result_kind=excluded.wire_result_kind, end_reason=excluded.end_reason, clock_json=excluded.clock_json WHERE sente_name IS NOT excluded.sente_name OR gote_name IS NOT excluded.gote_name OR black_player_id IS NOT excluded.black_player_id OR white_player_id IS NOT excluded.white_player_id OR ended_at_ms IS NOT excluded.ended_at_ms OR wire_result_kind IS NOT excluded.wire_result_kind OR end_reason IS NOT excluded.end_reason OR started_at_ms IS NOT excluded.started_at_ms OR source IS NOT excluded.source OR moves_count IS NOT excluded.moves_count OR clock_json IS NOT excluded.clock_json")
+    let upsert = db.prepare("INSERT INTO games_search_index (game_id, sente_name, gote_name, black_player_id, white_player_id, started_at_ms, ended_at_ms, result_kind, source, moves_count, wire_result_kind, end_reason, clock_json, event, origin_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(game_id) DO UPDATE SET sente_name=excluded.sente_name, gote_name=excluded.gote_name, black_player_id=excluded.black_player_id, white_player_id=excluded.white_player_id, started_at_ms=excluded.started_at_ms, ended_at_ms=excluded.ended_at_ms, result_kind=excluded.result_kind, source=excluded.source, moves_count=excluded.moves_count, wire_result_kind=excluded.wire_result_kind, end_reason=excluded.end_reason, clock_json=excluded.clock_json, event=excluded.event, origin_url=excluded.origin_url WHERE sente_name IS NOT excluded.sente_name OR gote_name IS NOT excluded.gote_name OR black_player_id IS NOT excluded.black_player_id OR white_player_id IS NOT excluded.white_player_id OR ended_at_ms IS NOT excluded.ended_at_ms OR wire_result_kind IS NOT excluded.wire_result_kind OR end_reason IS NOT excluded.end_reason OR started_at_ms IS NOT excluded.started_at_ms OR source IS NOT excluded.source OR moves_count IS NOT excluded.moves_count OR clock_json IS NOT excluded.clock_json OR event IS NOT excluded.event OR origin_url IS NOT excluded.origin_url")
         .bind(&values)?;
     db.batch(vec![dirty, upsert]).await?;
     Ok(())
@@ -480,7 +606,8 @@ mod tests {
         SearchParams {
             name: None,
             result: None,
-            source: None,
+            source: Vec::new(),
+            event: None,
             from: None,
             to: None,
             page: 1,
@@ -492,7 +619,8 @@ mod tests {
         let query = build_search_query(&SearchParams {
             name: Some("藤井".into()),
             result: Some("resignation".into()),
-            source: Some("kifu".into()),
+            source: vec!["kifu".into()],
+            event: Some("WCSC36".into()),
             from: Some(100),
             to: Some(200),
             ..base_params()
@@ -500,7 +628,8 @@ mod tests {
         for clause in [
             "sente_name LIKE ? ESCAPE '\\' COLLATE NOCASE",
             "result_kind = ?",
-            "source = ?",
+            "source IN (?)",
+            "event = ?",
             "ended_at_ms >= ?",
             "ended_at_ms <= ?",
         ] {
@@ -567,6 +696,111 @@ mod tests {
         expected["white_player_id"] =
             serde_json::Value::String(crate::player_identity::legacy_player_id("bob"));
         assert_eq!(serde_json::to_value(summary).unwrap(), expected);
+    }
+
+    #[test]
+    fn query_binds_each_source_in_order_before_later_filters() {
+        let query = build_search_query(&SearchParams {
+            source: vec!["kifu".into(), "floodgate".into()],
+            event: Some("floodgate-300-10F".into()),
+            from: Some(7),
+            ..base_params()
+        });
+        assert!(
+            query
+                .rows_sql
+                .contains("WHERE source IN (?, ?) AND event = ? AND ended_at_ms >= ?"),
+            "sql={}",
+            query.rows_sql
+        );
+        assert_eq!(
+            query.filter_values,
+            vec![
+                QueryValue::Text("kifu".into()),
+                QueryValue::Text("floodgate".into()),
+                QueryValue::Text("floodgate-300-10F".into()),
+                QueryValue::Integer(7.0),
+            ]
+        );
+        // bind 数と placeholder 数が一致する (LIMIT / OFFSET の 2 個を除く)。
+        assert_eq!(query.count_sql.matches('?').count(), query.filter_values.len());
+        assert_eq!(query.rows_sql.matches('?').count(), query.filter_values.len() + 2);
+    }
+
+    #[test]
+    fn query_without_source_or_event_has_no_such_clause() {
+        let query = build_search_query(&base_params());
+        assert!(!query.count_sql.contains("WHERE"));
+        assert!(query.rows_sql.contains("event, origin_url FROM games_search_index ORDER BY"));
+    }
+
+    #[test]
+    fn event_tag_serializes_to_contract_shape() {
+        let tag = EventTag {
+            event: "WCSC36".into(),
+            source: "upload".into(),
+            games: 123,
+        };
+        assert_eq!(
+            serde_json::to_value(&tag).unwrap(),
+            serde_json::json!({"event": "WCSC36", "source": "upload", "games": 123})
+        );
+        // D1 の行 (COUNT(*) AS games) をそのまま読める。
+        let row: EventTag =
+            serde_json::from_str(r#"{"event":"WCSC36","source":"upload","games":123}"#).unwrap();
+        assert_eq!(row, tag);
+        assert!(EVENT_TAGS_SQL.contains("GROUP BY event, source"));
+        assert!(EVENT_TAGS_SQL.ends_with("ORDER BY games DESC, event ASC, source ASC"));
+    }
+
+    #[test]
+    fn source_filter_splits_dedupes_and_bounds_values() {
+        assert_eq!(parse_source_filter("kifu").unwrap(), vec!["kifu"]);
+        assert_eq!(
+            parse_source_filter(" kifu, floodgate ,,kifu,wdoor").unwrap(),
+            vec!["kifu", "floodgate", "wdoor"]
+        );
+        assert!(parse_source_filter("").unwrap().is_empty());
+        assert!(parse_source_filter(",").unwrap().is_empty());
+        let at_limit: Vec<_> = (0..MAX_SOURCE_FILTERS).map(|i| format!("s{i}")).collect();
+        assert_eq!(parse_source_filter(&at_limit.join(",")).unwrap().len(), MAX_SOURCE_FILTERS);
+        let over_limit: Vec<_> = (0..=MAX_SOURCE_FILTERS).map(|i| format!("s{i}")).collect();
+        assert!(parse_source_filter(&over_limit.join(",")).is_err());
+    }
+
+    #[test]
+    fn external_entry_round_trips_optional_fields_without_player_ids() {
+        // backfill (R2 meta → games-index → D1) が通る経路: meta JSON を
+        // `OwnedGamesIndexEntry` に読み、D1 行表現を経て検索 summary に戻す。
+        let original = serde_json::json!({
+            "game_id": "wdoor-20261009000001-0123456789",
+            "started_at_ms": 100, "ended_at_ms": 200,
+            "black_handle": "RAMU", "white_handle": "Panda",
+            "result_kind": "WIN_BLACK", "end_reason": "RESIGN", "moves_count": 113,
+            "clock": {"kind": "fischer", "total_sec": 300, "increment_sec": 10},
+            "source": "wdoor",
+            "event": "floodgate-300-10F",
+            "origin_url": "https://example.com/x.csa"
+        });
+        let entry: OwnedGamesIndexEntry = serde_json::from_value(original.clone()).unwrap();
+        let summary = SearchRow::from_owned(&entry).unwrap().into_summary().unwrap();
+        assert_eq!(serde_json::to_value(summary).unwrap(), original);
+    }
+
+    #[test]
+    fn external_entry_without_clock_or_event_stays_omitted() {
+        let original = serde_json::json!({
+            "game_id": "upload-0123456789abcdef",
+            "started_at_ms": 100, "ended_at_ms": 200,
+            "black_handle": "a", "white_handle": "b",
+            "result_kind": "ABORT", "end_reason": "ABNORMAL", "moves_count": 0,
+            "source": "upload"
+        });
+        let entry: OwnedGamesIndexEntry = serde_json::from_value(original.clone()).unwrap();
+        let row = SearchRow::from_owned(&entry).unwrap();
+        // D1 の clock_json は NOT NULL なので JSON の null を保存する。
+        assert_eq!(row.clock_json, "null");
+        assert_eq!(serde_json::to_value(row.into_summary().unwrap()).unwrap(), original);
     }
 
     #[test]

@@ -72,10 +72,13 @@ pub fn games_index_key(ended_at_ms: u64, game_id: &str) -> Result<String, Storag
 /// `end_reason` を **2 フィールドに分離** する。client 側 (ramu-shogi viewer)
 /// は両者を合わせて UI 表示用の構造化結果に変換する。
 ///
-/// `source` は `"kifu"` / `"floodgate"` の 2 値 enum。`"floodgate"` は
-/// 「Floodgate gating が opt-in された worker (`ALLOW_FLOODGATE_FEATURES`
-/// 立ち + `FLOODGATE_HISTORY_BUCKET` binding 解決可) で起きた終局」を意味し、
-/// `floodgate-history/` への put 成否は反映しない。
+/// `source` は `"kifu"` / `"floodgate"` / `"wdoor"` / `"upload"` の 4 値。
+/// `"floodgate"` は「Floodgate gating が opt-in された worker
+/// (`ALLOW_FLOODGATE_FEATURES` 立ち + `FLOODGATE_HISTORY_BUCKET` binding 解決可)
+/// で起きた終局」を意味し、`floodgate-history/` への put 成否は反映しない。
+/// `"wdoor"` / `"upload"` は管理 API で取り込んだ外部棋譜
+/// ([`SOURCE_WDOOR`] / [`SOURCE_UPLOAD`]) で、player ID を持たず、内部
+/// レーティング集計の対象外になる。
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct GamesIndexEntry<'a> {
     pub game_id: &'a str,
@@ -92,8 +95,31 @@ pub struct GamesIndexEntry<'a> {
     pub result_kind: &'static str,
     pub end_reason: &'static str,
     pub moves_count: u32,
-    pub clock: ClockSpec<'a>,
+    /// 外部棋譜で持ち時間を判定できないときだけ省略する。自前サーバーの対局は常に `Some`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock: Option<ClockSpec<'a>>,
     pub source: &'static str,
+    /// `wdoor` はゲーム名 (例 `floodgate-300-10F`)、`upload` は取り込み時に指定した大会名など。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<&'a str>,
+    /// `wdoor` から参照取り込みした棋譜の元 URL。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<&'a str>,
+}
+
+/// wdoor の Floodgate から取り込んだ対局の `source` 値。
+pub const SOURCE_WDOOR: &str = "wdoor";
+
+/// 管理者がアップロードした棋譜の `source` 値。
+pub const SOURCE_UPLOAD: &str = "upload";
+
+/// 外部棋譜 (`wdoor` / `upload`) を除外する SQL 条件。レーティング集計と
+/// プレイヤー詳細の対局一覧で共有する。
+pub const NOT_EXTERNAL_SOURCE_SQL: &str = "source NOT IN ('wdoor','upload')";
+
+/// 外部から取り込んだ棋譜の `source` かどうか。
+pub fn is_external_source(source: &str) -> bool {
+    source == SOURCE_WDOOR || source == SOURCE_UPLOAD
 }
 
 /// `clock` field の wire 形状。`kind` は `wrangler.toml::CLOCK_KIND` と同一の
@@ -510,7 +536,7 @@ mod tests {
             result_kind: "WIN_BLACK",
             end_reason: "RESIGN",
             moves_count: 142,
-            clock: ClockSpec {
+            clock: Some(ClockSpec {
                 kind: "fischer",
                 total_sec: Some(300),
                 byoyomi_sec: None,
@@ -519,10 +545,15 @@ mod tests {
                 total_ms: None,
                 total_min: None,
                 byoyomi_min: None,
-            },
+            }),
             source: "kifu",
+            event: None,
+            origin_url: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
+        // 自前サーバーの対局では外部棋譜用の任意 field を出さない (既存 wire を変えない)。
+        assert!(!json.contains("event"), "json={json}");
+        assert!(!json.contains("origin_url"), "json={json}");
         // result_kind / end_reason が独立 field として直列化されることを固定。
         assert!(json.contains("\"result_kind\":\"WIN_BLACK\""), "json={json}");
         assert!(json.contains("\"end_reason\":\"RESIGN\""), "json={json}");
@@ -531,6 +562,45 @@ mod tests {
         // 未使用 clock field は省略される。
         assert!(!json.contains("byoyomi_sec"), "json={json}");
         assert!(!json.contains("total_ms"), "json={json}");
+    }
+
+    #[test]
+    fn external_entry_omits_player_ids_and_unknown_clock() {
+        let entry = GamesIndexEntry {
+            game_id: "wdoor-20261009000001-0123456789",
+            started_at_ms: 1,
+            ended_at_ms: 2,
+            black_handle: "RAMU",
+            white_handle: "Panda",
+            black_player_id: None,
+            white_player_id: None,
+            result_kind: "WIN_BLACK",
+            end_reason: "RESIGN",
+            moves_count: 113,
+            clock: None,
+            source: SOURCE_WDOOR,
+            event: Some("floodgate-300-10F"),
+            origin_url: Some("https://example.com/a.csa"),
+        };
+        let value = serde_json::to_value(&entry).unwrap();
+        let object = value.as_object().unwrap();
+        for absent in ["black_player_id", "white_player_id", "clock"] {
+            assert!(!object.contains_key(absent), "{absent} must be omitted: {value}");
+        }
+        assert_eq!(value["source"], "wdoor");
+        assert_eq!(value["event"], "floodgate-300-10F");
+        assert_eq!(value["origin_url"], "https://example.com/a.csa");
+    }
+
+    #[test]
+    fn external_source_predicate_matches_only_imported_sources() {
+        assert!(is_external_source("wdoor"));
+        assert!(is_external_source("upload"));
+        assert!(!is_external_source("kifu"));
+        assert!(!is_external_source("floodgate"));
+        for source in [SOURCE_WDOOR, SOURCE_UPLOAD] {
+            assert!(NOT_EXTERNAL_SOURCE_SQL.contains(&format!("'{source}'")));
+        }
     }
 
     #[test]

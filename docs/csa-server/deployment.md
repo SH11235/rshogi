@@ -485,6 +485,35 @@ requestのため共有deadlineを持たず、レスポンスの `deadline_reache
 初回公開後の key rotation / late insert rebuild 中は
 旧 `active_generation` を返し続け、clean な次世代が完成した時点で切り替える。
 
+### 3.2.2 外部棋譜を取り込む
+
+wdoor の Floodgate 対局や大会棋譜は、管理トークン付きの API で取り込む。取り込んだ
+対局は `source` が `wdoor` / `upload` になり、一覧・検索・単局 API にそのまま出る。
+player ID を持たず、内部レーティングの集計とプレイヤー詳細の対局一覧には入らない
+（取り込み後の warmup / 再集計は不要）。
+
+```bash
+# wdoor の対局 ID を渡すと、Worker が wdoor から CSA を 1 回だけ取得して保存する
+curl --fail-with-body -X POST \
+  -H "Authorization: Bearer ${ADMIN_API_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"wdoor_game_id":"wdoor+floodgate-300-10F+RAMU+Panda+20261009000001"}' \
+  "${WORKER_URL}/api/v1/admin/games/import-wdoor"
+
+# CSA 本文を直接送る（event は任意のタグ。source を "wdoor" にすると $EVENT の対局 ID から
+# 参照取り込みと同じ game_id を決める）
+jq -n --rawfile csa game.csa '{csa: $csa, event: "WCSC36"}' | curl --fail-with-body -X POST \
+  -H "Authorization: Bearer ${ADMIN_API_TOKEN}" -H "Content-Type: application/json" \
+  -d @- "${WORKER_URL}/api/v1/admin/games/upload"
+```
+
+- 応答は `{"game_id": "...", "created": true}`。保存済みの対局は何もせず
+  `created: false` を返す。`"force": true` を付けたときだけ上書きする。
+- 本文は 512KB まで（超過は 413）。`$START_TIME` / `$END_TIME` は JST として解釈する。
+- `import-wdoor` は wdoor に棋譜が無ければ 404、対局中（`'summary:` 行なし）なら 409。
+  指し手を初期局面から合法手として再生できない棋譜は 422。
+- 上書きした対局の単局 API (`GET /api/v1/games/<id>`) は edge cache が切れる
+  最大 600 秒後まで古い内容を返すことがある。
+
 ### 3.3 DO migration 確認
 
 `wrangler deployments list` は migration tag を表示しない。確認手段は 2 つ:

@@ -17,6 +17,9 @@
 //!   WS spectate 接続で実状態を確認する)。
 //! - `GET /api/v1/games/search` D1 検索 (終局済)
 //!   選手名・結果・source・終局日時で絞り込み、page pagination で返す。
+//! - `GET /api/v1/games/events` D1 集計 (終局済)
+//!   `event` (大会名・Floodgate のゲーム名などのタグ) を持つ対局を `(event, source)`
+//!   ごとに数え、件数の多い順に返す。
 //! - `GET /api/v1/games/<game_id>` 単局 (終局済)
 //!   `kifu-by-id/<encoded_game_id>.csa` を直接 get する。本文 (CSA V2) と
 //!   `kifu-by-id/<encoded_game_id>.meta.json` から取得した正準メタ (https://github.com/SH11235/rshogi/issues/551
@@ -103,8 +106,9 @@ use crate::client_kind::normalize_client_kind;
 use crate::config::{ConfigKeys, OriginAllowList, is_viewer_api_enabled};
 use crate::games_index::KEY_PREFIX as GAMES_INDEX_PREFIX;
 use crate::games_search_index::{
-    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, QueryValue, SearchGameSummary, SearchParams, SearchRow,
-    build_search_query, validate_pagination,
+    DEFAULT_PAGE_SIZE, EVENT_TAGS_SQL, EventTag, MAX_PAGE_SIZE, QueryValue, SEARCH_ROW_COLUMNS,
+    SearchGameSummary, SearchParams, SearchRow, build_search_query, parse_source_filter,
+    validate_pagination,
 };
 use crate::live_games_index::LIVE_KEY_PREFIX;
 use crate::origin::{OriginDecision, evaluate};
@@ -115,7 +119,10 @@ use crate::x1_paths::{kifu_by_id_meta_key, kifu_by_id_object_key};
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 100;
 const MIN_LIMIT: u32 = 1;
-const PLAYER_GAMES_PREDICATE: &str = "((black_player_id = ? OR black_player_id IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?)) OR (white_player_id = ? OR white_player_id IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?)))";
+/// プレイヤー詳細の対局一覧の絞り込み条件。外部棋譜 (`wdoor` / `upload`) は内部
+/// レーティングの対象外なので除外する
+/// ([`crate::games_index::NOT_EXTERNAL_SOURCE_SQL`] と同じ条件)。
+const PLAYER_GAMES_PREDICATE: &str = "((black_player_id = ? OR black_player_id IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?)) OR (white_player_id = ? OR white_player_id IN (SELECT alias_id FROM player_id_aliases WHERE canonical_id = ?))) AND source NOT IN ('wdoor','upload')";
 
 /// `/api/v1/games[/...]` / `/api/v1/players[/...]` を判定してハンドラに振り分ける。
 ///
@@ -141,10 +148,18 @@ pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
 
     if method == Method::Post {
         let url = req.url()?;
-        if url.path() == "/api/v1/admin/player-ratings/warmup" {
-            return Ok(Some(handle_player_ratings_warmup(req, env).await?));
-        }
-        return Ok(None);
+        return match url.path() {
+            "/api/v1/admin/player-ratings/warmup" => {
+                Ok(Some(handle_player_ratings_warmup(req, env).await?))
+            }
+            "/api/v1/admin/games/import-wdoor" => {
+                Ok(Some(crate::kifu_import_api::handle_import_wdoor(req, env).await?))
+            }
+            "/api/v1/admin/games/upload" => {
+                Ok(Some(crate::kifu_import_api::handle_upload(req, env).await?))
+            }
+            _ => Ok(None),
+        };
     }
 
     if method != Method::Get {
@@ -180,6 +195,10 @@ pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
     if path == "/api/v1/games/live" {
         return Ok(Some(handle_list_live(req, env, &url).await?));
     }
+    // `/api/v1/games/events` も `live` / `search` と同じく単局より先にマッチさせる。
+    if path == "/api/v1/games/events" {
+        return Ok(Some(handle_events(req, env).await?));
+    }
     if let Some(rest) = path.strip_prefix("/api/v1/games/") {
         if rest.is_empty() || rest.contains('/') {
             // 余分な階層 (`/api/v1/games/x/y`) や末尾 `/` は 404 で扱う。
@@ -199,11 +218,16 @@ pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
 /// viewer 配信 API 配下のパスかどうかを判定する純粋ロジック。
 ///
 /// `OPTIONS` preflight 経路で対象パスをゲートするためにも使用する。
-/// games 一覧 / live / 検索 / 単局、および players 一覧 / 詳細のみ true とする。
+/// games 一覧 / live / 検索 / イベントタグ / 単局、および players 一覧 / 詳細のみ
+/// true とする。
 fn is_viewer_api_path(path: &str) -> bool {
     if matches!(
         path,
-        "/api/v1/games" | "/api/v1/games/live" | "/api/v1/games/search" | "/api/v1/players"
+        "/api/v1/games"
+            | "/api/v1/games/live"
+            | "/api/v1/games/search"
+            | "/api/v1/games/events"
+            | "/api/v1/players"
     ) {
         return true;
     }
@@ -281,6 +305,12 @@ struct SearchResponse {
     page: u32,
     page_size: u32,
     total_count: u64,
+}
+
+/// イベントタグ一覧 API (`/api/v1/games/events`) レスポンスの wire 形状。
+#[derive(Debug, Serialize)]
+struct EventsResponse {
+    events: Vec<EventTag>,
 }
 
 #[derive(Debug, Serialize)]
@@ -514,7 +544,7 @@ async fn handle_player_detail(
         .unwrap_or(0);
     let offset = u64::from(page - 1) * u64::from(page_size);
     let rows_sql = format!(
-        "SELECT game_id, started_at_ms, ended_at_ms, sente_name, gote_name, black_player_id, white_player_id, wire_result_kind, end_reason, moves_count, clock_json, source FROM games_search_index WHERE {predicate} ORDER BY ended_at_ms DESC, game_id ASC LIMIT ? OFFSET ?"
+        "SELECT {SEARCH_ROW_COLUMNS} FROM games_search_index WHERE {predicate} ORDER BY ended_at_ms DESC, game_id ASC LIMIT ? OFFSET ?"
     );
     let mut row_values = family_values.to_vec();
     row_values.push(worker::wasm_bindgen::JsValue::from_f64(f64::from(page_size)));
@@ -581,10 +611,17 @@ async fn load_materialized_player(
         .map(PlayerSummary::from))
 }
 
-async fn handle_player_ratings_warmup(req: &Request, env: &Env) -> Result<Response> {
+/// `Authorization: Bearer <ADMIN_API_TOKEN>` が正しい管理リクエストか。
+///
+/// ヘッダ欠落・token 不一致・secret 未設定のいずれも `false` (呼び出し側は 403)。
+pub(crate) fn is_admin_request(req: &Request, env: &Env) -> Result<bool> {
     let authorization = req.headers().get("Authorization")?.unwrap_or_default();
     let token = authorization.strip_prefix("Bearer ").unwrap_or("");
-    if crate::admin_auth::verify_admin_token_str(token, env).is_err() {
+    Ok(crate::admin_auth::verify_admin_token_str(token, env).is_ok())
+}
+
+async fn handle_player_ratings_warmup(req: &Request, env: &Env) -> Result<Response> {
+    if !is_admin_request(req, env)? {
         return no_store_error("Forbidden", 403);
     }
     // Admin warmup is an independent HTTP invocation and does not share the
@@ -606,7 +643,8 @@ fn parse_search_params(url: &Url) -> std::result::Result<SearchParams, String> {
     let mut params = SearchParams {
         name: None,
         result: None,
-        source: None,
+        source: Vec::new(),
+        event: None,
         from: None,
         to: None,
         page: 1,
@@ -617,7 +655,8 @@ fn parse_search_params(url: &Url) -> std::result::Result<SearchParams, String> {
         match key.as_ref() {
             "name" => params.name = Some(value),
             "result" => params.result = Some(value),
-            "source" => params.source = Some(value),
+            "source" => params.source = parse_source_filter(&value)?,
+            "event" => params.event = Some(value),
             "from" => {
                 params.from =
                     Some(value.parse().map_err(|_| "from must be an epoch millisecond integer")?)
@@ -733,6 +772,42 @@ async fn handle_search(req: &Request, env: &Env, url: &Url) -> Result<Response> 
         page_size: params.page_size,
         total_count: count,
     })?;
+    set_cache_control(&mut response, CacheableKind::List.cache_control_header())?;
+    with_cors(response, req, env)
+}
+
+/// イベントタグ一覧ハンドラ。D1 から `(event, source)` ごとの対局数を集計する。
+///
+/// 検索 API と同じく D1 を直接読み、応答に一覧系と同じ 60 秒の `Cache-Control`
+/// を付ける。
+async fn handle_events(req: &Request, env: &Env) -> Result<Response> {
+    if let Some(blocked) = check_origin(req, env)? {
+        return Ok(blocked);
+    }
+    let db = match env.d1(ConfigKeys::GAMES_SEARCH_DB_BINDING) {
+        Ok(db) => db,
+        Err(e) => {
+            log_viewer_api_failed(
+                "games_events_binding",
+                &extract_client_kind(req),
+                &e.to_string(),
+            );
+            return with_cors(no_store_error("Storage error", 502)?, req, env);
+        }
+    };
+    let events = match db
+        .prepare(EVENT_TAGS_SQL)
+        .all()
+        .await
+        .and_then(|result| result.results::<EventTag>())
+    {
+        Ok(events) => events,
+        Err(e) => {
+            log_viewer_api_failed("games_events_query", &extract_client_kind(req), &e.to_string());
+            return with_cors(no_store_error("Storage error", 502)?, req, env);
+        }
+    };
+    let mut response = Response::from_json(&EventsResponse { events })?;
     set_cache_control(&mut response, CacheableKind::List.cache_control_header())?;
     with_cors(response, req, env)
 }
@@ -1227,7 +1302,7 @@ fn with_cors(mut resp: Response, req: &Request, env: &Env) -> Result<Response> {
 ///
 /// 400 / 403 / 404 / 502 / 503 等、cache してはいけない応答全てに使う共通ヘルパ。
 /// `with_cors` で ACAO + Vary を被せる前段の素レスポンスを返す。
-fn no_store_error<T: AsRef<str>>(msg: T, status: u16) -> Result<Response> {
+pub(crate) fn no_store_error<T: AsRef<str>>(msg: T, status: u16) -> Result<Response> {
     let mut resp = Response::error(msg.as_ref().to_string(), status)?;
     resp.headers_mut().set("Cache-Control", "no-store")?;
     Ok(resp)
@@ -1353,6 +1428,7 @@ mod tests {
         assert!(is_viewer_api_path("/api/v1/games"));
         assert!(is_viewer_api_path("/api/v1/games/live"));
         assert!(is_viewer_api_path("/api/v1/games/search"));
+        assert!(is_viewer_api_path("/api/v1/games/events"));
         assert!(is_viewer_api_path("/api/v1/games/abc-123"));
         assert!(is_viewer_api_path("/api/v1/players"));
         assert!(is_viewer_api_path("/api/v1/players/p_v2_abc123"));
