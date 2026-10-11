@@ -97,17 +97,25 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     concurrency: usize,
 
-    /// Byoyomi time per move in milliseconds (mutually exclusive with --btime/--binc)
+    /// Byoyomi time per move in milliseconds (mutually exclusive with --btime/--binc/--wtime/--winc)
     #[arg(long, default_value_t = 0)]
     byoyomi: u64,
 
-    /// Initial time per side in milliseconds (Fischer clock, mutually exclusive with --byoyomi)
+    /// 先手の持ち時間（ミリ秒、Fischer 時計、--byoyomi と排他）
     #[arg(long, default_value_t = 0)]
     btime: u64,
 
-    /// Increment per move in milliseconds (Fischer clock, mutually exclusive with --byoyomi)
+    /// 先手の加算時間（ミリ秒、Fischer 時計、--byoyomi と排他）
     #[arg(long, default_value_t = 0)]
     binc: u64,
+
+    /// 後手の持ち時間（ミリ秒、省略時 --btime）。Fischer 専用、単独指定不可、先後それぞれ持ち時間か加算の正値が必須
+    #[arg(long)]
+    wtime: Option<u64>,
+
+    /// 後手の加算時間（ミリ秒、省略時 --binc）。Fischer 専用、単独指定不可、先後それぞれ持ち時間か加算の正値が必須
+    #[arg(long)]
+    winc: Option<u64>,
 
     /// Threads per engine
     #[arg(long, default_value_t = 1)]
@@ -347,6 +355,8 @@ struct MetaSettings {
     btime: u64,
     #[serde(skip_serializing_if = "is_zero_u64")]
     binc: u64,
+    wtime: u64,
+    winc: u64,
     timeout_margin_ms: u64,
     threads: usize,
     hash_mb: u32,
@@ -354,6 +364,30 @@ struct MetaSettings {
     depth: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nodes: Option<u64>,
+}
+
+impl MetaSettings {
+    fn new(cli: &Cli, time_control: TimeControl, seed: u64) -> Self {
+        Self {
+            startpos_order: cli.startpos_order,
+            games: cli.games * 2, // 各方向 cli.games 局、双方向で合計
+            seed,
+            max_moves: cli.max_moves,
+            adjudicate_resign: cli.adjudicate_resign,
+            adjudicate_win: cli.adjudicate_win,
+            adjudicate_draw: cli.adjudicate_draw,
+            byoyomi: cli.byoyomi,
+            btime: cli.btime,
+            binc: cli.binc,
+            wtime: time_control.white_time,
+            winc: time_control.white_inc,
+            timeout_margin_ms: cli.timeout_margin_ms,
+            threads: cli.threads,
+            hash_mb: cli.hash_mb,
+            depth: cli.depth,
+            nodes: cli.nodes,
+        }
+    }
 }
 
 fn is_zero_u64(v: &u64) -> bool {
@@ -707,9 +741,7 @@ struct WorkerConfig {
     adjudicate_win: Option<ResignRule>,
     adjudicate_draw: Option<DrawRule>,
     timeout_margin_ms: u64,
-    byoyomi: u64,
-    btime: u64,
-    binc: u64,
+    time_control: TimeControl,
     go_depth: Option<u32>,
     /// エンジン index ごとの固定ノード数。`go_nodes[i]` が `engine_paths[i]` に対応する。
     go_nodes: Vec<Option<u64>>,
@@ -734,9 +766,7 @@ fn worker_main(
         adjudicate_win,
         adjudicate_draw,
         timeout_margin_ms,
-        byoyomi,
-        btime,
-        binc,
+        time_control,
         go_depth,
         go_nodes,
         start_positions,
@@ -801,7 +831,8 @@ fn worker_main(
         }
 
         let start_pos = &start_positions[ticket.startpos_idx];
-        let tc = TimeControl::new(btime, btime, binc, binc, byoyomi);
+        // 時計はエンジン index に依存せず、各局の先後に割り当てる。
+        let tc = time_control;
         let config = GameConfig {
             limit_only_timeout_ms: None,
             cancel: None,
@@ -899,9 +930,7 @@ struct SpawnCtx<'a> {
     adjudicate_win: Option<ResignRule>,
     adjudicate_draw: Option<DrawRule>,
     timeout_margin_ms: u64,
-    byoyomi: u64,
-    btime: u64,
-    binc: u64,
+    time_control: TimeControl,
     go_depth: Option<u32>,
     /// エンジン index ごとの固定ノード数。`go_nodes[i]` が `engine_paths[i]` に対応する。
     go_nodes: &'a [Option<u64>],
@@ -928,9 +957,7 @@ fn spawn_worker(
         adjudicate_win: ctx.adjudicate_win,
         adjudicate_draw: ctx.adjudicate_draw,
         timeout_margin_ms: ctx.timeout_margin_ms,
-        byoyomi: ctx.byoyomi,
-        btime: ctx.btime,
-        binc: ctx.binc,
+        time_control: ctx.time_control,
         go_depth: ctx.go_depth,
         go_nodes: ctx.go_nodes.to_vec(),
         start_positions: ctx
@@ -1063,23 +1090,7 @@ fn main() -> Result<()> {
     // --engine-nodes が指定されたエンジンはその値を、それ以外は global --nodes を使う。
     let engine_nodes = resolve_engine_nodes(n, cli.nodes, cli.engine_nodes.as_deref())?;
 
-    // 時間管理のバリデーション
-    let use_byoyomi = cli.byoyomi > 0;
-    let use_fischer = cli.btime > 0 || cli.binc > 0;
-    // engine_nodes は cli.nodes も織り込んだ解決済み Vec なので、resolve 後の状態で判定する。
-    let use_fixed = cli.depth.is_some() || engine_nodes.iter().any(|n| n.is_some());
-    if use_byoyomi && use_fischer {
-        bail!("--byoyomi と --btime/--binc は同時に指定できません");
-    }
-    if !use_byoyomi && !use_fischer && !use_fixed {
-        bail!(
-            "時間管理を指定してください: --byoyomi, --btime/--binc, --depth, --nodes, --engine-nodes のいずれか"
-        );
-    }
-    if use_fischer && cli.btime == 0 && cli.binc == 0 {
-        bail!("フィッシャー時計: --btime または --binc の少なくとも一方を正の値で指定してください");
-    }
-    ensure_node_coverage(&engine_nodes, use_byoyomi || use_fischer, cli.depth.is_some())?;
+    let time_control = resolve_time_control(&cli, &engine_nodes)?;
 
     // 開始局面のロード
     let (start_defs, start_commands) =
@@ -1201,23 +1212,7 @@ fn main() -> Result<()> {
 
     let mut tournament_meta = TournamentMeta {
         timestamp: timestamp.to_rfc3339(),
-        settings: MetaSettings {
-            startpos_order: cli.startpos_order,
-            games: cli.games * 2,
-            seed,
-            max_moves: cli.max_moves,
-            adjudicate_resign: cli.adjudicate_resign,
-            adjudicate_win: cli.adjudicate_win,
-            adjudicate_draw: cli.adjudicate_draw,
-            byoyomi: cli.byoyomi,
-            btime: cli.btime,
-            binc: cli.binc,
-            timeout_margin_ms: cli.timeout_margin_ms,
-            threads: cli.threads,
-            hash_mb: cli.hash_mb,
-            depth: cli.depth,
-            nodes: cli.nodes,
-        },
+        settings: MetaSettings::new(&cli, time_control, seed),
         engines: (0..n)
             .map(|i| EngineMetaEntry {
                 index: i,
@@ -1360,23 +1355,7 @@ fn main() -> Result<()> {
             let meta = MetaLogEntry {
                 kind: "meta".to_string(),
                 timestamp: timestamp.to_rfc3339(),
-                settings: MetaSettings {
-                    startpos_order: cli.startpos_order,
-                    games: cli.games * 2, // 各方向 cli.games 局、双方向で合計
-                    seed,
-                    max_moves: cli.max_moves,
-                    adjudicate_resign: cli.adjudicate_resign,
-                    adjudicate_win: cli.adjudicate_win,
-                    adjudicate_draw: cli.adjudicate_draw,
-                    byoyomi: cli.byoyomi,
-                    btime: cli.btime,
-                    binc: cli.binc,
-                    timeout_margin_ms: cli.timeout_margin_ms,
-                    threads: cli.threads,
-                    hash_mb: cli.hash_mb,
-                    depth: cli.depth,
-                    nodes: cli.nodes,
-                },
+                settings: MetaSettings::new(&cli, time_control, seed),
                 engine_cmd: EngineCommandMeta {
                     path_black: cli.engines[i].display().to_string(),
                     path_white: cli.engines[j].display().to_string(),
@@ -1418,9 +1397,7 @@ fn main() -> Result<()> {
         adjudicate_win: cli.adjudicate_win,
         adjudicate_draw: cli.adjudicate_draw,
         timeout_margin_ms: cli.timeout_margin_ms,
-        byoyomi: cli.byoyomi,
-        btime: cli.btime,
-        binc: cli.binc,
+        time_control,
         go_depth: cli.depth,
         go_nodes: &engine_nodes,
         start_defs: &start_defs,
@@ -2459,9 +2436,142 @@ fn ensure_node_coverage(
     Ok(())
 }
 
+/// 省略された後手の時計を補完し、探索制限との組み合わせを検証する。
+fn resolve_time_control(cli: &Cli, engine_nodes: &[Option<u64>]) -> Result<TimeControl> {
+    let use_byoyomi = cli.byoyomi > 0;
+    let white_specified = cli.wtime.is_some() || cli.winc.is_some();
+    let use_fischer = cli.btime > 0 || cli.binc > 0 || white_specified;
+    // engine_nodes は global --nodes も織り込んだ解決済みの値。
+    let use_fixed = cli.depth.is_some() || engine_nodes.iter().any(|n| n.is_some());
+    if use_byoyomi && white_specified {
+        bail!("--byoyomi と --wtime/--winc は同時に指定できません");
+    }
+    if use_byoyomi && use_fischer {
+        bail!("--byoyomi と --btime/--binc は同時に指定できません");
+    }
+    if !use_byoyomi && !use_fischer && !use_fixed {
+        bail!(
+            "時間管理を指定してください: --byoyomi, --btime/--binc, --depth, --nodes, --engine-nodes のいずれか"
+        );
+    }
+    if use_fischer && cli.btime == 0 && cli.binc == 0 {
+        bail!(
+            "フィッシャー時計: --wtime/--winc の後手時計だけでは指定できません。--btime または --binc の少なくとも一方を正の値で指定してください"
+        );
+    }
+    let wtime = cli.wtime.unwrap_or(cli.btime);
+    let winc = cli.winc.unwrap_or(cli.binc);
+    if use_fischer && wtime == 0 && winc == 0 {
+        bail!("フィッシャー時計: --wtime または --winc の少なくとも一方を正の値で指定してください");
+    }
+    ensure_node_coverage(engine_nodes, use_byoyomi || use_fischer, cli.depth.is_some())?;
+    Ok(TimeControl::new(cli.btime, wtime, cli.binc, winc, cli.byoyomi))
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+
+    fn clock_cli(args: &[&str]) -> super::Cli {
+        super::Cli::try_parse_from(
+            [
+                "tournament",
+                "--engine",
+                "base",
+                "--engine",
+                "test",
+                "--out-dir",
+                "out",
+            ]
+            .into_iter()
+            .chain(args.iter().copied()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fischer_white_defaults_to_black_independently() {
+        for (extra, expected_time, expected_inc) in [
+            (vec![], 180_000, 2_000),
+            (vec!["--wtime", "600000"], 600_000, 2_000),
+            (vec!["--winc", "3000"], 180_000, 3_000),
+            (vec!["--wtime", "0"], 0, 2_000),
+            (vec!["--winc", "0"], 180_000, 0),
+        ] {
+            let mut args = vec!["--btime", "180000", "--binc", "2000"];
+            args.extend(extra);
+            let cli = clock_cli(&args);
+            let tc = super::resolve_time_control(&cli, &[None, None]).unwrap();
+            assert_eq!((tc.black_time, tc.black_inc), (180_000, 2_000));
+            assert_eq!((tc.white_time, tc.white_inc), (expected_time, expected_inc));
+        }
+    }
+
+    #[test]
+    fn asymmetric_fischer_clock_reaches_each_colour() {
+        use rshogi_core::types::Color;
+
+        let cli = clock_cli(&[
+            "--btime", "180000", "--binc", "2000", "--wtime", "600000", "--winc", "3000",
+        ]);
+        let mut tc = super::resolve_time_control(&cli, &[None, None]).unwrap();
+        let args = tc.time_args();
+        assert_eq!(
+            (args.btime, args.wtime, args.binc, args.winc),
+            (180_000, 600_000, 2_000, 3_000)
+        );
+        assert_eq!(tc.think_limit_ms(Color::Black), 182_000);
+        assert_eq!(tc.think_limit_ms(Color::White), 603_000);
+        tc.update_after_move(Color::Black, 1_000);
+        tc.update_after_move(Color::White, 5_000);
+        assert_eq!(tc.remaining(Color::Black), 181_000);
+        assert_eq!(tc.remaining(Color::White), 598_000);
+    }
+
+    #[test]
+    fn asymmetric_meta_settings_serializes_resolved_clocks() {
+        let cli = clock_cli(&[
+            "--btime", "180000", "--binc", "2000", "--wtime", "600000", "--winc", "3000",
+        ]);
+        let tc = super::resolve_time_control(&cli, &[None, None]).unwrap();
+        let settings = super::MetaSettings::new(&cli, tc, 42);
+        let json = serde_json::to_value(settings).unwrap();
+        assert_eq!(json["btime"], 180_000);
+        assert_eq!(json["binc"], 2_000);
+        assert_eq!(json["wtime"], 600_000);
+        assert_eq!(json["winc"], 3_000);
+    }
+
+    #[test]
+    fn byoyomi_rejects_white_clock_even_when_zero() {
+        for option in ["--wtime", "--winc"] {
+            for value in ["0", "2000"] {
+                let cli = clock_cli(&["--byoyomi", "1000", option, value]);
+                let error = super::resolve_time_control(&cli, &[None, None]).err().unwrap();
+                assert_eq!(error.to_string(), "--byoyomi と --wtime/--winc は同時に指定できません");
+            }
+        }
+        let cli = clock_cli(&["--byoyomi", "1000"]);
+        let tc = super::resolve_time_control(&cli, &[None, None]).unwrap();
+        assert_eq!(tc.byoyomi, 1_000);
+        assert_eq!((tc.black_time, tc.white_time, tc.black_inc, tc.white_inc), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn fischer_requires_positive_time_or_increment_for_each_colour() {
+        for args in [
+            vec!["--wtime", "600000"],
+            vec!["--winc", "2000", "--nodes", "100"],
+            vec!["--wtime", "0", "--depth", "1"],
+        ] {
+            let cli = clock_cli(&args);
+            let error = super::resolve_time_control(&cli, &[None, None]).err().unwrap();
+            assert!(error.to_string().contains("--wtime/--winc の後手時計だけでは指定できません"));
+        }
+        let cli = clock_cli(&["--btime", "180000", "--wtime", "0", "--winc", "0"]);
+        let error = super::resolve_time_control(&cli, &[None, None]).err().unwrap();
+        assert!(error.to_string().contains("--wtime または --winc"));
+    }
 
     #[test]
     fn sprt_nelo_bounds_accept_space_separated_negative_values() {
@@ -2595,6 +2705,8 @@ mod tests {
             byoyomi: 100,
             btime: 0,
             binc: 0,
+            wtime: 0,
+            winc: 0,
             timeout_margin_ms: 0,
             threads: 1,
             hash_mb: 16,
@@ -2605,6 +2717,9 @@ mod tests {
         assert!(json.get("adjudicate_resign").is_none());
         assert!(json.get("adjudicate_win").is_none());
         assert_eq!(json["startpos_order"], "random");
+        // 明示したゼロを「先手と同じ」と誤解しないよう、後手の値は常に記録する。
+        assert_eq!(json["wtime"], 0);
+        assert_eq!(json["winc"], 0);
         settings.startpos_order = super::StartposOrder::Sequential;
         settings.adjudicate_win = Some("movecount=1,score=300".parse().unwrap());
         assert!(json.get("adjudicate_draw").is_none());
@@ -2734,9 +2849,7 @@ mod tests {
             adjudicate_win: None,
             adjudicate_draw: None,
             timeout_margin_ms: 1,
-            byoyomi: 0,
-            btime: 0,
-            binc: 0,
+            time_control: super::TimeControl::new(0, 0, 0, 0, 0),
             go_depth: None,
             go_nodes: &[],
             start_defs: &[],
