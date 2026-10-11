@@ -20,11 +20,14 @@ use regex::Regex;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::header::CONTENT_TYPE;
-use rshogi_csa::{Color, Position};
+use reqwest::redirect::Policy;
+use rshogi_csa::{Color, Position, usi_move_to_csa};
 use rshogi_csa_client::csa_writer::{
-    CsaGameEnd, CsaGameHeader, CsaTimeLimit, EndReason, MoveEval, WdoorCsaWriter,
+    CsaGameEnd, CsaGameHeader, CsaTimeLimit, EndReason, MoveEval, WdoorCsaWriter, jst_naive,
 };
+use rshogi_csa_client::jsonl::sanitize_for_filename;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::common::floodgate::http_client_builder;
 
@@ -51,10 +54,29 @@ pub fn csa_event(csa: &str) -> Option<&str> {
     csa.lines().find_map(|line| line.trim_end().strip_prefix("$EVENT:"))
 }
 
+/// CSA ファイルを UTF-8 のテキストとして読む。
+///
+/// Shift_JIS などの棋譜は、文字化けしたまま送らないようエラーにする（文字コード変換は
+/// 持たないので、UTF-8 に変換してから渡す）。
+pub fn read_csa_text(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("読めません: {}", path.display()))?;
+    String::from_utf8(bytes).map_err(|_| {
+        anyhow!(
+            "UTF-8 ではありません: {}（Shift_JIS などの棋譜は UTF-8 に変換してから渡してください）",
+            path.display()
+        )
+    })
+}
+
 /// `records_dir` 直下の `*.csa` から wdoor の対局 ID を集め、重複を除いて昇順で返す。
 ///
 /// `_reconnect_fragment` 付きのファイル（再接続後の断片）と、`$EVENT:` が wdoor の
-/// ID 形式でないファイル（他サーバーでの対局）は対象外。
+/// ID 形式でないファイル（他サーバーでの対局）は対象外。読めないファイルは警告を出して
+/// 飛ばす。
+///
+/// ID はすべてメモリに持つ。入力は 1 エンジンの対局記録ディレクトリで、Floodgate は
+/// 30 分に 1 局なので年 17,520 局が上限、ID は 1 件約 60 バイト。10 年分でも約 10MB に
+/// 収まるため、外部ソートなどは使わない。
 pub fn collect_wdoor_ids(records_dir: &Path) -> Result<Vec<String>> {
     let mut ids = BTreeSet::new();
     let entries = std::fs::read_dir(records_dir)
@@ -70,22 +92,27 @@ pub fn collect_wdoor_ids(records_dir: &Path) -> Result<Vec<String>> {
         if !is_csa || is_fragment || !path.is_file() {
             continue;
         }
-        if let Some(id) = read_event_line(&path)?
-            && is_wdoor_game_id(&id)
-        {
-            ids.insert(id);
+        match read_event_line(&path) {
+            Ok(Some(id)) if is_wdoor_game_id(&id) => {
+                ids.insert(id);
+            }
+            Ok(_) => {}
+            Err(err) => eprintln!("warning: 読めないので飛ばします: {}: {err}", path.display()),
         }
     }
     Ok(ids.into_iter().collect())
 }
 
 /// CSA ファイルの `$EVENT:` 行だけを読む（ヘッダーにあるので全文は読まない）。
-fn read_event_line(path: &Path) -> Result<Option<String>> {
-    let file = File::open(path).with_context(|| format!("開けません: {}", path.display()))?;
-    for line in BufReader::new(file).lines() {
-        let line = line.with_context(|| format!("読めません: {}", path.display()))?;
-        if let Some(event) = line.trim_end().strip_prefix("$EVENT:") {
-            return Ok(Some(event.to_owned()));
+///
+/// 対局 ID は ASCII なので行をバイト列のまま探す。対局者名などが UTF-8 でない棋譜
+/// （Shift_JIS）でも ID を取り出せる。
+fn read_event_line(path: &Path) -> std::io::Result<Option<String>> {
+    let file = File::open(path)?;
+    for line in BufReader::new(file).split(b'\n') {
+        let line = line?;
+        if let Some(event) = line.strip_prefix(b"$EVENT:") {
+            return Ok(Some(String::from_utf8_lossy(event).trim_end().to_owned()));
         }
     }
     Ok(None)
@@ -145,6 +172,10 @@ struct MetaSettings {
 
 #[derive(Deserialize)]
 struct MetaEngines {
+    #[serde(default)]
+    path_black: String,
+    #[serde(default)]
+    path_white: String,
     label_black: String,
     label_white: String,
 }
@@ -155,6 +186,8 @@ struct MoveLine {
     side_to_move: char,
     sfen_before: String,
     move_usi: String,
+    /// `tournament` が反則手・正規化した手の元の文字列を残すフィールド。
+    raw_move_usi: Option<String>,
     engine: String,
     elapsed_ms: u64,
     #[serde(default)]
@@ -174,6 +207,7 @@ struct ResultLine {
     game_id: u32,
     outcome: String,
     reason: String,
+    winner: Option<String>,
     #[serde(default)]
     error: bool,
 }
@@ -192,8 +226,8 @@ pub fn convert_jsonl<R: BufRead>(
     mut on_game: impl FnMut(u32, Result<String>) -> Result<()>,
 ) -> Result<usize> {
     let mut meta: Option<MetaLine> = None;
-    // 書き込み側は 1 局分の move 行と result 行をまとめて書くので、通常は同時に 1 局分
-    // しか保持しない。
+    // `result` 行が来るまでの move 行を対局ごとに保持する。`tournament` は 1 局分の move 行と
+    // result 行をまとめて書くので、その場合に同時に持つのは 1 局分。
     let mut pending: HashMap<u32, Vec<MoveLine>> = HashMap::new();
     let mut games = 0usize;
     for (idx, line) in reader.lines().enumerate() {
@@ -253,6 +287,42 @@ fn end_reason_for(reason: &str, declared_win: bool) -> Result<EndReason> {
     }
 }
 
+/// 1 手も指していない側の対局者名を決める。`known` は指した側の名前。
+///
+/// `csa_client` の JSONL は `move.engine` と `result.winner` が生の名前、`meta` のラベルが
+/// ファイル名用にサニタイズした名前（`Pan.da` → `Pan_da`）なので、生の名前が分かる
+/// 情報を先に使う。
+fn unmoved_player_name(
+    meta: &MetaLine,
+    side: Color,
+    known: &str,
+    winner: Option<Color>,
+    result: &ResultLine,
+) -> Result<String> {
+    let engines = &meta.engine_cmd;
+    let path = match side {
+        Color::Black => &engines.path_black,
+        Color::White => &engines.path_white,
+    };
+    // csa_client: 相手側のパスは `remote:<生の名前>`。
+    if let Some(raw) = path.strip_prefix("remote:") {
+        return Ok(raw.to_owned());
+    }
+    if winner == Some(side)
+        && let Some(name) = result.winner.as_deref().filter(|name| !name.is_empty())
+    {
+        return Ok(name.to_owned());
+    }
+    // 残るのは meta の 2 つのラベルのうち、指した側でない方。`tournament` のラベルは
+    // 先後と対応しない（ペアファイル内で先後が入れ替わる）ので、名前で突き合わせる。
+    let known = sanitize_for_filename(known);
+    [&engines.label_black, &engines.label_white]
+        .into_iter()
+        .find(|label| sanitize_for_filename(label) != known)
+        .cloned()
+        .context("1 手も指していない側の対局者名が分かりません")
+}
+
 fn game_to_csa(
     meta: &MetaLine,
     event: &str,
@@ -268,27 +338,43 @@ fn game_to_csa(
     };
     let declared_win = moves.last().is_some_and(|m| m.move_usi == "win");
     let reason = end_reason_for(&result.reason, declared_win)?;
+    // 勝者がなく引き分けの理由でもない局は、勝敗が確定していない。csa_client が自分の
+    // 投了・宣言の後にサーバーの結果を受け取れず切断した局（outcome は draw、reason は
+    // resign / win_declaration）がこれに当たり、決着済みとして公開してはいけない。
+    ensure!(
+        winner.is_some() || reason.is_draw(),
+        "勝敗が確定していない対局です（outcome: {}, reason: {}）",
+        result.outcome,
+        result.reason
+    );
 
     // 時間切れの手は盤面に反映されていないので、擬似指し手と同じく棋譜に入れない。
     let played: Vec<&MoveLine> =
         moves.iter().filter(|m| !m.timed_out && !is_pseudo_move(&m.move_usi)).collect();
     let first = played.first().context("指し手が 1 手もありません")?;
+    // 平手以外（定跡から始める対局など）もそのまま開始局面にする。
     let initial = Position::from_sfen(&first.sfen_before).context("開始局面を読めません")?;
 
-    let name_of = |side: char| played.iter().find(|m| m.side_to_move == side).map(|m| &m.engine);
-    let labels = [&meta.engine_cmd.label_black, &meta.engine_cmd.label_white];
-    // 片方が 1 手も指していない局は、meta の 2 つのラベルのうち指した側でない方を使う。
-    let other_label = |known: &String| labels.into_iter().find(|label| *label != known);
+    let name_of =
+        |side: char| played.iter().find(|m| m.side_to_move == side).map(|m| m.engine.clone());
     let (sente_name, gote_name) = match (name_of('b'), name_of('w')) {
         (Some(b), Some(w)) => (b, w),
-        (Some(b), None) => (b, other_label(b).context("後手の対局者名が分かりません")?),
-        (None, Some(w)) => (other_label(w).context("先手の対局者名が分かりません")?, w),
+        (Some(b), None) => {
+            let w = unmoved_player_name(meta, Color::White, &b, winner, result)?;
+            (b, w)
+        }
+        (None, Some(w)) => {
+            let b = unmoved_player_name(meta, Color::Black, &w, winner, result)?;
+            (b, w)
+        }
         (None, None) => bail!("指し手の手番が読めません"),
     };
 
-    let start_time = DateTime::parse_from_rfc3339(&meta.timestamp)
-        .with_context(|| format!("meta の timestamp が不正です: {}", meta.timestamp))?
-        .naive_local();
+    // CSA の時刻にはタイムゾーン表記がなく、棋譜サーバーは JST として読む。
+    let start_time = jst_naive(
+        &DateTime::parse_from_rfc3339(&meta.timestamp)
+            .with_context(|| format!("meta の timestamp が不正です: {}", meta.timestamp))?,
+    );
     let settings = &meta.settings;
     let time_limit =
         (settings.btime > 0 || settings.binc > 0 || settings.byoyomi > 0).then_some(CsaTimeLimit {
@@ -297,8 +383,8 @@ fn game_to_csa(
             increment_sec: settings.binc / 1000,
         });
     let header = CsaGameHeader {
-        sente_name,
-        gote_name,
+        sente_name: &sente_name,
+        gote_name: &gote_name,
         event,
         start_time,
         time_limit,
@@ -306,7 +392,6 @@ fn game_to_csa(
     };
 
     let mut writer = WdoorCsaWriter::new(&header, &initial);
-    let mut elapsed_total_ms = 0u64;
     for m in &played {
         let side = writer.position().side_to_move;
         let expected = match side {
@@ -328,10 +413,19 @@ fn game_to_csa(
         writer
             .push_usi_move(&m.move_usi, m.elapsed_ms / 1000, eval)
             .with_context(|| format!("指し手を CSA に変換できません: {}", m.move_usi))?;
-        elapsed_total_ms = elapsed_total_ms.saturating_add(m.elapsed_ms);
     }
 
-    // 終局時刻は記録されていないので、開始時刻 + 消費時間の合計とする。
+    // `tournament` は反則手を `move_usi = "illegal"` の行にし、元の手を `raw_move_usi` に
+    // 残す。CSA に直せる手なら `'ILLEGAL_MOVE(<手>)` コメント用に渡す。
+    let rejected_move = moves
+        .last()
+        .filter(|m| m.move_usi == "illegal")
+        .and_then(|m| m.raw_move_usi.as_deref())
+        .and_then(|raw| usi_move_to_csa(raw, writer.position()).ok());
+
+    // 終局時刻は記録されていないので、開始時刻 + 消費時間の合計とする。棋譜に入れない
+    // 終局時の手（時間切れになった手、投了の思考など）の時間も含める。
+    let elapsed_total_ms = moves.iter().fold(0u64, |sum, m| sum.saturating_add(m.elapsed_ms));
     let end_time = i64::try_from(elapsed_total_ms)
         .ok()
         .and_then(TimeDelta::try_milliseconds)
@@ -340,6 +434,7 @@ fn game_to_csa(
         reason,
         winner,
         end_time,
+        rejected_move,
     })))
 }
 
@@ -394,6 +489,17 @@ struct UploadRequest<'a> {
     source: UploadSource,
 }
 
+/// `import-wdoor` が「wdoor に棋譜がない」ことを表す 404 の応答本文。
+///
+/// サーバー（`rshogi-csa-server-workers` の `kifu_import_api`）はエラーを素のテキストで
+/// 返す。同じ 404 でも、`--api-base` の誤りやルート未デプロイのときは本文が違う。
+const WDOOR_NOT_FOUND_BODY: &str = "Not Found on wdoor";
+
+/// 管理トークンを平文で流してよい接続先か。`http://` はループバックだけ許す。
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
 /// 取り込み API のクライアント。管理トークンは `Authorization` ヘッダーにだけ使い、
 /// ログやエラーには出さない。
 pub struct ApiClient {
@@ -404,16 +510,30 @@ pub struct ApiClient {
 
 impl ApiClient {
     /// `api_base` は `/api/v1` までを含む URL。
+    ///
+    /// 管理トークンを送るので `https://` を要求する。`http://` はローカルの開発サーバー
+    /// （`localhost` / `127.0.0.1` / `[::1]`）だけ受け付ける。リダイレクトには追従しない
+    /// （別ホストへトークンを送らないため）。
     pub fn new(api_base: &str, token: String) -> Result<Self> {
         ensure!(!token.trim().is_empty(), "管理トークンが空です");
         let api_base = api_base.trim_end_matches('/');
-        ensure!(
-            api_base.starts_with("http://") || api_base.starts_with("https://"),
-            "API のベース URL は http:// か https:// で始めてください: {api_base}"
-        );
+        let url = Url::parse(api_base)
+            .with_context(|| format!("API のベース URL が不正です: {api_base}"))?;
+        match url.scheme() {
+            "https" => {}
+            "http" if url.host_str().is_some_and(is_loopback_host) => {}
+            "http" => bail!(
+                "http:// は localhost / 127.0.0.1 / [::1] にだけ使えます（管理トークンが平文で\
+                 流れます）。https:// を指定してください: {api_base}"
+            ),
+            other => {
+                bail!("API のベース URL は https:// で始めてください（{other}://）: {api_base}")
+            }
+        }
         // 参照取り込みはサーバーが wdoor へ取りに行くぶん待つ。
         let client = http_client_builder()
             .timeout(Duration::from_secs(60))
+            .redirect(Policy::none())
             .build()
             .context("HTTP クライアントを作れません")?;
         Ok(Self {
@@ -423,8 +543,11 @@ impl ApiClient {
         })
     }
 
-    /// wdoor の対局 ID を渡してサーバーに取り込ませる。wdoor に棋譜がない（404）ときは
-    /// `None`。
+    /// wdoor の対局 ID を渡してサーバーに取り込ませる。wdoor に棋譜がないときは `None`。
+    ///
+    /// 「wdoor に棋譜がない」と判定するのは、404 で応答本文が
+    /// [`WDOOR_NOT_FOUND_BODY`] のときだけ。それ以外の 404 は API の場所が違う
+    /// （`--api-base` の誤り、取り込み API が未デプロイ）ので、設定ミスとしてエラーにする。
     pub fn import_wdoor(&self, wdoor_game_id: &str) -> Result<Option<Imported>> {
         let request = ImportWdoorRequest {
             wdoor_game_id,
@@ -432,7 +555,17 @@ impl ApiClient {
         };
         let (status, body) = self.post("admin/games/import-wdoor", &request)?;
         if status == StatusCode::NOT_FOUND {
-            return Ok(None);
+            if body.trim() == WDOOR_NOT_FOUND_BODY {
+                return Ok(None);
+            }
+            let snippet: String = body.chars().take(200).collect();
+            bail!(
+                "HTTP 404: 取り込み API が見つかりません。--api-base（{}）が `/api/v1` までを\
+                 指しているか、サーバーに取り込み API がデプロイ済みかを確認してください\
+                 （応答: {}）",
+                self.api_base,
+                snippet.trim()
+            );
         }
         parse_imported(status, &body).map(Some)
     }
@@ -550,8 +683,7 @@ impl Publisher {
         let path = find_archive_csa(archive_dir, wdoor_game_id).with_context(|| {
             format!("wdoor に棋譜がなく、{} にも見つかりません", archive_dir.display())
         })?;
-        let csa = std::fs::read_to_string(&path)
-            .with_context(|| format!("読めません: {}", path.display()))?;
+        let csa = read_csa_text(&path)?;
         ensure!(
             csa_event(&csa) == Some(wdoor_game_id),
             "$EVENT が対局 ID と一致しません: {}",
@@ -630,6 +762,19 @@ mod tests {
             &csa_with_event("wdoor+floodgate-300-10F+C+D+20261009020000"),
         );
 
+        assert_eq!(collect_wdoor_ids(root).unwrap(), [ID_B, ID_A]);
+    }
+
+    #[test]
+    fn id_collection_reads_event_from_non_utf8_csa() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Shift_JIS の対局者名を含む棋譜。`$EVENT:` 行は ASCII なので ID は取り出せる。
+        let mut bytes = b"V2\r\nN+".to_vec();
+        bytes.extend_from_slice(&[0x90, 0xE6, 0x8E, 0xE8]);
+        bytes.extend_from_slice(format!("\r\nN-B\r\n$EVENT:{ID_A}\r\nPI\r\n+\r\n").as_bytes());
+        std::fs::write(root.join("sjis.csa"), &bytes).unwrap();
+        write(&root.join("utf8.csa"), &csa_with_event(ID_B));
         assert_eq!(collect_wdoor_ids(root).unwrap(), [ID_B, ID_A]);
     }
 
@@ -720,7 +865,8 @@ N+test\n\
 N-base\n\
 $EVENT:SPRT-2026-10\n\
 $START_TIME:2026/10/09 12:00:00\n\
-$TIME_LIMIT:5:00+10F\n\
+$TIME_LIMIT:00:05+00\n\
+'Increment:10\n\
 {BOARD}\
 +7776FU\n\
 T2\n\
@@ -745,7 +891,8 @@ N+base\n\
 N-test\n\
 $EVENT:SPRT-2026-10\n\
 $START_TIME:2026/10/09 12:00:00\n\
-$TIME_LIMIT:5:00+10F\n\
+$TIME_LIMIT:00:05+00\n\
+'Increment:10\n\
 {BOARD}\
 +7776FU\n\
 T2\n\
@@ -799,10 +946,307 @@ T2\n\
         let games = convert_all(&text, None);
         let csa = games[0].1.as_ref().unwrap();
         assert!(csa.contains("N+Panda\nN-RAMU\n"), "{csa}");
-        assert!(csa.contains("$TIME_LIMIT:15:00+10\n"), "{csa}");
+        assert!(csa.contains("$TIME_LIMIT:00:15+10\nP1"), "{csa}");
         assert!(
             csa.ends_with(
                 "+7776FU\nT2\n%TIME_UP\n'summary:time up:Panda lose:RAMU win\n'$END_TIME:2026/10/09 00:00:03\n"
+            ),
+            "{csa}"
+        );
+    }
+
+    /// 棋譜サーバーの読み方（`$TIME_LIMIT:HH:MM+SS` と `'Increment:<秒>`）で持ち時間を読み戻す。
+    /// 戻り値は (持ち時間秒, 秒読み秒, 加算秒)。
+    fn server_clock(csa: &str) -> Option<(u64, u64, Option<u64>)> {
+        let limit = csa.lines().find_map(|l| l.strip_prefix("$TIME_LIMIT:"))?;
+        let (main, byoyomi) = limit.split_once('+')?;
+        let (hours, minutes) = main.split_once(':')?;
+        let total = (hours.parse::<u64>().ok()? * 60 + minutes.parse::<u64>().ok()?) * 60;
+        let increment = csa
+            .lines()
+            .find_map(|l| l.strip_prefix("'Increment:"))
+            .and_then(|v| v.parse().ok());
+        Some((total, byoyomi.parse().ok()?, increment))
+    }
+
+    fn one_game(meta: &str, lines: &[String]) -> Result<String> {
+        let text = std::iter::once(meta.to_owned())
+            .chain(lines.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut games = convert_all(&text, None);
+        assert_eq!(games.len(), 1);
+        games.remove(0).1
+    }
+
+    fn result_line(outcome: &str, reason: &str, winner: Option<&str>) -> String {
+        let winner = winner.map(|w| format!(r#","winner":"{w}""#)).unwrap_or_default();
+        format!(
+            r#"{{"type":"result","game_id":1,"outcome":"{outcome}","reason":"{reason}","plies":1{winner}}}"#
+        )
+    }
+
+    #[test]
+    fn time_limit_is_written_the_way_the_server_reads_it() {
+        let meta = |settings: &str| {
+            format!(
+                r#"{{"type":"meta","timestamp":"2026-10-09T12:00:00+09:00","settings":{settings},"engine_cmd":{{"label_black":"base","label_white":"test"}}}}"#
+            )
+        };
+        let lines = [
+            move_line(1, 1, 'b', HIRATE, "7g7f", "base"),
+            result_line("white_win", "resign", None),
+        ];
+        for (settings, expected) in [
+            // csa_client の 15 分 + 秒読み 10 秒。15 時間と読まれない。
+            (r#"{"btime":900000,"byoyomi":10000,"binc":0}"#, Some((900, 10, None))),
+            // フィッシャー 5 分 + 10 秒。
+            (r#"{"btime":300000,"binc":10000,"byoyomi":0}"#, Some((300, 0, Some(10)))),
+            // 秒読みだけ。
+            (r#"{"byoyomi":1000}"#, Some((0, 1, None))),
+            (r#"{"btime":7200000,"byoyomi":60000}"#, Some((7200, 60, None))),
+            // 時間設定なし（深さ・ノード数固定の対局）は行ごと省く。
+            (r#"{"games":2}"#, None),
+        ] {
+            let csa = one_game(&meta(settings), &lines).unwrap();
+            assert_eq!(server_clock(&csa), expected, "{settings}\n{csa}");
+        }
+    }
+
+    #[test]
+    fn start_time_is_converted_to_jst() {
+        let lines = [
+            move_line(1, 1, 'b', HIRATE, "7g7f", "base"),
+            result_line("white_win", "resign", None),
+        ];
+        for timestamp in [
+            "2026-10-09T12:00:00+09:00",
+            "2026-10-09T03:00:00+00:00",
+            "2026-10-09T03:00:00Z",
+            "2026-10-08T20:00:00-07:00",
+            "2026-10-09T08:30:00+05:30",
+        ] {
+            let meta = format!(
+                r#"{{"type":"meta","timestamp":"{timestamp}","settings":{{}},"engine_cmd":{{"label_black":"base","label_white":"test"}}}}"#
+            );
+            let csa = one_game(&meta, &lines).unwrap();
+            assert!(csa.contains("$START_TIME:2026/10/09 12:00:00\n"), "{timestamp}\n{csa}");
+            assert!(csa.ends_with("'$END_TIME:2026/10/09 12:00:02\n"), "{timestamp}\n{csa}");
+        }
+    }
+
+    #[test]
+    fn converts_game_from_non_standard_start_position() {
+        // 定跡から始める対局: 開始局面は後手番・持ち駒あり・24 手目。
+        const START: &str =
+            "ln1g1g1nl/1ks2r3/1pppp1bpp/p3spp2/9/P1P1SP1PP/1P1PP1P2/1BK1GR3/LNSG3NL w Pp 24";
+        let meta = meta_line();
+        let lines = [
+            move_line(1, 24, 'w', START, "P*5e", "test"),
+            result_line("white_win", "resign", Some("test")),
+        ];
+        let csa = one_game(&meta, &lines).unwrap();
+        // 後手が最初に指し、先手は 1 手も指していない。先手名は meta のもう一方のラベル。
+        assert!(csa.contains("N+base\nN-test\n"), "{csa}");
+        assert!(csa.contains("P+00FU\nP-00FU\n-\n-0055FU\nT2\n%TORYO\n"), "{csa}");
+        assert!(csa.contains("'summary:toryo:base lose:test win\n"), "{csa}");
+        let (pos, moves, info) = rshogi_csa::parse_csa_full(&csa).unwrap();
+        assert_eq!(pos.to_sfen(), START.replace(" 24", " 1"));
+        assert_eq!(moves.len(), 2);
+        assert_eq!(info.summary.unwrap().result, rshogi_csa::SummaryResult::WhiteWin);
+    }
+
+    #[test]
+    fn unmoved_player_keeps_raw_name_from_csa_client_jsonl() {
+        // csa_client: move.engine と winner は生の名前、meta のラベルはサニタイズ済み。
+        let meta = |path_black: &str, path_white: &str, label_black: &str, label_white: &str| {
+            format!(
+                r#"{{"type":"meta","timestamp":"2026-10-09T12:00:00+09:00","settings":{{}},"engine_cmd":{{"path_black":"{path_black}","path_white":"{path_white}","label_black":"{label_black}","label_white":"{label_white}"}}}}"#
+            )
+        };
+        // 先手 `Pan.da`（相手）が 1 手指し、後手（自分 `RA.MU`）は指す前に相手が時間切れ。
+        let csa = one_game(
+            &meta("remote:Pan.da", "engine", "Pan_da", "RA_MU"),
+            &[
+                move_line(1, 1, 'b', HIRATE, "7g7f", "Pan.da"),
+                result_line("white_win", "time_up", Some("RA.MU")),
+            ],
+        )
+        .unwrap();
+        assert!(csa.contains("N+Pan.da\nN-RA.MU\n"), "{csa}");
+        assert!(csa.contains("'summary:time up:Pan.da lose:RA.MU win\n"), "{csa}");
+
+        // 自分（先手 `RA.MU`）が 1 手指し、後手の相手 `Pan.da` は指さずに勝った（自分の反則など）。
+        // 相手の生の名前は `remote:` から取る。
+        let csa = one_game(
+            &meta("engine", "remote:Pan.da", "RA_MU", "Pan_da"),
+            &[
+                move_line(1, 1, 'b', HIRATE, "7g7f", "RA.MU"),
+                result_line("white_win", "abnormal", Some("Pan.da")),
+            ],
+        )
+        .unwrap();
+        assert!(csa.contains("N+RA.MU\nN-Pan.da\n"), "{csa}");
+
+        // 生の名前の手がかりがないとき（自分が指さずに負けた）は、サニタイズ済みラベルのうち
+        // 指した側でない方を使う。相手の名前（`Pan_da`）と取り違えない。
+        let csa = one_game(
+            &meta("remote:Pan.da", "engine", "Pan_da", "RA_MU"),
+            &[
+                move_line(1, 1, 'b', HIRATE, "7g7f", "Pan.da"),
+                result_line("black_win", "abnormal", Some("Pan.da")),
+            ],
+        );
+        // 後手のパスは `remote:` でなく勝者でもないので、ラベルから `RA_MU`。
+        assert!(csa.unwrap().contains("N+Pan.da\nN-RA_MU\n"));
+    }
+
+    #[test]
+    fn undecided_games_are_not_converted() {
+        let moves = move_line(1, 1, 'b', HIRATE, "7g7f", "base");
+        // 自分の投了・宣言の後に切断し、サーバーの結果を受け取れなかった局。
+        for reason in [
+            "resign",
+            "win_declaration",
+            "time_up",
+            "illegal_move",
+            "abnormal",
+            "win",
+        ] {
+            let err = one_game(&meta_line(), &[moves.clone(), result_line("draw", reason, None)])
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("勝敗が確定していない"), "{reason}: {err:#}");
+        }
+        // 引き分けの理由なら勝者なしで変換できる。
+        for reason in ["sennichite", "max_moves", "jishogi"] {
+            let csa = one_game(&meta_line(), &[moves.clone(), result_line("draw", reason, None)])
+                .unwrap();
+            assert!(csa.contains(":base draw:test draw\n"), "{reason}: {csa}");
+        }
+    }
+
+    /// 不変条件: 変換できた対局には必ず `'summary:` があり、JSONL の勝敗と一致する。
+    #[test]
+    fn every_converted_game_has_a_summary_matching_the_outcome() {
+        use rshogi_csa::SummaryResult;
+        let moves = move_line(1, 1, 'b', HIRATE, "7g7f", "base");
+        let reasons = [
+            "resign",
+            "win_declaration",
+            "win",
+            "lose",
+            "timeout",
+            "time_up",
+            "illegal_move",
+            "sennichite",
+            "sennichite_perpetual_check",
+            "oute_sennichite",
+            "jishogi",
+            "max_moves",
+            "abnormal",
+            "adjudication_resign",
+            "adjudication_win",
+        ];
+        for reason in reasons {
+            for (outcome, expected) in [
+                ("black_win", SummaryResult::BlackWin),
+                ("white_win", SummaryResult::WhiteWin),
+                ("draw", SummaryResult::Draw),
+            ] {
+                let converted =
+                    one_game(&meta_line(), &[moves.clone(), result_line(outcome, reason, None)]);
+                let Ok(csa) = converted else {
+                    assert_eq!(outcome, "draw", "勝者のいる局は変換できる: {reason}");
+                    continue;
+                };
+                let (_, _, info) = rshogi_csa::parse_csa_full(&csa).unwrap();
+                let summary = info.summary.unwrap_or_else(|| panic!("summary なし: {csa}"));
+                assert_eq!(summary.result, expected, "{reason} {outcome}\n{csa}");
+            }
+        }
+    }
+
+    #[test]
+    fn broken_pv_tokens_do_not_abort_and_are_cut_off() {
+        let with_pv = |pv: &str| {
+            format!(
+                r#"{{"type":"move","game_id":1,"ply":1,"side_to_move":"b","sfen_before":"{HIRATE}","move_usi":"7g7f","engine":"base","elapsed_ms":1000,"eval":{{"score_cp":10,"pv":{pv}}}}}"#
+            )
+        };
+        for (pv, expected) in [
+            // USI として壊れたトークン（以前は panic していた）。
+            (r#"["7g7f","(3c3d)","2g2f"]"#, "'** 10 +7776FU\n"),
+            (r#"["7g7f","3c3d","/g7f"]"#, "'** 10 +7776FU -3334FU\n"),
+            // 変換はできるが局面に適用できない手（持っていない駒を打つ）は残さない。
+            (r#"["7g7f","P*5e","2g2f"]"#, "'** 10 +7776FU\n"),
+            // 先頭から壊れている・指し手と違う読み筋は評価値だけ。
+            (r#"["","7g7f"]"#, "'** 10\n"),
+            (r#"["2g2f"]"#, "'** 10\n"),
+            (r#"[]"#, "'** 10\n"),
+        ] {
+            let csa =
+                one_game(&meta_line(), &[with_pv(pv), result_line("black_win", "resign", None)])
+                    .unwrap();
+            assert!(csa.contains(&format!("+7776FU\nT1\n{expected}%TORYO\n")), "{pv}\n{csa}");
+        }
+    }
+
+    #[test]
+    fn illegal_and_timed_out_moves_are_not_written_as_moves() {
+        // tournament: 後手の反則手は `move_usi = "illegal"`、元の手は `raw_move_usi`。
+        let illegal = format!(
+            r#"{{"type":"move","game_id":1,"ply":2,"side_to_move":"w","sfen_before":"{AFTER_76}","move_usi":"illegal","raw_move_usi":"8b9b+","engine":"test","elapsed_ms":3000}}"#
+        );
+        let csa = one_game(
+            &meta_line(),
+            &[
+                move_line(1, 1, 'b', HIRATE, "7g7f", "base"),
+                illegal,
+                result_line("black_win", "illegal_move", Some("base")),
+            ],
+        )
+        .unwrap();
+        // wdoor と同じく、反則手はコメントにして `%` コマンドなしで summary。
+        assert!(
+            csa.ends_with(
+                "+7776FU\nT2\n'ILLEGAL_MOVE(-8292RY)\n'summary:illegal move:base win:test lose\n\
+'$END_TIME:2026/10/09 12:00:05\n"
+            ),
+            "{csa}"
+        );
+
+        // CSA に直せない反則手（文字列として壊れている）はコメントも書かない。
+        let garbage = format!(
+            r#"{{"type":"move","game_id":1,"ply":2,"side_to_move":"w","sfen_before":"{AFTER_76}","move_usi":"illegal","raw_move_usi":"(bogus)","engine":"test","elapsed_ms":0}}"#
+        );
+        let csa = one_game(
+            &meta_line(),
+            &[
+                move_line(1, 1, 'b', HIRATE, "7g7f", "base"),
+                garbage,
+                result_line("black_win", "illegal_move", Some("base")),
+            ],
+        )
+        .unwrap();
+        assert!(csa.contains("T2\n'summary:illegal move:base win:test lose\n"), "{csa}");
+
+        // 時間切れになった手は指し手行に残さず、消費時間だけ終了時刻に含める。
+        let timed_out = format!(
+            r#"{{"type":"move","game_id":1,"ply":2,"side_to_move":"w","sfen_before":"{AFTER_76}","move_usi":"3c3d","engine":"test","elapsed_ms":11000,"timed_out":true}}"#
+        );
+        let csa = one_game(
+            &meta_line(),
+            &[
+                move_line(1, 1, 'b', HIRATE, "7g7f", "base"),
+                timed_out,
+                result_line("black_win", "timeout", Some("base")),
+            ],
+        )
+        .unwrap();
+        assert!(
+            csa.ends_with(
+                "+7776FU\nT2\n%TIME_UP\n'summary:time up:base win:test lose\n\
+'$END_TIME:2026/10/09 12:00:13\n"
             ),
             "{csa}"
         );
@@ -941,8 +1385,14 @@ T2\n\
     }
 
     fn write_response(mut stream: TcpStream, status: u16, body: &str) {
+        // リダイレクト応答には、同じモックサーバーの別パスを指す Location を付ける。
+        let location = if (300..400).contains(&status) {
+            "Location: /api/v1/redirected\r\n"
+        } else {
+            ""
+        };
         let response = format!(
-            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} X\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         stream.write_all(response.as_bytes()).unwrap();
@@ -975,7 +1425,7 @@ T2\n\
                         r#"{"game_id":"wdoor-20261009003000-bbbbbbbbbb","created":false}"#
                             .to_owned(),
                     ),
-                    ID_GONE | ID_LOST => (404, r#"{"error":"not found on wdoor"}"#.to_owned()),
+                    ID_GONE | ID_LOST => (404, "Not Found on wdoor".to_owned()),
                     _ => (502, r#"{"error":"wdoor fetch failed"}"#.to_owned()),
                 }
             }
@@ -1033,8 +1483,7 @@ T2\n\
 
     #[test]
     fn wdoor_404_without_archive_dir_is_a_failure() {
-        let (api_base, requests) =
-            spawn_mock_api(|_| (404, r#"{"error":"not found on wdoor"}"#.to_owned()));
+        let (api_base, requests) = spawn_mock_api(|_| (404, "Not Found on wdoor".to_owned()));
         let mut publisher = publisher(&api_base);
         publisher.publish_wdoor(ID_GONE, None);
         assert_eq!(
@@ -1050,8 +1499,7 @@ T2\n\
 
     #[test]
     fn archive_csa_with_mismatched_event_is_not_uploaded() {
-        let (api_base, requests) =
-            spawn_mock_api(|_| (404, r#"{"error":"not found on wdoor"}"#.to_owned()));
+        let (api_base, requests) = spawn_mock_api(|_| (404, "Not Found on wdoor".to_owned()));
         let archive = tempfile::tempdir().unwrap();
         write(&archive.path().join(format!("{ID_GONE}.csa")), &csa_with_event(ID_LOST));
         let mut publisher = publisher(&api_base);
@@ -1107,5 +1555,93 @@ T2\n\
     fn api_client_rejects_empty_token_and_bad_base() {
         assert!(ApiClient::new("https://example.invalid/api/v1", "  ".to_owned()).is_err());
         assert!(ApiClient::new("example.invalid/api/v1", "t".to_owned()).is_err());
+        assert!(ApiClient::new("ftp://example.invalid/api/v1", "t".to_owned()).is_err());
+    }
+
+    #[test]
+    fn plain_http_is_allowed_only_for_loopback() {
+        for ok in [
+            "https://example.invalid/api/v1",
+            "http://localhost:8787/api/v1",
+            "http://127.0.0.1:8787/api/v1/",
+            "http://[::1]:8787/api/v1",
+        ] {
+            assert!(ApiClient::new(ok, "t".to_owned()).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://example.invalid/api/v1",
+            "http://192.168.1.10:8787/api/v1",
+            "http://localhost.example.invalid/api/v1",
+            "http://127.0.0.1.example.invalid/api/v1",
+        ] {
+            let err = ApiClient::new(bad, "t".to_owned()).err().expect(bad);
+            assert!(format!("{err:#}").contains("https://"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn redirects_are_not_followed() {
+        let (api_base, requests) = spawn_mock_api(|request| match request.path.as_str() {
+            "/api/v1/redirected" => (200, r#"{"game_id":"x","created":true}"#.to_owned()),
+            _ => (307, String::new()),
+        });
+        let mut publisher = publisher(&api_base);
+        publisher.publish_csa("a.csa", "csa", "E");
+        publisher.publish_wdoor(ID_NEW, None);
+        assert_eq!(publisher.tally.failed, 2);
+        let requests = requests.lock().unwrap();
+        let paths: Vec<&str> = requests.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/api/v1/admin/games/upload",
+                "/api/v1/admin/games/import-wdoor"
+            ],
+            "リダイレクト先へは送らない"
+        );
+    }
+
+    /// 404 でも「wdoor に棋譜がない」以外（API の場所が違う）はアーカイブへ切り替えず、
+    /// 設定ミスと分かるメッセージで失敗にする。
+    #[test]
+    fn other_404_is_a_configuration_error_not_an_archive_fallback() {
+        for body in ["Not Found", r#"{"error":"not found"}"#, ""] {
+            let (api_base, requests) = spawn_mock_api(move |_| (404, body.to_owned()));
+            let archive = tempfile::tempdir().unwrap();
+            write(&archive.path().join(format!("{ID_GONE}.csa")), &csa_with_event(ID_GONE));
+
+            let api = ApiClient::new(&api_base, "secret-token".to_owned()).unwrap();
+            let err = api.import_wdoor(ID_GONE).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(message.contains("--api-base"), "{message}");
+            assert!(!message.contains("secret-token"), "{message}");
+
+            let mut publisher = publisher(&api_base);
+            publisher.publish_wdoor(ID_GONE, Some(archive.path()));
+            assert_eq!(publisher.tally.failed, 1);
+            let requests = requests.lock().unwrap();
+            assert!(
+                requests.iter().all(|r| r.path == "/api/v1/admin/games/import-wdoor"),
+                "upload へ切り替えてはいけない: body={body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_utf8_archive_csa_is_reported_not_uploaded() {
+        let (api_base, requests) = spawn_mock_api(|_| (404, "Not Found on wdoor".to_owned()));
+        let archive = tempfile::tempdir().unwrap();
+        // Shift_JIS の対局者名（「先手」）を含む CSA。
+        let mut bytes = b"V2\nN+".to_vec();
+        bytes.extend_from_slice(&[0x90, 0xE6, 0x8E, 0xE8]);
+        bytes.extend_from_slice(format!("\nN-B\n$EVENT:{ID_GONE}\nPI\n+\n").as_bytes());
+        std::fs::write(archive.path().join(format!("{ID_GONE}.csa")), &bytes).unwrap();
+
+        let mut publisher = publisher(&api_base);
+        publisher.publish_wdoor(ID_GONE, Some(archive.path()));
+        assert_eq!(publisher.tally.failed, 1);
+        assert_eq!(requests.lock().unwrap().len(), 1, "upload は送らない");
+        let err = read_csa_text(&archive.path().join(format!("{ID_GONE}.csa"))).unwrap_err();
+        assert!(format!("{err:#}").contains("UTF-8"), "{err:#}");
     }
 }

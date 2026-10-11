@@ -24,6 +24,7 @@ use clap::{Parser, Subcommand};
 use tools::common::io::open_reader;
 use tools::kifu_publish::{
     ADMIN_TOKEN_ENV, API_BASE_ENV, ApiClient, Publisher, Tally, collect_wdoor_ids, convert_jsonl,
+    read_csa_text,
 };
 
 #[derive(Parser, Debug)]
@@ -34,6 +35,7 @@ use tools::kifu_publish::{
 )]
 struct Cli {
     /// API のベース URL（`/api/v1` まで含む）。省略時は環境変数 `RSHOGI_API_BASE`。
+    /// `https://` のみ（`http://` は localhost / 127.0.0.1 / [::1] に限る）。
     #[arg(long, global = true)]
     api_base: Option<String>,
 
@@ -41,7 +43,8 @@ struct Cli {
     #[arg(long, global = true, default_value_t = 1000)]
     interval_ms: u64,
 
-    /// サーバーへ送らず、送る内容（wdoor は対局 ID、jsonl / csa は CSA）を標準出力に出す。
+    /// サーバーへ送らず、送る内容（wdoor は対局 ID、jsonl / csa は CSA）だけを標準出力に出す。
+    /// 件数などの付随情報は標準エラーに出す。
     #[arg(long, global = true)]
     dry_run: bool,
 
@@ -77,12 +80,13 @@ enum Command {
         game_id: Option<u32>,
 
         /// `--dry-run` のとき、標準出力の代わりにここへ `<入力名>-<game_id>.csa` を書く。
+        /// 複数局を変換するときは必須（標準出力には 1 局分の CSA しか出さない）。
         #[arg(long, requires = "dry_run")]
         out_dir: Option<PathBuf>,
     },
     /// CSA ファイルをそのままアップロードする。
     Csa {
-        /// 入力 CSA。
+        /// 入力 CSA（UTF-8）。
         #[arg(long)]
         input: PathBuf,
 
@@ -93,9 +97,21 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    match run(Cli::parse()) {
+    let cli = Cli::parse();
+    let dry_run = cli.dry_run;
+    match run(cli) {
         Ok(tally) => {
-            println!("created={} skipped={} failed={}", tally.created, tally.skipped, tally.failed);
+            let summary = format!(
+                "created={} skipped={} failed={}",
+                tally.created, tally.skipped, tally.failed
+            );
+            // `--dry-run` の標準出力は対局 ID / CSA だけにする（パイプやリダイレクトで
+            // そのまま使えるように）。
+            if dry_run {
+                eprintln!("{summary}");
+            } else {
+                println!("{summary}");
+            }
             if tally.failed == 0 {
                 ExitCode::SUCCESS
             } else {
@@ -143,6 +159,7 @@ fn run(cli: Cli) -> Result<Tally> {
                 open_reader(input).with_context(|| format!("開けません: {}", input.display()))?;
             let stem = input.file_stem().map(|s| s.to_string_lossy().into_owned());
             let stem = stem.unwrap_or_else(|| "game".to_owned());
+            let mut printed_to_stdout = false;
             let games = convert_jsonl(reader, event, *game_id, |id, csa| {
                 let label = format!("{} game_id={id}", input.display());
                 match (csa, &mut sink) {
@@ -150,7 +167,17 @@ fn run(cli: Cli) -> Result<Tally> {
                     (Ok(csa), Sink::Send(publisher)) => publisher.publish_csa(&label, &csa, event),
                     (Ok(csa), Sink::DryRun(_)) => match out_dir {
                         Some(dir) => write_csa(&dir.join(format!("{stem}-{id}.csa")), &csa)?,
-                        None => print!("{csa}"),
+                        None => {
+                            // 標準出力に複数局を続けて出すと 1 つの CSA として読めなくなる。
+                            if printed_to_stdout {
+                                bail!(
+                                    "複数の対局があります。--game-id で 1 局に絞るか、--out-dir で\
+                                     対局ごとのファイルに出力してください"
+                                );
+                            }
+                            printed_to_stdout = true;
+                            print!("{csa}");
+                        }
                     },
                 }
                 Ok(())
@@ -160,8 +187,7 @@ fn run(cli: Cli) -> Result<Tally> {
             }
         }
         Command::Csa { input, event } => {
-            let csa = std::fs::read_to_string(input)
-                .with_context(|| format!("読めません: {}", input.display()))?;
+            let csa = read_csa_text(input)?;
             match &mut sink {
                 Sink::DryRun(_) => print!("{csa}"),
                 Sink::Send(publisher) => {

@@ -987,6 +987,9 @@ where
                             return MoveAction::sink_or_error(err);
                         }
                         let reason = s.conn.pending_end_reason.take();
+                        // 送った手のエコーが返る前に終局した。その手はサーバーに受理されて
+                        // いない（反則手・時間切れ後に届いた手など）ので指し手列から外す。
+                        s.record.reject_unconfirmed_last_move();
                         s.record.set_game_end(
                             record_result_with_reason(&game_result, reason.as_deref()),
                             &game_result,
@@ -1869,7 +1872,11 @@ fn gameover_str(result: &GameResult) -> &'static str {
 }
 
 /// サーバーの終局理由行（`#RESIGN` / `#TIME_UP` など）を棋譜の終局理由に直す。
-/// 理由行がない、または知らない理由行なら `None`。
+/// 理由行がなければ `None`。知らない理由行で勝敗が付いた場合は、投了とは断定できないので
+/// 異常終了（`abnormal`）とし、勝敗の付かない結果なら `None`。
+///
+/// shogi-server の内部分類にある王手放置（`oute_kaihimore`）などの細かい反則は、
+/// CSA プロトコル上は `#ILLEGAL_MOVE` として届くので区別しない。
 ///
 /// `#JISHOGI` は入玉宣言の成立で送られ、`#WIN` / `#LOSE` が続く（shogi-server /
 /// rshogi-csa-server 共通）。`#DRAW` が続く場合だけ持将棋の引き分けとして扱う。
@@ -1893,7 +1900,7 @@ fn end_reason_from_line(result: &GameResult, reason_line: Option<&str>) -> Optio
         }
     } else if line.contains("MAX_MOVES") {
         EndReason::MaxMoves
-    } else if line.contains("ABNORMAL") {
+    } else if line.contains("ABNORMAL") || matches!(result, GameResult::Win | GameResult::Lose) {
         EndReason::Abnormal
     } else {
         return None;
@@ -1903,8 +1910,8 @@ fn end_reason_from_line(result: &GameResult, reason_line: Option<&str>) -> Optio
 
 /// 棋譜（CSA の終局コマンドと JSONL の `reason`）に記録する終局理由。
 ///
-/// 理由行が使えないときは最終結果だけから決める。その場合の勝敗は理由が分からないので
-/// `win` / `lose` のまま残す。
+/// 理由行がまったく無いときは最終結果だけから決める。その場合の勝敗は理由が分からないので
+/// `win` / `lose` のまま残す（CSA では投了扱い）。
 fn record_result_with_reason(result: &GameResult, reason_line: Option<&str>) -> &'static str {
     if let Some(reason) = end_reason_from_line(result, reason_line) {
         return reason.as_str();
@@ -2153,9 +2160,12 @@ mod tests {
         for (result, line, expected) in cases {
             assert_eq!(record_result_with_reason(&result, line), expected, "{result:?} {line:?}");
         }
-        // 知らない理由行は最終結果へフォールバックする。
-        assert_eq!(record_result_with_reason(&Win, Some("#UNKNOWN_FUTURE")), "win");
-        assert_eq!(end_reason_from_line(&Win, Some("#UNKNOWN_FUTURE")), None);
+        // 知らない理由行で勝敗が付いたら、投了と断定せず異常終了として記録する。
+        assert_eq!(record_result_with_reason(&Win, Some("#UNKNOWN_FUTURE")), "abnormal");
+        assert_eq!(record_result_with_reason(&Lose, Some("#UNKNOWN_FUTURE")), "abnormal");
+        // 勝敗の付かない結果は最終結果から決める。
+        assert_eq!(record_result_with_reason(&Draw, Some("#UNKNOWN_FUTURE")), "sennichite");
+        assert_eq!(end_reason_from_line(&Interrupted, Some("#UNKNOWN_FUTURE")), None);
     }
 
     fn floodgate_info(pv: &[&str]) -> SearchInfo {

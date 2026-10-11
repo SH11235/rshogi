@@ -20,8 +20,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use rshogi_core::position::Position;
 use rshogi_core::types::{Color, Move};
 use rshogi_csa::{
-    Color as CsaColor, EvalCommentStyle, ParsedMove, SpecialMove, csa_move_to_usi,
-    parse_csa_full_with_evals_style, usi_move_to_csa,
+    Color as CsaColor, CsaSummary, EvalCommentStyle, ParsedMove, SpecialMove, SummaryResult,
+    csa_move_to_usi, parse_csa_full_with_evals_style, usi_move_to_csa,
 };
 use walkdir::WalkDir;
 
@@ -120,7 +120,8 @@ impl GameSource for CsaSource {
 
             let normal_count =
                 parsed.iter().filter(|m| matches!(m, ParsedMove::Normal(_))).count() as u32;
-            let outcome = derive_outcome(init.side_to_move, normal_count, &parsed);
+            let outcome =
+                derive_outcome(init.side_to_move, normal_count, &parsed, info.summary.as_ref());
 
             // 評価値コメントは元々先手視点なので、そのまま指標へ流す。
             let mut acc = EvalAccumulator::default();
@@ -170,7 +171,7 @@ impl GameSource for CsaSource {
             .ok_or_else(|| anyhow!("file_idx {file_idx} not found in index"))?;
         let text = fs::read_to_string(&meta.path)
             .with_context(|| format!("failed to read {}", meta.path.display()))?;
-        let (mut pos, parsed, _info, evals) =
+        let (mut pos, parsed, info, evals) =
             parse_csa_full_with_evals_style(&text, self.eval_comment_style)
                 .with_context(|| format!("failed to parse {}", meta.path.display()))?;
         let mut evals = evals.into_iter();
@@ -249,11 +250,15 @@ impl GameSource for CsaSource {
             }
         }
 
-        // 終局特殊手の生値。`derive_outcome` と同じ「末尾から最初の Special」走査で拾う
+        // 終局理由。`'summary:` 行があればその理由を優先する（wdoor の棋譜は反則負けを
+        // 終局コマンドなしで終え、異常終了の末尾に `%TORYO` が残ることがある）。無ければ
+        // `derive_outcome` と同じ「末尾から最初の Special」走査で終局特殊手の生値を拾う
         // （勝敗への縮約はせず、`%KACHI` 等の終局理由をそのまま伝える）。
-        let termination = parsed.iter().rev().find_map(|m| match m {
-            ParsedMove::Special(sp) => Some(sp.clone()),
-            ParsedMove::Normal(_) => None,
+        let termination = info.summary.as_ref().and_then(CsaSummary::special_move).or_else(|| {
+            parsed.iter().rev().find_map(|m| match m {
+                ParsedMove::Special(sp) => Some(sp.clone()),
+                ParsedMove::Normal(_) => None,
+            })
         });
 
         Ok(GameRecord {
@@ -287,15 +292,24 @@ fn opposite(c: CsaColor) -> CsaColor {
     }
 }
 
-/// 終端の特殊手と、そこでの手番から勝敗を導出する。CSA の `%TORYO` は勝ち側・負け側
-/// どちらの記録にも書かれるため、勝者は「終端で手番だった側（＝投了・時間切れ・反則の
-/// 当事者）が負け」という規約から求める。終端の特殊手が無い（中断・未完）ファイルは
-/// `None`（勝敗不明）。
+/// 勝敗を導出する。`'summary:` 行（wdoor / csa_client の棋譜）があれば、勝敗を明示する
+/// その行を最優先する。無ければ終端の特殊手と、そこでの手番から求める。CSA の `%TORYO` は
+/// 勝ち側・負け側どちらの記録にも書かれるため、勝者は「終端で手番だった側（＝投了・
+/// 時間切れ・反則の当事者）が負け」という規約から求める。`'summary:` も終端の特殊手も
+/// 無い（中断・未完）ファイルは `None`（勝敗不明）。
 fn derive_outcome(
     initial_side: CsaColor,
     normal_count: u32,
     parsed: &[ParsedMove],
+    summary: Option<&CsaSummary>,
 ) -> Option<GameOutcomeView> {
+    if let Some(summary) = summary {
+        return Some(match summary.result {
+            SummaryResult::BlackWin => GameOutcomeView::Win(Color::Black),
+            SummaryResult::WhiteWin => GameOutcomeView::Win(Color::White),
+            SummaryResult::Draw => GameOutcomeView::Draw,
+        });
+    }
     let sp = parsed.iter().rev().find_map(|m| match m {
         ParsedMove::Special(sp) => Some(sp),
         ParsedMove::Normal(_) => None,
@@ -515,6 +529,113 @@ mod tests {
         let game = source.load_game(&index, &index.entries[0]).expect("load_game");
         assert_eq!(game.moves.len(), 1);
         assert!(!game.moves[0].mv.is_normal(), "駒種を偽った手は Move::NONE にフォールバック");
+    }
+
+    fn index_and_load(text: &str) -> (Option<GameOutcomeView>, Option<SpecialMove>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_csa(dir.path(), "a.csa", text);
+        let source = CsaSource::new(dir.path());
+        let index = source.build_index().expect("build_index");
+        let game = source.load_game(&index, &index.entries[0]).expect("load_game");
+        (index.entries[0].outcome, game.termination)
+    }
+
+    #[test]
+    fn summary_line_decides_outcome_and_termination() {
+        // wdoor の反則負け: 反則手はコメント、終局コマンドなし。
+        let illegal = "V2\nN+A\nN-B\nPI\n+\n+7776FU\nT1\n'ILLEGAL_MOVE(-8292HI)\n\
+'summary:illegal move:A win:B lose\n'$END_TIME:2026/07/07 01:52:29\n";
+        assert_eq!(
+            index_and_load(illegal),
+            (Some(GameOutcomeView::Win(Color::Black)), Some(SpecialMove::IllegalMove))
+        );
+        // 連続王手の千日手: 最後に指した側（先手）が勝つ並び。手番からは決められない。
+        let oute = "V2\nN+A\nN-B\nPI\n+\n+7776FU\nT1\n'summary:oute_sennichite:A win:B lose\n";
+        assert_eq!(
+            index_and_load(oute),
+            (Some(GameOutcomeView::Win(Color::Black)), Some(SpecialMove::IllegalMove))
+        );
+        // 異常終了の末尾に `%TORYO` が残る棋譜。手番からの推定（後手番の投了 → 先手勝ち）
+        // ではなく summary の勝敗・理由を採る。
+        let abnormal = "V2\nN+A\nN-B\nPI\n+\n+7776FU\nT1\n%TORYO\n\
+'summary:abnormal:A lose:B win\n";
+        assert_eq!(
+            index_and_load(abnormal),
+            (Some(GameOutcomeView::Win(Color::White)), Some(SpecialMove::Interrupt))
+        );
+        // summary の理由が未知なら、終局理由は終局コマンドの生値に戻る。
+        let unknown = "V2\nN+A\nN-B\nPI\n+\n+7776FU\nT1\n%TORYO\n\
+'summary:something new:A win:B lose\n";
+        assert_eq!(
+            index_and_load(unknown),
+            (Some(GameOutcomeView::Win(Color::Black)), Some(SpecialMove::Resign))
+        );
+    }
+
+    /// csa_client / kifu_publish が書く CSA（`csa_writer`）の勝敗が、この読み手でも
+    /// 書いたとおりに読めること。
+    #[test]
+    fn outcome_matches_what_the_wdoor_csa_writer_wrote() {
+        use rshogi_csa_client::csa_writer::{CsaGameEnd, CsaGameHeader, EndReason, WdoorCsaWriter};
+        let header = CsaGameHeader {
+            sente_name: "A",
+            gote_name: "B",
+            event: "e",
+            start_time: chrono::NaiveDateTime::default(),
+            time_limit: None,
+            leading_comment: None,
+        };
+        for reason in EndReason::ALL {
+            for winner in [Some(CsaColor::Black), Some(CsaColor::White), None] {
+                let mut writer = WdoorCsaWriter::new(&header, &rshogi_csa::initial_position());
+                writer.push_move("+7776FU", 1, None).unwrap();
+                let csa = writer.finish(Some(&CsaGameEnd {
+                    reason,
+                    winner,
+                    end_time: None,
+                    rejected_move: None,
+                }));
+                let expected = match winner {
+                    Some(color) => Some(GameOutcomeView::Win(to_core_color(color))),
+                    None if reason.is_draw() => Some(GameOutcomeView::Draw),
+                    None => None,
+                };
+                assert_eq!(index_and_load(&csa).0, expected, "{reason:?} {winner:?}\n{csa}");
+            }
+        }
+    }
+
+    /// `kifu_publish jsonl` が変換した CSA を読み、JSONL の勝敗と一致すること。
+    #[test]
+    fn outcome_matches_jsonl_converted_by_kifu_publish() {
+        const HIRATE: &str = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1";
+        let meta = r#"{"type":"meta","timestamp":"2026-10-09T12:00:00+09:00","settings":{},"engine_cmd":{"label_black":"base","label_white":"test"}}"#;
+        let mv = format!(
+            r#"{{"type":"move","game_id":1,"ply":1,"side_to_move":"b","sfen_before":"{HIRATE}","move_usi":"7g7f","engine":"base","elapsed_ms":1000}}"#
+        );
+        for (outcome, reason, expected) in [
+            ("black_win", "resign", GameOutcomeView::Win(Color::Black)),
+            ("white_win", "timeout", GameOutcomeView::Win(Color::White)),
+            ("black_win", "illegal_move", GameOutcomeView::Win(Color::Black)),
+            ("black_win", "sennichite_perpetual_check", GameOutcomeView::Win(Color::Black)),
+            ("white_win", "sennichite_perpetual_check", GameOutcomeView::Win(Color::White)),
+            ("white_win", "abnormal", GameOutcomeView::Win(Color::White)),
+            ("draw", "sennichite", GameOutcomeView::Draw),
+            ("draw", "max_moves", GameOutcomeView::Draw),
+        ] {
+            let result = format!(
+                r#"{{"type":"result","game_id":1,"outcome":"{outcome}","reason":"{reason}","plies":1}}"#
+            );
+            let text = [meta, mv.as_str(), result.as_str()].join("\n");
+            let mut csa = None;
+            crate::kifu_publish::convert_jsonl(text.as_bytes(), "e", None, |_, converted| {
+                csa = Some(converted?);
+                Ok(())
+            })
+            .unwrap();
+            let csa = csa.expect("1 局変換される");
+            assert_eq!(index_and_load(&csa).0, Some(expected), "{outcome} {reason}\n{csa}");
+        }
     }
 
     #[test]

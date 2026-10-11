@@ -1113,6 +1113,7 @@ mod tests {
                 winner: None,
                 start_time: chrono::Local::now(),
                 end_time: None,
+                rejected_move: None,
                 my_color: CsaColor::Black,
                 jsonl_moves: vec![],
             },

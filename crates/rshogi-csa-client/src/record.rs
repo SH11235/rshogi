@@ -9,7 +9,7 @@ use rshogi_csa::{Color, Position, csa_move_to_usi};
 
 use crate::config::RecordConfig;
 use crate::csa_writer::{
-    CsaGameEnd, CsaGameHeader, CsaTimeLimit, EndReason, MoveEval, WdoorCsaWriter,
+    CsaGameEnd, CsaGameHeader, CsaTimeLimit, EndReason, MoveEval, WdoorCsaWriter, jst_naive,
 };
 use crate::engine::SearchInfo;
 use crate::protocol::{GameResult, GameSummary, TimeConfig};
@@ -33,6 +33,10 @@ pub struct GameRecord {
     pub start_time: chrono::DateTime<Local>,
     /// 終局を記録した時刻。CSA の `'$END_TIME:` 行に使う。
     pub end_time: Option<chrono::DateTime<Local>>,
+    /// 送ったがサーバーに受理されなかった自分の最後の手（CSA 形式）。反則負けや
+    /// 時間切れでは手のエコーが返らず、その手は対局の指し手に含まれない。`moves` には
+    /// 入れず、反則負けのとき CSA に `'ILLEGAL_MOVE(<手>)` コメントとして残す。
+    pub rejected_move: Option<String>,
     /// 自エンジンの手番。JSONL 出力モードで `outcome` / `winner` の正規化に使う。
     pub my_color: Color,
     /// JSONL 出力モード用に蓄積する手単位の追加情報。CSA / SFEN 棋譜出力には影響しない。
@@ -139,6 +143,7 @@ impl GameRecord {
             winner: None,
             start_time: Local::now(),
             end_time: None,
+            rejected_move: None,
             my_color: summary.my_color,
             jsonl_moves: Vec::new(),
         }
@@ -292,6 +297,23 @@ impl GameRecord {
         self.result = result.to_string();
     }
 
+    /// サーバーのエコーが返らないまま終局した自分の最後の手を、指し手列から外す。
+    ///
+    /// CSA サーバーは受理した手を消費時間つきでエコーしてから終局を通知する。エコーなしで
+    /// 終局した手（反則手、時間切れ後に届いた手など）は対局の指し手ではないので、棋譜に
+    /// 残すとサーバーの記録と食い違い、合法手として再生できなくなる。外した手は
+    /// `rejected_move` に残す。
+    pub fn reject_unconfirmed_last_move(&mut self) {
+        let Some(last) = self.moves.pop() else {
+            return;
+        };
+        // JSONL 用の追加情報は `moves` と同時に積まれる。対応が崩れないよう一緒に外す。
+        if self.jsonl_moves.len() > self.moves.len() {
+            self.jsonl_moves.truncate(self.moves.len());
+        }
+        self.rejected_move = Some(last.csa_move);
+    }
+
     /// 終局理由とサーバーの最終結果を記録する。勝者と終局時刻もここで確定する。
     pub fn set_game_end(&mut self, reason: &str, result: &GameResult) {
         self.result = reason.to_string();
@@ -311,7 +333,7 @@ impl GameRecord {
     /// record の種別を明示して CSA 形式の棋譜テキストを生成する。
     ///
     /// 書式は wdoor の公開棋譜と同じ（指し手 → `T<秒>` → `'** <先手視点評価値> <読み筋>`、
-    /// 末尾に `'summary:` と `'$END_TIME:`）。詳細は [`crate::csa_writer`] を参照。
+    /// 末尾に `'summary:` と `'$END_TIME:`）。時刻は JST。詳細は [`crate::csa_writer`] を参照。
     pub fn to_csa_with_status(&self, status: &RecordStatus) -> String {
         let leading_comment = match status {
             RecordStatus::Complete => None,
@@ -324,7 +346,8 @@ impl GameRecord {
             sente_name: &self.sente_name,
             gote_name: &self.gote_name,
             event: &self.game_id,
-            start_time: self.start_time.naive_local(),
+            // CSA の時刻にはタイムゾーン表記がなく、棋譜サーバーは JST として読む。
+            start_time: jst_naive(&self.start_time),
             time_limit: Some(CsaTimeLimit {
                 total_sec: ms_to_sec(self.black_time.total_time_ms),
                 byoyomi_sec: ms_to_sec(self.black_time.byoyomi_ms),
@@ -347,7 +370,8 @@ impl GameRecord {
         let end = EndReason::from_record_result(&self.result).map(|reason| CsaGameEnd {
             reason,
             winner: self.winner,
-            end_time: self.end_time.map(|t| t.naive_local()),
+            end_time: self.end_time.as_ref().map(jst_naive),
+            rejected_move: self.rejected_move.clone(),
         });
         writer.finish(end.as_ref())
     }

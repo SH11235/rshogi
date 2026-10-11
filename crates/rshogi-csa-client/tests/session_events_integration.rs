@@ -307,8 +307,10 @@ fn label_for(event: &SessionProgress) -> &'static str {
 // ────────────────────────────────────────────
 
 /// 1 手指した直後にサーバーが `reason_line` + `result_line` を返す対局を走らせ、
-/// 記録された棋譜を返す。
+/// 記録された棋譜を返す。`echo` が false なら、サーバーは手をエコーせずに終局を返す
+/// （手を受理しなかった場合の挙動）。
 fn record_after_server_end(
+    echo: bool,
     reason_line: &'static str,
     result_line: &'static str,
 ) -> rshogi_csa_client::GameRecord {
@@ -323,7 +325,10 @@ fn record_after_server_end(
         write_lines(writer, &["START:g-end"]);
         let mv = read_line(reader);
         assert!(mv.starts_with("+7776FU"), "expected client move +7776FU, got: {mv}");
-        write_lines(writer, &["+7776FU,T2", reason_line, result_line]);
+        if echo {
+            write_lines(writer, &["+7776FU,T2"]);
+        }
+        write_lines(writer, &[reason_line, result_line]);
         let _ = read_line(reader);
     });
 
@@ -355,34 +360,63 @@ fn record_after_server_end(
 
 #[test]
 fn server_end_reason_lines_reach_the_saved_record() {
-    // (理由行, 結果行, record.result, 勝者, CSA の終局コマンド以降の先頭行)
+    // (理由行, 結果行, record.result, 勝者, 指し手の後に続く最初の終局行)
     let cases = [
         ("#RESIGN", "#WIN", "resign", Some(Color::Black), "%TORYO"),
+        // 連続王手の千日手は wdoor と同じく `%` コマンドなしで summary だけ。
         (
             "#OUTE_SENNICHITE",
             "#LOSE",
             "oute_sennichite",
             Some(Color::White),
-            "%ILLEGAL_MOVE",
+            "'summary:oute_sennichite:",
         ),
         ("#JISHOGI", "#LOSE", "win_declaration", Some(Color::White), "%KACHI"),
         ("#ABNORMAL", "#WIN", "abnormal", Some(Color::Black), "%CHUDAN"),
         ("#SENNICHITE", "#DRAW", "sennichite", None, "%SENNICHITE"),
         ("#MAX_MOVES", "#CENSORED", "max_moves", None, "%MAX_MOVES"),
+        // 知らない理由行での決着は投了と断定しない。
+        ("#SOMETHING_NEW", "#WIN", "abnormal", Some(Color::Black), "%CHUDAN"),
     ];
-    for (reason_line, result_line, expected, winner, csa_command) in cases {
-        let record = record_after_server_end(reason_line, result_line);
+    for (reason_line, result_line, expected, winner, first_end_line) in cases {
+        let record = record_after_server_end(true, reason_line, result_line);
         assert_eq!(record.result, expected, "{reason_line} {result_line}");
         assert_eq!(record.winner, winner, "{reason_line} {result_line}");
         assert!(record.end_time.is_some());
+        assert_eq!(record.moves.len(), 1, "エコーされた手は残る");
+        assert_eq!(record.rejected_move, None);
         let csa = record.to_csa();
         let after_moves = csa.split_once("+7776FU\nT2\n").expect("move lines").1;
         let after_moves = after_moves
             .lines()
             .find(|line| !line.starts_with("'**"))
-            .expect("terminal command");
-        assert_eq!(after_moves, csa_command, "{reason_line} {result_line}\n{csa}");
+            .expect("terminal line");
+        assert!(after_moves.starts_with(first_end_line), "{reason_line} {result_line}\n{csa}");
+        assert!(csa.contains("'summary:"), "{csa}");
     }
+}
+
+/// 送った手のエコーが返らずに終局したら、その手は受理されていないので指し手行に残さない。
+#[test]
+fn unechoed_own_move_is_dropped_from_the_record() {
+    let record = record_after_server_end(false, "#ILLEGAL_MOVE", "#LOSE");
+    assert_eq!(record.result, "illegal_move");
+    assert_eq!(record.winner, Some(Color::White));
+    assert!(record.moves.is_empty());
+    assert!(record.jsonl_moves.is_empty());
+    assert_eq!(record.rejected_move.as_deref(), Some("+7776FU"));
+    let csa = record.to_csa();
+    assert!(
+        csa.contains("\n+\n'ILLEGAL_MOVE(+7776FU)\n'summary:illegal move:"),
+        "反則手はコメントにする:\n{csa}"
+    );
+
+    let record = record_after_server_end(false, "#TIME_UP", "#LOSE");
+    assert_eq!(record.result, "time_up");
+    assert!(record.moves.is_empty());
+    let csa = record.to_csa();
+    assert!(csa.contains("\n+\n%TIME_UP\n'summary:time up:"), "{csa}");
+    assert!(!csa.contains("7776FU"), "{csa}");
 }
 
 // ────────────────────────────────────────────

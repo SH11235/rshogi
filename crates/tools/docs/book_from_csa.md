@@ -50,7 +50,7 @@ cargo run --release -p tools --bin book_from_csa -- \
 | `--max-ply <N>` | `32` | この手数までの局面・指し手のみ集計 |
 | `--instant-threshold-sec <N>` | `1` | 消費時間による定跡手判定の閾値(秒)。この秒数以下を「即指し」とみなす |
 | `--no-instant-filter` | off | 消費時間判定を無効化し、max-ply までの全手を集計する |
-| `--winner-only` | off | 勝者側が指した手のみ集計。引き分け・結果不明の棋譜は除外 |
+| `--winner-only` | off | 勝者側が指した手のみ集計。引き分け・結果不明の棋譜は除外。勝敗は `'summary:` 行（wdoor / csa_client の棋譜）を最優先し、無ければ末尾の終局コマンドと手番から判定する |
 | `--side <both\|black\|white>` | `both` | 集計対象の手番 |
 | `--min-count <N>` | `1` | 集計後、採択回数が N 未満の指し手を出力から除外。手が空になった局面は出力しない |
 
