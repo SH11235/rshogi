@@ -428,7 +428,8 @@ fn push_single_quoted(out: &mut String, s: &str) {
 /// - Symbol: `:` 始まり
 /// - 日付・時刻: `2026-04-26` で始まる形
 /// - 数値: `1_000` / `1,000`（区切りつき）、`1:30`（60 進）、`.5`、値域を超える 16 進
-///   表記など。数字か `.` で始まり、数値に現れる文字だけでできているもの
+///   表記など。数字か `.`（または符号）で始まり、数字を含み、数値に現れる文字だけで
+///   できているもの
 fn ruby_may_read_as_non_string(s: &str) -> bool {
     const KEYWORDS: [&str; 9] = ["y", "n", "yes", "no", "on", "off", "true", "false", "null"];
     if KEYWORDS.iter().any(|k| s.eq_ignore_ascii_case(k)) || s.starts_with(':') {
@@ -440,7 +441,11 @@ fn ruby_may_read_as_non_string(s: &str) -> bool {
     }
     starts_with_date(unsigned) || {
         let mut prev = None;
-        unsigned.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+        // 符号つきなら区切りで始まる形（`+,5` / `-_29`）も対象にする。古い Psych
+        // （Ruby 2.3 で確認）はこれを整数として読む。
+        let signed = unsigned.len() < s.len();
+        (signed || unsigned.starts_with(|c: char| c.is_ascii_digit() || c == '.'))
+            && unsigned.contains(|c: char| c.is_ascii_digit())
             && unsigned.chars().all(|c| {
                 // 符号は指数の直後（`1e+5`）にだけ現れる。`20260426-001` のような
                 // game id はここで数値から外れる。
@@ -1549,6 +1554,9 @@ mod tests {
             ("1_000", "'1_000'"),
             ("1,000", "'1,000'"),
             ("-1_000", "'-1_000'"),
+            // 符号 + 区切り始まり（Ruby 2.3 が整数として読む）
+            ("+,5", "'+,5'"),
+            ("-_29", "'-_29'"),
             ("1_000.5", "'1_000.5'"),
             ("1:30", "'1:30'"),
             ("1:30:45.5", "'1:30:45.5'"),
@@ -1572,6 +1580,9 @@ mod tests {
             ("2ch_bot", "2ch_bot"),
             ("3gatsu", "3gatsu"),
             ("x1_000", "x1_000"),
+            ("_29", "_29"),
+            ("-x", "-x"),
+            ("+a", "+a"),
             ("a:b", "a:b"),
             ("<<", "<<"),
             (
