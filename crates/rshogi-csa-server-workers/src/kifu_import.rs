@@ -298,6 +298,8 @@ struct CsaHeaders<'a> {
     increment: Option<&'a str>,
     /// 最後の `%` 行 (先頭の `%` と `,T<秒>` を除いた部分)。
     last_special: Option<&'a str>,
+    /// 最後の `%` 行に付いていた消費時間 (`%TORYO,T30` の 30)。無ければ 0。
+    last_special_elapsed_sec: u64,
 }
 
 fn scan_headers(csa: &str) -> CsaHeaders<'_> {
@@ -319,7 +321,13 @@ fn scan_headers(csa: &str) -> CsaHeaders<'_> {
         } else if let Some(rest) = s.strip_prefix("'Increment:") {
             headers.increment = Some(rest);
         } else if let Some(rest) = s.strip_prefix('%') {
-            headers.last_special = Some(rest.split(',').next().unwrap_or(rest).trim());
+            let mut parts = rest.split(',');
+            headers.last_special = Some(parts.next().unwrap_or(rest).trim());
+            headers.last_special_elapsed_sec = parts
+                .next()
+                .and_then(|part| part.trim().strip_prefix('T'))
+                .and_then(|sec| sec.parse().ok())
+                .unwrap_or(0);
         }
     }
     headers
@@ -610,7 +618,10 @@ fn derive(csa: &str, headers: &CsaHeaders<'_>) -> Result<Derived, ImportError> {
     // `'ILLEGAL_MOVE(...)` コメントにする) ので、反則手の許容は `%` だけで終わる棋譜に限る。
     let ends_with_illegal_move =
         headers.summary.is_none() && headers.last_special == Some("ILLEGAL_MOVE");
-    let replay = replay(csa, ends_with_illegal_move).map_err(ImportError::Unplayable)?;
+    let mut replay = replay(csa, ends_with_illegal_move).map_err(ImportError::Unplayable)?;
+    // 終局の行に付いた消費時間 (投了を決めるまでの時間など) も、終了時刻の導出に含める。
+    replay.total_elapsed_sec =
+        replay.total_elapsed_sec.saturating_add(headers.last_special_elapsed_sec);
     let result = match headers.summary {
         Some(summary) => result_from_summary(summary),
         None => result_from_special(headers.last_special, replay.black_to_move),
@@ -1179,6 +1190,8 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
         let headers = scan_headers("$END_TIME:2026/05/03 11:00:00\r\n%TIME_UP,T12\r\n");
         assert_eq!(headers.end_time, Some("2026/05/03 11:00:00"));
         assert_eq!(headers.last_special, Some("TIME_UP"));
+        assert_eq!(headers.last_special_elapsed_sec, 12);
+        assert_eq!(scan_headers("%TORYO\n").last_special_elapsed_sec, 0);
         assert_eq!(scan_headers("+7776FU\n"), CsaHeaders::default());
     }
 
@@ -1400,6 +1413,9 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
         assert_eq!(game.started_at_ms, utc_ms(2026, 5, 3, 1, 0, 0));
         // `$END_TIME` が無いので開始 + 3 + 4 秒。
         assert_eq!(game.ended_at_ms, game.started_at_ms + 7_000);
+        // 終局の行の消費時間も足す。
+        let timed_end = import_upload(&upload_csa("%TORYO,T30\n"), None).unwrap();
+        assert_eq!(timed_end.ended_at_ms, timed_end.started_at_ms + 37_000);
         assert_eq!(
             game.clock,
             Some(ImportedClock::Countdown {
@@ -1435,6 +1451,31 @@ $TIME_LIMIT:00:15+05\nPI\n+\n+7776FU,T3\n-3334FU,T4\n{tail}"
         let game = import_upload(&csa, None).unwrap();
         assert_eq!((game.result_kind, game.end_reason), ("WIN_BLACK", "TIME_UP"));
         assert_eq!(game.ended_at_ms, utc_ms(2026, 5, 3, 1, 30, 0));
+    }
+
+    #[test]
+    fn end_move_time_counts_only_for_the_derived_end_time() {
+        // `$END_TIME` がある棋譜は、終局の行に時間が付いていても終了時刻は変わらない。
+        let with_end_time = upload_csa("%TORYO,T30\n$END_TIME:2026/05/03 10:30:00\n");
+        let game = import_upload(&with_end_time, None).unwrap();
+        assert_eq!(game.ended_at_ms, utc_ms(2026, 5, 3, 1, 30, 0));
+
+        // `$END_TIME` が無ければ、開始 + 指し手 (3 + 4 秒) + 終局の行の時間。
+        for (tail, special_sec) in [
+            ("%TORYO\n", 0),
+            ("%TORYO,T30\n", 30),
+            ("%TORYO,T30,'comment\n", 30),
+            // 時間の無いコメントつき、壊れた時間は 0 として扱う。
+            ("%TORYO,'T30\n", 0),
+            ("%TORYO,Tx\n", 0),
+            // `%` 行が複数あれば、勝敗と同じく最後の行だけを見る。
+            ("%CHUDAN,T99\n%TORYO,T5\n", 5),
+            ("%CHUDAN,T99\n%TORYO\n", 0),
+        ] {
+            let game = import_upload(&upload_csa(tail), None).unwrap();
+            assert_eq!(game.ended_at_ms, game.started_at_ms + 7_000 + special_sec * 1000, "{tail}");
+            assert_eq!((game.result_kind, game.end_reason), ("WIN_WHITE", "RESIGN"), "{tail}");
+        }
     }
 
     #[test]

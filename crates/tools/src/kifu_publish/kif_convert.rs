@@ -18,7 +18,7 @@
 //! +
 //! +5958OU,T3
 //! '** 122 -5251OU +4859OU    … `**対局 評価値 122 読み筋 △５一玉(52) ▲５九玉(48)`
-//! %TORYO
+//! %TORYO,T0                 … 終局の手に付いていた消費時間も残す
 //! 'まで84手で後手の勝ち        … 元の `まで` 行
 //! ```
 //!
@@ -256,6 +256,8 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
     let mut terminal: Option<&str> = None;
     // 終局の手の KIF での表記 (`投了` など)。
     let mut terminal_text: Option<&str> = None;
+    // 終局の手に付いていた消費時間 (投了を決めるまでの時間など)。
+    let mut terminal_elapsed: Option<u64> = None;
 
     for line in text.lines() {
         let line = line.trim_end();
@@ -321,15 +323,9 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
         if found[1].parse::<u32>().ok() != Some(moves_count + 1) {
             return Err(failed(REASON_MOVE_NUMBER, line));
         }
-        if let Some(mv) = parse_kif_move(move_text, last_dest) {
-            let sign = if moves_count.is_multiple_of(2) {
-                '+'
-            } else {
-                '-'
-            };
-            let mut csa_move = format!("{sign}{}", mv.body);
-            if let (Some(minutes), Some(seconds)) = (found.get(3), found.get(4)) {
-                // 桁あふれする値は黙って丸めず、壊れた行として扱う。
+        // 消費時間 (指し手にも終局の手にも付く)。桁あふれする値は黙って丸めず、壊れた行として扱う。
+        let elapsed = match (found.get(3), found.get(4)) {
+            (Some(minutes), Some(seconds)) => {
                 let elapsed = minutes
                     .as_str()
                     .parse::<u64>()
@@ -339,6 +335,18 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
                 let Some(elapsed) = elapsed else {
                     return Err(failed(REASON_BAD_MOVE, line));
                 };
+                Some(elapsed)
+            }
+            _ => None,
+        };
+        if let Some(mv) = parse_kif_move(move_text, last_dest) {
+            let sign = if moves_count.is_multiple_of(2) {
+                '+'
+            } else {
+                '-'
+            };
+            let mut csa_move = format!("{sign}{}", mv.body);
+            if let Some(elapsed) = elapsed {
                 csa_move.push_str(&format!(",T{elapsed}"));
             }
             body.push(csa_move);
@@ -369,6 +377,7 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
             _ => return Err(failed(REASON_UNKNOWN_END, move_text)),
         });
         terminal_text = Some(move_text);
+        terminal_elapsed = elapsed;
     }
 
     if handicap.is_some_and(|handicap| handicap != "平手") {
@@ -437,7 +446,10 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
         csa.push_str(&line);
         csa.push('\n');
     }
-    csa.push_str(&format!("%{special}\n"));
+    match terminal_elapsed {
+        Some(elapsed) => csa.push_str(&format!("%{special},T{elapsed}\n")),
+        None => csa.push_str(&format!("%{special}\n")),
+    }
     if let Some(made_line) = made_line {
         csa.push_str(&format!("'{made_line}\n"));
     }
@@ -520,8 +532,10 @@ mod tests {
         )
     }
 
+    /// 終局の行から消費時間を除いた部分 (`%TORYO,T5` なら `%TORYO`)。
     fn special(csa: &str) -> &str {
-        csa.lines().find(|line| line.starts_with('%')).unwrap()
+        let line = csa.lines().find(|line| line.starts_with('%')).unwrap();
+        line.split(',').next().unwrap()
     }
 
     fn reason(result: Result<String, Rejection>) -> &'static str {
@@ -538,7 +552,7 @@ mod tests {
             &format!("{TWO_MOVES} 3 投了           ( 0:00/00:00:03)\n"),
             "まで2手で後手の勝ち\n",
         );
-        let expected = "V2.2\nN+黒\nN-白\n$EVENT:テスト棋戦 1回戦\n$START_TIME:2025/12/07 09:00:21\n$TIME_LIMIT:00:10+00\n'Increment:2\n'先手持ち時間420秒削減\n'指定局面名：先手3分\nPI\n+\n+7776FU,T3\n-3334FU,T61\n%TORYO\n'まで2手で後手の勝ち\n";
+        let expected = "V2.2\nN+黒\nN-白\n$EVENT:テスト棋戦 1回戦\n$START_TIME:2025/12/07 09:00:21\n$TIME_LIMIT:00:10+00\n'Increment:2\n'先手持ち時間420秒削減\n'指定局面名：先手3分\nPI\n+\n+7776FU,T3\n-3334FU,T61\n%TORYO,T0\n'まで2手で後手の勝ち\n";
         assert_eq!(kif_to_csa(&text).unwrap(), expected);
         // CRLF、対局者名の末尾のタブ・空白も同じ結果になる。
         let crlf = text.replace("先手：黒\n", "先手：黒\t \n").replace('\n', "\r\n");
@@ -573,7 +587,7 @@ mod tests {
             "まで1手で非合法手により先手の勝ち\n",
         ))
         .unwrap();
-        assert!(csa.contains("+2726FU,T7\n%-ILLEGAL_ACTION\n"), "{csa}");
+        assert!(csa.contains("+2726FU,T7\n%-ILLEGAL_ACTION,T0\n"), "{csa}");
     }
 
     #[test]
@@ -596,6 +610,17 @@ mod tests {
                 "{minutes}"
             );
         }
+    }
+
+    #[test]
+    fn time_on_the_end_move_is_kept() {
+        let moves = format!("{TWO_MOVES} 3 投了           ( 0:30/00:00:33)\n");
+        let csa = kif_to_csa(&kif("", &moves, "まで2手で後手の勝ち\n")).unwrap();
+        assert!(csa.contains("-3334FU,T61\n%TORYO,T30\n"), "{csa}");
+        // 時間の欄が無い終局の手には付けない。
+        let moves = format!("{TWO_MOVES} 3 投了\n");
+        let csa = kif_to_csa(&kif("", &moves, "まで2手で後手の勝ち\n")).unwrap();
+        assert!(csa.contains("-3334FU,T61\n%TORYO\n"), "{csa}");
     }
 
     #[test]
@@ -733,7 +758,7 @@ mod tests {
             assert_eq!(special(&csa), expected, "{end_reason} / {made}");
             assert_eq!(csa.matches('%').count(), 1, "{end_reason} / {made}");
             if !made.is_empty() {
-                assert!(csa.ends_with(&format!("{expected}\n'{made}\n")), "{csa}");
+                assert!(csa.ends_with(&format!("{expected},T0\n'{made}\n")), "{csa}");
             }
         }
     }
@@ -810,10 +835,11 @@ mod tests {
         }
         // 宣言の行の重複と、終局後のコメントは許す。
         let declared = format!(
-            "{one} 2 入玉勝ち ( 0:00/)\n**対局 評価値 100000 読み筋 \n 3 入玉勝ち ( 0:00/)\n\n*コメント\n"
+            "{one} 2 入玉勝ち ( 0:07/)\n**対局 評価値 100000 読み筋 \n 3 入玉勝ち ( 0:09/)\n\n*コメント\n"
         );
         let csa = kif_to_csa(&kif("", &declared, "まで2手で入玉勝ち\n")).unwrap();
-        assert!(csa.ends_with("+7776FU,T3\n%KACHI\n'まで2手で入玉勝ち\n"), "{csa}");
+        // 消費時間は最初の宣言の行のものを採る。
+        assert!(csa.ends_with("+7776FU,T3\n%KACHI,T7\n'まで2手で入玉勝ち\n"), "{csa}");
     }
 
     #[test]
