@@ -25,10 +25,26 @@
 //!   :last_modified: 2026-04-26T12:34:56+00:00
 //! ```
 //!
-//! `serde_yaml` の `to_string` は document start (`---`) を出さず、`String` 型の
-//! `:last_modified` も quote 無しで bare scalar として出力する。例は
+//! 書き出しは document start (`---`) を出さず、Symbol キー（`:name` など）と
+//! `:last_modified` を quote 無しの plain scalar として出力する。例は
 //! `render_document` のテスト golden YAML と一致させる（実出力と差異が出たら
 //! `render_document_emits_byte_stable_yaml_with_ruby_symbol_keys` が落ちる）。
+//!
+//! ## 読み込みと書き出しの実装
+//!
+//! - **読み込み**は `serde-saphyr`（pure Rust の YAML パーサ）で行う。
+//! - **書き出し**は `render_document` が自前で組み立てる。`serde-saphyr` の
+//!   シリアライザは `:` 始まりの文字列とタイムスタンプ形の文字列を必ず quote し、
+//!   設定でも外せないため、上記の「quote 無し」の形式を保てない。
+//!
+//! 出力は、以前使っていた `serde_yaml` 0.9 の出力とバイト単位で一致させてある
+//! （どの文字列を quote するかの規則は `push_scalar` を参照）。例外は改行文字
+//! （LF / CR / U+0085 / U+2028 / U+2029）を含む文字列だけで、block scalar や
+//! explicit key ではなく double quote + エスケープで書く。
+//!
+//! 読み込みは `serde_yaml` が書いたファイルをそのまま読める。ただし U+2028 / U+2029
+//! を含む文字列だけは別で、`serde_yaml` はこれを改行として生のまま書いていたが、
+//! YAML 1.2 のパーサは改行として扱わないため、元の文字列に戻らない。
 //!
 //! ## クリーンルーム方針
 //!
@@ -58,7 +74,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
@@ -77,14 +93,11 @@ fn lock_cache<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 1 プレイヤ分のレコードを Ruby Symbol キー（`:name` / `:rate` / ...）で表現する
+/// 1 プレイヤ分のレコードを Ruby Symbol キー（`:name` / `:rate` / ...）で読み込む
 /// serde スキーマ。
 ///
-/// `last_game_id` が `None` の場合は serde の `skip_serializing_if` でキー行ごと
-/// 出力から除外する（`null` リテラルや空値を吐かない）。Ruby `YAML.dump` で
-/// `Hash.delete(:last_game_id)` 済みの未対局レコードと等価な見え方になる。
-/// deserialize 側は `default` で `None` を許容する。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `:last_game_id` 行が無いレコード（未対局）は `default` で `None` として読む。
+#[derive(Debug, Clone, Deserialize)]
 struct YamlRecord {
     #[serde(rename = ":name")]
     name: String,
@@ -94,28 +107,13 @@ struct YamlRecord {
     win: u32,
     #[serde(rename = ":loss")]
     loss: u32,
-    #[serde(
-        rename = ":last_game_id",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = ":last_game_id", default)]
     last_game_id: Option<String>,
     #[serde(rename = ":last_modified")]
     last_modified: String,
 }
 
 impl YamlRecord {
-    fn from_record(r: &PlayerRateRecord) -> Self {
-        Self {
-            name: r.name.as_str().to_owned(),
-            rate: r.rate,
-            win: r.wins,
-            loss: r.losses,
-            last_game_id: r.last_game_id.as_ref().map(|g| g.as_str().to_owned()),
-            last_modified: r.last_modified.clone(),
-        }
-    }
-
     fn into_record(self) -> PlayerRateRecord {
         PlayerRateRecord {
             name: PlayerName::new(self.name),
@@ -205,8 +203,7 @@ impl PlayersYamlRateStorage {
         &self,
         snapshot: &HashMap<String, PlayerRateRecord>,
     ) -> Result<(), StorageError> {
-        let yaml = render_document(snapshot)?;
-        atomic_write_yaml(&self.path, &yaml).await
+        atomic_write_yaml(&self.path, &render_document(snapshot)).await
     }
 }
 
@@ -291,18 +288,211 @@ impl RateStorage for PlayersYamlRateStorage {
 fn parse_document(text: &str) -> Result<HashMap<String, PlayerRateRecord>, StorageError> {
     // 並びを byte-stable にして round-trip 比較しやすくするため、内部表現は
     // BTreeMap で受けてから HashMap に変換する。
-    let doc: BTreeMap<String, YamlRecord> = serde_yaml::from_str(text)
+    //
+    // `serde-saphyr` の既定値のうち、このファイルの読み込みに合わないものを変える:
+    //
+    // - `budget`: 既定はノード数 25 万などの上限つき（信頼できない入力向けの防御）。
+    //   1 プレイヤは約 14 ノードなので 1.8 万人弱で上限に達し、サーバーが起動できなく
+    //   なる。サーバー自身と運用者が管理するファイルなので上限を外す。
+    // - `merge_keys`: `<<` という名前のプレイヤを merge key として展開せず、通常の
+    //   キーとして読む。
+    // - `duplicate_keys`: 同じプレイヤ名が重複していたら後のものを採る（`serde_yaml`
+    //   で読んでいたときと同じ）。既定の `Error` だと、これまで読めていた重複入りの
+    //   ファイルで起動できなくなる。
+    // - `with_snippet`: エラーメッセージに YAML の抜粋（複数行）を付けず、1 行に収める。
+    let options = serde_saphyr::options! {
+        budget: None,
+        merge_keys: serde_saphyr::options::MergeKeyPolicy::AsOrdinary,
+        duplicate_keys: serde_saphyr::options::DuplicateKeyPolicy::LastWins,
+        with_snippet: false,
+    };
+    let doc: BTreeMap<String, YamlRecord> = serde_saphyr::from_str_with_options(text, options)
         .map_err(|e| StorageError::Malformed(format!("players.yaml: {e}")))?;
     Ok(doc.into_iter().map(|(k, v)| (k, v.into_record())).collect())
 }
 
-fn render_document(records: &HashMap<String, PlayerRateRecord>) -> Result<String, StorageError> {
+/// `key:` の形（implicit key）で書くキーの最大 byte 数。
+///
+/// これを超えるキーは `? key` の形（explicit key）で書く。YAML の implicit key には
+/// 1024 文字までという制限があり、長いキーをそのまま `key:` と書くと読み戻せない。
+/// 境界の 128 は `serde_yaml`（libyaml）の出力に合わせた値。
+const MAX_IMPLICIT_KEY_BYTES: usize = 128;
+
+/// 全レコードを `players.yaml` の文字列に組み立てる。
+///
+/// `last_game_id` が `None` のレコードは `:last_game_id` 行ごと出力しない（`null`
+/// リテラルや空値を吐かない）。Ruby `YAML.dump` で `Hash.delete(:last_game_id)` 済みの
+/// 未対局レコードと等価な見え方になる。
+fn render_document(records: &HashMap<String, PlayerRateRecord>) -> String {
+    if records.is_empty() {
+        return "{}\n".to_owned();
+    }
     // `BTreeMap` でキーをソートして書き出すことで、同一データから出力 byte 列が
     // 一致する（運用での diff 比較・自動レビューが安定する）。
-    let doc: BTreeMap<String, YamlRecord> =
-        records.iter().map(|(k, v)| (k.clone(), YamlRecord::from_record(v))).collect();
-    serde_yaml::to_string(&doc)
-        .map_err(|e| StorageError::Io(format!("serialize players.yaml: {e}")))
+    let sorted: BTreeMap<&str, &PlayerRateRecord> =
+        records.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let mut out = String::new();
+    for (key, record) in sorted {
+        if key.len() <= MAX_IMPLICIT_KEY_BYTES {
+            push_scalar(&mut out, key);
+            out.push_str(":\n  :name: ");
+        } else {
+            out.push_str("? ");
+            push_scalar(&mut out, key);
+            out.push_str("\n: :name: ");
+        }
+        push_scalar(&mut out, record.name.as_str());
+        out.push_str(&format!(
+            "\n  :rate: {}\n  :win: {}\n  :loss: {}\n",
+            record.rate, record.wins, record.losses
+        ));
+        if let Some(game_id) = &record.last_game_id {
+            out.push_str("  :last_game_id: ");
+            push_scalar(&mut out, game_id.as_str());
+            out.push('\n');
+        }
+        out.push_str("  :last_modified: ");
+        push_scalar(&mut out, &record.last_modified);
+        out.push('\n');
+    }
+    out
+}
+
+/// 文字列 1 つを YAML の scalar として `out` に書く。
+///
+/// quote の要否は `serde_yaml` 0.9（libyaml）の出力と同じ規則で決める:
+///
+/// 1. エスケープが要る文字（制御文字・改行・BOM など）を含むなら double quote。
+/// 2. 空文字列、YAML 1.2 で null / 真偽値 / 数値として読まれる文字列、plain で書くと
+///    構文上の意味が変わる文字列は single quote。
+/// 3. それ以外は quote 無し（plain）。`:name` のような Symbol 形や
+///    `2026-04-26T12:34:56+00:00` のような時刻はここに入る。
+fn push_scalar(out: &mut String, s: &str) {
+    if s.chars().any(needs_escape) {
+        out.push('"');
+        for c in s.chars() {
+            push_double_quoted_char(out, c);
+        }
+        out.push('"');
+    } else if s.is_empty() || resolves_to_non_string(s) || !plain_allowed(s) {
+        out.push('\'');
+        out.push_str(&s.replace('\'', "''"));
+        out.push('\'');
+    } else {
+        out.push_str(s);
+    }
+}
+
+/// double quote の中でエスケープして書く必要がある文字か。
+///
+/// そのまま書けるのは ASCII の印字可能文字と、U+00A0 以上の文字のうち改行扱いの
+/// U+2028 / U+2029、BOM (U+FEFF)、非文字 U+FFFE / U+FFFF を除いたもの。
+fn needs_escape(c: char) -> bool {
+    !matches!(
+        c,
+        ' '..='~'
+            | '\u{a0}'..='\u{2027}'
+            | '\u{202a}'..='\u{d7ff}'
+            | '\u{e000}'..='\u{fefe}'
+            | '\u{ff00}'..='\u{fffd}'
+            | '\u{10000}'..='\u{10ffff}'
+    )
+}
+
+fn push_double_quoted_char(out: &mut String, c: char) {
+    match c {
+        '\0' => out.push_str("\\0"),
+        '\u{7}' => out.push_str("\\a"),
+        '\u{8}' => out.push_str("\\b"),
+        '\t' => out.push_str("\\t"),
+        '\n' => out.push_str("\\n"),
+        '\u{b}' => out.push_str("\\v"),
+        '\u{c}' => out.push_str("\\f"),
+        '\r' => out.push_str("\\r"),
+        '\u{1b}' => out.push_str("\\e"),
+        '"' => out.push_str("\\\""),
+        '\\' => out.push_str("\\\\"),
+        '\u{85}' => out.push_str("\\N"),
+        '\u{2028}' => out.push_str("\\L"),
+        '\u{2029}' => out.push_str("\\P"),
+        c if !needs_escape(c) => out.push(c),
+        c if c <= '\u{ff}' => out.push_str(&format!("\\x{:02X}", u32::from(c))),
+        c => out.push_str(&format!("\\u{:04X}", u32::from(c))),
+    }
+}
+
+/// quote 無しで書くと、YAML 1.2 の読み手に文字列以外（null / 真偽値 / 数値）として
+/// 読まれる文字列か。`001` のような「0 始まりの数字列」も quote する。
+fn resolves_to_non_string(s: &str) -> bool {
+    if matches!(
+        s,
+        "null" | "Null" | "NULL" | "~" | "true" | "True" | "TRUE" | "false" | "False" | "FALSE"
+    ) {
+        return true;
+    }
+    let (negative, unsigned) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    if unsigned.starts_with(['+', '-']) {
+        return false;
+    }
+    if unsigned.len() > 1
+        && unsigned.starts_with('0')
+        && unsigned[1..].bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+    for (prefix, radix) in [("0x", 16), ("0o", 8), ("0b", 2)] {
+        if let Some(digits) = unsigned.strip_prefix(prefix) {
+            if digits.starts_with(['+', '-']) {
+                return false;
+            }
+            let is_int = if negative {
+                i128::from_str_radix(&format!("-{digits}"), radix).is_ok()
+            } else {
+                u128::from_str_radix(digits, radix).is_ok()
+            };
+            if is_int {
+                return true;
+            }
+        }
+    }
+    if matches!(unsigned, ".inf" | ".Inf" | ".INF") || matches!(s, ".nan" | ".NaN" | ".NAN") {
+        return true;
+    }
+    let float_text = if negative { s } else { unsigned };
+    float_text.parse::<f64>().is_ok_and(f64::is_finite)
+}
+
+/// quote 無し（plain）で書いても、YAML の構文上ほかの意味に取られない文字列か。
+///
+/// 呼び出し側で空文字列と `needs_escape` な文字（タブ・改行を含む）は除外済みなので、
+/// 空白は ASCII スペースだけを考えればよい。
+fn plain_allowed(s: &str) -> bool {
+    if s.starts_with(' ') || s.ends_with(' ') || s.starts_with("---") || s.starts_with("...") {
+        return false;
+    }
+    let mut prev = None;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        let followed_by_blank = matches!(chars.peek(), None | Some(' '));
+        let is_indicator = match prev {
+            // 先頭の文字: 単独で indicator になる記号と、直後が空白（または末尾）の
+            // ときだけ indicator になる `?` `:` `-`。
+            None => {
+                "#,[]{}&*!|>'\"%@`".contains(c)
+                    || (matches!(c, '?' | ':' | '-') && followed_by_blank)
+            }
+            // 2 文字目以降: `: `（キーと値の区切り）と ` #`（コメント開始）。
+            Some(p) => (c == ':' && followed_by_blank) || (c == '#' && p == ' '),
+        };
+        if is_indicator {
+            return false;
+        }
+        prev = Some(c);
+    }
+    true
 }
 
 /// `path` の親ディレクトリが存在することを検証する（[`load_from_file`] の
@@ -472,13 +662,13 @@ mod tests {
         records.insert("alice".to_owned(), rec("alice", 2500, 100, 50));
         records.insert("bob".to_owned(), rec("bob", 2400, 80, 60));
 
-        let yaml = render_document(&records).unwrap();
+        let yaml = render_document(&records);
         // Ruby `YAML.dump` のキー順は内部 Hash 挿入順だが、ここでは BTreeMap で
         // 名前昇順に正規化する。アルファベット順で alice → bob が確定。
         // `:name`/`:rate`/`:win`/`:loss`/`:last_game_id`/`:last_modified` の
         // Ruby Symbol キーが quote 無しで出力されることを byte 比較で固定する。
-        // `serde_yaml` は ASCII の `:` を quote 不要と判断するため、Ruby
-        // `YAML.dump` と同様にコロン接頭辞のみで bare key として出力される。
+        // 先頭の `:` は直後が空白でなければ quote 不要なので、Ruby `YAML.dump` と
+        // 同様にコロン接頭辞のみで bare key として出力される。
         // diff 検証や grep で扱いやすくする上でも quote 無しの形を期待する。
         let expected = concat!(
             "alice:\n",
@@ -500,7 +690,7 @@ mod tests {
     }
 
     /// `last_game_id` が `None` のレコードは `:last_game_id` 行ごと出力から
-    /// 除外される（serde の `skip_serializing_if`）。Ruby 側で `if rec[:last_game_id]`
+    /// 除外される。Ruby 側で `if rec[:last_game_id]`
     /// truthiness チェックする実装でも、`has_key?(:last_game_id)` で存在判定する
     /// 実装でも、どちらにも互換な見え方になる。`null` リテラルは Ruby `YAML.dump`
     /// が出さない形なので避ける。
@@ -518,7 +708,7 @@ mod tests {
                 last_modified: "2026-04-26T00:00:00+00:00".to_owned(),
             },
         );
-        let yaml = render_document(&records).unwrap();
+        let yaml = render_document(&records);
         let expected = concat!(
             "alice:\n",
             "  :name: alice\n",
@@ -539,7 +729,7 @@ mod tests {
         records.insert("alice".to_owned(), rec("alice", 2500, 100, 50));
         records.insert("bob".to_owned(), rec("bob", 2400, 80, 60));
 
-        let yaml = render_document(&records).unwrap();
+        let yaml = render_document(&records);
         let parsed = parse_document(&yaml).unwrap();
         assert_eq!(parsed, records);
     }
@@ -766,33 +956,299 @@ mod tests {
         assert_eq!(r.losses, 3);
     }
 
-    /// 日本語ハンドル名 / 数字始まりハンドル名など serde_yaml が quote を要する
-    /// 可能性がある文字列で round-trip する契約を固定する。Ruby 互換 YAML として、
+    /// 日本語ハンドル名 / 数字始まりハンドル名など quote を要する可能性がある
+    /// 文字列で round-trip する契約を固定する。Ruby 互換 YAML として、
     /// UTF-8 名前の対局者を扱える運用を保証する。
     ///
     /// (1) round-trip で意味的同値を保つ
     /// (2) 日本語ハンドルは bare key として出力される（`田中太郎:` の出現を pin）
     /// (3) 数字 only ハンドル `12345` は YAML 1.2 で integer scalar に解釈されうる
-    ///     ため `serde_yaml` は string quote を付ける。`'12345':` の出現を pin する
+    ///     ため string quote を付ける。`'12345':` の出現を pin する
     ///     （quote の有無は仕様変更で破壊的変化があるため byte 列で固定する）。
     #[test]
     fn render_and_parse_round_trip_handles_unicode_and_numeric_names() {
         let mut records = HashMap::new();
         records.insert("田中太郎".to_owned(), rec("田中太郎", 1500, 0, 0));
         records.insert("12345".to_owned(), rec("12345", 1700, 10, 5));
-        let yaml = render_document(&records).unwrap();
+        let yaml = render_document(&records);
         let parsed = parse_document(&yaml).unwrap();
         assert_eq!(parsed, records, "Unicode / numeric handles must round-trip");
 
         // (2): 日本語ハンドルは bare で出力される。
         assert!(yaml.contains("田中太郎:\n"), "non-ASCII handle must be unquoted, got:\n{yaml}",);
         // (3): 数字 only ハンドルは integer 解釈を防ぐため quote される。
-        // serde_yaml 0.9 は single quote を採用するが、double quote 採用 minor バージョン
-        // 変化に保険を掛けるため両方許容する assertion にする。
+        // 現行の出力は single quote（`push_scalar_matches_serde_yaml_quoting` で固定）。
+        // ここでは「quote されていること」だけを見るので double quote も許容する。
         assert!(
             yaml.contains("'12345':\n") || yaml.contains("\"12345\":\n"),
             "numeric handle must be string-quoted to avoid YAML integer coercion, got:\n{yaml}",
         );
+    }
+
+    /// quote の規則を、置き換え前の `serde_yaml` 0.9.34 の実出力で固定する。
+    ///
+    /// 期待値は `serde_yaml::to_string` に同じ文字列を渡して得たもの（手書きではない）。
+    /// Ruby の `mk_rate` と同じファイルを共有するので、出力形式を変えないことが要件。
+    #[test]
+    fn push_scalar_matches_serde_yaml_quoting() {
+        let cases = [
+            // quote 無し
+            ("alice", "alice"),
+            ("田中太郎", "田中太郎"),
+            ("player_1", "player_1"),
+            ("a-b", "a-b"),
+            ("Alice.Bob", "Alice.Bob"),
+            ("2026-04-26T12:34:56+00:00", "2026-04-26T12:34:56+00:00"),
+            ("20260426-001", "20260426-001"),
+            ("1_000", "1_000"),
+            ("yes", "yes"),
+            ("on", "on"),
+            ("a b", "a b"),
+            ("a:b", "a:b"),
+            (":sym", ":sym"),
+            ("-x", "-x"),
+            ("?x", "?x"),
+            ("x#y", "x#y"),
+            ("a'b", "a'b"),
+            ("a\"b", "a\"b"),
+            ("a,b", "a,b"),
+            ("<<", "<<"),
+            ("=", "="),
+            ("a\\b", "a\\b"),
+            ("a\u{a0}b", "a\u{a0}b"),
+            ("😀", "😀"),
+            ("é", "é"),
+            // null / 真偽値 / 数値として読まれる文字列は single quote
+            ("12345", "'12345'"),
+            ("001", "'001'"),
+            ("-1", "'-1'"),
+            ("+1", "'+1'"),
+            ("1e5", "'1e5'"),
+            ("1.5", "'1.5'"),
+            (".5", "'.5'"),
+            ("0x1F", "'0x1F'"),
+            ("0o17", "'0o17'"),
+            ("0b11", "'0b11'"),
+            (".inf", "'.inf'"),
+            (".NaN", "'.NaN'"),
+            ("true", "'true'"),
+            ("True", "'True'"),
+            ("FALSE", "'FALSE'"),
+            ("null", "'null'"),
+            ("~", "'~'"),
+            ("", "''"),
+            // plain で書くと構文上の意味が変わる文字列は single quote
+            ("a: b", "'a: b'"),
+            ("x:", "'x:'"),
+            (":", "':'"),
+            ("-", "'-'"),
+            ("- x", "'- x'"),
+            ("? x", "'? x'"),
+            ("#x", "'#x'"),
+            ("x #y", "'x #y'"),
+            (" lead", "' lead'"),
+            ("trail ", "'trail '"),
+            ("'a", "'''a'"),
+            ("\"a", "'\"a'"),
+            ("@x", "'@x'"),
+            ("[x", "'[x'"),
+            ("{x", "'{x'"),
+            ("*x", "'*x'"),
+            ("&x", "'&x'"),
+            ("!x", "'!x'"),
+            ("|x", "'|x'"),
+            (">x", "'>x'"),
+            ("%x", "'%x'"),
+            ("`x", "'`x'"),
+            ("---", "'---'"),
+            ("--- a", "'--- a'"),
+            ("...", "'...'"),
+            // エスケープが要る文字を含む文字列は double quote
+            ("a\tb", "\"a\\tb\""),
+            ("a\\\tb", "\"a\\\\\\tb\""),
+            ("\u{feff}x", "\"\\uFEFFx\""),
+            ("\u{7f}", "\"\\x7F\""),
+            ("\u{1b}[0m", "\"\\e[0m\""),
+        ];
+        for (input, expected) in cases {
+            let mut out = String::new();
+            push_scalar(&mut out, input);
+            assert_eq!(out, expected, "input: {input:?}");
+        }
+    }
+
+    /// 置き換え前の実装（`serde_yaml` 0.9.34）が書いた `players.yaml` を読める。
+    ///
+    /// fixture は旧実装の実出力そのまま。数字だけの名前の quote、空文字列、`<<` という
+    /// 名前、改行入りの名前（explicit key + block scalar）、129 byte の名前（explicit
+    /// key）、空白区切りの時刻を含む。読んだ結果を書き戻すと、改行入りのレコード以外は
+    /// 旧実装と同じバイト列になることも確認する。
+    #[test]
+    fn parse_document_reads_file_written_by_serde_yaml() {
+        let long = "n".repeat(129);
+        let numeric_and_merge = concat!(
+            "'12345':\n",
+            "  :name: '12345'\n",
+            "  :rate: 1500\n",
+            "  :win: 3\n",
+            "  :loss: 4\n",
+            "  :last_game_id: '20260426'\n",
+            "  :last_modified: 2026-04-26T12:34:56+00:00\n",
+            "<<:\n",
+            "  :name: <<\n",
+            "  :rate: 1500\n",
+            "  :win: 3\n",
+            "  :loss: 4\n",
+            "  :last_modified: ''\n",
+        );
+        let multiline = concat!(
+            "? |-\n",
+            "  a\n",
+            "  b\n",
+            ": :name: |-\n",
+            "    a\n",
+            "    b\n",
+            "  :rate: 1500\n",
+            "  :win: 3\n",
+            "  :loss: 4\n",
+            "  :last_game_id: |\n",
+            "    x\n",
+            "    y\n",
+            "  :last_modified: 2026-04-26T00:00:00+00:00\n",
+        );
+        let rest = format!(
+            concat!(
+                "'a b: c':\n",
+                "  :name: 'a b: c'\n",
+                "  :rate: 1500\n",
+                "  :win: 3\n",
+                "  :loss: 4\n",
+                "  :last_modified: 2026-04-26 12:34:56 +09:00\n",
+                "alice:\n",
+                "  :name: alice\n",
+                "  :rate: 1500\n",
+                "  :win: 3\n",
+                "  :loss: 4\n",
+                "  :last_game_id: 20260426-001\n",
+                "  :last_modified: 2026-04-26T12:34:56+00:00\n",
+                "? {long}\n",
+                ": :name: {long}\n",
+                "  :rate: 1500\n",
+                "  :win: 3\n",
+                "  :loss: 4\n",
+                "  :last_modified: 2026-04-26T00:00:00+00:00\n",
+                "田中太郎:\n",
+                "  :name: 田中太郎\n",
+                "  :rate: 1500\n",
+                "  :win: 3\n",
+                "  :loss: 4\n",
+                "  :last_modified: 2026-04-26T00:00:00+00:00\n",
+            ),
+            long = long
+        );
+        let written_by_serde_yaml = format!("{numeric_and_merge}{multiline}{rest}");
+
+        let mut expected = HashMap::new();
+        for (name, game_id, last_modified) in [
+            ("12345", Some("20260426"), "2026-04-26T12:34:56+00:00"),
+            ("<<", None, ""),
+            ("a\nb", Some("x\ny\n"), "2026-04-26T00:00:00+00:00"),
+            ("a b: c", None, "2026-04-26 12:34:56 +09:00"),
+            ("alice", Some("20260426-001"), "2026-04-26T12:34:56+00:00"),
+            (long.as_str(), None, "2026-04-26T00:00:00+00:00"),
+            ("田中太郎", None, "2026-04-26T00:00:00+00:00"),
+        ] {
+            expected.insert(
+                name.to_owned(),
+                PlayerRateRecord {
+                    name: PlayerName::new(name),
+                    rate: 1500,
+                    wins: 3,
+                    losses: 4,
+                    last_game_id: game_id.map(GameId::new),
+                    last_modified: last_modified.to_owned(),
+                },
+            );
+        }
+        let mut parsed = parse_document(&written_by_serde_yaml).unwrap();
+        assert_eq!(parsed, expected);
+
+        // 改行入りのレコードだけは書き出しの形が旧実装と違う（意図した差）。
+        let rendered_multiline = concat!(
+            "\"a\\nb\":\n",
+            "  :name: \"a\\nb\"\n",
+            "  :rate: 1500\n",
+            "  :win: 3\n",
+            "  :loss: 4\n",
+            "  :last_game_id: \"x\\ny\\n\"\n",
+            "  :last_modified: 2026-04-26T00:00:00+00:00\n",
+        );
+        assert_eq!(
+            render_document(&parsed),
+            format!("{numeric_and_merge}{rendered_multiline}{rest}")
+        );
+        assert_eq!(parse_document(&render_document(&parsed)).unwrap(), expected);
+
+        // 残りは旧実装の出力とバイト一致する。
+        parsed.remove("a\nb");
+        assert_eq!(render_document(&parsed), format!("{numeric_and_merge}{rest}"));
+    }
+
+    /// Ruby の `YAML.dump` が書く形（`---` 始まり、未知のキーあり）を読める。
+    ///
+    /// fixture は手書き（このテストは Ruby を実行しない）。
+    #[test]
+    fn parse_document_reads_document_with_start_marker_and_unknown_keys() {
+        let yaml = concat!(
+            "---\n",
+            "alice:\n",
+            "  :name: alice\n",
+            "  :rate: 2500\n",
+            "  :win: 100\n",
+            "  :loss: 50\n",
+            "  :rating_group: 0\n",
+            "  :last_modified: 2026-04-26 12:34:56.000000000 +09:00\n",
+        );
+        let parsed = parse_document(yaml).unwrap();
+        let alice = parsed.get("alice").unwrap();
+        assert_eq!(alice.rate, 2500);
+        assert_eq!(alice.last_game_id, None);
+        assert_eq!(alice.last_modified, "2026-04-26 12:34:56.000000000 +09:00");
+    }
+
+    /// 同じプレイヤ名が重複していたら後のレコードを採る。
+    #[test]
+    fn parse_document_keeps_last_record_for_duplicate_name() {
+        let record = |rate: i32| {
+            format!(
+                "alice:\n  :name: alice\n  :rate: {rate}\n  :win: 0\n  :loss: 0\n  :last_modified: t\n"
+            )
+        };
+        let parsed = parse_document(&format!("{}{}", record(1500), record(1600))).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.get("alice").unwrap().rate, 1600);
+    }
+
+    /// プレイヤ数が多いファイルも読める（`serde-saphyr` 既定の budget だと、ノード数の
+    /// 上限 25 万に約 1.8 万人で達して読み込みが失敗する）。
+    #[test]
+    fn parse_document_reads_more_players_than_default_budget_allows() {
+        let records: HashMap<String, PlayerRateRecord> = (0..20_000)
+            .map(|i| {
+                let name = format!("player{i}");
+                (name.clone(), rec(&name, 1500, 0, 0))
+            })
+            .collect();
+        let parsed = parse_document(&render_document(&records)).unwrap();
+        assert_eq!(parsed, records);
+    }
+
+    /// レコードが 1 件も無いときは空の mapping を書き、読み戻せる。
+    #[test]
+    fn render_document_emits_empty_mapping_for_no_records() {
+        let yaml = render_document(&HashMap::new());
+        assert_eq!(yaml, "{}\n");
+        assert!(parse_document(&yaml).unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
