@@ -83,16 +83,17 @@ impl TimeControl {
         }
     }
 
+    /// 1手指した後の残り時間を返す。
+    ///
+    /// フィッシャー時は今回の手に使える時間が「残り時間 + 加算」（`think_limit_ms` 参照）なので、
+    /// 加算を足してから消費時間を引く。先に消費時間を引くと、残り時間を超えて加算分へ
+    /// 食い込んだ消費が 0 で打ち切られ、残り時間が加算の値まで戻ってしまう。
     pub fn updated_time(&self, current: u64, inc: u64, elapsed_ms: u64) -> u64 {
-        let mut next = current;
         if self.byoyomi > 0 {
             let over = elapsed_ms.saturating_sub(self.byoyomi);
-            next = next.saturating_sub(over);
-        } else {
-            next = next.saturating_sub(elapsed_ms);
+            return current.saturating_sub(over).saturating_add(inc);
         }
-        next = next.saturating_add(inc);
-        next
+        current.saturating_add(inc).saturating_sub(elapsed_ms)
     }
 }
 
@@ -111,5 +112,22 @@ mod tests {
         let tc_inc = TimeControl::new(60_000, 60_000, 1_000, 0, 0);
         assert_eq!(tc_inc.think_limit_ms(Color::Black), 61_000);
         assert_eq!(tc_inc.updated_time(5_000, 1_000, 4_000), 2_000);
+    }
+
+    #[test]
+    fn fischer_clock_charges_time_spent_from_increment() {
+        let mut tc = TimeControl::new(500, 500, 1_000, 1_000, 0);
+        // 残り 500ms + 加算 1000ms のうち 1400ms を使えば、残るのは 100ms。
+        assert_eq!(tc.think_limit_ms(Color::Black), 1_500);
+        tc.update_after_move(Color::Black, 1_400);
+        assert_eq!(tc.remaining(Color::Black), 100);
+        assert_eq!(tc.remaining(Color::White), 500);
+        // 次の手は 100ms + 1000ms が上限で、使い切れば 0 になる。
+        assert_eq!(tc.think_limit_ms(Color::Black), 1_100);
+        tc.update_after_move(Color::Black, 1_100);
+        assert_eq!(tc.remaining(Color::Black), 0);
+        // 判定マージン内の超過は時間切れにならないが、時計は 0 で止まり加算へは戻らない。
+        tc.update_after_move(Color::Black, 1_050);
+        assert_eq!(tc.remaining(Color::Black), 0);
     }
 }
