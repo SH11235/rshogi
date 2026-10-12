@@ -1069,12 +1069,249 @@ mod tests {
             ("\u{feff}x", "\"\\uFEFFx\""),
             ("\u{7f}", "\"\\x7F\""),
             ("\u{1b}[0m", "\"\\e[0m\""),
+            ("\0", "\"\\0\""),
+            ("\u{7}", "\"\\a\""),
+            ("\u{8}", "\"\\b\""),
+            ("\u{b}", "\"\\v\""),
+            ("\u{c}", "\"\\f\""),
+            ("a\rb", "\"a\\rb\""),
+            ("\u{85}", "\"\\N\""),
+            ("\u{80}", "\"\\x80\""),
+            ("\u{9f}", "\"\\x9F\""),
+            ("\u{fffe}", "\"\\uFFFE\""),
+            ("\u{ffff}", "\"\\uFFFF\""),
+            ("a\"\tb", "\"a\\\"\\tb\""),
+            ("a'\tb", "\"a'\\tb\""),
+            // エスケープ不要な範囲の両端
+            ("\u{a0}", "\u{a0}"),
+            ("\u{2027}", "\u{2027}"),
+            ("\u{202a}", "\u{202a}"),
+            ("\u{d7ff}", "\u{d7ff}"),
+            ("\u{e000}", "\u{e000}"),
+            ("\u{fefe}", "\u{fefe}"),
+            ("\u{ff00}", "\u{ff00}"),
+            ("\u{fffd}", "\u{fffd}"),
+            ("\u{10000}", "\u{10000}"),
+            ("\u{10ffff}", "\u{10ffff}"),
+            // null / 真偽値: 綴りが完全一致するものだけ quote
+            ("false", "'false'"),
+            ("False", "'False'"),
+            ("TRUE", "'TRUE'"),
+            ("Null", "'Null'"),
+            ("NULL", "'NULL'"),
+            ("tRUE", "tRUE"),
+            ("nULL", "nULL"),
+            ("null1", "null1"),
+            ("truex", "truex"),
+            ("~a", "~a"),
+            ("True ", "'True '"),
+            ("y", "y"),
+            ("n", "n"),
+            ("no", "no"),
+            ("off", "off"),
+            // 数値: 符号・0 始まり・指数
+            ("0", "'0'"),
+            ("-0", "'-0'"),
+            ("+0", "'+0'"),
+            ("00", "'00'"),
+            ("-001", "'-001'"),
+            ("+001", "'+001'"),
+            ("1.", "'1.'"),
+            ("1e+5", "'1e+5'"),
+            ("1E5", "'1E5'"),
+            ("1e", "1e"),
+            ("e5", "e5"),
+            ("1.5.5", "1.5.5"),
+            ("+-1", "+-1"),
+            ("-+1", "-+1"),
+            ("--1", "--1"),
+            ("++1", "++1"),
+            ("1,000", "1,000"),
+            ("1:30", "1:30"),
+            ("2026-04-26", "2026-04-26"),
+            // 数値: 基数つき（接頭辞は小文字のみ、桁が不正なら文字列）
+            ("-0x1F", "'-0x1F'"),
+            ("+0x1F", "'+0x1F'"),
+            ("-0o17", "'-0o17'"),
+            ("-0b11", "'-0b11'"),
+            ("0x", "0x"),
+            ("0xZZ", "0xZZ"),
+            ("0X1F", "0X1F"),
+            ("0x-1", "0x-1"),
+            ("0x+1", "0x+1"),
+            ("-0x-1", "-0x-1"),
+            ("0o8", "0o8"),
+            ("0b2", "0b2"),
+            // 数値: 無限大・NaN の綴り
+            (".Inf", "'.Inf'"),
+            (".INF", "'.INF'"),
+            ("-.inf", "'-.inf'"),
+            ("+.inf", "'+.inf'"),
+            ("-.Inf", "'-.Inf'"),
+            (".nan", "'.nan'"),
+            (".NAN", "'.NAN'"),
+            ("-.nan", "-.nan"),
+            ("+.nan", "+.nan"),
+            (".Nan", ".Nan"),
+            // 数値: 値域の境界。`serde_yaml` は u128 / i128 / 有限の f64 に収まるものだけを
+            // 数値とみなして quote していたので、収まらないものは quote 無しになる。
+            (
+                "340282366920938463463374607431768211455",
+                "'340282366920938463463374607431768211455'",
+            ),
+            (
+                "340282366920938463463374607431768211456",
+                "'340282366920938463463374607431768211456'",
+            ),
+            ("0xffffffffffffffffffffffffffffffff", "'0xffffffffffffffffffffffffffffffff'"),
+            ("0x1ffffffffffffffffffffffffffffffff", "0x1ffffffffffffffffffffffffffffffff"),
+            ("-0x80000000000000000000000000000000", "'-0x80000000000000000000000000000000'"),
+            ("-0x80000000000000000000000000000001", "-0x80000000000000000000000000000001"),
+            ("1e999", "1e999"),
+            ("-1e999", "-1e999"),
+            ("inf", "inf"),
+            ("-inf", "-inf"),
+            ("nan", "nan"),
+            ("NaN", "NaN"),
+            ("infinity", "infinity"),
+            // indicator の位置による違い
+            (",x", "',x'"),
+            ("]x", "']x'"),
+            ("}x", "'}x'"),
+            ("?", "'?'"),
+            ("#", "'#'"),
+            ("a?", "a?"),
+            ("a-", "a-"),
+            ("a:", "'a:'"),
+            ("a :b", "a :b"),
+            ("a# b", "a# b"),
+            ("a #", "'a #'"),
+            ("x: y: z", "'x: y: z'"),
+            ("...x", "'...x'"),
+            ("---x", "'---x'"),
+            ("..", ".."),
+            ("--", "--"),
+            ("-- -", "-- -"),
+            ("a  b", "a  b"),
+            (" ", "' '"),
+            ("''", "''''''"),
+            ("it's", "it's"),
+            ("a.b@example.com", "a.b@example.com"),
+            (
+                "wdoor+floodgate-300-10F+alice+bob+20260426123456",
+                "wdoor+floodgate-300-10F+alice+bob+20260426123456",
+            ),
+            ("2026-04-26 12:34:56 +09:00", "2026-04-26 12:34:56 +09:00"),
         ];
         for (input, expected) in cases {
             let mut out = String::new();
             push_scalar(&mut out, input);
             assert_eq!(out, expected, "input: {input:?}");
         }
+    }
+
+    /// 改行文字を含む文字列は double quote + エスケープで書く。
+    ///
+    /// ここだけは `serde_yaml` の出力（block scalar、U+2028 / U+2029 は生のまま）と
+    /// 意図して変えているので、新しい形を固定し、読み戻せることを確認する。
+    #[test]
+    fn push_scalar_escapes_line_breaks() {
+        let cases = [
+            ("a\nb", "\"a\\nb\""),
+            ("a\n", "\"a\\n\""),
+            ("\r", "\"\\r\""),
+            ("a\u{2028}b", "\"a\\Lb\""),
+            ("a\u{2029}b", "\"a\\Pb\""),
+        ];
+        for (input, expected) in cases {
+            let mut out = String::new();
+            push_scalar(&mut out, input);
+            assert_eq!(out, expected, "input: {input:?}");
+
+            let mut records = HashMap::new();
+            let mut record = rec(input, 1500, 0, 0);
+            record.last_game_id = Some(GameId::new(input));
+            record.last_modified = input.to_owned();
+            records.insert(input.to_owned(), record);
+            assert_eq!(
+                parse_document(&render_document(&records)).unwrap(),
+                records,
+                "input: {input:?}"
+            );
+        }
+    }
+
+    /// キーを `key:` と `? key` のどちらで書くかの境界（128 byte）を固定する。
+    ///
+    /// 期待値は `serde_yaml` 0.9.34 の実出力に合わせてある。長さは文字数ではなく
+    /// byte 数で数え、quote が要るキーは `? 'key'` の形になる。
+    #[test]
+    fn render_document_switches_to_explicit_key_above_128_bytes() {
+        let cases = [
+            ("k".repeat(128), false, false),
+            ("k".repeat(129), true, false),
+            // 44 文字 / 128 byte
+            ("あ".repeat(42) + "kk", false, false),
+            // 43 文字 / 129 byte
+            ("あ".repeat(43), true, false),
+            ("1".repeat(129), true, true),
+        ];
+        for (name, explicit, quoted) in cases {
+            let mut records = HashMap::new();
+            let mut record = rec(&name, 1500, 0, 0);
+            record.last_game_id = None;
+            records.insert(name.clone(), record);
+
+            let scalar = if quoted {
+                format!("'{name}'")
+            } else {
+                name.clone()
+            };
+            let head = if explicit {
+                format!("? {scalar}\n: :name: {scalar}\n")
+            } else {
+                format!("{scalar}:\n  :name: {scalar}\n")
+            };
+            let expected = format!(
+                "{head}  :rate: 1500\n  :win: 0\n  :loss: 0\n  :last_modified: 2026-04-26T12:34:56+00:00\n"
+            );
+            let yaml = render_document(&records);
+            assert_eq!(yaml, expected, "key length: {}", name.len());
+            assert_eq!(parse_document(&yaml).unwrap(), records, "key length: {}", name.len());
+        }
+    }
+
+    /// quote 無しで書かれた数値・真偽値の形の値も、文字列の項目には文字列として読む
+    /// （手書きのファイルや、名前を quote しない書き手への備え）。`:last_game_id` の
+    /// `~` は未対局（`None`）として読む。
+    #[test]
+    fn parse_document_reads_unquoted_scalars_as_strings() {
+        let yaml = concat!(
+            "12345:\n",
+            "  :name: 12345\n",
+            "  :rate: 1500\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_game_id: 20260426\n",
+            "  :last_modified: 2026-04-26\n",
+            "true:\n",
+            "  :name: true\n",
+            "  :rate: -20\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_game_id: ~\n",
+            "  :last_modified: 1.5\n",
+        );
+        let parsed = parse_document(yaml).unwrap();
+        let numeric = parsed.get("12345").unwrap();
+        assert_eq!(numeric.name.as_str(), "12345");
+        assert_eq!(numeric.last_game_id.as_ref().map(|g| g.as_str()), Some("20260426"));
+        assert_eq!(numeric.last_modified, "2026-04-26");
+        let boolean = parsed.get("true").unwrap();
+        assert_eq!(boolean.name.as_str(), "true");
+        assert_eq!(boolean.rate, -20);
+        assert_eq!(boolean.last_game_id, None);
+        assert_eq!(boolean.last_modified, "1.5");
     }
 
     /// 置き換え前の実装（`serde_yaml` 0.9.34）が書いた `players.yaml` を読める。
