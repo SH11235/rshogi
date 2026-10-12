@@ -104,7 +104,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 | ツール | 説明 |
 |--------|------|
 | `floodgate_pipeline` | Floodgate 棋譜の取得・変換パイプライン（CSA → SFEN → mirror → dedup、`live-mirror --push` で MONITOR2 着手通知を使う当日対局のリアルタイムミラー）。[詳細](floodgate_pipeline.md) |
-| `kifu_publish` | 棋譜を rshogi の棋譜サーバーへ公開（`wdoor`: csa_client の records から Floodgate 対局を ID で取り込み、wdoor に無い局はアーカイブからアップロード / `jsonl`: tournament・csa_client の JSONL を wdoor 形式の CSA に変換してアップロード / `csa`: CSA をそのままアップロード。[詳細](kifu_publish.md)） |
+| `kifu_publish` | 棋譜を rshogi の棋譜サーバーへ公開（`wdoor`: csa_client の records から Floodgate 対局を ID で取り込み、wdoor に無い局はアーカイブからアップロード / `jsonl`: tournament・csa_client の JSONL を wdoor 形式の CSA に変換してアップロード / `csa`: CSA（Shift_JIS 可、ディレクトリ可）をサーバーが読める形に正規化してアップロード / `kif`: 電竜戦の KIF を CSA に変換してアップロード / `event`: イベントの正式名称・公式リンクを登録。[詳細](kifu_publish.md)） |
 | `shogitest_sprt_log_to_csv` | shogitest SPRT ログを Elo・LLR・対局結果の CSV に変換 |
 
 ## パイプライン例

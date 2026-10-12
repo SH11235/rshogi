@@ -697,6 +697,103 @@ describe("miniflare smoke: external kifu import API", () => {
     expect(detailBody.games.map((g) => g.game_id)).toEqual(["g1"]);
   });
 
+  it("stores event meta and attaches it to the event list", async () => {
+    const put = (event: string, body: unknown, token: string | null = ADMIN_TOKEN) =>
+      mf.dispatchFetch(`http://localhost/api/v1/admin/events/${event}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token === null ? {} : { Authorization: `Bearer ${token}` }),
+        },
+        body: JSON.stringify(body),
+      });
+
+    const forbidden = await put("WCSC36", { title: "x" }, null);
+    expect(forbidden.status).toBe(403);
+    await forbidden.arrayBuffer();
+    for (const body of [
+      {},
+      { title: " " },
+      { title: "x", official_url: "javascript:alert(1)" },
+      { title: "x", kifu_source_url: "/kifu/" },
+      { title: "x", official_url: "https://:80" },
+      { title: "x", offical_url: "https://example.org/" },
+      { title: "a\nb" },
+    ]) {
+      const bad = await put("WCSC36", body);
+      expect(bad.status).toBe(400);
+      expect(bad.headers.get("Cache-Control")).toBe("no-store");
+      await bad.arrayBuffer();
+    }
+    const nested = await put("a/b", { title: "x" });
+    expect(nested.status).toBe(400);
+    await nested.arrayBuffer();
+
+    // 対局が 1 つも無い event にも登録できる (棋譜の投入より先に入れられる)。
+    const early = await put("WCSC36", {
+      title: "第36回世界コンピュータ将棋選手権",
+      organizer: "コンピュータ将棋協会",
+      official_url: "https://example.org/wcsc36/",
+      terms_note: "仮の値",
+    });
+    expect(early.status).toBe(200);
+    expect(early.headers.get("Cache-Control")).toBe("no-store");
+    expect(await early.json()).toMatchObject({ event: "WCSC36" });
+    // PUT は全体の置き換え。省略した任意項目は未登録に戻る。
+    const replaced = await put("WCSC36", {
+      title: "第36回世界コンピュータ将棋選手権",
+      organizer: "コンピュータ将棋協会",
+      official_url: "https://example.org/wcsc36/",
+    });
+    expect(replaced.status).toBe(200);
+    await replaced.arrayBuffer();
+    // event は percent-encode した 1 階層で受ける。対局の無い event は一覧に出ない。
+    const encoded = await put(encodeURIComponent("電竜戦 6"), { title: "第6回世界将棋AI電竜戦本戦" });
+    expect(await encoded.json()).toMatchObject({ event: "電竜戦 6" });
+
+    const db = await mf.getD1Database("GAMES_SEARCH_DB");
+    expect(
+      (await db.prepare("SELECT event, title, organizer, terms_note FROM event_meta ORDER BY title").all())
+        .results,
+    ).toEqual([
+      {
+        event: "WCSC36",
+        title: "第36回世界コンピュータ将棋選手権",
+        organizer: "コンピュータ将棋協会",
+        terms_note: null,
+      },
+      { event: "電竜戦 6", title: "第6回世界将棋AI電竜戦本戦", organizer: null, terms_note: null },
+    ]);
+
+    for (const [comment, event] of [
+      ["'a", "WCSC36"],
+      ["'b", "Denryu"],
+    ]) {
+      const res = await upload({ csa: uploadCsa(comment), event });
+      expect(res.status).toBe(200);
+      await res.arrayBuffer();
+    }
+    // メタのある event にだけ meta が付く。既存の 3 項目と並び順は変わらない。
+    const events = await viewerGet("/api/v1/games/events");
+    expect(await events.json()).toEqual({
+      events: [
+        { event: "Denryu", source: "upload", games: 1 },
+        {
+          event: "WCSC36",
+          source: "upload",
+          games: 1,
+          meta: {
+            title: "第36回世界コンピュータ将棋選手権",
+            organizer: "コンピュータ将棋協会",
+            official_url: "https://example.org/wcsc36/",
+            kifu_source_url: null,
+            terms_note: null,
+          },
+        },
+      ],
+    });
+  });
+
   it("serves an empty event list when no game has an event", async () => {
     const empty = await viewerGet("/api/v1/games/events");
     expect(await empty.json()).toEqual({ events: [] });

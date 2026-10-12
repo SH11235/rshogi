@@ -37,6 +37,7 @@ pub mod client_kind;
 pub(crate) mod backfill;
 pub mod config;
 pub mod datetime;
+pub mod event_meta;
 // `export_retry` は finalize_if_ended / handle_export_retry_alarm から消費される
 // 純粋ロジック (RETRY_DELAYS_SEC 等)。ホスト target でも cargo test から到達できる
 // ように `pub mod` で公開する。
@@ -95,6 +96,8 @@ pub mod x1_paths;
 // では展開時に失敗する点に注意。
 pub(crate) mod observability;
 
+#[cfg(target_arch = "wasm32")]
+mod event_meta_api;
 #[cfg(target_arch = "wasm32")]
 mod game_room;
 #[cfg(target_arch = "wasm32")]

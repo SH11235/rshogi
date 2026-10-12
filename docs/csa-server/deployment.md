@@ -560,6 +560,34 @@ jq -n --rawfile csa game.csa '{csa: $csa, event: "WCSC36"}' | curl --fail-with-b
 `GET /api/v1/games/search?source=wdoor,upload&event=WCSC36` のように `source` の複数指定と
 `event` の完全一致で絞り込める。
 
+イベント（大会）の正式名称・主催・公式ページ・棋譜の配布元・利用条件の要約は、D1 の
+`event_meta` テーブル（migration `0006_event_meta.sql`、主キーは `event`）に持つ。登録は
+`PUT /api/v1/admin/events/{event}`（`{event}` は percent-encode した 1 階層。管理トークン必須）。
+
+```bash
+curl --fail-with-body -X PUT \
+  -H "Authorization: Bearer ${ADMIN_API_TOKEN}" -H "Content-Type: application/json" \
+  -d '{"title":"第36回世界コンピュータ将棋選手権","organizer":"...","official_url":"https://...","kifu_source_url":"https://...","terms_note":"..."}' \
+  "${WORKER_URL}/api/v1/admin/events/WCSC36"
+```
+
+- `title` は必須（200 文字まで）。`organizer`（200 文字）、`official_url` / `kifu_source_url`
+  （500 文字、`https://` か `http://` で始まる絶対 URL）、`terms_note`（1000 文字）は任意。
+  制御文字（改行を含む）、長さ超過、それ以外の scheme の URL、ホストが空・壊れている URL
+  （`https://:80`、`https://@`、`https://[broken` など）、ユーザー情報つきの URL
+  （`https://user@example.org/`。公式リンクとして表示する値なので）は 400。本文に知らない項目があるときも
+  400（全体の置き換えなので、項目名の綴り間違いで値が消えるのを防ぐ）。
+- PUT は全体の置き換え。省略した任意項目は未登録（`null`）に戻る。対局が 1 つも無い `event` にも
+  登録できる（棋譜の投入より先に入れてよい）。`event` は `upload` と同じ規則（前後の空白を除く、
+  100 文字まで、制御文字なし）。
+- 登録すると `GET /api/v1/games/events` の同じ `event` の要素（`source` 違いがあれば全部）に
+  `"meta": {"title": ..., "organizer": ..., "official_url": ..., "kifu_source_url": ..., "terms_note": ...}`
+  が付く（未登録の任意項目は `null`）。メタの無い `event` は `meta` キー自体が無い。一覧の件数と
+  並び順は変わらない。60 秒キャッシュなので、反映は最大 60 秒後。
+- `event_meta` を読めないとき（migration 未適用など）は、ログ
+  `games_events_meta_query` を残して `meta` 無しの一覧を返す。
+- CLI からは `kifu_publish event`（`crates/tools/docs/kifu_publish.md`）。
+
 ロールバックの注意: 外部棋譜を取り込んだ後で、この機能より前の Worker に戻すと、旧版の
 レーティング集計は `source` を見ないので外部棋譜の行も読む（集計カーソルより新しい終局時刻の
 行は次回の集計で、古い行は次の全履歴 rebuild で）。外部棋譜の対局者が名前由来の legacy ID で

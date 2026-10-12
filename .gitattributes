@@ -31,3 +31,6 @@ Cargo.lock text eol=lf
 
 # GitHub linguist
 *.md linguist-documentation
+
+# 大会公式棋譜のサンプル (CP932 / CRLF)。byte をそのまま保つ。
+crates/tools/tests/fixtures/kifu_publish/** -text
