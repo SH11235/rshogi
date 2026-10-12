@@ -55,6 +55,7 @@ test("event migration keeps old rows untagged and the event tag query is served 
       "0003_games_search_index_player_ids.sql",
       "0004_player_rating_materialization.sql",
       "0005_games_search_index_event.sql",
+      "0006_event_meta.sql",
     ]) {
       db.exec(file(`migrations/${name}`));
     }

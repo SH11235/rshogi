@@ -48,6 +48,10 @@ pub struct EventTag {
     pub event: String,
     pub source: String,
     pub games: u64,
+    /// 登録済みのイベントメタ。集計 SQL の行には無く、
+    /// [`crate::event_meta::attach_event_meta`] が後から付ける。未登録なら省略する。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<crate::event_meta::EventMeta>,
 }
 
 /// 検索 API の `source` クエリ値 (カンマ区切り) を重複のない値の列に分解する。
@@ -765,6 +769,7 @@ mod tests {
             event: "WCSC36".into(),
             source: "upload".into(),
             games: 123,
+            meta: None,
         };
         assert_eq!(
             serde_json::to_value(&tag).unwrap(),

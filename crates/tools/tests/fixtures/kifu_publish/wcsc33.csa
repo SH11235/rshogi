@@ -1,0 +1,24 @@
+V2.2
+N+あうあう将棋
+N-重力場計算法
+$EVENT:第33回世界コンピュータ将棋選手権一次予選
+$SITE:オンライン
+$START_TIME:2023/05/03 17:36:09
+$END_TIME:2023/05/03 17:36:18
+$TIME_LIMIT:15分＋手番×5秒
+P1-KY-KE-GI-KI-OU-KI-GI-KE-KY
+P2 * -HI *  *  *  *  * -KA * 
+P3-FU-FU-FU-FU-FU-FU-FU-FU-FU
+P4 *  *  *  *  *  *  *  *  * 
+P5 *  *  *  *  *  *  *  *  * 
+P6 *  *  *  *  *  *  *  *  * 
+P7+FU+FU+FU+FU+FU+FU+FU+FU+FU
+P8 * +KA *  *  *  *  * +HI * 
+P9+KY+KE+GI+KI+OU+KI+GI+KE+KY
++
++9796FU,T0
+-4132KI,T3
++4948KI,T0
+-3142GI,T3
++2818HI,T2
+%TORYO,T0

@@ -349,7 +349,7 @@ async fn read_limited(stream: ByteStream, limit: usize) -> Result<Option<Vec<u8>
 
 /// リクエスト本文を上限つきで読み、JSON として decode する。内側の `Err` は
 /// クライアントへ返す 400 / 413 応答。
-async fn read_json_body<T: serde::de::DeserializeOwned>(
+pub(crate) async fn read_json_body<T: serde::de::DeserializeOwned>(
     req: &Request,
     limit: usize,
 ) -> Result<std::result::Result<T, Response>> {

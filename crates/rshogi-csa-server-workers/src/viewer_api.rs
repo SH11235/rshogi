@@ -104,6 +104,7 @@ use worker::{Env, Headers, Method, Request, Response, Result, Url};
 
 use crate::client_kind::normalize_client_kind;
 use crate::config::{ConfigKeys, OriginAllowList, is_viewer_api_enabled};
+use crate::event_meta::{EVENT_META_SELECT_SQL, EventMetaRow, attach_event_meta};
 use crate::games_index::KEY_PREFIX as GAMES_INDEX_PREFIX;
 use crate::games_search_index::{
     DEFAULT_PAGE_SIZE, EVENT_TAGS_SQL, EventTag, MAX_PAGE_SIZE, QueryValue, SEARCH_ROW_COLUMNS,
@@ -155,6 +156,16 @@ pub async fn try_handle(req: &Request, env: &Env) -> Result<Option<Response>> {
                 Ok(Some(crate::kifu_import_api::handle_upload(req, env).await?))
             }
             _ => Ok(None),
+        };
+    }
+
+    if method == Method::Put {
+        let url = req.url()?;
+        return match url.path().strip_prefix("/api/v1/admin/events/") {
+            Some(segment) => {
+                Ok(Some(crate::event_meta_api::handle_put_event_meta(req, env, segment).await?))
+            }
+            None => Ok(None),
         };
     }
 
@@ -773,7 +784,8 @@ async fn handle_search(req: &Request, env: &Env, url: &Url) -> Result<Response> 
     with_cors(response, req, env)
 }
 
-/// イベントタグ一覧ハンドラ。D1 から `(event, source)` ごとの対局数を集計する。
+/// イベントタグ一覧ハンドラ。D1 から `(event, source)` ごとの対局数を集計し、
+/// 登録済みのイベントメタ (`event_meta`) を各要素の `meta` に付ける。
 ///
 /// 検索 API と同じく D1 を直接読み、応答に一覧系と同じ 60 秒の `Cache-Control`
 /// を付ける。
@@ -792,7 +804,7 @@ async fn handle_events(req: &Request, env: &Env) -> Result<Response> {
             return with_cors(no_store_error("Storage error", 502)?, req, env);
         }
     };
-    let events = match db
+    let mut events = match db
         .prepare(EVENT_TAGS_SQL)
         .all()
         .await
@@ -804,6 +816,20 @@ async fn handle_events(req: &Request, env: &Env) -> Result<Response> {
             return with_cors(no_store_error("Storage error", 502)?, req, env);
         }
     };
+    // メタは表示の補足なので、読めないとき (migration 未適用の環境など) は一覧だけ返す。
+    match db
+        .prepare(EVENT_META_SELECT_SQL)
+        .all()
+        .await
+        .and_then(|result| result.results::<EventMetaRow>())
+    {
+        Ok(metas) => attach_event_meta(&mut events, metas),
+        Err(e) => log_viewer_api_failed(
+            "games_events_meta_query",
+            &extract_client_kind(req),
+            &e.to_string(),
+        ),
+    }
     let mut response = Response::from_json(&EventsResponse { events })?;
     set_cache_control(&mut response, CacheableKind::List.cache_control_header())?;
     with_cors(response, req, env)

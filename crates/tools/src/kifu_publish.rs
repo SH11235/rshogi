@@ -6,6 +6,11 @@
 //!   手元の wdoor 版 CSA を本文アップロードする。
 //! - `tournament` / `csa_client` の JSONL は wdoor 形式の CSA に変換して本文アップロード
 //!   する（`POST {api-base}/admin/games/upload`）。
+//! - 大会の公式棋譜アーカイブは、CSA なら [`csa_normalize`] でサーバーが読める形に
+//!   正規化し、電竜戦の KIF なら [`kif_convert`] で CSA に変換して本文アップロードする。
+//!   文字コードは UTF-8 でなければ Shift_JIS として読む（[`cp932`]）。
+//! - イベント（大会）の正式名称や公式リンクは `PUT {api-base}/admin/events/{event}` で
+//!   登録する。
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
@@ -30,6 +35,56 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::common::floodgate::http_client_builder;
+
+pub mod cp932;
+pub mod csa_normalize;
+pub mod kif_convert;
+
+/// 棋譜を送らない理由。変換・正規化の段階で決まるもの。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rejection {
+    /// 取り込みの対象外 (開始時刻が無い、指し手が無い、平手でない)。中身は理由。
+    Excluded(&'static str),
+    /// 変換できなかった。`reason` は集計用の分類、`detail` は該当箇所。
+    Failed {
+        /// 集計用の分類。
+        reason: &'static str,
+        /// 該当する行など。
+        detail: String,
+    },
+}
+
+/// 棋譜ファイルを文字列として読む。UTF-8 でなければ Shift_JIS (CP932) として読む。
+pub fn read_kifu_text(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("読めません: {}", path.display()))?;
+    cp932::decode_kifu_bytes(&bytes).with_context(|| format!("読めません: {}", path.display()))
+}
+
+/// `input` がファイルならそれ 1 つ、ディレクトリなら配下 (サブディレクトリを含む) の
+/// 拡張子 `extension` のファイルを、ファイル名順に返す。
+///
+/// `._` で始まるファイル (macOS が ZIP に入れるリソースフォーク) は無視する。パスは
+/// すべてメモリに持つ。入力は 1 大会の棋譜アーカイブ (数百局) で、1 件 200 バイト程度。
+pub fn collect_kifu_files(input: &Path, extension: &str) -> Result<Vec<PathBuf>> {
+    if !input.is_dir() {
+        return Ok(vec![input.to_path_buf()]);
+    }
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(input).sort_by_file_name() {
+        let entry = entry.with_context(|| format!("読めません: {}", input.display()))?;
+        let name = entry.file_name().to_string_lossy();
+        let matches = entry.file_type().is_file()
+            && !name.starts_with("._")
+            && entry
+                .path()
+                .extension()
+                .is_some_and(|found| found.eq_ignore_ascii_case(extension));
+        if matches {
+            files.push(entry.into_path());
+        }
+    }
+    Ok(files)
+}
 
 /// 管理トークンを読む環境変数名。
 pub const ADMIN_TOKEN_ENV: &str = "RSHOGI_ADMIN_TOKEN";
@@ -481,6 +536,25 @@ struct ImportWdoorRequest<'a> {
     force: bool,
 }
 
+/// イベント (大会) のメタデータ。`PUT admin/events/{event}` の本文。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EventMeta {
+    /// 正式名称。
+    pub title: String,
+    /// 主催。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organizer: Option<String>,
+    /// 大会の公式ページ。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub official_url: Option<String>,
+    /// 棋譜の配布元ページ。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kifu_source_url: Option<String>,
+    /// 利用条件の要約。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terms_note: Option<String>,
+}
+
 #[derive(Serialize)]
 struct UploadRequest<'a> {
     csa: &'a str,
@@ -577,16 +651,39 @@ impl ApiClient {
         parse_imported(status, &body)
     }
 
+    /// イベントのメタデータを登録・更新する。対局がまだ無い `event` にも登録できる。
+    pub fn put_event_meta(&self, event: &str, meta: &EventMeta) -> Result<()> {
+        // `event` は path の 1 階層として percent-encode する (`/` や日本語を含んでよい)。
+        let mut url = Url::parse(&self.api_base)
+            .with_context(|| format!("API のベース URL が不正です: {}", self.api_base))?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("API のベース URL が不正です: {}", self.api_base))?
+            .extend(["admin", "events", event]);
+        let (status, body) = self.send(self.client.put(url.as_str()), url.as_str(), meta)?;
+        if !status.is_success() {
+            let snippet: String = body.chars().take(200).collect();
+            bail!("HTTP {status}: {}", snippet.trim());
+        }
+        Ok(())
+    }
+
     fn post(&self, path: &str, request: &impl Serialize) -> Result<(StatusCode, String)> {
         let url = format!("{}/{path}", self.api_base);
-        let response = self
-            .client
-            .post(&url)
+        self.send(self.client.post(&url), &url, request)
+    }
+
+    fn send(
+        &self,
+        builder: reqwest::blocking::RequestBuilder,
+        url: &str,
+        request: &impl Serialize,
+    ) -> Result<(StatusCode, String)> {
+        let response = builder
             .bearer_auth(&self.token)
             .header(CONTENT_TYPE, "application/json")
             .body(serde_json::to_string(request)?)
             .send()
-            .with_context(|| format!("POST {url}"))?;
+            .with_context(|| format!("送信できません: {url}"))?;
         let status = response.status();
         let body = response.text().with_context(|| format!("応答を読めません: {url}"))?;
         Ok((status, body))
@@ -610,6 +707,8 @@ pub struct Tally {
     pub skipped: u32,
     /// 失敗した局数。
     pub failed: u32,
+    /// 送る前に対象外にした局数（開始時刻が無い・指し手が無い・平手でない）。
+    pub excluded: u32,
 }
 
 impl Tally {
@@ -617,6 +716,12 @@ impl Tally {
     pub fn fail(&mut self, label: &str, err: &anyhow::Error) {
         self.failed += 1;
         eprintln!("failed  {label}: {err:#}");
+    }
+
+    /// 対象外を 1 件数え、標準エラーに記録する。
+    pub fn exclude(&mut self, label: &str, reason: &str) {
+        self.excluded += 1;
+        eprintln!("skipped {label}: {reason}");
     }
 
     fn record(&mut self, label: &str, result: Result<Imported>) {
@@ -1326,9 +1431,98 @@ T2\n\
 
     #[derive(Debug, Clone)]
     struct Recorded {
+        method: String,
         path: String,
         authorization: Option<String>,
         body: serde_json::Value,
+    }
+
+    #[test]
+    fn event_meta_is_put_to_an_encoded_path_with_only_given_fields() {
+        let (api_base, requests) = spawn_mock_api(|request| {
+            if request.body["title"] == "bad" {
+                (400, "official_url must be an absolute https:// or http:// URL".to_owned())
+            } else {
+                (200, r#"{"event":"x","updated_at_ms":1}"#.to_owned())
+            }
+        });
+        let api = ApiClient::new(&api_base, "secret-token".to_owned()).unwrap();
+        let mut meta = EventMeta {
+            title: "第6回世界将棋AI電竜戦本戦".to_owned(),
+            organizer: None,
+            official_url: Some("https://example.org/dr6/".to_owned()),
+            kifu_source_url: None,
+            terms_note: None,
+        };
+        api.put_event_meta("電竜戦6 A/B級", &meta).unwrap();
+        meta.title = "bad".to_owned();
+        let err = api.put_event_meta("WCSC35", &meta).unwrap_err();
+        assert!(format!("{err:#}").contains("HTTP 400"), "{err:#}");
+        assert!(format!("{err:#}").contains("official_url must be"), "{err:#}");
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0].method, "PUT");
+        // 空白・`/`・日本語は 1 階層のまま percent-encode される。
+        assert_eq!(
+            requests[0].path,
+            "/api/v1/admin/events/%E9%9B%BB%E7%AB%9C%E6%88%A66%20A%2FB%E7%B4%9A"
+        );
+        assert_eq!(requests[0].authorization.as_deref(), Some("Bearer secret-token"));
+        assert_eq!(
+            requests[0].body,
+            serde_json::json!({
+                "title": "第6回世界将棋AI電竜戦本戦",
+                "official_url": "https://example.org/dr6/",
+            })
+        );
+        assert_eq!(requests[1].path, "/api/v1/admin/events/WCSC35");
+    }
+
+    #[test]
+    fn kifu_files_are_collected_recursively_in_name_order_without_mac_junk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::create_dir_all(root.join("__MACOSX")).unwrap();
+        for name in [
+            "z.csa",
+            "a.CSA",
+            "b/c.csa",
+            "note.txt",
+            "x.kif",
+            "__MACOSX/._a.csa",
+            "._z.csa",
+        ] {
+            std::fs::write(root.join(name), "x").unwrap();
+        }
+        let relative = |files: Vec<PathBuf>| -> Vec<String> {
+            files
+                .iter()
+                .map(|path| path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
+                .collect()
+        };
+        assert_eq!(
+            relative(collect_kifu_files(root, "csa").unwrap()),
+            ["a.CSA", "b/c.csa", "z.csa"]
+        );
+        assert_eq!(relative(collect_kifu_files(root, "kif").unwrap()), ["x.kif"]);
+        // ファイルを直接指定したときは拡張子を問わない。
+        let single = root.join("note.txt");
+        assert_eq!(collect_kifu_files(&single, "csa").unwrap(), [single]);
+    }
+
+    #[test]
+    fn kifu_text_is_read_as_utf8_or_shift_jis() {
+        let dir = tempfile::tempdir().unwrap();
+        let utf8 = dir.path().join("utf8.csa");
+        std::fs::write(&utf8, "N+水匠\n").unwrap();
+        let sjis = dir.path().join("sjis.csa");
+        std::fs::write(&sjis, [b'N', b'+', 0x90, 0x85, 0x8F, 0xA0, b'\r', b'\n']).unwrap();
+        assert_eq!(read_kifu_text(&utf8).unwrap(), "N+水匠\n");
+        assert_eq!(read_kifu_text(&sjis).unwrap(), "N+水匠\r\n");
+        let broken = dir.path().join("broken.csa");
+        std::fs::write(&broken, [0x80, 0xFF]).unwrap();
+        assert!(format!("{:#}", read_kifu_text(&broken).unwrap_err()).contains("Shift_JIS"));
     }
 
     /// ローカルのモック API サーバー。受けたリクエストを記録し、`respond` の返す
@@ -1357,7 +1551,7 @@ T2\n\
         let mut request_line = String::new();
         reader.read_line(&mut request_line).unwrap();
         let mut parts = request_line.split_whitespace();
-        assert_eq!(parts.next(), Some("POST"));
+        let method = parts.next().unwrap().to_owned();
         let path = parts.next().unwrap().to_owned();
         let mut content_length = 0usize;
         let mut authorization = None;
@@ -1378,6 +1572,7 @@ T2\n\
         let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body).unwrap();
         Recorded {
+            method,
             path,
             authorization,
             body: serde_json::from_slice(&body).unwrap(),
@@ -1450,6 +1645,7 @@ T2\n\
                 created: 2,
                 skipped: 1,
                 failed: 2,
+                excluded: 0,
             }
         );
 
@@ -1492,6 +1688,7 @@ T2\n\
                 created: 0,
                 skipped: 0,
                 failed: 1,
+                excluded: 0,
             }
         );
         assert_eq!(requests.lock().unwrap().len(), 1);
@@ -1530,6 +1727,7 @@ T2\n\
                 created: 1,
                 skipped: 1,
                 failed: 1,
+                excluded: 0,
             }
         );
         let requests = requests.lock().unwrap();
