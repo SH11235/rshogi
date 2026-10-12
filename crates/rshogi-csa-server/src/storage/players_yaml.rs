@@ -38,9 +38,14 @@
 //!   設定でも外せないため、上記の「quote 無し」の形式を保てない。
 //!
 //! 出力は、以前使っていた `serde_yaml` 0.9 の出力とバイト単位で一致させてある
-//! （どの文字列を quote するかの規則は `push_scalar` を参照）。例外は改行文字
-//! （LF / CR / U+0085 / U+2028 / U+2029）を含む文字列だけで、block scalar や
-//! explicit key ではなく double quote + エスケープで書く。
+//! （どの文字列を quote するかの規則は `push_scalar` を参照）。例外は次の 2 つ:
+//!
+//! - 改行文字（LF / CR / U+0085 / U+2028 / U+2029）を含む文字列は、block scalar や
+//!   explicit key ではなく double quote + エスケープで書く。
+//! - プレイヤ名と `:last_game_id` は、Ruby の YAML ローダーが文字列以外の型に読む形
+//!   （`yes`、`1_000`、`:foo`、`2026-04-26` など）なら quote する。`serde_yaml` は
+//!   YAML 1.2 の規則でしか quote しないので、こうした名前は Ruby 側で真偽値や数値に
+//!   化けていた（`push_text` を参照）。`<<` という名前のキーには `!!str` タグを付ける。
 //!
 //! 読み込みは `serde_yaml` が書いたファイルをそのまま読める。ただし U+2028 / U+2029
 //! を含む文字列だけは別で、`serde_yaml` はこれを改行として生のまま書いていたが、
@@ -333,29 +338,49 @@ fn render_document(records: &HashMap<String, PlayerRateRecord>) -> String {
         records.iter().map(|(k, v)| (k.as_str(), v)).collect();
     let mut out = String::new();
     for (key, record) in sorted {
-        if key.len() <= MAX_IMPLICIT_KEY_BYTES {
-            push_scalar(&mut out, key);
+        if key == "<<" {
+            // Ruby は `<<` というキーを、quote してあっても merge key として扱い、値の
+            // mapping を親に展開する。文字列だと明示するタグを付けたときだけ通常のキーに
+            // なる。
+            out.push_str("!!str <<:\n  :name: ");
+        } else if key.len() <= MAX_IMPLICIT_KEY_BYTES {
+            push_text(&mut out, key);
             out.push_str(":\n  :name: ");
         } else {
             out.push_str("? ");
-            push_scalar(&mut out, key);
+            push_text(&mut out, key);
             out.push_str("\n: :name: ");
         }
-        push_scalar(&mut out, record.name.as_str());
+        push_text(&mut out, record.name.as_str());
         out.push_str(&format!(
             "\n  :rate: {}\n  :win: {}\n  :loss: {}\n",
             record.rate, record.wins, record.losses
         ));
         if let Some(game_id) = &record.last_game_id {
             out.push_str("  :last_game_id: ");
-            push_scalar(&mut out, game_id.as_str());
+            push_text(&mut out, game_id.as_str());
             out.push('\n');
         }
+        // `:last_modified` は時刻として読まれてよい（Ruby 側では Time になる）ので、
+        // `push_text` ではなく `push_scalar` で quote 無しのまま書く。
         out.push_str("  :last_modified: ");
         push_scalar(&mut out, &record.last_modified);
         out.push('\n');
     }
     out
+}
+
+/// プレイヤ名や game id のように、読み手に必ず文字列として読まれるべき値を書く。
+///
+/// [`push_scalar`] の規則に加えて、Ruby の YAML ローダーが文字列以外の型に読む形
+/// （[`ruby_may_read_as_non_string`]）も single quote する。quote してあれば Ruby は
+/// 常に String として読む。
+fn push_text(out: &mut String, s: &str) {
+    if is_plain(s) && ruby_may_read_as_non_string(s) {
+        push_single_quoted(out, s);
+    } else {
+        push_scalar(out, s);
+    }
 }
 
 /// 文字列 1 つを YAML の scalar として `out` に書く。
@@ -374,13 +399,72 @@ fn push_scalar(out: &mut String, s: &str) {
             push_double_quoted_char(out, c);
         }
         out.push('"');
-    } else if s.is_empty() || resolves_to_non_string(s) || !plain_allowed(s) {
-        out.push('\'');
-        out.push_str(&s.replace('\'', "''"));
-        out.push('\'');
-    } else {
+    } else if is_plain(s) {
         out.push_str(s);
+    } else {
+        push_single_quoted(out, s);
     }
+}
+
+/// [`push_scalar`] が quote 無しで書く文字列か。
+fn is_plain(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(needs_escape) && !resolves_to_non_string(s) && plain_allowed(s)
+}
+
+fn push_single_quoted(out: &mut String, s: &str) {
+    out.push('\'');
+    out.push_str(&s.replace('\'', "''"));
+    out.push('\'');
+}
+
+/// quote 無しで書くと、Ruby の YAML ローダー（Psych）が文字列以外の型に読みうる形か。
+///
+/// Ruby は YAML 1.1 寄りの規則で型を推測するので、YAML 1.2 では文字列でしかない形も
+/// 別の型になる。Psych の規則そのものではなく、それを含む広めの判定にしてある
+/// （Psych の版による差を吸収するため。余分に quote しても、読まれる値は変わらない）:
+///
+/// - 真偽値・nil: `yes` / `no` / `on` / `off` / `true` / `false` / `null` など
+///   （大文字小文字を問わない）
+/// - Symbol: `:` 始まり
+/// - 日付・時刻: `2026-04-26` で始まる形
+/// - 数値: `1_000` / `1,000`（区切りつき）、`1:30`（60 進）、`.5`、値域を超える 16 進
+///   表記など。数字か `.` で始まり、数値に現れる文字だけでできているもの
+fn ruby_may_read_as_non_string(s: &str) -> bool {
+    const KEYWORDS: [&str; 9] = ["y", "n", "yes", "no", "on", "off", "true", "false", "null"];
+    if KEYWORDS.iter().any(|k| s.eq_ignore_ascii_case(k)) || s.starts_with(':') {
+        return true;
+    }
+    let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if unsigned.eq_ignore_ascii_case(".inf") || unsigned.eq_ignore_ascii_case(".nan") {
+        return true;
+    }
+    starts_with_date(unsigned) || {
+        let mut prev = None;
+        unsigned.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+            && unsigned.chars().all(|c| {
+                // 符号は指数の直後（`1e+5`）にだけ現れる。`20260426-001` のような
+                // game id はここで数値から外れる。
+                let ok = c.is_ascii_hexdigit()
+                    || matches!(c, '_' | ',' | '.' | ':' | 'x')
+                    || (matches!(c, '+' | '-') && matches!(prev, Some('e' | 'E')));
+                prev = Some(c);
+                ok
+            })
+    }
+}
+
+/// `YYYY-M-D`（月・日は 1〜2 桁）で始まるか。
+fn starts_with_date(s: &str) -> bool {
+    let mut parts = s.splitn(3, '-');
+    let (Some(year), Some(month), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let all_digits = |t: &str| t.bytes().all(|b| b.is_ascii_digit());
+    year.len() == 4
+        && all_digits(year)
+        && matches!(month.len(), 1 | 2)
+        && all_digits(month)
+        && rest.starts_with(|c: char| c.is_ascii_digit())
 }
 
 /// double quote の中でエスケープして書く必要がある文字か。
@@ -1318,8 +1402,8 @@ mod tests {
     ///
     /// fixture は旧実装の実出力そのまま。数字だけの名前の quote、空文字列、`<<` という
     /// 名前、改行入りの名前（explicit key + block scalar）、129 byte の名前（explicit
-    /// key）、空白区切りの時刻を含む。読んだ結果を書き戻すと、改行入りのレコード以外は
-    /// 旧実装と同じバイト列になることも確認する。
+    /// key）、空白区切りの時刻を含む。読んだ結果を書き戻すと、`<<` と改行入りの
+    /// レコード以外は旧実装と同じバイト列になることも確認する。
     #[test]
     fn parse_document_reads_file_written_by_serde_yaml() {
         let long = "n".repeat(129);
@@ -1410,7 +1494,8 @@ mod tests {
         let mut parsed = parse_document(&written_by_serde_yaml).unwrap();
         assert_eq!(parsed, expected);
 
-        // 改行入りのレコードだけは書き出しの形が旧実装と違う（意図した差）。
+        // 書き戻すと、`<<` という名前（`!!str` タグを付ける）と改行入りのレコード
+        // （double quote + エスケープ）だけ旧実装と形が違う。どちらも意図した差。
         let rendered_multiline = concat!(
             "\"a\\nb\":\n",
             "  :name: \"a\\nb\"\n",
@@ -1422,13 +1507,114 @@ mod tests {
         );
         assert_eq!(
             render_document(&parsed),
-            format!("{numeric_and_merge}{rendered_multiline}{rest}")
+            format!(
+                "{}{rendered_multiline}{rest}",
+                numeric_and_merge.replace("<<:\n", "!!str <<:\n")
+            )
         );
         assert_eq!(parse_document(&render_document(&parsed)).unwrap(), expected);
 
         // 残りは旧実装の出力とバイト一致する。
         parsed.remove("a\nb");
-        assert_eq!(render_document(&parsed), format!("{numeric_and_merge}{rest}"));
+        parsed.remove("<<");
+        assert_eq!(
+            render_document(&parsed),
+            format!("{}{rest}", numeric_and_merge.split("<<:\n").next().unwrap())
+        );
+    }
+
+    /// プレイヤ名と game id は、Ruby の YAML ローダーが文字列以外の型に読む形なら
+    /// quote する（`serde_yaml` は quote していなかった）。それ以外は quote しない。
+    #[test]
+    fn push_text_quotes_what_ruby_reads_as_non_string() {
+        let cases = [
+            // 真偽値・nil（大文字小文字を問わない）
+            ("yes", "'yes'"),
+            ("Yes", "'Yes'"),
+            ("NO", "'NO'"),
+            ("on", "'on'"),
+            ("oFF", "'oFF'"),
+            ("y", "'y'"),
+            ("N", "'N'"),
+            ("tRUE", "'tRUE'"),
+            ("nULL", "'nULL'"),
+            // Symbol
+            (":foo", "':foo'"),
+            // 日付・時刻
+            ("2026-04-26", "'2026-04-26'"),
+            ("2026-4-6", "'2026-4-6'"),
+            ("2026-04-26T12:34:56+00:00", "'2026-04-26T12:34:56+00:00'"),
+            ("2026-04-26 12:34:56 +09:00", "'2026-04-26 12:34:56 +09:00'"),
+            // 数値: 区切りつき・60 進・値域を超える 16 進・綴り違いの無限大 / NaN
+            ("1_000", "'1_000'"),
+            ("1,000", "'1,000'"),
+            ("-1_000", "'-1_000'"),
+            ("1_000.5", "'1_000.5'"),
+            ("1:30", "'1:30'"),
+            ("1:30:45.5", "'1:30:45.5'"),
+            ("0_7", "'0_7'"),
+            ("0x_1F", "'0x_1F'"),
+            ("0x1ffffffffffffffffffffffffffffffff", "'0x1ffffffffffffffffffffffffffffffff'"),
+            (".iNf", "'.iNf'"),
+            ("-.INF", "'-.INF'"),
+            (".nAn", "'.nAn'"),
+            // `push_scalar` の規則ですでに quote されるものはそのまま
+            ("12345", "'12345'"),
+            ("true", "'true'"),
+            ("", "''"),
+            ("a\tb", "\"a\\tb\""),
+            // 文字列としてしか読まれないものは quote しない
+            ("alice", "alice"),
+            ("田中太郎", "田中太郎"),
+            ("player_1", "player_1"),
+            ("yesman", "yesman"),
+            ("20260426-001", "20260426-001"),
+            ("2ch_bot", "2ch_bot"),
+            ("3gatsu", "3gatsu"),
+            ("x1_000", "x1_000"),
+            ("a:b", "a:b"),
+            ("<<", "<<"),
+            (
+                "wdoor+floodgate-300-10F+alice+bob+20260426123456",
+                "wdoor+floodgate-300-10F+alice+bob+20260426123456",
+            ),
+        ];
+        for (input, expected) in cases {
+            let mut out = String::new();
+            push_text(&mut out, input);
+            assert_eq!(out, expected, "input: {input:?}");
+        }
+    }
+
+    /// プレイヤ名と `:last_game_id` には Ruby 向けの quote を掛け、`:last_modified` の
+    /// 時刻は quote 無しのまま書く。`<<` という名前は `!!str` タグつきのキーにする。
+    #[test]
+    fn render_document_quotes_names_but_not_last_modified() {
+        let mut records = HashMap::new();
+        for (name, game_id) in [("yes", "2026-04-26"), ("<<", "1_000")] {
+            let mut record = rec(name, 1500, 0, 0);
+            record.last_game_id = Some(GameId::new(game_id));
+            records.insert(name.to_owned(), record);
+        }
+        let yaml = render_document(&records);
+        let expected = concat!(
+            "!!str <<:\n",
+            "  :name: <<\n",
+            "  :rate: 1500\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_game_id: '1_000'\n",
+            "  :last_modified: 2026-04-26T12:34:56+00:00\n",
+            "'yes':\n",
+            "  :name: 'yes'\n",
+            "  :rate: 1500\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_game_id: '2026-04-26'\n",
+            "  :last_modified: 2026-04-26T12:34:56+00:00\n",
+        );
+        assert_eq!(yaml, expected);
+        assert_eq!(parse_document(&yaml).unwrap(), records);
     }
 
     /// Ruby の `YAML.dump` が書く形（`---` 始まり、未知のキーあり）を読める。
