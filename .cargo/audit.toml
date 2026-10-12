@@ -1,0 +1,12 @@
+# `cargo audit` の設定（CI の Security Audit job が読む）。
+#
+# ignore には「脆弱性ではない通知」だけを、理由と外す条件つきで載せる。
+
+[advisories]
+ignore = [
+    # unsafe-libyaml のメンテ終了通知（informational = unmaintained。既知の脆弱性ではない）。
+    # serde_yaml 経由で `rshogi-csa-server` の `storage::players_yaml`（サーバーが自分で
+    # 管理する players.yaml の読み書き、`tokio-transport` feature 配下）だけが使う。
+    # serde_yaml を別の YAML 実装へ置き換えたら、この行を外す。
+    "RUSTSEC-2024-0449",
+]
