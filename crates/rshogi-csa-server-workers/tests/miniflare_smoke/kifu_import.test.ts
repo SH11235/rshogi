@@ -716,6 +716,8 @@ describe("miniflare smoke: external kifu import API", () => {
       { title: " " },
       { title: "x", official_url: "javascript:alert(1)" },
       { title: "x", kifu_source_url: "/kifu/" },
+      { title: "x", official_url: "https://:80" },
+      { title: "x", offical_url: "https://example.org/" },
       { title: "a\nb" },
     ]) {
       const bad = await put("WCSC36", body);

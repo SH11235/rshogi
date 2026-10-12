@@ -43,6 +43,12 @@ const REASON_MOVE_NUMBER: &str = "手数が連続していない";
 const REASON_UNKNOWN_END: &str = "未対応の終局表記";
 const REASON_NO_WINNER: &str = "反則負けの勝者が まで 行から分からない";
 const REASON_RESULT_MISMATCH: &str = "勝敗が まで 行と食い違う";
+const REASON_AFTER_END: &str = "終局の手の後に指し手が続く";
+const REASON_MOVE_COUNT: &str = "手数が まで 行と合わない";
+
+/// `まで84手で後手の勝ち` の手数。
+static MADE_COUNT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^まで([0-9]+)手").expect("固定の正規表現"));
 
 /// 指し手行: `<手数> <指し手> ( m:ss/累計)`。累計は空のことがある (`( 0:00/)`)。
 static MOVE_LINE: LazyLock<Regex> = LazyLock::new(|| {
@@ -248,6 +254,8 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
     let mut moves_count = 0_u32;
     let mut last_dest = None;
     let mut terminal: Option<&str> = None;
+    // 終局の手の KIF での表記 (`投了` など)。
+    let mut terminal_text: Option<&str> = None;
 
     for line in text.lines() {
         let line = line.trim_end();
@@ -276,13 +284,12 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
             }
             continue;
         }
-        if terminal.is_some() {
-            // 終局の手の後ろ (2 行目の `入玉宣言` など) は読まない。
-            continue;
-        }
         if let Some(found) = EVAL_COMMENT.captures(line) {
-            // 指し手の前のコメント、数値でない評価値は落とす。
-            if let (Some(dest), Ok(value)) = (last_dest, found[1].parse::<i64>()) {
+            // 指し手の前のコメント、数値でない評価値は落とす。終局の手の後ろのコメントも
+            // 付け先の指し手が無いので落とす。
+            if terminal.is_none()
+                && let (Some(dest), Ok(value)) = (last_dest, found[1].parse::<i64>())
+            {
                 let pv = convert_pv(found.get(2).map_or("", |pv| pv.as_str()), dest);
                 let mut comment = format!("'** {value}");
                 for mv in pv {
@@ -300,6 +307,16 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
             return Err(failed(REASON_BAD_MOVE, line));
         };
         let move_text = found.get(2).map_or("", |m| m.as_str());
+        if let Some(terminal_text) = terminal_text {
+            // 終局の手の後ろに来てよいのは、宣言の行の重複 (実データでは `入玉宣言` /
+            // `入玉勝ち` が 2 行続く) だけ。指し手や別の終局表記が続く棋譜は、どこまでが
+            // 対局なのか決められないので変換しない。
+            if matches!(terminal_text, "入玉宣言" | "入玉勝ち") && move_text == terminal_text
+            {
+                continue;
+            }
+            return Err(failed(REASON_AFTER_END, line));
+        }
         if found[1].parse::<u32>().ok() != Some(moves_count + 1) {
             return Err(failed(REASON_MOVE_NUMBER, line));
         }
@@ -343,6 +360,7 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
             }
             _ => return Err(failed(REASON_UNKNOWN_END, move_text)),
         });
+        terminal_text = Some(move_text);
     }
 
     if handicap.is_some_and(|handicap| handicap != "平手") {
@@ -359,8 +377,15 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
     else {
         return Err(failed(REASON_BAD_HEADER, ""));
     };
-    // 終局の手が無い棋譜 (接続切れなど) は中断として記録する。
-    let special = terminal.unwrap_or("CHUDAN");
+    let special = match (terminal, made_line) {
+        (Some(special), _) => special,
+        // 終局の手も `まで` 行も無い棋譜 (接続切れなど) は中断として記録する。
+        (None, None) => "CHUDAN",
+        // `まで` 行で結果が書かれているのに終局の手が無い。中断として送ると結果が消える。
+        (None, Some(made_line)) => {
+            return Err(failed(REASON_RESULT_MISMATCH, format!("終局の手が無い / {made_line}")));
+        }
+    };
     // 平手の先手番から始まるので、偶数手を指した後は先手番。
     if let (Some(expected), Some(converted)) =
         (made_outcome, outcome_from_special(special, moves_count.is_multiple_of(2)))
@@ -370,6 +395,18 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
             REASON_RESULT_MISMATCH,
             format!("%{special} ({moves_count} 手) / {}", made_line.unwrap_or("")),
         ));
+    }
+    // `まで N手で…` の N は指し手の数。入玉の宣言だけは宣言の行も 1 手に数える
+    // (電竜戦 第 2〜6 回の全棋譜でこの数え方)。
+    if let Some(made_line) = made_line {
+        let expected_count = moves_count + u32::from(special == "KACHI");
+        let stated = MADE_COUNT.captures(made_line).and_then(|found| found[1].parse::<u32>().ok());
+        if stated != Some(expected_count) {
+            return Err(failed(
+                REASON_MOVE_COUNT,
+                format!("指し手 {moves_count} 手 (%{special}) / {made_line}"),
+            ));
+        }
     }
 
     let mut csa = format!("V2.2\nN+{black}\nN-{white}\n");
@@ -713,6 +750,82 @@ mod tests {
     }
 
     #[test]
+    fn moves_after_the_end_are_not_silently_cut_off() {
+        let one = " 1 ７六歩(77)           ( 0:03/00:00:03)\n";
+        // 終局の手の後に指し手が続く。最初の投了までで切ると 1 手・先手勝ちの棋譜になって
+        // しまうので、変換しない。
+        let continued = format!(
+            "{one} 2 投了 ( 0:00/)\n 3 ３四歩(33) ( 0:01/)\n 4 ２六歩(27) ( 0:01/)\n 5 投了 ( 0:00/)\n"
+        );
+        assert_eq!(
+            reason(kif_to_csa(&kif("", &continued, "まで3手で先手の勝ち\n"))),
+            REASON_AFTER_END
+        );
+        // 別の終局表記が続く、宣言以外の終局表記が重複する場合も同じ。
+        for tail in [
+            " 2 投了 ( 0:00/)\n 3 切れ負け ( 0:00/)\n",
+            " 2 投了 ( 0:00/)\n 3 投了 ( 0:00/)\n",
+            " 2 入玉宣言 ( 0:00/)\n 3 入玉勝ち ( 0:00/)\n",
+            " 2 入玉宣言 ( 0:00/)\n 3 ３四歩(33) ( 0:00/)\n",
+        ] {
+            assert_eq!(
+                reason(kif_to_csa(&kif("", &format!("{one}{tail}"), ""))),
+                REASON_AFTER_END,
+                "{tail}"
+            );
+        }
+        // 宣言の行の重複と、終局後のコメントは許す。
+        let declared = format!(
+            "{one} 2 入玉勝ち ( 0:00/)\n**対局 評価値 100000 読み筋 \n 3 入玉勝ち ( 0:00/)\n*コメント\n"
+        );
+        let csa = kif_to_csa(&kif("", &declared, "まで2手で入玉勝ち\n")).unwrap();
+        assert!(csa.ends_with("+7776FU,T3\n%KACHI\n'まで2手で入玉勝ち\n"), "{csa}");
+    }
+
+    #[test]
+    fn move_count_must_match_the_made_line() {
+        let one = " 1 ７六歩(77)           ( 0:03/00:00:03)\n";
+        for (moves, made) in [
+            (format!("{TWO_MOVES} 3 投了 ( 0:00/)\n"), "まで3手で後手の勝ち"),
+            (format!("{TWO_MOVES} 3 投了 ( 0:00/)\n"), "まで1手で後手の勝ち"),
+            (format!("{TWO_MOVES} 3 千日手 ( 0:00/)\n"), "まで3手で千日手"),
+            // 宣言は宣言の行も 1 手に数える (1 手指して 2 手目に宣言なら「まで2手」)。
+            (format!("{one} 2 入玉宣言 ( 0:00/)\n"), "まで1手で入玉宣言"),
+            (format!("{one} 2 入玉宣言 ( 0:00/)\n"), "まで3手で入玉宣言"),
+            (format!("{TWO_MOVES} 3 投了 ( 0:00/)\n"), "までで後手の勝ち"),
+        ] {
+            assert_eq!(
+                reason(kif_to_csa(&kif("", &moves, &format!("{made}\n")))),
+                REASON_MOVE_COUNT,
+                "{made}"
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_result_without_an_end_move_is_not_sent_as_interrupted() {
+        // 終局の手が無いのに `まで` 行に結果がある。`%CHUDAN` にすると結果が消える。
+        for made in [
+            "まで2手で後手の勝ち",
+            "まで2手で千日手",
+            "まで2手で持将棋により引分け",
+            "まで2手で入玉宣言",
+        ] {
+            assert_eq!(
+                reason(kif_to_csa(&kif("*終局理由：投了\n", TWO_MOVES, &format!("{made}\n")))),
+                REASON_RESULT_MISMATCH,
+                "{made}"
+            );
+        }
+        // 結果の書かれていない中断 (`まで` 行なし) は `%CHUDAN`。
+        for end_reason in ["接続切れ", "非合法手", ""] {
+            let header = format!("*終局理由：{end_reason}\n");
+            let csa = kif_to_csa(&kif(&header, TWO_MOVES, "")).unwrap();
+            assert!(csa.ends_with("-3334FU,T61\n%CHUDAN\n"), "{csa}");
+        }
+    }
+
+    #[test]
     fn games_outside_the_scope_are_excluded() {
         assert_eq!(
             kif_to_csa(&kif("*終局理由：\n", "", "")),
@@ -740,7 +853,7 @@ mod tests {
                 include_str!("../../tests/golden/kifu_publish/dr6.csa"),
             ),
         ] {
-            let text = decode_kifu_bytes(kif).unwrap();
+            let (text, _) = decode_kifu_bytes(kif).unwrap();
             let csa = kif_to_csa(&text).unwrap();
             assert_eq!(csa, golden);
             // 同じ入力からは必ず同じ本文 (対局 ID は本文の SHA-256)。

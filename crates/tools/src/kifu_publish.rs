@@ -54,8 +54,9 @@ pub enum Rejection {
     },
 }
 
-/// 棋譜ファイルを文字列として読む。UTF-8 でなければ Shift_JIS (CP932) として読む。
-pub fn read_kifu_text(path: &Path) -> Result<String> {
+/// 棋譜ファイルを文字列として読み、読んだ文字コードと合わせて返す。UTF-8 でなければ
+/// Shift_JIS (CP932) として読む。
+pub fn read_kifu_text(path: &Path) -> Result<(String, cp932::KifuEncoding)> {
     let bytes = std::fs::read(path).with_context(|| format!("読めません: {}", path.display()))?;
     cp932::decode_kifu_bytes(&bytes).with_context(|| format!("読めません: {}", path.display()))
 }
@@ -1518,8 +1519,14 @@ T2\n\
         std::fs::write(&utf8, "N+水匠\n").unwrap();
         let sjis = dir.path().join("sjis.csa");
         std::fs::write(&sjis, [b'N', b'+', 0x90, 0x85, 0x8F, 0xA0, b'\r', b'\n']).unwrap();
-        assert_eq!(read_kifu_text(&utf8).unwrap(), "N+水匠\n");
-        assert_eq!(read_kifu_text(&sjis).unwrap(), "N+水匠\r\n");
+        assert_eq!(
+            read_kifu_text(&utf8).unwrap(),
+            ("N+水匠\n".to_owned(), cp932::KifuEncoding::Utf8)
+        );
+        assert_eq!(
+            read_kifu_text(&sjis).unwrap(),
+            ("N+水匠\r\n".to_owned(), cp932::KifuEncoding::Cp932)
+        );
         let broken = dir.path().join("broken.csa");
         std::fs::write(&broken, [0x80, 0xFF]).unwrap();
         assert!(format!("{:#}", read_kifu_text(&broken).unwrap_err()).contains("Shift_JIS"));

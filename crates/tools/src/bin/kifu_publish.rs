@@ -29,8 +29,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand};
 use tools::common::io::open_reader;
+use tools::kifu_publish::cp932::KifuEncoding;
 use tools::kifu_publish::csa_normalize::{
-    StartTimeFallback, csa_start_time, is_csa_datetime, normalize_csa, round_key,
+    RoundStartTimes, StartTimeFallback, StartTimeSource, is_csa_datetime, normalize_csa,
 };
 use tools::kifu_publish::kif_convert::kif_to_csa;
 use tools::kifu_publish::{
@@ -289,7 +290,15 @@ fn run(cli: Cli) -> Result<Option<Tally>> {
                 );
             }
             let files = collect_kifu_files(input, "csa")?;
-            let round_starts = earliest_round_start_times(&files);
+            // 開始時刻の無い棋譜のために、回戦ごとの最も早い開始時刻を先に集める。
+            // 読めないファイルはここでは無視する（本処理で失敗として数える）。
+            let mut round_starts = RoundStartTimes::default();
+            for path in &files {
+                if let Ok((text, _)) = read_kifu_text(path) {
+                    round_starts.observe(path, &text);
+                }
+            }
+            let mut filled: Vec<(String, String, StartTimeSource)> = Vec::new();
             let batch = Batch {
                 input,
                 event,
@@ -298,13 +307,28 @@ fn run(cli: Cli) -> Result<Option<Tally>> {
             };
             batch.publish(&mut sink, &files, |path, text| {
                 let start = StartTimeFallback {
-                    same_round: round_of(path)
-                        .and_then(|round| round_starts.get(&round))
-                        .map(String::as_str),
+                    same_round: round_starts.earliest_for(path),
                     given: fallback_start_time.as_deref(),
                 };
-                normalize_csa(text, &start)
+                let normalized = normalize_csa(text, &start)?;
+                if let Some((value, source)) = normalized.filled_start_time {
+                    let name = path.file_name().unwrap_or(path.as_os_str());
+                    filled.push((name.to_string_lossy().into_owned(), value, source));
+                }
+                Ok(normalized.csa)
             })?;
+            // 補完した開始時刻は本文（= 対局 ID）に入る。同じ回戦から取った値は一緒に
+            // 処理したファイルの集合で変わるので、どの棋譜に何を入れたかを残す。
+            for (name, value, source) in &filled {
+                let how = match source {
+                    StartTimeSource::SameRound => "同じ回戦の最も早い開始時刻",
+                    StartTimeSource::Given => "--fallback-start-time",
+                };
+                eprintln!("start-time {name}: {value} ({how})");
+            }
+            if !filled.is_empty() {
+                eprintln!("filled_start_time={}", filled.len());
+            }
         }
         Command::Kif {
             input,
@@ -323,38 +347,6 @@ fn run(cli: Cli) -> Result<Option<Tally>> {
         Command::Event { .. } => bail!("event は棋譜を送るサブコマンドではありません"),
     }
     Ok(Some(*sink.tally_mut()))
-}
-
-/// 回戦を表すキー（同じディレクトリの、ファイル名の「大会_回戦」部分）。
-fn round_of(path: &Path) -> Option<(PathBuf, String)> {
-    let name = path.file_name()?.to_str()?;
-    Some((path.parent()?.to_path_buf(), round_key(name)?.to_owned()))
-}
-
-/// 回戦ごとの最も早い `$START_TIME`。開始時刻の記録が無い棋譜に使う。
-///
-/// 持つのは回戦ごとに 1 件。読めないファイルはここでは無視する（本処理で失敗として数える）。
-fn earliest_round_start_times(files: &[PathBuf]) -> BTreeMap<(PathBuf, String), String> {
-    let mut earliest: BTreeMap<(PathBuf, String), String> = BTreeMap::new();
-    for path in files {
-        let Some(round) = round_of(path) else {
-            continue;
-        };
-        let Ok(text) = read_kifu_text(path) else {
-            continue;
-        };
-        let Some(start) = csa_start_time(&text) else {
-            continue;
-        };
-        match earliest.get_mut(&round) {
-            Some(current) if current.as_str() <= start => {}
-            Some(current) => *current = start.to_owned(),
-            None => {
-                earliest.insert(round, start.to_owned());
-            }
-        }
-    }
-    earliest
 }
 
 /// `csa` / `kif` の 1 回の実行。ファイルごとに変換して送り、1 件の失敗では止めない。
@@ -378,6 +370,7 @@ impl Batch<'_> {
         // 送らなかった理由ごとの件数（対象外 / 変換失敗）。理由は固定の数種類。
         let mut excluded: BTreeMap<&'static str, u32> = BTreeMap::new();
         let mut failed: BTreeMap<&'static str, u32> = BTreeMap::new();
+        let mut decoded: BTreeMap<KifuEncoding, u32> = BTreeMap::new();
         let mut converted = 0_u32;
         for path in files {
             // 表示と `--out-dir` には、入力ディレクトリからの相対パスを使う。
@@ -387,7 +380,10 @@ impl Batch<'_> {
             };
             let label = relative.display().to_string();
             let converted_csa = match read_kifu_text(path) {
-                Ok(text) => convert(path, &text),
+                Ok((text, encoding)) => {
+                    *decoded.entry(encoding).or_default() += 1;
+                    convert(path, &text)
+                }
                 Err(err) => {
                     *failed.entry("読めない").or_default() += 1;
                     sink.tally_mut().fail(&label, &err);
@@ -422,6 +418,9 @@ impl Batch<'_> {
                 (Sink::DryRun(_), None) if single => print!("{csa}"),
                 (Sink::DryRun(_), None) => eprintln!("ok      {label}"),
             }
+        }
+        for (encoding, count) in &decoded {
+            eprintln!("decoded[{}]={count}", encoding.label());
         }
         eprintln!("converted={converted}");
         for (reason, count) in &excluded {

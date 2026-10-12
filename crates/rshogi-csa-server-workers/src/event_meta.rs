@@ -48,7 +48,11 @@ pub struct EventMeta {
 }
 
 /// `PUT /api/v1/admin/events/{event}` のリクエスト本文。
+///
+/// PUT は全体の置き換えなので、知らない項目は拒否する (項目名の綴り間違いを黙って
+/// 捨てると、その項目が未登録に戻ってしまう)。
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventMetaRequest {
     pub title: Option<String>,
     #[serde(default)]
@@ -106,15 +110,27 @@ fn normalize_url(field: &str, raw: Option<String>) -> Result<Option<String>, Str
     let Some(url) = normalize_text(field, raw, MAX_URL_CHARS)? else {
         return Ok(None);
     };
-    let rest = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .ok_or_else(|| format!("{field} must be an absolute https:// or http:// URL"))?;
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if host.is_empty() || url.chars().any(char::is_whitespace) {
-        return Err(format!("{field} must be an absolute https:// or http:// URL"));
+    if is_absolute_http_url(&url) {
+        Ok(Some(url))
+    } else {
+        Err(format!("{field} must be an absolute https:// or http:// URL"))
     }
-    Ok(Some(url))
+}
+
+/// `https://` か `http://` (小文字) で始まり、URL として解析できて、ホストが空でないか。
+///
+/// URL パーサーは `https:///path` を `https://path/` と読み替えるなど寛容なので、
+/// `://` の直後から最初の `/` `?` `#` までが空でないことも字面で確かめる。空白を含む
+/// URL も受け付けない (パーサーは percent-encode して通す)。
+fn is_absolute_http_url(raw: &str) -> bool {
+    let Some(rest) = raw.strip_prefix("https://").or_else(|| raw.strip_prefix("http://")) else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || raw.chars().any(char::is_whitespace) {
+        return false;
+    }
+    url::Url::parse(raw).is_ok_and(|url| url.host_str().is_some_and(|host| !host.is_empty()))
 }
 
 /// `PUT /api/v1/admin/events/{event}` の path 末尾 (`{event}` の部分、percent-encode
@@ -240,6 +256,37 @@ mod tests {
     }
 
     #[test]
+    fn validate_accepts_urls_with_port_userinfo_ipv6_and_idn_hosts() {
+        for url in [
+            "https://example.org",
+            "https://example.org:8443/a?b=c#d",
+            "http://user@example.org/",
+            "https://[::1]:8080/",
+            "https://192.0.2.1/",
+            "https://電竜戦.example/棋譜",
+        ] {
+            let meta = request(serde_json::json!({ "title": "t", "official_url": url }))
+                .validate()
+                .unwrap();
+            // 保存するのは受け取った文字列のまま (正規化しない)。
+            assert_eq!(meta.official_url.as_deref(), Some(url));
+        }
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected_instead_of_dropped() {
+        // PUT は全体の置き換え。`offical_url` のような綴り間違いを黙って捨てると、
+        // 公式リンクが未登録に戻る。
+        for json in [
+            serde_json::json!({ "title": "t", "offical_url": "https://example.org/" }),
+            serde_json::json!({ "title": "t", "event": "WCSC35" }),
+            serde_json::json!({ "title": "t", "updated_at_ms": 1 }),
+        ] {
+            assert!(serde_json::from_value::<EventMetaRequest>(json).is_err());
+        }
+    }
+
+    #[test]
     fn validate_requires_title() {
         for json in [
             serde_json::json!({}),
@@ -264,6 +311,18 @@ mod tests {
             "https:///path",
             "https://example.org/a b",
             "HTTPS://example.org/",
+            // ホストが空、または壊れている。
+            "https://:80",
+            "https://:80/path",
+            "https://@",
+            "https://user@",
+            "https://user:pass@/path",
+            "https://[broken",
+            "https://[::1",
+            "http://?q=1",
+            "http://#top",
+            "https://exa mple.org/",
+            "https://%/",
         ] {
             for field in ["official_url", "kifu_source_url"] {
                 let err = request(serde_json::json!({ "title": "t", field: url }))
