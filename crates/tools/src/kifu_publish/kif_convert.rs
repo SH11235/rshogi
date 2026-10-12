@@ -328,11 +328,18 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
                 '-'
             };
             let mut csa_move = format!("{sign}{}", mv.body);
-            if let (Some(minutes), Some(seconds)) = (found.get(3), found.get(4))
-                && let (Ok(minutes), Ok(seconds)) =
-                    (minutes.as_str().parse::<u64>(), seconds.as_str().parse::<u64>())
-            {
-                csa_move.push_str(&format!(",T{}", minutes * 60 + seconds));
+            if let (Some(minutes), Some(seconds)) = (found.get(3), found.get(4)) {
+                // 桁あふれする値は黙って丸めず、壊れた行として扱う。
+                let elapsed = minutes
+                    .as_str()
+                    .parse::<u64>()
+                    .ok()
+                    .zip(seconds.as_str().parse::<u64>().ok())
+                    .and_then(|(minutes, seconds)| minutes.checked_mul(60)?.checked_add(seconds));
+                let Some(elapsed) = elapsed else {
+                    return Err(failed(REASON_BAD_MOVE, line));
+                };
+                csa_move.push_str(&format!(",T{elapsed}"));
             }
             body.push(csa_move);
             last_dest = Some(mv.dest);
@@ -567,6 +574,28 @@ mod tests {
         ))
         .unwrap();
         assert!(csa.contains("+2726FU,T7\n%-ILLEGAL_ACTION\n"), "{csa}");
+    }
+
+    #[test]
+    fn overflowing_time_is_rejected_instead_of_wrapping() {
+        // 分 × 60 が u64 に収まらない値と、そもそも u64 として読めない値。
+        for minutes in ["400000000000000000", "99999999999999999999999"] {
+            let moves = format!(
+                " 1 ２六歩(27)           ( {minutes}:00/)
+ 2 投了
+"
+            );
+            assert_eq!(
+                reason(kif_to_csa(&kif(
+                    "",
+                    &moves,
+                    "まで1手で先手の勝ち
+"
+                ))),
+                REASON_BAD_MOVE,
+                "{minutes}"
+            );
+        }
     }
 
     #[test]

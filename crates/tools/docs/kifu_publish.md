@@ -164,7 +164,7 @@ kifu_publish csa --input wcsc35_kifu/ --event WCSC35 --dry-run --out-dir ./csa-o
 | `--input <FILE\|DIR>` | CSA ファイル、またはディレクトリ。ディレクトリなら配下（サブディレクトリを含む）の `*.csa` をファイル名順に全部送る。`._` で始まるファイル（macOS が ZIP に入れるリソースフォーク）は無視する |
 | `--event <LABEL>` | 一覧に出す大会名など |
 | `--fallback-start-time <"YYYY/MM/DD HH:MM:SS">` | `$START_TIME` が無い棋譜に入れる仮の開始時刻（JST）。省略時、開始時刻が無い棋譜は送らない |
-| `--out-dir <DIR>` | `--dry-run` 専用。正規化した CSA を、入力と同じ相対パスで `<DIR>` の下に書く |
+| `--out-dir <DIR>` | `--dry-run` 専用。正規化した CSA を、入力と同じ相対パスで `<DIR>` の下に書く。`<DIR>` は空（または未作成）でなければエラーになる（前回の出力が混ざったまま検証・投入されるのを防ぐため） |
 
 文字コードは UTF-8 として読めなければ Shift_JIS（CP932）として読み、UTF-8 で送る。どちらでも
 ないファイルは失敗になる。1 件の失敗では止めず、最後に件数を出す。
@@ -235,7 +235,7 @@ kifu_publish kif --input kifu_dr6production/ --event 電竜戦6 --dry-run --out-
 |---|---|
 | `--input <FILE\|DIR>` | KIF ファイル、またはディレクトリ（配下の `*.kif` をファイル名順に全部。`._` で始まるファイルは無視） |
 | `--event <LABEL>` | 一覧に出す大会名など |
-| `--out-dir <DIR>` | `--dry-run` 専用。変換した CSA を、入力と同じ相対パス（拡張子は `.csa`）で `<DIR>` の下に書く |
+| `--out-dir <DIR>` | `--dry-run` 専用。変換した CSA を、入力と同じ相対パス（拡張子は `.csa`）で `<DIR>` の下に書く。`<DIR>` は空（または未作成）でなければエラーになる |
 
 電竜戦の公式 KIF（第 2〜6 回の本戦アーカイブで確認した形式。文字コードは `csa` と同じく
 UTF-8 でなければ Shift_JIS として読む）を CSA に変換し、`csa` と同じく

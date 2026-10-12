@@ -289,6 +289,7 @@ fn run(cli: Cli) -> Result<Option<Tally>> {
                     "--fallback-start-time は YYYY/MM/DD HH:MM:SS の形で指定してください: {value}"
                 );
             }
+            ensure_out_dir_is_empty(out_dir.as_deref())?;
             let files = collect_kifu_files(input, "csa")?;
             // 開始時刻の無い棋譜のために、回戦ごとの最も早い開始時刻を先に集める。
             // 読めないファイルはここでは無視する（本処理で失敗として数える）。
@@ -335,6 +336,7 @@ fn run(cli: Cli) -> Result<Option<Tally>> {
             event,
             out_dir,
         } => {
+            ensure_out_dir_is_empty(out_dir.as_deref())?;
             let files = collect_kifu_files(input, "kif")?;
             let batch = Batch {
                 input,
@@ -466,6 +468,29 @@ fn new_api(api_base: Option<&str>) -> Result<ApiClient> {
     let token = std::env::var(ADMIN_TOKEN_ENV)
         .with_context(|| format!("環境変数 {ADMIN_TOKEN_ENV} に管理トークンを設定してください"))?;
     ApiClient::new(&api_base, token)
+}
+
+/// 一括変換の書き出し先が空であることを確かめる（無ければ後で作る）。
+///
+/// 前回の出力が残ったディレクトリに書くと、今回は入力から消えた・変換できなかった棋譜の
+/// 古い `.csa` が混ざり、そのまま検証や投入に回ってしまう。
+fn ensure_out_dir_is_empty(dir: Option<&Path>) -> Result<()> {
+    let Some(dir) = dir else {
+        return Ok(());
+    };
+    let mut entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("--out-dir を読めません: {}", dir.display()));
+        }
+    };
+    ensure!(
+        entries.next().is_none(),
+        "--out-dir は空のディレクトリを指定してください（前回の出力が混ざるのを防ぐため）: {}",
+        dir.display()
+    );
+    Ok(())
 }
 
 fn write_csa(path: &Path, csa: &str) -> Result<()> {
