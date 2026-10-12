@@ -122,12 +122,16 @@ fn normalize_url(field: &str, raw: Option<String>) -> Result<Option<String>, Str
 /// URL パーサーは `https:///path` を `https://path/` と読み替えるなど寛容なので、
 /// `://` の直後から最初の `/` `?` `#` までが空でないことも字面で確かめる。空白を含む
 /// URL も受け付けない (パーサーは percent-encode して通す)。
+///
+/// ユーザー情報つきの URL (`https://user@example.org/`) も受け付けない。公式リンクとして
+/// 画面に出す値なので、`https://trusted.example@evil.example/` のように行き先を
+/// 見誤らせる形を入れさせない。
 fn is_absolute_http_url(raw: &str) -> bool {
     let Some(rest) = raw.strip_prefix("https://").or_else(|| raw.strip_prefix("http://")) else {
         return false;
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || raw.chars().any(char::is_whitespace) {
+    if authority.is_empty() || authority.contains('@') || raw.chars().any(char::is_whitespace) {
         return false;
     }
     url::Url::parse(raw).is_ok_and(|url| url.host_str().is_some_and(|host| !host.is_empty()))
@@ -256,11 +260,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_urls_with_port_userinfo_ipv6_and_idn_hosts() {
+    fn validate_accepts_urls_with_port_ipv6_and_idn_hosts() {
         for url in [
             "https://example.org",
             "https://example.org:8443/a?b=c#d",
-            "http://user@example.org/",
+            // `@` は path や query にあってよい。
+            "https://example.org/@user?mail=a@b",
             "https://[::1]:8080/",
             "https://192.0.2.1/",
             "https://電竜戦.example/棋譜",
@@ -316,6 +321,11 @@ mod tests {
             "https://:80/path",
             "https://@",
             "https://user@",
+            // ユーザー情報つき (行き先を見誤らせる)。
+            "https://user@example.org/",
+            "https://user:pass@example.org/",
+            "https://trusted.example@evil.example/",
+            "https://trusted.example%40evil.example@evil.example/",
             "https://user:pass@/path",
             "https://[broken",
             "https://[::1",

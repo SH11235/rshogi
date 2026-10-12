@@ -312,8 +312,8 @@ fn run(cli: Cli) -> Result<Option<Tally>> {
                 };
                 let normalized = normalize_csa(text, &start)?;
                 if let Some((value, source)) = normalized.filled_start_time {
-                    let name = path.file_name().unwrap_or(path.as_os_str());
-                    filled.push((name.to_string_lossy().into_owned(), value, source));
+                    let label = relative_path(input, path).display().to_string();
+                    filled.push((label, value, source));
                 }
                 Ok(normalized.csa)
             })?;
@@ -349,6 +349,14 @@ fn run(cli: Cli) -> Result<Option<Tally>> {
     Ok(Some(*sink.tally_mut()))
 }
 
+/// 表示と `--out-dir` に使う、入力ディレクトリからの相対パス。入力がファイルならファイル名。
+fn relative_path<'a>(input: &Path, path: &'a Path) -> &'a Path {
+    match path.strip_prefix(input) {
+        Ok(relative) if !relative.as_os_str().is_empty() => relative,
+        _ => Path::new(path.file_name().unwrap_or(path.as_os_str())),
+    }
+}
+
 /// `csa` / `kif` の 1 回の実行。ファイルごとに変換して送り、1 件の失敗では止めない。
 struct Batch<'a> {
     input: &'a Path,
@@ -373,11 +381,7 @@ impl Batch<'_> {
         let mut decoded: BTreeMap<KifuEncoding, u32> = BTreeMap::new();
         let mut converted = 0_u32;
         for path in files {
-            // 表示と `--out-dir` には、入力ディレクトリからの相対パスを使う。
-            let relative = match path.strip_prefix(self.input) {
-                Ok(relative) if !single => relative,
-                _ => Path::new(path.file_name().unwrap_or(path.as_os_str())),
-            };
+            let relative = relative_path(self.input, path);
             let label = relative.display().to_string();
             let converted_csa = match read_kifu_text(path) {
                 Ok((text, encoding)) => {

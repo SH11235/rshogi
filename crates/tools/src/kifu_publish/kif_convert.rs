@@ -284,12 +284,23 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
             }
             continue;
         }
+        if let Some(terminal_text) = terminal_text {
+            // 終局の手の後ろに来てよいのは、空行・`*` のコメント行と、宣言の行の重複
+            // (実データでは `入玉宣言` / `入玉勝ち` が 2 行続く) だけ。指し手や別の終局表記、
+            // 変化手順 (`変化：2手`) などが続く棋譜は、どこまでが対局なのか決められないので
+            // 変換しない。
+            let repeats_declaration = matches!(terminal_text, "入玉宣言" | "入玉勝ち")
+                && MOVE_LINE
+                    .captures(line)
+                    .is_some_and(|found| found.get(2).is_some_and(|m| m.as_str() == terminal_text));
+            if line.is_empty() || line.starts_with('*') || repeats_declaration {
+                continue;
+            }
+            return Err(failed(REASON_AFTER_END, line));
+        }
         if let Some(found) = EVAL_COMMENT.captures(line) {
-            // 指し手の前のコメント、数値でない評価値は落とす。終局の手の後ろのコメントも
-            // 付け先の指し手が無いので落とす。
-            if terminal.is_none()
-                && let (Some(dest), Ok(value)) = (last_dest, found[1].parse::<i64>())
-            {
+            // 指し手の前のコメント、数値でない評価値は落とす。
+            if let (Some(dest), Ok(value)) = (last_dest, found[1].parse::<i64>()) {
                 let pv = convert_pv(found.get(2).map_or("", |pv| pv.as_str()), dest);
                 let mut comment = format!("'** {value}");
                 for mv in pv {
@@ -307,16 +318,6 @@ pub fn kif_to_csa(text: &str) -> Result<String, Rejection> {
             return Err(failed(REASON_BAD_MOVE, line));
         };
         let move_text = found.get(2).map_or("", |m| m.as_str());
-        if let Some(terminal_text) = terminal_text {
-            // 終局の手の後ろに来てよいのは、宣言の行の重複 (実データでは `入玉宣言` /
-            // `入玉勝ち` が 2 行続く) だけ。指し手や別の終局表記が続く棋譜は、どこまでが
-            // 対局なのか決められないので変換しない。
-            if matches!(terminal_text, "入玉宣言" | "入玉勝ち") && move_text == terminal_text
-            {
-                continue;
-            }
-            return Err(failed(REASON_AFTER_END, line));
-        }
         if found[1].parse::<u32>().ok() != Some(moves_count + 1) {
             return Err(failed(REASON_MOVE_NUMBER, line));
         }
@@ -767,6 +768,10 @@ mod tests {
             " 2 投了 ( 0:00/)\n 3 投了 ( 0:00/)\n",
             " 2 入玉宣言 ( 0:00/)\n 3 入玉勝ち ( 0:00/)\n",
             " 2 入玉宣言 ( 0:00/)\n 3 ３四歩(33) ( 0:00/)\n",
+            // 指し手行の形でない行も、理由は「終局の手の後に続く」。
+            " 2 投了 ( 0:00/)\n変化：2手\n",
+            " 2 投了 ( 0:00/)\n&しおり\n",
+            " 2 投了 ( 0:00/)\n#コメント\n",
         ] {
             assert_eq!(
                 reason(kif_to_csa(&kif("", &format!("{one}{tail}"), ""))),
@@ -776,7 +781,7 @@ mod tests {
         }
         // 宣言の行の重複と、終局後のコメントは許す。
         let declared = format!(
-            "{one} 2 入玉勝ち ( 0:00/)\n**対局 評価値 100000 読み筋 \n 3 入玉勝ち ( 0:00/)\n*コメント\n"
+            "{one} 2 入玉勝ち ( 0:00/)\n**対局 評価値 100000 読み筋 \n 3 入玉勝ち ( 0:00/)\n\n*コメント\n"
         );
         let csa = kif_to_csa(&kif("", &declared, "まで2手で入玉勝ち\n")).unwrap();
         assert!(csa.ends_with("+7776FU,T3\n%KACHI\n'まで2手で入玉勝ち\n"), "{csa}");

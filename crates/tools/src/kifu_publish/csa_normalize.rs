@@ -83,6 +83,21 @@ fn is_move_or_special_line(line: &str) -> bool {
     (line.starts_with(['+', '-']) && line.len() >= 7) || line.starts_with('%')
 }
 
+/// 指し手・`%` 行 `target` に時間 `time` (`T<秒>`) を付けた行を作る。
+///
+/// サーバーが受け付ける形は `<手>,T<秒>` と `<手>,T<秒>,'コメント`。時間の無い
+/// インラインコメントつきの行 (`+7776FU,'memo`) には、コメントの前に時間を入れる。
+/// 既に時間が付いている行、それ以外の形の続きがある行は `None`。
+fn join_time(target: &str, time: &str) -> Option<String> {
+    match target.split_once(',') {
+        None => Some(format!("{target},{time}")),
+        Some((head, comment)) if comment.starts_with('\'') => {
+            Some(format!("{head},{time},{comment}"))
+        }
+        Some(_) => None,
+    }
+}
+
 fn push_server_clock(out: &mut Vec<String>, total_minutes: u64, byoyomi_sec: u64, increment: u64) {
     out.push(format!(
         "$TIME_LIMIT:{:02}:{:02}+{byoyomi_sec:02}",
@@ -138,19 +153,22 @@ pub fn normalize_csa(text: &str, start: &StartTimeFallback<'_>) -> Result<Normal
         // `%` 行に連結する。連結先が無い (既に時間が付いている、指し手がまだ無い) なら、
         // 消費時間を黙って落とさずに変換失敗にする。
         if seen_position && TIME_ONLY_LINE.is_match(line) {
-            let target = out
+            let joined = out
                 .iter_mut()
                 .rev()
                 .find(|previous| !previous.is_empty() && !previous.starts_with('\''))
-                .filter(|previous| is_move_or_special_line(previous) && !previous.contains(','));
-            let Some(target) = target else {
+                .filter(|previous| is_move_or_special_line(previous))
+                .and_then(|target| {
+                    let joined = join_time(target, line)?;
+                    *target = joined;
+                    Some(())
+                });
+            if joined.is_none() {
                 return Err(Rejection::Failed {
                     reason: REASON_ORPHAN_TIME,
                     detail: line.to_owned(),
                 });
-            };
-            target.push(',');
-            target.push_str(line);
+            }
             continue;
         }
         if line.starts_with('P') {
@@ -298,6 +316,17 @@ mod tests {
     }
 
     #[test]
+    fn time_line_is_inserted_before_an_inline_comment() {
+        // 時間の無いインラインコメントつきの指し手・`%` 行。サーバーが受け付ける形
+        // (`,T<秒>,'コメント`) にする。コメント中のカンマはそのまま。
+        let csa = "V2.2\nN+a\nN-b\n$START_TIME:2021/05/03 10:00:00\nPI\n+\n+7776FU,'memo, with comma\nT3\n-3334FU,'x\n'** 30\nT4\n%TORYO,'resign\nT0\n";
+        assert_eq!(
+            normalize(csa),
+            "V2.2\nN+a\nN-b\n$START_TIME:2021/05/03 10:00:00\nPI\n+\n+7776FU,T3,'memo, with comma\n-3334FU,T4,'x\n'** 30\n%TORYO,T0,'resign\n"
+        );
+    }
+
+    #[test]
     fn time_line_without_a_move_to_attach_is_a_failure() {
         let head = "V2.2\nN+a\nN-b\n$START_TIME:2021/05/03 10:00:00\nPI\n+\n";
         for tail in [
@@ -309,6 +338,9 @@ mod tests {
             "+2726FU\nT1\nT18\n",
             "+2726FU,T1\n'comment\nT3\n",
             "%TORYO,T0\nT3\n",
+            // 時間とコメントの両方が既に付いている、コメント以外の続きがある。
+            "+2726FU,T1,'memo\nT3\n",
+            "+2726FU,-8384FU\nT3\n",
         ] {
             assert_eq!(failure(&format!("{head}{tail}")), REASON_ORPHAN_TIME, "{tail}");
         }

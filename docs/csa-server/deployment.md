@@ -574,7 +574,8 @@ curl --fail-with-body -X PUT \
 - `title` は必須（200 文字まで）。`organizer`（200 文字）、`official_url` / `kifu_source_url`
   （500 文字、`https://` か `http://` で始まる絶対 URL）、`terms_note`（1000 文字）は任意。
   制御文字（改行を含む）、長さ超過、それ以外の scheme の URL、ホストが空・壊れている URL
-  （`https://:80`、`https://@`、`https://[broken` など）は 400。本文に知らない項目があるときも
+  （`https://:80`、`https://@`、`https://[broken` など）、ユーザー情報つきの URL
+  （`https://user@example.org/`。公式リンクとして表示する値なので）は 400。本文に知らない項目があるときも
   400（全体の置き換えなので、項目名の綴り間違いで値が消えるのを防ぐ）。
 - PUT は全体の置き換え。省略した任意項目は未登録（`null`）に戻る。対局が 1 つも無い `event` にも
   登録できる（棋譜の投入より先に入れてよい）。`event` は `upload` と同じ規則（前後の空白を除く、
