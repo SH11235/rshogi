@@ -25,10 +25,34 @@
 //!   :last_modified: 2026-04-26T12:34:56+00:00
 //! ```
 //!
-//! `serde_yaml` の `to_string` は document start (`---`) を出さず、`String` 型の
-//! `:last_modified` も quote 無しで bare scalar として出力する。例は
+//! 書き出しは document start (`---`) を出さず、Symbol キー（`:name` など）と
+//! `:last_modified` を quote 無しの plain scalar として出力する。例は
 //! `render_document` のテスト golden YAML と一致させる（実出力と差異が出たら
 //! `render_document_emits_byte_stable_yaml_with_ruby_symbol_keys` が落ちる）。
+//!
+//! ## 読み込みと書き出しの実装
+//!
+//! - **読み込み**は `granit-parser`（pure Rust の YAML パーサ）のイベント列を
+//!   `YamlReader` が直接読む。serde 経由の汎用デシリアライザ（`serde-saphyr`）は、
+//!   quote 無しのキーを数値として解釈して重複を判定するので、`1_000` と `10_00` の
+//!   ような別のプレイヤ名を同じキーとみなしてしまう。
+//! - **書き出し**は `render_document` が自前で組み立てる。汎用のシリアライザは
+//!   `:` 始まりの文字列とタイムスタンプ形の文字列を quote するため、上記の
+//!   「quote 無し」の形式を保てない。
+//!
+//! 出力は、以前使っていた `serde_yaml` 0.9 の出力とバイト単位で一致させてある
+//! （どの文字列を quote するかの規則は `push_scalar` を参照）。例外は次の 2 つ:
+//!
+//! - 改行文字（LF / CR / U+0085 / U+2028 / U+2029）を含む文字列は、block scalar や
+//!   explicit key ではなく double quote + エスケープで書く。
+//! - プレイヤ名と `:last_game_id` は、Ruby の YAML ローダーが文字列以外の型に読む形
+//!   （`yes`、`1_000`、`:foo`、`2026-04-26` など）なら quote する。`serde_yaml` は
+//!   YAML 1.2 の規則でしか quote しないので、こうした名前は Ruby 側で真偽値や数値に
+//!   化けていた（`push_text` を参照）。`<<` という名前のキーには `!!str` タグを付ける。
+//!
+//! 読み込みは `serde_yaml` が書いたファイルをそのまま読める。ただし U+2028 / U+2029
+//! を含む文字列だけは別で、`serde_yaml` はこれを改行として生のまま書いていたが、
+//! YAML 1.2 のパーサは改行として扱わないため、元の文字列に戻らない。
 //!
 //! ## クリーンルーム方針
 //!
@@ -58,7 +82,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
 
-use serde::{Deserialize, Serialize};
+use granit_parser::{Event, Parser, ScalarStyle, StrInput};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
@@ -75,57 +99,6 @@ use crate::types::{GameId, PlayerName};
 /// 方針に合わせ、poisoning は `into_inner` でデータをそのまま借りる。
 fn lock_cache<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// 1 プレイヤ分のレコードを Ruby Symbol キー（`:name` / `:rate` / ...）で表現する
-/// serde スキーマ。
-///
-/// `last_game_id` が `None` の場合は serde の `skip_serializing_if` でキー行ごと
-/// 出力から除外する（`null` リテラルや空値を吐かない）。Ruby `YAML.dump` で
-/// `Hash.delete(:last_game_id)` 済みの未対局レコードと等価な見え方になる。
-/// deserialize 側は `default` で `None` を許容する。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct YamlRecord {
-    #[serde(rename = ":name")]
-    name: String,
-    #[serde(rename = ":rate")]
-    rate: i32,
-    #[serde(rename = ":win")]
-    win: u32,
-    #[serde(rename = ":loss")]
-    loss: u32,
-    #[serde(
-        rename = ":last_game_id",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    last_game_id: Option<String>,
-    #[serde(rename = ":last_modified")]
-    last_modified: String,
-}
-
-impl YamlRecord {
-    fn from_record(r: &PlayerRateRecord) -> Self {
-        Self {
-            name: r.name.as_str().to_owned(),
-            rate: r.rate,
-            win: r.wins,
-            loss: r.losses,
-            last_game_id: r.last_game_id.as_ref().map(|g| g.as_str().to_owned()),
-            last_modified: r.last_modified.clone(),
-        }
-    }
-
-    fn into_record(self) -> PlayerRateRecord {
-        PlayerRateRecord {
-            name: PlayerName::new(self.name),
-            rate: self.rate,
-            wins: self.win,
-            losses: self.loss,
-            last_game_id: self.last_game_id.map(GameId::new),
-            last_modified: self.last_modified,
-        }
-    }
 }
 
 /// Ruby shogi-server 互換 `players.yaml` をレートストレージとして使う実装。
@@ -205,8 +178,7 @@ impl PlayersYamlRateStorage {
         &self,
         snapshot: &HashMap<String, PlayerRateRecord>,
     ) -> Result<(), StorageError> {
-        let yaml = render_document(snapshot)?;
-        atomic_write_yaml(&self.path, &yaml).await
+        atomic_write_yaml(&self.path, &render_document(snapshot)).await
     }
 }
 
@@ -289,20 +261,469 @@ impl RateStorage for PlayersYamlRateStorage {
 }
 
 fn parse_document(text: &str) -> Result<HashMap<String, PlayerRateRecord>, StorageError> {
-    // 並びを byte-stable にして round-trip 比較しやすくするため、内部表現は
-    // BTreeMap で受けてから HashMap に変換する。
-    let doc: BTreeMap<String, YamlRecord> = serde_yaml::from_str(text)
-        .map_err(|e| StorageError::Malformed(format!("players.yaml: {e}")))?;
-    Ok(doc.into_iter().map(|(k, v)| (k, v.into_record())).collect())
+    YamlReader::new(text)
+        .read_players()
+        .map_err(|e| StorageError::Malformed(format!("players.yaml: {e}")))
 }
 
-fn render_document(records: &HashMap<String, PlayerRateRecord>) -> Result<String, StorageError> {
+/// 読み込んだ scalar 1 つ。
+#[derive(Clone)]
+struct Scalar {
+    text: String,
+    /// quote もタグも無い `~` / `null` / 空（YAML の null）か。
+    is_null: bool,
+}
+
+/// YAML の node の先頭。mapping / sequence は中身をまだ読んでいない状態を表す。
+enum Node {
+    Scalar(Scalar),
+    MappingStart,
+    SequenceStart,
+}
+
+/// `players.yaml` を YAML パーサのイベント列から直接読む。
+///
+/// serde 経由の汎用デシリアライザを使わないのは、プレイヤ名を **書かれた文字列の
+/// まま** 区別するため。汎用デシリアライザは quote 無しのキーを数値として解釈して
+/// 重複を判定するので、`1_000` と `10_00` のような別の名前を同じキーとみなし、片方の
+/// レコードを捨ててしまう（`serde_yaml` はこうした名前を quote 無しで書いていた）。
+///
+/// ここでは scalar をすべて文字列として受け取り、型は項目ごとに決める:
+///
+/// - 同じプレイヤ名・同じ項目が重複していたら後のものを採る。
+/// - `<<` も通常のキーとして読む（merge key として展開しない）。
+/// - anchor / alias（`&1` / `*1`）は scalar に付いたものだけ解決する。Ruby の
+///   `YAML.dump` は同じ文字列オブジェクトを 2 回書くときにこれを使う。
+/// - 知らない項目は値ごと読み飛ばす。
+struct YamlReader<'a> {
+    parser: Parser<'a, StrInput<'a>>,
+    anchors: HashMap<usize, Scalar>,
+    /// 直近に読んだイベントの行番号（エラーメッセージ用）。
+    line: usize,
+}
+
+impl<'a> YamlReader<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            parser: Parser::new_from_str(text),
+            anchors: HashMap::new(),
+            line: 0,
+        }
+    }
+
+    fn error(&self, message: impl std::fmt::Display) -> String {
+        format!("{message} at line {}", self.line)
+    }
+
+    fn next_event(&mut self) -> Result<Event<'a>, String> {
+        loop {
+            match self.parser.next() {
+                Some(Ok((Event::Comment(..), _))) => {}
+                Some(Ok((event, span))) => {
+                    self.line = span.start.line();
+                    return Ok(event);
+                }
+                Some(Err(e)) => return Err(e.to_string()),
+                None => return Err(self.error("unexpected end of input")),
+            }
+        }
+    }
+
+    /// 次の node を読む。mapping / sequence の終わりに達していたら `None`。
+    fn next_node(&mut self) -> Result<Option<Node>, String> {
+        match self.next_event()? {
+            Event::Scalar(text, style, anchor, tag) => {
+                let is_null = style == ScalarStyle::Plain
+                    && tag.is_none()
+                    && matches!(&*text, "" | "~" | "null" | "Null" | "NULL");
+                let scalar = Scalar {
+                    text: text.into_owned(),
+                    is_null,
+                };
+                if anchor != 0 {
+                    self.anchors.insert(anchor, scalar.clone());
+                }
+                Ok(Some(Node::Scalar(scalar)))
+            }
+            Event::Alias(anchor) => match self.anchors.get(&anchor) {
+                Some(scalar) => Ok(Some(Node::Scalar(scalar.clone()))),
+                None => Err(self.error("alias to a mapping or sequence is not supported")),
+            },
+            Event::MappingStart(..) => Ok(Some(Node::MappingStart)),
+            Event::SequenceStart(..) => Ok(Some(Node::SequenceStart)),
+            Event::MappingEnd | Event::SequenceEnd => Ok(None),
+            other => Err(self.error(format!("unexpected YAML event {other:?}"))),
+        }
+    }
+
+    /// `node` が mapping / sequence の先頭なら、対応する終わりまで読み飛ばす。
+    fn skip(&mut self, node: Node) -> Result<(), String> {
+        let mut depth = usize::from(!matches!(node, Node::Scalar(_)));
+        while depth > 0 {
+            match self.next_event()? {
+                Event::MappingStart(..) | Event::SequenceStart(..) => depth += 1,
+                Event::MappingEnd | Event::SequenceEnd => depth -= 1,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn scalar(&self, node: Node, field: &str) -> Result<Scalar, String> {
+        match node {
+            Node::Scalar(scalar) => Ok(scalar),
+            Node::MappingStart | Node::SequenceStart => {
+                Err(self.error(format!("`{field}` must be a scalar")))
+            }
+        }
+    }
+
+    fn number<T: std::str::FromStr>(&self, node: Node, field: &str) -> Result<T, String> {
+        let scalar = self.scalar(node, field)?;
+        scalar
+            .text
+            .parse()
+            .map_err(|_| self.error(format!("invalid value {:?} for `{field}`", scalar.text)))
+    }
+
+    fn read_players(mut self) -> Result<HashMap<String, PlayerRateRecord>, String> {
+        let mut players = HashMap::new();
+        if !matches!(self.next_event()?, Event::StreamStart) {
+            return Err(self.error("expected the start of a YAML stream"));
+        }
+        match self.next_event()? {
+            // 空のファイル・コメントだけのファイル。
+            Event::StreamEnd => return Ok(players),
+            Event::DocumentStart(..) => {}
+            other => return Err(self.error(format!("unexpected YAML event {other:?}"))),
+        }
+        match self.next_node()? {
+            // `---` だけの文書。
+            Some(Node::Scalar(scalar)) if scalar.is_null => {}
+            Some(Node::MappingStart) => {
+                while let Some(key) = self.next_node()? {
+                    let name = self.scalar(key, "player name")?.text;
+                    let Some(Node::MappingStart) = self.next_node()? else {
+                        return Err(
+                            self.error(format!("record of player {name:?} must be a mapping"))
+                        );
+                    };
+                    let record = self.read_record(&name)?;
+                    players.insert(name, record);
+                }
+            }
+            _ => return Err(self.error("expected a mapping of players at the top level")),
+        }
+        match (self.next_event()?, self.next_event()?) {
+            (Event::DocumentEnd, Event::StreamEnd) => Ok(players),
+            _ => Err(self.error("expected a single YAML document")),
+        }
+    }
+
+    /// 1 プレイヤ分のレコード（`:name` / `:rate` / ... の mapping）を、先頭を読んだ
+    /// 直後の状態から読む。`:last_game_id` は無くてもよく、YAML の null なら `None`。
+    fn read_record(&mut self, player: &str) -> Result<PlayerRateRecord, String> {
+        let (mut name, mut rate, mut wins, mut losses) = (None, None, None, None);
+        let (mut last_game_id, mut last_modified) = (None, None);
+        while let Some(key) = self.next_node()? {
+            let key = self.scalar(key, "field name")?.text;
+            let Some(value) = self.next_node()? else {
+                return Err(self.error(format!("`{key}` has no value")));
+            };
+            match key.as_str() {
+                ":name" => name = Some(self.scalar(value, ":name")?.text),
+                ":rate" => rate = Some(self.number(value, ":rate")?),
+                ":win" => wins = Some(self.number(value, ":win")?),
+                ":loss" => losses = Some(self.number(value, ":loss")?),
+                ":last_game_id" => {
+                    let scalar = self.scalar(value, ":last_game_id")?;
+                    last_game_id = (!scalar.is_null).then_some(scalar.text);
+                }
+                ":last_modified" => {
+                    last_modified = Some(self.scalar(value, ":last_modified")?.text);
+                }
+                _ => self.skip(value)?,
+            }
+        }
+        let missing =
+            |field: &str| self.error(format!("player {player:?}: missing field `{field}`"));
+        Ok(PlayerRateRecord {
+            name: PlayerName::new(name.ok_or_else(|| missing(":name"))?),
+            rate: rate.ok_or_else(|| missing(":rate"))?,
+            wins: wins.ok_or_else(|| missing(":win"))?,
+            losses: losses.ok_or_else(|| missing(":loss"))?,
+            last_game_id: last_game_id.map(GameId::new),
+            last_modified: last_modified.ok_or_else(|| missing(":last_modified"))?,
+        })
+    }
+}
+
+/// `key:` の形（implicit key）で書くキーの最大 byte 数。
+///
+/// これを超えるキーは `? key` の形（explicit key）で書く。YAML の implicit key には
+/// 1024 文字までという制限があり、長いキーをそのまま `key:` と書くと読み戻せない。
+/// 境界の 128 は `serde_yaml`（libyaml）の出力に合わせた値。
+const MAX_IMPLICIT_KEY_BYTES: usize = 128;
+
+/// 全レコードを `players.yaml` の文字列に組み立てる。
+///
+/// `last_game_id` が `None` のレコードは `:last_game_id` 行ごと出力しない（`null`
+/// リテラルや空値を吐かない）。Ruby `YAML.dump` で `Hash.delete(:last_game_id)` 済みの
+/// 未対局レコードと等価な見え方になる。
+fn render_document(records: &HashMap<String, PlayerRateRecord>) -> String {
+    if records.is_empty() {
+        return "{}\n".to_owned();
+    }
     // `BTreeMap` でキーをソートして書き出すことで、同一データから出力 byte 列が
     // 一致する（運用での diff 比較・自動レビューが安定する）。
-    let doc: BTreeMap<String, YamlRecord> =
-        records.iter().map(|(k, v)| (k.clone(), YamlRecord::from_record(v))).collect();
-    serde_yaml::to_string(&doc)
-        .map_err(|e| StorageError::Io(format!("serialize players.yaml: {e}")))
+    let sorted: BTreeMap<&str, &PlayerRateRecord> =
+        records.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let mut out = String::new();
+    for (key, record) in sorted {
+        if key == "<<" {
+            // Ruby は `<<` というキーを、quote してあっても merge key として扱い、値の
+            // mapping を親に展開する。文字列だと明示するタグを付けたときだけ通常のキーに
+            // なる。
+            out.push_str("!!str <<:\n  :name: ");
+        } else if key.len() <= MAX_IMPLICIT_KEY_BYTES {
+            push_text(&mut out, key);
+            out.push_str(":\n  :name: ");
+        } else {
+            out.push_str("? ");
+            push_text(&mut out, key);
+            out.push_str("\n: :name: ");
+        }
+        push_text(&mut out, record.name.as_str());
+        out.push_str(&format!(
+            "\n  :rate: {}\n  :win: {}\n  :loss: {}\n",
+            record.rate, record.wins, record.losses
+        ));
+        if let Some(game_id) = &record.last_game_id {
+            out.push_str("  :last_game_id: ");
+            push_text(&mut out, game_id.as_str());
+            out.push('\n');
+        }
+        // `:last_modified` は時刻として読まれてよい（Ruby 側では Time になる）ので、
+        // `push_text` ではなく `push_scalar` で quote 無しのまま書く。
+        out.push_str("  :last_modified: ");
+        push_scalar(&mut out, &record.last_modified);
+        out.push('\n');
+    }
+    out
+}
+
+/// プレイヤ名や game id のように、読み手に必ず文字列として読まれるべき値を書く。
+///
+/// [`push_scalar`] の規則に加えて、Ruby の YAML ローダーが文字列以外の型に読む形
+/// （[`ruby_may_read_as_non_string`]）も single quote する。quote してあれば Ruby は
+/// 常に String として読む。
+fn push_text(out: &mut String, s: &str) {
+    if is_plain(s) && ruby_may_read_as_non_string(s) {
+        push_single_quoted(out, s);
+    } else {
+        push_scalar(out, s);
+    }
+}
+
+/// 文字列 1 つを YAML の scalar として `out` に書く。
+///
+/// quote の要否は `serde_yaml` 0.9（libyaml）の出力と同じ規則で決める:
+///
+/// 1. エスケープが要る文字（制御文字・改行・BOM など）を含むなら double quote。
+/// 2. 空文字列、YAML 1.2 で null / 真偽値 / 数値として読まれる文字列、plain で書くと
+///    構文上の意味が変わる文字列は single quote。
+/// 3. それ以外は quote 無し（plain）。`:name` のような Symbol 形や
+///    `2026-04-26T12:34:56+00:00` のような時刻はここに入る。
+fn push_scalar(out: &mut String, s: &str) {
+    if s.chars().any(needs_escape) {
+        out.push('"');
+        for c in s.chars() {
+            push_double_quoted_char(out, c);
+        }
+        out.push('"');
+    } else if is_plain(s) {
+        out.push_str(s);
+    } else {
+        push_single_quoted(out, s);
+    }
+}
+
+/// [`push_scalar`] が quote 無しで書く文字列か。
+fn is_plain(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(needs_escape) && !resolves_to_non_string(s) && plain_allowed(s)
+}
+
+fn push_single_quoted(out: &mut String, s: &str) {
+    out.push('\'');
+    out.push_str(&s.replace('\'', "''"));
+    out.push('\'');
+}
+
+/// quote 無しで書くと、Ruby の YAML ローダー（Psych）が文字列以外の型に読みうる形か。
+///
+/// Ruby は YAML 1.1 寄りの規則で型を推測するので、YAML 1.2 では文字列でしかない形も
+/// 別の型になる。Psych の規則そのものではなく、それを含む広めの判定にしてある
+/// （Psych の版による差を吸収するため。余分に quote しても、読まれる値は変わらない）:
+///
+/// - 真偽値・nil: `yes` / `no` / `on` / `off` / `true` / `false` / `null` など
+///   （大文字小文字を問わない）
+/// - Symbol: `:` 始まり
+/// - 日付・時刻: `2026-04-26` で始まる形
+/// - 数値: `1_000` / `1,000`（区切りつき）、`1:30`（60 進）、`.5`、値域を超える 16 進
+///   表記など。数字か `.`（または符号）で始まり、数字を含み、数値に現れる文字だけで
+///   できているもの
+fn ruby_may_read_as_non_string(s: &str) -> bool {
+    const KEYWORDS: [&str; 9] = ["y", "n", "yes", "no", "on", "off", "true", "false", "null"];
+    if KEYWORDS.iter().any(|k| s.eq_ignore_ascii_case(k)) || s.starts_with(':') {
+        return true;
+    }
+    let unsigned = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if unsigned.eq_ignore_ascii_case(".inf") || unsigned.eq_ignore_ascii_case(".nan") {
+        return true;
+    }
+    starts_with_date(unsigned) || {
+        let mut prev = None;
+        // 符号つきなら区切りで始まる形（`+,5` / `-_29`）も対象にする。古い Psych
+        // （Ruby 2.3 で確認）はこれを整数として読む。
+        let signed = unsigned.len() < s.len();
+        (signed || unsigned.starts_with(|c: char| c.is_ascii_digit() || c == '.'))
+            && unsigned.contains(|c: char| c.is_ascii_digit())
+            && unsigned.chars().all(|c| {
+                // 符号は指数の直後（`1e+5`）にだけ現れる。`20260426-001` のような
+                // game id はここで数値から外れる。
+                let ok = c.is_ascii_hexdigit()
+                    || matches!(c, '_' | ',' | '.' | ':' | 'x')
+                    || (matches!(c, '+' | '-') && matches!(prev, Some('e' | 'E')));
+                prev = Some(c);
+                ok
+            })
+    }
+}
+
+/// `YYYY-M-D`（月・日は 1〜2 桁）で始まるか。
+fn starts_with_date(s: &str) -> bool {
+    let mut parts = s.splitn(3, '-');
+    let (Some(year), Some(month), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let all_digits = |t: &str| t.bytes().all(|b| b.is_ascii_digit());
+    year.len() == 4
+        && all_digits(year)
+        && matches!(month.len(), 1 | 2)
+        && all_digits(month)
+        && rest.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// double quote の中でエスケープして書く必要がある文字か。
+///
+/// そのまま書けるのは ASCII の印字可能文字と、U+00A0 以上の文字のうち改行扱いの
+/// U+2028 / U+2029、BOM (U+FEFF)、非文字 U+FFFE / U+FFFF を除いたもの。
+fn needs_escape(c: char) -> bool {
+    !matches!(
+        c,
+        ' '..='~'
+            | '\u{a0}'..='\u{2027}'
+            | '\u{202a}'..='\u{d7ff}'
+            | '\u{e000}'..='\u{fefe}'
+            | '\u{ff00}'..='\u{fffd}'
+            | '\u{10000}'..='\u{10ffff}'
+    )
+}
+
+fn push_double_quoted_char(out: &mut String, c: char) {
+    match c {
+        '\0' => out.push_str("\\0"),
+        '\u{7}' => out.push_str("\\a"),
+        '\u{8}' => out.push_str("\\b"),
+        '\t' => out.push_str("\\t"),
+        '\n' => out.push_str("\\n"),
+        '\u{b}' => out.push_str("\\v"),
+        '\u{c}' => out.push_str("\\f"),
+        '\r' => out.push_str("\\r"),
+        '\u{1b}' => out.push_str("\\e"),
+        '"' => out.push_str("\\\""),
+        '\\' => out.push_str("\\\\"),
+        '\u{85}' => out.push_str("\\N"),
+        '\u{2028}' => out.push_str("\\L"),
+        '\u{2029}' => out.push_str("\\P"),
+        c if !needs_escape(c) => out.push(c),
+        c if c <= '\u{ff}' => out.push_str(&format!("\\x{:02X}", u32::from(c))),
+        c => out.push_str(&format!("\\u{:04X}", u32::from(c))),
+    }
+}
+
+/// quote 無しで書くと、YAML 1.2 の読み手に文字列以外（null / 真偽値 / 数値）として
+/// 読まれる文字列か。`001` のような「0 始まりの数字列」も quote する。
+fn resolves_to_non_string(s: &str) -> bool {
+    if matches!(
+        s,
+        "null" | "Null" | "NULL" | "~" | "true" | "True" | "TRUE" | "false" | "False" | "FALSE"
+    ) {
+        return true;
+    }
+    let (negative, unsigned) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    if unsigned.starts_with(['+', '-']) {
+        return false;
+    }
+    if unsigned.len() > 1
+        && unsigned.starts_with('0')
+        && unsigned[1..].bytes().all(|b| b.is_ascii_digit())
+    {
+        return true;
+    }
+    for (prefix, radix) in [("0x", 16), ("0o", 8), ("0b", 2)] {
+        if let Some(digits) = unsigned.strip_prefix(prefix) {
+            if digits.starts_with(['+', '-']) {
+                return false;
+            }
+            let is_int = if negative {
+                i128::from_str_radix(&format!("-{digits}"), radix).is_ok()
+            } else {
+                u128::from_str_radix(digits, radix).is_ok()
+            };
+            if is_int {
+                return true;
+            }
+        }
+    }
+    if matches!(unsigned, ".inf" | ".Inf" | ".INF") || matches!(s, ".nan" | ".NaN" | ".NAN") {
+        return true;
+    }
+    let float_text = if negative { s } else { unsigned };
+    float_text.parse::<f64>().is_ok_and(f64::is_finite)
+}
+
+/// quote 無し（plain）で書いても、YAML の構文上ほかの意味に取られない文字列か。
+///
+/// 呼び出し側で空文字列と `needs_escape` な文字（タブ・改行を含む）は除外済みなので、
+/// 空白は ASCII スペースだけを考えればよい。
+fn plain_allowed(s: &str) -> bool {
+    if s.starts_with(' ') || s.ends_with(' ') || s.starts_with("---") || s.starts_with("...") {
+        return false;
+    }
+    let mut prev = None;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        let followed_by_blank = matches!(chars.peek(), None | Some(' '));
+        let is_indicator = match prev {
+            // 先頭の文字: 単独で indicator になる記号と、直後が空白（または末尾）の
+            // ときだけ indicator になる `?` `:` `-`。
+            None => {
+                "#,[]{}&*!|>'\"%@`".contains(c)
+                    || (matches!(c, '?' | ':' | '-') && followed_by_blank)
+            }
+            // 2 文字目以降: `: `（キーと値の区切り）と ` #`（コメント開始）。
+            Some(p) => (c == ':' && followed_by_blank) || (c == '#' && p == ' '),
+        };
+        if is_indicator {
+            return false;
+        }
+        prev = Some(c);
+    }
+    true
 }
 
 /// `path` の親ディレクトリが存在することを検証する（[`load_from_file`] の
@@ -472,13 +893,13 @@ mod tests {
         records.insert("alice".to_owned(), rec("alice", 2500, 100, 50));
         records.insert("bob".to_owned(), rec("bob", 2400, 80, 60));
 
-        let yaml = render_document(&records).unwrap();
+        let yaml = render_document(&records);
         // Ruby `YAML.dump` のキー順は内部 Hash 挿入順だが、ここでは BTreeMap で
         // 名前昇順に正規化する。アルファベット順で alice → bob が確定。
         // `:name`/`:rate`/`:win`/`:loss`/`:last_game_id`/`:last_modified` の
         // Ruby Symbol キーが quote 無しで出力されることを byte 比較で固定する。
-        // `serde_yaml` は ASCII の `:` を quote 不要と判断するため、Ruby
-        // `YAML.dump` と同様にコロン接頭辞のみで bare key として出力される。
+        // 先頭の `:` は直後が空白でなければ quote 不要なので、Ruby `YAML.dump` と
+        // 同様にコロン接頭辞のみで bare key として出力される。
         // diff 検証や grep で扱いやすくする上でも quote 無しの形を期待する。
         let expected = concat!(
             "alice:\n",
@@ -500,7 +921,7 @@ mod tests {
     }
 
     /// `last_game_id` が `None` のレコードは `:last_game_id` 行ごと出力から
-    /// 除外される（serde の `skip_serializing_if`）。Ruby 側で `if rec[:last_game_id]`
+    /// 除外される。Ruby 側で `if rec[:last_game_id]`
     /// truthiness チェックする実装でも、`has_key?(:last_game_id)` で存在判定する
     /// 実装でも、どちらにも互換な見え方になる。`null` リテラルは Ruby `YAML.dump`
     /// が出さない形なので避ける。
@@ -518,7 +939,7 @@ mod tests {
                 last_modified: "2026-04-26T00:00:00+00:00".to_owned(),
             },
         );
-        let yaml = render_document(&records).unwrap();
+        let yaml = render_document(&records);
         let expected = concat!(
             "alice:\n",
             "  :name: alice\n",
@@ -539,7 +960,7 @@ mod tests {
         records.insert("alice".to_owned(), rec("alice", 2500, 100, 50));
         records.insert("bob".to_owned(), rec("bob", 2400, 80, 60));
 
-        let yaml = render_document(&records).unwrap();
+        let yaml = render_document(&records);
         let parsed = parse_document(&yaml).unwrap();
         assert_eq!(parsed, records);
     }
@@ -766,33 +1187,752 @@ mod tests {
         assert_eq!(r.losses, 3);
     }
 
-    /// 日本語ハンドル名 / 数字始まりハンドル名など serde_yaml が quote を要する
-    /// 可能性がある文字列で round-trip する契約を固定する。Ruby 互換 YAML として、
+    /// 日本語ハンドル名 / 数字始まりハンドル名など quote を要する可能性がある
+    /// 文字列で round-trip する契約を固定する。Ruby 互換 YAML として、
     /// UTF-8 名前の対局者を扱える運用を保証する。
     ///
     /// (1) round-trip で意味的同値を保つ
     /// (2) 日本語ハンドルは bare key として出力される（`田中太郎:` の出現を pin）
     /// (3) 数字 only ハンドル `12345` は YAML 1.2 で integer scalar に解釈されうる
-    ///     ため `serde_yaml` は string quote を付ける。`'12345':` の出現を pin する
+    ///     ため string quote を付ける。`'12345':` の出現を pin する
     ///     （quote の有無は仕様変更で破壊的変化があるため byte 列で固定する）。
     #[test]
     fn render_and_parse_round_trip_handles_unicode_and_numeric_names() {
         let mut records = HashMap::new();
         records.insert("田中太郎".to_owned(), rec("田中太郎", 1500, 0, 0));
         records.insert("12345".to_owned(), rec("12345", 1700, 10, 5));
-        let yaml = render_document(&records).unwrap();
+        let yaml = render_document(&records);
         let parsed = parse_document(&yaml).unwrap();
         assert_eq!(parsed, records, "Unicode / numeric handles must round-trip");
 
         // (2): 日本語ハンドルは bare で出力される。
         assert!(yaml.contains("田中太郎:\n"), "non-ASCII handle must be unquoted, got:\n{yaml}",);
         // (3): 数字 only ハンドルは integer 解釈を防ぐため quote される。
-        // serde_yaml 0.9 は single quote を採用するが、double quote 採用 minor バージョン
-        // 変化に保険を掛けるため両方許容する assertion にする。
+        // 現行の出力は single quote（`push_scalar_matches_serde_yaml_quoting` で固定）。
+        // ここでは「quote されていること」だけを見るので double quote も許容する。
         assert!(
             yaml.contains("'12345':\n") || yaml.contains("\"12345\":\n"),
             "numeric handle must be string-quoted to avoid YAML integer coercion, got:\n{yaml}",
         );
+    }
+
+    /// quote の規則を、置き換え前の `serde_yaml` 0.9.34 の実出力で固定する。
+    ///
+    /// 期待値は `serde_yaml::to_string` に同じ文字列を渡して得たもの（手書きではない）。
+    /// Ruby の `mk_rate` と同じファイルを共有するので、出力形式を変えないことが要件。
+    #[test]
+    fn push_scalar_matches_serde_yaml_quoting() {
+        let cases = [
+            // quote 無し
+            ("alice", "alice"),
+            ("田中太郎", "田中太郎"),
+            ("player_1", "player_1"),
+            ("a-b", "a-b"),
+            ("Alice.Bob", "Alice.Bob"),
+            ("2026-04-26T12:34:56+00:00", "2026-04-26T12:34:56+00:00"),
+            ("20260426-001", "20260426-001"),
+            ("1_000", "1_000"),
+            ("yes", "yes"),
+            ("on", "on"),
+            ("a b", "a b"),
+            ("a:b", "a:b"),
+            (":sym", ":sym"),
+            ("-x", "-x"),
+            ("?x", "?x"),
+            ("x#y", "x#y"),
+            ("a'b", "a'b"),
+            ("a\"b", "a\"b"),
+            ("a,b", "a,b"),
+            ("<<", "<<"),
+            ("=", "="),
+            ("a\\b", "a\\b"),
+            ("a\u{a0}b", "a\u{a0}b"),
+            ("😀", "😀"),
+            ("é", "é"),
+            // null / 真偽値 / 数値として読まれる文字列は single quote
+            ("12345", "'12345'"),
+            ("001", "'001'"),
+            ("-1", "'-1'"),
+            ("+1", "'+1'"),
+            ("1e5", "'1e5'"),
+            ("1.5", "'1.5'"),
+            (".5", "'.5'"),
+            ("0x1F", "'0x1F'"),
+            ("0o17", "'0o17'"),
+            ("0b11", "'0b11'"),
+            (".inf", "'.inf'"),
+            (".NaN", "'.NaN'"),
+            ("true", "'true'"),
+            ("True", "'True'"),
+            ("FALSE", "'FALSE'"),
+            ("null", "'null'"),
+            ("~", "'~'"),
+            ("", "''"),
+            // plain で書くと構文上の意味が変わる文字列は single quote
+            ("a: b", "'a: b'"),
+            ("x:", "'x:'"),
+            (":", "':'"),
+            ("-", "'-'"),
+            ("- x", "'- x'"),
+            ("? x", "'? x'"),
+            ("#x", "'#x'"),
+            ("x #y", "'x #y'"),
+            (" lead", "' lead'"),
+            ("trail ", "'trail '"),
+            ("'a", "'''a'"),
+            ("\"a", "'\"a'"),
+            ("@x", "'@x'"),
+            ("[x", "'[x'"),
+            ("{x", "'{x'"),
+            ("*x", "'*x'"),
+            ("&x", "'&x'"),
+            ("!x", "'!x'"),
+            ("|x", "'|x'"),
+            (">x", "'>x'"),
+            ("%x", "'%x'"),
+            ("`x", "'`x'"),
+            ("---", "'---'"),
+            ("--- a", "'--- a'"),
+            ("...", "'...'"),
+            // エスケープが要る文字を含む文字列は double quote
+            ("a\tb", "\"a\\tb\""),
+            ("a\\\tb", "\"a\\\\\\tb\""),
+            ("\u{feff}x", "\"\\uFEFFx\""),
+            ("\u{7f}", "\"\\x7F\""),
+            ("\u{1b}[0m", "\"\\e[0m\""),
+            ("\0", "\"\\0\""),
+            ("\u{7}", "\"\\a\""),
+            ("\u{8}", "\"\\b\""),
+            ("\u{b}", "\"\\v\""),
+            ("\u{c}", "\"\\f\""),
+            ("a\rb", "\"a\\rb\""),
+            ("\u{85}", "\"\\N\""),
+            ("\u{80}", "\"\\x80\""),
+            ("\u{9f}", "\"\\x9F\""),
+            ("\u{fffe}", "\"\\uFFFE\""),
+            ("\u{ffff}", "\"\\uFFFF\""),
+            ("a\"\tb", "\"a\\\"\\tb\""),
+            ("a'\tb", "\"a'\\tb\""),
+            // エスケープ不要な範囲の両端
+            ("\u{a0}", "\u{a0}"),
+            ("\u{2027}", "\u{2027}"),
+            ("\u{202a}", "\u{202a}"),
+            ("\u{d7ff}", "\u{d7ff}"),
+            ("\u{e000}", "\u{e000}"),
+            ("\u{fefe}", "\u{fefe}"),
+            ("\u{ff00}", "\u{ff00}"),
+            ("\u{fffd}", "\u{fffd}"),
+            ("\u{10000}", "\u{10000}"),
+            ("\u{10ffff}", "\u{10ffff}"),
+            // null / 真偽値: 綴りが完全一致するものだけ quote
+            ("false", "'false'"),
+            ("False", "'False'"),
+            ("TRUE", "'TRUE'"),
+            ("Null", "'Null'"),
+            ("NULL", "'NULL'"),
+            ("tRUE", "tRUE"),
+            ("nULL", "nULL"),
+            ("null1", "null1"),
+            ("truex", "truex"),
+            ("~a", "~a"),
+            ("True ", "'True '"),
+            ("y", "y"),
+            ("n", "n"),
+            ("no", "no"),
+            ("off", "off"),
+            // 数値: 符号・0 始まり・指数
+            ("0", "'0'"),
+            ("-0", "'-0'"),
+            ("+0", "'+0'"),
+            ("00", "'00'"),
+            ("-001", "'-001'"),
+            ("+001", "'+001'"),
+            ("1.", "'1.'"),
+            ("1e+5", "'1e+5'"),
+            ("1E5", "'1E5'"),
+            ("1e", "1e"),
+            ("e5", "e5"),
+            ("1.5.5", "1.5.5"),
+            ("+-1", "+-1"),
+            ("-+1", "-+1"),
+            ("--1", "--1"),
+            ("++1", "++1"),
+            ("1,000", "1,000"),
+            ("1:30", "1:30"),
+            ("2026-04-26", "2026-04-26"),
+            // 数値: 基数つき（接頭辞は小文字のみ、桁が不正なら文字列）
+            ("-0x1F", "'-0x1F'"),
+            ("+0x1F", "'+0x1F'"),
+            ("-0o17", "'-0o17'"),
+            ("-0b11", "'-0b11'"),
+            ("0x", "0x"),
+            ("0xZZ", "0xZZ"),
+            ("0X1F", "0X1F"),
+            ("0x-1", "0x-1"),
+            ("0x+1", "0x+1"),
+            ("-0x-1", "-0x-1"),
+            ("0o8", "0o8"),
+            ("0b2", "0b2"),
+            // 数値: 無限大・NaN の綴り
+            (".Inf", "'.Inf'"),
+            (".INF", "'.INF'"),
+            ("-.inf", "'-.inf'"),
+            ("+.inf", "'+.inf'"),
+            ("-.Inf", "'-.Inf'"),
+            (".nan", "'.nan'"),
+            (".NAN", "'.NAN'"),
+            ("-.nan", "-.nan"),
+            ("+.nan", "+.nan"),
+            (".Nan", ".Nan"),
+            // 数値: 値域の境界。`serde_yaml` は u128 / i128 / 有限の f64 に収まるものだけを
+            // 数値とみなして quote していたので、収まらないものは quote 無しになる。
+            (
+                "340282366920938463463374607431768211455",
+                "'340282366920938463463374607431768211455'",
+            ),
+            (
+                "340282366920938463463374607431768211456",
+                "'340282366920938463463374607431768211456'",
+            ),
+            ("0xffffffffffffffffffffffffffffffff", "'0xffffffffffffffffffffffffffffffff'"),
+            ("0x1ffffffffffffffffffffffffffffffff", "0x1ffffffffffffffffffffffffffffffff"),
+            ("-0x80000000000000000000000000000000", "'-0x80000000000000000000000000000000'"),
+            ("-0x80000000000000000000000000000001", "-0x80000000000000000000000000000001"),
+            ("1e999", "1e999"),
+            ("-1e999", "-1e999"),
+            ("inf", "inf"),
+            ("-inf", "-inf"),
+            ("nan", "nan"),
+            ("NaN", "NaN"),
+            ("infinity", "infinity"),
+            // indicator の位置による違い
+            (",x", "',x'"),
+            ("]x", "']x'"),
+            ("}x", "'}x'"),
+            ("?", "'?'"),
+            ("#", "'#'"),
+            ("a?", "a?"),
+            ("a-", "a-"),
+            ("a:", "'a:'"),
+            ("a :b", "a :b"),
+            ("a# b", "a# b"),
+            ("a #", "'a #'"),
+            ("x: y: z", "'x: y: z'"),
+            ("...x", "'...x'"),
+            ("---x", "'---x'"),
+            ("..", ".."),
+            ("--", "--"),
+            ("-- -", "-- -"),
+            ("a  b", "a  b"),
+            (" ", "' '"),
+            ("''", "''''''"),
+            ("it's", "it's"),
+            ("a.b@example.com", "a.b@example.com"),
+            (
+                "wdoor+floodgate-300-10F+alice+bob+20260426123456",
+                "wdoor+floodgate-300-10F+alice+bob+20260426123456",
+            ),
+            ("2026-04-26 12:34:56 +09:00", "2026-04-26 12:34:56 +09:00"),
+        ];
+        for (input, expected) in cases {
+            let mut out = String::new();
+            push_scalar(&mut out, input);
+            assert_eq!(out, expected, "input: {input:?}");
+        }
+    }
+
+    /// 改行文字を含む文字列は double quote + エスケープで書く。
+    ///
+    /// ここだけは `serde_yaml` の出力（block scalar、U+2028 / U+2029 は生のまま）と
+    /// 意図して変えているので、新しい形を固定し、読み戻せることを確認する。
+    #[test]
+    fn push_scalar_escapes_line_breaks() {
+        let cases = [
+            ("a\nb", "\"a\\nb\""),
+            ("a\n", "\"a\\n\""),
+            ("\r", "\"\\r\""),
+            ("a\u{2028}b", "\"a\\Lb\""),
+            ("a\u{2029}b", "\"a\\Pb\""),
+        ];
+        for (input, expected) in cases {
+            let mut out = String::new();
+            push_scalar(&mut out, input);
+            assert_eq!(out, expected, "input: {input:?}");
+
+            let mut records = HashMap::new();
+            let mut record = rec(input, 1500, 0, 0);
+            record.last_game_id = Some(GameId::new(input));
+            record.last_modified = input.to_owned();
+            records.insert(input.to_owned(), record);
+            assert_eq!(
+                parse_document(&render_document(&records)).unwrap(),
+                records,
+                "input: {input:?}"
+            );
+        }
+    }
+
+    /// キーを `key:` と `? key` のどちらで書くかの境界（128 byte）を固定する。
+    ///
+    /// 期待値は `serde_yaml` 0.9.34 の実出力に合わせてある。長さは文字数ではなく
+    /// byte 数で数え、quote が要るキーは `? 'key'` の形になる。
+    #[test]
+    fn render_document_switches_to_explicit_key_above_128_bytes() {
+        let cases = [
+            ("k".repeat(128), false, false),
+            ("k".repeat(129), true, false),
+            // 44 文字 / 128 byte
+            ("あ".repeat(42) + "kk", false, false),
+            // 43 文字 / 129 byte
+            ("あ".repeat(43), true, false),
+            ("1".repeat(129), true, true),
+        ];
+        for (name, explicit, quoted) in cases {
+            let mut records = HashMap::new();
+            let mut record = rec(&name, 1500, 0, 0);
+            record.last_game_id = None;
+            records.insert(name.clone(), record);
+
+            let scalar = if quoted {
+                format!("'{name}'")
+            } else {
+                name.clone()
+            };
+            let head = if explicit {
+                format!("? {scalar}\n: :name: {scalar}\n")
+            } else {
+                format!("{scalar}:\n  :name: {scalar}\n")
+            };
+            let expected = format!(
+                "{head}  :rate: 1500\n  :win: 0\n  :loss: 0\n  :last_modified: 2026-04-26T12:34:56+00:00\n"
+            );
+            let yaml = render_document(&records);
+            assert_eq!(yaml, expected, "key length: {}", name.len());
+            assert_eq!(parse_document(&yaml).unwrap(), records, "key length: {}", name.len());
+        }
+    }
+
+    /// quote 無しで書かれた数値・真偽値の形の値も、文字列の項目には文字列として読む
+    /// （手書きのファイルや、名前を quote しない書き手への備え）。`:last_game_id` の
+    /// `~` は未対局（`None`）として読む。
+    #[test]
+    fn parse_document_reads_unquoted_scalars_as_strings() {
+        let yaml = concat!(
+            "12345:\n",
+            "  :name: 12345\n",
+            "  :rate: 1500\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_game_id: 20260426\n",
+            "  :last_modified: 2026-04-26\n",
+            "true:\n",
+            "  :name: true\n",
+            "  :rate: -20\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_game_id: ~\n",
+            "  :last_modified: 1.5\n",
+        );
+        let parsed = parse_document(yaml).unwrap();
+        let numeric = parsed.get("12345").unwrap();
+        assert_eq!(numeric.name.as_str(), "12345");
+        assert_eq!(numeric.last_game_id.as_ref().map(|g| g.as_str()), Some("20260426"));
+        assert_eq!(numeric.last_modified, "2026-04-26");
+        let boolean = parsed.get("true").unwrap();
+        assert_eq!(boolean.name.as_str(), "true");
+        assert_eq!(boolean.rate, -20);
+        assert_eq!(boolean.last_game_id, None);
+        assert_eq!(boolean.last_modified, "1.5");
+    }
+
+    /// 置き換え前の実装（`serde_yaml` 0.9.34）が書いた `players.yaml` を読める。
+    ///
+    /// fixture は旧実装の実出力そのまま。数字だけの名前の quote、空文字列、`<<` という
+    /// 名前、改行入りの名前（explicit key + block scalar）、129 byte の名前（explicit
+    /// key）、空白区切りの時刻を含む。読んだ結果を書き戻すと、`<<` と改行入りの
+    /// レコード以外は旧実装と同じバイト列になることも確認する。
+    #[test]
+    fn parse_document_reads_file_written_by_serde_yaml() {
+        let long = "n".repeat(129);
+        let numeric_and_merge = concat!(
+            "'12345':\n",
+            "  :name: '12345'\n",
+            "  :rate: 1500\n",
+            "  :win: 3\n",
+            "  :loss: 4\n",
+            "  :last_game_id: '20260426'\n",
+            "  :last_modified: 2026-04-26T12:34:56+00:00\n",
+            "<<:\n",
+            "  :name: <<\n",
+            "  :rate: 1500\n",
+            "  :win: 3\n",
+            "  :loss: 4\n",
+            "  :last_modified: ''\n",
+        );
+        let multiline = concat!(
+            "? |-\n",
+            "  a\n",
+            "  b\n",
+            ": :name: |-\n",
+            "    a\n",
+            "    b\n",
+            "  :rate: 1500\n",
+            "  :win: 3\n",
+            "  :loss: 4\n",
+            "  :last_game_id: |\n",
+            "    x\n",
+            "    y\n",
+            "  :last_modified: 2026-04-26T00:00:00+00:00\n",
+        );
+        let rest = format!(
+            concat!(
+                "'a b: c':\n",
+                "  :name: 'a b: c'\n",
+                "  :rate: 1500\n",
+                "  :win: 3\n",
+                "  :loss: 4\n",
+                "  :last_modified: 2026-04-26 12:34:56 +09:00\n",
+                "alice:\n",
+                "  :name: alice\n",
+                "  :rate: 1500\n",
+                "  :win: 3\n",
+                "  :loss: 4\n",
+                "  :last_game_id: 20260426-001\n",
+                "  :last_modified: 2026-04-26T12:34:56+00:00\n",
+                "? {long}\n",
+                ": :name: {long}\n",
+                "  :rate: 1500\n",
+                "  :win: 3\n",
+                "  :loss: 4\n",
+                "  :last_modified: 2026-04-26T00:00:00+00:00\n",
+                "田中太郎:\n",
+                "  :name: 田中太郎\n",
+                "  :rate: 1500\n",
+                "  :win: 3\n",
+                "  :loss: 4\n",
+                "  :last_modified: 2026-04-26T00:00:00+00:00\n",
+            ),
+            long = long
+        );
+        let written_by_serde_yaml = format!("{numeric_and_merge}{multiline}{rest}");
+
+        let mut expected = HashMap::new();
+        for (name, game_id, last_modified) in [
+            ("12345", Some("20260426"), "2026-04-26T12:34:56+00:00"),
+            ("<<", None, ""),
+            ("a\nb", Some("x\ny\n"), "2026-04-26T00:00:00+00:00"),
+            ("a b: c", None, "2026-04-26 12:34:56 +09:00"),
+            ("alice", Some("20260426-001"), "2026-04-26T12:34:56+00:00"),
+            (long.as_str(), None, "2026-04-26T00:00:00+00:00"),
+            ("田中太郎", None, "2026-04-26T00:00:00+00:00"),
+        ] {
+            expected.insert(
+                name.to_owned(),
+                PlayerRateRecord {
+                    name: PlayerName::new(name),
+                    rate: 1500,
+                    wins: 3,
+                    losses: 4,
+                    last_game_id: game_id.map(GameId::new),
+                    last_modified: last_modified.to_owned(),
+                },
+            );
+        }
+        let mut parsed = parse_document(&written_by_serde_yaml).unwrap();
+        assert_eq!(parsed, expected);
+
+        // 書き戻すと、`<<` という名前（`!!str` タグを付ける）と改行入りのレコード
+        // （double quote + エスケープ）だけ旧実装と形が違う。どちらも意図した差。
+        let rendered_multiline = concat!(
+            "\"a\\nb\":\n",
+            "  :name: \"a\\nb\"\n",
+            "  :rate: 1500\n",
+            "  :win: 3\n",
+            "  :loss: 4\n",
+            "  :last_game_id: \"x\\ny\\n\"\n",
+            "  :last_modified: 2026-04-26T00:00:00+00:00\n",
+        );
+        assert_eq!(
+            render_document(&parsed),
+            format!(
+                "{}{rendered_multiline}{rest}",
+                numeric_and_merge.replace("<<:\n", "!!str <<:\n")
+            )
+        );
+        assert_eq!(parse_document(&render_document(&parsed)).unwrap(), expected);
+
+        // 残りは旧実装の出力とバイト一致する。
+        parsed.remove("a\nb");
+        parsed.remove("<<");
+        assert_eq!(
+            render_document(&parsed),
+            format!("{}{rest}", numeric_and_merge.split("<<:\n").next().unwrap())
+        );
+    }
+
+    /// プレイヤ名と game id は、Ruby の YAML ローダーが文字列以外の型に読む形なら
+    /// quote する（`serde_yaml` は quote していなかった）。それ以外は quote しない。
+    #[test]
+    fn push_text_quotes_what_ruby_reads_as_non_string() {
+        let cases = [
+            // 真偽値・nil（大文字小文字を問わない）
+            ("yes", "'yes'"),
+            ("Yes", "'Yes'"),
+            ("NO", "'NO'"),
+            ("on", "'on'"),
+            ("oFF", "'oFF'"),
+            ("y", "'y'"),
+            ("N", "'N'"),
+            ("tRUE", "'tRUE'"),
+            ("nULL", "'nULL'"),
+            // Symbol
+            (":foo", "':foo'"),
+            // 日付・時刻
+            ("2026-04-26", "'2026-04-26'"),
+            ("2026-4-6", "'2026-4-6'"),
+            ("2026-04-26T12:34:56+00:00", "'2026-04-26T12:34:56+00:00'"),
+            ("2026-04-26 12:34:56 +09:00", "'2026-04-26 12:34:56 +09:00'"),
+            // 数値: 区切りつき・60 進・値域を超える 16 進・綴り違いの無限大 / NaN
+            ("1_000", "'1_000'"),
+            ("1,000", "'1,000'"),
+            ("-1_000", "'-1_000'"),
+            // 符号 + 区切り始まり（Ruby 2.3 が整数として読む）
+            ("+,5", "'+,5'"),
+            ("-_29", "'-_29'"),
+            ("1_000.5", "'1_000.5'"),
+            ("1:30", "'1:30'"),
+            ("1:30:45.5", "'1:30:45.5'"),
+            ("0_7", "'0_7'"),
+            ("0x_1F", "'0x_1F'"),
+            ("0x1ffffffffffffffffffffffffffffffff", "'0x1ffffffffffffffffffffffffffffffff'"),
+            (".iNf", "'.iNf'"),
+            ("-.INF", "'-.INF'"),
+            (".nAn", "'.nAn'"),
+            // `push_scalar` の規則ですでに quote されるものはそのまま
+            ("12345", "'12345'"),
+            ("true", "'true'"),
+            ("", "''"),
+            ("a\tb", "\"a\\tb\""),
+            // 文字列としてしか読まれないものは quote しない
+            ("alice", "alice"),
+            ("田中太郎", "田中太郎"),
+            ("player_1", "player_1"),
+            ("yesman", "yesman"),
+            ("20260426-001", "20260426-001"),
+            ("2ch_bot", "2ch_bot"),
+            ("3gatsu", "3gatsu"),
+            ("x1_000", "x1_000"),
+            ("_29", "_29"),
+            ("-x", "-x"),
+            ("+a", "+a"),
+            ("a:b", "a:b"),
+            ("<<", "<<"),
+            (
+                "wdoor+floodgate-300-10F+alice+bob+20260426123456",
+                "wdoor+floodgate-300-10F+alice+bob+20260426123456",
+            ),
+        ];
+        for (input, expected) in cases {
+            let mut out = String::new();
+            push_text(&mut out, input);
+            assert_eq!(out, expected, "input: {input:?}");
+        }
+    }
+
+    /// プレイヤ名と `:last_game_id` には Ruby 向けの quote を掛け、`:last_modified` の
+    /// 時刻は quote 無しのまま書く。`<<` という名前は `!!str` タグつきのキーにする。
+    #[test]
+    fn render_document_quotes_names_but_not_last_modified() {
+        let mut records = HashMap::new();
+        for (name, game_id) in [("yes", "2026-04-26"), ("<<", "1_000")] {
+            let mut record = rec(name, 1500, 0, 0);
+            record.last_game_id = Some(GameId::new(game_id));
+            records.insert(name.to_owned(), record);
+        }
+        let yaml = render_document(&records);
+        let expected = concat!(
+            "!!str <<:\n",
+            "  :name: <<\n",
+            "  :rate: 1500\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_game_id: '1_000'\n",
+            "  :last_modified: 2026-04-26T12:34:56+00:00\n",
+            "'yes':\n",
+            "  :name: 'yes'\n",
+            "  :rate: 1500\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_game_id: '2026-04-26'\n",
+            "  :last_modified: 2026-04-26T12:34:56+00:00\n",
+        );
+        assert_eq!(yaml, expected);
+        assert_eq!(parse_document(&yaml).unwrap(), records);
+    }
+
+    /// Ruby の `YAML.dump` が書く形（`---` 始まり、未知のキーあり）を読める。
+    ///
+    /// fixture は手書き（このテストは Ruby を実行しない）。
+    #[test]
+    fn parse_document_reads_document_with_start_marker_and_unknown_keys() {
+        let yaml = concat!(
+            "---\n",
+            "alice:\n",
+            "  :name: alice\n",
+            "  :rate: 2500\n",
+            "  :win: 100\n",
+            "  :loss: 50\n",
+            "  :rating_group: 0\n",
+            "  :last_modified: 2026-04-26 12:34:56.000000000 +09:00\n",
+        );
+        let parsed = parse_document(yaml).unwrap();
+        let alice = parsed.get("alice").unwrap();
+        assert_eq!(alice.rate, 2500);
+        assert_eq!(alice.last_game_id, None);
+        assert_eq!(alice.last_modified, "2026-04-26 12:34:56.000000000 +09:00");
+    }
+
+    /// 同じプレイヤ名が重複していたら後のレコードを採る。
+    #[test]
+    fn parse_document_keeps_last_record_for_duplicate_name() {
+        let record = |rate: i32| {
+            format!(
+                "alice:\n  :name: alice\n  :rate: {rate}\n  :win: 0\n  :loss: 0\n  :last_modified: t\n"
+            )
+        };
+        let parsed = parse_document(&format!("{}{}", record(1500), record(1600))).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.get("alice").unwrap().rate, 1600);
+    }
+
+    /// 数値として読むと同じ値になる名前も、書かれた文字列のまま別のプレイヤとして読む。
+    ///
+    /// fixture は `serde_yaml` 0.9.34 の実出力。旧実装はこれらを quote 無しで書いて
+    /// いたので、キーを数値として解釈するデシリアライザだと片方のレコードが消える。
+    #[test]
+    fn parse_document_keeps_names_that_are_equal_as_numbers() {
+        let names = ["+1_0", "0X10", "0x_10", "10_00", "1_0", "1_000"];
+        let written_by_serde_yaml: String = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                format!(
+                    "{name}:\n  :name: {name}\n  :rate: {}\n  :win: 0\n  :loss: 0\n  :last_modified: t\n",
+                    1500 + i
+                )
+            })
+            .collect();
+        let parsed = parse_document(&written_by_serde_yaml).unwrap();
+        assert_eq!(parsed.len(), names.len());
+        for (i, name) in names.iter().enumerate() {
+            let record = parsed.get(*name).unwrap();
+            assert_eq!(record.name.as_str(), *name);
+            assert_eq!(record.rate, 1500 + i as i32);
+        }
+        // 書き戻すとすべて quote され、読み直しても同じ内容になる。
+        assert_eq!(parse_document(&render_document(&parsed)).unwrap(), parsed);
+    }
+
+    /// Ruby の `YAML.dump` は同じ文字列オブジェクトを 2 回書くとき anchor / alias を
+    /// 使う（対局した 2 人の `:last_game_id` など）。alias 側も同じ文字列として読む。
+    #[test]
+    fn parse_document_resolves_scalar_aliases() {
+        let yaml = concat!(
+            "---\n",
+            "alice:\n",
+            "  :name: alice\n",
+            "  :rate: 1500\n",
+            "  :win: 1\n",
+            "  :loss: 0\n",
+            "  :last_game_id: &1 20260426-001\n",
+            "  :last_modified: 2026-04-26 12:34:56 +09:00\n",
+            "bob:\n",
+            "  :name: bob\n",
+            "  :rate: 1500\n",
+            "  :win: 0\n",
+            "  :loss: 1\n",
+            "  :last_game_id: *1\n",
+            "  :last_modified: 2026-04-26 12:34:56 +09:00\n",
+        );
+        let parsed = parse_document(yaml).unwrap();
+        for name in ["alice", "bob"] {
+            let record = parsed.get(name).unwrap();
+            assert_eq!(record.last_game_id.as_ref().map(|g| g.as_str()), Some("20260426-001"));
+        }
+    }
+
+    /// 知らない項目は、値が mapping や sequence でも読み飛ばす。同じ項目が重複して
+    /// いたら後のものを採る。
+    #[test]
+    fn parse_document_skips_unknown_fields_and_keeps_last_duplicate_field() {
+        let yaml = concat!(
+            "alice:\n",
+            "  :name: alice\n",
+            "  :history:\n",
+            "    - {:game: g1, :result: win}\n",
+            "    - [1, 2, [3]]\n",
+            "  :rate: 1500\n",
+            "  :rate: 1600\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :extra: {a: {b: c}}\n",
+            "  :last_modified: t\n",
+            "bob:\n",
+            "  :name: bob\n",
+            "  :rate: 1400\n",
+            "  :win: 0\n",
+            "  :loss: 0\n",
+            "  :last_modified: t\n",
+        );
+        let parsed = parse_document(yaml).unwrap();
+        assert_eq!(parsed.get("alice").unwrap().rate, 1600);
+        assert_eq!(parsed.get("bob").unwrap().rate, 1400);
+    }
+
+    /// 形が合わないファイルは、理由と行番号つきの `Malformed` で拒否する。
+    #[test]
+    fn parse_document_rejects_unexpected_shapes() {
+        let record = "  :name: a\n  :rate: 1\n  :win: 0\n  :loss: 0\n  :last_modified: t\n";
+        let cases = [
+            // 必須項目が無い
+            (
+                "alice:\n  :name: alice\n  :rate: 1\n  :win: 0\n  :loss: 0\n",
+                "missing field `:last_modified`",
+            ),
+            // 数値でない
+            ("alice:\n  :name: alice\n  :rate: abc\n", "invalid value \"abc\" for `:rate`"),
+            ("alice:\n  :name: alice\n  :win: -1\n", "invalid value \"-1\" for `:win`"),
+            // レコードが mapping でない
+            ("alice: 1500\n", "must be a mapping"),
+            ("- alice\n", "expected a mapping of players"),
+            // 文字列の項目が mapping
+            ("alice:\n  :name: {a: b}\n", "`:name` must be a scalar"),
+        ];
+        for (yaml, expected) in cases {
+            let message = parse_document(yaml).unwrap_err().to_string();
+            assert!(message.contains(expected), "yaml: {yaml:?}, message: {message}");
+            assert!(message.contains("line"), "yaml: {yaml:?}, message: {message}");
+        }
+        // 2 つ目の文書がある
+        let two_documents = format!("a:\n{record}---\nb:\n{record}");
+        let message = parse_document(&two_documents).unwrap_err().to_string();
+        assert!(message.contains("single YAML document"), "message: {message}");
+    }
+
+    /// 空のファイル・コメントだけ・`---` だけの文書は、プレイヤ 0 人として読む。
+    #[test]
+    fn parse_document_treats_blank_documents_as_empty() {
+        for yaml in ["", "# no players yet\n", "---\n", "--- {}\n", "--- ~\n"] {
+            assert!(parse_document(yaml).unwrap().is_empty(), "yaml: {yaml:?}");
+        }
+    }
+
+    /// レコードが 1 件も無いときは空の mapping を書き、読み戻せる。
+    #[test]
+    fn render_document_emits_empty_mapping_for_no_records() {
+        let yaml = render_document(&HashMap::new());
+        assert_eq!(yaml, "{}\n");
+        assert!(parse_document(&yaml).unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
