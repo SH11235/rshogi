@@ -173,6 +173,8 @@ pub use network_layer_stacks::NetworkLayerStacks1536x32x32;
 pub use network_layer_stacks::NetworkLayerStacks2304x16x64;
 #[cfg(all(feature = "layerstacks-3072x16x32", feature = "ft-halfka_hm_merged"))]
 pub use network_layer_stacks::NetworkLayerStacks3072x16x32;
+#[cfg(all(feature = "layerstacks-3072x16x64", feature = "ft-halfka_hm_merged"))]
+pub use network_layer_stacks::NetworkLayerStacks3072x16x64;
 pub use network_layer_stacks::{
     LayerStacksNetwork, LsNetByFt, NetworkLayerStacks, compute_layer_stack_kingrank9_bucket_index,
 };

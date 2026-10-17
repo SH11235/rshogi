@@ -48,5 +48,5 @@ build 構成によって変わりません。
 ### L2=64 の専用モデル
 
 静的 LayerStacks の解析には、モデルの寸法に合わせて
-`--features layerstacks-2304x16x64` または `--features layerstacks-1536x16x64`
+`--features layerstacks-3072x16x64`、`--features layerstacks-2304x16x64` または `--features layerstacks-1536x16x64`
 をビルド時に追加する。L2 の中間出力も指定した幅で計算する。

@@ -11,6 +11,7 @@ pub fn for_each_model(include_l2_64: bool, mut check: impl FnMut(&str, Vec<u8>))
         (1536, 32, cfg!(feature = "layerstacks-1536x16x32")),
         (1536, 64, cfg!(feature = "layerstacks-1536x16x64")),
         (2304, 64, cfg!(feature = "layerstacks-2304x16x64")),
+        (3072, 64, cfg!(feature = "layerstacks-3072x16x64")),
     ] {
         if l3 == 64 && !include_l2_64 {
             continue;

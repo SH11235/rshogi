@@ -642,6 +642,7 @@ mod tests {
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
                 feature = "layerstacks-2304x16x64",
+                feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64"
             )
         ))]
@@ -737,6 +738,17 @@ mod tests {
             {
                 let mut stack = AccumulatorStackVariant::LayerStacks(
                     LayerStacksAccStack::L2304x16x64(AccumulatorStackLayerStacks::<2304>::new()),
+                );
+                stack.reset();
+                stack.push(dirty);
+                stack.push(dirty);
+                stack.pop();
+                stack.pop();
+            }
+            #[cfg(feature = "layerstacks-3072x16x64")]
+            {
+                let mut stack = AccumulatorStackVariant::LayerStacks(
+                    LayerStacksAccStack::L3072x16x64(AccumulatorStackLayerStacks::<3072>::new()),
                 );
                 stack.reset();
                 stack.push(dirty);

@@ -170,6 +170,8 @@ macro_rules! layer_observe {
             LayerStacksAccStack::L3072x16x32($entry) => $body,
             #[cfg(feature = "layerstacks-2304x16x64")]
             LayerStacksAccStack::L2304x16x64($entry) => $body,
+            #[cfg(feature = "layerstacks-3072x16x64")]
+            LayerStacksAccStack::L3072x16x64($entry) => $body,
             #[cfg(feature = "layerstacks-1536x16x64")]
             LayerStacksAccStack::L1536x16x64($entry) => $body,
         }
@@ -723,6 +725,7 @@ fn check_loader_matrix() {
             (1024, 16, 32, cfg!(feature = "layerstacks-1024x16x32")),
             (3072, 16, 32, cfg!(feature = "layerstacks-3072x16x32")),
             (2304, 16, 64, cfg!(feature = "layerstacks-2304x16x64")),
+            (3072, 16, 64, cfg!(feature = "layerstacks-3072x16x64")),
             (1536, 16, 64, cfg!(feature = "layerstacks-1536x16x64")),
             (128, 8, 16, false),
         ] {

@@ -763,6 +763,7 @@ mod tests {
         let manifest = include_str!("../../rshogi-usi/Cargo.toml");
         for edition in [
             "layerstacks-halfka_hm_merged-2304x16x64-none",
+            "layerstacks-halfka_hm_merged-3072x16x64-none",
             "layerstacks-halfka_hm_merged-1536x16x64-none",
         ] {
             assert!(manifest.contains(&normalize_edition(edition)));

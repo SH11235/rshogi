@@ -1888,6 +1888,8 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
             LayerStacksAccStack::L3072x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(feature = "layerstacks-2304x16x64")]
             LayerStacksAccStack::L2304x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
+            #[cfg(feature = "layerstacks-3072x16x64")]
+            LayerStacksAccStack::L3072x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(feature = "layerstacks-1536x16x64")]
             LayerStacksAccStack::L1536x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(not(any(
@@ -1899,6 +1901,7 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
                 feature = "layerstacks-1024x16x32",
                 feature = "layerstacks-3072x16x32",
                 feature = "layerstacks-2304x16x64",
+                feature = "layerstacks-3072x16x64",
                 feature = "layerstacks-1536x16x64"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
@@ -3320,6 +3323,8 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes()); // network_hash (dummy)
         let (l1, l3) = if cfg!(feature = "layerstacks-2304x16x64") {
             (2304, 64)
+        } else if cfg!(feature = "layerstacks-3072x16x64") {
+            (3072, 64)
         } else if cfg!(feature = "layerstacks-1536x16x64") {
             (1536, 64)
         } else {
@@ -3459,6 +3464,8 @@ mod tests {
         num_buckets_header.extend_from_slice(&0u32.to_le_bytes());
         let (l1, l3) = if cfg!(feature = "layerstacks-2304x16x64") {
             (2304, 64)
+        } else if cfg!(feature = "layerstacks-3072x16x64") {
+            (3072, 64)
         } else if cfg!(feature = "layerstacks-1536x16x64") {
             (1536, 64)
         } else {

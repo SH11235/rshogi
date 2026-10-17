@@ -113,6 +113,7 @@ layerstacks-512x16x32  = []
 layerstacks-1024x16x32 = []
 layerstacks-3072x16x32 = []
 layerstacks-2304x16x64 = []
+layerstacks-3072x16x64 = []
 layerstacks-1536x16x64 = []
 
 # LayerStack 拡張 slot (psqt / threat)
@@ -191,7 +192,7 @@ edition-layerstacks             = ["edition-layerstacks-any-any-any"]
 edition-layerstacks-any-any-any = [
   "mode-family", "layerstack-arch",
   "ft-halfkp", "ft-halfka_split", "ft-halfka_merged", "ft-halfka_hm_split", "ft-halfka_hm_merged",
-  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32", "layerstacks-1024x16x32", "layerstacks-3072x16x32", "layerstacks-2304x16x64", "layerstacks-1536x16x64",
+  "layerstacks-1536x16x32", "layerstacks-1536x32x32", "layerstacks-768x16x32", "layerstacks-768x8x32", "layerstacks-512x16x32", "layerstacks-1024x16x32", "layerstacks-3072x16x32", "layerstacks-2304x16x64", "layerstacks-3072x16x64", "layerstacks-1536x16x64",
   "nnue-psqt", "nnue-threat",
 ]
 
@@ -299,6 +300,10 @@ edition-layerstacks-halfka_hm_merged-3072x16x32-none = [
 ]
 edition-layerstacks-halfka_hm_merged-2304x16x64-none = [
   "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-2304x16x64",
+  "nnue-progress-diff",
+]
+edition-layerstacks-halfka_hm_merged-3072x16x64-none = [
+  "mode-specific", "layerstack-arch", "ft-halfka_hm_merged", "layerstacks-3072x16x64",
   "nnue-progress-diff",
 ]
 edition-layerstacks-halfka_hm_merged-1536x16x64-none = [

@@ -26,6 +26,7 @@ fn validate_feature_combination(
         "layerstacks-1024x16x32",
         "layerstacks-3072x16x32",
         "layerstacks-2304x16x64",
+        "layerstacks-3072x16x64",
         "layerstacks-1536x16x64",
     ];
     let layerstacks_count = layerstacks_features
@@ -147,11 +148,12 @@ fn validate_feature_combination(
                 || has_feature("layerstacks-1536x32x32")
                 || has_feature("layerstacks-3072x16x32")
                 || has_feature("layerstacks-2304x16x64")
+                || has_feature("layerstacks-3072x16x64")
                 || has_feature("layerstacks-1536x16x64"));
         if !valid {
             return Err(
                 "nnue-progress-diff は mode-specific + layerstacks-1536x16x32 / layerstacks-1536x32x32 \
-                 / layerstacks-3072x16x32 / layerstacks-2304x16x64 / layerstacks-1536x16x64 でのみ有効です。他構成では NPS が退行します。"
+                 / layerstacks-3072x16x32 / layerstacks-2304x16x64 / layerstacks-3072x16x64 / layerstacks-1536x16x64 でのみ有効です。他構成では NPS が退行します。"
                     .to_string(),
             );
         }
