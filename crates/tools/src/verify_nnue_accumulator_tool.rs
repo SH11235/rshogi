@@ -61,10 +61,11 @@ fn verify_with_network<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L2_OUT: usize,
     FT: LsFeatureSpec,
 >(
     cli: &Cli,
-    net: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>,
+    net: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
 ) -> Result<(usize, usize)> {
     let sfens = ["lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1"];
     let mut total_tests = 0usize;

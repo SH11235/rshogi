@@ -3,23 +3,32 @@
 use super::core;
 use core::nnue::*;
 
-pub fn for_each_model(mut check: impl FnMut(&str, Vec<u8>)) {
+pub fn for_each_model(include_l2_64: bool, mut check: impl FnMut(&str, Vec<u8>)) {
     if cfg!(any(feature = "halfkx-arch", feature = "nnue-runtime-dimensions")) {
         for_each_halfkx_model(&mut check);
     }
-    if cfg!(any(
-        feature = "nnue-runtime-dimensions",
-        all(feature = "layerstacks-1536x16x32", feature = "ft-halfka_hm_merged")
-    )) {
-        let model = core::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
-            "HalfKaHmMerged",
-            HALFKA_HM_DIMENSIONS,
-            1536,
-            16,
-            32,
-            4,
-        );
-        check("LayerStacks", model.bytes);
+    for (l1, l3, enabled) in [
+        (1536, 32, cfg!(feature = "layerstacks-1536x16x32")),
+        (1536, 64, cfg!(feature = "layerstacks-1536x16x64")),
+        (2304, 64, cfg!(feature = "layerstacks-2304x16x64")),
+        (3072, 64, cfg!(feature = "layerstacks-3072x16x64")),
+    ] {
+        if l3 == 64 && !include_l2_64 {
+            continue;
+        }
+        if cfg!(feature = "nnue-runtime-dimensions")
+            || (enabled && cfg!(feature = "ft-halfka_hm_merged"))
+        {
+            let model = core::nnue::net_delta::test_utils::build_synthetic_layer_stacks(
+                "HalfKaHmMerged",
+                HALFKA_HM_DIMENSIONS,
+                l1,
+                16,
+                l3,
+                4,
+            );
+            check("LayerStacks", model.bytes);
+        }
     }
 }
 

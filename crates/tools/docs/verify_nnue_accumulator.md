@@ -10,3 +10,6 @@ LayerStacks の accumulator 更新を refresh と照合します。
 モデルの読み込みには静的 LayerStacks 専用の reader を使います。同じビルドの他 crate
 経由で universal edition の `nnue-runtime-dimensions` が feature 統合されていても、
 LayerStacks net を静的構造のまま読み込めます（CLI は変わりません）。
+
+L2=64 モデルの検証には、ビルド時に `--features layerstacks-3072x16x64`、`--features layerstacks-2304x16x64`
+または `--features layerstacks-1536x16x64` をモデルに合わせて追加する。

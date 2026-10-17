@@ -18,11 +18,10 @@ use std::path::PathBuf;
 
 use rshogi_core::nnue::{
     AccumulatorLayerStacks, AffineTransform, FeatureSet, LayerStackBucketMode, LsFeatureSpec,
-    NNUE_PYTORCH_L3, NNUENetwork, NetworkLayerStacks,
-    compute_layer_stack_progresskpabs_bucket_index, configure_layer_stack_routing,
-    get_layer_stack_progress_kpabs_weights, layer_stack_progress_coeff_required,
-    load_progress_coeff_kpabs, ls_dispatch_ft_size, set_layer_stack_progress_kpabs_weights,
-    sqr_clipped_relu_transform,
+    NNUENetwork, NetworkLayerStacks, compute_layer_stack_progresskpabs_bucket_index,
+    configure_layer_stack_routing, get_layer_stack_progress_kpabs_weights,
+    layer_stack_progress_coeff_required, load_progress_coeff_kpabs, ls_dispatch_ft_size,
+    set_layer_stack_progress_kpabs_weights, sqr_clipped_relu_transform,
 };
 use rshogi_core::position::Position;
 use rshogi_core::types::Color;
@@ -167,9 +166,10 @@ fn recompute_ft_scalar<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L2_OUT: usize,
     FT: LsFeatureSpec,
 >(
-    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>,
+    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
     pos: &Position,
     perspective: Color,
 ) -> [i32; L1] {
@@ -192,9 +192,10 @@ fn dump_debug_first<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L2_OUT: usize,
     FT: LsFeatureSpec,
 >(
-    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>,
+    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
     pos: &Position,
     acc: &AccumulatorLayerStacks<L1>,
     sfen: &str,
@@ -270,14 +271,14 @@ fn dump_debug_first<
     }
     eprintln!("[debug] l2_input[0..{LS_L2_IN}]={:?}", &l2_input[..LS_L2_IN]);
 
-    let mut l2_simd = [0i32; NNUE_PYTORCH_L3];
-    let mut l2_scalar = [0i32; NNUE_PYTORCH_L3];
+    let mut l2_simd = [0i32; LS_L2_OUT];
+    let mut l2_scalar = [0i32; LS_L2_OUT];
     bucket.l2.propagate(&l2_input, &mut l2_simd);
     affine_scalar(&bucket.l2, &l2_input, &mut l2_scalar);
     compare_i32_slices("LayerStack L2(simd vs scalar)", &l2_simd, &l2_scalar);
     eprintln!("[debug] l2_out first16={:?}", &l2_simd[..16]);
 
-    let mut l2_relu = [0u8; NNUE_PYTORCH_L3];
+    let mut l2_relu = [0u8; LS_L2_OUT];
     for (dst, &v) in l2_relu.iter_mut().zip(l2_simd.iter()) {
         *dst = (v >> 6).clamp(0, 127) as u8;
     }
@@ -302,10 +303,11 @@ fn run_eval_for_network<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L2_OUT: usize,
     FT: LsFeatureSpec,
 >(
     cli: &Cli,
-    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>,
+    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
 ) -> Result<()> {
     eprintln!("fv_scale: {}", network.fv_scale);
     eprintln!(
