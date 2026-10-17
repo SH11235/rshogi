@@ -597,9 +597,9 @@ fn clipped_relu_i32_to_u8<const LS_L2_OUT: usize>(input: &[i32; LS_L2_OUT], outp
 
 /// 活性化と出力層の内積を融合する。
 ///
-/// `packus` が負値を0へ飽和するため、shift後は上限127だけを明示的にclampすれば
-/// `clamp(input >> 6, 0, 127)` と一致する。32/64要素をレジスタ内でu8へpackし、そのまま
-/// 出力層の内積へ渡すことで、中間配列へのstore/reloadを省く。
+/// 32/64要素をレジスタ内で活性化し、そのまま出力層の内積へ渡すことで、
+/// 中間配列へのstore/reloadを省く。32要素ではshift後の上限clampとpackusを使い、
+/// 64要素では符号付き飽和packと下限clampを使う。
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
 fn clipped_relu_affine_to_1<const LS_L2_OUT: usize>(
@@ -654,6 +654,10 @@ fn clipped_relu_affine_to_1<const LS_L2_OUT: usize>(
 }
 
 /// 64要素の活性化と内積を融合し、2ブロックの積和を最後に一度だけ水平加算する。
+///
+/// i32を先にi16へ飽和しても、範囲外の値は最終的に0または127になる。
+/// 16-bit算術shift後のsigned packとsigned maxにより、全i32で
+/// `clamp(input >> 6, 0, 127)` と一致する。
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx2",
@@ -665,17 +669,20 @@ fn clipped_relu_affine_64_to_1_avx2(input: &[i32; 64], weights: &[i8; 64], bias:
     // 活性化は[0,127]なのでmaddubsの2項和はi16に収まる。
     unsafe {
         use std::arch::x86_64::*;
-        let max127 = _mm256_set1_epi32(127);
         let reorder = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
         let mut sum = _mm256_setzero_si256();
         for block in 0..2 {
             let ptr = input.as_ptr().add(block * 32).cast::<__m256i>();
-            let v0 = _mm256_min_epi32(_mm256_srai_epi32(_mm256_loadu_si256(ptr), 6), max127);
-            let v1 = _mm256_min_epi32(_mm256_srai_epi32(_mm256_loadu_si256(ptr.add(1)), 6), max127);
-            let v2 = _mm256_min_epi32(_mm256_srai_epi32(_mm256_loadu_si256(ptr.add(2)), 6), max127);
-            let v3 = _mm256_min_epi32(_mm256_srai_epi32(_mm256_loadu_si256(ptr.add(3)), 6), max127);
+            let words01 = _mm256_srai_epi16(
+                _mm256_packs_epi32(_mm256_loadu_si256(ptr), _mm256_loadu_si256(ptr.add(1))),
+                6,
+            );
+            let words23 = _mm256_srai_epi16(
+                _mm256_packs_epi32(_mm256_loadu_si256(ptr.add(2)), _mm256_loadu_si256(ptr.add(3))),
+                6,
+            );
             let packed =
-                _mm256_packus_epi16(_mm256_packs_epi32(v0, v1), _mm256_packs_epi32(v2, v3));
+                _mm256_max_epi8(_mm256_packs_epi16(words01, words23), _mm256_setzero_si256());
             let activations = _mm256_permutevar8x32_epi32(packed, reorder);
             let weight = _mm256_loadu_si256(weights.as_ptr().add(block * 32).cast());
             let product =
@@ -690,6 +697,7 @@ fn clipped_relu_affine_64_to_1_avx2(input: &[i32; 64], weights: &[i8; 64], bias:
 }
 
 /// 64要素を一括でpackし、VNNIが有効なら4項積和、BWでは2段の積和を使う。
+/// 活性化はAVX2版と同じく、i16への飽和pack後にshiftとsigned pack/maxを行う。
 #[cfg(all(target_arch = "x86_64", target_feature = "avx512bw"))]
 #[inline]
 fn clipped_relu_affine_64_to_1_avx512(input: &[i32; 64], weights: &[i8; 64], bias: i32) -> i32 {
@@ -698,12 +706,15 @@ fn clipped_relu_affine_64_to_1_avx512(input: &[i32; 64], weights: &[i8; 64], bia
     unsafe {
         use std::arch::x86_64::*;
         let ptr = input.as_ptr().cast::<__m512i>();
-        let max127 = _mm512_set1_epi32(127);
-        let v0 = _mm512_min_epi32(_mm512_srai_epi32(_mm512_loadu_si512(ptr), 6), max127);
-        let v1 = _mm512_min_epi32(_mm512_srai_epi32(_mm512_loadu_si512(ptr.add(1)), 6), max127);
-        let v2 = _mm512_min_epi32(_mm512_srai_epi32(_mm512_loadu_si512(ptr.add(2)), 6), max127);
-        let v3 = _mm512_min_epi32(_mm512_srai_epi32(_mm512_loadu_si512(ptr.add(3)), 6), max127);
-        let packed = _mm512_packus_epi16(_mm512_packs_epi32(v0, v1), _mm512_packs_epi32(v2, v3));
+        let words01 = _mm512_srai_epi16(
+            _mm512_packs_epi32(_mm512_loadu_si512(ptr), _mm512_loadu_si512(ptr.add(1))),
+            6,
+        );
+        let words23 = _mm512_srai_epi16(
+            _mm512_packs_epi32(_mm512_loadu_si512(ptr.add(2)), _mm512_loadu_si512(ptr.add(3))),
+            6,
+        );
+        let packed = _mm512_max_epi8(_mm512_packs_epi16(words01, words23), _mm512_setzero_si512());
         // packは128-bit laneごとに動くため、4-byte groupの転置を戻す。
         let order = _mm512_setr_epi32(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
         let activations = _mm512_permutexvar_epi32(order, packed);
@@ -1025,6 +1036,9 @@ mod tests {
         let edges = [
             i32::MIN,
             -2_097_153,
+            -32769,
+            -32768,
+            -32767,
             -65,
             -64,
             -1,
@@ -1033,7 +1047,11 @@ mod tests {
             64,
             8127,
             8128,
+            8129,
             8191,
+            32766,
+            32767,
+            32768,
             i32::MAX,
         ];
         for case in 0..512 {
