@@ -610,9 +610,9 @@ fn clipped_relu_affine_to_1<const LS_L2_OUT: usize>(
     if LS_L2_OUT == 64 {
         let input = input.as_slice().try_into().unwrap();
         let weights = (&affine.weights[..]).try_into().unwrap();
-        #[cfg(all(target_feature = "avx512bw", target_feature = "avx512vnni"))]
+        #[cfg(target_feature = "avx512bw")]
         return clipped_relu_affine_64_to_1_avx512(input, weights, affine.biases[0]);
-        #[cfg(not(all(target_feature = "avx512bw", target_feature = "avx512vnni")))]
+        #[cfg(not(target_feature = "avx512bw"))]
         return clipped_relu_affine_64_to_1_avx2(input, weights, affine.biases[0]);
     }
 
@@ -657,10 +657,7 @@ fn clipped_relu_affine_to_1<const LS_L2_OUT: usize>(
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx2",
-    any(
-        test,
-        not(all(target_feature = "avx512bw", target_feature = "avx512vnni"))
-    )
+    any(test, not(target_feature = "avx512bw"))
 ))]
 #[inline]
 fn clipped_relu_affine_64_to_1_avx2(input: &[i32; 64], weights: &[i8; 64], bias: i32) -> i32 {
@@ -692,16 +689,12 @@ fn clipped_relu_affine_64_to_1_avx2(input: &[i32; 64], weights: &[i8; 64], bias:
     }
 }
 
-/// 64要素を一括でpackし、VNNIの4項積和で出力層を計算する。
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx512bw",
-    target_feature = "avx512vnni"
-))]
+/// 64要素を一括でpackし、VNNIが有効なら4項積和、BWでは2段の積和を使う。
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512bw"))]
 #[inline]
 fn clipped_relu_affine_64_to_1_avx512(input: &[i32; 64], weights: &[i8; 64], bias: i32) -> i32 {
     // SAFETY: loaduは配列内の64要素のみを読み、alignmentを要求しない。
-    // pack後の入力は[0,127]で、64項の内積はi32に収まる。
+    // pack後の入力は[0,127]なので隣接2項和はi16に収まり、64項の内積もi32に収まる。
     unsafe {
         use std::arch::x86_64::*;
         let ptr = input.as_ptr().cast::<__m512i>();
@@ -714,11 +707,12 @@ fn clipped_relu_affine_64_to_1_avx512(input: &[i32; 64], weights: &[i8; 64], bia
         // packは128-bit laneごとに動くため、4-byte groupの転置を戻す。
         let order = _mm512_setr_epi32(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
         let activations = _mm512_permutexvar_epi32(order, packed);
-        let product = _mm512_dpbusd_epi32(
-            _mm512_setzero_si512(),
-            activations,
-            _mm512_loadu_si512(weights.as_ptr().cast()),
-        );
+        let weights = _mm512_loadu_si512(weights.as_ptr().cast());
+        #[cfg(target_feature = "avx512vnni")]
+        let product = _mm512_dpbusd_epi32(_mm512_setzero_si512(), activations, weights);
+        #[cfg(not(target_feature = "avx512vnni"))]
+        let product =
+            _mm512_madd_epi16(_mm512_maddubs_epi16(activations, weights), _mm512_set1_epi16(1));
         bias + _mm512_reduce_add_epi32(product)
     }
 }
@@ -1066,7 +1060,7 @@ mod tests {
                 expected,
                 "case {case}"
             );
-            #[cfg(all(target_feature = "avx512bw", target_feature = "avx512vnni"))]
+            #[cfg(target_feature = "avx512bw")]
             assert_eq!(
                 clipped_relu_affine_64_to_1_avx512(&input, &weights, bias),
                 expected,
