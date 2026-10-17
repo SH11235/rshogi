@@ -72,6 +72,52 @@ mod tests {
     }
 
     #[test]
+    fn rejected_progress_weights_keep_session_resumable() {
+        use rshogi_core::nnue::{
+            SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, reset_layer_stack_progress_kpabs_q16_weights,
+            reset_layer_stack_progress_kpabs_weights, set_layer_stack_progress_kpabs_q16_weights,
+            set_layer_stack_progress_kpabs_weights,
+        };
+
+        let _guard = EVAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_material_level(MaterialLevel::Lv1);
+        for q16 in [false, true] {
+            let mut session = session(1, 1);
+            let first = session.prepare(AnalysisBudget::Depth(1)).unwrap();
+            session.run(&first, None::<fn(&SearchInfo)>).unwrap();
+
+            // 入力検証に失敗しただけなら、完了済み探索を失効させない。
+            let invalid = if q16 {
+                set_layer_stack_progress_kpabs_q16_weights(Vec::new().into_boxed_slice())
+            } else {
+                set_layer_stack_progress_kpabs_weights(Vec::new().into_boxed_slice())
+            };
+            assert!(invalid.is_err());
+            let next = session.prepare(AnalysisBudget::Depth(2)).unwrap();
+            assert_eq!(session.run(&next, None::<fn(&SearchInfo)>).unwrap().result.depth, 2);
+
+            // 有効な設定変更では、従来どおり再開を拒否する。
+            if q16 {
+                set_layer_stack_progress_kpabs_q16_weights(
+                    vec![0; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+                )
+                .unwrap();
+            } else {
+                set_layer_stack_progress_kpabs_weights(
+                    vec![0.0; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+                )
+                .unwrap();
+            }
+            assert!(matches!(
+                session.prepare(AnalysisBudget::Depth(3)),
+                Err(AnalysisError::EvaluationChanged)
+            ));
+            reset_layer_stack_progress_kpabs_q16_weights();
+            reset_layer_stack_progress_kpabs_weights();
+        }
+    }
+
+    #[test]
     fn changed_evaluator_and_foreign_run_are_rejected() {
         let _guard = EVAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_material_level(MaterialLevel::Lv1);

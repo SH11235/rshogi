@@ -83,11 +83,11 @@ pub fn load_progress_coeff_kpabs_q16_from_bytes(bytes: &[u8]) -> Result<Box<[i32
 /// Q16 係数を設定する。探索前に routing と合わせて設定すること。
 /// 既存の探索用 stack への反映には再生成または reset が必要。
 pub fn set_layer_stack_progress_kpabs_q16_weights(weights: Box<[i32]>) -> Result<(), String> {
-    crate::eval::changed();
     if weights.len() != SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS {
         return Err("progress Q16 weights length mismatch".to_string());
     }
     *WEIGHTS.write().map_err(|_| "progress Q16 weights lock poisoned")? = Some(Arc::from(weights));
+    crate::eval::changed();
     Ok(())
 }
 /// Q16 係数を未設定へ戻す。

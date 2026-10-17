@@ -384,7 +384,6 @@ pub fn get_layer_stack_progress_kpabs_weights() -> &'static [f32] {
 
 /// LayerStacks progresskpabs 重みを設定
 pub fn set_layer_stack_progress_kpabs_weights(weights: Box<[f32]>) -> Result<(), String> {
-    crate::eval::changed();
     if weights.len() != SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS {
         return Err(format!(
             "progresskpabs weights length mismatch: got {}, expected {}",
@@ -405,6 +404,7 @@ pub fn set_layer_stack_progress_kpabs_weights(weights: Box<[f32]>) -> Result<(),
             )));
         }
     }
+    crate::eval::changed();
     Ok(())
 }
 
