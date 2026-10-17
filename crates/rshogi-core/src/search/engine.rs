@@ -895,6 +895,18 @@ impl Search {
         self.stop.store(true, Ordering::SeqCst);
     }
 
+    pub(crate) fn analysis_worker_depths(&self) -> Vec<Depth> {
+        let mut depths =
+            vec![self.worker.as_ref().map_or(0, |worker| worker.state.completed_depth)];
+        depths.extend(self.thread_pool.completed_depths());
+        depths
+    }
+
+    pub(crate) fn stop_and_wait(&self) {
+        self.stop();
+        self.thread_pool.wait_for_search_finished();
+    }
+
     /// stop/ponderhitフラグをリセット（go() 呼び出し前にUSI層から呼ぶ）
     ///
     /// go() 内部ではなくスレッド生成前に呼ぶことで、USI層で既にセットされた
@@ -1047,13 +1059,17 @@ impl Search {
         #[cfg(feature = "allocation-stats")]
         let _allocation_scope =
             crate::allocation_stats::Scope::enter(crate::allocation_stats::Phase::Setup);
-        self.prepare_time_metrics(ply);
+        if !limits.analysis.as_ref().is_some_and(|run| run.resume) {
+            self.prepare_time_metrics(ply);
+        }
         // 注意: stop/ponderhitフラグのリセットは go() の呼び出し元
         // (USI層の cmd_go) でスレッド生成前に行うこと。
         // ここでリセットすると、USI層で既にセットされたフラグが失われる競合が発生する。
         self.start_time = Some(Instant::now());
         // 置換表の世代を進める
-        self.tt.new_search();
+        if !limits.analysis.as_ref().is_some_and(|run| run.resume) {
+            self.tt.new_search();
+        }
         // ヘルパースレッドの結果をクリア
         // スレッド数が1の場合でも呼び出し、前回のマルチスレッド探索の結果が残らないようにする
         self.thread_pool.clear_helper_results();
@@ -1169,8 +1185,9 @@ impl Search {
             self.thread_pool.wait_for_search_finished();
         }
 
-        let use_best_thread =
-            self.num_threads > 1 && should_use_best_thread_selection(&limits, skill_enabled);
+        let use_best_thread = limits.analysis.is_none()
+            && self.num_threads > 1
+            && should_use_best_thread_selection(&limits, skill_enabled);
         let debug_best_thread = best_thread_debug_enabled();
 
         let best_thread_id = {
@@ -1311,6 +1328,7 @@ impl Search {
         // 出さない (YO の previousScore フォールバック相当のガード)。
         // Wasm helper 採択で PV を取得できない場合も bestmove 1 手の PV で保証を保つ。
         if let Some(callback) = on_info.as_mut()
+            && limits.analysis.is_none()
             && best_move != Move::NONE
             && root_score_is_initialized(score)
         {
@@ -1503,7 +1521,9 @@ where
     }
 
     // ルート手を初期化
-    worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
+    if worker.state.completed_depth == 0 {
+        worker.state.root_moves = super::RootMoves::from_legal_moves(pos, &limits.search_moves);
+    }
 
     // root の入玉宣言勝ちチェック（YO準拠）
     // 探索内の宣言勝ち判定は probe_transposition で行う（YO の search() と同じ位置）。
@@ -1536,7 +1556,7 @@ where
     }
 
     // 合法手が1つの場合は500ms上限を適用
-    if worker.state.root_moves.len() == 1 {
+    if limits.analysis.is_none() && worker.state.root_moves.len() == 1 {
         time_manager.apply_single_move_limit();
     }
 
@@ -1547,7 +1567,11 @@ where
     effective_multi_pv = effective_multi_pv.min(worker.state.root_moves.len());
 
     // MultiPV・skill・helper の結果も完了した反復の score/PV/順位で返す。
-    let mut completed_root_moves = super::RootMoves::new();
+    let mut completed_root_moves = if worker.state.completed_depth > 0 {
+        worker.state.root_moves.clone()
+    } else {
+        super::RootMoves::new()
+    };
 
     // ヘルパー用のローカル search_again_counter
     let mut local_search_again_counter: i32 = 0;
@@ -1559,8 +1583,10 @@ where
     }
 
     // 反復深化ループ
-    for depth in 1..=max_depth {
-        if worker.state.abort {
+    for depth in (worker.state.completed_depth + 1)..=max_depth {
+        time_manager.publish_nodes(worker.state.nodes);
+        if worker.state.abort || time_manager.stop_requested() {
+            worker.state.abort = true;
             break;
         }
 
@@ -1675,6 +1701,7 @@ where
                 // abort フラグに加え、nodes 制限超過も直接チェックする
                 // （check_abort は頻度制御で呼び出されるため、abort フラグが
                 //   立っていないまま search_root が返ることがある）
+                time_manager.publish_nodes(worker.state.nodes);
                 if worker.state.abort
                     || (limits.nodes > 0
                         && !time_manager.is_pondering()
@@ -1922,6 +1949,7 @@ where
     wait_for_search_release(worker.state.abort, limits, time_manager, main_state.as_deref());
 
     // 中断した反復の番兵や bound を、完了深さの結果と混ぜない。
+    time_manager.publish_nodes(worker.state.nodes);
     if worker.state.abort && !completed_root_moves.is_empty() {
         worker.state.root_moves = completed_root_moves;
     }

@@ -29,12 +29,14 @@ pub fn get_pass_right_value() -> i32 {
 
 /// パス権評価値を設定（序盤・終盤両方を同じ値に設定）
 pub fn set_pass_right_value(value: i32) {
+    crate::eval::changed();
     PASS_RIGHT_VALUE_EARLY.store(value, Ordering::Relaxed);
     PASS_RIGHT_VALUE_LATE.store(value, Ordering::Relaxed);
 }
 
 /// パス権評価値を設定（序盤・終盤を個別に設定）
 pub fn set_pass_right_value_phased(early: i32, late: i32) {
+    crate::eval::changed();
     PASS_RIGHT_VALUE_EARLY.store(early, Ordering::Relaxed);
     PASS_RIGHT_VALUE_LATE.store(late, Ordering::Relaxed);
 }
@@ -115,6 +117,7 @@ pub fn get_pass_move_bonus() -> i32 {
 
 /// パス手ボーナスを設定
 pub fn set_pass_move_bonus(value: i32) {
+    crate::eval::changed();
     PASS_MOVE_BONUS.store(value, Ordering::Relaxed);
 }
 
@@ -203,12 +206,14 @@ pub fn get_material_level() -> MaterialLevel {
 
 /// Material評価レベルを設定し、Material評価を有効化する
 pub fn set_material_level(level: MaterialLevel) {
+    crate::eval::changed();
     MATERIAL_LEVEL.store(level.value(), Ordering::Relaxed);
     MATERIAL_ENABLED.store(true, Ordering::Relaxed);
 }
 
 /// Material評価を無効化する
 pub fn disable_material() {
+    crate::eval::changed();
     MATERIAL_ENABLED.store(false, Ordering::Relaxed);
 }
 

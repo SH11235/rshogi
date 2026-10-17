@@ -11,6 +11,7 @@
 mod stats;
 
 mod alpha_beta;
+mod analysis;
 mod engine;
 mod eval_helpers;
 mod history;
@@ -32,6 +33,10 @@ mod types;
 mod tests;
 
 pub use alpha_beta::*;
+pub use analysis::{
+    AnalysisBudget, AnalysisEndReason, AnalysisError, AnalysisFinished, AnalysisRunHandle,
+    AnalysisSession,
+};
 pub use engine::*;
 pub use history::*;
 pub use limits::*;

@@ -21,6 +21,7 @@ pub type TimePoint = i64;
 /// USI `go` コマンドで指定されるパラメータを保持する。
 #[derive(Clone)]
 pub struct LimitsType {
+    pub(crate) analysis: Option<super::analysis::AnalysisRun>,
     /// 両者の残り時間（ミリ秒）
     pub time: [TimePoint; Color::NUM],
 
@@ -71,6 +72,7 @@ pub struct LimitsType {
 impl Default for LimitsType {
     fn default() -> Self {
         Self {
+            analysis: None,
             time: [0; Color::NUM],
             inc: [0; Color::NUM],
             byoyomi: [0; Color::NUM],
@@ -90,6 +92,18 @@ impl Default for LimitsType {
 }
 
 impl LimitsType {
+    pub(crate) fn stop_check_interval(&self) -> i32 {
+        let nodes = match self.analysis.as_ref().map(|run| run.budget) {
+            Some(super::AnalysisBudget::Nodes(nodes)) => nodes,
+            _ => self.nodes,
+        };
+        if nodes > 0 {
+            (nodes / 1024).clamp(1, 512) as i32
+        } else {
+            512
+        }
+    }
+
     /// 新しいLimitsTypeを作成
     pub fn new() -> Self {
         Self::default()
@@ -106,7 +120,8 @@ impl LimitsType {
     /// - infinite（無制限）
     #[inline]
     pub fn use_time_management(&self) -> bool {
-        self.mate == 0
+        self.analysis.is_none()
+            && self.mate == 0
             && self.movetime == 0
             && self.depth == 0
             && self.nodes == 0
@@ -181,7 +196,11 @@ impl LimitsType {
     /// perft は alpha-beta を通らず guard 追跡を行わない（実害なし）。
     #[inline]
     pub fn has_interrupt_budget(&self) -> bool {
-        self.use_time_management() || self.movetime != 0 || self.nodes != 0 || self.infinite
+        self.analysis.is_some()
+            || self.use_time_management()
+            || self.movetime != 0
+            || self.nodes != 0
+            || self.infinite
     }
 }
 

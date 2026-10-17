@@ -27,6 +27,13 @@ mod imp {
     }
 
     impl ThreadPool {
+        pub(crate) fn completed_depths(&self) -> Vec<Depth> {
+            self.threads
+                .iter()
+                .map(|thread| thread.with_worker(|worker| worker.state.completed_depth))
+                .collect()
+        }
+
         pub fn new(
             num_threads: usize,
             tt: Arc<TranspositionTable>,
@@ -412,6 +419,10 @@ mod imp {
     }
 
     impl ThreadPool {
+        pub(crate) fn completed_depths(&self) -> Vec<Depth> {
+            Vec::new()
+        }
+
         pub fn new(
             _num_threads: usize,
             _tt: Arc<TranspositionTable>,
@@ -566,11 +577,8 @@ mod imp {
 // - Acquire on load: Ensures all writes from helpers are visible after loop exits
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 mod imp {
-    use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-
-    use rayon::prelude::*;
 
     use crate::eval::EvalHash;
     use crate::position::Position;
@@ -579,12 +587,6 @@ mod imp {
 
     use crate::search::engine::search_helper;
     use crate::search::{LimitsType, SearchTuneParams, SearchWorker, TimeManagement, TimeOptions};
-
-    // Thread-local storage for SearchWorker instances.
-    // Each Rayon worker thread gets its own SearchWorker on first use.
-    thread_local! {
-        static THREAD_WORKER: RefCell<Option<Box<SearchWorker>>> = const { RefCell::new(None) };
-    }
 
     /// Helper thread の探索結果を格納する構造体。
     /// 各 helper が探索完了時にこの情報を shared vector に push する。
@@ -644,6 +646,7 @@ mod imp {
     }
 
     pub struct ThreadPool {
+        workers: Vec<Arc<Mutex<Option<Box<SearchWorker>>>>>,
         num_threads: usize,
         tt: Arc<TranspositionTable>,
         eval_hash: Arc<EvalHash>,
@@ -664,6 +667,18 @@ mod imp {
     }
 
     impl ThreadPool {
+        pub(crate) fn completed_depths(&self) -> Vec<Depth> {
+            self.workers
+                .iter()
+                .map(|slot| {
+                    slot.lock()
+                        .expect("worker slot poisoned")
+                        .as_ref()
+                        .map_or(0, |worker| worker.state.completed_depth)
+                })
+                .collect()
+        }
+
         pub fn new(
             num_threads: usize,
             tt: Arc<TranspositionTable>,
@@ -679,6 +694,7 @@ mod imp {
             let helper_progress =
                 (0..helper_count).map(|_| Arc::new(HelperProgress::new())).collect();
             Self {
+                workers: (0..helper_count).map(|_| Arc::new(Mutex::new(None))).collect(),
                 num_threads,
                 tt,
                 eval_hash,
@@ -701,8 +717,11 @@ mod imp {
             max_moves_to_draw: i32,
             search_tune_params: SearchTuneParams,
         ) {
+            self.wait_for_search_finished();
             let num_threads = num_threads.max(1);
             let helper_count = num_threads.saturating_sub(1);
+            self.workers.resize_with(helper_count, || Arc::new(Mutex::new(None)));
+            self.workers.truncate(helper_count);
             // Resize helper_progress to match new thread count
             self.helper_progress
                 .resize_with(helper_count, || Arc::new(HelperProgress::new()));
@@ -784,94 +803,85 @@ mod imp {
                 let pos_clone = pos.clone();
                 let limits_clone = limits.clone();
 
-                rayon::spawn_fifo(move || {
-                    THREAD_WORKER.with(|cell| {
-                        let mut worker_opt = cell.borrow_mut();
-
-                        // Initialize SearchWorker on first use
-                        if worker_opt.is_none() {
-                            *worker_opt = Some(SearchWorker::new(
-                                Arc::clone(&tt),
-                                Arc::clone(&eval_hash),
-                                max_moves_to_draw,
-                                thread_id,
-                                search_tune_params,
-                            ));
-                        }
-
-                        let worker = worker_opt.as_mut().unwrap();
-
-                        // Update worker state for this search.
-                        // thread_id must be updated because Rayon may assign
-                        // this task to a different pool thread than last time,
-                        // and the thread_local worker retains the old thread_id.
-                        worker.thread_id = thread_id;
-                        worker.tt = Arc::clone(&tt);
-                        worker.eval_hash = Arc::clone(&eval_hash);
-                        worker.max_moves_to_draw = max_moves_to_draw;
-                        worker.draw_value_black = draw_value_black;
-                        worker.draw_value_white = draw_value_white;
-                        worker.entering_king_rule = entering_king_rule;
-                        worker.search_tune_params = search_tune_params;
-                        worker.prepare_search(&limits_clone);
-
-                        let mut search_pos = pos_clone;
-                        let mut time_manager =
-                            TimeManagement::new(Arc::clone(&stop), Arc::clone(&ponderhit));
-                        time_manager.set_options(&time_options);
-                        time_manager.init(
-                            &limits_clone,
-                            search_pos.side_to_move(),
-                            search_pos.game_ply(),
+                let slot = Arc::clone(&self.workers[thread_id - 1]);
+                // ロックは所有権の受け渡し時のみ。探索中はタスクが Box を排他的に所有する。
+                let mut worker =
+                    slot.lock().expect("worker slot poisoned").take().unwrap_or_else(|| {
+                        SearchWorker::new(
+                            Arc::clone(&tt),
+                            Arc::clone(&eval_hash),
                             max_moves_to_draw,
-                        );
+                            thread_id,
+                            search_tune_params,
+                        )
+                    });
+                rayon::spawn_fifo(move || {
+                    // 論理 ID の slot から受け取った worker に実行設定を適用する。
+                    worker.thread_id = thread_id;
+                    worker.tt = Arc::clone(&tt);
+                    worker.eval_hash = Arc::clone(&eval_hash);
+                    worker.max_moves_to_draw = max_moves_to_draw;
+                    worker.draw_value_black = draw_value_black;
+                    worker.draw_value_white = draw_value_white;
+                    worker.entering_king_rule = entering_king_rule;
+                    worker.search_tune_params = search_tune_params;
+                    worker.prepare_search(&limits_clone);
 
-                        search_helper(
-                            worker,
-                            &mut search_pos,
-                            &limits_clone,
-                            &mut time_manager,
-                            max_depth,
-                            skill_enabled,
-                            Some(&*progress),
-                            &increase_depth,
-                        );
+                    let mut search_pos = pos_clone;
+                    let mut time_manager =
+                        TimeManagement::new(Arc::clone(&stop), Arc::clone(&ponderhit));
+                    time_manager.set_options(&time_options);
+                    time_manager.init(
+                        &limits_clone,
+                        search_pos.side_to_move(),
+                        search_pos.game_ply(),
+                        max_moves_to_draw,
+                    );
 
-                        // Collect result after search completes
-                        // Extract top N moves for skill-based selection (typically 4 when skill enabled)
-                        let top_moves: Vec<(Move, Value)> = worker
+                    search_helper(
+                        &mut worker,
+                        &mut search_pos,
+                        &limits_clone,
+                        &mut time_manager,
+                        max_depth,
+                        skill_enabled,
+                        Some(&*progress),
+                        &increase_depth,
+                    );
+
+                    // Collect result after search completes
+                    // Extract top N moves for skill-based selection (typically 4 when skill enabled)
+                    let top_moves: Vec<(Move, Value)> = worker
+                        .state
+                        .root_moves
+                        .iter()
+                        .take(4) // multi_pv is at least 4 when skill is enabled
+                        .map(|rm| (rm.mv(), rm.score))
+                        .collect();
+                    let result = HelperResult {
+                        thread_id,
+                        nodes: worker.state.nodes,
+                        best_move_changes: worker.state.best_move_changes,
+                        completed_depth: worker.state.completed_depth,
+                        best_move: worker.state.best_move,
+                        best_score: worker
                             .state
                             .root_moves
-                            .iter()
-                            .take(4) // multi_pv is at least 4 when skill is enabled
-                            .map(|rm| (rm.mv(), rm.score))
-                            .collect();
-                        let result = HelperResult {
-                            thread_id,
-                            nodes: worker.state.nodes,
-                            best_move_changes: worker.state.best_move_changes,
-                            completed_depth: worker.state.completed_depth,
-                            best_move: worker.state.best_move,
-                            best_score: worker
-                                .state
-                                .root_moves
-                                .get(0)
-                                .map(|rm| rm.score)
-                                .unwrap_or(Value::ZERO),
-                            top_moves,
-                        };
-                        match helper_results.lock() {
-                            Ok(mut results) => results.push(result),
-                            Err(e) => {
-                                // Mutex poisoned - indicates a panic occurred in another thread.
-                                // This is a serious bug that should be investigated.
-                                #[cfg(debug_assertions)]
-                                eprintln!(
-                                    "Warning: Failed to lock helper_results for pushing: {e}"
-                                );
-                            }
+                            .get(0)
+                            .map(|rm| rm.score)
+                            .unwrap_or(Value::ZERO),
+                        top_moves,
+                    };
+                    match helper_results.lock() {
+                        Ok(mut results) => results.push(result),
+                        Err(e) => {
+                            // Mutex poisoned - indicates a panic occurred in another thread.
+                            // This is a serious bug that should be investigated.
+                            #[cfg(debug_assertions)]
+                            eprintln!("Warning: Failed to lock helper_results for pushing: {e}");
                         }
-                    });
+                    }
+                    *slot.lock().expect("worker slot poisoned") = Some(worker);
 
                     // Release ordering ensures that all writes made by this helper thread
                     // (TT updates, helper_results.push(), etc.) are visible to the main
@@ -913,20 +923,12 @@ mod imp {
         }
 
         pub fn clear_histories(&self) {
-            let helper_count = self.num_threads.saturating_sub(1);
-            if helper_count == 0 {
-                return;
+            self.wait_for_search_finished();
+            for slot in &self.workers {
+                if let Some(worker) = slot.lock().expect("worker slot poisoned").as_mut() {
+                    worker.clear();
+                }
             }
-
-            // clear_histories can use synchronous parallel iteration
-            // since it's called outside of search
-            (1..=helper_count).into_par_iter().for_each(|_| {
-                THREAD_WORKER.with(|cell| {
-                    if let Some(worker) = cell.borrow_mut().as_mut() {
-                        worker.clear();
-                    }
-                });
-            });
         }
 
         pub fn update_tt(&mut self, tt: Arc<TranspositionTable>) {

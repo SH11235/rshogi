@@ -83,6 +83,7 @@ pub fn load_progress_coeff_kpabs_q16_from_bytes(bytes: &[u8]) -> Result<Box<[i32
 /// Q16 係数を設定する。探索前に routing と合わせて設定すること。
 /// 既存の探索用 stack への反映には再生成または reset が必要。
 pub fn set_layer_stack_progress_kpabs_q16_weights(weights: Box<[i32]>) -> Result<(), String> {
+    crate::eval::changed();
     if weights.len() != SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS {
         return Err("progress Q16 weights length mismatch".to_string());
     }
@@ -92,6 +93,7 @@ pub fn set_layer_stack_progress_kpabs_q16_weights(weights: Box<[i32]>) -> Result
 /// Q16 係数を未設定へ戻す。
 /// 取得済みの探索用 stack は reset まで元の係数を保持する。
 pub fn reset_layer_stack_progress_kpabs_q16_weights() {
+    crate::eval::changed();
     *WEIGHTS.write().unwrap_or_else(|e| e.into_inner()) = None;
 }
 /// Q16 logit 和を bucket へ変換する。閾値と等しい値は上側の bucket に属する。

@@ -57,12 +57,9 @@ fn check_abort_slow(
     }
 
     // カウンターをリセット
-    st.calls_cnt = if limits.nodes > 0 {
-        std::cmp::min(512, (limits.nodes / 1024) as i32).max(1)
-    } else {
-        512
-    };
+    st.calls_cnt = limits.stop_check_interval();
 
+    time_manager.publish_nodes(st.nodes);
     // 外部からの停止要求
     if time_manager.stop_requested() {
         #[cfg(debug_assertions)]
