@@ -849,6 +849,10 @@ mod imp {
                         &increase_depth,
                     );
 
+                    // 中断反復の末尾も終了時の総ノード数へ含める。
+                    // 探索中の進捗は反復境界だが、停止完了後は最終値でなければならない。
+                    progress.update(worker.state.nodes, worker.state.best_move_changes);
+
                     // Collect result after search completes
                     // Extract top N moves for skill-based selection (typically 4 when skill enabled)
                     let top_moves: Vec<(Move, Value)> = worker
