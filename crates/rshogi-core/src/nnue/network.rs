@@ -3468,7 +3468,7 @@ mod tests {
             "Features=HalfKaHmMerged(Friend)[73305->{l1}x2],LayerStacks,l2=16,l3={l3},FV_SCALE=28"
         );
         num_buckets_header.extend_from_slice(&(arch.len() as u32).to_le_bytes());
-        num_buckets_header.extend_from_slice(arch);
+        num_buckets_header.extend_from_slice(arch.as_bytes());
         num_buckets_header.extend_from_slice(&9u32.to_le_bytes());
 
         for (bytes, override_mode) in [

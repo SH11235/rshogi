@@ -202,7 +202,7 @@ impl<
         // L2: LS_L2_IN → LS_L2_OUT
         self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        let output = clipped_relu_affine_32_to_1_avx2(&l2_out, &self.output);
+        let output = clipped_relu_affine_to_1(&l2_out, &self.output);
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let output = {
             clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
@@ -240,7 +240,7 @@ impl<
         // L2: LS_L2_IN → LS_L2_OUT
         self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        let output = clipped_relu_affine_32_to_1_avx2(&l2_out, &self.output);
+        let output = clipped_relu_affine_to_1(&l2_out, &self.output);
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let output = {
             clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
@@ -595,23 +595,25 @@ fn clipped_relu_i32_to_u8<const LS_L2_OUT: usize>(input: &[i32; LS_L2_OUT], outp
     }
 }
 
-/// L2=32 は融合 kernel、L2=64 は汎用 affine で出力層を計算する。
+/// 活性化と出力層の内積を融合する。
 ///
 /// `packus` が負値を0へ飽和するため、shift後は上限127だけを明示的にclampすれば
-/// `clamp(input >> 6, 0, 127)` と一致する。32要素をレジスタ内でu8へpackし、そのまま
-/// 出力層の内積へ渡すことで、従来の32-byte store/reloadを省く。
+/// `clamp(input >> 6, 0, 127)` と一致する。32/64要素をレジスタ内でu8へpackし、そのまま
+/// 出力層の内積へ渡すことで、中間配列へのstore/reloadを省く。
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
-fn clipped_relu_affine_32_to_1_avx2<const LS_L2_OUT: usize>(
+fn clipped_relu_affine_to_1<const LS_L2_OUT: usize>(
     input: &[i32; LS_L2_OUT],
     affine: &AffineTransform<LS_L2_OUT, 1>,
 ) -> i32 {
-    if LS_L2_OUT != 32 {
-        let mut activated = Aligned([0u8; LS_L2_OUT]);
-        let mut output = [0i32; 1];
-        clipped_relu_i32_to_u8(input, &mut activated.0);
-        affine.propagate_7bit(&activated.0, &mut output);
-        return output[0];
+    const { assert!(LS_L2_OUT == 32 || LS_L2_OUT == 64) };
+    if LS_L2_OUT == 64 {
+        let input = input.as_slice().try_into().unwrap();
+        let weights = (&affine.weights[..]).try_into().unwrap();
+        #[cfg(all(target_feature = "avx512bw", target_feature = "avx512vnni"))]
+        return clipped_relu_affine_64_to_1_avx512(input, weights, affine.biases[0]);
+        #[cfg(not(all(target_feature = "avx512bw", target_feature = "avx512vnni")))]
+        return clipped_relu_affine_64_to_1_avx2(input, weights, affine.biases[0]);
     }
 
     // SAFETY:
@@ -651,6 +653,75 @@ fn clipped_relu_affine_32_to_1_avx2<const LS_L2_OUT: usize>(
     }
 }
 
+/// 64要素の活性化と内積を融合し、2ブロックの積和を最後に一度だけ水平加算する。
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    any(
+        test,
+        not(all(target_feature = "avx512bw", target_feature = "avx512vnni"))
+    )
+))]
+#[inline]
+fn clipped_relu_affine_64_to_1_avx2(input: &[i32; 64], weights: &[i8; 64], bias: i32) -> i32 {
+    // SAFETY: 各loadは64要素の配列内に収まり、alignmentは要求しない。
+    // 活性化は[0,127]なのでmaddubsの2項和はi16に収まる。
+    unsafe {
+        use std::arch::x86_64::*;
+        let max127 = _mm256_set1_epi32(127);
+        let reorder = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+        let mut sum = _mm256_setzero_si256();
+        for block in 0..2 {
+            let ptr = input.as_ptr().add(block * 32).cast::<__m256i>();
+            let v0 = _mm256_min_epi32(_mm256_srai_epi32(_mm256_loadu_si256(ptr), 6), max127);
+            let v1 = _mm256_min_epi32(_mm256_srai_epi32(_mm256_loadu_si256(ptr.add(1)), 6), max127);
+            let v2 = _mm256_min_epi32(_mm256_srai_epi32(_mm256_loadu_si256(ptr.add(2)), 6), max127);
+            let v3 = _mm256_min_epi32(_mm256_srai_epi32(_mm256_loadu_si256(ptr.add(3)), 6), max127);
+            let packed =
+                _mm256_packus_epi16(_mm256_packs_epi32(v0, v1), _mm256_packs_epi32(v2, v3));
+            let activations = _mm256_permutevar8x32_epi32(packed, reorder);
+            let weight = _mm256_loadu_si256(weights.as_ptr().add(block * 32).cast());
+            let product =
+                _mm256_madd_epi16(_mm256_maddubs_epi16(activations, weight), _mm256_set1_epi16(1));
+            sum = _mm256_add_epi32(sum, product);
+        }
+        let sum128 = _mm_add_epi32(_mm256_castsi256_si128(sum), _mm256_extracti128_si256(sum, 1));
+        let sum64 = _mm_add_epi32(sum128, _mm_unpackhi_epi64(sum128, sum128));
+        let sum32 = _mm_add_epi32(sum64, _mm_shuffle_epi32(sum64, 1));
+        bias + _mm_cvtsi128_si32(sum32)
+    }
+}
+
+/// 64要素を一括でpackし、VNNIの4項積和で出力層を計算する。
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx512bw",
+    target_feature = "avx512vnni"
+))]
+#[inline]
+fn clipped_relu_affine_64_to_1_avx512(input: &[i32; 64], weights: &[i8; 64], bias: i32) -> i32 {
+    // SAFETY: loaduは配列内の64要素のみを読み、alignmentを要求しない。
+    // pack後の入力は[0,127]で、64項の内積はi32に収まる。
+    unsafe {
+        use std::arch::x86_64::*;
+        let ptr = input.as_ptr().cast::<__m512i>();
+        let max127 = _mm512_set1_epi32(127);
+        let v0 = _mm512_min_epi32(_mm512_srai_epi32(_mm512_loadu_si512(ptr), 6), max127);
+        let v1 = _mm512_min_epi32(_mm512_srai_epi32(_mm512_loadu_si512(ptr.add(1)), 6), max127);
+        let v2 = _mm512_min_epi32(_mm512_srai_epi32(_mm512_loadu_si512(ptr.add(2)), 6), max127);
+        let v3 = _mm512_min_epi32(_mm512_srai_epi32(_mm512_loadu_si512(ptr.add(3)), 6), max127);
+        let packed = _mm512_packus_epi16(_mm512_packs_epi32(v0, v1), _mm512_packs_epi32(v2, v3));
+        // packは128-bit laneごとに動くため、4-byte groupの転置を戻す。
+        let order = _mm512_setr_epi32(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+        let activations = _mm512_permutexvar_epi32(order, packed);
+        let product = _mm512_dpbusd_epi32(
+            _mm512_setzero_si512(),
+            activations,
+            _mm512_loadu_si512(weights.as_ptr().cast()),
+        );
+        bias + _mm512_reduce_add_epi32(product)
+    }
+}
 /// 入力: 両視点のアキュムレータ (各L1次元, i16)
 /// 出力: SqrClippedReLU後のL1次元 (u8)
 pub fn sqr_clipped_relu_transform<const L1: usize>(
@@ -951,6 +1022,63 @@ pub fn compute_king_ranks(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn test_fused_output64_boundaries_and_lanes() {
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x6400_3200);
+        let edges = [
+            i32::MIN,
+            -2_097_153,
+            -65,
+            -64,
+            -1,
+            0,
+            63,
+            64,
+            8127,
+            8128,
+            8191,
+            i32::MAX,
+        ];
+        for case in 0..512 {
+            let mut input = std::array::from_fn(|_| rng.random::<i32>());
+            let mut weights = std::array::from_fn(|_| rng.random::<i8>());
+            if case < 64 {
+                input = [0; 64];
+                input[case] = 8128;
+            } else if case < 128 {
+                input = std::array::from_fn(|i| edges[(i + case) % edges.len()]);
+                weights = [if case % 2 == 0 { -128 } else { 127 }; 64];
+            } else if case < 192 {
+                input = std::array::from_fn(|_| rng.random_range(-128..16384));
+            }
+            let bias = rng.random_range(-1_000_000..1_000_000);
+            let expected = bias
+                + input
+                    .iter()
+                    .zip(weights)
+                    .map(|(&v, w)| (v >> 6).clamp(0, 127) * i32::from(w))
+                    .sum::<i32>();
+            assert_eq!(
+                clipped_relu_affine_64_to_1_avx2(&input, &weights, bias),
+                expected,
+                "case {case}"
+            );
+            #[cfg(all(target_feature = "avx512bw", target_feature = "avx512vnni"))]
+            assert_eq!(
+                clipped_relu_affine_64_to_1_avx512(&input, &weights, bias),
+                expected,
+                "case {case}"
+            );
+            let mut bytes = bias.to_le_bytes().to_vec();
+            bytes.extend(weights.iter().map(|&w| w as u8));
+            let affine = AffineTransform::<64, 1>::read(&mut &bytes[..]).unwrap();
+            assert_eq!(clipped_relu_affine_to_1(&input, &affine), expected, "case {case}");
+        }
+    }
+
     use super::*;
     use crate::nnue::accumulator::Aligned;
     use crate::nnue::constants::{
@@ -1238,7 +1366,7 @@ mod tests {
 
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[test]
-    fn test_clipped_relu_affine_32_to_1_avx2_matches_scalar_reference() {
+    fn test_clipped_relu_affine_to_1_matches_scalar_reference() {
         let input = [
             i32::MIN,
             -1_000_000,
@@ -1291,7 +1419,7 @@ mod tests {
                 .map(|(&value, weight)| (value >> 6).clamp(0, 127) * i32::from(weight))
                 .sum::<i32>();
 
-        assert_eq!(clipped_relu_affine_32_to_1_avx2(&input, &affine), reference);
+        assert_eq!(clipped_relu_affine_to_1(&input, &affine), reference);
     }
 
     fn check_bucket_scalar_reference<const WIDTH: usize>() {
