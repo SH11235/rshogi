@@ -115,6 +115,8 @@ pub fn normalize_nodes_effort(effort: f64, nodes_total: u64) -> f64 {
 ///
 /// 探索の思考時間を計算し、停止判定を行う。
 pub struct TimeManagement {
+    analysis: Option<super::analysis::AnalysisRun>,
+    published_nodes: u64,
     /// 探索開始時刻
     start_time: Instant,
 
@@ -185,6 +187,8 @@ impl TimeManagement {
     pub fn new(stop: Arc<AtomicBool>, ponderhit: Arc<AtomicBool>) -> Self {
         let now = Instant::now();
         Self {
+            analysis: None,
+            published_nodes: 0,
             start_time: now,
             optimum_time: 0,
             maximum_time: 0,
@@ -276,6 +280,8 @@ impl TimeManagement {
     /// * `ply` - 現在の手数
     /// * `max_moves_to_draw` - 引き分けまでの最大手数
     pub fn init(&mut self, limits: &LimitsType, us: Color, ply: i32, max_moves_to_draw: i32) {
+        self.analysis = limits.analysis.clone();
+        self.published_nodes = 0;
         self.start_time = limits.start_time.unwrap_or_else(Instant::now);
         self.ponderhit_time = self.start_time;
         self.search_end = 0;
@@ -840,10 +846,18 @@ impl TimeManagement {
         self.stop.store(false, Ordering::Relaxed);
     }
 
+    // 各 worker のローカル増分だけを共有予算へ加算する。
+    pub(crate) fn publish_nodes(&mut self, nodes: u64) {
+        if let Some(run) = &self.analysis {
+            run.publish_nodes(nodes.saturating_sub(self.published_nodes));
+            self.published_nodes = nodes;
+        }
+    }
+
     /// 停止要求が出ているか
     #[inline]
     pub fn stop_requested(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
+        self.stop.load(Ordering::Relaxed) || self.analysis.as_ref().is_some_and(|run| run.stopped())
     }
 }
 

@@ -978,19 +978,26 @@ impl SearchWorker {
             && self.search_tune_params.depth_liveness_run_threshold > 0)
             .then(|| Box::new(DepthLivenessState::new()));
         self.state.root_delta = 1;
-        self.state.completed_depth = 0;
-        self.state.best_move = Move::NONE;
+        let resume = limits.analysis.as_ref().is_some_and(|run| run.resume);
+        if !resume {
+            self.state.completed_depth = 0;
+            self.state.best_move = Move::NONE;
+        }
         self.state.abort = false;
         self.state.best_move_changes = 0.0;
         self.state.nmp_min_ply = 0;
-        self.state.root_moves.clear();
+        if !resume {
+            self.state.root_moves.clear();
+        }
         // 探索統計をリセット（1回のgo毎にリセット）
         self.reset_stats();
-        // low_ply_historyのみクリア
-        // SAFETY: 探索開始前の初期化、他の参照と同時保持しない
-        unsafe { self.history.as_mut_unchecked() }
-            .low_ply_history
-            .clear_with_init(self.search_tune_params.low_ply_history_init as i16);
+        if !resume {
+            // low_ply_historyのみクリア
+            // SAFETY: 探索開始前の初期化、他の参照と同時保持しない
+            unsafe { self.history.as_mut_unchecked() }
+                .low_ply_history
+                .clear_with_init(self.search_tune_params.low_ply_history_init as i16);
+        }
         self.state.evaluator.prepare();
         // check_abort頻度制御カウンターをリセット
         // これにより新しい探索開始時に即座に停止チェックが行われる
@@ -1041,12 +1048,9 @@ impl SearchWorker {
             return false;
         }
         // カウンターをリセット
-        self.state.calls_cnt = if limits.nodes > 0 {
-            std::cmp::min(512, (limits.nodes / 1024) as i32).max(1)
-        } else {
-            512
-        };
+        self.state.calls_cnt = limits.stop_check_interval();
 
+        time_manager.publish_nodes(self.state.nodes);
         // 外部からの停止要求
         if time_manager.stop_requested() {
             #[cfg(debug_assertions)]

@@ -87,11 +87,13 @@ pub fn set_layer_stack_progress_kpabs_q16_weights(weights: Box<[i32]>) -> Result
         return Err("progress Q16 weights length mismatch".to_string());
     }
     *WEIGHTS.write().map_err(|_| "progress Q16 weights lock poisoned")? = Some(Arc::from(weights));
+    crate::eval::changed();
     Ok(())
 }
 /// Q16 係数を未設定へ戻す。
 /// 取得済みの探索用 stack は reset まで元の係数を保持する。
 pub fn reset_layer_stack_progress_kpabs_q16_weights() {
+    crate::eval::changed();
     *WEIGHTS.write().unwrap_or_else(|e| e.into_inner()) = None;
 }
 /// Q16 logit 和を bucket へ変換する。閾値と等しい値は上側の bucket に属する。

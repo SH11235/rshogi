@@ -10,3 +10,12 @@ pub use material::{
     get_scaled_pass_move_bonus, is_material_enabled, set_material_level, set_pass_move_bonus,
     set_pass_right_value, set_pass_right_value_phased,
 };
+
+// 停止中の解析が古い評価状態を再利用しないための世代。
+static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) fn revision() -> u64 {
+    REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+pub(crate) fn changed() {
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}

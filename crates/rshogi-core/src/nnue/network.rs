@@ -115,6 +115,7 @@ pub(crate) fn get_nnue_architecture_override() -> NNUEArchitectureOverride {
 
 /// NNUE アーキテクチャの明示指定を設定
 pub fn set_nnue_architecture_override(mode: NNUEArchitectureOverride) {
+    crate::eval::changed();
     NNUE_ARCHITECTURE_OVERRIDE.store(mode as i32, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -260,6 +261,7 @@ pub fn get_fv_scale_override() -> Option<i32> {
 /// 引数:
 /// - `value`: 設定値（0 = 自動判定、1以上 = オーバーライド）
 pub fn set_fv_scale_override(value: i32) {
+    crate::eval::changed();
     FV_SCALE_OVERRIDE.store(value.max(0), Ordering::Relaxed);
 }
 
@@ -274,6 +276,7 @@ pub fn get_layer_stack_bucket_mode() -> LayerStackBucketMode {
 
 /// LayerStacks bucket mode を設定
 pub(crate) fn set_layer_stack_bucket_mode(mode: LayerStackBucketMode) {
+    crate::eval::changed();
     LAYER_STACK_BUCKET_MODE.store(mode as i32, Ordering::Relaxed);
 }
 
@@ -356,6 +359,7 @@ pub fn layer_stack_progress_coeff_required(progress_bucket_count: Option<usize>)
 
 /// LayerStacks の progress routing bucket 数を未設定へ戻す。
 pub fn reset_layer_stack_progress_buckets() {
+    crate::eval::changed();
     LAYER_STACK_PROGRESS_BUCKETS.store(0, Ordering::Relaxed);
 }
 
@@ -400,11 +404,13 @@ pub fn set_layer_stack_progress_kpabs_weights(weights: Box<[f32]>) -> Result<(),
             )));
         }
     }
+    crate::eval::changed();
     Ok(())
 }
 
 /// LayerStacks progresskpabs 重みを既定値（全ゼロ）へ戻す
 pub fn reset_layer_stack_progress_kpabs_weights() {
+    crate::eval::changed();
     let old_ptr = LAYER_STACK_PROGRESS_KP_ABS_PTR.swap(std::ptr::null_mut(), Ordering::Relaxed);
     // SAFETY: 同上。old_ptr は Box::leak 由来のポインタ（または null）。
     if !old_ptr.is_null() {
@@ -1559,6 +1565,7 @@ pub fn init_nnue_with_deltas<P: AsRef<Path>>(
     NNUE_REQUIRES_BOARD_EFFECTS.store(network.requires_board_effects(), Ordering::Release);
     *NETWORK.write().expect("NNUE lock poisoned") = Some(network);
     NNUE_INITIALIZED.store(true, Ordering::Release);
+    crate::eval::changed();
     Ok(report)
 }
 
@@ -1578,6 +1585,7 @@ pub fn init_nnue_from_bytes_with_deltas(
     NNUE_REQUIRES_BOARD_EFFECTS.store(network.requires_board_effects(), Ordering::Release);
     *NETWORK.write().expect("NNUE lock poisoned") = Some(network);
     NNUE_INITIALIZED.store(true, Ordering::Release);
+    crate::eval::changed();
     Ok(report)
 }
 
@@ -1624,6 +1632,7 @@ fn halfkx_arch_disabled_error(
 
 /// グローバル NNUE をクリアする
 pub fn clear_nnue() {
+    crate::eval::changed();
     // Safety: false を先に書いてから NETWORK をクリアすること。
     // 逆順にすると is_nnue_initialized() == true の直後に get_network() が None を返す
     // 短い窓が生じる。false-negative（ロード済みなのに false に見える瞬間）は安全。
