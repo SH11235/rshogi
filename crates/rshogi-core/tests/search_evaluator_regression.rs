@@ -45,7 +45,7 @@ fn fixed_depth(name: &str) {
 fn fixed_depth_search_regression() {
     material::disable_material();
     nnue::configure_layer_stack_routing(LayerStackBucketMode::ProgressKPAbs, 4, Some(4)).unwrap();
-    search_models::for_each_model(|name, bytes| {
+    search_models::for_each_model(false, |name, bytes| {
         nnue::init_nnue_from_bytes(&bytes).unwrap();
         fixed_depth(name);
     });

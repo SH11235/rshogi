@@ -1886,6 +1886,10 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
             LayerStacksAccStack::L1024x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(feature = "layerstacks-3072x16x32")]
             LayerStacksAccStack::L3072x16x32(s) => ensure_progress_bucket(pos, s, num_buckets),
+            #[cfg(feature = "layerstacks-2304x16x64")]
+            LayerStacksAccStack::L2304x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
+            #[cfg(feature = "layerstacks-1536x16x64")]
+            LayerStacksAccStack::L1536x16x64(s) => ensure_progress_bucket(pos, s, num_buckets),
             #[cfg(not(any(
                 feature = "layerstacks-1536x16x32",
                 feature = "layerstacks-1536x32x32",
@@ -1893,7 +1897,9 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
                 feature = "layerstacks-768x8x32",
                 feature = "layerstacks-512x16x32",
                 feature = "layerstacks-1024x16x32",
-                feature = "layerstacks-3072x16x32"
+                feature = "layerstacks-3072x16x32",
+                feature = "layerstacks-2304x16x64",
+                feature = "layerstacks-1536x16x64"
             )))]
             _ => unreachable!("no LayerStacks variant enabled"),
         };
@@ -3312,9 +3318,18 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes()); // network_hash (dummy)
-        let arch = b"Features=HalfKaHmMerged^(40),LayerStacks,FV_SCALE=28";
+        let (l1, l3) = if cfg!(feature = "layerstacks-2304x16x64") {
+            (2304, 64)
+        } else if cfg!(feature = "layerstacks-1536x16x64") {
+            (1536, 64)
+        } else {
+            (1536, 32)
+        };
+        let arch = format!(
+            "Features=HalfKaHmMerged(Friend)[73305->{l1}x2],LayerStacks,l2=16,l3={l3},FV_SCALE=28"
+        );
         bytes.extend_from_slice(&(arch.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(arch);
+        bytes.extend_from_slice(arch.as_bytes());
         bytes.extend_from_slice(&num_buckets.to_le_bytes());
         bytes
     }
@@ -3442,7 +3457,16 @@ mod tests {
         let mut num_buckets_header = Vec::new();
         num_buckets_header.extend_from_slice(&NNUE_VERSION_LAYERSTACK_NUM_BUCKETS.to_le_bytes());
         num_buckets_header.extend_from_slice(&0u32.to_le_bytes());
-        let arch = b"Features=HalfKaHmMerged^(40),LayerStacks,FV_SCALE=28";
+        let (l1, l3) = if cfg!(feature = "layerstacks-2304x16x64") {
+            (2304, 64)
+        } else if cfg!(feature = "layerstacks-1536x16x64") {
+            (1536, 64)
+        } else {
+            (1536, 32)
+        };
+        let arch = format!(
+            "Features=HalfKaHmMerged(Friend)[73305->{l1}x2],LayerStacks,l2=16,l3={l3},FV_SCALE=28"
+        );
         num_buckets_header.extend_from_slice(&(arch.len() as u32).to_le_bytes());
         num_buckets_header.extend_from_slice(arch);
         num_buckets_header.extend_from_slice(&9u32.to_le_bytes());

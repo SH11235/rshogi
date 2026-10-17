@@ -357,3 +357,18 @@ ADR Phase 2 完了後 / 別 Issue で追加予定:
 - [`engines/README.md`](../engines/README.md) (binary 保管方針)
 - [`docs/nnue-supported-architectures.md`](./nnue-supported-architectures.md) (NNUE arch 一覧)
 - [`docs/nnue-architecture-detection.md`](./nnue-architecture-detection.md) (auto-detect ロジック)
+
+### L2=64 の LayerStacks
+
+`layerstacks-halfka_hm_merged-2304x16x64-none` と
+`layerstacks-halfka_hm_merged-1536x16x64-none` は、L1=16 / L2=64 の専用 edition。
+両方とも `nnue-progress-diff` を含む。FT 幅と L2 幅がモデルに一致する edition を選ぶ。
+`edition-universal` はヘッダーから寸法を読み、L2=32 / 64 の両方を扱う。
+
+```sh
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x16x64-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-none --profile production
+```
+
+専用経路の L2=32 は従来の融合出力 kernel を使う。L2=64 は固定長バッファと
+汎用 affine を使い、評価ごとのヒープ確保は行わない。

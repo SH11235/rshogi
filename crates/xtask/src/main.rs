@@ -759,6 +759,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn l2_64_editions_are_discoverable() {
+        let manifest = include_str!("../../rshogi-usi/Cargo.toml");
+        for edition in [
+            "layerstacks-halfka_hm_merged-2304x16x64-none",
+            "layerstacks-halfka_hm_merged-1536x16x64-none",
+        ] {
+            assert!(manifest.contains(&normalize_edition(edition)));
+        }
+    }
+
+    #[test]
     fn normalize_edition_accepts_both_forms() {
         assert_eq!(normalize_edition("layerstacks"), "edition-layerstacks");
         assert_eq!(normalize_edition("edition-layerstacks"), "edition-layerstacks");

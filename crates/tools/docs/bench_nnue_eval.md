@@ -44,3 +44,9 @@ LayerStacks 専用モードは各局面に対応する入力・accumulator を�
 build 構成によって変わりません。
 
 比較時は実行バイナリの commit、build feature、CPU、モデル、routing 設定、モードと反復数を保存してください。
+
+### L2=64 の専用モデル
+
+静的 LayerStacks の解析には、モデルの寸法に合わせて
+`--features layerstacks-2304x16x64` または `--features layerstacks-1536x16x64`
+をビルド時に追加する。L2 の中間出力も指定した幅で計算する。

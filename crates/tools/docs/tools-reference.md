@@ -117,3 +117,7 @@ crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
   → 対局評価 (tournament → analyze_selfplay)
   → SPSA チューニング (spsa)
 ```
+
+`eval_sfens` / `bench_nnue_eval` / `verify_nnue_accumulator` /
+`nnue_saturation` の静的 LayerStacks 解析は、追加 feature
+`layerstacks-2304x16x64` / `layerstacks-1536x16x64` にも対応する。
