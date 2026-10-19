@@ -70,8 +70,8 @@ side 別 wrapper で rshogi の stderr を保存する。終了後の marker 確
   依存する探索変更) では、TC とスレッド数を既定 3 択によらず、並列数・局数と併せてユーザーと
   すり合わせて決める。
 
-search / FS / arch / 速度が変わる対局を固定ノードでやると、本来実戦強度に効く NPS 差 (例: HalfKP の avg_nodes
-は HalfKA_HM_merged より +6-14% 多い) を切り捨ててしまい、デプロイ実態と乖離する。
+search / FS / arch / 速度が変わる対局を固定ノードでやると、本来実戦強度に効く NPS 差を
+切り捨ててしまい、デプロイ実態と乖離する。
 **「前回固定ノードだったから今回も」と暗黙踏襲しない**。比較軸ごとに毎回選び直す。
 
 #### (c) SPRT 仮説と上限局数
@@ -79,8 +79,7 @@ search / FS / arch / 速度が変わる対局を固定ノードでやると、�
 - 標準 bounds は用途別 2 種 (α=β=0.05):
   - **gainer (強くする変更)**: `--sprt-nelo0 0 --sprt-nelo1 10`
   - **simplification / non-regression**: `--sprt-nelo0 -10 --sprt-nelo1 0`
-  - 負値はスペース区切りのまま渡せる。負値対応前にビルドした tournament
-    (`error: unexpected argument '-1' found` が出る) では `--sprt-nelo0=-10` の `=` 形式で渡す。
+  - 負値はスペース区切りのまま渡せる。
 - simplification の `<-10, 0>` は -5 nElo 級の退行を検出せず通し得る。簡略化 SPRT を
   乱発せず、保守性が必要なら期待局数を見積もり、より狭い bounds を事前登録する。
 - **4 パラメータ (`--sprt-nelo0 / --sprt-nelo1 / --sprt-alpha / --sprt-beta`) は常に明示する**。
@@ -222,50 +221,9 @@ process ごとに `$OUT/engine-stderr/<side>-<unique>.log` を作るので、正
 その場合は旧 run を再利用せず、新しい run directory を作る。
 
 ```bash
-make_rshogi_wrapper() {
-  side=$1
-  case "$side" in
-    '' | . | .. | *[!A-Za-z0-9._-]*)
-      printf 'invalid engine side: %s\n' "$side" >&2
-      return 1
-      ;;
-  esac
-  for old_log in "$OUT"/engine-stderr/*.log; do
-    if test -e "$old_log"; then
-      printf 'existing engine stderr log found; use a fresh OUT: %s\n' "$OUT" >&2
-      return 1
-    fi
-  done
-  if ! real_bin=$(readlink -f -- "$2") || ! test -x "$real_bin"; then
-    printf 'rshogi binary is not executable: %s\n' "$2" >&2
-    return 1
-  fi
-  side_dir="$OUT/engine-stderr/$side"
-  mkdir -p "$OUT/engine-stderr" || return 1
-  if ! mkdir "$side_dir"; then
-    printf 'engine side already exists or cannot be created (%s); use a fresh OUT: %s\n' \
-      "$side" "$OUT" >&2
-    return 1
-  fi
-  printf '%s\n' "$real_bin" > "$side_dir/real-bin" || return 1
-  cat > "$side_dir/run" <<'SH' || return 1
-#!/bin/sh
-set -eu
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-log_dir=$(dirname -- "$script_dir")
-side=$(basename -- "$script_dir")
-IFS= read -r real_bin < "$script_dir/real-bin"
-log_file=$(mktemp "$log_dir/$side-XXXXXX.log")
-exec "$real_bin" "$@" 2>> "$log_file"
-SH
-  chmod 700 "$side_dir/run" || return 1
-  printf '%s\n' "$side_dir/run"
-}
-
-BASE_REAL="$PWD/engines/rshogi-usi-{BASE_EDITION}"
-TEST_REAL="$PWD/engines/rshogi-usi-{TEST_EDITION}"
-BASE_ENGINE=$(make_rshogi_wrapper base "$BASE_REAL") || exit 1
-TEST_ENGINE=$(make_rshogi_wrapper test "$TEST_REAL") || exit 1
+WRAP=.claude/skills/selfplay/scripts/make_rshogi_wrapper.sh
+BASE_ENGINE=$("$WRAP" "$OUT" base "$PWD/engines/rshogi-usi-{BASE_EDITION}") || exit 1
+TEST_ENGINE=$("$WRAP" "$OUT" test "$PWD/engines/rshogi-usi-{TEST_EDITION}") || exit 1
 ```
 
 side 名は `base` / `test` に限らず engine label と対応する一意な名前にする。YaneuraOu など
@@ -324,31 +282,12 @@ cargo run -p tools --release --bin tournament -- \
 
 #### 実行中の動的制御（再起動不要）
 
-長時間 run（SPRT 数千局・base-vs-N 等）の最中に、**再起動せず**対局境界で並列度や対局数を
-変えたいときは `<out-dir>/control.json` を書き換える。producer ループが 500ms 間隔で
-ポーリングし、次の対局境界で反映する。background task で回している最中でも、別途
-ファイルを書くだけで介入できる（Ctrl-C → パラメータ変更 → 再起動で進行中の対局結果を
-無駄にする / out-dir が分割されて集計が面倒になる、を回避）。
-
-```bash
-# <out-dir>/control.json （存在するフィールドだけ反映。両方任意）
-echo '{"target_games": 300, "concurrency": 8}' > "$OUT/control.json"
-```
-
-- **`target_games`**: 各方向・各ペアあたりの目標対局数（CLI `--games` と同じ単位）。
-  - 増やす → 既存ペアに追加チケットを供給して続行
-  - 減らす → 進行中ペアは 2 局目まで完結させた上で新規供給を停止し drain（pentanomial の
-    片側ペア残りを防ぐ）
-- **`concurrency`**: ワーカー数。増やすと即座に追加 spawn、減らすと対象ワーカーが現局面
-  完了後に退役する。`0` 以下は無視。
-- 変更は `<out-dir>/control_history.jsonl` に追記され、`pair_index` 整合は維持されるので
-  `analyze_selfplay` の集計と矛盾しない。
-
-留意点:
-- 変更は**対局境界**でのみ反映。進行中の 1 局は途中で再ターゲットされない。
-- `concurrency` 増加は worker 追加ごとに engine spawn（NNUE ロード相当）のコストがかかる。
-- SPRT の**途中トグル**（実行中に SPRT を有効化）は未対応。SPRT は起動時 `--sprt` で指定する。
-- 不正な JSON / 読み込み失敗 / 履歴追記失敗は警告のみで実行継続（対局は落とさない）。
+並列度や局数の変更は kill/restart せず `<out-dir>/control.json` を書き換える
+(`{"target_games": N, "concurrency": M}`、どちらも任意。対局境界で反映)。
+`target_games` を減らしても発行済みペアのもう片側は完結する。セマンティクスの詳細は
+`crates/tools/docs/tournament.md` の「実行中の目標局数変更と先後交換ペア」と
+`crates/tools/src/bin/tournament.rs` 冒頭の doc コメントを参照する。
+SPRT は起動時の `--sprt` でのみ有効化でき、途中トグルはできない。
 
 #### 外部エンジンとの対局例
 
@@ -386,7 +325,7 @@ nElo はペア単位 (同一開始局面・先後入替) で集計し、開始�
   A(engine-base) vs B(engine-test) | 2045局 | ... | Elo差:-36 ±15 | nElo:-37 ±15
 ```
 
-この出力を元に、以下の内容をマークダウンファイル（`docs/performance/` 配下）に出力する:
+この出力を元に、以下の内容をユーザーの private な実験ノートに記録する (この repo には置かない):
 
 1. **対局条件**: time control (nodes / byoyomi / btime+binc)・スレッド・ハッシュ・対局数・NNUE
 2. **総合結果表**: 各カードの勝敗・勝率・Elo差
@@ -395,8 +334,8 @@ nElo はペア単位 (同一開始局面・先後入替) で集計し、開始�
 
 採否判定の前に以下も確認する:
 
-- **`max_moves` 到達率**: `analyze_selfplay` の専用計数が未実装の間は、JSONL の
-  `reason="max_moves"` を直接集計する。到達率 0.1% 未満は現状維持、0.1% 以上は長手数局を
+- **`max_moves` 到達率**: `analyze_selfplay` 出力の `max_moves 到達率` 行を見る。
+  到達率 0.1% 未満は現状維持、0.1% 以上は長手数局を
   調査し、1% 以上は bounds の解釈より先に上限または千日手等のルール処理を見直す。
 - **NNUE 共有重み** (Linux / WSL2 の複数 rshogi process run): wrapper を使った各 rshogi
   side について、全 process log に `nnue shared weights [...]` の `shared` marker があり、
@@ -404,26 +343,9 @@ nElo はペア単位 (同一開始局面・先後入替) で集計し、開始�
   扱いにし、原因を解消して再走する。marker 非対応の外部 engine は対象に含めない。
 
   ```bash
-  check_rshogi_shared_weights() {
-    side=$1
-    found=0
-    for log in "$OUT"/engine-stderr/"$side"-*.log; do
-      test -e "$log" || continue
-      found=1
-      if ! grep -Eq 'nnue shared weights( \[[^]]+\])?: shared' "$log" ||
-        grep -Eq 'nnue shared weights( \[[^]]+\])?: local' "$log"; then
-        printf 'suspect shared weights log: %s\n' "$log" >&2
-        return 1
-      fi
-    done
-    if test "$found" -ne 1; then
-      printf 'missing shared weights log for side: %s\n' "$side" >&2
-      return 1
-    fi
-  }
-
-  check_rshogi_shared_weights base || exit 1
-  check_rshogi_shared_weights test || exit 1
+  CHECK=.claude/skills/selfplay/scripts/check_rshogi_shared_weights.sh
+  "$CHECK" "$OUT" base || exit 1
+  "$CHECK" "$OUT" test || exit 1
   ```
 
   外部 engine との例では rshogi 側だけ（例: `base`）を検査する。
@@ -480,21 +402,7 @@ simplification / non-regression の検定は `--sprt-nelo0 -10 --sprt-nelo1 0` �
 - **二段検定は例外運用**: 標準は単段。release-critical な変更や SPSA endpoint 等の
   選抜結果のみ、**独立 seed** (過去 run と異なる `--seed`) で同 bounds を再確認する。
 
-境界到達時の標準出力例:
-
-```
-[SPRT pair=2000 | test vs base] LLR=+2.979 (bounds -2.94..+2.94)  nelo=+14.01 ± 10.77  penta=[438, 20, 1000, 30, 512]  state=accept_h1
-[SPRT] terminal decision reached; draining 6 in-flight game(s)...
-...
-=== SPRT Summary (test vs base) ===
-bounds: LLR ∈ [-2.944, +2.944]  (alpha=0.05, beta=0.05)
-nelo hypotheses: H0=+0.0  H1=+10.0
-stopped_at:  pairs=2000, LLR=+2.979, decision=accept_h1
-             nelo=+14.01 ± 10.77  penta=[438, 20, 1000, 30, 512]
-final:       pairs=2006, LLR=+2.977, decision=accept_h1
-             nelo=+13.98 ± 10.75  penta=[439, 20, 1004, 30, 513]
-================================
-```
+境界到達時の出力例は `crates/tools/docs/tournament.md` の「SPRT 出力例」を参照する。
 
 ### 6. SPRT post-hoc 判定（完了済みログに対して再計算）
 
@@ -507,20 +415,11 @@ cargo run -p tools --release --bin analyze_selfplay -- \
   "$OUT"/*.jsonl --sprt
 ```
 
-base/test のラベルは以下の順で自動推定され、推定時は根拠が stderr に表示される:
-
-1. CLI 明示（`--sprt-base-label` / `--sprt-test-label`。片方だけ指定すれば他方は補完）
-2. meta の SPRT 情報（`tournament --sprt` で生成したログ）
-3. meta の `base_label` 記録（`tournament --base-label` で生成したログ）
-4. ラベル名に "base" を含む側を base と判断
-5. 最後の手段として label_black を test とみなす（警告付き）
-
-推定された役割が逆だったらラベルを明示して再実行する。レポートには
-`{test} (test) vs {base} (base)` と nelo/elo の視点が明記されるので、
-取り違えはレポート自体から判別できる。Wald パラメータは
-CLI → meta → 既定値 (nelo0=0, nelo1=5, α=β=0.05) の順で解決される
-(この既定値は規約標準の bounds と異なるので、meta に SPRT 情報が無いログの
-再判定では 4 パラメータを明示する)。
+base/test のラベルは CLI 明示 → meta の SPRT 情報 → meta の `base_label` → ラベル名の順で
+自動推定され、根拠が stderr に出る (詳細は `crates/tools/docs/tournament.md` の「SPRT post-hoc 判定」)。
+推定された役割が逆だったらラベルを明示して再実行する。Wald パラメータの既定値
+(nelo0=0, nelo1=5) は規約標準の bounds と異なるので、meta に SPRT 情報が無いログの
+再判定では 4 パラメータを明示する。
 
 通常の集計出力の末尾に SPRT レポートが追加される（`--json` 併用時は JSON 出力に
 `sprt` フィールドが追加される）。
@@ -533,13 +432,9 @@ CLI → meta → 既定値 (nelo0=0, nelo1=5, α=β=0.05) の順で解決され�
 
 ```
 /selfplay エンジン:
-- A: 3526b075 engines/rshogi-usi-{A_EDITION} ベースライン
-- B: 232d847d engines/rshogi-usi-{B_EDITION} move ordering完了
-- D: 4778e1c6 engines/rshogi-usi-{D_EDITION} LMR修正（TT変更前）
-- E: 5806777e engines/rshogi-usi-{E_EDITION} TT 16bit（最新）
+- base: {SHA} engines/rshogi-usi-{BASE_EDITION} ベースライン
+- test: {SHA} engines/rshogi-usi-{TEST_EDITION} 評価したい変更
 
 確認ポイント:
-1. E vs D: TT 16bit の棋力効果
-2. E vs A: 全修正+TT の総合効果
-3. B vs D: Step14+LMR が move ordering 完了時点より良いか悪いか
+1. test vs base: 変更の棋力効果 (gainer SPRT)
 ```
