@@ -58,24 +58,36 @@ tatara checkout は環境変数 `$TATARA_DIR` があればそれを使い、無�
 # SFEN だけを 1 行 1 局面で用意する
 sed -n 's/^[^#|][^|]*| //p' crates/tools/docs/fixtures/search_only_sentinel_4pos.txt > sfens.txt
 
-# 参照値 (tatara): stderr に bucket / raw / cp を出す
+# 参照値 (tatara): stdout に cp、--debug で stderr に bucket / raw / cp を出す
 cargo build --release --manifest-path "$TATARA_DIR/Cargo.toml" -p eval-sfen
 args=(); while IFS= read -r s; do args+=(--sfen "$s"); done < sfens.txt
 "$TATARA_DIR/target/release/eval_sfen" --nnue-file <net.bin> \
   --bucket-mode progresskpabs --progress-coeff <progress.bin> \
-  --fv-scale <net の FV_SCALE> --debug "${args[@]}"
+  --fv-scale <eval_sfens が表示する fv_scale> --debug "${args[@]}"
 
-# rshogi: TSV (sfen / bucket / raw / score / score_cp) を stdout に出す
+# rshogi: TSV (sfen / bucket / raw / score / score_cp) を stdout、fv_scale を stderr に出す。
+# 既定 features で読めない arch (768x16x32 + Threat 等) は
+# --no-default-features --features nnue-arch,<dim>,nnue-threat[,<threat-profile>] で build する
 cargo run --release -p tools --bin eval_sfens -- \
   --nnue <net.bin> --sfens sfens.txt \
   --bucket-mode progresskpabs --progress-coeff <progress.bin> \
   --progress-buckets <routing bucket 数> --count <局面数>
 ```
 
-**判定**: 全局面で `bucket` と `raw` が完全一致すれば OK。`raw` は FV_SCALE で割る前の
-ネットワーク出力なので、FV_SCALE の指定違いに左右されずに比べられる
-(tatara の `cp` は rshogi の `score` 列に対応する)。
+**判定**: 全局面で次の 2 列が完全一致すれば OK。
 
+| tatara `eval_sfen` | rshogi `eval_sfens` | 意味 |
+|---|---|---|
+| `bucket=` (stderr) | `bucket` | 選ばれた LayerStack bucket |
+| `cp` (stdout、stderr の `cp=`) | `score` | Threat を含む全 forward の出力 ÷ FV_SCALE (整数切り捨て) |
+
+- tatara の `--fv-scale` は rshogi が stderr に出す `fv_scale:` (net header の値) と同じにする。
+  違うと `score` 列と一致しない
+- rshogi の `raw` 列は piece accumulator だけから再計算した値で、Threat と PSQT を含まない。
+  Threat なし・PSQT なしの net に限り tatara の `raw=` と一致するので、そのときだけ
+  中間値の診断に使う。`score_cp` は歩=100 換算の別スケールで比較に使わない
+- **PSQT 付き net はこの経路の対象外**。tatara `eval_sfen` の forward は PSQT 項を足さないので、
+  Step 1 と legacy 経路で検証する
 - **bucket が食い違う**: tatara は net に格納された bucket 数で routing する。
   rshogi の `--progress-buckets` が格納数と違う (格納 9 / routing 8 の net 等) と bucket が
   ずれる。routing 数を確認し、格納数と routing 数が異なる net はこの経路で比べない
