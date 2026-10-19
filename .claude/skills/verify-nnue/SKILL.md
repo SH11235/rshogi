@@ -1,222 +1,162 @@
 ---
 name: verify-nnue
-description: "NNUE モデルの正当性検証。refresh vs update 一致テスト + bullet-shogi とのクロス実装検証を実行する。「モデルを検証して」「Golden Forward テストして」等のリクエストに使用する。"
+description: "NNUE モデルの正当性検証。refresh vs update 一致テスト + tatara eval_sfen とのクロス実装検証 (旧 bullet-shogi 経路は legacy) を実行する。「モデルを検証して」「Golden Forward テストして」等のリクエストに使用する。"
 user-invocable: true
 ---
 
 # NNUE モデル検証スキル
 
-学習済み quantised.bin の正当性を 2 段階で検証する。
-アーキテクチャ（素の LayerStacks / PSQT / Threat / PSQT+Threat）を問わず使用可能。
+学習済み LayerStacks net の正当性を 2 段階で検証する。
+
+1. rshogi 内部で差分更新 (update) と全計算 (refresh) が一致するか
+2. 学習器側の実装 (tatara `eval_sfen`) と rshogi が同じ局面で同じ値を出すか
 
 ## 入力パラメータ
 
 `$ARGUMENTS` から以下を受け取る。不足時は質問して補完する。
 
 ### 必須
-- **quantised.bin パス**: 検証対象のモデルファイル
+- **net パス**: 検証対象の量子化済み net (`.bin`)
+- **progress 係数**: progresskpabs の net なら学習時に使った係数ファイル
+  (`$SHOGI_DATA/progress/<coeff>.bin`)。kingrank9 の net では不要
+- **routing bucket 数**: progresskpabs の net を学習したときの bucket 数
 
 ### オプション
-- **checkpoint_dir**: bullet クロス検証用。省略時は quantised.bin の親ディレクトリ
-- **--threat**: Threat モデルの場合に bullet 側 `shogi_layerstack_eval` に渡す
-- **threat-profile**: Threat 次元削減プロファイル。bullet/rshogi 両方のビルドに同一 feature を指定する必要がある
+- **局面**: 既定は `crates/tools/docs/fixtures/search_only_sentinel_4pos.txt` の 4 局面
+  (`name | sfen` 形式。SFEN 部分だけ抜き出して使う)。局面を増やしたい場合は
+  `extract_bench_positions` 等で SFEN を 1 行 1 局面で用意する
+- **moves**: Step 1 の手数。既定 `100`
+- **threat-profile**: Threat 次元削減プロファイル。rshogi と参照実装のビルドに同一 feature を指定する必要がある
   - `threat-profile-same-class` (profile 1): 同種ペア全除外 (192,640 dims)
   - `threat-profile-same-class-major-pawn` (profile 2): 同種 + 大駒→歩除外 (173,568 dims)
   - `threat-profile-step-attacker` (profile 3): occupancy 依存 slider を attacker から除外 (33,408 dims)
   - `threat-profile-full-symdedup` (profile 4): pair 除外なし、canonical-dead な対称 edge を emit で drop (216,720 dims — full と同一。dims 不変のため net 一致は profile id で照合)
   - `threat-profile-cross-side` (profile 10): 同 side / 同種除外、敵味方跨ぎ異種のみ (96,320 dims)
 
-### デフォルト値（変更不要なら省略可）
-- **progress.bin**: `$SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin`
-- **bucket-mode**: rshogi 側は `progresskpabs` + `LS_PROGRESS_BUCKETS`/`--ls-progress-buckets` 8
-  (bullet v87〜v93 系は格納 9 bucket / routing 8)。bullet 側 CLI (`shogi_layerstack_eval`) は
-  旧名 `progress8kpabs` のままなので置換しない
-- **教師データ**: `$SHOGI_DATA/teachers/DLSuisho15b_deduped_shuffled.bin`
-- **moves**: `100`
-
 ## 検証手順
 
 ### Step 1: refresh vs update 一致テスト
 
 ```bash
-cargo run --release --bin verify_nnue_accumulator -- \
+cargo run --release -p tools --bin verify_nnue_accumulator -- \
+  --nnue-file <net.bin> \
   --ls-bucket-mode progresskpabs \
-  --ls-progress-buckets 8 \
-  --nnue-file <quantised.bin> \
+  --ls-progress-buckets <routing bucket 数> \
   --ls-progress-coeff <progress.bin> \
   --moves 100
 ```
 
+kingrank9 の net は `--ls-bucket-mode kingrank9` で `--ls-progress-*` を外す。
+
 **判定**: `ALL PASSED` なら OK。`MISMATCH` があれば差分更新にバグ。
 
-### Step 2: クロス実装検証
+### Step 2: クロス実装検証 (tatara `eval_sfen`)
 
-#### Step 2a: bullet 側で参照値生成
+tatara checkout は環境変数 `$TATARA_DIR` があればそれを使い、無ければユーザーに場所を聞く。
+
+```bash
+# SFEN だけを 1 行 1 局面で用意する
+sed -n 's/^[^#|][^|]*| //p' crates/tools/docs/fixtures/search_only_sentinel_4pos.txt > sfens.txt
+
+# 参照値 (tatara): stdout に cp、--debug で stderr に bucket / raw / cp を出す
+cargo build --release --manifest-path "$TATARA_DIR/Cargo.toml" -p eval-sfen
+args=(); while IFS= read -r s; do args+=(--sfen "$s"); done < sfens.txt
+"$TATARA_DIR/target/release/eval_sfen" --nnue-file <net.bin> \
+  --bucket-mode progresskpabs --progress-coeff <progress.bin> \
+  --fv-scale <eval_sfens が表示する fv_scale> --debug "${args[@]}"
+
+# rshogi: TSV (sfen / bucket / raw / score / score_cp) を stdout、fv_scale を stderr に出す。
+# 既定 features で読めない arch (768x16x32 + Threat 等) は
+# --no-default-features --features nnue-arch,<dim>,nnue-threat[,<threat-profile>] で build する
+cargo run --release -p tools --bin eval_sfens -- \
+  --nnue <net.bin> --sfens sfens.txt \
+  --bucket-mode progresskpabs --progress-coeff <progress.bin> \
+  --progress-buckets <routing bucket 数> --count <局面数>
+```
+
+**判定**: 全局面で次の 2 列が完全一致すれば OK。
+
+| tatara `eval_sfen` | rshogi `eval_sfens` | 意味 |
+|---|---|---|
+| `bucket=` (stderr) | `bucket` | 選ばれた LayerStack bucket |
+| `cp` (stdout、stderr の `cp=`) | `score` | Threat を含む全 forward の出力 ÷ FV_SCALE (整数切り捨て) |
+
+- tatara の `--fv-scale` は rshogi が stderr に出す `fv_scale:` (net header の値) と同じにする。
+  違うと `score` 列と一致しない
+- rshogi の `raw` 列は piece accumulator だけから再計算した値で、Threat と PSQT を含まない。
+  Threat なし・PSQT なしの net に限り tatara の `raw=` と一致するので、そのときだけ
+  中間値の診断に使う。`score_cp` は歩=100 換算の別スケールで比較に使わない
+- **PSQT 付き net はこの経路の対象外**。tatara `eval_sfen` の forward は PSQT 項を足さないので、
+  Step 1 と legacy 経路で検証する
+- **bucket が食い違う**: tatara は net に格納された bucket 数で routing する。
+  rshogi の `--progress-buckets` が格納数と違う (格納 9 / routing 8 の net 等) と bucket が
+  ずれる。routing 数を確認し、格納数と routing 数が異なる net はこの経路で比べない
+  (Step 1 と legacy 経路で検証する)
+- **tatara が読めない arch**: `eval_sfen` が読み込みエラーを出す arch は legacy 経路で検証する
+- 学習が数 superbatch しか進んでいない net は重みが異常に大きく、どこかの accumulator で
+  飽和して偽の不一致に見えることがある。十分学習した net で検証する
+
+---
+
+## Legacy: bullet-shogi とのクロス検証
+
+bullet-shogi で学習した旧 net の再検証にだけ使う。新しい net は Step 2 の tatara 経路を使う。
+
+### 参照値生成 (bullet)
 
 ```bash
 cd /path/to/bullet-shogi
 cargo run --release --example shogi_layerstack_eval -- \
   --checkpoint <checkpoint_dir> \
-  --pack $SHOGI_DATA/teachers/DLSuisho15b_deduped_shuffled.bin \
+  --pack <教師 PSV (例: $SHOGI_DATA/teachers/DLSuisho15b_aoba_deduped_shuffled.bin)> \
   --integer-forward --samples 1 \
   --bucket-mode progress8kpabs \
-  --progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
+  --progress-coeff <progress.bin> \
   [--threat]
 ```
 
-出力から `SFEN:` と `final_score:` を記録。
+- `checkpoint_dir` を省略するときは net の親ディレクトリ
+- bullet 側 CLI は旧名 `progress8kpabs` のままなので rshogi 側の名前に置換しない
+- `--threat` は Threat モデル時に必須 (`get_active_features` の入力型分岐に必要)。
+  PSQT の有無は arch_str から自動検出される
+- Threat profile を使う net は `--no-default-features --features cpu,<profile feature>` で
+  bullet を build する
 
-#### Step 2b: rshogi 側で同一局面を評価
+出力から `SFEN:` と `final_score:` を記録する。
+
+### rshogi 側で同一局面を評価
 
 ```bash
-# diagnostics ビルド（初回のみ）
 cargo build --release -p rshogi-usi --features diagnostics
 
-printf 'setoption name EvalFile value <quantised.bin>
+printf 'setoption name EvalFile value <net.bin>
 setoption name LS_BUCKET_MODE value progresskpabs
-setoption name LS_PROGRESS_BUCKETS value 8
+setoption name LS_PROGRESS_BUCKETS value <routing bucket 数>
 setoption name LS_PROGRESS_COEFF value <progress.bin>
 isready
-position sfen <Step 2a の SFEN>
+position sfen <bullet 出力の SFEN>
 eval diag
 quit
 ' | RUST_LOG=info ./target/release/rshogi-usi 2>&1 | grep "score:"
 ```
 
-**判定**: `final_score` が完全一致すれば OK。
-
----
-
-## 具体的なケース別コマンド例
-
-### Case A: PSQT 単体 (v88 等)
+Threat profile 付き net では rshogi も同じ profile feature で build する:
 
 ```bash
-# Step 1
-cargo run --release --bin verify_nnue_accumulator -- \
-  --ls-bucket-mode progresskpabs \
-  --ls-progress-buckets 8 \
-  --nnue-file $SHOGI_DATA/runs/bullet/v88/v88-20/quantised.bin \
-  --ls-progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
-  --moves 100
-
-# Step 2a (bullet): --threat なし（PSQT は arch_str から自動検出）
-cd /path/to/bullet-shogi
-cargo run --release --example shogi_layerstack_eval -- \
-  --checkpoint $SHOGI_DATA/runs/bullet/v88/v88-20 \
-  --pack $SHOGI_DATA/teachers/DLSuisho15b_deduped_shuffled.bin \
-  --integer-forward --samples 1 \
-  --bucket-mode progress8kpabs \
-  --progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin
-```
-
-### Case B: Threat 単体 (v89 等)
-
-```bash
-# Step 1
-cargo run --release --bin verify_nnue_accumulator -- \
-  --ls-bucket-mode progresskpabs \
-  --ls-progress-buckets 8 \
-  --nnue-file /path/to/v89-checkpoint/quantised.bin \
-  --ls-progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
-  --moves 100
-
-# Step 2a (bullet): --threat 必須
-cd /path/to/bullet-shogi
-cargo run --release --example shogi_layerstack_eval -- \
-  --checkpoint /path/to/v89-checkpoint \
-  --pack $SHOGI_DATA/teachers/DLSuisho15b_deduped_shuffled.bin \
-  --integer-forward --samples 1 \
-  --bucket-mode progress8kpabs \
-  --progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
-  --threat
-```
-
-### Case C: PSQT + Threat (v90 等)
-
-```bash
-# Step 1: 同一コマンド（モデルが自動判定）
-cargo run --release --bin verify_nnue_accumulator -- \
-  --ls-bucket-mode progresskpabs \
-  --ls-progress-buckets 8 \
-  --nnue-file /path/to/v90-checkpoint/quantised.bin \
-  --ls-progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
-  --moves 100
-
-# Step 2a (bullet): --threat 必須（PSQT は自動検出）
-cd /path/to/bullet-shogi
-cargo run --release --example shogi_layerstack_eval -- \
-  --checkpoint /path/to/v90-checkpoint \
-  --pack $SHOGI_DATA/teachers/DLSuisho15b_deduped_shuffled.bin \
-  --integer-forward --samples 1 \
-  --bucket-mode progress8kpabs \
-  --progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
-  --threat
-```
-
-### Case D: 素の LayerStacks（PSQT なし / Threat なし, v87 等）
-
-```bash
-# Step 1
-cargo run --release --bin verify_nnue_accumulator -- \
-  --ls-bucket-mode progresskpabs \
-  --ls-progress-buckets 8 \
-  --nnue-file /path/to/v87-checkpoint/quantised.bin \
-  --ls-progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
-  --moves 100
-
-# Step 2a (bullet): オプションなし
-cd /path/to/bullet-shogi
-cargo run --release --example shogi_layerstack_eval -- \
-  --checkpoint /path/to/v87-checkpoint \
-  --pack $SHOGI_DATA/teachers/DLSuisho15b_deduped_shuffled.bin \
-  --integer-forward --samples 1 \
-  --bucket-mode progress8kpabs \
-  --progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin
-```
-
-### Case E: Threat + 次元削減プロファイル (v93 等)
-
-Threat profile を使うモデルは **bullet/rshogi 両方のビルドで同一 profile feature を指定**する必要がある。
-profile が不一致だと THREAT_DIMENSIONS が異なり、weight 読み込みが破壊的にずれる。
-
-```bash
-# Step 1: rshogi を profile 付きでビルド（初回のみ）
-# ※ verify_nnue_accumulator は tools crate なのでそちらの feature も指定
 cargo build --release -p tools --no-default-features \
   --features layerstacks-768x16x32,nnue-threat,threat-profile-same-class
-cargo run --release --bin verify_nnue_accumulator -- \
-  --ls-bucket-mode progresskpabs \
-  --ls-progress-buckets 8 \
-  --nnue-file $SHOGI_DATA/runs/bullet/v93/v93-20/quantised.bin \
-  --ls-progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
-  --moves 100
-
-# Step 2a (bullet): --threat 必須、profile feature でビルド
-cd /path/to/bullet-shogi
-cargo run --release --no-default-features --features cpu,threat-profile-same-class \
-  --example shogi_layerstack_eval -- \
-  --checkpoint $SHOGI_DATA/runs/bullet/v93/v93-20 \
-  --pack $SHOGI_DATA/teachers/DLSuisho15b_deduped_shuffled.bin \
-  --integer-forward --samples 32 \
-  --bucket-mode progress8kpabs \
-  --progress-coeff $SHOGI_DATA/progress/nodchip_progress_e1_f1_cuda.bin \
-  --threat
-
-# Step 2b (rshogi): diagnostics + profile 付きでビルド
 cargo build --release -p rshogi-usi --no-default-features \
   --features rshogi-core/layerstack-arch,rshogi-core/layerstacks-768x16x32,rshogi-core/nnue-threat,rshogi-core/threat-profile-same-class,rshogi-usi/layerstack-arch,rshogi-usi/nnue-threat,rshogi-usi/threat-profile-same-class,rshogi-usi/diagnostics
-
-# 以降は Case B と同様に eval diag で比較
 ```
 
-**⚠️ 重要**: profile 2 (`threat-profile-same-class-major-pawn`) / profile 10 (`threat-profile-cross-side`) の場合は上記の `threat-profile-same-class` を該当 profile feature に全て置き換えること。
+`threat-profile-same-class` は対象 profile の feature に全て置き換える。
 
----
+**判定**: `final_score` が完全一致すれば OK。
 
 ## 不一致時のデバッグ
 
-### 比較すべき中間値
+rshogi の中間値は `eval_sfens --dump-debug-first` (最初の局面) か、diagnostics build の
+`eval diag` で出す。legacy 経路で bullet と比べる場合の対応:
 
 | 中間値 | bullet 出力キー | rshogi ログキー |
 |--------|-----------------|-----------------|
@@ -231,15 +171,16 @@ cargo build --release -p rshogi-usi --no-default-features \
 
 ### よくある原因
 
+- **bucket だけ不一致**: routing bucket 数か progress 係数ファイルの取り違え
 - **FT accumulator が不一致**: feature index 計算の差異、weight layout の転置
 - **PSQT だけ不一致**: PSQT の read サイズが input_size vs halfka_dim で不整合
 - **final_score だけ不一致**: fv_scale の差異、PSQT /2 の有無
-- **rshogi diagnostics が Threat を反映しない**: `evaluate_with_diagnostics` の Threat 結合漏れ（過去に発見・修正済み）
+- **rshogi diagnostics が Threat を反映しない**: `evaluate_with_diagnostics` の Threat 結合漏れ
 
 ## 注意事項
 
-- rshogi の diagnostics ビルドは `--features diagnostics` が必要
+- rshogi の `eval diag` は `--features diagnostics` の build が必要
 - `NNUE_ARCHITECTURE` USI オプションは**指定しない**（arch_str から自動検出させる）
-- bullet 側 `--threat` は Threat モデル時に必須（`get_active_features` の入力型分岐に必要）
-- PSQT の有無は bullet/rshogi 両方で arch_str から自動検出される
-- **Threat profile は bullet/rshogi 両方のビルドで必ず同一 feature を指定すること**。不一致だと THREAT_DIMENSIONS が異なり weight 読み込みが破壊的にずれる。profile 0 (全ペア) はデフォルトで feature 指定不要
+- **Threat profile は rshogi と参照実装の両方のビルドで必ず同一 feature を指定すること**。
+  不一致だと THREAT_DIMENSIONS が異なり weight 読み込みが破壊的にずれる。
+  profile 0 (全ペア) はデフォルトで feature 指定不要

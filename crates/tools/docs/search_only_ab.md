@@ -19,7 +19,8 @@ cargo build --release -p tools --bin search_only_ab
 ```
 
 `positions.txt` は 1 行 1 局面で `名前 | position コマンド引数` の形式です
-（例: `hirate-like | lnsgkgsnl/1r7/... b - 9`、`startpos` も可）。
+（例: `hirate-like | lnsgkgsnl/1r7/... b - 9`、`startpos` も可）。`#` 行と空行は無視します。
+4 局面のサンプルを `crates/tools/docs/fixtures/search_only_sentinel_4pos.txt` に置いています。
 
 ## backend
 

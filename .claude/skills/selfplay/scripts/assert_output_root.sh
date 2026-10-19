@@ -56,7 +56,7 @@ if [[ ! "$run_name" =~ ^[0-9]{8}-[0-9]{6}-[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
 fi
 timestamp="${run_name:0:15}"
 date_input="${timestamp:0:4}-${timestamp:4:2}-${timestamp:6:2} ${timestamp:9:2}:${timestamp:11:2}:${timestamp:13:2}"
-normalized_timestamp="$(date -d "$date_input" +%Y%m%d-%H%M%S 2>/dev/null || true)"
+normalized_timestamp="$(date -d "$date_input" +%Y%m%d-%H%M%S || true)"
 if [ "$normalized_timestamp" != "$timestamp" ]; then
   echo "selfplay output gate: invalid timestamp '$timestamp'" >&2
   exit 2
