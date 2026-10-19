@@ -958,8 +958,9 @@ YO のチューニング対象は素のソースだと `constexpr int param = N;
 
 ##### Step 1. tune.py の入手
 
-YaneuraOu-ScriptCollection の `SPSA/` ディレクトリ、もしくは本リポジトリの `tune/` 直下に
-`tune.py` と `ParamLib.py` が同梱されている。
+`tune.py` と `ParamLib.py` は本リポジトリには含まれない。YaneuraOu-ScriptCollection の
+`SPSA/` ディレクトリから `tune/` 直下にコピーして使う（追跡対象外のローカルファイル。
+入手元と配置するファイルは `tune/README.md` を参照）。以下のコマンドはこの配置を前提とする。
 
 ##### Step 2. `.tune` ファイルを YO ソースに当てる
 
