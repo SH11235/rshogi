@@ -104,6 +104,13 @@ test (`pnpm test:smoke` の miniflare smoke 等) 側で済んでいる前提で�
 vp exec wrangler tail --config "$WRANGLER" --format pretty
 ```
 
+log / pid / toml を置く run directory を先に作る (1-A / 1-B 共通):
+
+```bash
+RUN=runs/csa-e2e/$(date +%Y%m%d-%H%M%S)
+mkdir -p "$RUN"
+```
+
 `csa_client` の起動方法は **2 通り** 選べる。どちらも **起動直後に PID を記録**し、
 生存確認・停止は PID (`ps -p "$PID"` / `kill "$PID"`) で行う。
 
@@ -114,8 +121,6 @@ quit する。`<room_id>` は黒/白で完全一致、`<preset>` も完全一致
 のマッチング条件)。
 
 ```bash
-RUN=runs/csa-e2e/$(date +%Y%m%d-%H%M%S)
-mkdir -p "$RUN"
 ROOM=e2e-$(date +%Y%m%d%H%M%S)
 PRESET=<登録済み preset 名>
 ENGINE=engines/rshogi-usi-<edition>
@@ -410,4 +415,4 @@ timeout は概ね 70〜90 秒なので、`kill -KILL` から `enter_grace_window
 - server grace 経路: `crates/rshogi-csa-server-workers/src/game_room.rs::enter_grace_window`
 - AGREE timeout: `crates/rshogi-csa-server-workers/src/game_room.rs::handle_agree_timeout_alarm`
 - AGREE timeout probe: `crates/rshogi-csa-server-workers/scripts/agree_timeout_probe.mjs`
-- AGREE timeout 設定 env: `wrangler.{staging,production,toml.example}.toml` の `AGREE_TIMEOUT_SECONDS`
+- AGREE timeout 設定 env: `wrangler.staging.toml` / `wrangler.production.toml` / `wrangler.toml.example` の `AGREE_TIMEOUT_SECONDS`
