@@ -25,9 +25,9 @@ rshogi の指定領域を YaneuraOu (YO) の対応実装と行単位で対照比
 ## ファイル対応表
 
 rshogi のルートパス: `crates/rshogi-core/src/`
-YO のベースパス: `/path/to/YaneuraOu/source/`
-
-**重要**: YO ソースは必ず上記の正規パスを使用すること。
+YO のベースパス: YaneuraOu checkout の `source/`。環境変数 `$YO_DIR` が設定されていれば
+`$YO_DIR/source/` を使い、無ければユーザーに checkout の場所を聞く。推測したパスや
+別バージョンの YO を読まない。
 
 | rshogi | YO | 領域 |
 |---|---|---|
@@ -122,6 +122,16 @@ rshogi と YO のコードを対照し、以下の観点で差分を抽出する
 - MISSING: {件数}
 - 総合: {PASS / REVIEW_NEEDED / FIX_REQUIRED}
 ```
+
+## YaneuraOu USI の落とし穴
+
+比較結果を YO バイナリの実行で裏取りするときに踏みやすい点:
+
+- 既定 `Threads=4`。単発の eval / NPS 計測では `Threads` を必ず明示する。
+- pipe で `go` の直後に `quit` を送ると探索が即中断する。`bestmove` を待ってから `quit` を送る。
+- 生の静的評価は `e` コマンド (`eval` ではない)。
+- `d` の盤面出力は unicode を含むので grep には `-a` を付ける。
+- 探索コードは `#if STOCKFISH` / `#else` で分岐している。将棋の動作は `#else` 側。
 
 ## 大規模な比較の場合
 
