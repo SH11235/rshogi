@@ -16,32 +16,15 @@ selfplay / SPRT 等の対局運用は [`selfplay` SKILL](../selfplay/SKILL.md) �
 
 ## 1. preset edition の取得
 
-利用可能な preset 一覧:
+利用可能な preset 一覧は xtask から取る (skill に一覧を写さない):
 
 ```bash
-cd /path/to/rshogi
 cargo run --release -p xtask -- list-editions
 ```
 
-代表例 (2026-06 時点):
-
-| preset 名 | 説明 |
-|---|---|
-| `edition-layerstacks-halfka_hm_merged-1536x16x32-none` | LayerStack 1536x16x32 + HalfKA_HM merged (default 推奨) |
-| `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt` | 同上 + PSQT |
-| `edition-layerstacks-halfka_hm_merged-1536x16x32-threat` | 同上 + Threat |
-| `edition-layerstacks-halfka_hm_merged-1536x16x32-psqt_threat` | 同上 + PSQT + Threat |
-| `edition-layerstacks-halfka_hm_merged-1536x32x32-none` | 旧 L1=32 系 |
-| `edition-layerstacks-halfka_hm_merged-1024x16x32-none` | 縮小 L0=1024 |
-| `edition-layerstacks-halfka_hm_merged-768x16x32-none` | 縮小 L0=768 |
-| `edition-layerstacks-halfka_hm_merged-512x16x32-none` | 縮小 L0=512 |
-| `edition-layerstacks-halfka_hm_split-1536x16x32-none` | HalfKA_HM split |
-| `edition-layerstacks-halfka_split-1536x16x32-none` | HalfKA split |
-| `edition-layerstacks-halfka_merged-1536x16x32-none` | HalfKA merged |
-| `edition-layerstacks-halfkp-1536x16x32-none` | HalfKP |
-| `edition-halfka_hm_merged-screlu` | 非 LayerStack 旧 (SCReLU) |
-| `edition-halfkp-crelu` | 非 LayerStack 旧 (CReLU) |
-| `edition-layerstacks-any-any-any` | 動的 dispatch 全部入り (計測用) |
+名前は `edition-<arch 系>-<feature-set>-<L0>x<L1>x<L2>-<拡張>` の形で、既定推奨は
+`edition-layerstacks-halfka_hm_merged-1536x16x32-none`。`edition-layerstacks-any-any-any` は
+動的 dispatch 全部入り (計測用)、`edition-halfkp-crelu` 等の非 LayerStack は旧系統。
 
 ## 2. xtask build (推奨経路)
 
@@ -111,15 +94,18 @@ thread 'main' panicked: EvalFile was explicitly set but failed to load.
 
 selfplay / SPRT 起動前に以下 3 段の pre-flight check を踏むこと。
 
-### (a) ckpt の version 確認
+### (a) ckpt の version と arch 確認
 
-`inspect_ft.py` は tatara (NNUE trainer) 側の ckpt 検査 helper（本 repo には含まれない）。
+先頭 4 byte (little-endian) が format version、その後に arch 文字列が続く:
 
 ```bash
-python3 /path/to/inspect_ft.py <ckpt.bin> | head -3
-# nnue_ver: 0x7af32f21 (current)   ← num_buckets explicit、最新 engine 必要
-# nnue_ver: 0x7af32f20 (legacy)    ← num_buckets implicit (=9)、旧 engine 互換
+od -An -tx4 -N4 <ckpt.bin>
+# 7af32f21 ← num_buckets explicit、最新 engine 必要
+# 7af32f20 ← num_buckets implicit (=9)、旧 engine 互換
+head -c 512 <ckpt.bin> | strings -n 8 | head -2   # Features=... の arch 文字列
 ```
+
+version 定数の正典は `crates/rshogi-core/src/nnue/constants.rs`。
 
 ### (b) engine binary の build commit 確認
 
@@ -136,9 +122,9 @@ ckpt 作成時点の rshogi commit より engine build commit が古ければ re
 ```bash
 echo -e 'usi
 setoption name EvalFile value <ckpt.bin>
-setoption name FV_SCALE value 28
+setoption name FV_SCALE value <net の FV_SCALE>
 setoption name LS_BUCKET_MODE value progresskpabs
-setoption name LS_PROGRESS_BUCKETS value 8
+setoption name LS_PROGRESS_BUCKETS value <routing bucket 数>
 setoption name LS_PROGRESS_COEFF value <progress.bin>
 isready
 quit' | timeout 30 engines/<binary> 2>&1 | grep -E 'readyok|Error|Unknown NNUE version|panic'
@@ -227,7 +213,7 @@ cp target/production/rshogi-usi engines/rshogi-usi-custom-768x16x32-<purpose>
 | 症状 | 原因 | 対処 |
 |---|---|---|
 | `Unknown NNUE version: 0x7af32f21. Expected 0x7af32f16 / 0x7af32f20` | engine が旧 format しか対応していない (rshogi 側 format 拡張前の build) | `xtask build --edition <name> --profile production` で最新再 build |
-| `EvalFile was explicitly set but failed to load` | 上記 format mismatch、もしくは ckpt path 間違い、ckpt の feature-set/dim と engine の build が不一致 | (1) `inspect_ft.py` で ckpt の `arch` 確認、(2) engine の preset/features を arch に合わせる |
+| `EvalFile was explicitly set but failed to load` | 上記 format mismatch、もしくは ckpt path 間違い、ckpt の feature-set/dim と engine の build が不一致 | (1) §4 (a) の arch 文字列を確認、(2) engine の preset/features を arch に合わせる |
 | `readyok` 通過するが evaluator 出力おかしい | 過剰 feature で余分な accumulator field 残留 / 必要 feature 不足 | preset 経由で build し直し、対応表で feature 確認 |
 | NPS 差が説明できない | binary 群が release / production 混在 | 全 binary を同一 profile で rebuild |
 
