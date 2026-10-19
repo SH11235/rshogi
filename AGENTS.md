@@ -73,8 +73,10 @@
 
 ## 長時間実行タスク
 
-- 自己対局・ベンチマーク等の長時間コマンドは `run_in_background: true` でバックグラウンド実行すること
-- プロセス終了時にハーネスが完了を通知するので、polling や自前 watcher は不要
+- ハーネスの `run_in_background: true` は、セッション内に終わる有限のコマンド（ビルド、短いテスト・ベンチ）にだけ使う
+- 数時間級のジョブ（学習、SPRT、SPSA、floodgate 等）はセッションから切り離す: 絶対パスで
+  `nohup setsid -w <cmd> > <run-dir>/run.log 2>&1 < /dev/null &` と起動し、直後に `echo $! > <run-dir>/PID`
+- 切り離したジョブの監視は `ps -p "$(cat <run-dir>/PID)"` と log の mtime で行う。プロセス名のパターン一致で探したり kill したりしない
 
 ## 性能制約
 
