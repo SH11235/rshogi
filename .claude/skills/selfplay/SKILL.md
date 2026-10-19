@@ -281,10 +281,12 @@ cargo run -p tools --release --bin tournament -- \
 数局で終わる確認 run 以外 (SPRT・数百局以上の評価) はセッションから切り離して起動し、PID を残す:
 
 ```bash
-nohup setsid -w cargo run -p tools --release --bin tournament -- ... --out-dir "$OUT" \
+nohup setsid -w bash -c 'echo $$ > "$1/PID"; shift; exec "$@"' _ "$OUT" \
+  cargo run -p tools --release --bin tournament -- ... --out-dir "$OUT" \
   > "$OUT/tournament.log" 2>&1 < /dev/null &
-echo $! > "$OUT/PID"
 ```
+
+ジョブ自身が `PID` を書く (job control 下では `setsid` が fork するので `$!` は当てにならない)。
 
 監視は `ps -p "$(cat "$OUT/PID")"` と `tournament.log` の mtime で行う。
 
