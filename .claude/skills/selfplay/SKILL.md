@@ -278,7 +278,15 @@ cargo run -p tools --release --bin tournament -- \
   - `pair-{i}-{j}__{label_i}-vs-{label_j}.jsonl`（--engine 指定順の 0 始まり index + 整形した表示ラベル）: ペア別の棋譜ログ（各対局の指し手・評価値・結果）。例: `pair-0-1__baseline-vs-pass-root-bonus.jsonl`
   - `meta.json`: 対局設定・エンジン情報をまとめたファイル。対局条件の確認・再現に利用可能。
 
-`run_in_background: true` で起動する。終了時にハーネスが完了を通知する。
+数局で終わる確認 run 以外 (SPRT・数百局以上の評価) はセッションから切り離して起動し、PID を残す:
+
+```bash
+nohup setsid -w cargo run -p tools --release --bin tournament -- ... --out-dir "$OUT" \
+  > "$OUT/tournament.log" 2>&1 < /dev/null &
+echo $! > "$OUT/PID"
+```
+
+監視は `ps -p "$(cat "$OUT/PID")"` と `tournament.log` の mtime で行う。
 
 #### 実行中の動的制御（再起動不要）
 
@@ -310,7 +318,7 @@ cargo run -p tools --release --bin tournament -- \
 
 ### 4. 完了待ち・結果集計
 
-Background task の完了通知を受けたら、`analyze_selfplay` ツールで対局ログを集計しサマリを生成する:
+`ps -p` で PID の終了を確認したら、`analyze_selfplay` ツールで対局ログを集計しサマリを生成する:
 
 ```
 cargo run -p tools --release --bin analyze_selfplay -- "$OUT"/*.jsonl
