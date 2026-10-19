@@ -61,7 +61,7 @@ cargo build --release -p tools --bin psv_to_hcpe3
 
 - `--evalfix-a <a>`: `round_ties_even(score × 756.0865 / a)` で eval を焼き込み ±32767 でクランプ
   （`756.0865` は dlshogi 固定 decode 定数。`<a>` のみが教師セット側のスケールに合わせる可変値）
-  （python 参照 `psv_to_hcpe_flat.py --evalfix_a` と bit 一致）。**`<a>` は有限の正数のみ**（0/負/非有限はエラー）。
+  （ユーザーの private tooling にある参照 Python 実装の `--evalfix_a` と bit 一致）。**`<a>` は有限の正数のみ**（0/負/非有限はエラー）。
   未指定なら生 score をそのまま書く。`<a>` の値は教師セット側のスケールに合わせる。
 - ストリーミング処理でピークメモリは入力件数に非依存（`--chunk` 件分のみ）。
 - 出力はスレッド数・チャンク境界に依らず bit 一致する。
