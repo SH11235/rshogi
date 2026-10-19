@@ -1119,23 +1119,32 @@ SPSA ループで得られた最終値を YO の production バイナリに反�
 SPSA が正常完了すると `<run-dir>/final.params` が atomic に書き出される。
 これは反復が完了した時点の最終確定スナップショットで、live state である
 `<run-dir>/state.params` (反復ごとに上書きされる) とは別ファイルとして保持
-される。`apply` には必ず `final.params` を渡すこと:
+される。`apply` の入力には必ず `final.params` を使う。
+
+`tune.py apply` の引数は `<.tune ファイル> <ソースディレクトリ>` で、params ファイルは
+`.tune` の stem から `<stem>.params` として探される (params を直接は渡せない)。
+導いた path が無いと値を 0 件として黙って続行するので、起動時に表示される
+`params_file :` 行が意図したファイルを指していることを確認する。
+`tune/suisho10.params` (上流の初期値) を上書きしないよう、run ごとの作業ディレクトリに
+同じ stem で `.tune` と `.params` を並べてから apply する:
 
 ```bash
-# ケース A の場合: final.params が YO 形式のままなので直接 apply
-cd /path/to/YaneuraOu
-python3 /path/to/rshogi/tune/tune.py apply \
-  /path/to/rshogi/runs/spsa/<RUN>/final.params \
-  source/
+WORK=/path/to/rshogi/runs/spsa/<RUN>/apply
+mkdir -p "$WORK"
+cp /path/to/rshogi/tune/suisho10.tune "$WORK/tuned.tune"
 
-# ケース B の場合: rshogi 形式 → YO 形式に逆変換してから apply
+# ケース A の場合: final.params が YO 形式のままなのでそのまま並べる
+cp /path/to/rshogi/runs/spsa/<RUN>/final.params "$WORK/tuned.params"
+
+# ケース B の場合: rshogi 形式 → YO 形式に逆変換して並べる
 cargo run --release -p tools --bin rshogi_to_yo_params -- \
   --rshogi-params /path/to/rshogi/runs/spsa/<RUN>/final.params \
   --base /path/to/rshogi/tune/suisho10.params \
   --mapping /path/to/rshogi/tune/yo_rshogi_mapping.toml \
-  --output /tmp/tuned_yo.params
+  --output "$WORK/tuned.params"
+
 cd /path/to/YaneuraOu
-python3 /path/to/rshogi/tune/tune.py apply /tmp/tuned_yo.params source/
+python3 /path/to/rshogi/tune/tune.py apply "$WORK/tuned.tune" source/
 ```
 
 `apply` 後、`%%TUNE_DECLARATION%%` 等のマーカーは消え、注入された `TUNE(...)` も実定数に
