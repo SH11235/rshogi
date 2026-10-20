@@ -257,11 +257,11 @@ impl Readings for BTreeMap<String, Reading> {
     }
 }
 
-// 同じ指紋の読みは条件も同じなので、条件は 1 つだけ持ち、1 件ごとには読みだけを持つ。
+// 1 件ごとには読みだけを持つ。条件の同一性は指紋で決まる (ファイル型 option はパスでなく
+// 内容の sha256 で指紋に入るので、同じモデルを別のパスで指定した読みも同じ条件として使い回す)。
 pub(super) struct Journal {
     lock: LockedFile,
     fingerprint: String,
-    settings: Option<Settings>,
     records: BTreeMap<String, Reading>,
 }
 
@@ -316,17 +316,11 @@ impl Journal {
 
     fn load(mut lock: LockedFile, fingerprint: &str) -> Result<Self> {
         let mut records: BTreeMap<String, Reading> = BTreeMap::new();
-        let mut settings: Option<Settings> = None;
         scan(&mut lock, |rec| {
             if rec.settings.fingerprint != fingerprint {
                 return Ok(());
             }
             rec.reading.validate(&rec.settings)?;
-            match &settings {
-                Some(known) if *known != rec.settings => bail!("台帳の重複が矛盾します"),
-                Some(_) => {}
-                None => settings = Some(rec.settings),
-            }
             if let Some(old) = records.get(&rec.reading.key)
                 && !old.same_values(&rec.reading)
             {
@@ -338,7 +332,6 @@ impl Journal {
         Ok(Self {
             lock,
             fingerprint: fingerprint.into(),
-            settings,
             records,
         })
     }
@@ -366,9 +359,6 @@ impl Journal {
         if settings.fingerprint != self.fingerprint {
             bail!("台帳を開いた指紋と追記の条件が違います");
         }
-        if self.settings.as_ref().is_some_and(|known| known != settings) {
-            bail!("台帳の条件と追記の条件が違います");
-        }
         reading.validate(settings)?;
         let key = reading.key.clone();
         if let Some(old) = self.records.get(&key) {
@@ -386,7 +376,6 @@ impl Journal {
         serde_json::to_writer(&mut self.lock.0, &rec)?;
         self.lock.0.write_all(b"\n")?;
         self.lock.0.sync_data()?;
-        self.settings.get_or_insert(rec.settings);
         self.records.insert(key, rec.reading);
         Ok(())
     }
@@ -511,22 +500,42 @@ mod tests {
     }
 
     #[test]
-    fn same_fingerprint_with_different_settings_is_rejected() {
+    fn same_model_under_another_path_shares_the_condition() {
         let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("model.bin");
+        std::fs::write(&model, b"model").unwrap();
+        let moved = dir.path().join("moved");
+        std::fs::create_dir(&moved).unwrap();
+        std::fs::copy(&model, moved.join("model.bin")).unwrap();
+        let engine = dir.path().join("engine");
+        std::fs::write(&engine, b"engine").unwrap();
+        let settings_at = |eval: &Path| {
+            Settings::new(&crate::book_tree::ReadingArgs {
+                engine: engine.clone(),
+                engine_options: vec![format!("EvalFile={}", eval.display())],
+                nodes: 100,
+                multipv: 1,
+                hash: 16,
+            })
+            .unwrap()
+        };
+        let first = settings_at(&model);
+        let second = settings_at(&moved.join("model.bin"));
+        assert_ne!(first.options, second.options);
+        assert_eq!(first.fingerprint, second.fingerprint);
         let path = dir.path().join("journal.jsonl");
-        let first = record("target", 0);
-        let mut second = record("target", 1);
-        second.settings.engine_sha256 = "other".into();
-        {
-            let mut file = File::create(&path).unwrap();
-            write_record(&mut file, &first);
-            write_record(&mut file, &second);
-        }
-        assert!(Journal::open(&path, "target").is_err());
-        std::fs::write(&path, "").unwrap();
-        let mut journal = Journal::open(&path, "target").unwrap();
-        journal.append(first.reading, &first.settings, "fixture".into()).unwrap();
-        assert!(journal.append(second.reading, &second.settings, "fixture".into()).is_err());
+        let reading_for = |column| {
+            let mut r = record(&first.fingerprint, column).reading;
+            r.draw = first.draw();
+            r
+        };
+        let (a, b) = (reading_for(0), reading_for(1));
+        let mut journal = Journal::open(&path, &first.fingerprint).unwrap();
+        journal.append(a, &first, "fixture".into()).unwrap();
+        journal.append(b, &second, "fixture".into()).unwrap();
+        drop(journal);
+        let journal = Journal::open(&path, &second.fingerprint).unwrap();
+        assert_eq!(journal.records.len(), 2);
     }
 
     #[test]
