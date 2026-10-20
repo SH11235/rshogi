@@ -88,7 +88,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Serve(args) => service::serve(args),
         TreeCommand::Import(args) => {
             let settings = Settings::new(&args.reading)?;
-            let mut journal = Journal::open(&args.journal)?;
+            let mut journal = Journal::open(&args.journal, &settings.fingerprint)?;
             journal.import(&args.input, &settings)?;
             println!("fingerprint={}", settings.fingerprint);
             Ok(())
@@ -97,15 +97,16 @@ pub fn run(args: TreeArgs) -> Result<()> {
             let definition = Definition::load(&args.tree)?;
             paths::reject_collisions(&args.journal, None, &[&definition])?;
             let output_lock = journal::LockedFile::open(&definition.out.join("tree.lock"))?;
-            let journal = Journal::open(&args.journal)?;
+            paths::reject_symlink(&args.journal)?;
+            let journal_lock = journal::LockedFile::open(&args.journal)?;
             model::remove_candidates(&definition.out)?;
             let out = definition.out.clone();
             let result = (|| -> Result<bool> {
-                let settings = journal.select(args.fingerprint.as_deref())?;
-                let cache = journal.records_for(&settings.fingerprint);
+                let (journal, settings) =
+                    Journal::select(journal_lock, args.fingerprint.as_deref())?;
                 let mut tree = Tree::load(definition, &settings)?;
                 loop {
-                    let missing = tree.advance(&cache)?;
+                    let missing = tree.advance(&journal)?;
                     if tree.finished {
                         break;
                     }

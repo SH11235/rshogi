@@ -1,5 +1,5 @@
 use super::ServeArgs;
-use super::journal::{Journal, LockedFile, Pv, Reading, Settings, digest};
+use super::journal::{Journal, LockedFile, Pv, Reading, Readings, Settings, digest};
 use super::model::{Definition, Tree, remove_candidates};
 use crate::common::io::write_atomic;
 use crate::selfplay::{EngineConfig, EngineProcess};
@@ -351,8 +351,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
         Some(&args.state),
         &definitions.iter().collect::<Vec<_>>(),
     )?;
-    let mut journal = Journal::open(&journal_path)?;
-    let mut cache = journal.records_for(&settings.fingerprint);
+    let mut journal = Journal::open(&journal_path, &settings.fingerprint)?;
     for definition in definitions {
         output_locks.push(LockedFile::open(&definition.out.join("tree.lock"))?);
         let tree = Tree::load(definition, &settings)?;
@@ -481,8 +480,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                         }
                         match result {
                             Ok(reading) => {
-                                journal.append(reading.clone(), &settings, "engine".into())?;
-                                cache.insert(key, reading);
+                                journal.append(reading, &settings, "engine".into())?;
                             }
                             Err(error) => {
                                 if explicit {
@@ -556,7 +554,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 if tree.finished || tree.failed {
                     continue;
                 }
-                let step = tree.advance(&cache);
+                let step = tree.advance(&journal);
                 match step {
                     Ok(missing) => {
                         if let Some((key, _)) =
@@ -631,7 +629,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 "RUNNING"
             };
             monitor_changed(&args.state.join("STATUS"), &format!("{status}\n"));
-            let progress = json!({"status":status,"fingerprint":settings.fingerprint,"queued":queue_len,"workers":workers.iter().map(|(id,w)|json!({"id":id,"key":w.busy.as_ref().map(|(k,_)|k),"elapsed_secs":w.busy.as_ref().map(|(_,t)|t.elapsed().as_secs_f64()),"nodes":w.nodes,"depth":w.depth})).collect::<Vec<_>>(),"trees":trees.iter().enumerate().map(|(id,t)|json!({"id":id,"out":t.def.out,"round":t.round,"read":t.nodes.len(),"requested":t.level.len(),"queued":t.level.keys().filter(|k|!cache.contains_key(*k)&&!workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"running":t.level.keys().filter(|k|workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"finished":t.finished,"failed":t.failed})).collect::<Vec<_>>()});
+            let progress = json!({"status":status,"fingerprint":settings.fingerprint,"queued":queue_len,"workers":workers.iter().map(|(id,w)|json!({"id":id,"key":w.busy.as_ref().map(|(k,_)|k),"elapsed_secs":w.busy.as_ref().map(|(_,t)|t.elapsed().as_secs_f64()),"nodes":w.nodes,"depth":w.depth})).collect::<Vec<_>>(),"trees":trees.iter().enumerate().map(|(id,t)|json!({"id":id,"out":t.def.out,"round":t.round,"read":t.nodes.len(),"requested":t.level.len(),"queued":t.level.keys().filter(|k|journal.get(k).is_none()&&!workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"running":t.level.keys().filter(|k|workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"finished":t.finished,"failed":t.failed})).collect::<Vec<_>>()});
             monitor(&args.state.join("progress.json"), &serde_json::to_string_pretty(&progress)?);
             for tree in &trees {
                 let tree_status = if tree.failed {

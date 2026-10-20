@@ -1,4 +1,4 @@
-use super::journal::{Reading, Settings, digest};
+use super::journal::{Reading, Readings, Settings, digest};
 use crate::book_db::{child_position_after_move, position_from_sfen, strip_ply};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -209,7 +209,7 @@ impl Tree {
     }
 
     /// 台帳から要求済みの読みだけを取り込み、展開と段の緩和が止まるまで進める。
-    pub fn advance(&mut self, cache: &BTreeMap<String, Reading>) -> Result<Vec<(String, usize)>> {
+    pub fn advance(&mut self, cache: &impl Readings) -> Result<Vec<(String, usize)>> {
         if self.finished || self.failed {
             return Ok(Vec::new());
         }

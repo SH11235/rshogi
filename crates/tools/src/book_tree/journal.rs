@@ -247,68 +247,106 @@ impl Drop for LockedFile {
     }
 }
 
+pub(super) trait Readings {
+    fn get(&self, key: &str) -> Option<&Reading>;
+}
+
+impl Readings for BTreeMap<String, Reading> {
+    fn get(&self, key: &str) -> Option<&Reading> {
+        self.get(key)
+    }
+}
+
 pub(super) struct Journal {
     lock: LockedFile,
-    records: BTreeMap<(String, String), Record>,
+    fingerprint: String,
+    records: BTreeMap<String, Record>,
 }
+
+impl Readings for Journal {
+    fn get(&self, key: &str) -> Option<&Reading> {
+        self.records.get(key).map(|r| &r.reading)
+    }
+}
+
+fn scan(lock: &mut LockedFile, mut visit: impl FnMut(Record) -> Result<()>) -> Result<()> {
+    lock.0.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(lock.0.try_clone()?);
+    let mut offset = 0;
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        let n = reader.read_until(b'\n', &mut bytes)?;
+        if n == 0 {
+            break;
+        }
+        // 台帳は改行まで同期して保存する。末尾の未確定行だけを回復する。
+        if !bytes.ends_with(b"\n") {
+            lock.0.set_len(offset)?;
+            break;
+        }
+        offset += n as u64;
+        let rec: Record = serde_json::from_slice(&bytes)
+            .context("tree 台帳の形式が不正です (既存 book_mine 台帳とは共用できません)")?;
+        if rec.kind != VERSION || rec.settings.version != VERSION {
+            bail!("台帳の版が違います");
+        }
+        visit(rec)?;
+    }
+    lock.0.seek(SeekFrom::End(0))?;
+    Ok(())
+}
+
+fn conditions(lock: &mut LockedFile) -> Result<BTreeMap<String, Settings>> {
+    let mut conditions = BTreeMap::new();
+    scan(lock, |rec| {
+        conditions.insert(rec.settings.fingerprint.clone(), rec.settings);
+        Ok(())
+    })?;
+    Ok(conditions)
+}
+
 impl Journal {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, fingerprint: &str) -> Result<Self> {
         super::paths::reject_symlink(path)?;
-        let mut lock = LockedFile::open(path)?;
-        let mut reader = BufReader::new(lock.0.try_clone()?);
-        let mut records: BTreeMap<(String, String), Record> = BTreeMap::new();
-        let mut offset = 0;
-        loop {
-            let mut bytes = Vec::new();
-            let n = reader.read_until(b'\n', &mut bytes)?;
-            if n == 0 {
-                break;
-            }
-            // 台帳は改行まで同期して保存する。末尾の未確定行だけを回復する。
-            if !bytes.ends_with(b"\n") {
-                lock.0.set_len(offset)?;
-                break;
-            }
-            offset += n as u64;
-            let rec: Record = serde_json::from_slice(&bytes)
-                .context("tree 台帳の形式が不正です (既存 book_mine 台帳とは共用できません)")?;
-            if rec.kind != VERSION || rec.settings.version != VERSION {
-                bail!("台帳の版が違います");
+        Self::load(LockedFile::open(path)?, fingerprint)
+    }
+
+    fn load(mut lock: LockedFile, fingerprint: &str) -> Result<Self> {
+        let mut records: BTreeMap<String, Record> = BTreeMap::new();
+        scan(&mut lock, |rec| {
+            if rec.settings.fingerprint != fingerprint {
+                return Ok(());
             }
             rec.reading.validate(&rec.settings)?;
-            let key = (rec.settings.fingerprint.clone(), rec.reading.key.clone());
+            let key = rec.reading.key.clone();
             if let Some(old) = records.get(&key)
                 && (!old.reading.same_values(&rec.reading) || old.settings != rec.settings)
             {
                 bail!("台帳の重複が矛盾します");
             }
             records.insert(key, rec);
-        }
-        lock.0.seek(SeekFrom::End(0))?;
-        Ok(Self { lock, records })
+            Ok(())
+        })?;
+        Ok(Self {
+            lock,
+            fingerprint: fingerprint.into(),
+            records,
+        })
     }
 
-    pub fn records_for(&self, fingerprint: &str) -> BTreeMap<String, Reading> {
-        self.records
-            .iter()
-            .filter(|((fp, _), _)| fp == fingerprint)
-            .map(|((_, key), r)| (key.clone(), r.reading.clone()))
-            .collect()
-    }
-
-    pub fn select(&self, fingerprint: Option<&str>) -> Result<Settings> {
-        let conditions: BTreeMap<_, _> = self
-            .records
-            .values()
-            .map(|r| (r.settings.fingerprint.as_str(), &r.settings))
-            .collect();
-        if let Some(fp) = fingerprint {
-            return conditions.get(fp).map(|s| (*s).clone()).context("指紋が台帳にありません");
-        }
-        if conditions.len() != 1 {
-            bail!("台帳の条件が一意でありません。--fingerprint を指定してください");
-        }
-        conditions.values().next().map(|s| (*s).clone()).context("空の台帳")
+    pub fn select(mut lock: LockedFile, fingerprint: Option<&str>) -> Result<(Self, Settings)> {
+        let conditions = conditions(&mut lock)?;
+        let settings = if let Some(fp) = fingerprint {
+            conditions.get(fp).context("指紋が台帳にありません")?
+        } else {
+            if conditions.len() != 1 {
+                bail!("台帳の条件が一意でありません。--fingerprint を指定してください");
+            }
+            conditions.values().next().context("空の台帳")?
+        };
+        let journal = Self::load(lock, &settings.fingerprint)?;
+        Ok((journal, settings.clone()))
     }
 
     pub fn append(
@@ -317,8 +355,11 @@ impl Journal {
         settings: &Settings,
         provenance: String,
     ) -> Result<()> {
+        if settings.fingerprint != self.fingerprint {
+            bail!("台帳を開いた指紋と追記の条件が違います");
+        }
         reading.validate(settings)?;
-        let key = (settings.fingerprint.clone(), reading.key.clone());
+        let key = reading.key.clone();
         if let Some(old) = self.records.get(&key) {
             if !old.reading.same_values(&reading) {
                 bail!("値の違う重複: {}", reading.key);
@@ -339,6 +380,9 @@ impl Journal {
     }
 
     pub fn import(&mut self, paths: &[PathBuf], settings: &Settings) -> Result<()> {
+        if settings.fingerprint != self.fingerprint {
+            bail!("台帳を開いた指紋と取り込みの条件が違います");
+        }
         // 取り込み全体を検査してから追記し、拒否時には台帳を変更しない。
         let mut pending: BTreeMap<String, (Reading, String)> = BTreeMap::new();
         for path in paths {
@@ -353,7 +397,7 @@ impl Journal {
                 reading.validate_declaration(settings)?;
                 let existing = self
                     .records
-                    .get(&(settings.fingerprint.clone(), reading.key.clone()))
+                    .get(&reading.key)
                     .map(|r| &r.reading)
                     .or_else(|| pending.get(&reading.key).map(|(r, _)| r));
                 if let Some(old) = existing
@@ -368,5 +412,156 @@ impl Journal {
             self.append(reading, settings, provenance)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(fingerprint: &str, column: usize) -> Record {
+        let row = match column {
+            0 => "K8".into(),
+            8 => "8K".into(),
+            n => format!("{n}K{}", 8 - n),
+        };
+        let settings = Settings {
+            fingerprint: fingerprint.into(),
+            version: VERSION.into(),
+            engine_sha256: "engine".into(),
+            options: BTreeMap::new(),
+            content_sha256: BTreeMap::new(),
+            nodes: 100,
+            multipv: 1,
+            hash: 16,
+        };
+        let reading = Reading {
+            tag: "fixture".into(),
+            ply: 1,
+            key: format!("4k4/9/9/9/9/9/9/9/{row} b -"),
+            nodes_limit: settings.nodes,
+            nodes: Some(100),
+            sec: 0.1,
+            threads: 1,
+            hash: settings.hash,
+            draw: BTreeMap::new(),
+            multipv: Vec::new(),
+            bestmove: "resign".into(),
+        };
+        Record {
+            kind: VERSION.into(),
+            settings,
+            provenance: "fixture".into(),
+            reading,
+        }
+    }
+
+    fn write_record(file: &mut File, record: &Record) {
+        serde_json::to_writer(&mut *file, record).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn journal_retains_only_selected_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let target = record("target", 0);
+        {
+            let mut file = File::create(&path).unwrap();
+            write_record(&mut file, &target);
+            for condition in 0..128 {
+                for column in 0..9 {
+                    write_record(&mut file, &record(&format!("past-{condition}"), column));
+                }
+            }
+            let mut conflict = record("past-0", 0);
+            conflict.reading.bestmove = "win".into();
+            write_record(&mut file, &conflict);
+            file.write_all(b"{partial").unwrap();
+        }
+        let mut journal = Journal::open(&path, "target").unwrap();
+        assert_eq!(journal.records.len(), 1);
+        assert_eq!(journal.get(&target.reading.key), Some(&target.reading));
+        assert!(Journal::open(&path, "past-1").is_err());
+        let next = record("target", 1);
+        journal.append(next.reading.clone(), &next.settings, "fixture".into()).unwrap();
+        assert_eq!(journal.records.len(), 2);
+        assert_eq!(journal.get(&next.reading.key), Some(&next.reading));
+        let foreign = record("foreign", 2);
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(journal.append(foreign.reading, &foreign.settings, "fixture".into()).is_err());
+        assert!(journal.import(&[], &foreign.settings).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+        drop(journal);
+        assert!(Journal::open(&path, "past-0").is_err());
+        assert_eq!(Journal::open(&path, "past-1").unwrap().records.len(), 9);
+        assert!(Journal::open(&path, "absent").unwrap().records.is_empty());
+        assert_eq!(Journal::open(&path, "target").unwrap().records.len(), 2);
+    }
+
+    #[test]
+    fn streaming_select_lists_settings_and_preserves_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let first = record("first", 0);
+        let mut second = record("second", 1);
+        second.settings.engine_sha256 = "other-engine".into();
+        {
+            let mut file = File::create(&path).unwrap();
+            for rec in [&first, &second, &first] {
+                write_record(&mut file, rec);
+            }
+        }
+        let mut lock = LockedFile::open(&path).unwrap();
+        let found = conditions(&mut lock).unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found["first"], first.settings);
+        assert_eq!(found["second"], second.settings);
+        assert!(Journal::select(lock, None).is_err());
+        assert!(Journal::select(LockedFile::open(&path).unwrap(), Some("absent")).is_err());
+        let (journal, settings) =
+            Journal::select(LockedFile::open(&path).unwrap(), Some("second")).unwrap();
+        assert_eq!(settings, second.settings);
+        assert_eq!(journal.records.len(), 1);
+        assert_eq!(journal.get(&second.reading.key), Some(&second.reading));
+        assert!(LockedFile::open(&path).is_err());
+        drop(journal);
+        {
+            let mut file = File::create(&path).unwrap();
+            write_record(&mut file, &first);
+            write_record(&mut file, &first);
+            file.write_all(b"{partial").unwrap();
+        }
+        let (journal, settings) = Journal::select(LockedFile::open(&path).unwrap(), None).unwrap();
+        assert_eq!(settings, first.settings);
+        assert_eq!(journal.records.len(), 1);
+        drop(journal);
+        File::create(&path).unwrap();
+        assert!(Journal::select(LockedFile::open(&path).unwrap(), None).is_err());
+    }
+
+    #[test]
+    fn unselected_rows_check_format_and_version_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let mut invalid_version = record("past", 0);
+        invalid_version.settings.version = "unknown".into();
+        {
+            let mut file = File::create(&path).unwrap();
+            write_record(&mut file, &invalid_version);
+        }
+        assert!(Journal::open(&path, "target").is_err());
+        assert!(Journal::select(LockedFile::open(&path).unwrap(), None).is_err());
+        let mut invalid_reading = record("past", 0);
+        invalid_reading.reading.threads = 2;
+        {
+            let mut file = File::create(&path).unwrap();
+            write_record(&mut file, &invalid_reading);
+        }
+        assert!(Journal::open(&path, "target").unwrap().records.is_empty());
+        assert!(Journal::open(&path, "past").is_err());
+        assert!(Journal::select(LockedFile::open(&path).unwrap(), None).is_err());
+        std::fs::write(&path, b"{invalid}\n").unwrap();
+        assert!(Journal::open(&path, "target").is_err());
     }
 }

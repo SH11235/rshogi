@@ -1,4 +1,4 @@
-use super::journal::{Pv, Reading};
+use super::journal::{Pv, Reading, Readings};
 use super::model::{child, side};
 use super::*;
 use rshogi_core::movegen::{MoveList, generate_legal_all};
@@ -335,8 +335,8 @@ fn import_is_transactional_and_rejects_conflicting_declarations_and_values() {
     let input = dir.path().join("d0.jsonl");
     let path = dir.path().join("journal");
     let r = reading(ROOT, &[("5i4i", 10)], &s);
-    let mut j = Journal::open(&path).unwrap();
-    assert!(Journal::open(&path).is_err());
+    let mut j = Journal::open(&path, &s.fingerprint).unwrap();
+    assert!(Journal::open(&path, &s.fingerprint).is_err());
     for field in ["nodes_limit", "threads", "hash", "draw", "multipv"] {
         let mut v = serde_json::to_value(&r).unwrap();
         v[field] = match field {
@@ -346,7 +346,7 @@ fn import_is_transactional_and_rejects_conflicting_declarations_and_values() {
         };
         std::fs::write(&input, format!("{}\n{v}\n", serde_json::to_string(&r).unwrap())).unwrap();
         assert!(j.import(std::slice::from_ref(&input), &s).is_err());
-        assert!(j.records_for(&s.fingerprint).is_empty());
+        assert!(j.get(ROOT).is_none());
     }
     std::fs::write(&input, format!("{}\n", serde_json::to_string(&r).unwrap())).unwrap();
     j.import(std::slice::from_ref(&input), &s).unwrap();
@@ -360,8 +360,8 @@ fn import_is_transactional_and_rejects_conflicting_declarations_and_values() {
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"{partial").unwrap();
     }
-    let j = Journal::open(&path).unwrap();
-    assert_eq!(j.records_for(&s.fingerprint).len(), 1);
+    let j = Journal::open(&path, &s.fingerprint).unwrap();
+    assert!(j.get(ROOT).is_some());
 }
 
 #[test]
@@ -407,7 +407,7 @@ fn replay_missing_reading_and_not_ready_remove_registration_material() {
     assert!(!tree.write_outputs().unwrap());
     assert!(!tree.def.out.join("own_nodes.tsv").exists());
     let journal_path = dir.path().join("j");
-    let mut j = Journal::open(&journal_path).unwrap();
+    let mut j = Journal::open(&journal_path, &s.fingerprint).unwrap();
     j.append(cache[ROOT].clone(), &s, "fixture".into()).unwrap();
     drop(j);
     let toml = dir.path().join("tree.toml");
@@ -692,7 +692,7 @@ fn replay_locks_before_touching_candidates_or_status_and_not_ready_returns_error
     )
     .unwrap();
     let journal_path = dir.path().join("journal");
-    let mut journal = Journal::open(&journal_path).unwrap();
+    let mut journal = Journal::open(&journal_path, &s.fingerprint).unwrap();
     for r in corpus(&s).into_values() {
         journal.append(r, &s, "fixture".into()).unwrap();
     }
