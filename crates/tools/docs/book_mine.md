@@ -295,7 +295,7 @@ book_mine tree replay --journal /path/to/tree-journal.jsonl --tree /path/to/tree
 
 import では engine とファイル型 USI option の内容 SHA-256、全 option、明示 `SPSAParamsFile` が無い場合のバイナリ隣接 `spsa.params` の有無と内容、nodes、MultiPV、局面ごとの初期化・info 解析の版を条件の指紋にします。Python の記録は元の engine / 評価ファイルの digest を持たないため、**指定した条件の宣言による取り込み**です。出どころのパスと入力ファイルの SHA-256 も記録します。nodes_limit / threads / hash / draw / MultiPV 行数が宣言と違う行、不正な局面・手、同じ条件と局面で MultiPV の値や深さ・bestmove が異なる重複を拒否します。取り込み全体を検査してから追記します。
 
-replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足や ready:false は非0で終了します。出力先と journal・paths.tsv の衝突を検査し、出力先と journal の lock を取る前には既存の出力を変更しません。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。 台帳は行単位で読み、serve・import は宣言した fingerprint、replay は選択した fingerprint の読みだけをメモリに保持します。serve はその読みを直接参照し、別のキャッシュへ複製しません。replay は同じ排他 lock を保持したまま条件（Settings）の一覧だけを収集し、条件を選んでから対象の読みを読み込みます。他の fingerprint の行も形式・版を検査し、改行の無い末尾を回復しますが、読みの妥当性と重複の矛盾検査は対象の fingerprint 内だけで行います。保持量は対象条件の局面数に比例し、過去条件の総レコード数には比例しません（全行の走査時間は必要です）。
+replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足や ready:false は非0で終了します。出力先と journal・paths.tsv の衝突を検査し、出力先と journal の lock を取る前には既存の出力を変更しません。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。 台帳は行単位で読み、serve・import は宣言した fingerprint、replay は選択した fingerprint の読みだけをメモリに保持します。serve はその読みを直接参照し、別のキャッシュへ複製しません。replay は同じ排他 lock を保持したまま条件（Settings）の一覧だけを収集し、条件を選んでから対象の読みを読み込みます。他の fingerprint の行も形式・版を検査し、改行の無い末尾を回復しますが、読みの妥当性と重複の矛盾検査は対象の fingerprint 内だけで行います。保持量は対象条件の局面数に比例し、過去条件の総レコード数には比例しません（全行の走査時間は必要です）。条件は 1 つだけ持ち、局面ごとには読み (MultiPV 数行) だけを持ちます。1 局面あたり 1 KiB 前後で、10 万局面で約 100 MiB です。定跡の局面を深く読む用途ではこの規模を超えない想定で、ディスク上の索引は持ちません。
 
 ### 出力と登録可否
 

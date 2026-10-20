@@ -257,15 +257,17 @@ impl Readings for BTreeMap<String, Reading> {
     }
 }
 
+// 同じ指紋の読みは条件も同じなので、条件は 1 つだけ持ち、1 件ごとには読みだけを持つ。
 pub(super) struct Journal {
     lock: LockedFile,
     fingerprint: String,
-    records: BTreeMap<String, Record>,
+    settings: Option<Settings>,
+    records: BTreeMap<String, Reading>,
 }
 
 impl Readings for Journal {
     fn get(&self, key: &str) -> Option<&Reading> {
-        self.records.get(key).map(|r| &r.reading)
+        self.records.get(key)
     }
 }
 
@@ -313,24 +315,30 @@ impl Journal {
     }
 
     fn load(mut lock: LockedFile, fingerprint: &str) -> Result<Self> {
-        let mut records: BTreeMap<String, Record> = BTreeMap::new();
+        let mut records: BTreeMap<String, Reading> = BTreeMap::new();
+        let mut settings: Option<Settings> = None;
         scan(&mut lock, |rec| {
             if rec.settings.fingerprint != fingerprint {
                 return Ok(());
             }
             rec.reading.validate(&rec.settings)?;
-            let key = rec.reading.key.clone();
-            if let Some(old) = records.get(&key)
-                && (!old.reading.same_values(&rec.reading) || old.settings != rec.settings)
+            match &settings {
+                Some(known) if *known != rec.settings => bail!("台帳の重複が矛盾します"),
+                Some(_) => {}
+                None => settings = Some(rec.settings),
+            }
+            if let Some(old) = records.get(&rec.reading.key)
+                && !old.same_values(&rec.reading)
             {
                 bail!("台帳の重複が矛盾します");
             }
-            records.insert(key, rec);
+            records.insert(rec.reading.key.clone(), rec.reading);
             Ok(())
         })?;
         Ok(Self {
             lock,
             fingerprint: fingerprint.into(),
+            settings,
             records,
         })
     }
@@ -358,10 +366,13 @@ impl Journal {
         if settings.fingerprint != self.fingerprint {
             bail!("台帳を開いた指紋と追記の条件が違います");
         }
+        if self.settings.as_ref().is_some_and(|known| known != settings) {
+            bail!("台帳の条件と追記の条件が違います");
+        }
         reading.validate(settings)?;
         let key = reading.key.clone();
         if let Some(old) = self.records.get(&key) {
-            if !old.reading.same_values(&reading) {
+            if !old.same_values(&reading) {
                 bail!("値の違う重複: {}", reading.key);
             }
             return Ok(());
@@ -375,7 +386,8 @@ impl Journal {
         serde_json::to_writer(&mut self.lock.0, &rec)?;
         self.lock.0.write_all(b"\n")?;
         self.lock.0.sync_data()?;
-        self.records.insert(key, rec);
+        self.settings.get_or_insert(rec.settings);
+        self.records.insert(key, rec.reading);
         Ok(())
     }
 
@@ -398,7 +410,6 @@ impl Journal {
                 let existing = self
                     .records
                     .get(&reading.key)
-                    .map(|r| &r.reading)
                     .or_else(|| pending.get(&reading.key).map(|(r, _)| r));
                 if let Some(old) = existing
                     && !old.same_values(&reading)
@@ -497,6 +508,25 @@ mod tests {
         assert_eq!(Journal::open(&path, "past-1").unwrap().records.len(), 9);
         assert!(Journal::open(&path, "absent").unwrap().records.is_empty());
         assert_eq!(Journal::open(&path, "target").unwrap().records.len(), 2);
+    }
+
+    #[test]
+    fn same_fingerprint_with_different_settings_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let first = record("target", 0);
+        let mut second = record("target", 1);
+        second.settings.engine_sha256 = "other".into();
+        {
+            let mut file = File::create(&path).unwrap();
+            write_record(&mut file, &first);
+            write_record(&mut file, &second);
+        }
+        assert!(Journal::open(&path, "target").is_err());
+        std::fs::write(&path, "").unwrap();
+        let mut journal = Journal::open(&path, "target").unwrap();
+        journal.append(first.reading, &first.settings, "fixture".into()).unwrap();
+        assert!(journal.append(second.reading, &second.settings, "fixture".into()).is_err());
     }
 
     #[test]
