@@ -153,6 +153,14 @@ pub(super) struct Reading {
 }
 
 impl Reading {
+    pub fn lines(&self) -> &[Pv] {
+        if self.bestmove == "win" {
+            &[]
+        } else {
+            &self.multipv
+        }
+    }
+
     pub fn validate(&self, settings: &Settings) -> Result<()> {
         if self.nodes_limit != settings.nodes
             || self.threads != 1
@@ -170,6 +178,12 @@ impl Reading {
         }
         if self.multipv.len() > settings.multipv {
             bail!("MultiPV が指定数を超えています: {}", self.key);
+        }
+        if self.bestmove == "win"
+            && (self.multipv.is_empty()
+                || matches!(self.multipv.as_slice(), [pv] if pv.mv == "win"))
+        {
+            return Ok(());
         }
         let mut moves = BTreeSet::new();
         for pv in &self.multipv {
@@ -239,6 +253,7 @@ pub(super) struct Journal {
 }
 impl Journal {
     pub fn open(path: &Path) -> Result<Self> {
+        super::paths::reject_symlink(path)?;
         let mut lock = LockedFile::open(path)?;
         let mut reader = BufReader::new(lock.0.try_clone()?);
         let mut records: BTreeMap<(String, String), Record> = BTreeMap::new();

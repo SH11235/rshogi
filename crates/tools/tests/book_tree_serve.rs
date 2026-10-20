@@ -643,7 +643,7 @@ fn completed_status_is_unchanged_and_deleted_done_and_failed_outputs_stay_delete
 fn serve_accepts_omitted_nonpromotions_and_win_with_legal_moves_as_leaves() {
     use rshogi_core::movegen::{MoveList, generate_legal_all};
     let bishop = "4k4/9/4B4/9/9/9/9/9/4K4 b -";
-    for win in [false, true] {
+    for (win, win_row) in [(false, false), (true, false), (true, true)] {
         let dir = tempfile::tempdir().unwrap();
         let state = &dir.path().join("state");
         std::fs::create_dir_all(state.join("inbox")).unwrap();
@@ -659,7 +659,13 @@ fn serve_accepts_omitted_nonpromotions_and_win_with_legal_moves_as_leaves() {
             .take(17)
             .map(|m| json!({"move":m.to_usi(),"cp":500,"depth":8}))
             .collect();
-        data["positions"][bishop] = if win { json!([]) } else { json!(rows) };
+        data["positions"][bishop] = if win_row {
+            json!([{"move":"win", "cp":30000, "depth":1}])
+        } else if win {
+            json!([])
+        } else {
+            json!(rows)
+        };
         if win {
             data["bestmove"] = json!("win");
         }
@@ -678,7 +684,13 @@ fn serve_accepts_omitted_nonpromotions_and_win_with_legal_moves_as_leaves() {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0]["reading"]["multipv"].as_array().unwrap().len(),
-            if win { 0 } else { 17 }
+            if win_row {
+                1
+            } else if win {
+                0
+            } else {
+                17
+            }
         );
         if win {
             assert_eq!(rows[0]["reading"]["bestmove"], "win");
@@ -690,26 +702,50 @@ fn serve_accepts_omitted_nonpromotions_and_win_with_legal_moves_as_leaves() {
 
 #[cfg(unix)]
 #[test]
-fn inbox_rejects_output_containing_symlinked_journal_without_losing_readings() {
+fn serve_rejects_symlinked_journal_before_changing_outputs() {
+    for exists in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = &dir.path().join("state");
+        std::fs::create_dir_all(state.join("inbox")).unwrap();
+        let target = dir.path().join("target.jsonl");
+        if exists {
+            std::fs::write(&target, "preserve").unwrap();
+        }
+        std::os::unix::fs::symlink(&target, state.join("journal.jsonl")).unwrap();
+        let config = fast_fixture(state);
+        add_tree(state, "good");
+        let mut server = start(state, &config);
+        wait_for(|| server.0.try_wait().unwrap().is_some());
+        assert!(!server.0.wait().unwrap().success());
+        assert!(!dir.path().join("good").exists());
+        assert!(!state.join("lock").exists());
+        if exists {
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "preserve");
+        } else {
+            assert!(!target.exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn inbox_symlinks_are_alerted_without_stopping_serve() {
     let dir = tempfile::tempdir().unwrap();
     let state = &dir.path().join("state");
     std::fs::create_dir_all(state.join("inbox")).unwrap();
-    let out = dir.path().join("journal-output");
-    std::fs::create_dir(&out).unwrap();
-    std::fs::write(out.join("d0.jsonl"), "").unwrap();
-    std::fs::write(out.join("own_nodes.tsv"), "protected").unwrap();
-    std::os::unix::fs::symlink(out.join("d0.jsonl"), state.join("journal.jsonl")).unwrap();
     let config = fast_fixture(state);
-    add_tree(state, "good");
+    add_root(state, "valid", ROOT);
+    let source = state.join("inbox/valid.toml");
+    std::os::unix::fs::symlink(&source, state.join("inbox/link.toml")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("missing"), state.join("inbox/broken.toml"))
+        .unwrap();
     let mut server = start(state, &config);
-    wait_for(|| status(&dir.path().join("good")) == "DONE\n");
-    let before = std::fs::read(out.join("d0.jsonl")).unwrap();
-    assert!(!before.is_empty());
-    std::fs::write(state.join("inbox/collision.toml"), "paths='../../good.paths.tsv'\nout='../../journal-output'\ndepth=0\nopp_n=1\nstop=300\nown='b'\nrounds=0\n").unwrap();
-    wait_for(|| alerts(state).contains("衝突"));
-    assert_eq!(std::fs::read(out.join("d0.jsonl")).unwrap(), before);
-    assert_eq!(std::fs::read(out.join("own_nodes.tsv")).unwrap(), b"protected");
-    assert!(!out.join("tree.lock").exists());
+    wait_for(|| alerts(state).contains("link.toml") && alerts(state).contains("broken.toml"));
+    wait_for(|| status(&dir.path().join("valid")) == "DONE\n");
     assert!(server.0.try_wait().unwrap().is_none());
+    let accepted: Value =
+        serde_json::from_str(&std::fs::read_to_string(state.join("accepted.json")).unwrap())
+            .unwrap();
+    assert_eq!(accepted.as_array().unwrap().len(), 1);
     stop(state, &mut server);
 }

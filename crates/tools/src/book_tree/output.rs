@@ -149,7 +149,7 @@ impl Tree {
             if root_side == self.def.own {
                 let best = cands.iter().filter_map(|m| values.get(m)).max();
                 let above: Vec<_> = self.nodes[key]
-                    .multipv
+                    .lines()
                     .iter()
                     .filter(|p| !cands.contains(&p.mv) && best.is_some_and(|v| p.cp > *v))
                     .map(|p| p.mv.clone())
@@ -172,7 +172,7 @@ impl Tree {
         let own_sign = if self.def.own == "b" { 1 } else { -1 };
         let mut own_rows = Vec::new();
         for key in self.reach(&self.edge) {
-            if side(&key) != self.def.own || self.nodes[&key].multipv.is_empty() {
+            if side(&key) != self.def.own || self.nodes[&key].lines().is_empty() {
                 continue;
             }
             let values = rows_for(&replace, &key)?;
@@ -193,7 +193,7 @@ impl Tree {
                 } else {
                     "伸ばしていない手"
                 }
-            } else if self.nodes[&key].multipv[0].cp.abs() >= self.def.stop {
+            } else if self.nodes[&key].lines()[0].cp.abs() >= self.def.stop {
                 "止めた (値の絶対値が STOP 以上)"
             } else {
                 "出口 (伸ばしていない)"
@@ -257,7 +257,7 @@ impl Tree {
             for mv in edges.get(key).into_iter().flatten() {
                 let c = child(key, mv)?;
                 if !rows.contains_key(mv)
-                    && let Some(first) = self.nodes.get(&c).and_then(|n| n.multipv.first())
+                    && let Some(first) = self.nodes.get(&c).and_then(|n| n.lines().first())
                 {
                     rows.insert(mv.clone(), -first.cp);
                 }

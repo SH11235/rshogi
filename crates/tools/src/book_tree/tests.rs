@@ -68,6 +68,7 @@ fn definition(dir: &Path, rounds: usize) -> Definition {
     let paths = dir.join("paths.tsv");
     std::fs::write(&paths,format!("{ROOT}\t1\t5i4i 5a4a 4i5i 4a5a 5i6i\tcycle\n{ROOT}\t1\t5i5h 5a5b 5h4i 5b4a\ttransposition\n")).unwrap();
     Definition {
+        source: None,
         paths,
         paths_sha256: None,
         out: dir.join("out"),
@@ -859,4 +860,106 @@ fn serve_startup_rejects_accepted_collisions_before_changing_outputs() {
     assert_eq!(std::fs::read_to_string(journal).unwrap(), "protected");
     assert_eq!(std::fs::read_to_string(def.out.join("own_nodes.tsv")).unwrap(), "protected");
     assert!(!def.out.join("tree.lock").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_paths_reject_live_and_dangling_symlinks() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let def = definition(dir.path(), 0);
+    let journal = dir.path().join("journal");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(state.join("inbox")).unwrap();
+    std::fs::create_dir(&def.out).unwrap();
+    for exists in [false, true] {
+        let target = dir.path().join("target");
+        if exists {
+            std::fs::write(&target, "preserve").unwrap();
+        }
+        for path in [
+            journal.clone(),
+            state.join("lock"),
+            state.join("accepted.json"),
+            def.out.join("d0.jsonl"),
+            def.out.join("STATUS"),
+        ] {
+            symlink(&target, &path).unwrap();
+            let error =
+                super::paths::reject_collisions(&journal, Some(&state), &[&def]).unwrap_err();
+            assert!(error.to_string().contains("シンボリックリンク"), "{error:#}");
+            std::fs::remove_file(path).unwrap();
+        }
+        for path in [&def.out, &state.join("inbox"), &state] {
+            std::fs::remove_dir_all(path).unwrap();
+            symlink(&target, path).unwrap();
+            assert!(super::paths::reject_collisions(&journal, Some(&state), &[&def]).is_err());
+            std::fs::remove_file(path).unwrap();
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::create_dir_all(state.join("inbox")).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn definitions_reject_symlinks_and_protect_real_path_from_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let source = out.join("tree.toml");
+    let link = dir.path().join("link.toml");
+    std::os::unix::fs::symlink(&source, &link).unwrap();
+    assert!(Definition::load(&link).unwrap_err().to_string().contains("シンボリックリンク"));
+    std::fs::write(
+        &source,
+        "paths='../paths.tsv'\nout='.'\ndepth=0\nopp_n=1\nstop=300\nown='b'\nrounds=0\n",
+    )
+    .unwrap();
+    assert!(Definition::load(&link).is_err());
+    let def = Definition::load(&source).unwrap();
+    let journal = dir.path().join("journal");
+    assert!(super::paths::reject_collisions(&journal, None, &[&def]).is_err());
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&out, &alias).unwrap();
+    let def = Definition::load(&alias.join("tree.toml")).unwrap();
+    assert!(super::paths::reject_collisions(&journal, None, &[&def]).is_err());
+    let mut without_source = def.clone();
+    without_source.source = None;
+    super::paths::reject_collisions(&journal, None, &[&without_source]).unwrap();
+}
+
+#[test]
+fn single_pv_win_is_a_leaf_and_mixed_win_rows_are_rejected() {
+    let s = settings();
+    let mut collector = super::service::Collector::default();
+    collector
+        .info(
+            "info depth 1 seldepth 0 multipv 1 score mate 0 nodes 0 time 0 nps 0 hashfull 0 pv win",
+        )
+        .unwrap();
+    let mut r = reading(ROOT, &[], &s);
+    r.bestmove = "win".into();
+    (r.multipv, r.nodes) = collector.finish();
+    r.validate(&s).unwrap();
+    assert!(r.lines().is_empty());
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    std::fs::write(&def.paths, format!("{ROOT}\t1\t\n")).unwrap();
+    def.extra.clear();
+    let mut tree = Tree::load(def, &s).unwrap();
+    tree.advance(&BTreeMap::from([(ROOT.into(), r.clone())])).unwrap();
+    assert!(tree.finished);
+    assert!(tree.write_outputs().unwrap());
+    assert!(tree.raw_rows(ROOT).is_empty());
+    r.multipv.push(Pv {
+        mv: "5i4i".into(),
+        cp: 0,
+        depth: 1,
+    });
+    assert!(r.validate(&s).is_err());
+    r.multipv.remove(0);
+    assert!(r.validate(&s).is_err());
+    let mut collector = super::service::Collector::default();
+    assert!(collector.info("info depth 1 multipv 2 score mate 0 pv win").is_err());
 }

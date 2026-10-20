@@ -3,11 +3,27 @@ use crate::common::dedup::canonicalize_maybe_new;
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 
+pub(super) fn reject_symlink(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("管理パスにシンボリックリンクは使用できません: {}", path.display());
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn normalized(path: &Path) -> Result<PathBuf> {
     let path = canonicalize_maybe_new(path)?;
     #[cfg(windows)]
     let path = PathBuf::from(path.as_os_str().to_string_lossy().to_lowercase());
     Ok(path)
+}
+
+fn managed(path: &Path) -> Result<PathBuf> {
+    reject_symlink(path)?;
+    normalized(path)
 }
 
 fn overlap(a: &Path, b: &Path) -> bool {
@@ -19,10 +35,10 @@ pub(super) fn reject_collisions(
     state: Option<&Path>,
     definitions: &[&Definition],
 ) -> Result<()> {
-    let journal = normalized(journal)?;
+    let journal = managed(journal)?;
     let mut protected = vec![journal.clone()];
     if let Some(state) = state {
-        let state = normalized(state)?;
+        let state = managed(state)?;
         for name in [
             "inbox",
             "restart",
@@ -34,7 +50,7 @@ pub(super) fn reject_collisions(
             "progress.json",
             "accepted.json",
         ] {
-            let path = normalized(&state.join(name))?;
+            let path = managed(&state.join(name))?;
             if overlap(&journal, &path) {
                 bail!("journal と state の管理パスが衝突しています: {}", journal.display());
             }
@@ -49,9 +65,11 @@ pub(super) fn reject_collisions(
             bail!("paths と保護パスが衝突しています: {}", paths.display());
         }
         protected.push(paths);
+        if let Some(source) = &def.source {
+            protected.push(managed(source)?);
+        }
     }
-    let outputs: Vec<_> =
-        definitions.iter().map(|def| normalized(&def.out)).collect::<Result<_>>()?;
+    let outputs: Vec<_> = definitions.iter().map(|def| managed(&def.out)).collect::<Result<_>>()?;
     let mut destinations = Vec::new();
     for (index, def) in definitions.iter().enumerate() {
         let mut paths = vec![outputs[index].clone()];
@@ -65,14 +83,14 @@ pub(super) fn reject_collisions(
             "tree_bp_min.db",
             "report.txt",
         ] {
-            paths.push(normalized(&def.out.join(name))?);
+            paths.push(managed(&def.out.join(name))?);
         }
         if def.out.try_exists()? {
             for entry in std::fs::read_dir(&def.out)? {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if name.starts_with('d') && name.ends_with(".jsonl") {
-                    paths.push(normalized(&entry.path())?);
+                    paths.push(managed(&entry.path())?);
                 }
             }
         }

@@ -37,6 +37,9 @@ impl Collector {
             (30000 - n.checked_abs().context("mate 値が範囲外")?) * if n > 0 { 1 } else { -1 }
         };
         let index: usize = get("multipv").unwrap_or("1").parse()?;
+        if get("pv") == Some("win") && index != 1 {
+            bail!("宣言勝ちの multipv は 1 が必要です");
+        }
         if index == 0 {
             bail!("multipv は正数が必要です");
         }
@@ -331,6 +334,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
     let mut output_locks = Vec::new();
     let mut definitions = Vec::new();
     for entry in &accepted {
+        super::paths::reject_symlink(&entry.path)?;
         if digest(&entry.path)? != entry.sha256 {
             bail!("受付済みの木の定義は変更できません: {}", entry.path.display());
         }
@@ -395,7 +399,9 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
             if !stopping {
                 for entry in entries {
                     let original = entry.path();
-                    if original.extension().is_none_or(|e| e != "toml") {
+                    if original.extension().is_none_or(|e| e != "toml")
+                        && !entry.file_type()?.is_symlink()
+                    {
                         continue;
                     }
                     let stamp = file_stamp(&original);
@@ -403,6 +409,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                         continue;
                     }
                     let loaded = (|| -> Result<Option<LoadedTree>> {
+                        super::paths::reject_symlink(&original)?;
                         let path = std::fs::canonicalize(&original)?;
                         if accepted.iter().any(|a| a.path == path) {
                             return Ok(None);
@@ -497,6 +504,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
             }
             for entry in std::fs::read_dir(args.state.join("restart"))? {
                 let entry = entry?;
+                super::paths::reject_symlink(&entry.path())?;
                 let id = entry.file_name().to_string_lossy().parse::<usize>().ok();
                 let mut targeted = false;
                 if let Some(worker) = id.and_then(|id| workers.get(&id)) {

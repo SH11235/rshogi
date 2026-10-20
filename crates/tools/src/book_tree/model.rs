@@ -12,6 +12,8 @@ pub(super) type Pending = BTreeMap<String, Vec<(i32, String)>>;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Definition {
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
     pub paths: PathBuf,
     pub paths_sha256: Option<String>,
     pub out: PathBuf,
@@ -29,7 +31,9 @@ pub(super) struct Definition {
 }
 impl Definition {
     pub fn load(path: &Path) -> Result<Self> {
+        super::paths::reject_symlink(path)?;
         let mut definition: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
+        definition.source = Some(std::fs::canonicalize(path)?);
         let parent = path.parent().unwrap_or(Path::new("."));
         if definition.paths.is_relative() {
             definition.paths = parent.join(&definition.paths);
@@ -145,7 +149,7 @@ impl Tree {
         let mut cands = Vec::new();
         let game = self.game.get(key).cloned().unwrap_or_default();
         if side(key) != self.def.own {
-            for pv in node.multipv.iter().take(self.def.opp_n) {
+            for pv in node.lines().iter().take(self.def.opp_n) {
                 push_unique(&mut cands, &pv.mv);
             }
             for mv in &self.def.extra {
@@ -158,25 +162,25 @@ impl Tree {
             }
             self.compare.insert(key.into(), None);
         } else {
-            if let Some(first) = node.multipv.first() {
+            if let Some(first) = node.lines().first() {
                 push_unique(&mut cands, &first.mv);
             }
             for mv in &game {
                 push_unique(&mut cands, mv);
             }
             if cands.len() == 1
-                && let Some(second) = node.multipv.get(1)
+                && let Some(second) = node.lines().get(1)
             {
                 push_unique(&mut cands, &second.mv);
             }
             for mv in &self.def.extra {
-                if node.multipv.iter().any(|p| &p.mv == mv) {
+                if node.lines().iter().any(|p| &p.mv == mv) {
                     push_unique(&mut cands, mv);
                 }
             }
             self.compare.insert(
                 key.into(),
-                node.multipv.iter().find(|p| !game.contains(&p.mv)).map(|p| p.mv.clone()),
+                node.lines().iter().find(|p| !game.contains(&p.mv)).map(|p| p.mv.clone()),
             );
         }
         self.candidates.insert(key.into(), cands);
@@ -184,7 +188,7 @@ impl Tree {
     }
 
     fn picks(&self, key: &str) -> (BTreeSet<String>, BTreeSet<String>) {
-        let mp = &self.nodes[key].multipv;
+        let mp = self.nodes[key].lines();
         let mut pick = BTreeSet::new();
         let mut extra = BTreeSet::new();
         if !mp.is_empty() {
@@ -302,14 +306,14 @@ impl Tree {
     }
 
     pub fn raw_rows(&self, key: &str) -> BTreeMap<String, i32> {
-        self.nodes[key].multipv.iter().map(|p| (p.mv.clone(), p.cp)).collect()
+        self.nodes[key].lines().iter().map(|p| (p.mv.clone(), p.cp)).collect()
     }
 
     pub fn negamax(&self, nodes: &BTreeSet<String>) -> Result<Values> {
         let mut children: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
         for key in nodes {
             let moves: BTreeSet<_> = self.nodes[key]
-                .multipv
+                .lines()
                 .iter()
                 .map(|p| p.mv.clone())
                 .chain(self.edge.get(key).into_iter().flatten().cloned())
@@ -361,7 +365,7 @@ impl Tree {
                 .max()
                 .unwrap_or(-99999);
             let un: Vec<_> = self.nodes[key]
-                .multipv
+                .lines()
                 .iter()
                 .filter(|p| !edges.contains(&p.mv) && p.cp > best)
                 .map(|p| (p.cp, p.mv.clone()))
@@ -379,7 +383,7 @@ impl Tree {
         rows: &BTreeMap<String, i32>,
         moves: impl IntoIterator<Item = String>,
     ) -> Vec<String> {
-        let mp = &self.nodes[key].multipv;
+        let mp = self.nodes[key].lines();
         let mut moves: Vec<_> = moves.into_iter().collect();
         moves.sort_by(|a, b| {
             rows.get(b)
