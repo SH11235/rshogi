@@ -41,10 +41,6 @@ pub struct LimitsType {
     /// 探索深さ固定（0以外なら有効）
     pub depth: i32,
 
-    /// 詰み専用探索の手数（0以外なら有効）
-    /// USI `go mate N` の N は手数（1手=先後1回ずつ）で、内部比較では 2*N 手目まで探索する。
-    pub mate: i32,
-
     /// perftテスト中のフラグ（非0なら深さ）
     pub perft: i32,
 
@@ -79,7 +75,6 @@ impl Default for LimitsType {
             movetime: 0,
             rtime: 0,
             depth: 0,
-            mate: 0,
             perft: 0,
             infinite: false,
             nodes: 0,
@@ -112,7 +107,6 @@ impl LimitsType {
     /// 時間制御を行うべきかの判定
     ///
     /// 以下のいずれかが指定されている場合は時間制御を行わない：
-    /// - mate（詰み探索）
     /// - movetime（固定思考時間）
     /// - depth（固定深さ）
     /// - nodes（ノード数制限）
@@ -121,7 +115,6 @@ impl LimitsType {
     #[inline]
     pub fn use_time_management(&self) -> bool {
         self.analysis.is_none()
-            && self.mate == 0
             && self.movetime == 0
             && self.depth == 0
             && self.nodes == 0
@@ -271,12 +264,9 @@ mod tests {
 
     #[test]
     fn test_has_interrupt_budget() {
-        // 純粋な depth 固定（go depth N）・詰み探索は engine 自身の打ち切り予算なし → guard 対象
+        // 純粋な depth 固定（go depth N）は engine 自身の打ち切り予算なし → guard 対象
         let mut l = LimitsType::new();
         l.depth = 15;
-        assert!(!l.has_interrupt_budget());
-        let mut l = LimitsType::new();
-        l.mate = 5;
         assert!(!l.has_interrupt_budget());
 
         // 純粋な時間管理（depth 併用なし）は予算あり。increment のみ（go binc）・rtime 単独も時間管理が有効。

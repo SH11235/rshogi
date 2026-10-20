@@ -1,6 +1,6 @@
-// 1手詰め探索モジュール
-// YaneuraOuのmate1ply_without_effect.cppの移植
+// 1手詰め探索 (YaneuraOuのmate1ply_without_effect.cppの移植) と df-pn 詰み探索
 
+pub mod dfpn;
 pub mod drop_mate;
 pub mod helpers;
 pub mod move_mate;

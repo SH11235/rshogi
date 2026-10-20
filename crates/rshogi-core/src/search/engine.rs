@@ -132,28 +132,6 @@ fn proven_mate_depth_exceeded(best_value: Value, depth: Depth) -> bool {
     false
 }
 
-/// `go mate` 指定時に、要求手数以内の詰みが見つかったか判定する
-#[inline]
-fn mate_within_limit(
-    best_value: Value,
-    score_lower_bound: bool,
-    score_upper_bound: bool,
-    mate_limit_moves: i32,
-) -> bool {
-    if mate_limit_moves <= 0
-        || score_lower_bound
-        || score_upper_bound
-        || !best_value.is_mate_score()
-    {
-        return false;
-    }
-
-    let mate_ply = best_value.mate_ply() as i64;
-    let limit_plies = (mate_limit_moves as i64).saturating_mul(2);
-
-    mate_ply <= limit_plies
-}
-
 // =============================================================================
 // SearchResult - 探索結果
 // =============================================================================
@@ -537,9 +515,9 @@ fn collect_thread_summaries(
 
 fn should_use_best_thread_selection(limits: &LimitsType, skill_enabled: bool) -> bool {
     // - MultiPV=1
-    // - go depth/mate では使わない
+    // - go depth では使わない
     // - Skill有効時は使わない
-    limits.multi_pv == 1 && limits.depth == 0 && limits.mate == 0 && !skill_enabled
+    limits.multi_pv == 1 && limits.depth == 0 && !skill_enabled
 }
 
 fn get_best_thread_id(
@@ -1116,7 +1094,7 @@ impl Search {
         let skill_enabled = skill.enabled();
 
         // デバッグ用の helper 有効化制御
-        // go depth/go mate を含め helper を有効化する。
+        // go depth を含め helper を有効化する。
         // 追加の切り分けは環境変数 RSHOGI_DISABLE_HELPER_SEARCH で行う。
         let helper_search_enabled = self.num_threads > 1 && !helper_search_disabled();
 
@@ -1625,20 +1603,7 @@ where
         {
             let best_value = worker.state.root_moves[0].score;
 
-            if limits.mate == 0 {
-                if proven_mate_depth_exceeded(best_value, depth) {
-                    break;
-                }
-            } else if mate_within_limit(
-                best_value,
-                worker.state.root_moves[0].score_lower_bound,
-                worker.state.root_moves[0].score_upper_bound,
-                limits.mate,
-            ) {
-                // メインのみ request_stop
-                if is_main {
-                    time_manager.request_stop();
-                }
+            if proven_mate_depth_exceeded(best_value, depth) {
                 break;
             }
         }
@@ -1926,19 +1891,7 @@ where
             {
                 let best_value = worker.state.root_moves[0].score;
 
-                if limits.mate == 0 {
-                    if proven_mate_depth_exceeded(best_value, depth) {
-                        break;
-                    }
-                } else if mate_within_limit(
-                    best_value,
-                    worker.state.root_moves[0].score_lower_bound,
-                    worker.state.root_moves[0].score_upper_bound,
-                    limits.mate,
-                ) {
-                    if is_main {
-                        time_manager.request_stop();
-                    }
+                if proven_mate_depth_exceeded(best_value, depth) {
                     break;
                 }
             }
@@ -2023,7 +1976,7 @@ where
     F1: FnOnce(),
     F2: FnMut(u64, f64),
 {
-    // 恒久修正評価のため、go depth/go mate を含め helper からのTT書き込みを有効にする。
+    // 恒久修正評価のため、go depth を含め helper からのTT書き込みを有効にする。
     worker.allow_tt_write = true;
 
     on_start();
@@ -2364,13 +2317,6 @@ mod tests {
         );
 
         limits.depth = 0;
-        limits.mate = 3;
-        assert!(
-            !should_use_best_thread_selection(&limits, false),
-            "go mate ではbest thread選抜を使わない"
-        );
-
-        limits.mate = 0;
         limits.multi_pv = 2;
         assert!(
             !should_use_best_thread_selection(&limits, false),
@@ -2593,25 +2539,6 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
-    }
-
-    #[test]
-    fn test_mate_within_limit_converts_moves_to_plies() {
-        // mate in 9 ply is within a 5-move limit (10 ply)
-        assert!(mate_within_limit(Value::mate_in(9), false, false, 5));
-        assert!(!mate_within_limit(Value::mate_in(11), false, false, 5));
-    }
-
-    #[test]
-    fn test_mate_within_limit_handles_mated_scores() {
-        // mated in 7 ply should still trigger when limit is 4 moves (8 ply)
-        assert!(mate_within_limit(Value::mated_in(7), false, false, 4));
-    }
-
-    #[test]
-    fn test_mate_within_limit_requires_exact_score() {
-        assert!(!mate_within_limit(Value::mate_in(7), true, false, 4));
-        assert!(!mate_within_limit(Value::mate_in(7), false, true, 4));
     }
 
     #[test]
