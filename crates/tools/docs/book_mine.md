@@ -243,14 +243,14 @@ book_mine tree serve --state /path/to/state --engine /path/to/engine \
   --nodes 1000000000 --multipv 3 --hash 1024 --workers 16
 ```
 
-`EvalFile` / `EvalDir` は必須で、既定のモデルを推測して再利用しません。serve では指定した全 option が engine から広告されることも確認します。読み条件と参照ファイルは実行中に変更しないでください。必要な USI option は `--engine-option K=V` を繰り返して指定します。`Threads=1`、`USI_Hash=--hash`、`MultiPV=--multipv` は固定です。局面ごとに `usinewgame` と `isready` を送り、手順履歴を渡さず `position sfen` と `go nodes` で読みます。bound 付き info は捨て、MultiPV 番号ごとの最後の行を番号順に保存します。同じ手の行もまとめず、値の順序も詰め直しません。mate は符号付き `30000 - |n|` です。
+`EvalFile` / `EvalDir` は必須で、既定のモデルを推測して再利用しません。serve では指定した全 option が engine から広告されることも確認します。読み条件と参照ファイルは実行中に変更しないでください。必要な USI option は `--engine-option K=V` を繰り返して指定します。`Threads=1`、`USI_Hash=--hash`、`MultiPV=--multipv` は固定です。局面ごとに `usinewgame` と `isready` を送り、手順履歴を渡さず `position sfen` と `go nodes` で読みます。bound 付き info は捨て、MultiPV 番号ごとの最後の行を番号順に保存します。値の順序は詰め直しません。受理する読みの中で手が重複した場合は検査エラーにします。mate は符号付き `30000 - |n|` です。
 
 `<state>/inbox/*.toml` に木の定義を置きます。起動中・worker が0の間も追加できます。TOML 内の相対パスは TOML の親 dir から解決します。書きかけの定義が見えないよう、別名で書いてから `.toml` に rename してください。
 
 ```toml
-paths = "../example.paths.tsv"
+paths = "../../example.paths.tsv"
 # paths_sha256 = "..."  # 任意の内容検証
-out = "../example-out"
+out = "../../example-out"
 depth = 6
 opp_n = 2
 stop = 300
@@ -273,10 +273,12 @@ paths.tsv はヘッダ無しで `key<TAB>ply<TAB>USIの手順<TAB>メモ`。key 
 - `<state>/stop` を作ると読みかけを保存して serve を終了します。再開前に stop を除き、同じコマンドを実行します。kill 後も、保存済みの読みから木の回を再構築します。台帳の改行の無い末尾だけは切り捨てます。
 - 木が全て完了しても `IDLE` で受付を続けます。
 - `--stall-secs` (既定600) の間 info の nodes / depth のどちらも増えなければ `ALERT` に書きます。`info string` や同じ値の繰り返しでは時計を戻しません。既定では探索を止めません。
-- 固まった worker を明示的に作り直すには `<state>/restart/<worker番号>` を作ります。受付時点でその worker が読んでいる局面を列に戻します。対象の読みが無い番号は ALERT して制御ファイルを消します。明示 restart は自動再起動の上限に数えません。エンジン切断は自動で作り直します。`--max-restarts` (既定3) を超える同一局面の失敗、または再現する読みの検査エラーでは、その局面を待つ木だけを FAIL にして ALERT し、他の木の処理を続けます。serve の MultiPV 行数は `min(指定数, 合法手数)` で検査し、合法手0は空の MultiPV と resign/win を保存する葉です。
+- 固まった worker を明示的に作り直すには `<state>/restart/<worker番号>` を作ります。受付時点でその worker が読んでいる局面を列に戻します。対象の読みが無い番号は ALERT して制御ファイルを消します。明示 restart は自動再起動の上限に数えません。エンジン切断は自動で作り直します。`--max-restarts` (既定3) を超える同一局面の失敗、または再現する読みの検査エラーでは、その局面を待つ木だけを FAIL にして ALERT し、他の木の処理を続けます。serve の MultiPV は1行以上かつ指定数以下を受理し、各手の合法性と重複が無いことを検査します。根の不成省略などで指定数より少なくても受理します。0行の場合は合法手の有無によらず `bestmove resign` / `bestmove win` を受理し、展開しない葉として保存します。合法手数や根の候補数から行数は推測しません。
 - state の lock と journal 自体の lock を終了まで保持します。別 state でも同じ journal の同時使用はできません。木の出力先にも tree.lock を保持し、別の serve や replay から保護します。`--journal` を省略すると `<state>/journal.jsonl` を使います。
 
-プロセスの `STATUS` は `RUNNING / IDLE / STOPPED / FAIL`。木の出力先の `STATUS` は `QUEUED / RUNNING / STOPPED / DONE / NOT_READY / FAIL` です。プロセスの STOPPED は workers=0 または stop 指示で読みかけの保存が終わった状態で、待ち列が残っていても使います。木の QUEUED はまだ読み始めていない待機、RUNNING は読み始めた未完了の木、STOPPED は停止指示によりその木の実行中の読みが無くなった状態です。`progress.json` に木の回・読み済み数・要求数・列の長さと、worker の局面・経過秒・nodes / depth を記録します。`ALERT` は日時付きの追記です。受付ファイルの canonicalize・load の失敗は内容または mtime が変わるまで1回通知し、他のファイルの受付を続けます。STATUS・progress.json・ALERT の書き込み失敗は標準エラーへ報告して次の周期で再試行します。journal と成果物の書き込み失敗はエラーとして扱います。
+出力を変更する前にパスを正規化し、木の出力 dir（配下の生成物全体）と journal・state dir・受付 dir・lock・全ての木の paths.tsv の衝突、および木どうしの出力 dir の一致・親子関係を拒否します。木の出力先と paths.tsv は state の外に置いてください。既存のシンボリックリンクと未作成のパスの `..` も解決して比較します。受付時の衝突はその木だけを拒否して ALERT に記録し、serve は継続します。受付済みの木は起動時にまとめて検査し、衝突があれば出力を変更せず起動に失敗します。paths.tsv と journal・state の保護パスの衝突、journal と state の管理パスの衝突も拒否します。
+
+プロセスの `STATUS` は `RUNNING / IDLE / STOPPED / FAIL`。木の出力先の `STATUS` は `QUEUED / RUNNING / STOPPED / DONE / NOT_READY / FAIL` です。プロセスの STOPPED は workers=0 または stop 指示で読みかけの保存が終わった状態で、待ち列が残っていても使います。木の QUEUED はまだ読み始めていない待機、RUNNING は読み始めた未完了の木、STOPPED は停止指示によりその木の実行中の読みが無くなった状態です。`progress.json` に木の回・読み済み数・要求数・列の長さと、worker の局面・経過秒・nodes / depth を記録します。`ALERT` は日時付きの追記です。受付ファイルの canonicalize・load の失敗は内容または mtime が変わるまで1回通知し、他のファイルの受付を続けます。STATUS は内容が変わった場合だけ書きます。終了した木（DONE / NOT_READY / FAIL）の出力 dir を削除しても再作成しません。STATUS・progress.json・ALERT の書き込み失敗は標準エラーへ報告して次の周期で再試行します（終了した木の出力 dir が残っている場合）。journal と成果物の書き込み失敗はエラーとして扱います。
 
 ### Python の読みの取り込みと再生
 
@@ -293,7 +295,7 @@ book_mine tree replay --journal /path/to/tree-journal.jsonl --tree /path/to/tree
 
 import では engine とファイル型 USI option の内容 SHA-256、全 option、明示 `SPSAParamsFile` が無い場合のバイナリ隣接 `spsa.params` の有無と内容、nodes、MultiPV、局面ごとの初期化・info 解析の版を条件の指紋にします。Python の記録は元の engine / 評価ファイルの digest を持たないため、**指定した条件の宣言による取り込み**です。出どころのパスと入力ファイルの SHA-256 も記録します。nodes_limit / threads / hash / draw / MultiPV 行数が宣言と違う行、不正な局面・手、同じ条件と局面で MultiPV の値や深さ・bestmove が異なる重複を拒否します。取り込み全体を検査してから追記します。
 
-replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足や ready:false は非0で終了します。出力先と journal の lock を取る前には既存の出力を変更しません。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。
+replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足や ready:false は非0で終了します。出力先と journal・paths.tsv の衝突を検査し、出力先と journal の lock を取る前には既存の出力を変更しません。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。
 
 ### 出力と登録可否
 

@@ -201,9 +201,9 @@ fn bfs(tree: &mut Tree, cache: &BTreeMap<String, Reading>) {
         if round == tree.def.rounds {
             break;
         }
-        let values = tree.negamax(&tree.reach(&tree.edge)).unwrap();
+        let values = reference_negamax(tree, &reference_reach(tree, &tree.edge));
         let mut added = false;
-        for (key, un) in tree.unresolved(&values) {
+        for (key, un) in reference_unresolved(tree, &values) {
             if tree.level[&key] < tree.def.depth {
                 tree.force.entry(key).or_default().extend(un.into_iter().map(|(_, m)| m));
                 added = true;
@@ -283,6 +283,12 @@ fn asynchronous_closure_matches_bfs_across_rounds_and_completion_orders() {
             assert_eq!(tree.force, reference.force, "FORCE round={rounds}");
             let values = tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap();
             assert_eq!(values, reference_values(reference), "values round={rounds}");
+            assert_eq!(tree.unresolved(&values), reference_unresolved(reference, &values));
+            let rule_nodes = reference_reach(reference, &reference.rule);
+            assert_eq!(
+                tree.negamax(&rule_nodes).unwrap(),
+                reference_negamax(reference, &rule_nodes)
+            );
             let clean_dir = tempfile::tempdir().unwrap();
             let mut clean = Tree::load(definition(clean_dir.path(), rounds), &settings).unwrap();
             clean.advance(&tree.nodes).unwrap();
@@ -458,7 +464,16 @@ fn cycle_values_start_from_empty_ancestry_for_each_position() {
 }
 
 fn reference_values(tree: &Tree) -> super::model::Values {
-    fn evaluate(tree: &Tree, key: &str, path: Vec<String>) -> BTreeMap<String, i32> {
+    reference_negamax(tree, &tree.nodes.keys().cloned().collect())
+}
+
+fn reference_negamax(tree: &Tree, nodes: &BTreeSet<String>) -> super::model::Values {
+    fn evaluate(
+        tree: &Tree,
+        nodes: &BTreeSet<String>,
+        key: &str,
+        path: Vec<String>,
+    ) -> BTreeMap<String, i32> {
         let mut rows: BTreeMap<_, _> =
             tree.nodes[key].multipv.iter().map(|p| (p.mv.clone(), p.cp)).collect();
         let moves: BTreeSet<_> = rows
@@ -468,7 +483,7 @@ fn reference_values(tree: &Tree) -> super::model::Values {
             .collect();
         for mv in moves {
             let c = child(key, &mv).unwrap();
-            if !tree.nodes.contains_key(&c) {
+            if !nodes.contains(&c) {
                 continue;
             }
             let value = if c == key || path.contains(&c) {
@@ -476,16 +491,48 @@ fn reference_values(tree: &Tree) -> super::model::Values {
             } else {
                 let mut ancestors = path.clone();
                 ancestors.push(key.into());
-                -evaluate(tree, &c, ancestors).values().max().copied().unwrap_or(0)
+                -evaluate(tree, nodes, &c, ancestors).values().max().copied().unwrap_or(0)
             };
             rows.insert(mv, value);
         }
         rows
     }
-    tree.nodes
-        .keys()
-        .map(|key| (key.clone(), evaluate(tree, key, Vec::new())))
+    nodes
+        .iter()
+        .map(|key| (key.clone(), evaluate(tree, nodes, key, Vec::new())))
         .collect()
+}
+
+fn reference_reach(tree: &Tree, edges: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<String> {
+    let mut reached = BTreeSet::new();
+    let mut pending: Vec<_> = tree.roots.keys().cloned().collect();
+    while let Some(key) = pending.pop() {
+        if tree.nodes.contains_key(&key) && reached.insert(key.clone()) {
+            pending.extend(edges.get(&key).into_iter().flatten().map(|m| child(&key, m).unwrap()));
+        }
+    }
+    reached
+}
+
+fn reference_unresolved(tree: &Tree, values: &super::model::Values) -> super::model::Pending {
+    let mut result = BTreeMap::new();
+    for (key, rows) in values {
+        let edges = tree.edge.get(key).cloned().unwrap_or_default();
+        if key.split_whitespace().nth(1) != Some(tree.def.own.as_str()) || edges.is_empty() {
+            continue;
+        }
+        let best = edges.iter().map(|m| rows.get(m).copied().unwrap_or(-99999)).max().unwrap();
+        let un: Vec<_> = tree.nodes[key]
+            .multipv
+            .iter()
+            .filter(|p| !edges.contains(&p.mv) && p.cp > best)
+            .map(|p| (p.cp, p.mv.clone()))
+            .collect();
+        if !un.is_empty() {
+            result.insert(key.clone(), un);
+        }
+    }
+    result
 }
 
 #[test]
@@ -684,4 +731,132 @@ fn report_includes_opponent_candidates_and_unexpanded_warning() {
     tree.write_outputs().unwrap();
     assert!(std::fs::read_to_string(tree.def.out.join("report.txt")).unwrap()
         .contains("警告: 伸ばしていない手の読みの値が、候補の伝播後の 1 位を上回る (その手も伸ばしてから決める): ['5i5h', '5i4i']"));
+}
+
+#[test]
+fn normalized_output_paths_reject_protected_files_and_overlapping_trees() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    let journal = dir.path().join("journal");
+    let state = dir.path().join("state");
+    let reject = |d: &Definition, j: &Path| super::paths::reject_collisions(j, Some(&state), &[d]);
+    for name in ["d0.jsonl", "own_nodes.tsv", "tree.lock", "unused/sub/file"] {
+        assert!(reject(&def, &def.out.join(name)).is_err());
+    }
+    for out in [&state, &state.join("child"), dir.path()] {
+        def.out = out.to_owned();
+        assert!(reject(&def, &journal).is_err());
+    }
+    def.out = dir.path().join("out");
+    for name in ["paths.tsv", "lock", "inbox/paths.tsv"] {
+        def.paths = state.join(name);
+        assert!(reject(&def, &journal).is_err());
+    }
+    def.paths = def.out.join("new/../paths.tsv");
+    assert!(reject(&def, &journal).is_err());
+    def.paths = dir.path().join("paths.tsv");
+    assert!(reject(&def, &def.paths).is_err());
+    let mut other = def.clone();
+    for out in [
+        def.out.clone(),
+        def.out.join("child"),
+        dir.path().to_owned(),
+    ] {
+        other.out = out;
+        assert!(super::paths::reject_collisions(&journal, None, &[&def, &other]).is_err());
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("alias")).unwrap();
+        other.out = dir.path().join("alias/out/new/..");
+        assert!(super::paths::reject_collisions(&journal, None, &[&def, &other]).is_err());
+        std::fs::create_dir(&def.out).unwrap();
+        std::fs::write(&journal, "protected").unwrap();
+        std::os::unix::fs::symlink(&journal, def.out.join("d0.jsonl")).unwrap();
+        assert!(super::paths::reject_collisions(&journal, None, &[&def]).is_err());
+        std::fs::remove_file(def.out.join("d0.jsonl")).unwrap();
+        std::os::unix::fs::symlink(&journal, def.out.join("STATUS")).unwrap();
+        assert!(super::paths::reject_collisions(&journal, None, &[&def]).is_err());
+        std::fs::remove_file(def.out.join("STATUS")).unwrap();
+    }
+    other.out = dir.path().join("other");
+    other.paths = def.out.join("d0.jsonl");
+    assert!(super::paths::reject_collisions(&journal, None, &[&def, &other]).is_err());
+    other.paths = def.paths.clone();
+    super::paths::reject_collisions(&journal, Some(&state), &[&def, &other]).unwrap();
+}
+
+#[test]
+fn replay_rejects_journal_and_paths_collisions_before_changing_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let def = definition(dir.path(), 0);
+    std::fs::create_dir(&def.out).unwrap();
+    std::fs::write(def.out.join("own_nodes.tsv"), "protected").unwrap();
+    let toml = dir.path().join("tree.toml");
+    std::fs::write(
+        &toml,
+        "paths='paths.tsv'\nout='out'\ndepth=0\nopp_n=1\nstop=300\nown='b'\nrounds=0\n",
+    )
+    .unwrap();
+    for journal in [
+        def.out.join("d0.jsonl"),
+        def.out.join("tree.lock"),
+        def.paths.clone(),
+    ] {
+        std::fs::write(&journal, "protected").unwrap();
+        let error = run(TreeArgs {
+            command: TreeCommand::Replay(ReplayArgs {
+                journal: journal.clone(),
+                tree: toml.clone(),
+                fingerprint: None,
+            }),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("衝突"));
+        assert_eq!(std::fs::read_to_string(&journal).unwrap(), "protected");
+        assert_eq!(std::fs::read_to_string(def.out.join("own_nodes.tsv")).unwrap(), "protected");
+    }
+}
+
+#[test]
+fn serve_startup_rejects_accepted_collisions_before_changing_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let def = definition(dir.path(), 0);
+    std::fs::create_dir(&def.out).unwrap();
+    let journal = def.out.join("d0.jsonl");
+    std::fs::write(&journal, "protected").unwrap();
+    std::fs::write(def.out.join("own_nodes.tsv"), "protected").unwrap();
+    let toml = dir.path().join("tree.toml");
+    std::fs::write(
+        &toml,
+        "paths='paths.tsv'\nout='out'\ndepth=0\nopp_n=1\nstop=300\nown='b'\nrounds=0\n",
+    )
+    .unwrap();
+    let reading = ReadingArgs {
+        engine: def.paths.clone(),
+        engine_options: vec![format!("EvalFile={}", def.paths.display())],
+        nodes: 100,
+        multipv: 3,
+        hash: 16,
+    };
+    let settings = Settings::new(&reading).unwrap();
+    std::fs::write(state.join("accepted.json"), serde_json::to_vec(&serde_json::json!([{
+        "out": def.out, "path": toml, "sha256": journal::digest(&toml).unwrap(),
+        "paths_sha256": journal::digest(&def.paths).unwrap(), "fingerprint": settings.fingerprint
+    }])).unwrap()).unwrap();
+    let error = service::serve(ServeArgs {
+        state,
+        journal: Some(journal.clone()),
+        reading,
+        workers: 0,
+        stall_secs: 1,
+        max_restarts: 0,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("衝突"));
+    assert_eq!(std::fs::read_to_string(journal).unwrap(), "protected");
+    assert_eq!(std::fs::read_to_string(def.out.join("own_nodes.tsv")).unwrap(), "protected");
+    assert!(!def.out.join("tree.lock").exists());
 }

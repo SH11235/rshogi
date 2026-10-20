@@ -1,7 +1,6 @@
 use super::ReadingArgs;
 use crate::book_db::{child_position_after_move, position_from_sfen, strip_ply};
 use anyhow::{Context, Result, bail};
-use rshogi_core::movegen::{MoveList, generate_legal_all};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -169,12 +168,14 @@ impl Reading {
         if strip_ply(&pos.to_sfen()) != self.key {
             bail!("局面 key は正規形が必要です: {}", self.key);
         }
-        let mut legal = MoveList::new();
-        generate_legal_all(&pos, &mut legal);
-        if self.multipv.len() != settings.multipv.min(legal.len()) {
-            bail!("合法手数と MultiPV が矛盾: {}", self.key);
+        if self.multipv.len() > settings.multipv {
+            bail!("MultiPV が指定数を超えています: {}", self.key);
         }
+        let mut moves = BTreeSet::new();
         for pv in &self.multipv {
+            if !moves.insert(&pv.mv) {
+                bail!("MultiPV の手が重複しています: {}", self.key);
+            }
             child_position_after_move(&pos.to_sfen(), &pv.mv)?;
         }
         if self

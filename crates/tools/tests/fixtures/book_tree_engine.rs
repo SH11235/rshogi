@@ -77,7 +77,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
             let bestmove =
-                rows.first().and_then(|r| r.split_whitespace().next()).unwrap_or("resign");
+                config.get("bestmove").map(String::as_str).unwrap_or_else(|| {
+                    rows.first().and_then(|r| r.split_whitespace().next()).unwrap_or("resign")
+                });
             println!("bestmove {bestmove}");
         } else if line == "quit" {
             break;

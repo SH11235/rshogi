@@ -250,6 +250,8 @@ struct LoadedTree {
 }
 
 pub(super) fn serve(args: ServeArgs) -> Result<()> {
+    let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
+    super::paths::reject_collisions(&journal_path, Some(&args.state), &[])?;
     std::fs::create_dir_all(args.state.join("inbox"))?;
     std::fs::create_dir_all(args.state.join("restart"))?;
     let state_lock = LockedFile::open(&args.state.join("lock"))?;
@@ -266,6 +268,13 @@ pub(super) fn monitor(path: &std::path::Path, contents: &str) {
     if let Err(error) = write_atomic(path, contents) {
         eprintln!("監視ファイル書き込み失敗 {}: {error:#}", path.display());
     }
+}
+
+fn monitor_changed(path: &std::path::Path, contents: &str) {
+    if std::fs::read_to_string(path).is_ok_and(|current| current == contents) {
+        return;
+    }
+    monitor(path, contents);
 }
 
 fn alert(state: &std::path::Path, message: &str) {
@@ -312,8 +321,6 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
     let settings = Settings::new(&args.reading)?;
     println!("fingerprint={}", settings.fingerprint);
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
-    let mut journal = Journal::open(&journal_path)?;
-    let mut cache = journal.records_for(&settings.fingerprint);
     let manifest = args.state.join("accepted.json");
     let mut accepted: Vec<Accepted> = if manifest.exists() {
         serde_json::from_str(&std::fs::read_to_string(&manifest)?)?
@@ -321,8 +328,8 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
         Vec::new()
     };
     let mut trees = Vec::new();
-    let mut outputs = BTreeSet::new();
     let mut output_locks = Vec::new();
+    let mut definitions = Vec::new();
     for entry in &accepted {
         if digest(&entry.path)? != entry.sha256 {
             bail!("受付済みの木の定義は変更できません: {}", entry.path.display());
@@ -333,11 +340,18 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
         {
             bail!("受付済みの paths または読み条件が違います");
         }
+        definitions.push(definition);
+    }
+    super::paths::reject_collisions(
+        &journal_path,
+        Some(&args.state),
+        &definitions.iter().collect::<Vec<_>>(),
+    )?;
+    let mut journal = Journal::open(&journal_path)?;
+    let mut cache = journal.records_for(&settings.fingerprint);
+    for definition in definitions {
         output_locks.push(LockedFile::open(&definition.out.join("tree.lock"))?);
         let tree = Tree::load(definition, &settings)?;
-        if !outputs.insert(std::fs::canonicalize(&tree.def.out)?) {
-            bail!("出力先が重複しています");
-        }
         trees.push(tree);
     }
     let workers_file = args.state.join("workers");
@@ -394,16 +408,17 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                             return Ok(None);
                         }
                         let definition = Definition::load(&path)?;
-                        std::fs::create_dir_all(&definition.out)?;
-                        let out = std::fs::canonicalize(&definition.out)?;
-                        if outputs.contains(&out) {
-                            bail!("木の出力先が重複しています");
-                        }
+                        let mut definitions: Vec<_> = trees.iter().map(|t| &t.def).collect();
+                        definitions.push(&definition);
+                        super::paths::reject_collisions(
+                            &journal_path,
+                            Some(&args.state),
+                            &definitions,
+                        )?;
                         let lock = LockedFile::open(&definition.out.join("tree.lock"))?;
                         let sha = digest(&path)?;
                         let paths_sha = digest(&definition.paths)?;
                         let tree = Tree::load(definition, &settings)?;
-                        outputs.insert(out);
                         Ok(Some(LoadedTree {
                             accepted: Accepted {
                                 out: tree.def.out.clone(),
@@ -596,7 +611,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
             } else {
                 "RUNNING"
             };
-            monitor(&args.state.join("STATUS"), &format!("{status}\n"));
+            monitor_changed(&args.state.join("STATUS"), &format!("{status}\n"));
             let progress = json!({"status":status,"fingerprint":settings.fingerprint,"queued":queue_len,"workers":workers.iter().map(|(id,w)|json!({"id":id,"key":w.busy.as_ref().map(|(k,_)|k),"elapsed_secs":w.busy.as_ref().map(|(_,t)|t.elapsed().as_secs_f64()),"nodes":w.nodes,"depth":w.depth})).collect::<Vec<_>>(),"trees":trees.iter().enumerate().map(|(id,t)|json!({"id":id,"out":t.def.out,"round":t.round,"read":t.nodes.len(),"requested":t.level.len(),"queued":t.level.keys().filter(|k|!cache.contains_key(*k)&&!workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"running":t.level.keys().filter(|k|workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"finished":t.finished,"failed":t.failed})).collect::<Vec<_>>()});
             monitor(&args.state.join("progress.json"), &serde_json::to_string_pretty(&progress)?);
             for tree in &trees {
@@ -619,7 +634,9 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 } else {
                     "RUNNING"
                 };
-                monitor(&tree.def.out.join("STATUS"), &format!("{tree_status}\n"));
+                if !(tree.finished || tree.failed) || tree.def.out.is_dir() {
+                    monitor_changed(&tree.def.out.join("STATUS"), &format!("{tree_status}\n"));
+                }
             }
             alerts.flush();
             if stopping && active == 0 {
@@ -631,7 +648,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
     })();
     if result.is_err() {
         for tree in &trees {
-            if !tree.finished {
+            if !tree.finished && !tree.failed {
                 remove_candidates(&tree.def.out)?;
                 monitor(&tree.def.out.join("STATUS"), "FAIL\n");
             }

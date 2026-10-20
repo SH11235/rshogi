@@ -3,6 +3,7 @@
 mod journal;
 mod model;
 mod output;
+mod paths;
 mod service;
 #[cfg(test)]
 mod tests;
@@ -94,6 +95,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
         }
         TreeCommand::Replay(args) => {
             let definition = Definition::load(&args.tree)?;
+            paths::reject_collisions(&args.journal, None, &[&definition])?;
             let output_lock = journal::LockedFile::open(&definition.out.join("tree.lock"))?;
             let journal = Journal::open(&args.journal)?;
             model::remove_candidates(&definition.out)?;
