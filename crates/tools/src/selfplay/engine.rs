@@ -598,6 +598,15 @@ impl EngineProcess {
         Ok(())
     }
 
+    /// 待ち時間内の行を返す。無通信は None、切断はエラーに分ける。
+    pub fn poll_line(&self, timeout: Duration) -> Result<Option<String>> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(line) => Ok(Some(line)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => bail!("{}", self.engine_exited_message()),
+        }
+    }
+
     /// 継続的な info 出力でも延長されない絶対期限で1行受信する。
     pub fn recv_line_until(&self, deadline: Instant) -> Result<String> {
         let remaining = deadline

@@ -228,3 +228,75 @@ cargo run -p tools --release --bin book_mine -- run \
 - BookMiner の反駁 leaf (`pr`) などの他モード
 - 入玉局面のプレイアウトラベル (frontier の入玉フラグ出力まで)
 - 同値で depth の異なる非 best 手を `value - 1` する補正
+
+## `tree`: 台帳を共有する独立した木
+
+`tree` は `frontier / expand / run` と別の展開規則です。根の読みの候補と実戦の手順から始め、こちらの手番は1位、相手の手番は上位 `opp_n` 手を伸ばします。根以外で1位の絶対値が `stop` 以上なら規則と実戦の枝を止めます。未展開手が伝播後の展開手を上回ると、回の終わりに FORCE に加えて最大 `rounds` 回伸ばし直します。根は STOP を無視し、こちらの根の候補が1手だけなら2位も加えます。
+
+### 常駐と木の受付
+
+```bash
+book_mine tree serve --state /path/to/state --engine /path/to/engine \
+  --engine-option "EvalFile=$SHOGI_DATA/nnue/model.bin" \
+  --engine-option "LS_PROGRESS_COEFF=$SHOGI_DATA/progress/coeff.json" \
+  --engine-option DrawValueBlack=-70 --engine-option DrawValueWhite=70 \
+  --nodes 1000000000 --multipv 3 --hash 1024 --workers 16
+```
+
+`EvalFile` / `EvalDir` は必須で、既定のモデルを推測して再利用しません。serve では指定した全 option が engine から広告されることも確認します。読み条件と参照ファイルは実行中に変更しないでください。必要な USI option は `--engine-option K=V` を繰り返して指定します。`Threads=1`、`USI_Hash=--hash`、`MultiPV=--multipv` は固定です。局面ごとに `usinewgame` と `isready` を送り、手順履歴を渡さず `position sfen` と `go nodes` で読みます。bound 付き info は捨て、MultiPV 番号ごとの最後の行を番号順に保存します。同じ手の行もまとめず、値の順序も詰め直しません。mate は符号付き `30000 - |n|` です。
+
+`<state>/inbox/*.toml` に木の定義を置きます。起動中・worker が0の間も追加できます。TOML 内の相対パスは TOML の親 dir から解決します。書きかけの定義が見えないよう、別名で書いてから `.toml` に rename してください。
+
+```toml
+paths = "../example.paths.tsv"
+# paths_sha256 = "..."  # 任意の内容検証
+out = "../example-out"
+depth = 6
+opp_n = 2
+stop = 300
+own = "w"
+rounds = 3
+extra = ["6b5a"]
+# fingerprint = "..."  # import / serve が表示する読み条件。省略時はプロセスの条件
+# draw = 0            # 手順上の循環に付ける手番側の値。USI DrawValue とは別
+```
+
+paths.tsv はヘッダ無しで `key<TAB>ply<TAB>USIの手順<TAB>メモ`。key は手数を除く SFEN の3フィールドで、同じ根をまとめ、根の手番をそろえます。GAME は各手順の最初の `depth+1` 手を局面別に合わせます。`own` は `b` / `w`。こちらの根の EXTRA は MultiPV 内だけ、相手の根の EXTRA は合法なら採用します。
+
+木ごとの LEVEL は最短の段を回をまたいで保持し、浅い再発見は既存の辺の子孫にも伝えます。EDGE・RULE・FORCE は累積です。手数は根の手数に経路の長さを足した最小値を使います。台帳に他の木の読みがあっても、自分で要求した局面だけを評価します。negamax は各局面を空の祖先手順から評価し、その手順内の循環だけ `draw` にします。評価集合内の子に向かう MultiPV ∪ EDGE の手をつなぎます。同値は MultiPV の順、次に手の文字列順で選びます。
+
+同時に見つかった木はファイル名順、その後は受付順に優先します。列は `(受付順, 段, key)` 順で、列中・実行中とも同じ局面と指紋の要求を1つにまとめます。受付済みの木の定義と paths は変更せず、新しい定義・出力先で追加してください。受付順は `accepted.json` に保存され、再開時に定義・paths・読み条件を検査します。
+
+### 並列数・停止・監視
+
+- `<state>/workers` の整数を書き換えて並列数を変更します。既定16。減らすと余った worker は読みかけを台帳へ保存してから終了します。0は全 worker の drain で、serve は常駐を続けます。数を戻すと再開します。
+- `<state>/stop` を作ると読みかけを保存して serve を終了します。再開前に stop を除き、同じコマンドを実行します。kill 後も、保存済みの読みから木の回を再構築します。台帳の改行の無い末尾だけは切り捨てます。
+- 木が全て完了しても `IDLE` で受付を続けます。
+- `--stall-secs` (既定600) の間 info の nodes / depth のどちらも増えなければ `ALERT` に書きます。`info string` や同じ値の繰り返しでは時計を戻しません。既定では探索を止めません。
+- 固まった worker を明示的に作り直すには `<state>/restart/<worker番号>` を作ります。その読みを列に戻します。エンジン切断も自動で作り直します。`--max-restarts` (既定3) を超える同一局面の失敗は serve を FAIL にします。
+- state の lock と journal 自体の lock を終了まで保持します。別 state でも同じ journal の同時使用はできません。`--journal` を省略すると `<state>/journal.jsonl` を使います。
+
+プロセスの `STATUS` は `RUNNING / IDLE / STOPPED / FAIL`。木の出力先の `STATUS` は `QUEUED / RUNNING / DONE / NOT_READY / FAIL` です。`progress.json` に木の回・読み済み数・要求数・列の長さと、worker の局面・経過秒・nodes / depth を記録します。`ALERT` は日時付きの追記です。
+
+### Python の読みの取り込みと再生
+
+```bash
+book_mine tree import --journal /path/to/tree-journal.jsonl \
+  --engine /path/to/engine \
+  --engine-option "EvalFile=$SHOGI_DATA/nnue/model.bin" \
+  --engine-option DrawValueBlack=-70 --engine-option DrawValueWhite=70 \
+  --nodes 1000000000 --multipv 3 --hash 1024 \
+  --input /path/to/python-out/d0.jsonl /path/to/python-out/d1.jsonl
+
+book_mine tree replay --journal /path/to/tree-journal.jsonl --tree /path/to/tree.toml
+```
+
+import では engine とファイル型 USI option の内容 SHA-256、全 option、明示 `SPSAParamsFile` が無い場合のバイナリ隣接 `spsa.params` の有無と内容、nodes、MultiPV、局面ごとの初期化・info 解析の版を条件の指紋にします。Python の記録は元の engine / 評価ファイルの digest を持たないため、**指定した条件の宣言による取り込み**です。出どころのパスと入力ファイルの SHA-256 も記録します。nodes_limit / threads / hash / draw / MultiPV 行数が宣言と違う行、不正な局面・手、同じ条件と局面で MultiPV の値や深さ・bestmove が異なる重複を拒否します。取り込み全体を検査してから追記します。
+
+replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足があればエラーです。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。
+
+### 出力と登録可否
+
+木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。TSV の列と JSONL は node_calib / 登録・評価値更新の後段と互換です。min はライブラリの `backprop_file_with` を呼び、主の値とは分けます。
+
+未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は新しい木の定義と出力先で再生してください。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開します。
