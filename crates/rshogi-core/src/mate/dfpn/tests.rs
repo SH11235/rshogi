@@ -204,8 +204,8 @@ fn no_check_means_no_mate() {
 
 #[test]
 fn defender_escapes_by_interposition() {
-    // ▲5九香の王手に合駒で受けられ、持駒が尽きて詰まない
-    let sfen = "4k4/9/9/9/9/9/9/9/K3L4 b - 1";
+    // 香を打つ王手に後手は持駒の金で合駒でき (玉も逃げられる)、攻め方の持駒が尽きて詰まない
+    let sfen = "4k4/9/9/9/9/9/9/9/K8 b Lg 1";
     let mut pos = position(sfen);
     assert!(!brute_mate(&mut pos, 5, true));
     assert_no_mate(sfen);
@@ -258,6 +258,18 @@ fn positions_without_a_king_are_unsupported() {
         "4k4/8g/4P4/9/9/9/9/9/9 b G 1",
         "4k4/9/9/9/9/9/9/9/9 b R 1",
         "9/9/9/9/9/9/9/9/4K4 b R 1",
+    ] {
+        let mut pos = position(sfen);
+        assert_eq!(solve_limited(&mut pos, 1, 1_000), MateResult::Unsupported, "{sfen}");
+    }
+}
+
+#[test]
+fn position_with_side_not_to_move_in_check_is_unsupported() {
+    // 手番の先手の飛車が後手玉に利いている (後手が王手を放置した不正な局面)
+    for sfen in [
+        "4k4/9/9/9/4R4/9/9/9/4K4 b - 1",
+        "4k4/9/9/9/4R4/9/9/9/4K4 b G 1",
     ] {
         let mut pos = position(sfen);
         assert_eq!(solve_limited(&mut pos, 1, 1_000), MateResult::Unsupported, "{sfen}");
@@ -740,7 +752,8 @@ fn agrees_with_fixed_point_on_random_graphs() {
     assert!(mates > 100);
 }
 
-/// 長さ `len` の一本道 (OR → AND → ... ) で、末端が `end` (詰みの AND 終端か、不詰の OR 終端)
+/// 長さ `len` の一本道 (OR → AND → ...)。`mate_at_end` なら末端は詰みの AND 終端、
+/// そうでなければ不詰の OR 終端 (`len` の偶奇で決まるので一致を確かめる)
 fn chain_graph(len: usize, mate_at_end: bool) -> Vec<Vec<u32>> {
     let mut edges: Vec<Vec<u32>> = (0..len).map(|v| vec![v as u32 + 1]).collect();
     // 節点 len は len が奇数なら AND (子なし = 詰み)、偶数なら OR (子なし = 不詰)

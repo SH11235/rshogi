@@ -11,7 +11,8 @@
 //! 探索深さの上限 (2048 手) を超える手順を読み切れずに不詰と言えないとき、詰みを証明したが
 //! 手順を復元できなかったときも Unknown を返す。詰みの手順は最短とは限らない。
 //! 局面の同一性は 64bit のハッシュキーで判定するので、衝突による誤りの可能性は確率的にのみ排除される。
-//! 玉の無い局面 (攻め方の玉が無い詰将棋など) は扱わない ([`MateResult::Unsupported`])。
+//! 玉の無い局面 (攻め方の玉が無い詰将棋など) と、手番でない側が王手されている局面は扱わない
+//! ([`MateResult::Unsupported`])。
 
 mod pv;
 mod search;
@@ -40,7 +41,7 @@ pub enum MateResult {
     NoMate,
     /// 判定できなかった (時間・ノード数・停止による打ち切り、探索深さの上限、手順の復元失敗)
     Unknown,
-    /// 扱えない局面 (どちらかの玉が無い)
+    /// 扱えない局面 (どちらかの玉が無い、手番でない側が王手されている)
     Unsupported,
 }
 
@@ -96,10 +97,13 @@ impl DfpnSolver {
         mut progress: impl FnMut(MateProgress),
     ) -> MateResult {
         self.nodes = 0;
-        // 玉が無い側の玉の位置は既定値のままで、王手の判定が意味をなさない
+        // 玉が無い側の玉の位置は既定値のままで、王手の判定が意味をなさない。
+        // 手番でない側が王手されている局面は将棋として成立せず、受け方の手番の前提が崩れる。
+        let us = pos.side_to_move();
         if [Color::Black, Color::White]
             .iter()
             .any(|&c| pos.pieces(c, PieceType::King).is_empty())
+            || !pos.attackers_to_c(pos.king_square(!us), us).is_empty()
         {
             return MateResult::Unsupported;
         }

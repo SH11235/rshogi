@@ -1591,7 +1591,8 @@ impl UsiEngine {
             builder
                 .spawn(move || {
                     let limits = MateLimits { nodes: 0, time_ms };
-                    // panic しても GUI は checkmate を待ち続けるので、捕まえて timeout として応答する
+                    // panic しても GUI は checkmate を待ち続けるので、捕まえて timeout として応答する。
+                    // panic = "abort" のビルド (production プロファイル) ではプロセスごと終了する。
                     let solved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let result = solver.solve(&mut pos, &limits, &stop, |progress| {
                             let nps = progress.nodes * 1000 / progress.elapsed_ms.max(1);
