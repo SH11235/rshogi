@@ -54,6 +54,8 @@ enum Command {
     Expand(ExpandArgs),
     /// frontier → expand → 逆伝播 を周回する
     Run(RunArgs),
+    /// 独立した木を共有キューで読み、Python 互換の登録材料を作る
+    Tree(tools::book_tree::TreeArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -179,6 +181,7 @@ fn main() -> Result<()> {
         Command::Frontier(args) => cmd_frontier(&args),
         Command::Expand(args) => cmd_expand(&args),
         Command::Run(args) => cmd_run(&args),
+        Command::Tree(args) => tools::book_tree::run(args),
     }
 }
 

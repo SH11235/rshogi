@@ -44,6 +44,7 @@ pub mod aobazero_features;
 pub mod bench_nnue_eval_tool;
 pub mod book_backprop;
 pub mod book_db;
+pub mod book_tree;
 pub mod common;
 pub mod config;
 pub mod dlshogi_features;
