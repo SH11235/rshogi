@@ -750,13 +750,22 @@ fn inbox_symlinks_are_alerted_without_stopping_serve() {
             .unwrap()
             .success()
     );
+    std::fs::create_dir_all(state.join("restart")).unwrap();
+    std::os::unix::fs::symlink(&fifo, state.join("restart/0")).unwrap();
     let mut server = start(state, &config);
     wait_for(|| {
         let alerts = alerts(state);
-        ["link.toml", "broken.toml", "fifo_link.toml", "fifo.toml"]
-            .iter()
-            .all(|name| alerts.contains(name))
+        [
+            "link.toml",
+            "broken.toml",
+            "fifo_link.toml",
+            "fifo.toml",
+            "restart/0",
+        ]
+        .iter()
+        .all(|name| alerts.contains(name))
     });
+    assert!(std::fs::symlink_metadata(state.join("restart/0")).is_err());
     wait_for(|| status(&dir.path().join("valid")) == "DONE\n");
     assert!(server.0.try_wait().unwrap().is_none());
     let accepted: Value =

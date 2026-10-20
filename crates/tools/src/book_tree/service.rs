@@ -399,8 +399,9 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
             if !stopping {
                 for entry in entries {
                     let original = entry.path();
+                    // 種別を取れないのは rename 途中で消えたエントリなので、次の周回に回す。
                     if original.extension().is_none_or(|e| e != "toml")
-                        && !entry.file_type()?.is_symlink()
+                        && !entry.file_type().is_ok_and(|t| t.is_symlink())
                     {
                         continue;
                     }
@@ -510,7 +511,11 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
             }
             for entry in std::fs::read_dir(args.state.join("restart"))? {
                 let entry = entry?;
-                super::paths::reject_symlink(&entry.path())?;
+                if let Err(error) = super::paths::reject_symlink(&entry.path()) {
+                    alerts.push(&format!("restart の指示を無視しました: {error:#}"));
+                    let _ = std::fs::remove_file(entry.path());
+                    continue;
+                }
                 let id = entry.file_name().to_string_lossy().parse::<usize>().ok();
                 let mut targeted = false;
                 if let Some(worker) = id.and_then(|id| workers.get(&id)) {

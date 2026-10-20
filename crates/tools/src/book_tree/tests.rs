@@ -464,6 +464,31 @@ fn cycle_values_start_from_empty_ancestry_for_each_position() {
     assert_eq!(values, reference_values(&tree));
 }
 
+#[test]
+fn declaration_win_leaf_value_comes_from_its_win_line() {
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let mut tree = Tree::load(definition(dir.path(), 0), &s).unwrap();
+    let win = child(ROOT, "5i4i").unwrap();
+    tree.nodes.insert(ROOT.into(), reading(ROOT, &[("5i4i", 0)], &s));
+    tree.edge.insert(ROOT.into(), BTreeSet::from(["5i4i".into()]));
+    let mut r = reading(&win, &[], &s);
+    r.bestmove = "win".into();
+    r.multipv = vec![Pv {
+        mv: "win".into(),
+        cp: 30000,
+        depth: 1,
+    }];
+    tree.nodes.insert(win.clone(), r.clone());
+    let values = tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap();
+    assert_eq!(values[ROOT]["5i4i"], -30000);
+    assert!(values[&win].is_empty());
+    r.multipv.clear();
+    tree.nodes.insert(win, r);
+    let values = tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap();
+    assert_eq!(values[ROOT]["5i4i"], 0);
+}
+
 fn reference_values(tree: &Tree) -> super::model::Values {
     reference_negamax(tree, &tree.nodes.keys().cloned().collect())
 }

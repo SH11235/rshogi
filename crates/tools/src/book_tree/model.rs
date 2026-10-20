@@ -342,7 +342,13 @@ impl Tree {
                 rows.insert(mv.clone(), value);
             }
             path.remove(key);
-            (rows.values().copied().max().unwrap_or(0), rows)
+            // 宣言勝ちの葉は指し手の行を持たないので、`pv win` の行の値を局面の値にする
+            // (d*.jsonl を読む後段の登録はこの値を使う)。行が無ければ他の葉と同じ 0。
+            let reading = &tree.nodes[key];
+            let win = (rows.is_empty() && reading.bestmove == "win")
+                .then(|| reading.multipv.first().map(|p| p.cp))
+                .flatten();
+            (rows.values().copied().max().or(win).unwrap_or(0), rows)
         }
         Ok(nodes
             .iter()
