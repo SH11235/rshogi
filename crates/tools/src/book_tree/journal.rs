@@ -1,6 +1,7 @@
 use super::ReadingArgs;
 use crate::book_db::{child_position_after_move, position_from_sfen, strip_ply};
 use anyhow::{Context, Result, bail};
+use rshogi_core::movegen::{MoveList, generate_legal_all};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -158,7 +159,6 @@ impl Reading {
             || self.threads != 1
             || self.hash != settings.hash
             || self.draw != settings.draw()
-            || self.multipv.len() != settings.multipv
         {
             bail!("宣言と読みの条件が矛盾します: {}", self.key);
         }
@@ -169,11 +169,28 @@ impl Reading {
         if strip_ply(&pos.to_sfen()) != self.key {
             bail!("局面 key は正規形が必要です: {}", self.key);
         }
+        let mut legal = MoveList::new();
+        generate_legal_all(&pos, &mut legal);
+        if self.multipv.len() != settings.multipv.min(legal.len()) {
+            bail!("合法手数と MultiPV が矛盾: {}", self.key);
+        }
         for pv in &self.multipv {
             child_position_after_move(&pos.to_sfen(), &pv.mv)?;
         }
-        if self.multipv.first().is_none_or(|p| p.mv != self.bestmove) {
+        if self
+            .multipv
+            .first()
+            .map_or(!matches!(self.bestmove.as_str(), "resign" | "win"), |p| p.mv != self.bestmove)
+        {
             bail!("bestmove と MultiPV が矛盾: {}", self.key);
+        }
+        Ok(())
+    }
+
+    pub fn validate_declaration(&self, settings: &Settings) -> Result<()> {
+        self.validate(settings)?;
+        if self.multipv.len() != settings.multipv {
+            bail!("宣言と MultiPV 行数が矛盾します: {}", self.key);
         }
         Ok(())
     }
@@ -317,7 +334,7 @@ impl Journal {
                 }
                 let reading: Reading = serde_json::from_str(&line)
                     .with_context(|| format!("{}:{}", path.display(), line_no + 1))?;
-                reading.validate(settings)?;
+                reading.validate_declaration(settings)?;
                 let existing = self
                     .records
                     .get(&(settings.fingerprint.clone(), reading.key.clone()))

@@ -154,10 +154,11 @@ fn bfs(tree: &mut Tree, cache: &BTreeMap<String, Reading>) {
                 let mut extras = Vec::new();
                 if tree.roots.contains_key(&key) {
                     if side(&key) == tree.def.own {
-                        picks.push(mp[0].mv.clone());
+                        picks.extend(mp.first().map(|p| p.mv.clone()));
                         picks.extend(game.iter().cloned());
-                        picks.dedup();
-                        if picks.len() == 1 {
+                        let mut seen = BTreeSet::new();
+                        picks.retain(|m| seen.insert(m.clone()));
+                        if picks.len() == 1 && mp.len() > 1 {
                             picks.push(mp[1].mv.clone());
                         }
                         picks.extend(
@@ -174,7 +175,7 @@ fn bfs(tree: &mut Tree, cache: &BTreeMap<String, Reading>) {
                         );
                         picks.extend(game);
                     }
-                } else if mp[0].cp.abs() < tree.def.stop {
+                } else if mp.first().is_some_and(|p| p.cp.abs() < tree.def.stop) {
                     let n = if side(&key) == tree.def.own {
                         1
                     } else {
@@ -219,24 +220,26 @@ fn bfs(tree: &mut Tree, cache: &BTreeMap<String, Reading>) {
 fn asynchronous_closure_matches_bfs_across_rounds_and_completion_orders() {
     let settings = settings();
     let cache = corpus(&settings);
-    for rounds in 0..=2 {
-        let reference_dir = tempfile::tempdir().unwrap();
-        let mut reference =
-            Tree::load(definition(reference_dir.path(), rounds), &settings).unwrap();
-        bfs(&mut reference, &cache);
-        let full_dir = tempfile::tempdir().unwrap();
-        let mut full = Tree::load(definition(full_dir.path(), rounds), &settings).unwrap();
-        full.advance(&cache).unwrap();
-        assert_eq!(full.nodes, reference.nodes);
-        assert_eq!(
-            full.negamax(&full.nodes.keys().cloned().collect()).unwrap(),
-            reference_values(&reference)
-        );
-        for reverse in [false, true] {
+    let references: Vec<_> = (0..=2)
+        .map(|rounds| {
             let dir = tempfile::tempdir().unwrap();
             let mut tree = Tree::load(definition(dir.path(), rounds), &settings).unwrap();
-            let mut arrived = BTreeMap::new();
-            let mut saw_deep_transposition = false;
+            bfs(&mut tree, &cache);
+            tree.edge.retain(|_, v| !v.is_empty());
+            tree.rule.retain(|_, v| !v.is_empty());
+            (dir, tree)
+        })
+        .collect();
+    for permutation in 0..200 {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = Tree::load(definition(dir.path(), 0), &settings).unwrap();
+        let mut arrived = BTreeMap::new();
+        let mut random = 0x13b8_f712_u64 + permutation;
+        let mut saw_deep_transposition = false;
+        for (rounds, (reference_dir, reference)) in references.iter().enumerate() {
+            assert!(reference_dir.path().exists());
+            tree.def.rounds = rounds;
+            tree.finished = false;
             for step in 0..1000 {
                 let mut missing = tree.advance(&arrived).unwrap();
                 let c = child(&child(ROOT, "5i4i").unwrap(), "5a4a").unwrap();
@@ -244,18 +247,24 @@ fn asynchronous_closure_matches_bfs_across_rounds_and_completion_orders() {
                 if tree.finished {
                     break;
                 }
-                // 浅い片方の枝を遅らせ、長い経路の子孫を先に展開する。
                 missing.sort_by_key(|(k, d)| (*d, k.clone()));
-                let (key, _) = if reverse {
+                let index = if permutation == 1 {
+                    // 浅い枝を遅らせ、長い経路の子孫を先に展開する。
                     let delayed = child(ROOT, "5i4i").unwrap();
-                    let index = missing
+                    missing
                         .iter()
                         .rposition(|(key, _)| key != &delayed)
-                        .unwrap_or(missing.len() - 1);
-                    missing.remove(index)
+                        .unwrap_or(missing.len() - 1)
+                } else if permutation == 0 {
+                    0
                 } else {
-                    missing.remove(0)
+                    random ^= random << 13;
+                    random ^= random >> 7;
+                    random ^= random << 17;
+                    random as usize % missing.len()
                 };
+                let (key, depth) = missing.remove(index);
+                assert!(depth <= tree.def.depth);
                 arrived.insert(
                     key.clone(),
                     cache
@@ -265,29 +274,31 @@ fn asynchronous_closure_matches_bfs_across_rounds_and_completion_orders() {
                 );
             }
             assert!(tree.finished);
-            if reverse {
-                assert!(saw_deep_transposition);
-            }
-            assert_eq!(tree.nodes, reference.nodes);
-            assert_eq!(tree.level, reference.level);
             tree.edge.retain(|_, v| !v.is_empty());
-            reference.edge.retain(|_, v| !v.is_empty());
             tree.rule.retain(|_, v| !v.is_empty());
-            reference.rule.retain(|_, v| !v.is_empty());
-            assert_eq!(tree.edge, reference.edge);
-            assert_eq!(tree.rule, reference.rule);
-            assert_eq!(tree.force, reference.force);
-            assert_eq!(
-                tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap(),
-                reference.negamax(&reference.nodes.keys().cloned().collect()).unwrap()
-            );
-            assert_eq!(
-                tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap(),
-                reference_values(&tree)
-            );
-            let before = tree.nodes.clone();
-            tree.advance(&cache).unwrap();
-            assert_eq!(tree.nodes, before);
+            assert_eq!(tree.nodes, reference.nodes, "NODE round={rounds}");
+            assert_eq!(tree.level, reference.level, "LEVEL round={rounds}");
+            assert_eq!(tree.edge, reference.edge, "EDGE round={rounds}");
+            assert_eq!(tree.rule, reference.rule, "RULE round={rounds}");
+            assert_eq!(tree.force, reference.force, "FORCE round={rounds}");
+            let values = tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap();
+            assert_eq!(values, reference_values(reference), "values round={rounds}");
+            let clean_dir = tempfile::tempdir().unwrap();
+            let mut clean = Tree::load(definition(clean_dir.path(), rounds), &settings).unwrap();
+            clean.advance(&tree.nodes).unwrap();
+            let full_dir = tempfile::tempdir().unwrap();
+            let mut full = Tree::load(definition(full_dir.path(), rounds), &settings).unwrap();
+            full.advance(&cache).unwrap();
+            assert!(cache.len() > tree.nodes.len());
+            for other in [&clean, &full] {
+                assert_eq!(other.nodes, tree.nodes);
+                assert_eq!(other.level, tree.level);
+                assert_eq!(other.force, tree.force);
+                assert_eq!(other.negamax(&other.nodes.keys().cloned().collect()).unwrap(), values);
+            }
+        }
+        if permutation == 1 {
+            assert!(saw_deep_transposition);
         }
     }
 }
@@ -532,7 +543,7 @@ fn model_and_implicit_parameters_are_content_fingerprints() {
 }
 
 #[test]
-fn empty_game_still_adds_second_root_candidate_and_output_failure_publishes_none() {
+fn empty_game_adds_second_candidate_and_status_failure_does_not_block_outputs() {
     let s = settings();
     let dir = tempfile::tempdir().unwrap();
     let mut def = definition(dir.path(), 0);
@@ -550,6 +561,127 @@ fn empty_game_still_adds_second_root_candidate_and_output_failure_publishes_none
     assert_eq!(tree.candidates[ROOT], vec!["5i4i", "5i6i"]);
     assert_eq!(tree.ply[ROOT], 20);
     std::fs::create_dir(tree.def.out.join("STATUS")).unwrap();
-    assert!(tree.write_outputs().is_err());
-    assert!(!tree.def.out.join("own_nodes.tsv").exists());
+    assert!(tree.write_outputs().unwrap());
+    assert!(tree.def.out.join("own_nodes.tsv").exists());
+}
+
+#[test]
+fn short_multipv_and_terminal_readings_are_leaves_but_import_requires_declaration() {
+    let s = settings();
+    for (key, count) in [
+        ("k8/9/R8/9/9/9/9/9/8K w -", 2),
+        ("k8/9/RP7/9/9/9/9/9/8K w -", 1),
+        ("k8/1G7/RP7/9/9/9/9/9/8K w -", 0),
+    ] {
+        let moves = legal(key);
+        assert_eq!(moves.len(), count);
+        let mut r = reading(ROOT, &[("5i4i", 0)], &s);
+        r.key = key.into();
+        r.multipv = moves
+            .iter()
+            .map(|mv| Pv {
+                mv: mv.clone(),
+                cp: 500,
+                depth: 8,
+            })
+            .collect();
+        r.bestmove = moves.first().cloned().unwrap_or("resign".into());
+        r.validate(&s).unwrap();
+        assert!(r.validate_declaration(&s).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let mut def = definition(dir.path(), 0);
+        std::fs::write(&def.paths, format!("{key}\t1\t\tterminal\n")).unwrap();
+        def.depth = 0;
+        def.own = "w".into();
+        def.extra.clear();
+        let mut tree = Tree::load(def, &s).unwrap();
+        tree.advance(&BTreeMap::from([(key.into(), r.clone())])).unwrap();
+        assert!(tree.finished);
+        assert!(tree.write_outputs().unwrap());
+        if count == 0 {
+            assert!(tree.negamax(&tree.nodes.keys().cloned().collect()).unwrap()[key].is_empty());
+            r.bestmove = "win".into();
+            r.validate(&s).unwrap();
+        }
+    }
+}
+
+#[test]
+fn replay_locks_before_touching_candidates_or_status_and_not_ready_returns_error() {
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let def = definition(dir.path(), 0);
+    std::fs::create_dir(&def.out).unwrap();
+    let toml = dir.path().join("tree.toml");
+    std::fs::write(
+        &toml,
+        "paths='paths.tsv'\nout='out'\ndepth=5\nopp_n=1\nstop=300\nown='b'\nrounds=0\n",
+    )
+    .unwrap();
+    let journal_path = dir.path().join("journal");
+    let mut journal = Journal::open(&journal_path).unwrap();
+    for r in corpus(&s).into_values() {
+        journal.append(r, &s, "fixture".into()).unwrap();
+    }
+    let replay = || {
+        run(TreeArgs {
+            command: TreeCommand::Replay(ReplayArgs {
+                journal: journal_path.clone(),
+                tree: toml.clone(),
+                fingerprint: None,
+            }),
+        })
+    };
+    std::fs::write(def.out.join("own_nodes.tsv"), "protected").unwrap();
+    std::fs::write(def.out.join("STATUS"), "RUNNING\n").unwrap();
+    assert!(replay().is_err());
+    assert_eq!(std::fs::read_to_string(def.out.join("own_nodes.tsv")).unwrap(), "protected");
+    drop(journal);
+    let lock = super::journal::LockedFile::open(&def.out.join("tree.lock")).unwrap();
+    assert!(replay().is_err());
+    assert_eq!(std::fs::read_to_string(def.out.join("STATUS")).unwrap(), "RUNNING\n");
+    assert_eq!(std::fs::read_to_string(def.out.join("own_nodes.tsv")).unwrap(), "protected");
+    drop(lock);
+    assert!(replay().unwrap_err().to_string().contains("登録禁止"));
+    assert_eq!(std::fs::read_to_string(def.out.join("STATUS")).unwrap(), "NOT_READY\n");
+    assert!(!def.out.join("own_nodes.tsv").exists());
+}
+
+#[test]
+fn min_failure_is_reported_and_done_follows_all_artifacts() {
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    def.depth = 0;
+    let mut tree = Tree::load(def, &s).unwrap();
+    tree.advance(&corpus(&s)).unwrap();
+    std::fs::create_dir(tree.def.out.join("tree_bp_min.db")).unwrap();
+    assert!(tree.write_outputs().unwrap());
+    let report = std::fs::read_to_string(tree.def.out.join("report.txt")).unwrap();
+    assert!(report.contains("book_backprop (min、参考) が失敗した:"));
+    assert!(report.starts_with(&format!("根 {ROOT} 候補 ['5i5h', '5i4i', '5i6i'] 比べる手")));
+    assert!(tree.def.out.join("own_nodes.tsv").exists());
+    assert_eq!(std::fs::read_to_string(tree.def.out.join("STATUS")).unwrap(), "DONE\n");
+}
+
+#[test]
+fn report_includes_opponent_candidates_and_unexpanded_warning() {
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition(dir.path(), 0);
+    def.depth = 0;
+    def.own = "w".into();
+    let mut tree = Tree::load(def, &s).unwrap();
+    tree.advance(&corpus(&s)).unwrap();
+    tree.write_outputs().unwrap();
+    assert!(
+        std::fs::read_to_string(tree.def.out.join("report.txt"))
+            .unwrap()
+            .starts_with(&format!("根 (相手の手番) {ROOT} 伸ばす手"))
+    );
+    tree.def.own = "b".into();
+    tree.candidates.insert(ROOT.into(), vec!["5i6i".into()]);
+    tree.write_outputs().unwrap();
+    assert!(std::fs::read_to_string(tree.def.out.join("report.txt")).unwrap()
+        .contains("警告: 伸ばしていない手の読みの値が、候補の伝播後の 1 位を上回る (その手も伸ばしてから決める): ['5i5h', '5i4i']"));
 }

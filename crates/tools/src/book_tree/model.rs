@@ -52,6 +52,7 @@ pub(super) fn side(key: &str) -> &str {
 pub(super) struct Tree {
     pub def: Definition,
     pub roots: BTreeMap<String, u32>,
+    pub root_order: Vec<String>,
     pub game: Edges,
     pub nodes: BTreeMap<String, Reading>,
     pub level: BTreeMap<String, usize>,
@@ -62,7 +63,9 @@ pub(super) struct Tree {
     pub candidates: BTreeMap<String, Vec<String>>,
     pub compare: BTreeMap<String, Option<String>>,
     pub round: usize,
+    pub round_reports: Vec<(usize, usize)>,
     pub finished: bool,
+    pub ready: bool,
     pub failed: bool,
     expanded: BTreeMap<String, (usize, u32)>,
 }
@@ -82,6 +85,7 @@ impl Tree {
             bail!("paths の sha256 が違います");
         }
         let mut roots = BTreeMap::new();
+        let mut root_order = Vec::new();
         let mut game: Edges = BTreeMap::new();
         for line in std::fs::read_to_string(&def.paths)?.lines().filter(|l| !l.trim().is_empty()) {
             let cols: Vec<_> = line.split('\t').collect();
@@ -96,6 +100,9 @@ impl Tree {
             let mut key = strip_ply(&pos.to_sfen()).to_owned();
             if key != cols[0] {
                 bail!("paths の key は正規形が必要です");
+            }
+            if !roots.contains_key(&key) {
+                root_order.push(key.clone());
             }
             roots.entry(key.clone()).or_insert(ply);
             for mv in cols[2].split_whitespace().take(def.depth.saturating_add(1)) {
@@ -112,6 +119,7 @@ impl Tree {
             def,
             ply: roots.clone(),
             roots,
+            root_order,
             game,
             nodes: BTreeMap::new(),
             level,
@@ -121,7 +129,9 @@ impl Tree {
             candidates: BTreeMap::new(),
             compare: BTreeMap::new(),
             round: 0,
+            round_reports: Vec::new(),
             finished: false,
+            ready: false,
             failed: false,
             expanded: BTreeMap::new(),
         })
@@ -254,7 +264,7 @@ impl Tree {
             if self.round < self.def.rounds {
                 let values = self.negamax(&self.reach(&self.edge))?;
                 let pending = self.unresolved(&values);
-                let mut added = false;
+                let mut added = 0;
                 for (key, rows) in pending {
                     if self.level[&key] >= self.def.depth {
                         continue;
@@ -264,9 +274,10 @@ impl Tree {
                         .or_default()
                         .extend(rows.into_iter().map(|(_, m)| m));
                     self.expanded.remove(&key);
-                    added = true;
+                    added += 1;
                 }
-                if added {
+                self.round_reports.push((self.round + 2, added));
+                if added > 0 {
                     self.round += 1;
                     continue;
                 }

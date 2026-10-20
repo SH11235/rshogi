@@ -6,13 +6,9 @@ use crate::selfplay::{EngineConfig, EngineProcess};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
-};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -67,18 +63,47 @@ struct Job {
     ply: u32,
 }
 enum Event {
-    Done(usize, String, Result<Reading>),
+    Done(usize, String, bool, Result<Reading>),
     Info(usize, u64, u32),
     Alert(String),
 }
 struct Worker {
     tx: mpsc::Sender<Option<Job>>,
     handle: JoinHandle<()>,
-    restart: Arc<AtomicBool>,
+    restart: Arc<Mutex<Restart>>,
     busy: Option<(String, Instant)>,
     nodes: u64,
     depth: u32,
 }
+
+#[derive(Default)]
+struct Restart {
+    key: Option<String>,
+    requested: bool,
+}
+impl Restart {
+    fn request(&mut self) -> bool {
+        if self.key.is_none() {
+            return false;
+        }
+        self.requested = true;
+        true
+    }
+    fn finish(&mut self) -> bool {
+        let requested = self.requested;
+        *self = Self::default();
+        requested
+    }
+}
+
+#[derive(Debug)]
+struct InvalidReading(anyhow::Error);
+impl std::fmt::Display for InvalidReading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "読みの検査失敗: {:#}", self.0)
+    }
+}
+impl std::error::Error for InvalidReading {}
 
 fn spawn_worker(
     id: usize,
@@ -90,7 +115,7 @@ fn spawn_worker(
     let settings = settings.clone();
     let path = args.reading.engine.clone();
     let stall = Duration::from_secs(args.stall_secs);
-    let restart = Arc::new(AtomicBool::new(false));
+    let restart = Arc::new(Mutex::new(Restart::default()));
     let restart_worker = restart.clone();
     let handle = thread::spawn(move || {
         let cfg = EngineConfig {
@@ -128,7 +153,7 @@ fn spawn_worker(
                 let mut alerted = false;
                 let mut collector = Collector::default();
                 loop {
-                    if restart_worker.swap(false, Ordering::SeqCst) {
+                    if restart_worker.lock().unwrap_or_else(|error| error.into_inner()).requested {
                         bail!("制御ファイルによる engine 再起動");
                     }
                     if !alerted && progressed.elapsed() >= stall {
@@ -161,7 +186,7 @@ fn spawn_worker(
                             multipv,
                             bestmove,
                         };
-                        reading.validate(&settings)?;
+                        reading.validate(&settings).map_err(InvalidReading)?;
                         return Ok(reading);
                     }
                     if line.starts_with("info ") && !line.starts_with("info string ") {
@@ -184,13 +209,17 @@ fn spawn_worker(
                             let _ = events.send(Event::Info(id, high_nodes, high_depth));
                         }
                     }
-                    collector.info(&line)?;
+                    collector.info(&line).map_err(InvalidReading)?;
                 }
             })();
             if result.is_err() {
                 engine = None;
             }
-            if events.send(Event::Done(id, job.key, result)).is_err() {
+            let explicit = {
+                let mut control = restart_worker.lock().unwrap_or_else(|error| error.into_inner());
+                control.finish()
+            };
+            if events.send(Event::Done(id, job.key, explicit, result)).is_err() {
                 break;
             }
         }
@@ -214,27 +243,38 @@ struct Accepted {
     fingerprint: String,
 }
 
+struct LoadedTree {
+    tree: Tree,
+    accepted: Accepted,
+    lock: LockedFile,
+}
+
 pub(super) fn serve(args: ServeArgs) -> Result<()> {
     std::fs::create_dir_all(args.state.join("inbox"))?;
     std::fs::create_dir_all(args.state.join("restart"))?;
     let state_lock = LockedFile::open(&args.state.join("lock"))?;
-    let manifest = args.state.join("accepted.json");
-    if manifest.exists() {
-        let accepted: Vec<Accepted> = serde_json::from_str(&std::fs::read_to_string(manifest)?)?;
-        for entry in accepted {
-            remove_candidates(&entry.out)?;
-        }
-    }
     let result = serve_locked(&args);
     if let Err(error) = &result {
-        write_atomic(&args.state.join("STATUS"), "FAIL\n")?;
-        alert(&args.state, &format!("FAIL {error:#}"))?;
+        monitor(&args.state.join("STATUS"), "FAIL\n");
+        alert(&args.state, &format!("FAIL {error:#}"));
     }
     drop(state_lock);
     result
 }
 
-fn alert(state: &std::path::Path, message: &str) -> Result<()> {
+pub(super) fn monitor(path: &std::path::Path, contents: &str) {
+    if let Err(error) = write_atomic(path, contents) {
+        eprintln!("監視ファイル書き込み失敗 {}: {error:#}", path.display());
+    }
+}
+
+fn alert(state: &std::path::Path, message: &str) {
+    if let Err(error) = append_alert(state, message) {
+        eprintln!("ALERT 書き込み失敗: {error:#}; {message}");
+    }
+}
+
+fn append_alert(state: &std::path::Path, message: &str) -> Result<()> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -242,6 +282,27 @@ fn alert(state: &std::path::Path, message: &str) -> Result<()> {
         .open(state.join("ALERT"))?;
     writeln!(file, "{} {message}", chrono::Utc::now().to_rfc3339())?;
     Ok(())
+}
+
+struct Alerts<'a> {
+    state: &'a std::path::Path,
+    pending: VecDeque<String>,
+}
+impl Alerts<'_> {
+    fn push(&mut self, message: &str) {
+        if !self.pending.iter().any(|s| s == message) {
+            self.pending.push_back(message.to_owned());
+        }
+    }
+    fn flush(&mut self) {
+        while let Some(message) = self.pending.front() {
+            if let Err(error) = append_alert(self.state, message) {
+                eprintln!("ALERT 書き込み失敗: {error:#}; {message}");
+                break;
+            }
+            self.pending.pop_front();
+        }
+    }
 }
 
 fn serve_locked(args: &ServeArgs) -> Result<()> {
@@ -261,6 +322,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
     };
     let mut trees = Vec::new();
     let mut outputs = BTreeSet::new();
+    let mut output_locks = Vec::new();
     for entry in &accepted {
         if digest(&entry.path)? != entry.sha256 {
             bail!("受付済みの木の定義は変更できません: {}", entry.path.display());
@@ -271,6 +333,7 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
         {
             bail!("受付済みの paths または読み条件が違います");
         }
+        output_locks.push(LockedFile::open(&definition.out.join("tree.lock"))?);
         let tree = Tree::load(definition, &settings)?;
         if !outputs.insert(std::fs::canonicalize(&tree.def.out)?) {
             bail!("出力先が重複しています");
@@ -284,7 +347,13 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
     let (events_tx, events_rx) = mpsc::channel();
     let mut workers: BTreeMap<usize, Worker> = BTreeMap::new();
     let mut retries: BTreeMap<String, usize> = BTreeMap::new();
-    let mut rejected = BTreeSet::new();
+    let mut rejected = BTreeMap::new();
+    let mut workers_error = None;
+    let mut failures = BTreeMap::new();
+    let mut alerts = Alerts {
+        state: &args.state,
+        pending: VecDeque::new(),
+    };
     let result = (|| -> Result<()> {
         loop {
             let stopping = args.state.join("stop").exists();
@@ -292,9 +361,16 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 .context("workers を読めません")
                 .and_then(|s| Ok(s.trim().parse()?))
             {
-                Ok(n) => n,
+                Ok(n) => {
+                    workers_error = None;
+                    n
+                }
                 Err(e) => {
-                    alert(&args.state, &format!("workers が不正です: {e}"))?;
+                    let stamp = file_stamp(&workers_file);
+                    if workers_error.as_ref() != Some(&stamp) {
+                        alerts.push(&format!("workers が不正です: {e}"));
+                        workers_error = Some(stamp);
+                    }
                     workers.len()
                 }
             };
@@ -304,54 +380,73 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
             entries.sort_by_key(|e| e.file_name());
             if !stopping {
                 for entry in entries {
-                    let path = std::fs::canonicalize(entry.path())?;
-                    if path.extension().is_none_or(|e| e != "toml")
-                        || accepted.iter().any(|a| a.path == path)
-                        || rejected.contains(&path)
-                    {
+                    let original = entry.path();
+                    if original.extension().is_none_or(|e| e != "toml") {
                         continue;
                     }
-                    let loaded = (|| -> Result<Tree> {
+                    let stamp = file_stamp(&original);
+                    if rejected.get(&original) == Some(&stamp) {
+                        continue;
+                    }
+                    let loaded = (|| -> Result<Option<LoadedTree>> {
+                        let path = std::fs::canonicalize(&original)?;
+                        if accepted.iter().any(|a| a.path == path) {
+                            return Ok(None);
+                        }
                         let definition = Definition::load(&path)?;
                         std::fs::create_dir_all(&definition.out)?;
                         let out = std::fs::canonicalize(&definition.out)?;
                         if outputs.contains(&out) {
                             bail!("木の出力先が重複しています");
                         }
+                        let lock = LockedFile::open(&definition.out.join("tree.lock"))?;
+                        let sha = digest(&path)?;
+                        let paths_sha = digest(&definition.paths)?;
                         let tree = Tree::load(definition, &settings)?;
                         outputs.insert(out);
-                        Ok(tree)
+                        Ok(Some(LoadedTree {
+                            accepted: Accepted {
+                                out: tree.def.out.clone(),
+                                path,
+                                sha256: sha,
+                                paths_sha256: paths_sha,
+                                fingerprint: settings.fingerprint.clone(),
+                            },
+                            tree,
+                            lock,
+                        }))
                     })();
                     match loaded {
-                        Ok(tree) => {
-                            accepted.push(Accepted {
-                                out: tree.def.out.clone(),
-                                sha256: digest(&path)?,
-                                paths_sha256: digest(&tree.def.paths)?,
-                                fingerprint: settings.fingerprint.clone(),
-                                path,
-                            });
+                        Ok(Some(LoadedTree {
+                            tree,
+                            accepted: entry,
+                            lock,
+                        })) => {
+                            output_locks.push(lock);
+                            rejected.remove(&original);
+                            accepted.push(entry);
                             write_atomic(&manifest, &serde_json::to_string_pretty(&accepted)?)?;
-                            write_atomic(&tree.def.out.join("STATUS"), "QUEUED\n")?;
+                            monitor(&tree.def.out.join("STATUS"), "QUEUED\n");
                             trees.push(tree);
                         }
+                        Ok(None) => {}
                         Err(e) => {
-                            alert(&args.state, &format!("木の受付失敗 {}: {e:#}", path.display()))?;
-                            rejected.insert(path);
+                            alerts.push(&format!("木の受付失敗 {}: {e:#}", original.display()));
+                            rejected.insert(original, stamp);
                         }
                     }
                 }
             }
             while let Ok(event) = events_rx.try_recv() {
                 match event {
-                    Event::Alert(message) => alert(&args.state, &message)?,
+                    Event::Alert(message) => alerts.push(&message),
                     Event::Info(id, nodes, depth) => {
                         if let Some(worker) = workers.get_mut(&id) {
                             worker.nodes = nodes;
                             worker.depth = depth;
                         }
                     }
-                    Event::Done(id, key, result) => {
+                    Event::Done(id, key, explicit, result) => {
                         if let Some(worker) = workers.get_mut(&id) {
                             worker.busy = None;
                         }
@@ -361,30 +456,46 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                                 cache.insert(key, reading);
                             }
                             Err(error) => {
-                                let attempts = retries.entry(key.clone()).or_default();
-                                *attempts += 1;
-                                alert(
-                                    &args.state,
-                                    &format!(
-                                        "RESTART worker={id} attempt={attempts} key={key}: {error:#}"
-                                    ),
-                                )?;
-                                if *attempts > args.max_restarts {
-                                    bail!("engine の再起動上限: {key}");
+                                if explicit {
+                                    alerts.push(&format!(
+                                        "制御ファイルによる RESTART worker={id} key={key}"
+                                    ));
+                                } else if error.is::<InvalidReading>() {
+                                    let message = format!("局面の検査失敗: {key}: {error:#}");
+                                    alerts.push(&message);
+                                    failures.insert(key, message);
+                                } else {
+                                    let attempts = retries.entry(key.clone()).or_default();
+                                    *attempts += 1;
+                                    alerts.push(&format!("RESTART worker={id} attempt={attempts} key={key}: {error:#}"));
+                                    if *attempts > args.max_restarts {
+                                        let message =
+                                            format!("局面の失敗 (再起動上限): {key}: {error:#}");
+                                        alerts.push(&message);
+                                        failures.insert(key, message);
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-            for (id, worker) in &workers {
-                let restart = args.state.join("restart").join(id.to_string());
-                if restart.exists() {
-                    if worker.busy.is_some() {
-                        worker.restart.store(true, Ordering::SeqCst);
-                    }
-                    std::fs::remove_file(restart)?;
+            for entry in std::fs::read_dir(args.state.join("restart"))? {
+                let entry = entry?;
+                let id = entry.file_name().to_string_lossy().parse::<usize>().ok();
+                let mut targeted = false;
+                if let Some(worker) = id.and_then(|id| workers.get(&id)) {
+                    let mut control =
+                        worker.restart.lock().unwrap_or_else(|error| error.into_inner());
+                    targeted = control.request();
                 }
+                if !targeted {
+                    alerts.push(&format!(
+                        "restart 対象の読みがありません: {}",
+                        entry.path().display()
+                    ));
+                }
+                std::fs::remove_file(entry.path())?;
             }
             let retired: Vec<_> = workers
                 .iter()
@@ -414,15 +525,30 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 let step = tree.advance(&cache);
                 match step {
                     Ok(missing) => {
+                        if let Some((key, _)) =
+                            missing.iter().find(|(key, _)| failures.contains_key(key))
+                        {
+                            tree.failed = true;
+                            remove_candidates(&tree.def.out)?;
+                            monitor(&tree.def.out.join("STATUS"), "FAIL\n");
+                            alerts.push(&format!(
+                                "木の失敗 {}: {}",
+                                tree.def.out.display(),
+                                failures[key]
+                            ));
+                            continue;
+                        }
                         if tree.finished {
-                            if let Err(error) = tree.write_outputs() {
-                                tree.failed = true;
-                                remove_candidates(&tree.def.out)?;
-                                write_atomic(&tree.def.out.join("STATUS"), "FAIL\n")?;
-                                alert(&args.state, &format!("出力失敗: {error:#}"))?;
+                            match tree.write_outputs() {
+                                Ok(ready) => tree.ready = ready,
+                                Err(error) => {
+                                    tree.failed = true;
+                                    remove_candidates(&tree.def.out)?;
+                                    monitor(&tree.def.out.join("STATUS"), "FAIL\n");
+                                    alerts.push(&format!("出力失敗: {error:#}"));
+                                }
                             }
                         } else {
-                            write_atomic(&tree.def.out.join("STATUS"), "RUNNING\n")?;
                             for (key, depth) in missing {
                                 if !running.contains(&key) {
                                     queued.entry(key.clone()).or_insert((
@@ -437,8 +563,8 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                     Err(e) => {
                         tree.failed = true;
                         remove_candidates(&tree.def.out)?;
-                        write_atomic(&tree.def.out.join("STATUS"), "FAIL\n")?;
-                        alert(&args.state, &format!("木の失敗 {}: {e:#}", tree.def.out.display()))?;
+                        monitor(&tree.def.out.join("STATUS"), "FAIL\n");
+                        alerts.push(&format!("木の失敗 {}: {e:#}", tree.def.out.display()));
                     }
                 }
             }
@@ -449,6 +575,11 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 let mut jobs = queue.into_iter();
                 for worker in workers.values_mut().filter(|w| w.busy.is_none()) {
                     if let Some((key, (_, _, ply))) = jobs.next() {
+                        *worker.restart.lock().unwrap_or_else(|error| error.into_inner()) =
+                            Restart {
+                                key: Some(key.clone()),
+                                requested: false,
+                            };
                         worker.busy = Some((key.clone(), Instant::now()));
                         worker.nodes = 0;
                         worker.depth = 0;
@@ -458,19 +589,39 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 }
             }
             let active = workers.values().filter(|w| w.busy.is_some()).count();
-            let status = if stopping && active == 0 {
+            let status = if desired == 0 && active == 0 {
                 "STOPPED"
             } else if active == 0 && queue_len == 0 {
                 "IDLE"
             } else {
                 "RUNNING"
             };
-            write_atomic(&args.state.join("STATUS"), &format!("{status}\n"))?;
+            monitor(&args.state.join("STATUS"), &format!("{status}\n"));
             let progress = json!({"status":status,"fingerprint":settings.fingerprint,"queued":queue_len,"workers":workers.iter().map(|(id,w)|json!({"id":id,"key":w.busy.as_ref().map(|(k,_)|k),"elapsed_secs":w.busy.as_ref().map(|(_,t)|t.elapsed().as_secs_f64()),"nodes":w.nodes,"depth":w.depth})).collect::<Vec<_>>(),"trees":trees.iter().enumerate().map(|(id,t)|json!({"id":id,"out":t.def.out,"round":t.round,"read":t.nodes.len(),"requested":t.level.len(),"queued":t.level.keys().filter(|k|!cache.contains_key(*k)&&!workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"running":t.level.keys().filter(|k|workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"finished":t.finished,"failed":t.failed})).collect::<Vec<_>>()});
-            write_atomic(
-                &args.state.join("progress.json"),
-                &serde_json::to_string_pretty(&progress)?,
-            )?;
+            monitor(&args.state.join("progress.json"), &serde_json::to_string_pretty(&progress)?);
+            for tree in &trees {
+                let tree_status = if tree.failed {
+                    "FAIL"
+                } else if tree.finished {
+                    if tree.ready { "DONE" } else { "NOT_READY" }
+                } else if desired == 0
+                    && !tree.level.keys().any(|key| {
+                        workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
+                    })
+                {
+                    "STOPPED"
+                } else if tree.nodes.is_empty()
+                    && !tree.level.keys().any(|key| {
+                        workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
+                    })
+                {
+                    "QUEUED"
+                } else {
+                    "RUNNING"
+                };
+                monitor(&tree.def.out.join("STATUS"), &format!("{tree_status}\n"));
+            }
+            alerts.flush();
             if stopping && active == 0 {
                 break;
             }
@@ -482,16 +633,61 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
         for tree in &trees {
             if !tree.finished {
                 remove_candidates(&tree.def.out)?;
-                write_atomic(&tree.def.out.join("STATUS"), "FAIL\n")?;
+                monitor(&tree.def.out.join("STATUS"), "FAIL\n");
             }
         }
     }
+    alerts.flush();
     for worker in workers.into_values() {
         let _ = worker.tx.send(None);
         if result.is_err() {
-            worker.restart.store(true, Ordering::SeqCst);
+            worker.restart.lock().unwrap_or_else(|error| error.into_inner()).requested = true;
         }
         let _ = worker.handle.join();
     }
     result
+}
+
+// 内容と metadata の両方で変更を捉え、同じ受付エラーの連続通知を避ける。
+fn file_stamp(path: &std::path::Path) -> String {
+    format!(
+        "{:?}:{:?}",
+        std::fs::symlink_metadata(path).map(|m| (m.modified().ok(), m.len())),
+        std::fs::read(path)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_job_clears_restart_before_done_is_received() {
+        let control = Arc::new(Mutex::new(Restart {
+            key: Some("first".into()),
+            requested: true,
+        }));
+        let (tx, rx) = mpsc::channel();
+        let worker_control = control.clone();
+        let thread = thread::spawn(move || {
+            let mut state = worker_control.lock().unwrap();
+            let explicit = state.finish();
+            drop(state);
+            tx.send(explicit).unwrap();
+        });
+        thread.join().unwrap();
+        {
+            let mut state = control.lock().unwrap();
+            assert!(state.key.is_none());
+            assert!(!state.request());
+            assert!(!state.requested);
+            // Done が未受信でも次の局面に再起動要求を持ち越さない。
+            *state = Restart {
+                key: Some("second".into()),
+                requested: false,
+            };
+        }
+        assert!(rx.recv().unwrap());
+        assert!(!control.lock().unwrap().requested);
+    }
 }

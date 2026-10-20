@@ -51,13 +51,35 @@ impl Tree {
         for (d, contents) in levels {
             write_atomic(&self.def.out.join(format!("d{d}.jsonl")), &contents)?;
         }
+        let mut report = String::new();
+        for key in &self.root_order {
+            let candidates = python_list(&self.candidates[key]);
+            if side(key) == self.def.own {
+                writeln!(
+                    report,
+                    "根 {key} 候補 {candidates} 比べる手 {}",
+                    self.compare[key].as_deref().unwrap_or("None")
+                )?;
+            } else {
+                writeln!(report, "根 (相手の手番) {key} 伸ばす手 {candidates}")?;
+            }
+        }
+        for (round, added) in &self.round_reports {
+            writeln!(report, "伸ばし直しの局面 {added} ({round} 回目)")?;
+        }
         if !pending.is_empty() {
-            write_atomic(&self.def.out.join("STATUS"), "NOT_READY\n")?;
+            writeln!(
+                report,
+                "未展開手が上回る局面 {}: 登録禁止。伸ばし直し回数を増やして再開する",
+                pending.len()
+            )?;
+            write_atomic(&self.def.out.join("report.txt"), &report)?;
+            super::service::monitor(&self.def.out.join("STATUS"), "NOT_READY\n");
             return Ok(false);
         }
         self.write_db("tree.db", &all, &self.edge)?;
         self.write_db("tree_rule.db", &rule_set, &self.rule)?;
-        backprop_file_with(
+        let min_result = backprop_file_with(
             &self.def.out.join("tree.db"),
             &self.def.out.join("tree_bp_min.db"),
             None,
@@ -65,9 +87,16 @@ impl Tree {
             200000,
             MergeMode::Min,
             BackpropOptions::default(),
-        )?;
-        let min = BookDb::read(&self.def.out.join("tree_bp_min.db"))?;
-        let mut report = String::new();
+        )
+        .and_then(|_| BookDb::read(&self.def.out.join("tree_bp_min.db")));
+        let min = match min_result {
+            Ok(min) => min,
+            Err(error) => {
+                eprintln!("book_backprop (min、参考) が失敗した: {error:#}");
+                writeln!(report, "book_backprop (min、参考) が失敗した: {error:#}")?;
+                BookDb::default()
+            }
+        };
         let root_side = side(self.roots.keys().next().context("根がありません")?);
         let sgn = if root_side == "b" { 1 } else { -1 };
         for key in self.roots.keys() {
@@ -116,6 +145,22 @@ impl Tree {
                     fm(d),
                     self.pv(&c, &replace)?
                 )?;
+            }
+            if root_side == self.def.own {
+                let best = cands.iter().filter_map(|m| values.get(m)).max();
+                let above: Vec<_> = self.nodes[key]
+                    .multipv
+                    .iter()
+                    .filter(|p| !cands.contains(&p.mv) && best.is_some_and(|v| p.cp > *v))
+                    .map(|p| p.mv.clone())
+                    .collect();
+                if !above.is_empty() {
+                    writeln!(
+                        report,
+                        "警告: 伸ばしていない手の読みの値が、候補の伝播後の 1 位を上回る (その手も伸ばしてから決める): {}",
+                        python_list(&above)
+                    )?;
+                }
             }
         }
         let game_children: Vec<_> = self
@@ -195,8 +240,8 @@ impl Tree {
             writeln!(own, "{}", row.join("\t"))?;
         }
         // 登録材料は全ての成果物が完成してから公開する。
-        write_atomic(&self.def.out.join("STATUS"), "DONE\n")?;
         write_atomic(&self.def.out.join("own_nodes.tsv"), &own)?;
+        super::service::monitor(&self.def.out.join("STATUS"), "DONE\n");
         Ok(true)
     }
 
@@ -244,4 +289,8 @@ impl Tree {
         }
         Ok(pv.join(" "))
     }
+}
+
+fn python_list(items: &[String]) -> String {
+    format!("[{}]", items.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(", "))
 }

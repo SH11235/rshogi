@@ -94,10 +94,11 @@ pub fn run(args: TreeArgs) -> Result<()> {
         }
         TreeCommand::Replay(args) => {
             let definition = Definition::load(&args.tree)?;
+            let output_lock = journal::LockedFile::open(&definition.out.join("tree.lock"))?;
+            let journal = Journal::open(&args.journal)?;
             model::remove_candidates(&definition.out)?;
             let out = definition.out.clone();
-            let result = (|| -> Result<()> {
-                let journal = Journal::open(&args.journal)?;
+            let result = (|| -> Result<bool> {
                 let settings = journal.select(args.fingerprint.as_deref())?;
                 let cache = journal.records_for(&settings.fingerprint);
                 let mut tree = Tree::load(definition, &settings)?;
@@ -110,14 +111,17 @@ pub fn run(args: TreeArgs) -> Result<()> {
                         anyhow::bail!("読みが足りない: {key} (不足 {} 局面)", missing.len());
                     }
                 }
-                tree.write_outputs()?;
-                Ok(())
+                tree.write_outputs()
             })();
             if result.is_err() {
                 model::remove_candidates(&out)?;
-                crate::common::io::write_atomic(&out.join("STATUS"), "FAIL\n")?;
+                service::monitor(&out.join("STATUS"), "FAIL\n");
             }
-            result
+            drop(output_lock);
+            if !result? {
+                anyhow::bail!("未展開手が上回る局面: 登録禁止。伸ばし直し回数を増やして再開する");
+            }
+            Ok(())
         }
     }
 }

@@ -269,14 +269,14 @@ paths.tsv はヘッダ無しで `key<TAB>ply<TAB>USIの手順<TAB>メモ`。key 
 
 ### 並列数・停止・監視
 
-- `<state>/workers` の整数を書き換えて並列数を変更します。既定16。減らすと余った worker は読みかけを台帳へ保存してから終了します。0は全 worker の drain で、serve は常駐を続けます。数を戻すと再開します。
+- `<state>/workers` の整数を書き換えて並列数を変更します。初回の既定16。既存の workers ファイルがあれば再起動時も `--workers` より優先します。不正な内容の通知は内容または mtime が変わるまで1回です。減らすと余った worker は読みかけを台帳へ保存してから終了します。0は全 worker の drain で、serve は常駐を続けます。数を戻すと再開します。
 - `<state>/stop` を作ると読みかけを保存して serve を終了します。再開前に stop を除き、同じコマンドを実行します。kill 後も、保存済みの読みから木の回を再構築します。台帳の改行の無い末尾だけは切り捨てます。
 - 木が全て完了しても `IDLE` で受付を続けます。
 - `--stall-secs` (既定600) の間 info の nodes / depth のどちらも増えなければ `ALERT` に書きます。`info string` や同じ値の繰り返しでは時計を戻しません。既定では探索を止めません。
-- 固まった worker を明示的に作り直すには `<state>/restart/<worker番号>` を作ります。その読みを列に戻します。エンジン切断も自動で作り直します。`--max-restarts` (既定3) を超える同一局面の失敗は serve を FAIL にします。
-- state の lock と journal 自体の lock を終了まで保持します。別 state でも同じ journal の同時使用はできません。`--journal` を省略すると `<state>/journal.jsonl` を使います。
+- 固まった worker を明示的に作り直すには `<state>/restart/<worker番号>` を作ります。受付時点でその worker が読んでいる局面を列に戻します。対象の読みが無い番号は ALERT して制御ファイルを消します。明示 restart は自動再起動の上限に数えません。エンジン切断は自動で作り直します。`--max-restarts` (既定3) を超える同一局面の失敗、または再現する読みの検査エラーでは、その局面を待つ木だけを FAIL にして ALERT し、他の木の処理を続けます。serve の MultiPV 行数は `min(指定数, 合法手数)` で検査し、合法手0は空の MultiPV と resign/win を保存する葉です。
+- state の lock と journal 自体の lock を終了まで保持します。別 state でも同じ journal の同時使用はできません。木の出力先にも tree.lock を保持し、別の serve や replay から保護します。`--journal` を省略すると `<state>/journal.jsonl` を使います。
 
-プロセスの `STATUS` は `RUNNING / IDLE / STOPPED / FAIL`。木の出力先の `STATUS` は `QUEUED / RUNNING / DONE / NOT_READY / FAIL` です。`progress.json` に木の回・読み済み数・要求数・列の長さと、worker の局面・経過秒・nodes / depth を記録します。`ALERT` は日時付きの追記です。
+プロセスの `STATUS` は `RUNNING / IDLE / STOPPED / FAIL`。木の出力先の `STATUS` は `QUEUED / RUNNING / STOPPED / DONE / NOT_READY / FAIL` です。プロセスの STOPPED は workers=0 または stop 指示で読みかけの保存が終わった状態で、待ち列が残っていても使います。木の QUEUED はまだ読み始めていない待機、RUNNING は読み始めた未完了の木、STOPPED は停止指示によりその木の実行中の読みが無くなった状態です。`progress.json` に木の回・読み済み数・要求数・列の長さと、worker の局面・経過秒・nodes / depth を記録します。`ALERT` は日時付きの追記です。受付ファイルの canonicalize・load の失敗は内容または mtime が変わるまで1回通知し、他のファイルの受付を続けます。STATUS・progress.json・ALERT の書き込み失敗は標準エラーへ報告して次の周期で再試行します。journal と成果物の書き込み失敗はエラーとして扱います。
 
 ### Python の読みの取り込みと再生
 
@@ -293,10 +293,10 @@ book_mine tree replay --journal /path/to/tree-journal.jsonl --tree /path/to/tree
 
 import では engine とファイル型 USI option の内容 SHA-256、全 option、明示 `SPSAParamsFile` が無い場合のバイナリ隣接 `spsa.params` の有無と内容、nodes、MultiPV、局面ごとの初期化・info 解析の版を条件の指紋にします。Python の記録は元の engine / 評価ファイルの digest を持たないため、**指定した条件の宣言による取り込み**です。出どころのパスと入力ファイルの SHA-256 も記録します。nodes_limit / threads / hash / draw / MultiPV 行数が宣言と違う行、不正な局面・手、同じ条件と局面で MultiPV の値や深さ・bestmove が異なる重複を拒否します。取り込み全体を検査してから追記します。
 
-replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足があればエラーです。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。
+replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足や ready:false は非0で終了します。出力先と journal の lock を取る前には既存の出力を変更しません。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。
 
 ### 出力と登録可否
 
-木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。TSV の列と JSONL は node_calib / 登録・評価値更新の後段と互換です。min はライブラリの `backprop_file_with` を呼び、主の値とは分けます。
+木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。TSV の列と JSONL は node_calib / 登録・評価値更新の後段と互換です。min はライブラリの `backprop_file_with` を呼びます。参考値の生成・読み込みに失敗した場合は報告し、min 欄を空値として他の成果物を完成させます。report.txt は Python の標準出力から段ごとの進み具合を除いた内容（根の候補、伸ばし直し、警告を含む）です。
 
-未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は新しい木の定義と出力先で再生してください。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開します。
+未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は新しい木の定義と出力先で再生してください。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。

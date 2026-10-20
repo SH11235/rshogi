@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -28,7 +26,54 @@ fn progress(state: &Path) -> Value {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Value::Null)
 }
+fn mock_engine() -> &'static Path {
+    static MOCK: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    MOCK.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let result = Command::new("rustc")
+            .arg("--edition=2024")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/book_tree_engine.rs"))
+            .arg("-o")
+            .arg(dir.path().join(format!("engine{}", std::env::consts::EXE_SUFFIX)))
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        dir
+    })
+    .path()
+}
+fn engine_path() -> std::path::PathBuf {
+    mock_engine().join(format!("engine{}", std::env::consts::EXE_SUFFIX))
+}
+fn prepare_config(config: &Path) -> std::path::PathBuf {
+    let data: Value = serde_json::from_slice(&std::fs::read(config).unwrap()).unwrap();
+    let mut text = String::new();
+    for (name, value) in data.as_object().unwrap() {
+        if name == "positions" {
+            for (key, rows) in value.as_object().unwrap() {
+                let rows: Vec<_> = rows
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| format!("{} {} {}", r["move"].as_str().unwrap(), r["cp"], r["depth"]))
+                    .collect();
+                text.push_str(&format!("{key}\t{}\n", rows.join("|")));
+            }
+        } else {
+            text.push_str(&format!(
+                "{name}\t{}\n",
+                value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string())
+            ));
+        }
+    }
+    let path = config.with_extension("tsv");
+    std::fs::write(&path, text).unwrap();
+    path
+}
 fn start(state: &Path, config: &Path) -> Server {
+    start_with_restarts(state, config, 3)
+}
+fn start_with_restarts(state: &Path, config: &Path, max_restarts: usize) -> Server {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -39,9 +84,9 @@ fn start(state: &Path, config: &Path) -> Server {
             .args(["tree", "serve", "--state"])
             .arg(state)
             .arg("--engine")
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/book_tree_engine.py"))
+            .arg(engine_path())
             .arg("--engine-option")
-            .arg(format!("FixtureFile={}", config.display()))
+            .arg(format!("FixtureFile={}", prepare_config(config).display()))
             .arg("--engine-option")
             .arg(format!("EvalFile={}", config.display()))
             .args([
@@ -56,6 +101,8 @@ fn start(state: &Path, config: &Path) -> Server {
                 "--stall-secs",
                 "1",
             ])
+            .arg("--max-restarts")
+            .arg(max_restarts.to_string())
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .spawn()
@@ -221,11 +268,270 @@ fn repeated_engine_exits_hit_restart_limit_and_leave_no_candidates() {
     std::fs::create_dir(state.join("a")).unwrap();
     std::fs::write(state.join("a/own_nodes.tsv"), "stale").unwrap();
     let mut server = start(state, &config);
-    wait_for(|| server.0.try_wait().unwrap().is_some());
-    assert!(!server.0.wait().unwrap().success());
-    assert_eq!(std::fs::read_to_string(state.join("STATUS")).unwrap(), "FAIL\n");
+    wait_for(|| std::fs::read_to_string(state.join("a/STATUS")).is_ok_and(|s| s == "FAIL\n"));
+    assert!(server.0.try_wait().unwrap().is_none());
     assert!(!state.join("a/own_nodes.tsv").exists());
     let alerts = std::fs::read_to_string(state.join("ALERT")).unwrap();
     assert!(alerts.contains("再起動上限"));
     assert_eq!(alerts.lines().filter(|l| l.contains("RESTART worker")).count(), 4);
+}
+
+fn fast_fixture(state: &Path) -> std::path::PathBuf {
+    let path = fixture(state);
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    data.as_object_mut().unwrap().remove("crash_once");
+    data["delay"] = json!(0.05);
+    data["stagnant"] = json!(false);
+    std::fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
+    path
+}
+fn status(path: &Path) -> String {
+    std::fs::read_to_string(path.join("STATUS")).unwrap_or_default()
+}
+fn stop(state: &Path, server: &mut Server) {
+    std::fs::write(state.join("stop"), "").unwrap();
+    wait_for(|| server.0.try_wait().unwrap().is_some());
+    assert!(server.0.wait().unwrap().success());
+}
+fn alerts(state: &Path) -> String {
+    std::fs::read_to_string(state.join("ALERT")).unwrap_or_default()
+}
+fn add_root(state: &Path, name: &str, key: &str) {
+    std::fs::write(state.join(format!("{name}.paths.tsv")), format!("{key}\t1\t\troot\n")).unwrap();
+    std::fs::write(state.join("inbox").join(format!("{name}.toml")), format!(
+        "paths='../{name}.paths.tsv'\nout='../{name}'\ndepth=0\nopp_n=2\nstop=300\nown='w'\nrounds=0\n")).unwrap();
+}
+
+#[test]
+fn sparse_and_terminal_positions_finish_and_failed_position_is_isolated() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    std::fs::create_dir(state.join("inbox")).unwrap();
+    let config = fast_fixture(state);
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    let short = "k8/9/RP7/9/9/9/9/9/8K w -";
+    let two = "k8/9/R8/9/9/9/9/9/8K w -";
+    let terminal = "k8/1G7/RP7/9/9/9/9/9/8K w -";
+    let broken = "k8/9/9/9/9/9/9/9/8K w -";
+    let crash = "k8/9/9/9/9/9/9/9/8K b -";
+    data["positions"][two] =
+        json!([{"move":"9a8a","cp":500,"depth":8},{"move":"9a8b","cp":400,"depth":8}]);
+    data["positions"][short] = json!([{"move":"9a8a","cp":500,"depth":8}]);
+    data["positions"][terminal] = json!([]);
+    data["positions"][broken] = json!([{"move":"9a8a","cp":0,"depth":8}]);
+    data["crash_key"] = json!(crash);
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+    for (name, key) in [
+        ("short", short),
+        ("two", two),
+        ("terminal", terminal),
+        ("broken", broken),
+        ("crash", crash),
+    ] {
+        add_root(state, name, key);
+    }
+    add_tree(state, "good");
+    let mut server = start(state, &config);
+    wait_for(|| {
+        status(&state.join("good")) == "DONE\n"
+            && status(&state.join("short")) == "DONE\n"
+            && status(&state.join("two")) == "DONE\n"
+            && status(&state.join("terminal")) == "DONE\n"
+            && status(&state.join("broken")) == "FAIL\n"
+            && status(&state.join("crash")) == "FAIL\n"
+    });
+    assert!(server.0.try_wait().unwrap().is_none());
+    let journal = std::fs::read_to_string(state.join("journal.jsonl")).unwrap();
+    let rows: Vec<Value> = journal.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let terminal_row = rows.iter().find(|r| r["reading"]["key"] == terminal).unwrap();
+    assert_eq!(terminal_row["reading"]["multipv"], json!([]));
+    assert_eq!(terminal_row["reading"]["bestmove"], "resign");
+    let protocol = std::fs::read_to_string(state.join("protocol.jsonl")).unwrap();
+    assert_eq!(
+        protocol
+            .lines()
+            .filter(|l| l.contains(&format!("position sfen {broken} ")))
+            .count(),
+        1
+    );
+    stop(state, &mut server);
+}
+
+#[test]
+fn inbox_errors_and_invalid_workers_are_reported_once_until_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    std::fs::create_dir(state.join("inbox")).unwrap();
+    let config = fast_fixture(state);
+    std::fs::write(state.join("workers"), "invalid").unwrap();
+    std::fs::write(state.join("inbox/bad.toml"), "invalid").unwrap();
+    std::fs::write(state.join("inbox/temporary.tmp"), "").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("absent", state.join("inbox/.#x.toml")).unwrap();
+    let mut server = start(state, &config);
+    wait_for(|| alerts(state).contains("workers が不正") && alerts(state).contains("bad.toml"));
+    let before = alerts(state);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(alerts(state), before);
+    std::fs::write(state.join("inbox/bad.toml"), "different invalid").unwrap();
+    wait_for(|| alerts(state).lines().filter(|l| l.contains("bad.toml")).count() == 2);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(state.join("inbox/bad.toml"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(1))
+        .unwrap();
+    wait_for(|| alerts(state).lines().filter(|l| l.contains("bad.toml")).count() == 3);
+    add_tree(state, "good");
+    std::fs::write(state.join("workers"), "2").unwrap();
+    wait_for(|| status(&state.join("good")) == "DONE\n");
+    assert!(server.0.try_wait().unwrap().is_none());
+    stop(state, &mut server);
+}
+
+#[test]
+fn monitoring_io_failures_recover_and_zero_workers_and_stop_publish_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    std::fs::create_dir(state.join("inbox")).unwrap();
+    for name in ["STATUS", "progress.json", "ALERT"] {
+        std::fs::create_dir(state.join(name)).unwrap();
+    }
+    std::fs::write(state.join("workers"), "0").unwrap();
+    let config = fast_fixture(state);
+    add_tree(state, "a");
+    std::fs::create_dir(state.join("a")).unwrap();
+    std::fs::create_dir(state.join("a/STATUS")).unwrap();
+    std::fs::write(state.join("inbox/bad.toml"), "invalid").unwrap();
+    let mut server = start(state, &config);
+    wait_for(|| state.join("accepted.json").exists());
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(server.0.try_wait().unwrap().is_none());
+    for name in ["STATUS", "progress.json", "ALERT", "a/STATUS"] {
+        std::fs::remove_dir(state.join(name)).unwrap();
+    }
+    wait_for(|| progress(state)["status"] == "STOPPED" && status(&state.join("a")) == "STOPPED\n");
+    assert!(progress(state)["queued"].as_u64().unwrap() > 0);
+    std::fs::write(state.join("workers"), "1").unwrap();
+    wait_for(|| status(&state.join("a")) == "DONE\n");
+    assert!(state.join("a/own_nodes.tsv").exists());
+    wait_for(|| alerts(state).contains("bad.toml"));
+    std::fs::create_dir(state.join("c")).unwrap();
+    std::fs::create_dir(state.join("c/STATUS")).unwrap();
+    add_tree(state, "c");
+    wait_for(|| state.join("c/own_nodes.tsv").exists());
+    assert!(server.0.try_wait().unwrap().is_none());
+    std::fs::remove_dir(state.join("c/STATUS")).unwrap();
+    wait_for(|| status(&state.join("c")) == "DONE\n");
+    stop(state, &mut server);
+}
+
+#[test]
+fn replay_rejects_active_output_even_with_a_different_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    std::fs::create_dir(state.join("inbox")).unwrap();
+    let config = fast_fixture(state);
+    add_tree(state, "a");
+    let mut server = start(state, &config);
+    wait_for(|| status(&state.join("a")) == "DONE\n");
+    let own = std::fs::read(state.join("a/own_nodes.tsv")).unwrap();
+    for journal in [state.join("journal.jsonl"), state.join("another-journal")] {
+        let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+            .args(["tree", "replay", "--journal"])
+            .arg(journal)
+            .arg("--tree")
+            .arg(state.join("inbox/a.toml"))
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+    }
+    assert_eq!(status(&state.join("a")), "DONE\n");
+    assert_eq!(std::fs::read(state.join("a/own_nodes.tsv")).unwrap(), own);
+    stop(state, &mut server);
+}
+
+#[test]
+fn explicit_restarts_do_not_exhaust_automatic_limit_and_unused_requests_are_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    std::fs::create_dir(state.join("inbox")).unwrap();
+    std::fs::write(state.join("workers"), "1").unwrap();
+    let config = fast_fixture(state);
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    data["delay"] = json!(0.8);
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+    add_tree(state, "a");
+    let mut server = start_with_restarts(state, &config, 0);
+    for attempt in 0..5 {
+        wait_for(|| {
+            std::fs::read_to_string(state.join("protocol.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains(&format!("position sfen {ROOT} ")))
+                .count()
+                > attempt
+        });
+        std::fs::write(state.join("restart/0"), "").unwrap();
+        wait_for(|| alerts(state).lines().filter(|l| l.contains("制御ファイル")).count() > attempt);
+    }
+    wait_for(|| status(&state.join("a")) == "DONE\n");
+    std::fs::write(state.join("restart/0"), "").unwrap();
+    std::fs::write(state.join("restart/7"), "").unwrap();
+    wait_for(|| !state.join("restart/0").exists() && !state.join("restart/7").exists());
+    assert!(alerts(state).contains("restart 対象の読みがありません"));
+    std::fs::write(state.join("workers"), "8").unwrap();
+    wait_for(|| progress(state)["workers"].as_array().is_some_and(|w| w.len() == 8));
+    add_tree(state, "b");
+    wait_for(|| status(&state.join("b")) == "DONE\n");
+    assert!(!alerts(state).contains("再起動上限"));
+    stop(state, &mut server);
+}
+
+#[test]
+fn untouched_tree_stays_queued_and_stop_marks_unfinished_trees_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    std::fs::create_dir(state.join("inbox")).unwrap();
+    std::fs::write(state.join("workers"), "1").unwrap();
+    let config = fast_fixture(state);
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    data["delay"] = json!(0.6);
+    let other = "k8/9/9/9/9/9/9/9/8K w -";
+    data["positions"][other] = json!([{"move":"9a8a","cp":500,"depth":8},{"move":"9a9b","cp":400,"depth":8},{"move":"9a8b","cp":300,"depth":8}]);
+    std::fs::write(&config, serde_json::to_vec(&data).unwrap()).unwrap();
+    add_tree(state, "a");
+    add_root(state, "b", other);
+    let mut server = start(state, &config);
+    wait_for(|| status(&state.join("a")) == "RUNNING\n" && status(&state.join("b")) == "QUEUED\n");
+    stop(state, &mut server);
+    assert_eq!(status(state), "STOPPED\n");
+    assert_eq!(status(&state.join("a")), "STOPPED\n");
+    assert_eq!(status(&state.join("b")), "STOPPED\n");
+}
+
+#[test]
+fn replay_not_ready_has_nonzero_exit_and_preserves_not_ready_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    std::fs::create_dir(state.join("inbox")).unwrap();
+    let config = fast_fixture(state);
+    add_tree(state, "a");
+    let tree = state.join("inbox/a.toml");
+    let text = std::fs::read_to_string(&tree).unwrap().replace("extra=['5i5h']\n", "");
+    std::fs::write(&tree, text).unwrap();
+    let mut server = start(state, &config);
+    wait_for(|| status(&state.join("a")) == "NOT_READY\n");
+    stop(state, &mut server);
+    let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+        .args(["tree", "replay", "--journal"])
+        .arg(state.join("journal.jsonl"))
+        .arg("--tree")
+        .arg(tree)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("登録禁止"));
+    assert_eq!(status(&state.join("a")), "NOT_READY\n");
+    assert!(!state.join("a/own_nodes.tsv").exists());
 }
