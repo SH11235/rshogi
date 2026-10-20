@@ -410,6 +410,12 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                     }
                     let loaded = (|| -> Result<Option<LoadedTree>> {
                         super::paths::reject_symlink(&original)?;
+                        if !std::fs::symlink_metadata(&original)?.file_type().is_file() {
+                            bail!(
+                                "受付の定義は通常のファイルにしてください: {}",
+                                original.display()
+                            );
+                        }
                         let path = std::fs::canonicalize(&original)?;
                         if accepted.iter().any(|a| a.path == path) {
                             return Ok(None);
@@ -674,12 +680,15 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
 }
 
 // 内容と metadata の両方で変更を捉え、同じ受付エラーの連続通知を避ける。
+// 通常のファイル以外 (リンク・FIFO など) は開かない。書き手のいない FIFO を読むと受付が止まる。
 fn file_stamp(path: &std::path::Path) -> String {
-    format!(
-        "{:?}:{:?}",
-        std::fs::symlink_metadata(path).map(|m| (m.modified().ok(), m.len())),
-        std::fs::read(path)
-    )
+    let metadata = std::fs::symlink_metadata(path);
+    let content = match &metadata {
+        Ok(m) if m.file_type().is_file() => format!("{:?}", std::fs::read(path)),
+        Ok(m) if m.file_type().is_symlink() => format!("{:?}", std::fs::read_link(path)),
+        _ => String::new(),
+    };
+    format!("{:?}:{content}", metadata.map(|m| (m.modified().ok(), m.len())))
 }
 
 #[cfg(test)]

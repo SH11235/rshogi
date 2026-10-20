@@ -221,7 +221,7 @@ fn bfs(tree: &mut Tree, cache: &BTreeMap<String, Reading>) {
 fn asynchronous_closure_matches_bfs_across_rounds_and_completion_orders() {
     let settings = settings();
     let cache = corpus(&settings);
-    let references: Vec<_> = (0..=2)
+    let references: Vec<_> = (0..=3)
         .map(|rounds| {
             let dir = tempfile::tempdir().unwrap();
             let mut tree = Tree::load(definition(dir.path(), rounds), &settings).unwrap();

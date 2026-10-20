@@ -739,8 +739,24 @@ fn inbox_symlinks_are_alerted_without_stopping_serve() {
     std::os::unix::fs::symlink(&source, state.join("inbox/link.toml")).unwrap();
     std::os::unix::fs::symlink(dir.path().join("missing"), state.join("inbox/broken.toml"))
         .unwrap();
+    // 書き手のいない FIFO を開くと受付が止まるので、リンク先・直置きとも開かずに拒否する。
+    let fifo = dir.path().join("fifo");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    std::os::unix::fs::symlink(&fifo, state.join("inbox/fifo_link.toml")).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(state.join("inbox/fifo.toml"))
+            .status()
+            .unwrap()
+            .success()
+    );
     let mut server = start(state, &config);
-    wait_for(|| alerts(state).contains("link.toml") && alerts(state).contains("broken.toml"));
+    wait_for(|| {
+        let alerts = alerts(state);
+        ["link.toml", "broken.toml", "fifo_link.toml", "fifo.toml"]
+            .iter()
+            .all(|name| alerts.contains(name))
+    });
     wait_for(|| status(&dir.path().join("valid")) == "DONE\n");
     assert!(server.0.try_wait().unwrap().is_none());
     let accepted: Value =
