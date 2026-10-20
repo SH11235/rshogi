@@ -7,10 +7,11 @@
 //! 受け方は合法手 (合駒・不成を含む) をすべて考える。打ち歩詰めの歩打ちは攻め方の手にならない。
 //! 探索中に同じ局面へ戻る手順は (連続王手の千日手を含め) 攻め方の失敗として扱う。
 //!
-//! 結果は 3 値で、打ち切り (時間・ノード数・停止) は必ず [`MateResult::Unknown`] になり、
-//! 不詰と混ざらない。探索深さの上限 (2048 手) を超える手順を読み切れずに不詰と言えないときも
-//! Unknown を返す。詰みの手順は最短とは限らない。局面の同一性は 64bit のハッシュキーで
-//! 判定するので、衝突による誤りの可能性は確率的にのみ排除される。
+//! 打ち切り (時間・ノード数・停止) は必ず [`MateResult::Unknown`] になり、不詰と混ざらない。
+//! 探索深さの上限 (2048 手) を超える手順を読み切れずに不詰と言えないとき、詰みを証明したが
+//! 手順を復元できなかったときも Unknown を返す。詰みの手順は最短とは限らない。
+//! 局面の同一性は 64bit のハッシュキーで判定するので、衝突による誤りの可能性は確率的にのみ排除される。
+//! 玉の無い局面 (攻め方の玉が無い詰将棋など) は扱わない ([`MateResult::Unsupported`])。
 
 mod pv;
 mod search;
@@ -22,13 +23,13 @@ mod tests;
 
 use std::sync::atomic::AtomicBool;
 
-use search::{Budget, NO_LEN_LIMIT, NodeArgs, Searcher};
+use search::{Budget, NO_LEN_LIMIT, NodeArgs, Scratch, Searcher};
 use table::MateTable;
 
 use crate::movegen::{MoveList, generate_legal_all};
 use crate::position::Position;
 use crate::time::Instant;
-use crate::types::Move;
+use crate::types::{Color, Move, PieceType};
 
 /// 詰み探索の結果
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,8 +38,10 @@ pub enum MateResult {
     Mate(Vec<Move>),
     /// 不詰 (攻め方が王手を続けて詰ませる手順は無い)
     NoMate,
-    /// 打ち切り (時間・ノード数・停止) か、探索深さの上限で判定できなかった
+    /// 判定できなかった (時間・ノード数・停止による打ち切り、探索深さの上限、手順の復元失敗)
     Unknown,
+    /// 扱えない局面 (どちらかの玉が無い)
+    Unsupported,
 }
 
 /// 探索の制限。0 は無制限。
@@ -62,6 +65,7 @@ pub struct MateProgress {
 /// 置換表を持ち回る df-pn ソルバー
 pub struct DfpnSolver {
     table: MateTable,
+    scratch: Scratch<Move>,
     nodes: u64,
 }
 
@@ -70,6 +74,7 @@ impl DfpnSolver {
     pub fn new(hash_mb: usize) -> Self {
         Self {
             table: MateTable::new(hash_mb),
+            scratch: Scratch::new(),
             nodes: 0,
         }
     }
@@ -81,7 +86,7 @@ impl DfpnSolver {
 
     /// 局面 `pos` の手番側が詰ませられるかを判定する。
     ///
-    /// `stop` が立つか制限に達すると [`MateResult::Unknown`] を返す。
+    /// `stop` が立つか制限に達すると [`MateResult::Unknown`] を返す (呼び出し時に立っていても同じ)。
     /// 約 1 秒ごとに `progress` を呼ぶ。`pos` は呼び出し前の局面に戻して返る。
     pub fn solve(
         &mut self,
@@ -90,6 +95,14 @@ impl DfpnSolver {
         stop: &AtomicBool,
         mut progress: impl FnMut(MateProgress),
     ) -> MateResult {
+        self.nodes = 0;
+        // 玉が無い側の玉の位置は既定値のままで、王手の判定が意味をなさない
+        if [Color::Black, Color::White]
+            .iter()
+            .any(|&c| pos.pieces(c, PieceType::King).is_empty())
+        {
+            return MateResult::Unsupported;
+        }
         self.table.clear();
         let budget = Budget {
             stop,
@@ -98,7 +111,7 @@ impl DfpnSolver {
             start: Instant::now(),
             progress: &mut progress,
         };
-        let mut searcher = Searcher::new(&mut self.table, budget);
+        let mut searcher = Searcher::new(&mut self.table, &mut self.scratch, budget);
         let result = solve_with(&mut searcher, pos);
         self.nodes = searcher.nodes();
         match result {

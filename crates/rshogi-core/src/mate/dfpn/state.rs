@@ -47,16 +47,16 @@ impl MateState for Position {
     fn generate(&self, or_node: bool, out: &mut Vec<Move>) {
         let mut buffer = ExtMoveBuffer::new();
         // 不成でしか詰まない・不成でしか逃れられない局面があるので、どちらも *All で生成する。
-        let gen_type = if or_node && !self.in_check() {
-            GenType::ChecksAll
-        } else {
-            GenType::EvasionsAll
+        let gen_type = match (or_node, self.in_check()) {
+            (true, false) => GenType::ChecksAll,
+            (_, true) => GenType::EvasionsAll,
+            (false, false) => {
+                // 受け方の手番は直前の王手で必ず王手されている。崩れていても応手を空にして
+                // 「詰み」と誤らないよう、合法手をすべて返す。
+                debug_assert!(false, "AND ノードで王手されていない: {}", self.to_sfen());
+                GenType::LegalAll
+            }
         };
-        if gen_type == GenType::EvasionsAll && !self.in_check() {
-            // 受け方の手番は直前の王手で必ず王手されている
-            debug_assert!(false, "AND ノードで王手されていない: {}", self.to_sfen());
-            return;
-        }
         generate_with_type(self, gen_type, &mut buffer, None);
         for ext in buffer.iter() {
             let mv = ext.mv;

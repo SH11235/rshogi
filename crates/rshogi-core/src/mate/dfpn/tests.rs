@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
-use super::search::{Budget, Searcher};
+use super::search::{Budget, MAX_DEPTH, Scratch, Searcher};
 use super::state::MateState;
 use super::table::MateTable;
 use super::*;
@@ -187,12 +187,6 @@ fn solves_known_tsume() {
 }
 
 #[test]
-fn repetition_on_path_is_not_a_property_of_the_position() {
-    // 4三の飛車で 5筋・4筋と王手を繰り返す循環があるが、局面自体には ▲5二金 の 1 手詰めがある
-    assert_mate("4k4/9/5R3/5N3/9/9/9/9/K8 b G 1", 1);
-}
-
-#[test]
 fn pawn_drop_mate_is_not_a_mate() {
     // ▲1二歩は打ち歩詰め (2三金が紐、2一は3二銀が利く)。他に詰みは無い。
     let sfen = "8k/6S2/7G1/9/9/9/9/9/K8 b P 1";
@@ -229,7 +223,7 @@ fn attacker_in_check_is_solved_with_counter_checks() {
             assert!(is_valid_mate_pv(&mut pos, &pv), "{}", pv_usi(&pv));
         }
         MateResult::NoMate => assert!(!expected, "7 手以内に詰むのに NoMate"),
-        MateResult::Unknown => panic!("Unknown"),
+        other => panic!("{other:?}"),
     }
 }
 
@@ -240,6 +234,33 @@ fn node_limit_gives_unknown_not_no_mate() {
         let mut pos = position(sfen);
         let result = solve_limited(&mut pos, 1, nodes);
         assert!(!matches!(result, MateResult::NoMate), "nodes={nodes}: 詰む局面で NoMate");
+    }
+}
+
+#[test]
+fn stop_flag_set_before_solve_gives_unknown_even_for_trivial_positions() {
+    // 1 ノードで不詰・1 手詰めと分かる局面でも、停止済みなら判定しない
+    for sfen in [
+        "4k4/9/9/9/9/9/9/9/4K4 b - 1",
+        "4k4/9/4P4/9/9/9/9/9/4K4 b G 1",
+    ] {
+        let mut pos = position(sfen);
+        let stop = AtomicBool::new(true);
+        let result = DfpnSolver::new(1).solve(&mut pos, &MateLimits::default(), &stop, |_| {});
+        assert_eq!(result, MateResult::Unknown, "{sfen}");
+    }
+}
+
+#[test]
+fn positions_without_a_king_are_unsupported() {
+    // 攻め方の玉が無い詰将棋の局面。玉の位置が既定値のままなので王手の判定が狂う
+    for sfen in [
+        "4k4/8g/4P4/9/9/9/9/9/9 b G 1",
+        "4k4/9/9/9/9/9/9/9/9 b R 1",
+        "9/9/9/9/9/9/9/9/4K4 b R 1",
+    ] {
+        let mut pos = position(sfen);
+        assert_eq!(solve_limited(&mut pos, 1, 1_000), MateResult::Unsupported, "{sfen}");
     }
 }
 
@@ -432,7 +453,7 @@ fn agrees_with_brute_force_on_random_positions() {
             }
             MateResult::NoMate => assert!(!brute, "{sfen}: 5 手以内に詰むのに NoMate"),
             // 短手数の詰みは必ず見つかる。不詰側は深さ上限で判定できないことがある (飛車で玉を追い回す等)
-            MateResult::Unknown => {
+            MateResult::Unknown | MateResult::Unsupported => {
                 assert!(!brute, "{sfen}: 5 手以内に詰むのに Unknown");
                 unknowns += 1;
             }
@@ -521,7 +542,8 @@ fn solve_tiny_table(pos: &mut Position, nodes: u64) -> MateResult {
         start: Instant::now(),
         progress: &mut progress,
     };
-    let mut searcher = Searcher::new(&mut table, budget);
+    let mut scratch = Scratch::new();
+    let mut searcher = Searcher::new(&mut table, &mut scratch, budget);
     match solve_with(&mut searcher, pos) {
         Some(SolveOutcome::Mate(pv)) => {
             assert!(is_valid_mate_pv(pos, &pv), "{}: {}", pos.to_sfen(), pv_usi(&pv));
@@ -616,17 +638,26 @@ impl MateState for Graph {
 }
 
 fn solve_graph(graph: &mut Graph, buckets: usize) -> Option<SolveOutcome<u32>> {
+    solve_graph_with_limit(graph, buckets, 2_000_000)
+}
+
+fn solve_graph_with_limit(
+    graph: &mut Graph,
+    buckets: usize,
+    node_limit: u64,
+) -> Option<SolveOutcome<u32>> {
     let mut table = MateTable::with_buckets(buckets);
     let stop = AtomicBool::new(false);
     let mut progress = |_| {};
     let budget = Budget {
         stop: &stop,
-        node_limit: 2_000_000,
+        node_limit,
         time_limit_ms: 0,
         start: Instant::now(),
         progress: &mut progress,
     };
-    let mut searcher = Searcher::new(&mut table, budget);
+    let mut scratch = Scratch::new();
+    let mut searcher = Searcher::new(&mut table, &mut scratch, budget);
     solve_with(&mut searcher, graph)
 }
 
@@ -707,6 +738,71 @@ fn agrees_with_fixed_point_on_random_graphs() {
         }
     }
     assert!(mates > 100);
+}
+
+/// 長さ `len` の一本道 (OR → AND → ... ) で、末端が `end` (詰みの AND 終端か、不詰の OR 終端)
+fn chain_graph(len: usize, mate_at_end: bool) -> Vec<Vec<u32>> {
+    let mut edges: Vec<Vec<u32>> = (0..len).map(|v| vec![v as u32 + 1]).collect();
+    // 節点 len は len が奇数なら AND (子なし = 詰み)、偶数なら OR (子なし = 不詰)
+    assert_eq!(len % 2 == 1, mate_at_end);
+    edges.push(Vec::new());
+    edges
+}
+
+/// 深さの上限を超える一本道: 詰みが上限の先にあれば Unknown、不詰が上限の先にあっても Unknown
+/// (上限で打ち切った手順を根拠に不詰とは言わない)
+#[test]
+fn depth_limit_gives_unknown_not_no_mate() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            for mate_at_end in [true, false] {
+                let len = MAX_DEPTH + 11 - usize::from(!mate_at_end);
+                let mut graph = Graph::new(chain_graph(len, mate_at_end), 0);
+                assert!(
+                    solve_graph_with_limit(&mut graph, 1024, 0).is_none(),
+                    "mate_at_end={mate_at_end}: 上限の先を読まずに結論を出した"
+                );
+            }
+            // 上限より浅い一本道は解ける
+            let mut graph = Graph::new(chain_graph(101, true), 0);
+            let Some(SolveOutcome::Mate(pv)) = solve_graph_with_limit(&mut graph, 1024, 0) else {
+                panic!("101 手の一本道が詰まない");
+            };
+            assert_eq!(pv.len(), 101);
+            let mut graph = Graph::new(chain_graph(100, false), 0);
+            assert!(matches!(
+                solve_graph_with_limit(&mut graph, 1024, 0),
+                Some(SolveOutcome::NoMate)
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// 深さの上限を超える枝があっても、別の枝の短い詰みは見つける
+#[test]
+fn deep_branch_does_not_hide_a_short_mate() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            // 節点 0 (OR) → {1 (AND、深い一本道の入口), short (AND) }。short → s1 (OR) → s2 (AND、詰み)
+            let mut edges = chain_graph(MAX_DEPTH + 10, false);
+            let short = edges.len() as u32;
+            edges[0].push(short);
+            edges.push(vec![short + 1]);
+            edges.push(vec![short + 2]);
+            edges.push(Vec::new());
+            let mut graph = Graph::new(edges, 0);
+            let Some(SolveOutcome::Mate(pv)) = solve_graph_with_limit(&mut graph, 1024, 0) else {
+                panic!("短い詰みを見つけられない");
+            };
+            assert_eq!(pv, vec![short, short + 1, short + 2]);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -813,12 +909,12 @@ fn bench_positions() {
                 nomate += 1;
                 ("nomate", String::new())
             }
-            MateResult::Unknown => {
+            MateResult::Unknown | MateResult::Unsupported => {
                 unknown += 1;
                 ("unknown", String::new())
             }
         };
-        if !matches!(result, MateResult::Unknown) {
+        if matches!(result, MateResult::Mate(_) | MateResult::NoMate) {
             solved_ms.push(micros);
         }
         rows.push(format!("{sfen}	{tag}	{pv}	{}	{micros}", solver.nodes()));

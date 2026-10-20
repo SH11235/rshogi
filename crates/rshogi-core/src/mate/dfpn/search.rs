@@ -28,6 +28,9 @@ pub(super) const MAX_DEPTH: usize = 2048;
 
 /// 停止フラグ・時間を確かめるノード間隔
 const CHECK_INTERVAL: u64 = 1024;
+/// 子の配列 (全フレーム分を 1 本に積む) にあらかじめ確保しておく要素数。
+/// 経路上の各局面の候補手の合計で、超えたときだけ伸ばす (伸ばした領域はソルバーが持ち回る)。
+const CHILDREN_RESERVE: usize = 1 << 16;
 /// 進捗を知らせる間隔 (ミリ秒)
 const PROGRESS_INTERVAL_MS: u64 = 1000;
 
@@ -149,18 +152,39 @@ pub(super) struct Budget<'a> {
     pub progress: &'a mut dyn FnMut(MateProgress),
 }
 
+/// 探索の作業領域。ソルバーが solve をまたいで持ち回り、探索中に確保し直さない。
+pub(super) struct Scratch<M> {
+    /// ルートから現局面までの局面のキー (添字が深さ)
+    path: Vec<u64>,
+    /// 経路上の各局面の子を、浅い順に 1 本に積んだもの。各フレームの子は末尾にある
+    /// (深いフレームは戻るときに自分の子を取り除く)。
+    children: Vec<Child<M>>,
+    moves: Vec<M>,
+    /// `capture_proven` で指定した深さのフレームが終わったときの、証明済みの子
+    proven: Vec<(M, u16)>,
+}
+
+impl<M> Scratch<M> {
+    pub fn new() -> Self {
+        Self {
+            path: Vec::with_capacity(MAX_DEPTH),
+            children: Vec::with_capacity(CHILDREN_RESERVE),
+            moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
+            proven: Vec::with_capacity(crate::movegen::MAX_MOVES),
+        }
+    }
+}
+
 /// 1 回の solve の探索状態
 pub(super) struct Searcher<'a, S: MateState> {
     table: &'a mut MateTable,
+    scratch: &'a mut Scratch<S::Mv>,
     nodes: u64,
     next_check: u64,
     next_progress_ms: u64,
     budget: Budget<'a>,
-    /// ルートから現局面までの局面のキー (添字が深さ)
-    path: Vec<u64>,
-    /// 深さごとの子の配列。確保済みの領域を使い回す。
-    children: Vec<Vec<Child<S::Mv>>>,
-    moves: Vec<S::Mv>,
+    /// この深さのフレームが終わるとき、証明済みの子を `scratch.proven` に写す (PV 復元用)
+    capture_depth: Option<usize>,
 }
 
 #[inline]
@@ -179,16 +203,22 @@ fn clamp_sum(sum: u64, has_inf: bool) -> u32 {
 }
 
 impl<'a, S: MateState> Searcher<'a, S> {
-    pub fn new(table: &'a mut MateTable, budget: Budget<'a>) -> Self {
+    pub fn new(
+        table: &'a mut MateTable,
+        scratch: &'a mut Scratch<S::Mv>,
+        budget: Budget<'a>,
+    ) -> Self {
+        scratch.path.clear();
+        scratch.children.clear();
         Self {
             table,
+            scratch,
             nodes: 0,
-            next_check: CHECK_INTERVAL,
+            // 最初のノードで停止フラグを確かめる (開始前に立っていたら何も返さない)
+            next_check: 0,
             next_progress_ms: PROGRESS_INTERVAL_MS,
             budget,
-            path: Vec::with_capacity(MAX_DEPTH),
-            children: Vec::new(),
-            moves: Vec::with_capacity(crate::movegen::MAX_MOVES),
+            capture_depth: None,
         }
     }
 
@@ -199,35 +229,34 @@ impl<'a, S: MateState> Searcher<'a, S> {
 
     /// 経路上の局面の数 (= 次に探索する局面の深さ)
     pub fn path_len(&self) -> usize {
-        self.path.len()
+        self.scratch.path.len()
     }
 
     /// 現在の局面を探索経路に積む (PV 復元で、探索を経ずに局面を進めるときに使う)
     pub fn push_path(&mut self, st: &S) {
-        self.path.push(st.key());
+        self.scratch.path.push(st.key());
     }
 
     /// `push_path` で積んだ局面を降ろす
     pub fn pop_path(&mut self) {
-        self.path.pop();
+        self.scratch.path.pop();
     }
 
     /// 局面が探索経路上の局面の反復なら、その祖先の深さ
     fn repetition_depth(&self, key: u64) -> Option<usize> {
-        self.path.iter().rposition(|&k| k == key)
+        self.scratch.path.iter().rposition(|&k| k == key)
     }
 
-    /// 直前に深さ `depth` で展開した子のうち、詰みが証明済みのもの (指し手, 詰み手数)。
-    ///
-    /// 深さ `depth` の `search` が展開を終えて戻った直後にだけ意味がある
-    /// (1 手詰めの近道で戻った場合は展開していない)。
-    pub fn proven_children(&self, depth: usize) -> impl Iterator<Item = (S::Mv, u16)> + '_ {
-        self.children
-            .get(depth)
-            .into_iter()
-            .flatten()
-            .filter(|c| c.pn == 0)
-            .map(|c| (c.mv, c.mate_len))
+    /// 次の `search` で深さ `depth` のフレームが終わるとき、証明済みの子を記録させる
+    pub fn capture_proven(&mut self, depth: usize) {
+        self.capture_depth = Some(depth);
+        self.scratch.proven.clear();
+    }
+
+    /// `capture_proven` で記録した証明済みの子 (指し手, 詰み手数)。
+    /// 1 手詰めの近道で証明されたノードは子を展開しないので空になる。
+    pub fn proven_children(&self) -> &[(S::Mv, u16)] {
+        &self.scratch.proven
     }
 
     fn count_node(&mut self) -> Result<(), Abort> {
@@ -273,9 +302,11 @@ impl<'a, S: MateState> Searcher<'a, S> {
             return Ok(NodeResult::disproven(loop_depth as u16, false));
         }
 
-        self.path.push(key);
-        let result = self.search_node(st, key, args, inc_flag);
-        self.path.pop();
+        self.scratch.path.push(key);
+        let frame_start = self.scratch.children.len();
+        let result = self.search_node(st, key, args, frame_start, inc_flag);
+        self.scratch.children.truncate(frame_start);
+        self.scratch.path.pop();
         result
     }
 
@@ -284,6 +315,7 @@ impl<'a, S: MateState> Searcher<'a, S> {
         st: &mut S,
         key: u64,
         args: NodeArgs,
+        start: usize,
         inc_flag: &mut u32,
     ) -> Result<NodeResult, Abort> {
         let NodeArgs {
@@ -305,7 +337,7 @@ impl<'a, S: MateState> Searcher<'a, S> {
         }
 
         let has_old_child = self.expand(st, depth, or_node, args.child_len_limit());
-        if self.children[depth].is_empty() {
+        if self.scratch.children.len() == start {
             // 攻め方に王手が無ければ不詰、受け方に応手が無ければ詰み
             let result = if or_node {
                 NodeResult::disproven(NO_LOOP, false)
@@ -327,14 +359,14 @@ impl<'a, S: MateState> Searcher<'a, S> {
 
         let mut thpn = orig_thpn;
         let mut thdn = orig_thdn;
-        let mut current = self.aggregate(depth, or_node);
+        let mut current = self.aggregate(start, or_node);
         if *inc_flag > 0 {
             extend_thresholds(&current, &mut thpn, &mut thdn);
         }
 
         while !current.is_final() && current.pn < thpn && current.dn < thdn {
-            let (best, child_thpn, child_thdn) = self.select(depth, or_node, thpn, thdn);
-            let child = &mut self.children[depth][best];
+            let (best, child_thpn, child_thdn) = self.select(start, or_node, thpn, thdn);
+            let child = &mut self.scratch.children[best];
             let mv = child.mv;
             // 新しい局面を展開したら TCA の延長を 1 段減らす
             let consumed_extension = child.first_visit && *inc_flag > 0;
@@ -360,14 +392,14 @@ impl<'a, S: MateState> Searcher<'a, S> {
                 *inc_flag += 1;
             }
 
-            let child = &mut self.children[depth][best];
+            let child = &mut self.scratch.children[best];
             child.pn = child_result.pn;
             child.dn = child_result.dn;
             child.mate_len = child_result.mate_len;
             child.loop_depth = child_result.loop_depth;
             child.limited = child_result.limited;
 
-            current = self.aggregate(depth, or_node);
+            current = self.aggregate(start, or_node);
             thpn = orig_thpn;
             thdn = orig_thdn;
             if *inc_flag > 0 {
@@ -379,8 +411,13 @@ impl<'a, S: MateState> Searcher<'a, S> {
         }
         *inc_flag = (*inc_flag).min(orig_inc_flag);
 
-        let result = self.node_result(depth, or_node, current);
+        let result = self.node_result(start, depth, or_node, current);
         self.store(key, depth, &result, self.nodes - nodes_before);
+        if self.capture_depth == Some(depth) {
+            self.capture_depth = None;
+            let proven = self.scratch.children[start..].iter().filter(|c| c.pn == 0);
+            self.scratch.proven.extend(proven.map(|c| (c.mv, c.mate_len)));
+        }
         Ok(result)
     }
 
@@ -388,17 +425,13 @@ impl<'a, S: MateState> Searcher<'a, S> {
     ///
     /// 置換表の詰みのうち、詰み手数が `child_len_limit` を超えるものは使わない (未確定として読み直す)。
     fn expand(&mut self, st: &S, depth: usize, or_node: bool, child_len_limit: u16) -> bool {
-        if self.children.len() <= depth {
-            self.children.resize_with(depth + 1, Vec::new);
-        }
-        self.moves.clear();
-        st.generate(or_node, &mut self.moves);
+        self.scratch.moves.clear();
+        st.generate(or_node, &mut self.scratch.moves);
 
         let child_depth = (depth + 1) as u16;
         let mut has_old_child = false;
-        self.children[depth].clear();
-        for i in 0..self.moves.len() {
-            let mv = self.moves[i];
+        for i in 0..self.scratch.moves.len() {
+            let mv = self.scratch.moves[i];
             let mut child = Child {
                 mv,
                 pn: 1,
@@ -427,14 +460,14 @@ impl<'a, S: MateState> Searcher<'a, S> {
                     has_old_child = true;
                 }
             }
-            self.children[depth].push(child);
+            self.scratch.children.push(child);
         }
         has_old_child
     }
 
     /// 子の値から現局面の pn/dn を求める (OR: pn=min, dn=和 / AND: pn=和, dn=min)
-    fn aggregate(&self, depth: usize, or_node: bool) -> NodeResult {
-        let children = &self.children[depth];
+    fn aggregate(&self, start: usize, or_node: bool) -> NodeResult {
+        let children = &self.scratch.children[start..];
         let mut min = PN_INF;
         let mut sum = 0u64;
         let mut has_inf = false;
@@ -459,9 +492,9 @@ impl<'a, S: MateState> Searcher<'a, S> {
         }
     }
 
-    /// 次に読む子と、その子に渡す閾値を選ぶ
-    fn select(&self, depth: usize, or_node: bool, thpn: u32, thdn: u32) -> (usize, u32, u32) {
-        let children = &self.children[depth];
+    /// 次に読む子 (`scratch.children` の添字) と、その子に渡す閾値を選ぶ
+    fn select(&self, start: usize, or_node: bool, thpn: u32, thdn: u32) -> (usize, u32, u32) {
+        let children = &self.scratch.children[start..];
         // φ = OR なら pn、AND なら dn (小さいほど有望)。δ はその相方。
         let phi = |c: &Child<S::Mv>| if or_node { c.pn } else { c.dn };
         let delta = |c: &Child<S::Mv>| if or_node { c.dn } else { c.pn };
@@ -492,15 +525,21 @@ impl<'a, S: MateState> Searcher<'a, S> {
             (u64::from(thdelta).saturating_sub(others)).min(u64::from(PN_INF)) as u32
         };
         if or_node {
-            (best, child_thphi, child_thdelta)
+            (start + best, child_thphi, child_thdelta)
         } else {
-            (best, child_thdelta, child_thphi)
+            (start + best, child_thdelta, child_thphi)
         }
     }
 
     /// ループを抜けた後の現局面の結果 (詰み手数と不詰の条件を含む)
-    fn node_result(&self, depth: usize, or_node: bool, current: NodeResult) -> NodeResult {
-        let children = &self.children[depth];
+    fn node_result(
+        &self,
+        start: usize,
+        depth: usize,
+        or_node: bool,
+        current: NodeResult,
+    ) -> NodeResult {
+        let children = &self.scratch.children[start..];
         if current.is_proven() {
             let len = if or_node {
                 children.iter().filter(|c| c.pn == 0).map(|c| c.mate_len).min()

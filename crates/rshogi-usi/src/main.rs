@@ -186,8 +186,8 @@ struct UsiEngine {
     mate_hash_mb: usize,
     /// df-pn ソルバー（置換表を持ち回る。最初の go mate で確保）
     mate_solver: Option<DfpnSolver>,
-    /// go mate のスレッド（終了時にソルバーを返す）
-    mate_thread: Option<thread::JoinHandle<DfpnSolver>>,
+    /// go mate のスレッド（終了時にソルバーを返す。panic したら None）
+    mate_thread: Option<thread::JoinHandle<Option<DfpnSolver>>>,
     /// go mate の停止フラグ
     mate_stop: Arc<AtomicBool>,
 }
@@ -762,6 +762,8 @@ impl UsiEngine {
     fn cmd_setoption(&mut self, tokens: &[&str]) {
         // 探索中の設定変更は避ける
         self.wait_for_search();
+        // 未解決の go mate infinite は終わらないので、待つ前に止める (checkmate timeout を出す)
+        self.mate_stop.store(true, Ordering::SeqCst);
         self.wait_for_mate();
 
         // setoption name <name> value <value>
@@ -1589,14 +1591,25 @@ impl UsiEngine {
             builder
                 .spawn(move || {
                     let limits = MateLimits { nodes: 0, time_ms };
-                    let result = solver.solve(&mut pos, &limits, &stop, |progress| {
-                        let nps = progress.nodes * 1000 / progress.elapsed_ms.max(1);
-                        println!(
-                            "info time {} nodes {} nps {nps}",
-                            progress.elapsed_ms, progress.nodes
-                        );
-                        std::io::stdout().flush().ok();
-                    });
+                    // panic しても GUI は checkmate を待ち続けるので、捕まえて timeout として応答する
+                    let solved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let result = solver.solve(&mut pos, &limits, &stop, |progress| {
+                            let nps = progress.nodes * 1000 / progress.elapsed_ms.max(1);
+                            println!(
+                                "info time {} nodes {} nps {nps}",
+                                progress.elapsed_ms, progress.nodes
+                            );
+                            std::io::stdout().flush().ok();
+                        });
+                        (solver, result)
+                    }));
+                    let (solver, result) = match solved {
+                        Ok((solver, result)) => (Some(solver), result),
+                        Err(_) => {
+                            eprintln!("info string mate search panicked");
+                            (None, MateResult::Unknown)
+                        }
+                    };
                     if !suppress_flag.load(Ordering::SeqCst) {
                         println!("{}", checkmate_response(&result));
                         std::io::stdout().flush().ok();
@@ -1607,16 +1620,10 @@ impl UsiEngine {
         );
     }
 
-    /// 詰み探索スレッドの終了を待ち、ソルバーを取り戻す
+    /// 詰み探索スレッドの終了を待ち、ソルバーを取り戻す（panic していたら次の go mate で作り直す）
     fn wait_for_mate(&mut self) {
         if let Some(handle) = self.mate_thread.take() {
-            match handle.join() {
-                Ok(solver) => self.mate_solver = Some(solver),
-                Err(_) => {
-                    eprintln!("info string mate search thread panicked, resetting solver");
-                    self.mate_solver = None;
-                }
-            }
+            self.mate_solver = handle.join().ok().flatten();
         }
     }
 
@@ -1919,9 +1926,6 @@ impl UsiEngine {
     }
 }
 
-/// LayerStacks の格納 bucket 数と、明示された routing semantics の整合性を検証する。
-///
-/// NNUE version は binary layout の判別にだけ使い、この判断には使わない。
 /// `go mate` の制限時間（ミリ秒）。`infinite`・省略・0 は無制限（0 を返す）。
 fn parse_go_mate_time(tokens: &[&str]) -> u64 {
     match tokens.get(2) {
@@ -1942,9 +1946,13 @@ fn checkmate_response(result: &MateResult) -> String {
         }
         MateResult::NoMate => "checkmate nomate".to_string(),
         MateResult::Unknown => "checkmate timeout".to_string(),
+        MateResult::Unsupported => "checkmate notimplemented".to_string(),
     }
 }
 
+/// LayerStacks の格納 bucket 数と、明示された routing semantics の整合性を検証する。
+///
+/// NNUE version は binary layout の判別にだけ使い、この判断には使わない。
 fn validate_layer_stack_routing(
     stored_bucket_count: usize,
     mode: Option<LayerStackBucketMode>,
@@ -2331,11 +2339,12 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
     }
 
     #[test]
-    fn checkmate_response_formats_three_outcomes() {
+    fn checkmate_response_formats_each_outcome() {
         let pv = vec![Move::from_usi("G*5b").unwrap()];
         assert_eq!(checkmate_response(&MateResult::Mate(pv)), "checkmate G*5b");
         assert_eq!(checkmate_response(&MateResult::NoMate), "checkmate nomate");
         assert_eq!(checkmate_response(&MateResult::Unknown), "checkmate timeout");
+        assert_eq!(checkmate_response(&MateResult::Unsupported), "checkmate notimplemented");
     }
 
     #[test]

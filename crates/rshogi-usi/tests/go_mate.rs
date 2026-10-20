@@ -40,7 +40,7 @@ impl Engine {
         writeln!(self.child.stdin.as_mut().unwrap(), "{commands}").expect("write to engine");
     }
 
-    /// `predicate` を満たす行を待って返す。途中の `checkmate` 行は 1 回しか出ないことも確かめる。
+    /// `predicate` を満たす行を待って返す
     fn wait_for(&mut self, predicate: impl Fn(&str) -> bool, timeout: Duration) -> String {
         let deadline = Instant::now() + timeout;
         loop {
@@ -122,6 +122,27 @@ fn stop_ends_go_mate_with_timeout() {
     engine.send("stop");
     assert_eq!(engine.checkmate(Duration::from_secs(5)), "checkmate timeout");
     assert!(start.elapsed() < Duration::from_secs(2), "stop への応答が遅い");
+    engine.assert_no_more_checkmate();
+}
+
+#[test]
+fn setoption_during_go_mate_does_not_block_commands() {
+    let mut engine = Engine::start();
+    engine.send(&format!("position sfen {ZUKOU_001}\ngo mate infinite"));
+    std::thread::sleep(Duration::from_millis(100));
+    // 探索中の setoption は USI の手順違反だが、後続のコマンドを止めてはいけない
+    engine.send("setoption name MateHashMB value 2");
+    assert_eq!(engine.checkmate(Duration::from_secs(5)), "checkmate timeout");
+    engine.send("position sfen 4k4/9/4P4/9/9/9/9/9/4K4 b G 1\ngo mate 5000");
+    assert_eq!(engine.checkmate(Duration::from_secs(10)), "checkmate G*5b");
+    engine.assert_no_more_checkmate();
+}
+
+#[test]
+fn position_without_attacker_king_is_not_implemented() {
+    let mut engine = Engine::start();
+    engine.send("position sfen 4k4/8g/4P4/9/9/9/9/9/9 b G 1\ngo mate 5000");
+    assert_eq!(engine.checkmate(Duration::from_secs(10)), "checkmate notimplemented");
     engine.assert_no_more_checkmate();
 }
 

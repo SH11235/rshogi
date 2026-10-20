@@ -70,6 +70,7 @@ fn choose_attack<S: MateState>(
     len_limit: u16,
 ) -> Result<Option<(S::Mv, u16)>, Abort> {
     let depth = searcher.path_len();
+    searcher.capture_proven(depth);
     let result = searcher.search(st, NodeArgs::unbounded(depth, true, len_limit), &mut 0)?;
     if !result.is_proven() {
         return Ok(None);
@@ -81,7 +82,9 @@ fn choose_attack<S: MateState>(
         }
     }
     let best = searcher
-        .proven_children(depth)
+        .proven_children()
+        .iter()
+        .copied()
         .filter(|&(_, len)| len < len_limit)
         .min_by_key(|&(_, len)| len);
     Ok(best)
