@@ -156,6 +156,17 @@ pub(super) fn reject_protected(out: &Path, protected: &[PathBuf]) -> Result<()> 
     Ok(())
 }
 
+/// serve の出力の根の lock が通常のファイルとしてあるか。リンクなどは serve と replay で
+/// 別のファイルを lock し得るので拒む。
+pub(super) fn serve_lock_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => bail!("serve の lock が通常のファイルではありません: {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// 出力先の上にある serve の出力の根の lock を取る。serve が動いていれば失敗し、
 /// replay の間は serve がその根で起動できない。
 pub(super) fn lock_serve_roots(out: &Path) -> Result<Vec<super::journal::LockedFile>> {
@@ -163,7 +174,7 @@ pub(super) fn lock_serve_roots(out: &Path) -> Result<Vec<super::journal::LockedF
     let mut locks = Vec::new();
     for dir in out.ancestors() {
         let path = dir.join(super::targets::OUT_ROOT_LOCK);
-        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+        if serve_lock_exists(&path)? {
             locks.push(
                 super::journal::LockedFile::open(&path).with_context(|| {
                     format!("serve が出力の根を使っています: {}", dir.display())

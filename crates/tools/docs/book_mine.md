@@ -286,7 +286,7 @@ book_mine tree enqueue --state /path/to/state --repair            # 末尾の書
 
 対象の出力は `<out-root>/<id>/<own>/g<世代>/` です。前の世代の dir は残し、その `STATUS` を `SUPERSEDED` にします (中身は消しません)。後段 (登録) には `book_mine tree wait` の出力か `targets.status.json` で、**今の世代かつ `ready=true`** の出力先だけを渡してください。各世代の dir には記録として根と手順の `paths.record.tsv` (paths.tsv 形式) を書きます。serve はこれを入力に使いません。replay に使うときは dir の外へ写してから指定します。
 
-serve は出力の根の `serve.lock` を終了まで保持し、根の下はその serve だけが書きます (対象の数によらず lock は 1 つ)。同じ出力の根で 2 本目の serve は起動できません。`tree replay` は出力先の `tree.lock` を取り、上の階層に `serve.lock` があればそれも取ってから書くので、serve が動いている間は根の下へ replay できません。serve は世代の dir を用意する (前の世代を SUPERSEDED にする) ときにその dir の `tree.lock` を一時的に取るので、serve より前に始まった replay が終わるまでその対象を用意しません。前の世代の dir の SUPERSEDED は書けなければ次の周回でやり直し、消された前の世代の dir は作り直しません。エンジンを起動できない失敗 (パスの誤りや開けるファイル数の上限など) は局面の失敗に数えず、読みが成功するまで ALERT に 1 回だけ書いて、次の周回で起動し直します。出力の根が台帳・state の中にあれば起動を拒否し、対象の出力先が台帳・state と重なる行と、出力先の途中・生成物がシンボリックリンクの行は拒否します。
+serve は出力の根の `serve.lock` を終了まで保持し、根の下はその serve だけが書きます (対象の数によらず lock は 1 つ)。同じ出力の根で 2 本目の serve は起動できません。`tree replay` は出力先の `tree.lock` を取り、上の階層に `serve.lock` があればそれも取ってから書くので、serve が動いている間は根の下へ replay できません。`serve.lock` がシンボリックリンクなど通常のファイルでなければ、serve も replay も拒否します。serve は世代の dir を用意する (前の世代を SUPERSEDED にする) ときにその dir の `tree.lock` を一時的に取るので、serve より前に始まった replay が終わるまでその対象を用意しません。前の世代の dir の SUPERSEDED は書けなければ次の周回でやり直し、消された前の世代の dir は作り直しません。エンジンを起動できない失敗 (パスの誤りや開けるファイル数の上限など) は局面の失敗に数えず、読みが成功するまで ALERT に 1 回だけ書いて、次の周回で起動し直します。出力の根が台帳・state の中にあれば起動を拒否し、対象の出力先が台帳・state と重なる行と、出力先の途中・生成物がシンボリックリンクの行は拒否します。
 
 ### 受け付けとチェックポイント
 

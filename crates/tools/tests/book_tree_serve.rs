@@ -691,6 +691,27 @@ fn out_root_collisions_stop_startup_and_unsafe_ids_are_rejected() {
         &dir.path().join("other")
     )));
     assert!(std::fs::read_to_string(state.join("server.log")).unwrap().contains("固定"));
+    #[cfg(unix)]
+    {
+        let lock = dir.path().join("serve.lock");
+        std::fs::remove_file(&lock).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("elsewhere"), &lock).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_book_mine"))
+            .args(["tree", "replay", "--journal"])
+            .arg(state.join("journal.jsonl"))
+            .arg("--tree")
+            .arg(replay_toml(state, "good", ""))
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("通常のファイル"));
+        assert!(exits_with_failure(serve_command(state, &config, 3, 3, dir.path())));
+        assert!(
+            std::fs::read_to_string(state.join("server.log"))
+                .unwrap()
+                .contains("通常のファイル")
+        );
+    }
 }
 
 #[test]

@@ -523,8 +523,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
         super::paths::reject_out_root(&journal_path, &args.state, &args.out_root)?;
     std::fs::create_dir_all(&out_root)?;
     // 出力の根の下は、この serve だけが書く (別の serve と、配下の dir への replay を拒む)。
-    let _out_lock = LockedFile::open(&out_root.join(OUT_ROOT_LOCK))
-        .context("別の serve か replay がこの出力の根を使っています")?;
+    let out_lock = out_root.join(OUT_ROOT_LOCK);
+    super::paths::serve_lock_exists(&out_lock)?;
+    let _out_lock =
+        LockedFile::open(&out_lock).context("別の serve か replay がこの出力の根を使っています")?;
     let manifest = args.state.join(CHECKPOINT);
     let mut checkpoint = match Checkpoint::load(&manifest)? {
         Some(checkpoint) => {
