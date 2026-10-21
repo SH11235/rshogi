@@ -12,6 +12,8 @@ pub(super) const QUEUE_LOCK: &str = "targets.lock";
 pub(super) const CHECKPOINT: &str = "accepted.json";
 pub(super) const STATUS_FILE: &str = "targets.status.json";
 pub(super) const RUN_DIR: &str = "run";
+/// 出力の根に置く serve の lock。id は `.` を含まないので対象の dir と重ならない。
+pub(super) const OUT_ROOT_LOCK: &str = "serve.lock";
 const CHECKPOINT_VERSION: &str = "book-tree-queue-v1";
 pub(super) const DEFAULT_PRIORITY: u32 = 100;
 const MAX_PRIORITY: u32 = 1_000_000;

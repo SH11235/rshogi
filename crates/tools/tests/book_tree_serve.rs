@@ -677,6 +677,11 @@ fn out_root_collisions_stop_startup_and_unsafe_ids_are_rejected() {
     let result = wait_cmd(state, &receipt, None).output().unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("大小文字"));
+    // 同じ出力の根を別の state の serve は使えない。
+    let second = dir.path().join("second");
+    std::fs::create_dir(&second).unwrap();
+    assert!(exits_with_failure(serve_command(&second, &config, 3, 3, dir.path())));
+    assert!(std::fs::read_to_string(second.join("ALERT")).unwrap().contains("出力の根"));
     stop(state, &mut server);
     assert!(exits_with_failure(serve_command(
         state,

@@ -160,7 +160,7 @@ rayon = "1.10"
 crossbeam-channel = "0.5"
 ctrlc = "3.4"
 libc = "0.2"
-rustix = { version = "1.1", features = ["fs", "process"] }
+rustix = { version = "1.1", features = ["fs"] }
 indicatif = "0.18"
 rand = "0.9.3"
 rand_chacha = "0.9"

@@ -2,8 +2,8 @@ use super::ServeArgs;
 use super::journal::{Journal, LockedFile, Pv, Reading, Readings, Settings};
 use super::model::{Tree, remove_candidates};
 use super::targets::{
-    CHECKPOINT, Checkpoint, Defaults, QUEUE, QUEUE_LOCK, RUN_DIR, STATUS_FILE, StatusFile, Target,
-    TargetStatus,
+    CHECKPOINT, Checkpoint, Defaults, OUT_ROOT_LOCK, QUEUE, QUEUE_LOCK, RUN_DIR, STATUS_FILE,
+    StatusFile, Target, TargetStatus,
 };
 use crate::common::io::{write_atomic, write_atomic_durable};
 use crate::selfplay::{EngineConfig, EngineProcess};
@@ -256,8 +256,6 @@ fn spawn_worker(
 /// 受け付けた対象 1 本の実行時の状態。チェックポイントの `targets` と同じ順に並ぶ。
 struct Live {
     tree: Tree,
-    /// 今の世代の出力の lock。前の世代は書くときだけ取り、持つ数を世代の履歴でなく対象の数に比例させる。
-    lock: Option<LockedFile>,
     prepared: bool,
     superseded: bool,
     /// 終わった木の (読んだ局面数, 要る局面数)。終わった木は中身を縮めて保持する。
@@ -267,7 +265,6 @@ impl Live {
     fn new(tree: Tree) -> Self {
         Self {
             tree,
-            lock: None,
             prepared: false,
             superseded: false,
             ended: None,
@@ -283,14 +280,11 @@ fn generation_dir(checkpoint: &Checkpoint, target: &Target, generation: u32) -> 
         .join(format!("g{generation}"))
 }
 
-/// チェックポイントから今の世代の出力の副作用 (dir・lock・記録・QUEUED) を行う。
+/// チェックポイントから今の世代の出力の副作用 (dir・記録・QUEUED) を行う。
 /// どれも冪等で、失敗したら次の周回でやり直す。
 fn prepare(live: &mut Live, target: &Target) -> Result<()> {
     super::paths::artifacts(&target.out)?;
     std::fs::create_dir_all(&target.out)?;
-    if live.lock.is_none() {
-        live.lock = Some(LockedFile::open(&target.out.join("tree.lock"))?);
-    }
     remove_candidates(&target.out)?;
     write_atomic(&target.out.join("paths.record.tsv"), &target.definition.record())?;
     monitor(&target.out.join("STATUS"), if target.hold { "HELD\n" } else { "QUEUED\n" });
@@ -298,7 +292,7 @@ fn prepare(live: &mut Live, target: &Target) -> Result<()> {
     Ok(())
 }
 
-/// 前の世代の dir を SUPERSEDED にする。書くときだけ lock を取り、消された dir は作り直さない。
+/// 前の世代の dir を SUPERSEDED にする。消された dir は作り直さない。
 /// 今の世代の準備とは別にやり直すので、前の世代の失敗で今の世代が止まらない。
 fn supersede(checkpoint: &Checkpoint, target: &Target) -> Result<()> {
     for generation in 1..target.generation {
@@ -307,7 +301,6 @@ fn supersede(checkpoint: &Checkpoint, target: &Target) -> Result<()> {
             continue;
         }
         super::paths::artifacts(&dir)?;
-        let _lock = LockedFile::open(&dir.join("tree.lock"))?;
         if std::fs::read_to_string(dir.join("STATUS")).ok().as_deref() != Some("SUPERSEDED\n") {
             write_atomic(&dir.join("STATUS"), "SUPERSEDED\n")?;
         }
@@ -382,44 +375,7 @@ fn poll_queue(state: &Path, checkpoint: &Checkpoint, seen: &mut Option<String>) 
     Ok(Poll::Lines(bytes[processed..end].to_vec(), hasher))
 }
 
-/// 対象ごとに出力の lock を 1 つ持つので、開けるファイル数の soft limit を hard limit まで上げる。
-#[cfg(unix)]
-fn raise_open_files() {
-    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-    let limit = getrlimit(Resource::Nofile);
-    if limit.current != limit.maximum
-        && let Err(error) = setrlimit(
-            Resource::Nofile,
-            Rlimit {
-                current: limit.maximum,
-                maximum: limit.maximum,
-            },
-        )
-    {
-        eprintln!("開けるファイル数の上限を上げられません: {error}");
-    }
-}
-
-/// 対象の lock に使ってよいファイル記述子の数。engine 1 個に標準入出力などで数個、
-/// ほかに state・台帳・一時ファイルの分を残す。
-fn open_files_budget(workers: usize) -> usize {
-    open_files_limit().saturating_sub(256 + 8 * workers)
-}
-
-#[cfg(unix)]
-fn open_files_limit() -> usize {
-    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile).current;
-    limit.map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX))
-}
-
-#[cfg(not(unix))]
-fn open_files_limit() -> usize {
-    usize::MAX
-}
-
 pub(super) fn serve(args: ServeArgs) -> Result<()> {
-    #[cfg(unix)]
-    raise_open_files();
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
     super::paths::reject_collisions(&journal_path, Some(&args.state), &[])?;
     std::fs::create_dir_all(args.state.join("restart"))?;
@@ -435,8 +391,11 @@ pub(super) fn serve(args: ServeArgs) -> Result<()> {
     };
     let run_id =
         format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"), std::process::id());
-    let run_lock = hold_run_lock(&args.state, &run_id)?;
-    let result = serve_locked(&args, &run_id);
+    let run_lock = hold_run_lock(&args.state, &run_id);
+    let result = run_lock
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("{e:#}"))
+        .and_then(|_| serve_locked(&args, &run_id));
     if let Err(error) = &result {
         monitor(&args.state.join("STATUS"), "FAIL\n");
         alert(&args.state, &format!("FAIL {error:#}"));
@@ -558,6 +517,10 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
     let (out_root, protected) =
         super::paths::reject_out_root(&journal_path, &args.state, &args.out_root)?;
+    std::fs::create_dir_all(&out_root)?;
+    // 出力の根の下は、この serve だけが書く (別の serve と、配下の dir への replay を拒む)。
+    let _out_lock = LockedFile::open(&out_root.join(OUT_ROOT_LOCK))
+        .context("別の serve か replay がこの出力の根を使っています")?;
     let manifest = args.state.join(CHECKPOINT);
     let mut checkpoint = match Checkpoint::load(&manifest)? {
         Some(checkpoint) => {
@@ -648,7 +611,6 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                 queue_error = None;
                                 built.sort_by_key(|(index, _)| *index);
                                 for (index, tree) in built {
-                                    // 前の世代の lock を手放してから、その dir を SUPERSEDED にする。
                                     if let Some(live) = lives.get_mut(index) {
                                         *live = Live::new(tree);
                                     } else {
@@ -688,21 +650,11 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                     }
                 }
             }
-            // 対象ごとに lock を 1 つ持つので、制御・台帳・engine の分を残して準備を止める。
-            let budget = open_files_budget(desired.max(workers.len()));
-            let mut held = lives.iter().filter(|l| l.lock.is_some()).count();
             for (index, live) in lives.iter_mut().enumerate() {
                 let target = &checkpoint.targets[index];
-                if !live.prepared && live.lock.is_none() && held >= budget {
-                    once.report(&mut alerts, "budget", format!("開けるファイル数の上限に近いので、対象の準備を待たせます (保持中の lock {held}、上限の目安 {budget})"));
-                } else if !live.prepared {
+                if !live.prepared {
                     let slot = format!("prepare-{index}");
-                    let had_lock = live.lock.is_some();
-                    let result = prepare(live, target);
-                    if !had_lock && live.lock.is_some() {
-                        held += 1;
-                    }
-                    match result {
+                    match prepare(live, target) {
                         Ok(()) => once.clear(&slot),
                         Err(error) => once.report(
                             &mut alerts,

@@ -1,6 +1,6 @@
 use super::model::Definition;
 use crate::common::dedup::canonicalize_maybe_new;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 pub(super) fn reject_symlink(path: &Path) -> Result<()> {
@@ -154,4 +154,22 @@ pub(super) fn reject_protected(out: &Path, protected: &[PathBuf]) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// 出力先の上にある serve の出力の根の lock を取る。serve が動いていれば失敗し、
+/// replay の間は serve がその根で起動できない。
+pub(super) fn lock_serve_roots(out: &Path) -> Result<Vec<super::journal::LockedFile>> {
+    let out = normalized(out)?;
+    let mut locks = Vec::new();
+    for dir in out.ancestors() {
+        let path = dir.join(super::targets::OUT_ROOT_LOCK);
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file()) {
+            locks.push(
+                super::journal::LockedFile::open(&path).with_context(|| {
+                    format!("serve が出力の根を使っています: {}", dir.display())
+                })?,
+            );
+        }
+    }
+    Ok(locks)
 }
