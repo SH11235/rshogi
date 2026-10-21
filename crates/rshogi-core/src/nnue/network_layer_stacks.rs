@@ -1624,7 +1624,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
             ))]
             _ => panic!(
-                "LayerStacksNetwork / LayerStacksAccStack の L1 サイズが不一致 (net={:?}, stack={:?})",
+                "LayerStacksNetwork / LayerStacksAccStack の寸法が不一致 (net={:?}, stack={:?})",
                 self.architecture_dims(),
                 stack.architecture_dims()
             ),
@@ -1923,7 +1923,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
                 all(feature = "layerstacks-1024x16x32", feature = "layerstacks-1536x16x64"),
             ))]
             _ => panic!(
-                "LayerStacksNetwork / LayerStacksAccStack の L1 サイズが不一致 (net={:?}, stack={:?})",
+                "LayerStacksNetwork / LayerStacksAccStack の寸法が不一致 (net={:?}, stack={:?})",
                 net_dims, stack_dims
             ),
         }
@@ -2198,7 +2198,7 @@ pub enum LayerStacksNetwork {
 /// マッチアームは呼び出し crate 側の cfg を見て展開されるため、`rshogi-core` 側で
 /// 有効な variant を caller 側がすべては有効化していない場合に備えて `_ =>`
 /// fallback を引数として受け取る。caller のすべての (`ft-*`, `layerstacks-*`) feature が
-/// 揃っている = 35 arm で exhaustive なときは fallback arm を cfg gate でドロップし、
+/// 揃っている = 50 arm で exhaustive なときは fallback arm を cfg gate でドロップし、
 /// `#[allow(unreachable_patterns)]` を不要にする。
 ///
 /// 構文 (既存の `with_ls_net!` 等と互換):
@@ -2452,7 +2452,7 @@ macro_rules! ls_dispatch_ft_size {
             $crate::nnue::LayerStacksNetwork::HalfKP($crate::nnue::LsNetByFt::L1536x16x64(
                 $inner,
             )) => $body,
-            // caller の (ft-*, layerstacks-*) を 5 × 7 全部有効化したときは 35 arm が
+            // caller の (ft-*, layerstacks-*) を 5 × 10 全部有効化したときは 50 arm が
             // exhaustive。そのときだけ fallback arm を cfg gate でドロップして
             // unreachable warning を避ける。
             #[cfg(not(all(

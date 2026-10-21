@@ -341,6 +341,24 @@ PGO build は `scripts/build_pgo.sh` 参照 (NPS +6-7% を狙う、本番計測�
 `cargo build --features <atomic feature>` の直接指定もサポートするが、
 新規 user は preset edition (`cargo xtask build --edition <name>`) 経由を推奨。
 
+## L2=64 の LayerStacks
+
+`layerstacks-halfka_hm_merged-3072x16x64-none`、
+`layerstacks-halfka_hm_merged-2304x16x64-none` と
+`layerstacks-halfka_hm_merged-1536x16x64-none` は、L1 層の出力 16、L2 層の出力 64 (ヘッダーの `l2=16,l3=64`) の専用 edition。
+いずれも `nnue-progress-diff` を含む。FT 幅と L2 幅がモデルに一致する edition を選ぶ。
+`edition-universal` はヘッダーから寸法を読み、L2=32 / 64 の両方を扱う。
+
+```sh
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-3072x16x64-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x16x64-none --profile production
+cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-none --profile production
+```
+
+L2 層の出力 32 の専用経路は 32 幅の融合出力 kernel を使う。出力 64 は活性化と出力層の内積を
+融合し、AVX512BW が有効なら64要素を一括処理する。VNNI があれば4項積和命令を使う。
+それ以外の AVX2 環境では32要素ずつ処理し、最後に一度だけ水平加算する。評価ごとのヒープ確保は行わない。
+
 ## 今後の追加予定 (本ドキュメントの未対応項目)
 
 ADR Phase 2 完了後 / 別 Issue で追加予定:
@@ -357,22 +375,3 @@ ADR Phase 2 完了後 / 別 Issue で追加予定:
 - [`engines/README.md`](../engines/README.md) (binary 保管方針)
 - [`docs/nnue-supported-architectures.md`](./nnue-supported-architectures.md) (NNUE arch 一覧)
 - [`docs/nnue-architecture-detection.md`](./nnue-architecture-detection.md) (auto-detect ロジック)
-
-### L2=64 の LayerStacks
-
-`layerstacks-halfka_hm_merged-3072x16x64-none`、
-`layerstacks-halfka_hm_merged-2304x16x64-none` と
-`layerstacks-halfka_hm_merged-1536x16x64-none` は、L1=16 / L2=64 の専用 edition。
-いずれも `nnue-progress-diff` を含む。FT 幅と L2 幅がモデルに一致する edition を選ぶ。
-`edition-universal` はヘッダーから寸法を読み、L2=32 / 64 の両方を扱う。
-
-```sh
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-3072x16x64-none --profile production
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-2304x16x64-none --profile production
-cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-none --profile production
-```
-
-専用経路の L2=32 は従来の融合出力 kernel を使う。L2=64 は活性化と出力層の内積を
-融合し、AVX512BW が有効なら64要素を一括処理する。VNNI があれば4項積和命令を使う。
-それ以外の AVX2 環境では
-32要素ずつ処理し、最後に一度だけ水平加算する。評価ごとのヒープ確保は行わない。

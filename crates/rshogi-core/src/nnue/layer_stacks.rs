@@ -62,7 +62,7 @@ pub struct LayerStackBucket<
 > {
     /// L1層: L1 → LS_L1_OUT
     l1: AffineTransform<L1, LS_L1_OUT>,
-    /// L2層: LS_L2_IN → 32
+    /// L2層: LS_L2_IN → LS_L2_OUT
     pub l2: AffineTransform<LS_L2_IN, LS_L2_OUT>,
     /// 出力層: LS_L2_OUT → 1
     pub output: AffineTransform<LS_L2_OUT, 1>,
