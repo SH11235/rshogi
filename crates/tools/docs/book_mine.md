@@ -233,10 +233,13 @@ cargo run -p tools --release --bin book_mine -- run \
 
 `tree` は `frontier / expand / run` と別の展開規則です。根の読みの候補と実戦の手順から始め、こちらの手番は1位、相手の手番は上位 `opp_n` 手を伸ばします。根以外で1位の絶対値が `stop` 以上なら規則と実戦の枝を止めます。未展開手が伝播後の展開手を上回ると、回の終わりに FORCE に加えて最大 `rounds` 回伸ばし直します。根は STOP を無視し、こちらの根の候補が1手だけなら2位も加えます。
 
-### 常駐と木の受付
+木ごとの LEVEL は最短の段を回をまたいで保持し、浅い再発見は既存の辺の子孫にも伝えます。EDGE・RULE・FORCE は累積です。手数は根の手数に経路の長さを足した最小値を使います。台帳に他の木の読みがあっても、自分で要求した局面だけを評価します。negamax は各局面を空の祖先手順から評価し、その手順内の循環だけ `draw` にします。評価集合内の子に向かう MultiPV ∪ EDGE の手をつなぎます。同値は MultiPV の順、次に手の文字列順で選びます。
+
+### 常駐
 
 ```bash
-book_mine tree serve --state /path/to/state --engine /path/to/engine \
+book_mine tree serve --state /path/to/state --out-root /path/to/trees \
+  --engine /path/to/engine \
   --engine-option "EvalFile=$SHOGI_DATA/nnue/model.bin" \
   --engine-option "LS_PROGRESS_COEFF=$SHOGI_DATA/progress/coeff.json" \
   --engine-option DrawValueBlack=-70 --engine-option DrawValueWhite=70 \
@@ -245,7 +248,90 @@ book_mine tree serve --state /path/to/state --engine /path/to/engine \
 
 `EvalFile` / `EvalDir` は必須で、既定のモデルを推測して再利用しません。serve では指定した全 option が engine から広告されることも確認します。読み条件と参照ファイルは実行中に変更しないでください。必要な USI option は `--engine-option K=V` を繰り返して指定します。`Threads=1`、`USI_Hash=--hash`、`MultiPV=--multipv` は固定です。局面ごとに `usinewgame` と `isready` を送り、手順履歴を渡さず `position sfen` と `go nodes` で読みます。bound 付き info は捨て、MultiPV 番号ごとの最後の行を番号順に保存します。値の順序は詰め直しません。受理する読みの中で手が重複した場合は検査エラーにします。mate は符号付き `30000 - |n|` です。
 
-`<state>/inbox/*.toml` に木の定義を置きます。起動中・worker が0の間も追加できます。TOML 内の相対パスは TOML の親 dir から解決します。書きかけの定義が見えないよう、別名で書いてから `.toml` に rename してください。
+`--out-root` は対象の出力の根で、state に固定されます (再開で変えると起動を拒否)。`--opp-n` (既定 2)・`--stop` (300)・`--rounds` (3)・`--draw` (0) は、キューの行で `opts` を省いた項目の既定です。読み条件 (指紋) は state に固定され、変えるときは新しい state dir で起動し、`--journal` で同じ台帳を指定して読みを使い回します。
+
+### 対象のキュー
+
+読む対象は `<state>/targets.jsonl` (JSON Lines、追記型) に `book_mine tree enqueue` で足します。serve は動いたまま新しい行を受け付けます。
+
+```bash
+book_mine tree enqueue --state /path/to/state --id p12_w \
+  --root "sfen lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1" \
+  --own w --depth 6 --priority 100 \
+  --game "7g7f 8c8d 2g2f" --opp-n 2 --stop 300 --rounds 3 --extra 6a5b --memo "局 24"
+# {"start":0,"end":243,"lines":1}   ← 受領 (この追記のバイト範囲と行数)
+
+book_mine tree enqueue --state /path/to/state --from more.jsonl   # 全行を検査してからまとめて追記
+book_mine tree enqueue --state /path/to/state --repair            # 末尾の書きかけの行だけを切り詰める
+```
+
+| 項目 | 内容 |
+|---|---|
+| `id` | `[A-Za-z0-9_-]{1,64}`。出力先の dir 名。大小文字だけが違う id は拒否 |
+| `root` | `sfen <盤> <手番> <持駒> <手数>` か `startpos moves <USI の手順>`。合法でなければ拒否 |
+| `own` | `b` / `w` / `bw`。`bw` は先手と後手の 2 本の木 (読みは台帳で共有)。2 本は一緒に受け付けるか一緒に拒否する |
+| `depth` | 1〜20 |
+| `priority` | 0〜1000000、小さいほど先。目安: 0 = 急ぎ、100 = 既定、1000 = 空きを埋めるだけ |
+| `hold` | 真なら読まない (読みかけは読み終えて台帳に入れる)。解除で再開 |
+| `game` | 根からの実戦の手順 (USI の配列の配列)。各手順の最初の `depth+1` 手を局面別に合わせる |
+| `opts` | `opp_n` (1〜8)・`stop` (1〜30000)・`rounds` (0〜10)・`draw` (−30000〜30000)・`extra` (根で合法な手、8 手まで。こちらの手番の根では MultiPV 内の手だけを伸ばす) |
+| `memo` | 自由 (道具は読まない) |
+
+- 行は差分でなく完全な指定で、同じ `id` では検査を通った最後の行が有効です。`root` と `own` は `id` ごとに固定で、変えた行は拒否します (別の `id` で足す)。拒否した行は `targets.status.json` の `rejected` (バイト範囲・`id`・理由) と ALERT に残り、有効な定義は前のままです。
+- enqueue は行の形と局面・手順の合法性を serve と同じ関数で検査し、通らなければ何も書かずに非 0 で終わります。`<state>/targets.lock` を取ってから、末尾が行の境界であることを確かめ、まとめて 1 回で追記して fsync し、受領を標準出力に出します。末尾に書きかけの行があれば何も変えずに非 0 で終わるので、`--repair` で切り詰めてください (切り詰めた中身を標準エラーに出します)。書き込みが途中で失敗したときは受領を出しません。どこまで入ったかは、キューの改行で終わった行と `targets.status.json` の `processed_bytes`・`rejected` で確かめます。
+- キューは手で書いてもかまいませんが、検査と lock がありません。serve は最後の改行までを読み、書きかけの行は次の周回に回します。処理済みの範囲の内容が変わったら、戻るまで受付を止めて ALERT に書きます (読みは続けます)。キューがリンクや通常のファイルでない場合も同じです。
+- 段数・`opts`・`game` を変えた行は、既定で解決した定義が今の世代と違うので新しい世代を作り、台帳にある局面は読み直しません。priority・hold・memo だけが違う行は世代を変えません。`opts` を省いた項目は、その行を処理したときの serve の既定で解決して保存します。起動オプションを変えた後に priority だけを変えた行を足すと、解決後の値が変わって新しい世代になります。世代を変えたくないときは解決済みの値を `opts` に書いてください。
+
+### 世代と出力先
+
+対象の出力は `<out-root>/<id>/<own>/g<世代>/` です。前の世代の dir は残し、その `STATUS` を `SUPERSEDED` にします (中身は消しません)。後段 (登録) には `book_mine tree wait` の出力か `targets.status.json` で、**今の世代かつ `ready=true`** の出力先だけを渡してください。各世代の dir には記録として根と手順の `paths.record.tsv` (paths.tsv 形式) を書きます。serve はこれを入力に使いません。replay に使うときは dir の外へ写してから指定します。
+
+serve は全ての世代の dir に `tree.lock` を保持します (1 世代に 1 つのファイル記述子)。出力の根が台帳・state の中にあれば起動を拒否し、対象の出力先が台帳・state と重なる行と、出力先の途中・生成物がシンボリックリンクの行は拒否します。
+
+### 受け付けとチェックポイント
+
+`<state>/accepted.json` がチェックポイントです。有効な定義 (`id`・手番・解決済みの定義・出力先・世代・受付順・priority・hold)、キューを処理した位置 `processed_bytes` とそこまでの sha256、確定した拒否の一覧を、新しい行を処理するたびに 1 回の原子的な書き込みで確定します。副作用 (前の世代の SUPERSEDED、新しい世代の dir・lock・`QUEUED`、列の作り直し) はチェックポイントの後に行い、どれも冪等です。チェックポイントの前に落ちた行は次の起動で処理し直し、後に落ちたら副作用だけをやり直します。過去の行は再適用しません。inbox の TOML で受け付けていた頃の state (`accepted.json` が配列) からは再開できません。新しい state dir で起動し、古い台帳を `--journal` で指定してください。
+
+列は局面ごとに、それを求める保留でない木の `(priority, 受付順, 段)` の最小を選び、`(priority, 受付順, 段, key)` の順に並べます。受付順は `id` が最初に受け付けられた順で、世代を変えても変わりません。空いた worker に先頭から割り当て、読みかけの worker は取り戻しません (優先度の高い対象の次の局面は、実行中の読みが終わるまで待つことがあります)。同じ局面と指紋の要求は列中・実行中とも 1 つにまとめます。
+
+### 状態と待機
+
+`<state>/targets.status.json` は 1 回の原子的な書き込みで出す 1 つの JSON です: `run_id`、`processed_bytes`、`processed_sha256`、`all_ended`、`targets` (対象ごとに `id`・`own`・`generation`・`priority`・`hold`・`state`・`ready`・`read` (読んだ局面数)・`required` (要る局面数)・`out`)、`rejected`。`state` は `RESUMING / QUEUED / RUNNING / HELD / DONE / NOT_READY / FAIL`。`all_ended` は有効な木がすべて `DONE / NOT_READY / FAIL / HELD` のときに真 (0 本でも真) で、worker が止まったことは意味しません。serve は起動のたびに `run_id` (時刻と PID) を作り、出力に触れる前にこのファイルを全対象 `RESUMING`・`ready=false` で書き直します (書けなければ起動をやめます)。`ready=true` はその世代の出力一式が揃ってから出します。書き込みに失敗したら ALERT に書いて次の周回でやり直します。
+
+```bash
+receipt=$(book_mine tree enqueue --state "$STATE" --from targets.jsonl)
+book_mine tree wait --state "$STATE" --receipt "$receipt" [--ids p12_w,p11_b]
+```
+
+`wait` は次を同じ 1 回の読み取りで満たしたときに、対象ごとの `id`・`own`・`generation`・`state`・`ready`・`out` を JSON で出して 0 で終わります: `processed_bytes` が受領の `end` 以上、受領の範囲 `[start, end)` に拒否が無い、`all_ended` が真 (`--ids` を付けたらその対象と受領の範囲で足した `id` が終わった状態)、状態の `run_id` が serve の `STATUS` の `run_id` と同じで serve が生きている。受領の範囲に拒否があればその理由を出して非 0、serve が落ちていれば非 0 で終わります。範囲の外の拒否 (他の書き手の行や同じ `id` の過去の拒否) は見ません。serve の生存は state の lock を共有 lock で一瞬試して確かめます (serve は起動時に lock を 1 秒ほど待ち直すので、待機と起動が重なっても起動は失敗しません)。
+
+### 並列数・停止・監視
+
+- `<state>/workers` の整数を書き換えて並列数を変更します。初回の既定16。既存の workers ファイルがあれば再起動時も `--workers` より優先します。不正な内容の通知は内容または mtime が変わるまで1回です。減らすと余った worker は読みかけを台帳へ保存してから終了します。0は全 worker の drain で、serve は常駐を続けます。数を戻すと再開します。
+- `<state>/stop` を作ると読みかけを保存して serve を終了します。再開前に stop を除き、同じコマンドを実行します。kill 後も、保存済みの読みから木の回を再構築します。台帳の改行の無い末尾だけは切り捨てます。
+- 木が全て完了しても `IDLE` で受付を続けます。プロセスの `STATUS` は `<状態> <run_id>` の 1 行です。
+- `--stall-secs` (既定600) の間 info の nodes / depth のどちらも増えなければ `ALERT` に書きます。`info string` や同じ値の繰り返しでは時計を戻しません。既定では探索を止めません。
+- 固まった worker を明示的に作り直すには `<state>/restart/<worker番号>` を作ります。受付時点でその worker が読んでいる局面を列に戻します。対象の読みが無い番号は ALERT して制御ファイルを消します。明示 restart は自動再起動の上限に数えません。エンジン切断は自動で作り直します。`--max-restarts` (既定3) を超える同一局面の失敗、または再現する読みの検査エラーでは、その局面を待つ木だけを FAIL にして ALERT し、他の木の処理を続けます。serve の MultiPV は1行以上かつ指定数以下を受理し、各手の合法性と重複が無いことを検査します。根の不成省略などで指定数より少なくても受理します。0行の場合は合法手の有無によらず `bestmove resign` / `bestmove win` を受理し、展開しない葉として保存します。1位が `win` の1行だけで `bestmove win` が返る場合も、0行の宣言勝ちと同じ葉として扱います。合法手数や根の候補数から行数は推測しません。
+- state の lock と journal 自体の lock を終了まで保持します。別 state でも同じ journal の同時使用はできません。木の出力先にも tree.lock を保持し、別の serve や replay から保護します。`--journal` を省略すると `<state>/journal.jsonl` を使います。
+
+journal、state dir とその管理ファイル (キュー・lock・チェックポイント・状態のファイルなど) がシンボリックリンクなら、リンク先の有無によらず拒否します。親 dir の途中のリンクと未作成部分の `..` は解決して比較します。journal と state の管理パスの衝突も拒否します。replay では、木の出力 dir（配下の生成物全体）と journal・state・paths.tsv・定義ファイルの衝突を拒否します。
+
+プロセスの `STATUS` は `RUNNING / IDLE / STOPPED / FAIL`。木の出力先の `STATUS` は `QUEUED / RUNNING / HELD / STOPPED / DONE / NOT_READY / FAIL / SUPERSEDED` です。プロセスの STOPPED は workers=0 または stop 指示で読みかけの保存が終わった状態で、待ち列が残っていても使います。木の QUEUED はまだ読み始めていない待機、RUNNING は読み始めた未完了の木、STOPPED は停止指示によりその木の実行中の読みが無くなった状態です。`progress.json` に木 (id・手番・世代・priority・hold) の回・読み済み数・要求数・列の長さと、worker の局面・経過秒・nodes / depth を記録します。`ALERT` は日時付きの追記です。キューの読み取りと出力先の用意の失敗は、内容が変わるまで 1 回通知して次の周回でやり直します。STATUS は内容が変わった場合だけ書きます。終了した木（DONE / NOT_READY / FAIL）の出力 dir を削除しても再作成しません。STATUS・progress.json・ALERT の書き込み失敗は標準エラーへ報告して次の周期で再試行します（終了した木の出力 dir が残っている場合）。journal と成果物の書き込み失敗はエラーとして扱います。
+
+### Python の読みの取り込みと再生
+
+```bash
+book_mine tree import --journal /path/to/tree-journal.jsonl \
+  --engine /path/to/engine \
+  --engine-option "EvalFile=$SHOGI_DATA/nnue/model.bin" \
+  --engine-option DrawValueBlack=-70 --engine-option DrawValueWhite=70 \
+  --nodes 1000000000 --multipv 3 --hash 1024 \
+  --input /path/to/python-out/d0.jsonl /path/to/python-out/d1.jsonl
+
+book_mine tree replay --journal /path/to/tree-journal.jsonl --tree /path/to/tree.toml
+```
+
+replay の木の定義は TOML です。TOML 内の相対パスは TOML の親 dir から解決します。
 
 ```toml
 paths = "../../example.paths.tsv"
@@ -263,36 +349,6 @@ extra = ["6b5a"]
 
 paths.tsv はヘッダ無しで `key<TAB>ply<TAB>USIの手順<TAB>メモ`。key は手数を除く SFEN の3フィールドで、同じ根をまとめ、根の手番をそろえます。GAME は各手順の最初の `depth+1` 手を局面別に合わせます。`own` は `b` / `w`。こちらの根の EXTRA は MultiPV 内だけ、相手の根の EXTRA は合法なら採用します。
 
-木ごとの LEVEL は最短の段を回をまたいで保持し、浅い再発見は既存の辺の子孫にも伝えます。EDGE・RULE・FORCE は累積です。手数は根の手数に経路の長さを足した最小値を使います。台帳に他の木の読みがあっても、自分で要求した局面だけを評価します。negamax は各局面を空の祖先手順から評価し、その手順内の循環だけ `draw` にします。評価集合内の子に向かう MultiPV ∪ EDGE の手をつなぎます。同値は MultiPV の順、次に手の文字列順で選びます。
-
-同時に見つかった木はファイル名順、その後は受付順に優先します。列は `(受付順, 段, key)` 順で、列中・実行中とも同じ局面と指紋の要求を1つにまとめます。受付済みの木の定義と paths は変更せず、新しい定義・出力先で追加してください。受付順は `accepted.json` に保存され、再開時に定義・paths・読み条件を検査します。
-
-### 並列数・停止・監視
-
-- `<state>/workers` の整数を書き換えて並列数を変更します。初回の既定16。既存の workers ファイルがあれば再起動時も `--workers` より優先します。不正な内容の通知は内容または mtime が変わるまで1回です。減らすと余った worker は読みかけを台帳へ保存してから終了します。0は全 worker の drain で、serve は常駐を続けます。数を戻すと再開します。
-- `<state>/stop` を作ると読みかけを保存して serve を終了します。再開前に stop を除き、同じコマンドを実行します。kill 後も、保存済みの読みから木の回を再構築します。台帳の改行の無い末尾だけは切り捨てます。
-- 木が全て完了しても `IDLE` で受付を続けます。
-- `--stall-secs` (既定600) の間 info の nodes / depth のどちらも増えなければ `ALERT` に書きます。`info string` や同じ値の繰り返しでは時計を戻しません。既定では探索を止めません。
-- 固まった worker を明示的に作り直すには `<state>/restart/<worker番号>` を作ります。受付時点でその worker が読んでいる局面を列に戻します。対象の読みが無い番号は ALERT して制御ファイルを消します。明示 restart は自動再起動の上限に数えません。エンジン切断は自動で作り直します。`--max-restarts` (既定3) を超える同一局面の失敗、または再現する読みの検査エラーでは、その局面を待つ木だけを FAIL にして ALERT し、他の木の処理を続けます。serve の MultiPV は1行以上かつ指定数以下を受理し、各手の合法性と重複が無いことを検査します。根の不成省略などで指定数より少なくても受理します。0行の場合は合法手の有無によらず `bestmove resign` / `bestmove win` を受理し、展開しない葉として保存します。1位が `win` の1行だけで `bestmove win` が返る場合も、0行の宣言勝ちと同じ葉として扱います。合法手数や根の候補数から行数は推測しません。
-- state の lock と journal 自体の lock を終了まで保持します。別 state でも同じ journal の同時使用はできません。木の出力先にも tree.lock を保持し、別の serve や replay から保護します。`--journal` を省略すると `<state>/journal.jsonl` を使います。
-
-出力を変更する前にパスを正規化し、木の出力 dir（配下の生成物全体）と journal・state dir・受付 dir・lock・全ての木の paths.tsv の衝突、および木どうしの出力 dir の一致・親子関係を拒否します。木の出力先と paths.tsv は state の外に置いてください。journal、state dir とその管理ファイル、inbox dir と各エントリ、木の定義ファイル、出力 dir と既存の生成物自体がシンボリックリンクなら、リンク先の有無によらず拒否します（inbox のリンクはその木だけを拒否して ALERT に記録します）。親 dir の途中のリンクと未作成部分の `..` は解決して比較し、定義ファイルの実パスも出力との衝突から保護します。受付時の衝突はその木だけを拒否して ALERT に記録し、serve は継続します。受付済みの木は起動時にまとめて検査し、衝突があれば出力を変更せず起動に失敗します。paths.tsv と journal・state の保護パスの衝突、journal と state の管理パスの衝突も拒否します。
-
-プロセスの `STATUS` は `RUNNING / IDLE / STOPPED / FAIL`。木の出力先の `STATUS` は `QUEUED / RUNNING / STOPPED / DONE / NOT_READY / FAIL` です。プロセスの STOPPED は workers=0 または stop 指示で読みかけの保存が終わった状態で、待ち列が残っていても使います。木の QUEUED はまだ読み始めていない待機、RUNNING は読み始めた未完了の木、STOPPED は停止指示によりその木の実行中の読みが無くなった状態です。`progress.json` に木の回・読み済み数・要求数・列の長さと、worker の局面・経過秒・nodes / depth を記録します。`ALERT` は日時付きの追記です。受付ファイルの canonicalize・load の失敗は内容または mtime が変わるまで1回通知し、他のファイルの受付を続けます。STATUS は内容が変わった場合だけ書きます。終了した木（DONE / NOT_READY / FAIL）の出力 dir を削除しても再作成しません。STATUS・progress.json・ALERT の書き込み失敗は標準エラーへ報告して次の周期で再試行します（終了した木の出力 dir が残っている場合）。journal と成果物の書き込み失敗はエラーとして扱います。
-
-### Python の読みの取り込みと再生
-
-```bash
-book_mine tree import --journal /path/to/tree-journal.jsonl \
-  --engine /path/to/engine \
-  --engine-option "EvalFile=$SHOGI_DATA/nnue/model.bin" \
-  --engine-option DrawValueBlack=-70 --engine-option DrawValueWhite=70 \
-  --nodes 1000000000 --multipv 3 --hash 1024 \
-  --input /path/to/python-out/d0.jsonl /path/to/python-out/d1.jsonl
-
-book_mine tree replay --journal /path/to/tree-journal.jsonl --tree /path/to/tree.toml
-```
-
 import では engine とファイル型 USI option の内容 SHA-256、全 option、明示 `SPSAParamsFile` が無い場合のバイナリ隣接 `spsa.params` の有無と内容、nodes、MultiPV、局面ごとの初期化・info 解析の版を条件の指紋にします。Python の記録は元の engine / 評価ファイルの digest を持たないため、**指定した条件の宣言による取り込み**です。出どころのパスと入力ファイルの SHA-256 も記録します。nodes_limit / threads / hash / draw / MultiPV 行数が宣言と違う行、不正な局面・手、同じ条件と局面で MultiPV の値や深さ・bestmove が異なる重複を拒否します。取り込み全体を検査してから追記します。
 
 replay は engine を起動せず、serve と同じ木の処理を台帳の読みだけで進めます。不足や ready:false は非0で終了します。出力先と journal・paths.tsv の衝突を検査し、出力先と journal の lock を取る前には既存の出力を変更しません。複数条件が台帳にある場合は `--fingerprint` で選びます。tree 用台帳は版付きで、既存 `expand / run` の台帳とは共用できません。 台帳は行単位で読み、serve・import は宣言した fingerprint、replay は選択した fingerprint の読みだけをメモリに保持します。serve はその読みを直接参照し、別のキャッシュへ複製しません。replay は同じ排他 lock を保持したまま条件（Settings）の一覧だけを収集し、条件を選んでから対象の読みを読み込みます。他の fingerprint の行も形式・版を検査し、改行の無い末尾を回復しますが、読みの妥当性と重複の矛盾検査は対象の fingerprint 内だけで行います。保持量は対象条件の局面数に比例し、過去条件の総レコード数には比例しません（全行の走査時間は必要です）。局面ごとには読み (MultiPV 数行) だけを持ちます。条件の同一性は指紋で決まり、内容が同じモデルを別のパスで指定した読みも同じ条件として使い回します。台帳の保持は 1 局面あたり 1 KiB 前後で、10 万局面で約 100 MiB です (これとは別に、各木が自分の局面の読みを持ちます)。定跡の局面を深く読む用途ではこの規模を超えない想定で、ディスク上の索引は持ちません。
@@ -301,4 +357,4 @@ replay は engine を起動せず、serve と同じ木の処理を台帳の読�
 
 木ごとの出力先に `registration_status.json` と使用した読みの `d<段>.jsonl` を書きます。ready の場合は `own_nodes.tsv`、`tree.db`、`tree_rule.db`、参考値の `tree_bp_min.db`、根の表と最後の集計を含む `report.txt` を出します。TSV の列と JSONL は node_calib / 登録・評価値更新の後段と互換です。min はライブラリの `backprop_file_with` を呼びます。参考値の生成・読み込みに失敗した場合は報告し、min 欄を空値として他の成果物を完成させます。report.txt は Python の標準出力から段ごとの進み具合を除いた内容（根の候補、伸ばし直し、警告を含む）です。
 
-未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は新しい木の定義と出力先で再生してください。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。
+未展開手が上回る局面が残ると `ready:false` と `unresolved` を記録し、`NOT_READY` にします。これは計算自体の失敗ではありません。rounds を増やす場合は、同じ `id` で `opts.rounds` を増やした行を足すと新しい世代で読み直します。読みは同じ台帳から再利用できます。途中・失敗・ready:false の出力先には `own_nodes.tsv` を残しません。ready のときも全出力が完成してから登録材料を公開し、その後に DONE を書きます。

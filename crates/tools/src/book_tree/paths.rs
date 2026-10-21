@@ -40,7 +40,9 @@ pub(super) fn reject_collisions(
     if let Some(state) = state {
         let state = managed(state)?;
         for name in [
-            "inbox",
+            super::targets::QUEUE,
+            super::targets::QUEUE_LOCK,
+            super::targets::STATUS_FILE,
             "restart",
             "lock",
             "workers",
@@ -48,7 +50,7 @@ pub(super) fn reject_collisions(
             "STATUS",
             "ALERT",
             "progress.json",
-            "accepted.json",
+            super::targets::CHECKPOINT,
         ] {
             let path = managed(&state.join(name))?;
             if overlap(&journal, &path) {
@@ -72,28 +74,7 @@ pub(super) fn reject_collisions(
     let outputs: Vec<_> = definitions.iter().map(|def| managed(&def.out)).collect::<Result<_>>()?;
     let mut destinations = Vec::new();
     for (index, def) in definitions.iter().enumerate() {
-        let mut paths = vec![outputs[index].clone()];
-        for name in [
-            "STATUS",
-            "tree.lock",
-            "own_nodes.tsv",
-            "registration_status.json",
-            "tree.db",
-            "tree_rule.db",
-            "tree_bp_min.db",
-            "report.txt",
-        ] {
-            paths.push(managed(&def.out.join(name))?);
-        }
-        if def.out.try_exists()? {
-            for entry in std::fs::read_dir(&def.out)? {
-                let entry = entry?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('d') && name.ends_with(".jsonl") {
-                    paths.push(managed(&entry.path())?);
-                }
-            }
-        }
+        let paths = artifacts(&def.out)?;
         for path in &paths {
             for other in protected
                 .iter()
@@ -110,6 +91,66 @@ pub(super) fn reject_collisions(
             }
         }
         destinations.extend(paths);
+    }
+    Ok(())
+}
+
+/// 木の出力 dir と、その中で書き換える成果物。どれかがリンクなら拒否する。
+pub(super) fn artifacts(out: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = vec![managed(out)?];
+    for name in [
+        "STATUS",
+        "tree.lock",
+        "own_nodes.tsv",
+        "registration_status.json",
+        "tree.db",
+        "tree_rule.db",
+        "tree_bp_min.db",
+        "report.txt",
+        "paths.record.tsv",
+    ] {
+        paths.push(managed(&out.join(name))?);
+    }
+    if out.try_exists()? {
+        for entry in std::fs::read_dir(out)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('d') && name.ends_with(".jsonl") {
+                paths.push(managed(&entry.path())?);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// キューの対象の出力の根が台帳や state の中に無いことを確かめ、正規化した根と保護パスを返す。
+/// 根が state の親でもよい (対象ごとの出力先は受付で保護パスと照合する)。
+pub(super) fn reject_out_root(
+    journal: &Path,
+    state: &Path,
+    out_root: &Path,
+) -> Result<(PathBuf, Vec<PathBuf>)> {
+    let out_root = managed(out_root)?;
+    let protected = vec![managed(journal)?, managed(state)?];
+    for path in &protected {
+        if out_root.starts_with(path) {
+            bail!(
+                "出力の根と保護パスが衝突しています: {} / {}",
+                out_root.display(),
+                path.display()
+            );
+        }
+    }
+    Ok((out_root, protected))
+}
+
+/// 対象の出力先が保護パスと重ならないことを確かめる。
+pub(super) fn reject_protected(out: &Path, protected: &[PathBuf]) -> Result<()> {
+    let out = managed(out)?;
+    for path in protected {
+        if overlap(&out, path) {
+            bail!("対象の出力先と保護パスが衝突しています: {} / {}", out.display(), path.display());
+        }
     }
     Ok(())
 }

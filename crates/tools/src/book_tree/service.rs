@@ -1,13 +1,16 @@
 use super::ServeArgs;
-use super::journal::{Journal, LockedFile, Pv, Reading, Readings, Settings, digest};
-use super::model::{Definition, Tree, remove_candidates};
-use crate::common::io::write_atomic;
+use super::journal::{Journal, LockedFile, Pv, Reading, Readings, Settings};
+use super::model::{Tree, remove_candidates};
+use super::targets::{
+    CHECKPOINT, Checkpoint, Defaults, QUEUE, STATUS_FILE, StatusFile, Target, TargetStatus,
+};
+use crate::common::io::{write_atomic, write_atomic_durable};
 use crate::selfplay::{EngineConfig, EngineProcess};
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -237,27 +240,108 @@ fn spawn_worker(
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct Accepted {
-    out: PathBuf,
-    path: PathBuf,
-    sha256: String,
-    paths_sha256: String,
-    fingerprint: String,
+/// 受け付けた対象 1 本の実行時の状態。チェックポイントの `targets` と同じ順に並ぶ。
+struct Live {
+    tree: Tree,
+    /// 世代ごとの出力の lock。前の世代も replay などから守るため保持し続ける。
+    locks: BTreeMap<u32, LockedFile>,
+    prepared: bool,
 }
 
-struct LoadedTree {
-    tree: Tree,
-    accepted: Accepted,
-    lock: LockedFile,
+fn generation_dir(checkpoint: &Checkpoint, target: &Target, generation: u32) -> PathBuf {
+    checkpoint
+        .out_root
+        .join(&target.id)
+        .join(&target.own)
+        .join(format!("g{generation}"))
+}
+
+/// チェックポイントから出力の副作用 (前の世代の SUPERSEDED、今の世代の dir・lock・QUEUED) を
+/// 行う。どれも冪等で、失敗したら次の周回でやり直す。
+fn prepare(live: &mut Live, checkpoint: &Checkpoint, target: &Target) -> Result<()> {
+    for generation in 1..target.generation {
+        let dir = generation_dir(checkpoint, target, generation);
+        if let std::collections::btree_map::Entry::Vacant(entry) = live.locks.entry(generation) {
+            if !dir.try_exists()? {
+                continue;
+            }
+            super::paths::artifacts(&dir)?;
+            entry.insert(LockedFile::open(&dir.join("tree.lock"))?);
+        }
+        monitor(&dir.join("STATUS"), "SUPERSEDED\n");
+    }
+    super::paths::artifacts(&target.out)?;
+    std::fs::create_dir_all(&target.out)?;
+    if let std::collections::btree_map::Entry::Vacant(entry) = live.locks.entry(target.generation) {
+        entry.insert(LockedFile::open(&target.out.join("tree.lock"))?);
+    }
+    remove_candidates(&target.out)?;
+    write_atomic(&target.out.join("paths.record.tsv"), &target.definition.record())?;
+    monitor(&target.out.join("STATUS"), if target.hold { "HELD\n" } else { "QUEUED\n" });
+    live.prepared = true;
+    Ok(())
+}
+
+/// キューの改行で終わった未処理の行と、処理済みの範囲までの hash を返す。
+/// 前回見た内容 (長さと mtime) から変わっていなければ読まない。
+fn poll_queue(
+    state: &Path,
+    checkpoint: &Checkpoint,
+    seen: &mut Option<String>,
+) -> Result<Option<(Vec<u8>, Sha256)>> {
+    let path = state.join(QUEUE);
+    super::paths::reject_symlink(&path)?;
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.as_ref().is_some_and(|m| !m.file_type().is_file()) {
+        bail!("キューは通常のファイルにしてください: {}", path.display());
+    }
+    let stamp = format!("{:?}", metadata.as_ref().map(|m| (m.len(), m.modified().ok())));
+    if seen.as_ref() == Some(&stamp) {
+        return Ok(None);
+    }
+    *seen = Some(stamp);
+    let bytes = match metadata {
+        Some(_) => std::fs::read(&path)?,
+        None => Vec::new(),
+    };
+    let processed = usize::try_from(checkpoint.processed_bytes)?;
+    let mut hasher = Sha256::new();
+    if bytes.len() >= processed {
+        hasher.update(&bytes[..processed]);
+    }
+    if bytes.len() < processed
+        || format!("{:x}", hasher.clone().finalize()) != checkpoint.processed_sha256
+    {
+        bail!("キューの処理済みの範囲が変わりました。戻るまで受付を止めます (読みは続けます)");
+    }
+    let end = bytes[processed..]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(processed, |i| processed + i + 1);
+    if end == processed {
+        return Ok(None);
+    }
+    Ok(Some((bytes[processed..end].to_vec(), hasher)))
 }
 
 pub(super) fn serve(args: ServeArgs) -> Result<()> {
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
     super::paths::reject_collisions(&journal_path, Some(&args.state), &[])?;
-    std::fs::create_dir_all(args.state.join("inbox"))?;
     std::fs::create_dir_all(args.state.join("restart"))?;
-    let state_lock = LockedFile::open(&args.state.join("lock"))?;
+    // `tree wait` は共有 lock を一瞬取って serve の生存を確かめるので、その間は待つ。
+    let mut attempt = 0;
+    let state_lock = loop {
+        match LockedFile::open(&args.state.join("lock")) {
+            Ok(lock) => break lock,
+            Err(_) if attempt < 20 => attempt += 1,
+            Err(error) => return Err(error),
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
     let result = serve_locked(&args);
     if let Err(error) = &result {
         monitor(&args.state.join("STATUS"), "FAIL\n");
@@ -317,46 +401,77 @@ impl Alerts<'_> {
     }
 }
 
+/// 同じ内容の通知を、内容が変わるまで 1 回にする。
+#[derive(Default)]
+struct Once(BTreeMap<String, String>);
+impl Once {
+    fn report(&mut self, alerts: &mut Alerts, slot: &str, message: String) {
+        if self.0.get(slot) != Some(&message) {
+            alerts.push(&message);
+            self.0.insert(slot.to_owned(), message);
+        }
+    }
+    fn clear(&mut self, slot: &str) {
+        self.0.remove(slot);
+    }
+}
+
 fn serve_locked(args: &ServeArgs) -> Result<()> {
     if args.stall_secs == 0 {
         bail!("stall-secs は正数が必要です");
     }
+    let defaults = Defaults {
+        opp_n: args.opp_n,
+        stop: args.stop,
+        rounds: args.rounds,
+        draw: args.draw,
+    };
+    defaults.check()?;
     let settings = Settings::new(&args.reading)?;
     println!("fingerprint={}", settings.fingerprint);
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
-    let manifest = args.state.join("accepted.json");
-    let mut accepted: Vec<Accepted> = if manifest.exists() {
-        serde_json::from_str(&std::fs::read_to_string(&manifest)?)?
-    } else {
-        Vec::new()
+    let (out_root, protected) =
+        super::paths::reject_out_root(&journal_path, &args.state, &args.out_root)?;
+    let manifest = args.state.join(CHECKPOINT);
+    let mut checkpoint = match Checkpoint::load(&manifest)? {
+        Some(checkpoint) => {
+            if checkpoint.out_root != out_root {
+                bail!(
+                    "--out-root は state に固定されています: {} (指定 {})",
+                    checkpoint.out_root.display(),
+                    out_root.display()
+                );
+            }
+            if checkpoint.fingerprint != settings.fingerprint {
+                bail!(
+                    "受付済みの対象と読み条件が違います。条件を変えるときは新しい state dir で起動してください"
+                );
+            }
+            checkpoint
+        }
+        None => Checkpoint::new(out_root, settings.fingerprint.clone()),
     };
-    let mut trees = Vec::new();
-    let mut output_locks = Vec::new();
-    let mut definitions = Vec::new();
-    for entry in &accepted {
-        super::paths::reject_symlink(&entry.path)?;
-        if digest(&entry.path)? != entry.sha256 {
-            bail!("受付済みの木の定義は変更できません: {}", entry.path.display());
-        }
-        let definition = Definition::load(&entry.path)?;
-        if digest(&definition.paths)? != entry.paths_sha256
-            || settings.fingerprint != entry.fingerprint
-        {
-            bail!("受付済みの paths または読み条件が違います");
-        }
-        definitions.push(definition);
-    }
-    super::paths::reject_collisions(
-        &journal_path,
-        Some(&args.state),
-        &definitions.iter().collect::<Vec<_>>(),
-    )?;
+    let run_id =
+        format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"), std::process::id());
+    let status_path = args.state.join(STATUS_FILE);
+    // 出力に触れる前に、前回の ready を無効にする。
+    write_atomic(
+        &status_path,
+        &serde_json::to_string_pretty(&StatusFile::resuming(&run_id, &checkpoint))?,
+    )
+    .context("状態のファイルを書けません")?;
     let mut journal = Journal::open(&journal_path, &settings.fingerprint)?;
-    for definition in definitions {
-        output_locks.push(LockedFile::open(&definition.out.join("tree.lock"))?);
-        let tree = Tree::load(definition, &settings)?;
-        trees.push(tree);
-    }
+    let mut lives = checkpoint
+        .targets
+        .iter()
+        .map(|t| {
+            Ok(Live {
+                tree: t.definition.build(&t.own, &t.out)?,
+                locks: BTreeMap::new(),
+                prepared: false,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let workers_file = args.state.join("workers");
     if !workers_file.exists() {
         write_atomic(&workers_file, &args.workers.to_string())?;
@@ -364,13 +479,15 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
     let (events_tx, events_rx) = mpsc::channel();
     let mut workers: BTreeMap<usize, Worker> = BTreeMap::new();
     let mut retries: BTreeMap<String, usize> = BTreeMap::new();
-    let mut rejected = BTreeMap::new();
     let mut workers_error = None;
     let mut failures = BTreeMap::new();
     let mut alerts = Alerts {
         state: &args.state,
         pending: VecDeque::new(),
     };
+    let mut once = Once::default();
+    let mut queue_seen = None;
+    let mut status_written = None;
     let result = (|| -> Result<()> {
         loop {
             let stopping = args.state.join("stop").exists();
@@ -392,77 +509,70 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 }
             };
             let desired = if stopping { 0 } else { desired };
-            let mut entries = std::fs::read_dir(args.state.join("inbox"))?
-                .collect::<std::io::Result<Vec<_>>>()?;
-            entries.sort_by_key(|e| e.file_name());
             if !stopping {
-                for entry in entries {
-                    let original = entry.path();
-                    // 種別を取れないのは rename 途中で消えたエントリなので、次の周回に回す。
-                    if original.extension().is_none_or(|e| e != "toml")
-                        && !entry.file_type().is_ok_and(|t| t.is_symlink())
-                    {
-                        continue;
-                    }
-                    let stamp = file_stamp(&original);
-                    if rejected.get(&original) == Some(&stamp) {
-                        continue;
-                    }
-                    let loaded = (|| -> Result<Option<LoadedTree>> {
-                        super::paths::reject_symlink(&original)?;
-                        if !std::fs::symlink_metadata(&original)?.file_type().is_file() {
-                            bail!(
-                                "受付の定義は通常のファイルにしてください: {}",
-                                original.display()
-                            );
-                        }
-                        let path = std::fs::canonicalize(&original)?;
-                        if accepted.iter().any(|a| a.path == path) {
-                            return Ok(None);
-                        }
-                        let definition = Definition::load(&path)?;
-                        let mut definitions: Vec<_> = trees.iter().map(|t| &t.def).collect();
-                        definitions.push(&definition);
-                        super::paths::reject_collisions(
-                            &journal_path,
-                            Some(&args.state),
-                            &definitions,
-                        )?;
-                        let lock = LockedFile::open(&definition.out.join("tree.lock"))?;
-                        let sha = digest(&path)?;
-                        let paths_sha = digest(&definition.paths)?;
-                        let tree = Tree::load(definition, &settings)?;
-                        Ok(Some(LoadedTree {
-                            accepted: Accepted {
-                                out: tree.def.out.clone(),
-                                path,
-                                sha256: sha,
-                                paths_sha256: paths_sha,
-                                fingerprint: settings.fingerprint.clone(),
-                            },
-                            tree,
-                            lock,
-                        }))
-                    })();
-                    match loaded {
-                        Ok(Some(LoadedTree {
-                            tree,
-                            accepted: entry,
-                            lock,
-                        })) => {
-                            output_locks.push(lock);
-                            rejected.remove(&original);
-                            accepted.push(entry);
-                            write_atomic(&manifest, &serde_json::to_string_pretty(&accepted)?)?;
-                            monitor(&tree.def.out.join("STATUS"), "QUEUED\n");
-                            trees.push(tree);
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            alerts.push(&format!("木の受付失敗 {}: {e:#}", original.display()));
-                            rejected.insert(original, stamp);
+                match poll_queue(&args.state, &checkpoint, &mut queue_seen) {
+                    Ok(None) => {}
+                    Ok(Some((chunk, prefix))) => {
+                        let (next, mut built) =
+                            checkpoint.apply(&chunk, &defaults, &prefix, &protected);
+                        match serde_json::to_string_pretty(&next)
+                            .map_err(anyhow::Error::from)
+                            .and_then(|text| write_atomic_durable(&manifest, &text))
+                        {
+                            Ok(()) => {
+                                once.clear("queue");
+                                built.sort_by_key(|(index, _)| *index);
+                                for (index, tree) in built {
+                                    if let Some(live) = lives.get_mut(index) {
+                                        live.tree = tree;
+                                        live.prepared = false;
+                                    } else {
+                                        lives.push(Live {
+                                            tree,
+                                            locks: BTreeMap::new(),
+                                            prepared: false,
+                                        });
+                                    }
+                                }
+                                for rejected in &next.rejected[checkpoint.rejected.len()..] {
+                                    alerts.push(&format!(
+                                        "キューの行を拒否 [{}, {}) id={}: {}",
+                                        rejected.start,
+                                        rejected.end,
+                                        rejected.id.as_deref().unwrap_or("-"),
+                                        rejected.reason
+                                    ));
+                                }
+                                checkpoint = next;
+                            }
+                            Err(error) => {
+                                queue_seen = None;
+                                once.report(
+                                    &mut alerts,
+                                    "queue",
+                                    format!("チェックポイントを書けません: {error:#}"),
+                                );
+                            }
                         }
                     }
+                    Err(error) => once.report(&mut alerts, "queue", format!("{error:#}")),
+                }
+            }
+            for (index, live) in lives.iter_mut().enumerate() {
+                if live.prepared {
+                    continue;
+                }
+                let slot = format!("prepare-{index}");
+                match prepare(live, &checkpoint, &checkpoint.targets[index]) {
+                    Ok(()) => once.clear(&slot),
+                    Err(error) => once.report(
+                        &mut alerts,
+                        &slot,
+                        format!(
+                            "出力先を用意できません {}: {error:#}",
+                            checkpoint.targets[index].out.display()
+                        ),
+                    ),
                 }
             }
             while let Ok(event) = events_rx.try_recv() {
@@ -549,13 +659,14 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 .values()
                 .filter_map(|w| w.busy.as_ref().map(|(k, _)| k.clone()))
                 .collect();
-            let mut queued: BTreeMap<String, (usize, usize, u32)> = BTreeMap::new();
-            for (order, tree) in trees.iter_mut().enumerate() {
-                if tree.finished || tree.failed {
+            // 局面ごとに、それを求める木の (優先度, 受付順, 段) の最小を取る。
+            let mut queued: BTreeMap<String, (u32, u64, usize, u32)> = BTreeMap::new();
+            for (target, live) in checkpoint.targets.iter().zip(lives.iter_mut()) {
+                let tree = &mut live.tree;
+                if !live.prepared || target.hold || tree.finished || tree.failed {
                     continue;
                 }
-                let step = tree.advance(&journal);
-                match step {
+                match tree.advance(&journal) {
                     Ok(missing) => {
                         if let Some((key, _)) =
                             missing.iter().find(|(key, _)| failures.contains_key(key))
@@ -582,13 +693,18 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                             }
                         } else {
                             for (key, depth) in missing {
-                                if !running.contains(&key) {
-                                    queued.entry(key.clone()).or_insert((
-                                        order,
-                                        depth,
-                                        tree.ply[&key],
-                                    ));
+                                if running.contains(&key) {
+                                    continue;
                                 }
+                                let rank = (target.priority, target.order, depth, tree.ply[&key]);
+                                queued
+                                    .entry(key)
+                                    .and_modify(|r| {
+                                        if (rank.0, rank.1, rank.2) < (r.0, r.1, r.2) {
+                                            *r = rank;
+                                        }
+                                    })
+                                    .or_insert(rank);
                             }
                         }
                     }
@@ -601,12 +717,14 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                 }
             }
             let mut queue: Vec<_> = queued.into_iter().collect();
-            queue.sort_by(|(ka, (oa, da, _)), (kb, (ob, db, _))| (oa, da, ka).cmp(&(ob, db, kb)));
+            queue.sort_by(|(ka, (pa, oa, da, _)), (kb, (pb, ob, db, _))| {
+                (pa, oa, da, ka).cmp(&(pb, ob, db, kb))
+            });
             let mut queue_len = queue.len();
             if !stopping {
                 let mut jobs = queue.into_iter();
                 for worker in workers.values_mut().filter(|w| w.busy.is_none()) {
-                    if let Some((key, (_, _, ply))) = jobs.next() {
+                    if let Some((key, (_, _, _, ply))) = jobs.next() {
                         *worker.restart.lock().unwrap_or_else(|error| error.into_inner()) =
                             Restart {
                                 key: Some(key.clone()),
@@ -628,31 +746,63 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
             } else {
                 "RUNNING"
             };
-            monitor_changed(&args.state.join("STATUS"), &format!("{status}\n"));
-            let progress = json!({"status":status,"fingerprint":settings.fingerprint,"queued":queue_len,"workers":workers.iter().map(|(id,w)|json!({"id":id,"key":w.busy.as_ref().map(|(k,_)|k),"elapsed_secs":w.busy.as_ref().map(|(_,t)|t.elapsed().as_secs_f64()),"nodes":w.nodes,"depth":w.depth})).collect::<Vec<_>>(),"trees":trees.iter().enumerate().map(|(id,t)|json!({"id":id,"out":t.def.out,"round":t.round,"read":t.nodes.len(),"requested":t.level.len(),"queued":t.level.keys().filter(|k|journal.get(k).is_none()&&!workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"running":t.level.keys().filter(|k|workers.values().any(|w|w.busy.as_ref().is_some_and(|(key,_)|key==*k))).count(),"finished":t.finished,"failed":t.failed})).collect::<Vec<_>>()});
+            monitor_changed(&args.state.join("STATUS"), &format!("{status} {run_id}\n"));
+            let busy = |key: &String| {
+                workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
+            };
+            let progress = json!({"status":status,"run_id":run_id,"fingerprint":settings.fingerprint,"queued":queue_len,"workers":workers.iter().map(|(id,w)|json!({"id":id,"key":w.busy.as_ref().map(|(k,_)|k),"elapsed_secs":w.busy.as_ref().map(|(_,t)|t.elapsed().as_secs_f64()),"nodes":w.nodes,"depth":w.depth})).collect::<Vec<_>>(),"trees":checkpoint.targets.iter().zip(&lives).map(|(target,live)|{let t=&live.tree;json!({"id":target.id,"own":target.own,"generation":target.generation,"priority":target.priority,"hold":target.hold,"out":t.def.out,"round":t.round,"read":t.nodes.len(),"requested":t.level.len(),"queued":t.level.keys().filter(|k|journal.get(k).is_none()&&!busy(k)).count(),"running":t.level.keys().filter(|k|busy(k)).count(),"finished":t.finished,"failed":t.failed})}).collect::<Vec<_>>()});
             monitor(&args.state.join("progress.json"), &serde_json::to_string_pretty(&progress)?);
-            for tree in &trees {
+            let mut statuses = Vec::new();
+            for (target, live) in checkpoint.targets.iter().zip(&lives) {
+                let tree = &live.tree;
+                let reading = tree.level.keys().any(busy);
                 let tree_status = if tree.failed {
                     "FAIL"
                 } else if tree.finished {
                     if tree.ready { "DONE" } else { "NOT_READY" }
-                } else if desired == 0
-                    && !tree.level.keys().any(|key| {
-                        workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
-                    })
-                {
+                } else if target.hold {
+                    "HELD"
+                } else if desired == 0 && !reading {
                     "STOPPED"
-                } else if tree.nodes.is_empty()
-                    && !tree.level.keys().any(|key| {
-                        workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
-                    })
-                {
+                } else if tree.nodes.is_empty() && !reading {
                     "QUEUED"
                 } else {
                     "RUNNING"
                 };
-                if !(tree.finished || tree.failed) || tree.def.out.is_dir() {
+                if live.prepared && (!(tree.finished || tree.failed) || tree.def.out.is_dir()) {
                     monitor_changed(&tree.def.out.join("STATUS"), &format!("{tree_status}\n"));
+                }
+                let state = match tree_status {
+                    "STOPPED" if tree.nodes.is_empty() => "QUEUED",
+                    "STOPPED" => "RUNNING",
+                    other => other,
+                };
+                statuses.push(TargetStatus {
+                    id: target.id.clone(),
+                    own: target.own.clone(),
+                    generation: target.generation,
+                    priority: target.priority,
+                    hold: target.hold,
+                    state: state.into(),
+                    ready: tree.finished && tree.ready,
+                    read: tree.nodes.len(),
+                    required: tree.level.len(),
+                    out: target.out.clone(),
+                });
+            }
+            let text =
+                serde_json::to_string_pretty(&StatusFile::new(&run_id, &checkpoint, statuses))?;
+            if status_written.as_ref() != Some(&text) {
+                match write_atomic(&status_path, &text) {
+                    Ok(()) => {
+                        once.clear("status");
+                        status_written = Some(text);
+                    }
+                    Err(error) => once.report(
+                        &mut alerts,
+                        "status",
+                        format!("状態のファイルを書けません: {error:#}"),
+                    ),
                 }
             }
             alerts.flush();
@@ -664,8 +814,9 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
         Ok(())
     })();
     if result.is_err() {
-        for tree in &trees {
-            if !tree.finished && !tree.failed {
+        for live in &lives {
+            let tree = &live.tree;
+            if live.prepared && !tree.finished && !tree.failed {
                 remove_candidates(&tree.def.out)?;
                 monitor(&tree.def.out.join("STATUS"), "FAIL\n");
             }
