@@ -16,6 +16,7 @@ fn rows_for<'a>(values: &'a Values, key: &str) -> Result<&'a BTreeMap<String, i3
 
 impl Tree {
     pub fn write_outputs(&self) -> Result<bool> {
+        std::fs::create_dir_all(&self.def.out)?;
         remove_candidates(&self.def.out)?;
         let all: BTreeSet<_> = self.nodes.keys().cloned().collect();
         let rule_set = self.reach(&self.rule);

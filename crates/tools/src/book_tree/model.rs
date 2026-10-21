@@ -30,6 +30,19 @@ pub(super) struct Definition {
     pub draw: i32,
 }
 impl Definition {
+    pub fn params(&self) -> TreeParams {
+        TreeParams {
+            out: self.out.clone(),
+            depth: self.depth,
+            opp_n: self.opp_n,
+            stop: self.stop,
+            own: self.own.clone(),
+            rounds: self.rounds,
+            extra: self.extra.clone(),
+            draw: self.draw,
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         super::paths::reject_symlink(path)?;
         let mut definition: Self = toml::from_str(&std::fs::read_to_string(path)?)?;
@@ -45,6 +58,22 @@ impl Definition {
     }
 }
 
+/// 木の伸ばし方と出力先。定義の入力 (TOML と paths.tsv、キューの行) によらない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TreeParams {
+    pub out: PathBuf,
+    pub depth: usize,
+    pub opp_n: usize,
+    pub stop: i32,
+    pub own: String,
+    pub rounds: usize,
+    pub extra: Vec<String>,
+    pub draw: i32,
+}
+
+/// 根の局面 key・手数と、根からの実戦の手順。
+pub(super) type GameLine = (String, u32, Vec<String>);
+
 pub(super) fn child(key: &str, mv: &str) -> Result<String> {
     Ok(strip_ply(&child_position_after_move(&format!("{key} 1"), mv)?.to_sfen()).to_owned())
 }
@@ -54,7 +83,7 @@ pub(super) fn side(key: &str) -> &str {
 
 #[derive(Debug)]
 pub(super) struct Tree {
-    pub def: Definition,
+    pub def: TreeParams,
     pub roots: BTreeMap<String, u32>,
     pub root_order: Vec<String>,
     pub game: Edges,
@@ -74,12 +103,8 @@ pub(super) struct Tree {
     expanded: BTreeMap<String, (usize, u32)>,
 }
 impl Tree {
+    /// TOML の定義と paths.tsv から木を作る。出力先には触れない。
     pub fn load(def: Definition, settings: &Settings) -> Result<Self> {
-        std::fs::create_dir_all(&def.out)?;
-        remove_candidates(&def.out)?;
-        if !matches!(def.own.as_str(), "b" | "w") || def.opp_n == 0 || def.stop < 0 {
-            bail!("own / opp_n / stop の指定が不正です");
-        }
         if def.fingerprint.as_ref().is_some_and(|fp| fp != &settings.fingerprint) {
             bail!("木の読み条件とプロセスの指紋が違います");
         }
@@ -88,28 +113,45 @@ impl Tree {
         {
             bail!("paths の sha256 が違います");
         }
-        let mut roots = BTreeMap::new();
-        let mut root_order = Vec::new();
-        let mut game: Edges = BTreeMap::new();
+        let mut lines = Vec::new();
         for line in std::fs::read_to_string(&def.paths)?.lines().filter(|l| !l.trim().is_empty()) {
             let cols: Vec<_> = line.split('\t').collect();
             if cols.len() < 3 {
                 bail!("paths は key / ply / 手順 が必要です");
             }
             let ply: u32 = cols[1].parse()?;
+            lines.push((
+                cols[0].to_owned(),
+                ply,
+                cols[2].split_whitespace().map(str::to_owned).collect(),
+            ));
+        }
+        Self::build(def.params(), &lines)
+    }
+
+    /// 根と実戦の手順から木を作る。出力先には触れない。
+    pub fn build(def: TreeParams, lines: &[GameLine]) -> Result<Self> {
+        if !matches!(def.own.as_str(), "b" | "w") || def.opp_n == 0 || def.stop < 0 {
+            bail!("own / opp_n / stop の指定が不正です");
+        }
+        let mut roots = BTreeMap::new();
+        let mut root_order = Vec::new();
+        let mut game: Edges = BTreeMap::new();
+        for (root, ply, moves) in lines {
+            let ply = *ply;
             if ply == 0 {
                 bail!("ply は正数が必要です");
             }
-            let pos = position_from_sfen(&format!("{} {ply}", cols[0]))?;
+            let pos = position_from_sfen(&format!("{root} {ply}"))?;
             let mut key = strip_ply(&pos.to_sfen()).to_owned();
-            if key != cols[0] {
-                bail!("paths の key は正規形が必要です");
+            if &key != root {
+                bail!("根の key は正規形が必要です");
             }
             if !roots.contains_key(&key) {
                 root_order.push(key.clone());
             }
             roots.entry(key.clone()).or_insert(ply);
-            for mv in cols[2].split_whitespace().take(def.depth.saturating_add(1)) {
+            for mv in moves.iter().take(def.depth.saturating_add(1)) {
                 let next = child(&key, mv)?;
                 game.entry(key).or_default().insert(mv.to_owned());
                 key = next;
@@ -289,6 +331,22 @@ impl Tree {
             self.finished = true;
             return Ok(Vec::new());
         }
+    }
+
+    /// 終わった木の読みと辺を手放す (状態の旗と出力先だけを残す)。
+    pub fn shrink(&mut self) {
+        self.roots.clear();
+        self.root_order.clear();
+        self.game.clear();
+        self.nodes.clear();
+        self.level.clear();
+        self.ply.clear();
+        self.edge.clear();
+        self.rule.clear();
+        self.force.clear();
+        self.candidates.clear();
+        self.compare.clear();
+        self.expanded.clear();
     }
 
     pub fn reach(&self, edges: &Edges) -> BTreeSet<String> {

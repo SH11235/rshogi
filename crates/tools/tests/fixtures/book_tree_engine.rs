@@ -53,7 +53,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(error) => return Err(error.into()),
                 }
             }
-            let rows = config.get(&key).ok_or("局面がありません")?;
+            let resign = config.get("unknown_resign").is_some_and(|s| s == "true");
+            let rows = match config.get(&key) {
+                Some(rows) => rows.as_str(),
+                None if resign => "",
+                None => return Err("局面がありません".into()),
+            };
             let rows: Vec<_> = rows.split('|').filter(|r| !r.is_empty()).collect();
             let delay: f64 = config.get("delay").map(|v| v.parse()).transpose()?.unwrap_or(0.0);
             let started = Instant::now();

@@ -4,7 +4,9 @@ mod journal;
 mod model;
 mod output;
 mod paths;
+mod queue;
 mod service;
+mod targets;
 #[cfg(test)]
 mod tests;
 
@@ -23,8 +25,12 @@ pub struct TreeArgs {
 
 #[derive(Subcommand, Debug)]
 enum TreeCommand {
-    /// inbox の木を共有エンジンで読む
+    /// キューの対象を共有エンジンで読む
     Serve(ServeArgs),
+    /// キューに対象を足す (検査してから追記し、受領を出す)
+    Enqueue(queue::EnqueueArgs),
+    /// 受領の範囲の対象が処理され、終わるまで待つ
+    Wait(queue::WaitArgs),
     /// 宣言した条件で node_calib JSONL を取り込む
     Import(ImportArgs),
     /// 台帳だけから木を再生成する
@@ -59,6 +65,21 @@ struct ServeArgs {
     stall_secs: u64,
     #[arg(long, default_value_t = 3)]
     max_restarts: usize,
+    /// 対象の出力の根。`<out-root>/<id>/<own>/g<世代>/` に書く。state に固定される
+    #[arg(long)]
+    out_root: PathBuf,
+    /// キューの行で opts.opp_n を省いたときの既定
+    #[arg(long, default_value_t = 2)]
+    opp_n: usize,
+    /// キューの行で opts.stop を省いたときの既定
+    #[arg(long, default_value_t = 300)]
+    stop: i32,
+    /// キューの行で opts.rounds を省いたときの既定
+    #[arg(long, default_value_t = 3)]
+    rounds: usize,
+    /// キューの行で opts.draw を省いたときの既定
+    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+    draw: i32,
 }
 
 #[derive(Args, Debug)]
@@ -86,6 +107,8 @@ struct ReplayArgs {
 pub fn run(args: TreeArgs) -> Result<()> {
     match args.command {
         TreeCommand::Serve(args) => service::serve(args),
+        TreeCommand::Enqueue(args) => queue::enqueue(args),
+        TreeCommand::Wait(args) => queue::wait(args),
         TreeCommand::Import(args) => {
             let settings = Settings::new(&args.reading)?;
             let mut journal = Journal::open(&args.journal, &settings.fingerprint)?;
@@ -96,7 +119,9 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Replay(args) => {
             let definition = Definition::load(&args.tree)?;
             paths::reject_collisions(&args.journal, None, &[&definition])?;
+            // tree.lock を先に取る。後から起動した serve はこの dir を用意する前に tree.lock を見る。
             let output_lock = journal::LockedFile::open(&definition.out.join("tree.lock"))?;
+            let root_locks = paths::lock_serve_roots(&definition.out)?;
             paths::reject_symlink(&args.journal)?;
             let journal_lock = journal::LockedFile::open(&args.journal)?;
             model::remove_candidates(&definition.out)?;
@@ -120,6 +145,7 @@ pub fn run(args: TreeArgs) -> Result<()> {
                 model::remove_candidates(&out)?;
                 service::monitor(&out.join("STATUS"), "FAIL\n");
             }
+            drop(root_locks);
             drop(output_lock);
             if !result? {
                 anyhow::bail!("未展開手が上回る局面: 登録禁止。伸ばし直し回数を増やして再開する");

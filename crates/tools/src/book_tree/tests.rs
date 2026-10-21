@@ -393,9 +393,11 @@ fn replay_missing_reading_and_not_ready_remove_registration_material() {
     let dir = tempfile::tempdir().unwrap();
     let def = definition(dir.path(), 0);
     let mut tree = Tree::load(def.clone(), &s).unwrap();
+    std::fs::create_dir_all(&def.out).unwrap();
     std::fs::write(def.out.join("own_nodes.tsv"), "stale").unwrap();
+    // 木を作るだけでは出力に触れず、書き出しで登録材料を消す。
     let tree2 = Tree::load(def, &s).unwrap();
-    assert!(!tree2.def.out.join("own_nodes.tsv").exists());
+    assert!(tree2.def.out.join("own_nodes.tsv").exists());
     let cache = corpus(&s);
     tree.advance(&cache).unwrap();
     assert!(tree.finished);
@@ -562,7 +564,7 @@ fn reference_unresolved(tree: &Tree, values: &super::model::Values) -> super::mo
 }
 
 #[test]
-fn explicit_model_is_required_and_invalid_paths_clear_stale_candidates() {
+fn explicit_model_is_required_and_invalid_paths_leave_outputs_untouched() {
     assert!(
         Settings::new(&ReadingArgs {
             engine: std::env::current_exe().unwrap(),
@@ -580,12 +582,10 @@ fn explicit_model_is_required_and_invalid_paths_clear_stale_candidates() {
     std::fs::write(def.out.join("own_nodes.tsv"), "stale").unwrap();
     def.paths_sha256 = Some("wrong".into());
     assert!(Tree::load(def.clone(), &s).is_err());
-    assert!(!def.out.join("own_nodes.tsv").exists());
-    std::fs::write(def.out.join("own_nodes.tsv"), "stale").unwrap();
     def.paths_sha256 = None;
     def.paths = dir.path().join("absent");
     assert!(Tree::load(def.clone(), &s).is_err());
-    assert!(!def.out.join("own_nodes.tsv").exists());
+    assert_eq!(std::fs::read_to_string(def.out.join("own_nodes.tsv")).unwrap(), "stale");
 }
 
 #[test]
@@ -633,7 +633,7 @@ fn empty_game_adds_second_candidate_and_status_failure_does_not_block_outputs() 
     assert!(tree.finished);
     assert_eq!(tree.candidates[ROOT], vec!["5i4i", "5i6i"]);
     assert_eq!(tree.ply[ROOT], 20);
-    std::fs::create_dir(tree.def.out.join("STATUS")).unwrap();
+    std::fs::create_dir_all(tree.def.out.join("STATUS")).unwrap();
     assert!(tree.write_outputs().unwrap());
     assert!(tree.def.out.join("own_nodes.tsv").exists());
 }
@@ -728,7 +728,7 @@ fn min_failure_is_reported_and_done_follows_all_artifacts() {
     def.depth = 0;
     let mut tree = Tree::load(def, &s).unwrap();
     tree.advance(&corpus(&s)).unwrap();
-    std::fs::create_dir(tree.def.out.join("tree_bp_min.db")).unwrap();
+    std::fs::create_dir_all(tree.def.out.join("tree_bp_min.db")).unwrap();
     assert!(tree.write_outputs().unwrap());
     let report = std::fs::read_to_string(tree.def.out.join("report.txt")).unwrap();
     assert!(report.contains("book_backprop (min、参考) が失敗した:"));
@@ -844,47 +844,49 @@ fn replay_rejects_journal_and_paths_collisions_before_changing_outputs() {
     }
 }
 
+fn serve_args(state: &Path, journal: &Path, out_root: &Path, engine: &Path) -> ServeArgs {
+    ServeArgs {
+        state: state.to_owned(),
+        journal: Some(journal.to_owned()),
+        reading: ReadingArgs {
+            engine: engine.to_owned(),
+            engine_options: vec![format!("EvalFile={}", engine.display())],
+            nodes: 100,
+            multipv: 3,
+            hash: 16,
+        },
+        workers: 0,
+        stall_secs: 1,
+        max_restarts: 0,
+        out_root: out_root.to_owned(),
+        opp_n: 2,
+        stop: 300,
+        rounds: 3,
+        draw: 0,
+    }
+}
+
 #[test]
-fn serve_startup_rejects_accepted_collisions_before_changing_outputs() {
+fn serve_startup_rejects_old_checkpoints_and_out_root_collisions_before_changing_outputs() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
     std::fs::create_dir(&state).unwrap();
     let def = definition(dir.path(), 0);
-    std::fs::create_dir(&def.out).unwrap();
-    let journal = def.out.join("d0.jsonl");
+    let out_root = dir.path().join("trees");
+    let journal = dir.path().join("journal.jsonl");
     std::fs::write(&journal, "protected").unwrap();
-    std::fs::write(def.out.join("own_nodes.tsv"), "protected").unwrap();
-    let toml = dir.path().join("tree.toml");
-    std::fs::write(
-        &toml,
-        "paths='paths.tsv'\nout='out'\ndepth=0\nopp_n=1\nstop=300\nown='b'\nrounds=0\n",
-    )
-    .unwrap();
-    let reading = ReadingArgs {
-        engine: def.paths.clone(),
-        engine_options: vec![format!("EvalFile={}", def.paths.display())],
-        nodes: 100,
-        multipv: 3,
-        hash: 16,
-    };
-    let settings = Settings::new(&reading).unwrap();
-    std::fs::write(state.join("accepted.json"), serde_json::to_vec(&serde_json::json!([{
-        "out": def.out, "path": toml, "sha256": journal::digest(&toml).unwrap(),
-        "paths_sha256": journal::digest(&def.paths).unwrap(), "fingerprint": settings.fingerprint
-    }])).unwrap()).unwrap();
-    let error = service::serve(ServeArgs {
-        state,
-        journal: Some(journal.clone()),
-        reading,
-        workers: 0,
-        stall_secs: 1,
-        max_restarts: 0,
-    })
-    .unwrap_err();
-    assert!(error.to_string().contains("衝突"));
-    assert_eq!(std::fs::read_to_string(journal).unwrap(), "protected");
-    assert_eq!(std::fs::read_to_string(def.out.join("own_nodes.tsv")).unwrap(), "protected");
-    assert!(!def.out.join("tree.lock").exists());
+    for inside in [state.clone(), state.join("trees")] {
+        let error = service::serve(serve_args(&state, &journal, &inside, &def.paths)).unwrap_err();
+        assert!(error.to_string().contains("衝突"), "{error:#}");
+    }
+    assert_eq!(std::fs::read_to_string(&journal).unwrap(), "protected");
+    assert!(!state.join("targets.status.json").exists());
+    let journal = dir.path().join("fresh.jsonl");
+    std::fs::write(state.join("accepted.json"), "[]").unwrap();
+    let error = service::serve(serve_args(&state, &journal, &out_root, &def.paths)).unwrap_err();
+    assert!(error.to_string().contains("inbox 受付の state"), "{error:#}");
+    assert!(!journal.exists());
+    assert!(!state.join("targets.status.json").exists());
 }
 
 #[cfg(unix)]
@@ -895,7 +897,7 @@ fn managed_paths_reject_live_and_dangling_symlinks() {
     let def = definition(dir.path(), 0);
     let journal = dir.path().join("journal");
     let state = dir.path().join("state");
-    std::fs::create_dir_all(state.join("inbox")).unwrap();
+    std::fs::create_dir_all(state.join("restart")).unwrap();
     std::fs::create_dir(&def.out).unwrap();
     for exists in [false, true] {
         let target = dir.path().join("target");
@@ -915,14 +917,14 @@ fn managed_paths_reject_live_and_dangling_symlinks() {
             assert!(error.to_string().contains("シンボリックリンク"), "{error:#}");
             std::fs::remove_file(path).unwrap();
         }
-        for path in [&def.out, &state.join("inbox"), &state] {
+        for path in [&def.out, &state.join("restart"), &state] {
             std::fs::remove_dir_all(path).unwrap();
             symlink(&target, path).unwrap();
             assert!(super::paths::reject_collisions(&journal, Some(&state), &[&def]).is_err());
             std::fs::remove_file(path).unwrap();
             std::fs::create_dir_all(path).unwrap();
         }
-        std::fs::create_dir_all(state.join("inbox")).unwrap();
+        std::fs::create_dir_all(state.join("restart")).unwrap();
     }
 }
 
@@ -987,4 +989,35 @@ fn single_pv_win_is_a_leaf_and_mixed_win_rows_are_rejected() {
     assert!(r.validate(&s).is_err());
     let mut collector = super::service::Collector::default();
     assert!(collector.info("info depth 1 multipv 2 score mate 0 pv win").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn bw_line_is_rejected_whole_when_one_side_cannot_be_built() {
+    use sha2::Digest;
+    let dir = tempfile::tempdir().unwrap();
+    let out_root = dir.path().join("trees");
+    std::fs::create_dir_all(out_root.join("x")).unwrap();
+    std::os::unix::fs::symlink(dir.path(), out_root.join("x/w")).unwrap();
+    let checkpoint = targets::Checkpoint::new(out_root, "fp".into());
+    let defaults = targets::Defaults {
+        opp_n: 2,
+        stop: 300,
+        rounds: 3,
+        draw: 0,
+    };
+    let lines = format!(
+        "{}\n{}\n",
+        serde_json::json!({"id":"x","root":format!("sfen {ROOT} 1"),"own":"bw","depth":2}),
+        serde_json::json!({"id":"y","root":format!("sfen {ROOT} 1"),"own":"bw","depth":2})
+    );
+    let (next, built) = checkpoint.apply(lines.as_bytes(), &defaults, &sha2::Sha256::new(), &[]);
+    assert_eq!(next.rejected.len(), 1);
+    assert_eq!(next.rejected[0].id.as_deref(), Some("x"));
+    assert!(next.rejected[0].reason.contains("シンボリックリンク"));
+    let accepted: Vec<_> =
+        next.targets.iter().map(|t| (t.id.as_str(), t.own.as_str(), t.order)).collect();
+    assert_eq!(accepted, [("y", "b", 0), ("y", "w", 0)]);
+    assert_eq!(built.len(), 2);
+    assert_eq!(next.processed_bytes, lines.len() as u64);
 }
