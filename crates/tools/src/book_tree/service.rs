@@ -285,6 +285,9 @@ fn generation_dir(checkpoint: &Checkpoint, target: &Target, generation: u32) -> 
 fn prepare(live: &mut Live, target: &Target) -> Result<()> {
     super::paths::artifacts(&target.out)?;
     std::fs::create_dir_all(&target.out)?;
+    // serve.lock より前に始まった replay は tree.lock を持っている。終わるまで用意しない
+    // (serve.lock を作った後に始まる replay は serve.lock で止まる)。
+    let _replay = LockedFile::open(&target.out.join("tree.lock"))?;
     remove_candidates(&target.out)?;
     write_atomic(&target.out.join("paths.record.tsv"), &target.definition.record())?;
     monitor(&target.out.join("STATUS"), if target.hold { "HELD\n" } else { "QUEUED\n" });
@@ -301,6 +304,7 @@ fn supersede(checkpoint: &Checkpoint, target: &Target) -> Result<()> {
             continue;
         }
         super::paths::artifacts(&dir)?;
+        let _replay = LockedFile::open(&dir.join("tree.lock"))?;
         if std::fs::read_to_string(dir.join("STATUS")).ok().as_deref() != Some("SUPERSEDED\n") {
             write_atomic(&dir.join("STATUS"), "SUPERSEDED\n")?;
         }

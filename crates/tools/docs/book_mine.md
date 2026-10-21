@@ -286,7 +286,7 @@ book_mine tree enqueue --state /path/to/state --repair            # 末尾の書
 
 対象の出力は `<out-root>/<id>/<own>/g<世代>/` です。前の世代の dir は残し、その `STATUS` を `SUPERSEDED` にします (中身は消しません)。後段 (登録) には `book_mine tree wait` の出力か `targets.status.json` で、**今の世代かつ `ready=true`** の出力先だけを渡してください。各世代の dir には記録として根と手順の `paths.record.tsv` (paths.tsv 形式) を書きます。serve はこれを入力に使いません。replay に使うときは dir の外へ写してから指定します。
 
-serve は出力の根の `serve.lock` を終了まで保持し、根の下はその serve だけが書きます (対象の数によらず lock は 1 つ)。同じ出力の根で 2 本目の serve は起動できず、`tree replay` は出力先の上の階層に `serve.lock` があればそれを取ってから書くので、serve が動いている間は根の下へ replay できません。前の世代の dir の SUPERSEDED は書けなければ次の周回でやり直し、消された前の世代の dir は作り直しません。エンジンを起動できない失敗 (パスの誤りや開けるファイル数の上限など) は局面の失敗に数えず、読みが成功するまで ALERT に 1 回だけ書いて、次の周回で起動し直します。出力の根が台帳・state の中にあれば起動を拒否し、対象の出力先が台帳・state と重なる行と、出力先の途中・生成物がシンボリックリンクの行は拒否します。
+serve は出力の根の `serve.lock` を終了まで保持し、根の下はその serve だけが書きます (対象の数によらず lock は 1 つ)。同じ出力の根で 2 本目の serve は起動できません。`tree replay` は出力先の `tree.lock` を取り、上の階層に `serve.lock` があればそれも取ってから書くので、serve が動いている間は根の下へ replay できません。serve は世代の dir を用意する (前の世代を SUPERSEDED にする) ときにその dir の `tree.lock` を一時的に取るので、serve より前に始まった replay が終わるまでその対象を用意しません。前の世代の dir の SUPERSEDED は書けなければ次の周回でやり直し、消された前の世代の dir は作り直しません。エンジンを起動できない失敗 (パスの誤りや開けるファイル数の上限など) は局面の失敗に数えず、読みが成功するまで ALERT に 1 回だけ書いて、次の周回で起動し直します。出力の根が台帳・state の中にあれば起動を拒否し、対象の出力先が台帳・state と重なる行と、出力先の途中・生成物がシンボリックリンクの行は拒否します。
 
 ### 受け付けとチェックポイント
 
@@ -312,7 +312,7 @@ book_mine tree wait --state "$STATE" --receipt "$receipt" [--ids p12_w,p11_b]
 - 木が全て完了しても `IDLE` で受付を続けます。プロセスの `STATUS` は `<状態> <run_id>` の 1 行です (人が見るためのもので、wait は使いません)。
 - `--stall-secs` (既定600) の間 info の nodes / depth のどちらも増えなければ `ALERT` に書きます。`info string` や同じ値の繰り返しでは時計を戻しません。既定では探索を止めません。
 - 固まった worker を明示的に作り直すには `<state>/restart/<worker番号>` を作ります。受付時点でその worker が読んでいる局面を列に戻します。対象の読みが無い番号は ALERT して制御ファイルを消します。明示 restart は自動再起動の上限に数えません。エンジン切断は自動で作り直します。`--max-restarts` (既定3) を超える同一局面の失敗、または再現する読みの検査エラーでは、その局面を待つ木だけを FAIL にして ALERT し、他の木の処理を続けます。serve の MultiPV は1行以上かつ指定数以下を受理し、各手の合法性と重複が無いことを検査します。根の不成省略などで指定数より少なくても受理します。0行の場合は合法手の有無によらず `bestmove resign` / `bestmove win` を受理し、展開しない葉として保存します。1位が `win` の1行だけで `bestmove win` が返る場合も、0行の宣言勝ちと同じ葉として扱います。合法手数や根の候補数から行数は推測しません。
-- state の lock と journal 自体の lock を終了まで保持します。別 state でも同じ journal の同時使用はできません。木の出力先にも tree.lock を保持し、別の serve や replay から保護します。`--journal` を省略すると `<state>/journal.jsonl` を使います。
+- state の lock と journal 自体の lock を終了まで保持します。別 state でも同じ journal の同時使用はできません。木の出力は出力の根の `serve.lock` で別の serve や replay から保護します。`--journal` を省略すると `<state>/journal.jsonl` を使います。
 
 journal、state dir とその管理ファイル (キュー・lock・チェックポイント・状態のファイルなど) がシンボリックリンクなら、リンク先の有無によらず拒否します。親 dir の途中のリンクと未作成部分の `..` は解決して比較します。journal と state の管理パスの衝突も拒否します。replay では、木の出力 dir（配下の生成物全体）と journal・state・paths.tsv・定義ファイルの衝突を拒否します。
 

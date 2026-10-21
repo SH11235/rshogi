@@ -1271,3 +1271,31 @@ fn engine_that_cannot_start_is_alerted_once_without_failing_the_tree() {
     assert!(server.0.try_wait().unwrap().is_none());
     stop(state, &mut server);
 }
+
+#[test]
+fn replay_started_before_serve_keeps_its_output_until_it_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = &dir.path().join("state");
+    std::fs::create_dir(state).unwrap();
+    let config = fast_fixture(state);
+    // serve.lock が無い間に始まった replay の代わりに、出力先の tree.lock を持っておく。
+    std::fs::create_dir_all(out(state, "a", "b")).unwrap();
+    let replay = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(out(state, "a", "b").join("tree.lock"))
+        .unwrap();
+    replay.try_lock().unwrap();
+    let receipt = add_tree(state, "a");
+    let mut server = start(state, &config);
+    wait_for(|| alerts(state).contains("出力先を用意できません"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!out(state, "a", "b").join("STATUS").exists());
+    assert!(!out(state, "a", "b").join("paths.record.tsv").exists());
+    replay.unlock().unwrap();
+    assert!(wait_cmd(state, &receipt, None).output().unwrap().status.success());
+    assert_eq!(status(&out(state, "a", "b")), "DONE\n");
+    stop(state, &mut server);
+}

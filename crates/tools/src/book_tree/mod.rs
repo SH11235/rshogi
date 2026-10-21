@@ -119,8 +119,9 @@ pub fn run(args: TreeArgs) -> Result<()> {
         TreeCommand::Replay(args) => {
             let definition = Definition::load(&args.tree)?;
             paths::reject_collisions(&args.journal, None, &[&definition])?;
-            let root_locks = paths::lock_serve_roots(&definition.out)?;
+            // tree.lock を先に取る。後から起動した serve はこの dir を用意する前に tree.lock を見る。
             let output_lock = journal::LockedFile::open(&definition.out.join("tree.lock"))?;
+            let root_locks = paths::lock_serve_roots(&definition.out)?;
             paths::reject_symlink(&args.journal)?;
             let journal_lock = journal::LockedFile::open(&args.journal)?;
             model::remove_candidates(&definition.out)?;
@@ -144,8 +145,8 @@ pub fn run(args: TreeArgs) -> Result<()> {
                 model::remove_candidates(&out)?;
                 service::monitor(&out.join("STATUS"), "FAIL\n");
             }
-            drop(output_lock);
             drop(root_locks);
+            drop(output_lock);
             if !result? {
                 anyhow::bail!("未展開手が上回る局面: 登録禁止。伸ばし直し回数を増やして再開する");
             }
