@@ -1046,15 +1046,15 @@ pub type NetworkLayerStacks1536x16x64 = NetworkLayerStacks<
 >;
 
 // =============================================================================
-// LayerStacksNetwork - 2-tier (FT, L1) dispatch enum
+// LayerStacksNetwork - 2-tier (FT, 寸法) dispatch enum
 // =============================================================================
 
-/// LayerStacks ネットワークの FT 別内部 enum。L1 サイズ軸を持つ。
+/// LayerStacks ネットワークの FT 別内部 enum。寸法の軸を持つ。
 ///
 /// 外側の `LayerStacksNetwork` が FT 軸 (5 種類のうち 1 つ) で dispatch し、
-/// この内部 enum が L1 軸 (5 サイズのうち 1 つ) で dispatch する。
+/// この内部 enum が寸法の軸 (10 構成のうち 1 つ) で dispatch する。
 ///
-/// **重要**: 大会ビルドでは必ず単一 (FT, L1) のみを有効化すること。複数
+/// **重要**: 大会ビルドでは必ず単一 (FT, 寸法) のみを有効化すること。複数
 /// バリアントを同時有効にすると dispatch match の overhead が出る (実測 ~5%)。
 pub enum LsNetByFt<FT: LsFeatureSpec + 'static> {
     #[cfg(feature = "layerstacks-1536x16x32")]
@@ -2085,7 +2085,7 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         }
     }
 
-    /// `eval diag` 用: refresh + evaluate_with_diagnostics を全 L1 variant 上で実行する。
+    /// `eval diag` 用: refresh + evaluate_with_diagnostics を全寸法の variant 上で実行する。
     ///
     /// `LayerStacksNetwork::refresh_and_evaluate_with_diagnostics` から委譲される。
     #[cfg(all(feature = "layerstack-arch", feature = "diagnostics"))]
@@ -2168,10 +2168,10 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
     }
 }
 
-/// LayerStacks ネットワークの FT 軸 dispatch enum。各 variant の内部に L1 軸 dispatch
+/// LayerStacks ネットワークの FT 軸 dispatch enum。各 variant の内部に寸法の軸の dispatch
 /// `LsNetByFt<FT>` を持つ二段構造。
 ///
-/// active な FT variant は `ft-*` feature で、active な L1 variant は `layerstacks-*` feature で
+/// active な FT variant は `ft-*` feature で、active な寸法の variant は `layerstacks-*` feature で
 /// 制御される。
 pub enum LayerStacksNetwork {
     #[cfg(feature = "nnue-effect-bucket")]
@@ -2207,7 +2207,7 @@ pub enum LayerStacksNetwork {
 /// use rshogi_core::nnue::ls_dispatch_ft_size;
 /// ls_dispatch_ft_size!(ls_net, |net| {
 ///     run_layer_stack_bench(net, /* ... */)?;
-/// }, _ => bail!("有効な LayerStacks (FT × L1) バリアントがありません"))
+/// }, _ => bail!("有効な LayerStacks (FT × 寸法) バリアントがありません"))
 /// ```
 #[macro_export]
 macro_rules! ls_dispatch_ft_size {
@@ -2767,9 +2767,9 @@ impl LayerStacksNetwork {
         ls_match_ft!(self, by_ft => by_ft.new_acc_cache())
     }
 
-    /// 診断ログ向け: refresh + evaluate_with_diagnostics を全 FT × L1 variant 上で実行する。
+    /// 診断ログ向け: refresh + evaluate_with_diagnostics を全 FT × 寸法の variant 上で実行する。
     ///
-    /// `eval diag` USI コマンドから呼ばれる。FT/L1 軸をすべて束ねた high-level helper。
+    /// `eval diag` USI コマンドから呼ばれる。FT/寸法の軸をすべて束ねた high-level helper。
     #[cfg(all(feature = "layerstack-arch", feature = "diagnostics"))]
     pub fn refresh_and_evaluate_with_diagnostics(&self, pos: &Position) -> Value {
         ls_match_ft!(self, by_ft => by_ft.refresh_and_evaluate_with_diagnostics(pos))
