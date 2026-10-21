@@ -136,10 +136,11 @@ fn run_for_network<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L2_OUT: usize,
     FT: LsFeatureSpec,
 >(
     cli: &Cli,
-    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT>,
+    network: &NetworkLayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, FT, LS_L2_OUT>,
 ) -> Result<()> {
     let file = std::fs::File::open(&cli.sfens)
         .with_context(|| format!("sfens を開けません: {:?}", cli.sfens))?;

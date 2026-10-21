@@ -151,7 +151,7 @@ pub const NNUE_PYTORCH_L1: usize = 1536;
 /// LayerStacks 16x32 バリアントの L2 直前 main 次元数
 pub const LAYER_STACK_16X32_MAIN_DIM: usize = 15;
 
-/// LayerStacks の L2 出力次元数
+/// LayerStacks の既定 L2 出力次元数（専用ネットワークは const generic で指定）
 pub const NNUE_PYTORCH_L3: usize = 32;
 
 /// LayerStacks の bucket 数を `.bin` header から読めない legacy 形式

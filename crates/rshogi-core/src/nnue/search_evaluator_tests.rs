@@ -168,6 +168,12 @@ macro_rules! layer_observe {
             LayerStacksAccStack::L1024x16x32($entry) => $body,
             #[cfg(feature = "layerstacks-3072x16x32")]
             LayerStacksAccStack::L3072x16x32($entry) => $body,
+            #[cfg(feature = "layerstacks-2304x16x64")]
+            LayerStacksAccStack::L2304x16x64($entry) => $body,
+            #[cfg(feature = "layerstacks-3072x16x64")]
+            LayerStacksAccStack::L3072x16x64($entry) => $body,
+            #[cfg(feature = "layerstacks-1536x16x64")]
+            LayerStacksAccStack::L1536x16x64($entry) => $body,
         }
     };
 }
@@ -397,9 +403,12 @@ fn check_models() {
         .unwrap();
     install_progress_weights();
     check_loader_matrix();
-    search_models::for_each_model(|name, mut bytes| {
+    search_models::for_each_model(true, |name, mut bytes| {
         if name == "LayerStacks" {
-            bytes = with_auxiliary_weights(bytes, 1536, nnue::HALFKA_HM_DIMENSIONS);
+            let arch_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+            let arch = std::str::from_utf8(&bytes[12..12 + arch_len]).unwrap();
+            let (l1, _, _) = nnue::spec::parse_arch_dimensions(arch);
+            bytes = with_auxiliary_weights(bytes, l1, nnue::HALFKA_HM_DIMENSIONS);
         }
         nnue::init_nnue_from_bytes(&bytes).unwrap();
         let network = get_network().unwrap();
@@ -715,6 +724,9 @@ fn check_loader_matrix() {
             (512, 16, 32, cfg!(feature = "layerstacks-512x16x32")),
             (1024, 16, 32, cfg!(feature = "layerstacks-1024x16x32")),
             (3072, 16, 32, cfg!(feature = "layerstacks-3072x16x32")),
+            (2304, 16, 64, cfg!(feature = "layerstacks-2304x16x64")),
+            (3072, 16, 64, cfg!(feature = "layerstacks-3072x16x64")),
+            (1536, 16, 64, cfg!(feature = "layerstacks-1536x16x64")),
             (128, 8, 16, false),
         ] {
             if !shape_enabled && l1 != 128 && (l1, l2) != (1536, 16) {

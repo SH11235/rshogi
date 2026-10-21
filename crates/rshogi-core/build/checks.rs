@@ -25,6 +25,9 @@ fn validate_feature_combination(
         "layerstacks-512x16x32",
         "layerstacks-1024x16x32",
         "layerstacks-3072x16x32",
+        "layerstacks-2304x16x64",
+        "layerstacks-3072x16x64",
+        "layerstacks-1536x16x64",
     ];
     let layerstacks_count = layerstacks_features
         .iter()
@@ -137,17 +140,20 @@ fn validate_feature_combination(
         }
     }
 
-    // nnue-progress-diff は L0=1536 系 / L0=3072 で性能向上 (実測確認済み)、
+    // nnue-progress-diff は L2=32 の L0=1536 系 / L0=3072 で性能向上、2304x16x64 で中立 (実測)、
     // L0=768/512 で退行する trade-off。退行構成での誤指定を弾く。
     if has_feature("nnue-progress-diff") {
         let valid = mode_specific
             && (has_feature("layerstacks-1536x16x32")
                 || has_feature("layerstacks-1536x32x32")
-                || has_feature("layerstacks-3072x16x32"));
+                || has_feature("layerstacks-3072x16x32")
+                || has_feature("layerstacks-2304x16x64")
+                || has_feature("layerstacks-3072x16x64")
+                || has_feature("layerstacks-1536x16x64"));
         if !valid {
             return Err(
                 "nnue-progress-diff は mode-specific + layerstacks-1536x16x32 / layerstacks-1536x32x32 \
-                 / layerstacks-3072x16x32 でのみ有効です。他構成では NPS が退行します。"
+                 / layerstacks-3072x16x32 / layerstacks-2304x16x64 / layerstacks-3072x16x64 / layerstacks-1536x16x64 でのみ有効です。他構成では NPS が退行します。"
                     .to_string(),
             );
         }

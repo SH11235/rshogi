@@ -163,3 +163,7 @@ Floodgate の HTTPS 取得は reqwest 0.13 の rustls backend を使う。
 より多くのコマンド例は [examples/README.md](examples/README.md) を参照。
 
 - [spsa_stats_to_plot_csv](docs/spsa_stats_to_plot_csv.md) - 入力 alias を拒否し、変換成功時だけ plot CSV を置換
+
+`eval_sfens` / `bench_nnue_eval` / `verify_nnue_accumulator` /
+`nnue_saturation` の静的 LayerStacks 解析は、追加 feature
+`layerstacks-3072x16x64` / `layerstacks-2304x16x64` / `layerstacks-1536x16x64` にも対応する。

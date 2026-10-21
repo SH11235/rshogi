@@ -11,17 +11,14 @@
 //! LayerStacks (bucket選択後):
 //!   L1: L1 → LS_L1_OUT, split [LS_L1_OUT - 1, 1]
 //!   Sqr + ClippedReLU: LS_L1_OUT - 1 → LS_L2_IN (= 2 * (LS_L1_OUT - 1))
-//!   L2: LS_L2_IN → 32, ReLU
-//!   Output: 32 → 1 + skip
+//!   L2: LS_L2_IN → LS_L2_OUT, ReLU
+//!   Output: LS_L2_OUT → 1 + skip
 //! ```
 
 use super::accumulator::Aligned;
 use super::constants::{DEFAULT_NUM_BUCKETS, MAX_LAYER_STACK_BUCKETS, NNUE_PYTORCH_L3};
 use super::layers::AffineTransform;
 use std::io::{self, Read};
-
-/// Output 入力のパディング済み次元数（padded_input(32) = 32）
-const OUTPUT_PADDED_INPUT: usize = super::layers::padded_input(NNUE_PYTORCH_L3);
 
 #[cfg(test)]
 fn sqr_clipped_relu_explicit<const DIM: usize>(input: &[i32; DIM], output: &mut [u8; DIM]) {
@@ -52,8 +49,8 @@ pub struct LsSaturationCounts {
 ///
 /// 各バケットは以下の構造を持つ:
 /// - L1: L1 → LS_L1_OUT
-/// - L2: LS_L2_IN → 32
-/// - Output: 32 → 1
+/// - L2: LS_L2_IN → LS_L2_OUT
+/// - Output: LS_L2_OUT → 1
 ///
 /// 各層は `AffineTransform` を使用し、AVX512/AVX2/SSSE3/WASM SIMD128 に対応。
 pub struct LayerStackBucket<
@@ -61,13 +58,14 @@ pub struct LayerStackBucket<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L2_OUT: usize = NNUE_PYTORCH_L3,
 > {
     /// L1層: L1 → LS_L1_OUT
     l1: AffineTransform<L1, LS_L1_OUT>,
-    /// L2層: LS_L2_IN → 32
-    pub l2: AffineTransform<LS_L2_IN, NNUE_PYTORCH_L3>,
-    /// 出力層: 32 → 1
-    pub output: AffineTransform<NNUE_PYTORCH_L3, 1>,
+    /// L2層: LS_L2_IN → LS_L2_OUT
+    pub l2: AffineTransform<LS_L2_IN, LS_L2_OUT>,
+    /// 出力層: LS_L2_OUT → 1
+    pub output: AffineTransform<LS_L2_OUT, 1>,
     #[cfg(all(
         target_arch = "x86_64",
         target_feature = "avx512f",
@@ -82,7 +80,8 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
-> LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+    const LS_L2_OUT: usize,
+> LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, LS_L2_OUT>
 {
     const MAIN_DIM: usize = LS_L1_OUT - 1;
 
@@ -94,10 +93,11 @@ impl<
     /// 層から bucket を構築し、対象形状では融合用重みも用意する。
     pub fn from_layers(
         l1: AffineTransform<L1, LS_L1_OUT>,
-        l2: AffineTransform<LS_L2_IN, NNUE_PYTORCH_L3>,
-        output: AffineTransform<NNUE_PYTORCH_L3, 1>,
+        l2: AffineTransform<LS_L2_IN, LS_L2_OUT>,
+        output: AffineTransform<LS_L2_OUT, 1>,
     ) -> Self {
         const {
+            assert!(LS_L2_OUT == 32 || LS_L2_OUT == 64, "LayerStacks L2 output must be 32 or 64");
             assert!(LS_L1_OUT >= 2, "LayerStacks L1 output must be at least 2");
             assert!(
                 LS_L2_IN == (LS_L1_OUT - 1) * 2,
@@ -181,9 +181,9 @@ impl<
     pub fn propagate(&self, input: &[u8; L1]) -> i32 {
         let mut l1_out = [0i32; LS_L1_OUT];
         let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
-        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+        let mut l2_out = [0i32; LS_L2_OUT];
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut l2_relu = Aligned([0u8; LS_L2_OUT]);
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let mut output_arr = [0i32; 1];
 
@@ -199,10 +199,10 @@ impl<
         // ClippedReLU:    clamp(input >> 6, 0, 127)
         l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
 
-        // L2: LS_L2_IN → 32
+        // L2: LS_L2_IN → LS_L2_OUT
         self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        let output = clipped_relu_affine_32_to_1_avx2(&l2_out, &self.output);
+        let output = clipped_relu_affine_to_1(&l2_out, &self.output);
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let output = {
             clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
@@ -222,9 +222,9 @@ impl<
     ))]
     fn propagate_from_l1(&self, l1_out: &[i32; LS_L1_OUT]) -> i32 {
         let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
-        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+        let mut l2_out = [0i32; LS_L2_OUT];
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut l2_relu = Aligned([0u8; LS_L2_OUT]);
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let mut output_arr = [0i32; 1];
 
@@ -237,10 +237,10 @@ impl<
         // ClippedReLU:    clamp(input >> 6, 0, 127)
         l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(l1_out, &mut l2_input.0);
 
-        // L2: LS_L2_IN → 32
+        // L2: LS_L2_IN → LS_L2_OUT
         self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        let output = clipped_relu_affine_32_to_1_avx2(&l2_out, &self.output);
+        let output = clipped_relu_affine_to_1(&l2_out, &self.output);
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let output = {
             clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
@@ -268,8 +268,8 @@ impl<
     ) -> i32 {
         let mut l1_out = [0i32; LS_L1_OUT];
         let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
-        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
-        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut l2_out = [0i32; LS_L2_OUT];
+        let mut l2_relu = Aligned([0u8; LS_L2_OUT]);
         let mut output_arr = [0i32; 1];
 
         self.l1.propagate_7bit(input, &mut l1_out);
@@ -280,9 +280,8 @@ impl<
 
         self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
-        counts.l2_act_sat +=
-            l2_relu.0[..NNUE_PYTORCH_L3].iter().filter(|&&v| v == 127).count() as u64;
-        counts.l2_act_total += NNUE_PYTORCH_L3 as u64;
+        counts.l2_act_sat += l2_relu.0[..LS_L2_OUT].iter().filter(|&&v| v == 127).count() as u64;
+        counts.l2_act_total += LS_L2_OUT as u64;
 
         self.output.propagate_7bit(&l2_relu.0, &mut output_arr);
         output_arr[0] + l1_skip
@@ -295,8 +294,8 @@ impl<
     pub fn propagate_with_diagnostics(&self, input: &[u8; L1]) -> (i32, [i32; LS_L1_OUT], i32) {
         let mut l1_out = [0i32; LS_L1_OUT];
         let mut l2_input = Aligned([0u8; LS_L2_PADDED_INPUT]);
-        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
-        let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut l2_out = [0i32; LS_L2_OUT];
+        let mut l2_relu = Aligned([0u8; LS_L2_OUT]);
         let mut output_arr = [0i32; 1];
 
         self.l1.propagate_7bit(input, &mut l1_out);
@@ -305,11 +304,11 @@ impl<
         let l1_skip = l1_out[Self::MAIN_DIM];
         l1_sqr_clipped_relu_activation::<LS_L1_OUT, LS_L2_IN>(&l1_out, &mut l2_input.0);
 
-        // L2: LS_L2_IN → 32
+        // L2: LS_L2_IN → LS_L2_OUT
         self.l2.propagate_7bit(&l2_input.0, &mut l2_out);
         clipped_relu_i32_to_u8(&l2_out, &mut l2_relu.0);
 
-        // Output: 32 → 1
+        // Output: LS_L2_OUT → 1
         self.output.propagate_7bit(&l2_relu.0, &mut output_arr);
 
         // Skip connection
@@ -324,7 +323,8 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
-> Default for LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+    const LS_L2_OUT: usize,
+> Default for LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, LS_L2_OUT>
 {
     fn default() -> Self {
         Self::new()
@@ -345,9 +345,10 @@ pub struct LayerStacks<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
+    const LS_L2_OUT: usize = NNUE_PYTORCH_L3,
 > {
     /// `num_buckets` 個の bucket。長さは net file の `num_buckets` で決まる。
-    pub buckets: Vec<LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>>,
+    pub buckets: Vec<LayerStackBucket<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, LS_L2_OUT>>,
 }
 
 impl<
@@ -355,7 +356,8 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
-> LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+    const LS_L2_OUT: usize,
+> LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, LS_L2_OUT>
 {
     /// 新規作成 (default `DEFAULT_NUM_BUCKETS` 個の bucket をゼロ初期化)
     pub fn new() -> Self {
@@ -448,7 +450,8 @@ impl<
     const LS_L1_OUT: usize,
     const LS_L2_IN: usize,
     const LS_L2_PADDED_INPUT: usize,
-> Default for LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT>
+    const LS_L2_OUT: usize,
+> Default for LayerStacks<L1, LS_L1_OUT, LS_L2_IN, LS_L2_PADDED_INPUT, LS_L2_OUT>
 {
     fn default() -> Self {
         Self::new()
@@ -543,17 +546,19 @@ fn l1_sqr_clipped_relu_activation<const LS_L1_OUT: usize, const LS_L2_IN: usize>
     }
 }
 
-/// L2→Output activation: ClippedReLU（32要素 i32 → u8）
+/// L2→Output activation: ClippedReLU（i32 → u8）
 ///
 /// clamp(input >> 6, 0, 127)
 #[inline]
-fn clipped_relu_i32_to_u8(input: &[i32; NNUE_PYTORCH_L3], output: &mut [u8]) {
-    // AVX2: 32 i32 → 32 u8（8要素ずつ4回）
+fn clipped_relu_i32_to_u8<const LS_L2_OUT: usize>(input: &[i32; LS_L2_OUT], output: &mut [u8]) {
+    assert!(output.len() >= LS_L2_OUT);
+    const { assert!(LS_L2_OUT == 32 || LS_L2_OUT == 64) };
+    // AVX2: 8要素ずつ変換する。
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
         // SAFETY:
-        // - input は 32 要素（NNUE_PYTORCH_L3）
-        // - output は OUTPUT_PADDED_INPUT(=32) 要素
+        // - input は LS_L2_OUT 要素で、32 または 64。
+        // - output は LS_L2_OUT 要素以上。
         // - >>6 + clamp(0,127) の結果は [0, 127] → u8 に収まる
         unsafe {
             use std::arch::x86_64::*;
@@ -563,8 +568,8 @@ fn clipped_relu_i32_to_u8(input: &[i32; NNUE_PYTORCH_L3], output: &mut [u8]) {
             let in_ptr = input.as_ptr();
             let out_ptr = output.as_mut_ptr();
 
-            // 8要素ずつ4回 = 32要素
-            for chunk in 0..4 {
+            // 8要素ずつ全出力を変換する。
+            for chunk in 0..LS_L2_OUT / 8 {
                 let offset = chunk * 8;
                 let v = _mm256_loadu_si256(in_ptr.add(offset) as *const __m256i);
                 let shifted = _mm256_srai_epi32(v, 6);
@@ -590,18 +595,26 @@ fn clipped_relu_i32_to_u8(input: &[i32; NNUE_PYTORCH_L3], output: &mut [u8]) {
     }
 }
 
-/// LayerStacks の L2 ClippedReLU と 32→1 affine を中間配列なしで計算する。
+/// 活性化と出力層の内積を融合する。
 ///
-/// `packus` が負値を0へ飽和するため、shift後は上限127だけを明示的にclampすれば
-/// `clamp(input >> 6, 0, 127)` と一致する。32要素をレジスタ内でu8へpackし、そのまま
-/// 出力層の内積へ渡すことで、従来の32-byte store/reloadを省く。
+/// 32/64要素をレジスタ内で活性化し、そのまま出力層の内積へ渡すことで、
+/// 中間配列へのstore/reloadを省く。32要素ではshift後の上限clampとpackusを使い、
+/// 64要素では符号付き飽和packと下限clampを使う。
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 #[inline]
-fn clipped_relu_affine_32_to_1_avx2(
-    input: &[i32; NNUE_PYTORCH_L3],
-    affine: &AffineTransform<NNUE_PYTORCH_L3, 1>,
+fn clipped_relu_affine_to_1<const LS_L2_OUT: usize>(
+    input: &[i32; LS_L2_OUT],
+    affine: &AffineTransform<LS_L2_OUT, 1>,
 ) -> i32 {
-    const { assert!(NNUE_PYTORCH_L3 == 32) };
+    const { assert!(LS_L2_OUT == 32 || LS_L2_OUT == 64) };
+    if LS_L2_OUT == 64 {
+        let input = input.as_slice().try_into().unwrap();
+        let weights = (&affine.weights[..]).try_into().unwrap();
+        #[cfg(target_feature = "avx512bw")]
+        return clipped_relu_affine_64_to_1_avx512(input, weights, affine.biases[0]);
+        #[cfg(not(target_feature = "avx512bw"))]
+        return clipped_relu_affine_64_to_1_avx2(input, weights, affine.biases[0]);
+    }
 
     // SAFETY:
     // - input は32要素なので4本の256-bit loadが有効。
@@ -640,6 +653,80 @@ fn clipped_relu_affine_32_to_1_avx2(
     }
 }
 
+/// 64要素の活性化と内積を融合し、2ブロックの積和を最後に一度だけ水平加算する。
+///
+/// i32を先にi16へ飽和しても、範囲外の値は最終的に0または127になる。
+/// 16-bit算術shift後のsigned packとsigned maxにより、全i32で
+/// `clamp(input >> 6, 0, 127)` と一致する。
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
+    any(test, not(target_feature = "avx512bw"))
+))]
+#[inline]
+fn clipped_relu_affine_64_to_1_avx2(input: &[i32; 64], weights: &[i8; 64], bias: i32) -> i32 {
+    // SAFETY: 各loadは64要素の配列内に収まり、alignmentは要求しない。
+    // 活性化は[0,127]なのでmaddubsの2項和はi16に収まる。
+    unsafe {
+        use std::arch::x86_64::*;
+        let reorder = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+        let mut sum = _mm256_setzero_si256();
+        for block in 0..2 {
+            let ptr = input.as_ptr().add(block * 32).cast::<__m256i>();
+            let words01 = _mm256_srai_epi16(
+                _mm256_packs_epi32(_mm256_loadu_si256(ptr), _mm256_loadu_si256(ptr.add(1))),
+                6,
+            );
+            let words23 = _mm256_srai_epi16(
+                _mm256_packs_epi32(_mm256_loadu_si256(ptr.add(2)), _mm256_loadu_si256(ptr.add(3))),
+                6,
+            );
+            let packed =
+                _mm256_max_epi8(_mm256_packs_epi16(words01, words23), _mm256_setzero_si256());
+            let activations = _mm256_permutevar8x32_epi32(packed, reorder);
+            let weight = _mm256_loadu_si256(weights.as_ptr().add(block * 32).cast());
+            let product =
+                _mm256_madd_epi16(_mm256_maddubs_epi16(activations, weight), _mm256_set1_epi16(1));
+            sum = _mm256_add_epi32(sum, product);
+        }
+        let sum128 = _mm_add_epi32(_mm256_castsi256_si128(sum), _mm256_extracti128_si256(sum, 1));
+        let sum64 = _mm_add_epi32(sum128, _mm_unpackhi_epi64(sum128, sum128));
+        let sum32 = _mm_add_epi32(sum64, _mm_shuffle_epi32(sum64, 1));
+        bias + _mm_cvtsi128_si32(sum32)
+    }
+}
+
+/// 64要素を一括でpackし、VNNIが有効なら4項積和、BWでは2段の積和を使う。
+/// 活性化はAVX2版と同じく、i16への飽和pack後にshiftとsigned pack/maxを行う。
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512bw"))]
+#[inline]
+fn clipped_relu_affine_64_to_1_avx512(input: &[i32; 64], weights: &[i8; 64], bias: i32) -> i32 {
+    // SAFETY: loaduは配列内の64要素のみを読み、alignmentを要求しない。
+    // pack後の入力は[0,127]なので隣接2項和はi16に収まり、64項の内積もi32に収まる。
+    unsafe {
+        use std::arch::x86_64::*;
+        let ptr = input.as_ptr().cast::<__m512i>();
+        let words01 = _mm512_srai_epi16(
+            _mm512_packs_epi32(_mm512_loadu_si512(ptr), _mm512_loadu_si512(ptr.add(1))),
+            6,
+        );
+        let words23 = _mm512_srai_epi16(
+            _mm512_packs_epi32(_mm512_loadu_si512(ptr.add(2)), _mm512_loadu_si512(ptr.add(3))),
+            6,
+        );
+        let packed = _mm512_max_epi8(_mm512_packs_epi16(words01, words23), _mm512_setzero_si512());
+        // packは128-bit laneごとに動くため、4-byte groupの転置を戻す。
+        let order = _mm512_setr_epi32(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+        let activations = _mm512_permutexvar_epi32(order, packed);
+        let weights = _mm512_loadu_si512(weights.as_ptr().cast());
+        #[cfg(target_feature = "avx512vnni")]
+        let product = _mm512_dpbusd_epi32(_mm512_setzero_si512(), activations, weights);
+        #[cfg(not(target_feature = "avx512vnni"))]
+        let product =
+            _mm512_madd_epi16(_mm512_maddubs_epi16(activations, weights), _mm512_set1_epi16(1));
+        bias + _mm512_reduce_add_epi32(product)
+    }
+}
 /// 入力: 両視点のアキュムレータ (各L1次元, i16)
 /// 出力: SqrClippedReLU後のL1次元 (u8)
 pub fn sqr_clipped_relu_transform<const L1: usize>(
@@ -940,6 +1027,70 @@ pub fn compute_king_ranks(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn test_fused_output64_boundaries_and_lanes() {
+        use rand::{Rng, SeedableRng};
+        use rand_xoshiro::Xoshiro256PlusPlus;
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(0x6400_3200);
+        let edges = [
+            i32::MIN,
+            -2_097_153,
+            -32769,
+            -32768,
+            -32767,
+            -65,
+            -64,
+            -1,
+            0,
+            63,
+            64,
+            8127,
+            8128,
+            8129,
+            8191,
+            32766,
+            32767,
+            32768,
+            i32::MAX,
+        ];
+        for case in 0..512 {
+            let mut input = std::array::from_fn(|_| rng.random::<i32>());
+            let mut weights = std::array::from_fn(|_| rng.random::<i8>());
+            if case < 64 {
+                input = [0; 64];
+                input[case] = 8128;
+            } else if case < 128 {
+                input = std::array::from_fn(|i| edges[(i + case) % edges.len()]);
+                weights = [if case % 2 == 0 { -128 } else { 127 }; 64];
+            } else if case < 192 {
+                input = std::array::from_fn(|_| rng.random_range(-128..16384));
+            }
+            let bias = rng.random_range(-1_000_000..1_000_000);
+            let expected = bias
+                + input
+                    .iter()
+                    .zip(weights)
+                    .map(|(&v, w)| (v >> 6).clamp(0, 127) * i32::from(w))
+                    .sum::<i32>();
+            assert_eq!(
+                clipped_relu_affine_64_to_1_avx2(&input, &weights, bias),
+                expected,
+                "case {case}"
+            );
+            #[cfg(target_feature = "avx512bw")]
+            assert_eq!(
+                clipped_relu_affine_64_to_1_avx512(&input, &weights, bias),
+                expected,
+                "case {case}"
+            );
+            let mut bytes = bias.to_le_bytes().to_vec();
+            bytes.extend(weights.iter().map(|&w| w as u8));
+            let affine = AffineTransform::<64, 1>::read(&mut &bytes[..]).unwrap();
+            assert_eq!(clipped_relu_affine_to_1(&input, &affine), expected, "case {case}");
+        }
+    }
+
     use super::*;
     use crate::nnue::accumulator::Aligned;
     use crate::nnue::constants::{
@@ -1227,7 +1378,7 @@ mod tests {
 
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[test]
-    fn test_clipped_relu_affine_32_to_1_avx2_matches_scalar_reference() {
+    fn test_clipped_relu_affine_to_1_matches_scalar_reference() {
         let input = [
             i32::MIN,
             -1_000_000,
@@ -1280,11 +1431,10 @@ mod tests {
                 .map(|(&value, weight)| (value >> 6).clamp(0, 127) * i32::from(weight))
                 .sum::<i32>();
 
-        assert_eq!(clipped_relu_affine_32_to_1_avx2(&input, &affine), reference);
+        assert_eq!(clipped_relu_affine_to_1(&input, &affine), reference);
     }
 
-    #[test]
-    fn test_layer_stack_bucket_propagate_matches_scalar_reference() {
+    fn check_bucket_scalar_reference<const WIDTH: usize>() {
         fn affine_from_bytes<const INPUT_DIM: usize, const OUTPUT_DIM: usize>(
             biases: [i32; OUTPUT_DIM],
             weights: &[i8],
@@ -1299,7 +1449,16 @@ mod tests {
             AffineTransform::<INPUT_DIM, OUTPUT_DIM>::read(&mut &bytes[..]).unwrap()
         }
 
-        fn scalar_reference(bucket: &TestLayerStackBucket, input: &[u8; TEST_L1]) -> i32 {
+        fn scalar_reference<const WIDTH: usize>(
+            bucket: &LayerStackBucket<
+                TEST_L1,
+                TEST_LS_L1_OUT,
+                TEST_LS_L2_IN,
+                TEST_LS_L2_PADDED_INPUT,
+                WIDTH,
+            >,
+            input: &[u8; TEST_L1],
+        ) -> i32 {
             let mut l1_out = [0i32; TEST_LS_L1_OUT];
             bucket.l1.propagate(input, &mut l1_out);
             let l1_skip = l1_out[TEST_MAIN_DIM];
@@ -1311,10 +1470,10 @@ mod tests {
                 l2_input.0[TEST_MAIN_DIM + i] = (val >> 6).clamp(0, 127) as u8;
             }
 
-            let mut l2_out = [0i32; NNUE_PYTORCH_L3];
+            let mut l2_out = [0i32; WIDTH];
             bucket.l2.propagate(&l2_input.0, &mut l2_out);
 
-            let mut l2_relu = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+            let mut l2_relu = Aligned([0u8; WIDTH]);
             for (dst, &val) in l2_relu.0.iter_mut().zip(l2_out.iter()) {
                 *dst = (val >> 6).clamp(0, 127) as u8;
             }
@@ -1330,25 +1489,31 @@ mod tests {
         ];
         let l1_weights = vec![0i8; TEST_LS_L1_OUT * TEST_L1];
 
-        let mut l2_biases = [0i32; NNUE_PYTORCH_L3];
+        let mut l2_biases = [0i32; WIDTH];
         for (i, bias) in l2_biases.iter_mut().enumerate() {
             *bias = (i as i32 - 16) * 37;
         }
-        let mut l2_weights = vec![0i8; NNUE_PYTORCH_L3 * TEST_LS_L2_PADDED_INPUT];
+        let mut l2_weights = vec![0i8; WIDTH * TEST_LS_L2_PADDED_INPUT];
         for (i, weight) in l2_weights.iter_mut().enumerate() {
             *weight = ((i as i32 % 7) - 3) as i8;
         }
 
         let output_biases = [123i32; 1];
-        let mut output_weights = vec![0i8; OUTPUT_PADDED_INPUT];
+        let mut output_weights = vec![0i8; WIDTH];
         for (i, weight) in output_weights.iter_mut().enumerate() {
             *weight = ((i as i32 % 5) - 2) as i8;
         }
 
-        let bucket = TestLayerStackBucket::from_layers(
+        let bucket = LayerStackBucket::<
+            TEST_L1,
+            TEST_LS_L1_OUT,
+            TEST_LS_L2_IN,
+            TEST_LS_L2_PADDED_INPUT,
+            WIDTH,
+        >::from_layers(
             affine_from_bytes::<TEST_L1, TEST_LS_L1_OUT>(l1_biases, &l1_weights),
-            affine_from_bytes::<TEST_LS_L2_IN, NNUE_PYTORCH_L3>(l2_biases, &l2_weights),
-            affine_from_bytes::<NNUE_PYTORCH_L3, 1>(output_biases, &output_weights),
+            affine_from_bytes::<TEST_LS_L2_IN, WIDTH>(l2_biases, &l2_weights),
+            affine_from_bytes::<WIDTH, 1>(output_biases, &output_weights),
         );
 
         let input = Aligned([0u8; TEST_L1]);
@@ -1357,9 +1522,9 @@ mod tests {
         let mut l2_input_opt = Aligned([0u8; TEST_LS_L2_PADDED_INPUT]);
         let mut l2_input_ref = Aligned([0u8; TEST_LS_L2_PADDED_INPUT]);
         let mut l2_sqr = [0u8; TEST_LS_L1_OUT];
-        let mut l2_out = [0i32; NNUE_PYTORCH_L3];
-        let mut l2_relu_opt = Aligned([0u8; OUTPUT_PADDED_INPUT]);
-        let mut l2_relu_ref = Aligned([0u8; OUTPUT_PADDED_INPUT]);
+        let mut l2_out = [0i32; WIDTH];
+        let mut l2_relu_opt = Aligned([0u8; WIDTH]);
+        let mut l2_relu_ref = Aligned([0u8; WIDTH]);
 
         bucket.l1.propagate(&input.0, &mut l1_out);
         ClippedReLU::<TEST_LS_L1_OUT>::propagate(&l1_out, &mut l1_relu);
@@ -1376,7 +1541,7 @@ mod tests {
         assert_eq!(l2_input_opt.0, l2_input_ref.0);
 
         bucket.l2.propagate(&l2_input_opt.0, &mut l2_out);
-        ClippedReLU::<NNUE_PYTORCH_L3>::propagate(&l2_out, &mut l2_relu_opt.0);
+        ClippedReLU::<WIDTH>::propagate(&l2_out, &mut l2_relu_opt.0);
         for (dst, &val) in l2_relu_ref.0.iter_mut().zip(l2_out.iter()) {
             *dst = (val >> 6).clamp(0, 127) as u8;
         }
@@ -1395,6 +1560,12 @@ mod tests {
         // hot path と診断 path は別実装のため、非自明入力での bit 一致をここで固定する
         let mut counts = LsSaturationCounts::default();
         assert_eq!(bucket.propagate_counting_saturation(&input.0, &mut counts), reference);
+    }
+
+    #[test]
+    fn test_layer_stack_bucket_propagate_matches_scalar_reference() {
+        check_bucket_scalar_reference::<32>();
+        check_bucket_scalar_reference::<64>();
     }
 
     /// l1_out の値が大きい場合（i32 乗算でオーバーフローするケース）の回帰テスト。
