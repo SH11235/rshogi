@@ -2,7 +2,7 @@ use super::ServeArgs;
 use super::journal::{Journal, LockedFile, Pv, Reading, Readings, Settings};
 use super::model::{Tree, remove_candidates};
 use super::targets::{
-    CHECKPOINT, Checkpoint, Defaults, QUEUE, QUEUE_LOCK, STATUS_FILE, StatusFile, Target,
+    CHECKPOINT, Checkpoint, Defaults, QUEUE, QUEUE_LOCK, RUN_DIR, STATUS_FILE, StatusFile, Target,
     TargetStatus,
 };
 use crate::common::io::{write_atomic, write_atomic_durable};
@@ -323,6 +323,8 @@ enum Poll {
     Clean,
     /// 新しい行と、処理済みの範囲までの hash。
     Lines(Vec<u8>, Sha256),
+    /// 処理済みの範囲が変わった。内容が変わるまで読み直さない。
+    Broken,
 }
 
 fn poll_queue(state: &Path, checkpoint: &Checkpoint, seen: &mut Option<String>) -> Result<Poll> {
@@ -368,7 +370,7 @@ fn poll_queue(state: &Path, checkpoint: &Checkpoint, seen: &mut Option<String>) 
     if bytes.len() < processed
         || format!("{:x}", hasher.clone().finalize()) != checkpoint.processed_sha256
     {
-        bail!("キューの処理済みの範囲が変わりました。戻るまで受付を止めます (読みは続けます)");
+        return Ok(Poll::Broken);
     }
     let end = bytes[processed..]
         .iter()
@@ -398,18 +400,29 @@ fn raise_open_files() {
     }
 }
 
+/// 対象の lock に使ってよいファイル記述子の数。engine 1 個に標準入出力などで数個、
+/// ほかに state・台帳・一時ファイルの分を残す。
+fn open_files_budget(workers: usize) -> usize {
+    open_files_limit().saturating_sub(256 + 8 * workers)
+}
+
+#[cfg(unix)]
+fn open_files_limit() -> usize {
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile).current;
+    limit.map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX))
+}
+
+#[cfg(not(unix))]
+fn open_files_limit() -> usize {
+    usize::MAX
+}
+
 pub(super) fn serve(args: ServeArgs) -> Result<()> {
     #[cfg(unix)]
     raise_open_files();
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
     super::paths::reject_collisions(&journal_path, Some(&args.state), &[])?;
     std::fs::create_dir_all(args.state.join("restart"))?;
-    let run_id =
-        format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"), std::process::id());
-    // wait は「state の lock が取られている」と「STATUS と状態のファイルの run_id が同じ」で
-    // 判定するので、lock を取る前に新しい run_id を出し、前の起動の状態と一致させない。
-    // lock を取れずに終わった場合は、動いている serve が次の周回で STATUS を書き戻す。
-    let started = write_atomic(&args.state.join("STATUS"), &format!("STARTING {run_id}\n"));
     // `tree wait` は共有 lock を一瞬取って serve の生存を確かめるので、その間は待つ。
     let mut attempt = 0;
     let state_lock = loop {
@@ -420,21 +433,34 @@ pub(super) fn serve(args: ServeArgs) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(50));
     };
-    if let Err(error) = started {
-        eprintln!("監視ファイル書き込み失敗 STATUS: {error:#}");
-        if let Err(error) = std::fs::remove_file(args.state.join(STATUS_FILE))
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            eprintln!("前の状態のファイルを消せません: {error:#}");
-        }
-    }
+    let run_id =
+        format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"), std::process::id());
+    let run_lock = hold_run_lock(&args.state, &run_id)?;
     let result = serve_locked(&args, &run_id);
     if let Err(error) = &result {
         monitor(&args.state.join("STATUS"), "FAIL\n");
         alert(&args.state, &format!("FAIL {error:#}"));
     }
+    drop(run_lock);
     drop(state_lock);
     result
+}
+
+/// 起動ごとの lock を取って保持する。wait は状態のファイルの run_id の lock が取られているかで、
+/// その状態を書いた serve 自身の生存を確かめる (前の起動の状態を今の serve のものと取り違えない)。
+/// 状態のファイルは、この lock を取った後にしか今の run_id で書かない。
+fn hold_run_lock(state: &Path, run_id: &str) -> Result<LockedFile> {
+    let dir = state.join(RUN_DIR);
+    super::paths::reject_symlink(&dir)?;
+    std::fs::create_dir_all(&dir)?;
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        // state の lock を持っているので、残っているのは終わった起動の lock だけ。
+        if std::fs::symlink_metadata(&path)?.file_type().is_file() {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    LockedFile::open(&dir.join(format!("{run_id}.lock")))
 }
 
 pub(super) fn monitor(path: &std::path::Path, contents: &str) {
@@ -500,6 +526,13 @@ struct Once(BTreeMap<String, String>);
 impl Once {
     fn report(&mut self, alerts: &mut Alerts, slot: &str, message: String) {
         if self.0.get(slot) != Some(&message) {
+            alerts.push(&message);
+            self.0.insert(slot.to_owned(), message);
+        }
+    }
+    /// 文面によらず、解除されるまで 1 回だけ通知する (失敗の文面が揺れる通知に使う)。
+    fn report_first(&mut self, alerts: &mut Alerts, slot: &str, message: String) {
+        if !self.0.contains_key(slot) {
             alerts.push(&message);
             self.0.insert(slot.to_owned(), message);
         }
@@ -641,18 +674,35 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                             }
                         }
                     }
+                    Ok(Poll::Broken) => {
+                        let message = "キューの処理済みの範囲が変わりました。戻るまで受付を止めます (読みは続けます)".to_owned();
+                        queue_error = Some(message.clone());
+                        once.report(&mut alerts, "queue", message);
+                    }
                     Err(error) => {
+                        // 読めなかった・通常のファイルでなかった後は、内容が前と同じでも確かめ直す。
+                        queue_seen = None;
                         let message = format!("{error:#}");
                         queue_error = Some(message.clone());
                         once.report(&mut alerts, "queue", message);
                     }
                 }
             }
+            // 対象ごとに lock を 1 つ持つので、制御・台帳・engine の分を残して準備を止める。
+            let budget = open_files_budget(desired.max(workers.len()));
+            let mut held = lives.iter().filter(|l| l.lock.is_some()).count();
             for (index, live) in lives.iter_mut().enumerate() {
                 let target = &checkpoint.targets[index];
-                if !live.prepared {
+                if !live.prepared && live.lock.is_none() && held >= budget {
+                    once.report(&mut alerts, "budget", format!("開けるファイル数の上限に近いので、対象の準備を待たせます (保持中の lock {held}、上限の目安 {budget})"));
+                } else if !live.prepared {
                     let slot = format!("prepare-{index}");
-                    match prepare(live, target) {
+                    let had_lock = live.lock.is_some();
+                    let result = prepare(live, target);
+                    if !had_lock && live.lock.is_some() {
+                        held += 1;
+                    }
+                    match result {
                         Ok(()) => once.clear(&slot),
                         Err(error) => once.report(
                             &mut alerts,
@@ -691,6 +741,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                         }
                         match result {
                             Ok(reading) => {
+                                once.clear("spawn");
                                 journal.append(reading, &settings, "engine".into())?;
                             }
                             Err(error) => {
@@ -699,7 +750,7 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                         "制御ファイルによる RESTART worker={id} key={key}"
                                     ));
                                 } else if error.is::<SpawnFailed>() {
-                                    once.report(&mut alerts, "spawn", format!("{error:#}"));
+                                    once.report_first(&mut alerts, "spawn", format!("{error:#}"));
                                 } else if error.is::<InvalidReading>() {
                                     let message = format!("局面の検査失敗: {key}: {error:#}");
                                     alerts.push(&message);

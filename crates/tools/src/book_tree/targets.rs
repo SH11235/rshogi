@@ -11,6 +11,7 @@ pub(super) const QUEUE: &str = "targets.jsonl";
 pub(super) const QUEUE_LOCK: &str = "targets.lock";
 pub(super) const CHECKPOINT: &str = "accepted.json";
 pub(super) const STATUS_FILE: &str = "targets.status.json";
+pub(super) const RUN_DIR: &str = "run";
 const CHECKPOINT_VERSION: &str = "book-tree-queue-v1";
 pub(super) const DEFAULT_PRIORITY: u32 = 100;
 const MAX_PRIORITY: u32 = 1_000_000;

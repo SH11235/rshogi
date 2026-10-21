@@ -43,6 +43,7 @@ pub(super) fn reject_collisions(
             super::targets::QUEUE,
             super::targets::QUEUE_LOCK,
             super::targets::STATUS_FILE,
+            super::targets::RUN_DIR,
             "restart",
             "lock",
             "workers",

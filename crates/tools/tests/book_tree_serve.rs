@@ -371,8 +371,9 @@ fn repeated_engine_exits_hit_restart_limit_and_leave_no_candidates() {
     });
     assert!(server.0.try_wait().unwrap().is_none());
     assert!(!out(state, "a", "b").join("own_nodes.tsv").exists());
+    // ALERT は同じ周回の終わりに書き出すので、STATUS の後に見えることがある。
+    wait_for(|| self::alerts(state).contains("再起動上限"));
     let alerts = std::fs::read_to_string(state.join("ALERT")).unwrap();
-    assert!(alerts.contains("再起動上限"));
     assert_eq!(alerts.lines().filter(|l| l.contains("RESTART worker")).count(), 4);
 }
 
@@ -848,6 +849,15 @@ fn queue_and_restart_links_and_fifos_are_alerted_without_stopping_serve() {
     std::fs::remove_file(state.join("targets.jsonl")).unwrap();
     add_root(state, "valid", ROOT);
     wait_for(|| status(&out(state, "valid", "w")) == "DONE\n");
+    // 同じ内容 (長さと mtime) のファイルを戻しても、受付停止の理由を確かめ直して消す。
+    wait_for(|| targets_status(state)["queue_error"].is_null());
+    let saved = dir.path().join("saved.jsonl");
+    std::fs::rename(state.join("targets.jsonl"), &saved).unwrap();
+    std::fs::create_dir(state.join("targets.jsonl")).unwrap();
+    wait_for(|| !targets_status(state)["queue_error"].is_null());
+    std::fs::remove_dir(state.join("targets.jsonl")).unwrap();
+    std::fs::rename(&saved, state.join("targets.jsonl")).unwrap();
+    wait_for(|| targets_status(state)["queue_error"].is_null());
     assert!(server.0.try_wait().unwrap().is_none());
     stop(state, &mut server);
 }
@@ -1115,13 +1125,17 @@ fn restart_hides_old_ready_processes_lines_once_and_recovers_status_writes() {
     std::fs::create_dir(state).unwrap();
     let config = fast_fixture(state);
     std::fs::write(state.join("targets.jsonl"), "invalid\n").unwrap();
-    add_tree(state, "a");
+    let receipt_a = add_tree(state, "a");
     let mut server = start(state, &config);
     wait_for(|| targets_status(state)["targets"][0]["ready"] == true);
     let checkpoint = std::fs::read_to_string(state.join("accepted.json")).unwrap();
     let first_run = targets_status(state)["run_id"].clone();
     stop(state, &mut server);
     std::fs::remove_file(state.join("stop")).unwrap();
+    // 止まった serve の状態は ready=true のままでも、wait はそれを使わない。
+    let result = wait_cmd(state, &receipt_a, None).output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("serve が動いていません"));
     // 台帳を別の serve が持っている間は起動に失敗するが、その前に古い ready を消す。
     let other = dir.path().join("other");
     std::fs::create_dir(&other).unwrap();
@@ -1214,5 +1228,41 @@ fn restart_redoes_side_effects_after_the_checkpoint_and_lines_before_it_once() {
     assert_eq!(std::fs::read_to_string(state.join("accepted.json")).unwrap(), second);
     assert_eq!(targets_status(state)["rejected"].as_array().unwrap().len(), 2);
     wait_for(|| status(&out(state, "b", "b")) == "STOPPED\n");
+    stop(state, &mut server);
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_that_cannot_start_is_alerted_once_without_failing_the_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = &dir.path().join("state");
+    std::fs::create_dir(state).unwrap();
+    std::fs::write(state.join("workers"), "1").unwrap();
+    let eval = dir.path().join("eval");
+    std::fs::write(&eval, "eval").unwrap();
+    add_tree(state, "a");
+    let log = std::fs::File::create(state.join("server.log")).unwrap();
+    let mut server = Server(
+        Command::new(env!("CARGO_BIN_EXE_book_mine"))
+            .args(["tree", "serve", "--state"])
+            .arg(state)
+            .args(["--engine", "/bin/false", "--engine-option"])
+            .arg(format!("EvalFile={}", eval.display()))
+            .args(["--nodes", "100", "--hash", "16", "--out-root"])
+            .arg(dir.path())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(|| alerts(state).contains("engine を起動できません"));
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(
+        alerts(state).lines().filter(|l| l.contains("engine を起動できません")).count(),
+        1
+    );
+    assert!(!alerts(state).contains("再起動上限"));
+    assert!(["QUEUED\n", "RUNNING\n"].contains(&status(&out(state, "a", "b")).as_str()));
+    assert!(server.0.try_wait().unwrap().is_none());
     stop(state, &mut server);
 }

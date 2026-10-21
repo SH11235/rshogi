@@ -1,7 +1,8 @@
 //! `book_mine tree enqueue` と `book_mine tree wait`。
 
 use super::targets::{
-    DEFAULT_PRIORITY, ENDED, Line, Opts, QUEUE, QUEUE_LOCK, Receipt, STATUS_FILE, StatusFile,
+    DEFAULT_PRIORITY, ENDED, Line, Opts, QUEUE, QUEUE_LOCK, RUN_DIR, Receipt, STATUS_FILE,
+    StatusFile,
 };
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const QUEUE_ERROR_GRACE: Duration = Duration::from_secs(2);
+const POLL: Duration = Duration::from_millis(500);
 
 /// `book_mine tree enqueue` の引数。
 #[derive(Args, Debug)]
@@ -208,14 +210,7 @@ fn serve_alive(state: &Path) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
-    match file.try_lock_shared() {
-        Ok(()) => {
-            file.unlock()?;
-            Ok(false)
-        }
-        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
-        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
-    }
+    probe(&file)
 }
 
 fn read_status(state: &Path) -> Result<Option<StatusFile>> {
@@ -226,10 +221,31 @@ fn read_status(state: &Path) -> Result<Option<StatusFile>> {
     }
 }
 
-fn serve_run_id(state: &Path) -> Option<String> {
-    std::fs::read_to_string(state.join("STATUS"))
-        .ok()
-        .and_then(|s| s.split_whitespace().nth(1).map(str::to_owned))
+/// その起動の serve が、起動ごとの lock を持っていれば生きている。
+fn run_alive(state: &Path, run_id: &str) -> Result<bool> {
+    if run_id.is_empty()
+        || !run_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+    {
+        bail!("状態のファイルの run_id が不正です: {run_id}");
+    }
+    let file = match File::open(state.join(RUN_DIR).join(format!("{run_id}.lock"))) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    probe(&file)
+}
+
+/// 他のプロセスが排他 lock を持っているか。共有 lock を一瞬だけ試す。
+fn probe(file: &File) -> Result<bool> {
+    match file.try_lock_shared() {
+        Ok(()) => {
+            file.unlock()?;
+            Ok(false)
+        }
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
 }
 
 /// 受領の範囲の行で足した id。
@@ -260,16 +276,24 @@ pub(super) fn wait(args: WaitArgs) -> Result<()> {
     // 受付停止の理由は、直した直後の古い表示で落ちないよう、続いたときだけ失敗にする。
     let mut stalled_since = None;
     loop {
-        let alive = serve_alive(&args.state)?;
-        let run_id = serve_run_id(&args.state);
         let status = read_status(&args.state)?;
-        let stalled = status.as_ref().and_then(|status| {
-            (status.processed_bytes < receipt.end
-                && alive
-                && run_id.as_ref() == Some(&status.run_id))
+        // 状態を書いた serve 自身が生きているときだけ、その状態で判定する。
+        let current = match &status {
+            Some(status) => run_alive(&args.state, &status.run_id)?,
+            None => false,
+        };
+        let Some(status) = status.filter(|_| current) else {
+            // 前の起動の状態か、まだ状態が無い。新しい serve が状態を書くまで待つ。
+            if !serve_alive(&args.state)? {
+                bail!("serve が動いていません: {}", args.state.display());
+            }
+            stalled_since = None;
+            std::thread::sleep(POLL);
+            continue;
+        };
+        let stalled = (status.processed_bytes < receipt.end)
             .then(|| status.queue_error.clone())
-            .flatten()
-        });
+            .flatten();
         match stalled {
             Some(error) => {
                 let since = *stalled_since.get_or_insert_with(Instant::now);
@@ -279,9 +303,7 @@ pub(super) fn wait(args: WaitArgs) -> Result<()> {
             }
             None => stalled_since = None,
         }
-        if let Some(status) = status
-            && status.processed_bytes >= receipt.end
-        {
+        if status.processed_bytes >= receipt.end {
             let rejected: Vec<_> = status
                 .rejected
                 .iter()
@@ -314,7 +336,7 @@ pub(super) fn wait(args: WaitArgs) -> Result<()> {
             } else {
                 selected.iter().all(|t| ENDED.contains(&t.state.as_str()))
             };
-            if ended && alive && run_id.as_ref() == Some(&status.run_id) {
+            if ended {
                 let targets: Vec<_> = selected
                     .iter()
                     .map(|t| json!({"id":t.id,"own":t.own,"generation":t.generation,"state":t.state,"ready":t.ready,"out":t.out}))
@@ -328,9 +350,6 @@ pub(super) fn wait(args: WaitArgs) -> Result<()> {
                 return Ok(());
             }
         }
-        if !alive {
-            bail!("serve が動いていません: {}", args.state.display());
-        }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(POLL);
     }
 }
