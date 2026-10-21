@@ -590,7 +590,7 @@ fn explicit_restarts_do_not_exhaust_automatic_limit_and_unused_requests_are_remo
     std::fs::write(state.join("restart/0"), "").unwrap();
     std::fs::write(state.join("restart/7"), "").unwrap();
     wait_for(|| !state.join("restart/0").exists() && !state.join("restart/7").exists());
-    assert!(alerts(state).contains("restart 対象の読みがありません"));
+    wait_for(|| alerts(state).contains("restart 対象の読みがありません"));
     std::fs::write(state.join("workers"), "8").unwrap();
     wait_for(|| progress(state)["workers"].as_array().is_some_and(|w| w.len() == 8));
     add_tree(state, "b");
