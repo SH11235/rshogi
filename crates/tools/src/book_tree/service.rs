@@ -112,6 +112,17 @@ impl std::fmt::Display for InvalidReading {
 }
 impl std::error::Error for InvalidReading {}
 
+/// エンジンを起動できない (開けるファイル数の上限など、局面によらない環境の失敗)。
+/// 局面の失敗に数えず、次の周回で起動し直す。
+#[derive(Debug)]
+struct SpawnFailed(anyhow::Error);
+impl std::fmt::Display for SpawnFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "engine を起動できません: {:#}", self.0)
+    }
+}
+impl std::error::Error for SpawnFailed {}
+
 fn spawn_worker(
     id: usize,
     args: &ServeArgs,
@@ -141,7 +152,8 @@ fn spawn_worker(
         while let Ok(Some(job)) = rx.recv() {
             let result = (|| -> Result<Reading> {
                 if engine.is_none() {
-                    let process = EngineProcess::spawn(&cfg, format!("tree-{id}"))?;
+                    let process =
+                        EngineProcess::spawn(&cfg, format!("tree-{id}")).map_err(SpawnFailed)?;
                     for name in settings.options.keys() {
                         if !process.advertises_option(name) {
                             bail!("engine が option を広告していません: {name}");
@@ -247,6 +259,7 @@ struct Live {
     /// 今の世代の出力の lock。前の世代は書くときだけ取り、持つ数を世代の履歴でなく対象の数に比例させる。
     lock: Option<LockedFile>,
     prepared: bool,
+    superseded: bool,
     /// 終わった木の (読んだ局面数, 要る局面数)。終わった木は中身を縮めて保持する。
     ended: Option<(usize, usize)>,
 }
@@ -256,6 +269,7 @@ impl Live {
             tree,
             lock: None,
             prepared: false,
+            superseded: false,
             ended: None,
         }
     }
@@ -269,20 +283,9 @@ fn generation_dir(checkpoint: &Checkpoint, target: &Target, generation: u32) -> 
         .join(format!("g{generation}"))
 }
 
-/// チェックポイントから出力の副作用 (前の世代の SUPERSEDED、今の世代の dir・lock・QUEUED) を
-/// 行う。どれも冪等で、失敗したら次の周回でやり直す。消された前の世代の dir は作り直さない。
-fn prepare(live: &mut Live, checkpoint: &Checkpoint, target: &Target) -> Result<()> {
-    for generation in 1..target.generation {
-        let dir = generation_dir(checkpoint, target, generation);
-        if !dir.try_exists()? {
-            continue;
-        }
-        super::paths::artifacts(&dir)?;
-        let _lock = LockedFile::open(&dir.join("tree.lock"))?;
-        if std::fs::read_to_string(dir.join("STATUS")).ok().as_deref() != Some("SUPERSEDED\n") {
-            write_atomic(&dir.join("STATUS"), "SUPERSEDED\n")?;
-        }
-    }
+/// チェックポイントから今の世代の出力の副作用 (dir・lock・記録・QUEUED) を行う。
+/// どれも冪等で、失敗したら次の周回でやり直す。
+fn prepare(live: &mut Live, target: &Target) -> Result<()> {
     super::paths::artifacts(&target.out)?;
     std::fs::create_dir_all(&target.out)?;
     if live.lock.is_none() {
@@ -295,14 +298,34 @@ fn prepare(live: &mut Live, checkpoint: &Checkpoint, target: &Target) -> Result<
     Ok(())
 }
 
-/// キューの改行で終わった未処理の行と、処理済みの範囲までの hash を返す。
-/// 前回見た内容 (長さと mtime) から変わっていなければ読まない。enqueue が追記と fsync を
-/// 終えるまで持つ lock を共有で取ってから読み、同期前の行を受け付けない。
-fn poll_queue(
-    state: &Path,
-    checkpoint: &Checkpoint,
-    seen: &mut Option<String>,
-) -> Result<Option<(Vec<u8>, Sha256)>> {
+/// 前の世代の dir を SUPERSEDED にする。書くときだけ lock を取り、消された dir は作り直さない。
+/// 今の世代の準備とは別にやり直すので、前の世代の失敗で今の世代が止まらない。
+fn supersede(checkpoint: &Checkpoint, target: &Target) -> Result<()> {
+    for generation in 1..target.generation {
+        let dir = generation_dir(checkpoint, target, generation);
+        if !dir.try_exists()? {
+            continue;
+        }
+        super::paths::artifacts(&dir)?;
+        let _lock = LockedFile::open(&dir.join("tree.lock"))?;
+        if std::fs::read_to_string(dir.join("STATUS")).ok().as_deref() != Some("SUPERSEDED\n") {
+            write_atomic(&dir.join("STATUS"), "SUPERSEDED\n")?;
+        }
+    }
+    Ok(())
+}
+
+/// キューを見た結果。
+enum Poll {
+    /// 読んでいない (前回と同じ内容、または enqueue が書き込み中)。
+    Skipped,
+    /// 処理済みの範囲を確かめ、新しい行は無い。
+    Clean,
+    /// 新しい行と、処理済みの範囲までの hash。
+    Lines(Vec<u8>, Sha256),
+}
+
+fn poll_queue(state: &Path, checkpoint: &Checkpoint, seen: &mut Option<String>) -> Result<Poll> {
     let path = state.join(QUEUE);
     super::paths::reject_symlink(&path)?;
     let metadata = match std::fs::symlink_metadata(&path) {
@@ -315,7 +338,7 @@ fn poll_queue(
     }
     let stamp = format!("{:?}", metadata.as_ref().map(|m| (m.len(), m.modified().ok())));
     if seen.as_ref() == Some(&stamp) {
-        return Ok(None);
+        return Ok(Poll::Skipped);
     }
     let lock_path = state.join(QUEUE_LOCK);
     super::paths::reject_symlink(&lock_path)?;
@@ -327,7 +350,7 @@ fn poll_queue(
         .open(&lock_path)?;
     match lock.try_lock_shared() {
         Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(Poll::Skipped),
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
     let bytes = match metadata {
@@ -352,15 +375,41 @@ fn poll_queue(
         .rposition(|b| *b == b'\n')
         .map_or(processed, |i| processed + i + 1);
     if end == processed {
-        return Ok(None);
+        return Ok(Poll::Clean);
     }
-    Ok(Some((bytes[processed..end].to_vec(), hasher)))
+    Ok(Poll::Lines(bytes[processed..end].to_vec(), hasher))
+}
+
+/// 対象ごとに出力の lock を 1 つ持つので、開けるファイル数の soft limit を hard limit まで上げる。
+#[cfg(unix)]
+fn raise_open_files() {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let limit = getrlimit(Resource::Nofile);
+    if limit.current != limit.maximum
+        && let Err(error) = setrlimit(
+            Resource::Nofile,
+            Rlimit {
+                current: limit.maximum,
+                maximum: limit.maximum,
+            },
+        )
+    {
+        eprintln!("開けるファイル数の上限を上げられません: {error}");
+    }
 }
 
 pub(super) fn serve(args: ServeArgs) -> Result<()> {
+    #[cfg(unix)]
+    raise_open_files();
     let journal_path = args.journal.clone().unwrap_or_else(|| args.state.join("journal.jsonl"));
     super::paths::reject_collisions(&journal_path, Some(&args.state), &[])?;
     std::fs::create_dir_all(args.state.join("restart"))?;
+    let run_id =
+        format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"), std::process::id());
+    // wait は「state の lock が取られている」と「STATUS と状態のファイルの run_id が同じ」で
+    // 判定するので、lock を取る前に新しい run_id を出し、前の起動の状態と一致させない。
+    // lock を取れずに終わった場合は、動いている serve が次の周回で STATUS を書き戻す。
+    let started = write_atomic(&args.state.join("STATUS"), &format!("STARTING {run_id}\n"));
     // `tree wait` は共有 lock を一瞬取って serve の生存を確かめるので、その間は待つ。
     let mut attempt = 0;
     let state_lock = loop {
@@ -371,10 +420,7 @@ pub(super) fn serve(args: ServeArgs) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(50));
     };
-    let run_id =
-        format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"), std::process::id());
-    // 生存の印 (state の lock) と同時に新しい run_id を出し、前の起動の状態を wait に使わせない。
-    if let Err(error) = write_atomic(&args.state.join("STATUS"), &format!("STARTING {run_id}\n")) {
+    if let Err(error) = started {
         eprintln!("監視ファイル書き込み失敗 STATUS: {error:#}");
         if let Err(error) = std::fs::remove_file(args.state.join(STATUS_FILE))
             && error.kind() != std::io::ErrorKind::NotFound
@@ -552,8 +598,12 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
             let desired = if stopping { 0 } else { desired };
             if !stopping {
                 match poll_queue(&args.state, &checkpoint, &mut queue_seen) {
-                    Ok(None) => {}
-                    Ok(Some((chunk, prefix))) => {
+                    Ok(Poll::Skipped) => {}
+                    Ok(Poll::Clean) => {
+                        once.clear("queue");
+                        queue_error = None;
+                    }
+                    Ok(Poll::Lines(chunk, prefix)) => {
                         let (next, mut built) =
                             checkpoint.apply(&chunk, &defaults, &prefix, &protected);
                         match serde_json::to_string_pretty(&next)
@@ -599,20 +649,31 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                 }
             }
             for (index, live) in lives.iter_mut().enumerate() {
-                if live.prepared {
-                    continue;
-                }
-                let slot = format!("prepare-{index}");
-                match prepare(live, &checkpoint, &checkpoint.targets[index]) {
-                    Ok(()) => once.clear(&slot),
-                    Err(error) => once.report(
-                        &mut alerts,
-                        &slot,
-                        format!(
-                            "出力先を用意できません {}: {error:#}",
-                            checkpoint.targets[index].out.display()
+                let target = &checkpoint.targets[index];
+                if !live.prepared {
+                    let slot = format!("prepare-{index}");
+                    match prepare(live, target) {
+                        Ok(()) => once.clear(&slot),
+                        Err(error) => once.report(
+                            &mut alerts,
+                            &slot,
+                            format!("出力先を用意できません {}: {error:#}", target.out.display()),
                         ),
-                    ),
+                    }
+                }
+                if !live.superseded {
+                    let slot = format!("supersede-{index}");
+                    match supersede(&checkpoint, target) {
+                        Ok(()) => {
+                            live.superseded = true;
+                            once.clear(&slot);
+                        }
+                        Err(error) => once.report(
+                            &mut alerts,
+                            &slot,
+                            format!("前の世代を SUPERSEDED にできません {}: {error:#}", target.id),
+                        ),
+                    }
                 }
             }
             while let Ok(event) = events_rx.try_recv() {
@@ -637,6 +698,8 @@ fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
                                     alerts.push(&format!(
                                         "制御ファイルによる RESTART worker={id} key={key}"
                                     ));
+                                } else if error.is::<SpawnFailed>() {
+                                    once.report(&mut alerts, "spawn", format!("{error:#}"));
                                 } else if error.is::<InvalidReading>() {
                                     let message = format!("局面の検査失敗: {key}: {error:#}");
                                     alerts.push(&message);

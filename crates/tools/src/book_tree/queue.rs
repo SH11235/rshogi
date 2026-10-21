@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const QUEUE_ERROR_GRACE: Duration = Duration::from_secs(2);
 
 /// `book_mine tree enqueue` の引数。
 #[derive(Args, Debug)]
@@ -255,17 +257,27 @@ pub(super) fn wait(args: WaitArgs) -> Result<()> {
     if !ids.is_empty() {
         ids.extend(receipt_ids(&args.state, &receipt)?);
     }
+    // 受付停止の理由は、直した直後の古い表示で落ちないよう、続いたときだけ失敗にする。
+    let mut stalled_since = None;
     loop {
         let alive = serve_alive(&args.state)?;
         let run_id = serve_run_id(&args.state);
         let status = read_status(&args.state)?;
-        if let Some(status) = &status
-            && status.processed_bytes < receipt.end
-            && let Some(error) = &status.queue_error
-            && alive
-            && run_id.as_ref() == Some(&status.run_id)
-        {
-            bail!("serve がキューを受け付けていません: {error}");
+        let stalled = status.as_ref().and_then(|status| {
+            (status.processed_bytes < receipt.end
+                && alive
+                && run_id.as_ref() == Some(&status.run_id))
+            .then(|| status.queue_error.clone())
+            .flatten()
+        });
+        match stalled {
+            Some(error) => {
+                let since = *stalled_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= QUEUE_ERROR_GRACE {
+                    bail!("serve がキューを受け付けていません: {error}");
+                }
+            }
+            None => stalled_since = None,
         }
         if let Some(status) = status
             && status.processed_bytes >= receipt.end

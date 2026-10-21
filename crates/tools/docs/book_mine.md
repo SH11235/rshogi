@@ -286,7 +286,7 @@ book_mine tree enqueue --state /path/to/state --repair            # 末尾の書
 
 対象の出力は `<out-root>/<id>/<own>/g<世代>/` です。前の世代の dir は残し、その `STATUS` を `SUPERSEDED` にします (中身は消しません)。後段 (登録) には `book_mine tree wait` の出力か `targets.status.json` で、**今の世代かつ `ready=true`** の出力先だけを渡してください。各世代の dir には記録として根と手順の `paths.record.tsv` (paths.tsv 形式) を書きます。serve はこれを入力に使いません。replay に使うときは dir の外へ写してから指定します。
 
-serve は対象ごとに今の世代の dir の `tree.lock` を終了まで保持します (対象 1 本・手番ごとに 1 つのファイル記述子。世代の数には比例しません)。前の世代の dir は STATUS を書くときだけ lock を取ります。書けなければ次の周回でやり直し、消された前の世代の dir は作り直しません。出力の根が台帳・state の中にあれば起動を拒否し、対象の出力先が台帳・state と重なる行と、出力先の途中・生成物がシンボリックリンクの行は拒否します。
+serve は対象ごとに今の世代の dir の `tree.lock` を終了まで保持します (対象 1 本・手番ごとに 1 つのファイル記述子。世代の数には比例しません)。Unix では起動時に開けるファイル数の soft limit を hard limit まで上げます。エンジンを起動できない失敗 (上限など) は局面の失敗に数えず、ALERT に書いて次の周回で起動し直します。前の世代の dir は STATUS を書くときだけ lock を取ります。書けなければ次の周回でやり直し、消された前の世代の dir は作り直しません。出力の根が台帳・state の中にあれば起動を拒否し、対象の出力先が台帳・state と重なる行と、出力先の途中・生成物がシンボリックリンクの行は拒否します。
 
 ### 受け付けとチェックポイント
 
@@ -296,14 +296,14 @@ serve は対象ごとに今の世代の dir の `tree.lock` を終了まで保�
 
 ### 状態と待機
 
-`<state>/targets.status.json` は 1 回の原子的な書き込みで出す 1 つの JSON です: `run_id`、`processed_bytes`、`processed_sha256`、`all_ended`、`targets` (対象ごとに `id`・`own`・`generation`・`priority`・`hold`・`state`・`ready`・`read` (読んだ局面数)・`required` (要る局面数)・`out`)、`rejected`。`state` は `RESUMING / QUEUED / RUNNING / HELD / DONE / NOT_READY / FAIL`。`queue_error` はキューの受付が止まっている理由です (無ければ null)。`all_ended` は有効な木がすべて `DONE / NOT_READY / FAIL / HELD` のときに真 (0 本でも真) で、worker が止まったことは意味しません。serve は起動のたびに `run_id` (時刻と PID) を作り、state の lock を取った直後に `STATUS` を `STARTING <run_id>` にします (書けなければ前の `targets.status.json` を消します)。出力に触れる前にこのファイルを全対象 `RESUMING`・`ready=false` で書き直します (書けなければ起動をやめます)。`ready=true` はその世代の出力一式が揃ってから出します。書き込みに失敗したら ALERT に書いて次の周回でやり直します。
+`<state>/targets.status.json` は 1 回の原子的な書き込みで出す 1 つの JSON です: `run_id`、`processed_bytes`、`processed_sha256`、`all_ended`、`targets` (対象ごとに `id`・`own`・`generation`・`priority`・`hold`・`state`・`ready`・`read` (読んだ局面数)・`required` (要る局面数)・`out`)、`rejected`。`state` は `RESUMING / QUEUED / RUNNING / HELD / DONE / NOT_READY / FAIL`。`queue_error` はキューの受付が止まっている理由です (無ければ null)。`all_ended` は有効な木がすべて `DONE / NOT_READY / FAIL / HELD` のときに真 (0 本でも真) で、worker が止まったことは意味しません。serve は起動のたびに `run_id` (時刻と PID) を作り、state の lock を取る前に `STATUS` を `STARTING <run_id>` にします (書けなければ lock を取った後に前の `targets.status.json` を消します。lock を取れずに終わった起動の `STARTING` は、動いている serve が次の周回で書き戻します)。出力に触れる前にこのファイルを全対象 `RESUMING`・`ready=false` で書き直します (書けなければ起動をやめます)。`ready=true` はその世代の出力一式が揃ってから出します。書き込みに失敗したら ALERT に書いて次の周回でやり直します。
 
 ```bash
 receipt=$(book_mine tree enqueue --state "$STATE" --from targets.jsonl)
 book_mine tree wait --state "$STATE" --receipt "$receipt" [--ids p12_w,p11_b]
 ```
 
-`wait` は次を同じ 1 回の読み取りで満たしたときに、対象ごとの `id`・`own`・`generation`・`state`・`ready`・`out` を JSON で出して 0 で終わります: `processed_bytes` が受領の `end` 以上、受領の範囲 `[start, end)` に拒否が無い、`all_ended` が真 (`--ids` を付けたらその対象と受領の範囲で足した `id` が終わった状態)、状態の `run_id` が serve の `STATUS` の `run_id` と同じで serve が生きている。受領の範囲に拒否があればその理由を出して非 0、serve が落ちていれば非 0 で終わります。範囲の外の拒否 (他の書き手の行や同じ `id` の過去の拒否) は見ません。受領の範囲が未処理のまま `queue_error` が出ていれば、その理由を出して非 0 で終わります。`--ids` に状態に無い id を渡すと (打ち間違いや、別の受領で足してまだ処理されていない id)、待たずに非 0 で終わります。serve の生存は state の lock を共有 lock で一瞬試して確かめます (serve は起動時に lock を 1 秒ほど待ち直すので、待機と起動が重なっても起動は失敗しません)。
+`wait` は次を同じ 1 回の読み取りで満たしたときに、対象ごとの `id`・`own`・`generation`・`state`・`ready`・`out` を JSON で出して 0 で終わります: `processed_bytes` が受領の `end` 以上、受領の範囲 `[start, end)` に拒否が無い、`all_ended` が真 (`--ids` を付けたらその対象と受領の範囲で足した `id` が終わった状態)、状態の `run_id` が serve の `STATUS` の `run_id` と同じで serve が生きている。受領の範囲に拒否があればその理由を出して非 0、serve が落ちていれば非 0 で終わります。範囲の外の拒否 (他の書き手の行や同じ `id` の過去の拒否) は見ません。受領の範囲が未処理のまま `queue_error` が 2 秒続けば、その理由を出して非 0 で終わります (チェックポイントを一時的に書けない場合も含みます。直した後に待ち直してください)。`--ids` に状態に無い id を渡すと (打ち間違いや、別の受領で足してまだ処理されていない id)、待たずに非 0 で終わります。serve の生存は state の lock を共有 lock で一瞬試して確かめます (serve は起動時に lock を 1 秒ほど待ち直すので、待機と起動が重なっても起動は失敗しません)。
 
 ### 並列数・停止・監視
 

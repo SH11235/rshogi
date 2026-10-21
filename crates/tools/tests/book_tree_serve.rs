@@ -1163,6 +1163,12 @@ fn restart_hides_old_ready_processes_lines_once_and_recovers_status_writes() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(targets_status(state)["targets"].as_array().unwrap().len(), 2);
     assert!(server.0.try_wait().unwrap().is_none());
+    // 戻せば止まっていた行から受付を再開し、受付停止の理由も消える。
+    let mut queue = std::fs::read(state.join("targets.jsonl")).unwrap();
+    queue[0] = b'i';
+    std::fs::write(state.join("targets.jsonl"), &queue).unwrap();
+    assert!(wait_cmd(state, &receipt, Some("c")).output().unwrap().status.success());
+    assert!(targets_status(state)["queue_error"].is_null());
     stop(state, &mut server);
 }
 
