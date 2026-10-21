@@ -333,6 +333,22 @@ impl Tree {
         }
     }
 
+    /// 終わった木の読みと辺を手放す (状態の旗と出力先だけを残す)。
+    pub fn shrink(&mut self) {
+        self.roots.clear();
+        self.root_order.clear();
+        self.game.clear();
+        self.nodes.clear();
+        self.level.clear();
+        self.ply.clear();
+        self.edge.clear();
+        self.rule.clear();
+        self.force.clear();
+        self.candidates.clear();
+        self.compare.clear();
+        self.expanded.clear();
+    }
+
     pub fn reach(&self, edges: &Edges) -> BTreeSet<String> {
         self.reach_from(self.roots.keys().cloned().collect(), edges)
     }

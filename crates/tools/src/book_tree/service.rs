@@ -2,7 +2,8 @@ use super::ServeArgs;
 use super::journal::{Journal, LockedFile, Pv, Reading, Readings, Settings};
 use super::model::{Tree, remove_candidates};
 use super::targets::{
-    CHECKPOINT, Checkpoint, Defaults, QUEUE, STATUS_FILE, StatusFile, Target, TargetStatus,
+    CHECKPOINT, Checkpoint, Defaults, QUEUE, QUEUE_LOCK, STATUS_FILE, StatusFile, Target,
+    TargetStatus,
 };
 use crate::common::io::{write_atomic, write_atomic_durable};
 use crate::selfplay::{EngineConfig, EngineProcess};
@@ -243,9 +244,21 @@ fn spawn_worker(
 /// 受け付けた対象 1 本の実行時の状態。チェックポイントの `targets` と同じ順に並ぶ。
 struct Live {
     tree: Tree,
-    /// 世代ごとの出力の lock。前の世代も replay などから守るため保持し続ける。
-    locks: BTreeMap<u32, LockedFile>,
+    /// 今の世代の出力の lock。前の世代は書くときだけ取り、持つ数を世代の履歴でなく対象の数に比例させる。
+    lock: Option<LockedFile>,
     prepared: bool,
+    /// 終わった木の (読んだ局面数, 要る局面数)。終わった木は中身を縮めて保持する。
+    ended: Option<(usize, usize)>,
+}
+impl Live {
+    fn new(tree: Tree) -> Self {
+        Self {
+            tree,
+            lock: None,
+            prepared: false,
+            ended: None,
+        }
+    }
 }
 
 fn generation_dir(checkpoint: &Checkpoint, target: &Target, generation: u32) -> PathBuf {
@@ -257,23 +270,23 @@ fn generation_dir(checkpoint: &Checkpoint, target: &Target, generation: u32) -> 
 }
 
 /// チェックポイントから出力の副作用 (前の世代の SUPERSEDED、今の世代の dir・lock・QUEUED) を
-/// 行う。どれも冪等で、失敗したら次の周回でやり直す。
+/// 行う。どれも冪等で、失敗したら次の周回でやり直す。消された前の世代の dir は作り直さない。
 fn prepare(live: &mut Live, checkpoint: &Checkpoint, target: &Target) -> Result<()> {
     for generation in 1..target.generation {
         let dir = generation_dir(checkpoint, target, generation);
-        if let std::collections::btree_map::Entry::Vacant(entry) = live.locks.entry(generation) {
-            if !dir.try_exists()? {
-                continue;
-            }
-            super::paths::artifacts(&dir)?;
-            entry.insert(LockedFile::open(&dir.join("tree.lock"))?);
+        if !dir.try_exists()? {
+            continue;
         }
-        monitor(&dir.join("STATUS"), "SUPERSEDED\n");
+        super::paths::artifacts(&dir)?;
+        let _lock = LockedFile::open(&dir.join("tree.lock"))?;
+        if std::fs::read_to_string(dir.join("STATUS")).ok().as_deref() != Some("SUPERSEDED\n") {
+            write_atomic(&dir.join("STATUS"), "SUPERSEDED\n")?;
+        }
     }
     super::paths::artifacts(&target.out)?;
     std::fs::create_dir_all(&target.out)?;
-    if let std::collections::btree_map::Entry::Vacant(entry) = live.locks.entry(target.generation) {
-        entry.insert(LockedFile::open(&target.out.join("tree.lock"))?);
+    if live.lock.is_none() {
+        live.lock = Some(LockedFile::open(&target.out.join("tree.lock"))?);
     }
     remove_candidates(&target.out)?;
     write_atomic(&target.out.join("paths.record.tsv"), &target.definition.record())?;
@@ -283,7 +296,8 @@ fn prepare(live: &mut Live, checkpoint: &Checkpoint, target: &Target) -> Result<
 }
 
 /// キューの改行で終わった未処理の行と、処理済みの範囲までの hash を返す。
-/// 前回見た内容 (長さと mtime) から変わっていなければ読まない。
+/// 前回見た内容 (長さと mtime) から変わっていなければ読まない。enqueue が追記と fsync を
+/// 終えるまで持つ lock を共有で取ってから読み、同期前の行を受け付けない。
 fn poll_queue(
     state: &Path,
     checkpoint: &Checkpoint,
@@ -303,11 +317,26 @@ fn poll_queue(
     if seen.as_ref() == Some(&stamp) {
         return Ok(None);
     }
-    *seen = Some(stamp);
+    let lock_path = state.join(QUEUE_LOCK);
+    super::paths::reject_symlink(&lock_path)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    match lock.try_lock_shared() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
     let bytes = match metadata {
         Some(_) => std::fs::read(&path)?,
         None => Vec::new(),
     };
+    drop(lock);
+    // 読めてから見た内容を覚える (読み取りの失敗は同じ内容のまま次の周回でやり直す)。
+    *seen = Some(stamp);
     let processed = usize::try_from(checkpoint.processed_bytes)?;
     let mut hasher = Sha256::new();
     if bytes.len() >= processed {
@@ -342,7 +371,18 @@ pub(super) fn serve(args: ServeArgs) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(50));
     };
-    let result = serve_locked(&args);
+    let run_id =
+        format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"), std::process::id());
+    // 生存の印 (state の lock) と同時に新しい run_id を出し、前の起動の状態を wait に使わせない。
+    if let Err(error) = write_atomic(&args.state.join("STATUS"), &format!("STARTING {run_id}\n")) {
+        eprintln!("監視ファイル書き込み失敗 STATUS: {error:#}");
+        if let Err(error) = std::fs::remove_file(args.state.join(STATUS_FILE))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("前の状態のファイルを消せません: {error:#}");
+        }
+    }
+    let result = serve_locked(&args, &run_id);
     if let Err(error) = &result {
         monitor(&args.state.join("STATUS"), "FAIL\n");
         alert(&args.state, &format!("FAIL {error:#}"));
@@ -357,11 +397,18 @@ pub(super) fn monitor(path: &std::path::Path, contents: &str) {
     }
 }
 
-fn monitor_changed(path: &std::path::Path, contents: &str) {
+/// 内容が変わったときだけ書く。書けたか、既に同じ内容なら真。
+fn monitor_changed(path: &std::path::Path, contents: &str) -> bool {
     if std::fs::read_to_string(path).is_ok_and(|current| current == contents) {
-        return;
+        return true;
     }
-    monitor(path, contents);
+    match write_atomic(path, contents) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("監視ファイル書き込み失敗 {}: {error:#}", path.display());
+            false
+        }
+    }
 }
 
 fn alert(state: &std::path::Path, message: &str) {
@@ -416,7 +463,7 @@ impl Once {
     }
 }
 
-fn serve_locked(args: &ServeArgs) -> Result<()> {
+fn serve_locked(args: &ServeArgs, run_id: &str) -> Result<()> {
     if args.stall_secs == 0 {
         bail!("stall-secs は正数が必要です");
     }
@@ -451,26 +498,18 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
         }
         None => Checkpoint::new(out_root, settings.fingerprint.clone()),
     };
-    let run_id =
-        format!("{}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"), std::process::id());
     let status_path = args.state.join(STATUS_FILE);
     // 出力に触れる前に、前回の ready を無効にする。
     write_atomic(
         &status_path,
-        &serde_json::to_string_pretty(&StatusFile::resuming(&run_id, &checkpoint))?,
+        &serde_json::to_string_pretty(&StatusFile::resuming(run_id, &checkpoint))?,
     )
     .context("状態のファイルを書けません")?;
     let mut journal = Journal::open(&journal_path, &settings.fingerprint)?;
     let mut lives = checkpoint
         .targets
         .iter()
-        .map(|t| {
-            Ok(Live {
-                tree: t.definition.build(&t.own, &t.out)?,
-                locks: BTreeMap::new(),
-                prepared: false,
-            })
-        })
+        .map(|t| Ok(Live::new(t.definition.build(&t.own, &t.out)?)))
         .collect::<Result<Vec<_>>>()?;
     let workers_file = args.state.join("workers");
     if !workers_file.exists() {
@@ -488,6 +527,8 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
     let mut once = Once::default();
     let mut queue_seen = None;
     let mut status_written = None;
+    let mut queue_error = None;
+    let mut progress_written: Option<(String, Instant)> = None;
     let result = (|| -> Result<()> {
         loop {
             let stopping = args.state.join("stop").exists();
@@ -521,17 +562,14 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                         {
                             Ok(()) => {
                                 once.clear("queue");
+                                queue_error = None;
                                 built.sort_by_key(|(index, _)| *index);
                                 for (index, tree) in built {
+                                    // 前の世代の lock を手放してから、その dir を SUPERSEDED にする。
                                     if let Some(live) = lives.get_mut(index) {
-                                        live.tree = tree;
-                                        live.prepared = false;
+                                        *live = Live::new(tree);
                                     } else {
-                                        lives.push(Live {
-                                            tree,
-                                            locks: BTreeMap::new(),
-                                            prepared: false,
-                                        });
+                                        lives.push(Live::new(tree));
                                     }
                                 }
                                 for rejected in &next.rejected[checkpoint.rejected.len()..] {
@@ -547,15 +585,17 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                             }
                             Err(error) => {
                                 queue_seen = None;
-                                once.report(
-                                    &mut alerts,
-                                    "queue",
-                                    format!("チェックポイントを書けません: {error:#}"),
-                                );
+                                let message = format!("チェックポイントを書けません: {error:#}");
+                                queue_error = Some(message.clone());
+                                once.report(&mut alerts, "queue", message);
                             }
                         }
                     }
-                    Err(error) => once.report(&mut alerts, "queue", format!("{error:#}")),
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        queue_error = Some(message.clone());
+                        once.report(&mut alerts, "queue", message);
+                    }
                 }
             }
             for (index, live) in lives.iter_mut().enumerate() {
@@ -750,12 +790,40 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
             let busy = |key: &String| {
                 workers.values().any(|w| w.busy.as_ref().is_some_and(|(k, _)| k == key))
             };
-            let progress = json!({"status":status,"run_id":run_id,"fingerprint":settings.fingerprint,"queued":queue_len,"workers":workers.iter().map(|(id,w)|json!({"id":id,"key":w.busy.as_ref().map(|(k,_)|k),"elapsed_secs":w.busy.as_ref().map(|(_,t)|t.elapsed().as_secs_f64()),"nodes":w.nodes,"depth":w.depth})).collect::<Vec<_>>(),"trees":checkpoint.targets.iter().zip(&lives).map(|(target,live)|{let t=&live.tree;json!({"id":target.id,"own":target.own,"generation":target.generation,"priority":target.priority,"hold":target.hold,"out":t.def.out,"round":t.round,"read":t.nodes.len(),"requested":t.level.len(),"queued":t.level.keys().filter(|k|journal.get(k).is_none()&&!busy(k)).count(),"running":t.level.keys().filter(|k|busy(k)).count(),"finished":t.finished,"failed":t.failed})}).collect::<Vec<_>>()});
-            monitor(&args.state.join("progress.json"), &serde_json::to_string_pretty(&progress)?);
+            // 終わった木は列にも読みにも関わらないので、局面を数え直さない。
+            let counts =
+                |live: &Live| live.ended.unwrap_or((live.tree.nodes.len(), live.tree.level.len()));
+            let active_tree =
+                |live: &Live| live.ended.is_none() && !live.tree.finished && !live.tree.failed;
+            if progress_written
+                .as_ref()
+                .is_none_or(|(last, at)| last != status || at.elapsed() >= Duration::from_secs(1))
+            {
+                let trees: Vec<_> = checkpoint.targets.iter().zip(&lives).map(|(target, live)| {
+                    let t = &live.tree;
+                    let (read, requested) = counts(live);
+                    let (queued, running) = if active_tree(live) {
+                        (
+                            t.level.keys().filter(|k| journal.get(k).is_none() && !busy(k)).count(),
+                            t.level.keys().filter(|k| busy(k)).count(),
+                        )
+                    } else {
+                        (0, 0)
+                    };
+                    json!({"id":target.id,"own":target.own,"generation":target.generation,"priority":target.priority,"hold":target.hold,"out":t.def.out,"round":t.round,"read":read,"requested":requested,"queued":queued,"running":running,"finished":t.finished,"failed":t.failed})
+                }).collect();
+                let progress = json!({"status":status,"run_id":run_id,"fingerprint":settings.fingerprint,"queued":queue_len,"workers":workers.iter().map(|(id,w)|json!({"id":id,"key":w.busy.as_ref().map(|(k,_)|k),"elapsed_secs":w.busy.as_ref().map(|(_,t)|t.elapsed().as_secs_f64()),"nodes":w.nodes,"depth":w.depth})).collect::<Vec<_>>(),"trees":trees});
+                monitor(
+                    &args.state.join("progress.json"),
+                    &serde_json::to_string_pretty(&progress)?,
+                );
+                progress_written = Some((status.to_owned(), Instant::now()));
+            }
             let mut statuses = Vec::new();
-            for (target, live) in checkpoint.targets.iter().zip(&lives) {
+            for (target, live) in checkpoint.targets.iter().zip(lives.iter_mut()) {
+                let (read, required) = counts(live);
                 let tree = &live.tree;
-                let reading = tree.level.keys().any(busy);
+                let reading = active_tree(live) && tree.level.keys().any(busy);
                 let tree_status = if tree.failed {
                     "FAIL"
                 } else if tree.finished {
@@ -764,16 +832,13 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                     "HELD"
                 } else if desired == 0 && !reading {
                     "STOPPED"
-                } else if tree.nodes.is_empty() && !reading {
+                } else if read == 0 && !reading {
                     "QUEUED"
                 } else {
                     "RUNNING"
                 };
-                if live.prepared && (!(tree.finished || tree.failed) || tree.def.out.is_dir()) {
-                    monitor_changed(&tree.def.out.join("STATUS"), &format!("{tree_status}\n"));
-                }
                 let state = match tree_status {
-                    "STOPPED" if tree.nodes.is_empty() => "QUEUED",
+                    "STOPPED" if read == 0 => "QUEUED",
                     "STOPPED" => "RUNNING",
                     other => other,
                 };
@@ -785,13 +850,31 @@ fn serve_locked(args: &ServeArgs) -> Result<()> {
                     hold: target.hold,
                     state: state.into(),
                     ready: tree.finished && tree.ready,
-                    read: tree.nodes.len(),
-                    required: tree.level.len(),
+                    read,
+                    required,
                     out: target.out.clone(),
                 });
+                if !live.prepared || live.ended.is_some() {
+                    continue;
+                }
+                let ended = tree.finished || tree.failed;
+                let written = if ended && !tree.def.out.is_dir() {
+                    true
+                } else {
+                    monitor_changed(&tree.def.out.join("STATUS"), &format!("{tree_status}\n"))
+                };
+                // 終わった木は STATUS を書けてから中身を縮める。
+                if ended && written {
+                    live.ended = Some((read, required));
+                    live.tree.shrink();
+                }
             }
-            let text =
-                serde_json::to_string_pretty(&StatusFile::new(&run_id, &checkpoint, statuses))?;
+            let text = serde_json::to_string_pretty(&StatusFile::new(
+                run_id,
+                &checkpoint,
+                statuses,
+                queue_error.clone(),
+            ))?;
             if status_written.as_ref() != Some(&text) {
                 match write_atomic(&status_path, &text) {
                     Ok(()) => {

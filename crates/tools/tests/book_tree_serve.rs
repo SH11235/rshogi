@@ -216,6 +216,12 @@ fn replay_toml(state: &Path, name: &str, extra: &str) -> PathBuf {
     .unwrap();
     toml
 }
+/// 起動に失敗するはずの serve を、常駐してしまっても待ち続けないよう期限付きで待つ。
+fn exits_with_failure(mut command: Command) -> bool {
+    let mut child = Server(command.spawn().unwrap());
+    wait_for(|| child.0.try_wait().unwrap().is_some());
+    !child.0.wait().unwrap().success()
+}
 fn searches(state: &Path) -> usize {
     std::fs::read_to_string(state.join("protocol.jsonl"))
         .unwrap_or_default()
@@ -649,8 +655,7 @@ fn out_root_collisions_stop_startup_and_unsafe_ids_are_rejected() {
     std::fs::create_dir_all(state).unwrap();
     let config = fast_fixture(state);
     for out_root in [state.clone(), state.join("child")] {
-        let result = serve_command(state, &config, 3, 3, &out_root).output().unwrap();
-        assert!(!result.status.success());
+        assert!(exits_with_failure(serve_command(state, &config, 3, 3, &out_root)));
         assert!(std::fs::read_to_string(state.join("server.log")).unwrap().contains("衝突"));
         assert!(!state.join("accepted.json").exists());
     }
@@ -672,8 +677,13 @@ fn out_root_collisions_stop_startup_and_unsafe_ids_are_rejected() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("大小文字"));
     stop(state, &mut server);
-    let result = serve_command(state, &config, 3, 3, &dir.path().join("other")).output().unwrap();
-    assert!(!result.status.success());
+    assert!(exits_with_failure(serve_command(
+        state,
+        &config,
+        3,
+        3,
+        &dir.path().join("other")
+    )));
     assert!(std::fs::read_to_string(state.join("server.log")).unwrap().contains("固定"));
 }
 
@@ -815,8 +825,7 @@ fn queue_and_restart_links_and_fifos_are_alerted_without_stopping_serve() {
     std::fs::create_dir_all(state.join("restart")).unwrap();
     std::os::unix::fs::symlink(&fifo, state.join("restart/0")).unwrap();
     assert!(!try_enqueue(state, &[tree_line("good")]).status.success());
-    let result = serve_command(state, &config, 3, 3, dir.path()).output().unwrap();
-    assert!(!result.status.success());
+    assert!(exits_with_failure(serve_command(state, &config, 3, 3, dir.path())));
     assert!(
         std::fs::read_to_string(state.join("server.log"))
             .unwrap()
@@ -868,6 +877,21 @@ fn enqueue_checks_everything_before_writing_and_repair_truncates_only_the_partia
     let result = try_enqueue(state, &[tree_line("d")]);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("--repair"));
+    // 1 行用の引数は --from / --repair と一緒に使えない (黙って無視しない)。
+    assert!(!book_mine(&["enqueue", "--repair", "--memo", "x"], state).status.success());
+    let lines = dir.path().join("one.jsonl");
+    std::fs::write(&lines, format!("{}\n", tree_line("d"))).unwrap();
+    let from = book_mine(
+        &[
+            "enqueue",
+            "--from",
+            lines.to_str().unwrap(),
+            "--priority",
+            "3",
+        ],
+        state,
+    );
+    assert!(!from.status.success());
     let result = book_mine(&["enqueue", "--repair"], state);
     assert!(result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("half"));
@@ -1108,9 +1132,9 @@ fn restart_hides_old_ready_processes_lines_once_and_recovers_status_writes() {
             .spawn()
             .unwrap(),
     );
-    wait_for(|| other.join("targets.status.json").exists());
-    let result = serve_command(state, &config, 3, 3, state.parent().unwrap()).output().unwrap();
-    assert!(!result.status.success());
+    // progress.json は台帳を開いた後の周回で書かれる。
+    wait_for(|| other.join("progress.json").exists());
+    assert!(exits_with_failure(serve_command(state, &config, 3, 3, state.parent().unwrap())));
     let resumed = targets_status(state);
     assert_ne!(resumed["run_id"], first_run);
     assert_eq!(resumed["targets"][0]["state"], "RESUMING");
@@ -1131,10 +1155,58 @@ fn restart_hides_old_ready_processes_lines_once_and_recovers_status_writes() {
     let mut queue = std::fs::read(state.join("targets.jsonl")).unwrap();
     queue[0] = b'X';
     std::fs::write(state.join("targets.jsonl"), &queue).unwrap();
-    add_tree(state, "c");
+    let receipt = add_tree(state, "c");
     wait_for(|| alerts(state).contains("処理済みの範囲が変わりました"));
+    let result = wait_cmd(state, &receipt, None).output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("受け付けていません"));
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(targets_status(state)["targets"].as_array().unwrap().len(), 2);
     assert!(server.0.try_wait().unwrap().is_none());
+    stop(state, &mut server);
+}
+
+#[test]
+fn restart_redoes_side_effects_after_the_checkpoint_and_lines_before_it_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = &dir.path().join("state");
+    std::fs::create_dir(state).unwrap();
+    std::fs::write(state.join("workers"), "0").unwrap();
+    let config = fast_fixture(state);
+    std::fs::write(state.join("targets.jsonl"), "invalid\n").unwrap();
+    add_tree(state, "a");
+    let mut server = start(state, &config);
+    wait_for(|| out(state, "a", "b").join("paths.record.tsv").exists());
+    stop(state, &mut server);
+    std::fs::remove_file(state.join("stop")).unwrap();
+    let first = std::fs::read_to_string(state.join("accepted.json")).unwrap();
+    // チェックポイントの後、副作用の前に落ちた: 出力先が無くても再開で作り直す。
+    std::fs::remove_dir_all(state.parent().unwrap().join("a")).unwrap();
+    let mut server = start(state, &config);
+    wait_for(|| status(&out(state, "a", "b")) == "STOPPED\n");
+    assert!(out(state, "a", "b").join("paths.record.tsv").exists());
+    assert_eq!(std::fs::read_to_string(state.join("accepted.json")).unwrap(), first);
+    let mut queue = std::fs::OpenOptions::new()
+        .append(true)
+        .open(state.join("targets.jsonl"))
+        .unwrap();
+    std::io::Write::write_all(&mut queue, b"invalid again\n").unwrap();
+    add_tree(state, "b");
+    wait_for(|| targets_status(state)["targets"].as_array().is_some_and(|t| t.len() == 2));
+    stop(state, &mut server);
+    std::fs::remove_file(state.join("stop")).unwrap();
+    let second = std::fs::read_to_string(state.join("accepted.json")).unwrap();
+    // チェックポイントの前に落ちた: 行は未処理のまま残り、次の起動で 1 回だけ処理する。
+    std::fs::write(state.join("accepted.json"), &first).unwrap();
+    std::fs::remove_dir_all(state.parent().unwrap().join("b")).unwrap();
+    let before = targets_status(state)["run_id"].clone();
+    let mut server = start(state, &config);
+    wait_for(|| {
+        let current = targets_status(state);
+        current["run_id"] != before && current["targets"].as_array().is_some_and(|t| t.len() == 2)
+    });
+    assert_eq!(std::fs::read_to_string(state.join("accepted.json")).unwrap(), second);
+    assert_eq!(targets_status(state)["rejected"].as_array().unwrap().len(), 2);
+    wait_for(|| status(&out(state, "b", "b")) == "STOPPED\n");
     stop(state, &mut server);
 }

@@ -26,33 +26,33 @@ pub struct EnqueueArgs {
     #[arg(long, required_unless_present_any = ["from", "repair"])]
     id: Option<String>,
     /// `sfen <盤> <手番> <持駒> <手数>` か `startpos moves <USI の手順>`
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     root: Option<String>,
     /// b / w / bw
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     own: Option<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     depth: Option<usize>,
     /// 小さいほど先 (目安: 0 = 急ぎ、100 = 既定、1000 = 空きを埋めるだけ)
-    #[arg(long, default_value_t = DEFAULT_PRIORITY)]
-    priority: u32,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
+    priority: Option<u32>,
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     hold: bool,
     /// 根からの実戦の手順 (USI を空白区切り)。繰り返して複数
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     game: Vec<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     opp_n: Option<usize>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     stop: Option<i32>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     rounds: Option<usize>,
-    #[arg(long, allow_hyphen_values = true)]
+    #[arg(long, conflicts_with_all = ["from", "repair"], allow_hyphen_values = true)]
     draw: Option<i32>,
     /// 根で伸ばす手。繰り返して複数
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     extra: Vec<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["from", "repair"])]
     memo: Option<String>,
 }
 
@@ -76,7 +76,7 @@ fn line_from_args(args: &EnqueueArgs) -> Result<Line> {
         root: args.root.clone().with_context(|| need("root"))?,
         own: args.own.clone().with_context(|| need("own"))?,
         depth: args.depth.with_context(|| need("depth"))?,
-        priority: args.priority,
+        priority: args.priority.unwrap_or(DEFAULT_PRIORITY),
         hold: args.hold,
         game: args
             .game
@@ -258,7 +258,16 @@ pub(super) fn wait(args: WaitArgs) -> Result<()> {
     loop {
         let alive = serve_alive(&args.state)?;
         let run_id = serve_run_id(&args.state);
-        if let Some(status) = read_status(&args.state)?
+        let status = read_status(&args.state)?;
+        if let Some(status) = &status
+            && status.processed_bytes < receipt.end
+            && let Some(error) = &status.queue_error
+            && alive
+            && run_id.as_ref() == Some(&status.run_id)
+        {
+            bail!("serve がキューを受け付けていません: {error}");
+        }
+        if let Some(status) = status
             && status.processed_bytes >= receipt.end
         {
             let rejected: Vec<_> = status

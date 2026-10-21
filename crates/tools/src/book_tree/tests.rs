@@ -990,3 +990,34 @@ fn single_pv_win_is_a_leaf_and_mixed_win_rows_are_rejected() {
     let mut collector = super::service::Collector::default();
     assert!(collector.info("info depth 1 multipv 2 score mate 0 pv win").is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn bw_line_is_rejected_whole_when_one_side_cannot_be_built() {
+    use sha2::Digest;
+    let dir = tempfile::tempdir().unwrap();
+    let out_root = dir.path().join("trees");
+    std::fs::create_dir_all(out_root.join("x")).unwrap();
+    std::os::unix::fs::symlink(dir.path(), out_root.join("x/w")).unwrap();
+    let checkpoint = targets::Checkpoint::new(out_root, "fp".into());
+    let defaults = targets::Defaults {
+        opp_n: 2,
+        stop: 300,
+        rounds: 3,
+        draw: 0,
+    };
+    let lines = format!(
+        "{}\n{}\n",
+        serde_json::json!({"id":"x","root":format!("sfen {ROOT} 1"),"own":"bw","depth":2}),
+        serde_json::json!({"id":"y","root":format!("sfen {ROOT} 1"),"own":"bw","depth":2})
+    );
+    let (next, built) = checkpoint.apply(lines.as_bytes(), &defaults, &sha2::Sha256::new(), &[]);
+    assert_eq!(next.rejected.len(), 1);
+    assert_eq!(next.rejected[0].id.as_deref(), Some("x"));
+    assert!(next.rejected[0].reason.contains("シンボリックリンク"));
+    let accepted: Vec<_> =
+        next.targets.iter().map(|t| (t.id.as_str(), t.own.as_str(), t.order)).collect();
+    assert_eq!(accepted, [("y", "b", 0), ("y", "w", 0)]);
+    assert_eq!(built.len(), 2);
+    assert_eq!(next.processed_bytes, lines.len() as u64);
+}

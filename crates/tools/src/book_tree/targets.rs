@@ -478,6 +478,8 @@ pub(super) struct StatusFile {
     pub processed_bytes: u64,
     pub processed_sha256: String,
     pub all_ended: bool,
+    /// キューの受付が止まっている理由 (処理済みの範囲の変化、チェックポイントを書けないなど)。
+    pub queue_error: Option<String>,
     pub targets: Vec<TargetStatus>,
     pub rejected: Vec<Rejected>,
 }
@@ -485,12 +487,18 @@ pub(super) struct StatusFile {
 pub(super) const ENDED: [&str; 4] = ["DONE", "NOT_READY", "FAIL", "HELD"];
 
 impl StatusFile {
-    pub fn new(run_id: &str, checkpoint: &Checkpoint, targets: Vec<TargetStatus>) -> Self {
+    pub fn new(
+        run_id: &str,
+        checkpoint: &Checkpoint,
+        targets: Vec<TargetStatus>,
+        queue_error: Option<String>,
+    ) -> Self {
         Self {
             run_id: run_id.into(),
             processed_bytes: checkpoint.processed_bytes,
             processed_sha256: checkpoint.processed_sha256.clone(),
             all_ended: targets.iter().all(|t| ENDED.contains(&t.state.as_str())),
+            queue_error,
             targets,
             rejected: checkpoint.rejected.clone(),
         }
@@ -514,7 +522,7 @@ impl StatusFile {
                 out: t.out.clone(),
             })
             .collect();
-        Self::new(run_id, checkpoint, targets)
+        Self::new(run_id, checkpoint, targets, None)
     }
 }
 
