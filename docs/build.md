@@ -355,8 +355,8 @@ cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-230
 cargo run --release -p xtask -- build --edition layerstacks-halfka_hm_merged-1536x16x64-none --profile production
 ```
 
-L2 層の出力 32 の専用経路は 32 幅の融合出力 kernel を使う。出力 64 は活性化と出力層の内積を
-融合し、AVX512BW が有効なら64要素を一括処理する。VNNI があれば4項積和命令を使う。
+AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融合出力 kernel を使う。出力 64 は
+活性化と出力層の内積を融合し、AVX512BW が有効なら64要素を一括処理する。VNNI があれば4項積和命令を使う。
 それ以外の AVX2 環境では32要素ずつ処理し、最後に一度だけ水平加算する。評価ごとのヒープ確保は行わない。
 
 ## 今後の追加予定 (本ドキュメントの未対応項目)

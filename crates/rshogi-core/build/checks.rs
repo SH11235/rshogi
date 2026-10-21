@@ -140,7 +140,7 @@ fn validate_feature_combination(
         }
     }
 
-    // nnue-progress-diff は L0=1536 系 / L0=3072 で性能向上、L0=2304 で中立 (実測確認済み)、
+    // nnue-progress-diff は L2=32 の L0=1536 系 / L0=3072 で性能向上、2304x16x64 で中立 (実測)、
     // L0=768/512 で退行する trade-off。退行構成での誤指定を弾く。
     if has_feature("nnue-progress-diff") {
         let valid = mode_specific

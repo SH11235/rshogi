@@ -2188,17 +2188,18 @@ pub enum LayerStacksNetwork {
     HalfKP(LsNetByFt<HalfKpSpec>),
 }
 
-/// `LayerStacksNetwork` の FT × L1 軸を 1 段 match で展開する公開マクロ。
+/// `LayerStacksNetwork` の FT × 寸法の軸を 1 段 match で展開する公開マクロ。
 ///
-/// 5 FT × 7 L1 = 35 (FT, L1) 組合せを `all(ft-*, layerstacks-*)` cfg gate 付きで列挙し、
+/// 5 FT × 10 寸法 = 50 組合せを `all(ft-*, layerstacks-*)` cfg gate 付きで列挙し、
 /// マッチした variant の内部 `&NetworkLayerStacks<L1, ..., FT>` (concrete 型) を
 /// `$inner` として body に渡す。tools crate (bench / eval / verify) の dispatch
-/// マクロをこれに統合することで、FT/L1 軸が増えたときの 3 ファイル同時更新漏れを防ぐ。
+/// マクロをこれに統合することで、FT/寸法の軸が増えたときの 3 ファイル同時更新漏れを防ぐ。
 ///
 /// マッチアームは呼び出し crate 側の cfg を見て展開されるため、`rshogi-core` 側で
 /// 有効な variant を caller 側がすべては有効化していない場合に備えて `_ =>`
 /// fallback を引数として受け取る。caller のすべての (`ft-*`, `layerstacks-*`) feature が
-/// 揃っている = 50 arm で exhaustive なときは fallback arm を cfg gate でドロップし、
+/// 揃っている = 50 arm (`nnue-effect-bucket` の 10 arm は別) で exhaustive なときは
+/// fallback arm を cfg gate でドロップし、
 /// `#[allow(unreachable_patterns)]` を不要にする。
 ///
 /// 構文 (既存の `with_ls_net!` 等と互換):

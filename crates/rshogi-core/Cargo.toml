@@ -159,11 +159,11 @@ mode-specific  = []
 # NNUE progresskpabs バケットの差分更新最適化
 # - 有効時: StackEntry に progress_sum/computed_progress フィールド追加、
 #   ensure_progress_bucket で DirtyPiece 差分から O(1) 更新
-# - L0=1536 系 / L0=3072 で性能向上、L0=2304 は命令数/node が減り cycles/node は中立、
-#   L0=768/512 で退行する trade-off
+# - 実測: L2=32 の L0=1536 系 / L0=3072 で性能向上、2304x16x64 は命令数/node が減り
+#   cycles/node は中立、L0=768/512 で退行する trade-off
 # - 適用条件: build.rs で mode-specific + layerstacks-1536x16x32 / layerstacks-1536x32x32 /
 #   layerstacks-3072x16x32 / layerstacks-2304x16x64 / layerstacks-3072x16x64 /
-#   layerstacks-1536x16x64 を強制
+#   layerstacks-1536x16x64 に限定
 #   (mode-* が未指定の互換 build では check 緩和、user 責任で組合せ可)
 nnue-progress-diff = []
 
