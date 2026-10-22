@@ -119,7 +119,7 @@ pub(crate) fn compute_layer_stacks_bucket_index_with_q16(
             compute_layer_stack_progresskpabs_bucket_index(
                 pos,
                 side_to_move,
-                weights,
+                &weights,
                 routing_buckets,
             )
         }
@@ -660,8 +660,10 @@ impl<
         }
     }
 
-    /// 評価値を計算
+    /// 評価値を計算。
     ///
+    /// stackを持たないため、progress係数は評価ごとにglobal設定から取得する。
+    /// f32係数をresetまで保持する場合は `NNUEEvaluator` を使う。
     pub fn evaluate(&self, pos: &Position, acc: &AccumulatorLayerStacks<L1>) -> Value {
         let side_to_move = pos.side_to_move();
         let bucket_index = compute_layer_stacks_bucket_index(pos, side_to_move, self.num_buckets);
@@ -780,6 +782,7 @@ impl<
     ///
     /// Python (nnue-pytorch) との比較検証用。
     /// 各中間値をログ出力する。
+    /// stackを持たないため、progress係数は評価ごとにglobal設定から取得する。
     #[cfg(feature = "diagnostics")]
     pub fn evaluate_with_diagnostics(
         &self,
@@ -1464,7 +1467,23 @@ impl<FT: LsFeatureSpec + 'static> LsNetByFt<FT> {
         pos: &Position,
         stack: &super::accumulator_layer_stacks::LayerStacksAccStack,
     ) -> Value {
-        self.evaluate_impl(pos, stack, None)
+        let bucket = if get_layer_stack_bucket_mode() == LayerStackBucketMode::ProgressKPAbs {
+            let routing_buckets = get_layer_stack_progress_buckets()
+                .expect("LayerStacks progress routing is not configured");
+            assert!(
+                routing_buckets <= self.num_buckets(),
+                "progress routing exceeds stored buckets"
+            );
+            Some(compute_layer_stack_progresskpabs_bucket_index(
+                pos,
+                pos.side_to_move(),
+                stack.progress_kpabs_weights(),
+                routing_buckets,
+            ))
+        } else {
+            None
+        };
+        self.evaluate_impl(pos, stack, bucket)
     }
 
     #[cfg(feature = "layerstack-arch")]

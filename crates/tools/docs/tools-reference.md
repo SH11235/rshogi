@@ -1,6 +1,6 @@
 # rshogi tools リファレンス
 
-LayerStacks の [native / USI routing 対応と Q16 制限](nnue-routing.md)。
+LayerStacks の [native / USI routing 対応、Q16 制限、progress 係数の保持と再読込み](nnue-routing.md)。
 
 crates/tools/src/bin/ 配下の主要バイナリの一覧と解説。
 

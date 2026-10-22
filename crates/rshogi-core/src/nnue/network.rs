@@ -56,7 +56,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::mem::size_of;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 /// グローバルなNNUEネットワーク（HalfKP/HalfKaSplit/HalfKaHmMerged^）
@@ -242,11 +242,19 @@ static LAYER_STACK_PROGRESS_BUCKETS: AtomicUsize = AtomicUsize::new(0);
 static LAYER_STACK_PROGRESS_KP_ABS_ZERO_WEIGHTS: [f32; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS] =
     [0.0; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS];
 
-/// progresskpabs 重みのグローバル設定
-///
-/// `progress.bin` 読み込み時に Box を leak してポインタだけ差し替える。
-/// 設定は起動時の一度を想定し、評価ホットパスでは lock を取らない。
-static LAYER_STACK_PROGRESS_KP_ABS_PTR: AtomicPtr<f32> = AtomicPtr::new(std::ptr::null_mut());
+static LAYER_STACK_PROGRESS_KP_ABS_WEIGHTS: RwLock<Option<Arc<[f32]>>> = RwLock::new(None);
+
+/// progresskpabs 係数の不変スナップショット。再設定・reset 後も取得時の係数を保持する。
+#[derive(Clone)]
+pub struct ProgressKpAbsWeights(Option<Arc<[f32]>>);
+
+impl std::ops::Deref for ProgressKpAbsWeights {
+    type Target = [f32];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().unwrap_or(&LAYER_STACK_PROGRESS_KP_ABS_ZERO_WEIGHTS)
+    }
+}
 
 /// FV_SCALE オーバーライドを取得
 ///
@@ -373,18 +381,18 @@ pub(crate) fn layer_stack_routing_test_guard() -> std::sync::MutexGuard<'static,
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// LayerStacks progresskpabs 重みを取得
-pub fn get_layer_stack_progress_kpabs_weights() -> &'static [f32] {
-    let ptr = LAYER_STACK_PROGRESS_KP_ABS_PTR.load(Ordering::Relaxed);
-    if ptr.is_null() {
-        &LAYER_STACK_PROGRESS_KP_ABS_ZERO_WEIGHTS
-    } else {
-        // SAFETY: `set_layer_stack_progress_kpabs_weights()` で leaked Box の先頭ポインタを保存している。
-        unsafe { std::slice::from_raw_parts(ptr.cast_const(), SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS) }
-    }
+/// LayerStacks progresskpabs 係数の所有権付きスナップショットを取得する。
+/// 未設定時は全ゼロを参照し、set/reset 後も取得済みの値は変わらない。
+pub fn get_layer_stack_progress_kpabs_weights() -> ProgressKpAbsWeights {
+    ProgressKpAbsWeights(
+        LAYER_STACK_PROGRESS_KP_ABS_WEIGHTS
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
+    )
 }
 
-/// LayerStacks progresskpabs 重みを設定
+/// LayerStacks progresskpabs 係数を設定する。既存の探索stackへの反映にはresetが必要。
 pub fn set_layer_stack_progress_kpabs_weights(weights: Box<[f32]>) -> Result<(), String> {
     if weights.len() != SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS {
         return Err(format!(
@@ -394,35 +402,18 @@ pub fn set_layer_stack_progress_kpabs_weights(weights: Box<[f32]>) -> Result<(),
         ));
     }
 
-    let leaked = Box::leak(weights);
-    let old_ptr = LAYER_STACK_PROGRESS_KP_ABS_PTR.swap(leaked.as_mut_ptr(), Ordering::Relaxed);
-    // SAFETY: old_ptr は過去の同関数で Box::leak したスライスの先頭ポインタ（または null）。
-    // USI プロトコルにより設定変更中は評価パスが実行されないため、参照者は存在しない。
-    if !old_ptr.is_null() {
-        unsafe {
-            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                old_ptr,
-                SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
-            )));
-        }
-    }
+    let snapshot = Arc::from(weights);
+    *LAYER_STACK_PROGRESS_KP_ABS_WEIGHTS
+        .write()
+        .map_err(|_| "progresskpabs weights lock poisoned")? = Some(snapshot);
     crate::eval::changed();
     Ok(())
 }
 
-/// LayerStacks progresskpabs 重みを既定値（全ゼロ）へ戻す
+/// LayerStacks progresskpabs 係数を全ゼロへ戻す。取得済みのsnapshotは元の係数を保持する。
 pub fn reset_layer_stack_progress_kpabs_weights() {
     crate::eval::changed();
-    let old_ptr = LAYER_STACK_PROGRESS_KP_ABS_PTR.swap(std::ptr::null_mut(), Ordering::Relaxed);
-    // SAFETY: 同上。old_ptr は Box::leak 由来のポインタ（または null）。
-    if !old_ptr.is_null() {
-        unsafe {
-            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
-                old_ptr,
-                SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
-            )));
-        }
-    }
+    *LAYER_STACK_PROGRESS_KP_ABS_WEIGHTS.write().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 // =============================================================================
@@ -1477,7 +1468,7 @@ pub fn compute_progresskpabs_sum(pos: &Position, weights: &[f32]) -> f32 {
 ///
 /// 玉が動いていない場合にのみ使用可能。
 /// DirtyPiece の ExtBonaPiece.fb/fw は progresskpabs と同じ BonaPiece 体系。
-#[cfg(feature = "nnue-progress-diff")]
+#[cfg(all(feature = "nnue-progress-diff", any(feature = "layerstack-arch", test)))]
 #[inline]
 pub fn update_progresskpabs_sum_diff(
     prev_sum: f32,
@@ -1910,12 +1901,32 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
         CACHED_PROGRESS_BUCKET.with(|c| c.set(Some(bucket)));
     }
 
-    let bucket = super::network_layer_stacks::compute_layer_stacks_bucket_index_with_q16(
-        pos,
-        pos.side_to_move(),
-        net.num_buckets(),
-        || stack.ensure_progress_q16_bucket(pos, net.num_buckets()),
-    );
+    let bucket = match get_layer_stack_bucket_mode() {
+        LayerStackBucketMode::KingRank9 => {
+            super::network_layer_stacks::compute_layer_stack_kingrank9_bucket_index(
+                pos,
+                pos.side_to_move(),
+                net.num_buckets(),
+            )
+        }
+        LayerStackBucketMode::ProgressKPAbsQ16 => {
+            stack.ensure_progress_q16_bucket(pos, net.num_buckets())
+        }
+        LayerStackBucketMode::ProgressKPAbs => {
+            let routing_buckets = get_layer_stack_progress_buckets()
+                .expect("LayerStacks progress routing is not configured");
+            assert!(
+                routing_buckets <= net.num_buckets(),
+                "progress routing exceeds stored buckets"
+            );
+            compute_layer_stack_progresskpabs_bucket_index(
+                pos,
+                pos.side_to_move(),
+                stack.progress_kpabs_weights(),
+                routing_buckets,
+            )
+        }
+    };
     net.evaluate_with_bucket(pos, stack, bucket)
 }
 
@@ -1923,7 +1934,7 @@ pub(crate) fn update_and_evaluate_layer_stacks_cached(
 ///
 /// 差分更新が可能な場合（前局面が計算済み、玉移動なし）は DirtyPiece の差分で O(1) 更新。
 /// それ以外は全駒スキャンにフォールバック。
-#[cfg(feature = "nnue-progress-diff")]
+#[cfg(all(feature = "nnue-progress-diff", feature = "layerstack-arch"))]
 #[inline]
 fn ensure_progress_bucket<const L1: usize>(
     pos: &Position,
@@ -1931,7 +1942,6 @@ fn ensure_progress_bucket<const L1: usize>(
     num_buckets: usize,
 ) -> usize {
     if !stack.current().computed_progress {
-        let weights = get_layer_stack_progress_kpabs_weights();
         let current_entry = stack.current();
         let dirty = &current_entry.dirty_piece;
         let king_moved = dirty.king_moved[0] || dirty.king_moved[1];
@@ -1943,14 +1953,20 @@ fn ensure_progress_bucket<const L1: usize>(
             let prev_sum = stack.entry_at(prev_idx).progress_sum;
             let sq_bk = pos.king_square(Color::Black).index();
             let sq_wk = pos.king_square(Color::White).inverse().index();
-            let new_sum = update_progresskpabs_sum_diff(prev_sum, dirty, sq_bk, sq_wk, weights);
+            let new_sum = update_progresskpabs_sum_diff(
+                prev_sum,
+                dirty,
+                sq_bk,
+                sq_wk,
+                stack.progress_kpabs_weights(),
+            );
             let entry = stack.current_mut();
             entry.progress_sum = new_sum;
             entry.computed_progress = true;
         }
 
         if !stack.current().computed_progress {
-            let sum = compute_progresskpabs_sum(pos, weights);
+            let sum = compute_progresskpabs_sum(pos, stack.progress_kpabs_weights());
             let entry = stack.current_mut();
             entry.progress_sum = sum;
             entry.computed_progress = true;
@@ -2587,6 +2603,59 @@ mod tests {
     use crate::position::SFEN_HIRATE;
 
     #[test]
+    fn progress_weights_snapshot_survives_replacement_and_reset() {
+        let _guard = layer_stack_routing_test_guard();
+        reset_layer_stack_progress_kpabs_weights();
+        let zero = get_layer_stack_progress_kpabs_weights();
+        set_layer_stack_progress_kpabs_weights(
+            vec![1.25; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+        )
+        .unwrap();
+        let mut original = get_layer_stack_progress_kpabs_weights();
+        set_layer_stack_progress_kpabs_weights(
+            vec![-0.75; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+        )
+        .unwrap();
+        let replacement = get_layer_stack_progress_kpabs_weights();
+        reset_layer_stack_progress_kpabs_weights();
+        assert!(zero.iter().all(|&v| v == 0.0));
+        assert!(original.iter().all(|&v| v == 1.25));
+        assert!(replacement.iter().all(|&v| v == -0.75));
+        assert!(get_layer_stack_progress_kpabs_weights().iter().all(|&v| v == 0.0));
+        // 他テストのstackが旧係数を保持していても、解放確認は単独所有の値で行う。
+        Arc::make_mut(original.0.as_mut().unwrap());
+        let weak = Arc::downgrade(original.0.as_ref().unwrap());
+        assert!(weak.upgrade().is_some());
+        drop(original);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn progress_weights_snapshot_is_independent_of_other_threads() {
+        let _guard = layer_stack_routing_test_guard();
+        set_layer_stack_progress_kpabs_weights(
+            vec![0.25; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+        )
+        .unwrap();
+        let snapshot = get_layer_stack_progress_kpabs_weights();
+        let reader = snapshot.clone();
+        std::thread::spawn(move || {
+            reset_layer_stack_progress_kpabs_weights();
+            set_layer_stack_progress_kpabs_weights(
+                vec![0.5; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+            )
+            .unwrap();
+            assert!(reader.iter().all(|&v| v == 0.25));
+        })
+        .join()
+        .unwrap();
+        assert!(snapshot.iter().all(|&v| v == 0.25));
+        assert!(set_layer_stack_progress_kpabs_weights(vec![0.0].into_boxed_slice()).is_err());
+        assert!(get_layer_stack_progress_kpabs_weights().iter().all(|&v| v == 0.5));
+        reset_layer_stack_progress_kpabs_weights();
+    }
+
+    #[test]
     fn progress_sum_rejects_incorrect_coefficient_lengths() {
         let mut pos = Position::new();
         pos.set_sfen(SFEN_HIRATE).unwrap();
@@ -2709,7 +2778,7 @@ mod tests {
         let selected_bucket = compute_layer_stack_progresskpabs_bucket_index(
             &pos,
             pos.side_to_move(),
-            get_layer_stack_progress_kpabs_weights(),
+            &get_layer_stack_progress_kpabs_weights(),
             4,
         );
         assert_eq!(selected_bucket, 2);

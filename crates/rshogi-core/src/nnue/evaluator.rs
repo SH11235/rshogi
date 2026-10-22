@@ -137,6 +137,7 @@ impl NNUEEvaluator {
     /// スタックをリセット（探索開始時に呼び出す）
     ///
     /// ルート局面でアキュムレータをフル再計算する。
+    /// LayerStacks の f32 progresskpabs 係数も、この時点の設定へ更新する。
     ///
     /// # 引数
     ///
@@ -580,6 +581,78 @@ impl NNUEEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(
+        feature = "layerstack-arch",
+        feature = "ft-halfka_hm_merged",
+        not(feature = "nnue-effect-bucket"),
+        any(feature = "layerstacks-1536x16x32", feature = "layerstacks-512x16x32")
+    ))]
+    #[test]
+    fn fixed_layer_stacks_progress_weights_snapshot_changes_on_evaluator_reset() {
+        use crate::nnue::constants::HALFKA_HM_DIMENSIONS;
+        use crate::nnue::net_delta::test_utils::build_synthetic_layer_stacks;
+        use crate::nnue::network::{
+            LayerStackBucketMode, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, configure_layer_stack_routing,
+            layer_stack_routing_test_guard, reset_layer_stack_progress_buckets,
+            reset_layer_stack_progress_kpabs_weights, set_layer_stack_progress_kpabs_weights,
+        };
+        use crate::nnue::network_layer_stacks::LayerStacksNetwork;
+        use std::io::Cursor;
+
+        let _guard = layer_stack_routing_test_guard();
+        configure_layer_stack_routing(LayerStackBucketMode::ProgressKPAbs, 4, Some(4)).unwrap();
+        let mut pos = Position::new();
+        pos.set_sfen(crate::position::SFEN_HIRATE).unwrap();
+        for l1 in [
+            #[cfg(feature = "layerstacks-1536x16x32")]
+            1536,
+            #[cfg(feature = "layerstacks-512x16x32")]
+            512,
+        ] {
+            let mut model =
+                build_synthetic_layer_stacks("HalfKaHmMerged", HALFKA_HM_DIMENSIONS, l1, 16, 32, 4);
+            for (index, bucket) in model.buckets.iter().enumerate() {
+                model.bytes[bucket.output_bias..bucket.output_bias + 4]
+                    .copy_from_slice(&(index as i32 * 8192).to_le_bytes());
+                model.bytes[bucket.output_weights..bucket.output_weights + 32].fill(0);
+            }
+            let net = LayerStacksNetwork::read_with_options(
+                &mut Cursor::new(&model.bytes),
+                l1,
+                16,
+                32,
+                None,
+            )
+            .unwrap();
+            let network = Arc::new(NNUENetwork::LayerStacks(Arc::new(net)));
+            set_layer_stack_progress_kpabs_weights(
+                vec![-0.125; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+            )
+            .unwrap();
+            let mut evaluator = NNUEEvaluator::new_with_position(Arc::clone(&network), &pos);
+            let original = evaluator.evaluate(&pos);
+            set_layer_stack_progress_kpabs_weights(
+                vec![0.125; SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS].into_boxed_slice(),
+            )
+            .unwrap();
+            let replacement = NNUEEvaluator::new_with_position(network, &pos).evaluate(&pos);
+            assert_ne!(original, replacement, "L1={l1}");
+            assert_eq!(evaluator.evaluate_only(&pos), original, "L1={l1}");
+            assert_eq!(evaluator.evaluate(&pos), original, "L1={l1}");
+            evaluator.refresh(&pos);
+            assert_eq!(evaluator.evaluate_only(&pos), original, "L1={l1}");
+            evaluator.reset(&pos);
+            assert_eq!(evaluator.evaluate(&pos), replacement, "L1={l1}");
+            reset_layer_stack_progress_kpabs_weights();
+            assert_eq!(evaluator.evaluate_only(&pos), replacement, "L1={l1}");
+            evaluator.reset(&pos);
+            let zero = evaluator.evaluate(&pos);
+            assert_ne!(zero, original, "L1={l1}");
+            assert_ne!(zero, replacement, "L1={l1}");
+        }
+        reset_layer_stack_progress_buckets();
+    }
 
     /// 各バリアントの push/pop インデックス一貫性テスト
     ///
