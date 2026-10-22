@@ -7,6 +7,9 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
+/// 登録の材料。own_nodes.tsv と同じく ready の木だけに残す。
+pub(super) const NODE_MOVES: &str = "node_moves.tsv";
+
 fn fm(v: Option<i32>) -> String {
     v.map_or_else(|| "-".into(), |v| format!("{v:+}"))
 }
@@ -236,6 +239,7 @@ impl Tree {
             own_rows.len()
         )?;
         write_atomic(&self.def.out.join("report.txt"), &report)?;
+        write_atomic(&self.def.out.join(NODE_MOVES), &self.node_moves(&replace)?)?;
         let mut own = "key\tply\t伸ばした手の中の 1 位\t値 (手番の側)\t値 (プラス = 先手良し)\t全体の 1 位\t全体の 1 位は\t全体の 1 位の値 (プラス = 先手良し)\t実戦の手\t実戦の手の値 (プラス = 先手良し)\t実戦の手の 1 位からの差 (手番の側)\t実戦の手の下\t手ごとの値 (手番の側)\n".to_owned();
         for row in own_rows {
             writeln!(own, "{}", row.join("\t"))?;
@@ -244,6 +248,34 @@ impl Tree {
         write_atomic(&self.def.out.join("own_nodes.tsv"), &own)?;
         super::service::monitor(&self.def.out.join("STATUS"), "DONE\n");
         Ok(true)
+    }
+
+    /// 両方の手番の局面の手ごとの伝播後の値。伸ばしていない手は 1 回の読みの値のまま並べる。
+    fn node_moves(&self, replace: &Values) -> Result<String> {
+        let mut text =
+            "key\tply\tlevel\tremaining\tnodes\tmove\tvalue\texpanded\trank\n".to_owned();
+        for key in self.reach(&self.edge) {
+            let reading = &self.nodes[&key];
+            if reading.lines().is_empty() {
+                continue;
+            }
+            let values = rows_for(replace, &key)?;
+            let level = self.level[&key];
+            let edges = self.edge.get(&key);
+            for (rank, mv) in self.rank(&key, values, values.keys().cloned()).iter().enumerate() {
+                writeln!(
+                    text,
+                    "{key}\t{}\t{level}\t{}\t{}\t{mv}\t{}\t{}\t{}",
+                    self.ply[&key],
+                    self.def.depth.saturating_sub(level),
+                    reading.nodes_limit,
+                    values[mv],
+                    u8::from(edges.is_some_and(|e| e.contains(mv))),
+                    rank + 1
+                )?;
+            }
+        }
+        Ok(text)
     }
 
     fn write_db(

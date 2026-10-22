@@ -1021,3 +1021,29 @@ fn bw_line_is_rejected_whole_when_one_side_cannot_be_built() {
     assert_eq!(built.len(), 2);
     assert_eq!(next.processed_bytes, lines.len() as u64);
 }
+
+#[test]
+fn node_moves_lists_both_sides_with_propagated_values() {
+    let s = settings();
+    let dir = tempfile::tempdir().unwrap();
+    let mut tree = Tree::load(definition(dir.path(), 3), &s).unwrap();
+    let cache = corpus(&s);
+    while !tree.finished {
+        assert!(tree.advance(&cache).unwrap().is_empty() || tree.finished);
+    }
+    assert!(tree.write_outputs().unwrap());
+    let text = std::fs::read_to_string(tree.def.out.join("node_moves.tsv")).unwrap();
+    let nodes = super::register::parse_node_moves(&text, 0).unwrap();
+    let values = reference_values(&tree);
+    assert!(nodes.keys().any(|k| side(k) == "w"));
+    assert!(nodes.keys().any(|k| side(k) == "b"));
+    for (key, node) in &nodes {
+        let expected: Vec<_> = tree.rank(key, &values[key], values[key].keys().cloned());
+        let got: Vec<_> = node.moves.iter().map(|m| m.mv.clone()).collect();
+        assert_eq!(got, expected, "{key}");
+        for m in &node.moves {
+            assert_eq!(m.value, values[key][&m.mv], "{key} {}", m.mv);
+        }
+        assert_eq!(node.remaining, tree.def.depth - tree.level[key]);
+    }
+}
