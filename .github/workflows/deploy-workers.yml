@@ -148,12 +148,6 @@ jobs:
           CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
           echo "Adding wasm32-unknown-unknown to toolchain $CHANNEL"
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
-      - name: Setup sccache
-        if: steps.check.outputs.can_deploy == 'true'
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        if: steps.check.outputs.can_deploy == 'true'
-        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: steps.check.outputs.can_deploy == 'true'
         with:
@@ -247,9 +241,6 @@ jobs:
           # `--var DEPLOYED_SHA:...` で worker 側の `env.var("DEPLOYED_SHA")` に注入。
           # 値は `/health` JSON の `deployed_sha` として外部から観測可能になる。
           command: deploy --config wrangler.staging.toml --var DEPLOYED_SHA:${{ steps.trigger_sha.outputs.sha }}
-      - name: sccache stats
-        if: always() && steps.check.outputs.can_deploy == 'true'
-        run: sccache --show-stats || true
       # smoke check は deploy 完了後に同 job 内で続けて実行する。`environment:` は
       # job 単位で解決済みなので `vars.WORKERS_HEALTH_URL` も step 内 env で読める。
       # `WORKERS_HEALTH_URL` 未設定時は warning + exit 0 で skip 相当。
@@ -379,12 +370,6 @@ jobs:
           CHANNEL=$(awk -F'"' '/^channel/{print $2}' rust-toolchain.toml)
           echo "Adding wasm32-unknown-unknown to toolchain $CHANNEL"
           rustup target add --toolchain "$CHANNEL" wasm32-unknown-unknown
-      - name: Setup sccache
-        if: steps.check.outputs.can_deploy == 'true'
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - name: Enable sccache
-        if: steps.check.outputs.can_deploy == 'true'
-        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: steps.check.outputs.can_deploy == 'true'
         with:
@@ -466,9 +451,6 @@ jobs:
           workingDirectory: crates/rshogi-csa-server-workers
           packageManager: pnpm
           command: deploy --config wrangler.production.toml --var DEPLOYED_SHA:${{ steps.trigger_sha.outputs.sha }}
-      - name: sccache stats
-        if: always() && steps.check.outputs.can_deploy == 'true'
-        run: sccache --show-stats || true
       - name: Smoke check deployed worker
         if: steps.check.outputs.can_deploy == 'true'
         env:
