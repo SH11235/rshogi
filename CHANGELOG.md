@@ -925,7 +925,6 @@ v1.0.0 後の追加機能リリース。tatara 学習側の bucket 数可変化�
   - NPS bench (9-bucket LayerStack + PSQT 配布 net、300k iter): 旧 9-bucket 固定
     SIMD 実装 1,169,473 evals/sec → 本リリース runtime mask SIMD 実装
     1,257,854 evals/sec、evaluate あたり 790.3 ns → 790.4 ns (退行無し)。
-  - 詳細: 本リポジトリ [ADR 2026-05-26](docs/decisions/2026-05-26-variable-num-buckets-layerstack-load.md)。
 - **HalfKp LayerStack の玉 BonaPiece OOR panic 修正** (#757): `layerstacks-halfkp` edition
   で ply32 前後の局面探索中に玉 BonaPiece (`≥ FE_END`) が FT 差分更新の高速経路に
   流れて panic する不具合を修正。HalfKp の `append_active_indices` /
@@ -948,9 +947,8 @@ v1.0.0 後の追加機能リリース。tatara 学習側の bucket 数可変化�
 - **engines/ 命名規則を Edition 軸前提に本格化** (#752 / Issue #739):
   従来の flavor 軸を非採用とし、Edition 軸の preset feature set を一次元として
   命名・配置する方針に統一。
-- **flavor 軸を非採用として retire** (#756): 本リポジトリ
-  [ADR 2026-05-24 "build edition / flavor design"](docs/decisions/2026-05-24-build-edition-flavor-design.md)
-  に補記し、flavor 軸を成立させていた CFG/feature gate を物理削除。
+- **flavor 軸を非採用として retire** (#756): flavor 軸を成立させていた CFG/feature gate を
+  物理削除。
 
 ### CSA Server / Workers
 
@@ -1052,8 +1050,8 @@ LayerStacks (LS, tatara 学習形式) と HalfKX (Simple-arch, suisho5 互換) �
   に統一。旧 alias (`parse_feature_set_from_arch` 経由) は受理可能で arch 文字列レベル
   の後方互換は維持。
 - **Atomic feature の Edition 軸再編** (#736 / #741):
-  旧 `feature-*` 系 atomic feature を Edition 軸 ADR
-  (`docs/decisions/2026-05-24-build-edition-flavor-design.md`) に沿って再編。
+  旧 `feature-*` 系 atomic feature を Edition 軸の命名規則 ([`docs/build.md`](docs/build.md))
+  に沿って再編。
   `edition-universal` / `edition-layerstacks` / `edition-layerstacks-{ft}-{L1}-{ext}` / `edition-halfkp-crelu`
   などの preset を使う運用に変更。`layerstack-arch` の意味論も再定義。
 - **LayerStack network の FT generic 化** (#745):

@@ -197,8 +197,7 @@ fn add_i16_arrays<const L1: usize>(dst: &mut [i16; L1], a: &[i16; L1], b: &[i16;
 ///
 /// `FT` は LS の Feature Transformer 軸 (5 種類のうち 1 つ) を表す marker type。
 /// FT::DIMENSIONS 次元 + L1 次元 Feature Transformer + `num_buckets` 個の bucket
-/// による LayerStacks。`num_buckets` は net file の header から読まれる
-/// (ADR `2026-05-26`)。
+/// による LayerStacks。`num_buckets` は net file の header から読まれる。
 pub struct NetworkLayerStacks<
     const L1: usize,
     const LS_L1_OUT: usize,
@@ -326,8 +325,7 @@ impl<
                     io::ErrorKind::InvalidData,
                     format!(
                         "NNUE LayerStack num_buckets={n} out of range (1..={MAX_LAYER_STACK_BUCKETS}). \
-                         Rebuild rshogi-core with a larger MAX_LAYER_STACK_BUCKETS if needed \
-                         (see ADR 2026-05-26)."
+                         Rebuild rshogi-core with a larger MAX_LAYER_STACK_BUCKETS if needed."
                     ),
                 ));
             }

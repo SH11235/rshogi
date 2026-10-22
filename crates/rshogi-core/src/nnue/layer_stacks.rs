@@ -338,8 +338,7 @@ impl<
 /// LayerStacks: 可変長 `num_buckets` 個の bucket を持つ構造
 ///
 /// `buckets` は load 時に 1 回だけ `Vec::with_capacity` + push で構築され、
-/// 以後 **read-only**。ホットパスでは indexing のみで再 alloc は発生しない
-/// (ADR `2026-05-26` §2.7.3)。
+/// 以後 **read-only**。ホットパスでは indexing のみで再 alloc は発生しない。
 pub struct LayerStacks<
     const L1: usize,
     const LS_L1_OUT: usize,

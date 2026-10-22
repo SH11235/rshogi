@@ -58,7 +58,7 @@ search-pass-rules = ["rshogi-core/search-pass-rules"]
 search-no-pass-rules = ["rshogi-core/search-no-pass-rules"]
 
 # === Edition 軸 atomic feature 群 ===
-# 設計は docs/decisions/2026-05-24-build-edition-flavor-design.md を参照。
+# 命名規則は docs/build.md を参照。
 # Architecture 経路
 layerstack-arch     = ["rshogi-core/layerstack-arch"]
 halfkx-arch = ["rshogi-core/halfkx-arch"]

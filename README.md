@@ -96,9 +96,7 @@ cargo xtask build --edition X --features mimalloc
 cargo xtask list-binaries
 ```
 
-詳細は [`docs/build.md`](docs/build.md) と ADR
-[`docs/decisions/2026-05-24-build-edition-flavor-design.md`](docs/decisions/2026-05-24-build-edition-flavor-design.md)
-を参照。
+詳細は [`docs/build.md`](docs/build.md) を参照。
 
 ## このエンジンを使用したアプリ
 

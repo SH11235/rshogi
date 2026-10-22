@@ -3,8 +3,6 @@
 //!
 //! `FeatureTransformerLayerStacks<L1, FT>` / `NetworkLayerStacks<L1, ..., FT>`
 //! を FT-generic 化するために必要な情報を `LsFeatureSpec` に集約する。
-//! 設計の根拠は `docs/decisions/2026-05-24-build-edition-flavor-design.md`
-//! §「LS FT generic 化」を参照。
 
 use super::bona_piece::{BonaPiece, halfkp_index};
 #[cfg(feature = "nnue-effect-bucket")]

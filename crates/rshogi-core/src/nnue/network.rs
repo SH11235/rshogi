@@ -196,7 +196,9 @@ pub fn load_progress_coeff_kpabs_from_bytes(bytes: &[u8]) -> Result<Box<[f32]>, 
 /// `OnceLock` で N 値ごとに lazy 初期化し、`ln(k / (N-k))` を pre-compute する。
 /// ホットパス (`progress_sum_to_bucket`) では slice を取って `partition_point`
 /// で `floor(sigmoid(sum) * N)` 相当を求める。tatara `progress_kpabs::bucket`
-/// (`floor(p * N).clamp(0, N-1)`) と等価 (ADR `2026-05-26` §2.4.1 で証明)。
+/// (`floor(p * N).clamp(0, N-1)`) と等価: `t_k = ln(k / (N-k))` は `sigmoid(t_k) = k/N`
+/// を満たすので、`sum >= t_k` となる k の個数がちょうど `floor(sigmoid(sum) * N)` になる
+/// (`sum = t_k` の境界ではどちらも k、`sum = +∞` ではどちらも N-1)。
 ///
 /// 配列添字 N (`1..=MAX_LAYER_STACK_BUCKETS`) ごとに `OnceLock<Box<[f32]>>`。
 /// 添字 0 は使われない placeholder。
@@ -1396,8 +1398,7 @@ pub fn parse_layer_stack_bucket_mode(value: &str) -> Option<LayerStackBucketMode
 ///
 /// `CACHED_PROGRESS_BUCKET` にキャッシュされた値がある場合はそちらを消費する。
 /// `num_buckets` は学習時と一致する、明示設定済みの routing bucket 数を渡す。
-/// キャッシュは active net 1 つの不変条件のもとで作成・消費される
-/// (ADR `2026-05-26` §2.4.3)。
+/// キャッシュは active net 1 つの不変条件のもとで作成・消費される。
 pub fn compute_layer_stack_progresskpabs_bucket_index(
     pos: &Position,
     _side_to_move: Color,
@@ -1540,9 +1541,8 @@ pub fn update_progresskpabs_sum_diff(
 ///
 /// 戻り値は `[0, num_buckets)`。式は tatara の
 /// `floor(sigmoid(sum) × num_buckets).clamp(0, num_buckets - 1)` と等価。
-/// 閾値テーブルは N ごとに `OnceLock` で lazy 構築される。
-///
-/// ADR `2026-05-26` §2.4.1 の等価性証明を参照。
+/// 閾値テーブルは N ごとに `OnceLock` で lazy 構築される
+/// (等価性の根拠は `layer_stack_progress_thresholds` の doc)。
 #[inline]
 pub fn progress_sum_to_bucket(sum: f32, num_buckets: usize) -> usize {
     let thresholds = layer_stack_progress_thresholds(num_buckets);
@@ -3253,7 +3253,7 @@ mod tests {
     fn test_progress_bucket_thresholds_match_sigmoid() {
         // tatara `progress_kpabs::bucket` の `floor(p * N).clamp(0, N-1)` と engine 側
         // partition_point 方式が N ∈ {1, 2, 3, 4, 5, 8, 9, 12, 16} で一致することを
-        // 各 sum 値で確認 (ADR `2026-05-26` §2.4.1 の等価性 + tests)。
+        // 各 sum 値で確認。
         let sigmoid_bucket = |sum: f32, n: usize| -> usize {
             let p = (1.0 / (1.0 + (-sum).exp())).clamp(0.0, 1.0);
             let raw = (p * n as f32).floor() as i32;

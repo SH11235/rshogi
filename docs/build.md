@@ -1,10 +1,7 @@
 # ビルドガイド
 
 rshogi-usi バイナリの build 手順と、複数 NNUE architecture binary を運用するための
-`cargo xtask` workflow をまとめる。設計の根拠 (なぜ preset edition を導入したか) は
-ADR [`docs/decisions/2026-05-24-build-edition-flavor-design.md`][adr] を参照。
-
-[adr]: ./decisions/2026-05-24-build-edition-flavor-design.md
+`cargo xtask` workflow をまとめる。
 
 ## 目次
 
@@ -136,8 +133,30 @@ preset 名は `edition-{arch_class}-{slots...}` 形式:
 - LS family alias: `edition-layerstacks[-any-any-any]`
 - universal: `edition-universal`
 
-slot 値の意味論 (`any` / `none` / 具体値) の詳細は ADR の「slot 値の意味論」セクション
-参照。
+### slot 値の意味論
+
+| slot 値 | 意味 |
+|---|---|
+| 具体値 (`1536x16x32`, `psqt`, `crelu`, `halfka_hm_merged` 等) | コンパイル時固定、その値以外はサポート外 |
+| `none` (ext slot のみ) | 拡張なしを **明示** (省略との区別) |
+| `any` | runtime dispatch、その軸の全候補を build に含める |
+
+| slot 種別 | 具体値 | `none` | `any` |
+|---|---|:---:|:---:|
+| activation (HalfKX) | `crelu` / `screlu` / `pairwise` | ✗ | ✓ |
+| ft (LS / HalfKX 共通) | `halfkp` / `halfka_split` / `halfka_merged` / `halfka_hm_split` / `halfka_hm_merged` | ✗ | ✓ |
+| size (LS) | `1536x16x32` / `1536x32x32` / `768x16x32` / `512x16x32` | ✗ | ✓ |
+| ext (LS) | `psqt` / `threat` / `psqt_threat` | ✓ | ✓ |
+
+- slot の省略は alias `edition-halfkx` / `edition-layerstacks` 以外では不可。全候補を
+  dispatch したいときは `any` を書く。
+- ext slot は列挙した拡張だけを ON、列挙しない拡張を OFF にする。複数拡張はアルファベット順に
+  `_` で結合する (`psqt_threat`)。
+- `edition-halfkx` は `edition-halfkx-any`、`edition-layerstacks` は
+  `edition-layerstacks-any-any-any` の短縮形。`edition-halfkx-{activation}` は
+  HalfKX の全 architecture を runtime dispatch しつつ activation だけ固定する。
+- slot 区切りは `-`、slot 内の複合語は `_` (tatara の `halfka-hm-merged` と同じ architecture を
+  `halfka_hm_merged` と書く)。
 
 ## cargo xtask reference
 
@@ -215,7 +234,7 @@ edition=edition-layerstacks-halfka_hm_merged-1536x16x32-none, features=search-st
 ### `cargo xtask list-editions`
 
 rshogi-core の Cargo.toml から `edition-*` preset を抽出して列挙する。
-新しい preset が ADR 拡張で追加された場合の発見にも使える。
+新しい preset が追加された場合の発見にも使える。
 
 ```bash
 $ cargo xtask list-editions
@@ -361,7 +380,7 @@ AVX2 以上の環境では、L2 層の出力 32 の専用経路は 32 幅の融�
 
 ## 今後の追加予定 (本ドキュメントの未対応項目)
 
-ADR Phase 2 完了後 / 別 Issue で追加予定:
+別 Issue で追加予定:
 
 - `cargo xtask verify <binary>`: 既存 binary に USI smoke (usi/isready/readyok) を流す
   自動検証。preset → 推奨 NNUE model のマッピング policy 決定後に着手 (Tier 2)。
@@ -371,7 +390,6 @@ ADR Phase 2 完了後 / 別 Issue で追加予定:
 
 ## 関連 ドキュメント
 
-- [ADR: ビルド設定の Edition 軸設計][adr] (本ドキュメントの設計根拠)
 - [`engines/README.md`](../engines/README.md) (binary 保管方針)
 - [`docs/nnue-supported-architectures.md`](./nnue-supported-architectures.md) (NNUE arch 一覧)
 - [`docs/nnue-architecture-detection.md`](./nnue-architecture-detection.md) (auto-detect ロジック)

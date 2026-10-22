@@ -6,8 +6,7 @@
 //! を書き出し、後から commit / profile / built_at を追跡できるようにする。
 //! `--features <name>[,<name>...]` で Edition 軸と直交する rshogi-usi の opt-in feature
 //! (`mimalloc` 等) を全 edition に追加でき、その場合は binary 名に `+<feature>` が付く。
-//! 設計と命名規則の根拠は ADR `docs/decisions/2026-05-24-build-edition-flavor-design.md`
-//! を参照。
+//! 命名規則は `docs/build.md` を参照。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;

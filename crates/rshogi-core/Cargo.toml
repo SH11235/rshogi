@@ -93,7 +93,7 @@ threat-profile-full-symdedup = []           # profile 4: pair 除外なし、emi
 threat-profile-cross-side = []               # profile 10: 同 side / 同種を除外、敵味方跨ぎ異種のみ
 
 # === Edition 軸 atomic feature 群 ===
-# 設計は docs/decisions/2026-05-24-build-edition-flavor-design.md を参照。
+# 命名規則は docs/build.md を参照。
 # atomic feature は実装詳細扱いで、user は基本的に preset edition (後述 `edition-*`)
 # 経由で触る想定。
 
@@ -168,8 +168,7 @@ mode-specific  = []
 nnue-progress-diff = []
 
 # === preset edition (user-facing canonical API) ===
-# 命名規則・slot 意味論は ADR `docs/decisions/2026-05-24-build-edition-flavor-design.md`
-# 参照。各 preset は mode sentinel + 必要な atomic feature 群を bundle する。
+# 命名規則・slot 意味論は docs/build.md 参照。各 preset は mode sentinel + 必要な atomic feature 群を bundle する。
 # 主要な build target をここで整備し、残りは需要に応じて追加する。
 
 # 全 architecture × 任意次元を header から runtime 構成 (default)。
