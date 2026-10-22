@@ -11,7 +11,7 @@ use rshogi_core::position::Position;
 use rshogi_core::types::Color;
 use tools::common::dedup::collect_input_paths;
 use tools::output_path::ensure_safe_output_path;
-use tools::packed_sfen::{PackedSfenValue, hcpe_move16_to_move, hcpe_move16_to_psv, pack_position};
+use tools::packed_sfen::{PackedSfenValue, hcpe_move16_to_psv, move_to_hcpe_move16, pack_position};
 
 const MAX_BATCH_GAMES: usize = 128;
 const BATCH_POSITIONS: usize = 16 * 1024;
@@ -181,22 +181,11 @@ fn convert_game(game: &PackGame) -> io::Result<Vec<u8>> {
     let mut output = Vec::with_capacity(game.moves.len() * PackedSfenValue::SIZE);
 
     for &(move16, eval) in &game.moves {
-        let target_mv = hcpe_move16_to_move(move16);
         let mut legal_moves = MoveList::new();
         generate_legal_all(&pos, &mut legal_moves);
         let mv = legal_moves
             .iter()
-            .find(|m| {
-                !target_mv.is_none()
-                    && m.to() == target_mv.to()
-                    && m.is_drop() == target_mv.is_drop()
-                    && m.is_promote() == target_mv.is_promote()
-                    && if target_mv.is_drop() {
-                        m.drop_piece_type() == target_mv.drop_piece_type()
-                    } else {
-                        m.from() == target_mv.from()
-                    }
-            })
+            .find(|m| move_to_hcpe_move16(**m) == move16)
             .copied()
             .ok_or_else(|| {
                 io::Error::new(
@@ -252,6 +241,17 @@ fn write_batch(
 }
 
 fn convert_paths(paths: &[PathBuf], output: &Path, max_games: u64) -> io::Result<ConversionStats> {
+    let existing_permissions = match std::fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.is_file() => Some(metadata.permissions()),
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("出力には通常ファイルを指定してください: {}", output.display()),
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
     for path in paths {
         ensure_safe_output_path(output, path)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -262,12 +262,10 @@ fn convert_paths(paths: &[PathBuf], output: &Path, max_games: u64) -> io::Result
         .unwrap_or_else(|| Path::new("."));
     let mut builder = tempfile::Builder::new();
     builder.prefix(".pack_to_psv_").suffix(".tmp");
-    #[cfg(unix)]
-    let existing_permissions = match std::fs::metadata(output) {
-        Ok(metadata) => Some(metadata.permissions()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
+    #[cfg(windows)]
+    if existing_permissions.as_ref().is_some_and(|permissions| permissions.readonly()) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "出力は読み取り専用です"));
+    }
     #[cfg(unix)]
     if existing_permissions.is_none() {
         use std::os::unix::fs::PermissionsExt;
@@ -320,8 +318,7 @@ fn convert_paths(paths: &[PathBuf], output: &Path, max_games: u64) -> io::Result
     Ok(stats)
 }
 
-fn main() -> io::Result<()> {
-    let args = Args::parse();
+fn run(args: Args) -> io::Result<()> {
     let paths = collect_input_paths(args.input.as_deref(), args.input_dir.as_ref(), &args.pattern)?;
     if paths.is_empty() {
         eprintln!("入力ファイルが見つかりません");
@@ -347,13 +344,17 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+fn main() -> io::Result<()> {
+    run(Args::parse())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rshogi_core::types::Move;
     use std::io::Cursor;
     use tempfile::TempDir;
-    use tools::packed_sfen::{move_to_hcpe_move16, move_to_psv_move16};
+    use tools::packed_sfen::move_to_psv_move16;
 
     fn pack_game(moves: &[&str], score: i16, result: u8) -> Vec<u8> {
         let mut bytes = vec![1];
@@ -510,6 +511,68 @@ mod tests {
         convert_paths(&[input], &output, 0).unwrap();
         assert_eq!(std::fs::metadata(output).unwrap().len(), 40);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn malformed_move_bits_do_not_replace_output() {
+        let dir = TempDir::new().unwrap();
+        let mut pos = Position::new();
+        pos.set_sfen("4k4/9/9/9/9/9/9/9/4K4 b P 1").unwrap();
+        let mut bytes = vec![0];
+        bytes.extend_from_slice(&tools::packed_sfen::pack_position_hcp(&pos));
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&pack_game(&["P*5e"], 0, 0)[1..]);
+        let input = write_input(&dir, "input.pack", &bytes);
+        let output = dir.path().join("output.psv");
+        convert_paths(std::slice::from_ref(&input), &output, 0).unwrap();
+        let valid_output = std::fs::read(&output).unwrap();
+        assert_eq!(valid_output.len(), 40);
+        for mask in [0x4000u16, 0x8000] {
+            let mut invalid = bytes.clone();
+            let move16 = u16::from_le_bytes([invalid[35], invalid[36]]) | mask;
+            invalid[35..37].copy_from_slice(&move16.to_le_bytes());
+            std::fs::write(&input, invalid).unwrap();
+            let error = convert_paths(std::slice::from_ref(&input), &output, 0).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(std::fs::read(&output).unwrap(), valid_output);
+        }
+    }
+
+    #[test]
+    fn output_directory_is_rejected_before_reading_input() {
+        let dir = TempDir::new().unwrap();
+        let error = convert_paths(&[dir.path().join("missing.pack")], dir.path(), 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("通常ファイル"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_directory_read_error_preserves_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        write_input(&dir, "valid.pack", &pack_game(&["7g7f"], 0, 0));
+        let inaccessible = dir.path().join("inaccessible");
+        std::fs::create_dir(&inaccessible).unwrap();
+        std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0)).unwrap();
+        if std::fs::read_dir(&inaccessible).is_ok() {
+            std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            eprintln!("permission fixture skipped: process can read mode 000 directories");
+            return;
+        }
+        let output = write_input(&dir, "output.psv", b"existing output");
+        let result = run(Args {
+            input: None,
+            input_dir: Some(dir.path().to_path_buf()),
+            pattern: "*.pack".to_owned(),
+            output: output.clone(),
+            max_games: 0,
+        });
+        std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read(output).unwrap(), b"existing output");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 
     #[cfg(unix)]
