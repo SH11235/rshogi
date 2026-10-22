@@ -6,6 +6,10 @@ const USI_INIT: &str = "usi\nsetoption name MaterialLevel value 9\nisready\n";
 
 #[test]
 fn invalid_position_preserves_previous_position_and_search() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
     let invalid_commands = [
         "position sfen invalid b - 1",
         "position startpos moves 7g7e",
@@ -27,17 +31,63 @@ fn invalid_position_preserves_previous_position_and_search() {
         input.push_str(command);
         input.push_str("\nd\n");
     }
-    input.push_str("go depth 1\nstop\nquit\n");
+    input.push_str("go depth 1\n");
 
-    let output = assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"))
-        .timeout(std::time::Duration::from_secs(15))
-        .write_stdin(input)
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
-    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin!("rshogi-usi"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn engine");
+    let (sender, receiver) = mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || -> std::io::Result<String> {
+        let mut output = String::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = line?;
+            output.push_str(&line);
+            output.push('\n');
+            if line.starts_with("bestmove ") && sender.send(()).is_err() {
+                break;
+            }
+        }
+        Ok(output)
+    });
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr_reader = std::thread::spawn(move || -> std::io::Result<String> {
+        let mut output = String::new();
+        stderr.read_to_string(&mut output)?;
+        Ok(output)
+    });
+    let result = (|| -> Result<(), String> {
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .map_err(|err| err.to_string())?;
+        receiver.recv_timeout(Duration::from_secs(15)).map_err(|err| err.to_string())?;
+        writeln!(child.stdin.as_mut().unwrap(), "quit").map_err(|err| err.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().map_err(|err| err.to_string())?.is_none() {
+            if Instant::now() >= deadline {
+                return Err("engine did not exit after quit".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    })();
+    if result.is_err()
+        && let Err(err) = child.kill()
+    {
+        eprintln!("failed to terminate engine: {err}");
+    }
+    let status = child.wait().expect("wait engine");
+    let stdout = stdout_reader.join().expect("stdout reader").expect("read stdout");
+    let stderr = stderr_reader.join().expect("stderr reader").expect("read stderr");
+    assert!(result.is_ok(), "{result:?}\n{stdout}\n{stderr}");
+    assert!(status.success(), "{status}\n{stdout}\n{stderr}");
+    assert!(stdout.lines().any(|line| line.starts_with("info depth 1 ")), "{stdout}");
     let positions: Vec<_> = stdout.lines().filter_map(|line| line.strip_prefix("SFEN: ")).collect();
     assert_eq!(positions, vec![expected; invalid_commands.len() + 1], "{stdout}");
     assert_eq!(

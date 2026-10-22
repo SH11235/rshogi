@@ -1095,9 +1095,31 @@ impl Position {
     ///
     /// PASSの場合は do_pass_move に委譲する。
     pub fn do_move(&mut self, m: Move, gives_check: bool) -> DirtyPiece {
+        self.do_move_impl::<false>(m, gives_check)
+    }
+
+    /// 玉の省略を許す入力局面で、検証済みの指し手を実行する。
+    ///
+    /// 移動・成り・手駒・実在する玉の安全などは呼び出し側で検証する。
+    /// 玉のない側への王手は記録しない。通常の探索では `do_move` を使う。
+    pub fn do_move_with_missing_kings(&mut self, m: Move) -> DirtyPiece {
+        if self.pieces(self.side_to_move, PieceType::King).is_empty() {
+            self.cur_state_mut().checkers = Bitboard::EMPTY;
+        }
+        let gives_check = !m.is_pass()
+            && !self.pieces(!self.side_to_move, PieceType::King).is_empty()
+            && self.gives_check(m);
+        self.do_move_impl::<true>(m, gives_check)
+    }
+
+    fn do_move_impl<const ALLOW_MISSING_KINGS: bool>(
+        &mut self,
+        m: Move,
+        gives_check: bool,
+    ) -> DirtyPiece {
         // PASSの場合は do_pass_move に委譲
         if m.is_pass() {
-            return self.do_pass_move();
+            return self.do_pass_move_impl::<ALLOW_MISSING_KINGS>();
         }
 
         let us = self.side_to_move;
@@ -1366,7 +1388,12 @@ impl Position {
         // デバッグビルドでは debug_assert で検証を実施
         debug_assert!(
             {
-                let expected = self.attackers_to_c(self.king_square[them.index()], us);
+                let expected =
+                    if ALLOW_MISSING_KINGS && self.pieces(them, PieceType::King).is_empty() {
+                        Bitboard::EMPTY
+                    } else {
+                        self.attackers_to_c(self.king_square[them.index()], us)
+                    };
                 let result = if gives_check {
                     checkers == expected
                 } else {
@@ -1605,6 +1632,10 @@ impl Position {
     /// - ハッシュ更新は StateInfo 更新前に差分計算
     /// - assert! で release ビルドでも不正入力を検出
     pub fn do_pass_move(&mut self) -> DirtyPiece {
+        self.do_pass_move_impl::<false>()
+    }
+
+    fn do_pass_move_impl<const ALLOW_MISSING_KINGS: bool>(&mut self) -> DirtyPiece {
         // release ビルドでも検出
         assert!(self.can_pass(), "Cannot pass: rule disabled, in check, or no pass rights");
 
@@ -1648,7 +1679,8 @@ impl Position {
         // 6. 連続王手カウンタ: パスが王手を維持する場合はカウンタを更新
         // （自分が相手玉に攻撃している場合、パス後も相手は王手状態）
         let their_king = self.king_square(them);
-        let gives_check = !self.attackers_to_c(their_king, us).is_empty();
+        let gives_check = (!ALLOW_MISSING_KINGS || !self.pieces(them, PieceType::King).is_empty())
+            && !self.attackers_to_c(their_king, us).is_empty();
         if gives_check {
             // 王手を維持するので、連続王手カウンタを更新（do_moveと同様）
             new_state.continuous_check[us.index()] += 2;
@@ -1667,7 +1699,11 @@ impl Position {
         // （相手が王手をかけたままパスした場合、こちらは王手状態になる）
         // Note: side_to_move は既に them に変更済み
         self.cur_state_mut().checkers =
-            self.attackers_to_c(self.king_square(self.side_to_move), !self.side_to_move);
+            if ALLOW_MISSING_KINGS && self.pieces(them, PieceType::King).is_empty() {
+                Bitboard::EMPTY
+            } else {
+                self.attackers_to_c(self.king_square(self.side_to_move), !self.side_to_move)
+            };
 
         // 10. pinは親から引き継ぎ、王手升を更新
         self.set_check_info::<true>();

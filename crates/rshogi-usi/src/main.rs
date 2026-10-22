@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use anyhow::{Context, Result, bail};
+use rshogi_core::bitboard::Bitboard;
 use rshogi_core::eval::{
     DEFAULT_PASS_RIGHT_VALUE_EARLY, DEFAULT_PASS_RIGHT_VALUE_LATE, MaterialLevel, disable_material,
     is_material_enabled, set_eval_hash_enabled, set_material_level, set_pass_move_bonus,
@@ -31,7 +32,7 @@ use rshogi_core::search::{
     DEFAULT_DRAW_VALUE_BLACK, DEFAULT_DRAW_VALUE_WHITE, LimitsType, PonderhitHandle, Search,
     SearchInfo, SearchResult, SearchTuneParams,
 };
-use rshogi_core::types::{EnteringKingRule, Move};
+use rshogi_core::types::{EnteringKingRule, Move, PieceType};
 use serde_json::json;
 
 #[cfg(feature = "allocation-stats")]
@@ -1379,6 +1380,7 @@ impl UsiEngine {
             }
             _ => bail!("Expected startpos or sfen"),
         }
+        Self::clear_checkers_without_king(&mut candidate);
 
         if idx < tokens.len() && tokens[idx] == "passrights" {
             idx += 1;
@@ -1401,16 +1403,45 @@ impl UsiEngine {
                 let mv = Move::from_usi_strict(token)
                     .with_context(|| format!("Invalid move token: {token}"))?;
                 anyhow::ensure!(
-                    candidate.pseudo_legal(mv) && candidate.is_legal(mv),
+                    Self::is_legal_position_move(&candidate, mv),
                     "Illegal move: {token}"
                 );
-                anyhow::ensure!(candidate.game_ply() < i32::MAX, "SFEN ply overflow");
-                let gives_check = !mv.is_pass() && candidate.gives_check(mv);
-                candidate.do_move(mv, gives_check);
+                anyhow::ensure!(candidate.game_ply() < i32::MAX, "ply overflow");
+                candidate.do_move_with_missing_kings(mv);
             }
         }
         *position = candidate;
         Ok(())
+    }
+
+    fn clear_checkers_without_king(position: &mut Position) {
+        // 玉のない側の king_square は仮の升なので、入力検証の王手情報には使わない。
+        if position.pieces(position.side_to_move(), PieceType::King).is_empty() {
+            position.state_mut().checkers = Bitboard::EMPTY;
+        }
+    }
+
+    fn is_legal_position_move(position: &Position, mv: Move) -> bool {
+        if !position.pseudo_legal(mv) {
+            return false;
+        }
+        if mv.is_pass() {
+            return true;
+        }
+
+        let us = position.side_to_move();
+        if mv.is_drop() {
+            // 打ち歩詰めは相手玉が実在するときだけ検査する。
+            return mv.drop_piece_type() != PieceType::Pawn
+                || position.pieces(!us, PieceType::King).is_empty()
+                || position.is_legal(mv);
+        }
+        let captured = position.piece_on(mv.to());
+        if captured.is_some() && captured.piece_type() == PieceType::King {
+            return false;
+        }
+        // 自玉がなければ、仮の玉位置に対する玉移動・pin の制約は適用しない。
+        position.pieces(us, PieceType::King).is_empty() || position.is_legal(mv)
     }
 
     fn stochastic_ponder_position(&self) -> Option<Position> {
@@ -2328,6 +2359,131 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
     }
 
     #[test]
+    fn position_commands_accept_moves_without_kings() {
+        let mut failures = Vec::new();
+        for (sfen, moves, expected) in [
+            ("4k4/9/9/9/9/9/9/9/8r b G 1", "", "4k4/9/9/9/9/9/9/9/8r b G 1"),
+            ("4k4/8g/4P4/9/9/9/9/9/9 b G 1", "G*5b", "4k4/4G3g/4P4/9/9/9/9/9/9 w - 2"),
+            ("4k4/9/9/9/9/9/9/9/8r b G 1", "G*5b", "4k4/4G4/9/9/9/9/9/9/8r w - 2"),
+            ("4k4/9/9/9/9/9/9/9/8r b G 1", "G*5b 5a5b", "9/4k4/9/9/9/9/9/9/8r b g 3"),
+            ("8G/7r1/9/9/9/9/9/9/4k4 b - 1", "1a1b", "9/7rG/9/9/9/9/9/9/4k4 w - 2"),
+            ("4k4/9/9/9/8G/9/9/9/8r b - 1", "1e2e", "4k4/9/9/9/7G1/9/9/9/8r w - 2"),
+            ("7pp/7p1/7G1/9/9/9/9/9/4K4 b P 1", "P*1b", "7pp/7pP/7G1/9/9/9/9/9/4K4 w - 2"),
+            ("9/9/9/9/9/9/9/9/4K3R w g 1", "G*5h", "9/9/9/9/9/9/9/4g4/4K3R b - 2"),
+            (
+                "4k4/9/4p4/4P4/9/9/9/9/9 b - 23",
+                "5d5c+ 5a4a P*5e",
+                "5k3/9/4+P4/9/4P4/9/9/9/9 w - 26",
+            ),
+        ] {
+            let mut position = Position::new();
+            let line = format!("position sfen {sfen} moves {moves}");
+            if let Err(err) = UsiEngine::apply_position_tokens(
+                &mut position,
+                &line.split_whitespace().collect::<Vec<_>>(),
+                false,
+                2,
+            ) {
+                failures.push(format!("{line}: {err}"));
+                continue;
+            }
+            assert_eq!(position.to_sfen(), expected, "{line}");
+            if position.pieces(position.side_to_move(), PieceType::King).is_empty() {
+                assert!(!position.in_check(), "{line}");
+            }
+            for token in moves.split_whitespace().rev() {
+                position.undo_move(Move::from_usi_strict(token).unwrap());
+                if position.pieces(position.side_to_move(), PieceType::King).is_empty() {
+                    assert!(!position.in_check(), "{line}");
+                }
+            }
+            assert_eq!(position.to_sfen(), sfen, "{line}");
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn position_commands_missing_kings_preserve_repetition_history() {
+        let sfen = "9/9/9/9/4G4/9/9/9/8r b - 1";
+        let cycle = "5e4e 1i1h 4e5e 1h1i ";
+        let line = format!("position sfen {sfen} moves {}", cycle.repeat(3));
+        let mut position = Position::new();
+        UsiEngine::apply_position_tokens(
+            &mut position,
+            &line.split_whitespace().collect::<Vec<_>>(),
+            false,
+            2,
+        )
+        .unwrap();
+        assert_eq!(position.to_sfen(), "9/9/9/9/4G4/9/9/9/8r b - 13");
+        assert!(!position.in_check());
+        assert_eq!(position.repetition_state(16), rshogi_core::types::RepetitionState::Draw);
+        assert_eq!(position.state().continuous_check, [0, 0]);
+        for token in cycle.repeat(3).split_whitespace().rev() {
+            position.undo_move(Move::from_usi_strict(token).unwrap());
+            assert!(!position.in_check());
+        }
+        assert_eq!(position.to_sfen(), sfen);
+    }
+
+    #[test]
+    fn position_commands_missing_king_pass_preserves_rights() {
+        use rshogi_core::types::Color;
+
+        let sfen = "9/9/9/9/9/9/9/9/8r b G 1";
+        let line = format!("position sfen {sfen} passrights 1 1 moves pass 0000");
+        let mut position = Position::new();
+        UsiEngine::apply_position_tokens(
+            &mut position,
+            &line.split_whitespace().collect::<Vec<_>>(),
+            true,
+            2,
+        )
+        .unwrap();
+        assert_eq!(position.to_sfen(), "9/9/9/9/9/9/9/9/8r b G 3");
+        assert_eq!(position.pass_rights(Color::Black), 0);
+        assert_eq!(position.pass_rights(Color::White), 0);
+        assert!(!position.in_check());
+        assert_eq!(position.state().continuous_check, [0, 0]);
+        let before = position.to_sfen();
+        let key = position.key();
+        for (enabled, moves) in [(false, "pass"), (true, "pass 0000 pass")] {
+            let line = format!("position sfen {sfen} passrights 1 1 moves {moves}");
+            assert!(
+                UsiEngine::apply_position_tokens(
+                    &mut position,
+                    &line.split_whitespace().collect::<Vec<_>>(),
+                    enabled,
+                    2,
+                )
+                .is_err(),
+                "{line}"
+            );
+            assert_eq!(position.to_sfen(), before);
+            assert_eq!(position.key(), key);
+        }
+        position.undo_move(Move::PASS);
+        position.undo_move(Move::PASS);
+        assert_eq!(position.to_sfen(), sfen);
+        assert_eq!(position.pass_rights(Color::Black), 1);
+        assert_eq!(position.pass_rights(Color::White), 1);
+        assert!(!position.in_check());
+
+        let line = "position sfen 4k4/9/9/9/4R4/9/9/9/9 b - 1 passrights 1 1 moves pass";
+        UsiEngine::apply_position_tokens(
+            &mut position,
+            &line.split_whitespace().collect::<Vec<_>>(),
+            true,
+            2,
+        )
+        .unwrap();
+        assert_eq!(position.side_to_move(), Color::White);
+        assert!(position.in_check());
+        assert!(!position.can_pass());
+        assert_eq!(position.state().continuous_check, [2, 0]);
+    }
+
+    #[test]
     fn position_commands_reject_invalid_input_atomically() {
         let mut position = Position::new();
         UsiEngine::apply_position_tokens(
@@ -2369,6 +2525,22 @@ SPSA_NET_ft_b_1023,int,0,-10,10,1,0.1 [[NOT USED]]
             "position sfen 8k/4P4/9/9/9/9/9/9/4K4 b - 1 moves 5b5a",
             "position sfen 4k4/9/3GN1B2/4R4/9/9/9/9/4K4 b P 1 moves P*5b",
             "position sfen 4k4/9/9/9/4P4/9/9/9/4K4 b P 1 moves P*5d",
+            "position sfen 4k4/9/9/9/9/9/4P4/9/9 b - 1 moves 5g5e",
+            "position sfen 4k4/9/9/9/9/9/4P4/9/9 b - 1 moves 5g5f+",
+            "position sfen 4k4/9/9/9/9/9/9/9/9 b - 1 moves 5e5d",
+            "position sfen 4k4/9/9/9/9/9/9/9/9 b - 1 moves 5a5b",
+            "position sfen 4k4/9/9/9/9/9/9/9/9 b - 1 moves P*5e",
+            "position sfen 4k4/9/9/9/4P4/9/9/9/9 b P 1 moves P*5d",
+            "position sfen 4k4/9/9/9/9/9/9/9/9 b P 1 moves P*4a",
+            "position sfen 4k4/9/9/9/9/9/9/9/9 b L 1 moves L*4a",
+            "position sfen 4k4/9/9/9/9/9/9/9/9 b N 1 moves N*4b",
+            "position sfen 8k/4P4/9/9/9/9/9/9/9 b - 1 moves 5b5a",
+            "position sfen 8k/4G4/9/9/9/9/9/9/9 b - 1 moves 5b5a+",
+            "position sfen 4k4/4G4/9/9/9/9/9/9/9 b - 1 moves 5b5a",
+            "position sfen 4k4/9/3GN1B2/4R4/9/9/9/9/9 b P 1 moves P*5b",
+            "position sfen 4r4/9/9/9/9/9/9/4G4/4K4 b - 1 moves 5h4h",
+            "position sfen 4r4/9/9/9/9/9/9/9/4K4 b - 1 moves 5i5h",
+            "position sfen 4k4/9/9/9/9/9/9/9/8r b G 1 moves G*5b 5a5b 5e5d",
         ] {
             let tokens: Vec<_> = line.split_whitespace().collect();
             assert!(
