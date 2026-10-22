@@ -10,6 +10,7 @@ Authentication: ADMIN_API_TOKEN environment variable (never a command-line argum
            --latest selects the newest source-meta version when there are multiple snapshots.
            --apply writes missing objects; the default is a dry run. Existing different data is rejected.
 Dates are UTC game-start dates. --latest selects within each day and rejects timestamp ties.
+Explicit empty --game-id and --snapshot values are rejected before any request.
 `;
 
 function day(value) {
@@ -48,7 +49,8 @@ export async function main(args, env = process.env, output = console.log, fetchI
   }
   const token = env.ADMIN_API_TOKEN;
   if (!token) throw new Error("ADMIN_API_TOKEN is required");
-  if (values["game-id"] && !/^[A-Za-z0-9_-]{1,256}$/.test(values["game-id"])) throw new Error("invalid --game-id");
+  if (values["game-id"] !== undefined && !/^[A-Za-z0-9_-]{1,256}$/.test(values["game-id"])) throw new Error("invalid --game-id");
+  if (values.snapshot !== undefined) snapshotParts(values.snapshot);
   if (values.apply && command !== "restore") throw new Error("--apply is only valid for restore");
 
   async function request(action, query = {}, method = "GET") {
@@ -74,11 +76,10 @@ export async function main(args, env = process.env, output = console.log, fetchI
     }
     throw new Error("scan is incomplete; rerun to continue from its checkpoint");
   }
-  if (values.snapshot) {
-    if (command !== "restore" || values.from || values.through || values["game-id"] || values.latest) {
+  if (values.snapshot !== undefined) {
+    if (command !== "restore" || values.from !== undefined || values.through !== undefined || values["game-id"] !== undefined || values.latest) {
       throw new Error("--snapshot is exclusive with range/version selection");
     }
-    snapshotParts(values.snapshot);
     print(await request("restore", { key: values.snapshot, apply: String(values.apply ?? false) }, "POST"));
     return;
   }
@@ -109,7 +110,7 @@ export async function main(args, env = process.env, output = console.log, fetchI
     let previous;
     for await (const key of keys(date)) {
       const parts = snapshotParts(key);
-      if (values["game-id"] && parts.game !== values["game-id"]) continue;
+      if (values["game-id"] !== undefined && parts.game !== values["game-id"]) continue;
       if (command === "list") { print({ key }); continue; }
       if (previous && previous.game !== parts.game) { await restore(selected); selected = undefined; }
       if (selected) {

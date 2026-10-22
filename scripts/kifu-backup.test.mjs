@@ -17,6 +17,19 @@ test("管理 token を非 HTTPS や資格情報付き URL へ送らない", asyn
   assert.equal(calls, 0);
 });
 
+test("明示された空 selector は dry run と apply の通信前に拒否する", async () => {
+  let calls = 0;
+  const fetch = async () => { calls++; return ok({ keys: [], truncated: false }); };
+  for (const flag of ["game-id", "snapshot"]) {
+    for (const selector of [[`--${flag}=`], [`--${flag}`, ""]]) {
+      for (const apply of [[], ["--apply"]]) {
+        await assert.rejects(main(["restore", ...common, ...range, ...selector, ...apply], env, () => {}, fetch), /invalid|empty/);
+      }
+    }
+  }
+  assert.equal(calls, 0);
+});
+
 test("複数版には明示選択が必要で、latest も同時刻の版を拒否する", async () => {
   let writes = 0;
   let keys = [key(1), key(2)];

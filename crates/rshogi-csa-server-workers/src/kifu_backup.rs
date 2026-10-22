@@ -54,8 +54,48 @@ pub(crate) struct Snapshot {
     pub meta_uploaded_ms: u64,
     pub csa_version: String,
     pub verification: Verification,
-    pub csa: String,
+    #[serde(with = "csa_bytes")]
+    pub csa: Vec<u8>,
     pub meta_json: String,
+}
+
+mod csa_bytes {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
+
+    use super::MAX_CSA_BYTES;
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(untagged, deny_unknown_fields)]
+    enum WireCsa {
+        Utf8(String),
+        Base64 { base64: String },
+    }
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        // UTF-8 の既存表現を維持し、その他の byte 列も置換せず保存する。
+        match std::str::from_utf8(bytes) {
+            Ok(text) => serializer.serialize_str(text),
+            Err(_) => WireCsa::Base64 {
+                base64: STANDARD.encode(bytes),
+            }
+            .serialize(serializer),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let bytes = match WireCsa::deserialize(deserializer)? {
+            WireCsa::Utf8(text) if text.len() <= MAX_CSA_BYTES => text.into_bytes(),
+            WireCsa::Base64 { base64 } if base64.len() <= MAX_CSA_BYTES.div_ceil(3) * 4 => {
+                STANDARD.decode(base64).map_err(D::Error::custom)?
+            }
+            _ => return Err(D::Error::custom("CSA exceeds size limit")),
+        };
+        if bytes.len() > MAX_CSA_BYTES {
+            return Err(D::Error::custom("CSA exceeds size limit"));
+        }
+        Ok(bytes)
+    }
 }
 
 impl Snapshot {
@@ -88,7 +128,7 @@ impl Snapshot {
             serde_json::from_str(&self.meta_json).map_err(|_| "invalid backup meta")?;
         match (value.get("csa_sha256"), self.verification) {
             (Some(digest), Verification::Digest)
-                if digest.as_str() == Some(sha256_hex(self.csa.as_bytes()).as_str()) => {}
+                if digest.as_str() == Some(sha256_hex(&self.csa).as_str()) => {}
             (None, Verification::NativeLegacy) if !is_external_source(&entry.source) => {}
             (None, Verification::UnverifiedLegacy) if is_external_source(&entry.source) => {}
             _ => return Err("CSA/meta digest mismatch".into()),
@@ -134,10 +174,10 @@ impl Snapshot {
         if !is_external_source(&entry.source) {
             targets.push((
                 format!("{}/{}.csa", format_date_path(entry.started_at_ms), entry.game_id),
-                self.csa.as_bytes().to_vec(),
+                self.csa.clone(),
             ));
         }
-        targets.push((kifu_by_id_object_key(&entry.game_id), self.csa.as_bytes().to_vec()));
+        targets.push((kifu_by_id_object_key(&entry.game_id), self.csa.clone()));
         targets.push((kifu_by_id_meta_key(&entry.game_id), self.meta_json.as_bytes().to_vec()));
         targets.push((
             games_index_key(entry.ended_at_ms, &entry.game_id).map_err(|_| "invalid index key")?,
@@ -188,10 +228,52 @@ pub(crate) struct Checkpoint {
     pub unverified_legacy: u64,
     pub last_error: Option<String>,
     pub last_alert_ms: u64,
+    #[serde(default)]
+    pub last_failure_alert_ms: u64,
+    #[serde(default)]
+    pub last_lag_alert_ms: u64,
+    #[serde(default)]
+    pub last_legacy_alert_ms: u64,
     pub notification: String,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DueAlerts {
+    pub failure: bool,
+    pub lag: bool,
+    pub legacy: bool,
+}
+
+impl DueAlerts {
+    pub fn any(self) -> bool {
+        self.failure || self.lag || self.legacy
+    }
+}
+
 impl Checkpoint {
+    pub fn due_alerts(&self, now: u64) -> DueAlerts {
+        let due = |last, interval| last == 0 || now.saturating_sub(last) >= interval;
+        DueAlerts {
+            failure: self.last_error.is_some() && due(self.last_failure_alert_ms, 60 * 60 * 1000),
+            lag: self.lagging(now) && due(self.last_lag_alert_ms, 60 * 60 * 1000),
+            legacy: self.unverified_legacy != 0
+                && due(self.last_legacy_alert_ms, 24 * 60 * 60 * 1000),
+        }
+    }
+
+    pub fn record_alert_attempt(&mut self, due: DueAlerts, now: u64) {
+        if due.failure {
+            self.last_failure_alert_ms = now;
+        }
+        if due.lag {
+            self.last_lag_alert_ms = now;
+        }
+        if due.legacy {
+            self.last_legacy_alert_ms = now;
+        }
+        self.last_alert_ms = now;
+    }
+
     pub(crate) fn lagging(&self, now_ms: u64) -> bool {
         let reference = if self.completed_at_ms == 0 {
             self.cycle_started_ms
@@ -240,7 +322,7 @@ mod tests {
             } else {
                 Verification::NativeLegacy
             },
-            csa: csa.into(),
+            csa: csa.as_bytes().to_vec(),
             meta_json,
         }
     }
@@ -277,8 +359,65 @@ mod tests {
         assert_eq!(restored.csa, original.csa);
         assert!(Snapshot::decode("control/overwrite", &bytes).is_err());
         let mut changed = restored;
-        changed.csa.push('x');
+        changed.csa.push(b'x');
         assert!(changed.encode().is_err());
+    }
+
+    #[test]
+    fn utf8_snapshots_keep_the_v1_string_representation() {
+        let original = snapshot("kifu", true);
+        let (key, bytes) = original.encode().unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["csa"], "V2.2\n%TORYO\n");
+        assert_eq!(Snapshot::decode(&key, &bytes).unwrap().csa, original.csa);
+    }
+
+    #[test]
+    fn non_utf8_snapshots_restore_the_original_bytes_at_the_size_limit() {
+        let mut original = snapshot("wdoor", true);
+        original.csa = vec![0xff; MAX_CSA_BYTES];
+        let meta: serde_json::Value = serde_json::from_str(&original.meta_json).unwrap();
+        original.meta_json =
+            String::from_utf8(meta_with_csa_digest(&meta, &original.csa).unwrap()).unwrap();
+        let (key, bytes) = original.encode().unwrap();
+        assert!(bytes.len() < MAX_SNAPSHOT_BYTES);
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["csa"]["base64"].is_string());
+        let decoded = Snapshot::decode(&key, &bytes).unwrap();
+        assert_eq!(decoded.csa, original.csa);
+        assert_eq!(decoded.restore_targets().unwrap()[0].1, original.csa);
+    }
+
+    #[test]
+    fn base64_payloads_reject_noncanonical_ambiguous_and_oversized_data() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+
+        let mut original = snapshot("wdoor", true);
+        original.csa = vec![0xff];
+        let meta: serde_json::Value = serde_json::from_str(&original.meta_json).unwrap();
+        original.meta_json =
+            String::from_utf8(meta_with_csa_digest(&meta, &original.csa).unwrap()).unwrap();
+        let mut json = serde_json::to_value(&original).unwrap();
+        for csa in [
+            serde_json::json!({"base64":"/w"}),
+            serde_json::json!({"base64":"/x=="}),
+            serde_json::json!({"base64":"/w==\n"}),
+            serde_json::json!({"base64":"_w=="}),
+            serde_json::json!({"base64":"/w==", "text":"ambiguous"}),
+            serde_json::json!({"base64":255}),
+            serde_json::json!([255]),
+            serde_json::json!({"base64":STANDARD.encode(vec![0xff; MAX_CSA_BYTES + 1])}),
+            serde_json::json!({"base64":"A".repeat(MAX_CSA_BYTES.div_ceil(3) * 4 + 4)}),
+            serde_json::json!("x".repeat(MAX_CSA_BYTES + 1)),
+        ] {
+            json["csa"] = csa;
+            assert!(serde_json::from_value::<Snapshot>(json.clone()).is_err());
+        }
+        let duplicate = serde_json::to_string(&original)
+            .unwrap()
+            .replace("\"base64\":\"/w==\"", "\"base64\":\"/w==\",\"base64\":\"/w==\"");
+        assert!(serde_json::from_str::<Snapshot>(&duplicate).is_err());
     }
 
     #[test]
@@ -342,10 +481,78 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_alerts_have_independent_cooldowns() {
+        let now = 3 * RPO_TARGET_MS;
+        let mut state = Checkpoint {
+            unverified_legacy: 1,
+            completed_at_ms: now,
+            ..Checkpoint::default()
+        };
+        let legacy = state.due_alerts(now);
+        assert_eq!(
+            legacy,
+            DueAlerts {
+                legacy: true,
+                ..DueAlerts::default()
+            }
+        );
+        state.record_alert_attempt(legacy, now);
+        state.last_error = Some("copy failed".into());
+        let failure = state.due_alerts(now + 1);
+        assert_eq!(
+            failure,
+            DueAlerts {
+                failure: true,
+                ..DueAlerts::default()
+            }
+        );
+        state.record_alert_attempt(failure, now + 1);
+        state.completed_at_ms = now - RPO_TARGET_MS - 1;
+        let lag = state.due_alerts(now + 2);
+        assert_eq!(
+            lag,
+            DueAlerts {
+                lag: true,
+                ..DueAlerts::default()
+            }
+        );
+        state.record_alert_attempt(lag, now + 2);
+        assert!(!state.due_alerts(now + 3).any());
+        assert!(state.due_alerts(now + 60 * 60 * 1000 + 2).failure);
+        assert!(state.due_alerts(now + 60 * 60 * 1000 + 2).lag);
+        assert!(!state.due_alerts(now + 60 * 60 * 1000 + 2).legacy);
+        assert!(state.due_alerts(now + 24 * 60 * 60 * 1000).legacy);
+    }
+
+    #[test]
+    fn checkpoints_without_alert_categories_remain_readable() {
+        let state = Checkpoint {
+            last_error: Some("copy failed".into()),
+            last_alert_ms: 123,
+            ..Checkpoint::default()
+        };
+        let mut json = serde_json::to_value(state).unwrap();
+        let object = json.as_object_mut().unwrap();
+        for key in [
+            "last_failure_alert_ms",
+            "last_lag_alert_ms",
+            "last_legacy_alert_ms",
+        ] {
+            object.remove(key);
+        }
+        let migrated: Checkpoint = serde_json::from_value(json).unwrap();
+        assert_eq!(migrated.last_alert_ms, 123);
+        assert_eq!(migrated.last_failure_alert_ms, 0);
+        assert_eq!(migrated.last_lag_alert_ms, 0);
+        assert_eq!(migrated.last_legacy_alert_ms, 0);
+        assert!(migrated.due_alerts(124).failure);
+    }
+
+    #[test]
     fn oversized_empty_and_unknown_source_snapshots_are_rejected() {
         assert!(meta_with_csa_digest(&true, b"CSA").is_err());
         let mut oversized = snapshot("kifu", true);
-        oversized.csa = "x".repeat(MAX_CSA_BYTES + 1);
+        oversized.csa = vec![b'x'; MAX_CSA_BYTES + 1];
         assert!(oversized.validate().is_err());
         oversized.csa.clear();
         assert!(oversized.validate().is_err());

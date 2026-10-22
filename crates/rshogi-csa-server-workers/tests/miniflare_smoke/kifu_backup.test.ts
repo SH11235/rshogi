@@ -11,11 +11,13 @@ const STATE_KEY = "control/kifu-backup-v1.json";
 const DATE = "2026-10-21";
 const START = Date.parse(`${DATE}T10:00:00Z`);
 const CSA = "V2.2\nN+alice\nN-bob\nPI\n+\n%TORYO\n";
-const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+const sha = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const WDOOR_ID = "wdoor+floodgate-300-10F+RAMU+Panda+20261009000001";
+const WDOOR_URL = `https://wdoor.c.u-tokyo.ac.jp/shogi/x/2026/10/09/${WDOOR_ID}.csa`;
 
 interface Bucket {
   put(key: string, value: string): Promise<unknown>;
-  get(key: string): Promise<{ text(): Promise<string>; json<T>(): Promise<T> } | null>;
+  get(key: string): Promise<{ text(): Promise<string>; json<T>(): Promise<T>; arrayBuffer(): Promise<ArrayBuffer> } | null>;
   delete(keys: string | string[]): Promise<void>;
   list(options?: { prefix?: string; limit?: number }): Promise<{ objects: { key: string }[] }>;
 }
@@ -55,17 +57,25 @@ describe("Miniflare: versioned kifu backup and restore", () => {
   let cleanup: () => Promise<void>;
   let alerts: { url: string; body: string; auth: string | null }[];
   let alertStatus: number;
+  let wdoorCsa: Uint8Array | undefined;
+  let wdoorRequests: string[];
 
   beforeEach(async () => {
     const persist = await makeTempPersistRoot();
     cleanup = persist.cleanup;
     alerts = [];
     alertStatus = 200;
+    wdoorCsa = undefined;
+    wdoorRequests = [];
     mf = await createMiniflare({
       persistRoot: persist.path, kifuBackup: true, adminApiToken: TOKEN,
       kifuBackupAlertUrl: "https://notification.invalid/backup",
       scriptPath: resolve(import.meta.dirname, "backup-worker.mjs"),
       outboundService: async (request) => {
+        if (request.url === WDOOR_URL) {
+          wdoorRequests.push(request.url);
+          return new MfResponse(wdoorCsa ?? "missing fixture", { status: wdoorCsa ? 200 : 404 });
+        }
         alerts.push({ url: request.url, body: await request.text(), auth: request.headers.get("Authorization") });
         return new MfResponse("notification fixture", { status: alertStatus });
       },
@@ -138,6 +148,81 @@ describe("Miniflare: versioned kifu backup and restore", () => {
     expect(alerts).toHaveLength(0);
   });
 
+  it("backs up and restores non-UTF-8 bytes through import-wdoor without stopping later games", async () => {
+    const text = ["V2", "N+RAMU", "N-Panda", "'Increment:10", `$EVENT:${WDOOR_ID}`,
+      "$START_TIME:2026/10/09 00:00:00", "PI", "+", "+2726FU", "T0", "-8384FU", "T10",
+      "%TORYO", "'summary:toryo:RAMU lose:Panda win", ""].join("\n");
+    wdoorCsa = Buffer.concat([Buffer.from(text), Buffer.from([0x27, 0x81, 0xff, 0x00, 0x0a])]);
+    const imported = await mf.dispatchFetch(`${ORIGIN}/api/v1/admin/games/import-wdoor`, {
+      method: "POST", headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ wdoor_game_id: WDOOR_ID }),
+    });
+    expect(imported.status).toBe(200);
+    expect(wdoorRequests).toEqual([WDOOR_URL]);
+    const { game_id: id } = await imported.json() as { game_id: string };
+    const csaKey = `kifu-by-id/${id}.csa`;
+    const metaKey = `kifu-by-id/${id}.meta.json`;
+    const metadata = await (await primary.get(metaKey))!.text();
+    expect(JSON.parse(metadata).csa_sha256).toBe(sha(wdoorCsa));
+    expect(Buffer.from(await (await primary.get(csaKey))!.arrayBuffer())).toEqual(wdoorCsa);
+    await seed("zz-after-nonutf8", "upload");
+    const outcome = await run();
+    expect(outcome.state.last_error).toBeNull();
+    expect(outcome.state.verified).toBe(2);
+    expect(outcome.cycle_complete).toBe(true);
+    const keys = await snapshots();
+    expect(keys).toHaveLength(2);
+    const key = keys.find(candidate => candidate.includes(`/${id}/`))!;
+    const stored = await (await backup.get(key))!.json<{ csa: { base64: string }; meta_json: string }>();
+    expect(Buffer.from(stored.csa.base64, "base64")).toEqual(wdoorCsa);
+    expect(stored.meta_json).toBe(metadata);
+    expect((await run()).state.last_error).toBeNull();
+    expect(await snapshots()).toEqual(keys);
+    await removePrimary();
+    const db = await mf.getD1Database("GAMES_SEARCH_DB");
+    await db.prepare("DELETE FROM games_search_index WHERE game_id = ?").bind(id).run();
+    expect((await api("restore", "POST", { key })).status).toBe(200);
+    expect((await primary.list()).objects).toHaveLength(0);
+    expect((await api("restore", "POST", { key, apply: "true" })).status).toBe(200);
+    expect(Buffer.from(await (await primary.get(csaKey))!.arrayBuffer())).toEqual(wdoorCsa);
+    expect(await (await primary.get(metaKey))!.text()).toBe(metadata);
+    expect(await db.prepare("SELECT game_id FROM games_search_index WHERE game_id = ?").bind(id).first()).toMatchObject({ game_id: id });
+    expect(alerts).toHaveLength(0);
+  });
+
+  it("legacy notifications do not throttle a new failure or lag alert", async () => {
+    await seed("a-legacy", "wdoor", START, false);
+    await run();
+    expect(alerts).toHaveLength(1);
+    await seed("zz-failure", "upload");
+    await faults({ backupPut: true });
+    const failed = await run();
+    expect(failed.state.last_error).toBeTruthy();
+    expect(alerts).toHaveLength(2);
+    const stale = Date.now() - 25 * 60 * 60_000;
+    await backup.put(STATE_KEY, JSON.stringify({ ...failed.state, completed_at_ms: stale }));
+    await faults({ backupPut: true });
+    expect((await run()).state.last_error).toBeTruthy();
+    expect(alerts).toHaveLength(3);
+    expect(alerts[2]?.body).toContain("lagging=true");
+    expect((await run()).state.last_error).toBeNull();
+  });
+
+  it("limits persistent legacy reminders to one per day", async () => {
+    await seed("legacy-reminder", "wdoor", START, false);
+    const first = await run();
+    expect(alerts).toHaveLength(1);
+    const recent = Date.now() - 2 * 60 * 60_000;
+    await backup.put(STATE_KEY, JSON.stringify({ ...first.state, last_alert_ms: recent, last_legacy_alert_ms: recent }));
+    const repeated = await run();
+    expect(repeated.state.last_error).toBeNull();
+    expect(alerts).toHaveLength(1);
+    const expired = Date.now() - 25 * 60 * 60_000;
+    await backup.put(STATE_KEY, JSON.stringify({ ...repeated.state, last_alert_ms: expired, last_legacy_alert_ms: expired }));
+    await run();
+    expect(alerts).toHaveLength(2);
+  });
+
   it("retries a failed snapshot before advancing the cursor and throttles alerts", async () => {
     await seed("retry-1");
     await faults({ backupPut: true });
@@ -153,6 +238,26 @@ describe("Miniflare: versioned kifu backup and restore", () => {
     expect(alerts).toHaveLength(1);
     expect((await run()).state.last_error).toBeNull();
     await onlySnapshot();
+  });
+
+  it("keeps a missing source visible and retries it before later games", async () => {
+    await seed("a-missing", "upload");
+    await primary.delete("kifu-by-id/a-missing.csa");
+    await seed("z-later", "upload");
+    const first = await run();
+    expect(first.state.last_error).toContain("source CSA missing");
+    expect(first.state.after_key).toBeNull();
+    const repeated = await run();
+    expect(repeated.state.last_error).toContain("source CSA missing");
+    expect(repeated.state.after_key).toBe(first.state.after_key);
+    expect(await snapshots()).toHaveLength(0);
+    await primary.put("kifu-by-id/a-missing.csa", CSA);
+    const recovered = await run();
+    expect(recovered.state.last_error).toBeNull();
+    expect(recovered.state.notification).toBe("idle");
+    expect(recovered.state.verified).toBe(2);
+    expect(recovered.cycle_complete).toBe(true);
+    expect(await snapshots()).toHaveLength(2);
   });
 
   it("refuses mixed force-import versions and keeps a later verified version", async () => {

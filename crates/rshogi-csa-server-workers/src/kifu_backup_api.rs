@@ -21,7 +21,6 @@ use crate::x1_paths::kifu_by_id_object_key;
 
 const SOURCE_PREFIX: &str = "kifu-by-id/";
 const API_PREFIX: &str = "/api/v1/admin/kifu-backup/";
-const ALERT_INTERVAL_MS: u64 = 60 * 60 * 1000;
 const MAX_RESTORE_INDEX_ITEMS: u32 = 1000;
 const RESTORE_PREFLIGHT_MS: u64 = 20_000;
 
@@ -223,7 +222,7 @@ async fn copy_game(primary: &Bucket, backup: &Bucket, meta_key: &str) -> Result<
         meta_uploaded_ms: meta_object.uploaded().as_millis(),
         csa_version: csa_object.version(),
         verification,
-        csa: String::from_utf8(csa_bytes).map_err(|_| failure("source CSA is not UTF-8"))?,
+        csa: csa_bytes,
         meta_json,
     };
     let entry = snapshot.validate().map_err(Error::RustError)?;
@@ -236,7 +235,7 @@ async fn copy_game(primary: &Bucket, backup: &Bucket, meta_key: &str) -> Result<
         let (_, date_bytes) = read_bytes(primary, &date_key, MAX_CSA_BYTES)
             .await?
             .ok_or_else(|| failure("legacy native date copy missing"))?;
-        if date_bytes != snapshot.csa.as_bytes() {
+        if date_bytes != snapshot.csa {
             return Err(failure("legacy native CSA copies disagree"));
         }
     }
@@ -256,6 +255,7 @@ async fn copy_game(primary: &Bucket, backup: &Bucket, meta_key: &str) -> Result<
 async fn alert(env: &Env, state: &mut Checkpoint) {
     let now = Date::now().as_millis();
     if state.last_error.is_none() && !state.lagging(now) && state.unverified_legacy == 0 {
+        state.notification = "idle".into();
         return;
     }
     let Some(url) = env
@@ -267,7 +267,8 @@ async fn alert(env: &Env, state: &mut Checkpoint) {
         state.notification = "unconfigured".into();
         return;
     };
-    if state.last_alert_ms != 0 && now.saturating_sub(state.last_alert_ms) < ALERT_INTERVAL_MS {
+    let due = state.due_alerts(now);
+    if !due.any() {
         return;
     }
     let sent = async {
@@ -301,7 +302,7 @@ async fn alert(env: &Env, state: &mut Checkpoint) {
         }
         Ok::<(), Error>(())
     }.await;
-    state.last_alert_ms = now;
+    state.record_alert_attempt(due, now);
     state.notification = if sent.is_ok() { "delivered" } else { "failed" }.into();
     if sent.is_err() {
         crate::structured_log!(event: "kifu_backup_notification_failed", component: "kifu_backup");

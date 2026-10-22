@@ -1602,6 +1602,10 @@ snapshot key は `snapshots/v1/YYYY/MM/DD/<id>/<meta-uploaded-ms>-<sha256>.json`
 元の meta の版が変わると別 snapshot を保存し、以前の版も残す。
 復元時の `games-index` は snapshot 内の同じ meta から再生成し、D1 にも upsert する。
 R2 native versioning を前提にしていない。
+v1 の `csa` は UTF-8 なら JSON 文字列、非 UTF-8 なら `{ "base64": "..." }` とする。
+base64 は padding 付きの標準 alphabet に限定し、不正な padding・余分な文字・曖昧なフィールドを拒否する。
+既存の文字列形式も読める。wdoor から取得した非 UTF-8 を含む本体は文字コード変換せず、
+digest の検証・復元とも元の byte 列を使う。本体サイズの上限は base64 展開後にも適用する。
 
 新しい export / import は meta に CSA の `csa_sha256` を保存する。コピー時はその照合と
 元 object version の再確認を行い、取り込み途中の旧 meta と新 CSA の組を拒否する。
@@ -1628,6 +1632,20 @@ meta がまだ存在しない本体はバックアップ対象として数えな
 checkpoint の ETag と 60 秒 lease で同時実行を制限し、クラッシュ時は lease の期限後に再開する。
 一周すると先頭から再走査し、古い日付で追加された棋譜や meta の修正も回収する。
 
+元データの欠損・不整合でも自動 skip はしない。その key より後ろのコピーも停止するため、
+`status` の `last_error` と `after_key` を確認し、次の `.meta.json` と対応する本体を調べる。
+
+| 停止原因 | 回復操作 |
+|---|---|
+| native 本体が欠損し meta だけある | R2 権限・障害と GameRoom の export retry を復旧し、本体の書込み完了を確認する。retry が残っていなければ、保全した原本・DO 状態からの管理者による補修が必要 |
+| legacy native の日付別と by-id が欠損・不一致 | 両方を保全して原本と照合し、採用する版を決めて欠損コピーを補修する。一致を確認できなければ停止したまま扱う |
+| external の force import 中断による digest 不一致 | 取得元と対象 ID を確認し、同じ import を `force` 付きで最後まで再実行する。非 UTF-8 本文を UTF-8 に変換して合わせない |
+| meta 不正、サイズ超過、出所を確認できない不整合 | 元 object を保全し、正しい metadata の補修または上限・復旧手順の見直しを管理者が判断する。本体の切詰めや削除で通さない |
+
+補修後に `run --until-complete` を再実行すれば、保持された checkpoint から再試行する。
+解消できない場合は未保護としてインシデントに残し、復旧担当へエスカレーションする。
+`after_key` の書換えや meta の削除で問題の棋譜を飛ばして、走査完了扱いにはしない。
+
 管理 API の `status` は `last_error`、`completed_at_ms`、`after_key`、`verified`、
 `unverified_legacy`、`notification` を返す。件数は現在または直前の走査一周分で、全保存版の総数ではない。
 構造化ログは `kifu_backup_progress` / `kifu_backup_failed` / `kifu_backup_notification_failed`。
@@ -1635,10 +1653,14 @@ checkpoint の ETag と 60 秒 lease で同時実行を制限し、クラッシ�
 
 任意の secret `KIFU_BACKUP_ALERT_URL` に HTTPS webhook を設定すると、コピー失敗・
 24 時間超の走査遅延・未検証 legacy を `{ "text": "..." }` 形式で通知する。
-通知先に管理 token や棋譜を送らず、redirect は追わない。通常は checkpoint により
-1 時間に 1 回に抑える。checkpoint 自体を読み書きできない障害では永続的な抑制ができず、
-scheduled の発火ごとに通知し得る。未設定は `unconfigured`、送信失敗は `failed`。
-Worker/cron 全体の停止は通知できないため、外部監視で最終完了時刻も確認する。
+通知先に管理 token や棋譜を送らず、redirect は追わない。checkpoint に種類別の最終試行時刻を保存し、
+失敗・遅延はそれぞれ 1 時間に 1 回、未検証 legacy は 24 時間に 1 回に抑える。
+legacy の通知直後でも新たな失敗・遅延を通知でき、同時に期限が来た種類は 1 回の webhook にまとめる。
+既存 checkpoint に種類別時刻がなければ未通知として読み込む。
+checkpoint 自体を読み書きできない障害では永続的な抑制ができず、scheduled の発火ごとに通知し得る。
+実行後の `notification` は、通知対象がなければ `idle`、通知先未設定なら `unconfigured`、最終送信の成功は
+`delivered`、失敗は `failed`。送信失敗にも同じ間隔を適用し、各 `last_*_alert_ms` は成功時刻ではなく
+試行時刻を表す。Worker/cron 全体の停止は通知できないため、外部監視で最終完了時刻も確認する。
 
 運用目標は **RPO 24 時間、RTO 2 時間**。どちらも未計測の目標である。
 有効化時に全件数・保存量・コピー一周時間・復元所要時間を測り、満たせるか判断する。
@@ -1657,6 +1679,8 @@ Worker/cron 全体の停止は通知できないため、外部監視で最終�
 2. `snapshots/` に indefinite lock があり、`control/` は更新可能なことを API / Dashboard で確認する。
    作業用 sentinel で snapshot の上書き・削除が拒否されることを確かめる。
    保護された sentinel も保存対象に残るため、棋譜 key と区別できる名前にする。
+   実 R2 binding で条件付き作成 (`etag_does_not_match: "*"`) が既存 key を上書きせず、
+   checkpoint の ETag 条件付き更新が競合を拒否することも隔離した key で確認する。
 3. 対象の `wrangler.<env>.toml` に `KIFU_BACKUP_BUCKET` を追加し、作成した bucket 名を指定する。
    通知先 secret を設定し、通常の deploy 手順を通す。
 4. 下記 CLI で初回の全件コピーを完了し、エラー、未検証 legacy、元の件数との差異を確認する。
@@ -1666,6 +1690,8 @@ Worker/cron 全体の停止は通知できないため、外部監視で最終�
 Pulumi は bucket / lock / lifecycle を `protect: true` とし、lifecycle は
 未完 multipart を 7 日後に abort する規則だけを持つ。snapshot の expiry は設けない。
 primary 全体には lock を掛けない。export の再試行や meta repair、外部取り込みの更新を妨げるためである。
+primary の棋譜本体・meta・`games-index` にも期限削除を設定しない。アプリ改修では棋譜本体を削除する経路を追加しない。
+`force` が更新に伴って古い派生 index を整理することと、本体の削除は区別する。
 
 expiry のない lifecycle だけでは API の削除・上書きを防げない。
 [Bucket locks](https://developers.cloudflare.com/r2/buckets/bucket-locks/) は対象 object の
@@ -1706,6 +1732,7 @@ node scripts/kifu-backup.mjs restore --url https://<worker-host> --from 2026-10-
 エラー・busy・無効状態では終了コードを失敗にし、checkpoint は保持する。
 `list` と日付範囲復元は 1 ページ 100 key で順次処理し、全件をメモリに載せない。
 `--game-id <id>` で絞り込める。日付範囲は両端を含む UTC の対局開始日で、最大 3661 日。
+`--game-id=` と `--snapshot=` のような明示的な空値は、未指定と区別して通信前に拒否する。
 
 復元は既定で dry run。`--apply` で欠損 object だけを条件付き作成する。
 各棋譜の全 target と D1 の同 ID 行を事前確認し、既存の異なる内容には 409 を返して上書きしない。
@@ -1729,8 +1756,17 @@ R2 の複数 object と D1 をまたぐ原子的な復元や、同時の force i
 snapshot は CSA/meta/key の整合性を検証してから復元する。native 棋譜は日付別・by-id 本体、
 meta、games-index の 4 object、外部棋譜は日付別を除く 3 object を戻す。
 Buoy、進行中対局、Floodgate history、rating 集計、その他の D1 テーブルは対象外。
-復元後は viewer 検索と棋譜取得を確認する。primary と backup の両方が失われた場合、
-本機能だけでは復元できない。
+復元後は viewer 検索と棋譜取得を確認する。インシデント記録には対象環境・喪失範囲・日時、
+採用した snapshot key と digest、dry run の結果、実施者、復元後の件数と整合性確認、未解決項目を残す。
+管理 token や棋譜本文は記録に含めない。
+
+backup だけを失った場合は primary を保全し、bucket / binding / lock を復旧した上で
+`run --until-complete` により再同期する。途中の checkpoint が残っていれば、現在の一周を完了した後に
+さらに一周を先頭から完走し、失われた key が checkpoint より前にあっても回収する。
+現在の primary に残る版だけが再作成対象であり、失った旧版を現在の本体から再現することはできない。
+残存する lock 済み snapshot は消さず、再同期後に件数・digest・復元を検証する。
+primary と backup の両方が失われた場合、本機能だけでは復元できない。Cloudflare サポートへ
+状況と保全済み情報を伝えてエスカレーションするが、サポート経由の復旧も保証されない。
 
 ### 14.5 費用と検証
 
@@ -1747,8 +1783,9 @@ Class A $4.50/百万操作、Class B $0.36/百万操作。アカウントの無�
 実際の請求は料金ページ・丸め・使用量を確認する。転送量が無料でも操作と保存は有料になり得る。
 
 ローカル検証は `kifu_backup` の Rust テストと `kifu_backup.test.ts` の Miniflare で行う。
-Miniflare は実 R2 API の copy / restore / 条件付き更新を試すが、Cloudflare 側の bucket lock は
-fixture で上書き拒否を模擬する。IaC policy テストも設定の意図を検査するだけで、実適用を証明しない。
+Miniflare は隔離した R2 binding の copy / restore / 条件付き更新を試し、非 UTF-8 の wdoor
+取り込みから元 byte 列の復元までを検証する。Cloudflare 側の bucket lock は fixture で上書き拒否を模擬する。
+条件付き作成を含む実 R2 の動作や IaC の適用を証明するものではない。IaC policy テストも設定の意図だけを検査する。
 
 ```bash
 cargo test -p rshogi-csa-server-workers
