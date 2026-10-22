@@ -108,6 +108,6 @@ sudo perf report -i perf_reuse.data
 
 ## wasm の計測
 
-`run_wasi.mjs` は、WASI 向けにビルドした wasm を Node.js で動かす (ブラウザと同じ V8 で wasm の速さを測る)。
+`run_wasi.mjs` は、WASI 向けにビルドした wasm を Node.js 20 以降で動かす (wasm の速さを V8 で測る。wasm から見えるのはカレントディレクトリだけ)。
 `node scripts/run_wasi.mjs <file.wasm> [args...]`。詰み探索の局面集ベンチでの使い方は
 `crates/tools/docs/mate_bench.md` の「wasm で測る」。

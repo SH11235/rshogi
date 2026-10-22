@@ -1,26 +1,23 @@
-// WASI 向けにビルドした wasm を Node.js で動かす (ブラウザと同じ V8 で wasm の速さを測る)。
+// WASI 向けにビルドした wasm を Node.js (20 以降) で動かす。wasm の速さを V8 (Chromium と同じエンジン) で測る用。
 // usage: node scripts/run_wasi.mjs <file.wasm> [args...]
-// 引数に出てくる既存のファイル・ディレクトリの親ディレクトリと、カレントディレクトリを wasm から見えるようにする。
+// wasm から見えるのはカレントディレクトリだけ (読み書きできる)。ファイルはカレントディレクトリからの
+// 相対パスで渡す ("../" や絶対パスは開けない)。Windows の "\" 区切りは "/" に直して渡す。
 import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import path from "node:path";
 import { WASI } from "node:wasi";
 
-const [wasmPath, ...args] = process.argv.slice(2);
+const [wasmPath, ...rawArgs] = process.argv.slice(2);
 if (!wasmPath) {
     console.error("usage: node scripts/run_wasi.mjs <file.wasm> [args...]");
     process.exit(2);
 }
 
-const preopens = { ".": process.cwd() };
-for (const arg of args) {
-    const dir = path.dirname(arg);
-    if (dir !== "." && existsSync(dir)) {
-        preopens[dir] = path.resolve(dir);
-    }
-}
-
-const wasi = new WASI({ version: "preview1", args: [wasmPath, ...args], env: process.env, preopens });
+const args = process.platform === "win32" ? rawArgs.map((a) => a.replaceAll("\\", "/")) : rawArgs;
+const wasi = new WASI({
+    version: "preview1",
+    args: [wasmPath, ...args],
+    env: {},
+    preopens: { ".": process.cwd() },
+});
 const module = await WebAssembly.compile(await readFile(wasmPath));
 const instance = await WebAssembly.instantiate(module, wasi.getImportObject());
 process.exitCode = wasi.start(instance);
