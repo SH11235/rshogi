@@ -174,29 +174,34 @@ pub(super) fn check_conflicts_path(
     Ok(())
 }
 
-/// 存在する一番近い祖先を実体のパスにし、まだ無い部分をつなげる (書き出し先の dir は後で作られる)。
+/// 存在する一番長い先頭部分を実体のパスにし、残り (書き出し時に作られる dir) は文字の上でたどる。
 fn resolved(path: &Path) -> Result<PathBuf> {
-    let mut existing = if path.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        path
-    };
-    let mut rest = Vec::new();
-    while std::fs::symlink_metadata(existing).is_err() {
-        rest.push(
-            existing
-                .file_name()
-                .with_context(|| format!("{} を解決できません", path.display()))?,
-        );
-        existing = existing
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+    use std::path::Component;
+    let components: Vec<_> = path.components().collect();
+    let mut prefix = PathBuf::new();
+    let mut existing = 0;
+    for component in &components {
+        prefix.push(component);
+        if std::fs::symlink_metadata(&prefix).is_err() {
+            break;
+        }
+        existing += 1;
     }
-    let mut out = std::fs::canonicalize(existing)
-        .with_context(|| format!("{} を解決できません", existing.display()))?;
-    for name in rest.into_iter().rev() {
-        out.push(name);
+    let base: PathBuf = if existing == 0 {
+        ".".into()
+    } else {
+        components[..existing].iter().collect()
+    };
+    let mut out = std::fs::canonicalize(&base)
+        .with_context(|| format!("{} を解決できません", base.display()))?;
+    for component in &components[existing..] {
+        match component {
+            Component::Normal(name) => out.push(name),
+            Component::ParentDir => {
+                out.pop();
+            }
+            _ => {}
+        }
     }
     Ok(out)
 }
@@ -635,6 +640,15 @@ mod tests {
         check_conflicts_path(&dir.path().join("conflicts.tsv"), &master, &trees).unwrap();
         check_conflicts_path(&dir.path().join("new/dir/conflicts.tsv"), &master, &trees).unwrap();
         assert!(check_conflicts_path(&tree.join("new/conflicts.tsv"), &master, &trees).is_err());
+        check_conflicts_path(&dir.path().join("new/../reports/conflicts.tsv"), &master, &trees)
+            .unwrap();
+        for bad in [
+            "new/../moves.tsv",
+            "new/../tree/x.tsv",
+            "tree/new/../../moves.tsv",
+        ] {
+            assert!(check_conflicts_path(&dir.path().join(bad), &master, &trees).is_err(), "{bad}");
+        }
         assert_eq!(std::fs::read_to_string(&master).unwrap(), "x");
     }
 
